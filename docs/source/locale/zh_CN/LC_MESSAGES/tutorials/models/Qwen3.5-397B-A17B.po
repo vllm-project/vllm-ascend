@@ -8,7 +8,7 @@ msgid ""
 msgstr ""
 "Project-Id-Version: vllm-ascend \n"
 "Report-Msgid-Bugs-To: \n"
-"POT-Creation-Date: 2026-04-21 02:03+0000\n"
+"POT-Creation-Date: 2026-04-26 02:10+0000\n"
 "PO-Revision-Date: 2026-04-10 18:37+0800\n"
 "Last-Translator: FULL NAME <EMAIL@ADDRESS>\n"
 "Language: zh_CN\n"
@@ -399,19 +399,19 @@ msgstr ""
 msgid "Prefill Node 0 `run_p.sh` script"
 msgstr "预填充节点 0 的 `run_p.sh` 脚本"
 
-#: ../../source/tutorials/models/Qwen3.5-397B-A17B.md:352
+#: ../../source/tutorials/models/Qwen3.5-397B-A17B.md:353
 msgid "Decode Node 0 `run_d0.sh` script"
 msgstr "解码节点 0 的 `run_d0.sh` 脚本"
 
-#: ../../source/tutorials/models/Qwen3.5-397B-A17B.md:432
+#: ../../source/tutorials/models/Qwen3.5-397B-A17B.md:434
 msgid "Decode Node 1 `run_d1.sh` script"
 msgstr "解码节点 1 的 `run_d1.sh` 脚本"
 
-#: ../../source/tutorials/models/Qwen3.5-397B-A17B.md:519
+#: ../../source/tutorials/models/Qwen3.5-397B-A17B.md:522
 msgid "Run the `proxy.sh` script on the prefill master node"
 msgstr "在预填充主节点上运行 `proxy.sh` 脚本"
 
-#: ../../source/tutorials/models/Qwen3.5-397B-A17B.md:521
+#: ../../source/tutorials/models/Qwen3.5-397B-A17B.md:524
 msgid ""
 "Run a proxy server on the same node with the prefiller service instance. "
 "You can get the proxy program in the repository's examples: "
@@ -423,28 +423,28 @@ msgstr ""
 "/vllm-project/vllm-"
 "ascend/blob/main/examples/disaggregated_prefill_v1/load_balance_proxy_server_example.py)"
 
-#: ../../source/tutorials/models/Qwen3.5-397B-A17B.md:547
+#: ../../source/tutorials/models/Qwen3.5-397B-A17B.md:550
 msgid "Functional Verification"
 msgstr "功能验证"
 
-#: ../../source/tutorials/models/Qwen3.5-397B-A17B.md:549
+#: ../../source/tutorials/models/Qwen3.5-397B-A17B.md:552
 msgid "Once your server is started, you can query the model with input prompts:"
 msgstr "服务器启动后，您可以使用输入提示词查询模型："
 
-#: ../../source/tutorials/models/Qwen3.5-397B-A17B.md:562
+#: ../../source/tutorials/models/Qwen3.5-397B-A17B.md:565
 msgid "Accuracy Evaluation"
 msgstr "精度评估"
 
-#: ../../source/tutorials/models/Qwen3.5-397B-A17B.md:564
+#: ../../source/tutorials/models/Qwen3.5-397B-A17B.md:567
 msgid "Here are two accuracy evaluation methods."
 msgstr "以下是两种精度评估方法。"
 
-#: ../../source/tutorials/models/Qwen3.5-397B-A17B.md:566
-#: ../../source/tutorials/models/Qwen3.5-397B-A17B.md:578
+#: ../../source/tutorials/models/Qwen3.5-397B-A17B.md:569
+#: ../../source/tutorials/models/Qwen3.5-397B-A17B.md:581
 msgid "Using AISBench"
 msgstr "使用 AISBench"
 
-#: ../../source/tutorials/models/Qwen3.5-397B-A17B.md:568
+#: ../../source/tutorials/models/Qwen3.5-397B-A17B.md:571
 msgid ""
 "Refer to [Using "
 "AISBench](../../developer_guide/evaluation/using_ais_bench.md) for "
@@ -453,7 +453,7 @@ msgstr ""
 "详细信息请参考[使用 AISBench "
 "进行精度评估](../../developer_guide/evaluation/using_ais_bench.md)。"
 
-#: ../../source/tutorials/models/Qwen3.5-397B-A17B.md:570
+#: ../../source/tutorials/models/Qwen3.5-397B-A17B.md:573
 msgid ""
 "After execution, you can get the result, here is the result of `Qwen3.5"
 "-397B-A17B-w8a8` in `vllm-ascend:v0.17.0rc1` for reference only."
@@ -501,11 +501,11 @@ msgstr "生成"
 msgid "96.74"
 msgstr "96.74"
 
-#: ../../source/tutorials/models/Qwen3.5-397B-A17B.md:576
+#: ../../source/tutorials/models/Qwen3.5-397B-A17B.md:579
 msgid "Performance"
 msgstr "性能"
 
-#: ../../source/tutorials/models/Qwen3.5-397B-A17B.md:580
+#: ../../source/tutorials/models/Qwen3.5-397B-A17B.md:583
 msgid ""
 "Refer to [Using AISBench for performance "
 "evaluation](../../developer_guide/evaluation/using_ais_bench.md#execute-"
@@ -515,44 +515,43 @@ msgstr ""
 "进行性能评估](../../developer_guide/evaluation/using_ais_bench.md#execute-"
 "performance-evaluation)。"
 
-#: ../../source/tutorials/models/Qwen3.5-397B-A17B.md:582
+#: ../../source/tutorials/models/Qwen3.5-397B-A17B.md:585
 msgid "Using vLLM Benchmark"
 msgstr "使用 vLLM 基准测试"
 
-#: ../../source/tutorials/models/Qwen3.5-397B-A17B.md:584
+#: ../../source/tutorials/models/Qwen3.5-397B-A17B.md:587
 msgid "Run performance evaluation of `Qwen3.5-397B-A17B-w8a8` as an example."
 msgstr "以 `Qwen3.5-397B-A17B-w8a8` 为例运行性能评估。"
 
-#: ../../source/tutorials/models/Qwen3.5-397B-A17B.md:586
+#: ../../source/tutorials/models/Qwen3.5-397B-A17B.md:589
 msgid ""
-"Refer to [vllm "
-"benchmark](https://docs.vllm.ai/en/latest/contributing/benchmarks.html) "
+"Refer to [vllm benchmark](https://docs.vllm.ai/en/latest/benchmarking/) "
 "for more details."
 msgstr ""
 "更多详细信息请参考 [vLLM "
-"基准测试](https://docs.vllm.ai/en/latest/contributing/benchmarks.html)。"
+"基准测试](https://docs.vllm.ai/en/latest/benchmarking/)。"
 
-#: ../../source/tutorials/models/Qwen3.5-397B-A17B.md:588
+#: ../../source/tutorials/models/Qwen3.5-397B-A17B.md:591
 msgid "There are three `vllm bench` subcommands:"
 msgstr "有三个 `vllm bench` 子命令："
 
-#: ../../source/tutorials/models/Qwen3.5-397B-A17B.md:590
+#: ../../source/tutorials/models/Qwen3.5-397B-A17B.md:593
 msgid "`latency`: Benchmark the latency of a single batch of requests."
 msgstr "`latency`：基准测试单批次请求的延迟。"
 
-#: ../../source/tutorials/models/Qwen3.5-397B-A17B.md:591
+#: ../../source/tutorials/models/Qwen3.5-397B-A17B.md:594
 msgid "`serve`: Benchmark the online serving throughput."
 msgstr "`serve`：基准测试在线服务的吞吐量。"
 
-#: ../../source/tutorials/models/Qwen3.5-397B-A17B.md:592
+#: ../../source/tutorials/models/Qwen3.5-397B-A17B.md:595
 msgid "`throughput`: Benchmark offline inference throughput."
 msgstr "`throughput`：基准测试离线推理的吞吐量。"
 
-#: ../../source/tutorials/models/Qwen3.5-397B-A17B.md:594
+#: ../../source/tutorials/models/Qwen3.5-397B-A17B.md:597
 msgid "Take the `serve` as an example. Run the code as follows."
 msgstr "以 `serve` 为例，运行如下代码。"
 
-#: ../../source/tutorials/models/Qwen3.5-397B-A17B.md:601
+#: ../../source/tutorials/models/Qwen3.5-397B-A17B.md:604
 msgid ""
 "After about several minutes, you can get the performance evaluation "
 "result."

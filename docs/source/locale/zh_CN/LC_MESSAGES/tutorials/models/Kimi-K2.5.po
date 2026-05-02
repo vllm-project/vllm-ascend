@@ -8,7 +8,7 @@ msgid ""
 msgstr ""
 "Project-Id-Version: vllm-ascend \n"
 "Report-Msgid-Bugs-To: \n"
-"POT-Creation-Date: 2026-04-21 02:03+0000\n"
+"POT-Creation-Date: 2026-04-26 02:10+0000\n"
 "PO-Revision-Date: 2026-04-10 18:37+0800\n"
 "Last-Translator: FULL NAME <EMAIL@ADDRESS>\n"
 "Language: zh_CN\n"
@@ -128,7 +128,7 @@ msgstr ""
 "根据您的机器类型选择镜像，并在节点上启动 Docker 镜像，请参考[使用 Docker 安装](../../installation.md"
 "#set-up-using-docker)。"
 
-#: ../../source/tutorials/models/Kimi-K2.5.md:36
+#: ../../source/tutorials/models/Kimi-K2.5.md
 msgid "A3 series"
 msgstr "A3 系列"
 
@@ -137,7 +137,7 @@ msgstr "A3 系列"
 msgid "Start the docker image on your each node."
 msgstr "在每个节点上启动 Docker 镜像。"
 
-#: ../../source/tutorials/models/Kimi-K2.5.md:45
+#: ../../source/tutorials/models/Kimi-K2.5.md
 msgid "A2 series"
 msgstr "A2 系列"
 
@@ -519,12 +519,11 @@ msgstr "以 `Kimi-K2.5-w4a8` 为例运行性能评估。"
 
 #: ../../source/tutorials/models/Kimi-K2.5.md:776
 msgid ""
-"Refer to [vllm "
-"benchmark](https://docs.vllm.ai/en/latest/contributing/benchmarks.html) "
+"Refer to [vllm benchmark](https://docs.vllm.ai/en/latest/benchmarking/) "
 "for more details."
 msgstr ""
 "更多详细信息请参考 [vLLM "
-"基准测试](https://docs.vllm.ai/en/latest/contributing/benchmarks.html)。"
+"基准测试](https://docs.vllm.ai/en/latest/benchmarking/)。"
 
 #: ../../source/tutorials/models/Kimi-K2.5.md:778
 msgid "There are three `vllm bench` subcommands:"
