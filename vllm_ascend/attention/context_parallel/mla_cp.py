@@ -44,6 +44,7 @@ from vllm_ascend.compilation.acl_graph import (
     update_graph_params_workspaces,
 )
 from vllm_ascend.utils import weak_ref_tensors
+from vllm_ascend.attention.utils import generate_dcp_mtp_mask
 
 MAX_O_PROJ_PREFETCH_SIZE = 16 * 1024 * 1024
 
@@ -155,7 +156,7 @@ class AscendMlaCPMetadataBuilder(AscendMLAMetadataBuilder):
         assert long_seq_metadata is not None
         num_computed_tokens_of_pcp_dcp = long_seq_metadata.num_computed_tokens_of_pcp_dcp
         assert num_computed_tokens_of_pcp_dcp is not None
-        local_context_lens_allranks = torch.tensor(num_computed_tokens_of_pcp_dcp[self.num_decodes_flatten :]).reshape(
+        local_context_lens_allranks = torch.tensor(num_computed_tokens_of_pcp_dcp[self.num_decodes :]).reshape(
             -1, self.dcp_size * self.pcp_size
         )
         # Note(qcs): The max local context lengths
@@ -211,13 +212,12 @@ class AscendMlaCPMetadataBuilder(AscendMLAMetadataBuilder):
         return chunked_metadata
 
     def get_block_table_size(self, common_attn_metadata: AscendCommonAttentionMetadata, build_metadata_step: int):
-        self.num_decodes_flatten = self.query_lens[: self.num_decodes].sum().item()
         if build_metadata_step == BUILD_METADATA_STEP_PREFILL:
             # For pcp + spec decode, we flatten seq_lens and block_table
             # to avoid irregular attn_mask shape
-            return self.num_decodes_flatten + self.num_prefills
+            return self.num_decodes + self.num_prefills
         else:
-            return self.num_decodes_flatten
+            return self.num_decodes
 
     def build_prefill_metadata(
         self,
@@ -226,7 +226,7 @@ class AscendMlaCPMetadataBuilder(AscendMLAMetadataBuilder):
     ) -> AscendMLAPrefillMetadata:
         prefill_metadata = super().build_prefill_metadata(common_prefix_len, common_attn_metadata)
         prefill_metadata.pcp_metadata = self.build_cp_metadata(common_prefix_len, common_attn_metadata)
-        prefill_metadata.block_table = self.block_table[self.num_decodes_flatten :, ...]
+        prefill_metadata.block_table = self.block_table[self.num_decodes :, ...]
         return prefill_metadata
 
     def build_decode_metadata(
@@ -241,14 +241,19 @@ class AscendMlaCPMetadataBuilder(AscendMLAMetadataBuilder):
         num_computed_tokens_of_pcp_dcp = long_seq_metadata.num_computed_tokens_of_pcp_dcp
         assert num_computed_tokens_of_pcp_dcp is not None
         # [bs, pcp_size, dcp_size]
-        num_computed_tokens_of_cp_dcp_array = np.array(num_computed_tokens_of_pcp_dcp)[: self.num_decodes_flatten]
+        num_computed_tokens_of_cp_dcp_array = np.array(num_computed_tokens_of_pcp_dcp)[: self.num_decodes]
 
         cp_seq_len = num_computed_tokens_of_cp_dcp_array[:, self.pcp_rank, self.dcp_rank]
         cp_seq_len = torch.tensor(cp_seq_len, dtype=torch.int32)
         decode_metadata.cp_seq_len = cp_seq_len.tolist()
 
-        actual_seq_lengths_q = torch.arange(self.num_decodes_flatten) + 1
+        actual_seq_lengths_q = decode_metadata.seq_lens[: self.num_decodes]
         decode_metadata.actual_seq_lengths_q = actual_seq_lengths_q
+        if long_seq_metadata.mtp_attention_masks_for_decode:
+            masks = long_seq_metadata.mtp_attention_masks_for_decode
+            query_lens = common_attn_metadata.query_start_loc_cpu[1 : self.num_decodes + 1] - common_attn_metadata.query_start_loc_cpu[: self.num_decodes]
+            mtp_attn_mask = generate_dcp_mtp_mask(masks, query_lens, self.num_decodes)
+            decode_metadata.attn_mask = mtp_attn_mask
 
         return decode_metadata
 
@@ -641,13 +646,15 @@ class AscendMlaCPImpl(AscendMLAImpl):
             ]
             and self.speculative_config is not None
         ):
-            input_layout = "TND"
-            # TODO: If the driver is upgraded later, the contiguous function can be deleted.
-            q_nope = q_nope.view(num_tokens, num_heads, -1).contiguous()
-            q_pe = q_pe.view(num_tokens, num_heads, -1)
-            sparse_mode = 3
-            spec_attn_mask = attn_metadata.decode.attn_mask  # type:ignore
-            actual_seq_lengths = decode_meta.actual_seq_lengths_q
+            input_layout = "BSND"
+            actual_seq_lengths_q = decode_meta.actual_seq_lengths_q
+            num_decodes = len(actual_seq_lengths_q)
+            lst = actual_seq_lengths_q[:num_decodes]
+            actual_seq_lengths_q = list(np.diff([0] + np.array(lst)))
+            q_nope = q_nope.view(num_decodes, -1, num_heads, q_nope.shape[-1]).contiguous()
+            q_pe = q_pe.view(num_decodes, -1, num_heads, q_pe.shape[-1])
+            sparse_mode = 0
+            spec_attn_mask = attn_metadata.decode.attn_mask[:num_decodes].to(q_nope.device)  # type:ignore
         else:
             q_nope = q_nope.view(num_tokens, num_heads, 1, -1).contiguous()
             q_pe = q_pe.view(num_tokens, num_heads, 1, -1)
@@ -733,6 +740,11 @@ class AscendMlaCPImpl(AscendMLAImpl):
                 k_nope,
                 **common_kwargs,
             )
+
+        if input_layout == "BSND":
+            attn_output = attn_output.view(-1, attn_output.shape[2], attn_output.shape[3])
+            softmax_lse = softmax_lse.transpose(1,2).reshape(-1, softmax_lse.shape[1], 1)
+
         if input_layout == "BNSD":
             B_attn, N_attn, S, D = attn_output.shape
             B_lse, N_lse, Q_S, _ = softmax_lse.shape
