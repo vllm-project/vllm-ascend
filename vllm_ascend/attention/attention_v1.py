@@ -416,6 +416,8 @@ class AscendAttentionBackendImpl(AttentionImpl):
                     graph_params = get_draft_graph_params()
             else:
                 graph_params = get_graph_params()
+            if graph_params is None:
+                return
             with torch.npu.stream(update_stream):
                 for key, param, handle, event in zip(
                     forward_context.attn_metadata,
@@ -475,6 +477,8 @@ class AscendAttentionBackendImpl(AttentionImpl):
                 graph_params = get_graph_params()
                 attn_metadata = forward_context.attn_metadata
                 attn_keys = list(attn_metadata.keys())
+            if graph_params is None:
+                return
             # For Qwen3-next, since the kv_cache_config has already categorized
             # linear_attn and self_attn, the attn_metadata is first arranged with
             # self_attn followed by linear_attn. Therefore, using zip directly
