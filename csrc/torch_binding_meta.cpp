@@ -665,6 +665,18 @@ at::Tensor npu_lightning_indexer_quant_meta(
     return lightning_indexer_quant_output;
 }
 
+// GumbelSample meta：输出 sampled[num_reqs]，dtype=int64
+at::Tensor npu_gumbel_sample_meta(
+    const at::Tensor& logits,
+    const at::Tensor& temperature,
+    const at::Tensor& seeds,
+    const at::Tensor& pos,
+    bool apply_temperature)
+{
+    int64_t num_reqs = logits.size(0);
+    return at::empty({num_reqs}, logits.options().dtype(at::kLong));
+}
+
 } // namespace meta
 } // namespace vllm_ascend
 
@@ -736,6 +748,8 @@ TORCH_LIBRARY_IMPL_EXPAND(CONCAT(_C, _ascend), Meta, ops) {
     ops.impl("moe_grouped_matmul", &vllm_ascend::meta::moe_grouped_matmul_meta);
     // Lightning indexer quant
     ops.impl("npu_lightning_indexer_quant", &vllm_ascend::meta::npu_lightning_indexer_quant_meta);
+    // GumbelSample
+    ops.impl("npu_gumbel_sample", &vllm_ascend::meta::npu_gumbel_sample_meta);
 }
 }
 #endif
