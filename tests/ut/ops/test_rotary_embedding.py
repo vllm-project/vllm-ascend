@@ -13,7 +13,7 @@
 # This file is a part of the vllm-ascend project.
 #
 
-
+import importlib
 import inspect
 from unittest.mock import MagicMock, patch
 
@@ -59,7 +59,7 @@ def check_parent_init_signature_has_not_changed(parent_func, child_func):
     )
 
 
-@pytest.fixture(autouse=True)
+@pytest.fixture()
 def patch_init_side_effects():
     """
     Suppress all side-effects that fire during __init__ so every test starts
@@ -74,6 +74,36 @@ def patch_init_side_effects():
         # Default: speculative_config is None → use_mtp = False
         mock_cfg.return_value.speculative_config = None
         yield mock_cfg
+
+
+@pytest.fixture(autouse=True)
+def reset_rotary_embedding_globals():
+    rotary_embedding = importlib.import_module("vllm_ascend.ops.rotary_embedding")
+    for name in (
+        "_cos_mla",
+        "_sin_mla",
+        "_cos_cache",
+        "_sin_cache",
+        "_cos_sin_cache",
+        "_cos",
+        "_sin",
+        "_cos_slice",
+        "_sin_slice",
+    ):
+        setattr(rotary_embedding, name, None)
+    yield
+    for name in (
+        "_cos_mla",
+        "_sin_mla",
+        "_cos_cache",
+        "_sin_cache",
+        "_cos_sin_cache",
+        "_cos",
+        "_sin",
+        "_cos_slice",
+        "_sin_slice",
+    ):
+        setattr(rotary_embedding, name, None)
 
 
 @pytest.fixture()
@@ -279,6 +309,243 @@ class TestAscendEmbeddingForwardOOT:
         accordingly.
         """
         check_parent_init_signature_has_not_changed(RotaryEmbedding.__init__, AscendRotaryEmbedding.__init__)
+
+
+class TestRotaryEmbeddingUtilities:
+    def test_record_cos_sin_cache_records_once(self):
+        from vllm_ascend.ops import rotary_embedding
+
+        first = torch.randn(4, 8)
+        second = torch.randn(4, 8)
+
+        rotary_embedding._record_cos_sin_cache(first)
+        rotary_embedding._record_cos_sin_cache(second)
+
+        assert rotary_embedding._cos_sin_cache is first
+
+    def test_record_cos_and_sin_cache_updates_both(self):
+        from vllm_ascend.ops import rotary_embedding
+
+        cos = torch.randn(3, 4)
+        sin = torch.randn(3, 4)
+
+        rotary_embedding._record_cos_and_sin_cache(cos, sin)
+
+        assert rotary_embedding._cos_cache is cos
+        assert rotary_embedding._sin_cache is sin
+
+    def test_record_cos_and_sin_cache_interleaved_expands_once(self):
+        from vllm_ascend.ops import rotary_embedding
+
+        cache = torch.tensor(
+            [
+                [1.0, 2.0, 10.0, 20.0],
+                [3.0, 4.0, 30.0, 40.0],
+            ],
+            dtype=torch.float32,
+        )
+
+        rotary_embedding._record_cos_and_sin_cache_interleaved(cache)
+
+        expected_cos = torch.tensor([[1.0, 2.0, 1.0, 2.0], [3.0, 4.0, 3.0, 4.0]])
+        expected_sin = torch.tensor([[10.0, 20.0, 10.0, 20.0], [30.0, 40.0, 30.0, 40.0]])
+        torch.testing.assert_close(rotary_embedding._cos_cache, expected_cos)
+        torch.testing.assert_close(rotary_embedding._sin_cache, expected_sin)
+
+        original_cos = rotary_embedding._cos_cache
+        original_sin = rotary_embedding._sin_cache
+        rotary_embedding._record_cos_and_sin_cache_interleaved(torch.zeros_like(cache))
+        assert rotary_embedding._cos_cache is original_cos
+        assert rotary_embedding._sin_cache is original_sin
+
+    @patch("vllm_ascend.ops.rotary_embedding.is_vl_model", return_value=False)
+    @patch("vllm_ascend.ops.rotary_embedding.has_rope", return_value=True)
+    def test_set_cos_and_sin_uses_partial_rotary_factor(self, mock_has_rope, mock_is_vl):
+        from vllm_ascend.ops import rotary_embedding
+
+        config = MagicMock()
+        config.model_config.use_mla = False
+        config.model_config.get_head_size.return_value = 64
+        config.model_config.hf_text_config = MagicMock()
+        config.model_config.hf_text_config.partial_rotary_factor = 0.5
+        config.scheduler_config.max_num_batched_tokens = 16
+
+        rotary_embedding.set_cos_and_sin(config, max_num_reqs=2, decode_token_per_req=1, dtype=torch.float16, device="cpu")
+
+        assert rotary_embedding._cos.shape == (1, 16, 1, 32)
+        assert rotary_embedding._sin.shape == (1, 16, 1, 32)
+
+    @patch("vllm_ascend.ops.rotary_embedding.is_vl_model", return_value=False)
+    @patch("vllm_ascend.ops.rotary_embedding.has_rope", return_value=True)
+    def test_set_cos_and_sin_uses_rotary_dim_when_partial_factor_absent(self, mock_has_rope, mock_is_vl):
+        from vllm_ascend.ops import rotary_embedding
+
+        hf_text_config = MagicMock(spec=["rotary_dim"])
+        hf_text_config.rotary_dim = 24
+
+        config = MagicMock()
+        config.model_config.use_mla = False
+        config.model_config.get_head_size.return_value = 64
+        config.model_config.hf_text_config = hf_text_config
+        config.scheduler_config.max_num_batched_tokens = 8
+
+        rotary_embedding.set_cos_and_sin(config, max_num_reqs=2, decode_token_per_req=1, dtype=torch.float32, device="cpu")
+
+        assert rotary_embedding._cos.shape == (1, 8, 1, 24)
+        assert rotary_embedding._sin.shape == (1, 8, 1, 24)
+
+    def test_get_cos_and_sin_mla_without_cache_returns_selected_positions(self):
+        from vllm_ascend.ops import rotary_embedding
+
+        rotary_embedding._cos_cache = torch.arange(12, dtype=torch.float32).view(3, 4)
+        rotary_embedding._sin_cache = torch.arange(12, 24, dtype=torch.float32).view(3, 4)
+        positions = torch.tensor([2, 0], dtype=torch.long)
+
+        cos, sin = rotary_embedding.get_cos_and_sin_mla(positions, use_cache=False)
+
+        torch.testing.assert_close(cos, rotary_embedding._cos_cache[positions].unsqueeze(1).unsqueeze(2))
+        torch.testing.assert_close(sin, rotary_embedding._sin_cache[positions].unsqueeze(1).unsqueeze(2))
+
+    def test_get_cos_and_sin_mla_with_cache_reuses_preallocated_buffers(self):
+        from vllm_ascend.ops import rotary_embedding
+
+        rotary_embedding._cos_cache = torch.arange(12, dtype=torch.float32).view(3, 4)
+        rotary_embedding._sin_cache = torch.arange(12, 24, dtype=torch.float32).view(3, 4)
+        rotary_embedding._cos_mla = torch.full((4, 1, 1, 4), -1.0)
+        rotary_embedding._sin_mla = torch.full((4, 1, 1, 4), -1.0)
+        positions = torch.tensor([1, 2], dtype=torch.long)
+
+        cos, sin = rotary_embedding.get_cos_and_sin_mla(positions, use_cache=True)
+
+        assert cos.data_ptr() == rotary_embedding._cos_mla[:2].data_ptr()
+        assert sin.data_ptr() == rotary_embedding._sin_mla[:2].data_ptr()
+        torch.testing.assert_close(cos, rotary_embedding._cos_cache[positions].unsqueeze(1).unsqueeze(2))
+        torch.testing.assert_close(sin, rotary_embedding._sin_cache[positions].unsqueeze(1).unsqueeze(2))
+
+    def test_update_cos_sin_populates_slice_cache(self):
+        from vllm_ascend.ops import rotary_embedding
+
+        rotary_embedding._cos_sin_cache = torch.tensor(
+            [
+                [1.0, 2.0, 10.0, 20.0],
+                [3.0, 4.0, 30.0, 40.0],
+                [5.0, 6.0, 50.0, 60.0],
+            ],
+            dtype=torch.float32,
+        )
+        rotary_embedding._cos = torch.zeros(1, 4, 1, 4, dtype=torch.float32)
+        rotary_embedding._sin = torch.zeros(1, 4, 1, 4, dtype=torch.float32)
+        positions = torch.tensor([2, 0], dtype=torch.long)
+
+        rotary_embedding.update_cos_sin(positions)
+
+        expected_cos = torch.tensor([[[[5.0, 6.0, 5.0, 6.0]], [[1.0, 2.0, 1.0, 2.0]]]])
+        expected_sin = torch.tensor([[[[50.0, 60.0, 50.0, 60.0]], [[10.0, 20.0, 10.0, 20.0]]]])
+        torch.testing.assert_close(rotary_embedding._cos_slice, expected_cos)
+        torch.testing.assert_close(rotary_embedding._sin_slice, expected_sin)
+
+    def test_update_cos_sin_returns_early_when_caches_missing(self):
+        from vllm_ascend.ops import rotary_embedding
+
+        rotary_embedding._cos_slice = "sentinel_cos"
+        rotary_embedding._sin_slice = "sentinel_sin"
+
+        rotary_embedding.update_cos_sin(torch.tensor([0, 1], dtype=torch.long))
+
+        assert rotary_embedding._cos_slice == "sentinel_cos"
+        assert rotary_embedding._sin_slice == "sentinel_sin"
+
+    def test_get_cos_and_sin_slice_returns_current_views(self):
+        from vllm_ascend.ops import rotary_embedding
+
+        rotary_embedding._cos_slice = torch.ones(1, 2, 1, 4)
+        rotary_embedding._sin_slice = torch.zeros(1, 2, 1, 4)
+
+        cos, sin = rotary_embedding.get_cos_and_sin_slice()
+
+        assert cos is rotary_embedding._cos_slice
+        assert sin is rotary_embedding._sin_slice
+
+
+class TestRopeForwardOOT:
+    @patch("vllm_ascend.ops.rotary_embedding.HAS_TRITON", False)
+    @patch("torch_npu._npu_rotary_embedding")
+    def test_full_rotary_passes_head_size_to_npu_op(self, mock_rotary):
+        from vllm_ascend.ops.rotary_embedding import rope_forward_oot
+
+        def fake_rotary(positions, query, key, dim, cos_sin_cache, is_neox_style):
+            query.add_(1.0)
+            key.add_(2.0)
+
+        mock_rotary.side_effect = fake_rotary
+        positions, query, key = _make_tensors()
+        cache = torch.randn(MAX_POS, ROTARY_DIM * 2)
+
+        result_q, result_k = rope_forward_oot(
+            positions,
+            query.clone(),
+            key.clone(),
+            cache,
+            head_size=HEAD_SIZE,
+            rotary_dim=HEAD_SIZE,
+            is_neox_style=True,
+        )
+
+        assert mock_rotary.call_args.args[3] == HEAD_SIZE
+        torch.testing.assert_close(result_q, query + 1.0)
+        torch.testing.assert_close(result_k, key + 2.0)
+
+    @patch("vllm_ascend.ops.rotary_embedding.HAS_TRITON", False)
+    @patch("torch_npu._npu_rotary_embedding")
+    def test_partial_rotary_only_updates_rotary_slice(self, mock_rotary):
+        from vllm_ascend.ops.rotary_embedding import rope_forward_oot
+
+        rotary_dim = 32
+
+        def fake_rotary(positions, query, key, dim, cos_sin_cache, is_neox_style):
+            query.add_(3.0)
+            key.add_(5.0)
+
+        mock_rotary.side_effect = fake_rotary
+        positions, query, key = _make_tensors()
+        cache = torch.randn(MAX_POS, rotary_dim * 2)
+
+        result_q, result_k = rope_forward_oot(
+            positions,
+            query.clone(),
+            key.clone(),
+            cache,
+            head_size=HEAD_SIZE,
+            rotary_dim=rotary_dim,
+            is_neox_style=True,
+        )
+
+        expected_q = query.view(SEQ_LEN, NUM_HEADS, HEAD_SIZE).clone()
+        expected_k = key.view(SEQ_LEN, NUM_HEADS, HEAD_SIZE).clone()
+        expected_q[..., :rotary_dim] += 3.0
+        expected_k[..., :rotary_dim] += 5.0
+        torch.testing.assert_close(result_q, expected_q.reshape_as(query))
+        torch.testing.assert_close(result_k, expected_k.reshape_as(key))
+        assert mock_rotary.call_args.args[3] == rotary_dim
+
+    def test_offsets_are_not_supported(self):
+        from vllm_ascend.ops.rotary_embedding import rope_forward_oot
+
+        positions, query, key = _make_tensors()
+        cache = torch.randn(MAX_POS, ROTARY_DIM * 2)
+        offsets = torch.arange(SEQ_LEN, dtype=torch.long)
+
+        with pytest.raises(NotImplementedError, match="Batched rotary embedding"):
+            rope_forward_oot(
+                positions,
+                query,
+                key,
+                cache,
+                head_size=HEAD_SIZE,
+                rotary_dim=ROTARY_DIM,
+                is_neox_style=True,
+                offsets=offsets,
+            )
 
 
 class TestAscendYaRNRotaryEmbeddingForwardOOT:
