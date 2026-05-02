@@ -55,7 +55,7 @@ class AscendInputBuffers(InputBuffers):
         # Create seq_lens_cpu and seq_lens_np.
         # npu's attention backend still needs seq_lens on CPU side.
         self.seq_lens_cpu: torch.Tensor = torch.zeros(
-            max_num_reqs,
+            max_num_reqs + 1,
             dtype=torch.int32,
             device="cpu",
         )
@@ -92,7 +92,7 @@ class AscendInputBatch(InputBatch):
         input_buffers.seq_lens_np[num_reqs - 1] += num_tokens % num_reqs
         # Pad for full CUDA graph mode.
         input_buffers.seq_lens_np[num_reqs:] = 0
-        seq_lens_np = input_buffers.seq_lens_np[:num_reqs]
+        seq_lens_np = input_buffers.seq_lens_np[: num_reqs + 1]
         input_batch.seq_lens_np = seq_lens_np
         # A dummy run for dp or memory profiling.
         # When dummy run for dp, num_tokens is set to 1,
