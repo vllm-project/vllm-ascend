@@ -1,17 +1,17 @@
-model_name: "llava-hf/llava-onevision-qwen2-0.5b-ov-hf"
+model_name: "facebook/chameleon-7b"
 model_type: "vllm-vlm"
 hardware: "Atlas A2 Series"
 
 serve:
   tensor_parallel_size: 1
-  dtype: auto
-  max_model_len: 4096
+  dtype: bfloat16
+  max_model_len: 2048
   gpu_memory_utilization: 0.8
   trust_remote_code: true
+  enforce_eager: true
 
 tasks:
 - name: "ceval-valid"
-  rtol: 0.10
   metrics:
   - name: "acc,none"
     value: 0.42

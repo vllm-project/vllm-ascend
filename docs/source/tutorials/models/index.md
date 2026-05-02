@@ -20,6 +20,10 @@ Qwen3-8B-W4A8.md
 Qwen3-32B-W4A4.md
 Qwen3-Next.md
 Qwen3-Omni-30B-A3B-Thinking.md
+chameleon.md
+Hunyuan-A13B-Instruct.md
+LLaVA-OneVision-Qwen2-0.5B-OV.md
+Minitron-8B-Base.md
 Qwen3.5-27B.md
 Qwen3.5-397B-A17B.md
 DeepSeek-V3.1.md
@@ -32,7 +36,6 @@ Kimi-K2-Thinking.md
 Kimi-K2.5.md
 PaddleOCR-VL.md
 MiniMax-M2.5.md
-Hunyuan-A13B-Instruct.md
-Minitron-8B-Base.md
-LLaVA-OneVision-Qwen2-0.5B-OV.md
+Qwen2.5-7B.md
+Qwen2.5-Omni.md
 :::
