@@ -1,0 +1,16 @@
+model_name: "allenai/Molmo2-8B"
+hardware: "Atlas A2 Series"
+model: "vllm-vlm"
+tasks:
+  - name: "mmmu_val"
+    metrics:
+      - name: "acc,none"
+        # Quick validation baseline placeholder; not used for final delivery.
+        value: 0.53
+max_model_len: 8192
+dtype: "bfloat16"
+trust_remote_code: True
+gpu_memory_utilization: 0.6
+enforce_eager: True
+batch_size: 1
+limit: 20
