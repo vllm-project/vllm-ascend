@@ -295,12 +295,10 @@ static ge::graphStatus DispatchFFNCombineTilingFuncImpl(gert::TilingContext *con
     uint32_t k2 = info.N / 2;
 
     uint64_t cocWorkspace = (info.M + 256 - 1) / 256 * 256 * info.topK *sizeof(int32_t) +
-                            info.worldSize * info.worldSize * info.expertPerRank * sizeof(int32_t) * 3 +
+                            info.worldSize * info.worldSize * info.expertPerRank * sizeof(int32_t) * 2 +
                             info.maxOutputSize * sizeof(float) * 2 +
-                            info.maxOutputSize * info.N * sizeof(int16_t) +
                             info.maxOutputSize * n2 * sizeof(int16_t) +
                             info.maxOutputSize * info.K * sizeof(int8_t) +
-                            info.maxOutputSize * k2 * sizeof(int8_t) +
                             info.worldSize  * sizeof(int32_t) * 16 +
                             (info.expertPerRank + info.worldSize) * sizeof(int32_t) * 16;
 
