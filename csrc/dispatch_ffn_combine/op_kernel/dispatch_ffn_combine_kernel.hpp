@@ -354,14 +354,21 @@ private:
         expertIdxGm.SetGlobalBuffer(reinterpret_cast<__gm__ int32_t*>(params.expertIdx));
 
         int32_t totalElements = m * topK;
-        int32_t elementsPerCore = CeilDiv(totalElements, coreNum);
-        int32_t startIdx = min(coreIdx * elementsPerCore, totalElements);
-        int32_t endIdx = min(startIdx + elementsPerCore, totalElements);
+        int32_t base = totalElements / coreNum;
+        int32_t rem = totalElements % coreNum;
+
+        int32_t startIdx = coreIdx * base + min(coreIdx, rem);
+        int32_t endIdx = (coreIdx + 1) * base + min(coreIdx + 1, rem);
 
         AscendC::LocalTensor<int32_t> tmpExpertIdx = resource.ubBuf.template GetBufferByByte<int32_t>(0);
         int32_t copySize = endIdx - startIdx;
 
-        AscendC::DataCopy(tmpExpertIdx, expertIdxGm[startIdx], copySize);
+        AscendC::DataCopyPad(tmpExpertIdx[0], expertIdxGm[startIdx], 
+                    {1, static_cast<uint16_t>(copySize * sizeof(int32_t)), 0, 0}, {}
+        );
+
+        AscendC::SetFlag<AscendC::HardEvent::MTE2_S>(EVENT_ID0);
+        AscendC::WaitFlag<AscendC::HardEvent::MTE2_S>(EVENT_ID0);
 
         for (int32_t i = 0; i < copySize; ++i) {
             int32_t tokenIdx = (startIdx + i) / topK;
@@ -371,9 +378,9 @@ private:
             }
         }
 
-        AscendC::SetFlag<AscendC::HardEvent::S_MTE2>(EVENT_ID0);
-        AscendC::WaitFlag<AscendC::HardEvent::S_MTE2>(EVENT_ID0);
-        AscendC::DataCopy(expertIdxGm[startIdx], tmpExpertIdx, copySize);
+        AscendC::SetFlag<AscendC::HardEvent::S_MTE3>(EVENT_ID0);
+        AscendC::WaitFlag<AscendC::HardEvent::S_MTE3>(EVENT_ID0);
+        AscendC::DataCopyPad(expertIdxGm[startIdx], tmpExpertIdx[0], {1, static_cast<uint16_t>(copySize * sizeof(int32_t)), 0, 0, 0});
         AscendC::SyncAll<true>();
     }
 
