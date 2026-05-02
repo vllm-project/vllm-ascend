@@ -44,6 +44,7 @@
 #include "moe_init_routing_custom/moe_init_routing_custom_torch_adpt.h"
 #include "sparse_flash_attention/sparse_flash_attention_torch_adpt.h"
 #include "lightning_indexer_quant/lightning_indexer_quant_torch_adpt.h"
+#include "ngram_spec_decode/ngram_spec_decode_torch_adpt.h"
 #include "causal_conv1d_v310/causal_conv1d_310_torch_adpt.h"
 #include "recurrent_gated_delta_rule_v310/recurrent_gated_delta_rule_310_torch_adpt.h"
 #include <c10/core/Device.h>
@@ -1279,5 +1280,15 @@ TORCH_LIBRARY_EXPAND(CONCAT(_C, _ascend), ops)
         "                            int sparse_count=2048, int sparse_mode=3) -> Tensor"
     );
     ops.impl("npu_lightning_indexer_quant", torch::kPrivateUse1, &vllm_ascend::npu_lightning_indexer_quant);
+
+    // N-gram spec decode
+    ops.def(
+        "npu_ngram_spec_decode(Tensor(a!) token_ids, Tensor num_tokens_no_spec, "
+        "Tensor sampled_token_ids, Tensor discard_request_mask, "
+        "int vocab_size, int min_n, int max_n, int k) -> "
+        "(Tensor token_ids, Tensor next_token_ids, Tensor draft_token_ids, Tensor num_valid_draft_tokens)"
+    );
+    ops.impl("npu_ngram_spec_decode", torch::kPrivateUse1,
+             &vllm_ascend::npu_ngram_spec_decode);
 }
 #endif
