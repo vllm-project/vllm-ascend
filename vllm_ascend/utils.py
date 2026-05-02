@@ -946,14 +946,16 @@ def weak_ref_tensors(
     if isinstance(tensors, torch.Tensor):
         return weak_ref_tensor(tensors)
     if isinstance(tensors, list):
-        return [weak_ref_tensor(t) for t in tensors]
+        return [weak_ref_tensors(t) for t in tensors]
     if isinstance(tensors, tuple):
-        return tuple(weak_ref_tensor(t) for t in tensors)
+        return tuple(weak_ref_tensors(t) for t in tensors)
     # For IntermediateTensors used in pipeline parallelism
     if isinstance(tensors, IntermediateTensors):
         ret = IntermediateTensors({key: weak_ref_tensor(val) for key, val in tensors.tensors.items()})
         return ret
-    raise ValueError("Invalid type for tensors")
+    # For non-tensor leaf nodes (e.g., None, int, metadata), return as-is.
+    # This handles nested structures from Eagle3 that may contain non-tensor elements.
+    return weak_ref_tensor(tensors)
 
 
 def npu_stream_switch(target_stream: torch.npu.Stream, *, enabled: bool = True):
