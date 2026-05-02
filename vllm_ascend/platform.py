@@ -351,6 +351,28 @@ class NPUPlatform(Platform):
         # `apply_config_platform_defaults`, so this late pass should only honor
         # the current max / size inputs after the mode adjustments above.
         vllm_config._set_cudagraph_sizes()
+        # 新增：投机推理场景下，强制 capture sizes 为 decode_query_len 的倍数
+        speculative_config = getattr(vllm_config, "speculative_config", None)
+        if (
+            speculative_config
+            and speculative_config.num_speculative_tokens
+            and compilation_config.cudagraph_capture_sizes
+            and compilation_config.cudagraph_mode in (CUDAGraphMode.FULL_DECODE_ONLY, CUDAGraphMode.FULL)
+        ):
+            decode_query_len = 1 + speculative_config.num_speculative_tokens
+            if decode_query_len > 1:
+                max_size = compilation_config.max_cudagraph_capture_size
+                aligned_sizes = list(range(decode_query_len, max_size + 1, decode_query_len))
+                compilation_config.cudagraph_capture_sizes = aligned_sizes
+                compilation_config.max_cudagraph_capture_size = aligned_sizes[-1]
+                compilation_config.post_init_cudagraph_sizes()
+                if aligned_sizes:
+                    logger.info(
+                        "Adjusted cudagraph_capture_sizes for speculative decoding, (decode_query_len=%d): from %d to %d",
+                        decode_query_len,
+                        aligned_sizes[0],
+                        aligned_sizes[-1],
+                    )
         # TODO delete graph size update here when compilation_config.pass_config.enable_sp
         # is supported by vllm-ascend.
         if (
