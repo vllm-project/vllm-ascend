@@ -237,7 +237,7 @@ vllm serve Qwen/Qwen3-235B-A22B \
 --enable-expert-parallel \
 --trust-remote-code \
 --async-scheduling \
---gpu-memory-utilization 0.9 \
+--gpu-memory-utilization 0.9 
 ```
 
 If the service starts successfully, the following information will be displayed on node 0:
