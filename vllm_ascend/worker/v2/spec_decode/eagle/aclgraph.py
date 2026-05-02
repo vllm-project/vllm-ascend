@@ -9,23 +9,13 @@ from vllm.config import VllmConfig
 from vllm.config.compilation import CUDAGraphMode
 from vllm.forward_context import get_forward_context, set_forward_context
 from vllm.logger import logger
+from vllm.v1.kv_cache_interface import KVCacheConfig
+from vllm.v1.worker.gpu.block_table import BlockTables
 from vllm.v1.worker.gpu.cudagraph_utils import BatchExecutionDescriptor
-
-from vllm_ascend.utils import vllm_version_is
-
-if vllm_version_is("0.19.1"):
-    from vllm.v1.worker.gpu.spec_decode.eagle.cudagraph import (
-        EagleCudaGraphManager,
-    )
-    _PrefillEagleCudaGraphManager = None
-else:
-    # vLLM #40410 split EagleCudaGraphManager into Prefill/Decode managers.
-    # EagleAclGraphManager extends DecodeEagleCudaGraphManager (decode-style
-    # signature) but also needs to handle the prefill-style capture call.
-    from vllm.v1.worker.gpu.spec_decode.eagle.cudagraph import (
-        DecodeEagleCudaGraphManager as EagleCudaGraphManager,
-        PrefillEagleCudaGraphManager as _PrefillEagleCudaGraphManager,
-    )
+from vllm.v1.worker.gpu.input_batch import InputBuffers
+from vllm.v1.worker.gpu.model_states.interface import ModelState
+from vllm.v1.worker.gpu.spec_decode.eagle.cudagraph import EagleCudaGraphManager
+from vllm.v1.worker.utils import AttentionGroup
 
 from vllm_ascend.ascend_forward_context import _EXTRA_CTX
 from vllm_ascend.compilation.acl_graph import (
@@ -66,20 +56,27 @@ class EagleAclGraphManager(EagleCudaGraphManager):
             else:
                 set_draft_graph_params(self.capture_sizes)
 
-    def capture(self, forward_fn: Callable, *args, **kwargs) -> None:
-        """Capture ACL graphs for Eagle.
-
-        vLLM #40410 split EagleCudaGraphManager into separate Prefill/Decode
-        managers with different capture() signatures:
-        - Prefill: capture(forward_fn, full_cg_attn_states, ...)
-        - Decode:  capture(forward_fn, model_state, input_buffers, ...)
-        This override dispatches to the correct parent based on is_draft_model_prefill.
-        """
+    def capture(
+        self,
+        forward_fn: Callable,
+        model_state: ModelState,
+        input_buffers: InputBuffers,
+        block_tables: BlockTables,
+        attn_groups: list[list[AttentionGroup]],
+        kv_cache_config: KVCacheConfig,
+        progress_bar_desc: str = "Capturing CUDA graphs",
+    ) -> None:
+        """Capture ACL graphs for Eagle."""
         with communicator_switch(), model_capture_wrapper(self.speculator, self.is_draft_model_prefill):
-            if _PrefillEagleCudaGraphManager is not None and self.is_draft_model_prefill:
-                _PrefillEagleCudaGraphManager.capture(self, forward_fn, *args, **kwargs)
-            else:
-                super().capture(forward_fn, *args, **kwargs)
+            super().capture(
+                forward_fn,
+                model_state,
+                input_buffers,
+                block_tables,
+                attn_groups,
+                kv_cache_config,
+                progress_bar_desc,
+            )
 
     def run_fullgraph(self, desc: BatchExecutionDescriptor) -> torch.Tensor | tuple[torch.Tensor, list[torch.Tensor]]:
         """Override run_fullgraph to update full graph params in run_fullgraph."""
