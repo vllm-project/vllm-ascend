@@ -130,6 +130,22 @@ class AscendUnquantizedFusedMoEMethod(UnquantizedFusedMoEMethod):
         pertoken_scale: torch.Tensor | None = None,
         mc2_mask: torch.Tensor | None = None,
     ) -> torch.Tensor:
+        # LoRA requires Triton-based expert computation for adapter injection.
+        # Ascend's custom fused experts do not support LoRA weight injection.
+        # Fall back to vLLM's base UnquantizedFusedMoEMethod. Mirrors vllm PR #40273.
+        if self.moe.is_lora_enabled:
+            result = super().apply(
+                layer=layer,
+                x=x,
+                use_grouped_topk=use_grouped_topk,
+                top_k=top_k,
+                router_logits=router_logits,
+                renormalize=renormalize,
+            )
+            from vllm_ascend.ops.fused_moe.moe_comm_method import FusedExpertsResult
+
+            return FusedExpertsResult(routed_out=result)
+
         zero_expert_num = getattr(layer, "zero_expert_num", 0)
         zero_expert_type = getattr(layer, "zero_expert_type", None)
         topk_weights, topk_ids = select_experts(
