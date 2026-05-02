@@ -564,7 +564,13 @@ class NPUWorker(WorkerBase):
         set_random_seed(self.model_config.seed)
         return CompilationTimes(
             language_model=self.vllm_config.compilation_config.compilation_time,
-            encoder=self.vllm_config.compilation_config.encoder_compilation_time,
+            # `encoder_compilation_time` was added after v0.19.1 (vLLM #39240); fall
+            # back to 0.0 so the older release still constructs CompilationTimes.
+            encoder=getattr(
+                self.vllm_config.compilation_config,
+                "encoder_compilation_time",
+                0.0,
+            ),
         )
 
     def _warm_up_atb(self):

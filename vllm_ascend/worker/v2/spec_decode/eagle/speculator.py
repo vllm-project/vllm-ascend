@@ -31,8 +31,24 @@ from vllm.v1.worker.gpu.block_table import BlockTables
 from vllm.v1.worker.gpu.input_batch import InputBatch
 from vllm.v1.worker.gpu.model_states.interface import ModelState
 from vllm.v1.worker.gpu.spec_decode.eagle import speculator as vllm_speculator
-from vllm.v1.worker.gpu.spec_decode.eagle.cudagraph import EagleCudaGraphManager
 from vllm.v1.worker.gpu.spec_decode.eagle.speculator import EagleSpeculator, gumbel_sample, update_eagle_inputs
+
+from vllm_ascend.utils import vllm_version_is
+
+if vllm_version_is("0.19.1"):
+    from vllm.v1.worker.gpu.spec_decode.eagle.cudagraph import (
+        EagleCudaGraphManager,
+    )
+else:
+    # vLLM #40410 split the single EagleCudaGraphManager into a prefill/decode
+    # pair. The Ascend AclGraphManager keeps the previous decode-style capture
+    # signature, so reuse the decode class as the historical alias here.
+    from vllm.v1.worker.gpu.spec_decode.eagle.cudagraph import (  # noqa: F401
+        DecodeEagleCudaGraphManager as EagleCudaGraphManager,
+    )
+    from vllm.v1.worker.gpu.spec_decode.eagle.cudagraph import (
+        PrefillEagleCudaGraphManager,
+    )
 
 from vllm_ascend.attention.attention_v1 import AscendAttentionState
 from vllm_ascend.worker.v2.attn_utils import build_attn_metadata
@@ -385,13 +401,26 @@ def torch_gather_wrapper():
 @contextmanager
 def graph_manager_wrapper(speculator):
     """Context manager to override graph manager."""
-    original_graph_manager = EagleCudaGraphManager
 
     def factory(vllm_config: VllmConfig, device: torch.device, cudagraph_mode: CUDAGraphMode, decode_query_len: int):
         return EagleAclGraphManager(vllm_config, device, cudagraph_mode, decode_query_len, speculator)
 
-    try:
-        vllm_speculator.EagleCudaGraphManager = factory
-        yield
-    finally:
-        vllm_speculator.EagleCudaGraphManager = original_graph_manager
+    if vllm_version_is("0.19.1"):
+        original = vllm_speculator.EagleCudaGraphManager
+        try:
+            vllm_speculator.EagleCudaGraphManager = factory
+            yield
+        finally:
+            vllm_speculator.EagleCudaGraphManager = original
+    else:
+        # vLLM #40410: speculator constructs both Prefill and Decode managers.
+        # Patch both names so the Ascend factory replaces both.
+        original_decode = vllm_speculator.DecodeEagleCudaGraphManager
+        original_prefill = vllm_speculator.PrefillEagleCudaGraphManager
+        try:
+            vllm_speculator.DecodeEagleCudaGraphManager = factory
+            vllm_speculator.PrefillEagleCudaGraphManager = factory
+            yield
+        finally:
+            vllm_speculator.DecodeEagleCudaGraphManager = original_decode
+            vllm_speculator.PrefillEagleCudaGraphManager = original_prefill
