@@ -59,19 +59,34 @@ class ProfilingChunkScheduler(Scheduler):
         kv_cache_config: KVCacheConfig,
         structured_output_manager: StructuredOutputManager,
         block_size: int,
+        # `hash_block_size` was added in vLLM #40946; keep it optional so the
+        # subclass works on both pinned vllm and main.
+        hash_block_size: int | None = None,
         mm_registry: MultiModalRegistry = MULTIMODAL_REGISTRY,
         include_finished_set: bool = False,
         log_stats: bool = False,
     ) -> None:
-        super().__init__(
-            vllm_config,
-            kv_cache_config,
-            structured_output_manager,
-            block_size,
-            mm_registry=mm_registry,
-            include_finished_set=include_finished_set,
-            log_stats=log_stats,
-        )
+        if vllm_version_is("0.19.1"):
+            super().__init__(
+                vllm_config,
+                kv_cache_config,
+                structured_output_manager,
+                block_size,
+                mm_registry=mm_registry,
+                include_finished_set=include_finished_set,
+                log_stats=log_stats,
+            )
+        else:
+            super().__init__(
+                vllm_config,
+                kv_cache_config,
+                structured_output_manager,
+                block_size,
+                hash_block_size=hash_block_size,
+                mm_registry=mm_registry,
+                include_finished_set=include_finished_set,
+                log_stats=log_stats,
+            )
 
         from vllm_ascend.ascend_config import get_ascend_config, init_ascend_config
 
