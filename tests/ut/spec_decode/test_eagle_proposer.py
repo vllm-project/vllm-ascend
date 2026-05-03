@@ -17,6 +17,9 @@ from vllm_ascend.ascend_config import init_ascend_config
 from vllm_ascend.attention.attention_v1 import AscendAttentionState
 from vllm_ascend.spec_decode.draft_proposer import AscendDraftModelProposer
 from vllm_ascend.spec_decode.eagle_proposer import AscendEagleProposer
+from vllm_ascend.utils import enable_custom_op
+
+enable_custom_op()
 
 
 class TestEagleProposerInitialization(TestBase):
