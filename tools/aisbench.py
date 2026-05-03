@@ -85,6 +85,8 @@ class AisbenchRunner:
         self.top_k = aisbench_config.get("top_k")
         self.top_p = aisbench_config.get("top_p")
         self.seed = aisbench_config.get("seed")
+        self.min_p = aisbench_config.get("min_p")
+        self.presence_penalty = aisbench_config.get("presence_penalty")
         self.repetition_penalty = aisbench_config.get("repetition_penalty")
         self.no_pred = aisbench_config.get("no_pred")
         self.thinking = aisbench_config.get("thinking")
@@ -137,6 +139,12 @@ class AisbenchRunner:
             content = re.sub(r"ignore_eos.*", f"ignore_eos=False,\n            top_k={self.top_k},", content)
         if self.seed:
             content = re.sub(r"ignore_eos.*", f"ignore_eos=False,\n            seed={self.seed},", content)
+        if self.min_p:
+            content = re.sub(r"ignore_eos.*", f"ignore_eos=False,\n            min_p={self.min_p},", content)
+        if self.presence_penalty:
+            content = re.sub(
+                r"ignore_eos.*", f"ignore_eos=False,\n            presence_penalty={self.presence_penalty},", content
+            )
         if self.repetition_penalty:
             content = re.sub(
                 r"ignore_eos.*",

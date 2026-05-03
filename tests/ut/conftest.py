@@ -16,6 +16,7 @@
 # This file is a part of the vllm-ascend project.
 #
 import functools
+import inspect
 import subprocess
 import sys
 from enum import Enum
@@ -68,13 +69,23 @@ class RunnerDeviceType(str, Enum):
 def npu_test(num_npus: int = 1, npu_type: str | RunnerDeviceType = RunnerDeviceType.A2):
     """Decorator that marks a test with NPU resource requirements.
 
-    Serves two purposes:
-      1. **CI routing** — the AST parser in determine_smart_e2e_scope.py reads
-         the decorator keyword arguments (num_npus, npu_type) to group tests
-         by runner type. The parameter names and decorator name must stay in
-         sync with the parser.
-      2. **Runtime gating** — at test time the decorator skips the test when
-         the current environment lacks the required NPU hardware.
+    Can be applied to either a single test function/method or a test class.
+
+    Serves two purposes, depending on the target:
+
+      - **Function/method**: declarative metadata for the AST parser AND
+        runtime gating. If the runner does not satisfy the declared
+        requirements, the wrapper raises ``RuntimeError`` (fails loudly,
+        not ``pytest.skip``) — a mismatch means routing or the runner
+        environment is broken.
+      - **Class**: declarative metadata only. The class is returned
+        unchanged so pytest's standard class-based collection still works.
+        CI routing (driven by the AST parser) is the single source of
+        truth — runtime gating per method would be redundant.
+
+    The AST parser in ``determine_smart_e2e_scope.py`` reads the decorator
+    keyword arguments (num_npus, npu_type) to group tests by runner type.
+    The parameter names and decorator name must stay in sync with the parser.
 
     Args:
         num_npus: Number of NPU devices required (default 1).
@@ -83,7 +94,7 @@ def npu_test(num_npus: int = 1, npu_type: str | RunnerDeviceType = RunnerDeviceT
     if not isinstance(npu_type, RunnerDeviceType):
         npu_type = RunnerDeviceType(npu_type)
 
-    def decorator(func):
+    def _wrap_callable(func):
         @functools.wraps(func)
         def wrapper(*args, **kwargs):
             if npu_type == RunnerDeviceType.CPU:
@@ -107,5 +118,13 @@ def npu_test(num_npus: int = 1, npu_type: str | RunnerDeviceType = RunnerDeviceT
             return func(*args, **kwargs)
 
         return wrapper
+
+    def decorator(obj):
+        # Class decoration is purely declarative — the AST parser handles
+        # routing, and CI routing is the single source of truth. Returning
+        # the class unchanged keeps pytest's class-based collection working.
+        if inspect.isclass(obj):
+            return obj
+        return _wrap_callable(obj)
 
     return decorator

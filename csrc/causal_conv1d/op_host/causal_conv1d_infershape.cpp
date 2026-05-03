@@ -14,7 +14,7 @@
  * \brief
  */
 #include "register/op_impl_registry.h"
-#include "log/log.h"
+#include "error_log.h"
 
 using namespace ge;
 
@@ -25,12 +25,13 @@ static ge::graphStatus InferShapeCausalConv1d(gert::InferShapeContext* context)
 {
     OP_LOGD(context->GetNodeName(), "Begin to do InferShapeCausalConv1d");
 
+    // get input shapes
     const gert::Shape* xShape = context->GetInputShape(IDX_0);
     OP_CHECK_NULL_WITH_CONTEXT(context, xShape);
 
+    // get output shapes
     gert::Shape* yShape = context->GetOutputShape(IDX_0);
     OP_CHECK_NULL_WITH_CONTEXT(context, yShape);
-
     *yShape = *xShape;
 
     OP_LOGD(context->GetNodeName(), "End to do InferShapeCausalConv1d");

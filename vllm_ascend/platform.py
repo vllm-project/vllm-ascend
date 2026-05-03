@@ -48,6 +48,7 @@ from vllm_ascend.utils import (
     update_cudagraph_capture_sizes,
     is_310p,
     enable_sp,
+    vllm_version_is,
 )
 
 if TYPE_CHECKING:
@@ -202,7 +203,7 @@ class NPUPlatform(Platform):
             from vllm_ascend.compilation.passes.sequence_parallelism import get_sp_min_token_num
 
             pass_config.sp_min_token_num = get_sp_min_token_num(vllm_config)
-            logger.info(f"set sp_min_token_num to {pass_config.sp_min_token_num}")
+            logger.info("set sp_min_token_num to %s", pass_config.sp_min_token_num)
 
         default_max_cg_capture_size = cls._get_default_max_cudagraph_capture_size(vllm_config)
         if default_max_cg_capture_size is not None:
@@ -757,7 +758,10 @@ class NPUPlatform(Platform):
             num_tokens = list(attn_metadata.values())[0].num_actual_tokens
         dp_world_size = get_dp_group().world_size
         if dp_world_size > 1 and dp_metadata is not None:
-            max_tokens_across_dp = dp_metadata.max_tokens_across_dp_cpu.item()
+            if vllm_version_is("0.19.1"):
+                max_tokens_across_dp = dp_metadata.max_tokens_across_dp_cpu.item()
+            else:
+                max_tokens_across_dp = dp_metadata.num_tokens_across_dp_cpu.max().item()
             if flash_comm_v1_enabled or flashcomm_v2_enabled:
                 padded_length = (max_tokens_across_dp + tp_world_size - 1) // tp_world_size * tp_world_size
                 pad_size = padded_length - num_tokens

@@ -11,6 +11,7 @@ from vllm.v1.attention.backends.utils import CommonAttentionMetadata
 
 from vllm_ascend import envs
 from vllm_ascend.utils import AscendDeviceType, get_ascend_config, get_ascend_device_type
+from vllm_ascend.worker.kvcomp_utils import KVCompMetaData
 
 
 def ascend_chunked_prefill_workspace_size(vllm_config: VllmConfig) -> int:
@@ -87,11 +88,21 @@ class AscendPrefillContextParallelMetadata:
 
     kv_with_q_tail_mask_idx_tensor: torch.Tensor = None
 
+    kv_tail_proj_idx_tensor: torch.Tensor = None
+
+    kv_with_q_head_attn_idx_in_tail_tensor: torch.Tensor = None
+
+    kv_with_q_tail_attn_idx_in_tail_tensor: torch.Tensor = None
+
     attn_mask_seqlens: torch.Tensor = None
 
     head_attn_nomask_seqlens: torch.Tensor = None
 
     tail_attn_nomask_seqlens: torch.Tensor = None
+
+    head_actual_seq_lengths_kv: list[int] | None = None
+
+    tail_actual_seq_lengths_kv: list[int] | None = None
 
     q_full_idx: torch.Tensor = None
 
@@ -173,6 +184,7 @@ class AscendCommonAttentionMetadata(CommonAttentionMetadata):
 
     # Metadata for Prefill Context Parallelism (PCP) operations.
     prefill_context_parallel_metadata: AscendPrefillContextParallelMetadata | None = None
+    kvcomp_metadata: KVCompMetaData | None = None
 
     # TODO: Remove it when vLLM no longer uses this function.
     def unpadded(self, num_actual_tokens: int, num_actual_reqs: int) -> "AscendCommonAttentionMetadata":

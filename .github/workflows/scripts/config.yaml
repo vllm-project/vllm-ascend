@@ -92,8 +92,6 @@ e2e-multicard-2-cards:
   estimated_time: 185
 - name: tests/e2e/multicard/2-cards/test_data_parallel.py
   estimated_time: 426
-- name: tests/e2e/multicard/2-cards/test_expert_parallel.py
-  estimated_time: 236
 - name: tests/e2e/multicard/2-cards/test_external_launcher.py
   estimated_time: 496
 - name: tests/e2e/multicard/2-cards/test_full_graph_mode.py

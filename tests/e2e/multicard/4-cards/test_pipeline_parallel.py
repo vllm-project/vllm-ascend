@@ -28,7 +28,7 @@ MOE_MODELS = [
 ]
 
 DATA_PARALLELS = [2]
-TENSOR_PARALLELS = [1, 2]
+TENSOR_PARALLELS = [1]
 PIPELINE_PARALLELS = [2]
 DIST_EXECUTOR_BACKEND = ["mp", "ray"]
 
@@ -39,34 +39,32 @@ prompts = [
 GOLDEN = [
     (
         [
-            100000,
             17464,
             11,
             601,
             1210,
             317,
-            46462,
+            459,
+            6946,
+            29,
+            32,
+            1568,
+            32092,
+            535,
+            6946,
+            29,
+            285,
+            304,
             608,
             245,
-            4541,
-            7712,
-            13,
-            2682,
-            6207,
-            317,
-            276,
-            2774,
-            340,
-            366,
-            254,
-            1608,
-            2784,
+            459,
+            6946,
+            29,
         ],
-        "Hello, my name is***** am a computer expert. My goal is to provide you with the best experience",
+        "Hello, my name is <strong>Alessandro</strong> and I am a <strong>",
     ),
     (
         [
-            100000,
             549,
             3680,
             280,
@@ -74,22 +72,22 @@ GOLDEN = [
             317,
             6464,
             11,
-            548,
+            285,
             359,
             487,
             82,
-            441,
-            1673,
-            895,
-            10694,
-            13,
-            1733,
-            20838,
-            5495,
-            11106,
+            1872,
             276,
+            330,
+            245,
+            2624,
+            12,
+            73309,
+            279,
+            254,
+            1843,
         ],
-        "The future of AI is bright, but it’s not without its challenges. As AI technology continues to",
+        "The future of AI is bright, and it’s going to be a game-changer in the world",
     ),
 ]
 

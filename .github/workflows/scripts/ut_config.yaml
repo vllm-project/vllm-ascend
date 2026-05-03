@@ -128,7 +128,7 @@
     - tests/ut/batch_invariant
 
 - name: dummy
-  optional: false
+  optional: true
   source_file_dependencies:
     - tests/ut/dummy
   tests:

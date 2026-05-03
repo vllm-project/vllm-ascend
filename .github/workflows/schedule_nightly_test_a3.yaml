@@ -299,6 +299,9 @@ jobs:
           - name: Qwen3.5-397B-A17B-w8a8-mtp
             os: linux-aarch64-a3-16
             config_file_path: Qwen3.5-397B-A17B-W8A8-mtp-A3.yaml
+          - name: Qwen3.5-122B-A10B-W8A8-A3
+            os: linux-aarch64-a3-16
+            config_file_path: Qwen3.5-122B-A10B-W8A8-A3.yaml
           # pytest-driven tests
           - name: custom-multi-ops
             os: linux-aarch64-a3-16

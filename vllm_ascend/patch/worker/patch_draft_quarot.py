@@ -64,8 +64,8 @@ def get_rotataion_matrix(rotation_path):
         return Q
     except Exception as e:
         logger.error(
-            f"Failed to load rotation weight from '{rotation_path}'. "
-            "If you want to use quarot model with eagle3, take a check."
+            "Failed to load rotation weight from '%s'. If you want to use quarot model with eagle3, take a check.",
+            rotation_path,
         )
         raise e
 
