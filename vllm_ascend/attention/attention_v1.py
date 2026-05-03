@@ -864,6 +864,7 @@ class AscendAttentionBackendImpl(AttentionImpl):
         attn_metadata: AscendMetadata,
         output: torch.Tensor,
         kv_cache=None,
+        layer: torch.nn.Module | None = None,
     ):
         # we inherit ForwardContext in model runner v2, when enable model
         # runner v2, there is not capturing attribute in forward_context,
@@ -897,6 +898,10 @@ class AscendAttentionBackendImpl(AttentionImpl):
         ):
             key = key[:num_tokens]
             value = value[:num_tokens]
+        is_llama4 = False
+        if layer is not None and hasattr(layer, "config"):
+            model_type = getattr(layer.config, "model_type", "").lower()
+            is_llama4 = "llama-4" in model_type
         # Get workspace from cache or calculate it if not present.
         if self.sinks is not None:
             actual_seq_qlen = attn_metadata.actual_seq_lengths_q
@@ -925,37 +930,38 @@ class AscendAttentionBackendImpl(AttentionImpl):
                 learnable_sink=self.sinks,
             )
         else:
-            if not attn_metadata.causal:
-                attn_output, _ = torch_npu.npu_fused_infer_attention_score(
-                    query=query,
-                    key=key,
-                    value=value,
-                    block_table=block_table,
-                    input_layout="TND",
-                    block_size=block_size,
-                    actual_seq_lengths=attn_metadata.actual_seq_lengths_q,
-                    actual_seq_lengths_kv=actual_seq_lengths_kv,
-                    num_key_value_heads=self.num_kv_heads,
-                    num_heads=self.num_heads,
-                    scale=self.scale,
-                    sparse_mode=0,
-                )
+            # --- Resolved Conflict: Integrating Llama4 support with Main's causal logic ---
+            # Use causal metadata from main, but override for Llama4 specific requirements.
+            is_llama4 = getattr(self, "is_llama4", False)
+
+            if is_llama4:
+                sparse_mode = 0
+                actual_seq_lengths_q = [query.shape[0]]
             else:
-                attn_output, _ = torch_npu.npu_fused_infer_attention_score(
-                    query=query,
-                    key=key,
-                    value=value,
-                    atten_mask=attn_metadata.attn_mask,
-                    block_table=block_table,
-                    input_layout="TND",
-                    block_size=block_size,
-                    actual_seq_lengths=attn_metadata.actual_seq_lengths_q,
-                    actual_seq_lengths_kv=actual_seq_lengths_kv,
-                    num_key_value_heads=self.num_kv_heads,
-                    num_heads=self.num_heads,
-                    scale=self.scale,
-                    sparse_mode=3,
-                )
+                # Fallback to main branch logic
+                sparse_mode = 3 if attn_metadata.causal else 0
+                actual_seq_lengths_q = attn_metadata.actual_seq_lengths_q
+
+            # Prepare common arguments for npu_fused_infer_attention_score
+            attn_args = {
+                "query": query,
+                "key": key,
+                "value": value,
+                "block_table": block_table,
+                "input_layout": "TND",
+                "block_size": block_size,
+                "actual_seq_lengths": actual_seq_lengths_q,
+                "actual_seq_lengths_kv": actual_seq_lengths_kv,
+                "num_key_value_heads": self.num_kv_heads,
+                "num_heads": self.num_heads,
+                "scale": self.scale,
+                "sparse_mode": sparse_mode,
+            }
+            # If it's causal (and not overridden by llama4 logic), we need the mask
+            if sparse_mode == 3:
+                attn_args["atten_mask"] = attn_metadata.attn_mask
+
+            attn_output, _ = torch_npu.npu_fused_infer_attention_score(**attn_args)
 
             attn_output = attn_output.view(num_tokens, self.num_heads, self.head_size)
         output[:num_tokens] = attn_output[:num_tokens]
@@ -1061,6 +1067,7 @@ class AscendAttentionBackendImpl(AttentionImpl):
         kv_cache: tuple[torch.Tensor],
         attn_metadata: AscendMetadata,
         output: torch.Tensor,
+        layer: torch.nn.Module | None = None,
     ):
         num_tokens = query.shape[0]
         if (
@@ -1070,7 +1077,7 @@ class AscendAttentionBackendImpl(AttentionImpl):
         ):
             output = self.forward_paged_attention(query, attn_metadata, output)
         else:
-            output = self.forward_fused_infer_attention(query, key, value, attn_metadata, output, kv_cache)
+            output = self.forward_fused_infer_attention(query, key, value, attn_metadata, output, kv_cache, layer)
 
         return output
 
@@ -1134,9 +1141,9 @@ class AscendAttentionBackendImpl(AttentionImpl):
             output[:num_tokens] = attn_output[:num_tokens]
             return output
         if output_padded is not None:
-            attn_output = self.forward_impl(query, key, value, kv_cache, attn_metadata, output_padded)
+            attn_output = self.forward_impl(query, key, value, kv_cache, attn_metadata, output_padded, layer)
         else:
-            attn_output = self.forward_impl(query, key, value, kv_cache, attn_metadata, output)
+            attn_output = self.forward_impl(query, key, value, kv_cache, attn_metadata, output, layer)
         output[:num_tokens] = attn_output[:num_tokens]
         return output
 
