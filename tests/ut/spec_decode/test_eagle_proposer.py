@@ -2279,6 +2279,7 @@ class TestDraftProposerHelperMethods(TestBase):
         token_indices_to_sample = None
         common_attn_metadata = MagicMock()
         common_attn_metadata.seq_lens = torch.tensor([4])
+        common_attn_metadata.seq_lens_cpu = torch.tensor([4])
         common_attn_metadata._seq_lens_cpu = torch.tensor([4])
         num_rejected_tokens_gpu = torch.tensor([0])
 
@@ -2292,7 +2293,7 @@ class TestDraftProposerHelperMethods(TestBase):
             )
         mock_slot.return_value = torch.tensor([[1]])
 
-        _, __, common_attn_metadata, ___ = (
+        _, _, common_attn_metadata, _ = (
             self.proposer.set_inputs_first_pass(
                 target_token_ids,
                 next_token_ids,
@@ -2303,5 +2304,6 @@ class TestDraftProposerHelperMethods(TestBase):
                 num_rejected_tokens_gpu
             )
         )
-        assert common_attn_metadata.seq_lens == common_attn_metadata._seq_lens_cpu
+        assert common_attn_metadata.seq_lens.to("cpu") == common_attn_metadata._seq_lens_cpu
+        assert common_attn_metadata.seq_lens_cpu == common_attn_metadata._seq_lens_cpu
 # fmt: on
