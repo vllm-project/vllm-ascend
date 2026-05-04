@@ -2285,7 +2285,6 @@ class TestDraftProposerHelperMethods(TestBase):
             query_start_loc_cpu=torch.tensor([0, 5], dtype=torch.int32),
             seq_lens=torch.tensor([5], dtype=torch.int32),
             seq_lens_cpu=torch.tensor([5], dtype=torch.int32),
-            _seq_lens_cpu=torch.tensor([5], dtype=torch.int32),
             num_actual_tokens=5,
             max_query_len=5,
             max_seq_len=5,
@@ -2316,5 +2315,4 @@ class TestDraftProposerHelperMethods(TestBase):
             )
         )
         assert common_attn_metadata.seq_lens.to("cpu") == common_attn_metadata.seq_lens_cpu
-        assert common_attn_metadata.seq_lens_cpu == common_attn_metadata._seq_lens_cpu
 # fmt: on
