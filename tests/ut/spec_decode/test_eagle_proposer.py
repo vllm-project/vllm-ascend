@@ -2268,7 +2268,7 @@ class TestDraftProposerHelperMethods(TestBase):
         set_current_vllm_config(None)
 
     
-    @patch('torch.ops._C_ascend.npu_copy_and_expand_eagle_inputs', create=True)
+    @patch("torch.ops._C_ascend.npu_copy_and_expand_eagle_inputs")
     @patch("vllm_ascend.spec_decode.eagle_proposer.compute_new_slot_mapping")
     def test_set_inputs_first_pass(self, mock_slot, mock_expand):
         self.assertTrue(self.proposer.needs_extra_input_slots)
