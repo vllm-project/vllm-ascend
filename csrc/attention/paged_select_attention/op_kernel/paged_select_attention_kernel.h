@@ -72,6 +72,7 @@ namespace SplitFuse {
             bool sparseLaunchEnabled = false;
             uint32_t sparseKMax = 0;
             uint32_t pagedBlockSize = 0;
+            uint32_t numBlocks = 0;
         };
 
         struct SparseBatchDecodeBounds {
@@ -100,12 +101,14 @@ namespace SplitFuse {
             uint32_t sparseLaunchEnabled,
             uint32_t sparseKMax,
             uint32_t pagedBlockSize,
+            uint32_t numBlocks,
             SelectedKvSparseRuntimeState &selectedKvSparseState)
         {
             selectedKvSparseState.hasSelectedKvIndices = (params.selectedKvIndices != nullptr);
             selectedKvSparseState.sparseLaunchEnabled = (sparseLaunchEnabled != 0U);
             selectedKvSparseState.sparseKMax = sparseKMax;
             selectedKvSparseState.pagedBlockSize = pagedBlockSize;
+            selectedKvSparseState.numBlocks = numBlocks;
         }
 
         __aicore__ inline
@@ -185,6 +188,7 @@ namespace SplitFuse {
             uint64_t blockBOffset,
             uint32_t selectedBlockLimit,
             uint32_t validLogicalBlockCount,
+            uint32_t numBlocks,
             uint32_t sparseBlockBase,
             uint32_t *windowPhysicalIds,
             uint32_t &windowPhysicalCount)
@@ -207,6 +211,10 @@ namespace SplitFuse {
                     break;
                 }
                 int32_t physicalBlockIdRaw = gBlockTable.GetValue(blockBOffset + static_cast<uint32_t>(blockId));
+                FIA_HARD_FAIL_IF((physicalBlockIdRaw < 0) ||
+                    (static_cast<uint32_t>(physicalBlockIdRaw) >= numBlocks),
+                    "selected_kv_indices sparse contract violation: physical block id rowBase=%llu idx=%u logicalBlock=%d value=%d numBlocks=%u",
+                    static_cast<unsigned long long>(selectedRowBase), i, blockId, physicalBlockIdRaw, numBlocks);
                 windowPhysicalIds[windowPhysicalCount++] = static_cast<uint32_t>(physicalBlockIdRaw);
             }
         }
@@ -344,6 +352,7 @@ namespace SplitFuse {
             AscendC::GlobalTensor<int32_t> &gBlockTable,
             uint64_t blockBOffset,
             uint32_t pagedBlockSize,
+            uint32_t numBlocks,
             uint32_t kvSIdx,
             const SparseHeadDecodeState &sparseHeadState,
             uint32_t *windowPhysicalIds,
@@ -357,6 +366,7 @@ namespace SplitFuse {
                 blockBOffset,
                 sparseHeadState.selectedBlockCount,
                 sparseHeadState.validLogicalBlockCount,
+                numBlocks,
                 sparseBlockBase,
                 windowPhysicalIds,
                 windowPhysicalCount);
@@ -378,6 +388,7 @@ namespace SplitFuse {
                 gBlockTable,
                 blockBOffset,
                 selectedKvSparseState.pagedBlockSize,
+                selectedKvSparseState.numBlocks,
                 kvSIdx,
                 sparseHeadState,
                 windowPhysicalIds,
@@ -443,7 +454,13 @@ namespace SplitFuse {
                 gSelectedKvIndices.SetGlobalBuffer((__gm__ int32_t *)(params.selectedKvIndices));
             }
             SelectedKvSparseRuntimeState selectedKvSparseState;
-            InitSelectedKvSparseRuntimeState(params, sparseLaunchEnabled, sparseKMax, pagedBlockSize, selectedKvSparseState);
+            InitSelectedKvSparseRuntimeState(
+                params,
+                sparseLaunchEnabled,
+                sparseKMax,
+                pagedBlockSize,
+                numBlocks,
+                selectedKvSparseState);
             AscendC::GlobalTensor<int64_t> gActualQseqlen;
             gActualQseqlen.SetGlobalBuffer((__gm__ int64_t *)params.actualQseqlen);
             AscendC::GlobalTensor<int64_t> gActualKvseqlen;
