@@ -15,6 +15,7 @@ import vllm_ascend.spec_decode.eagle_proposer as eagle_proposer
 from tests.ut.base import TestBase
 from vllm_ascend.ascend_config import init_ascend_config
 from vllm_ascend.attention.attention_v1 import AscendAttentionState
+from vllm_ascend.attention.utils import AscendCommonAttentionMetadata
 from vllm_ascend.spec_decode.draft_proposer import AscendDraftModelProposer
 from vllm_ascend.spec_decode.eagle_proposer import AscendEagleProposer
 
@@ -2268,24 +2269,34 @@ class TestDraftProposerHelperMethods(TestBase):
         set_current_vllm_config(None)
 
     
-    @patch("torch.ops._C_ascend.npu_copy_and_expand_eagle_inputs")
+    @patch('torch.ops._C_ascend.npu_copy_and_expand_eagle_inputs', create=True)
     @patch("vllm_ascend.spec_decode.eagle_proposer.compute_new_slot_mapping")
     def test_set_inputs_first_pass(self, mock_slot, mock_expand):
         self.assertTrue(self.proposer.needs_extra_input_slots)
-        target_token_ids = torch.tensor([0,1,2,3])
-        target_positions = torch.tensor([0,1,2,3])
-        next_token_ids = torch.tensor([4])
+        target_token_ids = torch.tensor([0,1,2,3,4])
+        target_positions = torch.tensor([0,1,2,3,4])
+        next_token_ids = torch.tensor([5])
         target_hidden_states = None
         token_indices_to_sample = None
-        common_attn_metadata = MagicMock()
-        common_attn_metadata.seq_lens = torch.tensor([4])
-        common_attn_metadata.seq_lens_cpu = torch.tensor([4])
-        common_attn_metadata._seq_lens_cpu = torch.tensor([4])
         num_rejected_tokens_gpu = torch.tensor([0])
-
+        batch_size = 1
+        common_attn_metadata = AscendCommonAttentionMetadata(
+            query_start_loc=torch.tensor([0, 5], dtype=torch.int32),
+            query_start_loc_cpu=torch.tensor([0, 5], dtype=torch.int32),
+            seq_lens=torch.tensor([5], dtype=torch.int32),
+            seq_lens_cpu=torch.tensor([5], dtype=torch.int32),
+            _seq_lens_cpu=torch.tensor([5], dtype=torch.int32),
+            num_actual_tokens=5,
+            max_query_len=5,
+            max_seq_len=5,
+            num_reqs=1,
+            block_table_tensor=torch.zeros([1,320], dtype=torch.int32),
+            slot_mapping=torch.tensor([128,129,130,131], dtype=torch.int32),
+        )
+        common_attn_metadata.batch_size = lambda: batch_size
         mock_expand.return_value =  (
                 next_token_ids,
-                torch.tensor([4]),
+                torch.tensor([5]),
                 torch.tensor([False]),
                 torch.tensor([False]),
                 token_indices_to_sample,
@@ -2304,6 +2315,6 @@ class TestDraftProposerHelperMethods(TestBase):
                 num_rejected_tokens_gpu
             )
         )
-        assert common_attn_metadata.seq_lens == common_attn_metadata._seq_lens_cpu
+        assert common_attn_metadata.seq_lens.to("cpu") == common_attn_metadata.seq_lens_cpu
         assert common_attn_metadata.seq_lens_cpu == common_attn_metadata._seq_lens_cpu
 # fmt: on
