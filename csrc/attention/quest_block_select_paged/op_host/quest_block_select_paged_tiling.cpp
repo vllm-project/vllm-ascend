@@ -108,9 +108,13 @@ static ge::graphStatus QuestBlockSelectPagedTilingFunc(gert::TilingContext *cont
 
     const auto query_desc = context->GetInputDesc(QUERY_INDEX);
     OPS_LOG_E_IF_NULL(context, query_desc, return ge::GRAPH_FAILED);
-    context->SetTilingKey(
-        query_desc->GetDataType() == ge::DT_BF16 ? QUEST_BLOCK_SELECT_PAGED_TILING_BF16
-                                                 : QUEST_BLOCK_SELECT_PAGED_TILING_FP16);
+    const auto query_data_type = query_desc->GetDataType();
+    OPS_ERR_IF(query_data_type != ge::DT_FLOAT16 && query_data_type != ge::DT_BF16,
+               OPS_LOG_E(context->GetNodeName(), "query dtype must be float16 or bfloat16."),
+               return ge::GRAPH_FAILED);
+    tiling.set_dataType(query_data_type == ge::DT_BF16 ? QUEST_BLOCK_SELECT_PAGED_DTYPE_BF16
+                                                       : QUEST_BLOCK_SELECT_PAGED_DTYPE_FP16);
+    context->SetTilingKey(QUEST_BLOCK_SELECT_PAGED_TILING);
     tiling.SaveToBuffer(context->GetRawTilingData()->GetData(),
                         context->GetRawTilingData()->GetCapacity());
     context->GetRawTilingData()->SetDataSize(tiling.GetDataSize());

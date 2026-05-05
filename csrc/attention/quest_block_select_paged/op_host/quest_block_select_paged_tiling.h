@@ -22,6 +22,7 @@ TILING_DATA_FIELD_DEF(uint32_t, blockSize)
 TILING_DATA_FIELD_DEF(uint32_t, headDim)
 TILING_DATA_FIELD_DEF(uint32_t, maxMetadataBlocksPerRequest)
 TILING_DATA_FIELD_DEF(uint32_t, k)
+TILING_DATA_FIELD_DEF(uint32_t, dataType)
 TILING_DATA_FIELD_DEF(int32_t, tokensSinceMetadataUpdate)
 END_TILING_DATA_DEF;
 

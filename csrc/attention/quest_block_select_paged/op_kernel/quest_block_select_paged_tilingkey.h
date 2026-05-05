@@ -12,8 +12,10 @@
 
 #include "kernel_tiling/kernel_tiling.h"
 
-#define QUEST_BLOCK_SELECT_PAGED_TILING_FP16 0ULL
-#define QUEST_BLOCK_SELECT_PAGED_TILING_BF16 1ULL
+#define QUEST_BLOCK_SELECT_PAGED_TILING 0ULL
+
+#define QUEST_BLOCK_SELECT_PAGED_DTYPE_FP16 0U
+#define QUEST_BLOCK_SELECT_PAGED_DTYPE_BF16 1U
 
 #define QUEST_BLOCK_SELECT_PAGED_COPY_TILING_DATA(tilingDataStruct, tiling)                 \
     GET_TILING_DATA_WITH_STRUCT(tilingDataStruct, tiling_data_in, tiling);                  \

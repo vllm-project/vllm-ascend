@@ -13,20 +13,14 @@
 
 #define BYTES_UB_BLOCK 32
 #define BYTES_DATA_BLOCK 32
-#define NUM_HALF_ELEMS_PER_VECTOR 128
 #define NUM_FLOAT_ELEMS_PER_VECTOR 64
 #define DIV_ROUNDUP(x, y) (((x) + (y)-1) / (y))
 #define DIV_ROUNDUP_MUL(bytes, bytes_per_block) (DIV_ROUNDUP(bytes, bytes_per_block) * (bytes_per_block))
 #define NUM_UB_BYTES(bytes) (DIV_ROUNDUP_MUL(bytes, BYTES_UB_BLOCK))
 #define NUM_DATA_BLOCKS(bytes) (DIV_ROUNDUP(bytes, BYTES_DATA_BLOCK))
 #define MIN(a, b) (((a) < (b)) ? (a) : (b))
-#define MINHALF -65504.0f
-#define MAXHALF 65504.0f
 #define MINFLOAT -3.4028235e38f
-#define MAXFLOAT 3.4028235e+38f
 
-constexpr uint32_t REGION_PROPOSAL_DATA_SIZE_V200 = 8;
-constexpr uint32_t REGION_PROPOSAL_DATA_SIZE_HALF_V220 = 4;
 constexpr uint32_t REGION_PROPOSAL_DATA_SIZE_FLOAT_V220 = 2;
 
 using namespace AscendC;
@@ -34,55 +28,8 @@ using namespace AscendC;
 // QuestBlockSelectPagedTilingData is generated from the op_host tiling
 // definition. The kernel must not redeclare it locally.
 
-template <typename A, typename B>
-struct quest_is_same {
-    static constexpr bool value = false;
-};
-
-template <typename A>
-struct quest_is_same<A, A> {
-    static constexpr bool value = true;
-};
-
-template <typename StorageT, typename ComputeT>
-struct QuestBlockSelectPagedTraits {
-    static constexpr bool need_cast = !quest_is_same<StorageT, ComputeT>::value;
-    static constexpr uint32_t concat_region_size =
-        need_cast ? REGION_PROPOSAL_DATA_SIZE_FLOAT_V220 : REGION_PROPOSAL_DATA_SIZE_V200;
-    static constexpr uint32_t sort_region_size =
-        need_cast ? REGION_PROPOSAL_DATA_SIZE_FLOAT_V220 : REGION_PROPOSAL_DATA_SIZE_HALF_V220;
-
-    __aicore__ inline static ComputeT MinScoreValue()
-    {
-        if constexpr (quest_is_same<ComputeT, float>::value) {
-            return static_cast<ComputeT>(MINFLOAT);
-        } else {
-            return static_cast<ComputeT>(MINHALF);
-        }
-    }
-};
-
-__aicore__ inline void quest_emit_unique_index(
-    LocalTensor<uint32_t> &selected_indices_lt,
-    int32_t selection_limit,
-    int32_t &write_idx,
-    uint32_t candidate)
-{
-    if (write_idx >= selection_limit) {
-        return;
-    }
-    for (int32_t idx = 0; idx < write_idx; ++idx) {
-        if (selected_indices_lt.GetValue(idx) == candidate) {
-            return;
-        }
-    }
-    selected_indices_lt.SetValue(write_idx, candidate);
-    ++write_idx;
-}
-
 __aicore__ inline void quest_apply_anchor_selection(
     LocalTensor<uint32_t> &selected_indices_lt,
-    LocalTensor<uint32_t> &scratch_indices_lt,
     int32_t seq_len,
     int32_t block_size,
     int32_t k)
@@ -91,51 +38,55 @@ __aicore__ inline void quest_apply_anchor_selection(
         return;
     }
 
-    int32_t valid_page_count = DIV_ROUNDUP(seq_len, block_size);
-    int32_t selection_limit = MIN(k, valid_page_count);
-    if (selection_limit <= 0) {
+    int32_t num_valid_pages = DIV_ROUNDUP(seq_len, block_size);
+    int32_t num_selected_pages = MIN(k, num_valid_pages);
+    // Case 1: Nothing selected
+    if (num_selected_pages <= 0) {
         return;
     }
 
-    for (int32_t idx = 0; idx < selection_limit; ++idx) {
-        scratch_indices_lt.SetValue(idx, selected_indices_lt.GetValue(idx));
-    }
-
-    if (selection_limit == 1) {
-        selected_indices_lt.SetValue(0, static_cast<uint32_t>(valid_page_count - 1));
-        for (int32_t idx = 1; idx < k; ++idx) {
+    // Case 2: <= 2 blocks selected
+    uint32_t last_anchor = static_cast<uint32_t>(num_valid_pages - 1);
+    if (unlikely(num_selected_pages <= 2)) {
+        for (int32_t idx = 0; idx < k; ++idx) {
             selected_indices_lt.SetValue(idx, 0U);
         }
+        // If only one page is selected, last_anchor should win
+        selected_indices_lt.SetValue(num_selected_pages - 1, last_anchor);
         return;
     }
 
-    int32_t write_idx = 0;
-    quest_emit_unique_index(selected_indices_lt, selection_limit, write_idx, 0U);
-    if (valid_page_count >= 2) {
-        quest_emit_unique_index(
-            selected_indices_lt,
-            selection_limit,
-            write_idx,
-            static_cast<uint32_t>(valid_page_count - 1));
-    }
-
-    for (int32_t idx = 0; idx < selection_limit && write_idx < selection_limit; ++idx) {
-        uint32_t candidate = scratch_indices_lt.GetValue(idx);
-        if (candidate >= static_cast<uint32_t>(valid_page_count)) {
-            continue;
+    // Case 3: > 2 blocks selected
+    bool has_first_anchor = false;
+    bool has_last_anchor = false;
+    for (int32_t idx = 0; idx < num_selected_pages; ++idx) {
+        uint32_t selected_page = selected_indices_lt.GetValue(idx);
+        has_first_anchor = has_first_anchor || selected_page == 0U;
+        has_last_anchor = has_last_anchor || selected_page == last_anchor;
+        if (has_first_anchor && has_last_anchor) {
+            break;
         }
-        quest_emit_unique_index(selected_indices_lt, selection_limit, write_idx, candidate);
     }
 
-    for (int32_t idx = write_idx; idx < k; ++idx) {
+    if (!has_first_anchor) {
+        selected_indices_lt.SetValue(num_selected_pages - 1, 0U);
+    }
+    if (!has_last_anchor) {
+        selected_indices_lt.SetValue(
+            num_selected_pages - 1 - static_cast<int32_t>(!has_first_anchor),
+            last_anchor);
+    }
+
+    for (int32_t idx = num_selected_pages; idx < k; ++idx) {
         selected_indices_lt.SetValue(idx, 0U);
     }
 }
 
-template <typename StorageT, typename ComputeT>
+template <typename StorageT>
 class KernelQuestBlockSelectPaged {
-    using Traits = QuestBlockSelectPagedTraits<StorageT, ComputeT>;
     using VecBufT = AscendC::TBuf<AscendC::QuePosition::VECCALC>;
+    using ComputeT = float;
+    static constexpr uint32_t REGION_SIZE = REGION_PROPOSAL_DATA_SIZE_FLOAT_V220;
 
     struct LocalTensors {
         AscendC::LocalTensor<ComputeT> query;
@@ -188,11 +139,9 @@ public:
         seq_lens_gm_.SetGlobalBuffer((__gm__ int32_t *)seq_lens);
         selected_indices_gm_.SetGlobalBuffer((__gm__ uint32_t *)selected_indices);
 
-        if constexpr (Traits::need_cast) {
-            uint32_t input_storage_buf_size =
-                NUM_UB_BYTES(block_size_ * head_dim_ * static_cast<int32_t>(sizeof(StorageT)));
-            pipe_.InitBuffer(input_storage_buf_, input_storage_buf_size);
-        }
+        uint32_t input_storage_buf_size =
+            NUM_UB_BYTES(block_size_ * head_dim_ * static_cast<int32_t>(sizeof(StorageT)));
+        pipe_.InitBuffer(input_storage_buf_, input_storage_buf_size);
 
         uint32_t query_buf_size =
             NUM_UB_BYTES(head_dim_ * static_cast<int32_t>(sizeof(ComputeT)));
@@ -206,17 +155,17 @@ public:
         uint32_t selected_values_buf_size =
             NUM_UB_BYTES(k_ * static_cast<int32_t>(sizeof(ComputeT)));
         uint32_t tmp_concat_buf_size = NUM_UB_BYTES(
-            max_metadata_blocks_per_request_ * block_size_ * Traits::concat_region_size *
+            max_metadata_blocks_per_request_ * block_size_ * REGION_SIZE *
             static_cast<int32_t>(sizeof(ComputeT)));
         uint32_t concat_buf_size = NUM_UB_BYTES(
             (max_metadata_blocks_per_request_ * block_size_ +
-             max_metadata_blocks_per_request_ * block_size_ * Traits::concat_region_size) *
+             max_metadata_blocks_per_request_ * block_size_ * REGION_SIZE) *
             static_cast<int32_t>(sizeof(ComputeT)));
         uint32_t index_local_buf_size =
             NUM_UB_BYTES(max_metadata_blocks_per_request_ * block_size_ *
                          static_cast<int32_t>(sizeof(uint32_t)));
         uint32_t sort_tmp_buf_size = NUM_UB_BYTES(
-            max_metadata_blocks_per_request_ * block_size_ * Traits::sort_region_size *
+            max_metadata_blocks_per_request_ * block_size_ * REGION_SIZE *
             static_cast<int32_t>(sizeof(ComputeT)));
 
         pipe_.InitBuffer(query_buf_, query_buf_size);
@@ -250,36 +199,48 @@ public:
             int32_t output_offset = batch_head_idx * k_;
 
             int32_t seq_len = seq_lens_gm_.GetValue(batch_idx);
+            int32_t valid_page_count = DIV_ROUNDUP(seq_len, block_size_);
             int32_t num_tokens_per_meta_block = block_size_ * block_size_;
             int32_t num_meta_blocks_in_request = DIV_ROUNDUP(seq_len, num_tokens_per_meta_block);
-
-            LoadQuery(tensors, query_offset);
-            DuplicateAccumulatedScores(tensors, num_meta_blocks_in_request);
-
-            for (int32_t meta_block = 0; meta_block < num_meta_blocks_in_request; meta_block++) {
-                int32_t meta_block_id = metadata_block_tables_gm_.GetValue(
-                    batch_idx * max_metadata_blocks_per_request_ + meta_block);
-                int32_t meta_block_offset =
-                    meta_block_id * block_size_ * num_kv_heads_ * head_dim_ + kv_head_idx * head_dim_;
-
-                ScoreMetadataBlock(tensors, meta_block_offset);
-                CopyScoresToAccumulated(
-                    tensors,
-                    seq_len,
-                    num_tokens_per_meta_block,
-                    meta_block,
-                    num_meta_blocks_in_request);
-            }
-
-            SortAndExtract(tensors, num_meta_blocks_in_request);
-
-            if (tokens_since_metadata_update_ >= 0) {
+            bool use_fixed_anchors = tokens_since_metadata_update_ >= 0;
+            if (unlikely(use_fixed_anchors &&
+                         valid_page_count > 0 &&
+                         valid_page_count <= 2 &&
+                         k_ >= valid_page_count)) {
+                // Catch case where number of selected blocks <= 2
                 quest_apply_anchor_selection(
                     tensors.selected_indices,
-                    tensors.index_local,
                     seq_len,
                     block_size_,
                     k_);
+            } else {
+                LoadQuery(tensors, query_offset);
+                DuplicateAccumulatedScores(tensors, num_meta_blocks_in_request);
+
+                for (int32_t meta_block = 0; meta_block < num_meta_blocks_in_request; meta_block++) {
+                    int32_t meta_block_id = metadata_block_tables_gm_.GetValue(
+                        batch_idx * max_metadata_blocks_per_request_ + meta_block);
+                    int32_t meta_block_offset =
+                        meta_block_id * block_size_ * num_kv_heads_ * head_dim_ + kv_head_idx * head_dim_;
+
+                    ScoreMetadataBlock(tensors, meta_block_offset);
+                    CopyScoresToAccumulated(
+                        tensors,
+                        seq_len,
+                        num_tokens_per_meta_block,
+                        meta_block,
+                        num_meta_blocks_in_request);
+                }
+
+                SortAndExtract(tensors, num_meta_blocks_in_request);
+
+                if (likely(use_fixed_anchors)) {
+                    quest_apply_anchor_selection(
+                        tensors.selected_indices,
+                        seq_len,
+                        block_size_,
+                        k_);
+                }
             }
 
             AscendC::SetFlag<AscendC::HardEvent::V_MTE3>(EVENT_ID3);
@@ -315,25 +276,19 @@ private:
             NUM_DATA_BLOCKS(head_dim_ * static_cast<int32_t>(sizeof(StorageT)));
         auto query_copy_params = AscendC::DataCopyParams(1, query_copy_block_len, 0, 0);
 
-        if constexpr (!Traits::need_cast) {
-            AscendC::DataCopy(tensors.query, query_gm_[query_offset], query_copy_params);
-            AscendC::SetFlag<AscendC::HardEvent::MTE2_V>(EVENT_ID1);
-            AscendC::WaitFlag<AscendC::HardEvent::MTE2_V>(EVENT_ID1);
-        } else {
-            AscendC::LocalTensor<StorageT> input_storage_lt =
-                input_storage_buf_.Get<StorageT>(block_size_ * head_dim_);
-            AscendC::DataCopy(input_storage_lt, query_gm_[query_offset], query_copy_params);
-            AscendC::SetFlag<AscendC::HardEvent::MTE2_V>(EVENT_ID1);
-            AscendC::WaitFlag<AscendC::HardEvent::MTE2_V>(EVENT_ID1);
-            AscendC::Cast<ComputeT, StorageT>(
-                tensors.query,
-                input_storage_lt,
-                AscendC::RoundMode::CAST_NONE,
-                head_dim_);
-            AscendC::SetFlag<AscendC::HardEvent::V_MTE2>(EVENT_ID0);
-            AscendC::WaitFlag<AscendC::HardEvent::V_MTE2>(EVENT_ID0);
-            AscendC::PipeBarrier<PIPE_V>();
-        }
+        AscendC::LocalTensor<StorageT> input_storage_lt =
+            input_storage_buf_.Get<StorageT>(block_size_ * head_dim_);
+        AscendC::DataCopy(input_storage_lt, query_gm_[query_offset], query_copy_params);
+        AscendC::SetFlag<AscendC::HardEvent::MTE2_V>(EVENT_ID1);
+        AscendC::WaitFlag<AscendC::HardEvent::MTE2_V>(EVENT_ID1);
+        AscendC::Cast<ComputeT, StorageT>(
+            tensors.query,
+            input_storage_lt,
+            AscendC::RoundMode::CAST_NONE,
+            head_dim_);
+        AscendC::SetFlag<AscendC::HardEvent::V_MTE2>(EVENT_ID0);
+        AscendC::WaitFlag<AscendC::HardEvent::V_MTE2>(EVENT_ID0);
+        AscendC::PipeBarrier<PIPE_V>();
     }
 
     __aicore__ inline void DuplicateAccumulatedScores(
@@ -342,15 +297,17 @@ private:
     {
         AscendC::Duplicate(
             tensors.accumulated_scores,
-            Traits::MinScoreValue(),
+            static_cast<ComputeT>(MINFLOAT),
             max_metadata_blocks_per_request_ * num_meta_blocks_in_request);
-        if constexpr (!Traits::need_cast) {
-            AscendC::PipeBarrier<PIPE_V>();
-        }
+        AscendC::PipeBarrier<PIPE_V>();
     }
 
-    __aicore__ inline AscendC::DataCopyParams MetadataCopyParams()
+    __aicore__ inline void ScoreMetadataBlock(
+        LocalTensors &tensors,
+        int32_t meta_block_offset)
     {
+        AscendC::LocalTensor<StorageT> input_storage_lt =
+            input_storage_buf_.Get<StorageT>(block_size_ * head_dim_);
         AscendC::DataCopyParams gm_ub_cp;
         gm_ub_cp.blockCount = block_size_;
         gm_ub_cp.blockLen =
@@ -359,85 +316,16 @@ private:
             (num_kv_heads_ - 1) * head_dim_ * static_cast<int32_t>(sizeof(StorageT)),
             BYTES_DATA_BLOCK);
         gm_ub_cp.dstStride = 0;
-        return gm_ub_cp;
-    }
 
-    __aicore__ inline void ScoreMetadataBlock(
-        LocalTensors &tensors,
-        int32_t meta_block_offset)
-    {
-        AscendC::DataCopyParams gm_ub_cp = MetadataCopyParams();
-        if constexpr (Traits::need_cast) {
-            ScoreMetadataBlockCastToCompute(tensors, gm_ub_cp, meta_block_offset);
-        } else {
-            ScoreMetadataBlockSameType(tensors, gm_ub_cp, meta_block_offset);
-        }
-    }
-
-    __aicore__ inline void ScoreMetadataBlockSameType(
-        LocalTensors &tensors,
-        AscendC::DataCopyParams gm_ub_cp,
-        int32_t meta_block_offset)
-    {
-        AscendC::DataCopy(tensors.maxblock, maxblocks_gm_[meta_block_offset], gm_ub_cp);
-        AscendC::SetFlag<AscendC::HardEvent::MTE2_V>(EVENT_ID0);
-        AscendC::DataCopy(tensors.minblock, minblocks_gm_[meta_block_offset], gm_ub_cp);
-        AscendC::SetFlag<AscendC::HardEvent::MTE2_V>(EVENT_ID1);
-
-        uint64_t mask = head_dim_;
-        uint8_t repeat_times = static_cast<uint8_t>(block_size_);
-        AscendC::BinaryRepeatParams mul_repeat_params = {1, 1, 1, 8, 0, 8};
-        AscendC::WaitFlag<AscendC::HardEvent::MTE2_V>(EVENT_ID0);
-        AscendC::Mul(tensors.maxblock, tensors.query, tensors.maxblock, mask, repeat_times, mul_repeat_params);
-        AscendC::WaitFlag<AscendC::HardEvent::MTE2_V>(EVENT_ID1);
-        AscendC::Mul(tensors.minblock, tensors.query, tensors.minblock, mask, repeat_times, mul_repeat_params);
-        AscendC::Max(
-            tensors.maxblock,
-            tensors.maxblock,
-            tensors.minblock,
-            mask,
-            repeat_times,
-            {1, 1, 1, 8, 8, 8});
-        AscendC::RepeatReduceSum<ComputeT, true>(
-            tensors.block_scores,
-            tensors.maxblock,
-            repeat_times,
-            mask,
+        uint64_t mask = NUM_FLOAT_ELEMS_PER_VECTOR;
+        uint64_t masks_per_head_dim = head_dim_ / mask;
+        AscendC::BinaryRepeatParams mul_repeat_params = AscendC::BinaryRepeatParams(
+            1,
+            1,
+            1,
+            8 * masks_per_head_dim,
             0,
-            1,
-            1,
-            8);
-        AscendC::PipeBarrier<PIPE_V>();
-    }
-
-    __aicore__ inline void MulFloatBlock(
-        AscendC::LocalTensor<ComputeT> block_lt,
-        AscendC::LocalTensor<ComputeT> query_lt,
-        AscendC::BinaryRepeatParams mul_repeat_params)
-    {
-        AscendC::Mul(
-            block_lt,
-            query_lt,
-            block_lt,
-            NUM_FLOAT_ELEMS_PER_VECTOR,
-            block_size_,
-            mul_repeat_params);
-        AscendC::Mul(
-            block_lt[NUM_FLOAT_ELEMS_PER_VECTOR],
-            query_lt[NUM_FLOAT_ELEMS_PER_VECTOR],
-            block_lt[NUM_FLOAT_ELEMS_PER_VECTOR],
-            NUM_FLOAT_ELEMS_PER_VECTOR,
-            block_size_,
-            mul_repeat_params);
-    }
-
-    __aicore__ inline void ScoreMetadataBlockCastToCompute(
-        LocalTensors &tensors,
-        AscendC::DataCopyParams gm_ub_cp,
-        int32_t meta_block_offset)
-    {
-        AscendC::LocalTensor<StorageT> input_storage_lt =
-            input_storage_buf_.Get<StorageT>(block_size_ * head_dim_);
+            8 * masks_per_head_dim);
 
         AscendC::DataCopy(input_storage_lt, maxblocks_gm_[meta_block_offset], gm_ub_cp);
         AscendC::SetFlag<AscendC::HardEvent::MTE2_V>(EVENT_ID0);
@@ -449,17 +337,20 @@ private:
             block_size_ * head_dim_);
         AscendC::SetFlag<AscendC::HardEvent::V_MTE2>(EVENT_ID0);
         AscendC::WaitFlag<AscendC::HardEvent::V_MTE2>(EVENT_ID0);
-
-        uint64_t mask = NUM_FLOAT_ELEMS_PER_VECTOR;
-        uint64_t masks_per_head_dim = head_dim_ / mask;
-        AscendC::BinaryRepeatParams mul_repeat_params = AscendC::BinaryRepeatParams(
-            1,
-            1,
-            1,
-            8 * masks_per_head_dim,
-            0,
-            8 * masks_per_head_dim);
-        MulFloatBlock(tensors.maxblock, tensors.query, mul_repeat_params);
+        AscendC::Mul(
+            tensors.maxblock,
+            tensors.query,
+            tensors.maxblock,
+            NUM_FLOAT_ELEMS_PER_VECTOR,
+            block_size_,
+            mul_repeat_params);
+        AscendC::Mul(
+            tensors.maxblock[NUM_FLOAT_ELEMS_PER_VECTOR],
+            tensors.query[NUM_FLOAT_ELEMS_PER_VECTOR],
+            tensors.maxblock[NUM_FLOAT_ELEMS_PER_VECTOR],
+            NUM_FLOAT_ELEMS_PER_VECTOR,
+            block_size_,
+            mul_repeat_params);
 
         AscendC::DataCopy(input_storage_lt, minblocks_gm_[meta_block_offset], gm_ub_cp);
         AscendC::SetFlag<AscendC::HardEvent::MTE2_V>(EVENT_ID1);
@@ -469,7 +360,20 @@ private:
             input_storage_lt,
             AscendC::RoundMode::CAST_NONE,
             block_size_ * head_dim_);
-        MulFloatBlock(tensors.minblock, tensors.query, mul_repeat_params);
+        AscendC::Mul(
+            tensors.minblock,
+            tensors.query,
+            tensors.minblock,
+            NUM_FLOAT_ELEMS_PER_VECTOR,
+            block_size_,
+            mul_repeat_params);
+        AscendC::Mul(
+            tensors.minblock[NUM_FLOAT_ELEMS_PER_VECTOR],
+            tensors.query[NUM_FLOAT_ELEMS_PER_VECTOR],
+            tensors.minblock[NUM_FLOAT_ELEMS_PER_VECTOR],
+            NUM_FLOAT_ELEMS_PER_VECTOR,
+            block_size_,
+            mul_repeat_params);
 
         AscendC::Max(tensors.maxblock, tensors.maxblock, tensors.minblock, block_size_ * head_dim_);
 
@@ -512,35 +416,21 @@ private:
     {
         uint64_t seq_len_curr_meta_block =
             MIN(seq_len - (meta_block * num_tokens_per_meta_block), block_size_);
-        if constexpr (!Traits::need_cast) {
-            int32_t accumulated_offset = meta_block * block_size_;
+        uint64_t mask = NUM_FLOAT_ELEMS_PER_VECTOR;
+        uint64_t masks_per_head_dim = head_dim_ / mask;
+        for (int32_t sub_meta_block_id = 0; sub_meta_block_id < static_cast<int32_t>(masks_per_head_dim);
+             sub_meta_block_id++) {
+            int32_t block_scores_offset = sub_meta_block_id * NUM_FLOAT_ELEMS_PER_VECTOR;
+            int32_t accumulated_offset = meta_block * block_size_ + block_scores_offset;
             AscendC::Copy(
                 tensors.accumulated_scores[accumulated_offset],
-                tensors.block_scores,
-                seq_len_curr_meta_block,
+                tensors.block_scores[block_scores_offset],
+                seq_len_curr_meta_block - sub_meta_block_id * NUM_FLOAT_ELEMS_PER_VECTOR,
                 1,
                 {1, 1, 8, 8});
             if (meta_block < num_meta_blocks_in_request - 1) {
                 AscendC::SetFlag<AscendC::HardEvent::V_MTE2>(EVENT_ID2);
                 AscendC::WaitFlag<AscendC::HardEvent::V_MTE2>(EVENT_ID2);
-            }
-        } else {
-            uint64_t mask = NUM_FLOAT_ELEMS_PER_VECTOR;
-            uint64_t masks_per_head_dim = head_dim_ / mask;
-            for (int32_t sub_meta_block_id = 0; sub_meta_block_id < static_cast<int32_t>(masks_per_head_dim);
-                 sub_meta_block_id++) {
-                int32_t block_scores_offset = sub_meta_block_id * NUM_FLOAT_ELEMS_PER_VECTOR;
-                int32_t accumulated_offset = meta_block * block_size_ + block_scores_offset;
-                AscendC::Copy(
-                    tensors.accumulated_scores[accumulated_offset],
-                    tensors.block_scores[block_scores_offset],
-                    seq_len_curr_meta_block - sub_meta_block_id * NUM_FLOAT_ELEMS_PER_VECTOR,
-                    1,
-                    {1, 1, 8, 8});
-                if (meta_block < num_meta_blocks_in_request - 1) {
-                    AscendC::SetFlag<AscendC::HardEvent::V_MTE2>(EVENT_ID2);
-                    AscendC::WaitFlag<AscendC::HardEvent::V_MTE2>(EVENT_ID2);
-                }
             }
         }
     }
@@ -550,36 +440,29 @@ private:
         int32_t num_meta_blocks_in_request)
     {
         uint32_t total_elements = num_meta_blocks_in_request * block_size_;
-        uint32_t concat_repeat_times = DIV_ROUNDUP(total_elements, 32);
-        uint32_t sort_repeat_times = DIV_ROUNDUP(total_elements, 32);
-        uint32_t extract_repeat_times = DIV_ROUNDUP(total_elements, 32);
+        uint32_t repeat_times = DIV_ROUNDUP(total_elements, 32);
 
         for (uint32_t idx = 0; idx < total_elements; idx++) {
             tensors.index_local.SetValue(idx, idx);
         }
 
-        if constexpr (!Traits::need_cast) {
-            AscendC::PipeBarrier<PIPE_V>();
-        }
         AscendC::Concat(
             tensors.concat,
             tensors.accumulated_scores,
             tensors.tmp_concat,
-            concat_repeat_times);
-        if constexpr (Traits::need_cast) {
-            AscendC::PipeBarrier<PIPE_V>();
-        }
+            repeat_times);
+        AscendC::PipeBarrier<PIPE_V>();
         AscendC::Sort<ComputeT, true>(
             tensors.maxblock,
             tensors.concat,
             tensors.index_local,
             tensors.sort_tmp,
-            sort_repeat_times);
+            repeat_times);
         AscendC::Extract(
             tensors.selected_values,
             tensors.selected_indices,
             tensors.maxblock,
-            extract_repeat_times);
+            repeat_times);
     }
 
     AscendC::TPipe pipe_;
@@ -613,7 +496,7 @@ private:
     int32_t k_;
 };
 
-template <typename StorageT, typename ComputeT>
+template <typename StorageT>
 __aicore__ inline void RunQuestBlockSelectPaged(
     GM_ADDR query,
     GM_ADDR maxblocks,
@@ -623,7 +506,7 @@ __aicore__ inline void RunQuestBlockSelectPaged(
     GM_ADDR selected_indices,
     const QuestBlockSelectPagedTilingData *__restrict tiling_data)
 {
-    KernelQuestBlockSelectPaged<StorageT, ComputeT> op;
+    KernelQuestBlockSelectPaged<StorageT> op;
     op.Init(
         query,
         maxblocks,
@@ -655,8 +538,13 @@ extern "C" __global__ __aicore__ void quest_block_select_paged(
     (void)workspace;
     QUEST_BLOCK_SELECT_PAGED_COPY_TILING_DATA(QuestBlockSelectPagedTilingData, tiling);
 
-    if (TILING_KEY_IS(QUEST_BLOCK_SELECT_PAGED_TILING_FP16)) {
-        RunQuestBlockSelectPaged<half, half>(
+    if (!TILING_KEY_IS(QUEST_BLOCK_SELECT_PAGED_TILING)) {
+        ASSERT(false && "Unsupported quest_block_select_paged tiling key.");
+        return;
+    }
+
+    if (tiling_data->dataType == QUEST_BLOCK_SELECT_PAGED_DTYPE_FP16) {
+        RunQuestBlockSelectPaged<half>(
             query,
             maxblocks,
             minblocks,
@@ -667,8 +555,8 @@ extern "C" __global__ __aicore__ void quest_block_select_paged(
         return;
     }
 
-    if (TILING_KEY_IS(QUEST_BLOCK_SELECT_PAGED_TILING_BF16)) {
-        RunQuestBlockSelectPaged<bfloat16_t, float>(
+    if (tiling_data->dataType == QUEST_BLOCK_SELECT_PAGED_DTYPE_BF16) {
+        RunQuestBlockSelectPaged<bfloat16_t>(
             query,
             maxblocks,
             minblocks,
@@ -679,5 +567,5 @@ extern "C" __global__ __aicore__ void quest_block_select_paged(
         return;
     }
 
-    ASSERT(false && "Unsupported quest_block_select_paged tiling key.");
+    ASSERT(false && "Unsupported quest_block_select_paged dtype.");
 }
