@@ -462,7 +462,6 @@ class AscendAttentionBackendImpl(AttentionImpl):
                         workspace=workspace,
                     )
                     torch.npu.graph_task_update_end(update_stream)
-                    event.record(update_stream)
         elif using_sw_sink_attention(vllm_config):
             # FIA update logic
             if _EXTRA_CTX.is_draft_model:
