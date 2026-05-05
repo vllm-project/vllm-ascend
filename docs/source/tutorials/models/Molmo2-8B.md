@@ -88,6 +88,7 @@ vllm serve allenai/Molmo2-8B \
 ```
 
 Key parameters:
+
 - `--trust-remote-code`: Required for loading model with custom code
 - `--dtype bfloat16`: Use BF16 precision for inference
 - `--max-num-batched-tokens 36864`: Maximum number of tokens in a batch for long visual sequences
