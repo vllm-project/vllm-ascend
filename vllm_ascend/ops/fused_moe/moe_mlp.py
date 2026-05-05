@@ -18,8 +18,8 @@
 import torch
 import torch_npu
 from torch.nn.functional import pad
-from vllm.triton_utils import HAS_TRITON
 from vllm.model_executor.layers.fused_moe.activation import MoEActivation
+from vllm.triton_utils import HAS_TRITON
 
 from vllm_ascend.ascend_forward_context import _EXTRA_CTX, MoECommType
 from vllm_ascend.device.device_op import DeviceOperator
