@@ -21,6 +21,7 @@ TILING_DATA_FIELD_DEF(uint32_t, blockSize)
 TILING_DATA_FIELD_DEF(uint32_t, headDim)
 TILING_DATA_FIELD_DEF(uint32_t, maxKvBlocksPerRequest)
 TILING_DATA_FIELD_DEF(uint32_t, maxMetadataBlocksPerRequest)
+TILING_DATA_FIELD_DEF(uint32_t, dataType)
 END_TILING_DATA_DEF;
 
 REGISTER_TILING_DATA_CLASS(QuestPrefillMetadata, QuestPrefillMetadataTilingData)

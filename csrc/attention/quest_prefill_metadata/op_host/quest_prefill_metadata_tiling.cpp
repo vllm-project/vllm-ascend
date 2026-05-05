@@ -92,9 +92,13 @@ static ge::graphStatus QuestPrefillMetadataTilingFunc(gert::TilingContext *conte
 
     const auto k_cache_desc = context->GetInputDesc(K_CACHE_INDEX);
     OPS_LOG_E_IF_NULL(context, k_cache_desc, return ge::GRAPH_FAILED);
-    context->SetTilingKey(
-        k_cache_desc->GetDataType() == ge::DT_BF16 ? QUEST_PREFILL_METADATA_TILING_BF16
-                                                   : QUEST_PREFILL_METADATA_TILING_FP16);
+    const auto k_cache_data_type = k_cache_desc->GetDataType();
+    OPS_ERR_IF(k_cache_data_type != ge::DT_FLOAT16 && k_cache_data_type != ge::DT_BF16,
+               OPS_LOG_E(context->GetNodeName(), "k_cache dtype must be float16 or bfloat16."),
+               return ge::GRAPH_FAILED);
+    tiling.set_dataType(k_cache_data_type == ge::DT_BF16 ? QUEST_PREFILL_METADATA_DTYPE_BF16
+                                                         : QUEST_PREFILL_METADATA_DTYPE_FP16);
+    context->SetTilingKey(QUEST_PREFILL_METADATA_TILING);
 
     tiling.SaveToBuffer(context->GetRawTilingData()->GetData(),
                         context->GetRawTilingData()->GetCapacity());

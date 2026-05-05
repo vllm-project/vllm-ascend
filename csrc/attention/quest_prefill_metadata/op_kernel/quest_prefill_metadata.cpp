@@ -352,7 +352,12 @@ extern "C" __global__ __aicore__ void quest_prefill_metadata(
     (void)workspace;
     QUEST_PREFILL_METADATA_COPY_TILING_DATA(QuestPrefillMetadataTilingData, tiling);
 
-    if (TILING_KEY_IS(QUEST_PREFILL_METADATA_TILING_FP16)) {
+    if (!TILING_KEY_IS(QUEST_PREFILL_METADATA_TILING)) {
+        ASSERT(false && "Unsupported quest_prefill_metadata tiling key.");
+        return;
+    }
+
+    if (tiling_data->dataType == QUEST_PREFILL_METADATA_DTYPE_FP16) {
         RunQuestPrefillMetadata<half, half>(
             k_cache,
             block_tables,
@@ -364,7 +369,7 @@ extern "C" __global__ __aicore__ void quest_prefill_metadata(
         return;
     }
 
-    if (TILING_KEY_IS(QUEST_PREFILL_METADATA_TILING_BF16)) {
+    if (tiling_data->dataType == QUEST_PREFILL_METADATA_DTYPE_BF16) {
         RunQuestPrefillMetadata<bfloat16_t, float>(
             k_cache,
             block_tables,
@@ -376,5 +381,5 @@ extern "C" __global__ __aicore__ void quest_prefill_metadata(
         return;
     }
 
-    ASSERT(false && "Unsupported quest_prefill_metadata tiling key.");
+    ASSERT(false && "Unsupported quest_prefill_metadata dtype.");
 }
