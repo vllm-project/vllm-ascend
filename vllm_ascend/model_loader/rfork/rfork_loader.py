@@ -156,7 +156,7 @@ class RForkModelLoader(BaseModelLoader):
 
                 return model.eval()
             except Exception as e:
-                logger.warning(f"RFork transfer failed: {e}, clean up and fall back to default loader")
+                logger.warning("RFork transfer failed: %s, clean up and fall back to default loader", e)
 
                 rfork_worker.post_transfer()
 

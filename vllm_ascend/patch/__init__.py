@@ -155,7 +155,45 @@
 #       Drop the alias once upstream registry includes it or the checkpoint
 #       standardizes architecture strings.
 #
-# ** 8. File: platform/patch_kv_cache_interface.py**
+# ** 8. File: platform/patch_minimax_usage_accounting.py**
+# ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+#   1. `vllm.entrypoints.openai.chat_completion.serving.OpenAIServingChat`
+#      `vllm.reasoning.minimax_m2_reasoning_parser`
+#    Why:
+#       MiniMax-M2 reasoning usage accounting needs to report
+#       `completion_tokens_details.reasoning_tokens` for both streaming and
+#       non-streaming chat completions.
+#    How：
+#       Monkey-patch MiniMax reasoning token counters, extend `UsageInfo`, and
+#       update chat usage construction to count reasoning tokens from raw output
+#       token ids.
+#    Related PR (if no, explain why):
+#       https://github.com/vllm-project/vllm/pull/37955
+#    Future Plan:
+#       Remove this patch once the runtime vLLM version contains the upstream
+#       MiniMax usage-accounting fix.
+#
+# ** 9. File: platform/patch_glm_tool_call_parser.py**
+# ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+#   1. `vllm.tool_parsers.glm4_moe_tool_parser.Glm4MoeModelToolParser`
+#      `vllm.entrypoints.openai.chat_completion.serving.OpenAIServingChat`
+#    Why:
+#       GLM-4.7 tool-call streaming can leave a terminal inline argument chunk
+#       undrained, and final streaming chunks can repeat function metadata or
+#       combine final arguments with `finish_reason="tool_calls"`.
+#    How：
+#       Monkey-patch the GLM parser to drain terminal chunks, patch remaining
+#       argument backfill to omit function metadata unless explicitly needed,
+#       and split terminal argument chunks into an argument chunk followed by
+#       an empty finish chunk.
+#    Related PR (if no, explain why):
+#       https://github.com/vllm-project/vllm/pull/37845
+#       https://github.com/vllm-project/vllm/pull/33218
+#    Future Plan:
+#       Remove this patch once the runtime vLLM version contains the GLM parser
+#       and streaming finish-chunk fixes.
+#
+# ** 10. File: platform/patch_kv_cache_interface.py**
 # ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 #   1. `vllm.v1.kv_cache_interface.MLAAttentionSpec`
 #    Why:
@@ -177,7 +215,7 @@
 #    Future Plan:
 #       Remove this patch after the upcoming KV cache spec refactor.
 #
-# ** 9. File: platform/patch_profiling_chunk.py**
+# ** 11. File: platform/patch_profiling_chunk.py**
 # ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 #   1. `vllm.v1.engine.core.EngineCore.__init__`
 #   2. `vllm.v1.engine.core.EngineCoreProc.run_engine_core`
@@ -204,6 +242,26 @@
 #       Remove or narrow this patch if upstream exposes stable hooks for backend
 #       profiling startup and per-step timing callbacks without monkey-patching
 #       `EngineCore` and the multiprocess entry point.
+#
+# ** 10. File: platform/patch_tool_choice_none_content.py**
+# ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+#   1. `vllm.entrypoints.openai.engine.serving.OpenAIServing._parse_tool_calls_from_content`
+#      `vllm.parser.abstract_parser.DelegatingParser._parse_tool_calls`
+#    Why:
+#       Forced tool choice can receive `content=None` when reasoning extraction
+#       consumes the whole generated text, for example when generation stops at
+#       `max_tokens`. Upstream vLLM 0.19.1 asserts in that case.
+#    How：
+#       Return an empty tool-call list for forced tool choice with `content=None`
+#       and mark the current named chat tool-choice result so the downstream
+#       chat response path does not assert. Preserve normal forced tool-call
+#       behavior when content is present.
+#    Related PR (if no, explain why):
+#       https://github.com/vllm-project/vllm/pull/40148
+#       https://github.com/vllm-project/vllm-ascend/pull/8400
+#    Future Plan:
+#       Remove this patch once the vLLM fix is included in the supported vLLM
+#       version.
 #
 # * Worker Patch:
 # ===============
@@ -368,17 +426,7 @@
 #    Future Plan:
 #       Remove this patch when https://github.com/vllm-project/vllm-ascend/issues/5712 is completed.
 #
-# ** 11. File: worker/patch_unquantized_gemm.py**
-# ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
-#   1. `vllm.model_executor.layers.utils.default_unquantized_gemm`
-#    Why:
-#       unquantized_gemm in vLLM not is a customop, which will make MatmulAllReduceAddRMSNorm fusion failure.
-#    How：
-#       make unquantized_gemm as a customop.
-#    Future Plan:
-#       Remove this patch when vLLM support the operator as customop.
-#
-# ** 12. File: worker/patch_npugraph_ex_triton.py**
+# ** 11. File: worker/patch_npugraph_ex_triton.py**
 # ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 #   1. `torchair.core._concrete_graph.ValuePack`,
 #      `torchair.npu_fx_compiler._unpack_meta`,
@@ -392,7 +440,7 @@
 #    Future Plan:
 #       Remove this patch when the PTA version used by vllm-ascend has been upgraded.
 #
-# ** 13. File: worker/patch_v2/patch_uva.py**
+# ** 12. File: worker/patch_v2/patch_uva.py**
 # ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 #   1. `vllm.v1.worker.gpu.states.UvaBuffer`
 #    Why:
@@ -402,7 +450,7 @@
 #    Future Plan:
 #       Remove this patch when NPU support UVA.
 #
-# ** 14. File: worker/patch_kimi_k25.py**
+# ** 13. File: worker/patch_kimi_k25.py**
 # ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 #   1. `vllm.model_executor.models.kimi_k25_vit.Learnable2DInterpPosEmbDivided_fixed.forward`
 #    Why:
@@ -413,7 +461,7 @@
 #    Future Plan:
 #       Remove this patch when vLLM aligns with the latest main.
 #
-# ** 15. File: worker/patch_routed_experts_capturer.py**
+# ** 14. File: worker/patch_routed_experts_capturer.py**
 # ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 #   1. `vllm.model_executor.layers.fused_moe.routed_experts_capturer.RoutedExpertsCapturer.init_buffer`
 #    Why:
@@ -425,7 +473,7 @@
 #       https://github.com/vllm-project/vllm/pull/34336
 #    Future Plan:
 #       Remove this patch when vLLM merges the PR.
-# ** 16. File: worker/patch_draft_quarot.py**
+# ** 15. File: worker/patch_draft_quarot.py**
 # ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 #   1. `vllm.model_executor.models.llama_eagle3.Eagle3LlamaForCausalLM.load_weights`
 #    Why:
@@ -439,7 +487,7 @@
 #    Future Plan:
 #       Remove this patch when vLLM merges the PR.
 #
-# ** 17. File: worker/patch_minimax_m2.py**
+# ** 16. File: worker/patch_minimax_m2.py**
 # ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 #   1. `vllm.model_executor.models.minimax_m2.MiniMaxM2MoE.forward`
 #    Why:
@@ -502,7 +550,7 @@
 #    Future Plan:
 #       Remove this patch once upstream provides these methods on the model.
 #
-# ** 18. File: worker/patch_minimax_m2_linear_attn.py**
+# ** 17. File: worker/patch_minimax_m2_linear_attn.py**
 # ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 #   1. `vllm.model_executor.layers.mamba.linear_attn.MiniMaxText01RMSNormTP.__init__`
 #      `vllm.model_executor.layers.mamba.linear_attn.MiniMaxText01RMSNormTP.weight_loader`
@@ -530,7 +578,7 @@
 #    Future Plan:
 #       Remove this patch when upstream adds a backend dispatch path for q/k norm.
 #
-# ** 19. File: worker/patch_qwen3_5.py**
+# ** 18. File: worker/patch_qwen3_5.py**
 # ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 #   1. `vllm.model_executor.models.qwen3_5.Qwen3_5GatedDeltaNet._forward_core`
 #    Why:
@@ -541,7 +589,7 @@
 #    Future Plan:
 #       Remove this patch when all ops in _forward_core support both Qwen3_5 and Qwen3Next.
 #
-# ** 20. File: worker/patch_cudagraph.py**
+# ** 19. File: worker/patch_cudagraph.py**
 # ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 #   1. `vllm.v1.cudagraph_dispatcher.CudagraphDispatcher._create_padded_batch_descriptor`
 #    Why:
@@ -555,7 +603,7 @@
 #    Future Plan:
 #       Remove this patch when vLLM merges the PR.
 #
-# ** 21. File: worker/patch_deepseek_mtp.py**
+# ** 20. File: worker/patch_deepseek_mtp.py**
 # ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 #   1. `vllm.model_executor.models.deepseek_v2.get_spec_layer_idx_from_weight_name` and
 #      `vllm.model_executor.models.deepseek_mtp.get_spec_layer_idx_from_weight_name`
@@ -586,7 +634,7 @@
 #       Rotary quant is a unique feature of vllm-ascend.
 #    Future Plan:
 #       Remove this patch when vllm supports rotary quant or pluggable `MultiTokenPredictorLayer`.
-# ** 22. File: worker/patch_mamba_utils.py**
+# ** 21. File: worker/patch_mamba_utils.py**
 # ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 #   1. `vllm.v1.worker.mamba_utils.batch_memcpy_kernel = batch_memcpy_kernel`
 #    Why:
@@ -609,7 +657,7 @@
 #       Remove this patch when:
 #       design a dispatch mechanism for batch_memcpy_kernel.
 #
-# ** 23. File: worker/patch_weight_utils.py**
+# ** 22. File: worker/patch_weight_utils.py**
 # ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 #   1. `vllm.model_executor.models.deepseek_v2.DeepseekV2ForCausalLM.load_weights`
 #    Why:
@@ -622,7 +670,7 @@
 #    Future Plan:
 #       The maybe_remap_kv_scale_name function of the community is reconstructed to support
 #       multiple backends.
-# ** 24. File: worker/patch_v2/patch_input_batch.py**
+# ** 23. File: worker/patch_v2/patch_input_batch.py**
 # ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 #   1. `vllm.v1.worker.gpu.input_batch.InputBatch`
 #    Why:
@@ -632,7 +680,7 @@
 #       replace InputBatch with AscendInputBatch.
 #    Future Plan:
 #       remove this patch when vLLM-ascend's make_dummy behavior aligns with vLLM.
-# ** 25. File: worker/patch_v2/patch_block_table.py**
+# ** 24. File: worker/patch_v2/patch_block_table.py**
 # ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 #   1. `vllm.v1.worker.gpu.block_table.BlockTables`
 #    Why:
@@ -667,11 +715,11 @@
 #    Future Plan:
 #       Remove this patch when vLLM support the dispatch function.
 #
-# ** 27. File: worker/patch_qwen3_c8.py**
+# ** 27. File: worker/patch_gqa_c8.py**
 # ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 #   1. `vllm.model_executor.models.qwen3.Qwen3ForCausalLM.load_weights`
 #    Why:
-#       The Qwen3 W8A8C8 model stores per-channel KV cache scales and offsets
+#       The GQA W8A8C8 model stores per-channel KV cache scales and offsets
 #       (k_cache_scale, k_cache_offset, v_cache_scale, v_cache_offset) under
 #       weight names that AutoWeightsLoader does not recognise and would
 #       silently discard.  Without these scales the INT8 KV cache cannot be
@@ -682,13 +730,13 @@
 #       corresponding nn.Parameter via its weight_loader, then excluded from
 #       the remaining weight stream so the base loader never sees it.
 #    Related PR (if no, explain why):
-#       This PR (Qwen3-32B W8A8C8 support).  Upstream vLLM's weight-loading
+#       This PR (Qwen3-32B and GLM4.7  W8A8C8 support).  Upstream vLLM's weight-loading
 #       pipeline does not yet have a generic hook for hardware-plugin-defined
 #       KV cache parameters.
 #    Future Plan:
 #       Remove this patch when vLLM provides a first-class extension point
 #       for loading extra KV cache quantisation parameters in model load_weights,
-#       or when the Qwen3 model's weight names are aligned with the parameter
+#       or when the GQA model's weight names are aligned with the parameter
 #       names expected by the quantisation backend.
 # ** 28. File: worker/patch_qwen3vl.py**
 # ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~

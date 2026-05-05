@@ -13,3 +13,4 @@ Molmo2-8B.yaml
 Molmo2-8B-quick.yaml
 llava-onevision-qwen2-0.5b-ov-hf.yaml
 Llama-3.2-3B-Instruct.yaml
+Qwen3-ASR-1.7B.yaml
