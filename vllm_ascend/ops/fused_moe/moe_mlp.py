@@ -19,6 +19,7 @@ import torch
 import torch_npu
 from torch.nn.functional import pad
 from vllm.triton_utils import HAS_TRITON
+from vllm.model_executor.layers.fused_moe.activation import MoEActivation
 
 from vllm_ascend.ascend_forward_context import _EXTRA_CTX, MoECommType
 from vllm_ascend.device.device_op import DeviceOperator
@@ -348,7 +349,7 @@ def unquant_apply_mlp(
         group_list=group_list,
     )[0]
 
-    if act_name == "swigluoai":
+    if activation == MoEActivation.SWIGLUOAI:
         num_experts, _, hidden_size = w1.shape
         gate_up_out = AscendSwigluOAIAndMul.swiglu_oai_forward(gate_up_out.view(-1, hidden_size))
     else:
