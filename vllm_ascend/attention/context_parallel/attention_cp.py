@@ -392,13 +392,16 @@ class AscendAttentionCPImpl(AscendAttentionBackendImpl):
 
                 torch.npu.graph_task_update_begin(update_stream, handle)
 
+                input_layout = "TND"
+                if speculative_config is not None:
+                    input_layout = "BSND"
                 torch_npu.npu_fused_infer_attention_score.out(
                     q_nope,
                     k_nope,
                     value,
                     num_heads=num_heads,
                     num_key_value_heads=num_kv_heads,
-                    input_layout="TND",
+                    input_layout=input_layout,
                     atten_mask=None,
                     scale=scale,
                     antiquant_mode=0,
@@ -577,15 +580,13 @@ class AscendAttentionCPImpl(AscendAttentionBackendImpl):
         attn_mask = None
         input_layerout = "TND"
         actual_seq_lengths_q = attn_metadata.actual_seq_lengths_q[: attn_metadata.num_decodes]
-        if (
-            attn_metadata.decode_meta
-            and attn_metadata.decode_meta.mtp_attn_mask is not None
-            and self.vllm_config.speculative_config is not None
-        ):
+        if self.vllm_config.speculative_config is not None:
             input_layerout = "BSND"
             num_decodes = attn_metadata.num_decodes
-            attn_mask = attn_metadata.decode_meta.mtp_attn_mask.to(query.device)
-
+            if attn_metadata.decode_meta.mtp_attn_mask is not None:
+                attn_mask = attn_metadata.decode_meta.mtp_attn_mask.to(query.device)
+            else:
+                attn_mask = None
             query = query.view(num_decodes, -1, query.shape[1], query.shape[-1])
             k_nope = self.key_cache.view(self.key_cache.shape[0], 1, self.key_cache.shape[1], -1)
             value = self.value_cache.view(self.value_cache.shape[0], 1, self.value_cache.shape[1], -1)
@@ -611,8 +612,10 @@ class AscendAttentionCPImpl(AscendAttentionBackendImpl):
             graph_params = get_draft_graph_params()
         else:
             graph_params = get_graph_params()
-        num_tokens = query.shape[0]
-
+        if input_layerout == "TND":
+            num_tokens = query.shape[0]
+        else:
+            num_tokens = query.shape[0] * query.shape[1]
         if _EXTRA_CTX.capturing:
             stream = torch_npu.npu.current_stream()
 
@@ -631,7 +634,10 @@ class AscendAttentionCPImpl(AscendAttentionBackendImpl):
                 else:
                     update_graph_params_workspaces(num_tokens, workspace)
             attn_out = torch.empty_like(query)
-            attn_lse = torch.empty((num_tokens, num_heads, 1), dtype=torch.float, device=query.device)
+            if input_layerout == "TND":
+                attn_lse = torch.empty((num_tokens, num_heads, 1), dtype=torch.float, device=query.device)
+            else:
+                attn_lse = torch.empty((query.shape[0], num_heads, query.shape[1], 1), dtype=torch.float, device=query.device)
 
             graph_params.attn_params[num_tokens].append(
                 (
@@ -660,9 +666,9 @@ class AscendAttentionCPImpl(AscendAttentionBackendImpl):
             graph_params.handles[num_tokens].append(handle)
         else:
             attn_out, attn_lse = torch_npu.npu_fused_infer_attention_score(query, k_nope, value, **common_kwargs)
-            if input_layerout == "BSND":
-                attn_out = attn_out.view(-1, attn_out.shape[2], attn_out.shape[3])
-                attn_lse = attn_lse.transpose(1,2).reshape(-1, attn_lse.shape[1], 1)
+        if input_layerout == "BSND":
+            attn_out = attn_out.view(-1, attn_out.shape[2], attn_out.shape[3])
+            attn_lse = attn_lse.transpose(1,2).reshape(-1, attn_lse.shape[1], 1)
         attn_out_lse = _process_attn_out_lse(attn_out, attn_lse)
         attn_out = _npu_attention_update(self.head_size, attn_out_lse)
         return attn_out
