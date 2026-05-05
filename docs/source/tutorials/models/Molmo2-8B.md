@@ -106,7 +106,7 @@ out = llm.generate(
 print(out[0].outputs[0].text)
 ```
 
-You can also use the upstream script [vision_language_multi_image.py](https://github.com/vllm-project/vllm/blob/main/examples/offline_inference/vision_language_multi_image.py) with `--model-type molmo2`.
+For multi-image inference examples, refer to the [vLLM offline inference examples](https://github.com/vllm-project/vllm/tree/main/examples/offline_inference).
 
 ### OpenAI-compatible server
 
