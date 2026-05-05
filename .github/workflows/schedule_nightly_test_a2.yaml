@@ -108,7 +108,7 @@ jobs:
               normalized=$(echo "$input_branch" | tr '/' '-')
               echo "vllm_ascend_branches=[\"${normalized}\"]"
             else
-              echo 'vllm_ascend_branches=["releases-v0.18.0"]'
+              echo 'vllm_ascend_branches=["main"]'
             fi
           } >> $GITHUB_OUTPUT
 
@@ -120,7 +120,7 @@ jobs:
         vllm_ascend_branch: >-
           ${{ github.event_name == 'workflow_dispatch' 
               && fromJSON(format('["{0}"]', inputs.vllm_ascend_branch))
-              || fromJSON('["main", "releases/v0.18.0"]') }}
+              || fromJSON('["main"]') }}
     uses: ./.github/workflows/_nightly_image_build.yaml
     with:
       target: a2
