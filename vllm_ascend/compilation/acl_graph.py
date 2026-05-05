@@ -196,7 +196,7 @@ class ACLGraphWrapper:
 
         logger.info_once("Replaying aclgraph")
         # FIXME(klyzhenko-vadim): There is no need synchronization.
-        # Because it significantly degrades perfomance.
+        # Because it significantly degrades performance.
         entry.aclgraph.replay()
         return entry.output
 
