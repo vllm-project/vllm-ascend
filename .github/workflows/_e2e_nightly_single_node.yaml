@@ -68,7 +68,7 @@ jobs:
     name: ${{ inputs.name || inputs.config_file_path || inputs.tests }}
     runs-on: ${{ inputs.runner }}
     if: ${{ inputs.should_run }}
-    timeout-minutes: 120
+    timeout-minutes: 600
     container:
       image: ${{ inputs.image }}
     env:
