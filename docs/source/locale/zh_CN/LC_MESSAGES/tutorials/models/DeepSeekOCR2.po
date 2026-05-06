@@ -8,7 +8,7 @@ msgid ""
 msgstr ""
 "Project-Id-Version: vllm-ascend \n"
 "Report-Msgid-Bugs-To: \n"
-"POT-Creation-Date: 2026-04-21 02:03+0000\n"
+"POT-Creation-Date: 2026-04-24 02:06+0000\n"
 "PO-Revision-Date: 2026-04-10 18:37+0800\n"
 "Last-Translator: FULL NAME <EMAIL@ADDRESS>\n"
 "Language: zh_CN\n"
@@ -34,8 +34,10 @@ msgid ""
 msgstr "DeepSeekOCR2 是一个从以 LLM 为中心的视角研究视觉编码器作用的模型。"
 
 #: ../../source/tutorials/models/DeepSeekOCR2.md:7
-msgid "The `DeepSeek-OCR-2` model is first supported in `vllm-ascend:v0.16.0`."
-msgstr "`DeepSeek-OCR-2` 模型从 `vllm-ascend:v0.16.0` 版本开始首次支持。"
+msgid ""
+"The `DeepSeek-OCR-2` model is first supported in `vllm-ascend:v0.16.0` "
+"and can stably run in v0.16.0 and later version."
+msgstr "`DeepSeek-OCR-2` 模型从 `vllm-ascend:v0.16.0` 版本开始首次支持，并可在 v0.16.0 及更高版本中稳定运行。"
 
 #: ../../source/tutorials/models/DeepSeekOCR2.md:9
 msgid ""
@@ -136,47 +138,87 @@ msgid "Run the following script to execute online inference."
 msgstr "运行以下脚本执行在线推理。"
 
 #: ../../source/tutorials/models/DeepSeekOCR2.md:109
+msgid "**Notice:** The parameters are explained as follows:"
+msgstr "**注意：** 参数说明如下："
+
+#: ../../source/tutorials/models/DeepSeekOCR2.md:112
+msgid ""
+"`--max-model-len` specifies the maximum context length - that is, the sum"
+" of input and output tokens for a single request."
+msgstr "`--max-model-len` 指定最大上下文长度，即单个请求的输入和输出 token 总数。"
+
+#: ../../source/tutorials/models/DeepSeekOCR2.md:113
+msgid ""
+"`--no-enable-prefix-caching` indicates that prefix caching is disabled. "
+"To enable it, remove this option."
+msgstr "`--no-enable-prefix-caching` 表示禁用前缀缓存。要启用该功能，请移除该选项。"
+
+#: ../../source/tutorials/models/DeepSeekOCR2.md:114
+msgid ""
+"`--gpu-memory-utilization` represents the proportion of HBM that vLLM "
+"will use for actual inference. Its essential function is to calculate the"
+" available kv_cache size. During the warm-up phase (referred to as "
+"profile run in vLLM), vLLM records the peak GPU memory usage during an "
+"inference process with an input size of `--max-num-batched-tokens`. The "
+"available kv_cache size is then calculated as: `--gpu-memory-utilization`"
+" * HBM size - peak GPU memory usage. Therefore, the larger the value of "
+"`--gpu-memory-utilization`, the more kv_cache can be used. However, since"
+" the GPU memory usage during the warm-up phase may differ from that "
+"during actual inference (e.g., due to uneven EP load), setting `--gpu-"
+"memory-utilization` too high may lead to OOM (Out of Memory) issues "
+"during actual inference. The default value is `0.9`."
+msgstr "`--gpu-memory-utilization` 表示 vLLM 用于实际推理的 HBM 比例。其核心功能是计算可用的 kv_cache 大小。在预热阶段（vLLM 中称为 profile run），vLLM 会记录输入大小为 `--max-num-batched-tokens` 的推理过程中的峰值 GPU 内存使用量。可用的 kv_cache 大小计算公式为：`--gpu-memory-utilization` * HBM 大小 - 峰值 GPU 内存使用量。因此，`--gpu-memory-utilization` 的值越大，可使用的 kv_cache 就越多。但由于预热阶段的 GPU 内存使用量可能与实际推理阶段不同（例如由于 EP 负载不均），将 `--gpu-memory-utilization` 设置过高可能会导致实际推理时出现 OOM（内存不足）问题。默认值为 `0.9`。"
+
+#: ../../source/tutorials/models/DeepSeekOCR2.md:115
+msgid ""
+"`--async-scheduling` Asynchronous scheduling is a technique used to "
+"optimize inference efficiency. It allows non-blocking task scheduling to "
+"improve concurrency and throughput, especially when processing large-"
+"scale models."
+msgstr "`--async-scheduling` 异步调度是一种用于优化推理效率的技术。它允许非阻塞任务调度，以提高并发性和吞吐量，特别是在处理大规模模型时。"
+
+#: ../../source/tutorials/models/DeepSeekOCR2.md:117
 msgid "Multi-node Deployment"
 msgstr "多节点部署"
 
-#: ../../source/tutorials/models/DeepSeekOCR2.md:111
+#: ../../source/tutorials/models/DeepSeekOCR2.md:119
 msgid "Single-node deployment is recommended."
 msgstr "建议使用单节点部署。"
 
-#: ../../source/tutorials/models/DeepSeekOCR2.md:113
+#: ../../source/tutorials/models/DeepSeekOCR2.md:121
 msgid "Prefill-Decode Disaggregation"
 msgstr "预填充-解码分离部署"
 
-#: ../../source/tutorials/models/DeepSeekOCR2.md:115
+#: ../../source/tutorials/models/DeepSeekOCR2.md:123
 msgid "We don't need to Prefill-Decode disaggregation"
 msgstr "我们不需要预填充-解码分离部署"
 
-#: ../../source/tutorials/models/DeepSeekOCR2.md:117
+#: ../../source/tutorials/models/DeepSeekOCR2.md:125
 msgid "Functional Verification"
 msgstr "功能验证"
 
-#: ../../source/tutorials/models/DeepSeekOCR2.md:119
+#: ../../source/tutorials/models/DeepSeekOCR2.md:127
 msgid "If your service start successfully, you can see the info shown below:"
 msgstr "如果服务启动成功，您将看到如下所示的信息："
 
-#: ../../source/tutorials/models/DeepSeekOCR2.md:127
+#: ../../source/tutorials/models/DeepSeekOCR2.md:135
 msgid "Once your server is started, you can query the model with input prompts:"
 msgstr "服务器启动后，您可以使用输入提示词查询模型："
 
-#: ../../source/tutorials/models/DeepSeekOCR2.md:140
+#: ../../source/tutorials/models/DeepSeekOCR2.md:148
 msgid "Accuracy Evaluation"
 msgstr "精度评估"
 
-#: ../../source/tutorials/models/DeepSeekOCR2.md:142
-msgid "Here are two accuracy evaluation methods."
-msgstr "以下是两种精度评估方法。"
+#: ../../source/tutorials/models/DeepSeekOCR2.md:150
+msgid "Here ia an accuracy evaluation methods."
+msgstr "以下是精度评估方法。"
 
-#: ../../source/tutorials/models/DeepSeekOCR2.md:144
-#: ../../source/tutorials/models/DeepSeekOCR2.md:161
+#: ../../source/tutorials/models/DeepSeekOCR2.md:152
+#: ../../source/tutorials/models/DeepSeekOCR2.md:165
 msgid "Using AISBench"
 msgstr "使用 AISBench"
 
-#: ../../source/tutorials/models/DeepSeekOCR2.md:146
+#: ../../source/tutorials/models/DeepSeekOCR2.md:154
 msgid ""
 "Refer to [Using "
 "AISBench](../../developer_guide/evaluation/using_ais_bench.md) for "
@@ -185,7 +227,7 @@ msgstr ""
 "详细信息请参考[使用 AISBench "
 "进行精度评估](../../developer_guide/evaluation/using_ais_bench.md)。"
 
-#: ../../source/tutorials/models/DeepSeekOCR2.md:148
+#: ../../source/tutorials/models/DeepSeekOCR2.md:156
 msgid ""
 "After execution, you can get the result, here is the result of `DeepSeek-"
 "OCR-2` for reference only."
@@ -247,19 +289,11 @@ msgstr "ominidocbench"
 msgid "66.86"
 msgstr "66.86"
 
-#: ../../source/tutorials/models/DeepSeekOCR2.md:155
-msgid "Using Language Model Evaluation Harness"
-msgstr "使用 Language Model Evaluation Harness"
-
-#: ../../source/tutorials/models/DeepSeekOCR2.md:157
-msgid "Not tested yet."
-msgstr "尚未测试。"
-
-#: ../../source/tutorials/models/DeepSeekOCR2.md:159
+#: ../../source/tutorials/models/DeepSeekOCR2.md:163
 msgid "Performance"
 msgstr "性能"
 
-#: ../../source/tutorials/models/DeepSeekOCR2.md:163
+#: ../../source/tutorials/models/DeepSeekOCR2.md:167
 msgid ""
 "Refer to [Using AISBench for performance "
 "evaluation](../../developer_guide/evaluation/using_ais_bench.md#execute-"
@@ -269,20 +303,55 @@ msgstr ""
 "进行性能评估](../../developer_guide/evaluation/using_ais_bench.md#execute-"
 "performance-evaluation)。"
 
-#: ../../source/tutorials/models/DeepSeekOCR2.md:165
+#: ../../source/tutorials/models/DeepSeekOCR2.md:169
 msgid "The performance result is:"
 msgstr "性能结果如下："
 
-#: ../../source/tutorials/models/DeepSeekOCR2.md:167
+#: ../../source/tutorials/models/DeepSeekOCR2.md:171
 msgid "**Hardware**: A2-313T, 1 node"
 msgstr "**硬件**：A2-313T，1 节点"
 
-#: ../../source/tutorials/models/DeepSeekOCR2.md:169
+#: ../../source/tutorials/models/DeepSeekOCR2.md:173
 msgid "**Input/Output**: 1080P/256"
 msgstr "**输入/输出**：1080P/256"
 
-#: ../../source/tutorials/models/DeepSeekOCR2.md:171
+#: ../../source/tutorials/models/DeepSeekOCR2.md:175
 msgid ""
 "**Performance**: TTFT = 2s, TPOT = 200ms, Average performance of each "
 "card is 864 TPS (Token Per Second)."
 msgstr "**性能**：TTFT = 2 秒，TPOT = 200 毫秒，每卡平均性能为 864 TPS（每秒处理 Token 数）。"
+
+#: ../../source/tutorials/models/DeepSeekOCR2.md:177
+msgid "Best Practices"
+msgstr "最佳实践"
+
+#: ../../source/tutorials/models/DeepSeekOCR2.md:179
+msgid ""
+"In this chapter, we recommend best practices. for details about best "
+"practices, see the \"Single-node Deployment\" section."
+msgstr "本章节推荐最佳实践。有关最佳实践的详细信息，请参阅“单节点部署”部分。"
+
+#: ../../source/tutorials/models/DeepSeekOCR2.md:181
+msgid "FAQ"
+msgstr "常见问题"
+
+#: ../../source/tutorials/models/DeepSeekOCR2.md:183
+msgid ""
+"**Q: Startup fails with HCCL port conflicts (address already bound). What"
+" should I do?**"
+msgstr "**问：启动失败，提示 HCCL 端口冲突（地址已绑定）。该如何处理？**"
+
+#: ../../source/tutorials/models/DeepSeekOCR2.md:185
+msgid "A: Clean up old processes and restart: `pkill -f vLLM*`."
+msgstr "答：清理旧进程并重启：`pkill -f vLLM*`。"
+
+#: ../../source/tutorials/models/DeepSeekOCR2.md:187
+msgid "**Q: How to handle OOM or unstable startup?**"
+msgstr "**问：如何处理 OOM 或启动不稳定的问题？**"
+
+#: ../../source/tutorials/models/DeepSeekOCR2.md:189
+msgid ""
+"A: Reduce `--max-num-seqs` and `--max-model-len` first. If needed, reduce"
+" concurrency and load-testing pressure (e.g., `max-concurrency` / `num-"
+"prompts`)."
+msgstr "答：首先减小 `--max-num-seqs` 和 `--max-model-len`。如有必要，降低并发度和负载测试压力（例如 `max-concurrency` / `num-prompts`）。"
