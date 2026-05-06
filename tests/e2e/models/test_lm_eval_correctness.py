@@ -155,7 +155,15 @@ def test_lm_eval_correctness_param(config_filename, tp_size, report_dir, env_con
     print("Eval Parameters:")
     print(eval_params)
 
-    results = lm_eval.simple_evaluate(**eval_params)
+    try:
+        results = lm_eval.simple_evaluate(**eval_params)
+    except ValueError as exc:
+        message = str(exc)
+        if "local_files_only" in message or "outgoing traffic has been disabled" in message:
+            pytest.skip(
+                f"Model files for {eval_config['model_name']} are not cached and downloads are disabled"
+            )
+        raise
 
     for task in eval_config["tasks"]:
         task_name = task["name"]
