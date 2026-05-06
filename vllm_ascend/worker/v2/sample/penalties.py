@@ -162,7 +162,7 @@ def apply_penalties(
     )
 
 
-# In the current CANN version 8.5.1, the atomic_or and atomic_add operators may encounter deadlock issues.
+# In the current CANN version 9.0.0, the atomic_or and atomic_add operators may encounter deadlock issues.
 # This issue will be fixed in the subsequent CANN version 9.0.0
 @triton.jit
 def _bincount_kernel(
