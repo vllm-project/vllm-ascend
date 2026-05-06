@@ -371,6 +371,18 @@ class KVCacheRecvingThread(threading.Thread):
                 self.num_kv_heads = max(self.model_config.hf_text_config.num_key_value_heads // self.tp_size, 1)
         self.proc_not_transfer_request: dict[str, bool] = {}
 
+        self.num_draft_layers = 0
+        if self.vllm_config.speculative_config is not None:
+            if self.vllm_config.speculative_config.method == "mtp":
+                # all MTP layer use the same kv cache layer, so only need to transfer once
+                self.num_draft_layers = 1
+            elif (
+                hasattr(self.vllm_config.speculative_config.draft_model_config, "hf_config")
+                and hasattr(self.vllm_config.speculative_config.draft_model_config.hf_config, "num_hidden_layers")
+                and self.vllm_config.speculative_config.draft_model_config.hf_config.num_hidden_layers is not None
+            ):
+                self.num_draft_layers = self.vllm_config.speculative_config.draft_model_config.hf_config.num_hidden_layers
+
     def add_request(
         self,
         request_id: str,
@@ -515,11 +527,10 @@ class KVCacheRecvingThread(threading.Thread):
 
         remote_kv_caches_base_addrs = self.kv_caches_base_addr[remote_engine_id][remote_handshake_port]
         first_layer_index, end_layer_index = self.pp_layer_indices[prefill_pp_rank]
-        # support MTP layer kv transfer
+        # support MTP layer and draft model kv transfer
         if self.vllm_config.speculative_config is not None:
-            # all MTP layer use the same kv cache layer, so only need to transfer once
             if prefill_pp_rank == self._prefill_pp_size - 1:
-                end_layer_index = end_layer_index + 1
+                end_layer_index = end_layer_index + self.num_draft_layers
         num_cache_per_layer = len(list(self.kv_caches.values())[0])  # Number of KV caches per layer
         local_kv_caches_base_addrs = self.kv_caches_base_addr[self.local_engine_id][self.local_handshake_port][
             first_layer_index * num_cache_per_layer : end_layer_index * num_cache_per_layer
