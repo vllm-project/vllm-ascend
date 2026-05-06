@@ -8,7 +8,7 @@ msgid ""
 msgstr ""
 "Project-Id-Version: vllm-ascend \n"
 "Report-Msgid-Bugs-To: \n"
-"POT-Creation-Date: 2026-04-21 02:03+0000\n"
+"POT-Creation-Date: 2026-04-26 02:10+0000\n"
 "PO-Revision-Date: YEAR-MO-DA HO:MI+ZONE\n"
 "Last-Translator: FULL NAME <EMAIL@ADDRESS>\n"
 "Language: zh_CN\n"
@@ -38,7 +38,7 @@ msgstr "在线服务器模式"
 
 #: ../../source/developer_guide/evaluation/using_ais_bench.md:7
 msgid "1. Start the vLLM server"
-msgstr "1. 启动 vLLM 服务器"
+msgstr "1.启动 vLLM 服务器"
 
 #: ../../source/developer_guide/evaluation/using_ais_bench.md:9
 msgid "You can run docker container to start the vLLM server on a single NPU:"
@@ -50,9 +50,9 @@ msgstr "在 Docker 容器中运行 vLLM 服务器。"
 
 #: ../../source/developer_guide/evaluation/using_ais_bench.md:45
 msgid ""
-"`--max_model_len` should be greater than `35000`, this will be suitable "
+"`--max-model-len` should be greater than `35000`, this will be suitable "
 "for most datasets. Otherwise the accuracy evaluation may be affected."
-msgstr "`--max_model_len` 参数应设置为大于 `35000`，这适用于大多数数据集。否则可能会影响准确率评估结果。"
+msgstr "`--max-model-len` 应设置为大于 `35000`，这适用于大多数数据集。否则可能会影响准确率评估结果。"
 
 #: ../../source/developer_guide/evaluation/using_ais_bench.md:48
 msgid "The vLLM server is started successfully, if you see logs as below:"
@@ -60,7 +60,7 @@ msgstr "如果您看到如下日志，表明 vLLM 服务器已成功启动："
 
 #: ../../source/developer_guide/evaluation/using_ais_bench.md:56
 msgid "2. Run different datasets using AISBench"
-msgstr "2. 使用 AISBench 运行不同数据集"
+msgstr "2.使用 AISBench 运行不同数据集"
 
 #: ../../source/developer_guide/evaluation/using_ais_bench.md:58
 msgid "Install AISBench"
@@ -182,8 +182,8 @@ msgid ""
 "`max_model_len`(config in your vllm server), `32768` will be suitable for"
 " most datasets."
 msgstr ""
-"`max_out_len`：请注意，`max_out_len` + LLM 输入长度应小于 vLLM 服务器中配置的 `max_model_len`。`32768` "
-"适用于大多数数据集。"
+"`max_out_len`：请注意，`max_out_len` + LLM 输入长度应小于 vLLM 服务器中配置的 "
+"`max_model_len`。`32768` 适用于大多数数据集。"
 
 #: ../../source/developer_guide/evaluation/using_ais_bench.md:165
 msgid "`batch_size`: Update according to your dataset."
@@ -228,7 +228,7 @@ msgstr "执行完成后，您可以从保存的文件中获取结果，示例如
 
 #: ../../source/developer_guide/evaluation/using_ais_bench.md:300
 msgid "3. Troubleshooting"
-msgstr "3. 故障排除"
+msgstr "3.故障排除"
 
 #: ../../source/developer_guide/evaluation/using_ais_bench.md:302
 msgid "Invalid Image Path Error"
