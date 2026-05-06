@@ -205,7 +205,7 @@ vllm serve /root/.cache/modelscope/hub/models/vllm-ascend/DeepSeek-V4-Pro-w4a8-m
    :substitutions:
 local_ip="xxx"
 node0_ip="xxxx"
-data_parallel_start_rank=xxx  # Based on node IDs from 1 to 3
+data_parallel_start_rank=xxx
 
 export HCCL_IF_IP=$local_ip
 export IFNAME="xxx"
