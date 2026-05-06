@@ -41,7 +41,7 @@ on:
       vllm:
         required: false
         type: string
-        default: '["d886c26d4d4fef7d079696beb4ece1cfb4b008a8"]'"]'
+        default: '["d886c26d4d4fef7d079696beb4ece1cfb4b008a8"]'
 # Bash shells do not use ~/.profile or ~/.bashrc so these shells need to be explicitly
 # declared as "shell: bash -el {0}" on steps that need to be properly activated.
 # It's used to activate ascend-toolkit environment variables.
