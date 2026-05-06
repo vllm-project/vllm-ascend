@@ -89,7 +89,7 @@ Only specific types of PRs will be reviewed. The PR title is prefixed appropriat
 - `[Worker]` for new features or optimization in worker.
 - `[Core]` for new features or optimization  in the core vllm-ascend logic (such as platform, attention, communicators, model runner)
 - `[Kernel]` for changes affecting compute kernels and ops.
-- `[Bugfix]` for bug fixes.
+- `[BugFix]` for bug fixes.
 - `[Doc]` for documentation fixes and improvements.
 - `[Test]` for tests (such as unit tests).
 - `[CI]` for build or continuous integration improvements.
