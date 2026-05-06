@@ -26,6 +26,7 @@ from vllm_ascend.ops.linear import (
     AscendRowParallelLinear,
 )
 from vllm_ascend.ops.vocab_parallel_embedding import AscendVocabParallelEmbedding
+from vllm_ascend.utils import vllm_version_is
 
 
 class AscendColumnParallelLinearWithLoRA(ColumnParallelLinearWithLoRA):

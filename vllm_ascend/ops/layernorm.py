@@ -21,7 +21,7 @@ from vllm.config import get_current_vllm_config
 from vllm.model_executor.layers.layernorm import GemmaRMSNorm, RMSNorm, RMSNormGated
 
 from vllm_ascend.ops.triton.layernorm_gated import layer_norm_fwd_npu
-from vllm_ascend.utils import enable_custom_op, get_weight_prefetch_method
+from vllm_ascend.utils import enable_custom_op, get_weight_prefetch_method, vllm_version_is
 
 
 class AscendRMSNorm(RMSNorm):
