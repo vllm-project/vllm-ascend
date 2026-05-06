@@ -259,16 +259,16 @@ class AscendGatedDeltaNetAttention(GatedDeltaNetAttention):
             g_non_spec = g
             beta_non_spec = beta
 
-        # 2.1: Process the multi-query part
+        # 2.1: Process the multi-query part (spec decode path)
+        # Uses the AscendC custom operator (via ASCEND_CUSTOM_OPP_PATH).
+        # Requires MAX_MTP >= num_speculative_tokens + 1 in the kernel.
         if spec_sequence_masks is not None:
             cu_seqlens = spec_query_start_loc[: attn_metadata.num_spec_decodes + 1]
             actual_seq_lengths = torch.cat([cu_seqlens[:1], cu_seqlens[1:] - cu_seqlens[:-1]])
             query_spec = l2norm_fwd(query_spec)
             key_spec = l2norm_fwd(key_spec)
-            # Dispatches to the vllm-ascend AscendC custom operator
-            # (csrc/recurrent_gated_delta_rule), NOT the built-in CANN operator.
-            # The custom op extends dtype support (e.g. float32 state) and is
-            # loaded at runtime via ASCEND_CUSTOM_OPP_PATH.
+            scale = key_spec.shape[-1] ** -0.5
+            flat_state_indices = spec_state_indices_tensor.flatten()
             core_attn_out_spec = torch_npu.npu_recurrent_gated_delta_rule(
                 query=query_spec.squeeze(0),
                 key=key_spec.squeeze(0),
@@ -276,9 +276,9 @@ class AscendGatedDeltaNetAttention(GatedDeltaNetAttention):
                 g=g_spec.squeeze(0),
                 beta=beta_spec.squeeze(0),
                 state=ssm_state,
-                scale=key_spec.shape[-1] ** -0.5,
+                scale=scale,
                 actual_seq_lengths=actual_seq_lengths,
-                ssm_state_indices=spec_state_indices_tensor.flatten(),
+                ssm_state_indices=flat_state_indices,
                 num_accepted_tokens=num_accepted_tokens.to(torch.int32),
             ).unsqueeze(0)
         else:

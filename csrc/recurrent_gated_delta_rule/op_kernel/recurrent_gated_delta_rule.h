@@ -25,7 +25,7 @@ using namespace matmul;
 using namespace AscendC;
 constexpr uint64_t BUFFER_NUM = 1;
 constexpr uint32_t MAX_OUT_BUFFER_NUM = 2;
-constexpr uint64_t MAX_MTP = 8;
+constexpr uint64_t MAX_MTP = 12;
 constexpr uint64_t BF16_NUM_PER_BLOCK = 16;
 constexpr uint64_t FP32_NUM_PER_BLOCK = 8;
 constexpr uint32_t REPEAT_LENTH = 64; // 256Byte for float

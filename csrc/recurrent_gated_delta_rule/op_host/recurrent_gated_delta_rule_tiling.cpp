@@ -49,7 +49,7 @@ const size_t DIM_1 = 1;
 const size_t DIM_2 = 2;
 const size_t DIM_3 = 3;
 
-const size_t MAX_MTP = 8;
+const size_t MAX_MTP = 12;
 
 template <typename T1, typename T2>
 static T1 CeilDiv(T1 a, T2 b)
