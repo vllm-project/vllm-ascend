@@ -33,7 +33,7 @@ from vllm.v1.attention.backend import AttentionMetadata  # type: ignore
 
 from vllm_ascend.ascend_config import get_ascend_config
 from vllm_ascend.ascend_forward_context import _EXTRA_CTX
-from vllm_ascend.utils import is_vl_model, parse_layer_idx, vllm_version_is
+from vllm_ascend.utils import is_vl_model, parse_layer_idx
 
 
 class IndexerWrapper(nn.Module):
@@ -54,12 +54,7 @@ class IndexerWrapper(nn.Module):
         self.topk_tokens: int = vllm_indexer.topk_tokens  # 2048
         self.q_lora_rank: int = vllm_indexer.q_lora_rank  # 1536
         self.wq_b = vllm_indexer.wq_b
-        # upstream ac3dac545 fused wk+weights_proj into wk_weights_proj
-        if vllm_version_is("0.19.1"):
-            self.wk = vllm_indexer.wk
-            self.weights_proj = vllm_indexer.weights_proj
-        else:
-            self.wk_weights_proj = vllm_indexer.wk_weights_proj
+        self.wk_weights_proj = vllm_indexer.wk_weights_proj
         self.k_norm = vllm_indexer.k_norm
         self.softmax_scale = vllm_indexer.softmax_scale
         vllm_indexer.topk_indices_buffer = None  # delete topk_indices_buffer

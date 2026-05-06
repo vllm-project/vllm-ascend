@@ -46,8 +46,6 @@ from vllm.v1.sample.rejection_sampler import PLACEHOLDER_TOKEN_ID
 from vllm.v1.spec_decode.metrics import SpecDecodingStats
 from vllm.v1.utils import ConstantList, record_function_or_nullcontext
 
-from vllm_ascend.utils import vllm_version_is
-
 
 # `spec_manager_map` in single_type_kv_cache_manager is a module-level dict
 # whose keys are class objects bound at import time.  When the async
@@ -208,11 +206,6 @@ class RecomputeScheduler(Scheduler):
 
             # Update the request state for scheduling.
             request.num_computed_tokens = num_computed_tokens
-
-            if vllm_version_is("0.19.1"):
-                # Count the number of prefix cached tokens.
-                if request.num_cached_tokens < 0:
-                    request.num_cached_tokens = request.num_computed_tokens
 
         self.finished_recving_kv_req_ids.remove(request.request_id)
 
@@ -500,11 +493,7 @@ class RecomputeScheduler(Scheduler):
                             request_queue.pop_request()
                             step_skipped_waiting.prepend_request(request)
                             continue
-
-                        if vllm_version_is("0.19.1"):
-                            request.num_external_computed_tokens = ext_tokens
                         num_external_computed_tokens = ext_tokens
-
                         connector_prefix_cache_queries = request.num_tokens - num_new_local_computed_tokens
                         connector_prefix_cache_hits = num_external_computed_tokens
 
@@ -512,7 +501,7 @@ class RecomputeScheduler(Scheduler):
                     num_computed_tokens = num_new_local_computed_tokens + num_external_computed_tokens
                     assert num_computed_tokens <= request.num_tokens
 
-                    if not vllm_version_is("0.19.1") and request.prefill_stats is not None:
+                    if request.prefill_stats is not None:
                         request.prefill_stats.set(
                             num_prompt_tokens=request.num_prompt_tokens,
                             num_local_cached_tokens=num_new_local_computed_tokens,
@@ -691,10 +680,6 @@ class RecomputeScheduler(Scheduler):
                 token_budget -= num_new_tokens
                 request.status = RequestStatus.RUNNING
                 request.num_computed_tokens = num_computed_tokens
-                if vllm_version_is("0.19.1"):
-                    # Count the number of prefix cached tokens.
-                    if request.num_cached_tokens < 0:
-                        request.num_cached_tokens = num_computed_tokens
                 # Encoder-related.
                 if encoder_inputs_to_schedule:
                     scheduled_encoder_inputs[request_id] = encoder_inputs_to_schedule
@@ -956,11 +941,7 @@ class RecomputeScheduler(Scheduler):
             if new_token_ids or pooler_output is not None or kv_transfer_params or stopped:
                 # Add EngineCoreOutput for this Request.
                 prefill_kwargs: dict = {}
-                if not vllm_version_is("0.19.1"):
-                    prefill_kwargs["prefill_stats"] = request.take_prefill_stats()
-                else:
-                    prefill_kwargs["num_cached_tokens"] = request.num_cached_tokens
-                    prefill_kwargs["num_external_computed_tokens"] = request.num_external_computed_tokens
+                prefill_kwargs["prefill_stats"] = request.take_prefill_stats()
                 outputs[request.client_index].append(
                     EngineCoreOutput(
                         request_id=req_id,
@@ -994,8 +975,6 @@ class RecomputeScheduler(Scheduler):
             self.finish_requests(failed_kv_load_req_ids, RequestStatus.FINISHED_ERROR)
             for request in requests:
                 prefill_kwargs = {}
-                if vllm_version_is("0.19.1"):
-                    prefill_kwargs["num_cached_tokens"] = request.num_cached_tokens
                 outputs[request.client_index].append(
                     EngineCoreOutput(
                         request_id=request.request_id,
