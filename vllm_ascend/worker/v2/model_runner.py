@@ -277,7 +277,6 @@ class NPUModelRunner(GPUModelRunner):
         query_start_loc = self.input_buffers.query_start_loc[: num_reqs + 1]
 
         # Backend-specific padding (e.g. FIA TND): needs the full CPU buffer before slicing;
-        # `FiaOpConstrait.padding` returns None in FULL graph mode (no extra_kw entries then).
         if batch_desc.cg_mode == CUDAGraphMode.FULL:
             max_num_reqs_padded, max_query_start_loc_np = self.prepare_backend_extra_input(
                 batch_desc, num_reqs, query_start_loc_np
@@ -285,7 +284,7 @@ class NPUModelRunner(GPUModelRunner):
             if max_num_reqs_padded > num_reqs_padded:
                 num_reqs_padded = max_num_reqs_padded
                 query_start_loc_np = max_query_start_loc_np
-                
+
         query_start_loc_np = query_start_loc_np[: num_reqs_padded + 1]
 
         # Get prefill tokens if any.

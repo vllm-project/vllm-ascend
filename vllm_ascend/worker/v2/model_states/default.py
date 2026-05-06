@@ -53,7 +53,7 @@ class AscendModelState(DefaultModelState):
             num_tokens = input_batch.num_tokens
         query_start_loc_cpu = torch.from_numpy(input_batch.query_start_loc_np)
         max_query_len = input_batch.num_scheduled_tokens.max().item()
-        attn_metadata = build_attn_metadata(
+        self.attn_metadata = build_attn_metadata(
             attn_groups=attn_groups,
             num_reqs=num_reqs,
             num_tokens=num_tokens,
@@ -72,5 +72,4 @@ class AscendModelState(DefaultModelState):
             attn_state=input_batch.attn_state,
             **input_batch.extra_kwargs,
         )
-        return attn_metadata
-p
+        return self.attn_metadata
