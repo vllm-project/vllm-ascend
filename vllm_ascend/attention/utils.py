@@ -55,6 +55,7 @@ def using_paged_attention(runtime_shape: int, vllm_config: VllmConfig) -> bool:
 
     return runtime_shape in get_ascend_config().pa_shape_list
 
+
 def using_sw_sink_attention(vllm_config: VllmConfig) -> bool:
     from vllm.config.compilation import CUDAGraphMode
 
@@ -63,6 +64,7 @@ def using_sw_sink_attention(vllm_config: VllmConfig) -> bool:
         return False
 
     return get_ascend_config().sw_sink_attention
+
 
 @lru_cache(maxsize=1)
 def enable_cp():
