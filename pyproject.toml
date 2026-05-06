@@ -6,7 +6,7 @@ requires = [
     "decorator",
     "einops",
     "googleapis-common-protos",
-    "numpy<2.0.0",
+    "numpy",
     "packaging",
     "pip",
     "pybind11",
