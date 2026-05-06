@@ -79,6 +79,7 @@ class AscendMultiHeadLatentAttention(MultiHeadLatentAttentionWrapper):
         cache_config: CacheConfig | None = None,
         quant_config: QuantizationConfig | None = None,
         prefix: str = "",
+        skip_topk: bool = False,
     ) -> None:
         nn.Module.__init__(self)
         self.hidden_size = hidden_size
@@ -93,6 +94,7 @@ class AscendMultiHeadLatentAttention(MultiHeadLatentAttentionWrapper):
         self.enable_shared_expert_dp = get_ascend_config().enable_shared_expert_dp
         self.tp_size = get_tensor_model_parallel_world_size()
         self.layers = hf_config.num_hidden_layers
+        self.skip_topk = skip_topk
         if mla_modules.indexer is not None:
             ascend_indexer = IndexerWrapper(mla_modules.indexer)
         else:
