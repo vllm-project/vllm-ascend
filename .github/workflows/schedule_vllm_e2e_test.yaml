@@ -20,6 +20,11 @@ name: E2E-upstream
 on:
   schedule:
     - cron: '0 8 * * 0' # every Sunday at 8:00
+  pull_request:
+    branches:
+      - 'main'
+      - '*-dev'
+      - 'releases/v*'
   inputs:
     image_a2:
       required: false
