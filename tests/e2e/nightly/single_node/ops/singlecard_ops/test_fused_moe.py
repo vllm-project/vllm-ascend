@@ -139,8 +139,6 @@ def test_token_dispatcher_with_all_gather(
             topk_weights=topk_weights,
             topk_ids=topk_ids,
             routing=MoERoutingParams(
-                expert_map=expert_map,
-                global_redundant_expert_num=0,
                 mc2_mask=None,
                 apply_router_weight_on_input=apply_router_weight_on_input,
             ),
@@ -222,8 +220,6 @@ def test_token_dispatcher_with_all_gather_quant(
                 topk_weights=topk_weights,
                 topk_ids=topk_ids,
                 routing=MoERoutingParams(
-                    expert_map=expert_map,
-                    global_redundant_expert_num=0,
                     mc2_mask=None,
                     apply_router_weight_on_input=apply_router_weight_on_input,
                 ),

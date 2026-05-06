@@ -27,7 +27,7 @@ from vllm_ascend.ascend_forward_context import _EXTRA_CTX
 from vllm_ascend.ops.fused_moe.experts_selector import select_experts
 from vllm_ascend.ops.fused_moe.moe_runtime_args import build_fused_experts_input
 
-from .base import AscendMoEScheme, QuantType
+from .base import AscendMoEScheme, QuantType, get_moe_num_logical_experts
 from .registry import register_scheme
 
 
@@ -107,7 +107,6 @@ class AscendW4A16FusedMoEMethod(AscendMoEScheme):
     quant_type: QuantType = QuantType.W4A16
 
     def __init__(self) -> None:
-        self.transpose_weight = True
         self.num_bits = 4  # dtype = torch.int4
         self.pack_factor = 8  # pack 8 of torch.int4 tensors to torch.int32
 
@@ -183,7 +182,8 @@ class AscendW4A16FusedMoEMethod(AscendMoEScheme):
         top_k: int,
         renormalize: bool,
         use_grouped_topk: bool = False,
-        global_num_experts: int = -1,
+        num_experts: int = -1,
+        expert_map: torch.Tensor | None = None,
         topk_group: int | None = None,
         num_expert_group: int | None = None,
         custom_routing_function: Callable | None = None,
@@ -199,9 +199,16 @@ class AscendW4A16FusedMoEMethod(AscendMoEScheme):
         apply_router_weight_on_input: bool = False,
         mc2_mask: torch.Tensor | None = None,
     ) -> torch.Tensor:
-        assert router_logits.shape[1] == global_num_experts - global_redundant_expert_num, (
-            "Number of global experts mismatch (excluding redundancy)"
+        num_shared_experts = getattr(layer, "n_shared_experts", 0)
+        if num_shared_experts is None:
+            num_shared_experts = 0
+        num_logical_experts = get_moe_num_logical_experts(
+            layer,
+            num_experts,
+            global_redundant_expert_num=global_redundant_expert_num,
+            num_shared_experts=num_shared_experts,
         )
+        assert router_logits.shape[1] == num_logical_experts, "Number of global experts mismatch (excluding redundancy)"
 
         topk_weights, topk_ids = select_experts(
             hidden_states=x,
@@ -214,7 +221,7 @@ class AscendW4A16FusedMoEMethod(AscendMoEScheme):
             custom_routing_function=custom_routing_function,
             scoring_func=scoring_func,
             e_score_correction_bias=e_score_correction_bias,
-            global_num_experts=global_num_experts,
+            num_experts=num_logical_experts,
         )
 
         topk_ids = topk_ids.to(torch.int32)
@@ -243,36 +250,35 @@ class AscendW4A16FusedMoEMethod(AscendMoEScheme):
         )
 
     def process_weights_after_loading(self, layer: torch.nn.Module) -> None:
-        if self.transpose_weight:
-            w13_shape = layer.w13_weight_packed.data.shape
-            w2_shape = layer.w2_weight_packed.data.shape
-            unpacked_w13_weight = (
-                unpack_from_int32(
-                    layer.w13_weight_packed.data.flatten(0, 1),
-                    torch.Size([w13_shape[0] * w13_shape[1], w13_shape[2] * self.pack_factor]),
-                    self.num_bits,
-                )
-                .view(w13_shape[0], w13_shape[1], -1)
-                .transpose(1, 2)
-                .contiguous()
-                .int()
+        w13_shape = layer.w13_weight_packed.data.shape
+        w2_shape = layer.w2_weight_packed.data.shape
+        unpacked_w13_weight = (
+            unpack_from_int32(
+                layer.w13_weight_packed.data.flatten(0, 1),
+                torch.Size([w13_shape[0] * w13_shape[1], w13_shape[2] * self.pack_factor]),
+                self.num_bits,
             )
-            unpacked_w2_weight = (
-                unpack_from_int32(
-                    layer.w2_weight_packed.data.flatten(0, 1),
-                    torch.Size([w2_shape[0] * w2_shape[1], w2_shape[2] * self.pack_factor]),
-                    self.num_bits,
-                )
-                .view(w2_shape[0], w2_shape[1], -1)
-                .transpose(1, 2)
-                .contiguous()
-                .int()
+            .view(w13_shape[0], w13_shape[1], -1)
+            .transpose(1, 2)
+            .contiguous()
+            .int()
+        )
+        unpacked_w2_weight = (
+            unpack_from_int32(
+                layer.w2_weight_packed.data.flatten(0, 1),
+                torch.Size([w2_shape[0] * w2_shape[1], w2_shape[2] * self.pack_factor]),
+                self.num_bits,
             )
-            layer.w13_weight_packed.data = pack_to_int32(unpacked_w13_weight)
-            layer.w2_weight_packed.data = pack_to_int32(unpacked_w2_weight)
+            .view(w2_shape[0], w2_shape[1], -1)
+            .transpose(1, 2)
+            .contiguous()
+            .int()
+        )
+        layer.w13_weight_packed.data = pack_to_int32(unpacked_w13_weight)
+        layer.w2_weight_packed.data = pack_to_int32(unpacked_w2_weight)
 
-            layer.w13_weight_scale.data = layer.w13_weight_scale.data.transpose(1, 2).contiguous()
-            layer.w2_weight_scale.data = layer.w2_weight_scale.data.transpose(1, 2).contiguous()
+        layer.w13_weight_scale.data = layer.w13_weight_scale.data.transpose(1, 2).contiguous()
+        layer.w2_weight_scale.data = layer.w2_weight_scale.data.transpose(1, 2).contiguous()
 
-            layer.w13_weight_offset.data = layer.w13_weight_offset.data.transpose(1, 2).contiguous()
-            layer.w2_weight_offset.data = layer.w2_weight_offset.data.transpose(1, 2).contiguous()
+        layer.w13_weight_offset.data = layer.w13_weight_offset.data.transpose(1, 2).contiguous()
+        layer.w2_weight_offset.data = layer.w2_weight_offset.data.transpose(1, 2).contiguous()

@@ -27,23 +27,20 @@ if HAS_TRITON:
 # isort: off
 import vllm_ascend.patch.worker.patch_weight_utils  # noqa
 import vllm_ascend.patch.platform.patch_sched_yield  # noqa
-import vllm_ascend.patch.worker.patch_unquantized_gemm  # noqa
 import vllm_ascend.patch.worker.patch_bert  # noqa
 import vllm_ascend.patch.worker.patch_distributed  # noqa
 import vllm_ascend.patch.worker.patch_minimax_m2  # noqa
 import vllm_ascend.patch.worker.patch_minimax_m2_linear_attn  # noqa
 import vllm_ascend.patch.worker.patch_mamba_utils  # noqa
 import vllm_ascend.patch.worker.patch_multimodal_merge  # noqa
-import vllm_ascend.patch.worker.patch_gdn_attn  # noqa
+import vllm_ascend.patch.worker.patch_qwen3_next_mtp  # noqa
 
-if is_310p():
-    import vllm_ascend.patch.worker.patch_qwen3_5_310  # noqa
-else:
-    import vllm_ascend.patch.worker.patch_qwen3_next  # noqa
-    import vllm_ascend.patch.worker.patch_qwen3_next_mtp  # noqa
+if not is_310p():
     import vllm_ascend.patch.worker.patch_qwen3_5  # noqa
+    import vllm_ascend.patch.worker.patch_gdn_attn  # noqa
+    import vllm_ascend.patch.worker.patch_qwen3_dflash  # noqa
+
 import vllm_ascend.patch.worker.patch_rejection_sampler  # noqa
-import vllm_ascend.patch.worker.patch_v2.patch_eagle  # noqa
 import vllm_ascend.patch.worker.patch_v2.patch_uva  # noqa
 import vllm_ascend.patch.worker.patch_huanyuan_vl  # noqa
 import vllm_ascend.patch.worker.patch_routed_experts_capturer  # noqa
@@ -55,5 +52,7 @@ import vllm_ascend.patch.worker.patch_deepseek_mtp  # noqa
 import vllm_ascend.patch.worker.patch_v2.patch_input_batch  # noqa
 import vllm_ascend.patch.worker.patch_v2.patch_model_state  # noqa
 import vllm_ascend.patch.worker.patch_v2.patch_block_table  # noqa
-import vllm_ascend.patch.worker.patch_qwen3_c8  # noqa
+import vllm_ascend.patch.worker.patch_gqa_c8  # noqa
 import vllm_ascend.patch.worker.patch_qwen3vl  # noqa
+import vllm_ascend.patch.worker.patch_v2.patch_attn_utils  # noqa
+import vllm_ascend.patch.worker.patch_bailing_moe_linear  # noqa

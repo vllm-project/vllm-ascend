@@ -85,7 +85,8 @@ class AscendW8A8DynamicFusedMoEMethod310(AscendMoEScheme):
         top_k: int,
         renormalize: bool,
         use_grouped_topk: bool = False,
-        global_num_experts: int = -1,
+        num_experts: int = -1,
+        expert_map: torch.Tensor | None = None,
         topk_group: int | None = None,
         num_expert_group: int | None = None,
         custom_routing_function: Callable | None = None,
@@ -115,14 +116,14 @@ class AscendW8A8DynamicFusedMoEMethod310(AscendMoEScheme):
             custom_routing_function=custom_routing_function,
             scoring_func=scoring_func,
             e_score_correction_bias=e_score_correction_bias,
-            global_num_experts=global_num_experts,
+            global_num_experts=num_experts,
         )
 
         if zero_expert_num > 0 and zero_expert_type is not None:
             topk_ids, topk_weights, zero_expert_result = zero_experts_compute(
                 expert_indices=topk_ids,
                 expert_scales=topk_weights,
-                num_experts=global_num_experts,
+                num_experts=num_experts,
                 zero_expert_type=zero_expert_type,
                 hidden_states=x,
             )

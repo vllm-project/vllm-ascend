@@ -2,7 +2,7 @@
 
 ## Introduction
 
-Qwen3-Omni is the natively end-to-end multilingual omni-modal foundation models. It processes text, images, audio, and video, and delivers real-time streaming responses in both text and natural speech. We introduce several architectural upgrades to improve performance and efficiency. The Thinking model of Qwen3-Omni-30B-A3B, containing the thinker component, equipped with chain-of-thought reasoning, supporting audio, video, and text input, with text output.
+Qwen3-Omni is a native end-to-end multilingual omni-modal foundation model. It processes text, images, audio, and video, and delivers real-time streaming responses in both text and natural speech. We introduce several architectural upgrades to improve performance and efficiency. The Thinking model of Qwen3-Omni-30B-A3B, which contains the thinker component, is equipped with chain-of-thought reasoning and supports audio, video, and text input, with text output.
 
 This document will show the main verification steps of the model, including supported features, feature configuration, environment preparation, single-node deployment, accuracy and performance evaluation.
 
@@ -16,7 +16,7 @@ Refer to [feature guide](https://docs.vllm.ai/projects/ascend/zh-cn/latest/user
 
 ### Model Weight
 
-- `Qwen3-Omni-30B-A3B-Thinking` require 2 NPU Card(64G × 2).[Download model weight](https://modelscope.cn/models/Qwen/Qwen3-Omni-30B-A3B-Thinking)
+- `Qwen3-Omni-30B-A3B-Thinking` requires 2 NPU Cards (64G × 2).[Download model weight](https://modelscope.cn/models/Qwen/Qwen3-Omni-30B-A3B-Thinking)
 It is recommended to download the model weight to the shared directory of multiple nodes, such as `/root/.cache/`
 
 ### Installation
@@ -73,9 +73,15 @@ Please install system dependencies
 ```bash
 pip install qwen_omni_utils modelscope
 # Used for audio processing.
-apt-get update && apt-get install ffmpeg -y
+apt-get update && apt-get install -y ffmpeg
 # Check the installation.
 ffmpeg -version
+```
+
+Required to avoid HcclAllreduce failures caused by the default FFTS+ mode's stream and shape limitations.
+
+```bash
+export HCCL_OP_EXPANSION_MODE="AIV"
 ```
 
 ## Deployment
@@ -283,7 +289,7 @@ There are three `vllm bench` subcommands:
 Take the `serve` as an example. Run the code as follows.
 
 ```bash
-VLLM_USE_MODELSCOPE=True 
+export VLLM_USE_MODELSCOPE=True
 export MODEL=Qwen/Qwen3-Omni-30B-A3B-Thinking
 python3 -m vllm.entrypoints.openai.api_server --model $MODEL --tensor-parallel-size 2 --swap-space 16 --disable-log-stats --disable-log-request --load-format dummy
 

@@ -3,7 +3,7 @@
 ## Version Specific FAQs
 
 - [[v0.18.0rc1] FAQ & Feedback](https://github.com/vllm-project/vllm-ascend/issues/7633)
-- [[v0.17.0rc1] FAQ & Feedback](https://github.com/vllm-project/vllm-ascend/issues/7173)
+- [[v0.19.1rc1] FAQ & Feedback](https://github.com/vllm-project/vllm-ascend/issues/8819)
 - [[v0.13.0] FAQ & Feedback](https://github.com/vllm-project/vllm-ascend/issues/6583)
 
 ## General FAQs
@@ -137,9 +137,9 @@ The problem is usually caused by the installation of a development or editable v
 
 OOM errors typically occur when the model exceeds the memory capacity of a single NPU. For general guidance, you can refer to [vLLM OOM troubleshooting documentation](https://docs.vllm.ai/en/latest/usage/troubleshooting/#out-of-memory).
 
-In scenarios where NPUs have limited high bandwidth memory (HBM) capacity, dynamic memory allocation/deallocation during inference can exacerbate memory fragmentation, leading to OOM. To address this:
+In scenarios where NPUs have limited high bandwidth memory (on-chip memory) capacity, dynamic memory allocation/deallocation during inference can exacerbate memory fragmentation, leading to OOM. To address this:
 
-- **Limit `--max-model-len`**: It can save the HBM usage for KV cache initialization step.
+- **Limit `--max-model-len`**: It can save the on-chip memory usage for KV cache initialization step.
 
 - **Adjust `--gpu-memory-utilization`**: If unspecified, the default value is `0.9`. You can decrease this value to reserve more memory to reduce fragmentation risks. See details in: [vLLM - Inference and Serving - Engine Arguments](https://docs.vllm.ai/en/latest/cli/serve/#-gpu-memory-utilization).
 
@@ -147,7 +147,7 @@ In scenarios where NPUs have limited high bandwidth memory (HBM) capacity, dynam
 
 ### 13. Failed to enable NPU graph mode when running DeepSeek
 
-Enabling NPU graph mode for DeepSeek may trigger an error. This is because when both MLA and NPU graph mode are active, the number of queries per KV head must be 32, 64, or 128. However, DeepSeek-V2-Lite has only 16 attention heads, which results in 16 queries per KV—a value outside the supported range. Support for NPU graph mode on DeepSeek-V2-Lite will be added in a future update.
+Enabling NPU graph mode for DeepSeek may trigger an error. This is because when both MLA (Multi-Head Latent Attention) and NPU graph mode are active, the number of queries per KV head must be 32, 64, or 128. However, DeepSeek-V2-Lite has only 16 attention heads, which results in 16 queries per KV—a value outside the supported range. Support for NPU graph mode on DeepSeek-V2-Lite will be added in a future update.
 
 And if you're using DeepSeek-V3 or DeepSeek-R1, please make sure after the tensor parallel split, `num_heads`/`num_kv_heads` is {32, 64, 128}.
 
@@ -179,7 +179,7 @@ There are several factors that affect output determinism:
    # Create a sampling params object.
    sampling_params = SamplingParams(temperature=0)
    # Create an LLM.
-   llm = LLM(model="Qwen/Qwen2.5-0.5B-Instruct")
+   llm = LLM(model="Qwen/Qwen3-0.6B")
 
    # Generate texts from the prompts.
    outputs = llm.generate(prompts, sampling_params)
@@ -198,9 +198,9 @@ There are several factors that affect output determinism:
    export ATB_LLM_LCOC_ENABLE=0
    ```
 
-### 16. How to fix the error "ImportError: Please install vllm[audio] for audio support" for the Qwen2.5-Omni model？
+### 16. How to fix the error "ImportError: Please install vllm[audio] for audio support" for the multi-modal models？
 
-The `Qwen2.5-Omni` model requires the `librosa` package to be installed, you need to install the `qwen-omni-utils` package to ensure all dependencies are met, run `pip install qwen-omni-utils`.
+Some multi-modal models requires the `librosa` package to be installed, you need to install the `qwen-omni-utils` package to ensure all dependencies are met, for Qwen-omni, run `pip install qwen-omni-utils`.
 This package will install `librosa` and its related dependencies, resolving the `ImportError: No module named 'librosa'` issue and ensuring that the audio processing functionality works correctly.
 
 ### 17. How to troubleshoot and resolve size capture failures resulting from stream resource exhaustion, and what are the underlying causes?
@@ -260,7 +260,7 @@ The performance of `torch_npu.npu_fused_infer_attention_score` in small batch sc
 
 ```bash
 bash tools/install_flash_infer_attention_score_ops_a2.sh
-## change to run the following instruction if you're using A3 machine
+# change to run the following instruction if you're using A3 machine
 # bash tools/install_flash_infer_attention_score_ops_a3.sh
 ```
 
@@ -286,3 +286,13 @@ export SOC_VERSION="ascend310p1"
 # Atlas A5 (Ascend 950 series)
 export SOC_VERSION="<value starting with ascend950>"
 ```
+
+### 23. Why TPOT increases drastically as concurrency grows?
+
+When testing a vLLM server, one may find that TPOT increases as concurrency increases (for example, TPOT increases by 0.5 ~ 1ms when concurrency increases by 4). This phenomenon is normal in most cases. However, sometimes TPOT may increase dramatically (10 to 100ms for example) as concurrency grows. This is possibly caused by [**PREEMPTION**](https://docs.vllm.ai/en/latest/configuration/optimization/#preemption) in vLLM.
+Generally, when your server hits KV cache limits, vLLM tries to free KV cache of requests to ensure sufficient space for other requests, which is called preemption in vLLM. When a request is preempted, the default behavior is to recompute the KV cache of this request again in the future, which is why the performance might drop significantly. There are several ways to verify this:
+
+- vLLM usually logs stats on your server. You might see metrics like `GPU KV cache usage: 99.0%,`. When reaching 100%, it triggers preemption.
+- When launching a vLLM server, you will see logs like `GPU KV cache size: 66340 tokens` and `Maximum concurrency for 16,384 tokens per request: 4.05`. These are estimated KV cache capacity for a single DP group. You can adjust the overall request traffic according to this.
+
+Preemption cannot be avoided completely since KV cache usage always has a limit. But there are methods to reduce the chances of preemption. As is suggested in [**PREEMPTION**](https://docs.vllm.ai/en/latest/configuration/optimization/#preemption), the core strategy is to increase available KV cache. For example, one can increase `--gpu-memory-utilization` or decrease `--max-num-seqs` && `--max-num-batched-tokens`.

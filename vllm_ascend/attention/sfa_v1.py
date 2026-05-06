@@ -240,7 +240,15 @@ class AscendSFAMetadataBuilder(MLACommonMetadataBuilder[AscendSFAMetadata]):
 
         cum_query_lens = common_attn_metadata.query_start_loc[1 : num_reqs + 1]
         seq_lens = common_attn_metadata.seq_lens[:num_reqs]
-        seq_lens_cpu = common_attn_metadata.seq_lens_cpu[:num_reqs]
+
+        # Prefer _seq_lens_cpu (always available, updated during draft
+        # iterations) over seq_lens_cpu (None in async spec decode mode).
+        if common_attn_metadata._seq_lens_cpu is not None:
+            seq_lens_cpu = common_attn_metadata._seq_lens_cpu[:num_reqs]
+        elif common_attn_metadata.seq_lens_cpu is not None:
+            seq_lens_cpu = common_attn_metadata.seq_lens_cpu[:num_reqs]
+        else:
+            seq_lens_cpu = common_attn_metadata.seq_lens[:num_reqs].to("cpu")
 
         cos, sin = get_cos_and_sin_mla(input_positions, True)
 
@@ -430,8 +438,7 @@ class AscendSFAImpl(MLAAttentionImpl):
         self.n_head: int = self.indexer.n_head  # 64
         self.head_dim: int = self.indexer.head_dim  # 128
         self.wq_b = self.indexer.wq_b
-        self.wk = self.indexer.wk
-        self.weights_proj = self.indexer.weights_proj
+        self.wk_weights_proj = self.indexer.wk_weights_proj
         self.k_norm = self.indexer.k_norm
         self.cp_size = 1
         self.is_rope_neox_style = True
@@ -900,7 +907,8 @@ class AscendSFAImpl(MLAAttentionImpl):
         cos: torch.Tensor,
         sin: torch.Tensor,
     ):
-        k_li, _ = self.wk(x)  # [b,s,7168] @ [7168,128] = [b,s,128]
+        kw, _ = self.wk_weights_proj(x)
+        k_li = kw[:, : self.head_dim]
         k_li = self.k_norm(k_li).unsqueeze(1)
         k_li = k_li.view(-1, 1, self.head_dim)
 
@@ -945,8 +953,8 @@ class AscendSFAImpl(MLAAttentionImpl):
         actual_seq_lengths_query: torch.Tensor,
         actual_seq_lengths_key: torch.Tensor,
     ):
-        weights, _ = self.weights_proj(x)
-
+        kw, _ = self.wk_weights_proj(x)
+        weights = kw[:, self.head_dim :]
         q_li, _ = self.wq_b(q_c)  # [b,s,1536] @ [1536,64*128] = [b,s,64*128]
         q_li = q_li.view(-1, self.n_head, self.head_dim)  # [n_toks,64,128]
         if HAS_TRITON:
@@ -1099,6 +1107,7 @@ class AscendSFAImpl(MLAAttentionImpl):
                 num_input_tokens=num_input_tokens,
             )
             k_li, k_li_scale = self.indexer_select_pre_process(x=hidden_states, cos=cos, sin=sin)
+            wait_for_kv_layer_from_connector(layer_name)
         # native
         else:
             assert self.fused_qkv_a_proj is not None, "q lora is required for DSA."

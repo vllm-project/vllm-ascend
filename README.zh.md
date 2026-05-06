@@ -57,12 +57,12 @@ vLLM 昇腾插件 (`vllm-ascend`) 是一个由社区维护的让vLLM在Ascend NP
 
 | Version    | Release type | Doc                                  |
 |------------|--------------|--------------------------------------|
-|v0.18.0rc1| 最新RC版本 |请查看[快速开始](https://docs.vllm.ai/projects/ascend/en/latest/quick_start.html)和[安装指南](https://docs.vllm.ai/projects/ascend/en/latest/installation.html)了解更多|
+|v0.19.1rc1| 最新RC版本 |请查看[快速开始](https://docs.vllm.ai/projects/ascend/en/latest/quick_start.html)和[安装指南](https://docs.vllm.ai/projects/ascend/en/latest/installation.html)了解更多|
 |v0.13.0| 最新正式/稳定版本 |[快速开始](https://docs.vllm.ai/projects/ascend/en/v0.13.0/quick_start.html) and [安装指南](https://docs.vllm.ai/projects/ascend/en/v0.13.0/installation.html)了解更多|
 
 ## 贡献
 
-请参考 [CONTRIBUTING]((https://docs.vllm.ai/projects/ascend/en/latest/developer_guide/contribution/index.html)) 文档了解更多关于开发环境搭建、功能测试以及 PR 提交规范的信息。
+请参考[CONTRIBUTING](https://docs.vllm.ai/projects/ascend/en/latest/developer_guide/contribution/index.html)文档了解更多关于开发环境搭建、功能测试以及 PR 提交规范的信息。
 
 我们欢迎并重视任何形式的贡献与合作：
 
@@ -74,7 +74,7 @@ vLLM 昇腾插件 (`vllm-ascend`) 是一个由社区维护的让vLLM在Ascend NP
 vllm-ascend有主干分支和开发分支。
 
 - **main**: 主干分支，与vLLM的主干分支对应，并通过昇腾CI持续进行质量看护。
-- **releases/vX.Y.Z**: 开发分支，随vLLM部分新版本发布而创建，比如`releases/v0.13.0`是vllm-asend针对vLLM `v0.13.0` 版本的开发分支。
+- **releases/vX.Y.Z**: 开发分支，随vLLM部分新版本发布而创建，比如`releases/v0.13.0`是vllm-ascend针对vLLM `v0.13.0` 版本的开发分支。
 
 下面是维护中的分支：
 

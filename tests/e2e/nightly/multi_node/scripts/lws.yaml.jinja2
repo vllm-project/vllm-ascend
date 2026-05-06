@@ -13,6 +13,11 @@ spec:
         labels:
           role: leader
       spec:
+        tolerations:
+          - key: "dedicated"
+            operator: "Equal"
+            value: "night"
+            effect: "NoSchedule"
         containers:
           - name: vllm-leader
             imagePullPolicy: Always
@@ -28,8 +33,6 @@ spec:
                 value: {{ fail_tag | default("FAIL_TAG") }}
               - name: IS_PR_TEST
                 value: "{{ is_pr_test | default("false") }}"
-              - name: VLLM_VERSION
-                value: {{ vllm_version | default("latest") }}
               - name: VLLM_ASCEND_REF
                 value: {{ vllm_ascend_ref | default("main") }}
               - name: VLLM_ASCEND_REMOTE_URL
@@ -72,7 +75,7 @@ spec:
         - name: dshm
           emptyDir:
             medium: Memory
-            sizeLimit: 15Gi
+            sizeLimit: 512Gi
         - name: shared-volume
           persistentVolumeClaim:
             claimName: {{ pvc_name | default("nv-action-vllm-benchmarks-v2") }}
@@ -81,6 +84,11 @@ spec:
             path: /usr/local/Ascend/driver/tools
     workerTemplate:
       spec:
+        tolerations:
+          - key: "dedicated"
+            operator: "Equal"
+            value: "night"
+            effect: "NoSchedule"
         containers:
           - name: vllm-worker
             imagePullPolicy: Always
@@ -96,8 +104,6 @@ spec:
                 value: {{ fail_tag | default("FAIL_TAG") }}
               - name: IS_PR_TEST
                 value: "{{ is_pr_test | default("false") }}"
-              - name: VLLM_VERSION
-                value: {{ vllm_version | default("latest") }}
               - name: VLLM_ASCEND_REF
                 value: {{ vllm_ascend_ref | default("main") }}
               - name: VLLM_ASCEND_REMOTE_URL
@@ -106,8 +112,6 @@ spec:
                 value: {{ benchmark_job_name | default("") }}
               - name: VLLM_CI_RUNNER
                 value: {{ runner | default("linux-aarch64-a3-0") }}
-              - name: VLLM_ASCEND_VERSION
-                value: {{ vllm_ascend_ref | default("main") }}
             command:
               - sh
               - -c
@@ -133,7 +137,7 @@ spec:
         - name: dshm
           emptyDir:
             medium: Memory
-            sizeLimit: 15Gi
+            sizeLimit: 512Gi
         - name: shared-volume
           persistentVolumeClaim:
             claimName: {{ pvc_name | default("nv-action-vllm-benchmarks-v2") }}
