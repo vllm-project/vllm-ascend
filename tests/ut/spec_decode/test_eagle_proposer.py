@@ -31,6 +31,50 @@ _CPU_GPU_BUFFER_TARGET = (
 )
 
 
+def test_prepare_inputs_padded_preserves_internal_seq_lens_cpu():
+    proposer = AscendEagleProposer.__new__(AscendEagleProposer)
+    proposer.pcp_size = 1
+    proposer.arange = torch.arange(16, dtype=torch.int32)
+    proposer.runner = MagicMock()
+    proposer.runner.actual_seq_lengths_q = [3, 3]
+    proposer.runner.attn_state = AscendAttentionState.SpecDecoding
+    proposer.runner.decode_token_per_req = 4
+
+    internal_seq_lens_cpu = torch.tensor([7, 9], dtype=torch.int32)
+    common_attn_metadata = AscendCommonAttentionMetadata(
+        query_start_loc=torch.tensor([0, 3, 6], dtype=torch.int32),
+        query_start_loc_cpu=torch.tensor([0, 3, 6], dtype=torch.int32),
+        seq_lens=torch.tensor([7, 9], dtype=torch.int32),
+        _seq_lens_cpu=internal_seq_lens_cpu,
+        seq_lens_cpu=None,
+        num_computed_tokens_cpu=None,
+        num_reqs=2,
+        num_actual_tokens=6,
+        num_input_tokens=6,
+        max_query_len=3,
+        actual_seq_lengths_q=[3, 3],
+        block_table_tensor=torch.zeros((2, 1), dtype=torch.int32),
+        slot_mapping=torch.arange(6, dtype=torch.int32),
+        positions=torch.arange(6),
+        attn_state=AscendAttentionState.SpecDecoding,
+        decode_token_per_req=4,
+        max_seq_len=9,
+    )
+    spec_decode_metadata = MagicMock()
+    spec_decode_metadata.cu_num_draft_tokens = torch.tensor([2, 3], dtype=torch.int32)
+    valid_sampled_tokens_count = torch.tensor([3, 1], dtype=torch.int32)
+
+    with patch.object(eagle_proposer, "HAS_TRITON", False):
+        spec_common_attn_metadata, *_ = proposer.prepare_inputs_padded(
+            common_attn_metadata,
+            spec_decode_metadata,
+            valid_sampled_tokens_count,
+        )
+
+    assert spec_common_attn_metadata._seq_lens_cpu is internal_seq_lens_cpu
+    assert spec_common_attn_metadata.seq_lens_cpu is None
+
+
 class TestEagleProposerInitialization(TestBase):
     def setUp(self):
         self.vllm_config = MagicMock(spec=VllmConfig)
