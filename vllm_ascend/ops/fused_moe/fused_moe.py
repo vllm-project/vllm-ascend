@@ -252,10 +252,13 @@ class AscendMoERunner(MoERunner):
         This delegates to the layer's forward_impl method which contains the
         Ascend-specific MoE computation logic.
         """
-        result = layer.forward_impl(hidden_states, router_logits)
-        # If the layer has shared experts, forward_impl returns a tuple (shared_out, routed_out)
-        # Otherwise, it returns just routed_out
-        # The torch op expects the same return type based on whether it's moe_forward or moe_forward_shared
+        if self.shared_experts is None:
+            result = layer.forward_impl(hidden_states, router_logits)
+            # If the layer has shared experts, forward_impl returns a tuple (shared_out, routed_out)
+            # Otherwise, it returns just routed_out
+            # The torch op expects the same return type based on whether it's moe_forward or moe_forward_shared
+        else:
+            result = layer.shared_forward_impl(hidden_states, router_logits)
         return result
 
     def _forward_impl(
@@ -390,8 +393,8 @@ class AscendFusedMoE(FusedMoE):
             self.moe_config,
             self.router,
             self._routed_input_transform,
-            self._gate,
-            self._shared_experts,
+            kwargs.pop("gate", None),
+            kwargs.pop("shared_experts", None),
             self.quant_method,
             self.vllm_config.parallel_config.enable_dbo,
         )
