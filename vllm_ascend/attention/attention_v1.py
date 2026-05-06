@@ -650,7 +650,7 @@ class AscendAttentionBackendImpl(AttentionImpl):
         if flashcomm2_oshard_manager.flashcomm2_oshard_enable():
             flashcomm2_oshard_manager.post_process_after_loading()
 
-   def full_graph_fia_v2(
+    def full_graph_fia_v2(
         self,
         query: torch.Tensor,
         key: torch.Tensor,
