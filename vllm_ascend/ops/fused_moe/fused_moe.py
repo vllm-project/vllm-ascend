@@ -417,8 +417,8 @@ class AscendFusedMoE(FusedMoE):
             self.moe_config,
             self.router,
             self._routed_input_transform,
-            self._gate,
-            self._shared_experts,
+            kwargs.pop("gate", None),
+            kwargs.pop("shared_experts", None),
             self.quant_method,
             self.vllm_config.parallel_config.enable_dbo,
         )
