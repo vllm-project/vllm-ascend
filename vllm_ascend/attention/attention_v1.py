@@ -855,7 +855,6 @@ class AscendAttentionBackendImpl(AttentionImpl):
             actual_seq_lengths_kv = attn_metadata.seq_lens_list
         return key, value, block_size, block_table, actual_seq_lengths_kv
 
-
     def forward_fused_infer_attention(
         self,
         query: torch.Tensor,
