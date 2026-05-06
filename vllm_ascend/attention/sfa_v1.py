@@ -13,7 +13,6 @@ from vllm.model_executor.layers.attention.mla_attention import MLACommonMetadata
 from vllm.model_executor.layers.linear import UnquantizedLinearMethod
 from vllm.triton_utils import HAS_TRITON
 from vllm.v1.attention.backend import (
-    AttentionBackend,  # type: ignore
     AttentionCGSupport,
     MLAAttentionImpl,
 )
@@ -103,8 +102,8 @@ class AscendSFABackend(AscendAttentionBackend):
         return AscendSFAImpl
     
     @staticmethod
-    def get_extra_input_Preparer() -> FiaExtraInputPreparer:
-        raise FiaExtraInputPreparer()
+    def get_extra_input_preparer() -> FiaExtraInputPreparer:
+        return FiaExtraInputPreparer()
 
     @staticmethod
     def get_supported_kernel_block_sizes() -> list[int]:

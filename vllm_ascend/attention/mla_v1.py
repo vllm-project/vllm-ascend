@@ -111,8 +111,8 @@ class AscendMLABackend(AscendAttentionBackend):
         return AscendMLAImpl
     
     @staticmethod
-    def get_extra_input_Preparer() -> FiaExtraInputPreparer:
-        raise FiaExtraInputPreparer()
+    def get_extra_input_preparer() -> FiaExtraInputPreparer:
+        return FiaExtraInputPreparer()
 
     @staticmethod
     def get_supported_kernel_block_sizes() -> list[int]:

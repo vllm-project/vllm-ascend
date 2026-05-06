@@ -98,8 +98,8 @@ class AscendAttentionBackend(AscendAttentionBackend):
         return AscendAttentionMetadataBuilder
     
     @staticmethod
-    def get_extra_input_Preparer() -> FiaExtraInputPreparer:
-        raise FiaExtraInputPreparer()
+    def get_extra_input_preparer() -> FiaExtraInputPreparer:
+        return FiaExtraInputPreparer()
 
     @staticmethod
     def get_kv_cache_shape(

@@ -79,5 +79,5 @@ class FiaExtraInputPreparer(BackendExtraInputPreparer):
 class AscendAttentionBackend(AttentionBackend):
     @staticmethod
     @abstractmethod
-    def get_extra_input_Preparer() -> BackendExtraInputPreparer:
+    def get_extra_input_preparer() -> BackendExtraInputPreparer:
         raise NotImplementedError

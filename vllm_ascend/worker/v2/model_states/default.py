@@ -73,3 +73,4 @@ class AscendModelState(DefaultModelState):
             **input_batch.extra_kwargs,
         )
         return attn_metadata
+p
