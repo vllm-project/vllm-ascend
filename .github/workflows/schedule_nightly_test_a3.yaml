@@ -219,6 +219,9 @@ jobs:
           - name: multi-node-deepseek-v3.1
             config_file_path: DeepSeek-V3.1-BF16.yaml
             size: 2
+          - name: multi-node-glm4.7-w8a8c8-layerwise
+            config_file_path: GLM-4.7-W8A8C8-Mooncake-Layerwise.yaml
+            size: 2
     uses: ./.github/workflows/_e2e_nightly_multi_node.yaml
     with:
       soc_version: a3
