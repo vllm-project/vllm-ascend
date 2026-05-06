@@ -44,7 +44,10 @@ from vllm.v1.core.sched.output import GrammarOutput, SchedulerOutput
 from vllm.v1.kv_cache_interface import KVCacheConfig, KVCacheSpec
 from vllm.v1.outputs import EMPTY_MODEL_RUNNER_OUTPUT, AsyncModelRunnerOutput, DraftTokenIds, ModelRunnerOutput
 from vllm.v1.worker.gpu_worker import AsyncIntermediateTensors
-from vllm.v1.worker.worker_base import WorkerBase
+from vllm.v1.worker.worker_base import (
+    CompilationTimes,  # noqa: E402
+    WorkerBase,
+)
 from vllm.v1.worker.workspace import init_workspace_manager
 
 import vllm_ascend.envs as envs_ascend
@@ -60,12 +63,8 @@ from vllm_ascend.utils import (
     enable_sp,
     get_ascend_device_type,
     register_ascend_customop,
-    vllm_version_is,
 )
 from vllm_ascend.worker.model_runner_v1 import NPUModelRunner
-
-if not vllm_version_is("0.19.1"):
-    from vllm.v1.worker.worker_base import CompilationTimes  # noqa: E402
 
 torch._dynamo.trace_rules.clear_lru_cache()  # noqa: E402
 from torch._dynamo.variables import TorchInGraphFunctionVariable  # noqa: E402
@@ -554,8 +553,6 @@ class NPUWorker(WorkerBase):
         # Reset the seed to ensure that the random state is not affected by
         # the model initialization and profiling.
         set_random_seed(self.model_config.seed)
-        if vllm_version_is("0.19.1"):
-            return self.vllm_config.compilation_config.compilation_time
 
         return CompilationTimes(
             language_model=self.vllm_config.compilation_config.compilation_time,
