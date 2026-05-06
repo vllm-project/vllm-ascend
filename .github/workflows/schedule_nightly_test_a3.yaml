@@ -27,7 +27,7 @@ on:
   workflow_dispatch:
     inputs:
       vllm_ascend_branch:
-        description: 'Branch to test (main or releases/v0.18.0)'
+        description: 'Branch to test'
         required: true
         default: 'main'
         type: choice
@@ -77,8 +77,8 @@ jobs:
       contains(github.event.pull_request.labels.*.name, 'nightly-test')
     uses: ./.github/workflows/_parse_trigger.yaml
     with:
-      nightly_test_branch: '["releases/v0.18.0"]'
-      nightly_image_branch: '["main", "releases/v0.18.0"]'
+      nightly_test_branch: '["main"]'
+      nightly_image_branch: '["main"]'
       test_cases: ${{ github.event_name == 'workflow_dispatch' && inputs.test_cases || '' }}
       vllm_ascend_branch_dispatch: ${{ github.event_name == 'workflow_dispatch' && inputs.vllm_ascend_branch || '' }}
 

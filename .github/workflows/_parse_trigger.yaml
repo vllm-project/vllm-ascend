@@ -27,11 +27,11 @@ on:
       nightly_test_branch:
         required: false
         type: string
-        default: '[releases/v0.18.0]'
+        default: '[main]'
       nightly_image_branch:
         required: false
         type: string
-        default: '[releases/v0.18.0, main]'
+        default: '[main]'
       parse_e2e_comment:
         required: false
         type: boolean
