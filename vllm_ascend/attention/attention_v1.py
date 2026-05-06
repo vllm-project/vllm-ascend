@@ -532,12 +532,6 @@ class AscendAttentionBackendImpl(AttentionImpl):
                     torch.npu.graph_task_update_begin(update_stream, handle)
                     input_layout = "TND"
                     extra_args = {}
-                    # head_size=512 uses BNSD layout during capture (query is 4D)
-                    # Must detect and match the layout used during graph capture
-                    use_bnsd_layout = query.dim() == 4
-                    if use_bnsd_layout:
-                        input_layout = "BNSD"
-                        sparse_mode = 0
                     if c8_k_aq_scale is not None:
                         extra_args = {
                             "key_antiquant_scale": c8_k_aq_scale,
