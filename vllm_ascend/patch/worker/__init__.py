@@ -17,7 +17,7 @@
 
 from vllm.triton_utils import HAS_TRITON
 
-from vllm_ascend.utils import is_310p, vllm_version_is
+from vllm_ascend.utils import is_310p
 
 if HAS_TRITON:
     import vllm_ascend.patch.worker.patch_triton
@@ -38,9 +38,8 @@ import vllm_ascend.patch.worker.patch_qwen3_next_mtp  # noqa
 if not is_310p():
     import vllm_ascend.patch.worker.patch_qwen3_5  # noqa
     import vllm_ascend.patch.worker.patch_gdn_attn  # noqa
+    import vllm_ascend.patch.worker.patch_qwen3_dflash  # noqa
 
-    if not vllm_version_is("0.19.1"):
-        import vllm_ascend.patch.worker.patch_qwen3_dflash  # noqa
 import vllm_ascend.patch.worker.patch_rejection_sampler  # noqa
 import vllm_ascend.patch.worker.patch_v2.patch_uva  # noqa
 import vllm_ascend.patch.worker.patch_huanyuan_vl  # noqa
