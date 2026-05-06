@@ -18,7 +18,7 @@
 
 import torch
 import vllm
-from vllm.model_executor.models.utils import _embedding_count_expression, _flatten_embeddings
+from vllm.model_executor.models import utils
 from vllm.multimodal import NestedTensors
 
 
@@ -35,18 +35,29 @@ def _merge_multimodal_embeddings(
     Note:
         This updates ``inputs_embeds`` in place.
     """
-    flattened = _flatten_embeddings(multimodal_embeddings)
+    def masked_scatter_with_index_put(inputs_embeds, is_multimodal, mm_embeds_flat):
+        is_multimodal = is_multimodal.bool()
+        row_indices = is_multimodal.squeeze(-1).nonzero().squeeze(-1)
+        num_rows_to_replace = row_indices.size(0)
+        inputs_embeds[row_indices] = mm_embeds_flat[:num_rows_to_replace]
+        return inputs_embeds
+
+    if len(multimodal_embeddings) == 0:
+        return inputs_embeds
+    mm_embeds_flat = utils._flatten_embeddings(multimodal_embeddings)
     input_dtype = inputs_embeds.dtype
     try:
-        inputs_embeds[is_multimodal] = flattened.to(dtype=input_dtype)
+        inputs_embeds = masked_scatter_with_index_put(
+            inputs_embeds, is_multimodal.unsqueeze(-1), mm_embeds_flat.to(dtype=input_dtype)
+        )
     except RuntimeError as e:
+        num_actual_tokens = len(mm_embeds_flat)
         num_expected_tokens = is_multimodal.sum().item()
-        assert isinstance(num_expected_tokens, int)
 
-        if flattened.shape[0] != num_expected_tokens:
-            expr = _embedding_count_expression(multimodal_embeddings)
+        if num_actual_tokens != num_expected_tokens:
+            expr = utils._embedding_count_expression(multimodal_embeddings)
             raise ValueError(
-                f"Attempted to assign {expr} = {flattened.shape[0]} "
+                f"Attempted to assign {expr} = {num_actual_tokens} "
                 f"multimodal tokens to {num_expected_tokens} placeholders"
             ) from e
         else:
