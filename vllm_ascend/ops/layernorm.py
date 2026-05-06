@@ -21,7 +21,7 @@ from vllm.config import get_current_vllm_config
 from vllm.model_executor.layers.layernorm import GemmaRMSNorm, RMSNorm, RMSNormGated
 
 from vllm_ascend.ops.triton.layernorm_gated import layer_norm_fwd_npu
-from vllm_ascend.utils import enable_custom_op, get_weight_prefetch_method
+from vllm_ascend.utils import enable_custom_op, get_weight_prefetch_method, vllm_version_is
 
 
 class AscendRMSNorm(RMSNorm):
@@ -166,12 +166,27 @@ class AscendRMSNormGated(RMSNormGated):
         norm_before_gate: bool = False,
         device: torch.device | None = None,
         dtype: torch.dtype | None = None,
+        # `activation` was added in vLLM #40245 (Qwen3-Next/GDN). Accept and
+        # forward it; older vllm versions did not pass this kwarg so the
+        # default keeps existing behavior.
+        activation: str = "swish",
     ):
         """If group_size is not None, we do GroupNorm with each group having group_size elements.
         group_size=None is equivalent to group_size=hidden_size (i.e. there's only 1 group).
         """
         factory_kwargs = {"device": device, "dtype": dtype}
-        super().__init__(hidden_size, eps, group_size, norm_before_gate, device, dtype)
+        if vllm_version_is("0.19.1"):
+            super().__init__(hidden_size, eps, group_size, norm_before_gate, device, dtype)
+        else:
+            super().__init__(
+                hidden_size,
+                eps,
+                group_size,
+                norm_before_gate,
+                device,
+                dtype,
+                activation=activation,
+            )
         self.eps = eps
         self.weight = nn.Parameter(torch.empty(hidden_size, **factory_kwargs))
         self.register_parameter("bias", None)

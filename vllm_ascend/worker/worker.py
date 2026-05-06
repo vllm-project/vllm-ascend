@@ -44,10 +44,7 @@ from vllm.v1.core.sched.output import GrammarOutput, SchedulerOutput
 from vllm.v1.kv_cache_interface import KVCacheConfig, KVCacheSpec
 from vllm.v1.outputs import EMPTY_MODEL_RUNNER_OUTPUT, AsyncModelRunnerOutput, DraftTokenIds, ModelRunnerOutput
 from vllm.v1.worker.gpu_worker import AsyncIntermediateTensors
-from vllm.v1.worker.worker_base import (
-    CompilationTimes,  # noqa: E402
-    WorkerBase,
-)
+from vllm.v1.worker.worker_base import WorkerBase
 from vllm.v1.worker.workspace import init_workspace_manager
 
 import vllm_ascend.envs as envs_ascend
@@ -65,6 +62,17 @@ from vllm_ascend.utils import (
     register_ascend_customop,
 )
 from vllm_ascend.worker.model_runner_v1 import NPUModelRunner
+
+if not vllm_version_is("0.19.1"):
+    from vllm.v1.worker.worker_base import CompilationTimes  # noqa: E402
+else:
+    # CompilationTimes was added after v0.19.1; define a compatible fallback.
+    from typing import NamedTuple
+
+    class CompilationTimes(NamedTuple):  # type: ignore[no-redef]
+        language_model: float
+        encoder: float
+
 
 torch._dynamo.trace_rules.clear_lru_cache()  # noqa: E402
 from torch._dynamo.variables import TorchInGraphFunctionVariable  # noqa: E402
@@ -473,7 +481,7 @@ class NPUWorker(WorkerBase):
         with context, set_current_vllm_config(self.vllm_config):
             self.model_runner.load_model()
 
-    def compile_or_warm_up_model(self):
+    def compile_or_warm_up_model(self) -> CompilationTimes:
         # Note: need to adapt for graph mode.
         warmup_sizes = (self.vllm_config.compilation_config.compile_sizes or []).copy()
         if not self.model_config.enforce_eager:
@@ -553,10 +561,15 @@ class NPUWorker(WorkerBase):
         # Reset the seed to ensure that the random state is not affected by
         # the model initialization and profiling.
         set_random_seed(self.model_config.seed)
-
         return CompilationTimes(
             language_model=self.vllm_config.compilation_config.compilation_time,
-            encoder=self.compilation_config.encoder_compilation_time,
+            # `encoder_compilation_time` was added after v0.19.1 (vLLM #39240); fall
+            # back to 0.0 so the older release still constructs CompilationTimes.
+            encoder=getattr(
+                self.vllm_config.compilation_config,
+                "encoder_compilation_time",
+                0.0,
+            ),
         )
 
     def _warm_up_atb(self):
