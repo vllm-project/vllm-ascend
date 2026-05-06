@@ -25,7 +25,6 @@ from vllm.config import VllmConfig, get_current_vllm_config
 from vllm.distributed import get_tensor_model_parallel_rank, get_tensor_model_parallel_world_size
 from vllm.utils.math_utils import cdiv
 from vllm.v1.attention.backend import (  # type: ignore
-    AttentionBackend,
     AttentionCGSupport,
     AttentionImpl,
     AttentionLayer,
@@ -41,6 +40,7 @@ from vllm.v1.kv_cache_interface import AttentionSpec, CrossAttentionSpec
 
 from vllm_ascend.ascend_forward_context import _EXTRA_CTX
 from vllm_ascend.attention.attention_mask import AttentionMaskBuilder
+from vllm_ascend.attention.backend import AscendAttentionBackend, FiaExtraInputPreparer
 from vllm_ascend.attention.context_parallel.common_cp import AscendMetadataForDecode, AscendMetadataForPrefill
 from vllm_ascend.attention.kvcomp_attn.attention_utils import (
     get_kvcomp_decode_params,
@@ -53,7 +53,6 @@ from vllm_ascend.attention.utils import (
     split_decodes_and_prefills,
     using_paged_attention,
 )
-from vllm_ascend.attention.backend import AscendAttentionBackend, FiaExtraInputPreparer
 from vllm_ascend.compilation.acl_graph import (
     get_draft_graph_params,
     get_draft_graph_prefill_params,
@@ -359,7 +358,7 @@ class AscendAttentionMetadataBuilder(AttentionMetadataBuilder[AscendMetadata]):
         return attn_metadata
 
 
-class AscendAttentionBackendImpl(AttentionImpl, ):
+class AscendAttentionBackendImpl(AttentionImpl):
     def __init__(
         self,
         num_heads: int,
