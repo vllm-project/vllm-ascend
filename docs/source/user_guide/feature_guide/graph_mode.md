@@ -126,7 +126,45 @@ outputs = llm.generate("Hello, how are you?")
 
 ### Explicit configuration
 
-To explicitly control Npugraph_ex or enable additional features like static kernel:
+To explicitly control Npugraph_ex:
+
+Offline example:
+
+```python
+from vllm import LLM
+
+model = LLM(
+    model="path/to/Qwen2-7B-Instruct",
+    additional_config={
+        "ascend_compilation_config": {
+            "enable_npugraph_ex": True,
+        }
+    }
+)
+outputs = model.generate("Hello, how are you?")
+```
+
+Online example:
+
+```bash
+vllm serve Qwen/Qwen2-7B-Instruct \
+  --additional-config '{"ascend_compilation_config":{"enable_npugraph_ex":true}}'
+```
+
+To disable Npugraph_ex explicitly:
+
+```bash
+vllm serve Qwen/Qwen2-7B-Instruct \
+  --additional-config '{"ascend_compilation_config":{"enable_npugraph_ex":false}}'
+```
+
+### Static kernel compilation
+
+Static kernel compilation is an **optional** feature that pre-compiles operator binaries with fixed shapes at compile time, reducing runtime overhead for networks with static or near-static shapes. It is **disabled by default** and must be explicitly enabled.
+
+```{note}
+Enabling static kernel triggers a compilation pass during the graph capture phase at service startup. This may add **several minutes to tens of minutes** to the startup time depending on the number of operators to compile and model complexity. Once completed, subsequent request processing is not affected.
+```
 
 Offline example:
 
@@ -152,12 +190,21 @@ vllm serve Qwen/Qwen2-7B-Instruct \
   --additional-config '{"ascend_compilation_config":{"enable_npugraph_ex":true, "enable_static_kernel":true}}'
 ```
 
-To disable Npugraph_ex explicitly:
+#### Verifying static kernel is active
 
-```bash
-vllm serve Qwen/Qwen2-7B-Instruct \
-  --additional-config '{"ascend_compilation_config":{"enable_npugraph_ex":false}}'
+The recommended way to verify static kernel is in effect is through **Ascend Profiling**:
+
+1. Collect a profiling trace of your running model using [Ascend PyTorch Profiler](https://www.hiascend.com/document/detail/zh/Pytorch/2600/apiref/torchnpuCustomsapi/docs/zh/custom_APIs/torch_npu-profiler/torch_npu-profiler-profile.md) (`torch_npu.profiler`).
+2. Open the generated `op_statistic.csv` file.
+3. Look for operators whose `op_type` or `name` column contains the keyword **`static_kernel`**. If such entries exist, static kernel compilation has taken effect for those operators.
+
+During the compilation phase, you will see a Python warning (visible by default):
+
+```text
+Starting static kernel compilation, the build directory is <path>
 ```
+
+This confirms that compilation has been triggered. The absence of this message means static kernel was not enabled or the cached result was reused directly.
 
 For more details about Npugraph_ex, see the [torchair guide](https://www.hiascend.com/document/detail/zh/Pytorch/730/modthirdparty/torchairuseguide/torchair_00021.html).
 
