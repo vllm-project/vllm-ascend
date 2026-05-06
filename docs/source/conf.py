@@ -160,6 +160,7 @@ linkcheck_ignore = [
     r"https?://<[^>]+>.*",
     r"https://github\.com/vllm-project/vllm-ascend/issues/new/choose",
     r"https://github\.com/[^/?#]+/?$",
+    r"https?://.*\$%7B.*%7D.*",
 ]
 
 READTHEDOCS_VERSION_TYPE = os.environ.get("READTHEDOCS_VERSION_TYPE")
