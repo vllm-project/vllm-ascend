@@ -1,4 +1,5 @@
 import importlib
+import logging
 import math
 import threading
 from collections.abc import Generator
@@ -303,7 +304,7 @@ class KVPoolWorker:
             if self.current_layer == self.num_layers - 1:
                 assert ret_token_mask is not None
                 num_retrieved_tokens = ret_token_mask.sum().item()
-                logger.debug(f"Retrieved {num_retrieved_tokens} tokens")
+                logger.debug("Retrieved %s tokens", num_retrieved_tokens)
 
     def save_kv_layer(self, connector_metadata: AscendConnectorMetadata) -> None:
         if self.current_layer == 0:
@@ -418,7 +419,7 @@ class KVPoolWorker:
                 yield None
 
         retrieved_tokens = torch.sum(ret_mask)
-        logger.debug(f"Retrieved {retrieved_tokens} out of {num_required_tokens} out of total {token_len} tokens")
+        logger.debug("Retrieved %s out of %s out of total %s tokens", retrieved_tokens, num_required_tokens, token_len)
 
         yield ret_mask
 
@@ -494,12 +495,13 @@ class KVPoolWorker:
             else set()
         )
 
-        logger.debug(
-            "Number of completed KV cache send requests: %d, receive requests: %d, tp_rank:%d",
-            len(done_sending),
-            len(done_recving),
-            self.tp_rank,
-        )
+        if logger.isEnabledFor(logging.DEBUG):
+            logger.debug(
+                "Number of completed KV cache send requests: %d, receive requests: %d, tp_rank:%d",
+                len(done_sending),
+                len(done_recving),
+                self.tp_rank,
+            )
         return done_sending, done_recving
 
     def get_and_clear_finished_requests(self, finished_req_ids, meta: AscendConnectorMetadata) -> set[str]:
@@ -570,7 +572,7 @@ class KVPoolWorker:
                     return starts[index]
             # all tokens where found, return the maximal end
         except Exception as e:
-            logger.error(f"Remote connection failed in contains: {e}")
+            logger.error("Remote connection failed in contains: %s", e)
             return 0
         return end
 
@@ -628,7 +630,7 @@ class KVPoolWorker:
                 return starts[index]
         # all tokens where found, return the maximal end
         except Exception as e:
-            logger.error(f"Remote connection failed in contains: {e}")
+            logger.error("Remote connection failed in contains: %s", e)
             return 0
         return end
 

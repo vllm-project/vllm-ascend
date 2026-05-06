@@ -2,6 +2,7 @@
 import copy
 from collections.abc import Callable
 from contextlib import AbstractContextManager, contextmanager, nullcontext
+from functools import partial
 from typing import Any
 
 import numpy as np
@@ -17,13 +18,14 @@ from vllm.distributed.parallel_state import (
     init_model_parallel_group,
     patch_tensor_parallel_group,
 )
-from vllm.forward_context import BatchDescriptor, get_forward_context
+from vllm.forward_context import BatchDescriptor, ForwardContext, get_forward_context
 from vllm.logger import logger
 from vllm.model_executor.layers.attention_layer_base import AttentionLayerBase
 from vllm.model_executor.model_loader import get_model
 from vllm.model_executor.models import supports_multimodal
 from vllm.model_executor.models.deepseek_v2 import DeepseekV32IndexerCache
 from vllm.model_executor.models.llama_eagle3 import Eagle3LlamaForCausalLM
+from vllm.model_executor.models.qwen3_dflash import DFlashQwen3ForCausalLM
 from vllm.triton_utils import HAS_TRITON, triton
 from vllm.utils.math_utils import cdiv
 from vllm.utils.platform_utils import is_pin_memory_available
@@ -46,12 +48,7 @@ from vllm_ascend.attention.utils import AscendCommonAttentionMetadata
 from vllm_ascend.compilation.acl_graph import ACLGraphWrapper, update_full_graph_params
 from vllm_ascend.ops.triton.spec_decode.utils import prepare_inputs_padded_kernel
 from vllm_ascend.ops.triton.triton_utils import get_vectorcore_num
-from vllm_ascend.utils import enable_sp, lmhead_tp_enable, shared_expert_dp_enabled, vllm_version_is
-
-if not vllm_version_is("0.19.0"):
-    from vllm.model_executor.models.qwen3_dflash import DFlashQwen3ForCausalLM
-else:
-    DFlashQwen3ForCausalLM = None
+from vllm_ascend.utils import enable_sp, lmhead_tp_enable, shared_expert_dp_enabled
 
 # Currently we will fix block size to a small one since `num_reqs` can't be too large
 _PREPARE_INPUTS_BLOCK_SIZE = 4
@@ -185,6 +182,8 @@ class AscendSpecDecodeBaseProposer(SpecDecodeBaseProposer):
             self.positions = torch.zeros(self.max_num_tokens, dtype=torch.int32, device=device)
 
         self.token_arange_np = np.arange(self.max_num_tokens + 1)
+        self.enable_enpu = self.runner.enable_enpu
+        self.use_eagle = self.runner.use_eagle
 
     def _get_model(self) -> nn.Module:
         """
@@ -325,12 +324,14 @@ class AscendSpecDecodeBaseProposer(SpecDecodeBaseProposer):
     def _maybe_share_lm_head(self, model: nn.Module) -> None:
         # some model definition do not define lm_head explicitly
         # and reuse embed_tokens for lm_head, e.g., CohereForCausalLM
-        if self.method in ("eagle", "dflash") and hasattr(model, "lm_head"):
+        if self.method in ("eagle", "dflash"):
             logger.info("Loading EAGLE or DFLASH LM head weights from the target model.")
-            if supports_multimodal(model):
+            if hasattr(model, "lm_head"):
+                self.model.lm_head = model.lm_head
+            elif hasattr(model, "get_language_model") and hasattr(model.get_language_model(), "lm_head"):
                 self.model.lm_head = model.get_language_model().lm_head
             else:
-                self.model.lm_head = model.lm_head
+                logger.warning("Target model has no accessible lm_head for sharing.")
 
         if self.method == "mtp" and self.vllm_config.model_config.is_deepseek_mla:
             for _, layer_module in self.model.model.layers.items():
@@ -340,10 +341,20 @@ class AscendSpecDecodeBaseProposer(SpecDecodeBaseProposer):
         if self.vllm_config.compilation_config.cudagraph_mode.has_full_cudagraphs() and self.use_cuda_graph:
             self.update_stream = torch.npu.Stream()
             if self.method == "dflash":
-                self.model = ACLGraphWrapper(self.model, self.vllm_config, runtime_mode=CUDAGraphMode.FULL)
+                self.model = ACLGraphWrapper(
+                    self.model,
+                    self.vllm_config,
+                    runtime_mode=CUDAGraphMode.FULL,
+                    use_eagle=self.use_eagle,
+                    enable_enpu=self.enable_enpu,
+                )
             else:
                 self._runnable = ACLGraphWrapper(
-                    self._run_merged_draft, self.vllm_config, runtime_mode=CUDAGraphMode.FULL
+                    self._run_merged_draft,
+                    self.vllm_config,
+                    runtime_mode=CUDAGraphMode.FULL,
+                    use_eagle=self.use_eagle,
+                    enable_enpu=self.enable_enpu,
                 )
 
     def get_model(self) -> nn.Module:
@@ -381,7 +392,12 @@ class AscendSpecDecodeBaseProposer(SpecDecodeBaseProposer):
             aclgraph_runtime_mode = CUDAGraphMode.NONE
 
         # init block table tensor clone is only available after profile run and is only used for graph mode
-        if self.use_cuda_graph and not is_profile and self.block_table_tensor_clone is None:
+        if (
+            self.pcp_size * self.dcp_size > 1
+            and self.use_cuda_graph
+            and not is_profile
+            and self.block_table_tensor_clone is None
+        ):
             self.block_table_tensor_clone = torch.zeros(
                 (
                     self.runner.max_num_tokens + 2 * self.pcp_size * self.runner.max_num_reqs,
@@ -434,9 +450,9 @@ class AscendSpecDecodeBaseProposer(SpecDecodeBaseProposer):
                 common_attn_metadata.slot_mapping = self.slot_mapping_group[draft_step]
                 common_attn_metadata.seq_lens = self.seq_lens_group[draft_step][:num_reqs]
                 common_attn_metadata.query_start_loc = self.query_start_loc_group[draft_step][: num_reqs + 1]
-                if draft_step > 0:
-                    slicing_length = num_reqs * self.decode_threshold if self.pcp_size * self.dcp_size > 1 else num_reqs
+                if self.pcp_size * self.dcp_size > 1 and draft_step > 0:
                     assert self.block_table_tensor_clone is not None, "block_table_tensor_clone is not init"
+                    slicing_length = num_reqs * self.decode_threshold
                     common_attn_metadata.block_table_tensor = self.block_table_tensor_clone[:slicing_length]
                 attn_metadata_eagle = builder.build_for_graph_capture(
                     common_attn_metadata,
@@ -494,6 +510,15 @@ class AscendSpecDecodeBaseProposer(SpecDecodeBaseProposer):
             forward_context = get_forward_context()
             if forward_context.cudagraph_runtime_mode == CUDAGraphMode.FULL and not _EXTRA_CTX.capturing:
                 self._update_full_graph_params(forward_context, num_tokens, multi_steps_attn_metadata)
+
+    def _update_full_graph_params_if_needed(
+        self,
+        forward_context: ForwardContext,
+        num_input_tokens: int,
+        multi_steps_attn_metadata: list[dict[str, Any]],
+    ) -> None:
+        if forward_context.cudagraph_runtime_mode == CUDAGraphMode.FULL:
+            self._update_full_graph_params(forward_context, num_input_tokens, multi_steps_attn_metadata)
 
     def _propose(
         self,
@@ -679,7 +704,7 @@ class AscendSpecDecodeBaseProposer(SpecDecodeBaseProposer):
         # Clone the data so that when calculating the data at position 2 and position 3
         # in the merged graph, it does not affect position 1
         # FIXME(lilinsiman)
-        if self.use_cuda_graph:
+        if self.pcp_size * self.dcp_size > 1 and self.use_cuda_graph:
             assert self.block_table_tensor_clone is not None, "block_table_tensor_clone is not init"
             self.block_table_tensor_clone[: common_attn_metadata.block_table_tensor.shape[0]] = (
                 common_attn_metadata.block_table_tensor
@@ -796,20 +821,24 @@ class AscendSpecDecodeBaseProposer(SpecDecodeBaseProposer):
             if forward_context is not None:
                 forward_context.moe_layer_index = 0
 
-            draft_token_ids = self._runnable(
-                num_input_tokens=num_input_tokens,
-                batch_size=batch_size,
-                token_indices_to_sample=self.token_indices_to_sample[:token_indices_to_sample_len],
-                target_positions=target_positions,
-                inputs_embeds=inputs_embeds,
-                multi_steps_attn_metadata=multi_steps_attn_metadata,
-                num_tokens=num_tokens,
-                is_prefill=attn_metadata_i.num_prefills,
-            )
+            model_inputs: dict[str, Any] = {
+                "num_input_tokens": num_input_tokens,
+                "batch_size": batch_size,
+                "token_indices_to_sample": self.token_indices_to_sample[:token_indices_to_sample_len],
+                "target_positions": target_positions,
+                "inputs_embeds": inputs_embeds,
+                "multi_steps_attn_metadata": multi_steps_attn_metadata,
+                "num_tokens": num_tokens,
+                "is_prefill": attn_metadata_i.num_prefills,
+            }
+            run_draft = partial(self._runnable, **model_inputs)
 
-            forward_context = get_forward_context()
-            if forward_context.cudagraph_runtime_mode == CUDAGraphMode.FULL:
-                self._update_full_graph_params(forward_context, num_input_tokens, multi_steps_attn_metadata)
+            if self.enable_enpu:
+                self._update_full_graph_params_if_needed(forward_context, num_input_tokens, multi_steps_attn_metadata)
+                draft_token_ids = run_draft()
+            else:
+                draft_token_ids = run_draft()
+                self._update_full_graph_params_if_needed(forward_context, num_input_tokens, multi_steps_attn_metadata)
         return draft_token_ids
 
     def _run_merged_draft(
@@ -907,6 +936,14 @@ class AscendSpecDecodeBaseProposer(SpecDecodeBaseProposer):
             for _ in range(self.num_speculative_tokens):
                 draft_token_ids_list.append(draft_token_ids)
             return torch.stack(draft_token_ids_list, dim=1)
+
+        # The logits are split and then merged only when lmhead_tp_enable() is enabled.
+        # As a result, the batch size length becomes the actual length 32.
+        # However, when lmhead_tp_enable() is disabled, the batch size uses the length after padding.
+        # To decouple the scenarios, a judgment is required.
+        # That is, the batch size needs to be modified only when lmhead_tp_enable() is enabled.
+        if lmhead_tp_enable() and self.method == "mtp":
+            batch_size = draft_token_ids.shape[0]
 
         # Generate the remaining draft tokens.
         draft_token_ids_tensor = torch.zeros(
