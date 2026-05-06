@@ -47,7 +47,7 @@ on:
 # It's used to activate ascend-toolkit environment variables.
 defaults:
   run:
-    shell: bash -el {0}
+    shell: bash
 
 # only cancel in-progress runs of the same workflow
 # and ignore the lint / 1 card / 4 cards test type
