@@ -4,7 +4,6 @@ from dataclasses import dataclass
 import numpy as np
 import torch
 
-from vllm.config.compilation import CUDAGraphMode
 from vllm.config import get_current_vllm_config
 from vllm.v1.attention.backend import AttentionBackend
 from vllm.v1.worker.gpu.buffer_utils import async_copy_to_gpu
@@ -22,11 +21,9 @@ class BackendExtraInput:
 
 class BackendExtraInputPreparer:
     @abstractmethod
-    def prepare(self,
-                num_reqs: int,
-                query_start_loc_np: np.ndarray,
-                decode_query_len: int,
-                batch_desc: BatchExecutionDescriptor):
+    def prepare(
+        self, num_reqs: int, query_start_loc_np: np.ndarray, decode_query_len: int, batch_desc: BatchExecutionDescriptor
+    ):
         raise NotImplementedError
 
 @singleton
@@ -37,16 +34,12 @@ class FiaExtraInputPreparer(BackendExtraInputPreparer):
 
         self.extra_input = BackendExtraInput(
             query_start_loc_np=np.empty(max_num_reqs + 2, dtype=np.int32),
-            query_start_loc=torch.zeros(
-                max_num_reqs + 2, dtype=torch.int32, device="npu"
-            ),
+            query_start_loc=torch.zeros(max_num_reqs + 2, dtype=torch.int32, device="npu"),
         )
 
-    def prepare(self,
-                num_reqs: int,
-                query_start_loc_np: np.ndarray,
-                decode_query_len: int,
-                batch_desc: BatchExecutionDescriptor):
+    def prepare(
+        self, num_reqs: int, query_start_loc_np: np.ndarray, decode_query_len: int, batch_desc: BatchExecutionDescriptor
+    ):
         """
         This function is only designed to satisfied the constraint that when the layout is TND,
         the first dimension of `hidden_states` must equal the last element of `actual_seq_lengths_q`.
@@ -54,7 +47,7 @@ class FiaExtraInputPreparer(BackendExtraInputPreparer):
         num_reqs_padded = batch_desc.num_reqs or num_reqs
         num_tokens_padded = batch_desc.num_tokens
 
-        self.extra_input.query_start_loc_np[:num_reqs_padded + 1] = query_start_loc_np[:num_reqs_padded + 1]
+        self.extra_input.query_start_loc_np[: num_reqs_padded + 1] = query_start_loc_np[: num_reqs_padded + 1]
         if num_tokens_padded == num_reqs_padded * decode_query_len:
             # Uniform-batch case: num_reqs must be no greater than num_reqs_padded
             assert num_reqs <= num_reqs_padded

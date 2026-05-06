@@ -118,7 +118,8 @@ def build_attn_metadata(
                 num_reqs_padded = preparer.extra_input.num_reqs_padded
                 common_attn_metadata.query_start_loc = preparer.extra_input.query_start_loc[: num_reqs_padded + 1]
                 common_attn_metadata.query_start_loc_cpu = torch.from_numpy(
-                    extra_kwargs[preparer.extra_input.query_start_loc_np[: num_reqs_padded + 1]])
+                    extra_kwargs[preparer.extra_input.query_start_loc_np[: num_reqs_padded + 1]]
+                )
 
             attn_metadata_builder = attn_group.get_metadata_builder(0)
             metadata = attn_metadata_builder.build(
