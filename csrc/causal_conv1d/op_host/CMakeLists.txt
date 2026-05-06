@@ -14,8 +14,12 @@ add_ops_compile_options(
                 -Werror
 )
 
-target_sources(op_host_aclnn PRIVATE
+target_sources(op_host_aclnnInner PRIVATE
         causal_conv1d_def.cpp
+)
+
+target_sources(opapi PRIVATE
+        aclnn_causal_conv1d.cpp
 )
 
 target_sources(optiling PRIVATE
