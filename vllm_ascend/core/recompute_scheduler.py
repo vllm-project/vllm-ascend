@@ -282,6 +282,7 @@ class RecomputeScheduler(LAPSSchedulerMixin, Scheduler):
         long_capped_count = 0
         short_actual_used_tokens = 0
         long_actual_used_tokens = 0
+        capped_scheduled_req_ids: set[str] = set()
 
         self.kv_cache_manager.new_step_starts()
 
@@ -318,8 +319,6 @@ class RecomputeScheduler(LAPSSchedulerMixin, Scheduler):
             num_new_tokens, was_long_capped = self._apply_long_prefill_cap(
                 request, num_new_tokens
             )
-            if was_long_capped:
-                long_capped_count += 1
             num_new_tokens = self._apply_long_budget_limit(
                 request, num_new_tokens, long_budget_remaining
             )
@@ -413,6 +412,13 @@ class RecomputeScheduler(LAPSSchedulerMixin, Scheduler):
                                 token_budget += released_tokens
                                 if self._is_long_prefill_request(preempted_req):
                                     long_budget_remaining += released_tokens
+                                if preempted_req_id in capped_scheduled_req_ids:
+                                    capped_scheduled_req_ids.remove(preempted_req_id)
+                                    long_capped_count -= 1
+                                if self._is_short_prefill_request(preempted_req):
+                                    short_actual_used_tokens -= released_tokens
+                                elif self._is_long_prefill_request(preempted_req):
+                                    long_actual_used_tokens -= released_tokens
                                 req_to_new_blocks.pop(preempted_req_id)
                                 scheduled_spec_decode_tokens.pop(preempted_req_id, None)
                                 preempted_encoder_inputs = scheduled_encoder_inputs.pop(preempted_req_id, None)
@@ -779,6 +785,7 @@ class RecomputeScheduler(LAPSSchedulerMixin, Scheduler):
                 num_scheduled_tokens[request_id] = num_new_tokens
                 token_budget -= num_new_tokens
                 if was_long_capped:
+                    capped_scheduled_req_ids.add(request_id)
                     long_capped_count += 1
                 if self._is_long_prefill_request(
                     request, num_computed_tokens=num_computed_tokens

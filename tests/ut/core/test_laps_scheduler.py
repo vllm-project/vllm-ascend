@@ -1,6 +1,7 @@
 import pytest
 
 from tests.v1.core.utils import create_requests, create_scheduler
+from vllm.v1.request import RequestStatus
 from vllm.v1.structured_output import StructuredOutputManager
 
 from vllm_ascend.core.laps_scheduler import LAPSScheduler
@@ -74,3 +75,38 @@ def test_laps_short_reserved_budget_reduces_long_prefill_share(monkeypatch):
     assert waiting._last_short_reserved_tokens == 256
     assert waiting._last_short_actual_used_tokens == 64
     assert waiting._last_long_actual_used_tokens == 768
+
+
+@pytest.mark.cpu_test
+def test_laps_long_cap_count_only_tracks_scheduled_requests(monkeypatch):
+    monkeypatch.setenv("VLLM_ASCEND_LAPS_LONG_PREFILL_CAP", "256")
+    monkeypatch.setenv("VLLM_ASCEND_LAPS_SHORT_RESERVED_RATIO", "0")
+    monkeypatch.setenv("VLLM_ASCEND_LAPS_THRESHOLD", "128")
+
+    base_scheduler = create_scheduler(
+        max_num_batched_tokens=1024,
+        enable_chunked_prefill=True,
+    )
+    scheduler = LAPSScheduler(
+        vllm_config=base_scheduler.vllm_config,
+        kv_cache_config=base_scheduler.kv_cache_config,
+        block_size=base_scheduler.block_size,
+        log_stats=True,
+        structured_output_manager=StructuredOutputManager(base_scheduler.vllm_config),
+    )
+
+    request_1 = create_requests(num_requests=1, num_tokens=800)[0]
+    request_2 = create_requests(num_requests=1, num_tokens=800, req_ids=["long-2"])[0]
+    scheduler.add_request(request_1)
+    scheduler.add_request(request_2)
+
+    request_1.status = RequestStatus.RUNNING
+    request_2.status = RequestStatus.RUNNING
+    scheduler.running = [request_1, request_2]
+    scheduler.waiting.remove_requests([request_1, request_2])
+    scheduler.kv_cache_manager.allocate_slots = lambda *args, **kwargs: None
+
+    output = scheduler.schedule()
+
+    assert output.preempted_req_ids
+    assert scheduler.waiting._last_long_capped_count == 0
