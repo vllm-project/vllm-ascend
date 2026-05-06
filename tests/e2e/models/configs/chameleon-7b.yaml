@@ -1,4 +1,4 @@
-model_name: "facebook/chameleon-7b"
+model_name: "LLM-Research/chameleon-7b"
 model_type: "vllm-vlm"
 hardware: "Atlas A2 Series"
 
