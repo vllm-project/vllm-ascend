@@ -76,7 +76,7 @@ class FiaExtraInputPreparer(BackendExtraInputPreparer):
 
         return self.extra_input
     
-class AscendAttentionBackend(AttentionBackend):
+class AscendBaseAttnBackend(AttentionBackend):
     @staticmethod
     @abstractmethod
     def get_extra_input_preparer() -> BackendExtraInputPreparer:
