@@ -60,6 +60,7 @@ from vllm_ascend.utils import (
     enable_sp,
     get_ascend_device_type,
     register_ascend_customop,
+    vllm_version_is
 )
 from vllm_ascend.worker.model_runner_v1 import NPUModelRunner
 
