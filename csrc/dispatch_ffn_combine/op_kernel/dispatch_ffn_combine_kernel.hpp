@@ -65,7 +65,8 @@ template <
     class BlockScheduler_,
     class ElementGroupList_,
     class BlockEpilogue1_,
-    class BlockEpilogue2_
+    class BlockEpilogue2_,
+    class BlockEpilogue3_
 >
 class DispatchFFNCombineKernel {
 public:
@@ -84,8 +85,11 @@ public:
     using ElementPerTokenScale = float;
     using LayoutPerTokenScale = typename layout::VectorLayout;
     using BlockScheduler = BlockScheduler_;
+    
     using BlockEpilogue1 = BlockEpilogue1_;
     using BlockEpilogue2 = BlockEpilogue2_;
+    using BlockEpilogue3 = BlockEpilogue3_;
+
     using ElementD1 = typename BlockEpilogue1::ElementD;
     using LayoutD1 = typename BlockEpilogue1::LayoutD;
     using ElementD2 = typename BlockEpilogue2::ElementD;
@@ -242,6 +246,11 @@ private:
         tokenPerExpertLayout = Layout3D(paddedExpertNumAligned, params.expertPerRank);
         preSumBeforeRank.SetGlobalBuffer(reinterpret_cast<__gm__ int32_t*>(workspaceInfo.ptrSumBeforeRank));
         gmXActiveMask.SetGlobalBuffer(reinterpret_cast<__gm__ bool*>(params.ptrXActiveMask));
+        
+        isCombineV1 = true;
+        if (params.problemShape.m() * params.topK <= 4096) {
+            isCombineV1 = false;
+        }
     }
 
     template<typename T>
@@ -611,7 +620,9 @@ private:
         if constexpr (BlockMmad::DispatchPolicy::ASYNC) {
             blockMmad.SynchronizeBlock();
         }
-        blockMmad.Finalize(params.expertPerRank - 1, 0);
+        if (isCombineV1) {
+            blockMmad.Finalize(params.expertPerRank - 1, 0);
+        }
     }
 
 
@@ -837,7 +848,7 @@ private:
                     int64_t gmOffsetA = params.layoutA.GetOffset(offsetA);
                     int64_t gmOffsetPeer = rowSrc * (params.problemShape.k() + UB_ALIGN);
                     int32_t ubMoveNum = 2;
-                    CopyGMToGMPerTokenV2(gmA[gmOffsetA], gmPerTokenScale1[rowStart], gmRemoteA[gmOffsetPeer],  rows, params.problemShape.k(), ubMoveNum, pingpongIdx);
+                    CopyGMToGMPerToken(gmA[gmOffsetA], gmPerTokenScale1[rowStart], gmRemoteA[gmOffsetPeer],  rows, params.problemShape.k(), ubMoveNum, pingpongIdx);
                 }
 
             }
@@ -871,15 +882,29 @@ private:
         uint32_t n2 = params.problemShape.k();
 
 
-        typename BlockEpilogue2::Params epilogueParams{
+        typename BlockEpilogue2::Params epilogueParams2{
             static_cast<int32_t>(params.EP),
             static_cast<int32_t>(params.expertPerRank),
             reinterpret_cast<__gm__ int32_t *>(shmem() + peermemInfo.offsetPeerTokenPerExpert),
             static_cast<int32_t>(n2)
         };
 
+        typename BlockEpilogue3::Params epilogueParams3{
+            static_cast<int32_t>(params.EP),
+            static_cast<int32_t>(params.expertPerRank),
+            static_cast<int32_t>(params.rank),
+            reinterpret_cast<__gm__ int32_t *>(shmem() + peermemInfo.offsetPeerTokenPerExpert),
+            params.layoutD2,
+            static_cast<int32_t>(n2),
+            static_cast<int32_t>(L1TileShape::N),
+            shmem,
+            static_cast<int32_t>(peermemInfo.offsetD),
+            tokenPerExpertLayout
+        };
+        
         uint32_t n = params.problemShape.n();
-        BlockEpilogue2 blockEpilogue2(resource, epilogueParams);
+        BlockEpilogue2 blockEpilogue2(resource, epilogueParams2);
+        BlockEpilogue3 blockEpilogue3(resource, epilogueParams3);
         BlockEpilogue1 blockEpilogue1(resource, n);
 
         // Synchronous wait: SwiGLU waits for GMM1 [1]
@@ -918,13 +943,18 @@ private:
         }
 
         blockEpilogue1.Finalize();
+        if (isCombineV1) {
+            blockEpilogue2.SetFlag();
+            CombineV1(params, blockEpilogue2);
+        } else {
+            blockEpilogue3.SetFlag();
+            CombineV2(params, blockEpilogue3);
+        }
 
-        blockEpilogue2.SetFlag();
-        CombineV1(params, blockEpilogue2);
+        
+        
         AscendC::SyncAll<true>();
-        #ifndef __CROSSRANKSYNCANDALLGATHERV1__
         ResetTokenPerExpert(params.EP * paddedExpertNumAligned);
-        #endif
 
         shmem.CrossRankSync();
 
@@ -934,6 +964,7 @@ private:
         kernelMoeTokenUnpermuteOp.Init(shmem() + peermemInfo.offsetD, workspaceInfo.expandedRowIdx, params.probs, reinterpret_cast<GM_ADDR>(params.ptrOutput), &tilingData);
         kernelMoeTokenUnpermuteOp.Process();
     }
+
     CATLASS_DEVICE
     void CombineV1(Params const &params, BlockEpilogue2 & blockEpilogue) {
         uint32_t n2 = params.problemShape.k();
@@ -974,6 +1005,68 @@ private:
                 }
             }
             prevGroupSum2 += cumsumMM((params.EP - 1) * params.expertPerRank + groupIdx);
+        }
+        blockEpilogue.Finalize();
+    }
+
+    CATLASS_DEVICE
+    void CombineV2(Params const &params, BlockEpilogue3 & blockEpilogue) {
+        BlockScheduler blockScheduler;
+        int32_t syncLoopIdx = 0;
+        uint32_t startCoreIdx = 0;
+        uint32_t aicCoreNum = coreNum / 2;
+        uint32_t aicCoreIdx = get_block_idx();
+        uint32_t aivSubCoreIdx = get_subblockid();
+        uint32_t preSrcExpertSum = 0;
+        uint32_t n2 = params.problemShape.k();
+        uint32_t k2 = params.problemShape.n() / 2;
+        icache_preload(8);
+        for (uint32_t groupIdx = 0; groupIdx < params.expertPerRank; ++groupIdx) {
+            uint32_t currentExpertM = cumsumMM((params.EP - 1) * params.expertPerRank + groupIdx);
+            if (preSrcExpertSum >= params.maxOutputSize) {
+                currentExpertM = 0;
+            } else if (preSrcExpertSum + currentExpertM > params.maxOutputSize) {
+                currentExpertM = params.maxOutputSize - preSrcExpertSum;
+            }
+            GemmCoord inGroupProblemShape{currentExpertM, n2, k2}; // M N K
+            blockScheduler.Update(inGroupProblemShape, MakeCoord(L1TileShape::M, L1TileShape::N));
+            uint32_t coreLoops = blockScheduler.GetCoreLoops();
+            uint32_t startLoopIdx = ((aicCoreIdx < startCoreIdx) ? (aicCoreIdx + aicCoreNum) : aicCoreIdx) - startCoreIdx;
+
+            for (uint32_t loopIdx = startLoopIdx; loopIdx < coreLoops; loopIdx += aicCoreNum) {
+                GemmCoord blockCoord = blockScheduler.GetBlockCoord(loopIdx);
+                GemmCoord actualBlockShape = blockScheduler.GetActualBlockShape(blockCoord);
+                int32_t m0 = 16;
+                //  Block count, the shape of each block is (m0, actualBlockShape.n())
+                int32_t m_rows = (actualBlockShape.m() + m0 - 1) / m0;
+                int32_t aiv_m_rows = m_rows / 2;
+                if (aivSubCoreIdx == 1 && aiv_m_rows * 2 < m_rows) {
+                    aiv_m_rows += 1;
+                }
+                uint32_t m_offset = blockCoord.m() * L1TileShape::M;//blockOffset
+                if(aivSubCoreIdx == 1) {
+                    m_offset += (m_rows / 2) * m0;
+                }
+
+
+                for (;syncLoopIdx <= groupIdx; syncLoopIdx ++) {
+                    int32_t flag_id = syncLoopIdx / CROSS_CORE_FLAG_MAX_SET_COUNT;
+                    AscendC::CrossCoreWaitFlag<0x2>(flag_id);
+                }
+
+                for (int32_t cur_row = 0; cur_row < aiv_m_rows; cur_row ++) {
+                    GemmCoord realTileCoord{m_offset, blockCoord.n() * L1TileShape::N, 1};
+                    uint32_t actualm = m0;
+                    if(aivSubCoreIdx == 1 && cur_row == aiv_m_rows - 1){
+                        actualm = actualBlockShape.m() - (m_rows / 2) * m0 - cur_row * m0;
+                    }
+                    GemmCoord realTileShape{actualm, actualBlockShape.n(), 1};
+                    blockEpilogue(gmC2, gmPerTokenScale2, realTileCoord, realTileShape, groupIdx, preSrcExpertSum, preSumBeforeRank);
+                    m_offset += m0;
+                }
+            }
+            preSrcExpertSum += currentExpertM;
+            startCoreIdx = (startCoreIdx + coreLoops) % aicCoreNum;
         }
         blockEpilogue.Finalize();
     }
@@ -1080,6 +1173,7 @@ private:
     Layout3D tokenPerExpertLayout;
     HcclShmem shmem;
     int32_t paddedExpertNumAligned;
+    bool isCombineV1;
 };
 
 } // namespace Catlass::Gemm::Kernel
