@@ -276,6 +276,12 @@ class RecomputeScheduler(LAPSSchedulerMixin, Scheduler):
 
         # For logging.
         scheduled_timestamp = time.monotonic()
+        laps_waiting = self._laps_waiting_queue()
+        short_reserved_tokens = self._laps_short_reserved_tokens(token_budget)
+        long_budget_remaining = max(token_budget - short_reserved_tokens, 0)
+        long_capped_count = 0
+        short_actual_used_tokens = 0
+        long_actual_used_tokens = 0
 
         self.kv_cache_manager.new_step_starts()
 
@@ -309,6 +315,17 @@ class RecomputeScheduler(LAPSSchedulerMixin, Scheduler):
             )
             if 0 < self.scheduler_config.long_prefill_token_threshold < num_new_tokens:
                 num_new_tokens = self.scheduler_config.long_prefill_token_threshold
+            num_new_tokens, was_long_capped = self._apply_long_prefill_cap(
+                request, num_new_tokens
+            )
+            if was_long_capped:
+                long_capped_count += 1
+            num_new_tokens = self._apply_long_budget_limit(
+                request, num_new_tokens, long_budget_remaining
+            )
+            if num_new_tokens == 0:
+                req_index += 1
+                continue
             num_new_tokens = min(num_new_tokens, token_budget)
 
             # Make sure the input position does not exceed the max model len.
@@ -392,7 +409,10 @@ class RecomputeScheduler(LAPSSchedulerMixin, Scheduler):
                             if preempted_req in scheduled_running_reqs:
                                 preempted_req_id = preempted_req.request_id
                                 scheduled_running_reqs.remove(preempted_req)
-                                token_budget += num_scheduled_tokens.pop(preempted_req_id)
+                                released_tokens = num_scheduled_tokens.pop(preempted_req_id)
+                                token_budget += released_tokens
+                                if self._is_long_prefill_request(preempted_req):
+                                    long_budget_remaining += released_tokens
                                 req_to_new_blocks.pop(preempted_req_id)
                                 scheduled_spec_decode_tokens.pop(preempted_req_id, None)
                                 preempted_encoder_inputs = scheduled_encoder_inputs.pop(preempted_req_id, None)
@@ -423,6 +443,17 @@ class RecomputeScheduler(LAPSSchedulerMixin, Scheduler):
             req_to_new_blocks[request_id] = new_blocks
             num_scheduled_tokens[request_id] = num_new_tokens
             token_budget -= num_new_tokens
+            if self._is_long_prefill_request(request):
+                long_budget_remaining -= num_new_tokens
+            (
+                short_actual_used_tokens,
+                long_actual_used_tokens,
+            ) = self._record_laps_step_usage(
+                request,
+                num_new_tokens,
+                short_actual_used_tokens=short_actual_used_tokens,
+                long_actual_used_tokens=long_actual_used_tokens,
+            )
             req_index += 1
 
             # Speculative decode related.
@@ -562,6 +593,7 @@ class RecomputeScheduler(LAPSSchedulerMixin, Scheduler):
                 encoder_inputs_to_schedule = None
                 external_load_encoder_input = []
                 new_encoder_compute_budget = encoder_compute_budget
+                was_long_capped = False
 
                 if load_kv_async:
                     # KVTransfer: loading remote KV, do not allocate for new work.
@@ -579,14 +611,37 @@ class RecomputeScheduler(LAPSSchedulerMixin, Scheduler):
                     threshold = self.scheduler_config.long_prefill_token_threshold
                     if 0 < threshold < num_new_tokens:
                         num_new_tokens = threshold
+                    num_new_tokens, was_long_capped = self._apply_long_prefill_cap(
+                        request,
+                        num_new_tokens,
+                        num_computed_tokens=num_computed_tokens,
+                    )
 
                     # chunked prefill has to be enabled explicitly to allow
                     # pooling requests to be chunked
-                    if not self.scheduler_config.enable_chunked_prefill and num_new_tokens > token_budget:
+                    if (
+                        not self.scheduler_config.enable_chunked_prefill
+                        and not self._laps_long_budgeting_enabled()
+                        and num_new_tokens > token_budget
+                    ):
                         # If chunked_prefill is disabled,
                         # we can stop the scheduling here.
                         break
 
+                    num_new_tokens = self._apply_long_budget_limit(
+                        request,
+                        num_new_tokens,
+                        long_budget_remaining,
+                        num_computed_tokens=num_computed_tokens,
+                    )
+                    if num_new_tokens == 0:
+                        if self._is_long_prefill_request(
+                            request, num_computed_tokens=num_computed_tokens
+                        ):
+                            break
+                        num_new_tokens = min(
+                            request.num_tokens - num_computed_tokens, token_budget
+                        )
                     num_new_tokens = min(num_new_tokens, token_budget)
                     assert num_new_tokens > 0
 
@@ -723,6 +778,22 @@ class RecomputeScheduler(LAPSSchedulerMixin, Scheduler):
                 req_to_new_blocks[request_id] = self.kv_cache_manager.get_blocks(request_id)
                 num_scheduled_tokens[request_id] = num_new_tokens
                 token_budget -= num_new_tokens
+                if was_long_capped:
+                    long_capped_count += 1
+                if self._is_long_prefill_request(
+                    request, num_computed_tokens=num_computed_tokens
+                ):
+                    long_budget_remaining -= num_new_tokens
+                (
+                    short_actual_used_tokens,
+                    long_actual_used_tokens,
+                ) = self._record_laps_step_usage(
+                    request,
+                    num_new_tokens,
+                    short_actual_used_tokens=short_actual_used_tokens,
+                    long_actual_used_tokens=long_actual_used_tokens,
+                    num_computed_tokens=num_computed_tokens,
+                )
                 request.status = RequestStatus.RUNNING
                 request.num_computed_tokens = num_computed_tokens
                 # Count the number of prefix cached tokens.
@@ -836,6 +907,14 @@ class RecomputeScheduler(LAPSSchedulerMixin, Scheduler):
 
         with record_function_or_nullcontext("schedule: update_after_schedule"):
             self._update_after_schedule(scheduler_output)
+        if laps_waiting is not None:
+            laps_waiting.record_schedule_step_stats(
+                long_capped_count=long_capped_count,
+                short_reserved_tokens=short_reserved_tokens,
+                short_actual_used_tokens=short_actual_used_tokens,
+                long_actual_used_tokens=long_actual_used_tokens,
+            )
+            laps_waiting._maybe_log_stats()
         return scheduler_output
 
     def update_from_output(

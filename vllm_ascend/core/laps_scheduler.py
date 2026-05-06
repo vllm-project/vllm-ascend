@@ -407,6 +407,10 @@ class LAPSSchedulerMixin:
         self,
         immediate_predicate: Callable[[Request], bool] | None = None,
     ) -> None:
+        self.laps_long_prefill_cap = max(envs.VLLM_ASCEND_LAPS_LONG_PREFILL_CAP, 0)
+        self.laps_short_reserved_ratio = min(
+            max(envs.VLLM_ASCEND_LAPS_SHORT_RESERVED_RATIO, 0.0), 1.0
+        )
         if self.policy != SchedulingPolicy.FCFS:
             logger.warning_once(
                 "VLLM_ASCEND_LAPS_SCHEDULING currently supports only FCFS "
@@ -433,34 +437,6 @@ class LAPSSchedulerMixin:
             wait_max_batch,
             envs.VLLM_ASCEND_LAPS_LONG_PREFILL_CAP,
             envs.VLLM_ASCEND_LAPS_SHORT_RESERVED_RATIO,
-        )
-
-    def _select_waiting_queue_for_scheduling(self) -> RequestQueue | None:
-        waiting = getattr(self, "waiting", None)
-        if isinstance(waiting, LAPSRequestQueue):
-            return waiting.select_waiting_queue_for_scheduling()
-        return super()._select_waiting_queue_for_scheduling()
-
-    def _preempt_request(self, request: Request, timestamp: float) -> None:
-        super()._preempt_request(request, timestamp)
-        waiting = getattr(self, "waiting", None)
-        if isinstance(waiting, LAPSRequestQueue):
-            waiting.remove_request(request)
-            waiting.prepend_request(request, force_immediate=True)
-
-
-from vllm.v1.core.sched.scheduler import Scheduler as BaseScheduler
-
-
-class LAPSScheduler(LAPSSchedulerMixin, BaseScheduler):
-    """vLLM scheduler with the Ascend LAPS waiting queue installed."""
-
-    def __init__(self, *args, **kwargs) -> None:
-        super().__init__(*args, **kwargs)
-        self._init_laps_waiting_queue()
-        self.laps_long_prefill_cap = max(envs.VLLM_ASCEND_LAPS_LONG_PREFILL_CAP, 0)
-        self.laps_short_reserved_ratio = min(
-            max(envs.VLLM_ASCEND_LAPS_SHORT_RESERVED_RATIO, 0.0), 1.0
         )
 
     def _laps_waiting_queue(self) -> LAPSRequestQueue | None:
@@ -503,7 +479,7 @@ class LAPSScheduler(LAPSSchedulerMixin, BaseScheduler):
         if (
             laps_waiting is None
             or token_budget <= 0
-            or self.laps_short_reserved_ratio <= 0
+            or getattr(self, "laps_short_reserved_ratio", 0.0) <= 0
             or not laps_waiting.has_short_requests()
         ):
             return 0
@@ -513,7 +489,10 @@ class LAPSScheduler(LAPSSchedulerMixin, BaseScheduler):
         )
 
     def _laps_long_budgeting_enabled(self) -> bool:
-        return self.laps_long_prefill_cap > 0 or self.laps_short_reserved_ratio > 0
+        return (
+            getattr(self, "laps_long_prefill_cap", 0) > 0
+            or getattr(self, "laps_short_reserved_ratio", 0.0) > 0
+        )
 
     def _apply_long_prefill_cap(
         self,
@@ -522,7 +501,7 @@ class LAPSScheduler(LAPSSchedulerMixin, BaseScheduler):
         num_computed_tokens: int | None = None,
     ) -> tuple[int, bool]:
         if (
-            self.laps_long_prefill_cap <= 0
+            getattr(self, "laps_long_prefill_cap", 0) <= 0
             or not self._is_prefill_request(request, num_computed_tokens)
             or request.num_prompt_tokens <= self.laps_long_prefill_cap
         ):
@@ -556,6 +535,34 @@ class LAPSScheduler(LAPSSchedulerMixin, BaseScheduler):
         elif self._is_long_prefill_request(request, num_computed_tokens):
             long_actual_used_tokens += num_scheduled_tokens
         return short_actual_used_tokens, long_actual_used_tokens
+
+    def _select_waiting_queue_for_scheduling(self) -> RequestQueue | None:
+        waiting = getattr(self, "waiting", None)
+        if isinstance(waiting, LAPSRequestQueue):
+            queue = waiting.select_waiting_queue_for_scheduling()
+            if queue is not None:
+                return queue
+            skipped_waiting = getattr(self, "skipped_waiting", None)
+            return skipped_waiting or None
+        return super()._select_waiting_queue_for_scheduling()
+
+    def _preempt_request(self, request: Request, timestamp: float) -> None:
+        super()._preempt_request(request, timestamp)
+        waiting = getattr(self, "waiting", None)
+        if isinstance(waiting, LAPSRequestQueue):
+            waiting.remove_request(request)
+            waiting.prepend_request(request, force_immediate=True)
+
+
+from vllm.v1.core.sched.scheduler import Scheduler as BaseScheduler
+
+
+class LAPSScheduler(LAPSSchedulerMixin, BaseScheduler):
+    """vLLM scheduler with the Ascend LAPS waiting queue installed."""
+
+    def __init__(self, *args, **kwargs) -> None:
+        super().__init__(*args, **kwargs)
+        self._init_laps_waiting_queue()
 
     def schedule(self) -> SchedulerOutput:
         laps_waiting = self._laps_waiting_queue()
