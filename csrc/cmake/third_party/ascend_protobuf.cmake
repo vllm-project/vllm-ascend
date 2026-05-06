@@ -37,10 +37,10 @@ else()
         set(REQ_URL "file://${CANN_3RD_LIB_PATH}/pkg/${PROTOBUF_VERSION_PKG}")
         message(STATUS "[ThirdPartyLib][ascend protobuf] found in ${REQ_URL}.")
     else()
-        set(REQ_URL "https://gitcode.com/cann-src-third-party/protobuf/releases/download/v25.1/protobuf-25.1.tar.gz")
+        set(REQ_URL "https://antsys-language-compiler.cn-shanghai-alipay-office.oss-alipay.aliyuncs.com/wengang.cwg/protobuf-25.1.tar.gz?OSSAccessKeyId=LTAI5tQJ27aHkT3hMkaZ8Yka&Expires=1792576029&Signature=PKPr6Mhq3u6WTRLYfr9PfXVKG%2Bc%3D")
         message(STATUS "[ThirdPartyLib][ascend protobuf] ${REQ_URL} not found, need download.")
     endif()
-    
+
     set(protobuf_CXXFLAGS "-Wno-maybe-uninitialized -Wno-unused-parameter -fPIC -fstack-protector-all -D_FORTIFY_SOURCE=2 -D_GLIBCXX_USE_CXX11_ABI=0 -O2 -Dgoogle=ascend_private")
     set(protobuf_LDFLAGS "-Wl,-z,relro,-z,now,-z,noexecstack")
 

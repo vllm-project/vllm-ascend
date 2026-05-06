@@ -13,7 +13,7 @@ set(MAKESELF_PATH ${CANN_3RD_LIB_PATH}/makeself)
 
 # 默认配置的makeself还是不存在则下载
 if (NOT EXISTS "${MAKESELF_PATH}/makeself-header.sh" OR NOT EXISTS "${MAKESELF_PATH}/makeself.sh")
-    set(MAKESELF_URL "https://gitcode.com/cann-src-third-party/makeself/releases/download/release-2.5.0-patch1.0/makeself-release-2.5.0-patch1.tar.gz")
+    set(MAKESELF_URL "https://antsys-language-compiler.cn-shanghai-alipay-office.oss-alipay.aliyuncs.com/wengang.cwg/makeself-release-2.5.0-patch1.tar.gz?OSSAccessKeyId=LTAI5tQJ27aHkT3hMkaZ8Yka&Expires=1792576074&Signature=PJAL%2BTIEqGYFUwt7nQAYBk8k2ZY%3D")
     message(STATUS "Downloading ${MAKESELF_NAME} from ${MAKESELF_URL}")
 
     include(FetchContent)
