@@ -52,6 +52,7 @@ from vllm_ascend.worker.v2.input_batch import AscendInputBatch, AscendInputBuffe
 from vllm_ascend.worker.v2.spec_decode.eagle import init_speculator
 from vllm_ascend.worker.v2.spec_decode.eagle.speculator import AscendEagleSpeculator
 from vllm_ascend.worker.v2.states import AscendRequestState
+from vllm_ascend.worker.v2.utils import torch_cuda_wrapper
 
 
 class NPUModelRunner(GPUModelRunner):
