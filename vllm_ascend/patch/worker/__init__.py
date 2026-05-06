@@ -57,7 +57,7 @@ import vllm_ascend.patch.worker.patch_v2.patch_block_table  # noqa
 import vllm_ascend.patch.worker.patch_gqa_c8  # noqa
 # Only import qwen3vl patch when the upstream module exists to avoid import-time
 # failures if upstream vLLM removed/renamed the module.
-if find_spec("vllm.model_executor.models.qwen3_vl"):
+if importlib.util.find_spec("vllm.model_executor.models.qwen3_vl"):
     import vllm_ascend.patch.worker.patch_qwen3vl  # noqa
 import vllm_ascend.patch.worker.patch_v2.patch_attn_utils  # noqa
 import vllm_ascend.patch.worker.patch_bailing_moe_linear  # noqa
