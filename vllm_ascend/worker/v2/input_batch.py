@@ -17,7 +17,6 @@
 # This file is a part of the vllm-ascend project.
 #
 from dataclasses import asdict, dataclass
-from typing import Any
 
 import numpy as np
 import torch

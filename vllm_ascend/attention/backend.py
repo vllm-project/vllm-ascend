@@ -53,12 +53,14 @@ class FiaExtraInputPreparer(BackendExtraInputPreparer):
         """
         num_reqs_padded = batch_desc.num_reqs or num_reqs
         num_tokens_padded = batch_desc.num_tokens
+
+        self.extra_input.query_start_loc_np[:num_reqs_padded + 1] = query_start_loc_np[:num_reqs_padded + 1]
         if num_tokens_padded == num_reqs_padded * decode_query_len:
             # Uniform-batch case: num_reqs must be no greater than num_reqs_padded
             assert num_reqs <= num_reqs_padded
 
-            last_loc = query_start_loc_np[num_reqs]
-            query_start_loc_np[num_reqs + 1 : num_reqs_padded + 1] = (
+            last_loc = self.extra_input.query_start_loc_np[num_reqs]
+            self.extra_input.query_start_loc_np[num_reqs + 1 : num_reqs_padded + 1] = (
                 np.arange(1, num_reqs_padded + 1 - num_reqs) * decode_query_len + last_loc
             )
         else:
@@ -66,11 +68,10 @@ class FiaExtraInputPreparer(BackendExtraInputPreparer):
             assert num_reqs == num_reqs_padded
 
             # Insert a dummy request instead of setting query_start_loc[num_reqs] = num_tokens_padded directly
-            query_start_loc_np[num_reqs_padded + 1] = num_tokens_padded
+            self.extra_input.query_start_loc_np[num_reqs_padded + 1] = num_tokens_padded
             num_reqs_padded = num_reqs_padded + 1
 
         self.extra_input.num_reqs_padded = num_reqs_padded
-        self.extra_input.query_start_loc_np[:num_reqs_padded + 1] = query_start_loc_np[:num_reqs_padded + 1]
         async_copy_to_gpu(self.extra_input.query_start_loc_np, out=self.extra_input.query_start_loc)
 
         return self.extra_input

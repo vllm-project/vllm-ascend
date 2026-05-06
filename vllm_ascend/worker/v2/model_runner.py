@@ -17,7 +17,6 @@
 # This file is a part of the vllm-ascend project.
 #
 from contextlib import contextmanager
-from typing import Any
 
 import numpy as np
 import torch
@@ -34,7 +33,6 @@ from vllm.v1.worker.gpu.input_batch import (
     prepare_pos_seq_lens,
     prepare_prefill_inputs,
 )
-from vllm.v1.kv_cache_interface import KVCacheConfig
 from vllm.v1.worker.gpu.model_runner import GPUModelRunner
 
 from vllm_ascend.ascend_config import get_ascend_config
