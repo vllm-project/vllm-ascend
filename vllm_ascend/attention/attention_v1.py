@@ -543,6 +543,12 @@ class AscendAttentionBackendImpl(AttentionImpl):
                         }
                         input_layout = "BNSD"
                         sparse_mode = 0
+                    # head_size=512 uses BNSD layout (query is 4D instead of 3D)
+                    # This must be detected from query dimensions since update_graph_params
+                    # is a static method without access to self.head_size
+                    elif query.dim() == 4:
+                        input_layout = "BNSD"
+                        sparse_mode = 0
                     torch_npu.npu_fused_infer_attention_score.out(
                         query=query,
                         key=key_cache,
