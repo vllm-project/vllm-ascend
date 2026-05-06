@@ -151,3 +151,77 @@ Suffix Decoding can achieve better performance for tasks with high repetition, s
         generated_text = output.outputs[0].text
         print(f"Prompt: {prompt!r}, Generated text: {generated_text!r}")
     ```
+
+## Extracting Hidden States
+
+The `extract_hidden_states` method is a special speculative decoding mode that does not perform actual speculation. Instead, it extracts hidden states from specified layers of the target model and saves them to disk. This is primarily used for collecting training data for EAGLE-style draft models.
+
+> [!NOTE]
+> This method produces only 1 output token per request. The primary output is the hidden states saved to disk, not the generated text.
+
+- Offline inference
+
+    ```python
+    import tempfile
+
+    from safetensors import safe_open
+    from vllm import LLM, SamplingParams
+
+
+    def main():
+        with tempfile.TemporaryDirectory() as tmpdirname:
+            llm = LLM(
+                model="Qwen/Qwen3-8B",
+                tensor_parallel_size=1,
+                speculative_config={
+                    "method": "extract_hidden_states",
+                    "num_speculative_tokens": 1,
+                    "draft_model_config": {
+                        "hf_config": {
+                            # Layer indices to extract hidden states from
+                            "eagle_aux_hidden_state_layer_ids": [2, 18, 34],
+                        }
+                    },
+                },
+                kv_transfer_config={
+                    "kv_connector": "ExampleHiddenStatesConnector",
+                    "kv_role": "kv_producer",
+                    "kv_connector_extra_config": {
+                        "shared_storage_path": tmpdirname,
+                    },
+                },
+            )
+
+            prompts = ["Hello, how are you?", "What is machine learning?"]
+            sampling_params = SamplingParams(max_tokens=1)
+            outputs = llm.generate(prompts, sampling_params)
+
+            for output in outputs:
+                print("Prompt:", output.prompt)
+                print("Prompt token ids:", output.prompt_token_ids)
+
+                hidden_states_path = output.kv_transfer_params.get("hidden_states_path")
+                print("Hidden states saved to:", hidden_states_path)
+
+                with safe_open(hidden_states_path, "pt") as f:
+                    token_ids = f.get_tensor("token_ids")
+                    hidden_states = f.get_tensor("hidden_states")
+                    print("Shape:", hidden_states.shape)
+                    # Shape: (num_tokens, num_layers, hidden_size)
+
+
+    if __name__ == "__main__":
+        main()
+    ```
+
+Key configuration parameters:
+
+1. **`num_speculative_tokens`**: Must be set to `1`. This method does not perform actual speculation, so the value is fixed.
+
+2. **`eagle_aux_hidden_state_layer_ids`**: List of layer indices from which to extract hidden states. For example, `[2, 18, 34]` extracts from layers 2, 18, and 34.
+
+3. **`kv_connector`**: Must be set to `"ExampleHiddenStatesConnector"` to enable saving hidden states to disk.
+
+4. **`kv_role`**: Must be set to `"kv_producer"` for the extraction mode.
+
+5. **`shared_storage_path`**: Directory where hidden states will be saved as `.safetensors` files (one per request).
