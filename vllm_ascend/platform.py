@@ -241,7 +241,7 @@ class NPUPlatform(Platform):
             return
 
         kv_transfer_config = vllm_config.kv_transfer_config
-        if kv_transfer_config is not None and kv_transfer_config.kv_role != "kv_producer":
+        if kv_transfer_config is None or kv_transfer_config.kv_role != "kv_producer":
             raise ValueError("additional_config.layer_sharding can only be enabled in PD-disaggregated's P node.")
 
     @classmethod
@@ -829,19 +829,6 @@ class NPUPlatform(Platform):
                 )
                 vllm_config.scheduler_config.max_num_partial_prefills = 1
 
-            # Disable async scheduling when speculative decoding is active.
-            # Ascend does not implement the GPU-side num_computed_tokens
-            # correction (update_num_computed_tokens_for_batch_change) required
-            # for async spec decode, which causes accuracy divergence.
-            if vllm_config.speculative_config is not None and getattr(
-                vllm_config.scheduler_config, "async_scheduling", False
-            ):
-                logger.warning(
-                    "Async scheduling with speculative decoding is not yet "
-                    "supported on Ascend. Disabling async scheduling."
-                )
-                vllm_config.scheduler_config.async_scheduling = False
-
         # ==================== 6. Speculative Config ====================
         if vllm_config.speculative_config:
             # Ascend automatically inherits main model quantization
@@ -917,6 +904,27 @@ class NPUPlatform(Platform):
                     "ignored on Ascend. Resetting to default (32)."
                 )
                 att_config.flash_attn_max_num_splits_for_cuda_graph = 32
+
+        # ==================== 9. Parallel Config ====================
+        if vllm_config.parallel_config:
+            if getattr(vllm_config.parallel_config, "enable_dbo", False):
+                logger.warning(
+                    "'--enable-dbo' is currently ignored on Ascend NPU because the "
+                    "upstream generic DBO path has not yet aligned with the Ascend "
+                    "backend/runtime model. Ascend may use separate backend/model-"
+                    "specific overlap optimizations, and this may converge as the "
+                    "generic overlap framework evolves. Resetting to False."
+                )
+                vllm_config.parallel_config.enable_dbo = False
+
+            ubatch_size = getattr(vllm_config.parallel_config, "ubatch_size", 0)
+            if ubatch_size != 0:
+                logger.warning(
+                    "'--ubatch-size' is currently ignored on Ascend NPU because it "
+                    "depends on the generic DBO path, which is not yet aligned with "
+                    "the current Ascend backend/runtime model. Resetting to 0."
+                )
+                vllm_config.parallel_config.ubatch_size = 0
 
     @classmethod
     def use_custom_op_collectives(cls) -> bool:

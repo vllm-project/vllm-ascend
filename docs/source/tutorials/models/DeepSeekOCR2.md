@@ -88,10 +88,10 @@ export PYTORCH_NPU_ALLOC_CONF="expandable_segments:True"
 export TASK_QUEUE_ENABLE=1
 export TOKENIZERS_PARALLELISM=false
 
-vllm serve /weights/DeepSeek-OCR-2 \
+vllm serve /root/.cache/DeepSeek-OCR-2 \
     --served-model-name deepseekocr2 \
     --trust-remote-code \
-    -tp 1  \
+    --tensor-parallel-size 1  \
     --port 1055 \
     --max_model_len 8192 \
     --no-enable-prefix-caching \
@@ -147,7 +147,7 @@ curl http://<node0_ip>:<port>/v1/completions \
 
 ## Accuracy Evaluation
 
-Here are two accuracy evaluation methods.
+Here ia an accuracy evaluation methods.
 
 ### Using AISBench
 
@@ -159,10 +159,6 @@ Here are two accuracy evaluation methods.
 |----- | ----- | ----- | ----- | -----| ----- |
 | textvqa | - | accuracy | gen | 50.28 | 1 Atlas 800 A2 |
 | ominidocbench | - | accuracy | gen | 66.86 | 1 Atlas 800 A2 |
-
-### Using Language Model Evaluation Harness
-
-Not tested yet.
 
 ## Performance
 
