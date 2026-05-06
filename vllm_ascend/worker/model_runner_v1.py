@@ -1458,9 +1458,16 @@ class NPUModelRunner(GPUModelRunner):
             else:
                 logger.warning("RoutedExpertsCapturer is not initialized.")
 
-        if self.ascend_config.profiling_chunk_config.enabled:
-            self._sync_device()
-            self._execution_start_time = time.perf_counter()
+        if self.ascend_config.profiling_chunk_config.need_timing:
+            # Check if the scheduler signaled that calibration is complete.
+            # This flag is set cross-process via scheduler_output because
+            # modifying the config singleton in the scheduler process does
+            # not affect this worker process.
+            if getattr(scheduler_output, "disable_profiling_timing", False):
+                self.ascend_config.profiling_chunk_config.need_timing = False
+            else:
+                self._sync_device()
+                self._execution_start_time = time.perf_counter()
         if self.execute_model_state is not None:
             raise RuntimeError("State error: sample_tokens() must be called after execute_model() returns None.")
         # self._draft_token_ids is None when `input_fits_in_drafter=False`
@@ -1939,7 +1946,7 @@ class NPUModelRunner(GPUModelRunner):
             ec_connector_output=ec_connector_output if self.supports_mm_inputs else None,
             cudagraph_stats=cudagraph_stats,
         )
-        if self.ascend_config.profiling_chunk_config.enabled and hasattr(self, '_execution_start_time'):
+        if self.ascend_config.profiling_chunk_config.need_timing and hasattr(self, '_execution_start_time'):
             self._sync_device()
             model_runner_output.execution_time_ms = (time.perf_counter() - self._execution_start_time) * 1000.0
 

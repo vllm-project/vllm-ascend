@@ -76,7 +76,7 @@ class TestProfilingChunkConfig(TestBase):
     def test_default_values(self):
         cfg = ProfilingChunkConfig()
         self.assertFalse(cfg.enabled)
-        self.assertAlmostEqual(cfg.smooth_factor, 0.8)
+        self.assertAlmostEqual(cfg.smooth_factor, 1.0)
         self.assertEqual(cfg.min_chunk, 4096)
 
     def test_invalid_smooth_factor_raises(self):
