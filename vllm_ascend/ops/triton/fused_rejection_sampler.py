@@ -635,6 +635,33 @@ def _expand_draft_probs_to_logits(
     return draft_logits, req_indices, local_pos
 
 
+def _prepare_draft_logits(
+    draft_logits: torch.Tensor,
+    num_draft_tokens: list[int],
+    cu_num_draft_tokens: torch.Tensor,
+    max_spec_len: int,
+) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+    batch_size = len(num_draft_tokens)
+    assert draft_logits.ndim == 3
+    assert draft_logits.shape[0] == batch_size
+    assert draft_logits.shape[1] >= max_spec_len
+
+    total_num_tokens = sum(num_draft_tokens)
+    num_draft_tokens_tensor = torch.tensor(
+        num_draft_tokens,
+        dtype=cu_num_draft_tokens.dtype,
+        device=draft_logits.device,
+    )
+    req_indices = torch.repeat_interleave(
+        torch.arange(batch_size, dtype=torch.int64, device=draft_logits.device),
+        num_draft_tokens_tensor.to(torch.int64),
+    )
+    cu_start = torch.cat([cu_num_draft_tokens.new_zeros(1), cu_num_draft_tokens[:-1]])
+    local_pos = torch.arange(total_num_tokens, dtype=torch.int64, device=draft_logits.device)
+    local_pos = local_pos - cu_start[req_indices].to(torch.int64)
+    return draft_logits[:, :max_spec_len].contiguous(), req_indices, local_pos
+
+
 def generate_uniform_resample(
     batch_size: int,
     vocab_size: int,
@@ -663,6 +690,45 @@ def fused_rejection_sample_from_probs(
     cu_num_logits = torch.cat([cu_num_draft_tokens.new_zeros(1), cu_num_draft_tokens])
     draft_logits, expanded_idx_mapping, expanded_local_pos = _expand_draft_probs_to_logits(
         draft_probs,
+        num_draft_tokens,
+        cu_num_draft_tokens,
+        max_spec_len,
+    )
+    idx_mapping = torch.arange(batch_size, dtype=torch.int64, device=target_logits.device)
+    output_token_ids, _ = fused_probabilistic_rejection_sample(
+        target_logits,
+        draft_logits,
+        draft_token_ids,
+        bonus_token_ids,
+        cu_num_logits,
+        torch.empty(0, dtype=torch.int64, device=target_logits.device),
+        idx_mapping,
+        expanded_idx_mapping,
+        expanded_local_pos,
+        temperature,
+        uniform_probs,
+        uniform_resample,
+        max_spec_len,
+    )
+    return output_token_ids.to(torch.int32)
+
+
+def fused_rejection_sample_from_logits(
+    draft_token_ids: torch.Tensor,
+    num_draft_tokens: list[int],
+    max_spec_len: int,
+    cu_num_draft_tokens: torch.Tensor,
+    draft_logits: torch.Tensor,
+    target_logits: torch.Tensor,
+    bonus_token_ids: torch.Tensor,
+    uniform_probs: torch.Tensor,
+    uniform_resample: torch.Tensor,
+    temperature: torch.Tensor,
+) -> torch.Tensor:
+    batch_size = len(num_draft_tokens)
+    cu_num_logits = torch.cat([cu_num_draft_tokens.new_zeros(1), cu_num_draft_tokens])
+    draft_logits, expanded_idx_mapping, expanded_local_pos = _prepare_draft_logits(
+        draft_logits,
         num_draft_tokens,
         cu_num_draft_tokens,
         max_spec_len,

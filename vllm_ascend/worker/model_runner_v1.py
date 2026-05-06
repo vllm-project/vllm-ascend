@@ -115,6 +115,10 @@ from vllm_ascend.ops.rotary_embedding import set_cos_and_sin, update_cos_sin
 from vllm_ascend.patch.worker.patch_draft_quarot import patch_load_weights
 from vllm_ascend.patch.worker.patch_module import patch_torch_npu_argsort
 from vllm_ascend.quantization.utils import enable_fa_quant
+from vllm_ascend.sample.rejection_sampler import (
+    clear_sampling_metadata_draft_logits,
+    set_sampling_metadata_draft_logits,
+)
 from vllm_ascend.sample.sampler import AscendSampler
 from vllm_ascend.spec_decode import get_spec_decode_method
 from vllm_ascend.spec_decode.dflash_proposer import AscendDflashProposer
@@ -2047,12 +2051,19 @@ class NPUModelRunner(GPUModelRunner):
 
         if lmhead_tp_enable() and logits is not None:
             logits = logits[: len(spec_decode_metadata.logits_indices)]
-        sampler_output = self.rejection_sampler(
-            spec_decode_metadata,
-            None,  # draft_probs
-            logits,
-            sampling_metadata,
-        )
+        draft_logits = getattr(self.drafter, "draft_logits", None) if self.drafter is not None else None
+        # RejectionSampler still takes the upstream public signature, so stash
+        # draft logits in the Ascend side table for the patched sampler path.
+        set_sampling_metadata_draft_logits(sampling_metadata, draft_logits)
+        try:
+            sampler_output = self.rejection_sampler(
+                spec_decode_metadata,
+                None,  # draft_probs
+                logits,
+                sampling_metadata,
+            )
+        finally:
+            clear_sampling_metadata_draft_logits(sampling_metadata)
         return sampler_output
 
     # TODO: remove this func after eagle_proposer is refactored and
