@@ -283,7 +283,7 @@ jobs:
             env:
               PIP_EXTRA_INDEX_URL: https://mirrors.huaweicloud.com/ascend/repos/pypi
             run: |
-              uv pip install uc-manager
+              pip install uc-manager
               uv pip install -r requirements-dev.txt
               uv pip install -v -e .
               uv pip install tblib mteb runai_model_streamer pqdm timm schemathesis==3.39.15 "vllm[helion]" "runai-model-streamer[s3,gcs]"
