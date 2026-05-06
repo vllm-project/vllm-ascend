@@ -12,7 +12,6 @@ from vllm_ascend.attention.context_parallel.common_cp import AscendPCPMetadata
 from vllm_ascend.attention.sfa_v1 import AscendSFAImpl, AscendSFAMetadata, AscendSFAMetadataBuilder
 from vllm_ascend.attention.utils import AscendCommonAttentionMetadata, enabling_mlapo, split_decodes_and_prefills
 from vllm_ascend.ops.triton.rope import rope_forward_triton_siso
-from vllm_ascend.utils import vllm_version_is
 
 M = TypeVar("M", bound=AscendSFAMetadata)
 
@@ -414,12 +413,8 @@ class AscendSFACPImpl(AscendSFAImpl):
         actual_seq_lengths_query: torch.Tensor,
         actual_seq_lengths_key: torch.Tensor,
     ):
-        if vllm_version_is("0.19.1"):
-            weights, _ = self.weights_proj(x)
-        else:
-            kw, _ = self.wk_weights_proj(x)
-            weights = kw[:, self.head_dim :]
-
+        kw, _ = self.wk_weights_proj(x)
+        weights = kw[:, self.head_dim :]
         q_li, _ = self.wq_b(q_c)  # [b,s,1536] @ [1536,64*128] = [b,s,64*128]
         q_li = q_li.view(-1, self.n_head, self.head_dim)  # [n_toks,64,128]
         if HAS_TRITON:
