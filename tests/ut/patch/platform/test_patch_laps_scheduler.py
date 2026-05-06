@@ -206,6 +206,35 @@ def test_prepend_request_can_force_immediate_queue():
         assert queue.select_waiting_queue_for_scheduling() is None
 
 
+def test_select_waiting_queue_prefers_skipped_waiting_under_fcfs():
+    class SchedulerStub:
+        policy = SchedulingPolicy.FCFS
+
+    queue = LAPSRequestQueue(
+        policy=SchedulingPolicy.FCFS,
+        threshold=16,
+        wait_window_ms=10.0,
+        wait_max_batch=4,
+    )
+    skipped_waiting = SimpleNamespace(marker="skipped")
+
+    scheduler = SchedulerStub()
+    scheduler.waiting = queue
+    scheduler.skipped_waiting = skipped_waiting
+
+    short_request = make_request("short", 8)
+    long_request = make_request("long", 64)
+    queue.add_request(short_request)
+    queue.add_request(long_request)
+
+    from vllm_ascend.core.laps_scheduler import LAPSSchedulerMixin
+
+    selected_queue = LAPSSchedulerMixin._select_waiting_queue_for_scheduling(
+        scheduler
+    )
+    assert selected_queue is skipped_waiting
+
+
 def test_remove_request_uses_request_id_instead_of_identity():
     queue = LAPSRequestQueue(
         policy=SchedulingPolicy.FCFS,

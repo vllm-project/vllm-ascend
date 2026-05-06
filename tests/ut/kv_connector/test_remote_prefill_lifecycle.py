@@ -435,3 +435,29 @@ def test_recompute_scheduler_applies_laps_budgeting(monkeypatch):
     assert waiting._last_short_reserved_tokens == 256
     assert waiting._last_short_actual_used_tokens == 64
     assert waiting._last_long_actual_used_tokens == 768
+
+
+def test_recompute_scheduler_disables_laps_budgeting_under_priority_policy(monkeypatch):
+    monkeypatch.setenv("VLLM_ASCEND_LAPS_SCHEDULING", "1")
+    monkeypatch.setenv("VLLM_ASCEND_LAPS_THRESHOLD", "128")
+    monkeypatch.setenv("VLLM_ASCEND_LAPS_LONG_PREFILL_CAP", "256")
+    monkeypatch.setenv("VLLM_ASCEND_LAPS_SHORT_RESERVED_RATIO", "0.25")
+
+    vllm_config = create_vllm_config(max_num_batched_tokens=1024)
+    vllm_config.scheduler_config.policy = "priority"
+    base_scheduler = create_scheduler(vllm_config)
+    base_scheduler.scheduler_config.policy = base_scheduler.vllm_config.scheduler_config.policy
+    scheduler = RecomputeScheduler(
+        vllm_config=vllm_config,
+        kv_cache_config=base_scheduler.kv_cache_config,
+        log_stats=True,
+        block_size=vllm_config.cache_config.block_size,
+        structured_output_manager=base_scheduler.structured_output_manager,
+    )
+
+    long_request = create_request(request_id=17, num_tokens=800)
+    scheduler.add_request(long_request)
+    output = scheduler.schedule()
+
+    assert output.num_scheduled_tokens[long_request.request_id] == 800
+    assert scheduler._laps_waiting_queue() is None or not scheduler._laps_long_budgeting_enabled()

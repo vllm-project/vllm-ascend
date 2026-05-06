@@ -403,14 +403,13 @@ class LAPSRequestQueue(RequestQueue):
 class LAPSSchedulerMixin:
     """Inject a LAPS-style waiting queue into vLLM's scheduler."""
 
+    laps_long_prefill_cap: int = 0
+    laps_short_reserved_ratio: float = 0.0
+
     def _init_laps_waiting_queue(
         self,
         immediate_predicate: Callable[[Request], bool] | None = None,
     ) -> None:
-        self.laps_long_prefill_cap = max(envs.VLLM_ASCEND_LAPS_LONG_PREFILL_CAP, 0)
-        self.laps_short_reserved_ratio = min(
-            max(envs.VLLM_ASCEND_LAPS_SHORT_RESERVED_RATIO, 0.0), 1.0
-        )
         if self.policy != SchedulingPolicy.FCFS:
             logger.warning_once(
                 "VLLM_ASCEND_LAPS_SCHEDULING currently supports only FCFS "
@@ -418,6 +417,10 @@ class LAPSSchedulerMixin:
             )
             return
 
+        self.laps_long_prefill_cap = max(envs.VLLM_ASCEND_LAPS_LONG_PREFILL_CAP, 0)
+        self.laps_short_reserved_ratio = min(
+            max(envs.VLLM_ASCEND_LAPS_SHORT_RESERVED_RATIO, 0.0), 1.0
+        )
         threshold = envs.VLLM_ASCEND_LAPS_THRESHOLD
         wait_window_ms = envs.VLLM_ASCEND_LAPS_WAIT_WINDOW_MS
         wait_max_batch = envs.VLLM_ASCEND_LAPS_WAIT_MAX_BATCH
@@ -489,6 +492,8 @@ class LAPSSchedulerMixin:
         )
 
     def _laps_long_budgeting_enabled(self) -> bool:
+        if self._laps_waiting_queue() is None:
+            return False
         return (
             getattr(self, "laps_long_prefill_cap", 0) > 0
             or getattr(self, "laps_short_reserved_ratio", 0.0) > 0
@@ -539,10 +544,12 @@ class LAPSSchedulerMixin:
     def _select_waiting_queue_for_scheduling(self) -> RequestQueue | None:
         waiting = getattr(self, "waiting", None)
         if isinstance(waiting, LAPSRequestQueue):
+            skipped_waiting = getattr(self, "skipped_waiting", None)
+            if self.policy == SchedulingPolicy.FCFS and skipped_waiting:
+                return skipped_waiting
             queue = waiting.select_waiting_queue_for_scheduling()
             if queue is not None:
                 return queue
-            skipped_waiting = getattr(self, "skipped_waiting", None)
             return skipped_waiting or None
         return super()._select_waiting_queue_for_scheduling()
 
