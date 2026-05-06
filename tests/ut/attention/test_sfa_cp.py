@@ -1029,9 +1029,7 @@ class TestAscendSFACPImpl(TestBase):
                 create=True,
                 return_value=torch.randn(2, 4, 32),
             ),
-            patch(
-                "vllm_ascend.attention.context_parallel.sfa_cp.get_forward_context"
-            ) as mock_fc,
+            patch("vllm_ascend.attention.context_parallel.sfa_cp.get_forward_context") as mock_fc,
         ):
             mock_fc.return_value = MagicMock(num_tokens=4)
             result = self.impl._execute_sparse_flash_attention_process(
@@ -1085,9 +1083,7 @@ class TestAscendSFACPImpl(TestBase):
                 create=True,
                 side_effect=fake_sfa,
             ),
-            patch(
-                "vllm_ascend.attention.context_parallel.sfa_cp.get_forward_context"
-            ) as mock_fc,
+            patch("vllm_ascend.attention.context_parallel.sfa_cp.get_forward_context") as mock_fc,
         ):
             mock_fc.return_value = MagicMock(num_tokens=5)
             result = self.impl._execute_sparse_flash_attention_process(
@@ -1217,9 +1213,7 @@ class TestAscendSFACPImpl(TestBase):
             torch.randn(2, self.impl.n_head * self.impl.head_dim),
             None,
         )
-        mock_torch_npu.npu_rotary_mul.return_value = torch.randn(
-            2, self.impl.n_head, 1, self.impl.qk_rope_head_dim
-        )
+        mock_torch_npu.npu_rotary_mul.return_value = torch.randn(2, self.impl.n_head, 1, self.impl.qk_rope_head_dim)
 
         attn_metadata = MagicMock()
         attn_metadata.num_decodes = 2
