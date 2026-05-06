@@ -210,7 +210,7 @@ class AscendFusedMoEWithLoRA(FusedMoEWithLoRA):
         packed_modules_list: list,
         model_config: PretrainedConfig | None = None,
     ) -> bool:
-        return isinstance(source_layer, AscendFusedMoE) and len(packed_modules_list) == 2
+        return type(source_layer) is AscendFusedMoE and len(packed_modules_list) == 2
 
     def __init__(self, base_layer: FusedMoE) -> None:
         from vllm.lora.layers.base import BaseLayerWithLoRA
@@ -249,4 +249,5 @@ def refresh_all_lora_classes():
     vllm.lora.utils._all_lora_classes.add(AscendQKVParallelLinearWithShardedLoRA)
     vllm.lora.utils._all_lora_classes.add(AscendRowParallelLinearWithShardedLoRA)
     vllm.lora.utils._all_lora_classes.add(AscendReplicatedLinearWithLoRA)
+    vllm.lora.utils._all_lora_classes.discard(FusedMoEWithLoRA)
     vllm.lora.utils._all_lora_classes.add(AscendFusedMoEWithLoRA)
