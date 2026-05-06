@@ -26,7 +26,6 @@ from vllm_ascend.ops.linear import (
     AscendRowParallelLinear,
 )
 from vllm_ascend.ops.vocab_parallel_embedding import AscendVocabParallelEmbedding
-from vllm_ascend.utils import vllm_version_is
 
 
 class AscendColumnParallelLinearWithLoRA(ColumnParallelLinearWithLoRA):
@@ -200,13 +199,9 @@ def refresh_all_lora_classes():
         AscendRowParallelLinearWithShardedLoRA,
         AscendReplicatedLinearWithLoRA,
     )
-    if vllm_version_is("0.19.1"):
-        for cls in ascend_classes:
-            vllm.lora.utils._all_lora_classes.add(cls)
-    else:
-        # vLLM #35077 changed _all_lora_classes from set to ordered tuple.
-        # Append the Ascend classes in a deterministic order.
-        vllm.lora.utils._all_lora_classes = (
-            *vllm.lora.utils._all_lora_classes,
-            *ascend_classes,
-        )
+    # vLLM #35077 changed _all_lora_classes from set to ordered tuple.
+    # Append the Ascend classes in a deterministic order.
+    vllm.lora.utils._all_lora_classes = (
+        *vllm.lora.utils._all_lora_classes,
+        *ascend_classes,
+    )
