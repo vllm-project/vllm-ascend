@@ -325,6 +325,10 @@ def test_recompute_scheduler_uses_pd_aware_laps_queue(monkeypatch):
 
     assert scheduler._should_bypass_laps_wait_window(request)
 
+    request.status = RequestStatus.WAITING
+    request.num_computed_tokens = 1
+    assert scheduler._should_bypass_laps_wait_window(request)
+
 
 def test_recompute_scheduler_selects_schedulable_laps_subqueue(monkeypatch):
     monkeypatch.setenv("VLLM_ASCEND_LAPS_SCHEDULING", "1")
@@ -435,6 +439,61 @@ def test_recompute_scheduler_applies_laps_budgeting(monkeypatch):
     assert waiting._last_short_reserved_tokens == 256
     assert waiting._last_short_actual_used_tokens == 64
     assert waiting._last_long_actual_used_tokens == 768
+
+
+def test_recompute_scheduler_long_prefill_cap_does_not_limit_short_prefill(monkeypatch):
+    monkeypatch.setenv("VLLM_ASCEND_LAPS_SCHEDULING", "1")
+    monkeypatch.setenv("VLLM_ASCEND_LAPS_THRESHOLD", "256")
+    monkeypatch.setenv("VLLM_ASCEND_LAPS_LONG_PREFILL_CAP", "128")
+    monkeypatch.setenv("VLLM_ASCEND_LAPS_SHORT_RESERVED_RATIO", "0")
+
+    vllm_config = create_vllm_config(max_num_batched_tokens=1024)
+    base_scheduler = create_scheduler(vllm_config)
+    scheduler = RecomputeScheduler(
+        vllm_config=vllm_config,
+        kv_cache_config=base_scheduler.kv_cache_config,
+        log_stats=True,
+        block_size=vllm_config.cache_config.block_size,
+        structured_output_manager=base_scheduler.structured_output_manager,
+    )
+
+    short_request = create_request(request_id=18, num_tokens=200)
+    scheduler.add_request(short_request)
+    output = scheduler.schedule()
+
+    assert output.num_scheduled_tokens[short_request.request_id] == 200
+    waiting = scheduler.waiting
+    assert isinstance(waiting, LAPSRequestQueue)
+    assert waiting._last_long_capped_count == 0
+    assert waiting._last_short_actual_used_tokens == 200
+    assert waiting._last_long_actual_used_tokens == 0
+
+
+def test_recompute_scheduler_releases_unused_short_reservation(monkeypatch):
+    monkeypatch.setenv("VLLM_ASCEND_LAPS_SCHEDULING", "1")
+    monkeypatch.setenv("VLLM_ASCEND_LAPS_THRESHOLD", "128")
+    monkeypatch.setenv("VLLM_ASCEND_LAPS_LONG_PREFILL_CAP", "0")
+    monkeypatch.setenv("VLLM_ASCEND_LAPS_SHORT_RESERVED_RATIO", "0.5")
+
+    vllm_config = create_vllm_config(max_num_batched_tokens=1024)
+    base_scheduler = create_scheduler(vllm_config)
+    scheduler = RecomputeScheduler(
+        vllm_config=vllm_config,
+        kv_cache_config=base_scheduler.kv_cache_config,
+        log_stats=True,
+        block_size=vllm_config.cache_config.block_size,
+        structured_output_manager=base_scheduler.structured_output_manager,
+    )
+
+    short_request = create_request(request_id=19, num_tokens=64)
+    long_request = create_request(request_id=20, num_tokens=800)
+
+    scheduler.add_request(short_request)
+    scheduler.add_request(long_request)
+    output = scheduler.schedule()
+
+    assert output.num_scheduled_tokens[short_request.request_id] == 64
+    assert output.num_scheduled_tokens[long_request.request_id] == 800
 
 
 def test_recompute_scheduler_disables_laps_budgeting_under_priority_policy(monkeypatch):

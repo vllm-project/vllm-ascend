@@ -46,14 +46,52 @@ def test_wait_window_holds_isolated_short_request():
         queue.add_request(short_request)
 
         assert len(queue) == 1
-        assert queue
+        assert not queue
+        assert not queue.has_schedulable_requests()
         assert queue.select_waiting_queue_for_scheduling() is None
         current_time["value"] = 0.009
         assert len(queue) == 1
-        assert queue
+        assert not queue
+        assert not queue.has_schedulable_requests()
         assert queue.select_waiting_queue_for_scheduling() is None
         current_time["value"] = 0.011
         assert queue
+        assert queue.has_schedulable_requests()
+        assert queue.peek_request() is short_request
+
+
+def test_wait_window_blocks_peek_and_pop_until_request_is_schedulable():
+    current_time = {"value": 0.0}
+
+    with patch(
+        "vllm_ascend.core.laps_scheduler.time.monotonic",
+        side_effect=lambda: current_time["value"],
+    ):
+        queue = LAPSRequestQueue(
+            policy=SchedulingPolicy.FCFS,
+            threshold=16,
+            wait_window_ms=10.0,
+            wait_max_batch=4,
+        )
+        short_request = make_request("short", 8)
+        queue.add_request(short_request)
+
+        assert not queue
+        assert not queue.has_schedulable_requests()
+        try:
+            queue.peek_request()
+            raise AssertionError("peek_request should fail before dispatch window elapses")
+        except IndexError:
+            pass
+
+        try:
+            queue.pop_request()
+            raise AssertionError("pop_request should fail before dispatch window elapses")
+        except IndexError:
+            pass
+
+        current_time["value"] = 0.011
+        assert queue.has_schedulable_requests()
         assert queue.peek_request() is short_request
 
 
@@ -76,12 +114,15 @@ def test_long_request_can_run_while_short_batch_is_waiting():
         queue.add_request(long_request)
 
         assert queue
+        assert queue.has_schedulable_requests()
         assert queue.peek_request() is long_request
         assert queue.pop_request() is long_request
 
         assert not queue
+        assert not queue.has_schedulable_requests()
         current_time["value"] = 0.011
         assert queue
+        assert queue.has_schedulable_requests()
         assert queue.pop_request() is short_request
 
 
@@ -102,9 +143,11 @@ def test_short_batch_dispatches_early_when_target_batch_size_is_reached():
         short_request_2 = make_request("short-2", 12)
         queue.add_request(short_request_1)
         assert not queue
+        assert not queue.has_schedulable_requests()
 
         queue.add_request(short_request_2)
         assert queue
+        assert queue.has_schedulable_requests()
         assert queue.pop_request() is short_request_1
         assert queue.pop_request() is short_request_2
 
@@ -139,11 +182,13 @@ def test_immediate_requests_bypass_short_wait_window():
         assert queue
         assert queue.peek_request() is resumed_request
         assert queue.pop_request() is resumed_request
-        assert queue
+        assert not queue
+        assert not queue.has_schedulable_requests()
         assert queue.select_waiting_queue_for_scheduling() is None
 
         current_time["value"] = 0.011
         assert queue
+        assert queue.has_schedulable_requests()
         assert queue.pop_request() is short_request
 
 
@@ -169,7 +214,8 @@ def test_select_waiting_queue_for_scheduling_uses_internal_subqueues():
         assert queue.select_waiting_queue_for_scheduling().peek_request() is long_request
 
         queue.pop_request()
-        assert queue
+        assert not queue
+        assert not queue.has_schedulable_requests()
         assert queue.select_waiting_queue_for_scheduling() is None
 
 
@@ -203,6 +249,7 @@ def test_prepend_request_can_force_immediate_queue():
 
         assert queue.peek_request() is preempted_request
         assert queue.pop_request() is preempted_request
+        assert not queue.has_schedulable_requests()
         assert queue.select_waiting_queue_for_scheduling() is None
 
 

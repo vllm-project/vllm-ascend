@@ -78,6 +78,40 @@ def test_laps_short_reserved_budget_reduces_long_prefill_share(monkeypatch):
 
 
 @pytest.mark.cpu_test
+def test_laps_long_prefill_cap_does_not_limit_short_prefill(monkeypatch):
+    monkeypatch.setenv("VLLM_ASCEND_LAPS_LONG_PREFILL_CAP", "128")
+    monkeypatch.setenv("VLLM_ASCEND_LAPS_SHORT_RESERVED_RATIO", "0")
+    monkeypatch.setenv("VLLM_ASCEND_LAPS_THRESHOLD", "256")
+
+    base_scheduler = create_scheduler(
+        max_num_batched_tokens=1024,
+        enable_chunked_prefill=True,
+    )
+    scheduler = LAPSScheduler(
+        vllm_config=base_scheduler.vllm_config,
+        kv_cache_config=base_scheduler.kv_cache_config,
+        block_size=base_scheduler.block_size,
+        log_stats=True,
+        structured_output_manager=StructuredOutputManager(base_scheduler.vllm_config),
+    )
+
+    short_request = create_requests(
+        num_requests=1,
+        num_tokens=200,
+        req_ids=["short-200"],
+    )[0]
+
+    scheduler.add_request(short_request)
+    output = scheduler.schedule()
+
+    assert output.num_scheduled_tokens[short_request.request_id] == 200
+    waiting = scheduler.waiting
+    assert waiting._last_long_capped_count == 0
+    assert waiting._last_short_actual_used_tokens == 200
+    assert waiting._last_long_actual_used_tokens == 0
+
+
+@pytest.mark.cpu_test
 def test_laps_long_cap_count_only_tracks_scheduled_requests(monkeypatch):
     monkeypatch.setenv("VLLM_ASCEND_LAPS_LONG_PREFILL_CAP", "256")
     monkeypatch.setenv("VLLM_ASCEND_LAPS_SHORT_RESERVED_RATIO", "0")
@@ -110,3 +144,68 @@ def test_laps_long_cap_count_only_tracks_scheduled_requests(monkeypatch):
 
     assert output.preempted_req_ids
     assert scheduler.waiting._last_long_capped_count == 0
+
+
+@pytest.mark.cpu_test
+def test_laps_preempted_request_is_requeued_immediately(monkeypatch):
+    monkeypatch.setenv("VLLM_ASCEND_LAPS_THRESHOLD", "256")
+    monkeypatch.setenv("VLLM_ASCEND_LAPS_WAIT_WINDOW_MS", "10")
+    monkeypatch.setenv("VLLM_ASCEND_LAPS_WAIT_MAX_BATCH", "4")
+    monkeypatch.setenv("VLLM_ASCEND_LAPS_LONG_PREFILL_CAP", "0")
+    monkeypatch.setenv("VLLM_ASCEND_LAPS_SHORT_RESERVED_RATIO", "0")
+
+    base_scheduler = create_scheduler(
+        max_num_batched_tokens=1024,
+        enable_chunked_prefill=True,
+    )
+    scheduler = LAPSScheduler(
+        vllm_config=base_scheduler.vllm_config,
+        kv_cache_config=base_scheduler.kv_cache_config,
+        block_size=base_scheduler.block_size,
+        log_stats=True,
+        structured_output_manager=StructuredOutputManager(base_scheduler.vllm_config),
+    )
+
+    request = create_requests(num_requests=1, num_tokens=64)[0]
+    request.status = RequestStatus.RUNNING
+
+    scheduler._preempt_request(request, 0.0)
+
+    selected_queue = scheduler._select_waiting_queue_for_scheduling()
+    assert selected_queue is not None
+    assert selected_queue.peek_request() is request
+
+
+@pytest.mark.cpu_test
+def test_laps_non_budget_path_records_short_usage(monkeypatch):
+    monkeypatch.setenv("VLLM_ASCEND_LAPS_THRESHOLD", "256")
+    monkeypatch.setenv("VLLM_ASCEND_LAPS_WAIT_WINDOW_MS", "0")
+    monkeypatch.setenv("VLLM_ASCEND_LAPS_WAIT_MAX_BATCH", "4")
+    monkeypatch.setenv("VLLM_ASCEND_LAPS_LONG_PREFILL_CAP", "0")
+    monkeypatch.setenv("VLLM_ASCEND_LAPS_SHORT_RESERVED_RATIO", "0")
+
+    base_scheduler = create_scheduler(
+        max_num_batched_tokens=1024,
+        enable_chunked_prefill=True,
+    )
+    scheduler = LAPSScheduler(
+        vllm_config=base_scheduler.vllm_config,
+        kv_cache_config=base_scheduler.kv_cache_config,
+        block_size=base_scheduler.block_size,
+        log_stats=True,
+        structured_output_manager=StructuredOutputManager(base_scheduler.vllm_config),
+    )
+
+    short_request = create_requests(
+        num_requests=1,
+        num_tokens=64,
+        req_ids=["short-stats"],
+    )[0]
+
+    scheduler.add_request(short_request)
+    output = scheduler.schedule()
+
+    assert output.num_scheduled_tokens[short_request.request_id] == 64
+    waiting = scheduler.waiting
+    assert waiting._last_short_actual_used_tokens == 64
+    assert waiting._last_long_actual_used_tokens == 0

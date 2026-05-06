@@ -18,7 +18,7 @@ from __future__ import annotations
 
 import logging
 import time
-from collections.abc import Iterable, Iterator
+from collections.abc import Iterable, Iterator, Mapping
 from typing import Callable, cast
 
 from vllm.logger import logger
@@ -279,8 +279,15 @@ class LAPSRequestQueue(RequestQueue):
             return self._long_queue
         return None
 
+    def has_schedulable_requests(self) -> bool:
+        """Return whether a request can be dispatched right now."""
+        return self._select_schedulable_queue() is not None
+
     def select_waiting_queue_for_scheduling(self) -> RequestQueue | None:
         return self._select_schedulable_queue()
+
+    def mark_force_immediate(self, request_id: str) -> None:
+        self._force_immediate_request_ids.add(request_id)
 
     @staticmethod
     def _request_id(request: Request | object) -> str | None:
@@ -379,7 +386,7 @@ class LAPSRequestQueue(RequestQueue):
             self._maybe_log_stats()
 
     def __bool__(self) -> bool:
-        return any(bool(queue) for queue in self._queues())
+        return self._select_schedulable_queue() is not None
 
     def __len__(self) -> int:
         return (
@@ -406,6 +413,19 @@ class LAPSSchedulerMixin:
     laps_long_prefill_cap: int = 0
     laps_short_reserved_ratio: float = 0.0
 
+    def _get_attached_waiting_computed_tokens(self, request: Request) -> int | None:
+        return None
+
+    def _should_bypass_laps_wait_window(self, request: Request) -> bool:
+        """Recovery-style requests should not be delayed by short wait windows."""
+        return (
+            request.status == RequestStatus.PREEMPTED
+            or request.num_computed_tokens > 0
+            or request.num_external_computed_tokens > 0
+            or self._get_attached_waiting_computed_tokens(request) is not None
+            or request.num_output_tokens > 0
+        )
+
     def _init_laps_waiting_queue(
         self,
         immediate_predicate: Callable[[Request], bool] | None = None,
@@ -421,6 +441,8 @@ class LAPSSchedulerMixin:
         self.laps_short_reserved_ratio = min(
             max(envs.VLLM_ASCEND_LAPS_SHORT_RESERVED_RATIO, 0.0), 1.0
         )
+        if immediate_predicate is None:
+            immediate_predicate = self._should_bypass_laps_wait_window
         threshold = envs.VLLM_ASCEND_LAPS_THRESHOLD
         wait_window_ms = envs.VLLM_ASCEND_LAPS_WAIT_WINDOW_MS
         wait_max_batch = envs.VLLM_ASCEND_LAPS_WAIT_MAX_BATCH
@@ -499,6 +521,24 @@ class LAPSSchedulerMixin:
             or getattr(self, "laps_short_reserved_ratio", 0.0) > 0
         )
 
+    def _compute_long_budget_remaining(
+        self,
+        token_budget: int,
+        short_reserved_tokens: int,
+        short_actual_used_tokens: int,
+    ) -> int:
+        laps_waiting = self._laps_waiting_queue()
+        if (
+            laps_waiting is None
+            or short_reserved_tokens <= 0
+            or not laps_waiting.has_short_requests()
+        ):
+            return token_budget
+        short_reserved_remaining = max(
+            short_reserved_tokens - short_actual_used_tokens, 0
+        )
+        return max(token_budget - short_reserved_remaining, 0)
+
     def _apply_long_prefill_cap(
         self,
         request: Request,
@@ -507,8 +547,7 @@ class LAPSSchedulerMixin:
     ) -> tuple[int, bool]:
         if (
             getattr(self, "laps_long_prefill_cap", 0) <= 0
-            or not self._is_prefill_request(request, num_computed_tokens)
-            or request.num_prompt_tokens <= self.laps_long_prefill_cap
+            or not self._is_long_prefill_request(request, num_computed_tokens)
         ):
             return num_new_tokens, False
         if num_new_tokens > self.laps_long_prefill_cap:
@@ -541,6 +580,29 @@ class LAPSSchedulerMixin:
             long_actual_used_tokens += num_scheduled_tokens
         return short_actual_used_tokens, long_actual_used_tokens
 
+    def _summarize_laps_scheduled_tokens(
+        self,
+        num_scheduled_tokens: Mapping[str, int],
+    ) -> tuple[int, int]:
+        short_actual_used_tokens = 0
+        long_actual_used_tokens = 0
+        for req_id, num_tokens in num_scheduled_tokens.items():
+            request = self.requests.get(req_id)
+            if request is None:
+                continue
+            orig_num_computed_tokens = request.num_computed_tokens - num_tokens
+            (
+                short_actual_used_tokens,
+                long_actual_used_tokens,
+            ) = self._record_laps_step_usage(
+                request,
+                num_tokens,
+                short_actual_used_tokens=short_actual_used_tokens,
+                long_actual_used_tokens=long_actual_used_tokens,
+                num_computed_tokens=orig_num_computed_tokens,
+            )
+        return short_actual_used_tokens, long_actual_used_tokens
+
     def _select_waiting_queue_for_scheduling(self) -> RequestQueue | None:
         waiting = getattr(self, "waiting", None)
         if isinstance(waiting, LAPSRequestQueue):
@@ -554,11 +616,10 @@ class LAPSSchedulerMixin:
         return super()._select_waiting_queue_for_scheduling()
 
     def _preempt_request(self, request: Request, timestamp: float) -> None:
-        super()._preempt_request(request, timestamp)
         waiting = getattr(self, "waiting", None)
         if isinstance(waiting, LAPSRequestQueue):
-            waiting.remove_request(request)
-            waiting.prepend_request(request, force_immediate=True)
+            waiting.mark_force_immediate(request.request_id)
+        super()._preempt_request(request, timestamp)
 
 
 from vllm.v1.core.sched.scheduler import Scheduler as BaseScheduler
@@ -576,11 +637,17 @@ class LAPSScheduler(LAPSSchedulerMixin, BaseScheduler):
         if not self._laps_long_budgeting_enabled():
             scheduler_output = super().schedule()
             if laps_waiting is not None:
+                (
+                    short_actual_used_tokens,
+                    long_actual_used_tokens,
+                ) = self._summarize_laps_scheduled_tokens(
+                    scheduler_output.num_scheduled_tokens
+                )
                 laps_waiting.record_schedule_step_stats(
                     long_capped_count=0,
                     short_reserved_tokens=0,
-                    short_actual_used_tokens=0,
-                    long_actual_used_tokens=0,
+                    short_actual_used_tokens=short_actual_used_tokens,
+                    long_actual_used_tokens=long_actual_used_tokens,
                 )
             return scheduler_output
 
@@ -602,10 +669,14 @@ class LAPSScheduler(LAPSSchedulerMixin, BaseScheduler):
         scheduled_timestamp = time.monotonic()
 
         short_reserved_tokens = self._laps_short_reserved_tokens(token_budget)
-        long_budget_remaining = max(token_budget - short_reserved_tokens, 0)
         long_capped_count = 0
         short_actual_used_tokens = 0
         long_actual_used_tokens = 0
+        long_budget_remaining = self._compute_long_budget_remaining(
+            token_budget,
+            short_reserved_tokens,
+            short_actual_used_tokens,
+        )
         capped_scheduled_req_ids: set[str] = set()
 
         self.kv_cache_manager.new_step_starts()
@@ -631,6 +702,11 @@ class LAPSScheduler(LAPSSchedulerMixin, BaseScheduler):
                 num_new_tokens = self.scheduler_config.long_prefill_token_threshold
             num_new_tokens, was_long_capped = self._apply_long_prefill_cap(
                 request, num_new_tokens
+            )
+            long_budget_remaining = self._compute_long_budget_remaining(
+                token_budget,
+                short_reserved_tokens,
+                short_actual_used_tokens,
             )
             num_new_tokens = self._apply_long_budget_limit(
                 request, num_new_tokens, long_budget_remaining
@@ -873,6 +949,11 @@ class LAPSScheduler(LAPSSchedulerMixin, BaseScheduler):
                         num_computed_tokens=num_computed_tokens,
                     )
 
+                    long_budget_remaining = self._compute_long_budget_remaining(
+                        token_budget,
+                        short_reserved_tokens,
+                        short_actual_used_tokens,
+                    )
                     if (
                         not self.scheduler_config.enable_chunked_prefill
                         and not self._laps_long_budgeting_enabled()
