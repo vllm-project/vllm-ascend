@@ -8,7 +8,7 @@ msgid ""
 msgstr ""
 "Project-Id-Version: vllm-ascend \n"
 "Report-Msgid-Bugs-To: \n"
-"POT-Creation-Date: 2026-04-23 02:08+0000\n"
+"POT-Creation-Date: 2026-04-25 01:56+0000\n"
 "PO-Revision-Date: 2026-04-10 18:37+0800\n"
 "Last-Translator: FULL NAME <EMAIL@ADDRESS>\n"
 "Language: zh_CN\n"
@@ -126,21 +126,18 @@ msgstr "建议将模型权重下载到多节点共享目录，例如 `/root/.cac
 msgid "Installation"
 msgstr "安装"
 
-#: ../../source/tutorials/models/Qwen-VL-Dense.md:32
+#: ../../source/tutorials/models/Qwen-VL-Dense.md
 msgid "single-NPU"
 msgstr "单 NPU"
 
 #: ../../source/tutorials/models/Qwen-VL-Dense.md:39
-msgid "Run docker container:"
-msgstr "运行 Docker 容器："
-
-#: ../../source/tutorials/models/Qwen-VL-Dense.md:65
-msgid "multi-NPU"
-msgstr "多 NPU"
-
 #: ../../source/tutorials/models/Qwen-VL-Dense.md:67
 msgid "Run docker container:"
 msgstr "运行 Docker 容器："
+
+#: ../../source/tutorials/models/Qwen-VL-Dense.md
+msgid "multi-NPU"
+msgstr "多 NPU"
 
 #: ../../source/tutorials/models/Qwen-VL-Dense.md:95
 msgid "Setup environment variables:"
@@ -165,7 +162,7 @@ msgstr "部署"
 msgid "Offline Inference"
 msgstr "离线推理"
 
-#: ../../source/tutorials/models/Qwen-VL-Dense.md:113
+#: ../../source/tutorials/models/Qwen-VL-Dense.md
 msgid "Qwen3-VL-8B-Instruct"
 msgstr "Qwen3-VL-8B-Instruct"
 
@@ -174,20 +171,17 @@ msgid "Run the following script to execute offline inference on single-NPU:"
 msgstr "运行以下脚本在单 NPU 上执行离线推理："
 
 #: ../../source/tutorials/models/Qwen-VL-Dense.md:185
+#: ../../source/tutorials/models/Qwen-VL-Dense.md:281
 msgid "If you run this script successfully, you can see the info shown below:"
 msgstr "如果成功运行此脚本，将看到如下所示的信息："
 
-#: ../../source/tutorials/models/Qwen-VL-Dense.md:213
+#: ../../source/tutorials/models/Qwen-VL-Dense.md
 msgid "Qwen3-VL-32B-Instruct"
 msgstr "Qwen3-VL-32B-Instruct"
 
 #: ../../source/tutorials/models/Qwen-VL-Dense.md:215
 msgid "Run the following script to execute offline inference on multi-NPU:"
 msgstr "运行以下脚本在多 NPU 上执行离线推理："
-
-#: ../../source/tutorials/models/Qwen-VL-Dense.md:281
-msgid "If you run this script successfully, you can see the info shown below:"
-msgstr "如果成功运行此脚本，将看到如下所示的信息："
 
 #: ../../source/tutorials/models/Qwen-VL-Dense.md:306
 msgid "Online Serving"
@@ -210,20 +204,24 @@ msgstr ""
 "系列修改为合适的值。"
 
 #: ../../source/tutorials/models/Qwen-VL-Dense.md:329
+#: ../../source/tutorials/models/Qwen-VL-Dense.md:416
 msgid "If your service start successfully, you can see the info shown below:"
 msgstr "如果服务启动成功，您将看到如下所示的信息："
 
 #: ../../source/tutorials/models/Qwen-VL-Dense.md:337
+#: ../../source/tutorials/models/Qwen-VL-Dense.md:424
 msgid "Once your server is started, you can query the model with input prompts:"
 msgstr "服务器启动后，您可以使用输入提示词查询模型："
 
 #: ../../source/tutorials/models/Qwen-VL-Dense.md:354
+#: ../../source/tutorials/models/Qwen-VL-Dense.md:441
 msgid ""
 "If you query the server successfully, you can see the info shown below "
 "(client):"
 msgstr "如果查询服务器成功，您将看到如下所示的信息（客户端）："
 
 #: ../../source/tutorials/models/Qwen-VL-Dense.md:360
+#: ../../source/tutorials/models/Qwen-VL-Dense.md:447
 msgid "Logs of the vllm server:"
 msgstr "vLLM 服务器日志："
 
@@ -242,24 +240,6 @@ msgstr ""
 "添加 `--max_model_len` 选项以避免 Qwen3-VL-32B-Instruct 模型的 "
 "max_model_len（128000）大于 KV 缓存可存储的最大 token 数而导致的 ValueError。不同 NPU "
 "系列基于片上内存大小会有所不同。请根据您的 NPU 系列修改为合适的值。"
-
-#: ../../source/tutorials/models/Qwen-VL-Dense.md:416
-msgid "If your service start successfully, you can see the info shown below:"
-msgstr "如果服务启动成功，您将看到如下所示的信息："
-
-#: ../../source/tutorials/models/Qwen-VL-Dense.md:424
-msgid "Once your server is started, you can query the model with input prompts:"
-msgstr "服务器启动后，您可以使用输入提示词查询模型："
-
-#: ../../source/tutorials/models/Qwen-VL-Dense.md:441
-msgid ""
-"If you query the server successfully, you can see the info shown below "
-"(client):"
-msgstr "如果查询服务器成功，您将看到如下所示的信息（客户端）："
-
-#: ../../source/tutorials/models/Qwen-VL-Dense.md:447
-msgid "Logs of the vllm server:"
-msgstr "vLLM 服务器日志："
 
 #: ../../source/tutorials/models/Qwen-VL-Dense.md:462
 msgid "Accuracy Evaluation"
@@ -304,63 +284,63 @@ msgid ""
 "8B-Instruct` in `vllm-ascend:0.11.0rc3` for reference only."
 msgstr "执行后即可获得结果，以下是 `Qwen3-VL-8B-Instruct` 在 `vllm-ascend:0.11.0rc3` 上的结果，仅供参考。"
 
-#: ../../source/tutorials/models/Qwen-VL-Dense.md:493
+#: ../../source/tutorials/models/Qwen-VL-Dense.md:412
 msgid "Tasks"
 msgstr "任务"
 
-#: ../../source/tutorials/models/Qwen-VL-Dense.md:493
+#: ../../source/tutorials/models/Qwen-VL-Dense.md:412
 msgid "Version"
 msgstr "版本"
 
-#: ../../source/tutorials/models/Qwen-VL-Dense.md:493
+#: ../../source/tutorials/models/Qwen-VL-Dense.md:412
 msgid "Filter"
 msgstr "过滤器"
 
-#: ../../source/tutorials/models/Qwen-VL-Dense.md:493
+#: ../../source/tutorials/models/Qwen-VL-Dense.md:412
 msgid "n-shot"
 msgstr "n-shot"
 
-#: ../../source/tutorials/models/Qwen-VL-Dense.md:493
+#: ../../source/tutorials/models/Qwen-VL-Dense.md:412
 msgid "Metric"
 msgstr "指标"
 
-#: ../../source/tutorials/models/Qwen-VL-Dense.md:493
+#: ../../source/tutorials/models/Qwen-VL-Dense.md:412
 msgid "Value"
 msgstr "值"
 
-#: ../../source/tutorials/models/Qwen-VL-Dense.md:493
+#: ../../source/tutorials/models/Qwen-VL-Dense.md:412
 msgid "Stderr"
 msgstr "标准误差"
 
-#: ../../source/tutorials/models/Qwen-VL-Dense.md:493
+#: ../../source/tutorials/models/Qwen-VL-Dense.md:412
 msgid "mmmu_val"
 msgstr "mmmu_val"
 
-#: ../../source/tutorials/models/Qwen-VL-Dense.md:493
+#: ../../source/tutorials/models/Qwen-VL-Dense.md:412
 msgid "0"
 msgstr "0"
 
-#: ../../source/tutorials/models/Qwen-VL-Dense.md:493
+#: ../../source/tutorials/models/Qwen-VL-Dense.md:412
 msgid "none"
 msgstr "无"
 
-#: ../../source/tutorials/models/Qwen-VL-Dense.md:493
+#: ../../source/tutorials/models/Qwen-VL-Dense.md:412
 msgid "acc"
 msgstr "准确率"
 
-#: ../../source/tutorials/models/Qwen-VL-Dense.md:493
+#: ../../source/tutorials/models/Qwen-VL-Dense.md:412
 msgid "↑"
 msgstr "↑"
 
-#: ../../source/tutorials/models/Qwen-VL-Dense.md:493
+#: ../../source/tutorials/models/Qwen-VL-Dense.md:412
 msgid "0.5389"
 msgstr "0.5389"
 
-#: ../../source/tutorials/models/Qwen-VL-Dense.md:493
+#: ../../source/tutorials/models/Qwen-VL-Dense.md:412
 msgid "±"
 msgstr "±"
 
-#: ../../source/tutorials/models/Qwen-VL-Dense.md:493
+#: ../../source/tutorials/models/Qwen-VL-Dense.md:412
 msgid "0.0159"
 msgstr "0.0159"
 
@@ -457,19 +437,19 @@ msgstr "大约几分钟后，即可获得性能评估结果。"
 #~ "dataset as a test dataset, and run"
 #~ " accuracy evaluation of `Qwen2.5-VL-32B-"
 #~ "Instruct` in offline mode."
-msgstr "以 `mmmu_val` 数据集为例，以离线模式运行 `Qwen2.5-VL-32B-Instruct` 的精度评估。"
+#~ msgstr "以 `mmmu_val` 数据集为例，以离线模式运行 `Qwen2.5-VL-32B-Instruct` 的精度评估。"
 
 #~ msgid ""
 #~ "After execution, you can get the "
 #~ "result, here is the result of "
 #~ "`Qwen2.5-VL-32B-Instruct` in `vllm-"
 #~ "ascend:0.11.0rc3` for reference only."
-msgstr ""
-"执行后即可获得结果，以下是 `Qwen2.5-VL-32B-Instruct` 在 "
-"`vllm-ascend:0.11.0rc3` 上的结果，仅供参考。"
+#~ msgstr ""
+#~ "执行后即可获得结果，以下是 `Qwen2.5-VL-32B-Instruct` 在 "
+#~ "`vllm-ascend:0.11.0rc3` 上的结果，仅供参考。"
 
 #~ msgid "Qwen2.5-VL-32B-Instruct"
-msgstr "Qwen2.5-VL-32B-Instruct"
+#~ msgstr "Qwen2.5-VL-32B-Instruct"
 
 #~ msgid "`Qwen2.5-VL-7B-Instruct`"
-msgstr "`Qwen2.5-VL-7B-Instruct`"
+#~ msgstr "`Qwen2.5-VL-7B-Instruct`"
