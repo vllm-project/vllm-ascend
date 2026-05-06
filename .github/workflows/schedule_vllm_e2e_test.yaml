@@ -67,9 +67,9 @@ jobs:
           fail-fast: false
           matrix:
             part: [ 0, 1, 2 , 3]
-            vllm: ${{ fromJSON(inputs.vllm) }}
+            vllm: ${{ fromJSON(inputs.vllm) }} || "d886c26d4d4fef7d079696beb4ece1cfb4b008a8"
         container:
-          image: ${{ inputs.image_a2 }}
+          image: ${{ inputs.image_a2 }} ||  swr.cn-southwest-2.myhuaweicloud.com/base_image/ascend-ci/cann:8.5.1-910b-ubuntu22.04-py3.11
           env:
             VLLM_LOGGING_LEVEL: ERROR
             HF_HUB_OFFLINE: 0
@@ -148,9 +148,9 @@ jobs:
           fail-fast: false
           matrix:
             part: [3]
-            vllm: ${{ fromJSON(inputs.vllm) }}
+            vllm: ${{ fromJSON(inputs.vllm) }} || "d886c26d4d4fef7d079696beb4ece1cfb4b008a8"
         container:
-          image: ${{ inputs.image_a3 }}
+          image: ${{ inputs.image_a3 }} || "swr.cn-southwest-2.myhuaweicloud.com/base_image/ascend-ci/cann:8.5.1-a3-ubuntu22.04-py3.11"
           env:
             VLLM_LOGGING_LEVEL: ERROR
             HF_HUB_OFFLINE: 0
@@ -228,9 +228,9 @@ jobs:
           fail-fast: false
           matrix:
             part: [3]
-            vllm: ${{ fromJSON(inputs.vllm) }}
+            vllm: ${{ fromJSON(inputs.vllm) }} || "d886c26d4d4fef7d079696beb4ece1cfb4b008a8"
         container:
-          image: ${{ inputs.image_a3 }}
+          image: ${{ inputs.image_a3 }} || "swr.cn-southwest-2.myhuaweicloud.com/base_image/ascend-ci/cann:8.5.1-a3-ubuntu22.04-py3.11"
           env:
             VLLM_LOGGING_LEVEL: ERROR
             HF_HUB_OFFLINE: 0
