@@ -391,8 +391,8 @@ class AscendFusedMoE(FusedMoE):
             self.moe_config,
             self.router,
             self._routed_input_transform,
-            self.gate if is_legacy else kwargs.pop("gate", None),
-            self._shared_experts if is_legacy else kwargs.pop("shared_experts", None),
+            self._gate,
+            self._shared_experts,
             self.quant_method,
             self.vllm_config.parallel_config.enable_dbo,
         )
