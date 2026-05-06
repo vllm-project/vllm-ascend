@@ -148,7 +148,7 @@ jobs:
           fail-fast: false
           matrix:
             part: [3]
-            vllm: ${{ inputs.vllm }}
+            vllm: ${{ fromJSON(inputs.vllm) }}
         container:
           image: ${{ inputs.image_a3 }}
           env:
@@ -228,7 +228,7 @@ jobs:
           fail-fast: false
           matrix:
             part: [3]
-            vllm: ${{ inputs.vllm }}
+            vllm: ${{ fromJSON(inputs.vllm) }}
         container:
           image: ${{ inputs.image_a3 }}
           env:
