@@ -26,6 +26,8 @@ Qwen3.5-27B.md
 Qwen3.5-397B-A17B.md
 DeepSeek-V3.1.md
 DeepSeek-V3.2.md
+DeepSeek-V4-Flash.md
+DeepSeek-V4-Pro.md
 DeepSeek-R1.md
 DeepSeekOCR2.md
 GLM4.x.md
