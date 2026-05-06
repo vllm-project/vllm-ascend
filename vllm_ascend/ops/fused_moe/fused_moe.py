@@ -131,7 +131,7 @@ class AscendUnquantizedFusedMoEMethod(UnquantizedFusedMoEMethod):
         global_redundant_expert_num: int = 0,
         pertoken_scale: torch.Tensor | None = None,
         mc2_mask: torch.Tensor | None = None,
-    ) -> torch.Tensor:
+    ) -> FusedExpertsResult:
         zero_expert_num = getattr(layer, "zero_expert_num", 0)
         zero_expert_type = getattr(layer, "zero_expert_type", None)
         topk_weights, topk_ids = select_experts(
@@ -173,7 +173,7 @@ class AscendUnquantizedFusedMoEMethod(UnquantizedFusedMoEMethod):
         moe_comm_method = _EXTRA_CTX.moe_comm_method
 
         if self._lora_enabled and self._lora_layer is not None:
-            final_hidden_states = self._apply_with_lora(
+            fused_experts_results = self._apply_with_lora(
                 layer=layer,
                 x=x,
                 topk_weights=topk_weights,
@@ -188,7 +188,7 @@ class AscendUnquantizedFusedMoEMethod(UnquantizedFusedMoEMethod):
                 pertoken_scale=pertoken_scale,
             )
         else:
-            final_hidden_states = self._apply_fused(
+            fused_experts_results = self._apply_fused(
                 layer=layer,
                 x=x,
                 topk_weights=topk_weights,
@@ -203,8 +203,8 @@ class AscendUnquantizedFusedMoEMethod(UnquantizedFusedMoEMethod):
                 pertoken_scale=pertoken_scale,
             )
         if zero_expert_num > 0 and zero_expert_type is not None:
-            final_hidden_states += zero_expert_result
-        return final_hidden_states
+            fused_experts_results.routed_out += zero_expert_result
+        return fused_experts_results
 
     def _apply_fused(
         self,
@@ -254,7 +254,7 @@ class AscendUnquantizedFusedMoEMethod(UnquantizedFusedMoEMethod):
                 w2_scale=w2_scale,
             )
         )
-        return final_hidden_states.routed_out
+        return final_hidden_states
 
     def _apply_with_lora(
         self,
@@ -419,7 +419,12 @@ class AscendUnquantizedFusedMoEMethod(UnquantizedFusedMoEMethod):
             hidden_states=mlp_output,
             combine_metadata=combine_metadata,
         )
-        return routed_out
+        expert_tokens = group_list
+        return FusedExpertsResult(
+            routed_out=routed_out,
+            expert_tokens=expert_tokens,
+            group_list_type=group_list_type,
+        )
 
 
 # Please remove this inheritance after extending vllm, todo(wxs)
