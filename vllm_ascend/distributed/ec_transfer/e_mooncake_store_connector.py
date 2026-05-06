@@ -73,7 +73,7 @@ class EMoonCakeStoreConnector(ECConnectorBase):
                 self.thread_executor.submit(self.producer_run)
                 logger.info("============ Producer init ===============")
             elif transfer_config.ec_role == "ec_consumer":
-                self.handle_caches = dict[str, tuple[int, list[int], str]]
+                self.handle_caches: dict[str, tuple[int, list[int], str]] = {}
                 self.recv_queue = queue.Queue[bytes]()
                 self.thread_executor.submit(self.consumer_run)
                 self.thread_executor.submit(self.recv_feat_async)
@@ -110,7 +110,7 @@ class EMoonCakeStoreConnector(ECConnectorBase):
             if mm_data.mm_hash in encoder_cache:
                 continue
 
-            tensor_bytes, tensor_shape, tensor_dtype = self.handle_caches.get(mm_data.mm_hash, ())
+            tensor_bytes, tensor_shape, tensor_dtype = self.handle_caches.get(mm_data.mm_hash, (0, [], ""))
             tensor = torch.empty(tensor_shape, dtype=tensor_dtype).npu()
             tensor_addr = (tensor.data_ptr() + ALIGNMENT - 1) // ALIGNMENT * ALIGNMENT
             self.ec_store.register_buffer(tensor_addr, tensor_bytes)
