@@ -5,7 +5,7 @@ import queue
 import time
 from collections.abc import Iterator
 from concurrent.futures import ThreadPoolExecutor
-from typing import TYPE_CHECKING, Any, Optional
+from typing import TYPE_CHECKING, Any
 
 import msgspec
 import torch
@@ -287,7 +287,7 @@ def zmq_ctx(socket_type: Any, addr: str) -> Iterator[zmq.Socket]:  # type: ignor
     if socket_type not in (zmq.ROUTER, zmq.REQ, zmq.DEALER):  # type: ignore
         raise ValueError(f"Unexpected socket type: {socket_type}")
 
-    ctx: Optional[zmq.Context] | None = None  # type: ignore
+    ctx: zmq.Context | None = None  # type: ignore
     try:
         ctx = zmq.Context()  # type: ignore
         yield make_zmq_socket(ctx=ctx, path=addr, socket_type=socket_type, bind=socket_type == zmq.ROUTER)  # type: ignore
