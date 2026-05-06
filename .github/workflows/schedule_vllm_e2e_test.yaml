@@ -53,7 +53,7 @@ jobs:
             HF_HUB_OFFLINE: 0
         steps:
           - name: Checkout vllm-project/vllm-ascend repo
-            uses: actions/checkout@v4
+            uses: actions/checkout@v6
           - name: Check npu and CANN info
             run: |
               npu-smi info
@@ -77,7 +77,7 @@ jobs:
               pip install uv
 
           - name: Checkout vllm-project/vllm repo
-            uses: actions/checkout@v4
+            uses: actions/checkout@v6
             with:
               repository: vllm-project/vllm
               ref: ${{ matrix.vllm }}
