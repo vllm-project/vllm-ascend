@@ -20,22 +20,35 @@ name: 'e2e nightly test'
 on:
   workflow_call:
     inputs:
-      vllm:
-        required: true
-        type: string
       runner:
         required: true
         type: string
       image:
         required: false
         type: string
-        default: "swr.cn-southwest-2.myhuaweicloud.com/base_image/ascend-ci/cann:8.3.rc2-910b-ubuntu22.04-py3.11"
+        default: "swr.cn-southwest-2.myhuaweicloud.com/base_image/ascend-ci/cann:8.5.1-910b-ubuntu22.04-py3.11"
       tests:
-        required: true
+        required: false
+        type: string
+      config_file_path:
+        required: false
         type: string
       name:
         required: false
         type: string
+      should_run:
+        required: true
+        type: boolean
+      vllm_ascend_branch:
+        required: false
+        type: string
+        default: ''
+        description: branch name used as prefix in artifact/benchmark names to distinguish dual-branch test runs
+    secrets:
+      OBS_ACCESS_KEY:
+        required: false
+      OBS_SECRET_KEY:
+        required: false
 
 # Bash shells do not use ~/.profile or ~/.bashrc so these shells need to be explicitly
 # declared as "shell: bash -el {0}" on steps that need to be properly activated.
@@ -47,30 +60,84 @@ defaults:
 # only cancel in-progress runs of the same workflow
 # and ignore the lint / 1 card / 4 cards test type
 concurrency:
-  group: ascend-nightly-${{ github.workflow_ref }}-${{ github.ref }}-${{ inputs.tests }}
+  group: ascend-nightly-${{ github.workflow_ref }}-${{ github.ref }}-${{ inputs.config_file_path || inputs.tests }}
   cancel-in-progress: true
 
 jobs:
   e2e-nightly:
-    name: ${{ inputs.tests }}
+    name: ${{ inputs.name || inputs.config_file_path || inputs.tests }}
     runs-on: ${{ inputs.runner }}
+    if: ${{ inputs.should_run }}
     timeout-minutes: 600
     container:
       image: ${{ inputs.image }}
     env:
-      TRANSFORMERS_OFFLINE: 1
+      HF_HUB_OFFLINE: 1
       VLLM_USE_MODELSCOPE: True
+      UV_INDEX_URL: http://cache-service.nginx-pypi-cache.svc.cluster.local/pypi/simple
+      UV_EXTRA_INDEX_URL: https://mirrors.huaweicloud.com/ascend/repos/pypi
+      UV_INDEX_STRATEGY: unsafe-best-match
+      UV_NO_CACHE: 1
+      UV_SYSTEM_PYTHON: 1
+      VLLM_ENGINE_READY_TIMEOUT_S: 1800
     steps:
       - name: Check npu and CANN info
         run: |
           npu-smi info
           cat /usr/local/Ascend/ascend-toolkit/latest/"$(uname -i)"-linux/ascend_toolkit_install.info
+          sed -Ei 's@(ports|archive).ubuntu.com@cache-service.nginx-pypi-cache.svc.cluster.local:8081@g' /etc/apt/sources.list
+          pip config set global.index-url http://cache-service.nginx-pypi-cache.svc.cluster.local/pypi/simple
+          pip config set global.trusted-host cache-service.nginx-pypi-cache.svc.cluster.local
+          pip install uv
+      
+      - name: uninstall vlm vllm-ascend and remove code (if pr test)
+        if: ${{ github.event_name == 'pull_request' }}
+        run: |
+          pip uninstall -y vllm-ascend || true
+          cp -r /vllm-workspace/vllm-ascend/benchmark /tmp/aisbench-backup || true
+          rm -rf  /vllm-workspace/vllm-ascend
+
+
+      - name: Checkout vllm-project/vllm-ascend repo
+        if: ${{ github.event_name == 'pull_request' }}
+        uses: actions/checkout@v6
+        with:
+          path: ./temp-vllm-ascend
+          fetch-depth: 1
+
+      - name: Move code to /vllm-workspace
+        if: ${{ github.event_name == 'pull_request' }}
+        run: |
+          mv ./temp-vllm-ascend /vllm-workspace/vllm-ascend
+          ls -R /vllm-workspace
+
+      - name: Install vllm-project/vllm-ascend
+        if: ${{ github.event_name == 'pull_request' }}
+        working-directory: /vllm-workspace/vllm-ascend
+        env:
+          PIP_EXTRA_INDEX_URL: https://mirrors.huaweicloud.com/ascend/repos/pypi
+        run: |
+          git config --global --add safe.directory /vllm-workspace/vllm-ascend
+          pip install uc-manager
+          uv pip install -r requirements-dev.txt
+          uv pip install -v -e .
+
+      - name: Install aisbench
+        if: ${{ github.event_name == 'pull_request' }}
+        shell: bash -l {0}
+        run: |
+          cp -r /tmp/aisbench-backup /vllm-workspace/vllm-ascend/benchmark
+          cd /vllm-workspace/vllm-ascend/benchmark
+          pip install pytest asyncio pytest-asyncio
+          pip install -e . -r requirements/api.txt -r requirements/extra.txt
+          python3 -m pip cache purge
 
       - name: Show vLLM and vLLM-Ascend version
         working-directory: /vllm-workspace
         run: |
           echo "Installed vLLM-related Python packages:"
           pip list | grep vllm || echo "No vllm packages found."
+
 
           echo ""
           echo "============================"
@@ -105,41 +172,80 @@ jobs:
             echo "Tags:        $(git tag --points-at HEAD || echo 'None')"
             echo "Remote:      $(git remote -v | head -n1)"
             echo ""
+            echo "VLLM_ASCEND_VERSION=$(git rev-parse HEAD)" >> $GITHUB_ENV
           else
             echo "No .git directory found in vllm-ascend"
           fi
           cd ..
 
-      - name: Install custom-ops (for DeepSeek-V3.2-Exp)
-        if: ${{ inputs.name == 'deepseek3_2-exp-w8a8' }}
+      - name: Install clang
         shell: bash -l {0}
         run: |
-          wget https://vllm-ascend.obs.cn-north-4.myhuaweicloud.com/vllm-ascend/a3/CANN-custom_ops-sfa-linux.aarch64.run
-          chmod +x ./CANN-custom_ops-sfa-linux.aarch64.run
-          ./CANN-custom_ops-sfa-linux.aarch64.run --quiet
-          export ASCEND_CUSTOM_OPP_PATH=/usr/local/Ascend/ascend-toolkit/latest/opp/vendors/customize:${ASCEND_CUSTOM_OPP_PATH}
-          export LD_LIBRARY_PATH=/usr/local/Ascend/ascend-toolkit/latest/opp/vendors/customize/op_api/lib/:${LD_LIBRARY_PATH}
-          wget https://vllm-ascend.obs.cn-north-4.myhuaweicloud.com/vllm-ascend/a3/custom_ops-1.0-cp311-cp311-linux_aarch64.whl
-          pip install custom_ops-1.0-cp311-cp311-linux_aarch64.whl
-          . /usr/local/Ascend/ascend-toolkit/set_env.sh
+          apt-get update && apt-get -y install clang-15
+          update-alternatives --install /usr/bin/clang clang /usr/bin/clang-15 20
+          update-alternatives --install /usr/bin/clang++ clang++ /usr/bin/clang++-15 20
 
-      - name: Install Ascend toolkit & triton_ascend
-        shell: bash -l {0}
+      - name: Validate Inputs
         run: |
-          BISHENG_NAME="Ascend-BiSheng-toolkit_aarch64_20260105.run"
-          BISHENG_URL="https://vllm-ascend.obs.cn-north-4.myhuaweicloud.com/vllm-ascend/${BISHENG_NAME}"
-          wget -O "${BISHENG_NAME}" "${BISHENG_URL}" && chmod a+x "${BISHENG_NAME}" && "./${BISHENG_NAME}" --install && rm "${BISHENG_NAME}"
-          export PATH=/usr/local/Ascend/tools/bishengir/bin:$PATH
-          python3 -m pip install -i https://test.pypi.org/simple/ triton-ascend==3.2.0.dev20260105
+          if [[ -z "${{ inputs.tests }}" && -z "${{ inputs.config_file_path }}" ]]; then
+            echo "Error: Either 'tests' or 'config_file_path' must be provided."
+            exit 1
+          fi
 
-      - name: Run vllm-project/vllm-ascend test
+      - name: Run Pytest (py-driven)
+        if: ${{ inputs.tests != '' }}
         env:
           VLLM_WORKER_MULTIPROC_METHOD: spawn
           VLLM_USE_MODELSCOPE: True
           VLLM_CI_RUNNER: ${{ inputs.runner }}
-          BENCHMARK_HOME: /vllm-workspace/vllm-ascend/benchmark
         working-directory: /vllm-workspace/vllm-ascend
         run: |
-          # ignore test_dispatch_ffn_combine until the test is fixed
-          pytest -sv ${{ inputs.tests }} \
+          export LD_LIBRARY_PATH=/usr/local/lib:$LD_LIBRARY_PATH
+          echo "Running pytest with tests path: ${{ inputs.tests }}"
+          pytest -sv "${{ inputs.tests }}" \
           --ignore=tests/e2e/nightly/single_node/ops/singlecard_ops/test_fused_moe.py
+
+      - name: Run Pytest (YAML-driven)
+        if: ${{ always() && inputs.config_file_path != '' }}
+        env:
+          VLLM_WORKER_MULTIPROC_METHOD: spawn
+          VLLM_USE_MODELSCOPE: True
+          VLLM_CI_RUNNER: ${{ inputs.runner }}
+          CONFIG_YAML_PATH: ${{ inputs.config_file_path }}
+          BENCHMARK_JOB_NAME: ${{ inputs.vllm_ascend_branch }}-${{ inputs.name }}
+        working-directory: /vllm-workspace/vllm-ascend
+        run: |
+          export LD_LIBRARY_PATH=/usr/local/lib:$LD_LIBRARY_PATH
+          echo "export LD_LIBRARY_PATH=$LD_LIBRARY_PATH:/usr/local/lib" >> ~/.bashrc
+          echo "Running YAML-driven test with config: ${{ inputs.config_file_path }}"
+          pytest -sv tests/e2e/nightly/single_node/models/scripts/test_single_node.py
+
+      - name: Set benchmark artifact timestamp
+        if: ${{ always() && inputs.config_file_path != '' }}
+        id: bench_ts
+        run: |
+          echo "artifact_ts=$(date -u +%Y%m%dT%H%M%SZ)" >> $GITHUB_OUTPUT
+          echo "effective_name=${{ inputs.vllm_ascend_branch }}-${{ inputs.name }}" >> $GITHUB_OUTPUT
+
+      - name: Upload benchmark results
+        if: ${{ always() && inputs.config_file_path != '' }}
+        continue-on-error: true
+        uses: ascend-gha-runners/artifact/upload@v0.3
+        with:
+          access_key: ${{ secrets.OBS_ACCESS_KEY }}
+          secret_key: ${{ secrets.OBS_SECRET_KEY }}
+          name: nightly-test-benchmark-results-${{ inputs.name }}-${{ steps.bench_ts.outputs.artifact_ts }}
+          path: /vllm-workspace/vllm-ascend/benchmark_results/${{ inputs.name }}.json
+          if-no-files-found: warn
+          retention-days: 90
+
+      - name: Upload benchmark results (GitHub Artifacts)
+        if: ${{ always() && inputs.config_file_path != '' }}
+        continue-on-error: true
+        uses: actions/upload-artifact@v7
+        with:
+          name: nightly-test-benchmark-results-${{ steps.bench_ts.outputs.effective_name }}-${{ steps.bench_ts.outputs.artifact_ts }}
+          path: /vllm-workspace/vllm-ascend/benchmark_results/${{ steps.bench_ts.outputs.effective_name }}.json
+          if-no-files-found: warn
+          retention-days: 90
+          compression-level: 0

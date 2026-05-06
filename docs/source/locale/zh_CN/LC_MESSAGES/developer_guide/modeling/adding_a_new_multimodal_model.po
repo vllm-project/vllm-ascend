@@ -4,7 +4,6 @@
 # package.
 # FIRST AUTHOR <EMAIL@ADDRESS>, 2025.
 #
-#, fuzzy
 msgid ""
 msgstr ""
 "Project-Id-Version: vllm-ascend\n"
@@ -25,5 +24,5 @@ msgid "Adding a New Multi-Modal Model"
 msgstr "添加新的多模态模型"
 
 #: ../../developer_guide/modeling/adding_a_new_multimodal_model.md:3
-msgid "**_Comming soon ..._**"
+msgid "**_Coming soon ..._**"
 msgstr "**_敬请期待 ..._**"

@@ -55,6 +55,11 @@ class DispatchFFNCombine : public OpDef {
         .DataType({ge::DT_FLOAT, ge::DT_FLOAT, ge::DT_FLOAT})
         .Format({ge::FORMAT_ND, ge::FORMAT_ND, ge::FORMAT_ND})
         .UnknownShapeFormat({ge::FORMAT_ND, ge::FORMAT_ND, ge::FORMAT_ND});
+    this->Input("xActiveMaskOptional")
+        .ParamType(OPTIONAL)
+        .DataType({ge::DT_BOOL, ge::DT_BOOL, ge::DT_BOOL})
+        .Format({ge::FORMAT_ND, ge::FORMAT_ND, ge::FORMAT_ND})
+        .UnknownShapeFormat({ge::FORMAT_ND, ge::FORMAT_ND, ge::FORMAT_ND});
 
     // Output
     this->Output("out")
@@ -62,6 +67,11 @@ class DispatchFFNCombine : public OpDef {
         .DataType({ge::DT_FLOAT16, ge::DT_BF16, ge::DT_BF16})
         .Format({ge::FORMAT_ND, ge::FORMAT_ND, ge::FORMAT_ND})
         .UnknownShapeFormat({ge::FORMAT_ND, ge::FORMAT_ND,ge::FORMAT_ND});
+    this->Output("expert_token_nums")
+        .ParamType(REQUIRED)
+        .DataType({ge::DT_INT32, ge::DT_INT32, ge::DT_INT32})
+        .Format({ge::FORMAT_ND, ge::FORMAT_ND, ge::FORMAT_ND})
+        .UnknownShapeFormat({ge::FORMAT_ND, ge::FORMAT_ND, ge::FORMAT_ND});
 
     this->Attr("group").AttrType(REQUIRED).String();
     this->Attr("M").AttrType(OPTIONAL).Int();

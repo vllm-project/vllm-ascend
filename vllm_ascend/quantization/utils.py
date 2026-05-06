@@ -1,125 +1,208 @@
-from typing import Any, Dict, Optional, Type
+#
+# Copyright (c) 2025 Huawei Technologies Co., Ltd. All Rights Reserved.
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+# This file is a part of the vllm-ascend project.
+#
 
-import torch
+import json
+from pathlib import Path
+
+from vllm import envs
 from vllm.logger import logger
 
-from vllm_ascend.utils import COMPRESSED_TENSORS_METHOD
-
-from .w4a4_flatquant_dynamic import AscendW4A4FlatQuantDynamicLinearMethod
-from .w4a8_dynamic import (AscendW4A8DynamicFusedMoEMethod,
-                           AscendW4A8DynamicLinearMethod)
-from .w4a16 import AscendW4A16FusedMoEMethod
-from .w8a8 import AscendW8A8LinearMethod
-from .w8a8_dynamic import (AscendW8A8DynamicFusedMoEMethod,
-                           AscendW8A8DynamicLinearMethod)
-from .w8a8_pdmix import (AscendW8A8PDMixFusedMoeMethod,
-                         AscendW8A8PDMixLinearMethod)
-from .w8a8mxfp8 import AscendW8A8MXFP8DynamicLinearMethod
-from .w8a16 import AscendW8A16LinearMethod
-
-ASCEND_QUANTIZATION_METHOD_MAP: Dict[str, Dict[str, Type[Any]]] = {
-    "W4A16": {
-        "moe": AscendW4A16FusedMoEMethod,
-    },
-    "W4A8_DYNAMIC": {
-        "linear": AscendW4A8DynamicLinearMethod,
-        "moe": AscendW4A8DynamicFusedMoEMethod,
-    },
-    "W4A4_FLATQUANT_DYNAMIC": {
-        "linear": AscendW4A4FlatQuantDynamicLinearMethod,
-    },
-    "W8A8": {
-        "linear": AscendW8A8LinearMethod,
-    },
-    "W8A8_DYNAMIC": {
-        "linear": AscendW8A8DynamicLinearMethod,
-        "moe": AscendW8A8DynamicFusedMoEMethod,
-    },
-    "W8A8_MIX": {
-        "linear": AscendW8A8PDMixLinearMethod,
-        "moe": AscendW8A8PDMixFusedMoeMethod,
-    },
-    "W8A16": {
-        "linear": AscendW8A16LinearMethod,
-    },
-    "W8A8_MXFP8": {
-        "linear": AscendW8A8MXFP8DynamicLinearMethod,
-    },
-}
+from vllm_ascend.utils import ASCEND_QUANTIZATION_METHOD, COMPRESSED_TENSORS_METHOD
 
 
-def get_linear_quant_type(quant_description: Dict[str, Any], prefix: str,
-                          packed_modules_mapping: Dict[str, Any]):
-    proj_name = prefix.split(".")[-1]
-    if proj_name in packed_modules_mapping:
-        quant_type = None
-        shard_prefixes = [
-            prefix.replace(proj_name, shard_proj_name)
-            for shard_proj_name in packed_modules_mapping[proj_name]
-        ]
-        for shard_prefix in shard_prefixes:
-            shard_quant_type = quant_description[shard_prefix + '.weight']
+def get_model_file(
+    model: str | Path,
+    filename: str,
+    revision: str | None = None,
+) -> Path | None:
+    """Get a file from local model directory or download from remote repo.
 
-            if quant_type is None:
-                quant_type = shard_quant_type
-            elif shard_quant_type != quant_type:
-                raise ValueError(
-                    f"Not all shards of {prefix} are quantized with same quant type."
-                    f"Shard {proj_name} uses {shard_quant_type}, but another shard"
-                    f"use {quant_type}. Please check quantization config.")
-    else:
-        quant_type = quant_description[prefix + '.weight']
-    return quant_type
+    This function handles both local paths and remote repository IDs,
+    automatically downloading files from HuggingFace Hub or ModelScope
+    if they are not already cached.
 
+    Args:
+        model: Local directory path or HuggingFace/ModelScope repo id.
+        filename: Name of the file to retrieve (e.g., "config.json").
+        revision: Optional revision (branch, tag, or commit hash) for remote repos.
 
-def get_quant_method(quant_description: Dict[str, Any],
-                     prefix: str,
-                     layer_type: str,
-                     packed_modules_mapping: Optional[Dict[str, Any]] = None,
-                     layer: torch.nn.Module = None):
-    if quant_description.get("quant_method") == COMPRESSED_TENSORS_METHOD:
-        return get_quant_method_llmcompressor(layer)
+    Returns:
+        Path to the file if found, None otherwise.
+    """
+    # Check if it's a local path
+    model_path = Path(model) if isinstance(model, str) else model
+    if model_path.exists():
+        file_path = model_path / filename
+        return file_path if file_path.exists() else None
 
-    return get_quant_method_modelslim(quant_description, prefix, layer_type,
-                                      packed_modules_mapping)
+    # Remote repo: try to download from HF Hub or ModelScope
+    try:
+        if envs.VLLM_USE_MODELSCOPE:
+            from modelscope.hub.file_download import model_file_download  # type: ignore[import-untyped]
 
-
-def get_quant_method_llmcompressor(layer: torch.nn.Module):
-    logger.info_once("Using the vLLM Ascend llmcompressor Quantization now!")
-    if layer.scheme is None:
-        raise ValueError("A scheme must be defined for each layer")
-    return layer.scheme
-
-
-def get_quant_method_modelslim(
-        quant_description: Dict[str, Any],
-        prefix: str,
-        layer_type: str,
-        packed_modules_mapping: Optional[Dict[str, Any]] = None):
-    logger.info_once("Using the vLLM Ascend modelslim Quantization now!")
-    if packed_modules_mapping is None:
-        packed_modules_mapping = dict()
-    # Attention
-    if '.attn' in prefix and 'fa_quant_type' in quant_description.keys():
-        quant_type = quant_description['fa_quant_type']
-    # Linear
-    else:
-        quant_type = get_linear_quant_type(quant_description, prefix,
-                                           packed_modules_mapping)
-    if quant_type in ASCEND_QUANTIZATION_METHOD_MAP.keys():
-        method_map = ASCEND_QUANTIZATION_METHOD_MAP[quant_type]
-        if layer_type in method_map.keys():
-            method_cls = method_map[layer_type]
-            return method_cls()
-        else:
-            raise NotImplementedError(
-                f"Currently, vLLM Ascend doesn't support {quant_type} for {layer_type}."
+            downloaded_path = model_file_download(
+                model_id=str(model),
+                file_path=filename,
+                revision=revision,
             )
-    raise NotImplementedError("Currently, vLLM Ascend only supports following quant types:" \
-                                f"{list(ASCEND_QUANTIZATION_METHOD_MAP.keys())}")
+            return Path(downloaded_path)
+        else:
+            from huggingface_hub import hf_hub_download
+
+            downloaded_path = hf_hub_download(
+                repo_id=str(model),
+                filename=filename,
+                revision=revision,
+            )
+            return Path(downloaded_path)
+    except Exception as e:
+        logger.debug("Could not download %s from %s: %s", filename, model, e)
+        return None
 
 
-def is_mx_quant_type(instance: Any) -> bool:
-    """Checks if the quantization method is a mix-precision type."""
-    MX_QUANT_TYPES = (AscendW8A8MXFP8DynamicLinearMethod, )
-    return isinstance(instance, MX_QUANT_TYPES)
+def detect_quantization_method(model: str, revision: str | None = None) -> str | None:
+    """Auto-detect the quantization method from model files.
+
+    This function performs a lightweight check (JSON files only — no
+    .safetensors or .bin inspection) to determine which quantization
+    method was used to produce the weights in *model*.
+
+    Works with both local directories (``/path/to/model``) and remote
+    repository identifiers (``org/model-name``).  For remote repos the
+    lookup goes through the HuggingFace / ModelScope cache, downloading
+    config files if not already cached.
+
+    Detection priority:
+        1. **ModelSlim (Ascend)** – ``quant_model_description.json`` exists.
+        2. **LLM-Compressor (compressed-tensors)** – ``config.json`` contains
+           a ``quantization_config`` section with
+           ``"quant_method": "compressed-tensors"``.
+        3. **None** – neither condition is met; the caller should fall back to
+           the default (float) behaviour.
+
+    Args:
+        model: Local directory path **or** HuggingFace / ModelScope repo id.
+        revision: Optional model revision (branch, tag, or commit id).
+
+    Returns:
+        ``"ascend"`` for ModelSlim models,
+        ``"compressed-tensors"`` for LLM-Compressor models,
+        or ``None`` if no quantization signature is found.
+    """
+    from vllm_ascend.quantization.modelslim_config import MODELSLIM_CONFIG_FILENAME
+
+    # Case 1: ModelSlim — look for quant_model_description.json
+    modelslim_path = get_model_file(model, MODELSLIM_CONFIG_FILENAME, revision=revision)
+    if modelslim_path is not None:
+        return ASCEND_QUANTIZATION_METHOD
+
+    # Case 2: LLM-Compressor — look for compressed-tensors in config.json
+    config_path = get_model_file(model, "config.json", revision=revision)
+    if config_path is not None:
+        try:
+            with open(config_path) as f:
+                config = json.load(f)
+            quant_cfg = config.get("quantization_config")
+            if isinstance(quant_cfg, dict):
+                quant_method = quant_cfg.get("quant_method", "")
+                if quant_method == COMPRESSED_TENSORS_METHOD:
+                    return COMPRESSED_TENSORS_METHOD
+        except (json.JSONDecodeError, OSError):
+            pass
+
+    # Case 3: No quantization signature found.
+    return None
+
+
+def maybe_auto_detect_quantization(vllm_config) -> None:
+    """Auto-detect and apply the quantization method on *vllm_config*.
+
+    This should be called during engine initialisation (from
+    ``NPUPlatform.check_and_update_config``) **after** ``VllmConfig`` has been
+    created but **before** heavy weights are loaded.
+
+    Because ``check_and_update_config`` runs *after*
+    ``VllmConfig.__post_init__`` has already evaluated
+    ``_get_quantization_config`` (which returned ``None`` when
+    ``model_config.quantization`` was not set), we must:
+
+    1. Set ``model_config.quantization`` to the detected value.
+    2. Recreate ``vllm_config.quant_config`` so that the quantization
+       pipeline (``get_quant_config`` → ``QuantizationConfig`` →
+       ``get_quant_method`` for every layer) is properly initialised.
+
+    Rules:
+        * If the user explicitly set ``--quantization``, that value is
+          respected.  A warning is emitted when the detected method differs.
+        * If no ``--quantization`` was given, the detected method (if any) is
+          applied automatically.
+
+    Args:
+        vllm_config: A ``vllm.config.VllmConfig`` instance (mutable).
+    """
+    model_config = vllm_config.model_config
+    model = model_config.model
+    revision = model_config.revision
+    user_quant = model_config.quantization
+    detected = detect_quantization_method(model, revision=revision)
+
+    if detected is None:
+        # No quantization signature found — nothing to do.
+        return
+
+    if user_quant is not None:
+        # User explicitly specified a quantization method.
+        if user_quant != detected:
+            logger.warning(
+                "Auto-detected quantization method '%s' from model "
+                "files for '%s', but user explicitly specified "
+                "'--quantization %s'. Respecting the user-specified "
+                "value. If you encounter errors during model loading, "
+                "consider using '--quantization %s' instead.",
+                detected,
+                model,
+                user_quant,
+                detected,
+            )
+        return
+
+    # No user-specified quantization — apply auto-detected value.
+    model_config.quantization = detected
+    logger.info(
+        "Auto-detected quantization method '%s' from model files "
+        "for '%s'. To override, pass '--quantization <method>' explicitly.",
+        detected,
+        model,
+    )
+
+    # Recreate quant_config on VllmConfig.  The original __post_init__
+    # already ran _get_quantization_config(), but at that point
+    # model_config.quantization was None so it returned None.  Now that
+    # we've set it, we need to build the actual QuantizationConfig so the
+    # downstream model-loading code can use it.
+    from vllm.config import VllmConfig as _VllmConfig
+
+    vllm_config.quant_config = _VllmConfig._get_quantization_config(model_config, vllm_config.load_config)
+
+
+def enable_fa_quant(vllm_config, layer_name=None) -> bool:
+    if vllm_config.quant_config is not None and getattr(vllm_config.quant_config, "enable_fa_quant", False):
+        if layer_name is not None:
+            return vllm_config.quant_config.enabling_fa_quant(vllm_config, layer_name)
+        else:
+            return True
+    return False

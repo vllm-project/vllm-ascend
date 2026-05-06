@@ -5,17 +5,15 @@ SOC_VERSION=$2
 
 if [[ "$SOC_VERSION" =~ ^ascend310 ]]; then
     # ASCEND310P series
-    # currently, no custom aclnn ops for ASCEND310 series
-    # CUSTOM_OPS=""
-    # SOC_ARG="ascend310p"
-    exit 0
+    CUSTOM_OPS="causal_conv1d_v310;recurrent_gated_delta_rule_v310"
+    SOC_ARG="ascend310p"
 elif [[ "$SOC_VERSION" =~ ^ascend910b ]]; then
     # ASCEND910B (A2) series
-    # depdendency: catlass
+    # dependency: catlass
     git config --global --add safe.directory "$ROOT_DIR"
     CATLASS_PATH=${ROOT_DIR}/csrc/third_party/catlass/include
     if [[ ! -d "${CATLASS_PATH}" ]]; then
-        echo "depdendency catlass is missing, try to fetch it..."
+        echo "dependency catlass is missing, try to fetch it..."
         if ! git submodule update --init --recursive; then
             echo "fetch failed"
             exit 1
@@ -24,46 +22,31 @@ elif [[ "$SOC_VERSION" =~ ^ascend910b ]]; then
     ABSOLUTE_CATLASS_PATH=$(cd "${CATLASS_PATH}" && pwd)
     export CPATH=${ABSOLUTE_CATLASS_PATH}:${CPATH}
 
-    CUSTOM_OPS="grouped_matmul_swiglu_quant_weight_nz_tensor_list;lightning_indexer;sparse_flash_attention;matmul_allreduce_add_rmsnorm;moe_init_routing_custom;moe_gating_top_k;"
+
+    CUSTOM_OPS="moe_grouped_matmul;grouped_matmul_swiglu_quant_weight_nz_tensor_list;lightning_indexer_vllm;sparse_flash_attention;matmul_allreduce_add_rmsnorm;moe_init_routing_custom;moe_gating_top_k;add_rms_norm_bias;apply_top_k_top_p_custom;transpose_kv_cache_by_block;copy_and_expand_eagle_inputs;causal_conv1d;lightning_indexer_quant;hamming_dist_top_k;reshape_and_cache_bnsd;recurrent_gated_delta_rule;"
     SOC_ARG="ascend910b"
 elif [[ "$SOC_VERSION" =~ ^ascend910_93 ]]; then
     # ASCEND910C (A3) series
-    # depdendency: catlass
+    # dependency: catlass
     git config --global --add safe.directory "$ROOT_DIR"
     CATLASS_PATH=${ROOT_DIR}/csrc/third_party/catlass/include
     if [[ ! -d "${CATLASS_PATH}" ]]; then
-        echo "depdendency catlass is missing, try to fetch it..."
+        echo "dependency catlass is missing, try to fetch it..."
         if ! git submodule update --init --recursive; then
             echo "fetch failed"
             exit 1
         fi
     fi
-    # depdendency: cann-toolkit file moe_distribute_base.h
-    HCCL_STRUCT_FILE_PATH=$(find -L "${ASCEND_TOOLKIT_HOME}" -name "moe_distribute_base.h" 2>/dev/null | head -n1)
-    if [ -z "$HCCL_STRUCT_FILE_PATH" ]; then
-        echo "cannot find moe_distribute_base.h file in CANN env"
-        exit 1
-    fi
     # for dispatch_gmm_combine_decode
     yes | cp "${HCCL_STRUCT_FILE_PATH}" "${ROOT_DIR}/csrc/utils/inc/kernel"
-    # for dispatch_ffn_combine
-    SCRIPT_DIR=$(cd "$(dirname "$0")" && pwd)
-    TARGET_DIR="$SCRIPT_DIR/dispatch_ffn_combine/op_kernel/utils/"
-    TARGET_FILE="$TARGET_DIR/$(basename "$HCCL_STRUCT_FILE_PATH")"
-
-    echo "*************************************"
-    echo $HCCL_STRUCT_FILE_PATH
-    echo "$TARGET_DIR"
-    cp "$HCCL_STRUCT_FILE_PATH" "$TARGET_DIR"
-
-    sed -i 's/struct HcclOpResParam {/struct HcclOpResParamCustom {/g' "$TARGET_FILE"
-    sed -i 's/struct HcclRankRelationResV2 {/struct HcclRankRelationResV2Custom {/g' "$TARGET_FILE"
 
     CUSTOM_OPS_ARRAY=(
         "grouped_matmul_swiglu_quant_weight_nz_tensor_list"
-        "lightning_indexer"
+        "lightning_indexer_vllm"
         "sparse_flash_attention"
         "dispatch_ffn_combine"
+        "dispatch_ffn_combine_w4_a8"
+        "dispatch_ffn_combine_bf16"
         "dispatch_gmm_combine_decode"
         "moe_combine_normal"
         "moe_dispatch_normal"
@@ -71,6 +54,16 @@ elif [[ "$SOC_VERSION" =~ ^ascend910_93 ]]; then
         "notify_dispatch"
         "moe_init_routing_custom"
         "moe_gating_top_k"
+        "add_rms_norm_bias"
+        "apply_top_k_top_p_custom"
+        "transpose_kv_cache_by_block"
+        "copy_and_expand_eagle_inputs"
+        "causal_conv1d"
+        "moe_grouped_matmul"
+        "lightning_indexer_quant"
+        "hamming_dist_top_k"
+        "reshape_and_cache_bnsd"
+        "recurrent_gated_delta_rule"
     )
     CUSTOM_OPS=$(IFS=';'; echo "${CUSTOM_OPS_ARRAY[*]}")
     SOC_ARG="ascend910_93"

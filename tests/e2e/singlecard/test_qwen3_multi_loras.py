@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-from modelscope import snapshot_download  # type: ignore
+from unittest.mock import patch
+
 from vllm import SamplingParams
 from vllm.lora.request import LoRARequest
 
@@ -9,11 +10,11 @@ from vllm_ascend.utils import enable_custom_op
 
 enable_custom_op()
 
-MODEL_PATH = "vllm-ascend/Qwen3-0.6B"
+MODEL_PATH = "Qwen/Qwen3-0.6B"
 LORA_NAME_PATH_MAP = {
-    "Alice": "vllm-ascend/self_cognition_Alice",
-    "Bob": "vllm-ascend/self_cognition_Bob",
-    "Cat": "vllm-ascend/self_cognition_Bob",  # same as Bob
+    "Alice": "charent/self_cognition_Alice",
+    "Bob": "charent/self_cognition_Bob",
+    "Cat": "charent/self_cognition_Bob",  # same as Bob
 }
 
 LORA_RANK = 8
@@ -27,19 +28,13 @@ LORA_TEST_EXPECTED = [
 
 def format_chatml_messages(prompt: str):
     return [
-        {
-            "role": "system",
-            "content": "You are a helpful assistant."
-        },
-        {
-            "role": "user",
-            "content": prompt
-        },
+        {"role": "system", "content": "You are a helpful assistant."},
+        {"role": "user", "content": prompt},
     ]
 
 
+@patch.dict("os.environ", {"VLLM_USE_MODELSCOPE": "False"})
 def test_multi_loras_with_tp_sync():
-
     lora_name_id_map = {}
     increase_lora_id = 0
 
@@ -51,11 +46,11 @@ def test_multi_loras_with_tp_sync():
         return LoRARequest(
             lora_name=name,
             lora_int_id=increase_lora_id,
-            lora_path=snapshot_download(path),
+            lora_path=path,
         )
 
     vllm_model = VllmRunner(
-        snapshot_download(MODEL_PATH),
+        MODEL_PATH,
         enable_lora=True,
         # dtype="half",
         max_loras=2,  # ensure max_loras < max_cpu_loras
@@ -103,9 +98,7 @@ def test_multi_loras_with_tp_sync():
         outputs = llm.chat(
             [messages],
             sampling_params,
-            chat_template_kwargs={
-                "enable_thinking": False
-            },  # for those loras, ensure enable_thinking=False
+            chat_template_kwargs={"enable_thinking": False},  # for those loras, ensure enable_thinking=False
             lora_request=lora_request,
             use_tqdm=False,
         )
@@ -114,15 +107,13 @@ def test_multi_loras_with_tp_sync():
 
     def reload_lora(name: str):
         """
-        reload a lora to simulate the case: 
-        setting `VLLM_ALLOW_RUNTIME_LORA_UPDATING=true` 
+        reload a lora to simulate the case:
+        setting `VLLM_ALLOW_RUNTIME_LORA_UPDATING=true`
         for dynamic lora loading and unloading
         """
-        remove_lora_response = llm.llm_engine.remove_lora(
-            lora_id=lora_name_id_map[name])
+        remove_lora_response = llm.llm_engine.remove_lora(lora_id=lora_name_id_map[name])
 
-        add_lora_response = llm.llm_engine.add_lora(
-            make_add_lora_request(name, LORA_NAME_PATH_MAP[name]))
+        add_lora_response = llm.llm_engine.add_lora(make_add_lora_request(name, LORA_NAME_PATH_MAP[name]))
 
         print(f"{remove_lora_response=}, {add_lora_response=}")
 
@@ -132,7 +123,6 @@ def test_multi_loras_with_tp_sync():
         assert outputs == expected
 
     for prompt, expected_output in zip(LORA_TEST_PROMPTS, LORA_TEST_EXPECTED):
-
         output_text = call_llm_get_outputs(prompt, "Alice")
         check_outputs(output_text, expected_output, prompt)
 

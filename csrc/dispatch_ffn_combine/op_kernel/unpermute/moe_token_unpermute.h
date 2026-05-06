@@ -87,7 +87,6 @@ KernelMoeTokenUnpermute<T1, T2, T3, PROBS>::Init(GM_ADDR permuted_tokens, GM_ADD
 {
     this->blockIdx = get_block_idx() + get_subblockid() * get_block_num();
     this->blockNum = get_block_num() * get_subblockdim();
-
     if (blockIdx >= blockNum) {
         return;
     }

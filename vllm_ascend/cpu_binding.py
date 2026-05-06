@@ -1,38 +1,68 @@
 #!/usr/bin/env python3
-# -*- coding: utf-8 -*-
 
 import os
+import platform
+import shutil
 import subprocess
 from collections import defaultdict
-from typing import Dict, List, Tuple
 
 import psutil
 from vllm.logger import logger
 
+from vllm_ascend.utils import AscendDeviceType, get_ascend_device_type
+
+MASK_BIT = 32  # Number of bits in a CPU affinity mask group
+MIN_CPUS_PER_NPU = 5  # 2(IRQ) + 1(main, at least 1 CPU) + 1(acl) + 1(release) = 5 CPUs per NPU
 ALLOWED_CPUS_PATH = "/proc/self/status"
 ASCEND_RT_VISIBLE_DEVICES = os.getenv("ASCEND_RT_VISIBLE_DEVICES")
 
+TOPO_AFFINITY_MODE = "topo_affinity"
+GLOBAL_SLICE_MODE = "global_slice"
 
-def execute_command(cmd: List[str]) -> Tuple[str, int]:
-    with subprocess.Popen(cmd,
-                          shell=False,
-                          stdout=subprocess.PIPE,
-                          stderr=subprocess.PIPE) as p:
-        out, _ = p.communicate(timeout=1000)
+DEVICE_BINDING_MODE: dict["AscendDeviceType", str] = {
+    AscendDeviceType.A2: TOPO_AFFINITY_MODE,
+    AscendDeviceType.A3: GLOBAL_SLICE_MODE,
+    AscendDeviceType._310P: TOPO_AFFINITY_MODE,
+}
+
+
+def is_arm_cpu() -> bool:
+    arch = platform.machine().lower()
+    if arch in {"x86_64", "amd64", "i386", "i686"}:
+        return False
+    if arch in {"aarch64", "arm64"} or arch.startswith("arm"):
+        return True
+    logger.warning("Unknown CPU architecture '%s', CPU binding will be disabled.", arch)
+    return False
+
+
+def execute_command(cmd: list[str]) -> tuple[str, int]:
+    # Force a C locale so subprocess output remains parseable on localized OSes.
+    env = os.environ.copy()
+    env["LC_ALL"] = "C"
+    env["LANG"] = "C"
+    env["LC_MESSAGES"] = "C"
+    with subprocess.Popen(cmd, shell=False, stdout=subprocess.PIPE, stderr=subprocess.PIPE, env=env) as p:
+        try:
+            out, _ = p.communicate(timeout=1000)
+        except subprocess.TimeoutExpired:
+            p.kill()
+            out, _ = p.communicate()
     return out.decode(), p.returncode
 
 
 class DeviceInfo:
-
     def __init__(self):
-        self.npu_map_info: Dict[str, Dict[str, str]] = self.get_npu_map_info()
-        self.allowed_cpus: List[int] = self.parse_allowed_cpus()
-        self.running_npu_list: List[int] = self.get_running_npus()
-        self.npu_affinity: Dict[int, List[int]] = self.parse_topo_affinity()
+        self.npu_map_info: dict[str, dict[str, str]] = self.get_npu_map_info()
+        self.allowed_cpus: list[int] = self.parse_allowed_cpus()
+        self.running_npu_list: list[int] = self.get_running_npus()
+        self.npu_affinity: dict[int, list[int]] = self.parse_topo_affinity()
+        self.all_logic_npus: list[int] = self.get_all_logic_npus()
+        self.total_logic_npus: int = len(self.all_logic_npus)
 
     @staticmethod
-    def expand_cpu_list(allowed_list_str: str) -> List[int]:
-        allowed_cpus_list: List[int] = []
+    def expand_cpu_list(allowed_list_str: str) -> list[int]:
+        allowed_cpus_list: list[int] = []
         for per_range in allowed_list_str.split(","):
             if "-" in per_range:
                 start_cpu, end_cpu = map(int, per_range.split("-"))
@@ -41,9 +71,23 @@ class DeviceInfo:
                 allowed_cpus_list.append(int(per_range))
         return allowed_cpus_list
 
+    def get_all_logic_npus(self) -> list[int]:
+        """Collect all logical NPU IDs from the NPU mapping.
+
+        self.npu_map_info maps a board_id (A3) or npu_id (A2) to a per-chip map.
+        The per-chip map uses chip_id as the key and the logical NPU ID string
+        as the value.
+        """
+        logic_ids: set[int] = set()
+        for _, chip_map in self.npu_map_info.items():
+            for _, logic_str in chip_map.items():
+                if logic_str and logic_str.isdigit():
+                    logic_ids.add(int(logic_str))
+        return sorted(logic_ids)
+
     @staticmethod
-    def get_npu_map_info() -> Dict[str, Dict[str, str]]:
-        npu_map_info: Dict[str, Dict[str, str]] = {}
+    def get_npu_map_info() -> dict[str, dict[str, str]]:
+        npu_map_info: dict[str, dict[str, str]] = {}
         npu_info, _ = execute_command(["npu-smi", "info", "-m"])
         npu_map = npu_info.strip().split("\n")[1:]
         for line in npu_map:
@@ -55,7 +99,7 @@ class DeviceInfo:
             npu_map_info[npu_id][chip_id] = chip_logic_id
         return npu_map_info
 
-    def get_running_npus(self) -> List[int]:
+    def get_running_npus(self) -> list[int]:
         npu_message, _ = execute_command(["npu-smi", "info"])
         in_proc_section = False
         running_npu_set = set()
@@ -76,36 +120,29 @@ class DeviceInfo:
                     continue
                 chip_logic_id = self.npu_map_info.get(npu_id, {}).get(chip_id)
                 if not chip_logic_id or not chip_logic_id.isdigit():
-                    raise RuntimeError(
-                        "Failed to get correct chip_logic_id from command 'npu-smi info -m'."
-                    )
+                    raise RuntimeError("Failed to get correct chip_logic_id from command 'npu-smi info -m'.")
                 running_npu_set.add(int(chip_logic_id))
         if ASCEND_RT_VISIBLE_DEVICES:
             devices_str = ASCEND_RT_VISIBLE_DEVICES
             devices_list = [int(x) for x in devices_str.split(",")]
             running_npu_set = set(devices_list) & running_npu_set
         if not running_npu_set:
-            raise RuntimeError(
-                "Can not get running npu info, you can use BIND_CPU=0 to skip."
-            )
+            raise RuntimeError("Can not get running npu info.")
         return sorted(running_npu_set)
 
-    def parse_allowed_cpus(self) -> List[int]:
+    def parse_allowed_cpus(self) -> list[int]:
         if not os.path.exists(ALLOWED_CPUS_PATH):
             return []
         with open(ALLOWED_CPUS_PATH) as f:
             for line in f:
                 if line.startswith("Cpus_allowed_list"):
                     return self.expand_cpu_list(line.split()[1])
-        raise RuntimeError(
-            "Can not found specific 'Cpus_allowed_list' in the '/proc/self/status' file."
-        )
+        raise RuntimeError("Can not found specific 'Cpus_allowed_list' in the '/proc/self/status' file.")
 
-    def parse_topo_affinity(self) -> Dict[int, List[int]]:
+    def parse_topo_affinity(self) -> dict[int, list[int]]:
         chip_logic_id = 0
-        affinity: Dict[int, List[int]] = {}
-        affinity_message, _ = execute_command(
-            ["npu-smi", "info", "-t", "topo"])
+        affinity: dict[int, list[int]] = {}
+        affinity_message, _ = execute_command(["npu-smi", "info", "-t", "topo"])
         for line in affinity_message.splitlines():
             if line.startswith("NPU"):
                 parts = line.split()
@@ -117,21 +154,29 @@ class DeviceInfo:
 
 
 class CpuAlloc:
-
     def __init__(self, rank_id: int):
         self.rank_id = rank_id
         self.device_info: DeviceInfo = DeviceInfo()
-        self.cpu_node: Dict[int, int] = {}
-        self.numa_to_cpu_map: Dict[int, List[int]] = defaultdict(list)
-        self.npu_cpu_pool: Dict[int, List[int]] = {}
-        self.assign_main: Dict[int, List[int]] = {}
-        self.assign_acl: Dict[int, List[int]] = {}
-        self.assign_rel: Dict[int, List[int]] = {}
+        self.cpu_node: dict[int, int] = {}
+        self.numa_to_cpu_map: dict[int, list[int]] = defaultdict(list)
+        self.npu_cpu_pool: dict[int, list[int]] = {}
+        self.assign_main: dict[int, list[int]] = {}
+        self.assign_acl: dict[int, list[int]] = {}
+        self.assign_rel: dict[int, list[int]] = {}
 
     @staticmethod
-    def get_threads_map(
-            thread_message: str) -> Dict[str, Dict[str, List[str]]]:
-        threads_map: Dict[str, Dict[str, List[str]]] = {}
+    def cpu_to_mask(cpu: int) -> str:
+        group = cpu // MASK_BIT
+        bit = cpu % MASK_BIT
+        value = 1 << bit
+        mask = f"{value:08x}"
+        for _ in range(1, group + 1):
+            mask = f"{mask},{'0' * (MASK_BIT // 4)}"
+        return mask
+
+    @staticmethod
+    def get_threads_map(thread_message: str) -> dict[str, dict[str, list[str]]]:
+        threads_map: dict[str, dict[str, list[str]]] = {}
         for line in thread_message.splitlines():
             parts = line.split()
             if len(parts) < 2:
@@ -144,40 +189,33 @@ class CpuAlloc:
             else:
                 continue
             if main_pid not in threads_map:
-                threads_map[main_pid] = {
-                    "acl_thread": [],
-                    "release_thread": []
-                }
+                threads_map[main_pid] = {"acl_thread": [], "release_thread": []}
             threads_map[main_pid][key].append(sub_pid)
         return threads_map
 
     @staticmethod
-    def bind(pid: str, cpus: List[int], bind_sub_thread: bool) -> None:
+    def bind(pid: str, cpus: list[int], bind_sub_thread: bool) -> None:
         if cpus:
             cpu_list = ",".join(map(str, cpus))
             if bind_sub_thread:
-                bind_result, return_code = execute_command(
-                    ["taskset", "-acp", cpu_list, pid])
+                bind_result, return_code = execute_command(["taskset", "-acp", cpu_list, pid])
             else:
-                bind_result, return_code = execute_command(
-                    ["taskset", "-cp", cpu_list, pid])
+                bind_result, return_code = execute_command(["taskset", "-cp", cpu_list, pid])
             if return_code != 0:
                 raise RuntimeError(f"Failed to bind {pid} to CPU {cpu_list}.")
 
-    def average_distribute(
-            self, groups: Dict[str, List[int]]) -> Dict[int, List[int]]:
-        result: Dict[int, List[int]] = {}
+    def average_distribute(self, groups: dict[str, list[int]]) -> dict[int, list[int]]:
+        result: dict[int, list[int]] = {}
         for key, npu_list in groups.items():
             cpu_list = sorted(self.npu_cpu_pool[npu_list[0]])
             cpu_num_per_npu = len(cpu_list) // len(npu_list)
             for i, npu in enumerate(npu_list):
                 start_index = i * cpu_num_per_npu
-                end_index = (i + 1) * cpu_num_per_npu if i < len(
-                    npu_list) - 1 else len(cpu_list)
+                end_index = (i + 1) * cpu_num_per_npu if i < len(npu_list) - 1 else len(cpu_list)
                 result[npu] = cpu_list[start_index:end_index]
         return result
 
-    def extend_numa(self, cpu_list: List[int]) -> List[int]:
+    def extend_numa(self, cpu_list: list[int]) -> list[int]:
         if not cpu_list:
             return []
         nodes = {self.cpu_node[c] for c in cpu_list}
@@ -203,84 +241,145 @@ class CpuAlloc:
             self.cpu_node[cpu] = node
             self.numa_to_cpu_map[node].append(cpu)
         if len(self.numa_to_cpu_map) == 0:
+            raise RuntimeError("lscpu command output error, no NUMA node available. Please check!")
+
+    def build_global_slice_cpu_pool(self) -> None:
+        """
+        Build per-NPU CPU pools by slicing allowed_cpus using GLOBAL logical NPU ids.
+
+        Why:
+          - Multiple processes/DP groups may share the SAME cpuset (same allowed_cpus).
+          - If each process slices only its visible NPUs, CPU ranges overlap across processes.
+          - Global slicing ensures deterministic, non-overlapping CPU partitions per logical NPU id.
+
+        Notes:
+          - This strategy does NOT rely on npu-smi topo affinity.
+          - NUMA locality is achieved only if CPU numbering aligns with NUMA layout.
+          - Requires per-NPU slice size >= 5 (IRQ(2) + main(>=1) + acl(1) + release(1)).
+        """
+        running = list(self.device_info.running_npu_list)
+        if not running:
+            return
+
+        allowed = sorted(set(self.device_info.allowed_cpus))
+        total_cpu = len(allowed)
+        if total_cpu == 0:
+            return
+
+        # Prefer mapping info (npu-smi info -m), fallback to topo keys, then visible list
+        if self.device_info.total_logic_npus > 0:
+            total_npus = self.device_info.total_logic_npus
+        elif self.device_info.npu_affinity:
+            total_npus = len(self.device_info.npu_affinity)
+        else:
+            total_npus = len(running)
+
+        # Compute global per-NPU slicing
+        base = total_cpu // total_npus
+        extra = total_cpu % total_npus
+
+        logger.debug(
+            "[cpu_global_slice] rank:%s ASCEND_RT_VISIBLE_DEVICES=%s running_npu_list:%s total_npus:%s "
+            "allowed_cpus:%s base:%s extra:%s allowed_cpus_head:%s allowed_cpus_tail:%s",
+            self.rank_id,
+            ASCEND_RT_VISIBLE_DEVICES,
+            running,
+            total_npus,
+            total_cpu,
+            base,
+            extra,
+            allowed[:16],
+            allowed[-16:],
+        )
+
+        # Enforce per-NPU slice length >= 5.
+        # Because with remainder distribution, some NPUs may get 'base' cores and some get 'base+1'.
+        # The minimum slice size is 'base'.
+        if base < MIN_CPUS_PER_NPU:
             raise RuntimeError(
-                "lscpu command output error, no NUMA node available. Please check!"
+                "Insufficient CPUs for binding with IRQ/ACL/REL reservations: "
+                f"total_allowed={total_cpu}, total_npus={total_npus}, "
+                f"min_per_npu={base} (<{MIN_CPUS_PER_NPU}). "
+                f"Need at least {total_npus * MIN_CPUS_PER_NPU} CPUs in cpuset."
             )
 
-    def handle_no_affinity(self) -> None:
-        num_running_npu = len(self.device_info.running_npu_list)
-        num_numa_node = len(self.numa_to_cpu_map)
-        if num_numa_node == 0 or num_running_npu == 0:
-            return
-        if num_running_npu % num_numa_node != 0:
-            npu_num_per_node = num_running_npu // num_numa_node + 1
-        else:
-            npu_num_per_node = num_running_npu // num_numa_node
-        index = 0
-        for node in sorted(self.numa_to_cpu_map):
-            # Available CPUs on this NUMA (constrained by allowed_cpus)
-            cpus = [
-                c for c in self.numa_to_cpu_map[node]
-                if c in self.device_info.allowed_cpus
-            ]
-            if not cpus:
-                continue
-            # The actual number of NPUs to be allocated on this NUMA.
-            npu_num_this_node = min(npu_num_per_node, num_running_npu - index)
-            if npu_num_this_node <= 0:
-                break
-            # Evenly distribute the CPUs of this NUMA node among npu_num_this_node NPUs.
-            total_cpu_num = len(cpus)
-            base_cpu_num = total_cpu_num // npu_num_this_node
-            extra_cpu_num = total_cpu_num % npu_num_this_node
-            start_index = 0
-            for i in range(npu_num_this_node):
-                take_cpu_num = base_cpu_num + (1 if i < extra_cpu_num else 0)
-                end_index = start_index + take_cpu_num
-                select_cpus_list = cpus[start_index:end_index]
-                if index < num_running_npu:
-                    npu = self.device_info.running_npu_list[index]
-                    self.npu_cpu_pool[npu] = select_cpus_list
-                    index += 1
-                start_index = end_index
+        def _slice_for_npu(global_npu_id: int) -> list[int]:
+            # start = global_npu_id*base + min(global_npu_id, extra)
+            start = global_npu_id * base + (global_npu_id if global_npu_id < extra else extra)
+            take = base + (1 if global_npu_id < extra else 0)
+            end = start + take
+            return allowed[start:end]
+
+        for npu in running:
+            if npu < 0 or npu >= total_npus:
+                raise RuntimeError(f"Invalid NPU id {npu}, total_npus={total_npus}.")
+            cpus = _slice_for_npu(npu)
+            self.npu_cpu_pool[npu] = cpus
+
+    @staticmethod
+    def _binding_mode() -> str:
+        device_type = get_ascend_device_type()
+        return DEVICE_BINDING_MODE.get(device_type, TOPO_AFFINITY_MODE)
 
     def build_cpu_pools(self) -> None:
         self.build_cpu_node_map()
-        if not self.device_info.npu_affinity:
-            self.handle_no_affinity()
+
+        mode = self._binding_mode()
+        logger.info(
+            "[cpu_bind_mode] mode=%s rank=%s visible_npus=%s", mode, self.rank_id, self.device_info.running_npu_list
+        )
+        if mode == GLOBAL_SLICE_MODE:
+            self.build_global_slice_cpu_pool()
             return
-        for npu in self.device_info.running_npu_list:
+
+        # topo_affinity mode
+        if not self.device_info.npu_affinity:
+            logger.warning("NPU topo affinity not found, fallback to global-slice CPU binding.")
+            self.build_global_slice_cpu_pool()
+            return
+
+        allowed_cpu_set = set(self.device_info.allowed_cpus)
+        # Consider all logical NPUs to avoid CPU distribution overlap across worker processes.
+        candidate_npus = [
+            npu
+            for npu in self.device_info.all_logic_npus
+            # Always keep visible NPUs for strict conflict checks; include
+            # non-visible NPUs only when they overlap this process's cpuset.
+            if npu in self.device_info.running_npu_list
+            or any(cpu in allowed_cpu_set for cpu in self.device_info.npu_affinity.get(npu, []))
+        ]
+        for npu in candidate_npus:
             base_cpu_list = [
-                cpu for cpu in self.device_info.npu_affinity.get(npu, [])
-                if cpu in self.device_info.allowed_cpus
+                cpu for cpu in self.device_info.npu_affinity.get(npu, []) if cpu in self.device_info.allowed_cpus
             ]
             if not base_cpu_list:
-                raise RuntimeError(
-                    "CPUs available in 'Cpus_allowed_list' conflict with NUMA affinity."
-                )
+                raise RuntimeError("CPUs available in 'Cpus_allowed_list' conflict with NUMA affinity.")
             extra_cpu_list = self.extend_numa(base_cpu_list)
             self.npu_cpu_pool[npu] = extra_cpu_list
+
         groups = defaultdict(list)
         for npu, cpus in self.npu_cpu_pool.items():
             groups[str(cpus)].append(npu)
-        final: Dict[int, List[int]] = {}
+
+        final: dict[int, list[int]] = {}
         for key, npu_list in groups.items():
             if len(npu_list) == 1:
                 final[npu_list[0]] = self.npu_cpu_pool[npu_list[0]]
             else:
                 final.update(self.average_distribute({key: npu_list}))
-        self.npu_cpu_pool = final
+        # Keep only visible NPUs in the final binding pool. Non-visible NPUs are used only to avoid overlap.
+        self.npu_cpu_pool = {npu: final[npu] for npu in self.device_info.running_npu_list}
 
     def allocate(self) -> None:
         for npu, pool in self.npu_cpu_pool.items():
-            if len(pool) >= 3:
-                main = pool[:-2]
+            if len(pool) >= MIN_CPUS_PER_NPU:
+                main = pool[2:-2]
                 acl = [pool[-2]]
                 rel = [pool[-1]]
             else:
                 raise RuntimeError(
-                    "The number of CPUs is insufficient to bind to the NPUs. "
-                    "Each NPU requires at least 3 CPUs.")
+                    f"The number of CPUs is insufficient. Each NPU requires at least {MIN_CPUS_PER_NPU} CPUs."
+                )
             self.assign_main[npu] = main
             self.assign_acl[npu] = acl
             self.assign_rel[npu] = rel
@@ -290,10 +389,38 @@ class CpuAlloc:
         current_npu = self.device_info.running_npu_list[self.rank_id]
         main = " ".join(map(str, self.assign_main[current_npu]))
         acl = " ".join(map(str, self.assign_acl[current_npu]))
-        rel = str(self.assign_rel[current_npu]
-                  ) if self.assign_rel[current_npu] else ""
-        logger.info(
-            f"NPU{current_npu}: main=[{main}]  acl=[{acl}]  release=[{rel}]")
+        rel = str(self.assign_rel[current_npu]) if self.assign_rel[current_npu] else ""
+        logger.info("NPU%s: main=[%s]  acl=[%s]  release=[%s]", current_npu, main, acl, rel)
+
+    def bind_memory(self, pid: str, npu: int) -> None:
+        def _get_npu_numa_node(npu_id: int) -> int | None:
+            cpu_pool = self.npu_cpu_pool.get(npu_id, [])
+            if not cpu_pool:
+                return None
+            anchor_cpu = cpu_pool[0]
+            return self.cpu_node.get(anchor_cpu)
+
+        if not shutil.which("migratepages"):
+            logger.info("The 'migratepages' command is not available, skipping memory binding.")
+            return
+        target_numa = _get_npu_numa_node(npu)
+        if target_numa is None:
+            logger.warning("[migrate] rank:%s -> NPU%s has no CPU pool, skip memory binding.", self.rank_id, npu)
+            return
+        all_numa_nodes = sorted(self.numa_to_cpu_map.keys())
+        if target_numa not in all_numa_nodes:
+            logger.warning("[migrate] NPU:%s -> NUMA %s not found, skip memory binding.", npu, target_numa)
+            return
+        # Bind memory to the NPU's NUMA node only to minimize cross-NUMA traffic.
+        logger.info("[migrate] NPU:%s -> NUMA [%s]", npu, target_numa)
+        execute_command(
+            [
+                "migratepages",
+                pid,
+                ",".join(map(str, all_numa_nodes)),
+                str(target_numa),
+            ]
+        )
 
     def bind_threads(self) -> None:
         thread_message, _ = execute_command(["ps", "-Te"])
@@ -303,17 +430,108 @@ class CpuAlloc:
         self.bind(main_pid, self.assign_main[current_npu], True)
         for acl_thread in threads_map.get(main_pid, {}).get("acl_thread", []):
             self.bind(acl_thread, self.assign_acl[current_npu], False)
-        for release_thread in threads_map.get(main_pid,
-                                              {}).get("release_thread", []):
+        for release_thread in threads_map.get(main_pid, {}).get("release_thread", []):
             self.bind(release_thread, self.assign_rel[current_npu], False)
+        # Migrate memory once for the whole process, after all threads are pinned.
+        self.bind_memory(main_pid, current_npu)
+
+    def bind_npu_irq(self) -> None:
+        if not os.access("/proc/irq", os.W_OK):
+            return
+
+        # Only bind IRQ for current rank's NPU to avoid multi-process overwrite.
+        current_npu = self.device_info.running_npu_list[self.rank_id]
+        if current_npu not in self.npu_cpu_pool:
+            logger.warning("[irq] rank:%s -> NPU%s has no cpu pool, skip irq binding.", self.rank_id, current_npu)
+            return
+
+        if shutil.which("systemctl"):
+            output, _ = execute_command(["systemctl", "list-unit-files"])
+            if "irqbalance.service" in output:
+                _, return_code = execute_command(["systemctl", "is-active", "--quiet", "irqbalance"])
+                if return_code == 0:
+                    logger.warning(
+                        "The irqbalance service is running and has been stopped. "
+                        "You can run the systemctl start irqbalance command to restart it."
+                    )
+                    execute_command(["systemctl", "stop", "irqbalance"])
+
+        sq_irqs = []
+        with open("/proc/interrupts") as f:
+            for line in f:
+                if "sq_send_trigger_irq" in line:
+                    irq = line.split(":")[0].strip()
+                    sq_irqs.append(irq)
+
+        npu = current_npu
+        cpus = self.npu_cpu_pool[npu]
+        if len(cpus) < 2:
+            logger.warning("[irq] NPU%s cpu pool too small (<2), skip irq binding.", npu)
+            return
+
+        sq_cpu, cq_cpu = cpus[0], cpus[1]  # Reserved for IRQ binding
+        pci_addr = ""
+
+        device_type = get_ascend_device_type()
+        if device_type == AscendDeviceType.A3:
+            # A3: logical npu_id = card_id*2 + chip_id
+            card_id = npu // 2
+            chip_id = npu % 2
+            info, _ = execute_command(["npu-smi", "info", "-t", "board", "-i", str(card_id), "-c", str(chip_id)])
+        else:
+            # A2 / others: logical npu_id is card id
+            info, _ = execute_command(["npu-smi", "info", "-t", "board", "-i", str(npu)])
+
+        for line in info.splitlines():
+            if "PCIe Bus Info" in line:
+                pci_addr = line.split()[-1].lower()
+                break
+
+        if not pci_addr:
+            logger.warning("Can't find pci address of NPU%s .", npu)
+            return
+
+        try:
+            npu_irq_list = sorted(os.listdir(f"/sys/bus/pci/devices/{pci_addr}/msi_irqs/"), key=lambda x: int(x))
+        except FileNotFoundError:
+            logger.warning("The msi_irqs folder cannot be found under /sys/bus/pci/devices/%s .", pci_addr)
+            return
+
+        sq_irq, cq_irq = "", ""
+        for irq in sq_irqs:
+            if irq in npu_irq_list:
+                sq_irq = irq
+                cq_irq = str(int(irq) + 1)
+                break
+        if not sq_irq:
+            logger.warning("The sq_send_trigger_irq of NPU%s is not found.", npu)
+            return
+
+        logger.info(
+            "NPU%s(PCI %s): sq_send_trigger_irq IRQ_ID=%s -> CPU%s, cq_update_irq IRQ_ID=%s -> CPU%s",
+            npu,
+            pci_addr,
+            sq_irq,
+            sq_cpu,
+            cq_irq,
+            cq_cpu,
+        )
+        with open(f"/proc/irq/{sq_irq}/smp_affinity", "w") as f:
+            f.write(self.cpu_to_mask(sq_cpu))
+        with open(f"/proc/irq/{cq_irq}/smp_affinity", "w") as f:
+            f.write(self.cpu_to_mask(cq_cpu))
 
     def run_all(self) -> None:
         self.build_cpu_pools()
         self.allocate()
         self.print_plan()
         self.bind_threads()
+        self.bind_npu_irq()
 
 
 def bind_cpus(rank_id: int) -> None:
+    if not is_arm_cpu():
+        logger.info("CPU binding skipped: non-ARM CPU detected.")
+        return
     binder = CpuAlloc(rank_id)
     binder.run_all()

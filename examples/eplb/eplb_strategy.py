@@ -59,7 +59,7 @@ def calculate_average(lst):
     return total / count
 
 
-def layer_imblance_polt(y_list, label_names, device_num, output_path, file_name):
+def layer_imbalance_plot(y_list, label_names, device_num, output_path, file_name):
     plt.rcParams["font.sans-serif"] = ["Arial"]
     plt.rcParams["axes.unicode_minus"] = False
     x = [i for i in range(58)]
@@ -160,4 +160,4 @@ if __name__ == "__main__":
     save_matrix_to_json(output_path, file_name, np.array(global_deployment))
     label_names = ["default deployment max load", "balanced load max load", "balanced load avg load"]
     new_file_name = f"{exp_name}_{num_devices}_{num_redundancy_expert}.png"
-    layer_imblance_polt(y_list, label_names, num_devices, output_path, new_file_name)
+    layer_imbalance_plot(y_list, label_names, num_devices, output_path, new_file_name)

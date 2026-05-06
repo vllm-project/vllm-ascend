@@ -1,6 +1,6 @@
 import torch
 import vllm.v1.worker.utils as utils
-from vllm.attention.layer import Attention
+from vllm.model_executor.layers.attention import Attention
 from vllm.v1.worker.utils import defaultdict, extract_layer_index
 
 
@@ -34,8 +34,7 @@ def bind_kv_cache(
     # Convert kv_caches dict to a list of tensors in the order of layer_index.
     index2name = defaultdict(list)
     for layer_name in kv_caches:
-        index2name[extract_layer_index(layer_name,
-                                       num_attn_module)].append(layer_name)
+        index2name[extract_layer_index(layer_name, num_attn_module)].append(layer_name)
 
     for layer_index in sorted(index2name.keys()):
         layer_names = index2name[layer_index]
@@ -45,8 +44,7 @@ def bind_kv_cache(
 
     # Bind kv_caches to forward context
     for layer_name, kv_cache in kv_caches.items():
-        # NOTE: Use list because of v0 PP virtual engine.
-        forward_context[layer_name].kv_cache = [kv_cache]
+        forward_context[layer_name].kv_cache = kv_cache
 
 
 utils.bind_kv_cache = bind_kv_cache

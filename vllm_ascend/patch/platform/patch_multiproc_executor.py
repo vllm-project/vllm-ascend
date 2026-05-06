@@ -1,4 +1,5 @@
-import threading
+from __future__ import annotations
+
 import weakref
 from collections import deque
 from collections.abc import Callable
@@ -7,41 +8,34 @@ from multiprocessing.synchronize import Lock as LockType
 import vllm.v1.executor.multiproc_executor
 from vllm import envs
 from vllm.config import VllmConfig
-from vllm.distributed.device_communicators.shm_broadcast import (Handle,
-                                                                 MessageQueue)
-from vllm.utils.network_utils import (get_distributed_init_method,
-                                      get_loopback_ip, get_open_port)
+from vllm.distributed.device_communicators.shm_broadcast import Handle, MessageQueue
+from vllm.utils.network_utils import get_distributed_init_method, get_loopback_ip, get_open_port
 from vllm.utils.system_utils import get_mp_context
 from vllm.v1.executor.abstract import FailureCallback
 from vllm.v1.executor.multiproc_executor import (
-    FutureWrapper, MultiprocExecutor, UnreadyWorkerProcHandle, WorkerProc,
-    set_multiprocessing_worker_envs)
+    FutureWrapper,
+    MultiprocExecutor,
+    UnreadyWorkerProcHandle,
+    WorkerProc,
+    set_multiprocessing_worker_envs,
+)
 
 
 class AscendMultiprocExecutor(MultiprocExecutor):
-
     def _init_executor(self) -> None:
         # Call self.shutdown at exit to clean up
         # and ensure workers will be terminated.
         self._finalizer = weakref.finalize(self, self.shutdown)
         self.is_failed = False
-        self.shutdown_event = threading.Event()
         self.failure_callback: FailureCallback | None = None
 
-        self.world_size = self.parallel_config.world_size
-        assert self.world_size % self.parallel_config.nnodes_within_dp == 0, (
-            f"global world_size ({self.parallel_config.world_size}) must be "
-            f"divisible by nnodes_within_dp "
-            f"({self.parallel_config.nnodes_within_dp}). ")
-        self.local_world_size = self.parallel_config.local_world_size
-        tensor_parallel_size = self.parallel_config.tensor_parallel_size
-        pp_parallel_size = self.parallel_config.pipeline_parallel_size
-        pcp_parallel_size = self.parallel_config.prefill_context_parallel_size
+        tensor_parallel_size, pp_parallel_size, pcp_parallel_size = self._get_parallel_sizes()
         assert self.world_size == tensor_parallel_size * pp_parallel_size * pcp_parallel_size, (
             f"world_size ({self.world_size}) must be equal to the "
             f"tensor_parallel_size ({tensor_parallel_size}) x pipeline"
             f"_parallel_size ({pp_parallel_size}) x prefill_context"
-            f"_parallel_size ({pcp_parallel_size}). ")
+            f"_parallel_size ({pcp_parallel_size}). "
+        )
 
         # Set multiprocessing envs
         set_multiprocessing_worker_envs()
@@ -49,8 +43,7 @@ class AscendMultiprocExecutor(MultiprocExecutor):
         # Multiprocessing-based executor does not support multi-node setting.
         # Since it only works for single node, we can use the loopback address
         # get_loopback_ip() for communication.
-        distributed_init_method = get_distributed_init_method(
-            get_loopback_ip(), get_open_port())
+        distributed_init_method = get_distributed_init_method(get_loopback_ip(), get_open_port())
         self.rpc_broadcast_mq: MessageQueue | None = None
         scheduler_output_handle: Handle | None = None
         # Initialize worker and set up message queues for SchedulerOutputs
@@ -72,19 +65,30 @@ class AscendMultiprocExecutor(MultiprocExecutor):
         unready_workers: list[UnreadyWorkerProcHandle] = []
         success = False
         try:
-            global_start_rank = (self.local_world_size *
-                                 self.parallel_config.node_rank_within_dp)
+            global_start_rank = self.local_world_size * self.parallel_config.node_rank_within_dp
+
+            # When using fork, keep track of socket file descriptors that are
+            # inherited by the worker, so that we can close them in subsequent
+            # workers
+            inherited_fds: list[int] | None = [] if context.get_start_method() == "fork" else None
+
             for local_rank in range(self.local_world_size):
                 global_rank = global_start_rank + local_rank
-                unready_workers.append(
-                    AscendWorkerProc.make_worker_process(
-                        vllm_config=self.vllm_config,
-                        local_rank=local_rank,
-                        rank=global_rank,
-                        distributed_init_method=distributed_init_method,
-                        input_shm_handle=scheduler_output_handle,
-                        shared_worker_lock=shared_worker_lock,
-                    ))
+                is_driver_worker = self._is_driver_worker(global_rank)
+                unready_worker_handle = AscendWorkerProc.make_worker_process(
+                    vllm_config=self.vllm_config,
+                    local_rank=local_rank,
+                    rank=global_rank,
+                    distributed_init_method=distributed_init_method,
+                    input_shm_handle=scheduler_output_handle,
+                    shared_worker_lock=shared_worker_lock,
+                    is_driver_worker=is_driver_worker,
+                    inherited_fds=inherited_fds,
+                )
+                unready_workers.append(unready_worker_handle)
+                if inherited_fds is not None:
+                    inherited_fds.append(unready_worker_handle.death_writer.fileno())
+                    inherited_fds.append(unready_worker_handle.ready_pipe.fileno())
 
             # Workers must be created before wait_for_ready to avoid
             # deadlock, since worker.init_device() does a device sync.
@@ -101,13 +105,11 @@ class AscendMultiprocExecutor(MultiprocExecutor):
             if self.parallel_config.node_rank_within_dp == 0:
                 for rank in range(self.world_size):
                     if rank < self.local_world_size:
-                        local_message_queue = self.workers[
-                            rank].worker_response_mq
+                        local_message_queue = self.workers[rank].worker_response_mq
                         assert local_message_queue is not None
                         self.response_mqs.append(local_message_queue)
                     else:
-                        remote_message_queue = self.workers[
-                            0].peer_worker_response_mqs[rank]
+                        remote_message_queue = self.workers[0].peer_worker_response_mqs[rank]
                         assert remote_message_queue is not None
                         self.response_mqs.append(remote_message_queue)
 
@@ -120,6 +122,9 @@ class AscendMultiprocExecutor(MultiprocExecutor):
             # Wait for all remote response mqs to be ready.
             for response_mq in self.response_mqs:
                 response_mq.wait_until_ready()
+            self.futures_queue = deque[tuple[FutureWrapper, Callable]]()
+            self._post_init_executor()
+
             success = True
         finally:
             if not success:
@@ -128,16 +133,32 @@ class AscendMultiprocExecutor(MultiprocExecutor):
                 for uw in unready_workers:
                     if uw.death_writer is not None:
                         uw.death_writer.close()
-                self._ensure_worker_termination(
-                    [uw.proc for uw in unready_workers])
-
-        self.futures_queue = deque[tuple[FutureWrapper, Callable]]()
+                        uw.death_writer = None
+                self._ensure_worker_termination([uw.proc for uw in unready_workers])
 
         self.output_rank = self._get_output_rank()
 
+    def _get_parallel_sizes(self) -> tuple[int, int, int]:
+        self.world_size = self.parallel_config.world_size
+        assert self.world_size % self.parallel_config.nnodes_within_dp == 0, (
+            f"global world_size ({self.parallel_config.world_size}) must be "
+            f"divisible by nnodes_within_dp "
+            f"({self.parallel_config.nnodes_within_dp}). "
+        )
+        self.local_world_size = self.parallel_config.local_world_size
+        tp_size = self.parallel_config.tensor_parallel_size
+        pp_size = self.parallel_config.pipeline_parallel_size
+        pcp_size = self.parallel_config.prefill_context_parallel_size
+        return tp_size, pp_size, pcp_size
+
+    def _post_init_executor(self) -> None:
+        pass
+
+    def _is_driver_worker(self, rank: int) -> bool:
+        return rank % self.parallel_config.tensor_parallel_size == 0
+
 
 class AscendWorkerProc(WorkerProc):
-
     @staticmethod
     def make_worker_process(
         vllm_config: VllmConfig,
@@ -146,23 +167,29 @@ class AscendWorkerProc(WorkerProc):
         distributed_init_method: str,
         input_shm_handle,  # Receive SchedulerOutput
         shared_worker_lock: LockType,
+        is_driver_worker: bool = False,
+        inherited_fds: list[int] | None = None,
     ) -> UnreadyWorkerProcHandle:
         context = get_mp_context()
-        # (reader, writer)
-        reader, writer = context.Pipe(duplex=False)
-
-        # Create death pipe to detect parent process exit
+        # Ready pipe to communicate readiness from child to parent
+        ready_reader, ready_writer = context.Pipe(duplex=False)
+        # Death pipe to let child detect parent process exit
         death_reader, death_writer = context.Pipe(duplex=False)
-
+        if inherited_fds is not None:
+            inherited_fds = inherited_fds.copy()
+            inherited_fds.extend((ready_reader.fileno(), death_writer.fileno()))
         process_kwargs = {
             "vllm_config": vllm_config,
             "local_rank": local_rank,
             "rank": rank,
             "distributed_init_method": distributed_init_method,
             "input_shm_handle": input_shm_handle,
-            "ready_pipe": (reader, writer),
+            "ready_pipe": ready_writer,
             "death_pipe": death_reader,
             "shared_worker_lock": shared_worker_lock,
+            "is_driver_worker": is_driver_worker,
+            # Have the worker close parent end of this worker's pipes too
+            "inherited_fds": inherited_fds if inherited_fds is not None else [],
         }
         # Run EngineCore busy loop in background process.
         proc = context.Process(
@@ -173,10 +200,12 @@ class AscendWorkerProc(WorkerProc):
         )
 
         proc.start()
-        writer.close()
+        # Close child ends of pipes here in the parent
+        ready_writer.close()
+        death_reader.close()
         # Keep death_writer open in parent - when parent exits,
         # death_reader in child will get EOFError
-        return UnreadyWorkerProcHandle(proc, rank, reader, death_writer)
+        return UnreadyWorkerProcHandle(proc, rank, ready_reader, death_writer)
 
 
 vllm.v1.executor.multiproc_executor.MultiprocExecutor = AscendMultiprocExecutor

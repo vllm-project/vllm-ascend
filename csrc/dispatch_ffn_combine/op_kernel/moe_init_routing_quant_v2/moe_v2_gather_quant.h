@@ -95,34 +95,34 @@ __aicore__ inline void MoeV2GatherQuant<T>::Compute() {
   uint32_t elements = Align(this->colsTileLength, sizeof(T));
   if constexpr (IsSameType<T, bfloat16_t>::value) {
     Cast(floatLocal, inLocal, RoundMode::CAST_NONE, elements);
-    pipe_barrier(PIPE_V);
+    AscendC::PipeBarrier<PIPE_V>();
     Cast(halfLocal, floatLocal, RoundMode::CAST_NONE, elements);
-    pipe_barrier(PIPE_V);
+    AscendC::PipeBarrier<PIPE_V>();
     Muls(halfLocal, halfLocal, static_cast<half>(this->scale), elements);
-    pipe_barrier(PIPE_V);
+    AscendC::PipeBarrier<PIPE_V>();
     Adds(halfLocal, halfLocal, static_cast<half>(this->offset), elements);
-    pipe_barrier(PIPE_V);
+    AscendC::PipeBarrier<PIPE_V>();
     LocalTensor<int32_t> intLocal = floatLocal.ReinterpretCast<int32_t>();
     Cast(intLocal, halfLocal, RoundMode::CAST_RINT, elements);
-    pipe_barrier(PIPE_V);
+    AscendC::PipeBarrier<PIPE_V>();
     SetDeqScale((half)1.000000e+00f);
-    pipe_barrier(PIPE_V);
+    AscendC::PipeBarrier<PIPE_V>();
     Cast(halfLocal, intLocal, RoundMode::CAST_RINT, elements);
-    pipe_barrier(PIPE_V);
+    AscendC::PipeBarrier<PIPE_V>();
     Cast(outLocal, halfLocal, RoundMode::CAST_RINT, elements);
   } else if constexpr (IsSameType<T, float>::value) {
     Cast(halfLocal, inLocal, RoundMode::CAST_NONE, elements);
-    pipe_barrier(PIPE_V);
+    AscendC::PipeBarrier<PIPE_V>();
     Muls(halfLocal, halfLocal, static_cast<half>(this->scale), elements);
-    pipe_barrier(PIPE_V);
+    AscendC::PipeBarrier<PIPE_V>();
     Adds(halfLocal, halfLocal, static_cast<half>(this->offset), elements);
-    pipe_barrier(PIPE_V);
+    AscendC::PipeBarrier<PIPE_V>();
     Cast(outLocal, halfLocal, RoundMode::CAST_RINT, elements);
   } else {
     Muls(inLocal, inLocal, static_cast<T>(this->scale), elements);
-    pipe_barrier(PIPE_V);
+    AscendC::PipeBarrier<PIPE_V>();
     Adds(inLocal, inLocal, static_cast<T>(this->offset), elements);
-    pipe_barrier(PIPE_V);
+    AscendC::PipeBarrier<PIPE_V>();
     Cast(outLocal, inLocal, RoundMode::CAST_RINT, elements);
   }
   inputXCopyOutQueue.EnQue(outLocal);

@@ -17,14 +17,16 @@
 #include "error_log.h"
 #include "hcom_topo_info.h"
 #include "register/op_def_registry.h"
-#include "dispatch_ffn_combine_tiling.h"
+#include "../op_kernel/dispatch_ffn_combine_tiling.h"
 #include <vector>
 #include <map>
 #include <algorithm>
-#include "moe_init_routing_quant_v2/moe_init_routing_quant_v2_tiling.h"
+#include "../op_kernel/moe_init_routing_quant_v2/moe_init_routing_quant_v2_tiling.h"
 
 using namespace AscendC;
 using namespace ge;
+
+#define HCCL_BUFFSIZE  "HCCL_BUFFSIZE"
 
 namespace {
     // 1. Constant definitions
@@ -40,8 +42,10 @@ namespace {
     constexpr uint32_t WEIGHT_INDEX = 1;
     constexpr uint32_t WEIGHT2_INDEX = 2;
     constexpr uint32_t EXPERTID_INDEX = 3;
+    constexpr uint32_t X_ACTIVE_MASK_INDEX = 7;
     constexpr uint32_t BLOCK_NUM = 20;
     constexpr uint32_t SYSTEM_NEED_WORKSPACE = 16 * 1024 * 1024;
+    constexpr uint64_t MB_SIZE = 1024 * 1024UL;
 }
 
 namespace optiling {
@@ -52,6 +56,30 @@ static int32_t CeilDev(int32_t num, int32_t div)
         return 0;
     }
     return (num + div - 1) / div;
+}
+
+static uint64_t GetMaxWindowSize()
+{
+    uint16_t defaultWindowSize = 200;
+    const char* hccl_buffsize_env = getenv(HCCL_BUFFSIZE);
+    if (hccl_buffsize_env != nullptr) {
+        try {
+            std::string envStr(hccl_buffsize_env);
+            unsigned long val = std::stoul(envStr);
+            if (val <= std::numeric_limits<uint16_t>::max()) {
+                defaultWindowSize = static_cast<uint16_t>(val);
+            } else {
+                OP_LOGW(K_INNER_DEBUG, "HCCL_BUFFSIZE value %lu is out of range, using default.", val);
+            }
+        } catch (const std::exception& e) {
+            OP_LOGE(K_INNER_DEBUG, "Exception encountered when parsing env HCCL_BUFFSIZE: %s", e.what());
+        }
+    } else {
+        OP_LOGD(K_INNER_DEBUG, "Env HCCL_BUFFSIZE not set");
+    }
+    const uint64_t maxWindowSize = static_cast<uint64_t>(defaultWindowSize) * MB_SIZE;
+    OP_LOGD(K_INNER_DEBUG, "Get maxWindowSize is %lu", maxWindowSize);
+    return maxWindowSize;
 }
 
 // Parse and validate rankId, group, worldSize, and isTransB attributes
@@ -147,6 +175,21 @@ static ge::graphStatus DispatchFFNCombineGetPlatformInfoAndSetTiling(gert::Tilin
     return ge::GRAPH_SUCCESS;
 }
 
+static ge::graphStatus CheckXActiveMaskShape(gert::TilingContext *context, const char *nodeName, DispatchFFNCombineInfo &info)
+{
+    const gert::StorageShape* xActiveMaskStorageShape = context->GetOptionalInputShape(X_ACTIVE_MASK_INDEX);
+    if (xActiveMaskStorageShape != nullptr) {
+        OP_TILING_CHECK(xActiveMaskStorageShape->GetStorageShape().GetDimNum() != 1,
+            OP_LOGE(nodeName, "xActiveMask shape dims must be 1, but current dim num is %lu.",
+                xActiveMaskStorageShape->GetStorageShape().GetDimNum()), return ge::GRAPH_FAILED);
+        const int64_t xActiveMaskDim0 = xActiveMaskStorageShape->GetStorageShape().GetDim(0);
+        OP_TILING_CHECK(xActiveMaskDim0 != static_cast<int64_t>(info.M),
+            OP_LOGE(nodeName, "xActiveMask Dim0 must be M(%u), but current dim is %lu.", info.M, xActiveMaskDim0),
+            return ge::GRAPH_FAILED);
+    }
+    return ge::GRAPH_SUCCESS;
+}
+
 void SetTilingData(CoCTiling &cocTilingData, DispatchFFNCombineInfo &info)
 {
     cocTilingData.m0 = 128;
@@ -187,6 +230,9 @@ static ge::graphStatus DispatchFFNCombineTilingFuncImpl(gert::TilingContext *con
     OP_TILING_CHECK(DispatchFFNCombineGetPlatformInfoAndSetTiling(context, info) != ge::GRAPH_SUCCESS,
         OP_LOGE(context->GetNodeName(), "DispatchFFNCombine GetPlatformInfoAndSetTiling Failed"),
         return ge::GRAPH_FAILED);
+    OP_TILING_CHECK(CheckXActiveMaskShape(context, nodeName, info) != ge::GRAPH_SUCCESS,
+        OP_LOGE(context->GetNodeName(), "DispatchFFNCombine CheckXActiveMaskShape Failed"),
+        return ge::GRAPH_FAILED);
 
     SetTilingData(tilingData->cocTiling, info);
 
@@ -211,7 +257,7 @@ static ge::graphStatus DispatchFFNCombineTilingFuncImpl(gert::TilingContext *con
     int64_t scaleDim0 = 0;
     int64_t ubSize = 196352;
     int64_t expertCapacity = 0;
-    int64_t expertNum = info.expertPerRank * info.worldSize;
+    int64_t expertNum = info.expertPerRank * info.worldSize + 1;    // enable expertId == expertNum
     int64_t activeNum = 0;
     int64_t dropPadMode = 0;
      int64_t expertTokensCountOrCumsumFlag = 2;
@@ -232,6 +278,14 @@ static ge::graphStatus DispatchFFNCombineTilingFuncImpl(gert::TilingContext *con
     tilingData->cocTiling.moeInitRoutingQuantV2TilingData.gatherOutComputeParamsOp = moeInitRoutingQuantV2TilingBase.quantTilingData.gatherOutComputeParamsOp;
     tilingData->cocTiling.initRoutingQuantTilingKey = initRoutingQuantTilingKey;
 
+    uint64_t maxWindowSize = GetMaxWindowSize();
+    uint64_t actualSize = static_cast<uint64_t>(info.M) * info.topK * info.K * sizeof(int8_t) * 3 + 10 * MB_SIZE ;
+    OP_TILING_CHECK((actualSize > maxWindowSize),
+        OP_LOGE(nodeName, "HCCL_BUFFSIZE is too SMALL, m = %lu, k = %lu, topK = %lu"
+            " expected HCCL_BUFFSIZE is ((m * k * topK * sizeof(int8_t)) * 3 + 3MB)= %luMB, HCCL_BUFFSIZE=%luMB.",
+            info.M, info.K, info.topK, (actualSize + MB_SIZE - 1) / MB_SIZE, maxWindowSize / MB_SIZE),
+        return ge::GRAPH_FAILED);
+
     // 4. workspace
     size_t *workSpaces = context->GetWorkspaceSizes(1);
     OP_TILING_CHECK(workSpaces == nullptr, OP_LOGE(nodeName, "workSpaces is nullptr."),
@@ -243,8 +297,12 @@ static ge::graphStatus DispatchFFNCombineTilingFuncImpl(gert::TilingContext *con
     uint64_t cocWorkspace = (info.M + 256 - 1) / 256 * 256 * info.topK *sizeof(int32_t) +
                             info.worldSize * info.worldSize * info.expertPerRank * sizeof(int32_t) * 3 +
                             info.maxOutputSize * sizeof(float) * 2 +
-                            std::max(info.maxOutputSize * info.N * sizeof(int16_t), info.maxOutputSize * n2 * sizeof(int16_t)) +
-                            std::max(info.maxOutputSize * info.K * sizeof(int8_t), info.maxOutputSize * k2 * sizeof(int8_t));
+                            info.maxOutputSize * info.N * sizeof(int16_t) +
+                            info.maxOutputSize * n2 * sizeof(int16_t) +
+                            info.maxOutputSize * info.K * sizeof(int8_t) +
+                            info.maxOutputSize * k2 * sizeof(int8_t) +
+                            info.worldSize  * sizeof(int32_t) * 16 +
+                            (info.expertPerRank + info.worldSize) * sizeof(int32_t) * 16;
 
     workSpaces[0] = SYSTEM_NEED_WORKSPACE + std::max(cocWorkspace, initRoutingWorkspace);
 

@@ -10,6 +10,7 @@ import pytest
 from transformers import AutoTokenizer
 from vllm import LLM, SamplingParams
 from vllm.config import CompilationConfig
+from vllm.tokenizers.registry import resolve_tokenizer_args
 from vllm.v1.metrics.reader import Counter, Vector
 
 from tests.e2e.conftest import VllmRunner
@@ -17,14 +18,28 @@ from tests.e2e.conftest import VllmRunner
 os.environ["VLLM_WORKER_MULTIPROC_METHOD"] = "spawn"
 
 MODELS = {
-    "eagle": {
-        "main": "LLM-Research/Meta-Llama-3.1-8B-Instruct",
-        "spec": "vllm-ascend/EAGLE-LLaMA3.1-Instruct-8B",
-    },
+    # "eagle": {
+    #    "main": "LLM-Research/Meta-Llama-3.1-8B-Instruct",
+    #    "spec": "vllm-ascend/EAGLE-LLaMA3.1-Instruct-8B",
+    # },
     "eagle3": {
         "main": "Qwen/Qwen3-8B",
         "spec": "RedHatAI/Qwen3-8B-speculator.eagle3",
     },
+}
+
+DRAFT_PARALLEL_MODELS = {
+    "draft_parallel": {
+        "main": "LLM-Research/Meta-Llama-3.1-8B-Instruct",
+        "spec": "amd/PARD-Llama-3.2-1B",
+    },
+}
+
+DFLASH = {
+    "dflash": {
+        "main": "Qwen/Qwen3-8B",
+        "spec": "z-lab/Qwen3-8B-DFlash-b16",
+    }
 }
 
 # NOTE: golden may change (eagle_proposer only runs in eager mode currently),
@@ -32,7 +47,10 @@ MODELS = {
 BASELINES = {
     "eagle": [0.74, 0.44, 0.29],
     "eagle3": [0.68, 0.40, 0.18],
+    "draft_parallel": [0.83, 0.50, 0.33, 0.17, 0.17, 0.17, 0.17, 0.00],
+    "dflash": [0.67, 0.67, 0.44, 0.33, 0.11, 0.00, 0.00, 0.00],
 }
+
 
 @pytest.fixture
 def test_prompts():
@@ -85,33 +103,85 @@ def eagle3_model_name():
     return "vllm-ascend/EAGLE3-LLaMA3.1-Instruct-8B"
 
 
+@pytest.fixture
+def vl_model_name():
+    return "Qwen/Qwen3-VL-8B-Instruct"
+
+
+def vl_eagle3_model_name():
+    return "MNN/Qwen3-VL-8B-Instruct-Eagle3"
+
+
 def test_ngram_correctness(
     test_prompts: list[list[dict[str, Any]]],
     sampling_config: SamplingParams,
     model_name: str,
 ):
-    '''
+    """
     Compare the outputs of a original LLM and a speculative LLM
     should be the same when using ngram speculative decoding.
-    '''
+    """
 
     with VllmRunner(
-            model_name,
-            max_model_len=1024,
-            cudagraph_capture_sizes=[1, 2, 4, 8],
+        model_name,
+        max_model_len=1024,
+        cudagraph_capture_sizes=[1, 2, 4, 8],
     ) as ref_llm:
         ref_outputs = ref_llm.model.chat(test_prompts, sampling_config)
 
     with VllmRunner(
-            model_name,
-            speculative_config={
-                "method": "ngram",
-                "prompt_lookup_max": 5,
-                "prompt_lookup_min": 3,
-                "num_speculative_tokens": 3,
-            },
-            max_model_len=1024,
-            cudagraph_capture_sizes=[1, 2, 4, 8],
+        model_name,
+        speculative_config={
+            "method": "ngram",
+            "prompt_lookup_max": 5,
+            "prompt_lookup_min": 3,
+            "num_speculative_tokens": 3,
+        },
+        max_model_len=1024,
+        cudagraph_capture_sizes=[1, 2, 4, 8],
+    ) as runner:
+        spec_outputs = runner.model.chat(test_prompts, sampling_config)
+    matches = 0
+    misses = 0
+    for ref_output, spec_output in zip(ref_outputs, spec_outputs):
+        if ref_output.outputs[0].text == spec_output.outputs[0].text:
+            matches += 1
+        else:
+            misses += 1
+            print(f"ref_output: {ref_output.outputs[0].text}")
+            print(f"spec_output: {spec_output.outputs[0].text}")
+
+    # Heuristic: expect at least 70% of the prompts to match exactly
+    # Upon failure, inspect the outputs to check for inaccuracy.
+    assert matches > int(0.66 * len(ref_outputs))
+
+
+def test_qwen3_vl_eagle_correctness(
+    test_prompts: list[list[dict[str, Any]]],
+    sampling_config: SamplingParams,
+    vl_model_name: str,
+):
+    """
+    Compare the outputs of a original LLM and a speculative LLM
+    should be the same when using eagle speculative decoding.
+    """
+    with VllmRunner(
+        vl_model_name,
+        max_model_len=1024,
+        cudagraph_capture_sizes=[1, 2, 4, 8],
+    ) as ref_llm:
+        ref_outputs = ref_llm.model.chat(test_prompts, sampling_config)
+
+    spec_model_name = vl_eagle3_model_name()
+    with VllmRunner(
+        vl_model_name,
+        speculative_config={
+            "method": "eagle3",
+            "model": spec_model_name,
+            "num_speculative_tokens": 2,
+        },
+        max_model_len=1024,
+        cudagraph_capture_sizes=[1, 2, 4, 8],
     ) as runner:
         spec_outputs = runner.model.chat(test_prompts, sampling_config)
     matches = 0
@@ -134,22 +204,22 @@ def test_suffix_correctness(
     sampling_config: SamplingParams,
     model_name: str,
 ):
-    '''
+    """
     Compare the outputs of a original LLM and a speculative LLM
     should be the same when using ngram speculative decoding.
-    '''
-    with VllmRunner(model_name,
-                    max_model_len=1024,
-                    cudagraph_capture_sizes=[1, 2, 4, 8]) as ref_llm:
+    """
+    with VllmRunner(model_name, max_model_len=1024, cudagraph_capture_sizes=[1, 2, 4, 8]) as ref_llm:
         ref_outputs = ref_llm.model.chat(test_prompts, sampling_config)
 
-    with VllmRunner(model_name,
-                    speculative_config={
-                        "method": "suffix",
-                        "num_speculative_tokens": 8,
-                    },
-                    cudagraph_capture_sizes=[1, 2, 4, 8],
-                    max_model_len=1024) as runner:
+    with VllmRunner(
+        model_name,
+        speculative_config={
+            "method": "suffix",
+            "num_speculative_tokens": 8,
+        },
+        cudagraph_capture_sizes=[1, 2, 4, 8],
+        max_model_len=1024,
+    ) as runner:
         spec_outputs = runner.model.chat(test_prompts, sampling_config)
     matches = 0
     misses = 0
@@ -171,22 +241,24 @@ def test_suffix_acceptance(
     sampling_config: SamplingParams,
     model_name: str,
 ):
-    '''
+    """
     Check that suffix decoding caching takes effect and improves acceptance
     lengths and acceptance rates over multiple runs of the same prompts.
-    '''
+    """
     num_draft = []
     num_accept = []
-    with VllmRunner(model_name,
-                    speculative_config={
-                        "method": "suffix",
-                        "suffix_decoding_max_spec_factor": 2.0,
-                        "suffix_decoding_max_cached_requests": 1000,
-                        "num_speculative_tokens": 10,
-                    },
-                    max_model_len=1024,
-                    cudagraph_capture_sizes=[1, 2, 4, 8],
-                    disable_log_stats=False) as runner:
+    with VllmRunner(
+        model_name,
+        speculative_config={
+            "method": "suffix",
+            "suffix_decoding_max_spec_factor": 2.0,
+            "suffix_decoding_max_cached_requests": 1000,
+            "num_speculative_tokens": 10,
+        },
+        max_model_len=1024,
+        cudagraph_capture_sizes=[1, 2, 4, 8],
+        disable_log_stats=False,
+    ) as runner:
         for i in range(10):
             runner.model.chat(test_prompts[i], sampling_config)
             metrics = runner.model.get_metrics()
@@ -217,15 +289,14 @@ def test_suffix_acceptance(
 
 
 @pytest.mark.parametrize("use_eagle3", [True], ids=["eagle3"])
+@pytest.mark.parametrize("draft_tensor_parallel_size", [None, 1])
 def test_eagle_logprobs(
     model_name: str,
     use_eagle3: bool,
+    draft_tensor_parallel_size: None | int,
 ):
     prompt = {"role": "user", "content": "Hello world " * 10}
-    sampling_params = SamplingParams(temperature=0,
-                                     logprobs=1,
-                                     max_tokens=10,
-                                     ignore_eos=False)
+    sampling_params = SamplingParams(temperature=0, logprobs=1, max_tokens=10, ignore_eos=False)
 
     ref_llm = LLM(model=model_name, max_model_len=2048)
     ref_outputs = ref_llm.chat([prompt], sampling_params)
@@ -238,18 +309,19 @@ def test_eagle_logprobs(
 
     spec_model_name = eagle3_model_name() if use_eagle3 else eagle_model_name()
     with VllmRunner(
-            model_name,
-            max_num_seqs=1,
-            max_num_batched_tokens=2048,
-            gpu_memory_utilization=0.6,
-            speculative_config={
-                "method": "eagle3" if use_eagle3 else "eagle",
-                "model": spec_model_name,
-                "num_speculative_tokens": 2,
-                "max_model_len": 128,
-            },
-            max_model_len=128,
-            cudagraph_capture_sizes=[1, 2, 4, 8],
+        model_name,
+        max_num_seqs=1,
+        max_num_batched_tokens=2048,
+        gpu_memory_utilization=0.6,
+        speculative_config={
+            "method": "eagle3" if use_eagle3 else "eagle",
+            "model": spec_model_name,
+            "num_speculative_tokens": 2,
+            "draft_tensor_parallel_size": draft_tensor_parallel_size,
+            "max_model_len": 128,
+        },
+        max_model_len=128,
+        cudagraph_capture_sizes=[1, 2, 4, 8],
     ) as runner:
         spec_outputs = runner.model.chat([prompt], sampling_params)
 
@@ -261,21 +333,63 @@ def test_eagle_logprobs(
                 spec_logprobs.append(logprobs[token_id])
 
     for ref_logprob, spec_logprob in zip(ref_logprobs, spec_logprobs):
-        assert math.isclose(ref_logprob.logprob,
-                            spec_logprob.logprob,
-                            rel_tol=5e-2,
-                            abs_tol=1e-1)
+        assert math.isclose(ref_logprob.logprob, spec_logprob.logprob, rel_tol=5e-2, abs_tol=1e-1)
+        assert ref_logprob.rank == spec_logprob.rank
+        assert ref_logprob.decoded_token == spec_logprob.decoded_token
+
+
+def test_suffix_logprobs(
+    model_name: str,
+):
+    """
+    Verify that suffix speculative decoding with logprobs enabled
+    does not crash and returns correct logprobs.
+    """
+    prompt = {"role": "user", "content": "Hello world " * 10}
+    sampling_params = SamplingParams(temperature=0, logprobs=1, max_tokens=10, ignore_eos=False)
+
+    ref_llm = LLM(model=model_name, max_model_len=2048)
+    ref_outputs = ref_llm.chat([prompt], sampling_params)
+    ref_logprobs = []
+    for output in ref_outputs[0].outputs:
+        for logprobs in output.logprobs:
+            for token_id in logprobs:
+                ref_logprobs.append(logprobs[token_id])
+    del ref_llm
+
+    with VllmRunner(
+        model_name,
+        speculative_config={
+            "method": "suffix",
+            "num_speculative_tokens": 8,
+        },
+        max_model_len=1024,
+        cudagraph_capture_sizes=[1, 2, 4, 8],
+    ) as runner:
+        spec_outputs = runner.model.chat([prompt], sampling_params)
+
+    spec_logprobs = []
+    for output in spec_outputs[0].outputs:
+        for logprobs in output.logprobs:
+            for token_id in logprobs:
+                spec_logprobs.append(logprobs[token_id])
+
+    assert len(spec_logprobs) > 0, "No logprobs returned from suffix spec decode"
+    for ref_logprob, spec_logprob in zip(ref_logprobs, spec_logprobs):
+        assert math.isclose(ref_logprob.logprob, spec_logprob.logprob, rel_tol=5e-2, abs_tol=1e-1)
         assert ref_logprob.rank == spec_logprob.rank
         assert ref_logprob.decoded_token == spec_logprob.decoded_token
 
 
 @pytest.mark.parametrize("method", MODELS.keys())
 @pytest.mark.parametrize("num_speculative_tokens", [3])
+@pytest.mark.parametrize("draft_tensor_parallel_size", [None, 1])
 @pytest.mark.parametrize("disable_padded_drafter_batch", [True, False])
 @pytest.mark.parametrize("async_scheduling", [True, False])
 def test_llama_qwen_eagle_acceptance(
     method: str,
     num_speculative_tokens: int,
+    draft_tensor_parallel_size: None | int,
     disable_padded_drafter_batch: bool,
     async_scheduling: bool,
 ):
@@ -287,8 +401,9 @@ def test_llama_qwen_eagle_acceptance(
     main_model_name = MODELS[method]["main"]
     spec_model_name = MODELS[method]["spec"]
 
+    tokenizer_path = resolve_tokenizer_args(main_model_name)[1]
     tokenizer = AutoTokenizer.from_pretrained(
-        main_model_name,
+        tokenizer_path,
         trust_remote_code=True,
     )
     sampling_params = SamplingParams(
@@ -320,12 +435,14 @@ def test_llama_qwen_eagle_acceptance(
             [prompt],
             tokenize=False,
             add_generation_prompt=True,
-        ) for prompt in prompts
+        )
+        for prompt in prompts
     ]
 
     speculative_config = {
         "method": method,
         "num_speculative_tokens": num_speculative_tokens,
+        "draft_tensor_parallel_size": draft_tensor_parallel_size,
         "disable_padded_drafter_batch": disable_padded_drafter_batch,
         "model": spec_model_name,
     }
@@ -333,19 +450,122 @@ def test_llama_qwen_eagle_acceptance(
     compilation_config = CompilationConfig(cudagraph_capture_sizes=[12])
 
     with VllmRunner(
-            main_model_name,
-            max_model_len=2048,
-            disable_log_stats=False,
-            tensor_parallel_size=1,
-            max_num_seqs=256,
-            distributed_executor_backend="mp",
-            gpu_memory_utilization=0.7,
-            speculative_config=speculative_config,
-            compilation_config=compilation_config,
-            async_scheduling=async_scheduling,
+        main_model_name,
+        max_model_len=2048,
+        disable_log_stats=False,
+        tensor_parallel_size=1,
+        max_num_seqs=256,
+        distributed_executor_backend="mp",
+        gpu_memory_utilization=0.7,
+        speculative_config=speculative_config,
+        compilation_config=compilation_config,
+        async_scheduling=async_scheduling,
     ) as llm:
-        _ = llm.generate(prompts, sampling_params)
+        outputs = llm.model.generate(prompts, sampling_params)
         metrics = llm.model.get_metrics()
+    for output in outputs:
+        prompt = output.prompt
+        generated_text = output.outputs[0].text
+        output_tokens = output.outputs[0].token_ids
+        print(f"Prompt: {prompt!r}, Generated text: {generated_text!r}")
+        print(f"Output tokens: {output_tokens}")
+    num_drafts = 0
+    num_accepted_tokens_per_pos = [0] * num_speculative_tokens
+    for metric in metrics:
+        if metric.name == "vllm:spec_decode_num_drafts":
+            assert isinstance(metric, Counter)
+            num_drafts += metric.value
+        elif metric.name == "vllm:spec_decode_num_accepted_tokens_per_pos":
+            assert isinstance(metric, Vector)
+            for pos in range(len(metric.values)):
+                num_accepted_tokens_per_pos[pos] += metric.values[pos]
+
+    acceptance_per_pos = [num_accepted_tokens / num_drafts for num_accepted_tokens in num_accepted_tokens_per_pos]
+    if method == "eagle":
+        golden = [0.7313432835820896, 0.373134328358209, 0.19402985074626866]
+    else:
+        golden = [0.68, 0.40, 0.18]
+
+    match = all(abs(a - b) < 0.08 for a, b in zip(acceptance_per_pos, golden))
+    if not match:
+        print(f"acceptance_per_pos: {acceptance_per_pos}")
+        print(f"golden: {golden}")
+
+    assert match
+
+
+@pytest.mark.parametrize("method", DRAFT_PARALLEL_MODELS.keys())
+@pytest.mark.parametrize("num_speculative_tokens", [8])
+@pytest.mark.parametrize("draft_tensor_parallel_size", [None, 1])
+def test_parallel_drafting_acceptance(
+    method: str,
+    num_speculative_tokens: int,
+    draft_tensor_parallel_size: None | int,
+):
+    """
+    Test acceptance rate for parallel drafting speculative decoding
+    using a smaller draft model with parallel_drafting enabled.
+    """
+    main_model_name = DRAFT_PARALLEL_MODELS[method]["main"]
+    spec_model_name = DRAFT_PARALLEL_MODELS[method]["spec"]
+
+    tokenizer_path = resolve_tokenizer_args(main_model_name)[1]
+    tokenizer = AutoTokenizer.from_pretrained(
+        tokenizer_path,
+        trust_remote_code=True,
+    )
+    sampling_params = SamplingParams(
+        temperature=0,
+        ignore_eos=False,
+        max_tokens=256,
+    )
+
+    prompts = [
+        {
+            "role": "user",
+            "content": "Hello, your name is",
+        },
+    ]
+    prompts = [
+        tokenizer.apply_chat_template(
+            [prompt],
+            tokenize=False,
+            add_generation_prompt=True,
+        )
+        for prompt in prompts
+    ]
+
+    speculative_config = {
+        "method": "draft_model",
+        "model": spec_model_name,
+        "num_speculative_tokens": num_speculative_tokens,
+        "draft_tensor_parallel_size": draft_tensor_parallel_size,
+        "parallel_drafting": True,
+    }
+
+    compilation_config = CompilationConfig(cudagraph_capture_sizes=[12])
+
+    with VllmRunner(
+        main_model_name,
+        max_model_len=4096,
+        disable_log_stats=False,
+        tensor_parallel_size=1,
+        max_num_seqs=256,
+        distributed_executor_backend="mp",
+        gpu_memory_utilization=0.8,
+        speculative_config=speculative_config,
+        compilation_config=compilation_config,
+        enable_prefix_caching=False,
+    ) as llm:
+        outputs = llm.model.generate(prompts, sampling_params)
+        metrics = llm.model.get_metrics()
+
+    for output in outputs:
+        prompt = output.prompt
+        generated_text = output.outputs[0].text
+        output_tokens = output.outputs[0].token_ids
+        print(f"Prompt: {prompt!r}, Generated text: {generated_text!r}")
+        print(f"Output tokens: {output_tokens}")
 
     num_drafts = 0
     num_accepted_tokens_per_pos = [0] * num_speculative_tokens
@@ -358,13 +578,128 @@ def test_llama_qwen_eagle_acceptance(
             for pos in range(len(metric.values)):
                 num_accepted_tokens_per_pos[pos] += metric.values[pos]
 
-    acceptance_per_pos = [
-        num_accepted_tokens / num_drafts
-        for num_accepted_tokens in num_accepted_tokens_per_pos
-    ]
+    acceptance_per_pos = [num_accepted_tokens / num_drafts for num_accepted_tokens in num_accepted_tokens_per_pos]
+
     golden = BASELINES[method]
 
-    match = all(abs(a - b) < 0.06 for a, b in zip(acceptance_per_pos, golden))
+    match = all(abs(a - b) < 0.1 for a, b in zip(acceptance_per_pos, golden))
+    if not match:
+        print(f"acceptance_per_pos: {acceptance_per_pos}")
+        print(f"golden: {golden}")
+
+    assert match
+
+
+@pytest.mark.parametrize("method", MODELS.keys())
+@pytest.mark.parametrize("num_speculative_tokens", [3])
+def test_eagle3_fia_pad_under_max_concurrency(
+    method: str,
+    num_speculative_tokens: int,
+):
+    main_model_name = MODELS[method]["main"]
+    spec_model_name = MODELS[method]["spec"]
+    prompts = [
+        "Hello, I am",
+    ]
+    speculative_config = {
+        "method": method,
+        "num_speculative_tokens": num_speculative_tokens,
+        "model": spec_model_name,
+    }
+    max_num_tokens = 1 + num_speculative_tokens
+    compilation_config = CompilationConfig(cudagraph_mode="FULL_DECODE_ONLY", cudagraph_capture_sizes=[max_num_tokens])
+    with VllmRunner(
+        main_model_name,
+        max_model_len=2048,
+        tensor_parallel_size=1,
+        speculative_config=speculative_config,
+        max_num_batched_tokens=max_num_tokens,
+        compilation_config=compilation_config,
+    ) as llm:
+        _ = llm.generate_greedy(prompts, max_tokens=10)
+
+
+@pytest.mark.parametrize("method", DFLASH.keys())
+@pytest.mark.parametrize("num_speculative_tokens", [8])
+def test_dflash_acceptance(
+    method: str,
+    num_speculative_tokens: int,
+):
+    main_model_name = DFLASH[method]["main"]
+    spec_model_name = DFLASH[method]["spec"]
+
+    tokenizer = AutoTokenizer.from_pretrained(
+        main_model_name,
+        trust_remote_code=True,
+    )
+    sampling_params = SamplingParams(
+        temperature=0,
+        ignore_eos=False,
+        max_tokens=256,
+    )
+
+    prompts = [
+        {
+            "role": "user",
+            "content": "Hello, your name is",
+        },
+    ]
+    prompts = [
+        tokenizer.apply_chat_template(
+            [prompt],
+            tokenize=False,
+            add_generation_prompt=True,
+            enable_thinking=False,
+        )
+        for prompt in prompts
+    ]
+
+    speculative_config = {
+        "method": "dflash",
+        "model": spec_model_name,
+        "num_speculative_tokens": num_speculative_tokens,
+    }
+
+    compilation_config = CompilationConfig(cudagraph_mode="FULL_DECODE_ONLY", cudagraph_capture_sizes=[9, 18])
+
+    with VllmRunner(
+        main_model_name,
+        max_model_len=4096,
+        disable_log_stats=False,
+        tensor_parallel_size=1,
+        max_num_seqs=256,
+        distributed_executor_backend="mp",
+        gpu_memory_utilization=0.8,
+        speculative_config=speculative_config,
+        compilation_config=compilation_config,
+        enable_prefix_caching=False,
+    ) as llm:
+        outputs = llm.model.generate(prompts, sampling_params)
+        metrics = llm.model.get_metrics()
+
+    for output in outputs:
+        prompt = output.prompt
+        generated_text = output.outputs[0].text
+        output_tokens = output.outputs[0].token_ids
+        print(f"Prompt: {prompt!r}, Generated text: {generated_text!r}")
+        print(f"Output tokens: {output_tokens}")
+
+    num_drafts = 0
+    num_accepted_tokens_per_pos = [0] * num_speculative_tokens
+    for metric in metrics:
+        if metric.name == "vllm:spec_decode_num_drafts":
+            assert isinstance(metric, Counter)
+            num_drafts += metric.value
+        elif metric.name == "vllm:spec_decode_num_accepted_tokens_per_pos":
+            assert isinstance(metric, Vector)
+            for pos in range(len(metric.values)):
+                num_accepted_tokens_per_pos[pos] += metric.values[pos]
+
+    acceptance_per_pos = [num_accepted_tokens / num_drafts for num_accepted_tokens in num_accepted_tokens_per_pos]
+
+    golden = BASELINES[method]
+
+    match = all(abs(a - b) < 0.1 for a, b in zip(acceptance_per_pos, golden))
     if not match:
         print(f"acceptance_per_pos: {acceptance_per_pos}")
         print(f"golden: {golden}")

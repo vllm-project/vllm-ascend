@@ -7,7 +7,7 @@
 extern "C" {
 #endif
 
-/* funtion: aclnnMoeCombineGetWorkspaceSize
+/* function: aclnnMoeCombineGetWorkspaceSize
  * recvX : required
  * tokenSrcInfo : required
  * epRecvCounts : required
@@ -43,7 +43,7 @@ __attribute__((visibility("default"))) aclnnStatus aclnnMoeCombineNormalGetWorks
                                             uint64_t *workspaceSize,
                                             aclOpExecutor **executor);
 
-/* funtion: aclnnMoeCombine
+/* function: aclnnMoeCombine
  * workspace : workspace memory addr(input).
  * workspaceSize : size of workspace(input).
  * executor : executor context(input).

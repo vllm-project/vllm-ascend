@@ -17,8 +17,8 @@
 #
 
 from torch import fx as fx
-from vllm.compilation.inductor_pass import get_pass_context
-from vllm.compilation.vllm_inductor_pass import VllmInductorPass
+from vllm.compilation.passes.inductor_pass import get_pass_context
+from vllm.compilation.passes.vllm_inductor_pass import VllmInductorPass
 from vllm.config import VllmConfig
 
 
@@ -26,7 +26,7 @@ class GraphFusionPassManager:
     """
     A pass manager for graph fusion passes.
     It handles the configuration and execution of passes.
-    The counterpart in vllm is PostGradPassManager. Since torch_npu 
+    The counterpart in vllm is PostGradPassManager. Since torch_npu
     does not support triton for now, we define our own pass manager.
     """
 
@@ -48,13 +48,30 @@ class GraphFusionPassManager:
 
     def configure(self, config: VllmConfig):
         # By default, we enable the graph fusion and quantization fusion pass.
-        self.ascend_compilation_config: dict = config.additional_config.get(
-            "ascend_compilation_config", {})
+        self.ascend_compilation_config: dict = config.additional_config.get("ascend_compilation_config", {})
         if self.ascend_compilation_config.get("fuse_norm_quant", True):
-            from .passes.norm_quant_fusion_pass import \
-                AddRMSNormQuantFusionPass
+            from .passes.norm_quant_fusion_pass import AddRMSNormQuantFusionPass
+
             self.passes.append(AddRMSNormQuantFusionPass(config))
 
         if self.ascend_compilation_config.get("fuse_qknorm_rope", True):
             from .passes.qknorm_rope_fusion_pass import QKNormRopeFusionPass
+
             self.passes.append(QKNormRopeFusionPass(config))
+
+        if self.ascend_compilation_config.get("fuse_allreduce_rms", True):
+            from .passes.allreduce_rmsnorm_fusion_pass import MatmulAllReduceAddRMSNormPass
+
+            self.passes.append(MatmulAllReduceAddRMSNormPass(config))
+
+        if self.ascend_compilation_config.get("fuse_muls_add", True):
+            from .passes.muls_add_pass import MulsAddFusionPass
+
+            self.passes.append(MulsAddFusionPass(config))
+
+        if config.compilation_config.pass_config.enable_sp:
+            from .passes.sequence_parallelism import SequenceParallelismPass
+            from .passes.sequence_parallelism_moe import SequenceParallelismMoePass
+
+            self.passes.append(SequenceParallelismPass(config))
+            self.passes.append(SequenceParallelismMoePass(config))

@@ -23,15 +23,13 @@ from vllm.lora.request import LoRARequest
 from vllm.pooling_params import PoolingParams
 from vllm.v1.outputs import LogprobsTensors
 from vllm.v1.pool.metadata import PoolingStates
-from vllm.v1.sample.logits_processor import (BatchUpdateBuilder,
-                                             LogitsProcessors)
+from vllm.v1.sample.logits_processor import BatchUpdateBuilder, LogitsProcessors
 from vllm.v1.worker.gpu_input_batch import InputBatch
 
 from vllm_ascend.worker.block_table import MultiGroupBlockTable
 
 
 class NPUInputBatch(InputBatch):
-
     def __init__(
         self,
         max_num_reqs: int,
@@ -42,6 +40,7 @@ class NPUInputBatch(InputBatch):
         vocab_size: int,
         block_sizes: list[int],  # The block_size of each kv cache group
         kernel_block_sizes: list[list[int]],
+        max_num_blocks_per_req: list[int] | None = None,
         logitsprocs: LogitsProcessors | None = None,
         logitsprocs_need_output_token_ids: bool = False,
         is_spec_decode: bool = False,
@@ -72,26 +71,36 @@ class NPUInputBatch(InputBatch):
             pin_memory=False,
         )
         self.token_ids_cpu = self.token_ids_cpu_tensor.numpy()
-        self.is_token_ids_tensor = torch.zeros((max_num_reqs, max_model_len),
-                                               device="cpu",
-                                               dtype=bool,
-                                               pin_memory=False)
+        self.is_token_ids_tensor = torch.zeros(
+            (max_num_reqs, max_model_len), device="cpu", dtype=bool, pin_memory=False
+        )
         self.is_token_ids = self.is_token_ids_tensor.numpy()
         # Store prompt embeddings per request to avoid OOM from large upfront
         # allocation if max_model_len is big.
         # Maps req_index -> tensor of shape (num_prompt_tokens, hidden_size)
         self.req_prompt_embeds: dict[int, torch.Tensor] = {}
         self.num_tokens = np.zeros(max_num_reqs, dtype=np.int32)
-        self.num_tokens_no_spec = np.zeros(max_num_reqs, dtype=np.int32)
-        self.num_prompt_tokens = np.zeros(max_num_reqs, dtype=np.int32)
-        self.num_computed_tokens_cpu_tensor = torch.zeros(
-            (max_num_reqs, ),
+        self.num_tokens_no_spec_cpu_tensor = torch.zeros(
+            (max_num_reqs,),
             device="cpu",
             dtype=torch.int32,
             pin_memory=pin_memory,
         )
-        self.num_computed_tokens_cpu = self.num_computed_tokens_cpu_tensor.numpy(
+        self.num_tokens_no_spec = self.num_tokens_no_spec_cpu_tensor.numpy()
+        self.num_prompt_tokens_cpu_tensor = torch.zeros(
+            (max_num_reqs,),
+            device="cpu",
+            dtype=torch.int32,
+            pin_memory=pin_memory,
         )
+        self.num_prompt_tokens = self.num_prompt_tokens_cpu_tensor.numpy()
+        self.num_computed_tokens_cpu_tensor = torch.zeros(
+            (max_num_reqs,),
+            device="cpu",
+            dtype=torch.int32,
+            pin_memory=pin_memory,
+        )
+        self.num_computed_tokens_cpu = self.num_computed_tokens_cpu_tensor.numpy()
 
         # Block table.
         self.block_table = MultiGroupBlockTable(
@@ -101,40 +110,28 @@ class NPUInputBatch(InputBatch):
             pin_memory=pin_memory,
             device=device,
             block_sizes=block_sizes,
+            max_num_blocks=max_num_blocks_per_req,
             num_speculative_tokens=num_speculative_tokens,
             kernel_sizes=kernel_block_sizes,
             cp_kv_cache_interleave_size=cp_kv_cache_interleave_size,
         )
 
         # Sampling-related.
-        self.temperature = torch.empty((max_num_reqs, ),
-                                       dtype=torch.float32,
-                                       device=device)
-        self.temperature_cpu_tensor = torch.empty((max_num_reqs, ),
-                                                  dtype=torch.float32,
-                                                  device="cpu",
-                                                  pin_memory=pin_memory)
+        self.temperature = torch.empty((max_num_reqs,), dtype=torch.float32, device=device)
+        self.temperature_cpu_tensor = torch.empty(
+            (max_num_reqs,), dtype=torch.float32, device="cpu", pin_memory=pin_memory
+        )
         self.temperature_cpu = self.temperature_cpu_tensor.numpy()
         self.greedy_reqs: set[str] = set()
         self.random_reqs: set[str] = set()
 
-        self.top_p = torch.empty((max_num_reqs, ),
-                                 dtype=torch.float32,
-                                 device=device)
-        self.top_p_cpu_tensor = torch.empty((max_num_reqs, ),
-                                            dtype=torch.float32,
-                                            device="cpu",
-                                            pin_memory=pin_memory)
+        self.top_p = torch.empty((max_num_reqs,), dtype=torch.float32, device=device)
+        self.top_p_cpu_tensor = torch.empty((max_num_reqs,), dtype=torch.float32, device="cpu", pin_memory=pin_memory)
         self.top_p_cpu = self.top_p_cpu_tensor.numpy()
         self.top_p_reqs: set[str] = set()
 
-        self.top_k = torch.empty((max_num_reqs, ),
-                                 dtype=torch.int32,
-                                 device=device)
-        self.top_k_cpu_tensor = torch.empty((max_num_reqs, ),
-                                            dtype=torch.int32,
-                                            device="cpu",
-                                            pin_memory=pin_memory)
+        self.top_k = torch.empty((max_num_reqs,), dtype=torch.int32, device=device)
+        self.top_k_cpu_tensor = torch.empty((max_num_reqs,), dtype=torch.int32, device="cpu", pin_memory=pin_memory)
         self.top_k_cpu = self.top_k_cpu_tensor.numpy()
         self.top_k_reqs: set[str] = set()
 
@@ -142,54 +139,37 @@ class NPUInputBatch(InputBatch):
         self.spec_decode_unsupported_reqs: set[str] = set()
 
         # Frequency penalty related data structures
-        self.frequency_penalties = torch.empty((max_num_reqs, ),
-                                               dtype=torch.float,
-                                               device=device)
+        self.frequency_penalties = torch.empty((max_num_reqs,), dtype=torch.float, device=device)
         self.frequency_penalties_cpu_tensor = torch.empty(
-            (max_num_reqs, ),
-            dtype=torch.float,
-            device="cpu",
-            pin_memory=pin_memory)
-        self.frequency_penalties_cpu = self.frequency_penalties_cpu_tensor.numpy(
+            (max_num_reqs,), dtype=torch.float, device="cpu", pin_memory=pin_memory
         )
+        self.frequency_penalties_cpu = self.frequency_penalties_cpu_tensor.numpy()
         self.frequency_penalties_reqs: set[str] = set()
 
         # Presence penalty related data structures
-        self.presence_penalties = torch.empty((max_num_reqs, ),
-                                              dtype=torch.float,
-                                              device=device)
-        self.presence_penalties_cpu_tensor = torch.empty((max_num_reqs, ),
-                                                         dtype=torch.float,
-                                                         device="cpu",
-                                                         pin_memory=pin_memory)
-        self.presence_penalties_cpu = self.presence_penalties_cpu_tensor.numpy(
+        self.presence_penalties = torch.empty((max_num_reqs,), dtype=torch.float, device=device)
+        self.presence_penalties_cpu_tensor = torch.empty(
+            (max_num_reqs,), dtype=torch.float, device="cpu", pin_memory=pin_memory
         )
+        self.presence_penalties_cpu = self.presence_penalties_cpu_tensor.numpy()
         self.presence_penalties_reqs: set[str] = set()
 
         # Repetition penalty related data structures
-        self.repetition_penalties = torch.empty((max_num_reqs, ),
-                                                dtype=torch.float,
-                                                device=device)
+        self.repetition_penalties = torch.empty((max_num_reqs,), dtype=torch.float, device=device)
         self.repetition_penalties_cpu_tensor = torch.empty(
-            (max_num_reqs, ),
-            dtype=torch.float,
-            device="cpu",
-            pin_memory=pin_memory)
-        self.repetition_penalties_cpu = self.repetition_penalties_cpu_tensor.numpy(
+            (max_num_reqs,), dtype=torch.float, device="cpu", pin_memory=pin_memory
         )
+        self.repetition_penalties_cpu = self.repetition_penalties_cpu_tensor.numpy()
         self.repetition_penalties_reqs: set[str] = set()
 
         # Speculative decoding
-        self.num_accepted_tokens_cpu_tensor = torch.ones((max_num_reqs, ),
-                                                         dtype=torch.int64,
-                                                         device="cpu",
-                                                         pin_memory=pin_memory)
-        self.num_accepted_tokens_cpu = self.num_accepted_tokens_cpu_tensor.numpy(
+        self.num_accepted_tokens_cpu_tensor = torch.ones(
+            (max_num_reqs,), dtype=torch.int32, device="cpu", pin_memory=pin_memory
         )
+        self.num_accepted_tokens_cpu = self.num_accepted_tokens_cpu_tensor.numpy()
 
         # lora related
-        self.request_lora_mapping = np.zeros((self.max_num_reqs, ),
-                                             dtype=np.int64)
+        self.request_lora_mapping = np.zeros((self.max_num_reqs,), dtype=np.int64)
         self.lora_id_to_request_ids: dict[int, set[str]] = {}
         self.lora_id_to_lora_request: dict[int, LoRARequest] = {}
 
@@ -202,6 +182,10 @@ class NPUInputBatch(InputBatch):
 
         # To accumulate prompt logprobs tensor chunks across prefill steps.
         self.in_progress_prompt_logprobs_cpu: dict[str, LogprobsTensors] = {}
+
+        # req_id -> list of specific token IDs to compute logprobs for
+        # More efficient than num_logprobs=-1 when only a few tokens are needed
+        self.logprob_token_ids: dict[str, list[int]] = {}
 
         # Internal representation of per-step batch state changes, used for
         # reordering persistent batch and generating logitsprocs batch state
@@ -218,8 +202,7 @@ class NPUInputBatch(InputBatch):
         # req_index -> bad_words_token_ids
         self.bad_words_token_ids: dict[int, list[list[int]]] = {}
 
-        self.logits_processing_needs_token_ids = np.zeros(max_num_reqs,
-                                                          dtype=bool)
+        self.logits_processing_needs_token_ids = np.zeros(max_num_reqs, dtype=bool)
 
         self.req_output_token_ids: list[list[int] | None] = []
 
@@ -229,8 +212,7 @@ class NPUInputBatch(InputBatch):
         self.logitsprocs_need_output_token_ids = logitsprocs_need_output_token_ids
 
         # Store last speculative tokens for sampler.
-        self.spec_token_ids: list[list[int]] = [[]
-                                                for _ in range(max_num_reqs)]
+        self.spec_token_ids: list[list[int]] = [[] for _ in range(max_num_reqs)]
 
         # This is updated each time the batch constituents change.
         self.sampling_metadata = self._make_sampling_metadata()

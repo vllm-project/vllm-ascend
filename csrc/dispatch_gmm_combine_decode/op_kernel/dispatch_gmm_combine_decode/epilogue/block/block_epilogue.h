@@ -12,3 +12,6 @@
 
 #include "block_epilogue_per_token_dequant_swiglu.h"
 #include "block_epilogue_per_token_dequant.hpp"
+
+#include "block_epilogue_swiglu_bf16_fp16.h"
+#include "block_epilogue_bf16_fp16.hpp"

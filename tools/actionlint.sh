@@ -1,4 +1,4 @@
-#!/bin/bash
+#!/usr/bin/env bash
 
 #
 # Copyright (c) 2025 Huawei Technologies Co., Ltd. All Rights Reserved.

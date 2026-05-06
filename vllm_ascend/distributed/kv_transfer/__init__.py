@@ -15,31 +15,45 @@
 # limitations under the License.
 #
 
-from vllm.distributed.kv_transfer.kv_connector.factory import \
-    KVConnectorFactory
+from vllm.distributed.kv_transfer.kv_connector.factory import KVConnectorFactory
 
 
 def register_connector():
+    # override multi_connector as ascend_multi_connector
+    if "MultiConnector" in KVConnectorFactory._registry:
+        KVConnectorFactory._registry.pop("MultiConnector")
     KVConnectorFactory.register_connector(
-        "MooncakeConnectorV1",
-        "vllm_ascend.distributed.kv_transfer.kv_p2p.mooncake_connector",
-        "MooncakeConnector")
+        "MultiConnector", "vllm_ascend.distributed.kv_transfer.ascend_multi_connector", "AscendMultiConnector"
+    )
+
+    KVConnectorFactory.register_connector(
+        "MooncakeConnectorV1", "vllm_ascend.distributed.kv_transfer.kv_p2p.mooncake_connector", "MooncakeConnector"
+    )
 
     KVConnectorFactory.register_connector(
         "MooncakeConnectorStoreV1",
         "vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.ascend_store_connector",
-        "AscendStoreConnector")
+        "AscendStoreConnector",
+    )
 
     KVConnectorFactory.register_connector(
         "AscendStoreConnector",
         "vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.ascend_store_connector",
-        "AscendStoreConnector")
+        "AscendStoreConnector",
+    )
 
     KVConnectorFactory.register_connector(
         "MooncakeLayerwiseConnector",
         "vllm_ascend.distributed.kv_transfer.kv_p2p.mooncake_layerwise_connector",
-        "MooncakeLayerwiseConnector")
+        "MooncakeLayerwiseConnector",
+    )
 
     KVConnectorFactory.register_connector(
-        "UCMConnector", "vllm_ascend.distributed.kv_transfer.ucm_connector",
-        "UCMConnectorV1")
+        "UCMConnector", "vllm_ascend.distributed.kv_transfer.kv_pool.ucm_connector", "UCMConnectorV1"
+    )
+
+    KVConnectorFactory.register_connector(
+        "LMCacheAscendConnector",
+        "vllm_ascend.distributed.kv_transfer.kv_pool.lmcache_ascend_connector",
+        "LMCacheConnectorV1",
+    )

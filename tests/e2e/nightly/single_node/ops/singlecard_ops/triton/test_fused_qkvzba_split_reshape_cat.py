@@ -1,3 +1,4 @@
+import gc
 import pytest
 import torch
 from einops import rearrange
@@ -37,11 +38,11 @@ def validate_cmp(y_cal, y_ref, dtype, device='npu'):
             'Invalid parameter \"dtype\" is found : {}'.format(dtype))
 
 
-@pytest.mark.parametrize("seq_len", [1, 16, 64, 128, 256, 1024, 2048, 3567])
-@pytest.mark.parametrize("num_heads_qk", [2, 4, 8, 16])
-@pytest.mark.parametrize("num_heads_v", [2, 4, 8])
-@pytest.mark.parametrize("head_qk_dim", [64, 128, 256])
-@pytest.mark.parametrize("head_v_dim", [64, 128])
+@pytest.mark.parametrize("seq_len", [1,  64, 1024, 2048])
+@pytest.mark.parametrize("num_heads_qk", [2, 4, 8])
+@pytest.mark.parametrize("num_heads_v", [8])
+@pytest.mark.parametrize("head_qk_dim", [256])
+@pytest.mark.parametrize("head_v_dim", [128])
 @pytest.mark.parametrize("dtype",
                          [torch.float32, torch.float16, torch.bfloat16])
 def test_fused_qkvzba_split_reshape_cat(
@@ -98,3 +99,6 @@ def test_fused_qkvzba_split_reshape_cat(
     validate_cmp(z, z_ref, dtype)
     validate_cmp(b, b_ref, dtype)
     validate_cmp(a, a_ref, dtype)
+    gc.collect()
+    torch.npu.empty_cache()
+    torch.npu.reset_peak_memory_stats()

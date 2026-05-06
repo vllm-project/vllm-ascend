@@ -24,22 +24,22 @@ class EnvConfig:
 
 @pytest.fixture
 def env_config() -> EnvConfig:
-    return EnvConfig(vllm_version=os.getenv('VLLM_VERSION', 'unknown'),
-                     vllm_commit=os.getenv('VLLM_COMMIT', 'unknown'),
-                     vllm_ascend_version=os.getenv('VLLM_ASCEND_VERSION',
-                                                   'unknown'),
-                     vllm_ascend_commit=os.getenv('VLLM_ASCEND_COMMIT',
-                                                  'unknown'),
-                     cann_version=os.getenv('CANN_VERSION', 'unknown'),
-                     torch_version=os.getenv('TORCH_VERSION', 'unknown'),
-                     torch_npu_version=os.getenv('TORCH_NPU_VERSION',
-                                                 'unknown'))
+    return EnvConfig(
+        vllm_version=os.getenv("VLLM_VERSION", "unknown"),
+        vllm_commit=os.getenv("VLLM_COMMIT", "unknown"),
+        vllm_ascend_version=os.getenv("VLLM_ASCEND_VERSION", "unknown"),
+        vllm_ascend_commit=os.getenv("VLLM_ASCEND_COMMIT", "unknown"),
+        cann_version=os.getenv("CANN_VERSION", "unknown"),
+        torch_version=os.getenv("TORCH_VERSION", "unknown"),
+        torch_npu_version=os.getenv("TORCH_NPU_VERSION", "unknown"),
+    )
 
 
 def build_model_args(eval_config, tp_size):
-    trust_remote_code = eval_config.get("trust_remote_code", False)
-    max_model_len = eval_config.get("max_model_len", 4096)
-    dtype = eval_config.get("dtype", "auto")
+    serve_cfg = eval_config.get("serve", {})
+    trust_remote_code = serve_cfg.get("trust_remote_code", False)
+    max_model_len = serve_cfg.get("max_model_len", 4096)
+    dtype = serve_cfg.get("dtype", "auto")
     model_args = {
         "pretrained": eval_config["model_name"],
         "tensor_parallel_size": tp_size,
@@ -48,11 +48,15 @@ def build_model_args(eval_config, tp_size):
         "max_model_len": max_model_len,
     }
     for s in [
-            "max_images", "gpu_memory_utilization", "enable_expert_parallel",
-            "tensor_parallel_size", "enforce_eager", "enable_thinking",
-            "quantization"
+        "max_images",
+        "gpu_memory_utilization",
+        "enable_expert_parallel",
+        "tensor_parallel_size",
+        "enforce_eager",
+        "enable_thinking",
+        "quantization",
     ]:
-        val = eval_config.get(s, None)
+        val = serve_cfg.get(s, None)
         if val is not None:
             model_args[s] = val
 
@@ -68,7 +72,7 @@ def generate_report(tp_size, eval_config, report_data, report_dir, env_config):
     model_args = build_model_args(eval_config, tp_size)
 
     parallel_mode = f"TP{model_args.get('tensor_parallel_size', 1)}"
-    if model_args.get('enable_expert_parallel', False):
+    if model_args.get("enable_expert_parallel", False):
         parallel_mode += " + EP"
 
     execution_model = f"{'Eager' if model_args.get('enforce_eager', False) else 'ACLGraph'}"
@@ -84,7 +88,7 @@ def generate_report(tp_size, eval_config, report_data, report_dir, env_config):
         hardware=eval_config.get("hardware", "unknown"),
         model_name=eval_config["model_name"],
         model_args=f"'{','.join(f'{k}={v}' for k, v in model_args.items())}'",
-        model_type=eval_config.get("model", "vllm"),
+        model_type=eval_config.get("model_type", "vllm"),
         datasets=",".join([task["name"] for task in eval_config["tasks"]]),
         apply_chat_template=eval_config.get("apply_chat_template", True),
         fewshot_as_multiturn=eval_config.get("fewshot_as_multiturn", True),
@@ -93,24 +97,27 @@ def generate_report(tp_size, eval_config, report_data, report_dir, env_config):
         num_fewshot=eval_config.get("num_fewshot", "N/A"),
         rows=report_data["rows"],
         parallel_mode=parallel_mode,
-        execution_model=execution_model)
+        execution_model=execution_model,
+    )
 
-    report_output = os.path.join(
-        report_dir, f"{os.path.basename(eval_config['model_name'])}.md")
+    report_output = os.path.join(report_dir, f"{os.path.basename(eval_config['model_name'])}.md")
     os.makedirs(os.path.dirname(report_output), exist_ok=True)
-    with open(report_output, 'w', encoding='utf-8') as f:
+    with open(report_output, "w", encoding="utf-8") as f:
         f.write(report_content)
 
 
-def test_lm_eval_correctness_param(config_filename, tp_size, report_dir,
-                                   env_config):
+def test_lm_eval_correctness_param(config_filename, tp_size, report_dir, env_config):
     eval_config = yaml.safe_load(config_filename.read_text(encoding="utf-8"))
+
+    if eval_config.get("model_type", "vllm") == "vllm-asr":
+        pytest.skip("Skipping ASR config, use test_asr_eval.py instead")
+
     model_args = build_model_args(eval_config, tp_size)
     success = True
     report_data: dict[str, list[dict]] = {"rows": []}
 
     eval_params = {
-        "model": eval_config.get("model", "vllm"),
+        "model": eval_config.get("model_type", "vllm"),
         "model_args": model_args,
         "tasks": [task["name"] for task in eval_config["tasks"]],
         "apply_chat_template": eval_config.get("apply_chat_template", True),
@@ -135,25 +142,26 @@ def test_lm_eval_correctness_param(config_filename, tp_size, report_dir,
             metric_name = metric["name"]
             ground_truth = metric["value"]
             measured_value = round(task_result[metric_name], 4)
-            task_success = bool(
-                np.isclose(ground_truth, measured_value, rtol=RTOL))
+            task_success = bool(np.isclose(ground_truth, measured_value, rtol=RTOL))
             success = success and task_success
 
-            print(f"{task_name} | {metric_name}: "
-                  f"ground_truth={ground_truth} | measured={measured_value} | "
-                  f"success={'✅' if task_success else '❌'}")
+            print(
+                f"{task_name} | {metric_name}: "
+                f"ground_truth={ground_truth} | measured={measured_value} | "
+                f"success={'✅' if task_success else '❌'}"
+            )
 
-            report_data["rows"].append({
-                "task":
-                task_name,
-                "metric":
-                metric_name,
-                "value":
-                f"✅{measured_value}" if success else f"❌{measured_value}",
-                "stderr":
-                task_result[
-                    metric_name.replace(',', '_stderr,') if metric_name ==
-                    "acc,none" else metric_name.replace(',', '_stderr,')]
-            })
+            report_data["rows"].append(
+                {
+                    "task": task_name,
+                    "metric": metric_name,
+                    "value": f"✅{measured_value}" if success else f"❌{measured_value}",
+                    "stderr": task_result[
+                        metric_name.replace(",", "_stderr,")
+                        if metric_name == "acc,none"
+                        else metric_name.replace(",", "_stderr,")
+                    ],
+                }
+            )
     generate_report(tp_size, eval_config, report_data, report_dir, env_config)
     assert success

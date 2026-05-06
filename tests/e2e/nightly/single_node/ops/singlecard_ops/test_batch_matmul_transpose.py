@@ -1,3 +1,4 @@
+import gc
 import random
 import unittest
 
@@ -56,7 +57,9 @@ class TestMatrixMultiplication(unittest.TestCase):
 
         self.assertLessEqual(max_diff, atol,
                              f"Absolute error too large: {max_diff} > {atol}")
-
+        gc.collect()
+        torch.npu.empty_cache()
+        torch.npu.reset_peak_memory_stats()
     def test_boundary_conditions(self):
         """Test boundary conditions"""
         test_cases = [
@@ -90,6 +93,9 @@ class TestMatrixMultiplication(unittest.TestCase):
 
                     self.assert_tensors_almost_equal(res1.view(-1, m, n), res2,
                                                      dtype)
+        gc.collect()
+        torch.npu.empty_cache()
+        torch.npu.reset_peak_memory_stats()
 
     def test_random_shapes(self):
         """Test randomly generated shapes"""
@@ -116,7 +122,9 @@ class TestMatrixMultiplication(unittest.TestCase):
                         a, b_tensor, res2)
                     self.assert_tensors_almost_equal(res1.view(-1, m, n), res2,
                                                      dtype)
-
+        gc.collect()
+        torch.npu.empty_cache()
+        torch.npu.reset_peak_memory_stats()
     def test_zero_values(self):
         """Test zero input values"""
         dtypes = [torch.float16, torch.bfloat16]
@@ -135,7 +143,9 @@ class TestMatrixMultiplication(unittest.TestCase):
                 self.assert_tensors_almost_equal(res1.view(-1, m, n), res2,
                                                  dtype)
                 self.assertTrue(torch.all(res2 == 0))
-
+        gc.collect()
+        torch.npu.empty_cache()
+        torch.npu.reset_peak_memory_stats()
 
 if __name__ == "__main__":
     unittest.main(verbosity=2)

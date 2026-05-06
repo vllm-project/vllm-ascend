@@ -2,285 +2,606 @@
 # Copyright (C) 2025, vllm-ascend team
 # This file is distributed under the same license as the vllm-ascend
 # package.
-# FIRST AUTHOR <EMAIL@ADDRESS>, 2025.
+# FIRST AUTHOR <EMAIL@ADDRESS>, 2026.
 #
-#, fuzzy
 msgid ""
 msgstr ""
-"Project-Id-Version: vllm-ascend\n"
+"Project-Id-Version: vllm-ascend \n"
 "Report-Msgid-Bugs-To: \n"
-"POT-Creation-Date: 2025-07-18 09:01+0800\n"
-"PO-Revision-Date: YEAR-MO-DA HO:MI+ZONE\n"
-"Last-Translator: FULL NAME <EMAIL@ADDRESS>\n"
-"Language-Team: zh_CN <LL@li.org>\n"
+"POT-Creation-Date: 2026-05-06 02:14+0000\n"
+"PO-Revision-Date: 2026-01-22 16:45+0800\n"
+"Last-Translator: Gemini\n"
 "Language: zh_CN\n"
+"Language-Team: zh_CN <LL@li.org>\n"
+"Plural-Forms: nplurals=1; plural=0;\n"
 "MIME-Version: 1.0\n"
 "Content-Type: text/plain; charset=utf-8\n"
 "Content-Transfer-Encoding: 8bit\n"
-"Plural-Forms: nplurals=1; plural=0;\n"
-"Generated-By: Babel 2.17.0\n"
+"Generated-By: Babel 2.18.0\n"
 
-#: ../../user_guide/configuration/additional_config.md:1
+#: ../../source/user_guide/configuration/additional_config.md:1
 msgid "Additional Configuration"
 msgstr "附加配置"
 
-#: ../../user_guide/configuration/additional_config.md:3
+#: ../../source/user_guide/configuration/additional_config.md:3
 msgid ""
-"additional configuration is a mechanism provided by vLLM to allow plugins to"
-" control inner behavior by their own. vLLM Ascend uses this mechanism to "
-"make the project more flexible."
-msgstr "额外配置是 vLLM 提供的一种机制，允许插件自行控制内部行为。vLLM Ascend 利用这种机制使项目更加灵活。"
+"Additional configuration is a mechanism provided by vLLM to allow plugins"
+" to control internal behavior by themselves. VLLM Ascend uses this "
+"mechanism to make the project more flexible."
+msgstr "附加配置是 vLLM 提供的一种机制，允许插件自行控制内部行为。vLLM Ascend 利用这种机制来增强项目的灵活性。"
 
-#: ../../user_guide/configuration/additional_config.md:5
+#: ../../source/user_guide/configuration/additional_config.md:5
 msgid "How to use"
 msgstr "如何使用"
 
-#: ../../user_guide/configuration/additional_config.md:7
+#: ../../source/user_guide/configuration/additional_config.md:7
 msgid ""
 "With either online mode or offline mode, users can use additional "
 "configuration. Take Qwen3 as an example:"
-msgstr "无论是在线模式还是离线模式，用户都可以使用额外的配置。以 Qwen3 为例："
+msgstr "无论是在线模式还是离线模式，用户都可以使用附加配置。以 Qwen3 为例："
 
-#: ../../user_guide/configuration/additional_config.md:9
+#: ../../source/user_guide/configuration/additional_config.md:9
 msgid "**Online mode**:"
 msgstr "**在线模式**："
 
-#: ../../user_guide/configuration/additional_config.md:15
+#: ../../source/user_guide/configuration/additional_config.md:15
 msgid "**Offline mode**:"
 msgstr "**离线模式**："
 
-#: ../../user_guide/configuration/additional_config.md:23
+#: ../../source/user_guide/configuration/additional_config.md:23
 msgid "Configuration options"
 msgstr "配置选项"
 
-#: ../../user_guide/configuration/additional_config.md:25
+#: ../../source/user_guide/configuration/additional_config.md:25
 msgid ""
-"The following table lists the additional configuration options available in "
+"The following table lists additional configuration options available in "
 "vLLM Ascend:"
-msgstr "下表列出了 vLLM Ascend 中可用的其他配置选项："
+msgstr "下表列出了 vLLM Ascend 中可用的附加配置选项："
 
-#: ../../user_guide/configuration/additional_config.md
+#: ../../source/user_guide/configuration/additional_config.md
 msgid "Name"
 msgstr "名称"
 
-#: ../../user_guide/configuration/additional_config.md
+#: ../../source/user_guide/configuration/additional_config.md
 msgid "Type"
 msgstr "类型"
 
-#: ../../user_guide/configuration/additional_config.md
+#: ../../source/user_guide/configuration/additional_config.md
 msgid "Default"
-msgstr "默认"
+msgstr "默认值"
 
-#: ../../user_guide/configuration/additional_config.md
+#: ../../source/user_guide/configuration/additional_config.md
 msgid "Description"
 msgstr "描述"
 
-#: ../../user_guide/configuration/additional_config.md
-msgid "`torchair_graph_config`"
-msgstr "`torchair_graph_config`"
+#: ../../source/user_guide/configuration/additional_config.md
+msgid "`xlite_graph_config`"
+msgstr "`xlite_graph_config`"
 
-#: ../../user_guide/configuration/additional_config.md
+#: ../../source/user_guide/configuration/additional_config.md
 msgid "dict"
 msgstr "dict"
 
-#: ../../user_guide/configuration/additional_config.md
+#: ../../source/user_guide/configuration/additional_config.md
 #, python-brace-format
 msgid "`{}`"
 msgstr "`{}`"
 
-#: ../../user_guide/configuration/additional_config.md
-msgid "The config options for torchair graph mode"
-msgstr "torchair 图模式的配置选项"
+#: ../../source/user_guide/configuration/additional_config.md
+msgid "Configuration options for Xlite graph mode"
+msgstr "Xlite 图模式的配置选项"
 
-#: ../../user_guide/configuration/additional_config.md
-msgid "`ascend_scheduler_config`"
-msgstr "`ascend_scheduler_config`"
+#: ../../source/user_guide/configuration/additional_config.md
+msgid "`weight_prefetch_config`"
+msgstr "`weight_prefetch_config`"
 
-#: ../../user_guide/configuration/additional_config.md
-msgid "The config options for ascend scheduler"
-msgstr "ascend 调度器的配置选项"
+#: ../../source/user_guide/configuration/additional_config.md
+msgid "Configuration options for weight prefetch"
+msgstr "权重预取的配置选项"
 
-#: ../../user_guide/configuration/additional_config.md
-msgid "`expert_tensor_parallel_size`"
-msgstr "`expert_tensor_parallel_size`"
+#: ../../source/user_guide/configuration/additional_config.md
+msgid "`finegrained_tp_config`"
+msgstr "`finegrained_tp_config`"
 
-#: ../../user_guide/configuration/additional_config.md
-msgid "str"
-msgstr "str"
+#: ../../source/user_guide/configuration/additional_config.md
+msgid "Configuration options for module tensor parallelism"
+msgstr "模块级张量并行的配置选项"
 
-#: ../../user_guide/configuration/additional_config.md
-msgid "`0`"
-msgstr "`0`"
+#: ../../source/user_guide/configuration/additional_config.md
+msgid "`ascend_compilation_config`"
+msgstr "`ascend_compilation_config`"
 
-#: ../../user_guide/configuration/additional_config.md
-msgid "Expert tensor parallel size the model to use."
-msgstr "专家张量并行的模型大小设置。"
+#: ../../source/user_guide/configuration/additional_config.md
+msgid "Configuration options for ascend compilation"
+msgstr "昇腾编译选项配置"
 
-#: ../../user_guide/configuration/additional_config.md
+#: ../../source/user_guide/configuration/additional_config.md
+msgid "`eplb_config`"
+msgstr "`eplb_config`"
+
+#: ../../source/user_guide/configuration/additional_config.md
+msgid "Configuration options for eplb"
+msgstr "EPLB 的配置选项"
+
+#: ../../source/user_guide/configuration/additional_config.md
 msgid "`refresh`"
-msgstr "`刷新`"
+msgstr "`refresh`"
 
-#: ../../user_guide/configuration/additional_config.md
+#: ../../source/user_guide/configuration/additional_config.md
 msgid "bool"
 msgstr "bool"
 
-#: ../../user_guide/configuration/additional_config.md
+#: ../../source/user_guide/configuration/additional_config.md
 msgid "`false`"
 msgstr "`false`"
 
-#: ../../user_guide/configuration/additional_config.md
+#: ../../source/user_guide/configuration/additional_config.md
 msgid ""
-"Whether to refresh global ascend config content. This value is usually used "
-"by rlhf or ut/e2e test case."
-msgstr "是否刷新全局 ascend 配置信息。此值通常由 rlhf 或 ut/e2e 测试用例使用。"
+"Whether to refresh global Ascend configuration content. This is usually "
+"used by rlhf or ut/e2e test case."
+msgstr "是否刷新全局昇腾配置内容。通常用于 RLHF 训练或 UT/E2E 测试用例。"
 
-#: ../../user_guide/configuration/additional_config.md
-msgid "`expert_map_path`"
-msgstr "`expert_map_path`"
+#: ../../source/user_guide/configuration/additional_config.md
+msgid "`dump_config_path`"
+msgstr "`dump_config_path`"
 
-#: ../../user_guide/configuration/additional_config.md
+#: ../../source/user_guide/configuration/additional_config.md
+msgid "str"
+msgstr "str"
+
+#: ../../source/user_guide/configuration/additional_config.md
 msgid "`None`"
 msgstr "`None`"
 
-#: ../../user_guide/configuration/additional_config.md
-msgid ""
-"When using expert load balancing for the MOE model, an expert map path needs"
-" to be passed in."
-msgstr "在为MOE模型使用专家负载均衡时，需要传入专家映射路径。"
+#: ../../source/user_guide/configuration/additional_config.md
+msgid "Configuration file path for msprobe dump(eager mode)."
+msgstr "msprobe dump 的配置文件路径（仅限 Eager 模式）。"
 
-#: ../../user_guide/configuration/additional_config.md
+#: ../../source/user_guide/configuration/additional_config.md
+msgid "`enable_async_exponential`"
+msgstr "`enable_async_exponential`"
+
+#: ../../source/user_guide/configuration/additional_config.md
 msgid "`False`"
 msgstr "`False`"
 
-#: ../../user_guide/configuration/additional_config.md
-msgid "Whether to enable the fused operator-like chunked_prefill."
-msgstr "是否启用类似算子融合的 chunked_prefill 功能。"
-
-#: ../../user_guide/configuration/additional_config.md
-msgid "`kv_cache_dtype`"
-msgstr "`kv_cache_dtype`"
-
-#: ../../user_guide/configuration/additional_config.md
+#: ../../source/user_guide/configuration/additional_config.md
 msgid ""
-"When using the kv cache quantization method, kv cache dtype needs to be set,"
-" currently only int8 is supported."
-msgstr "当使用kv缓存量化方法时，需要设置kv缓存的数据类型，目前仅支持int8。"
+"Whether to enable asynchronous exponential overlap. To enable "
+"asynchronous exponential, set this config to True."
+msgstr "是否启用异步指数重叠。设置为 True 以启用异步指数。"
 
-#: ../../user_guide/configuration/additional_config.md:37
-msgid "The details of each config option are as follows:"
-msgstr "每个配置选项的详细信息如下："
+#: ../../source/user_guide/configuration/additional_config.md
+msgid "`enable_shared_expert_dp`"
+msgstr "`enable_shared_expert_dp`"
 
-#: ../../user_guide/configuration/additional_config.md:39
-msgid "**torchair_graph_config**"
-msgstr "**torchair_graph_config**"
-
-#: ../../user_guide/configuration/additional_config.md
-msgid "`enabled`"
-msgstr "`启用`"
-
-#: ../../user_guide/configuration/additional_config.md
+#: ../../source/user_guide/configuration/additional_config.md
 msgid ""
-"Whether to enable torchair graph mode. Currently only DeepSeek series models"
-" and PanguProMoE are supported to use torchair graph mode"
-msgstr "是否启用 torchair 图模式。目前仅支持 DeepSeek 系列模型和 PanguProMoE 使用 torchair 图模式。"
+"When the expert is shared in DP, it delivers better performance but "
+"consumes more memory. Currently only DeepSeek series models are "
+"supported."
+msgstr "在数据并行中共享专家模型可提供更好的性能，但会消耗更多显存。目前仅支持 DeepSeek 系列模型。"
 
-#: ../../user_guide/configuration/additional_config.md
-msgid "`enable_multistream_mla`"
-msgstr "`enable_multistream_mla`"
-
-#: ../../user_guide/configuration/additional_config.md
-msgid ""
-"Whether to put vector ops of MLA to another stream. This option only takes "
-"effects on models using MLA (e.g., DeepSeek)."
-msgstr "是否将MLA的向量操作放到另一个流中。此选项仅对使用MLA的模型（例如，DeepSeek）有效。"
-
-#: ../../user_guide/configuration/additional_config.md
+#: ../../source/user_guide/configuration/additional_config.md
 msgid "`multistream_overlap_shared_expert`"
 msgstr "`multistream_overlap_shared_expert`"
 
-#: ../../user_guide/configuration/additional_config.md
+#: ../../source/user_guide/configuration/additional_config.md
 msgid ""
-"Whether to enable multistream shared expert. This option only takes effects "
-"on DeepSeek moe models."
-msgstr "是否启用多流共享专家功能。此选项仅对 DeepSeek MoE 模型生效。"
+"Whether to enable multi-stream shared expert. This option only takes "
+"effect on MoE models with shared experts."
+msgstr "是否启用多流共享专家。此选项仅对包含共享专家的 MoE 模型生效。"
 
-#: ../../user_guide/configuration/additional_config.md
-msgid "`enable_view_optimize`"
-msgstr "`enable_view_optimize` （启用视图优化）"
+#: ../../source/user_guide/configuration/additional_config.md
+msgid "`multistream_overlap_gate`"
+msgstr "`multistream_overlap_gate`"
 
-#: ../../user_guide/configuration/additional_config.md
+#: ../../source/user_guide/configuration/additional_config.md
+msgid ""
+"Whether to enable multi-stream overlap gate. This option only takes "
+"effect on MoE models with shared experts."
+msgstr "是否启用多流门控重叠。此选项仅对包含共享专家的 MoE 模型生效。"
+
+#: ../../source/user_guide/configuration/additional_config.md
+msgid "`recompute_scheduler_enable`"
+msgstr "`recompute_scheduler_enable`"
+
+#: ../../source/user_guide/configuration/additional_config.md
+msgid ""
+"Whether to enable the recompute scheduler. **Only valid in PD-"
+"disaggregated mode** (`kv_role` is `kv_producer` or `kv_consumer`). **Do "
+"not enable in PD-mixed mode** (no `kv_transfer_config`, or `kv_role` is "
+"`kv_both`); startup will fail with a clear error."
+msgstr ""
+"是否启用重计算调度器。**仅在 PD 解耦模式下有效**（`kv_role` 为 `kv_producer` 或 "
+"`kv_consumer`）。**请勿在 PD 混合模式下启用**（无 `kv_transfer_config`，或 `kv_role` 为 "
+"`kv_both`）；启动将失败并显示明确的错误信息。"
+
+#: ../../source/user_guide/configuration/additional_config.md
+msgid "`enable_cpu_binding`"
+msgstr "`enable_cpu_binding`"
+
+#: ../../source/user_guide/configuration/additional_config.md
 msgid "`True`"
 msgstr "`True`"
 
-#: ../../user_guide/configuration/additional_config.md
-msgid "Whether to enable torchair view optimization"
-msgstr "是否启用torchair视图优化"
+#: ../../source/user_guide/configuration/additional_config.md
+msgid ""
+"Enables Ascend-native CPU binding on ARM servers. Set to `False` to "
+"disable. See [CPU Binding](../feature_guide/cpu_binding.md)."
+msgstr "在 ARM 服务器上启用昇腾原生 CPU 绑定。设置为 `False` 以禁用。参见 [CPU 绑定](../feature_guide/cpu_binding.md)。"
 
-#: ../../user_guide/configuration/additional_config.md
-msgid "`use_cached_graph`"
-msgstr "`use_cached_graph`"
+#: ../../source/user_guide/configuration/additional_config.md
+msgid "`SLO_limits_for_dynamic_batch`"
+msgstr "`SLO_limits_for_dynamic_batch`"
 
-#: ../../user_guide/configuration/additional_config.md
-msgid "Whether to use cached graph"
-msgstr "是否使用缓存的图"
+#: ../../source/user_guide/configuration/additional_config.md
+msgid "int"
+msgstr "int"
 
-#: ../../user_guide/configuration/additional_config.md
-msgid "`graph_batch_sizes`"
-msgstr "`graph_batch_sizes`"
+#: ../../source/user_guide/configuration/additional_config.md
+msgid "`-1`"
+msgstr "`-1`"
 
-#: ../../user_guide/configuration/additional_config.md
-msgid "list[int]"
-msgstr "list[int]"
+#: ../../source/user_guide/configuration/additional_config.md
+msgid ""
+"SLO limits for dynamic batch. This is new scheduler to support dynamic "
+"batch feature"
+msgstr "动态批处理的服务级别目标限制。这是支持动态批处理功能的新调度器。"
 
-#: ../../user_guide/configuration/additional_config.md
+#: ../../source/user_guide/configuration/additional_config.md
+msgid "`enable_npugraph_ex`"
+msgstr "`enable_npugraph_ex`"
+
+#: ../../source/user_guide/configuration/additional_config.md
+msgid "Whether to enable npugraph_ex graph mode."
+msgstr "是否启用 npugraph_ex 图模式。"
+
+#: ../../source/user_guide/configuration/additional_config.md
+msgid "`pa_shape_list`"
+msgstr "`pa_shape_list`"
+
+#: ../../source/user_guide/configuration/additional_config.md
+msgid "list"
+msgstr "list"
+
+#: ../../source/user_guide/configuration/additional_config.md
 msgid "`[]`"
 msgstr "`[]`"
 
-#: ../../user_guide/configuration/additional_config.md
-msgid "The batch size for torchair graph cache"
-msgstr "torchair 图缓存的批量大小"
+#: ../../source/user_guide/configuration/additional_config.md
+msgid "The custom shape list of page attention ops."
+msgstr "页面注意力算子的自定义形状列表。"
 
-#: ../../user_guide/configuration/additional_config.md
-msgid "`graph_batch_sizes_init`"
-msgstr "`graph_batch_sizes_init`"
-
-#: ../../user_guide/configuration/additional_config.md
-msgid "Init graph batch size dynamically if `graph_batch_sizes` is empty"
-msgstr "如果 `graph_batch_sizes` 为空，则动态初始化图批大小"
-
-#: ../../user_guide/configuration/additional_config.md
+#: ../../source/user_guide/configuration/additional_config.md
 msgid "`enable_kv_nz`"
 msgstr "`enable_kv_nz`"
 
-#: ../../user_guide/configuration/additional_config.md
+#: ../../source/user_guide/configuration/additional_config.md
 msgid ""
-"Whether to enable kvcache NZ layout. This option only takes effects on "
+"Whether to enable KV cache NZ layout. This option only takes effects on "
 "models using MLA (e.g., DeepSeek)."
-msgstr "是否启用 kvcache NZ 布局。此选项仅对使用 MLA 的模型（例如 DeepSeek）生效。"
+msgstr "是否启用 KV 缓存 NZ 布局。此选项仅对使用 MLA 的模型（如 DeepSeek）生效。"
 
-#: ../../user_guide/configuration/additional_config.md:52
-msgid "**ascend_scheduler_config**"
-msgstr "**ascend_scheduler_config**"
+#: ../../source/user_guide/configuration/additional_config.md
+msgid "`layer_sharding`"
+msgstr "`layer_sharding`"
 
-#: ../../user_guide/configuration/additional_config.md
-msgid "Whether to enable ascend scheduler for V1 engine"
-msgstr "是否为 V1 引擎启用 ascend 调度器"
-
-#: ../../user_guide/configuration/additional_config.md:58
+#: ../../source/user_guide/configuration/additional_config.md
 msgid ""
-"ascend_scheduler_config also support the options from [vllm scheduler "
-"config](https://docs.vllm.ai/en/stable/api/vllm/config.html#vllm.config.SchedulerConfig)."
-" For example, you can add `enable_chunked_prefill: True` to "
-"ascend_scheduler_config as well."
-msgstr ""
-"ascend_scheduler_config 也支持来自 [vllm scheduler "
-"config](https://docs.vllm.ai/en/stable/api/vllm/config.html#vllm.config.SchedulerConfig)"
-" 的选项。例如，你也可以在 ascend_scheduler_config 中添加 `enable_chunked_prefill: True`。"
+"Configuration options for Layer Sharding Linear. Layer Sharding can only "
+"be enabled in PD-disaggregated's P node."
+msgstr "层分片线性的配置选项。层分片只能在 PD 解耦的 P 节点中启用。"
 
-#: ../../user_guide/configuration/additional_config.md:60
+#: ../../source/user_guide/configuration/additional_config.md
+msgid "`enable_sparse_c8`"
+msgstr "`enable_sparse_c8`"
+
+#: ../../source/user_guide/configuration/additional_config.md
+msgid ""
+"Whether to enable KV cache C8 in DSA models (e.g., DeepSeekV3.2 and "
+"GLM5). Not supported on A5 devices now"
+msgstr "是否在 DSA 模型中启用 KV 缓存 C8（例如 DeepSeekV3.2 和 GLM5）。目前 A5 设备不支持。"
+
+#: ../../source/user_guide/configuration/additional_config.md
+msgid "`enable_mc2_hierarchy_comm`"
+msgstr "`enable_mc2_hierarchy_comm`"
+
+#: ../../source/user_guide/configuration/additional_config.md
+msgid "Enable dispatch/combine op inter-node communication by ROCE."
+msgstr "通过 ROCE 启用分发/组合操作的节点间通信。"
+
+#: ../../source/user_guide/configuration/additional_config.md
+msgid "`profiling_chunk_config`"
+msgstr "`profiling_chunk_config`"
+
+#: ../../source/user_guide/configuration/additional_config.md
+msgid ""
+"Configuration options for dynamic chunked pipeline parallel. See [Dynamic"
+" Chunked Pipeline "
+"Parallel](../feature_guide/dynamic_chunk_pipeline_parallel.md) for "
+"details."
+msgstr "动态分块流水线并行的配置选项。详情请参见[动态分块流水线并行](../feature_guide/dynamic_chunk_pipeline_parallel.md)。"
+
+#: ../../source/user_guide/configuration/additional_config.md:51
+msgid "The details of each configuration option are as follows:"
+msgstr "每个配置选项的详细说明如下："
+
+#: ../../source/user_guide/configuration/additional_config.md:53
+msgid "**xlite_graph_config**"
+msgstr "**xlite_graph_config**"
+
+#: ../../source/user_guide/configuration/additional_config.md
+msgid "`enabled`"
+msgstr "`enabled`"
+
+#: ../../source/user_guide/configuration/additional_config.md
+msgid ""
+"Whether to enable Xlite graph mode. Currently only Llama, Qwen dense "
+"series models, and Qwen3-VL are supported."
+msgstr "是否启用 Xlite 图模式。目前仅支持 Llama、Qwen 全量系列模型以及 Qwen3-VL。"
+
+#: ../../source/user_guide/configuration/additional_config.md
+msgid "`full_mode`"
+msgstr "`full_mode`"
+
+#: ../../source/user_guide/configuration/additional_config.md
+msgid ""
+"Whether to enable Xlite for both the prefill and decode stages. By "
+"default, Xlite is only enabled for the decode stage."
+msgstr "是否在预填充和解码阶段同时启用 Xlite。默认情况下，Xlite 仅在解码阶段启用。"
+
+#: ../../source/user_guide/configuration/additional_config.md:60
+msgid "**weight_prefetch_config**"
+msgstr "**weight_prefetch_config**"
+
+#: ../../source/user_guide/configuration/additional_config.md
+msgid "Whether to enable weight prefetch."
+msgstr "是否启用权重预取。"
+
+#: ../../source/user_guide/configuration/additional_config.md
+msgid "`prefetch_ratio`"
+msgstr "`prefetch_ratio`"
+
+#: ../../source/user_guide/configuration/additional_config.md
+#, python-brace-format
+msgid ""
+"`{\"attn\": {\"qkv\": 1.0, \"o\": 1.0}, \"moe\": {\"gate_up\": 0.8}, "
+"\"mlp\": { \"gate_up\": 1.0,  \"down\": 1.0}}`"
+msgstr ""
+"`{\"attn\": {\"qkv\": 1.0, \"o\": 1.0}, \"moe\": {\"gate_up\": 0.8}, "
+"\"mlp\": { \"gate_up\": 1.0,  \"down\": 1.0}}`"
+
+#: ../../source/user_guide/configuration/additional_config.md
+msgid "Prefetch ratio of each weight."
+msgstr "各项权重的预取比例。"
+
+#: ../../source/user_guide/configuration/additional_config.md:67
+msgid "**finegrained_tp_config**"
+msgstr "**finegrained_tp_config**"
+
+#: ../../source/user_guide/configuration/additional_config.md
+msgid "`lmhead_tensor_parallel_size`"
+msgstr "`lmhead_tensor_parallel_size`"
+
+#: ../../source/user_guide/configuration/additional_config.md
+msgid "`0`"
+msgstr "`0`"
+
+#: ../../source/user_guide/configuration/additional_config.md
+msgid "The custom tensor parallel size of lm_head."
+msgstr "lm_head 的自定义张量并行大小。"
+
+#: ../../source/user_guide/configuration/additional_config.md
+msgid "`oproj_tensor_parallel_size`"
+msgstr "`oproj_tensor_parallel_size`"
+
+#: ../../source/user_guide/configuration/additional_config.md
+msgid "The custom tensor parallel size of o_proj."
+msgstr "o_proj 的自定义张量并行大小。"
+
+#: ../../source/user_guide/configuration/additional_config.md
+msgid "`embedding_tensor_parallel_size`"
+msgstr "`embedding_tensor_parallel_size`"
+
+#: ../../source/user_guide/configuration/additional_config.md
+msgid "The custom tensor parallel size of embedding."
+msgstr "embedding 层的自定义张量并行大小。"
+
+#: ../../source/user_guide/configuration/additional_config.md
+msgid "`mlp_tensor_parallel_size`"
+msgstr "`mlp_tensor_parallel_size`"
+
+#: ../../source/user_guide/configuration/additional_config.md
+msgid "The custom tensor parallel size of mlp."
+msgstr "MLP 层的自定义张量并行大小。"
+
+#: ../../source/user_guide/configuration/additional_config.md:76
+msgid "**ascend_compilation_config**"
+msgstr "**ascend_compilation_config**"
+
+#: ../../source/user_guide/configuration/additional_config.md
+msgid "Whether to enable npugraph_ex backend."
+msgstr "是否启用 npugraph_ex 后端。"
+
+#: ../../source/user_guide/configuration/additional_config.md
+msgid "`enable_static_kernel`"
+msgstr "`enable_static_kernel`"
+
+#: ../../source/user_guide/configuration/additional_config.md
+msgid ""
+"Whether to enable static kernel. Suitable for scenarios where shape "
+"changes are minimal and some time is available for static kernel "
+"compilation."
+msgstr "是否启用静态内核。适用于形状变化极小且有时间为静态内核编译预留时间的场景。"
+
+#: ../../source/user_guide/configuration/additional_config.md
+msgid "`fuse_norm_quant`"
+msgstr "`fuse_norm_quant`"
+
+#: ../../source/user_guide/configuration/additional_config.md
+msgid "Whether to enable fuse_norm_quant pass."
+msgstr "是否启用 fuse_norm_quant 优化通道。"
+
+#: ../../source/user_guide/configuration/additional_config.md
+msgid "`fuse_qknorm_rope`"
+msgstr "`fuse_qknorm_rope`"
+
+#: ../../source/user_guide/configuration/additional_config.md
+msgid ""
+"Whether to enable fuse_qknorm_rope pass. If Triton is not in the "
+"environment, set it to False."
+msgstr "是否启用 fuse_qknorm_rope 优化通道。如果环境中没有安装 Triton，请将其设置为 False。"
+
+#: ../../source/user_guide/configuration/additional_config.md
+msgid "`fuse_allreduce_rms`"
+msgstr "`fuse_allreduce_rms`"
+
+#: ../../source/user_guide/configuration/additional_config.md
+msgid ""
+"Whether to enable fuse_allreduce_rms pass. It's set to False because of "
+"conflict with SP."
+msgstr "是否启用 fuse_allreduce_rms 优化通道。由于与 SP 存在冲突，默认设置为 False。"
+
+#: ../../source/user_guide/configuration/additional_config.md
+msgid "`fuse_muls_add`"
+msgstr "`fuse_muls_add`"
+
+#: ../../source/user_guide/configuration/additional_config.md
+msgid "Whether to enable fuse_muls_add pass."
+msgstr "是否启用 fuse_muls_add 优化通道。"
+
+#: ../../source/user_guide/configuration/additional_config.md:87
+msgid "**eplb_config**"
+msgstr "**eplb_config**"
+
+#: ../../source/user_guide/configuration/additional_config.md
+msgid "`dynamic_eplb`"
+msgstr "`dynamic_eplb`"
+
+#: ../../source/user_guide/configuration/additional_config.md
+msgid "Whether to enable dynamic EPLB."
+msgstr "是否启用动态专家并行负载均衡 (EPLB)。"
+
+#: ../../source/user_guide/configuration/additional_config.md
+msgid "`expert_map_path`"
+msgstr "`expert_map_path`"
+
+#: ../../source/user_guide/configuration/additional_config.md
+msgid ""
+"When using expert load balancing for an MoE model, an expert map path "
+"needs to be passed in."
+msgstr "为 MoE 模型使用专家负载均衡时，需要传入专家映射表的路径。"
+
+#: ../../source/user_guide/configuration/additional_config.md
+msgid "`expert_heat_collection_interval`"
+msgstr "`expert_heat_collection_interval`"
+
+#: ../../source/user_guide/configuration/additional_config.md
+msgid "`400`"
+msgstr "`400`"
+
+#: ../../source/user_guide/configuration/additional_config.md
+msgid "Forward iterations when EPLB begins."
+msgstr "EPLB 开始前的正向迭代次数。"
+
+#: ../../source/user_guide/configuration/additional_config.md
+msgid "`algorithm_execution_interval`"
+msgstr "`algorithm_execution_interval`"
+
+#: ../../source/user_guide/configuration/additional_config.md
+msgid "`30`"
+msgstr "`30`"
+
+#: ../../source/user_guide/configuration/additional_config.md
+msgid "The forward iterations when the EPLB worker will finish CPU tasks."
+msgstr "EPLB 工作线程完成 CPU 任务所需的正向迭代次数。"
+
+#: ../../source/user_guide/configuration/additional_config.md
+msgid "`expert_map_record_path`"
+msgstr "`expert_map_record_path`"
+
+#: ../../source/user_guide/configuration/additional_config.md
+msgid ""
+"Save the expert load calculation results to a new expert table in the "
+"specified directory."
+msgstr "将专家负载计算结果保存到指定目录下的新专家表中。"
+
+#: ../../source/user_guide/configuration/additional_config.md
+msgid "`num_redundant_experts`"
+msgstr "`num_redundant_experts`"
+
+#: ../../source/user_guide/configuration/additional_config.md
+msgid "Specify redundant experts during initialization."
+msgstr "在初始化阶段指定冗余专家的数量。"
+
+#: ../../source/user_guide/configuration/additional_config.md:98
+msgid "**profiling_chunk_config**"
+msgstr "**profiling_chunk_config**"
+
+#: ../../source/user_guide/configuration/additional_config.md
+msgid ""
+"Whether to enable dynamic chunked pipeline parallel. Requires `pipeline-"
+"parallel-size > 1`."
+msgstr "是否启用动态分块流水线并行。需要 `pipeline-parallel-size > 1`。"
+
+#: ../../source/user_guide/configuration/additional_config.md
+msgid "`smooth_factor`"
+msgstr "`smooth_factor`"
+
+#: ../../source/user_guide/configuration/additional_config.md
+msgid "float"
+msgstr "float"
+
+#: ../../source/user_guide/configuration/additional_config.md
+msgid "`1.0`"
+msgstr "`1.0`"
+
+#: ../../source/user_guide/configuration/additional_config.md
+msgid ""
+"Smoothing factor (0 < x ≤ 1.0). Higher values trust the dynamic "
+"prediction more; `0.0` disables dynamic adjustment."
+msgstr "平滑因子 (0 < x ≤ 1.0)。值越大越信任动态预测；`0.0` 表示禁用动态调整。"
+
+#: ../../source/user_guide/configuration/additional_config.md
+msgid "`min_chunk`"
+msgstr "`min_chunk`"
+
+#: ../../source/user_guide/configuration/additional_config.md
+msgid "`4096`"
+msgstr "`4096`"
+
+#: ../../source/user_guide/configuration/additional_config.md
+msgid ""
+"Minimum chunk size for dynamic calculation. Should be smaller than `max-"
+"num-batched-tokens`."
+msgstr "动态计算的最小分块大小。应小于 `max-num-batched-tokens`。"
+
+#: ../../source/user_guide/configuration/additional_config.md
+msgid "`need_timing`"
+msgstr "`need_timing`"
+
+#: ../../source/user_guide/configuration/additional_config.md
+msgid "True"
+msgstr "True"
+
+#: ../../source/user_guide/configuration/additional_config.md
+msgid "Enable/disable Online Calibration"
+msgstr "启用/禁用在线校准"
+
+#: ../../source/user_guide/configuration/additional_config.md:107
 msgid "Example"
 msgstr "示例"
 
-#: ../../user_guide/configuration/additional_config.md:62
+#: ../../source/user_guide/configuration/additional_config.md:109
 msgid "An example of additional configuration is as follows:"
-msgstr "以下是额外配置的一个示例："
+msgstr "附加配置的一个示例如下："
+
+#~ msgid ""
+#~ "Whether to enable CPU binding. Only "
+#~ "takes effect on ARM CPUs; A3 uses"
+#~ " the global-slicing CPU allocation "
+#~ "strategy and other device types use "
+#~ "the topo-affinity CPU allocation "
+#~ "strategy."
+#~ msgstr "是否启用 CPU 绑定。仅在 ARM CPU 上生效；A3 使用全局切片 CPU 分配策略，其他设备类型使用拓扑亲和性 CPU 分配策略。"

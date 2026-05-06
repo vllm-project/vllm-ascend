@@ -9,7 +9,9 @@
  */
 #ifndef CAM_MOE_DISTRIBUTE_COMBINE_H
 #define CAM_MOE_DISTRIBUTE_COMBINE_H
+#ifndef OPT_RANK_OFFSET
 #define OPT_RANK_OFFSET 512
+#endif
 
 #include "kernel_operator.h"
 #include "kernel_tiling/kernel_tiling.h"
@@ -262,7 +264,7 @@ __aicore__ inline void CamMoeDistributeCombine<TemplateMC2TypeFunc>::Init(
     DataCacheCleanAndInvalid<int32_t, CacheLine::SINGLE_CACHE_LINE, DcciDst::CACHELINE_OUT>(
         selfDataStatusTensor[coreIdx_ * UB_ALIGN]);
     __asm__ __volatile__("");
-    pipe_barrier(PIPE_ALL);
+    AscendC::PipeBarrier<PIPE_ALL>();
 
     workspaceGM_ = workspaceGM;
     expandXGM_.SetGlobalBuffer((__gm__ ExpandXType *)expandX);
@@ -478,13 +480,13 @@ __aicore__ inline void CamMoeDistributeCombine<TemplateMC2TypeFunc>::ReduceScatt
 template <TemplateMC2TypeClass>
 __aicore__ inline void CamMoeDistributeCombine<TemplateMC2TypeFunc>::SetWaitTpStatusAndDisPatch()
 {
-    pipe_barrier(PIPE_ALL);
+    AscendC::PipeBarrier<PIPE_ALL>();
     if (startRankId_ >= epWorldSize_) {
         return;
     }
     if constexpr (IsNeedReduceScatter) {
         uint32_t tpToRankId = 1 - tpRankId_;
-        pipe_barrier(PIPE_ALL);
+        AscendC::PipeBarrier<PIPE_ALL>();
         LocalTensor<float> statusFlagUb = readStateBuf_.Get<float>();
         statusFlagUb(0) = sumTarget_;
         SyncFunc<AscendC::HardEvent::S_MTE3>();
@@ -602,9 +604,9 @@ __aicore__ inline void CamMoeDistributeCombine<TemplateMC2TypeFunc>::CustomAdd(L
     if constexpr (AscendC::IsSameType<ExpandXType, bfloat16_t>::value) {
         Cast(winTpSendCountFloatTensor_, src0, RoundMode::CAST_NONE, dataCnt);
         Cast(gmTpSendCountFloatTensor_, src1, RoundMode::CAST_NONE, dataCnt);
-        pipe_barrier(PIPE_V);
+        AscendC::PipeBarrier<PIPE_V>();
         Add(winTpSendCountFloatTensor_, winTpSendCountFloatTensor_, gmTpSendCountFloatTensor_, dataCnt);
-        pipe_barrier(PIPE_V);
+        AscendC::PipeBarrier<PIPE_V>();
         Cast(dst, winTpSendCountFloatTensor_, RoundMode::CAST_ROUND, dataCnt);
     } else {
         Add(dst, src0, src1, dataCnt);
@@ -614,7 +616,7 @@ __aicore__ inline void CamMoeDistributeCombine<TemplateMC2TypeFunc>::CustomAdd(L
 template <TemplateMC2TypeClass>
 __aicore__ inline void CamMoeDistributeCombine<TemplateMC2TypeFunc>::SetStatus()
 {
-    pipe_barrier(PIPE_ALL);
+    AscendC::PipeBarrier<PIPE_ALL>();
     if (startRankId_ >= epWorldSize_) {
         return;
     }

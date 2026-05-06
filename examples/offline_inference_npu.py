@@ -37,6 +37,9 @@ def main():
     # Create a sampling params object.
     sampling_params = SamplingParams(max_tokens=100, temperature=0.0)
     # Create an LLM.
+    # NOTE: To access output.metrics (e.g., first_token_time, finished_time),
+    # set disable_log_stats=False. By default, vLLM disables log stats and
+    # output.metrics will be None. See issue #5027 for details.
     llm = LLM(model="Qwen/Qwen2.5-0.5B-Instruct")
 
     # Generate texts from the prompts.

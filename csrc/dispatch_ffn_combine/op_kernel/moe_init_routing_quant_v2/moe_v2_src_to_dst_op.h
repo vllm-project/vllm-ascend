@@ -75,13 +75,13 @@ __aicore__ inline void MoeV2SrcToDstOp::Compute(int64_t progress) {
   LocalTensor<int32_t> outLocal = copyOutQueue.AllocTensor<int32_t>();
   LocalTensor<int32_t> assistTensor = assistBuffer.Get<int32_t>(ASSIST_NUM);
 
-  pipe_barrier(PIPE_V);
+  AscendC::PipeBarrier<PIPE_V>();
   int64_t loops = Ceil(currentLoopRows, ASSIST_INDEX_NUM);
   for (int64_t i = 0; i < loops; i++) {
     Adds(outLocal[i * ASSIST_NUM], assistTensor,
          static_cast<int32_t>(this->perLoopRows * progress + i * ASSIST_INDEX_NUM), ASSIST_NUM);
   }
-  pipe_barrier(PIPE_V);
+  AscendC::PipeBarrier<PIPE_V>();
   copyOutQueue.EnQue<int32_t>(outLocal);
 }
 

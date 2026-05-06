@@ -130,9 +130,15 @@ from typing import Any
 import httpx
 from fastapi import FastAPI, Request
 from fastapi.responses import StreamingResponse
-from vllm.logger import init_logger
 
-logger = init_logger(__name__)
+try:
+    from vllm.logger import init_logger
+
+    logger = init_logger(__name__)
+except ImportError:
+    import logging
+
+    logger = logging.getLogger(__name__)
 
 # Add uvloop for faster event loop if available
 try:
@@ -147,6 +153,9 @@ except ImportError:
 class InstanceType:
     PREFILL: str = "prefill"
     DECODE: str = "decode"
+
+
+TAINT_PRIORITY = 1e15
 
 
 class ServerState:
@@ -186,6 +195,9 @@ class ServerState:
 
 class ProxyState:
     def __init__(self, prefiller_instances, decoder_instances):
+        self.request_num = 0
+        self.tainted_prefillers: list[ServerState] = []
+        self.tainted_decoders: list[ServerState] = []
         self.node_listener = NodeListener(self)
 
         self.prefillers: list[ServerState] = [ServerState(h, p) for h, p in prefiller_instances]
@@ -197,8 +209,8 @@ class ProxyState:
         # Initialize priority queues for efficient server selection
         # Each entry is (priority_score, server_index, server_reference)
         # Lower priority score = higher priority (less loaded)
-        self.prefiller_heap = [(0, i, server) for i, server in enumerate(self.prefillers)]
-        self.decoder_heap = [(0, i, server) for i, server in enumerate(self.decoders)]
+        self.prefiller_heap = [(0.0, i, server) for i, server in enumerate(self.prefillers)]
+        self.decoder_heap = [(0.0, i, server) for i, server in enumerate(self.decoders)]
         heapq.heapify(self.prefiller_heap)
         heapq.heapify(self.decoder_heap)
 
@@ -209,7 +221,7 @@ class ProxyState:
         priority = server.active_tokens + server.active_kv_cache * 0.3
         # Remove old entry and add new one
         self.prefiller_heap = [(p, i, s) for p, i, s in self.prefiller_heap if i != server_idx]
-        heapq.heappush(self.prefiller_heap, (priority, server_idx, server))  # type: ignore
+        heapq.heappush(self.prefiller_heap, (priority, server_idx, server))
 
     def _update_decoder_priority(self, server_idx: int):
         """Update the priority of a decoder server in the heap."""
@@ -217,7 +229,7 @@ class ProxyState:
         priority = server.active_tokens
         # Remove old entry and add new one
         self.decoder_heap = [(p, i, s) for p, i, s in self.decoder_heap if i != server_idx]
-        heapq.heappush(self.decoder_heap, (priority, server_idx, server))  # type: ignore
+        heapq.heappush(self.decoder_heap, (priority, server_idx, server))
 
     def abort_prefiller_request(self, server_idx: int, request_id):  # Changed to synchronous
         """
@@ -225,14 +237,18 @@ class ProxyState:
         prefiller node.
         """
         # No lock needed - atomic operation
+        if server_idx >= len(self.prefillers):
+            return
         self.prefillers[server_idx].aborted_requests.add(request_id)
 
-    def aquire_aborted_prefiller_requests(self, server_idx: int):  # Changed to synchronous
+    def acquire_aborted_prefiller_requests(self, server_idx: int):  # Changed to synchronous
         """
         Get the set of aborted requests and clear it.
         This is used to release kv cache in prefiller node.
         """
         # No lock needed - atomic operation
+        if server_idx >= len(self.prefillers):
+            return set()
         aborted_requests = self.prefillers[server_idx].aborted_requests.copy()
         self.prefillers[server_idx].aborted_requests.clear()
         return aborted_requests
@@ -259,12 +275,16 @@ class ProxyState:
 
     def release_prefiller(self, idx, token_count):  # Changed to synchronous
         # No lock needed - atomic operation
+        if idx >= len(self.prefillers):
+            return
         self.prefillers[idx].active_tokens -= token_count
         # Update priority queue after releasing
         self._update_prefiller_priority(idx)
 
     def release_prefiller_kv(self, idx, token_count):  # Changed to synchronous
         # No lock needed - atomic operation
+        if idx >= len(self.prefillers):
+            return
         if self.prefillers[idx].active_kv_cache > 0:
             self.prefillers[idx].active_kv_cache -= token_count
         # Update priority queue after releasing
@@ -287,6 +307,8 @@ class ProxyState:
 
     def release_decoder(self, idx, token_count):  # Changed to synchronous
         # No lock needed - atomic operation
+        if idx >= len(self.decoders):
+            return
         self.decoders[idx].active_tokens -= token_count
         # Update priority queue after releasing
         self._update_decoder_priority(idx)
@@ -317,24 +339,44 @@ class ProxyState:
         return added_nodes, waiting_nodes
 
     def add_prefillers(self, instances: list[ServerState]) -> None:
-        num_prefillers = len(self.prefillers)
-        for idx, server in enumerate(instances):
-            if server not in self.prefillers:
+        for server in instances:
+            if server in self.tainted_prefillers:
+                self.tainted_prefillers.remove(server)
+                self.prefiller_heap = [
+                    (0, idx, server) if srv == server else (priority, idx, srv)
+                    for priority, idx, srv in self.prefiller_heap
+                ]
+                heapq.heapify(self.prefiller_heap)
+            elif server not in self.prefillers:
                 self.prefillers.append(server)
                 # prefiller_heap: [(priority_0, 0, server_0)] -> [(priority_0, 0, server_0), (0, 1, server_1)]
-                heapq.heappush(self.prefiller_heap, (0, num_prefillers + idx, server))
+                heapq.heappush(self.prefiller_heap, (0, len(self.prefillers) - 1, server))
         self.print_status(f"Add prefiller instances: {instances}.")
 
     def add_decoders(self, instances: list[ServerState]) -> None:
-        num_decoders = len(self.decoders)
-        for idx, server in enumerate(instances):
-            if server not in self.decoders:
+        for server in instances:
+            if server in self.tainted_decoders:
+                self.tainted_decoders.remove(server)
+                self.decoder_heap = [
+                    (0, idx, server) if srv == server else (priority, idx, srv)
+                    for priority, idx, srv in self.decoder_heap
+                ]
+                heapq.heapify(self.decoder_heap)
+            elif server not in self.decoders:
                 self.decoders.append(server)
                 # decoder_heap: [(priority_0, 0, server_0)] -> [(priority_0, 0, server_0), (0, 1, server_1)]
-                heapq.heappush(self.decoder_heap, (0, num_decoders + idx, server))
+                heapq.heappush(self.decoder_heap, (0, len(self.decoders) - 1, server))
         self.print_status(f"Add decoder instances: {instances}.")
 
-    def remove_prefillers(self, instances: list[ServerState]) -> None:
+    def remove_prefillers(self, instances: list[ServerState]) -> bool:
+        if not instances:
+            return False
+
+        if self.request_num > 0:
+            logger.warning("Start to taint prefill instances %s.", instances)
+            self._taint_prefillers(instances)
+            return True
+
         instances_to_remove = set(instances)
         self.prefillers = [server for server in self.prefillers if server not in instances_to_remove]
         prefiller_heap_copy = self.prefiller_heap.copy()
@@ -350,8 +392,17 @@ class ProxyState:
         self.prefiller_heap = prefiller_heap
         heapq.heapify(self.prefiller_heap)
         self.print_status(f"Remove prefiller instances: {instances}.")
+        return False
 
-    def remove_decoders(self, instances: list[ServerState]) -> None:
+    def remove_decoders(self, instances: list[ServerState]) -> bool:
+        if not instances:
+            return False
+
+        if self.request_num > 0:
+            logger.warning("Start to taint decode instances %s.", instances)
+            self._taint_decoders(instances)
+            return True
+
         instances_to_remove = set(instances)
         self.decoders = [server for server in self.decoders if server not in instances_to_remove]
         decoder_heap_copy = self.decoder_heap.copy()
@@ -367,6 +418,31 @@ class ProxyState:
         self.decoder_heap = decoder_heap
         heapq.heapify(self.decoder_heap)
         self.print_status(f"Remove decoder instances: {instances}.")
+        return False
+
+    def _taint_prefillers(self, instances: list[ServerState]) -> None:
+        instances_to_taint = set(instances)
+        for server in self.prefillers:
+            if server in instances_to_taint and server not in self.tainted_prefillers:
+                self.tainted_prefillers.append(server)
+
+        self.prefiller_heap = [
+            (TAINT_PRIORITY, idx, srv) if srv in instances_to_taint else (priority, idx, srv)
+            for priority, idx, srv in self.prefiller_heap
+        ]
+        heapq.heapify(self.prefiller_heap)
+
+    def _taint_decoders(self, instances: list[ServerState]) -> None:
+        instances_to_taint = set(instances)
+        for server in self.decoders:
+            if server in instances_to_taint and server not in self.tainted_decoders:
+                self.tainted_decoders.append(server)
+
+        self.decoder_heap = [
+            (TAINT_PRIORITY, idx, srv) if srv in instances_to_taint else (priority, idx, srv)
+            for priority, idx, srv in self.decoder_heap
+        ]
+        heapq.heapify(self.decoder_heap)
 
     def print_status(self, msg: str) -> None:
         status = {
@@ -403,6 +479,16 @@ class NodeListener:
                     self.waiting_nodes.pop(node)
                 else:
                     self.waiting_nodes[node] = (instance_type, server, check_times)
+
+            if self.proxy_state.tainted_prefillers and not self.proxy_state.request_num:
+                need_waiting = self.proxy_state.remove_prefillers(self.proxy_state.tainted_prefillers)
+                if not need_waiting:
+                    self.proxy_state.tainted_prefillers.clear()
+
+            if self.proxy_state.tainted_decoders and not self.proxy_state.request_num:
+                need_waiting = self.proxy_state.remove_decoders(self.proxy_state.tainted_decoders)
+                if not need_waiting:
+                    self.proxy_state.tainted_decoders.clear()
             time.sleep(global_args.waiting_retry_interval)
 
     @staticmethod
@@ -496,7 +582,7 @@ async def send_request_to_service(
     max_retries: int = 3,
     base_delay: float = 0.2,
 ):
-    aborted_requests = proxy_state.aquire_aborted_prefiller_requests(prefiller_id)
+    aborted_requests = proxy_state.acquire_aborted_prefiller_requests(prefiller_id)
     req_data = req_data.copy()
     req_data["kv_transfer_params"] = {
         "do_remote_decode": True,
@@ -522,12 +608,12 @@ async def send_request_to_service(
             response.raise_for_status()
             return response
         except (httpx.RequestError, httpx.HTTPStatusError) as e:
-            logger.warning(f"Attempt {attempt} failed for {endpoint}: {str(e)}")
+            logger.warning("Attempt %s failed for %s: %s", attempt, endpoint, e)
             last_exc = e
             if attempt < max_retries:
                 await asyncio.sleep(base_delay * (2 ** (attempt - 1)))
             else:
-                logger.error(f"All {max_retries} attempts failed for {endpoint}.")
+                logger.error("All %s attempts failed for %s.", max_retries, endpoint)
                 raise last_exc
 
 
@@ -551,28 +637,28 @@ async def stream_service_response_with_retry(
                 return  # Success, exit after streaming
         except (httpx.RequestError, httpx.HTTPStatusError) as e:
             if attempt < max_retries:
-                logger.warning(f"Attempt {attempt} failed for streaming {endpoint}: {str(e)}")
+                logger.warning("Attempt %s failed for streaming %s: %s", attempt, endpoint, e)
                 await asyncio.sleep(base_delay * (2 ** (attempt - 1)))
             else:
-                logger.error(f"All {max_retries} attempts failed for streaming {endpoint}.")
+                logger.error("All %s attempts failed for streaming %s.", max_retries, endpoint)
                 raise e
         except Exception as e:
             # If any chunk has been sent, do not retry, just log and drop
             if "first_chunk_sent" in locals() and first_chunk_sent:
-                logger.error(f"Streaming to client interrupted after response started: {str(e)}")
+                logger.error("Streaming to client interrupted after response started: %s", e)
                 return
             else:
                 if attempt < max_retries:
-                    logger.warning(f"Attempt {attempt} failed for streaming {endpoint}: {str(e)}")
+                    logger.warning("Attempt %s failed for streaming %s: %s", attempt, endpoint, e)
                     await asyncio.sleep(base_delay * (2 ** (attempt - 1)))
                 else:
-                    logger.error(f"All {max_retries} attempts failed for streaming {endpoint}.")
+                    logger.error("All %s attempts failed for streaming %s.", max_retries, endpoint)
                     raise e
 
 
 async def _handle_select_instance(api: str, req_data: Any, request_length: int):
     prefiller_score = proxy_state.calculate_prefill_scores(request_length)
-    logger.debug(f"Request length: {request_length}, Prefiller score: {prefiller_score}")
+    logger.debug("Request length: %s, Prefiller score: %s", request_length, prefiller_score)
     request_id = await proxy_state.next_req_id()
     # Select prefiller
     prefiller_idx = proxy_state.select_prefiller(prefiller_score)
@@ -623,6 +709,7 @@ class InstanceInfo:
 
 async def _handle_completions(api: str, request: Request):
     try:
+        proxy_state.request_num += 1
         req_data = await request.json()
         req_body = await request.body()
         request_length = len(req_body)
@@ -647,6 +734,13 @@ async def _handle_completions(api: str, request: Request):
             retry_count = 0
             retry = True
             completion_tokens = 0
+
+            def release_prefiller_kv_once():
+                nonlocal released_kv
+                if not released_kv:
+                    proxy_state.release_prefiller_kv(instance_info.prefiller_idx, instance_info.prefiller_score)
+                    released_kv = True
+
             # Only one await per chunk, minimal logic in loop
             try:
                 while retry:
@@ -660,12 +754,11 @@ async def _handle_completions(api: str, request: Request):
                         base_delay=global_args.retry_delay,
                     ):
                         if not released_kv and chunk:
-                            proxy_state.release_prefiller_kv(instance_info.prefiller_idx, instance_info.prefiller_score)
-                            released_kv = True
+                            release_prefiller_kv_once()
                         try:
                             chunk_str = chunk.decode("utf-8").strip()
                         except UnicodeDecodeError:
-                            logger.debug(f"Skipping chunk: {chunk}")
+                            logger.debug("Skipping chunk: %s", chunk)
                             yield chunk
                             continue
                         if not chunk_str:
@@ -676,7 +769,7 @@ async def _handle_completions(api: str, request: Request):
                             chunk_json = json.loads(chunk_str)
                         except json.JSONDecodeError:
                             # if chunk is [done], skip it.
-                            logger.debug(f"Skipping chunk: {chunk_str}")
+                            logger.debug("Skipping chunk: %s", chunk_str)
                             yield chunk
                             continue
                         choices = chunk_json.get("choices", [])
@@ -715,19 +808,27 @@ async def _handle_completions(api: str, request: Request):
                                 choice["text"] = generated_token
                             chunk = json.dumps(chunk_json).encode("utf-8")
                         yield chunk
+            except asyncio.CancelledError:
+                raise
             except Exception as e:
                 logger.error(
-                    f"Error during streaming from decoder {instance_info.decoder.url}: {str(e)} "
-                    f"the aborted request {instance_info.request_id} will be routing to the target "
-                    "prefiller when new request is ready to dispatch to it"
+                    "Error during streaming from decoder %s: %s the aborted request %s "
+                    "will be routing to the target prefiller when new request is ready to dispatch to it",
+                    instance_info.decoder.url,
+                    e,
+                    instance_info.request_id,
                 )
                 proxy_state.abort_prefiller_request(instance_info.prefiller_idx, instance_info.request_id)
-                proxy_state.release_prefiller_kv(instance_info.prefiller_idx, instance_info.prefiller_score)
+                release_prefiller_kv_once()
+            finally:
+                # After streaming is done or cancelled, release tokens.
+                release_prefiller_kv_once()
+                proxy_state.release_decoder(instance_info.decoder_idx, instance_info.decoder_score)
+                proxy_state.request_num -= 1
 
-            # After streaming done, release tokens
-            proxy_state.release_decoder(instance_info.decoder_idx, instance_info.decoder_score)
-
-        return StreamingResponse(generate_stream(), media_type="application/json")
+        # Determine the correct media type based on stream flag
+        media_type = "text/event-stream; charset=utf-8" if stream_flag else "application/json"
+        return StreamingResponse(generate_stream(), media_type=media_type)
     except Exception as e:
         import traceback
 
@@ -735,6 +836,7 @@ async def _handle_completions(api: str, request: Request):
         print(f"Error occurred in disagg prefill proxy server - {api} endpoint")
         print(e)
         print("".join(traceback.format_exception(*exc_info)))
+        proxy_state.request_num -= 1
         raise
 
 
@@ -763,16 +865,19 @@ async def _handle_adjust_instances(adjust_mode: str, request: Request):
                 )
         elif adjust_mode == "remove":
             if instance_type == InstanceType.PREFILL:
-                proxy_state.remove_prefillers(instances)
+                need_waiting = proxy_state.remove_prefillers(instances)
             else:
-                proxy_state.remove_decoders(instances)
+                need_waiting = proxy_state.remove_decoders(instances)
+
+            if need_waiting:
+                all_msg = f"Instances {instances} are isolated and waiting to be removed."
         return {
             "message": all_msg,
             "current_prefill_instances": [str(prefiller) for prefiller in proxy_state.prefillers],
             "current_decode_instances": [str(decoder) for decoder in proxy_state.decoders],
         }
     except Exception as e:
-        logger.error(f"Failed to {adjust_mode} instances: {e}")
+        logger.error("Failed to %s instances: %s", adjust_mode, e)
         raise e
 
 

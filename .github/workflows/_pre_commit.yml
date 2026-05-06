@@ -11,20 +11,49 @@ permissions:
   contents: read
 
 jobs:
-  pre-commit:
-    runs-on: linux-amd64-cpu-16-hk
+  validate-pr-title:
+    runs-on: linux-amd64-cpu-8-hk
     container:
       # Build it from https://github.com/nv-action/vllm-benchmarks/blob/main/Dockerfile
-      image: swr.cn-southwest-2.myhuaweicloud.com/base_image/ascend-ci/vllm-ascend:nightly-cpu
-    env:
-      GOPROXY: https://goproxy.io,direct
-      GITHUB_WORKSPACE: /__w/vllm-ascend/vllm-ascend
+      image: quay.io/ascend-ci/vllm-ascend:lint
+    steps:
+    - name: Validate PR title prefix
+      env:
+        PR_TITLE: ${{ github.event.pull_request.title }}
+      run: |
+        # Fail if PR title is empty
+        if [ -z "$PR_TITLE" ]; then
+          echo "::error::PR title cannot be empty"
+          exit 1
+        fi
+
+        echo "Checking PR title: $PR_TITLE"
+
+        # Define valid prefixes (case-sensitive)
+        # Check if PR title contains any valid prefix (not necessarily at the start)
+        VALID_PREFIXES='\[(BugFix|Performance|Test|CI|Feature|Doc|Misc|Community|Refactor)\]'
+
+        # Check if PR title contains a valid prefix
+        if ! echo "$PR_TITLE" | grep -qE "$VALID_PREFIXES"; then
+          echo "::error::PR title must contain one of the following prefixes: [BugFix], [Performance], [Test], [CI], [Feature], [Doc], [Misc], [Community], [Refactor]"
+          echo "::error::Example: '[Feature] Add new optimization pass' or 'Add new feature [Feature]'"
+          exit 1
+        fi
+
+        echo "✓ PR title prefix is valid"
+
+  pre-commit:
+    needs: [validate-pr-title]
+    runs-on: linux-amd64-cpu-8-hk
+    container:
+      # Build it from https://github.com/nv-action/vllm-benchmarks/blob/main/Dockerfile
+      image: quay.io/ascend-ci/vllm-ascend:lint
     steps:
     - name: Checkout vllm-project/vllm-ascend repo
       uses: actions/checkout@v6
 
     # With problem matchers in a container, the output of $GITHUB_WORKSPACE and ${{ github.workspace }} are different.
-    # So we will just copy it into the path ${{ github.workspace }}. see https://github.com/actions/runner/issues/2058
+    # So we will just copy it into a temp path. see https://github.com/actions/runner/issues/2058
     - name: cp problem matchers
       run: |
         cp .github/workflows/matchers/actionlint.json "$RUNNER_TEMP/actionlint.json"
@@ -41,14 +70,30 @@ jobs:
         repository: vllm-project/vllm
         path: ./vllm-empty
         ref: ${{ inputs.vllm }}
-    - name: Install vllm
-      working-directory: vllm-empty
+
+    - uses: dorny/paths-filter@v4
+      id: filter
+      with:
+        filters: |
+          lint_tracker:
+            - 'requirements.txt'
+            - 'requirements-dev.txt'
+            - 'requirements-lint.txt'
+
+    - name: Install vllm-ascend dev (conditional)
+      if: steps.filter.outputs.lint_tracker == 'true'
+      env:
+        UV_INDEX_URL: http://cache-service.nginx-pypi-cache.svc.cluster.local/pypi/simple
+        UV_EXTRA_INDEX_URL: https://mirrors.huaweicloud.com/ascend/repos/pypi
+        UV_INDEX_STRATEGY: unsafe-best-match
+        UV_NO_CACHE: 1
+        UV_SYSTEM_PYTHON: 1
       run: |
-        VLLM_TARGET_DEVICE=empty python3 -m pip install . --extra-index https://download.pytorch.org/whl/cpu/
-    - name: Install vllm-ascend dev
-      run: |
+        pip install uv
         git config --global --add safe.directory /__w/vllm-ascend/vllm-ascend
-        pip install -r requirements-dev.txt --extra-index-url https://download.pytorch.org/whl/cpu
+        pip install uc-manager
+        uv pip install -r requirements-dev.txt --extra-index-url https://download.pytorch.org/whl/cpu
+
     - name: Run pre-commit
       env:
         PRE_COMMIT_COLOR: always
@@ -56,4 +101,18 @@ jobs:
         TERM: xterm-256color
         SHELLCHECK_OPTS: "--exclude=SC2046,SC2006,SC2086" # Exclude SC2046, SC2006, SC2086 for actionlint
       run: |
-        pre-commit run --all-files --hook-stage manual
+        git config --global --add safe.directory /__w/vllm-ascend/vllm-ascend
+        pre-commit run --all-files --hook-stage manual --show-diff-on-failure
+
+    - name: Run mypy
+      run: |
+        PYTHONPATH="$PYTHONPATH:$(pwd)/vllm-empty"
+        export PYTHONPATH
+        git config --global --add safe.directory /__w/vllm-ascend/vllm-ascend
+        # Run mypy for Python 3.10, 3.11, 3.12 manually
+        # Note: We are now separating mypy from pre-commit hooks for performance reasons.
+        for python_version in "3.10" "3.11" "3.12"; do
+          echo "============================"
+          tools/mypy.sh 1 "$python_version"
+          echo "============================"
+        done

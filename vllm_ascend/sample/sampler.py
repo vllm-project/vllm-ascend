@@ -1,9 +1,13 @@
 import torch
+import vllm.envs as envs
+from vllm.triton_utils import HAS_TRITON
+from vllm.v1.sample.metadata import SamplingMetadata
 from vllm.v1.sample.ops.topk_topp_sampler import TopKTopPSampler
 from vllm.v1.sample.sampler import Sampler
 
 from vllm_ascend.ascend_config import get_ascend_config
-from vllm_ascend.utils import global_stream, npu_stream_switch
+from vllm_ascend.sample.penalties import apply_all_penalties
+from vllm_ascend.utils import AscendDeviceType, get_ascend_device_type, global_stream, npu_stream_switch
 
 DEFAULT_LOGPROBS_MODE = "raw_logprobs"
 
@@ -35,6 +39,27 @@ def random_sample(
 
 
 class AscendSampler(Sampler):
+    @staticmethod
+    def apply_penalties(
+        logits: torch.Tensor,
+        sampling_metadata: SamplingMetadata,
+        output_token_ids: list[list[int]],
+    ) -> torch.Tensor:
+        """Use Triton-Ascend penalties on NPU when Triton is available; else vLLM default."""
+        if not HAS_TRITON:
+            return Sampler.apply_penalties(logits, sampling_metadata, output_token_ids)
+
+        if sampling_metadata.no_penalties:
+            return logits
+        assert sampling_metadata.prompt_token_ids is not None
+        return apply_all_penalties(
+            logits,
+            sampling_metadata.prompt_token_ids,
+            sampling_metadata.presence_penalties,
+            sampling_metadata.frequency_penalties,
+            sampling_metadata.repetition_penalties,
+            output_token_ids,
+        )
 
     def __init__(self, logprobs_mode=DEFAULT_LOGPROBS_MODE):
         # TODO: support logprobs_mode in vllm-ascend
@@ -62,7 +87,6 @@ class AscendSampler(Sampler):
 
 
 class AscendTopKTopPSampler(TopKTopPSampler):
-
     def __init__(self, **kwargs):
         super().__init__(**kwargs)
         self.apply_top_k_top_p = apply_top_k_top_p
@@ -75,6 +99,10 @@ class AscendTopKTopPSampler(TopKTopPSampler):
 
     def forward_native(self, logits, generators, k, p):
         """Override pytorch native implementation to torch_npu"""
+        # when batch_invariant mode is enabled, we should use vllm's implementation.
+        # or it will make batch_invariant mode not working.
+        if envs.VLLM_BATCH_INVARIANT:
+            return super().forward_native(logits, generators, k, p)
         logits = self.apply_top_k_top_p(logits, k, p)
         logits_to_return = None
         if self.logprobs_mode == "processed_logits":
@@ -90,7 +118,7 @@ class AscendTopKTopPSampler(TopKTopPSampler):
         return random_sample(probs, generators), logits_to_return
 
 
-def apply_top_k_top_p(
+def _apply_top_k_top_p_pytorch(
     logits: torch.Tensor,
     k: torch.Tensor,
     p: torch.Tensor,
@@ -124,3 +152,20 @@ def apply_top_k_top_p(
         logits.masked_fill_(elements_to_discard, -float("inf"))
 
     return logits
+
+
+def _apply_top_k_top_p_ascendc(
+    logits: torch.Tensor,
+    k: torch.Tensor,
+    p: torch.Tensor,
+) -> torch.Tensor:
+    if p is None and k is None:
+        return logits
+    return torch.ops._C_ascend.npu_apply_top_k_top_p(logits, k=k, p=p)
+
+
+apply_top_k_top_p = (
+    _apply_top_k_top_p_ascendc
+    if get_ascend_device_type() in [AscendDeviceType.A2, AscendDeviceType.A3]
+    else _apply_top_k_top_p_pytorch
+)

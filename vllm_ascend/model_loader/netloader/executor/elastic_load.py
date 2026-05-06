@@ -18,8 +18,7 @@ import torch
 import torch_npu
 from vllm.logger import logger
 
-from .netloader_pg import (destroy_stateless_process_group,
-                           stateless_init_process_group)
+from .netloader_pg import destroy_stateless_process_group, stateless_init_process_group
 
 
 class P2PLoad:
@@ -57,7 +56,7 @@ class P2PLoad:
         """
         model_device = next(model.parameters()).device
         logger.info(
-            f"Start init_process_group, name: {self.world_name}, addr: {self.source_ip}:{self.source_port}"
+            "Start init_process_group, name: %s, addr: %s:%s", self.world_name, self.source_ip, self.source_port
         )
         receiver_pg = None
         loaded_model = None
@@ -67,16 +66,14 @@ class P2PLoad:
                 port=self.source_port,
                 rank=0,
                 world_size=2,
-                group_name='netloader',
+                group_name="netloader",
             )
             logger.info(
-                f"Finish init_process_group, name: {self.world_name}, addr: {self.source_ip}:{self.source_port}"
+                "Finish init_process_group, name: %s, addr: %s:%s", self.world_name, self.source_ip, self.source_port
             )
 
-            logger.info(
-                f"Start recv, name: {self.world_name}, addr: {self.source_ip}:{self.source_port}"
-            )
-            logger.info(f"Model device: {model_device}")
+            logger.info("Start recv, name: %s, addr: %s:%s", self.world_name, self.source_ip, self.source_port)
+            logger.info("Model device: %s", model_device)
 
             trans_stream = torch_npu.npu.Stream()
             with torch_npu.npu.stream(trans_stream):
@@ -84,17 +81,14 @@ class P2PLoad:
                     if len(param.shape) == 0:
                         continue
                     receiver_pg.recv([param], 1, 0).wait()
-                torch.distributed.barrier(group=receiver_pg,
-                                          device_ids=[model_device.index])
+                torch.distributed.barrier(group=receiver_pg, device_ids=[model_device.index])
 
             torch_npu.npu.synchronize(trans_stream)
 
-            logger.info(
-                f"Finish recv, name: {self.world_name}, addr: {self.source_ip}:{self.source_port}"
-            )
+            logger.info("Finish recv, name: %s, addr: %s:%s", self.world_name, self.source_ip, self.source_port)
             loaded_model = model
         except Exception as e:
-            logger.error("Failed to recv model: {}".format(e))
+            logger.error("Failed to recv model: %s", e)
         finally:
             if receiver_pg:
                 destroy_stateless_process_group(receiver_pg)
@@ -129,9 +123,7 @@ class P2PSend:
         """
         model_device = next(model.parameters()).device
         torch.npu.set_device(model_device)
-        logger.info(
-            f"Start init_process_group, name: {self.comm_name}, addr: {self.listen_ip}:{self.listen_port}"
-        )
+        logger.info("Start init_process_group, name: %s, addr: %s:%s", self.comm_name, self.listen_ip, self.listen_port)
         sender_pg = None
         try:
             sender_pg = stateless_init_process_group(
@@ -139,15 +131,13 @@ class P2PSend:
                 port=self.listen_port,
                 rank=1,
                 world_size=2,
-                group_name='netloader',
+                group_name="netloader",
             )
             logger.info(
-                f"Finish init_process_group, name: {self.comm_name}, addr: {self.listen_ip}:{self.listen_port}"
+                "Finish init_process_group, name: %s, addr: %s:%s", self.comm_name, self.listen_ip, self.listen_port
             )
-            logger.info(
-                f"Start send, name: {self.comm_name}, addr: {self.listen_ip}:{self.listen_port}"
-            )
-            logger.info(f"Model device: {model_device}")
+            logger.info("Start send, name: %s, addr: %s:%s", self.comm_name, self.listen_ip, self.listen_port)
+            logger.info("Model device: %s", model_device)
 
             trans_stream = torch_npu.npu.Stream()
             with torch_npu.npu.stream(trans_stream):
@@ -155,16 +145,12 @@ class P2PSend:
                     if "aclnn_input_scale" in name:
                         continue
                     if name in int8_params:
-                        sender_pg.send([int8_params[name].to(model_device)], 0,
-                                       0).wait()
+                        sender_pg.send([int8_params[name].to(model_device)], 0, 0).wait()
                     else:
                         sender_pg.send([param.contiguous()], 0, 0).wait()
-                torch.distributed.barrier(group=sender_pg,
-                                          device_ids=[model_device.index])
+                torch.distributed.barrier(group=sender_pg, device_ids=[model_device.index])
             torch_npu.npu.synchronize(trans_stream)
-            logger.info(
-                f"Finish send, name: {self.comm_name}, addr: {self.listen_ip}:{self.listen_port}"
-            )
+            logger.info("Finish send, name: %s, addr: %s:%s", self.comm_name, self.listen_ip, self.listen_port)
         finally:
             if sender_pg:
                 destroy_stateless_process_group(sender_pg)

@@ -1,12 +1,22 @@
 model_name: "Qwen/Qwen3-VL-30B-A3B-Instruct"
+model_type: "vllm-vlm"
 hardware: "Atlas A2 Series"
-model: "vllm-vlm"
+
+serve:
+  tensor_parallel_size: 2
+  dtype: auto
+  max_model_len: 128000
+  gpu_memory_utilization: 0.7
+  trust_remote_code: false
+  enable_expert_parallel: true
+
 tasks:
 - name: "mmmu_val"
   metrics:
   - name: "acc,none"
     value: 0.58
-max_model_len: 8192
-tensor_parallel_size: 2
-gpu_memory_utilization: 0.7
-enable_expert_parallel: True
+
+num_fewshot: 0
+apply_chat_template: false
+fewshot_as_multiturn: false
+batch_size: "auto"

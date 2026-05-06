@@ -1,6 +1,6 @@
 # Using EvalScope
 
-This document will guide you have model inference stress testing and accuracy testing using [EvalScope](https://github.com/modelscope/evalscope).
+This document will guide you through model inference stress testing and accuracy testing using [EvalScope](https://github.com/modelscope/evalscope).
 
 ## 1. Online server
 
@@ -48,7 +48,7 @@ curl http://localhost:8000/v1/completions \
     -d '{
         "model": "Qwen/Qwen2.5-7B-Instruct",
         "prompt": "The future of AI is",
-        "max_tokens": 7,
+        "max_completion_tokens": 7,
         "temperature": 0
     }'
 ```
@@ -65,7 +65,7 @@ pip install gradio plotly evalscope
 
 ## 3. Run GSM8K using EvalScope for accuracy testing
 
-You can use `evalscope eval` to run GSM8K for accuracy testing:
+You can use `evalscope eval` to run GSM8K (a grade-school math benchmark dataset) for accuracy testing:
 
 ```shell
 evalscope eval \
@@ -87,7 +87,7 @@ After 1 to 2 minutes, the output is shown below:
 +---------------------+-----------+-----------------+----------+-------+---------+---------+
 ```
 
-See more detail in [EvalScope doc - Model API Service Evaluation](https://evalscope.readthedocs.io/en/latest/get_started/basic_usage.html#model-api-service-evaluation).
+See more details in [EvalScope doc - Model API Service Evaluation](https://evalscope.readthedocs.io/en/latest/get_started/basic_usage.html#model-api-service-evaluation).
 
 ## 4. Run model inference stress testing using EvalScope
 

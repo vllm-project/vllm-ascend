@@ -37,7 +37,7 @@ deployment:
         --kv-transfer-config
         '{"kv_connector": "MooncakeConnectorV1",
         "kv_role": "kv_producer",
-        "kv_port": "30000",
+        "kv_port": "36000",
         "engine_id": "0",
         "kv_connector_extra_config": {
                   "prefill": {
@@ -51,7 +51,7 @@ deployment:
             }
         }'
         --additional-config
-        '{"dynamic_eplb":true,"num_iterations_eplb_update":2048,"num_wait_worker_iterations":200}'
+        '{"eplb_config": {"dynamic_eplb":true,"expert_heat_collection_interval":2048,"algorithm_execution_interval":200}}'
 
   -
     server_cmd: >
@@ -73,7 +73,7 @@ deployment:
         --kv-transfer-config
         '{"kv_connector": "MooncakeConnectorV1",
         "kv_role": "kv_consumer",
-        "kv_port": "30200",
+        "kv_port": "36100",
         "engine_id": "1",
         "kv_connector_extra_config": {
                   "prefill": {
@@ -87,5 +87,5 @@ deployment:
             }
         }'
         --additional-config
-        '{"dynamic_eplb":true,"num_iterations_eplb_update":2048,"num_wait_worker_iterations":200}'
+        '{"eplb_config": {"dynamic_eplb":true,"expert_heat_collection_interval":2048,"algorithm_execution_interval":200}}'
 benchmarks:

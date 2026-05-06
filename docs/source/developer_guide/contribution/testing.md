@@ -1,10 +1,10 @@
 # Testing
 
-This document explains how to write E2E tests and unit tests to verify the implementation of your feature.
+This document explains how to write unit tests, E2E tests, and nightly tests to verify your feature implementation.
 
-## Setup a test environment
+## Set up a test environment
 
-The fastest way to setup a test environment is to use the main branch's container image:
+The fastest way to set up a test environment is to use the main branch's container image:
 
 :::::{tab-set}
 :sync-group: e2e
@@ -23,7 +23,7 @@ cd ~/vllm-project/
 # vllm  vllm-ascend
 
 # Use mirror to speed up download
-# docker pull quay.nju.edu.cn/ascend/cann:|cann_image_tag|
+# docker pull m.daocloud.io/quay.io/ascend/cann:|cann_image_tag|
 export IMAGE=quay.io/ascend/cann:|cann_image_tag|
 docker run --rm --name vllm-ascend-ut \
     -v $(pwd):/vllm-project \
@@ -37,19 +37,30 @@ pip config set global.index-url https://mirrors.huaweicloud.com/repository/pypi/
 # For torch-npu dev version or x86 machine
 export PIP_EXTRA_INDEX_URL="https://download.pytorch.org/whl/cpu/ https://mirrors.huaweicloud.com/ascend/repos/pypi"
 
+# src path
+export SRC_WORKSPACE=/vllm-workspace
+mkdir -p $SRC_WORKSPACE
+cd $SRC_WORKSPACE
+
 apt-get update -y
 apt-get install -y python3-pip git vim wget net-tools gcc g++ cmake libnuma-dev curl gnupg2
 
-# Install vllm
-cd /vllm-project/vllm
-VLLM_TARGET_DEVICE=empty python3 -m pip -v install .
+git clone -b |vllm_ascend_version| --depth 1 https://github.com/vllm-project/vllm-ascend.git
+git clone --depth 1 https://github.com/vllm-project/vllm.git
 
-# Install vllm-ascend
-cd /vllm-project/vllm-ascend
-# [IMPORTANT] Import LD_LIBRARY_PATH to enumerate the CANN environment under CPU
+# vllm
+cd $SRC_WORKSPACE/vllm
+VLLM_TARGET_DEVICE=empty python3 -m pip install .
+python3 -m pip uninstall -y triton
+
+# vllm-ascend
+cd $SRC_WORKSPACE/vllm-ascend
 export LD_LIBRARY_PATH=$LD_LIBRARY_PATH:/usr/local/Ascend/ascend-toolkit/latest/$(uname -m)-linux/devlib
-python3 -m pip install -r requirements-dev.txt
+# For cpu environment, set SOC_VERSION for different chips.
+# See https://github.com/vllm-project/vllm-ascend/blob/3cb0af0bcf3299089ca7e72159fa36e825a470f8/setup.py#L132 for detail.
+export SOC_VERSION="ascend910b1"
 python3 -m pip install -v .
+python3 -m pip install -r requirements-dev.txt
 ```
 
 ::::
@@ -86,6 +97,9 @@ After starting the container, you should install the required packages:
 ```bash
 # Prepare
 pip config set global.index-url https://mirrors.tuna.tsinghua.edu.cn/pypi/web/simple
+
+# Switch to the /vllm-workspace/vllm-ascend directory
+cd /vllm-workspace/vllm-ascend/
 
 # Install required packages
 pip install -r requirements-dev.txt
@@ -143,8 +157,8 @@ pip install -r requirements-dev.txt
 There are several principles to follow when writing unit tests:
 
 - The test file path should be consistent with the source file and start with the `test_` prefix, such as: `vllm_ascend/worker/worker.py` --> `tests/ut/worker/test_worker.py`
-- The vLLM Ascend test uses unittest framework. See [here](https://docs.python.org/3/library/unittest.html#module-unittest) to understand how to write unit tests.
-- All unit tests can be run on CPUs, so you must mock the device-related function to host.
+- The vLLM Ascend test uses unittest framework. See [the Python unittest documentation](https://docs.python.org/3/library/unittest.html#module-unittest) to understand how to write unit tests.
+- All unit tests can be run on CPUs, so you must mock the device-related functions on the host.
 - Example: [tests/ut/test_ascend_config.py](https://github.com/vllm-project/vllm-ascend/blob/main/tests/ut/test_ascend_config.py).
 - You can run the unit tests using `pytest`:
 
@@ -168,7 +182,7 @@ TORCH_DEVICE_BACKEND_AUTOLOAD=0 pytest -sv tests/ut
 
 ```bash
 cd /vllm-workspace/vllm-ascend/
-# Run all single card the tests
+# Run all single-card tests
 pytest -sv tests/ut
 
 # Run single test
@@ -182,7 +196,7 @@ pytest -sv tests/ut/test_ascend_config.py
 
 ```bash
 cd /vllm-workspace/vllm-ascend/
-# Run all single card the tests
+# Run all multi-card tests
 pytest -sv tests/ut
 
 # Run single test
@@ -195,8 +209,63 @@ pytest -sv tests/ut/test_ascend_config.py
 
 ### E2E test
 
-Although vllm-ascend CI provides the [E2E test](https://github.com/vllm-project/vllm-ascend/blob/main/.github/workflows/vllm_ascend_test.yaml) on Ascend CI, you can run it
-locally.
+Although vllm-ascend CI provides E2E tests on Ascend CI (for example,
+[schedule_nightly_test_a2.yaml](https://github.com/vllm-project/vllm-ascend/blob/main/.github/workflows/schedule_nightly_test_a2.yaml), [schedule_nightly_test_a3.yaml](https://github.com/vllm-project/vllm-ascend/blob/main/.github/workflows/schedule_nightly_test_a3.yaml), [pr_test_full.yaml](https://github.com/vllm-project/vllm-ascend/blob/main/.github/workflows/pr_test_full.yaml)), you can run them locally.
+
+#### PR-triggered E2E test
+
+You can run tests with `pytest` as well. Typical examples:
+:::::{tab-set}
+:sync-group: e2e
+
+::::{tab-item} Local (CPU)
+:sync: cpu
+
+You can't run the E2E test on CPUs.
+::::
+
+::::{tab-item} Single-card
+:selected:
+:sync: single
+
+```bash
+cd /vllm-workspace/vllm-ascend/
+# Run all single-card tests
+VLLM_USE_MODELSCOPE=true pytest -sv tests/e2e/singlecard/
+
+# Run a certain test script
+VLLM_USE_MODELSCOPE=true pytest -sv tests/e2e/singlecard/test_camem.py
+
+# Run a certain case in test script
+VLLM_USE_MODELSCOPE=true pytest -sv tests/e2e/singlecard/test_camem.py::test_end_to_end
+```
+
+::::
+
+::::{tab-item} Multi-card
+:sync: multi
+
+```bash
+cd /vllm-workspace/vllm-ascend/
+# Run all multi-card tests
+VLLM_USE_MODELSCOPE=true pytest -sv tests/e2e/multicard/2-cards/
+
+# Run a certain test script
+VLLM_USE_MODELSCOPE=true pytest -sv tests/e2e/multicard/2-cards/test_qwen3_moe.py
+
+# Run a certain case in test script
+VLLM_USE_MODELSCOPE=true pytest -sv tests/e2e/multicard/2-cards/test_qwen3_moe.py::test_qwen3_moe_distributed_mp_tp2_ep
+```
+
+::::
+
+:::::
+
+This will reproduce the E2E test behavior.
+
+#### Nightly-triggered E2E test
+
+You can run tests with `pytest` as well. Typical examples:
 
 :::::{tab-set}
 :sync-group: e2e
@@ -213,14 +282,8 @@ You can't run the E2E test on CPUs.
 
 ```bash
 cd /vllm-workspace/vllm-ascend/
-# Run all single card the tests
-VLLM_USE_MODELSCOPE=true pytest -sv tests/e2e/singlecard/
-
-# Run a certain test script
-VLLM_USE_MODELSCOPE=true pytest -sv tests/e2e/singlecard/test_offline_inference.py
-
-# Run a certain case in test script
-VLLM_USE_MODELSCOPE=true pytest -sv tests/e2e/singlecard/test_offline_inference.py::test_models
+# run all single-card op tests
+VLLM_USE_MODELSCOPE=true pytest -sv tests/e2e/nightly/single_node/ops/singlecard_ops/
 ```
 
 ::::
@@ -230,50 +293,70 @@ VLLM_USE_MODELSCOPE=true pytest -sv tests/e2e/singlecard/test_offline_inference.
 
 ```bash
 cd /vllm-workspace/vllm-ascend/
-# Run all the single card tests
-VLLM_USE_MODELSCOPE=true pytest -sv tests/e2e/singlecard/
+# run all multi-card op tests on A2
+VLLM_USE_MODELSCOPE=true pytest -sv tests/e2e/nightly/single_node/ops/multicard_ops_a2/
 
-# Run a certain test script
-VLLM_USE_MODELSCOPE=true pytest -sv tests/e2e/singlecard/test_aclgraph_accuracy.py
-
-# Run a certain case in test script
-VLLM_USE_MODELSCOPE=true pytest -sv tests/e2e/singlecard/test_aclgraph_accuracy.py::test_models_output
+# run all multi-card op tests on A3
+VLLM_USE_MODELSCOPE=true pytest -sv tests/e2e/nightly/single_node/ops/multicard_ops_a3/
 ```
 
 ::::
 
 :::::
 
-This will reproduce the E2E test. See [vllm_ascend_test.yaml](https://github.com/vllm-project/vllm-ascend/blob/main/.github/workflows/vllm_ascend_test.yaml).
+For running nightly single-node model test cases locally, refer to the following example.
 
-Run nightly multi-node test cases locally refer to section of `Running Locally` of [Multi Node Test](./multi_node_test.md).
+```bash
+export CONFIG_YAML_PATH=Qwen3-32B.yaml
+VLLM_USE_MODELSCOPE=true pytest -sv tests/e2e/nightly/single_node/models/scripts/test_single_node.py
+```
 
-#### E2E test example
+For running nightly multi-node model test cases locally, refer to the `Running Locally` section in [Multi Node Test](./multi_node_test.md).
 
-- Offline test example: [`tests/e2e/singlecard/test_offline_inference.py`](https://github.com/vllm-project/vllm-ascend/blob/main/tests/e2e/singlecard/test_offline_inference.py)
-- Online test examples: [`tests/e2e/singlecard/test_prompt_embedding.py`](https://github.com/vllm-project/vllm-ascend/blob/main/tests/e2e/singlecard/test_prompt_embedding.py)
+#### E2E test examples
+
+- Offline test example: [`tests/e2e/singlecard/test_camem.py`](https://github.com/vllm-project/vllm-ascend/blob/main/tests/e2e/singlecard/test_camem.py)
+- Online test example: [`tests/e2e/multicard/2-cards/test_single_request_aclgraph.py`](https://github.com/vllm-project/vllm-ascend/blob/main/tests/e2e/multicard/2-cards/test_single_request_aclgraph.py)
 - Correctness test example: [`tests/e2e/singlecard/test_aclgraph_accuracy.py`](https://github.com/vllm-project/vllm-ascend/blob/main/tests/e2e/singlecard/test_aclgraph_accuracy.py)
 
-    The CI resource is limited, and you might need to reduce the number of layers of a model. Below is an example of how to generate a reduced layer model:
-    1. Fork the original model repo in modelscope. All the files in the repo except for weights are required.
-    2. Set `num_hidden_layers` to the expected number of layers, e.g., `{"num_hidden_layers": 2,}`
-    3. Copy the following python script as `generate_random_weight.py`. Set the relevant parameters `MODEL_LOCAL_PATH`, `DIST_DTYPE` and `DIST_MODEL_PATH` as needed:
+The CI resource is limited, and you might need to reduce the number of layers of a model. Below is an example of how to generate a reduced layer model:
 
-        ```python
-        import torch
-        from transformers import AutoTokenizer, AutoConfig
-        from modeling_deepseek import DeepseekV3ForCausalLM
-        from modelscope import snapshot_download
+1. Fork the original model repo in modelscope. All the files in the repo except for weights are required.
+2. Set `num_hidden_layers` to the expected number of layers, e.g., `{"num_hidden_layers": 2,}`
+3. Copy the following python script as `generate_random_weight.py`. Set the relevant parameters `MODEL_LOCAL_PATH`, `DIST_DTYPE` and `DIST_MODEL_PATH` as needed:
 
-        MODEL_LOCAL_PATH = "~/.cache/modelscope/models/vllm-ascend/DeepSeek-V3-Pruning"
-        DIST_DTYPE = torch.bfloat16
-        DIST_MODEL_PATH = "./random_deepseek_v3_with_2_hidden_layer"
+    ```python
+    import torch
+    from transformers import AutoTokenizer, AutoConfig
+    from modeling_deepseek import DeepseekV3ForCausalLM
+    from modelscope import snapshot_download
 
-        config = AutoConfig.from_pretrained(MODEL_LOCAL_PATH, trust_remote_code=True)
-        model = DeepseekV3ForCausalLM(config)
-        model = model.to(DIST_DTYPE)
-        model.save_pretrained(DIST_MODEL_PATH)
-        ```
+    MODEL_LOCAL_PATH = "~/.cache/modelscope/models/vllm-ascend/DeepSeek-V3-Pruning"
+    DIST_DTYPE = torch.bfloat16
+    DIST_MODEL_PATH = "./random_deepseek_v3_with_2_hidden_layer"
+
+    config = AutoConfig.from_pretrained(MODEL_LOCAL_PATH, trust_remote_code=True)
+    model = DeepseekV3ForCausalLM(config)
+    model = model.to(DIST_DTYPE)
+    model.save_pretrained(DIST_MODEL_PATH)
+    ```
+
+### View CI log summary in GitHub Actions
+
+After a CI job finishes, you can open the corresponding GitHub Actions job page and check the
+`Summary` tab to view the generated CI log summary.
+
+![GitHub Actions CI log summary](../../assets/ci_log_summary.png)
+
+The summary is intended to help developers triage failures more quickly. It may include:
+
+- failed test files
+- failed test cases
+- distinct root-cause errors
+- short error context extracted from the job log
+
+This summary is generated from the job log by
+`/.github/workflows/scripts/ci_log_summary.py` for unit-test and e2e workflows.
 
 ### Run doctest
 
@@ -285,4 +368,26 @@ The doctest is a good way to make sure docs stay current and examples remain exe
 /vllm-workspace/vllm-ascend/tests/e2e/run_doctests.sh
 ```
 
-This will reproduce the same environment as the CI. See [vllm_ascend_doctest.yaml](https://github.com/vllm-project/vllm-ascend/blob/main/.github/workflows/vllm_ascend_doctest.yaml).
+This will reproduce the same environment as the CI. See [labeled_doctest.yaml](https://github.com/vllm-project/vllm-ascend/blob/main/.github/workflows/labeled_doctest.yaml).
+
+### Run docs link check
+
+You can validate external links in the Sphinx docs locally with:
+
+```bash
+make -C docs linkcheck SPHINXOPTS="-W --keep-going"
+```
+
+To check links in a specific Markdown file, pass the file to `sphinx-build`.
+For example, to check only `docs/source/user_guide/release_notes.md`:
+
+```bash
+cd docs
+sphinx-build -b linkcheck -W --keep-going \
+  source _build/linkcheck source/user_guide/release_notes.md
+```
+
+The detailed report will be written to:
+
+- `docs/_build/linkcheck/output.txt`
+- `docs/_build/linkcheck/output.json`

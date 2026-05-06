@@ -17,6 +17,7 @@
 # Adapted from https://github.com/vllm-project/vllm/tree/main/tools
 #
 import os
+import subprocess
 import sys
 
 VLLM_ASCEND_SRC = "vllm_ascend"
@@ -45,12 +46,36 @@ def check_init_file_in_package(directory):
 
 def find_missing_init_dirs(src_dir):
     """
-    Walk through the src_dir and return subdirectories missing __init__.py.
+    Return tracked package directories in src_dir missing __init__.py.
+
+    Prefer git-tracked files so ignored/untracked generated directories are not
+    treated as package violations.
     """
     missing_init = set()
-    for dirpath, _, _ in os.walk(src_dir):
-        if not check_init_file_in_package(dirpath):
-            missing_init.add(dirpath)
+
+    try:
+        result = subprocess.run(
+            ["git", "ls-files", "-z", src_dir],
+            check=True,
+            capture_output=True,
+            text=True,
+        )
+        tracked_files = {f for f in result.stdout.split("\0") if f}
+    except (subprocess.CalledProcessError, FileNotFoundError):
+        tracked_files = None
+
+    if tracked_files is not None:
+        candidate_dirs = {os.path.dirname(f) for f in tracked_files if f.endswith(".py")}
+        for dirpath in candidate_dirs:
+            init_path = f"{dirpath}/__init__.py" if dirpath else "__init__.py"
+            if init_path not in tracked_files:
+                missing_init.add(dirpath)
+
+    else:
+        for dirpath, _, _ in os.walk(src_dir):
+            if not check_init_file_in_package(dirpath):
+                missing_init.add(dirpath)
+
     return missing_init
 
 
@@ -67,7 +92,7 @@ def main():
             print(f" - {pkg}")
         sys.exit(1)
     else:
-        print("✅ All Python packages have __init__.py files.")
+        print("All Python packages have __init__.py files.")
 
 
 if __name__ == "__main__":

@@ -27,7 +27,7 @@
 #define CEIL_DIV(a, b) (((a) + (b) - 1) / (b))
 #endif
 namespace optiling {
-const static uint64_t MOE_GATING_TOP_K_REGBASE_TILING_KEY = 10000;
+const static uint64_t MOE_GATING_TOP_K_ASCEND_950_TILING_KEY = 10000;
 
 const static int64_t GROUP_SELECT_MODE_MAX = 0;
 const static int64_t GROUP_SELECT_MODE_SUM = 1;
@@ -79,7 +79,7 @@ public:
 protected:
     bool IsCapable() override
     {
-        if (socVersion != platform_ascendc::SocVersion::ASCEND910_95) {
+        if (socVersion != platform_ascendc::SocVersion::VLLM_ASCEND_950_SOC_ENUM) {
             return false;
         }
         return true;
@@ -400,11 +400,11 @@ ge::graphStatus MoeGatingTopKTilingRegbase::CheckOutShape()
     }
 
     OP_CHECK_IF((yShape_->GetDim(0) != xShape_->GetDim(0)),
-                OP_LOGE(context_, "y out dim[0] %ld not euqal x dim[0] %ld, please check.", yShape_->GetDim(0),
+                OP_LOGE(context_, "y out dim[0] %ld not equal x dim[0] %ld, please check.", yShape_->GetDim(0),
                      xShape_->GetDim(0)),
                 return ge::GRAPH_FAILED);
     OP_CHECK_IF((expertIdxShape_->GetDim(0) != xShape_->GetDim(0)),
-                OP_LOGE(context_, "expertId out dim[0] %ld not euqal x dim[0] %ld, please check.",
+                OP_LOGE(context_, "expertId out dim[0] %ld not equal x dim[0] %ld, please check.",
                      expertIdxShape_->GetDim(0), xShape_->GetDim(0)),
                 return ge::GRAPH_FAILED);
     if (outFlag_ && outShape_ != nullptr) {
@@ -415,10 +415,10 @@ ge::graphStatus MoeGatingTopKTilingRegbase::CheckOutShape()
     }
 
     OP_CHECK_IF((yShape_->GetDim(1) != k_),
-                OP_LOGE(context_, "y dim[1] %ld not euqal k %ld, please check.", yShape_->GetDim(1), k_),
+                OP_LOGE(context_, "y dim[1] %ld not equal k %ld, please check.", yShape_->GetDim(1), k_),
                 return ge::GRAPH_FAILED);
     OP_CHECK_IF((expertIdxShape_->GetDim(1) != k_),
-                OP_LOGE(context_, "expertId dim[1] %ld not euqal k %ld, please check.", expertIdxShape_->GetDim(1), k_),
+                OP_LOGE(context_, "expertId dim[1] %ld not equal k %ld, please check.", expertIdxShape_->GetDim(1), k_),
                 return ge::GRAPH_FAILED);
     if (outFlag_ && outShape_ != nullptr) {
         OP_CHECK_IF((outShape_->GetDim(1) != xShape_->GetDim(1)),
@@ -508,7 +508,7 @@ ge::graphStatus MoeGatingTopKTilingRegbase::PostTiling()
 
 uint64_t MoeGatingTopKTilingRegbase::GetTilingKey() const
 {
-    return MOE_GATING_TOP_K_REGBASE_TILING_KEY;
+    return MOE_GATING_TOP_K_ASCEND_950_TILING_KEY;
 }
 
 void MoeGatingTopKTilingRegbase::Reset()

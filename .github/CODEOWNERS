@@ -19,24 +19,24 @@
 # benchmark
 /benchmarks @wangxiyuan
 
-# c++ source code
-/cmake @zzzzwwjj
-/csrc @zzzzwwjj
-/CMakeLists.txt @zzzzwwjj
-
 # docs
 /docs  @wangxiyuan @Yikun @LCAIZJ
 /.readthedocs.yaml  @wangxiyuan @Yikun
 /README*  @wangxiyuan @Yikun
 
-# exmaple
+# example
 /examples @wangxiyuan
 
 # tests
 /tests @wangxiyuan
 
+# c++ source code
+/cmake @zzzzwwjj
+/csrc @zzzzwwjj
+/CMakeLists.txt @zzzzwwjj
+
 # python source code
-/vllm_ascend/attention @weijinqian0
+/vllm_ascend/attention @weijinqian0 @whx-sjtu
 /vllm_ascend/compilation @yiz-liu
 /vllm_ascend/core @wangxiyuan @MengqingCao
 /vllm_ascend/device @weijinqian0 @zzzzwwjj
@@ -46,10 +46,10 @@
 /vllm_ascend/kv_offload @nalinaly
 /vllm_ascend/lora @paulyu12
 /vllm_ascend/model_loader @wangxiyuan
-/vllm_ascend/ops @zzzzwwjj @realliujiaxu
+/vllm_ascend/ops @zzzzwwjj @realliujiaxu @whx-sjtu
 /vllm_ascend/patch @wangxiyuan
 /vllm_ascend/quantization @wangxiyuan
-/vllm_ascend/sample @realliujiaxu
+/vllm_ascend/sample @realliujiaxu @whx-sjtu
 /vllm_ascend/spec_decode @wangxiyuan
 /vllm_ascend/worker @MengqingCao
 /vllm_ascend/xlite @wangxiyuan
