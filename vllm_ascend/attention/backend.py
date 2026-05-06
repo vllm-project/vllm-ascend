@@ -13,7 +13,7 @@ from vllm_ascend.utils import singleton
 
 @dataclass
 class BackendExtraInput:
-    """Lazily filled by ``prepare_extra_input``; constructed empty then populated."""
+    """Lazily filled by ``BackendExtraInputPreparer.prepare()``; constructed empty then populated."""
 
     num_reqs_padded: int = 0
     query_start_loc_np: np.ndarray | None = None

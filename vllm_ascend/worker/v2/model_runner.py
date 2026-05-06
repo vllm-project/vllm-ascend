@@ -44,6 +44,7 @@ from vllm_ascend.ascend_forward_context import (
     set_mc2_mask,
     set_mc2_tokens_capacity,
 )
+from vllm_ascend.attention.backend import BackendExtraInput
 from vllm_ascend.ops.rotary_embedding import set_cos_and_sin, update_cos_sin
 from vllm_ascend.utils import set_weight_prefetch_method
 from vllm_ascend.worker.v2.aclgraph_utils import ModelAclGraphManager
@@ -146,7 +147,7 @@ class NPUModelRunner(GPUModelRunner):
         batch_desc: BatchExecutionDescriptor,
         num_reqs: int,
         query_start_loc_np: np.ndarray,
-    ) -> tuple[int, np.ndarray | None]:
+    ) -> BackendExtraInput:
         """Apply FULL-graph padding requirements from attention backends (e.g. FIA TND)."""
         if self.backend_extra_input_constructors is None:
             self.backend_extra_input_constructors = set()
@@ -155,9 +156,9 @@ class NPUModelRunner(GPUModelRunner):
                     self.backend_extra_input_constructors.add(backend.get_extra_input_constructor())
         
         max_num_reqs_padded = 0
-        max_query_start_loc_np = None
+        max_extra_input = None
         for constructor in self.backend_extra_input_constructors:
-            extra_input = constructor.prepare_extra_input(
+            extra_input = constructor.prepare(
                 num_reqs,
                 query_start_loc_np,
                 self.decode_query_len,
@@ -165,10 +166,9 @@ class NPUModelRunner(GPUModelRunner):
             )
             if extra_input.num_reqs_padded > max_num_reqs_padded:
                 max_num_reqs_padded = extra_input.num_reqs_padded
-                assert extra_input.query_start_loc_np is not None
-                max_query_start_loc_np = extra_input.query_start_loc_np
+                max_extra_input = extra_input
 
-        return max_num_reqs_padded, max_query_start_loc_np
+        return max_extra_input
 
     def initialize_kv_cache(self, kv_cache_config: KVCacheConfig) -> None:
         with graph_manager_wrapper(self):
@@ -279,12 +279,13 @@ class NPUModelRunner(GPUModelRunner):
 
         # Backend-specific padding (e.g. FIA TND): needs the full CPU buffer before slicing;
         if batch_desc.cg_mode == CUDAGraphMode.FULL:
-            max_num_reqs_padded, max_query_start_loc_np = self.prepare_backend_extra_input(
+            max_extra_input = self.prepare_backend_extra_input(
                 batch_desc, num_reqs, query_start_loc_np
             )
-            if max_num_reqs_padded > num_reqs_padded:
-                num_reqs_padded = max_num_reqs_padded
-                query_start_loc_np = max_query_start_loc_np
+            if max_extra_input.num_reqs_padded > num_reqs_padded:
+                num_reqs_padded = max_extra_input.num_reqs_padded
+                query_start_loc_np = max_extra_input.query_start_loc_np
+                query_start_loc = max_extra_input.query_start_loc
 
         query_start_loc_np = query_start_loc_np[: num_reqs_padded + 1]
 
