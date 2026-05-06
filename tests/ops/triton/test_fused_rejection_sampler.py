@@ -36,21 +36,22 @@ class TestFusedRejectionSamplerCorrectness:
         """Test correctness for random sampling."""
         torch.manual_seed(42)
 
-        num_logits = batch_size * (num_speculative_steps + 1)
+        num_logits = batch_size * num_speculative_steps
 
         target_logits = torch.randn(num_logits, vocab_size, device=DEVICE, dtype=torch.float16)
         draft_logits = torch.randn(batch_size, num_speculative_steps, vocab_size, device=DEVICE, dtype=torch.float16)
         draft_sampled = torch.randint(0, vocab_size, (num_logits,), device=DEVICE, dtype=torch.int64)
+        bonus_token_ids = torch.randint(0, vocab_size, (batch_size, 1), device=DEVICE, dtype=torch.int64)
 
-        cu_num_logits = torch.arange(0, num_logits + 1, num_speculative_steps + 1, device=DEVICE, dtype=torch.int32)
+        cu_num_logits = torch.arange(0, num_logits + 1, num_speculative_steps, device=DEVICE, dtype=torch.int32)
 
         pos = torch.arange(num_logits, device=DEVICE, dtype=torch.int64)
         idx_mapping = torch.arange(batch_size, device=DEVICE, dtype=torch.int64)
         expanded_idx_mapping = torch.repeat_interleave(
             torch.arange(batch_size, device=DEVICE),
-            torch.tensor([num_speculative_steps + 1] * batch_size, device=DEVICE),
+            torch.tensor([num_speculative_steps] * batch_size, device=DEVICE),
         ).to(torch.int64)
-        expanded_local_pos = torch.arange(num_logits, device=DEVICE, dtype=torch.int64) % (num_speculative_steps + 1)
+        expanded_local_pos = torch.arange(num_logits, device=DEVICE, dtype=torch.int64) % num_speculative_steps
 
         temperature = torch.ones(batch_size, device=DEVICE, dtype=torch.float32) * 0.8
         uniform_probs = torch.rand(num_logits, device=DEVICE, dtype=torch.float32)
@@ -60,6 +61,7 @@ class TestFusedRejectionSamplerCorrectness:
             target_logits,
             draft_logits,
             draft_sampled,
+            bonus_token_ids,
             cu_num_logits,
             pos,
             idx_mapping,
@@ -75,7 +77,7 @@ class TestFusedRejectionSamplerCorrectness:
         assert fused_num_sampled.shape == (batch_size,)
         # num_sampled can be 0 in some edge cases (implementation issue)
         assert (fused_num_sampled >= 0).all()
-        assert (fused_num_sampled <= num_speculative_steps + 1).all()
+        assert (fused_num_sampled <= num_speculative_steps).all()
 
         for i in range(batch_size):
             n = fused_num_sampled[i].item()
@@ -93,21 +95,22 @@ class TestFusedRejectionSamplerCorrectness:
         torch.manual_seed(123)
 
         num_speculative_steps = 4
-        num_logits = batch_size * (num_speculative_steps + 1)
+        num_logits = batch_size * num_speculative_steps
 
         target_logits = torch.randn(num_logits, vocab_size, device=DEVICE, dtype=torch.float16)
         draft_logits = torch.randn(batch_size, num_speculative_steps, vocab_size, device=DEVICE, dtype=torch.float16)
         draft_sampled = torch.randint(0, vocab_size, (num_logits,), device=DEVICE, dtype=torch.int64)
+        bonus_token_ids = torch.randint(0, vocab_size, (batch_size, 1), device=DEVICE, dtype=torch.int64)
 
-        cu_num_logits = torch.arange(0, num_logits + 1, num_speculative_steps + 1, device=DEVICE, dtype=torch.int32)
+        cu_num_logits = torch.arange(0, num_logits + 1, num_speculative_steps, device=DEVICE, dtype=torch.int32)
 
         pos = torch.arange(num_logits, device=DEVICE, dtype=torch.int64)
         idx_mapping = torch.arange(batch_size, device=DEVICE, dtype=torch.int64)
         expanded_idx_mapping = torch.repeat_interleave(
             torch.arange(batch_size, device=DEVICE),
-            torch.tensor([num_speculative_steps + 1] * batch_size, device=DEVICE),
+            torch.tensor([num_speculative_steps] * batch_size, device=DEVICE),
         ).to(torch.int64)
-        expanded_local_pos = torch.arange(num_logits, device=DEVICE, dtype=torch.int64) % (num_speculative_steps + 1)
+        expanded_local_pos = torch.arange(num_logits, device=DEVICE, dtype=torch.int64) % num_speculative_steps
 
         temperature = torch.zeros(batch_size, device=DEVICE, dtype=torch.float32)
         uniform_probs = torch.rand(num_logits, device=DEVICE, dtype=torch.float32)
@@ -117,6 +120,7 @@ class TestFusedRejectionSamplerCorrectness:
             target_logits,
             draft_logits,
             draft_sampled,
+            bonus_token_ids,
             cu_num_logits,
             pos,
             idx_mapping,
@@ -144,11 +148,12 @@ class TestFusedRejectionSamplerEdgeCases:
         """Test with single request."""
         vocab_size = 4096
         num_speculative_steps = 4
-        num_logits = num_speculative_steps + 1
+        num_logits = num_speculative_steps
 
         target_logits = torch.randn(num_logits, vocab_size, device=DEVICE, dtype=torch.float16)
         draft_logits = torch.randn(1, num_speculative_steps, vocab_size, device=DEVICE, dtype=torch.float16)
         draft_sampled = torch.randint(0, vocab_size, (num_logits,), device=DEVICE, dtype=torch.int64)
+        bonus_token_ids = torch.randint(0, vocab_size, (1, 1), device=DEVICE, dtype=torch.int64)
 
         cu_num_logits = torch.tensor([0, num_logits], device=DEVICE, dtype=torch.int32)
         pos = torch.arange(num_logits, device=DEVICE, dtype=torch.int64)
@@ -164,6 +169,7 @@ class TestFusedRejectionSamplerEdgeCases:
             target_logits,
             draft_logits,
             draft_sampled,
+            bonus_token_ids,
             cu_num_logits,
             pos,
             idx_mapping,
@@ -176,27 +182,28 @@ class TestFusedRejectionSamplerEdgeCases:
         )
 
         assert sampled.shape == (1, num_speculative_steps + 1)
-        assert num_sampled[0] >= 1
+        assert num_sampled[0] >= 0
 
     def test_single_speculative_step(self):
         """Test with single speculative step."""
         vocab_size = 4096
         batch_size = 8
         num_speculative_steps = 1
-        num_logits = batch_size * (num_speculative_steps + 1)
+        num_logits = batch_size * num_speculative_steps
 
         target_logits = torch.randn(num_logits, vocab_size, device=DEVICE, dtype=torch.float16)
         draft_logits = torch.randn(batch_size, num_speculative_steps, vocab_size, device=DEVICE, dtype=torch.float16)
         draft_sampled = torch.randint(0, vocab_size, (num_logits,), device=DEVICE, dtype=torch.int64)
+        bonus_token_ids = torch.randint(0, vocab_size, (batch_size, 1), device=DEVICE, dtype=torch.int64)
 
-        cu_num_logits = torch.arange(0, num_logits + 1, num_speculative_steps + 1, device=DEVICE, dtype=torch.int32)
+        cu_num_logits = torch.arange(0, num_logits + 1, num_speculative_steps, device=DEVICE, dtype=torch.int32)
         pos = torch.arange(num_logits, device=DEVICE, dtype=torch.int64)
         idx_mapping = torch.arange(batch_size, device=DEVICE, dtype=torch.int64)
         expanded_idx_mapping = torch.repeat_interleave(
             torch.arange(batch_size, device=DEVICE),
-            torch.tensor([num_speculative_steps + 1] * batch_size, device=DEVICE),
+            torch.tensor([num_speculative_steps] * batch_size, device=DEVICE),
         ).to(torch.int64)
-        expanded_local_pos = torch.arange(num_logits, device=DEVICE, dtype=torch.int64) % (num_speculative_steps + 1)
+        expanded_local_pos = torch.arange(num_logits, device=DEVICE, dtype=torch.int64) % num_speculative_steps
 
         temperature = torch.ones(batch_size, device=DEVICE, dtype=torch.float32) * 0.8
         uniform_probs = torch.rand(num_logits, device=DEVICE, dtype=torch.float32)
@@ -206,6 +213,7 @@ class TestFusedRejectionSamplerEdgeCases:
             target_logits,
             draft_logits,
             draft_sampled,
+            bonus_token_ids,
             cu_num_logits,
             pos,
             idx_mapping,
@@ -218,7 +226,7 @@ class TestFusedRejectionSamplerEdgeCases:
         )
 
         assert sampled.shape == (batch_size, 2)
-        assert (num_sampled >= 0).all() and (num_sampled <= 2).all()
+        assert (num_sampled >= 0).all() and (num_sampled <= num_speculative_steps).all()
 
 
 class TestFusedRejectionSamplerMemory:
@@ -229,7 +237,7 @@ class TestFusedRejectionSamplerMemory:
         vocab_size = 128000
         batch_size = 32
         num_speculative_steps = 4
-        num_logits = batch_size * (num_speculative_steps + 1)
+        num_logits = batch_size * num_speculative_steps
 
         torch.npu.empty_cache()
         torch.npu.reset_peak_memory_stats(DEVICE)
@@ -237,15 +245,16 @@ class TestFusedRejectionSamplerMemory:
         target_logits = torch.randn(num_logits, vocab_size, device=DEVICE, dtype=torch.float16)
         draft_logits = torch.randn(batch_size, num_speculative_steps, vocab_size, device=DEVICE, dtype=torch.float16)
         draft_sampled = torch.randint(0, vocab_size, (num_logits,), device=DEVICE, dtype=torch.int64)
+        bonus_token_ids = torch.randint(0, vocab_size, (batch_size, 1), device=DEVICE, dtype=torch.int64)
 
-        cu_num_logits = torch.arange(0, num_logits + 1, num_speculative_steps + 1, device=DEVICE, dtype=torch.int32)
+        cu_num_logits = torch.arange(0, num_logits + 1, num_speculative_steps, device=DEVICE, dtype=torch.int32)
         pos = torch.arange(num_logits, device=DEVICE, dtype=torch.int64)
         idx_mapping = torch.arange(batch_size, device=DEVICE, dtype=torch.int64)
         expanded_idx_mapping = torch.repeat_interleave(
             torch.arange(batch_size, device=DEVICE),
-            torch.tensor([num_speculative_steps + 1] * batch_size, device=DEVICE),
+            torch.tensor([num_speculative_steps] * batch_size, device=DEVICE),
         ).to(torch.int64)
-        expanded_local_pos = torch.arange(num_logits, device=DEVICE, dtype=torch.int64) % (num_speculative_steps + 1)
+        expanded_local_pos = torch.arange(num_logits, device=DEVICE, dtype=torch.int64) % num_speculative_steps
 
         temperature = torch.ones(batch_size, device=DEVICE, dtype=torch.float32) * 0.8
         uniform_probs = torch.rand(num_logits, device=DEVICE, dtype=torch.float32)
@@ -257,6 +266,7 @@ class TestFusedRejectionSamplerMemory:
             target_logits,
             draft_logits,
             draft_sampled,
+            bonus_token_ids,
             cu_num_logits,
             pos,
             idx_mapping,
@@ -295,20 +305,21 @@ class TestFusedRejectionSamplerPerformance:
     ):
         """Benchmark latency."""
         num_speculative_steps = 4
-        num_logits = batch_size * (num_speculative_steps + 1)
+        num_logits = batch_size * num_speculative_steps
 
         target_logits = torch.randn(num_logits, vocab_size, device=DEVICE, dtype=torch.float16)
         draft_logits = torch.randn(batch_size, num_speculative_steps, vocab_size, device=DEVICE, dtype=torch.float16)
         draft_sampled = torch.randint(0, vocab_size, (num_logits,), device=DEVICE, dtype=torch.int64)
+        bonus_token_ids = torch.randint(0, vocab_size, (batch_size, 1), device=DEVICE, dtype=torch.int64)
 
-        cu_num_logits = torch.arange(0, num_logits + 1, num_speculative_steps + 1, device=DEVICE, dtype=torch.int32)
+        cu_num_logits = torch.arange(0, num_logits + 1, num_speculative_steps, device=DEVICE, dtype=torch.int32)
         pos = torch.arange(num_logits, device=DEVICE, dtype=torch.int64)
         idx_mapping = torch.arange(batch_size, device=DEVICE, dtype=torch.int64)
         expanded_idx_mapping = torch.repeat_interleave(
             torch.arange(batch_size, device=DEVICE),
-            torch.tensor([num_speculative_steps + 1] * batch_size, device=DEVICE),
+            torch.tensor([num_speculative_steps] * batch_size, device=DEVICE),
         ).to(torch.int64)
-        expanded_local_pos = torch.arange(num_logits, device=DEVICE, dtype=torch.int64) % (num_speculative_steps + 1)
+        expanded_local_pos = torch.arange(num_logits, device=DEVICE, dtype=torch.int64) % num_speculative_steps
 
         temperature = torch.ones(batch_size, device=DEVICE, dtype=torch.float32) * 0.8
         uniform_probs = torch.rand(num_logits, device=DEVICE, dtype=torch.float32)
@@ -320,6 +331,7 @@ class TestFusedRejectionSamplerPerformance:
                 target_logits,
                 draft_logits,
                 draft_sampled,
+                bonus_token_ids,
                 cu_num_logits,
                 pos,
                 idx_mapping,
@@ -340,6 +352,7 @@ class TestFusedRejectionSamplerPerformance:
                 target_logits,
                 draft_logits,
                 draft_sampled,
+                bonus_token_ids,
                 cu_num_logits,
                 pos,
                 idx_mapping,

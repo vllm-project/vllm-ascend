@@ -212,6 +212,7 @@ def _probabilistic_rejection_kernel(
     target_local_sumexp_ptr,
     target_local_sumexp_stride,
     draft_sampled_ptr,
+    bonus_token_ids_ptr,
     draft_logits_ptr,
     draft_logits_stride_0,
     draft_logits_stride_1,
@@ -247,10 +248,10 @@ def _probabilistic_rejection_kernel(
     draft_lse = 0.0
     accepted = True
 
-    for i in range(num_tokens - 1):
+    for i in range(num_tokens):
         if accepted:
             logit_idx = start_idx + i
-            draft_sampled = tl.load(draft_sampled_ptr + logit_idx + 1)
+            draft_sampled = tl.load(draft_sampled_ptr + logit_idx)
 
             if temp == 0.0:
                 target_blocks = tl.arange(0, PADDED_VOCAB_NUM_BLOCKS)
@@ -304,6 +305,10 @@ def _probabilistic_rejection_kernel(
 
             rejected_step += accepted
 
+    if accepted:
+        bonus_token_id = tl.load(bonus_token_ids_ptr + req_idx)
+        tl.store(sampled_ptr + req_idx * sampled_stride + num_tokens, bonus_token_id)
+
     tl.store(rejected_steps_ptr + req_idx, rejected_step)
     tl.store(target_rejected_logsumexp_ptr + req_idx, target_lse)
     tl.store(draft_rejected_logsumexp_ptr + req_idx, draft_lse)
@@ -341,6 +346,9 @@ def _resample_kernel(
     resample_idx = tl.load(rejected_step_ptr + req_idx)
     start_idx = tl.load(cu_num_logits_ptr + req_idx)
     end_idx = tl.load(cu_num_logits_ptr + req_idx + 1)
+    if resample_idx >= end_idx - start_idx:
+        return
+
     resample_token_idx = start_idx + resample_idx
     req_state_idx = tl.load(expanded_idx_mapping_ptr + resample_token_idx)
 
@@ -422,6 +430,9 @@ def _insert_resampled_kernel(
     start_idx = tl.load(cu_num_logits_ptr + req_idx)
     end_idx = tl.load(cu_num_logits_ptr + req_idx + 1)
     resample_token_idx = start_idx + num_sampled
+    if resample_token_idx >= end_idx:
+        return
+
     req_state_idx = tl.load(expanded_idx_mapping_ptr + resample_token_idx)
     temp = tl.load(temp_ptr + req_state_idx).to(tl.float32)
 
@@ -444,6 +455,7 @@ def fused_probabilistic_rejection_sample(
     target_logits: torch.Tensor,
     draft_logits: torch.Tensor,
     draft_sampled: torch.Tensor,
+    bonus_token_ids: torch.Tensor,
     cu_num_logits: torch.Tensor,
     pos: torch.Tensor,
     idx_mapping: torch.Tensor,
@@ -464,6 +476,7 @@ def fused_probabilistic_rejection_sample(
         target_logits: Target model logits [num_logits, V]
         draft_logits: Draft model logits [max_num_reqs, num_speculative_steps, V]
         draft_sampled: Draft token IDs [num_logits]
+        bonus_token_ids: Bonus token IDs [num_reqs, 1] or [num_reqs]
         cu_num_logits: Cumulative logits count [num_reqs + 1]
         pos: Position indices [num_logits]
         idx_mapping: Request index mapping [num_reqs]
@@ -481,6 +494,7 @@ def fused_probabilistic_rejection_sample(
     num_reqs = cu_num_logits.shape[0] - 1
     num_logits, vocab_size = target_logits.shape
     assert uniform_resample.shape == (num_reqs, vocab_size)
+    bonus_token_ids = bonus_token_ids.view(-1)
 
     VOCAB_BLOCK_SIZE_LOCAL = 8192
     vocab_num_blocks = triton.cdiv(vocab_size, VOCAB_BLOCK_SIZE_LOCAL)
@@ -536,6 +550,7 @@ def fused_probabilistic_rejection_sample(
         target_local_sumexp,
         target_local_sumexp.stride(0),
         draft_sampled,
+        bonus_token_ids,
         draft_logits,
         draft_logits.stride(0),
         draft_logits.stride(1),
@@ -594,3 +609,78 @@ def fused_probabilistic_rejection_sample(
     )
 
     return sampled, num_sampled
+
+
+def _expand_draft_probs_to_logits(
+    draft_probs: torch.Tensor,
+    num_draft_tokens: list[int],
+    cu_num_draft_tokens: torch.Tensor,
+    max_spec_len: int,
+) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+    batch_size = len(num_draft_tokens)
+    vocab_size = draft_probs.shape[-1]
+    device = draft_probs.device
+    draft_logits = draft_probs.new_full((batch_size, max_spec_len, vocab_size), float("-inf"))
+
+    num_draft_tokens_tensor = torch.tensor(num_draft_tokens, dtype=cu_num_draft_tokens.dtype, device=device)
+    req_indices = torch.repeat_interleave(
+        torch.arange(batch_size, dtype=torch.int64, device=device),
+        num_draft_tokens_tensor.to(torch.int64),
+    )
+    cu_start = torch.cat([cu_num_draft_tokens.new_zeros(1), cu_num_draft_tokens[:-1]])
+    local_pos = torch.arange(draft_probs.shape[0], dtype=torch.int64, device=device)
+    local_pos = local_pos - cu_start[req_indices].to(torch.int64)
+    safe_draft_probs = draft_probs.clamp_min(torch.finfo(draft_probs.dtype).tiny)
+    draft_logits[req_indices, local_pos] = safe_draft_probs.log()
+    return draft_logits, req_indices, local_pos
+
+
+def generate_uniform_resample(
+    batch_size: int,
+    vocab_size: int,
+    generators: dict[int, torch.Generator],
+    device: torch.device,
+) -> torch.Tensor:
+    uniform_resample = torch.rand((batch_size, vocab_size), dtype=torch.float32, device=device)
+    for req_idx, generator in generators.items():
+        uniform_resample[req_idx].uniform_(generator=generator)
+    return uniform_resample
+
+
+def fused_rejection_sample_from_probs(
+    draft_token_ids: torch.Tensor,
+    num_draft_tokens: list[int],
+    max_spec_len: int,
+    cu_num_draft_tokens: torch.Tensor,
+    draft_probs: torch.Tensor,
+    target_logits: torch.Tensor,
+    bonus_token_ids: torch.Tensor,
+    uniform_probs: torch.Tensor,
+    uniform_resample: torch.Tensor,
+    temperature: torch.Tensor,
+) -> torch.Tensor:
+    batch_size = len(num_draft_tokens)
+    cu_num_logits = torch.cat([cu_num_draft_tokens.new_zeros(1), cu_num_draft_tokens])
+    draft_logits, expanded_idx_mapping, expanded_local_pos = _expand_draft_probs_to_logits(
+        draft_probs,
+        num_draft_tokens,
+        cu_num_draft_tokens,
+        max_spec_len,
+    )
+    idx_mapping = torch.arange(batch_size, dtype=torch.int64, device=target_logits.device)
+    output_token_ids, _ = fused_probabilistic_rejection_sample(
+        target_logits,
+        draft_logits,
+        draft_token_ids,
+        bonus_token_ids,
+        cu_num_logits,
+        torch.empty(0, dtype=torch.int64, device=target_logits.device),
+        idx_mapping,
+        expanded_idx_mapping,
+        expanded_local_pos,
+        temperature,
+        uniform_probs,
+        uniform_resample,
+        max_spec_len,
+    )
+    return output_token_ids.to(torch.int32)

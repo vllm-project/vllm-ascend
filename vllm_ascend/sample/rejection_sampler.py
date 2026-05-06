@@ -10,6 +10,11 @@ from vllm.v1.sample.rejection_sampler import (
     generate_uniform_probs,
 )
 
+from vllm_ascend import envs
+from vllm_ascend.ops.triton.fused_rejection_sampler import (
+    fused_rejection_sample_from_probs,
+    generate_uniform_resample,
+)
 from vllm_ascend.ops.triton.reject_sample import (
     cal_grid_and_block_size,
     expand_triton,
@@ -19,6 +24,25 @@ from vllm_ascend.ops.triton.reject_sample import (
     sample_recovered_tokens_kernel,
 )
 from vllm_ascend.sample.sampler import apply_top_k_top_p
+
+
+def _should_use_fused_rejection_sampler(
+    draft_probs: torch.Tensor | None,
+    sampling_metadata: SamplingMetadata,
+    num_draft_tokens: list[int],
+    max_spec_len: int,
+    device: torch.device,
+) -> bool:
+    return (
+        envs.VLLM_ASCEND_USE_FUSED_REJECTION
+        and HAS_TRITON
+        and device.type == "npu"
+        and sampling_metadata.all_random
+        and draft_probs is not None
+        and len(num_draft_tokens) > 0
+        and max(num_draft_tokens) > 0
+        and max(num_draft_tokens) <= max_spec_len
+    )
 
 
 def apply_sampling_constraints(
@@ -167,10 +191,6 @@ def rejection_sample(
         if sampling_metadata.all_greedy:
             return output_token_ids
 
-    # Compute probability distribution from target logits.
-    target_probs = target_logits.softmax(dim=-1, dtype=torch.float32)
-    assert target_probs.is_contiguous()
-
     # Generate uniform probabilities for rejection sampling.
     # [num_tokens]
     uniform_probs = generate_uniform_probs(
@@ -179,6 +199,36 @@ def rejection_sample(
         sampling_metadata.generators,
         device,
     )
+
+    if _should_use_fused_rejection_sampler(
+        draft_probs,
+        sampling_metadata,
+        num_draft_tokens,
+        max_spec_len,
+        device,
+    ):
+        uniform_resample = generate_uniform_resample(
+            batch_size,
+            vocab_size,
+            sampling_metadata.generators,
+            device,
+        )
+        return fused_rejection_sample_from_probs(
+            draft_token_ids,
+            num_draft_tokens,
+            max_spec_len,
+            cu_num_draft_tokens,
+            draft_probs,
+            target_logits,
+            bonus_token_ids,
+            uniform_probs.to(torch.float32),
+            uniform_resample,
+            sampling_metadata.temperature,
+        )
+
+    # Compute probability distribution from target logits.
+    target_probs = target_logits.softmax(dim=-1, dtype=torch.float32)
+    assert target_probs.is_contiguous()
 
     # Sample recovered tokens for each position.
     # [num_tokens]

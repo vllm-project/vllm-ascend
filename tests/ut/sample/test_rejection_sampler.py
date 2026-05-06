@@ -12,17 +12,21 @@
 # limitations under the License.
 # This file is a part of the vllm-ascend project.
 #
+import os
+from types import SimpleNamespace
 from unittest.mock import patch
 
 import torch
 
 from tests.ut.base import TestBase
 from vllm_ascend.sample.rejection_sampler import (
+    _should_use_fused_rejection_sampler,
     expand_batch_to_tokens,
     expand_pytorch,
     rejection_greedy_sample_pytorch,
     rejection_random_sample_block_verify_pytorch,
     rejection_random_sample_pytorch,
+    rejection_sample,
     sample_recovered_tokens_blockwise_pytorch,
     sample_recovered_tokens_pytorch,
 )
@@ -43,6 +47,146 @@ def mock_pin_memory(original_func):
 
 
 class TestAscendRejectionSampler(TestBase):
+    def _sampling_metadata(
+        self,
+        *,
+        all_greedy=False,
+        all_random=True,
+        temperature=None,
+        generators=None,
+    ):
+        return SimpleNamespace(
+            all_greedy=all_greedy,
+            all_random=all_random,
+            temperature=torch.tensor([1.0]) if temperature is None else temperature,
+            generators={} if generators is None else generators,
+            top_k=None,
+            top_p=None,
+        )
+
+    def test_fused_rejection_sampler_guard(self):
+        draft_probs = torch.ones((2, 4), dtype=torch.float32)
+        npu_device = SimpleNamespace(type="npu")
+        cpu_device = torch.device("cpu")
+
+        with (
+            patch.dict(os.environ, {}, clear=True),
+            patch("vllm_ascend.sample.rejection_sampler.HAS_TRITON", True),
+        ):
+            assert _should_use_fused_rejection_sampler(
+                draft_probs,
+                self._sampling_metadata(all_random=True),
+                [2],
+                2,
+                npu_device,
+            )
+            assert not _should_use_fused_rejection_sampler(
+                draft_probs,
+                self._sampling_metadata(all_random=True),
+                [2],
+                2,
+                cpu_device,
+            )
+            assert not _should_use_fused_rejection_sampler(
+                draft_probs,
+                self._sampling_metadata(all_random=False),
+                [2],
+                2,
+                npu_device,
+            )
+            assert not _should_use_fused_rejection_sampler(
+                None,
+                self._sampling_metadata(all_random=True),
+                [2],
+                2,
+                npu_device,
+            )
+            assert not _should_use_fused_rejection_sampler(
+                draft_probs,
+                self._sampling_metadata(all_random=True),
+                [0],
+                2,
+                npu_device,
+            )
+            assert not _should_use_fused_rejection_sampler(
+                draft_probs,
+                self._sampling_metadata(all_random=True),
+                [3],
+                2,
+                npu_device,
+            )
+
+        with (
+            patch.dict(os.environ, {"VLLM_ASCEND_USE_FUSED_REJECTION": "1"}),
+            patch("vllm_ascend.sample.rejection_sampler.HAS_TRITON", True),
+        ):
+            assert _should_use_fused_rejection_sampler(
+                draft_probs,
+                self._sampling_metadata(all_random=True),
+                [2],
+                2,
+                npu_device,
+            )
+
+        with (
+            patch.dict(os.environ, {"VLLM_ASCEND_USE_FUSED_REJECTION": "0"}),
+            patch("vllm_ascend.sample.rejection_sampler.HAS_TRITON", True),
+        ):
+            assert not _should_use_fused_rejection_sampler(
+                draft_probs,
+                self._sampling_metadata(all_random=True),
+                [2],
+                2,
+                npu_device,
+            )
+
+    def test_rejection_sample_uses_fused_path_when_supported(self):
+        draft_token_ids = torch.tensor([1, 2], dtype=torch.int64)
+        num_draft_tokens = [2]
+        max_spec_len = 2
+        cu_num_draft_tokens = torch.tensor([2], dtype=torch.int32)
+        draft_probs = torch.full((2, 4), 0.25, dtype=torch.float32)
+        target_logits = torch.zeros((2, 4), dtype=torch.float32)
+        bonus_token_ids = torch.tensor([[3]], dtype=torch.int64)
+        metadata = self._sampling_metadata()
+        expected = torch.tensor([[1, 3, PLACEHOLDER_TOKEN_ID]], dtype=torch.int32)
+        uniform_resample = torch.full((1, 4), 0.5, dtype=torch.float32)
+
+        with (
+            patch("vllm_ascend.sample.rejection_sampler._should_use_fused_rejection_sampler", return_value=True),
+            patch(
+                "vllm_ascend.sample.rejection_sampler.generate_uniform_probs",
+                return_value=torch.tensor([0.1, 0.2], dtype=torch.float32),
+            ),
+            patch(
+                "vllm_ascend.sample.rejection_sampler.generate_uniform_resample",
+                return_value=uniform_resample,
+            ) as mock_uniform_resample,
+            patch(
+                "vllm_ascend.sample.rejection_sampler.fused_rejection_sample_from_probs",
+                return_value=expected,
+            ) as mock_fused,
+        ):
+            actual = rejection_sample(
+                draft_token_ids,
+                num_draft_tokens,
+                max_spec_len,
+                cu_num_draft_tokens,
+                draft_probs,
+                target_logits,
+                bonus_token_ids,
+                metadata,
+            )
+
+        assert torch.equal(actual, expected)
+        mock_uniform_resample.assert_called_once_with(1, 4, metadata.generators, target_logits.device)
+        mock_fused.assert_called_once()
+        assert torch.equal(mock_fused.call_args.args[0], draft_token_ids)
+        assert mock_fused.call_args.args[1] == num_draft_tokens
+        assert mock_fused.call_args.args[2] == max_spec_len
+        assert torch.equal(mock_fused.call_args.args[7], torch.tensor([0.1, 0.2], dtype=torch.float32))
+        assert torch.equal(mock_fused.call_args.args[8], uniform_resample)
+
     @patch("torch.arange", new=mock_pin_memory(torch.arange))
     @patch("torch.ones", new=mock_pin_memory(torch.ones))
     @patch("torch.full", new=mock_pin_memory(torch.full))
