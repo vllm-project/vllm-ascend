@@ -25,23 +25,23 @@ on:
       - 'main'
       - '*-dev'
       - 'releases/v*'
-  workflow_call:
-    inputs:
-      image_a2:
-        required: false
-        type: string
-        default: swr.cn-southwest-2.myhuaweicloud.com/base_image/ascend-ci/cann:8.5.1-910b-ubuntu22.04-py3.11
-      image_a3:
-        required: false
-        type: string
-        default: swr.cn-southwest-2.myhuaweicloud.com/base_image/ascend-ci/cann:8.5.1-a3-ubuntu22.04-py3.11
-      type:
-        required: true
-        type: string
-      vllm:
-        required: false
-        type: string
-        default: '["d886c26d4d4fef7d079696beb4ece1cfb4b008a8"]'
+#  workflow_call:
+#    inputs:
+#      image_a2:
+#        required: false
+#        type: string
+#        default: swr.cn-southwest-2.myhuaweicloud.com/base_image/ascend-ci/cann:8.5.1-910b-ubuntu22.04-py3.11
+#      image_a3:
+#        required: false
+#        type: string
+#        default: swr.cn-southwest-2.myhuaweicloud.com/base_image/ascend-ci/cann:8.5.1-a3-ubuntu22.04-py3.11
+#      type:
+#        required: true
+#        type: string
+#      vllm:
+#        required: false
+#        type: string
+#        default: '["d886c26d4d4fef7d079696beb4ece1cfb4b008a8"]'
 # Bash shells do not use ~/.profile or ~/.bashrc so these shells need to be explicitly
 # declared as "shell: bash -el {0}" on steps that need to be properly activated.
 # It's used to activate ascend-toolkit environment variables.
@@ -67,9 +67,9 @@ jobs:
           fail-fast: false
           matrix:
             part: [ 0, 1, 2 , 3]
-            vllm: "${{ fromJSON(inputs.vllm) || 'd886c26d4d4fef7d079696beb4ece1cfb4b008a8' }}"
+            vllm: 'd886c26d4d4fef7d079696beb4ece1cfb4b008a8'
         container:
-          image: "${{ inputs.image_a2 || 'swr.cn-southwest-2.myhuaweicloud.com/base_image/ascend-ci/cann:8.5.1-910b-ubuntu22.04-py3.11'}}"
+          image: 'swr.cn-southwest-2.myhuaweicloud.com/base_image/ascend-ci/cann:8.5.1-910b-ubuntu22.04-py3.11'
           env:
             VLLM_LOGGING_LEVEL: ERROR
             HF_HUB_OFFLINE: 0
@@ -148,9 +148,9 @@ jobs:
           fail-fast: false
           matrix:
             part: [3]
-            vllm: "${{ fromJSON(inputs.vllm) || 'd886c26d4d4fef7d079696beb4ece1cfb4b008a8' }}"
+            vllm: 'd886c26d4d4fef7d079696beb4ece1cfb4b008a8'
         container:
-          image: "${{ inputs.image_a3 || 'swr.cn-southwest-2.myhuaweicloud.com/base_image/ascend-ci/cann:8.5.1-a3-ubuntu22.04-py3.11'}}"
+          image: 'swr.cn-southwest-2.myhuaweicloud.com/base_image/ascend-ci/cann:8.5.1-a3-ubuntu22.04-py3.11'
           env:
             VLLM_LOGGING_LEVEL: ERROR
             HF_HUB_OFFLINE: 0
@@ -228,9 +228,9 @@ jobs:
           fail-fast: false
           matrix:
             part: [3]
-            vllm: "${{ fromJSON(inputs.vllm) || 'd886c26d4d4fef7d079696beb4ece1cfb4b008a8' }}"
+            vllm: 'd886c26d4d4fef7d079696beb4ece1cfb4b008a8'
         container:
-          image: "${{ inputs.image_a3 || 'swr.cn-southwest-2.myhuaweicloud.com/base_image/ascend-ci/cann:8.5.1-a3-ubuntu22.04-py3.11'}}"
+          image: 'swr.cn-southwest-2.myhuaweicloud.com/base_image/ascend-ci/cann:8.5.1-a3-ubuntu22.04-py3.11'
           env:
             VLLM_LOGGING_LEVEL: ERROR
             HF_HUB_OFFLINE: 0
