@@ -162,6 +162,12 @@ jobs:
           - name: qwen3-32b-int8
             os: linux-aarch64-a2b3-4
             config_file_path: Qwen3-32B-Int8-A2.yaml
+          - name: MiniMax-M2.5-w8a8-QuaRot-A2
+            os: linux-aarch64-a2b3-4
+            config_file_path: MiniMax-M2.5-w8a8-QuaRot-A2.yaml
+          - name: Qwen3.5-27B-w8a8-A2
+            os: linux-aarch64-a2b3-4
+            config_file_path: Qwen3.5-27B-w8a8-A2.yaml
           - name: Qwen3.5-397B-A17B-w4a8-mtp
             os: linux-aarch64-a2b3-8
             config_file_path: Qwen3.5-397B-A17B-w4a8-mtp-A2.yaml
