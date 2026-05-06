@@ -254,8 +254,10 @@
       "Eco-Tech/Qwen3.5-397B-A17B-w8a8-mtp",
       "z-lab/Qwen3-8B-DFlash-b16",
       "Eco-Tech/GLM-5.1-w8a8",
-      "Eco-Tech/Qwen3.5-397B-A17B-w4a8-mtp"
-    ], 
+      "Eco-Tech/Qwen3.5-397B-A17B-w4a8-mtp", 
+      "lightseekorg/kimi-k2.5-eagle3",
+      "Eco-Tech/Qwen3.5-122B-A10B-w8a8-mtp"
+    ],
     "datasets": [
       "vllm-ascend/GSM8K-in1024-bs210",
       "vllm-ascend/GSM8K-in3500-bs2800",
