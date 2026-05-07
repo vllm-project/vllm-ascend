@@ -8,8 +8,8 @@ test_cases:
     envs:
       VLLM_USE_MODELSCOPE: "true"
       PYTORCH_NPU_ALLOC_CONF: "expandable_segments:True"
-      HCCL_BUFFSIZE: "512"
-      OMP_PROC_BIND: "false"
+      HCCL_BUFFSIZE: "1024"
+      HCCL_OP_EXPANSION_MODE: "AIV"
       OMP_NUM_THREADS: "1"
       TASK_QUEUE_ENABLE: "1"
       SERVER_PORT: "DEFAULT_PORT"
@@ -20,45 +20,44 @@ test_cases:
       - "1"
       - "--port"
       - "$SERVER_PORT"
-      - "--seed"
-      - "1024"
       - "--max-num-seqs"
-      - "32"
+      - "128"
       - "--quantization"
       - "ascend"
       - "--max-model-len"
-      - "133000"
+      - "128000"
       - "--max-num-batched-tokens"
-      - "8096"
+      - "16384"
       - "--trust-remote-code"
       - "--gpu-memory-utilization"
       - "0.9"
-      - "--no-enable-prefix-caching"
       - "--additional-config"
       - '{"enable_cpu_binding":true}'
       - "--speculative_config"
       - '{"method": "qwen3_5_mtp", "num_speculative_tokens": 3,"enforce_eager": true}'
       - "--compilation-config"
-      - '{"cudagraph_mode":"FULL_DECODE_ONLY"}'
+      - '{"cudagraph_capture_sizes":[1,4,8,12,16,24,32,48,56,64,72,84,96,108,112,128,160,172,196,200,212,232,256,272,288,312,328,344,360,384,400,416,432,448,480,512], "cudagraph_mode":"FULL_DECODE_ONLY"}'
       - "--async-scheduling"
+      - "--mm-processor-cache-gb"
+      - "0"
     benchmarks:
       acc:
         case_type: accuracy
-        dataset_path: vllm-ascend/gsm8k-lite
+        dataset_path: vllm-ascend/gpqa
         request_conf: vllm_api_general_chat
-        dataset_conf: gsm8k/gsm8k_gen_0_shot_cot_chat_prompt
+        dataset_conf: gpqa/gpqa_gen_0_shot_cot_chat_prompt
         max_out_len: 32768
         batch_size: 32
-        baseline: 95
+        baseline: 85
         threshold: 5
       perf:
         case_type: performance
         dataset_path: vllm-ascend/GSM8K-in3500-bs8000-qwen3
         request_conf: vllm_api_stream_chat
         dataset_conf: gsm8k/gsm8k_gen_0_shot_cot_str_perf
-        num_prompts: 80
+        num_prompts: 140
         max_out_len: 1500
-        batch_size: 20
+        batch_size: 35
         request_rate: 0
-        baseline: 664.6449
+        baseline: 605.0224
         threshold: 0.97
