@@ -216,7 +216,7 @@ class TestAscendW4A16FusedMoEMethod(TestBase):
             router_logits=router_logits,
             top_k=2,
             renormalize=True,
-            global_num_experts=self.experts,
+            num_experts=self.experts,
             activation="gelu",
             apply_router_weight_on_input=True,
             mc2_mask=mc2_mask,
@@ -237,4 +237,4 @@ class TestAscendW4A16FusedMoEMethod(TestBase):
         x = torch.randn(4, self.output_size, dtype=torch.float32)
         router_logits = torch.randn(4, self.experts + 1, dtype=torch.float32)
         with self.assertRaises(AssertionError):
-            self.quant_method.apply(layer, x, router_logits, top_k=2, renormalize=True, global_num_experts=self.experts)
+            self.quant_method.apply(layer, x, router_logits, top_k=2, renormalize=True, num_experts=self.experts)

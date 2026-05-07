@@ -154,7 +154,8 @@ def set_ascend_forward_context(
 
         dp_world_size = get_dp_group().world_size
         if dp_world_size > 1 and forward_context.dp_metadata is not None:
-            max_tokens_across_dp = forward_context.dp_metadata.max_tokens_across_dp_cpu.item()
+            dp_meta = forward_context.dp_metadata
+            max_tokens_across_dp = dp_meta.num_tokens_across_dp_cpu.max().item()
             if forward_context.flash_comm_v1_enabled or forward_context.flashcomm_v2_enabled:
                 padded_length = (max_tokens_across_dp + tp_world_size - 1) // tp_world_size * tp_world_size
                 pad_size = padded_length - num_tokens
