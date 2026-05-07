@@ -127,6 +127,10 @@ class AscendConfig:
         # 0: disabled (default), >0: enabled with O-matrix TP group size
         self.enable_flashcomm2_parallel_size = additional_config.get("enable_flashcomm2_parallel_size", 0)
         print(f"[PATCH_VERIFY] AscendConfig.enable_flashcomm2_parallel_size initialized: {self.enable_flashcomm2_parallel_size}")
+        # VLLM_VERSION override configuration (replaces VLLM_VERSION env var)
+        # If set, overrides vllm.__version__ for version detection. Useful for dev builds.
+        self.vllm_version = additional_config.get("vllm_version", None)
+        print(f"[PATCH_VERIFY] AscendConfig.vllm_version initialized: {self.vllm_version}")
 
         self.pd_tp_ratio = 1
         self.pd_head_ratio = 1

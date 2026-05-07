@@ -64,7 +64,7 @@ env_variables: dict[str, Callable[[], Any]] = {
     # it's installed from source, the version of vllm is usually set to "0.9.1".
     # In this case, developers need to set this value to "0.9.0" to make sure
     # that the correct package is installed.
-    # DEPRECATED: VLLM_VERSION env var is removed. Use vllm.__version__ directly.
+    # DEPRECATED: VLLM_VERSION env var is removed. Use --additional-config '{"vllm_version": "0.9.0"}'.
     #     "VLLM_VERSION": lambda: os.getenv("VLLM_VERSION", None),
     # Whether to enable MatmulAllReduce fusion kernel when tensor parallel is enabled.
     # this feature is supported in A2, and eager mode will get better performance.
