@@ -91,6 +91,7 @@ from vllm.v1.worker.ubatch_utils import (
     maybe_create_ubatch_slices,
 )
 from vllm.v1.worker.utils import AttentionGroup
+
 try:
     from vllm.model_executor.layers.mamba.ops.ssu_dispatch import (
         initialize_mamba_ssu_backend,
