@@ -436,7 +436,8 @@ class NPUPlatform(Platform):
             compilation_config.custom_ops = ["all"]
 
         enable_laps = envs_ascend.VLLM_ASCEND_LAPS_SCHEDULING
-        if enable_laps and vllm_config.scheduler_config.policy != "fcfs":
+        laps_supported_policy = vllm_config.scheduler_config.policy == "fcfs"
+        if enable_laps and not laps_supported_policy:
             logger.warning_once(
                 "VLLM_ASCEND_LAPS_SCHEDULING currently supports only FCFS "
                 "scheduler policy; current policy=%s. The default waiting "
@@ -460,8 +461,11 @@ class NPUPlatform(Platform):
                     envs_ascend.VLLM_ASCEND_LAPS_WAIT_WINDOW_MS,
                     envs_ascend.VLLM_ASCEND_LAPS_WAIT_MAX_BATCH,
                 )
-        elif enable_laps:
-            vllm_config.scheduler_config.scheduler_cls = "vllm_ascend.core.laps_scheduler.LAPSScheduler"
+        elif enable_laps and laps_supported_policy:
+            if vllm_config.scheduler_config.async_scheduling:
+                vllm_config.scheduler_config.scheduler_cls = "vllm_ascend.core.laps_scheduler.AsyncLAPSScheduler"
+            else:
+                vllm_config.scheduler_config.scheduler_cls = "vllm_ascend.core.laps_scheduler.LAPSScheduler"
             logger.info(
                 "Ascend LAPS scheduler selected: scheduler_cls=%s, "
                 "policy=%s, threshold=%d, wait_window_ms=%.3f, "

@@ -24,6 +24,7 @@ from typing import Callable, cast
 from vllm.logger import logger
 from vllm.v1.core.sched.interface import PauseState
 from vllm.v1.core.sched.output import NewRequestData, SchedulerOutput
+from vllm.v1.core.sched.async_scheduler import AsyncScheduler
 from vllm.v1.core.sched.request_queue import (
     RequestQueue,
     SchedulingPolicy,
@@ -1199,3 +1200,11 @@ class LAPSScheduler(LAPSSchedulerMixin, BaseScheduler):
             )
             laps_waiting._maybe_log_stats()
         return scheduler_output
+
+
+class AsyncLAPSScheduler(LAPSSchedulerMixin, AsyncScheduler):
+    """Async vLLM scheduler with the Ascend LAPS waiting queue installed."""
+
+    def __init__(self, *args, **kwargs) -> None:
+        super().__init__(*args, **kwargs)
+        self._init_laps_waiting_queue()

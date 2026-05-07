@@ -4,7 +4,7 @@ from tests.v1.core.utils import create_requests, create_scheduler
 from vllm.v1.request import RequestStatus
 from vllm.v1.structured_output import StructuredOutputManager
 
-from vllm_ascend.core.laps_scheduler import LAPSScheduler
+from vllm_ascend.core.laps_scheduler import AsyncLAPSScheduler, LAPSScheduler
 
 
 @pytest.mark.cpu_test
@@ -209,3 +209,30 @@ def test_laps_non_budget_path_records_short_usage(monkeypatch):
     waiting = scheduler.waiting
     assert waiting._last_short_actual_used_tokens == 64
     assert waiting._last_long_actual_used_tokens == 0
+
+
+@pytest.mark.cpu_test
+def test_async_laps_scheduler_installs_laps_waiting_queue(monkeypatch):
+    monkeypatch.setenv("VLLM_ASCEND_LAPS_THRESHOLD", "256")
+    monkeypatch.setenv("VLLM_ASCEND_LAPS_WAIT_WINDOW_MS", "10")
+    monkeypatch.setenv("VLLM_ASCEND_LAPS_WAIT_MAX_BATCH", "4")
+    monkeypatch.setenv("VLLM_ASCEND_LAPS_LONG_PREFILL_CAP", "0")
+    monkeypatch.setenv("VLLM_ASCEND_LAPS_SHORT_RESERVED_RATIO", "0")
+
+    base_scheduler = create_scheduler(
+        max_num_batched_tokens=1024,
+        enable_chunked_prefill=True,
+    )
+    base_scheduler.vllm_config.scheduler_config.async_scheduling = True
+    scheduler = AsyncLAPSScheduler(
+        vllm_config=base_scheduler.vllm_config,
+        kv_cache_config=base_scheduler.kv_cache_config,
+        block_size=base_scheduler.block_size,
+        log_stats=True,
+        structured_output_manager=StructuredOutputManager(base_scheduler.vllm_config),
+    )
+
+    request = create_requests(num_requests=1, num_tokens=64)[0]
+    scheduler.add_request(request)
+
+    assert scheduler.waiting.__class__.__name__ == "LAPSRequestQueue"
