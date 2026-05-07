@@ -27,7 +27,6 @@ from vllm_ascend.ops.fused_moe.experts_selector import zero_experts_compute
 from vllm_ascend.ops.fused_moe.moe_comm_method import FusedExpertsResult, _MoECommMethods
 from vllm_ascend.ops.fused_moe.moe_runtime_args import build_fused_experts_input
 from vllm_ascend.quantization.quant_type import QuantType
-from vllm_ascend.utils import vllm_version_is
 
 from .experts_selector import select_experts
 from .moe_comm_method import AllGatherCommImpl310
@@ -64,7 +63,7 @@ class AscendUnquantizedFusedMoEMethod310(UnquantizedFusedMoEMethod):
         custom_routing_function: Callable | None = None,
         scoring_func: str = "softmax",
         e_score_correction_bias: torch.Tensor | None = None,
-        global_num_experts: int = -1,
+        num_experts: int = -1,
         expert_map: torch.Tensor | None = None,
         apply_router_weight_on_input: bool = False,
         **kwargs,
@@ -83,14 +82,14 @@ class AscendUnquantizedFusedMoEMethod310(UnquantizedFusedMoEMethod):
             custom_routing_function=custom_routing_function,
             scoring_func=scoring_func,
             e_score_correction_bias=e_score_correction_bias,
-            global_num_experts=global_num_experts,
+            global_num_experts=num_experts,
         )
 
         if zero_expert_num > 0 and zero_expert_type is not None:
             topk_ids, topk_weights, zero_expert_result = zero_experts_compute(
                 expert_indices=topk_ids,
                 expert_scales=topk_weights,
-                num_experts=global_num_experts,
+                num_experts=num_experts,
                 zero_expert_type=zero_expert_type,
                 hidden_states=x,
             )
@@ -164,14 +163,13 @@ class AscendFusedMoE310(FusedMoE):
 
         from vllm_ascend.ops.fused_moe.fused_moe import AscendMoERunner
 
-        is_legacy = vllm_version_is("0.19.0")
         self.runner = AscendMoERunner(
-            self if is_legacy else self.layer_name,
+            self.layer_name,
             self.moe_config,
             self.router,
             self._routed_input_transform,
-            self.gate if is_legacy else kwargs.pop("gate", None),
-            self.shared_experts if is_legacy else kwargs.pop("shared_experts", None),
+            kwargs.pop("gate", None),
+            kwargs.pop("shared_experts", None),
             self.quant_method,
             self.reduce_results,
             self.vllm_config.parallel_config.enable_dbo,
@@ -248,7 +246,7 @@ class AscendFusedMoE310(FusedMoE):
             custom_routing_function=self.custom_routing_function,
             scoring_func=self.scoring_func,
             e_score_correction_bias=self.e_score_correction_bias,
-            global_num_experts=self.global_num_experts,
+            num_experts=self.global_num_experts,
             expert_map=self.local_expert_map,
             apply_router_weight_on_input=self.apply_router_weight_on_input,
             pertoken_scale=pertoken_scale,
@@ -285,9 +283,8 @@ class AscendSharedFusedMoE310(SharedFusedMoE, AscendFusedMoE310):
         # which at this point is still the stale runner built with shared_experts=None.
         from vllm_ascend.ops.fused_moe.fused_moe import AscendMoERunner
 
-        is_legacy = vllm_version_is("0.19.0")
         self.runner = AscendMoERunner(
-            self if is_legacy else self.layer_name,
+            self.layer_name,
             self.moe_config,
             self.router,
             self._routed_input_transform,

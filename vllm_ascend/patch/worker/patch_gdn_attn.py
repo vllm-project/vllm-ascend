@@ -32,6 +32,7 @@ _GDN_CUMSUM_WORKING_SET = 2**18
 
 _IS_PATCHED = False
 _ORIGINAL_BUILD = gdn_attn.GDNAttentionMetadataBuilder.build
+_ORIGINAL_INIT_THRESHOLD = gdn_attn.GDNAttentionMetadataBuilder._init_reorder_batch_threshold
 
 
 @dataclass
@@ -597,9 +598,33 @@ def _patched_build(
     return attn_metadata
 
 
+def _init_reorder_batch_threshold(
+    self,
+    reorder_batch_threshold: int | None = 1,
+    supports_spec_as_decode: bool = False,
+    supports_dcp_with_varlen: bool = False,
+) -> None:
+    _ORIGINAL_INIT_THRESHOLD(
+        self,
+        reorder_batch_threshold,
+        supports_spec_as_decode,
+        supports_dcp_with_varlen,
+    )
+    if self.reorder_batch_threshold != 1:
+        speculative_config = self.vllm_config.speculative_config
+        if (
+            speculative_config is not None
+            and speculative_config.num_speculative_tokens is not None
+            and hasattr(speculative_config, "method")
+            and speculative_config.method == "dflash"
+        ):
+            self.reorder_batch_threshold = 1 + speculative_config.num_speculative_tokens
+
+
 if not _IS_PATCHED and not is_310p():
     gdn_attn.GDNChunkedPrefillMetadata = GDNChunkedPrefillMetadata
     gdn_attn.GDNCausalConv1dHostMetadata = GDNCausalConv1dHostMetadata
     gdn_attn.GDNPrefillFallbackMeta = GDNPrefillFallbackMeta
     gdn_attn.GDNAttentionMetadataBuilder.build = _patched_build
+    gdn_attn.GDNAttentionMetadataBuilder._init_reorder_batch_threshold = _init_reorder_batch_threshold
     _IS_PATCHED = True
