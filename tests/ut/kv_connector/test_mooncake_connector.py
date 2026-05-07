@@ -277,6 +277,23 @@ class TestKVCacheRecvingThreadBasic(unittest.TestCase):
         self.assertEqual(queued["request_id"], "req1")
         self.assertEqual(queued["remote_host"], "localhost")
 
+    def test_mark_and_is_failed(self):
+        self.thread._mark_failed_recv_request("req1", [10, 20])
+        self.assertTrue(self.thread._is_failed_recv_request("req1"))
+        self.assertIn(10, self.thread.invalid_block_ids)
+        self.assertIn(20, self.thread.invalid_block_ids)
+
+    def test_clear_failed_recv_request(self):
+        self.thread._mark_failed_recv_request("req2", [30])
+        self.thread._clear_failed_recv_request("req2")
+        self.assertFalse(self.thread._is_failed_recv_request("req2"))
+
+    def test_get_and_clear_invalid_block_ids(self):
+        self.thread.invalid_block_ids = {1, 2, 3}
+        result = self.thread.get_and_clear_invalid_block_ids()
+        self.assertSetEqual(result, {1, 2, 3})
+        self.assertEqual(self.thread.invalid_block_ids, set())
+    
     @patch.object(KVCacheTaskTracker, "get_and_clear_finished_requests")
     def test_get_finished_requests(self, mock_tracker):
         mock_tracker.return_value = {"req1", "req2"}
