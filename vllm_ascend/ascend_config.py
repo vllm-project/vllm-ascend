@@ -87,7 +87,7 @@ class AscendConfig:
                 "Linear layer sharding enabled with config: %s. "
                 "Note: This feature works optimally with FLASHCOMM2 and DSA-CP enabled; "
                 "using it without these features may result in significant performance degradation.",
-                self.layer_sharding,
+                str(self.layer_sharding),
             )
 
         self.enable_shared_expert_dp = (
@@ -112,8 +112,8 @@ class AscendConfig:
                 logger.warning_once(
                     "When using FLASHCOMM1, the max_num_batched_tokens should be divisible "
                     "by tp_size * pcp_size (%s). It has been adjusted to %s.",
-                    tp_pcp_size,
-                    vllm_config.scheduler_config.max_num_batched_tokens,
+                    str(tp_pcp_size),
+                    str(vllm_config.scheduler_config.max_num_batched_tokens),
                 )
         self.multistream_overlap_shared_expert = additional_config.get("multistream_overlap_shared_expert", False)
         self.multistream_overlap_gate = additional_config.get("multistream_overlap_gate", False)
