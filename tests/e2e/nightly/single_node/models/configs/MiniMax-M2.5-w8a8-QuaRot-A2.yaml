@@ -1,0 +1,70 @@
+# ==========================================
+# ACTUAL TEST CASES
+# ==========================================
+
+test_cases:
+  - name: "MiniMax-M2.5-w8a8"
+    model: "Eco-Tech/MiniMax-M2.5-w8a8-QuaRot"
+    envs:
+      HCCL_BUFFSIZE: "512"
+      HCCL_OP_EXPANSION_MODE: "AIV"
+      PYTORCH_NPU_ALLOC_CONF: "expandable_segments:True"
+      VLLM_ASCEND_ENABLE_FLASHCOMM1: "1"
+      OMP_NUM_THREADS: "1"
+      TASK_QUEUE_ENABLE: "1"
+      VLLM-ASCEND_BALANCE_SCHEDULING: "1"
+      HCCL_INTRA_PCIE_ENABLE: "1"
+      HCCL_INTRA_ROCE_ENABLE: "0"
+      OMP_PROC_BIND: "false"
+      VLLM_TORCH_PROFILER_WITH_STACK: "0"
+      VLLM_TORCH_PROFILER_DIR: "./profile"
+      VLLM_USE_MODELSCOPE: "true"
+      SERVER_PORT: "DEFAULT_PORT"
+    server_cmd:
+      - "--tensor-parallel-size"
+      - "8"
+      - "--port"
+      - "$SERVER_PORT"
+      - "--trust-remote-code"
+      - "--async-scheduling"
+      - "--gpu-memory-utilization"
+      - "0.9"
+      - "--quantization"
+      - "ascend"
+      - "--additional-config"
+      - '{"enable_cpu_binding":true}'
+      - "--model-loader-extra-config"
+      - '{"enable_multithread_load":true,"num_threads":16}'
+      - "--speculative_config"
+      - '{"method":"eagle3","model":"vllm-ascend/MiniMax-M2.5-eagle-model-0318","num_speculative_tokens":3}'
+      - "--enable-expert-parallel"
+      - "--enable-chunked-prefill"
+      - "--enable-prefix-caching"
+      - "--max-num-seqs"
+      - "100"
+      - "--seed"
+      - "1024"
+      - "--max-num-batched-tokens"
+      - "6144"
+      - "--enable-auto-tool-choice"
+      - "--tool-call-parser"
+      - "minimax_m2"
+      - "--reasoning-parser"
+      - "minimax_m2_append_think"
+      - "--enable-force-include-usage"
+      - "--profiler-config"
+      - '{"profiler":"torch","torch_profiler_dir":"./profile","torch_profiler_with_stack":false}'
+      - "--compilation-config"
+      - '{"cudagraph_mode":"FULL_DECODE_ONLY","cudagraph_capture_sizes":[4,16,40,80,160,256,400]}'
+    benchmarks:
+      perf:
+        case_type: performance
+        dataset_path: vllm-ascend/GSM8K-in3500-bs2800
+        request_conf: vllm_api_stream_chat
+        dataset_conf: gsm8k/gsm8k_gen_0_shot_cot_str_perf
+        num_prompts: 360
+        max_out_len: 1500
+        batch_size: 120
+        request_rate: 0
+        baseline: 1
+        threshold: 0.97
