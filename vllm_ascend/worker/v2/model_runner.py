@@ -452,8 +452,7 @@ class NPUModelRunner(GPUModelRunner):
                 block_tables, slot_mappings = self.prepare_dummy_attn(input_batch)
             else:
                 assert batch_desc.cg_mode != CUDAGraphMode.FULL, (
-                    "Attention metadata must be prepared for dummy runs when using "
-                    "FULL cudagraph mode."
+                    "Attention metadata must be prepared for dummy runs when using FULL cudagraph mode."
                 )
                 block_tables = None
                 slot_mappings = None
@@ -463,9 +462,7 @@ class NPUModelRunner(GPUModelRunner):
         slot_mappings_by_layer = None
         if not (dummy_run and skip_attn_for_dummy_run):
             assert slot_mappings is not None
-            slot_mappings_by_layer = build_slot_mappings_by_layer(
-                slot_mappings, self.kv_cache_config
-            )
+            slot_mappings_by_layer = build_slot_mappings_by_layer(slot_mappings, self.kv_cache_config)
             assert block_tables is not None
             attn_metadata = self.model_state.prepare_attn(
                 input_batch,
