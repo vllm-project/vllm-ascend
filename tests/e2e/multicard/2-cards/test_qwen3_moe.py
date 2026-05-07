@@ -127,7 +127,7 @@ async def test_qwen3_moe_w8a8_distributed_tp2_ep_dynamic_eplb():
         )
         gt_choices: list[openai.types.CompletionChoice] = batch.choices
 
-    # dynamic eplb test
+    # dynamic eplb test.
     # Since pytest runs as a daemon, it conflicts with the dynamic eplb manager
     # during initialization in offline mode, so the online mode is used instead.
     env_dict.update({"DYNAMIC_EPLB": "true"})
