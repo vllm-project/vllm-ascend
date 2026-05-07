@@ -80,7 +80,7 @@ def partition(files: list[TestFile], rank: int, size: int) -> list[TestFile]:
         sums[lightest] += test.estimated_time
     # Sort each bucket ascending by estimated_time for better feedback and developer experience
     indices = [i for i in buckets[rank] if i < len(active)]
-    print(f"indices>>>",indices)
+    print(f"Valid indices for rank {rank}: {indices}")
     return sorted([active[i] for i in buckets[rank]], key=lambda f: f.estimated_time, reverse=True)
 
 
