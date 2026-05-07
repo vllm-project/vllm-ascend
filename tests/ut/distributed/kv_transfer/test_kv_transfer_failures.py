@@ -153,11 +153,9 @@ class TestRecordFailedBlocks(unittest.TestCase):
 
         self.assertEqual(result, {2, 3})
         mock_logger.error.assert_called_once()
-        # Check that the log message contains the failed block IDs
-        log_call_args = mock_logger.error.call_args[0][0]
-        self.assertIn("Failed to load blocks", log_call_args)
-        self.assertIn("2", log_call_args)
-        self.assertIn("3", log_call_args)
+        log_msg, failed_blocks = mock_logger.error.call_args[0]
+        self.assertIn("Failed to load blocks", log_msg)
+        self.assertEqual(failed_blocks, {2, 3})
 
     @patch("vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.kv_transfer.logger")
     def test_no_log_when_all_succeed(self, mock_logger: MagicMock):
