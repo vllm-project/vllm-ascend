@@ -134,6 +134,7 @@ from vllm_ascend.utils import (
     enable_sp_by_pass,
     get_c_env,
     global_stream,
+    is_310p,
     kv_cache_spec_uses_sparse_c8,
     lmhead_tp_enable,
     set_weight_prefetch_method,
@@ -662,12 +663,18 @@ class NPUModelRunner(GPUModelRunner):
             self.query_pos.np[: cu_num_tokens[-1]],
             out=positions_np,
         )
+        use_310p_cpu_metadata = is_310p()
+        if use_310p_cpu_metadata:
+            self.input_batch.block_table.compute_slot_mapping(
+                req_indices,
+                positions_np[:total_num_scheduled_tokens],
+            )
 
         # For PCP, compute slot_mapping on GPU using pre-PCP-split positions.
         # Use blocking .to(device) to ensure data lands on GPU before PCP
         # modifies CPU position buffers. PCP and async spec decode are
         # mutually exclusive, so the sync is acceptable.
-        if self.pcp_size > 1:
+        if self.pcp_size > 1 and not use_310p_cpu_metadata:
             pre_pcp_positions = torch.from_numpy(
                 positions_np[:total_num_scheduled_tokens]
             ).to(self.device)
@@ -900,11 +907,12 @@ class NPUModelRunner(GPUModelRunner):
         # CPU values are optimistic (all drafts accepted). The kernel
         # corrects on GPU using the previous step's
         # valid_sampled_token_count_gpu. Otherwise, just copy from CPU.
-        if (
+        need_async_num_computed_update = (
             self.use_async_spec_decode
             and self.valid_sampled_token_count_gpu is not None
             and prev_req_id_to_index
-        ):
+        )
+        if need_async_num_computed_update:
             self.prev_positions.copy_to_gpu(num_reqs)
             self.prev_num_draft_tokens.copy_to_gpu()
             cpu_values = self.input_batch.num_computed_tokens_cpu_tensor[:num_reqs].to(
@@ -932,16 +940,11 @@ class NPUModelRunner(GPUModelRunner):
         self.num_scheduled_tokens.np[:num_reqs] = num_scheduled_tokens
         self.num_scheduled_tokens.copy_to_gpu(num_reqs)
         num_scheduled_tokens_gpu = self.num_scheduled_tokens.gpu[:num_reqs]
-        # fix prefix cache ci test
-        if self.pcp_size > 1:
-            # When PCP (Prefill Context Parallel) is enabled, positions use
-            # special PCP offsets (position_pcp) that are only computed on CPU.
-            # Copy the correctly-computed CPU positions to GPU instead of
-            # recomputing on GPU (which would miss the PCP offsets).
+        if self.pcp_size > 1 or use_310p_cpu_metadata:
+            # PCP and 310P both rely on CPU-computed positions. PCP needs
+            # special CPU-only offsets; 310P avoids unsupported device Add ops.
             self.positions[:total_num_scheduled_tokens].copy_(
-                torch.from_numpy(
-                    positions_np[:total_num_scheduled_tokens]
-                ).to(self.device),
+                self._positions_cpu_buf[:total_num_scheduled_tokens],
                 non_blocking=True,
             )
         else:
@@ -949,9 +952,15 @@ class NPUModelRunner(GPUModelRunner):
                 self.num_computed_tokens[req_indices_gpu].to(torch.int64)
                 + self.query_pos.gpu[:total_num_scheduled_tokens]
             )
-        self.seq_lens[:num_reqs] = (
-            self.num_computed_tokens[:num_reqs] + num_scheduled_tokens_gpu
-        )
+        if use_310p_cpu_metadata and not need_async_num_computed_update:
+            self.seq_lens[:num_reqs].copy_(
+                self.optimistic_seq_lens_cpu[:num_reqs],
+                non_blocking=True,
+            )
+        else:
+            self.seq_lens[:num_reqs] = (
+                self.num_computed_tokens[:num_reqs] + num_scheduled_tokens_gpu
+            )
         self.seq_lens[num_reqs:].fill_(0)
 
         # In async spec decode mode, num_computed_tokens was corrected on GPU
@@ -979,7 +988,7 @@ class NPUModelRunner(GPUModelRunner):
 
         # For non-PCP, compute slot_mapping on GPU. PCP slot_mapping was
         # already computed on GPU before PCP split the positions.
-        if self.pcp_size <= 1:
+        if self.pcp_size <= 1 and not use_310p_cpu_metadata:
             self.input_batch.block_table.compute_slot_mapping(
                 num_reqs,
                 self.query_start_loc.gpu[: num_reqs + 1],

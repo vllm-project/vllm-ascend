@@ -10,72 +10,8 @@ from vllm_ascend.worker.block_table import MultiGroupBlockTable as AscendMultiGr
 
 class BlockTable(AscendBlockTable):
     def compute_slot_mapping(self, *args) -> None:
-        if len(args) == 3:
-            self._compute_slot_mapping_device(*args)
-            return
-
-        if len(args) == 2 and any(isinstance(arg, torch.Tensor) for arg in args):
-            req_indices, positions = args
-            self._write_slot_mapping_device(
-                req_indices.to(dtype=torch.int64, device=self.slot_mapping.gpu.device),
-                positions.to(device=self.slot_mapping.gpu.device),
-            )
-            return
-
         req_indices, positions = self._normalize_slot_mapping_inputs(*args)
         self._compute_slot_mapping_numpy(req_indices, positions)
-
-    def _compute_slot_mapping_device(
-        self,
-        num_reqs: int,
-        query_start_loc: torch.Tensor,
-        positions: torch.Tensor,
-    ) -> None:
-        num_tokens = positions.shape[0]
-        if num_tokens == 0:
-            return
-
-        token_indices = torch.arange(num_tokens, dtype=query_start_loc.dtype, device=positions.device)
-        req_indices = torch.searchsorted(query_start_loc[1 : num_reqs + 1], token_indices, right=True).to(torch.int64)
-        self._write_slot_mapping_device(req_indices, positions)
-
-    def _write_slot_mapping_device(
-        self,
-        req_indices: torch.Tensor,
-        positions: torch.Tensor,
-    ) -> None:
-        num_tokens = positions.shape[0]
-        if num_tokens == 0:
-            return
-
-        block_table = self.block_table.gpu.flatten()
-        if self.dcp_world_size * self.pcp_world_size > 1:
-            virtual_block_size = self.block_size * self.dcp_world_size * self.pcp_world_size
-            logical_block_idx = positions // virtual_block_size
-            block_table_indices = self._get_block_table_indices(req_indices, logical_block_idx)
-            block_numbers = block_table[block_table_indices]
-            virtual_block_offsets = positions % virtual_block_size
-            current_rank = self.dcp_world_size * self.pcp_rank + self.dcp_rank
-            mask = (
-                virtual_block_offsets // self.cp_kv_cache_interleave_size % (self.dcp_world_size * self.pcp_world_size)
-                == current_rank
-            )
-            block_offsets = (
-                virtual_block_offsets
-                // (self.dcp_world_size * self.pcp_world_size * self.cp_kv_cache_interleave_size)
-                * self.cp_kv_cache_interleave_size
-                + virtual_block_offsets % self.cp_kv_cache_interleave_size
-            )
-            slot_mapping = block_numbers * self.block_size + block_offsets.to(torch.int32)
-            slot_mapping = torch.where(mask, slot_mapping, torch.full_like(slot_mapping, PAD_SLOT_ID))
-        else:
-            logical_block_idx = positions // self.block_size
-            block_table_indices = self._get_block_table_indices(req_indices, logical_block_idx)
-            block_numbers = block_table[block_table_indices]
-            block_offsets = positions % self.block_size
-            slot_mapping = block_numbers * self.block_size + block_offsets.to(torch.int32)
-
-        self.slot_mapping.gpu[:num_tokens].copy_(slot_mapping)
 
     def _compute_slot_mapping_numpy(self, req_indices: np.ndarray, positions: np.ndarray) -> None:
         num_tokens = positions.shape[0]
@@ -120,6 +56,19 @@ class BlockTable(AscendBlockTable):
             req_indices, positions = args
             return self._to_numpy(req_indices), self._to_numpy(positions)
 
+        if len(args) == 3:
+            num_reqs, query_start_loc, positions = args
+            query_start_loc_np = self._to_numpy(query_start_loc)[: num_reqs + 1]
+            positions_np = self._to_numpy(positions)
+            counts = np.diff(query_start_loc_np)
+            req_indices_np = np.repeat(np.arange(num_reqs, dtype=np.int64), counts)
+            if req_indices_np.shape[0] != positions_np.shape[0]:
+                raise ValueError(
+                    "query_start_loc and positions describe different token counts: "
+                    f"{req_indices_np.shape[0]} != {positions_np.shape[0]}"
+                )
+            return req_indices_np, positions_np
+
         raise TypeError("compute_slot_mapping expects either 2 or 3 positional arguments")
 
     @staticmethod
@@ -128,7 +77,10 @@ class BlockTable(AscendBlockTable):
             return value.astype(np.int64, copy=False)
         if isinstance(value, torch.Tensor):
             if value.device.type != "cpu":
-                raise TypeError("device tensors should use the device slot-mapping path")
+                raise TypeError(
+                    "310P slot mapping must be computed from CPU req_indices/positions; "
+                    "device tensor inputs would require unsupported NPU arithmetic or D2H"
+                )
             return value.detach().numpy().astype(np.int64, copy=False)
         return np.asarray(value, dtype=np.int64)
 
