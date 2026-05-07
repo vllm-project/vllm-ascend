@@ -75,7 +75,7 @@ class TestFusedRejectionSamplerCorrectness:
 
         assert fused_sampled.shape == (batch_size, num_speculative_steps + 1)
         assert fused_num_sampled.shape == (batch_size,)
-        # num_sampled can be 0 in some edge cases (implementation issue)
+        # num_sampled may be 0 when all draft tokens are rejected.
         assert (fused_num_sampled >= 0).all()
         assert (fused_num_sampled <= num_speculative_steps).all()
 
