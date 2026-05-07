@@ -628,7 +628,7 @@ python launch_online_dp.py --dp-size 32 --dp-size-local 16 --dp-rank-start 16 --
 
 Finally, Refer to [Prefill-Decode Disaggregation (Deepseek)](../features/pd_disaggregation_mooncake_multi_node.md) to deploy the P-D disaggregation proxy.
 
-For Atlas 800 A2 series machines, we can configure the deployment as follows:.
+For Atlas 800 A2 series machines, we can configure the deployment(4\*1P 1\*4D) as follows:.
 
 Before you start, please
 
@@ -712,7 +712,7 @@ Before you start, please
     unset http_proxy
     rm -rf ~/ascend/log
 
-    nic_name="enp67s0f0np0"
+    nic_name="xxxxxx" #eg."enp67s0f0np0"
     local_ip=`hostname -I|awk -F " " '{print$1}'`
 
     # # jemalloc
@@ -800,7 +800,7 @@ For each P instance, only these two configuration values need to be modified: â€
     unset http_proxy
     rm -rf ~/ascend/log
 
-    nic_name="enp67s0f0np0"
+    nic_name="xxxxxxx" #eg. "enp67s0f0np0"
     local_ip=`hostname -I|awk -F " " '{print$1}'`
 
     # # jemalloc
@@ -850,7 +850,6 @@ For each P instance, only these two configuration values need to be modified: â€
         --max-num-seqs 30 \
         --async-scheduling \
         --no-disable-hybrid-kv-cache-manager \
-        --no-enable-prefix-caching \
         --trust-remote-code \
         --gpu-memory-utilization 0.9 \
         --quantization ascend \
@@ -922,6 +921,8 @@ python launch_online_dp.py --dp-size 32 --tp-size 1 --dp-size-local 8 --dp-rank-
 For each D instance, only the --dp-rank-start parameter differs, which should be configured as 0, 8, 16, and 24 respectively.Each instanceâ€™s --dp-address must be set to the IP address of the main D node, which is the IP of the Decode instance with --dp-rank-start set to 0.
 
 The proxy is also implemented by referring [Prefill-Decode Disaggregation (Deepseek)](../features/pd_disaggregation_mooncake_multi_node.md).
+
+For ultra-long sequence scenarios, support can be achieved by adjusting the PD (Prefill/Decode) ratio and the model parallelism strategy. For example, in a 1M sequence scenario, a 1\*4P-1\*4D ratio can be used, with the model parallelism set to DP4TP8 mode.
 
 ## Functional Verification
 
