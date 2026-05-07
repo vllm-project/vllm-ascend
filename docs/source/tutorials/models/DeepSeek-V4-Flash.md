@@ -922,6 +922,8 @@ For each D instance, only the --dp-rank-start parameter differs, which should be
 
 The proxy is also implemented by referring [Prefill-Decode Disaggregation (Deepseek)](../features/pd_disaggregation_mooncake_multi_node.md).
 
+For ultra-long sequence scenarios, support can be achieved by adjusting the PD (Prefill/Decode) ratio and the model parallelism strategy. For example, in a 1M sequence scenario, a 1\*4P-1\*4D ratio can be used, with the model parallelism set to DP4TP8 mode.
+
 ## Functional Verification
 
 Once your server is started, you can query the model with input prompts:
