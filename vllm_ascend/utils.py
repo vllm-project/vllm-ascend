@@ -407,7 +407,13 @@ def adapt_patch(is_global_patch: bool = False):
 @functools.cache
 def vllm_version_is(target_vllm_version: str):
     # VLLM_VERSION env var is removed. Use AscendConfig.vllm_version or vllm.__version__.
-    config_version = get_ascend_config().vllm_version
+    # Note: This function may be called at module import time before AscendConfig is initialized.
+    # In that case, fall back to vllm.__version__ directly.
+    config_version = None
+    try:
+        config_version = get_ascend_config().vllm_version
+    except RuntimeError:
+        pass
     if config_version is not None:
         vllm_version = config_version
         print(f"[PATCH_VERIFY] vllm_version_is: from Config = {vllm_version}")
