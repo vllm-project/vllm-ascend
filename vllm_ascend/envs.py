@@ -77,7 +77,8 @@ env_variables: dict[str, Callable[[], Any]] = {
     # The specific value set will be used as the O-matrix TP group size for flashcomm2.
     # For a detailed introduction to the parameters and the differences and applicable scenarios
     # between this feature and FLASHCOMM1, please refer to the feature guide in the documentation.
-    "VLLM_ASCEND_FLASHCOMM2_PARALLEL_SIZE": lambda: int(os.getenv("VLLM_ASCEND_FLASHCOMM2_PARALLEL_SIZE", 0)),
+    # DEPRECATED: VLLM_ASCEND_FLASHCOMM2_PARALLEL_SIZE env var is removed. Use --additional-config '{"enable_flashcomm2_parallel_size": 2}'.
+    #     "VLLM_ASCEND_FLASHCOMM2_PARALLEL_SIZE": lambda: int(os.getenv("VLLM_ASCEND_FLASHCOMM2_PARALLEL_SIZE", 0)),
     # Whether to enable msMonitor tool to monitor the performance of vllm-ascend.
     "MSMONITOR_USE_DAEMON": lambda: bool(int(os.getenv("MSMONITOR_USE_DAEMON", "0"))),
     # Whether to enable MLAPO optimization for DeepSeek W8A8 series models.

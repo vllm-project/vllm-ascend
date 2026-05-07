@@ -1104,7 +1104,9 @@ def has_layer_idx(model_instance: torch.nn.Module) -> bool:
 
 
 def flashcomm2_enable() -> bool:
-    return envs_ascend.VLLM_ASCEND_FLASHCOMM2_PARALLEL_SIZE > 0
+    config_val = get_ascend_config().enable_flashcomm2_parallel_size
+    print(f"[PATCH_VERIFY] flashcomm2_enable: from Config = {config_val}")
+    return config_val > 0
 
 
 def o_shard_enable() -> bool:
@@ -1115,10 +1117,12 @@ def o_shard_enable() -> bool:
 
 
 def get_flashcomm2_config_and_validate(ascend_config, vllm_config):
-    flashcomm2_oproj_tp_size = envs_ascend.VLLM_ASCEND_FLASHCOMM2_PARALLEL_SIZE
+    flashcomm2_oproj_tp_size = ascend_config.enable_flashcomm2_parallel_size
+    print(f"[PATCH_VERIFY] get_flashcomm2_config_and_validate: flashcomm2_parallel_size = {flashcomm2_oproj_tp_size}")
     global_tp_size = vllm_config.parallel_config.tensor_parallel_size
 
-    if not flashcomm2_enable():
+    # Use ascend_config parameter instead of flashcomm2_enable() to avoid uninitialized config
+    if ascend_config.enable_flashcomm2_parallel_size <= 0:
         return 0
 
     logger.info("Enable FLASHCOMM2 with flashcomm2_oproj_tensor_parallel_size = %s", flashcomm2_oproj_tp_size)

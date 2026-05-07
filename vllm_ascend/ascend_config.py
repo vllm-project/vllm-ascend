@@ -123,6 +123,10 @@ class AscendConfig:
         # MLAPO configuration (replaces VLLM_ASCEND_ENABLE_MLAPO env var)
         self.enable_mlapo = additional_config.get("enable_mlapo", True)
         print(f"[PATCH_VERIFY] AscendConfig.enable_mlapo initialized: {self.enable_mlapo}")
+        # FLASHCOMM2 parallel size configuration (replaces VLLM_ASCEND_FLASHCOMM2_PARALLEL_SIZE env var)
+        # 0: disabled (default), >0: enabled with O-matrix TP group size
+        self.enable_flashcomm2_parallel_size = additional_config.get("enable_flashcomm2_parallel_size", 0)
+        print(f"[PATCH_VERIFY] AscendConfig.enable_flashcomm2_parallel_size initialized: {self.enable_flashcomm2_parallel_size}")
 
         self.pd_tp_ratio = 1
         self.pd_head_ratio = 1
