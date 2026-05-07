@@ -33,6 +33,7 @@ DTYPE = "float16"
 def model_name(request):
     yield snapshot_download(request.param)
 
+
 def test_cross_encoder_score_1_to_1(model_name):
     text_pair = [TEXTS_1[0], TEXTS_2[0]]
 
@@ -99,7 +100,7 @@ def test_embedding_score_1_to_1(emb_model_name):
         hf_outputs = [F.cosine_similarity(*map(torch.tensor, pair), dim=0) for pair in hf_embeddings]
 
     with VllmRunner(
-           emb_model_name, runner="pooling", dtype=DTYPE, max_model_len=1024, enforce_eager=True
+        emb_model_name, runner="pooling", dtype=DTYPE, max_model_len=1024, enforce_eager=True
     ) as vllm_model:
         vllm_outputs = vllm_model.score(text_pair[0], text_pair[1])
 
@@ -120,7 +121,7 @@ def test_embedding_score_1_to_N(emb_model_name):
         hf_outputs = [F.cosine_similarity(*map(torch.tensor, pair), dim=0) for pair in hf_embeddings]
 
     with VllmRunner(
-           emb_model_name, runner="pooling", dtype=DTYPE, max_model_len=1024, enforce_eager=True
+        emb_model_name, runner="pooling", dtype=DTYPE, max_model_len=1024, enforce_eager=True
     ) as vllm_model:
         vllm_outputs = vllm_model.score(TEXTS_1[0], TEXTS_2)
 
@@ -142,7 +143,7 @@ def test_embedding_score_N_to_N(emb_model_name):
         hf_outputs = [F.cosine_similarity(*map(torch.tensor, pair), dim=0) for pair in hf_embeddings]
 
     with VllmRunner(
-           emb_model_name, runner="pooling", dtype=DTYPE, max_model_len=1024, enforce_eager=True
+        emb_model_name, runner="pooling", dtype=DTYPE, max_model_len=1024, enforce_eager=True
     ) as vllm_model:
         vllm_outputs = vllm_model.score(TEXTS_1, TEXTS_2)
 
