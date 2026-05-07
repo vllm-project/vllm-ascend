@@ -81,6 +81,7 @@ PromptImageInput = _PromptMultiModalInput[Image.Image]
 PromptAudioInput = _PromptMultiModalInput[tuple[np.ndarray, int]]
 PromptVideoInput = _PromptMultiModalInput[np.ndarray]
 
+
 def _terminate_process_tree(proc: subprocess.Popen) -> None:
     try:
         parent = psutil.Process(proc.pid)

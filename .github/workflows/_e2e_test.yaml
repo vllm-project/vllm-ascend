@@ -151,7 +151,6 @@ jobs:
         shell: bash
         run: |
           set -o pipefail
-          set +e
           if [ "${{ inputs.continue_on_error }}" = "true" ]; then
             python3 .github/workflows/scripts/run_suite.py \
               --suite e2e-singlecard-light \
@@ -167,9 +166,7 @@ jobs:
               --auto-partition-size 1 \
               2>&1 | tee /tmp/e2e-singlecard-light-part${{ matrix.part }}.log
           fi
-          status=${PIPESTATUS[0]}
-          set -e
-          exit "$status"
+          exit ${PIPESTATUS[0]}
 
       - name: Summarize singlecard-light failure
         if: ${{ always() }}
@@ -418,7 +415,6 @@ jobs:
         shell: bash
         run: |
           set -o pipefail
-          set +e
           if [ "${{ inputs.continue_on_error }}" = "true" ]; then
             python3 .github/workflows/scripts/run_suite.py \
               --suite e2e-2card-light \
@@ -434,9 +430,7 @@ jobs:
               --auto-partition-size 1 \
               2>&1 | tee /tmp/e2e-2card-light-part${{ matrix.part }}.log
           fi
-          status=${PIPESTATUS[0]}
-          set -e
-          exit "$status"
+          exit ${PIPESTATUS[0]}
 
       - name: Summarize multicard-2-light failure
         if: ${{ always() }}
@@ -550,7 +544,6 @@ jobs:
         shell: bash
         run: |
           set -o pipefail
-          set +e
           if [ "${{ inputs.continue_on_error }}" = "true" ]; then
             python3 .github/workflows/scripts/run_suite.py \
               --suite e2e-multicard-2-cards \
@@ -566,9 +559,7 @@ jobs:
               --auto-partition-size 1 \
               2>&1 | tee /tmp/e2e-2card-full-part${{ matrix.part }}.log
           fi
-          status=${PIPESTATUS[0]}
-          set -e
-          exit "$status"
+          exit ${PIPESTATUS[0]}
 
       - name: Summarize multicard-2-full failure
         if: ${{ always() && inputs.type == 'full' }}
@@ -603,12 +594,9 @@ jobs:
         run: |
           set -o pipefail
           python3 -m pip uninstall -y triton-ascend
-          set +e
           pytest -sv --durations=0 tests/e2e/multicard/2-cards/test_aclgraph_capture_replay.py \
             2>&1 | tee /tmp/e2e-non-triton.log
-          status=${PIPESTATUS[0]}
-          set -e
-          exit "$status"
+          exit ${PIPESTATUS[0]}
 
       - name: Summarize non-triton failure
         if: ${{ always() && inputs.type == 'full' && matrix.part == 0 }}
@@ -712,7 +700,6 @@ jobs:
         shell: bash
         run: |
           set -o pipefail
-          set +e
           if [ "${{ inputs.continue_on_error }}" = "true" ]; then
             python3 .github/workflows/scripts/run_suite.py \
               --suite e2e-multicard-4-cards \
@@ -728,9 +715,7 @@ jobs:
               --auto-partition-size 1 \
               2>&1 | tee /tmp/e2e-4card-full-part${{ matrix.part }}.log
           fi
-          status=${PIPESTATUS[0]}
-          set -e
-          exit "$status"
+          exit ${PIPESTATUS[0]}
 
       - name: Summarize multicard-4-full failure
         if: ${{ always() && inputs.type == 'full' }}
@@ -849,13 +834,10 @@ jobs:
         shell: bash
         run: |
           set -o pipefail
-          set +e
           pytest -sv --durations=0 tests/e2e/310p/singlecard/test_dense_model_singlecard.py \
           tests/e2e/310p/singlecard/test_vl_model_singlecard.py \
           2>&1 | tee /tmp/e2e-310p-singlecard.log
-          status=${PIPESTATUS[0]}
-          set -e
-          exit "$status"
+          exit ${PIPESTATUS[0]}
 
       - name: Summarize 310p singlecard failure
         if: ${{ always() && inputs.contains_310 }}
@@ -962,16 +944,13 @@ jobs:
         shell: bash
         run: |
           set -o pipefail
-          set +e
           pytest -sv --durations=0 \
           tests/e2e/310p/multicard/test_dense_model_multicard.py::test_qwen3_dense_tp4_w8a8 \
           tests/e2e/310p/multicard/test_moe_model_multicard.py::test_qwen3_moe_tp4_fp16 \
           tests/e2e/310p/multicard/test_moe_model_multicard.py::test_qwen3_5_moe_tp4_fp16 \
           tests/e2e/310p/multicard/test_vl_model_multicard.py::test_qwen3_vl_8b_tp2_fp16 \
           2>&1 | tee /tmp/e2e-310p-4cards.log
-          status=${PIPESTATUS[0]}
-          set -e
-          exit "$status"
+          exit ${PIPESTATUS[0]}
 
       - name: Summarize 310p multicards failure
         if: ${{ always() && inputs.contains_310 }}
