@@ -1,0 +1,112 @@
+#
+# Copyright (c) 2025 Huawei Technologies Co., Ltd. All Rights Reserved.
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+# This file is a part of the vllm-ascend project.
+#
+
+# Run upstream vLLM tests on NPU to catch regressions early.
+# Uses a whitelist from vllm_upstream_config.yaml (see #7084)
+
+name: 'vLLM upstream tests'
+
+on:
+  workflow_call:
+    inputs:
+      vllm_version:
+        description: 'vLLM version tag or commit to test against'
+        required: true
+        type: string
+      image:
+        description: 'Container image to use'
+        required: true
+        type: string
+
+jobs:
+  upstream-singlecard:
+    name: upstream-singlecard
+    runs-on: linux-aarch64-a2b3-1
+    strategy:
+      fail-fast: false
+      matrix:
+        part: [0, 1, 2, 3]
+    container:
+      image: ${{ inputs.image }}
+      env:
+        VLLM_LOGGING_LEVEL: ERROR
+        VLLM_USE_MODELSCOPE: True
+        HF_HUB_OFFLINE: 1
+    steps:
+      - name: Checkout vllm-project/vllm-ascend repo
+        uses: actions/checkout@v6
+
+      - name: Check npu and CANN info
+        run: |
+          npu-smi info
+          cat /usr/local/Ascend/ascend-toolkit/latest/"$(uname -i)"-linux/ascend_toolkit_install.info
+
+      - name: Config mirrors
+        run: |
+          sed -Ei 's@(ports|archive).ubuntu.com@cache-service.nginx-pypi-cache.svc.cluster.local:8081@g' /etc/apt/sources.list
+          pip config set global.index-url http://cache-service.nginx-pypi-cache.svc.cluster.local/pypi/simple
+          pip config set global.trusted-host cache-service.nginx-pypi-cache.svc.cluster.local
+          apt-get update -y
+          apt install git -y
+
+      - name: Install system dependencies
+        run: |
+          apt-get -y install `cat packages.txt`
+          apt-get -y install gcc g++ cmake libnuma-dev clang-15
+          update-alternatives --install /usr/bin/clang clang /usr/bin/clang-15 20
+          update-alternatives --install /usr/bin/clang++ clang++ /usr/bin/clang++-15 20
+
+      - name: Checkout vllm-project/vllm repo
+        uses: actions/checkout@v6
+        with:
+          repository: vllm-project/vllm
+          ref: ${{ inputs.vllm_version }}
+          path: ./vllm-repo
+          fetch-depth: 1
+
+      - name: Install vllm-project/vllm from source
+        working-directory: ./vllm-repo
+        run: |
+          VLLM_TARGET_DEVICE=empty pip install -e .
+
+      - name: Install vllm-project/vllm-ascend
+        env:
+          PIP_EXTRA_INDEX_URL: https://mirrors.huaweicloud.com/ascend/repos/pypi
+        run: |
+          pip install -r requirements-dev.txt
+          pip install -v -e .
+
+      - name: Run upstream vLLM test cases
+        env:
+          PYTORCH_NPU_ALLOC_CONF: max_split_size_mb:256
+          VLLM_WORKER_MULTIPROC_METHOD: spawn
+        run: |
+          python3 .github/workflows/scripts/run_vllm_upstream.py \
+            --suite vllm-upstream-singlecard \
+            --vllm-root ./vllm-repo \
+            --auto-partition-id "${{ matrix.part }}" \
+            --auto-partition-size 4 \
+            --continue-on-error
+
+      - name: Upload timing data
+        uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: upstream-timing-data-part${{ matrix.part }}
+          path: upstream_test_timing_data.json
+          if-no-files-found: warn
+          retention-days: 5
