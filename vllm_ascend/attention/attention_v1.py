@@ -1159,7 +1159,7 @@ class AscendAttentionBackendImpl(AttentionImpl):
             return self._forward_fia_slidingwindow(query, attn_metadata, output)
 
         if envs_ascend.VLLM_ASCEND_ENABLE_FLASH_ATTN and _FA3_AVAILABLE:
-            logger.info("Using Flash Attention 3 (FA3) for attention computation in eager mode.")
+            logger.info("Using Flash Attention 3 (FA3) for attention computation.")
             output = self.forward_flash_attn(query, attn_metadata, output)
         else:
             output = self.forward_fused_infer_attention(query, key, value, attn_metadata, output, kv_cache)
