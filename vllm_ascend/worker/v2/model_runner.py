@@ -279,9 +279,7 @@ class NPUModelRunner(GPUModelRunner):
 
         # Backend-specific padding (e.g. FIA TND): needs the full CPU buffer before slicing;
         if batch_desc.cg_mode == CUDAGraphMode.FULL:
-            max_extra_input = self.prepare_backend_extra_input(
-                batch_desc, num_reqs, query_start_loc_np
-            )
+            max_extra_input = self.prepare_backend_extra_input(batch_desc, num_reqs, query_start_loc_np)
             if max_extra_input.num_reqs_padded > num_reqs_padded:
                 num_reqs_padded = max_extra_input.num_reqs_padded
                 query_start_loc_np = max_extra_input.query_start_loc_np
