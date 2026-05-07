@@ -217,20 +217,52 @@ def _muls_add_impl_fake(
     return torch.empty_like(x)
 
 
-def _device_print_impl(value: torch.Tensor | int | float | bool | str | torch.dtype | torch.device | torch.Size):
+def _device_print_tensor_impl(value: torch.Tensor):
     from vllm_ascend.utils import device_print
     device_print(value)
 
-def _device_print_impl_fake(value: torch.Tensor | int | float | bool | str | torch.dtype | torch.device | torch.Size):
-    return  # 直接返回，device_print 返回 None
+def _device_print_tensor_impl_fake(value: torch.Tensor):
+    return
 
 direct_register_custom_op(
-    op_name="device_print",
-    op_func=_device_print_impl,
-    fake_impl=_device_print_impl_fake,
+    op_name="device_print_tensor",
+    op_func=_device_print_tensor_impl,
+    fake_impl=_device_print_tensor_impl_fake,
     mutates_args=[],
     dispatch_key="PrivateUse1",
 )
+
+def _device_print_size_impl(value: torch.Size):
+    from vllm_ascend.utils import device_print
+    device_print(value)
+
+def _device_print_size_impl_fake(value: torch.Size):
+    return
+
+direct_register_custom_op(
+    op_name="device_print_size",
+    op_func=_device_print_size_impl,
+    fake_impl=_device_print_size_impl_fake,
+    mutates_args=[],
+    dispatch_key="PrivateUse1",
+)
+
+
+def _device_print_str_impl(value: str):
+    from vllm_ascend.utils import device_print
+    device_print(value)
+
+def _device_print_str_impl_fake(value: str):
+    return
+
+direct_register_custom_op(
+    op_name="device_print_str",
+    op_func=_device_print_str_impl,
+    fake_impl=_device_print_str_impl_fake,
+    mutates_args=[],
+    dispatch_key="PrivateUse1",
+)
+
 
 direct_register_custom_op(
     op_name="maybe_chunk_residual",
@@ -239,6 +271,8 @@ direct_register_custom_op(
     mutates_args=[],
     dispatch_key="PrivateUse1",
 )
+
+
 
 direct_register_custom_op(
     op_name="maybe_all_gather_and_maybe_unpad",
