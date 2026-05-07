@@ -198,7 +198,8 @@ class LlamaXliteModel(XliteModel):
         xlite_config.moe_tp_size = 1
 
         xlite_config.attn_type = AttnMHA
-        xlite_config.weight_nz = envs_ascend.VLLM_ASCEND_ENABLE_NZ == 2
+        xlite_config.weight_nz = get_ascend_config().weight_nz_mode == 2
+        print(f"[PATCH_VERIFY] XliteConfig: weight_nz = {xlite_config.weight_nz}")
         scheduler_config = vllm_config.scheduler_config
         max_batch_size = scheduler_config.max_num_seqs
         max_seq_len = vllm_config.model_config.max_model_len

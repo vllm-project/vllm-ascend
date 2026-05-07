@@ -92,7 +92,8 @@ env_variables: dict[str, Callable[[], Any]] = {
     # 0: close nz;
     # 1: only quant case enable nz;
     # 2: enable nz as long as possible.
-    "VLLM_ASCEND_ENABLE_NZ": lambda: int(os.getenv("VLLM_ASCEND_ENABLE_NZ", 1)),
+    # DEPRECATED: VLLM_ASCEND_ENABLE_NZ env var is removed. Use --additional-config '{"weight_nz_mode": 1}'.
+    #     "VLLM_ASCEND_ENABLE_NZ": lambda: int(os.getenv("VLLM_ASCEND_ENABLE_NZ", 1)),
     # Decide whether we should enable CP parallelism.
     "VLLM_ASCEND_ENABLE_CONTEXT_PARALLEL": lambda: bool(int(os.getenv("VLLM_ASCEND_ENABLE_CONTEXT_PARALLEL", "0"))),
     # Whether to anbale dynamic EPLB

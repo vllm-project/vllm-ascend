@@ -163,13 +163,18 @@ def _should_trans_nz(weight: torch.Tensor) -> bool:
     if is_310p():
         return True
 
-    # NZ is disabled on non-310P.
-    if not envs_ascend.VLLM_ASCEND_ENABLE_NZ:
+    # Get config value instead of env
+    config = get_ascend_config()
+    nz_mode = config.weight_nz_mode
+    print(f"[PATCH_VERIFY] _should_trans_nz: weight_nz_mode = {nz_mode}")
+
+    # NZ is disabled when mode is 0.
+    if not nz_mode:
         return False
 
-    # BF16/FP16 convert only when enable_nz == 2.
+    # BF16/FP16 convert only when nz_mode == 2.
     if weight.dtype in {torch.bfloat16, torch.float16}:
-        return envs_ascend.VLLM_ASCEND_ENABLE_NZ == 2
+        return nz_mode == 2
 
     # Quantized or other supported dtypes convert by default.
     return True

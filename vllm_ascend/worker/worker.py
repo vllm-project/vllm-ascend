@@ -211,10 +211,12 @@ class NPUWorker(WorkerBase):
         )
 
     def wake_up(self, tags: list[str] | None = None) -> None:
-        if envs_ascend.VLLM_ASCEND_ENABLE_NZ:
+        nz_mode = get_ascend_config().weight_nz_mode
+        print(f"[PATCH_VERIFY] SleepMode.wake_up: weight_nz_mode = {nz_mode}")
+        if nz_mode:
             raise ValueError(
                 "FRACTAL_NZ mode is enabled. This may cause model parameter precision issues "
-                "in the RL scenarios. Please set VLLM_ASCEND_ENABLE_NZ=0."
+                "in the RL scenarios. Please set weight_nz_mode=0 via --additional-config."
             )
         allocator = CaMemAllocator.get_instance()
         allocator.wake_up(tags=tags)

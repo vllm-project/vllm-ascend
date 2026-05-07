@@ -168,6 +168,10 @@ class AscendConfig:
         # _npu_paged_attention in this cases. This should be removed once
         # npu_fused_infer_attention_score performs better on all scenarios.
         self.pa_shape_list = additional_config.get("pa_shape_list", [])
+        # Weight NZ mode configuration (replaces VLLM_ASCEND_ENABLE_NZ env var)
+        # 0: disabled, 1: only quant case enable nz (default), 2: BF16/FP16 also enable nz
+        self.weight_nz_mode = additional_config.get("weight_nz_mode", 1)
+        print(f"[PATCH_VERIFY] AscendConfig.weight_nz_mode initialized: {self.weight_nz_mode}")
 
         # when enable_async_exponential is True, AscendSampler will be different from vllm Sampler,
         # which make batch_invariant mode not working.
