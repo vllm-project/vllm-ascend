@@ -64,7 +64,7 @@ msgid ""
 "cn/latest/user_guide/feature_guide/index.html) to get the feature's "
 "configuration."
 msgstr ""
-"请参考 [功能指南](https://docs.vllm.ai/projects/ascend/zh-cn/latest/user_guide/feature_guide/index.html) 以获取功能的配置信息。"
+"请参考 [特性指南](https://docs.vllm.ai/projects/ascend/zh-cn/latest/user_guide/feature_guide/index.html) 以获取功能的配置信息。"
 
 #: ../../source/tutorials/models/Qwen3-Omni-30B-A3B-Thinking.md:15
 msgid "Environment Preparation"

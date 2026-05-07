@@ -692,7 +692,7 @@ msgstr ""
 "`VLLM_ASCEND_MLP_DOWN_PREFETCH_SIZE` "
 "已被弃用。请改用以下配置：`\"weight_prefetch_config\": { \"enabled\": true, "
 "\"prefetch_ratio\": { \"mlp\": { \"gate_up\": 1.0, \"down\": "
-"1.0}}}`。详情请参阅用户指南->功能指南->权重预取指南。"
+"1.0}}}`。详情请参阅用户指南->特性指南->权重预取指南。"
 
 #: ../../source/tutorials/models/Qwen3-Dense.md:350
 msgid "6. Zerolike Elimination"
