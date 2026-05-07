@@ -42,9 +42,9 @@ def test_embed_models_correctness(model: str):
         vllm_outputs = vllm_runner.embed(queries)
 
     with HfRunner(
-            model_name,
-            dtype="float16",
-            is_sentence_transformer=True,
+        model_name,
+        dtype="float16",
+        is_sentence_transformer=True,
     ) as hf_runner:
         hf_outputs = hf_runner.encode(queries)
 
