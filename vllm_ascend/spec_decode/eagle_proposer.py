@@ -626,13 +626,14 @@ class AscendSpecDecodeBaseProposer(SpecDecodeBaseProposer):
                 common_attn_metadata.seq_lens_cpu = self._adjust_tensor(
                     self.runner.optimistic_seq_lens_cpu, num_reqs_padded
                 )
-                # Keep the upstream-canonical mirror in sync with the padded
-                # subclass field. NPU attention backends prefer ``_seq_lens_cpu``
-                # over ``seq_lens_cpu``; a stale length here (carried over from
-                # the cm_base/prepare_inputs_padded pre-padding view) would
-                # later collide with the new ``num_reqs_padded`` query_lens
-                # in builders such as attention_cp.
-                common_attn_metadata._seq_lens_cpu = common_attn_metadata.seq_lens_cpu
+                # Keep the upstream-canonical mirror length-aligned with the
+                # padded subclass field, but only if the caller already
+                # populated it (production cm_base does; some unit-test mocks
+                # leave it None and assert it stays None). ``.clone()`` keeps
+                # the two fields independent so per-step in-place updates in
+                # ``attn_update_stack_num_spec_norm`` don't double-count.
+                if common_attn_metadata._seq_lens_cpu is not None:
+                    common_attn_metadata._seq_lens_cpu = common_attn_metadata.seq_lens_cpu.clone()
             if common_attn_metadata.num_computed_tokens_cpu is not None:
                 common_attn_metadata.num_computed_tokens_cpu = self._adjust_tensor(
                     common_attn_metadata.num_computed_tokens_cpu, num_reqs_padded

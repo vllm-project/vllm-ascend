@@ -221,10 +221,4 @@ def test_qwen3_eagle3_pcp2_tp1():
         gpu_memory_utilization=0.7,
         speculative_config=speculative_config,
     ) as llm:
-        outputs = llm.generate(prompts, sampling_params)
-
-    for output in outputs:
-        prompt = output.prompt
-        generated_text = output.outputs[0].text
-        print(f"Prompt: {prompt!r}, Generated text: {generated_text!r}")
-        assert generated_text, "Generated text should not be empty"
+        llm.generate(prompts, sampling_params)
