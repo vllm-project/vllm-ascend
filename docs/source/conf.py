@@ -147,7 +147,7 @@ html_extra_path = ["llms.txt"]
 # Check external links without validating remote anchors. Many third-party
 # sites render anchors dynamically, which makes anchor checks flaky in CI.
 linkcheck_anchors = False
-linkcheck_retries = 2
+linkcheck_retries = 3
 linkcheck_timeout = 15
 linkcheck_workers = 10
 
@@ -160,6 +160,7 @@ linkcheck_ignore = [
     r"https?://<[^>]+>.*",
     r"https://github\.com/vllm-project/vllm-ascend/issues/new/choose",
     r"https://github\.com/[^/?#]+/?$",
+    r"https?://.*\$%7B.*%7D.*",
 ]
 
 READTHEDOCS_VERSION_TYPE = os.environ.get("READTHEDOCS_VERSION_TYPE")

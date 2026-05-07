@@ -25,6 +25,20 @@ import torch
 from vllm_ascend.quantization.quant_type import QuantType
 
 
+def get_moe_num_logical_experts(
+    layer: torch.nn.Module,
+    num_experts: int,
+    global_redundant_expert_num: int = 0,
+    num_shared_experts: int = 0,
+) -> int:
+    moe_config = getattr(layer, "moe_config", None)
+    num_logical_experts = getattr(moe_config, "num_logical_experts", None)
+    if num_logical_experts is not None:
+        return int(num_logical_experts)
+
+    return int(num_experts - global_redundant_expert_num - num_shared_experts)
+
+
 class AscendLinearScheme(ABC):
     """Base class for all linear quantization schemes.
 
