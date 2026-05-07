@@ -210,7 +210,7 @@ class AscendFusedMoEWithLoRA(FusedMoEWithLoRA):
         packed_modules_list: list,
         model_config: PretrainedConfig | None = None,
     ) -> bool:
-        return type(source_layer) is AscendFusedMoE and len(packed_modules_list) == 2
+        return isinstance(source_layer, AscendFusedMoE) and len(packed_modules_list) == 2
 
     def __init__(self, base_layer: FusedMoE) -> None:
         from vllm.lora.layers.base import BaseLayerWithLoRA
@@ -234,7 +234,10 @@ class AscendFusedMoEWithLoRA(FusedMoEWithLoRA):
     def _inject_lora_into_fused_moe(self):
         self.base_layer.ensure_moe_quant_config_init()
         self.base_layer.quant_method._lora_enabled = True
-        self.base_layer.quant_method._lora_layer = self
+        self.base_layer._lora_wrapper = self
+
+    def forward(self, *args, **kwargs):
+        return self.base_layer.forward(*args, **kwargs)
 
 def refresh_all_lora_classes():
     vllm.lora.utils._all_lora_classes.add(AscendColumnParallelLinearWithLoRA)
@@ -249,5 +252,13 @@ def refresh_all_lora_classes():
     vllm.lora.utils._all_lora_classes.add(AscendQKVParallelLinearWithShardedLoRA)
     vllm.lora.utils._all_lora_classes.add(AscendRowParallelLinearWithShardedLoRA)
     vllm.lora.utils._all_lora_classes.add(AscendReplicatedLinearWithLoRA)
-    vllm.lora.utils._all_lora_classes.discard(FusedMoEWithLoRA)
     vllm.lora.utils._all_lora_classes.add(AscendFusedMoEWithLoRA)
+
+    _gpu_can_replace_layer = FusedMoEWithLoRA.can_replace_layer.__func__
+
+    def _patched_can_replace_layer(cls, source_layer, lora_config, packed_modules_list, model_config=None):
+        if isinstance(source_layer, AscendFusedMoE):
+            return False
+        return _gpu_can_replace_layer(cls, source_layer, lora_config, packed_modules_list, model_config)
+
+    FusedMoEWithLoRA.can_replace_layer = classmethod(_patched_can_replace_layer)

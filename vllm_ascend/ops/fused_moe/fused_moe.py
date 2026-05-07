@@ -80,7 +80,6 @@ class AscendUnquantizedFusedMoEMethod(UnquantizedFusedMoEMethod):
         super().__init__(moe=moe)
         self.dynamic_eplb = get_ascend_config().eplb_config.dynamic_eplb
         self._lora_enabled = False
-        self._lora_layer = None
 
     @property
     def is_monolithic(self) -> bool:
@@ -172,7 +171,7 @@ class AscendUnquantizedFusedMoEMethod(UnquantizedFusedMoEMethod):
 
         moe_comm_method = _EXTRA_CTX.moe_comm_method
 
-        if self._lora_enabled and self._lora_layer is not None:
+        if self._lora_enabled and hasattr(layer, '_lora_wrapper'):
             fused_experts_results = self._apply_with_lora(
                 layer=layer,
                 x=x,
@@ -203,7 +202,7 @@ class AscendUnquantizedFusedMoEMethod(UnquantizedFusedMoEMethod):
                 pertoken_scale=pertoken_scale,
             )
         if zero_expert_num > 0 and zero_expert_type is not None:
-            fused_experts_results.routed_out += zero_expert_result
+            fused_experts_results += zero_expert_result
         return fused_experts_results
 
     def _apply_fused(
@@ -296,7 +295,12 @@ class AscendUnquantizedFusedMoEMethod(UnquantizedFusedMoEMethod):
             "Please disable VLLM_ASCEND_ENABLE_FUSED_MC2 when using MoE LoRA."
         )
 
-        lora_layer = self._lora_layer
+        lora_layer = layer._lora_wrapper
+        assert lora_layer is not None, (
+            f"_apply_with_lora called but layer._lora_wrapper is None. "
+            f"_lora_enabled={self._lora_enabled}, "
+            f"layer type={type(layer).__name__}"
+        )
         num_experts = layer.local_num_experts
 
         routed_topk_ids = topk_ids
