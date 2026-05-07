@@ -113,7 +113,7 @@ class AttentionMaskBuilder310:
             self.swa_mask = torch_npu.npu_format_cast(nd_to_nz_2d(swa_mask), ACL_FORMAT_FRACTAL_NZ)
         return self.swa_mask
 
-    def get_attention_mask(self, causal:bool, model_config) -> torch.Tensor:
+    def get_attention_mask(self, causal: bool, model_config) -> torch.Tensor:
         """
         Retrieves the appropriate attention mask based on the model configuration.
 
