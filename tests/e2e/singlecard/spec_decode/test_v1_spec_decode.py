@@ -625,11 +625,6 @@ def test_dflash_acceptance(
     method: str,
     num_speculative_tokens: int,
 ):
-    from vllm_ascend.utils import vllm_version_is
-
-    if vllm_version_is("0.19.0"):
-        pytest.skip("Dflash tests are not supported on vLLM version 0.19.0")
-
     main_model_name = DFLASH[method]["main"]
     spec_model_name = DFLASH[method]["spec"]
 
@@ -660,13 +655,12 @@ def test_dflash_acceptance(
     ]
 
     speculative_config = {
-        "method": "draft_model",
+        "method": "dflash",
         "model": spec_model_name,
         "num_speculative_tokens": num_speculative_tokens,
-        "enforce_eager": True,
     }
 
-    compilation_config = CompilationConfig(cudagraph_capture_sizes=[9])
+    compilation_config = CompilationConfig(cudagraph_mode="FULL_DECODE_ONLY", cudagraph_capture_sizes=[9, 18])
 
     with VllmRunner(
         main_model_name,
