@@ -88,6 +88,18 @@ public:
         tokenPerExpertLayout = params.tokenPerExpertLayout;
         is_ping = true;
     }
+    CATLASS_DEVICE
+    void SetFlag()
+    {
+        AscendC::SetFlag<AscendC::HardEvent::V_MTE2>(EVENT_ID0);
+        AscendC::SetFlag<AscendC::HardEvent::V_MTE2>(EVENT_ID1);
+        AscendC::SetFlag<AscendC::HardEvent::V_MTE2>(EVENT_ID2);
+        AscendC::SetFlag<AscendC::HardEvent::V_MTE2>(EVENT_ID3);
+        AscendC::SetFlag<AscendC::HardEvent::S_MTE2>(EVENT_ID2);
+        AscendC::SetFlag<AscendC::HardEvent::S_MTE2>(EVENT_ID3);
+        AscendC::SetFlag<AscendC::HardEvent::MTE3_V>(EVENT_ID0);
+        AscendC::SetFlag<AscendC::HardEvent::MTE3_V>(EVENT_ID1);
+    }
 
     CATLASS_DEVICE
     void Finalize()
