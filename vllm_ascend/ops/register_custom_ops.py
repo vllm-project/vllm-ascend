@@ -255,6 +255,46 @@ def _device_print_str_impl(value: str):
 def _device_print_str_impl_fake(value: str):
     return
 
+
+def device_print_op_tensor(x: torch.Tensor) -> torch.Tensor:
+    torch.ops._C_ascend.device_print_tensor(x)
+    return x
+
+def device_print_op_str(x: str) -> torch.Tensor:
+    torch.ops._C_ascend.device_print(x)
+    return torch.ones(1)
+
+def device_print_op_size(x: torch.Size) -> torch.Tensor:
+    torch.ops._C_ascend.device_print(x.size)
+    return torch.ones(1)
+
+direct_register_custom_op(
+    op_name="device_print_op_tensor",
+    op_func=device_print_op_tensor,
+    fake_impl=lambda x: torch.empty_like(x),
+    mutates_args=[],
+    dispatch_key="PrivateUse1",
+)
+
+direct_register_custom_op(
+    op_name="device_print_op_str",
+    op_func=device_print_op_str,
+    fake_impl=lambda x: torch.empty_like(torch.ones(1)),
+    mutates_args=[],
+    dispatch_key="PrivateUse1",
+)
+
+direct_register_custom_op(
+    op_name="device_print_op_size",
+    op_func=device_print_op_size,
+    fake_impl=lambda x: torch.empty_like(torch.ones(1)),
+    mutates_args=[],
+    dispatch_key="PrivateUse1",
+)
+
+
+
+
 direct_register_custom_op(
     op_name="device_print_str",
     op_func=_device_print_str_impl,
