@@ -68,7 +68,8 @@ def partition(files: list[TestFile], rank: int, size: int) -> list[TestFile]:
     print(f"Partitioning {len(active)} files")
     if not active or size <= 0 or size > len(active):
         return []
-
+    if not (0 <= rank < size):
+        raise ValueError(f"rank={rank} 必须满足 0 <= rank < size={size}")
     # Sort descending by weight; use original index as tiebreaker to be stable
     indexed = sorted(enumerate(active), key=lambda x: (-x[1].estimated_time, x[0]))
 
@@ -79,8 +80,6 @@ def partition(files: list[TestFile], rank: int, size: int) -> list[TestFile]:
         buckets[lightest].append(idx)
         sums[lightest] += test.estimated_time
     # Sort each bucket ascending by estimated_time for better feedback and developer experience
-    indices = [i for i in buckets[rank] if i < len(active)]
-    print(f"Valid indices for rank {rank}: {indices}")
     return sorted([active[i] for i in buckets[rank]], key=lambda f: f.estimated_time, reverse=True)
 
 
