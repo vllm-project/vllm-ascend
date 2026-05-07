@@ -61,7 +61,7 @@ msgstr "概述"
 
 #: ../../source/developer_guide/Design_Documents/ModelRunner_prepare_inputs.md:26
 msgid "1. Obtain inputs"
-msgstr "1. 获取输入"
+msgstr "1.获取输入"
 
 #: ../../source/developer_guide/Design_Documents/ModelRunner_prepare_inputs.md:28
 msgid "The workflow of obtaining inputs:"
@@ -100,7 +100,7 @@ msgstr "**注意**：`Token IDs` 是模型的输入，因此我们也称它们�
 
 #: ../../source/developer_guide/Design_Documents/ModelRunner_prepare_inputs.md:40
 msgid "2. Build inputs attention metadata"
-msgstr "2. 构建输入注意力元数据"
+msgstr "2.构建输入注意力元数据"
 
 #: ../../source/developer_guide/Design_Documents/ModelRunner_prepare_inputs.md:42
 msgid "A model requires these attention metadata during the forward pass:"
@@ -273,7 +273,7 @@ msgstr ""
 
 #: ../../source/developer_guide/Design_Documents/ModelRunner_prepare_inputs.md:105
 msgid "1. Get token positions"
-msgstr "1. 获取 token positions"
+msgstr "1.获取 token positions"
 
 #: ../../source/developer_guide/Design_Documents/ModelRunner_prepare_inputs.md:107
 msgid ""
@@ -313,7 +313,7 @@ msgstr ""
 
 #: ../../source/developer_guide/Design_Documents/ModelRunner_prepare_inputs.md:115
 msgid "2. Get token indices"
-msgstr "2. 获取 token indices"
+msgstr "2.获取 token indices"
 
 #: ../../source/developer_guide/Design_Documents/ModelRunner_prepare_inputs.md:117
 msgid ""
@@ -358,7 +358,7 @@ msgstr ""
 
 #: ../../source/developer_guide/Design_Documents/ModelRunner_prepare_inputs.md:139
 msgid "3. Retrieve the Token IDs"
-msgstr "3. 检索 Token IDs"
+msgstr "3.检索 Token IDs"
 
 #: ../../source/developer_guide/Design_Documents/ModelRunner_prepare_inputs.md:141
 msgid ""
