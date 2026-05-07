@@ -488,10 +488,7 @@ class KVCacheSendingLayerThread(threading.Thread):
                         transfer_meta.req_ids,
                         session_id,
                     )
-                    for req_id in transfer_meta.req_ids:
-                        self.failed_reqs.add(req_id)
-                        req_meta = send_task.send_request[req_id]
-                        self.callback_func(req_id, req_meta, layer_group_idx, trans_flag=False)
+                    self.failed_reqs.add(req_id)
                 else:
                     req_end_time = time.perf_counter()
                     total_transfer_size = sum(transfer_meta.length) / 1024
@@ -503,11 +500,16 @@ class KVCacheSendingLayerThread(threading.Thread):
                         session_id,
                         req_transfer_elapsed,
                     )
-                    if send_task.layer_idx == (self.total_layers - 1):
-                        for req_id in transfer_meta.req_ids:
-                            req_meta = send_task.send_request[req_id]
-                            if req_meta.chunk_finish:
+                if send_task.layer_idx == (self.total_layers - 1):
+                    for req_id in transfer_meta.req_ids:
+                        req_meta = send_task.send_request[req_id]
+                        if req_meta.chunk_finish:
+                            if req_id in self.failed_reqs:
+                                self.callback_func(req_id, req_meta, layer_group_idx, trans_flag=False)
+                                self.failed_reqs.discard(req_id)
+                            else:
                                 self.callback_func(req_id, req_meta, layer_group_idx, trans_flag=True)
+
 
 
 class KVCacheRecvingLayerThread(threading.Thread):
@@ -619,7 +621,7 @@ class KVCacheRecvingLayerThread(threading.Thread):
                         sock.send_multipart((identity, b"", b"ACK"))
                     elif msg[0] == FAILED_SENDING_MSG:
                         request_id = msg[1]
-                        logger.error(f"Got FAILED_SENDING_MSG for request {request_id}, abort KV load.")
+                        logger.error("Got FAILED_SENDING_MSG for request %s, abort KV load.", msg[1])
                         self.update_failed_task(request_id)
                         sock.send_multipart((identity, b"", b"ACK"))
                     else:
@@ -1122,6 +1124,8 @@ class MooncakeLayerwiseConnectorWorker:
         self.k_buffer: torch.Tensor | None = None
         self.v_buffer: torch.Tensor | None = None
         self.virtual_request: set[str] = set()
+        self._invalid_block_ids: set[int] = set()
+        self._recving_metadata: dict[str, ReqMeta] = {}
 
     def create_kv_buffer(self, first_kv_cache_tuple):
         alignment = 2 * 1024 * 1024
@@ -1307,10 +1311,7 @@ class MooncakeLayerwiseConnectorWorker:
         done_recving = {self.request_map[s] for s in done_recving if s in self.request_map}
         done_recving.update(self.virtual_request)
         self.virtual_request = set()
-        for req_id in done_recving:
-            req_id = req_id[:-9]
-            self.request_map.pop(req_id, None)
-
+    
         failed_recving = (
             self.kv_recv_layer_thread.get_and_clear_failed_requests()
             if self.vllm_config.kv_transfer_config.is_kv_consumer and self.kv_recv_layer_thread is not None
@@ -1319,14 +1320,14 @@ class MooncakeLayerwiseConnectorWorker:
         failed_recving = {self.request_map[s] for s in failed_recving if s in self.request_map}
         for req_id in failed_recving:
             if meta := self._recving_metadata.get(req_id):
-                logger.warning(f"Request {req_id} failed during Layerwise transfer. Blocks marked as invalid: {meta.local_block_ids}")
+                logger.debug(f"Request {req_id} failed during layerwise transfer. Blocks marked as invalid: {meta.local_block_ids}")
                 self._invalid_block_ids.update(
                     tuple(block_id) for block_id in meta.local_block_ids
                 )
-                self._recving_metadata.pop(req_id, None)
-                req_id = req_id[:-9]
-                self.request_map.pop(req_id, None)
-                    
+        for req_id in done_recving.union(failed_recving):
+            org_req_id = req_id[:-9]
+            self.request_map.pop(org_req_id, None)
+            self._recving_metadata.pop(req_id, None)
         if len(done_recving) > 0:
             logger.info(
                 "Number of completed KV cache recv requests: %s, receive requests: %s", len(done_recving), done_recving
@@ -1517,6 +1518,7 @@ class MooncakeLayerwiseConnectorWorker:
                 external_req_id = get_external_request_id(req_id)
                 assert self.kv_recv_layer_thread is not None
                 self.request_map[external_req_id] = req_id
+                self._recving_metadata[req_id] = meta
         elif self.vllm_config.kv_transfer_config.is_kv_producer:
             # update trans info
             update_metadata = {}
