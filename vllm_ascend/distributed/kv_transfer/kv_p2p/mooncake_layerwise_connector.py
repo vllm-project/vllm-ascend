@@ -1320,9 +1320,8 @@ class MooncakeLayerwiseConnectorWorker:
         failed_recving = {self.request_map[s] for s in failed_recving if s in self.request_map}
         for req_id in failed_recving:
             if meta := self._recving_metadata.get(req_id):
-                logger.debug(f"Request {req_id} failed during layerwise transfer. Blocks marked as invalid: {meta.local_block_ids}")
                 self._invalid_block_ids.update(
-                    tuple(block_id) for block_id in meta.local_block_ids
+                    block_id for group in meta.local_block_ids for block_id in group
                 )
         for req_id in done_recving.union(failed_recving):
             org_req_id = req_id[:-9]
