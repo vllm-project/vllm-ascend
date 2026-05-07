@@ -37,6 +37,7 @@ def env_config() -> EnvConfig:
 
 def build_model_args(eval_config, tp_size):
     serve_cfg = eval_config.get("serve", {})
+
     # Keep backward compatibility with existing configs that place serve args
     # at the top level instead of under "serve".
     def _cfg(key, default=None):
