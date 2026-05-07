@@ -463,5 +463,5 @@ def record_failed_blocks(
 ) -> set[int]:
     failed_blocks = {block_id for block_id, code in zip(block_ids, ret_codes) if code != 0}
     if failed_blocks:
-        logger.error(f"Failed to load blocks: {failed_blocks}")
+        logger.error("Failed to load blocks: %s", failed_blocks)
     return failed_blocks
