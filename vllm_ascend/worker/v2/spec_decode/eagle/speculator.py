@@ -31,14 +31,19 @@ from vllm.v1.worker.gpu.block_table import BlockTables
 from vllm.v1.worker.gpu.input_batch import InputBatch
 from vllm.v1.worker.gpu.model_states.interface import ModelState
 from vllm.v1.worker.gpu.spec_decode.eagle import speculator as vllm_speculator
-from vllm.v1.worker.gpu.spec_decode.eagle.cudagraph import EagleCudaGraphManager
-from vllm.v1.worker.gpu.spec_decode.eagle.speculator import EagleSpeculator, gumbel_sample, update_eagle_inputs
 
 from vllm_ascend.attention.attention_v1 import AscendAttentionState
 from vllm_ascend.worker.v2.attn_utils import build_attn_metadata
 from vllm_ascend.worker.v2.input_batch import AscendInputBuffers
-from vllm_ascend.worker.v2.spec_decode.eagle.aclgraph import EagleAclGraphManager
-
+from vllm_ascend.utils import vllm_version_is
+if not vllm_version_is("0.20.1"):
+    from vllm.v1.worker.gpu.spec_decode.eagle.cudagraph import PrefillEagleCudaGraphManager
+    from vllm.v1.worker.gpu.spec_decode.eagle.speculator import EagleSpeculator, update_eagle_draft_inputs
+    from vllm_ascend.worker.v2.spec_decode.eagle.aclgraph import PrefillEagleAclGraphManager
+else:
+    from vllm.v1.worker.gpu.spec_decode.eagle.cudagraph import EagleCudaGraphManager
+    from vllm.v1.worker.gpu.spec_decode.eagle.speculator import EagleSpeculator, gumbel_sample, update_eagle_inputs
+    from vllm_ascend.worker.v2.spec_decode.eagle.aclgraph import EagleAclGraphManager
 
 class AscendEagleSpeculator(EagleSpeculator):
     def __init__(self, vllm_config: VllmConfig, device: torch.device):
@@ -159,28 +164,25 @@ class AscendEagleSpeculator(EagleSpeculator):
 
         self.attn_backends = attn_backends
 
-    def generate_draft(
-        self,
-        num_reqs: int,
-        num_tokens_padded: int,
-        attn_metadata: dict[str, Any],
-        slot_mappings: dict[str, torch.Tensor],
-        num_tokens_across_dp: torch.Tensor | None,
-        cudagraph_runtime_mode: CUDAGraphMode = CUDAGraphMode.NONE,
-    ):
-        """Override GPU EagleSpeculator.generate_draft for Ascend NPUs, because
-        attn_metadata is created in super propose method, it does not have some
-        attribute that Ascend attention backend needs, so we update it.
-        """
-        self._init_decode_attn_metadata(attn_metadata, num_reqs)
-        self._increment_decode_attn_metadata(attn_metadata)
-
-        # NOTE(drslark): following lines (from 145 to 184) come from raw gpu's generate_draft logic
-        pos = self.input_buffers.positions[:num_reqs]
-        query_start_loc = self.input_buffers.query_start_loc[: num_reqs + 1]
-        idx_mapping = self.idx_mapping[:num_reqs]
-        for step in range(1, self.num_speculative_steps):
-            # Run the eagle model.
+    if not vllm_version_is("0.20.1"):
+        def generate_draft(
+            self,
+            num_reqs: int,
+            num_tokens_padded: int,
+            attn_metadata: dict[str, Any],
+            slot_mappings: dict[str, torch.Tensor],
+            num_tokens_across_dp: torch.Tensor | None,
+            cudagraph_runtime_mode: CUDAGraphMode = CUDAGraphMode.NONE,
+        ):
+            """Override GPU EagleSpeculator.generate_draft for Ascend NPUs, because
+            attn_metadata is created in super propose method, it does not have some
+            attribute that Ascend attention backend needs, so we update it.
+            """
+            self._init_decode_attn_metadata(attn_metadata, num_reqs)
+            self._increment_decode_attn_metadata(attn_metadata)
+            idx_mapping = self.idx_mapping[:num_reqs]
+            positions = self.input_buffers.positions[:num_reqs]
+            # Run the eagle model forward pass.
             last_hidden_states, hidden_states = self.run_model(
                 num_tokens_padded,
                 attn_metadata,
@@ -189,36 +191,92 @@ class AscendEagleSpeculator(EagleSpeculator):
                 cudagraph_runtime_mode,
             )
             last_hidden_states = last_hidden_states[:num_reqs]
-            hidden_states = hidden_states[:num_reqs]
-            logits = self.model.compute_logits(last_hidden_states)
 
-            # NOTE(woosuk): We must add 1 to the positions to match the Gumbel noise
-            # used for draft and target sampling.
-            draft_tokens = gumbel_sample(
+            # Sample the draft tokens.
+            logits = self.model.compute_logits(last_hidden_states)
+            draft_tokens = self._sample_draft(
                 logits,
                 idx_mapping,
-                self.temperature,
-                self.seeds,
-                pos + 1,
-                apply_temperature=True,
-                processed_logits_out=self.draft_logits[:, step] if self.draft_logits is not None else None,
+                positions,
+                self.current_draft_step,
+                self.draft_logits,
             )
-            self.draft_tokens[:num_reqs, step] = draft_tokens
 
-            if step < self.num_speculative_steps - 1:
-                # Update the inputs for the next step.
-                update_eagle_inputs(
-                    draft_tokens,
-                    hidden_states,
-                    self.input_buffers,
-                    self.hidden_states,
-                    self.max_model_len,
+            # Update the inputs for the next step.
+            update_eagle_draft_inputs(
+                draft_tokens,
+                self.current_draft_step,
+                hidden_states,
+                self.draft_tokens,
+                self.hidden_states,
+                self.input_buffers,
+                num_reqs,
+                self.max_model_len,
+                self.num_speculative_steps,
+            )
+            # npu's own update logic
+            self._increment_decode_attn_metadata(attn_metadata)
+    else:
+        def generate_draft(
+            self,
+            num_reqs: int,
+            num_tokens_padded: int,
+            attn_metadata: dict[str, Any],
+            slot_mappings: dict[str, torch.Tensor],
+            num_tokens_across_dp: torch.Tensor | None,
+            cudagraph_runtime_mode: CUDAGraphMode = CUDAGraphMode.NONE,
+        ):
+            """Override GPU EagleSpeculator.generate_draft for Ascend NPUs, because
+            attn_metadata is created in super propose method, it does not have some
+            attribute that Ascend attention backend needs, so we update it.
+            """
+            self._init_decode_attn_metadata(attn_metadata, num_reqs)
+            self._increment_decode_attn_metadata(attn_metadata)
+
+            # NOTE(drslark): following lines (from 145 to 184) come from raw gpu's generate_draft logic
+            pos = self.input_buffers.positions[:num_reqs]
+            query_start_loc = self.input_buffers.query_start_loc[: num_reqs + 1]
+            idx_mapping = self.idx_mapping[:num_reqs]
+            for step in range(1, self.num_speculative_steps):
+                # Run the eagle model.
+                last_hidden_states, hidden_states = self.run_model(
+                    num_tokens_padded,
+                    attn_metadata,
+                    slot_mappings,
+                    num_tokens_across_dp,
+                    cudagraph_runtime_mode,
                 )
-                if attn_metadata is not None:
-                    self.block_tables.compute_slot_mappings(idx_mapping, query_start_loc, pos, num_tokens_padded)
+                last_hidden_states = last_hidden_states[:num_reqs]
+                hidden_states = hidden_states[:num_reqs]
+                logits = self.model.compute_logits(last_hidden_states)
 
-                    # npu's own update logic
-                    self._increment_decode_attn_metadata(attn_metadata)
+                # NOTE(woosuk): We must add 1 to the positions to match the Gumbel noise
+                # used for draft and target sampling.
+                draft_tokens = gumbel_sample(
+                    logits,
+                    idx_mapping,
+                    self.temperature,
+                    self.seeds,
+                    pos + 1,
+                    apply_temperature=True,
+                    processed_logits_out=self.draft_logits[:, step] if self.draft_logits is not None else None,
+                )
+                self.draft_tokens[:num_reqs, step] = draft_tokens
+
+                if step < self.num_speculative_steps - 1:
+                    # Update the inputs for the next step.
+                    update_eagle_inputs(
+                        draft_tokens,
+                        hidden_states,
+                        self.input_buffers,
+                        self.hidden_states,
+                        self.max_model_len,
+                    )
+                    if attn_metadata is not None:
+                        self.block_tables.compute_slot_mappings(idx_mapping, query_start_loc, pos, num_tokens_padded)
+
+                        # npu's own update logic
+                        self._increment_decode_attn_metadata(attn_metadata)
 
     @torch.inference_mode()
     def run_model(
@@ -381,17 +439,31 @@ def torch_gather_wrapper():
     finally:
         torch.gather = original_gather
 
+if not vllm_version_is("0.20.1"):
+    @contextmanager
+    def graph_manager_wrapper(speculator):
+        """Context manager to override graph manager."""
+        original_graph_manager = PrefillEagleCudaGraphManager
 
-@contextmanager
-def graph_manager_wrapper(speculator):
-    """Context manager to override graph manager."""
-    original_graph_manager = EagleCudaGraphManager
+        def factory(vllm_config: VllmConfig, device: torch.device, cudagraph_mode: CUDAGraphMode, decode_query_len: int):
+            return PrefillEagleAclGraphManager(vllm_config, device, cudagraph_mode, decode_query_len, speculator)
 
-    def factory(vllm_config: VllmConfig, device: torch.device, cudagraph_mode: CUDAGraphMode, decode_query_len: int):
-        return EagleAclGraphManager(vllm_config, device, cudagraph_mode, decode_query_len, speculator)
+        try:
+            vllm_speculator.PrefillEagleCudaGraphManager = factory
+            yield
+        finally:
+            vllm_speculator.PrefillEagleCudaGraphManager = original_graph_manager
+else:
+    @contextmanager
+    def graph_manager_wrapper(speculator):
+        """Context manager to override graph manager."""
+        original_graph_manager = EagleCudaGraphManager
 
-    try:
-        vllm_speculator.EagleCudaGraphManager = factory
-        yield
-    finally:
-        vllm_speculator.EagleCudaGraphManager = original_graph_manager
+        def factory(vllm_config: VllmConfig, device: torch.device, cudagraph_mode: CUDAGraphMode, decode_query_len: int):
+            return EagleAclGraphManager(vllm_config, device, cudagraph_mode, decode_query_len, speculator)
+
+        try:
+            vllm_speculator.EagleCudaGraphManager = factory
+            yield
+        finally:
+            vllm_speculator.EagleCudaGraphManager = original_graph_manager

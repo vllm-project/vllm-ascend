@@ -66,27 +66,16 @@ class ProfilingChunkScheduler(Scheduler):
         include_finished_set: bool = False,
         log_stats: bool = False,
     ) -> None:
-        if vllm_version_is("0.19.1"):
-            super().__init__(
-                vllm_config,
-                kv_cache_config,
-                structured_output_manager,
-                block_size,
-                mm_registry=mm_registry,
-                include_finished_set=include_finished_set,
-                log_stats=log_stats,
-            )
-        else:
-            super().__init__(
-                vllm_config,
-                kv_cache_config,
-                structured_output_manager,
-                block_size,
-                hash_block_size=hash_block_size,
-                mm_registry=mm_registry,
-                include_finished_set=include_finished_set,
-                log_stats=log_stats,
-            )
+        super().__init__(
+            vllm_config,
+            kv_cache_config,
+            structured_output_manager,
+            block_size,
+            hash_block_size=hash_block_size,
+            mm_registry=mm_registry,
+            include_finished_set=include_finished_set,
+            log_stats=log_stats,
+        )
 
         from vllm_ascend.ascend_config import get_ascend_config, init_ascend_config
 
