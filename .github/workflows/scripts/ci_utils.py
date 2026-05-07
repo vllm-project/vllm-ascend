@@ -72,7 +72,7 @@ def run_tests(
         report_path: If provided, write a Markdown timing report here.
 
     Returns:
-        (exit_code, records) — exit_code is 0 on full success, -1 otherwise.
+        (exit_code, records) — exit_code is 0 on full success, 1 otherwise.
     """
     records: list[TestRecord] = []
     all_passed = True
@@ -130,4 +130,4 @@ def run_tests(
         print(f"  {icon} {r.name}  ({r.elapsed:.0f}s)")
     print(flush=True)
 
-    return (0 if all_passed else -1), records
+    return (0 if all_passed else 1), records
