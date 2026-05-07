@@ -110,7 +110,7 @@ class DeploymentMode:
     EPD = "e-p-d"
     E_DISAGG = "e-pd"
     PD_DISAGG = "p-d"
-    # 每种模式对应的活跃实例类型
+    # Active instance types for each deployment mode
     ACTIVE_TYPES = {
         EPD: [InstanceType.ENCODE, InstanceType.PREFILL,
   InstanceType.DECODE],
@@ -159,27 +159,27 @@ class ProxyState:
         self.req_data_dict = {}
 
     def _rebuild_encoder_heap(self):
-        """重建 encoder 最小堆（增删实例后调用）。"""
+        """Rebuild encoder min-heap (call after adding/removing instances)."""
         self.encoder_heap = [(0, i, server) for i, server in enumerate(self.encoders)]
         heapq.heapify(self.encoder_heap)
 
     def _rebuild_prefiller_heap(self):
-        """重建 prefiller 最小堆（增删实例后调用）。"""
+        """Rebuild prefiller min-heap (call after adding/removing instances)."""
         self.prefiller_heap = [(0, i, server) for i, server in enumerate(self.prefillers)]
         heapq.heapify(self.prefiller_heap)
 
     def _rebuild_decoder_heap(self):
-        """重建 decoder 最小堆（增删实例后调用）。"""
+        """Rebuild decoder min-heap (call after adding/removing instances)."""
         self.decoder_heap = [(0, i, server) for i, server in enumerate(self.decoders)]
         heapq.heapify(self.decoder_heap)
     
     def _rebuild_pd_heap(self):
-        """重建 pd  最小堆（增删实例后调用）。"""
+        """Rebuild pd min-heap (call after adding/removing instances)."""
         self.pd_heap = [(0, i, server) for i, server in enumerate(self.pds)]
         heapq.heapify(self.pd_heap)
 
     async def add_instances(self, instance_type: str, instances: list["ServerState"]):
-        """动态添加后端实例，自动去重并重建对应堆。"""
+        """Dynamically add backend instances, auto-deduplicate and rebuild the corresponding heap."""
         async with self.instances_lock:
             if instance_type == InstanceType.ENCODE:
                 target = self.encoders
@@ -209,7 +209,7 @@ class ProxyState:
             return added
     
     async def remove_instances(self, instance_type: str, instances: list["ServerState"]):
-        """动态移除后端实例，并重建对应堆。"""
+        """Dynamically remove backend instances and rebuild the corresponding heap."""
         async with self.instances_lock:
             if instance_type == InstanceType.ENCODE:
                 target = self.encoders
@@ -429,9 +429,9 @@ def parse_args():
         raise ValueError("Number of encoder hosts must match number of encoder ports")
     if args.deployment_mode is None:
         args.deployment_mode = DeploymentMode.detect(args)
-        logger.info(f"Auto-detected deployment mode: {args.deployment_mode}")
+        logger.info("Auto-detected deployment mode: %s", args.deployment_mode)
     else:
-        logger.info(f"Using specified deployment mode: {args.deployment_mode}")
+        logger.info("Using specified deployment mode: %s", args.deployment_mode)
     args.prefiller_instances = list(zip(args.prefiller_hosts, args.prefiller_ports))
     args.decoder_instances = list(zip(args.decoder_hosts, args.decoder_ports))
     args.encoder_instances = list(zip(args.encoder_hosts, args.encoder_ports))
@@ -446,7 +446,7 @@ async def lifespan(app: FastAPI):
 
     cluster_manager = ClusterManager(global_args, InstanceType)
     mode = global_args.deployment_mode
-    # 启动初始集群，返回 dict: {"encode": [...], "prefill": [...], ...}
+    # Start the initial cluster, returns dict: {"encode": [...], "prefill": [...], ...}
     initial_instances = await cluster_manager.start_initial_cluster(mode)
     
     proxy_state = ProxyState([], [], [], [])
@@ -531,12 +531,12 @@ async def send_request_to_service(
                 result_future.set_result(response.json()["kv_transfer_params"])
             return
         except (httpx.RequestError, httpx.HTTPStatusError) as e:
-            logger.warning(f"Attempt {attempt} failed for {endpoint}: {str(e)}")
+            logger.warning("Attempt %s failed for %s: %s", attempt, endpoint, str(e))
             last_exc = e
             if attempt < max_retries:
                 await asyncio.sleep(base_delay * (2 ** (attempt - 1)))
             else:
-                logger.error(f"All {max_retries} attempts failed for {endpoint}.")
+                logger.error("All %s attempts failed for %s.", max_retries, endpoint)
                 raise last_exc
 
 async def send_request_to_encode_service(
@@ -561,12 +561,12 @@ async def send_request_to_encode_service(
             response.raise_for_status()
             return response
         except (httpx.RequestError, httpx.HTTPStatusError) as e:
-            logger.warning(f"Attempt {attempt} failed for {endpoint}: {str(e)}")
+            logger.warning("Attempt %s failed for %s: %s", attempt, endpoint, str(e))
             last_exc = e
             if attempt < max_retries:
                 await asyncio.sleep(base_delay * (2 ** (attempt - 1)))
             else:
-                logger.error(f"All {max_retries} attempts failed for {endpoint}.")
+                logger.error("All %s attempts failed for %s.", max_retries, endpoint)
                 raise last_exc
 
 
@@ -1001,13 +1001,13 @@ async def _handle_adjust_instances(adjust_mode: str, request: Request):
 
 @app.post("/instances/add")
 async def handle_add_instances(request: Request):
-    """动态添加后端实例的 API 端点。"""
+    """API endpoint for dynamically adding backend instances."""
     return await _handle_adjust_instances("add", request)
 
 
 @app.post("/instances/remove")
 async def handle_remove_instances(request: Request):
-    """动态移除后端实例的 API 端点。"""
+    """API endpoint for dynamically removing backend instances."""
     return await _handle_adjust_instances("remove", request)
 
 @app.post("/v1/metaserver")
