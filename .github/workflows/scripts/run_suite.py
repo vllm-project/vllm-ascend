@@ -65,7 +65,6 @@ def partition(files: list[TestFile], rank: int, size: int) -> list[TestFile]:
     Files within the returned group are sorted ascending by estimated_time.
     """
     active = [f for f in files if not f.is_skipped]
-    print(f"Partitioning {len(active)} files")
     if not active or size <= 0 or size > len(active):
         return []
     # Sort descending by weight; use original index as tiebreaker to be stable
