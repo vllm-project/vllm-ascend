@@ -626,6 +626,13 @@ class AscendSpecDecodeBaseProposer(SpecDecodeBaseProposer):
                 common_attn_metadata.seq_lens_cpu = self._adjust_tensor(
                     self.runner.optimistic_seq_lens_cpu, num_reqs_padded
                 )
+                # Keep the upstream-canonical mirror in sync with the padded
+                # subclass field. NPU attention backends prefer ``_seq_lens_cpu``
+                # over ``seq_lens_cpu``; a stale length here (carried over from
+                # the cm_base/prepare_inputs_padded pre-padding view) would
+                # later collide with the new ``num_reqs_padded`` query_lens
+                # in builders such as attention_cp.
+                common_attn_metadata._seq_lens_cpu = common_attn_metadata.seq_lens_cpu
             if common_attn_metadata.num_computed_tokens_cpu is not None:
                 common_attn_metadata.num_computed_tokens_cpu = self._adjust_tensor(
                     common_attn_metadata.num_computed_tokens_cpu, num_reqs_padded
@@ -1546,7 +1553,14 @@ class AscendSpecDecodeBaseProposer(SpecDecodeBaseProposer):
 
         device = common_attn_metadata.query_start_loc.device
         query_start_loc_cpu = common_attn_metadata.query_start_loc_cpu[: num_actual_reqs + 1]
-        seq_lens_cpu = common_attn_metadata.seq_lens_cpu[:num_actual_reqs]
+        # Prefer the upstream-canonical ``_seq_lens_cpu``; fall back to the
+        # Ascend subclass field. In async-spec mode the model runner only
+        # populates ``_seq_lens_cpu`` (optimistic_seq_lens_cpu) and leaves
+        # ``seq_lens_cpu`` as None, so an unguarded read here would crash.
+        if common_attn_metadata._seq_lens_cpu is not None:
+            seq_lens_cpu = common_attn_metadata._seq_lens_cpu[:num_actual_reqs]
+        else:
+            seq_lens_cpu = common_attn_metadata.seq_lens_cpu[:num_actual_reqs]
         new_seq_lens_cpu = seq_lens_cpu - num_rejected_tokens
 
         # [0, q1, q1 + q2, q1 + q2 + q3] -> [q1, q2, q3]
@@ -1597,12 +1611,17 @@ class AscendSpecDecodeBaseProposer(SpecDecodeBaseProposer):
         # NOTE: Currently positions and seq_lens are not used in attn forward
         # so we do not need to fixed them. But if they are used in the future,
         # we should fixed them.
+        # Mirror ``new_seq_lens_cpu`` into the upstream-canonical
+        # ``_seq_lens_cpu`` slot so consumers preferring the parent field
+        # (e.g. attention_cp builder) see the rejection-adjusted value.
         spec_common_attn_metadata = AscendCommonAttentionMetadata(
             query_start_loc=new_query_start_loc_cpu.to(device, non_blocking=True),
             query_start_loc_cpu=new_query_start_loc_cpu,
             seq_lens=new_seq_lens_cpu.to(device, non_blocking=True),
             seq_lens_cpu=new_seq_lens_cpu,
+            _seq_lens_cpu=new_seq_lens_cpu,
             num_computed_tokens_cpu=common_attn_metadata.num_computed_tokens_cpu,
+            _num_computed_tokens_cpu=common_attn_metadata._num_computed_tokens_cpu,
             num_reqs=common_attn_metadata.num_reqs,
             num_actual_tokens=total_num_tokens,
             num_input_tokens=common_attn_metadata.num_input_tokens,
@@ -1677,10 +1696,18 @@ class AscendSpecDecodeBaseProposer(SpecDecodeBaseProposer):
         # NOTE: Currently positions and seq_lens are not used in attn forward
         # so we do not need to fixed them. But if they are used in the future,
         # we should fixed them.
+        # ``prepare_inputs_padded`` does not change ``seq_lens`` (rejected
+        # tokens are kept as padding and filtered out later). Pass through
+        # both the subclass ``seq_lens_cpu`` field and the upstream-canonical
+        # ``_seq_lens_cpu`` field unchanged. In async-spec mode only the
+        # latter is populated (subclass field is None to signal "GPU is
+        # authoritative"); dropping ``_seq_lens_cpu`` here causes downstream
+        # backends (e.g. attention_cp) to crash on a None subscript.
         spec_common_attn_metadata = AscendCommonAttentionMetadata(
             query_start_loc=common_attn_metadata.query_start_loc,
             query_start_loc_cpu=query_start_loc_cpu,
             seq_lens_cpu=common_attn_metadata.seq_lens_cpu,
+            _seq_lens_cpu=common_attn_metadata._seq_lens_cpu,
             num_reqs=common_attn_metadata.num_reqs,
             num_actual_tokens=common_attn_metadata.num_actual_tokens if self.pcp_size > 1 else total_num_tokens,
             num_input_tokens=common_attn_metadata.num_input_tokens,
@@ -1692,6 +1719,7 @@ class AscendSpecDecodeBaseProposer(SpecDecodeBaseProposer):
             attn_state=self.runner.attn_state,
             decode_token_per_req=self.runner.decode_token_per_req,
             num_computed_tokens_cpu=common_attn_metadata.num_computed_tokens_cpu,
+            _num_computed_tokens_cpu=common_attn_metadata._num_computed_tokens_cpu,
             seq_lens=common_attn_metadata.seq_lens,
             max_seq_len=0,
         )
