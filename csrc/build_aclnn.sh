@@ -121,7 +121,11 @@ elif [[ "$SOC_VERSION" =~ ^ascend910b ]]; then
         "chunk_gated_delta_rule_fwd_h"
     )
 
+<<<<<<< HEAD
     CUSTOM_OPS=$(IFS=';'; echo "${CUSTOM_OPS_ARRAY[*]}")
+=======
+    CUSTOM_OPS="moe_grouped_matmul;grouped_matmul_swiglu_quant_weight_nz_tensor_list;lightning_indexer_vllm;sparse_flash_attention;matmul_allreduce_add_rmsnorm;moe_init_routing_custom;moe_gating_top_k;add_rms_norm_bias;apply_top_k_top_p_custom;transpose_kv_cache_by_block;copy_and_expand_eagle_inputs;causal_conv1d;lightning_indexer_quant;hamming_dist_top_k;reshape_and_cache_bnsd;recurrent_gated_delta_rule;slot_mapping;"
+>>>>>>> c1703487 ([Performance] change slot_mapping to ascend c op)
     SOC_ARG="ascend910b"
 elif [[ "$SOC_VERSION" =~ ^ascend910_93 ]]; then
     log "matched SOC branch: ascend910_93"
@@ -178,10 +182,14 @@ elif [[ "$SOC_VERSION" =~ ^ascend910_93 ]]; then
         "hamming_dist_top_k"
         "reshape_and_cache_bnsd"
         "recurrent_gated_delta_rule"
+<<<<<<< HEAD
         "fused_gdn_gating"
         "ngram_spec_decode"
         "chunk_fwd_o"
         "chunk_gated_delta_rule_fwd_h"
+=======
+        "slot_mapping"
+>>>>>>> c1703487 ([Performance] change slot_mapping to ascend c op)
     )
     CUSTOM_OPS=$(IFS=';'; echo "${CUSTOM_OPS_ARRAY[*]}")
     SOC_ARG="ascend910_93"
