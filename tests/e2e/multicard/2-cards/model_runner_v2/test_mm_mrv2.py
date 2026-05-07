@@ -17,14 +17,12 @@
 # Adapted from vllm/tests/basic_correctness/test_basic_correctness.py
 #
 import json
-import os
-from unittest.mock import patch
 
 import openai
 import pytest
 from vllm.utils.network_utils import get_open_port
 
-from tests.e2e.conftest import RemoteOpenAIServer, VllmRunner
+from tests.e2e.conftest import RemoteOpenAIServer
 
 
 @pytest.mark.asyncio
@@ -43,11 +41,11 @@ async def test_mm_mrv2():
         "--compilation-config",
         compilation_config,
     ]
-    env_dict = {"HCCL_BUFFSIZE": "1024",}
-    env_dict.update({"VLLM_USE_V2_MODEL_RUNNER": "1"})
-    additional_config = {
-      "enable_cpu_binding": true
+    env_dict = {
+        "HCCL_BUFFSIZE": "1024"
     }
+    env_dict.update({"VLLM_USE_V2_MODEL_RUNNER": "1"})
+    additional_config = {"enable_cpu_binding": true}
     server_args.extend(["--additional-config", json.dumps(additional_config)])
     with RemoteOpenAIServer(model, server_args, server_port=port, auto_port=False, env_dict=env_dict) as server:
         client = server.get_async_client()
