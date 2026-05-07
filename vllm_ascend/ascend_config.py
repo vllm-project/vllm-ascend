@@ -110,6 +110,8 @@ class AscendConfig:
         self.enable_cpu_binding = additional_config.get("enable_cpu_binding", True)
         self.enable_context_parallel = additional_config.get("enable_context_parallel", False)
         print(f"[PATCH_VERIFY] AscendConfig.enable_context_parallel initialized: {self.enable_context_parallel}")
+        self.enable_matmul_allreduce = additional_config.get("enable_matmul_allreduce", False)
+        print(f"[PATCH_VERIFY] AscendConfig.enable_matmul_allreduce initialized: {self.enable_matmul_allreduce}")
         # HCCL library path configuration (replaces HCCL_SO_PATH env var)
         self.hccl_so_path = additional_config.get("hccl_so_path", None)
         logger.info(f"[PATCH_VERIFY] AscendConfig.hccl_so_path initialized: {self.hccl_so_path}")

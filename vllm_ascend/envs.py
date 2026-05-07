@@ -66,9 +66,8 @@ env_variables: dict[str, Callable[[], Any]] = {
     # that the correct package is installed.
     # DEPRECATED: VLLM_VERSION env var is removed. Use --additional-config '{"vllm_version": "0.9.0"}'.
     #     "VLLM_VERSION": lambda: os.getenv("VLLM_VERSION", None),
-    # Whether to enable MatmulAllReduce fusion kernel when tensor parallel is enabled.
-    # this feature is supported in A2, and eager mode will get better performance.
-    "VLLM_ASCEND_ENABLE_MATMUL_ALLREDUCE": lambda: bool(int(os.getenv("VLLM_ASCEND_ENABLE_MATMUL_ALLREDUCE", "0"))),
+    # DEPRECATED: VLLM_ASCEND_ENABLE_MATMUL_ALLREDUCE env var is removed. Use --additional-config '{"enable_matmul_allreduce": true}'.
+    #     "VLLM_ASCEND_ENABLE_MATMUL_ALLREDUCE": lambda: bool(int(os.getenv("VLLM_ASCEND_ENABLE_MATMUL_ALLREDUCE", "0"))),
     # Whether to enable FlashComm optimization when tensor parallel is enabled.
     # This feature will get better performance when concurrency is large.
     # DEPRECATED: VLLM_ASCEND_ENABLE_FLASHCOMM1 env var is removed. Use --additional-config '{"enable_flashcomm1": true}'.

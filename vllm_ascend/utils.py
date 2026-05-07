@@ -806,7 +806,9 @@ def mlp_tp_enable() -> bool:
 
 
 def matmul_allreduce_enable() -> bool:
-    return envs_ascend.VLLM_ASCEND_ENABLE_MATMUL_ALLREDUCE
+    config_val = get_ascend_config().enable_matmul_allreduce
+    print(f"[PATCH_VERIFY] matmul_allreduce_enable: from Config = {config_val}")
+    return config_val
 
 
 def enable_sp_by_pass():

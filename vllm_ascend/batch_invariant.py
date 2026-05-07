@@ -74,11 +74,16 @@ def reduce_sum(x: torch.Tensor, dim: int | None = None, keepdim: bool = False) -
 
 
 def override_envs_for_invariance():
-    # enabling NZ mode introduces NZ format input to the triton operator,
-    # resulting in accuracy anomalies.
-    os.environ["VLLM_ASCEND_ENABLE_NZ"] = "0"
-    # fused operator can't ensure batch invariant, so we disable it.
-    os.environ["VLLM_ASCEND_ENABLE_MATMUL_ALLREDUCE"] = "0"
+    from vllm_ascend.ascend_config import get_ascend_config
+    try:
+        ascend_config = get_ascend_config()
+        ascend_config.weight_nz_mode = 0
+        ascend_config.enable_matmul_allreduce = False
+        print("[PATCH_VERIFY] override_envs_for_invariance: disabled weight_nz_mode and enable_matmul_allreduce via Config")
+    except RuntimeError:
+        os.environ["VLLM_ASCEND_ENABLE_NZ"] = "0"
+        os.environ["VLLM_ASCEND_ENABLE_MATMUL_ALLREDUCE"] = "0"
+        print("[PATCH_VERIFY] override_envs_for_invariance: Config not initialized, disabled via os.environ fallback")
 
     # communication determinism settings
     os.environ["HCCL_DETERMINISTIC"] = "strict"
