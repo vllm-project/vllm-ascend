@@ -157,7 +157,7 @@ class CPUKVCacheManager:
     def cache_and_free_slots(self, request_id: str):
         logger.debug("Cache and free slots for request %s in cpu_kv_cache_manager", request_id)
         if request_id not in self.req_to_free:
-            logger.Error(f"request {request_id} not in req_to_free, maybe bug!")
+            logger.error("request %s not in req_to_free, maybe bug!", request_id)
             return
         request = self.req_to_free[request_id]
         if not self.req_failed_to_allocate[request_id]:
