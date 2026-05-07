@@ -250,6 +250,13 @@ class GraphParams:
     workspaces: dict[int, torch.Tensor]
     handles: dict[int, list[torch_npu._C._NPUTaskGroupHandle]]
     attn_params: dict[int, list[tuple]]
+    # New: key -> (params, handle, event) mapping for reliable lookup
+    # Structure: {num_tokens: {layer_key: (params_tuple, handle, event)}}
+    attn_params_by_key: dict[int, dict[str, tuple]] = None
+
+    def __post_init__(self):
+        if self.attn_params_by_key is None:
+            self.attn_params_by_key = {size: {} for size in self.attn_params.keys()}
 
 
 _graph_params: GraphParams | None = None
@@ -264,6 +271,7 @@ def set_graph_params(aclgraph_capture_sizes: list[int]):
         {size: None for size in aclgraph_capture_sizes},
         {size: [] for size in aclgraph_capture_sizes},
         {size: [] for size in aclgraph_capture_sizes},
+        {size: {} for size in aclgraph_capture_sizes},  # attn_params_by_key
     )
 
 
@@ -289,6 +297,7 @@ def set_draft_graph_params(aclgraph_capture_sizes: list[int]):
         {size: None for size in aclgraph_capture_sizes},
         {size: [] for size in aclgraph_capture_sizes},
         {size: [] for size in aclgraph_capture_sizes},
+        {size: {} for size in aclgraph_capture_sizes},  # attn_params_by_key
     )
 
 
@@ -314,6 +323,7 @@ def set_draft_graph_prefill_params(aclgraph_capture_sizes: list[int]):
         {size: None for size in aclgraph_capture_sizes},
         {size: [] for size in aclgraph_capture_sizes},
         {size: [] for size in aclgraph_capture_sizes},
+        {size: {} for size in aclgraph_capture_sizes},  # attn_params_by_key
     )
 
 
