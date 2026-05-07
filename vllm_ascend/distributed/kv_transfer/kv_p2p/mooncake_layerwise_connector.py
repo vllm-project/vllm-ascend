@@ -80,6 +80,7 @@ if TYPE_CHECKING:
 DONE_SENDING_MSG = b"done_sending_msg"
 FAILED_SENDING_MSG = b"failed_sending_msg"
 
+
 @dataclass
 class LayerMetadata:
     tensor_group_idx: list[int]
@@ -511,7 +512,6 @@ class KVCacheSendingLayerThread(threading.Thread):
                                 self.callback_func(req_id, req_meta, layer_group_idx, trans_flag=True)
 
 
-
 class KVCacheRecvingLayerThread(threading.Thread):
     def __init__(
         self,
@@ -558,7 +558,7 @@ class KVCacheRecvingLayerThread(threading.Thread):
             failed_requests = self.failed_requests
             self.failed_requests = set()
         return failed_requests
-    
+
     def update_failed_task(self, req_id: str) -> None:
         """
         Handle a failed task by adding it to the failed_requests set and removing it from the task tracker.
@@ -733,7 +733,7 @@ class MooncakeLayerwiseConnector(KVConnectorBase_V1, SupportsHMA):
         """Get the finished recving and sending requests."""
         assert self.connector_worker is not None
         return self.connector_worker.get_finished()
-    
+
     def get_block_ids_with_load_errors(self) -> set[int]:
         """Get the block ids that have load errors."""
         assert self.connector_worker is not None
@@ -1311,7 +1311,7 @@ class MooncakeLayerwiseConnectorWorker:
         done_recving = {self.request_map[s] for s in done_recving if s in self.request_map}
         done_recving.update(self.virtual_request)
         self.virtual_request = set()
-    
+
         failed_recving = (
             self.kv_recv_layer_thread.get_and_clear_failed_requests()
             if self.vllm_config.kv_transfer_config.is_kv_consumer and self.kv_recv_layer_thread is not None
@@ -1332,7 +1332,7 @@ class MooncakeLayerwiseConnectorWorker:
                 "Number of completed KV cache recv requests: %s, receive requests: %s", len(done_recving), done_recving
             )
         return set(), done_recving
-    
+
     def get_block_ids_with_load_errors(self) -> set[int]:
         """
         Return and clear the set of block IDs that failed to load.
