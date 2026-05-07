@@ -149,7 +149,7 @@ jobs:
         strategy:
           fail-fast: false
           matrix:
-            part: [2]
+            part: [0]
             vllm: [d886c26d4d4fef7d079696beb4ece1cfb4b008a8]
         container:
           image: 'swr.cn-southwest-2.myhuaweicloud.com/base_image/ascend-ci/cann:8.5.1-a3-ubuntu22.04-py3.11'
@@ -229,7 +229,7 @@ jobs:
         strategy:
           fail-fast: false
           matrix:
-            part: [3]
+            part: [0]
             vllm: [d886c26d4d4fef7d079696beb4ece1cfb4b008a8]
         container:
           image: 'swr.cn-southwest-2.myhuaweicloud.com/base_image/ascend-ci/cann:8.5.1-a3-ubuntu22.04-py3.11'
