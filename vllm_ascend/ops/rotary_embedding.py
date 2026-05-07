@@ -227,6 +227,10 @@ class AscendRotaryEmbedding(RotaryEmbedding):
         super().__init__(head_size, rotary_dim, max_position_embeddings, base, is_neox_style, dtype, init_cache)
         vllm_config = get_current_vllm_config()
         self.use_mtp = vllm_config.speculative_config and vllm_config.speculative_config.method == "mtp"
+        self.force_native_qwen2_rope = (
+            "Qwen2ForCausalLM" in getattr(vllm_config.model_config, "architectures", [])
+            and os.environ.get("VLLM_ASCEND_USE_NATIVE_QWEN2_ROPE", "1") != "0"
+        )
         _record_cos_sin_cache(self.cos_sin_cache)
         _record_cos_and_sin_cache_interleaved(self.cos_sin_cache)
 
@@ -241,6 +245,17 @@ class AscendRotaryEmbedding(RotaryEmbedding):
         is_neox_style = self.is_neox_style
         if is_neox_style_override is not None:
             is_neox_style = is_neox_style_override
+        if self.force_native_qwen2_rope:
+            cos_sin_cache = self._match_cos_sin_cache_dtype(query)
+            return RotaryEmbedding.forward_static(
+                positions,
+                query,
+                key,
+                self.head_size,
+                self.rotary_dim,
+                cos_sin_cache,
+                is_neox_style,
+            )
         is_draft_model = _EXTRA_CTX.is_draft_model
         flash_comm_v1_enabled = _EXTRA_CTX.flash_comm_v1_enabled
         if is_draft_model and self.use_mtp and flash_comm_v1_enabled:
@@ -280,8 +295,6 @@ class AscendYaRNRotaryEmbedding(YaRNScalingRotaryEmbedding):
         super().__init__(
             head_size, rotary_dim, max_position_embeddings, base, is_neox_style, scaling_factor, dtype, **extra_kwargs
         )
-        vllm_config = get_current_vllm_config()
-        self.use_mtp = vllm_config.speculative_config and vllm_config.speculative_config.method == "mtp"
         _record_cos_sin_cache(self.cos_sin_cache)
 
     def forward_oot(
