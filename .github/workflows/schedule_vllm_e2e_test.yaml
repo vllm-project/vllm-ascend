@@ -175,7 +175,7 @@ jobs:
           - name: Install system dependencies
             run: |
               apt-get -y install `cat packages.txt`
-              apt-get -y install gcc g++ cmake libnuma-dev clang-15
+              apt-get -y install gcc g++ cmake libnuma-dev clang-15 pytrec-eval-terrier
               git config --global --add safe.directory /__w/vllm-ascend/vllm-ascend
               update-alternatives --install /usr/bin/clang clang /usr/bin/clang-15 20
               update-alternatives --install /usr/bin/clang++ clang++ /usr/bin/clang++-15 20
@@ -255,7 +255,7 @@ jobs:
           - name: Install system dependencies
             run: |
               apt-get -y install `cat packages.txt`
-              apt-get -y install gcc g++ cmake libnuma-dev clang-15
+              apt-get -y install gcc g++ cmake libnuma-dev clang-15 pytrec-eval-terrier
               git config --global --add safe.directory /__w/vllm-ascend/vllm-ascend
               update-alternatives --install /usr/bin/clang clang /usr/bin/clang-15 20
               update-alternatives --install /usr/bin/clang++ clang++ /usr/bin/clang++-15 20
