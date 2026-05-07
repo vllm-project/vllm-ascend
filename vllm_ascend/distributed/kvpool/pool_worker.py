@@ -485,10 +485,9 @@ class KVPoolWorker:
     def get_and_clear_finished_requests(
             self, finished_req_ids, meta: AscendConnectorMetadata) -> set[str]:
         if self.use_layerwise:
-            kv_send_thread = self.kv_send_thread
-            assert kv_send_thread is not None
             self.finished_store_req.update(
-                kv_send_thread.get_and_clear_finished_requests())
+                self.kv_send_thread.get_and_clear_finished_requests(  # type: ignore[union-attr]
+                ))
             self.finished_store_req.difference_update(meta.preempted_req_ids)
 
             finished_sending = self.finished_store_req.intersection(
