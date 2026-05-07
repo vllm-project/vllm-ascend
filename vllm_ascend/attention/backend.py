@@ -30,14 +30,14 @@ class BackendExtraInputPreparer:
 class FiaExtraInputPreparer(BackendExtraInputPreparer):
     def __init__(self):
         # Buffers are allocated on first ``prepare()`` when ``set_current_vllm_config`` is active.
-        self._extra_input: BackendExtraInput | None = None
+        self.extra_input: BackendExtraInput | None = None
 
     def _ensure_extra_input(self) -> None:
-        if self._extra_input is not None:
+        if self.extra_input is not None:
             return
         vllm_config = get_current_vllm_config()
         max_num_reqs = vllm_config.scheduler_config.max_num_reqs
-        self._extra_input = BackendExtraInput(
+        self.extra_input = BackendExtraInput(
             query_start_loc_np=np.empty(max_num_reqs + 2, dtype=np.int32),
             query_start_loc=torch.zeros(max_num_reqs + 2, dtype=torch.int32, device="npu"),
         )
@@ -50,7 +50,7 @@ class FiaExtraInputPreparer(BackendExtraInputPreparer):
         the first dimension of `hidden_states` must equal the last element of `actual_seq_lengths_q`.
         """
         self._ensure_extra_input()
-        extra = self._extra_input
+        extra = self.extra_input
         assert extra is not None
         num_reqs_padded = batch_desc.num_reqs or num_reqs
         num_tokens_padded = batch_desc.num_tokens

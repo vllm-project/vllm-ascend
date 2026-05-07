@@ -108,7 +108,7 @@ class AscendMLABackend(AscendBaseAttnBackend):
 
             return AscendMlaCPImpl
         return AscendMLAImpl
-    
+
     @staticmethod
     def get_extra_input_preparer() -> FiaExtraInputPreparer:
         return FiaExtraInputPreparer()
