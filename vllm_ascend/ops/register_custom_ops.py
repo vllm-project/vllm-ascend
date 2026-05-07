@@ -217,6 +217,21 @@ def _muls_add_impl_fake(
     return torch.empty_like(x)
 
 
+def _device_print_impl(value: torch.Tensor | int | float | bool | str | torch.dtype | torch.device | torch.Size):
+    from vllm_ascend.utils import device_print
+    device_print(value)
+
+def _device_print_impl_fake(value: torch.Tensor | int | float | bool | str | torch.dtype | torch.device | torch.Size):
+    return  # 直接返回，device_print 返回 None
+
+direct_register_custom_op(
+    op_name="device_print",
+    op_func=_device_print_impl,
+    fake_impl=_device_print_impl_fake,
+    mutates_args=[],
+    dispatch_key="PrivateUse1",
+)
+
 direct_register_custom_op(
     op_name="maybe_chunk_residual",
     op_func=_maybe_chunk_residual_impl,
