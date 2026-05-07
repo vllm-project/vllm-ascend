@@ -619,14 +619,16 @@ class AscendAttentionBackendImpl(AttentionImpl):
         input_layout = "TND"
         attn_mask = attn_metadata.attn_mask
 
+        # next_tokens only takes effect when sparse_mode=4 (sliding window attention);
+        # for other sparse modes it is ignored, so we set it to 0 by default.
+        next_tokens = 0
         if self.sliding_window is not None:
             sparse_mode = 4
             pre_tokens = self.sliding_window
-            next_tokens = 0
+
         else:
             sparse_mode = 3 if attn_metadata.causal else 0
             pre_tokens = SWA_INT_MAX
-            next_tokens = 0
 
         extra_args = {}
         if self.enable_c8_quant:
