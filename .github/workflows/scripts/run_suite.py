@@ -70,11 +70,8 @@ def partition(files: list[TestFile], rank: int, size: int) -> list[TestFile]:
     print(f"Partitioning {len(active)} files")
     if not active or size <= 0 or size > len(active):
         return []
-    if not (0 <= rank < size):
-        raise ValueError(f"rank={rank} 必须满足 0 <= rank < size={size}")
     # Sort descending by weight; use original index as tiebreaker to be stable
     indexed = sorted(enumerate(active), key=lambda x: (-x[1].estimated_time, x[0]))
-
     buckets: list[list[int]] = [[] for _ in range(size)]
     sums = [0.0] * size
     for idx, test in indexed:
