@@ -243,6 +243,27 @@ packed_modules_model_mapping: dict[str, dict[str, list[str]]] = {
             "up_proj",
         ],
     },
+    "qwen2_5_omni_thinker": {
+        "qkv_proj": [
+            "q_proj",
+            "k_proj",
+            "v_proj",
+        ],
+        "attn_qkv_proj": [
+            "attn_q_proj",
+            "attn_k_proj",
+            "attn_v_proj",
+        ],
+        "qkv": [
+            "q",
+            "k",
+            "v",
+        ],
+        "gate_up_proj": [
+            "gate_proj",
+            "up_proj",
+        ],
+    },
     "bailing_hybrid": {
         "gate_up_proj": [
             "gate_proj",
@@ -487,6 +508,8 @@ class AscendModelSlimConfig(QuantizationConfig):
         # TODO: remove it when vllm fixes the WeightsMapper bug of qwen3-vl.
         if model_type in ["qwen3_vl"] and prefix == "lm_head":
             prefix = "language_model.lm_head"
+        if model_type in ["qwen2_5_omni_thinker", "qwen2_5_omni_text"]:
+            prefix = prefix.replace("thinker.", "")
         if model_type in ["bailing_hybrid"]:
             # Adapt to bailing_hybrid architecture: update layer names to MoE convention
             prefix = prefix.replace("linear_attn", "attention")
