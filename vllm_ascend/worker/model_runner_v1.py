@@ -16,6 +16,9 @@
 # This file is a part of the vllm-ascend project.
 # Adapted from vllm-project/vllm/vllm/worker/gpu_model_runner.py
 #
+# import MLAAttentionSpec patch first to ensure that it is applied before calling
+# Do not change the order of this import
+import vllm_ascend.patch.platform.patch_kv_cache_interface  # noqa
 
 import math
 import sys
@@ -3749,13 +3752,9 @@ class NPUModelRunner(GPUModelRunner):
 
             elif isinstance(attn_module, MLAAttention):
                 if self.use_sparse:
-                    # `MLAAttentionSpec` is temporarily patched to `AscendMLAAttentionSpec`.
-                    # Re-importing it at runtime will therefore resolve to the patched class.
-                    # Rename it here to make this behavior explicit.
-                    from vllm.v1.kv_cache_interface import MLAAttentionSpec as AscendMLAAttentionSpec
                     # TODO(rjg-lyh): when kv_cache_spec's refactor is ready,
                     # implement it by creating a new kv_cache_spec class
-                    kv_cache_spec[layer_name] = AscendMLAAttentionSpec(
+                    kv_cache_spec[layer_name] = MLAAttentionSpec(
                         block_size=self.block_size,
                         num_kv_heads=1,
                         head_size=sum(self.sparse_head_dim),
@@ -3765,13 +3764,12 @@ class NPUModelRunner(GPUModelRunner):
                         cache_sparse_c8=self.ascend_config.is_sparse_c8_layer(layer_name),
                     )
                 elif spec := attn_module.get_kv_cache_spec(self.vllm_config):
-                    from vllm.v1.kv_cache_interface import MLAAttentionSpec as AscendMLAAttentionSpec
                     if getattr(attn_module.impl, "fa_quant_layer", False):
                         head_size = attn_module.head_size + attn_module.qk_rope_head_dim
                         dtype, cache_dtype_str = attn_module.impl.dtype, None
                     else:
                         head_size, dtype, cache_dtype_str = spec.head_size, spec.dtype, spec.cache_dtype_str
-                    kv_cache_spec[layer_name] = AscendMLAAttentionSpec(
+                    kv_cache_spec[layer_name] = MLAAttentionSpec(
                         block_size=spec.block_size,
                         num_kv_heads=spec.num_kv_heads,
                         head_size=head_size,
@@ -3783,12 +3781,9 @@ class NPUModelRunner(GPUModelRunner):
             elif isinstance(attn_module, MambaBase):
                 mamba_layers[layer_name] = attn_module
 
-            else:
-                # Handle other AttentionLayerBase subclasses (e.g., CacheOnlyAttentionLayer)
-                # that are not Attention, MLAAttention, or MambaBase
-                if spec := attn_module.get_kv_cache_spec(self.vllm_config):
-                    kv_cache_spec[layer_name] = spec
-                    attn_layer_names.add(layer_name)
+            elif isinstance(attn_module, CacheOnlyAttentionLayer):
+                kv_cache_spec[layer_name] = attn_module.get_kv_cache_spec(self.vllm_config)
+                attn_layer_names.add(layer_name)
 
         if len(mamba_layers) > 0:
             mamba_page_size_padded = 0
