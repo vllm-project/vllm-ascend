@@ -4412,7 +4412,7 @@ msgid ""
 msgstr ""
 "[实验性功能] 已支持预填充上下文并行（Prefill Context Parallel）和解码上下文并行（Decode Context "
 "Parallel），请注意这目前是一个实验性功能，欢迎任何反馈。详情请参考 "
-"[上下文并行功能指南](https://docs.vllm.ai/projects/ascend/en/latest/user_guide/feature_guide/context_parallel.html)"
+"[上下文并行特性指南](https://docs.vllm.ai/projects/ascend/en/latest/user_guide/feature_guide/context_parallel.html)"
 
 #: ../../source/user_guide/release_notes.md:709
 msgid ""
@@ -5083,7 +5083,6 @@ msgid "Python 3.9 support is dropped to keep the same with vLLM v0.12.0"
 msgstr "已停止支持 Python 3.9，以与 vLLM v0.12.0 保持一致。"
 
 #: ../../source/user_guide/release_notes.md:836
-#, fuzzy
 msgid ""
 "DeepSeek 3/3.1 and Qwen3 doesn't work with FULL_DECODE_ONLY graph mode. "
 "We'll fix it in next release. [#4990](https://github.com/vllm-project"
@@ -5094,7 +5093,6 @@ msgstr ""
 "ascend/issues/4990)"
 
 #: ../../source/user_guide/release_notes.md:837
-#, fuzzy
 msgid ""
 "Hunyuan OCR doesn't work. We'll fix it in the next release. "
 "[#4989](https://github.com/vllm-project/vllm-ascend/issues/4989) "
@@ -5113,7 +5111,6 @@ msgstr ""
 "版本中提供支持。"
 
 #: ../../source/user_guide/release_notes.md:839
-#, fuzzy
 msgid ""
 "DeepSeek 3.2 doesn't work with high concurrency in some case. We'll fix "
 "it in next release. [#4996](https://github.com/vllm-project/vllm-"
@@ -5133,7 +5130,6 @@ msgstr ""
 "`VLLM_ASCEND_ENABLE_NZ=0` 来禁用它。我们将在下个版本中添加自动检测机制。"
 
 #: ../../source/user_guide/release_notes.md:841
-#, fuzzy
 msgid ""
 "speculative decode method `suffix` doesn't work. We'll fix it in next "
 "release. You can pick this commit to fix the issue: "
@@ -5652,7 +5648,6 @@ msgid ""
 msgstr "LoRA 功能现已恢复。[#3044](https://github.com/vllm-project/vllm-ascend/pull/3044)"
 
 #: ../../source/user_guide/release_notes.md:953
-#, fuzzy
 msgid ""
 "Eagle3 spec decode method is back now. [#2949](https://github.com/vllm-"
 "project/vllm-ascend/issues/2949)"
@@ -5823,7 +5818,6 @@ msgstr ""
 "ascend/pull/2744)"
 
 #: ../../source/user_guide/release_notes.md:984
-#, fuzzy
 msgid ""
 "The performance of Qwen3 dense model is improved with flashcomm_v1. Set "
 "`VLLM_ASCEND_ENABLE_DENSE_OPTIMIZE=1` and "
