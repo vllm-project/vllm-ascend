@@ -69,15 +69,15 @@ myst_substitutions = {
     # the branch of vllm, used in vllm clone
     # - main branch: 'main'
     # - vX.Y.Z branch: 'vX.Y.Z'
-    "vllm_version": "v0.18.0",
+    "vllm_version": "v0.19.1",
     # the branch of vllm-ascend, used in vllm-ascend clone and image tag
     # - main branch: 'main'
     # - vX.Y.Z branch: latest vllm-ascend release tag
-    "vllm_ascend_version": "v0.18.0rc1",
+    "vllm_ascend_version": "v0.19.1rc1",
     # the newest release version of vllm-ascend and matched vLLM, used in pip install.
     # This value should be updated when cut down release.
-    "pip_vllm_ascend_version": "0.18.0rc1",
-    "pip_vllm_version": "0.18.0",
+    "pip_vllm_ascend_version": "0.19.1rc1",
+    "pip_vllm_version": "0.19.1",
     # CANN image tag
     "cann_image_tag": "8.5.1-910b-ubuntu22.04-py3.11",
     # vLLM commit hash for main branch
@@ -147,7 +147,7 @@ html_extra_path = ["llms.txt"]
 # Check external links without validating remote anchors. Many third-party
 # sites render anchors dynamically, which makes anchor checks flaky in CI.
 linkcheck_anchors = False
-linkcheck_retries = 2
+linkcheck_retries = 3
 linkcheck_timeout = 15
 linkcheck_workers = 10
 
@@ -160,6 +160,7 @@ linkcheck_ignore = [
     r"https?://<[^>]+>.*",
     r"https://github\.com/vllm-project/vllm-ascend/issues/new/choose",
     r"https://github\.com/[^/?#]+/?$",
+    r"https?://.*\$%7B.*%7D.*",
 ]
 
 READTHEDOCS_VERSION_TYPE = os.environ.get("READTHEDOCS_VERSION_TYPE")
