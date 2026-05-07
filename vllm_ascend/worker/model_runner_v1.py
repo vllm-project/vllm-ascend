@@ -3786,6 +3786,13 @@ class NPUModelRunner(GPUModelRunner):
             else:
                 # Handle other AttentionLayerBase subclasses (e.g., CacheOnlyAttentionLayer)
                 # that are not Attention, MLAAttention, or MambaBase
+                if self.use_sparse:
+                    from vllm.model_executor.models.deepseek_v2 import DeepseekV32IndexerCache
+                    if isinstance(attn_module, DeepseekV32IndexerCache):
+                        # When use_sparse=True, the indexer k_cache is embedded in the
+                        # main attention layer's extended KV cache (dsa_k_tensor).
+                        # Ascend SFA accesses it via kv_cache[2], so skip separate allocation.
+                        continue
                 if spec := attn_module.get_kv_cache_spec(self.vllm_config):
                     kv_cache_spec[layer_name] = spec
                     attn_layer_names.add(layer_name)
