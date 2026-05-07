@@ -21,9 +21,7 @@ from enum import Enum
 import torch
 import torch_npu
 import vllm.envs as envs_vllm
-import vllm_ascend.envs as envs_ascend
 from vllm.config import VllmConfig, get_current_vllm_config
-from vllm.logger import logger
 from vllm.distributed import get_tensor_model_parallel_rank, get_tensor_model_parallel_world_size
 from vllm.utils.math_utils import cdiv
 from vllm.v1.attention.backend import (  # type: ignore
@@ -41,6 +39,8 @@ from vllm.v1.attention.backends.registry import (  # type: ignore
 from vllm.v1.core.sched.output import SchedulerOutput
 from vllm.v1.kv_cache_interface import AttentionSpec, CrossAttentionSpec
 
+import vllm_ascend.envs as envs_ascend
+from vllm.logger import logger
 from vllm_ascend.ascend_forward_context import _EXTRA_CTX
 from vllm_ascend.attention.attention_mask import AttentionMaskBuilder
 from vllm_ascend.attention.context_parallel.common_cp import AscendMetadataForDecode, AscendMetadataForPrefill
@@ -73,6 +73,12 @@ try:
     _FA3_AVAILABLE = True
 except ImportError:
     _FA3_AVAILABLE = False
+
+if envs_ascend.VLLM_ASCEND_ENABLE_FLASH_ATTN and not _FA3_AVAILABLE:
+    logger.error(
+        "VLLM_ASCEND_ENABLE_FLASH_ATTN is enabled but flash_attn_v3 is not installed. "
+        "FA3 will not be used. Please install flash_attn_v3 to enable FA3."
+    )
 
 # default max value of sliding window size
 SWA_INT_MAX = 2147483647
@@ -786,9 +792,11 @@ class AscendAttentionBackendImpl(AttentionImpl):
     ):
         num_block, block_size, _, _ = self.key_cache.shape  # type: ignore
         key_fa_blk = self.key_cache.view(  # type: ignore
-            num_block, block_size, self.num_kv_heads, self.head_size)
+            num_block, block_size, self.num_kv_heads, self.head_size
+        )
         value_fa_blk = self.value_cache.view(  # type: ignore
-            num_block, block_size, self.num_kv_heads, self.head_size)
+            num_block, block_size, self.num_kv_heads, self.head_size
+        )
 
         kv_seqlen_list = torch.tensor(seq_lens_list_qa, dtype=torch.int32).npu()
 
@@ -803,7 +811,7 @@ class AscendAttentionBackendImpl(AttentionImpl):
             causal=is_causal,
             window_size=[-1, -1],
             rotary_interleaved=False,
-            num_splits=0,
+            num_splits=1 if envs_vllm.VLLM_BATCH_INVARIANT else 0,
             softcap=0.0,
             attention_chunk=0,
             sm_margin=0,
@@ -827,24 +835,28 @@ class AscendAttentionBackendImpl(AttentionImpl):
         outputs = []
 
         if num_decodes > 0:
-            outputs.append(self._flash_attn_with_kvcache(
-                query[:num_decode_tokens],
-                attn_metadata.block_tables[:num_decodes, :],
-                attn_metadata.query_start_loc[:num_decodes + 1],
-                attn_metadata.seq_lens_list[:num_decodes],
-                False,
-                max(attn_metadata.seq_lens_list[:num_decodes]),
-            ))
+            outputs.append(
+                self._flash_attn_with_kvcache(
+                    query[:num_decode_tokens],
+                    attn_metadata.block_tables[:num_decodes, :],
+                    attn_metadata.query_start_loc[: num_decodes + 1],
+                    attn_metadata.seq_lens_list[:num_decodes],
+                    False,
+                    max(attn_metadata.seq_lens_list[:num_decodes]),
+                )
+            )
 
         if num_prefills > 0:
-            outputs.append(self._flash_attn_with_kvcache(
-                query[num_decode_tokens:],
-                attn_metadata.block_tables[num_decode_tokens:, :],
-                attn_metadata.query_start_loc[num_decodes:],
-                attn_metadata.seq_lens_list[num_decodes:],
-                True,  # enable causal for prefill
-                max(attn_metadata.seq_lens_list[num_decodes:]),
-            ))
+            outputs.append(
+                self._flash_attn_with_kvcache(
+                    query[num_decode_tokens:],
+                    attn_metadata.block_tables[num_decode_tokens:, :],
+                    attn_metadata.query_start_loc[num_decodes:],
+                    attn_metadata.seq_lens_list[num_decodes:],
+                    True,  # enable causal for prefill
+                    max(attn_metadata.seq_lens_list[num_decodes:]),
+                )
+            )
 
         if not outputs:
             raise ValueError("No attention output available")
@@ -1159,7 +1171,6 @@ class AscendAttentionBackendImpl(AttentionImpl):
             return self._forward_fia_slidingwindow(query, attn_metadata, output)
 
         if envs_ascend.VLLM_ASCEND_ENABLE_FLASH_ATTN and _FA3_AVAILABLE:
-            logger.info("Using Flash Attention 3 (FA3) for attention computation.")
             output = self.forward_flash_attn(query, attn_metadata, output)
         else:
             output = self.forward_fused_infer_attention(query, key, value, attn_metadata, output, kv_cache)
