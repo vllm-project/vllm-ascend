@@ -23,7 +23,7 @@ msgstr ""
 #: ../../user_guide/feature_guide/index.md:1
 #: ../../user_guide/feature_guide/index.md:5
 msgid "Feature Guide"
-msgstr "功能指南"
+msgstr "特性指南"
 
 #: ../../user_guide/feature_guide/index.md:3
 msgid "This section provides a detailed usage guide of vLLM Ascend features."
