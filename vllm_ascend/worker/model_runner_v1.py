@@ -3210,7 +3210,14 @@ class NPUModelRunner(GPUModelRunner):
                     current_kv_cache_spec = layer_kv_cache_spec[layer_name]
                     assert isinstance(current_kv_cache_spec, AttentionSpec)
 
-                    if self.use_sparse:
+                    # Only apply the sparse MLA path for layers whose spec is
+                    # AscendMLAAttentionSpec (i.e. real sparse MLA layers).
+                    # Layers like CacheOnlyAttentionLayer carry a plain
+                    # MLAAttentionSpec that has no sparse_kv_cache_ratio and
+                    # must fall through to the generic split-factor path.
+                    from vllm.v1.kv_cache_interface import MLAAttentionSpec as _AscendMLA
+                    is_sparse_mla = self.use_sparse and isinstance(current_kv_cache_spec, _AscendMLA)
+                    if is_sparse_mla:
                         # for deepseek v3.2, we split the kv cache according to the corresponding ratio
                         kv_cache_spec = layer_kv_cache_spec[layer_name]
                         current_sparse_c8 = kv_cache_spec_uses_sparse_c8(kv_cache_spec)
@@ -3220,6 +3227,7 @@ class NPUModelRunner(GPUModelRunner):
                         dsa_k_tensor_split_factor = sparse_kv_cache_ratio[2]
                         dsa_k_scale_tensor_split_factor = sparse_kv_cache_ratio[3] if current_sparse_c8 else None
                     else:
+                        current_sparse_c8 = False
                         k_dim, v_dim = self._get_attention_kv_cache_dims(layer_name, current_kv_cache_spec)
                         assert k_dim > 0 and v_dim > 0
                         kv_head_dim_list = [
@@ -3238,9 +3246,9 @@ class NPUModelRunner(GPUModelRunner):
                     dsa_k_tensor_size = None
                     dsa_k_scale_tensor_size = None
                     #### for deepseek sparse attention
-                    if self.use_sparse:
+                    if is_sparse_mla:
                         dsa_k_tensor_size = int(kv_cache_tensor.size // dsa_k_tensor_split_factor)
-                    if self.use_sparse and current_sparse_c8:
+                    if is_sparse_mla and current_sparse_c8:
                         dsa_k_scale_tensor_size = int(kv_cache_tensor.size // dsa_k_scale_tensor_split_factor)
 
                     # for other attentions, e.g., self_attn, sliding window attn
@@ -3276,7 +3284,7 @@ class NPUModelRunner(GPUModelRunner):
                     for layer_name_inner in kv_cache_tensor.shared_by:
                         # shared the attn kvcache for all shared layers
                         if "attn" in layer_name_inner and "linear_attn" not in layer_name_inner:
-                            if self.use_sparse:
+                            if is_sparse_mla:
                                 if current_sparse_c8:
                                     kv_cache_raw_tensors[layer_name_inner] = (
                                         k_tensor, v_tensor, dsa_k_tensor, dsa_k_scale_tensor
@@ -3324,7 +3332,8 @@ class NPUModelRunner(GPUModelRunner):
                 # TODO: remove this after the OOM issue is located and fixed, otherwise, some model may
                 # encounter OOM issue
                 if isinstance(current_kv_cache_spec, AttentionSpec):
-                    if self.use_sparse:
+                    from vllm.v1.kv_cache_interface import MLAAttentionSpec as _AscendMLA
+                    if self.use_sparse and isinstance(current_kv_cache_spec, _AscendMLA):
                         current_sparse_c8 = kv_cache_spec_uses_sparse_c8(current_kv_cache_spec)
                         if current_sparse_c8:
                             raw_k_tensor, raw_v_tensor, raw_dsa_k_tensor, raw_dsa_k_scale_tensor = kv_cache_raw_tensors[  # type: ignore
