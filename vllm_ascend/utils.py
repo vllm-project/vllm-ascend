@@ -1153,8 +1153,8 @@ def get_flashcomm2_config_and_validate(ascend_config, vllm_config):
                 "FLASHCOMM2 only supports 'o_proj' as the sole layer sharding configuration! "
                 f"Found invalid layer_sharding: {layer_sharding}"
             )
-    if not get_ascend_config().enable_flashcomm1:
-        print(f"[PATCH_VERIFY] get_flashcomm2_config: enable_flashcomm1 = {get_ascend_config().enable_flashcomm1}")
+    if not ascend_config.enable_flashcomm1:
+        print(f"[PATCH_VERIFY] get_flashcomm2_config: enable_flashcomm1 = {ascend_config.enable_flashcomm1}")
         logger.warning_once(
             "It is recommended to enable FLASHCOMM1 simultaneously when starting FLASHCOMM2 for optimal performance."
         )
