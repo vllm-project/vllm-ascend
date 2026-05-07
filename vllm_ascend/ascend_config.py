@@ -134,6 +134,9 @@ class AscendConfig:
         # MSMONITOR daemon mode configuration (replaces MSMONITOR_USE_DAEMON env var)
         self.msmonitor_use_daemon = additional_config.get("msmonitor_use_daemon", False)
         print(f"[PATCH_VERIFY] AscendConfig.msmonitor_use_daemon initialized: {self.msmonitor_use_daemon}")
+        # Transpose KV cache by block fused op configuration (replaces VLLM_ASCEND_FUSION_OP_TRANSPOSE_KV_CACHE_BY_BLOCK env var)
+        self.enable_transpose_kv_cache_by_block = additional_config.get("enable_transpose_kv_cache_by_block", True)
+        print(f"[PATCH_VERIFY] AscendConfig.enable_transpose_kv_cache_by_block initialized: {self.enable_transpose_kv_cache_by_block}")
 
         self.pd_tp_ratio = 1
         self.pd_head_ratio = 1
