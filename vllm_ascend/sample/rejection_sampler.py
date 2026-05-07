@@ -67,20 +67,6 @@ def clear_sampling_metadata_draft_logits(sampling_metadata: SamplingMetadata) ->
     _SAMPLING_METADATA_DRAFT_LOGITS.pop(id(sampling_metadata), None)
 
 
-def _flatten_draft_logits_to_probs(
-    draft_logits: torch.Tensor,
-    num_draft_tokens: list[int],
-) -> torch.Tensor | None:
-    draft_probs_list: list[torch.Tensor] = []
-    for req_idx, num_tokens in enumerate(num_draft_tokens):
-        if num_tokens <= 0:
-            continue
-        draft_probs_list.append(draft_logits[req_idx, :num_tokens].softmax(dim=-1, dtype=torch.float32))
-    if not draft_probs_list:
-        return None
-    return torch.cat(draft_probs_list, dim=0).contiguous()
-
-
 def apply_sampling_constraints(
     logits: torch.Tensor,  # [num_tokens, vocab_size]
     cu_num_draft_tokens: torch.Tensor,  # [batch_size]
@@ -276,14 +262,10 @@ def rejection_sample(
             sampling_metadata.temperature,
         )
 
-    draft_probs_for_fallback = draft_probs
-    if draft_probs_for_fallback is None and draft_logits is not None:
-        draft_probs_for_fallback = _flatten_draft_logits_to_probs(draft_logits, num_draft_tokens)
-
     # When num_speculative_tokens>=3, using block verify.
     # Skip block verify when draft probabilities are unavailable
     # to avoid incorrect verification results.
-    using_block_verify = max_spec_len >= 3 and draft_probs_for_fallback is not None
+    using_block_verify = max_spec_len >= 3 and draft_probs is not None
 
     # Compute probability distribution from target logits.
     target_probs = target_logits.softmax(dim=-1, dtype=torch.float32)
@@ -296,7 +278,7 @@ def rejection_sample(
         num_draft_tokens,
         cu_num_draft_tokens,
         draft_token_ids,
-        draft_probs_for_fallback,
+        draft_probs,
         target_probs,
         sampling_metadata,
         device,
@@ -309,7 +291,7 @@ def rejection_sample(
                 output_token_ids,
                 cu_num_draft_tokens,
                 draft_token_ids,
-                draft_probs_for_fallback,
+                draft_probs,
                 target_probs,
                 bonus_token_ids,
                 recovered_token_ids,
@@ -318,7 +300,7 @@ def rejection_sample(
                 max_spec_len,
                 vocab_size,
                 batch_size,
-                NO_DRAFT_PROBS=draft_probs_for_fallback is None,
+                NO_DRAFT_PROBS=draft_probs is None,
                 BLOCK_SIZE=block_size,
             )
         else:
@@ -326,7 +308,7 @@ def rejection_sample(
                 output_token_ids,
                 cu_num_draft_tokens,
                 draft_token_ids,
-                draft_probs_for_fallback,
+                draft_probs,
                 target_probs,
                 bonus_token_ids,
                 recovered_token_ids,
@@ -334,7 +316,7 @@ def rejection_sample(
                 is_greedy,
                 max_spec_len,
                 vocab_size,
-                IS_NGRAM=draft_probs_for_fallback is None,
+                IS_NGRAM=draft_probs is None,
                 # num_warps=1,
             )
     else:
@@ -344,7 +326,7 @@ def rejection_sample(
                 output_token_ids,
                 cu_num_draft_tokens,
                 draft_token_ids,
-                draft_probs_for_fallback,
+                draft_probs,
                 target_probs,
                 bonus_token_ids,
                 recovered_token_ids,
@@ -353,7 +335,7 @@ def rejection_sample(
                 max_spec_len,
                 vocab_size,
                 batch_size,
-                NO_DRAFT_PROBS=draft_probs_for_fallback is None,
+                NO_DRAFT_PROBS=draft_probs is None,
                 BLOCK_SIZE=block_size,
                 SUB_BLOCK=4 * 1024,
             )
@@ -362,7 +344,7 @@ def rejection_sample(
                 output_token_ids,
                 cu_num_draft_tokens,
                 draft_token_ids,
-                draft_probs_for_fallback,
+                draft_probs,
                 target_probs,
                 bonus_token_ids,
                 recovered_token_ids,
@@ -370,7 +352,7 @@ def rejection_sample(
                 is_greedy,
                 max_spec_len,
                 vocab_size,
-                IS_NGRAM=draft_probs_for_fallback is None,
+                IS_NGRAM=draft_probs is None,
             )
     return output_token_ids
 
