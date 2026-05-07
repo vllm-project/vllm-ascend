@@ -138,8 +138,9 @@ class AttentionMaskBuilder310:
                     return self.attn_mask_cache
 
                 max_seq_len = self.max_seqlen
-                attention_mask_npu = torch.zeros(size=(max_seq_len, max_seq_len),
-                                                 dtype=model_config.dtype, device=self.device)
+                attention_mask_npu = torch.zeros(
+                    size=(max_seq_len, max_seq_len), dtype=model_config.dtype, device=self.device
+                )
                 attention_mask_npu = nd_to_nz_2d(attention_mask_npu)
                 self.attn_mask_cache = torch_npu.npu_format_cast(attention_mask_npu.contiguous(), 29)
 

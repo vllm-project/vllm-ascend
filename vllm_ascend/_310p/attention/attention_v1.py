@@ -104,15 +104,17 @@ class AscendAttentionBackendImpl310(AscendAttentionBackendImpl):
         attn_metadata: AscendMetadata,
         output: torch.Tensor,
     ) -> torch.Tensor:
-        torch_npu._npu_flash_attention(query=query,
-                                       key=key,
-                                       value=value,
-                                       mask=attn_metadata.attn_mask,
-                                       seq_len=attn_metadata.seq_lens,
-                                       scale_value=self.scale,
-                                       num_heads=self.num_heads,
-                                       num_kv_heads=self.num_kv_heads,
-                                       out=output)
+        torch_npu._npu_flash_attention(
+            query=query,
+            key=key,
+            value=value,
+            mask=attn_metadata.attn_mask,
+            seq_len=attn_metadata.seq_lens,
+            scale_value=self.scale,
+            num_heads=self.num_heads,
+            num_kv_heads=self.num_kv_heads,
+            out=output,
+        )
         return output
 
     def forward_paged_attention(
