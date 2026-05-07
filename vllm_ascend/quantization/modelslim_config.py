@@ -264,6 +264,27 @@ packed_modules_model_mapping: dict[str, dict[str, list[str]]] = {
             "up_proj",
         ],
     },
+    "qwen2_5_omni_text": {
+        "qkv_proj": [
+            "q_proj",
+            "k_proj",
+            "v_proj",
+        ],
+        "attn_qkv_proj": [
+            "attn_q_proj",
+            "attn_k_proj",
+            "attn_v_proj",
+        ],
+        "qkv": [
+            "q",
+            "k",
+            "v",
+        ],
+        "gate_up_proj": [
+            "gate_proj",
+            "up_proj",
+        ],
+    },
     "bailing_hybrid": {
         "gate_up_proj": [
             "gate_proj",
