@@ -11,6 +11,7 @@ from vllm.v1.attention.backends.utils import CommonAttentionMetadata
 
 from vllm_ascend import envs
 from vllm_ascend.utils import AscendDeviceType, get_ascend_config, get_ascend_device_type
+from vllm_ascend.worker.kvcomp_utils import KVCompMetaData
 
 
 def ascend_chunked_prefill_workspace_size(vllm_config: VllmConfig) -> int:
@@ -87,11 +88,21 @@ class AscendPrefillContextParallelMetadata:
 
     kv_with_q_tail_mask_idx_tensor: torch.Tensor = None
 
+    kv_tail_proj_idx_tensor: torch.Tensor = None
+
+    kv_with_q_head_attn_idx_in_tail_tensor: torch.Tensor = None
+
+    kv_with_q_tail_attn_idx_in_tail_tensor: torch.Tensor = None
+
     attn_mask_seqlens: torch.Tensor = None
 
     head_attn_nomask_seqlens: torch.Tensor = None
 
     tail_attn_nomask_seqlens: torch.Tensor = None
+
+    head_actual_seq_lengths_kv: list[int] | None = None
+
+    tail_actual_seq_lengths_kv: list[int] | None = None
 
     q_full_idx: torch.Tensor = None
 
@@ -119,6 +130,18 @@ class AscendPrefillContextParallelMetadata:
 
     # the number of tokens padded in linear-attn per rank
     pcp_padded_tokens_fla: int = 0
+
+    # the max number of unpadded tokens in all ranks
+    max_num_tokens_across_pcp: int = 0
+
+    # the number of scheduled tokens on the current rank before padding
+    total_num_scheduled_tokens: int = 0
+
+    # Because the sequence shard in linear attention layers does not include padding,
+    # the full attention layers cannot obtain the correct query_lens with pcp pad for
+    # chunked prefill calculation. Therefore, this value needs to be passed to the backend.
+    # TODO:To be refactored.
+    attn_chunk_seqlens: torch.Tensor = None
 
 
 @dataclass
@@ -161,6 +184,7 @@ class AscendCommonAttentionMetadata(CommonAttentionMetadata):
 
     # Metadata for Prefill Context Parallelism (PCP) operations.
     prefill_context_parallel_metadata: AscendPrefillContextParallelMetadata | None = None
+    kvcomp_metadata: KVCompMetaData | None = None
 
     # TODO: Remove it when vLLM no longer uses this function.
     def unpadded(self, num_actual_tokens: int, num_actual_reqs: int) -> "AscendCommonAttentionMetadata":
@@ -169,8 +193,10 @@ class AscendCommonAttentionMetadata(CommonAttentionMetadata):
             query_start_loc=self.query_start_loc[: num_actual_reqs + 1],
             query_start_loc_cpu=self.query_start_loc_cpu[: num_actual_reqs + 1],
             seq_lens=self.seq_lens[:num_actual_reqs],
-            seq_lens_cpu=self.seq_lens_cpu[:num_actual_reqs],
-            num_computed_tokens_cpu=self.num_computed_tokens_cpu[:num_actual_reqs],
+            seq_lens_cpu=self.seq_lens_cpu[:num_actual_reqs] if self.seq_lens_cpu is not None else None,
+            num_computed_tokens_cpu=self.num_computed_tokens_cpu[:num_actual_reqs]
+            if self.num_computed_tokens_cpu is not None
+            else None,
             num_reqs=num_actual_reqs,
             num_actual_tokens=num_actual_tokens,
             max_query_len=self.max_query_len,
@@ -325,6 +351,9 @@ def transdata(nd_mat, block_size: tuple = (16, 16)):
 
 
 def enabling_mlapo(vllm_config: VllmConfig) -> bool:
+    if get_ascend_device_type() == AscendDeviceType.A5:
+        return bool(envs.VLLM_ASCEND_ENABLE_MLAPO)
+
     is_decode_instance = (
         vllm_config.kv_transfer_config is not None
         and vllm_config.kv_transfer_config.is_kv_consumer

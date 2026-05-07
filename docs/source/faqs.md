@@ -2,8 +2,8 @@
 
 ## Version Specific FAQs
 
-- [[v0.17.0rc1] FAQ & Feedback](https://github.com/vllm-project/vllm-ascend/issues/7173)
-- [[v0.13.0] FAQ & Feedback](https://github.com/vllm-project/vllm-ascend/issues/6583)
+- [[v0.19.1rc1] FAQ & Feedback](https://github.com/vllm-project/vllm-ascend/issues/8819)
+- [[v0.18.0] FAQ & Feedback](https://github.com/vllm-project/vllm-ascend/issues/8238)
 
 ## General FAQs
 
@@ -104,21 +104,17 @@ If all above steps are not working, feel free to submit a GitHub issue.
 
 ### 7. How vllm-ascend work with vLLM?
 
-`vllm-ascend` is a hardware plugin for vLLM. The version of `vllm-ascend` is the same as the version of `vllm`. For example, if you use `vllm` 0.9.1, you should use vllm-ascend 0.9.1 as well. For the main branch, we ensure that `vllm-ascend` and `vllm` are compatible at every commit.
+`vllm-ascend` is a hardware plugin for vLLM. Stable releases usually align with the same vLLM version, while RC releases may use the corresponding vLLM final release version. For example, `vllm-ascend` `v0.18.0rc1` matches vLLM `v0.18.0`. For the main branch, we ensure that `vllm-ascend` and `vllm` are compatible at every commit.
 
 ### 8. Does vllm-ascend support Prefill Disaggregation feature?
 
-Yes, vllm-ascend supports Prefill Disaggregation feature with Mooncake backend. See the [official tutorial](https://docs.vllm.ai/projects/ascend/en/latest/tutorials/pd_disaggregation_mooncake_multi_node.html) for example.
+Yes, vllm-ascend supports Prefill Disaggregation feature with Mooncake backend. See the [official tutorial](https://docs.vllm.ai/projects/ascend/en/latest/tutorials/features/pd_disaggregation_mooncake_multi_node.html) for example.
 
 ### 9. Does vllm-ascend support quantization method?
 
 Currently, w8a8, w4a8, and w4a4 quantization methods are already supported by vllm-ascend.
 
-### 10. How to run a W8A8 DeepSeek model?
-
-Follow the [inference tutorial](https://docs.vllm.ai/projects/ascend/en/latest/tutorials/multi_node.html) and replace the model with DeepSeek.
-
-### 11. How is vllm-ascend tested?
+### 10. How is vllm-ascend tested?
 
 vllm-ascend is tested in three aspects: functions, performance, and accuracy.
 
@@ -132,25 +128,25 @@ vllm-ascend is tested in three aspects: functions, performance, and accuracy.
 
 For each release, we'll publish the performance test and accuracy test report in the future.
 
-### 12. How to fix the error "InvalidVersion" when using vllm-ascend?
+### 11. How to fix the error "InvalidVersion" when using vllm-ascend?
 
 The problem is usually caused by the installation of a development or editable version of the vLLM package. In this case, we provide the environment variable `VLLM_VERSION` to let users specify the version of vLLM package to use. Please set the environment variable `VLLM_VERSION` to the version of the vLLM package you have installed. The format of `VLLM_VERSION` should be `X.Y.Z`.
 
-### 13. How to handle the out-of-memory issue?
+### 12. How to handle the out-of-memory issue?
 
-OOM errors typically occur when the model exceeds the memory capacity of a single NPU. For general guidance, you can refer to [vLLM OOM troubleshooting documentation](https://docs.vllm.ai/en/latest/getting_started/troubleshooting.html#out-of-memory).
+OOM errors typically occur when the model exceeds the memory capacity of a single NPU. For general guidance, you can refer to [vLLM OOM troubleshooting documentation](https://docs.vllm.ai/en/latest/usage/troubleshooting/#out-of-memory).
 
-In scenarios where NPUs have limited high bandwidth memory (HBM) capacity, dynamic memory allocation/deallocation during inference can exacerbate memory fragmentation, leading to OOM. To address this:
+In scenarios where NPUs have limited high bandwidth memory (on-chip memory) capacity, dynamic memory allocation/deallocation during inference can exacerbate memory fragmentation, leading to OOM. To address this:
 
-- **Limit `--max-model-len`**: It can save the HBM usage for KV cache initialization step.
+- **Limit `--max-model-len`**: It can save the on-chip memory usage for KV cache initialization step.
 
-- **Adjust `--gpu-memory-utilization`**: If unspecified, the default value is `0.9`. You can decrease this value to reserve more memory to reduce fragmentation risks. See details in: [vLLM - Inference and Serving - Engine Arguments](https://docs.vllm.ai/en/latest/serving/engine_args.html#vllm.engine.arg_utils-_engine_args_parser-cacheconfig).
+- **Adjust `--gpu-memory-utilization`**: If unspecified, the default value is `0.9`. You can decrease this value to reserve more memory to reduce fragmentation risks. See details in: [vLLM - Inference and Serving - Engine Arguments](https://docs.vllm.ai/en/latest/cli/serve/#-gpu-memory-utilization).
 
 - **Configure `PYTORCH_NPU_ALLOC_CONF`**: Set this environment variable to optimize NPU memory management. For example, you can use `export PYTORCH_NPU_ALLOC_CONF=expandable_segments:True` to enable virtual memory feature to mitigate memory fragmentation caused by frequent dynamic memory size adjustments during runtime. See details in [PYTORCH_NPU_ALLOC_CONF](https://www.hiascend.com/document/detail/zh/Pytorch/700/comref/Envvariables/Envir_012.html).
 
-### 14. Failed to enable NPU graph mode when running DeepSeek
+### 13. Failed to enable NPU graph mode when running DeepSeek
 
-Enabling NPU graph mode for DeepSeek may trigger an error. This is because when both MLA and NPU graph mode are active, the number of queries per KV head must be 32, 64, or 128. However, DeepSeek-V2-Lite has only 16 attention heads, which results in 16 queries per KV—a value outside the supported range. Support for NPU graph mode on DeepSeek-V2-Lite will be added in a future update.
+Enabling NPU graph mode for DeepSeek may trigger an error. This is because when both MLA (Multi-Head Latent Attention) and NPU graph mode are active, the number of queries per KV head must be 32, 64, or 128. However, DeepSeek-V2-Lite has only 16 attention heads, which results in 16 queries per KV—a value outside the supported range. Support for NPU graph mode on DeepSeek-V2-Lite will be added in a future update.
 
 And if you're using DeepSeek-V3 or DeepSeek-R1, please make sure after the tensor parallel split, `num_heads`/`num_kv_heads` is {32, 64, 128}.
 
@@ -159,54 +155,54 @@ And if you're using DeepSeek-V3 or DeepSeek-R1, please make sure after the tenso
 [rank0]: EZ9999: [PID: 62938] 2025-05-27-06:52:12.455.807 numHeads / numKvHeads = 8, MLA only support {32, 64, 128}.[FUNC:CheckMlaAttrs][FILE:incre_flash_attention_tiling_check.cc][LINE:1218]
 ```
 
-### 15. Failed to reinstall vllm-ascend from source after uninstalling vllm-ascend
+### 14. Failed to reinstall vllm-ascend from source after uninstalling vllm-ascend
 
 You may encounter the problem of C/C++ compilation failure when reinstalling vllm-ascend from source using pip. If the installation fails, use `python setup.py install` (recommended) to install, or use `python setup.py clean` to clear the cache.
 
-### 16. How to generate deterministic results when using vllm-ascend?
+### 15. How to generate deterministic results when using vllm-ascend?
 
 There are several factors that affect output determinism:
 
 1. Sampler method: using **greedy sampling** by setting `temperature=0` in `SamplingParams`, e.g.:
 
-```python
-from vllm import LLM, SamplingParams
+   ```python
+   from vllm import LLM, SamplingParams
 
-prompts = [
-    "Hello, my name is",
-    "The president of the United States is",
-    "The capital of France is",
-    "The future of AI is",
-]
+   prompts = [
+      "Hello, my name is",
+      "The president of the United States is",
+      "The capital of France is",
+      "The future of AI is",
+   ]
 
-# Create a sampling params object.
-sampling_params = SamplingParams(temperature=0)
-# Create an LLM.
-llm = LLM(model="Qwen/Qwen2.5-0.5B-Instruct")
+   # Create a sampling params object.
+   sampling_params = SamplingParams(temperature=0)
+   # Create an LLM.
+   llm = LLM(model="Qwen/Qwen3-0.6B")
 
-# Generate texts from the prompts.
-outputs = llm.generate(prompts, sampling_params)
-for output in outputs:
-    prompt = output.prompt
-    generated_text = output.outputs[0].text
-    print(f"Prompt: {prompt!r}, Generated text: {generated_text!r}")
-```
+   # Generate texts from the prompts.
+   outputs = llm.generate(prompts, sampling_params)
+   for output in outputs:
+      prompt = output.prompt
+      generated_text = output.outputs[0].text
+      print(f"Prompt: {prompt!r}, Generated text: {generated_text!r}")
+   ```
 
 2. Set the following environment parameters:
 
-```bash
-export LCCL_DETERMINISTIC=1
-export HCCL_DETERMINISTIC=true
-export ATB_MATMUL_SHUFFLE_K_ENABLE=0
-export ATB_LLM_LCOC_ENABLE=0
-```
+   ```bash
+   export LCCL_DETERMINISTIC=1
+   export HCCL_DETERMINISTIC=true
+   export ATB_MATMUL_SHUFFLE_K_ENABLE=0
+   export ATB_LLM_LCOC_ENABLE=0
+   ```
 
-### 17. How to fix the error "ImportError: Please install vllm[audio] for audio support" for the Qwen2.5-Omni model？
+### 16. How to fix the error "ImportError: Please install vllm[audio] for audio support" for the multi-modal models？
 
-The `Qwen2.5-Omni` model requires the `librosa` package to be installed, you need to install the `qwen-omni-utils` package to ensure all dependencies are met, run `pip install qwen-omni-utils`.
+Some multi-modal models requires the `librosa` package to be installed, you need to install the `qwen-omni-utils` package to ensure all dependencies are met, for Qwen-omni, run `pip install qwen-omni-utils`.
 This package will install `librosa` and its related dependencies, resolving the `ImportError: No module named 'librosa'` issue and ensuring that the audio processing functionality works correctly.
 
-### 18. How to troubleshoot and resolve size capture failures resulting from stream resource exhaustion, and what are the underlying causes?
+### 17. How to troubleshoot and resolve size capture failures resulting from stream resource exhaustion, and what are the underlying causes?
 
 ```shell
 error example in detail: 
@@ -222,11 +218,11 @@ Recommended mitigation strategies:
 Root cause analysis:
 The current stream requirement calculation for size captures only accounts for measurable factors including: data parallel size, tensor parallel size, expert parallel configuration, piece graph count, multistream-overlap shared expert settings, and HCCL communication mode (AIV/AICPU). However, numerous unquantifiable elements, such as operator characteristics and specific hardware features, consume additional streams outside of this calculation framework, resulting in stream resource exhaustion during size capture operations.
 
-### 19. How to install custom version of torch_npu?
+### 18. How to install custom version of torch_npu?
 
 torch-npu will be overridden  when installing vllm-ascend. If you need to install a specific version of torch-npu, you can manually install the specified version of torch-npu after vllm-ascend is installed.
 
-### 20. On certain systems (e.g., Kylin OS), `docker pull` may fail with an `invalid tar header` error
+### 19. On certain systems (e.g., Kylin OS), `docker pull` may fail with an `invalid tar header` error
 
 On certain operating systems, such as Kylin OS, you may encounter an `invalid tar header` error during the `docker pull` process:
 
@@ -253,24 +249,24 @@ This is often due to system compatibility issues. You can resolve this by using 
 
 Copy the `vllm_ascend_<tag>.tar` file (where `<tag>` is the image tag you used) to your target machine
 
-### 21. Why am I getting an error when executing the script to start a Docker container? The error message is: "operation not permitted"
+### 20. Why am I getting an error when executing the script to start a Docker container? The error message is: "operation not permitted"
 
 When using `--shm-size`, you may need to add the `--privileged=true` flag to your `docker run` command to grant the container necessary permissions. Please be aware that using `--privileged=true` grants the container extensive privileges on the host system, which can be a security risk. Only use this option if you understand the implications and trust the container's source.
 
-### 22. How to achieve low latency in a small batch scenario?
+### 21. How to achieve low latency in a small batch scenario?
 
 The performance of `torch_npu.npu_fused_infer_attention_score` in small batch scenarios is not satisfactory, mainly due to the lack of flash decoding function. We offer an alternative operator in `tools/install_flash_infer_attention_score_ops_a2.sh` and `tools/install_flash_infer_attention_score_ops_a3.sh`, you can install it using the following instruction:
 
 ```bash
 bash tools/install_flash_infer_attention_score_ops_a2.sh
-## change to run the following instruction if you're using A3 machine
+# change to run the following instruction if you're using A3 machine
 # bash tools/install_flash_infer_attention_score_ops_a3.sh
 ```
 
 **NOTE**: Don't set `additional_config.pa_shape_list` when using this method; otherwise, it will lead to another attention operator.
 **Important**: Please make sure you're using the **official image** of `vllm-ascend`; otherwise, you **must change** the directory `/vllm-workspace` in `tools/install_flash_infer_attention_score_ops_a2.sh` or `tools/install_flash_infer_attention_score_ops_a3.sh` to your own, or create one. If you're not the root user, you need `sudo` **privileges** to run this script.
 
-### 23. How to set `SOC_VERSION` when building from source on a CPU-only machine?
+### 22. How to set `SOC_VERSION` when building from source on a CPU-only machine?
 
 When building from source (e.g. `pip install -e .`), the build may try to infer the target chip via `npu-smi`. If `npu-smi` is not available (common in CPU-only build environments), you must set `SOC_VERSION` manually before installation.
 
@@ -289,3 +285,13 @@ export SOC_VERSION="ascend310p1"
 # Atlas A5 (Ascend 950 series)
 export SOC_VERSION="<value starting with ascend950>"
 ```
+
+### 23. Why TPOT increases drastically as concurrency grows?
+
+When testing a vLLM server, one may find that TPOT increases as concurrency increases (for example, TPOT increases by 0.5 ~ 1ms when concurrency increases by 4). This phenomenon is normal in most cases. However, sometimes TPOT may increase dramatically (10 to 100ms for example) as concurrency grows. This is possibly caused by [**PREEMPTION**](https://docs.vllm.ai/en/latest/configuration/optimization/#preemption) in vLLM.
+Generally, when your server hits KV cache limits, vLLM tries to free KV cache of requests to ensure sufficient space for other requests, which is called preemption in vLLM. When a request is preempted, the default behavior is to recompute the KV cache of this request again in the future, which is why the performance might drop significantly. There are several ways to verify this:
+
+- vLLM usually logs stats on your server. You might see metrics like `GPU KV cache usage: 99.0%,`. When reaching 100%, it triggers preemption.
+- When launching a vLLM server, you will see logs like `GPU KV cache size: 66340 tokens` and `Maximum concurrency for 16,384 tokens per request: 4.05`. These are estimated KV cache capacity for a single DP group. You can adjust the overall request traffic according to this.
+
+Preemption cannot be avoided completely since KV cache usage always has a limit. But there are methods to reduce the chances of preemption. As is suggested in [**PREEMPTION**](https://docs.vllm.ai/en/latest/configuration/optimization/#preemption), the core strategy is to increase available KV cache. For example, one can increase `--gpu-memory-utilization` or decrease `--max-num-seqs` && `--max-num-batched-tokens`.

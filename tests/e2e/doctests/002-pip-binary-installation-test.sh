@@ -20,7 +20,6 @@ trap clean_venv EXIT
 
 function install_system_packages() {
     if command -v apt-get >/dev/null; then
-        sed -i 's|ports.ubuntu.com|mirrors.tuna.tsinghua.edu.cn|g' /etc/apt/sources.list
         apt-get update -y && apt-get install -y gcc g++ cmake libnuma-dev wget git curl jq
     elif command -v yum >/dev/null; then
         yum update -y && yum install -y gcc g++ cmake numactl-devel wget git curl jq
@@ -30,14 +29,29 @@ function install_system_packages() {
 }
 
 function config_pip_mirror() {
-    pip config set global.index-url https://mirrors.tuna.tsinghua.edu.cn/pypi/web/simple
+    pip config set global.index-url http://cache-service.nginx-pypi-cache.svc.cluster.local/pypi/simple
+    pip config set global.trusted-host cache-service.nginx-pypi-cache.svc.cluster.local
+
+    if [ -f /etc/os-release ]; then
+        . /etc/os-release
+        case "$ID" in
+            ubuntu|debian)
+                sed -Ei 's@(ports|archive).ubuntu.com@cache-service.nginx-pypi-cache.svc.cluster.local:8081@g' /etc/apt/sources.list
+                ;;
+            openEuler|centos|rhel|fedora)
+                sed -Ei 's@https?://[^/]+/(openeuler|centos|fedora)@http://cache-service.nginx-pypi-cache.svc.cluster.local:8081/\1@g' /etc/yum.repos.d/*.repo
+                ;;
+        esac
+    fi
 }
+
 
 function install_binary_test() {
 
+    config_pip_mirror
     install_system_packages
     create_vllm_venv
-    config_pip_mirror
+    pip install -r ${SCRIPT_DIR}/../../docs/requirements-docs.txt
 
     PIP_VLLM_VERSION=$(get_version pip_vllm_version)
     VLLM_VERSION=$(get_version vllm_version)
@@ -48,12 +62,9 @@ function install_binary_test() {
     pip config set global.extra-index-url "https://download.pytorch.org/whl/cpu/"
 
     # The vLLM version already in pypi, we install from pypi.
-    pip install vllm=="${PIP_VLLM_VERSION}"
+    pip install --default-timeout=300 --retries 3 vllm=="${PIP_VLLM_VERSION}"
 
     pip install vllm-ascend=="${PIP_VLLM_ASCEND_VERSION}"
-    if [ "${PIP_VLLM_ASCEND_VERSION}" == "0.17.0rc1" ]; then
-        pip install torchvision==0.24.0 torchaudio==2.9.0
-    fi
 
     pip list | grep vllm
 

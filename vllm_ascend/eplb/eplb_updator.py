@@ -70,7 +70,7 @@ class EplbUpdator:
 
         self.process = process
 
-        logger.info(f"[ModelRunner] Launched EPLB process (pid={self.process.pid})")
+        logger.info("[ModelRunner] Launched EPLB process (pid=%s)", self.process.pid)
 
     def update_iteration(self):
         self.cur_iterations += 1
@@ -131,16 +131,14 @@ class EplbUpdator:
         self.update_iteration()
 
     def compute_and_set_moe_load(self):
-        local_load = self.adaptor.get_rank_expert_workload()
-        moe_load = (
-            self.comm_group.all_gather(local_load, dim=0).reshape(-1, self.world_size, *local_load.shape[1:]).cpu()
-        )
+        local_load = self.adaptor.get_rank_expert_workload().unsqueeze(1)
+        moe_load = self.comm_group.all_gather(local_load, dim=1).cpu()
 
         if self.multi_stage:
             moe_load = moe_load.permute(2, 0, 1, 3)
 
         self.shared_dict["moe_load"] = moe_load
-        logger.debug(f"[ModelRunner] Updated shared_dict['moe_load'] shape={moe_load.shape}")
+        logger.debug("[ModelRunner] Updated shared_dict['moe_load'] shape=%s", moe_load.shape)
 
         return moe_load
 

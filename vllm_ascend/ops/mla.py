@@ -33,7 +33,7 @@ from vllm.v1.attention.backend import AttentionMetadata  # type: ignore
 
 from vllm_ascend.ascend_config import get_ascend_config
 from vllm_ascend.ascend_forward_context import _EXTRA_CTX
-from vllm_ascend.utils import is_vl_model, parse_layer_idx, vllm_version_is
+from vllm_ascend.utils import is_vl_model, parse_layer_idx
 
 
 class IndexerWrapper(nn.Module):
@@ -41,7 +41,7 @@ class IndexerWrapper(nn.Module):
     A wrapper of Indexer for Deepseek v3.2.
     This wrapper is currently used to solve the fp8 hard code issue of vllm's deepseek_v2.py.
     It wraps the original Indexer, inherits its module weights
-    (including wq_b, wk, weights_proj, k_norm)
+    (including wq_b, wk_weights_proj or wk/weights_proj, k_norm)
     while deletes the unused topk_indices_buffer and k_cache to save memory.
     TODO: Will be removed once original Indexer supports different quantization methods.
     """
@@ -54,8 +54,7 @@ class IndexerWrapper(nn.Module):
         self.topk_tokens: int = vllm_indexer.topk_tokens  # 2048
         self.q_lora_rank: int = vllm_indexer.q_lora_rank  # 1536
         self.wq_b = vllm_indexer.wq_b
-        self.wk = vllm_indexer.wk
-        self.weights_proj = vllm_indexer.weights_proj
+        self.wk_weights_proj = vllm_indexer.wk_weights_proj
         self.k_norm = vllm_indexer.k_norm
         self.softmax_scale = vllm_indexer.softmax_scale
         vllm_indexer.topk_indices_buffer = None  # delete topk_indices_buffer
@@ -183,7 +182,7 @@ def mla_forward(
         attn_metadata = forward_context.attn_metadata[self.mla_attn.layer_name]
     else:
         attn_metadata = forward_context.attn_metadata
-    kv_cache = self.mla_attn.kv_cache[forward_context.virtual_engine if vllm_version_is("0.18.0") else 0]
+    kv_cache = self.mla_attn.kv_cache
     self.mla_attn.impl.forward(
         self.mla_attn.layer_name, hidden_states, kv_cache, attn_metadata, need_gather_q_kv, output
     )

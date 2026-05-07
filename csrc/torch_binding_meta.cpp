@@ -51,14 +51,24 @@ std::tuple<at::Tensor, at::Tensor> get_masked_input_and_mask_meta(
     return {masked_input, mask};
 }
 
+void device_print_meta(c10::string_view msg)
+{
+    (void)msg;
+}
+
+void device_print_tensor_meta(const at::Tensor& tensor)
+{
+    (void)tensor;
+}
+
 at::Tensor bgmv_expand_meta(at::Tensor &x, at::Tensor &weight, at::Tensor &indices, at::Tensor &y,
-                       int64_t slice_offset, int64_t slice_size) {
+                        int64_t slice_offset, int64_t slice_size) {
     at::Tensor y_out = at::empty_like(y);
     return y_out;
 }
 
 at::Tensor sgmv_expand_meta(at::Tensor &x, at::Tensor &weight, at::Tensor &lora_indices, at::Tensor &seq_len,
-                       at::Tensor &y, int64_t slice_offset, int64_t slice_size) {
+                        at::Tensor &y, int64_t slice_offset, int64_t slice_size) {
     at::Tensor y_out = at::empty_like(y);
     return y_out;
 }
@@ -183,11 +193,14 @@ std::tuple<at::Tensor&, at::Tensor&> dispatch_ffn_combine_meta(
     const at::Tensor& expert_idx,
     const at::TensorList& scale1,
     const at::TensorList& scale2,
+    const c10::optional<at::TensorList>& bias1,
+    const c10::optional<at::TensorList>& bias2,
     const at::Tensor& probs,
     c10::string_view group,
     int64_t max_output_size,
     at::Tensor& out,
-    at::Tensor& expert_token_nums
+    at::Tensor& expert_token_nums,
+    const c10::optional<at::Tensor> &x_active_mask
 ) {
     return {out, expert_token_nums};
 }
@@ -418,6 +431,53 @@ std::tuple<at::Tensor,at::Tensor, at::Tensor> npu_add_rms_norm_bias_meta(
     return std::tuple<at::Tensor, at::Tensor, at::Tensor>(y, rstd, x);
 }
 
+at::Tensor npu_reshape_and_cache_bnsd_meta(const at::Tensor& hashq, 
+                                           const at::Tensor& hashkCache,
+                                           const at::Tensor& slotMapping,
+                                           const at::Tensor& seqLen,
+                                           const at::Tensor& hashkCacheOut) {
+    at::Tensor output = at::empty(hashkCache.sizes(), hashkCache.options().dtype(hashkCache.dtype()).device(hashkCache.device()));                                        
+    return output;
+}
+
+
+at::Tensor npu_hamming_dist_top_k_meta(const at::Tensor &hashq, 
+                                       const at::Tensor &hashkCache,
+                                       const at::Tensor& hashkCacheRope,
+                                       const at::Tensor &topN,
+                                       const at::Tensor &seqLen, 
+                                       const c10::optional<at::Tensor> &chunkSize,
+                                       const c10::optional<int64_t> maxSeqLen, 
+                                       const c10::optional<int64_t> sink, 
+                                       const c10::optional<int64_t> recent, 
+                                       const c10::optional<int64_t> supportOffload,
+                                       const c10::optional<at::Tensor> &blockTable,
+                                       const c10::optional<at::Tensor> &mask,
+                                       const c10::optional<at::Tensor>& indices) {
+    if (indices.has_value()) {
+        return at::empty_like(indices.value());
+    }
+    uint32_t MAX_BLOCK_PER_REQ_INHSA = 512;
+
+    auto n_bs = hashq.size(0);
+    auto n_kv_heads = hashkCache.size(1); 
+    auto n_max_kv = MAX_BLOCK_PER_REQ_INHSA;
+    at::Tensor out = at::empty({n_bs, n_kv_heads, n_max_kv}, torch::TensorOptions().dtype(torch::kInt32).device(hashq.device()));
+    return out;
+}
+
+at::Tensor npu_sign_bits_pack_meta(const at::Tensor& input, 
+                                   const int64_t size) {
+    int64_t ySize = (input.size(0) + 7) / 8;
+    int64_t outDim = 0;
+    if (size != 0) {
+        outDim = ySize / size;
+    }
+
+    at::Tensor out = torch::empty({size, outDim}, torch::TensorOptions().dtype(torch::kUInt8).device(input.device()));                                 
+    return out;
+}
+
 std::tuple<at::Tensor, at::Tensor> npu_gemma_rms_norm_meta(
     const at::Tensor& x,
     const at::Tensor& gamma,
@@ -520,6 +580,24 @@ at::Tensor npu_causal_conv1d_310_meta(
     at::Tensor output = at::empty_symint(x.sym_sizes(), x.options());
     return output;
 }
+
+at::Tensor npu_recurrent_gated_delta_rule_310_meta(
+    const at::Tensor& query,
+    const at::Tensor& key,
+    const at::Tensor& value,
+    const at::Tensor& beta,
+    at::Tensor& state,
+    const at::Tensor& actual_seq_lengths,
+    const at::Tensor& ssm_state_indices,
+    const c10::optional<at::Tensor>& g,
+    const c10::optional<at::Tensor>& gk,
+    const c10::optional<at::Tensor>& num_accepted_tokens,
+    double scale_value)
+{
+
+    at::Tensor output = at::empty_symint(value.sym_sizes(), value.options());
+    return output;
+}
   
 std::vector<at::Tensor> moe_grouped_matmul_meta(
     at::Tensor x,
@@ -598,6 +676,8 @@ namespace {
 TORCH_LIBRARY_IMPL_EXPAND(CONCAT(_C, _ascend), Meta, ops) {
     // causal_conv1d_310
     ops.impl("npu_causal_conv1d_310", &vllm_ascend::meta::npu_causal_conv1d_310_meta);
+    // npu_recurrent_gated_delta_rule_310
+    ops.impl("npu_recurrent_gated_delta_rule_310", &vllm_ascend::meta::npu_recurrent_gated_delta_rule_310_meta);
 }
 }
 #else
@@ -608,6 +688,10 @@ TORCH_LIBRARY_IMPL_EXPAND(CONCAT(_C, _ascend), Meta, ops) {
     ops.impl("npu_gemma_rms_norm", &vllm_ascend::meta::npu_gemma_rms_norm_meta);
     // Masked input and mask meta implementation
     ops.impl("get_masked_input_and_mask", &vllm_ascend::meta::get_masked_input_and_mask_meta);
+    // Launch host print from device
+    ops.impl("device_print", &vllm_ascend::meta::device_print_meta);
+    // launch host print from device for tensors
+    ops.impl("device_print_tensor", &vllm_ascend::meta::device_print_tensor_meta);
     // Bgmv expand
     ops.impl("bgmv_expand", &vllm_ascend::meta::bgmv_expand_meta);
     // Sgmv expand
@@ -638,6 +722,12 @@ TORCH_LIBRARY_IMPL_EXPAND(CONCAT(_C, _ascend), Meta, ops) {
     ops.impl("npu_add_rms_norm_bias", &vllm_ascend::meta::npu_add_rms_norm_bias_meta);
     // transpose_kv_cache_by_block
     ops.impl("transpose_kv_cache_by_block", &vllm_ascend::meta::transpose_kv_cache_by_block_meta);
+    // hamming_dist_top_k
+    ops.impl("npu_hamming_dist_top_k", &vllm_ascend::meta::npu_hamming_dist_top_k_meta);
+    // reshape_and_cache_bnsd
+    ops.impl("npu_reshape_and_cache_bnsd", &vllm_ascend::meta::npu_reshape_and_cache_bnsd_meta);
+    // npu_sign_bits_pack
+    ops.impl("npu_sign_bits_pack", &vllm_ascend::meta::npu_sign_bits_pack_meta);
     // CopyAndExpandEagleInputs
     ops.impl("npu_copy_and_expand_eagle_inputs", &vllm_ascend::meta::npu_copy_and_expand_eagle_inputs_meta);
     // causal_conv1d_fn

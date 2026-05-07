@@ -24,6 +24,7 @@ from vllm.config import VllmConfig
 from vllm.config.compilation import CUDAGraphMode
 from vllm.forward_context import get_forward_context, set_forward_context
 from vllm.logger import logger
+from vllm.sequence import IntermediateTensors
 from vllm.v1.kv_cache_interface import KVCacheConfig
 from vllm.v1.worker.gpu.block_table import BlockTables
 from vllm.v1.worker.gpu.cudagraph_utils import BatchExecutionDescriptor, ModelCudaGraphManager
@@ -33,6 +34,7 @@ from vllm.v1.worker.utils import AttentionGroup
 
 from vllm_ascend.ascend_forward_context import _EXTRA_CTX
 from vllm_ascend.compilation.acl_graph import set_graph_params, update_full_graph_params
+from vllm_ascend.worker.v2.utils import communicator_switch
 
 
 class ModelAclGraphManager(ModelCudaGraphManager):
@@ -74,13 +76,13 @@ class ModelAclGraphManager(ModelCudaGraphManager):
         # calculate num_tokens_across_dp.
         num_tokens_across_dp = torch.full([self.model_runner.dp_size], num_tokens, device=self.device)
         with set_forward_context(
-            self.model_runner.input_batch.attn_metadata,
+            self.model_runner.model_state.attn_metadata,
             self.vllm_config,
             num_tokens=num_tokens,
             cudagraph_runtime_mode=desc.cg_mode,
             num_tokens_across_dp=num_tokens_across_dp,
             batch_descriptor=None,  # Full graph model don't need batch_descriptor
-            slot_mapping=self.model_runner.input_batch.slot_mappings,
+            slot_mapping=None,
         ):
             forward_context = get_forward_context()
             update_full_graph_params(
@@ -100,6 +102,7 @@ class ModelAclGraphManager(ModelCudaGraphManager):
         model: nn.Module,
         model_state: ModelState,
         input_buffers: InputBuffers,
+        intermediate_tensors: IntermediateTensors | None,
         block_tables: BlockTables,
         attn_groups: list[list[AttentionGroup]],
         kv_cache_config: KVCacheConfig,
@@ -109,17 +112,19 @@ class ModelAclGraphManager(ModelCudaGraphManager):
     ) -> None:
         """Capture CUDA graphs for model forward pass."""
         model = ModelWithContext(model)
-        return super().capture(
-            model,
-            model_state,
-            input_buffers,
-            block_tables,
-            attn_groups,
-            kv_cache_config,
-            has_lora,
-            use_aux_hidden_state_outputs,
-            progress_bar_desc,
-        )
+        with communicator_switch():
+            super().capture(
+                model,
+                model_state,
+                input_buffers,
+                intermediate_tensors,
+                block_tables,
+                attn_groups,
+                kv_cache_config,
+                has_lora,
+                use_aux_hidden_state_outputs,
+                progress_bar_desc,
+            )
 
 
 class ModelWithContext(nn.Module):
@@ -127,14 +132,27 @@ class ModelWithContext(nn.Module):
     so we can inherit vllm's CudaGraphManager._capture_full_graph.
     """
 
-    def __init__(self, original_model):
+    def __init__(self, original_model, is_draft_model=False, is_draft_model_prefill=False):
         super().__init__()
         self.original_model = original_model
+        self.is_draft_model = is_draft_model
+        self.is_draft_model_prefill = is_draft_model_prefill
 
     def forward(self, *args, **kwargs):
         # In warmup phase, capturing=False by default.
         # when capturing, we need to set capturing=True in forward context.
         if torch.npu.is_current_stream_capturing():
             _EXTRA_CTX.capturing = True
+        if self.is_draft_model:
+            _EXTRA_CTX.is_draft_model = True
+        if self.is_draft_model_prefill:
+            _EXTRA_CTX.is_draft_model_prefill = True
 
         return self.original_model(*args, **kwargs)
+
+    def get_original_model(self):
+        return self.original_model
+
+    def compute_logits(self, hidden_states: torch.Tensor):
+        # draft model has `compute_logits`, which is not in ModelWithContext
+        return self.original_model.compute_logits(hidden_states)

@@ -38,11 +38,11 @@ Run the vLLM server in the docker.
 
 ```{code-block} bash
    :substitutions:
-vllm serve Qwen/Qwen2.5-0.5B-Instruct --max_model_len 35000 &
+vllm serve Qwen/Qwen2.5-0.5B-Instruct --max-model-len 35000 &
 ```
 
 :::{note}
-`--max_model_len` should be greater than `35000`, this will be suitable for most datasets. Otherwise the accuracy evaluation may be affected.
+`--max-model-len` should be greater than `35000`, this will be suitable for most datasets. Otherwise the accuracy evaluation may be affected.
 :::
 
 The vLLM server is started successfully, if you see logs as below:
@@ -61,7 +61,7 @@ Refer to [AISBench](https://gitee.com/aisbench/benchmark/tree/master) for detail
 Install AISBench from source.
 
 ```shell
-git clone https://gitee.com/aisbench/benchmark.git
+git clone https://github.com/AISBench/benchmark.git
 cd benchmark/
 pip3 install -e ./ --use-pep517
 ```
@@ -81,74 +81,74 @@ You can choose one or multiple datasets to execute accuracy evaluation.
 
 1. `C-Eval` dataset.
 
-Take `C-Eval` dataset as an example. You can refer to [Datasets](https://gitee.com/aisbench/benchmark/tree/master/ais_bench/benchmark/configs/datasets) for more datasets. Each dataset has a `README.md` with detailed download and installation instructions.
+    Take `C-Eval` dataset as an example. You can refer to [Datasets](https://gitee.com/aisbench/benchmark/tree/master/ais_bench/benchmark/configs/datasets) for more datasets. Each dataset has a `README.md` with detailed download and installation instructions.
 
-Download dataset and install it to specific path.
+    Download dataset and install it to specific path.
 
-```shell
-cd ais_bench/datasets
-mkdir ceval/
-mkdir ceval/formal_ceval
-cd ceval/formal_ceval
-wget https://www.modelscope.cn/datasets/opencompass/ceval-exam/resolve/master/ceval-exam.zip
-unzip ceval-exam.zip
-rm ceval-exam.zip
-```
+    ```shell
+    cd ais_bench/datasets
+    mkdir ceval/
+    mkdir ceval/formal_ceval
+    cd ceval/formal_ceval
+    wget https://www.modelscope.cn/datasets/opencompass/ceval-exam/resolve/master/ceval-exam.zip
+    unzip ceval-exam.zip
+    rm ceval-exam.zip
+    ```
 
 2. `MMLU` dataset.
 
-```shell
-cd ais_bench/datasets
-wget http://opencompass.oss-cn-shanghai.aliyuncs.com/datasets/data/mmlu.zip
-unzip mmlu.zip
-rm mmlu.zip
-```
+    ```shell
+    cd ais_bench/datasets
+    wget http://opencompass.oss-cn-shanghai.aliyuncs.com/datasets/data/mmlu.zip
+    unzip mmlu.zip
+    rm mmlu.zip
+    ```
 
 3. `GPQA` dataset.
 
-```shell
-cd ais_bench/datasets
-wget http://opencompass.oss-cn-shanghai.aliyuncs.com/datasets/data/gpqa.zip
-unzip gpqa.zip
-rm gpqa.zip
-```
+    ```shell
+    cd ais_bench/datasets
+    wget http://opencompass.oss-cn-shanghai.aliyuncs.com/datasets/data/gpqa.zip
+    unzip gpqa.zip
+    rm gpqa.zip
+    ```
 
 4. `MATH` dataset.
 
-```shell
-cd ais_bench/datasets
-wget http://opencompass.oss-cn-shanghai.aliyuncs.com/datasets/data/math.zip
-unzip math.zip
-rm math.zip
-```
+    ```shell
+    cd ais_bench/datasets
+    wget http://opencompass.oss-cn-shanghai.aliyuncs.com/datasets/data/math.zip
+    unzip math.zip
+    rm math.zip
+    ```
 
 5. `LiveCodeBench` dataset.
 
-```shell
-cd ais_bench/datasets
-git lfs install
-git clone https://huggingface.co/datasets/livecodebench/code_generation_lite
-```
+    ```shell
+    cd ais_bench/datasets
+    git lfs install
+    git clone https://huggingface.co/datasets/livecodebench/code_generation_lite
+    ```
 
 6. `AIME 2024` dataset.
 
-```shell
-cd ais_bench/datasets
-mkdir aime/
-cd aime/
-wget http://opencompass.oss-cn-shanghai.aliyuncs.com/datasets/data/aime.zip
-unzip aime.zip
-rm aime.zip
-```
+    ```shell
+    cd ais_bench/datasets
+    mkdir aime/
+    cd aime/
+    wget http://opencompass.oss-cn-shanghai.aliyuncs.com/datasets/data/aime.zip
+    unzip aime.zip
+    rm aime.zip
+    ```
 
 7. `GSM8K` dataset.
 
-```shell
-cd ais_bench/datasets
-wget http://opencompass.oss-cn-shanghai.aliyuncs.com/datasets/data/gsm8k.zip
-unzip gsm8k.zip
-rm gsm8k.zip
-```
+    ```shell
+    cd ais_bench/datasets
+    wget http://opencompass.oss-cn-shanghai.aliyuncs.com/datasets/data/gsm8k.zip
+    unzip gsm8k.zip
+    rm gsm8k.zip
+    ```
 
 #### Configuration
 
@@ -161,7 +161,7 @@ There are several arguments that you should update according to your environment
 - `path`: Update to your model weight path.
 - `model`: Update to your model name in vLLM.
 - `host_ip` and `host_port`: Update to your vLLM server ip and port.
-- `max_out_len`: Note `max_out_len` + LLM input length should be less than `max-model-len`(config in your vllm server), `32768` will be suitable for most datasets.
+- `max_out_len`: Note `max_out_len` + LLM input length should be less than `max_model_len`(config in your vllm server), `32768` will be suitable for most datasets.
 - `batch_size`: Update according to your dataset.
 - `temperature`: Update inference argument.
 

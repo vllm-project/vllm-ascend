@@ -1,0 +1,473 @@
+#: ../../source/developer_guide/Design_Documents/ACL_Graph.md:89
+msgid ""
+"The attention backends that implement `update_graph_params()` are "
+"`PagedAttention` and `BlockManagerAttention`."
+msgstr "实现 `update_graph_params()` 的注意力后端是 `PagedAttention` 和 `BlockManagerAttention`。"
+
+#: ../../source/developer_guide/Design_Documents/ACL_Graph.md:91
+msgid ""
+"The current implementation uses a synchronous update pattern: the host "
+"waits for the update stream to finish before replay begins. This is "
+"simpler to reason about and sufficient for current workloads. An "
+"asynchronous pattern that overlaps update with replay is possible in "
+"principle but not yet implemented."
+msgstr "当前实现使用同步更新模式：主机等待更新流完成后再开始重放。这样更容易推理，并且对于当前工作负载来说已经足够。异步模式在原则上可以重叠更新和重放，但尚未实现。"
+
+#: ../../source/developer_guide/Design_Documents/ACL_Graph.md:93
+msgid "Piecewise graph capture and replay"
+msgstr "分段图捕获与重放"
+
+#: ../../source/developer_guide/Design_Documents/ACL_Graph.md:95
+msgid ""
+"Piecewise mode captures each model layer as a separate ACL graph. This "
+"reduces per-graph memory pressure and makes it feasible to capture larger"
+" batch sizes on Ascend. The trade-off is that each layer incurs a replay "
+"launch, so the host overhead saved by graph mode is partially offset by "
+"the number of segments."
+msgstr "分段模式将每个模型层捕获为单独的 ACL 计算图。这减少了每个计算图的内存压力，使得在 Ascend 上捕获更大的批次大小成为可能。代价是每层都会产生一次重放启动，因此计算图模式节省的主机开销会被分段数量部分抵消。"
+
+#: ../../source/developer_guide/Design_Documents/ACL_Graph.md:97
+msgid ""
+"Piecewise capture is implemented in "
+"`vllm_ascend.compilation.acl_graph.ACLGraphWrapper._capture_piecewise()`."
+" The wrapper iterates over the model layers, captures each one "
+"individually, and stores the resulting graph handles in a list. During "
+"replay, `_replay_piecewise()` replays each segment in order."
+msgstr "分段捕获在 `vllm_ascend.compilation.acl_graph.ACLGraphWrapper._capture_piecewise()` 中实现。封装器遍历模型层，单独捕获每一层，并将生成的计算图句柄存储在列表中。在重放期间，`_replay_piecewise()` 按顺序重放每个段。"
+
+#: ../../source/developer_guide/Design_Documents/ACL_Graph.md:99
+msgid ""
+"Piecewise mode does not require the host-side attention parameter update "
+"mechanism described above, because each layer's graph is small enough "
+"that the attention parameters are captured as part of the graph itself."
+msgstr "分段模式不需要上述的主机端注意力参数更新机制，因为每层的计算图足够小，注意力参数可以作为计算图本身的一部分被捕获。"
+
+#: ../../source/developer_guide/Design_Documents/ACL_Graph.md:101
+msgid "Graph pool management"
+msgstr "计算图池管理"
+
+#: ../../source/developer_guide/Design_Documents/ACL_Graph.md:103
+msgid ""
+"ACL graph capture requires a memory pool that persists across captures. "
+"The pool is created once during the first capture and reused for "
+"subsequent captures of the same batch descriptor. The pool is destroyed "
+"when the `ACLGraphWrapper` is garbage collected or when the model is "
+"reloaded."
+msgstr "ACL 计算图捕获需要一个跨捕获持久化的内存池。该池在第一次捕获期间创建一次，并用于同一批次描述符的后续捕获。当 `ACLGraphWrapper` 被垃圾回收或模型重新加载时，该池被销毁。"
+
+#: ../../source/developer_guide/Design_Documents/ACL_Graph.md:105
+msgid ""
+"The pool is managed by `torch.npu.graph_pool_handle()` and "
+"`torch.npu.graph_pool_handle_destroy()`. The current implementation "
+"creates one pool per batch descriptor, which is sufficient for the "
+"typical number of capture sizes. If the number of capture sizes grows "
+"significantly, pool memory may become a concern."
+msgstr "该池由 `torch.npu.graph_pool_handle()` 和 `torch.npu.graph_pool_handle_destroy()` 管理。当前实现为每个批次描述符创建一个池，这对于典型的捕获大小数量来说已经足够。如果捕获大小数量显著增长，池内存可能会成为一个问题。"
+
+#: ../../source/developer_guide/Design_Documents/ACL_Graph.md:107
+msgid "Error handling and fallback"
+msgstr "错误处理与回退"
+
+#: ../../source/developer_guide/Design_Documents/ACL_Graph.md:109
+msgid ""
+"If ACL graph capture fails for any reason (e.g., out of memory, stream "
+"resource exhaustion, unsupported operator), the wrapper falls back to "
+"eager execution for that batch descriptor. The failure is logged but does"
+" not crash the model. Subsequent requests for the same batch descriptor "
+"will attempt capture again, which may succeed if the resource situation "
+"has changed."
+msgstr "如果 ACL 计算图捕获因任何原因失败（例如，内存不足、流资源耗尽、不支持的算子），封装器会为该批次描述符回退到立即执行模式。失败会被记录，但不会导致模型崩溃。后续对同一批次描述符的请求将再次尝试捕获，如果资源情况已发生变化，则可能成功。"
+
+#: ../../source/developer_guide/Design_Documents/ACL_Graph.md:111
+msgid ""
+"Similarly, if replay fails (e.g., due to a device error), the wrapper "
+"falls back to eager execution for that request and logs the error. The "
+"graph is not evicted from the cache on replay failure, because the "
+"failure may be transient."
+msgstr "类似地，如果重放失败（例如，由于设备错误），封装器会为该请求回退到立即执行模式并记录错误。重放失败时不会从缓存中驱逐该计算图，因为失败可能是暂时的。"
+
+#: ../../source/developer_guide/Design_Documents/ACL_Graph.md:113
+msgid "Future Work"
+msgstr "未来工作"
+
+#: ../../source/developer_guide/Design_Documents/ACL_Graph.md:115
+msgid ""
+"The current implementation is functional but has several areas for "
+"improvement:"
+msgstr "当前实现功能完整，但有几个改进方向："
+
+#: ../../source/developer_guide/Design_Documents/ACL_Graph.md:117
+msgid ""
+"Asynchronous attention parameter update: overlapping host-side update "
+"with replay could reduce latency further."
+msgstr "异步注意力参数更新：将主机端更新与重放重叠可以进一步减少延迟。"
+
+#: ../../source/developer_guide/Design_Documents/ACL_Graph.md:118
+msgid ""
+"Dynamic capture size adjustment: the current stream budget trimming is "
+"static. A dynamic approach that adjusts capture sizes based on actual "
+"resource usage could improve coverage."
+msgstr "动态捕获大小调整：当前的流预算裁剪是静态的。基于实际资源使用情况动态调整捕获大小的方法可以提高覆盖率。"
+
+#: ../../source/developer_guide/Design_Documents/ACL_Graph.md:119
+msgid ""
+"Full graph support for encoder-decoder models: currently forced to "
+"piecewise mode, but full graph may be feasible with additional work."
+msgstr "编码器-解码器模型的完整图支持：当前强制使用分段模式，但通过额外工作可能实现完整图支持。"
+
+#: ../../source/developer_guide/Design_Documents/ACL_Graph.md:120
+msgid ""
+"Better integration with Xlite graph mode: the current interaction between"
+" ACL graph and Xlite graph is ad-hoc and could be more systematic."
+msgstr "与 Xlite 计算图模式的更好集成：当前 ACL 计算图和 Xlite 计算图之间的交互是临时性的，可以更加系统化。"
+
+#: ../../source/developer_guide/Design_Documents/ACL_Graph.md:121
+msgid ""
+"More efficient pool management: sharing pools across batch descriptors "
+"could reduce memory usage."
+msgstr "更高效的池管理：跨批次描述符共享池可以减少内存使用。"
+
+#: ../../source/developer_guide/Design_Documents/ACL_Graph.md:90
+msgid "This mechanism is implemented in attention backends such as:"
+msgstr "此机制在注意力后端中实现，例如："
+
+#: ../../source/developer_guide/Design_Documents/ACL_Graph.md:92
+msgid "`vllm_ascend/attention/attention_v1.py`"
+msgstr "`vllm_ascend/attention/attention_v1.py`"
+
+#: ../../source/developer_guide/Design_Documents/ACL_Graph.md:93
+msgid "`vllm_ascend/attention/mla_v1.py`"
+msgstr "`vllm_ascend/attention/mla_v1.py`"
+
+#: ../../source/developer_guide/Design_Documents/ACL_Graph.md:94
+msgid "`vllm_ascend/attention/context_parallel/attention_cp.py`"
+msgstr "`vllm_ascend/attention/context_parallel/attention_cp.py`"
+
+#: ../../source/developer_guide/Design_Documents/ACL_Graph.md:95
+msgid "`vllm_ascend/attention/context_parallel/mla_cp.py`"
+msgstr "`vllm_ascend/attention/context_parallel/mla_cp.py`"
+
+#: ../../source/developer_guide/Design_Documents/ACL_Graph.md:97
+msgid ""
+"The important design point is that Ascend full graph support depends on "
+"backend-provided `update_graph_params()` hooks. Without that hook, "
+"capture alone is not enough to replay the correct attention state."
+msgstr ""
+"重要的设计点是，Ascend 完整图支持依赖于后端提供的 `update_graph_params()` "
+"钩子。没有这个钩子，仅靠捕获不足以重放正确的注意力状态。"
+
+#: ../../source/developer_guide/Design_Documents/ACL_Graph.md:99
+msgid "Replay ordering and synchronization"
+msgstr "重放顺序与同步"
+
+#: ../../source/developer_guide/Design_Documents/ACL_Graph.md:101
+msgid ""
+"`ACLGraphWrapper` synchronizes the current stream before replay in the "
+"common path to ensure that host-side parameter updates stay aligned with "
+"the graph execution that will consume them. This is especially relevant "
+"in asynchronous scheduling or multi-threaded execution."
+msgstr ""
+"`ACLGraphWrapper` "
+"在通用路径的重放前同步当前流，以确保主机侧参数更新与将要使用它们的图执行保持对齐。这在异步调度或多线程执行中尤为重要。"
+
+#: ../../source/developer_guide/Design_Documents/ACL_Graph.md:103
+msgid ""
+"If ordering is not preserved, the parameter update for iteration *i* can "
+"be observed by the replay of iteration *i-1*, or the replay of iteration "
+"*i* can start before its own parameter update has completed. In practice,"
+" this means the attention operator may run with mismatched runtime "
+"metadata, which can cause incorrect results, precision issues, or even "
+"hangs. The code keeps a narrower path for the main full-graph eagle case,"
+" but the general design assumption is the same: replay must not overtake "
+"pending parameter update work."
+msgstr ""
+"如果顺序未得到保持，迭代 *i* 的参数更新可能被迭代 *i-1* 的重放观察到，或者迭代 *i* "
+"的重放可能在它自身的参数更新完成之前就开始。实际上，这意味着注意力算子可能在运行时元数据不匹配的情况下运行，这可能导致错误结果、精度问题甚至挂起。代码为主流的完整图"
+" eagle 情况保留了一条更窄的路径，但通用的设计假设是相同的：重放不得超越待处理的参数更新工作。"
+
+#: ../../source/developer_guide/Design_Documents/ACL_Graph.md:105
+msgid "Full vs Piecewise on Ascend"
+msgstr "Ascend 上的完整图与分段图"
+
+#: ../../source/developer_guide/Design_Documents/ACL_Graph.md:107
+msgid ""
+"Upstream docs already define full graph and piecewise graph semantically."
+" On Ascend, the practical difference is driven by backend support and "
+"resource cost."
+msgstr "上游文档已经在语义上定义了完整图和分段图。在 Ascend 上，实际差异由后端支持和资源成本驱动。"
+
+#: ../../source/developer_guide/Design_Documents/ACL_Graph.md:109
+msgid "Piecewise mode"
+msgstr "分段模式"
+
+#: ../../source/developer_guide/Design_Documents/ACL_Graph.md:111
+msgid ""
+"Piecewise mode is the conservative path. It relies on the generic vLLM "
+"split execution strategy, then applies ACL graph capture to the non-"
+"attention segments selected by the compilation path. On Ascend, this mode"
+" is currently the more widely supported option, but it is also the most "
+"sensitive to stream pressure because the number of captured graphs scales"
+" with model depth."
+msgstr ""
+"分段模式是保守路径。它依赖通用的 vLLM 拆分执行策略，然后将 ACL 图捕获应用于编译路径选择的非注意力片段。在 Ascend "
+"上，此模式是目前更广泛支持的选项，但它也对流压力最敏感，因为捕获的图数量随模型深度而增加。"
+
+#: ../../source/developer_guide/Design_Documents/ACL_Graph.md:113
+msgid "Full graph mode"
+msgstr "完整图模式"
+
+#: ../../source/developer_guide/Design_Documents/ACL_Graph.md:115
+msgid ""
+"Full graph mode is the more performance-oriented path when the attention "
+"backend can support runtime parameter patching through "
+"`update_graph_params()`. On Ascend, full graph support is tied to those "
+"attention-specific update hooks, workspace caching, and replay ordering "
+"guarantees."
+msgstr ""
+"完整图模式是更注重性能的路径，前提是注意力后端能够通过 `update_graph_params()` 支持运行时参数修补。在 Ascend "
+"上，完整图支持与那些注意力特定的更新钩子、工作空间缓存和重放顺序保证紧密相关。"
+
+#: ../../source/developer_guide/Design_Documents/ACL_Graph.md:117
+msgid "Diagnostics and Operational Notes"
+msgstr "诊断与操作说明"
+
+#: ../../source/developer_guide/Design_Documents/ACL_Graph.md:119
+msgid ""
+"The simplest way to confirm that graph mode is active is to enable "
+"cudagraph metrics and keep log stats enabled. In CLI usage, use "
+"`--cudagraph-metrics` and do not pass `--disable-log-stats`. In Python "
+"usage, set `cudagraph_metrics=True` and `disable_log_stats=False`. Then "
+"inspect the emitted metrics and logs."
+msgstr ""
+"确认图模式是否激活的最简单方法是启用 cudagraph 指标并保持日志统计开启。在 CLI 使用中，使用 `--cudagraph-"
+"metrics` 且不传递 `--disable-log-stats`。在 Python 使用中，设置 "
+"`cudagraph_metrics=True` 和 `disable_log_stats=False`。然后检查输出的指标和日志。"
+
+#: ../../source/developer_guide/Design_Documents/ACL_Graph.md:120
+msgid ""
+"Profiling can also confirm whether replay is happening, and developers "
+"can add temporary prints before replay when debugging locally, but those "
+"are secondary methods and are not expanded here."
+msgstr "性能分析也可以确认重放是否发生，开发者可以在本地调试时在重放前添加临时打印，但这些都是次要方法，此处不展开说明。"
+
+#: ../../source/developer_guide/Design_Documents/ACL_Graph.md:121
+msgid ""
+"`update_aclgraph_sizes()` is the main implementation point for stream-"
+"budget-driven capture-size trimming."
+msgstr "`update_aclgraph_sizes()` 是基于流预算驱动的捕获大小调整的主要实现点。"
+
+#: ../../source/developer_guide/Design_Documents/ACL_Graph.md:122
+msgid ""
+"In debug mode, `ACLGraphWrapper` asserts that replay uses the same tensor"
+" addresses recorded during capture."
+msgstr "在调试模式下，`ACLGraphWrapper` 断言重放使用与捕获期间记录的相同的张量地址。"
+
+#: ../../source/developer_guide/Design_Documents/ACL_Graph.md:123
+msgid ""
+"`ASCEND_LAUNCH_BLOCKING=1` is incompatible with ACL graph enablement in "
+"the current implementation."
+msgstr "在当前实现中，`ASCEND_LAUNCH_BLOCKING=1` 与 ACL 图启用不兼容。"
+
+#: ../../source/developer_guide/Design_Documents/ACL_Graph.md:124
+msgid ""
+"For debugging inside graph execution, the repo also provides graph-aware "
+"print helpers in `vllm_ascend.utils`, but those are developer diagnostics"
+" rather than part of the execution design."
+msgstr ""
+"对于图执行内部的调试，代码库还在 `vllm_ascend.utils` "
+"中提供了图感知的打印辅助工具，但这些是开发者诊断工具，而非执行设计的一部分。"
+
+#: ../../source/developer_guide/Design_Documents/ACL_Graph.md:126
+msgid "Related Files"
+msgstr "相关文件"
+
+#: ../../source/developer_guide/Design_Documents/ACL_Graph.md:128
+msgid ""
+"`vllm_ascend/platform.py`, mode normalization, platform hooks, and static"
+" graph wrapper selection."
+msgstr "`vllm_ascend/platform.py`，模式规范化、平台钩子以及静态图包装器选择。"
+
+#: ../../source/developer_guide/Design_Documents/ACL_Graph.md:129
+msgid ""
+"`vllm_ascend/compilation/acl_graph.py`, ACL graph wrapper, capture and "
+"replay cache, graph parameter containers, and full graph update dispatch."
+msgstr "`vllm_ascend/compilation/acl_graph.py`，ACL 图包装器、捕获与重放缓存、图参数容器以及完整图更新分发。"
+
+#: ../../source/developer_guide/Design_Documents/ACL_Graph.md:130
+msgid ""
+"`vllm_ascend/utils.py`, capture size adjustment through "
+"`update_aclgraph_sizes()`."
+msgstr "`vllm_ascend/utils.py`，通过 `update_aclgraph_sizes()` 进行捕获大小调整。"
+
+#: ../../source/developer_guide/Design_Documents/ACL_Graph.md:131
+msgid ""
+"`vllm_ascend/attention/attention_v1.py`, full graph attention parameter "
+"capture and update logic."
+msgstr "`vllm_ascend/attention/attention_v1.py`，完整图注意力参数捕获与更新逻辑。"
+
+#: ../../source/developer_guide/Design_Documents/ACL_Graph.md:132
+msgid ""
+"`vllm_ascend/attention/mla_v1.py`, MLA (Multi-Head Latent Attention) "
+"specific full graph parameter capture and update logic."
+msgstr "`vllm_ascend/attention/mla_v1.py`，MLA（多头潜在注意力）特定的完整图参数捕获与更新逻辑。"
+
+#: ../../source/developer_guide/Design_Documents/ACL_Graph.md:133
+msgid ""
+"`vllm_ascend/attention/context_parallel/attention_cp.py`, context "
+"parallel attention update path."
+msgstr "`vllm_ascend/attention/context_parallel/attention_cp.py`，上下文并行注意力更新路径。"
+
+#: ../../source/developer_guide/Design_Documents/ACL_Graph.md:134
+msgid ""
+"`vllm_ascend/attention/context_parallel/mla_cp.py`, context parallel MLA "
+"update path."
+msgstr "`vllm_ascend/attention/context_parallel/mla_cp.py`，上下文并行 MLA 更新路径。"
+
+#~ msgid ""
+#~ "Currently, due to stream resource "
+#~ "constraint, we can only support a "
+#~ "few buckets in piecewise graph mode "
+#~ "now, which will cause redundant "
+#~ "computing and may lead to performance"
+#~ " degradation compared with eager mode."
+#~ msgstr "目前，由于流资源限制，分段计算图模式仅支持少量桶，这会导致冗余计算，与 eager 模式相比可能带来性能下降。"
+
+#~ msgid "How is it implemented?"
+#~ msgstr "它是如何实现的？"
+
+#~ msgid ""
+#~ "When using piecewise graph, we just "
+#~ "need to follow the above-mentioned "
+#~ "process. But when in full graph, "
+#~ "due to the complexity of the "
+#~ "attention, sometimes we need to update"
+#~ " attention op's params before execution."
+#~ " So we implement `update_attn_params` and"
+#~ " `update_mla_attn_params` functions for full "
+#~ "graph mode. During forward, memory will"
+#~ " be reused between different ops, so"
+#~ " we can't update attention op's "
+#~ "params before forward. In ACL Graph, "
+#~ "we use `torch.npu.graph_task_update_begin` and "
+#~ "`torch.npu.graph_task_update_end` to do it, "
+#~ "and use `torch.npu.ExternalEvent` to ensure"
+#~ " order between param updates and op"
+#~ " executions."
+#~ msgstr ""
+#~ "使用分段计算图时，只需遵循上述流程。但在完整计算图模式下，由于注意力机制的复杂性，有时需要在执行前更新注意力算子的参数。因此，我们为完整计算图模式实现了"
+#~ " `update_attn_params` 和 `update_mla_attn_params` "
+#~ "函数。在前向传播过程中，不同算子之间会复用内存，因此无法在前向传播之前更新注意力算子的参数。在 ACL "
+#~ "计算图中，我们使用 `torch.npu.graph_task_update_begin` 和 "
+#~ "`torch.npu.graph_task_update_end` 来实现此功能，并使用 "
+#~ "`torch.npu.ExternalEvent` 来确保参数更新与算子执行之间的顺序。"
+
+#~ msgid "DFX"
+#~ msgstr "DFX"
+
+#~ msgid "Stream resource constraint"
+#~ msgstr "流资源限制"
+
+#~ msgid ""
+#~ "Currently, we can only capture 1800 "
+#~ "graphs at most, due to the "
+#~ "limitation of ACL graph that a "
+#~ "graph requires at least a separate "
+#~ "stream. This number is bounded by "
+#~ "the number of streams, which is "
+#~ "2048; we save 248 streams as a "
+#~ "buffer. Besides, there are many "
+#~ "variables that can affect the number "
+#~ "of buckets:"
+#~ msgstr ""
+#~ "目前，由于 ACL 计算图要求每个图至少需要一个独立的流，我们最多只能捕获 1800 "
+#~ "个计算图。此数量受限于流的总数（2048 个），我们保留了 248 "
+#~ "个流作为缓冲区。此外，还有许多变量会影响桶的数量："
+
+#~ msgid ""
+#~ "Piecewise graph divides the model into"
+#~ " `num_hidden_layers + 1` sub modules, "
+#~ "based on the attention layer. Every "
+#~ "sub module is a single graph which"
+#~ " needs to cost a stream, so the"
+#~ " number of buckets in piecewise graph"
+#~ " mode is very tight compared with "
+#~ "full graph mode."
+#~ msgstr ""
+#~ "分段计算图根据注意力层将模型划分为 `num_hidden_layers + 1` "
+#~ "个子模块。每个子模块是一个独立的计算图，需要消耗一个流，因此与完整计算图模式相比，分段计算图模式下的桶数量非常紧张。"
+
+#~ msgid ""
+#~ "The number of streams required for "
+#~ "a graph is related to the number"
+#~ " of comm domains. Each comm domain"
+#~ " will increase one stream consumed by"
+#~ " a graph."
+#~ msgstr "计算图所需的流数量与通信域的数量相关。每个通信域会增加计算图消耗的一个流。"
+
+#~ msgid ""
+#~ "When multi-stream is explicitly called"
+#~ " in a sub module, it will "
+#~ "consume an additional stream."
+#~ msgstr "当在子模块中显式调用多流时，会额外消耗一个流。"
+
+#~ msgid ""
+#~ "There are some other rules about "
+#~ "ACL Graph and stream. Currently, we "
+#~ "use func `update_aclgraph_sizes` to calculate"
+#~ " the maximum number of buckets and"
+#~ " update `graph_batch_sizes` to ensure "
+#~ "stream resource is sufficient."
+#~ msgstr ""
+#~ "关于 ACL 计算图和流还有一些其他规则。目前，我们使用 `update_aclgraph_sizes`"
+#~ " 函数来计算最大桶数量并更新 `graph_batch_sizes`，以确保流资源充足。"
+
+#~ msgid "We will expand the stream resource limitation in the future."
+#~ msgstr "未来我们将放宽流资源的限制。"
+
+#~ msgid "Limitations"
+#~ msgstr "限制"
+
+#~ msgid "`FULL` and `FULL_AND_PIECEWISE` are not supported now;"
+#~ msgstr "目前不支持 `FULL` 和 `FULL_AND_PIECEWISE`；"
+
+#~ msgid ""
+#~ "When use ACL Graph and MTP and "
+#~ "`num_speculative_tokens > 1`, as vLLM "
+#~ "don't support this case in v0.11.0, "
+#~ "we need to set `cudagraph_capture_sizes` "
+#~ "explicitly."
+#~ msgstr ""
+#~ "当使用 ACL 计算图和 MTP 且 "
+#~ "`num_speculative_tokens > 1` 时，由于 vLLM 在"
+#~ " v0.11.0 版本中不支持此场景，需要显式设置 `cudagraph_capture_sizes`。"
+
+#~ msgid "`use_inductor` is not supported now;"
+#~ msgstr "目前不支持 `use_inductor`；"
+
+#~ msgid ""
+#~ "When in graph mode, vLLM will call"
+#~ " `current_platform.get_static_graph_wrapper_cls` to get"
+#~ " the current device's graph model "
+#~ "wrapper, so what we need to do "
+#~ "is implement the graph mode wrapper "
+#~ "on Ascend: `ACLGraphWrapper`."
+#~ msgstr ""
+#~ "在计算图模式下，vLLM 会调用 "
+#~ "`current_platform.get_static_graph_wrapper_cls` "
+#~ "获取当前设备的计算图模型包装器，因此我们需要在 Ascend "
+#~ "上实现计算图模式包装器：`ACLGraphWrapper`。"
+
+#~ msgid ""
+#~ "vLLM has added `support_torch_compile` "
+#~ "decorator to all models. This decorator"
+#~ " will replace the `__init__` and "
+#~ "`forward` interface of the model class."
+#~ " When `forward` is called, the code"
+#~ " inside the `ACLGraphWrapper` will be "
+#~ "executed, and it will do capture "
+#~ "or replay as mentioned above."
+#~ msgstr ""
+#~ "vLLM 已为所有模型添加了 `support_torch_compile` "
+#~ "装饰器。该装饰器会替换模型类的 `__init__` 和 `forward` 接口。当调用"
+#~ " `forward` 时，将执行 `ACLGraphWrapper` "
+#~ "内的代码，并根据上述说明进行捕获或回放。"

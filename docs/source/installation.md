@@ -11,7 +11,7 @@ This document describes how to install vllm-ascend manually.
 
     | Software      | Supported version                | Note                                      |
     |---------------|----------------------------------|-------------------------------------------|
-    | Ascend HDK    | Refer to the documentation [here](https://www.hiascend.com/document/detail/zh/canncommercial/83RC1/releasenote/releasenote_0000.html) | Required for CANN |
+    | Ascend HDK    | Refer to the documentation [CANN 8.3.RC1](https://www.hiascend.com/document/detail/zh/canncommercial/83RC1/releasenote/releasenote_0000.html) | Required for CANN |
     | CANN          | == 8.5.1                        | Required for vllm-ascend and torch-npu    |
     | torch-npu     | == 2.9.0             | Required for vllm-ascend, No need to install manually, it will be auto installed in below steps |
     | torch         | == 2.9.0                          | Required for torch-npu and vllm           |
@@ -128,7 +128,7 @@ sed -i 's|ports.ubuntu.com|mirrors.tuna.tsinghua.edu.cn|g' /etc/apt/sources.list
 apt-get update -y && apt-get install -y gcc g++ cmake libnuma-dev wget git curl jq
 # Or using yum
 # yum update -y && yum install -y gcc g++ cmake numactl-devel wget git curl jq
-# Config pip mirror
+# Config pip mirror,only versions 0.11.0 and earlier are supported, if using a version later than 0.11.0, do not execute this command
 pip config set global.index-url https://mirrors.tuna.tsinghua.edu.cn/pypi/web/simple
 ```
 
@@ -155,8 +155,7 @@ pip install vllm==|pip_vllm_version|
 
 # Install vllm-project/vllm-ascend.
 pip install \
---extra-index-url https://mirrors.huaweicloud.com/ascend/repos/pypi/simple  \
---index-url https://mirrors.tuna.tsinghua.edu.cn/pypi/web/simple   \
+--extra-index-url https://mirrors.huaweicloud.com/repository/pypi/simple  \
 vllm-ascend==|pip_vllm_ascend_version|
 
 ```
@@ -180,10 +179,9 @@ source $HOME/.local/bin/env
 # Install vllm-project/vllm. The newest supported version is |vllm_version|.
 pip install vllm==|pip_vllm_version|
 
-# Install vllm-project/vllm-ascend from wheelnext incremental index.
+# Install vllm-project/vllm-ascend from wheelnext index.
 uv pip install --system -v \
---extra-index-url https://mirrors.huaweicloud.com/ascend/repos/pypi/incremental  \
---index-url https://mirrors.tuna.tsinghua.edu.cn/pypi/web/simple   \
+--extra-index-url https://mirrors.huaweicloud.com/ascend/repos/pypi/variant   \
 vllm-ascend==|pip_vllm_ascend_version|
 
 ```
@@ -284,7 +282,7 @@ docker run --rm \
     -it $IMAGE bash
 ```
 
-The default workdir is `/workspace`, vLLM and vLLM Ascend code are placed in `/vllm-workspace` and installed in [development mode](https://setuptools.pypa.io/en/latest/userguide/development_mode.html) (`pip install -e`) to help developer immediately take place changes without requiring a new installation.
+The default workdir is `/workspace`, vLLM and vLLM Ascend code are placed in `/vllm-workspace` and installed in [development mode](https://setuptools.pypa.io/en/latest/userguide/development_mode.html) (`pip install -e`) to help developers immediately make changes without requiring a new installation.
 
 ## Extra information
 
@@ -324,7 +322,7 @@ python example.py
 If you encounter a connection error with Hugging Face (e.g., `We couldn't connect to 'https://huggingface.co' to load the files, and couldn't find them in the cached files.`), run the following commands to use ModelScope as an alternative:
 
 ```bash
-export VLLM_USE_MODELSCOPE=true
+export VLLM_USE_MODELSCOPE=True
 pip install modelscope
 python example.py
 ```

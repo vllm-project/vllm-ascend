@@ -20,6 +20,7 @@ vLLM Ascend Plugin
 ---
 *最新消息* 🔥
 
+- [2026/05] 我们发布了新的正式版本 [v0.18.0](https://github.com/vllm-project/vllm-ascend/releases/tag/v0.18.0)! 请按照[官方指南](https://docs.vllm.ai/projects/ascend/en/v0.18.0/)开始在Ascend上部署vLLM Ascend Plugin。
 - [2026/02] 我们发布了新的正式版本 [v0.13.0](https://github.com/vllm-project/vllm-ascend/releases/tag/v0.13.0)! 请按照[官方指南](https://docs.vllm.ai/projects/ascend/en/v0.13.0/)开始在Ascend上部署vLLM Ascend Plugin。
 - [2025/12] 我们发布了新的正式版本 [v0.11.0](https://github.com/vllm-project/vllm-ascend/releases/tag/v0.11.0)! 请按照[官方指南](https://docs.vllm.ai/projects/ascend/en/v0.11.0/)开始在Ascend上部署vLLM Ascend Plugin。
 - [2025/09] 我们发布了新的正式版本 [v0.9.1](https://github.com/vllm-project/vllm-ascend/releases/tag/v0.9.1)! 请按照[官方指南](https://docs.vllm.ai/projects/ascend/en/v0.9.1/tutorials/large_scale_ep.html)开始在Ascend上部署大型专家并行 (EP)。
@@ -47,7 +48,7 @@ vLLM 昇腾插件 (`vllm-ascend`) 是一个由社区维护的让vLLM在Ascend NP
 - 操作系统：Linux
 - 软件：
     - Python >= 3.10, < 3.12
-    - CANN == 8.5.0 (Ascend HDK 版本参考[这里](https://www.hiascend.com/document/detail/zh/canncommercial/83RC2/releasenote/releasenote_0000.html))
+    - CANN == 8.5.1 (Ascend HDK 版本参考[这里](https://www.hiascend.com/document/detail/zh/canncommercial/83RC2/releasenote/releasenote_0000.html))
     - PyTorch == 2.9.0, torch-npu == 2.9.0
     - vLLM (与vllm-ascend版本一致)
 
@@ -57,12 +58,12 @@ vLLM 昇腾插件 (`vllm-ascend`) 是一个由社区维护的让vLLM在Ascend NP
 
 | Version    | Release type | Doc                                  |
 |------------|--------------|--------------------------------------|
-|v0.17.0rc1| 最新RC版本 |请查看[快速开始](https://docs.vllm.ai/projects/ascend/en/latest/quick_start.html)和[安装指南](https://docs.vllm.ai/projects/ascend/en/latest/installation.html)了解更多|
-|v0.13.0| 最新正式/稳定版本 |[快速开始](https://docs.vllm.ai/projects/ascend/en/v0.13.0/quick_start.html) and [安装指南](https://docs.vllm.ai/projects/ascend/en/v0.13.0/installation.html)了解更多|
+|v0.19.1rc1| 最新RC版本 |请查看[快速开始](https://docs.vllm.ai/projects/ascend/en/latest/quick_start.html)和[安装指南](https://docs.vllm.ai/projects/ascend/en/latest/installation.html)了解更多|
+|v0.18.0| 最新正式/稳定版本 |[快速开始](https://docs.vllm.ai/projects/ascend/en/v0.18.0/quick_start.html) and [安装指南](https://docs.vllm.ai/projects/ascend/en/v0.18.0/installation.html)了解更多|
 
 ## 贡献
 
-请参考 [CONTRIBUTING]((https://docs.vllm.ai/projects/ascend/en/latest/developer_guide/contribution/index.html)) 文档了解更多关于开发环境搭建、功能测试以及 PR 提交规范的信息。
+请参考[CONTRIBUTING](https://docs.vllm.ai/projects/ascend/en/latest/developer_guide/contribution/index.html)文档了解更多关于开发环境搭建、功能测试以及 PR 提交规范的信息。
 
 我们欢迎并重视任何形式的贡献与合作：
 
@@ -74,19 +75,20 @@ vLLM 昇腾插件 (`vllm-ascend`) 是一个由社区维护的让vLLM在Ascend NP
 vllm-ascend有主干分支和开发分支。
 
 - **main**: 主干分支，与vLLM的主干分支对应，并通过昇腾CI持续进行质量看护。
-- **releases/vX.Y.Z**: 开发分支，随vLLM部分新版本发布而创建，比如`releases/v0.13.0`是vllm-asend针对vLLM `v0.13.0` 版本的开发分支。
+- **releases/vX.Y.Z**: 开发分支，随vLLM部分新版本发布而创建，比如`releases/v0.13.0`是vllm-ascend针对vLLM `v0.13.0` 版本的开发分支。
 
 下面是维护中的分支：
 
-| 分支         | 状态         | 备注                  |
-|------------|------------|---------------------|
-| main       | Maintained | 基于vLLM main分支和vLLM最新版本（v0.17.0）CI看护   |
-| v0.7.1-dev | Unmaintained | 只允许文档修复 |
-| v0.7.3-dev | Maintained | 基于vLLM v0.7.3版本CI看护, 只允许Bug修复，不会再发布新版本 |
-| v0.9.1-dev | Maintained | 基于vLLM v0.9.1版本CI看护 |
-| v0.11.0-dev | Maintained | 基于vLLM v0.11.0版本CI看护 |
-| releases/v0.13.0 | Maintained | 基于vLLM v0.13.0版本CI看护 |
-|rfc/feature-name| Maintained | 为协作创建的[特性分支](https://docs.vllm.ai/projects/ascend/en/latest/community/versioning_policy.html#feature-branches) |
+| 分支              | 状态         | 备注                  |
+|------------------|--------------|----------------------|
+| main             | Maintained   | 基于vLLM main分支和vLLM最新版本（v0.18.0）CI看护   |
+| v0.7.1-dev       | Unmaintained | 不再维护 |
+| v0.7.3-dev       | Unmaintained | 只允许Bug修复，不会再发布新版本 |
+| v0.9.1-dev       | Unmaintained | 只允许Bug修复，不会再发布新版本 |
+| v0.11.0-dev      | Unmaintained | 只允许Bug修复，不会再发布新版本 |
+| releases/v0.13.0 | Maintained   | 基于vLLM v0.13.0版本CI看护 |
+| releases/v0.18.0 | Maintained   | 基于vLLM v0.18.0版本CI看护 |
+| rfc/feature-name | Maintained   | 为协作创建的[特性分支](https://docs.vllm.ai/projects/ascend/en/latest/community/versioning_policy.html#feature-branches) |
 
 请参阅[版本策略](https://docs.vllm.ai/projects/ascend/en/latest/community/versioning_policy.html)了解更多详细信息。
 

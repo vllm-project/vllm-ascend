@@ -1,0 +1,58 @@
+# ==========================================
+# ACTUAL TEST CASES
+# ==========================================
+
+test_cases:
+  - name: "Qwen3.5-27B-w8a8"
+    model: "Eco-Tech/Qwen3.5-27B-w8a8-mtp"
+    envs:
+      VLLM_USE_MODELSCOPE: "true"
+      PYTORCH_NPU_ALLOC_CONF: "expandable_segments:True"
+      HCCL_BUFFSIZE: "1024"
+      HCCL_OP_EXPANSION_MODE: "AIV"
+      OMP_NUM_THREADS: "1"
+      TASK_QUEUE_ENABLE: "1"
+      VLLM_ASCEND_ENABLE_PREFETCH_MLP: "1"
+      VLLM_ASCEND_ENABLE_DENSE_OPTIMIZE: "1"
+      VLLM_ASCEND_ENABLE_NZ: "1"
+      VLLM_ASCEND_ENABLE_FUSED_MC2: "1"
+      SERVER_PORT: "DEFAULT_PORT"
+    server_cmd:
+      - "--tensor-parallel-size"
+      - "2"
+      - "--port"
+      - "$SERVER_PORT"
+      - "--max-num-seqs"
+      - "128"
+      - "--quantization"
+      - "ascend"
+      - "--max-model-len"
+      - "262144"
+      - "--max-num-batched-tokens"
+      - "8192"
+      - "--trust-remote-code"
+      - "--gpu-memory-utilization"
+      - "0.95"
+      - "--additional-config"
+      - '{"enable_cpu_binding":true, "multistream_overlap_shared_expert": true, "enable_weight_nz_layout":true}'
+      - "--speculative_config"
+      - '{"method": "qwen3_5_mtp", "num_speculative_tokens": 3,"enforce_eager": true}'
+      - "--compilation-config"
+      - '{"cudagraph_mode":"FULL_DECODE_ONLY", "cudagraph_capture_sizes":[4,8,12,16,20,24,28,32,36,40,44,48,52,56,60,64,68,72,76,80,84,88,92,96,100,104,108,112,116,120,124,128,132,136,140,144]}'
+      - "--async-scheduling"
+      - "--mm-processor-cache-gb"
+      - "0"
+      - "--mm_processor_cache_type"
+      - "shm"
+    benchmarks:
+      perf:
+        case_type: performance
+        dataset_path: vllm-ascend/GSM8K-in3500-bs8000-qwen3
+        request_conf: vllm_api_stream_chat
+        dataset_conf: gsm8k/gsm8k_gen_0_shot_cot_str_perf
+        num_prompts: 128
+        max_out_len: 1500
+        batch_size: 32
+        request_rate: 0
+        baseline: 604.317
+        threshold: 0.97

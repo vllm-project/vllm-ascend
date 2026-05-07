@@ -1,0 +1,868 @@
+# SOME DESCRIPTIVE TITLE.
+# Copyright (C) 2025, vllm-ascend team
+# This file is distributed under the same license as the vllm-ascend
+# package.
+# FIRST AUTHOR <EMAIL@ADDRESS>, 2026.
+#
+msgid ""
+msgstr ""
+"Project-Id-Version: vllm-ascend \n"
+"Report-Msgid-Bugs-To: \n"
+"POT-Creation-Date: 2026-04-09 18:37+0800\n"
+"PO-Revision-Date: 2026-04-10 18:37+0800\n"
+"Last-Translator: FULL NAME <EMAIL@ADDRESS>\n"
+"Language: zh_CN\n"
+"Language-Team: zh_CN <LL@li.org>\n"
+"Plural-Forms: nplurals=1; plural=0;\n"
+"MIME-Version: 1.0\n"
+"Content-Type: text/plain; charset=utf-8\n"
+"Content-Transfer-Encoding: 8bit\n"
+"Generated-By: Babel 2.18.0\n"
+
+#: ../../source/tutorials/features/suffix_speculative_decoding.md:1
+msgid "Suffix Speculative Decoding"
+msgstr "后缀投机解码"
+
+#: ../../source/tutorials/features/suffix_speculative_decoding.md:3
+msgid "**Introduction**"
+msgstr "**简介**"
+
+#: ../../source/tutorials/features/suffix_speculative_decoding.md:5
+msgid ""
+"Suffix Decoding is an optimization technique for speculative decoding "
+"based on pattern matching. It simultaneously retrieves repetitive "
+"sequences from both the prompt and the generated content, using frequency"
+" statistics to predict the most likely token continuations. Unlike "
+"traditional speculative decoding methods, Suffix Decoding runs entirely "
+"on the CPU, eliminating the need for additional GPU resources or draft "
+"models, which results in superior acceleration for repetitive tasks such "
+"as AI agents and code generation."
+msgstr ""
+"后缀解码是一种基于模式匹配的投机解码优化技术。它同时从提示词和已生成内容中检索重复序列，"
+"利用频率统计来预测最有可能的 token 延续。与传统的投机解码方法不同，后缀解码完全在 CPU 上运行，"
+"无需额外的 GPU 资源或草稿模型，从而为 AI Agent 和代码生成等重复性任务带来显著的加速效果。"
+
+#: ../../source/tutorials/features/suffix_speculative_decoding.md:7
+msgid ""
+"This document provides step-by-step guidance on how to deploy and "
+"benchmark the Suffix Decoding speculative inference technology supported "
+"by `vllm-ascend` on Atlas A2 hardware. The setup utilizes a single Atlas "
+"800T A2 node with a 4-card deployment of the Qwen3-32B model instance. "
+"Benchmarking is conducted using authentic open-source datasets covering "
+"the following categories:"
+msgstr ""
+"本文档提供了如何在 Atlas A2 硬件上部署和测试 `vllm-ascend` 所支持的后缀解码投机推理技术的逐步指南。"
+"配置使用单台 Atlas 800T A2 节点，以 4 卡方式部署 Qwen3-32B 模型实例。"
+"基准测试使用真实的开源数据集进行，涵盖以下类别："
+
+#: ../../source/tutorials/features/suffix_speculative_decoding.md
+msgid "**Dataset Category**"
+msgstr "**数据集类别**"
+
+#: ../../source/tutorials/features/suffix_speculative_decoding.md
+msgid "**Dataset Name**"
+msgstr "**数据集名称**"
+
+#: ../../source/tutorials/features/suffix_speculative_decoding.md
+msgid "Code Generation"
+msgstr "代码生成"
+
+#: ../../source/tutorials/features/suffix_speculative_decoding.md
+msgid "HumanEval"
+msgstr "HumanEval"
+
+#: ../../source/tutorials/features/suffix_speculative_decoding.md
+msgid "Common Sense Reasoning"
+msgstr "常识推理"
+
+#: ../../source/tutorials/features/suffix_speculative_decoding.md
+msgid "ARC"
+msgstr "ARC"
+
+#: ../../source/tutorials/features/suffix_speculative_decoding.md
+msgid "Mathematical Reasoning"
+msgstr "数学推理"
+
+#: ../../source/tutorials/features/suffix_speculative_decoding.md
+msgid "gsm8k"
+msgstr "gsm8k"
+
+#: ../../source/tutorials/features/suffix_speculative_decoding.md
+msgid "Natural Language Understanding"
+msgstr "自然语言理解"
+
+#: ../../source/tutorials/features/suffix_speculative_decoding.md
+msgid "SuperGLUE_BoolQ"
+msgstr "SuperGLUE_BoolQ"
+
+#: ../../source/tutorials/features/suffix_speculative_decoding.md
+msgid "Comprehensive Examination"
+msgstr "综合考试"
+
+#: ../../source/tutorials/features/suffix_speculative_decoding.md
+msgid "AGIEval"
+msgstr "AGIEval"
+
+#: ../../source/tutorials/features/suffix_speculative_decoding.md
+msgid "Multi-turn Dialogue"
+msgstr "多轮对话"
+
+#: ../../source/tutorials/features/suffix_speculative_decoding.md
+msgid "ShareGPT"
+msgstr "ShareGPT"
+
+#: ../../source/tutorials/features/suffix_speculative_decoding.md:18
+#, python-format
+msgid ""
+"The benchmarking tool used in this tutorial is AISBench, which supports "
+"performance testing for all the datasets listed above. The final section "
+"of this tutorial presents a performance comparison between enabling and "
+"disabling Suffix Decoding under the condition of satisfying an SLO TPOT <"
+" 50ms across different datasets and concurrency levels. Validations "
+"demonstrate that the Qwen3-32B model achieves a throughput improvement of"
+" approximately 20% to 80% on various real-world datasets when Suffix "
+"Decoding is enabled."
+msgstr ""
+"本教程使用的基准测试工具是 AISBench，它支持上述所有数据集的性能测试。"
+"教程的最后一部分展示了在不同数据集和并发级别下，满足 SLO TPOT < 50ms 的条件下，启用与禁用后缀解码的性能对比。"
+"验证表明，Qwen3-32B 模型在启用后缀解码后，在各种真实数据集上的吞吐量提升了约 20% 到 80%。"
+
+#: ../../source/tutorials/features/suffix_speculative_decoding.md:20
+msgid "**Download vllm-ascend Image**"
+msgstr "**下载 vllm-ascend 镜像**"
+
+#: ../../source/tutorials/features/suffix_speculative_decoding.md:22
+msgid ""
+"This tutorial uses the official image, version v0.13.0rc1. Use the "
+"following command to download:"
+msgstr "本教程使用官方镜像，版本 v0.13.0rc1。使用以下命令下载："
+
+#: ../../source/tutorials/features/suffix_speculative_decoding.md:28
+msgid "**Run with Docker**"
+msgstr "**使用 Docker 运行**"
+
+#: ../../source/tutorials/features/suffix_speculative_decoding.md:30
+msgid "Container startup command:"
+msgstr "容器启动命令："
+
+#: ../../source/tutorials/features/suffix_speculative_decoding.md:64
+msgid "**Install arctic-inference**"
+msgstr "**安装 arctic-inference**"
+
+#: ../../source/tutorials/features/suffix_speculative_decoding.md:66
+msgid ""
+"Before enabling Suffix Decoding speculative inference on Ascend, the "
+"Arctic Inference plugin must be installed. Arctic Inference is an open-"
+"source plugin launched by Snowflake specifically to optimize LLM "
+"inference speed. For detailed technical principles, please refer to the "
+"following article: [Fastest Speculative Decoding in vLLM with Arctic "
+"Inference and Arctic Training](https://www.snowflake.com/en/engineering-"
+"blog/fast-speculative-decoding-vllm-arctic/). Install it within the "
+"container using the following command:"
+msgstr ""
+"在 Ascend 上启用后缀解码投机推理之前，必须安装 Arctic Inference 插件。"
+"Arctic Inference 是 Snowflake 推出的开源插件，专门用于优化 LLM 推理速度。"
+"详细技术原理请参考以下文章：[Fastest Speculative Decoding in vLLM with Arctic Inference and Arctic Training]"
+"(https://www.snowflake.com/en/engineering-blog/fast-speculative-decoding-vllm-arctic/)。"
+"使用以下命令在容器内安装："
+
+#: ../../source/tutorials/features/suffix_speculative_decoding.md:72
+msgid "**vLLM Instance Deployment**"
+msgstr "**vLLM 实例部署**"
+
+#: ../../source/tutorials/features/suffix_speculative_decoding.md:74
+msgid ""
+"Use the following command to start the container service instance. "
+"Speculative inference is enabled via the `--speculative-config` "
+"parameter, where `method` is set to `suffix`. For this test, "
+"`num_speculative_tokens` is uniformly set to `3`."
+msgstr ""
+"使用以下命令启动容器服务实例。通过 `--speculative-config` 参数启用投机推理，其中 `method` 设置为 `suffix`。"
+"本次测试中，`num_speculative_tokens` 统一设置为 `3`。"
+
+#: ../../source/tutorials/features/suffix_speculative_decoding.md:99
+msgid "**AISbench Benchmark Testing**"
+msgstr "**AISbench 基准测试**"
+
+#: ../../source/tutorials/features/suffix_speculative_decoding.md:101
+msgid ""
+"Performance for all open-source datasets is tested using AISbench. For "
+"specific instructions, refer to [Using AISBench for performance "
+"evaluation](https://docs.vllm.ai/projects/ascend/en/latest/developer_guide/evaluation/using_ais_bench.html"
+"#execute-performance-evaluation)."
+msgstr ""
+"所有开源数据集的性能均使用 AISbench 进行测试。具体说明请参考"
+"[使用 AISBench 进行性能评估](https://docs.vllm.ai/projects/ascend/en/latest/developer_guide/evaluation/using_ais_bench.html"
+"#execute-performance-evaluation)。"
+
+#: ../../source/tutorials/features/suffix_speculative_decoding.md:103
+msgid "**Model Configuration**:"
+msgstr "**模型配置**："
+
+#: ../../source/tutorials/features/suffix_speculative_decoding.md:132
+msgid "**Performance Benchmarking Commands**:"
+msgstr "**性能基准测试命令**："
+
+#: ../../source/tutorials/features/suffix_speculative_decoding.md:141
+msgid "**Test Results**"
+msgstr "**测试结果**"
+
+#: ../../source/tutorials/features/suffix_speculative_decoding.md:143
+msgid ""
+"Below are the detailed test results of the six open-source datasets in "
+"this evaluation. Compared to the baseline performance, the improvement in"
+" TPOT and throughput performance at different concurrency levels after "
+"enabling Suffix Decoding varies across datasets. The extent of "
+"improvement after enabling Suffix Decoding differs among the datasets. "
+"Below is a summary of the results:"
+msgstr ""
+"以下是本次评估中六个开源数据集的详细测试结果。与基线性能相比，启用后缀解码后，不同并发级别下的 TPOT 和吞吐量性能提升因数据集而异。"
+"各数据集启用后缀解码后的提升幅度不尽相同。以下是结果汇总："
+
+#: ../../source/tutorials/features/suffix_speculative_decoding.md
+msgid "**Typical Representative**"
+msgstr "**典型代表**"
+
+#: ../../source/tutorials/features/suffix_speculative_decoding.md
+msgid "**Throughput Improvement (BS=1-10)**"
+msgstr "**吞吐量提升（BS=1-10）**"
+
+#: ../../source/tutorials/features/suffix_speculative_decoding.md
+msgid "**SLO TPOT**"
+msgstr "**SLO TPOT**"
+
+#: ../../source/tutorials/features/suffix_speculative_decoding.md
+msgid "**High Gain**"
+msgstr "**高收益**"
+
+#: ../../source/tutorials/features/suffix_speculative_decoding.md
+msgid "AGIEval, GSM8K"
+msgstr "AGIEval、GSM8K"
+
+#: ../../source/tutorials/features/suffix_speculative_decoding.md
+msgid "**> 50%**"
+msgstr "**> 50%**"
+
+#: ../../source/tutorials/features/suffix_speculative_decoding.md
+msgid "< 50ms"
+msgstr "< 50ms"
+
+#: ../../source/tutorials/features/suffix_speculative_decoding.md
+msgid "**Medium-Low Gain**"
+msgstr "**中低收益**"
+
+#: ../../source/tutorials/features/suffix_speculative_decoding.md
+msgid "ARC, ShareGPT"
+msgstr "ARC、ShareGPT"
+
+#: ../../source/tutorials/features/suffix_speculative_decoding.md
+msgid "**20% ~ 30%**"
+msgstr "**20% ~ 30%**"
+
+#: ../../source/tutorials/features/suffix_speculative_decoding.md:150
+msgid "Below is the raw detailed test results:"
+msgstr "以下是原始详细测试结果："
+
+#: ../../source/tutorials/features/suffix_speculative_decoding.md
+msgid "Concurrency"
+msgstr "并发数"
+
+#: ../../source/tutorials/features/suffix_speculative_decoding.md
+msgid "Avg Input"
+msgstr "平均输入长度"
+
+#: ../../source/tutorials/features/suffix_speculative_decoding.md
+msgid "Avg Output"
+msgstr "平均输出长度"
+
+#: ../../source/tutorials/features/suffix_speculative_decoding.md
+msgid "Requests"
+msgstr "请求数"
+
+#: ../../source/tutorials/features/suffix_speculative_decoding.md
+msgid "Base TPOT(ms)"
+msgstr "基线 TPOT（毫秒）"
+
+#: ../../source/tutorials/features/suffix_speculative_decoding.md
+msgid "Base Throughput(TPS)"
+msgstr "基线吞吐量（TPS）"
+
+#: ../../source/tutorials/features/suffix_speculative_decoding.md
+msgid "Suffix TPOT(ms)"
+msgstr "后缀解码 TPOT（毫秒）"
+
+#: ../../source/tutorials/features/suffix_speculative_decoding.md
+msgid "Suffix Throughput(TPS)"
+msgstr "后缀解码吞吐量（TPS）"
+
+#: ../../source/tutorials/features/suffix_speculative_decoding.md
+msgid "Accept Rate"
+msgstr "接受率"
+
+#: ../../source/tutorials/features/suffix_speculative_decoding.md
+msgid "TPOT Gain"
+msgstr "TPOT 提升"
+
+#: ../../source/tutorials/features/suffix_speculative_decoding.md
+msgid "TPS Gain"
+msgstr "TPS 提升"
+
+#: ../../source/tutorials/features/suffix_speculative_decoding.md
+msgid "**Humaneval**"
+msgstr "**Humaneval**"
+
+#: ../../source/tutorials/features/suffix_speculative_decoding.md
+msgid "1"
+msgstr "1"
+
+#: ../../source/tutorials/features/suffix_speculative_decoding.md
+msgid "150"
+msgstr "150"
+
+#: ../../source/tutorials/features/suffix_speculative_decoding.md
+msgid "2700"
+msgstr "2700"
+
+#: ../../source/tutorials/features/suffix_speculative_decoding.md
+msgid "100"
+msgstr "100"
+
+#: ../../source/tutorials/features/suffix_speculative_decoding.md
+msgid "55.1"
+msgstr "55.1"
+
+#: ../../source/tutorials/features/suffix_speculative_decoding.md
+msgid "18.1"
+msgstr "18.1"
+
+#: ../../source/tutorials/features/suffix_speculative_decoding.md
+msgid "37.9"
+msgstr "37.9"
+
+#: ../../source/tutorials/features/suffix_speculative_decoding.md
+msgid "26.3"
+msgstr "26.3"
+
+#: ../../source/tutorials/features/suffix_speculative_decoding.md
+msgid "27.0%"
+msgstr "27.0%"
+
+#: ../../source/tutorials/features/suffix_speculative_decoding.md
+msgid "45.2%"
+msgstr "45.2%"
+
+#: ../../source/tutorials/features/suffix_speculative_decoding.md
+msgid "45.1%"
+msgstr "45.1%"
+
+#: ../../source/tutorials/features/suffix_speculative_decoding.md
+msgid "15"
+msgstr "15"
+
+#: ../../source/tutorials/features/suffix_speculative_decoding.md
+msgid "61.6"
+msgstr "61.6"
+
+#: ../../source/tutorials/features/suffix_speculative_decoding.md
+msgid "233.8"
+msgstr "233.8"
+
+#: ../../source/tutorials/features/suffix_speculative_decoding.md
+msgid "45.8"
+msgstr "45.8"
+
+#: ../../source/tutorials/features/suffix_speculative_decoding.md
+msgid "318.2"
+msgstr "318.2"
+
+#: ../../source/tutorials/features/suffix_speculative_decoding.md
+msgid "34.6%"
+msgstr "34.6%"
+
+#: ../../source/tutorials/features/suffix_speculative_decoding.md
+msgid "36.1%"
+msgstr "36.1%"
+
+#: ../../source/tutorials/features/suffix_speculative_decoding.md
+msgid "26"
+msgstr "26"
+
+#: ../../source/tutorials/features/suffix_speculative_decoding.md
+msgid "64.7"
+msgstr "64.7"
+
+#: ../../source/tutorials/features/suffix_speculative_decoding.md
+msgid "403.8"
+msgstr "403.8"
+
+#: ../../source/tutorials/features/suffix_speculative_decoding.md
+msgid "50.9"
+msgstr "50.9"
+
+#: ../../source/tutorials/features/suffix_speculative_decoding.md
+msgid "519.2"
+msgstr "519.2"
+
+#: ../../source/tutorials/features/suffix_speculative_decoding.md
+msgid "27.2%"
+msgstr "27.2%"
+
+#: ../../source/tutorials/features/suffix_speculative_decoding.md
+msgid "28.6%"
+msgstr "28.6%"
+
+#: ../../source/tutorials/features/suffix_speculative_decoding.md
+msgid "**ARC**"
+msgstr "**ARC**"
+
+#: ../../source/tutorials/features/suffix_speculative_decoding.md
+msgid "76"
+msgstr "76"
+
+#: ../../source/tutorials/features/suffix_speculative_decoding.md
+msgid "960"
+msgstr "960"
+
+#: ../../source/tutorials/features/suffix_speculative_decoding.md
+msgid "52.8"
+msgstr "52.8"
+
+#: ../../source/tutorials/features/suffix_speculative_decoding.md
+msgid "18.9"
+msgstr "18.9"
+
+#: ../../source/tutorials/features/suffix_speculative_decoding.md
+msgid "39.5"
+msgstr "39.5"
+
+#: ../../source/tutorials/features/suffix_speculative_decoding.md
+msgid "25.4"
+msgstr "25.4"
+
+#: ../../source/tutorials/features/suffix_speculative_decoding.md
+msgid "23.9%"
+msgstr "23.9%"
+
+#: ../../source/tutorials/features/suffix_speculative_decoding.md
+msgid "33.7%"
+msgstr "33.7%"
+
+#: ../../source/tutorials/features/suffix_speculative_decoding.md
+msgid "8"
+msgstr "8"
+
+#: ../../source/tutorials/features/suffix_speculative_decoding.md
+msgid "59.1"
+msgstr "59.1"
+
+#: ../../source/tutorials/features/suffix_speculative_decoding.md
+msgid "125.4"
+msgstr "125.4"
+
+#: ../../source/tutorials/features/suffix_speculative_decoding.md
+msgid "47.0"
+msgstr "47.0"
+
+#: ../../source/tutorials/features/suffix_speculative_decoding.md
+msgid "163.1"
+msgstr "163.1"
+
+#: ../../source/tutorials/features/suffix_speculative_decoding.md
+msgid "25.7%"
+msgstr "25.7%"
+
+#: ../../source/tutorials/features/suffix_speculative_decoding.md
+msgid "30.0%"
+msgstr "30.0%"
+
+#: ../../source/tutorials/features/suffix_speculative_decoding.md
+msgid "59.8"
+msgstr "59.8"
+
+#: ../../source/tutorials/features/suffix_speculative_decoding.md
+msgid "245.8"
+msgstr "245.8"
+
+#: ../../source/tutorials/features/suffix_speculative_decoding.md
+msgid "48.9"
+msgstr "48.9"
+
+#: ../../source/tutorials/features/suffix_speculative_decoding.md
+msgid "311.7"
+msgstr "311.7"
+
+#: ../../source/tutorials/features/suffix_speculative_decoding.md
+msgid "22.3%"
+msgstr "22.3%"
+
+#: ../../source/tutorials/features/suffix_speculative_decoding.md
+msgid "26.8%"
+msgstr "26.8%"
+
+#: ../../source/tutorials/features/suffix_speculative_decoding.md
+msgid "**GSM8K**"
+msgstr "**GSM8K**"
+
+#: ../../source/tutorials/features/suffix_speculative_decoding.md
+msgid "67"
+msgstr "67"
+
+#: ../../source/tutorials/features/suffix_speculative_decoding.md
+msgid "1570"
+msgstr "1570"
+
+#: ../../source/tutorials/features/suffix_speculative_decoding.md
+msgid "55.5"
+msgstr "55.5"
+
+#: ../../source/tutorials/features/suffix_speculative_decoding.md
+msgid "18.0"
+msgstr "18.0"
+
+#: ../../source/tutorials/features/suffix_speculative_decoding.md
+msgid "35.7"
+msgstr "35.7"
+
+#: ../../source/tutorials/features/suffix_speculative_decoding.md
+msgid "28.5"
+msgstr "28.5"
+
+#: ../../source/tutorials/features/suffix_speculative_decoding.md
+msgid "31.1%"
+msgstr "31.1%"
+
+#: ../../source/tutorials/features/suffix_speculative_decoding.md
+msgid "55.6%"
+msgstr "55.6%"
+
+#: ../../source/tutorials/features/suffix_speculative_decoding.md
+msgid "58.4%"
+msgstr "58.4%"
+
+#: ../../source/tutorials/features/suffix_speculative_decoding.md
+msgid "17"
+msgstr "17"
+
+#: ../../source/tutorials/features/suffix_speculative_decoding.md
+msgid "61.5"
+msgstr "61.5"
+
+#: ../../source/tutorials/features/suffix_speculative_decoding.md
+msgid "279.8"
+msgstr "279.8"
+
+#: ../../source/tutorials/features/suffix_speculative_decoding.md
+msgid "45.4"
+msgstr "45.4"
+
+#: ../../source/tutorials/features/suffix_speculative_decoding.md
+msgid "403.0"
+msgstr "403.0"
+
+#: ../../source/tutorials/features/suffix_speculative_decoding.md
+msgid "35.6%"
+msgstr "35.6%"
+
+#: ../../source/tutorials/features/suffix_speculative_decoding.md
+msgid "44.0%"
+msgstr "44.0%"
+
+#: ../../source/tutorials/features/suffix_speculative_decoding.md
+msgid "63.9"
+msgstr "63.9"
+
+#: ../../source/tutorials/features/suffix_speculative_decoding.md
+msgid "396.4"
+msgstr "396.4"
+
+#: ../../source/tutorials/features/suffix_speculative_decoding.md
+msgid "50.0"
+msgstr "50.0"
+
+#: ../../source/tutorials/features/suffix_speculative_decoding.md
+msgid "527.6"
+msgstr "527.6"
+
+#: ../../source/tutorials/features/suffix_speculative_decoding.md
+msgid "27.8%"
+msgstr "27.8%"
+
+#: ../../source/tutorials/features/suffix_speculative_decoding.md
+msgid "33.1%"
+msgstr "33.1%"
+
+#: ../../source/tutorials/features/suffix_speculative_decoding.md
+msgid "**ShareGPT**"
+msgstr "**ShareGPT**"
+
+#: ../../source/tutorials/features/suffix_speculative_decoding.md
+msgid "666"
+msgstr "666"
+
+#: ../../source/tutorials/features/suffix_speculative_decoding.md
+msgid "231"
+msgstr "231"
+
+#: ../../source/tutorials/features/suffix_speculative_decoding.md
+msgid "327"
+msgstr "327"
+
+#: ../../source/tutorials/features/suffix_speculative_decoding.md
+msgid "54.1"
+msgstr "54.1"
+
+#: ../../source/tutorials/features/suffix_speculative_decoding.md
+msgid "18.3"
+msgstr "18.3"
+
+#: ../../source/tutorials/features/suffix_speculative_decoding.md
+msgid "39.2"
+msgstr "39.2"
+
+#: ../../source/tutorials/features/suffix_speculative_decoding.md
+msgid "24.1"
+msgstr "24.1"
+
+#: ../../source/tutorials/features/suffix_speculative_decoding.md
+msgid "37.9%"
+msgstr "37.9%"
+
+#: ../../source/tutorials/features/suffix_speculative_decoding.md
+msgid "31.5%"
+msgstr "31.5%"
+
+#: ../../source/tutorials/features/suffix_speculative_decoding.md
+msgid "58.8"
+msgstr "58.8"
+
+#: ../../source/tutorials/features/suffix_speculative_decoding.md
+msgid "125.0"
+msgstr "125.0"
+
+#: ../../source/tutorials/features/suffix_speculative_decoding.md
+msgid "46.2"
+msgstr "46.2"
+
+#: ../../source/tutorials/features/suffix_speculative_decoding.md
+msgid "153.2"
+msgstr "153.2"
+
+#: ../../source/tutorials/features/suffix_speculative_decoding.md
+msgid "27.1%"
+msgstr "27.1%"
+
+#: ../../source/tutorials/features/suffix_speculative_decoding.md
+msgid "22.5%"
+msgstr "22.5%"
+
+#: ../../source/tutorials/features/suffix_speculative_decoding.md
+msgid "14"
+msgstr "14"
+
+#: ../../source/tutorials/features/suffix_speculative_decoding.md
+msgid "61.8"
+msgstr "61.8"
+
+#: ../../source/tutorials/features/suffix_speculative_decoding.md
+msgid "227.0"
+msgstr "227.0"
+
+#: ../../source/tutorials/features/suffix_speculative_decoding.md
+msgid "49.9"
+msgstr "49.9"
+
+#: ../../source/tutorials/features/suffix_speculative_decoding.md
+msgid "273.9"
+msgstr "273.9"
+
+#: ../../source/tutorials/features/suffix_speculative_decoding.md
+msgid "23.8%"
+msgstr "23.8%"
+
+#: ../../source/tutorials/features/suffix_speculative_decoding.md
+msgid "20.7%"
+msgstr "20.7%"
+
+#: ../../source/tutorials/features/suffix_speculative_decoding.md
+msgid "**SuperGLUE_BoolQ**"
+msgstr "**SuperGLUE_BoolQ**"
+
+#: ../../source/tutorials/features/suffix_speculative_decoding.md
+msgid "207"
+msgstr "207"
+
+#: ../../source/tutorials/features/suffix_speculative_decoding.md
+msgid "314"
+msgstr "314"
+
+#: ../../source/tutorials/features/suffix_speculative_decoding.md
+msgid "18.4"
+msgstr "18.4"
+
+#: ../../source/tutorials/features/suffix_speculative_decoding.md
+msgid "36.1"
+msgstr "36.1"
+
+#: ../../source/tutorials/features/suffix_speculative_decoding.md
+msgid "26.8"
+msgstr "26.8"
+
+#: ../../source/tutorials/features/suffix_speculative_decoding.md
+msgid "33.4%"
+msgstr "33.4%"
+
+#: ../../source/tutorials/features/suffix_speculative_decoding.md
+msgid "49.8%"
+msgstr "49.8%"
+
+#: ../../source/tutorials/features/suffix_speculative_decoding.md
+msgid "45.6%"
+msgstr "45.6%"
+
+#: ../../source/tutorials/features/suffix_speculative_decoding.md
+msgid "16"
+msgstr "16"
+
+#: ../../source/tutorials/features/suffix_speculative_decoding.md
+msgid "60.0"
+msgstr "60.0"
+
+#: ../../source/tutorials/features/suffix_speculative_decoding.md
+msgid "229.7"
+msgstr "229.7"
+
+#: ../../source/tutorials/features/suffix_speculative_decoding.md
+msgid "43.5"
+msgstr "43.5"
+
+#: ../../source/tutorials/features/suffix_speculative_decoding.md
+msgid "303.9"
+msgstr "303.9"
+
+#: ../../source/tutorials/features/suffix_speculative_decoding.md
+msgid "38.0%"
+msgstr "38.0%"
+
+#: ../../source/tutorials/features/suffix_speculative_decoding.md
+msgid "32.3%"
+msgstr "32.3%"
+
+#: ../../source/tutorials/features/suffix_speculative_decoding.md
+msgid "32"
+msgstr "32"
+
+#: ../../source/tutorials/features/suffix_speculative_decoding.md
+msgid "62.7"
+msgstr "62.7"
+
+#: ../../source/tutorials/features/suffix_speculative_decoding.md
+msgid "47.8"
+msgstr "47.8"
+
+#: ../../source/tutorials/features/suffix_speculative_decoding.md
+msgid "507.5"
+msgstr "507.5"
+
+#: ../../source/tutorials/features/suffix_speculative_decoding.md
+msgid "31.3%"
+msgstr "31.3%"
+
+#: ../../source/tutorials/features/suffix_speculative_decoding.md
+msgid "28.0%"
+msgstr "28.0%"
+
+#: ../../source/tutorials/features/suffix_speculative_decoding.md
+msgid "**AGIEval**"
+msgstr "**AGIEval**"
+
+#: ../../source/tutorials/features/suffix_speculative_decoding.md
+msgid "735"
+msgstr "735"
+
+#: ../../source/tutorials/features/suffix_speculative_decoding.md
+msgid "1880"
+msgstr "1880"
+
+#: ../../source/tutorials/features/suffix_speculative_decoding.md
+msgid "53.1"
+msgstr "53.1"
+
+#: ../../source/tutorials/features/suffix_speculative_decoding.md
+msgid "18.7"
+msgstr "18.7"
+
+#: ../../source/tutorials/features/suffix_speculative_decoding.md
+msgid "31.8"
+msgstr "31.8"
+
+#: ../../source/tutorials/features/suffix_speculative_decoding.md
+msgid "34.1"
+msgstr "34.1"
+
+#: ../../source/tutorials/features/suffix_speculative_decoding.md
+msgid "50.3%"
+msgstr "50.3%"
+
+#: ../../source/tutorials/features/suffix_speculative_decoding.md
+msgid "66.8%"
+msgstr "66.8%"
+
+#: ../../source/tutorials/features/suffix_speculative_decoding.md
+msgid "81.9%"
+msgstr "81.9%"
+
+#: ../../source/tutorials/features/suffix_speculative_decoding.md
+msgid "24"
+msgstr "24"
+
+#: ../../source/tutorials/features/suffix_speculative_decoding.md
+msgid "64.0"
+msgstr "64.0"
+
+#: ../../source/tutorials/features/suffix_speculative_decoding.md
+msgid "381.2"
+msgstr "381.2"
+
+#: ../../source/tutorials/features/suffix_speculative_decoding.md
+msgid "43.3"
+msgstr "43.3"
+
+#: ../../source/tutorials/features/suffix_speculative_decoding.md
+msgid "629.0"
+msgstr "629.0"
+
+#: ../../source/tutorials/features/suffix_speculative_decoding.md
+msgid "47.8%"
+msgstr "47.8%"
+
+#: ../../source/tutorials/features/suffix_speculative_decoding.md
+msgid "65.0%"
+msgstr "65.0%"
+
+#: ../../source/tutorials/features/suffix_speculative_decoding.md
+msgid "34"
+msgstr "34"
+
+#: ../../source/tutorials/features/suffix_speculative_decoding.md
+msgid "70.0"
+msgstr "70.0"
+
+#: ../../source/tutorials/features/suffix_speculative_decoding.md
+msgid "494.6"
+msgstr "494.6"
+
+#: ../../source/tutorials/features/suffix_speculative_decoding.md
+msgid "50.2"
+msgstr "50.2"
+
+#: ../../source/tutorials/features/suffix_speculative_decoding.md
+msgid "768.4"
+msgstr "768.4"
+
+#: ../../source/tutorials/features/suffix_speculative_decoding.md
+msgid "39.4%"
+msgstr "39.4%"
+
+#: ../../source/tutorials/features/suffix_speculative_decoding.md
+msgid "55.3%"
+msgstr "55.3%"

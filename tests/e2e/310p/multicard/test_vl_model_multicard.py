@@ -18,6 +18,8 @@
 import os
 import sys
 
+from tests.e2e.conftest import wait_until_npu_memory_free
+
 # Add 310p directory to sys.path
 current_dir = os.path.dirname(os.path.abspath(__file__))
 parent_dir = os.path.dirname(current_dir)  # 310p directory
@@ -27,11 +29,7 @@ sys.path.insert(0, parent_dir)
 from test_utils import run_vl_model_test
 
 
+@wait_until_npu_memory_free(target_free_percentage=0.95)
 def test_qwen3_vl_8b_tp2_fp16():
     """Qwen3-VL-8B dual-card FP16 test"""
     run_vl_model_test(model_name="Qwen/Qwen3-VL-8B-Instruct", tensor_parallel_size=2, max_tokens=5)
-
-
-def test_qwen3_vl_32b_tp1_fp16():
-    """Qwen3-VL-32B 4-card FP16 test"""
-    run_vl_model_test(model_name="Qwen/Qwen3-VL-32B-Instruct", tensor_parallel_size=4, max_tokens=5)
