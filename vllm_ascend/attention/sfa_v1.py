@@ -100,7 +100,7 @@ class AscendSFABackend(AscendBaseAttnBackend):
 
             return AscendSFACPImpl
         return AscendSFAImpl
-    
+
     @staticmethod
     def get_extra_input_preparer() -> FiaExtraInputPreparer:
         return FiaExtraInputPreparer()

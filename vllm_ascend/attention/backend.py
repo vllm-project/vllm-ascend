@@ -29,10 +29,15 @@ class BackendExtraInputPreparer:
 @singleton
 class FiaExtraInputPreparer(BackendExtraInputPreparer):
     def __init__(self):
+        # Buffers are allocated on first ``prepare()`` when ``set_current_vllm_config`` is active.
+        self._extra_input: BackendExtraInput | None = None
+
+    def _ensure_extra_input(self) -> None:
+        if self._extra_input is not None:
+            return
         vllm_config = get_current_vllm_config()
         max_num_reqs = vllm_config.scheduler_config.max_num_reqs
-
-        self.extra_input = BackendExtraInput(
+        self._extra_input = BackendExtraInput(
             query_start_loc_np=np.empty(max_num_reqs + 2, dtype=np.int32),
             query_start_loc=torch.zeros(max_num_reqs + 2, dtype=torch.int32, device="npu"),
         )
@@ -44,16 +49,19 @@ class FiaExtraInputPreparer(BackendExtraInputPreparer):
         This function is only designed to satisfied the constraint that when the layout is TND,
         the first dimension of `hidden_states` must equal the last element of `actual_seq_lengths_q`.
         """
+        self._ensure_extra_input()
+        extra = self._extra_input
+        assert extra is not None
         num_reqs_padded = batch_desc.num_reqs or num_reqs
         num_tokens_padded = batch_desc.num_tokens
 
-        self.extra_input.query_start_loc_np[: num_reqs_padded + 1] = query_start_loc_np[: num_reqs_padded + 1]
+        extra.query_start_loc_np[: num_reqs_padded + 1] = query_start_loc_np[: num_reqs_padded + 1]
         if num_tokens_padded == num_reqs_padded * decode_query_len:
             # Uniform-batch case: num_reqs must be no greater than num_reqs_padded
             assert num_reqs <= num_reqs_padded
 
-            last_loc = self.extra_input.query_start_loc_np[num_reqs]
-            self.extra_input.query_start_loc_np[num_reqs + 1 : num_reqs_padded + 1] = (
+            last_loc = extra.query_start_loc_np[num_reqs]
+            extra.query_start_loc_np[num_reqs + 1 : num_reqs_padded + 1] = (
                 np.arange(1, num_reqs_padded + 1 - num_reqs) * decode_query_len + last_loc
             )
         else:
@@ -61,13 +69,13 @@ class FiaExtraInputPreparer(BackendExtraInputPreparer):
             assert num_reqs == num_reqs_padded
 
             # Insert a dummy request instead of setting query_start_loc[num_reqs] = num_tokens_padded directly
-            self.extra_input.query_start_loc_np[num_reqs_padded + 1] = num_tokens_padded
+            extra.query_start_loc_np[num_reqs_padded + 1] = num_tokens_padded
             num_reqs_padded = num_reqs_padded + 1
 
-        self.extra_input.num_reqs_padded = num_reqs_padded
-        async_copy_to_gpu(self.extra_input.query_start_loc_np, out=self.extra_input.query_start_loc)
+        extra.num_reqs_padded = num_reqs_padded
+        async_copy_to_gpu(extra.query_start_loc_np, out=extra.query_start_loc)
 
-        return self.extra_input
+        return extra
     
 class AscendBaseAttnBackend(AttentionBackend):
     @staticmethod
