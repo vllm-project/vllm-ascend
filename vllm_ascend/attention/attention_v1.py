@@ -21,7 +21,9 @@ from enum import Enum
 import torch
 import torch_npu
 import vllm.envs as envs_vllm
+import vllm_ascend.envs as envs_ascend
 from vllm.config import VllmConfig, get_current_vllm_config
+from vllm.logger import logger
 from vllm.distributed import get_tensor_model_parallel_rank, get_tensor_model_parallel_world_size
 from vllm.utils.math_utils import cdiv
 from vllm.v1.attention.backend import (  # type: ignore
@@ -64,6 +66,13 @@ from vllm_ascend.device.device_op import DeviceOperator
 from vllm_ascend.ops.flashcomm2_oshard_manager import flashcomm2_oshard_manager
 from vllm_ascend.utils import weak_ref_tensors
 from vllm_ascend.worker.kvcomp_utils import KVCompMetaData
+
+try:
+    from flash_attn_v3 import flash_attn_with_kvcache as _fa3_fn
+
+    _FA3_AVAILABLE = True
+except ImportError:
+    _FA3_AVAILABLE = False
 
 # default max value of sliding window size
 SWA_INT_MAX = 2147483647
@@ -766,6 +775,84 @@ class AscendAttentionBackendImpl(AttentionImpl):
             graph_params.handles[num_tokens].append(handle)
             return output
 
+    def _flash_attn_with_kvcache(
+        self,
+        query: torch.Tensor,
+        block_table: torch.Tensor,
+        actual_seq_lengths_fa: torch.Tensor,
+        seq_lens_list_qa: list,
+        is_causal: bool,
+        max_seq_len: int,
+    ):
+        num_block, block_size, _, _ = self.key_cache.shape  # type: ignore
+        key_fa_blk = self.key_cache.view(  # type: ignore
+            num_block, block_size, self.num_kv_heads, self.head_size)
+        value_fa_blk = self.value_cache.view(  # type: ignore
+            num_block, block_size, self.num_kv_heads, self.head_size)
+
+        kv_seqlen_list = torch.tensor(seq_lens_list_qa, dtype=torch.int32).npu()
+
+        attn_output = _fa3_fn(
+            query,
+            key_fa_blk,
+            value_fa_blk,
+            cache_seqlens=kv_seqlen_list,  # kv sequence length for each individual request (NOT cumulative)
+            page_table=block_table,  #  must match the block table for the corresponding q
+            cu_seqlens_q=actual_seq_lengths_fa,  # cumulative sequence length for q
+            max_seqlen_q=max_seq_len,
+            causal=is_causal,
+            window_size=[-1, -1],
+            rotary_interleaved=False,
+            num_splits=0,
+            softcap=0.0,
+            attention_chunk=0,
+            sm_margin=0,
+            return_softmax_lse=False,
+        )
+
+        return attn_output
+
+    def forward_flash_attn(
+        self,
+        query: torch.Tensor,
+        attn_metadata: AscendMetadata,
+        output: torch.Tensor,
+    ):
+        num_tokens = attn_metadata.actual_seq_lengths_q[-1]
+        query = query[:num_tokens]
+
+        num_decodes = attn_metadata.num_decodes
+        num_decode_tokens = attn_metadata.num_decode_tokens
+        num_prefills = attn_metadata.num_prefills
+        outputs = []
+
+        if num_decodes > 0:
+            outputs.append(self._flash_attn_with_kvcache(
+                query[:num_decode_tokens],
+                attn_metadata.block_tables[:num_decodes, :],
+                attn_metadata.query_start_loc[:num_decodes + 1],
+                attn_metadata.seq_lens_list[:num_decodes],
+                False,
+                max(attn_metadata.seq_lens_list[:num_decodes]),
+            ))
+
+        if num_prefills > 0:
+            outputs.append(self._flash_attn_with_kvcache(
+                query[num_decode_tokens:],
+                attn_metadata.block_tables[num_decode_tokens:, :],
+                attn_metadata.query_start_loc[num_decodes:],
+                attn_metadata.seq_lens_list[num_decodes:],
+                True,  # enable causal for prefill
+                max(attn_metadata.seq_lens_list[num_decodes:]),
+            ))
+
+        if not outputs:
+            raise ValueError("No attention output available")
+
+        attn_output_fa = outputs[0] if len(outputs) == 1 else torch.cat(outputs, dim=0)
+        output[:num_tokens] = attn_output_fa[:num_tokens]
+        return output
+
     def _get_fia_params(self, key: torch.Tensor, value: torch.Tensor, attn_metadata: AscendMetadata, kv_cache=None):
         # PrefillNoCache doesn't need key_cache, but other modes do
         # Only initialize/require cache for modes that actually use it
@@ -865,20 +952,6 @@ class AscendAttentionBackendImpl(AttentionImpl):
         output: torch.Tensor,
         kv_cache=None,
     ):
-        # we inherit ForwardContext in model runner v2, when enable model
-        # runner v2, there is not capturing attribute in forward_context,
-        # just use getattr to avoid attribute error.
-        if _EXTRA_CTX.capturing:
-            attn_output, num_tokens = self.full_graph_fia(query, key, value, attn_metadata, output)
-            output[:num_tokens] = attn_output[:num_tokens]
-            return output
-        if (
-            attn_metadata.attn_state == AscendAttentionState.DecodeOnly
-            and self.sliding_window is not None
-            and attn_metadata.seq_lens.shape[0] == query.size(0)
-            and self.sinks is None
-        ):
-            return self._forward_fia_slidingwindow(query, attn_metadata, output)
         passed_key = key
         key, value, block_size, block_table, actual_seq_lengths_kv = self._get_fia_params(
             key, value, attn_metadata, kv_cache
@@ -1069,6 +1142,25 @@ class AscendAttentionBackendImpl(AttentionImpl):
             and self.sliding_window is None
         ):
             output = self.forward_paged_attention(query, attn_metadata, output)
+
+        # we inherit ForwardContext in model runner v2, when enable model
+        # runner v2, there is not capturing attribute in forward_context,
+        # just use getattr to avoid attribute error.
+        if _EXTRA_CTX.capturing:
+            attn_output, num_tokens = self.full_graph_fia(query, key, value, attn_metadata, output)
+            output[:num_tokens] = attn_output[:num_tokens]
+            return output
+        if (
+            attn_metadata.attn_state == AscendAttentionState.DecodeOnly
+            and self.sliding_window is not None
+            and attn_metadata.seq_lens.shape[0] == query.size(0)
+            and self.sinks is None
+        ):
+            return self._forward_fia_slidingwindow(query, attn_metadata, output)
+
+        if envs_ascend.VLLM_ASCEND_ENABLE_FLASH_ATTN and _FA3_AVAILABLE:
+            logger.info("Using Flash Attention 3 (FA3) for attention computation in eager mode.")
+            output = self.forward_flash_attn(query, attn_metadata, output)
         else:
             output = self.forward_fused_infer_attention(query, key, value, attn_metadata, output, kv_cache)
 
