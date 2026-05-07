@@ -91,6 +91,12 @@ from vllm.v1.worker.ubatch_utils import (
     maybe_create_ubatch_slices,
 )
 from vllm.v1.worker.utils import AttentionGroup
+try:
+    from vllm.model_executor.layers.mamba.ops.ssu_dispatch import (
+        initialize_mamba_ssu_backend,
+    )
+except ImportError:
+    initialize_mamba_ssu_backend = None
 
 # yapf: enable
 from vllm_ascend.ascend_config import get_ascend_config
@@ -3081,6 +3087,11 @@ class NPUModelRunner(GPUModelRunner):
         self.maybe_add_kv_sharing_layers_to_kv_cache_groups(kv_cache_config)
         # NOTE(cmq): initialize_attn_backend must before using self.attn_groups
         self.initialize_attn_backend(kv_cache_config)
+        if initialize_mamba_ssu_backend is not None:
+            initialize_mamba_ssu_backend(
+                self.vllm_config.mamba_config,
+                self.kv_cache_config,
+            )
         self.use_hybrid_blocks = len(self.attn_groups) > 1
         # NOTE: Currently, we determine whether we need `num_accepted_tokens` through `MambaSpec`.
         self.need_accepted_tokens = any(
