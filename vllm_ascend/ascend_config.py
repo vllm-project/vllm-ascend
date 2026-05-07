@@ -131,6 +131,9 @@ class AscendConfig:
         # If set, overrides vllm.__version__ for version detection. Useful for dev builds.
         self.vllm_version = additional_config.get("vllm_version", None)
         print(f"[PATCH_VERIFY] AscendConfig.vllm_version initialized: {self.vllm_version}")
+        # MSMONITOR daemon mode configuration (replaces MSMONITOR_USE_DAEMON env var)
+        self.msmonitor_use_daemon = additional_config.get("msmonitor_use_daemon", False)
+        print(f"[PATCH_VERIFY] AscendConfig.msmonitor_use_daemon initialized: {self.msmonitor_use_daemon}")
 
         self.pd_tp_ratio = 1
         self.pd_head_ratio = 1

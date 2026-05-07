@@ -400,7 +400,8 @@ class NPUWorker(WorkerBase):
         scheduler_output: "SchedulerOutput",
     ) -> ModelRunnerOutput | AsyncModelRunnerOutput | None:
         # enable msMonitor to monitor the performance of vllm-ascend
-        if envs_ascend.MSMONITOR_USE_DAEMON:
+        print(f"[PATCH_VERIFY] execute_model: msmonitor_enabled = {get_ascend_config().msmonitor_use_daemon}")
+        if get_ascend_config().msmonitor_use_daemon:
             dp.step()
 
         if self._pp_send_work:
@@ -747,7 +748,8 @@ class NPUWorker(WorkerBase):
             raise RuntimeError(f"Unrecognized profiler: {profiler_config.profiler}")
         if not profiler_config.torch_profiler_dir:
             raise RuntimeError("torch_profiler_dir cannot be empty.")
-        if envs_ascend.MSMONITOR_USE_DAEMON:
+        print(f"[PATCH_VERIFY] profile: msmonitor_enabled = {get_ascend_config().msmonitor_use_daemon}")
+        if get_ascend_config().msmonitor_use_daemon:
             raise RuntimeError("MSMONITOR_USE_DAEMON and torch profiler cannot be both enabled at the same time.")
 
         experimental_config = torch_npu.profiler._ExperimentalConfig(

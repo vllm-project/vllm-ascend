@@ -80,7 +80,8 @@ env_variables: dict[str, Callable[[], Any]] = {
     # DEPRECATED: VLLM_ASCEND_FLASHCOMM2_PARALLEL_SIZE env var is removed. Use --additional-config '{"enable_flashcomm2_parallel_size": 2}'.
     #     "VLLM_ASCEND_FLASHCOMM2_PARALLEL_SIZE": lambda: int(os.getenv("VLLM_ASCEND_FLASHCOMM2_PARALLEL_SIZE", 0)),
     # Whether to enable msMonitor tool to monitor the performance of vllm-ascend.
-    "MSMONITOR_USE_DAEMON": lambda: bool(int(os.getenv("MSMONITOR_USE_DAEMON", "0"))),
+    # DEPRECATED: MSMONITOR_USE_DAEMON env var is removed. Use --additional-config '{"msmonitor_use_daemon": true}'.
+    #     "MSMONITOR_USE_DAEMON": lambda: bool(int(os.getenv("MSMONITOR_USE_DAEMON", "0"))),
     # Whether to enable MLAPO optimization for DeepSeek W8A8 series models.
     # This option is enabled by default. MLAPO can improve performance, but
     # it will consume more NPU memory. If reducing NPU memory usage is a higher priority
