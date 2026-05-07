@@ -1244,9 +1244,30 @@ class AscendSpecDecodeBaseProposer(SpecDecodeBaseProposer):
                 arange=self.arange,
                 new_slot_mapping=new_slot_mapping,
             )
-            # FIXME(klyzhenko-vadim): seq_lens_cpu is deprecated in vllm.
-            # Updating using .replace() does not work for seq_lens_cpu!
-            new_cad._seq_lens_cpu = new_cad.seq_lens.to("cpu")
+            # ``extend_all_queries_by_N`` adds N to every per-row GPU
+            # ``seq_lens`` but cannot touch the host-side mirrors (it
+            # only knows about upstream's deprecated ``_seq_lens_cpu``
+            # field; the Ascend subclass also has its own
+            # ``seq_lens_cpu`` field, which would be silently stale
+            # after the dataclass ``replace``).
+            #
+            # NPU attention backends (MLA, AscendAttention, SFA) read
+            # those CPU mirrors as kernel input, so they MUST be in
+            # sync with the GPU view. We compute the +N update on CPU
+            # to avoid an extra GPU->CPU sync (which was the original
+            # FIXME): every consumer that needs the post-extend value
+            # already had a valid pre-extend mirror, so a CPU-only
+            # ``+N`` keeps both in lock-step at zero device-side cost.
+            N = self.net_num_new_slots_per_request
+            if cad._seq_lens_cpu is not None:
+                new_cad._seq_lens_cpu = cad._seq_lens_cpu + N
+            elif cad.seq_lens_cpu is not None:
+                # Parent field absent but Ascend subclass field set:
+                # populate ``_seq_lens_cpu`` so upstream code paths
+                # that prefer the parent field still get a fresh value.
+                new_cad._seq_lens_cpu = cad.seq_lens_cpu + N
+            if cad.seq_lens_cpu is not None:
+                new_cad.seq_lens_cpu = cad.seq_lens_cpu + N
 
             return total_num_output_tokens, token_indices_to_sample, new_cad, None
 
