@@ -393,12 +393,12 @@ async def send_request_to_service(
                 result_future.set_result(response.json()["kv_transfer_params"])
             return
         except (httpx.RequestError, httpx.HTTPStatusError) as e:
-            logger.warning(f"Attempt {attempt} failed for {endpoint}: {str(e)}")
+            logger.warning("Attempt %s failed for %s: %s", attempt, endpoint, str(e))
             last_exc = e
             if attempt < max_retries:
                 await asyncio.sleep(base_delay * (2 ** (attempt - 1)))
             else:
-                logger.error(f"All {max_retries} attempts failed for {endpoint}.")
+                logger.error("All %s attempts failed for %s.", max_retries, endpoint)
                 raise last_exc
 
 async def send_request_to_encode_service(
@@ -723,7 +723,7 @@ async def _handle_completions(api: str, request: Request):
                             try:
                                 chunk_str = chunk.decode("utf-8").strip()
                             except UnicodeDecodeError:
-                                logger.debug(f"Skipping chunk: {chunk}")
+                                logger.debug("Skipping chunk: %s", chunk)
                                 yield chunk
                                 continue
                             if not chunk_str:
@@ -734,7 +734,7 @@ async def _handle_completions(api: str, request: Request):
                                 chunk_json = json.loads(chunk_str)
                             except json.JSONDecodeError:
                                 # if chunk is [done], skip it.
-                                logger.debug(f"Skipping chunk: {chunk_str}")
+                                logger.debug("Skipping chunk: %s", chunk_str)
                                 yield chunk
                                 continue
                             choices = chunk_json.get("choices", [])
