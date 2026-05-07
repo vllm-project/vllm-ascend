@@ -68,108 +68,6 @@ from vllm_ascend.worker.kvcomp_utils import KVCompMetaData
 # default max value of sliding window size
 SWA_INT_MAX = 2147483647
 
-# ============================================================================
-# Debug logging for Gemma 31B graph mode precision investigation
-# ============================================================================
-import os
-
-# Control debug output
-_DEBUG_ENABLE = os.environ.get("VLLM_ASCEND_DEBUG_ATTN", "1") == "1"
-_DEBUG_LAYER_LIMIT = int(os.environ.get("VLLM_ASCEND_DEBUG_LAYER_LIMIT", "6"))  # Increased to capture full_attention layer (L4)
-_DEBUG_CALL_LIMIT = int(os.environ.get("VLLM_ASCEND_DEBUG_CALL_LIMIT", "5"))
-
-# Track call counts per layer
-_debug_call_counts: dict[str, int] = {}
-
-
-def _debug_log(layer_name: str, stage: str, tag: str, **kwargs):
-    """Print debug info for attention layer.
-
-    Args:
-        layer_name: Layer identifier (e.g., "model.layers.0")
-        stage: One of "EAGER", "CAPTURE", "REPLAY"
-        tag: Tag like "input", "output", "params"
-        **kwargs: Key-value pairs to log
-    """
-    if not _DEBUG_ENABLE:
-        return
-
-    # Extract layer index
-    layer_idx = -1
-    if "layers." in layer_name:
-        try:
-            layer_idx = int(layer_name.split("layers.")[1].split(".")[0])
-        except (ValueError, IndexError):
-            pass
-
-    # Limit to first N layers
-    if layer_idx >= _DEBUG_LAYER_LIMIT:
-        return
-
-    # Limit to first N calls per layer
-    call_key = f"{layer_name}:{stage}"
-    call_count = _debug_call_counts.get(call_key, 0)
-    if call_count >= _DEBUG_CALL_LIMIT:
-        return
-    _debug_call_counts[call_key] = call_count + 1
-
-    # Format output
-    prefix = f"[L{layer_idx}][#{call_count}][{stage}][{tag}]"
-
-    # In CAPTURE/REPLAY stages, skip tensor stats to avoid NPU sync
-    # which is not allowed during graph capture/update
-    skip_stats = (stage in ("CAPTURE", "REPLAY"))
-
-    parts = []
-    for k, v in kwargs.items():
-        if isinstance(v, torch.Tensor):
-            parts.append(f"{k}={_tensor_stats(v, skip_stats=skip_stats)}")
-        else:
-            parts.append(f"{k}={v}")
-
-    print(f"{prefix} " + " | ".join(parts), flush=True)
-
-
-def _tensor_stats(t: torch.Tensor, name: str = "", skip_stats: bool = False) -> str:
-    """Get statistical summary of a tensor.
-
-    Args:
-        t: Tensor to analyze
-        name: Optional name prefix
-        skip_stats: If True, only return shape/dtype (for graph capture mode)
-    """
-    if t is None:
-        return f"{name}=None"
-
-    shape_str = f"shape={list(t.shape)}"
-    dtype_str = f"dtype={t.dtype}"
-
-    if skip_stats:
-        return f"{name}{shape_str}, {dtype_str}" if name else f"{shape_str}, {dtype_str}"
-
-    # Compute stats on CPU to avoid NPU sync
-    t_cpu = t.detach().float().cpu()
-
-    mean_val = t_cpu.mean().item()
-    std_val = t_cpu.std().item()
-    min_val = t_cpu.min().item()
-    max_val = t_cpu.max().item()
-
-    has_nan = torch.isnan(t_cpu).any().item()
-    has_inf = torch.isinf(t_cpu).any().item()
-
-    stats = f"mean={mean_val:.4f}, std={std_val:.4f}, min={min_val:.4f}, max={max_val:.4f}"
-    flags = []
-    if has_nan:
-        flags.append("NAN")
-    if has_inf:
-        flags.append("INF")
-    if flags:
-        stats += f", {','.join(flags)}"
-
-    return f"{name}{shape_str}, {dtype_str}, {stats}" if name else f"{shape_str}, {dtype_str}, {stats}"
-# ============================================================================
-
 
 @register_backend(AttentionBackendEnum.CUSTOM, "ASCEND")
 class AscendAttentionBackend(AttentionBackend):
@@ -518,9 +416,6 @@ class AscendAttentionBackendImpl(AttentionImpl):
                     graph_params = get_draft_graph_params()
             else:
                 graph_params = get_graph_params()
-            # Debug: log REPLAY stage for paged attention
-            num_pa_layers = len(graph_params.attn_params.get(num_tokens, []))
-            print(f"[REPLAY_PA] num_tokens={num_tokens}, num_pa_layers={num_pa_layers}", flush=True)
             with torch.npu.stream(update_stream):
                 for key, param, handle, event in zip(
                     forward_context.attn_metadata,
@@ -539,15 +434,6 @@ class AscendAttentionBackendImpl(AttentionImpl):
                         seq_lens,
                         output,
                     ) = param
-                    # Debug: log each layer's REPLAY params
-                    # Extract layer index from key (e.g., "model.layers.0.self_attn")
-                    layer_idx = -1
-                    if "layers." in str(key):
-                        try:
-                            layer_idx = int(str(key).split("layers.")[1].split(".")[0])
-                        except (ValueError, IndexError):
-                            pass
-                    print(f"[REPLAY_PA][L{layer_idx}] key={key}, query_shape={query.shape}, head_size={query.shape[-1]}", flush=True)
                     seq_lens = forward_context.attn_metadata[key].seq_lens
 
                     workspace = torch_npu._npu_paged_attention_get_workspace(
@@ -602,39 +488,20 @@ class AscendAttentionBackendImpl(AttentionImpl):
             if _EXTRA_CTX.is_draft_model:
                 attn_keys = attn_keys * (len(graph_params.attn_params[num_tokens]) // num_layers)
             attn_count = 0
-            param_idx = 0  # Track parameter index for debugging
             with torch.npu.stream(update_stream):
                 # Use attn_params_by_key for reliable key-based lookup
                 # This ensures we get the correct parameters for each layer
                 params_by_key = graph_params.attn_params_by_key.get(num_tokens, {})
 
-                # Validate key sets match between CAPTURE and REPLAY
-                captured_keys = set(params_by_key.keys())
-                replay_keys = set(attn_keys)
-                if captured_keys != replay_keys:
-                    missing_in_capture = replay_keys - captured_keys
-                    missing_in_replay = captured_keys - replay_keys
-                    error_msg = f"[KEY_VALIDATION_ERROR] Key set mismatch!\n"
-                    if missing_in_capture:
-                        error_msg += f"  Keys in REPLAY but not in CAPTURE: {missing_in_capture}\n"
-                    if missing_in_replay:
-                        error_msg += f"  Keys in CAPTURE but not in REPLAY: {missing_in_replay}\n"
-                    error_msg += f"  CAPTURE keys ({len(captured_keys)}): {sorted(captured_keys)}\n"
-                    error_msg += f"  REPLAY keys ({len(replay_keys)}): {sorted(replay_keys)}"
-                    print(error_msg, flush=True)
-                    raise KeyError(f"Key set mismatch between CAPTURE and REPLAY phases")
-
                 for key in attn_keys:
                     # Look up parameters by key instead of relying on zip order
                     if key not in params_by_key:
-                        print(f"[REPLAY_ERROR] key={key} not found in attn_params_by_key! Available keys: {list(params_by_key.keys())[:5]}...", flush=True)
                         continue
 
                     param_info = params_by_key[key]
                     param = param_info['params']
                     handle = param_info['handle']
                     event = param_info['event']
-                    capture_param_idx = param_info.get('param_idx', -1)
 
                     (
                         query,
@@ -656,29 +523,6 @@ class AscendAttentionBackendImpl(AttentionImpl):
                         c8_v_aq_offset,
                     ) = param
 
-                    # Debug: log REPLAY stage input with parameter index
-                    # Extract actual layer index from key
-                    actual_layer_idx = -1
-                    if "layers." in str(key):
-                        try:
-                            actual_layer_idx = int(str(key).split("layers.")[1].split(".")[0])
-                        except (ValueError, IndexError):
-                            pass
-                    # Detect head_size from query shape
-                    query_head_size = query.shape[-1] if query.dim() == 3 else (query.shape[-1] if query.dim() == 4 else -1)
-                    print(f"[REPLAY_DEBUG] param_idx={param_idx}, key={key}, actual_layer={actual_layer_idx}, query_head_size={query_head_size}, capture_param_idx={capture_param_idx}, match={'OK' if capture_param_idx == param_idx else 'BY_KEY'}", flush=True)
-                    param_idx += 1
-
-                    # Debug: log REPLAY stage input
-                    _debug_log(
-                        key, "REPLAY", "input",
-                        query=query,
-                        key_cache=key_cache,
-                        value=value,
-                        num_heads=num_heads,
-                        num_kv_heads=num_kv_heads,
-                    )
-
                     sparse_mode = 3
                     if _EXTRA_CTX.is_draft_model:
                         draft_step = attn_count // num_layers
@@ -692,9 +536,6 @@ class AscendAttentionBackendImpl(AttentionImpl):
                         seq_lens = attn_metadata[key].seq_lens_list
                         actual_seq_lengths_q = attn_metadata[key].actual_seq_lengths_q
                         block_tables = attn_metadata[key].block_tables
-
-                    # Debug: log seq_lens for each decode step
-                    print(f"[REPLAY][{key}] seq_lens={seq_lens}, actual_seq_q={actual_seq_lengths_q}", flush=True)
 
                     torch.npu.graph_task_update_begin(update_stream, handle)
                     input_layout = "TND"
@@ -735,15 +576,6 @@ class AscendAttentionBackendImpl(AttentionImpl):
                         out=[attn_output, softmax_lse],
                     )
 
-                    # Debug: log REPLAY stage output
-                    _debug_log(
-                        key, "REPLAY", "output",
-                        attn_output=attn_output,
-                        input_layout=input_layout,
-                        query_dim=query.dim(),
-                        num_tokens=num_tokens,
-                    )
-
                     torch.npu.graph_task_update_end(update_stream)
 
                     event.record(update_stream)
@@ -766,30 +598,12 @@ class AscendAttentionBackendImpl(AttentionImpl):
         # layer_name format could be "language_model.model.layers.X.self_attn" or "layer_X"
         layer_name_raw = getattr(layer, "layer_name", f"layer_{self.layerIndex}")
 
-        # Debug: print layer info to understand its format
-        layer_type = type(layer).__name__ if layer is not None else "None"
-        print(f"[FULL_GRAPH_FIA] layer_type={layer_type}, layer_name={repr(layer_name_raw)}, has_layers={'layers.' in str(layer_name_raw)}", flush=True)
-
         # Try to extract layer index from layer_name
-        layer_idx = self.layerIndex  # fallback to current value
         if "layers." in str(layer_name_raw):
             try:
-                layer_idx = int(str(layer_name_raw).split("layers.")[1].split(".")[0])
-                self.layerIndex = layer_idx  # Update for subsequent use
-                print(f"[FULL_GRAPH_FIA] Extracted layerIndex={self.layerIndex} from '{layer_name_raw}'", flush=True)
+                self.layerIndex = int(str(layer_name_raw).split("layers.")[1].split(".")[0])
             except (ValueError, IndexError):
                 pass
-
-        # Debug: log CAPTURE stage input
-        _debug_log(
-            layer_name_raw, "CAPTURE", "input",
-            query=query,
-            key=key,
-            value=value,
-            head_size=self.head_size,
-            num_heads=self.num_heads,
-            num_kv_heads=self.num_kv_heads,
-        )
 
         passed_key = key
         key, value, block_size, block_table, actual_seq_lengths_kv = self._get_fia_params(key, value, attn_metadata)
@@ -900,16 +714,9 @@ class AscendAttentionBackendImpl(AttentionImpl):
         else:
             attn_params = attn_params + (None, None, None, None)  # type: ignore
 
-        # Debug: log CAPTURE stage parameter storage order
         # Construct the correct key format that matches REPLAY stage expectations
         # REPLAY uses format: "language_model.model.layers.X.self_attn.attn"
         attn_key = f"language_model.model.layers.{self.layerIndex}.self_attn.attn"
-        actual_layer_idx = self.layerIndex
-
-        # Get current param count (this will be the index after append)
-        param_idx = len(graph_params.attn_params[num_tokens])
-        query_head_size = query.shape[-1] if query.dim() == 3 else (query.shape[-1] if query.dim() == 4 else -1)
-        print(f"[CAPTURE_DEBUG] param_idx={param_idx}, key={attn_key}, actual_layer={actual_layer_idx}, query_head_size={query_head_size}, num_tokens={num_tokens}", flush=True)
 
         graph_params.attn_params[num_tokens].append(attn_params)
 
@@ -919,7 +726,6 @@ class AscendAttentionBackendImpl(AttentionImpl):
             'params': attn_params,
             'handle': None,  # Will be set after graph_task_group_end
             'event': event,  # Already created above
-            'param_idx': param_idx,
         }
 
         torch.npu.graph_task_group_begin(stream)
@@ -948,22 +754,12 @@ class AscendAttentionBackendImpl(AttentionImpl):
 
         output = output.view(num_tokens, self.num_heads, self.head_size)
 
-        # Debug: log CAPTURE stage output
-        _debug_log(
-            layer_name_raw, "CAPTURE", "output",
-            output=output,
-            input_layout=input_layout,
-            use_bnsd_for_d512=use_bnsd_for_d512,
-            num_tokens=num_tokens,
-        )
-
         handle = torch.npu.graph_task_group_end(stream)
         graph_params.handles[num_tokens].append(handle)
 
         # Update handle in attn_params_by_key
         if attn_key in graph_params.attn_params_by_key[num_tokens]:
             graph_params.attn_params_by_key[num_tokens][attn_key]['handle'] = handle
-            print(f"[CAPTURE_DEBUG] Stored handle for key={attn_key}, param_idx={graph_params.attn_params_by_key[num_tokens][attn_key]['param_idx']}", flush=True)
 
         return output, num_tokens
 
@@ -973,18 +769,6 @@ class AscendAttentionBackendImpl(AttentionImpl):
         attn_metadata: AscendMetadata,
         output: torch.Tensor | None = None,
     ):
-        # Debug: log CAPTURE stage for paged attention path
-        layer_name = f"layer_{self.layerIndex}"
-        _debug_log(
-            layer_name, "CAPTURE_PA", "input",
-            query=query,
-            key_cache=self.key_cache,
-            value_cache=self.value_cache,
-            head_size=self.head_size,
-            num_heads=self.num_heads,
-            num_kv_heads=self.num_kv_heads,
-        )
-
         graph_params = get_graph_params()
         num_tokens = query.shape[0]
         if _EXTRA_CTX.capturing:
@@ -1187,19 +971,6 @@ class AscendAttentionBackendImpl(AttentionImpl):
         block_size: int,
         output: torch.Tensor,
     ):
-        # Debug: log EAGER stage input for BNSD path (head_size=512)
-        layer_name = f"layer_{self.layerIndex}"
-        _debug_log(
-            layer_name, "EAGER", "input",
-            query=query,
-            key=key,
-            value=value,
-            head_size=self.head_size,
-            num_heads=self.num_heads,
-            num_kv_heads=self.num_kv_heads,
-            block_table=block_table is not None,
-        )
-
         q_lens = self._cum_lens_to_lens(attn_metadata.actual_seq_lengths_q)
         query_bnsd = self._pack_tnd_to_bnsd(query, q_lens)
 
@@ -1238,14 +1009,6 @@ class AscendAttentionBackendImpl(AttentionImpl):
 
         attn_output_tnd = self._unpack_bnsd_to_tnd(attn_output, q_lens)
         num_tokens = query.shape[0]
-
-        # Debug: log EAGER stage output
-        _debug_log(
-            layer_name, "EAGER", "output",
-            attn_output=attn_output_tnd,
-            q_lens=q_lens,
-            num_tokens=num_tokens,
-        )
 
         output[:num_tokens] = attn_output_tnd[:num_tokens]
         return output
@@ -1344,19 +1107,6 @@ class AscendAttentionBackendImpl(AttentionImpl):
                 output=output,
             )
 
-        # Debug: log EAGER stage input for TND path (head_size != 512)
-        layer_name = f"layer_{self.layerIndex}"
-        _debug_log(
-            layer_name, "EAGER", "input",
-            query=query,
-            key=key,
-            value=value,
-            head_size=self.head_size,
-            num_heads=self.num_heads,
-            num_kv_heads=self.num_kv_heads,
-            block_table=block_table is not None,
-        )
-
         # Get workspace from cache or calculate it if not present.
         if self.sinks is not None:
             actual_seq_qlen = attn_metadata.actual_seq_lengths_q
@@ -1419,13 +1169,6 @@ class AscendAttentionBackendImpl(AttentionImpl):
 
             attn_output = attn_output.view(num_tokens, self.num_heads, self.head_size)
 
-        # Debug: log EAGER stage output for TND path
-        _debug_log(
-            layer_name, "EAGER", "output",
-            attn_output=attn_output,
-            num_tokens=num_tokens,
-        )
-
         output[:num_tokens] = attn_output[:num_tokens]
         return output
 
@@ -1438,17 +1181,6 @@ class AscendAttentionBackendImpl(AttentionImpl):
         if _EXTRA_CTX.capturing:
             return self.full_graph_pa(query, attn_metadata, output)
 
-        # Debug: log EAGER stage for paged attention path (used by head_size=512)
-        layer_name = f"layer_{self.layerIndex}"
-        _debug_log(
-            layer_name, "EAGER_PA", "input",
-            query=query,
-            key_cache=self.key_cache,
-            value_cache=self.value_cache,
-            head_size=self.head_size,
-            num_heads=self.num_heads,
-            num_kv_heads=self.num_kv_heads,
-        )
         torch_npu._npu_paged_attention(
             query=query,
             key_cache=self.key_cache,
@@ -1549,17 +1281,6 @@ class AscendAttentionBackendImpl(AttentionImpl):
             and using_paged_attention(num_tokens, self.vllm_config)
             and self.sliding_window is None
         )
-        # Debug: log path selection
-        layer_name = f"layer_{self.layerIndex}"
-        stage = "CAPTURE" if _EXTRA_CTX.capturing else "EAGER"
-        _debug_log(
-            layer_name, stage, "forward_impl",
-            head_size=self.head_size,
-            sliding_window=self.sliding_window,
-            attn_state=attn_metadata.attn_state,
-            num_tokens=num_tokens,
-            use_pa=use_pa,
-        )
         if use_pa:
             output = self.forward_paged_attention(query, attn_metadata, output)
         else:
@@ -1591,47 +1312,15 @@ class AscendAttentionBackendImpl(AttentionImpl):
             shape = [num_tokens, num_heads * head_size]
         """
         assert output is not None, "Output tensor must be provided."
-        # Debug: inspect layer object to understand its structure
-        layer_name_attr = getattr(layer, "layer_name", None) if layer is not None else None
-        layer_type = type(layer).__name__ if layer is not None else "None"
-        # Check if layer has 'impl' attribute (which would make it an Attention object)
-        layer_impl = getattr(layer, "impl", None)
-        impl_type = type(layer_impl).__name__ if layer_impl is not None else "None"
-        print(f"[LAYER_DEBUG] layer_type={layer_type}, layer_name={repr(layer_name_attr)}, impl_type={impl_type}, has_layers={'layers.' in str(layer_name_attr) if layer_name_attr else False}", flush=True)
 
         # Try to extract layer index from layer_name
-        # Format could be:
-        # - "language_model.model.layers.X.self_attn.attn"
-        # - "layer_X"
         if hasattr(layer, 'layer_name'):
             layer_name_str = str(layer.layer_name)
             if "layers." in layer_name_str:
                 try:
                     self.layerIndex = int(layer_name_str.split("layers.")[1].split(".")[0])
-                    print(f"[LAYER_INDEX] Extracted layerIndex={self.layerIndex} from '{layer_name_str}'", flush=True)
-                except (ValueError, IndexError) as e:
-                    print(f"[LAYER_INDEX] Failed to extract from '{layer_name_str}': {e}", flush=True)
-            else:
-                # Try to extract from "layer_X" format
-                import re
-                match = re.search(r'layer_(\d+)', layer_name_str)
-                if match:
-                    self.layerIndex = int(match.group(1))
-                    print(f"[LAYER_INDEX] Extracted layerIndex={self.layerIndex} from 'layer_X' format: '{layer_name_str}'", flush=True)
-                else:
-                    print(f"[LAYER_INDEX] Could not extract layer index from '{layer_name_str}'", flush=True)
-
-        # Debug: log forward entry point
-        layer_name = getattr(layer, "layer_name", f"layer_{self.layerIndex}")
-        stage = "CAPTURE" if _EXTRA_CTX.capturing else "EAGER"
-        _debug_log(
-            layer_name, stage, "forward_entry",
-            query=query,
-            key=key is not None,
-            value=value is not None,
-            head_size=self.head_size,
-            attn_state=attn_metadata.attn_state if attn_metadata else None,
-        )
+                except (ValueError, IndexError):
+                    pass
 
         if output_scale is not None or output_block_scale is not None:
             raise NotImplementedError("fused output quantization is not yet supported for AscendAttentionBackendImpl")
