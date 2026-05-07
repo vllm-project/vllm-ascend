@@ -161,7 +161,7 @@ vllm serve Eco-Tech/GLM-4.7-W8A8-floatmtp \
   --gpu-memory-utilization 0.9 \
   --speculative-config '{"num_speculative_tokens": 3, "method":"mtp"}' \
   --compilation-config '{"cudagraph_capture_sizes": [1,2,4,8,16,32,64,128,256,512], "cudagraph_mode": "FULL_DECODE_ONLY"}' \
-  --additional-config '{"enable_shared_expert_dp": true, "ascend_fusion_config": {"fusion_ops_gmmswigluquant": false}}'\
+  --additional-config '{"enable_shared_expert_dp": true, "ascend_fusion_config": {"fusion_ops_gmmswigluquant": false}}'
 ```
 
 **Notice:**
@@ -578,7 +578,7 @@ Before you start, please
                                 "tp_size": 4
                         }
                 }
-            }' \
+            }'
         ```
 
     4. Decode node 1
@@ -648,7 +648,7 @@ Before you start, please
                                 "tp_size": 4
                         }
                 }
-            }' \
+            }'
         ```
 
 Once the preparation is done, you can start the server with the following command on each node:
@@ -678,7 +678,7 @@ Once the preparation is done, you can start the server with the following comman
 
     ```shell
     # change ip to your own
-    python launch_online_dp.py --dp-size 8 --tp-size 4 --dp-size-local 4 --dp-rank-start 4 --dp-address $node_d0_ip --dp-rpc-port 12778 --vllm-start-port 9300
+    python launch_online_dp.py --dp-size 8 --tp-size 4 --dp-size-local 4 --dp-rank-start 4 --dp-address $node_d1_ip --dp-rpc-port 12778 --vllm-start-port 9300
     ```
 
 ### Request Forwarding
