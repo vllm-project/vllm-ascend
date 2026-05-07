@@ -4,7 +4,6 @@ from vllm.distributed import get_dcp_group, get_pcp_group
 from vllm.utils.math_utils import cdiv
 from vllm.v1.attention.backends.utils import PAD_SLOT_ID
 from vllm.v1.utils import CpuGpuBuffer
-from vllm.v1.worker.block_table import _compute_slot_mapping_kernel
 from vllm.v1.worker.cp_utils import get_total_cp_world_size
 
 
@@ -139,7 +138,7 @@ class BlockTable:
             query_start_loc,
             positions,
             self.block_table.gpu,
-            self.slot_mapping.gpu[:self.max_num_batched_tokens],
+            self.slot_mapping.gpu[: self.max_num_batched_tokens],
             int(num_tokens),
             int(self.max_num_batched_tokens),
             int(self.block_size),
