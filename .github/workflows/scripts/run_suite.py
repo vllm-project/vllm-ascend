@@ -58,77 +58,28 @@ def load_suites(
     return all_suites, upstream_files
 
 
-# def partition(files: list[TestFile], rank: int, size: int) -> list[TestFile]:
-#     """
-#     Split non-skipped files into `size` groups of approximately equal estimated
-#     time using a greedy algorithm, and return the group at index `rank`.
-#     Files within the returned group are sorted ascending by estimated_time.
-#     """
-#     active = [f for f in files if not f.is_skipped]
-#     if not active or size <= 0 or size > len(active):
-#         return []
-#
-#     # Sort descending by weight; use original index as tiebreaker to be stable
-#     indexed = sorted(enumerate(active), key=lambda x: (-x[1].estimated_time, x[0]))
-#
-#     buckets: list[list[int]] = [[] for _ in range(size)]
-#     sums = [0.0] * size
-#     for idx, test in indexed:
-#         lightest = sums.index(min(sums))
-#         buckets[lightest].append(idx)
-#         sums[lightest] += test.estimated_time
-#     # Sort each bucket ascending by estimated_time for better feedback and developer experience
-#     return sorted([active[i] for i in buckets[rank]], key=lambda f: f.estimated_time, reverse=True)
 def partition(files: list[TestFile], rank: int, size: int) -> list[TestFile]:
-    """Split non-skipped files into `size` groups of approximately equal estimated time
-    using a greedy algorithm, and return the group at index `rank`.
+    """
+    Split non-skipped files into `size` groups of approximately equal estimated
+    time using a greedy algorithm, and return the group at index `rank`.
     Files within the returned group are sorted ascending by estimated_time.
     """
-    # 1. 过滤出未跳过的文件
     active = [f for f in files if not f.is_skipped]
-
-    # 2. 边界处理
-    if not active or size <= 0:
+    print(f"Partitioning {len(active)} files")
+    if not active or size <= 0 or size > len(active):
         return []
 
-    # 确保 size 合法：不允许 size > len(active)？原逻辑如此，我们保留
-    if size > len(active):
-        return []
-
-    # 🔐 关键：保存 active 长度，后续绝不修改 active！
-    n = len(active)
-
-    # 3. 按 estimated_time 降序排序，原始索引作为稳定排序依据
+    # Sort descending by weight; use original index as tiebreaker to be stable
     indexed = sorted(enumerate(active), key=lambda x: (-x[1].estimated_time, x[0]))
 
-    # 4. 初始化桶和时间总和
     buckets: list[list[int]] = [[] for _ in range(size)]
     sums = [0.0] * size
-
-    # 5. 贪心分配：每次放入最轻的桶
     for idx, test in indexed:
         lightest = sums.index(min(sums))
         buckets[lightest].append(idx)
         sums[lightest] += test.estimated_time
-
-    # 6. 安全提取当前 rank 的文件组
-    if rank < 0 or rank >= len(buckets):
-        return []  # 防御性处理：rank 越界
-
-    # ✅ 安全映射：检查每个 idx 是否在 [0, n) 范围内
-    try:
-        selected_files = [active[i] for i in buckets[rank]]
-    except IndexError as e:
-        # 更清晰报错，便于调试
-        invalid_indices = [i for i in buckets[rank] if i < 0 or i >= n]
-        raise RuntimeError(
-            f"Invalid indices in bucket[{rank}]: {invalid_indices}, "
-            f"but active has only {n} items. "
-            "This indicates a logic error in index management."
-        ) from e
-
-    # 7. 按 estimated_time 升序排序（让快的任务先执行，提升反馈速度）
-    return sorted(selected_files, key=lambda f: f.estimated_time, reverse=True)
+    # Sort each bucket ascending by estimated_time for better feedback and developer experience
+    return sorted([active[i] for i in buckets[rank]], key=lambda f: f.estimated_time, reverse=True)
 
 
 def _find_project_root() -> Path:
@@ -255,8 +206,6 @@ def _save_timing_json(
 
 def main() -> None:
     suites, upstream_files = load_suites()
-    print("All suites:", suites)
-    print("Upstream files:", upstream_files)
     parser = argparse.ArgumentParser(description="Run a named e2e test suite")
     parser.add_argument(
         "--suite",
