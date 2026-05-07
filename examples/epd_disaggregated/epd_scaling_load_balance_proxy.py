@@ -19,77 +19,14 @@
 # - Install dependencies:
 #     pip install fastapi<0.124.0 httpx uvicorn vllm
 #
-# Step 1: Start Your Backend Servers
-# ----------------------------------
-# You need to have at least one prefiller and one decoder backend running.
-# These can be mock servers or actual vLLM servers.
-#
-# For testing, you can use the provided mock server:
-#
-#   vllm serve --host 0.0.0.0 --port 8101 ... # Encoder 1
-#   vllm serve --host 0.0.0.0 --port 8102 ... # Encoder 2
-#   vllm serve --host 0.0.0.0 --port 8201 ... # PD 1
-#   vllm serve --host 0.0.0.0 --port 8202 ... # PD 2
-#   vllm serve --host 0.0.0.0 --port 8301 ... # Prefiller 1
-#   vllm serve --host 0.0.0.0 --port 8301 ... # Prefiller 2
-#   vllm serve --host 0.0.0.0 --port 8401 ... # Decoder 1
-#   vllm serve --host 0.0.0.0 --port 8402 ... # Decoder 2
-#
-# Step 2: Start the Proxy Server
-# ------------------------------
-# Run the proxy server, specifying the host/port for each instance:
-#
-# 2 Encoder instance + 2 PD instance:
-#   python epd_load_balance_proxy_layerwise_server_example.py \
-#     --encoder-hosts 127.0.0.1 127.0.0.1 \
-#     --encoder-ports 81001 81002 \
-#     --pd-hosts 127.0.0.1 127.0.0.1 \
-#     --pd-ports 82001 82002 \
-#     --host 0.0.0.0 \
-#     --port 9000
-
-# 2 Encoder instance + 2 Prefill instance + 2 Decode instance:
-#   python epd_load_balance_proxy_layerwise_server_example.py \
-#     --encoder-hosts 127.0.0.1 127.0.0.1 \
-#     --encoder-ports 81001 81002 \
-#     --prefiller-hosts 127.0.0.1 127.0.0.1 \
-#     --prefiller-ports 83001 83002 \
-#     --decoder-hosts 127.0.0.1 127.0.0.1 \
-#     --decoder-ports 84001 84002 \
-#     --host 0.0.0.0 \
-#     --port 9000
-
-# This will start the proxy on port 9000, load balancing between two encoder, tweo pd, two prefiller
-# and two decoder servers.
-#
-# Step 3: Send a Request to the Proxy
-# -----------------------------------
-# You can now send OpenAI-compatible requests to the proxy. For example:
-#
-#   curl -X POST http://localhost:9000/v1/chat/completions \
-#     -H "Content-Type: application/json" \
-#     -d '{
-#           "model": "your-model",
-#           "messages": [{"role": "user","content": [{"type": "image_url","image_url": {"url": f"file://{image_path}"}},
-# 								                     {"type": "text","text": "Describe this image."}]}],
-#           "max_tokens": 16
-#         }'
-#
-# Step 4: Health Check
-# --------------------
-# To check if the proxy is running and see how many backend instances are
-# connected, use:
-#
-#   curl http://localhost:9000/healthcheck
-#
-# This will return a JSON object with the status and the number of encoder, pd, prefiller
-# and decoder instances.
-#
-# Notes:
-# - You can scale the number of encoder, pd, prefiller and decoder servers as needed.
-# - The proxy dispatches requests based on a least-loaded strategy,
-#   using a priority queue to balance the active token workload across instances.
-# - For production, ensure your backend servers are robust and secure.
+# python epd_scaling_load_balance_proxy.py \
+#     --host 127.0.0.1 --port 8001 \
+#     --model-path /model_weights \
+#     --visible-devices 0 1 2 3 4 5 6 \
+#     --encode-threshold 1000 \
+#     --pd-threshold 1000 \
+#     --scale-interval 0.5 \
+#     --deployment-mode e-pd
 #
 # For more details, see the code and comments in this file.
 
