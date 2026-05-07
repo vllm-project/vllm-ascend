@@ -34,7 +34,7 @@ From the workflow perspective, we can see how the final test script is executed,
     num_nodes: 2
     npu_per_node: 16
     # All env vars you need should add it here
-    env_common:
+    env_common: &env_common
       VLLM_USE_MODELSCOPE: true
       OMP_PROC_BIND: false
       OMP_NUM_THREADS: 100
