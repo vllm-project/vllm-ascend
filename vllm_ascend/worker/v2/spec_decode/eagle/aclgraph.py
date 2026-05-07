@@ -17,6 +17,7 @@ from vllm.v1.worker.gpu.model_states.interface import ModelState
 from vllm.v1.worker.utils import AttentionGroup
 
 from vllm_ascend.utils import vllm_version_is
+
 if not vllm_version_is("0.20.1"):
     from vllm.v1.worker.gpu.spec_decode.eagle.cudagraph import DecodeEagleCudaGraphManager, PrefillEagleCudaGraphManager
 else:
@@ -32,6 +33,7 @@ from vllm_ascend.worker.v2.aclgraph_utils import ModelWithContext
 from vllm_ascend.worker.v2.utils import communicator_switch
 
 if not vllm_version_is("0.20.1"):
+
     class PrefillEagleAclGraphManager(PrefillEagleCudaGraphManager):
         """AclGraphManager for Eagle speculative decoding."""
 
@@ -83,7 +85,9 @@ if not vllm_version_is("0.20.1"):
                     progress_bar_desc,
                 )
 
-        def run_fullgraph(self, desc: BatchExecutionDescriptor) -> torch.Tensor | tuple[torch.Tensor, list[torch.Tensor]]:
+        def run_fullgraph(
+            self, desc: BatchExecutionDescriptor
+        ) -> torch.Tensor | tuple[torch.Tensor, list[torch.Tensor]]:
             """Override run_fullgraph to update full graph params in run_fullgraph."""
             num_tokens = desc.num_tokens
             if self.is_draft_model_prefill:
@@ -91,7 +95,9 @@ if not vllm_version_is("0.20.1"):
             else:
                 logger.info_once(f"draft run_fullgraph with num_tokens={num_tokens}")
 
-            draft_attn_metadatas = self.speculator.build_draft_attn_metadatas(desc.num_reqs, self.is_draft_model_prefill)
+            draft_attn_metadatas = self.speculator.build_draft_attn_metadatas(
+                desc.num_reqs, self.is_draft_model_prefill
+            )
 
             ret = super().run_fullgraph(desc)
 
@@ -127,7 +133,6 @@ if not vllm_version_is("0.20.1"):
                     draft_attn_metadatas=draft_attn_metadatas,
                 )
             return ret
-
 
     class DecodeEagleAclGraphManager(DecodeEagleCudaGraphManager):
         """AclGraphManager for Eagle speculative decoding."""
@@ -180,7 +185,9 @@ if not vllm_version_is("0.20.1"):
                     progress_bar_desc,
                 )
 
-        def run_fullgraph(self, desc: BatchExecutionDescriptor) -> torch.Tensor | tuple[torch.Tensor, list[torch.Tensor]]:
+        def run_fullgraph(
+            self, desc: BatchExecutionDescriptor
+        ) -> torch.Tensor | tuple[torch.Tensor, list[torch.Tensor]]:
             """Override run_fullgraph to update full graph params in run_fullgraph."""
             num_tokens = desc.num_tokens
             if self.is_draft_model_prefill:
@@ -188,7 +195,9 @@ if not vllm_version_is("0.20.1"):
             else:
                 logger.info_once(f"draft run_fullgraph with num_tokens={num_tokens}")
 
-            draft_attn_metadatas = self.speculator.build_draft_attn_metadatas(desc.num_reqs, self.is_draft_model_prefill)
+            draft_attn_metadatas = self.speculator.build_draft_attn_metadatas(
+                desc.num_reqs, self.is_draft_model_prefill
+            )
 
             ret = super().run_fullgraph(desc)
 
@@ -224,8 +233,9 @@ if not vllm_version_is("0.20.1"):
                     draft_attn_metadatas=draft_attn_metadatas,
                 )
             return ret
-        
+
 else:
+
     class EagleAclGraphManager(EagleCudaGraphManager):
         """AclGraphManager for Eagle speculative decoding."""
 
@@ -277,7 +287,9 @@ else:
                     progress_bar_desc,
                 )
 
-        def run_fullgraph(self, desc: BatchExecutionDescriptor) -> torch.Tensor | tuple[torch.Tensor, list[torch.Tensor]]:
+        def run_fullgraph(
+            self, desc: BatchExecutionDescriptor
+        ) -> torch.Tensor | tuple[torch.Tensor, list[torch.Tensor]]:
             """Override run_fullgraph to update full graph params in run_fullgraph."""
             num_tokens = desc.num_tokens
             if self.is_draft_model_prefill:
@@ -285,7 +297,9 @@ else:
             else:
                 logger.info_once(f"draft run_fullgraph with num_tokens={num_tokens}")
 
-            draft_attn_metadatas = self.speculator.build_draft_attn_metadatas(desc.num_reqs, self.is_draft_model_prefill)
+            draft_attn_metadatas = self.speculator.build_draft_attn_metadatas(
+                desc.num_reqs, self.is_draft_model_prefill
+            )
 
             ret = super().run_fullgraph(desc)
 

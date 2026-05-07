@@ -23,8 +23,10 @@ from vllm.v1.outputs import LogprobsTensors
 
 from vllm_ascend.ops.triton.triton_utils import get_vectorcore_num
 from vllm_ascend.utils import vllm_version_is
+
 if not vllm_version_is("0.20.1"):
     from vllm.v1.worker.gpu.sample.logprob import LogprobTokenIdsState
+
 
 @triton.jit
 def _topk_log_softmax_kernel(
@@ -116,7 +118,9 @@ def _ranks_kernel(
             n = tl.sum(n_vec)
             tl.store(output_ptr + req_idx, n)
 
+
 if not vllm_version_is("0.20.1"):
+
     def compute_topk_logprobs(
         logits: torch.Tensor,
         num_logprobs: int,
@@ -168,11 +172,12 @@ if not vllm_version_is("0.20.1"):
             cu_num_generated_tokens=cu_num_logits,
         )
 else:
+
     def compute_topk_logprobs(
-    logits: torch.Tensor,
-    num_logprobs: int,
-    sampled_token_ids: torch.Tensor,
-    cu_num_logits: list[int] | None = None,
+        logits: torch.Tensor,
+        num_logprobs: int,
+        sampled_token_ids: torch.Tensor,
+        cu_num_logits: list[int] | None = None,
     ) -> LogprobsTensors:
         assert num_logprobs >= 0
         batch_size, vocab_size = logits.shape
