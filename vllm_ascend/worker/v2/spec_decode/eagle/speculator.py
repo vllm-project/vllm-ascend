@@ -33,17 +33,21 @@ from vllm.v1.worker.gpu.model_states.interface import ModelState
 from vllm.v1.worker.gpu.spec_decode.eagle import speculator as vllm_speculator
 
 from vllm_ascend.attention.attention_v1 import AscendAttentionState
+from vllm_ascend.utils import vllm_version_is
 from vllm_ascend.worker.v2.attn_utils import build_attn_metadata
 from vllm_ascend.worker.v2.input_batch import AscendInputBuffers
-from vllm_ascend.utils import vllm_version_is
+
 if not vllm_version_is("0.20.1"):
     from vllm.v1.worker.gpu.spec_decode.eagle.cudagraph import PrefillEagleCudaGraphManager
     from vllm.v1.worker.gpu.spec_decode.eagle.speculator import EagleSpeculator, update_eagle_draft_inputs
+
     from vllm_ascend.worker.v2.spec_decode.eagle.aclgraph import PrefillEagleAclGraphManager
 else:
     from vllm.v1.worker.gpu.spec_decode.eagle.cudagraph import EagleCudaGraphManager
     from vllm.v1.worker.gpu.spec_decode.eagle.speculator import EagleSpeculator, gumbel_sample, update_eagle_inputs
+
     from vllm_ascend.worker.v2.spec_decode.eagle.aclgraph import EagleAclGraphManager
+
 
 class AscendEagleSpeculator(EagleSpeculator):
     def __init__(self, vllm_config: VllmConfig, device: torch.device):
@@ -165,6 +169,7 @@ class AscendEagleSpeculator(EagleSpeculator):
         self.attn_backends = attn_backends
 
     if not vllm_version_is("0.20.1"):
+
         def generate_draft(
             self,
             num_reqs: int,
@@ -217,6 +222,7 @@ class AscendEagleSpeculator(EagleSpeculator):
             # npu's own update logic
             self._increment_decode_attn_metadata(attn_metadata)
     else:
+
         def generate_draft(
             self,
             num_reqs: int,
@@ -439,13 +445,17 @@ def torch_gather_wrapper():
     finally:
         torch.gather = original_gather
 
+
 if not vllm_version_is("0.20.1"):
+
     @contextmanager
     def graph_manager_wrapper(speculator):
         """Context manager to override graph manager."""
         original_graph_manager = PrefillEagleCudaGraphManager
 
-        def factory(vllm_config: VllmConfig, device: torch.device, cudagraph_mode: CUDAGraphMode, decode_query_len: int):
+        def factory(
+            vllm_config: VllmConfig, device: torch.device, cudagraph_mode: CUDAGraphMode, decode_query_len: int
+        ):
             return PrefillEagleAclGraphManager(vllm_config, device, cudagraph_mode, decode_query_len, speculator)
 
         try:
@@ -454,12 +464,15 @@ if not vllm_version_is("0.20.1"):
         finally:
             vllm_speculator.PrefillEagleCudaGraphManager = original_graph_manager
 else:
+
     @contextmanager
     def graph_manager_wrapper(speculator):
         """Context manager to override graph manager."""
         original_graph_manager = EagleCudaGraphManager
 
-        def factory(vllm_config: VllmConfig, device: torch.device, cudagraph_mode: CUDAGraphMode, decode_query_len: int):
+        def factory(
+            vllm_config: VllmConfig, device: torch.device, cudagraph_mode: CUDAGraphMode, decode_query_len: int
+        ):
             return EagleAclGraphManager(vllm_config, device, cudagraph_mode, decode_query_len, speculator)
 
         try:
