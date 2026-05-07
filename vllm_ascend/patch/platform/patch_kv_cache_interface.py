@@ -10,6 +10,15 @@ from typing_extensions import Self
 from vllm.utils.torch_utils import get_dtype_size
 from vllm.v1.kv_cache_interface import MLAAttentionSpec
 
+# Redirect pickle's class lookup for the original MLAAttentionSpec so that
+# instances created by modules with stale imports (e.g. CacheOnlyAttentionLayer)
+# remain serializable after we replace vllm.v1.kv_cache_interface.MLAAttentionSpec.
+# pickle uses obj.__class__.__module__ + '.' + obj.__class__.__qualname__ to
+# locate the class; by pointing the original to this module we keep it findable.
+_OriginalMLAAttentionSpec = MLAAttentionSpec
+_OriginalMLAAttentionSpec.__module__ = __name__
+_OriginalMLAAttentionSpec.__qualname__ = "_OriginalMLAAttentionSpec"
+
 
 @dataclass(frozen=True)
 class AscendMLAAttentionSpec(MLAAttentionSpec):
