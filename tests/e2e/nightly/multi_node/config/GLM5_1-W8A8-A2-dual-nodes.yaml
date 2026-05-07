@@ -2,7 +2,7 @@ test_name: "multi-node-GLM-5.1-w8a8-A2"
 model: "Eco-Tech/GLM-5.1-w8a8"
 num_nodes: 2
 npu_per_node: 16
-env_common:
+env_common: &env_common
   HCCL_OP_EXPANSION_MODE: "AIV"
   OMP_PROC_BIND: false
   OMP_NUM_THREADS: 1
@@ -21,6 +21,8 @@ special_dependencies:
 
 deployment:
   -
+    envs:
+      <<: *env_common
     server_cmd: >
       vllm serve Eco-Tech/GLM-5.1-w8a8
       --host 0.0.0.0
@@ -44,6 +46,8 @@ deployment:
       --compilation-config '{"cudagraph_mode": "FULL_DECODE_ONLY","cudagraph_capture_sizes": [1,4,8,12,16,20,24,28,32,36,48,60,72]}'
       --speculative-config '{"num_speculative_tokens": 3, "method": "deepseek_mtp"}'
   -
+    envs:
+      <<: *env_common
     server_cmd: >
       vllm serve Eco-Tech/GLM-5.1-w8a8
       --host 0.0.0.0
