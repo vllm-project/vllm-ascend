@@ -239,6 +239,30 @@ class AscendMoERunner(MoERunner):
         chunked path. Always return False to stay on forward_impl."""
         return False
 
+    @property
+    def _fused_output_is_reduced(self) -> bool:
+        # For MC2/ALLTOALL/FUSED_MC2 comm types, finalize() already includes
+        # TP all-reduce for the routed output, and _forward_shared_experts
+        # handles it for the shared output. Signal this to the upstream
+        # MoERunner.forward() so _maybe_reduce_final_output does not apply a
+        # second TP all-reduce (which would double-count the contributions).
+        moe_comm_type = _EXTRA_CTX.moe_comm_type
+        return moe_comm_type in {
+            MoECommType.ALLTOALL,
+            MoECommType.MC2,
+            MoECommType.FUSED_MC2,
+        }
+
+    def _maybe_reduce_shared_expert_output(
+        self,
+        shared_output: torch.Tensor | None,
+    ) -> torch.Tensor | None:
+        # _forward_shared_experts already handles shared expert TP all-reduce
+        # for MC2/ALLTOALL/FUSED_MC2. For AllGather the reduction is done
+        # via _maybe_reduce_final_output on the combined (shared + routed)
+        # output. Skip any additional reduction here.
+        return shared_output
+
     # TODO: Remove this after drop v0.19.1 support
     def forward_impl(
         self,
