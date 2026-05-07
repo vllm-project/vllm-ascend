@@ -75,7 +75,6 @@ def build_attn_metadata(
     graph_pad_size: int = -1,
     num_input_tokens: int = 0,
     prefill_context_parallel_metadata: AscendPrefillContextParallelMetadata | None = None,
-    **extra_kwargs,
 ) -> dict[str, Any]:
     """Build attention metadata for Ascend NPUs."""
     # TODO(Ronald1995): optimize AscendCommonAttentionMetadata.
@@ -118,7 +117,7 @@ def build_attn_metadata(
                 num_reqs_padded = preparer.extra_input.num_reqs_padded
                 common_attn_metadata.query_start_loc = preparer.extra_input.query_start_loc[: num_reqs_padded + 1]
                 common_attn_metadata.query_start_loc_cpu = torch.from_numpy(
-                    extra_kwargs[preparer.extra_input.query_start_loc_np[: num_reqs_padded + 1]]
+                    preparer.extra_input.query_start_loc_np[: num_reqs_padded + 1]
                 )
 
             attn_metadata_builder = attn_group.get_metadata_builder(0)

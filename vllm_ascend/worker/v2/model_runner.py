@@ -154,7 +154,7 @@ class NPUModelRunner(GPUModelRunner):
             for backend in self._attn_backends:
                 if hasattr(backend, "get_extra_input_constructor"):
                     self.backend_extra_input_constructors.add(backend.get_extra_input_constructor())
-        
+
         max_num_reqs_padded = 0
         max_extra_input = None
         for constructor in self.backend_extra_input_constructors:
