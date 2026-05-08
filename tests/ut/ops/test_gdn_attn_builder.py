@@ -9,14 +9,18 @@ import torch
 from vllm.config.compilation import CUDAGraphMode
 from vllm.model_executor.layers.fla.ops import index as _fla_index
 from vllm.v1.attention.backend import CommonAttentionMetadata
-from vllm.v1.attention.backends.gdn_attn import GDNAttentionMetadataBuilder
 from vllm.v1.kv_cache_interface import MambaSpec
 
-import vllm_ascend.patch.worker.patch_gdn_attn as patch_gdn_attn
+from vllm_ascend.ops import gdn_attn_builder as ascend_gdn_attn_builder
 from vllm_ascend.ops.gdn import (
+    AscendGatedDeltaNetAttention,
     get_non_spec_causal_conv1d_host_args,
     get_non_spec_chunked_prefill_meta,
     to_int64_tuple,
+)
+from vllm_ascend.ops.gdn_attn_builder import (
+    AscendGDNAttentionBackend,
+    AscendGDNAttentionMetadataBuilder,
 )
 from vllm_ascend.ops.triton.fla import utils as fla_utils
 from vllm_ascend.ops.triton.fla.utils import (
@@ -150,7 +154,7 @@ def _make_builder(*, device: torch.device, num_heads: int, num_speculative_token
         dtypes=(torch.float32,),
         mamba_cache_mode="none",
     )
-    return GDNAttentionMetadataBuilder(spec, ["layer0"], vllm_config, device)
+    return AscendGDNAttentionMetadataBuilder(spec, ["layer0"], vllm_config, device)
 
 
 def _build_attn_metadata(
@@ -190,31 +194,31 @@ def _build_attn_metadata(
 def _assert_chunk_meta_matches_runtime(builder, chunk_meta, cu_seqlens: torch.Tensor) -> None:
     assert torch.equal(
         chunk_meta.chunk_indices_chunk64,
-        runtime_prepare_chunk_indices(cu_seqlens, patch_gdn_attn._GDN_CHUNK_SIZE),
+        runtime_prepare_chunk_indices(cu_seqlens, ascend_gdn_attn_builder._GDN_CHUNK_SIZE),
     )
     assert torch.equal(
         chunk_meta.chunk_offsets_chunk64,
-        runtime_prepare_chunk_offsets(cu_seqlens, patch_gdn_attn._GDN_CHUNK_SIZE),
+        runtime_prepare_chunk_offsets(cu_seqlens, ascend_gdn_attn_builder._GDN_CHUNK_SIZE),
     )
     assert torch.equal(
         chunk_meta.update_chunk_offsets_chunk64,
         runtime_prepare_update_chunk_offsets(
             cu_seqlens,
-            patch_gdn_attn._GDN_CHUNK_SIZE,
+            ascend_gdn_attn_builder._GDN_CHUNK_SIZE,
         ),
     )
     assert torch.equal(
         chunk_meta.final_chunk_indices_chunk64,
         runtime_prepare_final_chunk_indices(
             cu_seqlens,
-            patch_gdn_attn._GDN_CHUNK_SIZE,
+            ascend_gdn_attn_builder._GDN_CHUNK_SIZE,
         ),
     )
     assert torch.equal(
         chunk_meta.chunk_indices_large_block,
         runtime_prepare_chunk_indices(
             cu_seqlens,
-            patch_gdn_attn._GDN_SOLVE_TRIL_LARGE_BLOCK_SIZE,
+            ascend_gdn_attn_builder._GDN_SOLVE_TRIL_LARGE_BLOCK_SIZE,
         ),
     )
     assert torch.equal(
@@ -235,6 +239,28 @@ def _patch_missing_runtime_cdiv(monkeypatch: pytest.MonkeyPatch) -> None:
         lambda x, y: (x + y - 1) // y,
         raising=False,
     )
+
+
+def test_ascend_gdn_attention_uses_ascend_backend():
+    assert AscendGatedDeltaNetAttention.get_attn_backend(object()) is AscendGDNAttentionBackend
+    assert AscendGDNAttentionBackend.get_builder_cls() is AscendGDNAttentionMetadataBuilder
+
+
+def test_sequence_index_buffers_cover_spec_decode_when_cudagraph_disabled():
+    builder = _make_builder(
+        device=torch.device("cpu"),
+        num_heads=32,
+        num_speculative_tokens=3,
+    )
+    assert builder.spec_sequence_indices_cpu.numel() >= builder.vllm_config.scheduler_config.max_num_seqs
+
+    spec_indices, non_spec_indices = builder._copy_sequence_indices_to_device(
+        torch.tensor([True], dtype=torch.bool),
+        num_spec_decodes=1,
+    )
+
+    assert torch.equal(spec_indices.cpu(), torch.tensor([0]))
+    assert non_spec_indices.numel() == 0
 
 
 def _expected_conv1d_host_args(attn_metadata) -> tuple[tuple[int, ...], tuple[int, ...], tuple[int, ...]]:
@@ -317,7 +343,7 @@ def test_build_non_spec_causal_conv1d_host_meta_avoids_seq_lens_cpu_fallback():
         has_initial_state=torch.tensor([True, False]),
     )
 
-    host_meta = patch_gdn_attn._build_non_spec_causal_conv1d_host_meta(
+    host_meta = ascend_gdn_attn_builder._build_non_spec_causal_conv1d_host_meta(
         builder,
         attn_metadata,
         non_spec_query_start_loc_cpu=torch.tensor([0, 4, 12], dtype=torch.int32),
@@ -338,7 +364,7 @@ def test_build_non_spec_causal_conv1d_host_meta_requires_has_initial_state():
         has_initial_state=None,
     )
     with pytest.raises(RuntimeError, match="has_initial_state"):
-        patch_gdn_attn._build_non_spec_causal_conv1d_host_meta(
+        ascend_gdn_attn_builder._build_non_spec_causal_conv1d_host_meta(
             builder,
             attn_metadata,
             non_spec_query_start_loc_cpu=torch.tensor([0, 4, 12], dtype=torch.int32),
@@ -386,8 +412,8 @@ def test_builder_uses_device_chunk_builder_with_non_spec_query_start_loc(monkeyp
 
     builder._ascend_gdn_chunk_meta_initialized = True
     builder._ascend_gdn_chunk_meta_device = SimpleNamespace(type="npu")
-    builder._ascend_gdn_chunk_size = patch_gdn_attn._GDN_CHUNK_SIZE
-    builder._ascend_gdn_large_block_size = patch_gdn_attn._GDN_SOLVE_TRIL_LARGE_BLOCK_SIZE
+    builder._ascend_gdn_chunk_size = ascend_gdn_attn_builder._GDN_CHUNK_SIZE
+    builder._ascend_gdn_large_block_size = ascend_gdn_attn_builder._GDN_SOLVE_TRIL_LARGE_BLOCK_SIZE
     builder._ascend_gdn_cumsum_block_size = 256
     builder._ascend_gdn_chunked_prefill_pool_idx = -1
     builder._ascend_gdn_chunked_prefill_pool = [
@@ -410,15 +436,10 @@ def test_builder_uses_device_chunk_builder_with_non_spec_query_start_loc(monkeyp
         helper_calls[kwargs["chunk_size"]] = kwargs
 
     monkeypatch.setattr(
-        patch_gdn_attn,
+        ascend_gdn_attn_builder,
         "build_chunk_meta_device",
         fake_build_chunk_meta_device,
         raising=False,
-    )
-    monkeypatch.setattr(
-        patch_gdn_attn,
-        "_prepare_chunk_counts_cpu",
-        lambda *args, **kwargs: pytest.fail("_prepare_chunk_counts_cpu should not be used on the device path"),
     )
 
     attn_metadata = builder.build(
@@ -430,22 +451,22 @@ def test_builder_uses_device_chunk_builder_with_non_spec_query_start_loc(monkeyp
 
     expected_chunk_indices = runtime_prepare_chunk_indices(
         attn_metadata.non_spec_query_start_loc,
-        patch_gdn_attn._GDN_CHUNK_SIZE,
+        ascend_gdn_attn_builder._GDN_CHUNK_SIZE,
     )
     expected_chunk_offsets = runtime_prepare_chunk_offsets(
         attn_metadata.non_spec_query_start_loc,
-        patch_gdn_attn._GDN_CHUNK_SIZE,
+        ascend_gdn_attn_builder._GDN_CHUNK_SIZE,
     )
     expected_update_chunk_offsets = runtime_prepare_update_chunk_offsets(
         attn_metadata.non_spec_query_start_loc,
-        patch_gdn_attn._GDN_CHUNK_SIZE,
+        ascend_gdn_attn_builder._GDN_CHUNK_SIZE,
     )
     expected_final_chunk_indices = runtime_prepare_final_chunk_indices(
         attn_metadata.non_spec_query_start_loc,
-        patch_gdn_attn._GDN_CHUNK_SIZE,
+        ascend_gdn_attn_builder._GDN_CHUNK_SIZE,
     )
 
-    chunk64_call = helper_calls[patch_gdn_attn._GDN_CHUNK_SIZE]
+    chunk64_call = helper_calls[ascend_gdn_attn_builder._GDN_CHUNK_SIZE]
     out_chunk_indices = cast(torch.Tensor, chunk64_call["out_chunk_indices"])
     out_chunk_offsets = cast(torch.Tensor, chunk64_call["out_chunk_offsets"])
     out_update_chunk_offsets = cast(
@@ -456,6 +477,7 @@ def test_builder_uses_device_chunk_builder_with_non_spec_query_start_loc(monkeyp
         torch.Tensor,
         chunk64_call["out_final_chunk_indices"],
     )
+    fallback_meta = get_non_spec_chunked_prefill_meta(attn_metadata)
     assert chunk64_call["cu_seqlens"] is attn_metadata.non_spec_query_start_loc
     assert out_chunk_indices.shape == expected_chunk_indices.shape
     assert out_chunk_indices.dtype == expected_chunk_indices.dtype
@@ -465,6 +487,10 @@ def test_builder_uses_device_chunk_builder_with_non_spec_query_start_loc(monkeyp
     assert out_update_chunk_offsets.dtype == torch.int32
     assert out_final_chunk_indices.shape == expected_final_chunk_indices.shape
     assert out_final_chunk_indices.dtype == torch.int32
+    assert fallback_meta.cu_seqlens_host == tuple(attn_metadata.non_spec_query_start_loc.to(torch.int64).tolist())
+    assert fallback_meta.chunk_indices_chunk64_host == tuple(
+        expected_chunk_indices.to(torch.int64).reshape(-1).tolist()
+    )
 
 
 @pytest.mark.parametrize(
