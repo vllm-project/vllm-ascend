@@ -23,9 +23,11 @@ def register():
 
 
 def register_connector():
+    from vllm_ascend.distributed.ec_transfer import register_ec_connector
     from vllm_ascend.distributed.kv_transfer import register_connector
 
     register_connector()
+    register_ec_connector()
 
 
 def register_model_loader():
