@@ -218,7 +218,7 @@ jobs:
               curl -L -o tiktoken_encodings/cl100k_base.tiktoken "https://openaipublic.blob.core.windows.net/encodings/cl100k_base.tiktoken"
               export TIKTOKEN_ENCODINGS_BASE=${PWD}/tiktoken_encodings
               python3 ../.github/workflows/scripts/run_suite.py \
-                --suite e2e-upstream_a3_2 \
+                --suite e2e-upstream_a2_2 \
                 --auto-partition-id "${{ matrix.part }}" \
                 --auto-partition-size 1 \
                 --continue-on-error
@@ -296,7 +296,7 @@ jobs:
               curl -L -o tiktoken_encodings/cl100k_base.tiktoken "https://openaipublic.blob.core.windows.net/encodings/cl100k_base.tiktoken"
               export TIKTOKEN_ENCODINGS_BASE=${PWD}/tiktoken_encodings
               python3 ../.github/workflows/scripts/run_suite.py \
-                --suite e2e-upstream_a3_4 \
+                --suite e2e-upstream_a2_4 \
                 --auto-partition-id "${{ matrix.part }}" \
                 --auto-partition-size 1 \
                 --continue-on-error
