@@ -7,7 +7,7 @@ GumbelSample 算子 e2e 测试
   temperature [num_req_states]          FP32  — 每 req_state 温度系数
   seeds       [num_req_states]          INT64 — 每 req_state 随机种子
   pos         [num_tokens]              INT64 — 每 token slot 位置，按 batch_idx 直接索引
-  idx_mapping [num_tokens]              INT64 — idx_mapping[batch_idx] = req_state_idx，
+  idx_mapping [num_tokens]              INT32 — idx_mapping[batch_idx] = req_state_idx，
                                                 仅用于索引 temperature/seeds
 
 运行方式：
@@ -164,7 +164,7 @@ def _make_inputs(num_tokens: int, vocab_size: int, num_req_states: int = None,
     seeds_np       = np.arange(seed_base, seed_base + num_req_states, dtype=np.int64)
     pos_np         = np.arange(pos_base, pos_base + num_tokens, dtype=np.int64)
     # idx_mapping[batch_idx] = batch_idx % num_req_states（循环映射，保证在 [0, num_req_states) 内）
-    idx_mapping_np = np.arange(num_tokens, dtype=np.int64) % num_req_states
+    idx_mapping_np = np.arange(num_tokens, dtype=np.int32) % num_req_states
     return logits_np, temp_np, seeds_np, pos_np, idx_mapping_np
 
 
@@ -239,7 +239,7 @@ def test_gumbel_sample_idx_mapping(num_tokens, num_req_states, vocab_size):
     seeds_np       = np.arange(num_req_states, dtype=np.int64)
     pos_np         = np.arange(num_tokens, dtype=np.int64)
     # idx_mapping: 每个 token slot 随机映射到一个 req_state（在 [0, num_req_states) 内）
-    idx_mapping_np = rng.integers(0, num_req_states, size=num_tokens).astype(np.int64)
+    idx_mapping_np = rng.integers(0, num_req_states, size=num_tokens).astype(np.int32)
 
     golden = golden_gumbel_sample(logits_np, temp_np, seeds_np, pos_np, idx_mapping_np,
                                    apply_temperature=True)

@@ -42,7 +42,7 @@ public:
 
         this->Input("idx_mapping")
             .ParamType(REQUIRED)
-            .DataType({ge::DT_INT64})
+            .DataType({ge::DT_INT32})
             .Format({ge::FORMAT_ND})
             .UnknownShapeFormat({ge::FORMAT_ND});
 
