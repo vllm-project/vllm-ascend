@@ -236,6 +236,12 @@ def moe_method(mock_dist_env):
     return AscendUnquantizedFusedMoEMethod(moe)
 
 
+def test_ascend_unquantized_skips_upstream_modular_kernel_init():
+    method = AscendUnquantizedFusedMoEMethod.maybe_make_prepare_finalize
+
+    assert method(object()) is None
+
+
 class Device(TypedDict):
     device_id: int
     device_expert: list[int]

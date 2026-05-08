@@ -215,6 +215,9 @@ class AscendCommonAttentionMetadata(CommonAttentionMetadata):
             graph_pad_size=-1,  # It should be -1 when not run in fullgraph mode.
             num_input_tokens=self.num_input_tokens,
             prefill_context_parallel_metadata=self.prefill_context_parallel_metadata,
+            seq_lens_cpu_upper_bound=self.seq_lens_cpu_upper_bound[:num_actual_reqs]
+            if self.seq_lens_cpu_upper_bound is not None
+            else None,
             max_seq_len=self.max_seq_len,
             # Propagate parent-class fields so the unpadded view is a
             # faithful sub-batch of the original. Missing any of these
