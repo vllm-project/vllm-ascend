@@ -18,7 +18,6 @@ from vllm.triton_utils import tl, triton
 from vllm.v1.attention.backends import utils as attn_backend_utils  # type: ignore
 
 PAD_SLOT_ID = attn_backend_utils.PAD_SLOT_ID
-NULL_BLOCK_ID = getattr(attn_backend_utils, "NULL_BLOCK_ID", PAD_SLOT_ID)
 
 
 def causal_conv1d_ref(
@@ -88,7 +87,6 @@ def causal_conv1d_fn(
     has_initial_state: torch.Tensor | None = None,
     activation: str | None = "silu",
     pad_slot_id: int = PAD_SLOT_ID,
-    null_block_id: int = NULL_BLOCK_ID,
     block_idx_first_scheduled_token: torch.Tensor | None = None,
     block_idx_last_scheduled_token: torch.Tensor | None = None,
     initial_state_idx: torch.Tensor | None = None,
@@ -112,9 +110,6 @@ def causal_conv1d_fn(
     has_initial_state: (batch) bool
         indicates whether should the kernel take the current state as initial
         state for the calculations
-    null_block_id: int
-        Upstream-compatible sentinel for empty APC block-table entries. The
-        NPU path normalizes it to pad_slot_id before dispatch.
     block_idx_first_scheduled_token / block_idx_last_scheduled_token /
     initial_state_idx / num_computed_tokens:
         APC all-mode prefill metadata. When provided, causal_conv1d_fn routes
@@ -155,22 +150,13 @@ def causal_conv1d_fn(
             raise RuntimeError("APC causal_conv1d_fn requires a 2D block table.")
         if query_start_loc is None or has_initial_state is None or conv_states is None:
             raise RuntimeError("APC causal_conv1d_fn requires varlen state metadata.")
-        if any(
-            tensor is None
-            for tensor in (
-                block_idx_first_scheduled_token,
-                block_idx_last_scheduled_token,
-                initial_state_idx,
-                num_computed_tokens,
-            )
+        if (
+            block_idx_first_scheduled_token is None
+            or block_idx_last_scheduled_token is None
+            or initial_state_idx is None
+            or num_computed_tokens is None
         ):
             raise RuntimeError("APC causal_conv1d_fn requires block metadata.")
-        if null_block_id != pad_slot_id:
-            cache_indices = torch.where(
-                cache_indices == null_block_id,
-                torch.full_like(cache_indices, pad_slot_id),
-                cache_indices,
-            )
         return _causal_conv1d_fwd_npu(
             x=x,
             weight=weight,
@@ -785,36 +771,6 @@ def causal_conv1d_update_npu(
     return out.to(original_x_dtype)
 
 
-def _normalize_apc_input_layout(
-    x: torch.Tensor,
-    weight: torch.Tensor,
-) -> tuple[torch.Tensor, torch.Tensor, bool]:
-    if x.dim() != 2:
-        raise RuntimeError("APC causal_conv1d_fn expects 2D input.")
-
-    input_is_dim_major = False
-    if weight.shape[0] == x.shape[1]:
-        x_row_major = x
-        weight_row_major = weight
-    elif weight.shape[1] == x.shape[1]:
-        x_row_major = x
-        weight_row_major = weight.transpose(0, 1)
-    elif weight.shape[0] == x.shape[0]:
-        input_is_dim_major = True
-        x_row_major = x.transpose(0, 1)
-        weight_row_major = weight
-    elif weight.shape[1] == x.shape[0]:
-        input_is_dim_major = True
-        x_row_major = x.transpose(0, 1)
-        weight_row_major = weight.transpose(0, 1)
-    else:
-        raise RuntimeError("APC causal_conv1d_fn could not infer input layout.")
-
-    if x_row_major.stride(-1) != 1:
-        x_row_major = x_row_major.contiguous()
-    return x_row_major, weight_row_major.contiguous(), input_is_dim_major
-
-
 @triton.jit(
     do_not_specialize=[
         "seqlen",
@@ -1112,35 +1068,15 @@ def _causal_conv1d_fwd_npu(
     num_computed_tokens: torch.Tensor | None = None,
     block_size_to_align: int = 0,
 ) -> torch.Tensor:
-    x_row_major, weight_row_major, input_is_dim_major = _normalize_apc_input_layout(
-        x,
-        weight,
-    )
-    bias = bias.contiguous() if bias is not None else None
-
-    dim_val = x_row_major.shape[1]
-    if conv_states.shape[-2] != dim_val and conv_states.shape[-1] == dim_val:
-        conv_states = conv_states.transpose(-1, -2)
-    if conv_states.shape[-2] != dim_val:
-        raise RuntimeError("APC causal_conv1d_fn conv_states dim mismatch.")
     if block_size_to_align <= 0:
         raise RuntimeError("APC causal_conv1d_fn requires block_size_to_align > 0.")
-    if any(
-        tensor is None
-        for tensor in (
-            block_idx_first_scheduled_token,
-            block_idx_last_scheduled_token,
-            initial_state_idx,
-            num_computed_tokens,
-        )
-    ):
-        raise RuntimeError("APC causal_conv1d_fn requires block metadata.")
 
-    original_dtype = x_row_major.dtype
-    x_row_major = x_row_major.to(conv_states.dtype)
-    out = torch.empty_like(x_row_major)
+    dim_val = x.shape[1]
+    original_dtype = x.dtype
+    x = x.to(conv_states.dtype)
+    out = torch.empty_like(x)
 
-    _, width = weight_row_major.shape
+    _, width = weight.shape
     assert width == 4, "Only KERNEL_WIDTH=4 is supported."
     state_len = width - 1
     np2_statelen = triton.next_power_of_2(state_len)
@@ -1148,10 +1084,10 @@ def _causal_conv1d_fwd_npu(
     block_m = 8
     block_n = 256
 
-    stride_x_dim = x_row_major.stride(1)
-    stride_x_token = x_row_major.stride(0)
-    stride_w_dim = weight_row_major.stride(0)
-    stride_w_width = weight_row_major.stride(1)
+    stride_x_dim = x.stride(1)
+    stride_x_token = x.stride(0)
+    stride_w_dim = weight.stride(0)
+    stride_w_width = weight.stride(1)
     stride_o_dim = out.stride(1)
     stride_o_token = out.stride(0)
 
@@ -1168,13 +1104,13 @@ def _causal_conv1d_fwd_npu(
         query_start_loc,
         block_m,
         pad_slot_id,
-        x_row_major.device,
+        x.device,
     )
     grid = (num_programs, triton.cdiv(dim_val, block_n))
 
     _causal_conv1d_fwd_kernel_npu[grid](
-        x_row_major,
-        weight_row_major,
+        x,
+        weight,
         bias,
         conv_states,
         cache_indices,
@@ -1188,7 +1124,7 @@ def _causal_conv1d_fwd_npu(
         num_computed_tokens,
         out,
         dim_val,
-        x_row_major.shape[0],
+        x.shape[0],
         num_cache_lines,
         stride_x_dim,
         stride_x_token,
@@ -1211,7 +1147,4 @@ def _causal_conv1d_fwd_npu(
         BLOCK_N=block_n,
     )
 
-    out = out.to(original_dtype)
-    if input_is_dim_major:
-        return out.transpose(0, 1).contiguous()
-    return out
+    return out.to(original_dtype)
