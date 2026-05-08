@@ -185,15 +185,23 @@ class AscendRowParallelLinearWithShardedLoRA(RowParallelLinearWithShardedLoRA):
 
 
 def refresh_all_lora_classes():
-    vllm.lora.utils._all_lora_classes.add(AscendColumnParallelLinearWithLoRA)
-    vllm.lora.utils._all_lora_classes.add(AscendMergedColumnParallelLinearWithLoRA)
-    vllm.lora.utils._all_lora_classes.add(AscendRowParallelLinearWithLoRA)
-    vllm.lora.utils._all_lora_classes.add(AscendVocabParallelEmbeddingWithLoRA)
-    vllm.lora.utils._all_lora_classes.add(AscendQKVParallelLinearWithLoRA)
-    vllm.lora.utils._all_lora_classes.add(AscendMergedQKVParallelLinearWithLoRA)
-    vllm.lora.utils._all_lora_classes.add(AscendColumnParallelLinearWithShardedLoRA)
-    vllm.lora.utils._all_lora_classes.add(AscendMergedColumnParallelLinearWithShardedLoRA)
-    vllm.lora.utils._all_lora_classes.add(AscendMergedQKVParallelLinearWithShardedLoRA)
-    vllm.lora.utils._all_lora_classes.add(AscendQKVParallelLinearWithShardedLoRA)
-    vllm.lora.utils._all_lora_classes.add(AscendRowParallelLinearWithShardedLoRA)
-    vllm.lora.utils._all_lora_classes.add(AscendReplicatedLinearWithLoRA)
+    ascend_classes = (
+        AscendColumnParallelLinearWithLoRA,
+        AscendMergedColumnParallelLinearWithLoRA,
+        AscendRowParallelLinearWithLoRA,
+        AscendVocabParallelEmbeddingWithLoRA,
+        AscendQKVParallelLinearWithLoRA,
+        AscendMergedQKVParallelLinearWithLoRA,
+        AscendColumnParallelLinearWithShardedLoRA,
+        AscendMergedColumnParallelLinearWithShardedLoRA,
+        AscendMergedQKVParallelLinearWithShardedLoRA,
+        AscendQKVParallelLinearWithShardedLoRA,
+        AscendRowParallelLinearWithShardedLoRA,
+        AscendReplicatedLinearWithLoRA,
+    )
+    # vLLM #35077 changed _all_lora_classes from set to ordered tuple.
+    # Append the Ascend classes in a deterministic order.
+    vllm.lora.utils._all_lora_classes = (
+        *vllm.lora.utils._all_lora_classes,
+        *ascend_classes,
+    )
