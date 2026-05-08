@@ -52,9 +52,6 @@ test_cases:
       - "deepseek_v3"
       - "--tokenizer_mode"
       - "deepseek_v32"
-    special_dependencies:
-      transformers: "5.8"
-
     benchmarks:
       acc_aime2025:
         case_type: accuracy
