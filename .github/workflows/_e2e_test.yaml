@@ -210,6 +210,7 @@ jobs:
 
       - name: Check npu and CANN info
         run: |
+          sleep 1000
           . /usr/local/Ascend/ascend-toolkit/set_env.sh
           npu-smi info
           cat /usr/local/Ascend/ascend-toolkit/latest/"$(uname -i)"-linux/ascend_toolkit_install.info
