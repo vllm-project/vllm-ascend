@@ -918,6 +918,10 @@ Before you start, please
       export OMP_NUM_THREADS=10
       export PYTORCH_NPU_ALLOC_CONF=expandable_segments:True
       export HCCL_BUFFSIZE=1024
+
+      sysctl -w vm.swappiness=0
+      sysctl -w kernel.numa_balancing=0
+      sysctl kernel.sched_migration_cost_ns=50000
       
       export USE_MULTI_GROUPS_KV_CACHE=1
       export USE_MULTI_BLOCK_POOL=1
@@ -993,6 +997,10 @@ Before you start, please
       export OMP_NUM_THREADS=10
       export PYTORCH_NPU_ALLOC_CONF=expandable_segments:True
       export HCCL_BUFFSIZE=1024
+
+      sysctl -w vm.swappiness=0
+      sysctl -w kernel.numa_balancing=0
+      sysctl kernel.sched_migration_cost_ns=50000
       
       export USE_MULTI_GROUPS_KV_CACHE=1
       export USE_MULTI_BLOCK_POOL=1
