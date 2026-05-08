@@ -54,7 +54,7 @@ msgstr "如何触发"
 
 #: ../../source/developer_guide/contribution/e2e_ci_test.md:17
 msgid "1. Post a comment"
-msgstr "1. 发布评论"
+msgstr "1.发布评论"
 
 #: ../../source/developer_guide/contribution/e2e_ci_test.md:19
 msgid "First, post a comment on the PR specifying which test paths to run:"
@@ -114,7 +114,7 @@ msgstr "运行特定的测试用例"
 
 #: ../../source/developer_guide/contribution/e2e_ci_test.md:36
 msgid "2. Add the label"
-msgstr "2. 添加标签"
+msgstr "2.添加标签"
 
 #: ../../source/developer_guide/contribution/e2e_ci_test.md:38
 msgid ""
@@ -153,7 +153,7 @@ msgstr "此外，只有 **PR 作者**或具有仓库**写入或管理员**权限
 
 #: ../../source/developer_guide/contribution/e2e_ci_test.md:61
 msgid "3. Wait for results"
-msgstr "3. 等待结果"
+msgstr "3.等待结果"
 
 #: ../../source/developer_guide/contribution/e2e_ci_test.md:63
 msgid ""

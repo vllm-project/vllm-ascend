@@ -498,7 +498,6 @@ msgstr ""
 #: ../../source/user_guide/feature_guide/ucm_deployment.md:251
 #: ../../source/user_guide/feature_guide/ucm_deployment.md:395
 #: ../../source/user_guide/feature_guide/ucm_deployment.md:521
-#, fuzzy
 msgid ""
 "**Note**: For more configuration options, refer to [UCM PipelineStore "
 "Documentation](https://ucm.readthedocs.io/en/latest/user-guide/prefix-"

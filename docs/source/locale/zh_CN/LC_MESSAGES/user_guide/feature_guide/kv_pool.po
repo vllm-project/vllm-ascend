@@ -266,7 +266,6 @@ msgid "`export HCCL_INTRA_ROCE_ENABLE=1`"
 msgstr "`export HCCL_INTRA_ROCE_ENABLE=1`"
 
 #: ../../source/user_guide/feature_guide/kv_pool.md
-#, fuzzy
 msgid "Required by direct transmission scheme on 800 I/T A2 series"
 msgstr "800 I/T A2 系列直接传输方案所需"
 

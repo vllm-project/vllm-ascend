@@ -43,7 +43,7 @@ msgstr ""
 
 #: ../../source/developer_guide/performance_and_debug/msprobe_guide.md:5
 msgid "0. Background Concepts"
-msgstr "0. 背景概念"
+msgstr "0.背景概念"
 
 #: ../../source/developer_guide/performance_and_debug/msprobe_guide.md:7
 msgid "`msprobe` supports three accuracy levels:"
@@ -71,7 +71,7 @@ msgstr "**mix**：同时捕获结构信息和算子统计，适用于需要同�
 
 #: ../../source/developer_guide/performance_and_debug/msprobe_guide.md:13
 msgid "1. Prerequisites"
-msgstr "1. 前提条件"
+msgstr "1.前提条件"
 
 #: ../../source/developer_guide/performance_and_debug/msprobe_guide.md:15
 msgid "1.1 Install `msprobe`"
@@ -97,7 +97,7 @@ msgstr "安装 `tb_graph_ascend`："
 
 #: ../../source/developer_guide/performance_and_debug/msprobe_guide.md:33
 msgid "2. Collecting Data with `msprobe`"
-msgstr "2. 使用 `msprobe` 采集数据"
+msgstr "2.使用 `msprobe` 采集数据"
 
 #: ../../source/developer_guide/performance_and_debug/msprobe_guide.md:35
 msgid ""
@@ -277,7 +277,7 @@ msgstr "配置示例："
 
 #: ../../source/developer_guide/performance_and_debug/msprobe_guide.md:90
 msgid "3. Enable `msprobe` in vllm-ascend"
-msgstr "3. 在 vllm-ascend 中启用 `msprobe`"
+msgstr "3.在 vllm-ascend 中启用 `msprobe`"
 
 #: ../../source/developer_guide/performance_and_debug/msprobe_guide.md:92
 msgid ""
@@ -290,7 +290,7 @@ msgstr ""
 
 #: ../../source/developer_guide/performance_and_debug/msprobe_guide.md:103
 msgid "4. Send requests and collect dumps"
-msgstr "4. 发送请求并采集数据"
+msgstr "4.发送请求并采集数据"
 
 #: ../../source/developer_guide/performance_and_debug/msprobe_guide.md:105
 msgid "Send inference requests as usual, for example:"
@@ -369,7 +369,7 @@ msgstr "`construct.json`：分层结构描述。`level=L1` 时为空。"
 
 #: ../../source/developer_guide/performance_and_debug/msprobe_guide.md:163
 msgid "5. Analyze the results"
-msgstr "5. 分析结果"
+msgstr "5.分析结果"
 
 #: ../../source/developer_guide/performance_and_debug/msprobe_guide.md:165
 msgid "5.1 Prerequisites"
@@ -509,7 +509,7 @@ msgstr "手动映射：自动映射无法覆盖所有情况，因此该工具允
 
 #: ../../source/developer_guide/performance_and_debug/msprobe_guide.md:235
 msgid "6. Troubleshooting"
-msgstr "6. 故障排除"
+msgstr "6.故障排除"
 
 #: ../../source/developer_guide/performance_and_debug/msprobe_guide.md:237
 msgid ""

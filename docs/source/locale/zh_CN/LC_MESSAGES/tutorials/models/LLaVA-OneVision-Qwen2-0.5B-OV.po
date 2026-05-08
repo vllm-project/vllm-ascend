@@ -61,7 +61,7 @@ msgid ""
 "Refer to [feature guide](../../user_guide/feature_guide/index.md) to get "
 "the feature's configuration."
 msgstr ""
-"请参考[功能指南](../../user_guide/feature_guide/index.md)以获取功能的配置方法。"
+"请参考[特性指南](../../user_guide/feature_guide/index.md)以获取功能的配置方法。"
 
 #: ../../source/tutorials/models/LLaVA-OneVision-Qwen2-0.5B-OV.md:15
 msgid "Environment Preparation"

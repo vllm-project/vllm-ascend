@@ -68,23 +68,21 @@ msgid ""
 "transfer-engine metadata from the seed, and performs batch weight "
 "transfer into local parameter buffers."
 msgstr ""
-如果返回了一个种子，新实例在其本地 NPU 上初始化模型结构，注册本地权重内存，从种子获取远程传输引擎元数据，"
-并执行批量权重传输到本地参数缓冲区。"
+"如果返回了一个种子，新实例在其本地 NPU 上初始化模型结构，注册本地权重内存，从种子获取远程传输引擎元数据，"
+"并执行批量权重传输到本地参数缓冲区。"
 
 #: ../../source/user_guide/feature_guide/rfork.md:17
 msgid ""
 "If no seed is available, or any step fails, RFork cleans up and falls "
 "back to the default loader."
-msgstr ""
-如果没有可用的种子，或者任何步骤失败，RFork 会清理并回退到默认加载器。"
+msgstr "如果没有可用的种子，或者任何步骤失败，RFork 会清理并回退到默认加载器。"
 
 #: ../../source/user_guide/feature_guide/rfork.md:18
 msgid ""
 "After the instance finishes loading, it starts a local seed service and "
 "periodically reports heartbeat to the planner, so later instances can "
 "reuse it."
-msgstr ""
-实例加载完成后，它会启动一个本地种子服务，并定期向规划器上报心跳，以便后续实例可以复用。"
+msgstr "实例加载完成后，它会启动一个本地种子服务，并定期向规划器上报心跳，以便后续实例可以复用。"
 
 #: ../../source/user_guide/feature_guide/rfork.md:20
 msgid "Flowchart"
@@ -135,8 +133,7 @@ msgstr "使用方法"
 msgid ""
 "To enable RFork, pass `--load-format rfork` and provide RFork settings "
 "through `--model-loader-extra-config` as a JSON string."
-msgstr ""
-要启用 RFork，请传递 `--load-format rfork`，并通过 JSON 字符串形式的 `--model-loader-extra-config` 提供 RFork 设置。"
+msgstr "要启用 RFork，请传递 `--load-format rfork`，并通过 JSON 字符串形式的 `--model-loader-extra-config` 提供 RFork 设置。"
 
 #: ../../source/user_guide/feature_guide/rfork.md:36
 msgid "RFork Prerequisites"
@@ -287,8 +284,7 @@ msgstr "当工作进程作为草稿模型运行时，可选的 `draft` 后缀"
 msgid ""
 "This means two instances must agree on both model identity and deployment"
 " topology before the planner will treat them as interchangeable seeds."
-msgstr ""
-这意味着两个实例必须在模型标识和部署拓扑上都达成一致，规划器才会将它们视为可互换的种子。"
+msgstr "这意味着两个实例必须在模型标识和部署拓扑上都达成一致，规划器才会将它们视为可互换的种子。"
 
 #: ../../source/user_guide/feature_guide/rfork.md:66
 msgid "Example Commands & Placeholders"
@@ -300,11 +296,11 @@ msgstr "运行前请替换 `` `<...>` `` 中的内容。"
 
 #: ../../source/user_guide/feature_guide/rfork.md:70
 msgid "1. Install YuanRong TransferEngine"
-msgstr "1. 安装 YuanRong TransferEngine"
+msgstr "1.安装 YuanRong TransferEngine"
 
 #: ../../source/user_guide/feature_guide/rfork.md:76
 msgid "2. Start the Planner"
-msgstr "2. 启动规划器"
+msgstr "2.启动规划器"
 
 #: ../../source/user_guide/feature_guide/rfork.md:78
 msgid ""
@@ -315,7 +311,7 @@ msgstr ""
 
 #: ../../source/user_guide/feature_guide/rfork.md:86
 msgid "3. Start vLLM Instances"
-msgstr "3. 启动 vLLM 实例"
+msgstr "3.启动 vLLM 实例"
 
 #: ../../source/user_guide/feature_guide/rfork.md:88
 msgid ""

@@ -52,7 +52,7 @@ msgstr "如何触发"
 
 #: ../../source/developer_guide/contribution/nightly_ci_test.md:14
 msgid "1. Post a comment"
-msgstr "1. 发布评论"
+msgstr "1.发布评论"
 
 #: ../../source/developer_guide/contribution/nightly_ci_test.md:16
 msgid ""
@@ -94,7 +94,7 @@ msgstr "仅运行**指定名称**的测试"
 
 #: ../../source/developer_guide/contribution/nightly_ci_test.md:24
 msgid "2. Add the label"
-msgstr "2. 添加标签"
+msgstr "2.添加标签"
 
 #: ../../source/developer_guide/contribution/nightly_ci_test.md:26
 msgid ""
@@ -130,7 +130,7 @@ msgstr "评论必须在添加标签**之前**发布。如果您先添加标签�
 
 #: ../../source/developer_guide/contribution/nightly_ci_test.md:44
 msgid "3. Wait for results"
-msgstr "3. 等待结果"
+msgstr "3.等待结果"
 
 #: ../../source/developer_guide/contribution/nightly_ci_test.md:46
 msgid ""
