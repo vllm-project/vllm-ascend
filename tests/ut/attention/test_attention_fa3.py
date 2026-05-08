@@ -1,8 +1,7 @@
-import sys
-import os
 import torch
 import torch_npu
 import pytest
+import numpy as np
 
 
 def _fa3_available():
@@ -67,8 +66,8 @@ def ref_fused_infer_attention(
 test_cases = [
     # (data_type, batch_size, num_heads, kv_heads, q_seqlen, kv_seqlen, head_size, block_size, is_causal)
     (torch.bfloat16, 1, 1, 1, 1024, 1024, 128, 128, False),
-    (torch.bfloat16, 5, 4, 4, 1024, 1024, 128, 128, True),
-    (torch.float16, 7, 1, 1, 512, 512, 128, 128, False),
+    (torch.bfloat16, 5, 4, 1, 1024, 1024, 128, 128, True),
+    (torch.float16, 7, 16, 8, 512, 512, 128, 128, False),
 ]
 
 @pytest.mark.skipif(not _fa3_available(), reason="flash_attn_v3 is not installed")
@@ -89,9 +88,8 @@ def test_fa_custom_ops_tnd(data_type, batch_size, num_heads, kv_heads, q_seqlen,
         torch.randint(low=q, high=kv_seqlen + 1, size=(1,)).item()
         for q in q_sequences
     ]
-    
+
     t_q_sum = sum(q_sequences)
-    t_kv_sum = sum(kv_sequences)
 
     query = (q_min_range + (q_max_range - q_min_range) * torch.rand(t_q_sum, num_heads, head_size)).to(data_type).npu()
     
@@ -117,16 +115,13 @@ def test_fa_custom_ops_tnd(data_type, batch_size, num_heads, kv_heads, q_seqlen,
     window_size_left = -1
     window_size_right = -1
     is_rotary_interleaved = False
-    softcap = 0
     num_splits = 0
     kv_seqlen_list = torch.tensor(kv_seqlen_list, dtype=torch.int32).npu()
     rotary_cos = None
     rotary_sin = None
     cache_batch_idx = None
     leftpad_k = None
-    alibi_slopes = None
     new_q_seqlen_list = None
-    new_kv_seqlen_list = None
 
     new_q_seqlen_list = [0]
     pre_seq_sum = 0
@@ -136,7 +131,7 @@ def test_fa_custom_ops_tnd(data_type, batch_size, num_heads, kv_heads, q_seqlen,
     new_q_seqlen_list = torch.tensor(new_q_seqlen_list, dtype=torch.int32).npu()
 
     from flash_attn_v3 import flash_attn_with_kvcache
-    out_out, softmax_lse, *rest = flash_attn_with_kvcache(
+    out_out, _, _ = flash_attn_with_kvcache(
         query,
         key_cache,
         value_cache,
@@ -176,12 +171,11 @@ def test_fa_custom_ops_tnd(data_type, batch_size, num_heads, kv_heads, q_seqlen,
     else:
         attn_mask = None 
 
-    import numpy as np
     q_cumsum = torch.tensor(np.cumsum(q_sequences), dtype=torch.int32, device=query.device)
 
     ref_out = ref_fused_infer_attention(
         query,
-        key_cache.permute(0, 2, 1, 3).contiguous(),  # (B, S, N, D) -> (B, N, S, D),
+        key_cache.permute(0, 2, 1, 3).contiguous(),  # [num_blocks, num_kv_heads, block_size, head_size]
         value_cache.permute(0, 2, 1, 3).contiguous(),
         block_tables,
         block_size,
