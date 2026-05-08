@@ -275,7 +275,8 @@
       "vllm-ascend/textvqa-perf-1080p",
       "vllm-ascend/gpqa",
       "vllm-ascend/GSM8K-in131072-bs100-qwen3",
-      "vllm-ascend/GSM8_prefix99_in102400_bs100",
+      "vllm-ascend/GSM8K_noprefix_in8192_bs400",
+      "vllm-ascend/GSM8K_prefix99_in1024000_bs100",
       "vllm-ascend/GSM8K_prefix90_in131072_bs100"
     ]
   }
