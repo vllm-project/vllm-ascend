@@ -72,7 +72,7 @@ class AttentionMaskBuilder:
             self.pcp_mla_mask = torch.triu(torch.ones(512, 512, device=self.device, dtype=dtype), 1)
         return self.pcp_mla_mask
 
-    def get_attention_mask(self, model_config: ModelConfig):
+    def get_attention_mask(self, causal: bool, model_config: ModelConfig):
         if model_config.runner_type == "pooling":
             return self.get_attn_mask(2048, torch.bool)
 

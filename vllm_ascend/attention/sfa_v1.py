@@ -339,7 +339,7 @@ class AscendSFAMetadataBuilder(MLACommonMetadataBuilder[AscendSFAMetadata]):
             seq_lens_cpu=seq_lens_cpu,
             slot_mapping=slot_mapping,
             head_dim=self.model_config.get_head_size(),
-            attn_mask=self.attn_mask_builder.get_attention_mask(self.model_config),
+            attn_mask=self.attn_mask_builder.get_attention_mask(common_attn_metadata.causal, self.model_config),
             attn_state=common_attn_metadata.attn_state,
             block_table=block_table,
             sin=sin[:num_input_tokens],
