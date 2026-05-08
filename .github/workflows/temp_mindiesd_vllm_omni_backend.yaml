@@ -98,19 +98,19 @@ jobs:
           update-alternatives --install /usr/bin/clang++ clang++ /usr/bin/clang++-15 20
           pip install uv build wheel
 
-      - name: Clone and install MindIE-SD
-        run: |
-          git clone --depth 1 --branch "$MINDIESD_REF" "$MINDIESD_REPO" MindIE-SD
-          cd MindIE-SD
-          python3 -m build --wheel --no-isolation
-          pip install --no-deps --force-reinstall dist/mindiesd*.whl
-
       - name: Clone and install vllm
         run: |
           git clone --depth 1 --branch "$VLLM_REF" "$VLLM_REPO" vllm-empty
           cd vllm-empty
           VLLM_TARGET_DEVICE=empty uv pip install -e .
           uv pip uninstall triton
+
+      - name: Clone and install MindIE-SD
+        run: |
+          git clone --depth 1 --branch "$MINDIESD_REF" "$MINDIESD_REPO" MindIE-SD
+          cd MindIE-SD
+          python3 -m build --wheel --no-isolation
+          pip install --no-deps --force-reinstall dist/mindiesd*.whl
 
       - name: Install vllm-project/vllm-ascend
         env:
