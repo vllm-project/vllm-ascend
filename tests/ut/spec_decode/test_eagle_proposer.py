@@ -15,8 +15,20 @@ import vllm_ascend.spec_decode.eagle_proposer as eagle_proposer
 from tests.ut.base import TestBase
 from vllm_ascend.ascend_config import init_ascend_config
 from vllm_ascend.attention.attention_v1 import AscendAttentionState
+from vllm_ascend.attention.utils import AscendCommonAttentionMetadata
 from vllm_ascend.spec_decode.draft_proposer import AscendDraftModelProposer
 from vllm_ascend.spec_decode.eagle_proposer import AscendEagleProposer
+from vllm_ascend.utils import vllm_version_is
+
+# vLLM #40732 moved `SpecDecodeBaseProposer` (and its `CpuGpuBuffer` import)
+# out of `vllm.v1.spec_decode.eagle` into `vllm.v1.spec_decode.llm_base_proposer`.
+# Pick the right patch path depending on the installed vllm version so the
+# tests can mock the buffer factory.
+_CPU_GPU_BUFFER_TARGET = (
+    "vllm.v1.spec_decode.eagle.CpuGpuBuffer"
+    if vllm_version_is("0.19.1")
+    else "vllm.v1.spec_decode.llm_base_proposer.CpuGpuBuffer"
+)
 
 
 class TestEagleProposerInitialization(TestBase):
@@ -51,13 +63,15 @@ class TestEagleProposerInitialization(TestBase):
         self.vllm_config.parallel_config.enable_expert_parallel = False
         self.vllm_config.speculative_config.draft_tensor_parallel_size = 1
         self.vllm_config.speculative_config.num_speculative_tokens = 2
+        self.vllm_config.speculative_config.parallel_drafting = False
         self.vllm_config.speculative_config.speculative_token_tree = str([(i + 1) * (0,) for i in range(2)])
+        self.vllm_config.speculative_config.draft_model_config.hf_config = MagicMock(spec=[])
         self.vllm_config.speculative_config.draft_model_config.uses_xdrope_dim = 0
         self.vllm_config.speculative_config.draft_model_config.uses_mrope = False
         self.vllm_config.speculative_config.disable_padded_drafter_batch = False
         self.vllm_config.additional_config = None
 
-        self.mock_cpugpubuffer = patch("vllm.v1.spec_decode.eagle.CpuGpuBuffer")
+        self.mock_cpugpubuffer = patch(_CPU_GPU_BUFFER_TARGET)
         self.mock_cpugpubuffer.start()
         self.mock_supports_multimodal_inputs = patch(
             "vllm.multimodal.registry.MultiModalRegistry.supports_multimodal_inputs", return_value=False
@@ -76,6 +90,7 @@ class TestEagleProposerInitialization(TestBase):
     def test_initialization_eagle_graph(self):
         self.vllm_config.speculative_config.method = "eagle"
         self.vllm_config.speculative_config.draft_model_config.get_hidden_size.return_value = 4096
+        self.vllm_config.speculative_config.draft_model_config.get_inputs_embeds_size.return_value = 4096
         self.vllm_config.speculative_config.draft_model_config.uses_mrope = False
         self.vllm_config.compilation_config.mode = CompilationMode.VLLM_COMPILE
         self.vllm_config.model_config.enforce_eager = False
@@ -99,6 +114,7 @@ class TestEagleProposerInitialization(TestBase):
     def test_initialization_eagle3_enforce_eager(self):
         self.vllm_config.speculative_config.method = "eagle3"
         self.vllm_config.speculative_config.draft_model_config.get_hidden_size.return_value = 2048
+        self.vllm_config.speculative_config.draft_model_config.get_inputs_embeds_size.return_value = 2048
         self.vllm_config.compilation_config.mode = CompilationMode.NONE
         self.vllm_config.compilation_config.pass_config = MagicMock()
         self.vllm_config.compilation_config.pass_config.enable_sp = False
@@ -116,6 +132,7 @@ class TestEagleProposerInitialization(TestBase):
     def test_initialization_eagle3_full_graph_async(self):
         self.vllm_config.speculative_config.method = "eagle3"
         self.vllm_config.speculative_config.draft_model_config.get_hidden_size.return_value = 2048
+        self.vllm_config.speculative_config.draft_model_config.get_inputs_embeds_size.return_value = 2048
         self.vllm_config.compilation_config.mode = CompilationMode.VLLM_COMPILE
         self.vllm_config.model_config.enforce_eager = False
         self.vllm_config.speculative_config.enforce_eager = False
@@ -133,6 +150,7 @@ class TestEagleProposerInitialization(TestBase):
     def test_initialization_mtp_full_graph_async(self):
         self.vllm_config.speculative_config.method = "mtp"
         self.vllm_config.speculative_config.draft_model_config.get_hidden_size.return_value = 2048
+        self.vllm_config.speculative_config.draft_model_config.get_inputs_embeds_size.return_value = 2048
         self.vllm_config.compilation_config.mode = CompilationMode.VLLM_COMPILE
         self.vllm_config.model_config.enforce_eager = False
         self.vllm_config.speculative_config.enforce_eager = False
@@ -196,7 +214,7 @@ class TestEagleProposerLoadModel(TestBase):
         self.vllm_config.additional_config = None
         init_ascend_config(self.vllm_config)
 
-        self.mock_cpugpubuffer = patch("vllm.v1.spec_decode.eagle.CpuGpuBuffer")
+        self.mock_cpugpubuffer = patch(_CPU_GPU_BUFFER_TARGET)
         self.mock_cpugpubuffer.start()
         self.mock_supports_multimodal_inputs = patch(
             "vllm.multimodal.registry.MultiModalRegistry.supports_multimodal_inputs", return_value=False
@@ -332,7 +350,7 @@ class TestEagleProposerDummyRun(TestBase):
         self.vllm_config.additional_config = None
         init_ascend_config(self.vllm_config)
 
-        self.mock_cpugpubuffer = patch("vllm.v1.spec_decode.eagle.CpuGpuBuffer")
+        self.mock_cpugpubuffer = patch(_CPU_GPU_BUFFER_TARGET)
         self.mock_cpugpubuffer.start()
         self.mock_supports_multimodal_inputs = patch(
             "vllm.multimodal.registry.MultiModalRegistry.supports_multimodal_inputs", return_value=False
@@ -483,7 +501,7 @@ class TestEagleProposerHelperMethods(TestBase):
         self.vllm_config.additional_config = None
         init_ascend_config(self.vllm_config)
 
-        self.mock_cpugpubuffer = patch("vllm.v1.spec_decode.eagle.CpuGpuBuffer")
+        self.mock_cpugpubuffer = patch(_CPU_GPU_BUFFER_TARGET)
         self.mock_cpugpubuffer.start()
         self.mock_supports_multimodal_inputs = patch(
             "vllm.multimodal.registry.MultiModalRegistry.supports_multimodal_inputs", return_value=False
@@ -558,7 +576,7 @@ class TestEagleProposerPropose:
         self.vllm_config.additional_config = None
         init_ascend_config(self.vllm_config)
 
-        self.mock_cpugpubuffer = patch("vllm.v1.spec_decode.eagle.CpuGpuBuffer")
+        self.mock_cpugpubuffer = patch(_CPU_GPU_BUFFER_TARGET)
         self.mock_cpugpubuffer.start()
         self.mock_supports_multimodal_inputs = patch(
             "vllm.multimodal.registry.MultiModalRegistry.supports_multimodal_inputs", return_value=False
@@ -1263,7 +1281,7 @@ class TestPrepareNextTokenIdsPadded(TestBase):
         self.vllm_config.additional_config = None
         init_ascend_config(self.vllm_config)
 
-        self.mock_cpugpubuffer = patch("vllm.v1.spec_decode.eagle.CpuGpuBuffer", MockCpuGpuBuffer)
+        self.mock_cpugpubuffer = patch(_CPU_GPU_BUFFER_TARGET, MockCpuGpuBuffer)
         self.mock_cpugpubuffer.start()
         self.mock_supports_multimodal_inputs = patch(
             "vllm.multimodal.registry.MultiModalRegistry.supports_multimodal_inputs", return_value=False
@@ -1747,6 +1765,7 @@ class TestRunMergedDraft(TestBase):
         self.vllm_config.speculative_config.use_local_argmax_reduction = False
         self.vllm_config.speculative_config.draft_tensor_parallel_size = 1
         self.vllm_config.speculative_config.speculative_token_tree = str([(i + 1) * (0,) for i in range(3)])
+        self.vllm_config.speculative_config.draft_model_config.hf_config = MagicMock(spec=[])
         self.vllm_config.speculative_config.draft_model_config.get_hidden_size.return_value = 4
         self.vllm_config.speculative_config.draft_model_config.get_inputs_embeds_size.return_value = 4
         self.vllm_config.speculative_config.draft_model_config.uses_mrope = False
@@ -1755,7 +1774,7 @@ class TestRunMergedDraft(TestBase):
         self.vllm_config.additional_config = None
         init_ascend_config(self.vllm_config)
 
-        self.mock_cpugpubuffer = patch("vllm.v1.spec_decode.eagle.CpuGpuBuffer", MockCpuGpuBuffer)
+        self.mock_cpugpubuffer = patch(_CPU_GPU_BUFFER_TARGET, MockCpuGpuBuffer)
         self.mock_cpugpubuffer.start()
         self.mock_supports_multimodal_inputs = patch(
             "vllm.multimodal.registry.MultiModalRegistry.supports_multimodal_inputs", return_value=False
@@ -1876,7 +1895,14 @@ class TestRunMergedDraft(TestBase):
 
         import vllm.v1.spec_decode.eagle
 
-        assert hasattr(vllm.v1.spec_decode.eagle, "CpuGpuBuffer")
+        # `CpuGpuBuffer` was re-exported from `eagle` until vLLM #40732 moved
+        # `SpecDecodeBaseProposer` (and the import) into `llm_base_proposer`.
+        if vllm_version_is("0.19.1"):
+            assert hasattr(vllm.v1.spec_decode.eagle, "CpuGpuBuffer")
+        else:
+            import vllm.v1.spec_decode.llm_base_proposer
+
+            assert hasattr(vllm.v1.spec_decode.llm_base_proposer, "CpuGpuBuffer")
         RunnerCls = vllm.v1.spec_decode.eagle.SpecDecodeBaseProposer
         for attr in ("_get_positions", "_set_positions"):
             assert hasattr(RunnerCls, attr), f"SpecDecodeBaseProposer.{attr} not found"
@@ -2209,4 +2235,109 @@ class TestRunMergedDraft(TestBase):
 
                 self.assertEqual(tuple(draft_token_ids.shape), expected_shape)
                 self.assertEqual(len(self.proposer.model.calls), 1)
+
+class TestDraftProposerHelperMethods(TestBase):
+
+    def setUp(self):
+        self.vllm_config = MagicMock(spec=VllmConfig)
+        self.vllm_config.scheduler_config = MagicMock(max_num_seqs=3)
+        self.device = torch.device("cpu")
+        self.runner = MagicMock()
+        self.runner.input_batch = MagicMock()
+        self.runner.input_batch.req_ids = [0, 1, 2]
+        self.runner.arange_np = np.arange(10)
+        self.runner.input_batch.num_reqs = 3
+        self.runner.pin_memory = False
+        self.runner.pcp_size = 1
+        self.runner.dcp_size = 1
+
+        self.vllm_config.cache_config.block_size = 16
+        self.vllm_config.scheduler_config.max_num_batched_tokens = 1024
+        self.vllm_config.scheduler_config.max_num_seqs = 32
+        self.vllm_config.model_config.dtype = torch.float16
+        self.vllm_config.model_config.max_model_len = 2048
+        self.vllm_config.model_config.uses_mrope = False
+        self.vllm_config.model_config.uses_xdrope_dim = 0
+        self.vllm_config.parallel_config.tensor_parallel_size = 1
+        self.vllm_config.parallel_config.data_parallel_rank = 0
+        self.vllm_config.parallel_config.data_parallel_size = 1
+        self.vllm_config.parallel_config.prefill_context_parallel_size = 1
+        self.vllm_config.parallel_config.enable_expert_parallel = False
+        self.vllm_config.speculative_config.draft_tensor_parallel_size = 1
+        self.vllm_config.speculative_config.num_speculative_tokens = 2
+        self.vllm_config.speculative_config.speculative_token_tree = str([(i + 1) * (0,) for i in range(2)])
+        self.vllm_config.speculative_config.draft_model_config.uses_xdrope_dim = 0
+        self.vllm_config.speculative_config.draft_model_config.uses_mrope = False
+        self.vllm_config.speculative_config.disable_padded_drafter_batch = False
+        self.vllm_config.speculative_config.parallel_drafting = False
+        self.vllm_config.speculative_config.draft_parallel_config.tensor_parallel_size = 1
+        self.vllm_config.speculative_config.target_parallel_config.tensor_parallel_size = 1
+        self.vllm_config.additional_config = None
+        init_ascend_config(self.vllm_config)
+
+        self.mock_cpugpubuffer = patch("vllm.v1.spec_decode.eagle.CpuGpuBuffer")
+        self.mock_cpugpubuffer.start()
+        self.mock_supports_multimodal_inputs = patch(
+            "vllm.multimodal.registry.MultiModalRegistry.supports_multimodal_inputs", return_value=False
+        )
+        self.mock_supports_multimodal_inputs.start()
+
+        # Set the current vllm config
+        with set_current_vllm_config(self.vllm_config):
+            self.proposer = AscendDraftModelProposer(vllm_config=self.vllm_config, device=self.device, runner=self.runner)
+        self.proposer.draft_attn_groups = [MagicMock()]
+
+    def tearDown(self):
+        self.mock_cpugpubuffer.stop()
+        self.mock_supports_multimodal_inputs.stop()
+        # Clear the current vllm config
+        set_current_vllm_config(None)
+
+    
+    @patch('torch.ops._C_ascend.npu_copy_and_expand_eagle_inputs', create=True)
+    @patch("vllm_ascend.spec_decode.eagle_proposer.compute_new_slot_mapping")
+    def test_set_inputs_first_pass(self, mock_slot, mock_expand):
+        self.assertTrue(self.proposer.needs_extra_input_slots)
+        target_token_ids = torch.tensor([0,1,2,3,4])
+        target_positions = torch.tensor([0,1,2,3,4])
+        next_token_ids = torch.tensor([5])
+        target_hidden_states = None
+        token_indices_to_sample = None
+        num_rejected_tokens_gpu = torch.tensor([0])
+        batch_size = 1
+        common_attn_metadata = AscendCommonAttentionMetadata(
+            query_start_loc=torch.tensor([0, 5], dtype=torch.int32),
+            query_start_loc_cpu=torch.tensor([0, 5], dtype=torch.int32),
+            seq_lens=torch.tensor([5], dtype=torch.int32),
+            seq_lens_cpu=torch.tensor([5], dtype=torch.int32),
+            num_actual_tokens=5,
+            max_query_len=5,
+            max_seq_len=5,
+            num_reqs=1,
+            block_table_tensor=torch.zeros([1,320], dtype=torch.int32),
+            slot_mapping=torch.tensor([128,129,130,131], dtype=torch.int32),
+        )
+        common_attn_metadata.batch_size = lambda: batch_size
+        mock_expand.return_value =  (
+                next_token_ids,
+                torch.tensor([5]),
+                torch.tensor([False]),
+                torch.tensor([False]),
+                token_indices_to_sample,
+                None,
+            )
+        mock_slot.return_value = torch.tensor([[1]])
+
+        _, _, common_attn_metadata, _ = (
+            self.proposer.set_inputs_first_pass(
+                target_token_ids,
+                next_token_ids,
+                target_positions,
+                target_hidden_states,
+                token_indices_to_sample,
+                common_attn_metadata,
+                num_rejected_tokens_gpu
+            )
+        )
+        assert common_attn_metadata.seq_lens.to("cpu") == common_attn_metadata.seq_lens_cpu
 # fmt: on
