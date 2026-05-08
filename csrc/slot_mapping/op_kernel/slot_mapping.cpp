@@ -1,7 +1,4 @@
 /**
- * @file slot_mapping.cpp
- * @brief AscendC SlotMapping kernel for vLLM.
- *
  * Maps token positions to physical KV-cache slot ids; replaces the upstream
  * Triton implementation on the Ascend NPU path. Output dtype is int32 to match
  * the slot_mapping buffer in `vllm_ascend/worker/block_table.py` (which the
@@ -41,7 +38,7 @@ public:
         GM_ADDR blockTable, GM_ADDR slotMapping,
         const SlotMappingTilingData* td)
     {
-        // ---------- Tiling 参数 ----------
+        // ---------- Tiling param ----------
         numReqs_ = td->numReqs;
         numTokens_ = td->numTokens;
         maxNumTokens_ = td->maxNumTokens;
@@ -52,7 +49,6 @@ public:
         cpRank_ = td->totalCpRank;
         ilv_ = td->cpKvCacheInterleaveSize;
 
-        // ---------- 多核分块（与 v1 等价） ----------
         int32_t blockIdx = static_cast<int32_t>(GetBlockIdx());
         int32_t blockNumCores = static_cast<int32_t>(GetBlockNum());
         if (blockNumCores < 1) blockNumCores = 1;
@@ -71,35 +67,28 @@ public:
         if (posEnd_ > maxNumTokens_) posEnd_ = maxNumTokens_;
         myNumPos_ = posEnd_ - posStart_;
         if (myNumPos_ <= 0) {
-            // 本核无任务
             myNumPos_ = 0;
             return;
         }
 
-        // ---------- GM Tensor 绑定 ----------
         gmQsl_.SetGlobalBuffer(reinterpret_cast<__gm__ int32_t*>(queryStartLoc), numReqs_ + 1);
         gmPos_.SetGlobalBuffer(reinterpret_cast<__gm__ int64_t*>(positions), maxNumTokens_);
         gmBt_.SetGlobalBuffer(reinterpret_cast<__gm__ int32_t*>(blockTable),
                               static_cast<uint64_t>(numReqs_) * static_cast<uint64_t>(stride_));
         gmSlot_.SetGlobalBuffer(reinterpret_cast<__gm__ int32_t*>(slotMapping), maxNumTokens_);
 
-        // ---------- UB 缓冲 ----------
-        // queryStartLoc cache：numReqs+1 个 int32，对齐 32B（8 个 int32）
         int32_t qslElems = numReqs_ + 1;
         uint32_t qslBytes = AlignUp(static_cast<uint32_t>(qslElems) * sizeof(int32_t), ONE_BLK_SIZE);
         pipe_.InitBuffer(bufQsl_, qslBytes);
 
-        // blockTable cache：numReqs × stride 个 int32（典型 ≤ 几 KB）
         int64_t btElems64 = static_cast<int64_t>(numReqs_) * static_cast<int64_t>(stride_);
         btElems_ = static_cast<int32_t>(btElems64);
         uint32_t btBytes = AlignUp(static_cast<uint32_t>(btElems_) * sizeof(int32_t), ONE_BLK_SIZE);
         pipe_.InitBuffer(bufBt_, btBytes);
 
-        // positions tile：myNumPos_ 个 int64，对齐 32B（4 个 int64）
         uint32_t posBytes = AlignUp(static_cast<uint32_t>(myNumPos_) * sizeof(int64_t), ONE_BLK_SIZE);
         pipe_.InitBuffer(bufPos_, posBytes);
 
-        // slotMapping tile (int64 internal,在 cast 前)：同 positions 大小
         pipe_.InitBuffer(bufSlot_, posBytes);
 
         // int32 output tile (half the byte count of bufSlot_): scalar narrow
@@ -117,8 +106,6 @@ public:
         int32_t qslAligned = (qslElems + kInt32PerBlk - 1) / kInt32PerBlk * kInt32PerBlk;
         int32_t btAligned = (btElems_ > 0) ? (btElems_ + kInt32PerBlk - 1) / kInt32PerBlk * kInt32PerBlk : 0;
 
-        // 有效区域: [posStart_, min(posEnd_, numTokens_))。padding 区在 numTokens_ 后,
-        // GM 上对应内容未定义,inner loop 只扫 valid 区,padding 区单独填 padId。
         int32_t validInTile = posEnd_ < numTokens_ ? myNumPos_ : (numTokens_ - posStart_);
         if (validInTile < 0) validInTile = 0;
         if (validInTile > myNumPos_) validInTile = myNumPos_;
@@ -144,7 +131,6 @@ public:
         pipe_barrier(PIPE_ALL);
     }
 
-    // 二分查找：返回满足 qsl[r] <= tokIdx < qsl[r+1] 的 r。读 LocalTensor 而非 GM。
     __aicore__ inline int32_t FindReqIdx(int32_t tokIdx, LocalTensor<int32_t>& lqsl)
     {
         int32_t left = 0;
@@ -163,13 +149,11 @@ public:
         return r;
     }
 
-    // 检查 x 是否为 2 的幂：x > 0 且 (x & (x-1)) == 0
     static __aicore__ inline bool IsPow2(int32_t x)
     {
         return x > 0 && (x & (x - 1)) == 0;
     }
 
-    // 整数 log2（仅当 x 是 2 的幂时使用）
     static __aicore__ inline int32_t IntLog2(int32_t x)
     {
         int32_t r = 0;
@@ -186,28 +170,10 @@ public:
         LocalTensor<int64_t> lpos = bufPos_.Get<int64_t>();
         LocalTensor<int64_t> lslot = bufSlot_.Get<int64_t>();
 
-        // Host-side preserved invariants & 公共子表达式
-        // dav_c220 不支持 int64 Duplicate / int64 vec div-mod，因此 inner loop 仍走标量；
-        // 但把 div/mod by 常量替换为 shift/AND（仅当 blockSize × cpWs 是 2 的幂）。
         const int64_t padIdI64 = static_cast<int64_t>(padId_);
         const int64_t vbs = static_cast<int64_t>(blockSize_) * static_cast<int64_t>(cpWs_);
         const int64_t intTimesCp = static_cast<int64_t>(cpWs_) * static_cast<int64_t>(ilv_);
 
-        // ---------- Fast path: cpWs == 1 and blockSize is a power of two ----------
-        // 此分支下：
-        //   vbs == blockSize（2 的幂）
-        //   blockIdx2 = globalPos / blockSize → globalPos >> log2(blockSize)
-        //   offset    = globalPos % blockSize → globalPos & (blockSize - 1)
-        //   isLocal == true（cpWs=1 时永远 local）
-        //   localOffset == offset
-        //   slotId    = blockNum * blockSize + offset
-        //             = (blockNum << log2(blockSize)) | offset    (因为 offset < blockSize)
-        //
-        // 大部分生产场景（vLLM 默认 block_size=16/32/64/128 全是 2 的幂、不开 CP）
-        // 都进这条路径，节省内层 3 次 div + 2 次 mod。
-        // Monotonic walk pointer for reqIdx. Within a tile both globalIdx and
-        // qsl are monotonically increasing, so reqIdx is monotonically
-        // non-decreasing — amortized O(1) per token instead of O(log numReqs).
         int32_t reqIdx = FindReqIdx(posStart_, lqsl);
         int32_t nextBoundary = (reqIdx + 1 < numReqs_) ? lqsl.GetValue(reqIdx + 1) : 2147483647;
         const int32_t lastReq = numReqs_ - 1;
@@ -225,16 +191,15 @@ public:
                 }
                 int64_t globalPos = lpos.GetValue(i);
 
-                int64_t blockIdx2 = globalPos >> bsShift;       // shift 替代 div
-                int64_t offset = globalPos & bsMask;            // AND 替代 mod
+                int64_t blockIdx2 = globalPos >> bsShift;
+                int64_t offset = globalPos & bsMask;
                 int32_t blockNum = lbt.GetValue(
                     static_cast<uint32_t>(reqIdx * stride_) +
                     static_cast<uint32_t>(blockIdx2));
                 int64_t slotId = (static_cast<int64_t>(blockNum) << bsShift) | offset;
-                lslot.SetValue(i, slotId);  // cpWs=1 时永 local，无 isLocal 判断
+                lslot.SetValue(i, slotId);
             }
         } else {
-            // ---------- 通用路径：CP > 1 或 blockSize 非 2 的幂 ----------
             for (int32_t i = 0; i < validInTile_; ++i) {
                 int32_t globalIdx = posStart_ + i;
                 while (reqIdx < lastReq && globalIdx >= nextBoundary) {
@@ -255,7 +220,7 @@ public:
                 lslot.SetValue(i, isLocal ? slotId : padIdI64);
             }
         }
-        // padding 区填 padId（fast / slow 路径共用）
+
         for (int32_t i = validInTile_; i < myNumPos_; ++i) {
             lslot.SetValue(i, padIdI64);
         }
@@ -300,7 +265,7 @@ private:
     TBuf<QuePosition::VECCALC> bufSlot_;    // int64 internal slot ids
     TBuf<QuePosition::VECCALC> bufSlot32_;  // int32 output tile (DataCopyPad source)
 
-    // Tiling 参数 cache
+    // Tiling param cache
     int32_t numReqs_ = 0;
     int32_t numTokens_ = 0;
     int32_t maxNumTokens_ = 0;
@@ -311,7 +276,6 @@ private:
     int32_t cpRank_ = 0;
     int32_t ilv_ = 1;
 
-    // 本核范围
     int32_t posStart_ = 0;
     int32_t posEnd_ = 0;
     int32_t myNumPos_ = 0;

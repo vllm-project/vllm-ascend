@@ -1,20 +1,3 @@
-/**
- * @file slot_mapping_tiling.cpp
- * @brief SlotMapping TilingFunc 实现
- *
- * 接口变更：原先 numTokens / maxNumTokens / blockSize / blockTableStride 四个标量
- * 通过 int32 tensor 走 GM 传入（其中 num_tokens_t = full((max_num_tokens,), val)
- * 浪费 16 KB），此版本全部通过 Attr + shape 推导，减少 kernel 侧 GM load。
- *
- * Tensor 输入：queryStartLoc / positions / blockTable
- * Attr：numTokens, maxNumTokens, blockSize, totalCpWorldSize, totalCpRank,
- *       cpKvCacheInterleaveSize, padId
- *
- * 分核策略：per-position，每核 tilePerCore 个连续 position（对齐 8 × int64 = 64 B
- * cache line，避免 false sharing），`numBlocks = ceil(maxNumTokens/tilePerCore)`
- * 且不超过 coreNum。
- */
-
 #include "slot_mapping_tiling.h"
 #include "register/op_def_registry.h"
 #include "log/ops_log.h"
@@ -25,12 +8,12 @@ namespace optiling {
 // adjacent cores write to disjoint cache lines (no false sharing).
 constexpr int32_t kSlotAlignment = 16;
 
-// Input 索引
+// Input
 constexpr int IDX_QUERY_START_LOC = 0;
 constexpr int IDX_POSITIONS = 1;
 constexpr int IDX_BLOCK_TABLE = 2;
 
-// Attr 索引（与 slot_mapping_def.cpp 顺序一致）
+// Attr
 constexpr int ATTR_NUM_TOKENS = 0;
 constexpr int ATTR_MAX_NUM_TOKENS = 1;
 constexpr int ATTR_BLOCK_SIZE = 2;
@@ -120,7 +103,6 @@ static ge::graphStatus TilingFunc(gert::TilingContext* context)
         }
     }
 
-    // -------------------- 分核策略 --------------------
     int32_t tilePerCore = static_cast<int32_t>(
         (maxNumTokens + static_cast<int64_t>(coreNum) - 1) / static_cast<int64_t>(coreNum));
     if (tilePerCore < kSlotAlignment) {

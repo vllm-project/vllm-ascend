@@ -1,10 +1,3 @@
-/**
- * @file slot_mapping_infershape.cpp
- * @brief SlotMapping InferShape / InferDataType（vllm-ascend 风格：IMPL_OP_INFERSHAPE 外挂）
- *
- * 接口调整后 `maxNumTokens` 从 tensor 变成 Attr；输出长度从 Attr 值推断。
- */
-
 #include "register/op_def_registry.h"
 #include "log/ops_log.h"
 
@@ -24,9 +17,6 @@ using namespace ge;
 
 namespace ops {
 
-// Attr 索引：与 slot_mapping_def.cpp 的 Attr 顺序保持一致
-// 0=numTokens, 1=maxNumTokens, 2=blockSize,
-// 3=totalCpWorldSize, 4=totalCpRank, 5=cpKvCacheInterleaveSize, 6=padId
 static constexpr int ATTR_MAX_NUM_TOKENS = 1;
 static constexpr int OUT_SLOT_MAPPING = 0;
 
