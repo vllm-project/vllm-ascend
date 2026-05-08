@@ -13,12 +13,13 @@
 
 // ===========================================================================
 // GumbelSample kernel 入口
-//   参数顺序：4 输入 + 1 输出 + workspace + tiling
+//   参数顺序：5 输入 + 1 输出 + workspace + tiling
 //   TilingKey 单维：applyTemp ∈ {0, 1}（0=不缩放, 1=z/τ 缩放）
 // ===========================================================================
 template <uint32_t applyTemp>
 __global__ __aicore__ void gumbel_sample(
     GM_ADDR logits, GM_ADDR temperature, GM_ADDR seeds, GM_ADDR pos,
+    GM_ADDR idxMapping,
     GM_ADDR sampled, GM_ADDR workspace, GM_ADDR tiling)
 {
     GET_TILING_DATA_WITH_STRUCT(GumbelSampleTilingData, tilingData, tiling);
@@ -27,11 +28,11 @@ __global__ __aicore__ void gumbel_sample(
     TPipe pipe;
     if constexpr (applyTemp == 1) {
         NsGumbelSample::GumbelSampleOp<true> op;
-        op.Init(logits, temperature, seeds, pos, sampled, workspace, tilingData, &pipe);
+        op.Init(logits, temperature, seeds, pos, idxMapping, sampled, workspace, tilingData, &pipe);
         op.Process();
     } else {
         NsGumbelSample::GumbelSampleOp<false> op;
-        op.Init(logits, temperature, seeds, pos, sampled, workspace, tilingData, &pipe);
+        op.Init(logits, temperature, seeds, pos, idxMapping, sampled, workspace, tilingData, &pipe);
         op.Process();
     }
 }

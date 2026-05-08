@@ -43,6 +43,7 @@ static ge::graphStatus GumbelSampleTilingFunc(gert::TilingContext* context)
         return ge::GRAPH_FAILED;
     }
 
+    // logits.dim(0) = num_tokens（batch slot 总数），logits.dim(1) = vocab_size
     auto logitsShapeBundle = context->GetInputShape(0);
     if (logitsShapeBundle == nullptr) {
         return ge::GRAPH_FAILED;
@@ -52,21 +53,34 @@ static ge::graphStatus GumbelSampleTilingFunc(gert::TilingContext* context)
         return ge::GRAPH_FAILED;
     }
 
-    int64_t numReqsI64   = logitsShape.GetDim(0);
-    int64_t vocabSizeI64 = logitsShape.GetDim(1);
-    if (numReqsI64 <= 0 || vocabSizeI64 <= 0) {
+    // temperature（输入 1）的 dim0 = num_req_states
+    auto tempShapeBundle = context->GetInputShape(1);
+    if (tempShapeBundle == nullptr) {
         return ge::GRAPH_FAILED;
     }
-    uint32_t numReqs   = static_cast<uint32_t>(numReqsI64);
-    uint32_t vocabSize = static_cast<uint32_t>(vocabSizeI64);
+    auto tempShape = tempShapeBundle->GetStorageShape();
+    if (tempShape.GetDimNum() < 1) {
+        return ge::GRAPH_FAILED;
+    }
 
-    uint32_t usedCoreNum = (numReqs < aivCoreNum) ? numReqs : aivCoreNum;
+    int64_t numTokensI64    = logitsShape.GetDim(0);
+    int64_t vocabSizeI64    = logitsShape.GetDim(1);
+    int64_t numReqStatesI64 = tempShape.GetDim(0);
+    if (numTokensI64 <= 0 || vocabSizeI64 <= 0 || numReqStatesI64 <= 0) {
+        return ge::GRAPH_FAILED;
+    }
+    uint32_t numTokens    = static_cast<uint32_t>(numTokensI64);
+    uint32_t numReqStates = static_cast<uint32_t>(numReqStatesI64);
+    uint32_t vocabSize    = static_cast<uint32_t>(vocabSizeI64);
+
+    // 多核切分按 num_tokens（每 batch slot 1 行）
+    uint32_t usedCoreNum = (numTokens < aivCoreNum) ? numTokens : aivCoreNum;
     if (usedCoreNum == 0) {
         usedCoreNum = 1;
     }
-    uint32_t formerNum   = numReqs % usedCoreNum;
-    uint32_t nRowsLarge  = CeilDivU32(numReqs, usedCoreNum);
-    uint32_t nRowsSmall  = numReqs / usedCoreNum;
+    uint32_t formerNum   = numTokens % usedCoreNum;
+    uint32_t nRowsLarge  = CeilDivU32(numTokens, usedCoreNum);
+    uint32_t nRowsSmall  = numTokens / usedCoreNum;
     uint32_t numTiles    = CeilDivU32(vocabSize, GUMBEL_SAMPLE_BLOCK_SIZE);
     uint32_t lastTileLen = vocabSize - (numTiles - 1) * GUMBEL_SAMPLE_BLOCK_SIZE;
 
@@ -81,7 +95,8 @@ static ge::graphStatus GumbelSampleTilingFunc(gert::TilingContext* context)
     }
 
     GumbelSampleTilingData tiling;
-    tiling.set_numReqs(numReqs);
+    tiling.set_numTokens(numTokens);
+    tiling.set_numReqStates(numReqStates);
     tiling.set_vocabSize(vocabSize);
     tiling.set_usedCoreNum(usedCoreNum);
     tiling.set_formerNum(formerNum);

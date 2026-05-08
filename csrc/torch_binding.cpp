@@ -1087,12 +1087,13 @@ at::Tensor npu_gumbel_sample(
     const at::Tensor& temperature,
     const at::Tensor& seeds,
     const at::Tensor& pos,
+    const at::Tensor& idx_mapping,
     bool apply_temperature)
 {
-    int64_t num_reqs = logits.size(0);
+    int64_t num_tokens = logits.size(0);
     auto device = logits.device();
-    at::Tensor sampled = at::empty({num_reqs}, at::dtype(at::kLong).device(device));
-    EXEC_NPU_CMD(aclnnGumbelSample, logits, temperature, seeds, pos, apply_temperature, sampled);
+    at::Tensor sampled = at::empty({num_tokens}, at::dtype(at::kLong).device(device));
+    EXEC_NPU_CMD(aclnnGumbelSample, logits, temperature, seeds, pos, idx_mapping, apply_temperature, sampled);
     return sampled;
 }
 
@@ -1401,7 +1402,7 @@ TORCH_LIBRARY_EXPAND(CONCAT(_C, _ascend), ops)
 
     ops.def(
         "npu_gumbel_sample(Tensor logits, Tensor temperature, Tensor seeds, Tensor pos, "
-        "bool apply_temperature=True) -> Tensor"
+        "Tensor idx_mapping, bool apply_temperature=True) -> Tensor"
     );
     ops.impl("npu_gumbel_sample", torch::kPrivateUse1, &vllm_ascend::npu_gumbel_sample);
 }

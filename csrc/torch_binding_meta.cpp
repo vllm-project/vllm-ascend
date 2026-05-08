@@ -751,10 +751,11 @@ at::Tensor npu_gumbel_sample_meta(
     const at::Tensor& temperature,
     const at::Tensor& seeds,
     const at::Tensor& pos,
+    const at::Tensor& idx_mapping,
     bool apply_temperature)
 {
-    int64_t num_reqs = logits.size(0);
-    return at::empty({num_reqs}, logits.options().dtype(at::kLong));
+    int64_t num_tokens = logits.size(0);
+    return at::empty({num_tokens}, logits.options().dtype(at::kLong));
 }
 
 } // namespace meta

@@ -18,7 +18,8 @@
 namespace optiling {
 
 BEGIN_TILING_DATA_DEF(GumbelSampleTilingData)
-    TILING_DATA_FIELD_DEF(uint32_t, numReqs);
+    TILING_DATA_FIELD_DEF(uint32_t, numTokens);     // batch slot 总数（= logits.dim(0)）
+    TILING_DATA_FIELD_DEF(uint32_t, numReqStates);  // req_state 总数（= temperature.dim(0)）
     TILING_DATA_FIELD_DEF(uint32_t, vocabSize);
     TILING_DATA_FIELD_DEF(uint32_t, usedCoreNum);
     TILING_DATA_FIELD_DEF(uint32_t, formerNum);

@@ -19,6 +19,7 @@ static graphStatus InferShapeForGumbelSample(gert::InferShapeContext* context)
     if (context == nullptr) {
         return GRAPH_FAILED;
     }
+    // sampled.shape = [num_tokens]，取 logits（输入 0）的 dim0
     const gert::Shape* logitsShape = context->GetInputShape(0);
     if (logitsShape == nullptr) {
         return GRAPH_FAILED;
@@ -31,9 +32,8 @@ static graphStatus InferShapeForGumbelSample(gert::InferShapeContext* context)
     if (sampledShape == nullptr) {
         return GRAPH_FAILED;
     }
-    // sampled.shape = [num_reqs]，取 logits 第 0 维
     sampledShape->SetDimNum(1);
-    sampledShape->SetDim(0, logitsShape->GetDim(0));
+    sampledShape->SetDim(0, logitsShape->GetDim(0));   // sampled.shape = [num_tokens]
     return GRAPH_SUCCESS;
 }
 
