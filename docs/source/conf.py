@@ -63,6 +63,9 @@ extensions = [
     "sphinxcontrib.mermaid",
 ]
 
+# Disable Pygments highlighting for mermaid code blocks to let the mermaid extension handle rendering
+highlight_args = {'highlight_code': False}
+
 myst_enable_extensions = ["colon_fence", "amsmath", "dollarmath", "substitution"]
 
 # Change this when cut down release
