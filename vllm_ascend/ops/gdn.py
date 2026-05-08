@@ -33,7 +33,7 @@ else:
 
 from vllm.model_executor.layers.mamba.mamba_utils import MambaStateShapeCalculator
 from vllm.triton_utils import triton
-from vllm.v1.attention.backend import AttentionMetadata  # type: ignore
+from vllm.v1.attention.backend import AttentionBackend, AttentionMetadata  # type: ignore
 from vllm.v1.attention.backends.gdn_attn import GDNAttentionMetadata
 from vllm.v1.attention.backends.utils import PAD_SLOT_ID
 
@@ -44,6 +44,7 @@ from vllm_ascend.compilation.acl_graph import (
     get_graph_params,
 )
 from vllm_ascend.device.device_op import DeviceOperator
+from vllm_ascend.ops.gdn_attn_builder import AscendGDNAttentionBackend
 from vllm_ascend.ops.triton.fla.chunk import chunk_gated_delta_rule
 from vllm_ascend.ops.triton.fla.fused_qkvzba_split_reshape import fused_qkvzba_split_reshape_cat
 from vllm_ascend.ops.triton.fla.utils import clear_ssm_states
@@ -60,9 +61,7 @@ def to_int64_tuple(tensor: torch.Tensor) -> tuple[int, ...]:
 
 def _check_and_get_host_args(attn_metadata, field_name: str, sub_field_name: str):
     if (fallback_meta := getattr(attn_metadata, field_name, None)) is None:
-        raise RuntimeError(
-            f"Expected attn_metadata.{field_name}.{sub_field_name} for patched GDN non-spec prefill path."
-        )
+        raise RuntimeError(f"Expected attn_metadata.{field_name}.{sub_field_name} for Ascend GDN fallback path.")
     return fallback_meta
 
 
@@ -275,6 +274,9 @@ class AscendGatedDeltaNetAttention(GatedDeltaNetAttention):
     def _warmup_prefill_kernels_v0202(self, mixed_qkv: torch.Tensor) -> None:
         return
 
+    def get_attn_backend(self) -> type[AttentionBackend]:
+        return AscendGDNAttentionBackend
+
     def forward(
         self,
         hidden_states: torch.Tensor,
@@ -295,7 +297,7 @@ class AscendGatedDeltaNetAttention(GatedDeltaNetAttention):
             if vllm_version_is("0.21.0"):
                 b, a = ba.chunk(2, dim=-1)
             else:
-                b, a = self.split_ba(ba)
+                b, a = self._split_ba_for_tp(ba)
             b = b.contiguous()
             a = a.contiguous()
         else:
@@ -310,7 +312,7 @@ class AscendGatedDeltaNetAttention(GatedDeltaNetAttention):
                 if vllm_version_is("0.21.0"):
                     b, a = ba.chunk(2, dim=-1)
                 else:
-                    b, a = self.split_ba(ba)
+                    b, a = self._split_ba_for_tp(ba)
 
                 b = b.contiguous()
                 a = a.contiguous()
