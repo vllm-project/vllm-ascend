@@ -135,20 +135,17 @@ def test_fa3_vs_fia_logprobs():
         fia_ids, _, fia_lp = fia_out
         fa3_ids, _, fa3_lp = fa3_out
 
-        # Token IDs must match
         assert fia_ids == fa3_ids, (
             f"Prompt {i}: FA3 and FIA token ids differ.\n"
             f"  FIA ids: {fia_ids}\n"
             f"  FA3 ids: {fa3_ids}"
         )
 
-        # Logprobs length must match
         assert len(fia_lp) == len(fa3_lp), (
             f"Prompt {i}: Different number of logprob steps: "
             f"FIA {len(fia_lp)} vs FA3 {len(fa3_lp)}"
         )
 
-        # Compare logprobs per token
         for t, (fia_token_lp, fa3_token_lp) in enumerate(zip(fia_lp, fa3_lp)):
             assert set(fia_token_lp.keys()) == set(fa3_token_lp.keys()), (
                 f"Prompt {i}, token {t}: Logprob token sets differ.\n"
@@ -158,7 +155,6 @@ def test_fa3_vs_fia_logprobs():
             for token_id in fia_token_lp:
                 fia_logprob = fia_token_lp[token_id].logprob
                 fa3_logprob = fa3_token_lp[token_id].logprob
-                # Compare with both relative and absolute tolerance
                 assert fia_logprob==fa3_logprob, (
                     f"Prompt {i}, token {t}, token_id {token_id} ("
                     f"'{fia_token_lp[token_id].decoded_token}'): "
