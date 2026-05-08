@@ -1,0 +1,151 @@
+#
+# Copyright (c) 2026 Huawei Technologies Co., Ltd. All Rights Reserved.
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+#
+
+name: Temp MindIE-SD vLLM-Omni Backend
+
+on:
+  pull_request: {}
+  workflow_dispatch:
+    inputs:
+      run_e2e:
+        description: "Run optional vLLM-Omni diffusion E2E after backend smoke"
+        required: false
+        default: "false"
+        type: choice
+        options:
+          - "false"
+          - "true"
+
+# Bash shells do not use ~/.profile or ~/.bashrc so these shells need to be explicitly
+# declared as "shell: bash -el {0}" on steps that need to be properly activated.
+# It's used to activate ascend-toolkit environment variables.
+defaults:
+  run:
+    shell: bash -el {0}
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  MINDIESD_REPO: https://gitcode.com/weixin_44144262/MindIE-SD_bugfix.git
+  MINDIESD_REF: dev
+  VLLM_REPO: https://github.com/vllm-project/vllm.git
+  VLLM_REF: main
+  VLLM_OMNI_REPO: https://github.com/vllm-project/vllm-omni.git
+  VLLM_OMNI_REF: main
+  VLLM_TARGET_DEVICE: npu
+  VLLM_OMNI_TARGET_DEVICE: npu
+  VLLM_WORKER_MULTIPROC_METHOD: spawn
+  VLLM_USE_MODELSCOPE: "True"
+  PYTORCH_NPU_ALLOC_CONF: max_split_size_mb:256
+  UV_INDEX_URL: http://cache-service.nginx-pypi-cache.svc.cluster.local/pypi/simple
+  UV_EXTRA_INDEX_URL: https://mirrors.huaweicloud.com/ascend/repos/pypi
+  UV_INDEX_STRATEGY: unsafe-best-match
+  UV_NO_CACHE: 1
+  UV_SYSTEM_PYTHON: 1
+
+jobs:
+  backend-smoke:
+    name: backend smoke
+    runs-on: linux-aarch64-a2b3-1
+    container:
+      image: swr.cn-southwest-2.myhuaweicloud.com/base_image/ascend-ci/cann:8.5.1-910b-ubuntu22.04-py3.11
+      env:
+        VLLM_LOGGING_LEVEL: ERROR
+        VLLM_TARGET_DEVICE: npu
+        VLLM_OMNI_TARGET_DEVICE: npu
+        VLLM_WORKER_MULTIPROC_METHOD: spawn
+        VLLM_USE_MODELSCOPE: "True"
+        PYTORCH_NPU_ALLOC_CONF: max_split_size_mb:256
+
+    steps:
+      - name: Checkout vllm-project/vllm-ascend repo
+        uses: actions/checkout@v6
+
+      - name: Check NPU and CANN info
+        run: |
+          npu-smi info
+          cat /usr/local/Ascend/ascend-toolkit/latest/"$(uname -i)"-linux/ascend_toolkit_install.info
+          python3 - <<'PY'
+          import torch
+          import torch_npu  # noqa: F401
+
+          print("torch:", torch.__version__)
+          print("torch.npu.is_available:", torch.npu.is_available())
+          print("torch.npu.device_count:", torch.npu.device_count())
+          if not torch.npu.is_available() or torch.npu.device_count() < 1:
+              raise SystemExit("NPU is not available")
+          PY
+
+      - name: Config mirrors
+        run: |
+          sed -Ei 's@(ports|archive).ubuntu.com@cache-service.nginx-pypi-cache.svc.cluster.local:8081@g' /etc/apt/sources.list
+          pip config set global.index-url http://cache-service.nginx-pypi-cache.svc.cluster.local/pypi/simple
+          pip config set global.trusted-host cache-service.nginx-pypi-cache.svc.cluster.local
+          apt-get update -y
+          apt-get install -y git
+          git config --global --add safe.directory "$GITHUB_WORKSPACE"
+
+      - name: Install system dependencies
+        run: |
+          apt-get install -y `cat packages.txt`
+          apt-get install -y gcc g++ cmake libnuma-dev clang-15
+          update-alternatives --install /usr/bin/clang clang /usr/bin/clang-15 20
+          update-alternatives --install /usr/bin/clang++ clang++ /usr/bin/clang++-15 20
+          pip install uv build wheel
+
+      - name: Clone and install MindIE-SD
+        run: |
+          git clone --depth 1 --branch "$MINDIESD_REF" "$MINDIESD_REPO" MindIE-SD
+          cd MindIE-SD
+          python3 -m build --wheel --no-isolation
+          pip install --no-deps --force-reinstall dist/mindiesd*.whl
+
+      - name: Clone and install vllm
+        run: |
+          git clone --depth 1 --branch "$VLLM_REF" "$VLLM_REPO" vllm-empty
+          cd vllm-empty
+          VLLM_TARGET_DEVICE=empty uv pip install -e .
+          uv pip uninstall triton
+
+      - name: Install vllm-project/vllm-ascend
+        env:
+          PIP_EXTRA_INDEX_URL: https://mirrors.huaweicloud.com/ascend/repos/pypi
+        run: |
+          pip install uc-manager
+          uv pip install -r requirements-dev.txt
+          uv pip install -v -e .
+          uv pip install git+https://github.com/modelscope/modelscope.git@dbbcbf631fe6d10cc6446df2ad2fef24039fe7fe
+
+      - name: Clone and install vllm-omni
+        run: |
+          git clone --depth 1 --branch "$VLLM_OMNI_REF" "$VLLM_OMNI_REPO" vllm-omni
+          cd vllm-omni
+          VLLM_OMNI_TARGET_DEVICE=npu uv pip install -v -e .
+
+      - name: Run MindIE-SD/vLLM-Omni backend smoke
+        run: |
+          python3 .github/workflows/scripts/check_mindiesd_vllm_omni_backend.py
+
+      - name: Run optional vLLM-Omni diffusion E2E
+        if: ${{ github.event_name == 'workflow_dispatch' && inputs.run_e2e == 'true' }}
+        working-directory: vllm-omni
+        env:
+          DIFFUSION_ATTENTION_BACKEND: FLASH_ATTN
+        run: |
+          pytest -q tests/e2e/offline_inference/test_t2i_model.py::test_diffusion_model \
+            --run-level core_model
