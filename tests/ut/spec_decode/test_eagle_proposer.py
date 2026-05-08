@@ -24,6 +24,7 @@ from vllm_ascend.spec_decode.draft_proposer import AscendDraftModelProposer
 from vllm_ascend.spec_decode.eagle_proposer import AscendEagleProposer
 from vllm_ascend.utils import vllm_version_is
 
+
 def _resolve_cpu_gpu_buffer_target() -> str:
     # vLLM moved CpuGpuBuffer from eagle.py to llm_base_proposer.py, but
     # packaging/version tags can vary in CI. Resolve by symbol existence.
