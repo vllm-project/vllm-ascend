@@ -20,7 +20,6 @@ import torch.nn.functional as F
 
 from vllm_ascend._310p.fused_moe.fused_moe import (
     AscendFusedMoE310,
-    AscendSharedFusedMoE310,
 )
 
 
@@ -48,8 +47,8 @@ class _DummySharedExperts(torch.nn.Module):
         return out
 
 
-def _build_layer(shared_experts: torch.nn.Module | None) -> AscendSharedFusedMoE310:
-    layer = AscendSharedFusedMoE310.__new__(AscendSharedFusedMoE310)
+def _build_layer(shared_experts: torch.nn.Module | None) -> AscendFusedMoE310:
+    layer = AscendFusedMoE310.__new__(AscendFusedMoE310)
     # The test bypasses full layer init with __new__, so we must initialize
     # nn.Module internals before assigning child modules.
     torch.nn.Module.__init__(layer)
@@ -80,7 +79,7 @@ def test_forward_impl_with_shared_experts_returns_tuple_310():
     routed_out = torch.randn(3, 8)
 
     with patch.object(AscendFusedMoE310, "forward_impl", return_value=routed_out):
-        shared_out, routed = layer.forward_impl(hidden_states, router_logits)
+        shared_out, routed = layer.shared_forward_impl(hidden_states, router_logits)
 
     expected_shared = 0.5 * (hidden_states * 2.0 + 1.0)
     torch.testing.assert_close(shared_out, expected_shared)
@@ -100,7 +99,7 @@ def test_forward_impl_without_shared_experts_returns_routed_only_310():
     routed_out = torch.randn(3, 8)
 
     with patch.object(AscendFusedMoE310, "forward_impl", return_value=routed_out):
-        output = layer.forward_impl(hidden_states, router_logits)
+        output = layer.shared_forward_impl(hidden_states, router_logits)
 
     torch.testing.assert_close(output, routed_out)
 

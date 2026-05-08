@@ -107,7 +107,7 @@ class AscendDflashProposer(AscendEagleProposer):
             num_rejected_tokens_ptr=(num_rejected_tokens_gpu if has_num_rejected else 0),
             # Scalars
             parallel_drafting_token_id=self.parallel_drafting_token_id,
-            block_size=self.block_size,
+            block_size=self.kernel_block_size,
             num_query_per_req=num_query_per_req,
             num_speculative_tokens=self.num_speculative_tokens,
             total_input_tokens=num_context,
@@ -176,6 +176,7 @@ class AscendDflashProposer(AscendEagleProposer):
                 query_start_loc=self.arange_dflash[: num_reqs + 1] * num_query_per_req,
                 query_start_loc_cpu=torch.from_numpy(self.token_arange_np[: num_reqs + 1]).clone() * num_query_per_req,
                 seq_lens_cpu=self.runner.optimistic_seq_lens_cpu,
+                seq_lens_cpu_upper_bound=self.runner.optimistic_seq_lens_cpu,
                 seq_lens=self.runner.seq_lens[:num_reqs],
                 num_reqs=num_reqs,
                 num_actual_tokens=num_query_tokens,
@@ -184,7 +185,9 @@ class AscendDflashProposer(AscendEagleProposer):
                 slot_mapping=self._slot_mapping_buffer[:num_query_total],
                 attn_state=AscendAttentionState.ChunkedPrefill,
                 causal=False,
-                block_table_tensor=self.runner.input_batch.block_table[0].get_device_tensor()[:num_reqs],
+                block_table_tensor=self.runner.input_batch.block_table[self.kv_cache_gid].get_device_tensor()[
+                    :num_reqs
+                ],
             )
 
             attn_metadata_dflash = builder.build_for_graph_capture(
@@ -239,3 +242,6 @@ class AscendDflashProposer(AscendEagleProposer):
         return dict(
             input_ids=self.input_ids[:num_input_tokens], positions=self.positions[:num_input_tokens], inputs_embeds=None
         )
+
+    def _raise_if_multimodal(self):
+        pass
