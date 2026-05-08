@@ -721,8 +721,10 @@ async def _patched_chat_completion_stream_generator(
                     # This prevents downstream consumers from losing the final
                     # arguments fragment because they stop reading at finish_reason.
                     _split_done = False
-                    if finish_reason_ == "tool_calls" and delta_message is not None and (
-                        bool(delta_message.tool_calls) or bool(delta_message.content)
+                    if (
+                        finish_reason_ == "tool_calls"
+                        and delta_message is not None
+                        and (bool(delta_message.tool_calls) or bool(delta_message.content))
                     ):
                         _data_choice = ChatCompletionResponseStreamChoice(
                             index=i,
@@ -752,9 +754,7 @@ async def _patched_chat_completion_stream_generator(
                         finish_reason=finish_reason_,
                         stop_reason=output.stop_reason,
                         token_ids=(
-                            None
-                            if _split_done
-                            else (as_list(output.token_ids) if request.return_token_ids else None)
+                            None if _split_done else (as_list(output.token_ids) if request.return_token_ids else None)
                         ),
                     )
 

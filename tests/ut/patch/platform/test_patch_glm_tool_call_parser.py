@@ -4,7 +4,6 @@ import json
 from unittest.mock import MagicMock
 
 import pytest
-
 from vllm.entrypoints.openai.chat_completion.protocol import (
     ChatCompletionRequest,
     ChatCompletionResponseStreamChoice,
@@ -18,6 +17,7 @@ from vllm.entrypoints.openai.engine.protocol import (
 )
 from vllm.tool_parsers.glm4_moe_tool_parser import Glm4MoeModelToolParser
 from vllm.tool_parsers.glm47_moe_tool_parser import Glm47MoeModelToolParser
+
 from vllm_ascend.patch.platform.patch_glm_tool_call_parser import (
     _patched_chat_completion_stream_generator,
 )
@@ -330,6 +330,7 @@ def test_glm47_streaming_delta_serializes_tool_call_fields():
 # Helpers shared by streaming-split tests
 # ---------------------------------------------------------------------------
 
+
 def _make_serving_mock(*, use_harmony: bool = False) -> MagicMock:
     """Return a minimal mock of OpenAIServingChat for streaming tests."""
     serving = MagicMock()
@@ -385,6 +386,7 @@ class _MockResult:
 
 async def _run_stream(serving, request, outputs):
     """Drive the patched generator and return parsed non-DONE data chunks."""
+
     async def _gen():
         for out in outputs:
             yield out
@@ -423,6 +425,7 @@ def _assert_split_invariant(chunks):
 # ---------------------------------------------------------------------------
 # Streaming-split tests
 # ---------------------------------------------------------------------------
+
 
 @pytest.mark.asyncio
 async def test_streaming_final_tool_calls_chunk_is_split_from_finish_reason():
@@ -497,13 +500,13 @@ async def test_streaming_multi_chunk_tool_args_split_only_at_finish():
         ]
     )
     serving.extract_tool_call_required_streaming.side_effect = [
-        (intermediate_delta, True),   # first call → no finish_reason
-        (final_delta, True),          # second call → finish_reason="stop"
+        (intermediate_delta, True),  # first call → no finish_reason
+        (final_delta, True),  # second call → finish_reason="stop"
     ]
 
     outputs = [
-        _MockResult([_MockOutput(finish_reason=None)]),   # intermediate
-        _MockResult([_MockOutput(finish_reason="stop")]), # final
+        _MockResult([_MockOutput(finish_reason=None)]),  # intermediate
+        _MockResult([_MockOutput(finish_reason="stop")]),  # final
     ]
     chunks = await _run_stream(serving, request, outputs)
 
