@@ -360,10 +360,10 @@ class KVPoolWorker:
             be the boolean mask indicating which tokens are retrieved and will
             only be returned in the last iteration. 
         """
-        token_len = request.token_len_chunk
-        mask_num = (
-            request.load_spec.vllm_cached_tokens  # type: ignore[union-attr]
-            // self.block_size * self.block_size)
+        load_spec = request.load_spec
+        assert load_spec is not None
+        token_len = load_spec.token_len
+        mask_num = load_spec.vllm_cached_tokens // self.block_size * self.block_size
         num_required_tokens = token_len - mask_num
 
         ret_mask = torch.zeros(token_len, dtype=torch.bool, device="cpu")
