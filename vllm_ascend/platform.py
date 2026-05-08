@@ -19,6 +19,7 @@ from __future__ import annotations
 
 import math
 import os
+import subprocess
 from typing import TYPE_CHECKING, Any
 from uuid import uuid4
 
@@ -59,6 +60,34 @@ else:
     FlexibleArgumentParser = None
 
 _CUSTOM_OP_REGISTERED = False
+
+
+def _get_npu_smi_field(lines: list[str], key: str) -> str | None:
+    for line in lines:
+        normalized = " ".join(line.split())
+        if normalized.startswith(f"{key} :"):
+            return normalized.split(":", 1)[1].strip()
+    return None
+
+
+def _get_npu_smi_hbm_capacity_mb(device_id: int) -> int | None:
+    try:
+        output = subprocess.check_output(
+            ["npu-smi", "info", "-t", "memory", "-i", str(device_id), "-c", "0"],
+            stderr=subprocess.DEVNULL,
+            text=True,
+        )
+    except (FileNotFoundError, subprocess.CalledProcessError):
+        return None
+
+    value = _get_npu_smi_field(output.splitlines(), "HBM Capacity(MB)")
+    if value is None:
+        return None
+
+    try:
+        return int(value)
+    except ValueError:
+        return None
 
 
 def config_deprecated_logging():
@@ -129,6 +158,22 @@ class NPUPlatform(Platform):
         To use graph fusion operations, we defined our own backend compiler.
         """
         return "vllm_ascend.compilation.compiler_interface.AscendCompiler"
+
+    @staticmethod
+    def _sync_additional_config(vllm_config: VllmConfig, ascend_config) -> None:
+        ascend_compilation_config = getattr(ascend_config, "ascend_compilation_config", None)
+        if ascend_compilation_config:
+            vllm_config.additional_config.setdefault("ascend_compilation_config", {}).update(
+                vars(ascend_compilation_config)
+                if not isinstance(ascend_compilation_config, dict)
+                else ascend_compilation_config
+            )
+
+        ascend_fusion_config = getattr(ascend_config, "ascend_fusion_config", None)
+        if ascend_fusion_config:
+            vllm_config.additional_config.setdefault("ascend_fusion_config", {}).update(
+                vars(ascend_fusion_config) if not isinstance(ascend_fusion_config, dict) else ascend_fusion_config
+            )
 
     @classmethod
     def pre_register_and_update(cls, parser: FlexibleArgumentParser | None = None) -> None:
@@ -220,6 +265,20 @@ class NPUPlatform(Platform):
         return device_props.uuid
 
     @classmethod
+    def get_device_total_memory(cls, device_id: int = 0) -> int:
+        """
+        Return total memory of the device in bytes.
+        """
+        hbm_capacity_mb = _get_npu_smi_hbm_capacity_mb(device_id)
+        if hbm_capacity_mb is not None:
+            return hbm_capacity_mb * 1024 * 1024
+
+        device_props = torch.npu.get_device_properties(device_id)
+        total_memory = getattr(device_props, "total_memory", None)
+        if total_memory is not None:
+            return int(total_memory)
+        raise RuntimeError(f"Unable to determine total memory for device {device_id}.")
+
     def num_compute_units(cls, device_id: int = 0) -> int:
         """Return the number of Cube Cores on the NPU device.
         This is the NPU equivalent of CUDA's ``multi_processor_count``
@@ -273,8 +332,19 @@ class NPUPlatform(Platform):
     def check_and_update_config(cls, vllm_config: VllmConfig) -> None:
         from vllm_ascend.quantization.utils import maybe_auto_detect_quantization
 
-        if vllm_config.model_config is not None:
-            maybe_auto_detect_quantization(vllm_config)
+        device_config = getattr(vllm_config, "device_config", None)
+        if device_config is not None and getattr(device_config, "device_type", cls.device_type) != cls.device_type:
+            logger.debug(
+                "Skipping Ascend-specific config updates for device type %s.",
+                device_config.device_type,
+            )
+            return
+
+        if vllm_config.model_config is None:
+            logger.warning("Model config is missing. Skipping Ascend-specific config updates.")
+            return
+
+        maybe_auto_detect_quantization(vllm_config)
 
         cls._validate_layer_sharding_config(vllm_config)
 
@@ -294,30 +364,13 @@ class NPUPlatform(Platform):
         model_config = vllm_config.model_config
         parallel_config = vllm_config.parallel_config
         cache_config = vllm_config.cache_config
-        ascend_compilation_config = ascend_config.ascend_compilation_config
-        if ascend_compilation_config:
-            vllm_config.additional_config.setdefault("ascend_compilation_config", {}).update(
-                vars(ascend_compilation_config)
-                if not isinstance(ascend_compilation_config, dict)
-                else ascend_compilation_config
-            )
 
         ascend_config.update_compile_ranges_split_points()
 
         if model_config and hasattr(model_config.hf_text_config, "index_topk"):
             vllm_config.cache_config.cache_dtype = str(model_config.dtype).replace("torch.", "")
 
-        ascend_fusion_config = ascend_config.ascend_fusion_config
-        if ascend_fusion_config:
-            vllm_config.additional_config.setdefault("ascend_fusion_config", {}).update(
-                vars(ascend_fusion_config) if not isinstance(ascend_fusion_config, dict) else ascend_fusion_config
-            )
-
-        if model_config is None:
-            logger.warning("Model config is missing. This may indicate that we are running a test case")
-            enforce_eager = False
-        else:
-            enforce_eager = getattr(model_config, "enforce_eager", False)
+        enforce_eager = getattr(model_config, "enforce_eager", False)
 
         from vllm.config.compilation import CUDAGraphMode
 
@@ -451,6 +504,8 @@ class NPUPlatform(Platform):
                 "for example, check the plog files (default: $HOME/ascend/log/debug) "
                 "for more information about runtime errors."
             )
+
+        cls._sync_additional_config(vllm_config, ascend_config)
 
         if parallel_config and parallel_config.worker_cls == "auto":
             # TODO: this is a tricky way to disable `use_sequence_parallel_moe` in vllm.

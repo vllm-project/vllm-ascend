@@ -3924,7 +3924,7 @@ def _torch_cuda_wrapper():
         torch.cuda.synchronize = torch.npu.synchronize
         torch.cuda.mem_get_info = torch.npu.mem_get_info
         yield
-    except Exception as e:
+    except Exception:
         torch.cuda.Event = _EventPlaceholder
         torch.cuda.Stream = _StreamPlaceholder
         torch.cuda.default_stream = _StreamPlaceholder
@@ -3932,7 +3932,8 @@ def _torch_cuda_wrapper():
         torch.cuda.stream = _StreamPlaceholder
         torch.cuda.synchronize = _StreamPlaceholder
         torch.cuda.mem_get_info = _StreamPlaceholder
-        raise RuntimeError(f"NPUModelRunner init failed, error is {e}")
+        logger.exception("NPUModelRunner init failed inside _torch_cuda_wrapper")
+        raise
     finally:
         # if anything goes wrong, just patch it with a placeholder
         torch.cuda.Event = _EventPlaceholder
