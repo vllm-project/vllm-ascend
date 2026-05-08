@@ -76,7 +76,10 @@ jobs:
     steps:
       - name: Set global envs
         run: |
-          echo "LD_LIBRARY_PATH=/usr/local/Ascend/driver/lib64/driver:$LD_LIBRARY_PATH" >> $GITHUB_ENV
+          set -a
+          . /usr/local/Ascend/ascend-toolkit/set_env.sh
+          set +a
+          env >> $GITHUB_ENV
 
       - name: Checkout vllm-project/vllm-ascend repo
         uses: actions/checkout@v6
@@ -208,7 +211,10 @@ jobs:
     steps:
       - name: Set global envs
         run: |
-          echo "LD_LIBRARY_PATH=/usr/local/Ascend/driver/lib64/driver:$LD_LIBRARY_PATH" >> $GITHUB_ENV
+          set -a
+          . /usr/local/Ascend/ascend-toolkit/set_env.sh
+          set +a
+          env >> $GITHUB_ENV
         
       - name: Checkout vllm-project/vllm-ascend repo
         uses: actions/checkout@v6
@@ -350,7 +356,10 @@ jobs:
     steps:
       - name: Set global envs
         run: |
-          echo "LD_LIBRARY_PATH=/usr/local/Ascend/driver/lib64/driver:$LD_LIBRARY_PATH" >> $GITHUB_ENV
+          set -a
+          . /usr/local/Ascend/ascend-toolkit/set_env.sh
+          set +a
+          env >> $GITHUB_ENV
 
       - name: Checkout vllm-project/vllm-ascend repo
         uses: actions/checkout@v6
@@ -481,7 +490,10 @@ jobs:
 
       - name: Set global envs
         run: |
-          echo "LD_LIBRARY_PATH=/usr/local/Ascend/driver/lib64/driver:$LD_LIBRARY_PATH" >> $GITHUB_ENV
+          set -a
+          . /usr/local/Ascend/ascend-toolkit/set_env.sh
+          set +a
+          env >> $GITHUB_ENV
 
       - name: Checkout vllm-project/vllm-ascend repo
         uses: actions/checkout@v6
@@ -640,7 +652,10 @@ jobs:
     steps:
       - name: Set global envs
         run: |
-          echo "LD_LIBRARY_PATH=/usr/local/Ascend/driver/lib64/driver:$LD_LIBRARY_PATH" >> $GITHUB_ENV
+          set -a
+          . /usr/local/Ascend/ascend-toolkit/set_env.sh
+          set +a
+          env >> $GITHUB_ENV
 
       - name: Checkout vllm-project/vllm-ascend repo
         uses: actions/checkout@v6
@@ -776,7 +791,10 @@ jobs:
     steps:
       - name: Set global envs
         run: |
-          echo "LD_LIBRARY_PATH=/usr/local/Ascend/driver/lib64/driver:$LD_LIBRARY_PATH" >> $GITHUB_ENV
+          set -a
+          . /usr/local/Ascend/ascend-toolkit/set_env.sh
+          set +a
+          env >> $GITHUB_ENV
 
       - name: Check npu and CANN info
         run: |
@@ -889,7 +907,10 @@ jobs:
     steps:
       - name: Set global envs
         run: |
-          echo "LD_LIBRARY_PATH=/usr/local/Ascend/driver/lib64/driver:$LD_LIBRARY_PATH" >> $GITHUB_ENV
+          set -a
+          . /usr/local/Ascend/ascend-toolkit/set_env.sh
+          set +a
+          env >> $GITHUB_ENV
 
       - name: Check npu and CANN info
         run: |

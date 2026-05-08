@@ -30,7 +30,7 @@ requires = [
     "opencv-python-headless<=4.11.0.86", # Required to avoid numpy version conflict with vllm
     "compressed_tensors>=0.11.0",
     "arctic-inference==0.1.1",
-    "triton-ascend==3.2.0"
+    "triton-ascend==3.2.1"
 ]
 build-backend = "setuptools.build_meta"
 

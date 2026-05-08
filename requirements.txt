@@ -41,4 +41,6 @@ torch-npu==2.9.0
 arctic-inference==0.1.1
 transformers==5.5.3
 fastapi<0.124.0
-triton-ascend==3.2.0
+
+# --extra-index-url http://triton-ascend.osinfra.cn/pypi/simple/
+triton-ascend==3.2.1
