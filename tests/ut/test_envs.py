@@ -57,3 +57,55 @@ class TestEnvVariables(TestBase):
         for var_name in self.env_vars:
             with self.subTest(var=var_name):
                 getattr(envs_ascend, var_name)
+
+    def _with_env(self, name: str, value: str | None):
+        # Helper context that sets/clears one env var and restores the original.
+        original = os.environ.get(name)
+
+        class _Ctx:
+            def __enter__(_self):
+                if value is None:
+                    os.environ.pop(name, None)
+                else:
+                    os.environ[name] = value
+                return _self
+
+            def __exit__(_self, exc_type, exc, tb):
+                if original is None:
+                    os.environ.pop(name, None)
+                else:
+                    os.environ[name] = original
+
+        return _Ctx()
+
+    def test_dynamic_eplb_truthy_values_are_case_insensitive(self):
+        # Both DYNAMIC_EPLB and EXPERT_MAP_RECORD gate the same EPLB code paths
+        # (vllm_ascend/ascend_config.py, vllm_ascend/patch/platform/__init__.py).
+        # They must accept the same case-insensitive truthy spellings; previously
+        # only DYNAMIC_EPLB was case-insensitive while EXPERT_MAP_RECORD demanded
+        # an exact lowercase "true", which silently disabled the patch when users
+        # wrote "True" or "1".
+        truthy_inputs = ["true", "True", "TRUE", "tRuE", "1", " true ", " 1 "]
+        falsy_inputs = ["false", "False", "0", "", "yes", "no", "TRUEISH"]
+        for var_name in ("DYNAMIC_EPLB", "EXPERT_MAP_RECORD"):
+            self.assertIn(var_name, self.env_vars, f"{var_name} must be defined in vllm_ascend.envs")
+            for value in truthy_inputs:
+                with self._with_env(var_name, value):
+                    self.assertIs(
+                        getattr(envs_ascend, var_name),
+                        True,
+                        f"{var_name}={value!r} should be parsed as True",
+                    )
+            for value in falsy_inputs:
+                with self._with_env(var_name, value):
+                    self.assertIs(
+                        getattr(envs_ascend, var_name),
+                        False,
+                        f"{var_name}={value!r} should be parsed as False",
+                    )
+            with self._with_env(var_name, None):
+                self.assertIs(
+                    getattr(envs_ascend, var_name),
+                    False,
+                    f"unset {var_name} should default to False",
+                )
