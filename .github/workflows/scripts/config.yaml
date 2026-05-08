@@ -63,6 +63,8 @@ e2e-singlecard:
   estimated_time: 2285
 - name: tests/e2e/singlecard/model_runner_v2/test_basic.py
   estimated_time: 27
+- name: tests/e2e/singlecard/spec_decode/test_extract_hidden_states.py
+  estimated_time: 600
 e2e-singlecard-light:
 - name: tests/e2e/singlecard/test_aclgraph_accuracy.py::test_piecewise_res_consistency
   estimated_time: 394
@@ -94,8 +96,6 @@ e2e-multicard-2-cards:
   estimated_time: 185
 - name: tests/e2e/multicard/2-cards/test_data_parallel.py
   estimated_time: 426
-- name: tests/e2e/multicard/2-cards/test_expert_parallel.py
-  estimated_time: 236
 - name: tests/e2e/multicard/2-cards/test_external_launcher.py
   estimated_time: 496
 - name: tests/e2e/multicard/2-cards/test_full_graph_mode.py

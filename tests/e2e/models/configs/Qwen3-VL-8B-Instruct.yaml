@@ -1,11 +1,21 @@
 model_name: "Qwen/Qwen3-VL-8B-Instruct"
+model_type: "vllm-vlm"
 hardware: "Atlas A2 Series"
-model: "vllm-vlm"
+
+serve:
+  tensor_parallel_size: 1
+  dtype: auto
+  max_model_len: 8192
+  gpu_memory_utilization: 0.7
+  trust_remote_code: false
+
 tasks:
 - name: "mmmu_val"
   metrics:
   - name: "acc,none"
     value: 0.55
-max_model_len: 8192
+
+num_fewshot: 0
+apply_chat_template: false
+fewshot_as_multiturn: false
 batch_size: 32
-gpu_memory_utilization: 0.7

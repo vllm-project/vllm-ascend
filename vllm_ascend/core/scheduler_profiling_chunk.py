@@ -41,7 +41,6 @@ from vllm.v1.structured_output import StructuredOutputManager
 from vllm.v1.utils import record_function_or_nullcontext
 
 from vllm_ascend.core.profiling_chunk_predictor import ProfilingChunkManager
-from vllm_ascend.utils import vllm_version_is
 
 
 class ProfilingChunkScheduler(Scheduler):
@@ -380,7 +379,10 @@ class ProfilingChunkScheduler(Scheduler):
             req_to_new_blocks[request_id] = new_blocks
             num_scheduled_tokens[request_id] = num_new_tokens
             token_budget -= num_new_tokens
-            time_budget -= self.profiling_chunk_manager.predict_time(num_new_tokens, request.num_computed_tokens)
+            # Decode requests (num_new_tokens == 1) have negligible latency;
+            # skip time_budget accounting so they don't starve other requests.
+            if num_new_tokens > 1:
+                time_budget -= self.profiling_chunk_manager.predict_time(num_new_tokens, request.num_computed_tokens)
             req_index += 1
 
             # Speculative decode related.
@@ -482,9 +484,6 @@ class ProfilingChunkScheduler(Scheduler):
                             request_queue.pop_request()
                             step_skipped_waiting.prepend_request(request)
                             continue
-
-                        if vllm_version_is("0.19.0"):
-                            request.num_external_computed_tokens = ext_tokens
                         num_external_computed_tokens = ext_tokens
 
                         connector_prefix_cache_queries = request.num_tokens - num_new_local_computed_tokens
@@ -492,7 +491,7 @@ class ProfilingChunkScheduler(Scheduler):
 
                     num_computed_tokens = num_new_local_computed_tokens + num_external_computed_tokens
 
-                    if not vllm_version_is("0.19.0") and request.prefill_stats is not None:
+                    if request.prefill_stats is not None:
                         request.prefill_stats.set(
                             num_prompt_tokens=request.num_prompt_tokens,
                             num_local_cached_tokens=num_new_local_computed_tokens,
@@ -634,12 +633,14 @@ class ProfilingChunkScheduler(Scheduler):
                 req_to_new_blocks[request_id] = self.kv_cache_manager.get_blocks(request_id)
                 num_scheduled_tokens[request_id] = num_new_tokens
                 token_budget -= num_new_tokens
-                time_budget -= self.profiling_chunk_manager.predict_time(num_new_tokens, request.num_computed_tokens)
+                # Decode requests (num_new_tokens == 1) have negligible latency;
+                # skip time_budget accounting so they don't starve other requests.
+                if num_new_tokens > 1:
+                    time_budget -= self.profiling_chunk_manager.predict_time(
+                        num_new_tokens, request.num_computed_tokens
+                    )
                 request.status = RequestStatus.RUNNING
                 request.num_computed_tokens = num_computed_tokens
-                if vllm_version_is("0.19.0"):
-                    if request.num_cached_tokens < 0:
-                        request.num_cached_tokens = num_computed_tokens
                 if encoder_inputs_to_schedule:
                     scheduled_encoder_inputs[request_id] = encoder_inputs_to_schedule
                     for i in encoder_inputs_to_schedule:

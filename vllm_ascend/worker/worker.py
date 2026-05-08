@@ -19,6 +19,7 @@
 
 import copy
 import gc
+import logging
 from types import NoneType
 
 import torch
@@ -43,7 +44,10 @@ from vllm.v1.core.sched.output import GrammarOutput, SchedulerOutput
 from vllm.v1.kv_cache_interface import KVCacheConfig, KVCacheSpec
 from vllm.v1.outputs import EMPTY_MODEL_RUNNER_OUTPUT, AsyncModelRunnerOutput, DraftTokenIds, ModelRunnerOutput
 from vllm.v1.worker.gpu_worker import AsyncIntermediateTensors
-from vllm.v1.worker.worker_base import WorkerBase
+from vllm.v1.worker.worker_base import (
+    CompilationTimes,  # noqa: E402
+    WorkerBase,
+)
 from vllm.v1.worker.workspace import init_workspace_manager
 
 import vllm_ascend.envs as envs_ascend
@@ -469,7 +473,7 @@ class NPUWorker(WorkerBase):
         with context, set_current_vllm_config(self.vllm_config):
             self.model_runner.load_model()
 
-    def compile_or_warm_up_model(self) -> float:
+    def compile_or_warm_up_model(self):
         # Note: need to adapt for graph mode.
         warmup_sizes = (self.vllm_config.compilation_config.compile_sizes or []).copy()
         if not self.model_config.enforce_eager:
@@ -545,11 +549,15 @@ class NPUWorker(WorkerBase):
             try:
                 bind_cpus(self.local_rank)
             except Exception as e:
-                logger.warning(f"Bind cpus failed in rank{self.local_rank}: {e} Skip binding cpu.")
+                logger.warning("Bind cpus failed in rank%s: %s Skip binding cpu.", self.local_rank, e)
         # Reset the seed to ensure that the random state is not affected by
         # the model initialization and profiling.
         set_random_seed(self.model_config.seed)
-        return self.vllm_config.compilation_config.compilation_time
+
+        return CompilationTimes(
+            language_model=self.vllm_config.compilation_config.compilation_time,
+            encoder=self.compilation_config.encoder_compilation_time,
+        )
 
     def _warm_up_atb(self):
         x = torch.rand((2, 4), dtype=torch.float16).npu()
@@ -613,12 +621,13 @@ class NPUWorker(WorkerBase):
 
         # Log for debugging in PP mode
         if not is_first_pp_rank:
-            logger.debug(
-                "[ProfilingChunk] PP rank %d: profiled %d tokens, latency=%.2f ms (not used)",
-                get_pp_group().rank_in_group,
-                num_tokens,
-                latency_ms,
-            )
+            if logger.isEnabledFor(logging.DEBUG):
+                logger.debug(
+                    "[ProfilingChunk] PP rank %d: profiled %d tokens, latency=%.2f ms (not used)",
+                    get_pp_group().rank_in_group,
+                    num_tokens,
+                    latency_ms,
+                )
 
         return latency_ms
 
@@ -792,13 +801,13 @@ class NPUWorker(WorkerBase):
                 parse_text_output(result.stdout)
                 logger.info("check_health success!")
             else:
-                logger.info(f"query NPU card {self.local_rank} fail: {result.stderr}")
+                logger.info("query NPU card %s fail: %s", self.local_rank, result.stderr)
         except subprocess.TimeoutExpired:
-            logger.info(f"query NPU card  {self.local_rank} timeout.")
+            logger.info("query NPU card  %s timeout.", self.local_rank)
         except FileNotFoundError:
             logger.info("npu-smi tool not found.")
         except Exception as e:
-            logger.info(f"query NPU card {self.local_rank} fail: {e}")
+            logger.info("query NPU card %s fail: %s", self.local_rank, e)
         return
 
 

@@ -45,7 +45,7 @@ jobs:
           fail-fast: false
           matrix:
             part: [0, 1, 2, 3]
-            vllm: [v0.19.0]
+            vllm: [d886c26d4d4fef7d079696beb4ece1cfb4b008a8]
         container:
           image: swr.cn-southwest-2.myhuaweicloud.com/base_image/ascend-ci/cann:8.5.1-910b-ubuntu22.04-py3.11
           env:
@@ -53,7 +53,7 @@ jobs:
             HF_HUB_OFFLINE: 0
         steps:
           - name: Checkout vllm-project/vllm-ascend repo
-            uses: actions/checkout@v4
+            uses: actions/checkout@v6
           - name: Check npu and CANN info
             run: |
               npu-smi info
@@ -77,7 +77,7 @@ jobs:
               pip install uv
 
           - name: Checkout vllm-project/vllm repo
-            uses: actions/checkout@v4
+            uses: actions/checkout@v6
             with:
               repository: vllm-project/vllm
               ref: ${{ matrix.vllm }}
