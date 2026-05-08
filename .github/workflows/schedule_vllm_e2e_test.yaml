@@ -144,8 +144,8 @@ jobs:
 #                --auto-partition-size 4 \
 #                --continue-on-error
               
-    e2e-upstream_a3_2:
-        runs-on: linux-aarch64-a3-2
+    e2e-upstream_a2_2:
+        runs-on: linux-aarch64-a2b3-2
         strategy:
           fail-fast: false
           matrix:
@@ -156,7 +156,6 @@ jobs:
           env:
             VLLM_LOGGING_LEVEL: ERROR
             HF_HUB_OFFLINE: 0
-            HF_ENDPOINT: https://hf-mirror.com
         steps:
           - name: Checkout vllm-project/vllm-ascend repo
             uses: actions/checkout@v6
@@ -223,8 +222,8 @@ jobs:
                 --auto-partition-id "${{ matrix.part }}" \
                 --auto-partition-size 1 \
                 --continue-on-error
-    e2e-upstream_a3_4:
-        runs-on: linux-aarch64-a3-4
+    e2e-upstream_a2_4:
+        runs-on: linux-aarch64-a2b3-4
         strategy:
           fail-fast: false
           matrix:
@@ -235,7 +234,6 @@ jobs:
           env:
             VLLM_LOGGING_LEVEL: ERROR
             HF_HUB_OFFLINE: 0
-            HF_ENDPOINT: https://hf-mirror.com
         steps:
           - name: Checkout vllm-project/vllm-ascend repo
             uses: actions/checkout@v6
