@@ -173,7 +173,7 @@ if not vllm_version_is("0.20.1"):
         )
 else:
 
-    def compute_topk_logprobs(
+    def compute_topk_logprobs(  # type: ignore[misc]
         logits: torch.Tensor,
         num_logprobs: int,
         sampled_token_ids: torch.Tensor,
