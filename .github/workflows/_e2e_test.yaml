@@ -74,11 +74,14 @@ jobs:
         VLLM_USE_MODELSCOPE: True
         HF_HUB_OFFLINE: 1
     steps:
+      - name: Set global envs
+        run: |
+          echo "LD_LIBRARY_PATH=/usr/local/Ascend/driver/lib64/driver:$LD_LIBRARY_PATH" >> $GITHUB_ENV
+
       - name: Checkout vllm-project/vllm-ascend repo
         uses: actions/checkout@v6
       - name: Check npu and CANN info
         run: |
-          source /usr/local/Ascend/ascend-toolkit/set_env.sh
           npu-smi info
           cat /usr/local/Ascend/ascend-toolkit/latest/"$(uname -i)"-linux/ascend_toolkit_install.info
 
@@ -203,6 +206,10 @@ jobs:
         HF_HUB_OFFLINE: 1
         MODELSCOPE_HUB_FILE_LOCK: False
     steps:
+      - name: Set global envs
+        run: |
+          echo "LD_LIBRARY_PATH=/usr/local/Ascend/driver/lib64/driver:$LD_LIBRARY_PATH" >> $GITHUB_ENV
+        
       - name: Checkout vllm-project/vllm-ascend repo
         uses: actions/checkout@v6
         with:
@@ -210,8 +217,6 @@ jobs:
 
       - name: Check npu and CANN info
         run: |
-          sleep 1000
-          . /usr/local/Ascend/ascend-toolkit/set_env.sh
           npu-smi info
           cat /usr/local/Ascend/ascend-toolkit/latest/"$(uname -i)"-linux/ascend_toolkit_install.info
 
@@ -343,6 +348,10 @@ jobs:
         HCCL_BUFFSIZE: 1024
         HF_HUB_OFFLINE: 1
     steps:
+      - name: Set global envs
+        run: |
+          echo "LD_LIBRARY_PATH=/usr/local/Ascend/driver/lib64/driver:$LD_LIBRARY_PATH" >> $GITHUB_ENV
+
       - name: Checkout vllm-project/vllm-ascend repo
         uses: actions/checkout@v6
       - name: Check npu and CANN info
@@ -469,6 +478,11 @@ jobs:
         HCCL_BUFFSIZE: 1024
         HF_HUB_OFFLINE: 1
     steps:
+
+      - name: Set global envs
+        run: |
+          echo "LD_LIBRARY_PATH=/usr/local/Ascend/driver/lib64/driver:$LD_LIBRARY_PATH" >> $GITHUB_ENV
+
       - name: Checkout vllm-project/vllm-ascend repo
         uses: actions/checkout@v6
         with:
@@ -624,6 +638,10 @@ jobs:
         VLLM_USE_MODELSCOPE: True
         HF_HUB_OFFLINE: 1
     steps:
+      - name: Set global envs
+        run: |
+          echo "LD_LIBRARY_PATH=/usr/local/Ascend/driver/lib64/driver:$LD_LIBRARY_PATH" >> $GITHUB_ENV
+
       - name: Checkout vllm-project/vllm-ascend repo
         uses: actions/checkout@v6
         with:
@@ -756,6 +774,10 @@ jobs:
         VLLM_USE_MODELSCOPE: True
         HF_HUB_OFFLINE: 1
     steps:
+      - name: Set global envs
+        run: |
+          echo "LD_LIBRARY_PATH=/usr/local/Ascend/driver/lib64/driver:$LD_LIBRARY_PATH" >> $GITHUB_ENV
+
       - name: Check npu and CANN info
         run: |
           npu-smi info
@@ -865,6 +887,10 @@ jobs:
         VLLM_USE_MODELSCOPE: True
         HF_HUB_OFFLINE: 1
     steps:
+      - name: Set global envs
+        run: |
+          echo "LD_LIBRARY_PATH=/usr/local/Ascend/driver/lib64/driver:$LD_LIBRARY_PATH" >> $GITHUB_ENV
+
       - name: Check npu and CANN info
         run: |
           npu-smi info
