@@ -178,8 +178,7 @@ vllm serve /mnt/nfs_hw/weight/DeepSeek-V4-Flash-w8a8-mtp \
   --additional-config '{"enable_cpu_binding":true,"multistream_overlap_shared_expert":false}' \
   --compilation-config '{"cudagraph_mode":"FULL_DECODE_ONLY","cudagraph_capture_sizes":[2,4,6,8,10,12,14,16,18,20,22,24,32,36,40]}' \
   --model-loader-extra-config '{"enable_multithread_load":true,"num_threads":16}' \
-  --speculative-config '{"num_speculative_tokens": 1,"method": "mtp"}' \
-  --default-chat-template-kwargs '{"thinking": false}'
+  --speculative-config '{"num_speculative_tokens": 1,"method": "mtp"}'
 ```
 
 ::::
@@ -371,7 +370,6 @@ Before you start, please
         export HCCL_BUFFSIZE=2560
         export TASK_QUEUE_ENABLE=1
 
-        export ASCEND_BUFFER_POOL=4:8
         export LD_PRELOAD=/usr/lib/aarch64-linux-gnu/libjemalloc.so.2:$LD_PRELOAD
         export USE_MULTI_GROUPS_KV_CACHE=1
         export USE_MULTI_BLOCK_POOL=1
@@ -450,7 +448,6 @@ Before you start, please
         export HCCL_BUFFSIZE=2560
         export TASK_QUEUE_ENABLE=1
 
-        export ASCEND_BUFFER_POOL=4:8
         export LD_PRELOAD=/usr/lib/aarch64-linux-gnu/libjemalloc.so.2:$LD_PRELOAD
         export USE_MULTI_GROUPS_KV_CACHE=1
         export USE_MULTI_BLOCK_POOL=1
@@ -526,7 +523,6 @@ Before you start, please
         export OMP_NUM_THREADS=10
         export PYTORCH_NPU_ALLOC_CONF=expandable_segments:True
         export HCCL_BUFFSIZE=1024
-        export ASCEND_BUFFER_POOL=4:8
         export DYNAMIC_EPLB="true"
 
         export USE_MULTI_GROUPS_KV_CACHE=1
@@ -735,7 +731,6 @@ Before you start, please
     export PYTORCH_NPU_ALLOC_CONF=expandable_segments:True
     export HCCL_BUFFSIZE=1024
     export TASK_QUEUE_ENABLE=1
-    export ASCEND_BUFFER_POOL=4:8
 
     export USE_MULTI_GROUPS_KV_CACHE=1
     export USE_MULTI_BLOCK_POOL=1
@@ -769,7 +764,6 @@ Before you start, please
         --enable-auto-tool-choice \
         --reasoning-parser deepseek_v4 \
         --additional-config '{"enable_cpu_binding":"True"}' \
-        --default-chat-template-kwargs '{"thinking": true,"reasoning_effort": "high"}' \
         --compilation-config '{"cudagraph_mode": "FULL_DECODE_ONLY"}' \
         --kv-transfer-config \
         '{"kv_connector": "MooncakeHybridConnector",
@@ -823,7 +817,6 @@ For each P instance, only these two configuration values need to be modified: â€
     export PYTORCH_NPU_ALLOC_CONF=expandable_segments:True
     export HCCL_BUFFSIZE=1024
     export TASK_QUEUE_ENABLE=1
-    export ASCEND_BUFFER_POOL=4:8
 
     export USE_MULTI_GROUPS_KV_CACHE=1
     export USE_MULTI_BLOCK_POOL=1
