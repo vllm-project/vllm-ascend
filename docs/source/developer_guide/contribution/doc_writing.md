@@ -42,6 +42,7 @@ If you put ``model-code`` blocks in other directories, Sphinx builds will not au
 :block_name: your_unique_block_name
 :converter_tag: single_node
 :test_case_path: tests/e2e/nightly/single_node/models/configs/your_model.yaml
+:case_index: 0
 
 # You can add any extra content here, e.g. code, explanations, or comments.
 {{ generated }}
@@ -74,10 +75,19 @@ See existing files under `tests/e2e/nightly/single_node/models/configs/`.
 
 ````md
 ```{model-code}
-:block_name: your_unique_block_name
+:block_name: your_unique_block_name_0
 :converter_tag: multi_node
 :test_case_path: tests/e2e/nightly/multi_node/config/your_model.yaml
 :host_index: 0
+```
+````
+
+````md
+```{model-code}
+:block_name: your_unique_block_name_1
+:converter_tag: multi_node
+:test_case_path: tests/e2e/nightly/multi_node/config/your_model.yaml
+:host_index: 1
 ```
 ````
 
@@ -85,10 +95,22 @@ See existing files under `tests/e2e/nightly/single_node/models/configs/`.
 
 ````md
 ```{model-code}
-:block_name: your_unique_block_name
+:block_name: your_unique_block_name_0
 :converter_tag: multi_node
 :test_case_path: tests/e2e/nightly/multi_node/config/your_model.yaml
 :host_index: 0
+
+# You can add any extra content here, e.g. code, explanations, or comments.
+{{ generated }}
+```
+````
+
+````md
+```{model-code}
+:block_name: your_unique_block_name_1
+:converter_tag: multi_node
+:test_case_path: tests/e2e/nightly/multi_node/config/your_model.yaml
+:host_index: 1
 
 # You can add any extra content here, e.g. code, explanations, or comments.
 {{ generated }}
@@ -131,6 +153,10 @@ python3 tools/docs_codegen/cli.py \
 ```
 
 By default, artifacts are written to: `docs/_build/doc_codegen/<doc_stem>/<block_name>.sh`.
+
+:::{note}
+After the script is generated, please make sure to check whether the generated content is runnable, especially key parts such as environment variables and command-line parameters.
+:::
 
 #### Concrete YAML-to-shell example
 
