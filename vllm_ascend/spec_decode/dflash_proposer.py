@@ -176,6 +176,7 @@ class AscendDflashProposer(AscendEagleProposer):
                 query_start_loc=self.arange_dflash[: num_reqs + 1] * num_query_per_req,
                 query_start_loc_cpu=torch.from_numpy(self.token_arange_np[: num_reqs + 1]).clone() * num_query_per_req,
                 seq_lens_cpu=self.runner.optimistic_seq_lens_cpu,
+                seq_lens_cpu_upper_bound=self.runner.optimistic_seq_lens_cpu,
                 seq_lens=self.runner.seq_lens[:num_reqs],
                 num_reqs=num_reqs,
                 num_actual_tokens=num_query_tokens,

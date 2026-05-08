@@ -18,6 +18,17 @@ from vllm_ascend.attention.attention_v1 import AscendAttentionState
 from vllm_ascend.attention.utils import AscendCommonAttentionMetadata
 from vllm_ascend.spec_decode.draft_proposer import AscendDraftModelProposer
 from vllm_ascend.spec_decode.eagle_proposer import AscendEagleProposer
+from vllm_ascend.utils import vllm_version_is
+
+# vLLM #40732 moved `SpecDecodeBaseProposer` (and its `CpuGpuBuffer` import)
+# out of `vllm.v1.spec_decode.eagle` into `vllm.v1.spec_decode.llm_base_proposer`.
+# Pick the right patch path depending on the installed vllm version so the
+# tests can mock the buffer factory.
+_CPU_GPU_BUFFER_TARGET = (
+    "vllm.v1.spec_decode.eagle.CpuGpuBuffer"
+    if vllm_version_is("0.19.1")
+    else "vllm.v1.spec_decode.llm_base_proposer.CpuGpuBuffer"
+)
 
 
 class TestEagleProposerInitialization(TestBase):
@@ -52,13 +63,15 @@ class TestEagleProposerInitialization(TestBase):
         self.vllm_config.parallel_config.enable_expert_parallel = False
         self.vllm_config.speculative_config.draft_tensor_parallel_size = 1
         self.vllm_config.speculative_config.num_speculative_tokens = 2
+        self.vllm_config.speculative_config.parallel_drafting = False
         self.vllm_config.speculative_config.speculative_token_tree = str([(i + 1) * (0,) for i in range(2)])
+        self.vllm_config.speculative_config.draft_model_config.hf_config = MagicMock(spec=[])
         self.vllm_config.speculative_config.draft_model_config.uses_xdrope_dim = 0
         self.vllm_config.speculative_config.draft_model_config.uses_mrope = False
         self.vllm_config.speculative_config.disable_padded_drafter_batch = False
         self.vllm_config.additional_config = None
 
-        self.mock_cpugpubuffer = patch("vllm.v1.spec_decode.eagle.CpuGpuBuffer")
+        self.mock_cpugpubuffer = patch(_CPU_GPU_BUFFER_TARGET)
         self.mock_cpugpubuffer.start()
         self.mock_supports_multimodal_inputs = patch(
             "vllm.multimodal.registry.MultiModalRegistry.supports_multimodal_inputs", return_value=False
@@ -77,6 +90,7 @@ class TestEagleProposerInitialization(TestBase):
     def test_initialization_eagle_graph(self):
         self.vllm_config.speculative_config.method = "eagle"
         self.vllm_config.speculative_config.draft_model_config.get_hidden_size.return_value = 4096
+        self.vllm_config.speculative_config.draft_model_config.get_inputs_embeds_size.return_value = 4096
         self.vllm_config.speculative_config.draft_model_config.uses_mrope = False
         self.vllm_config.compilation_config.mode = CompilationMode.VLLM_COMPILE
         self.vllm_config.model_config.enforce_eager = False
@@ -100,6 +114,7 @@ class TestEagleProposerInitialization(TestBase):
     def test_initialization_eagle3_enforce_eager(self):
         self.vllm_config.speculative_config.method = "eagle3"
         self.vllm_config.speculative_config.draft_model_config.get_hidden_size.return_value = 2048
+        self.vllm_config.speculative_config.draft_model_config.get_inputs_embeds_size.return_value = 2048
         self.vllm_config.compilation_config.mode = CompilationMode.NONE
         self.vllm_config.compilation_config.pass_config = MagicMock()
         self.vllm_config.compilation_config.pass_config.enable_sp = False
@@ -117,6 +132,7 @@ class TestEagleProposerInitialization(TestBase):
     def test_initialization_eagle3_full_graph_async(self):
         self.vllm_config.speculative_config.method = "eagle3"
         self.vllm_config.speculative_config.draft_model_config.get_hidden_size.return_value = 2048
+        self.vllm_config.speculative_config.draft_model_config.get_inputs_embeds_size.return_value = 2048
         self.vllm_config.compilation_config.mode = CompilationMode.VLLM_COMPILE
         self.vllm_config.model_config.enforce_eager = False
         self.vllm_config.speculative_config.enforce_eager = False
@@ -134,6 +150,7 @@ class TestEagleProposerInitialization(TestBase):
     def test_initialization_mtp_full_graph_async(self):
         self.vllm_config.speculative_config.method = "mtp"
         self.vllm_config.speculative_config.draft_model_config.get_hidden_size.return_value = 2048
+        self.vllm_config.speculative_config.draft_model_config.get_inputs_embeds_size.return_value = 2048
         self.vllm_config.compilation_config.mode = CompilationMode.VLLM_COMPILE
         self.vllm_config.model_config.enforce_eager = False
         self.vllm_config.speculative_config.enforce_eager = False
@@ -197,7 +214,7 @@ class TestEagleProposerLoadModel(TestBase):
         self.vllm_config.additional_config = None
         init_ascend_config(self.vllm_config)
 
-        self.mock_cpugpubuffer = patch("vllm.v1.spec_decode.eagle.CpuGpuBuffer")
+        self.mock_cpugpubuffer = patch(_CPU_GPU_BUFFER_TARGET)
         self.mock_cpugpubuffer.start()
         self.mock_supports_multimodal_inputs = patch(
             "vllm.multimodal.registry.MultiModalRegistry.supports_multimodal_inputs", return_value=False
@@ -333,7 +350,7 @@ class TestEagleProposerDummyRun(TestBase):
         self.vllm_config.additional_config = None
         init_ascend_config(self.vllm_config)
 
-        self.mock_cpugpubuffer = patch("vllm.v1.spec_decode.eagle.CpuGpuBuffer")
+        self.mock_cpugpubuffer = patch(_CPU_GPU_BUFFER_TARGET)
         self.mock_cpugpubuffer.start()
         self.mock_supports_multimodal_inputs = patch(
             "vllm.multimodal.registry.MultiModalRegistry.supports_multimodal_inputs", return_value=False
@@ -484,7 +501,7 @@ class TestEagleProposerHelperMethods(TestBase):
         self.vllm_config.additional_config = None
         init_ascend_config(self.vllm_config)
 
-        self.mock_cpugpubuffer = patch("vllm.v1.spec_decode.eagle.CpuGpuBuffer")
+        self.mock_cpugpubuffer = patch(_CPU_GPU_BUFFER_TARGET)
         self.mock_cpugpubuffer.start()
         self.mock_supports_multimodal_inputs = patch(
             "vllm.multimodal.registry.MultiModalRegistry.supports_multimodal_inputs", return_value=False
@@ -559,7 +576,7 @@ class TestEagleProposerPropose:
         self.vllm_config.additional_config = None
         init_ascend_config(self.vllm_config)
 
-        self.mock_cpugpubuffer = patch("vllm.v1.spec_decode.eagle.CpuGpuBuffer")
+        self.mock_cpugpubuffer = patch(_CPU_GPU_BUFFER_TARGET)
         self.mock_cpugpubuffer.start()
         self.mock_supports_multimodal_inputs = patch(
             "vllm.multimodal.registry.MultiModalRegistry.supports_multimodal_inputs", return_value=False
@@ -1264,7 +1281,7 @@ class TestPrepareNextTokenIdsPadded(TestBase):
         self.vllm_config.additional_config = None
         init_ascend_config(self.vllm_config)
 
-        self.mock_cpugpubuffer = patch("vllm.v1.spec_decode.eagle.CpuGpuBuffer", MockCpuGpuBuffer)
+        self.mock_cpugpubuffer = patch(_CPU_GPU_BUFFER_TARGET, MockCpuGpuBuffer)
         self.mock_cpugpubuffer.start()
         self.mock_supports_multimodal_inputs = patch(
             "vllm.multimodal.registry.MultiModalRegistry.supports_multimodal_inputs", return_value=False
@@ -1748,6 +1765,7 @@ class TestRunMergedDraft(TestBase):
         self.vllm_config.speculative_config.use_local_argmax_reduction = False
         self.vllm_config.speculative_config.draft_tensor_parallel_size = 1
         self.vllm_config.speculative_config.speculative_token_tree = str([(i + 1) * (0,) for i in range(3)])
+        self.vllm_config.speculative_config.draft_model_config.hf_config = MagicMock(spec=[])
         self.vllm_config.speculative_config.draft_model_config.get_hidden_size.return_value = 4
         self.vllm_config.speculative_config.draft_model_config.get_inputs_embeds_size.return_value = 4
         self.vllm_config.speculative_config.draft_model_config.uses_mrope = False
@@ -1756,7 +1774,7 @@ class TestRunMergedDraft(TestBase):
         self.vllm_config.additional_config = None
         init_ascend_config(self.vllm_config)
 
-        self.mock_cpugpubuffer = patch("vllm.v1.spec_decode.eagle.CpuGpuBuffer", MockCpuGpuBuffer)
+        self.mock_cpugpubuffer = patch(_CPU_GPU_BUFFER_TARGET, MockCpuGpuBuffer)
         self.mock_cpugpubuffer.start()
         self.mock_supports_multimodal_inputs = patch(
             "vllm.multimodal.registry.MultiModalRegistry.supports_multimodal_inputs", return_value=False
@@ -1877,7 +1895,14 @@ class TestRunMergedDraft(TestBase):
 
         import vllm.v1.spec_decode.eagle
 
-        assert hasattr(vllm.v1.spec_decode.eagle, "CpuGpuBuffer")
+        # `CpuGpuBuffer` was re-exported from `eagle` until vLLM #40732 moved
+        # `SpecDecodeBaseProposer` (and the import) into `llm_base_proposer`.
+        if vllm_version_is("0.19.1"):
+            assert hasattr(vllm.v1.spec_decode.eagle, "CpuGpuBuffer")
+        else:
+            import vllm.v1.spec_decode.llm_base_proposer
+
+            assert hasattr(vllm.v1.spec_decode.llm_base_proposer, "CpuGpuBuffer")
         RunnerCls = vllm.v1.spec_decode.eagle.SpecDecodeBaseProposer
         for attr in ("_get_positions", "_set_positions"):
             assert hasattr(RunnerCls, attr), f"SpecDecodeBaseProposer.{attr} not found"
