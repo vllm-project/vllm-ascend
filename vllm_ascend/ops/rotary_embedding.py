@@ -23,6 +23,7 @@ import torch_npu
 from vllm.config import get_current_vllm_config
 from vllm.model_executor.layers.rotary_embedding import (
     DeepseekScalingRotaryEmbedding,
+    Gemma4RotaryEmbedding,
     MRotaryEmbedding,
     RotaryEmbedding,
     YaRNScalingRotaryEmbedding,
@@ -248,7 +249,33 @@ class AscendRotaryEmbedding(RotaryEmbedding):
         return torch.ops.vllm.npu_rotary_embedding(
             positions, query, key, self.cos_sin_cache, self.head_size, self.rotary_dim, is_neox_style
         )
+class AscendGemma4RotaryEmbedding(Gemma4RotaryEmbedding):
+    """Ascend OOT wrapper for Gemma4 proportional RoPE."""
 
+    def __init__(
+        self,
+        head_size: int,
+        rotary_dim: int,
+        max_position_embeddings: int,
+        base: float,
+        is_neox_style: bool,
+        dtype: torch.dtype,
+    ) -> None:
+        super().__init__(head_size, rotary_dim, max_position_embeddings, base, is_neox_style, dtype)
+        vllm_config = get_current_vllm_config()
+        self.use_mtp = vllm_config.speculative_config and vllm_config.speculative_config.method == "mtp"
+        _record_cos_sin_cache(self.cos_sin_cache)
+        _record_cos_and_sin_cache_interleaved(self.cos_sin_cache)
+
+    def forward_oot(
+        self,
+        positions: torch.Tensor,
+        query: torch.Tensor,
+        key: torch.Tensor,
+        offsets: torch.Tensor | None = None,
+        is_neox_style_override: bool | None = None,
+    ):
+        return AscendRotaryEmbedding.forward_oot(self, positions, query, key, offsets, is_neox_style_override)
 
 class AscendYaRNRotaryEmbedding(YaRNScalingRotaryEmbedding):
     def __init__(
