@@ -49,9 +49,7 @@ plugins.md029.enabled = false # ol-prefix
 # TODO: according to PEP8, there should be 120 characters per line
 line-length = 120
 # Folder to be modified
-exclude = [
-    "tests/e2e/nightly/single_node/",
-]
+exclude = []
 
 [tool.ruff.lint]
 select = [
