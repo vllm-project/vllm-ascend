@@ -181,13 +181,15 @@ When code must work with both old and new vLLM versions, use version guards:
 
     from vllm_ascend.utils import vllm_version_is
 
-    if vllm_version_is(">=0.19.0"):
-        # new version logic
+    if vllm_version_is("0.19.0"):
+        # old compatible release logic
     else:
-        # old version logic
+        # new upstream/main logic
 
 The version number comes from conf.py's `main_vllm_tag` field. Use semantic
 version tags rather than commit hashes for clarity and stability.
+
+Use exact version checks only: `vllm_version_is("0.19.0")` or `not vllm_version_is("0.19.0")`.
 
 ## Pre-Completion Checklist
 

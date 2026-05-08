@@ -48,8 +48,8 @@ def _run_git(repo: Path, *args: str) -> str:
     return result.stdout
 
 
-def _get_changed_files(repo: Path) -> list[str]:
-    """Return list of modified/added files in the working tree."""
+def _get_tracked_changed_files(repo: Path) -> list[str]:
+    """Return tracked modified/deleted/staged files in the working tree."""
     output = _run_git(repo, "diff", "--name-only", "HEAD")
     staged = _run_git(repo, "diff", "--name-only", "--cached")
     all_files = set()
@@ -94,33 +94,26 @@ def main() -> None:
         print(f"Error: {repo} is not a git repository", file=sys.stderr)
         sys.exit(1)
 
-    # Check for changed files
-    changed = _get_changed_files(repo)
+    # Check for changed files, including newly-created source files.
+    tracked_changed = _get_tracked_changed_files(repo)
+    untracked = _get_untracked_files(repo)
+    changed = sorted(set(tracked_changed + untracked))
+
+    # Check for forbidden files before the no-op case so stray logs fail loudly.
+    forbidden = _check_forbidden(changed)
+    if forbidden:
+        print(
+            f"Error: forbidden files in working tree:\n"
+            + "\n".join(f"  - {f}" for f in forbidden),
+            file=sys.stderr,
+        )
+        sys.exit(1)
+
     if not changed:
         print("Error: no changes to commit", file=sys.stderr)
         sys.exit(1)
 
-    # Check for forbidden files in changes
-    forbidden_in_changes = _check_forbidden(changed)
-    if forbidden_in_changes:
-        print(
-            f"Error: forbidden files in working tree:\n"
-            + "\n".join(f"  - {f}" for f in forbidden_in_changes),
-            file=sys.stderr,
-        )
-        sys.exit(1)
-
-    # Check for forbidden untracked files
-    untracked = _get_untracked_files(repo)
-    forbidden_untracked = _check_forbidden(untracked)
-    if forbidden_untracked:
-        print(
-            f"Warning: forbidden untracked files detected (not blocking commit):\n"
-            + "\n".join(f"  - {f}" for f in forbidden_untracked),
-            file=sys.stderr,
-        )
-
-    # Stage specific files (not git add .)
+    # Stage specific files (not git add .).
     for f in changed:
         _run_git(repo, "add", f)
 

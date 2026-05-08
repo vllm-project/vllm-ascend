@@ -46,12 +46,13 @@ Files not in this table (docs/, tests/, benchmarks/) generally don't need adapta
 ## Adaptation Rules
 
 1. **Use `vllm_version_is()` for version compatibility:**
+   Use exact version strings only, optionally negated with `not`.
    ```python
    from vllm_ascend.utils import vllm_version_is
-   if vllm_version_is(">=0.19.0"):
-       # new API
+   if vllm_version_is("0.19.0"):
+       # old compatible release API
    else:
-       # old API
+       # new upstream/main API
    ```
 
 2. **For signature changes**, find every call site with `grep -r` and update.
