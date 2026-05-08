@@ -80,16 +80,6 @@ jobs:
         run: |
           npu-smi info
           cat /usr/local/Ascend/ascend-toolkit/latest/"$(uname -i)"-linux/ascend_toolkit_install.info
-          python3 - <<'PY'
-          import torch
-          import torch_npu  # noqa: F401
-
-          print("torch:", torch.__version__)
-          print("torch.npu.is_available:", torch.npu.is_available())
-          print("torch.npu.device_count:", torch.npu.device_count())
-          if not torch.npu.is_available() or torch.npu.device_count() < 1:
-              raise SystemExit("NPU is not available")
-          PY
 
       - name: Config mirrors
         run: |
@@ -136,6 +126,19 @@ jobs:
           git clone --depth 1 --branch "$VLLM_OMNI_REF" "$VLLM_OMNI_REPO" vllm-omni
           cd vllm-omni
           VLLM_OMNI_TARGET_DEVICE=npu uv pip install -v -e .
+
+      - name: Check torch NPU availability
+        run: |
+          python3 - <<'PY'
+          import torch
+          import torch_npu  # noqa: F401
+
+          print("torch:", torch.__version__)
+          print("torch.npu.is_available:", torch.npu.is_available())
+          print("torch.npu.device_count:", torch.npu.device_count())
+          if not torch.npu.is_available() or torch.npu.device_count() < 1:
+              raise SystemExit("NPU is not available")
+          PY
 
       - name: Run MindIE-SD/vLLM-Omni backend smoke
         run: |
