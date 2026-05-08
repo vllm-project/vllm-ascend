@@ -41,6 +41,7 @@ public:
 
     __aicore__ inline void Init(GM_ADDR logits, GM_ADDR temperature,
                                  GM_ADDR seeds, GM_ADDR pos,
+                                 GM_ADDR idxMapping,
                                  GM_ADDR sampled, GM_ADDR workspace,
                                  const GumbelSampleTilingData& t,
                                  TPipe* pipePtr);  // [opt-1] TPipe 移到核函数入口，传指针
@@ -63,12 +64,14 @@ private:
     GlobalTensor<float>   tempGm_;
     GlobalTensor<int64_t> seedsGm_;
     GlobalTensor<int64_t> posGm_;
+    GlobalTensor<int64_t> idxMappingGm_;
     GlobalTensor<int64_t> sampledGm_;
 
     // per-req 标量 buffer（Init 一次性搬入 UB，避免 GlobalTensor::GetValue，约束 #7）
     TBuf<TPosition::VECCALC> tempUbBuf_;
     TBuf<TPosition::VECCALC> seedsUbBuf_;
     TBuf<TPosition::VECCALC> posUbBuf_;
+    TBuf<TPosition::VECCALC> idxMappingUbBuf_;
 
     // tile 临时 buffer
     TQue<QuePosition::VECIN, 2>  inQueueLogits_;   // [opt-2] DoubleBuffer（单→双缓冲）
@@ -80,7 +83,7 @@ private:
     TBuf<TPosition::VECCALC> maskBuf_;       // Compare 输出 bitmap (uint8)
     TBuf<TPosition::VECCALC> sentinelBuf_;   // float 全 +INF（argmax sentinel）
 
-    uint32_t numReqs_     = 0;
+    uint32_t numTokens_   = 0;  // total token slots (= logits.dim(0))
     uint32_t vocabSize_   = 0;
     uint32_t blockSize_   = GUMBEL_BLOCK_SIZE;
     uint32_t numTiles_    = 0;
@@ -95,11 +98,12 @@ private:
 template <bool APPLY_TEMPERATURE>
 __aicore__ inline void GumbelSampleOp<APPLY_TEMPERATURE>::Init(
     GM_ADDR logits, GM_ADDR temperature, GM_ADDR seeds, GM_ADDR pos,
+    GM_ADDR idxMapping,
     GM_ADDR sampled, GM_ADDR /*workspace*/, const GumbelSampleTilingData& t,
     TPipe* pipePtr)  // [opt-1] 接受外部 TPipe 指针
 {
     pipe_ = pipePtr;  // [opt-1] 绑定外部 TPipe
-    numReqs_     = t.numReqs;
+    numTokens_   = t.numTokens;
     vocabSize_   = t.vocabSize;
     blockSize_   = t.blockSize;
     numTiles_    = t.numTiles;
@@ -122,12 +126,14 @@ __aicore__ inline void GumbelSampleOp<APPLY_TEMPERATURE>::Init(
     tempGm_.SetGlobalBuffer(reinterpret_cast<__gm__ float*>(temperature));
     seedsGm_.SetGlobalBuffer(reinterpret_cast<__gm__ int64_t*>(seeds));
     posGm_.SetGlobalBuffer(reinterpret_cast<__gm__ int64_t*>(pos));
+    idxMappingGm_.SetGlobalBuffer(reinterpret_cast<__gm__ int64_t*>(idxMapping));
     sampledGm_.SetGlobalBuffer(reinterpret_cast<__gm__ int64_t*>(sampled));
 
     auto Align32 = [](uint32_t bytes) -> uint32_t { return ((bytes + 31u) / 32u) * 32u; };
-    pipe_->InitBuffer(tempUbBuf_,  Align32(numReqs_ * static_cast<uint32_t>(sizeof(float))));
-    pipe_->InitBuffer(seedsUbBuf_, Align32(numReqs_ * static_cast<uint32_t>(sizeof(int64_t))));
-    pipe_->InitBuffer(posUbBuf_,   Align32(numReqs_ * static_cast<uint32_t>(sizeof(int64_t))));
+    pipe_->InitBuffer(tempUbBuf_,       Align32(t.numReqStates * static_cast<uint32_t>(sizeof(float))));
+    pipe_->InitBuffer(seedsUbBuf_,      Align32(t.numReqStates * static_cast<uint32_t>(sizeof(int64_t))));
+    pipe_->InitBuffer(idxMappingUbBuf_, Align32(t.numTokens * static_cast<uint32_t>(sizeof(int64_t))));
+    pipe_->InitBuffer(posUbBuf_,        Align32(t.numTokens * static_cast<uint32_t>(sizeof(int64_t))));
 
     pipe_->InitBuffer(inQueueLogits_,   2, GUMBEL_BLOCK_SIZE * sizeof(float));  // [opt-2] DoubleBuffer
     pipe_->InitBuffer(outQueueSampled_, 1, 32);
@@ -150,15 +156,16 @@ __aicore__ inline void GumbelSampleOp<APPLY_TEMPERATURE>::Init(
     }
     PipeBarrier<PIPE_V>();
 
-    // 一次性把 temperature/seeds/pos 搬入 UB（约束 #7：禁 GlobalTensor::GetValue）
+    // 一次性把 temperature/seeds/idx_mapping/pos 搬入 UB（约束 #7：禁 GlobalTensor::GetValue）
     {
-        LocalTensor<float>   tempLocal  = tempUbBuf_.Get<float>();
-        LocalTensor<int64_t> seedsLocal = seedsUbBuf_.Get<int64_t>();
-        LocalTensor<int64_t> posLocal   = posUbBuf_.Get<int64_t>();
+        LocalTensor<float>   tempLocal       = tempUbBuf_.Get<float>();
+        LocalTensor<int64_t> seedsLocal      = seedsUbBuf_.Get<int64_t>();
+        LocalTensor<int64_t> idxMappingLocal = idxMappingUbBuf_.Get<int64_t>();
+        LocalTensor<int64_t> posLocal        = posUbBuf_.Get<int64_t>();
 
         DataCopyExtParams pTemp;
         pTemp.blockCount = 1;
-        pTemp.blockLen   = numReqs_ * static_cast<uint32_t>(sizeof(float));
+        pTemp.blockLen   = t.numReqStates * static_cast<uint32_t>(sizeof(float));
         pTemp.srcStride  = 0;
         pTemp.dstStride  = 0;
         pTemp.rsv        = 0;
@@ -167,14 +174,28 @@ __aicore__ inline void GumbelSampleOp<APPLY_TEMPERATURE>::Init(
 
         DataCopyExtParams pSeeds;
         pSeeds.blockCount = 1;
-        pSeeds.blockLen   = numReqs_ * static_cast<uint32_t>(sizeof(int64_t));
+        pSeeds.blockLen   = t.numReqStates * static_cast<uint32_t>(sizeof(int64_t));
         pSeeds.srcStride  = 0;
         pSeeds.dstStride  = 0;
         pSeeds.rsv        = 0;
         DataCopyPadExtParams<int64_t> ppSeeds{false, 0, 0, 0};
         DataCopyPad(seedsLocal, seedsGm_, pSeeds, ppSeeds);
 
-        DataCopyExtParams pPos = pSeeds;
+        DataCopyExtParams pIdxMapping;
+        pIdxMapping.blockCount = 1;
+        pIdxMapping.blockLen   = t.numTokens * static_cast<uint32_t>(sizeof(int64_t));
+        pIdxMapping.srcStride  = 0;
+        pIdxMapping.dstStride  = 0;
+        pIdxMapping.rsv        = 0;
+        DataCopyPadExtParams<int64_t> ppIdxMapping{false, 0, 0, 0};
+        DataCopyPad(idxMappingLocal, idxMappingGm_, pIdxMapping, ppIdxMapping);
+
+        DataCopyExtParams pPos;
+        pPos.blockCount = 1;
+        pPos.blockLen   = t.numTokens * static_cast<uint32_t>(sizeof(int64_t));
+        pPos.srcStride  = 0;
+        pPos.dstStride  = 0;
+        pPos.rsv        = 0;
         DataCopyPadExtParams<int64_t> ppPos{false, 0, 0, 0};
         DataCopyPad(posLocal, posGm_, pPos, ppPos);
 
@@ -324,11 +345,18 @@ template <bool APPLY_TEMPERATURE>
 __aicore__ inline void GumbelSampleOp<APPLY_TEMPERATURE>::ProcessOneRow(uint32_t reqIdx)
 {
     // ----- (1) 读 per-req 标量（来自 Init 阶段已 DataCopyPad 到 UB 的 buffer）-----
-    LocalTensor<float>   tempLocal  = tempUbBuf_.Get<float>();
-    LocalTensor<int64_t> seedsLocal = seedsUbBuf_.Get<int64_t>();
-    LocalTensor<int64_t> posLocal   = posUbBuf_.Get<int64_t>();
-    float   temp   = tempLocal.GetValue(reqIdx);
-    int64_t seed64 = seedsLocal.GetValue(reqIdx);
+    LocalTensor<float>   tempLocal       = tempUbBuf_.Get<float>();
+    LocalTensor<int64_t> seedsLocal      = seedsUbBuf_.Get<int64_t>();
+    LocalTensor<int64_t> idxMappingLocal = idxMappingUbBuf_.Get<int64_t>();
+    LocalTensor<int64_t> posLocal        = posUbBuf_.Get<int64_t>();
+
+    // idx_mapping[reqIdx] → reqStateIdx，仅用于索引 temperature 和 seeds
+    int64_t  reqStateIdx64 = idxMappingLocal.GetValue(reqIdx);
+    uint32_t reqStateIdx   = static_cast<uint32_t>(reqStateIdx64);
+
+    float   temp   = tempLocal.GetValue(reqStateIdx);   // temperature[idx_mapping[reqIdx]]
+    int64_t seed64 = seedsLocal.GetValue(reqStateIdx);  // seeds[idx_mapping[reqIdx]]
+    // pos 和 logits 按 batch_idx（reqIdx）直接索引
     int64_t posI64 = posLocal.GetValue(reqIdx);
     int32_t pI32   = static_cast<int32_t>(posI64 & 0xFFFFFFFF);
 
