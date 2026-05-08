@@ -69,6 +69,8 @@ _VLLM_LOG_PREFIX_RE = re.compile(
 _PROFILER_PREFIX_RE = re.compile(r"^\d{4}-\d{2}-\d{2}\s+\d{2}:\d{2}:\d{2},\d+\s+-\s+\d+\s+-\s+\S+\s+-\s+[A-Z]+\s+-\s*")
 _VLLM_VERSION_RE = re.compile(r"vLLM\s+\S*\+g([0-9a-f]{7,12})\b")
 _WORKER_PID_PREFIX_RE = re.compile(r"^\([^)]*pid=\d+\)\s*")
+_ERROR_NUMERIC_SUFFIX_RE = re.compile(r"\s*\[\d+(?:,\d+)*\]\s*$")
+_ERROR_LOCATION_SUFFIX_RE = re.compile(r"\s*\[[^\[\]]*\b[\w./-]+\.[A-Za-z0-9]+\b:\d+[^\[\]]*\]\s*$")
 _MAX_CONTEXT_LINES = 50
 
 
@@ -129,9 +131,16 @@ def _normalize_error_match(error_type: str, error_msg: str) -> tuple[str, str]:
     full_error = f"{error_type}: {error_msg}"
     is_env_flake = any(re.search(pattern, full_error) for pattern in _ENV_FLAKE_PATTERNS)
     error_msg = re.sub(r"(\\n|\n).*$", "", error_msg)
-    error_msg = re.sub(r"\\['\"]", "'", error_msg)
-    error_msg = error_msg.strip()
-    error_msg = re.sub(r"""(?:\\[nr]|['"])+$""", "", error_msg).strip()
+    error_msg = re.sub(r"\\['\"]", "'", error_msg).strip()
+    error_msg = re.sub(r"(?:\\[nr])+$", "", error_msg).strip(" \t,")
+    while True:
+        updated = error_msg
+        for suffix_re in (_ERROR_NUMERIC_SUFFIX_RE, _ERROR_LOCATION_SUFFIX_RE):
+            updated = suffix_re.sub("", updated).strip()
+        if updated == error_msg:
+            break
+        error_msg = updated
+    error_msg = error_msg.strip(" \t,")
     return error_msg, ("Environment Flake" if is_env_flake else "Code Bug")
 
 
@@ -1026,17 +1035,25 @@ def render_json(result: dict) -> str:
 def select_representative_test_cases(distinct_errors: list[dict]) -> list[str]:
     representatives: list[str] = []
     used_cases: set[str] = set()
+    used_files: set[str] = set()
 
     for error in distinct_errors:
         cases = [_base_case_name(test_case) for test_case in error.get("failed_test_cases", []) if test_case]
-        if not cases:
+        if cases:
+            selected = next((test_case for test_case in cases if test_case not in used_cases), None)
+            if selected is None:
+                continue
+            representatives.append(selected)
+            used_cases.add(selected)
+            used_files.add(selected.split("::")[0])
             continue
 
-        selected = next((test_case for test_case in cases if test_case not in used_cases), None)
-        if selected is None:
+        files = [test_file for test_file in error.get("failed_test_files", []) if test_file]
+        selected_file = next((test_file for test_file in files if test_file not in used_files), None)
+        if selected_file is None:
             continue
-        representatives.append(selected)
-        used_cases.add(selected)
+        representatives.append(selected_file)
+        used_files.add(selected_file)
 
     return representatives
 
@@ -1056,7 +1073,7 @@ def build_bisect_payload(result: dict) -> dict:
         "representative_test_cases": representative_test_cases,
         "test_cmds": test_cmds,
         "test_cmd": "; ".join(test_cmds),
-        "skip_reason": None if test_cmds else "No representative failed test cases found",
+        "skip_reason": None if test_cmds else "No representative failed tests found",
     }
 
 

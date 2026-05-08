@@ -1,0 +1,735 @@
+#
+# Copyright (c) 2025 Huawei Technologies Co., Ltd. All Rights Reserved.
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+#
+
+name: Main2Main Auto
+run-name: >-
+  ${{
+    github.event_name == 'workflow_dispatch' &&
+    format('Main2Main Auto target-{0}', github.event.inputs.target_commit || 'main') ||
+    'Main2Main Auto detect'
+  }}
+
+on:
+  schedule:
+    - cron: '0 14 * * *'
+  workflow_dispatch:
+    inputs:
+      target_commit:
+        description: 'Target vLLM commit hash (default: latest vLLM main HEAD)'
+        required: false
+        default: ''
+      fix_round_limit:
+        description: 'Maximum number of direct fix rounds before entering bisect'
+        required: false
+        default: '3'
+      bisect_round_limit:
+        description: 'Maximum number of bisect-fix rounds'
+        required: false
+        default: '2'
+      mock_claude:
+        description: 'Mock Claude CLI for workflow testing (off|success|nochange)'
+        required: false
+        default: 'off'
+
+permissions:
+  contents: write
+  pull-requests: write
+  issues: write
+  actions: write
+
+defaults:
+  run:
+    shell: bash -el {0}
+
+env:
+  UPSTREAM_REPO: vllm-project/vllm-ascend
+  WORK_REPO_DIR: vllm-ascend
+  VLLM_DIR: vllm-upstream
+  NODE_VERSION: 18.20.8
+  MAIN2MAIN_SUITE: e2e-main2main  
+  MAIN2MAIN_MODEL: ${{ vars.MAIN2MAIN_MODEL || 'qwen3.6-plus' }}
+  CLAUDE_ALLOWED_TOOLS: Bash(git *),Bash(gh *),Bash(grep *),Bash(sed *),Bash(jq *),Bash(python3 *),Read,Write,Edit,Glob,Grep
+  UV_INDEX_URL: http://cache-service.nginx-pypi-cache.svc.cluster.local/pypi/simple
+  UV_EXTRA_INDEX_URL: https://mirrors.huaweicloud.com/ascend/repos/pypi
+  UV_INDEX_STRATEGY: unsafe-best-match
+  UV_NO_CACHE: 1
+  UV_SYSTEM_PYTHON: 1
+  BISECT_POLL_TIMEOUT_MINUTES: "240"
+
+jobs:
+  main2main:
+    runs-on: linux-aarch64-a2-4
+    timeout-minutes: 1440
+    concurrency:
+      group: main2main-auto
+      cancel-in-progress: false
+    container:
+      image: swr.cn-southwest-2.myhuaweicloud.com/base_image/ascend-ci/cann:8.5.1-910b-ubuntu22.04-py3.11
+      env:
+        VLLM_LOGGING_LEVEL: ERROR
+        VLLM_USE_MODELSCOPE: True
+        HCCL_BUFFSIZE: 1024
+        HF_HUB_OFFLINE: 1
+        IS_SANDBOX: 1
+    defaults:
+      run:
+        working-directory: ${{ github.workspace }}
+    env:
+      GH_TOKEN: ${{ secrets.PAT_TOKEN }}
+      ANTHROPIC_BASE_URL: ${{ secrets.ANTHROPIC_BASE_URL }}
+      ANTHROPIC_AUTH_TOKEN: ${{ secrets.ANTHROPIC_AUTH_TOKEN }}
+      TARGET_COMMIT: ${{ github.event_name == 'workflow_dispatch' && inputs.target_commit || '' }}
+      MOCK_CLAUDE_MODE: ${{ github.event_name == 'workflow_dispatch' && inputs.mock_claude || 'off' }}
+      FIX_ROUND_LIMIT: ${{ github.event_name == 'workflow_dispatch' && inputs.fix_round_limit || '3' }}
+      BISECT_ROUND_LIMIT: ${{ github.event_name == 'workflow_dispatch' && inputs.bisect_round_limit || '2' }}
+      PIP_EXTRA_INDEX_URL: https://mirrors.huaweicloud.com/ascend/repos/pypi
+      MAIN2MAIN_SKILL_PATH: ${{ github.workspace }}/vllm-ascend/.agents/skills/main2main/SKILL.md
+      MAIN2MAIN_ROUNDS_MARKDOWN_PATH: /tmp/main2main-round-commits.md
+      MAIN2MAIN_LOG_HELPERS: |
+        print_group() {
+          local title="$1"
+          local path="$2"
+          echo "::group::${title}"
+          cat "${path}" || true
+          echo "::endgroup::"
+        }
+        print_group_if_nonempty() {
+          local title="$1"
+          local path="$2"
+          [ -s "${path}" ] || return 0
+          print_group "${title}" "${path}"
+        }
+    steps:
+      - name: Checkout vllm-ascend fork repo
+        uses: actions/checkout@v6
+        with:
+          repository: Meihan-chen/vllm-ascend
+          token: ${{ secrets.PAT_TOKEN }}
+          path: ${{ env.WORK_REPO_DIR }}
+          fetch-depth: 0
+
+      - name: Checkout vllm-project/vllm repo
+        uses: actions/checkout@v6
+        with:
+          repository: vllm-project/vllm
+          ref: ${{ env.TARGET_COMMIT != '' && env.TARGET_COMMIT || 'main' }}
+          path: ${{ env.VLLM_DIR }}
+          fetch-depth: 0
+
+      - name: Detect vLLM version change
+        id: detect
+        run: |
+          set -eu
+          OLD_COMMIT=$(python3 - <<'PY'
+          import re
+          from pathlib import Path
+
+          text = Path("vllm-ascend/.github/workflows/pr_test_full.yaml").read_text(encoding="utf-8")
+          line = re.search(r'vllm_version:\s*\[(.*?)\]', text)
+          if not line:
+              raise SystemExit(1)
+          commit = re.search(r'\b([0-9a-f]{40})\b', line.group(1))
+          if not commit:
+              raise SystemExit(1)
+          print(commit.group(1))
+          PY
+          )
+          if [ -z "${OLD_COMMIT}" ]; then
+            echo "::error::Could not extract pinned vLLM commit from ${WORK_REPO_DIR}/.github/workflows/pr_test_full.yaml"
+            exit 1
+          fi
+
+          TARGET="${TARGET_COMMIT}"
+          if [ -n "${TARGET}" ]; then
+            if ! echo "${TARGET}" | grep -Eq '^[0-9a-f]{40}$'; then
+              echo "::error::Invalid target_commit format: ${TARGET}"
+              exit 1
+            fi
+            NEW_COMMIT="${TARGET}"
+            NEW_COMMIT_SOURCE="workflow_dispatch.target_commit"
+          else
+            NEW_COMMIT=$(git -C "${VLLM_DIR}" rev-parse HEAD)
+            NEW_COMMIT_SOURCE="${VLLM_DIR}.HEAD"
+          fi
+
+          echo "OLD_COMMIT=${OLD_COMMIT}"
+          echo "NEW_COMMIT=${NEW_COMMIT}"
+          echo "NEW_COMMIT_SOURCE=${NEW_COMMIT_SOURCE}"
+
+          echo "old_commit=${OLD_COMMIT}" >> "$GITHUB_OUTPUT"
+          echo "new_commit=${NEW_COMMIT}" >> "$GITHUB_OUTPUT"
+
+          if [ "${OLD_COMMIT}" = "${NEW_COMMIT}" ]; then
+            echo "::notice::No drift detected: ${OLD_COMMIT}"
+            echo "has_drift=false" >> "$GITHUB_OUTPUT"
+          else
+            echo "::notice::Drift detected: ${OLD_COMMIT} -> ${NEW_COMMIT}"
+            echo "has_drift=true" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Stop when no drift is detected
+        if: steps.detect.outputs.has_drift != 'true'
+        run: |
+          echo "::notice::No upstream drift detected for ${{ steps.detect.outputs.new_commit }}"
+
+      - name: Config mirrors
+        if: steps.detect.outputs.has_drift == 'true'
+        run: |
+          sed -Ei 's@(ports|archive).ubuntu.com@cache-service.nginx-pypi-cache.svc.cluster.local:8081@g' /etc/apt/sources.list
+          pip config set global.index-url http://cache-service.nginx-pypi-cache.svc.cluster.local/pypi/simple
+          pip config set global.trusted-host cache-service.nginx-pypi-cache.svc.cluster.local
+          apt-get update -y
+          apt-get -y install git
+          git config --global --add safe.directory "$GITHUB_WORKSPACE/${WORK_REPO_DIR}"
+          git config --global --add safe.directory "$GITHUB_WORKSPACE/${VLLM_DIR}"
+
+      - name: Install system dependencies
+        if: steps.detect.outputs.has_drift == 'true'
+        run: |
+          if [ -s "${WORK_REPO_DIR}/packages.txt" ]; then
+            xargs -r apt-get -y install < "${WORK_REPO_DIR}/packages.txt"
+          fi
+          apt-get -y install curl ca-certificates gcc g++ cmake libnuma-dev clang-15 jq gh
+          update-alternatives --install /usr/bin/clang clang /usr/bin/clang-15 20
+          update-alternatives --install /usr/bin/clang++ clang++ /usr/bin/clang++-15 20
+          pip install uv
+
+      - name: Configure git identity and auth
+        if: steps.detect.outputs.has_drift == 'true'
+        working-directory: ${{ env.WORK_REPO_DIR }}
+        run: |
+          set -eu
+          git config user.name "main2main-bot"
+          git config user.email "main2main-bot@users.noreply.github.com"
+          gh --version
+          gh auth status
+          gh api graphql -f query='query { viewer { login } }' >/dev/null
+          if [ "${MOCK_CLAUDE_MODE}" = "off" ]; then
+            test -n "$ANTHROPIC_BASE_URL" || { echo "::error::ANTHROPIC_BASE_URL is empty"; exit 1; }
+            test -n "$ANTHROPIC_AUTH_TOKEN" || { echo "::error::ANTHROPIC_AUTH_TOKEN is empty"; exit 1; }
+          fi
+
+      - name: Check npu and CANN info
+        if: steps.detect.outputs.has_drift == 'true'
+        run: |
+          npu-smi info || true
+          if [ -d /usr/local/Ascend/ascend-toolkit/latest ]; then
+            cat /usr/local/Ascend/ascend-toolkit/latest/"$(uname -i)"-linux/ascend_toolkit_install.info || true
+          fi
+
+      - name: Install vllm-project/vllm from source
+        if: steps.detect.outputs.has_drift == 'true'
+        working-directory: ${{ env.VLLM_DIR }}
+        run: |
+          VLLM_TARGET_DEVICE=empty uv pip install -e .
+          uv pip uninstall -y triton || true
+
+      - name: Create working branch
+        if: steps.detect.outputs.has_drift == 'true'
+        id: branch
+        working-directory: ${{ env.WORK_REPO_DIR }}
+        run: |
+          set -eu
+          BRANCH="main2main_auto_v2_$(date +%Y-%m-%d_%H-%M)"
+          git remote add upstream "https://github.com/${UPSTREAM_REPO}.git" || \
+            git remote set-url upstream "https://github.com/${UPSTREAM_REPO}.git"
+          git fetch upstream main
+          git checkout -B "${BRANCH}" upstream/main
+          echo "name=${BRANCH}" >> "$GITHUB_OUTPUT"
+
+      - name: Install nv-action/vllm-benchmark
+        if: steps.detect.outputs.has_drift == 'true'
+        working-directory: ${{ env.WORK_REPO_DIR }}
+        run: |
+          pip install uc-manager
+          uv pip install -r requirements-dev.txt
+          uv pip install -v -e .
+          uv pip install git+https://github.com/modelscope/modelscope.git@dbbcbf631fe6d10cc6446df2ad2fef24039fe7fe
+
+      - name: Install Node.js
+        if: steps.detect.outputs.has_drift == 'true' && env.MOCK_CLAUDE_MODE == 'off'
+        run: |
+          set -eu
+          case "$(uname -m)" in
+            aarch64|arm64) NODE_ARCH="arm64" ;;
+            x86_64|amd64) NODE_ARCH="x64" ;;
+            *)
+              echo "::error::Unsupported architecture: $(uname -m)"
+              exit 1
+              ;;
+          esac
+          NODE_DIST="node-v${NODE_VERSION}-linux-${NODE_ARCH}"
+          curl -fsSL "https://nodejs.org/dist/v${NODE_VERSION}/${NODE_DIST}.tar.gz" -o "/tmp/${NODE_DIST}.tar.gz"
+          rm -rf "/usr/local/${NODE_DIST}"
+          tar -xzf "/tmp/${NODE_DIST}.tar.gz" -C /usr/local
+          ln -sf "/usr/local/${NODE_DIST}/bin/node" /usr/local/bin/node
+          ln -sf "/usr/local/${NODE_DIST}/bin/npm" /usr/local/bin/npm
+          ln -sf "/usr/local/${NODE_DIST}/bin/npx" /usr/local/bin/npx
+          ln -sf "/usr/local/${NODE_DIST}/bin/corepack" /usr/local/bin/corepack
+          echo "/usr/local/${NODE_DIST}/bin" >> "$GITHUB_PATH"
+          node --version
+          npm --version
+
+      - name: Install Claude Code CLI
+        if: steps.detect.outputs.has_drift == 'true' && env.MOCK_CLAUDE_MODE == 'off'
+        run: |
+          set -eu
+          NODE_VERSION=$(node --version)
+          NPM_VERSION=$(npm --version)
+          echo "node=${NODE_VERSION}"
+          echo "npm=${NPM_VERSION}"
+          NODE_MAJOR=$(echo "${NODE_VERSION}" | sed -E 's/^v([0-9]+).*/\1/')
+          if [ "${NODE_MAJOR}" -lt 18 ]; then
+            echo "::error::Claude Code CLI requires Node.js >= 18, but found ${NODE_VERSION}"
+            exit 1
+          fi
+          npm install -g @anthropic-ai/claude-code
+          NPM_PREFIX=$(npm config get prefix)
+          echo "${NPM_PREFIX}/bin" >> "$GITHUB_PATH"
+          export PATH="${NPM_PREFIX}/bin:${PATH}"
+          command -v claude >/dev/null 2>&1 || {
+            echo "::error::claude binary not found after npm install; npm prefix=${NPM_PREFIX}"
+            exit 1
+          }
+          claude --version
+          mkdir -p "$HOME/.claude"
+          cat > "$HOME/.claude/settings.json" <<EOF
+          {
+            "model": "${MAIN2MAIN_MODEL}",
+            "env": {
+              "ANTHROPIC_BASE_URL": "${ANTHROPIC_BASE_URL}",
+              "ANTHROPIC_AUTH_TOKEN": "${ANTHROPIC_AUTH_TOKEN}",
+              "CLAUDE_CODE_DISABLE_EXPERIMENTAL_BETAS": "1"
+            },
+            "permissions": {
+              "allow": [
+                "Bash(git *)",
+                "Bash(gh *)",
+                "Bash(grep *)",
+                "Bash(sed *)",
+                "Bash(jq *)",
+                "Bash(python3 *)",
+                "Read",
+                "Write",
+                "Edit",
+                "Glob",
+                "Grep"
+              ]
+            }
+          }
+          EOF
+          python3 -m json.tool "$HOME/.claude/settings.json" >/dev/null
+
+      - name: Install mock Claude CLI
+        if: steps.detect.outputs.has_drift == 'true' && env.MOCK_CLAUDE_MODE != 'off'
+        run: |
+          set -eu
+          mkdir -p /tmp/mock-bin
+          cat > /tmp/mock-bin/claude <<'EOF'
+          #!/usr/bin/env bash
+          set -eu
+          exec python3 "$GITHUB_WORKSPACE/$WORK_REPO_DIR/.github/workflows/scripts/mock_claude.py" "$@"
+          EOF
+          chmod +x /tmp/mock-bin/claude
+          echo /tmp/mock-bin >> "$GITHUB_PATH"
+          export PATH="/tmp/mock-bin:${PATH}"
+          claude --version
+
+      - name: Initialize Claude session
+        if: steps.detect.outputs.has_drift == 'true'
+        id: claude-session
+        run: |
+          set -eu
+          SESSION_ID=$(python3 -c 'import uuid; print(uuid.uuid4())')
+          echo "id=${SESSION_ID}" >> "$GITHUB_OUTPUT"
+          : > /tmp/main2main-round-commits.md
+
+      - name: Run detect and adapt with Claude
+        if: steps.detect.outputs.has_drift == 'true'
+        id: detect-claude
+        env:
+          MAIN2MAIN_OLD_COMMIT: ${{ steps.detect.outputs.old_commit }}
+          MAIN2MAIN_NEW_COMMIT: ${{ steps.detect.outputs.new_commit }}
+          MAIN2MAIN_SESSION_ID: ${{ steps.claude-session.outputs.id }}
+        run: |
+          set -eu
+          eval "${MAIN2MAIN_LOG_HELPERS}"
+
+          export MOCK_CLAUDE_PHASE="detect"
+          export MOCK_CLAUDE_WORK_REPO="${GITHUB_WORKSPACE}/${WORK_REPO_DIR}"
+          export MOCK_CLAUDE_UPSTREAM_REPO="${GITHUB_WORKSPACE}/${VLLM_DIR}"
+          export MOCK_CLAUDE_OLD_COMMIT="${{ steps.detect.outputs.old_commit }}"
+          export MOCK_CLAUDE_NEW_COMMIT="${{ steps.detect.outputs.new_commit }}"
+
+          python3 "${WORK_REPO_DIR}/.github/workflows/scripts/main2main_ci.py" \
+            run-claude-phase \
+            --phase detect \
+            --rounds-markdown-path /tmp/main2main-round-commits.md \
+            --artifact-prefix /tmp/main2main-detect \
+            > /tmp/main2main-detect-meta.json
+
+          print_group "Claude detect meta" /tmp/main2main-detect-meta.json
+          print_group "Claude detect stderr" /tmp/main2main-detect-result.err
+          print_group "Claude detect stdout" /tmp/main2main-detect-result.json
+          print_group_if_nonempty "Claude detect git status" /tmp/main2main-detect-status.txt
+          COUNT=$(jq -r '.commit_count' /tmp/main2main-detect-meta.json)
+          echo "commit_count=${COUNT}" >> "$GITHUB_OUTPUT"
+
+      - name: E2E main2main suite test
+        if: steps.detect.outputs.has_drift == 'true' && steps.detect-claude.outputs.commit_count != '0'
+        id: test-initial
+        continue-on-error: true
+        working-directory: ${{ env.WORK_REPO_DIR }}
+        run: |
+          set -eu
+          eval "${MAIN2MAIN_LOG_HELPERS}"
+
+          python3 .github/workflows/scripts/main2main_ci.py \
+            run-suite-and-summarize \
+            --work-repo-dir "${PWD}" \
+            --suite e2e-main2main \
+            --artifact-prefix /tmp/main2main-test \
+            > /tmp/main2main-test-meta.json
+          print_group "Initial test meta" /tmp/main2main-test-meta.json
+          STATUS=$(jq -r '.exit_code' /tmp/main2main-test-meta.json)
+          print_group "Initial test log" /tmp/main2main-test.log
+          if [ "${STATUS}" -ne 0 ]; then
+            print_group_if_nonempty "Initial test summary stdout" /tmp/main2main-test-summary.out
+            print_group_if_nonempty "Initial test summary stderr" /tmp/main2main-test-summary.err
+            print_group_if_nonempty "Initial test failure summary" /tmp/main2main-failure-summary.json
+          fi
+          exit "${STATUS}"
+
+      - name: Run fix loop with Claude
+        if: steps.detect.outputs.has_drift == 'true' && steps.detect-claude.outputs.commit_count != '0'
+        id: fix-loop
+        env:
+          MAIN2MAIN_OLD_COMMIT: ${{ steps.detect.outputs.old_commit }}
+          MAIN2MAIN_NEW_COMMIT: ${{ steps.detect.outputs.new_commit }}
+          MAIN2MAIN_SESSION_ID: ${{ steps.claude-session.outputs.id }}
+        run: |
+          set -eu
+          eval "${MAIN2MAIN_LOG_HELPERS}"
+
+          export MOCK_CLAUDE_PHASE="fix"
+          export MOCK_CLAUDE_LOG_PATH="/tmp/main2main-test.log"
+          export MOCK_CLAUDE_WORK_REPO="${GITHUB_WORKSPACE}/${WORK_REPO_DIR}"
+          export MOCK_CLAUDE_UPSTREAM_REPO="${GITHUB_WORKSPACE}/${VLLM_DIR}"
+          export MOCK_CLAUDE_OLD_COMMIT="${{ steps.detect.outputs.old_commit }}"
+          export MOCK_CLAUDE_NEW_COMMIT="${{ steps.detect.outputs.new_commit }}"
+
+          if [ "${{ steps.test-initial.outcome }}" = "success" ]; then
+            echo "status=passed_after_initial_test" >> "$GITHUB_OUTPUT"
+            echo "fix_rounds_used=0" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
+          FIX_ROUNDS_USED=0
+          STATUS="needs_bisect"
+
+          while true; do
+            if [ "${FIX_ROUNDS_USED}" -ge "${FIX_ROUND_LIMIT}" ]; then
+              STATUS="needs_bisect"
+              break
+            fi
+
+            ROUND=$((FIX_ROUNDS_USED + 1))
+
+            if ! python3 "${WORK_REPO_DIR}/.github/workflows/scripts/main2main_ci.py" \
+              run-claude-phase \
+              --phase fix \
+              --artifact-prefix "/tmp/main2main-fix-round${ROUND}" \
+              --round "${ROUND}" \
+              --log-path /tmp/main2main-test.log \
+              > "/tmp/main2main-fix-round${ROUND}-meta.json"; then
+              echo "::warning::Claude fix round ${ROUND} failed; continue to next round"
+              print_group_if_nonempty "Claude fix round ${ROUND} stderr" "/tmp/main2main-fix-round${ROUND}-result.err"
+              print_group_if_nonempty "Claude fix round ${ROUND} stdout" "/tmp/main2main-fix-round${ROUND}-result.json"
+              print_group_if_nonempty "Claude fix round ${ROUND} git status" "/tmp/main2main-fix-round${ROUND}-status.txt"
+              FIX_ROUNDS_USED=${ROUND}
+              continue
+            fi
+
+            print_group "Claude fix round ${ROUND} meta" "/tmp/main2main-fix-round${ROUND}-meta.json"
+            print_group "Claude fix round ${ROUND} stderr" "/tmp/main2main-fix-round${ROUND}-result.err"
+            print_group "Claude fix round ${ROUND} stdout" "/tmp/main2main-fix-round${ROUND}-result.json"
+            print_group_if_nonempty "Claude fix round ${ROUND} git status" "/tmp/main2main-fix-round${ROUND}-status.txt"
+            COMMIT_COUNT=$(jq -r '.commit_count // 0' "/tmp/main2main-fix-round${ROUND}-meta.json" 2>/dev/null || echo "0")
+
+            if [ "${COMMIT_COUNT}" = "0" ]; then
+              STATUS="needs_bisect"
+              break
+            fi
+            FIX_ROUNDS_USED=${ROUND}
+
+            if ! python3 "${WORK_REPO_DIR}/.github/workflows/scripts/main2main_ci.py" \
+              run-suite-and-summarize \
+              --artifact-prefix /tmp/main2main-fix-test \
+              > /tmp/main2main-fix-test-meta.json; then
+              echo "::warning::Fix loop ${ROUND} suite execution failed; continue to next round"
+              print_group_if_nonempty "Fix loop ${ROUND} summary stdout" /tmp/main2main-fix-test-summary.out
+              print_group_if_nonempty "Fix loop ${ROUND} summary stderr" /tmp/main2main-fix-test-summary.err
+              continue
+            fi
+            print_group "Fix loop ${ROUND} test meta" /tmp/main2main-fix-test-meta.json
+            TEST_EXIT_CODE=$(jq -r '.exit_code // 1' /tmp/main2main-fix-test-meta.json 2>/dev/null || echo "1")
+            if [ "${TEST_EXIT_CODE}" = "0" ]; then
+              print_group "Fix loop ${ROUND} test log" /tmp/main2main-test.log
+              STATUS="passed_after_fix"
+              break
+            fi
+            print_group "Fix loop ${ROUND} test log" /tmp/main2main-test.log
+            print_group_if_nonempty "Fix loop ${ROUND} summary stdout" /tmp/main2main-fix-test-summary.out
+            print_group_if_nonempty "Fix loop ${ROUND} summary stderr" /tmp/main2main-fix-test-summary.err
+            print_group_if_nonempty "Fix loop ${ROUND} failure summary" /tmp/main2main-failure-summary.json
+          done
+
+          echo "status=${STATUS}" >> "$GITHUB_OUTPUT"
+          echo "fix_rounds_used=${FIX_ROUNDS_USED}" >> "$GITHUB_OUTPUT"
+
+      - name: Run bisect-fix loop with Claude
+        if: steps.fix-loop.outputs.status == 'needs_bisect'
+        id: bisect-loop
+        timeout-minutes: 720
+        env:
+          MAIN2MAIN_OLD_COMMIT: ${{ steps.detect.outputs.old_commit }}
+          MAIN2MAIN_NEW_COMMIT: ${{ steps.detect.outputs.new_commit }}
+          MAIN2MAIN_SESSION_ID: ${{ steps.claude-session.outputs.id }}
+        run: |
+          set -eu
+          eval "${MAIN2MAIN_LOG_HELPERS}"
+
+          export MOCK_CLAUDE_PHASE="bisect"
+          export MOCK_CLAUDE_LOG_PATH="/tmp/main2main-test.log"
+          export MOCK_CLAUDE_WORK_REPO="${GITHUB_WORKSPACE}/${WORK_REPO_DIR}"
+          export MOCK_CLAUDE_UPSTREAM_REPO="${GITHUB_WORKSPACE}/${VLLM_DIR}"
+          export MOCK_CLAUDE_OLD_COMMIT="${{ steps.detect.outputs.old_commit }}"
+          export MOCK_CLAUDE_NEW_COMMIT="${{ steps.detect.outputs.new_commit }}"
+
+          BISECT_ROUNDS_USED=0
+          STATUS="manual_review_required"
+
+          while true; do
+            if [ "${BISECT_ROUNDS_USED}" -ge "${BISECT_ROUND_LIMIT}" ]; then
+              STATUS="manual_review_required"
+              break
+            fi
+
+            ROUND=$((BISECT_ROUNDS_USED + 1))
+            echo "::group::Bisect round ${ROUND} setup"
+            if [ ! -f /tmp/main2main-failure-summary.json ]; then
+              echo "::warning::Expected /tmp/main2main-failure-summary.json to exist before bisect"
+              echo "::warning::Skip bisect round ${ROUND} and move to manual review"
+              STATUS="manual_review_required"
+              echo "::endgroup::"
+              break
+            fi
+            if ! python3 "${WORK_REPO_DIR}/.github/workflows/scripts/main2main_ci.py" \
+              run-bisect-round \
+              --round "${ROUND}" \
+              --log-path /tmp/main2main-test.log \
+              --failure-summary-path /tmp/main2main-failure-summary.json \
+              --artifact-prefix "/tmp/main2main-bisect-round${ROUND}" \
+              > "/tmp/main2main-bisect-round${ROUND}-meta.json"; then
+              echo "::warning::Bisect round ${ROUND} setup failed; continue to next bisect round"
+              python3 "${WORK_REPO_DIR}/.github/workflows/scripts/main2main_ci.py" \
+                print-bisect-round-logs \
+                --artifact-prefix "/tmp/main2main-bisect-round${ROUND}"
+              BISECT_ROUNDS_USED=${ROUND}
+              echo "::endgroup::"
+              continue
+            fi
+            python3 "${WORK_REPO_DIR}/.github/workflows/scripts/main2main_ci.py" \
+              print-bisect-round-logs \
+              --artifact-prefix "/tmp/main2main-bisect-round${ROUND}"
+
+            echo "::group::Bisect round ${ROUND} Claude fix"
+            if ! python3 "${WORK_REPO_DIR}/.github/workflows/scripts/main2main_ci.py" \
+              run-claude-phase \
+              --phase bisect \
+              --artifact-prefix "/tmp/main2main-bisect-fix-round${ROUND}" \
+              --round "${ROUND}" \
+              --log-path /tmp/main2main-test.log \
+              --bisect-result-path "/tmp/main2main-bisect-round${ROUND}-output/bisect_result.json" \
+              > "/tmp/main2main-bisect-fix-round${ROUND}-meta.json"; then
+              echo "::warning::Claude bisect fix round ${ROUND} failed; continue to next bisect round"
+              print_group_if_nonempty "Claude bisect fix round ${ROUND} stderr" "/tmp/main2main-bisect-fix-round${ROUND}-result.err"
+              print_group_if_nonempty "Claude bisect fix round ${ROUND} stdout" "/tmp/main2main-bisect-fix-round${ROUND}-result.json"
+              print_group_if_nonempty "Claude bisect fix round ${ROUND} git status" "/tmp/main2main-bisect-fix-round${ROUND}-status.txt"
+              BISECT_ROUNDS_USED=${ROUND}
+              echo "::endgroup::"
+              continue
+            fi
+            print_group "Claude bisect fix round ${ROUND} meta" "/tmp/main2main-bisect-fix-round${ROUND}-meta.json"
+            print_group "Claude bisect fix round ${ROUND} stderr" "/tmp/main2main-bisect-fix-round${ROUND}-result.err"
+            print_group "Claude bisect fix round ${ROUND} stdout" "/tmp/main2main-bisect-fix-round${ROUND}-result.json"
+            print_group_if_nonempty "Claude bisect fix round ${ROUND} git status" "/tmp/main2main-bisect-fix-round${ROUND}-status.txt"
+            COMMIT_COUNT=$(jq -r '.commit_count // 0' "/tmp/main2main-bisect-fix-round${ROUND}-meta.json" 2>/dev/null || echo "0")
+
+            if [ "${COMMIT_COUNT}" = "0" ]; then
+              STATUS="manual_review_required"
+              echo "::endgroup::"
+              break
+            fi
+            BISECT_ROUNDS_USED=${ROUND}
+
+            if ! python3 "${WORK_REPO_DIR}/.github/workflows/scripts/main2main_ci.py" \
+              run-suite-and-summarize \
+              --artifact-prefix /tmp/main2main-bisect-test \
+              > /tmp/main2main-bisect-test-meta.json; then
+              echo "::warning::Bisect loop ${ROUND} suite execution failed; continue to next bisect round"
+              print_group_if_nonempty "Bisect loop ${ROUND} summary stdout" /tmp/main2main-bisect-test-summary.out
+              print_group_if_nonempty "Bisect loop ${ROUND} summary stderr" /tmp/main2main-bisect-test-summary.err
+              echo "::endgroup::"
+              BISECT_ROUNDS_USED=${ROUND}
+              continue
+            fi
+            print_group "Bisect loop ${ROUND} test meta" /tmp/main2main-bisect-test-meta.json
+            TEST_EXIT_CODE=$(jq -r '.exit_code // 1' /tmp/main2main-bisect-test-meta.json 2>/dev/null || echo "1")
+            if [ "${TEST_EXIT_CODE}" = "0" ]; then
+              print_group "Bisect loop ${ROUND} test log" /tmp/main2main-test.log
+              STATUS="passed_after_bisect"
+              echo "::endgroup::"
+              break
+            fi
+            print_group "Bisect loop ${ROUND} test log" /tmp/main2main-test.log
+            print_group_if_nonempty "Bisect loop ${ROUND} summary stdout" /tmp/main2main-bisect-test-summary.out
+            print_group_if_nonempty "Bisect loop ${ROUND} summary stderr" /tmp/main2main-bisect-test-summary.err
+            print_group_if_nonempty "Bisect loop ${ROUND} failure summary" /tmp/main2main-failure-summary.json
+            echo "::endgroup::"
+          done
+
+          echo "status=${STATUS}" >> "$GITHUB_OUTPUT"
+          echo "bisect_rounds_used=${BISECT_ROUNDS_USED}" >> "$GITHUB_OUTPUT"
+
+      - name: Summarize final status
+        if: steps.detect.outputs.has_drift == 'true' && steps.detect-claude.outputs.commit_count != '0'
+        id: final-status
+        run: |
+          set -eu
+
+          FINAL_STATUS="manual_review_required"
+          FIX_ROUNDS_USED="${{ steps.fix-loop.outputs.fix_rounds_used }}"
+          BISECT_ROUNDS_USED="0"
+          MANUAL_REVIEW_REQUIRED=true
+
+          if [ "${{ steps.fix-loop.outputs.status }}" = "passed_after_initial_test" ]; then
+            FINAL_STATUS="passed_after_initial_test"
+            MANUAL_REVIEW_REQUIRED=false
+          elif [ "${{ steps.fix-loop.outputs.status }}" = "passed_after_fix" ]; then
+            FINAL_STATUS="passed_after_fix"
+            MANUAL_REVIEW_REQUIRED=false
+          elif [ "${{ steps.bisect-loop.outputs.status }}" = "passed_after_bisect" ]; then
+            FINAL_STATUS="passed_after_bisect"
+            BISECT_ROUNDS_USED="${{ steps.bisect-loop.outputs.bisect_rounds_used }}"
+            MANUAL_REVIEW_REQUIRED=false
+          elif [ "${{ steps.bisect-loop.outputs.status }}" = "manual_review_required" ]; then
+            FINAL_STATUS="manual_review_required"
+            BISECT_ROUNDS_USED="${{ steps.bisect-loop.outputs.bisect_rounds_used }}"
+          fi
+
+          echo "manual_review_required=${MANUAL_REVIEW_REQUIRED}" >> "$GITHUB_OUTPUT"
+          echo "::notice::final_status=${FINAL_STATUS}, fix_rounds_used=${FIX_ROUNDS_USED}, bisect_rounds_used=${BISECT_ROUNDS_USED}"
+
+      - name: Determine publish readiness
+        if: steps.detect.outputs.has_drift == 'true'
+        id: publication-state
+        working-directory: ${{ env.WORK_REPO_DIR }}
+        run: |
+          set -eu
+          COMMIT_COUNT=$(git rev-list --count upstream/main..HEAD)
+          SHOULD_PUBLISH=true
+          if [ "${COMMIT_COUNT}" = "0" ]; then
+            SHOULD_PUBLISH=false
+            echo "::notice::Drift detected but no code adaptation was produced"
+          fi
+
+          echo "should_publish=${SHOULD_PUBLISH}" >> "$GITHUB_OUTPUT"
+          echo "::notice::commit_count=${COMMIT_COUNT}, should_publish=${SHOULD_PUBLISH}"
+
+      - name: Publish draft PR
+        if: steps.detect.outputs.has_drift == 'true' && steps.publication-state.outputs.should_publish == 'true'
+        id: create-pr
+        working-directory: ${{ env.WORK_REPO_DIR }}
+        run: |
+          eval "${MAIN2MAIN_LOG_HELPERS}"
+          BRANCH_NAME="${{ steps.branch.outputs.name }}"
+          echo "Render PR body"
+          python3 .github/workflows/scripts/main2main_ci.py render-pr-body \
+            --old-commit "${{ steps.detect.outputs.old_commit }}" \
+            --new-commit "${{ steps.detect.outputs.new_commit }}" \
+            --rounds-md /tmp/main2main-round-commits.md \
+            > /tmp/main2main-pr-body.md || {
+              echo "::error::Failed while rendering PR body"
+              exit 1
+            }
+          print_group "PR body" /tmp/main2main-pr-body.md
+
+          echo "Normalize origin remote"
+          git remote set-url origin "https://github.com/Meihan-chen/vllm-ascend.git" || {
+            echo "::error::Failed to normalize origin remote URL"
+            exit 1
+          }
+          git remote -v
+
+          echo "Push branch"
+          git push --force-with-lease -u origin "${BRANCH_NAME}" || {
+            echo "::error::Failed while pushing branch ${BRANCH_NAME}"
+            exit 1
+          }
+
+          SHORT_OLD=$(printf '%.8s' "${{ steps.detect.outputs.old_commit }}")
+          SHORT_NEW=$(printf '%.8s' "${{ steps.detect.outputs.new_commit }}")
+          PR_URL=$(gh pr create \
+            --repo "${UPSTREAM_REPO}" \
+            --draft \
+            --title "[Misc]feat: adapt to vLLM main (${SHORT_OLD}...${SHORT_NEW})" \
+            --body-file /tmp/main2main-pr-body.md \
+            --head "Meihan-chen:${BRANCH_NAME}" \
+            --base main \
+            --label main2main \
+            --label ready \
+            --label ready-for-test) || {
+              echo "::error::Failed while creating draft PR"
+              exit 1
+            }
+          echo "url=${PR_URL}" >> "$GITHUB_OUTPUT"
+          echo "Created draft PR: ${PR_URL}"
+
+      - name: Create manual review issue
+        if: steps.create-pr.outcome == 'success' && steps.final-status.outputs.manual_review_required == 'true'
+        working-directory: ${{ env.WORK_REPO_DIR }}
+        run: |
+          eval "${MAIN2MAIN_LOG_HELPERS}"
+
+          BISECT_JSON=""
+          LAST_ROUND="${{ steps.bisect-loop.outputs.bisect_rounds_used }}"
+          if [ -n "${LAST_ROUND}" ] && [ "${LAST_ROUND}" != "0" ] && [ -f "/tmp/main2main-bisect-round${LAST_ROUND}-output/bisect_result.json" ]; then
+            BISECT_JSON="--bisect-json /tmp/main2main-bisect-round${LAST_ROUND}-output/bisect_result.json"
+          fi
+          python3 .github/workflows/scripts/main2main_ci.py render-manual-review-issue \
+            --pr-url "${{ steps.create-pr.outputs.url }}" \
+            --old-commit "${{ steps.detect.outputs.old_commit }}" \
+            --new-commit "${{ steps.detect.outputs.new_commit }}" \
+            --summary-json /tmp/main2main-failure-summary.json \
+            ${BISECT_JSON} \
+            > /tmp/main2main-manual-review.md
+          print_group "Manual review issue" /tmp/main2main-manual-review.md
+          SHORT_NEW=$(printf '%.8s' "${{ steps.detect.outputs.new_commit }}")
+          gh issue create \
+            --repo "${UPSTREAM_REPO}" \
+            --title "main2main manual review required (${SHORT_NEW})" \
+            --body-file /tmp/main2main-manual-review.md
