@@ -38,7 +38,7 @@ msgstr ""
 
 #: ../../source/user_guide/deployment_guide/using_volcano_kthena.md:7
 msgid "1. What is Prefill–Decode Disaggregation?"
-msgstr "1. 什么是预填充-解码解耦？"
+msgstr "1.什么是预填充-解码解耦？"
 
 #: ../../source/user_guide/deployment_guide/using_volcano_kthena.md:9
 msgid "Large language model inference naturally splits into two phases:"
@@ -76,7 +76,7 @@ msgstr "从客户端的角度来看，这仍然像一个单一的聊天/补全�
 
 #: ../../source/user_guide/deployment_guide/using_volcano_kthena.md:22
 msgid "2. Deploy on Kubernetes with Kthena"
-msgstr "2. 使用 Kthena 在 Kubernetes 上部署"
+msgstr "2.使用 Kthena 在 Kubernetes 上部署"
 
 #: ../../source/user_guide/deployment_guide/using_volcano_kthena.md:24
 msgid ""
@@ -234,7 +234,7 @@ msgstr "示例清单："
 
 #: ../../source/user_guide/deployment_guide/using_volcano_kthena.md:369
 msgid "3. Verification"
-msgstr "3. 验证"
+msgstr "3.验证"
 
 #: ../../source/user_guide/deployment_guide/using_volcano_kthena.md:371
 msgid "3.1 Check Workloads"
@@ -276,7 +276,7 @@ msgstr "Kthena 路由层正确地作为 vLLM-Ascend 插件的前端。"
 
 #: ../../source/user_guide/deployment_guide/using_volcano_kthena.md:414
 msgid "4. Cleanup"
-msgstr "4. 清理"
+msgstr "4.清理"
 
 #: ../../source/user_guide/deployment_guide/using_volcano_kthena.md:416
 msgid "To remove the deployment:"
@@ -284,7 +284,7 @@ msgstr "要移除部署："
 
 #: ../../source/user_guide/deployment_guide/using_volcano_kthena.md:431
 msgid "5. Summary"
-msgstr "5. 总结"
+msgstr "5.总结"
 
 #: ../../source/user_guide/deployment_guide/using_volcano_kthena.md:433
 msgid ""
