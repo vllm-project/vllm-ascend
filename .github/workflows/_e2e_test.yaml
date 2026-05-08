@@ -53,7 +53,8 @@ on:
         default: ''
 env:
   UV_INDEX_URL: http://cache-service.nginx-pypi-cache.svc.cluster.local/pypi/simple
-  UV_EXTRA_INDEX_URL: https://mirrors.huaweicloud.com/ascend/repos/pypi
+  UV_EXTRA_INDEX_URL: https://mirrors.huaweicloud.com/ascend/repos/pypi http://triton-ascend.osinfra.cn/pypi/simple/
+  UV_INSECURE_HOST: triton-ascend.osinfra.cn
   UV_INDEX_STRATEGY: unsafe-best-match
   UV_NO_CACHE: 1
   UV_SYSTEM_PYTHON: 1
@@ -92,7 +93,7 @@ jobs:
         run: |
           sed -Ei 's@(ports|archive).ubuntu.com@cache-service.nginx-pypi-cache.svc.cluster.local:8081@g' /etc/apt/sources.list
           pip config set global.index-url http://cache-service.nginx-pypi-cache.svc.cluster.local/pypi/simple
-          pip config set global.trusted-host cache-service.nginx-pypi-cache.svc.cluster.local
+          pip config set global.trusted-host "cache-service.nginx-pypi-cache.svc.cluster.local triton-ascend.osinfra.cn"
           apt-get update -y
           apt install git -y
           git config --global --add safe.directory /__w/vllm-ascend/vllm-ascend
@@ -230,7 +231,7 @@ jobs:
         run: |
           sed -Ei 's@(ports|archive).ubuntu.com@cache-service.nginx-pypi-cache.svc.cluster.local:8081@g' /etc/apt/sources.list
           pip config set global.index-url http://cache-service.nginx-pypi-cache.svc.cluster.local/pypi/simple
-          pip config set global.trusted-host cache-service.nginx-pypi-cache.svc.cluster.local
+          pip config set global.trusted-host "cache-service.nginx-pypi-cache.svc.cluster.local triton-ascend.osinfra.cn"
           apt-get update -y
           apt install git -y
           git config --global --add safe.directory /__w/vllm-ascend/vllm-ascend
@@ -372,7 +373,7 @@ jobs:
         run: |
           sed -Ei 's@(ports|archive).ubuntu.com@cache-service.nginx-pypi-cache.svc.cluster.local:8081@g' /etc/apt/sources.list
           pip config set global.index-url http://cache-service.nginx-pypi-cache.svc.cluster.local/pypi/simple
-          pip config set global.trusted-host cache-service.nginx-pypi-cache.svc.cluster.local
+          pip config set global.trusted-host "cache-service.nginx-pypi-cache.svc.cluster.local triton-ascend.osinfra.cn"
           apt-get update -y
           apt install git -y
           git config --global --add safe.directory /__w/vllm-ascend/vllm-ascend
@@ -508,7 +509,7 @@ jobs:
         run: |
           sed -Ei 's@(ports|archive).ubuntu.com@cache-service.nginx-pypi-cache.svc.cluster.local:8081@g' /etc/apt/sources.list
           pip config set global.index-url http://cache-service.nginx-pypi-cache.svc.cluster.local/pypi/simple
-          pip config set global.trusted-host cache-service.nginx-pypi-cache.svc.cluster.local
+          pip config set global.trusted-host "cache-service.nginx-pypi-cache.svc.cluster.local triton-ascend.osinfra.cn"
           apt-get update -y
           apt install git -y
           git config --global --add safe.directory /__w/vllm-ascend/vllm-ascend
@@ -670,7 +671,7 @@ jobs:
         run: |
           sed -Ei 's@(ports|archive).ubuntu.com@cache-service.nginx-pypi-cache.svc.cluster.local:8081@g' /etc/apt/sources.list
           pip config set global.index-url http://cache-service.nginx-pypi-cache.svc.cluster.local/pypi/simple
-          pip config set global.trusted-host cache-service.nginx-pypi-cache.svc.cluster.local
+          pip config set global.trusted-host "cache-service.nginx-pypi-cache.svc.cluster.local triton-ascend.osinfra.cn"
           apt-get update -y
           apt install git -y
           git config --global --add safe.directory /__w/vllm-ascend/vllm-ascend
@@ -804,7 +805,7 @@ jobs:
         run: |
           sed -Ei 's@(ports|archive).ubuntu.com@cache-service.nginx-pypi-cache.svc.cluster.local:8081@g' /etc/apt/sources.list
           pip config set global.index-url http://cache-service.nginx-pypi-cache.svc.cluster.local/pypi/simple
-          pip config set global.trusted-host cache-service.nginx-pypi-cache.svc.cluster.local
+          pip config set global.trusted-host "cache-service.nginx-pypi-cache.svc.cluster.local triton-ascend.osinfra.cn"
           apt-get update -y
           apt install git -y
           git config --global --add safe.directory /__w/vllm-ascend/vllm-ascend
@@ -920,7 +921,7 @@ jobs:
         run: |
           sed -Ei 's@(ports|archive).ubuntu.com@cache-service.nginx-pypi-cache.svc.cluster.local:8081@g' /etc/apt/sources.list
           pip config set global.index-url http://cache-service.nginx-pypi-cache.svc.cluster.local/pypi/simple
-          pip config set global.trusted-host cache-service.nginx-pypi-cache.svc.cluster.local
+          pip config set global.trusted-host "cache-service.nginx-pypi-cache.svc.cluster.local triton-ascend.osinfra.cn"
           apt-get update -y
           apt install git -y
           git config --global --add safe.directory /__w/vllm-ascend/vllm-ascend
