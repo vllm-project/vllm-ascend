@@ -518,7 +518,6 @@ msgid "Run performance evaluation of `Kimi-K2.5-w4a8` as an example."
 msgstr "以 `Kimi-K2.5-w4a8` 为例运行性能评估。"
 
 #: ../../source/tutorials/models/Kimi-K2.5.md:776
-#, fuzzy
 msgid ""
 "Refer to [vllm benchmark](https://docs.vllm.ai/en/latest/benchmarking/) "
 "for more details."

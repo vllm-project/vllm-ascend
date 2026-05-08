@@ -134,8 +134,7 @@ msgid ""
 "For an Atlas A2 with 64 GB of NPU card memory, tensor-parallel-size "
 "should be at least 2, and for 32 GB of memory, tensor-parallel-size "
 "should be at least 4."
-msgstr ""
-对于 Atlas A2，如果 NPU 卡内存为 64 GB，tensor-parallel-size 至少应为 2；如果内存为 32 GB，tensor-parallel-size 至少应为 4。"
+msgstr "对于 Atlas A2，如果 NPU 卡内存为 64 GB，tensor-parallel-size 至少应为 2；如果内存为 32 GB，tensor-parallel-size 至少应为 4。"
 
 #: ../../source/tutorials/models/Qwen3-Coder-30B-A3B.md:72
 msgid "Functional Verification"

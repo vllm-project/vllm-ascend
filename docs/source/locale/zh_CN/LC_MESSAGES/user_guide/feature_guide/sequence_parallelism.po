@@ -72,8 +72,7 @@ msgid ""
 "Currently, vllm-ascend has implemented Sequence Parallelism for VL-class "
 "models based on the Inductor pass. It can be enabled in the following "
 "way:"
-msgstr ""
-目前，vllm-ascend 已基于 Inductor pass 为 VL 类模型实现了序列并行。可通过以下方式启用："
+msgstr "目前，vllm-ascend 已基于 Inductor pass 为 VL 类模型实现了序列并行。可通过以下方式启用："
 
 #: ../../source/user_guide/feature_guide/sequence_parallelism.md:20
 msgid ""
