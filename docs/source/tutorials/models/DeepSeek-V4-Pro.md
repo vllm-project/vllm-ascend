@@ -907,7 +907,7 @@ Before you start, please
       
       export VLLM_RPC_TIMEOUT=3600000
       export VLLM_EXECUTE_MODEL_TIMEOUT_SECONDS=30000
-      export HCCL_EXEC_TIMEOUT=2000
+      export HCCL_EXEC_TIMEOUT=204
       export HCCL_CONNECT_TIMEOUT=1200
       
       export HCCL_IF_IP=$local_ip
@@ -921,7 +921,6 @@ Before you start, please
       
       export USE_MULTI_GROUPS_KV_CACHE=1
       export USE_MULTI_BLOCK_POOL=1
-      export VLLM_USE_V1=1
       export VLLM_ASCEND_ENABLE_FLASHCOMM1=1
       export ASCEND_RT_VISIBLE_DEVICES=$1
       
@@ -938,10 +937,10 @@ Before you start, please
           --served-model-name deepseek_v4 \
           --max_model_len 133072 \
           --max-num-batched-tokens 8192 \
-          --max-num-seqs 128 \
+          --max-num-seqs 16 \
           --no-disable-hybrid-kv-cache-manager \
           --trust-remote-code \
-          --gpu-memory-utilization 0.95 \
+          --gpu-memory-utilization 0.9 \
           --quantization ascend \
           --safetensors-load-strategy 'prefetch' \
           --tokenizer-mode deepseek_v4 \
@@ -983,7 +982,7 @@ Before you start, please
       
       export VLLM_RPC_TIMEOUT=3600000
       export VLLM_EXECUTE_MODEL_TIMEOUT_SECONDS=30000
-      export HCCL_EXEC_TIMEOUT=2000
+      export HCCL_EXEC_TIMEOUT=204
       export HCCL_CONNECT_TIMEOUT=1200
       
       export HCCL_IF_IP=$local_ip
@@ -997,8 +996,6 @@ Before you start, please
       
       export USE_MULTI_GROUPS_KV_CACHE=1
       export USE_MULTI_BLOCK_POOL=1
-      export VLLM_USE_V1=1
-      export VLLM_ASCEND_ENABLE_FLASHCOMM1=1
       export ASCEND_RT_VISIBLE_DEVICES=$1
       
       vllm serve /root/.cache/modelscope/hub/models/vllm-ascend/DeepSeek-V4-Pro-w4a8-mtp \
@@ -1013,12 +1010,12 @@ Before you start, please
           --seed 1024 \
           --served-model-name deepseek_v4 \
           --max-model-len 133072 \
-          --max-num-batched-tokens 256 \
-          --max-num-seqs 128 \
+          --max-num-batched-tokens 120 \
+          --max-num-seqs 60 \
           --async-scheduling \
           --no-disable-hybrid-kv-cache-manager \
           --trust-remote-code \
-          --gpu-memory-utilization 0.92 \
+          --gpu-memory-utilization 0.9 \
           --quantization ascend \
           --tokenizer-mode deepseek_v4 \
           --tool-call-parser deepseek_v4 \
@@ -1045,7 +1042,7 @@ Before you start, please
                       }
               }
           }' \
-          --additional_config '{"enable_cpu_binding": "True","multistream_overlap_shared_expert": false,"multistream_dsa_preprocess": false,"recompute_scheduler_enable":true,"eplb_config":{"dynamic_eplb":false,"expert_heat_collection_interval":600,"algorithm_execution_interval":50, "eplb_policy_type":2, "num_redundant_experts":32}}'
+          --additional-config '{"ascend_compilation_config":{"enable_npugraph_ex":true,"enable_static_kernel":false},"enable_cpu_binding":true,"multistream_overlap_shared_expert":false,"multistream_dsa_preprocess":false,"recompute_scheduler_enable":true}'
       ```
 
 Once the preparation is done, you can start the server with the following command on each node:
