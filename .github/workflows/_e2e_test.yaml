@@ -78,7 +78,7 @@ jobs:
         uses: actions/checkout@v6
       - name: Check npu and CANN info
         run: |
-          source /usr/local/Ascend/ascend-toolkit/set_env.sh
+          export LD_LIBRARY_PATH=//usr/local/Ascend/driver/lib64/driver:$LD_LIBRARY_PATH
           npu-smi info
           cat /usr/local/Ascend/ascend-toolkit/latest/"$(uname -i)"-linux/ascend_toolkit_install.info
 
