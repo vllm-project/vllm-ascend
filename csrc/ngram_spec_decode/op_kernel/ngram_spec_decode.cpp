@@ -291,18 +291,17 @@ private:
             numValidLocal.SetValue(i, valid_draft_count);
         }
 
-        uint16_t metaBytes16 = static_cast<uint16_t>(rows) * ELEM_SIZE;
-        AscendC::DataCopyParams nextParams{1, metaBytes16, 0, 0};
+        uint32_t metaBytes32 = static_cast<uint32_t>(rows) * ELEM_SIZE;
+        AscendC::DataCopyExtParams nextParams{1, metaBytes32, 0, 0, 0};
         AscendC::DataCopyPad(nextTokensGm[start_row], nextLocal, nextParams);
 
         uint32_t kBytes = static_cast<uint32_t>(this->k_val) * ELEM_SIZE;
-        uint32_t kUbBytes = static_cast<uint32_t>(this->k_align) * ELEM_SIZE;
-        uint16_t kSrcGap = static_cast<uint16_t>(kUbBytes - kBytes);
-        AscendC::DataCopyParams draftParams{
-            static_cast<uint16_t>(rows), static_cast<uint16_t>(kBytes), kSrcGap, 0};
-        AscendC::DataCopyPad(
-            draftTokensGm[static_cast<uint64_t>(start_row) * this->k_val],
-            draftLocal, draftParams);
+        for (uint32_t r = 0; r < rows; ++r) {
+            AscendC::DataCopyExtParams draftRowParams{1, kBytes, 0, 0, 0};
+            AscendC::DataCopyPad(
+                draftTokensGm[static_cast<uint64_t>(start_row + r) * this->k_val],
+                draftLocal[static_cast<uint64_t>(r) * this->k_align], draftRowParams);
+        }
 
         AscendC::DataCopyPad(numValidGm[start_row], numValidLocal, nextParams);
     }
@@ -327,7 +326,7 @@ private:
         uint32_t c = static_cast<uint32_t>(count);
         for (uint32_t off = 0; off < c; off += STORE_MAX) {
             uint32_t chunk = (off + STORE_MAX <= c) ? STORE_MAX : (c - off);
-            AscendC::DataCopyParams p{1, static_cast<uint16_t>(chunk * ELEM_SIZE), 0, 0};
+            AscendC::DataCopyExtParams p{1, chunk * ELEM_SIZE, 0, 0, 0};
             AscendC::DataCopyPad(tokenGm[gm_offset + off], tokenLocal[off], p);
         }
     }
@@ -582,25 +581,24 @@ private:
             uint32_t ubRow = r * msa;
             for (uint32_t off = 0; off < msl; off += OUT_CHUNK_ELEMS) {
                 uint32_t chunk = (off + OUT_CHUNK_ELEMS <= msl) ? OUT_CHUNK_ELEMS : (msl - off);
-                AscendC::DataCopyParams p{1, static_cast<uint16_t>(chunk * ELEM_SIZE), 0, 0};
+                AscendC::DataCopyExtParams p{1, chunk * ELEM_SIZE, 0, 0, 0};
                 AscendC::DataCopyPad(tokenGm[gmRow + off], tokenLocal[ubRow + off], p);
             }
         }
 
         auto nextLocal = nextTokenBuf.Get<int32_t>();
-        uint16_t metaBytes16 = static_cast<uint16_t>(rows) * ELEM_SIZE;
-        AscendC::DataCopyParams nextParams{1, metaBytes16, 0, 0};
+        uint32_t metaBytes32 = static_cast<uint32_t>(rows) * ELEM_SIZE;
+        AscendC::DataCopyExtParams nextParams{1, metaBytes32, 0, 0, 0};
         AscendC::DataCopyPad(nextTokensGm[start_row], nextLocal, nextParams);
 
         auto draftLocal = draftBuf.Get<int32_t>();
         uint32_t kBytes = static_cast<uint32_t>(this->k_val) * ELEM_SIZE;
-        uint32_t kUbBytes = static_cast<uint32_t>(this->k_align) * ELEM_SIZE;
-        uint16_t kSrcGap = static_cast<uint16_t>(kUbBytes - kBytes);
-        AscendC::DataCopyParams draftParams{
-            static_cast<uint16_t>(rows), static_cast<uint16_t>(kBytes), kSrcGap, 0};
-        AscendC::DataCopyPad(
-            draftTokensGm[static_cast<uint64_t>(start_row) * this->k_val],
-            draftLocal, draftParams);
+        for (uint32_t r = 0; r < rows; ++r) {
+            AscendC::DataCopyExtParams draftRowParams{1, kBytes, 0, 0, 0};
+            AscendC::DataCopyPad(
+                draftTokensGm[static_cast<uint64_t>(start_row + r) * this->k_val],
+                draftLocal[static_cast<uint64_t>(r) * this->k_align], draftRowParams);
+        }
 
         auto numValidLocal = numValidBuf.Get<int32_t>();
         AscendC::DataCopyPad(numValidGm[start_row], numValidLocal, nextParams);
