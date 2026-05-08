@@ -188,15 +188,22 @@ _mc2_tokens_capacity: int | None = None
 _reserved_mc2_mask: torch.Tensor | None = None
 
 
-def set_mc2_tokens_capacity(vllm_config, max_num_reqs, uniform_decode_query_len):
+def set_mc2_tokens_capacity(vllm_config):
     global _mc2_tokens_capacity
     if _mc2_tokens_capacity is not None:
         return
-    if vllm_config.compilation_config.cudagraph_capture_sizes:
-        max_num_tokens = vllm_config.compilation_config.max_cudagraph_capture_size
+
+    # MC2 token capacity depends on the kernel implementation and device
+    # architecture. See:
+    # https://www.hiascend.com/document/detail/zh/Pytorch/730/apiref/torchnpuCustomsapi/docs/context/torch_npu-npu_moe_distribute_dispatch_v2.md
+    soc_version = get_ascend_device_type()
+    if soc_version in {AscendDeviceType.A2}:
+        max_num_tokens = 256
+    elif soc_version in {AscendDeviceType.A3}:
+        max_num_tokens = 512
     else:
-        # NOTE: To save memory, we cap the max number of tokens to 512.
-        max_num_tokens = min(max_num_reqs * uniform_decode_query_len, 512)
+        raise ValueError(f"MC2 is not supported on soc_version: {soc_version}")
+
     tp_size = vllm_config.parallel_config.tensor_parallel_size
     # Use integer arithmetic for ceiling division.
     num_tokens_per_tp_rank = (max_num_tokens + tp_size - 1) // tp_size
@@ -204,6 +211,10 @@ def set_mc2_tokens_capacity(vllm_config, max_num_reqs, uniform_decode_query_len)
 
 
 def get_mc2_tokens_capacity():
+    assert _mc2_tokens_capacity is not None, (
+        "MC2 tokens capacity is not set. Please call set_mc2_tokens_capacity "
+        "with vllm_config first."
+    )
     return _mc2_tokens_capacity
 
 
