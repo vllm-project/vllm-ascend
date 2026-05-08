@@ -169,8 +169,12 @@ else
 fi
 
 if [ "${PARENT_JOB}" == "false" ];then
-    CPU_NUM=$(($(cat /proc/cpuinfo | grep "^processor" | wc -l)*2))
-    JOB_NUM="-j${CPU_NUM}"
+    if [ -n "${MAX_JOBS}" ]; then
+        JOB_NUM="-j${MAX_JOBS}"
+    else
+        CPU_NUM=$(($(cat /proc/cpuinfo | grep "^processor" | wc -l)*2))
+        JOB_NUM="-j${CPU_NUM}"
+    fi
 fi
 
 CUSTOM_OPTION="${CUSTOM_OPTION} -DCUSTOM_ASCEND_CANN_PACKAGE_PATH=${ASCEND_CANN_PACKAGE_PATH} -DCHECK_COMPATIBLE=${CHECK_COMPATIBLE}"
