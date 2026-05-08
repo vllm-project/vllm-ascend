@@ -88,31 +88,6 @@ class AttentionMaskBuilder310:
         splitfuse_mask_nz = torch_npu.npu_format_cast(nd_to_nz_spec(splitfuse_mask).contiguous(), ACL_FORMAT_FRACTAL_NZ)
         return splitfuse_mask_nz
 
-    def get_swa_mask(self, dtype: torch.dtype, sliding_window):
-        """
-        Generates or retrieves a cached Sliding Window Attention (SWA) mask.
-
-        This mask allows attention only within a specific local window (diagonal band),
-        masking out tokens that are too far in the past or in the future.
-
-        Args:
-            dtype (torch.dtype): Data type of the mask.
-            sliding_window (int): The size of the sliding window.
-
-        Returns:
-            torch.Tensor: The SWA mask cast to ACL_FORMAT_FRACTAL_NZ.
-        """
-        assert dtype == torch.float16
-        if sliding_window is not None and self.swa_mask is None:
-            mask = torch.ones(self.max_seqlen, self.max_seqlen, dtype=torch.bool)
-            triu_mask = torch.triu(mask, diagonal=1).to(self.device)
-            tril_mask = torch.tril(mask, -sliding_window).to(self.device)
-            mask = triu_mask + tril_mask
-            swa_mask = torch.zeros((self.max_seqlen, self.max_seqlen), dtype=dtype, device=self.device)
-            swa_mask.masked_fill_(mask, float("-inf"))
-            self.swa_mask = torch_npu.npu_format_cast(nd_to_nz_2d(swa_mask), ACL_FORMAT_FRACTAL_NZ)
-        return self.swa_mask
-
     def get_attention_mask(self, causal: bool, model_config) -> torch.Tensor:
         """
         Retrieves the appropriate attention mask based on the model configuration.
