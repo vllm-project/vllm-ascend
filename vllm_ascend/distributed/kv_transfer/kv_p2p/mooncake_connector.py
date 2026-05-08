@@ -368,7 +368,7 @@ class KVCacheRecvingThread(threading.Thread):
             else:
                 self.k_head_dim = self.model_config.hf_text_config.head_dim
                 self.v_head_dim = self.model_config.hf_text_config.head_dim
-                self.num_kv_heads = max(self.model_config.hf_text_config.num_key_value_heads // self.tp_size, 1)
+                self.num_kv_heads = max(self.model_config.get_total_num_kv_heads() // self.tp_size, 1)
         self.proc_not_transfer_request: dict[str, bool] = {}
 
     def add_request(
@@ -588,7 +588,7 @@ class KVCacheRecvingThread(threading.Thread):
         device = k_cache.device
         head_dim = self.model_config.hf_text_config.head_dim
         block_size = self.vllm_config.cache_config.block_size
-        num_kv_head = max(self.model_config.hf_text_config.num_key_value_heads // self.tp_size, 1)
+        num_kv_head = max(self.model_config.get_total_num_kv_heads() // self.tp_size, 1)
         layers = len(self.kv_caches)
         flat_block_ids = [item for sublist in block_ids for item in sublist]
         block_ids_tensor = torch.tensor(flat_block_ids, dtype=torch.int64, device=device)
@@ -1127,7 +1127,7 @@ class MooncakeConnectorWorker:
 
         self.max_device_id = self.tp_size * self.dp_size * self.pcp_size * self.pp_size
         self.kv_role = vllm_config.kv_transfer_config.kv_role
-        self.num_key_value_heads = self.vllm_config.model_config.hf_text_config.num_key_value_heads
+        self.num_key_value_heads = self.vllm_config.model_config.get_total_num_kv_heads()
 
         # Handshake base port
         self.side_channel_port = (
