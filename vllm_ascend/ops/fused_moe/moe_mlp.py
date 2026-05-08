@@ -192,6 +192,7 @@ def quant_apply_mlp(
                 activate_left=True,
                 quant_mode=1,
             )
+        before_gmm2_evt = torch.npu.current_stream().record_event()
         # gmm2: down_proj
         hidden_states = DeviceOperator.npu_grouped_matmul_gmm2(
             hidden_states=hidden_states,
@@ -226,6 +227,7 @@ def quant_apply_mlp(
         dispose_tensor(unquantized_hidden_states)
         # act_fn: swiglu
         hidden_states = torch_npu.npu_swiglu(hidden_states)
+        before_gmm2_evt = torch.npu.current_stream().record_event()
         # gmm2: down_proj
         hidden_states = torch_npu.npu_grouped_matmul(
             x=[hidden_states],
@@ -299,6 +301,7 @@ def quant_apply_mlp(
             else:
                 hidden_states = torch_npu.npu_swiglu(hidden_states)
                 hidden_states, swiglu_out_scale = torch_npu.npu_dynamic_quant(hidden_states)
+        before_gmm2_evt = torch.npu.current_stream().record_event()
         # gmm2: down_proj
         hidden_states = DeviceOperator.npu_grouped_matmul_gmm2(
             hidden_states=hidden_states,
@@ -317,7 +320,7 @@ def quant_apply_mlp(
             bias=bias2,
             fallback_output_dtype=_output_dtype,
         )
-    return hidden_states
+    return hidden_states, before_gmm2_evt
 
 
 def unquant_apply_mlp(
@@ -366,7 +369,7 @@ def unquant_apply_mlp(
         group_type=0,
         group_list=group_list,
     )[0]
-    return hidden_states
+    return hidden_states, None
 
 
 def unified_apply_mlp(*, mlp_compute_input: MoEMlpComputeInput) -> torch.Tensor:
