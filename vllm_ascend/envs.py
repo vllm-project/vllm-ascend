@@ -91,8 +91,12 @@ env_variables: dict[str, Callable[[], Any]] = {
     "VLLM_ASCEND_ENABLE_NZ": lambda: int(os.getenv("VLLM_ASCEND_ENABLE_NZ", 1)),
     # Decide whether we should enable CP parallelism.
     "VLLM_ASCEND_ENABLE_CONTEXT_PARALLEL": lambda: bool(int(os.getenv("VLLM_ASCEND_ENABLE_CONTEXT_PARALLEL", "0"))),
-    # Whether to anbale dynamic EPLB
-    "DYNAMIC_EPLB": lambda: os.getenv("DYNAMIC_EPLB", "false").lower(),
+    # Whether to enable dynamic EPLB. Accepted truthy values are case-insensitive
+    # "true" / "1"; everything else (including unset) is treated as disabled.
+    "DYNAMIC_EPLB": lambda: os.getenv("DYNAMIC_EPLB", "false").strip().lower() in ("true", "1"),
+    # Whether to enable expert-map recording for EPLB. Accepts the same
+    # case-insensitive "true" / "1" values as DYNAMIC_EPLB.
+    "EXPERT_MAP_RECORD": lambda: os.getenv("EXPERT_MAP_RECORD", "false").strip().lower() in ("true", "1"),
     # Whether to enable fused MC2 (`dispatch_gmm_combine_decode` / `dispatch_ffn_combine`).
     # 0, or not set: default ALLTOALL and MC2 will be used.
     # 1: ALLTOALL and MC2 might be replaced by `dispatch_ffn_combine` operator.
