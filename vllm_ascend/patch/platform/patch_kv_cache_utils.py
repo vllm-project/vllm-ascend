@@ -6,7 +6,11 @@ import vllm.v1.core.kv_cache_utils
 from vllm.config import VllmConfig
 from vllm.v1.kv_cache_interface import KVCacheConfig
 
-_orig_resolve_kv_cache_block_sizes = vllm.v1.core.kv_cache_utils.resolve_kv_cache_block_sizes
+_orig_resolve_kv_cache_block_sizes = getattr(
+    vllm.v1.core.kv_cache_utils,
+    "resolve_kv_cache_block_sizes",
+    None,
+)
 
 
 def _ascend_resolve_kv_cache_block_sizes(
@@ -44,9 +48,11 @@ def _ascend_resolve_kv_cache_block_sizes(
     return _orig_resolve_kv_cache_block_sizes(kv_cache_config, vllm_config)
 
 
-vllm.v1.core.kv_cache_utils.resolve_kv_cache_block_sizes = _ascend_resolve_kv_cache_block_sizes
+if _orig_resolve_kv_cache_block_sizes is not None:
+    vllm.v1.core.kv_cache_utils.resolve_kv_cache_block_sizes = _ascend_resolve_kv_cache_block_sizes
 
-# Also patch the reference used by engine/core.py which imports the function directly.
-import vllm.v1.engine.core  # noqa: E402
+    # Also patch the reference used by engine/core.py which imports the function directly.
+    import vllm.v1.engine.core  # noqa: E402
 
-vllm.v1.engine.core.resolve_kv_cache_block_sizes = _ascend_resolve_kv_cache_block_sizes
+    if hasattr(vllm.v1.engine.core, "resolve_kv_cache_block_sizes"):
+        vllm.v1.engine.core.resolve_kv_cache_block_sizes = _ascend_resolve_kv_cache_block_sizes
