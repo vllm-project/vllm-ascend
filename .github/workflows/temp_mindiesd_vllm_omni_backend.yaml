@@ -124,6 +124,8 @@ jobs:
         run: |
           git clone --depth 1 --branch "$MINDIESD_REF" "$MINDIESD_REPO" MindIE-SD
           cd MindIE-SD
+          sed -i '/build_tik_ops.sh/s/^/# /' build/build_ops.sh
+          grep -n "build_tik_ops" build/build_ops.sh
           python3 -m build --wheel --no-isolation
           pip install --no-deps --force-reinstall dist/mindiesd*.whl
 
