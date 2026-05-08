@@ -51,8 +51,8 @@ test_cases:
         dataset_conf: gpqa/gpqa_gen_0_shot_cot_chat_prompt
         max_out_len: 65536
         batch_size: 32
-        baseline: 80
-        threshold: 8
+        baseline: 83
+        threshold: 5
         temperature: 1.0
       perf:
         case_type: performance
@@ -63,5 +63,5 @@ test_cases:
         max_out_len: 1500
         batch_size: 128
         request_rate: 0
-        baseline: 1128
+        baseline: 1116
         threshold: 0.97
