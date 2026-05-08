@@ -105,13 +105,6 @@ jobs:
           VLLM_TARGET_DEVICE=empty uv pip install -e .
           uv pip uninstall triton
 
-      - name: Clone and install MindIE-SD
-        run: |
-          git clone --depth 1 --branch "$MINDIESD_REF" "$MINDIESD_REPO" MindIE-SD
-          cd MindIE-SD
-          python3 -m build --wheel --no-isolation
-          pip install --no-deps --force-reinstall dist/mindiesd*.whl
-
       - name: Install vllm-project/vllm-ascend
         env:
           PIP_EXTRA_INDEX_URL: https://mirrors.huaweicloud.com/ascend/repos/pypi
@@ -126,6 +119,13 @@ jobs:
           git clone --depth 1 --branch "$VLLM_OMNI_REF" "$VLLM_OMNI_REPO" vllm-omni
           cd vllm-omni
           VLLM_OMNI_TARGET_DEVICE=npu uv pip install -v -e .
+
+      - name: Clone and install MindIE-SD
+        run: |
+          git clone --depth 1 --branch "$MINDIESD_REF" "$MINDIESD_REPO" MindIE-SD
+          cd MindIE-SD
+          python3 -m build --wheel --no-isolation
+          pip install --no-deps --force-reinstall dist/mindiesd*.whl
 
       - name: Check torch NPU availability
         run: |
