@@ -64,7 +64,8 @@ def gmm_swiglu_quant_golden_a8_w4(
     Process the input data by group and call the GMM_Swiglu_quant function for quantization computation.
     Parameters:
         x (torch.Tensor): Input tensor with shape (M, K), type INT8.
-        weight (torch.Tensor): List of weight tensors, each with shape (E, K, N), data type INT8 but data range INT4, representing INT4 values.
+        weight (torch.Tensor): List of weight tensors, each with shape (E, K, N),
+                               data type INT8 but data range INT4, representing INT4 values.
         weight_scale (torch.Tensor): Scaling factor for each channel.
           - In perGroup scenario: shape (E, k_group_num, N).
           - In perChannel scenario: shape (E, N).

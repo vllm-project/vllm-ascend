@@ -38,7 +38,7 @@ BASE_KWARGS = {
 def redirect_output(log_file_path):
     log_path = Path(LOG_NAME) / log_file_path
     log_path.parent.mkdir(parents=True, exist_ok=True)
-    f = open(LOG_NAME + "/" + log_file_path, "w")
+    f = open(LOG_NAME + "/" + log_file_path, "w")  # noqa: SIM115
     os.dup2(f.fileno(), sys.stdout.fileno())
     os.dup2(f.fileno(), sys.stderr.fileno())
     return f

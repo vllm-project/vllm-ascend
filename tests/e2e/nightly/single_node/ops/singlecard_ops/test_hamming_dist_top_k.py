@@ -23,7 +23,6 @@ def run_tests():
 
 
 def unpackbits(x, dim=-1):
-    shape = x.shape
     x_np = x.cpu().numpy()
     unpacked = np.unpackbits(x_np, axis=dim)
     return torch.from_numpy(unpacked).to(x.device).to(dtype=torch.float16)
@@ -94,7 +93,6 @@ def torch_hamming_distance_all(hash_q_op, hash_k_op, block_table_op, seq_len_op,
     assert ds_top_k_idx_ is not None
 
     top_k = top_k_op.max()
-    ds_top_k_r = ds_top_k_.reshape(batch, num_kv_head, 1, top_k)
     ds_top_k_idx_r = ds_top_k_idx_.reshape(batch, num_kv_head, top_k)
 
     return ds_top_k_idx_r
@@ -162,7 +160,6 @@ def torch_hamming_distance_topk(hash_q_op, hash_k_op, block_table_op, seq_len, c
         effect_len = (seq_len // chunk_size + 1) * chunk_size
 
     # number of chunks
-    chunk_blocks = effect_len // chunk_size
     reduce_max_chunk = flat_q_k_mul[:effect_len].view(1, -1, chunk_size).max(dim=-1).values
 
     reduce_max_chunk[:, :sink] = 8192
@@ -277,7 +274,7 @@ class TestCustomHammingDistTopK(TestCase):
     def _run_graph_mode(self):
         class Network(nn.Module):
             def __init__(self):
-                super(Network, self).__init__()
+                super().__init__()
 
             def forward(
                 self,

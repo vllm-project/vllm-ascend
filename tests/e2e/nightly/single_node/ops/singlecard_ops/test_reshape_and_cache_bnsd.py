@@ -51,7 +51,7 @@ class TestCustomReshapeAndCacheBnsd(TestCase):
     def _run_graph_mode(self):
         class Network(nn.Module):
             def __init__(self):
-                super(Network, self).__init__()
+                super().__init__()
 
             def forward(self, hashk_op, hashk_cache_op, slot_mapping_op, seq_lens_op, k_cache_out):
                 return torch.ops._C_ascend.npu_reshape_and_cache_bnsd(
@@ -75,7 +75,6 @@ class TestCustomReshapeAndCacheBnsd(TestCase):
             block_offset = slot % self.block_size
 
             for kv_head_id in range(self.num_kv_heads):
-                input_hashk = self.hashk_op_org[kv_head_id, token_id, :]
                 output_hashk = output[block_idx, kv_head_id, block_offset, :]
 
         token_id = self.bs - 1
@@ -165,7 +164,6 @@ class TestCustomReshapeAndCacheBnsd(TestCase):
         block_size = 4
         head_size = 4
         token_num = 4
-        bs = 1
 
         key_in = torch.zeros(num_kv_heads, token_num, head_size, dtype=torch.bfloat16)
         for head_id in range(num_kv_heads):

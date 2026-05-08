@@ -14,7 +14,6 @@ def generate_test_data(
     Generate random test data.
     Return a dictionary containing all input tensors and the additional field 'expected_query_lens' for validation.
     """
-    num_cols = num_speculative_steps + 1
 
     if num_reqs > max_num_reqs:
         raise ValueError("num_reqs cannot be larger than max_num_reqs")
@@ -99,6 +98,8 @@ def test_post_update(num_reqs: int, max_num_reqs: int, vocab_size: int, num_spec
         kernel_inputs_gpu["output_bin_counts"], kernel_inputs_npu["output_bin_counts"], rtol=1e-3, atol=1e-3
     ), (
         f"Triton output differs from PyTorch reference.\n"
-        f"Max diff: {torch.max(torch.abs(kernel_inputs_npu['output_bin_counts'] - kernel_inputs_npu['output_bin_counts']))}\n"
-        f"Mean diff: {torch.mean(torch.abs(kernel_inputs_npu['output_bin_counts'] - kernel_inputs_npu['output_bin_counts']))}"
+        f"Max diff: "
+        f"{torch.max(torch.abs(kernel_inputs_gpu['output_bin_counts'] - kernel_inputs_npu['output_bin_counts']))}\n"
+        f"Mean diff: "
+        f"{torch.mean(torch.abs(kernel_inputs_gpu['output_bin_counts'] - kernel_inputs_npu['output_bin_counts']))}"
     )
