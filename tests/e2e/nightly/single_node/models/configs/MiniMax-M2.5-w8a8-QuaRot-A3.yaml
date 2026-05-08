@@ -52,7 +52,7 @@ test_cases:
         max_out_len: 65536
         batch_size: 32
         baseline: 80
-        threshold: 10
+        threshold: 8
         temperature: 1.0
       perf:
         case_type: performance
