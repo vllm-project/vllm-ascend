@@ -1,84 +1,228 @@
 ---
 name: main2main
-description: |
-  Guides adaptation of vLLM-Ascend to upstream vLLM main branch changes. Supports two workflows:
-  (1) Proactive upgrade: analyze vLLM code diff, generate prioritized change report, adapt vllm-ascend code.
-  (2) CI failure diagnosis: when schedule_test_vllm_main CI is red, automatically extract errors from logs,
-  trace root causes to upstream commits, generate diagnostic report, and apply fixes.
-
-  The skill produces code changes, a report file, and a structured summary. It does NOT perform
-  git/PR operations. After the skill completes in standalone mode, create a branch, commit, and
-  submit a PR using the structured summary as PR body.
-
-  Use this skill whenever:
-  - The user wants to upgrade/adapt vllm-ascend to a newer vLLM commit
-  - The user shares a GitHub Actions URL or run ID from main2main tests
-  - The user mentions CI failures related to vLLM main branch updates or "main2main" test failures
-  - The user wants to compare vLLM changes and assess impact on vllm-ascend
-  - The user asks to analyze, debug, or fix failures caused by upstream vLLM changes 
+description: >-
+  Adapt vLLM-Ascend to upstream vLLM main branch evolution via a CI-verified
+  step pipeline. Use this skill whenever the user mentions upgrading, bumping,
+  or syncing vllm-ascend to a newer vLLM commit, wants to analyze upstream
+  vLLM changes and their impact on vllm-ascend, mentions main2main or
+  schedule_test_vllm_main, or asks to adapt code for vLLM API changes.
+  Also use when the user provides a vllm path and vllm-ascend path and
+  wants to bring them in sync, even if they don't explicitly say "main2main".
 ---
 
 # main2main
 
-Adapt vLLM-Ascend to upstream vLLM main branch evolution — proactively or reactively.
+vllm-ascend is a hardware adaptation plugin for vLLM. As vLLM's main branch
+evolves, vllm-ascend must keep up. This skill splits upstream commit changes
+into manageable steps, adapts vllm-ascend code for each step, and only commits
+after the e2e-main2main test suite passes.
 
-## Scenario Detection
+## Inputs
 
-Determine which workflow the user needs, then Read the corresponding document:
+The user provides (or the skill auto-detects):
+- **vllm_path**: path to the local vLLM repository
+- **vllm_ascend_path**: path to the local vllm-ascend repository
 
-**Proactive Upgrade** — Read `proactive-upgrade.md` (in the same directory as this SKILL.md)
-- User wants to analyze what changed in vLLM and adapt vllm-ascend
-- User mentions upgrading, bumping, or syncing to a newer vLLM commit
-- No CI failure is involved; the goal is forward-looking analysis
+## Guardrails
 
-**CI Failure Diagnosis** — Read `error-analysis.md` (in the same directory as this SKILL.md)
-- User shares a GitHub Actions URL, run ID, or mentions CI is red
-- User mentions schedule_test_vllm_main failures or "main2main" test failures
-- The goal is to diagnose and fix existing breakage
+These rules protect the repository's clean state. Every commit produced by
+this skill should be verified and intentional.
 
-**If both signals are present** (e.g., user says "upstream changed an API and CI is failing"), prefer CI Failure Diagnosis — fixing active breakage takes priority over proactive analysis.
+- **Only modify files inside the vllm-ascend repo.** The vLLM repo is an
+  upstream reference — we adapt to it, never modify it. If a fix seems to
+  require changing vLLM code, the adaptation approach is wrong.
 
-Both workflows share the common knowledge below. After reading the relevant document, also read `reference/error-patterns.md` for concrete fix examples — do this immediately if the user's message already mentions a specific error type (TypeError, AttributeError, ImportError, etc.), or whenever you encounter such errors during analysis.
+- **Keep intermediate files in /tmp/main2main/.** Analysis reports, logs,
+  patches, and ledgers belong outside the repo. Files left inside the repo
+  pollute commit history and risk being accidentally committed.
 
----
+- **Use `git add <files>` instead of `git add .`.** Explicit staging ensures
+  only intentional changes enter a commit. Glob-add easily drags in debug
+  artifacts, log files, and analysis documents.
 
-## Common Knowledge
+- **Commit only after CI passes.** Unverified code in the main branch breaks
+  other developers. If CI does not pass, save the work-in-progress as a patch
+  file instead of committing.
 
-### Version Compatibility Pattern
+- **Advance the vllm repo after each successful step.** After committing a
+  verified step, checkout the vllm repo to that step's last upstream commit.
+  Subsequent CI runs need to execute against the correct vLLM version —
+  skipping this produces misleading test results.
 
-Most fixes require `vllm_version_is()` guards to maintain backward compatibility:
+## Workflow Overview
 
-```python
-from vllm_ascend.utils import vllm_version_is
+The pipeline has 8 phases. Phases 1–2 are preparation. Phases 3–7 repeat for
+each step. Phase 8 produces the final output.
 
-if vllm_version_is("0.16.0"):  # pinned release version
-    # Use old API
-else:
-    # Use new API (main branch)
-```
+### Phase 1: Init & Detect
 
-The compatible release version comes from `vllm_version` matrix in `.github/workflows/pr_test_full.yaml`.
+Run the detection script to determine what needs upgrading:
 
-**Always use `vllm_version_is()`. Do not use these alternatives:**
+    python3 <skill_dir>/scripts/detect_commits.py \
+      --vllm-path <vllm_path> \
+      --ascend-path <ascend_path>
 
-- `hasattr(obj, "attr")` — looks like duck typing but silently accepts unexpected API shapes. It also hides which version boundary introduced the change, making future cleanup require code archaeology instead of a grep.
-- A boolean flag derived from a version check (e.g., `self.use_new_api = not vllm_version_is("0.16.0")`) set once and propagated downstream — this disguises a version boundary as a capability toggle. Future readers preserve the flag when dropping the version instead of deleting the branch.
-- `try/except ImportError` or `try/except AttributeError` — same problem as `hasattr`: hides the version boundary.
+The script reads `main_vllm_commit` from `vllm-ascend/docs/source/conf.py`
+as the base commit, and uses the vLLM repo's HEAD as the target. If they
+match (no drift), the pipeline ends here.
 
-**Why `vllm_version_is()` specifically:** it is grep-able by version string. When the pinned version is eventually dropped, `grep -rn 'vllm_version_is("0.16.0")'` finds every cleanup site in one command. None of the alternatives support this workflow.
+### Phase 2: Plan Steps
 
-**Apply the guard at each branching site, not once at the top.** Every file that diverges by version should import and call `vllm_version_is()` directly at the point of divergence. This keeps each version-gated branch independently discoverable and independently removable — the key question a future maintainer asks is "where does this version boundary live?" not "which flag was derived from which check?"
+Run the step planner to split the commit range into steps:
 
----
+    python3 <skill_dir>/scripts/plan_steps.py \
+      --vllm-path <vllm_path> \
+      --base-commit <base> \
+      --target-commit <target>
+
+Read `/tmp/main2main/steps.json` for the plan. The step boundaries are
+determined by the planner's risk analysis — do not rearrange them.
+
+Record `last_verified_head = current HEAD` before starting execution.
+
+*Phases 3–7 repeat for each step in the plan.*
+
+### Phase 3: Prepare Step Context
+
+Generate the upstream diff for this step. This patch file is the central
+reference for both the adapt and fix-ci phases.
+
+    git -C <vllm_path> diff <step_start>..<step_end> \
+      > /tmp/main2main/steps/<step-id>/upstream.patch
+
+    git -C <vllm_path> diff --name-only <step_start>..<step_end> \
+      > /tmp/main2main/steps/<step-id>/changed-files.txt
+
+### Phase 4: Adapt
+
+Read `adapt.md` in this skill directory. It contains the concrete method for
+analyzing the upstream patch and mapping changes to vllm-ascend files — the
+file mapping table, adaptation rules, and version compatibility patterns.
+
+The core task: translate upstream.patch changes into vllm-ascend modifications
+that maintain interface compatibility.
+
+### Phase 5: Verify via CI
+
+Run the e2e-main2main test suite:
+
+    cd <ascend_path>
+    python3 .github/workflows/scripts/run_suite.py \
+      --suite e2e-main2main --continue-on-error \
+      > /tmp/main2main/steps/<step-id>/ci/round-1.log 2>&1
+
+If all tests pass, proceed to Phase 7. If any fail, enter Phase 6.
+
+### Phase 6: Fix-CI Loop
+
+Read `fix-ci.md` in this skill directory. It describes how to extract errors
+from CI logs using `ci_log_summary.py`, diagnose root causes by
+cross-referencing the upstream patch, and apply targeted fixes.
+
+Each fix round re-runs CI (Phase 5). The loop continues until tests pass or
+a stop condition is met:
+
+1. Only environment flakes remain (not code issues) → treat as pass.
+2. Two consecutive rounds with identical error signatures → stop.
+3. No code diff produced in the current round → stop.
+4. No actionable code_bugs in the error summary → stop.
+5. Hard cap of 5 rounds → safety stop.
+
+### Phase 7: Commit & Advance
+
+If CI passed, commit the verified changes:
+
+    python3 <skill_dir>/scripts/check_and_commit.py \
+      --ascend-path <ascend_path> \
+      --step-id <step-id> \
+      --message "<commit message>"
+
+Then advance the vllm repo to match this step's endpoint:
+
+    git -C <vllm_path> checkout <step_end_commit>
+
+Update `last_verified_head` to the new HEAD.
+
+**If the fix-ci loop is exhausted** (stop condition triggered), execute a
+partial stop instead:
+
+    git diff > /tmp/main2main/steps/<step-id>/failed.patch
+    # Write failed-summary.json with error details
+    git checkout -- .   # rollback to last_verified_head
+
+Do not skip the failed step and continue to the next one — stop immediately.
+
+### Phase 8: Final Summary
+
+After all steps complete (or after a partial stop), output a structured
+summary covering: steps completed, commit SHAs, base→target progress, and
+any failure details with patch paths.
+
+## Edge Cases
+
+- **No drift (base == target)**: Phase 1 reports `has_drift=false`. Output
+  "no upstream drift detected" and end.
+
+- **0 steps planned** (all commits are docs/tests only): Skip Phases 3–7.
+  Just update the commit reference in conf.py and commit.
+
+- **First step fails and cannot be fixed**: Partial stop with 0 verified
+  steps. Save the patch for manual review.
+
+- **vllm repo path doesn't exist**: The detect script exits with an error.
+  Ask the user to confirm the path.
+
+- **CI timeout**: If `run_suite.py` produces no output for 60+ minutes,
+  terminate the process and treat it as a CI failure.
+
+## Version Compatibility Pattern
+
+When code must work with both old and new vLLM versions, use version guards:
+
+    from vllm_ascend.utils import vllm_version_is
+
+    if vllm_version_is(">=0.19.0"):
+        # new version logic
+    else:
+        # old version logic
+
+The version number comes from conf.py's `main_vllm_tag` field. Use semantic
+version tags rather than commit hashes for clarity and stability.
+
+## Pre-Completion Checklist
+
+Before declaring the task complete, verify these items — they are the most
+commonly missed issues based on past experience:
+
+- [ ] No temporary files left in the repo (vllm_changes.md, .log, .patch, etc.)
+- [ ] All commits use `git commit -s` (sign-off required)
+- [ ] All intermediate files are in /tmp/main2main/, not in the repo
+- [ ] conf.py `main_vllm_commit` updated to the final target commit reached
+- [ ] conf.py `main_vllm_tag` updated if the tag changed
+- [ ] Any new `vllm_version_is()` calls use the correct version number
+- [ ] Each commit message includes the upstream commit range it adapts
+- [ ] If partial stop: failed.patch and failed-summary.json are saved
+- [ ] Final summary has been output
 
 ## Output Contract
 
-Both workflows produce two common outputs:
+The final output should be structured as:
 
-1. **Code changes** — applied to the working tree (unstaged)
-2. **Structured summary** — output in conversation, following the format defined in each workflow's final step
-
-The skill does **not** perform git or GitHub operations (no branch, commit, push, or PR). After the skill completes:
-
-- **Standalone mode**: proceed with creating a branch, committing changes, pushing, and submitting a PR. Use the structured summary as the PR body content.
-- **Workflow mode**: the orchestrating Workflow handles all git/PR operations using the structured summary.
+```yaml
+status: completed | partial
+base_commit: <sha>
+target_commit: <sha>
+reached_commit: <sha>
+steps_completed: N
+steps_total: M
+commits:
+  - sha: <sha>
+    step: step-1
+    message: "..."
+  - ...
+partial_stop:            # only if status == partial
+  step_id: step-K
+  patch_path: /tmp/main2main/steps/step-K/failed.patch
+  summary_path: /tmp/main2main/steps/step-K/failed-summary.json
+  reason: "..."
+```
