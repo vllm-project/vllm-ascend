@@ -77,7 +77,7 @@ jobs:
       - name: Set global envs
         run: |
           set -a
-          . /root/.bashrc || true
+          . /usr/local/Ascend/ascend-toolkit/set_env.sh
           set +a
           env >> $GITHUB_ENV
       - name: Checkout vllm-project/vllm-ascend repo
