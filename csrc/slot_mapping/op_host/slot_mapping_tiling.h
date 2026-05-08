@@ -1,7 +1,3 @@
-/**
- * @file slot_mapping_tiling.h
- * @brief SlotMapping 算子 TilingData 定义（vllm-ascend Host 侧集成版）
- */
 #ifndef SLOT_MAPPING_TILING_H
 #define SLOT_MAPPING_TILING_H
 
