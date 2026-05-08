@@ -25,6 +25,12 @@ class DynamicTable:
 
 
 class DefaultEplb(EplbPolicy):
+    def __init__(self):
+        self._new_ep_size: int | None = None
+
+    def set_new_ep_size(self, new_ep_size: int):
+        self._new_ep_size = new_ep_size
+
     @staticmethod
     def add_redundant(current_expert_table, expert_workload, num_original_expert):
         layer_num, npu_num, experts_per_npu = expert_workload.shape
@@ -50,10 +56,14 @@ class DefaultEplb(EplbPolicy):
         for i in range(num_redundancy_expert):
             sorted_indices = np.argsort([t[1] for t in origin_weights], kind="stable")[::-1]
             weights = [origin_weights[idx] for idx in sorted_indices]
-            tmp_raw_weight = weights[0][1] * (len(route_expert_redundancy[weights[0][0]]) + 1)
-            route_expert_redundancy[weights[0][0]].append(route_expert_num + i)
-            avg_weight = tmp_raw_weight / (len(route_expert_redundancy[weights[0][0]]) + 1)
-            weights[0] = (weights[0][0], avg_weight)
+            index = 0
+            while (len(route_expert_redundancy[weights[index][0]])) == card_num - 1:
+                index += 1
+                assert index < route_expert_num
+            tmp_raw_weight = weights[index][1] * (len(route_expert_redundancy[weights[index][0]]) + 1)
+            route_expert_redundancy[weights[index][0]].append(route_expert_num + i)
+            avg_weight = tmp_raw_weight / (len(route_expert_redundancy[weights[index][0]]) + 1)
+            weights[index] = (weights[index][0], avg_weight)
             origin_weights = weights
 
         # Step 2: Calculate the number of items per box
@@ -70,16 +80,18 @@ class DefaultEplb(EplbPolicy):
         for i in range(route_expert_num):
             redundancy_num = len(route_expert_redundancy[i])
             for _ in range(redundancy_num):
-                cur_weight = 0
+                expert_weight = 0
                 for item, weight in origin_weights:
                     if item == i:
-                        cur_weight = weight
+                        expert_weight = weight
+                        break
 
                 boxes[index].append(i)
-                boxes_weights[index].append(cur_weight)
-                box_weights[index] += cur_weight
+                boxes_weights[index].append(expert_weight)
+                box_weights[index] += expert_weight
                 box_counts[index] += 1
                 index += 1
+                index = index % card_num
 
         sorted_indices = np.argsort([t[1] for t in origin_weights], kind="stable")[::-1]
         origin_weights = [origin_weights[idx] for idx in sorted_indices]
@@ -95,6 +107,14 @@ class DefaultEplb(EplbPolicy):
                     if min_box_index == -1 or box_weights[i] < box_weights[min_box_index]:
                         min_box_index = i
 
+            # If no valid box is found, place in the first available box (duplicates will be fixed in Step5)
+            if min_box_index == -1:
+                # Find any box with capacity
+                for i in range(card_num):
+                    if box_counts[i] < items_per_box or (box_counts[i] == items_per_box and remaining_items > 0):
+                        min_box_index = i
+                        break
+
             # Place the item (id) into the selected box
             boxes[min_box_index].append(item_id)
             boxes_weights[min_box_index].append(weight)
@@ -105,7 +125,74 @@ class DefaultEplb(EplbPolicy):
             if box_counts[min_box_index] == (items_per_box + 1) and remaining_items > 0:
                 remaining_items -= 1
 
-        # Step 5: Output each box's contents and total weight
+        # Step 5: Deduplication & Rebalancing
+        # Target CASE: Handles the edge case where Step 4's fallback logic forces a duplicate
+        # expert onto a card because all other cards are either full or already contain that expert.
+        # ACTION: Identifies these forced duplicates and replaces them with unique candidates
+        # that minimize weight difference, restoring uniqueness while preserving load balance.
+        for i in range(card_num):
+            arr = np.asarray(boxes[i])
+
+            unique, inv, cnt = np.unique(arr, return_inverse=True, return_counts=True)
+
+            mask = cnt > 1
+            dup_vals = unique[mask]  # The IDs of the duplicated experts
+            dup_cnts = cnt[mask]  # How many times each duplicated expert appears
+
+            for item_id, counts in zip(dup_vals, dup_cnts):
+                # We need to replace (counts - 1) occurrences to leave only one instance
+                for _ in range(counts - 1):
+                    # Find the current position of the duplicate expert in the NPU's list
+                    cur_position = boxes[i].index(item_id)
+                    # Get the current weight associated with this duplicate expert
+                    cur_weight: float = boxes_weights[i][cur_position]
+
+                    def score(t, cw=cur_weight):
+                        before = len(route_expert_redundancy[t[0]]) + 1
+                        after = len(route_expert_redundancy[t[0]]) + 2
+                        adjusted = t[1] * before / after
+                        return abs(adjusted - cw)
+
+                    sorted_indices = np.argsort(
+                        [score(t) for t in origin_weights],
+                        kind="stable",
+                    )
+
+                    weights = [origin_weights[idx] for idx in sorted_indices]
+
+                    index = 0
+                    while index < len(weights):
+                        candidate_id = weights[index][0]
+                        if (
+                            len(route_expert_redundancy[candidate_id]) < card_num - 1
+                            and candidate_id != item_id
+                            and candidate_id not in boxes[i]
+                        ):
+                            break
+                        index += 1
+
+                    assert index < len(weights)
+
+                    boxes[i][cur_position] = weights[index][0]
+                    tmp_raw_weight = weights[index][1] * (len(route_expert_redundancy[weights[index][0]]) + 1)
+                    route_expert_redundancy[weights[index][0]].append(0)  # Add a placeholder to track redundancy
+                    avg_weight = tmp_raw_weight / (len(route_expert_redundancy[weights[index][0]]) + 1)
+                    boxes_weights[i][cur_position] = avg_weight
+
+                    weights[index] = (weights[index][0], avg_weight)
+
+                    tmp_raw_weight = cur_weight * (len(route_expert_redundancy[item_id]) + 1)
+                    avg_weight = tmp_raw_weight / len(route_expert_redundancy[item_id])
+                    route_expert_redundancy[item_id].pop()
+
+                    for index, (expert_id, expert_weight) in enumerate(weights):
+                        if item_id == expert_id:
+                            weights[index] = (expert_id, avg_weight)
+                    origin_weights = weights
+
+        box_weights = [sum(boxes_weights[i]) for i in range(card_num)]  # type: ignore
+
+        # Step 6: Output each box's contents and total weight
         result = []
         for i in range(card_num):
             result.append(
@@ -250,33 +337,39 @@ class DefaultEplb(EplbPolicy):
     @staticmethod
     def constraint_expert_local_exchange(current_expert_table, global_deployment):
         for layer_id in range(len(global_deployment)):
-            for card_id in range(len(global_deployment[layer_id])):
-                current_list = [int(x) for x in current_expert_table[layer_id][card_id]]
-                new_list = [int(x) for x in global_deployment[layer_id][card_id]]
-                num = len(new_list)
+            # Iterate over available cards, ensuring we don't go out of bounds
+            num_cards = min(len(current_expert_table[layer_id]), len(global_deployment[layer_id]))
 
-                new_index = [-1] * num
-                new_result = [-1] * num
-                remaining_elements = []
+            for card_id in range(num_cards):
+                cur_expert_ids = np.array(current_expert_table[layer_id][card_id])
+                new_expert_ids = np.array(global_deployment[layer_id][card_id])
 
-                for i in range(num):
-                    flag = True
-                    for j in range(num):
-                        if new_list[i] == current_list[j] and new_index[j] == -1:
-                            new_index[j] = 0
-                            new_result[j] = current_list[j]
-                            flag = False
-                            break
-                    if flag:
-                        remaining_elements.append(new_list[i])
+                assert len(cur_expert_ids) == len(new_expert_ids), (
+                    "Number of experts must match between current and new deployment."
+                )
 
-                index = 0
-                for k in range(num):
-                    if new_result[k] == -1:
-                        new_result[k] = remaining_elements[index]
-                        index += 1
+                # 1. Identify experts that are not moved to other NPU.
+                # If there have duplicate experts in cur_expert_ids, we choose the first occurrence.
+                _, first_occurrence_idx = np.unique(cur_expert_ids, return_index=True)
+                mask_experts_not_move = np.zeros(len(cur_expert_ids), dtype=bool)
+                mask_experts_not_move[first_occurrence_idx] = True
+                mask_experts_not_move &= np.isin(cur_expert_ids, new_expert_ids)
+                experts_not_move = cur_expert_ids[mask_experts_not_move]
 
-                global_deployment[layer_id][card_id] = new_result
+                # 2. Identify experts in the new list that are moved from other NPU.
+                mask_new_experts = ~np.isin(new_expert_ids, experts_not_move)
+                new_experts = new_expert_ids[mask_new_experts]
+
+                final_expert_list = new_expert_ids.copy()
+
+                # Use mask_experts_not_move to constrain expert local exchange in NPU.
+                final_expert_list[mask_experts_not_move] = experts_not_move
+
+                # Fill the remaining slot with experts that are moved from other NPUS.
+                final_expert_list[~mask_experts_not_move] = new_experts
+
+                # Update the global deployment plan with the locally constrained list
+                global_deployment[layer_id][card_id] = final_expert_list.tolist()
 
         return global_deployment
 
@@ -289,8 +382,13 @@ class DefaultEplb(EplbPolicy):
         assert info.placement_table is not None
         row = cast(np.ndarray, info.placement_table[0])
         expert_ids, counts = np.unique(row, return_counts=True)
-        num_redundancy_expert = self.get_redundant_num(num_npus, counts)
         num_original_expert = len(expert_ids)
+        if self._new_ep_size:
+            # Elastic EP Scaling
+            num_npus = self._new_ep_size
+            num_redundancy_expert = experts_per_npu * self._new_ep_size - num_original_expert
+        else:
+            num_redundancy_expert = self.get_redundant_num(num_npus, counts)
         layer_workloads = self.add_redundant(info.placement_table, info.workload_table, num_original_expert)
         max_heat_per_layer_before = self.calculate_max_heat_per_layer(info.workload_table, layer_num)
         npu_heat_all_origin = sum(max_heat_per_layer_before)
@@ -308,11 +406,15 @@ class DefaultEplb(EplbPolicy):
         if num_npus <= 0:
             raise ValueError("the number of NPUs must be greater than 0")
 
-        if num_npus < num_redundancy_expert:
+        if experts_per_npu > expert_num:
             raise ValueError(
-                "the number of NPUs "
-                f"{num_npus} must be greater than or equal to the number of redundant experts "
-                f"{num_redundancy_expert}"
+                f"the number of experts per NPU {experts_per_npu} can't be greater than expert_num {expert_num}"
+            )
+
+        if num_npus * experts_per_npu < num_original_expert:
+            raise ValueError(
+                f"num_npus {num_npus} * experts_per_npu {experts_per_npu} "
+                f"can't be less than num_original_expert {num_original_expert}"
             )
 
         # Number of experts deployed on each card includes one redundant expert
@@ -321,7 +423,7 @@ class DefaultEplb(EplbPolicy):
         max_heat_per_layer_after = np.zeros([layer_num])
         for layer in range(layer_num):
             # Get the expert IDs and their corresponding workloads for the current layer;
-            # workloads need to be normalized, and one redundant expert is added per card
+            # redundant experts will be created and distributed during the packing process
             weights = np.zeros((expert_num,), dtype="object")
             for expert_id, workload_weight in enumerate(layer_workloads[layer]):
                 weights[expert_id] = (expert_id, workload_weight)
@@ -346,5 +448,7 @@ class DefaultEplb(EplbPolicy):
         change = 0
         if npu_heat_all_after < 0.95 * npu_heat_all_origin:
             change = 1
+
+        self._new_ep_size = None
 
         return change, per_layer_priority, np.array(new_global_deployment).tolist()

@@ -15,6 +15,8 @@
 # This file is a part of the vllm-ascend project.
 #
 # Todo: Once https://github.com/vllm-project/vllm/issues/22246 is merged in vllm. Remove this updator.
+import os
+
 import numpy
 import torch
 import torch.distributed as dist
@@ -31,22 +33,22 @@ class EplbUpdator:
     def __init__(self, eplb_config, loader: D2DExpertWeightLoader, eplb_process: EplbProcess, process):
         self.eplb_config = eplb_config
         self.multi_stage = eplb_config.eplb_policy_type == 3
+        self.comm_group = get_dynamic_eplb_group()
         self.init_eplb(self.eplb_config.expert_map_path, process)
         self.eplb_loader = loader
         self.eplb_process = eplb_process
         self.shared_dict = self.eplb_process.shared_dict
-        self.comm_group = get_dynamic_eplb_group()
 
     def set_adaptor(self, adaptor: VllmEplbAdaptor):
         self.adaptor = adaptor
         self.num_moe_layers = self.adaptor.num_moe_layers
         local_load = self.adaptor.get_rank_expert_workload()
-        self.world_size = dist.get_world_size()
+        self.world_size = self.comm_group.world_size
         self.device = local_load.device
         self.eplb_loader.num_layers = self.adaptor.num_dense_layers + self.adaptor.num_moe_layers
 
     def init_eplb(self, expert_map_path, process):
-        self.rank_id = dist.get_rank()
+        self.rank_id = self.comm_group.rank_in_group
         self.num_expert_load_gather = 10
         self.periodic_load_gather = True
         self.expert_heat_collection_interval: torch.int64 = self.eplb_config.expert_heat_collection_interval
@@ -143,7 +145,13 @@ class EplbUpdator:
         return moe_load
 
     def warm_up_eplb(self):
-        self.shared_dict["expert_maps"] = self.adaptor.get_global_expert_map()
+        global_expert_map = self.adaptor.get_global_expert_map()
+        if self.shared_dict["expert_maps"] is None:
+            self.shared_dict["expert_maps"] = global_expert_map
+
+        if os.environ.get("VLLM_ELASTIC_EP_SCALE_UP_LAUNCH") == "1":
+            return
+
         self.compute_and_set_moe_load()
 
         src_tensor = torch.empty((1,), device=self.device)

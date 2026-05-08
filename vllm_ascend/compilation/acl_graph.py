@@ -2,10 +2,11 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 import dataclasses
+import weakref
 from collections.abc import Callable
 from contextlib import ExitStack
 from dataclasses import dataclass
-from typing import Any
+from typing import Any, ClassVar
 from unittest.mock import patch
 
 import torch
@@ -60,6 +61,22 @@ class ACLGraphWrapper:
     guaranteed when VLLM_LOGGING_LEVEL == "DEBUG".
     """
 
+    _all_instances: ClassVar[weakref.WeakSet["ACLGraphWrapper"]] = weakref.WeakSet()
+    _graph_pool: ClassVar[tuple[int, int] | None] = None
+
+    @classmethod
+    def get_graph_pool(cls):
+        if cls._graph_pool is None:
+            cls._graph_pool = current_platform.get_global_graph_pool()
+        return cls._graph_pool
+
+    @classmethod
+    def clear_all_graphs(cls) -> None:
+        cls._graph_pool = current_platform.graph_pool_handle()
+        """Clear all graphs from all ACLGraphWrapper instances."""
+        for instance in list(cls._all_instances):
+            instance.clear_graphs()
+
     def __init__(
         self,
         runnable: Callable,
@@ -82,7 +99,7 @@ class ACLGraphWrapper:
         # assert runtime_mode is not NONE(no aclgraph), otherwise, we don't
         # need to initialize a ACLGraphWrapper.
         assert self.runtime_mode != CUDAGraphMode.NONE
-        self.graph_pool = current_platform.get_global_graph_pool()
+        self.graph_pool = ACLGraphWrapper.get_graph_pool()
 
         if cudagraph_options is None:
             cudagraph_options = CUDAGraphOptions()
@@ -92,6 +109,8 @@ class ACLGraphWrapper:
         self.concrete_aclgraph_entries: dict[BatchDescriptor, ACLGraphEntry] = {}
         self.enable_enpu = enable_enpu
         self.use_eagle = use_eagle
+
+        ACLGraphWrapper._all_instances.add(self)
 
     def __getattr__(self, key: str):
         # allow accessing the attributes of the runnable.
@@ -106,6 +125,15 @@ class ACLGraphWrapper:
     def unwrap(self) -> Callable:
         # in case we need to access the original runnable.
         return self.runnable
+
+    def clear_graphs(self) -> None:
+        for batch_descriptor in self.concrete_aclgraph_entries:
+            entry = self.concrete_aclgraph_entries[batch_descriptor]
+            assert entry.aclgraph is not None
+            entry.aclgraph.reset()
+            del entry.aclgraph, entry.batch_descriptor, entry.output, entry.input_addresses, entry
+        self.concrete_aclgraph_entries.clear()
+        self.graph_pool = ACLGraphWrapper._graph_pool
 
     def __call__(self, *args, **kwargs):
         forward_context = get_forward_context()

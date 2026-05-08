@@ -56,6 +56,7 @@ from vllm_ascend.batch_invariant import init_batch_invariance
 from vllm_ascend.cpu_binding import bind_cpus
 from vllm_ascend.device_allocator.camem import CaMemAllocator
 from vllm_ascend.distributed.parallel_state import init_ascend_model_parallel
+from vllm_ascend.distributed.utils import use_stateless_pg_with_world_registration
 from vllm_ascend.ops.triton.triton_utils import init_device_properties_triton
 from vllm_ascend.utils import (
     AscendDeviceType,
@@ -119,6 +120,10 @@ class NPUWorker(WorkerBase):
             distributed_init_method=distributed_init_method,
             is_driver_worker=is_driver_worker,
         )
+
+        from vllm_ascend.distributed.elastic_ep.elastic_execute import AscendElasticEPScalingExecutor
+
+        self.elastic_ep_executor = AscendElasticEPScalingExecutor(self)
 
         if self.cache_config.cache_dtype == "auto":
             self.cache_dtype = self.model_config.dtype
@@ -296,7 +301,8 @@ class NPUWorker(WorkerBase):
             )
 
         # Initialize the distributed environment.
-        self._init_worker_distributed_environment()
+        with use_stateless_pg_with_world_registration():
+            self._init_worker_distributed_environment()
         # Set random seed.
         set_random_seed(self.model_config.seed)
         # Initialize device properties used by triton kernels.
@@ -460,7 +466,7 @@ class NPUWorker(WorkerBase):
     def sample_tokens(self, grammar_output: "GrammarOutput") -> ModelRunnerOutput | AsyncModelRunnerOutput:
         return self.model_runner.sample_tokens(grammar_output)
 
-    def load_model(self) -> None:
+    def load_model(self, *, load_dummy_weights: bool = False) -> None:
         if self.vllm_config.model_config.enable_sleep_mode:
             allocator = CaMemAllocator.get_instance()
             assert allocator.get_current_usage() == 0, "Sleep mode can only be used for one instance per process."
@@ -471,7 +477,9 @@ class NPUWorker(WorkerBase):
             context = nullcontext()  # type: ignore
 
         with context, set_current_vllm_config(self.vllm_config):
-            self.model_runner.load_model()
+            self.model_runner.load_model(load_dummy_weights)
+
+        self.model_runner.eplb_warmup()
 
     def compile_or_warm_up_model(self):
         # Note: need to adapt for graph mode.
@@ -809,6 +817,9 @@ class NPUWorker(WorkerBase):
         except Exception as e:
             logger.info("query NPU card %s fail: %s", self.local_rank, e)
         return
+
+    def elastic_ep_execute(self, execute_method: str, *args, **kwargs):
+        return self.elastic_ep_executor.execute(execute_method, *args, **kwargs)
 
 
 def parse_text_output(output) -> None:

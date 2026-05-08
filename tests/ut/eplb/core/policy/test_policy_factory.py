@@ -31,6 +31,20 @@ class TestEplbRebalancePolicies(unittest.TestCase):
 
         self.assertLessEqual(update_mean, 1.1)
 
+    def test_default_policy_rebalance_experts_with_new_ep_size(self):
+        num_layers = 58
+        default_policy = PolicyFactory.generate_policy(1)
+
+        # Scale Down
+        default_policy.set_new_ep_size(new_ep_size=30)
+        _, _, new_placement = default_policy.rebalance_experts(self.current_expert_table, self.expert_workload.sum(0))
+        self.assertTrue(all([len(new_placement[layer_idx]) == 30 for layer_idx in range(num_layers)]))
+
+        # Scale Up
+        default_policy.set_new_ep_size(new_ep_size=40)
+        _, _, new_placement = default_policy.rebalance_experts(self.current_expert_table, self.expert_workload.sum(0))
+        self.assertTrue(all([len(new_placement[layer_idx]) == 40 for layer_idx in range(num_layers)]))
+
 
 if __name__ == "__main__":
     unittest.main(verbosity=2)

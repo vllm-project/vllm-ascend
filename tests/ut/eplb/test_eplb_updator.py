@@ -13,16 +13,10 @@ class TestEplbUpdatorComputeAndSetMoeLoad(unittest.TestCase):
         self.world_size = 4
         self.device = torch.device("cpu")
 
-        # mock dist
-        p1 = patch("torch.distributed.get_rank", return_value=self.rank)
-        p2 = patch("torch.distributed.get_world_size", return_value=self.world_size)
-        self.addCleanup(p1.stop)
-        self.addCleanup(p2.stop)
-        p1.start()
-        p2.start()
-
         # ====================== 2. Mock comm group ======================
         self.mock_comm_group = MagicMock()
+        self.mock_comm_group.rank_in_group = self.rank
+        self.mock_comm_group.world_size = self.world_size
 
         def mock_all_gather(tensor, dim):
             gathered = torch.cat([tensor for _ in range(self.world_size)], dim=dim)
@@ -30,9 +24,9 @@ class TestEplbUpdatorComputeAndSetMoeLoad(unittest.TestCase):
 
         self.mock_comm_group.all_gather = mock_all_gather
 
-        p3 = patch("vllm_ascend.eplb.eplb_updator.get_dynamic_eplb_group", return_value=self.mock_comm_group)
-        self.addCleanup(p3.stop)
-        p3.start()
+        patcher = patch("vllm_ascend.eplb.eplb_updator.get_dynamic_eplb_group", return_value=self.mock_comm_group)
+        self.addCleanup(patcher.stop)
+        patcher.start()
 
         # ====================== 3. Mock EplbUpdator ======================
         self.eplb_config = MagicMock()

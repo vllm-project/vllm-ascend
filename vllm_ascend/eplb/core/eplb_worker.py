@@ -19,9 +19,9 @@ from typing import Any
 
 import numpy as np
 import torch
-import torch.distributed as dist
 from vllm.logger import logger
 
+from vllm_ascend.distributed.parallel_state import get_dynamic_eplb_group
 from vllm_ascend.eplb.core.eplb_utils import generate_log2phy_map
 from vllm_ascend.eplb.core.policy.policy_factory import PolicyFactory
 
@@ -33,7 +33,7 @@ class EplbWorker:
         self.shared_dict = shared_dict
         self.old_expert_maps = None
         self.enable_d2d = enable_d2d
-        self.rank_id = dist.get_rank()
+        self.rank_id = get_dynamic_eplb_group().rank_in_group
         self.multi_stage = policy_type == 3
 
     def do_update(self):
@@ -60,6 +60,17 @@ class EplbWorker:
 
         # Get the updated expert table based on the workload information
         old_placement = self.global2local(self.old_expert_maps, self.num_local_experts)
+        scale = self.shared_dict.get("scale", False)
+        if scale:
+            # Elastic EP Scaling
+            old_ep_size = self.shared_dict["old_ep_size"]
+            new_ep_size = self.shared_dict["new_ep_size"]
+            assert old_ep_size != new_ep_size
+            self.policy.set_new_ep_size(new_ep_size)
+            if load_info.shape[1] > old_ep_size:
+                load_info = load_info[:, :old_ep_size]
+            if self.old_expert_maps.shape[1] > old_ep_size:
+                self.old_expert_maps = self.old_expert_maps[:, :old_ep_size]
         _, _, new_placement = self.calculate_rebalance_experts(load_info, old_placement)
 
         if self.rank_id == 0:
@@ -79,12 +90,29 @@ class EplbWorker:
 
         if not torch.is_tensor(new_placement):
             new_placement = torch.tensor(new_placement)
-        self.check_expert_placement(old_placement, new_placement)
+        if not scale:
+            self.check_expert_placement(old_placement, new_placement)
         new_expert_maps = self.local2global(new_placement)
         self.update_expert_map(new_expert_maps)
+        new_expert_maps_clone = new_expert_maps.clone()
+
+        if scale:
+            # Elastic EP Scaling
+            shape = list(new_expert_maps.shape)
+            shape[1] = abs(old_ep_size - new_ep_size)
+            if old_ep_size > new_ep_size:
+                # when scale down, ensure that the shutdown ranks do not own any experts
+                # by setting their expert_map to all -1
+                shutdown_rank_expert_maps = torch.full(shape, -1, dtype=new_expert_maps.dtype)
+                new_expert_maps = torch.cat([new_expert_maps, shutdown_rank_expert_maps], dim=1)
+            else:
+                # when scale up, ensure that new ranks do not own any experts
+                # by setting their expert_map to all -1
+                new_rank_expert_maps = torch.full(shape, -1, dtype=new_expert_maps.dtype)
+                self.old_expert_maps = torch.cat([self.old_expert_maps, new_rank_expert_maps], dim=1)
 
         update_info = self.compose_expert_update_info_greedy(new_expert_maps, self.old_expert_maps)
-        self.old_expert_maps = new_expert_maps
+        self.old_expert_maps = new_expert_maps_clone
         logger.debug("EPLB Process compute complete")
 
         packed_update_info = self.pack_update_info(update_info)

@@ -14,6 +14,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 #
+import os
 from collections.abc import Callable
 from dataclasses import dataclass, field
 from functools import wraps
@@ -277,7 +278,18 @@ class AscendFusedMoE(FusedMoE):
     gate_stream: torch.npu.Stream | None = None
 
     def __init__(self, *args, **kwargs):
-        super().__init__(*args, **kwargs)
+        """
+        Set `enable_eplb` to False for skipping the assertion requiring total experts to be divisible by EP size in
+        initialization of `FusedMoE` when enable Elastic EP, as the number of redundant expert differs between
+        `AscendFusedMoE and `FusedMoE`.
+        """
+        if get_current_vllm_config().parallel_config.enable_elastic_ep:
+            enable_eplb = kwargs.pop("enable_eplb", False)
+            super().__init__(*args, **kwargs, enable_eplb=False)
+            if enable_eplb:
+                kwargs["enable_eplb"] = enable_eplb
+        else:
+            super().__init__(*args, **kwargs)
 
         num_experts = kwargs["num_experts"]
         intermediate_size = kwargs["intermediate_size"]
@@ -363,7 +375,8 @@ class AscendFusedMoE(FusedMoE):
         self.enable_shared_expert_dp = ascend_config.enable_shared_expert_dp
         self.enable_npugraph_ex_static_kernel = ascend_config.ascend_compilation_config.enable_static_kernel
 
-        setup_moe_comm_method(self.moe_config)
+        if os.environ.get("VLLM_ELASTIC_EP_SCALE_UP_LAUNCH") != "1":
+            setup_moe_comm_method(self.moe_config)
         self.quant_type = self._get_quant_type()
 
         self.runner = AscendMoERunner(

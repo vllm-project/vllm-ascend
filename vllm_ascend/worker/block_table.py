@@ -222,7 +222,7 @@ class BlockTable:
         self.block_table.copy_to_gpu(num_reqs)
 
     def clear(self) -> None:
-        self.block_table.fill_(0)
+        self.block_table.gpu.fill_(0)
         self.block_table.cpu.fill_(0)
 
     def _convert_physical_to_logical_blocks(self, physical_blocks: np.ndarray) -> np.ndarray:
