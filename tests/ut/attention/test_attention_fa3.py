@@ -1,7 +1,7 @@
+import numpy as np
+import pytest
 import torch
 import torch_npu
-import pytest
-import numpy as np
 
 
 def _fa3_available():
@@ -63,6 +63,7 @@ def ref_fused_infer_attention(
     attn_output = attn_output.view(-1, num_heads, head_size)
     return attn_output
 
+
 test_cases = [
     # (data_type, batch_size, num_heads, kv_heads, q_seqlen, kv_seqlen, head_size, block_size, is_causal)
     (torch.bfloat16, 1, 1, 1, 1024, 1024, 128, 128, False),
@@ -70,9 +71,14 @@ test_cases = [
     (torch.float16, 7, 16, 8, 512, 512, 128, 128, False),
 ]
 
+
 @pytest.mark.skipif(not _fa3_available(), reason="flash_attn_v3 is not installed")
-@pytest.mark.parametrize("data_type, batch_size, num_heads, kv_heads, q_seqlen, kv_seqlen, head_size, block_size, is_causal", test_cases)
-def test_fa_custom_ops_tnd(data_type, batch_size, num_heads, kv_heads, q_seqlen, kv_seqlen, head_size, block_size, is_causal):
+@pytest.mark.parametrize(
+    "data_type, batch_size, num_heads, kv_heads, q_seqlen, kv_seqlen, head_size, block_size, is_causal", test_cases
+)
+def test_fa_custom_ops_tnd(
+    data_type, batch_size, num_heads, kv_heads, q_seqlen, kv_seqlen, head_size, block_size, is_causal
+):
     q_min_range = -1.0
     q_max_range = 1.0
     kv_min_range = -1.0
@@ -81,37 +87,38 @@ def test_fa_custom_ops_tnd(data_type, batch_size, num_heads, kv_heads, q_seqlen,
     num_blocks = 64
 
     q_sequences = sorted(
-        torch.randint(low=1, high=q_seqlen + 1, size=(batch_size,)).tolist(),
-        reverse=False
-    ) # actual_seq_lengths in fia need in ascending order
-    kv_sequences = [
-        torch.randint(low=q, high=kv_seqlen + 1, size=(1,)).item()
-        for q in q_sequences
-    ]
+        torch.randint(low=1, high=q_seqlen + 1, size=(batch_size,)).tolist(), reverse=False
+    )  # actual_seq_lengths in fia need in ascending order
+    kv_sequences = [torch.randint(low=q, high=kv_seqlen + 1, size=(1,)).item() for q in q_sequences]
 
     t_q_sum = sum(q_sequences)
 
     query = (q_min_range + (q_max_range - q_min_range) * torch.rand(t_q_sum, num_heads, head_size)).to(data_type).npu()
-    
+
     key_cache = None
     value_cache = None
     block_tables = []
 
-    key_cache = (kv_min_range + (kv_max_range - kv_min_range) * torch.rand(num_blocks, block_size, kv_heads, head_size)).to(data_type).npu()
-    value_cache = (kv_min_range + (kv_max_range - kv_min_range) * torch.rand(num_blocks, block_size, kv_heads, head_size)).to(data_type).npu()
+    key_cache = (
+        (kv_min_range + (kv_max_range - kv_min_range) * torch.rand(num_blocks, block_size, kv_heads, head_size))
+        .to(data_type)
+        .npu()
+    )
+    value_cache = (
+        (kv_min_range + (kv_max_range - kv_min_range) * torch.rand(num_blocks, block_size, kv_heads, head_size))
+        .to(data_type)
+        .npu()
+    )
     max_num_blocks_per_seq = (kv_seqlen + block_size - 1) // block_size
     for i in range(batch_size):
-        block_table = [
-            max_num_blocks_per_seq * i + j
-            for j in range(max_num_blocks_per_seq)
-        ]
+        block_table = [max_num_blocks_per_seq * i + j for j in range(max_num_blocks_per_seq)]
         block_tables.append(block_table)
     block_tables = torch.tensor(block_tables, dtype=torch.int32).npu()
 
     q_seqlen_list = q_sequences
     kv_seqlen_list = kv_sequences
-        
-    scale = 1.0 / (head_size ** 0.5)
+
+    scale = 1.0 / (head_size**0.5)
     window_size_left = -1
     window_size_right = -1
     is_rotary_interleaved = False
@@ -131,7 +138,8 @@ def test_fa_custom_ops_tnd(data_type, batch_size, num_heads, kv_heads, q_seqlen,
     new_q_seqlen_list = torch.tensor(new_q_seqlen_list, dtype=torch.int32).npu()
 
     from flash_attn_v3 import flash_attn_with_kvcache
-    out_out, _, _ = flash_attn_with_kvcache(
+
+    out_out = flash_attn_with_kvcache(
         query,
         key_cache,
         value_cache,
@@ -161,7 +169,7 @@ def test_fa_custom_ops_tnd(data_type, batch_size, num_heads, kv_heads, q_seqlen,
         num_splits=num_splits,
         pack_gqa=None,
         sm_margin=0,
-        return_softmax_lse=True
+        return_softmax_lse=False,
     )
 
     ref_out = torch.empty((t_q_sum, num_heads, head_size), dtype=data_type)
@@ -169,7 +177,7 @@ def test_fa_custom_ops_tnd(data_type, batch_size, num_heads, kv_heads, q_seqlen,
     if is_causal:
         attn_mask = torch.triu(torch.ones(2048, 2048), diagonal=1).to(torch.int8).to(query.device)
     else:
-        attn_mask = None 
+        attn_mask = None
 
     q_cumsum = torch.tensor(np.cumsum(q_sequences), dtype=torch.int32, device=query.device)
 
