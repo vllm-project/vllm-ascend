@@ -3324,7 +3324,12 @@ class NPUModelRunner(GPUModelRunner):
                 # TODO: remove this after the OOM issue is located and fixed, otherwise, some model may
                 # encounter OOM issue
                 if isinstance(current_kv_cache_spec, AttentionSpec):
-                    if self.use_sparse:
+                    # cache_only_layers (extract_hidden_states) are allocated
+                    # as a single tensor by the branch at the top of
+                    # _allocate_kv_cache_tensors; route them to the dedicated
+                    # elif branch below before the sparse branch tries to
+                    # unpack them as a (k, v, dsa_k[, scale]) tuple.
+                    if self.use_sparse and "cache_only_layers" not in layer_name:
                         current_sparse_c8 = kv_cache_spec_uses_sparse_c8(current_kv_cache_spec)
                         if current_sparse_c8:
                             raw_k_tensor, raw_v_tensor, raw_dsa_k_tensor, raw_dsa_k_scale_tensor = kv_cache_raw_tensors[  # type: ignore
@@ -3783,11 +3788,27 @@ class NPUModelRunner(GPUModelRunner):
             elif isinstance(attn_module, MambaBase):
                 mamba_layers[layer_name] = attn_module
 
-            else:
-                # Handle other AttentionLayerBase subclasses (e.g., CacheOnlyAttentionLayer)
-                # that are not Attention, MLAAttention, or MambaBase
+            elif isinstance(attn_module, CacheOnlyAttentionLayer):
+                # Only CacheOnlyAttentionLayer (extract_hidden_states draft model)
+                # is handled here. Other AttentionLayerBase subclasses such as
+                # DeepseekV32IndexerCache are intentionally skipped: on Ascend,
+                # the indexer's k_cache is replaced by IndexerWrapper, so its
+                # KV cache is unused.
                 if spec := attn_module.get_kv_cache_spec(self.vllm_config):
-                    kv_cache_spec[layer_name] = spec
+                    # CacheOnlyAttentionLayer's module imports MLAAttentionSpec
+                    # before the patch runs, so the spec it returns is an
+                    # instance of the original (unpatched) class. Rebuilding
+                    # with the patched AscendMLAAttentionSpec makes the spec
+                    # picklable and keeps this branch consistent with the
+                    # MLAAttention branch above.
+                    from vllm.v1.kv_cache_interface import MLAAttentionSpec as AscendMLAAttentionSpec
+                    kv_cache_spec[layer_name] = AscendMLAAttentionSpec(
+                        block_size=spec.block_size,
+                        num_kv_heads=spec.num_kv_heads,
+                        head_size=spec.head_size,
+                        dtype=spec.dtype,
+                        cache_dtype_str=spec.cache_dtype_str,
+                    )
                     attn_layer_names.add(layer_name)
 
         if len(mamba_layers) > 0:
