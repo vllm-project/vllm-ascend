@@ -79,6 +79,7 @@ class AscendUnquantizedFusedMoEMethod(UnquantizedFusedMoEMethod):
     def __init__(self, moe: FusedMoEConfig = None):
         super().__init__(moe=moe)
         self.dynamic_eplb = get_ascend_config().eplb_config.dynamic_eplb
+        self._lora_enabled = False
 
     @property
     def is_monolithic(self) -> bool:
@@ -129,7 +130,7 @@ class AscendUnquantizedFusedMoEMethod(UnquantizedFusedMoEMethod):
         global_redundant_expert_num: int = 0,
         pertoken_scale: torch.Tensor | None = None,
         mc2_mask: torch.Tensor | None = None,
-    ) -> torch.Tensor:
+    ) -> FusedExpertsResult:
         zero_expert_num = getattr(layer, "zero_expert_num", 0)
         zero_expert_type = getattr(layer, "zero_expert_type", None)
         num_shared_experts = getattr(layer, "n_shared_experts", 0)
@@ -173,24 +174,61 @@ class AscendUnquantizedFusedMoEMethod(UnquantizedFusedMoEMethod):
             )
 
         topk_weights = topk_weights.to(x.dtype)
-        # this is a naive implementation for experts load balance so as
-        # to avoid accumulating too much tokens on a single rank.
-        # currently it is only activated when doing profile runs.
         if enable_force_load_balance:
             random_matrix = torch.rand(topk_ids.size(0), num_logical_experts, device=topk_ids.device)
             topk_ids = torch.argsort(random_matrix, dim=1)[:, : topk_ids.size(1)].to(topk_ids.dtype)
 
         moe_comm_method = _EXTRA_CTX.moe_comm_method
-        # NOTE: In the MoECommType.FUSED_MC2 branch, we wrap weights (w1, w2) into lists
-        # and provide dummy scales (w1_scale, w2_scale). This is required because:
-        # The underlying Ascend fused operator (e.g., dispatch_ffn_combine) expects
-        # inputs in a list format.
-        # TODO: Passing an empty tensor as scale for float (BF16) cases is semantically
-        # incorrect. The ideal solution is to pass None. However, if the underlying
-        # dispatch_ffn_combine C++ operator does not support None for the scale argument
-        # (due to signature constraints), we are forced to use a placeholder empty tensor.
-        # This TODO tracks the requirement to update the C++ operator to accept Optional[Tensor]
-        # or None for scales in non-quantized scenarios.
+
+        if self._lora_enabled and hasattr(layer, '_lora_wrapper'):
+            fused_experts_results = self._apply_with_lora(
+                layer=layer,
+                x=x,
+                topk_weights=topk_weights,
+                topk_ids=topk_ids,
+                moe_comm_method=moe_comm_method,
+                activation=activation,
+                expert_map=expert_map,
+                global_redundant_expert_num=global_redundant_expert_num,
+                mc2_mask=mc2_mask,
+                apply_router_weight_on_input=apply_router_weight_on_input,
+                log2phy=log2phy,
+                pertoken_scale=pertoken_scale,
+            )
+        else:
+            fused_experts_results = self._apply_fused(
+                layer=layer,
+                x=x,
+                topk_weights=topk_weights,
+                topk_ids=topk_ids,
+                moe_comm_method=moe_comm_method,
+                activation=activation,
+                expert_map=expert_map,
+                global_redundant_expert_num=global_redundant_expert_num,
+                mc2_mask=mc2_mask,
+                apply_router_weight_on_input=apply_router_weight_on_input,
+                log2phy=log2phy,
+                pertoken_scale=pertoken_scale,
+            )
+        if zero_expert_num > 0 and zero_expert_type is not None:
+            fused_experts_results += zero_expert_result
+        return fused_experts_results
+
+    def _apply_fused(
+        self,
+        layer,
+        x,
+        topk_weights,
+        topk_ids,
+        moe_comm_method,
+        activation="silu",
+        expert_map=None,
+        global_redundant_expert_num=0,
+        mc2_mask=None,
+        apply_router_weight_on_input=False,
+        log2phy=None,
+        pertoken_scale=None,
+    ):
         if _EXTRA_CTX.moe_comm_type == MoECommType.FUSED_MC2:
             w1 = [layer.w13_weight]
             w1_scale = [torch.tensor([], dtype=torch.int64)]
@@ -224,9 +262,182 @@ class AscendUnquantizedFusedMoEMethod(UnquantizedFusedMoEMethod):
                 w2_scale=w2_scale,
             )
         )
-        if zero_expert_num > 0 and zero_expert_type is not None:
-            final_hidden_states += zero_expert_result
         return final_hidden_states
+
+    def _apply_with_lora(
+        self,
+        layer,
+        x,
+        topk_weights,
+        topk_ids,
+        moe_comm_method,
+        activation="silu",
+        expert_map=None,
+        global_redundant_expert_num=0,
+        mc2_mask=None,
+        apply_router_weight_on_input=False,
+        log2phy=None,
+        pertoken_scale=None,
+    ):
+        from vllm_ascend.lora.moe_lora_ops import (
+            _build_lora_expert_indices_allgather,
+            _build_lora_expert_indices_alltoall,
+            apply_moe_lora_w13,
+            apply_moe_lora_w2,
+        )
+        from vllm_ascend.ops.fused_moe.moe_mlp import (
+            unquant_apply_mlp_activation,
+            unquant_apply_mlp_w1,
+            unquant_apply_mlp_w2,
+        )
+        from vllm_ascend.ops.fused_moe.moe_runtime_args import (
+            build_token_dispatch_input,
+            build_mlp_compute_input,
+        )
+        from vllm_ascend.ops.fused_moe.moe_stage_contracts import (
+            MoEAllGatherCombineMetadata,
+            MoEAllToAllCombineMetadata,
+        )
+
+        assert _EXTRA_CTX.moe_comm_type != MoECommType.FUSED_MC2, (
+            "FusedMC2 is not supported with MoE LoRA. "
+            "Please disable VLLM_ASCEND_ENABLE_FUSED_MC2 when using MoE LoRA."
+        )
+
+        lora_layer = layer._lora_wrapper
+        assert lora_layer is not None, (
+            f"_apply_with_lora called but layer._lora_wrapper is None. "
+            f"_lora_enabled={self._lora_enabled}, "
+            f"layer type={type(layer).__name__}"
+        )
+        num_experts = layer.local_num_experts
+
+        routed_topk_ids = topk_ids
+        if log2phy is not None:
+            routed_topk_ids = log2phy[topk_ids]
+
+        fused_experts_input = build_fused_experts_input(
+            hidden_states=x,
+            topk_weights=topk_weights,
+            topk_ids=topk_ids,
+            w1=layer.w13_weight,
+            w2=layer.w2_weight,
+            w1_bias=layer.w13_bias if self.moe.has_bias else None,
+            w2_bias=layer.w2_bias if self.moe.has_bias else None,
+            quant_type=QuantType.NONE,
+            dynamic_eplb=self.dynamic_eplb,
+            expert_map=expert_map,
+            global_redundant_expert_num=global_redundant_expert_num,
+            mc2_mask=mc2_mask,
+            apply_router_weight_on_input=apply_router_weight_on_input,
+            log2phy=log2phy,
+            pertoken_scale=pertoken_scale,
+            activation=activation,
+        )
+
+        token_dispatch_input = build_token_dispatch_input(
+            fused_experts_input=fused_experts_input,
+            topk_ids=routed_topk_ids,
+        )
+        token_dispatch_output = moe_comm_method.token_dispatcher.token_dispatch(
+            token_dispatch_input=token_dispatch_input
+        )
+        mlp_compute_input = build_mlp_compute_input(
+            fused_experts_input=fused_experts_input,
+            token_dispatch_output=token_dispatch_output,
+            use_fusion_ops=False,
+        )
+
+        dispatched_hidden = mlp_compute_input.hidden_states
+        group_list = mlp_compute_input.group_list
+        group_list_type = mlp_compute_input.group_list_type
+        w1 = mlp_compute_input.weights.w1
+        w2 = mlp_compute_input.weights.w2
+        w1_bias = mlp_compute_input.weights.w1_bias
+        w2_bias = mlp_compute_input.weights.w2_bias
+        need_trans = mlp_compute_input.need_trans
+        topk_scales = mlp_compute_input.topk_scales
+
+        combine_metadata = token_dispatch_output.combine_metadata
+        lora_indices = lora_layer.punica_wrapper.token_lora_indices
+
+        if isinstance(combine_metadata, MoEAllGatherCombineMetadata):
+            lora_expert_indices = _build_lora_expert_indices_allgather(
+                lora_indices=lora_indices,
+                expanded_row_idx=combine_metadata.expanded_row_idx,
+                topk_ids=topk_ids,
+                num_experts=num_experts,
+            )
+        elif isinstance(combine_metadata, MoEAllToAllCombineMetadata):
+            assert combine_metadata.reversed_global_input_permutation_mapping is not None, (
+                "reversed_global_input_permutation_mapping is required for "
+                "AllToAll MoE LoRA."
+            )
+            lora_expert_indices = _build_lora_expert_indices_alltoall(
+                lora_indices=lora_indices,
+                reversed_global_input_permutation_mapping=combine_metadata.reversed_global_input_permutation_mapping,
+                topk_ids=topk_ids,
+                group_list=group_list,
+                num_experts=num_experts,
+            )
+        else:
+            raise NotImplementedError(
+                f"MoE LoRA is not supported for combine_metadata type "
+                f"{type(combine_metadata).__name__}."
+            )
+
+        gate_up_out = unquant_apply_mlp_w1(
+            hidden_states=dispatched_hidden,
+            w1=w1,
+            group_list=group_list,
+            w1_bias=w1_bias,
+            group_list_type=group_list_type,
+            need_trans=need_trans,
+        )
+
+        apply_moe_lora_w13(
+            gate_up_out=gate_up_out,
+            hidden_states=dispatched_hidden,
+            w13_lora_a_stacked=lora_layer.w13_lora_a_stacked,
+            w13_lora_b_stacked=lora_layer.w13_lora_b_stacked,
+            lora_expert_indices=lora_expert_indices,
+            scale=1.0,
+        )
+
+        gate_up_out = unquant_apply_mlp_activation(
+            gate_up_out=gate_up_out,
+            w1=w1,
+            topk_scales=topk_scales,
+            activation=activation,
+        )
+
+        apply_moe_lora_w2(
+            activated_out=gate_up_out,
+            w2_lora_a_stacked=lora_layer.w2_lora_a_stacked,
+            w2_lora_b_stacked=lora_layer.w2_lora_b_stacked,
+            lora_expert_indices=lora_expert_indices,
+            scale=1.0,
+        )
+
+        mlp_output = unquant_apply_mlp_w2(
+            gate_up_out=gate_up_out,
+            w2=w2,
+            group_list=group_list,
+            w2_bias=w2_bias,
+            group_list_type=group_list_type,
+            need_trans=need_trans,
+        )
+
+        routed_out = moe_comm_method.token_dispatcher.token_combine(
+            hidden_states=mlp_output,
+            combine_metadata=combine_metadata,
+        )
+        expert_tokens = group_list
+        return FusedExpertsResult(
+            routed_out=routed_out,
+            expert_tokens=expert_tokens,
+            group_list_type=group_list_type,
+        )
 
 
 # Please remove this inheritance after extending vllm, todo(wxs)
