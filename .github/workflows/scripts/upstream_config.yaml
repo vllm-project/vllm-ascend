@@ -621,3 +621,16 @@ e2e-upstream-singlecard:
     estimated_time: 20
   - name: tests/compile/fullgraph/test_toy_llama.py
     estimated_time: 20
+<<<<<<< HEAD
+=======
+e2e-upstream_a2_2:
+  - name: tests/v1/distributed/test_async_llm_dp.py
+    estimated_time: 20
+  - name: tests/v1/distributed/test_external_lb_dp.py
+    estimated_time: 20
+  - name: tests/v1/distributed/test_internal_lb_dp.py
+    estimated_time: 20
+e2e-upstream_a2_4:
+  - name: tests/v1/distributed/test_hybrid_lb_dp.py
+    estimated_time: 20
+>>>>>>> df7571e4... modify schedule_vllm_e2e_test.yaml
