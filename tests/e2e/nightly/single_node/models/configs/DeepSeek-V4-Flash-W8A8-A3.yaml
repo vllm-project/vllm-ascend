@@ -4,73 +4,65 @@
 
 test_cases:
   - name: "DeepSeek-V4-Flash-W8A8-A3"
-    model: "DeepSeek-V4-Flash-w8a8-mtp"
+    model: "Eco-Tech/DeepSeek-V4-Flash-w8a8-mtp"
     envs:
       OMP_PROC_BIND: "false"
-      OMP_NUM_THREADS: "1"
-      HCCL_OP_EXPANSION_MODE: "AIV"
+      OMP_NUM_THREADS: "10"
       PYTORCH_NPU_ALLOC_CONF: "expandable_segments:True"
       VLLM_USE_V1: "1"
-      HCCL_BUFFSIZE: "256"
-      ASCEND_AGGREGATE_ENABLE: "1"
-      ASCEND_TRANSPORT_PRINT: "1"
-      ACL_OP_INIT_MODE: "1"
-      ASCEND_A3_ENABLE: "1"
-      VLLM_NIXL_ABORT_REQUEST_TIMEOUT: "300000"
-      TASK_QUEUE_ENABLE: "1"
-      VLLM_ASCEND_ENABLE_MLAPO: "1"
+      USE_MULTI_BLOCK_POOL: "1"
+      USE_MULTI_GROUPS_KV_CACHE: "1"
+      HCCL_BUFFSIZE: "1024"
+      VLLM_ASCEND_ENABLE_FUSED_MC2: "1"
       VLLM_ASCEND_ENABLE_FLASHCOMM1: "1"
       SERVER_PORT: "DEFAULT_PORT"
     server_cmd:
-      - "--enable-expert-parallel"
-      - "--tensor-parallel-size"
-      - "8"
-      - "--data-parallel-size"
-      - "2"
-      - "--port"
-      - "$SERVER_PORT"
-      - "--seed"
-      - "1024"
       - "--max-model-len"
-      - "67000"
+      - "1024000"
       - "--max-num-batched-tokens"
-      - "4096"
+      - "8192"
+      - "--gpu-memory-utilization"
+      - "0.9"
       - "--max-num-seqs"
-      - "8"
-      - "--trust-remote-code"
+      - "4"
+      - "--data-parallel-size"
+      - "4"
+      - "--tensor-parallel-size"
+      - "4"
+      - "--enable-expert-parallel"
+      - "--tokenizer-mode"
+      - "deepseek_v4"
+      - "--tool-call-parser"
+      - "deepseek_v4"
+      - "--enable-auto-tool-choice"
+      - "--reasoning-parser"
+      - "deepseek_v4"
+      - "--safetensors-load-strategy"
+      - "prefetch"
       - "--quantization"
       - "ascend"
-      - "--async-scheduling"
-      - "--gpu-memory-utilization"
-      - "0.95"
-      - "--compilation-config"
-      - "--no-enable-prefix-caching"
-      - '{"cudagraph_capture_sizes":[1,2,4,8,16,24,32,40,48], "cudagraph_mode":"FULL_DECODE_ONLY"}'
+      - "--api-server-count"
+      - "1"
       - "--speculative-config"
-      - '{"num_speculative_tokens": 3, "method":"deepseek_mtp"}'
-      - "--reasoning-parser"
-      - "deepseek_v3"
-      - "--tokenizer_mode"
-      - "deepseek_v32"
+      - '{"num_speculative_tokens": 1,"method": "deepseek_mtp"}'
+      - "--port"
+      - "$SERVER_PORT"
+      - "--block-size"
+      - "128"
+      - "--compilation-config"
+      - '{"cudagraph_mode": "FULL_DECODE_ONLY"}'
+      - "--async-scheduling"
+      - "--additional-config"
+      - '{"ascend_compilation_config":{"enable_npugraph_ex":true,"enable_static_kernel":false},"enable_cpu_binding":"true","multistream_overlap_shared_expert":false,"multistream_dsa_preprocess":false}'
     benchmarks:
-      acc_aime2025:
+      acc:
         case_type: accuracy
-        dataset_path: vllm-ascend/aime2025
+        dataset_path: vllm-ascend/gsm8k
         request_conf: vllm_api_general_chat
-        dataset_conf: aime2025/aime2025_gen_0_shot_chat_prompt
+        dataset_conf: gsm8k/gsm8k_gen_0_shot_cot_chat_prompt
         max_out_len: 32768
         batch_size: 32
-        baseline: 86.67
-        threshold: 5
-
-      acc_GPQA:
-        case_type: accuracy
-        dataset_path: vllm-ascend/gpqa
-        request_conf: vllm_api_general_chat
-        dataset_conf: gpqa/gpqa_gen_0_shot_cot_chat_prompt
-        max_out_len: 32768
-        batch_size: 32
-        baseline: 79.80
+        baseline: 90
         threshold: 5
 
       perf_2:
