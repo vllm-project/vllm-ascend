@@ -23,7 +23,6 @@ import torch_npu
 import vllm.envs as envs_vllm
 from vllm.config import VllmConfig, get_current_vllm_config
 from vllm.distributed import get_tensor_model_parallel_rank, get_tensor_model_parallel_world_size
-from vllm.logger import logger
 from vllm.utils.math_utils import cdiv
 from vllm.v1.attention.backend import (  # type: ignore
     AttentionBackend,
@@ -75,7 +74,7 @@ except ImportError:
     _FA3_AVAILABLE = False
 
 if envs_ascend.VLLM_ASCEND_ENABLE_FLASH_ATTN and not _FA3_AVAILABLE:
-    logger.error(
+    raise ValueError(
         "VLLM_ASCEND_ENABLE_FLASH_ATTN is enabled but flash_attn_v3 is not installed. "
         "FA3 will not be used. Please install flash_attn_v3 to enable FA3."
     )
