@@ -45,6 +45,12 @@ def _ascend_resolve_kv_cache_block_sizes(
         scheduler_block_size = math.lcm(*group_block_sizes) * dcp * pcp
         return scheduler_block_size, scheduler_block_size
 
+    if _orig_resolve_kv_cache_block_sizes is None:
+        # Upstream API changed and no resolver is exposed; keep conservative
+        # behavior for non-CP/multi-group path.
+        bs = cache_config.block_size * dcp * pcp
+        return bs, bs
+
     return _orig_resolve_kv_cache_block_sizes(kv_cache_config, vllm_config)
 
 
