@@ -229,16 +229,27 @@ class KVTransferThread(threading.Thread):
     ) -> torch.Tensor:
         self.request_queue.put(request)
 
-    def get_and_clear_finished_requests(self) -> set[str]:
+    def get_and_clear_finished_requests(
+        self,
+        req_ids: set[str] | None = None,
+    ) -> set[str]:
         """
         Get and clear the requests that have been completed.
         Returns:
             A set of request IDs that have been completed.
         """
         with self.done_task_lock:
-            finished_requests = self.finished_requests.copy()
-            self.finished_requests.clear()
+            if req_ids is None:
+                finished_requests = self.finished_requests.copy()
+                self.finished_requests.clear()
+            else:
+                finished_requests = self.finished_requests & req_ids
+                self.finished_requests -= finished_requests
         return finished_requests
+
+    def discard_finished_requests(self, req_ids: set[str]) -> None:
+        with self.done_task_lock:
+            self.finished_requests -= req_ids
 
     def set_finished_request(self, req_id):
         with self.done_task_lock:
@@ -579,11 +590,6 @@ class KVCacheStoreLayerSendingThread(KVTransferThread):
                                       rank_start, self.put_step)
         gvas_list = _select_rank_data(req_meta.gvas_array,
                                       rank_start, self.put_step)
-        if layer_id == self.final_layer_id:
-            for req_id, is_last_chunk in zip(req_meta.req_ids,
-                                             req_meta.is_last_chunks):
-                if is_last_chunk:
-                    self.set_finished_request(req_id)
         for req_id in req_meta.req_ids:
             self.dec_stored_request(req_id)
         self.sync_save_events[layer_id].synchronize()
@@ -596,6 +602,11 @@ class KVCacheStoreLayerSendingThread(KVTransferThread):
         #     self.layer_transfer_finished_events[layer_id].clear()
         if res != 0:
             logger.error("Layerwise %d save batch_copy failed with return code %d", layer_id, res)
+        elif layer_id == self.final_layer_id:
+            for req_id, is_last_chunk in zip(req_meta.req_ids,
+                                             req_meta.is_last_chunks):
+                if is_last_chunk:
+                    self.set_finished_request(req_id)
         assert not self.layer_save_finished_events[layer_id].is_set(), f"thread: {layer_id} save failed "
         logger.debug(f">>>>>>>>>>>>>>>>>>>> set save layer {layer_id}")
         self.layer_save_finished_events[layer_id].set()
@@ -711,12 +722,6 @@ class KVCacheStoreLayerRecvingThread(KVTransferThread):
             logger.debug(f">>>>>>>>>>>>>>>>>>>> clear save layer {wait_for_save}")
             self.layer_save_finished_events[wait_for_save].clear()
 
-        if layer_id == self.final_layer_id:
-            for req_id, is_last_chunk in zip(req_meta.req_ids,
-                                             req_meta.is_last_chunks):
-                if is_last_chunk:
-                    self.set_finished_request(req_id)
-
         gvas_list_c = _circular_shift_to_list(
             req_meta.gvas_array,
             (self.tp_rank * len(req_meta.gvas_array)) // self.tp_size,
@@ -733,6 +738,11 @@ class KVCacheStoreLayerRecvingThread(KVTransferThread):
         res = self.m_store.store.batch_copy(gvas_list_c, addr_list_c, size_list_c, 1)
         if res != 0:
             logger.error("Layerwise %d load batch_copy failed with return code %d", layer_id, res)
+        elif layer_id == self.final_layer_id:
+            for req_id, is_last_chunk in zip(req_meta.req_ids,
+                                             req_meta.is_last_chunks):
+                if is_last_chunk:
+                    self.set_finished_request(req_id)
         assert not self.layer_load_finished_events[layer_id].is_set(), f"thread: {layer_id} load failed "
         logger.debug(f">>>>>>>>>>>>>>>>>>>> set load layer {layer_id}")
         self.layer_load_finished_events[layer_id].set()

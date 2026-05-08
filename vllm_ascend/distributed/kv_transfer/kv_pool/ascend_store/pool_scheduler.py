@@ -74,7 +74,7 @@ class KVPoolScheduler:
 
         # Define independent layers (same as pool_worker.py)
         INDEPENDENT_LAYER_INDICES = {0, self.num_layers - 1}
-        self.independent_layers = list(INDEPENDENT_LAYER_INDICES)
+        self.independent_layers = sorted(INDEPENDENT_LAYER_INDICES)
 
         keys_per_block_hash = (
             self.pcp_size * self.dcp_size

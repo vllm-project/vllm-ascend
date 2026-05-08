@@ -169,8 +169,6 @@ class KVPoolWorker:
         self.kv_send_thread: KVTransferThread | None = None
         self.kv_recv_thread: KVTransferThread | None = None
 
-
-
         self.layer_load_tasks: list[list[LayerTransferTask]] = [[] for i in range(self.num_layers)]
         self.layer_save_tasks: list[list[LayerTransferTask]] = [[] for i in range(self.num_layers)]
         self.layer_load_finished_events = None
@@ -179,7 +177,7 @@ class KVPoolWorker:
         NUM_SHARED_BUFFERS = 2
         self.NUM_SHARED_BUFFERS = NUM_SHARED_BUFFERS
         INDEPENDENT_LAYER_INDICES = {0, self.num_layers - 1}
-        self.independent_layers = list(INDEPENDENT_LAYER_INDICES)
+        self.independent_layers = sorted(INDEPENDENT_LAYER_INDICES)
 
         shared_layer_indices = [i for i in range(self.num_layers)
                                 if i not in INDEPENDENT_LAYER_INDICES]
@@ -514,23 +512,24 @@ class KVPoolWorker:
             )
 
     def get_finished(self, finished_req_ids: set[str], meta: AscendConnectorMetadata) -> tuple[set[str], set[str]]:
-        # TODO 这里需要确定要按照last chunk 进行判断，prefill完了还有decode，这里返回，decode是否还能正常继续？
-        done_sending = (
-            self.kv_send_thread.get_and_clear_finished_requests()  # type: ignore[union-attr]
-            if self.kv_role in ["kv_producer", "kv_both"] or self.consumer_is_to_put
-            else set()
-        )
+        if self.kv_send_thread is not None:
+            for req_id in meta.preempted_req_ids:
+                self.kv_send_thread.delete_finished_stored_request(req_id)
+            self.kv_send_thread.discard_finished_requests(meta.preempted_req_ids)
+            # The layerwise sender can finish saving the prompt KV before the
+            # request finishes decoding. Only clear and report requests after
+            # the scheduler has marked them finished.
+            done_sending = self.kv_send_thread.get_and_clear_finished_requests(
+                finished_req_ids
+            )
+        else:
+            done_sending = set()
 
         done_recving = (
             self.kv_recv_thread.get_and_clear_finished_requests()  # type: ignore[union-attr]
-            if self.load_async
+            if self.load_async and self.kv_recv_thread is not None
             else set()
         )
-
-        for req_id in meta.preempted_req_ids:
-            self.kv_send_thread.delete_finished_stored_request(  # type: ignore[union-attr]
-                req_id
-            )
 
         logger.debug(
             "Number of completed KV cache send requests: %d, receive requests: %d, tp_rank:%d",
