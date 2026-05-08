@@ -72,8 +72,4 @@ def register_service_profiling():
 def register_model():
     from .models import register_model
 
-<<<<<<< HEAD
     register_model()
-=======
-    register_model()
->>>>>>> 315b474a (epd disaggregation enable mooncake store backend)
