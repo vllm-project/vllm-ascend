@@ -12,30 +12,42 @@ elif [[ "$SOC_VERSION" =~ ^ascend910b ]]; then
     # dependency: catlass
     git config --global --add safe.directory "$ROOT_DIR"
     CATLASS_PATH=${ROOT_DIR}/csrc/third_party/catlass/include
+    CATLASS_COMMIT=$(git config -f "${ROOT_DIR}/.gitmodules" --get submodule.csrc/third_party/catlass.commit)
     if [[ ! -d "${CATLASS_PATH}" ]]; then
         echo "dependency catlass is missing, try to fetch it..."
+        git submodule sync
         if ! git submodule update --init --recursive; then
             echo "fetch failed"
             exit 1
         fi
+        cd "${ROOT_DIR}/csrc/third_party/catlass" || exit 1
+        git fetch origin
+        git checkout "${CATLASS_COMMIT}" || exit 1
+        cd - || exit 1
     fi
     ABSOLUTE_CATLASS_PATH=$(cd "${CATLASS_PATH}" && pwd)
     export CPATH=${ABSOLUTE_CATLASS_PATH}:${CPATH}
 
 
-    CUSTOM_OPS="moe_grouped_matmul;grouped_matmul_swiglu_quant_weight_nz_tensor_list;lightning_indexer_vllm;sparse_flash_attention;matmul_allreduce_add_rmsnorm;moe_init_routing_custom;moe_gating_top_k;add_rms_norm_bias;apply_top_k_top_p_custom;transpose_kv_cache_by_block;copy_and_expand_eagle_inputs;causal_conv1d;lightning_indexer_quant;hamming_dist_top_k;reshape_and_cache_bnsd;recurrent_gated_delta_rule;"
+    CUSTOM_OPS="chunk_fwd_o;chunk_gated_delta_rule_fwd_h;moe_grouped_matmul;grouped_matmul_swiglu_quant_weight_nz_tensor_list;lightning_indexer_vllm;sparse_flash_attention;matmul_allreduce_add_rmsnorm;moe_init_routing_custom;moe_gating_top_k;add_rms_norm_bias;apply_top_k_top_p_custom;transpose_kv_cache_by_block;copy_and_expand_eagle_inputs;causal_conv1d;lightning_indexer_quant;hamming_dist_top_k;reshape_and_cache_bnsd;recurrent_gated_delta_rule;"
     SOC_ARG="ascend910b"
 elif [[ "$SOC_VERSION" =~ ^ascend910_93 ]]; then
     # ASCEND910C (A3) series
     # dependency: catlass
     git config --global --add safe.directory "$ROOT_DIR"
     CATLASS_PATH=${ROOT_DIR}/csrc/third_party/catlass/include
+    CATLASS_COMMIT=$(git config -f "${ROOT_DIR}/.gitmodules" --get submodule.csrc/third_party/catlass.commit)
     if [[ ! -d "${CATLASS_PATH}" ]]; then
         echo "dependency catlass is missing, try to fetch it..."
+        git submodule sync
         if ! git submodule update --init --recursive; then
             echo "fetch failed"
             exit 1
         fi
+        cd "${ROOT_DIR}/csrc/third_party/catlass" || exit 1
+        git fetch origin
+        git checkout "${CATLASS_COMMIT}" || exit 1
+        cd - || exit 1
     fi
     # for dispatch_gmm_combine_decode
     yes | cp "${HCCL_STRUCT_FILE_PATH}" "${ROOT_DIR}/csrc/utils/inc/kernel"
@@ -64,6 +76,8 @@ elif [[ "$SOC_VERSION" =~ ^ascend910_93 ]]; then
         "hamming_dist_top_k"
         "reshape_and_cache_bnsd"
         "recurrent_gated_delta_rule"
+        "chunk_fwd_o"
+        "chunk_gated_delta_rule_fwd_h"
     )
     CUSTOM_OPS=$(IFS=';'; echo "${CUSTOM_OPS_ARRAY[*]}")
     SOC_ARG="ascend910_93"

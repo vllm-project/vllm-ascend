@@ -17,6 +17,9 @@ set(ASCEND_COMPUTE_UNIT           "ascend910b"                    CACHE   STRING
 set(ASCEND_OP_NAME                "ALL"                           CACHE   STRING   "operators that need to be compiled")
 set(VENDOR_NAME                   "vllm-ascend"                   CACHE   STRING   "vendor name")
 
+# Suppress warnings from catlass/tla third-party headers for CANN kernel compilation
+list(APPEND OPS_COMPILE_OPTIONS -Wno-ignored-attributes)
+
 include(cmake/config.cmake)
 include(cmake/func.cmake)
 include(cmake/intf.cmake)
