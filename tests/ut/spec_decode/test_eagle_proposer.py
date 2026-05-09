@@ -3489,7 +3489,7 @@ class TestEagleProposerSetInputsFirstPass(TestBase):
         self.runner.max_num_tokens = 8192
         self.runner.max_num_reqs = 256
 
-        self.mock_cpugpubuffer = patch(_CPU_GPU_BUFFER_TARGET, MockCpuGpuBuffer)
+        self.mock_cpugpubuffer = patch(_CPU_GPU_BUFFER_TARGET)
         self.mock_cpugpubuffer.start()
         self.mock_supports_multimodal_inputs = patch(
             "vllm.multimodal.registry.MultiModalRegistry.supports_multimodal_inputs", return_value=False
@@ -3571,7 +3571,7 @@ class TestEagleProposerSetInputsFirstPass(TestBase):
         init_ascend_config(vllm_config)
 
         with (
-            patch(_CPU_GPU_BUFFER_TARGET, MockCpuGpuBuffer),
+            patch(_CPU_GPU_BUFFER_TARGET),
             patch("vllm.multimodal.registry.MultiModalRegistry.supports_multimodal_inputs", return_value=False),
             set_current_vllm_config(vllm_config),
         ):
