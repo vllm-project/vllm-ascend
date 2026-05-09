@@ -323,15 +323,18 @@ class KVCacheRecvingThread(threading.Thread):
         side_channel_port: int,
         local_kv_caches_base_addr: list[int],
         block_len_per_addr: list[int],
-        mamba_ssm_size: tuple[int, int],
-        is_hma_required,
-        has_mamba,
-        hma_group_size,
-        _is_mamba_group,
-        ready_event: threading.Event,
-        vllm_config: VllmConfig,
-        kv_caches: dict[str, Any],
+        mamba_ssm_size: tuple[int, int] = (0, 0),
+        is_hma_required=False,
+        has_mamba=False,
+        hma_group_size=1,
+        _is_mamba_group=None,
+        ready_event: threading.Event | None = None,
+        vllm_config: VllmConfig | None = None,
+        kv_caches: dict[str, Any] | None = None,
         prefill_pp_layer_partition: str | None = None,
+        mamba_spec: MambaSpec | None = None,
+        group_layer_names: list[list[str]] | None = None,
+        group_kv_cache_indices: list[list[list[int]]] | None = None,
     ):
         super().__init__(daemon=True, name="KVCacheRecvingThread")
         self.tp_rank = tp_rank
@@ -341,15 +344,28 @@ class KVCacheRecvingThread(threading.Thread):
         self.local_handshake_port = local_handshake_port
         self.side_channel_port = side_channel_port
         self.engine = engine
+        if ready_event is None:
+            ready_event = threading.Event()
         self.ready_event = ready_event
 
+        if kv_caches is None:
+            kv_caches = {}
         self.kv_caches = kv_caches
         self.kv_caches_base_addr: dict[str, dict[int, list[int]]] = SizedDict()
         self.kv_caches_base_addr[local_engine_id][local_handshake_port] = local_kv_caches_base_addr
         self.block_len_per_addr = block_len_per_addr
         self.hma_group_size = hma_group_size
         self.mamba_ssm_size = mamba_ssm_size
+        self.mamba_spec = mamba_spec
+        if _is_mamba_group is None:
+            _is_mamba_group = [False] * hma_group_size
         self._is_mamba_group = _is_mamba_group
+        if group_layer_names is None:
+            group_layer_names = [list(kv_caches.keys())]
+        self.group_layer_names = group_layer_names
+        if group_kv_cache_indices is None:
+            group_kv_cache_indices = [[list(range(len(local_kv_caches_base_addr)))]]
+        self.group_kv_cache_indices = group_kv_cache_indices
         self.remote_te_port: dict[str, dict[int, int]] = SizedDict()
 
         self.request_queue: queue.Queue[Any] = queue.Queue()
@@ -368,6 +384,7 @@ class KVCacheRecvingThread(threading.Thread):
         self.remote_poller = zmq.Poller()  # type: ignore
         self.timeout = 1.0  # seconds
 
+        assert vllm_config is not None
         self.vllm_config = vllm_config
         self.model_config = self.vllm_config.model_config
         self.num_speculative_tokens = (
@@ -502,8 +519,8 @@ class KVCacheRecvingThread(threading.Thread):
         remote_engine_id = req_meta["remote_engine_id"]
         remote_host = req_meta["remote_host"]
         remote_handshake_port = req_meta["remote_handshake_port"]
-        # offset = req_meta["offset"]
-        # tp_num_need_pulls = req_meta["tp_num_need_pulls"]
+        offset = req_meta["offset"]
+        tp_num_need_pulls = req_meta["tp_num_need_pulls"]
 
         # Full prefix cache hit: do not need to read remote blocks, just notify
         # P worker that we have the blocks we need.
@@ -526,27 +543,59 @@ class KVCacheRecvingThread(threading.Thread):
 
         req_start_time = time.perf_counter()
         src_list, dst_list, length_list = [], [], []
+        inner_offset = offset % tp_num_need_pulls
+        attention_group_reformat_block_ids: list[tuple[int, list[list[int]]]] = []
         for i in range(self.hma_group_size):
             if not self._is_mamba_group[i]:
-                grouped_remote_block_ids, grouped_local_block_ids = group_concurrent_contiguous(
-                    remote_block_ids[i], local_block_ids[i]
-                )
+                if tp_num_need_pulls == 1:
+                    grouped_remote_block_ids, grouped_local_block_ids = group_concurrent_contiguous(
+                        remote_block_ids[i], local_block_ids[i]
+                    )
+                else:
+                    grouped_remote_block_ids = [[block_id] for block_id in remote_block_ids[i]]
+                    grouped_local_block_ids = [[block_id] for block_id in local_block_ids[i]]
+                    attention_group_reformat_block_ids.append((i, grouped_local_block_ids))
             else:
                 transfer_block_idx = len(remote_block_ids[i]) - self.num_speculative_tokens - 1
                 grouped_remote_block_ids = [[remote_block_ids[i][transfer_block_idx]]]
                 grouped_local_block_ids = [[local_block_ids[i][0]]]
 
-            for k, (src_layer_base_addr, dst_layer_base_addr) in enumerate(
-                zip(local_kv_caches_base_addrs, remote_kv_caches_base_addrs)
-            ):
-                block_len = self.block_len_per_addr[k]
-                for remote_block_id, local_block_id in zip(grouped_remote_block_ids, grouped_local_block_ids):
-                    src = src_layer_base_addr + local_block_id[0] * block_len
-                    dst = dst_layer_base_addr + remote_block_id[0] * block_len
-                    length = block_len * len(local_block_id)
-                    src_list.append(src)
-                    dst_list.append(dst)
-                    length_list.append(length)
+            if self._is_mamba_group[i]:
+                for layer_kv_cache_indices in self.group_kv_cache_indices[i]:
+                    layer_local_kv_caches_base_addrs = [
+                        local_kv_caches_base_addrs[idx] for idx in layer_kv_cache_indices
+                    ]
+                    layer_remote_kv_caches_base_addrs = [
+                        remote_kv_caches_base_addrs[idx] for idx in layer_kv_cache_indices
+                    ]
+                    layer_block_len_per_addr = [self.block_len_per_addr[idx] for idx in layer_kv_cache_indices]
+                    self._append_mamba_transfer_meta(
+                        src_list,
+                        dst_list,
+                        length_list,
+                        layer_local_kv_caches_base_addrs,
+                        layer_remote_kv_caches_base_addrs,
+                        layer_block_len_per_addr,
+                        remote_block_id=grouped_remote_block_ids[0][0],
+                        local_block_id=grouped_local_block_ids[0][0],
+                        tp_num_need_pulls=tp_num_need_pulls,
+                        remote_tp_offset=req_meta["offset"],
+                    )
+                continue
+
+            for layer_kv_cache_indices in self.group_kv_cache_indices[i]:
+                for idx in layer_kv_cache_indices:
+                    src_layer_base_addr = local_kv_caches_base_addrs[idx]
+                    dst_layer_base_addr = remote_kv_caches_base_addrs[idx]
+                    block_len = self.block_len_per_addr[idx]
+                    inner_block_len = block_len // tp_num_need_pulls
+                    for remote_block_id, local_block_id in zip(grouped_remote_block_ids, grouped_local_block_ids):
+                        src = src_layer_base_addr + local_block_id[0] * block_len + inner_offset * inner_block_len
+                        dst = dst_layer_base_addr + remote_block_id[0] * inner_block_len
+                        length = inner_block_len * len(local_block_id)
+                        src_list.append(src)
+                        dst_list.append(dst)
+                        length_list.append(length)
 
         ret = self.engine.batch_transfer_sync_read(session_id, src_list, dst_list, length_list)
         if ret < 0:
@@ -563,6 +612,100 @@ class KVCacheRecvingThread(threading.Thread):
             self.tp_rank,
             session_id,
         )
+
+        is_kv_transfer_end = req_meta.get("all_task_done", False)
+        need_cat_cache = tp_num_need_pulls > 1 and is_kv_transfer_end
+        if need_cat_cache:
+            for group_idx, grouped_local_block_ids in attention_group_reformat_block_ids:
+                group_kv_caches = self._get_group_kv_caches(group_idx)
+                self.reformat_kv_cache(
+                    grouped_local_block_ids, tp_num_need_pulls, need_cat_cache, False, group_kv_caches
+                )
+
+    def _append_mamba_transfer_meta(
+        self,
+        src_list: list[int],
+        dst_list: list[int],
+        length_list: list[int],
+        local_base_addrs: list[int],
+        remote_base_addrs: list[int],
+        local_block_lens: list[int],
+        remote_block_id: int,
+        local_block_id: int,
+        tp_num_need_pulls: int,
+        remote_tp_offset: int,
+    ) -> None:
+        remote_tp_size = self.tp_size * tp_num_need_pulls
+        assert remote_tp_size >= self.tp_size, "Mamba prefill TP size must be >= decode TP size."
+        assert remote_tp_size % self.tp_size == 0, "Mamba prefill TP size must be divisible by decode TP size."
+        assert len(remote_base_addrs) >= 2 and len(local_base_addrs) >= 2, (
+            "Mamba KV cache transfer requires conv and ssm tensors."
+        )
+
+        remote_conv_addr, remote_ssm_addr = remote_base_addrs[:2]
+        local_conv_addr, local_ssm_addr = local_base_addrs[:2]
+        local_conv_len, local_ssm_len = local_block_lens[:2]
+        tp_ratio = tp_num_need_pulls
+        remote_conv_len = local_conv_len // tp_ratio
+        remote_ssm_len = local_ssm_len // tp_ratio
+
+        if tp_ratio == 1:
+            src_list.extend(
+                [
+                    local_conv_addr + local_block_id * local_conv_len,
+                    local_ssm_addr + local_block_id * local_ssm_len,
+                ]
+            )
+            dst_list.extend(
+                [
+                    remote_conv_addr + remote_block_id * remote_conv_len,
+                    remote_ssm_addr + remote_block_id * remote_ssm_len,
+                ]
+            )
+            length_list.extend([remote_conv_len, remote_ssm_len])
+            return
+
+        assert self.mamba_spec is not None, "Mamba spec is required for TP resharding."
+        conv_shape, ssm_shape = self.mamba_spec.shapes
+        conv_dtype, ssm_dtype = self.mamba_spec.dtypes
+        conv_dtype_size = torch.tensor([], dtype=conv_dtype).element_size()  # type: ignore[misc]
+        ssm_dtype_size = torch.tensor([], dtype=ssm_dtype).element_size()  # type: ignore[misc]
+
+        linear_key_head_dim = self.vllm_config.model_config.hf_text_config.linear_key_head_dim
+        linear_num_key_heads = self.vllm_config.model_config.hf_text_config.linear_num_key_heads
+        linear_value_head_dim = self.vllm_config.model_config.hf_text_config.linear_value_head_dim
+        linear_num_value_heads = self.vllm_config.model_config.hf_text_config.linear_num_value_heads
+        remote_num_key_heads = linear_num_key_heads // remote_tp_size
+        remote_num_value_heads = linear_num_value_heads // remote_tp_size
+        remote_conv_width = (
+            remote_num_key_heads * 2 * linear_key_head_dim + remote_num_value_heads * linear_value_head_dim
+        )
+        remote_conv_offsets = [
+            0,
+            remote_num_key_heads * linear_key_head_dim,
+            remote_num_key_heads * 2 * linear_key_head_dim,
+        ]
+        remote_conv_sizes = [
+            remote_num_key_heads * linear_key_head_dim,
+            remote_num_key_heads * linear_key_head_dim,
+            remote_num_value_heads * linear_value_head_dim,
+        ]
+
+        for i in range(conv_shape[0]):
+            for remote_conv_offset, remote_conv_size in zip(remote_conv_offsets, remote_conv_sizes):
+                remote_addr_offset = (i * remote_conv_width + remote_conv_offset) * conv_dtype_size
+                local_addr_offset = (
+                    (i * remote_conv_width + remote_conv_offset) * tp_ratio
+                    + remote_tp_offset * remote_conv_size
+                ) * conv_dtype_size
+                src_list.append(local_conv_addr + local_block_id * local_conv_len + local_addr_offset)
+                dst_list.append(remote_conv_addr + remote_block_id * remote_conv_len + remote_addr_offset)
+                length_list.append(remote_conv_size * conv_dtype_size)
+
+        src_list.append(local_ssm_addr + local_block_id * local_ssm_len + remote_tp_offset * math.prod(ssm_shape)
+                        * ssm_dtype_size)
+        dst_list.append(remote_ssm_addr + remote_block_id * remote_ssm_len)
+        length_list.append(remote_ssm_len)
 
     def _transfer_kv_cache(self, req_meta: dict[str, Any]):
         """Handle a KV cache transfer request."""
@@ -677,20 +820,30 @@ class KVCacheRecvingThread(threading.Thread):
             else:
                 self.reformat_kv_cache(grouped_local_block_ids, tp_num_need_pulls, need_cat_cache, need_nz_cache)
 
-    def reformat_kv_cache_with_fused_op(self, block_ids: list[list[int]], tp_num_need_pulls: int):
+    def _get_group_kv_caches(self, group_idx: int) -> dict[str, Any]:
+        return {layer_name: self.kv_caches[layer_name] for layer_name in self.group_layer_names[group_idx]}
+
+    def reformat_kv_cache_with_fused_op(
+        self,
+        block_ids: list[list[int]],
+        tp_num_need_pulls: int,
+        kv_caches: dict[str, Any] | None = None,
+    ):
+        if kv_caches is None:
+            kv_caches = self.kv_caches
         # Get necessary parameters
-        k_cache = list(self.kv_caches.values())[0][0]
+        k_cache = list(kv_caches.values())[0][0]
         device = k_cache.device
         head_dim = self.model_config.hf_text_config.head_dim
         block_size = self.vllm_config.cache_config.block_size
         num_kv_head = max(self.model_config.hf_text_config.num_key_value_heads // self.tp_size, 1)
-        layers = len(self.kv_caches)
+        layers = len(kv_caches)
         flat_block_ids = [item for sublist in block_ids for item in sublist]
         block_ids_tensor = torch.tensor(flat_block_ids, dtype=torch.int64, device=device)
 
         k_caches = []
         v_caches = []
-        for _, (k_cache_layer, v_cache_layer) in self.kv_caches.items():
+        for _, (k_cache_layer, v_cache_layer) in kv_caches.items():
             k_caches.append(k_cache_layer)
             v_caches.append(v_cache_layer)
 
@@ -704,9 +857,12 @@ class KVCacheRecvingThread(threading.Thread):
         tp_num_need_pulls: int,
         need_cat_cache: bool = False,
         need_nz_cache: bool = False,
+        kv_caches: dict[str, Any] | None = None,
     ):
+        if kv_caches is None:
+            kv_caches = self.kv_caches
         # Get necessary parameters
-        k_cache = list(self.kv_caches.values())[0][0]
+        k_cache = list(kv_caches.values())[0][0]
         dtype = k_cache.dtype
         device = k_cache.device
 
@@ -736,7 +892,7 @@ class KVCacheRecvingThread(threading.Thread):
         torch.npu.synchronize()
 
         # Process each layer in the KV cache
-        for _, (k_cache_layer, v_cache_layer) in self.kv_caches.items():
+        for _, (k_cache_layer, v_cache_layer) in kv_caches.items():
             # Load cache data into buffers
             torch_npu.atb.npu_paged_cache_load(
                 k_cache_layer,
@@ -1248,18 +1404,21 @@ class MooncakeConnectorWorker:
         self._layer_specs = {
             layer: group.kv_cache_spec for group in kv_cache_config.kv_cache_groups for layer in group.layer_names
         }
+        self._layer_group_ids = {
+            layer: group_id
+            for group_id, group in enumerate(kv_cache_config.kv_cache_groups)
+            for layer in group.layer_names
+        }
         self.hma_group_size = len(kv_cache_config.kv_cache_groups)
 
         # Mamba metadata
         self._is_mamba_group = [isinstance(group.kv_cache_spec, MambaSpec) for group in kv_cache_config.kv_cache_groups]
         mamba_ssm_size = (0, 0)
+        mamba_spec = None
         self._has_mamba = any(self._is_mamba_group)
         if self._has_mamba:
             assert self._is_hma_required
             assert self.pcp_size * self.dcp_size == 1
-            assert self._prefill_tp_size == self._decode_tp_size, (
-                "Mooncake connector does not support different TP size with Mamba."
-            )
             mamba_spec = next(spec for spec in self._layer_specs.values() if isinstance(spec, MambaSpec))
             conv_nbytes, ssm_nbytes = (
                 torch.tensor([], dtype=mamba_spec.dtypes[0]).element_size(),  # type: ignore[misc]
@@ -1274,6 +1433,7 @@ class MooncakeConnectorWorker:
                 ssm_shape.numel() * ssm_nbytes,
             )
         self._mamba_ssm_size = mamba_ssm_size
+        self._mamba_spec = mamba_spec
 
         # Handshake base port
         self.side_channel_port = (
@@ -1340,6 +1500,8 @@ class MooncakeConnectorWorker:
         self.block_len_per_addr = list[int]()
         self.kv_caches = kv_caches
         kv_caches_base_addr = []
+        kv_cache_ptr_to_index: dict[int, int] = {}
+        group_kv_cache_indices: list[list[list[int]]] = [[] for _ in range(self.hma_group_size)]
         ptrs = []
         lengths = []
         if not self._is_hma_required:
@@ -1373,8 +1535,11 @@ class MooncakeConnectorWorker:
                     kv_cache_tuple = kv_caches[layer_name]
                     if isinstance(kv_cache_tuple, (list, tuple)) is False:
                         kv_cache_tuple = [kv_cache_tuple]
+                    layer_kv_cache_indices: list[int] = []
                     for single_kv_cache in kv_cache_tuple:
-                        if single_kv_cache.data_ptr() in kv_caches_base_addr:
+                        kv_cache_ptr = single_kv_cache.data_ptr()
+                        if kv_cache_ptr in kv_cache_ptr_to_index:
+                            layer_kv_cache_indices.append(kv_cache_ptr_to_index[kv_cache_ptr])
                             continue
                         tensor_num_blocks = single_kv_cache.shape[0]
                         block_size_scale = tensor_num_blocks // self.num_blocks
@@ -1382,8 +1547,12 @@ class MooncakeConnectorWorker:
                         self.block_len_per_addr.append(
                             single_kv_cache.element_size() * math.prod(block_shape) * block_size_scale
                         )
-                        kv_caches_base_addr.append(single_kv_cache.data_ptr())
-                        share_tensor_addr.append(single_kv_cache.data_ptr())
+                        kv_cache_ptr_to_index[kv_cache_ptr] = len(kv_caches_base_addr)
+                        layer_kv_cache_indices.append(len(kv_caches_base_addr))
+                        kv_caches_base_addr.append(kv_cache_ptr)
+                        share_tensor_addr.append(kv_cache_ptr)
+                    if layer_kv_cache_indices:
+                        group_kv_cache_indices[self._layer_group_ids[layer_name]].append(layer_kv_cache_indices)
                     if isinstance(layer_spec, MambaSpec) and len(self._mamba_ssm_size) == 2:
                         conv_padding = self.num_blocks * self._mamba_ssm_size[0]
                 if share_tensor_addr:
@@ -1446,6 +1615,9 @@ class MooncakeConnectorWorker:
                 self.vllm_config,
                 self.kv_caches,
                 self._prefill_pp_layer_partition,
+                self._mamba_spec,
+                [group.layer_names for group in self.kv_cache_config.kv_cache_groups],
+                group_kv_cache_indices,
             )
             self.kv_recv_thread.start()
 
@@ -1709,33 +1881,7 @@ class MooncakeConnectorWorker:
             tp_num_need_pulls = self._get_tp_num_need_pulls(prefill_tp_size)
             remote_req_id = meta.remote_request_id
 
-            if self._has_mamba:
-                assert self.kv_recv_thread is not None
-                assert meta.remote_pcp_size * meta.remote_dcp_size * self.pcp_size * self.dcp_size == 1, (
-                    "Mooncake connector does not support CP with Mamba."
-                )
-                chosen_rank_list = self._get_remote_rank(remote_req_id, prefill_tp_size)
-                remote_handshake_port_list = [[x + meta.remote_port] for x in chosen_rank_list]
-                remote_host, remote_engine_id = self._get_remote_host_info_by_port(
-                    meta.remote_port,
-                    remote_handshake_port_list[0][0],
-                    meta.remote_host,
-                    meta.remote_engine_id,
-                    meta.remote_multi_nodes_meta_mapping,
-                )
-                self.kv_recv_thread.add_request(
-                    request_id=req_id,
-                    remote_request_id=remote_req_id,
-                    local_block_ids=meta.local_block_ids,
-                    remote_block_ids=meta.remote_block_ids,
-                    remote_engine_id=remote_engine_id,
-                    remote_host=remote_host,
-                    remote_handshake_port=remote_handshake_port_list[0][0],
-                    offset=0,
-                    tp_num_need_pulls=tp_num_need_pulls,
-                    all_task_done=True,
-                )
-            elif meta.remote_pcp_size * meta.remote_dcp_size > 1:
+            if meta.remote_pcp_size * meta.remote_dcp_size > 1 and (not self._has_mamba):
                 remote_handshake_port_list, local_block_ids_list, remote_block_ids_list = self._get_kv_split_metadata(
                     req_id, meta
                 )
@@ -1808,9 +1954,6 @@ class MooncakeConnectorWorker:
                 self.kv_send_thread.add_delayed_request(req_id, delay_start_time)
 
     def _get_tp_num_need_pulls(self, prefill_tp_size: int) -> int:
-        if self._has_mamba:
-            assert prefill_tp_size == self.tp_size, "Mooncake connector does not support different TP size with Mamba."
-            return prefill_tp_size
         if prefill_tp_size is None:
             prefill_tp_size = self._prefill_tp_size
 
