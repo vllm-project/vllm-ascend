@@ -68,6 +68,7 @@ developer_guide/performance_and_debug/index
 :maxdepth: 1
 community/governance
 community/contributors
+community/issue-workflow-guidelines
 community/versioning_policy
 community/user_stories/index
 :::
