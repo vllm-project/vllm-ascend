@@ -212,8 +212,7 @@ def set_mc2_tokens_capacity(vllm_config):
 
 def get_mc2_tokens_capacity():
     assert _mc2_tokens_capacity is not None, (
-        "MC2 tokens capacity is not set. Please call set_mc2_tokens_capacity "
-        "with vllm_config first."
+        "MC2 tokens capacity is not set. Please call set_mc2_tokens_capacity with vllm_config first."
     )
     return _mc2_tokens_capacity
 
