@@ -76,7 +76,8 @@ class FiaExtraInputPreparer(BackendExtraInputPreparer):
         async_copy_to_gpu(extra.query_start_loc_np, out=extra.query_start_loc)
 
         return extra
-    
+
+
 class AscendBaseAttnBackend(AttentionBackend):
     @staticmethod
     @abstractmethod
