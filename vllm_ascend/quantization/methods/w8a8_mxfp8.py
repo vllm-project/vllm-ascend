@@ -23,6 +23,7 @@ import torch_npu
 from vllm.config import CompilationMode, get_current_vllm_config
 from vllm.distributed import get_ep_group
 
+import vllm_ascend.envs as envs_ascend
 from vllm_ascend.ascend_config import get_ascend_config
 from vllm_ascend.ascend_forward_context import _EXTRA_CTX
 from vllm_ascend.device.mxfp_compat import (
@@ -333,10 +334,11 @@ class AscendW8A8MXFP8DynamicFusedMoEMethod(AscendMoEScheme):
         layer.w13_weight_scale.data = layer.w13_weight_scale.data.reshape(g_num, n_size, k_size // 2, 2)
         g_num, n_size, k_size = layer.w2_weight_scale.shape
         layer.w2_weight_scale.data = layer.w2_weight_scale.data.reshape(g_num, n_size, k_size // 2, 2)
-        layer.w13_weight.data = layer.w13_weight.data.transpose(1, 2)
-        layer.w2_weight.data = layer.w2_weight.data.transpose(1, 2)
-        layer.w13_weight_scale.data = layer.w13_weight_scale.data.transpose(1, 2)
-        layer.w2_weight_scale.data = layer.w2_weight_scale.data.transpose(1, 2)
+        if envs_ascend.VLLM_ASCEND_ENABLE_FUSED_MC2 != 1:
+            layer.w13_weight.data = layer.w13_weight.data.transpose(1, 2)
+            layer.w2_weight.data = layer.w2_weight.data.transpose(1, 2)
+            layer.w13_weight_scale.data = layer.w13_weight_scale.data.transpose(1, 2)
+            layer.w2_weight_scale.data = layer.w2_weight_scale.data.transpose(1, 2)
 
         # Mark as transformed
         layer._mxfp8_transformed = True

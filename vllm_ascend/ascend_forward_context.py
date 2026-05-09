@@ -269,7 +269,9 @@ def select_moe_comm_method(num_tokens: int, vllm_config: VllmConfig, is_draft_mo
     elif soc_version in {AscendDeviceType._310P}:
         moe_comm_type = MoECommType.ALLGATHER
     elif soc_version in {AscendDeviceType.A5}:
-        fused_mc2_enable = envs_ascend.VLLM_ASCEND_ENABLE_FUSED_MC2 == 1 and quant_type == "w8a8_mxfp8"
+        # The A5 fused dispatch_ffn_combine path currently assumes the caller
+        # provides a compatible quantized MoE layout when the env is enabled.
+        fused_mc2_enable = envs_ascend.VLLM_ASCEND_ENABLE_FUSED_MC2 == 1
         if num_tokens <= mc2_tokens_capacity and vllm_config.parallel_config.world_size_across_dp > 1:
             moe_comm_type = MoECommType.FUSED_MC2 if fused_mc2_enable else MoECommType.MC2
         else:
