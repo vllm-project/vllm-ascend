@@ -1484,6 +1484,7 @@ def llama32_lora_files():
 def qwen35_text_lora_files():
     return snapshot_download(repo_id="vllm-ascend/qwen35-4b-text-only-sql-lora")
 
+
 def qwen_prompt(questions: list[str]) -> list[str]:
     placeholder = "<|image_pad|>"
     return [

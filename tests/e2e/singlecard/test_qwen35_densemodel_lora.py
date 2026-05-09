@@ -1,4 +1,3 @@
-
 from transformers import AutoTokenizer
 
 import vllm
@@ -20,9 +19,7 @@ TEXT_EXPECTED_LORA_OUTPUT = [
 TOKENIZER = AutoTokenizer.from_pretrained(MODEL_PATH, trust_remote_code=True)
 
 
-def _assert_exact_outputs(
-    generated_texts: list[str], expected_outputs: list[str]
-) -> None:
+def _assert_exact_outputs(generated_texts: list[str], expected_outputs: list[str]) -> None:
     assert generated_texts == expected_outputs
 
 
@@ -34,14 +31,9 @@ def _run_text_lora_sample(
     prompts = [
         TEXT_PROMPT_TEMPLATE.format(query="How many singers do we have?"),
         TEXT_PROMPT_TEMPLATE.format(
-            query=(
-                "What is the average, minimum, and maximum "
-                "age of all singers from France?"
-            )
+            query=("What is the average, minimum, and maximum age of all singers from France?")
         ),
-        TEXT_PROMPT_TEMPLATE.format(
-            query="What are the names of the stadiums without any concerts?"
-        ),
+        TEXT_PROMPT_TEMPLATE.format(query="What are the names of the stadiums without any concerts?"),
     ]
     input_templates = []
     for prompt_text in prompts:
