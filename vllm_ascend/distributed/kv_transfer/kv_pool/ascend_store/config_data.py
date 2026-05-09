@@ -1,12 +1,12 @@
 from collections.abc import Iterable
 from dataclasses import dataclass
-from typing import Optional
+from typing import Optional, cast
 
 import torch
 from vllm.distributed.kv_transfer.kv_connector.v1.base import KVConnectorMetadata
 from vllm.logger import logger
 from vllm.utils.math_utils import cdiv
-from vllm.v1.core.kv_cache_utils import BlockHash
+from vllm.v1.core.kv_cache_utils import BlockHash, BlockHashListWithBlockSize, BlockHashList
 from vllm.v1.core.sched.output import NewRequestData
 
 
@@ -30,6 +30,7 @@ class KeyMetadata:
 class PoolKey:
     key_metadata: KeyMetadata
     chunk_hash: str
+    kv_cache_group_id: int
 
     def __hash__(self):
         return hash(
@@ -39,6 +40,7 @@ class PoolKey:
                 self.key_metadata.pcp_rank,
                 self.key_metadata.dcp_rank,
                 self.key_metadata.pp_rank,
+                self.kv_cache_group_id,
                 self.chunk_hash,
             )
         )
@@ -48,7 +50,8 @@ class PoolKey:
             f"{self.key_metadata.model_name}"
             f"@pcp{self.key_metadata.pcp_rank}@dcp{self.key_metadata.dcp_rank}"
             f"@head_or_tp_rank:{self.key_metadata.head_or_tp_rank}"
-            f"@pp_rank:{self.key_metadata.pp_rank}@{self.chunk_hash}"
+            f"@pp_rank:{self.key_metadata.pp_rank}"
+            f"@group:{self.kv_cache_group_id}@{self.chunk_hash}"
         )
 
     def split_layers(self, num_layers: int) -> list["LayerPoolKey"]:
@@ -59,6 +62,7 @@ class PoolKey:
                 LayerPoolKey(
                     self.key_metadata,
                     self.chunk_hash,
+                    self.kv_cache_group_id,
                     layer_id,
                 )
             )
@@ -92,46 +96,60 @@ class LayerPoolKey(PoolKey):
 
 
 class ChunkedTokenDatabase:
-    def __init__(self, metadata: KeyMetadata, block_size: int, partitions: list[int] | None):
+    def __init__(self,
+                 metadata: KeyMetadata,
+                 block_size: list[int],
+                 partitions: list[int] | None,
+                 use_hybrid: bool = False,
+                 hash_block_size: int | None = None,):
         self.metadata = metadata
         self.block_size = block_size
-        self.kv_caches_base_addr: list[int] = []
-        self.block_len: list[int] = []
+        self.kv_caches_base_addr: list[list[int]] = []
+        self.block_len: list[list[int]] = []
         self.partitions = partitions
+        self.use_hybrid = use_hybrid
+        self.hash_block_size = block_size[0] if hash_block_size is None else hash_block_size
 
-    def _make_key_by_hash(self, chunk_hash: str, layer_id: int | None = None):
+    def _make_key_by_hash(self, chunk_hash: str, layer_id: int | None = None, kv_cache_group_id: int = 0):
         assert self.metadata is not None
         return PoolKey(
             self.metadata,
             chunk_hash,
+            kv_cache_group_id
         )
 
-    def set_kv_caches_base_addr(self, kv_caches_base_addr: list[int]):
+    def set_kv_caches_base_addr(self, kv_caches_base_addr: list[list[int]]):
         self.kv_caches_base_addr = kv_caches_base_addr
 
-    def set_block_len(self, block_len: list[int]):
+    def set_block_len(self, block_len: list[list[int]]):
         self.block_len = block_len
 
-    def prepare_value(self, start: int, end: int, block_ids: list[int]):
+    def get_block_size(self, kv_cache_group_id):
+        return self.block_size[kv_cache_group_id]
+
+    def prepare_value(self, start: int, end: int, block_ids: list[int], kv_cache_group_id: int = 0):
         addr_list = []
         size_list = []
-        block_id = block_ids[start // self.block_size]
-        length = len(self.block_len)
-        for index, base_addr in enumerate(self.kv_caches_base_addr):
-            addr = base_addr + block_id * self.block_len[index % length]
-            size = int(self.block_len[index % length] / self.block_size * (end - start))
+        group_block_size = self.get_block_size(kv_cache_group_id)
+        block_id = block_ids[start // group_block_size]
+        base_addrs = self.kv_caches_base_addr[kv_cache_group_id]
+        group_block_len = self.block_len[kv_cache_group_id]
+        length = len(group_block_len)
+        for index, base_addr in enumerate(base_addrs):
+            addr = base_addr + block_id * group_block_len[index % length]
+            size = int(group_block_len[index % length] / group_block_size * (end - start))
             addr_list.append(addr)
             size_list.append(size)
         return addr_list, size_list, block_id
 
     def prepare_value_layer(self, start: int, end: int, block_ids: list[int], layer_id: int):
-        block_id = block_ids[start // self.block_size]
+        block_id = block_ids[start // self.block_size[0]]
         addr_list = []
         size_list = []
         length = len(self.block_len)
         for i in range(length):
-            addr = self.kv_caches_base_addr[layer_id * length] + block_id * self.block_len[i]
-            size = int(self.block_len[i] / self.block_size * (end - start))
+            addr = self.kv_caches_base_addr[0][layer_id * length] + block_id * self.block_len[0][i]
+            size = int(self.block_len[0][i] / self.block_size[0] * (end - start))
             addr_list.append(addr)
             size_list.append(size)
         return addr_list, size_list
@@ -139,8 +157,9 @@ class ChunkedTokenDatabase:
     def process_tokens(
         self,
         token_len: int,
-        block_hashes: list[BlockHash] | list[str],
+        block_hashes: list[str] | BlockHashList,
         mask_num: int = 0,
+        kv_cache_group_id: int = 0,
     ) -> Iterable[tuple[int, int, PoolKey]]:
         """Process the tokens and return the corresponding cache engine keys.
 
@@ -170,15 +189,42 @@ class ChunkedTokenDatabase:
                 for h in block_hashes
             ]
         start_idx = 0
+        group_block_size = self.get_block_size(kv_cache_group_id)
         for chunk_id, hash_val in enumerate(block_hashes):
-            start_idx = chunk_id * self.block_size
+            start_idx = chunk_id * group_block_size
             if start_idx >= token_len:
                 break
-            end_idx = min(start_idx + self.block_size, token_len)
+            end_idx = min(start_idx + group_block_size, token_len)
             if start_idx < mask_num:
                 continue
             else:
-                yield start_idx, end_idx, self._make_key_by_hash(hash_val)
+                yield start_idx, end_idx, self._make_key_by_hash(hash_val, kv_cache_group_id=kv_cache_group_id)
+
+    def process_tokens_with_block_ids(
+        self,
+        token_len: int,
+        block_hashes: list[BlockHash] | list[str],
+        block_ids: list[int],
+        mask_num: int = 0,
+        kv_cache_group_id: int = 0,
+        skip_null_blocks: bool = False,
+    ) -> Iterable[tuple[int, int, PoolKey, int]]:
+        group_block_size = self.get_block_size(kv_cache_group_id)
+        for start_idx, end_idx, key in self.process_tokens(
+            token_len,
+            get_block_hashes(block_hashes, group_block_size, self.hash_block_size),
+            mask_num,
+            kv_cache_group_id=kv_cache_group_id,
+        ):
+            if not skip_null_blocks:
+                yield start_idx, end_idx, key
+            block_idx = start_idx // group_block_size
+            if block_idx >= len(block_ids):
+                continue
+            block_id = block_ids[block_idx]
+            if block_id <= 0:
+                continue
+            yield start_idx, end_idx, key
 
     def decode_adaptor_prefill_pp(self, key, addr, size):
         if self.partitions is None or len(self.partitions) == 1:
@@ -201,6 +247,20 @@ class ChunkedTokenDatabase:
                 new_size.append(size_list[start:end])
                 start = end
         return new_key, new_addr, new_size
+
+
+def normalize_block_ids_by_group(block_ids: tuple[list[int], ...] | list[int] | list[list[int]]) -> list[list[int]]:
+    if isinstance(block_ids, tuple):
+        return [group.copy() for group in block_ids]
+    if isinstance(block_ids, list):
+        if not block_ids:
+            return [[]]
+        if isinstance(block_ids[0], list):
+            grouped_block_ids = cast(list[list[int]], block_ids)
+            return [group.copy() for group in grouped_block_ids]
+        flat_block_ids = cast(list[int], block_ids)
+        return [flat_block_ids.copy()]
+    raise ValueError(f"Unsupported block_ids type {type(block_ids)}")
 
 
 # Parameters related to the connector metadata
@@ -227,7 +287,7 @@ class RequestTracker:
     # NOTE: allocated blocks could be more than the number of tokens
     # FIXME: need to check whether the block ids will be changed after
     #        preemption
-    allocated_block_ids: list[int]
+    allocated_block_ids_by_group: list[list[int]]
 
     # The number of tokens that has been savd
     num_saved_tokens: int = 0
@@ -250,18 +310,11 @@ class RequestTracker:
                 local cache hit) and new tokens that will be scheduled.
 
         """
-        unfolded_block_ids = []
-
-        if not isinstance(new_request.block_ids[0], list):
-            unfolded_block_ids = new_request.block_ids.copy()
-        else:
-            unfolded_block_ids = new_request.block_ids[0].copy()
-
         return RequestTracker(
             req_id=new_request.req_id,
             token_ids=new_request.prompt_token_ids[:num_tokens_to_compute].copy(),
             token_len=num_tokens_to_compute,
-            allocated_block_ids=unfolded_block_ids,
+            allocated_block_ids_by_group=normalize_block_ids_by_group(new_request.block_ids),
             num_saved_tokens=0,
         )
 
@@ -272,15 +325,13 @@ class RequestTracker:
         """Update the request tracker when a running request is
         scheduled again
         """
-        if len(new_block_ids) == 0:
-            new_block_ids = []
-        elif isinstance(new_block_ids, tuple):
-            new_block_ids = new_block_ids[0]
-        elif isinstance(new_block_ids, list):
-            pass
-        else:
-            raise ValueError(f"Unsupported new_block_ids type {type(new_block_ids)}")
-        self.allocated_block_ids.extend(new_block_ids)
+        normalized = normalize_block_ids_by_group(new_block_ids)
+        if len(normalized) > len(self.allocated_block_ids_by_group):    # todo: unnecessary check?
+            self.allocated_block_ids_by_group.extend(
+                [[] for _ in range(len(normalized) - len(self.allocated_block_ids_by_group))]
+            )
+        for group_id, ids in enumerate(normalized):
+            self.allocated_block_ids_by_group[group_id].extend(ids)
 
 
 @dataclass
@@ -290,7 +341,7 @@ class ReqMeta:
     # Number of tokens in this chunk
     token_len_chunk: int
 
-    block_ids: list[int]
+    block_ids_by_group: list[list[int]]
 
     block_hashes: list[BlockHash]
 
@@ -305,24 +356,24 @@ class ReqMeta:
     # The following parameters are only used for kv event generation
     # TODO: add lora_request which used for gen lora_id/lora_name in kv event
     token_ids: list[int] | None = None
-    original_block_size: int | None = None
+    original_block_size: list[int] | None = None
 
     @staticmethod
     def from_request_tracker(
         tracker: RequestTracker,
-        block_size: int,
+        lcm_block_size: int,
         load_spec: LoadSpec | None = None,
         skip_save: bool | None = False,
         block_hashes: list[BlockHash] | None = None,
         is_last_chunk: bool | None = None,
         discard_partial_chunks: bool = True,
-        original_block_size: int | None = None,
+        original_block_size: list[int] | None = None,
     ) -> Optional["ReqMeta"]:
         """Create the request metadata from a request tracker.
 
         Args:
             tracker (RequestTracker): the request tracker.
-            block_size (int): the block size in vLLM scheduler and AscendConnector.
+            lcm_block_size (int): the lcm block size of each kv group in vLLM scheduler and AscendConnector.
                 If context parallelism is enabled, block_size = block_size * pcp_size * dcp_size.
             load_spec (Optional[LoadSpec]): the load spec for KV cache loading.
             skip_save (bool): whether to skip the save operation.
@@ -340,10 +391,12 @@ class ReqMeta:
         # For save operation: do not save if the following condition is met
         # 1. has already been saved before (num_saved_tokens > 0)
         # 2. number of unsaved tokens is not reached the chunk boundary
-        chunk_boundary = cdiv(tracker.num_saved_tokens + 1, block_size) * block_size if discard_partial_chunks else 0
+        chunk_boundary = \
+            cdiv(tracker.num_saved_tokens + 1, lcm_block_size) * lcm_block_size if discard_partial_chunks else 0
         # Calculate number of tokens to save based on discard_partial_chunks
         # setting
-        num_tokens_to_save = (input_token_len // block_size * block_size) if discard_partial_chunks else input_token_len
+        num_tokens_to_save = \
+            (input_token_len // lcm_block_size * lcm_block_size) if discard_partial_chunks else input_token_len
 
         skip_save = skip_save or num_tokens_to_save < chunk_boundary
         if skip_save and load_spec is None:
@@ -372,7 +425,7 @@ class ReqMeta:
         return ReqMeta(
             req_id=tracker.req_id,
             token_len_chunk=num_tokens_to_save,
-            block_ids=tracker.allocated_block_ids,
+            block_ids_by_group=tracker.allocated_block_ids_by_group,
             can_save=not skip_save,
             load_spec=load_spec,
             block_hashes=block_hashes,
@@ -403,7 +456,15 @@ class LayerMultiBlockReqMeta:
     keys: list[LayerPoolKey]
     starts: list[int]
     ends: list[int]
-    block_ids: list[int]
+    block_ids_by_group: list[list[int]]
     layer_id: int
     is_last_chunk: bool | None = True
     current_event: torch.npu.Event | None = None
+
+
+def get_block_hashes(block_hashes: list[BlockHash], group_block_size: int, hash_block_size: int) -> BlockHashList:
+    if group_block_size == hash_block_size:
+        return block_hashes
+    return BlockHashListWithBlockSize(
+        block_hashes, hash_block_size, group_block_size
+    )

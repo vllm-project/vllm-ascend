@@ -26,7 +26,7 @@ class KVTransferThread(threading.Thread):
         self,
         m_store: Backend,
         token_database: ChunkedTokenDatabase,
-        block_size: int,
+        block_size: int | list[int],
         tp_rank: int,
         dcp_size: int,
         ready_event: threading.Event,
@@ -120,12 +120,13 @@ class KVCacheStoreSendingThread(KVTransferThread):
         self,
         m_store: Backend,
         token_database: ChunkedTokenDatabase,
-        block_size: int,
+        block_size: list[int],
         tp_rank: int,
         dcp_size: int,
         put_step: int,
         kv_role: str,
         ready_event: threading.Event,
+        group_uses_align_state: list[bool],
         enable_kv_event: bool = False,
     ):
         super().__init__(
@@ -134,6 +135,7 @@ class KVCacheStoreSendingThread(KVTransferThread):
         self.put_step = put_step
         self.kv_role = kv_role
         self.stored_requests = defaultdict[str, int](int)
+        self.group_uses_align_state = group_uses_align_state
         self.enable_kv_event = enable_kv_event
 
     def add_stored_request(self, req_id: str):
@@ -152,55 +154,59 @@ class KVCacheStoreSendingThread(KVTransferThread):
 
     def _handle_request(self, req_meta: ReqMeta):
         token_len = req_meta.token_len_chunk
-        block_ids = req_meta.block_ids
         req_id = req_meta.req_id
         current_event = req_meta.current_event
-        starts = []
-        ends = []
-        keys = []
-        block_hashes = []
+
         if req_id not in self.stored_requests:
             self.request_queue.task_done()
             return
 
-        for index, (start, end, key) in enumerate(self.token_database.process_tokens(token_len, req_meta.block_hashes)):
-            starts.append(start)
-            ends.append(end)
-            keys.append(key.to_string())
-            block_hashes.append(req_meta.block_hashes[index])
+        for group_id, block_ids in enumerate(req_meta.block_ids_by_group):
+            starts = []
+            ends = []
+            keys = []
+            block_hashes = []
+            group_block_size = self.block_size[group_id]
+            for start, end, key in self.token_database.process_tokens_with_block_ids(
+                    token_len,
+                    req_meta.block_hashes,
+                    block_ids,
+                    kv_cache_group_id=group_id,
+                    skip_null_blocks=self.group_uses_align_state[group_id]):
+                starts.append(start)
+                ends.append(end)
+                keys.append(key.to_string())
+                block_hashes.append(req_meta.block_hashes[start // group_block_size])
 
-        if not self.dcp_size > 1:
-            starts = starts[self.tp_rank % self.put_step :: self.put_step]
-            ends = ends[self.tp_rank % self.put_step :: self.put_step]
-            keys = keys[self.tp_rank % self.put_step :: self.put_step]
-            block_hashes = block_hashes[self.tp_rank % self.put_step :: self.put_step]
+            if not self.dcp_size > 1:
+                starts = starts[self.tp_rank % self.put_step :: self.put_step]
+                ends = ends[self.tp_rank % self.put_step :: self.put_step]
+                keys = keys[self.tp_rank % self.put_step :: self.put_step]
+                block_hashes = block_hashes[self.tp_rank % self.put_step :: self.put_step]
 
-        if not keys:
-            self.dec_stored_request(req_id)
-            return
+            if not keys:
+                continue
 
-        exists_states = self.lookup(keys)
-        missing_indices = [index for index, exists in enumerate(exists_states) if not exists]
+            exists_states = self.lookup(keys)
+            missing_indices = [index for index, exists in enumerate(exists_states) if not exists]
 
-        if not missing_indices:
-            self.dec_stored_request(req_id)
-            return
+            if not missing_indices:
+                continue
 
-        starts = [starts[index] for index in missing_indices]
-        ends = [ends[index] for index in missing_indices]
-        keys = [keys[index] for index in missing_indices]
-        block_hashes = [block_hashes[index] for index in missing_indices]
+            starts = [starts[index] for index in missing_indices]
+            ends = [ends[index] for index in missing_indices]
+            keys = [keys[index] for index in missing_indices]
+            block_hashes = [block_hashes[index] for index in missing_indices]
 
-        if logger.isEnabledFor(logging.DEBUG):
-            logger.debug(
-                "Storing KV cache for %d out of %d blocks (missing_count=%d) for request %s",
-                len(keys),
-                token_len // self.block_size,
-                len(missing_indices),
-                req_id,
-            )
+            if logger.isEnabledFor(logging.DEBUG):
+                logger.debug(
+                    "Storing KV cache for %d out of %d blocks (missing_count=%d) for request %s",
+                    len(keys),
+                    token_len // group_block_size,
+                    len(missing_indices),
+                    req_id,
+                )
 
-        if keys:
             """
             Note: Due to a bug in ADXL, calling current_event.synchronize() may occasionally hang.
             This issue will be fixed in CANN version 8.5.rc1.
@@ -213,21 +219,24 @@ class KVCacheStoreSendingThread(KVTransferThread):
             prev_key = None
             new_block_hashes = [maybe_convert_block_hash(bh) for bh in block_hashes]
             for index, start in enumerate(starts):
-                addr, size, _ = self.token_database.prepare_value(start, ends[index], block_ids)
+                addr, size, _ = self.token_database.prepare_value(start, ends[index], block_ids, group_id)
                 addrs.append(addr)
                 sizes.append(size)
 
                 # Create KV event
                 if self.enable_kv_event:
                     token_ids = req_meta.token_ids[start : ends[index]] if req_meta.token_ids is not None else None
+                    block_size = \
+                        req_meta.original_block_size[group_id] if req_meta.original_block_size is not None else None
                     stored_event = BlockStored(
                         block_hashes=[new_block_hashes[index]],
                         parent_block_hash=prev_key,
                         token_ids=token_ids,
-                        block_size=req_meta.original_block_size,
+                        block_size=block_size,
                         lora_id=None,
                         medium="cpu",
                         lora_name=None,
+                        group_idx=group_id
                     )
                     stored_events.append(stored_event)
                     prev_key = new_block_hashes[index]
@@ -253,31 +262,43 @@ class KVCacheStoreRecvingThread(KVTransferThread):
         self,
         m_store: Backend,
         token_database: ChunkedTokenDatabase,
-        block_size: int,
+        block_size: list[int],
         tp_rank: int,
         dcp_size: int,
         ready_event: threading.Event,
+        group_uses_align_state: list[bool]
     ):
         super().__init__(
             m_store, token_database, block_size, tp_rank, dcp_size, ready_event, name="KVCacheStoreRecvingThread"
         )
+        self.group_uses_align_state = group_uses_align_state
 
     def _handle_request(self, req_meta: ReqMeta):
         token_len = req_meta.load_spec.token_len  # type: ignore[union-attr]
         req_id = req_meta.req_id
-        mask_num = (
-            req_meta.load_spec.vllm_cached_tokens  # type: ignore[union-attr]
-            // self.block_size
-            * self.block_size
-        )
+
         addr_list = []
         size_list = []
         key_list = []
-        for start, end, key in self.token_database.process_tokens(token_len, req_meta.block_hashes, mask_num):
-            addr, size, _ = self.token_database.prepare_value(start, end, req_meta.block_ids)
-            key_list.append(key.to_string())
-            addr_list.append(addr)
-            size_list.append(size)
+        for group_id, block_ids in enumerate(req_meta.block_ids_by_group, 0):
+            group_block_size = self.block_size[group_id]
+            mask_num = (
+                    req_meta.load_spec.vllm_cached_tokens  # type: ignore[union-attr]
+                    // group_block_size
+                    * group_block_size
+            )
+            for start, end, key in self.token_database.process_tokens_with_block_ids(
+                    token_len,
+                    req_meta.block_hashes,
+                    block_ids,
+                    mask_num,
+                    kv_cache_group_id=group_id,
+                    skip_null_blocks=self.group_uses_align_state[group_id]):
+                addr, size, _ = self.token_database.prepare_value(start, end, block_ids, group_id)
+                key_list.append(key.to_string())
+                addr_list.append(addr)
+                size_list.append(size)
+
         key_list_c = key_list[self.tp_rank % len(key_list) :] + key_list[: self.tp_rank % len(key_list)]
         addr_list_c = addr_list[self.tp_rank % len(addr_list) :] + addr_list[: self.tp_rank % len(addr_list)]
         size_list_c = size_list[self.tp_rank % len(size_list) :] + size_list[: self.tp_rank % len(size_list)]
@@ -291,7 +312,7 @@ class KVCacheStoreLayerSendingThread(KVTransferThread):
         self,
         m_store: Backend,
         token_database: ChunkedTokenDatabase,
-        block_size: int,
+        block_size: list[int],
         tp_rank: int,
         dcp_size: int,
         put_step: int,
@@ -351,7 +372,7 @@ class KVCacheStoreLayerSendingThread(KVTransferThread):
         size_list = []
         for index, key in enumerate(key_list):
             addr, size = self.token_database.prepare_value_layer(
-                starts[index], ends[index], req_meta.block_ids, layer_id
+                starts[index], ends[index], req_meta.block_ids_by_group[0], layer_id
             )
             addr_list.append(addr)
             size_list.append(size)
@@ -378,7 +399,7 @@ class KVCacheStoreLayerRecvingThread(KVTransferThread):
         self,
         m_store: Backend,
         token_database: ChunkedTokenDatabase,
-        block_size: int,
+        block_size: list[int],
         tp_rank: int,
         dcp_size: int,
         ready_event: threading.Event,
@@ -402,7 +423,7 @@ class KVCacheStoreLayerRecvingThread(KVTransferThread):
         key_list = []
         for index, key in enumerate(req_meta.keys):
             addr, size = self.token_database.prepare_value_layer(
-                req_meta.starts[index], req_meta.ends[index], req_meta.block_ids, req_meta.layer_id
+                req_meta.starts[index], req_meta.ends[index], req_meta.block_ids_by_group[0], req_meta.layer_id
             )
             key_list.append(key.to_string())
             addr_list.append(addr)

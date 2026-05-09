@@ -16,13 +16,14 @@ from vllm.distributed import (
 from vllm.distributed.kv_events import BlockStored
 from vllm.logger import logger
 from vllm.v1.core.kv_cache_utils import BlockHash
+from vllm.v1.kv_cache_interface import KVCacheConfig, FullAttentionSpec, MambaSpec, UniformTypeKVCacheSpecs
 
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.config_data import (
     AscendConnectorMetadata,
     ChunkedTokenDatabase,
     KeyMetadata,
     LayerMultiBlockReqMeta,
-    ReqMeta,
+    ReqMeta, get_block_hashes
 )
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.kv_transfer import (
     KVCacheStoreLayerRecvingThread,
@@ -55,6 +56,7 @@ class KVPoolWorker:
         self,
         vllm_config: VllmConfig,
         use_layerwize: bool,
+        kv_cache_config: KVCacheConfig | None = None
     ):
         model_config = vllm_config.model_config
         parallel_config = vllm_config.parallel_config
@@ -80,13 +82,56 @@ class KVPoolWorker:
             "consumer_is_to_put", False
         )
         self.backend = vllm_config.kv_transfer_config.kv_connector_extra_config.get("backend", "mooncake")
-        self.original_block_size = vllm_config.cache_config.block_size
-        self.block_size = vllm_config.cache_config.block_size
+        self.original_block_size = [vllm_config.cache_config.block_size]
 
-        if self.pcp_size > 1:
-            self.block_size *= self.pcp_size
-        if self.dcp_size > 1:
-            self.block_size *= self.dcp_size
+        # kv cache config
+        self.kv_cache_config = kv_cache_config
+        self.use_hybrid = False
+        self.use_mamba = False
+        self.group_uses_align_state = [False]
+        self.hma_group_size = 1
+        if self.kv_cache_config:
+            self.use_hybrid = not vllm_config.scheduler_config.disable_hybrid_kv_cache_manager and any(
+                not isinstance(g.kv_cache_spec, FullAttentionSpec) for g in kv_cache_config.kv_cache_groups
+            ) and len(kv_cache_config.kv_cache_groups) > 1
+
+            # Mamba metadata
+            self.use_mamba = \
+                any([isinstance(group.kv_cache_spec, MambaSpec) for group in kv_cache_config.kv_cache_groups]) \
+                and self.use_hybrid
+            if self.use_hybrid:
+                self.hma_group_size = len(kv_cache_config.kv_cache_groups)
+                self.group_uses_align_state = []
+                self.original_block_size = []
+                for group_id, kv_cache_group in enumerate(self.kv_cache_config.kv_cache_groups, 0):
+                    kv_cache_spec = kv_cache_group.kv_cache_spec
+                    if isinstance(kv_cache_spec, UniformTypeKVCacheSpecs):
+                        kv_cache_spec = next(iter(kv_cache_spec.kv_cache_specs.values()))
+                    if isinstance(kv_cache_spec, MambaSpec) and kv_cache_spec.mamba_cache_mode != "align":
+                        raise NotImplementedError(
+                            "AscendStore hybrid linear-attention support currently requires mamba_cache_mode='align'."
+                        )
+                    self.group_uses_align_state.append(
+                        isinstance(kv_cache_spec, MambaSpec) and kv_cache_spec.mamba_cache_mode == "align"
+                    )
+                    self.original_block_size.append(kv_cache_spec.block_size)
+
+        if self.use_hybrid:
+            assert not self.use_layerwise, "AscendStore layerwise mode does not yet support hybrid KV cache groups."
+            assert self.pcp_size == 1, "Hybrid mode does not yet support prefill context parallelism."
+            assert self.dcp_size == 1, "Hybrid mode does not yet support decode context parallelism."
+
+        self.grouped_block_size = self.original_block_size
+        cp_scale = self.pcp_size * self.dcp_size
+        if cp_scale > 1:
+            self._block_size = [bs * cp_scale for bs in self.original_block_size]
+
+        self.hash_block_size = vllm_config.cache_config.block_size * cp_scale  # todo: using cache_config.hash_block_size or gcd of grouped_block_size
+        self.lcm_block_size = math.lcm(*self.grouped_block_size)
+
+        logger.info("use_hybrid: %s, use_mamba: %s, hma_group_size: %s, hash_block_size: %s, lcm_block_size: %s",
+                    self.use_hybrid, self.use_mamba, self.hma_group_size, self.hash_block_size, self.lcm_block_size)
+
         self.current_layer = 0
         self.num_layers = model_config.get_num_layers(parallel_config)
 
@@ -135,7 +180,11 @@ class KVPoolWorker:
                     for i in range(2, remaining_layers + 2):
                         partitions[-i] += 1
 
-        self.token_database = ChunkedTokenDatabase(self.metadata, self.block_size, partitions)
+        self.token_database = ChunkedTokenDatabase(self.metadata,
+                                                   self.grouped_block_size,
+                                                   partitions,
+                                                   self.use_hybrid,
+                                                   self.hash_block_size)
 
         backend = backend_map.get(self.backend.lower())
         assert backend is not None
@@ -162,7 +211,10 @@ class KVPoolWorker:
         _, first_kv_cache_tuple = next(iter(kv_caches.items()))
         first_kv_cache = first_kv_cache_tuple[0]
 
-        self.num_blocks = first_kv_cache.shape[0]
+        if self.kv_cache_config:
+            self.num_blocks = self.kv_cache_config.num_blocks
+        else:
+            self.num_blocks = first_kv_cache.shape[0]
         logger.info("num_blocks: %s", self.num_blocks)
         block_rank = 3
         self.block_len = []
@@ -171,7 +223,7 @@ class KVPoolWorker:
                 block_shape = first_kv_cache_tuple[i].shape[-block_rank:]
                 logger.info("block_shape: %s", block_shape)
                 self.block_len.append(first_kv_cache[i].element_size() * math.prod(block_shape))
-        else:
+        elif not self.use_hybrid:
             # [num_block, block_size, num_head, hidden_dim]
             block_shape = first_kv_cache.shape[-block_rank:]
             logger.info("block_shape: %s", block_shape)
@@ -188,19 +240,42 @@ class KVPoolWorker:
         self.kv_caches_base_addr = []
         ptrs = []
         lengths = []
-        length = len(self.block_len)
-        for cache_or_caches in kv_caches.values():
-            # Normalize to always be a list of caches
-            for i, cache in enumerate(cache_or_caches, 0):
-                base_addr = cache.data_ptr()
-                region_len = self.num_blocks * self.block_len[i % length]
-                self.kv_caches_base_addr.append(base_addr)
-                ptrs.append(base_addr)
-                lengths.append(region_len)
+        if not self.use_hybrid:
+            length = len(self.block_len)
+            for cache_or_caches in kv_caches.values():
+                # Normalize to always be a list of caches
+                for i, cache in enumerate(cache_or_caches, 0):
+                    base_addr = cache.data_ptr()
+                    region_len = self.num_blocks * self.block_len[i % length]
+                    self.kv_caches_base_addr.append(base_addr)
+                    ptrs.append(base_addr)
+                    lengths.append(region_len)
+        elif self.use_mamba:
+            ptrs = [-1] * len(self.kv_cache_config.kv_cache_tensors)
+            lengths = [tensor.size for tensor in self.kv_cache_config.kv_cache_tensors]
+            for group_id, kv_group in enumerate(self.kv_cache_config.kv_cache_groups, 0):
+                group_kv_caches_base_addr: list[int] = []
+                group_block_len = []
+                for tensor_id, layer in enumerate(kv_group.layer_names, 0):
+                    kv_cache_tuple = kv_caches[layer]
+                    if not isinstance(kv_cache_tuple, (list, tuple)):
+                        kv_cache_tuple = [kv_cache_tuple]
+                    for single_kv_cache in kv_cache_tuple:
+                        ptrs[tensor_id] = single_kv_cache.data_ptr() if ptrs[tensor_id] < 0 \
+                            else min(ptrs[tensor_id], single_kv_cache.data_ptr())
+                        tensor_num_blocks = single_kv_cache.shape[0]
+                        block_size_scale = tensor_num_blocks // self.num_blocks
+                        block_shape = single_kv_cache.shape[1:]
+                        group_kv_caches_base_addr.append(single_kv_cache.data_ptr())
+                        group_block_len.append(
+                            single_kv_cache.element_size() * math.prod(block_shape) * block_size_scale)
+                self.kv_caches_base_addr.append(group_kv_caches_base_addr)
+                self.block_len.append(group_block_len)
 
         self.m_store.register_buffer(ptrs, lengths)
-        self.token_database.set_kv_caches_base_addr(self.kv_caches_base_addr)
-        self.token_database.set_block_len(self.block_len)
+        self.token_database.set_kv_caches_base_addr(
+            self.kv_caches_base_addr if self.use_hybrid else [self.kv_caches_base_addr])
+        self.token_database.set_block_len(self.block_len if self.use_hybrid else[self.block_len])
 
         if self.use_layerwise:
             self.get_event = threading.Event()
@@ -209,7 +284,7 @@ class KVPoolWorker:
                 self.kv_send_thread = KVCacheStoreLayerSendingThread(
                     self.m_store,
                     self.token_database,
-                    self.block_size,
+                    self.grouped_block_size,
                     self.tp_rank,
                     self.dcp_size,
                     self.put_step,
@@ -222,7 +297,7 @@ class KVPoolWorker:
             self.kv_recv_thread = KVCacheStoreLayerRecvingThread(
                 self.m_store,
                 self.token_database,
-                self.block_size,
+                self.grouped_block_size,
                 self.tp_rank,
                 self.dcp_size,
                 ready_event,
@@ -236,19 +311,23 @@ class KVPoolWorker:
                 self.kv_send_thread = KVCacheStoreSendingThread(
                     self.m_store,
                     self.token_database,
-                    self.block_size,
+                    self.grouped_block_size,
                     self.tp_rank,
                     self.dcp_size,
                     self.put_step,
                     self.kv_role,
                     ready_event_sending,
+                    self.group_uses_align_state,
                     self.enable_kv_events,
                 )
                 self.kv_send_thread.start()
             if self.load_async:
                 ready_event = threading.Event()
                 self.kv_recv_thread = KVCacheStoreRecvingThread(
-                    self.m_store, self.token_database, self.block_size, self.tp_rank, self.dcp_size, ready_event
+                    self.m_store, self.token_database,
+                    self.grouped_block_size,
+                    self.tp_rank, self.dcp_size, ready_event,
+                    self.group_uses_align_state
                 )
                 self.kv_recv_thread.start()
                 ready_event.wait()
@@ -261,7 +340,7 @@ class KVPoolWorker:
             if load_spec is None or not load_spec.can_load:  # load =0
                 continue
             token_len = request.token_len_chunk
-            if (load_spec.kvpool_cached_tokens % self.block_size != 0) and (
+            if (load_spec.kvpool_cached_tokens % self.lcm_block_size != 0) and (
                 load_spec.kvpool_cached_tokens == token_len - 1
             ):
                 token_len = request.load_spec.kvpool_cached_tokens + 1
@@ -281,14 +360,22 @@ class KVPoolWorker:
                     addr_list = []
                     size_list = []
                     key_list = []
-                    mask_num = request.load_spec.vllm_cached_tokens // self.block_size * self.block_size
-                    for start, end, key in self.token_database.process_tokens(
-                        token_len, request.block_hashes, mask_num
-                    ):
-                        addr, size, _ = self.token_database.prepare_value(start, end, request.block_ids)
-                        key_list.append(key.to_string())
-                        addr_list.append(addr)
-                        size_list.append(size)
+                    for group_id, block_ids in enumerate(request.block_ids_by_group, 0):
+                        block_size = self.grouped_block_size[group_id]
+                        mask_num = request.load_spec.vllm_cached_tokens // block_size * block_size
+
+                        for start, end, key in self.token_database.process_tokens_with_block_ids(
+                                token_len,
+                                request.block_hashes,
+                                block_ids,
+                                mask_num,
+                                kv_cache_group_id=group_id,
+                                skip_null_blocks=self.group_uses_align_state[group_id]
+                        ):
+                            addr, size, _ = self.token_database.prepare_value(start, end, block_ids, group_id)
+                            key_list.append(key.to_string())
+                            addr_list.append(addr)
+                            size_list.append(size)
                     key_list_c = key_list[self.tp_rank % len(key_list) :] + key_list[: self.tp_rank % len(key_list)]
                     addr_list_c = (
                         addr_list[self.tp_rank % len(addr_list) :] + addr_list[: self.tp_rank % len(addr_list)]
@@ -377,8 +464,8 @@ class KVPoolWorker:
         token_len = request.token_len_chunk
         mask_num = (
             request.load_spec.vllm_cached_tokens  # type: ignore[union-attr]
-            // self.block_size
-            * self.block_size
+            // self.grouped_block_size[0]
+            * self.grouped_block_size[0]
         )
         num_required_tokens = token_len - mask_num
 
@@ -405,7 +492,7 @@ class KVPoolWorker:
                         logger.info("Layerwise get failed")
                 self.get_event.clear()
                 req_meta = LayerMultiBlockReqMeta(
-                    request.req_id, keys_multi_chunk, starts, ends, request.block_ids, layer_id
+                    request.req_id, keys_multi_chunk, starts, ends, request.block_ids_by_group, layer_id
                 )
                 self.kv_recv_thread.add_request(  # type: ignore[union-attr, call-arg]
                     req_meta
@@ -465,7 +552,7 @@ class KVPoolWorker:
                     keys_multi_chunk,
                     starts,
                     ends,
-                    request.block_ids,
+                    request.block_ids_by_group,
                     layer_id,
                     request.is_last_chunk,
                     current_event,
@@ -587,52 +674,71 @@ class KVPoolWorker:
         :param tokens: the input tokens, with shape [seq_len]
         :return: An int indicating how many prefix tokens are cached.
         """
-        end = 0
-        keys = []
         try:
-            starts = []
-            for start, end, key in self.token_database.process_tokens(token_len, block_hashes):
+            hits = []
+            for group_id in range(self.hma_group_size):
+                keys = []
+                starts = []
+                ends = []
+                for start, end, key in self.token_database.process_tokens(
+                    token_len,
+                    get_block_hashes(block_hashes, self.grouped_block_size[group_id], self.hash_block_size),
+                    kv_cache_group_id=group_id,
+                ):
+                    if use_layerwise:
+                        keys_multi_layer = key.split_layers(self.num_layers)
+                        for item in keys_multi_layer:
+                            keys.append(item.to_string())
+                    else:
+                        keys.append(key.to_string())
+                    starts.append(start)
+                    ends.append(end)
+
+                if not keys:
+                    return 0
+
+                multi_tp_keys = keys[:]
+                for i in range(1, min(self.tp_size, self.num_kv_head)):
+                    for item in keys:
+                        new_str = item.replace(  # type: ignore[attr-defined]
+                            "@head_or_tp_rank:0", f"@head_or_tp_rank:{i}", 1
+                        )
+                        multi_tp_keys.append(new_str)
+
+                pp_base_keys = multi_tp_keys.copy()
+                for i in range(1, self.pp_size):
+                    for item in pp_base_keys:
+                        new_str = item.replace(  # type: ignore[attr-defined]
+                            "@pp_rank:0", f"@pp_rank:{i}", 1
+                        )
+                        multi_tp_keys.append(new_str)
+
+                res = self.m_store.exists(multi_tp_keys)  # type: ignore[assignment]
+                num_block = len(keys)
                 if use_layerwise:
-                    keys_multi_layer = key.split_layers(self.num_layers)
-                    for item in keys_multi_layer:
-                        keys.append(item.to_string())
+                    res = self.check_all_layers_exists(res, self.num_layers)
+                    num_block = len(keys) // self.num_layers
+                multi_tp_values = [
+                    res[i * num_block : (i + 1) * num_block]  # type: ignore[index]
+                    for i in range(min(self.tp_size, self.num_kv_head) * self.pp_size)
+                ]
+                if self.group_uses_align_state[group_id]:
+                    # mamba group with align mode will skip some null block, we must loop it in reverse order
+                    for i in range(num_block - 1, -1, -1):
+                        if all(values[i] == 1 for values in multi_tp_values) and ends[i] % self.lcm_block_size == 0:
+                            hits.append(ends[i])
+                            break
                 else:
-                    keys.append(key.to_string())
-                starts.append(start)
-
-            multi_tp_keys = keys[:]
-            for i in range(1, min(self.tp_size, self.num_kv_head)):
-                for item in keys:
-                    new_str = item.replace(  # type: ignore[attr-defined]
-                        "@head_or_tp_rank:0", f"@head_or_tp_rank:{i}", 1
-                    )
-                    multi_tp_keys.append(new_str)
-
-            pp_base_keys = multi_tp_keys.copy()
-            for i in range(1, self.pp_size):
-                for item in pp_base_keys:
-                    new_str = item.replace(  # type: ignore[attr-defined]
-                        "@pp_rank:0", f"@pp_rank:{i}", 1
-                    )
-                    multi_tp_keys.append(new_str)
-
-            res = self.m_store.exists(multi_tp_keys)  # type: ignore[assignment]
-            num_block = len(keys)
-            if use_layerwise:
-                res = self.check_all_layers_exists(res, self.num_layers)
-                num_block = len(keys) // self.num_layers
-            multi_tp_values = [
-                res[i * num_block : (i + 1) * num_block]  # type: ignore[index]
-                for i in range(min(self.tp_size, self.num_kv_head) * self.pp_size)
-            ]
-            index = self.find_min_first_non_one_index(multi_tp_values)
-            if index != -1:
-                return starts[index]
-        # all tokens where found, return the maximal end
+                    index = self.find_min_first_non_one_index(multi_tp_values)
+                    if index != -1:
+                        for i in range(index, 0, -1):
+                            if starts[i] % self.lcm_block_size == 0:
+                                hits.append(starts[i])
+                                break
         except Exception as e:
             logger.error("Remote connection failed in contains: %s", e)
             return 0
-        return end
+        return min(hits) if hits else 0
 
     def check_all_layers_exists(self, res: list[int], num_layers: int) -> list[int]:
         total_chunks = len(res) // num_layers
