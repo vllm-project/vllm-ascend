@@ -119,104 +119,53 @@ def _ranks_kernel(
             tl.store(output_ptr + req_idx, n)
 
 
-if not vllm_version_is("0.20.1"):
+def compute_topk_logprobs(
+    logits: torch.Tensor,
+    num_logprobs: int,
+    sampled_token_ids: torch.Tensor,
+    cu_num_logits: list[int] | None = None,
+    logprob_token_ids_state: "LogprobTokenIdsState | None" = None,
+    expanded_idx_mapping: torch.Tensor | None = None,
+    max_per_req_token_ids: int = 0,
+) -> LogprobsTensors:
+    assert num_logprobs >= 0
+    batch_size, vocab_size = logits.shape
+    logprob_token_ids = sampled_token_ids.unsqueeze(-1)
+    if num_logprobs > 0:
+        topk_indices = torch.topk(logits, num_logprobs, dim=-1).indices
+        logprob_token_ids = torch.cat((sampled_token_ids.unsqueeze(-1), topk_indices), dim=1)
 
-    def compute_topk_logprobs(
-        logits: torch.Tensor,
-        num_logprobs: int,
-        sampled_token_ids: torch.Tensor,
-        cu_num_logits: list[int] | None = None,
-        logprob_token_ids_state: "LogprobTokenIdsState | None" = None,
-        expanded_idx_mapping: torch.Tensor | None = None,
-        max_per_req_token_ids: int = 0,
-    ) -> LogprobsTensors:
-        assert num_logprobs >= 0
-        batch_size, vocab_size = logits.shape
-        logprob_token_ids = sampled_token_ids.unsqueeze(-1)
-        if num_logprobs > 0:
-            topk_indices = torch.topk(logits, num_logprobs, dim=-1).indices
-            logprob_token_ids = torch.cat((sampled_token_ids.unsqueeze(-1), topk_indices), dim=1)
+    # NOTE(woosuk): Here, to save GPU memory, we do not materialize the full
+    # logprobs tensor. Instead, we only compute and return the logprobs of
+    # the topk + 1 tokens.
+    logprobs = compute_token_logprobs(logits, logprob_token_ids)
+    token_ranks = torch.empty(
+        batch_size,
+        dtype=torch.int64,
+        device=logits.device,
+    )
 
-        # NOTE(woosuk): Here, to save GPU memory, we do not materialize the full
-        # logprobs tensor. Instead, we only compute and return the logprobs of
-        # the topk + 1 tokens.
-        logprobs = compute_token_logprobs(logits, logprob_token_ids)
-        token_ranks = torch.empty(
-            batch_size,
-            dtype=torch.int64,
-            device=logits.device,
-        )
+    vec_core = get_vectorcore_num()
+    NUM_CORES = min(batch_size, vec_core)
 
-        vec_core = get_vectorcore_num()
-        NUM_CORES = min(batch_size, vec_core)
+    rows_per_core = triton.cdiv(batch_size, NUM_CORES)
+    BLOCK_SIZE = 8192
+    grid = (NUM_CORES,)
+    _ranks_kernel[grid](
+        token_ranks,
+        logits,
+        logits.stride(0),
+        sampled_token_ids,
+        vocab_size,
+        batch_size,
+        rows_per_core,
+        BLOCK_SIZE=BLOCK_SIZE,
+        multibuffer=False,
+    )
 
-        rows_per_core = triton.cdiv(batch_size, NUM_CORES)
-        BLOCK_SIZE = 8192
-        grid = (NUM_CORES,)
-        _ranks_kernel[grid](
-            token_ranks,
-            logits,
-            logits.stride(0),
-            sampled_token_ids,
-            vocab_size,
-            batch_size,
-            rows_per_core,
-            BLOCK_SIZE=BLOCK_SIZE,
-            multibuffer=False,
-        )
-
-        return LogprobsTensors(
-            logprob_token_ids=logprob_token_ids,
-            logprobs=logprobs,
-            selected_token_ranks=token_ranks,
-            cu_num_generated_tokens=cu_num_logits,
-        )
-else:
-
-    def compute_topk_logprobs(  # type: ignore[misc]
-        logits: torch.Tensor,
-        num_logprobs: int,
-        sampled_token_ids: torch.Tensor,
-        cu_num_logits: list[int] | None = None,
-    ) -> LogprobsTensors:
-        assert num_logprobs >= 0
-        batch_size, vocab_size = logits.shape
-        logprob_token_ids = sampled_token_ids.unsqueeze(-1)
-        if num_logprobs > 0:
-            topk_indices = torch.topk(logits, num_logprobs, dim=-1).indices
-            logprob_token_ids = torch.cat((sampled_token_ids.unsqueeze(-1), topk_indices), dim=1)
-
-        # NOTE(woosuk): Here, to save GPU memory, we do not materialize the full
-        # logprobs tensor. Instead, we only compute and return the logprobs of
-        # the topk + 1 tokens.
-        logprobs = compute_token_logprobs(logits, logprob_token_ids)
-        token_ranks = torch.empty(
-            batch_size,
-            dtype=torch.int64,
-            device=logits.device,
-        )
-
-        vec_core = get_vectorcore_num()
-        NUM_CORES = min(batch_size, vec_core)
-
-        rows_per_core = triton.cdiv(batch_size, NUM_CORES)
-        BLOCK_SIZE = 8192
-        grid = (NUM_CORES,)
-        _ranks_kernel[grid](
-            token_ranks,
-            logits,
-            logits.stride(0),
-            sampled_token_ids,
-            vocab_size,
-            batch_size,
-            rows_per_core,
-            BLOCK_SIZE=BLOCK_SIZE,
-            multibuffer=False,
-        )
-
-        return LogprobsTensors(
-            logprob_token_ids=logprob_token_ids,
-            logprobs=logprobs,
-            selected_token_ranks=token_ranks,
-            cu_num_generated_tokens=cu_num_logits,
-        )
+    return LogprobsTensors(
+        logprob_token_ids=logprob_token_ids,
+        logprobs=logprobs,
+        selected_token_ranks=token_ranks,
+        cu_num_generated_tokens=cu_num_logits,
+    )
