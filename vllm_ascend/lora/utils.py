@@ -51,7 +51,7 @@ class AscendMergedColumnParallelLinearWithLoRA(MergedColumnParallelLinearWithLoR
         packed_modules_list: list,
         model_config: PretrainedConfig | None,
     ) -> bool:
-        return type(source_layer) is AscendMergedColumnParallelLinear
+        return type(source_layer) is AscendMergedColumnParallelLinear and len(packed_modules_list) == 2
 
 
 class AscendRowParallelLinearWithLoRA(RowParallelLinearWithLoRA):

@@ -1480,6 +1480,10 @@ def llama32_lora_files():
     return hf_snapshot_download(repo_id="jeeejeee/llama32-3b-text2sql-spider", local_files_only=True)
 
 
+@pytest.fixture(scope="session")
+def qwen35_text_lora_files():
+    return snapshot_download(repo_id="vllm-ascend/qwen35-4b-text-only-sql-lora")
+
 def qwen_prompt(questions: list[str]) -> list[str]:
     placeholder = "<|image_pad|>"
     return [
