@@ -18,6 +18,12 @@ class TestPrepareAndFinalize(unittest.TestCase):
         patcher = patch("torch.npu.Stream", return_value=fake_stream)
         patcher.start()
         self.addCleanup(patcher.stop)
+        self.mock_get_config = patch("vllm_ascend.ops.fused_moe.prepare_finalize.get_ascend_config")
+        mock_config = self.mock_get_config.start()
+        mock_ascend_config = MagicMock()
+        mock_ascend_config.multistream_overlap_gate = False
+        mock_config.return_value = mock_ascend_config
+        self.addCleanup(self.mock_get_config.stop)
         self.moe_config = MagicMock(spec=FusedMoEConfig)
         self.moe_config.tp_group = MagicMock()
         self.moe_config.tp_group.device_group = MagicMock()

@@ -30,7 +30,7 @@ class TestBatchInvariant:
     def test_override_envs_for_invariance(self):
         """Test Config and environment variable override"""
         mock_config = MagicMock()
-        with patch("vllm_ascend.batch_invariant.get_ascend_config", return_value=mock_config):
+        with patch("vllm_ascend.ascend_config.get_ascend_config", return_value=mock_config):
             batch_invariant.override_envs_for_invariance()
 
         assert mock_config.weight_nz_mode == 0
