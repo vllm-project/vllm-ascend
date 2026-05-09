@@ -54,21 +54,21 @@ Get the latest info here: <https://github.com/vllm-project/vllm-ascend/issues/16
 | Gemma-3                       | 🔵        |                                                                      | A2/A3 |
 | Phi-3/4                       | 🔵        |                                                                      | A2/A3 |
 | Mistral/Mistral-Instruct      | 🔵        |                                                                      | A2/A3 |
-| DeepSeek V2.5                 | 🟡        | Need test                                                            |                    |
-| Mllama                        | 🟡        | Need test                                                            |                    |
-| MiniMax-Text                  | 🟡        | Need test                                                            |                    |
+| DeepSeek V2.5                 | 🟡        | Need test                                                            |       |
+| Mllama                        | 🟡        | Need test                                                            |       |
+| MiniMax-Text                  | 🟡        | Need test                                                            |       |
 
 ### Pooling Models
 
-| Model                         | Support   | Note                                                                 | Supported Hardware | Doc |
-|-------------------------------|-----------|----------------------------------------------------------------------|--------------------|-----|
-| Qwen3-Embedding               | 🔵        |                                                                      | A2/A3 | [Qwen3_embedding](../../tutorials/models/Qwen3_embedding.md)|
-| Qwen3-VL-Embedding            | 🔵        |                                                                      | A2/A3 | [Qwen3-VL-Embedding](../../tutorials/models/Qwen3-VL-Embedding.md)|
-| Qwen3-Reranker                | 🔵        |                                                                      | A2/A3 | [Qwen3_reranker](../../tutorials/models/Qwen3_reranker.md)|
-| Qwen3-VL-Reranker             | 🔵        |                                                                      | A2/A3 | [Qwen3-VL-Reranker](../../tutorials/models/Qwen3-VL-Reranker.md)|
-| Molmo                         | 🔵        | [#1942](https://github.com/vllm-project/vllm-ascend/issues/1942)      | A2/A3 |     |
-| XLM-RoBERTa-based             | 🔵        |                                                                      | A2/A3 |     |
-| Bert                          | 🔵        |                                                                      | A2/A3 |     |
+| Model                         | Support   | Note                                                                 |    Supported Hardware    |  Doc |
+|-------------------------------|-----------|----------------------------------------------------------------------|--------------------------|------|
+| Qwen3-Embedding               | 🔵        |                                                                      |         A2/A3            | [Qwen3_embedding](../../tutorials/models/Qwen3_embedding.md)|
+| Qwen3-VL-Embedding            | 🔵        |                                                                      |         A2/A3            | [Qwen3-VL-Embedding](../../tutorials/models/Qwen3-VL-Embedding.md)|
+| Qwen3-Reranker                | 🔵        |                                                                      |         A2/A3            | [Qwen3_reranker](../../tutorials/models/Qwen3_reranker.md)|
+| Qwen3-VL-Reranker             | 🔵        |                                                                      |         A2/A3            | [Qwen3-VL-Reranker](../../tutorials/models/Qwen3-VL-Reranker.md)|
+| Molmo                         | 🔵        | [1942](https://github.com/vllm-project/vllm-ascend/issues/1942)      |         A2/A3            |      |
+| XLM-RoBERTa-based             | 🔵        |                                                                      |         A2/A3            |      |
+| Bert                          | 🔵        |                                                                      |         A2/A3            |      |
 | Qwen2.5-Math-RM-72B           | ✅        | Reward Model, gsm8k_correctness accuracy=0.80 | A2 | [Qwen2.5-Math-RM-72B](../../tutorials/models/Qwen2.5-Math-RM-72B.md) |
 
 ## Multimodal Language Models
@@ -102,10 +102,10 @@ Get the latest info here: <https://github.com/vllm-project/vllm-ascend/issues/16
 | Gemma3                         | 🔵            |                                                                      | A2/A3 |
 | Llama3.2                       | 🔵            |                                                                      | A2/A3 |
 | PaddleOCR-VL                   | 🔵            |                                                                      | A2/A3 |
-| Llama4                         | ❌            | [#1972](https://github.com/vllm-project/vllm-ascend/issues/1972)      |                    |
-| Keye-VL-8B-Preview             | ❌            | [#1963](https://github.com/vllm-project/vllm-ascend/issues/1963)      |                    |
-| Florence-2                     | ❌            | [#2259](https://github.com/vllm-project/vllm-ascend/issues/2259)      |                    |
-| GLM-4V                         | ❌            | [#2260](https://github.com/vllm-project/vllm-ascend/issues/2260)      |                    |
-| InternVL2.0/2.5/3.0 InternVideo2.5/Mono-InternVL | ❌ | [#2064](https://github.com/vllm-project/vllm-ascend/issues/2064) |  |
-| Whisper                        | ❌            | [#2262](https://github.com/vllm-project/vllm-ascend/issues/2262)      |                    |
-| Ultravox                       | 🟡            | Need test                                                            |                    |
+| Llama4                         | ❌            | [1972](https://github.com/vllm-project/vllm-ascend/issues/1972)      |       |
+| Keye-VL-8B-Preview             | ❌            | [1961](https://github.com/vllm-project/vllm-ascend/issues/1961)      |       |
+| Florence-2                     | ❌            | [2259](https://github.com/vllm-project/vllm-ascend/issues/2259)      |       |
+| GLM-4V                         | ❌            | [2260](https://github.com/vllm-project/vllm-ascend/issues/2260)      |       |
+| InternVL2.0/2.5/3.0<br>InternVideo2.5/Mono-InternVL | ❌ | [2064](https://github.com/vllm-project/vllm-ascend/issues/2064) |  |
+| Whisper                        | ❌            | [2262](https://github.com/vllm-project/vllm-ascend/issues/2262)      |       |
+| Ultravox                       | 🟡            | Need test                                                            |       |
