@@ -3,7 +3,6 @@ from dataclasses import dataclass
 
 import numpy as np
 import torch
-
 from vllm.config import get_current_vllm_config
 from vllm.v1.attention.backend import AttentionBackend
 from vllm.v1.worker.gpu.buffer_utils import async_copy_to_gpu

@@ -95,7 +95,7 @@ class AscendAttentionBackend(AscendBaseAttnBackend):
 
             return AscendAttentionCPMetadataBuilder
         return AscendAttentionMetadataBuilder
-    
+
     @staticmethod
     def get_extra_input_preparer() -> FiaExtraInputPreparer:
         return FiaExtraInputPreparer()
