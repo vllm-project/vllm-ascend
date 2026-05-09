@@ -19,7 +19,8 @@ from abc import ABC, abstractmethod
 from dataclasses import dataclass
 
 import torch
-import torch_npu
+from npu_ops_transformer.ops import get_symm_buffer_for_mega_moe, mega_moe
+from vllm.distributed.parallel_state import get_ep_group
 from vllm.model_executor.layers.fused_moe import FusedMoEConfig
 
 import vllm_ascend.envs as envs_ascend
@@ -47,6 +48,16 @@ from vllm_ascend.ops.fused_moe.token_dispatcher import (
 from vllm_ascend.quantization.quant_type import QuantType
 
 _MoECommMethods: dict[MoECommType | None, MoECommMethod] = {}
+
+_MEGA_MOE_DISPATCH_QUANT_MODE_MX = 4
+_MEGA_MOE_DISPATCH_QUANT_OUT_TYPE_E5M2 = 23
+_MEGA_MOE_DISPATCH_QUANT_OUT_TYPE_E4M3FN = 24
+
+
+def _get_dispatch_quant_out_type(dtype: torch.dtype | None) -> int:
+    if dtype == torch.float8_e5m2:
+        return _MEGA_MOE_DISPATCH_QUANT_OUT_TYPE_E5M2
+    return _MEGA_MOE_DISPATCH_QUANT_OUT_TYPE_E4M3FN
 
 
 def get_moe_comm_method(moe_comm_type: MoECommType | None) -> MoECommMethod | None:
@@ -254,6 +265,20 @@ class FusedMC2CommImpl(MoECommMethod):
             self.expert_token_nums = torch.zeros([self.moe_config.num_local_experts], dtype=torch.int32, device="npu")
         else:
             self.expert_token_nums = None
+        self.mega_moe_symm_buffer = None
+
+        if envs_ascend.VLLM_ASCEND_ENABLE_FUSED_MC2 == 1:
+            self.mega_moe_symm_buffer = get_symm_buffer_for_mega_moe(
+                group=get_ep_group().device_group,
+                num_experts=self.moe_config.num_experts,
+                num_max_tokens_per_rank=0,
+                num_topk=self.moe_config.experts_per_token,
+                hidden=self.moe_config.hidden_size,
+                intermediate_hidden=2 * self.moe_config.intermediate_size_per_partition,
+                max_recv_token_num=65536,
+                dispatch_quant_mode=_MEGA_MOE_DISPATCH_QUANT_MODE_MX,
+                dispatch_quant_out_type=_MEGA_MOE_DISPATCH_QUANT_OUT_TYPE_E4M3FN,
+            )
 
     def _get_token_dispatcher(self):
         return TokenDispatcherWithMC2()
@@ -281,23 +306,25 @@ class FusedMC2CommImpl(MoECommMethod):
         expert_tokens = None
         if envs_ascend.VLLM_ASCEND_ENABLE_FUSED_MC2 == 1:
             if fused_experts_input.quant.is_mxfp:
-                hidden_states = fused_experts_input.hidden_states
-                out = torch_npu.npu_mega_moe(
-                    x=hidden_states,
-                    expert_ids=topk_ids,
-                    expert_scales=fused_experts_input.topk_weights,
-                    weight1=fused_experts_input.weights.w1,
-                    weight_scales1=fused_experts_input.weights.w1_scale,
-                    weight2=fused_experts_input.weights.w2,
-                    weight_scales2=fused_experts_input.weights.w2_scale,
-                    group_ep=self.token_dispatcher.moe_all_to_all_group_name,
-                    ep_rank_id=self.token_dispatcher.ep_rank_id,
-                    ep_world_size=self.token_dispatcher.ep_world_size,
-                    moe_expert_num=self.moe_config.num_experts,
-                    max_recv_token_num=65536,
-                    comm_alg="mte",
-                    scales1_type=fused_experts_input.weights.w1_scale.dtype,
-                    scales2_type=fused_experts_input.weights.w2_scale.dtype,
+                assert fused_experts_input.quant.mxfp is not None, "mxfp params are required for MXFP mega_moe."
+                assert self.mega_moe_symm_buffer is not None, "mega_moe_symm_buffer should be initialized."
+                self.mega_moe_symm_buffer.dispatch_quant_out_type = _get_dispatch_quant_out_type(
+                    fused_experts_input.quant.mxfp.act_quant_type
+                )
+                w1 = fused_experts_input.weights.w1
+                w2 = fused_experts_input.weights.w2
+                w1_scale = fused_experts_input.weights.w1_scale
+                w2_scale = fused_experts_input.weights.w2_scale
+
+                out, expert_tokens = mega_moe(
+                    x=fused_experts_input.hidden_states,
+                    topk_ids=topk_ids,
+                    topk_weights=fused_experts_input.topk_weights,
+                    l1_weights=w1 if isinstance(w1, list) else [w1],
+                    l2_weights=w2 if isinstance(w2, list) else [w2],
+                    sym_buffer=self.mega_moe_symm_buffer,
+                    l1_weights_sf=w1_scale if isinstance(w1_scale, list) else [w1_scale],
+                    l2_weights_sf=w2_scale if isinstance(w2_scale, list) else [w2_scale],
                 )
             else:
                 out = torch.empty_like(fused_experts_input.hidden_states)
