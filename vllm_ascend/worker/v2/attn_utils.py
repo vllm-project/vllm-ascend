@@ -22,6 +22,7 @@ from typing import Any
 
 import numpy as np
 import torch
+import vllm.envs as envs_vllm
 from vllm.config import VllmConfig, get_current_vllm_config, get_layers_from_vllm_config
 from vllm.model_executor.layers.attention import MLAAttention
 from vllm.model_executor.layers.attention_layer_base import AttentionLayerBase
@@ -112,7 +113,7 @@ def build_attn_metadata(
         )
 
         for attn_group in attn_groups[i]:
-            if hasattr(attn_group.backend, "get_extra_input_preparer"):
+            if envs_vllm.VLLM_USE_V2_MODEL_RUNNER and hasattr(attn_group.backend, "get_extra_input_preparer"):
                 preparer = attn_group.backend.get_extra_input_preparer()
                 num_reqs_padded = preparer.extra_input.num_reqs_padded
                 common_attn_metadata.query_start_loc = preparer.extra_input.query_start_loc[: num_reqs_padded + 1]

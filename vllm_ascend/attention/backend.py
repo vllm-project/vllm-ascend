@@ -11,6 +11,7 @@ from vllm.v1.worker.gpu.cudagraph_utils import BatchExecutionDescriptor
 
 from vllm_ascend.utils import singleton
 
+
 @dataclass
 class BackendExtraInput:
     """Lazily filled by ``BackendExtraInputPreparer.prepare()``; constructed empty then populated."""
@@ -19,12 +20,14 @@ class BackendExtraInput:
     query_start_loc_np: np.ndarray | None = None
     query_start_loc: torch.Tensor | None = None
 
+
 class BackendExtraInputPreparer:
     @abstractmethod
     def prepare(
         self, num_reqs: int, query_start_loc_np: np.ndarray, decode_query_len: int, batch_desc: BatchExecutionDescriptor
     ):
         raise NotImplementedError
+
 
 @singleton
 class FiaExtraInputPreparer(BackendExtraInputPreparer):
