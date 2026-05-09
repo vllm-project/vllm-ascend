@@ -490,7 +490,7 @@ class AscendMlaCPImpl(AscendMLAImpl):
         if self.dcp_size > 1:
             decode_q_no_split = torch.cat([decode_q_nope, decode_q_pe], dim=-1)
             decode_q_no_split = get_dcp_group().all_gather(decode_q_no_split, 1)
-            decode_q_nope, decode_q_pe = decode_q_no_split.split([self.kv_lora_rank, self.qk_rope_head_dim], dim=-1)
+            decode_q_nope, decode_q_pe = decode_q_no_split.split([self.qk_nope_head_dim, self.qk_rope_head_dim], dim=-1)
         return decode_q_nope, decode_q_pe
 
     def _forward_prefill(
