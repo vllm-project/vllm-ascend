@@ -5,12 +5,12 @@ import numpy as np
 import pytest
 import torch
 import torch_npu
-import vllm_ascend.vllm_ascend_C  # noqa: F401
 
+from vllm_ascend.utils import enable_custom_op  # noqa: F401 # type: ignore[import-untyped]
+
+enable_custom_op()
+# import vllm_ascend.vllm_ascend_C  # noqa: F401
 torch.set_printoptions(threshold=np.inf)
-
-# from vllm_ascend.utils import enable_custom_op
-# enable_custom_op()
 
 
 def random_with_zero_prob(zero_prob, index):
