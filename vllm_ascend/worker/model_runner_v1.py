@@ -2545,6 +2545,7 @@ class NPUModelRunner(GPUModelRunner):
             # This is separate from seq_lens_cpu (None in async) which eagle
             # proposer checks to distinguish async/non-async behavior.
             _seq_lens_cpu=self.optimistic_seq_lens_cpu[:num_reqs_padded],
+            seq_lens_cpu_upper_bound=self.optimistic_seq_lens_cpu[:num_reqs_padded],
             # TODO
             seq_lens_cpu=seq_lens_cpu,
             # TODO
