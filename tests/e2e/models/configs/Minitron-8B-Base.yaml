@@ -1,0 +1,39 @@
+model_name: "nv-community/Minitron-8B-Base"
+model_type: "vllm"
+hardware: "Atlas A2 Series"
+
+test_cases:
+  - model: "nv-community/Minitron-8B-Base"
+    server_cmd:
+      - --served-model-name
+      - minitron-8b-base
+      - --tensor-parallel-size
+      - "1"
+      - --max-model-len
+      - "4096"
+      - --gpu-memory-utilization
+      - "0.9"
+      - --enforce-eager
+      - --port
+      - "8000"
+
+serve:
+  tensor_parallel_size: 1
+  dtype: auto
+  max_model_len: 4096
+  gpu_memory_utilization: 0.9
+  enforce_eager: true
+  trust_remote_code: true
+
+tasks:
+  - name: "gsm8k"
+    metrics:
+      - name: "exact_match,strict-match"
+        value: 0.5436
+      - name: "exact_match,flexible-extract"
+        value: 0.5451
+
+limit: 1000
+apply_chat_template: false
+fewshot_as_multiturn: false
+batch_size: "auto"

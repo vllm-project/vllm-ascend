@@ -5,7 +5,7 @@ openai
 pytest >= 6.0,<9.0.0
 pytest-asyncio
 pytest-mock
-lm-eval==0.4.9.2
+lm-eval==0.4.11
 types-jsonschema
 xgrammar
 zmq
@@ -15,7 +15,9 @@ regex
 sentence_transformers
 ray>=2.47.1,<=2.48.0
 protobuf>3.20.0
-librosa 
+jiwer
+librosa
+scipy
 soundfile
 pytest_mock
 mindstudio-probe>=8.3.0

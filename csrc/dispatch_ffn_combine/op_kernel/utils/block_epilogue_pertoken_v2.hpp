@@ -54,15 +54,15 @@ public:
         int32_t rank;
         HcclShmem shmem;
         int32_t offsetD;
-
+        Layout3D tokenPerExpertLayout;
         CATLASS_DEVICE
         Params() {};
         CATLASS_DEVICE
         Params(int32_t EP_, int32_t expertPerRank_, int32_t rank_, __gm__ int32_t *ptrTokenPerExpert_, 
-        LayoutC layoutC_, int32_t n2_, int32_t n0_, HcclShmem& shmem_, int32_t offsetD_) : 
+        LayoutC layoutC_, int32_t n2_, int32_t n0_, HcclShmem& shmem_, int32_t offsetD_, Layout3D tokenPerExpertLayout_) : 
         ptrTokenPerExpert(ptrTokenPerExpert_), EP(EP_), 
         expertPerRank(expertPerRank_),rank(rank_), layoutC(layoutC_), n2(n2_), n0(n0_),
-        shmem(shmem_), offsetD(offsetD_)
+        shmem(shmem_), offsetD(offsetD_), tokenPerExpertLayout(tokenPerExpertLayout_)
          {}
     };
 
@@ -85,8 +85,20 @@ public:
             source_scale_offset[i] = -1;
         }
         tokenPerExpert.SetGlobalBuffer(reinterpret_cast<__gm__ int32_t *>(params.ptrTokenPerExpert));
-        tokenPerExpertLayout = Layout3D(AlignUp(params.EP * params.expertPerRank, 128), params.expertPerRank);
+        tokenPerExpertLayout = params.tokenPerExpertLayout;
         is_ping = true;
+    }
+    CATLASS_DEVICE
+    void SetFlag()
+    {
+        AscendC::SetFlag<AscendC::HardEvent::V_MTE2>(EVENT_ID0);
+        AscendC::SetFlag<AscendC::HardEvent::V_MTE2>(EVENT_ID1);
+        AscendC::SetFlag<AscendC::HardEvent::V_MTE2>(EVENT_ID2);
+        AscendC::SetFlag<AscendC::HardEvent::V_MTE2>(EVENT_ID3);
+        AscendC::SetFlag<AscendC::HardEvent::S_MTE2>(EVENT_ID2);
+        AscendC::SetFlag<AscendC::HardEvent::S_MTE2>(EVENT_ID3);
+        AscendC::SetFlag<AscendC::HardEvent::MTE3_V>(EVENT_ID0);
+        AscendC::SetFlag<AscendC::HardEvent::MTE3_V>(EVENT_ID1);
     }
 
     CATLASS_DEVICE

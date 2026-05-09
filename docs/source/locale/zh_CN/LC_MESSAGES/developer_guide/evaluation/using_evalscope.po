@@ -8,7 +8,7 @@ msgid ""
 msgstr ""
 "Project-Id-Version:  vllm-ascend\n"
 "Report-Msgid-Bugs-To: \n"
-"POT-Creation-Date: 2026-04-14 02:04+0000\n"
+"POT-Creation-Date: 2026-04-21 02:03+0000\n"
 "PO-Revision-Date: YEAR-MO-DA HO:MI+ZONE\n"
 "Last-Translator: FULL NAME <EMAIL@ADDRESS>\n"
 "Language: zh_CN\n"
@@ -34,7 +34,7 @@ msgstr ""
 
 #: ../../source/developer_guide/evaluation/using_evalscope.md:5
 msgid "1. Online server"
-msgstr "1. 在线服务器模式"
+msgstr "1.在线服务器模式"
 
 #: ../../source/developer_guide/evaluation/using_evalscope.md:7
 msgid "You can run docker container to start the vLLM server on a single NPU:"
@@ -54,7 +54,7 @@ msgstr "服务器启动后，您可以在新的终端中使用输入提示词查
 
 #: ../../source/developer_guide/evaluation/using_evalscope.md:56
 msgid "2. Install EvalScope using pip"
-msgstr "2. 使用 pip 安装 EvalScope"
+msgstr "2.使用 pip 安装 EvalScope"
 
 #: ../../source/developer_guide/evaluation/using_evalscope.md:58
 msgid "You can install EvalScope as follows:"
@@ -62,11 +62,14 @@ msgstr "您可以按以下方式安装 EvalScope："
 
 #: ../../source/developer_guide/evaluation/using_evalscope.md:66
 msgid "3. Run GSM8K using EvalScope for accuracy testing"
-msgstr "3. 使用 EvalScope 运行 GSM8K 准确率测试"
+msgstr "3.使用 EvalScope 运行 GSM8K 准确率测试"
 
 #: ../../source/developer_guide/evaluation/using_evalscope.md:68
-msgid "You can use `evalscope eval` to run GSM8K for accuracy testing:"
-msgstr "您可以使用 `evalscope eval` 命令运行 GSM8K 准确率测试："
+msgid ""
+"You can use `evalscope eval` to run GSM8K (a grade-school math benchmark "
+"dataset) for accuracy testing:"
+msgstr ""
+"您可以使用 `evalscope eval` 命令运行 GSM8K（一个小学数学基准数据集）进行准确率测试："
 
 #: ../../source/developer_guide/evaluation/using_evalscope.md:80
 #: ../../source/developer_guide/evaluation/using_evalscope.md:117
@@ -85,7 +88,7 @@ msgstr ""
 
 #: ../../source/developer_guide/evaluation/using_evalscope.md:92
 msgid "4. Run model inference stress testing using EvalScope"
-msgstr "4. 使用 EvalScope 运行模型推理压力测试"
+msgstr "4.使用 EvalScope 运行模型推理压力测试"
 
 #: ../../source/developer_guide/evaluation/using_evalscope.md:94
 msgid "Install EvalScope[perf] using pip"

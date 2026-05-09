@@ -6,6 +6,7 @@
 - **Parallel mode**: {{ parallel_mode }}
 - **Execution mode**: {{ execution_model }}
 
+{% if show_command is not defined or show_command %}
 **Command**:  
 
 ```bash
@@ -26,9 +27,10 @@ lm_eval --model {{ model_type }} --model_args $MODEL_ARGS \
 {%- endif %}
   --batch_size {{ batch_size }}
 ```
+{% endif %}
 
 | Task                  | Metric      | Value     | Stderr |
 |-----------------------|-------------|----------:|-------:|
 {% for row in rows -%}
-| {{ row.task }} | {{ row.metric }} | {{ row.value }} | ± {{ "%.4f" \| format(row.stderr \| float) }} |
+| {{ row.task }} | {{ row.metric }} | {{ row.value }} | ± {{ "%.4f" | format(row.stderr | float) }} |
 {% endfor %}

@@ -47,14 +47,15 @@ logger = logging.getLogger(__name__)
 def check_or_set_default_env(cmake_args, env_name, env_variable, default_path=""):
     if env_variable is None:
         logging.warning(
-            f"No {env_name} found in your environment, pleause try to set {env_name} "
-            "if you customize the installation path of this library, otherwise default "
-            "path will be adapted during build this project"
+            "No %s found in your environment, pleause try to set %s if you customize the installation path of this "
+            "library, otherwise default path will be adapted during build this project",
+            env_name,
+            env_name,
         )
-        logging.warning(f"Set default {env_name}: {default_path}")
+        logging.warning("Set default %s: %s", env_name, default_path)
         env_variable = default_path
     else:
-        logging.info(f"Found existing {env_name}: {env_variable}")
+        logging.info("Found existing %s: %s", env_name, env_variable)
     # cann package seems will check this environments in cmake, need write this env variable back.
     if env_name == "ASCEND_HOME_PATH":
         os.environ["ASCEND_HOME_PATH"] = env_variable
@@ -186,7 +187,7 @@ def gen_build_info():
     with open(package_dir, "w+") as f:
         f.write("# Auto-generated file\n")
         f.write(f"__device_type__ = '{device_type}'\n")
-    logging.info(f"Generated _build_info.py with SOC version: {soc_version}")
+    logging.info("Generated _build_info.py with SOC version: %s", soc_version)
 
 
 class CMakeExtension(Extension):
@@ -338,6 +339,11 @@ class cmake_build_ext(build_ext):
         # add TORCH_NPU_PATH
         cmake_args += [f"-DTORCH_NPU_PATH={torch_npu_path}"]
 
+        # Pass VLLM_ASCEND_ENABLE_BATCH_MEMCPY to CMake if explicitly set.
+        # When unset (None), CMake will auto-detect from CANN headers.
+        if envs.VLLM_ASCEND_ENABLE_BATCH_MEMCPY is not None:
+            cmake_args += [f"-DVLLM_ASCEND_ENABLE_BATCH_MEMCPY={envs.VLLM_ASCEND_ENABLE_BATCH_MEMCPY}"]
+
         build_tool = []
         # TODO(ganyi): ninja and ccache support for ascend c auto codegen. now we can only use make build
         # if which('ninja') is not None:
@@ -345,7 +351,7 @@ class cmake_build_ext(build_ext):
         # Default build tool to whatever cmake picks.
 
         cmake_args += [source_dir]
-        logging.info(f"cmake config command: {cmake_args}")
+        logging.info("cmake config command: %s", cmake_args)
         try:
             subprocess.check_call(cmake_args, cwd=self.build_temp)
         except subprocess.CalledProcessError as e:
