@@ -425,7 +425,7 @@ class AscendSFAImpl(MLAAttentionImpl):
         # The MLAPO operator fuses the pre-processing steps on Q/K/V in MLA into a single operator
         # NOTE: it imposes a limit on the number of input tokens and conflicts with FlashComm
         self.enable_mlapo = get_ascend_config().enable_mlapo
-        print(f"[PATCH_VERIFY] sfa_v1: enable_mlapo = {self.enable_mlapo}")
+        logger.debug("sfa_v1: enable_mlapo = %s", self.enable_mlapo)
 
         assert self.indexer is not None, "Indexer is required for DSA."
 

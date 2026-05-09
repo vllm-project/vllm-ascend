@@ -199,7 +199,7 @@ class LlamaXliteModel(XliteModel):
 
         xlite_config.attn_type = AttnMHA
         xlite_config.weight_nz = get_ascend_config().weight_nz_mode == 2
-        print(f"[PATCH_VERIFY] XliteConfig: weight_nz = {xlite_config.weight_nz}")
+        logger.debug("XliteConfig: weight_nz = %s", xlite_config.weight_nz)
         scheduler_config = vllm_config.scheduler_config
         max_batch_size = scheduler_config.max_num_seqs
         max_seq_len = vllm_config.model_config.max_model_len

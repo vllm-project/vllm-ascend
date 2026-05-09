@@ -166,7 +166,7 @@ def _should_trans_nz(weight: torch.Tensor) -> bool:
     # Get config value instead of env
     config = get_ascend_config()
     nz_mode = config.weight_nz_mode
-    print(f"[PATCH_VERIFY] _should_trans_nz: weight_nz_mode = {nz_mode}")
+    logger.debug("_should_trans_nz: weight_nz_mode = %s", nz_mode)
 
     # NZ is disabled when mode is 0.
     if not nz_mode:
@@ -322,19 +322,19 @@ def find_hccl_library() -> str:
     After importing `torch`, `libhccl.so` can be
     found by `ctypes` automatically.
     """
-    logger.info("[PATCH_VERIFY] find_hccl_library called, reading from Config")
+    logger.debug("find_hccl_library called, reading from Config")
     config = get_ascend_config()
     so_file = config.hccl_so_path
 
     # manually load the hccl library
     if so_file:
-        logger.info("[PATCH_VERIFY] Found hccl from Config hccl_so_path=%s", so_file)
+        logger.debug("Found hccl from Config hccl_so_path=%s", so_file)
     else:
         if torch.version.cann is not None:
             so_file = "libhccl.so"
         else:
             raise ValueError("HCCL only supports Ascend NPU backends.")
-        logger.info("[PATCH_VERIFY] Found hccl from library %s (no custom path)", so_file)
+        logger.debug("Found hccl from library %s (no custom path)", so_file)
     return so_file
 
 
@@ -421,11 +421,11 @@ def vllm_version_is(target_vllm_version: str):
         pass
     if config_version is not None:
         vllm_version = config_version
-        print(f"[PATCH_VERIFY] vllm_version_is: from Config = {vllm_version}")
+        logger.debug("vllm_version_is: from Config = %s", vllm_version)
     else:
         import vllm
         vllm_version = vllm.__version__
-        print(f"[PATCH_VERIFY] vllm_version_is: auto-detected = {vllm_version}")
+        logger.debug("vllm_version_is: auto-detected = %s", vllm_version)
     try:
         return Version(vllm_version) == Version(target_vllm_version)
     except InvalidVersion:
@@ -807,7 +807,7 @@ def mlp_tp_enable() -> bool:
 
 def matmul_allreduce_enable() -> bool:
     config_val = get_ascend_config().enable_matmul_allreduce
-    print(f"[PATCH_VERIFY] matmul_allreduce_enable: from Config = {config_val}")
+    logger.debug("matmul_allreduce_enable: from Config = %s", config_val)
     return config_val
 
 
@@ -823,12 +823,12 @@ def enable_sp(vllm_config=None, enable_shared_expert_dp: bool = False) -> bool:
 
             vllm_config = get_current_vllm_config()
         _ENABLE_SP = get_ascend_config().enable_flashcomm1
-        print(f"[PATCH_VERIFY] enable_sp: from Config = {_ENABLE_SP}")
+        logger.debug("enable_sp: from Config = %s", _ENABLE_SP)
 
         if not _ENABLE_SP and enable_shared_expert_dp:
             _ENABLE_SP = True
             logger.info("shared_expert_dp requires enable_sp = True. has set enable_sp to True")
-            print(f"[PATCH_VERIFY] enable_sp: auto-enabled for shared_expert_dp")
+            logger.debug("enable_sp: auto-enabled for shared_expert_dp")
 
     return _ENABLE_SP
 
@@ -840,7 +840,7 @@ def shared_expert_dp_enabled() -> bool:
 
 def prefill_context_parallel_enable() -> bool:
     config_val = get_ascend_config().enable_context_parallel
-    print(f"[PATCH_VERIFY] prefill_context_parallel_enable: from Config = {config_val}")
+    logger.debug("prefill_context_parallel_enable: from Config = %s", config_val)
     return config_val
 
 
@@ -1126,7 +1126,7 @@ def has_layer_idx(model_instance: torch.nn.Module) -> bool:
 
 def flashcomm2_enable() -> bool:
     config_val = get_ascend_config().enable_flashcomm2_parallel_size
-    print(f"[PATCH_VERIFY] flashcomm2_enable: from Config = {config_val}")
+    logger.debug("flashcomm2_enable: from Config = %s", config_val)
     return config_val > 0
 
 
@@ -1139,7 +1139,7 @@ def o_shard_enable() -> bool:
 
 def get_flashcomm2_config_and_validate(ascend_config, vllm_config):
     flashcomm2_oproj_tp_size = ascend_config.enable_flashcomm2_parallel_size
-    print(f"[PATCH_VERIFY] get_flashcomm2_config_and_validate: flashcomm2_parallel_size = {flashcomm2_oproj_tp_size}")
+    logger.debug("get_flashcomm2_config_and_validate: flashcomm2_parallel_size = %s", flashcomm2_oproj_tp_size)
     global_tp_size = vllm_config.parallel_config.tensor_parallel_size
 
     # Use ascend_config parameter instead of flashcomm2_enable() to avoid uninitialized config
@@ -1158,7 +1158,7 @@ def get_flashcomm2_config_and_validate(ascend_config, vllm_config):
                 f"Found invalid layer_sharding: {layer_sharding}"
             )
     if not ascend_config.enable_flashcomm1:
-        print(f"[PATCH_VERIFY] get_flashcomm2_config: enable_flashcomm1 = {ascend_config.enable_flashcomm1}")
+        logger.debug("get_flashcomm2_config: enable_flashcomm1 = %s", ascend_config.enable_flashcomm1)
         logger.warning_once(
             "It is recommended to enable FLASHCOMM1 simultaneously when starting FLASHCOMM2 for optimal performance."
         )

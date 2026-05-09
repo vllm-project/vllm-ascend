@@ -570,7 +570,7 @@ class KVCacheRecvingThread(threading.Thread):
         need_cat_cache = tp_num_need_pulls > 1 and is_kv_transfer_end
         need_nz_cache = get_ascend_config().enable_kv_nz and is_kv_transfer_end
         use_fused_op = get_ascend_config().enable_transpose_kv_cache_by_block
-        print(f"[PATCH_VERIFY] reformat_kv_cache: enable_transpose_kv_cache_by_block from Config = {use_fused_op}")
+        logger.debug("reformat_kv_cache: enable_transpose_kv_cache_by_block from Config = %s", use_fused_op)
         if need_nz_cache or need_cat_cache:
             # use fused op to reformat kv cache, we keep original implementation to provide ability to disable it.
             if use_fused_op and enable_custom_op():

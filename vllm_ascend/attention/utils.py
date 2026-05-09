@@ -7,6 +7,7 @@ import torch.nn.functional as F
 from vllm.config import VllmConfig, get_current_vllm_config
 from vllm.distributed.kv_transfer import get_kv_transfer_group, has_kv_transfer_group, is_v1_kv_transfer_group
 from vllm.forward_context import ForwardContext, get_forward_context
+from vllm.logger import logger
 from vllm.v1.attention.backends.utils import CommonAttentionMetadata
 
 from vllm_ascend import envs
@@ -343,7 +344,7 @@ def transdata(nd_mat, block_size: tuple = (16, 16)):
 def enabling_mlapo(vllm_config: VllmConfig) -> bool:
     config_val = get_ascend_config().enable_mlapo
     if get_ascend_device_type() == AscendDeviceType.A5:
-        print(f"[PATCH_VERIFY] enabling_mlapo (A5): from Config = {config_val}")
+        logger.debug("enabling_mlapo (A5): from Config = %s", config_val)
         return bool(config_val)
 
     is_decode_instance = (
@@ -351,5 +352,5 @@ def enabling_mlapo(vllm_config: VllmConfig) -> bool:
         and vllm_config.kv_transfer_config.is_kv_consumer
         and not vllm_config.kv_transfer_config.is_kv_producer
     )
-    print(f"[PATCH_VERIFY] enabling_mlapo: from Config = {config_val}, is_decode_instance = {is_decode_instance}")
+    logger.debug("enabling_mlapo: from Config = %s, is_decode_instance = %s", config_val, is_decode_instance)
     return bool(config_val and is_decode_instance)

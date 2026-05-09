@@ -109,38 +109,38 @@ class AscendConfig:
         self.recompute_scheduler_enable = additional_config.get("recompute_scheduler_enable", False)
         self.enable_cpu_binding = additional_config.get("enable_cpu_binding", True)
         self.enable_context_parallel = additional_config.get("enable_context_parallel", False)
-        print(f"[PATCH_VERIFY] AscendConfig.enable_context_parallel initialized: {self.enable_context_parallel}")
+        logger.debug("AscendConfig.enable_context_parallel initialized: %s", self.enable_context_parallel)
         self.enable_matmul_allreduce = additional_config.get("enable_matmul_allreduce", False)
-        print(f"[PATCH_VERIFY] AscendConfig.enable_matmul_allreduce initialized: {self.enable_matmul_allreduce}")
+        logger.debug("AscendConfig.enable_matmul_allreduce initialized: %s", self.enable_matmul_allreduce)
         # HCCL library path configuration (replaces HCCL_SO_PATH env var)
         self.hccl_so_path = additional_config.get("hccl_so_path", None)
-        logger.info(f"[PATCH_VERIFY] AscendConfig.hccl_so_path initialized: {self.hccl_so_path}")
+        logger.debug("AscendConfig.hccl_so_path initialized: %s", self.hccl_so_path)
         # Fused MC2 configuration (replaces VLLM_ASCEND_ENABLE_FUSED_MC2 env var)
         # 0: disabled (default)
         # 1: enable dispatch_ffn_combine (Prefill)
         # 2: enable dispatch_gmm_combine_decode (Decode)
         self.enable_fused_mc2 = additional_config.get("enable_fused_mc2", 0)
-        print(f"[PATCH_VERIFY] AscendConfig.enable_fused_mc2 initialized: {self.enable_fused_mc2}")
+        logger.debug("AscendConfig.enable_fused_mc2 initialized: %s", self.enable_fused_mc2)
         # FLASHCOMM1 configuration (replaces VLLM_ASCEND_ENABLE_FLASHCOMM1 env var)
         self.enable_flashcomm1 = additional_config.get("enable_flashcomm1", False)
-        print(f"[PATCH_VERIFY] AscendConfig.enable_flashcomm1 initialized: {self.enable_flashcomm1}")
+        logger.debug("AscendConfig.enable_flashcomm1 initialized: %s", self.enable_flashcomm1)
         # MLAPO configuration (replaces VLLM_ASCEND_ENABLE_MLAPO env var)
         self.enable_mlapo = additional_config.get("enable_mlapo", True)
-        print(f"[PATCH_VERIFY] AscendConfig.enable_mlapo initialized: {self.enable_mlapo}")
+        logger.debug("AscendConfig.enable_mlapo initialized: %s", self.enable_mlapo)
         # FLASHCOMM2 parallel size configuration (replaces VLLM_ASCEND_FLASHCOMM2_PARALLEL_SIZE env var)
         # 0: disabled (default), >0: enabled with O-matrix TP group size
         self.enable_flashcomm2_parallel_size = additional_config.get("enable_flashcomm2_parallel_size", 0)
-        print(f"[PATCH_VERIFY] AscendConfig.enable_flashcomm2_parallel_size initialized: {self.enable_flashcomm2_parallel_size}")
+        logger.debug("AscendConfig.enable_flashcomm2_parallel_size initialized: %s", self.enable_flashcomm2_parallel_size)
         # VLLM_VERSION override configuration (replaces VLLM_VERSION env var)
         # If set, overrides vllm.__version__ for version detection. Useful for dev builds.
         self.vllm_version = additional_config.get("vllm_version", None)
-        print(f"[PATCH_VERIFY] AscendConfig.vllm_version initialized: {self.vllm_version}")
+        logger.debug("AscendConfig.vllm_version initialized: %s", self.vllm_version)
         # MSMONITOR daemon mode configuration (replaces MSMONITOR_USE_DAEMON env var)
         self.msmonitor_use_daemon = additional_config.get("msmonitor_use_daemon", False)
-        print(f"[PATCH_VERIFY] AscendConfig.msmonitor_use_daemon initialized: {self.msmonitor_use_daemon}")
+        logger.debug("AscendConfig.msmonitor_use_daemon initialized: %s", self.msmonitor_use_daemon)
         # Transpose KV cache by block fused op configuration (replaces VLLM_ASCEND_FUSION_OP_TRANSPOSE_KV_CACHE_BY_BLOCK env var)
         self.enable_transpose_kv_cache_by_block = additional_config.get("enable_transpose_kv_cache_by_block", True)
-        print(f"[PATCH_VERIFY] AscendConfig.enable_transpose_kv_cache_by_block initialized: {self.enable_transpose_kv_cache_by_block}")
+        logger.debug("AscendConfig.enable_transpose_kv_cache_by_block initialized: %s", self.enable_transpose_kv_cache_by_block)
 
         self.pd_tp_ratio = 1
         self.pd_head_ratio = 1
@@ -178,7 +178,7 @@ class AscendConfig:
         # Weight NZ mode configuration (replaces VLLM_ASCEND_ENABLE_NZ env var)
         # 0: disabled, 1: only quant case enable nz (default), 2: BF16/FP16 also enable nz
         self.weight_nz_mode = additional_config.get("weight_nz_mode", 1)
-        print(f"[PATCH_VERIFY] AscendConfig.weight_nz_mode initialized: {self.weight_nz_mode}")
+        logger.debug("AscendConfig.weight_nz_mode initialized: %s", self.weight_nz_mode)
 
         # when enable_async_exponential is True, AscendSampler will be different from vllm Sampler,
         # which make batch_invariant mode not working.
