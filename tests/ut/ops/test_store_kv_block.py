@@ -326,7 +326,7 @@ def test_storeKVBlock_without_ascending(
 @pytest.mark.parametrize('block_size', [128])#128
 @pytest.mark.parametrize('num_blocks', [1773])#1599
 @pytest.mark.parametrize('head_size', [512])
-def test_siso_with_continuous(num_tokens, num_head, block_size, num_blocks, head_size):
+def test_siso(num_tokens, num_head, block_size, num_blocks, head_size):
     key_cpu = torch.randint(
         low=0,
         high=128,
@@ -381,37 +381,6 @@ def test_siso_with_continuous(num_tokens, num_head, block_size, num_blocks, head
     torch.testing.assert_close(key_expect, key_cache.cpu(), atol=0, rtol=0)
     # torch.testing.assert_close(key_expect, key_cache, atol=0.001, rtol=0.1 )
    
-@pytest.mark.parametrize("num_tokens", [32*1024])
-@pytest.mark.parametrize("num_head", [1])
-@pytest.mark.parametrize("block_size", [128])
-@pytest.mark.parametrize("num_blocks", [1773])
-@pytest.mark.parametrize("head_size", [64])
-def test_siso_without_continuous(num_tokens, num_head, block_size, num_blocks,head_size):
-    key = torch.rand((num_tokens, num_head, head_size), dtype=torch.float16).npu()
-    key_cache = torch.rand((num_blocks, block_size, num_head, head_size), dtype=torch.float16).npu()
-    slot_list=[]
-    r = 0
-    for i in range(0, num_tokens):
-        r = r + random_with_zero_prob(0.85,5)
-        slot_list.append(i+r)
-    
-    assert num_tokens==len(slot_list)
-    slot_list_np= np.array(slot_list)
-    slot_mapping_npu = torch.from_numpy(slot_list_np).to(torch.int32).npu()
-    key_expect = golden_store_kv_blcok(key, key_cache, slot_mapping_npu,block_size)
-    epoch = 100
-    start = time.perf_counter()
-    for _ in range(epoch):
-        torch_npu._npu_reshape_and_cache_siso(key, key_cache, slot_mapping_npu)
-    end = time.perf_counter()
-    avg_ms = (end - start) / epoch * 1000
-    print(f"python 耗时: {avg_ms:.4f} ms")
-    # prof.stop()
-    # end = time.perf_counter()
-    # avg_ms = (end - start) / N * 1000
-    # print(f"python 耗时: {avg_ms:.4f} ms")
-    # torch.ops._C_ascend.reshape_and_cache(key, value, key_cache, value_cache, slot_mapping)
-    torch.testing.assert_close(key_expect, key_cache, atol=0.001, rtol=0.1 )
 
 
 
@@ -429,15 +398,15 @@ def test_siso_without_continuous(num_tokens, num_head, block_size, num_blocks,he
 #     return key_expect.npu()
 
 
-# def cal_scatternd(key, key_cache, slot_mapping, block_size):
-#     key_expect = key_cache.clone()
-#     for i, slot in enumerate(slot_mapping):
-#         if slot < 0:
-#             continue
-#         token_key = key[i]
-#         key_expect[slot] = token_key
+def cal_scatternd(key, key_cache, slot_mapping, block_size):
+    key_expect = key_cache.clone()
+    for i, slot in enumerate(slot_mapping):
+        if slot < 0:
+            continue
+        token_key = key[i]
+        key_expect[slot] = token_key
 
-#     return key_expect.npu()
+    return key_expect.npu()
 
 
 # @pytest.mark.parametrize("num_tokens", [16])  # 6398
@@ -472,7 +441,7 @@ def test_siso_without_continuous(num_tokens, num_head, block_size, num_blocks,he
 #     torch.testing.assert_close(key_expect, key_cache, atol=0.001, rtol=0.1)
 
 
-@pytest.mark.parametrize("num_tokens", [16])  # 6398
+@pytest.mark.parametrize("num_tokens", [32*1024])  # 6398
 @pytest.mark.parametrize("num_head", [1])  # 512
 @pytest.mark.parametrize("block_size", [128])  # 128
 @pytest.mark.parametrize("num_blocks", [1773])  # 1599
