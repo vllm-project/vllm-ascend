@@ -11,7 +11,7 @@ from vllm.forward_context import get_forward_context, set_forward_context
 from vllm.logger import logger
 from vllm.v1.kv_cache_interface import KVCacheConfig
 from vllm.v1.worker.gpu.block_table import BlockTables
-from vllm.v1.worker.gpu.cudagraph_utils import BatchExecutionDescriptor
+from vllm.v1.worker.gpu.cudagraph_utils import BatchExecutionDescriptor, CapturedAttentionState
 from vllm.v1.worker.gpu.input_batch import InputBuffers
 from vllm.v1.worker.gpu.model_states.interface import ModelState
 from vllm.v1.worker.utils import AttentionGroup
@@ -66,22 +66,14 @@ if not vllm_version_is("0.20.1"):
         def capture(
             self,
             forward_fn: Callable,
-            model_state: ModelState,
-            input_buffers: InputBuffers,
-            block_tables: BlockTables,
-            attn_groups: list[list[AttentionGroup]],
-            kv_cache_config: KVCacheConfig,
+            full_cg_attn_states: dict[BatchExecutionDescriptor, CapturedAttentionState],
             progress_bar_desc: str = "Capturing CUDA graphs",
         ) -> None:
             """Capture ACL graphs for Eagle."""
             with communicator_switch(), model_capture_wrapper(self.speculator, self.is_draft_model_prefill):
                 super().capture(
                     forward_fn,
-                    model_state,
-                    input_buffers,
-                    block_tables,
-                    attn_groups,
-                    kv_cache_config,
+                    full_cg_attn_states,
                     progress_bar_desc,
                 )
 
