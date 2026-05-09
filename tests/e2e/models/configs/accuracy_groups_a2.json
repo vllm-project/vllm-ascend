@@ -58,13 +58,6 @@
       "model_list": [
         "Qwen2.5-Math-RM-72B"
       ]
-    },
-    {
-      "name": "pr-accuracy-group-4-cards",
-      "os": "linux-aarch64-a2b3-4",
-      "model_list": [
-        "Qwen2.5-Math-RM-72B"
-      ]
     }
   ]
 }
