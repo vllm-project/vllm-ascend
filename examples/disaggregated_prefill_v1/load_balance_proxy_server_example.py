@@ -129,7 +129,7 @@ from typing import Any
 
 import httpx
 from fastapi import FastAPI, Request
-from fastapi.responses import StreamingResponse
+from fastapi.responses import Response, StreamingResponse
 
 try:
     from vllm.logger import init_logger
@@ -573,6 +573,73 @@ def with_cancellation(handler_func):
 app = FastAPI(lifespan=lifespan)
 
 
+class BackendResponseError(Exception):
+    def __init__(self, status_code: int, content: bytes, content_type: str):
+        super().__init__(f"Backend returned HTTP {status_code}")
+        self.status_code = status_code
+        self.content = content
+        self.content_type = content_type
+
+
+def _backend_error_response(error: BackendResponseError) -> Response:
+    return Response(content=error.content, status_code=error.status_code, media_type=error.content_type)
+
+
+async def open_stream_response_with_retry(
+    client: httpx.AsyncClient,
+    endpoint: str,
+    req_data: dict,
+    request_id: str,
+    max_retries: int = 3,
+    base_delay: float = 0.2,
+):
+    headers = {"Authorization": f"Bearer {os.environ.get('OPENAI_API_KEY')}", "X-Request-Id": request_id}
+    for attempt in range(1, max_retries + 1):
+        try:
+            stream_context = client.stream("POST", endpoint, json=req_data, headers=headers)
+            response = await stream_context.__aenter__()
+            if response.status_code >= 400:
+                try:
+                    content = await response.aread()
+                finally:
+                    await stream_context.__aexit__(None, None, None)
+                error = BackendResponseError(
+                    response.status_code,
+                    content,
+                    response.headers.get("content-type", "application/json"),
+                )
+                if response.status_code < 500 or attempt == max_retries:
+                    raise error
+                logger.warning("Attempt %s failed for streaming %s: %s", attempt, endpoint, error)
+                await asyncio.sleep(base_delay * (2 ** (attempt - 1)))
+                continue
+            return stream_context, response
+        except BackendResponseError:
+            raise
+        except (httpx.RequestError, httpx.HTTPStatusError) as e:
+            if attempt < max_retries:
+                logger.warning("Attempt %s failed for streaming %s: %s", attempt, endpoint, e)
+                await asyncio.sleep(base_delay * (2 ** (attempt - 1)))
+            else:
+                logger.error("All %s attempts failed for streaming %s.", max_retries, endpoint)
+                raise e
+
+
+async def iter_opened_stream_response(stream_context, response):
+    first_chunk_sent = False
+    try:
+        async for chunk in response.aiter_bytes():
+            first_chunk_sent = True
+            yield chunk
+    except Exception as e:
+        if first_chunk_sent:
+            logger.error("Streaming to client interrupted after response started: %s", e)
+            return
+        raise
+    finally:
+        await stream_context.__aexit__(None, None, None)
+
+
 async def send_request_to_service(
     client: httpx.AsyncClient,
     prefiller_id: int,
@@ -625,35 +692,16 @@ async def stream_service_response_with_retry(
     max_retries: int = 3,
     base_delay: float = 0.2,
 ):
-    headers = {"Authorization": f"Bearer {os.environ.get('OPENAI_API_KEY')}", "X-Request-Id": request_id}
-    for attempt in range(1, max_retries + 1):
-        try:
-            async with client.stream("POST", endpoint, json=req_data, headers=headers) as response:
-                response.raise_for_status()
-                first_chunk_sent = False
-                async for chunk in response.aiter_bytes():
-                    first_chunk_sent = True
-                    yield chunk
-                return  # Success, exit after streaming
-        except (httpx.RequestError, httpx.HTTPStatusError) as e:
-            if attempt < max_retries:
-                logger.warning("Attempt %s failed for streaming %s: %s", attempt, endpoint, e)
-                await asyncio.sleep(base_delay * (2 ** (attempt - 1)))
-            else:
-                logger.error("All %s attempts failed for streaming %s.", max_retries, endpoint)
-                raise e
-        except Exception as e:
-            # If any chunk has been sent, do not retry, just log and drop
-            if "first_chunk_sent" in locals() and first_chunk_sent:
-                logger.error("Streaming to client interrupted after response started: %s", e)
-                return
-            else:
-                if attempt < max_retries:
-                    logger.warning("Attempt %s failed for streaming %s: %s", attempt, endpoint, e)
-                    await asyncio.sleep(base_delay * (2 ** (attempt - 1)))
-                else:
-                    logger.error("All %s attempts failed for streaming %s.", max_retries, endpoint)
-                    raise e
+    stream_context, response = await open_stream_response_with_retry(
+        client,
+        endpoint,
+        req_data,
+        request_id,
+        max_retries=max_retries,
+        base_delay=base_delay,
+    )
+    async for chunk in iter_opened_stream_response(stream_context, response):
+        yield chunk
 
 
 async def _handle_select_instance(api: str, req_data: Any, request_length: int):
@@ -726,9 +774,27 @@ async def _handle_completions(api: str, request: Request):
             origin_prompt = ""
         # refer to vLLM sampling_params: max_token default value
         origin_max_tokens = req_data.get("max_tokens", 16)
+        media_type = "text/event-stream; charset=utf-8" if stream_flag else "application/json"
+
+        try:
+            initial_stream_context, initial_response = await open_stream_response_with_retry(
+                instance_info.decoder.client,
+                api,
+                req_data,
+                request_id=instance_info.request_id,
+                max_retries=global_args.max_retries,
+                base_delay=global_args.retry_delay,
+            )
+        except BackendResponseError as e:
+            logger.error("Decoder %s returned an error before streaming: %s", instance_info.decoder.url, e)
+            proxy_state.abort_prefiller_request(instance_info.prefiller_idx, instance_info.request_id)
+            proxy_state.release_prefiller_kv(instance_info.prefiller_idx, instance_info.prefiller_score)
+            proxy_state.release_decoder(instance_info.decoder_idx, instance_info.decoder_score)
+            proxy_state.request_num -= 1
+            return _backend_error_response(e)
 
         async def generate_stream():
-            nonlocal instance_info
+            nonlocal initial_response, initial_stream_context, instance_info
             generated_token = ""
             released_kv = False
             retry_count = 0
@@ -745,14 +811,20 @@ async def _handle_completions(api: str, request: Request):
             try:
                 while retry:
                     retry = False
-                    async for chunk in stream_service_response_with_retry(
-                        instance_info.decoder.client,
-                        api,
-                        req_data,
-                        request_id=instance_info.request_id,
-                        max_retries=global_args.max_retries,
-                        base_delay=global_args.retry_delay,
-                    ):
+                    if initial_response is not None:
+                        chunk_iterator = iter_opened_stream_response(initial_stream_context, initial_response)
+                        initial_stream_context = None
+                        initial_response = None
+                    else:
+                        chunk_iterator = stream_service_response_with_retry(
+                            instance_info.decoder.client,
+                            api,
+                            req_data,
+                            request_id=instance_info.request_id,
+                            max_retries=global_args.max_retries,
+                            base_delay=global_args.retry_delay,
+                        )
+                    async for chunk in chunk_iterator:
                         if not released_kv and chunk:
                             release_prefiller_kv_once()
                         try:
@@ -826,8 +898,6 @@ async def _handle_completions(api: str, request: Request):
                 proxy_state.release_decoder(instance_info.decoder_idx, instance_info.decoder_score)
                 proxy_state.request_num -= 1
 
-        # Determine the correct media type based on stream flag
-        media_type = "text/event-stream; charset=utf-8" if stream_flag else "application/json"
         return StreamingResponse(generate_stream(), media_type=media_type)
     except Exception as e:
         import traceback
