@@ -237,15 +237,19 @@ __aicore__ inline void DispatchFFNCombine<TemplateMMA2ACFunc>::Process()
         D1Type, TileElemWiseMuls, TileCopy1>;
 
     using EpilogueDispatchPolicy2 = Epilogue::EpilogueAtlasA2PerTokenDequant<ubStages>;
-
+    using EpilogueDispatchPolicy3 =  Epilogue::EpilogueAtlasA2PerTokenDequantV2<ubStages>;
+    
     using TileCopy2 = Epilogue::Tile::TileCopy<ArchTag, CType, ScaleType, PerTokenScaleType, D2Type>;
     using BlockEpilogue2 = Epilogue::Block::BlockEpilogue<EpilogueDispatchPolicy2, CType,PerTokenScaleType,
         D2Type, TileCopy2>;
+    using BlockEpilogue3 = Epilogue::Block::BlockEpilogue<EpilogueDispatchPolicy3, CType,PerTokenScaleType,
+        D2Type, TileCopy2>;
+
 
     using BlockScheduler = typename Gemm::Block::GemmIdentityBlockSwizzle<9, 1>;
     using ElementGroupList = int64_t;
     using MatmulKernel = Gemm::Kernel::DispatchFFNCombineKernel<BlockMmad,
-        BlockScheduler, ElementGroupList, BlockEpilogue1, BlockEpilogue2>;
+        BlockScheduler, ElementGroupList, BlockEpilogue1, BlockEpilogue2, BlockEpilogue3>;
 
     LayoutA layoutA1{static_cast<uint32_t>(m), static_cast<uint32_t>(k)};
     LayoutA layoutA2{static_cast<uint32_t>(m), static_cast<uint32_t>(k2)};
