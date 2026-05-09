@@ -1,119 +1,140 @@
-# Diagnosis Guide — How to Fix CI Failures
+# Diagnosis Guide
 
-This is the reference material for the fix-ci phase. Come here when CI fails and you need the concrete commands or the progress judgment criteria. The thinking framework is in SKILL.md — this document is for lookup when you're in the middle of a fix round.
+You arrive here because CI failed. The goal isn't just "find the failing test" — it's to trace each failure back to the specific upstream change that caused it, so the fix addresses the root cause rather than the symptom.
+
+**Write `vllm_error_analyze.md` early.** Start the file after Step 1 with just the skeleton — Overview table, error list. Fill in the upstream commit details as you work through Step 2. This ensures a useful record exists even if context runs low before you finish.
 
 ---
 
-## Running ci_log_summary.py
+## Step 1: Extract structured errors
 
-The analysis script lives in the vllm-ascend repo. It processes raw CI logs into structured error data that fits in context without blowing your token budget.
+Run ci_log_summary.py to turn raw CI logs into structured data:
 
 ```bash
+# From a local log file (local CI run):
 python3 <ascend_path>/.github/workflows/scripts/ci_log_summary.py \
   --log-file /tmp/main2main/steps/<step-id>/ci/<round>.log \
   --format llm-json \
   --output /tmp/main2main/steps/<step-id>/ci/<round>-summary.json
 ```
 
-### What the script does
+The script does the heavy lifting: it extracts root-cause exceptions, filters wrapper errors (`Engine core initialization failed`), filters downstream effects (`KeyError: 'choices'` caused by engine crash), and deduplicates by normalized signature.
 
-- Parses failed test files and individual test case identifiers from pytest output
-- Extracts root-cause exceptions (TypeError, AttributeError, ImportError, etc.)
-- Skips wrapper errors (`Engine core initialization failed`, `Worker failed with error`)
-- Filters downstream effects (`KeyError: 'choices'` caused by upstream engine crash)
-- Detects environment flakes (Stale file handle, ConnectionResetError, filelock) even when embedded inside assertion messages
-- Deduplicates errors by normalized signature (stripping PIDs, timestamps, addresses)
-
-### Output format
+**Output fields you care about:**
 
 ```json
 {
-  "good_commit": "15d76f74...",
-  "bad_commit": "6d4f9d3a...",
-  "failed_test_files": ["tests/e2e/test_basic_correctness.py"],
-  "failed_test_cases": ["tests/e2e/test_basic_correctness.py::test_chunked_prefill"],
+  "good_commit": "...",
+  "bad_commit": "...",
   "code_bugs": [
     {
       "error_type": "TypeError",
       "error_message": "forward_oot() got an unexpected keyword argument 'kv_cache_dtype'",
-      "category": "Code Bug",
       "context": ["...traceback lines..."],
-      "error_failed_test_files": ["tests/..."],
       "error_failed_test_cases": ["tests/...::test_xxx"]
     }
   ],
-  "env_flakes": [
-    {
-      "error_type": "OSError",
-      "error_message": "Stale file handle",
-      "category": "Environment Flake"
-    }
-  ]
+  "env_flakes": [{ "error_type": "OSError", "error_message": "Stale file handle" }]
 }
 ```
 
-Only `code_bugs` need fixing. If only `env_flakes` remain, the CI is passing in substance — proceed to commit.
+Only `code_bugs` need fixing. If only `env_flakes` remain, treat as pass.
+
+**Immediately write the skeleton of `vllm_error_analyze.md`:**
+
+```markdown
+# CI Failure Analysis — step-<N>, round-<M>
+
+## Overview
+| Item | Value |
+|:---|:---|
+| Step | step-<N> |
+| Round | <M> |
+| Good commit | `<sha>` |
+| Bad commit | `<sha>` |
+| Code bugs | <count> |
+| Env flakes | <count> |
+
+## Issues
+| # | Error type | Message | Root cause commit | Status |
+|:---|:---|:---|:---|:---|
+| 1 | TypeError | forward_oot() got... | TBD | open |
+
+## Details
+(fill in during Step 2)
+```
 
 ---
 
-## Root Cause Correlation
+## Step 2: Trace each bug to its upstream cause
 
-This is the step most people rush through and then waste time fixing symptoms. The goal is to connect each code_bug to a specific upstream change — not just "which line errors" but "what upstream commit caused this error."
+This is the step that takes the most care. Don't just look at what line failed — find the upstream commit that introduced the breaking change. That context is what makes the fix complete rather than a patch.
 
-### Method
+For each `code_bug`:
 
-1. **Start from the error_type.** The exception class tells you the mechanism:
-   - `TypeError` → almost always a signature change
-   - `AttributeError` → config field moved or renamed
-   - `ImportError` → module path changed
-   - Unfamiliar error → read the traceback upward to find the root cause
+**1. Read the error type to narrow the mechanism:**
+- `TypeError` → almost always a signature change (added/removed parameter)
+- `AttributeError` → config field moved or renamed
+- `ImportError` → module path changed
+- `NotImplementedError` → new abstract method added to base class
+- Unfamiliar downstream error (e.g., `KeyError: 'choices'`) → read the traceback upward to find the actual root cause
 
-2. **Extract search terms from the error.** If the error says `forward_oot() got unexpected keyword argument 'kv_cache_dtype'`, search the upstream.patch for `kv_cache_dtype` or `forward_oot`.
+**2. Extract a search term from the error message** and search the step's upstream.patch:
 
-3. **Find the upstream diff that introduced the change.**
-   ```bash
-   grep -n 'kv_cache_dtype' /tmp/main2main/steps/<step-id>/upstream.patch
-   ```
-   This gives you the full context of what changed — not just the error symptom.
+```bash
+grep -n 'kv_cache_dtype' /tmp/main2main/steps/<step-id>/upstream.patch
+grep -n 'forward_oot' /tmp/main2main/steps/<step-id>/upstream.patch
+```
 
-4. **Understand the intent of the upstream change.** Was it a rename? A removal? A new parameter? This determines the fix strategy:
-   - Rename → update vllm-ascend to use the new name
-   - New parameter → add it to the OOT method signature with a default
-   - Removal → delete the usage from vllm-ascend
-   - Behavior change → adapt the override to match the new semantics
+This gives you the diff chunk that introduced the change — not just the symptom, but the full context of what changed and why.
 
----
+**3. Understand the intent of the upstream change.** Was it a rename? A removal? A new parameter? This determines the fix:
+- New parameter → add to vllm-ascend's override with a default, use `vllm_version_is()` guard
+- Removal → delete the usage from vllm-ascend
+- Rename → update to new name everywhere with `vllm_version_is()` guard
+- New abstract method → implement in `AscendPlatform` or relevant class
 
-## Progress Judgment
+**4. Update `vllm_error_analyze.md`** with the root cause commit and fix plan:
 
-After each fix round, compare error signatures with the previous round:
+```markdown
+### Issue 1: TypeError in forward_oot()
 
-- **Fewer failing tests** → making progress, continue to next round.
-- **Same error signatures for two consecutive rounds** → the fix is not working. Stop and trigger partial stop.
-- **New errors that weren't in the previous round** → the fix introduced a regression. Revert this round's changes before trying something different.
+| Item | Detail |
+|:---|:---|
+| Error | `TypeError: forward_oot() got an unexpected keyword argument 'kv_cache_dtype'` |
+| Affected tests | `tests/e2e/test_basic_correctness.py::test_chunked_prefill` |
+| Root cause commit | `abc1234` — "refactor attention forward signature" |
+| Changed file | `vllm/model_executor/layers/attention/backends/abstract.py` |
+| vllm-ascend file | `vllm_ascend/attention/ascend_attn_backend.py` |
+| Fix | Add `kv_cache_dtype` parameter with `vllm_version_is()` guard |
+```
 
----
-
-## Stop Conditions
-
-The fix-ci loop ends when any of these is true:
-
-1. **Only env_flakes remain** → treat as pass, proceed to commit.
-2. **Two consecutive rounds with identical error signatures** → no progress being made.
-3. **This round produced no code diff** → nothing was attempted.
-4. **ci_log_summary reports no actionable code_bugs** → nothing to fix.
-5. **Hard cap of 5 rounds** → safety fuse against infinite loops.
-
-When stopping due to conditions 2-5, execute a partial stop (save patch + summary, rollback to last_verified_head).
+For matching known error types to fix patterns, consult `reference/error-patterns.md`.
 
 ---
 
-## Context Management
+## Step 3: Apply fixes and track progress
 
-CI logs can be enormous (10K+ lines per job). Protect your context budget:
+After fixing, re-run CI. Then compare error signatures with the previous round:
 
-1. **Always use ci_log_summary.py first.** It processes logs in a subprocess and returns only structured results — keeping your context clean for analysis.
-2. **Never pipe raw logs into your context.** If you need a specific section, use `grep -A 10 '<error_pattern>' <logfile> | head -30`.
-3. **Write a diagnostic note early.** After parsing the summary JSON, jot down the key findings before diving into the patch. This helps if you need to resume after a context reset.
+- **Fewer failing tests** → making progress, continue
+- **Same error signatures two rounds in a row** → fix isn't working, trigger partial stop
+- **New errors not in the previous round** → fix introduced a regression, revert and trigger partial stop
 
+Update the Status column in `vllm_error_analyze.md` each round.
 
+**Stop conditions** (same as in SKILL.md):
+1. Only `env_flakes` remain → treat as pass
+2. Two consecutive rounds with identical error signatures → partial stop
+3. This round produced no code diff → partial stop
+4. No actionable `code_bugs` in summary → partial stop
+5. Hard cap of 5 rounds → partial stop
+
+---
+
+## Context management
+
+CI logs can be enormous. Never read raw logs into context:
+- Always use `ci_log_summary.py` first — it processes in a subprocess and returns only structured output
+- If you need a specific section of the raw log: `grep -A 10 '<pattern>' <logfile> | head -30`
+- Write `vllm_error_analyze.md` incrementally — it's your external memory for this task. If you need to re-orient mid-task, read the file rather than reconstructing from context
