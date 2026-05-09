@@ -89,8 +89,10 @@ class MonitoredTorchTensor:
 
 
 class UvaBufferWrapper:
-    """Ascend NPU doesn't support UVA tensors directly. This is a wrapper class
-    that provides CPU and NPU views of a UVA tensor."""
+    """
+    Ascend NPU doesn't support UVA tensors directly. This is a wrapper class that provides CPU and NPU views of a UVA tensor.
+    However if users add os.environ['PYTORCH_NPU_ALLOC_CONF'] = 'pinned_mem_register:True' to environment, UVA feature is Supported.
+    """
 
     def __init__(self, size: int | Sequence[int], dtype: torch.dtype):
         key = "PYTORCH_NPU_ALLOC_CONF"
