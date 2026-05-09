@@ -181,7 +181,6 @@ class AscendFusedMoE310(FusedMoE):
             kwargs.pop("gate", None),
             kwargs.pop("shared_experts", None),
             self.quant_method,
-            self.reduce_results,
             self.vllm_config.parallel_config.enable_dbo,
         )
 
@@ -267,9 +266,9 @@ class AscendFusedMoE310(FusedMoE):
             pertoken_scale=pertoken_scale,
         )
 
-        routed_out = _EXTRA_CTX.moe_comm_method.finalize(
+        moe_comm_method = _EXTRA_CTX.moe_comm_method
+        routed_out = moe_comm_method.finalize(
             hidden_states=fused_experts_results.routed_out,
-            reduce_results=self.reduce_results,
             padded_hidden_states_shape=padded_hidden_states_shape,
         )
 

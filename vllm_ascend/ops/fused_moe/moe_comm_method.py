@@ -108,10 +108,12 @@ class MoECommMethod(ABC):
     def finalize(
         self,
         hidden_states: torch.Tensor,
-        reduce_results: bool,
         padded_hidden_states_shape: torch.Size | None = None,
     ) -> torch.Tensor:
-        hidden_states = self.prepare_finalize.finalize(hidden_states, reduce_results, padded_hidden_states_shape)
+        hidden_states = self.prepare_finalize.finalize(
+            hidden_states,
+            padded_hidden_states_shape=padded_hidden_states_shape,
+        )
         return hidden_states
 
     def fused_experts(

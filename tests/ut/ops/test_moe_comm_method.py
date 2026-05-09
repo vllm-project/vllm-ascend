@@ -74,8 +74,8 @@ class TestMoECommMethod(TestBase):
         mock_pf_instance.prepare.assert_called_once_with(hidden_states, router_logits, False, False, QuantType.NONE)
 
         # Test finalize method
-        comm_impl.finalize(h_out, reduce_results=True, padded_hidden_states_shape=padded_hidden_states_shape)
-        mock_pf_instance.finalize.assert_called_once_with(h_out, True, None)
+        comm_impl.finalize(h_out, padded_hidden_states_shape=padded_hidden_states_shape)
+        mock_pf_instance.finalize.assert_called_once_with(h_out, padded_hidden_states_shape=None)
 
     @patch("vllm_ascend.ascend_forward_context.get_forward_context")
     @patch("vllm_ascend.ops.fused_moe.moe_comm_method.PrepareAndFinalizeWithMC2")
@@ -115,8 +115,8 @@ class TestMoECommMethod(TestBase):
         mock_pf_instance.prepare.assert_called_once_with(hidden_states, router_logits, False, False, QuantType.NONE)
 
         # Test finalize method
-        comm_impl.finalize(h_out, reduce_results=True, padded_hidden_states_shape=padded_hidden_states_shape)
-        mock_pf_instance.finalize.assert_called_once_with(h_out, True, None)
+        comm_impl.finalize(h_out, padded_hidden_states_shape=padded_hidden_states_shape)
+        mock_pf_instance.finalize.assert_called_once_with(h_out, padded_hidden_states_shape=None)
 
     @patch("vllm_ascend.ascend_forward_context.get_forward_context")
     @patch("vllm_ascend.ops.fused_moe.moe_comm_method.PrepareAndFinalizeWithAll2All")

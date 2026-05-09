@@ -92,7 +92,6 @@ class PrepareAndFinalize(ABC):
     def finalize(
         self,
         hidden_states: torch.Tensor,
-        reduce_results: bool,
         padded_hidden_states_shape: torch.Size | None = None,
     ) -> torch.Tensor:
         """
@@ -100,11 +99,9 @@ class PrepareAndFinalize(ABC):
           - Gathering sliced tensors across TP ranks
           - Reducing or scattering across DP ranks
           - Unpadding to original token count
-          - Applying all-reduce across TP/EP if requested
 
         Args:
             hidden_states (torch.Tensor): MoE layer output, possibly padded or sliced
-            reduce_results (bool): Whether to apply all-reduce across TP/EP groups
 
         Returns:
             torch.Tensor: Final output with shape [original_num_tokens, hidden_size]
@@ -178,7 +175,6 @@ class PrepareAndFinalizeWithAll2All(PrepareAndFinalize):
     def finalize(
         self,
         hidden_states: torch.Tensor,
-        reduce_results: bool,
         padded_hidden_states_shape: torch.Size | None = None,
     ) -> torch.Tensor:
         """
@@ -427,7 +423,6 @@ class PrepareAndFinalizeWithAllGather(PrepareAndFinalize):
     def finalize(
         self,
         hidden_states: torch.Tensor,
-        reduce_results: bool,
         padded_hidden_states_shape: torch.Size | None = None,
     ) -> torch.Tensor:
         """
@@ -440,28 +435,22 @@ class PrepareAndFinalizeWithAllGather(PrepareAndFinalize):
         if enable_sp() or enable_sp_by_pass():
             return self._finalize_with_ep_group(hidden_states)
 
-        return self._finalize_with_dp_group(hidden_states, reduce_results)
+        return self._finalize_with_dp_group(hidden_states)
 
     def _finalize_with_ep_group(self, hidden_states: torch.Tensor) -> torch.Tensor:
         """
-        Argument `reduce_results` is not needed in this func. Given sequence parallelism is enabled:
-        1. Reduce_results is False usually happens when models have shared experts and need to
-        allreduce hidden states after results of shared experts and routed experts are added in FusedMoe.
-        We do reduce scatter for hidden states here, then skip allreudce in FusedMoe and add it to the
-        result of shared experts.
-        2 Reduce_results is True usually happens when model has no shared experts. We still do reduce scatter
-        here, then skip allreudce in FusedMoe.
+        Given sequence parallelism is enabled, reduce scatter is handled here
+        and the final output reduction is handled by the MoE runner.
         """
         hidden_states = torch.ops.vllm.maybe_pad_and_reduce(hidden_states, True)
 
         return hidden_states
 
-    def _finalize_with_dp_group(self, hidden_states: torch.Tensor, reduce_results: bool) -> torch.Tensor:
+    def _finalize_with_dp_group(self, hidden_states: torch.Tensor) -> torch.Tensor:
         """
         Finalization steps:
           1. If DP > 1 and not shared expert, reduce-scatter output across DP group.
           2. Slice to original local token count.
-          3. If `reduce_results=True` and TP/EP > 1, apply tensor_model_parallel_all_reduce.
 
         Returns:
             Tensor with shape [original_local_num_tokens, hidden_size]

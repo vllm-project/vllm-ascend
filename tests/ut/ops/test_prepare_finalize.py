@@ -54,7 +54,7 @@ class TestPrepareAndFinalize(unittest.TestCase):
         self.assertEqual(padded_hidden_states_shape, torch.Size([4, 8]))
 
         # Finalize
-        result = layer.finalize(h_out, reduce_results=False, padded_hidden_states_shape=padded_hidden_states_shape)
+        result = layer.finalize(h_out, padded_hidden_states_shape=padded_hidden_states_shape)
         self.assertEqual(result.shape[0], 3)
 
     @patch("vllm_ascend.ops.fused_moe.prepare_finalize.get_tensor_model_parallel_world_size", return_value=2)
@@ -89,9 +89,7 @@ class TestPrepareAndFinalize(unittest.TestCase):
         mock_all_gather.side_effect = mock_all_gather_func
 
         layer.split_hidden_states = [torch.zeros_like(h_out), torch.zeros_like(h_out)]
-        final_result = layer.finalize(
-            h_out, reduce_results=False, padded_hidden_states_shape=padded_hidden_states_shape
-        )
+        final_result = layer.finalize(h_out, padded_hidden_states_shape=padded_hidden_states_shape)
 
         # Should concat back to original size
         self.assertEqual(final_result.shape[0], 4)
@@ -111,7 +109,7 @@ class TestPrepareAndFinalize(unittest.TestCase):
         self.assertEqual(h_out.shape[0], 3)
         self.assertEqual(padded_hidden_states_shape, torch.Size([3, 8]))
 
-        result = layer.finalize(h_out, reduce_results=False, padded_hidden_states_shape=padded_hidden_states_shape)
+        result = layer.finalize(h_out, padded_hidden_states_shape=padded_hidden_states_shape)
         self.assertEqual(result.shape[0], 3)
 
     @patch("vllm_ascend.ops.fused_moe.prepare_finalize.get_tensor_model_parallel_world_size", return_value=2)
@@ -140,9 +138,7 @@ class TestPrepareAndFinalize(unittest.TestCase):
         mock_all_gather.side_effect = mock_all_gather_func
 
         layer.split_hidden_states = [torch.zeros_like(h_out), torch.zeros_like(h_out)]
-        final_result = layer.finalize(
-            h_out, reduce_results=False, padded_hidden_states_shape=padded_hidden_states_shape
-        )
+        final_result = layer.finalize(h_out, padded_hidden_states_shape=padded_hidden_states_shape)
 
         # Should concat back
         self.assertEqual(final_result.shape[0], 2)
@@ -195,9 +191,9 @@ class TestPrepareAndFinalize(unittest.TestCase):
             return tensor[:3]
 
         mock_dp_group.reduce_scatter = mock_reduce_scatter_func
-        result = layer.finalize(h_out, reduce_results=False, padded_hidden_states_shape=padded_hidden_states_shape)
+        result = layer.finalize(h_out, padded_hidden_states_shape=padded_hidden_states_shape)
 
         self.assertEqual(result.shape[0], 3)
 
-        result_with_tp = layer.finalize(h_out, reduce_results=True)
+        result_with_tp = layer.finalize(h_out)
         self.assertEqual(result_with_tp.shape[0], 3)
