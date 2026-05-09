@@ -8,8 +8,8 @@ are compared for consistency.
 """
 
 import os
-
 import pytest
+from importlib import import_module, util
 
 from tests.e2e.conftest import VllmRunner
 
@@ -28,12 +28,12 @@ SHORT_PROMPTS = [
 
 LONG_PROMPT = "The quick brown fox jumps over the lazy dog. " * 50
 
-
-def _fa3_available():
+def _fa3_available() -> bool:
     try:
-        from flash_attn_v3 import flash_attn_with_kvcache  # type: ignore[import-not-found]
-
-        return True
+        if util.find_spec("flash_attn_v3") is None:
+            return False
+        mod = import_module("flash_attn_v3")
+        return hasattr(mod, "flash_attn_with_kvcache")
     except ImportError:
         return False
 

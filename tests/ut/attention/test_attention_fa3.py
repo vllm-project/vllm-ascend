@@ -2,13 +2,14 @@ import numpy as np
 import pytest
 import torch
 import torch_npu
+from importlib import import_module, util
 
-
-def _fa3_available():
+def _fa3_available() -> bool:
     try:
-        from flash_attn_v3 import flash_attn_with_kvcache  # type: ignore[import-not-found]
-
-        return True
+        if util.find_spec("flash_attn_v3") is None:
+            return False
+        mod = import_module("flash_attn_v3")
+        return hasattr(mod, "flash_attn_with_kvcache")
     except ImportError:
         return False
 

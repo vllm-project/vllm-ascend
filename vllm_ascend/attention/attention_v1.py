@@ -67,7 +67,7 @@ from vllm_ascend.utils import weak_ref_tensors
 from vllm_ascend.worker.kvcomp_utils import KVCompMetaData
 
 try:
-    from flash_attn_v3 import flash_attn_with_kvcache as _fa3_fn
+    from flash_attn_v3 import flash_attn_with_kvcache as _fa3_fn  # type: ignore[import-not-found]
 
     _FA3_AVAILABLE = True
 except ImportError:
