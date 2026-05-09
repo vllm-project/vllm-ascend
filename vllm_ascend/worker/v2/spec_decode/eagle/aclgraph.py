@@ -11,7 +11,7 @@ from vllm.forward_context import get_forward_context, set_forward_context
 from vllm.logger import logger
 from vllm.v1.kv_cache_interface import KVCacheConfig
 from vllm.v1.worker.gpu.block_table import BlockTables
-from vllm.v1.worker.gpu.cudagraph_utils import BatchExecutionDescriptor, CapturedAttentionState
+from vllm.v1.worker.gpu.cudagraph_utils import BatchExecutionDescriptor
 from vllm.v1.worker.gpu.input_batch import InputBuffers
 from vllm.v1.worker.gpu.model_states.interface import ModelState
 from vllm.v1.worker.utils import AttentionGroup
@@ -19,7 +19,11 @@ from vllm.v1.worker.utils import AttentionGroup
 from vllm_ascend.utils import vllm_version_is
 
 if not vllm_version_is("0.20.1"):
-    from vllm.v1.worker.gpu.spec_decode.eagle.cudagraph import DecodeEagleCudaGraphManager, PrefillEagleCudaGraphManager
+    from vllm.v1.worker.gpu.spec_decode.eagle.cudagraph import (
+        CapturedAttentionState,
+        DecodeEagleCudaGraphManager,
+        PrefillEagleCudaGraphManager,
+    )
 else:
     from vllm.v1.worker.gpu.spec_decode.eagle.cudagraph import EagleCudaGraphManager
 
