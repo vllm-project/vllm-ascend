@@ -1,6 +1,5 @@
-from transformers import AutoTokenizer
-
 import vllm
+from transformers import AutoTokenizer
 from vllm.lora.request import LoRARequest
 
 MODEL_PATH = "Qwen/Qwen3.5-4B"
