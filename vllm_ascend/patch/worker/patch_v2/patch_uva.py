@@ -18,6 +18,7 @@
 #
 from collections.abc import Callable, Sequence
 
+import os
 import numpy as np
 import torch
 import vllm.v1.worker.gpu.buffer_utils
