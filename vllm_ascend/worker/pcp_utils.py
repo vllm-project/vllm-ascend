@@ -1234,11 +1234,11 @@ class PCPManager:
                 # Extract decode request info from input_batch and num_scheduled_tokens
                 decode_num_computed_tokens = input_batch.num_computed_tokens_cpu[: self.num_decode_reqs].tolist()
                 decode_num_scheduled_tokens = num_scheduled_tokens[: self.num_decode_reqs]
-                self.dcp_mtp_attn_mask.np[:self.num_decode_reqs] = self.generate_mtp_attention_mask_for_decode(
-                    decode_num_computed_tokens, decode_num_scheduled_tokens
-                )
-
-                self.dcp_mtp_attn_mask.copy_to_gpu(self.num_decode_reqs)
+                
+                dcp_mtp_attn_mask = self.generate_mtp_attention_mask_for_decode(decode_num_computed_tokens, decode_num_scheduled_tokens)
+                if dcp_mtp_attn_mask is not None:
+                    self.dcp_mtp_attn_mask.np[:self.num_decode_reqs] = dcp_mtp_attn_mask
+                    self.dcp_mtp_attn_mask.copy_to_gpu(self.num_decode_reqs)
 
                 long_seq_metadata.dcp_mtp_attn_mask = self.dcp_mtp_attn_mask
             else:
@@ -1361,11 +1361,14 @@ class PCPManager:
         for _ in range(self.num_prefill_reqs):
             mtp_masks.append(None)
 
-        query_len = mtp_masks[0].shape[0]
-        mtp_attn_mask = torch.ones(self.num_decode_reqs, query_len, 16384, dtype=torch.bool)
-        mtp_masks = mtp_masks[:self.num_decode_reqs]
-        for i, mask in enumerate(mtp_masks):
-            S = mask.shape[0]
-            L = mask.shape[1]
-            mtp_attn_mask[i, :S, :L] = mask
-        return mtp_attn_mask
+        if mtp_masks[0] is not None:
+            query_len = mtp_masks[0].shape[0]
+            mtp_attn_mask = torch.ones(self.num_decode_reqs, query_len, 16384, dtype=torch.bool)
+            mtp_masks = mtp_masks[:self.num_decode_reqs]
+            for i, mask in enumerate(mtp_masks):
+                S = mask.shape[0]
+                L = mask.shape[1]
+                mtp_attn_mask[i, :S, :L] = mask
+            return mtp_attn_mask
+        else:
+            return None
