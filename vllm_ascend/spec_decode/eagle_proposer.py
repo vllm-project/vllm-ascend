@@ -419,6 +419,7 @@ class AscendSpecDecodeBaseProposer(SpecDecodeBaseProposer):
                 query_start_loc=self.query_start_loc.gpu[: num_reqs + 1],
                 query_start_loc_cpu=self.query_start_loc.cpu[: num_reqs + 1],
                 seq_lens_cpu=self.runner.optimistic_seq_lens_cpu,
+                seq_lens_cpu_upper_bound=self.runner.optimistic_seq_lens_cpu,
                 seq_lens=self.runner.seq_lens[:num_reqs],
                 num_reqs=num_reqs,
                 num_actual_tokens=num_tokens,
@@ -1126,7 +1127,10 @@ class AscendSpecDecodeBaseProposer(SpecDecodeBaseProposer):
                 if num_tokens_d:
                     # remove padding (from pcp all-gather) in decode part
                     mask_start_loc = torch.cat(
-                        [torch.tensor([0], dtype=torch.int32), torch.cumsum(query_lens_d * self.pcp_size, dim=0)[:-1]]
+                        [
+                            torch.tensor([0], dtype=torch.int32, device=query_lens_d.device),
+                            torch.cumsum(query_lens_d * self.pcp_size, dim=0)[:-1],
+                        ]
                     )
                     mask_len = query_lens_d
                     mask = []
@@ -1623,6 +1627,7 @@ class AscendSpecDecodeBaseProposer(SpecDecodeBaseProposer):
             _seq_lens_cpu=new_seq_lens_cpu,
             num_computed_tokens_cpu=common_attn_metadata.num_computed_tokens_cpu,
             _num_computed_tokens_cpu=common_attn_metadata._num_computed_tokens_cpu,
+            seq_lens_cpu_upper_bound=new_seq_lens_cpu,
             num_reqs=common_attn_metadata.num_reqs,
             num_actual_tokens=total_num_tokens,
             num_input_tokens=common_attn_metadata.num_input_tokens,
@@ -1709,6 +1714,7 @@ class AscendSpecDecodeBaseProposer(SpecDecodeBaseProposer):
             query_start_loc_cpu=query_start_loc_cpu,
             seq_lens_cpu=common_attn_metadata.seq_lens_cpu,
             _seq_lens_cpu=common_attn_metadata._seq_lens_cpu,
+            seq_lens_cpu_upper_bound=common_attn_metadata.seq_lens_cpu_upper_bound,
             num_reqs=common_attn_metadata.num_reqs,
             num_actual_tokens=common_attn_metadata.num_actual_tokens if self.pcp_size > 1 else total_num_tokens,
             num_input_tokens=common_attn_metadata.num_input_tokens,
