@@ -1,8 +1,10 @@
+from importlib import import_module, util
+
 import numpy as np
 import pytest
 import torch
 import torch_npu
-from importlib import import_module, util
+
 
 def _fa3_available() -> bool:
     try:
