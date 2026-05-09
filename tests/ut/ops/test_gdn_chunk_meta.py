@@ -82,6 +82,25 @@ class _GatherResult:
         return self.items[item]
 
 
+class _FakeCAscend:
+    @staticmethod
+    def chunk_gated_delta_rule_fwd_h(*args, **kwargs):
+        return _DummyTensor("h"), _DummyTensor("v_new"), _DummyTensor("final_state")
+
+    @staticmethod
+    def chunk_fwd_o(*args, **kwargs):
+        return _DummyTensor("o_ascend")
+
+
+class _FakeTorch:
+    def __init__(self, real_torch):
+        self._real = real_torch
+        self.ops = type("Ops", (), {"_C_ascend": _FakeCAscend()})()
+
+    def __getattr__(self, name):
+        return getattr(self._real, name)
+
+
 def _next_power_of_2(value: int) -> int:
     if value <= 1:
         return 1
@@ -204,6 +223,7 @@ def test_chunk_gated_delta_rule_fwd_threads_prebuilt_chunk_offsets(
             "chunk_gated_delta_rule_fwd_hupdate",
             lambda *args, **kwargs: _DummyTensor("h_update"),
         )
+        monkeypatch.setattr(chunk, "torch", _FakeTorch(chunk.torch), raising=False)
         monkeypatch.setattr(
             chunk.torch,
             "matmul",
