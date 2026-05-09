@@ -89,18 +89,48 @@ class MonitoredTorchTensor:
 
 
 class UvaBufferWrapper:
+    """Ascend NPU doesn't support UVA tensors directly. This is a wrapper class
+    that provides CPU and NPU views of a UVA tensor."""
+
     def __init__(self, size: int | Sequence[int], dtype: torch.dtype):
         key = "PYTORCH_NPU_ALLOC_CONF"
-        if key not in os.environ:
-            raise RuntimeError(f"UVA is not available, because environment_param {key} is empty, try to add os.environ['PYTORCH_NPU_ALLOC_CONF'] = 'pinned_mem_register:True'")
-        value = os.environ[key]
-        if not "pinned_mem_register:True" in value:
-            raise RuntimeError(f"UVA is not available, because environment_param {key} lack value 'pinned_mem_register:True', try to add os.environ['PYTORCH_NPU_ALLOC_CONF'] = 'pinned_mem_register:True'")
-        self.cpu: torch.Tensor = torch.zeros(size, dtype=dtype, device="cpu", pin_memory=True)
-        if not self.cpu.is_pinned():
-            raise RuntimeError("UVA is not available, because cpu tensor is not pinned, try to use .pin_memory() to cpu_tensor wantted to use uva feature")
-        self.np = self.cpu.numpy()
-        self.uva: torch.Tensor = self.cpu
+        if key in os.environ:
+            value = os.environ[key]
+            if not "pinned_mem_register:True" in value:
+                raise RuntimeError(f"UVA is not available, because environment_param {key} lack value 'pinned_mem_register:True', try to add os.environ['PYTORCH_NPU_ALLOC_CONF'] = 'pinned_mem_register:True'")
+            self.cpu: torch.Tensor = torch.zeros(size, dtype=dtype, device="cpu", pin_memory=True)
+            if not self.cpu.is_pinned():
+                raise RuntimeError("UVA is not available, because cpu tensor is not pinned, try to use .pin_memory() to cpu_tensor wantted to use uva feature")
+            self.np = self.cpu.numpy()
+            self.uva: torch.Tensor = self.cpu
+        else:
+            self._cpu: torch.Tensor = torch.zeros(size, dtype=dtype, device="cpu", pin_memory=True)
+            self._np = self._cpu.numpy()
+            self._uva: torch.Tensor = torch.zeros_like(self._cpu, device="npu")
+            self._modified_indices: set[int] = set()
+
+    def _mark_cpu_modified(self, key: int):
+        self._modified_indices.add(key)
+
+    @property
+    def cpu(self):
+        return MonitoredTorchTensor(self._cpu, self._mark_cpu_modified)
+
+    @property
+    def np(self):
+        return MonitoredNumPyArray(self._np, self._mark_cpu_modified)
+
+    @property
+    def uva(self):
+        """Get the device data of the buffer."""
+        if self._modified_indices:
+            # Sort for better memory access locality
+            dirty_rows = sorted(self._modified_indices)
+            # can't use copy_ method, because copy_ for index tensor
+            #  will malloc new memory.
+            self._uva[dirty_rows] = self._cpu[dirty_rows].to(device="npu", non_blocking=True)
+            self._modified_indices.clear()
+        return self._uva
 
 
 vllm.v1.worker.gpu.buffer_utils.UvaBuffer = UvaBufferWrapper
