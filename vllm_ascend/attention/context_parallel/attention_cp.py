@@ -237,14 +237,14 @@ class AscendAttentionCPMetadataBuilder(AscendAttentionMetadataBuilder):
             num_computed_tokens_array = np.array(num_computed_tokens_of_pcp_dcp)
             num_computed_tokens_array = num_computed_tokens_array[: num_decodes]
             if common_long_seq_metadata.dcp_mtp_attn_mask is not None:
-                mtp_attn_mask = common_long_seq_metadata.dcp_mtp_attn_mask
+                dcp_mtp_attn_mask = common_long_seq_metadata.dcp_mtp_attn_mask
             else:
-                mtp_attn_mask = None
+                dcp_mtp_attn_mask = None
             
             decode_metadata = AscendMetadataForDecode(
                 num_computed_tokens_of_pcp_dcp=num_computed_tokens_array,
                 block_tables=block_table[: num_decodes],
-                mtp_attn_mask=mtp_attn_mask,
+                dcp_mtp_attn_mask=dcp_mtp_attn_mask,
             )
 
         if self.decode_threshold == 1:
