@@ -28,6 +28,7 @@ import os
 
 from docutils.parsers.rst import directives
 from sphinx.directives.code import CodeBlock
+from sphinx.highlighting import lexers
 
 # import sys
 # sys.path.insert(0, os.path.abspath('.'))
@@ -64,7 +65,7 @@ extensions = [
 ]
 
 # Disable Pygments highlighting for mermaid code blocks to let the mermaid extension handle rendering
-highlight_args = {'highlight_code': False}
+lexers['mermaid'] = None
 
 myst_enable_extensions = ["colon_fence", "amsmath", "dollarmath", "substitution"]
 
