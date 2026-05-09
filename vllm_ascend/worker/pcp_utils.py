@@ -76,6 +76,15 @@ class PCPManager:
             device=device,
             pin_memory=pin_memory,
         )
+
+        # 在这里首先构造一个buffer用于承载最后生成的mask
+        self.dcp_mtp_attn_mask = CpuGpuBuffer(
+            max_num_reqs,
+            dtype=torch.bool,
+            device=device,
+            pin_memory=pin_memory,
+        )
+
         self.pcp_exit_fa_scatter_idx = CpuGpuBuffer(
             max_buffer_num_tokens,
             dtype=torch.int64,
@@ -1225,13 +1234,15 @@ class PCPManager:
                 # Extract decode request info from input_batch and num_scheduled_tokens
                 decode_num_computed_tokens = input_batch.num_computed_tokens_cpu[: self.num_decode_reqs].tolist()
                 decode_num_scheduled_tokens = num_scheduled_tokens[: self.num_decode_reqs]
-                mtp_masks = self.generate_mtp_attention_mask_for_decode(
+                self.dcp_mtp_attn_mask.np[:self.num_decode_reqs] = self.generate_mtp_attention_mask_for_decode(
                     decode_num_computed_tokens, decode_num_scheduled_tokens
                 )
 
-                long_seq_metadata.mtp_attention_masks_for_decode = mtp_masks
+                self.dcp_mtp_attn_mask.copy_to_gpu(self.num_decode_reqs)
+
+                long_seq_metadata.dcp_mtp_attn_mask = self.dcp_mtp_attn_mask
             else:
-                long_seq_metadata.mtp_attention_masks_for_decode = None
+                long_seq_metadata.dcp_mtp_attn_mask = None
 
         self.long_seq_metadata = long_seq_metadata
         return long_seq_metadata, block_table_tensor
@@ -1350,4 +1361,11 @@ class PCPManager:
         for _ in range(self.num_prefill_reqs):
             mtp_masks.append(None)
 
-        return mtp_masks
+        query_len = mtp_masks[0].shape[0]
+        mtp_attn_mask = torch.ones(self.num_decode_reqs, query_len, 16384, dtype=torch.bool)
+        mtp_masks = mtp_masks[:self.num_decode_reqs]
+        for i, mask in enumerate(mtp_masks):
+            S = mask.shape[0]
+            L = mask.shape[1]
+            mtp_attn_mask[i, :S, :L] = mask
+        return mtp_attn_mask

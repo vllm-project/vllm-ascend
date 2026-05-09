@@ -250,11 +250,10 @@ class AscendMlaCPMetadataBuilder(AscendMLAMetadataBuilder):
 
         actual_seq_lengths_q = decode_metadata.seq_lens[: self.num_decodes]
         decode_metadata.actual_seq_lengths_q = actual_seq_lengths_q
-        if long_seq_metadata.mtp_attention_masks_for_decode:
-            masks = long_seq_metadata.mtp_attention_masks_for_decode
-            query_lens = common_attn_metadata.query_start_loc_cpu[1 : self.num_decodes + 1] - common_attn_metadata.query_start_loc_cpu[: self.num_decodes]
-            mtp_attn_mask = generate_dcp_mtp_mask(masks, query_lens, self.num_decodes)
-            decode_metadata.attn_mask = mtp_attn_mask
+        if long_seq_metadata.dcp_mtp_attn_mask is not None:
+            decode_metadata.dcp_mtp_attn_mask = long_seq_metadata.dcp_mtp_attn_mask
+        else:
+            decode_metadata.dcp_mtp_attn_mask = None
 
         return decode_metadata
 
@@ -655,7 +654,7 @@ class AscendMlaCPImpl(AscendMLAImpl):
             q_nope = q_nope.view(num_decodes, -1, num_heads, q_nope.shape[-1]).contiguous()
             q_pe = q_pe.view(num_decodes, -1, num_heads, q_pe.shape[-1])
             sparse_mode = 0
-            spec_attn_mask = attn_metadata.decode.attn_mask[:num_decodes].to(q_nope.device)  # type:ignore
+            spec_attn_mask = attn_metadata.decode.dcp_mtp_attn_mask
         else:
             q_nope = q_nope.view(num_tokens, num_heads, 1, -1).contiguous()
             q_pe = q_pe.view(num_tokens, num_heads, 1, -1)

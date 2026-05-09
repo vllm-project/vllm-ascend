@@ -58,7 +58,7 @@ from vllm_ascend.compilation.acl_graph import (
 )
 from vllm_ascend.device.device_op import DeviceOperator
 from vllm_ascend.utils import cp_chunkedprefill_comm_stream, weak_ref_tensors
-from vllm_ascend.attention.utils import generate_dcp_mtp_mask
+
 
 
 class AscendAttentionCPMetadataBuilder(AscendAttentionMetadataBuilder):
@@ -236,9 +236,8 @@ class AscendAttentionCPMetadataBuilder(AscendAttentionMetadataBuilder):
         if num_decodes > 0:
             num_computed_tokens_array = np.array(num_computed_tokens_of_pcp_dcp)
             num_computed_tokens_array = num_computed_tokens_array[: num_decodes]
-            if common_long_seq_metadata.mtp_attention_masks_for_decode:
-                masks = common_long_seq_metadata.mtp_attention_masks_for_decode
-                mtp_attn_mask = generate_dcp_mtp_mask(masks, query_lens, num_decodes)
+            if common_long_seq_metadata.dcp_mtp_attn_mask is not None:
+                mtp_attn_mask = common_long_seq_metadata.dcp_mtp_attn_mask
             else:
                 mtp_attn_mask = None
             
@@ -584,7 +583,7 @@ class AscendAttentionCPImpl(AscendAttentionBackendImpl):
             input_layerout = "BSND"
             num_decodes = attn_metadata.num_decodes
             if attn_metadata.decode_meta.mtp_attn_mask is not None:
-                attn_mask = attn_metadata.decode_meta.mtp_attn_mask.to(query.device)
+                attn_mask = attn_metadata.decode_meta.dcp_mtp_attn_mask
             else:
                 attn_mask = None
             query = query.view(num_decodes, -1, query.shape[1], query.shape[-1])
