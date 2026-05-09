@@ -171,6 +171,9 @@ jobs:
               pip config set global.trusted-host cache-service.nginx-pypi-cache.svc.cluster.local
               apt-get update -y
               apt install git -y
+          - name: Debug Env
+            run: |
+              python3 -c "import requests;print(requests.get('https://hf-mirror.com').status_code)"
 
           - name: Install system dependencies
             run: |
@@ -180,6 +183,8 @@ jobs:
               update-alternatives --install /usr/bin/clang clang /usr/bin/clang-15 20
               update-alternatives --install /usr/bin/clang++ clang++ /usr/bin/clang++-15 20
               pip install uv
+              pip install --upgrade huggingface_hub
+              apt-get install -y ca-certificates
 
           - name: Checkout vllm-project/vllm repo
             uses: actions/checkout@v6
@@ -250,6 +255,10 @@ jobs:
               apt-get update -y
               apt install git -y
 
+          - name: Debug Env
+            run: |
+              python3 -c "import requests;print(requests.get('https://hf-mirror.com').status_code)"
+
           - name: Install system dependencies
             run: |
               apt-get -y install `cat packages.txt`
@@ -258,7 +267,8 @@ jobs:
               update-alternatives --install /usr/bin/clang clang /usr/bin/clang-15 20
               update-alternatives --install /usr/bin/clang++ clang++ /usr/bin/clang++-15 20
               pip install uv
-
+              pip install --upgrade huggingface_hub
+              apt-get install -y ca-certificates
           - name: Checkout vllm-project/vllm repo
             uses: actions/checkout@v6
             with:
