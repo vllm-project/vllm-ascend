@@ -159,29 +159,61 @@ class SimpleCPUOffloadNPUWorker:
         tensor: torch.Tensor,
         num_blocks: int,
     ) -> dict[str, torch.Tensor]:
-        """Return ``{name: [num_blocks, block_bytes] int8 view}`` for one storage.
+        """Return ``{name: [num_blocks, block_bytes] int8 view}`` for one tensor.
 
-        Some attention backends pack multiple blocks segments inside a
-        single allocation (e.g. ``[2, num_blocks, ...]`` for K|V on
-        FlashAttention). We detect that by finding any dim whose
-        byte-stride exceeds the per-block size; each segment becomes
-        its own keyed view. On Ascend (blocks-outermost), no such dim
-        exists and we fall through to a single view.
+        Sizes views from the tensor's own metadata, NOT
+        ``storage.nbytes()``. When offload is enabled,
+        ``NPUModelRunner._allocate_kv_cache_tensors`` over-allocates
+        each KV tensor by ``+alignment`` (2 MiB) and slices back with
+        ``_align_memory(...)[:size]``; ``storage.nbytes()`` then
+        includes alignment-driven leading offset *and* trailing
+        padding that are not part of the block grid (the total is in
+        general not a multiple of ``num_blocks``).
+
+        Most Ascend layers register K and V as separate blocks-outermost
+        tensors (single segment). The ``cache_only_layers`` path with
+        ``AscendAttentionBackend`` produces ``(N, num_blocks, ...)`` —
+        N segments stacked in one allocation; we split it into N keyed
+        views. The runner's actual blocks-dim size may exceed
+        ``kv_cache_config.num_blocks``; we only view the leading
+        ``num_blocks`` blocks the connector knows about.
         """
-        storage = tensor.untyped_storage()
-        raw = torch.empty(0, dtype=torch.int8, device=tensor.device).set_(storage, 0, (storage.nbytes(),))
         el = tensor.element_size()
-        page_size_bytes = storage.nbytes() // num_blocks
-        outer_dims = [d for d in range(tensor.ndim) if tensor.stride(d) * el > page_size_bytes]
-        if not outer_dims:
-            return {key: raw.view(num_blocks, -1)}
+        storage = tensor.untyped_storage()
+        storage_offset_bytes = tensor.storage_offset() * el
 
-        seg_stride = tensor.stride(outer_dims[0]) * el
+        if tensor.ndim >= 1 and tensor.shape[0] >= num_blocks:
+            # Single-segment, blocks-outermost.
+            page_size_bytes = tensor.stride(0) * el
+            data_bytes = num_blocks * page_size_bytes
+            raw = torch.empty(0, dtype=torch.int8, device=tensor.device).set_(
+                storage, storage_offset_bytes, (data_bytes,)
+            )
+            return {key: raw.view(num_blocks, page_size_bytes)}
+
+        # Multi-segment: ``(N, num_blocks, ...)`` is the only NPU layout
+        # observed (N=2 for K|V stacked). We assume a single outer
+        # partition dim before the blocks dim.
+        if tensor.ndim < 2 or tensor.shape[1] < num_blocks:
+            raise RuntimeError(
+                f"_build_block_views[{key}]: cannot locate blocks dim "
+                f"(expected shape[0] or shape[1] >= {num_blocks}) in "
+                f"shape {tuple(tensor.shape)}"
+            )
+        page_size_bytes = tensor.stride(1) * el
+        seg_data_bytes = num_blocks * page_size_bytes
+        seg_stride_bytes = tensor.stride(0) * el
+        n_segments = tensor.shape[0]
+        total_bytes = (n_segments - 1) * seg_stride_bytes + seg_data_bytes
+
+        raw = torch.empty(0, dtype=torch.int8, device=tensor.device).set_(
+            storage, storage_offset_bytes, (total_bytes,)
+        )
         segs: dict[str, torch.Tensor] = {}
-        for idx in range(tensor.shape[outer_dims[0]]):
-            offset = idx * seg_stride
-            chunk = raw[offset : offset + seg_stride]
-            segs[f"{key}.{idx}"] = chunk.view(num_blocks, -1)
+        for idx in range(n_segments):
+            start = idx * seg_stride_bytes
+            chunk = raw[start : start + seg_data_bytes]
+            segs[f"{key}.{idx}"] = chunk.view(num_blocks, page_size_bytes)
         return segs
 
     # ------------------------------------------------------------------
