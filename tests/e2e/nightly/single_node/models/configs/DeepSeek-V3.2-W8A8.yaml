@@ -52,6 +52,7 @@ test_cases:
         batch_size: 8
         baseline: 95
         threshold: 5
+        
       perf_1:
         case_type: performance
         dataset_path: vllm-ascend/GSM8K-in3500-bs400
