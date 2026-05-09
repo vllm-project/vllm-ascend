@@ -827,7 +827,7 @@ class TestEagleProposerMaybePadAndGather:
                 assert mock_all_gather.call_count == 1
                 assert gathered_hidden_states is None
             else:
-                expected_hidden_states = torch.cat((hidden_states, hidden_states + 100), dim=0)
+                expected_hidden_states = torch.cat((hidden_states, hidden_states + 100), dim=0)  # type: ignore
                 assert mock_all_gather.call_count == 2
                 assert torch.equal(gathered_hidden_states, expected_hidden_states)
         else:
