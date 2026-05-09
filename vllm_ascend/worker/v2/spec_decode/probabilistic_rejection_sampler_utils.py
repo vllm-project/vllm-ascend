@@ -23,8 +23,165 @@ from vllm.v1.worker.gpu.spec_decode.probabilistic_rejection_sampler_utils import
     _compute_block_stats_kernel,
     _compute_global_lse,
     _insert_resampled_kernel,
-    _resample_kernel,
 )
+
+
+@triton.jit
+def _npu_gumbel_block_argmax(
+    logits,
+    block,
+    mask,
+    token_idx,
+    expanded_idx_mapping_ptr,
+    temp_ptr,
+    seeds_ptr,
+    pos_ptr,
+    processed_logits_ptr,
+    processed_logits_stride,
+    processed_logits_col_ptr,
+    vocab_size,
+    APPLY_TEMPERATURE: tl.constexpr,
+):
+    req_state_idx = tl.load(expanded_idx_mapping_ptr + token_idx)
+    temp = tl.load(temp_ptr + req_state_idx).to(tl.float32)
+    if temp != 0.0 and APPLY_TEMPERATURE:
+        logits = logits / temp
+
+    if processed_logits_ptr is not None:
+        if processed_logits_col_ptr is not None:
+            col = tl.load(processed_logits_col_ptr)
+        else:
+            col = 0
+        tl.store(
+            processed_logits_ptr + req_state_idx * processed_logits_stride + col * vocab_size + block,
+            logits,
+            mask=mask,
+        )
+
+    logits = logits.to(tl.float32)
+    if temp != 0.0:
+        seed = tl.load(seeds_ptr + req_state_idx)
+        # NPU: cast pos to int32 to avoid uint64 in philox (NPU umulhi only
+        # supports int32/uint32). Position values fit in int32 in practice.
+        pos = tl.load(pos_ptr + token_idx).to(tl.int32)
+        gumbel_seed = tl.randint(seed, pos)
+        # NPU: use tl.rand (float32) instead of tl_rand64 (float64 not supported)
+        r = tl.rand(gumbel_seed, block).to(tl.float32)
+        gumbel_noise = -tl.log(-tl.log(r + 1e-20) + 1e-20)
+        logits = tl.where(mask, logits + gumbel_noise, float("-inf"))
+
+    value, idx = tl.max(logits, axis=0, return_indices=True)
+    return value, idx
+
+
+@triton.jit
+def _resample_kernel(
+    # [num_reqs, num_blocks]
+    resampled_local_argmax_ptr,
+    resampled_local_argmax_stride,
+    # [num_reqs, num_blocks]
+    resampled_local_max_ptr,
+    resampled_local_max_stride,
+    # [num_logits, V]
+    target_logits_ptr,
+    target_logits_stride,
+    # [num_reqs]
+    target_rejected_logsumexp_ptr,
+    # [max_num_reqs, num_speculative_steps, V]
+    draft_logits_ptr,
+    draft_logits_stride_0,
+    draft_logits_stride_1,
+    # [num_reqs]
+    draft_rejected_logsumexp_ptr,
+    # [num_reqs]
+    rejected_step_ptr,
+    # [num_reqs + 1]
+    cu_num_logits_ptr,
+    # [num_logits]
+    expanded_idx_mapping_ptr,
+    # [num_logits]
+    draft_sampled_ptr,
+    # [max_num_reqs]
+    temp_ptr,
+    # [max_num_reqs]
+    seed_ptr,
+    # [num_logits]
+    pos_ptr,
+    vocab_size,
+    BLOCK_SIZE: tl.constexpr,
+    HAS_DRAFT_LOGITS: tl.constexpr,
+):
+    req_idx = tl.program_id(0)
+    resample_idx = tl.load(rejected_step_ptr + req_idx)
+    start_idx = tl.load(cu_num_logits_ptr + req_idx)
+    end_idx = tl.load(cu_num_logits_ptr + req_idx + 1)
+    resample_token_idx = start_idx + resample_idx
+    req_state_idx = tl.load(expanded_idx_mapping_ptr + resample_token_idx)
+
+    temp = tl.load(temp_ptr + req_state_idx).to(tl.float32)
+    is_bonus = resample_token_idx == end_idx - 1
+    if temp == 0.0 and not is_bonus:
+        return
+
+    block_idx = tl.program_id(1)
+    block = block_idx * BLOCK_SIZE + tl.arange(0, BLOCK_SIZE)
+    mask = block < vocab_size
+    target_logits = tl.load(
+        target_logits_ptr + resample_token_idx * target_logits_stride + block,
+        mask=mask,
+        other=float("-inf"),
+    ).to(tl.float32)
+
+    if is_bonus:
+        residual_logits = target_logits
+    elif HAS_DRAFT_LOGITS:
+        draft_logits = tl.load(
+            draft_logits_ptr + req_state_idx * draft_logits_stride_0 + resample_idx * draft_logits_stride_1 + block,
+            mask=mask,
+            other=float("-inf"),
+        ).to(tl.float32)
+        target_lse = tl.load(target_rejected_logsumexp_ptr + req_idx)
+        draft_lse = tl.load(draft_rejected_logsumexp_ptr + req_idx)
+        target_log_probs = target_logits - target_lse
+        draft_log_probs = draft_logits - draft_lse
+        ratio = tl.exp(draft_log_probs - target_log_probs)
+        residual_logits = tl.where(
+            ratio < 1.0,
+            target_log_probs + tl.log(1 - ratio),
+            float("-inf"),
+        ).to(tl.float32)
+    else:
+        rejected_draft_token = tl.load(draft_sampled_ptr + resample_token_idx + 1)
+        residual_logits = tl.where(
+            block != rejected_draft_token,
+            target_logits,
+            float("-inf"),
+        ).to(tl.float32)
+
+    value, idx = _npu_gumbel_block_argmax(
+        residual_logits,
+        block,
+        mask,
+        resample_token_idx,
+        expanded_idx_mapping_ptr,
+        temp_ptr,
+        seed_ptr,
+        pos_ptr,
+        None,
+        0,
+        None,
+        vocab_size,
+        APPLY_TEMPERATURE=False,
+    )
+    token_id = block_idx * BLOCK_SIZE + idx
+    tl.store(
+        resampled_local_argmax_ptr + req_idx * resampled_local_argmax_stride + block_idx,
+        token_id,
+    )
+    tl.store(
+        resampled_local_max_ptr + req_idx * resampled_local_max_stride + block_idx,
+        value,
+    )
 
 
 @triton.jit
