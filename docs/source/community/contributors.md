@@ -18,6 +18,7 @@
 | Chao Lei| [@LCAIZJ](https://github.com/LCAIZJ) | 2025/12 |
 | JiaXu Liu| [@realliujiaxu](https://github.com/realliujiaxu) | 2025/12 |
 | HeXiang Wang| [@whx-sjtu](https://github.com/whx-sjtu) | 2026/01 |
+| LinFeng Yuan| [@linfeng-yuan](https://github.com/linfeng-yuan) | 2026/05 |
 
 ## Contributors
 <!-- last_commit: 8e3f8bab57cff0a98dc75ad43d8bf5bb4113f34e -->
