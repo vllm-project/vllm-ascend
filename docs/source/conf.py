@@ -65,7 +65,7 @@ extensions = [
 ]
 
 # Disable Pygments highlighting for mermaid code blocks to let the mermaid extension handle rendering
-lexers['mermaid'] = None
+lexers['mermaid'] = lexers.get('text')
 
 myst_enable_extensions = ["colon_fence", "amsmath", "dollarmath", "substitution"]
 
