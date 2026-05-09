@@ -56,7 +56,7 @@ jobs:
         VLLM_USE_MODELSCOPE: True
         MAX_JOBS: 4
         UV_INDEX_URL: http://cache-service.nginx-pypi-cache.svc.cluster.local/pypi/simple
-        UV_EXTRA_INDEX_URL: https://mirrors.huaweicloud.com/ascend/repos/pypi
+        UV_EXTRA_INDEX_URL: "https://mirrors.huaweicloud.com/ascend/repos/pypi https://triton-ascend.osinfra.cn/pypi/simple"
         UV_INDEX_STRATEGY: unsafe-best-match
         UV_NO_CACHE: 1
         UV_SYSTEM_PYTHON: 1
@@ -111,14 +111,14 @@ jobs:
       - name: Install vllm-project/vllm-ascend
         if: ${{ runner.arch != 'X64' }}
         env:
-          PIP_EXTRA_INDEX_URL: https://mirrors.huaweicloud.com/ascend/repos/pypi
+          PIP_EXTRA_INDEX_URL: "https://mirrors.huaweicloud.com/ascend/repos/pypi https://triton-ascend.osinfra.cn/pypi/simple"
         run: |
           pip install uc-manager
           uv pip install -r requirements-dev.txt
           if find vllm_ascend -maxdepth 1 -name '*.so' -type f 2>/dev/null | grep -q .; then
-            COMPILE_CUSTOM_KERNELS=0 uv pip install -v -e .
+            COMPILE_CUSTOM_KERNELS=0 uv pip install -e .
           else
-            uv pip install -v -e .
+            uv pip install -e .
           fi
 
       - name: Install vllm-project/vllm-ascend
@@ -129,8 +129,8 @@ jobs:
         run: |
           pip install uc-manager
           export LD_LIBRARY_PATH=$LD_LIBRARY_PATH:/usr/local/Ascend/ascend-toolkit/latest/x86_64-linux/devlib
-          uv pip install -v . --extra-index-url https://download.pytorch.org/whl/cpu/
-          uv pip install -r requirements-dev.txt --extra-index-url https://download.pytorch.org/whl/cpu/
+          uv pip install . --extra-index-url https://download.pytorch.org/whl/cpu/ --extra-index-url https://triton-ascend.osinfra.cn/pypi/simple
+          uv pip install -r requirements-dev.txt --extra-index-url https://download.pytorch.org/whl/cpu/ --extra-index-url https://triton-ascend.osinfra.cn/pypi/simple
 
       - name: Run smart UT with device
         if: ${{ runner.arch != 'X64' }}
