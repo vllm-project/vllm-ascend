@@ -32,7 +32,7 @@ If you want to deploy multi-node environment, you need to verify multi-node comm
 :::::{tab-set}
 ::::{tab-item} Use docker image
 
-For example, using images `quay.io/ascend/vllm-ascend:v0.17.0rc1`(for Atlas 800 A2) and `quay.io/ascend/vllm-ascend:v0.17.0rc1-a3`(for Atlas 800 A3).
+For example, using images `quay.io/ascend/vllm-ascend:v0.18.0rc1`(for Atlas 800 A2) and `quay.io/ascend/vllm-ascend:v0.18.0rc1-a3`(for Atlas 800 A3).
 
 Select an image based on your machine type and start the docker image on your node, refer to [using docker](../../installation.md#set-up-using-docker).
 
