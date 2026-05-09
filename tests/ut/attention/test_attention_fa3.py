@@ -140,7 +140,7 @@ def test_fa_custom_ops_tnd(
         new_q_seqlen_list.append(pre_seq_sum)
     new_q_seqlen_list = torch.tensor(new_q_seqlen_list, dtype=torch.int32).npu()
 
-    from flash_attn_v3 import flash_attn_with_kvcache
+    from flash_attn_v3 import flash_attn_with_kvcache  # type: ignore[import-not-found]
 
     out_out = flash_attn_with_kvcache(
         query,
