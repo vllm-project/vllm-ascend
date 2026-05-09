@@ -43,7 +43,6 @@ deployment:
           --data-parallel-size-local 2
           --data-parallel-start-rank 0
           --data-parallel-address $LOCAL_IP
-          --data-parallel-rpc-port 10521
           --tensor-parallel-size 8
           --enable-expert-parallel
           --speculative-config '{"num_speculative_tokens": 3, "method":"deepseek_mtp"}'
@@ -92,7 +91,6 @@ deployment:
           --data-parallel-size-local 2
           --data-parallel-start-rank 2
           --data-parallel-address $MASTER_IP
-          --data-parallel-rpc-port 10521
           --tensor-parallel-size 8
           --enable-expert-parallel
           --speculative-config '{"num_speculative_tokens": 3, "method":"deepseek_mtp"}'
