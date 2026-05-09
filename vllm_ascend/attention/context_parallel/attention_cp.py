@@ -582,7 +582,7 @@ class AscendAttentionCPImpl(AscendAttentionBackendImpl):
         if self.vllm_config.speculative_config is not None:
             input_layerout = "BSND"
             num_decodes = attn_metadata.num_decodes
-            if attn_metadata.decode_meta.mtp_attn_mask is not None:
+            if attn_metadata.decode_meta.dcp_mtp_attn_mask is not None:
                 attn_mask = attn_metadata.decode_meta.dcp_mtp_attn_mask
             else:
                 attn_mask = None
