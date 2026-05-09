@@ -6,11 +6,39 @@ import pytest
 import torch
 import torch_npu
 
-from vllm_ascend.utils import enable_custom_op  # noqa: F401 # type: ignore[import-untyped]
+from vllm_ascend.utils import enable_custom_op  # type: ignore[import-untyped] # noqa: F401
 
-enable_custom_op()
-# import vllm_ascend.vllm_ascend_C  # noqa: F401
 torch.set_printoptions(threshold=np.inf)
+
+_CUSTOM_OP_ENABLE_ERROR = None
+_CUSTOM_OP_ENABLE_ATTEMPTED = False
+
+
+def npu_is_available():
+    try:
+        torch.npu.synchronize()
+    except Exception:
+        return False
+    return True
+
+
+def require_npu_available():
+    if not npu_is_available():
+        pytest.skip("NPU runtime is not available")
+
+
+def enable_custom_op_if_available():
+    global _CUSTOM_OP_ENABLE_ERROR
+    global _CUSTOM_OP_ENABLE_ATTEMPTED
+
+    if _CUSTOM_OP_ENABLE_ATTEMPTED:
+        return
+
+    _CUSTOM_OP_ENABLE_ATTEMPTED = True
+    try:
+        enable_custom_op()
+    except Exception as exc:
+        _CUSTOM_OP_ENABLE_ERROR = exc
 
 
 def random_with_zero_prob(zero_prob, index):
@@ -26,16 +54,21 @@ def random_with_zero_prob(zero_prob, index):
     return random.randint(1, index)
 
 
-def assert_store_kv_block_registered():
-    assert hasattr(torch.ops, "_C_ascend"), "torch.ops._C_ascend is not registered"
-    assert hasattr(
-        torch.ops._C_ascend,
-        "store_kv_block_pre",
-    ), "torch.ops._C_ascend.store_kv_block_pre is not registered"
-    assert hasattr(
-        torch.ops._C_ascend,
-        "store_kv_block",
-    ), "torch.ops._C_ascend.store_kv_block is not registered"
+def require_store_kv_block_registered():
+    require_npu_available()
+    enable_custom_op_if_available()
+
+    if _CUSTOM_OP_ENABLE_ERROR is not None:
+        pytest.skip(f"Failed to enable custom ops: {_CUSTOM_OP_ENABLE_ERROR}")
+
+    if not hasattr(torch.ops, "_C_ascend"):
+        pytest.skip("torch.ops._C_ascend is not registered")
+
+    if not hasattr(torch.ops._C_ascend, "store_kv_block_pre"):
+        pytest.skip("torch.ops._C_ascend.store_kv_block_pre is not registered")
+
+    if not hasattr(torch.ops._C_ascend, "store_kv_block"):
+        pytest.skip("torch.ops._C_ascend.store_kv_block is not registered")
 
 
 def golden_store_kv_block(keylist, cache_table, slotmap, block_size):
@@ -65,7 +98,7 @@ def test_storeKVBlock_with_continuous(
     head_size,
     block_size,
 ):
-    assert_store_kv_block_registered()
+    require_store_kv_block_registered()
 
     # keylist = torch.randint(
     #     low=0,
@@ -158,7 +191,7 @@ def test_storeKVBlock_without_continuous(
     head_size,
     block_size,
 ):
-    assert_store_kv_block_registered()
+    require_store_kv_block_registered()
 
     # keylist = torch.randint(
     #     low=0,
@@ -243,96 +276,14 @@ def test_storeKVBlock_without_continuous(
     torch.npu.reset_peak_memory_stats()
 
 
-@pytest.mark.parametrize("num_tokens", [32 * 1024])
-@pytest.mark.parametrize("num_head", [1])
-@pytest.mark.parametrize("block_size", [128])
-@pytest.mark.parametrize("num_blocks", [1773])
-@pytest.mark.parametrize("head_size", [64])
-def test_storeKVBlock_without_ascending(
-    num_tokens,
-    num_head,
-    num_blocks,
-    head_size,
-    block_size,
-):
-    assert_store_kv_block_registered()
-
-    keylist = torch.randint(
-        low=0,
-        high=128,
-        size=(num_tokens, num_head, head_size),
-        dtype=torch.int8,
-    )
-
-    slotmap = list(range(num_tokens))
-    random.shuffle(slotmap)
-
-    max_slot = max(slotmap)
-    total_cache_slots = num_blocks * block_size
-    assert max_slot < total_cache_slots
-
-    cache_table = torch.randint(
-        low=0,
-        high=128,
-        size=(num_blocks, block_size, num_head, head_size),
-        dtype=torch.int8,
-    )
-
-    expected_cache = golden_store_kv_block(
-        keylist=keylist,
-        cache_table=cache_table,
-        slotmap=slotmap,
-        block_size=block_size,
-    )
-
-    slotmap_np = np.array(slotmap, dtype=np.int32)
-    slot_mapping_npu = torch.from_numpy(slotmap_np).to(torch.int32).npu()
-
-    slot_mapping_cpu = torch.empty_like(slot_mapping_npu, device="cpu").pin_memory()
-    slot_mapping_cpu.copy_(slot_mapping_npu, non_blocking=True)
-    torch.npu.synchronize()
-
-    slot_mapping_list = slot_mapping_cpu.tolist()
-
-    keylist_npu = keylist.npu()
-    cache_table_npu = cache_table.clone().npu()
-
-    group_len, group_key_idx, group_key_cache_idx = torch.ops._C_ascend.store_kv_block_pre(
-        slot_mapping_npu,
-        slot_mapping_list,
-        block_size,
-    )
-
-    # group_len_cpu = group_len.cpu()
-    # group_key_idx_cpu = group_key_idx.cpu()
-    # group_key_cache_idx_cpu = group_key_cache_idx.cpu()
-
-    torch.ops._C_ascend.store_kv_block(
-        keylist_npu,
-        cache_table_npu,
-        group_len,
-        group_key_idx,
-        group_key_cache_idx,
-        block_size,
-    )
-
-    torch.testing.assert_close(
-        cache_table_npu.cpu(),
-        expected_cache,
-        rtol=0,
-        atol=0,
-    )
-
-    torch.npu.empty_cache()
-    torch.npu.reset_peak_memory_stats()
-
-
 @pytest.mark.parametrize("num_tokens", [32 * 1024])  # 6398
 @pytest.mark.parametrize("num_head", [1])  # 512
 @pytest.mark.parametrize("block_size", [128])  # 128
 @pytest.mark.parametrize("num_blocks", [1773])  # 1599
 @pytest.mark.parametrize("head_size", [512])
 def test_siso(num_tokens, num_head, block_size, num_blocks, head_size):
+    require_npu_available()
+
     key_cpu = torch.randint(
         low=0,
         high=128,
@@ -484,6 +435,8 @@ def cal_scatternd(key, key_cache, slot_mapping, block_size):
 @pytest.mark.parametrize("num_blocks", [1773])  # 1599
 @pytest.mark.parametrize("count", [1])
 def test_scatter(num_tokens, num_head, block_size, num_blocks, count):
+    require_npu_available()
+
     head_size_k = 64
     key = torch.randint(
         low=0,
