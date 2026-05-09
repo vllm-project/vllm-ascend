@@ -204,6 +204,9 @@ def set_mc2_tokens_capacity(vllm_config):
     else:
         raise ValueError(f"MC2 is not supported on soc_version: {soc_version}")
 
+    # Cap MC2 capacity by max_num_batched_tokens to reduce HCCL buffer size.
+    max_num_tokens = min(max_num_tokens, vllm_config.scheduler_config.max_num_batched_tokens)
+
     tp_size = vllm_config.parallel_config.tensor_parallel_size
     # Use integer arithmetic for ceiling division.
     num_tokens_per_tp_rank = (max_num_tokens + tp_size - 1) // tp_size
