@@ -91,8 +91,10 @@ class MonitoredTorchTensor:
 
 class UvaBufferWrapper:
     """
-    Ascend NPU doesn't support UVA tensors directly. This is a wrapper class that provides CPU and NPU views of a UVA tensor.
-    However if users add os.environ['PYTORCH_NPU_ALLOC_CONF'] = 'pinned_mem_register:True' to environment, UVA feature is Supported.
+    Ascend NPU doesn't support UVA tensors directly. 
+    This is a wrapper class that provides CPU and NPU views of a UVA tensor.
+    However if users add os.environ['PYTORCH_NPU_ALLOC_CONF'] = 'pinned_mem_register:True' to environment, 
+    UVA feature is Supported.
     """
 
     def __init__(self, size: int | Sequence[int], dtype: torch.dtype):
@@ -100,10 +102,12 @@ class UvaBufferWrapper:
         if key in os.environ:
             value = os.environ[key]
             if not "pinned_mem_register:True" in value:
-                raise RuntimeError(f"UVA is not available, because environment_param {key} lack value 'pinned_mem_register:True', try to add os.environ['PYTORCH_NPU_ALLOC_CONF'] = 'pinned_mem_register:True'")
+                raise RuntimeError(f"UVA is not available, because environment_param {key} lack value 'pinned_mem_register:True', 
+                try to add os.environ['PYTORCH_NPU_ALLOC_CONF'] = 'pinned_mem_register:True'")
             self.cpu: torch.Tensor = torch.zeros(size, dtype=dtype, device="cpu", pin_memory=True)
             if not self.cpu.is_pinned():
-                raise RuntimeError("UVA is not available, because cpu tensor is not pinned, try to use .pin_memory() to cpu_tensor wantted to use uva feature")
+                raise RuntimeError("UVA is not available, because cpu tensor is not pinned, 
+                try to use .pin_memory() to cpu_tensor wantted to use uva feature")
             self.np = self.cpu.numpy()
             self.uva: torch.Tensor = self.cpu
         else:
