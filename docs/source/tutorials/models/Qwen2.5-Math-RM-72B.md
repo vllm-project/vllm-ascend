@@ -136,58 +136,6 @@ curl http://localhost:8000/v1/reward/batch \
 }'
 ```
 
-## Performance
-
-### Using vLLM Benchmark
-
-Run performance evaluation of `Qwen2.5-Math-RM-72B` as an example.
-
-Refer to [vllm benchmark](https://docs.vllm.ai/en/latest/contributing/benchmarks.html) for more details.
-
-There are three `vllm bench` subcommands:
-
-- `latency`: Benchmark the latency of a single batch of requests.
-- `serve`: Benchmark the online serving throughput.
-- `throughput`: Benchmark offline inference throughput.
-
-Take the `serve` as an example. Run the code as follows.
-
-```shell
-vllm bench serve \
-  --model ./Qwen2.5-Math-RM-72B/ \
-  --dataset-name random \
-  --random-input 200 \
-  --num-prompts 200 \
-  --request-rate 1 \
-  --save-result \
-  --result-dir ./perf_results/ \
-  --task reward
-```
-
-After about several minutes, you can get the performance evaluation result.
-
-## Troubleshooting
-
-### Common Issues
-
-**Issue**: `pad_token_id` missing error
-
-**Solution**: Add the following to `config.json`:
-
-```json
-{
-  "pad_token_id": 151643
-}
-```
-
-**Issue**: Version incompatibility with transformers
-
-**Solution**: Install compatible versions:
-
-```bash
-pip install transformers==4.43.0 tokenizers==0.19.0
-```
-
 ## References
 
 - [Qwen2.5-Math Technical Report](https://arxiv.org/abs/2409.12122)
