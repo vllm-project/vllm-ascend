@@ -75,6 +75,7 @@ def reduce_sum(x: torch.Tensor, dim: int | None = None, keepdim: bool = False) -
 
 def override_envs_for_invariance():
     from vllm_ascend.ascend_config import get_ascend_config
+
     ascend_config = get_ascend_config()
     ascend_config.weight_nz_mode = 0
     ascend_config.enable_matmul_allreduce = False

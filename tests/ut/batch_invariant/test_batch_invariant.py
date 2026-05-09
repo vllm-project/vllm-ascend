@@ -34,7 +34,7 @@ class TestBatchInvariant:
             batch_invariant.override_envs_for_invariance()
 
         assert mock_config.weight_nz_mode == 0
-        assert mock_config.enable_matmul_allreduce == False
+        assert not mock_config.enable_matmul_allreduce
         assert os.environ["HCCL_DETERMINISTIC"] == "strict"
         assert os.environ["LCCL_DETERMINISTIC"] == "1"
 

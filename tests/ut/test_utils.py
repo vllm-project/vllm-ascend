@@ -129,12 +129,16 @@ class TestUtils(TestBase):
         with mock.patch("vllm_ascend.utils.get_ascend_config", return_value=mock_config):
             self.assertEqual(utils.find_hccl_library(), "/path/to/hccl/libhccl.so")
         mock_config.hccl_so_path = None
-        with mock.patch("vllm_ascend.utils.get_ascend_config", return_value=mock_config), \
-             mock.patch("torch.version.cann", None):
+        with (
+            mock.patch("vllm_ascend.utils.get_ascend_config", return_value=mock_config),
+            mock.patch("torch.version.cann", None),
+        ):
             self.assertRaises(ValueError, utils.find_hccl_library)
         mock_config.hccl_so_path = None
-        with mock.patch("vllm_ascend.utils.get_ascend_config", return_value=mock_config), \
-             mock.patch("torch.version.cann", "Ascend910"):
+        with (
+            mock.patch("vllm_ascend.utils.get_ascend_config", return_value=mock_config),
+            mock.patch("torch.version.cann", "Ascend910"),
+        ):
             self.assertEqual(utils.find_hccl_library(), "libhccl.so")
 
     def test_current_stream(self):

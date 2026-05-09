@@ -130,7 +130,10 @@ class AscendConfig:
         # FLASHCOMM2 parallel size configuration (replaces VLLM_ASCEND_FLASHCOMM2_PARALLEL_SIZE env var)
         # 0: disabled (default), >0: enabled with O-matrix TP group size
         self.enable_flashcomm2_parallel_size = additional_config.get("enable_flashcomm2_parallel_size", 0)
-        logger.debug("AscendConfig.enable_flashcomm2_parallel_size initialized: %s", self.enable_flashcomm2_parallel_size)
+        logger.debug(
+            "AscendConfig.enable_flashcomm2_parallel_size initialized: %s",
+            self.enable_flashcomm2_parallel_size,
+        )
         # VLLM_VERSION override configuration (replaces VLLM_VERSION env var)
         # If set, overrides vllm.__version__ for version detection. Useful for dev builds.
         self.vllm_version = additional_config.get("vllm_version", None)
@@ -138,9 +141,13 @@ class AscendConfig:
         # MSMONITOR daemon mode configuration (replaces MSMONITOR_USE_DAEMON env var)
         self.msmonitor_use_daemon = additional_config.get("msmonitor_use_daemon", False)
         logger.debug("AscendConfig.msmonitor_use_daemon initialized: %s", self.msmonitor_use_daemon)
-        # Transpose KV cache by block fused op configuration (replaces VLLM_ASCEND_FUSION_OP_TRANSPOSE_KV_CACHE_BY_BLOCK env var)
+        # Transpose KV cache by block fused op configuration
+        # (replaces VLLM_ASCEND_FUSION_OP_TRANSPOSE_KV_CACHE_BY_BLOCK env var)
         self.enable_transpose_kv_cache_by_block = additional_config.get("enable_transpose_kv_cache_by_block", True)
-        logger.debug("AscendConfig.enable_transpose_kv_cache_by_block initialized: %s", self.enable_transpose_kv_cache_by_block)
+        logger.debug(
+            "AscendConfig.enable_transpose_kv_cache_by_block initialized: %s",
+            self.enable_transpose_kv_cache_by_block,
+        )
 
         self.pd_tp_ratio = 1
         self.pd_head_ratio = 1

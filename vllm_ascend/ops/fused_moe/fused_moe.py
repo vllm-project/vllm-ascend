@@ -32,7 +32,6 @@ from vllm.model_executor.layers.fused_moe.routed_experts_capturer import RoutedE
 from vllm.model_executor.layers.fused_moe.runner.default_moe_runner import DefaultMoERunner  # type: ignore
 from vllm.model_executor.layers.fused_moe.shared_fused_moe import SharedFusedMoE
 
-import vllm_ascend.envs as envs_ascend
 from vllm_ascend.ascend_config import get_ascend_config
 from vllm_ascend.ascend_forward_context import _EXTRA_CTX, MoECommType
 from vllm_ascend.distributed.parallel_state import get_mc2_group

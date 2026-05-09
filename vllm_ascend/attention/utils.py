@@ -10,7 +10,6 @@ from vllm.forward_context import ForwardContext, get_forward_context
 from vllm.logger import logger
 from vllm.v1.attention.backends.utils import CommonAttentionMetadata
 
-from vllm_ascend import envs
 from vllm_ascend.utils import AscendDeviceType, get_ascend_config, get_ascend_device_type
 from vllm_ascend.worker.kvcomp_utils import KVCompMetaData
 

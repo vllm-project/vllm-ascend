@@ -22,7 +22,7 @@ from __future__ import annotations
 import functools
 import math
 import os
-from contextlib import nullcontext
+from contextlib import nullcontext, suppress
 from enum import Enum
 from functools import lru_cache
 from typing import TYPE_CHECKING, Any
@@ -34,7 +34,6 @@ from packaging.version import InvalidVersion, Version
 from vllm.logger import logger
 from vllm.sequence import IntermediateTensors
 
-import vllm_ascend.envs as envs_ascend
 from vllm_ascend.ascend_config import WeightPrefetchConfig, get_ascend_config
 
 if TYPE_CHECKING:
@@ -415,15 +414,14 @@ def vllm_version_is(target_vllm_version: str):
     # Note: This function may be called at module import time before AscendConfig is initialized.
     # In that case, fall back to vllm.__version__ directly.
     config_version = None
-    try:
+    with suppress(RuntimeError):
         config_version = get_ascend_config().vllm_version
-    except RuntimeError:
-        pass
     if config_version is not None:
         vllm_version = config_version
         logger.debug("vllm_version_is: from Config = %s", vllm_version)
     else:
         import vllm
+
         vllm_version = vllm.__version__
         logger.debug("vllm_version_is: auto-detected = %s", vllm_version)
     try:
@@ -432,7 +430,7 @@ def vllm_version_is(target_vllm_version: str):
         raise ValueError(
             f"Invalid vllm version {vllm_version} found. A dev version of vllm "
             "is installed probably. Use --additional-config "
-            "'{\"vllm_version\": \"x.y.z\"}' to override. "
+            '\'{"vllm_version": "x.y.z"}\' to override. '
             "And please make sure the value follows the "
             "format of x.y.z."
         )

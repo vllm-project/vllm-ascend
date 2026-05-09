@@ -22,7 +22,6 @@ import torch
 import torch.distributed as dist
 from vllm.logger import logger
 
-import vllm_ascend.envs as envs_ascend
 from vllm_ascend.ascend_config import get_ascend_config
 from vllm_ascend.quantization.methods.base import QuantType
 
