@@ -4,6 +4,83 @@ This is the reference material for the adapt phase. Come here when you need the 
 
 ---
 
+## vLLM Key Areas to Focus On
+
+When analyzing vLLM changes, pay special attention to these areas that typically require vLLM Ascend adaptation:
+
+1. **Platform Interface** (`vllm/platforms/`)
+   - New abstract methods that must be implemented
+   - Method signature changes
+   - New platform features
+
+2. **MoE (Mixture of Experts)** (`vllm/model_executor/layers/fused_moe/`)
+   - FusedMoE layer changes
+   - Activation function changes
+   - Router changes
+
+3. **Attention** (`vllm/model_executor/layers/attention/`)
+   - Attention backend changes
+   - New parameters or interfaces
+   - MLA (Multi-Head Latent Attention) updates
+
+4. **Speculative Decoding** (`vllm/v1/worker/gpu/spec_decode/`, `vllm/config/speculative.py`)
+   - Import path changes
+   - Config field changes
+   - New speculative methods
+
+5. **Distributed** (`vllm/distributed/`)
+   - Parallel state changes
+   - KV transfer changes
+   - Device communicator updates
+
+6. **Models** (`vllm/model_executor/models/`)
+   - New model architectures
+   - Model interface changes
+
+7. **Worker/Model Runner** (`vllm/v1/worker/gpu/model_runner.py`)
+   - New worker methods
+   - Model runner changes
+
+8. **Quantization** (`vllm/model_executor/layers/quantization/`)
+   - Quantization config changes
+   - compress-tensor method changes
+
+---
+
+## vLLM Ascend Key File Locations
+
+| Project | Path |
+|---------|------|
+| vLLM Ascend version compatibility | `vllm-ascend/docs/source/conf.py` |
+| vLLM Ascend source code | `vllm_ascend/` |
+| **Core Modules** | |
+| Ascend-specific attention | `vllm_ascend/attention/` |
+| Ascend-specific executor | `vllm_ascend/worker/` |
+| Ascend-specific ops | `vllm_ascend/ops/` |
+| **Specialized Implementations** | |
+| Ascend 310P specific | `vllm_ascend/_310p/` |
+| EPLB load balancing | `vllm_ascend/eplb/` |
+| XLite compiler | `vllm_ascend/xlite/` |
+| **Compilation & Fusion** | |
+| Graph fusion pass manager | `vllm_ascend/compilation/` |
+| Compilation passes | `vllm_ascend/compilation/passes/` |
+| **Quantization** | |
+| Quantization methods | `vllm_ascend/quantization/` |
+| ModelSlim integration | `vllm_ascend/quantization/methods/modelslim/` |
+| **Distributed & KV Cache** | |
+| KV transfer | `vllm_ascend/distributed/kv_transfer/` |
+| Device communicators | `vllm_ascend/distributed/device_communicators/` |
+| **Speculative Decoding** | |
+| MTP proposer | `vllm_ascend/spec_decode/mtp_proposer.py` |
+| Eagle proposer | `vllm_ascend/spec_decode/eagle_proposer.py` |
+| **Utility Modules** | |
+| Common utilities | `vllm_ascend/utils.py` |
+| Ascend config | `vllm_ascend/ascend_config.py` |
+| Platform detection | `vllm_ascend/platform.py` |
+| Environment variables | `vllm_ascend/envs.py` |
+
+---
+
 ## File Mapping Table
 
 When upstream changes a file on the left, the corresponding vllm-ascend file on the right likely needs updating. Use this table to scope your `grep` searches.
@@ -26,76 +103,6 @@ When upstream changes a file on the left, the corresponding vllm-ascend file on 
 | `vllm/v1/worker/gpu/spec_decode/` | `vllm_ascend/spec_decode/` | MTP/Eagle proposer |
 
 Files not in this table — `docs/`, `tests/`, `benchmarks/`, `.github/` — usually don't need adaptation unless they hint at an interface change (e.g., a new test that exercises an API your code overrides).
-
----
-
-## Subsystem Notes
-
-When you see changes in one of these areas, here are the things most likely to need attention. This list is not exhaustive — if you encounter patterns not covered here, use your judgment and update this section for future runs.
-
-### Platform (`vllm/platforms/`)
-
-AscendPlatform must implement every abstract method in the base class — miss one and you get `Can't instantiate abstract class`.
-
-- New abstract methods: check base class for signature + return type, implement in `vllm_ascend/platform.py`.
-- Signature changes on existing methods: grep for the method name in `vllm_ascend/platform.py`.
-
-### Worker / Model Runner (`vllm/v1/worker/`)
-
-The model runner is heavily overridden in vllm-ascend. Changes here frequently require adaptation.
-
-- `execute_model()` signature or flow changes: trace through `vllm_ascend/worker/model_runner_v1.py`.
-- New lifecycle methods or input preparation changes: check if the worker base class calls them.
-
-### Attention (`vllm/model_executor/layers/attention/`)
-
-Attention backends are replaced entirely on Ascend.
-
-- `forward_oot()` parameter changes: this is vllm-ascend's primary extension point — any upstream signature change breaks it.
-
-### MoE (`vllm/model_executor/layers/fused_moe/`)
-
-FusedMoE is fully reimplemented for Ascend NPU. Interface changes cascade into `vllm_ascend/ops/fused_moe/`.
-
-### Config (`vllm/config*.py`)
-
-Config changes are deceptively dangerous — a single field rename can break 5+ files. grep `vllm_config.<class>.<field>` across all of `vllm_ascend/` to find every access point.
-
-### Distributed (`vllm/distributed/`)
-
-Changes here may affect `vllm_ascend/distributed/`, including KV transfer and device communicators.
-
-### Speculative Decoding (`vllm/v1/worker/gpu/spec_decode/`)
-
-Import path changes are common in this area — spec decode is actively refactored upstream. Check `vllm_ascend/spec_decode/`.
-
----
-
-## Analysis Commands
-
-These are the concrete git commands for investigating upstream changes. Run them against the local vLLM repo.
-
-```bash
-# Overview of all changed files
-git diff <start>..<end> --name-only
-
-# Changes in a specific subsystem
-git diff <start>..<end> -- vllm/platforms/
-git diff <start>..<end> -- vllm/model_executor/layers/fused_moe/
-git diff <start>..<end> -- vllm/model_executor/layers/attention/
-
-# Commit-level history (useful for understanding intent)
-git log --oneline <start>..<end>
-
-# Find breaking changes in commit messages
-git log --oneline <start>..<end> | grep -iE "(refactor|breaking|api|rename|remove|deprecate)"
-
-# Detect renamed/moved files
-git diff <start>..<end> --name-status | grep -E "^R"
-
-# Detailed diff for a specific file
-git diff <start>..<end> -- <FILE_PATH>
-```
 
 ---
 
