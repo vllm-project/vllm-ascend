@@ -22,7 +22,6 @@ from vllm.model_executor.layers.fla.ops.utils import tensor_cache
 
 @tensor_cache
 def prepare_chunk_indices_310(cu_seqlens: torch.Tensor, chunk_size: int) -> torch.Tensor:
-
     seq_lens = prepare_lens(cu_seqlens)
     num_chunks = (seq_lens + chunk_size - 1) // chunk_size
 
@@ -36,7 +35,6 @@ def prepare_chunk_indices_310(cu_seqlens: torch.Tensor, chunk_size: int) -> torc
 
 @tensor_cache
 def prepare_chunk_offsets_310(cu_seqlens: torch.Tensor, chunk_size: int) -> torch.Tensor:
-
     seq_lens = prepare_lens(cu_seqlens)
 
     num_chunks = (seq_lens + chunk_size - 1) // chunk_size
