@@ -1127,7 +1127,10 @@ class AscendSpecDecodeBaseProposer(SpecDecodeBaseProposer):
                 if num_tokens_d:
                     # remove padding (from pcp all-gather) in decode part
                     mask_start_loc = torch.cat(
-                        [torch.tensor([0], dtype=torch.int32), torch.cumsum(query_lens_d * self.pcp_size, dim=0)[:-1]]
+                        [
+                            torch.tensor([0], dtype=torch.int32, device=query_lens_d.device),
+                            torch.cumsum(query_lens_d * self.pcp_size, dim=0)[:-1],
+                        ]
                     )
                     mask_len = query_lens_d
                     mask = []
