@@ -58,13 +58,6 @@
       "model_list": [
         "Qwen2.5-Math-RM-72B"
       ]
-    },
-    {
-      "name": "pr-accuracy-group-1-card",
-      "os": "linux-aarch64-a2b3-1",
-      "model_list": [
-        "Qwen3-ASR-1.7B"
-      ]
     }
   ]
 }
