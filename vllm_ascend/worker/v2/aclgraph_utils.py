@@ -34,6 +34,7 @@ from vllm.v1.worker.utils import AttentionGroup
 
 from vllm_ascend.ascend_forward_context import _EXTRA_CTX
 from vllm_ascend.compilation.acl_graph import set_graph_params, update_full_graph_params
+from vllm_ascend.utils import vllm_version_is
 from vllm_ascend.worker.v2.utils import communicator_switch
 
 
@@ -113,6 +114,19 @@ class ModelAclGraphManager(ModelCudaGraphManager):
         """Capture CUDA graphs for model forward pass."""
         model = ModelWithContext(model)
         with communicator_switch():
+            if not vllm_version_is("0.20.1"):
+                return super().capture(
+                    model,
+                    model_state,
+                    input_buffers,
+                    intermediate_tensors,
+                    block_tables,
+                    attn_groups,
+                    kv_cache_config,
+                    has_lora,
+                    use_aux_hidden_state_outputs,
+                    progress_bar_desc,
+                )
             super().capture(
                 model,
                 model_state,
