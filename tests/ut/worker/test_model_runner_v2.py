@@ -1,9 +1,11 @@
 import unittest
 from unittest.mock import MagicMock, patch
 
+import pytest
 from vllm.v1.worker.gpu.model_runner import GPUModelRunner
 
 from vllm_ascend.ascend_forward_context import MoECommType, get_mrv2_in_profile_run
+from vllm_ascend.utils import vllm_version_is
 from vllm_ascend.worker.v2.model_runner import NPUModelRunner
 
 
@@ -15,6 +17,7 @@ class TestNPUModelRunnerV2(unittest.TestCase):
         runner.vllm_config = MagicMock()
         return runner
 
+    @pytest.mark.skipif(vllm_version_is("0.20.1"), reason="no need to support model_runner for v0.20.1")
     def test_profile_run_marks_only_mc2_warmup_dummy_run(self):
         runner = self._make_runner(max_num_tokens=16)
         observed_runs: list[tuple[int, bool]] = []
@@ -37,6 +40,7 @@ class TestNPUModelRunnerV2(unittest.TestCase):
         self.assertEqual(observed_runs, [(8, True), (16, True)])
         self.assertFalse(get_mrv2_in_profile_run())
 
+    @pytest.mark.skipif(vllm_version_is("0.20.1"), reason="no need to support model_runner for v0.20.1")
     def test_profile_run_keeps_normal_dummy_run_outside_profile_override(self):
         runner = self._make_runner(max_num_tokens=16)
         observed_runs: list[tuple[int, bool]] = []
