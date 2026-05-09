@@ -9,7 +9,7 @@ env_common:
   OMP_NUM_THREADS: 1
   HCCL_BUFFSIZE: 200
   PYTORCH_NPU_ALLOC_CONF: "expandable_segments:True"
-  VLLM_ASCEND_BALANCE_SCHEDULING: 0
+  VLLM_ASCEND_BALANCE_SCHEDULING: 1
   VLLM_ASCEND_ENABLE_MLAPO: 1
   VLLM_ENGINE_READY_TIMEOUT_S: "3000"
   VLLM_RPC_TIMEOUT: "600"
@@ -29,11 +29,12 @@ deployment:
       --tensor-parallel-size 16
       --data-parallel-rpc-port 13389
       --data-parallel-size-local 1
+      --data-parallel-start-rank 0
       --data-parallel-address $LOCAL_IP
       --enable-expert-parallel
       --seed 1024
-      --max-num-seqs 48
-      --max-model-len 20480
+      --max-num-seqs 16
+      --max-model-len 133120
       --max-num-batched-tokens 4096
       --trust-remote-code
       --gpu-memory-utilization 0.95
@@ -58,8 +59,8 @@ deployment:
       --data-parallel-address $MASTER_IP
       --enable-expert-parallel
       --seed 1024
-      --max-num-seqs 48
-      --max-model-len 20480
+      --max-num-seqs 16
+      --max-model-len 133120
       --max-num-batched-tokens 4096
       --trust-remote-code
       --gpu-memory-utilization 0.95
