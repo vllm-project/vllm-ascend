@@ -31,7 +31,7 @@ LONG_PROMPT = "The quick brown fox jumps over the lazy dog. " * 50
 
 def _fa3_available():
     try:
-        from flash_attn_v3 import flash_attn_with_kvcache  # noqa: F401
+        from flash_attn_v3 import flash_attn_with_kvcache  # type: ignore[import-not-found]
 
         return True
     except ImportError:
