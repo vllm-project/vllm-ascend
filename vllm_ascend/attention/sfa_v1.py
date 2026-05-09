@@ -55,7 +55,6 @@ from vllm_ascend.utils import (
     enable_dsa_cp_with_o_proj_tp,
     get_weight_prefetch_method,
     maybe_trans_nz,
-    vllm_version_is,
 )
 from vllm_ascend.worker.npu_input_batch import NPUInputBatch
 
@@ -437,6 +436,8 @@ class AscendSFAImpl(MLAAttentionImpl):
         self.tp_size = get_tensor_model_parallel_world_size()
         self.tp_rank = get_tp_group().rank_in_group
         self.q_b_proj = kwargs["q_b_proj"]
+        self.skip_topk = kwargs.get("skip_topk", False)
+        self.topk_indices_buffer = kwargs.get("topk_indices_buffer")
 
         ascend_config = get_ascend_config()
         self.enable_shared_expert_dp = ascend_config.enable_shared_expert_dp
@@ -449,6 +450,11 @@ class AscendSFAImpl(MLAAttentionImpl):
 
         self.local_num_heads = self.num_heads
         self.vllm_config = get_current_vllm_config()
+        self.use_index_cache = self.skip_topk or getattr(
+            self.vllm_config.model_config.hf_config,
+            "use_index_cache",
+            False,
+        )
         self.is_kv_producer = (
             self.vllm_config.kv_transfer_config is not None and self.vllm_config.kv_transfer_config.is_kv_producer
         )
@@ -458,11 +464,7 @@ class AscendSFAImpl(MLAAttentionImpl):
         self.n_head: int = self.indexer.n_head  # 64
         self.head_dim: int = self.indexer.head_dim  # 128
         self.wq_b = self.indexer.wq_b
-        if vllm_version_is("0.19.1"):
-            self.wk = self.indexer.wk
-            self.weights_proj = self.indexer.weights_proj
-        else:
-            self.wk_weights_proj = self.indexer.wk_weights_proj
+        self.wk_weights_proj = self.indexer.wk_weights_proj
         self.k_norm = self.indexer.k_norm
         self.cp_size = 1
         self.is_rope_neox_style = True
@@ -931,11 +933,8 @@ class AscendSFAImpl(MLAAttentionImpl):
         cos: torch.Tensor,
         sin: torch.Tensor,
     ):
-        if vllm_version_is("0.19.1"):
-            k_li, _ = self.wk(x)  # [b,s,7168] @ [7168,128] = [b,s,128]
-        else:
-            kw, _ = self.wk_weights_proj(x)
-            k_li = kw[:, : self.head_dim]
+        kw, _ = self.wk_weights_proj(x)
+        k_li = kw[:, : self.head_dim]
         k_li = self.k_norm(k_li).unsqueeze(1)
         k_li = k_li.view(-1, 1, self.head_dim)
 
@@ -980,12 +979,8 @@ class AscendSFAImpl(MLAAttentionImpl):
         actual_seq_lengths_query: torch.Tensor,
         actual_seq_lengths_key: torch.Tensor,
     ):
-        if vllm_version_is("0.19.1"):
-            weights, _ = self.weights_proj(x)
-        else:
-            kw, _ = self.wk_weights_proj(x)
-            weights = kw[:, self.head_dim :]
-
+        kw, _ = self.wk_weights_proj(x)
+        weights = kw[:, self.head_dim :]
         q_li, _ = self.wq_b(q_c)  # [b,s,1536] @ [1536,64*128] = [b,s,64*128]
         q_li = q_li.view(-1, self.n_head, self.head_dim)  # [n_toks,64,128]
         if HAS_TRITON:
@@ -1057,6 +1052,26 @@ class AscendSFAImpl(MLAAttentionImpl):
                 sparse_mode=3,
             )
         return topk_indices
+
+    def _get_indexcache_topk_indices(self, num_tokens: int) -> torch.Tensor:
+        if self.topk_indices_buffer is None:
+            raise RuntimeError("IndexCache requires topk_indices_buffer when skip_topk is enabled.")
+        topk_indices = self.topk_indices_buffer[:num_tokens]
+        if topk_indices.dim() == 2:
+            topk_indices = topk_indices.unsqueeze(1)
+        return topk_indices
+
+    def _update_indexcache_topk_indices(self, topk_indices: torch.Tensor) -> None:
+        if self.topk_indices_buffer is None:
+            return
+        num_tokens = topk_indices.shape[0]
+        topk_tokens = topk_indices.shape[-1]
+        topk_indices_to_cache = topk_indices
+        topk_indices_buffer = self.topk_indices_buffer[:num_tokens, :topk_tokens]
+        if topk_indices_to_cache.dim() == 3 and topk_indices_buffer.dim() == 2:
+            assert topk_indices_to_cache.shape[1] == 1
+            topk_indices_to_cache = topk_indices_to_cache.squeeze(1)
+        topk_indices_buffer.copy_(topk_indices_to_cache)
 
     def _execute_sparse_flash_attention_process(
         self, ql_nope, q_pe, kv_cache, topk_indices, attn_metadata, actual_seq_lengths_query, actual_seq_lengths_key
@@ -1299,16 +1314,22 @@ class AscendSFAImpl(MLAAttentionImpl):
             if self.is_kv_producer:
                 attn_metadata.reshape_cache_event.record()
 
-        topk_indices = self.indexer_select_post_process(
-            x=hidden_states,
-            q_c=q_c,
-            kv_cache=kv_cache,
-            attn_metadata=attn_metadata,
-            cos=cos,
-            sin=sin,
-            actual_seq_lengths_query=actual_seq_lengths_query,
-            actual_seq_lengths_key=actual_seq_lengths_key,
-        )
+        topk_num_tokens = num_input_tokens or hidden_states.shape[0]
+        if self.skip_topk:
+            topk_indices = self._get_indexcache_topk_indices(topk_num_tokens)
+        else:
+            topk_indices = self.indexer_select_post_process(
+                x=hidden_states,
+                q_c=q_c,
+                kv_cache=kv_cache,
+                attn_metadata=attn_metadata,
+                cos=cos,
+                sin=sin,
+                actual_seq_lengths_query=actual_seq_lengths_query,
+                actual_seq_lengths_key=actual_seq_lengths_key,
+            )
+            if self.use_index_cache:
+                self._update_indexcache_topk_indices(topk_indices)
 
         attn_output = self._execute_sparse_flash_attention_process(
             ql_nope, q_pe, kv_cache, topk_indices, attn_metadata, actual_seq_lengths_query, actual_seq_lengths_key

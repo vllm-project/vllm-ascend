@@ -1,6 +1,7 @@
 # ruff: noqa: E501
 import inspect
 import unittest
+from dataclasses import dataclass
 from unittest.mock import MagicMock, patch
 
 import numpy as np
@@ -9,14 +10,110 @@ import torch
 from vllm.config import CacheConfig, CompilationMode, CUDAGraphMode, VllmConfig, set_current_vllm_config
 from vllm.forward_context import BatchDescriptor
 from vllm.model_executor.models.llama_eagle3 import Eagle3LlamaForCausalLM
+from vllm.platforms import current_platform
 from vllm.v1.spec_decode.draft_model import DraftModelProposer
 
 import vllm_ascend.spec_decode.eagle_proposer as eagle_proposer
 from tests.ut.base import TestBase
+from tests.ut.conftest import npu_test
 from vllm_ascend.ascend_config import init_ascend_config
 from vllm_ascend.attention.attention_v1 import AscendAttentionState
+from vllm_ascend.attention.utils import AscendCommonAttentionMetadata
 from vllm_ascend.spec_decode.draft_proposer import AscendDraftModelProposer
 from vllm_ascend.spec_decode.eagle_proposer import AscendEagleProposer
+from vllm_ascend.utils import vllm_version_is
+
+# vLLM #40732 moved `SpecDecodeBaseProposer` (and its `CpuGpuBuffer` import)
+# out of `vllm.v1.spec_decode.eagle` into `vllm.v1.spec_decode.llm_base_proposer`.
+# Pick the right patch path depending on the installed vllm version so the
+# tests can mock the buffer factory.
+_CPU_GPU_BUFFER_TARGET = (
+    "vllm.v1.spec_decode.eagle.CpuGpuBuffer"
+    if vllm_version_is("0.19.1")
+    else "vllm.v1.spec_decode.llm_base_proposer.CpuGpuBuffer"
+)
+
+BLOCK_SIZE = 16
+
+
+@dataclass
+class BatchSpec:
+    """Specification for a batch configuration (workload shape only)."""
+
+    seq_lens: list[int]
+    query_lens: list[int]
+
+    name: str = "unnamed"
+
+    @property
+    def batch_size(self):
+        return len(self.seq_lens)
+
+    def __post_init__(self):
+        assert len(self.seq_lens) == len(self.query_lens)
+
+    def compute_num_tokens(self):
+        return sum(self.query_lens)
+
+
+def create_common_attn_metadata(
+    batch_spec: BatchSpec,
+    block_size: int,
+    device: torch.device,
+    max_block_idx: int = 1000,
+    arange_block_indices: bool = False,
+) -> AscendCommonAttentionMetadata:
+    """Create AscendCommonAttentionMetadata from a BatchSpec and ModelParams."""
+    # Create query start locations
+    query_start_loc = torch.zeros(batch_spec.batch_size + 1, dtype=torch.int32, device=device)
+    query_start_loc[1:] = torch.tensor(batch_spec.query_lens, dtype=torch.int32, device=device).cumsum(0)
+    query_start_loc_cpu = query_start_loc.cpu()
+    num_tokens = batch_spec.compute_num_tokens()
+
+    # Create sequence lengths
+    seq_lens = torch.tensor(batch_spec.seq_lens, dtype=torch.int32, device=device)
+    seq_lens_cpu = seq_lens.cpu()
+    max_seq_len = int(seq_lens_cpu.max())
+
+    # Create computed tokens (context length for each sequence)
+    context_lens = [batch_spec.seq_lens[i] - batch_spec.query_lens[i] for i in range(batch_spec.batch_size)]
+    num_computed_tokens_cpu = torch.tensor(context_lens, dtype=torch.int32)
+
+    # Create block table and slot mapping
+    max_blocks = (max(batch_spec.seq_lens) + block_size - 1) // block_size
+    if arange_block_indices:
+        num_blocks = batch_spec.batch_size * max_blocks
+        block_table_tensor = torch.arange(num_blocks, dtype=torch.int32, device=device).view(
+            batch_spec.batch_size, max_blocks
+        )
+        slot_mapping = torch.arange(num_tokens, dtype=torch.int64, device=device).view(num_tokens)
+    else:
+        block_table_tensor = torch.randint(
+            0,
+            max_block_idx,
+            (batch_spec.batch_size, max_blocks),
+            dtype=torch.int32,
+            device=device,
+        )
+        slot_mapping = torch.randint(0, max_block_idx, (num_tokens,), dtype=torch.int64, device=device)
+
+    # Calculate max query length
+    max_query_len = max(batch_spec.query_lens)
+
+    return AscendCommonAttentionMetadata(
+        query_start_loc=query_start_loc,
+        query_start_loc_cpu=query_start_loc_cpu,
+        seq_lens=seq_lens,
+        _seq_lens_cpu=seq_lens_cpu,
+        _num_computed_tokens_cpu=num_computed_tokens_cpu,
+        num_reqs=batch_spec.batch_size,
+        num_actual_tokens=num_tokens,
+        max_query_len=max_query_len,
+        max_seq_len=max_seq_len,
+        block_table_tensor=block_table_tensor,
+        slot_mapping=slot_mapping,
+        causal=True,
+    )
 
 
 class TestEagleProposerInitialization(TestBase):
@@ -51,13 +148,15 @@ class TestEagleProposerInitialization(TestBase):
         self.vllm_config.parallel_config.enable_expert_parallel = False
         self.vllm_config.speculative_config.draft_tensor_parallel_size = 1
         self.vllm_config.speculative_config.num_speculative_tokens = 2
+        self.vllm_config.speculative_config.parallel_drafting = False
         self.vllm_config.speculative_config.speculative_token_tree = str([(i + 1) * (0,) for i in range(2)])
+        self.vllm_config.speculative_config.draft_model_config.hf_config = MagicMock(spec=[])
         self.vllm_config.speculative_config.draft_model_config.uses_xdrope_dim = 0
         self.vllm_config.speculative_config.draft_model_config.uses_mrope = False
         self.vllm_config.speculative_config.disable_padded_drafter_batch = False
         self.vllm_config.additional_config = None
 
-        self.mock_cpugpubuffer = patch("vllm.v1.spec_decode.eagle.CpuGpuBuffer")
+        self.mock_cpugpubuffer = patch(_CPU_GPU_BUFFER_TARGET)
         self.mock_cpugpubuffer.start()
         self.mock_supports_multimodal_inputs = patch(
             "vllm.multimodal.registry.MultiModalRegistry.supports_multimodal_inputs", return_value=False
@@ -76,6 +175,7 @@ class TestEagleProposerInitialization(TestBase):
     def test_initialization_eagle_graph(self):
         self.vllm_config.speculative_config.method = "eagle"
         self.vllm_config.speculative_config.draft_model_config.get_hidden_size.return_value = 4096
+        self.vllm_config.speculative_config.draft_model_config.get_inputs_embeds_size.return_value = 4096
         self.vllm_config.speculative_config.draft_model_config.uses_mrope = False
         self.vllm_config.compilation_config.mode = CompilationMode.VLLM_COMPILE
         self.vllm_config.model_config.enforce_eager = False
@@ -99,6 +199,7 @@ class TestEagleProposerInitialization(TestBase):
     def test_initialization_eagle3_enforce_eager(self):
         self.vllm_config.speculative_config.method = "eagle3"
         self.vllm_config.speculative_config.draft_model_config.get_hidden_size.return_value = 2048
+        self.vllm_config.speculative_config.draft_model_config.get_inputs_embeds_size.return_value = 2048
         self.vllm_config.compilation_config.mode = CompilationMode.NONE
         self.vllm_config.compilation_config.pass_config = MagicMock()
         self.vllm_config.compilation_config.pass_config.enable_sp = False
@@ -116,6 +217,7 @@ class TestEagleProposerInitialization(TestBase):
     def test_initialization_eagle3_full_graph_async(self):
         self.vllm_config.speculative_config.method = "eagle3"
         self.vllm_config.speculative_config.draft_model_config.get_hidden_size.return_value = 2048
+        self.vllm_config.speculative_config.draft_model_config.get_inputs_embeds_size.return_value = 2048
         self.vllm_config.compilation_config.mode = CompilationMode.VLLM_COMPILE
         self.vllm_config.model_config.enforce_eager = False
         self.vllm_config.speculative_config.enforce_eager = False
@@ -133,6 +235,7 @@ class TestEagleProposerInitialization(TestBase):
     def test_initialization_mtp_full_graph_async(self):
         self.vllm_config.speculative_config.method = "mtp"
         self.vllm_config.speculative_config.draft_model_config.get_hidden_size.return_value = 2048
+        self.vllm_config.speculative_config.draft_model_config.get_inputs_embeds_size.return_value = 2048
         self.vllm_config.compilation_config.mode = CompilationMode.VLLM_COMPILE
         self.vllm_config.model_config.enforce_eager = False
         self.vllm_config.speculative_config.enforce_eager = False
@@ -196,7 +299,7 @@ class TestEagleProposerLoadModel(TestBase):
         self.vllm_config.additional_config = None
         init_ascend_config(self.vllm_config)
 
-        self.mock_cpugpubuffer = patch("vllm.v1.spec_decode.eagle.CpuGpuBuffer")
+        self.mock_cpugpubuffer = patch(_CPU_GPU_BUFFER_TARGET)
         self.mock_cpugpubuffer.start()
         self.mock_supports_multimodal_inputs = patch(
             "vllm.multimodal.registry.MultiModalRegistry.supports_multimodal_inputs", return_value=False
@@ -332,7 +435,7 @@ class TestEagleProposerDummyRun(TestBase):
         self.vllm_config.additional_config = None
         init_ascend_config(self.vllm_config)
 
-        self.mock_cpugpubuffer = patch("vllm.v1.spec_decode.eagle.CpuGpuBuffer")
+        self.mock_cpugpubuffer = patch(_CPU_GPU_BUFFER_TARGET)
         self.mock_cpugpubuffer.start()
         self.mock_supports_multimodal_inputs = patch(
             "vllm.multimodal.registry.MultiModalRegistry.supports_multimodal_inputs", return_value=False
@@ -483,7 +586,7 @@ class TestEagleProposerHelperMethods(TestBase):
         self.vllm_config.additional_config = None
         init_ascend_config(self.vllm_config)
 
-        self.mock_cpugpubuffer = patch("vllm.v1.spec_decode.eagle.CpuGpuBuffer")
+        self.mock_cpugpubuffer = patch(_CPU_GPU_BUFFER_TARGET)
         self.mock_cpugpubuffer.start()
         self.mock_supports_multimodal_inputs = patch(
             "vllm.multimodal.registry.MultiModalRegistry.supports_multimodal_inputs", return_value=False
@@ -558,7 +661,7 @@ class TestEagleProposerPropose:
         self.vllm_config.additional_config = None
         init_ascend_config(self.vllm_config)
 
-        self.mock_cpugpubuffer = patch("vllm.v1.spec_decode.eagle.CpuGpuBuffer")
+        self.mock_cpugpubuffer = patch(_CPU_GPU_BUFFER_TARGET)
         self.mock_cpugpubuffer.start()
         self.mock_supports_multimodal_inputs = patch(
             "vllm.multimodal.registry.MultiModalRegistry.supports_multimodal_inputs", return_value=False
@@ -1263,7 +1366,7 @@ class TestPrepareNextTokenIdsPadded(TestBase):
         self.vllm_config.additional_config = None
         init_ascend_config(self.vllm_config)
 
-        self.mock_cpugpubuffer = patch("vllm.v1.spec_decode.eagle.CpuGpuBuffer", MockCpuGpuBuffer)
+        self.mock_cpugpubuffer = patch(_CPU_GPU_BUFFER_TARGET, MockCpuGpuBuffer)
         self.mock_cpugpubuffer.start()
         self.mock_supports_multimodal_inputs = patch(
             "vllm.multimodal.registry.MultiModalRegistry.supports_multimodal_inputs", return_value=False
@@ -1747,6 +1850,7 @@ class TestRunMergedDraft(TestBase):
         self.vllm_config.speculative_config.use_local_argmax_reduction = False
         self.vllm_config.speculative_config.draft_tensor_parallel_size = 1
         self.vllm_config.speculative_config.speculative_token_tree = str([(i + 1) * (0,) for i in range(3)])
+        self.vllm_config.speculative_config.draft_model_config.hf_config = MagicMock(spec=[])
         self.vllm_config.speculative_config.draft_model_config.get_hidden_size.return_value = 4
         self.vllm_config.speculative_config.draft_model_config.get_inputs_embeds_size.return_value = 4
         self.vllm_config.speculative_config.draft_model_config.uses_mrope = False
@@ -1755,7 +1859,7 @@ class TestRunMergedDraft(TestBase):
         self.vllm_config.additional_config = None
         init_ascend_config(self.vllm_config)
 
-        self.mock_cpugpubuffer = patch("vllm.v1.spec_decode.eagle.CpuGpuBuffer", MockCpuGpuBuffer)
+        self.mock_cpugpubuffer = patch(_CPU_GPU_BUFFER_TARGET, MockCpuGpuBuffer)
         self.mock_cpugpubuffer.start()
         self.mock_supports_multimodal_inputs = patch(
             "vllm.multimodal.registry.MultiModalRegistry.supports_multimodal_inputs", return_value=False
@@ -1876,7 +1980,14 @@ class TestRunMergedDraft(TestBase):
 
         import vllm.v1.spec_decode.eagle
 
-        assert hasattr(vllm.v1.spec_decode.eagle, "CpuGpuBuffer")
+        # `CpuGpuBuffer` was re-exported from `eagle` until vLLM #40732 moved
+        # `SpecDecodeBaseProposer` (and the import) into `llm_base_proposer`.
+        if vllm_version_is("0.19.1"):
+            assert hasattr(vllm.v1.spec_decode.eagle, "CpuGpuBuffer")
+        else:
+            import vllm.v1.spec_decode.llm_base_proposer
+
+            assert hasattr(vllm.v1.spec_decode.llm_base_proposer, "CpuGpuBuffer")
         RunnerCls = vllm.v1.spec_decode.eagle.SpecDecodeBaseProposer
         for attr in ("_get_positions", "_set_positions"):
             assert hasattr(RunnerCls, attr), f"SpecDecodeBaseProposer.{attr} not found"
@@ -2209,4 +2320,724 @@ class TestRunMergedDraft(TestBase):
 
                 self.assertEqual(tuple(draft_token_ids.shape), expected_shape)
                 self.assertEqual(len(self.proposer.model.calls), 1)
+
+class TestDraftProposerHelperMethods(TestBase):
+
+    def setUp(self):
+        self.vllm_config = MagicMock(spec=VllmConfig)
+        self.vllm_config.scheduler_config = MagicMock(max_num_seqs=3)
+        self.device = torch.device("cpu")
+        self.runner = MagicMock()
+        self.runner.input_batch = MagicMock()
+        self.runner.input_batch.req_ids = [0, 1, 2]
+        self.runner.arange_np = np.arange(10)
+        self.runner.input_batch.num_reqs = 3
+        self.runner.pin_memory = False
+        self.runner.pcp_size = 1
+        self.runner.dcp_size = 1
+
+        self.vllm_config.cache_config.block_size = 16
+        self.vllm_config.scheduler_config.max_num_batched_tokens = 1024
+        self.vllm_config.scheduler_config.max_num_seqs = 32
+        self.vllm_config.model_config.dtype = torch.float16
+        self.vllm_config.model_config.max_model_len = 2048
+        self.vllm_config.model_config.uses_mrope = False
+        self.vllm_config.model_config.uses_xdrope_dim = 0
+        self.vllm_config.parallel_config.tensor_parallel_size = 1
+        self.vllm_config.parallel_config.data_parallel_rank = 0
+        self.vllm_config.parallel_config.data_parallel_size = 1
+        self.vllm_config.parallel_config.prefill_context_parallel_size = 1
+        self.vllm_config.parallel_config.enable_expert_parallel = False
+        self.vllm_config.speculative_config.draft_tensor_parallel_size = 1
+        self.vllm_config.speculative_config.num_speculative_tokens = 2
+        self.vllm_config.speculative_config.speculative_token_tree = str([(i + 1) * (0,) for i in range(2)])
+        self.vllm_config.speculative_config.draft_model_config.uses_xdrope_dim = 0
+        self.vllm_config.speculative_config.draft_model_config.uses_mrope = False
+        self.vllm_config.speculative_config.disable_padded_drafter_batch = False
+        self.vllm_config.speculative_config.parallel_drafting = False
+        self.vllm_config.speculative_config.draft_parallel_config.tensor_parallel_size = 1
+        self.vllm_config.speculative_config.target_parallel_config.tensor_parallel_size = 1
+        self.vllm_config.additional_config = None
+        init_ascend_config(self.vllm_config)
+
+        self.mock_cpugpubuffer = patch(_CPU_GPU_BUFFER_TARGET)
+        self.mock_cpugpubuffer.start()
+        self.mock_supports_multimodal_inputs = patch(
+            "vllm.multimodal.registry.MultiModalRegistry.supports_multimodal_inputs", return_value=False
+        )
+        self.mock_supports_multimodal_inputs.start()
+
+        # Set the current vllm config
+        with set_current_vllm_config(self.vllm_config):
+            self.proposer = AscendDraftModelProposer(vllm_config=self.vllm_config, device=self.device, runner=self.runner)
+        self.proposer.draft_attn_groups = [MagicMock()]
+
+    def tearDown(self):
+        self.mock_cpugpubuffer.stop()
+        self.mock_supports_multimodal_inputs.stop()
+        # Clear the current vllm config
+        set_current_vllm_config(None)
+
+    
+    @patch('torch.ops._C_ascend.npu_copy_and_expand_eagle_inputs', create=True)
+    @patch("vllm_ascend.spec_decode.eagle_proposer.compute_new_slot_mapping")
+    def test_set_inputs_first_pass(self, mock_slot, mock_expand):
+        self.assertTrue(self.proposer.needs_extra_input_slots)
+        target_token_ids = torch.tensor([0,1,2,3,4])
+        target_positions = torch.tensor([0,1,2,3,4])
+        next_token_ids = torch.tensor([5])
+        target_hidden_states = None
+        token_indices_to_sample = None
+        num_rejected_tokens_gpu = torch.tensor([0])
+        batch_size = 1
+        common_attn_metadata = AscendCommonAttentionMetadata(
+            query_start_loc=torch.tensor([0, 5], dtype=torch.int32),
+            query_start_loc_cpu=torch.tensor([0, 5], dtype=torch.int32),
+            seq_lens=torch.tensor([5], dtype=torch.int32),
+            seq_lens_cpu=torch.tensor([5], dtype=torch.int32),
+            num_actual_tokens=5,
+            max_query_len=5,
+            max_seq_len=5,
+            num_reqs=1,
+            block_table_tensor=torch.zeros([1,320], dtype=torch.int32),
+            slot_mapping=torch.tensor([128,129,130,131], dtype=torch.int32),
+        )
+        common_attn_metadata.batch_size = lambda: batch_size
+        mock_expand.return_value =  (
+                next_token_ids,
+                torch.tensor([5]),
+                torch.tensor([False]),
+                torch.tensor([False]),
+                token_indices_to_sample,
+                None,
+            )
+        mock_slot.return_value = torch.tensor([[1]])
+
+        _, _, common_attn_metadata, _ = (
+            self.proposer.set_inputs_first_pass(
+                target_token_ids,
+                next_token_ids,
+                target_positions,
+                target_hidden_states,
+                token_indices_to_sample,
+                common_attn_metadata,
+                num_rejected_tokens_gpu
+            )
+        )
+        assert common_attn_metadata.seq_lens.to("cpu") == common_attn_metadata.seq_lens_cpu
 # fmt: on
+
+
+@npu_test(num_npus=1, npu_type="a2")
+class TestEagleProposerSetInputsFirstPass(TestBase):
+    """Test set_inputs_first_pass for AscendEagleProposer.
+
+    This test class covers all branches of set_inputs_first_pass:
+
+    Branch coverage:
+    - Branch 1 (needs_extra_input_slots=False): Default EAGLE pathway
+      - Branch 1.1: multiple requests
+      - Branch 1.2: pcp_size > 1 (PCP split logic) - vllm-ascend specific
+    - Branch 2 (needs_extra_input_slots=True): Draft model / Parallel drafting
+      - Branch 2.1: shift_input_ids=False (draft_model)
+      - Branch 2.2: shift_input_ids=True (parallel_drafting)
+
+    """
+
+    def setUp(self):
+        self.device = torch.device(current_platform.device_type)
+        self.runner = MagicMock()
+        self.runner.pin_memory = False
+        self.runner.pcp_size = 1
+        self.runner.dcp_size = 1
+        self.runner.max_num_tokens = 8192
+        self.runner.max_num_reqs = 256
+
+        self.mock_cpugpubuffer = patch("vllm.v1.spec_decode.eagle.CpuGpuBuffer")
+        self.mock_cpugpubuffer.start()
+        self.mock_supports_multimodal_inputs = patch(
+            "vllm.multimodal.registry.MultiModalRegistry.supports_multimodal_inputs", return_value=False
+        )
+        self.mock_supports_multimodal_inputs.start()
+
+    def tearDown(self):
+        self.mock_cpugpubuffer.stop()
+        self.mock_supports_multimodal_inputs.stop()
+
+    def _create_base_vllm_config(self):
+        """Create base vllm_config with common settings shared across all tests."""
+        vllm_config = MagicMock(spec=VllmConfig)
+        vllm_config.cache_config = MagicMock(spec=CacheConfig)
+        vllm_config.cache_config.block_size = BLOCK_SIZE
+        vllm_config.scheduler_config = MagicMock()
+        vllm_config.scheduler_config.max_num_batched_tokens = 1024
+        vllm_config.scheduler_config.max_num_seqs = 32
+        vllm_config.scheduler_config.async_scheduling = False
+        vllm_config.model_config = MagicMock()
+        vllm_config.model_config.hf_text_config = MagicMock(spec=[])
+        vllm_config.model_config.hf_text_config.to_dict = MagicMock(return_value={})
+        vllm_config.model_config.dtype = torch.float16
+        vllm_config.model_config.max_model_len = 2048
+        vllm_config.model_config.uses_mrope = False
+        vllm_config.model_config.uses_xdrope_dim = 0
+        vllm_config.compilation_config = MagicMock()
+        vllm_config.parallel_config = MagicMock()
+        vllm_config.parallel_config.tensor_parallel_size = 1
+        vllm_config.parallel_config.data_parallel_rank = 0
+        vllm_config.parallel_config.data_parallel_size = 1
+        vllm_config.parallel_config.prefill_context_parallel_size = 1
+        vllm_config.parallel_config.enable_expert_parallel = False
+        vllm_config.additional_config = {}
+        return vllm_config
+
+    def _create_speculative_config(
+        self,
+        method: str,
+        num_speculative_tokens: int,
+        parallel_drafting: bool = False,
+    ):
+        """Create speculative_config for specific method."""
+        speculative_config = MagicMock()
+        speculative_config.method = method
+        speculative_config.parallel_drafting = parallel_drafting
+        speculative_config.num_speculative_tokens = num_speculative_tokens
+        speculative_config.speculative_token_tree = str([(i + 1) * (0,) for i in range(num_speculative_tokens)])
+        speculative_config.draft_tensor_parallel_size = 1
+        speculative_config.disable_padded_drafter_batch = False
+        speculative_config.draft_model_config = MagicMock()
+        speculative_config.draft_model_config.get_hidden_size.return_value = 4096
+        speculative_config.draft_model_config.uses_xdrope_dim = 0
+        speculative_config.draft_model_config.uses_mrope = False
+        speculative_config.target_parallel_config = MagicMock()
+        speculative_config.target_parallel_config.tensor_parallel_size = 1
+        speculative_config.draft_parallel_config = MagicMock()
+        speculative_config.draft_parallel_config.tensor_parallel_size = 1
+        return speculative_config
+
+    def _create_proposer(
+        self,
+        method: str,
+        num_speculative_tokens: int,
+        parallel_drafting: bool = False,
+        device: torch.device = None,
+        runner=None,
+    ):
+        """Create a proposer instance for testing."""
+        if device is None:
+            device = torch.device(current_platform.device_type)
+        vllm_config = self._create_base_vllm_config()
+        vllm_config.speculative_config = self._create_speculative_config(
+            method=method,
+            num_speculative_tokens=num_speculative_tokens,
+            parallel_drafting=parallel_drafting,
+        )
+
+        init_ascend_config(vllm_config)
+
+        with (
+            patch("vllm.v1.spec_decode.eagle.CpuGpuBuffer"),
+            patch("vllm.multimodal.registry.MultiModalRegistry.supports_multimodal_inputs", return_value=False),
+            set_current_vllm_config(vllm_config),
+        ):
+            if method == "eagle":
+                proposer = AscendEagleProposer(
+                    vllm_config=vllm_config,
+                    device=device,
+                    runner=runner,
+                )
+            elif method == "draft_model":
+                proposer = AscendDraftModelProposer(
+                    vllm_config=vllm_config,
+                    device=device,
+                    runner=runner,
+                )
+            proposer.block_size = BLOCK_SIZE
+            return proposer, vllm_config
+
+    def test_set_inputs_first_pass_default_eagle(self):
+        """
+        Test for set_inputs_first_pass without extra input slots (default EAGLE).
+
+        This tests the path where needs_extra_input_slots=False, which is the
+        default EAGLE pathway. In this case:
+        - Input IDs are rotated (shifted by one)
+        - The next_token_ids are inserted at the last position of each request
+        - Positions are copied as-is
+        - Hidden states are copied as-is
+        - The CommonAttentionMetadata is returned unchanged
+
+        Setup:
+        - 3 requests with query_lens [3, 2, 4]
+        - Tokens: [a1, a2, a3, b1, b2, c1, c2, c3, c4]
+        - After rotation: [a2, a3, -, b2, -, c2, c3, c4, -]
+        - After inserting next_tokens [100, 200, 300]:
+            [a2, a3, 100, b2, 200, c2, c3, c4, 300]
+        """
+        num_speculative_tokens = 3
+        block_size = BLOCK_SIZE
+
+        self.proposer, self.vllm_config = self._create_proposer(
+            method="eagle",
+            num_speculative_tokens=num_speculative_tokens,
+            device=self.device,
+            runner=self.runner,
+        )
+
+        batch_spec = BatchSpec(
+            seq_lens=[10, 8, 12],
+            query_lens=[3, 2, 4],
+        )
+
+        common_attn_metadata = create_common_attn_metadata(
+            batch_spec,
+            block_size=block_size,
+            device=self.device,
+        )
+
+        self.proposer.needs_extra_input_slots = False
+
+        target_token_ids = torch.tensor([10, 11, 12, 20, 21, 30, 31, 32, 33], dtype=torch.int32, device=self.device)
+        target_positions = torch.tensor([7, 8, 9, 6, 7, 8, 9, 10, 11], dtype=torch.int64, device=self.device)
+        target_hidden_states = torch.randn(9, self.proposer.hidden_size, dtype=self.proposer.dtype, device=self.device)
+        next_token_ids = torch.tensor([100, 200, 300], dtype=torch.int32, device=self.device)
+
+        with set_current_vllm_config(self.vllm_config):
+            out_num_tokens, out_token_indices, out_cad, long_seq_args = self.proposer.set_inputs_first_pass(
+                target_token_ids=target_token_ids,
+                next_token_ids=next_token_ids,
+                target_positions=target_positions,
+                target_hidden_states=target_hidden_states,
+                token_indices_to_sample=None,
+                cad=common_attn_metadata,
+                num_rejected_tokens_gpu=None,
+            )
+
+        self.assertEqual(out_num_tokens, 9)
+
+        expected_token_indices = torch.tensor([2, 4, 8], dtype=torch.int32, device=self.device)
+        self.assertTrue(torch.equal(out_token_indices, expected_token_indices))
+
+        self.assertIs(out_cad, common_attn_metadata)
+
+        expected_input_ids = torch.tensor(
+            [11, 12, 100, 21, 200, 31, 32, 33, 300], dtype=torch.int32, device=self.device
+        )
+        self.assertTrue(torch.equal(self.proposer.input_ids[:out_num_tokens], expected_input_ids))
+        self.assertTrue(torch.equal(self.proposer.positions[:out_num_tokens], target_positions))
+        self.assertTrue(torch.equal(self.proposer.hidden_states[:out_num_tokens], target_hidden_states))
+
+    def test_set_inputs_first_pass_pcp_dcp_mixed(self):
+        """
+        Test Default pcp_dcp_mixed scenario
+        """
+        self.proposer, self.vllm_config = self._create_proposer(
+            method="eagle",
+            num_speculative_tokens=3,
+            device=self.device,
+            runner=self.runner,
+        )
+
+        self.proposer.pcp_size = 2
+        self.proposer.dcp_size = 2
+        self.proposer.pcp_rank = 0
+        self.proposer.needs_extra_input_slots = False
+
+        num_decode_reqs = 2
+        num_prefill_reqs = 2
+
+        req_ids = ["req-0", "req-1", "req-2", "req-3"]
+        req_scheduled_tokens = {"req-0": 3, "req-1": 2, "req-2": 4, "req-3": 3}
+        query_lens = [3, 2, 4, 3]
+
+        self.runner.query_lens = torch.tensor(query_lens[:num_decode_reqs], dtype=torch.int32, device=self.device)
+        self.runner.input_batch = MagicMock()
+        self.runner.input_batch.req_ids = req_ids
+        self.runner.logits_indices = torch.arange(12, dtype=torch.int32, device=self.device)
+
+        query_start_loc = torch.tensor([0] + list(np.cumsum(query_lens)), dtype=torch.int32, device=self.device)
+        mock_common_attn_metadata = MagicMock()
+        mock_common_attn_metadata.query_start_loc = query_start_loc
+        mock_common_attn_metadata.query_start_loc_cpu = query_start_loc.clone()
+        mock_common_attn_metadata.num_reqs = 4
+        mock_common_attn_metadata.num_actual_tokens = 12
+
+        mock_common_attn_metadata.seq_lens = torch.tensor([10, 8, 12, 6], dtype=torch.int32, device=self.device)
+        mock_common_attn_metadata.seq_lens_cpu = mock_common_attn_metadata.seq_lens.clone()
+
+        mock_common_attn_metadata.slot_mapping = torch.zeros(12, dtype=torch.int32, device=self.device)
+
+        target_token_ids = torch.tensor(
+            [10, 11, 12, 20, 21, 30, 31, 32, 33, 40, 41, 42], dtype=torch.int32, device=self.device
+        )
+
+        target_positions = torch.tensor([7, 8, 9, 6, 7, 8, 9, 10, 11, 5, 6, 7], dtype=torch.int64, device=self.device)
+
+        next_token_ids = torch.tensor([100, 200, 300, 400], dtype=torch.int32, device=self.device)
+
+        target_hidden_states = torch.randn(18, self.proposer.hidden_size, dtype=self.proposer.dtype, device=self.device)
+
+        with set_current_vllm_config(self.vllm_config):
+            out_num_tokens, out_token_indices, out_cad, (query_lens_d, ori_token_indices_to_sample) = (
+                self.proposer.set_inputs_first_pass(
+                    target_token_ids=target_token_ids,
+                    next_token_ids=next_token_ids,
+                    target_positions=target_positions,
+                    target_hidden_states=target_hidden_states,
+                    token_indices_to_sample=None,
+                    cad=mock_common_attn_metadata,
+                    num_rejected_tokens_gpu=None,
+                    req_scheduled_tokens=req_scheduled_tokens,
+                    long_seq_metadata=MagicMock(),
+                    num_prefill_reqs=num_prefill_reqs,
+                    num_decode_reqs=num_decode_reqs,
+                )
+            )
+
+        self.assertEqual(out_num_tokens, 9)
+
+        expected_token_indices = torch.tensor([2, 4, 10, 11], dtype=torch.int32, device=self.device)
+        self.assertTrue(torch.equal(out_token_indices, expected_token_indices))
+
+        expected_seq_lens = torch.tensor([10, 8, 2, 2], dtype=torch.int32, device=self.device)
+        expected_query_start_loc = torch.tensor([0, 3, 5, 7, 9], dtype=torch.int32, device=self.device)
+        self.assertIs(out_cad, mock_common_attn_metadata)
+        self.assertEqual(out_cad.num_actual_tokens, 9)
+        self.assertTrue(torch.equal(out_cad.seq_lens, expected_seq_lens))
+        self.assertTrue(torch.equal(out_cad.query_start_loc, expected_query_start_loc))
+        self.assertEqual(out_cad.max_query_len, 4)
+
+        expected_query_lens_d = torch.tensor([3, 2], dtype=torch.int32, device=self.device)
+        expected_ori_token_indices_to_sample = torch.tensor([2, 4, 8, 11], dtype=torch.int32, device=self.device)
+        self.assertTrue(torch.equal(query_lens_d, expected_query_lens_d))
+        self.assertTrue(torch.equal(ori_token_indices_to_sample, expected_ori_token_indices_to_sample))
+
+        expected_input_ids = torch.tensor([11, 12, 100, 21, 200, 31, 300, 41, 0], dtype=torch.int32, device=self.device)
+        indices = torch.tensor([0, 1, 2, 6, 7, 10, 13, 14, 17], dtype=torch.long, device=self.device)
+        expected_target_hidden_states = target_hidden_states[indices]
+        self.assertTrue(torch.equal(self.proposer.input_ids[:out_num_tokens], expected_input_ids))
+        self.assertTrue(torch.equal(self.proposer.positions[:out_num_tokens], target_positions[:out_num_tokens]))
+        self.assertTrue(torch.equal(self.proposer.hidden_states[:out_num_tokens], expected_target_hidden_states))
+
+    def test_set_inputs_first_pass_draft_model(self):
+        """
+        Test for set_inputs_first_pass with a draft model (extra input slots,
+        no shift).
+
+        This tests the path where needs_extra_input_slots=True and
+        shift_input_ids=False (draft model case). In this case:
+        - Input IDs are NOT shifted
+        - Each request gets extra_slots_per_request (1) new slots
+        - The kernel handles copying tokens and inserting bonus/padding tokens
+        - A new CommonAttentionMetadata is returned with updated query_start_loc
+
+        Setup:
+        - 2 requests
+        - Request 0: tokens [10, 11, 12] at positions [0, 1, 2]
+        - Only tokens [10, 11] are "valid" (query_end_loc=1),
+            token 12 is a rejected token from previous speculation
+        - Request 1: tokens [20, 21] at positions [0, 1], both valid.
+        - Note: this is less than num_speculative_tokens (2) to ensure
+            we handle variable lengths correctly.
+        - next_token_ids: [100, 200] (bonus tokens)
+
+        With extra_slots_per_request=1 and shift=False:
+        Expected output layout:
+        Request 0 (indices 0-3):
+        - idx 0: token 10, pos 0
+        - idx 1: token 11, pos 1
+        - idx 2: token 100, pos 2 (bonus token)
+        - idx 3: padding_token_id, is_rejected=True
+        Request 1 (indices 4-6):
+        - idx 4: token 20, pos 0
+        - idx 5: token 21, pos 1
+        - idx 6: token 200, pos 2 (bonus token)
+        """
+        num_speculative_tokens = 2
+        block_size = BLOCK_SIZE
+
+        proposer, vllm_config = self._create_proposer(
+            method="draft_model",
+            num_speculative_tokens=num_speculative_tokens,
+            device=self.device,
+            runner=self.runner,
+        )
+        proposer.net_num_new_slots_per_request = 1
+        proposer.needs_extra_input_slots = True
+
+        proposer.parallel_drafting_token_id = 0
+        proposer.is_rejected_token_mask = torch.zeros(proposer.max_num_tokens, dtype=torch.bool, device=self.device)
+        proposer.is_masked_token_mask = torch.zeros(proposer.max_num_tokens, dtype=torch.bool, device=self.device)
+
+        mock_kv_cache_spec = MagicMock()
+        mock_kv_cache_spec.block_size = block_size
+        mock_attn_group = MagicMock()
+        mock_attn_group.kv_cache_spec = mock_kv_cache_spec
+        proposer.draft_attn_groups = [mock_attn_group]
+
+        batch_spec = BatchSpec(
+            seq_lens=[3, 2],
+            query_lens=[3, 2],
+        )
+
+        common_attn_metadata = create_common_attn_metadata(
+            batch_spec,
+            block_size=block_size,
+            device=self.device,
+        )
+
+        target_token_ids = torch.tensor([10, 11, 12, 20, 21], dtype=torch.int32, device=self.device)
+        target_positions = torch.tensor([0, 1, 2, 0, 1], dtype=torch.int64, device=self.device)
+        target_hidden_states = torch.randn(5, proposer.hidden_size, dtype=proposer.dtype, device=self.device)
+        next_token_ids = torch.tensor([100, 200], dtype=torch.int32, device=self.device)
+        num_rejected_tokens_gpu = torch.tensor([1, 0], dtype=torch.int32, device=self.device)
+
+        def mock_npu_copy_and_expand_eagle_inputs(
+            target_token_ids,
+            target_positions,
+            next_token_ids,
+            query_start_loc,
+            query_end_loc,
+            padding_token_id,
+            parallel_drafting_token_id,
+            extra_slots_per_request,
+            pass_hidden_states_to_model,
+            total_num_output_tokens,
+        ):
+            out_input_ids = torch.tensor([10, 11, 100, 0, 20, 21, 200], dtype=torch.int32, device=self.device)
+            out_positions = torch.tensor([0, 1, 2, 0, 0, 1, 2], dtype=torch.int32, device=self.device)
+            out_is_rejected = torch.zeros(7, dtype=torch.bool, device=self.device)
+            out_is_rejected[3] = True
+            out_is_masked = torch.zeros(7, dtype=torch.bool, device=self.device)
+            out_token_indices = torch.tensor([2, 6], dtype=torch.int32, device=self.device)
+            out_hidden_state_mapping = torch.arange(7, dtype=torch.int64, device=self.device)
+            return (
+                out_input_ids,
+                out_positions,
+                out_is_rejected,
+                out_is_masked,
+                out_token_indices,
+                out_hidden_state_mapping,
+            )
+
+        with (
+            set_current_vllm_config(vllm_config),
+            patch(
+                "torch.ops._C_ascend.npu_copy_and_expand_eagle_inputs",
+                side_effect=mock_npu_copy_and_expand_eagle_inputs,
+                create=True,
+            ),
+        ):
+            out_num_tokens, out_token_indices, out_cad, long_seq_args = proposer.set_inputs_first_pass(
+                target_token_ids=target_token_ids,
+                next_token_ids=next_token_ids,
+                target_positions=target_positions,
+                target_hidden_states=target_hidden_states,
+                token_indices_to_sample=None,
+                cad=common_attn_metadata,
+                num_rejected_tokens_gpu=num_rejected_tokens_gpu,
+            )
+
+        self.assertEqual(proposer.net_num_new_slots_per_request, 1)
+        self.assertTrue(proposer.needs_extra_input_slots)
+        self.assertEqual(out_num_tokens, 7)
+
+        expected_input_ids = torch.tensor([10, 11, 100, 0, 20, 21, 200], dtype=torch.int32, device=self.device)
+        self.assertTrue(torch.equal(proposer.input_ids[:out_num_tokens], expected_input_ids))
+
+        expected_positions = torch.tensor([0, 1, 2, 0, 0, 1, 2], dtype=torch.int64, device=self.device)
+        self.assertTrue(
+            torch.equal(
+                proposer.positions[:out_num_tokens],
+                expected_positions,
+            )
+        )
+
+        expected_is_rejected = torch.zeros(7, dtype=torch.bool, device=self.device)
+        expected_is_rejected[3] = True
+        self.assertTrue(torch.equal(proposer.is_rejected_token_mask[:out_num_tokens], expected_is_rejected))
+
+        expected_is_masked = torch.zeros(7, dtype=torch.bool, device=self.device)
+        self.assertTrue(torch.equal(proposer.is_masked_token_mask[:out_num_tokens], expected_is_masked))
+
+        expected_out_token_indices = torch.tensor([2, 6], dtype=torch.int32, device=self.device)
+        self.assertTrue(torch.equal(out_token_indices, expected_out_token_indices))
+
+        expected_query_start_loc = torch.tensor([0, 4, 7], dtype=torch.int32, device=self.device)
+        self.assertTrue(torch.equal(out_cad.query_start_loc, expected_query_start_loc))
+
+    def test_set_inputs_first_pass_parallel_drafting(self):
+        """
+        Test for set_inputs_first_pass with parallel drafting (extra input slots,
+        with shift).
+
+        This tests the path where needs_extra_input_slots=True and
+        shift_input_ids=True (parallel drafting case). In this case:
+        - Input IDs ARE shifted (like default EAGLE)
+        - Each request gets extra_slots_per_request (3) new slots
+        - Parallel drafting tokens are inserted and marked as masked
+        - Hidden states are mapped correctly
+
+        Setup:
+        - 2 requests with query_lens [4, 4] (1 bonus + 3 spec tokens each)
+        - Request 0: tokens [10, 11, 12, 13] at positions [5, 6, 7, 8]
+        - Only tokens [10, 11, 12] are "valid", token 13 is rejected
+        - Request 1: tokens [20, 21, 22, 23] at positions [10, 11, 12, 13], all valid.
+        - next_token_ids: [100, 200] (bonus tokens)
+
+        With shift_input_ids=True, extra_slots_per_request=3:
+        Expected output layout:
+        Request 0 (6 output slots = 4 - 1 + 3):
+        - idx 0-2: shifted tokens [11, 12, 100]
+        - idx 3-4: parallel_drafting_tokens, is_masked=True
+        - idx 5: padding_token, is_rejected=True
+        Request 1 (6 output slots = 4 - 1 + 3):
+        - idx 6-8: shifted tokens [21, 22, 23]
+        - idx 9: bonus token 200
+        - idx 10-11: parallel_drafting_tokens, is_masked=True
+        """
+        num_speculative_tokens = 3
+        block_size = BLOCK_SIZE
+
+        proposer, vllm_config = self._create_proposer(
+            method="eagle",
+            num_speculative_tokens=num_speculative_tokens,
+            parallel_drafting=True,
+            device=self.device,
+            runner=self.runner,
+        )
+
+        self.assertTrue(proposer.pass_hidden_states_to_model)
+        self.assertTrue(proposer.needs_extra_input_slots)
+
+        proposer.parallel_drafting_token_id = -2
+        proposer.parallel_drafting_hidden_state_tensor = torch.zeros(
+            proposer.hidden_size, dtype=proposer.dtype, device=self.device
+        )
+        proposer.is_rejected_token_mask = torch.zeros(proposer.max_num_tokens, dtype=torch.bool, device=self.device)
+        proposer.is_masked_token_mask = torch.zeros(proposer.max_num_tokens, dtype=torch.bool, device=self.device)
+
+        mock_kv_cache_spec = MagicMock()
+        mock_kv_cache_spec.block_size = block_size
+        mock_attn_group = MagicMock()
+        mock_attn_group.kv_cache_spec = mock_kv_cache_spec
+        proposer.draft_attn_groups = [mock_attn_group]
+
+        batch_spec = BatchSpec(
+            seq_lens=[9, 14],
+            query_lens=[4, 4],
+        )
+
+        common_attn_metadata = create_common_attn_metadata(
+            batch_spec,
+            block_size=block_size,
+            device=self.device,
+            arange_block_indices=True,
+        )
+
+        target_token_ids = torch.tensor([10, 11, 12, 13, 20, 21, 22, 23], dtype=torch.int32, device=self.device)
+        target_positions = torch.tensor([5, 6, 7, 8, 10, 11, 12, 13], dtype=torch.int64, device=self.device)
+        target_hidden_states = torch.arange(8 * proposer.hidden_size, dtype=proposer.dtype, device=self.device).view(
+            8, proposer.hidden_size
+        )
+        next_token_ids = torch.tensor([100, 200], dtype=torch.int32, device=self.device)
+        num_rejected_tokens_gpu = torch.tensor([1, 0], dtype=torch.int32, device=self.device)
+
+        def mock_npu_copy_and_expand_eagle_inputs_parallel(
+            target_token_ids,
+            target_positions,
+            next_token_ids,
+            query_start_loc,
+            query_end_loc,
+            padding_token_id,
+            parallel_drafting_token_id,
+            extra_slots_per_request,
+            pass_hidden_states_to_model,
+            total_num_output_tokens,
+        ):
+            out_input_ids = torch.tensor(
+                [11, 12, 100, -2, -2, 0, 21, 22, 23, 200, -2, -2],
+                dtype=torch.int32,
+                device=self.device,
+            )
+            out_positions = torch.tensor(
+                [5, 6, 7, 8, 9, 0, 10, 11, 12, 13, 14, 15], dtype=torch.int32, device=self.device
+            )
+            out_is_rejected = torch.zeros(12, dtype=torch.bool, device=self.device)
+            out_is_rejected[5] = True
+            out_is_masked = torch.zeros(12, dtype=torch.bool, device=self.device)
+            out_is_masked[3] = True
+            out_is_masked[4] = True
+            out_is_masked[10] = True
+            out_is_masked[11] = True
+            out_token_indices = torch.tensor([2, 3, 4, 9, 10, 11], dtype=torch.int32, device=self.device)
+            out_hidden_state_mapping = torch.tensor([0, 1, 2, 6, 7, 8, 9, 10], dtype=torch.int64, device=self.device)
+            return (
+                out_input_ids,
+                out_positions,
+                out_is_rejected,
+                out_is_masked,
+                out_token_indices,
+                out_hidden_state_mapping,
+            )
+
+        with (
+            set_current_vllm_config(vllm_config),
+            patch(
+                "torch.ops._C_ascend.npu_copy_and_expand_eagle_inputs",
+                side_effect=mock_npu_copy_and_expand_eagle_inputs_parallel,
+                create=True,
+            ),
+        ):
+            out_num_tokens, out_token_indices, out_cad, long_seq_args = proposer.set_inputs_first_pass(
+                target_token_ids=target_token_ids,
+                next_token_ids=next_token_ids,
+                target_positions=target_positions,
+                target_hidden_states=target_hidden_states,
+                token_indices_to_sample=None,
+                cad=common_attn_metadata,
+                num_rejected_tokens_gpu=num_rejected_tokens_gpu,
+            )
+
+        self.assertEqual(out_num_tokens, 12)
+
+        expected_input_ids = torch.tensor(
+            [11, 12, 100, -2, -2, 0, 21, 22, 23, 200, -2, -2],
+            dtype=torch.int32,
+            device=self.device,
+        )
+        self.assertTrue(torch.equal(proposer.input_ids[:out_num_tokens], expected_input_ids))
+
+        expected_positions = torch.tensor(
+            [5, 6, 7, 8, 9, 0, 10, 11, 12, 13, 14, 15], dtype=torch.int64, device=self.device
+        )
+        self.assertTrue(
+            torch.equal(
+                proposer.positions[:out_num_tokens],
+                expected_positions,
+            )
+        )
+
+        expected_is_rejected = torch.zeros(12, dtype=torch.bool, device=self.device)
+        expected_is_rejected[5] = True
+        self.assertTrue(torch.equal(proposer.is_rejected_token_mask[:out_num_tokens], expected_is_rejected))
+
+        expected_is_masked = torch.zeros(12, dtype=torch.bool, device=self.device)
+        expected_is_masked[3] = True
+        expected_is_masked[4] = True
+        expected_is_masked[10] = True
+        expected_is_masked[11] = True
+        self.assertTrue(torch.equal(proposer.is_masked_token_mask[:out_num_tokens], expected_is_masked))
+
+        expected_out_token_indices = torch.tensor([2, 3, 4, 9, 10, 11], dtype=torch.int32, device=self.device)
+        self.assertTrue(torch.equal(out_token_indices, expected_out_token_indices))
+
+        expected_query_start_loc = torch.tensor([0, 6, 12], dtype=torch.int32, device=self.device)
+        self.assertTrue(torch.equal(out_cad.query_start_loc, expected_query_start_loc))
+
+        parallel_drafting_hs = proposer.parallel_drafting_hidden_state_tensor
+        for i in range(out_num_tokens):
+            if expected_is_masked[i]:
+                self.assertTrue(
+                    torch.equal(proposer.hidden_states[i], parallel_drafting_hs),
+                    f"Masked position {i} should have parallel drafting hidden state",
+                )
