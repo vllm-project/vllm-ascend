@@ -163,9 +163,11 @@ class TestAscendW8A8FusedMoEMethod(TestBase):
         self.assertIs(fused_experts_input.topk_ids, topk_ids)
 
     @patch("torch_npu.npu_format_cast")
-    @patch("vllm_ascend.quantization.methods.w8a8_dynamic.envs_ascend")
-    def test_process_weights_after_loading(self, mock_envs, mock_format_cast):
-        mock_envs.VLLM_ASCEND_ENABLE_FUSED_MC2 = 1
+    @patch("vllm_ascend.quantization.methods.w8a8_dynamic.get_ascend_config")
+    def test_process_weights_after_loading(self, mock_get_config, mock_format_cast):
+        mock_config = MagicMock()
+        mock_config.enable_fused_mc2 = 1
+        mock_get_config.return_value = mock_config
         self.quant_method.dynamic_eplb = True
         mock_format_cast.return_value = torch.randint(
             -8, 8, (self.num_experts, self.hidden_size, 2 * self.intermediate_size), dtype=torch.int8

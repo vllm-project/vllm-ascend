@@ -203,8 +203,11 @@ class TestNPUWorker(TestBase):
             self.assertEqual(worker.cache_config.num_cpu_blocks, 50)
 
     @patch("vllm_ascend.worker.worker.CaMemAllocator")
-    @patch.dict("os.environ", {"VLLM_ASCEND_ENABLE_NZ": "0"})
-    def test_wake_up_mode_enabled(self, mock_allocator_class):
+    @patch("vllm_ascend.worker.worker.get_ascend_config")
+    def test_wake_up_mode_enabled(self, mock_get_config, mock_allocator_class):
+        mock_config = MagicMock()
+        mock_config.weight_nz_mode = 0
+        mock_get_config.return_value = mock_config
         """Test wake_up method when sleep mode is enabled"""
         from vllm_ascend.worker.worker import NPUWorker
 
@@ -397,8 +400,10 @@ class TestNPUWorker(TestBase):
         vllm_config_mock = MagicMock()
         vllm_config_mock.profiler_config = profiler_config
 
-        with patch("vllm_ascend.worker.worker.envs_ascend") as mock_envs:
-            mock_envs.MSMONITOR_USE_DAEMON = 0
+        with patch("vllm_ascend.worker.worker.get_ascend_config") as mock_get_config:
+            mock_config = MagicMock()
+            mock_config.msmonitor_use_daemon = False
+            mock_get_config.return_value = mock_config
             with patch("torch_npu.profiler.tensorboard_trace_handler") as mock_handler:
                 with patch.object(NPUWorker, "__init__", lambda x, **kwargs: None):
                     worker = NPUWorker()
@@ -411,12 +416,14 @@ class TestNPUWorker(TestBase):
                 call_kwargs = mock_handler.call_args[1] if mock_handler.call_args[1] else {}
                 self.assertEqual(call_kwargs.get("worker_name"), "warmup_dp0_pp0_tp0_dcp0_ep0_rank0")
 
-    @patch("vllm_ascend.worker.worker.envs_ascend")
-    def test_profile_and_msmonitor_both_enabled_raises_error(self, mock_envs_ascend):
+    @patch("vllm_ascend.worker.worker.get_ascend_config")
+    def test_profile_and_msmonitor_both_enabled_raises_error(self, mock_get_config):
         """Test _create_profiler raises when both profiler and msmonitor are enabled"""
         from vllm_ascend.worker.worker import NPUWorker
 
-        mock_envs_ascend.MSMONITOR_USE_DAEMON = 1
+        mock_config = MagicMock()
+        mock_config.msmonitor_use_daemon = True
+        mock_get_config.return_value = mock_config
 
         profiler_config = ProfilerConfig(profiler="torch", torch_profiler_dir="/path/to/traces")
         vllm_config_mock = MagicMock()
@@ -512,7 +519,7 @@ class TestNPUWorker(TestBase):
                 num_tokens=mock_decode_token_per_req, uniform_decode=True
             )
 
-    @patch("vllm_ascend.worker.worker.envs_ascend")
+    @patch("vllm_ascend.worker.worker.get_ascend_config")
     @patch("torch_npu.profiler._ExperimentalConfig")
     @patch("torch_npu.profiler.profile")
     @patch("torch_npu.profiler.tensorboard_trace_handler")
@@ -529,12 +536,14 @@ class TestNPUWorker(TestBase):
         mock_trace_handler,
         mock_profile,
         mock_experimental_config,
-        mock_envs_ascend,
+        mock_get_config,
     ):
         """Test _create_profiler - profiler enabled with worker_name for trace naming (RFC #6954)"""
         from vllm_ascend.worker.worker import NPUWorker
 
-        mock_envs_ascend.MSMONITOR_USE_DAEMON = 0
+        mock_config = MagicMock()
+        mock_config.msmonitor_use_daemon = False
+        mock_get_config.return_value = mock_config
 
         profiler_config = ProfilerConfig(
             profiler="torch",

@@ -57,21 +57,30 @@ class TestAscendUnquantizedLinearMethod(TestBase):
         mock_dtype = mock.PropertyMock(return_value=torch.float16)
         type(self.layer.weight.data).dtype = mock_dtype
 
-    @patch.dict(os.environ, {"VLLM_ASCEND_ENABLE_NZ": "0"})
+    @patch("vllm_ascend.utils.get_ascend_config")
     @mock.patch("torch_npu.npu_format_cast")
-    def test_process_weights_after_loading_with_nz0(self, mock_format_cast):
+    def test_process_weights_after_loading_with_nz0(self, mock_format_cast, mock_get_config):
+        mock_config = MagicMock()
+        mock_config.weight_nz_mode = 0
+        mock_get_config.return_value = mock_config
         self.method.process_weights_after_loading(self.layer)
         mock_format_cast.assert_not_called()
 
-    @patch.dict(os.environ, {"VLLM_ASCEND_ENABLE_NZ": "1"})
+    @patch("vllm_ascend.utils.get_ascend_config")
     @mock.patch("torch_npu.npu_format_cast")
-    def test_process_weights_after_loading_with_nz1(self, mock_format_cast):
+    def test_process_weights_after_loading_with_nz1(self, mock_format_cast, mock_get_config):
+        mock_config = MagicMock()
+        mock_config.weight_nz_mode = 1
+        mock_get_config.return_value = mock_config
         self.method.process_weights_after_loading(self.layer)
         mock_format_cast.assert_not_called()
 
-    @patch.dict(os.environ, {"VLLM_ASCEND_ENABLE_NZ": "2"})
+    @patch("vllm_ascend.utils.get_ascend_config")
     @mock.patch("torch_npu.npu_format_cast")
-    def test_process_weights_after_loading_with_nz2(self, mock_format_cast):
+    def test_process_weights_after_loading_with_nz2(self, mock_format_cast, mock_get_config):
+        mock_config = MagicMock()
+        mock_config.weight_nz_mode = 2
+        mock_get_config.return_value = mock_config
         self.method.process_weights_after_loading(self.layer)
         mock_format_cast.assert_called_once()
 

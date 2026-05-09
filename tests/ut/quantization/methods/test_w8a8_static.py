@@ -1,4 +1,3 @@
-import os
 from unittest.mock import MagicMock, patch
 
 import torch
@@ -100,9 +99,12 @@ class TestAscendW8A8LinearMethod(TestBase):
         call_kwargs = mock_npu_quant_matmul.call_args.kwargs
         self.assertTrue(torch.equal(call_kwargs["bias"], bias))
 
-    @patch.dict(os.environ, {"VLLM_ASCEND_ENABLE_NZ": "1"})
+    @patch("vllm_ascend.utils.get_ascend_config")
     @patch("torch_npu.npu_format_cast")
-    def test_process_weights_after_loading_with_nz1(self, mock_npu_format_cast):
+    def test_process_weights_after_loading_with_nz1(self, mock_npu_format_cast, mock_get_config):
+        mock_config = MagicMock()
+        mock_config.weight_nz_mode = 1
+        mock_get_config.return_value = mock_config
         layer = MagicMock()
 
         layer.weight.data = torch.randint(-128, 127, (128, 256), dtype=torch.int8)
@@ -124,9 +126,12 @@ class TestAscendW8A8LinearMethod(TestBase):
         mock_npu_format_cast.assert_called_once()
         self.assertTrue(isinstance(layer.deq_scale, MagicMock))
 
-    @patch.dict(os.environ, {"VLLM_ASCEND_ENABLE_NZ": "2"})
+    @patch("vllm_ascend.utils.get_ascend_config")
     @patch("torch_npu.npu_format_cast")
-    def test_process_weights_after_loading_with_nz2_and_compressed_tensors(self, mock_npu_format_cast):
+    def test_process_weights_after_loading_with_nz2_and_compressed_tensors(self, mock_npu_format_cast, mock_get_config):
+        mock_config = MagicMock()
+        mock_config.weight_nz_mode = 2
+        mock_get_config.return_value = mock_config
         layer = MagicMock()
 
         layer.weight.data = torch.randint(-128, 127, (128, 256), dtype=torch.int8)
