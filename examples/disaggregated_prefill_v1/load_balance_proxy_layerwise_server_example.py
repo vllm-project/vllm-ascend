@@ -489,7 +489,6 @@ async def _handle_completions(api: str, request: Request):
         decoder = proxy_state.decoders[decoder_idx]
         # logger.debug("Using %s %s", prefiller.url, decoder.url)
         # Stream response from decoder
-        released_kv = False
 
         # Record request info for recompute
         stream_flag = bool(req_data.get("stream", False))
@@ -520,9 +519,8 @@ async def _handle_completions(api: str, request: Request):
             return _backend_error_response(e)
 
         async def generate_stream():
-            nonlocal initial_response, initial_stream_context, released_kv
+            nonlocal initial_response, initial_stream_context
             generated_token = ""
-            released_kv = False
             retry_count = 0
             retry = True
             completion_tokens = 0

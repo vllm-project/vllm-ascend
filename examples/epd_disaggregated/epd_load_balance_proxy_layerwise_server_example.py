@@ -643,15 +643,19 @@ async def _handle_completions(api: str, request: Request):
             encoder_idx = proxy_state.select_encoder(encoder_score)
             encoder = proxy_state.encoders[encoder_idx]
             logger.debug("Sending to encoder: %s", encoder.url)
-            _ = await send_request_to_encode_service(
-                encoder.client,
-                encoder_idx,
-                api,
-                req_data,
-                request_id,
-                max_retries=global_args.max_retries,
-                base_delay=global_args.retry_delay,
-            )
+            try:
+                _ = await send_request_to_encode_service(
+                    encoder.client,
+                    encoder_idx,
+                    api,
+                    req_data,
+                    request_id,
+                    max_retries=global_args.max_retries,
+                    base_delay=global_args.retry_delay,
+                )
+            except Exception:
+                proxy_state.release_encoder(encoder_idx, encoder_score)
+                raise
             proxy_state.release_encoder(encoder_idx, encoder_score)
 
         token_score = encoder_score + text_length
@@ -705,7 +709,6 @@ async def _handle_completions(api: str, request: Request):
             decoder = proxy_state.decoders[decoder_idx]
             # logger.debug("Using %s %s", prefiller.url, decoder.url)
             # Stream response from decoder
-            released_kv = False
             try:
                 initial_stream_context, initial_response = await open_stream_response_with_retry(
                     decoder.client,
@@ -721,7 +724,7 @@ async def _handle_completions(api: str, request: Request):
                 return _backend_error_response(e)
 
             async def generate_stream():
-                nonlocal initial_response, initial_stream_context, released_kv
+                nonlocal initial_response, initial_stream_context
                 try:
                     async for chunk in iter_opened_stream_response(initial_stream_context, initial_response):
                         yield chunk

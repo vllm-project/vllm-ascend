@@ -865,6 +865,9 @@ async def _handle_completions(api: str, request: Request):
                         if stop_reason == "recomputed":
                             retry = True
                             retry_count += 1
+                            # Release old decoder / prefiller kv before selecting new ones
+                            release_prefiller_kv_once()
+                            proxy_state.release_decoder(instance_info.decoder_idx, instance_info.decoder_score)
                             if chat_flag:
                                 messages[0]["content"] = origin_prompt + generated_token
                             else:
@@ -872,6 +875,7 @@ async def _handle_completions(api: str, request: Request):
                             req_data["max_tokens"] = origin_max_tokens - completion_tokens + retry_count
                             tmp_request_length = len(json.dumps(req_data).encode("utf-8"))
                             instance_info = await _handle_select_instance(api, req_data, tmp_request_length)
+                            released_kv = False  # Reset kv flag for the new prefiller
                             break
                         if retry_count > 0 and not stream_flag:
                             if chat_flag:
