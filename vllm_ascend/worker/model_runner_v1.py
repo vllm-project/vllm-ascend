@@ -386,7 +386,7 @@ class NPUModelRunner(GPUModelRunner):
             self.is_kv_consumer = vllm_config.kv_transfer_config.is_kv_consumer
 
         set_cos_and_sin(vllm_config, self.max_num_reqs, self.uniform_decode_query_len, self.dtype, self.device)
-        set_mc2_tokens_capacity(vllm_config)
+        set_mc2_tokens_capacity(vllm_config, self.max_model_len, self.uniform_decode_query_len)
         set_mc2_mask(vllm_config, self.device)
         self.decode_threshold = 1 + (self.speculative_config.num_speculative_tokens if self.speculative_config else 0)
 

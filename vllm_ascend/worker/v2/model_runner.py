@@ -123,7 +123,7 @@ class NPUModelRunner(GPUModelRunner):
         set_weight_prefetch_method(self.ascend_config.weight_prefetch_config)
         # TODO: remove set_cos_and_sin (together with update_cos_sin) when mla can properly handle cos/sin internally
         set_cos_and_sin(vllm_config, self.max_num_reqs, self.decode_query_len, self.dtype, self.device)
-        set_mc2_tokens_capacity(vllm_config)
+        set_mc2_tokens_capacity(vllm_config, self.max_num_reqs, self.decode_query_len)
         set_mc2_mask(vllm_config, self.device)
 
         # we need to update full graph params in run_fullgraph,
