@@ -5,6 +5,7 @@ from dataclasses import replace
 import torch
 from vllm.distributed.parallel_state import get_tp_group
 from vllm.triton_utils import HAS_TRITON
+from vllm.utils.math_utils import cdiv
 from vllm.v1.outputs import SamplerOutput
 from vllm.v1.sample.metadata import SamplingMetadata
 from vllm.v1.sample.rejection_sampler import (
@@ -14,7 +15,6 @@ from vllm.v1.sample.rejection_sampler import (
     RejectionSampler,
     generate_uniform_probs,
 )
-from vllm.v1.sample.sampler import Sampler
 from vllm.v1.spec_decode.metadata import SpecDecodeMetadata
 
 from vllm_ascend.ascend_config import get_ascend_config
@@ -51,15 +51,24 @@ class AscendRejectionSampler(RejectionSampler):
         if sampling_metadata.no_penalties:
             return logits
 
-        """Use Triton-Ascend penalties on NPU when Triton is available; else vLLM default."""
-        if not HAS_TRITON:
-            return Sampler.apply_penalties(logits, sampling_metadata, output_token_ids)
-
         assert sampling_metadata.prompt_token_ids is not None
         prompt_token_ids = sampling_metadata.prompt_token_ids[repeat_indices]
         presence_penalties = sampling_metadata.presence_penalties[repeat_indices]
         frequency_penalties = sampling_metadata.frequency_penalties[repeat_indices]
         repetition_penalties = sampling_metadata.repetition_penalties[repeat_indices]
+
+        if not HAS_TRITON:
+            from vllm.v1.sample.ops.penalties import apply_all_penalties as vllm_apply_all_penalties
+
+            return vllm_apply_all_penalties(
+                logits,
+                prompt_token_ids,
+                presence_penalties,
+                frequency_penalties,
+                repetition_penalties,
+                output_token_ids,
+            )
+
         return apply_all_penalties(
             logits,
             prompt_token_ids,
@@ -113,6 +122,12 @@ class AscendRejectionSampler(RejectionSampler):
                 requested.
         """
         assert metadata.max_spec_len <= MAX_SPEC_LEN
+
+        ascend_config = get_ascend_config()
+        rejection_config = ascend_config.rejection_sampling_config
+        enable_sampling_dp = rejection_config.enable_sampling_dp
+        skip_target_logits_sampling = rejection_config.skip_target_logits_sampling
+
         bonus_logits_indices = metadata.bonus_logits_indices
         target_logits_indices = metadata.target_logits_indices
 
@@ -147,24 +162,60 @@ class AscendRejectionSampler(RejectionSampler):
             # the original raw logits for logprobs computation, since
             # apply_logits_processors modifies the tensor in-place.
             target_logits = target_logits.clone()
-        target_logits = self.apply_logits_processors(target_logits, sampling_metadata, metadata)
-        # [num_tokens, vocab_size]
-        # NOTE(woosuk): `target_logits` can be updated in place inside the
-        # `apply_sampling_constraints` function.
-        target_logits = apply_sampling_constraints(
-            target_logits, metadata.cu_num_draft_tokens, sampling_metadata, self.top_k
+
+        # Check whether to use DP sharding path.
+        # DP sharding is only applicable when:
+        # - enable_sampling_dp is True
+        # - draft_probs is None (ngram/suffix spec decode, no draft probs to distribute)
+        # - thinking budget state holder is not active
+        use_dp_sharding = (
+            enable_sampling_dp
+            and draft_probs is None
+            and not (
+                sampling_metadata.thinking_budget_state_holder is not None
+                and sampling_metadata.thinking_budget_state_holder.has_tracked_requests()
+            )
         )
 
-        output_token_ids = rejection_sample(
-            metadata.draft_token_ids,
-            metadata.num_draft_tokens,
-            metadata.max_spec_len,
-            metadata.cu_num_draft_tokens,
-            draft_probs,
-            target_logits,
-            bonus_token_ids,
-            sampling_metadata,
-        )
+        if use_dp_sharding:
+            tp_group = get_tp_group()
+            tp_size = tp_group.world_size
+            tp_rank = tp_group.rank_in_group
+
+            batch_size = len(metadata.num_draft_tokens)
+            chunk_size = cdiv(batch_size, tp_size)
+            start_batch = tp_rank * chunk_size
+            end_batch = min(start_batch + chunk_size, batch_size)
+
+            output_token_ids = self._rejection_sample_with_dp_sharding(
+                metadata,
+                target_logits,
+                bonus_token_ids,
+                sampling_metadata,
+                start_batch,
+                end_batch,
+                chunk_size,
+                skip_target_logits_sampling,
+            )
+        else:
+            # [num_tokens, vocab_size]
+            # NOTE(woosuk): `target_logits` can be updated in place inside the
+            # `apply_sampling_constraints` function.
+            target_logits = self.apply_logits_processors(target_logits, sampling_metadata, metadata)
+            target_logits = apply_sampling_constraints(
+                target_logits, metadata.cu_num_draft_tokens, sampling_metadata, self.top_k
+            )
+
+            output_token_ids = rejection_sample(
+                metadata.draft_token_ids,
+                metadata.num_draft_tokens,
+                metadata.max_spec_len,
+                metadata.cu_num_draft_tokens,
+                draft_probs,
+                target_logits,
+                bonus_token_ids,
+                sampling_metadata,
+            )
 
         logprobs_tensors = None
         if sampling_metadata.max_num_logprobs is not None:
@@ -181,6 +232,109 @@ class AscendRejectionSampler(RejectionSampler):
             sampled_token_ids=output_token_ids,
             logprobs_tensors=logprobs_tensors,
         )
+
+    def _rejection_sample_with_dp_sharding(
+        self,
+        metadata: SpecDecodeMetadata,
+        target_logits: torch.Tensor,
+        bonus_token_ids: torch.Tensor,
+        sampling_metadata: SamplingMetadata,
+        start_batch: int,
+        end_batch: int,
+        chunk_size: int,
+        skip_target_logits_sampling: bool,
+    ) -> torch.Tensor:
+        tp_group = get_tp_group()
+        batch_size = len(metadata.num_draft_tokens)
+        max_spec_len = metadata.max_spec_len
+        local_batch = end_batch - start_batch
+
+        if local_batch <= 0:
+            padded_output = torch.full(
+                (chunk_size, max_spec_len + 1),
+                PLACEHOLDER_TOKEN_ID,
+                dtype=torch.int32,
+                device=target_logits.device,
+            )
+            gathered_output = tp_group.all_gather(padded_output, dim=0)
+            return gathered_output[:batch_size]
+
+        local_sampling_metadata = _split_sampling_metadata(sampling_metadata, start_batch, end_batch)
+
+        local_bonus_token_ids = bonus_token_ids[start_batch:end_batch]
+
+        cu_num_draft_tokens = metadata.cu_num_draft_tokens
+
+        local_num_draft_tokens = metadata.num_draft_tokens[start_batch:end_batch]
+        draft_start = sum(metadata.num_draft_tokens[:start_batch]) if start_batch > 0 else 0
+        draft_end = draft_start + sum(local_num_draft_tokens)
+        local_draft_token_ids = metadata.draft_token_ids[draft_start:draft_end]
+        local_target_logits = target_logits[draft_start:draft_end]
+
+        device = cu_num_draft_tokens.device
+        if start_batch > 0:
+            local_cu_num_draft = cu_num_draft_tokens[start_batch:end_batch] - cu_num_draft_tokens[start_batch - 1]
+        else:
+            local_cu_num_draft = cu_num_draft_tokens[start_batch:end_batch]
+        local_cu_num_sampled = local_cu_num_draft + torch.arange(1, local_batch + 1, device=device, dtype=torch.int32)
+
+        local_metadata = SpecDecodeMetadata(
+            draft_token_ids=local_draft_token_ids,
+            num_draft_tokens=local_num_draft_tokens,
+            cu_num_draft_tokens=local_cu_num_draft,
+            cu_num_sampled_tokens=local_cu_num_sampled,
+            target_logits_indices=torch.arange(len(local_draft_token_ids), dtype=torch.int32, device=device),
+            bonus_logits_indices=torch.arange(
+                len(local_draft_token_ids),
+                len(local_draft_token_ids) + len(local_num_draft_tokens),
+                dtype=torch.int32,
+                device=device,
+            ),
+            logits_indices=torch.arange(
+                len(local_draft_token_ids) + len(local_num_draft_tokens),
+                dtype=torch.int32,
+                device=device,
+            ),
+        )
+
+        if not skip_target_logits_sampling:
+            local_target_logits = self.apply_logits_processors(
+                local_target_logits,
+                local_sampling_metadata,
+                local_metadata,
+            )
+
+            local_target_logits = apply_sampling_constraints(
+                local_target_logits,
+                local_cu_num_draft,
+                local_sampling_metadata,
+                self.top_k,
+            )
+
+        local_output_token_ids = rejection_sample(
+            local_draft_token_ids,
+            local_num_draft_tokens,
+            max_spec_len,
+            local_cu_num_draft,
+            None,
+            local_target_logits,
+            local_bonus_token_ids,
+            local_sampling_metadata,
+            synthetic_mode=self.synthetic_mode,
+            synthetic_conditional_rates=self.synthetic_conditional_rates,
+        )
+
+        padded_output = torch.full(
+            (chunk_size, max_spec_len + 1),
+            PLACEHOLDER_TOKEN_ID,
+            dtype=torch.int32,
+            device=target_logits.device,
+        )
+        padded_output[:local_batch] = local_output_token_ids
+
+        gathered_output = tp_group.all_gather(padded_output, dim=0)
+
+        return gathered_output[:batch_size]
 
 
 def greedy_sample(logits: torch.Tensor) -> torch.Tensor:
@@ -1345,3 +1499,50 @@ def sample_recovered_tokens_blockwise_pytorch(
         output_token_ids[:] = target_indices[torch.arange(num_tokens, device=device), indices]
     else:
         output_token_ids[:] = torch.argmax(prob_over_q, dim=1)
+
+
+def _split_sampling_metadata(metadata: SamplingMetadata, start: int, end: int) -> SamplingMetadata:
+    local_temperature = metadata.temperature[start:end] if metadata.temperature is not None else None
+    local_top_p = metadata.top_p[start:end] if metadata.top_p is not None else None
+    local_top_k = metadata.top_k[start:end] if metadata.top_k is not None else None
+    local_frequency_penalties = metadata.frequency_penalties[start:end]
+    local_presence_penalties = metadata.presence_penalties[start:end]
+    local_repetition_penalties = metadata.repetition_penalties[start:end]
+
+    local_prompt_token_ids = metadata.prompt_token_ids[start:end] if metadata.prompt_token_ids is not None else None
+    local_allowed_mask = (
+        metadata.allowed_token_ids_mask[start:end] if metadata.allowed_token_ids_mask is not None else None
+    )
+
+    local_output_token_ids = metadata.output_token_ids[start:end]
+    local_spec_token_ids = metadata.spec_token_ids[start:end] if metadata.spec_token_ids is not None else None
+
+    local_generators = {i - start: gen for i, gen in metadata.generators.items() if start <= i < end}
+    local_bad_words = {i - start: words for i, words in metadata.bad_words_token_ids.items() if start <= i < end}
+    local_logprob_token_ids = (
+        {i - start: tids for i, tids in metadata.logprob_token_ids.items() if start <= i < end}
+        if metadata.logprob_token_ids is not None
+        else None
+    )
+
+    return SamplingMetadata(
+        temperature=local_temperature,
+        all_greedy=metadata.all_greedy,
+        all_random=metadata.all_random,
+        top_p=local_top_p,
+        top_k=local_top_k,
+        generators=local_generators,
+        max_num_logprobs=metadata.max_num_logprobs,
+        no_penalties=metadata.no_penalties,
+        prompt_token_ids=local_prompt_token_ids,
+        frequency_penalties=local_frequency_penalties,
+        presence_penalties=local_presence_penalties,
+        repetition_penalties=local_repetition_penalties,
+        output_token_ids=local_output_token_ids,
+        allowed_token_ids_mask=local_allowed_mask,
+        bad_words_token_ids=local_bad_words,
+        logitsprocs=metadata.logitsprocs,
+        logprob_token_ids=local_logprob_token_ids,
+        spec_token_ids=local_spec_token_ids,
+        thinking_budget_state_holder=None,
+    )

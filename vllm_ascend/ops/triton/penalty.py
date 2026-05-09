@@ -134,6 +134,13 @@ def _apply_all_penalties_triton(
 ) -> None:
     """Apply all penalties given precomputed bin counts and masks."""
     num_seqs, vocab_size = logits.shape
+    # Guard against empty logits to avoid kernel launch failure with grid=(0,1,1).
+    # Triton-Ascend backend does not support launching kernels with coreDim=0.
+    # This can happen when get_token_bin_counts_and_mask_triton returns empty tensors
+    # in DP sharding scenarios (see bincount.py for details).
+    if num_seqs == 0:
+        return
+
     grid = (min(num_seqs, get_vectorcore_num()), 1, 1)
 
     apply_all_penalties_kernel[grid](

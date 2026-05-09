@@ -13,6 +13,8 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
+from __future__ import annotations
+
 import json
 import os
 from typing import TYPE_CHECKING, Any
@@ -29,7 +31,7 @@ class AscendConfig:
     Configuration Object for additional_config from vllm.configs.
     """
 
-    def __init__(self, vllm_config: "VllmConfig"):
+    def __init__(self, vllm_config: VllmConfig):
         self.vllm_config = vllm_config
         additional_config = vllm_config.additional_config if vllm_config.additional_config is not None else {}
 
@@ -230,6 +232,15 @@ class AscendConfig:
         self.enable_async_exponential = (
             bool(additional_config.get("enable_async_exponential", False)) and not envs.VLLM_BATCH_INVARIANT
         )
+
+        rejection_sampling_config = additional_config.get("rejection_sampling_config", {})
+        self.rejection_sampling_config = RejectionSamplingConfig(rejection_sampling_config, vllm_config)
+
+        if self.rejection_sampling_config.enable_sampling_dp and self.enable_async_exponential:
+            logger.warning(
+                "enable_sampling_dp is incompatible with enable_async_exponential. Disabling enable_async_exponential."
+            )
+            self.enable_async_exponential = False
 
         use_sparse = hasattr(vllm_config.model_config, "hf_text_config") and hasattr(
             vllm_config.model_config.hf_text_config, "index_topk"
@@ -687,6 +698,38 @@ class EplbConfig:
 
         logger.info("Dynamic EPLB is %s", self.config["dynamic_eplb"])
         logger.info("The number of redundant experts is %s", self.config["num_redundant_experts"])
+
+
+class RejectionSamplingConfig:
+    """Configuration for rejection sampling optimizations in speculative decoding.
+
+    Usage::
+
+        vllm serve <model> --additional-config '{
+            "rejection_sampling_config": {
+                "enable_sampling_dp": true,
+                "skip_target_logits_sampling": false,
+                "acceleration_method": "default"
+            }
+        }'
+    """
+
+    def __init__(self, config: dict | None = None, vllm_config: VllmConfig | None = None):
+        if config is None:
+            config = {}
+
+        import vllm.envs as envs
+
+        self.enable_sampling_dp: bool = (
+            bool(config.get("enable_sampling_dp", False))
+            and vllm_config is not None
+            and vllm_config.parallel_config.tensor_parallel_size > 1
+            and not envs.VLLM_BATCH_INVARIANT
+        )
+
+        self.skip_target_logits_sampling: bool = config.get("skip_target_logits_sampling", False)
+
+        self.acceleration_method: str = config.get("acceleration_method", "default")
 
 
 _ASCEND_CONFIG: AscendConfig | None = None
