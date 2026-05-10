@@ -1649,12 +1649,10 @@ class MockInputBatch:
         self.num_reqs = num_reqs
         self.req_ids = req_ids
         self.vocab_size = vocab_size
-        # num_tokens_no_spec tracks the non-speculative token count per request.
-        # These UTs use sequence lengths 10, 15, 20, ... so the backing field
-        # needs to be 11, 16, 21, ... because the implementation reads
-        # `num_tokens_no_spec - 1` before calling request.get_token_id(...).
+        # num_tokens_no_spec represents the sequence length (excluding speculative tokens)
+        # for each request. Default to seq_len + 1 for each request.
         if num_tokens_no_spec is None:
-            self.num_tokens_no_spec = np.array([11 + 5 * i for i in range(num_reqs)], dtype=np.int64)
+            self.num_tokens_no_spec = np.array([i + 11 for i in range(num_reqs)], dtype=np.int64)
         else:
             self.num_tokens_no_spec = np.array(num_tokens_no_spec, dtype=np.int64)
 
@@ -1733,7 +1731,12 @@ class TestPrepareNextTokenIdsPadded(TestBase):
             "req_2": MockCachedRequestState("req_2", list(range(20))),
         }
 
-        gpu_input_batch = MockInputBatch(num_reqs=num_reqs, req_ids=["req_0", "req_1", "req_2"], vocab_size=vocab_size)
+        gpu_input_batch = MockInputBatch(
+            num_reqs=num_reqs,
+            req_ids=["req_0", "req_1", "req_2"],
+            vocab_size=vocab_size,
+            num_tokens_no_spec=[11, 16, 21],  # seq_len = num_tokens_no_spec - 1 = [10, 15, 20]
+        )
 
         discard_request_indices = torch.tensor([], dtype=torch.int64)
         num_discarded_requests = 0
@@ -1775,7 +1778,12 @@ class TestPrepareNextTokenIdsPadded(TestBase):
             "req_2": MockCachedRequestState("req_2", list(range(20))),
         }
 
-        gpu_input_batch = MockInputBatch(num_reqs=num_reqs, req_ids=["req_0", "req_1", "req_2"], vocab_size=vocab_size)
+        gpu_input_batch = MockInputBatch(
+            num_reqs=num_reqs,
+            req_ids=["req_0", "req_1", "req_2"],
+            vocab_size=vocab_size,
+            num_tokens_no_spec=[11, 16, 21],  # seq_len = num_tokens_no_spec - 1 = [10, 15, 20]
+        )
 
         discard_request_indices = torch.tensor([], dtype=torch.int64)
         num_discarded_requests = 0
@@ -1814,7 +1822,12 @@ class TestPrepareNextTokenIdsPadded(TestBase):
             "req_2": MockCachedRequestState("req_2", list(range(25))),
         }
 
-        gpu_input_batch = MockInputBatch(num_reqs=num_reqs, req_ids=["req_0", "req_1", "req_2"], vocab_size=vocab_size)
+        gpu_input_batch = MockInputBatch(
+            num_reqs=num_reqs,
+            req_ids=["req_0", "req_1", "req_2"],
+            vocab_size=vocab_size,
+            num_tokens_no_spec=[11, 16, 26],  # seq_len = num_tokens_no_spec - 1 = [10, 15, 25]
+        )
 
         discard_request_indices = torch.tensor([], dtype=torch.int64)
         num_discarded_requests = 0
@@ -1855,7 +1868,12 @@ class TestPrepareNextTokenIdsPadded(TestBase):
             "req_2": MockCachedRequestState("req_2", list(range(25))),
         }
 
-        gpu_input_batch = MockInputBatch(num_reqs=num_reqs, req_ids=["req_0", "req_1", "req_2"], vocab_size=vocab_size)
+        gpu_input_batch = MockInputBatch(
+            num_reqs=num_reqs,
+            req_ids=["req_0", "req_1", "req_2"],
+            vocab_size=vocab_size,
+            num_tokens_no_spec=[11, 21, 21],  # seq_len = num_tokens_no_spec - 1 = [10, 20, 20]
+        )
 
         discard_request_indices = torch.tensor([0, 2], dtype=torch.int64)
         num_discarded_requests = 2
@@ -1881,8 +1899,6 @@ class TestPrepareNextTokenIdsPadded(TestBase):
         num_reqs = 4
         vocab_size = 1000
 
-        # seq_lens_cpu = torch.tensor([10, 15, 20, 25], dtype=torch.int32)
-
         sampled_token_ids = torch.tensor(
             [
                 [100, 101, -1, -1, -1],
@@ -1901,7 +1917,10 @@ class TestPrepareNextTokenIdsPadded(TestBase):
         }
 
         gpu_input_batch = MockInputBatch(
-            num_reqs=num_reqs, req_ids=["req_0", "req_1", "req_2", "req_3"], vocab_size=vocab_size
+            num_reqs=num_reqs,
+            req_ids=["req_0", "req_1", "req_2", "req_3"],
+            vocab_size=vocab_size,
+            num_tokens_no_spec=[11, 16, 26, 31],  # seq_len = num_tokens_no_spec - 1 = [10, 15, 25, 30]
         )
 
         discard_request_indices = torch.tensor([1], dtype=torch.int64)
@@ -1927,15 +1946,18 @@ class TestPrepareNextTokenIdsPadded(TestBase):
         num_reqs = 1
         vocab_size = 1000
 
-        # seq_lens_cpu = torch.tensor([10], dtype=torch.int32)
-
         sampled_token_ids = torch.tensor([[100, 101, 102, 103, 104]], dtype=torch.int64)
 
         requests = {
             "req_0": MockCachedRequestState("req_0", list(range(15))),
         }
 
-        gpu_input_batch = MockInputBatch(num_reqs=num_reqs, req_ids=["req_0"], vocab_size=vocab_size)
+        gpu_input_batch = MockInputBatch(
+            num_reqs=num_reqs,
+            req_ids=["req_0"],
+            vocab_size=vocab_size,
+            num_tokens_no_spec=[16],  # seq_len = num_tokens_no_spec - 1 = [15]
+        )
 
         discard_request_indices = torch.tensor([], dtype=torch.int64)
         num_discarded_requests = 0
@@ -1959,8 +1981,6 @@ class TestPrepareNextTokenIdsPadded(TestBase):
         num_reqs = 2
         vocab_size = 100
 
-        # seq_lens_cpu = torch.tensor([10, 15], dtype=torch.int32)
-
         sampled_token_ids = torch.tensor(
             [
                 [99, 100, 101, -1, -1],
@@ -1974,7 +1994,12 @@ class TestPrepareNextTokenIdsPadded(TestBase):
             "req_1": MockCachedRequestState("req_1", list(range(20))),
         }
 
-        gpu_input_batch = MockInputBatch(num_reqs=num_reqs, req_ids=["req_0", "req_1"], vocab_size=vocab_size)
+        gpu_input_batch = MockInputBatch(
+            num_reqs=num_reqs,
+            req_ids=["req_0", "req_1"],
+            vocab_size=vocab_size,
+            num_tokens_no_spec=[16, 21],  # seq_len = num_tokens_no_spec - 1 = [15, 20]
+        )
 
         discard_request_indices = torch.tensor([], dtype=torch.int64)
         num_discarded_requests = 0
@@ -2002,8 +2027,6 @@ class TestPrepareNextTokenIdsPadded(TestBase):
         num_reqs = 2
         vocab_size = 1000
 
-        # seq_lens_cpu = torch.tensor([10, 15], dtype=torch.int32)
-
         sampled_token_ids = torch.tensor(
             [
                 [100, 101, -1, -1, -1],
@@ -2017,7 +2040,12 @@ class TestPrepareNextTokenIdsPadded(TestBase):
             "req_1": MockCachedRequestState("req_1", list(range(20))),
         }
 
-        gpu_input_batch = MockInputBatch(num_reqs=num_reqs, req_ids=["req_0", "req_1"], vocab_size=vocab_size)
+        gpu_input_batch = MockInputBatch(
+            num_reqs=num_reqs,
+            req_ids=["req_0", "req_1"],
+            vocab_size=vocab_size,
+            num_tokens_no_spec=[11, 16],  # seq_len = num_tokens_no_spec - 1 = [10, 15]
+        )
 
         discard_request_indices = torch.tensor([], dtype=torch.int64)
         num_discarded_requests = 0
