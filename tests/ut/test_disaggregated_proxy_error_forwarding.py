@@ -26,6 +26,9 @@ import httpx
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 ERROR_BODY = b'{"error":{"message":"too long","type":"invalid_request_error"}}'
+RECOMPUTE_BODY = (
+    b'{"choices":[{"message":{"content":"partial"},"stop_reason":"recomputed"}],"usage":{"completion_tokens":1}}'
+)
 
 
 class FakeRequest:
@@ -79,6 +82,11 @@ class FakeBackendClient:
     def stream(self, *args, **kwargs):
         self.stream_count += 1
         return FakeStreamContext(self)
+
+
+async def _drain_streaming_response(response):
+    async for _ in response.body_iterator:
+        pass
 
 
 def _load_example(relative_path: str):
@@ -161,6 +169,64 @@ def test_disaggregated_proxy_returns_decoder_http_error_before_streaming():
     assert state.released_decoder == [(0, 22)]
     assert client.enter_count == 1
     assert client.exit_count == 1
+
+
+def test_disaggregated_proxy_does_not_double_release_decoder_when_recompute_selection_fails():
+    mod = _load_example("examples/disaggregated_prefill_v1/load_balance_proxy_server_example.py")
+    client = FakeBackendClient()
+    client.response = FakeBackendResponse(200, RECOMPUTE_BODY)
+
+    class ProxyState:
+        request_num = 0
+
+        def __init__(self):
+            self.aborted = []
+            self.released_kv = []
+            self.released_decoder = []
+
+        def abort_prefiller_request(self, prefiller_idx, request_id):
+            self.aborted.append((prefiller_idx, request_id))
+
+        def release_prefiller_kv(self, prefiller_idx, score):
+            self.released_kv.append((prefiller_idx, score))
+
+        def release_decoder(self, decoder_idx, score):
+            self.released_decoder.append((decoder_idx, score))
+
+    state = ProxyState()
+    mod.proxy_state = state
+    mod.global_args = SimpleNamespace(max_retries=1, retry_delay=0)
+    select_calls = 0
+
+    async def select_instance(api, req_data, request_length):
+        nonlocal select_calls
+        select_calls += 1
+        if select_calls == 1:
+            return SimpleNamespace(
+                request_id="req-1",
+                prefiller_idx=0,
+                prefiller_score=11,
+                decoder_idx=0,
+                decoder_score=22,
+                decoder=SimpleNamespace(client=client, url="http://decoder/v1"),
+            )
+        raise RuntimeError("no replacement decoder")
+
+    mod._handle_select_instance = select_instance
+
+    response = asyncio.run(
+        mod._handle_completions(
+            "/chat/completions",
+            FakeRequest({"messages": [{"role": "user", "content": "hello"}], "max_tokens": 4000}),
+        )
+    )
+    asyncio.run(_drain_streaming_response(response))
+
+    assert select_calls == 2
+    assert state.request_num == 0
+    assert state.aborted == [(0, "req-1")]
+    assert state.released_kv == [(0, 11)]
+    assert state.released_decoder == [(0, 22)]
 
 
 def test_layerwise_proxy_returns_decoder_http_error_before_streaming():

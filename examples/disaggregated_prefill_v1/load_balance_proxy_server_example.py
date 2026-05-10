@@ -797,6 +797,7 @@ async def _handle_completions(api: str, request: Request):
             nonlocal initial_response, initial_stream_context, instance_info
             generated_token = ""
             released_kv = False
+            released_decoder_request_ids = set()
             retry_count = 0
             retry = True
             completion_tokens = 0
@@ -806,6 +807,12 @@ async def _handle_completions(api: str, request: Request):
                 if not released_kv:
                     proxy_state.release_prefiller_kv(instance_info.prefiller_idx, instance_info.prefiller_score)
                     released_kv = True
+
+            def release_decoder_once():
+                request_id = instance_info.request_id
+                if request_id not in released_decoder_request_ids:
+                    proxy_state.release_decoder(instance_info.decoder_idx, instance_info.decoder_score)
+                    released_decoder_request_ids.add(request_id)
 
             # Only one await per chunk, minimal logic in loop
             try:
@@ -867,7 +874,7 @@ async def _handle_completions(api: str, request: Request):
                             retry_count += 1
                             # Release old decoder / prefiller kv before selecting new ones
                             release_prefiller_kv_once()
-                            proxy_state.release_decoder(instance_info.decoder_idx, instance_info.decoder_score)
+                            release_decoder_once()
                             if chat_flag:
                                 messages[0]["content"] = origin_prompt + generated_token
                             else:
@@ -899,7 +906,7 @@ async def _handle_completions(api: str, request: Request):
             finally:
                 # After streaming is done or cancelled, release tokens.
                 release_prefiller_kv_once()
-                proxy_state.release_decoder(instance_info.decoder_idx, instance_info.decoder_score)
+                release_decoder_once()
                 proxy_state.request_num -= 1
 
         return StreamingResponse(generate_stream(), media_type=media_type)
