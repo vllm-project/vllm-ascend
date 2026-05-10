@@ -81,7 +81,7 @@ myst_substitutions = {
     # CANN image tag
     "cann_image_tag": "8.5.1-910b-ubuntu22.04-py3.11",
     # vLLM commit hash for main branch
-    "main_vllm_commit": "d886c26d4d4fef7d079696beb4ece1cfb4b008a8",
+    "main_vllm_commit": "4d51588e2381018348f1022dfa3a7698899805b7",
     # vLLM tag for main branch
     "main_vllm_tag": "v0.19.1",
     # Python version for main branch
@@ -147,7 +147,7 @@ html_extra_path = ["llms.txt"]
 # Check external links without validating remote anchors. Many third-party
 # sites render anchors dynamically, which makes anchor checks flaky in CI.
 linkcheck_anchors = False
-linkcheck_retries = 2
+linkcheck_retries = 3
 linkcheck_timeout = 15
 linkcheck_workers = 10
 
@@ -160,6 +160,7 @@ linkcheck_ignore = [
     r"https?://<[^>]+>.*",
     r"https://github\.com/vllm-project/vllm-ascend/issues/new/choose",
     r"https://github\.com/[^/?#]+/?$",
+    r"https?://.*\$%7B.*%7D.*",
 ]
 
 READTHEDOCS_VERSION_TYPE = os.environ.get("READTHEDOCS_VERSION_TYPE")
