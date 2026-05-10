@@ -113,7 +113,7 @@ class ModelAclGraphManager(ModelCudaGraphManager):
         """Capture CUDA graphs for model forward pass."""
         model = ModelWithContext(model)
         with communicator_switch():
-            super().capture(
+            return super().capture(
                 model,
                 model_state,
                 input_buffers,
