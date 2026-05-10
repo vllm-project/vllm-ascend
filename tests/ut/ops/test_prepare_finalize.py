@@ -154,12 +154,13 @@ class TestPrepareAndFinalize(unittest.TestCase):
         # Should concat back
         self.assertEqual(final_result.shape[0], 2)
 
+    @patch("vllm_ascend.ops.fused_moe.prepare_finalize.prefill_context_parallel_enable", return_value=False)
     @patch("vllm_ascend.ops.fused_moe.prepare_finalize.get_dp_group")
     @patch("vllm_ascend.ascend_forward_context.get_forward_context")
     @patch("vllm_ascend.ops.fused_moe.prepare_finalize.enable_sp", return_value=False)
     @patch("vllm_ascend.ops.fused_moe.prepare_finalize.enable_sp_by_pass", return_value=False)
     def test_allgather_prepare_finalize(
-        self, mock_enable_sp_by_pass, mock_enable_sp, mock_get_forward_context, mock_get_dp_group
+        self, mock_enable_sp_by_pass, mock_enable_sp, mock_get_forward_context, mock_get_dp_group, mock_pcp_enable
     ):
         # Mock forward context
         mock_context = MagicMock()
