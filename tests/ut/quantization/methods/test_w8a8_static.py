@@ -160,6 +160,14 @@ class TestAscendW8A8LinearMethod(TestBase):
 class TestAscendW8A8LinearMethodWithNpu(TestBase):
     def setUp(self):
         self.method = AscendW8A8LinearMethod()
+        self.mock_get_config = patch("vllm_ascend.utils.get_ascend_config")
+        mock_config = self.mock_get_config.start()
+        mock_ascend_config = MagicMock()
+        mock_ascend_config.weight_nz_mode = 0
+        mock_config.return_value = mock_ascend_config
+
+    def tearDown(self):
+        self.mock_get_config.stop()
 
     @patch("vllm_ascend.quantization.methods.w8a8_static.get_weight_prefetch_method")
     def test_apply_with_npu(self, mock_get_weight_prefetch_method):

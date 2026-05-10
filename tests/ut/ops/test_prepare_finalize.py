@@ -22,6 +22,7 @@ class TestPrepareAndFinalize(unittest.TestCase):
         mock_config = self.mock_get_config.start()
         mock_ascend_config = MagicMock()
         mock_ascend_config.multistream_overlap_gate = False
+        mock_ascend_config.enable_context_parallel = False
         mock_config.return_value = mock_ascend_config
         self.addCleanup(self.mock_get_config.stop)
         self.moe_config = MagicMock(spec=FusedMoEConfig)
