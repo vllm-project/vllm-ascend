@@ -307,6 +307,11 @@ class AscendFusedMoE(FusedMoE):
     gate_stream: torch.npu.Stream | None = None
 
     def __init__(self, *args, **kwargs):
+        # Save original routed_scaling_factor before super().__init__ modifies it.
+        # When apply_routed_scale_to_output=True, vLLM sets self.routed_scaling_factor
+        # to 1.0 and expects the runner to apply scaling to output. But vllm-ascend
+        # uses its own forward path, so we need the original value.
+        self._original_routed_scaling_factor = kwargs.get("routed_scaling_factor", 1.0)
         super().__init__(*args, **kwargs)
         self.use_overlapped = True
         self._routed_input_transform = kwargs.get("routed_input_transform")
@@ -578,7 +583,7 @@ class AscendFusedMoE(FusedMoE):
                     num_expert_group=self.num_expert_group,
                     custom_routing_function=self.custom_routing_function,
                     scoring_func=self.scoring_func,
-                    routed_scaling_factor=self.routed_scaling_factor,
+                    routed_scaling_factor=self._original_routed_scaling_factor,
                     e_score_correction_bias=self.e_score_correction_bias,
                     num_experts=self.moe_config.num_experts,
                 )
@@ -621,7 +626,7 @@ class AscendFusedMoE(FusedMoE):
             num_expert_group=self.num_expert_group,
             custom_routing_function=self.custom_routing_function,
             scoring_func=self.scoring_func,
-            routed_scaling_factor=self.routed_scaling_factor,
+            routed_scaling_factor=self._original_routed_scaling_factor,
             e_score_correction_bias=self.e_score_correction_bias,
             activation=self.activation,
             apply_router_weight_on_input=self.apply_router_weight_on_input,
