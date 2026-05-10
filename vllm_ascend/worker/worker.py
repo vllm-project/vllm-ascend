@@ -44,10 +44,7 @@ from vllm.v1.core.sched.output import GrammarOutput, SchedulerOutput
 from vllm.v1.kv_cache_interface import KVCacheConfig, KVCacheSpec
 from vllm.v1.outputs import EMPTY_MODEL_RUNNER_OUTPUT, AsyncModelRunnerOutput, DraftTokenIds, ModelRunnerOutput
 from vllm.v1.worker.gpu_worker import AsyncIntermediateTensors
-from vllm.v1.worker.worker_base import (
-    CompilationTimes,  # noqa: E402
-    WorkerBase,
-)
+from vllm.v1.worker.worker_base import CompilationTimes, WorkerBase
 from vllm.v1.worker.workspace import init_workspace_manager
 
 import vllm_ascend.envs as envs_ascend
