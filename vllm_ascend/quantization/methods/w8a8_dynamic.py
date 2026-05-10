@@ -31,7 +31,7 @@ from vllm_ascend.ops.fused_moe.experts_selector import select_experts, zero_expe
 from vllm_ascend.ops.fused_moe.moe_runtime_args import build_fused_experts_input
 from vllm_ascend.utils import ACL_FORMAT_FRACTAL_NZ, maybe_trans_nz
 
-from .base import AscendLinearScheme, AscendMoEScheme, QuantType
+from .base import AscendLinearScheme, AscendMoEScheme, QuantType, get_moe_num_logical_experts
 from .registry import register_scheme
 
 
@@ -192,9 +192,14 @@ class AscendW8A8DynamicFusedMoEMethod(AscendMoEScheme):
         mix_placement = getattr(layer, "mix_placement", False)
         if n_shared_experts is None:
             n_shared_experts = 0
-        valid_global_expert_num = num_experts - n_shared_experts
+        num_logical_experts = get_moe_num_logical_experts(
+            layer,
+            num_experts,
+            global_redundant_expert_num=global_redundant_expert_num,
+            num_shared_experts=n_shared_experts,
+        )
         if zero_expert_num == 0 or zero_expert_type is None:
-            assert router_logits.shape[1] == valid_global_expert_num, (
+            assert router_logits.shape[1] == num_logical_experts, (
                 "Number of global experts mismatch (excluding redundancy)"
             )
 
@@ -219,7 +224,7 @@ class AscendW8A8DynamicFusedMoEMethod(AscendMoEScheme):
                 mix_placement=mix_placement,
                 num_logical_experts=router_logits.shape[1],
                 num_shared_experts=n_shared_experts,
-                num_experts=num_experts,
+                num_experts=num_logical_experts,
             )
         assert topk_ids is not None
         assert topk_weights is not None
@@ -227,7 +232,7 @@ class AscendW8A8DynamicFusedMoEMethod(AscendMoEScheme):
             topk_ids, topk_weights, zero_expert_result = zero_experts_compute(
                 expert_indices=topk_ids,
                 expert_scales=topk_weights,
-                num_experts=num_experts,
+                num_experts=num_logical_experts,
                 zero_expert_type=zero_expert_type,
                 hidden_states=x,
             )
@@ -235,7 +240,7 @@ class AscendW8A8DynamicFusedMoEMethod(AscendMoEScheme):
         # to avoid accumulating too much tokens on a single rank.
         # currently it is only activated when doing profile runs.
         if enable_force_load_balance:
-            random_matrix = torch.rand(topk_ids.size(0), num_experts, device=topk_ids.device)
+            random_matrix = torch.rand(topk_ids.size(0), num_logical_experts, device=topk_ids.device)
             topk_ids = torch.argsort(random_matrix, dim=1)[:, : topk_ids.size(1)].to(topk_ids.dtype)
 
         assert topk_weights is not None
