@@ -177,8 +177,6 @@ class KVPoolWorker:
         self.layer_load_finished_events = None
         self.layer_save_finished_events = None
         self.layer_transfer_finished_events = None
-        self.submitted_layer_loads: set[int] = set()
-        self.finished_layer_loads: set[int] = set()
         self.next_layer_to_submit = 0
         layerwise_config = get_layerwise_config(self.num_layers)
         self.layerwise_offload = layerwise_config.has_layer_reuse
@@ -312,8 +310,6 @@ class KVPoolWorker:
             return
         self.current_layer = 0
         if self.use_layerwise:
-            self.submitted_layer_loads.clear()
-            self.finished_layer_loads.clear()
             self.next_layer_to_submit = 0
             self.process_layer_data(metadata.requests)
             return
@@ -428,42 +424,31 @@ class KVPoolWorker:
         if not self.layers_need_to_load:
             return
 
-        self._submit_layer_load_window()
+        def submit_layer_load(layer_id: int) -> bool:
+            if not self.layer_load_tasks[layer_id]:
+                return False
+            wait_for_save_layer = self.prefetch_layer_map.get(layer_id)
+            self.kv_recv_thread.add_request(
+                LayerLoadTask(
+                    wait_for_save_layer=wait_for_save_layer,
+                    transfer_tasks=self.layer_load_tasks[layer_id],
+                    layer_id=layer_id,
+                )
+            )
+            return True
 
-    def _submit_layer_load_window(self) -> None:
-        pending_loads = len(self.submitted_layer_loads -
-                            self.finished_layer_loads)
-        while (pending_loads < self.NUM_SHARED_BUFFERS
+        submit_count = self.NUM_SHARED_BUFFERS if self.current_layer == 0 else 1
+        submitted_layers = 0
+        while (submitted_layers < submit_count
                and self.next_layer_to_submit < self.num_layers):
             layer_id = self.next_layer_to_submit
             self.next_layer_to_submit += 1
-            if not self.layer_load_tasks[layer_id]:
-                continue
-            wait_for_save_layer = self.prefetch_layer_map.get(layer_id)
-            self._submit_layer_load(layer_id, wait_for_save_layer)
-            pending_loads += 1
-
-    def _submit_layer_load(self, layer_id: int,
-                           wait_for_save_layer: int | None) -> None:
-        if layer_id in self.submitted_layer_loads:
-            return
-        if not self.layer_load_tasks[layer_id]:
-            return
-        self.submitted_layer_loads.add(layer_id)
-        self.kv_recv_thread.add_request(
-            LayerLoadTask(
-                wait_for_save_layer=wait_for_save_layer,
-                transfer_tasks=self.layer_load_tasks[layer_id],
-                layer_id=layer_id,
-            )
-        )
+            if submit_layer_load(layer_id):
+                submitted_layers += 1
 
     def wait_for_layer_load(self) -> None:
         self._submit_ready_layer_loads()
-        should_wait = (
-            self.current_layer in self.submitted_layer_loads
-            and self.current_layer not in self.finished_layer_loads
-        )
+        should_wait = bool(self.layer_load_tasks[self.current_layer])
         if not should_wait:
             self.layer_load_finished_events[self.current_layer].clear()
             return
@@ -472,9 +457,6 @@ class KVPoolWorker:
             logger.info("Layerwise %d load wait timed out", self.current_layer)
         logger.debug(f">>>>>>>>>>>>>>>>>>>> clear load layer {self.current_layer}")
         self.layer_load_finished_events[self.current_layer].clear()
-        if is_finish:
-            self.finished_layer_loads.add(self.current_layer)
-        self._submit_layer_load_window()
 
     def save_kv_layer(self, connector_metadata: AscendConnectorMetadata) -> None:
         # Wait for KV cache saving to complete on the final layer that requires offloading.
