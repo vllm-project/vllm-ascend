@@ -75,7 +75,7 @@ spec:
         - name: dshm
           emptyDir:
             medium: Memory
-            sizeLimit: 15Gi
+            sizeLimit: 512Gi
         - name: shared-volume
           persistentVolumeClaim:
             claimName: {{ pvc_name | default("nv-action-vllm-benchmarks-v2") }}
@@ -137,7 +137,7 @@ spec:
         - name: dshm
           emptyDir:
             medium: Memory
-            sizeLimit: 15Gi
+            sizeLimit: 512Gi
         - name: shared-volume
           persistentVolumeClaim:
             claimName: {{ pvc_name | default("nv-action-vllm-benchmarks-v2") }}
