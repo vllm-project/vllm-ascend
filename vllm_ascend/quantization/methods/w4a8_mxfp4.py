@@ -26,7 +26,6 @@ from vllm.distributed import get_ep_group
 from vllm.forward_context import get_forward_context
 
 from vllm_ascend.ascend_config import get_ascend_config
-
 from vllm_ascend.device.mxfp_compat import (
     FLOAT8_E8M0FNU_DTYPE,
     ensure_mxfp4_linear_available,
@@ -41,17 +40,15 @@ from .registry import register_scheme
 @register_scheme("W4A8_MXFP", "linear")
 class AscendW4A8MXFPDynamicLinearMethod(AscendLinearScheme):
     """Linear method for Ascend W4A8_MXFP (Microscaling) quantization."""
+
     def __init__(self):
         ensure_mxfp4_linear_available("W8A8_MXFP8 linear quantization")
         vllm_config = get_current_vllm_config()
         self.group_size = vllm_config.quant_config.quant_description.get("group_size", 32)
 
-
     @staticmethod
     def get_weight(input_size: int, output_size: int, params_dtype: torch.dtype) -> dict[str, Any]:
-        
         params_dict = {"weight": torch.empty(output_size, input_size // 2, dtype=torch.uint8)}
-        
         return params_dict
 
     @staticmethod
@@ -60,8 +57,8 @@ class AscendW4A8MXFPDynamicLinearMethod(AscendLinearScheme):
 
     @staticmethod
     def get_perchannel_param(
-            output_size: int,
-            params_dtype: torch.dtype,
+        output_size: int,
+        params_dtype: torch.dtype,
     ) -> dict[str, Any]:
         return {}
 
@@ -79,7 +76,6 @@ class AscendW4A8MXFPDynamicLinearMethod(AscendLinearScheme):
         bias: torch.Tensor | None = None,
         tp_rank: int | None = 0,
     ) -> torch.Tensor:
-
         quantized_x, dynamic_scale = torch_npu.npu_dynamic_mx_quant(x, dst_type=torch.float8_e4m3fn)
 
         x2_scale = (
@@ -92,7 +88,7 @@ class AscendW4A8MXFPDynamicLinearMethod(AscendLinearScheme):
             layer.weight,
             x2_scale,
             scale_dtype=torch_npu.float8_e8m0fnu,
-            pertoken_scale=dynamic_scale, 
+            pertoken_scale=dynamic_scale,
             pertoken_scale_dtype=torch_npu.float8_e8m0fnu,
             bias=bias,
             output_dtype=output_dtype,
@@ -103,6 +99,9 @@ class AscendW4A8MXFPDynamicLinearMethod(AscendLinearScheme):
         return output
 
     def process_weights_after_loading(self, layer):
+        layer.weight.data = torch_npu.npu_format_cast(
+            layer.weight.data, 29, customize_dtype=torch.float8_e4m3fn, input_dtype=torch_npu.float4_e2m1fn_x2
+        )
         layer.weight.data = layer.weight.data.transpose(0, 1)
         layer.weight_scale.data = layer.weight_scale.data.transpose(0, 1)
 
@@ -110,6 +109,7 @@ class AscendW4A8MXFPDynamicLinearMethod(AscendLinearScheme):
 @register_scheme("W4A8_MXFP", "moe")
 class AscendW4A8MXFPDynamicFusedMoEMethod:
     """FusedMoe method for Ascend W4A8_DYNAMIC."""
+
     quant_type: QuantType = QuantType.W4A8MXFP
 
     def __init__(self):
@@ -125,9 +125,8 @@ class AscendW4A8MXFPDynamicFusedMoEMethod:
         self.dynamic_eplb = ascend_config.eplb_config.dynamic_eplb
         self.additional_quant_config = None
 
-    def update_addtional_quant_config(self, addtional_quant_config: dict):
-        self.additional_quant_config = addtional_quant_config
-
+    def update_additional_quant_config(self, additional_quant_config: dict):
+        self.additional_quant_config = additional_quant_config
 
     @staticmethod
     def get_weight(
