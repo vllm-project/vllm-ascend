@@ -1,0 +1,334 @@
+# SOME DESCRIPTIVE TITLE.
+# Copyright (C) 2025, vllm-ascend team
+# This file is distributed under the same license as the vllm-ascend
+# package.
+# FIRST AUTHOR <EMAIL@ADDRESS>, 2026.
+#
+msgid ""
+msgstr ""
+"Project-Id-Version: vllm-ascend \n"
+"Report-Msgid-Bugs-To: \n"
+"POT-Creation-Date: 2026-05-09 02:22+0000\n"
+"PO-Revision-Date: YEAR-MO-DA HO:MI+ZONE\n"
+"Last-Translator: FULL NAME <EMAIL@ADDRESS>\n"
+"Language: zh_CN\n"
+"Language-Team: zh_CN <LL@li.org>\n"
+"Plural-Forms: nplurals=1; plural=0;\n"
+"MIME-Version: 1.0\n"
+"Content-Type: text/plain; charset=utf-8\n"
+"Content-Transfer-Encoding: 8bit\n"
+"Generated-By: Babel 2.18.0\n"
+
+#: ../../source/user_guide/feature_guide/Ai_QoS_introduction_en.md:1
+msgid "AI QoS Feature"
+msgstr "AI QoS特性"
+
+#: ../../source/user_guide/feature_guide/Ai_QoS_introduction_en.md:3
+msgid "Background"
+msgstr "背景"
+
+#: ../../source/user_guide/feature_guide/Ai_QoS_introduction_en.md:5
+msgid ""
+"​ In the inference scenario, there are different types of traffic, such "
+"as operator delivery, collective communication, and KVCache. Such "
+"traffics are transmitted through network and affect each other, "
+"increasing the inference latency."
+msgstr ""
+"​在推理场景中，存在不同类型的流量，如算子下发、集合通信和KVCache。这些流量通过网络传输并相互影响，增加了推理时延。"
+
+#: ../../source/user_guide/feature_guide/Ai_QoS_introduction_en.md:7
+msgid ""
+"​ For example, in the Agentic AI era, as the context length continues to "
+"increase, the size of the KVCache also gradually grows. To conserve HBM "
+"usage, the approach of offloading KVCache to DDR is adopted to enhance "
+"inference TPS. At the same time, to maximize the utilization of computing"
+" power, a pipeline orchestration method using computation to mask KVCache"
+" is commonly employed. This method involves prefetching the next layer's "
+"KVCache during the current layer's computation/communication to reduce "
+"overall latency. However, this approach introduces a traffic conflict "
+"issue between the KVCache and the operator delivery/collective "
+"communication, leading to increased inference latency and impacting the "
+"SLO."
+msgstr ""
+"​例如，在Agentic AI时代，随着上下文长度不断增加，KVCache的大小也逐渐增长。为节省HBM使用，采用将KVCache卸载到DDR的方法来提升推理TPS。同时，为最大化计算资源利用率，通常采用计算掩盖KVCache的流水线编排方法。该方法在当前层的计算/通信期间预取下一层的KVCache以减少总体时延。然而，这种方法引入了KVCache与算子下发/集合通信之间的流量冲突问题，导致推理时延增加并影响SLO。"
+
+#: ../../source/user_guide/feature_guide/Ai_QoS_introduction_en.md:9
+msgid "![alt text](<./images/ai_qos1.png>)"
+msgstr "![替代文本](<./images/ai_qos1.png>)"
+
+#: ../../source/user_guide/feature_guide/Ai_QoS_introduction_en.md:9
+#: ../../source/user_guide/feature_guide/Ai_QoS_introduction_en.md:19
+msgid "alt text"
+msgstr "替代文本"
+
+#: ../../source/user_guide/feature_guide/Ai_QoS_introduction_en.md:11
+msgid ""
+"​ As shown in the preceding figure, traffic conflicts occur on the UB "
+"switch when intra-node device-to-device (D2D) traffic, intra-node host-"
+"to-device (H2D) traffic, and inter-node D2D traffic are transmitted."
+msgstr ""
+"​如上图所示，当节点内设备到设备（D2D）流量、节点内主机到设备（H2D）流量和节点间D2D流量传输时，UB交换机上会发生流量冲突。"
+
+#: ../../source/user_guide/feature_guide/Ai_QoS_introduction_en.md:13
+msgid "Introduction"
+msgstr "简介"
+
+#: ../../source/user_guide/feature_guide/Ai_QoS_introduction_en.md:15
+msgid ""
+"​ When different types of traffic conflict with each other, the Virtual "
+"Lane (VL) can be used to isolate the traffic at the UB switch and perform"
+" differentiated scheduling between the VLs. This helps to: (1) isolate "
+"the VLs of different types of traffic to prevent congestion from "
+"spreading; (2) perform differentiated scheduling for different types of "
+"traffic."
+msgstr ""
+"​当不同类型的流量相互冲突时，可以使用虚拟通道（VL）在UB交换机上隔离流量，并在VL之间执行差异化调度。这有助于：(1)隔离不同类型流量的VL以防止拥塞扩散；(2)对不同类型流量执行差异化调度。"
+
+#: ../../source/user_guide/feature_guide/Ai_QoS_introduction_en.md:17
+msgid ""
+"​ As shown in the following figure, different types of traffic are mapped"
+" to different VLs to isolate the traffic. In addition, the priority of "
+"each VL is set and the strict priority (SP) scheduling mode is used. When"
+" different types of traffic reach the UB switch at the same time, the "
+"traffic in the VL with the high priority is scheduled first, and then the"
+" traffic in the VL with the middle priority is scheduled. This process "
+"repeats until all the traffic is scheduled. In this way, differentiated "
+"scheduling is implemented for different types of traffic."
+msgstr ""
+"​如下图所示，不同类型的流量被映射到不同的VL以隔离流量。此外，设置每个VL的优先级并使用严格优先级（SP）调度模式。当不同类型的流量同时到达UB交换机时，首先调度高优先级VL中的流量，然后调度中优先级VL中的流量。此过程重复直到所有流量被调度完毕。通过这种方式，实现了对不同类型流量的差异化调度。"
+
+#: ../../source/user_guide/feature_guide/Ai_QoS_introduction_en.md:19
+msgid "![alt text](<./images/ai_qos2.png>)"
+msgstr "![替代文本](<./images/ai_qos2.png>)"
+
+#: ../../source/user_guide/feature_guide/Ai_QoS_introduction_en.md:21
+msgid ""
+"​ Different traffic is transmitted through different channels. Therefore,"
+" the AI QoS solution implements isolation and differentiated scheduling "
+"of different traffic to meet service requirements by (1) setting "
+"priorities for different NPU channels on the host, (2) establishing the "
+"mapping between the NPU channel priority and the VL of the UB switch, and"
+" (3) performing differentiated scheduling among different VLs of the UB "
+"switch based on the priority."
+msgstr ""
+"​不同流量通过不同通道传输。因此，AI QoS解决方案通过以下方式实现不同流量的隔离和差异化调度以满足业务需求：(1)在主机上为不同NPU通道设置优先级，(2)建立NPU通道优先级与UB交换机VL之间的映射关系，(3)基于优先级在UB交换机的不同VL之间执行差异化调度。"
+
+#: ../../source/user_guide/feature_guide/Ai_QoS_introduction_en.md:23
+msgid "Build AI QoS Module"
+msgstr "构建AI QoS模块"
+
+#: ../../source/user_guide/feature_guide/Ai_QoS_introduction_en.md:25
+msgid ""
+"Build and install the AI QoS extension before using `tools/ai_qos.py`. "
+"The DSMI include/library paths are environment-dependent. Locate the "
+"paths on your machine first, then replace `YOUR_DSMI_INCLUDE_DIR` and "
+"`YOUR_DSMI_LIBRARY_FILE` in the command (for example, "
+"`/usr/local/Ascend/driver/include` and "
+"`/usr/local/Ascend/driver/lib64/driver/libdrvdsmi_host.so`)."
+msgstr ""
+"在使用`tools/ai_qos.py`之前，请先构建并安装AI QoS扩展。DSMI包含/库路径取决于环境。请先定位您机器上的路径，然后替换命令中的`YOUR_DSMI_INCLUDE_DIR`和`YOUR_DSMI_LIBRARY_FILE`（例如`/usr/local/Ascend/driver/include`和`/usr/local/Ascend/driver/lib64/driver/libdrvdsmi_host.so`）。"
+
+#: ../../source/user_guide/feature_guide/Ai_QoS_introduction_en.md:28
+msgid ""
+"In most deployments, these commands are executed inside a container. When"
+" creating the container, make sure the DSMI header/library directories "
+"are mounted into the container filesystem; otherwise CMake cannot find "
+"the files."
+msgstr ""
+"在大多数部署中，这些命令在容器内执行。创建容器时，请确保DSMI头文件/库目录已挂载到容器文件系统中；否则CMake无法找到这些文件。"
+
+#: ../../source/user_guide/feature_guide/Ai_QoS_introduction_en.md:30
+msgid "Run the following commands from the vLLM-Ascend repository root:"
+msgstr "从vLLM-Ascend仓库根目录运行以下命令："
+
+#: ../../source/user_guide/feature_guide/Ai_QoS_introduction_en.md:42
+msgid "Usage Instruction"
+msgstr "使用说明"
+
+#: ../../source/user_guide/feature_guide/Ai_QoS_introduction_en.md:44
+msgid ""
+"​ The AI QoS feature supports two modes: Auto and Manual. Enter the vLLM-"
+"Ascend installation directory and run the following command before "
+"running the inference job:"
+msgstr ""
+"​AI QoS特性支持两种模式：自动和手动。进入vLLM-Ascend安装目录，在运行推理任务前执行以下命令："
+
+#: ../../source/user_guide/feature_guide/Ai_QoS_introduction_en.md:46
+msgid "​ 1）Auto mode："
+msgstr "​1）自动模式："
+
+#: ../../source/user_guide/feature_guide/Ai_QoS_introduction_en.md:48
+msgid "​ python tools/ai_qos.py"
+msgstr "​ python tools/ai_qos.py"
+
+#: ../../source/user_guide/feature_guide/Ai_QoS_introduction_en.md:50
+msgid ""
+"​ AI QoS auto mode automatically classifies the priorities of different "
+"types of traffic and generates QoS tags. It also prints the UB switch "
+"configuration. You can copy the outputs and log in to the UB switch to "
+"configure the QoS configurations of UB switch. This configuration will "
+"overwrite the current QoS configuration on the UB switch. If there is any"
+" existing QoS configuration,please back it up in advance."
+msgstr ""
+"​AI QoS自动模式自动分类不同类型流量的优先级并生成QoS标签。同时打印UB交换机配置。您可以复制输出并登录UB交换机配置QoS配置。此配置将覆盖UB交换机上当前的QoS配置。如果存在任何现有QoS配置，请提前备份。"
+
+#: ../../source/user_guide/feature_guide/Ai_QoS_introduction_en.md:52
+msgid "​ 2）Manual mode："
+msgstr "​2）手动模式："
+
+#: ../../source/user_guide/feature_guide/Ai_QoS_introduction_en.md:54
+#, python-brace-format
+msgid ""
+"​ python tools/ai_qos.py --mode manual --AIV_D2D *{priority}* --AIV_H2D "
+"*{priority}* --SDMA_D2D *{priority}* --SDMA_H2D *{priority}* "
+"--PCIEDMA_H2D *{priority}*"
+msgstr ""
+"​ python tools/ai_qos.py --mode manual --AIV_D2D *{priority}* --AIV_H2D *{priority}* --SDMA_D2D *{priority}* --SDMA_H2D *{priority}* --PCIEDMA_H2D *{priority}*"
+
+#: ../../source/user_guide/feature_guide/Ai_QoS_introduction_en.md:56
+msgid ""
+"​ AI QoS manual mode calculates the QoS tag of traffic based on the "
+"priority of different types of traffic set by users, and generates and "
+"prints the UB switch configuration.You can copy the outputs and log in to"
+" the UB switch to configure the QoS configurations of UB switch. This "
+"configuration will overwrite the current QoS configuration on the UB "
+"switch. If there is any existing QoS configuration,please back it up in "
+"advance."
+msgstr ""
+"​AI QoS手动模式根据用户设置的不同类型流量的优先级计算流量的QoS标签，并生成和打印UB交换机配置。您可以复制输出并登录UB交换机配置QoS配置。此配置将覆盖UB交换机上当前的QoS配置。如果存在任何现有QoS配置，请提前备份。"
+
+#: ../../source/user_guide/feature_guide/Ai_QoS_introduction_en.md:58
+msgid ""
+"​ In manual mode, you can specify the priority of only one type of "
+"traffic. The parameters are described as follows:"
+msgstr ""
+"​在手动模式下，您可以指定仅一种类型流量的优先级。参数说明如下："
+
+#: ../../source/user_guide/feature_guide/Ai_QoS_introduction_en.md
+msgid "Name"
+msgstr "名称"
+
+#: ../../source/user_guide/feature_guide/Ai_QoS_introduction_en.md
+msgid "Type"
+msgstr "类型"
+
+#: ../../source/user_guide/feature_guide/Ai_QoS_introduction_en.md
+msgid "Default"
+msgstr "默认值"
+
+#: ../../source/user_guide/feature_guide/Ai_QoS_introduction_en.md
+msgid "Description"
+msgstr "描述"
+
+#: ../../source/user_guide/feature_guide/Ai_QoS_introduction_en.md
+msgid "mode"
+msgstr "mode"
+
+#: ../../source/user_guide/feature_guide/Ai_QoS_introduction_en.md
+msgid "str"
+msgstr "str"
+
+#: ../../source/user_guide/feature_guide/Ai_QoS_introduction_en.md
+msgid "auto"
+msgstr "auto"
+
+#: ../../source/user_guide/feature_guide/Ai_QoS_introduction_en.md
+msgid ""
+"The  mode of AI QoS, default mode is \"auto\", another mode is  "
+"\"manual\",some parameters need to be configured if you choose  "
+"\"manual\" mode."
+msgstr ""
+"AI QoS的模式，默认模式为\"auto\"，另一种模式为\"manual\"，如果选择\"manual\"模式则需要配置一些参数。"
+
+#: ../../source/user_guide/feature_guide/Ai_QoS_introduction_en.md
+msgid "qos_manual_config"
+msgstr "qos_manual_config"
+
+#: ../../source/user_guide/feature_guide/Ai_QoS_introduction_en.md
+msgid "/"
+msgstr "/"
+
+#: ../../source/user_guide/feature_guide/Ai_QoS_introduction_en.md
+msgid ""
+"AIV_D2D: high,<br />AIV_H2D: high,<br />SDMA_D2D: high,<br />SDMA_H2D: "
+"low,<br />PCIEDMA_H2D: high"
+msgstr ""
+"AIV_D2D: high,<br />AIV_H2D: high,<br />SDMA_D2D: high,<br />SDMA_H2D: low,<br />PCIEDMA_H2D: high"
+
+#: ../../source/user_guide/feature_guide/Ai_QoS_introduction_en.md
+msgid ""
+"Parameters  for \"manual\" mode, determined the QoS priority of different"
+" types  of traffic.     <br />The default configuration is the same as "
+"\"auto\" mode.     <br />Typical traffic types are as follows for "
+"reference:     AIV_D2D: AIV-based  Device-to-Device communication, such "
+"as dispatch and combine.<br /> AIV_H2D: AIV-based  Operator Delivery.<br "
+"/> SDMA_D2D: SDMA-based  Device-to-Device communication, such as "
+"Allreduce and Allgather.<br />SDMA_H2D: SDMA-based  Host-to-Device"
+"/Device-to-Host communication, such as KVCache offloading and  "
+"prefetching.<br />PCIEDMA_H2D: PCIEDMA-based  Operator Delivery.   <br />"
+"  You can change the priority of different types of traffic, with  "
+"\"high/middle/low\" options available.Due to hardware restrictions,  "
+"\"PCIEDMA_H2D\" only supports  \"high/low\" priority."
+msgstr ""
+"\"manual\"模式的参数，决定不同类型流量的QoS优先级。<br />默认配置与\"auto\"模式相同。<br />典型流量类型如下供参考：AIV_D2D：基于AIV的设备到设备通信，如dispatch和combine。<br />AIV_H2D：基于AIV的算子下发。<br />SDMA_D2D：基于SDMA的设备到设备通信，如Allreduce和Allgather。<br />SDMA_H2D：基于SDMA的主机到设备/设备到主机通信，如KVCache卸载和预取。<br />PCIEDMA_H2D：基于PCIEDMA的算子下发。<br />您可以更改不同类型流量的优先级，提供\"high/middle/low\"选项。由于硬件限制，\"PCIEDMA_H2D\"仅支持\"high/low\"优先级。"
+
+#: ../../source/user_guide/feature_guide/Ai_QoS_introduction_en.md:65
+msgid "​ How to disable AI QoS："
+msgstr "​如何禁用AI QoS："
+
+#: ../../source/user_guide/feature_guide/Ai_QoS_introduction_en.md:67
+msgid "​ python tools/ai_qos.py unset"
+msgstr "​ python tools/ai_qos.py unset"
+
+#: ../../source/user_guide/feature_guide/Ai_QoS_introduction_en.md:69
+msgid ""
+"​ The command for disabling the AI QoS feature on the UB Switch will be "
+"printed on the screen. Please log in to the UB Switch and execute the "
+"command printed on the screen to complete the feature disabling."
+msgstr ""
+"​禁用UB交换机上AI QoS特性的命令将打印在屏幕上。请登录UB交换机并执行屏幕上打印的命令以完成特性禁用。"
+
+#: ../../source/user_guide/feature_guide/Ai_QoS_introduction_en.md:71
+msgid "Usage Constraints"
+msgstr "使用约束"
+
+#: ../../source/user_guide/feature_guide/Ai_QoS_introduction_en.md:73
+msgid ""
+"​ Due to underlying driver limitations, the QoS configurations for "
+"AIV_H2D and AIV_D2D do not take effect currently. Once the required "
+"adaptation capabilities are added in a future driver release, this "
+"feature will be delivered through a module upgrade."
+msgstr ""
+"​由于底层驱动限制，AIV_H2D和AIV_D2D的QoS配置当前不生效。一旦未来驱动版本中添加了所需的适配能力，此特性将通过模块升级交付。"
+
+#: ../../source/user_guide/feature_guide/Ai_QoS_introduction_en.md:75
+msgid ""
+"​ The AI QoS feature supports the Atlas 800T A3 server and Atlas 900 A3 "
+"SuperPoD cluster. It must be used in privileged containers and requires "
+"the following software versions:"
+msgstr ""
+"​AI QoS特性支持Atlas 800T A3服务器和Atlas 900 A3 SuperPoD集群。必须在特权容器中使用，并需要以下软件版本："
+
+#: ../../source/user_guide/feature_guide/Ai_QoS_introduction_en.md
+msgid "Software"
+msgstr "软件"
+
+#: ../../source/user_guide/feature_guide/Ai_QoS_introduction_en.md
+msgid "Matched Version"
+msgstr "匹配版本"
+
+#: ../../source/user_guide/feature_guide/Ai_QoS_introduction_en.md
+msgid "Ascend HDK"
+msgstr "Ascend HDK"
+
+#: ../../source/user_guide/feature_guide/Ai_QoS_introduction_en.md
+msgid "25.5.2 or later"
+msgstr "25.5.2及以上版本"
+
+#: ../../source/user_guide/feature_guide/Ai_QoS_introduction_en.md
+msgid "UB Switch"
+msgstr "UB交换机"
+
+#: ../../source/user_guide/feature_guide/Ai_QoS_introduction_en.md
+msgid "LingQu Computing Network 1.5.1 or later"
+msgstr "LingQu Computing Network 1.5.1及以上版本"
