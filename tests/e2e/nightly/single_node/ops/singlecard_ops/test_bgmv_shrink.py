@@ -37,7 +37,7 @@ def test_bgmv_shrink():
 
     # Compare the results.
     torch.testing.assert_close(y_npu.cpu(),
-                               y,
+                               y.cpu(),
                                atol=DEFAULT_ATOL,
                                rtol=DEFAULT_RTOL)
     gc.collect()
