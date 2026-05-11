@@ -289,7 +289,6 @@ def npu_interleave_rope_simple(
     Interleave the last dimension: [x0, x1, x2, x3, ...] -> [x0, x2, ..., x1, x3, ...]
     With cos=1, sin=0 (rope disabled), the function just returns the interleaved result.
     """
-    D = x.shape[-1]
     even = x[..., 0::2]
     odd = x[..., 1::2]
     return torch.cat([even, odd], dim=-1).contiguous()
