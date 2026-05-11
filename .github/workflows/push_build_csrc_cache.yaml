@@ -15,7 +15,6 @@
 # This file is a part of the vllm-ascend project.
 #
 
-# Prototype: unified csrc build matrix — arch × os × chip_type
 # Cartesian product: 2 arch × 2 os × 3 chip_type = 12 jobs
 name: 'Cache csrc Build Artifacts'
 on:
@@ -180,11 +179,12 @@ jobs:
         run: |
           source /usr/local/Ascend/ascend-toolkit/set_env.sh
           source /usr/local/Ascend/nnal/atb/set_env.sh
-          export LD_LIBRARY_PATH=$LD_LIBRARY_PATH:/usr/local/Ascend/ascend-toolkit/latest/`uname -i`-linux/devlib
+          arch=$(uname -i)
+          export LD_LIBRARY_PATH=$LD_LIBRARY_PATH:/usr/local/Ascend/ascend-toolkit/latest/${arch}-linux/devlib
 
           # os-specific: openeuler needs C++ include path for compilation
           if [ "${{ matrix.os }}" = "openeuler" ]; then
-            export CPLUS_INCLUDE_PATH=$CPLUS_INCLUDE_PATH:/usr/include/c++/12:/usr/include/c++/12/`uname -i`-openEuler-linux
+            export CPLUS_INCLUDE_PATH=$CPLUS_INCLUDE_PATH:/usr/include/c++/12:/usr/include/c++/12/${arch}-openEuler-linux
           fi
 
           # X64 needs pytorch cpu whl index; ARM runner has no network access to it
