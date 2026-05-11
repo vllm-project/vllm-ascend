@@ -218,7 +218,8 @@ def build_mlp_compute_input(
         topk_scales=token_dispatch_output.topk_scales,
         weights=fused_experts_input.weights,
         quant=fused_experts_input.quant,
-        fusion=fused_experts_input.quant.quant_type in (QuantType.W8A8, QuantType.MXFP8, QuantType.MXFP4) and use_fusion_ops,
+        fusion=fused_experts_input.quant.quant_type in (QuantType.W8A8, QuantType.MXFP8, QuantType.MXFP4)
+        and use_fusion_ops,
         activation=fused_experts_input.activation,
         need_trans=fused_experts_input.need_trans,
         dynamic_eplb=fused_experts_input.dynamic_eplb,

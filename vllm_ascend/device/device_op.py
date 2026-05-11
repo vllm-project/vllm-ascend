@@ -542,11 +542,8 @@ class A5DeviceAdaptor(BaseDeviceAdaptor):
 
         if mxfp_quant_dtype == QuantType.W4A8MXFP:
             gmm2_scale = None
-            antiquant_scale = weight_scale.reshape(
-                weight_scale.shape[0], weight_scale.shape[1] // 2 , 2, weight_scale.shape[2]
-            ).transpose(-1, -2)
-            gmm2_kwargs.update({'antiquant_scale': [antiquant_scale]})
-        
+            gmm2_kwargs.update({"antiquant_scale": [weight_scale]})
+
         return torch_npu.npu_grouped_matmul(
             x=[hidden_states],
             weight=gmm2_weight,

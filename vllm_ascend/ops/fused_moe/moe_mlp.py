@@ -28,7 +28,6 @@ from vllm_ascend.device.mxfp_compat import (
 from vllm_ascend.ops.activation import AscendSwigluOAIAndMul
 from vllm_ascend.ops.fused_moe.moe_runtime_args import MoEMlpComputeInput
 from vllm_ascend.quantization.quant_type import QuantType
-
 from vllm_ascend.utils import (
     dispose_tensor,
     enable_custom_op,
