@@ -467,8 +467,8 @@ class TestNPUPlatform(TestBase):
         vllm_config.scheduler_config = MagicMock()
         vllm_config._set_cudagraph_sizes = MagicMock()
 
-        from vllm.config.compilation import DynamicShapesType
-        from vllm_ascend import platform
+        from vllm.config.compilation import DynamicShapesType  # noqa: I001
+        from vllm_ascend import platform  # noqa: I001
         importlib.reload(platform)
         self.platform = platform.NPUPlatform()
 

@@ -391,7 +391,10 @@ class NPUPlatform(Platform):
             ascend_config.ascend_compilation_config.enable_npugraph_ex = False
         elif compilation_config.cudagraph_mode == CUDAGraphMode.PIECEWISE:
             if compilation_config.mode == CompilationMode.VLLM_COMPILE:
-                logger.info("PIECEWISE compilation enabled on NPU. use_inductor not supported - using only ACL Graph mode")
+                logger.info(
+                    "PIECEWISE compilation enabled on NPU. "
+                    "use_inductor not supported - using only ACL Graph mode"
+                )
                 # VLLM_COMPILE uses VllmBackend → AscendCompiler → TorchAIR ACL Graph.
                 # Set backend to "eager" so make_compiler() uses EagerAdaptor (actual
                 # compilation is done by AscendCompiler, not Inductor).
@@ -423,7 +426,8 @@ class NPUPlatform(Platform):
         ):
             if compilation_config.mode == CompilationMode.VLLM_COMPILE:
                 logger.info(
-                    "FULL_DECODE_ONLY compilation enabled on NPU. use_inductor not supported - using only ACL Graph mode"
+                    "FULL_DECODE_ONLY compilation enabled on NPU. "
+                    "use_inductor not supported - using only ACL Graph mode"
                 )
                 compilation_config.backend = "eager"
                 compilation_config.use_inductor = False
