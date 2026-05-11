@@ -4,7 +4,6 @@
 # package.
 # FIRST AUTHOR <EMAIL@ADDRESS>, 2026.
 #
-#, fuzzy
 msgid ""
 msgstr ""
 "Project-Id-Version: vllm-ascend \n"
@@ -45,7 +44,7 @@ msgid ""
 " For design details, see the [Design "
 "Document](../../developer_guide/Design_Documents/dynamic_chunked_pipeline_parallel.md)."
 msgstr ""
-"配置详情请参阅[功能指南](../../user_guide/feature_guide/dynamic_chunk_pipeline_parallel.md)。"
+"配置详情请参阅[特性指南](../../user_guide/feature_guide/dynamic_chunk_pipeline_parallel.md)。"
 "设计详情请参阅[设计文档](../../developer_guide/Design_Documents/dynamic_chunked_pipeline_parallel.md)。"
 
 #: ../../source/tutorials/features/dynamic_chunked_pipeline_parallel.md:9
@@ -121,7 +120,7 @@ msgid ""
 "For configuration details, see the [Feature "
 "Guide](../../user_guide/feature_guide/dynamic_chunk_pipeline_parallel.md)."
 msgstr ""
-"配置详情请参阅[功能指南](../../user_guide/feature_guide/dynamic_chunk_pipeline_parallel.md)。"
+"配置详情请参阅[特性指南](../../user_guide/feature_guide/dynamic_chunk_pipeline_parallel.md)。"
 
 #: ../../source/tutorials/features/dynamic_chunked_pipeline_parallel.md:116
 msgid "Online Calibration"
