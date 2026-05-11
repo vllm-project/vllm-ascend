@@ -33,7 +33,7 @@ from vllm_ascend.device.mxfp_compat import (
 from vllm_ascend.ops.fused_moe.experts_selector import select_experts
 from vllm_ascend.ops.fused_moe.moe_runtime_args import build_fused_experts_input
 
-from .base import AscendLinearScheme, QuantType
+from .base import AscendLinearScheme, AscendMoEScheme, QuantType, get_moe_num_logical_experts
 from .registry import register_scheme
 
 
@@ -81,7 +81,7 @@ class AscendW4A8MXFPDynamicLinearMethod(AscendLinearScheme):
         x2_scale = (
             layer.weight_scale.transpose(-1, -2).reshape(-1, layer.weight_scale.shape[0] // 2, 2).transpose(-3, -2)
         )
-        output_dtype = x.dtype
+        output_dtype = x.dtype if not isinstance(x, tuple) else x[0].dtype
 
         output = torch_npu.npu_quant_matmul(
             quantized_x,
@@ -107,7 +107,7 @@ class AscendW4A8MXFPDynamicLinearMethod(AscendLinearScheme):
 
 
 @register_scheme("W4A8_MXFP", "moe")
-class AscendW4A8MXFPDynamicFusedMoEMethod:
+class AscendW4A8MXFPDynamicFusedMoEMethod(AscendMoEScheme):
     """FusedMoe method for Ascend W4A8_DYNAMIC."""
 
     quant_type: QuantType = QuantType.W4A8MXFP
@@ -123,10 +123,6 @@ class AscendW4A8MXFPDynamicFusedMoEMethod:
             and not vllm_config.model_config.enforce_eager
         )
         self.dynamic_eplb = ascend_config.eplb_config.dynamic_eplb
-        self.additional_quant_config = None
-
-    def update_additional_quant_config(self, additional_quant_config: dict):
-        self.additional_quant_config = additional_quant_config
 
     @staticmethod
     def get_weight(
@@ -162,7 +158,7 @@ class AscendW4A8MXFPDynamicFusedMoEMethod:
         top_k: int,
         renormalize: bool,
         use_grouped_topk: bool = False,
-        global_num_experts: int = -1,
+        num_experts: int = -1,
         expert_map: torch.Tensor | None = None,
         topk_group: int | None = None,
         num_expert_group: int | None = None,
@@ -179,9 +175,16 @@ class AscendW4A8MXFPDynamicFusedMoEMethod:
         apply_router_weight_on_input: bool = False,
         mc2_mask: torch.Tensor | None = None,
     ) -> torch.Tensor:
-        assert router_logits.shape[1] == global_num_experts - global_redundant_expert_num, (
-            "Number of global experts mismatch (excluding redundancy)"
+        num_shared_experts = getattr(layer, "n_shared_experts", 0)
+        if num_shared_experts is None:
+            num_shared_experts = 0
+        num_logical_experts = get_moe_num_logical_experts(
+            layer,
+            num_experts,
+            global_redundant_expert_num=global_redundant_expert_num,
+            num_shared_experts=num_shared_experts,
         )
+        assert router_logits.shape[1] == num_logical_experts, "Number of global experts mismatch (excluding redundancy)"
         topk_weights, topk_ids = select_experts(
             hidden_states=x,
             router_logits=router_logits,
@@ -193,16 +196,14 @@ class AscendW4A8MXFPDynamicFusedMoEMethod:
             custom_routing_function=custom_routing_function,
             scoring_func=scoring_func,
             e_score_correction_bias=e_score_correction_bias,
-            global_num_experts=global_num_experts,
+            num_experts=num_logical_experts,
         )
 
         # this is a naive implementation for experts load balance so as
         # to avoid accumulating too much tokens on a single rank.
         # currently it is only activated when doing profile runs.
         if enable_force_load_balance:
-            random_matrix = torch.rand(
-                topk_ids.size(0), global_num_experts - global_redundant_expert_num, device=topk_ids.device
-            )
+            random_matrix = torch.rand(topk_ids.size(0), num_logical_experts, device=topk_ids.device)
             topk_ids = torch.argsort(random_matrix, dim=1)[:, : topk_ids.size(1)].to(topk_ids.dtype)
 
         topk_weights = topk_weights.to(x.dtype)

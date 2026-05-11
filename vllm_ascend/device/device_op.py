@@ -171,6 +171,7 @@ class BaseDeviceAdaptor:
         use_mxfp_quant: bool = False,
         bias=None,
         fallback_output_dtype: torch.dtype | None = None,
+        mxfp_quant_dtype: QuantType | None = None,
     ) -> torch.Tensor:
         if use_mxfp_quant:
             raise RuntimeError("MXFP MoE quantization is only supported on Ascend A5.")
@@ -541,7 +542,7 @@ class A5DeviceAdaptor(BaseDeviceAdaptor):
         gmm2_scale = weight_scale if isinstance(weight_scale, list) else [weight_scale]
 
         if mxfp_quant_dtype == QuantType.W4A8MXFP:
-            gmm2_scale = None
+            gmm2_scale = None  # type: ignore[assignment]
             gmm2_kwargs.update({"antiquant_scale": [weight_scale]})
 
         return torch_npu.npu_grouped_matmul(
