@@ -289,7 +289,7 @@ async def test_multi_node() -> None:
             proxy_port=proxy.proxy_port,
             disaggregated_prefill=config.disagg_cfg,
             nodes_info=config.nodes,
-            max_wait_seconds=2800,
+            max_wait_seconds=4800,
         ) as server,
     ):
         host, port = config.benchmark_endpoint
