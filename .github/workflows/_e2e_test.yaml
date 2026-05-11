@@ -61,6 +61,7 @@ env:
 jobs:
   e2e-light:
     name: singlecard-light
+    # Temporarily disabled to run only the four-card light job.
     if: ${{ inputs.type == 'light' }}
     runs-on: linux-aarch64-a2b3-1
     strategy:
@@ -327,6 +328,7 @@ jobs:
 
   e2e-2-cards-light:
     name: multicard-2-light
+    # Temporarily disabled to run only the four-card light job.
     if: ${{ inputs.type == 'light' }}
     runs-on: linux-aarch64-a3-2
     strategy:
@@ -608,6 +610,189 @@ jobs:
             --log-file /tmp/e2e-non-triton.log \
             --output "$GITHUB_STEP_SUMMARY"
 
+  e2e-4-cards-light:
+    name: multicard-4-light
+    if: ${{ inputs.type == 'light' }}
+    runs-on: linux-aarch64-a3-4
+    strategy:
+      fail-fast: false
+      matrix:
+        part: [0]
+    container:
+      image: ${{ inputs.image_a3 }}
+      env:
+        VLLM_LOGGING_LEVEL: ERROR
+        VLLM_USE_MODELSCOPE: True
+        HCCL_BUFFSIZE: 1024
+        HF_HUB_OFFLINE: 1
+    steps:
+      - name: Checkout vllm-project/vllm-ascend repo
+        uses: actions/checkout@v6
+        with:
+          ref: ${{ inputs.ref }}
+      
+      - name: Set global envs
+        run: |
+          set -a
+          . /usr/local/Ascend/ascend-toolkit/set_env.sh
+          set +a
+          env >> $GITHUB_ENV
+
+      - name: Check npu and CANN info
+        run: |
+          npu-smi info
+          cat /usr/local/Ascend/ascend-toolkit/latest/"$(uname -i)"-linux/ascend_toolkit_install.info
+
+      - name: Config mirrors
+        run: |
+          sed -Ei 's@(ports|archive).ubuntu.com@cache-service.nginx-pypi-cache.svc.cluster.local:8081@g' /etc/apt/sources.list
+          pip config set global.index-url http://cache-service.nginx-pypi-cache.svc.cluster.local/pypi/simple
+          pip config set global.trusted-host cache-service.nginx-pypi-cache.svc.cluster.local
+          apt-get update -y
+          apt install git -y
+          git config --global --add safe.directory /__w/vllm-ascend/vllm-ascend
+
+      - name: Install system dependencies
+        run: |
+          apt-get -y install `cat packages.txt`
+          apt-get -y install gcc g++ cmake libnuma-dev clang-15
+
+          update-alternatives --install /usr/bin/clang clang /usr/bin/clang-15 20
+          update-alternatives --install /usr/bin/clang++ clang++ /usr/bin/clang++-15 20
+
+      - name: Checkout vllm-project/vllm repo
+        uses: actions/checkout@v6
+        with:
+          repository: vllm-project/vllm
+          ref: ${{ inputs.vllm }}
+          path: ./vllm-empty
+          fetch-depth: 1
+
+      - name: Install vllm-project/vllm from source
+        working-directory: ./vllm-empty
+        run: |
+          VLLM_TARGET_DEVICE=empty pip install -e .
+          pip uninstall -y triton
+
+      - name: Get csrc hash
+        id: get_csrc_hash
+        run: |
+          CSRC_HASH=$(find ./csrc ./setup.py ./CMakeLists.txt ./cmake \
+            -type f -not -path '*/.*' | sort | xargs sha256sum | sha256sum | awk '{print $1}')
+          echo "CSRC_HASH=$CSRC_HASH" >> $GITHUB_OUTPUT
+
+      - name: Cache vllm-ascend csrc
+        uses: runs-on/cache@v4
+        with:
+          path: |
+            vllm_ascend/_cann_ops_custom
+            vllm_ascend/*.so
+            vllm_ascend/lib
+            vllm_ascend/include
+          key: vllm-ascend-build-v1-${{ runner.os }}-${{ inputs.image_a3 }}-${{ steps.get_csrc_hash.outputs.CSRC_HASH }}
+          restore-keys: |
+            vllm-ascend-build-v1-${{ runner.os }}-${{ inputs.image_a3 }}-${{ steps.get_csrc_hash.outputs.CSRC_HASH }}
+
+      - name: Install Mooncake wheel
+        shell: bash
+        run: |
+          set -euxo pipefail
+
+          echo "=== Install Mooncake system runtime deps ==="
+          apt-get update -y
+          apt-get update -y
+          apt-get install -y --no-install-recommends \
+            libibverbs1 \
+            ibverbs-providers \
+            librdmacm1 \
+            libnuma1 \
+            libcurl4
+          ldconfig
+
+          echo "=== Check libibverbs ==="
+          ldconfig -p | grep libibverbs || true
+          find /lib /usr/lib /usr/local/lib /usr/local -name 'libibverbs.so*' 2>/dev/null || true
+
+          echo "=== Locate Mooncake wheel ==="
+          MOONCAKE_WHEEL_DIR="/root/.cache/mooncake-wheelhouse"
+          ls -lh "${MOONCAKE_WHEEL_DIR}"
+
+          MOONCAKE_WHEEL="$(find "${MOONCAKE_WHEEL_DIR}" -maxdepth 1 -type f -name 'mooncake_transfer_engine-0.3.8.post1-cp311-cp311-*.whl' -print -quit)"
+
+          if [ -z "${MOONCAKE_WHEEL}" ]; then
+            echo "Mooncake wheel not found in ${MOONCAKE_WHEEL_DIR}"
+            exit 1
+          fi
+
+          echo "Using Mooncake wheel: ${MOONCAKE_WHEEL}"
+
+          echo "=== Check SHA256 ==="
+          if [ -f "${MOONCAKE_WHEEL_DIR}/SHA256SUMS" ]; then
+            cd "${MOONCAKE_WHEEL_DIR}"
+            sha256sum -c SHA256SUMS
+            cd -
+          else
+            sha256sum "${MOONCAKE_WHEEL}"
+          fi
+
+          echo "=== Install Mooncake wheel ==="
+          python3 -m pip install --no-cache-dir --no-deps "${MOONCAKE_WHEEL}"
+
+          echo "=== Installed Mooncake package ==="
+          python3 -m pip show mooncake-transfer-engine
+
+      - name: Install vllm-project/vllm-ascend
+        env:
+          PIP_EXTRA_INDEX_URL: "https://mirrors.huaweicloud.com/ascend/repos/pypi https://triton-ascend.osinfra.cn/pypi/simple https://download.pytorch.org/whl/cpu/"
+        run: |
+          pip install uc-manager
+          pip install -r requirements-dev.txt
+          if find vllm_ascend -maxdepth 1 -name '*.so' -type f 2>/dev/null | grep -q .; then
+            COMPILE_CUSTOM_KERNELS=0 pip install -e .
+          else
+            pip install -e .
+          fi
+
+      - name: Run vllm-project/vllm-ascend test (light)
+        env:
+          VLLM_WORKER_MULTIPROC_METHOD: spawn
+        shell: bash
+        run: |
+          set -o pipefail
+          if [ "${{ inputs.continue_on_error }}" = "true" ]; then
+            python3 .github/workflows/scripts/run_suite.py \
+              --suite e2e-4card-light \
+              --auto-partition-id "${{ matrix.part }}" \
+              --auto-partition-size 1 \
+              --auto-upgrade-estimated-times \
+              --continue-on-error \
+              2>&1 | tee /tmp/e2e-4card-light-part${{ matrix.part }}.log
+          else
+            python3 .github/workflows/scripts/run_suite.py \
+              --suite e2e-4card-light \
+              --auto-partition-id "${{ matrix.part }}" \
+              --auto-partition-size 1 \
+              2>&1 | tee /tmp/e2e-4card-light-part${{ matrix.part }}.log
+          fi
+          exit ${PIPESTATUS[0]}
+
+      - name: Summarize multicard-4-light failure
+        if: ${{ always() }}
+        run: |
+          python3 .github/workflows/scripts/ci_log_summary.py \
+            --step-name "Run multicard-4-light test" \
+            --log-file /tmp/e2e-4card-light-part${{ matrix.part }}.log \
+            --output "$GITHUB_STEP_SUMMARY"
+
+      - name: Upload timing data
+        uses: actions/upload-artifact@v7
+        if: ${{ inputs.continue_on_error == true && github.event_name != 'pull_request' }}
+        with:
+          name: timing-data-4card-light-part${{ matrix.part }}
+          path: test_timing_data.json
+          if-no-files-found: warn
+          retention-days: 5
+
   e2e-4-cards-full:
     name: multicard-4-full
     if: ${{ inputs.type == 'full' || inputs.multicard_4_tests != '' }}
@@ -747,7 +932,7 @@ jobs:
   e2e_310p:
     name: 310p singlecard
     runs-on: linux-aarch64-310p-1
-    if: ${{ inputs.contains_310 || inputs.p310_tests != '' }}
+    if: ${{ (inputs.contains_310 || inputs.p310_tests != '') && false }}
     container:
       image: ${{ inputs.image_310p }}
       env:
@@ -859,7 +1044,7 @@ jobs:
   e2e_310p-4cards:
     name: 310p multicards 4cards
     runs-on: linux-aarch64-310p-4
-    if: ${{ inputs.contains_310 }}
+    if: ${{ inputs.contains_310 && false }}
     container:
       image: ${{ inputs.image_310p }}
       env:

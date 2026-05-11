@@ -92,3 +92,19 @@ def _fast_pos_embed_interpolate(self, grid_thw: list[list[int]]) -> torch.Tensor
 
 
 Qwen3_VisionTransformer.fast_pos_embed_interpolate = _fast_pos_embed_interpolate
+
+
+def patch_qwen3_vl_moe_pp_layer_range():
+    try:
+        from vllm.model_executor.models.qwen3_vl_moe import Qwen3MoeLLMForCausalLM
+    except Exception:
+        return
+
+    if not hasattr(Qwen3MoeLLMForCausalLM, "start_layer"):
+        Qwen3MoeLLMForCausalLM.start_layer = property(lambda self: self.model.start_layer)
+
+    if not hasattr(Qwen3MoeLLMForCausalLM, "end_layer"):
+        Qwen3MoeLLMForCausalLM.end_layer = property(lambda self: self.model.end_layer)
+
+
+patch_qwen3_vl_moe_pp_layer_range()
