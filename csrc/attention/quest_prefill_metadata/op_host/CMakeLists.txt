@@ -1,3 +1,5 @@
+add_op_to_compiled_list()
+
 add_ops_compile_options(
         OP_NAME QuestPrefillMetadata
         OPTIONS --cce-auto-sync=off
@@ -7,24 +9,15 @@ add_ops_compile_options(
                 --op_relocatable_kernel_binary=true
 )
 
-target_sources(op_host_aclnn PRIVATE
+if (BUILD_OPEN_PROJECT)
+    target_sources(op_host_aclnn PRIVATE
         quest_prefill_metadata_def.cpp
-)
-
-target_sources(optiling PRIVATE
-        quest_prefill_metadata_tiling.cpp
-)
-
-if (NOT BUILD_OPEN_PROJECT)
-    target_sources(opmaster_ct PRIVATE
-        quest_prefill_metadata_tiling.cpp
     )
 endif ()
 
-target_include_directories(optiling PRIVATE
+if (NOT BUILD_OPS_RTY_KERNEL)
+    add_modules_sources(OPTYPE quest_prefill_metadata ACLNNTYPE aclnn)
+    target_include_directories(${OPHOST_NAME}_tiling_obj PRIVATE
         ${CMAKE_CURRENT_SOURCE_DIR}
-)
-
-target_sources(opsproto PRIVATE
-        quest_prefill_metadata_proto.cpp
-)
+    )
+endif()

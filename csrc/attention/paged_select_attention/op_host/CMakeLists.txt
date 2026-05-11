@@ -7,6 +7,8 @@
 # See LICENSE in the root of the software repository for the full text of the License.
 # ======================================================================================================================
 
+add_op_to_compiled_list()
+
 add_ops_compile_options(
         OP_NAME PagedSelectAttention
         OPTIONS --cce-auto-sync=off
@@ -17,45 +19,21 @@ add_ops_compile_options(
                 --op_relocatable_kernel_binary=true
 )
 
-target_sources(op_host_aclnnInner PRIVATE
+if (BUILD_OPEN_PROJECT)
+    target_sources(op_host_aclnnInner PRIVATE
         paged_select_attention_def.cpp
-)
-
-target_include_directories(op_host_aclnnInner PRIVATE
-        ${CMAKE_CURRENT_SOURCE_DIR}
-)
-
-target_sources(opapi PRIVATE
-        op_api/aclnn_paged_select_attention.cpp
-)
-
-target_include_directories(opapi PRIVATE
-        ${CMAKE_CURRENT_SOURCE_DIR}
-        ${CMAKE_CURRENT_SOURCE_DIR}/op_api
-)
-
-if (NOT BUILD_OPEN_PROJECT)
-    target_sources(aclnn_ops_train PRIVATE
-        op_api/aclnn_paged_select_attention.cpp
     )
-
-    target_sources(aclnn_ops_infer PRIVATE
-        op_api/aclnn_paged_select_attention.cpp
+    target_include_directories(op_host_aclnnInner PRIVATE
+        ${CMAKE_CURRENT_SOURCE_DIR}
     )
 endif ()
 
-target_sources(optiling PRIVATE
-        paged_select_attention_tiling.cpp
-        paged_select_attention_tiling_register.cpp
-)
-
-target_include_directories(optiling PRIVATE
+if (NOT BUILD_OPS_RTY_KERNEL)
+    add_modules_sources(OPTYPE paged_select_attention ACLNNTYPE aclnn_inner)
+    target_include_directories(${OPHOST_NAME}_tiling_obj PRIVATE
         ${CMAKE_CURRENT_SOURCE_DIR}
-)
-
-target_sources(opsproto PRIVATE
-        paged_select_attention_infershape.cpp
-)
+    )
+endif()
 
 file(GLOB PAGED_SELECT_ATTENTION_ACLNN_HEADER
         "${CMAKE_CURRENT_SOURCE_DIR}/op_api/aclnn_paged_select_attention.h")
