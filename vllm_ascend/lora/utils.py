@@ -212,29 +212,13 @@ class AscendFusedMoEWithLoRA(FusedMoEWithLoRA):
     ) -> bool:
         return isinstance(source_layer, AscendFusedMoE) and len(packed_modules_list) == 2
 
-    def __init__(self, base_layer: FusedMoE) -> None:
-        from vllm.lora.layers.base import BaseLayerWithLoRA
-        from vllm.lora.layers.utils import _get_lora_device
-
-        BaseLayerWithLoRA.__init__(self)
-        self.base_layer = base_layer
-
-        assert not self.base_layer.use_ep, (
-            "EP support for Fused MoE LoRA is not implemented yet."
-        )
-        assert not self.base_layer.quant_method.is_monolithic, (
-            "Monolithic kernels are not supported for Fused MoE LoRA."
-        )
-        self.tp_size = get_tensor_model_parallel_world_size()
-        self.tp_rank = get_tensor_model_parallel_rank()
-        self.device = _get_lora_device(base_layer)
-        self._w13_slices = 2 if base_layer.moe_config.is_act_and_mul else 1
-        self._inject_lora_into_fused_moe()
+    def __init__(self, base_layer: AscendFusedMoE) -> None:
+        super().__init__(base_layer)
 
     def _inject_lora_into_fused_moe(self):
         self.base_layer.ensure_moe_quant_config_init()
         self.base_layer.quant_method._lora_enabled = True
-        self.base_layer._lora_wrapper = self
+        self.base_layer.quant_method._lora_wrapper = self
 
     def forward(self, *args, **kwargs):
         return self.base_layer.forward(*args, **kwargs)
@@ -252,13 +236,6 @@ def refresh_all_lora_classes():
     vllm.lora.utils._all_lora_classes.add(AscendQKVParallelLinearWithShardedLoRA)
     vllm.lora.utils._all_lora_classes.add(AscendRowParallelLinearWithShardedLoRA)
     vllm.lora.utils._all_lora_classes.add(AscendReplicatedLinearWithLoRA)
+    vllm.lora.utils._all_lora_classes.discard(FusedMoEWithLoRA)
     vllm.lora.utils._all_lora_classes.add(AscendFusedMoEWithLoRA)
 
-    _gpu_can_replace_layer = FusedMoEWithLoRA.can_replace_layer.__func__
-
-    def _patched_can_replace_layer(cls, source_layer, lora_config, packed_modules_list, model_config=None):
-        if isinstance(source_layer, AscendFusedMoE):
-            return False
-        return _gpu_can_replace_layer(cls, source_layer, lora_config, packed_modules_list, model_config)
-
-    FusedMoEWithLoRA.can_replace_layer = classmethod(_patched_can_replace_layer)

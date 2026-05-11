@@ -81,6 +81,7 @@ def apply_moe_lora_w13(
 
 def apply_moe_lora_w2(
     activated_out: torch.Tensor,
+    w2_output: torch.Tensor,
     w2_lora_a_stacked: tuple[torch.Tensor, ...],
     w2_lora_b_stacked: tuple[torch.Tensor, ...],
     lora_expert_indices: torch.Tensor,
@@ -102,4 +103,4 @@ def apply_moe_lora_w2(
         device=activated_out.device,
     )
     bgmv_shrink(activated_out, lora_a_merged, buffer, lora_expert_indices, scale)
-    bgmv_expand(buffer, lora_b_merged, activated_out, lora_expert_indices, add_inputs=True)
+    bgmv_expand(buffer, lora_b_merged, w2_output, lora_expert_indices, add_inputs=True)

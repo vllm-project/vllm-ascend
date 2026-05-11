@@ -80,6 +80,7 @@ class AscendUnquantizedFusedMoEMethod(UnquantizedFusedMoEMethod):
         super().__init__(moe=moe)
         self.dynamic_eplb = get_ascend_config().eplb_config.dynamic_eplb
         self._lora_enabled = False
+        self._lora_wrapper = None
 
     @property
     def is_monolithic(self) -> bool:
@@ -171,7 +172,7 @@ class AscendUnquantizedFusedMoEMethod(UnquantizedFusedMoEMethod):
 
         moe_comm_method = _EXTRA_CTX.moe_comm_method
 
-        if self._lora_enabled and hasattr(layer, '_lora_wrapper'):
+        if self._lora_enabled and self._lora_wrapper is not None:
             fused_experts_results = self._apply_with_lora(
                 layer=layer,
                 x=x,
@@ -295,9 +296,9 @@ class AscendUnquantizedFusedMoEMethod(UnquantizedFusedMoEMethod):
             "Please disable VLLM_ASCEND_ENABLE_FUSED_MC2 when using MoE LoRA."
         )
 
-        lora_layer = layer._lora_wrapper
+        lora_layer = self._lora_wrapper
         assert lora_layer is not None, (
-            f"_apply_with_lora called but layer._lora_wrapper is None. "
+            f"_apply_with_lora called but self._lora_wrapper is None. "
             f"_lora_enabled={self._lora_enabled}, "
             f"layer type={type(layer).__name__}"
         )
@@ -402,14 +403,6 @@ class AscendUnquantizedFusedMoEMethod(UnquantizedFusedMoEMethod):
             activation=activation,
         )
 
-        apply_moe_lora_w2(
-            activated_out=gate_up_out,
-            w2_lora_a_stacked=lora_layer.w2_lora_a_stacked,
-            w2_lora_b_stacked=lora_layer.w2_lora_b_stacked,
-            lora_expert_indices=lora_expert_indices,
-            scale=1.0,
-        )
-
         mlp_output = unquant_apply_mlp_w2(
             gate_up_out=gate_up_out,
             w2=w2,
@@ -417,6 +410,15 @@ class AscendUnquantizedFusedMoEMethod(UnquantizedFusedMoEMethod):
             w2_bias=w2_bias,
             group_list_type=group_list_type,
             need_trans=need_trans,
+        )
+
+        apply_moe_lora_w2(
+            activated_out=gate_up_out,
+            w2_output=mlp_output,
+            w2_lora_a_stacked=lora_layer.w2_lora_a_stacked,
+            w2_lora_b_stacked=lora_layer.w2_lora_b_stacked,
+            lora_expert_indices=lora_expert_indices,
+            scale=1.0,
         )
 
         routed_out = moe_comm_method.token_dispatcher.token_combine(
