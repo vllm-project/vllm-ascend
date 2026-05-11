@@ -26,7 +26,6 @@ on:
       - 'CMakeLists.txt'
       - 'cmake/**'
   workflow_dispatch:
-  pull_request:
 
 defaults:
   run:
