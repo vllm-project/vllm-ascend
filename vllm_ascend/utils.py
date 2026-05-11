@@ -807,14 +807,17 @@ def enable_sp_by_pass():
 
 def enable_sp(vllm_config=None, enable_shared_expert_dp: bool = False) -> bool:
     global _ENABLE_SP
-    if _ENABLE_SP is None:
-        if vllm_config is None:
-            from vllm.config import get_current_vllm_config
+    if vllm_config is None:
+        from vllm.config import get_current_vllm_config
 
-            vllm_config = get_current_vllm_config()
+        vllm_config = get_current_vllm_config()
 
+    additional_config = getattr(vllm_config, "additional_config", None) if vllm_config is not None else None
+    refresh = additional_config.get("refresh", False) if additional_config else False
+
+    if _ENABLE_SP is None or refresh:
         if vllm_config is not None:
-            additional_config = getattr(vllm_config, "additional_config", None) or {}
+            additional_config = additional_config or {}
             _ENABLE_SP = additional_config.get("enable_flashcomm1", False)
         else:
             _ENABLE_SP = get_ascend_config().enable_flashcomm1
