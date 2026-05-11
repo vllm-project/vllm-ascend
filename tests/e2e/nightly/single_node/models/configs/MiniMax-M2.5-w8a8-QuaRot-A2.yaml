@@ -41,7 +41,7 @@ test_cases:
       - "--enable-chunked-prefill"
       - "--enable-prefix-caching"
       - "--max-num-seqs"
-      - "100"
+      - "120"
       - "--seed"
       - "1024"
       - "--max-num-batched-tokens"
