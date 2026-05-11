@@ -70,6 +70,11 @@ _HAS_LAYER_IDX = None
 _HAS_ROPE = None
 
 
+def clear_enable_sp():
+    global _ENABLE_SP
+    _ENABLE_SP = None
+
+
 def is_310p():
     return get_ascend_device_type() == AscendDeviceType._310P
 
