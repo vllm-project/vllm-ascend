@@ -32,7 +32,6 @@ chmod +x .agents/skills/vllm-ascend-model-adapter/scripts/*.sh
 | `triage_model.sh <MODEL_PATH>` | Model directory listing + config.json field scan |
 | `classify_model.py <MODEL_PATH>` | Classify model type from config.json |
 | `session_reset.sh [PORT]` | Kill stale vllm processes and verify port is free |
-| `syntax_check.sh <file.py> ...` | Python syntax check for one or more files |
 | `smoke_test.sh <SERVED_NAME> [PORT] [--multimodal]` | Readiness poll + OpenAI-compatible smoke requests |
 
 ## Hard constraints
@@ -172,24 +171,12 @@ If activation fails, stop and report the error before continuing.
 - Touch only files required for this model adaptation.
 - Keep weight mapping explicit and auditable.
 - Avoid unrelated refactors.
-- After editing, run syntax check:
-  ```bash
-  bash scripts/syntax_check.sh \
-    "$VLLM_SRC"/vllm/model_executor/models/<new_model>.py \
-    "$VLLM_SRC"/vllm/transformers_utils/processors/<new_model>.py
-  ```
 
 ### 6.5) Intermediate NPU unit-test gate (before full serve)
 
 Run targeted unit tests on NPU for any new operators (from Step 3) and framework changes (from Step 4) **before** launching the full serve pipeline. This catches NPU-specific failures in seconds rather than minutes.
 
-After writing tests under `/tmp/npu_unit_tests/`, run syntax check first:
-
-```bash
-bash scripts/syntax_check.sh /tmp/npu_unit_tests/test_<operator_or_module>.py
-```
-
-Then run the test:
+Run the test directly:
 
 ```bash
 python /tmp/npu_unit_tests/test_<operator_or_module>.py
