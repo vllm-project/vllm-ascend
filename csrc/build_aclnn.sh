@@ -62,7 +62,7 @@ elif [[ "$SOC_VERSION" =~ ^ascend910_93 ]]; then
         "causal_conv1d"
         "moe_grouped_matmul"
         "lightning_indexer_quant"
-        store_kv_block;
+        "store_kv_block"
     )
     CUSTOM_OPS=$(IFS=';'; echo "${CUSTOM_OPS_ARRAY[*]}")
     SOC_ARG="ascend910_93"
