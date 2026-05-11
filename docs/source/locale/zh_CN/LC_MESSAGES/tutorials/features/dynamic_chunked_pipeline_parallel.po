@@ -1,0 +1,300 @@
+# SOME DESCRIPTIVE TITLE.
+# Copyright (C) 2025, vllm-ascend team
+# This file is distributed under the same license as the vllm-ascend
+# package.
+# FIRST AUTHOR <EMAIL@ADDRESS>, 2026.
+#
+msgid ""
+msgstr ""
+"Project-Id-Version: vllm-ascend \n"
+"Report-Msgid-Bugs-To: \n"
+"POT-Creation-Date: 2026-05-06 02:14+0000\n"
+"PO-Revision-Date: YEAR-MO-DA HO:MI+ZONE\n"
+"Last-Translator: FULL NAME <EMAIL@ADDRESS>\n"
+"Language: zh_CN\n"
+"Language-Team: zh_CN <LL@li.org>\n"
+"Plural-Forms: nplurals=1; plural=0;\n"
+"MIME-Version: 1.0\n"
+"Content-Type: text/plain; charset=utf-8\n"
+"Content-Transfer-Encoding: 8bit\n"
+"Generated-By: Babel 2.18.0\n"
+
+#: ../../source/tutorials/features/dynamic_chunked_pipeline_parallel.md:1
+msgid "Dynamic Chunked Pipeline Parallel (DeepSeek-V3.1)"
+msgstr "动态分块流水线并行 (DeepSeek-V3.1)"
+
+#: ../../source/tutorials/features/dynamic_chunked_pipeline_parallel.md:3
+msgid "Getting Started"
+msgstr "快速入门"
+
+#: ../../source/tutorials/features/dynamic_chunked_pipeline_parallel.md:5
+msgid ""
+"vLLM-Ascend supports Dynamic Chunked Pipeline Parallel (CPP) for "
+"optimizing prefill performance in Pipeline Parallelism scenarios. This "
+"guide demonstrates deployment with DeepSeek-V3.1 on 1 Atlas 800T A3 "
+"server (64G × 16)."
+msgstr ""
+"vLLM-Ascend 支持动态分块流水线并行 (CPP) 以优化流水线并行场景中的预填充性能。"
+"本指南演示在1台 Atlas 800T A3 服务器 (64G × 16) 上使用 DeepSeek-V3.1 进行部署。"
+
+#: ../../source/tutorials/features/dynamic_chunked_pipeline_parallel.md:7
+msgid ""
+"For configuration details, see the [Feature "
+"Guide](../../user_guide/feature_guide/dynamic_chunk_pipeline_parallel.md)."
+" For design details, see the [Design "
+"Document](../../developer_guide/Design_Documents/dynamic_chunked_pipeline_parallel.md)."
+msgstr ""
+"配置详情请参阅[特性指南](../../user_guide/feature_guide/dynamic_chunk_pipeline_parallel.md)。"
+"设计详情请参阅[设计文档](../../developer_guide/Design_Documents/dynamic_chunked_pipeline_parallel.md)。"
+
+#: ../../source/tutorials/features/dynamic_chunked_pipeline_parallel.md:9
+msgid "Environment Preparation"
+msgstr "环境准备"
+
+#: ../../source/tutorials/features/dynamic_chunked_pipeline_parallel.md:11
+msgid "Model Weight"
+msgstr "模型权重"
+
+#: ../../source/tutorials/features/dynamic_chunked_pipeline_parallel.md:13
+msgid "`DeepSeek-V3.1-w8a8` (Quantized version): 1 Atlas 800T A3 (64G × 16) node"
+msgstr "`DeepSeek-V3.1-w8a8` (量化版本)：1个 Atlas 800T A3 (64G × 16) 节点"
+
+#: ../../source/tutorials/features/dynamic_chunked_pipeline_parallel.md:15
+msgid "Download to shared directory such as `/mnt/weight/`"
+msgstr "下载到共享目录，例如 `/mnt/weight/`"
+
+#: ../../source/tutorials/features/dynamic_chunked_pipeline_parallel.md:17
+msgid "Run with Docker"
+msgstr "使用 Docker 运行"
+
+#: ../../source/tutorials/features/dynamic_chunked_pipeline_parallel.md:58
+msgid "Deployment"
+msgstr "部署"
+
+#: ../../source/tutorials/features/dynamic_chunked_pipeline_parallel.md:60
+msgid "Startup Script"
+msgstr "启动脚本"
+
+#: ../../source/tutorials/features/dynamic_chunked_pipeline_parallel.md:105
+msgid "Key Parameters"
+msgstr "关键参数"
+
+#: ../../source/tutorials/features/dynamic_chunked_pipeline_parallel.md:107
+msgid "`--pipeline-parallel-size 2`: Enables Pipeline Parallelism (required)"
+msgstr "`--pipeline-parallel-size 2`：启用流水线并行（必需）"
+
+#: ../../source/tutorials/features/dynamic_chunked_pipeline_parallel.md:108
+msgid "`--enable-chunked-prefill`: Enables Chunked Prefill (required)"
+msgstr "`--enable-chunked-prefill`：启用分块预填充（必需）"
+
+#: ../../source/tutorials/features/dynamic_chunked_pipeline_parallel.md:109
+msgid ""
+"`--max-num-batched-tokens 32768`: Initial chunk size (recommended for "
+"128K sequences)"
+msgstr ""
+"`--max-num-batched-tokens 32768`：初始分块大小（推荐用于128K序列）"
+
+#: ../../source/tutorials/features/dynamic_chunked_pipeline_parallel.md:110
+msgid ""
+"`profiling_chunk_config.enabled`: Enables Dynamic Chunked Pipeline "
+"Parallel"
+msgstr ""
+"`profiling_chunk_config.enabled`：启用动态分块流水线并行"
+
+#: ../../source/tutorials/features/dynamic_chunked_pipeline_parallel.md:111
+msgid ""
+"`profiling_chunk_config.smooth_factor`:  Smoothing factor (0 < x ≤ 1.0). "
+"Higher values trust dynamic prediction more"
+msgstr ""
+"`profiling_chunk_config.smooth_factor`：平滑因子 (0 < x ≤ 1.0)。值越大越信任动态预测"
+
+#: ../../source/tutorials/features/dynamic_chunked_pipeline_parallel.md:112
+msgid ""
+"`profiling_chunk_config.min_chunk`: Minimum chunk size for dynamic "
+"calculation. Should be smaller than `max-num-batched-tokens`"
+msgstr ""
+"`profiling_chunk_config.min_chunk`：动态计算的最小分块大小。应小于 `max-num-batched-tokens`"
+
+#: ../../source/tutorials/features/dynamic_chunked_pipeline_parallel.md:114
+msgid ""
+"For configuration details, see the [Feature "
+"Guide](../../user_guide/feature_guide/dynamic_chunk_pipeline_parallel.md)."
+msgstr ""
+"配置详情请参阅[特性指南](../../user_guide/feature_guide/dynamic_chunk_pipeline_parallel.md)。"
+
+#: ../../source/tutorials/features/dynamic_chunked_pipeline_parallel.md:116
+msgid "Online Calibration"
+msgstr "在线校准"
+
+#: ../../source/tutorials/features/dynamic_chunked_pipeline_parallel.md:118
+msgid ""
+"For optimal performance, online calibrate with real data before "
+"production:"
+msgstr ""
+"为获得最佳性能，请在投产前使用真实数据进行在线校准："
+
+#: ../../source/tutorials/features/dynamic_chunked_pipeline_parallel.md:120
+msgid ""
+"You can use aisbench to generate fixed-length random datasets. Refer to "
+"[Using AISBench for performance "
+"evaluation](../../developer_guide/evaluation/using_ais_bench.md#execute-"
+"performance-evaluation) for details."
+msgstr ""
+"您可以使用 aisbench 生成固定长度的随机数据集。详情请参阅[使用 AISBench 进行性能评估](../../developer_guide/evaluation/using_ais_bench.md#execute-performance-evaluation)。"
+
+#: ../../source/tutorials/features/dynamic_chunked_pipeline_parallel.md:122
+msgid ""
+"Modify "
+"`<YOUR_AISBENCH_PATH>/benchmark/ais_bench/datasets/synthetic/synthetic_config.py`:"
+msgstr ""
+"修改 `<YOUR_AISBENCH_PATH>/benchmark/ais_bench/datasets/synthetic/synthetic_config.py`："
+
+#: ../../source/tutorials/features/dynamic_chunked_pipeline_parallel.md:142
+msgid "Run for online calibration:"
+msgstr "运行在线校准："
+
+#: ../../source/tutorials/features/dynamic_chunked_pipeline_parallel.md:148
+msgid ""
+"Configure online calibration data length to match your `max-model-len`. "
+"Use `batch_size=1` and ensure data differs to avoid cache hits if prefix "
+"caching is enabled."
+msgstr ""
+"配置在线校准数据长度以匹配您的 `max-model-len`。使用 `batch_size=1` 并确保数据不同，以避免启用前缀缓存时命中缓存。"
+
+#: ../../source/tutorials/features/dynamic_chunked_pipeline_parallel.md:150
+msgid "Accuracy Evaluation"
+msgstr "精度评估"
+
+#: ../../source/tutorials/features/dynamic_chunked_pipeline_parallel.md:152
+msgid ""
+"Refer to [Using "
+"AISBench](../../developer_guide/evaluation/using_ais_bench.md) for "
+"details."
+msgstr ""
+"详情请参阅[使用 AISBench](../../developer_guide/evaluation/using_ais_bench.md)。"
+
+#: ../../source/tutorials/features/dynamic_chunked_pipeline_parallel.md:19
+msgid "dataset"
+msgstr "数据集"
+
+#: ../../source/tutorials/features/dynamic_chunked_pipeline_parallel.md:19
+msgid "accuracy"
+msgstr "精度"
+
+#: ../../source/tutorials/features/dynamic_chunked_pipeline_parallel.md:19
+msgid "gsm8k"
+msgstr "gsm8k"
+
+#: ../../source/tutorials/features/dynamic_chunked_pipeline_parallel.md:19
+msgid "95.83"
+msgstr "95.83"
+
+#: ../../source/tutorials/features/dynamic_chunked_pipeline_parallel.md:158
+msgid "Performance Benchmark"
+msgstr "性能基准测试"
+
+#: ../../source/tutorials/features/dynamic_chunked_pipeline_parallel.md:160
+msgid ""
+"Refer to [Using AISBench for performance "
+"evaluation](../../developer_guide/evaluation/using_ais_bench.md#execute-"
+"performance-evaluation) for details."
+msgstr ""
+"详情请参阅[使用 AISBench 进行性能评估](../../developer_guide/evaluation/using_ais_bench.md#execute-performance-evaluation)。"
+
+#: ../../source/tutorials/features/dynamic_chunked_pipeline_parallel.md:162
+msgid ""
+"To evaluate the effectiveness of Dynamic Chunked Pipeline Parallel in "
+"long sequence LLM inference scenarios, we use **DeepSeek-V3.1-W8A8** and "
+"**Qwen3-235B**, deploy P instance in Ascend Atlas A3 inference "
+"products*64G (A3), the configuration and performance data are as follows."
+msgstr ""
+"为评估动态分块流水线并行在长序列 LLM 推理场景中的效果，我们使用 **DeepSeek-V3.1-W8A8** 和 **Qwen3-235B**，在 Ascend Atlas A3 推理产品*64G (A3) 中部署 P 实例，配置和性能数据如下。"
+
+#: ../../source/tutorials/features/dynamic_chunked_pipeline_parallel.md:164
+msgid "**Fixed-length requests, concurrency=1**:"
+msgstr "**固定长度请求，并发数=1**："
+
+#: ../../source/tutorials/features/dynamic_chunked_pipeline_parallel.md:166
+#: ../../source/tutorials/features/dynamic_chunked_pipeline_parallel.md:180
+msgid "DeepSeek-V3.1-W8A8:"
+msgstr "DeepSeek-V3.1-W8A8："
+
+#: ../../source/tutorials/features/dynamic_chunked_pipeline_parallel.md:19
+msgid "Configuration"
+msgstr "配置"
+
+#: ../../source/tutorials/features/dynamic_chunked_pipeline_parallel.md:19
+msgid "CPP <br> (Dynamic Chunk, <br> chunksize=32k)"
+msgstr "CPP <br> (动态分块, <br> 分块大小=32k)"
+
+#: ../../source/tutorials/features/dynamic_chunked_pipeline_parallel.md:19
+msgid "PP <br>(Static Chunk, <br> chunksize=32k)"
+msgstr "PP <br>(静态分块, <br> 分块大小=32k)"
+
+#: ../../source/tutorials/features/dynamic_chunked_pipeline_parallel.md:19
+msgid "Input length  128k"
+msgstr "输入长度 128k"
+
+#: ../../source/tutorials/features/dynamic_chunked_pipeline_parallel.md:19
+msgid "TTFT: 22.5s"
+msgstr "TTFT: 22.5s"
+
+#: ../../source/tutorials/features/dynamic_chunked_pipeline_parallel.md:19
+msgid "TTFT: 27.0s"
+msgstr "TTFT: 27.0s"
+
+#: ../../source/tutorials/features/dynamic_chunked_pipeline_parallel.md:172
+msgid "Qwen3-235B:"
+msgstr "Qwen3-235B："
+
+#: ../../source/tutorials/features/dynamic_chunked_pipeline_parallel.md:19
+msgid "Input length  256k"
+msgstr "输入长度 256k"
+
+#: ../../source/tutorials/features/dynamic_chunked_pipeline_parallel.md:19
+msgid "TTFT: 53.5s"
+msgstr "TTFT: 53.5s"
+
+#: ../../source/tutorials/features/dynamic_chunked_pipeline_parallel.md:19
+msgid "TTFT: 61.4s"
+msgstr "TTFT: 61.4s"
+
+#: ../../source/tutorials/features/dynamic_chunked_pipeline_parallel.md:178
+msgid "**Variable-length requests, concurrency=4**:"
+msgstr "**变长请求，并发数=4**："
+
+#: ../../source/tutorials/features/dynamic_chunked_pipeline_parallel.md:19
+msgid "4k~64k Input, mean=32k, std=32k <br> prefix hit rate=99%"
+msgstr "4k~64k 输入, mean=32k, std=32k <br> 前缀命中率=99%"
+
+#: ../../source/tutorials/features/dynamic_chunked_pipeline_parallel.md:19
+msgid "CPP2TP8"
+msgstr "CPP2TP8"
+
+#: ../../source/tutorials/features/dynamic_chunked_pipeline_parallel.md:19
+msgid "Input throughput: 22424 tps/card"
+msgstr "输入吞吐量: 22424 tps/卡"
+
+#: ../../source/tutorials/features/dynamic_chunked_pipeline_parallel.md:19
+msgid "DP2TP8"
+msgstr "DP2TP8"
+
+#: ../../source/tutorials/features/dynamic_chunked_pipeline_parallel.md:19
+msgid "Input throughput: 16150 tps/card"
+msgstr "输入吞吐量: 16150 tps/卡"
+
+#: ../../source/tutorials/features/dynamic_chunked_pipeline_parallel.md:19
+msgid "PCP2TP8"
+msgstr "PCP2TP8"
+
+#: ../../source/tutorials/features/dynamic_chunked_pipeline_parallel.md:19
+msgid "Input throughput: 18197 tps/card"
+msgstr "输入吞吐量: 18197 tps/卡"
+
+#: ../../source/tutorials/features/dynamic_chunked_pipeline_parallel.md:19
+msgid "TP16"
+msgstr "TP16"
+
+#: ../../source/tutorials/features/dynamic_chunked_pipeline_parallel.md:19
+msgid "Input throughput: 18875 tps/card"
+msgstr "输入吞吐量: 18875 tps/卡"
