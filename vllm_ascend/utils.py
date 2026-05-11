@@ -73,6 +73,10 @@ _HAS_ROPE = None
 def clear_enable_sp():
     global _ENABLE_SP
     _ENABLE_SP = None
+    enable_dsa_cp.cache_clear()
+    enable_dsa_cp_with_layer_shard.cache_clear()
+    enable_dsa_cp_with_o_proj_tp.cache_clear()
+    _libc_getenv.cache_clear()
 
 
 def is_310p():
