@@ -333,10 +333,7 @@ class NPUPlatform(Platform):
         if compilation_config.mode in [CompilationMode.STOCK_TORCH_COMPILE, CompilationMode.DYNAMO_TRACE_ONCE]:
             # Get the enum name for logging
             mode_name = compilation_config.mode.name
-            logger.info(
-                "%s compilation mode enabled on Ascend NPU.",
-                mode_name
-            )
+            logger.info("%s compilation mode enabled on Ascend NPU.", mode_name)
             # For STOCK_TORCH_COMPILE and DYNAMO_TRACE_ONCE, we don't use ACL Graph by default
             # but allow users to explicitly enable it if they want
             if compilation_config.cudagraph_mode is None:
@@ -392,8 +389,7 @@ class NPUPlatform(Platform):
         elif compilation_config.cudagraph_mode == CUDAGraphMode.PIECEWISE:
             if compilation_config.mode == CompilationMode.VLLM_COMPILE:
                 logger.info(
-                    "PIECEWISE compilation enabled on NPU. "
-                    "use_inductor not supported - using only ACL Graph mode"
+                    "PIECEWISE compilation enabled on NPU. use_inductor not supported - using only ACL Graph mode"
                 )
                 # VLLM_COMPILE uses VllmBackend → AscendCompiler → TorchAIR ACL Graph.
                 # Set backend to "eager" so make_compiler() uses EagerAdaptor (actual
@@ -415,10 +411,7 @@ class NPUPlatform(Platform):
                 ascend_config.ascend_compilation_config.enable_npugraph_ex = False
             else:
                 # For STOCK_TORCH_COMPILE and DYNAMO_TRACE_ONCE, allow PIECEWISE
-                logger.info(
-                    "PIECEWISE cudagraph_mode with %s compilation mode on Ascend NPU.",
-                    compilation_config.mode
-                )
+                logger.info("PIECEWISE cudagraph_mode with %s compilation mode on Ascend NPU.", compilation_config.mode)
                 # Don't force use_inductor=False for these modes - let them use inductor if available
         elif (
             compilation_config.cudagraph_mode == CUDAGraphMode.FULL_DECODE_ONLY
@@ -450,7 +443,7 @@ class NPUPlatform(Platform):
                 logger.info(
                     "%s cudagraph_mode with %s compilation mode on Ascend NPU.",
                     compilation_config.cudagraph_mode,
-                    compilation_config.mode
+                    compilation_config.mode,
                 )
                 # Don't force use_inductor=False - let inductor be used if available
         else:
@@ -467,7 +460,7 @@ class NPUPlatform(Platform):
                 logger.warning(
                     "%s cudagraph_mode may not be fully supported with %s compilation mode on Ascend NPU.",
                     compilation_config.cudagraph_mode,
-                    compilation_config.mode
+                    compilation_config.mode,
                 )
 
         # Handle dynamic_shapes_config
@@ -477,6 +470,7 @@ class NPUPlatform(Platform):
         # For STOCK_TORCH_COMPILE and DYNAMO_TRACE_ONCE, we pass through as-is since they
         # use standard torch.compile which handles these configurations natively.
         from vllm.config.compilation import DynamicShapesType
+
         dynamic_shapes_config = compilation_config.dynamic_shapes_config
 
         if compilation_config.mode == CompilationMode.VLLM_COMPILE:
