@@ -8,7 +8,7 @@ msgid ""
 msgstr ""
 "Project-Id-Version: vllm-ascend \n"
 "Report-Msgid-Bugs-To: \n"
-"POT-Creation-Date: 2026-05-06 02:14+0000\n"
+"POT-Creation-Date: 2026-05-09 02:22+0000\n"
 "PO-Revision-Date: 2026-01-22 16:55+0800\n"
 "Last-Translator: Gemini\n"
 "Language: zh_CN\n"
@@ -266,7 +266,6 @@ msgid "`export HCCL_INTRA_ROCE_ENABLE=1`"
 msgstr "`export HCCL_INTRA_ROCE_ENABLE=1`"
 
 #: ../../source/user_guide/feature_guide/kv_pool.md
-#, fuzzy
 msgid "Required by direct transmission scheme on 800 I/T A2 series"
 msgstr "800 I/T A2 系列直接传输方案所需"
 
@@ -487,10 +486,10 @@ msgstr ""
 #: ../../source/user_guide/feature_guide/kv_pool.md:412
 msgid ""
 "**memfabric_hybrid**: "
-"<https://gitcode.com/Ascend/memfabric_hybrid/tree/master/doc/build.md>"
+"<https://gitcode.com/Ascend/memfabric_hybrid/blob/master/doc/installation.md>"
 msgstr ""
 "**memfabric_hybrid**: "
-"<https://gitcode.com/Ascend/memfabric_hybrid/tree/master/doc/build.md>"
+"<https://gitcode.com/Ascend/memfabric_hybrid/blob/master/doc/installation.md>"
 
 #: ../../source/user_guide/feature_guide/kv_pool.md:414
 msgid ""
@@ -510,7 +509,8 @@ msgid ""
 "parameters "
 "description**：<https://gitcode.com/Ascend/memcache/blob/develop/doc/memcache_config.md>"
 msgstr ""
-"配置路径：/usr/local/memcache_hybrid/latest/config/ **配置文件参数说明**：<https://gitcode.com/Ascend/memcache/blob/develop/doc/memcache_config.md>"
+"配置路径：/usr/local/memcache_hybrid/latest/config/ "
+"**配置文件参数说明**：<https://gitcode.com/Ascend/memcache/blob/develop/doc/memcache_config.md>"
 
 #: ../../source/user_guide/feature_guide/kv_pool.md:421
 msgid ""
