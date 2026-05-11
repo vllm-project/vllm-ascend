@@ -206,9 +206,7 @@ class SimpleCPUOffloadNPUWorker:
         n_segments = tensor.shape[0]
         total_bytes = (n_segments - 1) * seg_stride_bytes + seg_data_bytes
 
-        raw = torch.empty(0, dtype=torch.int8, device=tensor.device).set_(
-            storage, storage_offset_bytes, (total_bytes,)
-        )
+        raw = torch.empty(0, dtype=torch.int8, device=tensor.device).set_(storage, storage_offset_bytes, (total_bytes,))
         segs: dict[str, torch.Tensor] = {}
         for idx in range(n_segments):
             start = idx * seg_stride_bytes
