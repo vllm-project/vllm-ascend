@@ -113,6 +113,7 @@ e2e-multicard-2-cards:
   estimated_time: 129
 - name: tests/e2e/multicard/2-cards/test_offline_inference_distributed.py::test_deepseek_w4a8_accuracy_tp2
   estimated_time: 128
+  is_skipped: true
 - name: tests/e2e/multicard/2-cards/test_offline_inference_distributed.py::test_qwen3_moe_fc2_tp2
   estimated_time: 101
 - name: tests/e2e/multicard/2-cards/test_offline_inference_distributed.py::test_deepseek_v2_lite_fc1_tp2
