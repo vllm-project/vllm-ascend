@@ -31,6 +31,7 @@ CLANG="false"
 VERBOSE="false"
 OOM="false"
 THREAD_NUM=$(grep -c ^processor /proc/cpuinfo)
+MAX_JOBS=${MAX_JOBS:-}
 ENABLE_VALGRIND=FALSE
 ENABLE_CREATE_LIB=FALSE
 ENABLE_OPKERNEL=FALSE
@@ -1329,10 +1330,19 @@ else
 fi
 
 function get_cpu_num() {
-    CPU_NUM=$(($(cat /proc/cpuinfo | grep "^processor" | wc -l)*2)) 
+    CPU_NUM=$(($(cat /proc/cpuinfo | grep "^processor" | wc -l)*2))
     if [ -n "${OPS_CPU_NUMBER}" ]; then
         if [[ "${OPS_CPU_NUMBER}" =~ ^[0-9]+$ ]]; then
             CPU_NUM="${OPS_CPU_NUMBER}"
+        fi
+    fi
+    if [ -n "${MAX_JOBS}" ]; then
+        if [[ "${MAX_JOBS}" =~ ^[0-9]+$ ]] && [ "${MAX_JOBS}" -gt 0 ]; then
+            if [ "${CPU_NUM}" -gt "${MAX_JOBS}" ]; then
+                CPU_NUM="${MAX_JOBS}"
+            fi
+        else
+            echo "Warning: MAX_JOBS='${MAX_JOBS}' is invalid, ignored." >&2
         fi
     fi
 }
@@ -1392,7 +1402,6 @@ else
     fi
 fi
 build_ut() {
-  CORE_NUMS=$(cat /proc/cpuinfo | grep "processor" | wc -l)
   dotted_line="----------------------------------------------------------------"
   echo $dotted_line
   echo "Start to build ut"
@@ -1416,7 +1425,7 @@ build_ut() {
     for UT_TARGET in ${UT_TARGETS[@]} ; do
         if cmake --build . --target help | grep -w "$UT_TARGET"; then
             echo "Building target: $UT_TARGET."
-            if ! cmake --build . --target ${UT_TARGET} -j $CORE_NUMS; then
+            if ! cmake --build . --target ${UT_TARGET} ${JOB_NUM}; then
                 echo "[ERROR] Build failed for target: $UT_TARGET."
                 exit 1
             fi
