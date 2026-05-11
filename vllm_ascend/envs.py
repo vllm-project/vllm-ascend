@@ -114,6 +114,19 @@ env_variables: dict[str, Callable[[], Any]] = {
     # Used to calculate LRU cache capacity for KV block management.
     # If not set, defaults to "0" which means LRU capacity falls back to a fixed value.
     "VLLM_ASCEND_KV_POOL_DRAM_SIZE": lambda: os.getenv("VLLM_ASCEND_KV_POOL_DRAM_SIZE", "0"),
+    # Number of reusable layerwise KV pool transfer buffers.
+    # Default: 2. Valid range: integer >= 1. Not sensitive.
+    "VLLM_ASCEND_KV_POOL_LAYERWISE_NUM_SHARED_BUFFERS": lambda: int(
+        os.getenv("VLLM_ASCEND_KV_POOL_LAYERWISE_NUM_SHARED_BUFFERS", "2")
+    ),
+    # Comma-separated independent layer indices for layerwise KV pool transfer.
+    # Negative indices are supported, e.g. "-1" means the last layer.
+    # Default: None, which uses the first and last layers. Set to an empty
+    # string to make all layers use layerwise KV pool transfer.
+    # Valid range for each index: [-num_layers, num_layers - 1]. Not sensitive.
+    "VLLM_ASCEND_KV_POOL_LAYERWISE_INDEPENDENT_LAYERS": lambda: os.getenv(
+        "VLLM_ASCEND_KV_POOL_LAYERWISE_INDEPENDENT_LAYERS", None
+    ),
 }
 
 # end-env-vars-definition

@@ -32,6 +32,9 @@ from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.kv_transfer import
     KVTransferThread,
     _circular_shift,
 )
+from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.layerwise_config import (
+    get_layerwise_config,
+)
 
 backend_map = {
     "mooncake": {
@@ -174,27 +177,11 @@ class KVPoolWorker:
         self.layer_load_finished_events = None
         self.layer_save_finished_events = None
         self.layer_transfer_finished_events = None
-        NUM_SHARED_BUFFERS = 2
-        self.NUM_SHARED_BUFFERS = NUM_SHARED_BUFFERS
-        INDEPENDENT_LAYER_INDICES = {0, self.num_layers - 1}
-        self.independent_layers = sorted(INDEPENDENT_LAYER_INDICES)
-
-        shared_layer_indices = [i for i in range(self.num_layers)
-                                if i not in INDEPENDENT_LAYER_INDICES]
-        buffer_owner_indices = shared_layer_indices[:NUM_SHARED_BUFFERS]
-        buffer_owner_set = set(buffer_owner_indices)
-
-        self.reuse_mapping = {}
-        for i, layer_idx in enumerate(shared_layer_indices):
-            if layer_idx not in buffer_owner_set:
-                owner_idx = shared_layer_indices[i % NUM_SHARED_BUFFERS]
-                self.reuse_mapping[layer_idx] = owner_idx
-
-        self.layer_next_map = {}
-        for i in range(len(shared_layer_indices) - NUM_SHARED_BUFFERS):
-            self.layer_next_map[shared_layer_indices[i]] = shared_layer_indices[i + NUM_SHARED_BUFFERS]
-        self.offload_start_ids = buffer_owner_indices
-        self.layers_need_to_save = [i for i in range(self.num_layers) if i not in self.independent_layers]
+        layerwise_config = get_layerwise_config(self.num_layers)
+        self.independent_layers = layerwise_config.independent_layers
+        self.layers_need_to_save = layerwise_config.shared_layers
+        self.prefetch_layer_map = layerwise_config.prefetch_layer_map
+        self.offload_start_ids = layerwise_config.buffer_owner_layers
         self.sync_save_events = None
 
     def register_kv_caches(self, kv_caches: dict[str, torch.Tensor]):
@@ -321,9 +308,6 @@ class KVPoolWorker:
         self.current_layer = 0
         if self.use_layerwise:
             self.process_layer_data(metadata.requests)
-            if len(self.independent_layers) == 0 and metadata.unfinished_request_ids:
-                for layer_id in self.offload_start_ids:
-                    self._submit_layer_load(None, layer_id)
             return
 
         for request in metadata.requests:
@@ -358,26 +342,6 @@ class KVPoolWorker:
                 addr_list_c = _circular_shift(addr_list, self.tp_rank % len(addr_list))
                 size_list_c = _circular_shift(size_list, self.tp_rank % len(size_list))
                 self.m_store.get(key_list_c, addr_list_c, size_list_c)
-        # TODO 这里的请求释放可能有问题
-        # logger.info(
-        #     f">>>>>>>>>>>> metadata.requests {len(metadata.requests)} "
-        #     f"metadata.unfinished_request_ids {metadata.unfinished_request_ids}")
-
-    def _process_transfer_for_layer_batch(
-        self,
-        request_block_ranges: list[LayerBlockRange],
-        layer_id: int,
-        layer_tasks: list[list[LayerTransferTask]],
-    ) -> None:
-        if not request_block_ranges:
-            return
-
-        layer_tasks[layer_id].append(
-            LayerTransferTask(
-                layer_id=layer_id,
-                block_ranges=request_block_ranges,
-            )
-        )
 
     def _process_save_for_layer_batch(
         self,
@@ -399,11 +363,13 @@ class KVPoolWorker:
                     partial_block_index=partial_block_index,
                 )
             )
-        self._process_transfer_for_layer_batch(
-            request_block_ranges,
-            layer_id,
-            self.layer_save_tasks,
-        )
+        if request_block_ranges:
+            self.layer_save_tasks[layer_id].append(
+                LayerTransferTask(
+                    layer_id=layer_id,
+                    block_ranges=request_block_ranges,
+                )
+            )
 
     def _process_load_for_layer_batch(
         self,
@@ -425,11 +391,13 @@ class KVPoolWorker:
                     partial_block_index=partial_block_index,
                 )
             )
-        self._process_transfer_for_layer_batch(
-            request_block_ranges,
-            layer_id,
-            self.layer_load_tasks,
-        )
+        if request_block_ranges:
+            self.layer_load_tasks[layer_id].append(
+                LayerTransferTask(
+                    layer_id=layer_id,
+                    block_ranges=request_block_ranges,
+                )
+            )
 
     def process_layer_data(self, requests: list[ReqMeta]) -> None:
         if not requests:
@@ -438,29 +406,36 @@ class KVPoolWorker:
             self._process_save_for_layer_batch(requests, layer_id)
             self._process_load_for_layer_batch(requests, layer_id)
 
-    def _submit_layer_load(self, wait_for_save: int | None, layer_id: int) -> None:
-        assert self.kv_recv_thread is not None
-        layer_load_task = self.layer_load_tasks[layer_id]
-        self.kv_recv_thread.add_request(
-            LayerLoadTask(
-                wait_for_save_layer=wait_for_save,
-                transfer_tasks=layer_load_task,
-                layer_id=layer_id,
-            )
-        )
-
     def _submit_ready_layer_loads(self) -> None:
-        if self.current_layer in self.independent_layers:
-            if self.current_layer == self.independent_layers[0]:
-                for layer_id in self.offload_start_ids:
-                    logger.debug(f">>>>>>>>>>>>>>>>>>>> load layer {layer_id}")
-                    self._submit_layer_load(None, layer_id)
+        assert self.kv_recv_thread is not None
+        if not self.layers_need_to_save:
             return
 
-        prev_layer = self.current_layer - 1
-        if prev_layer in self.layer_next_map:
-            next_layer = self.layer_next_map[prev_layer]
-            self._submit_layer_load(prev_layer, next_layer)
+        if self.current_layer in self.independent_layers:
+            return
+
+        if self.current_layer == self.layers_need_to_save[0]:
+            for layer_id in self.offload_start_ids:
+                logger.debug(f">>>>>>>>>>>>>>>>>>>> load layer {layer_id}")
+                self.kv_recv_thread.add_request(
+                    LayerLoadTask(
+                        wait_for_save_layer=None,
+                        transfer_tasks=self.layer_load_tasks[layer_id],
+                        layer_id=layer_id,
+                    )
+                )
+            return
+
+        prefetch_layers = self.prefetch_layer_map.get(self.current_layer)
+        if prefetch_layers is not None:
+            wait_for_save_layer, next_layer = prefetch_layers
+            self.kv_recv_thread.add_request(
+                LayerLoadTask(
+                    wait_for_save_layer=wait_for_save_layer,
+                    transfer_tasks=self.layer_load_tasks[next_layer],
+                    layer_id=next_layer,
+                )
+            )
 
     def wait_for_layer_load(self) -> None:
         self._submit_ready_layer_loads()
@@ -478,11 +453,11 @@ class KVPoolWorker:
         if self.current_layer in self.layers_need_to_save:
             self.sync_save_events[self.current_layer].record()
             self.kv_send_thread.add_request(self.layer_save_tasks[self.current_layer])
-        if self.current_layer == self.num_layers - 1:
+        if self.layers_need_to_save and self.current_layer == self.num_layers - 1:
             is_finish = self.layer_save_finished_events[self.layers_need_to_save[-1]].wait(timeout=10)
             if not is_finish:
                 logger.info("Layerwise %d save wait timed out", self.current_layer)
-            for layer_id in self.layers_need_to_save[-1*self.NUM_SHARED_BUFFERS:]:
+            for layer_id in self.layers_need_to_save[-len(self.offload_start_ids):]:
                 logger.debug(f">>>>>>>>>>>>>>>>>>>> clear save layer {layer_id}")
                 self.layer_save_finished_events[layer_id].clear()
 
