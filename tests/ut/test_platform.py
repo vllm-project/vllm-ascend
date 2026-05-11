@@ -443,7 +443,8 @@ class TestNPUPlatform(TestBase):
         vllm_config.compilation_config.mode = CompilationMode.VLLM_COMPILE
         vllm_config.compilation_config.cudagraph_mode = CUDAGraphMode.PIECEWISE
 
-        with patch.object(platform.NPUPlatform, "_fix_incompatible_config"):
+        with patch.object(platform.NPUPlatform, "_fix_incompatible_config"), \
+             patch("vllm_ascend.platform.update_aclgraph_sizes"):
             self.platform.check_and_update_config(vllm_config)
 
         self.assertEqual(vllm_config.compilation_config.mode, CompilationMode.VLLM_COMPILE)
@@ -495,7 +496,8 @@ class TestNPUPlatform(TestBase):
         vllm_config.compilation_config.dynamic_shapes_config.assume_32_bit_indexing = False
 
         with self.assertLogs(logger="vllm", level="WARNING") as cm:
-            with patch.object(platform.NPUPlatform, "_fix_incompatible_config"):
+            with patch.object(platform.NPUPlatform, "_fix_incompatible_config"), \
+                 patch("vllm_ascend.platform.update_aclgraph_sizes"):
                 self.platform.check_and_update_config(vllm_config)
 
             # Should warn about VLLM_COMPILE incompatibility
