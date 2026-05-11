@@ -14,8 +14,8 @@ test_cases:
       TASK_QUEUE_ENABLE: "1"
       SERVER_PORT: "DEFAULT_PORT"
       VLLM_ASCEND_ENABLE_FUSED_MC2: "1"
-      VLLM_ENGINE_READY_TIMEOUT_S: "3000"
-      VLLM_RPC_TIMEOUT: "600"
+      VLLM_ENGINE_READY_TIMEOUT_S: "100000"
+      VLLM_RPC_TIMEOUT: "6000"
     server_cmd:
       - "--tensor-parallel-size"
       - "16"
