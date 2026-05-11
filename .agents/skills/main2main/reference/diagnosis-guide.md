@@ -66,11 +66,9 @@ Only `code_bugs` need fixing. If only `env_flakes` remain, treat as pass.
 
 ---
 
-## Step 2: Trace each bug to its upstream cause
+## Step 2: Root Cause Correlation and Apply Fixes
 
-Don't just look at what line failed — find the upstream commit that introduced the breaking change. That context makes the fix complete rather than a patch.
-
-For each `code_bug`:
+For each code bug from the script output, use the error type, message, and context to figure out how upstream changes caused it. Find the commit(s) that introduced the relevant change, then analyze the code diff to understand why it breaks vllm-ascend.
 
 **1. Use the error type to narrow the mechanism:**
 - `TypeError` → almost always a signature change (added/removed parameter)
@@ -106,19 +104,28 @@ This reveals the diff chunk that introduced the change — not just the symptom,
 | Root cause commit | `abc1234` — "refactor attention forward signature" |
 | Changed file | `vllm/model_executor/layers/attention/backends/abstract.py` |
 | vllm-ascend file | `vllm_ascend/attention/ascend_attn_backend.py` |
-| Fix | Add `kv_cache_dtype` parameter with `vllm_version_is()` guard |
+
+**Error Traceback:**
+(use context from script output)
+
+**Explanation:** <Why this change breaks vllm-ascend>
+
+**Fix Suggestion:** <Specific code change needed>
+Add `kv_cache_dtype` parameter with `vllm_version_is()` guard
 ```
 
-For matching known error types to fix patterns, consult `reference/error-patterns.md`.
+**5. Apply fixes**
+
+For each issue, apply the fix suggested in **Fix Suggestion**. Map each error to the corresponding fix pattern in the Common Error Patterns Reference in `reference/error-patterns-examples.md`, which documents frequent upstream vLLM evolution issues with concrete fix examples.
 
 ---
 
-## Step 3: Apply fixes and track progress
+## Step 3: Verify and Track progress
 
-After fixing, re-run CI. Then compare error signatures with the previous round:
+After fixing, re-run CI refer to **Verify by CI** in SKILL.md. Then extract structured errors with `ci_log_summary.py` and compare error signatures with the previous round:
 
 - **Fewer failing tests** → making progress, continue
-- **Same error signatures two rounds in a row** → fix isn't working, trigger partial stop
+- **Same error signatures two rounds in a row** → all fix isn't working, trigger partial stop
 - **New errors not in the previous round** → fix introduced a regression, revert and trigger partial stop
 
 Update the Status column in `vllm_error_analyze.md` each round.

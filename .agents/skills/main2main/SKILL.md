@@ -38,7 +38,7 @@ These protect the repo. The reasoning behind each one matters more than the rule
 
 Each step has two phases: **adapt** (proactively modify vllm-ascend based on upstream.patch) and **fix** (react to CI failures your adaptation missed).
 
-**Adapt:** Read upstream.patch, use `changed-files.txt` to identify which subsystems are affected, then find and update the corresponding code in vllm-ascend. The file mapping table and key areas are in `reference/adapt-guide.md`. Common error patterns and fix examples are in `reference/error-patterns.md`.
+**Adapt:** Read upstream.patch, use `changed-files.txt` to identify which subsystems are affected, then find and update the corresponding code in vllm-ascend. The file mapping table and key areas are in `reference/adapt-guide.md`.
 
 When adapting, the goal isn't to copy upstream changes mechanically — it's to ask "how does this upstream change affect the contract between vLLM and vllm-ascend?" For example:
 
@@ -47,6 +47,8 @@ When adapting, the goal isn't to copy upstream changes mechanically — it's to 
 > **Right approach**: Check whether `AscendPlatform` inherits from this class — if yes, vllm-ascend will fail to instantiate at runtime with `TypeError: Can't instantiate abstract class`. Add the method immediately, even if the body is a stub.
 
 The pattern to internalize: upstream changes to **abstract methods, function signatures, and config field locations, etc.** always need vllm-ascend follow-up, because vllm-ascend overrides or reads these directly. Changes to **internal implementation** of methods vllm-ascend doesn't override can usually be skipped.
+
+No-op adapt is allowed, but it does not skip CI: every step must run CI after the commit reference is updated.
 
 **Fix:** When CI fails, run `ci_log_summary.py` to get structured error data. Focus only on `code_bugs` (ignore `env_flakes`). For each bug, search `upstream.patch` for the function/class/field name from the error — this connects the symptom to the upstream change, giving you the full picture. Fix based on that complete context, not just the error message. Detailed diagnostic workflow and progress judgment are in `reference/diagnosis-guide.md`.
 
@@ -102,7 +104,7 @@ python3 <skill_dir>/scripts/plan_steps.py \
   --base-commit <base> --target-commit <target>
 ```
 
-If `has_drift` is false, stop — nothing to do. If all commits are docs/tests (0 steps), just update conf.py and commit.
+If `has_drift` is false, stop — nothing to do.
 
 Record `last_verified_head` before starting.
 
@@ -127,10 +129,12 @@ python3 <skill_dir>/scripts/update_commit_reference.py \
   --new-commit <step_end_commit>
 ```
 
-3. **Adapt.** Read the patch, identify affected subsystems, update vllm-ascend code. See "Adaptation and CI Diagnosis" above and `reference/adapt-guide.md`
+3. **Adapt.** 
+Read the patch, identify affected subsystems, update vllm-ascend code if needed. See "Adaptation and CI Diagnosis" above and `reference/adapt-guide.md`. If no code adaptation is needed, record that conclusion and continue to CI.
 
+4. **Verify by CI (mandatory for every step)**
+Run CI after the commit reference update and adapt phase, even when adapt made no extra code changes. A step is only complete after CI passes.
 
-4. **Verify by CI**
 ```bash
 set -o pipefail
 python3 <ascend_path>/.github/workflows/scripts/run_suite.py \
@@ -138,7 +142,8 @@ python3 <ascend_path>/.github/workflows/scripts/run_suite.py \
   2>&1 | tee /tmp/main2main/steps/<step-id>/ci/round-1.log
 ```
 
-5. **If CI passes, commit and advance.** Run `scripts/check_and_commit.py` to commit the changes (including the updated commit reference). Then checkout the step's end commit in the vLLM repo so the next step runs against the correct upstream.
+5. **If CI passes, commit and advance.**
+Run `scripts/check_and_commit.py` to commit the changes (including the updated commit reference). Then checkout the step's end commit in the vLLM repo so the next step runs against the correct upstream.
 ```bash
 python3 <skill_dir>/scripts/check_and_commit.py \
   --ascend-path <ascend_path> --step-id <step-id> \
@@ -190,6 +195,7 @@ These are the things most commonly missed, based on past experience:
 - [ ] All intermediate files in /tmp/main2main/, not in the repo
 - [ ] conf.py `main_vllm_commit` updated at each step (not just at the end)
 - [ ] conf.py `main_vllm_tag` updated if the tag changed
+- [ ] Every step ran CI after the commit reference update, including no-op adapt steps
 - [ ] New `vllm_version_is()` calls use the correct version
 - [ ] Each commit message includes the upstream commit range
 - [ ] Each step has a summary in `/tmp/main2main/steps/<step-id>/summary.md`
