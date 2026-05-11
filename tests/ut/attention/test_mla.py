@@ -3,12 +3,15 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 import torch
+import math
+
 from vllm.config import set_current_vllm_config
 from vllm.forward_context import set_forward_context
 from vllm.utils.torch_utils import set_random_seed
 from vllm.v1.attention.backend import AttentionType
 from vllm.v1.attention.selector import get_attn_backend
 from vllm.v1.kv_cache_interface import MLAAttentionSpec
+from vllm.model_executor.layers.linear import UnquantizedLinearMethod
 
 from tests.ut.attention.utils import (
     BatchSpec,
@@ -58,11 +61,6 @@ BATCH_SPECS = {
     "medium_encoder_prefill": BatchSpec(seq_lens=[256, 512, 1024, 2048], query_lens=[256, 512, 1024, 2048]),
     "mtp_1_plus_3": BatchSpec(seq_lens=[256, 512, 1024, 1536], query_lens=[4, 4, 4, 4]),
 }
-
-
-import math
-
-from vllm.model_executor.layers.linear import UnquantizedLinearMethod
 
 
 class MockLinear:
@@ -293,7 +291,6 @@ def npu_interleave_rope_simple(
     With cos=1, sin=0 (rope disabled), the function just returns the interleaved result.
     """
     D = x.shape[-1]
-    half = D // 2
     even = x[..., 0::2]
     odd = x[..., 1::2]
     return torch.cat([even, odd], dim=-1).contiguous()
@@ -390,8 +387,6 @@ def compute_mla_sdpa_reference(
     - Prefill only: q raw, k/v via kv_b_proj, no _v_up_proj
     - Mixed: decode first, then prefill, combined before o_proj
     """
-    num_tokens = hidden_states.shape[0]
-    device = hidden_states.device
     rms_eps = impl.kv_a_layernorm.variance_epsilon
     rms_w = impl.kv_a_layernorm.weight
 
@@ -552,7 +547,6 @@ def _test_mla_attention_correctness(
     hf_config = vllm_config.model_config.hf_text_config
     kv_lora_rank = getattr(hf_config, "kv_lora_rank", 512)
     qk_rope_head_dim = getattr(hf_config, "qk_rope_head_dim", 64)
-    qk_nope_head_dim = getattr(hf_config, "qk_nope_head_dim", 128)
 
     batch_size = batch_spec.batch_size
     num_q_heads = vllm_config.model_config.get_num_attention_heads(vllm_config.parallel_config)
