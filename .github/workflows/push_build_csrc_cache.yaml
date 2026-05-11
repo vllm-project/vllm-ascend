@@ -67,7 +67,7 @@ jobs:
         include:
           # arch → runner
           - arch: X64
-            runner: linux-amd64-cpu-8-hk
+            runner: linux-amd64-cpu-16-hk
           - arch: ARM64
             runner: linux-arm64-cpu-16
 
