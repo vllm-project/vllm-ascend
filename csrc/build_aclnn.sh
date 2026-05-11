@@ -3,7 +3,55 @@
 ROOT_DIR=$1
 SOC_VERSION=$2
 
+log() {
+    echo "[build_aclnn] $*"
+}
+
+resolve_op_dir() {
+    local op_name=$1
+    local candidate_dir
+    for candidate_dir in \
+        "${ROOT_DIR}/csrc/moe/${op_name}" \
+        "${ROOT_DIR}/csrc/gmm/${op_name}" \
+        "${ROOT_DIR}/csrc/attention/${op_name}" \
+        "${ROOT_DIR}/csrc/mc2/${op_name}" \
+        "${ROOT_DIR}/csrc/ffn/${op_name}" \
+        "${ROOT_DIR}/csrc/posembedding/${op_name}"; do
+        if [[ -d "${candidate_dir}" ]]; then
+            echo "${candidate_dir}"
+            return 0
+        fi
+    done
+    find "${ROOT_DIR}/csrc" -maxdepth 3 -type d -name "${op_name}" -print -quit 2>/dev/null
+}
+
+log_selected_ops() {
+    local op_name
+    local op_path
+    local kernel_cpp_file_count
+
+    log "resolved SOC_ARG=${SOC_ARG}"
+    log "resolved CUSTOM_OPS=${CUSTOM_OPS}"
+    log "custom op count=${#CUSTOM_OPS_ARRAY[@]}"
+    for op_name in "${CUSTOM_OPS_ARRAY[@]}"; do
+        op_path=$(resolve_op_dir "${op_name}")
+        if [[ -z "${op_path}" ]]; then
+            log "op ${op_name}: dir=<missing>"
+            continue
+        fi
+        kernel_cpp_file_count=0
+        if [[ -d "${op_path}/op_kernel" ]]; then
+            kernel_cpp_file_count=$(find "${op_path}/op_kernel" -maxdepth 1 -name '*.cpp' | wc -l | tr -d ' ')
+        fi
+        log "op ${op_name}: dir=${op_path} cmake=$([[ -f "${op_path}/CMakeLists.txt" ]] && echo yes || echo no) op_host_cmake=$([[ -f "${op_path}/op_host/CMakeLists.txt" ]] && echo yes || echo no) op_kernel_cpp_count=${kernel_cpp_file_count}"
+    done
+}
+
+log "start: ROOT_DIR=${ROOT_DIR:-<unset>} SOC_VERSION=${SOC_VERSION:-<unset>} cwd=$(pwd)"
+log "env: ASCEND_HOME_PATH=${ASCEND_HOME_PATH:-<unset>} ASCEND_TOOLKIT_HOME=${ASCEND_TOOLKIT_HOME:-<unset>}"
+
 if [[ "$SOC_VERSION" =~ ^ascend310 ]]; then
+    log "matched SOC branch: ascend310"
     # ASCEND310P series
     CUSTOM_OPS_ARRAY=(
         "causal_conv1d_v310"
@@ -12,6 +60,7 @@ if [[ "$SOC_VERSION" =~ ^ascend310 ]]; then
     CUSTOM_OPS=$(IFS=';'; echo "${CUSTOM_OPS_ARRAY[*]}")
     SOC_ARG="ascend310p"
 elif [[ "$SOC_VERSION" =~ ^ascend910b ]]; then
+    log "matched SOC branch: ascend910b"
     # ASCEND910B (A2) series
     # dependency: catlass
     git config --global --add safe.directory "$ROOT_DIR"
@@ -25,6 +74,7 @@ elif [[ "$SOC_VERSION" =~ ^ascend910b ]]; then
     fi
     ABSOLUTE_CATLASS_PATH=$(cd "${CATLASS_PATH}" && pwd)
     export CPATH=${ABSOLUTE_CATLASS_PATH}:${CPATH}
+    log "catlass include=${ABSOLUTE_CATLASS_PATH}"
 
     CUSTOM_OPS_ARRAY=(
         "moe_grouped_matmul"
@@ -49,6 +99,7 @@ elif [[ "$SOC_VERSION" =~ ^ascend910b ]]; then
     CUSTOM_OPS=$(IFS=';'; echo "${CUSTOM_OPS_ARRAY[*]}")
     SOC_ARG="ascend910b"
 elif [[ "$SOC_VERSION" =~ ^ascend910_93 ]]; then
+    log "matched SOC branch: ascend910_93"
     # ASCEND910C (A3) series
     # dependency: catlass
     git config --global --add safe.directory "$ROOT_DIR"
@@ -132,8 +183,11 @@ elif [[ "$SOC_VERSION" =~ ^ascend910_93 ]]; then
 else
     # others
     # currently, no custom aclnn ops for other series
+    log "no custom ACLNN ops configured for SOC_VERSION=${SOC_VERSION}; skip build_aclnn"
     exit 0
 fi
+
+log_selected_ops
 
 
 # # build custom ops
@@ -149,7 +203,10 @@ fi
 (
   set -euo pipefail
 
+  log "subshell cwd before cd=$(pwd)"
   cd csrc
+  log "subshell cwd after cd=$(pwd)"
+  log "cleaning csrc build dirs"
   rm -rf -- build output build_out
 
   : "${ROOT_DIR:?ROOT_DIR is not set}"
@@ -157,24 +214,36 @@ fi
   : "${SOC_VERSION:?SOC_VERSION is not set}"
   : "${SOC_ARG:?SOC_ARG is not set}"
 
-  echo "building custom ops ${CUSTOM_OPS} for ${SOC_VERSION}"
+  log "build command: bash build.sh --pkg --ops=\"${CUSTOM_OPS}\" --soc=\"${SOC_ARG}\""
+  log "building custom ops ${CUSTOM_OPS} for ${SOC_VERSION}"
   bash build.sh --pkg --ops="${CUSTOM_OPS}" --soc="${SOC_ARG}"
+  log "build.sh finished"
 
-  install_dir="${ROOT_DIR}/vllm_ascend/_cann_ops_custom"
+  custom_ops_install_dir="${ROOT_DIR}/vllm_ascend/_cann_ops_custom"
+  log "custom_ops_install_dir=${custom_ops_install_dir}"
 
-  mkdir -p -- "$install_dir"
+  mkdir -p -- "$custom_ops_install_dir"
 
-  # 删除 install_dir 下除 .gitkeep 外的所有内容（包含隐藏文件/目录）
-  find "$install_dir" -mindepth 1 \
+  # Remove all top-level entries under custom_ops_install_dir except .gitkeep, including hidden files and directories.
+  find "$custom_ops_install_dir" -mindepth 1 -maxdepth 1 \
     ! -name '.gitkeep' \
     -exec rm -rf -- {} +
 
   shopt -s nullglob
-  runs=(./build/cann-ops-transformer*.run)
+  installer_candidates=(./build/cann-ops-transformer*.run)
   shopt -u nullglob
 
-  (( ${#runs[@]} == 1 )) || { echo "ERROR: expected 1 installer, got ${#runs[@]}" >&2; exit 1; }
+  log "installer candidate count=${#installer_candidates[@]}"
+  for installer_file in "${installer_candidates[@]}"; do
+    log "installer candidate: $(ls -lh "${installer_file}")"
+  done
 
-  chmod +x -- "${runs[0]}" || true
-  "${runs[0]}" --install-path="${install_dir}"
+  (( ${#installer_candidates[@]} == 1 )) || { echo "ERROR: expected 1 installer, got ${#installer_candidates[@]}" >&2; exit 1; }
+
+  chmod +x -- "${installer_candidates[0]}" || true
+  log "running installer: ${installer_candidates[0]}"
+  "${installer_candidates[0]}" --install-path="${custom_ops_install_dir}"
+  log "installer finished"
+  log "installed files under ${custom_ops_install_dir} (maxdepth=4, first 120 entries):"
+  { find "${custom_ops_install_dir}" -mindepth 1 -maxdepth 4 -print | sort | head -n 120 | sed 's#^#[build_aclnn] install: #'; } || true
 )
