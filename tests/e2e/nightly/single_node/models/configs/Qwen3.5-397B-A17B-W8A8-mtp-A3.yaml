@@ -40,7 +40,7 @@ test_cases:
       - "--speculative_config"
       - '{"method": "qwen3_5_mtp", "num_speculative_tokens": 5, "enforce_eager": true}'
       - "--compilation-config"
-      - '{"cudagraph_mode":"FULL_DECODE_ONLY"}'
+      - '{"cudagraph_capture_sizes":[1,6,12,18,24,30,36,42,48,54,72,78,84,90,96,102,108,144,192], "cudagraph_mode":"FULL_DECODE_ONLY"}'
       - "--async-scheduling"
       - "--allowed-local-media-path"
       - "/"
