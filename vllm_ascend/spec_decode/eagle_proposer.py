@@ -1846,7 +1846,9 @@ class AscendSpecDecodeBaseProposer(SpecDecodeBaseProposer):
                 last_hidden_states = torch.ops.vllm.maybe_all_gather_and_maybe_unpad(
                     last_hidden_states.contiguous(), True
                 )
-                positions = torch.ops.vllm.maybe_all_gather_and_maybe_unpad(positions.contiguous(), True)
+                # in mm model, positions not need allgather, because it not reduced before(see maybe_pad_and_reduce())
+                if not self.is_multimodal_model:
+                    positions = torch.ops.vllm.maybe_all_gather_and_maybe_unpad(positions.contiguous(), True)
                 if hidden_states is not None:
                     hidden_states = last_hidden_states
         else:
