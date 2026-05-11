@@ -198,9 +198,9 @@ std::tuple<at::Tensor&, at::Tensor&> dispatch_ffn_combine_meta(
     const at::Tensor& probs,
     c10::string_view group,
     int64_t max_output_size,
-    int64_t node_id,
     at::Tensor& out,
     at::Tensor& expert_token_nums,
+    int64_t node_id,
     const c10::optional<at::Tensor> &x_active_mask
 ) {
     return {out, expert_token_nums};
