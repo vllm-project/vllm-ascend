@@ -107,7 +107,7 @@ class UvaBufferWrapper:
                 #     f"lack value 'pinned_mem_register:True', "
                 #     f"try to add os.environ['PYTORCH_NPU_ALLOC_CONF'] = 'pinned_mem_register:True'"
                 # )
-                raise RuntimeError("erro")
+                raise RuntimeError("error")
             self.cpu: torch.Tensor = torch.zeros(size, dtype=dtype, device="cpu", pin_memory=True)
             if not self.cpu.is_pinned():
                 erro_info = (
