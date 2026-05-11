@@ -60,9 +60,6 @@ jobs:
           - a3
           - 310p
 
-        # ── arch → runner ────────────────────────────────────────────────────
-        # ── chip_type → soc_version ──────────────────────────────────────────
-        # ── os × chip_type → image ───────────────────────────────────────────
         include:
           # arch → runner
           - arch: X64
@@ -127,7 +124,9 @@ jobs:
         if: matrix.os == 'ubuntu'
         run: |
           apt-get -y install `cat packages.txt`
-          apt-get -y install gcc g++ cmake libnuma-dev zstd
+          apt-get -y install gcc g++ cmake libnuma-dev zstd clang-15
+          update-alternatives --install /usr/bin/clang clang /usr/bin/clang-15 20
+          update-alternatives --install /usr/bin/clang++ clang++ /usr/bin/clang++-15 20
           pip install uv
 
       - name: Install system dependencies (openeuler)
@@ -135,13 +134,6 @@ jobs:
         run: |
           yum install -y gcc gcc-c++ cmake numactl-devel clang
           pip install uv
-
-      - name: Install clang (ubuntu, non-310p only)
-        if: matrix.os == 'ubuntu' && matrix.chip_type != '310p'
-        run: |
-          apt-get -y install clang-15
-          update-alternatives --install /usr/bin/clang clang /usr/bin/clang-15 20
-          update-alternatives --install /usr/bin/clang++ clang++ /usr/bin/clang++-15 20
 
       - name: Get image tag
         id: get_image_tag
