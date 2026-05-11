@@ -34,10 +34,6 @@ def get_all_moe_loads(self, policy_type=0, pd_decay=0):
     num_layers = self.model.config.num_hidden_layers
     moe_load_old = None
     if policy_type == 4:
-        # all_moe_loads = torch.stack(
-        #     [self.model.layers[layer_id].mlp.experts.moe_load_prev for layer_id in range(num_dense_layers, num_layers)],
-        #     dim=0,
-        # )
         all_moe_loads = self.moe_load_prev
         activate_req = self.model.layers[num_dense_layers].mlp.experts.token2req[0]
         all_moe_loads_local = torch.stack(
