@@ -126,6 +126,7 @@ class AscendFusedMoE310(FusedMoE):
         self._routed_input_transform = kwargs.get("routed_input_transform")
         self._shared_experts = kwargs.get("shared_experts")
         self.global_num_experts = kwargs["num_experts"]
+        self.reduce_results = True
 
         if self.quant_config is None:
             self.quant_method = AscendUnquantizedFusedMoEMethod310(self.moe_config)
