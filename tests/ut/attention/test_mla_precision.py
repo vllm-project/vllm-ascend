@@ -192,7 +192,6 @@ def run_mla_attention_backend(
 
     original_weight_prefetch = utils_module._WEIGHT_PREFETCH_METHOD
     utils_module._WEIGHT_PREFETCH_METHOD = mock_weight_prefetch
-    print("vllm_config", vllm_config)
     try:
         with patch("vllm.distributed.parallel_state.get_tp_group", return_value=mock_tp_group):
             num_heads = vllm_config.model_config.get_num_attention_heads(vllm_config.parallel_config)
