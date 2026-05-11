@@ -42,7 +42,7 @@ on:
       vllm_ascend_branch:
         required: false
         type: string
-        default: ''
+        default: 'main'
         description: branch name used as prefix in artifact/benchmark names to distinguish dual-branch test runs
     secrets:
       OBS_ACCESS_KEY:
