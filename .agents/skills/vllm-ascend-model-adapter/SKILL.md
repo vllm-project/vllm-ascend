@@ -17,6 +17,24 @@ Adapt Hugging Face or local models to run on `vllm-ascend` with minimal changes,
 4. If checkpoint is fp8-on-NPU, read `references/fp8-on-npu-lessons.md`.
 5. Before handoff, read `references/deliverables.md`.
 
+## Scripts
+
+Reusable shell/Python scripts live in `.agents/skills/vllm-ascend-model-adapter/scripts/`. Make them executable once:
+
+```bash
+chmod +x .agents/skills/vllm-ascend-model-adapter/scripts/*.sh
+```
+
+| Script | Purpose |
+|---|---|
+| `check_npu_env.sh <TP_SIZE> [ATB_PATH]` | NPU sanity check (CANN, ATB, torch_npu, device count) |
+| `check_roots.sh <VLLM_SRC> <VLLM_ASCEND_SRC> [WORK_DIR]` | Verify source roots and runtime import |
+| `triage_model.sh <MODEL_PATH>` | Model directory listing + config.json field scan |
+| `classify_model.py <MODEL_PATH>` | Classify model type from config.json |
+| `session_reset.sh [PORT]` | Kill stale vllm processes and verify port is free |
+| `syntax_check.sh <file.py> ...` | Python syntax check for one or more files |
+| `smoke_test.sh <SERVED_NAME> [PORT] [--multimodal]` | Readiness poll + OpenAI-compatible smoke requests |
+
 ## Hard constraints
 
 - Never upgrade `transformers`.
@@ -84,16 +102,31 @@ If activation fails, stop and report the error before continuing.
 
 ### 1) Collect context
 
-- **Run NPU environment sanity check first** (see `references/workflow-checklist.md` §0.5). Verify NPU devices are visible, `torch_npu` is importable, NPU tensor creation works, and available NPU count ≥ required TP size. If any check fails, stop and resolve before proceeding.
+- **Run NPU environment sanity check first** using the provided script:
+  ```bash
+  bash scripts/check_npu_env.sh "$TP_SIZE"
+  # If ATB/NNAL set_env.sh is at a non-default path, pass it as the second argument.
+  # Default path tried: /usr/local/Ascend/nnal/atb/set_env.sh
+  ```
+  Verifies: CANN sourced, ATB/NNAL sourced, NPU devices visible, `torch_npu` importable, NPU tensor creation works, available NPU count ≥ TP size. If any check fails, stop and resolve before proceeding. See `references/workflow-checklist.md` §0.5 for details.
+- **Confirm implementation roots** using the provided script:
+  ```bash
+  bash scripts/check_roots.sh "$VLLM_SRC" "$VLLM_ASCEND_SRC" "$WORK_DIR"
+  ```
 - Model path, served model name, TP size, and implementation roots are already confirmed via the Entry Points above — use those values throughout.
 
 ### 2) Analyze model first
 
-- Inspect `config.json`, processor files, modeling files, tokenizer files.
-- **Classify model type**:
-    - High-level: LLM / VLM (Vision-Language) / Whisper (ASR).
-    - For LLM, identify attention sub-type: standard full attention, sliding window attention, Mamba (SSM), multi-latent attention (MLA), or a hybrid of the above.
-- Identify architecture class, attention variant, quantization type, and multimodal requirements.
+- **Run fast triage** to collect model inventory and key config fields:
+  ```bash
+  bash scripts/triage_model.sh "$MODEL_PATH"
+  ```
+- **Classify model type** using the provided script:
+  ```bash
+  python scripts/classify_model.py "$MODEL_PATH"
+  ```
+  The script reads `config.json` and outputs: high-level type (LLM / VLM / Whisper), attention sub-type (standard / sliding-window / MLA / Mamba / hybrid), MoE status, MTP status, quantization type, and key numeric parameters. Use the `CLASSIFICATION_SUMMARY:` JSON line for downstream decisions.
+- Inspect processor files, modeling files, tokenizer files as needed.
 - Check state-dict key prefixes (and safetensors index) to infer mapping needs.
 - Decide whether support already exists in `vllm/model_executor/models/registry.py`.
 
@@ -139,10 +172,28 @@ If activation fails, stop and report the error before continuing.
 - Touch only files required for this model adaptation.
 - Keep weight mapping explicit and auditable.
 - Avoid unrelated refactors.
+- After editing, run syntax check:
+  ```bash
+  bash scripts/syntax_check.sh \
+    "$VLLM_SRC"/vllm/model_executor/models/<new_model>.py \
+    "$VLLM_SRC"/vllm/transformers_utils/processors/<new_model>.py
+  ```
 
 ### 6.5) Intermediate NPU unit-test gate (before full serve)
 
 Run targeted unit tests on NPU for any new operators (from Step 3) and framework changes (from Step 4) **before** launching the full serve pipeline. This catches NPU-specific failures in seconds rather than minutes.
+
+After writing tests under `/tmp/npu_unit_tests/`, run syntax check first:
+
+```bash
+bash scripts/syntax_check.sh /tmp/npu_unit_tests/test_<operator_or_module>.py
+```
+
+Then run the test:
+
+```bash
+python /tmp/npu_unit_tests/test_<operator_or_module>.py
+```
 
 #### What to test
 
@@ -210,9 +261,11 @@ Place tests under `/tmp/npu_unit_tests/` (ephemeral; not committed).
 
 ### 8) Validate inference and features
 
-- Send `GET /v1/models` first.
-- Send at least one OpenAI-compatible text request.
-- For multimodal models, require at least one text+image request.
+- Run readiness poll and smoke requests using the provided script:
+  ```bash
+  bash scripts/smoke_test.sh <served-name>              # text-only
+  bash scripts/smoke_test.sh <served-name> 8000 --multimodal  # VL models
+  ```
 - Validate architecture registration and loader path with logs (no unresolved architecture, no fatal missing-key errors).
 - Try feature-first validation: EP + ACLGraph path first; eager path as fallback/isolation.
 - If startup succeeds but first request crashes (false-ready), treat as runtime failure and continue root-cause isolation.

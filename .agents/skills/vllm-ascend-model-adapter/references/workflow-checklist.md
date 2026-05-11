@@ -1,5 +1,8 @@
 # Workflow Checklist
 
+All scripts referenced below live in `.agents/skills/vllm-ascend-model-adapter/scripts/`.
+Make them executable once: `chmod +x .agents/skills/vllm-ascend-model-adapter/scripts/*.sh`
+
 ## 0) Environment prerequisites
 
 Set these once per session using the values confirmed at the Entry Points step.
@@ -15,10 +18,6 @@ MODEL_ROOT=<parent dir of MODEL_PATH>                # derived from user-specifi
 # e.g.: conda activate vllm-ascend
 #       source /path/to/venv/bin/activate
 <activation command>
-
-# verify correct Python is active
-which python
-python -c "import sys; print(sys.executable, sys.version)"
 ```
 
 Expected environment:
@@ -32,100 +31,29 @@ Expected environment:
 Run once at session start before any other work. If any check fails, stop and resolve the environment issue first.
 
 ```bash
-# 1. Source CANN toolkit environment
-#    Auto-detect common install locations first:
-CANN_SET_ENV=""
-for candidate in \
-    /usr/local/Ascend/ascend-toolkit/set_env.sh \
-    /usr/local/Ascend/latest/ascend-toolkit/set_env.sh \
-    /usr/local/Ascend/ascend-toolkit/latest/set_env.sh; do
-    if [ -f "$candidate" ]; then
-        CANN_SET_ENV="$candidate"
-        break
-    fi
-done
-
-if [ -n "$CANN_SET_ENV" ]; then
-    echo "Found CANN set_env.sh: $CANN_SET_ENV"
-    source "$CANN_SET_ENV"
-else
-    echo "CANN set_env.sh not found under /usr/local/Ascend."
-    echo "Please provide the full path to set_env.sh:"
-    # >>> Ask the user via AskUserQuestion for the CANN toolkit path,
-    #     then source the provided path. Stop if path is invalid or sourcing fails.
-fi
-
-# Some environments also require sourcing an additional ATB/NNAL env file
-# (e.g. /home/<user>/Ascend/nnal/atb/set_env.sh).
-# Ask the user if there is an additional env file to source:
-# >>> Use AskUserQuestion: "Is there an additional env file to source (e.g. ATB/NNAL set_env.sh)?"
-#     options: "Yes (specify path in notes)" / "No"
-# If yes, source the provided path before continuing.
-
-# 2. NPU device visibility
-npu-smi info
-
-# 3. torch_npu importable and NPU tensor creation works
-python - <<'PY'
-import torch
-import torch_npu
-n = torch.npu.device_count()
-assert n > 0, f"No NPU devices found (device_count={n})"
-x = torch.tensor([1.0], dtype=torch.bfloat16).npu()
-assert x.device.type == "npu"
-print(f"OK: {n} NPU(s) visible, tensor creation passed")
-PY
-
-# 4. available NPU count vs required TP size
-python - <<'PY'
-import torch_npu, torch
-n = torch.npu.device_count()
-tp = int("${TP_SIZE:-8}")   # set TP_SIZE in env or adjust manually
-assert n >= tp, f"Need {tp} NPUs for TP={tp}, only {n} available"
-print(f"OK: {n} NPUs >= TP={tp}")
-PY
-
-# 5. CANN / driver version (informational, not blocking)
-npu-smi info -t board -i 0 2>/dev/null | grep -i "cann\|driver\|firmware" || true
-python -c "import torch_npu; print('torch_npu version:', torch_npu.__version__)"
+# Default ATB path is /usr/local/Ascend/nnal/atb/set_env.sh.
+# If that path does not exist, the script will warn and continue without it.
+# Pass the correct path as the second argument if needed.
+bash scripts/check_npu_env.sh "$TP_SIZE"
+# or with explicit ATB path:
+bash scripts/check_npu_env.sh "$TP_SIZE" /path/to/atb/set_env.sh
+# or to skip ATB sourcing entirely:
+bash scripts/check_npu_env.sh "$TP_SIZE" none
 ```
 
-If any assertion above fails: **stop here**, resolve the environment issue, then restart the checklist from Step 0.
+If any assertion fails: **stop here**, resolve the environment issue, then restart the checklist from Step 0.
 
 ## 1) Fast triage commands
 
 ```bash
 MODEL_PATH=${MODEL_ROOT}/<model-name>
-echo "MODEL_PATH=$MODEL_PATH"
-
-# model inventory
-ls -la "$MODEL_PATH"
-
-# architecture + quant hints
-rg -n "architectures|model_type|quantization_config|torch_dtype|max_position_embeddings|num_nextn_predict_layers|version|num_attention_heads|num_key_value_heads|num_experts" "$MODEL_PATH/config.json"
-
-# state-dict key layout hints (if index exists)
-ls -la "$MODEL_PATH"/*index*.json 2>/dev/null || true
-
-# model custom code (if exists)
-ls -la "$MODEL_PATH"/*.py 2>/dev/null || true
+bash scripts/triage_model.sh "$MODEL_PATH"
 ```
 
 ## 2) Confirm implementation and delivery roots
 
 ```bash
-# implementation roots (fixed by Dockerfile)
-cd "$VLLM_SRC" && git status -s
-cd "$VLLM_ASCEND_SRC" && git status -s
-
-# runtime import source check (expect vllm-workspace path)
-python - <<'PY'
-import vllm
-print(vllm.__file__)
-PY
-
-# direct-run working directory
-cd "$WORK_DIR" && pwd
+bash scripts/check_roots.sh "$VLLM_SRC" "$VLLM_ASCEND_SRC" "$WORK_DIR"
 
 # delivery root (current repo)
 cd <current-repo>
@@ -135,14 +63,12 @@ git status -s
 ## 3) Session hygiene (before rerun)
 
 ```bash
-# stop stale servers
-pkill -f "vllm serve|api_server|EngineCore" || true
-
-# confirm port 8000 is free
-netstat -ltnp 2>/dev/null | rg ':8000' || true
+bash scripts/session_reset.sh
+# or with a custom port:
+bash scripts/session_reset.sh 8080
 ```
 
-When user explicitly requests reset:
+When user explicitly requests reset (destructive — confirm first):
 
 ```bash
 cd "$VLLM_SRC" && git reset --hard && git clean -fd
@@ -151,19 +77,20 @@ cd "$VLLM_ASCEND_SRC" && git reset --hard && git clean -fd
 
 ## 4) Model type classification
 
-Determine the high-level model type from `config.json`:
-
 ```bash
-# check model_type, architectures, and attention-related fields
-rg -n "model_type|architectures|attention_type|sliding_window|mamba|mla|num_nextn_predict" \
-  "$MODEL_PATH/config.json"
+python scripts/classify_model.py "$MODEL_PATH"
 ```
 
-Classification:
+The script reads `config.json` and outputs:
 
-- **LLM sub-types**: standard full attention / sliding window attention / Mamba (SSM) / multi-latent attention (MLA) / hybrid.
-- **VLM**: any model with vision encoder or multimodal processor.
-- **Whisper / ASR**: encoder-decoder speech model.
+- **High-level type**: LLM / VLM (Vision-Language) / Whisper (ASR)
+- **LLM attention sub-type**: standard full attention / sliding-window / MLA / Mamba / hybrid
+- **MoE**: yes/no with routed expert count
+- **MTP**: enabled/disabled with layer count
+- **Quantization**: type or none
+- **Key numeric parameters**
+
+The final `CLASSIFICATION_SUMMARY:` line is a JSON object for easy parsing.
 
 ## 5) Operator compatibility gate
 
@@ -238,11 +165,9 @@ If architecture is missing/incompatible, minimally do:
 ## 6) Syntax sanity checks
 
 ```bash
-python -m py_compile \
-  "$VLLM_SRC"/vllm/model_executor/models/<new_model>.py
-
-python -m py_compile \
-  "$VLLM_SRC"/vllm/transformers_utils/processors/<new_model>.py 2>/dev/null || true
+bash scripts/syntax_check.sh \
+  "$VLLM_SRC"/vllm/model_executor/models/<new_model>.py \
+  "$VLLM_SRC"/vllm/transformers_utils/processors/<new_model>.py
 ```
 
 ## 6.5) Intermediate NPU unit-test gate
@@ -330,19 +255,9 @@ TORCHDYNAMO_DISABLE=1
 ## 8) Readiness + smoke checks (must verify true-ready)
 
 ```bash
-# readiness
-for i in $(seq 1 200); do
-  curl -sf http://127.0.0.1:8000/v1/models >/tmp/models.json && break
-  sleep 3
-done
-
-# text smoke (required)
-curl -s http://127.0.0.1:8000/v1/chat/completions \
-  -H 'Content-Type: application/json' \
-  -d '{"model":"<served-name>","messages":[{"role":"user","content":"say hi"}],"temperature":0,"max_tokens":16}'
-
-# VL smoke (required for multimodal models)
-# send one text+image OpenAI-compatible request and require non-empty choices.
+# text smoke (required); add --multimodal for VL models
+bash scripts/smoke_test.sh <served-name>
+bash scripts/smoke_test.sh <served-name> 8000 --multimodal
 ```
 
 > `Application startup complete` alone is not success. If first request crashes, treat as runtime failure (false-ready).
