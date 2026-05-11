@@ -1,27 +1,58 @@
 # Adapt Guide
 
-This document describes how to analyze an upstream vLLM diff and translate it
-into adaptation changes in vllm-ascend. Read this at the start of each step's
-adapt phase.
+Use this guide during the adapt phase of each main2main step. The goal is not
+to copy upstream vLLM changes into vllm-ascend. The goal is to understand which
+upstream contracts changed, then update the Ascend implementation that depends
+on those contracts.
 
-## Inputs Available
+This file is only about adaptation decisions and code changes. Mechanical
+pipeline work, such as updating the pinned vLLM commit reference, is handled by
+`SKILL.md` and `scripts/update_commit_reference.py`.
 
-Available inputs for this step:
-- `/tmp/main2main/steps/<step-id>/upstream.patch` — full diff for this step
-- `/tmp/main2main/steps/<step-id>/changed-files.txt` — list of changed file paths
+## Inputs
+
+For each step, use these files:
+
+- `/tmp/main2main/steps/<step-id>/changed-files.txt` — file paths changed by the upstream step
+- `/tmp/main2main/steps/<step-id>/upstream.patch` — full upstream diff for the step
+
+Read `changed-files.txt` first. It is a cheap routing signal that tells you
+which parts of `upstream.patch` deserve attention.
 
 ---
 
 ## Step 1: Analyze vLLM Changes
 
-Read `upstream.patch` and `changed-files.txt`. Cross-reference against the Key Areas table below to identify which subsystems are touched before reading any actual diff.
+1. Read `upstream.patch` and `changed-files.txt`. Cross-reference against the 'vLLM Key Areas to Focus On' table below to identify which subsystems are touched before reading any actual diff.
+2. Find the relevant chunks in `upstream.patch` and identify the concrete change: new/removed abstract methods, changed signatures, renamed config fields, moved imports, changed constructor args, dependency bumps, or changed return types.
+3. Use the File Mapping Table below to find likely vllm-ascend locations.
 
+The key question: **does vllm-ascend subclass, override, call, import, or read anything this patch changed?**, Internal implementation changes only need adaptation when vllm-ascend directly depends on the behavior.
+
+## Step 2: Adapt vLLM Ascend Project
+For each related change in vLLM , evaluate whether adaptation in vLLM Ascend is needed:
+
+- **Internal Architecture Changes**
+  Check internal interfaces of vLLM core modules (scheduler, executor, model runner, etc.)
+  Update vLLM Ascend's Ascend-specific implementations (e.g., NPU worker/model runner, custom attention、custom ops)
+  Preserve vLLM Ascend specific modifications (e.g., code under vllm_ascend/)
+
+- **Dependency Changes**
+  Check for dependency version changes in pyproject.toml or setup.py
+  Update dependency declarations in vLLM Ascend
+
+- **Version Compatibility**
+   Use `vllm_version_is()` guards when the change must coexist with the release version (see Version Compatibility Rules in SKILL.md)
+
+When a feature genuinely can't be supported on Ascend yet, add a stub with a `# TODO` comment referencing the issue.
+
+A no-op adapt (nothing to change) is fine, but it does not skip CI — the updated commit reference still needs verification.
 
 ---
 
-## Step 2: vLLM Key Areas to Focus On
+### vLLM Key Areas to Focus On
 
-When analyzing vLLM changes (`upstream.patch`,`changed-files.txt`), pay special attention to these areas that typically require vLLM Ascend adaptation:
+When analyzing vLLM changes, pay special attention to these areas that typically require vLLM Ascend adaptation:
 
 1. **Platform Interface** (`vllm/platforms/`)
    - New abstract methods — implement immediately; missing ones cause `TypeError: Can't instantiate abstract class AscendPlatform` at runtime, not at import time, so they won't surface until a test actually executes
@@ -73,27 +104,6 @@ When analyzing vLLM changes (`upstream.patch`,`changed-files.txt`), pay special 
 
 ---
 
-## Step 3: Adapt vLLM Ascend Project
-For each related change in vLLM from the file vllm_changes.md, evaluate whether adaptation in vLLM Ascend is needed:
-
-- **Internal Architecture Changes**
-  Check internal interfaces of vLLM core modules (scheduler, executor, model runner, etc.)
-  Update vLLM Ascend's Ascend-specific implementations (e.g., NPU worker/model runner, custom attention、custom ops)
-  Preserve vLLM Ascend specific modifications (e.g., code under vllm_ascend/)
-
-- **Dependency Changes**
-  Check for dependency version changes in pyproject.toml or setup.py
-  Update dependency declarations in vLLM Ascend
-
-- **Version Compatibility**
-   Use `vllm_version_is()` guards when the change must coexist with the release version (see Version Compatibility Rules in SKILL.md)
-   When the right pattern is unclear, check how other version guards are structured: `grep -rn 'vllm_version_is' vllm_ascend/`
-
-When a feature genuinely can't be supported on Ascend yet, add a stub with a `# TODO` comment referencing the issue.
-
----
-
-
 ## vllm-ascend Key File Locations
 
 | Project | Path |
@@ -140,21 +150,22 @@ When a feature genuinely can't be supported on Ascend yet, add a stub with a `# 
 
 ## File Mapping Table
 
-| vLLM upstream path | vllm-ascend path | Notes |
+Use this table after identifying a changed upstream symbol. It points to likely vllm-ascend locations, not guaranteed locations.
+
+| vLLM upstream path | vllm-ascend path | What to check |
 |:---|:---|:---|
 | `vllm/platforms/` | `vllm_ascend/platform.py` | Abstract methods, platform capabilities |
-| `vllm/v1/worker/` | `vllm_ascend/worker/` | Worker lifecycle, model loading, execute_model |
-| `vllm/v1/worker/gpu/model_runner.py` | `vllm_ascend/worker/model_runner_v1.py`, `worker/v2/model_runner.py` | Heavily overridden |
-| `vllm/v1/attention/` | `vllm_ascend/attention/` | Attention backend interface |
-| `vllm/model_executor/layers/attention/` | `vllm_ascend/attention/`, `vllm_ascend/ops/mm_encoder_attention.py` | |
-| `vllm/model_executor/layers/fused_moe/` | `vllm_ascend/ops/fused_moe/` | MoE kernel interface, router |
+| `vllm/v1/worker/` | `vllm_ascend/worker/` | Worker lifecycle, model loading, `execute_model` |
+| `vllm/v1/worker/gpu/model_runner.py` | `vllm_ascend/worker/model_runner_v1.py`, `vllm_ascend/worker/v2/model_runner.py` | Runner initialization and execution |
+| `vllm/v1/attention/` | `vllm_ascend/attention/` | Backend interface and metadata |
+| `vllm/model_executor/layers/attention/` | `vllm_ascend/attention/`, `vllm_ascend/ops/mm_encoder_attention.py` | Attention wrappers and kernels |
+| `vllm/model_executor/layers/fused_moe/` | `vllm_ascend/ops/fused_moe/` | MoE kernel interface, router, experts |
 | `vllm/distributed/` | `vllm_ascend/distributed/` | Collective ops, TP/PP, KV transfer |
-| `vllm/config*.py` | `vllm_ascend/ascend_config.py` + many files that read config | Config class fields, constructor args |
-| `vllm/compilation/` | `vllm_ascend/compilation/` | Compilation passes, fusion rules |
-| `vllm/model_executor/models/` | `vllm_ascend/models/` | Model forward signatures |
-| `vllm/model_executor/layers/quantization/` | `vllm_ascend/quantization/` | Quantization kernels, compress-tensor |
-| `vllm/model_executor/layers/layernorm.py` | `vllm_ascend/ops/layernorm.py` | |
-| `vllm/model_executor/custom_op.py` | `vllm_ascend/ops/` (files registering custom ops) | |
-| `vllm/v1/worker/gpu/spec_decode/` | `vllm_ascend/spec_decode/` | MTP/Eagle proposer |
-| `requirements*.txt` / `pyproject.toml` | `requirements*.txt` / `pyproject.toml` | Dependency versions |
-
+| `vllm/config*.py` | `vllm_ascend/ascend_config.py`, plus call sites under `vllm_ascend/` | Config fields and constructor args |
+| `vllm/compilation/` | `vllm_ascend/compilation/` | Passes, fusion rules, registration |
+| `vllm/model_executor/models/` | `vllm_ascend/models/` | Model forward signatures and loaders |
+| `vllm/model_executor/layers/quantization/` | `vllm_ascend/quantization/` | Quantization methods and kernels |
+| `vllm/model_executor/layers/layernorm.py` | `vllm_ascend/ops/layernorm.py` | LayerNorm op interface |
+| `vllm/model_executor/custom_op.py` | `vllm_ascend/ops/` | Custom op registration |
+| `vllm/v1/worker/gpu/spec_decode/` | `vllm_ascend/spec_decode/` | MTP/Eagle proposer interfaces |
+| `requirements*`, `constraints*`, `pyproject.toml`, `setup.py`, `setup.cfg` | Matching dependency files in vllm-ascend | Dependency versions |

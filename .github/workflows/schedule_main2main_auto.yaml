@@ -31,18 +31,6 @@ on:
         description: 'Target vLLM commit hash (default: latest vLLM main HEAD)'
         required: false
         default: ''
-      fix_round_limit:
-        description: 'Maximum number of direct fix rounds before entering bisect'
-        required: false
-        default: '3'
-      bisect_round_limit:
-        description: 'Maximum number of bisect-fix rounds'
-        required: false
-        default: '2'
-      mock_claude:
-        description: 'Mock Claude CLI for workflow testing (off|success|nochange)'
-        required: false
-        default: 'off'
 
 permissions:
   contents: write
@@ -61,21 +49,20 @@ env:
   NODE_VERSION: 18.20.8
   MAIN2MAIN_SUITE: e2e-main2main  
   MAIN2MAIN_MODEL: ${{ vars.MAIN2MAIN_MODEL || 'qwen3.6-plus' }}
-  CLAUDE_ALLOWED_TOOLS: Bash(git *),Bash(gh *),Bash(grep *),Bash(sed *),Bash(jq *),Bash(python3 *),Read,Write,Edit,Glob,Grep
+  CLAUDE_ALLOWED_TOOLS: Bash(git *),Bash(gh *),Bash(grep *),Bash(sed *),Bash(jq *),Bash(python3 *),Bash(mkdir *),Bash(cat *),Bash(tee *),Bash(head *),Bash(tail *),Bash(test *),Bash(ls *),Bash(find *),Bash(pwd),Read,Write,Edit,Glob,Grep
   UV_INDEX_URL: http://cache-service.nginx-pypi-cache.svc.cluster.local/pypi/simple
   UV_EXTRA_INDEX_URL: https://mirrors.huaweicloud.com/ascend/repos/pypi
   UV_INDEX_STRATEGY: unsafe-best-match
   UV_NO_CACHE: 1
   UV_SYSTEM_PYTHON: 1
-  BISECT_POLL_TIMEOUT_MINUTES: "240"
 
 jobs:
   main2main:
     runs-on: linux-aarch64-a2-4
     timeout-minutes: 1440
-    concurrency:
-      group: main2main-auto
-      cancel-in-progress: false
+    # concurrency:
+    #   group: main2main-auto
+    #   cancel-in-progress: false
     container:
       image: swr.cn-southwest-2.myhuaweicloud.com/base_image/ascend-ci/cann:8.5.1-910b-ubuntu22.04-py3.11
       env:
@@ -92,12 +79,8 @@ jobs:
       ANTHROPIC_BASE_URL: ${{ secrets.ANTHROPIC_BASE_URL }}
       ANTHROPIC_AUTH_TOKEN: ${{ secrets.ANTHROPIC_AUTH_TOKEN }}
       TARGET_COMMIT: ${{ github.event_name == 'workflow_dispatch' && inputs.target_commit || '' }}
-      MOCK_CLAUDE_MODE: ${{ github.event_name == 'workflow_dispatch' && inputs.mock_claude || 'off' }}
-      FIX_ROUND_LIMIT: ${{ github.event_name == 'workflow_dispatch' && inputs.fix_round_limit || '3' }}
-      BISECT_ROUND_LIMIT: ${{ github.event_name == 'workflow_dispatch' && inputs.bisect_round_limit || '2' }}
       PIP_EXTRA_INDEX_URL: https://mirrors.huaweicloud.com/ascend/repos/pypi
-      MAIN2MAIN_SKILL_PATH: ${{ github.workspace }}/vllm-ascend/.agents/skills/main2main/SKILL.md
-      MAIN2MAIN_ROUNDS_MARKDOWN_PATH: /tmp/main2main-round-commits.md
+      MAIN2MAIN_SKILL_PATH: ${{ github.workspace }}/vllm-benchmarks/.agents/skills/main2main/SKILL.md
       MAIN2MAIN_LOG_HELPERS: |
         print_group() {
           local title="$1"
@@ -113,10 +96,10 @@ jobs:
           print_group "${title}" "${path}"
         }
     steps:
-      - name: Checkout vllm-ascend fork repo
+      - name: Checkout vLLM-benchmarks fork repo
         uses: actions/checkout@v6
         with:
-          repository: Meihan-chen/vllm-ascend
+          repository: Meihan-chen/vllm-benchmarks
           token: ${{ secrets.PAT_TOKEN }}
           path: ${{ env.WORK_REPO_DIR }}
           fetch-depth: 0
@@ -133,46 +116,30 @@ jobs:
         id: detect
         run: |
           set -eu
-          OLD_COMMIT=$(python3 - <<'PY'
-          import re
-          from pathlib import Path
-
-          text = Path("vllm-ascend/.github/workflows/pr_test_full.yaml").read_text(encoding="utf-8")
-          line = re.search(r'vllm_version:\s*\[(.*?)\]', text)
-          if not line:
-              raise SystemExit(1)
-          commit = re.search(r'\b([0-9a-f]{40})\b', line.group(1))
-          if not commit:
-              raise SystemExit(1)
-          print(commit.group(1))
-          PY
-          )
-          if [ -z "${OLD_COMMIT}" ]; then
-            echo "::error::Could not extract pinned vLLM commit from ${WORK_REPO_DIR}/.github/workflows/pr_test_full.yaml"
-            exit 1
-          fi
-
           TARGET="${TARGET_COMMIT}"
           if [ -n "${TARGET}" ]; then
             if ! echo "${TARGET}" | grep -Eq '^[0-9a-f]{40}$'; then
               echo "::error::Invalid target_commit format: ${TARGET}"
               exit 1
             fi
-            NEW_COMMIT="${TARGET}"
-            NEW_COMMIT_SOURCE="workflow_dispatch.target_commit"
-          else
-            NEW_COMMIT=$(git -C "${VLLM_DIR}" rev-parse HEAD)
-            NEW_COMMIT_SOURCE="${VLLM_DIR}.HEAD"
           fi
+
+          python3 "${WORK_REPO_DIR}/.agents/skills/main2main/scripts/detect_commits.py" \
+            --vllm-path "${VLLM_DIR}" \
+            --ascend-path "${WORK_REPO_DIR}" \
+            > /tmp/main2main-detect.json
+
+          OLD_COMMIT=$(python3 -c 'import json; print(json.load(open("/tmp/main2main-detect.json"))["base_commit"])')
+          NEW_COMMIT=$(python3 -c 'import json; print(json.load(open("/tmp/main2main-detect.json"))["target_commit"])')
+          HAS_DRIFT=$(python3 -c 'import json; print(str(json.load(open("/tmp/main2main-detect.json"))["has_drift"]).lower())')
 
           echo "OLD_COMMIT=${OLD_COMMIT}"
           echo "NEW_COMMIT=${NEW_COMMIT}"
-          echo "NEW_COMMIT_SOURCE=${NEW_COMMIT_SOURCE}"
 
           echo "old_commit=${OLD_COMMIT}" >> "$GITHUB_OUTPUT"
           echo "new_commit=${NEW_COMMIT}" >> "$GITHUB_OUTPUT"
 
-          if [ "${OLD_COMMIT}" = "${NEW_COMMIT}" ]; then
+          if [ "${HAS_DRIFT}" != "true" ]; then
             echo "::notice::No drift detected: ${OLD_COMMIT}"
             echo "has_drift=false" >> "$GITHUB_OUTPUT"
           else
@@ -217,10 +184,8 @@ jobs:
           gh --version
           gh auth status
           gh api graphql -f query='query { viewer { login } }' >/dev/null
-          if [ "${MOCK_CLAUDE_MODE}" = "off" ]; then
-            test -n "$ANTHROPIC_BASE_URL" || { echo "::error::ANTHROPIC_BASE_URL is empty"; exit 1; }
-            test -n "$ANTHROPIC_AUTH_TOKEN" || { echo "::error::ANTHROPIC_AUTH_TOKEN is empty"; exit 1; }
-          fi
+          test -n "$ANTHROPIC_BASE_URL" || { echo "::error::ANTHROPIC_BASE_URL is empty"; exit 1; }
+          test -n "$ANTHROPIC_AUTH_TOKEN" || { echo "::error::ANTHROPIC_AUTH_TOKEN is empty"; exit 1; }
 
       - name: Check npu and CANN info
         if: steps.detect.outputs.has_drift == 'true'
@@ -243,12 +208,14 @@ jobs:
         working-directory: ${{ env.WORK_REPO_DIR }}
         run: |
           set -eu
-          BRANCH="main2main_auto_v2_$(date +%Y-%m-%d_%H-%M)"
+          BRANCH="main2main_auto_$(date +%Y-%m-%d_%H-%M)"
           git remote add upstream "https://github.com/${UPSTREAM_REPO}.git" || \
             git remote set-url upstream "https://github.com/${UPSTREAM_REPO}.git"
           git fetch upstream main
           git checkout -B "${BRANCH}" upstream/main
+          BASE_SHA=$(git rev-parse HEAD)
           echo "name=${BRANCH}" >> "$GITHUB_OUTPUT"
+          echo "base_sha=${BASE_SHA}" >> "$GITHUB_OUTPUT"
 
       - name: Install nv-action/vllm-benchmark
         if: steps.detect.outputs.has_drift == 'true'
@@ -260,7 +227,7 @@ jobs:
           uv pip install git+https://github.com/modelscope/modelscope.git@dbbcbf631fe6d10cc6446df2ad2fef24039fe7fe
 
       - name: Install Node.js
-        if: steps.detect.outputs.has_drift == 'true' && env.MOCK_CLAUDE_MODE == 'off'
+        if: steps.detect.outputs.has_drift == 'true'
         run: |
           set -eu
           case "$(uname -m)" in
@@ -284,7 +251,7 @@ jobs:
           npm --version
 
       - name: Install Claude Code CLI
-        if: steps.detect.outputs.has_drift == 'true' && env.MOCK_CLAUDE_MODE == 'off'
+        if: steps.detect.outputs.has_drift == 'true'
         run: |
           set -eu
           NODE_VERSION=$(node --version)
@@ -322,6 +289,15 @@ jobs:
                 "Bash(sed *)",
                 "Bash(jq *)",
                 "Bash(python3 *)",
+                "Bash(mkdir *)",
+                "Bash(cat *)",
+                "Bash(tee *)",
+                "Bash(head *)",
+                "Bash(tail *)",
+                "Bash(test *)",
+                "Bash(ls *)",
+                "Bash(find *)",
+                "Bash(pwd)",
                 "Read",
                 "Write",
                 "Edit",
@@ -333,324 +309,117 @@ jobs:
           EOF
           python3 -m json.tool "$HOME/.claude/settings.json" >/dev/null
 
-      - name: Install mock Claude CLI
-        if: steps.detect.outputs.has_drift == 'true' && env.MOCK_CLAUDE_MODE != 'off'
-        run: |
-          set -eu
-          mkdir -p /tmp/mock-bin
-          cat > /tmp/mock-bin/claude <<'EOF'
-          #!/usr/bin/env bash
-          set -eu
-          exec python3 "$GITHUB_WORKSPACE/$WORK_REPO_DIR/.github/workflows/scripts/mock_claude.py" "$@"
-          EOF
-          chmod +x /tmp/mock-bin/claude
-          echo /tmp/mock-bin >> "$GITHUB_PATH"
-          export PATH="/tmp/mock-bin:${PATH}"
-          claude --version
-
-      - name: Initialize Claude session
+      - name: Run main2main skill
         if: steps.detect.outputs.has_drift == 'true'
-        id: claude-session
+        id: run-main2main
+        working-directory: ${{ github.workspace }}
         run: |
-          set -eu
-          SESSION_ID=$(python3 -c 'import uuid; print(uuid.uuid4())')
-          echo "id=${SESSION_ID}" >> "$GITHUB_OUTPUT"
-          : > /tmp/main2main-round-commits.md
-
-      - name: Run detect and adapt with Claude
-        if: steps.detect.outputs.has_drift == 'true'
-        id: detect-claude
-        env:
-          MAIN2MAIN_OLD_COMMIT: ${{ steps.detect.outputs.old_commit }}
-          MAIN2MAIN_NEW_COMMIT: ${{ steps.detect.outputs.new_commit }}
-          MAIN2MAIN_SESSION_ID: ${{ steps.claude-session.outputs.id }}
-        run: |
-          set -eu
+          set -euo pipefail
           eval "${MAIN2MAIN_LOG_HELPERS}"
 
-          export MOCK_CLAUDE_PHASE="detect"
-          export MOCK_CLAUDE_WORK_REPO="${GITHUB_WORKSPACE}/${WORK_REPO_DIR}"
-          export MOCK_CLAUDE_UPSTREAM_REPO="${GITHUB_WORKSPACE}/${VLLM_DIR}"
-          export MOCK_CLAUDE_OLD_COMMIT="${{ steps.detect.outputs.old_commit }}"
-          export MOCK_CLAUDE_NEW_COMMIT="${{ steps.detect.outputs.new_commit }}"
+          mkdir -p /tmp/main2main
+          cat > /tmp/main2main/main2main.prompt.md <<EOF
+          Use the main2main skill.
 
-          python3 "${WORK_REPO_DIR}/.github/workflows/scripts/main2main_ci.py" \
-            run-claude-phase \
-            --phase detect \
-            --rounds-markdown-path /tmp/main2main-round-commits.md \
-            --artifact-prefix /tmp/main2main-detect \
-            > /tmp/main2main-detect-meta.json
+          Inputs:
+          - vllm_path: ${GITHUB_WORKSPACE}/${VLLM_DIR}
+          - vllm_ascend_path: ${GITHUB_WORKSPACE}/${WORK_REPO_DIR}
+          - working directory: ${GITHUB_WORKSPACE}
 
-          print_group "Claude detect meta" /tmp/main2main-detect-meta.json
-          print_group "Claude detect stderr" /tmp/main2main-detect-result.err
-          print_group "Claude detect stdout" /tmp/main2main-detect-result.json
-          print_group_if_nonempty "Claude detect git status" /tmp/main2main-detect-status.txt
-          COUNT=$(jq -r '.commit_count' /tmp/main2main-detect-meta.json)
-          echo "commit_count=${COUNT}" >> "$GITHUB_OUTPUT"
+          Run the complete main2main pipeline from the skill.
+          Do not push.
+          Do not create a PR.
 
-      - name: E2E main2main suite test
-        if: steps.detect.outputs.has_drift == 'true' && steps.detect-claude.outputs.commit_count != '0'
-        id: test-initial
-        continue-on-error: true
+          Required output:
+          - Write the reviewer-facing final summary to /tmp/main2main/final-summary.md
+          EOF
+
+          set +e
+          claude \
+            -p "$(cat /tmp/main2main/main2main.prompt.md)" \
+            --model "${MAIN2MAIN_MODEL}" \
+            --append-system-prompt-file "${MAIN2MAIN_SKILL_PATH}" \
+            --output-format stream-json \
+            --verbose \
+            --dangerously-skip-permissions \
+            --allowedTools "${CLAUDE_ALLOWED_TOOLS}" \
+            2> /tmp/main2main/claude.err \
+            | tee /tmp/main2main/claude.stream.jsonl >/dev/null
+          CLAUDE_PIPE_STATUS=("${PIPESTATUS[@]}")
+          set -e
+          CLAUDE_STATUS="${CLAUDE_PIPE_STATUS[0]}"
+          TEE_STATUS="${CLAUDE_PIPE_STATUS[1]}"
+
+          if [ -s /tmp/main2main/claude.stream.jsonl ]; then
+            echo "::group::main2main Claude conversation"
+            python3 "${WORK_REPO_DIR}/.github/workflows/scripts/main2main_auto.py" print-claude-stream \
+              --input /tmp/main2main/claude.stream.jsonl
+            echo "::endgroup::"
+          else
+            echo "::warning::Claude stream output is empty"
+          fi
+          print_group_if_nonempty "main2main Claude stderr" /tmp/main2main/claude.err
+
+          if [ "${CLAUDE_STATUS}" -ne 0 ]; then
+            echo "::error::claude exited with status ${CLAUDE_STATUS}"
+            exit "${CLAUDE_STATUS}"
+          fi
+          if [ "${TEE_STATUS}" -ne 0 ]; then
+            echo "::error::tee exited with status ${TEE_STATUS}"
+            exit "${TEE_STATUS}"
+          fi
+
+          test -s /tmp/main2main/final-summary.md
+          print_group "main2main final summary" /tmp/main2main/final-summary.md
+
+      - name: Summarize final status
+        if: steps.detect.outputs.has_drift == 'true'
+        id: final-status
         working-directory: ${{ env.WORK_REPO_DIR }}
         run: |
           set -eu
           eval "${MAIN2MAIN_LOG_HELPERS}"
 
-          python3 .github/workflows/scripts/main2main_ci.py \
-            run-suite-and-summarize \
-            --work-repo-dir "${PWD}" \
-            --suite e2e-main2main \
-            --artifact-prefix /tmp/main2main-test \
-            > /tmp/main2main-test-meta.json
-          print_group "Initial test meta" /tmp/main2main-test-meta.json
-          STATUS=$(jq -r '.exit_code' /tmp/main2main-test-meta.json)
-          print_group "Initial test log" /tmp/main2main-test.log
-          if [ "${STATUS}" -ne 0 ]; then
-            print_group_if_nonempty "Initial test summary stdout" /tmp/main2main-test-summary.out
-            print_group_if_nonempty "Initial test summary stderr" /tmp/main2main-test-summary.err
-            print_group_if_nonempty "Initial test failure summary" /tmp/main2main-failure-summary.json
-          fi
-          exit "${STATUS}"
+          SUMMARY_MD=/tmp/main2main/final-summary.md
+          test -s "${SUMMARY_MD}"
 
-      - name: Run fix loop with Claude
-        if: steps.detect.outputs.has_drift == 'true' && steps.detect-claude.outputs.commit_count != '0'
-        id: fix-loop
-        env:
-          MAIN2MAIN_OLD_COMMIT: ${{ steps.detect.outputs.old_commit }}
-          MAIN2MAIN_NEW_COMMIT: ${{ steps.detect.outputs.new_commit }}
-          MAIN2MAIN_SESSION_ID: ${{ steps.claude-session.outputs.id }}
-        run: |
-          set -eu
-          eval "${MAIN2MAIN_LOG_HELPERS}"
+          python3 .github/workflows/scripts/main2main_auto.py parse-final-summary \
+            --summary-md "${SUMMARY_MD}" \
+            > /tmp/main2main/final-summary-parsed.json
 
-          export MOCK_CLAUDE_PHASE="fix"
-          export MOCK_CLAUDE_LOG_PATH="/tmp/main2main-test.log"
-          export MOCK_CLAUDE_WORK_REPO="${GITHUB_WORKSPACE}/${WORK_REPO_DIR}"
-          export MOCK_CLAUDE_UPSTREAM_REPO="${GITHUB_WORKSPACE}/${VLLM_DIR}"
-          export MOCK_CLAUDE_OLD_COMMIT="${{ steps.detect.outputs.old_commit }}"
-          export MOCK_CLAUDE_NEW_COMMIT="${{ steps.detect.outputs.new_commit }}"
+          FINAL_STATUS=$(python3 -c 'import json; print(json.load(open("/tmp/main2main/final-summary-parsed.json")).get("status", "unknown"))')
+          REACHED_COMMIT=$(python3 -c 'import json; print(json.load(open("/tmp/main2main/final-summary-parsed.json")).get("reached_commit", ""))')
+          STEPS_COMPLETED=$(python3 -c 'import json; print(json.load(open("/tmp/main2main/final-summary-parsed.json")).get("steps_completed", 0))')
+          STEPS_TOTAL=$(python3 -c 'import json; print(json.load(open("/tmp/main2main/final-summary-parsed.json")).get("steps_total", 0))')
 
-          if [ "${{ steps.test-initial.outcome }}" = "success" ]; then
-            echo "status=passed_after_initial_test" >> "$GITHUB_OUTPUT"
-            echo "fix_rounds_used=0" >> "$GITHUB_OUTPUT"
-            exit 0
+          MANUAL_REVIEW_REQUIRED=false
+          if [ "${FINAL_STATUS}" != "completed" ]; then
+            MANUAL_REVIEW_REQUIRED=true
           fi
 
-          FIX_ROUNDS_USED=0
-          STATUS="needs_bisect"
+          python3 .github/workflows/scripts/main2main_auto.py collect-commit-range \
+            --repo "${PWD}" \
+            --start-ref "${{ steps.branch.outputs.base_sha }}" \
+            --end-ref HEAD \
+            > /tmp/main2main/created-commits.json
 
-          while true; do
-            if [ "${FIX_ROUNDS_USED}" -ge "${FIX_ROUND_LIMIT}" ]; then
-              STATUS="needs_bisect"
-              break
-            fi
+          git log --reverse --format='- `%H` %s' "${{ steps.branch.outputs.base_sha }}..HEAD" \
+            > /tmp/main2main/created-commits.md
 
-            ROUND=$((FIX_ROUNDS_USED + 1))
+          COMMIT_COUNT=$(python3 -c 'import json; print(len(json.load(open("/tmp/main2main/created-commits.json"))))')
 
-            if ! python3 "${WORK_REPO_DIR}/.github/workflows/scripts/main2main_ci.py" \
-              run-claude-phase \
-              --phase fix \
-              --artifact-prefix "/tmp/main2main-fix-round${ROUND}" \
-              --round "${ROUND}" \
-              --log-path /tmp/main2main-test.log \
-              > "/tmp/main2main-fix-round${ROUND}-meta.json"; then
-              echo "::warning::Claude fix round ${ROUND} failed; continue to next round"
-              print_group_if_nonempty "Claude fix round ${ROUND} stderr" "/tmp/main2main-fix-round${ROUND}-result.err"
-              print_group_if_nonempty "Claude fix round ${ROUND} stdout" "/tmp/main2main-fix-round${ROUND}-result.json"
-              print_group_if_nonempty "Claude fix round ${ROUND} git status" "/tmp/main2main-fix-round${ROUND}-status.txt"
-              FIX_ROUNDS_USED=${ROUND}
-              continue
-            fi
-
-            print_group "Claude fix round ${ROUND} meta" "/tmp/main2main-fix-round${ROUND}-meta.json"
-            print_group "Claude fix round ${ROUND} stderr" "/tmp/main2main-fix-round${ROUND}-result.err"
-            print_group "Claude fix round ${ROUND} stdout" "/tmp/main2main-fix-round${ROUND}-result.json"
-            print_group_if_nonempty "Claude fix round ${ROUND} git status" "/tmp/main2main-fix-round${ROUND}-status.txt"
-            COMMIT_COUNT=$(jq -r '.commit_count // 0' "/tmp/main2main-fix-round${ROUND}-meta.json" 2>/dev/null || echo "0")
-
-            if [ "${COMMIT_COUNT}" = "0" ]; then
-              STATUS="needs_bisect"
-              break
-            fi
-            FIX_ROUNDS_USED=${ROUND}
-
-            if ! python3 "${WORK_REPO_DIR}/.github/workflows/scripts/main2main_ci.py" \
-              run-suite-and-summarize \
-              --artifact-prefix /tmp/main2main-fix-test \
-              > /tmp/main2main-fix-test-meta.json; then
-              echo "::warning::Fix loop ${ROUND} suite execution failed; continue to next round"
-              print_group_if_nonempty "Fix loop ${ROUND} summary stdout" /tmp/main2main-fix-test-summary.out
-              print_group_if_nonempty "Fix loop ${ROUND} summary stderr" /tmp/main2main-fix-test-summary.err
-              continue
-            fi
-            print_group "Fix loop ${ROUND} test meta" /tmp/main2main-fix-test-meta.json
-            TEST_EXIT_CODE=$(jq -r '.exit_code // 1' /tmp/main2main-fix-test-meta.json 2>/dev/null || echo "1")
-            if [ "${TEST_EXIT_CODE}" = "0" ]; then
-              print_group "Fix loop ${ROUND} test log" /tmp/main2main-test.log
-              STATUS="passed_after_fix"
-              break
-            fi
-            print_group "Fix loop ${ROUND} test log" /tmp/main2main-test.log
-            print_group_if_nonempty "Fix loop ${ROUND} summary stdout" /tmp/main2main-fix-test-summary.out
-            print_group_if_nonempty "Fix loop ${ROUND} summary stderr" /tmp/main2main-fix-test-summary.err
-            print_group_if_nonempty "Fix loop ${ROUND} failure summary" /tmp/main2main-failure-summary.json
-          done
-
-          echo "status=${STATUS}" >> "$GITHUB_OUTPUT"
-          echo "fix_rounds_used=${FIX_ROUNDS_USED}" >> "$GITHUB_OUTPUT"
-
-      - name: Run bisect-fix loop with Claude
-        if: steps.fix-loop.outputs.status == 'needs_bisect'
-        id: bisect-loop
-        timeout-minutes: 720
-        env:
-          MAIN2MAIN_OLD_COMMIT: ${{ steps.detect.outputs.old_commit }}
-          MAIN2MAIN_NEW_COMMIT: ${{ steps.detect.outputs.new_commit }}
-          MAIN2MAIN_SESSION_ID: ${{ steps.claude-session.outputs.id }}
-        run: |
-          set -eu
-          eval "${MAIN2MAIN_LOG_HELPERS}"
-
-          export MOCK_CLAUDE_PHASE="bisect"
-          export MOCK_CLAUDE_LOG_PATH="/tmp/main2main-test.log"
-          export MOCK_CLAUDE_WORK_REPO="${GITHUB_WORKSPACE}/${WORK_REPO_DIR}"
-          export MOCK_CLAUDE_UPSTREAM_REPO="${GITHUB_WORKSPACE}/${VLLM_DIR}"
-          export MOCK_CLAUDE_OLD_COMMIT="${{ steps.detect.outputs.old_commit }}"
-          export MOCK_CLAUDE_NEW_COMMIT="${{ steps.detect.outputs.new_commit }}"
-
-          BISECT_ROUNDS_USED=0
-          STATUS="manual_review_required"
-
-          while true; do
-            if [ "${BISECT_ROUNDS_USED}" -ge "${BISECT_ROUND_LIMIT}" ]; then
-              STATUS="manual_review_required"
-              break
-            fi
-
-            ROUND=$((BISECT_ROUNDS_USED + 1))
-            echo "::group::Bisect round ${ROUND} setup"
-            if [ ! -f /tmp/main2main-failure-summary.json ]; then
-              echo "::warning::Expected /tmp/main2main-failure-summary.json to exist before bisect"
-              echo "::warning::Skip bisect round ${ROUND} and move to manual review"
-              STATUS="manual_review_required"
-              echo "::endgroup::"
-              break
-            fi
-            if ! python3 "${WORK_REPO_DIR}/.github/workflows/scripts/main2main_ci.py" \
-              run-bisect-round \
-              --round "${ROUND}" \
-              --log-path /tmp/main2main-test.log \
-              --failure-summary-path /tmp/main2main-failure-summary.json \
-              --artifact-prefix "/tmp/main2main-bisect-round${ROUND}" \
-              > "/tmp/main2main-bisect-round${ROUND}-meta.json"; then
-              echo "::warning::Bisect round ${ROUND} setup failed; continue to next bisect round"
-              python3 "${WORK_REPO_DIR}/.github/workflows/scripts/main2main_ci.py" \
-                print-bisect-round-logs \
-                --artifact-prefix "/tmp/main2main-bisect-round${ROUND}"
-              BISECT_ROUNDS_USED=${ROUND}
-              echo "::endgroup::"
-              continue
-            fi
-            python3 "${WORK_REPO_DIR}/.github/workflows/scripts/main2main_ci.py" \
-              print-bisect-round-logs \
-              --artifact-prefix "/tmp/main2main-bisect-round${ROUND}"
-
-            echo "::group::Bisect round ${ROUND} Claude fix"
-            if ! python3 "${WORK_REPO_DIR}/.github/workflows/scripts/main2main_ci.py" \
-              run-claude-phase \
-              --phase bisect \
-              --artifact-prefix "/tmp/main2main-bisect-fix-round${ROUND}" \
-              --round "${ROUND}" \
-              --log-path /tmp/main2main-test.log \
-              --bisect-result-path "/tmp/main2main-bisect-round${ROUND}-output/bisect_result.json" \
-              > "/tmp/main2main-bisect-fix-round${ROUND}-meta.json"; then
-              echo "::warning::Claude bisect fix round ${ROUND} failed; continue to next bisect round"
-              print_group_if_nonempty "Claude bisect fix round ${ROUND} stderr" "/tmp/main2main-bisect-fix-round${ROUND}-result.err"
-              print_group_if_nonempty "Claude bisect fix round ${ROUND} stdout" "/tmp/main2main-bisect-fix-round${ROUND}-result.json"
-              print_group_if_nonempty "Claude bisect fix round ${ROUND} git status" "/tmp/main2main-bisect-fix-round${ROUND}-status.txt"
-              BISECT_ROUNDS_USED=${ROUND}
-              echo "::endgroup::"
-              continue
-            fi
-            print_group "Claude bisect fix round ${ROUND} meta" "/tmp/main2main-bisect-fix-round${ROUND}-meta.json"
-            print_group "Claude bisect fix round ${ROUND} stderr" "/tmp/main2main-bisect-fix-round${ROUND}-result.err"
-            print_group "Claude bisect fix round ${ROUND} stdout" "/tmp/main2main-bisect-fix-round${ROUND}-result.json"
-            print_group_if_nonempty "Claude bisect fix round ${ROUND} git status" "/tmp/main2main-bisect-fix-round${ROUND}-status.txt"
-            COMMIT_COUNT=$(jq -r '.commit_count // 0' "/tmp/main2main-bisect-fix-round${ROUND}-meta.json" 2>/dev/null || echo "0")
-
-            if [ "${COMMIT_COUNT}" = "0" ]; then
-              STATUS="manual_review_required"
-              echo "::endgroup::"
-              break
-            fi
-            BISECT_ROUNDS_USED=${ROUND}
-
-            if ! python3 "${WORK_REPO_DIR}/.github/workflows/scripts/main2main_ci.py" \
-              run-suite-and-summarize \
-              --artifact-prefix /tmp/main2main-bisect-test \
-              > /tmp/main2main-bisect-test-meta.json; then
-              echo "::warning::Bisect loop ${ROUND} suite execution failed; continue to next bisect round"
-              print_group_if_nonempty "Bisect loop ${ROUND} summary stdout" /tmp/main2main-bisect-test-summary.out
-              print_group_if_nonempty "Bisect loop ${ROUND} summary stderr" /tmp/main2main-bisect-test-summary.err
-              echo "::endgroup::"
-              BISECT_ROUNDS_USED=${ROUND}
-              continue
-            fi
-            print_group "Bisect loop ${ROUND} test meta" /tmp/main2main-bisect-test-meta.json
-            TEST_EXIT_CODE=$(jq -r '.exit_code // 1' /tmp/main2main-bisect-test-meta.json 2>/dev/null || echo "1")
-            if [ "${TEST_EXIT_CODE}" = "0" ]; then
-              print_group "Bisect loop ${ROUND} test log" /tmp/main2main-test.log
-              STATUS="passed_after_bisect"
-              echo "::endgroup::"
-              break
-            fi
-            print_group "Bisect loop ${ROUND} test log" /tmp/main2main-test.log
-            print_group_if_nonempty "Bisect loop ${ROUND} summary stdout" /tmp/main2main-bisect-test-summary.out
-            print_group_if_nonempty "Bisect loop ${ROUND} summary stderr" /tmp/main2main-bisect-test-summary.err
-            print_group_if_nonempty "Bisect loop ${ROUND} failure summary" /tmp/main2main-failure-summary.json
-            echo "::endgroup::"
-          done
-
-          echo "status=${STATUS}" >> "$GITHUB_OUTPUT"
-          echo "bisect_rounds_used=${BISECT_ROUNDS_USED}" >> "$GITHUB_OUTPUT"
-
-      - name: Summarize final status
-        if: steps.detect.outputs.has_drift == 'true' && steps.detect-claude.outputs.commit_count != '0'
-        id: final-status
-        run: |
-          set -eu
-
-          FINAL_STATUS="manual_review_required"
-          FIX_ROUNDS_USED="${{ steps.fix-loop.outputs.fix_rounds_used }}"
-          BISECT_ROUNDS_USED="0"
-          MANUAL_REVIEW_REQUIRED=true
-
-          if [ "${{ steps.fix-loop.outputs.status }}" = "passed_after_initial_test" ]; then
-            FINAL_STATUS="passed_after_initial_test"
-            MANUAL_REVIEW_REQUIRED=false
-          elif [ "${{ steps.fix-loop.outputs.status }}" = "passed_after_fix" ]; then
-            FINAL_STATUS="passed_after_fix"
-            MANUAL_REVIEW_REQUIRED=false
-          elif [ "${{ steps.bisect-loop.outputs.status }}" = "passed_after_bisect" ]; then
-            FINAL_STATUS="passed_after_bisect"
-            BISECT_ROUNDS_USED="${{ steps.bisect-loop.outputs.bisect_rounds_used }}"
-            MANUAL_REVIEW_REQUIRED=false
-          elif [ "${{ steps.bisect-loop.outputs.status }}" = "manual_review_required" ]; then
-            FINAL_STATUS="manual_review_required"
-            BISECT_ROUNDS_USED="${{ steps.bisect-loop.outputs.bisect_rounds_used }}"
-          fi
-
+          echo "status=${FINAL_STATUS}" >> "$GITHUB_OUTPUT"
+          echo "commit_count=${COMMIT_COUNT}" >> "$GITHUB_OUTPUT"
           echo "manual_review_required=${MANUAL_REVIEW_REQUIRED}" >> "$GITHUB_OUTPUT"
-          echo "::notice::final_status=${FINAL_STATUS}, fix_rounds_used=${FIX_ROUNDS_USED}, bisect_rounds_used=${BISECT_ROUNDS_USED}"
+          echo "::notice::final_status=${FINAL_STATUS}, reached_commit=${REACHED_COMMIT}, steps=${STEPS_COMPLETED}/${STEPS_TOTAL}, commit_count=${COMMIT_COUNT}"
+          print_group_if_nonempty "main2main created commits" /tmp/main2main/created-commits.md
 
       - name: Determine publish readiness
         if: steps.detect.outputs.has_drift == 'true'
         id: publication-state
-        working-directory: ${{ env.WORK_REPO_DIR }}
         run: |
           set -eu
-          COMMIT_COUNT=$(git rev-list --count upstream/main..HEAD)
+          COMMIT_COUNT="${{ steps.final-status.outputs.commit_count }}"
           SHOULD_PUBLISH=true
           if [ "${COMMIT_COUNT}" = "0" ]; then
             SHOULD_PUBLISH=false
@@ -668,10 +437,11 @@ jobs:
           eval "${MAIN2MAIN_LOG_HELPERS}"
           BRANCH_NAME="${{ steps.branch.outputs.name }}"
           echo "Render PR body"
-          python3 .github/workflows/scripts/main2main_ci.py render-pr-body \
+          python3 .github/workflows/scripts/main2main_auto.py render-pr-body \
             --old-commit "${{ steps.detect.outputs.old_commit }}" \
             --new-commit "${{ steps.detect.outputs.new_commit }}" \
-            --rounds-md /tmp/main2main-round-commits.md \
+            --summary-md /tmp/main2main/final-summary.md \
+            --commits-md /tmp/main2main/created-commits.md \
             > /tmp/main2main-pr-body.md || {
               echo "::error::Failed while rendering PR body"
               exit 1
@@ -679,7 +449,7 @@ jobs:
           print_group "PR body" /tmp/main2main-pr-body.md
 
           echo "Normalize origin remote"
-          git remote set-url origin "https://github.com/Meihan-chen/vllm-ascend.git" || {
+          git remote set-url origin "https://github.com/Meihan-chen/vllm-benchmarks.git" || {
             echo "::error::Failed to normalize origin remote URL"
             exit 1
           }
@@ -693,6 +463,12 @@ jobs:
 
           SHORT_OLD=$(printf '%.8s' "${{ steps.detect.outputs.old_commit }}")
           SHORT_NEW=$(printf '%.8s' "${{ steps.detect.outputs.new_commit }}")
+          LABEL_ARGS=(--label main2main)
+          if [ "${{ steps.final-status.outputs.status }}" = "completed" ]; then
+            LABEL_ARGS+=(--label ready --label ready-for-test)
+          else
+            LABEL_ARGS+=(--label manual-review)
+          fi
           PR_URL=$(gh pr create \
             --repo "${UPSTREAM_REPO}" \
             --draft \
@@ -700,9 +476,7 @@ jobs:
             --body-file /tmp/main2main-pr-body.md \
             --head "Meihan-chen:${BRANCH_NAME}" \
             --base main \
-            --label main2main \
-            --label ready \
-            --label ready-for-test) || {
+            "${LABEL_ARGS[@]}") || {
               echo "::error::Failed while creating draft PR"
               exit 1
             }
@@ -715,17 +489,11 @@ jobs:
         run: |
           eval "${MAIN2MAIN_LOG_HELPERS}"
 
-          BISECT_JSON=""
-          LAST_ROUND="${{ steps.bisect-loop.outputs.bisect_rounds_used }}"
-          if [ -n "${LAST_ROUND}" ] && [ "${LAST_ROUND}" != "0" ] && [ -f "/tmp/main2main-bisect-round${LAST_ROUND}-output/bisect_result.json" ]; then
-            BISECT_JSON="--bisect-json /tmp/main2main-bisect-round${LAST_ROUND}-output/bisect_result.json"
-          fi
-          python3 .github/workflows/scripts/main2main_ci.py render-manual-review-issue \
+          python3 .github/workflows/scripts/main2main_auto.py render-manual-review-issue \
             --pr-url "${{ steps.create-pr.outputs.url }}" \
             --old-commit "${{ steps.detect.outputs.old_commit }}" \
             --new-commit "${{ steps.detect.outputs.new_commit }}" \
-            --summary-json /tmp/main2main-failure-summary.json \
-            ${BISECT_JSON} \
+            --summary-md /tmp/main2main/final-summary.md \
             > /tmp/main2main-manual-review.md
           print_group "Manual review issue" /tmp/main2main-manual-review.md
           SHORT_NEW=$(printf '%.8s' "${{ steps.detect.outputs.new_commit }}")
