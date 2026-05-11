@@ -29,6 +29,178 @@ from vllm.triton_utils import tl, triton
 
 
 @triton.jit
+def _clear_linear_attention_cache_kernel(
+    KV_CACHE,
+    STATE_INDICES,
+    QUERY_START_LOC,
+    SEQ_LENS,
+    num_decode_tokens: tl.constexpr,
+    d: tl.constexpr,
+    e: tl.constexpr,
+    kv_stride_slot: tl.constexpr,
+    kv_stride_h: tl.constexpr,
+    kv_stride_d: tl.constexpr,
+    kv_stride_e: tl.constexpr,
+    BLOCK_KV: tl.constexpr,
+):
+    prefill_idx = tl.program_id(0)
+    head = tl.program_id(1)
+    kv_block = tl.program_id(2)
+
+    req_idx = num_decode_tokens + prefill_idx
+    q_start = tl.load(QUERY_START_LOC + req_idx)
+    q_end = tl.load(QUERY_START_LOC + req_idx + 1)
+    seq_len = tl.load(SEQ_LENS + req_idx)
+    slot_id = tl.load(STATE_INDICES + req_idx)
+
+    offsets = kv_block * BLOCK_KV + tl.arange(0, BLOCK_KV)
+    dim_d = offsets // e
+    dim_e = offsets - dim_d * e
+    should_clear = seq_len == q_end - q_start
+
+    ptrs = KV_CACHE + slot_id * kv_stride_slot + head * kv_stride_h + dim_d * kv_stride_d + dim_e * kv_stride_e
+    tl.store(ptrs, 0.0, mask=should_clear & (offsets < d * e))
+
+
+def clear_linear_attention_cache_for_prefill_npu(
+    kv_cache: torch.Tensor,
+    state_indices_tensor: torch.Tensor,
+    attn_metadata,
+) -> None:
+    num_prefills = getattr(attn_metadata, "num_prefills", 0)
+    if num_prefills <= 0:
+        return
+
+    num_decode_tokens = getattr(attn_metadata, "num_decode_tokens", 0)
+    _, h, d, e = kv_cache.shape
+    block_kv = 256
+    grid = (num_prefills, h, triton.cdiv(d * e, block_kv))
+    _clear_linear_attention_cache_kernel[grid](
+        kv_cache,
+        state_indices_tensor,
+        attn_metadata.query_start_loc,
+        attn_metadata.seq_lens,
+        num_decode_tokens,
+        d,
+        e,
+        kv_cache.stride(0),
+        kv_cache.stride(1),
+        kv_cache.stride(2),
+        kv_cache.stride(3),
+        BLOCK_KV=block_kv,
+    )
+
+
+@triton.jit
+def _pack_qkv_transpose_kernel(
+    Q,
+    K,
+    V,
+    QO,
+    KO,
+    VO,
+    q_start,
+    n,
+    h: tl.constexpr,
+    d: tl.constexpr,
+    q_stride_t: tl.constexpr,
+    q_stride_h: tl.constexpr,
+    q_stride_d: tl.constexpr,
+    k_stride_t: tl.constexpr,
+    k_stride_h: tl.constexpr,
+    k_stride_d: tl.constexpr,
+    v_stride_t: tl.constexpr,
+    v_stride_h: tl.constexpr,
+    v_stride_d: tl.constexpr,
+    BLOCK_T: tl.constexpr,
+    BLOCK_D: tl.constexpr,
+):
+    head = tl.program_id(0)
+    block_t = tl.program_id(1)
+
+    offs_t = block_t * BLOCK_T + tl.arange(0, BLOCK_T)
+    offs_d = tl.arange(0, BLOCK_D)
+    mask = (offs_t[:, None] < n) & (offs_d[None, :] < d)
+
+    token = q_start + offs_t[:, None]
+    dim = offs_d[None, :]
+
+    q = tl.load(
+        Q + token * q_stride_t + head * q_stride_h + dim * q_stride_d,
+        mask=mask,
+        other=0.0,
+    )
+    k = tl.load(
+        K + token * k_stride_t + head * k_stride_h + dim * k_stride_d,
+        mask=mask,
+        other=0.0,
+    )
+    v = tl.load(
+        V + token * v_stride_t + head * v_stride_h + dim * v_stride_d,
+        mask=mask,
+        other=0.0,
+    )
+
+    out = head * n * d + offs_t[:, None] * d + dim
+    tl.store(QO + out, q, mask=mask)
+    tl.store(KO + out, k, mask=mask)
+    tl.store(VO + out, v, mask=mask)
+
+
+def pack_qkv_for_prefill(
+    q: torch.Tensor,
+    k: torch.Tensor,
+    v: torch.Tensor,
+    q_start: int | torch.Tensor,
+    q_end: int | torch.Tensor,
+) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+    """Pack [T, H, D] Q/K/V slices into [H, N, D] contiguous tensors."""
+    q_start = int(q_start)
+    q_end = int(q_end)
+    n = q_end - q_start
+    if n <= 0:
+        h, d = q.shape[1], q.shape[2]
+        empty = torch.empty((h, 0, d), dtype=q.dtype, device=q.device)
+        return empty, empty, empty
+
+    assert q.dim() == k.dim() == v.dim() == 3
+    assert q.shape == k.shape == v.shape
+
+    h, d = q.shape[1], q.shape[2]
+    qo = torch.empty((h, n, d), dtype=q.dtype, device=q.device)
+    ko = torch.empty_like(qo)
+    vo = torch.empty_like(qo)
+
+    block_t = 32
+    block_d = triton.next_power_of_2(d)
+    grid = (h, triton.cdiv(n, block_t))
+    _pack_qkv_transpose_kernel[grid](
+        q,
+        k,
+        v,
+        qo,
+        ko,
+        vo,
+        q_start,
+        n,
+        h,
+        d,
+        q.stride(0),
+        q.stride(1),
+        q.stride(2),
+        k.stride(0),
+        k.stride(1),
+        k.stride(2),
+        v.stride(0),
+        v.stride(1),
+        v.stride(2),
+        BLOCK_T=block_t,
+        BLOCK_D=block_d,
+    )
+    return qo, ko, vo
+
+
+@triton.jit
 def _fwd_diag_kernel(
     Q,
     K,

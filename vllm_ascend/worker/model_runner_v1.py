@@ -52,6 +52,7 @@ from vllm.utils.mem_utils import DeviceMemoryProfiler
 from vllm.utils.torch_utils import get_dtype_size
 from vllm.v1.attention.backend import AttentionBackend, AttentionMetadata
 from vllm.v1.attention.backends.gdn_attn import GDNAttentionMetadataBuilder
+from vllm.v1.attention.backends.linear_attn import LinearAttentionMetadata
 from vllm.v1.attention.backends.utils import CommonAttentionMetadata
 from vllm.v1.attention.selector import get_attn_backend  # type: ignore
 from vllm.v1.core.sched.output import SchedulerOutput
@@ -2550,6 +2551,36 @@ class NPUModelRunner(GPUModelRunner):
             cm_base.num_logits_indices = logits_indices.size(0)
             cm_base.logits_indices_padded = self._prepare_kv_sharing_fast_prefill(logits_indices)
 
+        def _get_linear_attn_state_indices_cpu(
+            kv_cache_gid: int,
+            common_attn_metadata: CommonAttentionMetadata,
+        ) -> torch.Tensor | None:
+            # The prefill path loops over requests in Python. Keep the cache
+            # slot index on CPU there so kv_cache[slot] does not force a device
+            # scalar sync after the previous NPU kernel.
+            if self.use_cp or self.pcp_size > 1:
+                return None
+
+            kv_cache_spec = kv_cache_groups[kv_cache_gid].kv_cache_spec
+            if not isinstance(kv_cache_spec, MambaSpec):
+                return None
+
+            num_reqs = len(common_attn_metadata.query_start_loc_cpu) - 1
+            block_table_cpu = self.input_batch.block_table[kv_cache_gid].get_cpu_tensor()[:num_reqs]
+            mamba_cache_mode = self.vllm_config.cache_config.mamba_cache_mode
+            if mamba_cache_mode in ("all", "none"):
+                return block_table_cpu[:, 0]
+
+            seq_lens_cpu = common_attn_metadata._seq_lens_cpu
+            if seq_lens_cpu is None:
+                seq_lens_cpu = getattr(common_attn_metadata, "seq_lens_cpu", None)
+            if seq_lens_cpu is None:
+                return None
+
+            seq_lens_cpu = seq_lens_cpu[:num_reqs].to(torch.int64)
+            start_indices = torch.clamp((seq_lens_cpu - 1) // kv_cache_spec.block_size, min=0)
+            return torch.gather(block_table_cpu, 1, start_indices.unsqueeze(1)).squeeze(1)
+
         def _build_attn_group_metadata(
             kv_cache_gid: int,
             attn_gid: int,
@@ -2580,6 +2611,13 @@ class NPUModelRunner(GPUModelRunner):
                     common_attn_metadata=common_attn_metadata,
                     **extra_attn_metadata_args,
                 )
+                if isinstance(attn_metadata_i, LinearAttentionMetadata) and attn_metadata_i.num_prefills > 0:
+                    attn_metadata_i.query_start_loc_cpu = common_attn_metadata.query_start_loc_cpu
+                    attn_metadata_i.seq_lens_cpu = common_attn_metadata._seq_lens_cpu
+                    attn_metadata_i.state_indices_cpu = _get_linear_attn_state_indices_cpu(
+                        kv_cache_gid,
+                        common_attn_metadata,
+                    )
                 # NOTE(zxr): Due to the Triton operator does not deal with -1 padding in FullGraph mode,
                 # the padding needs to be changed from -1 to 0 to avoid writing invalid mamba block.
                 if self.vllm_config.compilation_config.cudagraph_mode.has_full_cudagraphs() \
