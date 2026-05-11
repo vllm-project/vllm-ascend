@@ -88,6 +88,7 @@ def npugraph_ex_compile(
     # Avoid to change torch.ops.aten.gelu.default to torch.ops.aten.gelu_.default which will fallback to CPU
     # and cause copy_between_host_and_device error.
     config.debug.aclgraph.disable_reinplace_inplaceable_ops_pass = True
+
     if ascend_compilation_config.enable_static_kernel:
         logger.info(
             "enable_static_kernel is enabled, static shape kernel will be used to accelerate aclgraph execution."

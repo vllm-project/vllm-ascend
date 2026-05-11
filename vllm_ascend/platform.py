@@ -95,7 +95,11 @@ class NPUPlatform(Platform):
     _enum = PlatformEnum.OOT
     device_name: str = "npu"
     device_type: str = "npu"
-    simple_compile_backend: str = "eager"  # Disable torch.compile()
+    # Ascend NPU uses torch_npu's Inductor backend ("npu") for
+    # STOCK_TORCH_COMPILE / DYNAMO_TRACE_ONCE modes. For VLLM_COMPILE mode,
+    # the actual compilation is handled by VllmBackend → AscendCompiler →
+    # TorchAIR ACL Graph, not by this attribute.
+    simple_compile_backend: str = "npu"
     ray_device_key: str = "NPU"
     device_control_env_var: str = "ASCEND_RT_VISIBLE_DEVICES"
     dispatch_key: str = "PrivateUse1"
@@ -125,10 +129,16 @@ class NPUPlatform(Platform):
     @classmethod
     def get_compile_backend(self) -> str:
         """
-        Get the custom compile backend. Previously, we used EagerAdaptor by default.
-        To use graph fusion operations, we defined our own backend compiler.
+        Return the torch.compile backend string for Ascend NPU.
+
+        - STOCK_TORCH_COMPILE / DYNAMO_TRACE_ONCE: returned as-is,
+          used as torch.compile(model, backend='npu'). torch_npu provides
+          an Inductor-based backend registered as "npu".
+        - VLLM_COMPILE: set as oot_compiler for graph fusion pass manager.
+          The actual compilation is handled by VllmBackend → AscendCompiler
+          → TorchAIR ACL Graph (not by this backend string).
         """
-        return "vllm_ascend.compilation.compiler_interface.AscendCompiler"
+        return "npu"
 
     @classmethod
     def pre_register_and_update(cls, parser: FlexibleArgumentParser | None = None) -> None:
@@ -234,6 +244,10 @@ class NPUPlatform(Platform):
         torch.npu.set_device(device)
 
     @classmethod
+    def manual_seed_all(cls, seed: int) -> None:
+        torch.npu.manual_seed_all(seed)
+
+    @classmethod
     def _validate_layer_sharding_config(cls, vllm_config: VllmConfig) -> None:
         additional_config = vllm_config.additional_config or {}
         layer_sharding = additional_config.get("layer_sharding") or []
@@ -309,16 +323,24 @@ class NPUPlatform(Platform):
         if enforce_eager:
             logger.info("Compilation disabled, using eager mode by default")
             compilation_config.mode = CompilationMode.NONE
+            compilation_config.cudagraph_mode = CUDAGraphMode.NONE
             if compilation_config.splitting_ops is None:
                 compilation_config.splitting_ops = []
 
         compilation_config.cudagraph_num_of_warmups = 1
 
-        if compilation_config.mode not in [CompilationMode.NONE, CompilationMode.VLLM_COMPILE]:
-            logger.warning(
-                "NPU does not support %s compilation mode. Setting CUDAGraphMode to NONE", compilation_config.mode
+        # Handle different compilation modes
+        if compilation_config.mode in [CompilationMode.STOCK_TORCH_COMPILE, CompilationMode.DYNAMO_TRACE_ONCE]:
+            # Get the enum name for logging
+            mode_name = compilation_config.mode.name
+            logger.info(
+                "%s compilation mode enabled on Ascend NPU.",
+                mode_name
             )
-            compilation_config.cudagraph_mode = CUDAGraphMode.NONE
+            # For STOCK_TORCH_COMPILE and DYNAMO_TRACE_ONCE, we don't use ACL Graph by default
+            # but allow users to explicitly enable it if they want
+            if compilation_config.cudagraph_mode is None:
+                compilation_config.cudagraph_mode = CUDAGraphMode.NONE
 
         # Recompute cudagraph sizes after Ascend-specific compatibility updates.
         # The platform default max is injected earlier via
@@ -361,57 +383,127 @@ class NPUPlatform(Platform):
         compilation_config.oot_compiler = cls.get_compile_backend()
 
         if compilation_config.cudagraph_mode == CUDAGraphMode.NONE:
-            compilation_config.mode = CompilationMode.NONE
+            # Only force mode to NONE for VLLM_COMPILE mode
+            # For STOCK_TORCH_COMPILE and DYNAMO_TRACE_ONCE, keep the mode
+            if compilation_config.mode == CompilationMode.VLLM_COMPILE:
+                compilation_config.backend = "eager"
+                compilation_config.mode = CompilationMode.NONE
             ascend_config.ascend_compilation_config.enable_npugraph_ex = False
         elif compilation_config.cudagraph_mode == CUDAGraphMode.PIECEWISE:
-            logger.info("PIECEWISE compilation enabled on NPU. use_inductor not supported - using only ACL Graph mode")
-            assert compilation_config.mode == CompilationMode.VLLM_COMPILE, (
-                "When enabling VLLM_COMPILE aclgraph, please make sure compilation_config.mode == "
-                "CompilationMode.VLLM_COMPILE and compilation_config.cudagraph_mode == CUDAGraphMode.VLLM_COMPILE"
-            )
-            compilation_config.set_splitting_ops_for_v1(
-                all2all_backend=vllm_config.parallel_config.all2all_backend,
-                data_parallel_size=vllm_config.parallel_config.data_parallel_size,
-            )
-            compilation_config.use_inductor = False
-            # NOTE: Theoretically, we should also add vllm::mla_forward in the attention ops.
-            # Since the process is created in the spawn mode, the value of the class attribute
-            # attention ops transmitted is still the one before modification, so it has not been modified.
-            # This will cause in scenarios where both piecewise and splitting ops are configured simultaneously,
-            # If splitting ops does not contain the vllm::mla forward value, this configuration issue will
-            # not be detected in advance assert.
-            compilation_config.splitting_ops.extend(["vllm::mla_forward"])
-            update_aclgraph_sizes(vllm_config)
-            ascend_config.ascend_compilation_config.enable_npugraph_ex = False
+            if compilation_config.mode == CompilationMode.VLLM_COMPILE:
+                logger.info("PIECEWISE compilation enabled on NPU. use_inductor not supported - using only ACL Graph mode")
+                # VLLM_COMPILE uses VllmBackend → AscendCompiler → TorchAIR ACL Graph.
+                # Set backend to "eager" so make_compiler() uses EagerAdaptor (actual
+                # compilation is done by AscendCompiler, not Inductor).
+                compilation_config.backend = "eager"
+                compilation_config.set_splitting_ops_for_v1(
+                    all2all_backend=vllm_config.parallel_config.all2all_backend,
+                    data_parallel_size=vllm_config.parallel_config.data_parallel_size,
+                )
+                compilation_config.use_inductor = False
+                # NOTE: Theoretically, we should also add vllm::mla_forward in the attention ops.
+                # Since the process is created in the spawn mode, the value of the class attribute
+                # attention ops transmitted is still the one before modification, so it has not been modified.
+                # This will cause in scenarios where both piecewise and splitting ops are configured simultaneously,
+                # If splitting ops does not contain the vllm::mla forward value, this configuration issue will
+                # not be detected in advance assert.
+                compilation_config.splitting_ops.extend(["vllm::mla_forward"])
+                update_aclgraph_sizes(vllm_config)
+                ascend_config.ascend_compilation_config.enable_npugraph_ex = False
+            else:
+                # For STOCK_TORCH_COMPILE and DYNAMO_TRACE_ONCE, allow PIECEWISE
+                logger.info(
+                    "PIECEWISE cudagraph_mode with %s compilation mode on Ascend NPU.",
+                    compilation_config.mode
+                )
+                # Don't force use_inductor=False for these modes - let them use inductor if available
         elif (
             compilation_config.cudagraph_mode == CUDAGraphMode.FULL_DECODE_ONLY
             or compilation_config.cudagraph_mode == CUDAGraphMode.FULL
         ):
-            logger.info(
-                "FULL_DECODE_ONLY compilation enabled on NPU. use_inductor not supported - using only ACL Graph mode"
-            )
-            compilation_config.use_inductor = False
-            compilation_config.splitting_ops = []
-            warning_message = """\033[91m
-            **********************************************************************************
-            * WARNING: You have enabled the *full graph* feature.
-            * This is an early experimental stage and may involve various unknown issues.
-            * A known problem is that capturing too many batch sizes can lead to OOM
-            * (Out of Memory) errors or inference hangs. If you encounter such issues,
-            * consider reducing `gpu_memory_utilization` or manually specifying a smaller
-            * batch size for graph capture.
-            * For more details, please refer to:
-            * https://docs.vllm.ai/en/stable/configuration/conserving_memory.html#reduce-cuda-graphs
-            **********************************************************************************\033[0m
-            """
-            logger.warning(warning_message)
+            if compilation_config.mode == CompilationMode.VLLM_COMPILE:
+                logger.info(
+                    "FULL_DECODE_ONLY compilation enabled on NPU. use_inductor not supported - using only ACL Graph mode"
+                )
+                compilation_config.backend = "eager"
+                compilation_config.use_inductor = False
+                compilation_config.splitting_ops = []
+                warning_message = """\033[91m
+                **********************************************************************************
+                * WARNING: You have enabled the *full graph* feature.
+                * This is an early experimental stage and may involve various unknown issues.
+                * A known problem is that capturing too many batch sizes can lead to OOM
+                * (Out of Memory) errors or inference hangs. If you encounter such issues,
+                * consider reducing `gpu_memory_utilization` or manually specifying a smaller
+                * batch size for graph capture.
+                * For more details, please refer to:
+                * https://docs.vllm.ai/en/stable/configuration/conserving_memory.html#reduce-cuda-graphs
+                **********************************************************************************\033[0m
+                """
+                logger.warning(warning_message)
+            else:
+                # For STOCK_TORCH_COMPILE and DYNAMO_TRACE_ONCE, allow
+                logger.info(
+                    "%s cudagraph_mode with %s compilation mode on Ascend NPU.",
+                    compilation_config.cudagraph_mode,
+                    compilation_config.mode
+                )
+                # Don't force use_inductor=False - let inductor be used if available
         else:
+            if compilation_config.mode == CompilationMode.VLLM_COMPILE:
+                logger.info(
+                    "%s cudagraph_mode is not support on NPU. falling back to NONE", compilation_config.cudagraph_mode
+                )
+                compilation_config.backend = "eager"
+                compilation_config.cudagraph_mode = CUDAGraphMode.NONE
+                compilation_config.mode = CompilationMode.NONE
+                ascend_config.ascend_compilation_config.enable_npugraph_ex = False
+            else:
+                # For STOCK_TORCH_COMPILE and DYNAMO_TRACE_ONCE, just warn but don't force mode change
+                logger.warning(
+                    "%s cudagraph_mode may not be fully supported with %s compilation mode on Ascend NPU.",
+                    compilation_config.cudagraph_mode,
+                    compilation_config.mode
+                )
+
+        # Handle dynamic_shapes_config
+        # Unlike CUDA platform, Ascend NPU has limitations with ACL Graph for dynamic shapes.
+        # For VLLM_COMPILE mode, ACL Graph captures static graphs, so UNBACKED dynamic shapes
+        # and evaluate_guards are not compatible. We provide warnings and fallbacks.
+        # For STOCK_TORCH_COMPILE and DYNAMO_TRACE_ONCE, we pass through as-is since they
+        # use standard torch.compile which handles these configurations natively.
+        from vllm.config.compilation import DynamicShapesType
+        dynamic_shapes_config = compilation_config.dynamic_shapes_config
+
+        if compilation_config.mode == CompilationMode.VLLM_COMPILE:
+            # VLLM_COMPILE uses ACL Graph which captures static graphs
+            # UNBACKED dynamic shapes are not compatible with ACL Graph's static capture
+            if dynamic_shapes_config.type == DynamicShapesType.UNBACKED:
+                logger.warning(
+                    "UNBACKED dynamic shapes type is not compatible with VLLM_COMPILE mode's "
+                    "ACL Graph static capture. Falling back to BACKED. "
+                    "Consider using STOCK_TORCH_COMPILE or DYNAMO_TRACE_ONCE for UNBACKED support."
+                )
+                dynamic_shapes_config.type = DynamicShapesType.BACKED
+
+            if dynamic_shapes_config.evaluate_guards:
+                logger.warning(
+                    "evaluate_guards=True is not compatible with VLLM_COMPILE mode's "
+                    "ACL Graph path. Setting to False. "
+                    "Consider using STOCK_TORCH_COMPILE or DYNAMO_TRACE_ONCE for evaluate_guards support."
+                )
+                dynamic_shapes_config.evaluate_guards = False
+
+        # For NONE, STOCK_TORCH_COMPILE, and DYNAMO_TRACE_ONCE modes,
+        # dynamic_shapes_config is handled by vLLM's TorchCompileWithNoGuardsWrapper
+        # and decorators.py - we pass through without modification.
+        # This matches the behavior of CUDA platform.
+
+        if dynamic_shapes_config.assume_32_bit_indexing:
             logger.info(
-                "%s cudagraph_mode is not support on NPU. falling back to NONE", compilation_config.cudagraph_mode
+                "assume_32_bit_indexing is enabled. "
+                "This is passed to torch._inductor.config for Inductor backend compatibility."
             )
-            compilation_config.cudagraph_mode = CUDAGraphMode.NONE
-            compilation_config.mode = CompilationMode.NONE
-            ascend_config.ascend_compilation_config.enable_npugraph_ex = False
 
         # TODO: Remove this check when ACL Graph supports ASCEND_LAUNCH_BLOCKING=1
         # Then, we will have to discuss the error handling strategy and user experience
@@ -893,6 +985,3 @@ class NPUPlatform(Platform):
     def use_custom_op_collectives(cls) -> bool:
         return True
 
-    @classmethod
-    def manual_seed_all(cls, seed: int) -> None:
-        pass
