@@ -16,6 +16,7 @@ from vllm.v1.kv_cache_interface import AttentionSpec, MLAAttentionSpec
 
 from vllm_ascend.attention.attention_v1 import AscendAttentionState
 from vllm_ascend.device.device_op import DeviceOperator
+
 # isort: off
 from vllm_ascend.attention.mla_v1 import (
     AscendMLADecodeMetadata,
