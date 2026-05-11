@@ -190,7 +190,7 @@ def run_mla_attention_backend(
     mock_weight_prefetch = MagicMock()
     mock_weight_prefetch.maybe_prefetch_mla_or_sla_weight_in_current_stream = MagicMock()
 
-    import vllm_ascend.utils as 
+    import vllm_ascend.utils as utils_module
     
     original_weight_prefetch = utils_module._WEIGHT_PREFETCH_METHOD
     utils_module._WEIGHT_PREFETCH_METHOD = mock_weight_prefetch
