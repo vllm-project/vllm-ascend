@@ -817,9 +817,12 @@ def enable_sp_by_pass():
 def enable_sp(vllm_config=None, enable_shared_expert_dp: bool = False) -> bool:
     global _ENABLE_SP
     if vllm_config is None:
-        from vllm.config import get_current_vllm_config
+        try:
+            from vllm.config import get_current_vllm_config
 
-        vllm_config = get_current_vllm_config()
+            vllm_config = get_current_vllm_config()
+        except AssertionError:
+            vllm_config = None
 
     additional_config = getattr(vllm_config, "additional_config", None) if vllm_config is not None else None
     refresh = additional_config.get("refresh", False) if additional_config else False
