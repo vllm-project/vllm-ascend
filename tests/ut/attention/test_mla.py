@@ -17,6 +17,7 @@ from tests.ut.attention.utils import (
     create_common_attn_metadata,
     create_vllm_config,
 )
+from tests.ut.conftest import npu_test
 from vllm_ascend.attention.utils import AscendCommonAttentionMetadata
 
 
