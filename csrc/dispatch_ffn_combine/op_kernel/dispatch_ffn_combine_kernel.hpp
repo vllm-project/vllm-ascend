@@ -461,8 +461,9 @@ private:
                     {1, static_cast<uint16_t>(copySize * sizeof(int32_t)), 0, 0}, {}
         );
 
-        // 拷贝probs到局部内存
-        AscendC::LocalTensor<float> tmpProbs = resource.ubBuf.template GetBufferByByte<float>(copySize * sizeof(int32_t));
+        // 拷贝probs到局部内存，使用64字节对齐的offset避免MaskedSelectV3的ADDR_MISALIGN错误
+        int32_t probsOffset = ((copySize * sizeof(int32_t) + 63) / 64) * 64;
+        AscendC::LocalTensor<float> tmpProbs = resource.ubBuf.template GetBufferByByte<float>(probsOffset);
         AscendC::DataCopyPad(tmpProbs[0], probsGm[startIdx],
                     {1, static_cast<uint16_t>(copySize * sizeof(float)), 0, 0}, {}
         );
