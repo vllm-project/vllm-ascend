@@ -162,14 +162,6 @@ If architecture is missing/incompatible, minimally do:
 - `$VLLM_SRC/vllm/model_executor/models/registry.py`
 - `$VLLM_ASCEND_SRC/vllm_ascend/...` (only if backend behavior requires it)
 
-## 6) Syntax sanity checks
-
-```bash
-bash scripts/syntax_check.sh \
-  "$VLLM_SRC"/vllm/model_executor/models/<new_model>.py \
-  "$VLLM_SRC"/vllm/transformers_utils/processors/<new_model>.py
-```
-
 ## 6.5) Intermediate NPU unit-test gate
 
 For each new operator (Step 5) and changed framework module (Step 6), write and run a minimal NPU unit test **before** launching `vllm serve`.
