@@ -101,7 +101,7 @@ class UvaBufferWrapper:
         key = "PYTORCH_NPU_ALLOC_CONF"
         if key in os.environ:
             value = os.environ[key]
-            if not "pinned_mem_register:True" in value:
+            if "pinned_mem_register:True" not in value:
                 # erro_info = (
                 #     f"UVA is not available, because environment_param {key} "
                 #     f"lack value 'pinned_mem_register:True', "
