@@ -177,13 +177,16 @@ class KVPoolWorker:
         self.layer_load_finished_events = None
         self.layer_save_finished_events = None
         self.layer_transfer_finished_events = None
+        self.submitted_layer_loads: set[int] = set()
+        self.finished_layer_loads: set[int] = set()
+        self.next_layer_to_submit = 0
         layerwise_config = get_layerwise_config(self.num_layers)
         self.layerwise_offload = layerwise_config.has_layer_reuse
+        self.NUM_SHARED_BUFFERS = layerwise_config.num_shared_buffers
         self.independent_layers = layerwise_config.independent_layers
         self.layers_need_to_save = layerwise_config.save_layers
         self.layers_need_to_load = layerwise_config.load_layers
         self.prefetch_layer_map = layerwise_config.prefetch_layer_map
-        self.initial_load_layers = layerwise_config.initial_load_layers
         self.sync_save_events = None
 
     def register_kv_caches(self, kv_caches: dict[str, torch.Tensor]):
@@ -309,6 +312,9 @@ class KVPoolWorker:
             return
         self.current_layer = 0
         if self.use_layerwise:
+            self.submitted_layer_loads.clear()
+            self.finished_layer_loads.clear()
+            self.next_layer_to_submit = 0
             self.process_layer_data(metadata.requests)
             return
 
@@ -356,7 +362,6 @@ class KVPoolWorker:
                 continue
             save_start_block = request.save_start_token // self.block_size
             save_end_block = request.token_len_chunk // self.block_size
-            save_start_block = max(save_start_block, request.gva_block_offset)
             if save_start_block >= save_end_block and request.partial_block_index is None:
                 continue
             partial_block_index = request.partial_block_index
@@ -386,9 +391,14 @@ class KVPoolWorker:
             if request.load_spec is None or not request.load_spec.can_load:
                 continue
             cached_tokens = request.load_spec.kvpool_cached_tokens
-            load_start_block = 0 if self.layerwise_offload else request.load_spec.vllm_cached_tokens // self.block_size
+            if self.layerwise_offload and layer_id not in self.independent_layers:
+                load_start_block = 0
+            else:
+                load_start_block = request.load_spec.vllm_cached_tokens // self.block_size
             full_blocks = cached_tokens // self.block_size
             partial_block_index = full_blocks if cached_tokens % self.block_size != 0 else None
+            if load_start_block >= full_blocks and partial_block_index is None:
+                continue
             request_block_ranges.append(
                 LayerBlockRange(
                     request=request,
@@ -418,35 +428,43 @@ class KVPoolWorker:
         if not self.layers_need_to_load:
             return
 
-        if self.current_layer in self.independent_layers:
-            return
+        self._submit_layer_load_window()
 
-        if self.current_layer == self.layers_need_to_load[0]:
-            for layer_id in self.initial_load_layers:
-                logger.debug(f">>>>>>>>>>>>>>>>>>>> load layer {layer_id}")
-                self.kv_recv_thread.add_request(
-                    LayerLoadTask(
-                        wait_for_save_layer=None,
-                        transfer_tasks=self.layer_load_tasks[layer_id],
-                        layer_id=layer_id,
-                    )
-                )
-            return
+    def _submit_layer_load_window(self) -> None:
+        pending_loads = len(self.submitted_layer_loads -
+                            self.finished_layer_loads)
+        while (pending_loads < self.NUM_SHARED_BUFFERS
+               and self.next_layer_to_submit < self.num_layers):
+            layer_id = self.next_layer_to_submit
+            self.next_layer_to_submit += 1
+            if not self.layer_load_tasks[layer_id]:
+                continue
+            wait_for_save_layer = self.prefetch_layer_map.get(layer_id)
+            self._submit_layer_load(layer_id, wait_for_save_layer)
+            pending_loads += 1
 
-        prefetch_layers = self.prefetch_layer_map.get(self.current_layer)
-        if prefetch_layers is not None:
-            wait_for_save_layer, next_layer = prefetch_layers
-            self.kv_recv_thread.add_request(
-                LayerLoadTask(
-                    wait_for_save_layer=wait_for_save_layer,
-                    transfer_tasks=self.layer_load_tasks[next_layer],
-                    layer_id=next_layer,
-                )
+    def _submit_layer_load(self, layer_id: int,
+                           wait_for_save_layer: int | None) -> None:
+        if layer_id in self.submitted_layer_loads:
+            return
+        if not self.layer_load_tasks[layer_id]:
+            return
+        self.submitted_layer_loads.add(layer_id)
+        self.kv_recv_thread.add_request(
+            LayerLoadTask(
+                wait_for_save_layer=wait_for_save_layer,
+                transfer_tasks=self.layer_load_tasks[layer_id],
+                layer_id=layer_id,
             )
+        )
 
     def wait_for_layer_load(self) -> None:
         self._submit_ready_layer_loads()
-        if self.current_layer in self.independent_layers:
+        should_wait = (
+            self.current_layer in self.submitted_layer_loads
+            and self.current_layer not in self.finished_layer_loads
+        )
+        if not should_wait:
             self.layer_load_finished_events[self.current_layer].clear()
             return
         is_finish = self.layer_load_finished_events[self.current_layer].wait(timeout=10)
@@ -454,6 +472,9 @@ class KVPoolWorker:
             logger.info("Layerwise %d load wait timed out", self.current_layer)
         logger.debug(f">>>>>>>>>>>>>>>>>>>> clear load layer {self.current_layer}")
         self.layer_load_finished_events[self.current_layer].clear()
+        if is_finish:
+            self.finished_layer_loads.add(self.current_layer)
+        self._submit_layer_load_window()
 
     def save_kv_layer(self, connector_metadata: AscendConnectorMetadata) -> None:
         # Wait for KV cache saving to complete on the final layer that requires offloading.

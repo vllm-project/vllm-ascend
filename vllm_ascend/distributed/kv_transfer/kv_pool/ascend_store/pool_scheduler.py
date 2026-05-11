@@ -31,6 +31,8 @@ class KVPoolScheduler:
             "consumer_is_to_put", False
         )
         self.load_async = vllm_config.kv_transfer_config.kv_connector_extra_config.get("load_async", False)
+        self.save_decode_cache = vllm_config.kv_transfer_config.kv_connector_extra_config.get(
+            "save_decode_cache", True)
         # request_id -> (vllm cached tokes, kvpool cached tokens)
         self.load_specs: dict[str, LoadSpec] = {}
         self.pcp_size = getattr(vllm_config.parallel_config, "prefill_context_parallel_size", 1)
@@ -134,6 +136,45 @@ class KVPoolScheduler:
             if last_block_key is not None and len(new_gvas) > num_new_chunk_keys:
                 request_tracker.last_block_key = last_block_key
                 request_tracker.last_block_gva = new_gvas[-1]
+
+    def _ensure_tracker_gvas_cover_blocks(
+        self,
+        request_tracker: RequestTracker,
+        block_hashes,
+    ) -> None:
+        block_keys, _ = self.generate_keys(block_hashes)
+        if not block_keys:
+            request_tracker.block_keys = []
+            request_tracker.chunk_gvas = []
+            request_tracker.gva_block_offset = 0
+            return
+
+        key_infos = self.store_scheduler.batch_get_key_info(block_keys)
+        chunk_gvas = [0] * len(block_keys)
+        missing_keys = []
+        missing_indices = []
+        for index, key_info in enumerate(key_infos):
+            sizes = key_info.size()
+            if sizes and sizes > 0:
+                chunk_gvas[index] = key_info.gva_list()[0]
+            else:
+                missing_keys.append(block_keys[index])
+                missing_indices.append(index)
+
+        if missing_keys:
+            alloc_size = self.page_size_bytes * self.keys_per_block_hash
+            new_gvas = self.store_scheduler.batch_alloc(
+                missing_keys, [alloc_size] * len(missing_keys))
+            if any(gva <= 0 for gva in new_gvas):
+                raise ValueError(
+                    f"Request {request_tracker.req_id}: batch_alloc failed, "
+                    f"gvas={new_gvas}")
+            for index, gva in zip(missing_indices, new_gvas):
+                chunk_gvas[index] = gva
+
+        request_tracker.block_keys = block_keys
+        request_tracker.chunk_gvas = chunk_gvas
+        request_tracker.gva_block_offset = 0
 
     def generate_keys(self, chunk_hashes, req_id='', has_last_block=False):
         chunk_keys = []
@@ -322,7 +363,6 @@ class KVPoolScheduler:
                 chunk_gvas=(previous_tracker.chunk_gvas.copy() if previous_tracker else []),
                 gva_block_offset=(previous_tracker.gva_block_offset if previous_tracker else 0),
             )
-            next_pool_block = request_tracker.gva_block_offset + len(request_tracker.block_keys)
             self._request_trackers[request.req_id] = request_tracker
             last_chunk_tokens_num = (
                 (len(request.prompt_token_ids) // self._block_size * self._block_size)
@@ -333,11 +373,16 @@ class KVPoolScheduler:
             num_blocks = num_tokens_to_compute // self._block_size
             has_last_block = num_tokens_to_compute % self._block_size != 0
 
-            self._generate_keys_and_alloc(
-                request_real.block_hashes[next_pool_block:num_blocks],
-                request_tracker=request_tracker,
-                has_last_block=has_last_block,
+            self._ensure_tracker_gvas_cover_blocks(
+                request_tracker,
+                request_real.block_hashes[:num_blocks],
             )
+            if has_last_block:
+                self._generate_keys_and_alloc(
+                    [],
+                    request_tracker=request_tracker,
+                    has_last_block=True,
+                )
 
             req_meta = ReqMeta.from_request_tracker(
                 request_tracker,
@@ -395,15 +440,19 @@ class KVPoolScheduler:
                         gva_block_offset=(previous_tracker.gva_block_offset if previous_tracker else 0),
                     )
                     self._request_trackers[req_id] = request_tracker
-                    next_pool_block = request_tracker.gva_block_offset + len(request_tracker.block_keys)
 
                     num_blocks = len(new_block_ids)
                     has_last_block = num_tokens_to_compute % self._block_size != 0
-                    self._generate_keys_and_alloc(
-                        request_real.block_hashes[next_pool_block:num_blocks],
-                        request_tracker=request_tracker,
-                        has_last_block=has_last_block,
+                    self._ensure_tracker_gvas_cover_blocks(
+                        request_tracker,
+                        request_real.block_hashes[:num_blocks],
                     )
+                    if has_last_block:
+                        self._generate_keys_and_alloc(
+                            [],
+                            request_tracker=request_tracker,
+                            has_last_block=True,
+                        )
 
                     last_chunk_tokens_num = (
                         (len(request_real.prompt_token_ids) // self._block_size * self._block_size)
@@ -423,6 +472,8 @@ class KVPoolScheduler:
 
                 # decode/chunked request
                 else:
+                    if not self.save_decode_cache and not self.prefill_offload:
+                        continue
                     request_tracker = self._request_trackers.get(req_id)
                     if request_tracker is None:
                         raise ValueError(
@@ -446,11 +497,16 @@ class KVPoolScheduler:
                     new_hash_count = current_hash_count - prev_hash_count
                     has_last_block = request_tracker.token_len % self._block_size != 0
                     if new_hash_count > 0 or has_last_block:
-                        self._generate_keys_and_alloc(
-                            request.block_hashes[prev_hash_count:current_hash_count],
-                            request_tracker=request_tracker,
-                            has_last_block=has_last_block,
+                        self._ensure_tracker_gvas_cover_blocks(
+                            request_tracker,
+                            request.block_hashes[:current_hash_count],
                         )
+                        if has_last_block:
+                            self._generate_keys_and_alloc(
+                                [],
+                                request_tracker=request_tracker,
+                                has_last_block=True,
+                            )
                     if new_block_ids is not None:
                         request_tracker.update(new_block_ids)
                     last_chunk_tokens_num = (
@@ -461,7 +517,7 @@ class KVPoolScheduler:
                     load_spec = None
                     if self.prefill_offload:
                         load_spec = LoadSpec(
-                            vllm_cached_tokens=0,
+                            vllm_cached_tokens=cached_reqs.num_computed_tokens[i],
                             kvpool_cached_tokens=cached_reqs.num_computed_tokens[i],
                             can_load=True,
                         )
@@ -503,13 +559,16 @@ class KVPoolScheduler:
 
                 num_blocks = num_tokens_to_compute // self._block_size
                 has_last_block = num_tokens_to_compute % self._block_size != 0
-                next_pool_block = request_tracker.gva_block_offset + len(request_tracker.block_keys)
-                block_hashes_for_keys = request.block_hashes[next_pool_block:num_blocks]
-                self._generate_keys_and_alloc(
-                    block_hashes_for_keys,
-                    request_tracker=request_tracker,
-                    has_last_block=has_last_block,
+                self._ensure_tracker_gvas_cover_blocks(
+                    request_tracker,
+                    request.block_hashes[:num_blocks],
                 )
+                if has_last_block:
+                    self._generate_keys_and_alloc(
+                        [],
+                        request_tracker=request_tracker,
+                        has_last_block=True,
+                    )
 
                 req_meta = ReqMeta.from_request_tracker(
                     request_tracker,

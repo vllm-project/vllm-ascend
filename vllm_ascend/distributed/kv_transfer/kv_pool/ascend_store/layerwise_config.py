@@ -11,8 +11,7 @@ class LayerwiseConfig:
     independent_layers: list[int]
     save_layers: list[int]
     load_layers: list[int]
-    initial_load_layers: list[int]
-    prefetch_layer_map: dict[int, tuple[int, int]]
+    prefetch_layer_map: dict[int, int | None]
     has_layer_reuse: bool
 
 
@@ -60,6 +59,8 @@ def get_layerwise_independent_layers(num_layers: int) -> list[int]:
     value = envs_ascend.VLLM_ASCEND_KV_POOL_LAYERWISE_INDEPENDENT_LAYERS
     if value is None:
         layer_indices = [0, num_layers - 1]
+    elif isinstance(value, str) and value.strip().lower() == "all":
+        layer_indices = list(range(num_layers))
     else:
         layer_indices = _parse_layer_indices(value)
 
@@ -80,32 +81,26 @@ def get_layerwise_independent_layers(num_layers: int) -> list[int]:
 def get_layerwise_config(num_layers: int) -> LayerwiseConfig:
     num_shared_buffers = get_layerwise_num_shared_buffers()
     independent_layers = get_layerwise_independent_layers(num_layers)
-    if len(independent_layers) == num_layers:
-        raise ValueError(
-            "VLLM_ASCEND_KV_POOL_LAYERWISE_INDEPENDENT_LAYERS cannot include "
-            "all layers; at least one layer must use layerwise KV pool transfer")
     independent_layer_indices = set(independent_layers)
     save_layers = list(range(num_layers))
-    load_layers = [i for i in range(num_layers)
-                   if i not in independent_layer_indices]
-    initial_load_layers = load_layers[:num_shared_buffers]
+    load_layers = list(range(num_layers))
+    reused_layers = [
+        i for i in range(num_layers)
+        if i not in independent_layer_indices
+    ]
+    has_layer_reuse = len(reused_layers) > num_shared_buffers
 
-    prefetch_layer_map = {}
-    for current_index in range(1, len(load_layers)):
-        previous_index = current_index - 1
-        next_index = previous_index + num_shared_buffers
-        if next_index < len(load_layers):
-            prefetch_layer_map[load_layers[current_index]] = (
-                load_layers[previous_index],
-                load_layers[next_index],
-            )
+    prefetch_layer_map: dict[int, int | None] = {}
+    if has_layer_reuse:
+        for next_index in range(num_shared_buffers, len(reused_layers)):
+            prefetch_layer_map[reused_layers[next_index]] = reused_layers[
+                next_index - num_shared_buffers]
 
     return LayerwiseConfig(
         num_shared_buffers=num_shared_buffers,
         independent_layers=independent_layers,
         save_layers=save_layers,
         load_layers=load_layers,
-        initial_load_layers=initial_load_layers,
         prefetch_layer_map=prefetch_layer_map,
-        has_layer_reuse=bool(prefetch_layer_map),
+        has_layer_reuse=has_layer_reuse,
     )
