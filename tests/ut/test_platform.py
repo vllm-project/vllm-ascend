@@ -65,8 +65,7 @@ class TestNPUPlatform(TestBase):
 
     @patch("vllm_ascend.utils.adapt_patch")
     @patch("vllm_ascend.quantization.modelslim_config.AscendModelSlimConfig")
-    def test_pre_register_and_update_with_parser(self, mock_quant_config,
-                                                 mock_adapt_patch):
+    def test_pre_register_and_update_with_parser(self, mock_quant_config, mock_adapt_patch):
         mock_parser = MagicMock()
         mock_action = MagicMock()
         mock_action.choices = ["awq", "gptq"]
@@ -81,16 +80,14 @@ class TestNPUPlatform(TestBase):
 
     @patch("vllm_ascend.utils.adapt_patch")
     @patch("vllm_ascend.quantization.modelslim_config.AscendModelSlimConfig")
-    def test_pre_register_and_update_without_parser(self, mock_quant_config,
-                                                    mock_adapt_patch):
+    def test_pre_register_and_update_without_parser(self, mock_quant_config, mock_adapt_patch):
         self.platform.pre_register_and_update(None)
 
         mock_adapt_patch.assert_called_once_with(is_global_patch=True)
 
     @patch("vllm_ascend.utils.adapt_patch")
     @patch("vllm_ascend.quantization.modelslim_config.AscendModelSlimConfig")
-    def test_pre_register_and_update_with_parser_no_quant_action(
-            self, mock_quant_config, mock_adapt_patch):
+    def test_pre_register_and_update_with_parser_no_quant_action(self, mock_quant_config, mock_adapt_patch):
         mock_parser = MagicMock()
         mock_parser._option_string_actions = {}
 
@@ -100,8 +97,7 @@ class TestNPUPlatform(TestBase):
 
     @patch("vllm_ascend.utils.adapt_patch")
     @patch("vllm_ascend.quantization.modelslim_config.AscendModelSlimConfig")
-    def test_pre_register_and_update_with_existing_ascend_quant(
-            self, mock_quant_config, mock_adapt_patch):
+    def test_pre_register_and_update_with_existing_ascend_quant(self, mock_quant_config, mock_adapt_patch):
         mock_parser = MagicMock()
         mock_action = MagicMock()
         mock_action.choices = ["awq", ASCEND_QUANTIZATION_METHOD]
@@ -126,9 +122,7 @@ class TestNPUPlatform(TestBase):
             ):
                 vllm_config = TestNPUPlatform.mock_vllm_config()
                 vllm_config.scheduler_config.max_num_seqs = max_num_seqs
-                vllm_config.speculative_config = MagicMock(
-                    num_speculative_tokens=num_speculative_tokens
-                )
+                vllm_config.speculative_config = MagicMock(num_speculative_tokens=num_speculative_tokens)
                 vllm_config.compilation_config.max_cudagraph_capture_size = None
                 vllm_config.compilation_config.cudagraph_capture_sizes = None
 
@@ -202,9 +196,7 @@ class TestNPUPlatform(TestBase):
 
         observed_inputs: list[int | None] = []
         vllm_config._set_cudagraph_sizes = MagicMock(
-            side_effect=lambda: observed_inputs.append(
-                vllm_config.compilation_config.max_cudagraph_capture_size
-            )
+            side_effect=lambda: observed_inputs.append(vllm_config.compilation_config.max_cudagraph_capture_size)
         )
 
         self.platform.check_and_update_config(vllm_config)
@@ -229,7 +221,7 @@ class TestNPUPlatform(TestBase):
         device_properties.uuid = "01020304-0000-0000-0000-01020304"
         mock_get_device_properties.return_value = device_properties
         self.assertEqual(self.platform.get_device_uuid(device_id), device_properties.uuid)
-        mock_get_device_properties.assert_called_once_with(0)        
+        mock_get_device_properties.assert_called_once_with(0)
 
     @patch("torch.inference_mode")
     def test_inference_mode(self, mock_inference_mode):
@@ -349,7 +341,9 @@ class TestNPUPlatform(TestBase):
     @patch("vllm_ascend.utils.get_ascend_device_type", return_value=AscendDeviceType.A3)
     @patch("vllm_ascend.ascend_config.init_ascend_config")
     @patch("vllm_ascend.core.recompute_scheduler.RecomputeSchedulerConfig.initialize_from_config")
-    def test_check_and_update_config_enforce_eager_mode(self, mock_init_recompute, mock_init_ascend, mock_soc_version, mock_auto_detect):
+    def test_check_and_update_config_enforce_eager_mode(
+        self, mock_init_recompute, mock_init_ascend, mock_soc_version, mock_auto_detect
+    ):
         mock_init_ascend.return_value = TestNPUPlatform.mock_vllm_ascend_config()
         vllm_config = TestNPUPlatform.mock_vllm_config()
         vllm_config.model_config.enforce_eager = True
@@ -546,7 +540,9 @@ class TestNPUPlatform(TestBase):
     @patch("vllm_ascend.quantization.utils.maybe_auto_detect_quantization")
     @patch("vllm_ascend.utils.get_ascend_device_type", return_value=AscendDeviceType.A3)
     @patch("vllm_ascend.ascend_config.init_ascend_config")
-    def test_check_and_update_config_unsupported_cudagraph_mode(self, mock_init_ascend, mock_soc_version, mock_auto_detect):
+    def test_check_and_update_config_unsupported_cudagraph_mode(
+        self, mock_init_ascend, mock_soc_version, mock_auto_detect
+    ):
         mock_init_ascend.return_value = TestNPUPlatform.mock_vllm_ascend_config()
         vllm_config = TestNPUPlatform.mock_vllm_config()
         vllm_config.model_config.enforce_eager = False
@@ -683,7 +679,9 @@ class TestNPUPlatform(TestBase):
     @patch("vllm_ascend.ascend_config.init_ascend_config")
     @patch("vllm_ascend.utils.get_ascend_device_type", return_value=AscendDeviceType._310P)
     @patch("vllm_ascend.core.recompute_scheduler.RecomputeSchedulerConfig.initialize_from_config")
-    def test_check_and_update_config_310p_no_custom_ops(self, mock_init_recompute, mock_soc_version, mock_init_ascend, mock_auto_detect):
+    def test_check_and_update_config_310p_no_custom_ops(
+        self, mock_init_recompute, mock_soc_version, mock_init_ascend, mock_auto_detect
+    ):
         mock_init_ascend.return_value = TestNPUPlatform.mock_vllm_ascend_config()
         vllm_config = TestNPUPlatform.mock_vllm_config()
         vllm_config.compilation_config.custom_ops = []
