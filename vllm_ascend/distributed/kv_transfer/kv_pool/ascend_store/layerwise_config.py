@@ -8,9 +8,8 @@ import vllm_ascend.envs as envs_ascend
 @dataclass(frozen=True)
 class LayerwiseConfig:
     num_shared_buffers: int
+    num_prefetch_layers: int
     independent_layers: list[int]
-    save_layers: list[int]
-    load_layers: list[int]
     prefetch_layer_map: dict[int, int | None]
     has_layer_reuse: bool
 
@@ -33,6 +32,17 @@ def get_layerwise_num_shared_buffers() -> int:
     if num_shared_buffers < 1:
         raise ValueError("VLLM_ASCEND_KV_POOL_LAYERWISE_NUM_SHARED_BUFFERS must be at least 1")
     return num_shared_buffers
+
+
+def get_layerwise_num_prefetch_layers() -> int:
+    value = envs_ascend.VLLM_ASCEND_KV_POOL_LAYERWISE_PREFETCH_LAYERS
+    num_prefetch_layers = _parse_int_config(
+        value,
+        "VLLM_ASCEND_KV_POOL_LAYERWISE_PREFETCH_LAYERS",
+    )
+    if num_prefetch_layers < 1:
+        raise ValueError("VLLM_ASCEND_KV_POOL_LAYERWISE_PREFETCH_LAYERS must be at least 1")
+    return num_prefetch_layers
 
 
 def _parse_layer_indices(value: Any) -> list[int]:
@@ -80,10 +90,9 @@ def get_layerwise_independent_layers(num_layers: int) -> list[int]:
 
 def get_layerwise_config(num_layers: int) -> LayerwiseConfig:
     num_shared_buffers = get_layerwise_num_shared_buffers()
+    num_prefetch_layers = get_layerwise_num_prefetch_layers()
     independent_layers = get_layerwise_independent_layers(num_layers)
     independent_layer_indices = set(independent_layers)
-    save_layers = list(range(num_layers))
-    load_layers = list(range(num_layers))
     reused_layers = [
         i for i in range(num_layers)
         if i not in independent_layer_indices
@@ -98,9 +107,8 @@ def get_layerwise_config(num_layers: int) -> LayerwiseConfig:
 
     return LayerwiseConfig(
         num_shared_buffers=num_shared_buffers,
+        num_prefetch_layers=num_prefetch_layers,
         independent_layers=independent_layers,
-        save_layers=save_layers,
-        load_layers=load_layers,
         prefetch_layer_map=prefetch_layer_map,
         has_layer_reuse=has_layer_reuse,
     )

@@ -119,6 +119,11 @@ env_variables: dict[str, Callable[[], Any]] = {
     "VLLM_ASCEND_KV_POOL_LAYERWISE_NUM_SHARED_BUFFERS": lambda: int(
         os.getenv("VLLM_ASCEND_KV_POOL_LAYERWISE_NUM_SHARED_BUFFERS", "2")
     ),
+    # Number of layerwise KV pool load layers to prefetch.
+    # Default: 2. Valid range: integer >= 1. Not sensitive.
+    "VLLM_ASCEND_KV_POOL_LAYERWISE_PREFETCH_LAYERS": lambda: int(
+        os.getenv("VLLM_ASCEND_KV_POOL_LAYERWISE_PREFETCH_LAYERS", "2")
+    ),
     # Comma-separated independent layer indices for layerwise KV pool transfer,
     # or "all" to make every layer independent for layerwise KV pooling.
     # Negative indices are supported, e.g. "-1" means the last layer.

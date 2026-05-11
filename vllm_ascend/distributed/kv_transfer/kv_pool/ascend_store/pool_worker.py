@@ -181,9 +181,8 @@ class KVPoolWorker:
         layerwise_config = get_layerwise_config(self.num_layers)
         self.layerwise_offload = layerwise_config.has_layer_reuse
         self.NUM_SHARED_BUFFERS = layerwise_config.num_shared_buffers
+        self.NUM_PREFETCH_LAYERS = layerwise_config.num_prefetch_layers
         self.independent_layers = layerwise_config.independent_layers
-        self.layers_need_to_save = layerwise_config.save_layers
-        self.layers_need_to_load = layerwise_config.load_layers
         self.prefetch_layer_map = layerwise_config.prefetch_layer_map
         self.sync_save_events = None
 
@@ -414,15 +413,13 @@ class KVPoolWorker:
     def process_layer_data(self, requests: list[ReqMeta]) -> None:
         if not requests:
             return
-        for layer_id in self.layers_need_to_save:
+        for layer_id in range(self.num_layers):
             self._process_save_for_layer_batch(requests, layer_id)
-        for layer_id in self.layers_need_to_load:
+        for layer_id in range(self.num_layers):
             self._process_load_for_layer_batch(requests, layer_id)
 
     def _submit_ready_layer_loads(self) -> None:
         assert self.kv_recv_thread is not None
-        if not self.layers_need_to_load:
-            return
 
         def submit_layer_load(layer_id: int) -> bool:
             if not self.layer_load_tasks[layer_id]:
@@ -437,7 +434,7 @@ class KVPoolWorker:
             )
             return True
 
-        submit_count = self.NUM_SHARED_BUFFERS if self.current_layer == 0 else 1
+        submit_count = self.NUM_PREFETCH_LAYERS if self.current_layer == 0 else 1
         submitted_layers = 0
         while (submitted_layers < submit_count
                and self.next_layer_to_submit < self.num_layers):
@@ -460,14 +457,13 @@ class KVPoolWorker:
 
     def save_kv_layer(self, connector_metadata: AscendConnectorMetadata) -> None:
         # Wait for KV cache saving to complete on the final layer that requires offloading.
-        if self.current_layer in self.layers_need_to_save:
-            self.sync_save_events[self.current_layer].record()
-            self.kv_send_thread.add_request(self.layer_save_tasks[self.current_layer])
-        if self.layers_need_to_save and self.current_layer == self.num_layers - 1:
-            is_finish = self.layer_save_finished_events[self.layers_need_to_save[-1]].wait(timeout=10)
+        self.sync_save_events[self.current_layer].record()
+        self.kv_send_thread.add_request(self.layer_save_tasks[self.current_layer])
+        if self.current_layer == self.num_layers - 1:
+            is_finish = self.layer_save_finished_events[self.num_layers - 1].wait(timeout=10)
             if not is_finish:
                 logger.info("Layerwise %d save wait timed out", self.current_layer)
-            for layer_id in self.layers_need_to_save:
+            for layer_id in range(self.num_layers):
                 if self.layer_save_finished_events[layer_id].is_set():
                     logger.debug(f">>>>>>>>>>>>>>>>>>>> clear save layer {layer_id}")
                     self.layer_save_finished_events[layer_id].clear()

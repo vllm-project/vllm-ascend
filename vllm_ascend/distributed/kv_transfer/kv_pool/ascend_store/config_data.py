@@ -269,7 +269,7 @@ class RequestTracker:
     # NOTE: This field will only be used when you enable kv-event
     token_ids: list[int] | None = None
 
-    chunk_gvas: list[int] = field(default_factory=list)
+    block_gvas: list[int] = field(default_factory=list)
     gva_block_offset: int = 0
     last_block_gva: int | None = None
 
@@ -365,7 +365,7 @@ class ReqMeta:
     sizes_per_chunk: list[list[int]] | None = None
 
     block_ids_np: np.ndarray | None = None
-    chunk_gvas_np: np.ndarray | None = None
+    block_gvas_np: np.ndarray | None = None
     gva_block_offset: int = 0
 
     @staticmethod
@@ -450,7 +450,7 @@ class ReqMeta:
             last_block_gva=tracker.last_block_gva,
             partial_block_index=partial_block_index,
             block_ids_np=np.asarray(tracker.allocated_block_ids, dtype=np.int64),
-            chunk_gvas_np=np.asarray(tracker.chunk_gvas, dtype=np.int64),
+            block_gvas_np=np.asarray(tracker.block_gvas, dtype=np.int64),
             gva_block_offset=tracker.gva_block_offset,
         )
 

@@ -67,7 +67,7 @@ class LayerBatchBuilder:
             np.cumsum(self._block_len_np[:-1], dtype=np.int64),
         ))
         self._block_ids_scratch_np: np.ndarray | None = None
-        self._chunk_gvas_scratch_np: np.ndarray | None = None
+        self._block_gvas_scratch_np: np.ndarray | None = None
         self._last_block_ids_scratch_np: np.ndarray | None = None
         self._last_gvas_scratch_np: np.ndarray | None = None
 
@@ -85,7 +85,7 @@ class LayerBatchBuilder:
     ) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
         return (
             self._ensure_scratch_array("_block_ids_scratch_np", total_blocks),
-            self._ensure_scratch_array("_chunk_gvas_scratch_np", total_blocks),
+            self._ensure_scratch_array("_block_gvas_scratch_np", total_blocks),
             self._ensure_scratch_array("_last_block_ids_scratch_np", total_last_blocks),
             self._ensure_scratch_array("_last_gvas_scratch_np", total_last_blocks),
         )
@@ -137,9 +137,9 @@ class LayerBatchBuilder:
         block_range: LayerBlockRange,
     ) -> tuple[np.ndarray, np.ndarray]:
         request = block_range.request
-        if request.block_ids_np is None or request.chunk_gvas_np is None:
+        if request.block_ids_np is None or request.block_gvas_np is None:
             raise RuntimeError("ReqMeta numpy block metadata is not initialized")
-        return request.block_ids_np, request.chunk_gvas_np
+        return request.block_ids_np, request.block_gvas_np
 
     def build(self, task: LayerTransferTask) -> LayerBatchReqMeta | None:
         if not task.block_ranges:
@@ -154,7 +154,7 @@ class LayerBatchBuilder:
 
         (
             block_ids_arr,
-            chunk_gvas_arr,
+            block_gvas_arr,
             last_block_ids_arr,
             last_gvas_arr,
         ) = self._get_transfer_scratch_arrays(total_blocks, total_last_blocks)
@@ -167,19 +167,19 @@ class LayerBatchBuilder:
             req_ids.append(request.req_id)
             is_last_chunks.append(request.is_last_chunk)
             num_blocks = block_range.end_block - block_range.start_block
-            block_ids_np, chunk_gvas_np = self._require_request_arrays(block_range)
+            block_ids_np, block_gvas_np = self._require_request_arrays(block_range)
             if num_blocks > 0:
                 end = offset + num_blocks
                 gva_start = block_range.start_block - request.gva_block_offset
                 gva_end = block_range.end_block - request.gva_block_offset
-                if gva_start < 0 or gva_end > len(chunk_gvas_np):
+                if gva_start < 0 or gva_end > len(block_gvas_np):
                     raise RuntimeError(
                         "ReqMeta GVA metadata does not cover requested block "
                         f"range [{block_range.start_block}, {block_range.end_block}) "
                         f"with offset {request.gva_block_offset}"
                     )
                 block_ids_arr[offset:end] = block_ids_np[block_range.start_block:block_range.end_block]
-                chunk_gvas_arr[offset:end] = chunk_gvas_np[gva_start:gva_end]
+                block_gvas_arr[offset:end] = block_gvas_np[gva_start:gva_end]
                 offset = end
 
             if block_range.partial_block_index is not None:
@@ -189,7 +189,7 @@ class LayerBatchBuilder:
                 last_offset += 1
 
         addr_array, size_array, gvas_array = self._build_transfer_arrays(
-            block_ids_arr, chunk_gvas_arr, task.layer_id)
+            block_ids_arr, block_gvas_arr, task.layer_id)
         last_addr_array, last_size_array, last_gvas_array = (
             self._build_transfer_arrays(last_block_ids_arr, last_gvas_arr, task.layer_id))
 
