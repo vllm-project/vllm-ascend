@@ -387,6 +387,8 @@ class AscendUnquantizedFusedMoEMethod(UnquantizedFusedMoEMethod):
             need_trans=need_trans,
         )
 
+        is_prefill = lora_layer.punica_wrapper.is_prefill
+
         apply_moe_lora_w13(
             gate_up_out=gate_up_out,
             hidden_states=dispatched_hidden,
@@ -394,6 +396,7 @@ class AscendUnquantizedFusedMoEMethod(UnquantizedFusedMoEMethod):
             w13_lora_b_stacked=lora_layer.w13_lora_b_stacked,
             lora_expert_indices=lora_expert_indices,
             scale=1.0,
+            is_prefill=is_prefill,
         )
 
         gate_up_out = unquant_apply_mlp_activation(
@@ -419,6 +422,7 @@ class AscendUnquantizedFusedMoEMethod(UnquantizedFusedMoEMethod):
             w2_lora_b_stacked=lora_layer.w2_lora_b_stacked,
             lora_expert_indices=lora_expert_indices,
             scale=1.0,
+            is_prefill=is_prefill,
         )
 
         routed_out = moe_comm_method.token_dispatcher.token_combine(

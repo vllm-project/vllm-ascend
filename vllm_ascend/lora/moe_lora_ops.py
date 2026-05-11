@@ -1,6 +1,21 @@
 import torch
 
-from vllm_ascend.lora.lora_ops import bgmv_expand, bgmv_shrink
+from vllm_ascend.lora.lora_ops import bgmv_expand, bgmv_shrink, sgmv_expand, sgmv_shrink
+
+
+def _compute_moe_sgmv_metadata(lora_expert_indices: torch.Tensor):
+    lora_indices_tensor, seq_len_tensor = torch.unique_consecutive(
+        lora_expert_indices, return_counts=True
+    )
+    cum_result = torch.cumsum(seq_len_tensor, dim=0)
+    b_seq_start_loc = torch.zeros_like(seq_len_tensor)
+    b_seq_start_loc[1:].copy_(cum_result[:-1])
+
+    batches = lora_indices_tensor.size(0)
+    max_seq_length = seq_len_tensor.max().item()
+    token_nums = seq_len_tensor.sum().item()
+
+    return b_seq_start_loc, seq_len_tensor, lora_indices_tensor, batches, max_seq_length, token_nums
 
 
 def _build_lora_expert_indices_allgather(
@@ -58,6 +73,7 @@ def apply_moe_lora_w13(
     w13_lora_b_stacked: tuple[torch.Tensor, ...],
     lora_expert_indices: torch.Tensor,
     scale: float,
+    is_prefill: bool = False,
 ):
     r = w13_lora_b_stacked[0].shape[-1]
     num_dispatched_tokens = gate_up_out.shape[0]
@@ -75,8 +91,23 @@ def apply_moe_lora_w13(
             dtype=torch.float32,
             device=gate_up_out.device,
         )
-        bgmv_shrink(hidden_states, lora_a_merged, buffer, lora_expert_indices, scale)
-        bgmv_expand(buffer, lora_b_merged, gate_up_out, lora_expert_indices, add_inputs=True)
+
+        if is_prefill:
+            b_seq_start_loc, seq_len_tensor, sgmv_lora_indices, batches, max_seq_length, token_nums = \
+                _compute_moe_sgmv_metadata(lora_expert_indices)
+            sgmv_shrink(
+                hidden_states, lora_a_merged, buffer,
+                b_seq_start_loc, seq_len_tensor, sgmv_lora_indices,
+                batches, max_seq_length, token_nums, scale,
+            )
+            sgmv_expand(
+                buffer, lora_b_merged, gate_up_out,
+                b_seq_start_loc, seq_len_tensor, sgmv_lora_indices,
+                batches, max_seq_length, token_nums, add_inputs=True,
+            )
+        else:
+            bgmv_shrink(hidden_states, lora_a_merged, buffer, lora_expert_indices, scale)
+            bgmv_expand(buffer, lora_b_merged, gate_up_out, lora_expert_indices, add_inputs=True)
 
 
 def apply_moe_lora_w2(
@@ -86,6 +117,7 @@ def apply_moe_lora_w2(
     w2_lora_b_stacked: tuple[torch.Tensor, ...],
     lora_expert_indices: torch.Tensor,
     scale: float,
+    is_prefill: bool = False,
 ):
     r = w2_lora_b_stacked[0].shape[-1]
     num_dispatched_tokens = activated_out.shape[0]
@@ -102,5 +134,20 @@ def apply_moe_lora_w2(
         dtype=torch.float32,
         device=activated_out.device,
     )
-    bgmv_shrink(activated_out, lora_a_merged, buffer, lora_expert_indices, scale)
-    bgmv_expand(buffer, lora_b_merged, w2_output, lora_expert_indices, add_inputs=True)
+
+    if is_prefill:
+        b_seq_start_loc, seq_len_tensor, sgmv_lora_indices, batches, max_seq_length, token_nums = \
+            _compute_moe_sgmv_metadata(lora_expert_indices)
+        sgmv_shrink(
+            activated_out, lora_a_merged, buffer,
+            b_seq_start_loc, seq_len_tensor, sgmv_lora_indices,
+            batches, max_seq_length, token_nums, scale,
+        )
+        sgmv_expand(
+            buffer, lora_b_merged, w2_output,
+            b_seq_start_loc, seq_len_tensor, sgmv_lora_indices,
+            batches, max_seq_length, token_nums, add_inputs=True,
+        )
+    else:
+        bgmv_shrink(activated_out, lora_a_merged, buffer, lora_expert_indices, scale)
+        bgmv_expand(buffer, lora_b_merged, w2_output, lora_expert_indices, add_inputs=True)
