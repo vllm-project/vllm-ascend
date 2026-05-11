@@ -695,12 +695,6 @@ class TestEagleProposerPropose:
         )
         self.mock_enable_sp.start()
 
-        # Mock flashcomm2_enable to avoid get_ascend_config() dependency
-        self.mock_flashcomm2_enable = patch(
-            "vllm_ascend.ascend_forward_context.flashcomm2_enable", return_value=False
-        )
-        self.mock_flashcomm2_enable.start()
-
         # Set the current vllm config
         set_current_vllm_config(self.vllm_config)
         self.proposer = AscendEagleProposer(vllm_config=self.vllm_config, device=self.device, runner=self.runner)
@@ -711,7 +705,6 @@ class TestEagleProposerPropose:
         self.mock_supports_multimodal_inputs.stop()
         self.mock_tp_world_size.stop()
         self.mock_dp_group.stop()
-        self.mock_flashcomm2_enable.stop()
         # Clear the current vllm config
         set_current_vllm_config(None)
 

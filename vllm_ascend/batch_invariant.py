@@ -79,7 +79,6 @@ def override_envs_for_invariance():
     ascend_config = get_ascend_config()
     ascend_config.weight_nz_mode = 0
     ascend_config.enable_matmul_allreduce = False
-    logger.debug("override_envs_for_invariance: disabled weight_nz_mode and enable_matmul_allreduce via Config")
 
     os.environ["HCCL_DETERMINISTIC"] = "strict"
     os.environ["LCCL_DETERMINISTIC"] = "1"

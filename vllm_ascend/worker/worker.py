@@ -211,7 +211,6 @@ class NPUWorker(WorkerBase):
 
     def wake_up(self, tags: list[str] | None = None) -> None:
         nz_mode = get_ascend_config().weight_nz_mode
-        logger.debug("SleepMode.wake_up: weight_nz_mode = %s", nz_mode)
         if nz_mode:
             raise ValueError(
                 "FRACTAL_NZ mode is enabled. This may cause model parameter precision issues "
@@ -401,7 +400,6 @@ class NPUWorker(WorkerBase):
         scheduler_output: "SchedulerOutput",
     ) -> ModelRunnerOutput | AsyncModelRunnerOutput | None:
         # enable msMonitor to monitor the performance of vllm-ascend
-        logger.debug("execute_model: msmonitor_enabled = %s", get_ascend_config().msmonitor_use_daemon)
         if get_ascend_config().msmonitor_use_daemon:
             dp.step()
 
@@ -752,7 +750,6 @@ class NPUWorker(WorkerBase):
             raise RuntimeError(f"Unrecognized profiler: {profiler_config.profiler}")
         if not profiler_config.torch_profiler_dir:
             raise RuntimeError("torch_profiler_dir cannot be empty.")
-        logger.debug("profile: msmonitor_enabled = %s", get_ascend_config().msmonitor_use_daemon)
         if get_ascend_config().msmonitor_use_daemon:
             raise RuntimeError("MSMONITOR_USE_DAEMON and torch profiler cannot be both enabled at the same time.")
 

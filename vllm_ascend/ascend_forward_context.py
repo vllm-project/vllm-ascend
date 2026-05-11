@@ -9,7 +9,6 @@ import vllm.envs as envs_vllm
 from vllm.config import CUDAGraphMode, VllmConfig
 from vllm.distributed import get_dp_group, get_ep_group, get_tensor_model_parallel_world_size
 from vllm.forward_context import BatchDescriptor, get_forward_context, set_forward_context
-from vllm.logger import logger
 
 from vllm_ascend.ascend_config import get_ascend_config
 from vllm_ascend.utils import (
@@ -275,13 +274,11 @@ def select_moe_comm_method(num_tokens: int, vllm_config: VllmConfig, is_draft_mo
         # TODO: drop the EP-size guard when dispatch_ffn_combine supports larger EP sizes
         # TODO: drop speculative method guard when dispatch_gmm_combine_decode supports w16a16
         fused_mc2_enable = get_ascend_config().enable_fused_mc2
-        logger.debug("select_moe_comm_method: fused_mc2_enable from Config = %s", fused_mc2_enable)
         dispatch_ffn_combine_enable = get_ep_group().world_size <= 32 and (not is_draft_model)
         if num_tokens <= mc2_tokens_capacity:
             fused_decode_enable = fused_mc2_enable
             if fused_mc2_enable == 1:
                 fused_decode_enable = fused_mc2_enable and dispatch_ffn_combine_enable
-                logger.debug("fused_decode_enable (mode=1): %s", fused_decode_enable)
             elif fused_mc2_enable == 2:
                 fused_decode_enable = (
                     fused_mc2_enable
