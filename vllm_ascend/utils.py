@@ -69,6 +69,10 @@ _IS_VL_MODEL = None
 _ENABLE_SP = None
 _HAS_LAYER_IDX = None
 _HAS_ROPE = None
+_CUSTOM_OP_VENDOR_DIR = "custom_transformer"
+_CUSTOM_OP_BASE_DIR = (
+    os.path.dirname(__file__) if os.path.isabs(__file__) else os.path.abspath(os.path.dirname(__file__))
+)
 
 
 def is_310p():
@@ -195,6 +199,26 @@ def _round_up(x: int, align: int):
     return (x + align - 1) // align * align
 
 
+def _prepend_env_path(env_name: str, path: str) -> None:
+    current_value = os.environ.get(env_name, "")
+    path_entries = [entry for entry in current_value.split(":") if entry]
+    if path not in path_entries:
+        path_entries.insert(0, path)
+        os.environ[env_name] = ":".join(path_entries)
+
+
+def bootstrap_custom_op_env(*, include_vendor_lib: bool = False) -> None:
+    vendor_path = os.path.join(_CUSTOM_OP_BASE_DIR, "_cann_ops_custom", "vendors", _CUSTOM_OP_VENDOR_DIR)
+    if not os.path.exists(vendor_path):
+        return
+    _prepend_env_path("ASCEND_CUSTOM_OPP_PATH", vendor_path)
+
+    if include_vendor_lib:
+        vendor_lib_path = os.path.join(vendor_path, "op_api", "lib")
+        if os.path.exists(vendor_lib_path):
+            _prepend_env_path("LD_LIBRARY_PATH", vendor_lib_path)
+
+
 def _custom_pad(x, pad_dims):
     # pad the input tensor to the shape of pad_dims
     # input: (13, 30), pad_dims: [0, 2, 0, 3]
@@ -295,6 +319,8 @@ def enable_custom_op():
         return _CUSTOM_OP_ENABLED
 
     try:
+        if not torch.compiler.is_compiling():
+            bootstrap_custom_op_env()
         # isort: off
         # register custom ops into torch_library here
         import vllm_ascend.vllm_ascend_C  # type: ignore  # noqa: F401
@@ -304,9 +330,22 @@ def enable_custom_op():
 
         # isort: on
         _CUSTOM_OP_ENABLED = True
-    except ImportError:
-        _CUSTOM_OP_ENABLED = False
-        logger.warning("Warning: Failed to register custom ops, all custom ops will be disabled")
+    except ImportError as e:
+        # Prefer the extension's rpath for vendor op_api loading. Only fall back
+        # to mutating LD_LIBRARY_PATH when the import proves it is still needed.
+        if (not torch.compiler.is_compiling()) and "libcust_opapi.so" in str(e):
+            try:
+                bootstrap_custom_op_env(include_vendor_lib=True)
+                import vllm_ascend.meta_registration  # type: ignore  # noqa: F401
+                import vllm_ascend.vllm_ascend_C  # type: ignore  # noqa: F401
+
+                _CUSTOM_OP_ENABLED = True
+            except ImportError:
+                _CUSTOM_OP_ENABLED = False
+                logger.warning("Warning: Failed to register custom ops, all custom ops will be disabled")
+        else:
+            _CUSTOM_OP_ENABLED = False
+            logger.warning("Warning: Failed to register custom ops, all custom ops will be disabled")
     return _CUSTOM_OP_ENABLED
 
 
