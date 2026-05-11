@@ -192,7 +192,7 @@ def run_mla_attention_backend(
 
     original_weight_prefetch = utils_module._WEIGHT_PREFETCH_METHOD
     utils_module._WEIGHT_PREFETCH_METHOD = mock_weight_prefetch
-
+    print("vllm_config", vllm_config)
     try:
         with patch("vllm.distributed.parallel_state.get_tp_group", return_value=mock_tp_group):
             num_heads = vllm_config.model_config.get_num_attention_heads(vllm_config.parallel_config)
@@ -209,6 +209,10 @@ def run_mla_attention_backend(
             backend = get_attn_backend(head_size, dtype, None, use_mla=True, use_sparse=False, use_mm_prefix=False)
             impl_cls = backend.get_impl_cls()
             builder_cls = backend.get_builder_cls()
+
+            mock_layer_entry = MagicMock()
+            for layer_name in ["placeholder"]:
+                vllm_config.compilation_config.static_forward_context[layer_name] = mock_layer_entry
 
             builder = builder_cls(
                 kv_cache_spec,
