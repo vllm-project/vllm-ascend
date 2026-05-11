@@ -611,7 +611,13 @@ class NPUPlatform(Platform):
 
         backend_cls_path = backend_map[key]
 
-        if selected_backend == AttentionBackendEnum.FLASH_ATTN and attn_selector_config.use_batch_invariant == True:
+        if selected_backend == AttentionBackendEnum.FLASH_ATTN:
+            if not attn_selector_config.use_batch_invariant:
+                raise ValueError(
+                    "AttentionBackendEnum.FLASH_ATTN is not supported on Ascend "
+                    "without batch invariant mode. Please set "
+                    "VLLM_BATCH_INVARIANT=1 to enable FA3 backend."
+                )
             if key != (False, False):
                 raise ValueError(
                     "Ascend FA3 backend does not support MLA and SFA."

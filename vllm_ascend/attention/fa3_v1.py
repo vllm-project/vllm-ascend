@@ -51,10 +51,15 @@ class AscendFAImpl(AscendAttentionBackendImpl):
                 "Please disable sliding window or use the default FIA backend."
             )
         if not self.vllm_config.model_config.enforce_eager:
-            raise ValueError(
-                "AscendFAImpl does not support ACL graph capture. "
-                "Please set enforce_eager=True or use the default FIA backend."
-            )
+            from vllm.config.compilation import CUDAGraphMode
+
+            cudagraph_mode = self.vllm_config.compilation_config.cudagraph_mode
+            if cudagraph_mode == CUDAGraphMode.FULL_DECODE_ONLY:
+                raise ValueError(
+                    "AscendFAImpl does not support ACL graph capture with "
+                    "FULL_DECODE_ONLY mode. Please set enforce_eager=True or "
+                    "not set FULL_DECODE_ONLY or use the default FIA backend."
+                )
 
     def _flash_attn_with_kvcache(
         self,
