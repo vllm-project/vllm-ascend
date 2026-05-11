@@ -167,3 +167,38 @@ e2e-multicard-4-cards:
   estimated_time: 679
 - name: tests/e2e/multicard/4-cards/test_profiling_chunk_performance.py
   estimated_time: 1300
+e2e-main2main:
+- name: tests/e2e/singlecard/model_runner_v2/test_basic.py
+  estimated_time: 27
+- name: tests/e2e/singlecard/test_sampler.py
+  estimated_time: 254
+- name: tests/e2e/singlecard/test_guided_decoding.py
+  estimated_time: 413
+- name: tests/e2e/singlecard/test_completion_with_prompt_embeds.py
+  estimated_time: 131
+- name: tests/e2e/singlecard/test_qwen3_multi_loras.py
+  estimated_time: 100
+- name: tests/e2e/singlecard/test_vlm.py
+  estimated_time: 424
+- name: tests/e2e/singlecard/pooling/test_classification.py
+  estimated_time: 139
+- name: tests/e2e/singlecard/test_quantization.py::test_qwen3_w8a8_quant
+  estimated_time: 184
+- name: tests/e2e/multicard/2-cards/test_qwen3_moe.py::test_qwen3_moe_distributed_mp_tp2_ep
+  estimated_time: 191
+- name: tests/e2e/multicard/2-cards/test_data_parallel.py
+  estimated_time: 426
+- name: tests/e2e/multicard/2-cards/test_offline_inference_distributed.py::test_deepseek3_2_w8a8_pruning_mtp_tp2_ep
+  estimated_time: 209
+- name: tests/e2e/multicard/2-cards/test_prefix_caching.py
+  estimated_time: 400
+- name: tests/e2e/multicard/2-cards/test_disaggregated_encoder.py
+  estimated_time: 169
+- name: tests/e2e/multicard/2-cards/test_sequence_parallelism_moe.py
+  estimated_time: 42
+- name: tests/e2e/multicard/4-cards/test_pipeline_parallel.py
+  estimated_time: 679
+- name: tests/e2e/multicard/4-cards/long_sequence/test_accuracy.py::test_models_long_sequence_output_between_tp_and_cp
+  estimated_time: 500
+- name: tests/e2e/multicard/4-cards/test_qwen3_next.py::test_qwen3_next_distributed_mp_graph_mode_tp4
+  estimated_time: 500
