@@ -631,6 +631,231 @@ class TestEagleProposerHelperMethods(TestBase):
 
 
 # fmt: off
+@npu_test(num_npus=1, npu_type="a2")
+class TestEagleProposerMaybePadAndGather:
+    @pytest.fixture(autouse=True)
+    def setUp_and_tearDown(self):
+        self.check_mock()
+        self.device = torch.device("npu")
+        yield
+
+    def _new_proposer(
+        self,
+        method,
+        *,
+        is_multimodal_model=False,
+        enable_shared_expert_dp=False,
+    ):
+        proposer = object.__new__(AscendEagleProposer)
+        proposer.method = method
+        proposer.is_multimodal_model = is_multimodal_model
+        proposer.enable_shared_expert_dp = enable_shared_expert_dp
+        return proposer
+
+    def _extra_ctx(self, flash_comm_v1_enabled):
+        extra_ctx = MagicMock()
+        extra_ctx.flash_comm_v1_enabled = flash_comm_v1_enabled
+        return extra_ctx
+
+    @pytest.mark.parametrize(
+        "flash_comm_v1_enabled,is_multimodal_model,expect_reduce",
+        [
+            (True, False, True),
+            (False, False, False),
+            (True, True, False),
+        ],
+    )
+    def test_mtp_maybe_pad_and_reduce(
+        self,
+        flash_comm_v1_enabled,
+        is_multimodal_model,
+        expect_reduce,
+    ):
+        proposer = self._new_proposer("mtp", is_multimodal_model=is_multimodal_model)
+        model_hidden_states = torch.arange(12, device=self.device, dtype=torch.float32).view(6, 2)
+        model_positions = torch.arange(6, device=self.device, dtype=torch.int64)
+
+        def fake_pad_and_reduce(input_tensor):
+            return input_tensor[::2].contiguous()
+
+        with (
+            patch("vllm_ascend.spec_decode.eagle_proposer._EXTRA_CTX", new=self._extra_ctx(flash_comm_v1_enabled)),
+            patch("torch.ops.vllm.maybe_pad_and_reduce", side_effect=fake_pad_and_reduce, create=True) as mock_reduce,
+        ):
+            reduced_hidden_states, reduced_positions = proposer.maybe_pad_and_reduce(
+                model_hidden_states, model_positions
+            )
+
+        if expect_reduce:
+            assert mock_reduce.call_count == 2
+            assert mock_reduce.call_args_list[0].args[0].shape == (6, 2)
+            assert mock_reduce.call_args_list[1].args[0].shape == (6, 1)
+            assert torch.equal(reduced_hidden_states, model_hidden_states[::2])
+            assert torch.equal(reduced_positions, model_positions[::2])
+        else:
+            mock_reduce.assert_not_called()
+            assert reduced_hidden_states is model_hidden_states
+            assert reduced_positions is model_positions
+
+    @pytest.mark.parametrize(
+        "flash_comm_v1_enabled,expect_split",
+        [
+            (True, True),
+            (False, False),
+        ],
+    )
+    def test_eagle_maybe_pad_and_reduce(
+        self,
+        flash_comm_v1_enabled,
+        expect_split,
+    ):
+        proposer = self._new_proposer("eagle3")
+        model_hidden_states = torch.arange(12, device=self.device, dtype=torch.float32).view(6, 2)
+        model_positions = torch.arange(6, device=self.device, dtype=torch.int64)
+
+        tp_group = MagicMock()
+        tp_group.world_size = 2
+        tp_group.rank = 1
+
+        with (
+            patch("vllm_ascend.spec_decode.eagle_proposer._EXTRA_CTX", new=self._extra_ctx(flash_comm_v1_enabled)),
+            patch("vllm_ascend.spec_decode.eagle_proposer.get_tp_group", return_value=tp_group) as mock_get_tp_group,
+        ):
+            reduced_hidden_states, reduced_positions = proposer.maybe_pad_and_reduce(
+                model_hidden_states, model_positions
+            )
+
+        if expect_split:
+            expected_hidden_states = torch.tensor([[6.0, 7.0], [8.0, 9.0], [10.0, 11.0]], device=self.device)
+            mock_get_tp_group.assert_called_once()
+            assert reduced_hidden_states.shape == (3, 2)
+            assert torch.equal(reduced_hidden_states, expected_hidden_states)
+            assert torch.equal(model_hidden_states[:3], expected_hidden_states)
+        else:
+            mock_get_tp_group.assert_not_called()
+            assert reduced_hidden_states is model_hidden_states
+        assert reduced_positions is model_positions
+
+    @pytest.mark.parametrize(
+        "enable_shared_expert_dp,hidden_states_is_none,expect_gather",
+        [
+            (True, False, True),
+            (True, True, True),
+            (False, False, False),
+        ],
+    )
+    def test_mtp_maybe_all_gather_and_unpad(
+        self,
+        enable_shared_expert_dp,
+        hidden_states_is_none,
+        expect_gather,
+    ):
+        proposer = self._new_proposer("mtp", enable_shared_expert_dp=enable_shared_expert_dp)
+        last_hidden_states = torch.arange(6, device=self.device, dtype=torch.float32).view(3, 2)
+        positions = torch.tensor([10, 11, 12], device=self.device, dtype=torch.int64)
+        hidden_states = None if hidden_states_is_none else last_hidden_states + 1000
+
+        def fake_all_gather_and_unpad(input_tensor, label):
+            assert label is True
+            return torch.cat((input_tensor, input_tensor + 100), dim=0)
+
+        with patch(
+            "torch.ops.vllm.maybe_all_gather_and_maybe_unpad",
+            side_effect=fake_all_gather_and_unpad,
+            create=True,
+        ) as mock_all_gather:
+            gathered_last_hidden_states, gathered_positions, gathered_hidden_states = (
+                proposer.maybe_all_gather_and_unpad(last_hidden_states, positions, hidden_states)
+            )
+
+        if expect_gather:
+            expected_last_hidden_states = torch.cat((last_hidden_states, last_hidden_states + 100), dim=0)
+            expected_positions = torch.cat((positions, positions + 100), dim=0)
+            assert mock_all_gather.call_count == 2
+            assert torch.equal(gathered_last_hidden_states, expected_last_hidden_states)
+            assert torch.equal(gathered_positions, expected_positions)
+            if hidden_states_is_none:
+                assert gathered_hidden_states is None
+            else:
+                assert gathered_hidden_states is gathered_last_hidden_states
+        else:
+            mock_all_gather.assert_not_called()
+            assert gathered_last_hidden_states is last_hidden_states
+            assert gathered_positions is positions
+            assert gathered_hidden_states is hidden_states
+
+    @pytest.mark.parametrize(
+        "flash_comm_v1_enabled,hidden_states_is_none,expect_gather",
+        [
+            (True, False, True),
+            (True, True, True),
+            (False, False, False),
+        ],
+    )
+    def test_eagle_maybe_all_gather_and_unpad(
+        self,
+        flash_comm_v1_enabled,
+        hidden_states_is_none,
+        expect_gather,
+    ):
+        proposer = self._new_proposer("eagle3")
+        last_hidden_states = torch.arange(6, device=self.device, dtype=torch.float32).view(3, 2)
+        positions = torch.tensor([10, 11, 12], device=self.device, dtype=torch.int64)
+        hidden_states = None if hidden_states_is_none else last_hidden_states + 1000
+
+        def fake_all_gather_and_unpad(input_tensor, label):
+            assert label is True
+            return torch.cat((input_tensor, input_tensor + 100), dim=0)
+
+        with (
+            patch("vllm_ascend.spec_decode.eagle_proposer._EXTRA_CTX", new=self._extra_ctx(flash_comm_v1_enabled)),
+            patch(
+                "torch.ops.vllm.maybe_all_gather_and_maybe_unpad",
+                side_effect=fake_all_gather_and_unpad,
+                create=True,
+            ) as mock_all_gather,
+        ):
+            gathered_last_hidden_states, gathered_positions, gathered_hidden_states = (
+                proposer.maybe_all_gather_and_unpad(last_hidden_states, positions, hidden_states)
+            )
+
+        if expect_gather:
+            expected_last_hidden_states = torch.cat((last_hidden_states, last_hidden_states + 100), dim=0)
+            assert torch.equal(gathered_last_hidden_states, expected_last_hidden_states)
+            assert gathered_positions is positions
+            if hidden_states_is_none:
+                assert mock_all_gather.call_count == 1
+                assert gathered_hidden_states is None
+            else:
+                expected_hidden_states = torch.cat((hidden_states, hidden_states + 100), dim=0)  # type: ignore
+                assert mock_all_gather.call_count == 2
+                assert torch.equal(gathered_hidden_states, expected_hidden_states)
+        else:
+            mock_all_gather.assert_not_called()
+            assert gathered_last_hidden_states is last_hidden_states
+            assert gathered_positions is positions
+            assert gathered_hidden_states is hidden_states
+
+    def check_mock(self):
+        import vllm_ascend.spec_decode.eagle_proposer
+
+        assert hasattr(vllm_ascend.spec_decode.eagle_proposer, "AscendSpecDecodeBaseProposer")
+        RunnerCls = vllm_ascend.spec_decode.eagle_proposer.AscendSpecDecodeBaseProposer
+
+        assert hasattr(RunnerCls, "maybe_pad_and_reduce")
+        sig = inspect.signature(RunnerCls.maybe_pad_and_reduce)
+        assert self.get_param_names(sig) == ["self", "hidden_states", "positions"]
+
+        assert hasattr(RunnerCls, "maybe_all_gather_and_unpad")
+        sig = inspect.signature(RunnerCls.maybe_all_gather_and_unpad)
+        assert self.get_param_names(sig) == ["self", "last_hidden_states", "positions", "hidden_states"]
+
+    def get_param_names(self, sig):
+        return [p.name for p in sig.parameters.values()]
+# fmt: on
+
+
+# fmt: off
 class TestEagleProposerPropose:
     @pytest.fixture(autouse=True)
     def setUp_and_tearDown(self):
@@ -737,6 +962,17 @@ class TestEagleProposerPropose:
                 torch.cat([torch.tensor([17, 18, 19, 20, 13, 14, 15, 16, 13, 14, 15, 16, 8, 9, 10, 11, 12, 0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12]), torch.zeros(8704 - 30)]),
                 AscendAttentionState.ChunkedPrefill, -1, 12, None
             ),
+            (
+                "decode_and_prefill", torch.tensor([ 0, 4, 17, 30], device=torch.device("cpu"), dtype=torch.int32), torch.tensor([ 0, 4, 17, 30], dtype=torch.int32), 
+                torch.tensor([17, 13, 13], device=torch.device("cpu"), dtype=torch.int32), 3, 30, 13, 0,
+                torch.cat([torch.eye(256, device="cpu", dtype=torch.int32)[0].unsqueeze(0)*i for i in [1,2,3]], dim=0),
+                torch.tensor([141, 142, 143, 144, 256, 257, 258, 259, 260, 261, 262, 263, 264, 265, 266, 267, 268, 384, 385, 386, 387, 388, 389, 390, 391, 392, 393, 394,
+                              395, 396], device=torch.device("cpu"), dtype=torch.int32),
+                True, None, None, None, None, None, None, torch.tensor([17, 13, 13], dtype=torch.int32), None, None, torch.tensor([17, 13, 13], dtype=torch.int32),
+                torch.tensor([13, 0, 0], dtype=torch.int32), 4, [],
+                torch.cat([torch.tensor([13, 14, 15, 16, 0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12]), torch.zeros(8704 - 30)]),
+                AscendAttentionState.ChunkedPrefill, -1, 30, None
+            ),
         ]
     )
     # config: prefill and decode, Qwen3-30B, tp2, ep_enable, enforce_eager, no_async_scheduling, eagle3, k=3, "disable_padded_drafter_batch": False
@@ -763,6 +999,12 @@ class TestEagleProposerPropose:
                 self.proposer.use_cuda_graph = True
             else:
                 pytest.skip("For the entire graph test, only one model needs to be tested to avoid repeated tests.")
+
+        if flag_prefill_decode == 'decode_and_prefill':
+            if not (model_type == 'qwen_dense' and graphmode == 'eager'):
+                pytest.skip(
+                    "decode_and_prefill case only need test once"
+                )
 
         # mock and adjust functions and var in propose
         if model_type == 'deepseek':
@@ -810,7 +1052,10 @@ class TestEagleProposerPropose:
         # create common_attn_metadata
         mock_common_attn_metadata= MagicMock()
         if not self.is_decode(flag_prefill_decode):
-            mock_common_attn_metadata.batch_size.return_value = 1
+            if flag_prefill_decode == 'prefill':
+                mock_common_attn_metadata.batch_size.return_value = 1
+            if flag_prefill_decode == 'decode_and_prefill':
+                mock_common_attn_metadata.batch_size.return_value = 3
             if model_type == 'qwen_moe':
                 _seq_lens_cpu = torch.tensor([13], dtype=torch.int32)
             if model_type == 'deepseek':
@@ -852,10 +1097,17 @@ class TestEagleProposerPropose:
         # create other parameters
         if not self.is_decode(flag_prefill_decode):
             if model_type == 'qwen_dense' or model_type == 'qwen_moe':
-                target_token_ids = torch.tensor([151644, 872, 198, 5501, 7512, 14678, 51765, 30, 151645, 198, 151644, 77091, 198], device=self.device, dtype=torch.int32)
-                target_positions = torch.tensor([0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12], device=self.device)
-                next_token_ids = torch.tensor([151667], device=self.device, dtype=torch.int32)
-                req_scheduled_tokens = {'0-8222703c': 13}
+                if flag_prefill_decode == 'prefill':
+                    target_token_ids = torch.tensor([151644, 872, 198, 5501, 7512, 14678, 51765, 30, 151645, 198, 151644, 77091, 198], device=self.device, dtype=torch.int32)
+                    target_positions = torch.tensor([0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12], device=self.device)
+                    next_token_ids = torch.tensor([151667], device=self.device, dtype=torch.int32)
+                    req_scheduled_tokens = {'0-8222703c': 13}
+                if flag_prefill_decode == 'decode_and_prefill':
+                    target_token_ids = torch.tensor([151667, 198, 32313, 11, 151644, 872, 198, 5501, 7512, 387, 23649, 30, 151645, 198, 151644, 77091, 198, 151644,
+                                                     872, 198, 5501, 7512, 557, 30070, 30, 151645, 198, 151644, 77091, 198], device=self.device, dtype=torch.int32)
+                    target_positions = torch.tensor([13, 14, 15, 16, 0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12], device=self.device)
+                    next_token_ids = torch.tensor([279, 151667, 151667], device=self.device, dtype=torch.int32)
+                    req_scheduled_tokens = {'0-b0f8a3bc': 4, '1-99a1b5fa': 13, '2-8a6a85d3': 13}
             if model_type == 'deepseek':
                 target_token_ids = torch.tensor([ 0, 0, 128803, 12473, 9734, 19991, 50096, 33, 128804], device=self.device, dtype=torch.int32)
                 target_positions = torch.tensor([0, 1, 2, 3, 4, 5, 6, 7, 8], device=self.device)
@@ -863,10 +1115,16 @@ class TestEagleProposerPropose:
                 next_token_ids = torch.tensor([128798], device=self.device, dtype=torch.int32)
                 req_scheduled_tokens = {'0-b4ed8210': 9}
             if model_type == 'qwen_dense':
-                target_hidden_states = torch.zeros(num_actual_tokens, 12288, device=self.device, dtype=torch.bfloat16)
+                if flag_prefill_decode == 'prefill':
+                    target_hidden_states = torch.zeros(num_actual_tokens, 12288, device=self.device, dtype=torch.bfloat16)
+                if flag_prefill_decode == 'decode_and_prefill':
+                    target_hidden_states = torch.zeros(30, 12288, device=self.device, dtype=torch.bfloat16)
             if model_type == 'qwen_moe':
                 target_hidden_states = torch.zeros(num_actual_tokens, 6144, device=self.device, dtype=torch.bfloat16)
-            token_indices_to_sample = None
+            if flag_prefill_decode == 'decode_and_prefill':
+                token_indices_to_sample = torch.tensor([3, 16, 29], device=self.device, dtype=torch.int32)
+            else:
+                token_indices_to_sample = None
             target_model_batch_desc = BatchDescriptor(num_tokens=num_actual_tokens, num_reqs=None, uniform=False, has_lora=False, num_active_loras=0)
             mock_sampling_metadata = MagicMock()
             mm_embed_inputs = None
@@ -875,7 +1133,10 @@ class TestEagleProposerPropose:
             num_decode_reqs = 0
             scheduler_output = MagicMock()
             num_scheduled_tokens = num_actual_tokens
-            num_rejected_tokens_gpu = None
+            if flag_prefill_decode == 'decode_and_prefill':
+                num_rejected_tokens_gpu = torch.tensor([0, 0, 0], device=self.device, dtype=torch.int32)
+            else:
+                num_rejected_tokens_gpu = None
 
         if self.is_decode(flag_prefill_decode):
             if model_type == 'qwen_dense':
@@ -963,17 +1224,29 @@ class TestEagleProposerPropose:
     # assert the value common_attn_metadata
     def assert_value_common_attn_metadata(self, captured_common_attn_metadata, flag_prefill_decode, model_type, graphmode):
         if not self.is_decode(flag_prefill_decode):
-            assert torch.equal(captured_common_attn_metadata.query_start_loc, torch.tensor([0, 1]))
-            assert torch.equal(captured_common_attn_metadata.query_start_loc_cpu, torch.tensor([0, 1]))
-            assert captured_common_attn_metadata.num_reqs == 1
-            assert captured_common_attn_metadata.num_actual_tokens == 1
-            assert captured_common_attn_metadata.max_query_len == 1
-            assert torch.equal(captured_common_attn_metadata.block_table_tensor, torch.eye(256, dtype=torch.int32)[0].unsqueeze(0))
-            assert torch.equal(captured_common_attn_metadata.num_computed_tokens_cpu, torch.tensor([2]))
+            if flag_prefill_decode == 'prefill':
+                assert torch.equal(captured_common_attn_metadata.query_start_loc, torch.tensor([0, 1]))
+                assert torch.equal(captured_common_attn_metadata.query_start_loc_cpu, torch.tensor([0, 1]))
+                assert captured_common_attn_metadata.num_reqs == 1
+                assert captured_common_attn_metadata.num_actual_tokens == 1
+                assert captured_common_attn_metadata.max_query_len == 1
+                assert torch.equal(captured_common_attn_metadata.block_table_tensor, torch.eye(256, dtype=torch.int32)[0].unsqueeze(0))
+                assert torch.equal(captured_common_attn_metadata.num_computed_tokens_cpu, torch.tensor([2]))
+            if flag_prefill_decode == 'decode_and_prefill':
+                assert torch.equal(captured_common_attn_metadata.query_start_loc, torch.tensor([0, 1, 2, 3]))
+                assert torch.equal(captured_common_attn_metadata.query_start_loc_cpu, torch.tensor([0, 1, 2, 3]))
+                assert captured_common_attn_metadata.num_reqs == 3
+                assert captured_common_attn_metadata.num_actual_tokens == 3
+                assert captured_common_attn_metadata.max_query_len == 1
+                assert torch.equal(captured_common_attn_metadata.block_table_tensor, torch.cat([torch.eye(256, device="cpu", dtype=torch.int32)[0].unsqueeze(0)*i for i in [1,2,3]], dim=0))
+                assert torch.equal(captured_common_attn_metadata.num_computed_tokens_cpu, torch.tensor([15, 2, 2]))
             if model_type == 'qwen_moe':
                 assert captured_common_attn_metadata._seq_lens_cpu == torch.tensor([15])
             if model_type == 'qwen_dense':
-                assert captured_common_attn_metadata._seq_lens_cpu is None
+                if flag_prefill_decode == 'prefill':
+                    assert captured_common_attn_metadata._seq_lens_cpu is None
+                if flag_prefill_decode == 'decode_and_prefill':
+                    assert torch.equal(captured_common_attn_metadata._seq_lens_cpu, torch.tensor([19, 15, 15]))
             if model_type == 'deepseek':
                 assert torch.equal(captured_common_attn_metadata.seq_lens, torch.tensor([11]))
                 assert captured_common_attn_metadata.max_seq_len == 9
@@ -983,12 +1256,21 @@ class TestEagleProposerPropose:
                 assert torch.equal(captured_common_attn_metadata.positions, torch.tensor([10, 1, 2, 3, 4, 5, 6, 7, 8] + [0]*(8704-9), dtype=torch.int64))
                 assert captured_common_attn_metadata.num_input_tokens == 9
             if model_type == 'qwen_dense' or model_type == 'qwen_moe':
-                assert torch.equal(captured_common_attn_metadata.seq_lens, torch.tensor([15]))
-                assert captured_common_attn_metadata.max_seq_len == 13
-                assert torch.equal(captured_common_attn_metadata.slot_mapping, torch.cat([torch.tensor([142]), torch.full((8703,), -1)]))
-                assert torch.equal(captured_common_attn_metadata.seq_lens_cpu, torch.tensor([15]))
-                assert torch.equal(captured_common_attn_metadata.positions, torch.tensor([14, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12] + [0]*(8704-13), dtype=torch.int64))
-                assert captured_common_attn_metadata.num_input_tokens == 13
+                if flag_prefill_decode == 'prefill':
+                    assert torch.equal(captured_common_attn_metadata.seq_lens, torch.tensor([15]))
+                    assert captured_common_attn_metadata.max_seq_len == 13
+                    assert torch.equal(captured_common_attn_metadata.slot_mapping, torch.cat([torch.tensor([142]), torch.full((8703,), -1)]))
+                    assert torch.equal(captured_common_attn_metadata.seq_lens_cpu, torch.tensor([15]))
+                    assert torch.equal(captured_common_attn_metadata.positions, torch.tensor([14, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12] + [0]*(8704-13), dtype=torch.int64))
+                    assert captured_common_attn_metadata.num_input_tokens == 13
+                if flag_prefill_decode == 'decode_and_prefill':
+                    assert torch.equal(captured_common_attn_metadata.seq_lens, torch.tensor([19, 15, 15]))
+                    assert captured_common_attn_metadata.max_seq_len == 0
+                    assert torch.equal(captured_common_attn_metadata.slot_mapping, torch.cat([torch.tensor([146, 270, 398]), torch.full((8701,), -1)]))
+                    assert torch.equal(captured_common_attn_metadata.seq_lens_cpu, torch.tensor([19, 15, 15]))
+                    assert torch.equal(captured_common_attn_metadata.positions, torch.tensor([18, 14, 14, 16, 0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12,
+                                                                                              0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12] + [0]*(8704-30), dtype=torch.int64))
+                    assert captured_common_attn_metadata.num_input_tokens == 30
 
         if self.is_decode(flag_prefill_decode):
             if graphmode == 'full':
@@ -1052,12 +1334,30 @@ class TestEagleProposerPropose:
             assert captured_common_attn_metadata.attn_state == AscendAttentionState.ChunkedPrefill
         assert captured_common_attn_metadata.graph_pad_size == -1
         assert captured_common_attn_metadata.prefill_context_parallel_metadata is None
+        if model_type == 'qwen_dense' and graphmode == 'eager' and flag_prefill_decode == 'decode_and_prefill':
+            assert torch.equal(self.proposer.slot_mapping_group[0][:30], torch.tensor([141, 142, 143, 144, 256, 257, 258, 259, 260, 261, 262, 263, 264, 265,
+                                                                                       266, 267, 268, 384, 385, 386, 387, 388, 389, 390, 391, 392, 393, 394, 395, 396]))
+            assert torch.equal(self.proposer.slot_mapping_group[1][:3], torch.tensor([145, 269, 397]))
+            assert torch.equal(self.proposer.slot_mapping_group[2][:3], torch.tensor([146, 270, 398]))
+            assert self.proposer.slot_mapping_group[0].shape == torch.Size([8704])
+            assert torch.equal(self.proposer.seq_lens_group[0][:3], torch.tensor([17, 13, 13]))
+            assert torch.equal(self.proposer.seq_lens_group[1][:3], torch.tensor([18, 14, 14]))
+            assert torch.equal(self.proposer.seq_lens_group[2][:3], torch.tensor([19, 15, 15]))
+            assert self.proposer.seq_lens_group[0].shape == torch.Size([8704])
+            assert torch.equal(self.proposer.query_start_loc_group[0][:4], torch.tensor([0, 4, 17, 30]))
+            assert torch.equal(self.proposer.query_start_loc_group[1][:4], torch.tensor([0, 1, 2, 3]))
+            assert torch.equal(self.proposer.query_start_loc_group[2][:4], torch.tensor([0, 1, 2, 3]))
+            assert self.proposer.query_start_loc_group[0].shape == torch.Size([8704])
+            assert torch.equal(self.proposer.token_indices_to_sample[:3], torch.tensor([3, 16, 29]))
+            assert self.proposer.token_indices_to_sample.shape == torch.Size([1024])
 
     # prefill or decode
     def is_decode(self, flag_prefill_decode):
         if flag_prefill_decode == "decode":
             return True
-        if flag_prefill_decode == "prefill":
+        elif flag_prefill_decode == "prefill":
+            return False
+        else:
             return False
 
     # Add assertions to ensure that the mocked functions and parameters exist
