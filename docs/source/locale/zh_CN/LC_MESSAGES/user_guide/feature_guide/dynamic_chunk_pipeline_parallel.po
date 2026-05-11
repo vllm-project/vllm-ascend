@@ -1,0 +1,440 @@
+# SOME DESCRIPTIVE TITLE.
+# Copyright (C) 2025, vllm-ascend team
+# This file is distributed under the same license as the vllm-ascend
+# package.
+# FIRST AUTHOR <EMAIL@ADDRESS>, 2026.
+#
+msgid ""
+msgstr ""
+"Project-Id-Version: vllm-ascend \n"
+"Report-Msgid-Bugs-To: \n"
+"POT-Creation-Date: 2026-05-06 02:14+0000\n"
+"PO-Revision-Date: YEAR-MO-DA HO:MI+ZONE\n"
+"Last-Translator: FULL NAME <EMAIL@ADDRESS>\n"
+"Language: zh_CN\n"
+"Language-Team: zh_CN <LL@li.org>\n"
+"Plural-Forms: nplurals=1; plural=0;\n"
+"MIME-Version: 1.0\n"
+"Content-Type: text/plain; charset=utf-8\n"
+"Content-Transfer-Encoding: 8bit\n"
+"Generated-By: Babel 2.18.0\n"
+
+#: ../../source/user_guide/feature_guide/dynamic_chunk_pipeline_parallel.md:1
+msgid "Dynamic Chunked Pipeline Parallel"
+msgstr "动态分块流水线并行"
+
+#: ../../source/user_guide/feature_guide/dynamic_chunk_pipeline_parallel.md:4
+msgid ""
+"For design details and mathematical models, see [Design "
+"Document](../../developer_guide/Design_Documents/dynamic_chunked_pipeline_parallel.md)."
+" For deployment tutorial, see [Dynamic Chunked Pipeline Parallel "
+"Tutorial](../../tutorials/features/dynamic_chunked_pipeline_parallel.md)."
+msgstr ""
+"设计细节和数学模型请参见[设计文档](../../developer_guide/Design_Documents/dynamic_chunked_pipeline_parallel.md)。"
+"部署教程请参见[动态分块流水线并行教程](../../tutorials/features/dynamic_chunked_pipeline_parallel.md)。"
+
+#: ../../source/user_guide/feature_guide/dynamic_chunk_pipeline_parallel.md:7
+msgid "Overview"
+msgstr "概述"
+
+#: ../../source/user_guide/feature_guide/dynamic_chunk_pipeline_parallel.md:9
+msgid ""
+"Dynamic Chunked Pipeline Parallel (CPP) is a profiling-based dynamic "
+"chunking strategy that optimizes prefill performance for long sequences "
+"in Pipeline Parallelism (PP) scenarios."
+msgstr ""
+"动态分块流水线并行（CPP）是一种基于性能分析的动态分块策略，用于优化流水线并行（PP）场景中长序列的预填充性能。"
+
+#: ../../source/user_guide/feature_guide/dynamic_chunk_pipeline_parallel.md:11
+msgid "When to Use"
+msgstr "使用场景"
+
+#: ../../source/user_guide/feature_guide/dynamic_chunk_pipeline_parallel.md:13
+msgid ""
+"**Variable-length sequence serving**: PP does not introduce degradation "
+"on short sequences, and gains benefits through dynamic chunks on long "
+"sequences."
+msgstr ""
+"**变长序列服务**：PP对短序列不会引入性能退化，并通过长序列的动态分块获得收益。"
+
+#: ../../source/user_guide/feature_guide/dynamic_chunk_pipeline_parallel.md:14
+msgid ""
+"**Ultra-long sequence inference**: For sequences exceeding single-machine"
+" memory capacity (e.g., 1M tokens), dynamic chunking significantly "
+"reduces pipeline idle time."
+msgstr ""
+"**超长序列推理**：对于超出单机内存容量的序列（如1M tokens），动态分块可显著减少流水线空闲时间。"
+
+#: ../../source/user_guide/feature_guide/dynamic_chunk_pipeline_parallel.md:16
+msgid "Supported Scenarios"
+msgstr "支持场景"
+
+#: ../../source/user_guide/feature_guide/dynamic_chunk_pipeline_parallel.md:18
+msgid ""
+"Currently CPP mainly focuses on optimization during the prefill phase. It"
+" is better to be used in PD disaggregation scenarios. Supported features "
+"are as follows:"
+msgstr ""
+"目前CPP主要专注于预填充阶段的优化，建议在PD分离场景中使用。支持的功能如下："
+
+#: ../../source/user_guide/feature_guide/dynamic_chunk_pipeline_parallel.md:3
+msgid "Eager"
+msgstr "Eager"
+
+#: ../../source/user_guide/feature_guide/dynamic_chunk_pipeline_parallel.md:3
+msgid "Graph"
+msgstr "Graph"
+
+#: ../../source/user_guide/feature_guide/dynamic_chunk_pipeline_parallel.md:3
+msgid "Prefix <br> Cache"
+msgstr "前缀<br>缓存"
+
+#: ../../source/user_guide/feature_guide/dynamic_chunk_pipeline_parallel.md:3
+msgid "Chunked <br> Prefill"
+msgstr "分块<br>预填充"
+
+#: ../../source/user_guide/feature_guide/dynamic_chunk_pipeline_parallel.md:3
+msgid "**CPP**"
+msgstr "**CPP**"
+
+#: ../../source/user_guide/feature_guide/dynamic_chunk_pipeline_parallel.md:3
+msgid "✅"
+msgstr "✅"
+
+#: ../../source/user_guide/feature_guide/dynamic_chunk_pipeline_parallel.md:24
+msgid "How to Enable"
+msgstr "启用方法"
+
+#: ../../source/user_guide/feature_guide/dynamic_chunk_pipeline_parallel.md:26
+msgid "Online Serving"
+msgstr "在线服务"
+
+#: ../../source/user_guide/feature_guide/dynamic_chunk_pipeline_parallel.md:35
+msgid "Offline Inference"
+msgstr "离线推理"
+
+#: ../../source/user_guide/feature_guide/dynamic_chunk_pipeline_parallel.md:47
+msgid "Configuration Parameters"
+msgstr "配置参数"
+
+#: ../../source/user_guide/feature_guide/dynamic_chunk_pipeline_parallel.md:3
+msgid "Parameter"
+msgstr "参数"
+
+#: ../../source/user_guide/feature_guide/dynamic_chunk_pipeline_parallel.md:3
+msgid "Type"
+msgstr "类型"
+
+#: ../../source/user_guide/feature_guide/dynamic_chunk_pipeline_parallel.md:3
+msgid "Default"
+msgstr "默认值"
+
+#: ../../source/user_guide/feature_guide/dynamic_chunk_pipeline_parallel.md:3
+msgid "Description"
+msgstr "描述"
+
+#: ../../source/user_guide/feature_guide/dynamic_chunk_pipeline_parallel.md:3
+msgid "`enabled`"
+msgstr "`enabled`"
+
+#: ../../source/user_guide/feature_guide/dynamic_chunk_pipeline_parallel.md:3
+msgid "bool"
+msgstr "bool"
+
+#: ../../source/user_guide/feature_guide/dynamic_chunk_pipeline_parallel.md:3
+msgid "False"
+msgstr "False"
+
+#: ../../source/user_guide/feature_guide/dynamic_chunk_pipeline_parallel.md:3
+msgid "Enable/disable Dynamic Chunked Pipeline Parallel"
+msgstr "启用/禁用动态分块流水线并行"
+
+#: ../../source/user_guide/feature_guide/dynamic_chunk_pipeline_parallel.md:3
+msgid "`smooth_factor`"
+msgstr "`smooth_factor`"
+
+#: ../../source/user_guide/feature_guide/dynamic_chunk_pipeline_parallel.md:3
+msgid "float"
+msgstr "float"
+
+#: ../../source/user_guide/feature_guide/dynamic_chunk_pipeline_parallel.md:3
+msgid "1.0"
+msgstr "1.0"
+
+#: ../../source/user_guide/feature_guide/dynamic_chunk_pipeline_parallel.md:3
+msgid ""
+"Smoothing factor (0 < x ≤ 1.0). Higher values trust dynamic prediction "
+"more"
+msgstr "平滑因子（0 < x ≤ 1.0），值越大越信任动态预测"
+
+#: ../../source/user_guide/feature_guide/dynamic_chunk_pipeline_parallel.md:3
+msgid "`min_chunk`"
+msgstr "`min_chunk`"
+
+#: ../../source/user_guide/feature_guide/dynamic_chunk_pipeline_parallel.md:3
+msgid "int"
+msgstr "int"
+
+#: ../../source/user_guide/feature_guide/dynamic_chunk_pipeline_parallel.md:3
+msgid "4096"
+msgstr "4096"
+
+#: ../../source/user_guide/feature_guide/dynamic_chunk_pipeline_parallel.md:3
+msgid "Minimum chunk size for dynamic calculation"
+msgstr "动态计算的最小分块大小"
+
+#: ../../source/user_guide/feature_guide/dynamic_chunk_pipeline_parallel.md:3
+msgid "`need_timing`"
+msgstr "`need_timing`"
+
+#: ../../source/user_guide/feature_guide/dynamic_chunk_pipeline_parallel.md:3
+msgid "True"
+msgstr "True"
+
+#: ../../source/user_guide/feature_guide/dynamic_chunk_pipeline_parallel.md:3
+msgid "Enable/disable Online Calibration"
+msgstr "启用/禁用在线校准"
+
+#: ../../source/user_guide/feature_guide/dynamic_chunk_pipeline_parallel.md:56
+msgid "Parameter Tuning"
+msgstr "参数调优"
+
+#: ../../source/user_guide/feature_guide/dynamic_chunk_pipeline_parallel.md:58
+msgid "`smooth_factor`: Controls trust level in dynamic prediction"
+msgstr "`smooth_factor`：控制对动态预测的信任程度"
+
+#: ../../source/user_guide/feature_guide/dynamic_chunk_pipeline_parallel.md:59
+msgid "`1.0`: Strictly follow model prediction"
+msgstr "`1.0`：严格遵循模型预测"
+
+#: ../../source/user_guide/feature_guide/dynamic_chunk_pipeline_parallel.md:60
+msgid "`0.6~0.85`: Balance dynamic adjustment and scheduling overhead"
+msgstr "`0.6~0.85`：平衡动态调整与调度开销"
+
+#: ../../source/user_guide/feature_guide/dynamic_chunk_pipeline_parallel.md:61
+msgid "`0.0`: No dynamic adjustment (degrades to fixed chunking)"
+msgstr "`0.0`：无动态调整（退化为固定分块）"
+
+#: ../../source/user_guide/feature_guide/dynamic_chunk_pipeline_parallel.md:62
+msgid ""
+"`min_chunk`: Generally doesn't need adjustment. Should be smaller than "
+"`max-num-batched-tokens`"
+msgstr "`min_chunk`：通常无需调整，应小于`max-num-batched-tokens`"
+
+#: ../../source/user_guide/feature_guide/dynamic_chunk_pipeline_parallel.md:64
+msgid "Recommended Settings"
+msgstr "推荐设置"
+
+#: ../../source/user_guide/feature_guide/dynamic_chunk_pipeline_parallel.md:66
+msgid "max-num-batched-tokens"
+msgstr "max-num-batched-tokens"
+
+#: ../../source/user_guide/feature_guide/dynamic_chunk_pipeline_parallel.md:68
+msgid ""
+"**Notably, the TTFT of CPP is very sensitive to `max-num-batched-tokens` "
+"(considered the initial chunksize for dynamic solving).** Because if it "
+"is too large, it will introduce si gnificant computational voids, and if "
+"it is too small, it will lead to a decrease in operator efficiency. To "
+"leave enough room for dynamic adjustments, we recommend that the longer "
+"the sequence being processed, the larger the `max-num-batched-tokens` "
+"should be set. Recommended values:"
+msgstr ""
+"**值得注意的是，CPP的TTFT对`max-num-batched-tokens`（视为动态求解的初始分块大小）非常敏感。** "
+"因为如果设置过大，会引入显著的计算空洞；如果设置过小，则会导致算子效率下降。"
+"为给动态调整留出足够空间，建议处理的序列越长，`max-num-batched-tokens`设置越大。推荐值："
+
+#: ../../source/user_guide/feature_guide/dynamic_chunk_pipeline_parallel.md:3
+msgid "Sequence Length"
+msgstr "序列长度"
+
+#: ../../source/user_guide/feature_guide/dynamic_chunk_pipeline_parallel.md:3
+msgid "`max-num-batched-tokens`"
+msgstr "`max-num-batched-tokens`"
+
+#: ../../source/user_guide/feature_guide/dynamic_chunk_pipeline_parallel.md:3
+msgid "64k"
+msgstr "64k"
+
+#: ../../source/user_guide/feature_guide/dynamic_chunk_pipeline_parallel.md:3
+msgid "20480"
+msgstr "20480"
+
+#: ../../source/user_guide/feature_guide/dynamic_chunk_pipeline_parallel.md:3
+msgid "128k"
+msgstr "128k"
+
+#: ../../source/user_guide/feature_guide/dynamic_chunk_pipeline_parallel.md:3
+msgid "32768"
+msgstr "32768"
+
+#: ../../source/user_guide/feature_guide/dynamic_chunk_pipeline_parallel.md:76
+msgid "Online Calibration"
+msgstr "在线校准"
+
+#: ../../source/user_guide/feature_guide/dynamic_chunk_pipeline_parallel.md:78
+msgid ""
+"For optimal performance, online calibrate with real data before "
+"production:"
+msgstr "为获得最佳性能，建议在生产前使用真实数据进行在线校准："
+
+#: ../../source/user_guide/feature_guide/dynamic_chunk_pipeline_parallel.md:80
+msgid ""
+"You can use aisbench to generate fixed-length random datasets. Refer to "
+"[Using AISBench for performance "
+"evaluation](../../developer_guide/evaluation/using_ais_bench.md#execute-"
+"performance-evaluation) for details."
+msgstr ""
+"可使用aisbench生成固定长度的随机数据集，详情请参见[使用AISBench进行性能评估](../../developer_guide/evaluation/using_ais_bench.md#execute-performance-evaluation)。"
+
+#: ../../source/user_guide/feature_guide/dynamic_chunk_pipeline_parallel.md:82
+msgid ""
+"Modify "
+"`<YOUR_AISBENCH_PATH>/benchmark/ais_bench/datasets/synthetic/synthetic_config.py`:"
+msgstr "修改`<YOUR_AISBENCH_PATH>/benchmark/ais_bench/datasets/synthetic/synthetic_config.py`："
+
+#: ../../source/user_guide/feature_guide/dynamic_chunk_pipeline_parallel.md:102
+msgid "Run for online calibration:"
+msgstr "运行在线校准："
+
+#: ../../source/user_guide/feature_guide/dynamic_chunk_pipeline_parallel.md:108
+msgid ""
+"Configure online calibration data length to match your `max-model-len`. "
+"Use `batch_size=1` and ensure data differs to avoid cache hits if prefix "
+"caching is enabled."
+msgstr ""
+"配置在线校准数据长度以匹配`max-model-len`。使用`batch_size=1`，并确保数据不同以避免启用前缀缓存时的缓存命中。"
+
+#: ../../source/user_guide/feature_guide/dynamic_chunk_pipeline_parallel.md:110
+msgid "Performance"
+msgstr "性能"
+
+#: ../../source/user_guide/feature_guide/dynamic_chunk_pipeline_parallel.md:112
+msgid ""
+"Refer to [Using AISBench for performance "
+"evaluation](../../developer_guide/evaluation/using_ais_bench.md#execute-"
+"performance-evaluation) for details."
+msgstr ""
+"详情请参见[使用AISBench进行性能评估](../../developer_guide/evaluation/using_ais_bench.md#execute-performance-evaluation)。"
+
+#: ../../source/user_guide/feature_guide/dynamic_chunk_pipeline_parallel.md:114
+msgid ""
+"To evaluate the effectiveness of Dynamic Chunked Pipeline Parallel in "
+"long sequence LLM inference scenarios, we use **DeepSeek-V3.1-W8A8** and "
+"**Qwen3-235B**, deploy P instance in Ascend Atlas A3 inference "
+"products*64G (A3), the configuration and performance data are as follows."
+msgstr ""
+"为评估动态分块流水线并行在长序列LLM推理场景中的效果，我们使用**DeepSeek-V3.1-W8A8**和**Qwen3-235B**，"
+"在Ascend Atlas A3推理产品*64G（A3）上部署P实例，配置和性能数据如下。"
+
+#: ../../source/user_guide/feature_guide/dynamic_chunk_pipeline_parallel.md:116
+msgid "**Fixed-length requests, concurrency=1**:"
+msgstr "**固定长度请求，并发数=1**："
+
+#: ../../source/user_guide/feature_guide/dynamic_chunk_pipeline_parallel.md:118
+#: ../../source/user_guide/feature_guide/dynamic_chunk_pipeline_parallel.md:132
+msgid "DeepSeek-V3.1-W8A8:"
+msgstr "DeepSeek-V3.1-W8A8："
+
+#: ../../source/user_guide/feature_guide/dynamic_chunk_pipeline_parallel.md:3
+msgid "Configuration"
+msgstr "配置"
+
+#: ../../source/user_guide/feature_guide/dynamic_chunk_pipeline_parallel.md:3
+msgid "CPP <br> (Dynamic Chunk, <br> chunksize=32k)"
+msgstr "CPP <br>（动态分块，<br>分块大小=32k）"
+
+#: ../../source/user_guide/feature_guide/dynamic_chunk_pipeline_parallel.md:3
+msgid "PP <br>(Static Chunk, <br> chunksize=32k)"
+msgstr "PP <br>（静态分块，<br>分块大小=32k）"
+
+#: ../../source/user_guide/feature_guide/dynamic_chunk_pipeline_parallel.md:3
+msgid "Input length  128k"
+msgstr "输入长度 128k"
+
+#: ../../source/user_guide/feature_guide/dynamic_chunk_pipeline_parallel.md:3
+msgid "TTFT: 22.5s"
+msgstr "TTFT：22.5s"
+
+#: ../../source/user_guide/feature_guide/dynamic_chunk_pipeline_parallel.md:3
+msgid "TTFT: 27.0s"
+msgstr "TTFT：27.0s"
+
+#: ../../source/user_guide/feature_guide/dynamic_chunk_pipeline_parallel.md:124
+msgid "Qwen3-235B:"
+msgstr "Qwen3-235B："
+
+#: ../../source/user_guide/feature_guide/dynamic_chunk_pipeline_parallel.md:3
+msgid "Input length  256k"
+msgstr "输入长度 256k"
+
+#: ../../source/user_guide/feature_guide/dynamic_chunk_pipeline_parallel.md:3
+msgid "TTFT: 53.5s"
+msgstr "TTFT：53.5s"
+
+#: ../../source/user_guide/feature_guide/dynamic_chunk_pipeline_parallel.md:3
+msgid "TTFT: 61.4s"
+msgstr "TTFT：61.4s"
+
+#: ../../source/user_guide/feature_guide/dynamic_chunk_pipeline_parallel.md:130
+msgid "**Variable-length requests, concurrency=4**:"
+msgstr "**变长请求，并发数=4**："
+
+#: ../../source/user_guide/feature_guide/dynamic_chunk_pipeline_parallel.md:3
+msgid "4k~64k Input, mean=32k, std=32k <br> prefix hit rate=99%"
+msgstr "4k~64k输入，均值=32k，标准差=32k <br>前缀命中率=99%"
+
+#: ../../source/user_guide/feature_guide/dynamic_chunk_pipeline_parallel.md:3
+msgid "CPP2TP8"
+msgstr "CPP2TP8"
+
+#: ../../source/user_guide/feature_guide/dynamic_chunk_pipeline_parallel.md:3
+msgid "Input throughput: 22424 tps/card"
+msgstr "输入吞吐量：22424 tps/卡"
+
+#: ../../source/user_guide/feature_guide/dynamic_chunk_pipeline_parallel.md:3
+msgid "DP2TP8"
+msgstr "DP2TP8"
+
+#: ../../source/user_guide/feature_guide/dynamic_chunk_pipeline_parallel.md:3
+msgid "Input throughput: 16150 tps/card"
+msgstr "输入吞吐量：16150 tps/卡"
+
+#: ../../source/user_guide/feature_guide/dynamic_chunk_pipeline_parallel.md:3
+msgid "PCP2TP8"
+msgstr "PCP2TP8"
+
+#: ../../source/user_guide/feature_guide/dynamic_chunk_pipeline_parallel.md:3
+msgid "Input throughput: 18197 tps/card"
+msgstr "输入吞吐量：18197 tps/卡"
+
+#: ../../source/user_guide/feature_guide/dynamic_chunk_pipeline_parallel.md:3
+msgid "TP16"
+msgstr "TP16"
+
+#: ../../source/user_guide/feature_guide/dynamic_chunk_pipeline_parallel.md:3
+msgid "Input throughput: 18875 tps/card"
+msgstr "输入吞吐量：18875 tps/卡"
+
+#: ../../source/user_guide/feature_guide/dynamic_chunk_pipeline_parallel.md:141
+msgid "Constraints"
+msgstr "约束条件"
+
+#: ../../source/user_guide/feature_guide/dynamic_chunk_pipeline_parallel.md:143
+msgid "**Pipeline Parallelism Required**: `--pipeline-parallel-size > 1`"
+msgstr "**需要流水线并行**：`--pipeline-parallel-size > 1`"
+
+#: ../../source/user_guide/feature_guide/dynamic_chunk_pipeline_parallel.md:144
+msgid "**Chunked Prefill Required**: `--enable-chunked-prefill`"
+msgstr "**需要分块预填充**：`--enable-chunked-prefill`"
+
+#: ../../source/user_guide/feature_guide/dynamic_chunk_pipeline_parallel.md:145
+msgid ""
+"**Incompatible with Balance Scheduling**: Cannot enable "
+"`VLLM_ASCEND_BALANCE_SCHEDULING`"
+msgstr ""
+"**与均衡调度不兼容**：无法启用"
+"`VLLM_ASCEND_BALANCE_SCHEDULING`"
+
+#: ../../source/user_guide/feature_guide/dynamic_chunk_pipeline_parallel.md:146
+msgid "**Startup Overhead**: Profiling adds ~64 forward passes (tens of seconds)"
+msgstr "**启动开销**：性能分析增加约64次前向传播（数十秒）"

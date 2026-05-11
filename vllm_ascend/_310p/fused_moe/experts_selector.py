@@ -31,6 +31,7 @@ def select_experts(
     num_expert_group: int | None = None,
     custom_routing_function: Callable | None = None,
     scoring_func: str = "softmax",
+    routed_scaling_factor: float = 1.0,
     e_score_correction_bias: torch.Tensor | None = None,
     global_num_experts: int = -1,
 ):
@@ -48,6 +49,7 @@ def select_experts(
         custom_routing_function: Custom routing function.
         scoring_func: Scoring function to use.
         e_score_correction_bias: Correction bias to apply to expert scores.
+        routed_scaling_factor: Scaling factor applied to routing weights.
         global_num_experts: Global number of experts.
 
     Returns:
@@ -67,4 +69,8 @@ def select_experts(
         e_score_correction_bias=e_score_correction_bias,
         num_experts=global_num_experts,
     )
+    # Apply routed scaling factor to weights
+    if routed_scaling_factor != 1.0:
+        topk_weights = topk_weights * routed_scaling_factor
+
     return topk_weights, topk_ids
