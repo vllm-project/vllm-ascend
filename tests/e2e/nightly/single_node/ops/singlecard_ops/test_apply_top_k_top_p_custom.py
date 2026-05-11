@@ -1,7 +1,9 @@
 import gc
+
 import numpy as np
 import pytest
 import torch
+
 from vllm_ascend.utils import enable_custom_op
 
 enable_custom_op()
@@ -75,12 +77,7 @@ def assert_output_close(out_cpu, out_npu, rtol=1e-4, atol=1e-4):
     # 2. Check value consistency for valid elements
     valid_mask = (~mask_cpu) & (~mask_npu)
     if valid_mask.any():
-        torch.testing.assert_close(
-            out_cpu[valid_mask],
-            out_npu[valid_mask],
-            rtol=rtol,
-            atol=atol
-        )
+        torch.testing.assert_close(out_cpu[valid_mask], out_npu[valid_mask], rtol=rtol, atol=atol)
 
 
 # -----------------------------------------------------------------------------
@@ -88,10 +85,10 @@ def assert_output_close(out_cpu, out_npu, rtol=1e-4, atol=1e-4):
 # -----------------------------------------------------------------------------
 
 
-@pytest.mark.parametrize('vocab_size', [15206, 152064])
-@pytest.mark.parametrize('batch_size', [4, 8, 16, 32, 64, 96, 128, 256])
-@pytest.mark.parametrize('p_val', [0.5, 0.9, 0.99])
-@pytest.mark.parametrize('k_val', [50, 200, 1024, 4096, 8192])
+@pytest.mark.parametrize("vocab_size", [15206, 152064])
+@pytest.mark.parametrize("batch_size", [4, 8, 16, 32, 64, 96, 128, 256])
+@pytest.mark.parametrize("p_val", [0.5, 0.9, 0.99])
+@pytest.mark.parametrize("k_val", [50, 200, 1024, 4096, 8192])
 def test_npu_apply_top_k_top_p(vocab_size, batch_size, p_val, k_val):
     shape = [batch_size, vocab_size]
     dtype = torch.float32
@@ -109,9 +106,9 @@ def test_npu_apply_top_k_top_p(vocab_size, batch_size, p_val, k_val):
     torch.npu.reset_peak_memory_stats()
 
 
-@pytest.mark.parametrize('vocab_size', [15206, 152064])
-@pytest.mark.parametrize('batch_size', [4, 8, 16, 32, 64, 96, 128, 256])
-@pytest.mark.parametrize('k_val', [50, 200, 1024, 4096, 8192])
+@pytest.mark.parametrize("vocab_size", [15206, 152064])
+@pytest.mark.parametrize("batch_size", [4, 8, 16, 32, 64, 96, 128, 256])
+@pytest.mark.parametrize("k_val", [50, 200, 1024, 4096, 8192])
 def test_npu_apply_top_k(vocab_size, batch_size, k_val):
     shape = [batch_size, vocab_size]
     dtype = torch.float32
@@ -129,9 +126,9 @@ def test_npu_apply_top_k(vocab_size, batch_size, k_val):
     torch.npu.reset_peak_memory_stats()
 
 
-@pytest.mark.parametrize('vocab_size', [15206, 152064])
-@pytest.mark.parametrize('batch_size', [4, 8, 16, 32, 64, 96, 128, 256])
-@pytest.mark.parametrize('p_val', [0.5, 0.9, 0.99])
+@pytest.mark.parametrize("vocab_size", [15206, 152064])
+@pytest.mark.parametrize("batch_size", [4, 8, 16, 32, 64, 96, 128, 256])
+@pytest.mark.parametrize("p_val", [0.5, 0.9, 0.99])
 def test_npu_apply_top_p(vocab_size, batch_size, p_val):
     shape = [batch_size, vocab_size]
     dtype = torch.float32

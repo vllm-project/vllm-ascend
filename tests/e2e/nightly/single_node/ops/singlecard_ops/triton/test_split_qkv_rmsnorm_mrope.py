@@ -29,18 +29,18 @@ def apply_interleaved_rope(x: torch.Tensor, mrope_section: list[int]) -> torch.T
     return x_t
 
 
-def rms_norm(x: torch.Tensor,
-            norm_weight: torch.Tensor,
-            eps,
-            norm_bias=None,
+def rms_norm(
+    x: torch.Tensor,
+    norm_weight: torch.Tensor,
+    eps,
+    norm_bias=None,
 ):
     x = x.cpu()
     norm_weight = norm_weight.cpu()
 
     x = x.to(torch.float32)
     norm_weight = norm_weight.to(torch.float32).cpu()
-    reciprocal_std = 1 / torch.sqrt(
-        torch.mean(x ** 2, axis=-1, keepdims=True) + eps)
+    reciprocal_std = 1 / torch.sqrt(torch.mean(x**2, axis=-1, keepdims=True) + eps)
     out = x * reciprocal_std * norm_weight
 
     if norm_bias is not None:
@@ -51,19 +51,19 @@ def rms_norm(x: torch.Tensor,
 
 
 def naive_split_qkv_rmsnorm_mrope(
-        qkv: torch.Tensor,
-        q_weight: torch.Tensor,
-        q_bias: torch.Tensor,
-        k_weight: torch.Tensor,
-        k_bias: torch.Tensor,
-        cos: torch.Tensor,
-        sin: torch.Tensor,
-        num_q_heads: int,
-        num_kv_heads: int,
-        head_size: int,
-        eps: float,
-        mrope_section: list[int],
-        rope_dim: int,
+    qkv: torch.Tensor,
+    q_weight: torch.Tensor,
+    q_bias: torch.Tensor,
+    k_weight: torch.Tensor,
+    k_bias: torch.Tensor,
+    cos: torch.Tensor,
+    sin: torch.Tensor,
+    num_q_heads: int,
+    num_kv_heads: int,
+    head_size: int,
+    eps: float,
+    mrope_section: list[int],
+    rope_dim: int,
 ):
     q_size = num_q_heads * head_size
     kv_size = num_kv_heads * head_size
@@ -141,19 +141,19 @@ def naive_split_qkv_rmsnorm_mrope(
 
 
 def naive_split_qkv_rmsnorm_mrope_interleaved(
-        qkv: torch.Tensor,
-        q_weight: torch.Tensor,
-        q_bias: torch.Tensor,
-        k_weight: torch.Tensor,
-        k_bias: torch.Tensor,
-        cos: torch.Tensor,
-        sin: torch.Tensor,
-        num_q_heads: int,
-        num_kv_heads: int,
-        head_size: int,
-        eps: float,
-        mrope_section: list[int],
-        rope_dim: int,
+    qkv: torch.Tensor,
+    q_weight: torch.Tensor,
+    q_bias: torch.Tensor,
+    k_weight: torch.Tensor,
+    k_bias: torch.Tensor,
+    cos: torch.Tensor,
+    sin: torch.Tensor,
+    num_q_heads: int,
+    num_kv_heads: int,
+    head_size: int,
+    eps: float,
+    mrope_section: list[int],
+    rope_dim: int,
 ):
     q_size = num_q_heads * head_size
     kv_size = num_kv_heads * head_size
@@ -183,7 +183,7 @@ def naive_split_qkv_rmsnorm_mrope_interleaved(
 
         q_token = q_reshaped[token_idx]
         k_token = k_reshaped[token_idx]
-        
+
         q1 = q_token[:, :half_rd]
         q2 = q_token[:, half_rd:rotary_dim]
         k1 = k_token[:, :half_rd]
@@ -233,7 +233,6 @@ def test_split_qkv_rmsnorm_mrope(
     is_interleaved: bool,
     has_gate: bool,
 ):
-
     torch.set_default_device(device)
     init_device_properties_triton()
     rope_dim = 2 * sum(mrope_section)
@@ -242,101 +241,86 @@ def test_split_qkv_rmsnorm_mrope(
 
     # input tensor
     if has_gate:
-        qkv = torch.randn(num_tokens,
-                          2 * q_size + kv_size * 2,
-                          dtype=dtype,
-                          device=device)
+        qkv = torch.randn(num_tokens, 2 * q_size + kv_size * 2, dtype=dtype, device=device)
     else:
-        qkv = torch.randn(num_tokens,
-                          q_size + kv_size * 2,
-                          dtype=dtype,
-                          device=device)
+        qkv = torch.randn(num_tokens, q_size + kv_size * 2, dtype=dtype, device=device)
     q_weight = torch.randn(head_size, dtype=dtype, device=device)
     k_weight = torch.randn(head_size, dtype=dtype, device=device)
     q_bias = None
     k_bias = None
 
-    cos_sin = torch.randn(3, num_tokens, rope_dim, dtype=dtype,
-                          device=device)
+    cos_sin = torch.randn(3, num_tokens, rope_dim, dtype=dtype, device=device)
     cos, sin = cos_sin.chunk(2, dim=-1)
-    
+
     cos = cos.contiguous()
     sin = sin.contiguous()
 
     if has_gate:
-        q_gate_data = qkv[:, :q_size * 2].view(-1, num_q_heads, head_size * 2)
+        q_gate_data = qkv[:, : q_size * 2].view(-1, num_q_heads, head_size * 2)
         q_data, golden_gate = torch.chunk(q_gate_data, 2, dim=-1)
         golden_gate = golden_gate.reshape(-1, q_size)
         q_data = q_data.reshape(-1, q_size)
-        k_data = qkv[:, 2 * q_size:2 * q_size + kv_size]
-        v_data = qkv[:, 2 * q_size + kv_size:]
+        k_data = qkv[:, 2 * q_size : 2 * q_size + kv_size]
+        v_data = qkv[:, 2 * q_size + kv_size :]
         qkv_for_ref = torch.cat([q_data, k_data, v_data], dim=-1)
     else:
         qkv_for_ref = qkv
 
     if is_interleaved:
-        golden_q, golden_k, golden_v = naive_split_qkv_rmsnorm_mrope_interleaved(qkv_for_ref.cpu(),
-                                                                 q_weight.cpu(),
-                                                                 q_bias,
-                                                                 k_weight.cpu(),
-                                                                 k_bias,
-                                                                 cos.cpu(),
-                                                                 sin.cpu(),
-                                                                 num_q_heads,
-                                                                 num_kv_heads,
-                                                                 head_size,
-                                                                 eps,
-                                                                 mrope_section,
-                                                                 rope_dim)
+        golden_q, golden_k, golden_v = naive_split_qkv_rmsnorm_mrope_interleaved(
+            qkv_for_ref.cpu(),
+            q_weight.cpu(),
+            q_bias,
+            k_weight.cpu(),
+            k_bias,
+            cos.cpu(),
+            sin.cpu(),
+            num_q_heads,
+            num_kv_heads,
+            head_size,
+            eps,
+            mrope_section,
+            rope_dim,
+        )
     else:
-        golden_q, golden_k, golden_v = naive_split_qkv_rmsnorm_mrope(qkv_for_ref.cpu(),
-                                                                    q_weight.cpu(),
-                                                                    q_bias,
-                                                                    k_weight.cpu(),
-                                                                    k_bias,
-                                                                    cos.cpu(),
-                                                                    sin.cpu(),
-                                                                    num_q_heads,
-                                                                    num_kv_heads,
-                                                                    head_size,
-                                                                    eps,
-                                                                    mrope_section,
-                                                                    rope_dim)
+        golden_q, golden_k, golden_v = naive_split_qkv_rmsnorm_mrope(
+            qkv_for_ref.cpu(),
+            q_weight.cpu(),
+            q_bias,
+            k_weight.cpu(),
+            k_bias,
+            cos.cpu(),
+            sin.cpu(),
+            num_q_heads,
+            num_kv_heads,
+            head_size,
+            eps,
+            mrope_section,
+            rope_dim,
+        )
 
     real_q, real_k, real_v, real_gate = torch.ops.vllm.triton_split_qkv_rmsnorm_mrope(
-            qkv=qkv,
-            q_weight=q_weight,
-            k_weight=k_weight,
-            cos_sin=cos_sin,
-            num_q_heads=num_q_heads,
-            num_kv_heads=num_kv_heads,
-            head_size=head_size,
-            eps=eps,
-            mrope_section=mrope_section,
-            is_interleaved=is_interleaved,
-            rope_dim=rope_dim,
-            has_gate=has_gate,
+        qkv=qkv,
+        q_weight=q_weight,
+        k_weight=k_weight,
+        cos_sin=cos_sin,
+        num_q_heads=num_q_heads,
+        num_kv_heads=num_kv_heads,
+        head_size=head_size,
+        eps=eps,
+        mrope_section=mrope_section,
+        is_interleaved=is_interleaved,
+        rope_dim=rope_dim,
+        has_gate=has_gate,
     )
 
-    torch.testing.assert_close(real_q.cpu(),
-                               golden_q.cpu(),
-                               atol=DEFAULT_ATOL,
-                               rtol=DEFAULT_RTOL)
+    torch.testing.assert_close(real_q.cpu(), golden_q.cpu(), atol=DEFAULT_ATOL, rtol=DEFAULT_RTOL)
 
-    torch.testing.assert_close(real_k.cpu(),
-                               golden_k.cpu(),
-                               atol=DEFAULT_ATOL,
-                               rtol=DEFAULT_RTOL)
+    torch.testing.assert_close(real_k.cpu(), golden_k.cpu(), atol=DEFAULT_ATOL, rtol=DEFAULT_RTOL)
 
-    torch.testing.assert_close(real_v.cpu(),
-                               golden_v.cpu(),
-                               atol=DEFAULT_ATOL,
-                               rtol=DEFAULT_RTOL)
+    torch.testing.assert_close(real_v.cpu(), golden_v.cpu(), atol=DEFAULT_ATOL, rtol=DEFAULT_RTOL)
     if has_gate:
-        torch.testing.assert_close(real_gate.cpu(),
-                                golden_gate.cpu(),
-                                atol=DEFAULT_ATOL,
-                                rtol=DEFAULT_RTOL)
+        torch.testing.assert_close(real_gate.cpu(), golden_gate.cpu(), atol=DEFAULT_ATOL, rtol=DEFAULT_RTOL)
 
     gc.collect()
     torch.npu.empty_cache()

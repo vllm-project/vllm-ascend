@@ -1,17 +1,19 @@
-import torch
 import pytest
-from vllm_ascend.worker.v2.sample.logprob import compute_topk_logprobs
+import torch
+
 from vllm_ascend.ops.triton.triton_utils import init_device_properties_triton
+from vllm_ascend.worker.v2.sample.logprob import compute_topk_logprobs
 
 
-@pytest.mark.parametrize("batch_size,vocab_size,num_logprobs", [
-    (48, 102400, 5),
-    (96, 102400, 0),
-    (24, 151936, 1),
-    (1, 32000, 10),
-])
-
-
+@pytest.mark.parametrize(
+    "batch_size,vocab_size,num_logprobs",
+    [
+        (48, 102400, 5),
+        (96, 102400, 0),
+        (24, 151936, 1),
+        (1, 32000, 10),
+    ],
+)
 def test_compute_topk_logprobs(batch_size, vocab_size, num_logprobs):
     """Test compute_topk_logprobs for correctness of IDs, logprobs, and ranks.
     Args:
@@ -22,7 +24,7 @@ def test_compute_topk_logprobs(batch_size, vocab_size, num_logprobs):
     init_device_properties_triton()
     # ========== 1. Setup test data ==========
     torch.manual_seed(42)
-    device = 'npu'
+    device = "npu"
 
     logits = torch.randn(batch_size, vocab_size, device=device, dtype=torch.float32)
     sampled_token_ids = torch.randint(0, vocab_size, (batch_size,), device=device, dtype=torch.int64)
@@ -45,14 +47,15 @@ def test_compute_topk_logprobs(batch_size, vocab_size, num_logprobs):
     ref_ranks = (logits > sampled_logits).sum(dim=1).to(torch.int64)
 
     # ========== 4. Verify results ==========
-    assert torch.equal(triton_output.logprob_token_ids, ref_token_ids), \
+    assert torch.equal(triton_output.logprob_token_ids, ref_token_ids), (
         "Token IDs (Sampled + TopK) do not match between Triton and PyTorch."
+    )
 
-    assert torch.equal(triton_output.selected_token_ranks, ref_ranks), \
-        f"Token Ranks do not match.\n" \
-        f"Triton: {triton_output.selected_token_ranks}\n" \
-        f"PyTorch: {ref_ranks}"
+    assert torch.equal(triton_output.selected_token_ranks, ref_ranks), (
+        f"Token Ranks do not match.\nTriton: {triton_output.selected_token_ranks}\nPyTorch: {ref_ranks}"
+    )
 
-    assert torch.allclose(triton_output.logprobs, ref_logprobs, rtol=1e-4, atol=1e-4), \
-        f"Logprobs values differ between Triton and PyTorch.\n" \
+    assert torch.allclose(triton_output.logprobs, ref_logprobs, rtol=1e-4, atol=1e-4), (
+        f"Logprobs values differ between Triton and PyTorch.\n"
         f"Max diff: {torch.max(torch.abs(triton_output.logprobs - ref_logprobs))}"
+    )

@@ -18,13 +18,13 @@ import gc
 import pytest
 import torch
 
-from vllm_ascend.ops.triton.gdn_chunk_meta import build_chunk_meta_device
 from vllm_ascend.ops.triton.fla.utils import (
     prepare_chunk_indices,
     prepare_chunk_offsets,
     prepare_final_chunk_indices,
     prepare_update_chunk_offsets,
 )
+from vllm_ascend.ops.triton.gdn_chunk_meta import build_chunk_meta_device
 from vllm_ascend.ops.triton.triton_utils import init_device_properties_triton
 
 
