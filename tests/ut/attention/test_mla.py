@@ -4,7 +4,6 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 import torch
-
 from vllm.config import set_current_vllm_config
 from vllm.forward_context import set_forward_context
 from vllm.model_executor.layers.linear import UnquantizedLinearMethod
