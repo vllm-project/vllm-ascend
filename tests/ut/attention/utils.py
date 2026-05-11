@@ -17,7 +17,9 @@ from vllm.config.model import ModelDType
 from vllm.distributed.parallel_state import all_gather_fake
 from vllm.utils.math_utils import cdiv
 from vllm.v1.kv_cache_interface import FullAttentionSpec
+
 from vllm_ascend.attention.utils import AscendCommonAttentionMetadata
+
 
 def patch_distributed_groups(dcp_size=1, dcp_rank=0, pcp_size=1, pcp_rank=0, needs_mocks=True):
     """
@@ -38,7 +40,6 @@ def patch_distributed_groups(dcp_size=1, dcp_rank=0, pcp_size=1, pcp_rank=0, nee
     """
 
     def decorator(func):
-
         @wraps(func)
         @patch("torch.distributed.all_to_all_single")
         @patch("vllm.distributed.parallel_state._PCP")

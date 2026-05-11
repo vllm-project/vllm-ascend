@@ -3,7 +3,6 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 import torch
-
 from vllm.config import set_current_vllm_config
 from vllm.forward_context import set_forward_context
 from vllm.utils.torch_utils import set_random_seed
@@ -57,8 +56,8 @@ BATCH_SPECS = {
     # encoder-only
     "small_encoder_prefill": BatchSpec(seq_lens=[32, 64, 128, 256], query_lens=[32, 64, 128, 256]),
     "medium_encoder_prefill": BatchSpec(seq_lens=[256, 512, 1024, 2048], query_lens=[256, 512, 1024, 2048]),
+    "mtp_1_plus_3": BatchSpec(seq_lens=[256, 512, 1024, 1536], query_lens=[4, 4, 4, 4]),
 }
-
 
 
 import math
@@ -76,7 +75,7 @@ class MockLinear:
             self.weight = torch.randn(
                 self.weight.size(0), x.size(-1), dtype=self.weight.dtype, device=x.device
             ) / math.sqrt(x.size(-1))
-            
+
         return (x @ self.weight.T, None)
 
 
@@ -132,10 +131,10 @@ def create_mla_kv_cache(
             start_block_idx, start_block_idx + num_blocks_for_seq, dtype=torch.int32
         )
 
-        k_cache_flat = k_cache[start_block_idx:start_block_idx + num_blocks_for_seq].view(
+        k_cache_flat = k_cache[start_block_idx : start_block_idx + num_blocks_for_seq].view(
             -1, num_kv_heads, kv_lora_rank
         )
-        v_cache_flat = v_cache[start_block_idx:start_block_idx + num_blocks_for_seq].view(
+        v_cache_flat = v_cache[start_block_idx : start_block_idx + num_blocks_for_seq].view(
             -1, num_kv_heads, qk_rope_head_dim
         )
         k_cache_flat[:context_len] = k_nope_ctx[:context_len]
@@ -169,6 +168,7 @@ def run_mla_attention_backend(
     attn_type: AttentionType = AttentionType.DECODER,
 ):
     from vllm_ascend.ascend_config import init_ascend_config
+
     init_ascend_config(vllm_config)
 
     from vllm_ascend.ops import rotary_embedding
@@ -190,7 +190,8 @@ def run_mla_attention_backend(
     mock_weight_prefetch = MagicMock()
     mock_weight_prefetch.maybe_prefetch_mla_or_sla_weight_in_current_stream = MagicMock()
 
-    import vllm_ascend.utils as utils_module
+    import vllm_ascend.utils as 
+    
     original_weight_prefetch = utils_module._WEIGHT_PREFETCH_METHOD
     utils_module._WEIGHT_PREFETCH_METHOD = mock_weight_prefetch
 
@@ -284,7 +285,7 @@ def rms_norm(x: torch.Tensor, weight: torch.Tensor, eps: float = 1e-6) -> torch.
 
 
 def npu_interleave_rope_simple(
-        x: torch.Tensor, cos: torch.Tensor | None = None, sin: torch.Tensor | None = None
+    x: torch.Tensor, cos: torch.Tensor | None = None, sin: torch.Tensor | None = None
 ) -> torch.Tensor:
     """Simulate Ascend npu_interleave_rope with default cos=1, sin=0.
 
@@ -364,7 +365,9 @@ def decode_sdpa(
     v_sdpa = k_nope.unsqueeze(0).transpose(1, 2)
 
     attn_out = torch.nn.functional.scaled_dot_product_attention(
-        q_sdpa, k_sdpa, v_sdpa,
+        q_sdpa,
+        k_sdpa,
+        v_sdpa,
         is_causal=False,
         enable_gqa=(impl.num_heads != impl.num_kv_heads),
         scale=scale,
@@ -668,6 +671,7 @@ def _test_mla_attention_correctness(
         "large_prefill",
         "single_decode",
         "single_prefill",
+        "mtp_1_plus_3",
     ],
 )
 @pytest.mark.parametrize("model", ["deepseek-ai/DeepSeek-V2"])
