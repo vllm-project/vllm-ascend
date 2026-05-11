@@ -8,7 +8,7 @@ msgid ""
 msgstr ""
 "Project-Id-Version:  vllm-ascend\n"
 "Report-Msgid-Bugs-To: \n"
-"POT-Creation-Date: 2026-04-14 02:04+0000\n"
+"POT-Creation-Date: 2026-05-06 02:14+0000\n"
 "PO-Revision-Date: 2026-01-22 16:40+0800\n"
 "Last-Translator: Gemini\n"
 "Language: zh_CN\n"
@@ -63,7 +63,7 @@ msgstr "vLLM Ascend 支持由两种主要工具量化的模型：`ModelSlim` 和
 
 #: ../../source/user_guide/feature_guide/quantization.md:17
 msgid "1. ModelSlim (Recommended)"
-msgstr "1. ModelSlim（推荐）"
+msgstr "1.ModelSlim（推荐）"
 
 #: ../../source/user_guide/feature_guide/quantization.md:19
 msgid ""
@@ -125,7 +125,7 @@ msgstr ""
 
 #: ../../source/user_guide/feature_guide/quantization.md:63
 msgid "2. LLM-Compressor"
-msgstr "2. LLM-Compressor"
+msgstr "2.LLM-Compressor"
 
 #: ../../source/user_guide/feature_guide/quantization.md:65
 msgid ""
@@ -191,11 +191,11 @@ msgstr "离线推理"
 msgid "Online Inference"
 msgstr "在线推理"
 
-#: ../../source/user_guide/feature_guide/quantization.md:158
+#: ../../source/user_guide/feature_guide/quantization.md:157
 msgid "References"
 msgstr "参考资料"
 
-#: ../../source/user_guide/feature_guide/quantization.md:160
+#: ../../source/user_guide/feature_guide/quantization.md:159
 msgid ""
 "[ModelSlim "
 "Documentation](https://gitcode.com/Ascend/msit/blob/master/msmodelslim/README.md)"
@@ -203,10 +203,12 @@ msgstr ""
 "[ModelSlim "
 "文档](https://gitcode.com/Ascend/msit/blob/master/msmodelslim/README.md)"
 
-#: ../../source/user_guide/feature_guide/quantization.md:161
+#: ../../source/user_guide/feature_guide/quantization.md:160
 msgid "[LLM-Compressor GitHub](https://github.com/vllm-project/llm-compressor)"
 msgstr "[LLM-Compressor GitHub](https://github.com/vllm-project/llm-compressor)"
 
-#: ../../source/user_guide/feature_guide/quantization.md:162
-msgid "[vLLM Quantization Guide](https://docs.vllm.ai/en/latest/quantization/)"
-msgstr "[vLLM 量化指南](https://docs.vllm.ai/en/latest/quantization/)"
+#: ../../source/user_guide/feature_guide/quantization.md:161
+msgid ""
+"[vLLM Quantization "
+"Guide](https://docs.vllm.ai/en/latest/features/quantization/)"
+msgstr "[vLLM 量化指南](https://docs.vllm.ai/en/latest/features/quantization/)"

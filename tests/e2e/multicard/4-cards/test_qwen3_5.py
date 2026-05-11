@@ -19,7 +19,7 @@
 import os
 from unittest.mock import patch
 
-from tests.e2e.conftest import VllmRunner
+from tests.e2e.conftest import DPVllmRunner, VllmRunner
 
 
 def test_qwen3_5_27b_distributed_mp_tp4():
@@ -94,9 +94,10 @@ def test_qwen3_5_35b_distributed_mp_tp4_full_decode_only_mtp3_flashcomm():
     ]
 
     max_tokens = 20
-    with VllmRunner(
+    with DPVllmRunner(
         "Qwen/Qwen3.5-35B-A3B",
-        tensor_parallel_size=4,
+        data_parallel_size=2,
+        tensor_parallel_size=2,
         enable_expert_parallel=True,
         max_model_len=4096,
         gpu_memory_utilization=0.90,

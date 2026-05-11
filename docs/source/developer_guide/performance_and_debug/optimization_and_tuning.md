@@ -1,6 +1,6 @@
 # Optimization and Tuning
 
-This guide aims to help users improve vLLM-Ascend performance at the system level. It includes OS configuration, library optimization, deployment guide, and so on. Any feedback is welcome.
+This guide aims to help users improve vLLM Ascend performance at the system level. It includes OS configuration, library optimization, deployment guide, and so on. Any feedback is welcome.
 
 ## Preparation
 
@@ -46,7 +46,7 @@ echo "deb-src https://mirrors.tuna.tsinghua.edu.cn/ubuntu-ports/ jammy-security 
 apt update && apt install wget gcc g++ libnuma-dev git vim -y
 ```
 
-Install vllm and vllm-ascend:
+Install vLLM and vLLM Ascend:
 
 ```{code-block} bash
    :substitutions:
@@ -55,13 +55,13 @@ pip config set global.index-url https://pypi.tuna.tsinghua.edu.cn/simple
 pip install modelscope pandas datasets gevent sacrebleu rouge_score pybind11 pytest
 
 # Configure this var to speed up model download
-VLLM_USE_MODELSCOPE=true
+export VLLM_USE_MODELSCOPE=True
 ```
 
-Please follow the [Installation Guide](https://docs.vllm.ai/projects/ascend/en/latest/installation.html) to make sure vLLM and vllm-ascend are installed correctly.
+Please follow the [Installation Guide](https://docs.vllm.ai/projects/ascend/en/latest/installation.html) to make sure vLLM and vLLM Ascend are installed correctly.
 
 :::{note}
-Make sure your vLLM and vllm-ascend are installed after your Python configuration is completed, because these packages will build binary files using python in current environment. If you install vLLM and vllm-ascend before completing section 1.1, the binary files will not use the optimized python.
+Make sure your vLLM and vLLM Ascend are installed after your Python configuration is completed, because these packages will build binary files using python in current environment. If you install vLLM and vLLM Ascend before completing section 1.1, the binary files will not use the optimized python.
 :::
 
 ## Optimizations
@@ -85,7 +85,7 @@ wget https://repo.oepkgs.net/ascend/pytorch/vllm/python/py311_bisheng.tar.gz
 
 # Configure python and pip
 cp ./*.so* /usr/local/lib
-tar -zxvf ./py311_bisheng.*  -C /usr/local/
+tar -zxvf ./py311_bisheng.tar.gz -C /usr/local/
 mv  /usr/local/py311_bisheng/  /usr/local/python
 sed -i "1c#\!/usr/local/python/bin/python3.11" /usr/local/python/bin/pip3
 sed -i "1c#\!/usr/local/python/bin/python3.11" /usr/local/python/bin/pip3.11
@@ -147,7 +147,12 @@ Memory optimization:
    :substitutions:
 # Upper limit of memory block splitting allowed (MB): Setting this parameter can prevent large memory blocks from being split.
 export PYTORCH_NPU_ALLOC_CONF="max_split_size_mb:250"
+```
 
+or
+
+```{code-block} bash
+   :substitutions:
 # When operators on the communication stream have dependencies, they all need to be ended before being released for reuse. The logic of multi-stream reuse is to release the memory on the communication stream in advance so that the computing stream can be reused.
 export PYTORCH_NPU_ALLOC_CONF="expandable_segments:True"
 ```

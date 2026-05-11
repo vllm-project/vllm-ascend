@@ -35,38 +35,36 @@ From the workflow perspective, we can see how the final test script is executed,
     npu_per_node: 16
     # All env vars you need should add it here
     env_common:
-    VLLM_USE_MODELSCOPE: true
-    OMP_PROC_BIND: false
-    OMP_NUM_THREADS: 100
-    HCCL_BUFFSIZE: 1024
-    SERVER_PORT: 8080
+      VLLM_USE_MODELSCOPE: true
+      OMP_PROC_BIND: false
+      OMP_NUM_THREADS: 100
+      HCCL_BUFFSIZE: 1024
+      SERVER_PORT: 8080
     disaggregated_prefill:
-    enabled: true
-    # node index(a list) which meet all the conditions:
-    #  - prefiller
-    #  - no headless(have api server)
-    prefiller_host_index: [0]
-    # node index(a list) which meet all the conditions:
-    #  - decoder
-    decoder_host_index: [1]
+      enabled: true
+      # node index(a list) which meet all the conditions:
+      #  - prefiller
+      #  - no headless(have api server)
+      prefiller_host_index: [0]
+      # node index(a list) which meet all the conditions:
+      #  - decoder
+      decoder_host_index: [1]
 
     # Add each node's vllm serve cli command just like you run locally
     # Add each node's individual envs like follow
     deployment:
-    -
-        envs:
-        # fill with envs like: <key>:<value>
+      - envs:
+          # fill with envs like: <key>:<value>
         server_cmd: >
-        vllm serve ...
-    -
-        envs:
-        # fill with envs like: <key>:<value>
+          vllm serve ...
+      - envs:
+          # fill with envs like: <key>:<value>
         server_cmd: >
-        vllm serve ...
+          vllm serve ...
     benchmarks:
-    perf:
+      perf:
         # fill with performance test kwargs
-    acc:
+      acc:
         # fill with accuracy test kwargs
     ```
 
@@ -74,38 +72,38 @@ From the workflow perspective, we can see how the final test script is executed,
 
 Currently, the multi-node test workflow is defined in the [nightly_test_a3.yaml](https://github.com/vllm-project/vllm-ascend/blob/main/.github/workflows/schedule_nightly_test_a3.yaml)
 
-   ```yaml
+    ```yaml
     multi-node-tests:
-    name: multi-node
-    if: always() && (github.event_name == 'schedule' || github.event_name == 'workflow_dispatch')
-    strategy:
+      name: multi-node
+      if: always() && (github.event_name == 'schedule' || github.event_name == 'workflow_dispatch')
+      strategy:
         fail-fast: false
         max-parallel: 1
         matrix:
-        test_config:
+          test_config:
             - name: multi-node-deepseek-pd
-            config_file_path: DeepSeek-V3.yaml
-            size: 2
+              config_file_path: DeepSeek-V3.yaml
+              size: 2
             - name: multi-node-qwen3-dp
-            config_file_path: Qwen3-235B-A22B.yaml
-            size: 2
+              config_file_path: Qwen3-235B-A22B.yaml
+              size: 2
             - name: multi-node-qwenw8a8-2node
-            config_file_path: Qwen3-235B-W8A8.yaml
-            size: 2
+              config_file_path: Qwen3-235B-W8A8.yaml
+              size: 2
             - name: multi-node-qwenw8a8-2node-eplb
-            config_file_path: Qwen3-235B-W8A8-EPLB.yaml
-            size: 2
-    uses: ./.github/workflows/_e2e_nightly_multi_node.yaml
-    with:
+              config_file_path: Qwen3-235B-W8A8-EPLB.yaml
+              size: 2
+      uses: ./.github/workflows/_e2e_nightly_multi_node.yaml
+      with:
         soc_version: a3
         runner: linux-aarch64-a3-0
         image: 'swr.cn-southwest-2.myhuaweicloud.com/base_image/ascend-ci/vllm-ascend:nightly-a3'
         replicas: 1
         size: ${{ matrix.test_config.size }}
         config_file_path: ${{ matrix.test_config.config_file_path }}
-    secrets:
+      secrets:
         KUBECONFIG_B64: ${{ secrets.KUBECONFIG_B64 }}
-   ```
+    ```
   
 The matrix above defines all the parameters required to add a multi-machine use case. The parameters worth noting (if you are adding a new use case) are `size` and the path to the yaml configuration file. The former defines the number of nodes required for your use case, and the latter defines the path to the configuration file you have completed in step 2.
 
@@ -125,130 +123,130 @@ This section assumes that you already have a [Kubernetes](https://kubernetes.io/
     apiVersion: leaderworkerset.x-k8s.io/v1
     kind: LeaderWorkerSet
     metadata:
-    name: test-server
-    namespace: vllm-project
+      name: test-server
+      namespace: vllm-project
     spec:
-    replicas: 1
-    leaderWorkerTemplate:
+      replicas: 1
+      leaderWorkerTemplate:
         size: 2
         restartPolicy: None
         leaderTemplate:
-        metadata:
+          metadata:
             labels:
-            role: leader
-        spec:
+              role: leader
+          spec:
             containers:
-            - name: vllm-leader
+              - name: vllm-leader
                 imagePullPolicy: Always
                 image: swr.cn-southwest-2.myhuaweicloud.com/base_image/ascend-ci/vllm-ascend:nightly-a3
                 env:
-                - name: CONFIG_YAML_PATH
+                  - name: CONFIG_YAML_PATH
                     value: DeepSeek-V3.yaml
-                - name: WORKSPACE
+                  - name: WORKSPACE
                     value: "/vllm-workspace"
-                - name: FAIL_TAG
+                  - name: FAIL_TAG
                     value: FAIL_TAG
                 command:
-                - sh
-                - -c
-                - |
+                  - sh
+                  - -c
+                  - |
                     bash /vllm-workspace/vllm-ascend/tests/e2e/nightly/multi_node/scripts/run.sh
                 resources:
-                limits:
+                  limits:
                     huawei.com/ascend-1980: 16
                     memory: 512Gi
                     ephemeral-storage: 100Gi
-                requests:
+                  requests:
                     huawei.com/ascend-1980: 16
                     memory: 512Gi
                     ephemeral-storage: 100Gi
                     cpu: 125
                 ports:
-                - containerPort: 8080
+                  - containerPort: 8080
                 # readinessProbe:
                 #   tcpSocket:
                 #     port: 8080
                 #   initialDelaySeconds: 15
                 #   periodSeconds: 10
                 volumeMounts:
-                - mountPath: /root/.cache
+                  - mountPath: /root/.cache
                     name: shared-volume
-                - mountPath: /usr/local/Ascend/driver/tools
+                  - mountPath: /usr/local/Ascend/driver/tools
                     name: driver-tools
-                - mountPath: /dev/shm
+                  - mountPath: /dev/shm
                     name: dshm
             volumes:
-            - name: dshm
+              - name: dshm
                 emptyDir:
-                medium: Memory
-                sizeLimit: 15Gi
-            - name: shared-volume
+                  medium: Memory
+                  sizeLimit: 15Gi
+              - name: shared-volume
                 persistentVolumeClaim:
-                claimName: nv-action-vllm-benchmarks-v2
-            - name: driver-tools
+                  claimName: nv-action-vllm-benchmarks-v2
+              - name: driver-tools
                 hostPath:
-                path: /usr/local/Ascend/driver/tools
+                  path: /usr/local/Ascend/driver/tools
         workerTemplate:
-        spec:
+          spec:
             containers:
-            - name: vllm-worker
+              - name: vllm-worker
                 imagePullPolicy: Always
                 image: swr.cn-southwest-2.myhuaweicloud.com/base_image/ascend-ci/vllm-ascend:nightly-a3
                 env:
-                - name: CONFIG_YAML_PATH
+                  - name: CONFIG_YAML_PATH
                     value: DeepSeek-V3.yaml
-                - name: WORKSPACE
+                  - name: WORKSPACE
                     value: "/vllm-workspace"
-                - name: FAIL_TAG
+                  - name: FAIL_TAG
                     value: FAIL_TAG
                 command:
-                - sh
-                - -c
-                - |
+                  - sh
+                  - -c
+                  - |
                     bash /vllm-workspace/vllm-ascend/tests/e2e/nightly/multi_node/scripts/run.sh
                 resources:
-                limits:
+                  limits:
                     huawei.com/ascend-1980: 16
                     memory: 512Gi
                     ephemeral-storage: 100Gi
-                requests:
+                  requests:
                     huawei.com/ascend-1980: 16
                     ephemeral-storage: 100Gi
                     cpu: 125
                 volumeMounts:
-                - mountPath: /root/.cache
+                  - mountPath: /root/.cache
                     name: shared-volume
-                - mountPath: /usr/local/Ascend/driver/tools
+                  - mountPath: /usr/local/Ascend/driver/tools
                     name: driver-tools
-                - mountPath: /dev/shm
+                  - mountPath: /dev/shm
                     name: dshm
             volumes:
-            - name: dshm
+              - name: dshm
                 emptyDir:
-                medium: Memory
-                sizeLimit: 15Gi
-            - name: shared-volume
+                  medium: Memory
+                  sizeLimit: 15Gi
+              - name: shared-volume
                 persistentVolumeClaim:
-                claimName: nv-action-vllm-benchmarks-v2
-            - name: driver-tools
+                  claimName: nv-action-vllm-benchmarks-v2
+              - name: driver-tools
                 hostPath:
-                path: /usr/local/Ascend/driver/tools
+                  path: /usr/local/Ascend/driver/tools
     ---
     apiVersion: v1
     kind: Service
     metadata:
-    name: vllm-leader
-    namespace: vllm-project
+      name: vllm-leader
+      namespace: vllm-project
     spec:
-    ports:
+      ports:
         - name: http
-        port: 8080
-        protocol: TCP
-        targetPort: 8080
-    selector:
+          port: 8080
+          protocol: TCP
+          targetPort: 8080
+      selector:
         leaderworkerset.sigs.k8s.io/name: vllm
         role: leader
-    type: ClusterIP
+      type: ClusterIP
     ```
 
     ```bash

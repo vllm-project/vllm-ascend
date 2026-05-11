@@ -8,7 +8,7 @@ msgid ""
 msgstr ""
 "Project-Id-Version: vllm-ascend \n"
 "Report-Msgid-Bugs-To: \n"
-"POT-Creation-Date: 2026-04-21 02:03+0000\n"
+"POT-Creation-Date: 2026-05-06 02:14+0000\n"
 "PO-Revision-Date: 2026-01-22 16:45+0800\n"
 "Last-Translator: Gemini\n"
 "Language: zh_CN\n"
@@ -119,6 +119,7 @@ msgstr "昇腾编译选项配置"
 msgid "`eplb_config`"
 msgstr "`eplb_config`"
 
+#: ../../source/user_guide/configuration/additional_config.md
 msgid "Configuration options for eplb"
 msgstr "EPLB 的配置选项"
 
@@ -211,7 +212,10 @@ msgid ""
 "disaggregated mode** (`kv_role` is `kv_producer` or `kv_consumer`). **Do "
 "not enable in PD-mixed mode** (no `kv_transfer_config`, or `kv_role` is "
 "`kv_both`); startup will fail with a clear error."
-msgstr "是否启用重计算调度器。**仅在 PD 解耦模式下有效**（`kv_role` 为 `kv_producer` 或 `kv_consumer`）。**请勿在 PD 混合模式下启用**（无 `kv_transfer_config`，或 `kv_role` 为 `kv_both`）；启动将失败并显示明确的错误信息。"
+msgstr ""
+"是否启用重计算调度器。**仅在 PD 解耦模式下有效**（`kv_role` 为 `kv_producer` 或 "
+"`kv_consumer`）。**请勿在 PD 混合模式下启用**（无 `kv_transfer_config`，或 `kv_role` 为 "
+"`kv_both`）；启动将失败并显示明确的错误信息。"
 
 #: ../../source/user_guide/configuration/additional_config.md
 msgid "`enable_cpu_binding`"
@@ -223,10 +227,9 @@ msgstr "`True`"
 
 #: ../../source/user_guide/configuration/additional_config.md
 msgid ""
-"Whether to enable CPU binding. Only takes effect on ARM CPUs; A3 uses the"
-" global-slicing CPU allocation strategy and other device types use the "
-"topo-affinity CPU allocation strategy."
-msgstr "是否启用 CPU 绑定。仅在 ARM CPU 上生效；A3 使用全局切片 CPU 分配策略，其他设备类型使用拓扑亲和性 CPU 分配策略。"
+"Enables Ascend-native CPU binding on ARM servers. Set to `False` to "
+"disable. See [CPU Binding](../feature_guide/cpu_binding.md)."
+msgstr "在 ARM 服务器上启用昇腾原生 CPU 绑定。设置为 `False` 以禁用。参见 [CPU 绑定](../feature_guide/cpu_binding.md)。"
 
 #: ../../source/user_guide/configuration/additional_config.md
 msgid "`SLO_limits_for_dynamic_batch`"
@@ -308,11 +311,23 @@ msgstr "`enable_mc2_hierarchy_comm`"
 msgid "Enable dispatch/combine op inter-node communication by ROCE."
 msgstr "通过 ROCE 启用分发/组合操作的节点间通信。"
 
-#: ../../source/user_guide/configuration/additional_config.md:50
+#: ../../source/user_guide/configuration/additional_config.md
+msgid "`profiling_chunk_config`"
+msgstr "`profiling_chunk_config`"
+
+#: ../../source/user_guide/configuration/additional_config.md
+msgid ""
+"Configuration options for dynamic chunked pipeline parallel. See [Dynamic"
+" Chunked Pipeline "
+"Parallel](../feature_guide/dynamic_chunk_pipeline_parallel.md) for "
+"details."
+msgstr "动态分块流水线并行的配置选项。详情请参见[动态分块流水线并行](../feature_guide/dynamic_chunk_pipeline_parallel.md)。"
+
+#: ../../source/user_guide/configuration/additional_config.md:51
 msgid "The details of each configuration option are as follows:"
 msgstr "每个配置选项的详细说明如下："
 
-#: ../../source/user_guide/configuration/additional_config.md:52
+#: ../../source/user_guide/configuration/additional_config.md:53
 msgid "**xlite_graph_config**"
 msgstr "**xlite_graph_config**"
 
@@ -336,7 +351,7 @@ msgid ""
 "default, Xlite is only enabled for the decode stage."
 msgstr "是否在预填充和解码阶段同时启用 Xlite。默认情况下，Xlite 仅在解码阶段启用。"
 
-#: ../../source/user_guide/configuration/additional_config.md:59
+#: ../../source/user_guide/configuration/additional_config.md:60
 msgid "**weight_prefetch_config**"
 msgstr "**weight_prefetch_config**"
 
@@ -361,7 +376,7 @@ msgstr ""
 msgid "Prefetch ratio of each weight."
 msgstr "各项权重的预取比例。"
 
-#: ../../source/user_guide/configuration/additional_config.md:66
+#: ../../source/user_guide/configuration/additional_config.md:67
 msgid "**finegrained_tp_config**"
 msgstr "**finegrained_tp_config**"
 
@@ -401,7 +416,7 @@ msgstr "`mlp_tensor_parallel_size`"
 msgid "The custom tensor parallel size of mlp."
 msgstr "MLP 层的自定义张量并行大小。"
 
-#: ../../source/user_guide/configuration/additional_config.md:75
+#: ../../source/user_guide/configuration/additional_config.md:76
 msgid "**ascend_compilation_config**"
 msgstr "**ascend_compilation_config**"
 
@@ -456,7 +471,7 @@ msgstr "`fuse_muls_add`"
 msgid "Whether to enable fuse_muls_add pass."
 msgstr "是否启用 fuse_muls_add 优化通道。"
 
-#: ../../source/user_guide/configuration/additional_config.md:86
+#: ../../source/user_guide/configuration/additional_config.md:87
 msgid "**eplb_config**"
 msgstr "**eplb_config**"
 
@@ -520,10 +535,73 @@ msgstr "`num_redundant_experts`"
 msgid "Specify redundant experts during initialization."
 msgstr "在初始化阶段指定冗余专家的数量。"
 
-#: ../../source/user_guide/configuration/additional_config.md:97
+#: ../../source/user_guide/configuration/additional_config.md:98
+msgid "**profiling_chunk_config**"
+msgstr "**profiling_chunk_config**"
+
+#: ../../source/user_guide/configuration/additional_config.md
+msgid ""
+"Whether to enable dynamic chunked pipeline parallel. Requires `pipeline-"
+"parallel-size > 1`."
+msgstr "是否启用动态分块流水线并行。需要 `pipeline-parallel-size > 1`。"
+
+#: ../../source/user_guide/configuration/additional_config.md
+msgid "`smooth_factor`"
+msgstr "`smooth_factor`"
+
+#: ../../source/user_guide/configuration/additional_config.md
+msgid "float"
+msgstr "float"
+
+#: ../../source/user_guide/configuration/additional_config.md
+msgid "`1.0`"
+msgstr "`1.0`"
+
+#: ../../source/user_guide/configuration/additional_config.md
+msgid ""
+"Smoothing factor (0 < x ≤ 1.0). Higher values trust the dynamic "
+"prediction more; `0.0` disables dynamic adjustment."
+msgstr "平滑因子 (0 < x ≤ 1.0)。值越大越信任动态预测；`0.0` 表示禁用动态调整。"
+
+#: ../../source/user_guide/configuration/additional_config.md
+msgid "`min_chunk`"
+msgstr "`min_chunk`"
+
+#: ../../source/user_guide/configuration/additional_config.md
+msgid "`4096`"
+msgstr "`4096`"
+
+#: ../../source/user_guide/configuration/additional_config.md
+msgid ""
+"Minimum chunk size for dynamic calculation. Should be smaller than `max-"
+"num-batched-tokens`."
+msgstr "动态计算的最小分块大小。应小于 `max-num-batched-tokens`。"
+
+#: ../../source/user_guide/configuration/additional_config.md
+msgid "`need_timing`"
+msgstr "`need_timing`"
+
+#: ../../source/user_guide/configuration/additional_config.md
+msgid "True"
+msgstr "True"
+
+#: ../../source/user_guide/configuration/additional_config.md
+msgid "Enable/disable Online Calibration"
+msgstr "启用/禁用在线校准"
+
+#: ../../source/user_guide/configuration/additional_config.md:107
 msgid "Example"
 msgstr "示例"
 
-#: ../../source/user_guide/configuration/additional_config.md:99
+#: ../../source/user_guide/configuration/additional_config.md:109
 msgid "An example of additional configuration is as follows:"
 msgstr "附加配置的一个示例如下："
+
+#~ msgid ""
+#~ "Whether to enable CPU binding. Only "
+#~ "takes effect on ARM CPUs; A3 uses"
+#~ " the global-slicing CPU allocation "
+#~ "strategy and other device types use "
+#~ "the topo-affinity CPU allocation "
+#~ "strategy."
+#~ msgstr "是否启用 CPU 绑定。仅在 ARM CPU 上生效；A3 使用全局切片 CPU 分配策略，其他设备类型使用拓扑亲和性 CPU 分配策略。"

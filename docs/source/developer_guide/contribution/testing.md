@@ -23,7 +23,7 @@ cd ~/vllm-project/
 # vllm  vllm-ascend
 
 # Use mirror to speed up download
-# docker pull quay.nju.edu.cn/ascend/cann:|cann_image_tag|
+# docker pull m.daocloud.io/quay.io/ascend/cann:|cann_image_tag|
 export IMAGE=quay.io/ascend/cann:|cann_image_tag|
 docker run --rm --name vllm-ascend-ut \
     -v $(pwd):/vllm-project \
@@ -40,6 +40,7 @@ export PIP_EXTRA_INDEX_URL="https://download.pytorch.org/whl/cpu/ https://mirror
 # src path
 export SRC_WORKSPACE=/vllm-workspace
 mkdir -p $SRC_WORKSPACE
+cd $SRC_WORKSPACE
 
 apt-get update -y
 apt-get install -y python3-pip git vim wget net-tools gcc g++ cmake libnuma-dev curl gnupg2
@@ -96,6 +97,9 @@ After starting the container, you should install the required packages:
 ```bash
 # Prepare
 pip config set global.index-url https://mirrors.tuna.tsinghua.edu.cn/pypi/web/simple
+
+# Switch to the /vllm-workspace/vllm-ascend directory
+cd /vllm-workspace/vllm-ascend/
 
 # Install required packages
 pip install -r requirements-dev.txt
@@ -365,3 +369,25 @@ The doctest is a good way to make sure docs stay current and examples remain exe
 ```
 
 This will reproduce the same environment as the CI. See [labeled_doctest.yaml](https://github.com/vllm-project/vllm-ascend/blob/main/.github/workflows/labeled_doctest.yaml).
+
+### Run docs link check
+
+You can validate external links in the Sphinx docs locally with:
+
+```bash
+make -C docs linkcheck SPHINXOPTS="-W --keep-going"
+```
+
+To check links in a specific Markdown file, pass the file to `sphinx-build`.
+For example, to check only `docs/source/user_guide/release_notes.md`:
+
+```bash
+cd docs
+sphinx-build -b linkcheck -W --keep-going \
+  source _build/linkcheck source/user_guide/release_notes.md
+```
+
+The detailed report will be written to:
+
+- `docs/_build/linkcheck/output.txt`
+- `docs/_build/linkcheck/output.json`

@@ -153,7 +153,7 @@ The content of the multi_producer.sh script:
 
 ```shell
 export LD_LIBRARY_PATH=/usr/local/Ascend/ascend-toolkit/latest/python/site-packages:$LD_LIBRARY_PATH
-export PYTHONHASHSEED=0 
+export PYTHONHASHSEED=0
 export PYTHONPATH=$PYTHONPATH:/xxxxx/vllm
 export MOONCAKE_CONFIG_PATH="/xxxxxx/mooncake.json"
 export ASCEND_RT_VISIBLE_DEVICES=0,1,2,3
@@ -232,7 +232,7 @@ The content of multi_consumer.sh:
 ```shell
 export LD_LIBRARY_PATH=/usr/local/Ascend/ascend-toolkit/latest/python/site-packages:$LD_LIBRARY_PATH
 export PYTHONPATH=$PYTHONPATH:/xxxxx/vllm
-export PYTHONHASHSEED=0 
+export PYTHONHASHSEED=0
 export MOONCAKE_CONFIG_PATH="/xxxxx/mooncake.json"
 export ASCEND_RT_VISIBLE_DEVICES=4,5,6,7
 export ACL_OP_INIT_MODE=1
@@ -349,7 +349,7 @@ export LD_LIBRARY_PATH=/usr/local/Ascend/ascend-toolkit/latest/python/site-packa
 export PYTHONPATH=$PYTHONPATH:/xxxxx/vllm
 export MOONCAKE_CONFIG_PATH="/xxxxxx/mooncake.json"
 export ASCEND_RT_VISIBLE_DEVICES=0,1,2,3
-export PYTHONHASHSEED=0 
+export PYTHONHASHSEED=0
 export ACL_OP_INIT_MODE=1
 #A3
 export ASCEND_ENABLE_USE_FABRIC_MEM=1
@@ -409,16 +409,16 @@ This is because HCCL one-sided communication connections are created lazily afte
 
 **MemCache depends on MemFabric. Therefore, MemFabric must be installed.Installing the memcache after the memfabric is installed.**
 
-* **memfabric_hybrid**: <https://gitcode.com/Ascend/memfabric_hybrid/tree/master/doc/build.md>
+* **memfabric_hybrid**: <https://gitcode.com/Ascend/memfabric_hybrid/blob/master/doc/installation.md>
 
 * **memcache**: <https://gitcode.com/Ascend/memcache/blob/master/doc/build.md>
 
 ### Configuring the memcache Config File
 
-    config Path：/usr/local/memcache_hybrid/latest/config/
-    **Config file parameters description**：<https://gitcode.com/Ascend/memcache/blob/develop/doc/memcache_config.md>
+config Path：/usr/local/memcache_hybrid/latest/config/
+**Config file parameters description**：<https://gitcode.com/Ascend/memcache/blob/develop/doc/memcache_config.md>
 
-    Set TLS certificate configurations. If TLS is disabled, you do not need to upload a certificate. If TLS is enabled, you need to upload a certificate.
+Set TLS certificate configurations. If TLS is disabled, you do not need to upload a certificate. If TLS is enabled, you need to upload a certificate.
 
 ```shell
 # mmc-meta.conf
@@ -650,7 +650,7 @@ vllm serve xxxxxxx/Qwen3-32B \
   --max-num-batched-tokens 16384 \
   --trust-remote-code \
   --gpu-memory-utilization 0.9 \
-  --max-num_seqs 20 \
+  --max-num-seqs 20 \
   --no-enable-prefix-caching \
   --kv-transfer-config \
     '{
@@ -729,7 +729,7 @@ vllm serve xxxxxxx/Qwen3-32B \
   --max-num-batched-tokens 16384 \
   --trust-remote-code \
   --gpu-memory-utilization 0.9 \
-  --max-num_seqs 20 \
+  --max-num-seqs 20 \
   --no-enable-prefix-caching \
   --kv-transfer-config \
   '{
@@ -796,7 +796,7 @@ python -m vllm.entrypoints.openai.api_server \
   --data-parallel-size 2 \
   --tensor-parallel-size 8 \
   --port 30050 \
-  --max-num_seqs 20 \
+  --max-num-seqs 20 \
   --max-model-len 32768 \
   --max-num-batched-tokens 16384 \
   --enable_expert_parallel \
@@ -869,7 +869,7 @@ python -m vllm.entrypoints.openai.api_server \
   --enforce-eager\
   --quantization ascend \
   --no-enable-prefix-caching \
-  --max-num_seqs 20 \
+  --max-num-seqs 20 \
   --speculative-config '{"num_speculative_tokens": 1, "method":"deepseek_mtp"}' \
   --enable_expert_parallel \
   --gpu-memory-utilization 0.9 \
@@ -967,7 +967,7 @@ vllm serve xxxxxxx/DeepSeek-R1 \
   --trust-remote-code \
   --gpu-memory-utilization 0.9 \
   --quantization ascend \
-  --max-num_seqs 20 \
+  --max-num-seqs 20 \
   --enable-expert-parallel \
   --no-enable-prefix-caching \
   --kv-transfer-config \
@@ -1032,7 +1032,7 @@ vllm serve xxxxxxx/DeepSeek-R1 \
   --trust-remote-code \
   --gpu-memory-utilization 0.9 \
   --quantization ascend \
-  --max-num_seqs 20 \
+  --max-num-seqs 20 \
   --enable-expert-parallel \
   --no-enable-prefix-caching \
   --kv-transfer-config \
@@ -1081,7 +1081,7 @@ python -m vllm.entrypoints.openai.api_server \
   -dp 2 \
   -tp 8 \
   --port 30050 \
-  --max-num_seqs 20 \
+  --max-num-seqs 20 \
   --max-model-len 32768 \
   --max-num-batched-tokens 16384 \
   --speculative-config '{"num_speculative_tokens": 1, "method":"deepseek_mtp"}' \
@@ -1147,7 +1147,7 @@ etcdctl --endpoints "${ETCD_IP}:2379" get key
 ```
 
 For production environments, refer to the official etcd clustering
-documentation: <https://etcd.io/docs/current/op-guide/clustering/>
+documentation: <https://etcd.io/docs/v3.7/op-guide/clustering/>
 
 ### Start Datasystem Worker
 

@@ -321,7 +321,7 @@ __aicore__ inline void MoeV2FullLoadDynamicQuant<T>::Init(GM_ADDR x, GM_ADDR exp
   this->k_ = tilingData->k;
   this->n_ = tilingData->n;
   this->cols_ = tilingData->cols;
-  this->cols_scale_ = this->cols_ + ALIGN_512;
+  this->cols_scale_ = this->cols_ + UB_ALIGN;
   this->needCoreNum_ = this->gatherOutTilingData_->needCoreNum;
   this->perCoreRows_ = this->gatherOutTilingData_->perCoreRows;
   this->activateRows_ = this->gatherOutTilingData_->activateRows;

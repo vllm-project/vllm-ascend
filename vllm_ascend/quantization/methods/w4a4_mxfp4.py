@@ -33,7 +33,7 @@ from vllm_ascend.device.mxfp_compat import (
 from vllm_ascend.ops.fused_moe.experts_selector import select_experts
 from vllm_ascend.ops.fused_moe.moe_runtime_args import build_fused_experts_input
 
-from .base import AscendLinearScheme, AscendMoEScheme, QuantType
+from .base import AscendLinearScheme, AscendMoEScheme, QuantType, get_moe_num_logical_experts
 from .registry import register_scheme
 
 
@@ -170,7 +170,7 @@ class AscendW4A4MXFP4DynamicFusedMoEMethod(AscendMoEScheme):
         top_k: int,
         renormalize: bool,
         use_grouped_topk: bool = False,
-        global_num_experts: int = -1,
+        num_experts: int = -1,
         expert_map: torch.Tensor | None = None,
         topk_group: int | None = None,
         num_expert_group: int | None = None,
@@ -187,8 +187,16 @@ class AscendW4A4MXFP4DynamicFusedMoEMethod(AscendMoEScheme):
         apply_router_weight_on_input: bool = False,
         mc2_mask: torch.Tensor | None = None,
     ) -> torch.Tensor:
-        expected = global_num_experts - global_redundant_expert_num
-        assert router_logits.shape[1] == expected, "Number of global experts mismatch (excluding redundancy)"
+        num_shared_experts = getattr(layer, "n_shared_experts", 0)
+        if num_shared_experts is None:
+            num_shared_experts = 0
+        num_logical_experts = get_moe_num_logical_experts(
+            layer,
+            num_experts,
+            global_redundant_expert_num=global_redundant_expert_num,
+            num_shared_experts=num_shared_experts,
+        )
+        assert router_logits.shape[1] == num_logical_experts, "Number of global experts mismatch (excluding redundancy)"
         topk_weights, topk_ids = select_experts(
             hidden_states=x,
             router_logits=router_logits,
@@ -199,17 +207,16 @@ class AscendW4A4MXFP4DynamicFusedMoEMethod(AscendMoEScheme):
             num_expert_group=num_expert_group,
             custom_routing_function=custom_routing_function,
             scoring_func=scoring_func,
+            routed_scaling_factor=routed_scaling_factor,
             e_score_correction_bias=e_score_correction_bias,
-            global_num_experts=global_num_experts,
+            num_experts=num_logical_experts,
         )
 
         # this is a naive implementation for experts load balance so as
         # to avoid accumulating too much tokens on a single rank.
         # currently it is only activated when doing profile runs.
         if enable_force_load_balance:
-            random_matrix = torch.rand(
-                topk_ids.size(0), global_num_experts - global_redundant_expert_num, device=topk_ids.device
-            )
+            random_matrix = torch.rand(topk_ids.size(0), num_logical_experts, device=topk_ids.device)
             topk_ids = torch.argsort(random_matrix, dim=1)[:, : topk_ids.size(1)].to(topk_ids.dtype)
 
         topk_weights = topk_weights.to(x.dtype)

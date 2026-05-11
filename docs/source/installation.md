@@ -155,7 +155,7 @@ pip install vllm==|pip_vllm_version|
 
 # Install vllm-project/vllm-ascend.
 pip install \
---extra-index-url https://mirrors.huaweicloud.com/ascend/repos/pypi/simple  \
+--extra-index-url https://mirrors.huaweicloud.com/repository/pypi/simple  \
 vllm-ascend==|pip_vllm_ascend_version|
 
 ```
@@ -322,7 +322,7 @@ python example.py
 If you encounter a connection error with Hugging Face (e.g., `We couldn't connect to 'https://huggingface.co' to load the files, and couldn't find them in the cached files.`), run the following commands to use ModelScope as an alternative:
 
 ```bash
-export VLLM_USE_MODELSCOPE=true
+export VLLM_USE_MODELSCOPE=True
 pip install modelscope
 python example.py
 ```

@@ -3,6 +3,8 @@ from contextlib import contextmanager
 import torch
 from vllm.logger import logger
 
+from vllm_ascend.compilation.acl_graph import get_draft_graph_params, get_graph_params, weak_ref_workspaces
+
 
 @contextmanager
 def torch_cuda_wrapper():
@@ -14,7 +16,7 @@ def torch_cuda_wrapper():
         torch.cuda.current_stream = torch.npu.current_stream
         torch.cuda.graph_pool_handle = torch.npu.graph_pool_handle
         torch.cuda.CUDAGraph = torch.npu.NPUGraph
-        torch.cuda.graph = torch.npu.graph
+        torch.cuda.graph = torch_npu_graph_wrapper
         torch.cuda.synchronize = torch.npu.synchronize
         torch.cuda.set_stream = torch.npu.set_stream
         torch.cuda.current_device = torch.npu.current_device
@@ -38,3 +40,16 @@ def communicator_switch():
         yield
     finally:
         vllm.distributed.device_communicators.cuda_communicator.CudaCommunicator = CudaCommunicator
+
+
+@contextmanager
+def torch_npu_graph_wrapper(*args, **kwargs):
+    # MRV2-specific cleanup hook: intentionally reuse the graph context
+    # manager's exit to weak-ref graph workspaces after each capture,
+    # without adding another upstream monkey patch.
+    try:
+        with torch.npu.graph(*args, **kwargs):
+            yield
+    finally:
+        weak_ref_workspaces(get_graph_params())
+        weak_ref_workspaces(get_draft_graph_params())

@@ -99,12 +99,20 @@ public:
             eventUbDMTE3VList[i] = eventMTE3V++;
             eventUbDVMTE3List[i] = eventVMTE3++;
 
-            AscendC::SetFlag<AscendC::HardEvent::V_MTE2>(eventUbCVMTE2List[i]);
-            AscendC::SetFlag<AscendC::HardEvent::MTE3_V>(eventUbDMTE3VList[i]);
+
             ubCFp32List[i] = resource.ubBuf.template GetBufferByByte<float>(ubOffset);
             ubOffset += blockN * sizeof(float);
         }
     }
+    CATLASS_DEVICE
+    void SetFlag() 
+    {
+        for (uint32_t i = 0; i < UB_STAGES; ++i) {
+            AscendC::SetFlag<AscendC::HardEvent::V_MTE2>(eventUbCVMTE2List[i]);
+            AscendC::SetFlag<AscendC::HardEvent::MTE3_V>(eventUbDMTE3VList[i]);
+        }
+    }
+    
     CATLASS_DEVICE
     void Finalize()
     {

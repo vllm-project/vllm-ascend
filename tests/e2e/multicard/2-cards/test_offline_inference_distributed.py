@@ -26,6 +26,7 @@ from unittest.mock import patch
 
 import pytest
 from vllm import SamplingParams
+from vllm.config import KVTransferConfig
 
 from tests.e2e.conftest import VllmRunner, wait_until_npu_memory_free
 from tests.e2e.model_utils import check_outputs_equal
@@ -119,7 +120,11 @@ def test_deepseek_w4a8_accuracy_tp2(model):
         "The president of the United States is",
         "vLLM is a high-throughput and memory-efficient inference and serving engine for LLMs",
     ]
-    vllm_ds_w4a8_answers = ["逍遙而至地去 accrued", "平行于我udo madreHelen", "ysteepaolis backwards Kj"]
+    vllm_ds_w4a8_answers = [
+        "estown Exped recoveryeilights",
+        "平行于我 charmsapar理工学院",
+        "agna以此为基点儿的 magnetism",
+    ]
     sampling_params = SamplingParams(max_tokens=5, temperature=0.0)
     with VllmRunner(
         model,
@@ -180,6 +185,7 @@ def test_qwen3_moe_fc2_oshard_tp2() -> None:
         enable_expert_parallel=True,
         enforce_eager=True,  # TODO(Levi-JQ): support graph mode for fc2 in Qwen
         additional_config={"layer_sharding": ["o_proj"]},
+        kv_transfer_config=KVTransferConfig(kv_role="kv_producer"),
     ) as vllm_model:
         vllm_model.generate(example_prompts, sampling_params)
 
@@ -261,7 +267,6 @@ def test_deepseek3_2_w8a8_pruning_mtp_tp2_ep():
         max_model_len=163840,
         compilation_config={"cudagraph_capture_sizes": [2, 4, 6, 8, 10, 12], "cudagraph_mode": "FULL_DECODE_ONLY"},
         speculative_config={"num_speculative_tokens": 1, "method": "deepseek_mtp"},
-        additional_config={"layer_sharding": ["q_b_proj", "o_proj"]},
         reasoning_parser="deepseek_v3",
         tokenizer_mode="deepseek_v32",
         gpu_memory_utilization=0.8,
@@ -290,7 +295,7 @@ def test_deepseek3_2_w8a8c8_pruning_mtp_tp2_ep():
         max_model_len=163840,
         compilation_config={"cudagraph_capture_sizes": [2, 4, 6, 8, 10, 12], "cudagraph_mode": "FULL_DECODE_ONLY"},
         speculative_config={"num_speculative_tokens": 1, "method": "deepseek_mtp"},
-        additional_config={"layer_sharding": ["q_b_proj", "o_proj"], "enable_sparse_c8": True},
+        additional_config={"enable_sparse_c8": True},
         reasoning_parser="deepseek_v3",
         tokenizer_mode="deepseek_v32",
         gpu_memory_utilization=0.8,
