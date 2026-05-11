@@ -11,17 +11,50 @@ from flash_attn_v3 import flash_attn_with_kvcache as _fa3_fn  # type: ignore[imp
 
 
 class AscendFABackend(AttentionBackend):
-    accept_output_buffer: bool = True
+    def __init__(self):
+        super().__init__()
 
     @staticmethod
     def get_name() -> str:
-        return "ASCEND_FA3" if not envs_vllm.VLLM_USE_V2_MODEL_RUNNER else "FLASH_ATTN"
+        return "CUSTOM" if not envs_vllm.VLLM_USE_V2_MODEL_RUNNER else "FLASH_ATTN"
 
     @staticmethod
     def get_impl_cls() -> type["AscendFAImpl"]:
         return AscendFAImpl
 
+    @staticmethod
+    def get_builder_cls() -> type["AscendAttentionMetadataBuilder"]:
+        return AscendAttentionMetadataBuilder
+
+    @staticmethod
+    def get_kv_cache_shape(
+        num_blocks: int,
+        block_size: int,
+        num_kv_heads: int,
+        head_size: int,
+        cache_type: str = "",
+    ) -> tuple[int, ...]:
+        return (2, num_blocks, block_size, num_kv_heads, head_size)
+
+    @staticmethod
+    def get_supported_kernel_block_sizes() -> list[int]:
+        return [128]
+
+
 class AscendFAImpl(AscendAttentionBackendImpl):
+
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        if self.sliding_window is not None:
+            raise ValueError(
+                "AscendFAImpl does not support sliding window attention. "
+                "Please disable sliding window or use the default FIA backend."
+            )
+        if not self.vllm_config.model_config.enforce_eager:
+            raise ValueError(
+                "AscendFAImpl does not support ACL graph capture. "
+                "Please set enforce_eager=True or use the default FIA backend."
+            )
 
     def _flash_attn_with_kvcache(
         self,

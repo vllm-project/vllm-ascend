@@ -39,8 +39,8 @@ def _fa3_available() -> bool:
 
 
 def _generate_with_backend(prompts, env_value, max_tokens=MAX_TOKENS, **runner_kwargs):
-    original_value = os.environ.get("VLLM_ASCEND_ENABLE_FLASH_ATTN", "0")
-    os.environ["VLLM_ASCEND_ENABLE_FLASH_ATTN"] = str(env_value)
+    original_value = os.environ.get("VLLM_BATCH_INVARIANT", "0")
+    os.environ["VLLM_BATCH_INVARIANT"] = str(env_value)
     try:
         with VllmRunner(
             MODEL_NAME,
@@ -51,12 +51,12 @@ def _generate_with_backend(prompts, env_value, max_tokens=MAX_TOKENS, **runner_k
         ) as runner:
             return runner.generate_greedy(prompts, max_tokens)
     finally:
-        os.environ["VLLM_ASCEND_ENABLE_FLASH_ATTN"] = original_value
+        os.environ["VLLM_BATCH_INVARIANT"] = original_value
 
 
 def _generate_logprobs_with_backend(prompts, env_value, max_tokens=5, num_logprobs=5):
-    original_value = os.environ.get("VLLM_ASCEND_ENABLE_FLASH_ATTN", "0")
-    os.environ["VLLM_ASCEND_ENABLE_FLASH_ATTN"] = str(env_value)
+    original_value = os.environ.get("VLLM_BATCH_INVARIANT", "0")
+    os.environ["VLLM_BATCH_INVARIANT"] = str(env_value)
     try:
         with VllmRunner(
             MODEL_NAME,
@@ -68,7 +68,7 @@ def _generate_logprobs_with_backend(prompts, env_value, max_tokens=5, num_logpro
                 prompts, max_tokens=max_tokens, num_logprobs=num_logprobs
             )
     finally:
-        os.environ["VLLM_ASCEND_ENABLE_FLASH_ATTN"] = original_value
+        os.environ["VLLM_BATCH_INVARIANT"] = original_value
 
 
 def _assert_outputs_match(fia_outputs, fa3_outputs, label=""):
@@ -93,7 +93,7 @@ def test_fa3_vs_fia_single_prompt():
     """
     single_prompt = ["Explain quantum computing in simple terms."]
     fia_outputs = _generate_with_backend(single_prompt, env_value=0)
-    fa3_outputs = _generate_with_backend(single_prompt, env_value=1)
+    fa3_outputs = _generate_with_backend(single_prompt, env_value=1, attention_backend="FLASH_ATTN")
     _assert_outputs_match(fia_outputs, fa3_outputs, label="[SinglePrompt] ")
 
 
@@ -112,7 +112,7 @@ def test_fa3_vs_fia_mixed_lengths():
         LONG_PROMPT[:MAX_MODEL_LEN],
     ]
     fia_outputs = _generate_with_backend(mixed_prompts, env_value=0)
-    fa3_outputs = _generate_with_backend(mixed_prompts, env_value=1)
+    fa3_outputs = _generate_with_backend(mixed_prompts, env_value=1, attention_backend="FLASH_ATTN")
     _assert_outputs_match(fia_outputs, fa3_outputs, label="[MixedLen] ")
 
 
@@ -121,7 +121,7 @@ def test_fa3_vs_fia_with_chunkprefill():
     """Compare FA3 and FIA with single token generation where chunkprefill is used.
     """
     fia_outputs = _generate_with_backend(SHORT_PROMPTS, env_value=0, max_tokens=2, max_num_seqs=2, max_num_batched_tokens=5)
-    fa3_outputs = _generate_with_backend(SHORT_PROMPTS, env_value=1, max_tokens=2, max_num_seqs=2, max_num_batched_tokens=5)
+    fa3_outputs = _generate_with_backend(SHORT_PROMPTS, env_value=1, attention_backend="FLASH_ATTN", max_tokens=2, max_num_seqs=2, max_num_batched_tokens=5)
     _assert_outputs_match(fia_outputs, fa3_outputs, label="[Chunkprefill] ")
 
 
@@ -129,7 +129,7 @@ def test_fa3_vs_fia_with_chunkprefill():
 def test_fa3_vs_fia_logprobs():
     """Compare FA3 and FIA logprobs for fine-grained numerical verification."""
     fia_logprobs = _generate_logprobs_with_backend(SHORT_PROMPTS[:1], env_value=0)
-    fa3_logprobs = _generate_logprobs_with_backend(SHORT_PROMPTS[:1], env_value=1)
+    fa3_logprobs = _generate_logprobs_with_backend(SHORT_PROMPTS[:1], env_value=1, attention_backend="FLASH_ATTN")
 
     for i, (fia_out, fa3_out) in enumerate(zip(fia_logprobs, fa3_logprobs)):
         fia_ids, _, fia_lp = fia_out
