@@ -91,7 +91,7 @@ class AscendFAImpl(AscendAttentionBackendImpl):
             causal=is_causal,
             window_size=[-1, -1],
             rotary_interleaved=False,
-            num_splits=1 if envs_vllm.VLLM_BATCH_INVARIANT else 0,
+            num_splits=1,
             softcap=0.0,
             attention_chunk=0,
             sm_margin=0,

@@ -614,9 +614,9 @@ class NPUPlatform(Platform):
         if selected_backend == AttentionBackendEnum.FLASH_ATTN:
             if not attn_selector_config.use_batch_invariant:
                 raise ValueError(
-                    "AttentionBackendEnum.FLASH_ATTN is not supported on Ascend "
-                    "without batch invariant mode. Please set "
-                    "VLLM_BATCH_INVARIANT=1 to enable FA3 backend."
+                    "FA3 is not enabled on Ascend without batch invariant mode. "
+                    "For training-inference consistency, please set "
+                    "VLLM_BATCH_INVARIANT=1."
                 )
             if key != (False, False):
                 raise ValueError(
