@@ -49,6 +49,10 @@ const size_t DIM_1 = 1;
 const size_t DIM_2 = 2;
 const size_t DIM_3 = 3;
 
+const size_t ATTR_STATE_STRIDE_0 = 1;
+const size_t ATTR_STATE_STRIDE_1 = 2;
+const size_t ATTR_STATE_STRIDE_2 = 3;
+
 const size_t MAX_MTP = 8;
 
 template <typename T1, typename T2>
@@ -100,6 +104,9 @@ ge::graphStatus RecurrentGatedDeltaRuleTiling::GetShapeAttrsInfo()
                 return ge::GRAPH_FAILED);
 
     OP_CHECK_IF(GetScale() != ge::GRAPH_SUCCESS, OP_LOGE(inputParams_.opName, "Invalid GetScale."),
+                return ge::GRAPH_FAILED);
+
+    OP_CHECK_IF(GetStateStrides() != ge::GRAPH_SUCCESS, OP_LOGE(inputParams_.opName, "Invalid GetStateStrides."),
                 return ge::GRAPH_FAILED);
 
     OP_CHECK_IF(GetOptionalInput() != ge::GRAPH_SUCCESS, OP_LOGE(inputParams_.opName, "Invalid GetOptionalInput."),
@@ -468,6 +475,27 @@ ge::graphStatus RecurrentGatedDeltaRuleTiling::GetScale()
     return ge::GRAPH_SUCCESS;
 }
 
+ge::graphStatus RecurrentGatedDeltaRuleTiling::GetStateStrides()
+{
+    auto attrs = context_->GetAttrs();
+    const int64_t* stride0Ptr = attrs->GetAttrPointer<int64_t>(ATTR_STATE_STRIDE_0);
+    int64_t stride0 = (stride0Ptr == nullptr) ? 0 : *stride0Ptr;
+    OP_CHECK_IF(stride0 <= 0, OP_LOGE(context_->GetNodeName(), "stride0 only supports > 0"),
+                return ge::GRAPH_FAILED);
+    tilingData_.stateStride0 = stride0;
+    const int64_t* stride1Ptr = attrs->GetAttrPointer<int64_t>(ATTR_STATE_STRIDE_1);
+    int64_t stride1 = (stride1Ptr == nullptr) ? 0 : *stride1Ptr;
+    OP_CHECK_IF(stride1 <= 0, OP_LOGE(context_->GetNodeName(), "stride1 only supports > 0"),
+                return ge::GRAPH_FAILED);
+    tilingData_.stateStride1 = stride1;
+    const int64_t* stride2Ptr = attrs->GetAttrPointer<int64_t>(ATTR_STATE_STRIDE_2);
+    int64_t stride2 = (stride2Ptr == nullptr) ? 0 : *stride2Ptr;
+    OP_CHECK_IF(stride2 <= 0, OP_LOGE(context_->GetNodeName(), "stride2 only supports > 0"),
+                return ge::GRAPH_FAILED);
+    tilingData_.stateStride2 = stride2;
+    return ge::GRAPH_SUCCESS;
+}
+
 ge::graphStatus RecurrentGatedDeltaRuleTiling::GetOptionalInput()
 {
     if (context_->GetOptionalInputDesc(G_INDEX) == nullptr) {
@@ -602,7 +630,7 @@ ge::graphStatus RecurrentGatedDeltaRuleTiling::FinalizeVStepFromUb(int64_t ubSiz
             selected = profile;
         }
     }
-    
+
     OP_LOGD(context_->GetNodeName(), "selected profile: stateOutBufferNum=[%u], attnOutBufferNum=[%u], vStep=[%u], repeatTime=[%u], valid=[%d]",
             selected.stateOutBufferNum, selected.attnOutBufferNum, selected.vStep, selected.repeatTime, selected.valid);
 
