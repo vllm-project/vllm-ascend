@@ -30,7 +30,7 @@ from vllm.platforms import Platform, PlatformEnum
 # todo: please remove it when solve cuda hard code in vllm
 os.environ["VLLM_DISABLE_SHARED_EXPERTS_STREAM"] = "1"
 
-import vllm_ascend.envs as envs_ascend
+from vllm.v1.attention.backends.registry import AttentionBackendEnum
 from vllm_ascend.ascend_config import init_ascend_config
 
 # isort: off
@@ -609,7 +609,23 @@ class NPUPlatform(Platform):
         if is_310p():
             return backend_map_310.get(key, backend_map_310[(False, False)])
 
-        return backend_map[key]
+        backend_cls_path = backend_map[key]
+
+        if selected_backend == AttentionBackendEnum.FLASH_ATTN and attn_selector_config.use_batch_invariant == True:
+            if key != (False, False):
+                raise ValueError(
+                    "Ascend FA3 backend does not support MLA and SFA."
+                )
+            try:
+                import flash_attn_v3  # noqa: F401
+            except ImportError:
+                raise ImportError(
+                    "flash_attn_v3 is not installed but FA3 backend is requested. "
+                    "Please install flash_attn_v3 to enable FA3."
+                )
+            backend_cls_path = "vllm_ascend.attention.fa3_v1.AscendFABackend"
+
+        return backend_cls_path
 
     @classmethod
     def get_punica_wrapper(cls) -> str:
@@ -901,7 +917,7 @@ class NPUPlatform(Platform):
                 att_config.flash_attn_version = None
 
             # Notify user that the backend will be managed by Ascend plugins
-            if getattr(att_config, "backend", None) is not None:
+            if getattr(att_config, "backend", None) is not None and att_config.backend != AttentionBackendEnum.FLASH_ATTN:
                 logger.info(
                     "User specified attention backend '%s'. Note that Ascend NPU "
                     "will use its registered plugin backend instead. Resetting to None.",
