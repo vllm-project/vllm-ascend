@@ -17,6 +17,7 @@ from tests.ut.attention.utils import (
     create_common_attn_metadata,
     create_vllm_config,
 )
+from tests.ut.conftest import npu_test
 from vllm_ascend.attention.utils import AscendCommonAttentionMetadata
 
 
@@ -521,6 +522,7 @@ def compute_mla_sdpa_reference(
     return sdpa_output
 
 
+@npu_test(num_npus=1, npu_type="a2")
 def _test_mla_attention_correctness(
     batch_spec: BatchSpec,
     model: str,
@@ -668,6 +670,7 @@ def _test_mla_attention_correctness(
 )
 @pytest.mark.parametrize("model", ["deepseek-ai/DeepSeek-V2"])
 @pytest.mark.parametrize("tensor_parallel_size", [1])
+@npu_test(num_npus=1, npu_type="a2")
 def test_mla_backend_correctness(default_vllm_config, batch_spec_name: str, model: str, tensor_parallel_size: int):
     batch_spec = BATCH_SPECS[batch_spec_name]
 
