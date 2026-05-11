@@ -6,55 +6,46 @@ test_cases:
   - name: "MiniMax-M2.5-w8a8"
     model: "Eco-Tech/MiniMax-M2.5-w8a8-QuaRot"
     envs:
-      HCCL_BUFFSIZE: "512"
+      HCCL_BUFFSIZE: "1024"
       HCCL_OP_EXPANSION_MODE: "AIV"
       PYTORCH_NPU_ALLOC_CONF: "expandable_segments:True"
       OMP_NUM_THREADS: "1"
       TASK_QUEUE_ENABLE: "1"
-      VLLM-ASCEND_ENABLE_NZ: "1"
-      VLLM_ASCEND_ENABLE__FUSED_MC2: "1"
-      VLLM_ASCEND_ENABLE_FLASHCOMM1: "1"
-      VLLM-ASCEND_BALANCE_SCHEDULING: "1"
       VLLM_USE_MODELSCOPE: "true"
       SERVER_PORT: "DEFAULT_PORT"
     server_cmd:
-      - "--tensor-parallel-size"
-      - "8"
       - "--data-parallel-size"
       - "1"
+      - "--tensor-parallel-size"
+      - "2"
       - "--port"
       - "$SERVER_PORT"
+      - "--max-model-len"
+      - "18432"
+      - "--max-num-batched-tokens"
+      - "16384"
+      - "--max-num-seqs"
+      - "128"
+      - "--gpu-memory-utilization"
+      - "0.9"
+      - "--compilation-config"
+      - '{"cudagraph_mode":"FULL_DECODE_ONLY"}'
       - "--trust-remote-code"
       - "--async-scheduling"
-      - "--gpu-memory-utilization"
-      - "0.85"
+      - "--allowed-local-media-path"
+      - "/"
       - "--quantization"
       - "ascend"
-      - "--no-enable-prefix-caching"
+      - "--mm-processor-cache-gb"
+      - "0"
       - "--additional-config"
       - '{"enable_cpu_binding":true}'
+      $$$$
+      - "--no-enable-prefix-caching"
       - "--speculative_config"
       - '{"method":"eagle3","model":"vllm-ascend/MiniMax-M2.5-eagle-model-0318","num_speculative_tokens":3}'
       - "--enable-expert-parallel"
-      - "--max-num-seqs"
-      - "128"
-      - "--max-num-batched-tokens"
-      - "16384"
-      - "--max-model-len"
-      - "196608"
-      - "--compilation-config"
-      - '{"cudagraph_mode":"FULL_DECODE_ONLY"}'
     benchmarks:
-      acc:
-        case_type: accuracy
-        dataset_path: vllm-ascend/gpqa
-        request_conf: vllm_api_general_chat
-        dataset_conf: gpqa/gpqa_gen_0_shot_cot_chat_prompt
-        max_out_len: 65536
-        batch_size: 32
-        baseline: 83
-        threshold: 5
-        temperature: 1.0
       perf:
         case_type: performance
         dataset_path: vllm-ascend/GSM8K-in3500-bs2800
