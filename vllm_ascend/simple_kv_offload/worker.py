@@ -140,11 +140,19 @@ class SimpleCPUOffloadNPUWorker:
             for name, t in unique_caches.items()
         }
 
-        # Mirror upstream: lowest-priority transfer streams so KV I/O
-        # yields to compute on the default stream.
-        low_pri, _ = torch.npu.Stream.priority_range()
-        self.load_stream = torch.npu.Stream(priority=low_pri)
-        self.store_stream = torch.npu.Stream(priority=low_pri)
+        # Upstream creates these with the lowest CUDA priority so KV I/O
+        # yields to compute on the default stream. ``torch.npu`` does
+        # NOT expose ``Stream.priority_range()`` / a ``priority=`` kwarg
+        # (``RuntimeError: NPU does not support Stream.priority_range()
+        # currently``) and there is no equivalent torch_npu API today.
+        # Use plain transfer streams — matches every other
+        # ``torch.npu.Stream`` site in this repo. The transfers still
+        # run off the default compute stream, so they overlap with the
+        # forward pass; we only lose the explicit "always yield" hint,
+        # which is a soft scheduling preference and not a correctness
+        # requirement.
+        self.load_stream = torch.npu.Stream()
+        self.store_stream = torch.npu.Stream()
         self._backend.init(
             self.npu_kv_caches,
             self.cpu_kv_caches,
