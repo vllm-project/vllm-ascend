@@ -114,7 +114,6 @@ jobs:
           apt-get update -y
           apt-get install -y git zstd
           git config --global --add safe.directory /__w/vllm-ascend/vllm-ascend
-          git config --global --add safe.directory /__w/vllm-benchmarks/vllm-benchmarks
 
       - name: Config mirrors (openeuler)
         if: matrix.os == 'openeuler'
@@ -124,7 +123,6 @@ jobs:
           sed -Ei 's@https?://[^/]+/(openeuler|centos|fedora)@http://cache-service.nginx-pypi-cache.svc.cluster.local:8081/\1@g' /etc/yum.repos.d/*.repo
           yum install -y git zstd
           git config --global --add safe.directory /__w/vllm-ascend/vllm-ascend
-          git config --global --add safe.directory /__w/vllm-benchmarks/vllm-benchmarks
 
       - name: Install system dependencies (ubuntu)
         if: matrix.os == 'ubuntu'
@@ -175,7 +173,7 @@ jobs:
         if: steps.cache-csrc.outputs.cache-hit != 'true'
         env:
           SOC_VERSION: ${{ matrix.soc_version }}
-          MAX_JOBS: "8"
+          MAX_JOBS: "16"
         run: |
           source /usr/local/Ascend/ascend-toolkit/set_env.sh
           source /usr/local/Ascend/nnal/atb/set_env.sh
