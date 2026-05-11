@@ -9,9 +9,11 @@ import vllm_ascend.envs as envs_ascend
 class LayerwiseConfig:
     num_shared_buffers: int
     independent_layers: list[int]
-    shared_layers: list[int]
-    buffer_owner_layers: list[int]
+    save_layers: list[int]
+    load_layers: list[int]
+    initial_load_layers: list[int]
     prefetch_layer_map: dict[int, tuple[int, int]]
+    has_layer_reuse: bool
 
 
 def _parse_int_config(value: Any, name: str) -> int:
@@ -83,24 +85,27 @@ def get_layerwise_config(num_layers: int) -> LayerwiseConfig:
             "VLLM_ASCEND_KV_POOL_LAYERWISE_INDEPENDENT_LAYERS cannot include "
             "all layers; at least one layer must use layerwise KV pool transfer")
     independent_layer_indices = set(independent_layers)
-    shared_layers = [i for i in range(num_layers)
-                     if i not in independent_layer_indices]
-    buffer_owner_layers = shared_layers[:num_shared_buffers]
+    save_layers = list(range(num_layers))
+    load_layers = [i for i in range(num_layers)
+                   if i not in independent_layer_indices]
+    initial_load_layers = load_layers[:num_shared_buffers]
 
     prefetch_layer_map = {}
-    for current_index in range(1, len(shared_layers)):
+    for current_index in range(1, len(load_layers)):
         previous_index = current_index - 1
         next_index = previous_index + num_shared_buffers
-        if next_index < len(shared_layers):
-            prefetch_layer_map[shared_layers[current_index]] = (
-                shared_layers[previous_index],
-                shared_layers[next_index],
+        if next_index < len(load_layers):
+            prefetch_layer_map[load_layers[current_index]] = (
+                load_layers[previous_index],
+                load_layers[next_index],
             )
 
     return LayerwiseConfig(
         num_shared_buffers=num_shared_buffers,
         independent_layers=independent_layers,
-        shared_layers=shared_layers,
-        buffer_owner_layers=buffer_owner_layers,
+        save_layers=save_layers,
+        load_layers=load_layers,
+        initial_load_layers=initial_load_layers,
         prefetch_layer_map=prefetch_layer_map,
+        has_layer_reuse=bool(prefetch_layer_map),
     )

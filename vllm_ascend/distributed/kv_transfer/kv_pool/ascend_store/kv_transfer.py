@@ -170,8 +170,16 @@ class LayerBatchBuilder:
             block_ids_np, chunk_gvas_np = self._require_request_arrays(block_range)
             if num_blocks > 0:
                 end = offset + num_blocks
+                gva_start = block_range.start_block - request.gva_block_offset
+                gva_end = block_range.end_block - request.gva_block_offset
+                if gva_start < 0 or gva_end > len(chunk_gvas_np):
+                    raise RuntimeError(
+                        "ReqMeta GVA metadata does not cover requested block "
+                        f"range [{block_range.start_block}, {block_range.end_block}) "
+                        f"with offset {request.gva_block_offset}"
+                    )
                 block_ids_arr[offset:end] = block_ids_np[block_range.start_block:block_range.end_block]
-                chunk_gvas_arr[offset:end] = chunk_gvas_np[block_range.start_block:block_range.end_block]
+                chunk_gvas_arr[offset:end] = chunk_gvas_np[gva_start:gva_end]
                 offset = end
 
             if block_range.partial_block_index is not None:

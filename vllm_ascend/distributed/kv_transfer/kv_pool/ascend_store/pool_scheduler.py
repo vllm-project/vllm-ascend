@@ -45,11 +45,8 @@ class KVPoolScheduler:
         # request_id -> full_token_ids
         self._request_trackers: dict[str, RequestTracker] = {}
         self._preempted_req_ids: set[str] = set()
-        self.prefill_offload = True
-        # Whether to discard partial chunks
-        self._discard_partial_chunks = (
-            vllm_config.kv_transfer_config.get_from_extra_config(
-                "discard_partial_chunks", not self.prefill_offload))
+        self.prefill_offload = False
+        self._discard_partial_chunks = True
         self._unfinished_requests: dict[str, tuple[Request, list[int]]] = {}
         self._unfinished_request_ids: set[str] = set()
 
@@ -76,15 +73,25 @@ class KVPoolScheduler:
         self.model_name = model_config.model.split('/')[-1]
 
         # Keep this in sync with pool_worker.py because it affects allocation size.
-        layerwise_config = get_layerwise_config(self.num_layers)
-        self.independent_layers = layerwise_config.independent_layers
+        if self.use_layerwise:
+            layerwise_config = get_layerwise_config(self.num_layers)
+            num_layer_keys = len(layerwise_config.save_layers)
+            self.layerwise_offload = layerwise_config.has_layer_reuse
+        else:
+            num_layer_keys = 1
+            self.layerwise_offload = False
 
         keys_per_block_hash = (
             self.pcp_size * self.dcp_size
             * (self.tp_size // self.put_step)
-            * (self.num_layers - len(self.independent_layers))
+            * num_layer_keys
         )
         self.keys_per_block_hash = keys_per_block_hash
+        self.prefill_offload = self.layerwise_offload
+        # Whether to discard partial chunks
+        self._discard_partial_chunks = (
+            vllm_config.kv_transfer_config.get_from_extra_config(
+                "discard_partial_chunks", not self.prefill_offload))
 
     def _get_or_create_request_tracker(self, req_id: str) -> RequestTracker:
         tracker = self._request_trackers.get(req_id)
@@ -173,7 +180,8 @@ class KVPoolScheduler:
         keys_to_check = [
             f"{self.model_name}@{bh.hex()}" for bh in block_hashes_to_check
         ]
-        remaining_keys = keys_to_check
+        local_hit_blocks = 0 if self.layerwise_offload else min(num_computed_tokens // self._block_size, num_blocks)
+        remaining_keys = keys_to_check[local_hit_blocks:]
         tracker = self._get_or_create_request_tracker(request.request_id)
         # cached_gvas = tracker.chunk_gvas
         # if cached_gvas:
@@ -183,19 +191,21 @@ class KVPoolScheduler:
         #             f"Request {request.request_id}: cached gvas key(s) no longer exist in store")
         #     remaining_keys = remaining_keys[len(cached_gvas):]
         cached_gvas = []
-        num_hit_blocks = 0
+        num_remote_hit_blocks = 0
         if remaining_keys:
             key_infos = self.store_scheduler.batch_get_key_info(remaining_keys)
             for key_info in key_infos:
                 sizes = key_info.size()
                 if sizes and sizes > 0:
                     cached_gvas.append(key_info.gva_list()[0])
-                    num_hit_blocks += 1
+                    num_remote_hit_blocks += 1
                 else:
                     break
+        num_hit_blocks = local_hit_blocks + num_remote_hit_blocks
         num_external_hit_tokens = num_hit_blocks * self._block_size
-        tracker.block_keys = keys_to_check[:num_hit_blocks]
-        tracker.chunk_gvas = cached_gvas[:num_hit_blocks]
+        tracker.block_keys = keys_to_check[local_hit_blocks:num_hit_blocks]
+        tracker.chunk_gvas = cached_gvas[:num_remote_hit_blocks]
+        tracker.gva_block_offset = local_hit_blocks
         # TODO 这里没有命中的可以提前申请空间，避免后面申请的时候掩盖不住，这个可以异步进行。
         # 先exists判断是否存在，然后异步获取地址和申请空间，这样是否更高效一点？
         if num_external_hit_tokens == request.num_tokens:
@@ -310,8 +320,9 @@ class KVPoolScheduler:
                 token_ids=request.prompt_token_ids[:num_tokens_to_compute].copy(),
                 block_keys=(previous_tracker.block_keys.copy() if previous_tracker else []),
                 chunk_gvas=(previous_tracker.chunk_gvas.copy() if previous_tracker else []),
+                gva_block_offset=(previous_tracker.gva_block_offset if previous_tracker else 0),
             )
-            num_hit_blocks = len(request_tracker.block_keys)
+            next_pool_block = request_tracker.gva_block_offset + len(request_tracker.block_keys)
             self._request_trackers[request.req_id] = request_tracker
             last_chunk_tokens_num = (
                 (len(request.prompt_token_ids) // self._block_size * self._block_size)
@@ -323,7 +334,7 @@ class KVPoolScheduler:
             has_last_block = num_tokens_to_compute % self._block_size != 0
 
             self._generate_keys_and_alloc(
-                request_real.block_hashes[num_hit_blocks:num_blocks],
+                request_real.block_hashes[next_pool_block:num_blocks],
                 request_tracker=request_tracker,
                 has_last_block=has_last_block,
             )
@@ -381,14 +392,15 @@ class KVPoolScheduler:
                         token_ids=request_real.prompt_token_ids[:num_tokens_to_compute].copy(),
                         block_keys=(previous_tracker.block_keys.copy() if previous_tracker else []),
                         chunk_gvas=(previous_tracker.chunk_gvas.copy() if previous_tracker else []),
+                        gva_block_offset=(previous_tracker.gva_block_offset if previous_tracker else 0),
                     )
                     self._request_trackers[req_id] = request_tracker
-                    num_hit_blocks = len(request_tracker.block_keys)
+                    next_pool_block = request_tracker.gva_block_offset + len(request_tracker.block_keys)
 
                     num_blocks = len(new_block_ids)
                     has_last_block = num_tokens_to_compute % self._block_size != 0
                     self._generate_keys_and_alloc(
-                        request_real.block_hashes[num_hit_blocks:num_blocks],
+                        request_real.block_hashes[next_pool_block:num_blocks],
                         request_tracker=request_tracker,
                         has_last_block=has_last_block,
                     )
@@ -476,18 +488,23 @@ class KVPoolScheduler:
                     num_tokens_to_compute == len(request.prompt_token_ids) - 1
                 ):
                     num_tokens_to_compute = num_tokens_to_compute + 1
+                previous_tracker = self._request_trackers.get(request_id)
                 request_tracker = RequestTracker(
                     req_id=request_id,
                     token_len=num_tokens_to_compute,
                     allocated_block_ids=block_ids,
                     num_saved_tokens=0,
+                    block_keys=(previous_tracker.block_keys.copy() if previous_tracker else []),
+                    chunk_gvas=(previous_tracker.chunk_gvas.copy() if previous_tracker else []),
+                    gva_block_offset=(previous_tracker.gva_block_offset if previous_tracker else 0),
                 )
 
                 self._request_trackers[request_id] = request_tracker
 
                 num_blocks = num_tokens_to_compute // self._block_size
                 has_last_block = num_tokens_to_compute % self._block_size != 0
-                block_hashes_for_keys = request.block_hashes[:num_blocks]
+                next_pool_block = request_tracker.gva_block_offset + len(request_tracker.block_keys)
+                block_hashes_for_keys = request.block_hashes[next_pool_block:num_blocks]
                 self._generate_keys_and_alloc(
                     block_hashes_for_keys,
                     request_tracker=request_tracker,

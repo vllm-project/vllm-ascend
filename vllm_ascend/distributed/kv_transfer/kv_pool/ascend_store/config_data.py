@@ -270,6 +270,7 @@ class RequestTracker:
     token_ids: list[int] | None = None
 
     chunk_gvas: list[int] = field(default_factory=list)
+    gva_block_offset: int = 0
     last_block_gva: int | None = None
 
     block_keys: list[str] = field(default_factory=list)
@@ -365,6 +366,7 @@ class ReqMeta:
 
     block_ids_np: np.ndarray | None = None
     chunk_gvas_np: np.ndarray | None = None
+    gva_block_offset: int = 0
 
     @staticmethod
     def from_request_tracker(
@@ -449,6 +451,7 @@ class ReqMeta:
             partial_block_index=partial_block_index,
             block_ids_np=np.asarray(tracker.allocated_block_ids, dtype=np.int64),
             chunk_gvas_np=np.asarray(tracker.chunk_gvas, dtype=np.int64),
+            gva_block_offset=tracker.gva_block_offset,
         )
 
 

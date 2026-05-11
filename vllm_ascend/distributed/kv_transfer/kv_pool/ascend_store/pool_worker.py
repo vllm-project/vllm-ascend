@@ -178,10 +178,12 @@ class KVPoolWorker:
         self.layer_save_finished_events = None
         self.layer_transfer_finished_events = None
         layerwise_config = get_layerwise_config(self.num_layers)
+        self.layerwise_offload = layerwise_config.has_layer_reuse
         self.independent_layers = layerwise_config.independent_layers
-        self.layers_need_to_save = layerwise_config.shared_layers
+        self.layers_need_to_save = layerwise_config.save_layers
+        self.layers_need_to_load = layerwise_config.load_layers
         self.prefetch_layer_map = layerwise_config.prefetch_layer_map
-        self.offload_start_ids = layerwise_config.buffer_owner_layers
+        self.initial_load_layers = layerwise_config.initial_load_layers
         self.sync_save_events = None
 
     def register_kv_caches(self, kv_caches: dict[str, torch.Tensor]):
@@ -242,7 +244,7 @@ class KVPoolWorker:
                     self.num_ranks_per_layer,
                     self.page_size_bytes,
                     ready_event_sending,
-                    self.layers_need_to_save[-1]+1,
+                    self.num_layers,
                     self.layer_save_finished_events,
                     self.sync_save_events,
                     self.enable_kv_events,
@@ -264,7 +266,7 @@ class KVPoolWorker:
                 self.get_event,
                 self.layer_load_finished_events,
                 self.layer_save_finished_events,
-                self.layers_need_to_save[-1]+1,
+                self.num_layers,
                 self.h2d_stagger_us,
                 self.h2d_stagger_group_size,
                 self.h2d_stagger_dynamic_addrs_per_us,
@@ -354,6 +356,9 @@ class KVPoolWorker:
                 continue
             save_start_block = request.save_start_token // self.block_size
             save_end_block = request.token_len_chunk // self.block_size
+            save_start_block = max(save_start_block, request.gva_block_offset)
+            if save_start_block >= save_end_block and request.partial_block_index is None:
+                continue
             partial_block_index = request.partial_block_index
             request_block_ranges.append(
                 LayerBlockRange(
@@ -381,12 +386,13 @@ class KVPoolWorker:
             if request.load_spec is None or not request.load_spec.can_load:
                 continue
             cached_tokens = request.load_spec.kvpool_cached_tokens
+            load_start_block = 0 if self.layerwise_offload else request.load_spec.vllm_cached_tokens // self.block_size
             full_blocks = cached_tokens // self.block_size
             partial_block_index = full_blocks if cached_tokens % self.block_size != 0 else None
             request_block_ranges.append(
                 LayerBlockRange(
                     request=request,
-                    start_block=0,
+                    start_block=load_start_block,
                     end_block=full_blocks,
                     partial_block_index=partial_block_index,
                 )
@@ -404,18 +410,19 @@ class KVPoolWorker:
             return
         for layer_id in self.layers_need_to_save:
             self._process_save_for_layer_batch(requests, layer_id)
+        for layer_id in self.layers_need_to_load:
             self._process_load_for_layer_batch(requests, layer_id)
 
     def _submit_ready_layer_loads(self) -> None:
         assert self.kv_recv_thread is not None
-        if not self.layers_need_to_save:
+        if not self.layers_need_to_load:
             return
 
         if self.current_layer in self.independent_layers:
             return
 
-        if self.current_layer == self.layers_need_to_save[0]:
-            for layer_id in self.offload_start_ids:
+        if self.current_layer == self.layers_need_to_load[0]:
+            for layer_id in self.initial_load_layers:
                 logger.debug(f">>>>>>>>>>>>>>>>>>>> load layer {layer_id}")
                 self.kv_recv_thread.add_request(
                     LayerLoadTask(
@@ -457,9 +464,10 @@ class KVPoolWorker:
             is_finish = self.layer_save_finished_events[self.layers_need_to_save[-1]].wait(timeout=10)
             if not is_finish:
                 logger.info("Layerwise %d save wait timed out", self.current_layer)
-            for layer_id in self.layers_need_to_save[-len(self.offload_start_ids):]:
-                logger.debug(f">>>>>>>>>>>>>>>>>>>> clear save layer {layer_id}")
-                self.layer_save_finished_events[layer_id].clear()
+            for layer_id in self.layers_need_to_save:
+                if self.layer_save_finished_events[layer_id].is_set():
+                    logger.debug(f">>>>>>>>>>>>>>>>>>>> clear save layer {layer_id}")
+                    self.layer_save_finished_events[layer_id].clear()
 
         self.current_layer = self.current_layer + 1
 
