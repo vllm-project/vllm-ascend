@@ -208,7 +208,7 @@ class ChunkedTokenDatabase:
         mask_num: int = 0,
         kv_cache_group_id: int = 0,
         skip_null_blocks: bool = False,
-    ) -> Iterable[tuple[int, int, PoolKey, int]]:
+    ) -> Iterable[tuple[int, int, PoolKey]]:
         group_block_size = self.get_block_size(kv_cache_group_id)
         for start_idx, end_idx, key in self.process_tokens(
             token_len,
@@ -218,13 +218,14 @@ class ChunkedTokenDatabase:
         ):
             if not skip_null_blocks:
                 yield start_idx, end_idx, key
-            block_idx = start_idx // group_block_size
-            if block_idx >= len(block_ids):
-                continue
-            block_id = block_ids[block_idx]
-            if block_id <= 0:
-                continue
-            yield start_idx, end_idx, key
+            else:
+                block_idx = start_idx // group_block_size
+                if block_idx >= len(block_ids):
+                    continue
+                block_id = block_ids[block_idx]
+                if block_id <= 0:
+                    continue
+                yield start_idx, end_idx, key
 
     def decode_adaptor_prefill_pp(self, key, addr, size):
         if self.partitions is None or len(self.partitions) == 1:

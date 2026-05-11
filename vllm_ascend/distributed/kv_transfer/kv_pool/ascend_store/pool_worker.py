@@ -124,9 +124,10 @@ class KVPoolWorker:
         self.grouped_block_size = self.original_block_size
         cp_scale = self.pcp_size * self.dcp_size
         if cp_scale > 1:
-            self._block_size = [bs * cp_scale for bs in self.original_block_size]
+            self.grouped_block_size = [bs * cp_scale for bs in self.original_block_size]
 
-        self.hash_block_size = vllm_config.cache_config.block_size * cp_scale  # todo: using cache_config.hash_block_size or gcd of grouped_block_size
+        # todo: using cache_config.hash_block_size or gcd of grouped_block_size
+        self.hash_block_size = vllm_config.cache_config.block_size * cp_scale
         self.lcm_block_size = math.lcm(*self.grouped_block_size)
 
         logger.info("use_hybrid: %s, use_mamba: %s, hma_group_size: %s, hash_block_size: %s, lcm_block_size: %s",
@@ -728,6 +729,8 @@ class KVPoolWorker:
                         if all(values[i] == 1 for values in multi_tp_values) and ends[i] % self.lcm_block_size == 0:
                             hits.append(ends[i])
                             break
+                    else:
+                        return 0
                 else:
                     index = self.find_min_first_non_one_index(multi_tp_values)
                     if index != -1:
@@ -735,6 +738,10 @@ class KVPoolWorker:
                             if starts[i] % self.lcm_block_size == 0:
                                 hits.append(starts[i])
                                 break
+                        else:
+                            return 0
+                    else:
+                        return 0
         except Exception as e:
             logger.error("Remote connection failed in contains: %s", e)
             return 0
