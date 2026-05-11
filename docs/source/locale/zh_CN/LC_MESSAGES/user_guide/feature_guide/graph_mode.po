@@ -7,7 +7,7 @@ msgid ""
 msgstr ""
 "Project-Id-Version: PROJECT VERSION\n"
 "Report-Msgid-Bugs-To: EMAIL@ADDRESS\n"
-"POT-Creation-Date: 2026-04-14 02:04+0000\n"
+"POT-Creation-Date: 2026-05-07 02:15+0000\n"
 "PO-Revision-Date: 2026-01-22 16:30+0800\n"
 "Last-Translator: Gemini\n"
 "Language: zh_CN\n"
@@ -37,21 +37,21 @@ msgid ""
 msgstr "vLLM 已提供了通用的图模式架构、模式定义和编译集成。关于这些上游概念，请参阅："
 
 #: ../../source/user_guide/feature_guide/graph_mode.md:9
-#: ../../source/user_guide/feature_guide/graph_mode.md:158
+#: ../../source/user_guide/feature_guide/graph_mode.md:277
 msgid "[CUDA Graphs](https://docs.vllm.ai/en/latest/design/cuda_graphs/)"
 msgstr "[CUDA 图](https://docs.vllm.ai/en/latest/design/cuda_graphs/)"
 
 #: ../../source/user_guide/feature_guide/graph_mode.md:10
-#: ../../source/user_guide/feature_guide/graph_mode.md:159
+#: ../../source/user_guide/feature_guide/graph_mode.md:278
 msgid "[torch.compile](https://docs.vllm.ai/en/latest/design/torch_compile/)"
 msgstr "[torch.compile](https://docs.vllm.ai/en/latest/design/torch_compile/)"
 
 #: ../../source/user_guide/feature_guide/graph_mode.md:12
 msgid ""
-"This document focuses on the Ascend-specific view: which graph backends "
-"are available, how to enable them, and what constraints users should keep"
-" in mind on Ascend."
-msgstr "本文档侧重于 Ascend 特有的视角：可用的图后端有哪些、如何启用它们，以及用户在 Ascend 上应注意哪些约束。"
+"This document focuses on the Ascend-specific view: how graph mode works "
+"on Ascend, which components are involved, how to configure them, and what"
+" constraints users should keep in mind."
+msgstr "本文档侧重于 Ascend 特有的视角：图模式在 Ascend 上如何工作、涉及哪些组件、如何配置它们，以及用户应注意哪些约束。"
 
 #: ../../source/user_guide/feature_guide/graph_mode.md:14
 msgid "Current Status on Ascend"
@@ -62,146 +62,260 @@ msgid "Graph mode is currently available only on the **V1 Engine**."
 msgstr "图模式目前仅在 **V1 引擎** 上可用。"
 
 #: ../../source/user_guide/feature_guide/graph_mode.md:17
-msgid "**ACLGraph** is the default graph path in vLLM Ascend."
-msgstr "**ACLGraph** 是 vLLM Ascend 中的默认图路径。"
+msgid ""
+"**ACLGraph** (capture/replay via `torch.npu.NPUGraph`) is the runtime "
+"graph execution mechanism used by the default graph path on Ascend."
+msgstr "**ACLGraph**（通过 `torch.npu.NPUGraph` 捕获/重放）是 Ascend 上默认图路径使用的运行时图执行机制。"
 
 #: ../../source/user_guide/feature_guide/graph_mode.md:18
+msgid ""
+"**Npugraph_ex** is a compile-time FX graph optimization layer, enabled by"
+" default in FULL/FULL_DECODE_ONLY modes. It optimizes the graph before "
+"ACLGraph captures it."
+msgstr ""
+"**Npugraph_ex** 是一个编译时 FX 图优化层，在 FULL/FULL_DECODE_ONLY 模式下默认启用。它在 "
+"ACLGraph 捕获图之前对其进行优化。"
+
+#: ../../source/user_guide/feature_guide/graph_mode.md:19
 msgid ""
 "**XliteGraph** is an optional graph path for selected model families and "
 "environments."
 msgstr "**XliteGraph** 是针对选定模型系列和环境的可选图路径。"
 
-#: ../../source/user_guide/feature_guide/graph_mode.md:19
+#: ../../source/user_guide/feature_guide/graph_mode.md:20
 msgid ""
 "In context parallel scenarios, `cudagraph_mode=\"FULL\"` is not "
 "sufficiently supported yet."
 msgstr "在上下文并行场景中，`cudagraph_mode=\"FULL\"` 尚未得到充分支持。"
 
-#: ../../source/user_guide/feature_guide/graph_mode.md:21
-msgid "Graph Backends on Ascend"
-msgstr "Ascend 上的图后端"
+#: ../../source/user_guide/feature_guide/graph_mode.md:22
+msgid "Graph Paths on Ascend"
+msgstr "Ascend 上的图路径"
 
-#: ../../source/user_guide/feature_guide/graph_mode.md:23
-msgid "vLLM Ascend currently exposes two graph backends:"
-msgstr "vLLM Ascend 目前提供两种图后端："
+#: ../../source/user_guide/feature_guide/graph_mode.md:24
+msgid "vLLM Ascend provides two graph paths:"
+msgstr "vLLM Ascend 提供两种图路径："
 
 #: ../../source/user_guide/feature_guide/graph_mode.md
-msgid "Backend"
-msgstr "后端"
+msgid "Graph Path"
+msgstr "图路径"
 
 #: ../../source/user_guide/feature_guide/graph_mode.md
 msgid "Default"
 msgstr "默认"
 
 #: ../../source/user_guide/feature_guide/graph_mode.md
-msgid "Typical usage"
-msgstr "典型用法"
-
-#: ../../source/user_guide/feature_guide/graph_mode.md
-msgid "Notes"
-msgstr "备注"
+msgid "Description"
+msgstr "描述"
 
 #: ../../source/user_guide/feature_guide/graph_mode.md
 msgid "Since"
 msgstr "自版本"
 
 #: ../../source/user_guide/feature_guide/graph_mode.md
-msgid "ACL Graph"
-msgstr "ACL 图"
+msgid "ACLGraph (+ Npugraph_ex)"
+msgstr "ACLGraph (+ Npugraph_ex)"
 
 #: ../../source/user_guide/feature_guide/graph_mode.md
 msgid "Yes"
 msgstr "是"
 
 #: ../../source/user_guide/feature_guide/graph_mode.md
-msgid "General graph mode on Ascend"
-msgstr "Ascend 上的通用图模式"
+msgid ""
+"Compile-time FX optimization (Npugraph_ex) + runtime capture/replay "
+"(ACLGraph)"
+msgstr "编译时 FX 优化 (Npugraph_ex) + 运行时捕获/重放 (ACLGraph)"
 
 #: ../../source/user_guide/feature_guide/graph_mode.md
-msgid "Default path in vLLM Ascend"
-msgstr "vLLM Ascend 中的默认路径"
-
-#: ../../source/user_guide/feature_guide/graph_mode.md
-msgid "v0.9.0rc1"
-msgstr "v0.9.0rc1"
+msgid "v0.9.0rc1 (Npugraph_ex since v0.15.0rc1)"
+msgstr "v0.9.0rc1 (Npugraph_ex 自 v0.15.0rc1 起)"
 
 #: ../../source/user_guide/feature_guide/graph_mode.md
 msgid "XliteGraph"
-msgstr "Xlite 图"
+msgstr "XliteGraph"
 
 #: ../../source/user_guide/feature_guide/graph_mode.md
 msgid "No"
 msgstr "否"
 
 #: ../../source/user_guide/feature_guide/graph_mode.md
-msgid "Selected models with Xlite installed"
-msgstr "已安装 Xlite 的选定模型"
-
-#: ../../source/user_guide/feature_guide/graph_mode.md
-msgid "Requires additional installation and config"
-msgstr "需要额外安装和配置"
+msgid ""
+"Preconfigured graph path for selected model families. Requires separate "
+"installation"
+msgstr "针对选定模型系列的预配置图路径。需要单独安装"
 
 #: ../../source/user_guide/feature_guide/graph_mode.md
 msgid "v0.11.0"
 msgstr "v0.11.0"
 
-#: ../../source/user_guide/feature_guide/graph_mode.md:30
+#: ../../source/user_guide/feature_guide/graph_mode.md:31
+msgid "How Graph Mode Works on Ascend"
+msgstr "图模式在 Ascend 上的工作原理"
+
+#: ../../source/user_guide/feature_guide/graph_mode.md:33
+msgid ""
+"The default graph path on Ascend involves two stages: **compile-time "
+"optimization** and **runtime capture/replay**. ACLGraph handles the "
+"runtime capture/replay. The compile-time stage differs by "
+"`cudagraph_mode`:"
+msgstr ""
+"Ascend 上的默认图路径涉及两个阶段：**编译时优化**和**运行时捕获/重放**。ACLGraph 处理运行时捕获/重放。编译时阶段因 "
+"`cudagraph_mode` 而异："
+
+#: ../../source/user_guide/feature_guide/graph_mode.md:35
+msgid ""
+"**FULL / FULL_DECODE_ONLY**: Npugraph_ex optimizes the FX graph via "
+"torchair (`run_eagerly=True`, compile-time only, no capture). The "
+"optimized callable is then captured and replayed by ACLGraph at runtime."
+msgstr ""
+"**FULL / FULL_DECODE_ONLY**：Npugraph_ex 通过 torchair "
+"(`run_eagerly=True`，仅编译时，无捕获) 优化 FX 图。然后，优化后的可调用对象在运行时由 ACLGraph 捕获和重放。"
+
+#: ../../source/user_guide/feature_guide/graph_mode.md:36
+msgid ""
+"**PIECEWISE**: Npugraph_ex is disabled. Only basic FX fusion passes are "
+"applied at compile-time. ACLGraph captures and replays the resulting "
+"callable at runtime."
+msgstr ""
+"**PIECEWISE**：Npugraph_ex 被禁用。编译时仅应用基本的 FX 融合过程。ACLGraph "
+"在运行时捕获并重放生成的可调用对象。"
+
+#: ../../source/user_guide/feature_guide/graph_mode.md:37
+msgid "**NONE**: No compilation or graph capture. The model runs in eager mode."
+msgstr "**NONE**：无编译或图捕获。模型以即时执行模式运行。"
+
+#: ../../source/user_guide/feature_guide/graph_mode.md
+msgid "`cudagraph_mode`"
+msgstr "`cudagraph_mode`"
+
+#: ../../source/user_guide/feature_guide/graph_mode.md
+msgid "Compile-time"
+msgstr "编译时"
+
+#: ../../source/user_guide/feature_guide/graph_mode.md
+msgid "Runtime"
+msgstr "运行时"
+
+#: ../../source/user_guide/feature_guide/graph_mode.md
+msgid "Npugraph_ex"
+msgstr "Npugraph_ex"
+
+#: ../../source/user_guide/feature_guide/graph_mode.md
+msgid "FULL / FULL_DECODE_ONLY"
+msgstr "FULL / FULL_DECODE_ONLY"
+
+#: ../../source/user_guide/feature_guide/graph_mode.md
+msgid "Npugraph_ex FX optimization"
+msgstr "Npugraph_ex FX 优化"
+
+#: ../../source/user_guide/feature_guide/graph_mode.md
+msgid "ACLGraph capture/replay"
+msgstr "ACLGraph 捕获/重放"
+
+#: ../../source/user_guide/feature_guide/graph_mode.md
+msgid "Enabled (default)"
+msgstr "启用（默认）"
+
+#: ../../source/user_guide/feature_guide/graph_mode.md
+msgid "PIECEWISE"
+msgstr "PIECEWISE"
+
+#: ../../source/user_guide/feature_guide/graph_mode.md
+msgid "Fusion pass only"
+msgstr "仅融合过程"
+
+#: ../../source/user_guide/feature_guide/graph_mode.md
+msgid "Disabled"
+msgstr "禁用"
+
+#: ../../source/user_guide/feature_guide/graph_mode.md
+msgid "NONE"
+msgstr "NONE"
+
+#: ../../source/user_guide/feature_guide/graph_mode.md
+msgid "None"
+msgstr "无"
+
+#: ../../source/user_guide/feature_guide/graph_mode.md
+msgid "Eager execution"
+msgstr "即时执行"
+
+#: ../../source/user_guide/feature_guide/graph_mode.md:45
+msgid ""
+"Additionally, **XliteGraph** is available as an optional alternative "
+"graph path for selected model families (see [Using XliteGraph](#using-"
+"xlitegraph))."
+msgstr "此外，**XliteGraph** 可作为选定模型系列的可选替代图路径（参见[使用 XliteGraph](#using-xlitegraph)）。"
+
+#: ../../source/user_guide/feature_guide/graph_mode.md:47
 msgid "Using ACLGraph"
 msgstr "使用 ACLGraph"
 
-#: ../../source/user_guide/feature_guide/graph_mode.md:32
+#: ../../source/user_guide/feature_guide/graph_mode.md:49
 msgid ""
-"ACLGraph is enabled by default when the model runs on the V1 Engine and "
-"graph mode is available."
-msgstr "当模型在 V1 引擎上运行且图模式可用时，ACLGraph 默认启用。"
+"ACLGraph is the runtime graph capture/replay mechanism on Ascend. It is "
+"enabled automatically when graph mode is active (i.e., `cudagraph_mode` "
+"is not `NONE`), and does not require explicit configuration."
+msgstr ""
+"ACLGraph 是 Ascend 上的运行时图捕获/重放机制。当图模式激活时（即 `cudagraph_mode` 不是 "
+"`NONE`），它会自动启用，无需显式配置。"
 
-#: ../../source/user_guide/feature_guide/graph_mode.md:34
+#: ../../source/user_guide/feature_guide/graph_mode.md:51
 msgid "Basic usage"
 msgstr "基本用法"
 
-#: ../../source/user_guide/feature_guide/graph_mode.md:36
-#: ../../source/user_guide/feature_guide/graph_mode.md:102
+#: ../../source/user_guide/feature_guide/graph_mode.md:53
+#: ../../source/user_guide/feature_guide/graph_mode.md:131
+#: ../../source/user_guide/feature_guide/graph_mode.md:169
+#: ../../source/user_guide/feature_guide/graph_mode.md:221
 msgid "Offline example:"
 msgstr "离线推理示例："
 
-#: ../../source/user_guide/feature_guide/graph_mode.md:45
-#: ../../source/user_guide/feature_guide/graph_mode.md:122
+#: ../../source/user_guide/feature_guide/graph_mode.md:62
+#: ../../source/user_guide/feature_guide/graph_mode.md:147
+#: ../../source/user_guide/feature_guide/graph_mode.md:186
+#: ../../source/user_guide/feature_guide/graph_mode.md:241
 msgid "Online example:"
 msgstr "在线服务示例："
 
-#: ../../source/user_guide/feature_guide/graph_mode.md:51
+#: ../../source/user_guide/feature_guide/graph_mode.md:68
 msgid "Explicit `cudagraph_mode` configuration"
 msgstr "显式 `cudagraph_mode` 配置"
 
-#: ../../source/user_guide/feature_guide/graph_mode.md:53
+#: ../../source/user_guide/feature_guide/graph_mode.md:70
 msgid ""
 "The generic `cudagraph_mode` options come from upstream vLLM. On Ascend, "
 "the final effective mode may still be adjusted according to platform and "
 "backend support, so the official vLLM CUDA Graphs document remains the "
 "canonical reference for mode semantics."
-msgstr "通用的 `cudagraph_mode` 选项来自上游 vLLM。在 Ascend 上，最终生效的模式仍可能根据平台和后端支持情况进行调整，因此官方的 vLLM CUDA 图文档仍然是模式语义的权威参考。"
+msgstr ""
+"通用的 `cudagraph_mode` 选项来自上游 vLLM。在 Ascend "
+"上，最终生效的模式仍可能根据平台和后端支持情况进行调整，因此官方的 vLLM CUDA 图文档仍然是模式语义的权威参考。"
 
-#: ../../source/user_guide/feature_guide/graph_mode.md:55
+#: ../../source/user_guide/feature_guide/graph_mode.md:72
 msgid "CLI example:"
 msgstr "命令行示例："
 
-#: ../../source/user_guide/feature_guide/graph_mode.md:62
+#: ../../source/user_guide/feature_guide/graph_mode.md:79
 msgid "Python example:"
 msgstr "Python 示例："
 
-#: ../../source/user_guide/feature_guide/graph_mode.md:73
+#: ../../source/user_guide/feature_guide/graph_mode.md:90
 msgid ""
 "For the detailed meaning of `NONE`, `PIECEWISE`, `FULL`, "
 "`FULL_DECODE_ONLY`, and `FULL_AND_PIECEWISE`, as well as the generic "
 "fallback policy, see the upstream [CUDA "
 "Graphs](https://docs.vllm.ai/en/latest/design/cuda_graphs/) design doc."
-msgstr "关于 `NONE`、`PIECEWISE`、`FULL`、`FULL_DECODE_ONLY` 和 `FULL_AND_PIECEWISE` 的详细含义，以及通用的回退策略，请参阅上游 [CUDA 图](https://docs.vllm.ai/en/latest/design/cuda_graphs/) 设计文档。"
+msgstr ""
+"关于 `NONE`、`PIECEWISE`、`FULL`、`FULL_DECODE_ONLY` 和 `FULL_AND_PIECEWISE` "
+"的详细含义，以及通用的回退策略，请参阅上游 [CUDA "
+"图](https://docs.vllm.ai/en/latest/design/cuda_graphs/) 设计文档。"
 
-#: ../../source/user_guide/feature_guide/graph_mode.md:75
+#: ../../source/user_guide/feature_guide/graph_mode.md:92
 msgid "Attention backend compatibility"
 msgstr "注意力后端兼容性"
 
-#: ../../source/user_guide/feature_guide/graph_mode.md:77
+#: ../../source/user_guide/feature_guide/graph_mode.md:94
 msgid ""
 "Not all attention backends support all graph modes. vLLM checks attention"
 " backend compatibility during compatibility checks and, when possible, "
@@ -209,9 +323,11 @@ msgid ""
 "of failing immediately. In practice, this means a requested full-graph "
 "mode may be narrowed to a mixed or piecewise mode, and if the backend "
 "cannot support graph execution at all, graph mode may be disabled."
-msgstr "并非所有注意力后端都支持所有图模式。vLLM 在兼容性检查期间会检查注意力后端的兼容性，并在可能的情况下自动将 `cudagraph_mode` 调整为更兼容的模式，而不是立即失败。实际上，这意味着请求的全图模式可能会被缩小为混合或分段模式，如果后端完全无法支持图执行，则图模式可能会被禁用。"
+msgstr ""
+"并非所有注意力后端都支持所有图模式。vLLM 在兼容性检查期间会检查注意力后端的兼容性，并在可能的情况下自动将 `cudagraph_mode` "
+"调整为更兼容的模式，而不是立即失败。实际上，这意味着请求的全图模式可能会被缩小为混合或分段模式，如果后端完全无法支持图执行，则图模式可能会被禁用。"
 
-#: ../../source/user_guide/feature_guide/graph_mode.md:79
+#: ../../source/user_guide/feature_guide/graph_mode.md:96
 msgid "On Ascend, the current attention backend support levels are:"
 msgstr "在 Ascend 上，当前注意力后端的支持级别如下："
 
@@ -269,163 +385,229 @@ msgstr "`sfa_v1`"
 msgid "`context_parallel/sfa_cp`"
 msgstr "`context_parallel/sfa_cp`"
 
-#: ../../source/user_guide/feature_guide/graph_mode.md:90
+#: ../../source/user_guide/feature_guide/graph_mode.md:107
 msgid ""
 "This is why the effective graph mode on Ascend may differ from the mode "
 "requested in configuration."
 msgstr "这就是为什么 Ascend 上生效的图模式可能与配置中请求的模式不同。"
 
-#: ../../source/user_guide/feature_guide/graph_mode.md:92
+#: ../../source/user_guide/feature_guide/graph_mode.md:109
+msgid "Using Npugraph_ex"
+msgstr "使用 Npugraph_ex"
+
+#: ../../source/user_guide/feature_guide/graph_mode.md:111
+msgid ""
+"As introduced in the [RFC](https://github.com/vllm-project/vllm-"
+"ascend/issues/4715), Npugraph_ex is a compile-time FX graph optimization "
+"layer that works together with ACLGraph. It optimizes the model's FX "
+"graph before ACLGraph captures it at runtime. Its performance benefits "
+"mainly come from fusing multiple operators into single kernels (e.g., add"
+" + rms_norm → npu_add_rms_norm) to reduce kernel launch overhead."
+msgstr ""
+"如 [RFC](https://github.com/vllm-project/vllm-ascend/issues/4715) "
+"中所述，Npugraph_ex 是一个编译时 FX 图优化层，与 ACLGraph 协同工作。它在 ACLGraph 于运行时捕获模型 FX "
+"图之前对其进行优化。其性能优势主要来自于将多个算子融合为单个内核（例如，add + rms_norm → "
+"npu_add_rms_norm），以减少内核启动开销。"
+
+#: ../../source/user_guide/feature_guide/graph_mode.md:113
+msgid "Default behavior"
+msgstr "默认行为"
+
+#: ../../source/user_guide/feature_guide/graph_mode.md:115
+msgid ""
+"Npugraph_ex is **enabled by default** when `cudagraph_mode` is `FULL` or "
+"`FULL_DECODE_ONLY`. It is automatically disabled in `PIECEWISE` or `NONE`"
+" modes."
+msgstr ""
+"当 `cudagraph_mode` 为 `FULL` 或 `FULL_DECODE_ONLY` 时，Npugraph_ex **默认启用**。在"
+" `PIECEWISE` 或 `NONE` 模式下会自动禁用。"
+
+#: ../../source/user_guide/feature_guide/graph_mode.md:117
+msgid ""
+"This means for most users, Npugraph_ex is active without any explicit "
+"configuration:"
+msgstr "这意味着对于大多数用户，Npugraph_ex 无需任何显式配置即可激活："
+
+#: ../../source/user_guide/feature_guide/graph_mode.md:127
+msgid "Explicit configuration"
+msgstr "显式配置"
+
+#: ../../source/user_guide/feature_guide/graph_mode.md:129
+msgid "To explicitly control Npugraph_ex:"
+msgstr "要显式控制 Npugraph_ex："
+
+#: ../../source/user_guide/feature_guide/graph_mode.md:154
+msgid "To disable Npugraph_ex explicitly:"
+msgstr "要显式禁用 Npugraph_ex："
+
+#: ../../source/user_guide/feature_guide/graph_mode.md:161
+msgid "Static kernel compilation"
+msgstr "静态内核编译"
+
+#: ../../source/user_guide/feature_guide/graph_mode.md:163
+msgid ""
+"Static kernel compilation is an **optional** feature that pre-compiles "
+"operator binaries with fixed shapes at compile time, reducing runtime "
+"overhead for networks with static or near-static shapes. It is **disabled"
+" by default** and must be explicitly enabled."
+msgstr ""
+"静态内核编译是一个**可选**功能，它在编译时预编译具有固定形状的算子二进制文件，从而减少静态或接近静态形状网络的运行时开销。它**默认禁用**，需要显式启用。"
+
+#: ../../source/user_guide/feature_guide/graph_mode.md:166
+msgid ""
+"Enabling static kernel triggers a compilation pass during the graph "
+"capture phase at service startup. This may add **several minutes to tens "
+"of minutes** to the startup time depending on the number of operators to "
+"compile and model complexity. Once completed, subsequent request "
+"processing is not affected."
+msgstr ""
+"启用静态内核会在服务启动时的图捕获阶段触发编译过程。根据待编译算子的数量和模型复杂度，这可能会增加**几分钟到几十分钟**的启动时间。一旦完成，后续的请求处理不会受到影响。"
+
+#: ../../source/user_guide/feature_guide/graph_mode.md:193
+msgid "Verifying static kernel is active"
+msgstr "验证静态内核是否生效"
+
+#: ../../source/user_guide/feature_guide/graph_mode.md:195
+msgid ""
+"The recommended way to verify static kernel is in effect is through "
+"**Ascend Profiling**:"
+msgstr "推荐通过 **Ascend Profiling** 来验证静态内核是否生效："
+
+#: ../../source/user_guide/feature_guide/graph_mode.md:197
+msgid ""
+"Collect a profiling trace of your running model using [Ascend PyTorch "
+"Profiler](https://www.hiascend.com/document/detail/zh/Pytorch/2600/apiref/torchnpuCustomsapi/docs/zh/custom_APIs"
+"/torch_npu-profiler/torch_npu-profiler-profile.md) "
+"(`torch_npu.profiler`)."
+msgstr ""
+"使用 [Ascend PyTorch Profiler](https://www.hiascend.com/document/detail/zh/Pytorch/2600/apiref/torchnpuCustomsapi/docs/zh/custom_APIs"
+"/torch_npu-profiler/torch_npu-profiler-profile.md) "
+"(`torch_npu.profiler`) 收集运行模型的 profiling 跟踪数据。"
+
+#: ../../source/user_guide/feature_guide/graph_mode.md:198
+msgid "Open the generated `op_statistic.csv` file."
+msgstr "打开生成的 `op_statistic.csv` 文件。"
+
+#: ../../source/user_guide/feature_guide/graph_mode.md:199
+msgid ""
+"Look for operators whose `op_type` or `name` column contains the keyword "
+"**`static_kernel`**. If such entries exist, static kernel compilation has"
+" taken effect for those operators."
+msgstr ""
+"查找 `op_type` 或 `name` 列中包含关键字 **`static_kernel`** 的算子。如果存在此类条目，则说明静态内核编译已对这些算子生效。"
+
+#: ../../source/user_guide/feature_guide/graph_mode.md:201
+msgid ""
+"During the compilation phase, you will see a Python warning (visible by "
+"default):"
+msgstr "在编译阶段，您会看到一个 Python 警告（默认可见）："
+
+#: ../../source/user_guide/feature_guide/graph_mode.md:207
+msgid ""
+"This confirms that compilation has been triggered. The absence of this "
+"message means static kernel was not enabled or the cached result was "
+"reused directly."
+msgstr "这确认了编译已被触发。如果没有此消息，则表示静态内核未启用或直接复用了缓存结果。"
+
+#: ../../source/user_guide/feature_guide/graph_mode.md:209
+msgid ""
+"For more details about Npugraph_ex, see the [torchair "
+"guide](https://www.hiascend.com/document/detail/zh/Pytorch/730/modthirdparty/torchairuseguide/torchair_00021.html)."
+msgstr ""
+"有关 Npugraph_ex 的更多详细信息，请参阅 [torchair "
+"指南](https://www.hiascend.com/document/detail/zh/Pytorch/730/modthirdparty/torchairuseguide/torchair_00021.html)。"
+
+#: ../../source/user_guide/feature_guide/graph_mode.md:211
 msgid "Using XliteGraph"
 msgstr "使用 XliteGraph"
 
-#: ../../source/user_guide/feature_guide/graph_mode.md:94
+#: ../../source/user_guide/feature_guide/graph_mode.md:213
 msgid ""
 "XliteGraph is an optional path for Llama, Qwen dense series models, Qwen "
 "MoE series models, and Qwen3-VL. It requires Xlite to be installed and "
 "configured through `xlite_graph_config`."
-msgstr "XliteGraph 是 Llama、Qwen 密集系列模型、Qwen MoE 系列模型和 Qwen3-VL 的可选路径。它需要安装 Xlite 并通过 `xlite_graph_config` 进行配置。"
+msgstr ""
+"XliteGraph 是 Llama、Qwen 密集系列模型、Qwen MoE 系列模型和 Qwen3-VL 的可选路径。它需要安装 Xlite "
+"并通过 `xlite_graph_config` 进行配置。"
 
-#: ../../source/user_guide/feature_guide/graph_mode.md:96
+#: ../../source/user_guide/feature_guide/graph_mode.md:215
 msgid "Install Xlite first:"
 msgstr "首先安装 Xlite："
 
-#: ../../source/user_guide/feature_guide/graph_mode.md:130
+#: ../../source/user_guide/feature_guide/graph_mode.md:249
 msgid ""
 "For more details about Xlite, see the [Xlite "
 "README](https://atomgit.com/openeuler/GVirt/blob/master/xlite/README.md)."
-msgstr "有关 Xlite 的更多详细信息，请参阅 [Xlite README](https://atomgit.com/openeuler/GVirt/blob/master/xlite/README.md)。"
+msgstr ""
+"有关 Xlite 的更多详细信息，请参阅 [Xlite "
+"README](https://atomgit.com/openeuler/GVirt/blob/master/xlite/README.md)。"
 
-#: ../../source/user_guide/feature_guide/graph_mode.md:132
+#: ../../source/user_guide/feature_guide/graph_mode.md:251
 msgid "Common Limitations and Caveats"
 msgstr "常见限制与注意事项"
 
-#: ../../source/user_guide/feature_guide/graph_mode.md:134
+#: ../../source/user_guide/feature_guide/graph_mode.md:253
 msgid ""
-"ACLGraph and XliteGraph have different support coverage. XliteGraph "
-"should be treated as an alternative backend, not as a drop-in replacement"
-" for all ACLGraph scenarios."
-msgstr "ACLGraph 和 XliteGraph 的支持范围不同。XliteGraph 应被视为一个替代后端，而不是所有 ACLGraph 场景的直接替代品。"
+"XliteGraph should be treated as an alternative graph path, not as a drop-"
+"in replacement for ACLGraph in all scenarios."
+msgstr "XliteGraph 应被视为一种替代的图路径，而非在所有场景下都能直接替代 ACLGraph。"
 
-#: ../../source/user_guide/feature_guide/graph_mode.md:135
+#: ../../source/user_guide/feature_guide/graph_mode.md:254
 msgid ""
 "Model and backend coverage is still evolving, so a configuration that "
 "works for one model family may not yet be recommended for another."
 msgstr "模型和后端的覆盖范围仍在不断发展，因此适用于一个模型系列的配置可能尚不推荐用于另一个模型系列。"
 
-#: ../../source/user_guide/feature_guide/graph_mode.md:137
+#: ../../source/user_guide/feature_guide/graph_mode.md:256
 msgid "Fallback to Eager Mode"
 msgstr "回退到 Eager 模式"
 
-#: ../../source/user_guide/feature_guide/graph_mode.md:139
+#: ../../source/user_guide/feature_guide/graph_mode.md:258
 msgid ""
 "If you encounter issues with graph mode, you can temporarily fall back to"
 " eager mode by setting `enforce_eager=True`."
 msgstr "如果您遇到图模式的问题，可以通过设置 `enforce_eager=True` 临时回退到 eager 模式。"
 
-#: ../../source/user_guide/feature_guide/graph_mode.md:141
+#: ../../source/user_guide/feature_guide/graph_mode.md:260
 msgid "**Offline example:**"
 msgstr "**离线推理示例：**"
 
-#: ../../source/user_guide/feature_guide/graph_mode.md:150
+#: ../../source/user_guide/feature_guide/graph_mode.md:269
 msgid "**Online example:**"
 msgstr "**在线服务示例：**"
 
-#: ../../source/user_guide/feature_guide/graph_mode.md:156
+#: ../../source/user_guide/feature_guide/graph_mode.md:275
 msgid "References"
 msgstr "参考资料"
 
-#: ../../source/user_guide/feature_guide/graph_mode.md:160
+#: ../../source/user_guide/feature_guide/graph_mode.md:279
 msgid ""
 "[Xlite "
 "README](https://atomgit.com/openeuler/GVirt/blob/master/xlite/README.md)"
-msgstr "[Xlite README](https://atomgit.com/openeuler/GVirt/blob/master/xlite/README.md)"
+msgstr ""
+"[Xlite "
+"README](https://atomgit.com/openeuler/GVirt/blob/master/xlite/README.md)"
 
-#: ../../source/user_guide/feature_guide/graph_mode.md:161
+#: ../../source/user_guide/feature_guide/graph_mode.md:280
+msgid ""
+"[Npugraph_ex torchair "
+"guide](https://www.hiascend.com/document/detail/zh/Pytorch/730/modthirdparty/torchairuseguide/torchair_00021.html)"
+msgstr ""
+"[Npugraph_ex torchair "
+"指南](https://www.hiascend.com/document/detail/zh/Pytorch/730/modthirdparty/torchairuseguide/torchair_00021.html)"
+
+#: ../../source/user_guide/feature_guide/graph_mode.md:281
+msgid "[Npugraph_ex RFC](https://github.com/vllm-project/vllm-ascend/issues/4715)"
+msgstr "[Npugraph_ex RFC](https://github.com/vllm-project/vllm-ascend/issues/4715)"
+
+#: ../../source/user_guide/feature_guide/graph_mode.md:282
 msgid ""
 "[ACL Graph Developer "
 "Guide](../../developer_guide/Design_Documents/ACL_Graph.md)"
 msgstr "[ACL 图开发者指南](../../developer_guide/Design_Documents/ACL_Graph.md)"
 
 #~ msgid ""
-#~ "If you want to run DeepSeek series"
-#~ " models with graph mode, you should"
-#~ " use "
-#~ "[TorchAirGraph](https://www.hiascend.com/document/detail/zh/Pytorch/700/modthirdparty/torchairuseguide/torchair_0002.html)."
-#~ " In this case, additional config is"
-#~ " required."
-#~ msgstr ""
-#~ "如果您想在图模式下运行 DeepSeek 系列模型，应当使用 "
-#~ "[TorchAirGraph](https://www.hiascend.com/document/detail/zh/Pytorch/700/modthirdparty/torchairuseguide/torchair_0002.html)。在这种情况下，需要进行额外配置。"
-
-#~ msgid ""
-#~ "You can find more detail about "
-#~ "additional config "
-#~ "[here](../configuration/additional_config.md)."
-#~ msgstr "您可以在[此处](../configuration/additional_config.md)找到关于附加配置的更多详情。"
-
-#~ msgid ""
-#~ "This feature is currently experimental. "
-#~ "In future versions, there may be "
-#~ "behavioral changes around configuration, "
-#~ "coverage, performance improvement."
-#~ msgstr "此功能目前处于实验性阶段。在未来的版本中，配置方式、模型覆盖率以及性能优化方面的行为可能会有所变化。"
-
-#~ msgid ""
-#~ "This guide provides instructions for "
-#~ "using Ascend Graph Mode with vLLM "
-#~ "Ascend. Please note that graph mode "
-#~ "is only available on V1 Engine. "
-#~ "And only Qwen, DeepSeek series models"
-#~ " are well tested from 0.9.0rc1. We"
-#~ " will make it stable and generalized"
-#~ " in the next release."
-#~ msgstr ""
-#~ "本指南提供了在 vLLM Ascend 上使用 Ascend "
-#~ "图模式的说明。请注意，图模式仅在 V1 引擎上可用。自 0.9.0rc1 版本起，目前仅"
-#~ " Qwen 和 DeepSeek "
-#~ "系列模型经过了充分测试。我们将在下一个版本中提升其稳定性和通用性。"
-
-#~ msgid "Getting Started"
-#~ msgstr "快速入门"
-
-#~ msgid ""
-#~ "From v0.9.1rc1 with V1 Engine, vLLM "
-#~ "Ascend will run models in graph "
-#~ "mode by default to keep the same"
-#~ " behavior with vLLM. If you hit "
-#~ "any issues, please feel free to "
-#~ "open an issue on GitHub and "
-#~ "fallback to the eager mode temporarily"
-#~ " by setting `enforce_eager=True` when "
-#~ "initializing the model."
-#~ msgstr ""
-#~ "从 v0.9.1rc1 版本起，搭配 V1 引擎使用时，vLLM Ascend"
-#~ " 默认将以图模式运行模型，以保持与 vLLM 官方行为一致。如果您遇到任何问题，欢迎在 "
-#~ "GitHub 上提交 Issue，并在初始化模型时通过设置 `enforce_eager=True`"
-#~ " 临时回退到 Eager 模式。"
-
-#~ msgid ""
-#~ "**ACLGraph**: This is the default graph"
-#~ " mode supported by vLLM Ascend. In"
-#~ " v0.9.1rc1, Qwen and Deepseek series "
-#~ "models are well tested."
-#~ msgstr ""
-#~ "**ACLGraph**：这是 vLLM Ascend 支持的默认图模式。在 "
-#~ "v0.9.1rc1 版本中，Qwen 和 DeepSeek 系列模型已得到充分测试。"
-
-#~ msgid ""
-#~ "**XliteGraph**: This is the openeuler "
-#~ "xlite graph mode. In v0.11.0, only "
-#~ "Llama, Qwen dense series models, and "
-#~ "Qwen3-vl are supported."
-#~ msgstr ""
-#~ "**XliteGraph**：这是 openEuler 的 Xlite 图模式。在 "
-#~ "v0.11.0 版本中，仅支持 Llama、Qwen 全量（dense）系列模型以及 "
-#~ "Qwen3-vl。"
-
-#~ msgid ""
-#~ "If `ACLGraph` and `XliteGraph` all fail"
-#~ " to run, you should fallback to "
-#~ "the eager mode."
-#~ msgstr "如果 `ACLGraph` 和 `XliteGraph` 均无法运行，您应当回退到 Eager 模式。"
+#~ "To explicitly control Npugraph_ex or "
+#~ "enable additional features like static "
+#~ "kernel:"
+#~ msgstr "要显式控制 Npugraph_ex 或启用静态内核等附加功能："

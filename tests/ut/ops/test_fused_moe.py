@@ -12,6 +12,10 @@
 # limitations under the License.
 # This file is a part of the vllm-ascend project.
 #
+import ast
+import inspect
+import textwrap
+from types import SimpleNamespace
 from typing import TypedDict
 from unittest.mock import MagicMock, patch
 
@@ -19,14 +23,16 @@ import pytest
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-import torch_npu
 from pytest_mock import MockerFixture
 
-from tests.ut.base import TestBase
 from vllm_ascend.ascend_forward_context import MoECommType
-from vllm_ascend.ops.fused_moe.experts_selector import select_experts
-from vllm_ascend.ops.fused_moe.fused_moe import AscendUnquantizedFusedMoEMethod
-from vllm_ascend.ops.fused_moe.moe_mlp import cumsum_group_list, unified_apply_mlp
+from vllm_ascend.ops.fused_moe import fused_moe as fused_moe_module
+from vllm_ascend.ops.fused_moe.fused_moe import (
+    AscendFusedMoE,
+    AscendMoERunner,
+    AscendUnquantizedFusedMoEMethod,
+)
+from vllm_ascend.ops.fused_moe.moe_comm_method import FusedExpertsResult
 from vllm_ascend.ops.fused_moe.moe_runtime_args import (
     MoEMlpComputeInput,
     MoEPrepareOutput,
@@ -195,35 +201,6 @@ def mock_dist_env(mocker: MockerFixture):
 
 
 @pytest.fixture
-def mock_moe_env(mocker: MockerFixture):
-    with (
-        patch("torch_npu.npu_moe_gating_top_k", return_value=(torch.randn(8, 2), torch.randint(0, 8, (8, 2)), None)),
-        patch(
-            "torch_npu.npu_moe_init_routing",
-            return_value=(torch.randn(8, 2), torch.randint(0, 8, (8, 2)), torch.tensor([0, 1, 2, 4, 6, 2, 7, 1])),
-        ),
-        patch("torch_npu.npu_moe_compute_expert_tokens", return_value=(torch.randn(8, 2))),
-        patch("torch_npu.npu_moe_distribute_dispatch", return_value=(torch.randn(16, 2))),
-        patch("torch_npu.npu_moe_distribute_combine", return_value=(torch.randn(16, 2))),
-        patch("torch_npu.npu_grouped_matmul", return_value=([torch.randn(16, 2)])),
-        patch("torch_npu.npu_swiglu", return_value=(torch.randn(16, 2))),
-        patch(
-            "torch_npu.npu_moe_gating_top_k_softmax",
-            return_value=(torch.randn(8, 2), torch.randint(0, 8, (8, 2)), torch.tensor([0, 1, 2, 4, 6, 2, 7, 1])),
-        ),
-        patch("torch_npu.npu_moe_finalize_routing", return_value=(torch.randn(16, 2))),
-    ):
-        if hasattr(torch_npu, "npu_moe_distribute_dispatch_v2"):
-            with (
-                patch("torch_npu.npu_moe_distribute_dispatch_v2", return_value=(torch.randn(16, 2))),
-                patch("torch_npu.npu_moe_distribute_combine_v2", return_value=(torch.randn(16, 2))),
-            ):
-                yield
-        else:
-            yield
-
-
-@pytest.fixture
 def default_moe_config():
     return {"num_experts": 8, "top_k": 2, "hidden_size": 512, "intermediate_size": 1024}
 
@@ -235,6 +212,12 @@ def moe_method(mock_dist_env):
     moe.moe_parallel_config.use_ep = False
     moe.moe_parallel_config.dp_size = 1
     return AscendUnquantizedFusedMoEMethod(moe)
+
+
+def test_ascend_unquantized_skips_upstream_modular_kernel_init():
+    method = AscendUnquantizedFusedMoEMethod.maybe_make_prepare_finalize
+
+    assert method(object()) is None
 
 
 class Device(TypedDict):
@@ -262,858 +245,549 @@ class MockQuantMethod(nn.Module):
             self.apply = MagicMock(return_value=(torch.randn(num_tokens, 32)))
 
 
-class TestExpertsSelector:
-    @pytest.mark.parametrize("global_num_experts", [256, 128])
-    def test_select_experts(self, mock_dist_env, mock_moe_env, global_num_experts):
-        x = torch.randn(8, 2)
-        router_logits = torch.randn(8, 2)
-        topk_weights, topk_ids = select_experts(
-            hidden_states=x,
-            router_logits=router_logits,
-            top_k=2,
-            use_grouped_topk=False,
-            renormalize=True,
-            topk_group=None,
-            num_expert_group=None,
-            custom_routing_function=None,
-            scoring_func="softmax",
-            e_score_correction_bias=None,
-            global_num_experts=global_num_experts,
+def _drop_self(signature: inspect.Signature) -> list[inspect.Parameter]:
+    params = list(signature.parameters.values())
+    if params and params[0].name == "self":
+        return params[1:]
+    return params
+
+
+def _format_signature_mismatch(method_name: str, issues: list[str]) -> str:
+    return f"{method_name} signature is not aligned with vLLM parent: " + "; ".join(issues)
+
+
+def _assert_child_signature_accepts_parent_interface(child_method, parent_method):
+    child_params = _drop_self(inspect.signature(child_method))
+    parent_params = _drop_self(inspect.signature(parent_method))
+    child_by_name = {
+        param.name: param
+        for param in child_params
+        if param.kind not in (inspect.Parameter.VAR_POSITIONAL, inspect.Parameter.VAR_KEYWORD)
+    }
+    child_has_var_positional = any(param.kind == inspect.Parameter.VAR_POSITIONAL for param in child_params)
+    child_has_var_keyword = any(param.kind == inspect.Parameter.VAR_KEYWORD for param in child_params)
+    issues: list[str] = []
+
+    for parent_param in parent_params:
+        if parent_param.kind == inspect.Parameter.VAR_POSITIONAL:
+            if not child_has_var_positional:
+                issues.append("child is missing *args from parent")
+            continue
+
+        if parent_param.kind == inspect.Parameter.VAR_KEYWORD:
+            if not child_has_var_keyword:
+                issues.append("child is missing **kwargs from parent")
+            continue
+
+        child_param = child_by_name.get(parent_param.name)
+        if child_param is None:
+            if parent_param.kind == inspect.Parameter.KEYWORD_ONLY:
+                if not child_has_var_keyword:
+                    issues.append(f"missing keyword-only parameter {parent_param.name!r}")
+            elif not child_has_var_positional and not child_has_var_keyword:
+                issues.append(f"missing parameter {parent_param.name!r}")
+            continue
+
+        if parent_param.kind != child_param.kind:
+            issues.append(
+                f"parameter {parent_param.name!r} has kind {child_param.kind!s}, expected {parent_param.kind!s}"
+            )
+
+    parent_param_names = {param.name for param in parent_params}
+    for child_param in child_params:
+        if child_param.kind in (inspect.Parameter.VAR_POSITIONAL, inspect.Parameter.VAR_KEYWORD):
+            continue
+        if child_param.name in parent_param_names:
+            continue
+        if child_param.default is inspect.Parameter.empty:
+            issues.append(f"extra parameter {child_param.name!r} must be optional")
+
+    assert not issues, _format_signature_mismatch(parent_method.__qualname__, issues)
+
+
+def _method_uses_super(method) -> bool:
+    try:
+        source = inspect.getsource(method)
+    except (OSError, TypeError):
+        return False
+
+    tree = ast.parse(textwrap.dedent(source))
+    return any(
+        isinstance(node, ast.Call) and isinstance(node.func, ast.Name) and node.func.id == "super"
+        for node in ast.walk(tree)
+    )
+
+
+class TestVllmParentInterfaceCompatibility:
+    @pytest.mark.parametrize(
+        "child_cls,parent_cls,method_name",
+        [
+            (AscendUnquantizedFusedMoEMethod, fused_moe_module.UnquantizedFusedMoEMethod, "__init__"),
+            (
+                AscendUnquantizedFusedMoEMethod,
+                fused_moe_module.UnquantizedFusedMoEMethod,
+                "process_weights_after_loading",
+            ),
+            (AscendUnquantizedFusedMoEMethod, fused_moe_module.UnquantizedFusedMoEMethod, "apply"),
+            (AscendMoERunner, fused_moe_module.MoERunner, "__init__"),
+            (AscendMoERunner, fused_moe_module.MoERunner, "forward_impl"),
+            (AscendMoERunner, fused_moe_module.MoERunner, "_forward_impl"),
+            (AscendFusedMoE, fused_moe_module.FusedMoE, "__init__"),
+            (AscendFusedMoE, fused_moe_module.FusedMoE, "forward"),
+            (AscendFusedMoE, fused_moe_module.FusedMoE, "forward_impl"),
+            (AscendFusedMoE, fused_moe_module.FusedMoE, "maybe_all_reduce_tensor_model_parallel"),
+        ],
+    )
+    def test_overridden_method_signature_accepts_parent_interface(self, child_cls, parent_cls, method_name):
+        child_method = getattr(child_cls, method_name)
+        if not _method_uses_super(child_method):
+            pytest.skip(
+                f"{child_cls.__name__}.{method_name} does not call "
+                "super(), so parent interface alignment is not "
+                "required"
+            )
+
+        if not hasattr(parent_cls, method_name):
+            pytest.fail(
+                f"{child_cls.__name__}.{method_name} calls super(), but {parent_cls.__name__} has no {method_name}"
+            )
+
+        _assert_child_signature_accepts_parent_interface(
+            child_method,
+            getattr(parent_cls, method_name),
         )
 
-        assert topk_weights.shape == (8, 2)
-        assert topk_ids.shape == (8, 2)
 
-    @pytest.mark.parametrize("scoring_func", ["softmax", "sigmoid"])
-    @pytest.mark.parametrize("renormalize", [True, False])
-    def test_select_experts_with_different_scoring_func(
-            self, mock_dist_env, mock_moe_env, scoring_func, renormalize):
-        num_tokens = 16
-        num_experts = 8
-        hidden_size = 32
+class TestAscendUnquantizedFusedMoEMethod:
+    def _build_layer(self, *, has_bias=True, zero_expert_num=0):
+        layer = MagicMock()
+        layer.w13_weight = nn.Parameter(torch.randn(2, 3, 4))
+        layer.w2_weight = nn.Parameter(torch.randn(2, 4, 3))
+        layer.w13_bias = torch.randn(2, 4) if has_bias else None
+        layer.w2_bias = torch.randn(2, 3) if has_bias else None
+        layer.zero_expert_num = zero_expert_num
+        layer.zero_expert_type = "identity" if zero_expert_num > 0 else None
+        layer.n_shared_experts = 0
+        layer.moe_config = SimpleNamespace(num_logical_experts=None)
+        layer.layer_id = 3
+        layer.vllm_config = SimpleNamespace(model_config=SimpleNamespace(enable_return_routed_experts=False))
+        return layer
 
-        hidden_states = torch.randn(num_tokens, hidden_size)
-        router_logits = torch.randn(num_tokens, num_experts)
+    @pytest.mark.parametrize("enable_fused_mc2", [True, False])
+    def test_process_weights_after_loading_transposes_and_formats(self, monkeypatch, enable_fused_mc2):
+        method = AscendUnquantizedFusedMoEMethod.__new__(AscendUnquantizedFusedMoEMethod)
+        method._maybe_pad_weight = MagicMock(side_effect=lambda weight: weight)
+        layer = self._build_layer()
+        original_w13 = layer.w13_weight.detach().clone()
+        original_w2 = layer.w2_weight.detach().clone()
+        format_cast = MagicMock(side_effect=lambda weight, _: weight)
+        maybe_trans_nz = MagicMock(side_effect=lambda weight: weight)
 
-        def simple_custom_routing(hidden_states, gating_output, topk,
-                                  renormalize, global_num_experts):
-            if scoring_func == "softmax":
-                weights = gating_output.softmax(dim=-1)
-            else:
-                weights = gating_output.sigmoid()
-            topk_weights, topk_ids = weights.topk(topk, dim=-1)
-            if renormalize:
-                topk_weights = topk_weights / topk_weights.sum(dim=-1,
-                                                               keepdim=True)
-            return topk_weights, topk_ids.to(torch.int32)
+        monkeypatch.setattr(fused_moe_module.envs_ascend, "VLLM_ASCEND_ENABLE_FUSED_MC2", enable_fused_mc2)
+        monkeypatch.setattr(fused_moe_module.torch_npu, "npu_format_cast", format_cast)
+        monkeypatch.setattr(fused_moe_module, "maybe_trans_nz", maybe_trans_nz)
 
-        topk_weights, topk_ids = select_experts(
-            hidden_states=hidden_states,
-            router_logits=router_logits,
-            top_k=2,
+        method.process_weights_after_loading(layer)
+
+        torch.testing.assert_close(layer.w13_weight, original_w13.transpose(1, 2).contiguous())
+        torch.testing.assert_close(layer.w2_weight, original_w2.transpose(1, 2).contiguous())
+        if enable_fused_mc2:
+            assert format_cast.call_count == 2
+            maybe_trans_nz.assert_not_called()
+        else:
+            assert maybe_trans_nz.call_count == 2
+            format_cast.assert_not_called()
+
+    @pytest.mark.parametrize("moe_comm_type", [MoECommType.MC2, MoECommType.FUSED_MC2])
+    def test_apply_builds_fused_experts_input(self, monkeypatch, moe_comm_type):
+        method = AscendUnquantizedFusedMoEMethod.__new__(AscendUnquantizedFusedMoEMethod)
+        method.moe = SimpleNamespace(has_bias=True)
+        method.dynamic_eplb = False
+        layer = self._build_layer(has_bias=True)
+        hidden_states = torch.randn(2, 4, dtype=torch.float16)
+        router_logits = torch.randn(2, 4)
+        topk_weights = torch.tensor([[0.25, 0.75], [0.6, 0.4]], dtype=torch.float32)
+        topk_ids = torch.tensor([[0, 1], [1, 0]], dtype=torch.int64)
+        moe_comm_method = MagicMock()
+        moe_comm_method.fused_experts.return_value = torch.ones_like(hidden_states)
+        monkeypatch.setattr(
+            fused_moe_module,
+            "_EXTRA_CTX",
+            SimpleNamespace(moe_comm_type=moe_comm_type, moe_comm_method=moe_comm_method),
+        )
+        select_experts_mock = MagicMock(return_value=(topk_weights, topk_ids))
+        monkeypatch.setattr(fused_moe_module, "select_experts", select_experts_mock)
+
+        result = method.apply(
+            layer=layer,
+            x=hidden_states,
             use_grouped_topk=False,
-            renormalize=renormalize,
-            topk_group=None,
-            num_expert_group=None,
-            custom_routing_function=simple_custom_routing,
-            scoring_func=scoring_func,
-            e_score_correction_bias=None,
-            global_num_experts=num_experts)
-
-        assert topk_weights.shape == (num_tokens, 2)
-        assert topk_ids.shape == (num_tokens, 2)
-        assert topk_weights.dtype == hidden_states.dtype
-        assert topk_ids.dtype == torch.int32
-
-        if renormalize:
-            weight_sum = topk_weights.sum(dim=-1)
-            torch.testing.assert_close(weight_sum,
-                                       torch.ones_like(weight_sum),
-                                       rtol=1e-4,
-                                       atol=1e-4)
-
-    def test_select_experts_with_grouped_topk(self, mock_dist_env, mock_moe_env):
-        num_tokens = 16
-        num_experts = 8
-        hidden_size = 32
-        num_expert_group = 4
-        topk_group = 2
-
-        hidden_states = torch.randn(num_tokens, hidden_size)
-        router_logits = torch.randn(num_tokens, num_experts)
-
-        topk_weights, topk_ids = select_experts(
-            hidden_states=hidden_states,
-            router_logits=router_logits,
             top_k=2,
-            use_grouped_topk=True,
+            router_logits=router_logits,
             renormalize=True,
-            topk_group=topk_group,
-            num_expert_group=num_expert_group,
-            custom_routing_function=None,
-            scoring_func="softmax",
-            e_score_correction_bias=None,
-            global_num_experts=num_experts)
+            num_experts=4,
+            apply_router_weight_on_input=True,
+            activation="gelu",
+            pertoken_scale=torch.ones(2),
+            mc2_mask=torch.tensor([True, False]),
+        )
 
-        assert topk_weights.shape == (num_tokens, 2)
-        assert topk_ids.shape == (num_tokens, 2)
+        torch.testing.assert_close(result, torch.ones_like(hidden_states))
+        select_experts_mock.assert_called_once()
+        fused_input = moe_comm_method.fused_experts.call_args.kwargs["fused_experts_input"]
+        assert fused_input.hidden_states is hidden_states
+        torch.testing.assert_close(fused_input.topk_weights, topk_weights.to(hidden_states.dtype))
+        assert torch.equal(fused_input.topk_ids, topk_ids)
+        assert fused_input.weights.w1_bias is layer.w13_bias
+        assert fused_input.weights.w2_bias is layer.w2_bias
+        assert fused_input.routing.apply_router_weight_on_input
+        assert fused_input.activation == "gelu"
+        if moe_comm_type == MoECommType.FUSED_MC2:
+            assert fused_input.weights.w1[0] is layer.w13_weight
+            assert fused_input.weights.w2[0] is layer.w2_weight
+            assert isinstance(fused_input.weights.w1_scale, list)
+            assert isinstance(fused_input.weights.w2_scale, list)
+        else:
+            assert fused_input.weights.w1 is layer.w13_weight
+            assert fused_input.weights.w2 is layer.w2_weight
+            assert fused_input.weights.w1_scale is None
+            assert fused_input.weights.w2_scale is None
 
-    def test_select_experts_with_e_score_correction_bias(self, mock_dist_env,
-                                                         mock_moe_env):
-        num_tokens = 16
-        num_experts = 8
-        hidden_size = 32
+    def test_apply_adds_zero_expert_result_and_force_balances(self, monkeypatch):
+        method = AscendUnquantizedFusedMoEMethod.__new__(AscendUnquantizedFusedMoEMethod)
+        method.moe = SimpleNamespace(has_bias=False)
+        method.dynamic_eplb = True
+        layer = self._build_layer(has_bias=False, zero_expert_num=1)
+        hidden_states = torch.randn(2, 4)
+        topk_weights = torch.ones(2, 2)
+        topk_ids = torch.tensor([[0, 1], [1, 0]], dtype=torch.int32)
+        zero_hidden = torch.full_like(hidden_states, 3.0)
+        routed_hidden = torch.full_like(hidden_states, 5.0)
+        expected = routed_hidden + zero_hidden
+        moe_comm_method = MagicMock()
+        moe_comm_method.fused_experts.return_value = routed_hidden
 
-        hidden_states = torch.randn(num_tokens, hidden_size)
-        router_logits = torch.randn(num_tokens, num_experts)
-        e_score_correction_bias = torch.randn(num_experts)
+        monkeypatch.setattr(
+            fused_moe_module,
+            "_EXTRA_CTX",
+            SimpleNamespace(moe_comm_type=MoECommType.MC2, moe_comm_method=moe_comm_method),
+        )
+        monkeypatch.setattr(fused_moe_module, "select_experts", MagicMock(return_value=(topk_weights, topk_ids)))
+        zero_experts_mock = MagicMock(return_value=(topk_ids, topk_weights, zero_hidden))
+        monkeypatch.setattr(fused_moe_module, "zero_experts_compute", zero_experts_mock)
+        monkeypatch.setattr(torch, "rand", MagicMock(return_value=torch.tensor([[0.2, 0.1], [0.4, 0.3]])))
 
-        topk_weights, topk_ids = select_experts(
-            hidden_states=hidden_states,
-            router_logits=router_logits,
-            top_k=2,
+        result = method.apply(
+            layer=layer,
+            x=hidden_states,
             use_grouped_topk=False,
-            renormalize=True,
-            topk_group=None,
-            num_expert_group=None,
-            custom_routing_function=None,
-            scoring_func="softmax",
-            e_score_correction_bias=e_score_correction_bias,
-            global_num_experts=num_experts)
-
-        assert topk_weights.shape == (num_tokens, 2)
-        assert topk_ids.shape == (num_tokens, 2)
-
-    def test_select_experts_with_custom_routing_function(self, mock_dist_env,
-                                                         mock_moe_env):
-        num_tokens = 16
-        num_experts = 8
-        hidden_size = 32
-
-        hidden_states = torch.randn(num_tokens, hidden_size)
-        router_logits = torch.randn(num_tokens, num_experts)
-
-        def custom_routing(hidden_states, gating_output, topk, renormalize,
-                           global_num_experts):
-            weights = gating_output.softmax(dim=-1)
-            topk_weights, topk_ids = weights.topk(topk, dim=-1)
-            if renormalize:
-                topk_weights = topk_weights / topk_weights.sum(dim=-1,
-                                                               keepdim=True)
-            return topk_weights, topk_ids.to(torch.int32)
-
-        topk_weights, topk_ids = select_experts(
-            hidden_states=hidden_states,
-            router_logits=router_logits,
             top_k=2,
-            use_grouped_topk=False,
-            renormalize=True,
-            topk_group=None,
-            num_expert_group=None,
-            custom_routing_function=custom_routing,
-            scoring_func="softmax",
-            e_score_correction_bias=None,
-            global_num_experts=num_experts)
-
-        assert topk_weights.shape == (num_tokens, 2)
-        assert topk_ids.shape == (num_tokens, 2)
-
-    def test_select_experts_weight_sum_range(self, mock_dist_env, mock_moe_env):
-        num_tokens = 16
-        num_experts = 8
-        hidden_size = 32
-
-        hidden_states = torch.randn(num_tokens, hidden_size)
-        router_logits = torch.randn(num_tokens, num_experts)
-
-        def simple_routing(hidden_states, gating_output, topk, renormalize,
-                           global_num_experts):
-            weights = gating_output.softmax(dim=-1)
-            topk_weights, topk_ids = weights.topk(topk, dim=-1)
-            if renormalize:
-                topk_weights = topk_weights / topk_weights.sum(dim=-1,
-                                                               keepdim=True)
-            return topk_weights, topk_ids.to(torch.int32)
-
-        topk_weights, topk_ids = select_experts(
-            hidden_states=hidden_states,
-            router_logits=router_logits,
-            top_k=2,
-            use_grouped_topk=False,
-            renormalize=True,
-            topk_group=None,
-            num_expert_group=None,
-            custom_routing_function=simple_routing,
-            scoring_func="softmax",
-            e_score_correction_bias=None,
-            global_num_experts=num_experts)
-
-        assert (topk_weights >= 0).all()
-        assert (topk_weights <= 1).all()
-
-        weight_sum = topk_weights.sum(dim=-1)
-        torch.testing.assert_close(weight_sum,
-                                   torch.ones_like(weight_sum),
-                                   rtol=1e-4,
-                                   atol=1e-4)
-
-    def test_select_experts_expert_id_range(self, mock_dist_env, mock_moe_env):
-        num_tokens = 16
-        num_experts = 8
-        hidden_size = 32
-
-        hidden_states = torch.randn(num_tokens, hidden_size)
-        router_logits = torch.randn(num_tokens, num_experts)
-
-        def simple_routing(hidden_states, gating_output, topk, renormalize,
-                           global_num_experts):
-            weights = gating_output.softmax(dim=-1)
-            topk_weights, topk_ids = weights.topk(topk, dim=-1)
-            if renormalize:
-                topk_weights = topk_weights / topk_weights.sum(dim=-1,
-                                                               keepdim=True)
-            return topk_weights, topk_ids.to(torch.int32)
-
-        topk_weights, topk_ids = select_experts(
-            hidden_states=hidden_states,
-            router_logits=router_logits,
-            top_k=2,
-            use_grouped_topk=False,
-            renormalize=True,
-            topk_group=None,
-            num_expert_group=None,
-            custom_routing_function=simple_routing,
-            scoring_func="softmax",
-            e_score_correction_bias=None,
-            global_num_experts=num_experts)
-
-        assert (topk_ids >= 0).all()
-        assert (topk_ids < num_experts).all()
-
-    @patch("vllm_ascend.ops.fused_moe.experts_selector.get_weight_prefetch_method")
-    @patch("vllm_ascend.ops.fused_moe.experts_selector.check_npu_moe_gating_top_k",
-           return_value=False)
-    def test_select_experts_native_softmax_matches_expected(
-            self, _, mock_get_weight_prefetch_method):
-        hidden_states = torch.tensor([[1.0, 0.0, -1.0, 2.0],
-                                      [0.5, 1.5, -0.5, 1.0]],
-                                     dtype=torch.float32)
-        router_logits = torch.tensor([[3.0, 1.0, 0.0, 2.0],
-                                      [0.0, 4.0, 1.0, 2.0]],
-                                     dtype=torch.float32)
-
-        prefetch_method = MagicMock()
-        mock_get_weight_prefetch_method.return_value = prefetch_method
-
-        topk_weights, topk_ids = select_experts(
-            hidden_states=hidden_states,
-            router_logits=router_logits,
-            top_k=2,
-            use_grouped_topk=False,
-            renormalize=True,
-            topk_group=None,
-            num_expert_group=None,
-            custom_routing_function=None,
-            scoring_func="softmax",
-            e_score_correction_bias=None,
-            global_num_experts=4)
-
-        expected_probs = router_logits.softmax(dim=-1)
-        expected_weights, expected_ids = expected_probs.topk(2, dim=-1)
-        expected_weights = expected_weights / expected_weights.sum(
-            dim=-1, keepdim=True)
-
-        prefetch_method.maybe_prefetch_moe_weight_preprocess.assert_called_once_with(
-            hidden_states, "gate_up")
-        torch.testing.assert_close(topk_weights,
-                                   expected_weights.to(hidden_states.dtype))
-        assert torch.equal(topk_ids, expected_ids.to(torch.int32))
-
-    @patch("vllm_ascend.ops.fused_moe.experts_selector.get_weight_prefetch_method")
-    @patch("vllm_ascend.ops.fused_moe.experts_selector.check_npu_moe_gating_top_k",
-           return_value=False)
-    def test_select_experts_grouped_topk_bias_uses_original_weights(
-            self, _, mock_get_weight_prefetch_method):
-        hidden_states = torch.tensor([[1.0, 0.0, -1.0, 2.0]],
-                                     dtype=torch.float32)
-        router_logits = torch.tensor([[4.0, 3.0, 1.0, 0.0]],
-                                     dtype=torch.float32)
-        e_score_correction_bias = torch.tensor([-10.0, -10.0, 5.0, 5.0],
-                                               dtype=torch.float32)
-
-        mock_get_weight_prefetch_method.return_value = MagicMock()
-
-        topk_weights, topk_ids = select_experts(
-            hidden_states=hidden_states,
-            router_logits=router_logits,
-            top_k=2,
-            use_grouped_topk=True,
+            router_logits=torch.randn(2, 2),
             renormalize=False,
-            topk_group=1,
-            num_expert_group=2,
-            custom_routing_function=None,
-            scoring_func="softmax",
-            e_score_correction_bias=e_score_correction_bias,
-            global_num_experts=4)
+            num_experts=2,
+            enable_force_load_balance=True,
+        )
 
-        original_weights = router_logits.softmax(dim=-1)
-        sorted_ids, order = torch.sort(topk_ids, dim=-1)
-        sorted_weights = topk_weights.gather(1, order)
+        torch.testing.assert_close(result, expected)
+        zero_experts_mock.assert_called_once()
+        fused_input = moe_comm_method.fused_experts.call_args.kwargs["fused_experts_input"]
+        assert fused_input.dynamic_eplb
+        assert fused_input.weights.w1_bias is None
+        assert fused_input.weights.w2_bias is None
 
-        expected_ids = torch.tensor([[2, 3]], dtype=torch.int32)
-        expected_weights = original_weights[:, 2:4].to(hidden_states.dtype)
 
-        assert torch.equal(sorted_ids, expected_ids)
-        torch.testing.assert_close(sorted_weights, expected_weights)
+class TestAscendMoERunner:
+    @pytest.mark.parametrize(
+        "moe_comm_type, expected",
+        [
+            (MoECommType.ALLTOALL, True),
+            (MoECommType.MC2, True),
+            (MoECommType.FUSED_MC2, True),
+            (MoECommType.ALLGATHER, False),
+        ],
+    )
+    def test_runner_reduction_properties(self, monkeypatch, moe_comm_type, expected):
+        runner = AscendMoERunner.__new__(AscendMoERunner)
+        monkeypatch.setattr(fused_moe_module, "_EXTRA_CTX", SimpleNamespace(moe_comm_type=moe_comm_type))
 
-    @patch("vllm_ascend.ops.fused_moe.experts_selector.get_weight_prefetch_method",
-           return_value=MagicMock())
-    @patch("vllm_ascend.ops.fused_moe.experts_selector.check_npu_moe_gating_top_k",
-           return_value=False)
-    def test_select_experts_invalid_scoring_func_raises(self, _, __):
+        assert runner.use_dp_chunking is False
+        if hasattr(type(runner), "_fused_output_is_reduced"):
+            assert runner._fused_output_is_reduced is expected
+        if hasattr(runner, "_maybe_reduce_shared_expert_output"):
+            assert runner._maybe_reduce_shared_expert_output("shared") == "shared"
+
+    @pytest.mark.parametrize("has_shared_experts", [False, True])
+    def test_forward_impl_delegates_to_layer(self, monkeypatch, has_shared_experts):
+        runner = AscendMoERunner.__new__(AscendMoERunner)
+        shared_experts = MagicMock() if has_shared_experts else None
+        shared_experts_owner = next(
+            (cls for cls in type(runner).__mro__ if "shared_experts" in cls.__dict__),
+            AscendMoERunner,
+        )
+        monkeypatch.setattr(shared_experts_owner, "shared_experts", property(lambda _: shared_experts), raising=False)
+        layer = MagicMock()
+        hidden_states = torch.randn(2, 4)
+        router_logits = torch.randn(2, 3)
+        layer.forward_impl.return_value = "routed"
+        layer.shared_forward_impl.return_value = ("shared", "routed")
+
+        result = runner.forward_impl(layer, hidden_states, router_logits, None)
+
+        if has_shared_experts:
+            assert result == ("shared", "routed")
+            layer.shared_forward_impl.assert_called_once_with(hidden_states, router_logits)
+            layer.forward_impl.assert_not_called()
+        else:
+            assert result == "routed"
+            layer.forward_impl.assert_called_once_with(hidden_states, router_logits)
+            layer.shared_forward_impl.assert_not_called()
+
+
+class TestAscendFusedMoE:
+    def _build_layer(self):
+        layer = AscendFusedMoE.__new__(AscendFusedMoE)
+        layer.quant_method = MagicMock()
+        layer.ensure_moe_quant_config_init = MagicMock()
+        layer.runner = MagicMock()
+        layer.moe_load = torch.zeros(2, dtype=torch.int64)
+        layer.multi_stage = False
+        layer.log2phy = torch.tensor([1, 0])
+        return layer
+
+    def test_simple_helpers(self, monkeypatch):
+        layer = self._build_layer()
+        layer.quant_method.quant_method = SimpleNamespace(quant_type=QuantType.W8A8)
+        layer.update_expert_map(torch.tensor([0, -1]))
+        assert torch.equal(layer._expert_map, torch.tensor([0, -1]))
+        assert torch.equal(layer.get_log2phy_map(), torch.tensor([1, 0]))
+        assert layer._get_quant_type() == QuantType.W8A8
+
+        layer.clear_moe_load()
+        assert torch.equal(layer.moe_load, torch.zeros_like(layer.moe_load))
+        layer.multi_stage = True
+        layer.load_counter = torch.tensor(4)
+        layer.clear_moe_load()
+        assert layer.load_counter.item() == 0
+
+        maybe_all_reduce = MagicMock(return_value="reduced")
+        monkeypatch.setattr(
+            fused_moe_module.torch.ops,
+            "vllm",
+            SimpleNamespace(maybe_all_reduce_tensor_model_parallel=maybe_all_reduce),
+            raising=False,
+        )
+        assert layer.maybe_all_reduce_tensor_model_parallel(torch.ones(1)) == "reduced"
+
+    def test_forward_delegates_to_runner(self):
+        layer = self._build_layer()
+        hidden_states = torch.randn(2, 4)
+        router_logits = torch.randn(2, 3)
+        layer.runner.forward.return_value = "forwarded"
+
+        assert layer.forward(hidden_states, router_logits) == "forwarded"
+        layer.ensure_moe_quant_config_init.assert_called_once()
+        layer.runner.forward.assert_called_once_with(hidden_states, router_logits)
+
+    @pytest.mark.parametrize("return_with_event", [True, False])
+    def test_forward_impl_prepare_apply_finalize(self, monkeypatch, return_with_event):
+        layer = self._build_layer()
+        layer.enable_npugraph_ex_static_kernel = True
+        layer.multistream_overlap_gate = False
+        layer.enable_shared_expert_dp = False
+        layer.quant_type = QuantType.NONE
+        layer.top_k = 2
+        layer.renormalize = True
+        layer.use_grouped_topk = False
+        layer.moe_config = SimpleNamespace(num_experts=4)
+        layer._expert_map = None
+        layer.topk_group = None
+        layer.num_expert_group = None
+        layer.custom_routing_function = None
+        layer.scoring_func = "softmax"
+        layer._original_routed_scaling_factor = 1.0
+        layer.routed_scaling_factor = 1.0
+        layer.e_score_correction_bias = None
+        layer.activation = "silu"
+        layer.apply_router_weight_on_input = False
+        layer.global_redundant_expert_num = 0
+        layer.dynamic_eplb = True
+        layer.reduce_results = True
+        forward_context = SimpleNamespace(moe_layer_index=5, all_moe_layers=[0, 1])
         hidden_states = torch.randn(2, 4)
         router_logits = torch.randn(2, 4)
-
-        with pytest.raises(ValueError, match="Unsupported scoring function"):
-            select_experts(
-                hidden_states=hidden_states,
-                router_logits=router_logits,
-                top_k=2,
-                use_grouped_topk=False,
-                renormalize=True,
-                topk_group=None,
-                num_expert_group=None,
-                custom_routing_function=None,
-                scoring_func="unsupported",
-                e_score_correction_bias=None,
-                global_num_experts=4)
-
-
-class TestCumsumGroupList(TestBase):
-    def setUp(self):
-        self.active_num = 8
-        self.expert_num = 128
-        self.experts = torch.zeros((self.expert_num,), dtype=torch.int64)
-        self.experts[: self.active_num] = 1
-        self.experts = self.experts[torch.randperm(self.expert_num)]
-        self.group_list = self.experts.cumsum(dim=0)
-
-    def test_cumsum_group_list_with_type_0(self):
-        group_list = self.experts.cumsum(dim=0)
-        group_list_type = 0
-        result = cumsum_group_list(group_list, group_list_type, 0)
-        self.assertTrue(torch.equal(result, self.group_list))
-
-    def test_cumsum_group_list_with_type_1(self):
-        group_list = self.experts
-        group_list_type = 1
-        result = cumsum_group_list(group_list, group_list_type, 0)
-        self.assertTrue(torch.equal(result, self.group_list))
-
-    def test_cumsum_group_list_with_type_2(self):
-        tokens = torch.arange(self.expert_num, dtype=torch.int64)
-        group_list = torch.cat([tokens.reshape(self.expert_num, 1), self.experts.reshape(self.expert_num, 1)], dim=1)
-        group_list_type = 2
-        result = cumsum_group_list(
-            group_list, group_list_type, 0, active_num=self.active_num, expert_num=self.expert_num
+        prepared_hidden = hidden_states + 1
+        prepared_logits = router_logits + 1
+        prepare_output = MoEPrepareOutput(
+            hidden_states=prepared_hidden,
+            router_logits=prepared_logits,
+            mc2_mask=torch.tensor([True, False]),
+            padded_hidden_states_shape=torch.Size([4, 4]),
+            pertoken_scale=torch.ones(2),
         )
-        self.assertTrue(torch.equal(result, self.group_list))
-
-
-class TestUnifiedApplyMLP(TestBase):
-    @patch("vllm_ascend.ops.fused_moe.moe_mlp.get_weight_prefetch_method", return_value=MagicMock())
-    @patch("vllm_ascend.ascend_forward_context.get_forward_context")
-    @patch("vllm_ascend.utils.get_ascend_device_type", return_value=AscendDeviceType.A3)
-    @patch("torch_npu.npu_grouped_matmul")
-    @patch("torch_npu.npu_dynamic_quant")
-    @patch("torch_npu.npu_dequant_swiglu_quant")
-    def test_unified_apply_mlp_with_quantization_mc2(
-        self,
-        mock_npu_dequant,
-        mock_npu_dynamic_quant,
-        mock_npu_grouped_matmul,
-        mock_soc_version,
-        mock_get_forward_context,
-        mock_get_weight_prefetch_method,
-    ):
-        mock_forward_context = MagicMock()
-        mock_forward_context.moe_comm_type = MoECommType.MC2
-        mock_get_forward_context.return_value = mock_forward_context
-
-        mock_npu_dynamic_quant.return_value = (
-            torch.randint(-128, 127, (10, 20), dtype=torch.int8),
-            torch.rand(10, 1, dtype=torch.float32),
+        moe_comm_method = MagicMock()
+        moe_comm_method.prepare.return_value = prepare_output
+        moe_comm_method.finalize.side_effect = lambda hidden_states, **_: (hidden_states + 2)
+        before_dispatch_evt = MagicMock()
+        before_combine_evt = MagicMock()
+        layer.quant_method.apply.return_value = FusedExpertsResult(
+            routed_out=torch.ones_like(hidden_states),
+            before_dispatch_evt=before_dispatch_evt,
+            before_combine_evt=before_combine_evt,
+            expert_tokens=torch.tensor([2, 5]),
+            group_list_type=0,
+        )
+        monkeypatch.setattr(fused_moe_module, "get_forward_context", MagicMock(return_value=forward_context))
+        monkeypatch.setattr(
+            fused_moe_module,
+            "_EXTRA_CTX",
+            SimpleNamespace(in_profile_run=True, moe_comm_method=moe_comm_method, flash_comm_v1_enabled=True),
         )
 
-        mock_npu_grouped_matmul.side_effect = [
-            [torch.randint(-2147483648, 2147483647, (10, 40), dtype=torch.int32)],
-            [torch.randn(10, 20, dtype=torch.bfloat16)],
-        ]
+        result = layer.forward_impl(hidden_states, router_logits, return_with_event=return_with_event)
 
-        mock_npu_dequant.return_value = (
-            torch.randn(10, 40, dtype=torch.bfloat16),
-            torch.randn(10, 1, dtype=torch.float32),
-        )
-
-        hidden_states = torch.randn(10, 20, dtype=torch.bfloat16)
-        w1 = torch.randint(-128, 127, (5, 20, 40), dtype=torch.int8)
-        w1_scale = torch.randn(5, 40, dtype=torch.float32)
-        w2 = torch.randint(-128, 127, (5, 40, 20), dtype=torch.int8)
-        w2_scale = torch.randn(5, 20, dtype=torch.bfloat16)
-        group_list = torch.tensor([2, 4, 6, 8, 10], dtype=torch.int64)
-
-        result = unified_apply_mlp(
-            mlp_compute_input=build_mlp_compute_input_fixture(
-                hidden_states=hidden_states,
-                w1=w1,
-                w2=w2,
-                group_list=group_list,
-                with_quant=True,
-                w1_scale=w1_scale,
-                w2_scale=w2_scale,
-            )
-        )
-
-        mock_get_forward_context.assert_called()
-
-        mock_npu_dynamic_quant.assert_called()
-
-        self.assertEqual(mock_npu_grouped_matmul.call_count, 2)
-
-        mock_npu_dequant.assert_called_once()
-
-        self.assertEqual(result.dtype, torch.bfloat16)
-
-    @patch("vllm_ascend.utils.get_ascend_device_type", return_value=AscendDeviceType.A3)
-    @patch("torch_npu.npu_grouped_matmul")
-    @patch("torch_npu.npu_swiglu")
-    @patch("torch_npu.npu_dynamic_quant")
-    def test_unified_apply_mlp_without_quantization(
-        self, mock_npu_dynamic_quant, mock_npu_swiglu, mock_npu_grouped_matmul, mock_soc_version
-    ):
-        mock_npu_grouped_matmul.side_effect = [
-            [torch.randn(10, 40, dtype=torch.float16)],
-            [torch.randn(10, 20, dtype=torch.float16)],
-        ]
-        mock_npu_swiglu.return_value = torch.randn(10, 40, dtype=torch.float16)
-        mock_npu_dynamic_quant.return_value = (MagicMock(), MagicMock())
-
-        hidden_states = torch.randn(10, 20, dtype=torch.float16)
-        w1 = torch.randn(5, 20, 40, dtype=torch.float16)
-        w2 = torch.randn(5, 40, 20, dtype=torch.float16)
-        group_list = torch.tensor([2, 4, 6, 8, 10], dtype=torch.int64)
-        topk_scales = torch.randn(10, 1, dtype=torch.float16)
-
-        result = unified_apply_mlp(
-            mlp_compute_input=build_mlp_compute_input_fixture(
-                hidden_states=hidden_states,
-                w1=w1,
-                w2=w2,
-                group_list=group_list,
-                with_quant=False,
-                topk_scales=topk_scales,
-            )
-        )
-
-        self.assertEqual(mock_npu_grouped_matmul.call_count, 2)
-        mock_npu_swiglu.assert_called_once()
-
-        self.assertEqual(result.shape, hidden_states.shape)
-        self.assertEqual(result.dtype, torch.float16)
-
-    @patch("vllm_ascend.ops.fused_moe.moe_mlp.HAS_TRITON", False)
-    @patch("vllm_ascend.ops.fused_moe.moe_mlp.get_weight_prefetch_method", return_value=MagicMock())
-    @patch("vllm_ascend.ascend_forward_context.get_forward_context")
-    @patch("torch_npu.npu_grouped_matmul")
-    @patch("torch_npu.npu_swiglu")
-    @patch("torch_npu.npu_dynamic_quant")
-    def test_unified_apply_mlp_with_quantization_and_dynamic_scale(
-        self,
-        mock_npu_dynamic_quant,
-        mock_npu_swiglu,
-        mock_npu_grouped_matmul,
-        mock_get_forward_context,
-        mock_get_weight_prefetch_method,
-    ):
-        mock_forward_context = MagicMock()
-        mock_forward_context.with_quant = True
-        mock_forward_context.fused_moe_state = "NOT_MC2"
-        mock_get_forward_context.return_value = mock_forward_context
-
-        mock_npu_grouped_matmul.side_effect = [
-            [torch.randn(10, 40, dtype=torch.bfloat16)],
-            [torch.randn(10, 20, dtype=torch.bfloat16)],
-        ]
-
-        mock_npu_swiglu.return_value = torch.randn(10, 40, dtype=torch.bfloat16)
-
-        mock_npu_dynamic_quant.return_value = (
-            torch.randint(-128, 127, (10, 40), dtype=torch.int8),
-            torch.rand(10, 1, dtype=torch.float32),
-        )
-
-        hidden_states = torch.randn(10, 20, dtype=torch.bfloat16)
-        hidden_states_shape = hidden_states.shape
-        w1 = torch.randn(5, 20, 40, dtype=torch.bfloat16)
-        w1_scale = torch.randn(5, 40, dtype=torch.bfloat16)
-        w2 = torch.randn(5, 40, 20, dtype=torch.bfloat16)
-        w2_scale = torch.randn(5, 20, dtype=torch.bfloat16)
-        w1_scale_bias = torch.randn(5, 40, dtype=torch.bfloat16)
-        w2_scale_bias = torch.randn(5, 20, dtype=torch.bfloat16)
-        group_list = torch.tensor([2, 4, 6, 8, 10], dtype=torch.int64)
-        provided_dynamic_scale = torch.rand(10, 1, dtype=torch.float32)
-
-        result = unified_apply_mlp(
-            mlp_compute_input=build_mlp_compute_input_fixture(
-                hidden_states=hidden_states,
-                w1=w1,
-                w2=w2,
-                group_list=group_list,
-                with_quant=True,
-                dynamic_scale=provided_dynamic_scale,
-                w1_scale=w1_scale,
-                w2_scale=w2_scale,
-                w1_scale_bias=w1_scale_bias,
-                w2_scale_bias=w2_scale_bias,
-            )
-        )
-
-        mock_get_forward_context.assert_called()
-
-        self.assertEqual(mock_npu_grouped_matmul.call_count, 2)
-        mock_npu_swiglu.assert_called_once()
-        mock_npu_dynamic_quant.assert_called_once()
-
-        self.assertEqual(result.shape, hidden_states_shape)
-        self.assertEqual(result.dtype, torch.bfloat16)
-
-    @patch("vllm_ascend.utils.get_ascend_device_type", return_value=AscendDeviceType._310P)
-    @patch("torch_npu.npu_grouped_matmul")
-    @patch("torch_npu.npu_swiglu")
-    @patch("torch_npu.npu_dynamic_quant")
-    def test_unified_apply_mlp_without_quantization_310p(
-        self, mock_npu_dynamic_quant, mock_npu_swiglu, mock_npu_grouped_matmul, mock_soc_version
-    ):
-        mock_gmm1_out = torch.randn(10, 40, dtype=torch.float16)
-        mock_gmm2_out = torch.randn(10, 20, dtype=torch.float16)
-        mock_npu_grouped_matmul.side_effect = [[mock_gmm1_out], [mock_gmm2_out]]
-
-        mock_npu_swiglu.return_value = torch.randn(10, 40, dtype=torch.float16)
-
-        mock_npu_dynamic_quant.return_value = (MagicMock(), MagicMock())
-
-        hidden_states = torch.randn(10, 20, dtype=torch.float16)
-        w1 = torch.randn(5, 20, 40, dtype=torch.float16)
-        w2 = torch.randn(5, 40, 20, dtype=torch.float16)
-        group_list = torch.tensor([2, 4, 6, 8, 10], dtype=torch.int64)
-        topk_scales = torch.randn(10, 1, dtype=torch.float16)
-
-        result = unified_apply_mlp(
-            mlp_compute_input=build_mlp_compute_input_fixture(
-                hidden_states=hidden_states,
-                w1=w1,
-                w2=w2,
-                group_list=group_list,
-                with_quant=False,
-                topk_scales=topk_scales,
-            )
-        )
-
-        self.assertEqual(mock_npu_grouped_matmul.call_count, 2)
-        mock_npu_swiglu.assert_called_once()
-
-        self.assertEqual(result.shape, hidden_states.shape)
-        self.assertEqual(result.dtype, torch.float16)
-
-    @patch("vllm_ascend.ops.fused_moe.moe_mlp.get_weight_prefetch_method", return_value=MagicMock())
-    @patch("vllm_ascend.ascend_forward_context.get_forward_context")
-    @patch("torch_npu.npu_grouped_matmul")
-    @patch("torch_npu.npu_swiglu")
-    @patch("torch_npu.npu_grouped_matmul_swiglu_quant")
-    @patch("torch_npu.npu_dynamic_quant")
-    def test_unified_apply_mlp_with_quantization_and_fusion_mlp(
-        self,
-        mock_npu_dynamic_quant,
-        mock_npu_grouped_matmul_swiglu_quant,
-        mock_npu_swiglu,
-        mock_npu_grouped_matmul,
-        mock_get_forward_context,
-        mock_get_weight_prefetch_method,
-    ):
-        mock_forward_context = MagicMock()
-        mock_forward_context.with_quant = True
-        mock_forward_context.fused_moe_state = "NOT_MC2"
-        mock_get_forward_context.return_value = mock_forward_context
-
-        mock_npu_grouped_matmul_swiglu_quant.return_value = (
-            torch.randint(-128, 127, (10, 40), dtype=torch.int8),
-            torch.rand(10, 1, dtype=torch.float32),
-            torch.rand(10, 1, dtype=torch.float32),
-        )
-        mock_npu_grouped_matmul.side_effect = [[torch.randn(10, 20, dtype=torch.bfloat16)]]
-        mock_npu_swiglu.return_value = torch.randn(10, 40, dtype=torch.bfloat16)
-        mock_npu_dynamic_quant.return_value = (
-            torch.randint(-128, 127, (10, 40), dtype=torch.int8),
-            torch.rand(10, 1, dtype=torch.float32),
-        )
-
-        hidden_states = torch.randn(10, 20, dtype=torch.bfloat16)
-        hidden_states_shape = hidden_states.shape
-        w1 = torch.randn(5, 20, 40, dtype=torch.bfloat16)
-        w1_scale = torch.randn(5, 40, dtype=torch.bfloat16)
-        w2 = torch.randn(5, 40, 20, dtype=torch.bfloat16)
-        w2_scale = torch.randn(5, 20, dtype=torch.bfloat16)
-        w1_scale_bias = torch.randn(5, 40, dtype=torch.bfloat16)
-        w2_scale_bias = torch.randn(5, 20, dtype=torch.bfloat16)
-        group_list = torch.tensor([2, 4, 6, 8, 10], dtype=torch.int64)
-        provided_dynamic_scale = torch.rand(10, 1, dtype=torch.float32)
-
-        result = unified_apply_mlp(
-            mlp_compute_input=build_mlp_compute_input_fixture(
-                hidden_states=hidden_states,
-                w1=w1,
-                w2=w2,
-                group_list=group_list,
-                with_quant=True,
-                dynamic_scale=provided_dynamic_scale,
-                w1_scale=w1_scale,
-                w2_scale=w2_scale,
-                w1_scale_bias=w1_scale_bias,
-                w2_scale_bias=w2_scale_bias,
-                fusion=True,
-            )
-        )
-
-        mock_get_forward_context.assert_called()
-        mock_npu_grouped_matmul.assert_called_once()
-        mock_npu_grouped_matmul_swiglu_quant.assert_called_once()
-
-        self.assertTrue(mock_forward_context.with_quant)
-        self.assertEqual(result.shape, hidden_states_shape)
-        self.assertEqual(result.dtype, torch.bfloat16)
-
-    @patch('torch_npu.npu_swiglu')
-    @patch('torch_npu.npu_grouped_matmul')
-    def test_unified_apply_mlp_without_quantization_matches_expected_values(
-            self, mock_npu_grouped_matmul, mock_npu_swiglu):
-        def fake_grouped_matmul(*, x, weight, bias=None, **kwargs):
-            weight_tensor = weight[0]
-            if weight_tensor.dim() == 3 and weight_tensor.shape[0] == 1:
-                weight_tensor = weight_tensor[0]
-
-            result = x[0] @ weight_tensor
-            if bias is not None:
-                bias_tensor = bias[0]
-                if bias_tensor.dim() == 2 and bias_tensor.shape[0] == 1:
-                    bias_tensor = bias_tensor[0]
-                result = result + bias_tensor.to(result.dtype)
-            return [result]
-
-        def fake_swiglu(x):
-            left, right = x.chunk(2, dim=-1)
-            return F.silu(left) * right
-
-        mock_npu_grouped_matmul.side_effect = fake_grouped_matmul
-        mock_npu_swiglu.side_effect = fake_swiglu
-
-        hidden_states = torch.tensor([[1.0, 2.0], [0.5, -1.0]],
-                                     dtype=torch.float32)
-        w1 = torch.tensor([[[1.0, 0.0, 1.0, -1.0],
-                            [0.0, 1.0, 2.0, 1.0]]],
-                          dtype=torch.float32)
-        w2 = torch.tensor([[[1.0, 2.0], [-1.0, 1.0]]], dtype=torch.float32)
-        topk_scales = torch.tensor([[1.0], [0.5]], dtype=torch.float32)
-        group_list = torch.tensor([2], dtype=torch.int64)
-
-        result = unified_apply_mlp(
-            mlp_compute_input=build_mlp_compute_input_fixture(
-                hidden_states=hidden_states,
-                w1=w1,
-                w2=w2,
-                group_list=group_list,
-                with_quant=False,
-                topk_scales=topk_scales,
-                need_trans=False,
-            ))
-
-        gate_up = hidden_states @ w1[0]
-        activated = F.silu(gate_up[:, :2]) * gate_up[:, 2:]
-        activated = activated * topk_scales
-        expected = activated @ w2[0]
-
-        self.assertEqual(mock_npu_grouped_matmul.call_count, 2)
-        mock_npu_swiglu.assert_called_once()
-        torch.testing.assert_close(result, expected)
-
-
-class TestZeroExpertsCompute(TestBase):
-    def test_zero_experts_compute_identity_type(self):
-        from vllm_ascend.ops.fused_moe.experts_selector import zero_experts_compute
-
-        num_experts = 8
-        num_tokens = 4
-        top_k = 2
-        hidden_size = 16
-
-        expert_indices = torch.tensor([[0, 1], [2, 3], [4, 5], [6, 7]], dtype=torch.int32)
-        expert_scales = torch.ones(num_tokens, top_k, dtype=torch.float32)
-        hidden_states = torch.randn(num_tokens, hidden_size, dtype=torch.float32)
-
-        result_indices, result_scales, result_hidden = zero_experts_compute(
-            expert_indices=expert_indices,
-            expert_scales=expert_scales,
-            num_experts=num_experts,
-            zero_expert_type="identity",
+        assert forward_context.moe_layer_index == 1
+        moe_comm_method.prepare.assert_called_once_with(
             hidden_states=hidden_states,
+            router_logits=router_logits,
+            replace_allreduce=True,
+            enable_shared_expert_dp=False,
+            quant_type=QuantType.NONE,
+        )
+        apply_kwargs = layer.quant_method.apply.call_args.kwargs
+        assert apply_kwargs["x"] is prepared_hidden
+        assert apply_kwargs["router_logits"] is prepared_logits
+        assert apply_kwargs["num_experts"] == 4
+        assert apply_kwargs["enable_force_load_balance"] is True
+        assert torch.equal(apply_kwargs["mc2_mask"], prepare_output.mc2_mask)
+        torch.testing.assert_close(layer.moe_load, torch.tensor([2, 3]))
+        if return_with_event:
+            assert result.routed_out.shape == hidden_states.shape
+            assert result.before_dispatch_evt is before_dispatch_evt
+            assert result.before_combine_evt is before_combine_evt
+        else:
+            torch.testing.assert_close(result, torch.ones_like(hidden_states) + 2)
+
+    def test_forward_impl_dynamic_eplb_multi_stage(self, monkeypatch):
+        layer = self._build_layer()
+        layer.enable_npugraph_ex_static_kernel = False
+        layer.multistream_overlap_gate = False
+        layer.enable_shared_expert_dp = False
+        layer.quant_type = QuantType.NONE
+        layer.top_k = 1
+        layer.renormalize = False
+        layer.use_grouped_topk = False
+        layer.moe_config = SimpleNamespace(num_experts=2)
+        layer._expert_map = None
+        layer.topk_group = None
+        layer.num_expert_group = None
+        layer.custom_routing_function = None
+        layer.scoring_func = "softmax"
+        layer._original_routed_scaling_factor = 1.0
+        layer.routed_scaling_factor = 1.0
+        layer.e_score_correction_bias = None
+        layer.activation = "silu"
+        layer.apply_router_weight_on_input = False
+        layer.global_redundant_expert_num = 0
+        layer.dynamic_eplb = True
+        layer.multi_stage = True
+        layer.moe_load = torch.zeros((2, 2), dtype=torch.int32)
+        layer.load_counter = torch.tensor([1], dtype=torch.int64)
+        layer.num_iter = 2
+        layer.reduce_results = False
+        moe_comm_method = MagicMock()
+        moe_comm_method.prepare.return_value = MoEPrepareOutput(
+            hidden_states=torch.ones(2, 4),
+            router_logits=torch.ones(2, 2),
+            mc2_mask=None,
+            padded_hidden_states_shape=None,
+        )
+        moe_comm_method.finalize.side_effect = lambda hidden_states, **_: (hidden_states)
+        layer.quant_method.apply.return_value = FusedExpertsResult(
+            routed_out=torch.ones(2, 4),
+            expert_tokens=torch.tensor([4, 6]),
+            group_list_type=1,
+        )
+        monkeypatch.setattr(fused_moe_module, "get_forward_context", MagicMock(return_value=SimpleNamespace()))
+        monkeypatch.setattr(
+            fused_moe_module,
+            "_EXTRA_CTX",
+            SimpleNamespace(in_profile_run=False, moe_comm_method=moe_comm_method, flash_comm_v1_enabled=False),
         )
 
-        assert result_indices.shape == expert_indices.shape
-        assert result_scales.shape == expert_scales.shape
-        assert result_hidden.shape == hidden_states.shape
+        layer.forward_impl(torch.zeros(2, 4), torch.zeros(2, 2))
 
-    def test_zero_experts_compute_with_zero_experts(self):
-        from vllm_ascend.ops.fused_moe.experts_selector import zero_experts_compute
+        assert torch.equal(layer.moe_load[1], torch.tensor([4, 6], dtype=torch.int32))
+        assert layer.load_counter.item() == 2
 
-        num_experts = 4
-        num_tokens = 3
-        top_k = 2
-        hidden_size = 8
 
-        expert_indices = torch.tensor([[0, 1], [1, 2], [2, 3]], dtype=torch.int32)
-        expert_scales = torch.tensor([[0.5, 0.5], [0.3, 0.7], [0.4, 0.6]], dtype=torch.float32)
-        hidden_states = torch.randn(num_tokens, hidden_size, dtype=torch.float32)
+class TestAscendFusedMoESharedExperts:
+    def test_properties_and_forward_delegate(self, monkeypatch):
+        layer = AscendFusedMoE.__new__(AscendFusedMoE)
+        if not hasattr(type(layer), "gate"):
+            pytest.skip("Current AscendFusedMoE does not expose gate property")
+        layer._gate = MagicMock()
+        layer.use_overlapped = True
+        assert layer.gate is layer._gate
+        layer.use_overlapped = False
+        assert layer.gate is None
+        assert layer.is_internal_router is False
+        assert layer.use_dp_chunking is False
 
-        result_indices, result_scales, result_hidden = zero_experts_compute(
-            expert_indices=expert_indices,
-            expert_scales=expert_scales,
-            num_experts=num_experts,
-            zero_expert_type="identity",
-            hidden_states=hidden_states,
+        monkeypatch.setattr(fused_moe_module.AscendFusedMoE, "forward", MagicMock(return_value="routed"))
+        layer._shared_experts = None
+        assert layer.forward(torch.ones(1, 2), torch.ones(1, 2)) == "routed"
+
+        fused_moe_module.AscendFusedMoE.forward.return_value = "forwarded"
+        layer._shared_experts = MagicMock()
+        assert layer.forward(torch.ones(1, 2), torch.ones(1, 2)) == "forwarded"
+
+    def test_shared_experts_split_with_expert_gate(self):
+        layer = AscendFusedMoE.__new__(AscendFusedMoE)
+        if not hasattr(layer, "_shared_experts_part1"):
+            pytest.skip("Current AscendFusedMoE does not split shared experts")
+        hidden_states = torch.tensor([[1.0, -1.0]])
+        gate_up = torch.tensor([[2.0, -2.0]])
+        down_out = torch.tensor([[3.0, 4.0]])
+        gate_out = torch.tensor([[0.0, 2.0]])
+        shared_experts = MagicMock()
+        shared_experts.gate_up_proj.return_value = (gate_up, None)
+        shared_experts.act_fn.side_effect = lambda tensor: tensor + 1
+        shared_experts.down_proj.return_value = (down_out, None)
+        shared_experts.expert_gate.return_value = (gate_out, None)
+        layer._shared_experts = shared_experts
+
+        part1_out = layer._shared_experts_part1(hidden_states)
+        part2_out = layer._shared_experts_part2(hidden_states, part1_out)
+
+        torch.testing.assert_close(part1_out, gate_up)
+        torch.testing.assert_close(part2_out, F.sigmoid(gate_out) * down_out)
+
+    @pytest.mark.parametrize("has_shared_experts", [False, True])
+    def test_shared_forward_impl_routes_shared_output(self, monkeypatch, has_shared_experts):
+        layer = AscendFusedMoE.__new__(AscendFusedMoE)
+        if not hasattr(layer, "shared_forward_impl"):
+            pytest.skip("Current AscendFusedMoE has no shared_forward_impl")
+        layer.shared_multistream_overlap_gate = False
+        layer._shared_experts = MagicMock() if has_shared_experts else None
+        hidden_states = torch.randn(2, 4)
+        router_logits = torch.randn(2, 3)
+        fused_result = fused_moe_module.FusedMoEResult(
+            routed_out=torch.ones(2, 4),
+            before_dispatch_evt=MagicMock(),
+            before_combine_evt=MagicMock(),
         )
-
-        assert result_indices.shape == expert_indices.shape
-        assert result_scales.shape == expert_scales.shape
-        assert result_hidden.shape == hidden_states.shape
-
-    def test_zero_experts_compute_normal_experts_masked(self):
-        from vllm_ascend.ops.fused_moe.experts_selector import zero_experts_compute
-
-        num_experts = 4
-        num_tokens = 2
-        top_k = 2
-        hidden_size = 8
-
-        expert_indices = torch.tensor([[0, 5], [6, 7]], dtype=torch.int32)
-        expert_scales = torch.ones(num_tokens, top_k, dtype=torch.float32)
-        hidden_states = torch.randn(num_tokens, hidden_size, dtype=torch.float32)
-
-        result_indices, result_scales, _ = zero_experts_compute(
-            expert_indices=expert_indices,
-            expert_scales=expert_scales,
-            num_experts=num_experts,
-            zero_expert_type="identity",
-            hidden_states=hidden_states,
+        monkeypatch.setattr(
+            fused_moe_module.torch.npu,
+            "current_stream",
+            MagicMock(return_value=MagicMock(record_event=MagicMock(return_value=MagicMock()))),
         )
+        monkeypatch.setattr(fused_moe_module.AscendFusedMoE, "forward_impl", MagicMock(return_value=fused_result))
+        layer._forward_shared_experts = MagicMock(return_value="shared_out")
 
-        normal_expert_mask = expert_indices >= num_experts
-        for i in range(num_tokens):
-            for j in range(top_k):
-                if normal_expert_mask[i, j]:
-                    assert result_scales[i, j] == 0.0
-                    assert result_indices[i, j] == 0
+        result = layer.shared_forward_impl(hidden_states, router_logits)
 
-    def test_zero_experts_compute_output_sum(self):
-        from vllm_ascend.ops.fused_moe.experts_selector import zero_experts_compute
-
-        num_experts = 2
-        num_tokens = 2
-        top_k = 2
-        hidden_size = 4
-
-        expert_indices = torch.tensor([[0, 1], [0, 1]], dtype=torch.int32)
-        expert_scales = torch.tensor([[0.5, 0.5], [0.3, 0.7]], dtype=torch.float32)
-        hidden_states = torch.randn(num_tokens, hidden_size, dtype=torch.float32)
-
-        _, _, result_hidden = zero_experts_compute(
-            expert_indices=expert_indices,
-            expert_scales=expert_scales,
-            num_experts=num_experts,
-            zero_expert_type="identity",
-            hidden_states=hidden_states,
-        )
-
-        assert result_hidden.shape == (num_tokens, hidden_size)
-
-    def test_zero_experts_compute_all_zero_experts(self):
-        from vllm_ascend.ops.fused_moe.experts_selector import zero_experts_compute
-
-        num_experts = 4
-        num_tokens = 2
-        top_k = 2
-        hidden_size = 8
-
-        expert_indices = torch.tensor([[0, 1], [2, 3]], dtype=torch.int32)
-        expert_scales = torch.ones(num_tokens, top_k, dtype=torch.float32)
-        hidden_states = torch.randn(num_tokens, hidden_size, dtype=torch.float32)
-
-        result_indices, result_scales, result_hidden = zero_experts_compute(
-            expert_indices=expert_indices,
-            expert_scales=expert_scales,
-            num_experts=num_experts,
-            zero_expert_type="identity",
-            hidden_states=hidden_states,
-        )
-
-        assert torch.equal(result_indices, expert_indices)
-        assert torch.equal(result_scales, expert_scales)
-        assert result_hidden.shape == hidden_states.shape
-
-    def test_zero_experts_compute_mixed_experts(self):
-        from vllm_ascend.ops.fused_moe.experts_selector import zero_experts_compute
-
-        num_experts = 3
-        num_tokens = 2
-        top_k = 3
-        hidden_size = 8
-
-        expert_indices = torch.tensor([[0, 1, 4], [2, 5, 6]], dtype=torch.int32)
-        expert_scales = torch.tensor([[0.3, 0.3, 0.4], [0.2, 0.5, 0.3]], dtype=torch.float32)
-        hidden_states = torch.randn(num_tokens, hidden_size, dtype=torch.float32)
-
-        result_indices, result_scales, _ = zero_experts_compute(
-            expert_indices=expert_indices,
-            expert_scales=expert_scales,
-            num_experts=num_experts,
-            zero_expert_type="identity",
-            hidden_states=hidden_states,
-        )
-
-        assert result_indices.shape == expert_indices.shape
-        assert result_scales.shape == expert_scales.shape
-
-    def test_zero_experts_compute_identity_values_match_expected(self):
-        from vllm_ascend.ops.fused_moe.experts_selector import zero_experts_compute
-
-        expert_indices = torch.tensor([[0, 2], [3, 1]], dtype=torch.int32)
-        expert_scales = torch.tensor([[0.25, 0.75], [0.60, 0.40]],
-                                     dtype=torch.float32)
-        hidden_states = torch.tensor([[1.0, 2.0], [3.0, 4.0]],
-                                     dtype=torch.float32)
-
-        result_indices, result_scales, result_hidden = zero_experts_compute(
-            expert_indices=expert_indices,
-            expert_scales=expert_scales,
-            num_experts=2,
-            zero_expert_type="identity",
-            hidden_states=hidden_states,
-        )
-
-        expected_indices = torch.tensor([[0, 0], [0, 1]], dtype=torch.int32)
-        expected_scales = torch.tensor([[0.25, 0.0], [0.0, 0.40]],
-                                       dtype=torch.float32)
-        expected_hidden = torch.tensor([[0.75, 1.50], [1.80, 2.40]],
-                                       dtype=torch.float32)
-
-        assert torch.equal(result_indices, expected_indices)
-        torch.testing.assert_close(result_scales, expected_scales)
-        torch.testing.assert_close(result_hidden, expected_hidden)
+        if has_shared_experts:
+            assert result == ("shared_out", fused_result.routed_out)
+            layer._forward_shared_experts.assert_called_once()
+        else:
+            torch.testing.assert_close(result, fused_result.routed_out)

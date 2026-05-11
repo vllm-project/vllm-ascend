@@ -17,7 +17,7 @@ requires = [
     "psutil",
     "setuptools>=64",
     "setuptools-scm>=8",
-    "transformers>=4.57.4",
+    "transformers==5.5.3",
     "torch-npu==2.9.0",
     "torch==2.9.0",
     "torchvision",
@@ -81,12 +81,11 @@ ignore = [
     "B007",
     # f-string format
     "UP032",
-    # TODO: FIE ME
-    "G004",
     "B904",
     "SIM108",
     "SIM102"
 ]
+logger-objects = ["vllm.logger.logger"]
 
 [tool.ruff.format]
 docstring-code-format = true
@@ -100,7 +99,9 @@ exclude = [
     "docs/source/tutorials/models/GLM4.x.md",
     "docs/source/tutorials/models/GLM5.md",
     "docs/source/tutorials/models/Kimi-K2.5.md",
+    "docs/source/tutorials/models/LLaVA-OneVision-Qwen2-0.5B-OV.md",
     "docs/source/tutorials/models/MiniMax-M2.5.md",
+    "docs/source/tutorials/models/Minitron-8B-Base.md",
     "docs/source/tutorials/models/PaddleOCR-VL.md",
     "docs/source/tutorials/models/Qwen-VL-Dense.md",
     "docs/source/tutorials/models/Qwen3-235B-A22B.md",
@@ -120,4 +121,5 @@ exclude = [
     "docs/source/tutorials/models/Qwen3_embedding.md",
     "docs/source/tutorials/models/Qwen3_reranker.md",
     "docs/source/tutorials/models/index.md",
+    "docs/source/tutorials/models/Hunyuan-A13B-Instruct.md",
 ]

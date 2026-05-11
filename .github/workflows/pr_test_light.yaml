@@ -41,20 +41,23 @@ jobs:
   lint:
     uses: ./.github/workflows/_pre_commit.yml
     with:
-      vllm: 6f786f2c506cb07f4566771fdc62e640e2c4a176
+      vllm: c7aa186d67b6f051680831418e957c67f34ba7a2
   changes:
     runs-on: linux-aarch64-a2b3-0
+    container:
+      image: swr.cn-southwest-2.myhuaweicloud.com/base_image/ascend-ci/vllm-ascend:nightly-cpu
     outputs:
       e2e_tracker: ${{ steps.filter.outputs.e2e_tracker }}
-      ut_tracker: ${{ steps.filter.outputs.ut_tracker }}
       _310_tracker: ${{ steps.filter.outputs._310_tracker }}
+      has_tests: ${{ steps.scope.outputs.has_tests }}
+      test_groups: ${{ steps.scope.outputs.test_groups }}
+      matched_modules: ${{ steps.scope.outputs.matched_modules }}
     steps:
-      - name: Setup git proxy
-        run: |
-          git config --global --add safe.directory "$GITHUB_WORKSPACE"
-          git config --global url."https://gh-proxy.test.osinfra.cn/https://github.com/".insteadOf https://github.com/
-      # NOTE: Do not update the version of checkout, there have some issue on self_hosted runner with the higher version
       - uses: actions/checkout@v6
+        with:
+          fetch-depth: 0
+      # For now, we still need to use paths-filter to determine whether the change is related to e2e test.
+      # we will migrate to use a single script to determine all the test scope in the future.
       - uses: dorny/paths-filter@v4
         id: filter
         with:
@@ -63,6 +66,7 @@ jobs:
               - '.github/workflows/pr_test_light.yaml'
               - '.github/workflows/_e2e_test.yaml'
               - '.github/workflows/scripts/**'
+              - '.github/workflows/_optional_smart_e2e.yaml'
               - 'vllm_ascend/**'
               - 'csrc/**'
               - 'cmake/**'
@@ -75,7 +79,6 @@ jobs:
               - 'packages.txt'
             ut_tracker:
               - 'tests/ut/**'
-              - '.github/workflows/pr_test_light.yaml'
             _310_tracker:
               - 'vllm_ascend/_310p/**'
               - 'tests/e2e/310p/**'
@@ -85,26 +88,83 @@ jobs:
               - 'vllm_ascend/patch/**'
               - 'CMakeLists.txt'
 
-  ut:
+      - name: Determine smart UT test scope
+        if: ${{ steps.filter.outputs.ut_tracker == 'true' || steps.filter.outputs.e2e_tracker == 'true' }}
+        id: scope
+        run: |
+          git config --global --add safe.directory /__w/vllm-ascend/vllm-ascend
+          git fetch origin ${{ github.base_ref }}
+          pip install pyyaml
+          python3 .github/workflows/scripts/determine_smart_e2e_scope.py \
+            --diff-base origin/${{ github.base_ref }} \
+            --run-all-cpu
+
+      - name: Post scope summary
+        if: ${{ steps.scope.outputs.has_tests == 'true' }}
+        env:
+          TEST_GROUPS: ${{ steps.scope.outputs.test_groups }}
+          MATCHED_MODULES: ${{ steps.scope.outputs.matched_modules }}
+        run: |
+          python3 -c "
+          import json, os, yaml
+          from pathlib import Path
+
+          groups = json.loads(os.environ['TEST_GROUPS'])
+          modules = os.environ['MATCHED_MODULES']
+          blacklist_path = Path('.github/workflows/scripts/ut_blacklist.yaml')
+          blacklist = yaml.safe_load(blacklist_path.read_text()) if blacklist_path.exists() else []
+
+          lines = ['## Smart UT Test Scope', '']
+          lines.append(f'**Matched modules:** {modules}')
+          lines.append('')
+
+          if blacklist:
+              lines.append('<details>')
+              lines.append(f'<summary>Blacklisted ({len(blacklist)} tests)</summary>')
+              lines.append('')
+              for bl in sorted(blacklist):
+                  lines.append(f'- \`{bl}\`')
+              lines.append('')
+              lines.append('</details>')
+              lines.append('')
+
+          for g in groups:
+              npu_type = g['npu_type']
+              num_npus = g['num_npus']
+              runner = g['runner']
+              tests = g['tests'].split()
+              if npu_type == 'cpu':
+                  header = f'### CPU ({len(tests)} tests) \u2192 \`{runner}\`'
+              else:
+                  header = f'### {npu_type.upper()} x{num_npus} ({len(tests)} tests) \u2192 \`{runner}\`'
+              lines.append(header)
+              lines.append('')
+              lines.append('| # | Test target |')
+              lines.append('|---|------------|')
+              for i, t in enumerate(tests, 1):
+                  lines.append(f'| {i} | \`{t}\` |')
+              lines.append('')
+
+          print('\n'.join(lines))
+          " >> $GITHUB_STEP_SUMMARY
+
+  smart_e2e:
     needs: [lint, changes]
-    name: unit test
-    # only trigger unit test after lint passed and the change is e2e and ut related.
-    if: ${{ needs.lint.result == 'success' && (needs.changes.outputs.e2e_tracker == 'true' || needs.changes.outputs.ut_tracker == 'true') }}
+    name: smart test
+    if: ${{ needs.lint.result == 'success' && needs.changes.outputs.has_tests == 'true' }}
     strategy:
       matrix:
-        vllm_version: [6f786f2c506cb07f4566771fdc62e640e2c4a176, v0.19.0]
-    uses: ./.github/workflows/_unit_test.yaml
+        vllm_version: [c7aa186d67b6f051680831418e957c67f34ba7a2, v0.20.1]
+    uses: ./.github/workflows/_optional_smart_e2e.yaml
     with:
       vllm: ${{ matrix.vllm_version }}
-      runner: linux-amd64-cpu-8-hk
-      image: quay.nju.edu.cn/ascend/cann:8.5.1-910b-ubuntu22.04-py3.11
-      type: pr
+      test_groups: ${{ needs.changes.outputs.test_groups }}
 
   e2e-light:
     name: e2e-light
     strategy:
       matrix:
-        vllm_version: [6f786f2c506cb07f4566771fdc62e640e2c4a176, v0.19.0]
+        vllm_version: [c7aa186d67b6f051680831418e957c67f34ba7a2, v0.20.1]
     # Note (yikun): If CI resource are limited we can split job into two chain jobs
     needs: [lint, changes]
     # only trigger e2e test after lint passed and the change is e2e related with pull request.
@@ -115,6 +175,3 @@ jobs:
       image: swr.cn-southwest-2.myhuaweicloud.com/base_image/ascend-ci/cann:8.5.1-910b-ubuntu22.04-py3.11
       contains_310: ${{ needs.changes.outputs._310_tracker == 'true' }}
       type: light
-    secrets:
-      HW_OBS_AK: ${{ secrets.HW_OBS_AK }}
-      HW_OBS_SK: ${{ secrets.HW_OBS_SK }}

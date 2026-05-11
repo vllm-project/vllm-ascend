@@ -38,7 +38,7 @@ def select_experts(
     mix_placement: bool = False,
     num_logical_experts: int = -1,
     num_shared_experts: int = 0,
-    global_num_experts: int = -1,
+    num_experts: int = -1,
 ):
     """
     Fused experts with select experts.
@@ -55,7 +55,7 @@ def select_experts(
         scoring_func: Scoring function to use.
         e_score_correction_bias: Correction bias to apply to expert scores.
         indices_type: dtype of indices
-        global_num_experts: Global number of experts.
+        num_experts: Number of experts.
 
     Returns:
         topk_weights: router weights of shape (num_tokens, top_k).
@@ -87,7 +87,6 @@ def select_experts(
             num_expert_group=num_expert_group,
             scoring_func=scoring_func,
             routed_scaling_factor=routed_scaling_factor,
-            global_num_experts=global_num_experts,
         )
     else:
         topk_weights, topk_ids = _native_select_experts(
@@ -101,8 +100,11 @@ def select_experts(
             custom_routing_function=custom_routing_function,
             scoring_func=scoring_func,
             e_score_correction_bias=e_score_correction_bias,
-            global_num_experts=global_num_experts,
+            num_experts=num_experts,
         )
+        # Apply routed scaling factor to weights
+        if routed_scaling_factor != 1.0:
+            topk_weights = topk_weights * routed_scaling_factor
     if mix_placement:
         shared_expert_routing_factor = 1.0 if is_support_npu_moe_gating_top_k else (1 / routed_scaling_factor)
         batch_size = topk_ids.shape[0]
@@ -230,7 +232,6 @@ def _select_experts_with_fusion_ops(
     num_expert_group: int | None,
     scoring_func: str = "softmax",
     routed_scaling_factor=1.0,
-    global_num_experts: int = -1,
 ):
     topk_group = topk_group if topk_group is not None else 1
     num_expert_group = num_expert_group if num_expert_group is not None else 1
@@ -266,7 +267,7 @@ def _native_select_experts(
     custom_routing_function: Callable | None = None,
     scoring_func: str = "softmax",
     e_score_correction_bias: torch.Tensor | None = None,
-    global_num_experts: torch.Tensor | None = None,
+    num_experts: torch.Tensor | None = None,
 ) -> tuple[torch.Tensor, torch.Tensor]:
     """
     Select top-k experts based on router logits.
@@ -314,7 +315,7 @@ def _native_select_experts(
             gating_output=router_logits,
             topk=top_k,
             renormalize=renormalize,
-            global_num_experts=global_num_experts,
+            num_experts=num_experts,
         )
         # Required by npu_moe_init_routing
         topk_ids = topk_ids.to(torch.int32)

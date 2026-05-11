@@ -1,0 +1,238 @@
+# SOME DESCRIPTIVE TITLE.
+# Copyright (C) 2025, vllm-ascend team
+# This file is distributed under the same license as the vllm-ascend
+# package.
+# FIRST AUTHOR <EMAIL@ADDRESS>, 2026.
+#
+msgid ""
+msgstr ""
+"Project-Id-Version: vllm-ascend \n"
+"Report-Msgid-Bugs-To: \n"
+"POT-Creation-Date: 2026-05-09 02:22+0000\n"
+"PO-Revision-Date: YEAR-MO-DA HO:MI+ZONE\n"
+"Last-Translator: FULL NAME <EMAIL@ADDRESS>\n"
+"Language: zh_CN\n"
+"Language-Team: zh_CN <LL@li.org>\n"
+"Plural-Forms: nplurals=1; plural=0;\n"
+"MIME-Version: 1.0\n"
+"Content-Type: text/plain; charset=utf-8\n"
+"Content-Transfer-Encoding: 8bit\n"
+"Generated-By: Babel 2.18.0\n"
+
+#: ../../source/tutorials/models/Hunyuan-A13B-Instruct.md:1
+msgid "Hunyuan-A13B-Instruct"
+msgstr "Hunyuan-A13B-Instruct"
+
+#: ../../source/tutorials/models/Hunyuan-A13B-Instruct.md:3
+msgid "Introduction"
+msgstr "简介"
+
+#: ../../source/tutorials/models/Hunyuan-A13B-Instruct.md:5
+msgid ""
+"Hunyuan-A13B-Instruct is a fine-grained hybrid expert model (MoE) "
+"developed by Tencent. This model has a total of 80 billion parameters, 13"
+" billion activation parameters, supports 256K ultra-long contexts, and "
+"possesses native thought chain (CoT) reasoning capabilities."
+msgstr ""
+"Hunyuan-A13B-Instruct 是腾讯开发的细粒度混合专家模型（MoE）。该模型总参数量为800亿，激活参数量为130亿，支持256K超长上下文，并具备原生思维链（CoT）推理能力。"
+
+#: ../../source/tutorials/models/Hunyuan-A13B-Instruct.md:7
+msgid "Environment Preparation"
+msgstr "环境准备"
+
+#: ../../source/tutorials/models/Hunyuan-A13B-Instruct.md:9
+msgid "Model Weight"
+msgstr "模型权重"
+
+#: ../../source/tutorials/models/Hunyuan-A13B-Instruct.md:11
+msgid ""
+"`Hunyuan-A13B-Instruct`(BF16 version): [Download model "
+"weight](https://www.modelscope.cn/models/Tencent-Hunyuan/Hunyuan-A13B-"
+"Instruct)."
+msgstr ""
+"`Hunyuan-A13B-Instruct`（BF16版本）：[下载模型权重](https://www.modelscope.cn/models/Tencent-Hunyuan/Hunyuan-A13B-Instruct)。"
+
+#: ../../source/tutorials/models/Hunyuan-A13B-Instruct.md:13
+msgid ""
+"It is recommended to download the model weight to the shared directory of"
+" multiple nodes, such as `/root/.cache/`"
+msgstr "建议将模型权重下载到多节点的共享目录，例如 `/root/.cache/`"
+
+#: ../../source/tutorials/models/Hunyuan-A13B-Instruct.md:15
+msgid "Installation"
+msgstr "安装"
+
+#: ../../source/tutorials/models/Hunyuan-A13B-Instruct.md:17
+msgid "Run docker container:"
+msgstr "运行 Docker 容器："
+
+#: ../../source/tutorials/models/Hunyuan-A13B-Instruct.md:46
+msgid "Build from source:"
+msgstr "从源码构建："
+
+#: ../../source/tutorials/models/Hunyuan-A13B-Instruct.md:64
+msgid "Software Stack Version Verification"
+msgstr "软件栈版本验证"
+
+#: ../../source/tutorials/models/Hunyuan-A13B-Instruct.md:66
+msgid ""
+"The environment is based on CANN built into the GiteeAI platform, and "
+"successfully runs vLLM |vllm_ascend_version|, and vLLM-"
+"Ascend:|vllm_ascend_version| through the Python 3.11.6 Conda environment."
+msgstr ""
+"该环境基于 GiteeAI 平台内置的 CANN，并通过 Python 3.11.6 Conda 环境成功运行了 vLLM |vllm_ascend_version| 和 vLLM-Ascend:|vllm_ascend_version|。"
+
+#: ../../source/tutorials/models/Hunyuan-A13B-Instruct.md:68
+msgid "Deployment"
+msgstr "部署"
+
+#: ../../source/tutorials/models/Hunyuan-A13B-Instruct.md:70
+msgid "Single-node Deployment (4-NPU)"
+msgstr "单节点部署（4-NPU）"
+
+#: ../../source/tutorials/models/Hunyuan-A13B-Instruct.md:89
+msgid "Key Performance Indicators"
+msgstr "关键性能指标"
+
+#: ../../source/tutorials/models/Hunyuan-A13B-Instruct.md:91
+msgid "Based on verified CANN 8.5.1 test logs:"
+msgstr "基于已验证的 CANN 8.5.1 测试日志："
+
+#: ../../source/tutorials/models/Hunyuan-A13B-Instruct.md:93
+msgid ""
+"Memory usage for weights: each NPU has a static memory usage of "
+"approximately 37.46 GB."
+msgstr "权重内存占用：每个 NPU 的静态内存占用约为 37.46 GB。"
+
+#: ../../source/tutorials/models/Hunyuan-A13B-Instruct.md:94
+msgid ""
+"Graph compilation (ACL Graph): with PIECEWISE mode enabled, the system "
+"automatically captures the graph in approximately 18 seconds, which can "
+"significantly accelerate subsequent inference."
+msgstr "图编译（ACL Graph）：启用 PIECEWISE 模式后，系统大约在 18 秒内自动捕获图，这可以显著加速后续推理。"
+
+#: ../../source/tutorials/models/Hunyuan-A13B-Instruct.md:95
+msgid ""
+"KV cache capacity: the remaining NPU memory can provide concurrent cache "
+"space for approximately 529,152 tokens."
+msgstr "KV 缓存容量：剩余的 NPU 内存可为大约 529,152 个 token 提供并发缓存空间。"
+
+#: ../../source/tutorials/models/Hunyuan-A13B-Instruct.md:97
+msgid "Functional Verification"
+msgstr "功能验证"
+
+#: ../../source/tutorials/models/Hunyuan-A13B-Instruct.md:110
+msgid "Expected output:"
+msgstr "预期输出："
+
+#: ../../source/tutorials/models/Hunyuan-A13B-Instruct.md:116
+msgid "Accuracy Evaluation"
+msgstr "精度评估"
+
+#: ../../source/tutorials/models/Hunyuan-A13B-Instruct.md:118
+#, python-format
+msgid ""
+"On the GiteeAI platform, the model was tested and verified using the "
+"AISBench tool on the GSM8K benchmark set: Under the 7cd45e version "
+"configuration, the model achieved an accuracy of 94.77% in the accuracy "
+"generation mode."
+msgstr ""
+"在 GiteeAI 平台上，使用 AISBench 工具在 GSM8K 基准集上对该模型进行了测试验证：在 7cd45e 版本配置下，该模型在精度生成模式下达到了 94.77% 的准确率。"
+
+#: ../../source/tutorials/models/Hunyuan-A13B-Instruct.md:124
+#: ../../source/tutorials/models/Hunyuan-A13B-Instruct.md:153
+msgid "output:"
+msgstr "输出："
+
+#: ../../source/tutorials/models/Hunyuan-A13B-Instruct.md:139
+msgid "The markdown formatted result is as follows:"
+msgstr "Markdown 格式化的结果如下："
+
+#: ../../source/tutorials/models/Hunyuan-A13B-Instruct.md:48
+msgid "dataset"
+msgstr "数据集"
+
+#: ../../source/tutorials/models/Hunyuan-A13B-Instruct.md:48
+msgid "version"
+msgstr "版本"
+
+#: ../../source/tutorials/models/Hunyuan-A13B-Instruct.md:48
+msgid "metric"
+msgstr "指标"
+
+#: ../../source/tutorials/models/Hunyuan-A13B-Instruct.md:48
+msgid "mode"
+msgstr "模式"
+
+#: ../../source/tutorials/models/Hunyuan-A13B-Instruct.md:48
+msgid "vllm-api-general-chat"
+msgstr "vllm-api-general-chat"
+
+#: ../../source/tutorials/models/Hunyuan-A13B-Instruct.md:48
+msgid "gsm8k"
+msgstr "gsm8k"
+
+#: ../../source/tutorials/models/Hunyuan-A13B-Instruct.md:48
+msgid "7cd45e"
+msgstr "7cd45e"
+
+#: ../../source/tutorials/models/Hunyuan-A13B-Instruct.md:48
+msgid "accuracy"
+msgstr "准确率"
+
+#: ../../source/tutorials/models/Hunyuan-A13B-Instruct.md:48
+msgid "gen"
+msgstr "生成"
+
+#: ../../source/tutorials/models/Hunyuan-A13B-Instruct.md:48
+msgid "94.77"
+msgstr "94.77"
+
+#: ../../source/tutorials/models/Hunyuan-A13B-Instruct.md:145
+msgid "Performance"
+msgstr "性能"
+
+#: ../../source/tutorials/models/Hunyuan-A13B-Instruct.md:147
+msgid "Using AISBench"
+msgstr "使用 AISBench"
+
+#: ../../source/tutorials/models/Hunyuan-A13B-Instruct.md:205
+msgid "Using vLLM Benchmark"
+msgstr "使用 vLLM Benchmark"
+
+#: ../../source/tutorials/models/Hunyuan-A13B-Instruct.md:207
+msgid "Run performance evaluation of `Hunyuan-A13B-Instruct` as an example."
+msgstr "以运行 `Hunyuan-A13B-Instruct` 的性能评估为例。"
+
+#: ../../source/tutorials/models/Hunyuan-A13B-Instruct.md:209
+msgid ""
+"Refer to [vllm benchmark](https://docs.vllm.ai/en/latest/benchmarking/) "
+"for more details."
+msgstr ""
+"更多详情请参考 [vllm benchmark](https://docs.vllm.ai/en/latest/benchmarking/)。"
+
+#: ../../source/tutorials/models/Hunyuan-A13B-Instruct.md:211
+msgid "There are three `vllm bench` subcommands:"
+msgstr "`vllm bench` 有三个子命令："
+
+#: ../../source/tutorials/models/Hunyuan-A13B-Instruct.md:213
+msgid "`latency`: Benchmark the latency of a single batch of requests."
+msgstr "`latency`：对单批请求的延迟进行基准测试。"
+
+#: ../../source/tutorials/models/Hunyuan-A13B-Instruct.md:214
+msgid "`serve`: Benchmark the online serving throughput."
+msgstr "`serve`：对在线服务吞吐量进行基准测试。"
+
+#: ../../source/tutorials/models/Hunyuan-A13B-Instruct.md:215
+msgid "`throughput`: Benchmark offline inference throughput."
+msgstr "`throughput`：对离线推理吞吐量进行基准测试。"
+
+#: ../../source/tutorials/models/Hunyuan-A13B-Instruct.md:217
+msgid "Take the `serve` as an example. Run the code as follows."
+msgstr "以 `serve` 为例。运行代码如下。"
+
+#: ../../source/tutorials/models/Hunyuan-A13B-Instruct.md:232
+msgid ""
+"After about several minutes, you can get the performance evaluation "
+"result."
+msgstr "大约几分钟后，您将获得性能评估结果。"

@@ -2,227 +2,234 @@
 
 ## Overview
 
-CPU binding pins vLLM Ascend worker processes and key threads to specific CPU cores to reduce CPU–NPU cross‑NUMA traffic and stabilize latency under multi‑process workloads. It is designed for ARM servers running Ascend NPUs and is executed after worker warmup completes when enabled.
+CPU binding is an **Ascend-native host-side optimization** for vLLM workers on
+ARM servers. **Starting from vllm-ascend v0.18.0rc1, it is enabled by default
+through `enable_cpu_binding=True`.**
 
-## Background
+The feature does not change model execution logic or numerical results. It only
+controls CPU placement for the worker process, key runtime threads, memory
+pages, and NPU IRQs when the host environment allows it. By keeping the main
+worker, ACL, and release threads on dedicated CPU ranges, it **helps reduce
+context-switch overhead from scheduler preemption on busy hosts.**
 
-On multi‑socket ARM systems, the OS scheduler may place vLLM threads on CPUs far from the local NPU, causing NUMA cross‑traffic and jitter. CPU binding enforces a deterministic CPU placement strategy and optionally binds NPU IRQs to the same CPU pool. This is distinct from other performance features (e.g., graph mode or dynamic batch) because it is purely a host‑side affinity policy and does not change model execution logic.
+## Why CPU Binding?
 
-## Design & How it works
+On multi-socket ARM systems, the Linux scheduler may place worker threads on
+CPUs far from the NPU that the worker drives. This can increase cross-NUMA
+traffic, increase thread preemption, and introduce latency jitter. The Ascend
+backend therefore owns a CPU allocation policy to **reduce cross-NUMA traffic,
+reduce thread preemption, and improve latency stability** instead of relying on
+upstream GPU NUMA binding flags.
 
-### Key concepts
+This is also why upstream NUMA flags are adapted on Ascend:
 
-- **Allowed CPU list**: The cpuset from /proc/self/status (Cpus_allowed_list). All allocations are constrained to this list.
-- **Running NPU list**: Logical NPU IDs extracted from npu‑smi process listing, optionally filtered by ASCEND_RT_VISIBLE_DEVICES.
-- **CPU pool per NPU**: The CPU list assigned to each logical NPU ID based on the binding mode.
-- **Binding modes & Device behavior**:
+- `--numa-bind` is converted to `additional_config={"enable_cpu_binding": true}`.
+- `--numa-bind-nodes` and `--numa-bind-cpus` are ignored because Ascend computes CPU pools from NPU topology or global logical NPU IDs.
 
-  | Device type | Default mode | Description |
-  | ----------- | ------------ | ------------ |
-  | A3 (No Affinity) | `global_slice` | Splits the allowed CPU list evenly based on the **total number of global logical NPUs**, ensuring each NPU is assigned a contiguous segment of CPU cores. This prevents CPU core overlap across multiple process groups. |
-  | A2 / 310P / Others | `topo_affinity` | Allocates CPUs based on NPU topology affinity (`npu‑smi info -t topo`). If multiple NPUs are assigned to a single NUMA node (which may cause bandwidth contention), the CPU allocation extends to adjacent NUMA nodes. |
+## How It Works?
 
-    - **Default**: enabled (enable_cpu_binding = true).
-    - **Fallback**: If NPU topo affinity is unavailable, global_slice is used.
-    - **Failure handling**: Any exception in binding is logged as a warning and **binding is skipped for that rank**.
+The allocator derives its plan from runtime host state:
 
-### Execution flow (simplified)
+| Input | Source | Purpose |
+| --- | --- | --- |
+| Allowed CPUs | `/proc/self/status` `Cpus_allowed_list` | The only CPUs eligible for binding. Container cpusets are respected. |
+| Logical NPU map | `npu-smi info -m` | Maps card/chip IDs to global logical NPU IDs and gives `total_logic_npus`. |
+| Running NPUs | `npu-smi info` process table, filtered by `ASCEND_RT_VISIBLE_DEVICES` | Identifies the logical NPUs used by this worker process. |
+| Topology affinity | `npu-smi info -t topo` | Provides NPU-to-CPU affinity for `topo_affinity` mode. |
+| CPU NUMA map | `lscpu -e=CPU,NODE` | Used to extend single-NUMA affinity pools to the next NUMA node. |
 
-1. **Feature entry**: `compile_or_warm_up_model()` calls `bind_cpus(local_rank)` after warmup, graph capture, and ATB warmup when `enable_cpu_binding` is true.
-2. **CPU architecture gate**: If the CPU is not ARM, binding is skipped with a log.
-3. **Collect device info**:
-   - Map logical NPU IDs from `npu‑smi info -m`.
-   - Detect running NPU IDs from npu‑smi info process table.
-   - Read cpuset from /proc/self/status.
-   - Read topo affinity from `npu‑smi info -t topo`.
-4. **Build CPU pools**:
-   - Use **global_slice** for A3 devices; **topo_affinity** for A2 and Atlas 300 inference products.
-   - If topo affinity is missing, fall back to global_slice.
-   - Ensure each NPU has at least 5 CPUs.
-5. **Allocate per‑role CPUs**:
-   - Reserve the first two CPUs for IRQ binding.
-   - `main`: pool[2:-2]
-   - `acl`: pool[-2]
-   - `release`: pool[-1]
-6. **Bind threads**:
-   - Main process is pinned to `main` CPUs.
-   - ACL threads (named with acl_thread) are pinned to `acl` CPU.
-   - Release threads (named with release_thread) are pinned to `release` CPU.
-7. **Bind NPU IRQs (optional)**:
-   - If /proc/irq is writable, bind SQ/CQ IRQs to the first two CPUs in the pool.
-   - irqbalance may be stopped to prevent overrides.
-8. **Memory binding (optional)**:
-   - If migratepages is available, memory for ACL threads is migrated to the NPU’s NUMA node.
+### Strategy Selection
 
-## Allocation plan examples
+The binding strategy is selected by Ascend device type:
 
-The allocation plan is derived directly from the CPU pool per NPU and then split into roles:
+| Device type | Strategy | Reason |
+| --- | --- | --- |
+| A3 | `global_slice` | A3 uses HCCS card-to-card interconnect. Each NPU is nearly equidistant from all NUMA nodes, so there is no strong NPU-to-NUMA affinity signal. Global logical NPU ID based slicing gives deterministic, non-overlapping CPU pools and CPU/NUMA isolation between workers. |
+| A2, Atlas 300 inference products, and other non-A3 device types | `topo_affinity` | A2 and Atlas 300 inference products provide NPU-to-CPU affinity information through `npu-smi info -t topo`. Non-A3 device types use this topology signal when available. |
 
-- IRQ CPUs: pool[0], pool[1]
-- `main`: pool[2:-2]
-- `acl`: pool[-2]
-- `release`: pool[-1]
+If `topo_affinity` is selected but topo affinity is unavailable, the allocator falls back to `global_slice`.
 
-Below are concrete examples that reflect the actual code paths.
+### CPU Pool Construction
 
-### Example 1: A3 inference server with 640 CPUs and 16 NPUs
+#### global_slice
 
-- allowed_cpus = [0..639] (640 CPUs)
-- NUMA nodes = 0..7 (8 NUMA nodes, symmetric layout)
-- total_npus = 16
-- running_npu_list = [0..15]
-- base = 640 // 16 = 40, extra = 0
-- Each NPU gets a 40‑CPU pool.
+`global_slice` is designed for A3. Because A3's **HCCS interconnect makes the
+distance from each NPU to each NUMA node nearly the same**, topology affinity is
+not a useful placement signal. The allocator therefore partitions the sorted
+`allowed_cpus` list by global logical NPU ID.
 
-|NPU ID|Assigned CPU Cores (global_slice)|Role Division (IRQ/Main/ACL/Release)|
-|---|---|---|
-|0|0-39|`IRQ`: 0-1, `Main`: 2-37, `ACL`: 38, `Release`: 39|
-|1|40-79|`IRQ`: 40-41, `Main`: 42-77, `ACL`: 78, `Release`: 79|
-|...|...|...|
-|15|600-639|`IRQ`: 600-601, `Main`: 602-637, `ACL`: 638, `Release`: 639|
+1. Determine `total_npus` in this order:
+   - `total_logic_npus` from `npu-smi info -m`
+   - number of topo affinity entries
+   - number of running NPUs
+2. Compute:
+   - `base = len(allowed_cpus) // total_npus`
+   - `extra = len(allowed_cpus) % total_npus`
+3. Each logical NPU gets a deterministic slice:
+   - NPU IDs `< extra` receive `base + 1` CPUs.
+   - Remaining NPU IDs receive `base` CPUs.
+4. Only running NPUs are materialized into `npu_cpu_pool`.
 
-This layout remains deterministic even when multiple processes share the same cpuset, because slicing is based on the global logical NPU ID.
+This is the key property: two independent worker processes with the same cpuset
+but different visible NPU IDs still get **non-overlapping CPU pools** because
+both processes slice against the same global NPU ID space. With a NUMA-aligned
+cpuset, this also provides **CPU/NUMA isolation between workers**, so one worker
+does not share the same CPU or NUMA slice with another worker.
 
-### Example 2: A3 global_slice, even split
+`global_slice` requires `base >= 5`, because every NPU pool reserves:
 
-**Inputs**:
+- 2 CPUs for SQ/CQ IRQ binding
+- at least 1 CPU for the main worker
+- 1 CPU for ACL thread
+- 1 CPU for release thread
 
-- allowed_cpus = [0..23] (24 CPUs)
-- NUMA nodes = 0..1 (2 NUMA nodes, symmetric layout; NUMA0 = 0..11, NUMA1 = 12..23)
-- total_npus = 4 (from npu-smi info -m)
-- running_npu_list = [0, 1, 2, 3]
+#### topo_affinity
 
-**Global slice**:
+`topo_affinity` is designed for A2, Atlas 300 inference products, and
+other non-A3 device types. A2 and Atlas 300 inference products expose
+**meaningful NPU-to-CPU affinity information**, so the allocator starts from NPU
+topology affinity when it is available and then avoids overlap for shared
+affinity groups.
 
-- base = 24 // 4 = 6, extra = 0
-- Each NPU gets a 6‑CPU pool.
+1. Build candidate NPUs from all logical NPUs:
+   - always include running NPUs
+   - include non-running NPUs only when their affinity overlaps this process's allowed cpuset
+2. For each candidate NPU, intersect topo affinity with `allowed_cpus`.
+3. If the intersection is empty for a candidate, binding fails for this rank.
+4. If the affinity CPUs are all on one NUMA node, extend the pool with CPUs from the next NUMA node, constrained by `allowed_cpus`.
+5. Group NPUs with identical extended pools and split each shared pool evenly across that group.
+6. Keep only running NPUs in the final `npu_cpu_pool`.
 
-|NPU ID|Assigned CPU Cores (global_slice)|Role Division (IRQ/Main/ACL/Release)|
-|---|---|---|
-|0|0-5|`IRQ`: 0-1, `Main`: 2-3, `ACL`: 4, `Release`: 5|
-|1|6-11|`IRQ`: 6-7, `Main`: 8-9, `ACL`: 10, `Release`: 11|
-|2|12-17|`IRQ`: 12-13, `Main`: 14-15, `ACL`: 16, `Release`: 17|
-|3|18-23|`IRQ`: 18-19, `Main`: 20-21, `ACL`: 22, `Release`: 23|
+The non-running candidate step is intentional. It prevents two independent
+single-card workers from selecting the same CPU range when their visible NPUs
+share the same topology affinity.
 
-### Example 3: A3 global_slice, remainder distribution
+### Role Split
 
-**Inputs**:
+After a CPU pool is built, the allocator splits it by role:
 
-- allowed_cpus = [0..16] (17 CPUs)
-- NUMA nodes = 0..1 (2 NUMA nodes, symmetric layout; NUMA0 = 0..7, NUMA1 = 8..16)
-- total_npus = 3
-- running_npu_list = [0, 1, 2]
+| Role | CPUs |
+| --- | --- |
+| SQ/CQ IRQ | `pool[0]`, `pool[1]` |
+| Main worker process and subthreads | `pool[2:-2]` |
+| ACL thread | `pool[-2]` |
+| Release thread | `pool[-1]` |
 
-**Global slice**:
+If a final pool has fewer than 5 CPUs, binding fails for this rank and the worker logs a warning from the caller.
 
-- base = 17 // 3 = 5, extra = 2
-- NPU0 pool size = 6 (base+1)
-- NPU1 pool size = 6 (base+1)
-- NPU2 pool size = 5 (base)
+## Conditional Host Tuning
 
-|NPU ID|Assigned CPU Cores (global_slice)|Role Division (IRQ/Main/ACL/Release)|
-|---|---|---|
-|0|0-5|`IRQ`: 0-1, `Main`: 2-3, `ACL`: 4, `Release`: 5|
-|1|6-11|`IRQ`: 6-7, `Main`: 8-9, `ACL`: 10, `Release`: 11|
-|2|12-16|`IRQ`: 12-13, `Main`: 14, `ACL`: 15, `Release`: 16|
+After CPU affinity is applied, CPU binding can also apply two host-side tuning
+steps when the environment supports them:
 
-Note: When a pool size is exactly 5, `main` has a single CPU (pool[2]). If any pool is <5, binding raises an error.
+- Memory migration uses `migratepages` to move the worker process's existing
+  pages to the selected NUMA node. This keeps the worker closer to the memory it
+  reads and reduces remote-NUMA memory read latency.
+- IRQ binding places NPU IRQ handling on the CPUs reserved for the corresponding
+  NPU when `/proc/irq` is writable and IRQ files can be resolved.
 
-**NUMA analysis**:
+These are conditional parts of CPU binding, not separate feature switches. If a
+host prerequisite is missing, that step is skipped while CPU thread binding
+still proceeds. Missing `migratepages` can still leave pages on remote NUMA
+nodes, so **latency or throughput may regress compared with a full CPU binding
+setup.**
 
-- With the symmetric NUMA layout above (NUMA0 = 0..7, NUMA1 = 8..16), NPU0 stays within NUMA0, NPU2 stays within NUMA1, but NPU1 spans both NUMA0 (6,7) and NUMA1 (8..11). This is a direct consequence of global slicing over the ordered cpuset; the remainder distribution does not enforce NUMA boundaries.
-- If the cpuset numbering is interleaved across NUMA nodes (non‑symmetric layout), cross‑NUMA pools can happen even earlier. This is why symmetric NUMA layout is recommended for best locality.
+## Examples
 
-### Known limitations and future improvements
+### A3 inference server with 640 CPUs and 16 NPUs
 
-With the current `global_slice` strategy, some CPU/NPU layouts cannot avoid cross‑NUMA pools. A future enhancement should incorporate NUMA node boundaries into the slicing logic so that pools remain within a single NUMA node whenever possible.
+Inputs:
 
-### Example 4: global_slice with visible subset of NPUs
+- `allowed_cpus = [0..639]`
+- `total_logic_npus = 16`
+- `running_npu_list = [0..15]`
 
-**Inputs**:
+Computation:
 
-- total_npus = 8 (from npu-smi info -m)
-- running_npu_list = [2, 3] (filtered by ASCEND_RT_VISIBLE_DEVICES)
-- allowed_cpus = [0..39] (40 CPUs)
-- NUMA nodes = 0..3 (4 NUMA nodes, symmetric layout; 0..9, 10..19, 20..29, 30..39)
+- `base = 640 // 16 = 40`
+- `extra = 0`
+- Worker `i` driving logical NPU `i` receives CPU slice
+  `[i * 40 .. i * 40 + 39]`.
 
-**Global slice**:
+Global slice view:
 
-- base = 40 // 8 = 5, extra = 0
-- Only the visible logical NPUs get pools, but slicing uses the global NPU ID so different processes do not overlap.
+```text
+CPU range: 0                                                             639
+           |-- worker0/NPU0 --|-- worker1/NPU1 --| ... |-- worker15/NPU15 --|
+           |      0-39        |      40-79       | ... |      600-639       |
+```
 
-|NPU ID|Assigned CPU Cores (global_slice)|Role Division (IRQ/Main/ACL/Release)|
-|---|---|---|
-|2|10-14|`IRQ`: 10-11, `Main`: 12, `ACL`: 13, `Release`: 14|
-|3|15-19|`IRQ`: 15-16, `Main`: 17, `ACL`: 18, `Release`: 19|
+Role split inside each worker slice:
 
-### Example 5: A2/310P topo_affinity with NUMA extension
+```text
+40-CPU worker slice
+| IRQ CPUs | main worker process and subthreads | ACL thread | release thread |
+|  c0-c1   |              c2-c37                |    c38     |      c39       |
+```
 
-**Inputs**:
+Concrete examples:
 
-- npu_affinity = {0: [0..7], 1: [0..7]} (from `npu-smi info -t topo`)
-- allowed_cpus = [0..15] (16 CPUs)
-- NUMA nodes = 0..1 (2 NUMA nodes; NUMA0 = 0..7, NUMA1 = 8..15)
+| Worker | Logical NPU | CPU pool | IRQ CPUs | Main CPUs | ACL CPU | Release CPU |
+| --- | --- | --- | --- | --- | --- | --- |
+| 0 | 0 | 0-39 | 0-1 | 2-37 | 38 | 39 |
+| 1 | 1 | 40-79 | 40-41 | 42-77 | 78 | 79 |
+| ... | ... | ... | ... | ... | ... | ... |
+| 15 | 15 | 600-639 | 600-601 | 602-637 | 638 | 639 |
 
-**NUMA extension**:
+This layout remains deterministic even when different worker processes share
+the same cpuset, because slicing is based on the global logical NPU ID.
 
-- Both NPUs are on NUMA0, so each pool extends to the nearest NUMA node to reduce contention.
-- NPU0 extends to NUMA1 -> [0..15]
-- NPU1 extends to NUMA1 -> [0..15]
+### A2 topo_affinity with hidden same-affinity NPUs
 
-Because both pools are identical, the allocator applies average distribution across NPUs to avoid overlap. With a pool [0..15] and 2 NPUs, the final pools become:
+Inputs from an A2 topology:
 
-|NPU ID|Assigned CPU Cores (topo_affinity)|Role Division (IRQ/Main/ACL/Release)|
-|---|---|---|
-|0|0-7|`IRQ`: 0-1, `Main`: 2-5, `ACL`: 6, `Release`: 7|
-|1|8-15|`IRQ`: 8-9, `Main`: 10-13, `ACL`: 14, `Release`: 15|
+- NPU0 affinity: 144-167
+- NPU2 affinity: 144-167
+- Process A sees only NPU0
+- Process B sees only NPU2
+- Both processes have `allowed_cpus = [144..191]`
 
-### Example 6: Minimum CPUs per NPU
+The allocator includes the hidden same-affinity NPU as a candidate in each
+process, splits the shared extended pool, and then keeps only the visible NPU in
+the final pool.
 
-**Inputs**:
+Final pools:
 
-- total_npus = 2
-- allowed_cpus = [0..7] (8 CPUs)
-- NUMA nodes = 0..1 (2 NUMA nodes, symmetric layout; NUMA0 = 0..3, NUMA1 = 4..7)
+| Process | Visible NPU | Final CPU pool |
+| --- | --- | --- |
+| A | 0 | 144-167 |
+| B | 2 | 168-191 |
 
-**Result**:
+This avoids overlapping CPU pools even when the two workers are launched as independent single-card services.
 
-- base = 4, which is < 5, so binding fails with: "Insufficient CPUs for binding with IRQ/ACL/REL reservations..."
+## Logs
 
-|NPU ID|Assigned CPU Cores|Role Division (IRQ/Main/ACL/Release)|
-|---|---|---|
-|0|N/A|Binding error (insufficient CPUs per NPU)|
-|1|N/A|Binding error (insufficient CPUs per NPU)|
+The allocator logs the selected mode and allocation plan:
 
-To resolve, either reduce total_npus or enlarge the cpuset so that each NPU has at least 5 CPUs.
+```text
+[cpu_bind_mode] mode=topo_affinity rank=0 visible_npus=[0]
+The CPU allocation plan is as follows:
+NPU0: main=[...] acl=[...] release=[...]
+```
 
-### Logging and verification
+## Limitations
 
-- Logs show the selected binding mode and the allocation plan, for example:
-    - `[cpu_bind_mode] mode=global_slice rank=0 visible_npus=[...]`
-    - `The CPU allocation plan is as follows: ...`
-- You can verify affinity via taskset or `/proc/<pid>/status` after startup.
-
-## Limitations & Notes
-
-- **ARM‑only**: Binding is skipped on non‑ARM CPUs.
-- **Minimum CPU requirement**: Each logical NPU requires at least 5 CPUs. If the cpuset is smaller, binding fails with an error.
-- **NUMA symmetry assumption**: For best locality, the current strategies assume the cpuset is evenly distributed across NUMA nodes and CPU numbering aligns with NUMA layout; otherwise NUMA locality may be suboptimal.
-    - Example (symmetric layout): 2 NUMA nodes, 64 CPUs total. NUMA0 = CPUs 0–31, NUMA1 = CPUs 32–63, and the cpuset is 0–63. With 4 logical NPUs, global slicing yields 16 CPUs per NPU (0–15, 16–31, 32–47, 48–63), so each NPU’s pool stays within a single NUMA node.
-- **Runtime dependencies**:
-    - Requires npu‑smi and lscpu commands.
-    - IRQ binding requires write access to /proc/irq.
-    - Memory binding requires migratepages; otherwise it is skipped.
-- **IRQ side effects**: irqbalance may be stopped to avoid overriding bindings.
-- **Per‑process behavior**: Only the current rank’s NPU is used for IRQ binding to avoid cross‑process overwrite.
-
-### Debug logging
-
-Use the standard vLLM logging configuration to enable debug logs. The binding process emits debug messages (e.g., `[cpu_global_slice] ...`) when debug level is enabled.
+- CPU binding runs only on ARM. It is skipped on x86_64.
+- Each final NPU pool must have at least 5 CPUs.
+- `global_slice` is deterministic and provides CPU/NUMA isolation when the
+  cpuset is NUMA-aligned, but it cannot guarantee NUMA-local pools when CPU
+  numbering or cpuset layout crosses NUMA boundaries.
+- `topo_affinity` depends on usable output from `npu-smi info -t topo`.
+- IRQ binding requires writable `/proc/irq` and resolvable PCI/IRQ information.
+- Memory migration requires `migratepages`; otherwise only memory migration is
+  skipped. CPU affinity still applies, but performance may degrade because
+  existing pages are not moved to the target NUMA node and may be read through
+  higher-latency remote NUMA access.
+- If an exception escapes the binding flow, `NPUWorker` logs a warning and skips CPU binding for that rank.
 
 ## References
 
-- CPU binding implementation: vllm_ascend/cpu_binding.py (`DeviceInfo`, `CpuAlloc`, `bind_cpus`)
-- Worker integration: vllm_ascend/worker/worker.py (`NPUWorker.compile_or_warm_up_model`)
-- Additional config option: docs/source/user_guide/configuration/additional_config.md (`enable_cpu_binding`)
-- Tests: tests/ut/device_allocator/test_cpu_binding.py
+- Implementation: `vllm_ascend/cpu_binding.py`
+- Worker integration: `vllm_ascend/worker/worker.py`
+- Config: `vllm_ascend/ascend_config.py` and `docs/source/user_guide/configuration/additional_config.md`
+- Tests: `tests/ut/device_allocator/test_cpu_binding.py`
