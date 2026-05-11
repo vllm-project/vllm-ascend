@@ -3,7 +3,7 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 import torch
-import torch_npu
+
 from vllm.config import set_current_vllm_config
 from vllm.forward_context import set_forward_context
 from vllm.utils.torch_utils import set_random_seed
@@ -73,10 +73,10 @@ class MockLinear:
 
     def __call__(self, x, **kwargs):
         if x.size(-1) != self.weight.size(-1):
-            self.weight = (
-                torch.randn(self.weight.size(0), x.size(-1), dtype=self.weight.dtype, device=x.device)
-                / math.sqrt(x.size(-1))
-            )
+            self.weight = torch.randn(
+                self.weight.size(0), x.size(-1), dtype=self.weight.dtype, device=x.device
+            ) / math.sqrt(x.size(-1))
+            
         return (x @ self.weight.T, None)
 
 
@@ -128,10 +128,16 @@ def create_mla_kv_cache(
         context_len = int(seq_lens[i]) - int(query_lens[i])
 
         num_blocks_for_seq = (int(seq_lens[i]) + block_size - 1) // block_size
-        block_table[i, :num_blocks_for_seq] = torch.arange(start_block_idx, start_block_idx + num_blocks_for_seq, dtype=torch.int32)
+        block_table[i, :num_blocks_for_seq] = torch.arange(
+            start_block_idx, start_block_idx + num_blocks_for_seq, dtype=torch.int32
+        )
 
-        k_cache_flat = k_cache[start_block_idx:start_block_idx + num_blocks_for_seq].view(-1, num_kv_heads, kv_lora_rank)
-        v_cache_flat = v_cache[start_block_idx:start_block_idx + num_blocks_for_seq].view(-1, num_kv_heads, qk_rope_head_dim)
+        k_cache_flat = k_cache[start_block_idx:start_block_idx + num_blocks_for_seq].view(
+            -1, num_kv_heads, kv_lora_rank
+        )
+        v_cache_flat = v_cache[start_block_idx:start_block_idx + num_blocks_for_seq].view(
+            -1, num_kv_heads, qk_rope_head_dim
+        )
         k_cache_flat[:context_len] = k_nope_ctx[:context_len]
         v_cache_flat[:context_len] = k_pe_ctx[:context_len]
 
@@ -145,7 +151,9 @@ def create_mla_kv_cache(
         token_inter_block_offsets = token_offsets % block_size
         start = int(query_start_loc_cpu[i])
         end = int(query_start_loc_cpu[i + 1])
-        slot_mapping[start:end] = block_table[i, block_indices] * block_size + token_inter_block_offsets.to(device).to(torch.int32)
+        slot_mapping[start:end] = block_table[i, block_indices] * block_size + token_inter_block_offsets.to(device).to(
+            torch.int32
+        )
 
     return (k_cache, v_cache)
 
@@ -187,7 +195,7 @@ def run_mla_attention_backend(
     utils_module._WEIGHT_PREFETCH_METHOD = mock_weight_prefetch
 
     try:
-        with patch('vllm.distributed.parallel_state.get_tp_group', return_value=mock_tp_group):
+        with patch("vllm.distributed.parallel_state.get_tp_group", return_value=mock_tp_group):
             num_heads = vllm_config.model_config.get_num_attention_heads(vllm_config.parallel_config)
             num_kv_heads = vllm_config.model_config.get_num_kv_heads(vllm_config.parallel_config)
             head_size = vllm_config.model_config.get_head_size()
@@ -229,7 +237,7 @@ def run_mla_attention_backend(
                 num_kv_heads=num_kv_heads,
                 alibi_slopes=None,
                 sliding_window=None,
-                attn_type=attn_type.value if hasattr(attn_type, 'value') else attn_type,
+                attn_type=attn_type.value if hasattr(attn_type, "value") else attn_type,
                 kv_cache_dtype="auto",
                 logits_soft_cap=None,
                 kv_sharing_target_layer_name=None,
@@ -241,7 +249,9 @@ def run_mla_attention_backend(
                 v_head_dim=v_head_dim,
                 q_proj=MockLinear(out_features=q_proj_out_dim, in_features=hidden_size, device=device, dtype=dtype),
                 q_b_proj=MockLinear(out_features=q_b_proj_out_dim, in_features=q_lora_rank, device=device, dtype=dtype),
-                kv_b_proj=MockLinear(out_features=kv_b_proj_out_dim, in_features=kv_b_proj_in_dim, device=device, dtype=dtype),
+                kv_b_proj=MockLinear(
+                    out_features=kv_b_proj_out_dim, in_features=kv_b_proj_in_dim, device=device, dtype=dtype
+                ),
                 o_proj=MockLinear(out_features=o_proj_out_dim, in_features=o_proj_in_dim, device=device, dtype=dtype),
                 kv_a_layernorm=MockLayerNorm(normalized_shape=kv_lora_rank, device=device, dtype=dtype),
                 q_a_layernorm=MockLayerNorm(normalized_shape=q_lora_rank, device=device, dtype=dtype),
@@ -273,9 +283,11 @@ def rms_norm(x: torch.Tensor, weight: torch.Tensor, eps: float = 1e-6) -> torch.
     return (x_normed * weight).to(x.dtype)
 
 
-def npu_interleave_rope_simple(x: torch.Tensor, cos: torch.Tensor | None = None, sin: torch.Tensor | None = None) -> torch.Tensor:
+def npu_interleave_rope_simple(
+        x: torch.Tensor, cos: torch.Tensor | None = None, sin: torch.Tensor | None = None
+) -> torch.Tensor:
     """Simulate Ascend npu_interleave_rope with default cos=1, sin=0.
-    
+
     Interleave the last dimension: [x0, x1, x2, x3, ...] -> [x0, x2, ..., x1, x3, ...]
     With cos=1, sin=0 (rope disabled), the function just returns the interleaved result.
     """
@@ -287,8 +299,10 @@ def npu_interleave_rope_simple(x: torch.Tensor, cos: torch.Tensor | None = None,
 
 
 def prefill_sdpa(
-    q_nope: torch.Tensor, q_pe_raw: torch.Tensor,
-    k_pe_c: torch.Tensor, k_nope_c: torch.Tensor,
+    q_nope: torch.Tensor,
+    q_pe_raw: torch.Tensor,
+    k_pe_c: torch.Tensor,
+    k_nope_c: torch.Tensor,
     v: torch.Tensor,
     impl,
     scale: float,
@@ -311,14 +325,18 @@ def prefill_sdpa(
             diagonal=context_len,
         )
         attn_out = torch.nn.functional.scaled_dot_product_attention(
-            q_sdpa, k_sdpa, v_sdpa,
+            q_sdpa,
+            k_sdpa,
+            v_sdpa,
             attn_mask=mask,
             enable_gqa=False,
             scale=scale,
         )
     else:
         attn_out = torch.nn.functional.scaled_dot_product_attention(
-            q_sdpa, k_sdpa, v_sdpa,
+            q_sdpa,
+            k_sdpa,
+            v_sdpa,
             is_causal=is_causal,
             enable_gqa=False,
             scale=scale,
@@ -327,13 +345,15 @@ def prefill_sdpa(
 
 
 def decode_sdpa(
-    ql_nope: torch.Tensor, q_pe: torch.Tensor,
-    k_pe: torch.Tensor, k_nope: torch.Tensor,
+    ql_nope: torch.Tensor,
+    q_pe: torch.Tensor,
+    k_pe: torch.Tensor,
+    k_nope: torch.Tensor,
     impl,
     scale: float,
 ) -> torch.Tensor:
     """Compute SDPA for decode path.
-    
+
     Decode path: q is W_UK projected (ql_nope), k/v are raw latent.
     """
     q_full = torch.cat([ql_nope, q_pe], dim=-1)
@@ -380,8 +400,8 @@ def compute_mla_sdpa_reference(
 
     # --- KV projection and normalization for all tokens ---
     kv_no_split = impl.kv_a_proj_with_mqa(hidden_states)[0]
-    k_nope_all = kv_no_split[:, :impl.kv_lora_rank]
-    k_pe_all = kv_no_split[:, impl.kv_lora_rank:]
+    k_nope_all = kv_no_split[:, : impl.kv_lora_rank]
+    k_pe_all = kv_no_split[:, impl.kv_lora_rank :]
     k_nope_normed = rms_norm(k_nope_all, rms_w, rms_eps)
 
     # --- Q projection for all tokens ---
@@ -410,16 +430,16 @@ def compute_mla_sdpa_reference(
         s_len_i = batch_spec.seq_lens[i]
         q_len_i = batch_spec.query_lens[i]
         context_len_i = s_len_i - q_len_i
-        is_decode = (q_len_i == 1)
+        is_decode = q_len_i == 1
 
         if is_decode:
-            ql_nope_i = ql_nope_decode[token_offset:token_offset + q_len_i]
-            q_pe_i = q_pe_decode[token_offset:token_offset + q_len_i]
+            ql_nope_i = ql_nope_decode[token_offset : token_offset + q_len_i]
+            q_pe_i = q_pe_decode[token_offset : token_offset + q_len_i]
 
-            k_nope_dec = k_nope_normed[token_offset:token_offset + q_len_i].view(
+            k_nope_dec = k_nope_normed[token_offset : token_offset + q_len_i].view(
                 q_len_i, impl.num_kv_heads, impl.kv_lora_rank
             )
-            k_pe_dec = k_pe_all[token_offset:token_offset + q_len_i].view(
+            k_pe_dec = k_pe_all[token_offset : token_offset + q_len_i].view(
                 q_len_i, impl.num_kv_heads, impl.qk_rope_head_dim
             )
             k_pe_dec = npu_interleave_rope_simple(k_pe_dec)
@@ -428,9 +448,12 @@ def compute_mla_sdpa_reference(
             k_pe_full_i = torch.cat([k_pe_contexts[i], k_pe_dec], dim=0)
 
             sdpa_out = decode_sdpa(
-                ql_nope_i, q_pe_i,
-                k_pe_full_i, k_nope_full_i,
-                impl, scale,
+                ql_nope_i,
+                q_pe_i,
+                k_pe_full_i,
+                k_nope_full_i,
+                impl,
+                scale,
             )
             # _v_up_proj
             sdpa_out = sdpa_out.transpose(0, 1).contiguous()
@@ -440,15 +463,13 @@ def compute_mla_sdpa_reference(
             decode_outputs.append(sdpa_out)
 
         else:
-            q_nope_i = q_nope_prefill[token_offset - num_decode_tokens:
-                                       token_offset - num_decode_tokens + q_len_i]
-            q_pe_raw_i = q_pe_prefill_raw[token_offset - num_decode_tokens:
-                                           token_offset - num_decode_tokens + q_len_i]
+            q_nope_i = q_nope_prefill[token_offset - num_decode_tokens : token_offset - num_decode_tokens + q_len_i]
+            q_pe_raw_i = q_pe_prefill_raw[token_offset - num_decode_tokens : token_offset - num_decode_tokens + q_len_i]
 
-            k_nope_new = k_nope_normed[token_offset:token_offset + q_len_i].view(
+            k_nope_new = k_nope_normed[token_offset : token_offset + q_len_i].view(
                 q_len_i, impl.num_kv_heads, impl.kv_lora_rank
             )
-            k_pe_raw_new = k_pe_all[token_offset:token_offset + q_len_i].view(
+            k_pe_raw_new = k_pe_all[token_offset : token_offset + q_len_i].view(
                 q_len_i, impl.num_kv_heads, impl.qk_rope_head_dim
             )
 
@@ -457,36 +478,37 @@ def compute_mla_sdpa_reference(
             kv_b_new = impl.kv_b_proj(k_nope_new_flat)[0].view(
                 q_len_i, impl.num_heads, impl.qk_nope_head_dim + impl.v_head_dim
             )
-            k_nope_proj_new, v_proj_new = kv_b_new.split(
-                [impl.qk_nope_head_dim, impl.v_head_dim], dim=-1
-            )
+            k_nope_proj_new, v_proj_new = kv_b_new.split([impl.qk_nope_head_dim, impl.v_head_dim], dim=-1)
 
             # kv_b_proj on raw context (cache stores raw data)
-            k_nope_ctx_raw = k_nope_contexts[i].view(
-                context_len_i, impl.num_kv_heads, impl.kv_lora_rank
-            ).reshape(-1, impl.kv_lora_rank)
+            k_nope_ctx_raw = (
+                k_nope_contexts[i]
+                .view(context_len_i, impl.num_kv_heads, impl.kv_lora_rank)
+                .reshape(-1, impl.kv_lora_rank)
+            )
             kv_b_ctx = impl.kv_b_proj(k_nope_ctx_raw)[0].view(
                 context_len_i, impl.num_heads, impl.qk_nope_head_dim + impl.v_head_dim
             )
-            k_nope_proj_ctx, v_proj_ctx = kv_b_ctx.split(
-                [impl.qk_nope_head_dim, impl.v_head_dim], dim=-1
-            )
+            k_nope_proj_ctx, v_proj_ctx = kv_b_ctx.split([impl.qk_nope_head_dim, impl.v_head_dim], dim=-1)
 
             k_nope_proj = torch.cat([k_nope_proj_ctx, k_nope_proj_new], dim=0)
             v_proj = torch.cat([v_proj_ctx, v_proj_new], dim=0)
 
             # k_pe: context raw (as stored in cache), new interleaved
-            k_pe_raw_ctx = k_pe_contexts[i].view(
-                context_len_i, impl.num_kv_heads, impl.qk_rope_head_dim
-            )
+            k_pe_raw_ctx = k_pe_contexts[i].view(context_len_i, impl.num_kv_heads, impl.qk_rope_head_dim)
             k_pe_new_interleaved = npu_interleave_rope_simple(k_pe_raw_new)
             k_pe_cat = torch.cat([k_pe_raw_ctx, k_pe_new_interleaved], dim=0)
             k_pe_expanded = k_pe_cat.expand(*k_nope_proj.shape[:-1], -1)
 
             sdpa_out = prefill_sdpa(
-                q_nope_i, q_pe_raw_i,
-                k_pe_expanded, k_nope_proj, v_proj,
-                impl, scale, is_causal=True,
+                q_nope_i,
+                q_pe_raw_i,
+                k_pe_expanded,
+                k_nope_proj,
+                v_proj,
+                impl,
+                scale,
+                is_causal=True,
                 context_len=context_len_i,
             )
             sdpa_out = sdpa_out.reshape(q_len_i, impl.num_heads * impl.v_head_dim)
@@ -581,6 +603,7 @@ def _test_mla_attention_correctness(
 
     with set_forward_context(attn_metadata=None, vllm_config=vllm_config):
         from vllm.forward_context import get_forward_context
+
         forward_ctx = get_forward_context()
         forward_ctx.num_tokens = num_tokens
         forward_ctx.is_draft_model = False
@@ -608,14 +631,6 @@ def _test_mla_attention_correctness(
         batch_spec,
         scale,
     )
-
-    import numpy as np
-    diff = (backend_output.float() - sdpa_output.float()).abs()
-    print(f"\n[MLA] head_size={head_size}, scale={scale:.4f}, "
-          f"num_heads={num_q_heads}, num_kv_heads={num_kv_heads}")
-    print(f"[MLA] kv_lora_rank={kv_lora_rank}, qk_rope_head_dim={qk_rope_head_dim}, "
-          f"qk_nope_head_dim={qk_nope_head_dim}")
-    print(f"[MLA] max abs diff={diff.max().item():.6f}, mismatched={diff.gt(atol).sum().item()}/{diff.numel()}")
 
     # Compare (same pattern as test_gqa.py)
     name = "MLA"

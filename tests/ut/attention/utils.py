@@ -1,9 +1,7 @@
+from dataclasses import dataclass
 from functools import wraps
 from unittest.mock import MagicMock, patch
-from dataclasses import dataclass
 
-
-from vllm.distributed.parallel_state import all_gather_fake
 import torch
 from vllm.config import (
     CacheConfig,
@@ -16,28 +14,25 @@ from vllm.config import (
     VllmConfig,
 )
 from vllm.config.model import ModelDType
+from vllm.distributed.parallel_state import all_gather_fake
 from vllm.utils.math_utils import cdiv
 from vllm.v1.kv_cache_interface import FullAttentionSpec
 from vllm_ascend.attention.utils import AscendCommonAttentionMetadata
 
-def patch_distributed_groups(dcp_size=1,
-                             dcp_rank=0,
-                             pcp_size=1,
-                             pcp_rank=0,
-                             needs_mocks=True):
+def patch_distributed_groups(dcp_size=1, dcp_rank=0, pcp_size=1, pcp_rank=0, needs_mocks=True):
     """
     Decorator to patch common distributed group mocks with configuration
-    
+
     Args:
         dcp_size: DCP world size (default: 1)
         dcp_rank: DCP rank (default: 0)
         pcp_size: PCP world size (default: 1)
         pcp_rank: PCP rank (default: 0)
-        needs_mocks: Whether to pass mock objects as the first arguments 
-             after 'self' to the decorated function. 
-             If True, the decorated function receives: 
+        needs_mocks: Whether to pass mock objects as the first arguments
+             after 'self' to the decorated function.
+             If True, the decorated function receives:
                  func(self, mock_all_to_all_single, mock_dcp, mock_pcp, *args, **kwargs)
-             If False, mocks are not passed and function receives: 
+             If False, mocks are not passed and function receives:
                  func(self, *args, **kwargs)
              (default: True)
     """
@@ -45,18 +40,18 @@ def patch_distributed_groups(dcp_size=1,
     def decorator(func):
 
         @wraps(func)
-        @patch('torch.distributed.all_to_all_single')
-        @patch('vllm.distributed.parallel_state._PCP')
-        @patch('vllm.distributed.parallel_state._DCP')
-        def wrapper(self, mock_dcp, mock_pcp, mock_all_to_all_single, *args,
-                    **kwargs):
+        @patch("torch.distributed.all_to_all_single")
+        @patch("vllm.distributed.parallel_state._PCP")
+        @patch("vllm.distributed.parallel_state._DCP")
+        def wrapper(self, mock_dcp, mock_pcp, mock_all_to_all_single, *args, **kwargs):
             mock_dcp.rank_in_group = dcp_rank
             mock_dcp.world_size = dcp_size
             mock_dcp.device_group = MagicMock()
 
             mock_dcp.all_gather = MagicMock()
             mock_dcp.all_gather.side_effect = lambda input_, dim: all_gather_fake(
-                input_, dim, mock_dcp.world_size, "mock_dcp_group")
+                input_, dim, mock_dcp.world_size, "mock_dcp_group"
+            )
 
             mock_pcp.rank_in_group = pcp_rank
             mock_pcp.world_size = pcp_size
@@ -64,14 +59,13 @@ def patch_distributed_groups(dcp_size=1,
 
             mock_pcp.all_gather = MagicMock()
             mock_pcp.all_gather.side_effect = lambda input_, dim: all_gather_fake(
-                input_, dim, mock_pcp.world_size, "mock_pcp_group")
+                input_, dim, mock_pcp.world_size, "mock_pcp_group"
+            )
 
-            mock_all_to_all_single.side_effect = lambda output, input, *a, **kw: output.copy_(
-                input)
+            mock_all_to_all_single.side_effect = lambda output, input, *a, **kw: output.copy_(input)
 
             if needs_mocks:
-                return func(self, mock_all_to_all_single, mock_dcp, mock_pcp,
-                            *args, **kwargs)
+                return func(self, mock_all_to_all_single, mock_dcp, mock_pcp, *args, **kwargs)
             else:
                 return func(self, *args, **kwargs)
 
@@ -327,4 +321,5 @@ def create_and_prepopulate_kv_cache(
         slot_mapping[start:end] = block_table[i, block_indices] * block_size + token_inter_block_offsets.to(device).to(
             torch.int32
         )
+
     return kv_cache
