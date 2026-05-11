@@ -9,6 +9,7 @@ from vllm.distributed import (
     get_decode_context_model_parallel_rank,
     get_decode_context_model_parallel_world_size,
     get_pcp_group,
+    GroupCoordinator,
 )
 from vllm.utils.math_utils import cdiv
 from vllm.v1.attention.backend import AttentionCGSupport
@@ -48,6 +49,89 @@ from vllm_ascend.utils import weak_ref_tensors
 MAX_O_PROJ_PREFETCH_SIZE = 16 * 1024 * 1024
 
 M = TypeVar("M", bound=AscendMLAMetadata)
+
+class KVCPManager:
+    def __init__(
+        self,
+        q_cumlens: np.ndarray,   # [B+1]
+        kv_lens: np.ndarray,     # [B]
+        blk_table: torch.Tensor, # [B, *]
+        pcp_group: GroupCoordinator = None,
+        dcp_group: GroupCoordinator = None,
+        page_size: int = 128,    # also the interleave size
+    ):
+        def as_np(x):
+            if type(x) is torch.Tensor:
+                x = np.array(x.tolist(), dtype=np.int32)
+            return x
+        q_cumlens = as_np(q_cumlens)
+        kv_lens = as_np(kv_lens)
+        assert q_cumlens.ndim == 1 and kv_lens.ndim == 1
+        assert q_cumlens.size == kv_lens.size + 1, f"{q_cumlens.size} != {kv_lens.size} + 1"
+        assert blk_table.size(0) == kv_lens.size, f"{blk_table.shape} {kv_lens}"
+        assert page_size > 0
+
+        q_lens = np.diff(q_cumlens) # [B]
+        computed = kv_lens - q_lens # [B]
+
+        pcp_size = pcp_group.world_size
+        dcp_size = dcp_group.world_size
+        sp_size = pcp_size * dcp_size
+        sp_len = cdiv(int(q_cumlens[-1]), sp_size)
+        cycle = page_size * sp_size # virtual page size
+        cycle_pcp = page_size * pcp_size
+
+        self.cfg = {"dtype": torch.int32, "device": blk_table.device}
+        self.blank = [blk_table.new_zeros(0)]
+
+        assert q_cumlens[0] == 0
+        assert all(computed >= 0)
+        assert blk_table.size(1) * cycle >= kv_lens.max()
+
+        self.blk_table = blk_table
+        self.sp_data = (sp_size, pcp_size, dcp_size, pcp_group.device_group, dcp_group.device_group )
+        self.seq_data = (q_lens, q_cumlens, kv_lens, computed)
+        self.size_data = (page_size, cycle, cycle_pcp, sp_len)
+
+        self._scheme_ag()
+        
+    def _scheme_ag(self):
+        sp_size, _, _, _, _ = self.sp_data
+        q_lens, q_cumlens, kv_lens, computed = self.seq_data
+        pg, cycle, cycle_pcp, sp_len = self.size_data
+
+        local_blks = cdiv(kv_lens, cycle) # [B]
+        req_pages = [tab[:cnt] for tab, cnt in # for each req
+            zip(self.blk_table, local_blks)]
+        local_pages = torch.cat(req_pages or self.blank)
+
+        local_blks_ = torch.tensor(local_blks, **self.cfg)        # [B]
+        global_blks = local_blks_.repeat(sp_size)                 # [B*p]
+        bases = global_blks.cumsum(dim=0) - global_blks           # [B*p]
+        bases = bases.view(sp_size, -1).transpose(0, 1)           # [B, p]
+        table0 = torch.arange(self.blk_table.size(1), **self.cfg) # [*]
+        blk_table = table0.view(1, -1, 1) + bases.unsqueeze(1)    # [B, *, p]
+        blk_table = blk_table.reshape(bases.size(0), -1)          # [B, *p]
+        blk_table = blk_table.to(torch.int32)                     # standard
+        blk_table_cp = blk_table.repeat(2, 1)     # for cp
+
+        self.ag_metadata = (local_pages, blk_table, blk_table_cp)
+
+    def ag_pages(self, cache: torch.Tensor):
+        pg, *_ = self.size_data
+        sp_size, pcp_size, dcp_size, pcp_comm_group, dcp_comm_group = self.sp_data
+        local_pages, blk_table, blk_table_cp = self.ag_metadata
+        assert cache.dim() in [3, 4] and cache.size(1) == pg
+        send = cache[local_pages]
+        def dcp_comm():
+            recv = send.new_empty(send.size(0) * dcp_size, *cache.shape[1:])
+            torch.distributed.all_gather_into_tensor(recv, send, group=dcp_comm_group)
+            return recv
+        def pcp_comm(send_pcp):
+            recv = send_pcp.new_empty(send.size(0) * sp_size, *cache.shape[1:])
+            torch.distributed.all_gather_into_tensor(recv, send_pcp, group=pcp_comm_group)
+            return recv
+        return dcp_comm, pcp_comm, blk_table, blk_table_cp
 
 
 class AscendMlaCPMetadataBuilder(AscendMLAMetadataBuilder):
@@ -89,7 +173,31 @@ class AscendMlaCPMetadataBuilder(AscendMLAMetadataBuilder):
                 : self.num_decode_tokens * self.pcp_size : self.pcp_size
             ]
             self.slot_mapping[self.num_decode_tokens : self.num_decode_tokens * self.pcp_size].fill_(-1)
+            if self.num_prefills > 0:
+                long_seq_metadata = common_attn_metadata.prefill_context_parallel_metadata
+
+                if long_seq_metadata is not None:
+                    restore_idx = long_seq_metadata.pcp_allgather_restore_idx
+                    num_tokens_pcp_padded = len(restore_idx)
+                    
+                    inverse_idx = torch.empty_like(restore_idx)
+                    inverse_idx.scatter_(
+                        0, 
+                        restore_idx, 
+                        torch.arange(num_tokens_pcp_padded, device=restore_idx.device, dtype=restore_idx.dtype)
+                    )
+
+                    prefill_start_in_slot_mapping = self.num_decode_tokens * self.pcp_size
+                    prefill_slots = self.slot_mapping[prefill_start_in_slot_mapping:].clone()
+                    
+                    self.prefill_slot_mapping = torch.where(
+                        inverse_idx < self.num_decode_tokens * self.pcp_size,
+                        torch.tensor(-1, device=restore_idx.device, dtype=torch.long),
+                        prefill_slots[inverse_idx - self.num_decode_tokens * self.pcp_size]
+                    )
+
         metadata_cls.slot_mapping = self.slot_mapping
+        metadata_cls.prefill_slot_mapping = self.prefill_slot_mapping if hasattr(self, 'prefill_slot_mapping') else None
         return metadata_cls
 
     @classmethod
@@ -120,12 +228,21 @@ class AscendMlaCPMetadataBuilder(AscendMLAMetadataBuilder):
         self,
         common_prefix_len: int,
         common_attn_metadata: AscendCommonAttentionMetadata,
+        query_lens: torch.Tensor = None,
     ) -> AscendPCPMetadata | None:
         common_long_seq_metadata = common_attn_metadata.prefill_context_parallel_metadata
         assert common_long_seq_metadata is not None
+        
+        prefill_num_computed_tokens = common_attn_metadata.num_computed_tokens_cpu.to(query_lens.device)[self.num_decodes:]
+        head_overall_attn_seq_lens = (query_lens //2) * (self.pcp_rank + 1) + prefill_num_computed_tokens #
+        tail_overall_attn_seq_lens = query_lens * self.pcp_size - (query_lens //2) * self.pcp_rank + prefill_num_computed_tokens #
+        full_overall_attn_seq_lens = torch.cat([head_overall_attn_seq_lens, tail_overall_attn_seq_lens], dim=0)
+        prefill_full_seq_lens = prefill_num_computed_tokens + query_lens * self.pcp_size
+        
         return AscendPCPMetadata(
             q_head_idx=common_long_seq_metadata.q_head_idx_tensor,
             q_tail_idx=common_long_seq_metadata.q_tail_idx_tensor,
+            q_head_tail_idx=common_long_seq_metadata.q_head_tail_idx_tensor,
             kv_with_q_head_nomask_idx=common_long_seq_metadata.kv_with_q_head_nomask_idx_tensor,
             kv_with_q_head_mask_idx=common_long_seq_metadata.kv_with_q_head_mask_idx_tensor,
             kv_with_q_tail_nomask_idx=common_long_seq_metadata.kv_with_q_tail_nomask_idx_tensor,
@@ -134,12 +251,15 @@ class AscendMlaCPMetadataBuilder(AscendMLAMetadataBuilder):
             kv_with_q_head_attn_idx_in_tail=common_long_seq_metadata.kv_with_q_head_attn_idx_in_tail_tensor,
             kv_with_q_tail_attn_idx_in_tail=common_long_seq_metadata.kv_with_q_tail_attn_idx_in_tail_tensor,
             attn_mask_seqlens=common_long_seq_metadata.attn_mask_seqlens,
+            attn_mask_full_seqlens=common_long_seq_metadata.attn_mask_full_seqlens,
             head_attn_nomask_seqlens=common_long_seq_metadata.head_attn_nomask_seqlens,
             tail_attn_nomask_seqlens=common_long_seq_metadata.tail_attn_nomask_seqlens,
             head_actual_seq_lengths_kv=common_long_seq_metadata.head_actual_seq_lengths_kv,
             tail_actual_seq_lengths_kv=common_long_seq_metadata.tail_actual_seq_lengths_kv,
             q_full_idx=common_long_seq_metadata.q_full_idx,
             pcp_allgather_restore_idx=common_long_seq_metadata.pcp_allgather_restore_idx,
+            full_overall_attn_seq_lens=full_overall_attn_seq_lens,
+            prefill_full_seq_lens=prefill_full_seq_lens,
         )
 
     def build_chunked_metadata(
@@ -225,8 +345,9 @@ class AscendMlaCPMetadataBuilder(AscendMLAMetadataBuilder):
         common_attn_metadata: AscendCommonAttentionMetadata,
     ) -> AscendMLAPrefillMetadata:
         prefill_metadata = super().build_prefill_metadata(common_prefix_len, common_attn_metadata)
-        prefill_metadata.pcp_metadata = self.build_cp_metadata(common_prefix_len, common_attn_metadata)
+        prefill_metadata.pcp_metadata = self.build_cp_metadata(common_prefix_len, common_attn_metadata, prefill_metadata.query_lens)
         prefill_metadata.block_table = self.block_table[self.num_decodes_flatten :, ...]
+        prefill_metadata.kvsm = KVCPManager(prefill_metadata.query_start_loc, prefill_metadata.pcp_metadata.prefill_full_seq_lens, prefill_metadata.block_table, get_pcp_group(), get_dcp_group())
         return prefill_metadata
 
     def build_decode_metadata(
@@ -463,6 +584,55 @@ class AscendMlaCPImpl(AscendMLAImpl):
         prefill_k_pe = tail_k_pe.expand((*prefill_k_nope.shape[:-1], -1))
         return PrefillMLAPreprocessResult(prefill_q_nope, prefill_q_pe, prefill_k_nope, prefill_k_pe, prefill_value)
 
+    def mla_preprocess_prefill_absorb(self, q_c, kv_no_split, kv_cache, attn_metadata):
+        if not self.pcp_size > 1:
+            return super().mla_preprocess_prefill(q_c, kv_no_split, kv_cache, attn_metadata)
+        num_decode_tokens = attn_metadata.num_decode_tokens
+        num_actual_tokens = (
+            attn_metadata.num_actual_tokens_pcp_padded - self.pcp_size * num_decode_tokens
+        ) // self.pcp_size + num_decode_tokens
+        prefill_q_c = q_c[num_decode_tokens:num_actual_tokens]
+        prefill_q_nope, prefill_q_pe = self._q_proj_and_k_up_proj(prefill_q_c)
+        
+        # q rope
+        cos = attn_metadata.prefill.cos[: num_actual_tokens - num_decode_tokens]
+        sin = attn_metadata.prefill.sin[: num_actual_tokens - num_decode_tokens]
+        prefill_q_pe = self.rope_single(prefill_q_pe, cos, sin)
+        
+        # kv
+        prefill_kv_no_split = kv_no_split[:num_actual_tokens]
+        kv_c, k_pe = prefill_kv_no_split.split([self.kv_lora_rank, self.qk_rope_head_dim], dim=-1)
+        kv_c_normed = self.kv_a_layernorm(kv_c.contiguous()) 
+        assert len(kv_cache) > 1, "the number of kv cache should be greater than 1, namely (nope_cache and rope_cache)"
+        kv_c_normed = kv_c_normed.view([num_actual_tokens, self.num_kv_heads, -1])
+        k_pe = k_pe.unsqueeze(1)
+        prefill_k_pe = k_pe
+        prefill_k_pe[num_decode_tokens:num_actual_tokens] = self.rope_single(
+            prefill_k_pe[num_decode_tokens:num_actual_tokens], cos, sin
+        )
+        prefill_k_c_normed = kv_c_normed[:num_actual_tokens]
+        prefill_kv_c_k_pe = torch.cat([prefill_k_c_normed, prefill_k_pe], dim=-1)
+        
+        prefill_kv_c_k_pe = get_pcp_group().all_gather(prefill_kv_c_k_pe, 0)
+        
+        # cache kv
+        prefill_k_c_normed, prefill_k_pe = prefill_kv_c_k_pe.split([self.kv_lora_rank, self.qk_rope_head_dim], dim=-1)
+        kv_c_normed, k_pe = prefill_k_c_normed, prefill_k_pe
+        prefill_k_c_normed = prefill_k_c_normed.squeeze(1)
+        assert attn_metadata.prefill_slot_mapping is not None
+        slot_mapping = attn_metadata.prefill_slot_mapping
+        
+        if self.is_kv_producer:
+            attn_metadata.reshape_cache_event = torch.npu.Event()
+        torch_npu._npu_reshape_and_cache(
+            key=kv_c_normed, value=k_pe, key_cache=kv_cache[0], value_cache=kv_cache[1], slot_indices=slot_mapping
+        )
+        if self.is_kv_producer:
+            attn_metadata.reshape_cache_event.record()
+            
+        return PrefillMLAPreprocessResult(prefill_q_nope, prefill_q_pe, kv_cache[0], kv_cache[1], None)
+            
+        
     def mla_preprocess_decode(self, q_c, kv_no_split, kv_cache, attn_metadata):
         num_decode_tokens = attn_metadata.num_decode_tokens
         decode_q_c = q_c[:num_decode_tokens]
@@ -558,6 +728,78 @@ class AscendMlaCPImpl(AscendMLAImpl):
 
         output = output.reshape([num_tokens, self.num_heads * self.v_head_dim])
 
+        return output
+
+    def _forward_prefill_absorb(
+        self,
+        q_nope: torch.Tensor,
+        q_pe: torch.Tensor,
+        k_nope: torch.Tensor,
+        k_pe: torch.Tensor,
+        value: torch.Tensor,
+        block_size: int,
+        kv_c_and_k_pe_cache: tuple[torch.Tensor],
+        attn_metadata: AscendMLAMetadata,
+    ) -> torch.Tensor:
+        if not self.pcp_size > 1:
+            return super()._forward_prefill(q_nope, q_pe, k_nope, k_pe, value, kv_c_and_k_pe_cache, attn_metadata)
+        assert attn_metadata.prefill is not None
+        assert attn_metadata.prefill.pcp_metadata is not None
+        num_tokens = q_nope.size(0)
+        prefill_metadata = attn_metadata.prefill
+        kvsm = prefill_metadata.kvsm
+        dcp_ag_k_nope, pcp_ag_k_nope, blk_table, blk_table_cp = kvsm.ag_pages(k_nope)
+        dcp_ag_k_pe, pcp_ag_k_pe, _, _ = kvsm.ag_pages(k_pe)
+        
+        k_nope_pcp = dcp_ag_k_nope()
+        k_pe_pcp = dcp_ag_k_pe()
+        
+        k_nope = pcp_ag_k_nope(k_nope_pcp)  
+        k_pe = pcp_ag_k_pe(k_pe_pcp)
+        
+        num_heads = self.num_heads
+        k_nope = k_nope.view(-1, self.num_kv_heads, block_size, self.kv_lora_rank)
+        k_pe = k_pe.view(-1, self.num_kv_heads, block_size, self.qk_rope_head_dim)
+        
+        input_layout = "TND"
+        q_nope = q_nope.view(num_tokens, num_heads, -1).contiguous()
+        q_pe = q_pe.view(num_tokens, num_heads, -1)
+        sparse_mode = 3
+        spec_attn_mask = attn_metadata.prefill.attn_mask
+        
+        q_head_tail_idx = prefill_metadata.pcp_metadata.q_head_tail_idx
+        q_full_idx = prefill_metadata.pcp_metadata.q_full_idx
+        attn_mask_full_seqlens = prefill_metadata.pcp_metadata.attn_mask_full_seqlens
+        full_overall_attn_seq_lens = prefill_metadata.pcp_metadata.full_overall_attn_seq_lens
+        
+        query_rope = torch.index_select(q_pe, 0, q_head_tail_idx)
+        query_nope = torch.index_select(q_nope, 0, q_head_tail_idx)
+        
+        kwargs = {
+            "query_rope": query_rope,
+            "key_rope": k_pe,
+            "num_heads": num_heads,
+            "num_key_value_heads": self.num_kv_heads,
+            "input_layout": input_layout,
+            "atten_mask": spec_attn_mask,
+            "sparse_mode": sparse_mode,
+            "scale": self.scale,
+            "antiquant_mode": 0,
+            "antiquant_scale": None,
+            "block_table": blk_table_cp,
+            "block_size": block_size,
+            "actual_seq_lengths_kv": full_overall_attn_seq_lens,
+            "actual_seq_lengths": attn_mask_full_seqlens,
+            "softmax_lse_flag": False,
+        }
+        attn_output, _ = torch_npu.npu_fused_infer_attention_score(
+            query_nope,
+            k_nope,
+            k_nope,
+            **kwargs
+        )
+        attn_output = torch.index_select(attn_output, 0, q_full_idx)
+        output = self._v_up_proj(attn_output)
         return output
 
     def _attention_with_optional_kv_select(
