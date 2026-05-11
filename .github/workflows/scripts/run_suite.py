@@ -48,16 +48,14 @@ def load_suites(
                 files.append(
                     TestFile(
                         name=name,
+                        estimated_time=entry.get("estimated_time", 60),
+                        is_skipped=entry.get("is_skipped", False),
                     )
                 )
                 if is_upstream:
                     upstream_files.add(name.split("::")[0])
             all_suites[suite_name] = files
-    return all_suites
-=======
-            all_suites[suite_name] = files
     return all_suites, upstream_files
->>>>>>> 1c5c7d99... update run_suite.py schedule_vllm_e2e_test.yaml
 
 
 def partition(files: list[TestFile], rank: int, size: int) -> list[TestFile]:
@@ -69,10 +67,13 @@ def partition(files: list[TestFile], rank: int, size: int) -> list[TestFile]:
     active = [f for f in files if not f.is_skipped]
     if not active or size <= 0 or size > len(active):
         return []
+
     # Sort descending by weight; use original index as tiebreaker to be stable
     indexed = sorted(enumerate(active), key=lambda x: (-x[1].estimated_time, x[0]))
+
     buckets: list[list[int]] = [[] for _ in range(size)]
     sums = [0.0] * size
+
     for idx, test in indexed:
         lightest = sums.index(min(sums))
         buckets[lightest].append(idx)
@@ -205,6 +206,7 @@ def _save_timing_json(
 
 def main() -> None:
     suites, upstream_files = load_suites()
+
     parser = argparse.ArgumentParser(description="Run a named e2e test suite")
     parser.add_argument(
         "--suite",
