@@ -20,6 +20,7 @@ import sys
 import types
 from pathlib import Path
 from types import SimpleNamespace
+from typing import Any, cast
 from unittest.mock import patch
 
 import httpx
@@ -92,12 +93,12 @@ async def _drain_streaming_response(response):
 def _load_example(relative_path: str):
     module_name = "test_" + relative_path.replace("/", "_").replace(".", "_")
 
-    vllm_mod = types.ModuleType("vllm")
-    logger_mod = types.ModuleType("vllm.logger")
+    vllm_mod = cast(Any, types.ModuleType("vllm"))
+    logger_mod = cast(Any, types.ModuleType("vllm.logger"))
     logger_mod.init_logger = logging.getLogger
     vllm_mod.logger = logger_mod
 
-    pil_mod = types.ModuleType("PIL")
+    pil_mod = cast(Any, types.ModuleType("PIL"))
     image_mod = types.ModuleType("PIL.Image")
     pil_mod.Image = image_mod
 
