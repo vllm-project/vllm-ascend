@@ -151,7 +151,7 @@ class NPUModelRunner(GPUModelRunner):
         """Apply FULL-graph padding requirements from attention backends (e.g. FIA TND)."""
         if self.backend_extra_input_constructors is None:
             self.backend_extra_input_constructors = set()
-            for backend in self._attn_backends:
+            for backend in self.attn_backends:
                 if hasattr(backend, "get_extra_input_constructor"):
                     self.backend_extra_input_constructors.add(backend.get_extra_input_constructor())
 
