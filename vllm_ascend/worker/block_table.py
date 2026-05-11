@@ -4,7 +4,6 @@ from vllm.distributed import get_dcp_group, get_pcp_group
 from vllm.utils.math_utils import cdiv
 from vllm.v1.attention.backends.utils import PAD_SLOT_ID
 from vllm.v1.utils import CpuGpuBuffer
-from vllm.v1.worker.block_table import _compute_slot_mapping_kernel
 from vllm.v1.worker.cp_utils import get_total_cp_world_size
 
 
@@ -134,20 +133,19 @@ class BlockTable:
         num_tokens = positions.shape[0]
         total_cp_world_size = self.pcp_world_size * self.dcp_world_size
         total_cp_rank = self.pcp_rank * self.dcp_world_size + self.dcp_rank
-        _compute_slot_mapping_kernel[(num_reqs + 1,)](
-            num_tokens,
-            self.max_num_batched_tokens,
+        # In-place: write directly into slot_mapping buffer; no per-call alloc/copy.
+        torch.ops._C_ascend.npu_slot_mapping(
             query_start_loc,
             positions,
             self.block_table.gpu,
-            self.block_table.gpu.stride(0),
-            self.block_size,
-            self.slot_mapping.gpu,
-            TOTAL_CP_WORLD_SIZE=total_cp_world_size,
-            TOTAL_CP_RANK=total_cp_rank,
-            CP_KV_CACHE_INTERLEAVE_SIZE=self.cp_kv_cache_interleave_size,
-            PAD_ID=PAD_SLOT_ID,
-            BLOCK_SIZE=1024,
+            self.slot_mapping.gpu[: self.max_num_batched_tokens],
+            int(num_tokens),
+            int(self.max_num_batched_tokens),
+            int(self.block_size),
+            int(total_cp_world_size),
+            int(total_cp_rank),
+            int(self.cp_kv_cache_interleave_size),
+            int(PAD_SLOT_ID),
         )
 
     def compute_slot_mapping_draft(self, req_indices: np.ndarray, positions: np.ndarray) -> None:

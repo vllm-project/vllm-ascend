@@ -665,6 +665,23 @@ at::Tensor npu_lightning_indexer_quant_meta(
     return lightning_indexer_quant_output;
 }
 
+at::Tensor npu_slot_mapping_meta(
+    const at::Tensor& query_start_loc,
+    const at::Tensor& positions,
+    const at::Tensor& block_table,
+    at::Tensor& slot_mapping,
+    int64_t num_tokens,
+    int64_t max_num_tokens,
+    int64_t block_size,
+    int64_t total_cp_world_size,
+    int64_t total_cp_rank,
+    int64_t cp_kv_cache_interleave_size,
+    int64_t pad_id)
+{
+    // In-place op: caller-provided slot_mapping is mutated and returned.
+    return slot_mapping;
+}
+
 } // namespace meta
 } // namespace vllm_ascend
 
@@ -736,6 +753,8 @@ TORCH_LIBRARY_IMPL_EXPAND(CONCAT(_C, _ascend), Meta, ops) {
     ops.impl("moe_grouped_matmul", &vllm_ascend::meta::moe_grouped_matmul_meta);
     // Lightning indexer quant
     ops.impl("npu_lightning_indexer_quant", &vllm_ascend::meta::npu_lightning_indexer_quant_meta);
+    // npu_slot_mapping
+    ops.impl("npu_slot_mapping", &vllm_ascend::meta::npu_slot_mapping_meta);
 }
 }
 #endif
