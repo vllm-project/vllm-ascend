@@ -19,6 +19,7 @@
 
 import copy
 import gc
+import logging
 from types import NoneType
 
 import torch
@@ -37,13 +38,13 @@ from vllm.lora.request import LoRARequest
 from vllm.sequence import IntermediateTensors
 from vllm.tasks import SupportedTask
 from vllm.utils.mem_constants import GiB_bytes
-from vllm.utils.mem_utils import MemorySnapshot, memory_profiling
+from vllm.utils.mem_utils import MemorySnapshot, format_gib, memory_profiling
 from vllm.utils.torch_utils import STR_DTYPE_TO_TORCH_DTYPE
 from vllm.v1.core.sched.output import GrammarOutput, SchedulerOutput
 from vllm.v1.kv_cache_interface import KVCacheConfig, KVCacheSpec
 from vllm.v1.outputs import EMPTY_MODEL_RUNNER_OUTPUT, AsyncModelRunnerOutput, DraftTokenIds, ModelRunnerOutput
 from vllm.v1.worker.gpu_worker import AsyncIntermediateTensors
-from vllm.v1.worker.worker_base import WorkerBase
+from vllm.v1.worker.worker_base import CompilationTimes, WorkerBase
 from vllm.v1.worker.workspace import init_workspace_manager
 
 import vllm_ascend.envs as envs_ascend
@@ -328,6 +329,24 @@ class NPUWorker(WorkerBase):
         """
         GiB = lambda b: b / GiB_bytes
 
+        # Fast path: user has explicitly specified KV cache size via
+        # --kv-cache-memory. Still run profile_run() to compile the model,
+        # but skip the memory profiling calculation entirely.
+        if kv_cache_memory_bytes := self.cache_config.kv_cache_memory_bytes:
+            self.model_runner.profile_run()
+            logger.info(
+                "Initial free memory %.2f GiB, reserved %.2f GiB for KV Cache "
+                "as specified by kv_cache_memory_bytes, skipping memory profiling. "
+                "This does not respect the gpu_memory_utilization config. "
+                "Only use kv_cache_memory_bytes when you want manual control of "
+                "KV cache memory size. If OOM'ed, check the difference of initial "
+                "free memory between the current run and the previous run where "
+                "kv_cache_memory_bytes is suggested and update it correspondingly.",
+                GiB(self.init_snapshot.free_memory),
+                GiB(kv_cache_memory_bytes),
+            )
+            return kv_cache_memory_bytes
+
         # Execute a forward pass with dummy inputs to profile the memory usage
         # of the model.
         with memory_profiling(
@@ -335,6 +354,23 @@ class NPUWorker(WorkerBase):
             weights_memory=int(self.model_runner.model_memory_usage),
         ) as profile_result:
             self.model_runner.profile_run()
+
+            # Record torch peak INSIDE the context and BEFORE graph capture,
+            # so that graph pool allocations don't inflate the activation peak.
+            # The memory_profiling context will also compute torch_peak_increase
+            # on exit, but we override it below with this pre-graph value.
+            profile_torch_peak = torch.npu.memory_stats(self.device).get("allocated_bytes.all.peak", 0)
+
+        # Override torch_peak_increase with the pre-graph-capture value to
+        # avoid double-counting graph pool memory as activation memory.
+        profile_result.torch_peak_increase = profile_torch_peak - profile_result.before_profile.torch_peak
+        profile_result.non_kv_cache_memory = (
+            profile_result.non_torch_increase + profile_result.torch_peak_increase + profile_result.weights_memory
+        )
+
+        # Save per-category memory for use in compile_or_warm_up_model() (step 5).
+        self.peak_activation_memory = profile_result.torch_peak_increase
+        self.non_torch_memory = profile_result.non_torch_increase
 
         free_gpu_memory = profile_result.after_profile.free_memory
         assert self.init_snapshot.free_memory > free_gpu_memory, (
@@ -347,6 +383,7 @@ class NPUWorker(WorkerBase):
             "isolate vLLM in its own container."
         )
         self.available_kv_cache_memory_bytes = self.requested_memory - profile_result.non_kv_cache_memory
+
         logger.debug(profile_result)
         logger.info_once(
             "Available KV cache memory: %.2f GiB", GiB(self.available_kv_cache_memory_bytes), scope="local"
@@ -433,7 +470,7 @@ class NPUWorker(WorkerBase):
         with context, set_current_vllm_config(self.vllm_config):
             self.model_runner.load_model()
 
-    def compile_or_warm_up_model(self) -> float:
+    def compile_or_warm_up_model(self) -> CompilationTimes:
         # Note: need to adapt for graph mode.
         warmup_sizes = (self.vllm_config.compilation_config.compile_sizes or []).copy()
         if not self.model_config.enforce_eager:
@@ -456,8 +493,49 @@ class NPUWorker(WorkerBase):
         for size in sorted(warmup_sizes, reverse=True):
             logger.info("Compile and warming up model for size %d", size)
             self.model_runner._dummy_run(size)
+
+        npugraph_memory_bytes = 0
         if not self.model_config.enforce_eager:
-            self.model_runner.capture_model()
+            npugraph_memory_bytes = self.model_runner.capture_model()
+
+        # Suggest an optimal --kv-cache-memory value for future runs.
+        # Only emitted when we ran full profiling (kv_cache_memory_bytes was not
+        # pre-specified) so that peak_activation_memory etc. are available.
+        # non_kv_memory already includes NPU graph memory, so the suggestion
+        # accounts for all measured memory categories. A 150 MiB buffer is kept
+        # because memory_profiling may slightly underestimate non-torch
+        # allocations (ACL context, HCCL buffers, driver layer, etc.).
+        if self.cache_config.kv_cache_memory_bytes is None and hasattr(self, "peak_activation_memory"):
+            redundancy_buffer = 150 * (1 << 20)  # 150 MiB safety margin
+            non_kv_memory = (
+                self.model_runner.model_memory_usage
+                + self.peak_activation_memory
+                + self.non_torch_memory
+                + npugraph_memory_bytes
+            )
+            suggested_to_requested = int(self.requested_memory) - non_kv_memory - redundancy_buffer
+            suggested_to_gpu_limit = int(self.init_snapshot.free_memory) - non_kv_memory - redundancy_buffer
+            msg = (
+                f"Free memory on device "
+                f"({format_gib(self.init_snapshot.free_memory)}/"
+                f"{format_gib(self.init_snapshot.total_memory)} GiB) on startup. "
+                f"Desired GPU memory utilization is "
+                f"({self.cache_config.gpu_memory_utilization}, "
+                f"{format_gib(self.requested_memory)} GiB). "
+                f"Actual usage: {format_gib(self.model_runner.model_memory_usage)} GiB "
+                f"for weights, {format_gib(self.peak_activation_memory)} GiB for peak "
+                f"activation, {format_gib(self.non_torch_memory)} GiB for non-torch "
+                f"memory, {format_gib(npugraph_memory_bytes)} GiB for NPU graph memory. "
+                f"Replace gpu_memory_utilization with "
+                f"`--kv-cache-memory={suggested_to_requested}` "
+                f"({format_gib(suggested_to_requested)} GiB) to fit into requested "
+                f"memory, or `--kv-cache-memory={suggested_to_gpu_limit}` "
+                f"({format_gib(suggested_to_gpu_limit)} GiB) to fully utilize NPU "
+                f"free memory. Current KV cache memory: "
+                f"{format_gib(self.available_kv_cache_memory_bytes)} GiB."
+            )
+            logger.info(msg)
+
         # Call ATB matmul to warm up; otherwise, the first operation (ReshapeAndCache)
         # may cause performance degradation at runtime.
         if get_ascend_device_type() != AscendDeviceType.A5:
@@ -468,11 +546,20 @@ class NPUWorker(WorkerBase):
             try:
                 bind_cpus(self.local_rank)
             except Exception as e:
-                logger.warning(f"Bind cpus failed in rank{self.local_rank}: {e} Skip binding cpu.")
+                logger.warning("Bind cpus failed in rank%s: %s Skip binding cpu.", self.local_rank, e)
         # Reset the seed to ensure that the random state is not affected by
         # the model initialization and profiling.
         set_random_seed(self.model_config.seed)
-        return self.vllm_config.compilation_config.compilation_time
+        return CompilationTimes(
+            language_model=self.vllm_config.compilation_config.compilation_time,
+            # `encoder_compilation_time` was added after v0.19.1 (vLLM #39240); fall
+            # back to 0.0 so the older release still constructs CompilationTimes.
+            encoder=getattr(
+                self.vllm_config.compilation_config,
+                "encoder_compilation_time",
+                0.0,
+            ),
+        )
 
     def _warm_up_atb(self):
         x = torch.rand((2, 4), dtype=torch.float16).npu()
@@ -536,12 +623,13 @@ class NPUWorker(WorkerBase):
 
         # Log for debugging in PP mode
         if not is_first_pp_rank:
-            logger.debug(
-                "[ProfilingChunk] PP rank %d: profiled %d tokens, latency=%.2f ms (not used)",
-                get_pp_group().rank_in_group,
-                num_tokens,
-                latency_ms,
-            )
+            if logger.isEnabledFor(logging.DEBUG):
+                logger.debug(
+                    "[ProfilingChunk] PP rank %d: profiled %d tokens, latency=%.2f ms (not used)",
+                    get_pp_group().rank_in_group,
+                    num_tokens,
+                    latency_ms,
+                )
 
         return latency_ms
 
@@ -715,13 +803,13 @@ class NPUWorker(WorkerBase):
                 parse_text_output(result.stdout)
                 logger.info("check_health success!")
             else:
-                logger.info(f"query NPU card {self.local_rank} fail: {result.stderr}")
+                logger.info("query NPU card %s fail: %s", self.local_rank, result.stderr)
         except subprocess.TimeoutExpired:
-            logger.info(f"query NPU card  {self.local_rank} timeout.")
+            logger.info("query NPU card  %s timeout.", self.local_rank)
         except FileNotFoundError:
             logger.info("npu-smi tool not found.")
         except Exception as e:
-            logger.info(f"query NPU card {self.local_rank} fail: {e}")
+            logger.info("query NPU card %s fail: %s", self.local_rank, e)
         return
 
 
