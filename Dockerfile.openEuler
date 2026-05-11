@@ -58,6 +58,7 @@ RUN VLLM_TARGET_DEVICE="empty" python3 -m pip install -e /vllm-workspace/vllm/[a
 
 # Install vllm-ascend
 ARG SOC_VERSION="ascend910b1"
+ARG COMPILE_CUSTOM_KERNELS=1
 ENV SOC_VERSION=$SOC_VERSION \
     TASK_QUEUE_ENABLE=1 \
     OMP_NUM_THREADS=1
