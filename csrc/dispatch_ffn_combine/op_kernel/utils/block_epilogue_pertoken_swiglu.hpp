@@ -150,6 +150,7 @@ public:
         AscendC::GlobalTensor<ElementPerTokenScale> const &gmPerTokenScale2,
 
         uint32_t epilogueCoreNum = 40,
+        uint32_t blockK = 1,
         Callback &&callback = Callback{}
     )
     {
@@ -182,7 +183,7 @@ public:
 
         for (uint32_t loopIdx = loopStartIdx; loopIdx < loopStartIdx + tasksForIdx; ++loopIdx) {
 
-            auto gmTileC = gmC[loopIdx * blockN];
+            auto gmTileC = gmC[loopIdx * blockK];
 
             auto &ubC = ubCList[ubListId];
             auto &ubD = ubDList[ubListId];
