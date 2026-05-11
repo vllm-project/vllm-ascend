@@ -39,6 +39,7 @@
 #include "attention/lightning_indexer_vllm/lightning_indexer_vllm_torch_adpt.h"
 #include "mc2/matmul_allreduce_add_rmsnorm/matmul_allreduce_add_rmsnorm_torch_adpt.h"
 #include "mla_preprocess/mla_preprocess_torch_adpt.h"
+<<<<<<< HEAD
 #include "mc2/moe_combine_normal/moe_combine_normal_torch_adpt.h"
 #include "moe/moe_gating_top_k/moe_gating_top_k_torch_adpt.h"
 #include "moe/moe_init_routing_custom/moe_init_routing_custom_torch_adpt.h"
@@ -46,6 +47,17 @@
 #include "attention/lightning_indexer_quant/lightning_indexer_quant_torch_adpt.h"
 #include "moe/causal_conv1d_v310/causal_conv1d_310_torch_adpt.h"
 #include "attention/recurrent_gated_delta_rule_v310/recurrent_gated_delta_rule_310_torch_adpt.h"
+=======
+#include "moe_combine_normal/moe_combine_normal_torch_adpt.h"
+#include "moe_gating_top_k/moe_gating_top_k_torch_adpt.h"
+#include "moe_init_routing_custom/moe_init_routing_custom_torch_adpt.h"
+#include "sparse_flash_attention/sparse_flash_attention_torch_adpt.h"
+#include "scatter_pa_kv_cache_vllm/scatter_pa_kv_cache_vllm_torch_adpt.h"
+#include "gather_pa_kv_cache_vllm/gather_pa_kv_cache_vllm_torch_adpt.h"
+#include "lightning_indexer_quant/lightning_indexer_quant_torch_adpt.h"
+#include "causal_conv1d_v310/causal_conv1d_310_torch_adpt.h"
+#include "recurrent_gated_delta_rule_v310/recurrent_gated_delta_rule_310_torch_adpt.h"
+>>>>>>> origin/main_origin
 #include <c10/core/Device.h>
 #include <c10/core/Scalar.h>
 #include <c10/util/Exception.h>
@@ -1140,6 +1152,14 @@ TORCH_LIBRARY_EXPAND(CONCAT(_C, _ascend), ops)
         "                           int sparse_mode=3) -> Tensor"
     );
     ops.impl("npu_sparse_flash_attention", torch::kPrivateUse1, &vllm_ascend::npu_sparse_flash_attention);
+
+    ops.def("npu_scatter_pa_kv_cache_vllm(Tensor key, Tensor key_cache, Tensor slot_mapping,"
+            "Tensor value, Tensor value_cache, Tensor? compress_lens=None, Tensor? compress_seq_offsets=None, Tensor? seq_lens=None, str? cache_mode='Norm')-> (Tensor key_cache, Tensor value_cache)");
+
+    ops.impl("npu_scatter_pa_kv_cache_vllm", torch::kPrivateUse1, &vllm_ascend::npu_scatter_pa_kv_cache_vllm);
+
+    ops.def("npu_gather_pa_kv_cache_vllm(Tensor key_cache, Tensor value_cache, Tensor block_tables, Tensor seq_lens, Tensor key_ref, Tensor value_ref, Tensor? seq_offset=None, str cache_mode=\"Norm\", bool is_seq_lens_cumsum=False) -> (Tensor key_ref, Tensor value_ref)");
+    ops.impl("npu_gather_pa_kv_cache_vllm", torch::kPrivateUse1, &vllm_ascend::npu_gather_pa_kv_cache_vllm);
 
     ops.def(
         "dispatch_ffn_combine(Tensor x, Tensor[] weight1, Tensor[] weight2, Tensor expert_idx,"

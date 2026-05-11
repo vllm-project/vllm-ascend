@@ -262,6 +262,53 @@ at::Tensor npu_sparse_flash_attention_meta(
     at::Tensor output = at::empty(query.sizes(), query.options().dtype(query.dtype()));
     return output;
 }
+
+
+// step3, 为META设备实现前向接口
+std::tuple<at::Tensor, at::Tensor> npu_scatter_pa_kv_cache_vllm_meta(
+    const at::Tensor &key,
+    const at::Tensor &value,
+    const at::Tensor &key_cache,
+    const at::Tensor &value_cache,
+    const at::Tensor &slot_mapping,
+    const c10::optional<at::Tensor>& compress_lens,
+    const c10::optional<at::Tensor>& compress_seq_offsets,
+    const c10::optional<at::Tensor>& seq_lens,
+    c10::optional<c10::string_view> cache_mode)
+{
+    // construct the output tensors
+    (void)key;
+    (void)slot_mapping;
+    (void)value;
+    (void)compress_lens;
+    (void)compress_seq_offsets;
+    (void)seq_lens;
+    (void)cache_mode;
+    return std::make_tuple(key_cache, value_cache);
+}
+
+
+std::tuple<at::Tensor, at::Tensor> npu_gather_pa_kv_cache_vllm_meta(
+    const at::Tensor &key_cache,
+    const at::Tensor &value_cache,
+    const at::Tensor &block_tables,
+    const at::Tensor &seq_lens,
+    const at::Tensor &key_ref,
+    const at::Tensor &value_ref,
+    const c10::optional<at::Tensor> &seq_offset,
+    c10::string_view cache_mode,
+    bool is_seq_lens_cumsum)
+{
+    (void)key_cache;
+    (void)value_cache;
+    (void)block_tables;
+    (void)seq_lens;
+    (void)seq_offset;
+    (void)cache_mode;
+    (void)is_seq_lens_cumsum;
+    return std::make_tuple(key_ref, value_ref);
+}
+
 std::tuple<at::Tensor, at::Tensor> matmul_allreduce_add_rmsnorm_meta(
     const at::Tensor &x1,
     const at::Tensor &x2,
@@ -710,6 +757,10 @@ TORCH_LIBRARY_IMPL_EXPAND(CONCAT(_C, _ascend), Meta, ops) {
     ops.impl("npu_lightning_indexer", &vllm_ascend::meta::npu_lightning_indexer_meta);
     // Sparse flash attention
     ops.impl("npu_sparse_flash_attention", &vllm_ascend::meta::npu_sparse_flash_attention_meta);
+
+    ops.impl("npu_scatter_pa_kv_cache_vllm", &vllm_ascend::meta::npu_scatter_pa_kv_cache_vllm_meta);
+    ops.impl("npu_gather_pa_kv_cache_vllm", &vllm_ascend::meta::npu_gather_pa_kv_cache_vllm_meta);
+
     // MoE dispatch-ffn-combine
     ops.impl("dispatch_ffn_combine", &vllm_ascend::meta::dispatch_ffn_combine_meta);
     // matmul allreduce add rmsnorm
