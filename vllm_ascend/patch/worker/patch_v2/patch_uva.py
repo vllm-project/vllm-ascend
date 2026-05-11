@@ -102,8 +102,8 @@ class UvaBufferWrapper:
         if key in os.environ:
             value = os.environ[key]
             if not "pinned_mem_register:True" in value:
-                raise RuntimeError(f"UVA is not available, because environment_param {key} lack value 'pinned_mem_register:True', 
-                try to add os.environ['PYTORCH_NPU_ALLOC_CONF'] = 'pinned_mem_register:True'")
+                raise RuntimeError(f"UVA is not available, because environment_param {key} lack value 'pinned_mem_register:True', "
+                "try to add os.environ['PYTORCH_NPU_ALLOC_CONF'] = 'pinned_mem_register:True'")
             self.cpu: torch.Tensor = torch.zeros(size, dtype=dtype, device="cpu", pin_memory=True)
             if not self.cpu.is_pinned():
                 raise RuntimeError("UVA is not available, because cpu tensor is not pinned, 
