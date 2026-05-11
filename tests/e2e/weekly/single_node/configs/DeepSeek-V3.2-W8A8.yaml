@@ -52,9 +52,10 @@ test_cases:
         batch_size: 8
         baseline: 95
         threshold: 5
-        
+
       perf_1:
         case_type: performance
+        trust_remote_code: true
         dataset_path: vllm-ascend/GSM8K-in3500-bs400
         request_conf: vllm_api_stream_chat
         dataset_conf: gsm8k/gsm8k_gen_0_shot_cot_str_perf
@@ -66,6 +67,7 @@ test_cases:
         threshold: 0.97
       perf_2:
         case_type: performance
+        trust_remote_code: true
         dataset_path: vllm-ascend/GSM8K-in3500-bs400
         request_conf: vllm_api_stream_chat
         dataset_conf: gsm8k/gsm8k_gen_0_shot_cot_str_perf
