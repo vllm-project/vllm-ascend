@@ -1,8 +1,8 @@
 # Diagnosis Guide
 
-You arrive here because CI failed. The goal isn't just "find the failing test" — it's to trace each failure back to the specific upstream change that caused it, so the fix addresses the root cause rather than the symptom.
+The goal of diagnosis isn't just "find the failing test" — it's to trace each failure back to the specific upstream change that caused it, so the fix addresses the root cause rather than the symptom.
 
-**Write `vllm_error_analyze.md` early.** Start the file after Step 1 with just the skeleton — Overview table, error list. Fill in the upstream commit details as you work through Step 2. This ensures a useful record exists even if context runs low before you finish.
+**Write `vllm_error_analyze.md` immediately after Step 1** — start with just the skeleton (Overview table, error list), then fill in upstream commit details as Step 2 progresses. This ensures a useful record exists even if context runs low before finishing.
 
 ---
 
@@ -20,7 +20,7 @@ python3 <ascend_path>/.github/workflows/scripts/ci_log_summary.py \
 
 The script does the heavy lifting: it extracts root-cause exceptions, filters wrapper errors (`Engine core initialization failed`), filters downstream effects (`KeyError: 'choices'` caused by engine crash), and deduplicates by normalized signature.
 
-**Output fields you care about:**
+**Relevant output fields:**
 
 ```json
 {
@@ -68,11 +68,11 @@ Only `code_bugs` need fixing. If only `env_flakes` remain, treat as pass.
 
 ## Step 2: Trace each bug to its upstream cause
 
-This is the step that takes the most care. Don't just look at what line failed — find the upstream commit that introduced the breaking change. That context is what makes the fix complete rather than a patch.
+Don't just look at what line failed — find the upstream commit that introduced the breaking change. That context makes the fix complete rather than a patch.
 
 For each `code_bug`:
 
-**1. Read the error type to narrow the mechanism:**
+**1. Use the error type to narrow the mechanism:**
 - `TypeError` → almost always a signature change (added/removed parameter)
 - `AttributeError` → config field moved or renamed
 - `ImportError` → module path changed
@@ -86,9 +86,9 @@ grep -n 'kv_cache_dtype' /tmp/main2main/steps/<step-id>/upstream.patch
 grep -n 'forward_oot' /tmp/main2main/steps/<step-id>/upstream.patch
 ```
 
-This gives you the diff chunk that introduced the change — not just the symptom, but the full context of what changed and why.
+This reveals the diff chunk that introduced the change — not just the symptom, but the full context of what changed and why.
 
-**3. Understand the intent of the upstream change.** Was it a rename? A removal? A new parameter? This determines the fix:
+**3. Identify the intent of the upstream change.** Was it a rename? A removal? A new parameter? This determines the fix:
 - New parameter → add to vllm-ascend's override with a default, use `vllm_version_is()` guard
 - Removal → delete the usage from vllm-ascend
 - Rename → update to new name everywhere with `vllm_version_is()` guard
@@ -136,5 +136,5 @@ Update the Status column in `vllm_error_analyze.md` each round.
 
 CI logs can be enormous. Never read raw logs into context:
 - Always use `ci_log_summary.py` first — it processes in a subprocess and returns only structured output
-- If you need a specific section of the raw log: `grep -A 10 '<pattern>' <logfile> | head -30`
-- Write `vllm_error_analyze.md` incrementally — it's your external memory for this task. If you need to re-orient mid-task, read the file rather than reconstructing from context
+- To read a specific section of the raw log: `grep -A 10 '<pattern>' <logfile> | head -30`
+- Write `vllm_error_analyze.md` incrementally — it serves as external memory for this task. Re-orient by reading the file rather than reconstructing from context

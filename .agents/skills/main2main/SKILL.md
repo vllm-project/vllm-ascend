@@ -9,7 +9,7 @@ description: >-
 
 # main2main
 
-vllm-ascend is a hardware adaptation plugin that sits on top of vLLM. When upstream vLLM changes its interfaces — function signatures, config fields, module paths, base class methods — vllm-ascend breaks. This skill's job is to absorb those upstream changes incrementally: split the commit range into manageable steps, adapt vllm-ascend for each step, verify via CI, and commit only verified code.
+vllm-ascend is a hardware adaptation plugin that sits on top of vLLM. When upstream vLLM changes — function signatures, config fields, module paths, base class methods, etc. — vllm-ascend breaks. This skill's job is to absorb those upstream changes incrementally: split the commit range into manageable steps, adapt vllm-ascend for each step, verify via CI, and commit only verified code.
 
 The two hardest parts are **figuring out what to adapt** and **diagnosing why CI fails after adapting**. Everything else (detecting commits, planning steps, running CI, committing) is mechanical and handled by scripts. This document focuses on the judgment calls.
 
@@ -46,7 +46,7 @@ When adapting, the goal isn't to copy upstream changes mechanically — it's to 
 > **Wrong approach**: Ignore it because no test currently calls it.
 > **Right approach**: Check whether `AscendPlatform` inherits from this class — if yes, vllm-ascend will fail to instantiate at runtime with `TypeError: Can't instantiate abstract class`. Add the method immediately, even if the body is a stub.
 
-The pattern to internalize: upstream changes to **abstract methods, function signatures, and config field locations** always need vllm-ascend follow-up, because vllm-ascend overrides or reads these directly. Changes to **internal implementation** of methods vllm-ascend doesn't override can usually be skipped.
+The pattern to internalize: upstream changes to **abstract methods, function signatures, and config field locations, etc.** always need vllm-ascend follow-up, because vllm-ascend overrides or reads these directly. Changes to **internal implementation** of methods vllm-ascend doesn't override can usually be skipped.
 
 **Fix:** When CI fails, run `ci_log_summary.py` to get structured error data. Focus only on `code_bugs` (ignore `env_flakes`). For each bug, search `upstream.patch` for the function/class/field name from the error — this connects the symptom to the upstream change, giving you the full picture. Fix based on that complete context, not just the error message. Detailed diagnostic workflow and progress judgment are in `reference/diagnosis-guide.md`.
 
@@ -73,6 +73,7 @@ if vllm_version_is("0.19.0"):
 else:
     # upstream main API
 ```
+The version info source of truth is `vllm-ascend/docs/source/conf.py`. The compatible release version for `vllm_version_is()` guards comes from the `main_vllm_tag` .
 
 Three rules that prevent subtle maintenance debt:
 
@@ -109,7 +110,6 @@ Record `last_verified_head` before starting.
 
 For each step in `steps.json`:
 
-
 1. **Generate upstream patch** 
 ```bash
 git -C <vllm_path> diff <step_start>..<step_end> \
@@ -118,14 +118,21 @@ git -C <vllm_path> diff --name-only <step_start>..<step_end> \
   > /tmp/main2main/steps/<step-id>/changed-files.txt
 ```
 
-2. **Update commit references.** Replace the previous vLLM commit hash (`main_vllm_commit` in `docs/source/conf.py`) with this step's target commit. This must happen before CI — tests may depend on the correct version reference.
-
+2. **Update commit references.** 
+Replace the previous vLLM commit hash with this step's target commit before CI — tests may depend on the correct version reference.
+```bash
+python3 <skill_dir>/scripts/update_commit_reference.py \
+  --ascend-path <ascend_path> \
+  --old-commit <step_start_commit> \
+  --new-commit <step_end_commit>
+```
 
 3. **Adapt.** Read the patch, identify affected subsystems, update vllm-ascend code. See "Adaptation and CI Diagnosis" above and `reference/adapt-guide.md`
 
 
 4. **Verify by CI**
 ```bash
+set -o pipefail
 python3 <ascend_path>/.github/workflows/scripts/run_suite.py \
   --suite e2e-main2main --continue-on-error \
   2>&1 | tee /tmp/main2main/steps/<step-id>/ci/round-1.log
@@ -138,18 +145,18 @@ python3 <skill_dir>/scripts/check_and_commit.py \
   --message "<commit message>"
 git -C <vllm_path> checkout <step_end_commit>
 ```
+
 6. **If CI fails, diagnose and fix.** Follow `reference/diagnosis-guide.md` for the diagnostic workflow. Re-run CI after each fix round. Stop conditions listed above.
 
-**If the fix loop is exhausted** (stop conditions triggered in Phase 6):
+**If the fix loop is exhausted** (stop conditions triggered in "Adaptation and CI Diagnosis"):
 - Save current changes: `git diff > /tmp/main2main/steps/<step-id>/failed.patch`
 - Write failure details to `/tmp/main2main/steps/<step-id>/failed-summary.json`
 - Rollback to `last_verified_head`: `git checkout -- .`
 - Stop the pipeline. Don't skip the failed step and continue to the next one.
 
-**If CI hangs (no output for 60+ minutes):** terminate and treat as CI failure.
+**If CI hangs (no output for 120+ minutes):** terminate and treat as CI failure.
 
 7. **Write step summary.** After committing, write a brief summary for this step: what upstream changes were absorbed, what vllm-ascend files were modified, and any version guards added. Save to `/tmp/main2main/steps/<step-id>/summary.md`. This is important because later steps and the final report depend on it.
-
 
 ### Phase 8: Final summary
 
@@ -188,4 +195,3 @@ These are the things most commonly missed, based on past experience:
 - [ ] Each step has a summary in `/tmp/main2main/steps/<step-id>/summary.md`
 - [ ] If partial stop: patch + failure details saved
 - [ ] Final summary output to user
-
