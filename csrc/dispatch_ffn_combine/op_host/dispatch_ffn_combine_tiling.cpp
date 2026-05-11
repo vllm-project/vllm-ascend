@@ -35,6 +35,7 @@ namespace {
     constexpr uint32_t ATTR_MAX_OUTPUT_SIZE_INDEX = 1;
     constexpr uint32_t ATTR_IS_TRANS_B = 2;
     constexpr uint32_t ATTR_WEIGHT_NZ = 3;
+    constexpr uint32_t ATTR_NODE_ID_INDEX = 4;
     constexpr uint64_t INIT_TILINGKEY = 1000000;
     constexpr uint64_t TILINGKEY_TRANS_B = 1U;
     constexpr uint64_t TILINGKEY_WEIGHT_NZ = 10;
@@ -104,6 +105,9 @@ static ge::graphStatus DispatchFFNCombineCheckAttrAndSetTiling(gert::TilingConte
     info.maxOutputSize = *maxOutputSizePtr;
     info.isTransposeB = *is_trans_b;
     info.isWeightNz = *weight_nz;
+
+    auto node_id_ptr = attrs->GetAttrPointer<int>(ATTR_NODE_ID_INDEX);
+    info.nodeId = (node_id_ptr != nullptr) ? *node_id_ptr : -1;  // 默认-1表示不区分节点(原方案)
 
     int64_t rankSize;
     (void)ge::HcomTopoInfo::Instance().GetGroupRankSize(groupPtr, rankSize);

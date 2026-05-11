@@ -77,6 +77,7 @@ class DispatchFFNCombine : public OpDef {
     this->Attr("M").AttrType(OPTIONAL).Int();
     this->Attr("transB").AttrType(OPTIONAL).Bool(false);
     this->Attr("weightNz").AttrType(OPTIONAL).Bool(false);
+    this->Attr("nodeId").AttrType(OPTIONAL).Int(-1);  // -1: 不区分节点(原方案，节点间可通信), 0: 本rank在节点0(前半专家), 1: 本rank在节点1(后半专家)，节点间不能通信
 
     OpAICoreConfig aicore_config;
     aicore_config.DynamicCompileStaticFlag(true)

@@ -29,11 +29,13 @@ std::tuple<at::Tensor&, at::Tensor&> dispatch_ffn_combine(
     const at::Tensor& probs,
     c10::string_view group,
     int64_t max_output_size,
+    int64_t node_id,
     at::Tensor& out,
     at::Tensor& expert_token_nums,
     const c10::optional<at::Tensor>& x_active_mask
 ) {
     char *group_ep_ptr = const_cast<char *>(group.data());
+    int32_t node_id_int32 = static_cast<int32_t>(node_id);
     bool is_int8 = weight1[0].dtype() == at::kChar;
     bool is_int4 = weight1[0].dtype() == at::kInt;
     if (is_int8) {
@@ -48,6 +50,7 @@ std::tuple<at::Tensor&, at::Tensor&> dispatch_ffn_combine(
                  x_active_mask.has_value() ? x_active_mask.value() : at::Tensor(),
                  group_ep_ptr,
                  max_output_size,
+                 node_id_int32,
                  out,
                  expert_token_nums);
     } else if (is_int4){

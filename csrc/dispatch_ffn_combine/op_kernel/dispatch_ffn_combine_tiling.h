@@ -31,6 +31,7 @@ struct DispatchFFNCombineInfo {
     uint32_t topK;
     uint32_t worldSize;
     uint32_t listLen;
+    int32_t nodeId;   // -1: 不区分节点(原方案，节点间可通信), 0: 本rank在节点0(前半专家), 1: 本rank在节点1(后半专家)，节点间不能通信
 };
 
 struct CoCTiling {

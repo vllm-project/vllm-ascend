@@ -106,6 +106,7 @@ private:
 
     optiling::MoeInitRoutingQuantV2TilingData moeInitRoutingQuantV2TilingData;
     uint64_t initRoutingQuantTilingKey;
+    int32_t nodeId;   // -1: 不区分节点(原方案，节点间可通信), 0: 本rank在节点0(前半专家), 1: 本rank在节点1(后半专家)，节点间不能通信
 
     // Hccl<HCCL_SERVER_TYPE_AICPU> hccl_;
 
@@ -144,6 +145,7 @@ __aicore__ inline void DispatchFFNCombine<TemplateMMA2ACFunc>::Init(GM_ADDR xGM,
     expertPerRank = tilingData.dispatchFFNCombineInfo.expertPerRank;
     maxOutputSize = tilingData.dispatchFFNCombineInfo.maxOutputSize;
     listLen = tilingData.dispatchFFNCombineInfo.listLen;
+    nodeId = tilingData.dispatchFFNCombineInfo.nodeId;
 
     m0 = tilingData.cocTiling.m0;
     k0 = tilingData.cocTiling.k0;
@@ -237,19 +239,15 @@ __aicore__ inline void DispatchFFNCombine<TemplateMMA2ACFunc>::Process()
         D1Type, TileElemWiseMuls, TileCopy1>;
 
     using EpilogueDispatchPolicy2 = Epilogue::EpilogueAtlasA2PerTokenDequant<ubStages>;
-    using EpilogueDispatchPolicy3 =  Epilogue::EpilogueAtlasA2PerTokenDequantV2<ubStages>;
-    
+
     using TileCopy2 = Epilogue::Tile::TileCopy<ArchTag, CType, ScaleType, PerTokenScaleType, D2Type>;
     using BlockEpilogue2 = Epilogue::Block::BlockEpilogue<EpilogueDispatchPolicy2, CType,PerTokenScaleType,
         D2Type, TileCopy2>;
-    using BlockEpilogue3 = Epilogue::Block::BlockEpilogue<EpilogueDispatchPolicy3, CType,PerTokenScaleType,
-        D2Type, TileCopy2>;
-
 
     using BlockScheduler = typename Gemm::Block::GemmIdentityBlockSwizzle<9, 1>;
     using ElementGroupList = int64_t;
     using MatmulKernel = Gemm::Kernel::DispatchFFNCombineKernel<BlockMmad,
-        BlockScheduler, ElementGroupList, BlockEpilogue1, BlockEpilogue2, BlockEpilogue3>;
+        BlockScheduler, ElementGroupList, BlockEpilogue1, BlockEpilogue2>;
 
     LayoutA layoutA1{static_cast<uint32_t>(m), static_cast<uint32_t>(k)};
     LayoutA layoutA2{static_cast<uint32_t>(m), static_cast<uint32_t>(k2)};
@@ -279,7 +277,7 @@ __aicore__ inline void DispatchFFNCombine<TemplateMMA2ACFunc>::Process()
         outGM_, layoutD1, layoutD2,
         expertIdGM_, moeInitRoutingQuantV2Scale, moeInitRoutingQuantV2Offset,
         expertTokensBeforeCapacity, probs_,
-        workspaceGM_, gmExpertTokenNums_, ubMoveNum, xActiveMaskGM_, moeInitRoutingQuantV2TilingData};
+        workspaceGM_, gmExpertTokenNums_, ubMoveNum, xActiveMaskGM_, nodeId, moeInitRoutingQuantV2TilingData};
     //Call kernel
     MatmulKernel kernel(params);
     kernel(params);
