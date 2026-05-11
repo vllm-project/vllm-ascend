@@ -1,4 +1,4 @@
-e2e-upstream-singlecard:
+e2e-upstream_singlecard:
   - name: tests/benchmarks/test_plot_filters.py
     estimated_time: 20
   - name: tests/compile/fullgraph/test_multimodal_compile.py
@@ -504,4 +504,22 @@ e2e-upstream-singlecard:
   - name: tests/compile/fullgraph/test_multiple_graphs.py
     estimated_time: 20
   - name: tests/compile/fullgraph/test_toy_llama.py
+    estimated_time: 20
+  - name: tests/detokenizer/test_stop_reason.py
+    estimated_time: 20
+  - name: tests/entrypoints/openai/chat_completion/test_chat.py
+    estimated_time: 20
+  - name: tests/entrypoints/openai/chat_completion/test_chat_echo.py
+    estimated_time: 20
+  - name: tests/entrypoints/openai/chat_completion/test_chat_logit_bias_validation.py
+    estimated_time: 20
+e2e-upstream_a2_2:
+  - name: tests/v1/distributed/test_async_llm_dp.py
+    estimated_time: 20
+  - name: tests/v1/distributed/test_external_lb_dp.py
+    estimated_time: 20
+  - name: tests/v1/distributed/test_internal_lb_dp.py
+    estimated_time: 20
+e2e-upstream_a2_4:
+  - name: tests/v1/distributed/test_hybrid_lb_dp.py
     estimated_time: 20
