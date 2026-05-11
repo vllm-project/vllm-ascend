@@ -624,7 +624,7 @@ def register_ascend_customop(vllm_config: VllmConfig | None = None):
 
     from vllm_ascend.ops.activation import AscendQuickGELU, AscendSiluAndMul
     from vllm_ascend.ops.conv import AscendConv3dLayer
-    from vllm_ascend.ops.fused_moe.fused_moe import AscendFusedMoE, AscendSharedFusedMoE
+    from vllm_ascend.ops.fused_moe.fused_moe import AscendFusedMoE
     from vllm_ascend.ops.gdn import AscendGatedDeltaNetAttention
     from vllm_ascend.ops.layernorm import AscendGemmaRMSNorm, AscendRMSNorm, AscendRMSNormGated
     from vllm_ascend.ops.linear import (
@@ -670,7 +670,6 @@ def register_ascend_customop(vllm_config: VllmConfig | None = None):
         "RMSNorm": AscendRMSNorm,
         "GemmaRMSNorm": AscendGemmaRMSNorm,
         "FusedMoE": AscendFusedMoE,
-        "SharedFusedMoE": AscendSharedFusedMoE,
         "MultiHeadLatentAttentionWrapper": AscendMultiHeadLatentAttention,
         "MMEncoderAttention": AscendMMEncoderAttention,
         "ApplyRotaryEmb": AscendApplyRotaryEmb,
@@ -683,8 +682,9 @@ def register_ascend_customop(vllm_config: VllmConfig | None = None):
 
     # 310P: override selected ops with 310P implementations (keep minimal changes outside _310p)
     if is_310p():
-        from vllm_ascend._310p.fused_moe.fused_moe import AscendFusedMoE310, AscendSharedFusedMoE310
+        from vllm_ascend._310p.fused_moe.fused_moe import AscendFusedMoE310
         from vllm_ascend._310p.ops.activation import AscendSiluAndMul310
+        from vllm_ascend._310p.ops.conv import AscendConv3dLayer310
         from vllm_ascend._310p.ops.fla.gdn_310 import AscendGatedDeltaNetAttention310
         from vllm_ascend._310p.ops.layernorm import (
             AscendGemmaRMSNorm310,
@@ -706,10 +706,10 @@ def register_ascend_customop(vllm_config: VllmConfig | None = None):
                 "GemmaRMSNorm": AscendGemmaRMSNorm310,
                 "RMSNormGated": AscendRMSNormGated310,
                 "FusedMoE": AscendFusedMoE310,
-                "SharedFusedMoE": AscendSharedFusedMoE310,
                 "ParallelLMHead": AscendParallelLMHead310,
                 "VocabParallelEmbedding": AscendVocabParallelEmbedding310,
                 "MMEncoderAttention": AscendMMEncoderAttention310,
+                "Conv3dLayer": AscendConv3dLayer310,
                 "GatedDeltaNetAttention": AscendGatedDeltaNetAttention310,
             }
         )
@@ -1122,7 +1122,7 @@ def get_flashcomm2_config_and_validate(ascend_config, vllm_config):
     if not flashcomm2_enable():
         return 0
 
-    logger.info(f"Enable FLASHCOMM2 with flashcomm2_oproj_tensor_parallel_size = {flashcomm2_oproj_tp_size}")
+    logger.info("Enable FLASHCOMM2 with flashcomm2_oproj_tensor_parallel_size = %s", flashcomm2_oproj_tp_size)
 
     layer_sharding = ascend_config.layer_sharding or []
     if layer_sharding:
@@ -1283,11 +1283,10 @@ def enable_dsa_cp_with_layer_shard() -> bool:
     from vllm.config import get_current_vllm_config
 
     vllm_config = get_current_vllm_config()
-    # because the broadcast in layer sharding needs to be overlapped with a heavy compute stream to be
-    # effectively hidden, it is enabled only during the prefill stage.
-    is_prefill_instance = (
-        vllm_config.kv_transfer_config is not None and vllm_config.kv_transfer_config.kv_role == "kv_producer"
-    )
+    kv_transfer_config = vllm_config.kv_transfer_config
+    # Layer sharding broadcast only pays off when it can be hidden by the
+    # heavier prefill-stage compute, so enable it only on the P-side instance.
+    is_prefill_instance = kv_transfer_config is not None and kv_transfer_config.kv_role == "kv_producer"
     return is_prefill_instance
 
 
@@ -1298,9 +1297,12 @@ def enable_dsa_cp_with_o_proj_tp() -> bool:
     from vllm.config import get_current_vllm_config
 
     vllm_config = get_current_vllm_config()
-    # if is PD mix stage, using original TP o_proj weight, and also need to
-    # full gather for o_proj weight for prefill stage.
-    return vllm_config.kv_transfer_config is None
+    kv_transfer_config = vllm_config.kv_transfer_config
+
+    # In PD-mixed mode, keep the original TP o_proj weight when:
+    # 1) KV pooling is disabled, or
+    # 2) KV pooling is enabled with kv_role == "kv_both".
+    return kv_transfer_config is None or kv_transfer_config.kv_role == "kv_both"
 
 
 def check_gdn_layer(vllm_config) -> bool:
@@ -1387,3 +1389,21 @@ def kv_cache_spec_uses_sparse_c8(kv_cache_spec) -> bool:
     from vllm.v1.kv_cache_interface import MLAAttentionSpec
 
     return isinstance(kv_cache_spec, MLAAttentionSpec) and bool(getattr(kv_cache_spec, "cache_sparse_c8", False))
+
+
+@lru_cache(maxsize=1)
+def _libc_getenv():
+    import ctypes
+
+    libc = ctypes.CDLL(None)
+    libc.getenv.argtypes = [ctypes.c_char_p]
+    libc.getenv.restype = ctypes.c_char_p
+    return libc.getenv
+
+
+def get_c_env(name: str, encoding: str = "utf-8") -> str | None:
+    """Read env via C getenv; returns None if unset."""
+    raw = _libc_getenv()(name.encode(encoding))
+    if raw is None:
+        return None
+    return raw.decode(encoding)

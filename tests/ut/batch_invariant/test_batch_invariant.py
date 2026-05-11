@@ -127,6 +127,7 @@ class TestBatchInvariant:
         """Test init_batch_invariance under different conditions"""
         # Mock dependencies
         import vllm.envs as envs
+
         envs.VLLM_BATCH_INVARIANT = batch_invariant_enabled
         batch_invariant.HAS_TRITON = has_backend
         batch_invariant.HAS_ASCENDC_BATCH_INVARIANT = has_backend
@@ -151,11 +152,8 @@ class TestBatchInvariant:
     def test_add_rms_norm(self, mock_torch_npu):
         """Test add_rms_norm function"""
         # Mock dependencies
-        mock_torch = batch_invariant.torch
 
         # Create mock tensors
-        batch_size = 2
-        hidden_size = 4
         x = MagicMock(spec=torch.Tensor)
         residual = MagicMock(spec=torch.Tensor)
         weight = MagicMock(spec=torch.Tensor)
@@ -187,8 +185,6 @@ class TestBatchInvariant:
     def test_add_rms_norm_consistency(self, mock_torch_npu):
         """Test that add_rms_norm produces the same output as torch_npu.npu_add_rms_norm"""
         # Create mock tensors
-        batch_size = 2
-        hidden_size = 4
         x = MagicMock(spec=torch.Tensor)
         residual = MagicMock(spec=torch.Tensor)
         weight = MagicMock(spec=torch.Tensor)

@@ -22,6 +22,10 @@ from vllm.triton_utils import tl, triton
 from vllm.v1.outputs import LogprobsTensors
 
 from vllm_ascend.ops.triton.triton_utils import get_vectorcore_num
+from vllm_ascend.utils import vllm_version_is
+
+if not vllm_version_is("0.20.1"):
+    from vllm.v1.worker.gpu.sample.logprob import LogprobTokenIdsState
 
 
 @triton.jit
@@ -48,13 +52,9 @@ def _topk_log_softmax_kernel(
     se = 0.0
     for i in range(0, vocab_size, BLOCK_SIZE):
         block = i + tl.arange(0, BLOCK_SIZE)
-        logits = tl.load(row_ptr + block, mask=block < vocab_size, other=0.0)
-        # NOTE(woosuk): Make sure that logits and all following operations use FP32.
+        logits = tl.load(row_ptr + block, mask=block < vocab_size, other=float("-inf"))
         logits = logits.to(tl.float32)
-        # NOTE(wangx700): tl.where does not support int64 so we cast it to float32.
-        block = block.to(tl.float32)
         e = tl.exp(logits - max_val)
-        e = tl.where(block < vocab_size, e, 0.0)
         se += tl.sum(e)
     lse = tl.log(se)
 
@@ -64,7 +64,7 @@ def _topk_log_softmax_kernel(
 
     logits = tl.load(row_ptr + topk_ids, mask=k_mask)
     logits = logits.to(tl.float32)
-    o = logits - max_val - lse
+    o = logits - lse - max_val
     tl.store(output_ptr + req_idx * topk + k_offset, o, mask=k_mask)
 
 
@@ -80,10 +80,9 @@ def compute_token_logprobs(logits: torch.Tensor, token_ids: torch.Tensor) -> tor
         token_ids,
         num_logprobs,
         vocab_size,
-        BLOCK_SIZE=1024,  # type: ignore
-        # NOTE(wangx700): PADDED_TOPK must be at least 2 to avoid
-        # num_logprobs=1 getting wrong results.
+        BLOCK_SIZE=12944,
         PADDED_TOPK=max(triton.next_power_of_2(num_logprobs), 2),
+        multibuffer=False,
     )
     return logprobs
 
@@ -124,12 +123,15 @@ def compute_topk_logprobs(
     logits: torch.Tensor,
     num_logprobs: int,
     sampled_token_ids: torch.Tensor,
+    cu_num_logits: list[int] | None = None,
+    logprob_token_ids_state: "LogprobTokenIdsState | None" = None,
+    expanded_idx_mapping: torch.Tensor | None = None,
+    max_per_req_token_ids: int = 0,
 ) -> LogprobsTensors:
     assert num_logprobs >= 0
     batch_size, vocab_size = logits.shape
-    if num_logprobs == 0:
-        logprob_token_ids = sampled_token_ids.unsqueeze(-1)
-    else:
+    logprob_token_ids = sampled_token_ids.unsqueeze(-1)
+    if num_logprobs > 0:
         topk_indices = torch.topk(logits, num_logprobs, dim=-1).indices
         logprob_token_ids = torch.cat((sampled_token_ids.unsqueeze(-1), topk_indices), dim=1)
 
@@ -165,4 +167,5 @@ def compute_topk_logprobs(
         logprob_token_ids=logprob_token_ids,
         logprobs=logprobs,
         selected_token_ranks=token_ranks,
+        cu_num_generated_tokens=cu_num_logits,
     )
