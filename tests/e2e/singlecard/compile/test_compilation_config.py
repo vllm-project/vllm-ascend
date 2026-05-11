@@ -38,10 +38,16 @@ PROMPTS = [
 
 
 def _run_and_collect(runner: VllmRunner, prompts: list[str]) -> list[str]:
-    """Run inference and collect output strings."""
+    """Run inference and collect output strings.
+
+    VllmRunner.generate() returns list[tuple[list[list[int]], list[str]]]
+    where each tuple is (full_token_ids_list, full_text_list).
+    """
     sampling_params = SamplingParams(temperature=0.0, max_tokens=32)
     outputs = runner.generate(prompts, sampling_params)
-    return [req_output.outputs[0].text for req_output in outputs]
+    # outputs[i] = (token_ids_list, text_list)
+    # text_list includes prompt + generated text
+    return [texts[0] for _, texts in outputs]
 
 
 @pytest.mark.parametrize(
