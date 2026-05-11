@@ -41,7 +41,6 @@ class BaseLinearTest(unittest.TestCase):
             patch("vllm_ascend.utils.oproj_tp_enable", return_value=True),
             patch("vllm_ascend.ops.linear_op.enable_dsa_cp", return_value=False),
             patch("vllm_ascend.ops.linear_op.enable_dsa_cp_with_layer_shard", return_value=False),
-            patch("vllm_ascend.ops.linear_op.enable_dsa_cp_with_o_proj_tp", return_value=False),
         ]
 
         for p in self.patches:
