@@ -4,7 +4,7 @@ e2e-singlecard:
 - name: tests/e2e/singlecard/compile/test_graphex_qknorm_rope_fusion.py
   estimated_time: 104
 - name: tests/e2e/singlecard/test_auto_fit_max_mode_len.py
-  estimated_time: 66
+  estimated_time: 61
 - name: tests/e2e/singlecard/test_eager_mode_acc.py
   estimated_time: 414
 - name: tests/e2e/singlecard/test_aclgraph_accuracy.py
@@ -149,7 +149,7 @@ e2e-multicard-4-cards:
 - name: tests/e2e/multicard/4-cards/test_data_parallel_tp2.py
   estimated_time: 322
 - name: tests/e2e/multicard/4-cards/test_kimi_k2.py
-  estimated_time: 37
+  estimated_time: 38
 - name: tests/e2e/multicard/4-cards/long_sequence/test_accuracy.py
   estimated_time: 1287
 - name: tests/e2e/multicard/4-cards/long_sequence/test_basic.py
