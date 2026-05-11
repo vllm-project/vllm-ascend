@@ -34,8 +34,8 @@ from packaging.version import InvalidVersion, Version
 from vllm.logger import logger
 from vllm.sequence import IntermediateTensors
 
-from vllm_ascend.ascend_config import WeightPrefetchConfig, get_ascend_config
 import vllm_ascend.envs as envs_ascend
+from vllm_ascend.ascend_config import WeightPrefetchConfig, get_ascend_config
 
 if TYPE_CHECKING:
     from vllm.config import VllmConfig
