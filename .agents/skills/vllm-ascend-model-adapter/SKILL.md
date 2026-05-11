@@ -38,7 +38,7 @@ chmod +x .agents/skills/vllm-ascend-model-adapter/scripts/*.sh
 
 - Never upgrade `transformers`.
 - Primary implementation roots are user-specified at entry (see Entry Points above). Defaults are `/vllm-workspace/vllm` and `/vllm-workspace/vllm-ascend` if the user does not specify otherwise.
-- Start `vllm serve` from `/workspace` with direct command by default.
+- Start `vllm serve` from `$WORK_DIR` (user-specified, default `/workspace`) with direct command. Create the directory if it does not exist.
 - Default API port is `8000` unless user explicitly asks otherwise.
 - Feature-first default: try best to validate ACLGraph / EP / flashcomm1 / multimodal out-of-box. MTP is validated only when the checkpoint explicitly supports it (inferred from config + weight keys in Step 2).
 - `--enable-expert-parallel` and flashcomm1 checks are MoE-only; for non-MoE models mark as not-applicable with evidence.
@@ -58,14 +58,16 @@ When this skill is invoked, **use the `AskUserQuestion` tool to interactively co
 Call `AskUserQuestion` in **two rounds** (tool limit: max 4 questions per call, min 2 options each):
 
 **Round 1** (4 questions):
-1. **Model checkpoint path** — options: `/models/<model-name>` / `Other (specify)`
-2. **Served model name** — options: `Same as checkpoint basename` / `Other (specify)`
-3. **Tensor parallel size** — options: `8 (A2)`, `16 (A3)`, `Other (specify)`
-4. **Python environment activation command** — options: `conda activate vllm-ascend`, `source <venv>/bin/activate`, `Other (specify)`, `None (already active)`
+1. **Model source** — options: `Already on disk (specify path)`, `Download from ModelScope`, `Download from HuggingFace`, `Other (specify)`
+2. **Model checkpoint path or model ID** — if already on disk: local path (e.g. `/models/gemma-4-E4B-it`); if downloading: model ID (e.g. `google/gemma-4-E4B-it`). Options: provide path/ID / `Other (specify)`
+3. **Served model name** — options: `Same as checkpoint basename` / `Other (specify)`
+4. **Tensor parallel size** — options: `8 (A2)`, `16 (A3)`, `Other (specify)`
 
-**Round 2** (2 questions):
-5. **vLLM source root** — options: `/vllm-workspace/vllm` / `Other (specify)`
-6. **vllm-ascend source root** — options: `/vllm-workspace/vllm-ascend` / `Other (specify)`
+**Round 2** (4 questions):
+5. **Python environment activation command** — options: `conda activate vllm-ascend`, `source <venv>/bin/activate`, `Other (specify)`, `None (already active)`
+6. **vLLM source root** — options: `/vllm-workspace/vllm` / `Other (specify)`
+7. **vllm-ascend source root** — options: `/vllm-workspace/vllm-ascend` / `Other (specify)`
+8. **Working directory for vllm serve** — options: `/workspace` (default, will be created if missing) / `Other (specify)`
 
 **Round 3 (conditional)** — only triggered during the NPU sanity check (§0.5), not upfront:
 - **CANN toolkit `set_env.sh` path** — ask via `AskUserQuestion` only if not auto-detected under `/usr/local/Ascend`. Options: `/usr/local/Ascend/ascend-toolkit/set_env.sh` / `Other (specify)`.
@@ -74,12 +76,14 @@ Call `AskUserQuestion` in **two rounds** (tool limit: max 4 questions per call, 
 After the user submits, echo the resolved values back in a confirmation block before starting the execution playbook:
 
 ```
+  Model source           : <on-disk | modelscope | huggingface>
   Model checkpoint path  : <value>
   Served model name      : <value>
   Tensor parallel size   : <value>
   vLLM source root       : <value>
   vllm-ascend source root: <value>
   Python env activate    : <value>
+  Working directory      : <value>
 ```
 
 Then immediately run the activation command (if not `None`) and verify it succeeded before proceeding:
@@ -99,6 +103,41 @@ If activation fails, stop and report the error before continuing.
 
 ## Execution playbook
 
+### 0.7) Download model (if not already on disk)
+
+Skip this step if model source is "already on disk" and `$MODEL_PATH` exists.
+
+**ModelScope download:**
+
+```bash
+# Resolve download directory from $MODELSCOPE_CACHE (or default ~/.cache/modelscope/hub)
+MS_CACHE="${MODELSCOPE_CACHE:-$HOME/.cache/modelscope/hub}"
+echo "ModelScope cache: $MS_CACHE"
+
+# Download (blocking — wait for completion before proceeding)
+modelscope download --model "$MODEL_ID" --local_dir "$MS_CACHE/$(echo $MODEL_ID | tr '/' '___')"
+# After download, set MODEL_PATH to the downloaded directory
+MODEL_PATH="$MS_CACHE/$(echo $MODEL_ID | tr '/' '___')"
+```
+
+**HuggingFace download:**
+
+```bash
+huggingface-cli download "$MODEL_ID" --local-dir "$MODEL_PATH"
+```
+
+After download, verify the model path exists and contains `config.json` before proceeding:
+
+```bash
+if [ ! -f "$MODEL_PATH/config.json" ]; then
+  echo "ERROR: $MODEL_PATH/config.json not found — download may have failed or path is wrong"
+  exit 1
+fi
+echo "OK: model path verified at $MODEL_PATH"
+```
+
+**Hard gate**: Do not proceed to Step 1 until `$MODEL_PATH/config.json` exists.
+
 ### 1) Collect context
 
 - **Run NPU environment sanity check first** using the provided script:
@@ -112,6 +151,11 @@ If activation fails, stop and report the error before continuing.
   ```bash
   bash scripts/check_roots.sh "$VLLM_SRC" "$VLLM_ASCEND_SRC" "$WORK_DIR"
   ```
+- **Ensure WORK_DIR exists** (create if missing):
+  ```bash
+  mkdir -p "$WORK_DIR"
+  ```
+- **Gate on model path**: verify `$MODEL_PATH/config.json` exists before running triage. If missing, stop and re-run Step 0.7.
 - Model path, served model name, TP size, and implementation roots are already confirmed via the Entry Points above — use those values throughout.
 
 ### 2) Analyze model first
@@ -283,7 +327,7 @@ Place tests under `/tmp/npu_unit_tests/` (ephemeral; not committed).
 
 ## Quality gate before final answer
 
-- Service starts successfully from `/workspace` with direct command.
+- Service starts successfully from `$WORK_DIR` with direct command.
 - OpenAI-compatible inference request succeeds (not startup-only).
 - Key feature set is attempted and reported: ACLGraph / EP / flashcomm1 / multimodal. MTP reported if checkpoint supports it.
 - Capacity baseline (`128k + bs16`) result is reported, or explicit reason why not feasible.

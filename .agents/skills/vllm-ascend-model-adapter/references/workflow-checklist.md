@@ -11,8 +11,8 @@ Set these once per session using the values confirmed at the Entry Points step.
 # --- set to values confirmed with user at entry ---
 VLLM_SRC=<user-specified vLLM source root>          # default: /vllm-workspace/vllm
 VLLM_ASCEND_SRC=<user-specified vllm-ascend root>   # default: /vllm-workspace/vllm-ascend
-WORK_DIR=/workspace                                  # directory to run vllm serve from
-MODEL_ROOT=<parent dir of MODEL_PATH>                # derived from user-specified checkpoint path
+WORK_DIR=<user-specified working dir>                # default: /workspace (created if missing)
+MODEL_PATH=<local path to model checkpoint>          # set after download or confirmed on-disk
 
 # activate user-specified Python environment (if provided)
 # e.g.: conda activate vllm-ascend
@@ -43,10 +43,42 @@ bash scripts/check_npu_env.sh "$TP_SIZE" none
 
 If any assertion fails: **stop here**, resolve the environment issue, then restart the checklist from Step 0.
 
+## 0.7) Download model (if not already on disk)
+
+Skip if model is already on disk and `$MODEL_PATH/config.json` exists.
+
+**ModelScope:**
+
+```bash
+MS_CACHE="${MODELSCOPE_CACHE:-$HOME/.cache/modelscope/hub}"
+MODEL_ID=<org/model-name>   # e.g. google/gemma-4-E4B-it
+MODEL_PATH="$MS_CACHE/$(echo $MODEL_ID | tr '/' '___')"
+modelscope download --model "$MODEL_ID" --local_dir "$MODEL_PATH"
+```
+
+**HuggingFace:**
+
+```bash
+MODEL_PATH=<target local dir>
+huggingface-cli download "$MODEL_ID" --local-dir "$MODEL_PATH"
+```
+
+**Gate — must pass before Step 1:**
+
+```bash
+if [ ! -f "$MODEL_PATH/config.json" ]; then
+  echo "ERROR: $MODEL_PATH/config.json not found — download failed or path is wrong"
+  exit 1
+fi
+echo "OK: model path verified at $MODEL_PATH"
+```
+
 ## 1) Fast triage commands
 
 ```bash
-MODEL_PATH=${MODEL_ROOT}/<model-name>
+# Ensure WORK_DIR exists
+mkdir -p "$WORK_DIR"
+
 bash scripts/triage_model.sh "$MODEL_PATH"
 ```
 
@@ -190,8 +222,6 @@ GitHub issue must include: failing test name, error + stack trace, both fix atte
 
 ```bash
 cd "$WORK_DIR"
-MODEL_PATH=${MODEL_ROOT}/<model-name>
-
 HCCL_OP_EXPANSION_MODE=AIV \
 VLLM_ASCEND_ENABLE_FLASHCOMM1=0 \
 vllm serve "$MODEL_PATH" \
