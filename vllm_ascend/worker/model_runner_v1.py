@@ -2556,6 +2556,7 @@ class NPUModelRunner(GPUModelRunner):
         if self.dynamic_eplb and not self.is_eplb_warmuped:
             self.is_eplb_warmuped = True
             self.eplb_adaptor = VllmEplbAdaptor(model=self.model)
+            self.eplb_adaptor.do_update_request_slot()
             self.eplb_loader.set_adator(self.eplb_adaptor)
             self.eplb_updator.set_adaptor(self.eplb_adaptor)
             self.eplb_updator.warm_up_eplb()

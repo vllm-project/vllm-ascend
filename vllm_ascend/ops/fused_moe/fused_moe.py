@@ -352,9 +352,8 @@ class AscendFusedMoE(FusedMoE):
                 self.num_iter = eplb_config.expert_heat_collection_interval
                 self.moe_load = torch.zeros((self.num_iter, self.local_num_experts), dtype=torch.int32, device="npu")
             if eplb_config.eplb_policy_type == 4:
-                self.token2req = None
-                self.moe_load_prev = torch.zeros([eplb_config.max_batch_token, self.global_num_experts],
-                                            dtype=torch.float32).npu()
+                self.token2req = [None]
+                self.moe_load_prev = None
                 self.moe_load = torch.zeros(self.local_num_experts, dtype=torch.int64).npu()
                 self.ones_buffer = torch.ones(1024*16, dtype=torch.float32).npu()
                 self.moe_load_local = torch.zeros([eplb_config.max_batch_token, self.global_num_experts], dtype=torch.float32).npu()
@@ -411,6 +410,10 @@ class AscendFusedMoE(FusedMoE):
 
     def get_log2phy_map(self):
         return self.log2phy
+    
+    def clear_moe_load_prev(self, expired_req_ids):
+        if self.moe_load_prev is not None:
+            self.moe_load_prev[expired_req_ids] = 0
 
     def clear_moe_load(self):
         if self.moe_load is not None:
@@ -542,9 +545,10 @@ class AscendFusedMoE(FusedMoE):
 
         if self.dynamic_eplb:
             if self.policy_type == 4:
+                # TODO ALL2ALL case, currently only support ALLGATHER
                 topk_ids = fused_experts_results.topk_ids.reshape(get_ep_group().world_size, -1, self.top_k)[get_ep_group().rank]
-                if self.token2req is not None:
-                    expanded_req_ids = self.token2req.unsqueeze(1)  
+                if self.token2req[0] is not None:
+                    expanded_req_ids = self.token2req[0]
                     indices = torch.add(topk_ids, expanded_req_ids, alpha=self.global_num_experts).view(-1)
                     self.moe_load_local.view(-1).index_add_(
                         0, 

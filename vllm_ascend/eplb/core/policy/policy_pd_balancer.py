@@ -18,9 +18,10 @@ class RequestManager:
         """
         active_req_ids = set(m1.keys())
         expired_req_ids = [rid for rid in self.m2 if rid not in active_req_ids]
-        
+        remove_req_ids = []
         for rid in expired_req_ids:
             idx = self.m2.pop(rid)
+            remove_req_ids.append(idx)
             heapq.heappush(self.free_idxs, idx)
 
         sum_tokens = 0
@@ -42,4 +43,4 @@ class RequestManager:
             target_tensor[current_ptr : current_ptr + num] = target_idx
             current_ptr += num
             
-        return target_tensor, self.m2, expired_req_ids
+        return target_tensor, self.m2, remove_req_ids

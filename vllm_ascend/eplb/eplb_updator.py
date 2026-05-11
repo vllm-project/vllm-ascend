@@ -140,7 +140,7 @@ class EplbUpdator:
             if self.multi_stage:
                 moe_load = moe_load.permute(2, 0, 1, 3)
         else:
-            self.comm_group.all_reduce(local_load)
+            local_load = self.comm_group.all_reduce(local_load)
             moe_load = local_load.reshape(local_load.shape[0], self.world_size, -1).cpu()
 
         self.shared_dict["moe_load"] = moe_load
