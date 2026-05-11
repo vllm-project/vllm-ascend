@@ -812,7 +812,12 @@ def enable_sp(vllm_config=None, enable_shared_expert_dp: bool = False) -> bool:
             from vllm.config import get_current_vllm_config
 
             vllm_config = get_current_vllm_config()
-        _ENABLE_SP = get_ascend_config().enable_flashcomm1
+
+        if vllm_config is not None:
+            additional_config = getattr(vllm_config, "additional_config", None) or {}
+            _ENABLE_SP = additional_config.get("enable_flashcomm1", False)
+        else:
+            _ENABLE_SP = get_ascend_config().enable_flashcomm1
 
         if not _ENABLE_SP and enable_shared_expert_dp:
             _ENABLE_SP = True
