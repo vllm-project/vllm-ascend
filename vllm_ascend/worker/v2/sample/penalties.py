@@ -21,7 +21,10 @@
 import torch
 from vllm.triton_utils import tl, triton
 
-pow = triton.language.extra.ascend.libdevice.pow
+try:
+    pow = triton.language.extra.ascend.libdevice.pow
+except:
+    pow = triton.language.extra.libdevice.pow
 
 
 @triton.jit
