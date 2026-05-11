@@ -68,7 +68,15 @@ class AscendQKVParallelLinearWithShardedLoRA(QKVParallelLinearWithShardedLoRA):
 
 
 def refresh_all_lora_classes():
-    vllm.lora.utils._all_lora_classes.add(AscendQKVParallelLinearWithLoRA)
-    vllm.lora.utils._all_lora_classes.add(AscendMergedQKVParallelLinearWithLoRA)
-    vllm.lora.utils._all_lora_classes.add(AscendMergedQKVParallelLinearWithShardedLoRA)
-    vllm.lora.utils._all_lora_classes.add(AscendQKVParallelLinearWithShardedLoRA)
+    ascend_classes = (
+        AscendQKVParallelLinearWithLoRA,
+        AscendMergedQKVParallelLinearWithLoRA,
+        AscendMergedQKVParallelLinearWithShardedLoRA,
+        AscendQKVParallelLinearWithShardedLoRA,
+    )
+    # vLLM #35077 changed _all_lora_classes from set to ordered tuple.
+    # Append the Ascend classes in a deterministic order.
+    vllm.lora.utils._all_lora_classes = (
+        *vllm.lora.utils._all_lora_classes,
+        *ascend_classes,
+    )
