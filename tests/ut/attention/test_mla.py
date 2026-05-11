@@ -1,17 +1,17 @@
+import math
 from functools import partial
 from unittest.mock import MagicMock, patch
 
 import pytest
 import torch
-import math
 
 from vllm.config import set_current_vllm_config
 from vllm.forward_context import set_forward_context
+from vllm.model_executor.layers.linear import UnquantizedLinearMethod
 from vllm.utils.torch_utils import set_random_seed
 from vllm.v1.attention.backend import AttentionType
 from vllm.v1.attention.selector import get_attn_backend
 from vllm.v1.kv_cache_interface import MLAAttentionSpec
-from vllm.model_executor.layers.linear import UnquantizedLinearMethod
 
 from tests.ut.attention.utils import (
     BatchSpec,
