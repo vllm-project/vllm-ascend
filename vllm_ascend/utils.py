@@ -22,7 +22,7 @@ from __future__ import annotations
 import functools
 import math
 import os
-from contextlib import nullcontext
+from contextlib import nullcontext, suppress
 from enum import Enum
 from functools import lru_cache
 from typing import TYPE_CHECKING, Any
@@ -34,7 +34,6 @@ from packaging.version import InvalidVersion, Version
 from vllm.logger import logger
 from vllm.sequence import IntermediateTensors
 
-import vllm_ascend.envs as envs_ascend
 from vllm_ascend.ascend_config import WeightPrefetchConfig, get_ascend_config
 
 if TYPE_CHECKING:
@@ -69,6 +68,15 @@ _IS_VL_MODEL = None
 _ENABLE_SP = None
 _HAS_LAYER_IDX = None
 _HAS_ROPE = None
+
+
+def clear_enable_sp():
+    global _ENABLE_SP
+    _ENABLE_SP = None
+    enable_dsa_cp.cache_clear()
+    enable_dsa_cp_with_layer_shard.cache_clear()
+    enable_dsa_cp_with_o_proj_tp.cache_clear()
+    _libc_getenv.cache_clear()
 
 
 def is_310p():
@@ -163,13 +171,17 @@ def _should_trans_nz(weight: torch.Tensor) -> bool:
     if is_310p():
         return True
 
-    # NZ is disabled on non-310P.
-    if not envs_ascend.VLLM_ASCEND_ENABLE_NZ:
+    # Get config value instead of env
+    config = get_ascend_config()
+    nz_mode = config.weight_nz_mode
+
+    # NZ is disabled when mode is 0.
+    if not nz_mode:
         return False
 
-    # BF16/FP16 convert only when enable_nz == 2.
+    # BF16/FP16 convert only when nz_mode == 2.
     if weight.dtype in {torch.bfloat16, torch.float16}:
-        return envs_ascend.VLLM_ASCEND_ENABLE_NZ == 2
+        return nz_mode == 2
 
     # Quantized or other supported dtypes convert by default.
     return True
@@ -312,16 +324,17 @@ def enable_custom_op():
 
 def find_hccl_library() -> str:
     """
-    We either use the library file specified by the `HCCL_SO_PATH`
-    environment variable, or we find the library file brought by PyTorch.
+    We either use the library file specified by the `hccl_so_path`
+    configuration, or we find the library file brought by PyTorch.
     After importing `torch`, `libhccl.so` can be
     found by `ctypes` automatically.
     """
-    so_file = envs_ascend.HCCL_SO_PATH
+    config = get_ascend_config()
+    so_file = config.hccl_so_path
 
     # manually load the hccl library
     if so_file:
-        logger.info("Found hccl from environment variable HCCL_SO_PATH=%s", so_file)
+        logger.info("Found hccl from Config hccl_so_path=%s", so_file)
     else:
         if torch.version.cann is not None:
             so_file = "libhccl.so"
@@ -404,8 +417,14 @@ def adapt_patch(is_global_patch: bool = False):
 
 @functools.cache
 def vllm_version_is(target_vllm_version: str):
-    if envs_ascend.VLLM_VERSION is not None:
-        vllm_version = envs_ascend.VLLM_VERSION
+    # VLLM_VERSION env var is removed. Use AscendConfig.vllm_version or vllm.__version__.
+    # Note: This function may be called at module import time before AscendConfig is initialized.
+    # In that case, fall back to vllm.__version__ directly.
+    config_version = None
+    with suppress(RuntimeError):
+        config_version = get_ascend_config().vllm_version
+    if config_version is not None:
+        vllm_version = config_version
     else:
         import vllm
 
@@ -415,8 +434,9 @@ def vllm_version_is(target_vllm_version: str):
     except InvalidVersion:
         raise ValueError(
             f"Invalid vllm version {vllm_version} found. A dev version of vllm "
-            "is installed probably. Set the environment variable VLLM_VERSION "
-            "to control it by hand. And please make sure the value follows the "
+            "is installed probably. Use --additional-config "
+            '\'{"vllm_version": "x.y.z"}\' to override. '
+            "And please make sure the value follows the "
             "format of x.y.z."
         )
 
@@ -787,7 +807,7 @@ def mlp_tp_enable() -> bool:
 
 
 def matmul_allreduce_enable() -> bool:
-    return envs_ascend.VLLM_ASCEND_ENABLE_MATMUL_ALLREDUCE
+    return get_ascend_config().enable_matmul_allreduce
 
 
 def enable_sp_by_pass():
@@ -796,15 +816,20 @@ def enable_sp_by_pass():
 
 def enable_sp(vllm_config=None, enable_shared_expert_dp: bool = False) -> bool:
     global _ENABLE_SP
-    if _ENABLE_SP is None:
-        if vllm_config is None:
+    if vllm_config is None:
+        try:
             from vllm.config import get_current_vllm_config
 
             vllm_config = get_current_vllm_config()
+        except AssertionError:
+            vllm_config = None
+
+    additional_config = getattr(vllm_config, "additional_config", None) if vllm_config is not None else None
+    refresh = additional_config.get("refresh", False) if additional_config else False
+
+    if _ENABLE_SP is None or refresh:
         _ENABLE_SP = (
             envs_ascend.VLLM_ASCEND_ENABLE_FLASHCOMM1
-            # Flash comm 1 should be enabled by env VLLM_ASCEND_ENABLE_FLASHCOMM1
-            # We retain the env VLLM_ASCEND_ENABLE_FLASHCOMM here for backward compatibility.
             or bool(int(os.getenv("VLLM_ASCEND_ENABLE_FLASHCOMM", "0")))
         )
 
@@ -821,7 +846,7 @@ def shared_expert_dp_enabled() -> bool:
 
 
 def prefill_context_parallel_enable() -> bool:
-    return envs_ascend.VLLM_ASCEND_ENABLE_CONTEXT_PARALLEL
+    return get_ascend_config().enable_context_parallel
 
 
 def is_moe_model(vllm_config: VllmConfig):
@@ -1105,7 +1130,8 @@ def has_layer_idx(model_instance: torch.nn.Module) -> bool:
 
 
 def flashcomm2_enable() -> bool:
-    return envs_ascend.VLLM_ASCEND_FLASHCOMM2_PARALLEL_SIZE > 0
+    config_val = get_ascend_config().enable_flashcomm2_parallel_size
+    return config_val > 0
 
 
 def o_shard_enable() -> bool:
@@ -1116,10 +1142,10 @@ def o_shard_enable() -> bool:
 
 
 def get_flashcomm2_config_and_validate(ascend_config, vllm_config):
-    flashcomm2_oproj_tp_size = envs_ascend.VLLM_ASCEND_FLASHCOMM2_PARALLEL_SIZE
+    flashcomm2_oproj_tp_size = ascend_config.enable_flashcomm2_parallel_size
     global_tp_size = vllm_config.parallel_config.tensor_parallel_size
 
-    if not flashcomm2_enable():
+    if ascend_config.enable_flashcomm2_parallel_size <= 0:
         return 0
 
     logger.info("Enable FLASHCOMM2 with flashcomm2_oproj_tensor_parallel_size = %s", flashcomm2_oproj_tp_size)

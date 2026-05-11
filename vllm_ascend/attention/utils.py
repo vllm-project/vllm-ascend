@@ -9,7 +9,6 @@ from vllm.distributed.kv_transfer import get_kv_transfer_group, has_kv_transfer_
 from vllm.forward_context import ForwardContext, get_forward_context
 from vllm.v1.attention.backends.utils import CommonAttentionMetadata
 
-from vllm_ascend import envs
 from vllm_ascend.utils import AscendDeviceType, get_ascend_config, get_ascend_device_type
 from vllm_ascend.worker.kvcomp_utils import KVCompMetaData
 
@@ -373,12 +372,13 @@ def transdata(nd_mat, block_size: tuple = (16, 16)):
 
 
 def enabling_mlapo(vllm_config: VllmConfig) -> bool:
+    config_val = get_ascend_config().enable_mlapo
     if get_ascend_device_type() == AscendDeviceType.A5:
-        return bool(envs.VLLM_ASCEND_ENABLE_MLAPO)
+        return bool(config_val)
 
     is_decode_instance = (
         vllm_config.kv_transfer_config is not None
         and vllm_config.kv_transfer_config.is_kv_consumer
         and not vllm_config.kv_transfer_config.is_kv_producer
     )
-    return bool(envs.VLLM_ASCEND_ENABLE_MLAPO and is_decode_instance)
+    return bool(config_val and is_decode_instance)

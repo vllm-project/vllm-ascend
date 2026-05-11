@@ -1,4 +1,3 @@
-import os
 from unittest.mock import MagicMock, patch
 
 import torch
@@ -50,9 +49,12 @@ class TestAscendW8A16LinearMethod(TestBase):
         self.assertTrue(torch.equal(output, expected_y_output))
         mock_npu_weight_quant_batchmatmul.assert_called_once()
 
-    @patch.dict(os.environ, {"VLLM_ASCEND_ENABLE_NZ": "1"})
+    @patch("vllm_ascend.utils.get_ascend_config")
     @patch("torch_npu.npu_format_cast")
-    def test_process_weights_after_loading_with_nz1(self, mock_npu_format_cast):
+    def test_process_weights_after_loading_with_nz1(self, mock_npu_format_cast, mock_get_config):
+        mock_config = MagicMock()
+        mock_config.weight_nz_mode = 1
+        mock_get_config.return_value = mock_config
         layer = MagicMock()
 
         layer.weight.data = torch.randint(-128, 127, (128, 256), dtype=torch.int8)
@@ -72,6 +74,14 @@ class TestAscendW8A16LinearMethod(TestBase):
 class TestAscendW8A16LinearMethodWithNpu(TestBase):
     def setUp(self):
         self.method = AscendW8A16LinearMethod()
+        self.mock_get_config = patch("vllm_ascend.utils.get_ascend_config")
+        mock_config = self.mock_get_config.start()
+        mock_ascend_config = MagicMock()
+        mock_ascend_config.weight_nz_mode = 0
+        mock_config.return_value = mock_ascend_config
+
+    def tearDown(self):
+        self.mock_get_config.stop()
 
     def test_apply_with_npu(self):
         input_size, output_size = 128, 256

@@ -10,7 +10,7 @@ from vllm.config import CUDAGraphMode, VllmConfig
 from vllm.distributed import get_dp_group, get_ep_group, get_tensor_model_parallel_world_size
 from vllm.forward_context import BatchDescriptor, get_forward_context, set_forward_context
 
-import vllm_ascend.envs as envs_ascend
+from vllm_ascend.ascend_config import get_ascend_config
 from vllm_ascend.utils import (
     AscendDeviceType,
     enable_sp,
@@ -273,13 +273,13 @@ def select_moe_comm_method(num_tokens: int, vllm_config: VllmConfig, is_draft_mo
     elif soc_version in {AscendDeviceType.A3}:
         # TODO: drop the EP-size guard when dispatch_ffn_combine supports larger EP sizes
         # TODO: drop speculative method guard when dispatch_gmm_combine_decode supports w16a16
-        fused_mc2_enable = envs_ascend.VLLM_ASCEND_ENABLE_FUSED_MC2
+        fused_mc2_enable = get_ascend_config().enable_fused_mc2
         dispatch_ffn_combine_enable = get_ep_group().world_size <= 32 and (not is_draft_model)
         if num_tokens <= mc2_tokens_capacity:
             fused_decode_enable = fused_mc2_enable
-            if envs_ascend.VLLM_ASCEND_ENABLE_FUSED_MC2 == 1:
+            if fused_mc2_enable == 1:
                 fused_decode_enable = fused_mc2_enable and dispatch_ffn_combine_enable
-            elif envs_ascend.VLLM_ASCEND_ENABLE_FUSED_MC2 == 2:
+            elif fused_mc2_enable == 2:
                 fused_decode_enable = (
                     fused_mc2_enable
                     and speculative_enable_dispatch_gmm_combine_decode(vllm_config)
@@ -288,9 +288,9 @@ def select_moe_comm_method(num_tokens: int, vllm_config: VllmConfig, is_draft_mo
             moe_comm_type = MoECommType.FUSED_MC2 if fused_decode_enable else MoECommType.MC2
         else:
             fused_prefill_enable = fused_mc2_enable
-            if envs_ascend.VLLM_ASCEND_ENABLE_FUSED_MC2 == 1:
+            if fused_mc2_enable == 1:
                 fused_prefill_enable = fused_mc2_enable and dispatch_ffn_combine_enable
-            elif envs_ascend.VLLM_ASCEND_ENABLE_FUSED_MC2 == 2:
+            elif fused_mc2_enable == 2:
                 fused_prefill_enable = False
             moe_comm_type = MoECommType.FUSED_MC2 if fused_prefill_enable else MoECommType.ALLTOALL
     elif soc_version in {AscendDeviceType._310P}:
