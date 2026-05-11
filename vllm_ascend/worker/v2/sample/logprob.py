@@ -22,6 +22,10 @@ from vllm.triton_utils import tl, triton
 from vllm.v1.outputs import LogprobsTensors
 
 from vllm_ascend.ops.triton.triton_utils import get_vectorcore_num
+from vllm_ascend.utils import vllm_version_is
+
+if not vllm_version_is("0.20.1"):
+    from vllm.v1.worker.gpu.sample.logprob import LogprobTokenIdsState
 
 
 @triton.jit
@@ -120,6 +124,9 @@ def compute_topk_logprobs(
     num_logprobs: int,
     sampled_token_ids: torch.Tensor,
     cu_num_logits: list[int] | None = None,
+    logprob_token_ids_state: "LogprobTokenIdsState | None" = None,
+    expanded_idx_mapping: torch.Tensor | None = None,
+    max_per_req_token_ids: int = 0,
 ) -> LogprobsTensors:
     assert num_logprobs >= 0
     batch_size, vocab_size = logits.shape
