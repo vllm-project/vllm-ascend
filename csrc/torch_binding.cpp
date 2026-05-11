@@ -39,7 +39,6 @@
 #include "attention/lightning_indexer_vllm/lightning_indexer_vllm_torch_adpt.h"
 #include "mc2/matmul_allreduce_add_rmsnorm/matmul_allreduce_add_rmsnorm_torch_adpt.h"
 #include "mla_preprocess/mla_preprocess_torch_adpt.h"
-<<<<<<< HEAD
 #include "mc2/moe_combine_normal/moe_combine_normal_torch_adpt.h"
 #include "moe/moe_gating_top_k/moe_gating_top_k_torch_adpt.h"
 #include "moe/moe_init_routing_custom/moe_init_routing_custom_torch_adpt.h"
@@ -47,17 +46,8 @@
 #include "attention/lightning_indexer_quant/lightning_indexer_quant_torch_adpt.h"
 #include "moe/causal_conv1d_v310/causal_conv1d_310_torch_adpt.h"
 #include "attention/recurrent_gated_delta_rule_v310/recurrent_gated_delta_rule_310_torch_adpt.h"
-=======
-#include "moe_combine_normal/moe_combine_normal_torch_adpt.h"
-#include "moe_gating_top_k/moe_gating_top_k_torch_adpt.h"
-#include "moe_init_routing_custom/moe_init_routing_custom_torch_adpt.h"
-#include "sparse_flash_attention/sparse_flash_attention_torch_adpt.h"
 #include "scatter_pa_kv_cache_vllm/scatter_pa_kv_cache_vllm_torch_adpt.h"
 #include "gather_pa_kv_cache_vllm/gather_pa_kv_cache_vllm_torch_adpt.h"
-#include "lightning_indexer_quant/lightning_indexer_quant_torch_adpt.h"
-#include "causal_conv1d_v310/causal_conv1d_310_torch_adpt.h"
-#include "recurrent_gated_delta_rule_v310/recurrent_gated_delta_rule_310_torch_adpt.h"
->>>>>>> origin/main_origin
 #include <c10/core/Device.h>
 #include <c10/core/Scalar.h>
 #include <c10/util/Exception.h>
