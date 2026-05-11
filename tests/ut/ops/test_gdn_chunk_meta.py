@@ -258,8 +258,16 @@ def test_build_chunk_offsets_falls_back_without_triton_kernel(monkeypatch: pytes
     chunk_offsets = torch.empty(4, dtype=torch.int32)
     update_chunk_offsets = torch.empty(4, dtype=torch.int32)
 
-    gdn_chunk_meta._build_chunk_offsets(chunk_counts, chunk_offsets, add_one=0)
-    gdn_chunk_meta._build_chunk_offsets(chunk_counts, update_chunk_offsets, add_one=1)
+    gdn_chunk_meta._build_chunk_offsets(
+        chunk_counts,
+        chunk_offsets,
+        extra_chunks_per_seq=0,
+    )
+    gdn_chunk_meta._build_chunk_offsets(
+        chunk_counts,
+        update_chunk_offsets,
+        extra_chunks_per_seq=1,
+    )
 
     assert torch.equal(chunk_offsets, torch.tensor([0, 2, 2, 5], dtype=torch.int32))
     assert torch.equal(update_chunk_offsets, torch.tensor([0, 3, 4, 8], dtype=torch.int32))
@@ -276,8 +284,16 @@ def test_build_chunk_offsets_does_not_launch_triton_prefix_sum_kernel(monkeypatc
     chunk_offsets = torch.empty(4, dtype=torch.int32)
     update_chunk_offsets = torch.empty(4, dtype=torch.int32)
 
-    gdn_chunk_meta._build_chunk_offsets(chunk_counts, chunk_offsets, add_one=0)
-    gdn_chunk_meta._build_chunk_offsets(chunk_counts, update_chunk_offsets, add_one=1)
+    gdn_chunk_meta._build_chunk_offsets(
+        chunk_counts,
+        chunk_offsets,
+        extra_chunks_per_seq=0,
+    )
+    gdn_chunk_meta._build_chunk_offsets(
+        chunk_counts,
+        update_chunk_offsets,
+        extra_chunks_per_seq=1,
+    )
 
     assert torch.equal(chunk_offsets, torch.tensor([0, 2, 2, 5], dtype=torch.int32))
     assert torch.equal(update_chunk_offsets, torch.tensor([0, 3, 4, 8], dtype=torch.int32))
