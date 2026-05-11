@@ -140,7 +140,7 @@ class NPUModelRunner(GPUModelRunner):
         # we need to use input_batch to set forward_context in run_fullgraph.
         # so we can inherit `execute_model` method.
         self.input_batch: AscendInputBatch | None = None
-        self.backend_extra_input_constructors = None
+        self.backend_extra_input_preparers = None
 
     def prepare_backend_extra_input(
         self,
@@ -149,15 +149,15 @@ class NPUModelRunner(GPUModelRunner):
         query_start_loc_np: np.ndarray,
     ) -> BackendExtraInput:
         """Apply FULL-graph padding requirements from attention backends (e.g. FIA TND)."""
-        if self.backend_extra_input_constructors is None:
-            self.backend_extra_input_constructors = set()
+        if self.backend_extra_input_preparers is None:
+            self.backend_extra_input_preparers = set()
             for backend in self.attn_backends:
-                if hasattr(backend, "get_extra_input_constructor"):
-                    self.backend_extra_input_constructors.add(backend.get_extra_input_constructor())
+                if hasattr(backend, "get_extra_input_preparer"):
+                    self.backend_extra_input_preparers.add(backend.get_extra_input_preparer())
 
         max_num_reqs_padded = 0
         max_extra_input = None
-        for constructor in self.backend_extra_input_constructors:
+        for constructor in self.backend_extra_input_preparers:
             extra_input = constructor.prepare(
                 num_reqs,
                 query_start_loc_np,
