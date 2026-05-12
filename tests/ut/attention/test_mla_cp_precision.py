@@ -21,6 +21,7 @@ import math
 import sys
 from contextlib import ExitStack
 from dataclasses import dataclass, field
+from typing import Any
 from unittest.mock import MagicMock, patch
 
 import pytest
@@ -438,7 +439,7 @@ def _prefill_reference(
 
 
 def _init_mla_cp_impl_common(
-    impl: object,
+    impl: Any,
     *,
     W_UV: torch.Tensor,
     speculative_config,
