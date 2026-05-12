@@ -45,12 +45,8 @@ pip install flash_attn_npu
 
 To enable FA3, you need to:
 
-1. Set the environment variable `VLLM_BATCH_INVARIANT=1` to enable batch invariant mode
+1. Set the environment variable `export VLLM_BATCH_INVARIANT=1` to enable batch invariant mode
 2. Specify the attention backend as `FLASH_ATTN` via the LLM parameter `attention_backend="FLASH_ATTN"`
-
-```bash
-export VLLM_BATCH_INVARIANT=1
-```
 
 ### Online Inference (Server Mode)
 
