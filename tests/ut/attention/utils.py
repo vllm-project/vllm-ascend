@@ -129,7 +129,13 @@ def create_common_attn_metadata(
     max_query_len = max(batch_spec.query_lens)
 
     # Create positions tensor
-    positions = torch.arange(num_tokens, dtype=torch.int32, device=device)
+    # Each sequence's positions should start from context_len
+    positions_list = []
+    for i in range(batch_spec.batch_size):
+        context_len_i = batch_spec.seq_lens[i] - batch_spec.query_lens[i]
+        positions_i = torch.arange(context_len_i, batch_spec.seq_lens[i], dtype=torch.int32, device=device)
+        positions_list.append(positions_i)
+    positions = torch.cat(positions_list, dim=0)
 
     return AscendCommonAttentionMetadata(
         query_start_loc=query_start_loc,
@@ -214,7 +220,7 @@ def create_vllm_config(
     if hf_config_override:
         model_config.hf_config.update(hf_config_override)
 
-    return VllmConfig(
+    vllm_config = VllmConfig(
         model_config=model_config,
         cache_config=cache_config,
         parallel_config=parallel_config,
@@ -223,6 +229,14 @@ def create_vllm_config(
         load_config=load_config,
         compilation_config=compilation_config,
     )
+
+    # Ensure additional_config and quant_config are set to None for tests
+    if not hasattr(vllm_config, 'additional_config') or vllm_config.additional_config is None:
+        vllm_config.additional_config = None
+    if not hasattr(vllm_config, 'quant_config') or vllm_config.quant_config is None:
+        vllm_config.quant_config = None
+
+    return vllm_config
 
 
 def create_standard_kv_cache_spec(vllm_config: VllmConfig) -> FullAttentionSpec:
