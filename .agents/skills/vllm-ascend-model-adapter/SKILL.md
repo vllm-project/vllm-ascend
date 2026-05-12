@@ -27,7 +27,7 @@ chmod +x .agents/skills/vllm-ascend-model-adapter/scripts/*.sh
 
 | Script | Purpose |
 |---|---|
-| `check_npu_env.sh <TP_SIZE> [ATB_PATH]` | NPU sanity check (CANN, ATB, torch_npu, device count) |
+| `check_npu_env.sh <TP_SIZE> [CANN_PATH] [ATB_PATH]` | NPU sanity check (CANN, ATB, torch_npu, device count) |
 | `check_roots.sh <VLLM_SRC> <VLLM_ASCEND_SRC> [WORK_DIR]` | Verify source roots and runtime import |
 | `triage_model.sh <MODEL_PATH>` | Model directory listing + config.json field scan |
 | `classify_model.py <MODEL_PATH>` | Classify model type from config.json |

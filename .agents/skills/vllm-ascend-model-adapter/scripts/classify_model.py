@@ -38,29 +38,34 @@ def classify(cfg: dict) -> dict:
     result["model_type"] = model_type
 
     # ── High-level type ───────────────────────────────────────────────────────
-    # Whisper / ASR: encoder-decoder speech model
-    is_whisper = (
-        any("Whisper" in a for a in architectures)
-        or model_type == "whisper"
-        or "audio_config" in cfg
-        or "encoder_config" in cfg
-    )
-
-    # VLM: has a vision sub-config or known VL architecture suffix
+    # VLM: has a vision sub-config or known VL architecture suffix — check FIRST
+    # so that multimodal models with audio_config are not misclassified as ASR.
     is_vlm = (
         "vision_config" in cfg
         or "thinker_config" in cfg
         or any(
             kw in a
             for a in architectures
-            for kw in ("VL", "Vision", "Visual", "Multimodal", "MM", "Image")
+            for kw in ("VL", "Vision", "Visual", "Multimodal", "MM", "Image",
+                       "ConditionalGeneration")
         )
     )
 
-    if is_whisper:
-        result["high_level_type"] = "Whisper (ASR)"
-    elif is_vlm:
+    # Whisper / ASR: encoder-decoder speech model (no vision component)
+    is_whisper = not is_vlm and (
+        any("Whisper" in a for a in architectures)
+        or model_type == "whisper"
+        or "encoder_config" in cfg
+        or (
+            "audio_config" in cfg
+            and not any("Conditional" in a for a in architectures)
+        )
+    )
+
+    if is_vlm:
         result["high_level_type"] = "VLM (Vision-Language)"
+    elif is_whisper:
+        result["high_level_type"] = "Whisper (ASR)"
     else:
         result["high_level_type"] = "LLM"
 
@@ -69,13 +74,14 @@ def classify(cfg: dict) -> dict:
         "num_experts", "n_routed_experts", "num_local_experts",
         "moe_intermediate_size", "moe_layer_freq", "num_experts_per_tok",
     ]
-    moe_fields = {k: cfg[k] for k in moe_keys if k in cfg}
-    # Also recurse one level for nested configs (e.g. text_config)
+    # Filter out null/zero values — a field present but null means "no MoE"
+    moe_fields = {k: cfg[k] for k in moe_keys if cfg.get(k) not in (None, 0, False)}
+    # Also recurse one level for nested configs (e.g. text_config, language_config)
     for sub_key in ("text_config", "language_config"):
         sub = cfg.get(sub_key, {})
         if isinstance(sub, dict):
             for k in moe_keys:
-                if k in sub and k not in moe_fields:
+                if sub.get(k) not in (None, 0, False) and k not in moe_fields:
                     moe_fields[k] = sub[k]
 
     result["is_moe"] = bool(moe_fields)
@@ -83,7 +89,7 @@ def classify(cfg: dict) -> dict:
         result["moe_fields"] = moe_fields
 
     # ── LLM attention sub-type ────────────────────────────────────────────────
-    if result["high_level_type"] == "LLM" or result["high_level_type"] == "VLM":
+    if result["high_level_type"] in ("LLM", "VLM (Vision-Language)"):
         sub_types = []
 
         # MLA: multi-latent attention (DeepSeek-style)
@@ -98,8 +104,15 @@ def classify(cfg: dict) -> dict:
         if any(k in cfg for k in mamba_keys) or "mamba" in model_type.lower():
             sub_types.append("Mamba (SSM)")
 
-        # Sliding window attention
+        # Sliding window attention — check top-level and text_config
         sw = cfg.get("sliding_window") or cfg.get("sliding_window_size")
+        if not sw:
+            for sub_key in ("text_config", "language_config"):
+                sub = cfg.get(sub_key, {})
+                if isinstance(sub, dict):
+                    sw = sub.get("sliding_window") or sub.get("sliding_window_size")
+                    if sw:
+                        break
         if sw:
             sub_types.append(f"sliding-window (size={sw})")
 
@@ -133,7 +146,15 @@ def classify(cfg: dict) -> dict:
         "num_attention_heads", "num_key_value_heads", "torch_dtype",
         "vocab_size",
     ]
-    result["params"] = {k: cfg[k] for k in numeric_keys if k in cfg}
+    # Try top-level first, then fall back to text_config / language_config
+    params = {k: cfg[k] for k in numeric_keys if k in cfg}
+    for sub_key in ("text_config", "language_config"):
+        sub = cfg.get(sub_key, {})
+        if isinstance(sub, dict):
+            for k in numeric_keys:
+                if k not in params and k in sub:
+                    params[k] = sub[k]
+    result["params"] = params
 
     return result
 

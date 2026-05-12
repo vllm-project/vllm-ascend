@@ -31,13 +31,15 @@ Expected environment:
 Run once at session start before any other work. If any check fails, stop and resolve the environment issue first.
 
 ```bash
-# Default ATB path is /usr/local/Ascend/nnal/atb/set_env.sh.
-# If that path does not exist, the script will warn and continue without it.
-# Pass the correct path as the second argument if needed.
+# Default: auto-detects CANN under /usr/local/Ascend and ~/Ascend.
+# Pass explicit CANN path as second arg if auto-detect fails.
+# Pass ATB path as third arg if needed.
 bash scripts/check_npu_env.sh "$TP_SIZE"
-# or with explicit ATB path:
-bash scripts/check_npu_env.sh "$TP_SIZE" /path/to/atb/set_env.sh
-# or to skip ATB sourcing entirely:
+# or with explicit CANN path:
+bash scripts/check_npu_env.sh "$TP_SIZE" /path/to/cann/set_env.sh
+# or with explicit CANN + ATB paths:
+bash scripts/check_npu_env.sh "$TP_SIZE" /path/to/cann/set_env.sh /path/to/atb/set_env.sh
+# or to skip CANN sourcing entirely:
 bash scripts/check_npu_env.sh "$TP_SIZE" none
 ```
 
