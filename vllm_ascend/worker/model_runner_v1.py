@@ -1581,7 +1581,7 @@ class NPUModelRunner(GPUModelRunner):
 
                 (
                     logits_indices,
-                    spec_decode_metadata, # a b b b
+                    spec_decode_metadata,
                     total_num_scheduled_tokens,
                 ) = self._prepare_inputs(
                     scheduler_output,
