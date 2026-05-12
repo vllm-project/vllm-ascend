@@ -29,7 +29,7 @@ def test_qwen3_moe_tp4_fp16():
         tensor_parallel_size=4,
         enforce_eager=True,
         dtype="float16",
-        max_model_len=16384,
+        max_model_len=4096,
     ) as vllm_model:
         vllm_model.generate_greedy(example_prompts, max_tokens)
 
@@ -60,6 +60,6 @@ def test_qwen3_5_moe_tp4_fp16():
         tensor_parallel_size=4,
         enforce_eager=True,
         dtype="float16",
-        max_model_len=16384,
+        max_model_len=4096,
     ) as vllm_model:
         vllm_model.generate_greedy(example_prompts, max_tokens)
