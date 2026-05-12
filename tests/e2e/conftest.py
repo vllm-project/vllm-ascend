@@ -82,31 +82,6 @@ PromptAudioInput = _PromptMultiModalInput[tuple[np.ndarray, int]]
 PromptVideoInput = _PromptMultiModalInput[np.ndarray]
 
 
-def _terminate_process_tree(proc: subprocess.Popen) -> None:
-    try:
-        parent = psutil.Process(proc.pid)
-    except psutil.NoSuchProcess:
-        return
-
-    children = parent.children(recursive=True)
-    for child in children:
-        with contextlib.suppress(psutil.NoSuchProcess):
-            child.terminate()
-
-    _, still_alive = psutil.wait_procs(children, timeout=10)
-
-    for child in still_alive:
-        with contextlib.suppress(psutil.NoSuchProcess):
-            child.kill()
-
-    try:
-        parent.terminate()
-        parent.wait(timeout=10)
-    except (psutil.NoSuchProcess, psutil.TimeoutExpired):
-        with contextlib.suppress(psutil.NoSuchProcess):
-            parent.kill()
-
-
 logger = logging.getLogger(__name__)
 
 _TEST_DIR = os.path.dirname(__file__)
@@ -435,7 +410,31 @@ class RemoteOpenAIServer:
 
     def _terminate_server(self) -> None:
         """Subclasses override this method to customize server process termination"""
-        _terminate_process_tree(self.proc)
+        self._terminate_process_tree(self.proc)
+
+    def _terminate_process_tree(self, proc: subprocess.Popen) -> None:
+        try:
+            parent = psutil.Process(proc.pid)
+        except psutil.NoSuchProcess:
+            return
+
+        children = parent.children(recursive=True)
+        for child in children:
+            with contextlib.suppress(psutil.NoSuchProcess):
+                child.terminate()
+
+        _, still_alive = psutil.wait_procs(children, timeout=10)
+
+        for child in still_alive:
+            with contextlib.suppress(psutil.NoSuchProcess):
+                child.kill()
+
+        try:
+            parent.terminate()
+            parent.wait(timeout=10)
+        except (psutil.NoSuchProcess, psutil.TimeoutExpired):
+            with contextlib.suppress(psutil.NoSuchProcess):
+                parent.kill()
 
     def url_for(self, *parts: str) -> str:
         return self.url_root + "/" + "/".join(parts)
@@ -572,10 +571,10 @@ class RemoteEPDServer(RemoteOpenAIServer):
         return proc
 
     def _terminate_server(self) -> None:
-        """kill process and its children"""
+        """Kill server processes and their children."""
         print("vllm instance is stopping")
         for proc in self._proc_list:
-            _terminate_process_tree(proc)
+            self._terminate_process_tree(proc)
 
     def __enter__(self):
         """Context manager entry point."""
