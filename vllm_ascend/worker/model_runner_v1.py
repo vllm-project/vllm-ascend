@@ -1639,6 +1639,18 @@ class NPUModelRunner(GPUModelRunner):
             with record_function_or_nullcontext("EPLB weight D2D"):
                 self.eplb_updator.forward_before()
 
+        sampling_metadata = self.input_batch.sampling_metadata
+        if (
+            self.speculative_config is not None
+            and self.speculative_config.method == "dflash"
+            and sampling_metadata is not None
+            and not sampling_metadata.all_greedy
+        ):
+            # Stochastic reasoning requests on Qwen3.5 hybrid attention are
+            # currently not graph-safe under the DFlash path. Route the whole
+            # request eagerly to preserve correctness.
+            cudagraph_mode = CUDAGraphMode.NONE
+
         # Set cudagraph mode to none if calc_kv_scales is true.
         # KV scales calculation involves dynamic operations that are incompatible
         # with CUDA graph capture.

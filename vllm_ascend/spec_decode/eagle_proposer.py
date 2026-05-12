@@ -845,14 +845,38 @@ class AscendSpecDecodeBaseProposer(SpecDecodeBaseProposer):
                 "num_tokens": num_tokens,
                 "is_prefill": attn_metadata_i.num_prefills,
             }
-            run_draft = partial(self._runnable, **model_inputs)
+            use_eager_draft = (
+                self.method == "dflash"
+                and forward_context.cudagraph_runtime_mode == CUDAGraphMode.FULL
+                and not sampling_metadata.all_greedy
+            )
+            # For stochastic decoding paths (e.g. thinking high with
+            # temperature/top-p sampling), DFlash draft graph replay can
+            # corrupt acceptance behavior on Qwen3.5 hybrid attention.
+            # Keep the target model on FDO graph while running the draft path
+            # eagerly for correctness.
+            run_draft = partial(
+                self._run_merged_draft if use_eager_draft else self._runnable,
+                **model_inputs,
+            )
 
             if self.enable_enpu:
                 self._update_full_graph_params_if_needed(forward_context, num_input_tokens, multi_steps_attn_metadata)
                 draft_token_ids = run_draft()
             else:
+                if self.method == "dflash" and not use_eager_draft:
+                    # DFlash draft graph replay depends on the live non-causal
+                    # attention metadata for the current step. Refresh graph
+                    # params before replay so it does not consume stale state
+                    # from the previous step.
+                    self._update_full_graph_params_if_needed(
+                        forward_context, num_input_tokens, multi_steps_attn_metadata
+                    )
                 draft_token_ids = run_draft()
-                self._update_full_graph_params_if_needed(forward_context, num_input_tokens, multi_steps_attn_metadata)
+                if self.method != "dflash":
+                    self._update_full_graph_params_if_needed(
+                        forward_context, num_input_tokens, multi_steps_attn_metadata
+                    )
 
             # NPU graph capture does not execute kernels — only records
             # operations. The first ACLGraphWrapper call (capture) returns

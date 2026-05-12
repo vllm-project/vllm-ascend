@@ -129,7 +129,9 @@ class AscendDflashProposer(AscendEagleProposer):
         ).to(torch.int32)
 
         if hasattr(cad, "actual_seq_lengths_q"):
-            cad.actual_seq_lengths_q = [num_query_per_req] * batch_size
+            # Keep runtime metadata consistent with graph capture and FIA TND
+            # expectations by storing cumulative query lengths per request.
+            cad.actual_seq_lengths_q = new_query_start_loc[1:].tolist()
         if hasattr(cad, "decode_token_per_req"):
             cad.decode_token_per_req = num_query_per_req
 
