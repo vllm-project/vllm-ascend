@@ -1317,7 +1317,7 @@ class PCPManager:
         # Get local history length for current rank
         local_history_lens = local_seq_lens[:, self.pcp_world_rank, self.dcp_world_rank]
 
-        mtp_masks = []
+        mtp_masks: list = []
 
         for req_idx in range(self.num_decode_reqs):
             history_len = local_history_lens[req_idx].item()
