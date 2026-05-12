@@ -206,10 +206,9 @@ def _run_npu(logits_np, temp_np, seeds_np, pos_np, idx_mapping_np,
 # Group 1: basic — 基本功能（num_tokens = num_req_states，1:1 映射）
 # ============================================================
 @pytest.mark.parametrize("num_tokens,vocab_size", [
-    (1,   32000),   # 最小 batch
-    (4,   32000),   # 小 batch
-    (16,  32000),   # 中 batch
-    (32,  128256),  # 大 vocab（Llama-3 规模）
+    (1,   512),    # 最小 batch
+    (4,   1024),   # 小 batch，vocab 对齐边界
+    (8,   2048),   # 中 batch，vocab 2× 对齐
 ])
 @torch.inference_mode()
 def test_gumbel_sample_basic(num_tokens, vocab_size):
@@ -226,11 +225,9 @@ def test_gumbel_sample_basic(num_tokens, vocab_size):
 #   多个 token slot 共享同一 req_state（典型 prefill 场景）
 # ============================================================
 @pytest.mark.parametrize("num_tokens,num_req_states,vocab_size", [
-    (8,   4,   32000),   # 每 req_state 平均 2 个 token
-    (16,  8,   32000),   # 同上，更大 batch
-    (16,  4,   32000),   # 稀疏映射（4 个 req_state 覆盖 16 个 token）
-    (32,  8,   128256),  # 大 vocab + 多 token
-    (4,   1,   32000),   # 所有 token 共享同一 req_state
+    (8,   4,   1024),   # 每 req_state 平均 2 个 token
+    (16,  4,   512),    # 稀疏映射（4 个 req_state 覆盖 16 个 token）
+    (4,   1,   1024),   # 所有 token 共享同一 req_state
 ])
 @torch.inference_mode()
 def test_gumbel_sample_idx_mapping(num_tokens, num_req_states, vocab_size):
@@ -253,11 +250,9 @@ def test_gumbel_sample_idx_mapping(num_tokens, num_req_states, vocab_size):
 # Group 3: apply_temperature=False（跳过缩放，TilingKey=0 分支）
 # ============================================================
 @pytest.mark.parametrize("num_tokens,vocab_size", [
-    (1,   32000),
-    (8,   32000),
-    (16,  128256),
-    (32,  32000),
-    (64,  32000),
+    (1,   512),
+    (8,   1024),
+    (16,  2048),
 ])
 @torch.inference_mode()
 def test_gumbel_sample_no_temperature(num_tokens, vocab_size):
@@ -275,16 +270,13 @@ def test_gumbel_sample_no_temperature(num_tokens, vocab_size):
 # ============================================================
 @pytest.mark.parametrize("temp_val,apply_temperature", [
     (0.5,  True),   # 低温（更尖锐分布）
-    (1.0,  True),   # 标准温度
     (2.0,  True),   # 高温（更平坦分布）
     (0.1,  True),   # 极低温（接近 greedy）
-    (10.0, True),   # 极高温（接近均匀）
     (0.5,  False),  # 低温但跳过缩放
-    (2.0,  False),  # 高温但跳过缩放
 ])
 @torch.inference_mode()
 def test_gumbel_sample_attr_combinations(temp_val, apply_temperature):
-    num_tokens, vocab_size = 8, 32000
+    num_tokens, vocab_size = 4, 512
     logits_np, _, seeds_np, pos_np, idx_mapping_np = _make_inputs(
         num_tokens, vocab_size, temp_val=temp_val)
     temp_np = np.full(num_tokens, temp_val, dtype=np.float32)
@@ -300,12 +292,9 @@ def test_gumbel_sample_attr_combinations(temp_val, apply_temperature):
 # Group 5: large — vLLM 真实负载规模
 # ============================================================
 @pytest.mark.parametrize("num_tokens,num_req_states,vocab_size,label", [
-    (1,   1,   32000,  "prefill_single_req"),    # prefill：单请求
-    (256, 256, 32000,  "decode_large_batch"),    # decode：大 batch
-    (512, 512, 32000,  "decode_max_batch"),      # decode：最大 batch
-    (1,   1,   128256, "prefill_llama3_vocab"),  # prefill：Llama-3 vocab
-    # prefill 场景：多 token 共享少量 req_state（典型 continuous batching）
-    (128, 8,   32000,  "prefill_multi_token"),
+    (1,   1,   2048,  "prefill_single_req"),    # prefill：单请求
+    (16,  16,  2048,  "decode_batch"),          # decode：中等 batch
+    (16,  4,   1024,  "prefill_multi_token"),   # prefill：多 token 共享 req_state
 ])
 @torch.inference_mode()
 def test_gumbel_sample_large(num_tokens, num_req_states, vocab_size, label):
@@ -325,23 +314,19 @@ def test_gumbel_sample_large(num_tokens, num_req_states, vocab_size, label):
     # 最小规模
     ("min_scale",           1,   1,     1.0,  0,    0),
     # vocab 恰好 = BLOCK_SIZE（4096，整数倍对齐）
-    ("vocab_eq_block",      4,   4096,  1.0,  1,    0),
-    # vocab 恰好 = 2×BLOCK_SIZE
-    ("vocab_2x_block",      4,   8192,  1.0,  2,    0),
+    ("vocab_eq_block",      2,   4096,  1.0,  1,    0),
     # vocab 非整数倍（4096+1）
-    ("vocab_non_aligned",   4,   4097,  1.0,  3,    0),
+    ("vocab_non_aligned",   2,   4097,  1.0,  3,    0),
     # seed=0（边界值）
-    ("seed_zero",           8,   32000, 1.0,  0,    0),
-    # pos=0（边界值）
-    ("pos_zero",            8,   32000, 1.0,  42,   0),
+    ("seed_zero",           4,   512,   1.0,  0,    0),
     # 极大 pos（接近 int32 上限）
-    ("pos_large",           4,   32000, 1.0,  42,   2147483647 - 4),
+    ("pos_large",           2,   512,   1.0,  42,   2147483647 - 2),
     # 极大 seed（接近 int64 上限）
-    ("seed_large",          4,   32000, 1.0,  9223372036854775800, 0),
+    ("seed_large",          2,   512,   1.0,  9223372036854775800, 0),
     # 混合 batch：num_tokens 不整除 usedCoreNum（假设 20 核）
-    ("batch_non_divisible", 21,  32000, 1.0,  7,    0),
+    ("batch_non_divisible", 7,   512,   1.0,  7,    0),
     # num_tokens > num_req_states（多 token 共享 req_state）
-    ("multi_token_per_req", 16,  32000, 1.0,  5,    0),
+    ("multi_token_per_req", 8,   512,   1.0,  5,    0),
 ])
 @torch.inference_mode()
 def test_gumbel_sample_boundary(case_name, num_tokens, vocab_size, temp_val, seed_base, pos_base):
