@@ -39,9 +39,14 @@ If you need to dump cudagraph graphs, you need to install from source code:
 
 We generally follow a coarse-to-fine strategy when capturing data. First, identify the token where the issue shows up, and then decide which range needs to be sampled around that token. The typical workflow is described below.
 
-### 2.1 Prepare the dump configuration file
+### 2.1 Prepare the dump configuration content
 
-Create a `config.json` that can be parsed by `PrecisionDebugger` and place it in an accessible path. Common fields are:
+Prepare configuration content that can be parsed by `PrecisionDebugger`. You can use either of the following ways:
+
+- Pass the config object directly through `--additional-config.dump_config`.
+- Pass a config file path through `--additional-config.dump_config_path`.
+
+Common fields are:
 
 | Field       | Description                                                                                                                                                                                                 | Required | Eager Mode | Graph Mode |
 |:-----------:|:-----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------|:--------:|:-------------:|:-------------:|
@@ -73,7 +78,8 @@ To restrict the operators that are captured, configure the `list` block:
     - Provide a substring such as `"list": ["relu"]` to dump every API whose name contains the substring. When `level=mix`, modules whose names contain the substring are also expanded.
 
 Example configuration:
-eager mode: 
+eager mode:
+
 ```json
 {
   "task": "statistics",
@@ -94,6 +100,7 @@ eager mode:
 ```
 
 Graph mode:
+
 ```json
 {
   "task": "statistics",
@@ -107,7 +114,26 @@ Graph mode:
 
 ## 3. Enable `msprobe` in vllm-ascend
 
-1. Start vLLM and pass the config path through `--additional-config`:
+1. Start vLLM and pass the dump config content through `--additional-config`:
+
+   ```bash
+   vllm serve Qwen/Qwen2.5-0.5B-Instruct \
+     --dtype bfloat16 \
+     --host 0.0.0.0 \
+     --port 8000 \
+     --additional-config '{
+       "dump_config": {
+         "task": "statistics",
+         "level": "L1",
+         "dump_path": "/data/msprobe_dump",
+         "statistics": {
+           "list": []
+         }
+       }
+     }' &
+   ```
+
+   Compatibility mode (legacy) is still supported:
 
    ```bash
    vllm serve Qwen/Qwen2.5-0.5B-Instruct \
@@ -203,7 +229,6 @@ Graph mode:
    ```
 
    - `dump.json`: Statistics for the forward data of each API or module, including names, dtype, shape, max, min, mean, L2 norm (square root of the L2 variance), and CRC-32 when `summary_mode="md5"`. See [dump.json file description](#dumpjson-file-description) for details.
-
 
 ## 5. Analyze the results
 

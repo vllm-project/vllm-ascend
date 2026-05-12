@@ -175,15 +175,13 @@ class TestNPUModelRunnerDebugger(unittest.TestCase):
         debugger.step.assert_called_once_with()
         self.assertTrue(runner._debugger_started)
 
-    def test_start_dump_data_before_execute_model_steps_pending_dummy_dump(self):
+    def test_start_dump_data_noop_when_already_started(self):
         runner = self._build_runner(MagicMock(spec=["start", "step"]))
-        runner._debugger_step_dummy_data_before_execute = True
 
-        runner._start_dump_data_before_execute_model()
+        runner._start_dump_data()
 
-        runner.debugger.step.assert_called_once_with()
         runner.debugger.start.assert_not_called()
-        self.assertFalse(runner._debugger_step_dummy_data_before_execute)
+        runner.debugger.step.assert_not_called()
         self.assertTrue(runner._debugger_started)
 
 
