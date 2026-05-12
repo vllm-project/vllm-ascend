@@ -85,4 +85,4 @@ class NPUOffloadingConnector(OffloadingConnector):
         # the spec already created by ``super().__init__`` so we do not
         # construct the (potentially expensive) OffloadingSpec twice.
         if role == KVConnectorRole.WORKER and self.connector_worker is not None:
-            self.connector_worker = NPUOffloadingConnectorWorker(self.connector_worker.spec)
+            self.connector_worker: OffloadingConnectorWorker = NPUOffloadingConnectorWorker(self.connector_worker.spec)
