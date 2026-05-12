@@ -54,7 +54,7 @@ def _generate_with_backend(prompts, env_value, max_tokens=MAX_TOKENS, **runner_k
         os.environ["VLLM_BATCH_INVARIANT"] = original_value
 
 
-def _generate_logprobs_with_backend(prompts, env_value, max_tokens=5, num_logprobs=5):
+def _generate_logprobs_with_backend(prompts, env_value, max_tokens=5, num_logprobs=5, **runner_kwargs):
     original_value = os.environ.get("VLLM_BATCH_INVARIANT", "0")
     os.environ["VLLM_BATCH_INVARIANT"] = str(env_value)
     try:
@@ -63,6 +63,7 @@ def _generate_logprobs_with_backend(prompts, env_value, max_tokens=5, num_logpro
             max_model_len=MAX_MODEL_LEN,
             enforce_eager=True,
             gpu_memory_utilization=0.7,
+            **runner_kwargs,
         ) as runner:
             return runner.generate_greedy_logprobs(
                 prompts, max_tokens=max_tokens, num_logprobs=num_logprobs

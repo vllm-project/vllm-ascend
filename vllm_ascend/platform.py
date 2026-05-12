@@ -613,26 +613,30 @@ class NPUPlatform(Platform):
         backend_cls_path = backend_map[key]
 
         if selected_backend == AttentionBackendEnum.FLASH_ATTN:
-            if not attn_selector_config.use_batch_invariant:
-                raise ValueError(
-                    "FA3 is not enabled on Ascend without batch invariant mode. "
-                    "For training-inference consistency, please set "
-                    "VLLM_BATCH_INVARIANT=1."
-                )
-            if key != (False, False):
-                raise ValueError(
-                    "Ascend FA3 backend does not support MLA and SFA."
-                )
-            try:
-                import flash_attn_v3  # noqa: F401
-            except ImportError:
-                raise ImportError(
-                    "flash_attn_v3 is not installed but FA3 backend is requested. "
-                    "Please install flash_attn_v3 to enable FA3."
-                )
-            backend_cls_path = "vllm_ascend.attention.fa3_v1.AscendFABackend"
+            backend_cls_path = cls._resolve_fa3_backend(key, attn_selector_config)
 
         return backend_cls_path
+
+    @classmethod
+    def _resolve_fa3_backend(cls, key, attn_selector_config):
+        if not attn_selector_config.use_batch_invariant:
+            raise ValueError(
+                "FA3 is not enabled on Ascend without batch invariant mode. "
+                "For training-inference consistency, please set "
+                "VLLM_BATCH_INVARIANT=1."
+            )
+        if key != (False, False):
+            raise ValueError(
+                "FA3 backend does not support MLA and SFA."
+            )
+        try:
+            import flash_attn_v3  # noqa: F401
+        except ImportError:
+            raise ValueError(
+                "flash_attn_v3 is not installed but FA3 backend is requested. "
+                "Please install flash_attn_v3 to enable FA3."
+            )
+        return "vllm_ascend.attention.fa3_v1.AscendFABackend"
 
     @classmethod
     def get_punica_wrapper(cls) -> str:
