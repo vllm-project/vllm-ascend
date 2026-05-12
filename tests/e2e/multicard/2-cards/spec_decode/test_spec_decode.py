@@ -57,7 +57,9 @@ def _require_cached_model(repo_id: str) -> None:
 
     # ModelScope cache (CI primary location when VLLM_USE_MODELSCOPE=True)
     try:
-        from modelscope.utils.file_utils import get_model_cache_root
+        from modelscope.utils.file_utils import (  # type: ignore[import-untyped]
+            get_model_cache_root,
+        )
 
         ms_config = os.path.join(get_model_cache_root(), repo_id, "config.json")
         if os.path.isfile(ms_config):
