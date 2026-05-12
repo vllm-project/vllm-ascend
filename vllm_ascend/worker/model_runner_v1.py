@@ -1907,11 +1907,8 @@ class NPUModelRunner(GPUModelRunner):
             assert self.sampling_done_event is not None
             self.sampling_done_event.record()
 
-<<<<<<< HEAD
         self.valid_sampled_token_count_gpu: torch.Tensor | None = None # type: ignore[no-redef]
 
-=======
->>>>>>> 3c53d0ab (Revert "[Performance]zero bubble async scheduling and spec decoding (#7640)")
         def propose_draft_token_ids(sampled_token_ids):
             assert spec_decode_common_attn_metadata is not None
             self._draft_token_ids = self.propose_draft_token_ids(
@@ -2520,15 +2517,12 @@ class NPUModelRunner(GPUModelRunner):
             query_start_loc=self.query_start_loc.gpu[: num_reqs_padded + 1],
             query_start_loc_cpu=self.query_start_loc.cpu[: num_reqs_padded + 1],
             seq_lens=self.seq_lens[:num_reqs_padded],
-<<<<<<< HEAD
             # Always pass optimistic_seq_lens_cpu via _seq_lens_cpu so NPU
             # attention backends can get CPU seq_lens without GPU->CPU sync.
             # This is separate from seq_lens_cpu (None in async) which eagle
             # proposer checks to distinguish async/non-async behavior.
             _seq_lens_cpu=self.optimistic_seq_lens_cpu[:num_reqs_padded],
             seq_lens_cpu_upper_bound=self.optimistic_seq_lens_cpu[:num_reqs_padded],
-=======
->>>>>>> 3c53d0ab (Revert "[Performance]zero bubble async scheduling and spec decoding (#7640)")
             # TODO
             seq_lens_cpu=seq_lens_cpu,
             # TODO

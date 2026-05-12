@@ -878,7 +878,6 @@ class AscendAttentionBackendImpl(AttentionImpl):
             and self.sinks is None
         ):
             return self._forward_fia_slidingwindow(query, attn_metadata, output)
-<<<<<<< HEAD
         passed_key = key
         key, value, block_size, block_table, actual_seq_lengths_kv = self._get_fia_params(
             key, value, attn_metadata, kv_cache
@@ -889,9 +888,6 @@ class AscendAttentionBackendImpl(AttentionImpl):
             block_table, actual_seq_lengths_kv = get_kvcomp_decode_params(
                 self.layerIndex, attn_metadata.kvcomp_metadata, query, passed_key, block_table, actual_seq_lengths_kv
             )
-=======
-        key, value, block_size, block_table, actual_seq_lengths_kv = self._get_fia_params(key, value, attn_metadata)
->>>>>>> 3c53d0ab (Revert "[Performance]zero bubble async scheduling and spec decoding (#7640)")
         num_tokens = attn_metadata.actual_seq_lengths_q[-1]
         query = query[:num_tokens]
         if (

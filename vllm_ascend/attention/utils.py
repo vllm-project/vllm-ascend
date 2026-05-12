@@ -199,13 +199,8 @@ class AscendCommonAttentionMetadata(CommonAttentionMetadata):
             query_start_loc=self.query_start_loc[: num_actual_reqs + 1],
             query_start_loc_cpu=self.query_start_loc_cpu[: num_actual_reqs + 1],
             seq_lens=self.seq_lens[:num_actual_reqs],
-<<<<<<< HEAD
             seq_lens_cpu=_slice_reqs(self.seq_lens_cpu),
             num_computed_tokens_cpu=_slice_reqs(self.num_computed_tokens_cpu),
-=======
-            seq_lens_cpu=self.seq_lens_cpu[:num_actual_reqs],
-            num_computed_tokens_cpu=self.num_computed_tokens_cpu[:num_actual_reqs],
->>>>>>> 3c53d0ab (Revert "[Performance]zero bubble async scheduling and spec decoding (#7640)")
             num_reqs=num_actual_reqs,
             num_actual_tokens=num_actual_tokens,
             max_query_len=self.max_query_len,
