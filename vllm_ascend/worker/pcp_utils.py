@@ -79,7 +79,7 @@ class PCPManager:
 
         # 在这里首先构造一个buffer用于承载最后生成的mask
         self.dcp_mtp_attn_mask = CpuGpuBuffer(
-            max_num_reqs,
+            (max_num_reqs, self.self.decode_threshold, 16384),
             dtype=torch.bool,
             device=device,
             pin_memory=pin_memory,
@@ -1239,8 +1239,9 @@ class PCPManager:
                 if dcp_mtp_attn_mask is not None:
                     self.dcp_mtp_attn_mask.np[:self.num_decode_reqs] = dcp_mtp_attn_mask
                     self.dcp_mtp_attn_mask.copy_to_gpu(self.num_decode_reqs)
-
-                long_seq_metadata.dcp_mtp_attn_mask = self.dcp_mtp_attn_mask
+                    long_seq_metadata.dcp_mtp_attn_mask = self.dcp_mtp_attn_mask.gpu[:self.num_decode_reqs]
+                else:
+                    long_seq_metadata.dcp_mtp_attn_mask = None
             else:
                 long_seq_metadata.dcp_mtp_attn_mask = None
 
@@ -1292,8 +1293,8 @@ class PCPManager:
             Each mask has shape [num_mtp_tokens, num_local_tokens]
             Returns None for non-decode requests or when no decode requests exist
         """
-        if self.num_decode_reqs == 0:
-            return [None] * (self.num_decode_reqs + self.num_prefill_reqs)
+        query_len = 1 + self.speculative_config.num_speculative_tokens
+        mtp_attn_mask = torch.ones(self.num_decode_reqs, query_len, 16384, dtype=torch.bool)  # max local_len is 16384
 
         # Calculate combined CP rank and size
         cp_rank = self.pcp_world_rank * self.dcp_world_size + self.dcp_world_rank
@@ -1362,13 +1363,9 @@ class PCPManager:
             mtp_masks.append(None)
 
         if mtp_masks[0] is not None:
-            query_len = mtp_masks[0].shape[0]
-            mtp_attn_mask = torch.ones(self.num_decode_reqs, query_len, 16384, dtype=torch.bool)
             mtp_masks = mtp_masks[:self.num_decode_reqs]
             for i, mask in enumerate(mtp_masks):
                 S = mask.shape[0]
                 L = mask.shape[1]
                 mtp_attn_mask[i, :S, :L] = mask
-            return mtp_attn_mask
-        else:
-            return None
+        return mtp_attn_mask

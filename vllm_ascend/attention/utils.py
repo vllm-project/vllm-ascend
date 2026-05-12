@@ -144,6 +144,7 @@ class AscendPrefillContextParallelMetadata:
     # TODO:To be refactored.
     attn_chunk_seqlens: torch.Tensor = None
 
+    dcp_mtp_attn_mask: torch.Tensor = None
 
 @dataclass
 class AscendCommonAttentionMetadata(CommonAttentionMetadata):

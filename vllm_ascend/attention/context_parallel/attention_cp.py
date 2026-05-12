@@ -361,6 +361,7 @@ class AscendAttentionCPImpl(AscendAttentionBackendImpl):
                     dcp_size,
                     pcp_rank,
                     dcp_rank,
+                    attn_mask,
                 ) = param
 
                 if _EXTRA_CTX.is_draft_model:
@@ -401,7 +402,7 @@ class AscendAttentionCPImpl(AscendAttentionBackendImpl):
                     num_heads=num_heads,
                     num_key_value_heads=num_kv_heads,
                     input_layout=input_layout,
-                    atten_mask=None,
+                    atten_mask=attn_mask,
                     scale=scale,
                     antiquant_mode=0,
                     antiquant_scale=None,
@@ -655,6 +656,7 @@ class AscendAttentionCPImpl(AscendAttentionBackendImpl):
                     self.dcp_size,
                     self.pcp_rank,
                     self.dcp_rank,
+                    attn_mask,
                 )
             )
             torch.npu.graph_task_group_begin(stream)
