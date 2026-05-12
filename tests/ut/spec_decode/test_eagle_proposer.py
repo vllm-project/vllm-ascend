@@ -2319,7 +2319,7 @@ class TestRunMergedDraft(TestBase):
         assert sig_name == ["self", "input_ids", "positions", "hidden_states", "inputs_embeds"]
         sig = inspect.signature(RunnerCls.compute_logits)
         sig_name = self.get_param_names(sig)
-        assert sig_name == ["self", "hidden_states"]
+        assert sig_name == ["self", "hidden_states", "enable_reduce_sample"]
 
         import vllm_ascend.ascend_forward_context
 
