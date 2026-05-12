@@ -60,6 +60,9 @@ BATCH_SPECS = {
     "single_prefill": BatchSpec(seq_lens=[1024], query_lens=[64]),
     "small_encoder_prefill": BatchSpec(seq_lens=[32, 64, 128, 256], query_lens=[32, 64, 128, 256]),
     "medium_encoder_prefill": BatchSpec(seq_lens=[256, 512, 1024, 2048], query_lens=[256, 512, 1024, 2048]),
+    "mtp_1_plus_3": BatchSpec(seq_lens=[256, 512, 1024, 1536], query_lens=[4, 4, 4, 4]),
+    "mtp_1_plus_7": BatchSpec(seq_lens=[512, 1024, 2048, 3072], query_lens=[8, 8, 8, 8]),
+    "mtp_small": BatchSpec(seq_lens=[64, 128, 256], query_lens=[4, 4, 4]),
 }
 
 
@@ -358,6 +361,9 @@ def _test_npu_attention_correctness(
         "large_prefill",
         "single_decode",
         "single_prefill",
+        "mtp_1_plus_3",
+        "mtp_1_plus_7",
+        "mtp_small",
     ],
 )
 @pytest.mark.parametrize("model", ["Qwen/Qwen3-8B"])
