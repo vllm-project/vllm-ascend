@@ -725,6 +725,7 @@ class AscendMlaCPImpl(AscendMLAImpl):
                     decode_meta.cp_seq_len,
                     weak_ref_tensors(attn_output),
                     weak_ref_tensors(softmax_lse),
+                    spec_attn_mask
                 )
             )
             torch.npu.graph_task_group_begin(stream)
