@@ -9,10 +9,27 @@ from vllm_ascend.ops.triton.triton_utils import init_device_properties_triton
 IS_NEOX_STYLE = [True, False]
 DTYPES = [torch.bfloat16, torch.float16]
 MAX_POSITION_EMBEDDINGS = [262144]
-HEAD_SIZES = [64, 128]
-ROTARY_DIMS = [32, 64]
-NUM_Q_HEADS = [64]
-NUM_K_HEADS = [1]
+
+# parameters for test_rotary_embedding_triton_kernel only
+# (head_size, rotary_dim)
+HEAD_ROTARY_DIMS = [
+    (64, 32),
+    (64, 64),
+    (128, 32),
+    (128, 64),
+    (128, 128),
+]
+# (num_q_heads, num_k_heads)
+NUM_QK_HEADS = [
+    (64, 1),
+    (96, 8),
+]
+
+# parameters for test_rotary_embedding_triton_kernel_siso only
+SISO_HEAD_SIZES = [64, 128]
+SISO_ROTARY_DIMS = [32, 64]
+SISO_NUM_HEADS = [64]
+
 NUM_TOKENS = [1, 4, 8, 16, 1024]
 SEEDS = [0]
 DEVICES = [f"npu:{0}"]
@@ -95,10 +112,8 @@ def _rope_siso_pytorch_native(
 
 @pytest.mark.parametrize("is_neox_style", IS_NEOX_STYLE)
 @pytest.mark.parametrize("num_tokens", NUM_TOKENS)
-@pytest.mark.parametrize("num_q_heads", NUM_Q_HEADS)
-@pytest.mark.parametrize("num_k_heads", NUM_K_HEADS)
-@pytest.mark.parametrize("head_size", HEAD_SIZES)
-@pytest.mark.parametrize("rotary_dim", ROTARY_DIMS)
+@pytest.mark.parametrize("num_q_heads,num_k_heads", NUM_QK_HEADS)
+@pytest.mark.parametrize("head_size,rotary_dim", HEAD_ROTARY_DIMS)
 @pytest.mark.parametrize("dtype", DTYPES)
 @pytest.mark.parametrize("seed", SEEDS)
 @pytest.mark.parametrize("device", DEVICES)
@@ -117,8 +132,6 @@ def test_rotary_embedding_triton_kernel(
     torch.manual_seed(seed)
     torch.set_default_device(device)
     init_device_properties_triton()
-    if rotary_dim == -1:
-        rotary_dim = head_size
     sin = torch.randn(num_tokens, rotary_dim // 2, dtype=dtype, device=device)
     cos = torch.randn(num_tokens, rotary_dim // 2, dtype=dtype, device=device)
     q_trt = torch.randn(num_tokens,
@@ -173,10 +186,8 @@ def test_rotary_embedding_triton_kernel(
 @pytest.mark.parametrize("max_position_embeddings", MAX_POSITION_EMBEDDINGS)
 @pytest.mark.parametrize("is_neox_style", IS_NEOX_STYLE)
 @pytest.mark.parametrize("num_tokens", NUM_TOKENS)
-@pytest.mark.parametrize("num_q_heads", NUM_Q_HEADS)
-@pytest.mark.parametrize("num_k_heads", NUM_K_HEADS)
-@pytest.mark.parametrize("head_size", HEAD_SIZES)
-@pytest.mark.parametrize("rotary_dim", ROTARY_DIMS)
+@pytest.mark.parametrize("num_q_heads,num_k_heads", NUM_QK_HEADS)
+@pytest.mark.parametrize("head_size,rotary_dim", HEAD_ROTARY_DIMS)
 @pytest.mark.parametrize("dtype", DTYPES)
 @pytest.mark.parametrize("seed", SEEDS)
 @pytest.mark.parametrize("device", DEVICES)
@@ -196,8 +207,6 @@ def test_rotary_embedding_triton_kernel_with_cos_sin_cache(
     torch.manual_seed(seed)
     torch.set_default_device(device)
     init_device_properties_triton()
-    if rotary_dim == -1:
-        rotary_dim = head_size
     cos_sin_cache = torch.randn(max_position_embeddings, rotary_dim, dtype=dtype, device=device)
     positions = torch.randint(low=0, high=max_position_embeddings, size=(num_tokens,), dtype=torch.int64, device=device)
     q_trt = torch.randn(num_tokens,
@@ -251,9 +260,9 @@ def test_rotary_embedding_triton_kernel_with_cos_sin_cache(
 
 @pytest.mark.parametrize("is_neox_style", IS_NEOX_STYLE)
 @pytest.mark.parametrize("num_tokens", NUM_TOKENS)
-@pytest.mark.parametrize("num_q_heads", NUM_Q_HEADS)
-@pytest.mark.parametrize("head_size", HEAD_SIZES)
-@pytest.mark.parametrize("rotary_dim", ROTARY_DIMS)
+@pytest.mark.parametrize("num_q_heads", SISO_NUM_HEADS)
+@pytest.mark.parametrize("head_size", SISO_HEAD_SIZES)
+@pytest.mark.parametrize("rotary_dim", SISO_ROTARY_DIMS)
 @pytest.mark.parametrize("dtype", DTYPES)
 @pytest.mark.parametrize("seed", SEEDS)
 @pytest.mark.parametrize("device", DEVICES)
