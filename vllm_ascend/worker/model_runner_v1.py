@@ -626,9 +626,11 @@ class NPUModelRunner(GPUModelRunner):
             return None
 
         refresh_seq_lens_cpu = self.input_batch.quest_refresh_seq_lens_cpu
+        assert refresh_seq_lens_cpu is not None
         refresh_seq_lens_cpu[:num_reqs].fill(0)
         seq_lens_cpu = self.optimistic_seq_lens_cpu[:num_reqs]
         valid_tokens = self.input_batch.quest_metadata_valid_tokens
+        assert valid_tokens is not None
 
         for row_idx, req_id in enumerate(self.input_batch.req_ids[:num_reqs]):
             seq_len = int(seq_lens_cpu[row_idx])
@@ -639,22 +641,30 @@ class NPUModelRunner(GPUModelRunner):
             ):
                 refresh_seq_lens_cpu[row_idx] = seq_len
 
-        self.input_batch.quest_refresh_seq_lens[:num_reqs].copy_(
-            self.input_batch.quest_refresh_seq_lens_cpu_tensor[:num_reqs],
+        quest_refresh_seq_lens = self.input_batch.quest_refresh_seq_lens
+        assert quest_refresh_seq_lens is not None
+        quest_refresh_seq_lens_cpu_tensor = self.input_batch.quest_refresh_seq_lens_cpu_tensor
+        assert quest_refresh_seq_lens_cpu_tensor is not None
+        quest_refresh_seq_lens[:num_reqs].copy_(
+            quest_refresh_seq_lens_cpu_tensor[:num_reqs],
             non_blocking=True,
         )
-        return self.input_batch.quest_refresh_seq_lens[:num_reqs]
+        return quest_refresh_seq_lens[:num_reqs]
 
     def _commit_quest_metadata_refreshes(self, num_reqs: int) -> None:
         if not self.quest_model_supported or num_reqs <= 0:
             return
 
+        refresh_seq_lens_cpu = self.input_batch.quest_refresh_seq_lens_cpu
+        assert refresh_seq_lens_cpu is not None
+        valid_tokens = self.input_batch.quest_metadata_valid_tokens
+        assert valid_tokens is not None
         for row_idx, req_id in enumerate(self.input_batch.req_ids[:num_reqs]):
-            refreshed_seq_len = int(self.input_batch.quest_refresh_seq_lens_cpu[row_idx])
+            refreshed_seq_len = int(refresh_seq_lens_cpu[row_idx])
             if refreshed_seq_len <= 0:
                 continue
             self.input_batch.quest_metadata_owner_req_ids[row_idx] = req_id
-            self.input_batch.quest_metadata_valid_tokens[row_idx] = refreshed_seq_len
+            valid_tokens[row_idx] = refreshed_seq_len
 
     def _init_device_properties(self) -> None:
         self.num_sms = None
@@ -2818,7 +2828,9 @@ class NPUModelRunner(GPUModelRunner):
             and self.input_batch.quest_metadata_block_tables is not None
         )
         if quest_decode_ready:
-            quest_metadata_block_tables = self.input_batch.quest_metadata_block_tables[:num_reqs]
+            quest_metadata_block_tables = self.input_batch.quest_metadata_block_tables
+            assert quest_metadata_block_tables is not None
+            quest_metadata_block_tables = quest_metadata_block_tables[:num_reqs]
             quest_refresh_seq_lens = self._prepare_quest_refresh_seq_lens(num_reqs)
             quest_ready = True
 
