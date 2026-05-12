@@ -17,6 +17,7 @@ GumbelSample 算子 e2e 测试
 """
 
 import time
+from typing import Optional
 
 import numpy as np
 import pytest
@@ -54,23 +55,23 @@ def _smulhi(a: np.uint32, b: np.uint32) -> np.uint32:
 
 def _philox4x32(c0: int, k0: int, k1: int) -> np.uint32:
     """Philox4x32-10 单元素实现，返回 c0 输出（与 kernel Philox4x32 完全对齐）。"""
-    c0 = np.uint32(c0)
+    c0_u32 = np.uint32(c0)
     c1 = np.uint32(0)
     c2 = np.uint32(0)
     c3 = np.uint32(0)
-    k0 = np.uint32(k0)
-    k1 = np.uint32(k1)
+    k0_u32 = np.uint32(k0)
+    k1_u32 = np.uint32(k1)
     for _ in range(PHILOX_ROUNDS):
         hi_b = _smulhi(PHILOX_ROUND_B, c2)
-        hi_a = _smulhi(PHILOX_ROUND_A, c0)
-        new_c0 = hi_b ^ c1 ^ k0
-        new_c2 = hi_a ^ c3 ^ k1
+        hi_a = _smulhi(PHILOX_ROUND_A, c0_u32)
+        new_c0 = hi_b ^ c1 ^ k0_u32
+        new_c2 = hi_a ^ c3 ^ k1_u32
         new_c1 = np.uint32(np.int32(PHILOX_ROUND_B) * np.int32(c2))
-        new_c3 = np.uint32(np.int32(PHILOX_ROUND_A) * np.int32(c0))
-        c0, c1, c2, c3 = new_c0, new_c1, new_c2, new_c3
-        k0 = np.uint32(k0 + PHILOX_KEY_A)
-        k1 = np.uint32(k1 + PHILOX_KEY_B)
-    return c0
+        new_c3 = np.uint32(np.int32(PHILOX_ROUND_A) * np.int32(c0_u32))
+        c0_u32, c1, c2, c3 = new_c0, new_c1, new_c2, new_c3
+        k0_u32 = np.uint32(k0_u32 + PHILOX_KEY_A)
+        k1_u32 = np.uint32(k1_u32 + PHILOX_KEY_B)
+    return c0_u32
 
 
 def _philox_to_uniform(raw: np.uint32) -> np.float32:
@@ -142,7 +143,7 @@ def golden_gumbel_sample(
 # ============================================================
 # 辅助：构造输入 + 调用 NPU 算子 + 打印延迟
 # ============================================================
-def _make_inputs(num_tokens: int, vocab_size: int, num_req_states: int = None,
+def _make_inputs(num_tokens: int, vocab_size: int, num_req_states: Optional[int] = None,
                  temp_val: float = 1.0, seed_base: int = 42, pos_base: int = 0):
     """
     构造 GumbelSample 输入张量（CPU numpy）。
