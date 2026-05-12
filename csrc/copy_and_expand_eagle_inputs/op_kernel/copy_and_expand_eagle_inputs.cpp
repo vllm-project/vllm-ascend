@@ -99,6 +99,40 @@ public:
         for (uint32_t rLocal = 0; rLocal < myNumReqs; rLocal++) {
             ProcessOneRequestShiftTrue(myStartReq + rLocal, rLocal);
         }
+        // shift_input_ids=true 下，generator 计算 totalDraftTokens = sum(outputLen[r])
+        // 但 outputStart 的步长会让相邻请求重叠 1 格（每个 qe==nqs 的请求都贡献 1 格）。
+        // 实际写入范围比 totalDraftTokens 短 N 格（N=重叠请求数）。剩余尾部 N 格不会
+        // 被任何请求写到，但 golden 把它们当作 zero-init 比对。kernel 不能依赖
+        // output GM 分配时被清零（pytest 连续跑会复用 GM），所以显式补零。
+        if (myStartReq + myNumReqs == numReqs && totalDraftTokens > 0) {
+            // 计算实际写入到的最后位置 + 1（= last req 的 outputStart + outputLen）
+            LocalTensor<int32_t> lqs = qsBuf.Get<int32_t>();
+            LocalTensor<int32_t> lqe = qeBuf.Get<int32_t>();
+            uint32_t lastLocal = myNumReqs - 1;
+            int32_t lastQs = lqs.GetValue(lastLocal);
+            int32_t lastNqs = lqs.GetValue(lastLocal + 1);
+            int32_t lastQe = lqe.GetValue(lastLocal);
+            int32_t lastNumValid = lastQe - lastQs;
+            if (lastNumValid < 0) lastNumValid = 0;
+            int32_t lastNumRejected = lastNqs - lastQe - 1;
+            if (lastNumRejected < 0) lastNumRejected = 0;
+            int32_t lastOutputLen = lastNumValid + (int32_t)numPaddingSlotsPerReq + lastNumRejected;
+            int32_t lastOutputStart = lastQs + (int32_t)(myStartReq + lastLocal) * ((int32_t)numPaddingSlotsPerReq - 1);
+            int32_t writtenEnd = lastOutputStart + lastOutputLen;  // 下一个未写位置
+            int32_t tailCount = (int32_t)totalDraftTokens - writtenEnd;
+            if (tailCount > 0) {
+                LocalTensor<int32_t> lZero32 = outIdsBuf.Get<int32_t>();
+                LocalTensor<int8_t>  lZero8  = outRejBuf.Get<int8_t>();
+                for (int32_t j = 0; j < tailCount; j++) {
+                    lZero32.SetValue(j, (int32_t)0);
+                    lZero8.SetValue(j, (int8_t)0);
+                }
+                DataCopyOut_int32(gmOutInputIds, lZero32, writtenEnd, tailCount);
+                DataCopyOut_int32(gmOutPositions, lZero32, writtenEnd, tailCount);
+                DataCopyOut_int8(gmOutIsRejectedTokenMask, lZero8, writtenEnd, tailCount);
+                DataCopyOut_int8(gmOutIsMaskedTokenMask, lZero8, writtenEnd, tailCount);
+            }
+        }
     }
 
 private:
@@ -317,10 +351,18 @@ private:
             lMsk.SetValue(j, (int8_t)0);
         }
 
-        DataCopyOut_int32(gmOutInputIds, lIds, outputStart, outputLen);
-        DataCopyOut_int32(gmOutPositions, lPos, outputStart, outputLen);
-        DataCopyOut_int8(gmOutIsRejectedTokenMask, lRej, outputStart, outputLen);
-        DataCopyOut_int8(gmOutIsMaskedTokenMask, lMsk, outputStart, outputLen);
+        // shift_input_ids=true 下，当 nextQueryStart == queryEnd（该请求实际无 rejected token，
+        // 被 max(...,0) 钳到 0）时，outputLen 比相邻请求间距多 1，最后一格会与
+        // 下一个请求的 outputStart 重叠。NPU 的 DataCopyPad 在 sub-block RMW 下不保证
+        // "后写赢"，因此让本请求少写一格，由 req[r+1] 的首格来写它。
+        int32_t outputLenToWrite = outputLen;
+        if (nextQueryStart == queryEnd && (r + 1) < numReqs) {
+            outputLenToWrite = outputLen - 1;
+        }
+        DataCopyOut_int32(gmOutInputIds, lIds, outputStart, outputLenToWrite);
+        DataCopyOut_int32(gmOutPositions, lPos, outputStart, outputLenToWrite);
+        DataCopyOut_int8(gmOutIsRejectedTokenMask, lRej, outputStart, outputLenToWrite);
+        DataCopyOut_int8(gmOutIsMaskedTokenMask, lMsk, outputStart, outputLenToWrite);
 
         LocalTensor<int32_t> lNti = ntiBuf.Get<int32_t>();
         lNti.SetValue(0, outputStart + numValid);
