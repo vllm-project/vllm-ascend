@@ -45,7 +45,7 @@ def apply_grammar_bitmask(self, logits, input_batch, grammar_req_ids, grammar_bi
         return
 
     # Asynchronously copy the bitmask to NPU.
-    with torch.cuda.stream(self.copy_stream):
+    with torch.npu.stream(self.copy_stream):
         bitmask = async_copy_to_gpu(
             grammar_bitmask,
             out=self.grammar_bitmask[: grammar_bitmask.shape[0]],
@@ -66,11 +66,11 @@ def apply_grammar_bitmask(self, logits, input_batch, grammar_req_ids, grammar_bi
     assert num_masks == len(mapping), f"num_masks={num_masks} != len(mapping)={len(mapping)}"
 
     # Asynchronously copy the mapping to NPU.
-    with torch.cuda.stream(self.copy_stream):
+    with torch.npu.stream(self.copy_stream):
         logits_indices_cpu = torch.tensor(mapping, dtype=torch.int32, device="cpu", pin_memory=True)
         logits_indices = self.logits_indices[: len(mapping)].copy_(logits_indices_cpu, non_blocking=True)
     # ensure copies finish before kernel launch
-    current_stream = torch.cuda.current_stream()
+    current_stream = torch.npu.current_stream()
     current_stream.wait_stream(self.copy_stream)
 
     vocab_size = logits.shape[-1]
