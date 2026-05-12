@@ -212,6 +212,15 @@ log_selected_ops
   : "${SOC_VERSION:?SOC_VERSION is not set}"
   : "${SOC_ARG:?SOC_ARG is not set}"
 
+  # Ensure CANN environment is sourced before build
+  if [ -n "${ASCEND_HOME_PATH}" ] && [ -f "${ASCEND_HOME_PATH}/set_env.sh" ]; then
+    source "${ASCEND_HOME_PATH}/set_env.sh"
+    log "sourced CANN env from ${ASCEND_HOME_PATH}"
+  fi
+  log "CANN cmake modules check:"
+  ls -l "${ASCEND_HOME_PATH}/tools/cmake/" 2>/dev/null || log "WARNING: ${ASCEND_HOME_PATH}/tools/cmake/ not found"
+  ls -l "${ASCEND_HOME_PATH}/$(uname -m)-linux/tikcpp/ascendc_kernel_cmake/cmake/" 2>/dev/null || log "WARNING: ascendc_kernel_cmake not found"
+
   log "build command: bash build.sh --pkg --ops=\"${CUSTOM_OPS}\" --soc=\"${SOC_ARG}\""
   log "building custom ops ${CUSTOM_OPS} for ${SOC_VERSION}"
   bash build.sh --pkg --ops="${CUSTOM_OPS}" --soc="${SOC_ARG}"
