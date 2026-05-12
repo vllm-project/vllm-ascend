@@ -19,6 +19,7 @@ from __future__ import annotations
 
 import math
 from contextlib import contextmanager, nullcontext
+from typing import cast
 
 import numpy as np
 import torch
@@ -37,6 +38,7 @@ from vllm.v1.kv_cache_interface import (
 )
 from vllm.v1.sample.rejection_sampler import RejectionSampler
 
+from vllm_ascend._310p.block_table import MultiGroupBlockTable as MultiGroupBlockTable310
 from vllm_ascend._310p.npu_input_batch import NPUInputBatch310 as NPUInputBatch
 from vllm_ascend._310p.ops.rotary_embedding import prepare_mrope_cos_sin_slices_from_runner
 from vllm_ascend._310p.sample.sampler import AscendSampler310
@@ -170,6 +172,13 @@ class NPUModelRunner310(NPUModelRunner):
 
         self.query_start_loc.copy_to_gpu()
         return num_reqs_padded
+
+    def _use_cpu_input_metadata(self) -> bool:
+        return True
+
+    def _compute_cpu_slot_mapping(self, req_indices: np.ndarray, positions: np.ndarray) -> None:
+        block_table = cast(MultiGroupBlockTable310, self.input_batch.block_table)
+        block_table.compute_slot_mapping(req_indices, positions)
 
     @torch.inference_mode()
     def _dummy_run(

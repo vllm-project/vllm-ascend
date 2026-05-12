@@ -134,7 +134,6 @@ from vllm_ascend.utils import (
     enable_sp_by_pass,
     get_c_env,
     global_stream,
-    is_310p,
     kv_cache_spec_uses_sparse_c8,
     lmhead_tp_enable,
     set_weight_prefetch_method,
@@ -612,6 +611,12 @@ class NPUModelRunner(GPUModelRunner):
 
         return num_reqs_padded
 
+    def _use_cpu_input_metadata(self) -> bool:
+        return False
+
+    def _compute_cpu_slot_mapping(self, req_indices: np.ndarray, positions: np.ndarray) -> None:
+        raise NotImplementedError
+
     def _prepare_inputs(
         self,
         scheduler_output: "SchedulerOutput",
@@ -663,9 +668,9 @@ class NPUModelRunner(GPUModelRunner):
             self.query_pos.np[: cu_num_tokens[-1]],
             out=positions_np,
         )
-        use_310p_cpu_metadata = is_310p()
-        if use_310p_cpu_metadata:
-            self.input_batch.block_table.compute_slot_mapping(
+        use_cpu_input_metadata = self._use_cpu_input_metadata()
+        if use_cpu_input_metadata:
+            self._compute_cpu_slot_mapping(
                 req_indices,
                 positions_np[:total_num_scheduled_tokens],
             )
@@ -674,7 +679,7 @@ class NPUModelRunner(GPUModelRunner):
         # Use blocking .to(device) to ensure data lands on GPU before PCP
         # modifies CPU position buffers. PCP and async spec decode are
         # mutually exclusive, so the sync is acceptable.
-        if self.pcp_size > 1 and not use_310p_cpu_metadata:
+        if self.pcp_size > 1 and not use_cpu_input_metadata:
             pre_pcp_positions = torch.from_numpy(
                 positions_np[:total_num_scheduled_tokens]
             ).to(self.device)
@@ -940,9 +945,8 @@ class NPUModelRunner(GPUModelRunner):
         self.num_scheduled_tokens.np[:num_reqs] = num_scheduled_tokens
         self.num_scheduled_tokens.copy_to_gpu(num_reqs)
         num_scheduled_tokens_gpu = self.num_scheduled_tokens.gpu[:num_reqs]
-        if self.pcp_size > 1 or use_310p_cpu_metadata:
-            # PCP and 310P both rely on CPU-computed positions. PCP needs
-            # special CPU-only offsets; 310P avoids unsupported device Add ops.
+        if self.pcp_size > 1 or use_cpu_input_metadata:
+            # PCP and some device-specific runners rely on CPU-computed positions.
             self.positions[:total_num_scheduled_tokens].copy_(
                 self._positions_cpu_buf[:total_num_scheduled_tokens],
                 non_blocking=True,
@@ -952,7 +956,7 @@ class NPUModelRunner(GPUModelRunner):
                 self.num_computed_tokens[req_indices_gpu].to(torch.int64)
                 + self.query_pos.gpu[:total_num_scheduled_tokens]
             )
-        if use_310p_cpu_metadata and not need_async_num_computed_update:
+        if use_cpu_input_metadata and not need_async_num_computed_update:
             self.seq_lens[:num_reqs].copy_(
                 self.optimistic_seq_lens_cpu[:num_reqs],
                 non_blocking=True,
@@ -988,7 +992,7 @@ class NPUModelRunner(GPUModelRunner):
 
         # For non-PCP, compute slot_mapping on GPU. PCP slot_mapping was
         # already computed on GPU before PCP split the positions.
-        if self.pcp_size <= 1 and not use_310p_cpu_metadata:
+        if self.pcp_size <= 1 and not use_cpu_input_metadata:
             self.input_batch.block_table.compute_slot_mapping(
                 num_reqs,
                 self.query_start_loc.gpu[: num_reqs + 1],
