@@ -46,8 +46,8 @@
 #include "attention/lightning_indexer_quant/lightning_indexer_quant_torch_adpt.h"
 #include "moe/causal_conv1d_v310/causal_conv1d_310_torch_adpt.h"
 #include "attention/recurrent_gated_delta_rule_v310/recurrent_gated_delta_rule_310_torch_adpt.h"
-#include "scatter_pa_kv_cache_vllm/scatter_pa_kv_cache_vllm_torch_adpt.h"
-#include "gather_pa_kv_cache_vllm/gather_pa_kv_cache_vllm_torch_adpt.h"
+#include "attention/scatter_pa_kv_cache_vllm/scatter_pa_kv_cache_vllm_torch_adpt.h"
+#include "attention/gather_pa_kv_cache_vllm/gather_pa_kv_cache_vllm_torch_adpt.h"
 #include <c10/core/Device.h>
 #include <c10/core/Scalar.h>
 #include <c10/util/Exception.h>

@@ -19,7 +19,7 @@
 #include "scatter_pa_kv_cache_vllm_tiling.h"
 
 #include "log/ops_log.h"
-#include "../../moe/causal_conv1d/op_host/math_util.h"
+#include "../../../moe/causal_conv1d/op_host/math_util.h"
 #include "tiling/platform/platform_ascendc.h"
 #include "platform/platform_info_def.h"
 // #include "platform_util.h"

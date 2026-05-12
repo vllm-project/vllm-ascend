@@ -14,7 +14,7 @@
  */
 
 #include "register/op_impl_registry.h"
-#include "../../moe/causal_conv1d/op_host/error_log.h"
+#include "../../../moe/causal_conv1d/op_host/error_log.h"
 
 using namespace ge;
 namespace ops {

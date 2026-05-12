@@ -27,7 +27,7 @@
 #include "register/op_def_registry.h"
 #include "tiling/tiling_api.h"
 #include "tiling/platform/platform_ascendc.h"
-#include "../../moe/causal_conv1d/tiling_base/tiling_base.h"
+#include "../../../moe/causal_conv1d/tiling_base/tiling_base.h"
 
 using namespace Ops::Transformer::OpTiling;
 namespace optiling {

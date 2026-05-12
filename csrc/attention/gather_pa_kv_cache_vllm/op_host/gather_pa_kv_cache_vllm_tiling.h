@@ -19,7 +19,7 @@
 #include <string>
 #include "register/op_impl_registry.h"
 #include "register/tilingdata_base.h"
-#include "../../moe/causal_conv1d/tiling_base/tiling_base.h"
+#include "../../../moe/causal_conv1d/tiling_base/tiling_base.h"
 
 namespace optiling {
 BEGIN_TILING_DATA_DEF(GatherPaKvCacheVllmTilingData)
