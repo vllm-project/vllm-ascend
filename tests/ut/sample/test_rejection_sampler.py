@@ -1,4 +1,4 @@
-from unittest.mock import patch, MagicMock
+from unittest.mock import patch
 
 import torch
 
@@ -211,30 +211,36 @@ class TestAscendRejectionSampler(TestBase):
         assert output_token_ids[0].item() == 0
         assert output_token_ids[1].item() == 1
 
-    @patch('torch.arange', new=mock_pin_memory(torch.arange))
-    @patch('torch.ones', new=mock_pin_memory(torch.ones))
-    @patch('torch.full', new=mock_pin_memory(torch.full))
-    @patch('torch.tensor', new=mock_pin_memory(torch.tensor))
+    @patch("torch.arange", new=mock_pin_memory(torch.arange))
+    @patch("torch.ones", new=mock_pin_memory(torch.ones))
+    @patch("torch.full", new=mock_pin_memory(torch.full))
+    @patch("torch.tensor", new=mock_pin_memory(torch.tensor))
     def test_reduce_sample_recovered_tokens_pytorch_ngram(self):
         """Test recovered token sampling under n-gram mode"""
         output_token_ids = torch.empty(2, dtype=torch.int32)
         cu_num_draft_tokens = torch.tensor([1, 2])
         draft_token_ids = torch.tensor([1, 2])
         draft_probs = None
-        target_probs = torch.tensor([
-            [0.1, 0.2, 0.7],
-            [0.3, 0.3, 0.4],
-        ])
-        q = torch.tensor([
-            [0.1, 0.2, 0.7],
-            [0.5, 0.4, 0.1],
-        ])
+        target_probs = torch.tensor(
+            [
+                [0.1, 0.2, 0.7],
+                [0.3, 0.3, 0.4],
+            ]
+        )
+        q = torch.tensor(
+            [
+                [0.1, 0.2, 0.7],
+                [0.5, 0.4, 0.1],
+            ]
+        )
         vocab_size = 3
-        target_indices = torch.tensor([
-            [0, 1, 2],
-            [0, 1, 2],
-        ])
-        compressed_mode = True  
+        target_indices = torch.tensor(
+            [
+                [0, 1, 2],
+                [0, 1, 2],
+            ]
+        )
+        compressed_mode = True 
         sample_recovered_tokens_pytorch(
             output_token_ids,
             cu_num_draft_tokens,
@@ -251,40 +257,45 @@ class TestAscendRejectionSampler(TestBase):
         assert output_token_ids[0].item() == 0
         assert output_token_ids[1].item() == 1
 
-    @patch('torch.arange', new=mock_pin_memory(torch.arange))
-    @patch('torch.ones', new=mock_pin_memory(torch.ones))
-    @patch('torch.full', new=mock_pin_memory(torch.full))
-    @patch('torch.tensor', new=mock_pin_memory(torch.tensor))
+    @patch("torch.arange", new=mock_pin_memory(torch.arange))
+    @patch("torch.ones", new=mock_pin_memory(torch.ones))
+    @patch("torch.full", new=mock_pin_memory(torch.full))
+    @patch("torch.tensor", new=mock_pin_memory(torch.tensor))
     def test_rejection_random_reduce_sample_block_verify_pytorch(self):
         """Test random rejection sampling for block verify: accept based on uniform probability"""
         batch_size = 2
         max_spec_len = 3
-        output_token_ids = torch.full((batch_size, max_spec_len + 1),
-                                      PLACEHOLDER_TOKEN_ID)
+        output_token_ids = torch.full((batch_size, max_spec_len + 1), PLACEHOLDER_TOKEN_ID)
 
         cu_num_draft_tokens = torch.tensor([2, 1])
         draft_token_ids = torch.tensor([1, 0, 2])
-        draft_probs = torch.tensor([
-            [0.0, 0.6, 0.0, 0.4, 0.0],
-            [0.1, 0.2, 0.3, 0.4, 0.0],
-            [0.5, 0.5, 0.0, 0.0, 0.0],
-        ])
-        target_probs = torch.tensor([
-            [0.0, 0.8, 0.0, 0.2],
-            [0.2, 0.1, 0.3, 0.4],
-            [0.9, 0.1, 0.0, 0.0],
-        ])
+        draft_probs = torch.tensor(
+            [
+                [0.0, 0.6, 0.0, 0.4, 0.0],
+                [0.1, 0.2, 0.3, 0.4, 0.0],
+                [0.5, 0.5, 0.0, 0.0, 0.0],
+            ]
+        )
+        target_probs = torch.tensor(
+            [
+                [0.0, 0.8, 0.0, 0.2],
+                [0.2, 0.1, 0.3, 0.4],
+                [0.9, 0.1, 0.0, 0.0],
+            ]
+        )
         bonus_token_ids = torch.tensor([[100], [200]])
         recovered_token_ids = torch.tensor([1, 2, 3])
         uniform_probs = torch.tensor([0.7, 0.6, 0.5])
         is_greedy = torch.tensor([False, False])
         vocab_size = 5
-        target_indices = torch.tensor([
-            [0, 1, 2, 3],
-            [0, 1, 2, 3],
-            [0, 1, 2, 3],
-        ])
-        compressed_mode = True  
+        target_indices = torch.tensor(
+            [
+                [0, 1, 2, 3],
+                [0, 1, 2, 3],
+                [0, 1, 2, 3],
+            ]
+        )
+        compressed_mode = True 
         rejection_random_sample_block_verify_pytorch(
             output_token_ids,
             cu_num_draft_tokens,
@@ -306,30 +317,36 @@ class TestAscendRejectionSampler(TestBase):
         assert output_token_ids[0, 1].item() == 0
         assert output_token_ids[0, 2].item() == 100
 
-    @patch('torch.arange', new=mock_pin_memory(torch.arange))
-    @patch('torch.ones', new=mock_pin_memory(torch.ones))
-    @patch('torch.full', new=mock_pin_memory(torch.full))
-    @patch('torch.tensor', new=mock_pin_memory(torch.tensor))
+    @patch("torch.arange", new=mock_pin_memory(torch.arange))
+    @patch("torch.ones", new=mock_pin_memory(torch.ones))
+    @patch("torch.full", new=mock_pin_memory(torch.full))
+    @patch("torch.tensor", new=mock_pin_memory(torch.tensor))
     def test_reduce_sample_recovered_tokens_blockwise_pytorch_ngram(self):
         """Test recovered token sampling for blockwise speculative decoding with n-gram."""
         output_token_ids = torch.empty(2, dtype=torch.int32)
         cu_num_draft_tokens = torch.tensor([1, 2])
         draft_token_ids = torch.tensor([1, 2])
         draft_probs = None
-        target_probs = torch.tensor([
-            [0.1, 0.2, 0.7],
-            [0.3, 0.3, 0.4],
-        ])
-        q = torch.tensor([
-            [0.1, 0.2, 0.7],
-            [0.5, 0.4, 0.1],
-        ])
+        target_probs = torch.tensor(
+            [
+                [0.1, 0.2, 0.7],
+                [0.3, 0.3, 0.4],
+            ]
+        )
+        q = torch.tensor(
+            [
+                [0.1, 0.2, 0.7],
+                [0.5, 0.4, 0.1],
+            ]
+        )
         vocab_size = 3
-        target_indices = torch.tensor([
-            [0, 1, 2],
-            [0, 1, 2],
-        ])
-        compressed_mode = True  
+        target_indices = torch.tensor(
+            [
+                [0, 1, 2],
+                [0, 1, 2],
+            ]
+        )
+        compressed_mode = True
         sample_recovered_tokens_blockwise_pytorch(
             output_token_ids,
             cu_num_draft_tokens,
@@ -346,33 +363,41 @@ class TestAscendRejectionSampler(TestBase):
         assert output_token_ids[0].item() == 0
         assert output_token_ids[1].item() == 1
 
-    @patch('torch.arange', new=mock_pin_memory(torch.arange))
-    @patch('torch.ones', new=mock_pin_memory(torch.ones))
-    @patch('torch.full', new=mock_pin_memory(torch.full))
-    @patch('torch.tensor', new=mock_pin_memory(torch.tensor))
+    @patch("torch.arange", new=mock_pin_memory(torch.arange))
+    @patch("torch.ones", new=mock_pin_memory(torch.ones))
+    @patch("torch.full", new=mock_pin_memory(torch.full))
+    @patch("torch.tensor", new=mock_pin_memory(torch.tensor))
     def test_reduce_sample_recovered_tokens_blockwise_pytorch(self):
         """Test recovered token sampling for blockwise speculative decoding."""
         output_token_ids = torch.empty(2, dtype=torch.int32)
         cu_num_draft_tokens = torch.tensor([1, 2])
         draft_token_ids = torch.tensor([0, 1])
-        draft_probs = torch.tensor([
-            [0.6, 0.1, 0.3],
-            [0.2, 0.7, 0.1],
-        ])
-        target_probs = torch.tensor([
-            [0.8, 0.1, 0.1],
-            [0.3, 0.6, 0.1],
-        ])
-        q = torch.tensor([
-            [0.5, 0.3, 0.2],
-            [0.1, 0.8, 0.1],
-        ])
+        draft_probs = torch.tensor(
+            [
+                [0.6, 0.1, 0.3],
+                [0.2, 0.7, 0.1],
+            ]
+        )
+        target_probs = torch.tensor(
+            [
+                [0.8, 0.1, 0.1],
+                [0.3, 0.6, 0.1],
+            ]
+        )
+        q = torch.tensor(
+            [
+                [0.5, 0.3, 0.2],
+                [0.1, 0.8, 0.1],
+            ]
+        )
         vocab_size = 3
-        target_indices = torch.tensor([
-            [0, 1, 2],
-            [0, 1, 2],
-        ])
-        compressed_mode = True  
+        target_indices = torch.tensor(
+            [
+                [0, 1, 2],
+                [0, 1, 2],
+            ]
+        )
+        compressed_mode = True 
         sample_recovered_tokens_blockwise_pytorch(
             output_token_ids,
             cu_num_draft_tokens,
@@ -388,10 +413,10 @@ class TestAscendRejectionSampler(TestBase):
         assert output_token_ids[0].item() == 0
         assert output_token_ids[1].item() == 0
 
-    @patch('torch.arange', new=mock_pin_memory(torch.arange))
-    @patch('torch.ones', new=mock_pin_memory(torch.ones))
-    @patch('torch.full', new=mock_pin_memory(torch.full))
-    @patch('torch.tensor', new=mock_pin_memory(torch.tensor))
+    @patch("torch.arange", new=mock_pin_memory(torch.arange))
+    @patch("torch.ones", new=mock_pin_memory(torch.ones))
+    @patch("torch.full", new=mock_pin_memory(torch.full))
+    @patch("torch.tensor", new=mock_pin_memory(torch.tensor))
     def test_rejection_random_sample_block_verify_pytorch(self):
         """Test random rejection sampling for block verify: accept based on uniform probability"""
         batch_size = 2
@@ -439,38 +464,43 @@ class TestAscendRejectionSampler(TestBase):
         assert output_token_ids[0, 1].item() == 0
         assert output_token_ids[0, 2].item() == 100
 
-    @patch('torch.arange', new=mock_pin_memory(torch.arange))
-    @patch('torch.ones', new=mock_pin_memory(torch.ones))
-    @patch('torch.full', new=mock_pin_memory(torch.full))
-    @patch('torch.tensor', new=mock_pin_memory(torch.tensor))
+    @patch("torch.arange", new=mock_pin_memory(torch.arange))
+    @patch("torch.ones", new=mock_pin_memory(torch.ones))
+    @patch("torch.full", new=mock_pin_memory(torch.full))
+    @patch("torch.tensor", new=mock_pin_memory(torch.tensor))
     def test_rejection_random_reduce_sample_pytorch(self):
         """Test random rejection sampling: accept based on uniform probability"""
         batch_size = 2
         max_spec_len = 3
-        output_token_ids = torch.full((batch_size, max_spec_len + 1),
-                                    PLACEHOLDER_TOKEN_ID)
+        output_token_ids = torch.full((batch_size, max_spec_len + 1), PLACEHOLDER_TOKEN_ID)
         cu_num_draft_tokens = torch.tensor([2, 1])
         draft_token_ids = torch.tensor([1, 0, 2])
-        draft_probs = torch.tensor([
-            [0.0, 0.6, 0.0, 0.4, 0.0],  # vocab_size=5
-            [0.1, 0.2, 0.3, 0.4, 0.0],
-            [0.5, 0.5, 0.0, 0.0, 0.0],
-        ])
-        target_probs = torch.tensor([
-            [0.0, 0.8, 0.0, 0.2],
-            [0.2, 0.1, 0.3, 0.4],
-            [0.9, 0.1, 0.0, 0.0],
-        ])
+        draft_probs = torch.tensor(
+            [
+                [0.0, 0.6, 0.0, 0.4, 0.0],  # vocab_size=5
+                [0.1, 0.2, 0.3, 0.4, 0.0],
+                [0.5, 0.5, 0.0, 0.0, 0.0],
+            ]
+        )
+        target_probs = torch.tensor(
+            [
+                [0.0, 0.8, 0.0, 0.2],
+                [0.2, 0.1, 0.3, 0.4],
+                [0.9, 0.1, 0.0, 0.0],
+            ]
+        )
         bonus_token_ids = torch.tensor([[100], [200]])
         recovered_token_ids = torch.tensor([1, 2, 3])
         uniform_probs = torch.tensor([0.7, 0.6, 0.5])
         is_greedy = torch.tensor([False, False])
         vocab_size = 5
-        target_indices = torch.tensor([
-            [0, 1, 2, 3],
-            [0, 1, 2, 3],
-            [0, 1, 2, 3],
-        ])
+        target_indices = torch.tensor(
+            [
+                [0, 1, 2, 3],
+                [0, 1, 2, 3],
+                [0, 1, 2, 3],
+            ]
+        )
         compressed_mode = True
         rejection_random_sample_pytorch(
             output_token_ids,

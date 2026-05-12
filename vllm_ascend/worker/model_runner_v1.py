@@ -513,7 +513,7 @@ class NPUModelRunner(GPUModelRunner):
                 elif self.speculative_config.method == "extract_hidden_states":
                     assert isinstance(self.drafter, AscendExtractHiddenStatesProposer)
                     self.use_aux_hidden_state_outputs = True
-                self.rejection_sampler = RejectionSampler(self.sampler)
+                self.rejection_sampler = AscendRejectionSampler(self.sampler)
         self.discard_request_indices = self._make_buffer(self.max_num_reqs, dtype=torch.int64)
         self.num_discarded_requests = 0
 
