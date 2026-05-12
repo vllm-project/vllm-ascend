@@ -16,7 +16,7 @@
 # limitations under the License.
 # This file is a part of the vllm-ascend project.
 #
-# NPU-compatible structured output bitmask kernel and apply method.
+# NPU-compatible structured output bitmask kernel.
 #
 # Upstream cannot be used directly on Ascend NPU: `BLOCK_SIZE=8192` overflows
 # UB, while a smaller `BLOCK_SIZE` makes the grid unstable. We therefore keep
@@ -24,73 +24,7 @@
 #
 #
 
-
-import torch
 from vllm.triton_utils import tl, triton
-from vllm.v1.worker.gpu.buffer_utils import async_copy_to_gpu
-
-_NPU_BLOCK_SIZE = 8192
-_NPU_BLOCK_SIZE_SUB = 1024
-
-
-def apply_grammar_bitmask(self, logits, input_batch, grammar_req_ids, grammar_bitmask):
-    """NPU-compatible apply_grammar_bitmask for StructuredOutputsWorker.
-
-    Differences from the upstream implementation:
-      - Uses BLOCK_SIZE_SUB tiling (gather_kernel pattern) to avoid UB
-        overflow while keeping BLOCK_SIZE=8192 for a small grid.
-
-    """
-    if not grammar_req_ids:
-        return
-
-    # Asynchronously copy the bitmask to NPU.
-    with torch.npu.stream(self.copy_stream):
-        bitmask = async_copy_to_gpu(
-            grammar_bitmask,
-            out=self.grammar_bitmask[: grammar_bitmask.shape[0]],
-        )
-
-    # Construct bitmask -> logits mapping
-    mapping: list[int] = []
-    req_ids = input_batch.req_ids
-    cu_num_logits = input_batch.cu_num_logits_np.tolist()
-    req_id_to_idx = {req_id: i for i, req_id in enumerate(req_ids)}
-    for grammar_req_id in grammar_req_ids:
-        req_idx = req_id_to_idx[grammar_req_id]
-        logits_start_idx = cu_num_logits[req_idx]
-        logits_end_idx = cu_num_logits[req_idx + 1]
-        mapping.extend(range(logits_start_idx, logits_end_idx))
-
-    num_masks = bitmask.shape[0]
-    assert num_masks == len(mapping), f"num_masks={num_masks} != len(mapping)={len(mapping)}"
-
-    # Asynchronously copy the mapping to NPU.
-    with torch.npu.stream(self.copy_stream):
-        logits_indices_cpu = torch.tensor(mapping, dtype=torch.int32, device="cpu", pin_memory=True)
-        logits_indices = self.logits_indices[: len(mapping)].copy_(logits_indices_cpu, non_blocking=True)
-    # ensure copies finish before kernel launch
-    current_stream = torch.npu.current_stream()
-    current_stream.wait_stream(self.copy_stream)
-
-    vocab_size = logits.shape[-1]
-    BLOCK_SIZE = _NPU_BLOCK_SIZE
-    BLOCK_SIZE_SUB = _NPU_BLOCK_SIZE_SUB
-    grid = (num_masks, triton.cdiv(vocab_size, BLOCK_SIZE))
-    _apply_grammar_bitmask_kernel[grid](
-        logits,
-        logits.stride(0),
-        logits_indices,
-        bitmask,
-        bitmask.stride(0),
-        vocab_size,
-        BLOCK_SIZE=BLOCK_SIZE,
-        BLOCK_SIZE_SUB=BLOCK_SIZE_SUB,
-    )
-
-    # Ensure the copy stream waits for the device tensors to finish being used
-    # before it reuses or deallocates them
-    self.copy_stream.wait_stream(current_stream)
 
 
 # Adapted from
@@ -105,8 +39,8 @@ def _apply_grammar_bitmask_kernel(
     bitmask_stride,
     vocab_size,
     BLOCK_SIZE: tl.constexpr,
-    BLOCK_SIZE_SUB: tl.constexpr,
 ):
+    BLOCK_SIZE_SUB: tl.constexpr = 1024
     bitmask_idx = tl.program_id(0)
     block_id = tl.program_id(1)
     logits_idx = tl.load(logits_indices_ptr + bitmask_idx)
@@ -121,7 +55,6 @@ def _apply_grammar_bitmask_kernel(
             mask=bitmask_offset < bitmask_stride,
             other=0,
         )
-        # Unpack: each int32 word → 32 bool values (0 = blocked)
         bitmask = ((packed_bitmask[:, None] >> (tl.arange(0, 32)[None, :])) & 1) == 0
         bitmask = bitmask.reshape(BLOCK_SIZE_SUB)
 
