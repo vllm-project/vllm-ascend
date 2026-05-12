@@ -63,8 +63,8 @@ class AscendFAImpl(AscendAttentionBackendImpl):
         self,
         query: torch.Tensor,
         block_table: torch.Tensor,
-        actual_seq_lengths_fa: torch.Tensor,
-        seq_lens_list_qa: list,
+        actual_seq_lengths: torch.Tensor,
+        seq_lens_list: list,
         is_causal: bool,
         max_seq_len: int,
     ):
@@ -76,7 +76,7 @@ class AscendFAImpl(AscendAttentionBackendImpl):
             num_block, block_size, self.num_kv_heads, self.head_size
         )
 
-        kv_seqlen_list = torch.tensor(seq_lens_list_qa, dtype=torch.int32).npu()
+        kv_seqlen_list = torch.tensor(seq_lens_list, dtype=torch.int32).npu()
 
         attn_output = _fa3_fn(
             query,
@@ -84,7 +84,7 @@ class AscendFAImpl(AscendAttentionBackendImpl):
             value_fa_blk,
             cache_seqlens=kv_seqlen_list,  # kv sequence length for each individual request (NOT cumulative)
             page_table=block_table,  #  must match the block table for the corresponding q
-            cu_seqlens_q=actual_seq_lengths_fa,  # cumulative sequence length for q
+            cu_seqlens_q=actual_seq_lengths,  # cumulative sequence length for q
             max_seqlen_q=max_seq_len,
             causal=is_causal,
             window_size=[-1, -1],
