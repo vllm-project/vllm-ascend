@@ -1,49 +1,69 @@
 #!/bin/bash
 # check_npu_env.sh — NPU environment sanity check
 #
-# Usage: check_npu_env.sh <TP_SIZE> [ATB_SET_ENV_PATH]
+# Usage: check_npu_env.sh <TP_SIZE> [CANN_SET_ENV_PATH] [ATB_SET_ENV_PATH]
 #
-#   TP_SIZE          Required tensor-parallel size (e.g. 8 or 16)
-#   ATB_SET_ENV_PATH Optional path to ATB/NNAL set_env.sh
-#                    Default: /usr/local/Ascend/nnal/atb/set_env.sh
-#                    Pass "none" to skip ATB sourcing entirely.
+#   TP_SIZE           Required tensor-parallel size (e.g. 8 or 16)
+#   CANN_SET_ENV_PATH Optional explicit path to CANN toolkit set_env.sh.
+#                     If omitted, auto-detected under /usr/local/Ascend and ~/Ascend.
+#                     Pass "none" to skip CANN sourcing.
+#   ATB_SET_ENV_PATH  Optional path to ATB/NNAL set_env.sh
+#                     Default: /usr/local/Ascend/nnal/atb/set_env.sh
+#                     Pass "none" to skip ATB sourcing entirely.
 #
 # Exit codes: 0 = all checks passed, 1 = one or more checks failed
 
-set -euo pipefail
+set -eo pipefail
 
 TP_SIZE=${1:-8}
-ATB_SET_ENV_PATH=${2:-/usr/local/Ascend/nnal/atb/set_env.sh}
+CANN_SET_ENV_ARG=${2:-}
+ATB_SET_ENV_PATH=${3:-/usr/local/Ascend/nnal/atb/set_env.sh}
 
 FAIL=0
 
 # ── 1. Source CANN toolkit set_env.sh ────────────────────────────────────────
 echo "==> [1/5] Sourcing CANN toolkit set_env.sh ..."
 CANN_SET_ENV=""
-for candidate in \
-    /usr/local/Ascend/ascend-toolkit/set_env.sh \
-    /usr/local/Ascend/latest/ascend-toolkit/set_env.sh \
-    /usr/local/Ascend/ascend-toolkit/latest/set_env.sh; do
-    if [ -f "$candidate" ]; then
-        CANN_SET_ENV="$candidate"
-        break
+
+if [ -n "$CANN_SET_ENV_ARG" ] && [ "$CANN_SET_ENV_ARG" != "none" ]; then
+    # User provided explicit path
+    if [ -f "$CANN_SET_ENV_ARG" ]; then
+        CANN_SET_ENV="$CANN_SET_ENV_ARG"
+    else
+        echo "    ERROR: provided CANN set_env.sh not found: $CANN_SET_ENV_ARG"
+        FAIL=1
     fi
-done
+elif [ "$CANN_SET_ENV_ARG" = "none" ]; then
+    echo "    Skipped (passed 'none')"
+else
+    # Auto-detect
+    for candidate in \
+        /usr/local/Ascend/ascend-toolkit/set_env.sh \
+        /usr/local/Ascend/latest/ascend-toolkit/set_env.sh \
+        /usr/local/Ascend/ascend-toolkit/latest/set_env.sh \
+        "$HOME/Ascend/ascend-toolkit/set_env.sh" \
+        "$HOME/Ascend/cann-8.5.1/set_env.sh"; do
+        if [ -f "$candidate" ]; then
+            CANN_SET_ENV="$candidate"
+            break
+        fi
+    done
+
+    if [ -z "$CANN_SET_ENV" ]; then
+        echo "    ERROR: CANN set_env.sh not found. Pass the path as the second argument:"
+        echo "      $0 $TP_SIZE /path/to/cann/set_env.sh"
+        FAIL=1
+    fi
+fi
 
 if [ -n "$CANN_SET_ENV" ]; then
     echo "    Found: $CANN_SET_ENV"
+    # Use set +u to tolerate unbound variables in the sourced script
+    set +u
     # shellcheck disable=SC1090
     source "$CANN_SET_ENV"
+    set -u
     echo "    OK: CANN environment sourced"
-else
-    echo "    ERROR: CANN set_env.sh not found under /usr/local/Ascend"
-    echo "    Searched:"
-    echo "      /usr/local/Ascend/ascend-toolkit/set_env.sh"
-    echo "      /usr/local/Ascend/latest/ascend-toolkit/set_env.sh"
-    echo "      /usr/local/Ascend/ascend-toolkit/latest/set_env.sh"
-    echo "    Please provide the correct path and re-run:"
-    echo "      $0 $TP_SIZE /path/to/set_env.sh"
-    FAIL=1
 fi
 
 # ── 2. Source ATB/NNAL set_env.sh ────────────────────────────────────────────
@@ -51,13 +71,15 @@ echo "==> [2/5] Sourcing ATB/NNAL set_env.sh ..."
 if [ "$ATB_SET_ENV_PATH" = "none" ]; then
     echo "    Skipped (passed 'none')"
 elif [ -f "$ATB_SET_ENV_PATH" ]; then
+    set +u
     # shellcheck disable=SC1090
     source "$ATB_SET_ENV_PATH"
+    set -u
     echo "    OK: ATB/NNAL environment sourced from $ATB_SET_ENV_PATH"
 else
     echo "    WARNING: ATB/NNAL set_env.sh not found at $ATB_SET_ENV_PATH"
     echo "    If your environment requires it, re-run with the correct path:"
-    echo "      $0 $TP_SIZE /path/to/atb/set_env.sh"
+    echo "      $0 $TP_SIZE <cann-path> /path/to/atb/set_env.sh"
     echo "    Continuing without ATB/NNAL env ..."
 fi
 
