@@ -70,10 +70,10 @@ DEFAULT_RTOL = 1e-2
 DEFAULT_ATOL = 1e-2
 
 # Signal-relative checks (per-element |err|/|ref| near zero ref is unstable).
-_MAX_SIG_REL_ERR = 1e-2      # max |out-ref| / peak |ref|
-_MAX_MEAN_SIG_ERR = 5e-3     # mean |out-ref| / mean |ref|
-_MAX_REL_ERR = 1e-2          # max per-element rel err where |ref| >= floor
-_SIG_FLOOR_FRAC = 5e-1       # floor = this fraction of peak |ref|
+_MAX_SIG_REL_ERR = 1e-2  # max |out-ref| / peak |ref|
+_MAX_MEAN_SIG_ERR = 5e-3  # mean |out-ref| / mean |ref|
+_MAX_REL_ERR = 1e-2  # max per-element rel err where |ref| >= floor
+_SIG_FLOOR_FRAC = 5e-1  # floor = this fraction of peak |ref|
 
 _BLOCK_SIZE = 128
 _TEST_NUM_HEADS = 8
@@ -196,16 +196,11 @@ def _build_paged_kv_cache_from_metadata(
     device: torch.device,
 ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
     """Paged k_nope / k_rope caches from metadata block layout."""
-    batch_size = len(seq_lens)
     blocks_per_seq = [(s + block_size - 1) // block_size for s in seq_lens]
     total_blocks = sum(blocks_per_seq) + 1
 
-    k_nope_cache = torch.zeros(
-        total_blocks, block_size, 1, kv_lora_rank, dtype=dtype, device=device
-    )
-    k_rope_cache = torch.zeros(
-        total_blocks, block_size, 1, qk_rope_head_dim, dtype=dtype, device=device
-    )
+    k_nope_cache = torch.zeros(total_blocks, block_size, 1, kv_lora_rank, dtype=dtype, device=device)
+    k_rope_cache = torch.zeros(total_blocks, block_size, 1, qk_rope_head_dim, dtype=dtype, device=device)
 
     block_table = common_attn_metadata.block_table_tensor
     block_table.zero_()
@@ -233,9 +228,7 @@ def _build_topk_indices(
 ) -> torch.Tensor:
     """Causal top-k indices; shape ``(T, 1, sparse_count)`` int32, -1 pad."""
     num_tokens = sum(query_lens)
-    topk = torch.full(
-        (num_tokens, 1, sparse_count), -1, dtype=torch.int32, device=device
-    )
+    topk = torch.full((num_tokens, 1, sparse_count), -1, dtype=torch.int32, device=device)
 
     cum_q = 0
     for b, s_len in enumerate(seq_lens):
@@ -243,9 +236,7 @@ def _build_topk_indices(
         ctx_len = s_len - q_len
         for j in range(q_len):
             valid_end = ctx_len + j + 1
-            topk[cum_q + j, 0, :valid_end] = torch.arange(
-                valid_end, dtype=torch.int32, device=device
-            )
+            topk[cum_q + j, 0, :valid_end] = torch.arange(valid_end, dtype=torch.int32, device=device)
         cum_q += q_len
 
     return topk
@@ -361,18 +352,10 @@ def _run_precision_check(
     head_dim = kv_lora_rank + qk_rope_head_dim
     scale = 1.0 / math.sqrt(head_dim)
 
-    common_attn_metadata = create_common_attn_metadata(
-        spec, block_size=block_size, device=device
-    )
+    common_attn_metadata = create_common_attn_metadata(spec, block_size=block_size, device=device)
 
-    k_nope_contexts = [
-        torch.randn(s, kv_lora_rank, dtype=dtype, device=device)
-        for s in seq_lens
-    ]
-    k_rope_contexts = [
-        torch.randn(s, qk_rope_head_dim, dtype=dtype, device=device)
-        for s in seq_lens
-    ]
+    k_nope_contexts = [torch.randn(s, kv_lora_rank, dtype=dtype, device=device) for s in seq_lens]
+    k_rope_contexts = [torch.randn(s, qk_rope_head_dim, dtype=dtype, device=device) for s in seq_lens]
 
     k_nope_cache, k_rope_cache, block_table = _build_paged_kv_cache_from_metadata(
         common_attn_metadata=common_attn_metadata,
@@ -425,16 +408,12 @@ def _run_precision_check(
 
     tag = f"{spec.name},tp={tensor_parallel_size}"
     assert backend_output.shape == reference_output.shape, (
-        f"[{tag}] backend shape {tuple(backend_output.shape)} != "
-        f"reference shape {tuple(reference_output.shape)}"
+        f"[{tag}] backend shape {tuple(backend_output.shape)} != reference shape {tuple(reference_output.shape)}"
     )
     assert backend_output.dtype == reference_output.dtype, (
-        f"[{tag}] backend dtype {backend_output.dtype} != "
-        f"reference dtype {reference_output.dtype}"
+        f"[{tag}] backend dtype {backend_output.dtype} != reference dtype {reference_output.dtype}"
     )
-    assert torch.isfinite(backend_output).all(), (
-        f"[{tag}] sparse flash attention produced non-finite values"
-    )
+    assert torch.isfinite(backend_output).all(), f"[{tag}] sparse flash attention produced non-finite values"
 
     torch.testing.assert_close(
         backend_output,
@@ -504,9 +483,7 @@ def test_sfa_sparse_flash_attention_precision(
     tensor_parallel_size: int,
 ) -> None:
     """SFA kernel vs fp32 dense MQA reference (decode, prefill, mixed, MTP)."""
-    vllm_config = _get_vllm_config(
-        model, dtype, tensor_parallel_size=tensor_parallel_size
-    )
+    vllm_config = _get_vllm_config(model, dtype, tensor_parallel_size=tensor_parallel_size)
     _run_precision_check(
         BATCH_SPECS[batch_spec_name],
         dtype,

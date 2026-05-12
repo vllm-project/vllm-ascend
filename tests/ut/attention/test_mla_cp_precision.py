@@ -240,15 +240,26 @@ def _build_paged_kv_cache(
     max_blocks_per_seq = max(blocks_per_seq)
 
     k_nope_cache = torch.zeros(
-        total_blocks, block_size, num_kv_heads, kv_lora_rank,
-        dtype=dtype, device=device,
+        total_blocks,
+        block_size,
+        num_kv_heads,
+        kv_lora_rank,
+        dtype=dtype,
+        device=device,
     )
     k_pe_cache = torch.zeros(
-        total_blocks, block_size, num_kv_heads, qk_rope_head_dim,
-        dtype=dtype, device=device,
+        total_blocks,
+        block_size,
+        num_kv_heads,
+        qk_rope_head_dim,
+        dtype=dtype,
+        device=device,
     )
     block_table = torch.zeros(
-        batch_size, max_blocks_per_seq, dtype=torch.int32, device=device,
+        batch_size,
+        max_blocks_per_seq,
+        dtype=torch.int32,
+        device=device,
     )
 
     next_block_id = 1
@@ -267,10 +278,12 @@ def _build_paged_kv_cache(
     return k_nope_cache, k_pe_cache, block_table
 
 
-def _make_w_uv(num_heads: int, kv_lora_rank: int, v_head_dim: int,
-               dtype: torch.dtype, device: torch.device) -> torch.Tensor:
-    return torch.randn(num_heads, kv_lora_rank, v_head_dim,
-                       dtype=dtype, device=device) * (1.0 / math.sqrt(kv_lora_rank))
+def _make_w_uv(
+    num_heads: int, kv_lora_rank: int, v_head_dim: int, dtype: torch.dtype, device: torch.device
+) -> torch.Tensor:
+    return torch.randn(num_heads, kv_lora_rank, v_head_dim, dtype=dtype, device=device) * (
+        1.0 / math.sqrt(kv_lora_rank)
+    )
 
 
 def _build_fixture(
@@ -282,21 +295,17 @@ def _build_fixture(
     tensor_parallel_size: int = 1,
 ) -> _MLAFixture:
     vllm_config = _get_mla_precision_vllm_config(
-        model, dtype, tensor_parallel_size=tensor_parallel_size,
+        model,
+        dtype,
+        tensor_parallel_size=tensor_parallel_size,
     )
     num_tokens = batch_spec.compute_num_tokens()
     assert num_tokens == sum(batch_spec.query_lens)
 
     seq_lens = list(batch_spec.seq_lens)
 
-    k_nope_contexts = [
-        torch.randn(s, KV_LORA_RANK, dtype=dtype, device=device)
-        for s in seq_lens
-    ]
-    k_pe_contexts = [
-        torch.randn(s, QK_ROPE_HEAD_DIM, dtype=dtype, device=device)
-        for s in seq_lens
-    ]
+    k_nope_contexts = [torch.randn(s, KV_LORA_RANK, dtype=dtype, device=device) for s in seq_lens]
+    k_pe_contexts = [torch.randn(s, QK_ROPE_HEAD_DIM, dtype=dtype, device=device) for s in seq_lens]
 
     k_nope_cache, k_pe_cache, block_table = _build_paged_kv_cache(
         seq_lens=seq_lens,
@@ -310,10 +319,8 @@ def _build_fixture(
         device=device,
     )
 
-    q_nope_latent = torch.randn(num_tokens, NUM_HEADS, KV_LORA_RANK,
-                                dtype=dtype, device=device)
-    q_pe_latent = torch.randn(num_tokens, NUM_HEADS, QK_ROPE_HEAD_DIM,
-                              dtype=dtype, device=device)
+    q_nope_latent = torch.randn(num_tokens, NUM_HEADS, KV_LORA_RANK, dtype=dtype, device=device)
+    q_pe_latent = torch.randn(num_tokens, NUM_HEADS, QK_ROPE_HEAD_DIM, dtype=dtype, device=device)
 
     q_nope_full: list[torch.Tensor] = []
     q_pe_full: list[torch.Tensor] = []
@@ -321,21 +328,11 @@ def _build_fixture(
     k_pe_full_per_req: list[torch.Tensor] = []
     v_full_per_req: list[torch.Tensor] = []
     for q_len in batch_spec.query_lens:
-        q_nope_full.append(
-            torch.randn(q_len, NUM_HEADS, QK_NOPE_HEAD_DIM, dtype=dtype, device=device)
-        )
-        q_pe_full.append(
-            torch.randn(q_len, NUM_HEADS, QK_ROPE_HEAD_DIM, dtype=dtype, device=device)
-        )
-        k_nope_full_per_req.append(
-            torch.randn(q_len, NUM_HEADS, QK_NOPE_HEAD_DIM, dtype=dtype, device=device)
-        )
-        k_pe_full_per_req.append(
-            torch.randn(q_len, NUM_HEADS, QK_ROPE_HEAD_DIM, dtype=dtype, device=device)
-        )
-        v_full_per_req.append(
-            torch.randn(q_len, NUM_HEADS, V_HEAD_DIM, dtype=dtype, device=device)
-        )
+        q_nope_full.append(torch.randn(q_len, NUM_HEADS, QK_NOPE_HEAD_DIM, dtype=dtype, device=device))
+        q_pe_full.append(torch.randn(q_len, NUM_HEADS, QK_ROPE_HEAD_DIM, dtype=dtype, device=device))
+        k_nope_full_per_req.append(torch.randn(q_len, NUM_HEADS, QK_NOPE_HEAD_DIM, dtype=dtype, device=device))
+        k_pe_full_per_req.append(torch.randn(q_len, NUM_HEADS, QK_ROPE_HEAD_DIM, dtype=dtype, device=device))
+        v_full_per_req.append(torch.randn(q_len, NUM_HEADS, V_HEAD_DIM, dtype=dtype, device=device))
 
     W_UV = _make_w_uv(NUM_HEADS, KV_LORA_RANK, V_HEAD_DIM, dtype, device)
 
@@ -424,12 +421,11 @@ def _prefill_reference(
         K = torch.cat([k_nope, k_pe], dim=-1).float()
         V = v.float()
 
-        scores = torch.matmul(
-            Q.transpose(0, 1), K.transpose(0, 1).transpose(-1, -2)
-        ) * scale
+        scores = torch.matmul(Q.transpose(0, 1), K.transpose(0, 1).transpose(-1, -2)) * scale
 
         causal_mask = torch.triu(
-            torch.ones(q_len, q_len, dtype=torch.bool, device=Q.device), diagonal=1,
+            torch.ones(q_len, q_len, dtype=torch.bool, device=Q.device),
+            diagonal=1,
         )
         scores = scores.masked_fill(causal_mask, float("-inf"))
         attn = torch.softmax(scores, dim=-1)
@@ -695,7 +691,8 @@ def _run_forward_prefill(
 
     attn_mask = _build_prefill_attn_mask(device)
     attn_metadata = _make_prefill_metadata(
-        query_lens=query_lens, attn_mask=attn_mask,
+        query_lens=query_lens,
+        attn_mask=attn_mask,
     )
 
     impl = _make_real_cp_impl(
@@ -711,7 +708,11 @@ def _run_forward_prefill(
     with _patch_extra_ctx("vllm_ascend.attention.mla_v1"):
         return AscendMlaCPImpl._forward_prefill(
             impl,
-            q_nope, q_pe, k_nope, k_pe, value,
+            q_nope,
+            q_pe,
+            k_nope,
+            k_pe,
+            value,
             dummy_kv,
             attn_metadata,
         )
@@ -728,12 +729,9 @@ def _record_and_assert(
     max_rel_err_sig: float = _MAX_REL_ERR,
 ) -> tuple[float, float, float, float]:
     assert backend_output.shape == reference_output.shape, (
-        f"[{tag}] backend shape {tuple(backend_output.shape)} != "
-        f"reference shape {tuple(reference_output.shape)}"
+        f"[{tag}] backend shape {tuple(backend_output.shape)} != reference shape {tuple(reference_output.shape)}"
     )
-    assert torch.isfinite(backend_output).all(), (
-        f"[{tag}] kernel output contains non-finite values"
-    )
+    assert torch.isfinite(backend_output).all(), f"[{tag}] kernel output contains non-finite values"
     if backend_output.dtype != reference_output.dtype:
         backend_output = backend_output.to(reference_output.dtype)
 
@@ -848,7 +846,10 @@ def _run_mla_cp_precision_case(
 
     if scenario == "pure_prefill":
         backend_output = _run_forward_prefill(
-            fixture, device=device, dtype=dtype, prefill_req_start=0,
+            fixture,
+            device=device,
+            dtype=dtype,
+            prefill_req_start=0,
         )
         reference_output = _prefill_reference(
             q_nope_full=fixture.q_nope_full,
