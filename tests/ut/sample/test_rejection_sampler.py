@@ -240,7 +240,7 @@ class TestAscendRejectionSampler(TestBase):
                 [0, 1, 2],
             ]
         )
-        compressed_mode = True 
+        compressed_mode = True
         sample_recovered_tokens_pytorch(
             output_token_ids,
             cu_num_draft_tokens,
@@ -295,7 +295,7 @@ class TestAscendRejectionSampler(TestBase):
                 [0, 1, 2, 3],
             ]
         )
-        compressed_mode = True 
+        compressed_mode = True
         rejection_random_sample_block_verify_pytorch(
             output_token_ids,
             cu_num_draft_tokens,
@@ -397,7 +397,7 @@ class TestAscendRejectionSampler(TestBase):
                 [0, 1, 2],
             ]
         )
-        compressed_mode = True 
+        compressed_mode = True
         sample_recovered_tokens_blockwise_pytorch(
             output_token_ids,
             cu_num_draft_tokens,
