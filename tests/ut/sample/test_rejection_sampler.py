@@ -522,7 +522,6 @@ class TestAscendRejectionSampler(TestBase):
         assert output_token_ids[0, 1].item() == 0
         assert output_token_ids[0, 2].item() == 100
 
-
     @patch("torch.arange", new=mock_pin_memory(torch.arange))
     @patch("torch.ones", new=mock_pin_memory(torch.ones))
     @patch("torch.full", new=mock_pin_memory(torch.full))
