@@ -800,7 +800,7 @@ class AscendMlaCPImpl(AscendMLAImpl):
             q_pe = q_pe.view(num_decodes, -1, q_pe.shape[1], q_pe.shape[-1])
             sparse_mode = 0
             spec_attn_mask = attn_metadata.decode.dcp_mtp_attn_mask
-            actual_seq_lengths = decode_meta.actual_seq_lengths_q 
+            actual_seq_lengths = attn_metadata.query_lens 
         else:
             q_nope = q_nope.view(num_tokens, num_heads, 1, -1).contiguous()
             q_pe = q_pe.view(num_tokens, num_heads, 1, -1)
