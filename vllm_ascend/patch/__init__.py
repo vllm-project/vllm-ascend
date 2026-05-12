@@ -212,6 +212,33 @@
 #       Remove this patch once upstream vLLM supports hybrid KV cache + CP for
 #       non-CUDA backends, or exposes a platform hook for this behavior.
 #
+# ** 10b. File: platform/patch_kv_consumer_hybrid.py**
+# ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+#   1. `vllm.v1.core.kv_cache_coordinator.HybridKVCacheCoordinator.__init__`
+#      `vllm.v1.core.kv_cache_coordinator.HybridKVCacheCoordinator.find_longest_cache_hit`
+#      `vllm.v1.core.kv_cache_coordinator.get_kv_cache_coordinator`
+#      `vllm.v1.core.kv_cache_manager.KVCacheManager.__init__`
+#      `vllm.v1.core.sched.scheduler.Scheduler.__init__`
+#      `vllm.v1.core.sched.scheduler.Scheduler._mamba_block_aligned_split`
+#    Why:
+#       In P/D disaggregated inference, the KV consumer receives KV cache
+#       from the producer but Mamba states are NOT transferred. For hybrid
+#       attention models (FullAttention + Mamba, e.g. Jamba), the consumer
+#       needs to only use FullAttention cache hits and ignore Mamba layers
+#       for prefix caching purposes.
+#    How:
+#       Wrap coordinator/manager/scheduler init and methods to:
+#       (a) set enable_kv_consumer_partial_group_caching flag,
+#       (b) override lcm_block_size to hash_block_size,
+#       (c) use FullAttention-only hit length in find_longest_cache_hit,
+#       (d) disable need_mamba_block_aligned_split for KV consumers,
+#       (e) remove assertion blocking external computed tokens.
+#    Related PR (if no, explain why):
+#       No, P/D + hybrid Mamba is Ascend-specific for now.
+#    Future Plan:
+#       Remove this patch when upstream vLLM adds native support for
+#       KV consumers with hybrid attention models.
+#
 # ** 10. File: platform/patch_kv_cache_interface.py**
 # ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 #   1. `vllm.v1.kv_cache_interface.MLAAttentionSpec`
