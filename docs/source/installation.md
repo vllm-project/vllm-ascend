@@ -330,7 +330,7 @@ python example.py
 
 The output will be like:
 
-```
+```bash
 INFO 05-12 11:29:25 [__init__.py:44] Available plugins for group vllm.platform_plugins:
 INFO 05-12 11:29:25 [__init__.py:46] - ascend -> vllm_ascend:register
 INFO 05-12 11:29:25 [__init__.py:49] All plugins in this group will be loaded. Set `VLLM_PLUGINS` to control which plugins to load.
