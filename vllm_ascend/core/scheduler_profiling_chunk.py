@@ -41,6 +41,7 @@ from vllm.v1.structured_output import StructuredOutputManager
 from vllm.v1.utils import record_function_or_nullcontext
 
 from vllm_ascend.core.profiling_chunk_predictor import ProfilingChunkManager
+from vllm_ascend.utils import vllm_version_is
 
 
 class ProfilingChunkScheduler(Scheduler):
@@ -59,6 +60,9 @@ class ProfilingChunkScheduler(Scheduler):
         kv_cache_config: KVCacheConfig,
         structured_output_manager: StructuredOutputManager,
         block_size: int,
+        # `hash_block_size` was added in vLLM #40946; keep it optional so the
+        # subclass works on both pinned vllm and main.
+        hash_block_size: int | None = None,
         mm_registry: MultiModalRegistry = MULTIMODAL_REGISTRY,
         include_finished_set: bool = False,
         log_stats: bool = False,
@@ -68,6 +72,7 @@ class ProfilingChunkScheduler(Scheduler):
             kv_cache_config,
             structured_output_manager,
             block_size,
+            hash_block_size=hash_block_size,
             mm_registry=mm_registry,
             include_finished_set=include_finished_set,
             log_stats=log_stats,
@@ -379,7 +384,10 @@ class ProfilingChunkScheduler(Scheduler):
             req_to_new_blocks[request_id] = new_blocks
             num_scheduled_tokens[request_id] = num_new_tokens
             token_budget -= num_new_tokens
-            time_budget -= self.profiling_chunk_manager.predict_time(num_new_tokens, request.num_computed_tokens)
+            # Decode requests (num_new_tokens == 1) have negligible latency;
+            # skip time_budget accounting so they don't starve other requests.
+            if num_new_tokens > 1:
+                time_budget -= self.profiling_chunk_manager.predict_time(num_new_tokens, request.num_computed_tokens)
             req_index += 1
 
             # Speculative decode related.
@@ -568,12 +576,16 @@ class ProfilingChunkScheduler(Scheduler):
                 if self.is_encoder_decoder and request.has_encoder_inputs and encoder_inputs_to_schedule:
                     num_encoder_tokens = sum(request.get_num_encoder_embeds(i) for i in encoder_inputs_to_schedule)
 
-                if self.scheduler_reserve_full_isl and not self.kv_cache_manager.can_fit_full_sequence(
-                    request,
-                    num_new_computed_tokens=num_new_local_computed_tokens,
-                    new_computed_blocks=new_computed_blocks,
-                    num_external_computed_tokens=num_external_computed_tokens,
-                    num_encoder_tokens=num_encoder_tokens,
+                if (
+                    vllm_version_is("0.20.1")
+                    and self.scheduler_reserve_full_isl
+                    and not self.kv_cache_manager.can_fit_full_sequence(
+                        request,
+                        num_new_computed_tokens=num_new_local_computed_tokens,
+                        new_computed_blocks=new_computed_blocks,
+                        num_external_computed_tokens=num_external_computed_tokens,
+                        num_encoder_tokens=num_encoder_tokens,
+                    )
                 ):
                     if request.has_encoder_inputs:
                         self.encoder_cache_manager.free(request)
@@ -588,6 +600,9 @@ class ProfilingChunkScheduler(Scheduler):
                     num_external_computed_tokens=num_external_computed_tokens,
                     delay_cache_blocks=load_kv_async,
                     num_encoder_tokens=num_encoder_tokens,
+                    **(
+                        {} if vllm_version_is("0.20.1") else {"full_sequence_must_fit": self.scheduler_reserve_full_isl}
+                    ),
                 )
 
                 if new_blocks is None:
@@ -630,7 +645,12 @@ class ProfilingChunkScheduler(Scheduler):
                 req_to_new_blocks[request_id] = self.kv_cache_manager.get_blocks(request_id)
                 num_scheduled_tokens[request_id] = num_new_tokens
                 token_budget -= num_new_tokens
-                time_budget -= self.profiling_chunk_manager.predict_time(num_new_tokens, request.num_computed_tokens)
+                # Decode requests (num_new_tokens == 1) have negligible latency;
+                # skip time_budget accounting so they don't starve other requests.
+                if num_new_tokens > 1:
+                    time_budget -= self.profiling_chunk_manager.predict_time(
+                        num_new_tokens, request.num_computed_tokens
+                    )
                 request.status = RequestStatus.RUNNING
                 request.num_computed_tokens = num_computed_tokens
                 if encoder_inputs_to_schedule:

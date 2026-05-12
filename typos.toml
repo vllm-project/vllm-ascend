@@ -18,7 +18,9 @@ identifier-leading-digits = false
 locale = "en"
 extend-ignore-identifiers-re = [".*Unc.*", ".*_thw",
     ".*UE8M0.*", ".*(UE4M3|ue4m3).*", ".*eles.*", ".*fo.*", ".*ba.*",
-    ".*ot.*", ".*[Tt]h[rR].*"]
+    ".*ot.*", ".*[Tt]h[rR].*",
+    # tools/ai_qos.py: align with driver qos_mata_config / original_sdma_mata (not "meta")
+    ".*(?i)mata.*"]
 extend-ignore-words-re = ["CANN", "cann","ND","alog","nd","BA","datas","ful","udo","artifcat",]
 extend-ignore-re = []
 
@@ -40,6 +42,7 @@ DepthWiseSeperableConv1d = "DepthWiseSeperableConv1d"
 depthwise_seperable_CNN = "depthwise_seperable_CNN"
 
 [default.extend-words]
+mata = "mata"
 iy = "iy"
 tendencias = "tendencias"
 # intel cpu features
