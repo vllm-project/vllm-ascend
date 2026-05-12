@@ -57,3 +57,17 @@ def register_connector():
         "vllm_ascend.distributed.kv_transfer.kv_pool.lmcache_ascend_connector",
         "LMCacheConnectorV1",
     )
+
+    # Override the upstream ``OffloadingConnector`` so the worker side
+    # understands Ascend's per-layer ``(k_cache, v_cache[, ...])`` tuple
+    # layout (upstream's worker asserts a single ``torch.Tensor`` per
+    # layer, which fails on NPU where K and V are separately allocated).
+    # Registered under the same name so existing user configs
+    # ``"kv_connector":"OffloadingConnector"`` work unchanged.
+    if "OffloadingConnector" in KVConnectorFactory._registry:
+        KVConnectorFactory._registry.pop("OffloadingConnector")
+    KVConnectorFactory.register_connector(
+        "OffloadingConnector",
+        "vllm_ascend.distributed.kv_transfer.offloading_connector",
+        "NPUOffloadingConnector",
+    )
