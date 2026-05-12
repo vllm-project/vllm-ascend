@@ -926,16 +926,14 @@ class AscendSpecDecodeBaseProposer(SpecDecodeBaseProposer):
             )
 
         sample_hidden_states = last_hidden_states[token_indices_to_sample]
-        if get_ascend_config().enable_reduce_sample:
-            draft_token_ids = self.model.compute_logits(sample_hidden_states, get_ascend_config().enable_reduce_sample)
-        else:
-            logits = self.model.compute_logits(sample_hidden_states, get_ascend_config().enable_reduce_sample)
-        if lmhead_tp_enable() and num_indices < logits.shape[0] and not get_ascend_config().enable_reduce_sample:
-            logits = logits[:num_indices]
-            token_indices_to_sample = token_indices_to_sample[:num_indices]
-
+        logits = self.model.compute_logits(sample_hidden_states, get_ascend_config().enable_reduce_sample)
         if not get_ascend_config().enable_reduce_sample:
+            if lmhead_tp_enable() and num_indices < logits.shape[0]:
+                logits = logits[:num_indices]
+                token_indices_to_sample = token_indices_to_sample[:num_indices]
             draft_token_ids = logits.argmax(dim=-1)
+        else:
+            draft_token_ids = logits
 
         # Early exit if there is only one draft token to be generated.
         if self.num_speculative_tokens == 1 or self.parallel_drafting:
@@ -943,8 +941,6 @@ class AscendSpecDecodeBaseProposer(SpecDecodeBaseProposer):
             return draft_token_ids.view(-1, self.num_speculative_tokens)
 
         if self.pcp_size * self.dcp_size > 1 and is_prefill:
-            if not get_ascend_config().enable_reduce_sample:
-                draft_token_ids = logits.argmax(dim=-1)
             draft_token_ids_list = []
             for _ in range(self.num_speculative_tokens):
                 draft_token_ids_list.append(draft_token_ids)
