@@ -65,12 +65,18 @@ elif [[ "$SOC_VERSION" =~ ^ascend910b ]]; then
     # dependency: catlass
     git config --global --add safe.directory "$ROOT_DIR"
     CATLASS_PATH=${ROOT_DIR}/csrc/third_party/catlass/include
+    CATLASS_COMMIT=$(git config -f "${ROOT_DIR}/.gitmodules" --get submodule.csrc/third_party/catlass.commit)
     if [[ ! -d "${CATLASS_PATH}" ]]; then
         echo "dependency catlass is missing, try to fetch it..."
+        git submodule sync
         if ! git submodule update --init --recursive; then
             echo "fetch failed"
             exit 1
         fi
+        cd "${ROOT_DIR}/csrc/third_party/catlass" || exit 1
+        git fetch origin
+        git checkout "${CATLASS_COMMIT}" || exit 1
+        cd - || exit 1
     fi
     ABSOLUTE_CATLASS_PATH=$(cd "${CATLASS_PATH}" && pwd)
     export CPATH=${ABSOLUTE_CATLASS_PATH}:${CPATH}
@@ -93,6 +99,8 @@ elif [[ "$SOC_VERSION" =~ ^ascend910b ]]; then
         "hamming_dist_top_k"
         "reshape_and_cache_bnsd"
         "recurrent_gated_delta_rule"
+        "chunk_fwd_o"
+        "chunk_gated_delta_rule_fwd_h"
     )
 
     CUSTOM_OPS=$(IFS=';'; echo "${CUSTOM_OPS_ARRAY[*]}")
@@ -103,12 +111,18 @@ elif [[ "$SOC_VERSION" =~ ^ascend910_93 ]]; then
     # dependency: catlass
     git config --global --add safe.directory "$ROOT_DIR"
     CATLASS_PATH=${ROOT_DIR}/csrc/third_party/catlass/include
+    CATLASS_COMMIT=$(git config -f "${ROOT_DIR}/.gitmodules" --get submodule.csrc/third_party/catlass.commit)
     if [[ ! -d "${CATLASS_PATH}" ]]; then
         echo "dependency catlass is missing, try to fetch it..."
+        git submodule sync
         if ! git submodule update --init --recursive; then
             echo "fetch failed"
             exit 1
         fi
+        cd "${ROOT_DIR}/csrc/third_party/catlass" || exit 1
+        git fetch origin
+        git checkout "${CATLASS_COMMIT}" || exit 1
+        cd - || exit 1
     fi
     # dependency: cann-toolkit file moe_distribute_base.h
     HCCL_STRUCT_FILE_PATH=$(find -L "${ASCEND_TOOLKIT_HOME}" -name "moe_distribute_base.h" 2>/dev/null | head -n1)
@@ -175,6 +189,8 @@ elif [[ "$SOC_VERSION" =~ ^ascend910_93 ]]; then
         "hamming_dist_top_k"
         "reshape_and_cache_bnsd"
         "recurrent_gated_delta_rule"
+        "chunk_fwd_o"
+        "chunk_gated_delta_rule_fwd_h"
     )
     CUSTOM_OPS=$(IFS=';'; echo "${CUSTOM_OPS_ARRAY[*]}")
     SOC_ARG="ascend910_93"
