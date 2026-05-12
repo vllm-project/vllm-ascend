@@ -661,7 +661,7 @@ def register_ascend_customop(vllm_config: VllmConfig | None = None):
         return
     from vllm.model_executor.custom_op import CustomOp
 
-    from vllm_ascend.ops.activation import AscendQuickGELU, AscendSiluAndMul
+    from vllm_ascend.ops.activation import AscendFastGELU, AscendNewGELU, AscendQuickGELU, AscendSiluAndMul
     from vllm_ascend.ops.conv import AscendConv3dLayer
     from vllm_ascend.ops.fused_moe.fused_moe import AscendFusedMoE
     from vllm_ascend.ops.gdn import AscendGatedDeltaNetAttention
@@ -692,6 +692,8 @@ def register_ascend_customop(vllm_config: VllmConfig | None = None):
 
     global REGISTERED_ASCEND_OPS
     REGISTERED_ASCEND_OPS = {
+        "NewGELU": AscendNewGELU,
+        "FastGELU": AscendFastGELU,
         "QuickGELU": AscendQuickGELU,
         "SiluAndMul": AscendSiluAndMul,
         "RotaryEmbedding": AscendRotaryEmbedding,
