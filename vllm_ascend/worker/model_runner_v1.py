@@ -124,7 +124,6 @@ from vllm_ascend.patch.worker.patch_module import patch_torch_npu_argsort
 from vllm_ascend.quantization.utils import enable_fa_quant
 from vllm_ascend.sample.sampler import AscendSampler
 from vllm_ascend.spec_decode import get_spec_decode_method
-from vllm_ascend.utils import AscendDeviceType, get_ascend_device_type
 from vllm_ascend.spec_decode.dflash_proposer import AscendDflashProposer
 from vllm_ascend.spec_decode.draft_proposer import AscendDraftModelProposer
 from vllm_ascend.spec_decode.eagle_proposer import AscendEagleProposer
@@ -137,10 +136,12 @@ from vllm_ascend.spec_decode.ngram_proposer_npu import AscendNgramProposerNPU
 from vllm_ascend.spec_decode.suffix_proposer import AscendSuffixDecodingProposer
 from vllm_ascend.spec_decode.utils import update_num_computed_tokens_for_batch_change
 from vllm_ascend.utils import (
+    AscendDeviceType,
     calc_split_factor,
     check_gdn_layer,
     enable_sp,
     enable_sp_by_pass,
+    get_ascend_device_type,
     get_c_env,
     global_stream,
     kv_cache_spec_uses_sparse_c8,

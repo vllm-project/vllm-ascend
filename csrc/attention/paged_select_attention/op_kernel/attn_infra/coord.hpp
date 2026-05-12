@@ -55,7 +55,7 @@ public:
         }
     }
 
-    // Constructs frrom an array of integers
+    // Constructs from an array of integers
     HOST_DEVICE
     int Argmin() const
     {
@@ -216,7 +216,7 @@ public:
         return true;
     }
 
-    // Member acces operator
+    // Member access operator
     HOST_DEVICE
     Index &operator[](int dim)
     {

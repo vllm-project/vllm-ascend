@@ -235,9 +235,7 @@ class AscendCommonAttentionMetadata(CommonAttentionMetadata):
                 else None
             ),
             quest_refresh_seq_lens=(
-                self.quest_refresh_seq_lens[:num_actual_reqs]
-                if self.quest_refresh_seq_lens is not None
-                else None
+                self.quest_refresh_seq_lens[:num_actual_reqs] if self.quest_refresh_seq_lens is not None else None
             ),
             quest_ready=self.quest_ready,
             max_seq_len=self.max_seq_len,
