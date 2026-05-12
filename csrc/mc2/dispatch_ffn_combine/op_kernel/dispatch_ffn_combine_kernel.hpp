@@ -138,6 +138,7 @@ public:
         uint64_t initRoutingQuantTilingKey;
         uint32_t epilogueCoreNum;
         uint32_t epilogueGranularity;
+        int32_t nodeId;   // -1: no node distinction (original, cross-node comm allowed), 0: this rank on node0 (first-half experts), 1: this rank on node1 (second-half experts), cross-node peermem not allowed
         optiling::MoeInitRoutingQuantV2TilingData moeInitRoutingQuantV2TilingData;
         //--------------
 
@@ -162,6 +163,7 @@ public:
             GM_ADDR expertTokensBeforeCapacity_, GM_ADDR probs_,
             GM_ADDR ptrWorkspace_, GM_ADDR gmExpertTokenNums_, int32_t ubMoveNum_,
             GM_ADDR ptrXActiveMask_,
+            int32_t nodeId_,
             optiling::MoeInitRoutingQuantV2TilingData moeInitRoutingQuantV2TilingData_
         ) : problemShape(problemShape_),
             EP(EP_), listLen(listLen_), expertPerRank(expertPerRank_), maxOutputSize(maxOutputSize_),
@@ -179,6 +181,7 @@ public:
             expertTokensBeforeCapacity(expertTokensBeforeCapacity_), probs(probs_),
             ptrWorkspace(ptrWorkspace_), ptrExpertTokenNums(gmExpertTokenNums_), ubMoveNum(ubMoveNum_),
             ptrXActiveMask(ptrXActiveMask_),
+            nodeId(nodeId_),
             moeInitRoutingQuantV2TilingData(moeInitRoutingQuantV2TilingData_)
         {
         }
@@ -392,6 +395,105 @@ private:
         AscendC::SetFlag<AscendC::HardEvent::S_MTE3>(EVENT_ID0);
         AscendC::WaitFlag<AscendC::HardEvent::S_MTE3>(EVENT_ID0);
         AscendC::DataCopyPad(expertIdxGm[startIdx], tmpExpertIdx[0], {1, static_cast<uint16_t>(copySize * sizeof(int32_t)), 0, 0, 0});
+        AscendC::SyncAll<true>();
+    }
+
+    // Check if dstEpIdx is on a different node from this rank
+    // Enabled when nodeId >= 0: EP ranks are split into two nodes, first half on node0, second half on node1
+    // Ranks on the same node can communicate via peermem, cross-node cannot
+    CATLASS_DEVICE
+    bool IsCrossNodeRank(Params const &params, int32_t dstEpIdx) const {
+        if (params.nodeId < 0) {
+            return false;  // No node distinction, all ranks can communicate
+        }
+        int32_t halfEP = params.EP / 2;
+        bool selfInFirstHalf = params.rank < halfEP;
+        bool dstInFirstHalf = dstEpIdx < halfEP;
+        return selfInFirstHalf != dstInFirstHalf;
+    }
+
+    // Cross-node aware in-node sync, replacing shmem.CrossRankSync()
+    // Only sync with ranks on the same node, skip peermem write/wait for cross-node ranks
+    CATLASS_DEVICE
+    void CrossNodeAwareRankSync(Params const &params) {
+        uint64_t flag_offset = (shmem.SegmentSize() - MB_SIZE) / sizeof(int32_t);
+        __gm__ int32_t* sync_counter = (__gm__ int32_t*)(shmem()) + flag_offset;
+        __gm__ int32_t* sync_base = (__gm__ int32_t*)(shmem()) + flag_offset + 2048;
+        int count = gm_load(sync_base) + 1;
+        int vec_id = AscendC::GetBlockIdx();
+        int vec_size = AscendC::GetBlockNum() * AscendC::GetTaskRation();
+        for (int i = vec_id; i < params.EP; i += vec_size) {
+            // Skip cross-node ranks, only sync with same-node ranks
+            if (IsCrossNodeRank(params, i)) {
+                continue;
+            }
+            __gm__ int32_t* sync_remote = (__gm__ int32_t*)(shmem(i)) + flag_offset + params.rank * 16;
+            gm_store(sync_remote, count);
+            gm_dcci((__gm__ uint8_t*)sync_remote);
+            auto sync_check = sync_counter + i * 16;
+            gm_signal_wait_until_eq_for_barrier(sync_check, count);
+        }
+        AscendC::SyncAll<true>();
+        gm_store(sync_base, count);
+    }
+
+    void ApplyCrossNodeExpertMask(Params const &params) {
+        // Cross-node scenario: set expertIdx of experts not belonging to this node to invalid value, and set corresponding probs to 0
+        // nodeId = -1: no node distinction, all expertIdx are kept (original)
+        // nodeId = 0: this rank on node0, only keep first-half experts(0~totalExperts/2-1), cross-node ones set to expertNum
+        // nodeId = 1: this rank on node1, only keep second-half experts(totalExperts/2~totalExperts-1), cross-node ones set to expertNum
+        // This way moe_init_routing_quant_v2 won't dispatch tokens to cross-node experts, unpermute returns 0 for those positions
+        // Also set probs to 0, so even if unpermute reads dirty data, 0 * dirty_data = 0
+        if (params.nodeId < 0) {
+            return;
+        }
+        int32_t totalExperts = params.expertPerRank * params.EP;
+        int32_t halfExperts = totalExperts / 2;
+        int32_t m = params.problemShape.m();
+        int32_t topK = params.topK;
+        int32_t expertNum = totalExperts;  // Invalid expert ID, used as replacement for cross-node experts
+
+        AscendC::GlobalTensor<int32_t> expertIdxGm;
+        expertIdxGm.SetGlobalBuffer(reinterpret_cast<__gm__ int32_t*>(params.expertIdx));
+        AscendC::GlobalTensor<float> probsGm;
+        probsGm.SetGlobalBuffer(reinterpret_cast<__gm__ float*>(params.probs));
+
+        int32_t totalElements = m * topK;
+        int32_t base = totalElements / coreNum;
+        int32_t rem = totalElements % coreNum;
+        int32_t startIdx = coreIdx * base + min(coreIdx, rem);
+        int32_t endIdx = (coreIdx + 1) * base + min(coreIdx + 1, rem);
+
+        AscendC::LocalTensor<int32_t> tmpExpertIdx = resource.ubBuf.template GetBufferByByte<int32_t>(0);
+        int32_t copySize = endIdx - startIdx;
+
+        AscendC::DataCopyPad(tmpExpertIdx[0], expertIdxGm[startIdx],
+                    {1, static_cast<uint16_t>(copySize * sizeof(int32_t)), 0, 0}, {}
+        );
+
+        // Copy probs to local memory, use 64-byte aligned offset to avoid MaskedSelectV3 ADDR_MISALIGN error
+        int32_t probsOffset = ((copySize * sizeof(int32_t) + 63) / 64) * 64;
+        AscendC::LocalTensor<float> tmpProbs = resource.ubBuf.template GetBufferByByte<float>(probsOffset);
+        AscendC::DataCopyPad(tmpProbs[0], probsGm[startIdx],
+                    {1, static_cast<uint16_t>(copySize * sizeof(float)), 0, 0}, {}
+        );
+
+        AscendC::SetFlag<AscendC::HardEvent::MTE2_S>(EVENT_ID0);
+        AscendC::WaitFlag<AscendC::HardEvent::MTE2_S>(EVENT_ID0);
+
+        for (int32_t i = 0; i < copySize; ++i) {
+            int32_t expertId = tmpExpertIdx.GetValue(i);
+            bool shouldFilter = (params.nodeId == 0) ? (expertId >= halfExperts) : (expertId < halfExperts);
+            if (shouldFilter) {
+                tmpExpertIdx.SetValue(i, expertNum);  // Set to expertNum, moe_init_routing_quant_v2 won't dispatch this token
+                tmpProbs.SetValue(i, 0.0f);           // Set probs to 0, ensure unpermute weighted result is 0
+            }
+        }
+
+        AscendC::SetFlag<AscendC::HardEvent::S_MTE3>(EVENT_ID0);
+        AscendC::WaitFlag<AscendC::HardEvent::S_MTE3>(EVENT_ID0);
+        AscendC::DataCopyPad(expertIdxGm[startIdx], tmpExpertIdx[0], {1, static_cast<uint16_t>(copySize * sizeof(int32_t)), 0, 0, 0});
+        AscendC::DataCopyPad(probsGm[startIdx], tmpProbs[0], {1, static_cast<uint16_t>(copySize * sizeof(float)), 0, 0, 0});
         AscendC::SyncAll<true>();
     }
 
@@ -658,6 +760,10 @@ private:
             if (dstEpIdx == params.rank) {
                 continue;
             }
+            // Cross-node peermem inaccessible, skip cross-node ranks
+            if (IsCrossNodeRank(params, dstEpIdx)) {
+                continue;
+            }
             AscendC::GlobalTensor<int32_t> srcAddress;
             srcAddress.SetGlobalBuffer(reinterpret_cast<__gm__ int32_t*>(shmem() + localTokenPerExpertOffset));
             AscendC::GlobalTensor<int32_t> dstAddress;
@@ -689,6 +795,19 @@ private:
             AscendC::WaitFlag<AscendC::HardEvent::MTE3_MTE2>(EVENT_ID0);
         }
         for(int32_t dstEpIdx = coreIdx; dstEpIdx < params.EP; dstEpIdx += coreNum) {
+            // Cross-node peermem inaccessible, skip cross-node ranks
+            if (IsCrossNodeRank(params, dstEpIdx)) {
+                // Treat tokenPerExpert of cross-node ranks as 0, write 0 directly to preSumBeforeRank
+                AscendC::LocalTensor<int32_t> zeroBuf = resource.ubBuf.template GetBufferByByte<int32_t>(0);
+                AscendC::SetFlag<AscendC::HardEvent::MTE3_V>(EVENT_ID0);
+                AscendC::WaitFlag<AscendC::HardEvent::MTE3_V>(EVENT_ID0);
+                AscendC::Duplicate(zeroBuf, 0, params.expertPerRank);
+                AscendC::SetFlag<AscendC::HardEvent::V_MTE3>(EVENT_ID0);
+                AscendC::WaitFlag<AscendC::HardEvent::V_MTE3>(EVENT_ID0);
+                AscendC::DataCopyPad(preSumBeforeRank[dstEpIdx * params.expertPerRank], zeroBuf,
+                AscendC::DataCopyParams{1, static_cast<uint16_t>(params.expertPerRank * sizeof(int32_t)), 0, 0});
+                continue;
+            }
             if (dstEpIdx != params.rank) {
                 int32_t intPer512 = CACHE_LINE / sizeof(int);
                 for(int32_t checkIdx = 0; checkIdx < paddedExpertNumAligned; checkIdx += intPer512) {
@@ -794,6 +913,7 @@ private:
         uint32_t expandedRowIdxOffset = AlignUp(params.problemShape.m(), 256) * params.topK * sizeof(int32_t);
 
         ApplyXActiveMask(params);
+        ApplyCrossNodeExpertMask(params);
 
         //---initRouting------
         moe_init_routing_quant_v2<ElementD2>(reinterpret_cast<GM_ADDR> (params.ptrA), params.expertIdx, 
@@ -840,6 +960,10 @@ private:
             // The ith core reads data from the ith rank's peermem
             uint32_t currentM = cumsumMM((params.EP - 1) * params.expertPerRank + groupIdx);
             for(int32_t dstEpIdx = coreIdx; dstEpIdx < params.EP; dstEpIdx += coreNum) {
+                // Cross-node peermem inaccessible, skip cross-node ranks
+                if (IsCrossNodeRank(params, dstEpIdx)) {
+                    continue;
+                }
                 uint32_t rowStart = (dstEpIdx == 0 ? 0 : cumsumMM((dstEpIdx - 1) * params.expertPerRank + groupIdx)) + prevGroupSum1;
                 if (rowStart < params.maxOutputSize) {
                     uint32_t rows = tokenPerExpert(tokenPerExpertLayout(dstEpIdx, params.rank, groupIdx));
@@ -963,7 +1087,11 @@ private:
         AscendC::SyncAll<true>();
         ResetTokenPerExpert(params.EP * paddedExpertNumAligned);
 
-        shmem.CrossRankSync();
+        if (params.nodeId >= 0) {
+            CrossNodeAwareRankSync(params);
+        } else {
+            shmem.CrossRankSync();
+        }
 
         MoeTokenUnpermuteTilingData tilingData;
         MoeTokenUnpermuteTiling(params.problemShape.m() * params.topK, n2, params.topK, tilingData, coreNum);
@@ -986,6 +1114,10 @@ private:
             uint32_t groupIdx = t_groupIdx;
 
             for(int32_t dstEpIdx = coreIdx; dstEpIdx < params.EP; dstEpIdx += coreNum) {
+                // Cross-node peermem inaccessible, skip cross-node ranks
+                if (IsCrossNodeRank(params, dstEpIdx)) {
+                    continue;
+                }
                 __gm__ void* dstPeermemPtr = shmem(peermemInfo.offsetD, dstEpIdx);
                 AscendC::GlobalTensor<ElementD2> gmRemotePeer;
                 gmRemotePeer.SetGlobalBuffer(reinterpret_cast<__gm__ ElementD2*>(dstPeermemPtr));
