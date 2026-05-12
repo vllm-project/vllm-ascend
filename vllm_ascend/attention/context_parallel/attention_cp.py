@@ -60,7 +60,6 @@ from vllm_ascend.device.device_op import DeviceOperator
 from vllm_ascend.utils import cp_chunkedprefill_comm_stream, weak_ref_tensors
 
 
-
 class AscendAttentionCPMetadataBuilder(AscendAttentionMetadataBuilder):
     """
     Builder for constructing AscendMetadata with Context Parallelism support.
@@ -163,9 +162,7 @@ class AscendAttentionCPMetadataBuilder(AscendAttentionMetadataBuilder):
                 if self.pcp_size > 1 and common_long_seq_metadata.pcp_use_hybrid_attn:
                     query_lens = attn_chunk_seqlens * 2
                 local_context_lens_allranks = (
-                    torch.tensor(num_computed_tokens_of_pcp_dcp)[num_decodes :]
-                    .to(self.device)
-                    .to(dtype=torch.int32)
+                    torch.tensor(num_computed_tokens_of_pcp_dcp)[num_decodes:].to(self.device).to(dtype=torch.int32)
                 )
                 local_chunked_kv_lens_rank = local_context_lens_allranks[:, self.pcp_rank, self.dcp_rank]
                 actual_seq_lengths_kv = torch.cumsum(local_chunked_kv_lens_rank, dim=0).tolist()
@@ -229,21 +226,21 @@ class AscendAttentionCPMetadataBuilder(AscendAttentionMetadataBuilder):
                 pcp_metadata=pcp_metadata,
                 pcp_exit_fa_scatter_idx=common_long_seq_metadata.pcp_exit_fa_scatter_idx,
                 chunked_context=chunked_context_metadata,
-                block_tables=block_table[num_decodes :, ...],
+                block_tables=block_table[num_decodes:, ...],
                 actual_seq_lengths_q=torch.cumsum(query_lens, dim=0),
             )
 
         if num_decodes > 0:
             num_computed_tokens_array = np.array(num_computed_tokens_of_pcp_dcp)
-            num_computed_tokens_array = num_computed_tokens_array[: num_decodes]
+            num_computed_tokens_array = num_computed_tokens_array[:num_decodes]
             if common_long_seq_metadata.dcp_mtp_attn_mask is not None:
                 dcp_mtp_attn_mask = common_long_seq_metadata.dcp_mtp_attn_mask
             else:
                 dcp_mtp_attn_mask = None
-            
+
             decode_metadata = AscendMetadataForDecode(
                 num_computed_tokens_of_pcp_dcp=num_computed_tokens_array,
-                block_tables=block_table[: num_decodes],
+                block_tables=block_table[:num_decodes],
                 dcp_mtp_attn_mask=dcp_mtp_attn_mask,
             )
 
@@ -252,7 +249,9 @@ class AscendAttentionCPMetadataBuilder(AscendAttentionMetadataBuilder):
                 num_decodes:
             ]
         else:
-            actual_seq_lengths_q = [self.decode_threshold for _ in range(num_decodes)] + query_start_loc_cpu[num_decodes + 1 :].tolist()
+            actual_seq_lengths_q = [self.decode_threshold for _ in range(num_decodes)] + query_start_loc_cpu[
+                num_decodes + 1 :
+            ].tolist()
 
         attn_metadata = AscendMetadata(
             num_actual_tokens=num_actual_tokens,
@@ -573,7 +572,6 @@ class AscendAttentionCPImpl(AscendAttentionBackendImpl):
         else:
             num_heads = self.num_heads
 
-
         k_nope = self.key_cache.view(self.key_cache.shape[0], self.key_cache.shape[1], -1)
         value = self.value_cache.view(self.key_cache.shape[0], self.key_cache.shape[1], -1)
 
@@ -637,7 +635,9 @@ class AscendAttentionCPImpl(AscendAttentionBackendImpl):
             if input_layerout == "TND":
                 attn_lse = torch.empty((num_tokens, num_heads, 1), dtype=torch.float, device=query.device)
             else:
-                attn_lse = torch.empty((query.shape[0], num_heads, query.shape[1], 1), dtype=torch.float, device=query.device)
+                attn_lse = torch.empty(
+                    (query.shape[0], num_heads, query.shape[1], 1), dtype=torch.float, device=query.device
+                )
 
             graph_params.attn_params[num_tokens].append(
                 (
@@ -669,7 +669,7 @@ class AscendAttentionCPImpl(AscendAttentionBackendImpl):
             attn_out, attn_lse = torch_npu.npu_fused_infer_attention_score(query, k_nope, value, **common_kwargs)
         if input_layerout == "BSND":
             attn_out = attn_out.view(-1, attn_out.shape[2], attn_out.shape[3])
-            attn_lse = attn_lse.transpose(1,2).reshape(-1, attn_lse.shape[1], 1)
+            attn_lse = attn_lse.transpose(1, 2).reshape(-1, attn_lse.shape[1], 1)
         attn_out_lse = _process_attn_out_lse(attn_out, attn_lse)
         attn_out = _npu_attention_update(self.head_size, attn_out_lse)
         return attn_out

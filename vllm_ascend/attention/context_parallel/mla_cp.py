@@ -45,7 +45,6 @@ from vllm_ascend.compilation.acl_graph import (
     update_graph_params_workspaces,
 )
 from vllm_ascend.utils import weak_ref_tensors
-from vllm_ascend.attention.utils import generate_dcp_mtp_mask
 
 MAX_O_PROJ_PREFETCH_SIZE = 16 * 1024 * 1024
 
@@ -611,7 +610,6 @@ class AscendMlaCPImpl(AscendMLAImpl):
 
         return attn_out, attn_lse
 
-
     def _forward_decode(
         self,
         q_nope: torch.Tensor,
@@ -654,7 +652,7 @@ class AscendMlaCPImpl(AscendMLAImpl):
             q_pe = q_pe.view(num_decodes, -1, q_pe.shape[1], q_pe.shape[-1])
             sparse_mode = 0
             spec_attn_mask = attn_metadata.decode.dcp_mtp_attn_mask
-            actual_seq_lengths = attn_metadata.query_lens 
+            actual_seq_lengths = attn_metadata.query_lens
         else:
             q_nope = q_nope.view(num_tokens, num_heads, 1, -1).contiguous()
             q_pe = q_pe.view(num_tokens, num_heads, 1, -1)
@@ -704,7 +702,9 @@ class AscendMlaCPImpl(AscendMLAImpl):
             attn_output = torch.empty_like(q_nope)
             if input_layout == "BSND":
                 num_decodes = attn_metadata.num_decodes
-                softmax_lse = torch.empty((num_decodes,  num_heads,q_nope.shape[1], 1), dtype=torch.float, device=q_nope.device)
+                softmax_lse = torch.empty(
+                    (num_decodes, num_heads, q_nope.shape[1], 1), dtype=torch.float, device=q_nope.device
+                )
             else:
                 softmax_lse = torch.empty((num_tokens, num_heads, 1), dtype=torch.float, device=q_nope.device)
 
@@ -744,8 +744,8 @@ class AscendMlaCPImpl(AscendMLAImpl):
 
         if input_layout == "BSND":
             attn_output = attn_output.view(-1, attn_output.shape[2], attn_output.shape[3])
-            softmax_lse = softmax_lse.transpose(1,2).reshape(-1, softmax_lse.shape[1], 1)
-        
+            softmax_lse = softmax_lse.transpose(1, 2).reshape(-1, softmax_lse.shape[1], 1)
+
         if input_layout == "BNSD":
             B_attn, N_attn, S, D = attn_output.shape
             B_lse, N_lse, Q_S, _ = softmax_lse.shape
@@ -757,6 +757,7 @@ class AscendMlaCPImpl(AscendMLAImpl):
         attn_out_lse = _process_attn_out_lse(attn_output, softmax_lse)
         attn_output = _npu_attention_update(self.kv_lora_rank, attn_out_lse)
         return self._v_up_proj(attn_output)
+
     def _out_lse_reshape(self, attn_out: torch.Tensor, attn_lse: torch.Tensor) -> torch.Tensor:
         attn_out = attn_out.contiguous().view(attn_out.shape[0] * attn_out.shape[1], attn_out.shape[2])
         attn_lse = attn_lse.contiguous().view(attn_lse.shape[0] * attn_lse.shape[1] * attn_lse.shape[2])

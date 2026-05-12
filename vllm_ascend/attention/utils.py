@@ -145,6 +145,7 @@ class AscendPrefillContextParallelMetadata:
 
     dcp_mtp_attn_mask: torch.Tensor = None
 
+
 @dataclass
 class AscendCommonAttentionMetadata(CommonAttentionMetadata):
     """
@@ -383,6 +384,7 @@ def enabling_mlapo(vllm_config: VllmConfig) -> bool:
         and not vllm_config.kv_transfer_config.is_kv_producer
     )
     return bool(envs.VLLM_ASCEND_ENABLE_MLAPO and is_decode_instance)
+
 
 def generate_dcp_mtp_mask(masks, query_lens, num_decodes) -> torch.Tensor:
     if masks and masks[0] is not None:

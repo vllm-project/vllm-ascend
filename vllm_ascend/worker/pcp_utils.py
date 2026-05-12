@@ -1223,7 +1223,7 @@ class PCPManager:
                 long_seq_metadata.tail_actual_seq_lengths_kv = self.extra_long_seq_kwargs["tail_actual_seq_lengths_kv"]
                 long_seq_metadata.attn_chunk_seqlens = attn_chunk_seqlens
 
-                    # Generate MTP attention masks for decode requests when dcp_size > 1 with speculative decoding
+                # Generate MTP attention masks for decode requests when dcp_size > 1 with speculative decoding
             if (
                 self.dcp_world_size > 1
                 and self.speculative_config
@@ -1233,12 +1233,14 @@ class PCPManager:
                 # Extract decode request info from input_batch and num_scheduled_tokens
                 decode_num_computed_tokens = input_batch.num_computed_tokens_cpu[: self.num_decode_reqs].tolist()
                 decode_num_scheduled_tokens = num_scheduled_tokens[: self.num_decode_reqs]
-                
-                dcp_mtp_attn_mask = self.generate_mtp_attention_mask_for_decode(decode_num_computed_tokens, decode_num_scheduled_tokens)
+
+                dcp_mtp_attn_mask = self.generate_mtp_attention_mask_for_decode(
+                    decode_num_computed_tokens, decode_num_scheduled_tokens
+                )
                 if dcp_mtp_attn_mask is not None:
-                    self.dcp_mtp_attn_mask.np[:self.num_decode_reqs] = dcp_mtp_attn_mask
+                    self.dcp_mtp_attn_mask.np[: self.num_decode_reqs] = dcp_mtp_attn_mask
                     self.dcp_mtp_attn_mask.copy_to_gpu(self.num_decode_reqs)
-                    long_seq_metadata.dcp_mtp_attn_mask = self.dcp_mtp_attn_mask.gpu[:self.num_decode_reqs]
+                    long_seq_metadata.dcp_mtp_attn_mask = self.dcp_mtp_attn_mask.gpu[: self.num_decode_reqs]
                 else:
                     long_seq_metadata.dcp_mtp_attn_mask = None
             else:
@@ -1251,7 +1253,7 @@ class PCPManager:
         tensor_npu = torch.zeros(len(lst), dtype=dtype, device=device)
         tensor_npu.copy_(torch.tensor(lst, dtype=dtype), non_blocking=True)
         return tensor_npu
-    
+
     def generate_mtp_attention_mask_for_decode(
         self,
         decode_num_computed_tokens: list[int],
@@ -1362,7 +1364,7 @@ class PCPManager:
             mtp_masks.append(None)
 
         if mtp_masks[0] is not None:
-            mtp_masks = mtp_masks[:self.num_decode_reqs]
+            mtp_masks = mtp_masks[: self.num_decode_reqs]
             for i, mask in enumerate(mtp_masks):
                 S = mask.shape[0]
                 L = mask.shape[1]
