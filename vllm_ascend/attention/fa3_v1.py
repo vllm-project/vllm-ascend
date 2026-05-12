@@ -41,7 +41,6 @@ class AscendFABackend(AttentionBackend):
 
 
 class AscendFAImpl(AscendAttentionBackendImpl):
-
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
         if self.sliding_window is not None:
