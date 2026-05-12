@@ -265,8 +265,8 @@ public:
                     Arch::CrossCoreWaitFlag(cubeBlockScheduler.vec1Done);
 
                     GDNFwdOOffsets& cube1Offsets = cubeBlockScheduler.GetCube1Offsets();
-                    int64_t cube1OffsetQ = cube1Offsets.qkOffset; 
-                    int64_t cube1OffsetK = cube1Offsets.qkOffset; 
+                    int64_t cube1OffsetQ = cube1Offsets.qOffset; 
+                    int64_t cube1OffsetK = cube1Offsets.kOffset; 
                     int64_t cube1OffsetAttn = cube1Offsets.attnWorkOffset; 
                     auto attenLayout = tla::MakeLayout<ElementAtten, LayoutAtten>(coreNum * chunkSize * PING_PONG_STAGES, cube1Offsets.blockTokens);
                     auto tensorQ = tla::MakeTensor(gmQ[cube1OffsetQ], qLayout, Catlass::Arch::PositionGM{});
@@ -288,7 +288,7 @@ public:
                     if(!cubeBlockScheduler.isRunning) Arch::CrossCoreWaitFlag(cubeBlockScheduler.vec1Done);
                     Arch::CrossCoreWaitFlag(cubeBlockScheduler.vec2Done);
                     GDNFwdOOffsets& cube2Offsets = cubeBlockScheduler.GetCube23Offsets();
-                    int64_t cube2OffsetQ = cube2Offsets.qkOffset;
+                    int64_t cube2OffsetQ = cube2Offsets.qOffset;
                     int64_t cube2OffsetH = cube2Offsets.hOffset;
                     int64_t cube2OffsetHWork = cube2Offsets.hvWorkOffset; 
                     auto tensorQ = tla::MakeTensor(gmQ[cube2OffsetQ], qLayout, Catlass::Arch::PositionGM{});
@@ -308,7 +308,7 @@ public:
                     GDNFwdOOffsets& cube3Offsets = cubeBlockScheduler.GetCube23Offsets();
                     if(isFirstC3) Arch::CrossCoreWaitFlag(cubeBlockScheduler.vec1Done);
                     int64_t cube3OffsetAttnMask = cube3Offsets.attnWorkOffset; 
-                    int64_t cube3OffsetV = cube3Offsets.ovOffset; 
+                    int64_t cube3OffsetV = cube3Offsets.vOffset; 
                     int64_t cube3OffsetVWork = cube3Offsets.hvWorkOffset; 
                     auto attenLayout = tla::MakeLayout<ElementAtten, LayoutAtten>(coreNum * chunkSize * PING_PONG_STAGES, cube3Offsets.blockTokens);
                     auto tensorAttnMask = tla::MakeTensor(gmAftermaskWorkspace[cube3OffsetAttnMask], attenLayout, Catlass::Arch::PositionGM{});
@@ -379,7 +379,7 @@ public:
                     Arch::CrossCoreWaitFlag(vecBlockScheduler.cube2Done);
                     Arch::CrossCoreWaitFlag(vecBlockScheduler.cube3Done);
                     GDNFwdOOffsets& vec2Offsets = vecBlockScheduler.GetVec2Offsets();
-                    int64_t vec2OffsetO = vec2Offsets.ovOffset;
+                    int64_t vec2OffsetO = vec2Offsets.oOffset;
                     int64_t vec2OffsetG = vec2Offsets.gOffset;
                     int64_t vec2OffsetVWork = vec2Offsets.hvWorkOffset;
                     int64_t vec2OffsetHWork = vec2Offsets.hvWorkOffset;

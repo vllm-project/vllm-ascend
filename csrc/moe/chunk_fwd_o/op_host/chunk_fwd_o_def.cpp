@@ -34,14 +34,14 @@ public:
             .DataType({ge::DT_BF16, ge::DT_FLOAT16, ge::DT_BF16, ge::DT_FLOAT16})
             .Format({ge::FORMAT_ND, ge::FORMAT_ND, ge::FORMAT_ND, ge::FORMAT_ND})
             .UnknownShapeFormat({ge::FORMAT_ND, ge::FORMAT_ND, ge::FORMAT_ND, ge::FORMAT_ND})
-            .AutoContiguous();
+            .IgnoreContiguous();
 
         this->Input("v")
             .ParamType(REQUIRED)
             .DataType({ge::DT_BF16, ge::DT_FLOAT16, ge::DT_BF16, ge::DT_FLOAT16})
             .Format({ge::FORMAT_ND, ge::FORMAT_ND, ge::FORMAT_ND, ge::FORMAT_ND})
             .UnknownShapeFormat({ge::FORMAT_ND, ge::FORMAT_ND, ge::FORMAT_ND, ge::FORMAT_ND})
-            .AutoContiguous();
+            .IgnoreContiguous();
 
         this->Input("h")
             .ParamType(REQUIRED)
@@ -81,6 +81,8 @@ public:
 
         this->Attr("scale").AttrType(REQUIRED).Float(1.0);
         this->Attr("chunk_size").AttrType(REQUIRED).Int(64);
+        this->Attr("kStride0").AttrType(REQUIRED).Int(0);
+        this->Attr("vStride0").AttrType(REQUIRED).Int(0);
 
         OpAICoreConfig aicore_config;
         aicore_config.DynamicCompileStaticFlag(true)
