@@ -17,14 +17,13 @@
 
 from vllm.triton_utils import HAS_TRITON
 
-from vllm_ascend.utils import is_310p
+from vllm_ascend.utils import is_310p, vllm_version_is
 
 if HAS_TRITON:
     import vllm_ascend.patch.worker.patch_triton
     import vllm_ascend.patch.worker.patch_v2.patch_triton  # noqa
 
 
-# isort: off
 import vllm_ascend.patch.worker.patch_weight_utils  # noqa
 import vllm_ascend.patch.platform.patch_sched_yield  # noqa
 import vllm_ascend.patch.worker.patch_bert  # noqa
@@ -53,4 +52,6 @@ import vllm_ascend.patch.worker.patch_v2.patch_input_batch  # noqa
 import vllm_ascend.patch.worker.patch_v2.patch_model_state  # noqa
 import vllm_ascend.patch.worker.patch_v2.patch_block_table  # noqa
 import vllm_ascend.patch.worker.patch_gqa_c8  # noqa
-import vllm_ascend.patch.worker.patch_v2.patch_attn_utils  # noqa
+
+if not vllm_version_is("0.20.2"):
+    import vllm_ascend.patch.worker.patch_v2.patch_attn_utils  # noqa
