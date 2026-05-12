@@ -390,8 +390,27 @@ class KVPoolWorker:
                 load_start_block = 0
             else:
                 load_start_block = request.load_spec.vllm_cached_tokens // self.block_size
-            full_blocks = cached_tokens // self.block_size
-            partial_block_index = full_blocks if cached_tokens % self.block_size != 0 else None
+            cached_full_blocks = cached_tokens // self.block_size
+            full_blocks = min(cached_full_blocks, len(request.block_hashes))
+            needs_last_block_at_boundary = (
+                cached_tokens > 0
+                and cached_tokens % self.block_size == 0
+                and full_blocks < cached_full_blocks
+            )
+            if request.last_block_gva is not None and (
+                cached_tokens % self.block_size != 0
+                or needs_last_block_at_boundary
+            ):
+                partial_block_index = (
+                    cached_full_blocks
+                    if cached_tokens % self.block_size != 0
+                    else cached_full_blocks - 1
+                )
+            else:
+                partial_block_index = None
+            if (partial_block_index is not None
+                    and partial_block_index < load_start_block):
+                partial_block_index = None
             if load_start_block >= full_blocks and partial_block_index is None:
                 continue
             request_block_ranges.append(

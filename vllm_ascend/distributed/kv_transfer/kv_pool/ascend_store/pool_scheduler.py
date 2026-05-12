@@ -486,7 +486,9 @@ class KVPoolScheduler:
                         request = req_tuple[0]
                         num_current_tokens = request_tracker.token_len
                         new_token_ids = request.all_token_ids[num_current_tokens : num_current_tokens + num_new_tokens]
-                        request_tracker.token_len += len(new_token_ids)
+                        if request_tracker.token_ids is not None and new_token_ids:
+                            request_tracker.token_ids.extend(new_token_ids)
+                        request_tracker.token_len += num_new_tokens
                     else:
                         raise ValueError(
                             f"Request {req_id} is not in _unfinished_requests, but it is scheduled to be cached"
@@ -495,7 +497,10 @@ class KVPoolScheduler:
                     prev_hash_count = prev_token_count // self._block_size
                     current_hash_count = request_tracker.token_len // self._block_size
                     new_hash_count = current_hash_count - prev_hash_count
-                    has_last_block = request_tracker.token_len % self._block_size != 0
+                    has_last_block = (
+                        request_tracker.token_len % self._block_size != 0
+                        or current_hash_count > len(request.block_hashes)
+                    )
                     if new_hash_count > 0 or has_last_block:
                         self._ensure_tracker_gvas_cover_blocks(
                             request_tracker,

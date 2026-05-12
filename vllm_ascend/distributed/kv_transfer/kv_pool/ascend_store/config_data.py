@@ -396,7 +396,7 @@ class ReqMeta:
         """
         if block_hashes is None:
             block_hashes = []
-        input_token_len = tracker.token_len
+        current_token_len = tracker.token_len
         previous_saved_tokens = tracker.num_saved_tokens
 
         # For save operation: do not save if the following condition is met
@@ -405,12 +405,27 @@ class ReqMeta:
         chunk_boundary = cdiv(tracker.num_saved_tokens + 1, block_size) * block_size if discard_partial_chunks else 0
         # Calculate number of tokens to save based on discard_partial_chunks
         # setting
-        num_tokens_to_save = (input_token_len // block_size * block_size) if discard_partial_chunks else input_token_len
-        partial_block_index = (
-            input_token_len // block_size
-            if input_token_len % block_size != 0 and tracker.last_block_gva is not None
-            else None
+        num_tokens_to_save = (
+            current_token_len // block_size * block_size
+        ) if discard_partial_chunks else current_token_len
+        full_block_count = current_token_len // block_size
+        boundary_without_hash = (
+            current_token_len > 0
+            and current_token_len % block_size == 0
+            and full_block_count > len(block_hashes)
         )
+        if boundary_without_hash:
+            num_tokens_to_save = len(block_hashes) * block_size
+        if tracker.last_block_gva is not None and (
+            current_token_len % block_size != 0 or boundary_without_hash
+        ):
+            partial_block_index = (
+                full_block_count
+                if current_token_len % block_size != 0
+                else full_block_count - 1
+            )
+        else:
+            partial_block_index = None
 
         skip_save = skip_save or (num_tokens_to_save < chunk_boundary and partial_block_index is None)
         if skip_save and load_spec is None:
