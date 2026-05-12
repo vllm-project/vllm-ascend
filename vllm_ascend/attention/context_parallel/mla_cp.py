@@ -624,7 +624,7 @@ class AscendMlaCPImpl(AscendMLAImpl):
     ) -> torch.Tensor:
         decode_meta = attn_metadata.decode
         assert decode_meta is not None
-        num_tokens = q_nope.size(0) #note 需要确认这里的shape
+        num_tokens = q_nope.size(0)
         # shape of knope/k_pe for npu graph mode should be:
         # [num_blocks, num_kv_heads, block_size, self.kv_lora_rank/self.qk_rope_head_dim]
         if self.dcp_size > 1:
