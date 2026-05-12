@@ -182,7 +182,7 @@ jobs:
       (needs.build-image.result == 'success' || needs.build-image.result == 'skipped')
     strategy:
       fail-fast: false
-      max-parallel: 2
+      max-parallel: 3
       matrix:
         vllm_ascend_branch: ${{ fromJSON(needs.setup-vars.outputs.vllm_ascend_branches) }}
         test_config:
@@ -225,6 +225,9 @@ jobs:
           - name: multi-node-GLM-5.1-w8a8-A3
             config_file_path: GLM5_1-W8A8-A3-dual-nodes.yaml
             size: 2
+          - name: multi-node-glm4.7-w8a8c8-layerwise
+            config_file_path: GLM-4.7-W8A8C8-Mooncake-Layerwise.yaml
+            size: 2
     uses: ./.github/workflows/_e2e_nightly_multi_node.yaml
     with:
       soc_version: a3
@@ -258,7 +261,7 @@ jobs:
       (needs.build-image.result == 'success' || needs.build-image.result == 'skipped')
     strategy:
       fail-fast: false
-      max-parallel: 5
+      max-parallel: 7
       matrix:
         vllm_ascend_branch: ${{ fromJSON(needs.setup-vars.outputs.vllm_ascend_branches) }}
         test_config:
@@ -305,6 +308,12 @@ jobs:
           - name: Qwen3.5-397B-A17B-w8a8-mtp
             os: linux-aarch64-a3-16
             config_file_path: Qwen3.5-397B-A17B-W8A8-mtp-A3.yaml
+          - name: MiniMax-M2.5-w8a8-QuaRot-A3
+            os: linux-aarch64-a3-8
+            config_file_path: MiniMax-M2.5-w8a8-QuaRot-A3.yaml
+          - name: Qwen3.5-27B-w8a8-A3
+            os: linux-aarch64-a3-2
+            config_file_path: Qwen3.5-27B-w8a8-A3.yaml
           - name: Qwen3.5-122B-A10B-W8A8-A3
             os: linux-aarch64-a3-16
             config_file_path: Qwen3.5-122B-A10B-W8A8-A3.yaml
