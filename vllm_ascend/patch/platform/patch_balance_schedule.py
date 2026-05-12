@@ -45,6 +45,9 @@ class BalanceScheduler(Scheduler):
             include_finished_set,
             log_stats,
         )
+        # all-mode also needs block-aligned chunked prefill splits
+        if self.has_mamba_layers and self.cache_config.mamba_cache_mode == "all":
+            self.need_mamba_block_aligned_split = True
         # Balance scheduling.
         self.balance_queue = [
             torch.tensor([0], dtype=torch.int, device="cpu")

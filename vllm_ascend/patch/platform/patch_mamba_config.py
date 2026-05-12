@@ -8,6 +8,7 @@ from vllm.model_executor.models import ModelRegistry
 from vllm.model_executor.models.config import MambaModelConfig
 from vllm.utils.math_utils import cdiv
 from vllm.utils.torch_utils import STR_DTYPE_TO_TORCH_DTYPE, get_dtype_size, get_kv_cache_torch_dtype
+from vllm.v1.core.sched.scheduler import Scheduler as _Scheduler
 
 
 @classmethod
@@ -22,8 +23,25 @@ def verify_and_update_config(cls, vllm_config) -> None:
     Args:
         vllm_config: vLLM Config
     """
+    cache_config = vllm_config.cache_config
+
+    # Save user-requested mode before calling parent, which may
+    # downgrade "all" -> "align" because upstream model classes
+    # don't declare SupportsMambaPrefixCaching for GDN yet.
+    requested_mamba_cache_mode = cache_config.mamba_cache_mode
+
     # Enable FULL_AND_PIECEWISE by default
     MambaModelConfig.verify_and_update_config(vllm_config)
+
+    # Restore "all" mode on NPU — we implement all-mode prefix caching
+    # for GDN in vllm-ascend even though upstream hasn't merged it yet.
+    if (
+        requested_mamba_cache_mode == "all"
+        and cache_config.enable_prefix_caching
+        and cache_config.mamba_cache_mode == "align"
+    ):
+        cache_config.mamba_cache_mode = "all"
+        logger.info("Restoring mamba_cache_mode='all' (NPU all-mode prefix caching is supported in vllm-ascend).")
 
     cache_config = vllm_config.cache_config
     model_config = vllm_config.model_config
@@ -101,13 +119,31 @@ def verify_and_update_config(cls, vllm_config) -> None:
             "exactly equal.",
             mamba_padding_pct,
         )
-    if cache_config.enable_prefix_caching and cache_config.mamba_cache_mode == "align":
+    if cache_config.enable_prefix_caching and cache_config.mamba_cache_mode in ("align", "all"):
         cache_config.mamba_block_size = cache_config.block_size
     else:
         cache_config.mamba_block_size = model_config.max_model_len
 
 
 vllm.model_executor.models.config.HybridAttentionMambaModelConfig.verify_and_update_config = verify_and_update_config
+
+
+# Enable block-aligned split for all-mode in upstream Scheduler.
+# BalanceScheduler (NPU DP scheduler) already does this at L49-50,
+# but the default Scheduler only enables it for "align" mode.
+# Without this, scatter writes incorrect intermediate states when
+# the step start position is not aligned to block boundaries.
+
+_original_scheduler_init = _Scheduler.__init__
+
+
+def _patched_scheduler_init(self, *args, **kwargs):
+    _original_scheduler_init(self, *args, **kwargs)
+    if self.has_mamba_layers and self.cache_config.mamba_cache_mode == "all":
+        self.need_mamba_block_aligned_split = True
+
+
+_Scheduler.__init__ = _patched_scheduler_init
 
 
 # =============================================================================
