@@ -1,13 +1,12 @@
 import torch
 import vllm.envs as envs_vllm
+from flash_attn_v3 import flash_attn_with_kvcache as _fa3_fn  # type: ignore[import-not-found]
 from vllm.v1.attention.backend import AttentionBackend  # type: ignore
 
 from vllm_ascend.attention.attention_v1 import (
     AscendAttentionBackendImpl,
     AscendAttentionMetadataBuilder,
 )
-
-from flash_attn_v3 import flash_attn_with_kvcache as _fa3_fn  # type: ignore[import-not-found]
 
 
 class AscendFABackend(AttentionBackend):

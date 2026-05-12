@@ -30,8 +30,9 @@ from vllm.platforms import Platform, PlatformEnum
 # todo: please remove it when solve cuda hard code in vllm
 os.environ["VLLM_DISABLE_SHARED_EXPERTS_STREAM"] = "1"
 
-import vllm_ascend.envs as envs_ascend
 from vllm.v1.attention.backends.registry import AttentionBackendEnum
+
+import vllm_ascend.envs as envs_ascend
 from vllm_ascend.ascend_config import init_ascend_config
 
 # isort: off
@@ -626,9 +627,7 @@ class NPUPlatform(Platform):
                 "VLLM_BATCH_INVARIANT=1."
             )
         if key != (False, False):
-            raise ValueError(
-                "FA3 backend does not support MLA and SFA."
-            )
+            raise ValueError("FA3 backend does not support MLA and SFA.")
         try:
             import flash_attn_v3  # noqa: F401
         except ImportError:
@@ -928,7 +927,10 @@ class NPUPlatform(Platform):
                 att_config.flash_attn_version = None
 
             # Notify user that the backend will be managed by Ascend plugins
-            if getattr(att_config, "backend", None) is not None and att_config.backend != AttentionBackendEnum.FLASH_ATTN:
+            if (
+                getattr(att_config, "backend", None) is not None
+                and att_config.backend != AttentionBackendEnum.FLASH_ATTN
+            ):
                 logger.info(
                     "User specified attention backend '%s'. Note that Ascend NPU "
                     "will use its registered plugin backend instead. Resetting to None.",
