@@ -41,7 +41,17 @@ SERVICE_PROFILING_SYMBOLS_YAML = """
   handler: ms_service_profiler.patcher.vllm.handlers.v1.batch_handlers:schedule
   name: batchFrameworkProcessing
 
-- symbol: vllm_ascend.core.scheduler:AscendScheduler.schedule
+- symbol: vllm_ascend.core.scheduler_dynamic_batch:SchedulerDynamicBatch.schedule
+  min_version: "0.9.1"
+  handler: ms_service_profiler.patcher.vllm.handlers.v1.batch_handlers:schedule
+  name: batchFrameworkProcessing
+
+- symbol: vllm_ascend.core.scheduler_profiling_chunk:ProfilingChunkScheduler.schedule
+  min_version: "0.9.1"
+  handler: ms_service_profiler.patcher.vllm.handlers.v1.batch_handlers:schedule
+  name: batchFrameworkProcessing
+
+- symbol: vllm_ascend.core.recompute_scheduler:RecomputeScheduler.schedule
   min_version: "0.9.1"
   handler: ms_service_profiler.patcher.vllm.handlers.v1.batch_handlers:schedule
   name: batchFrameworkProcessing
