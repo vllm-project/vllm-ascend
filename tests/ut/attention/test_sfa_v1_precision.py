@@ -28,6 +28,10 @@ import os
 import sys
 from unittest.mock import MagicMock
 
+from vllm_ascend.utils import enable_custom_op
+
+enable_custom_op()
+
 import pytest
 import torch
 
