@@ -640,8 +640,7 @@ class NPUPlatform(Platform):
                 "whether it supports flash_attn_with_kvcache."
             )
         logger.info(
-            "In training-inference consistency scenario, FA3 will be enabled, "
-            "which may cause performance degradation."
+            "In training-inference consistency scenario, FA3 will be enabled, which may cause performance degradation."
         )
         return True
 
