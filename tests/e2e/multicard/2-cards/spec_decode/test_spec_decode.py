@@ -21,7 +21,9 @@ from __future__ import annotations
 import os
 from unittest.mock import patch
 
+import huggingface_hub
 import pytest
+from huggingface_hub import try_to_load_from_cache
 from transformers import AutoTokenizer
 from vllm import SamplingParams
 from vllm.config import CompilationConfig
@@ -29,6 +31,48 @@ from vllm.tokenizers.registry import resolve_tokenizer_args
 from vllm.v1.metrics.reader import Counter, Vector
 
 from tests.e2e.conftest import VllmRunner
+
+
+def _require_cached_model(repo_id: str) -> None:
+    """Skip the current test if ``repo_id`` is not in the local cache.
+
+    CI sets ``HF_HUB_OFFLINE=1`` and ``VLLM_USE_MODELSCOPE=True``; models
+    listed in ``.github/workflows/misc/model_dataset_list.json`` are
+    pre-cached via ``modelscope download``. Models that only exist on
+    HuggingFace (no ModelScope mirror) fail to download silently, so the
+    ``SpeculativeConfig`` validator later dies with a confusing pydantic
+    ``ValidationError``. Detect that early and skip with a clear message;
+    the test auto-resumes once the model is mirrored.
+
+    Checks both the HuggingFace cache and the ModelScope cache, because
+    CI downloads exclusively populate the latter.
+    """
+    if not huggingface_hub.constants.HF_HUB_OFFLINE:
+        return
+
+    # HuggingFace cache
+    cached = try_to_load_from_cache(repo_id=repo_id, filename="config.json")
+    if isinstance(cached, str):
+        return
+
+    # ModelScope cache (CI primary location when VLLM_USE_MODELSCOPE=True)
+    try:
+        from modelscope.utils.file_utils import get_model_cache_root
+
+        ms_config = os.path.join(get_model_cache_root(), repo_id, "config.json")
+        if os.path.isfile(ms_config):
+            return
+    except ImportError:
+        pass
+
+    pytest.skip(
+        f"{repo_id!r} is not in the local cache (HF + ModelScope) and "
+        "HF_HUB_OFFLINE=1 blocks downloads; add a ModelScope mirror "
+        "under the vllm-ascend/ namespace and update "
+        "`.github/workflows/misc/model_dataset_list.json` to enable "
+        "this test in CI."
+    )
+
 
 os.environ["VLLM_WORKER_MULTIPROC_METHOD"] = "spawn"
 
@@ -247,6 +291,11 @@ def test_p_eagle_acceptance(
     """
     main_model_name = P_EAGLE_MODELS[method]["main"]
     spec_model_name = P_EAGLE_MODELS[method]["spec"]
+
+    # Skip in CI if the P-EAGLE spec model is not yet mirrored to the
+    # local cache (ModelScope does not host the upstream Amazon
+    # ``amazon/Qwen3-Coder-30B-A3B-Instruct-P-EAGLE`` artifact).
+    _require_cached_model(spec_model_name)
 
     tokenizer_path = resolve_tokenizer_args(main_model_name)[1]
     tokenizer = AutoTokenizer.from_pretrained(
