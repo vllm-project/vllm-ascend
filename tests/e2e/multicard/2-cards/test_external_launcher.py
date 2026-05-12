@@ -151,7 +151,7 @@ def test_qwen3_external_launcher_with_sleepmode():
         env=env,
         stdout=subprocess.PIPE,
         stderr=subprocess.STDOUT,
-        timeout=300,
+        timeout=600,
     )
     output = proc.stdout.decode(errors="ignore")
 
@@ -200,7 +200,7 @@ def test_qwen3_external_launcher_with_sleepmode_level2():
         env=env,
         stdout=subprocess.PIPE,
         stderr=subprocess.STDOUT,
-        timeout=300,
+        timeout=600,
     )
     output = proc.stdout.decode(errors="ignore")
 

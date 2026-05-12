@@ -98,6 +98,9 @@ set_directory_properties(PROPERTIES
     ADDITIONAL_MAKE_CLEAN_FILES "${CMAKE_BINARY_DIR}/_CPack_Packages"
 )
 
+# Suppress warnings from catlass/tla third-party headers for CANN kernel compilation
+list(APPEND OPS_COMPILE_OPTIONS -Wno-ignored-attributes)
+
 include(cmake/config.cmake)
 include(cmake/func.cmake)
 include(cmake/third_party/json.cmake)
