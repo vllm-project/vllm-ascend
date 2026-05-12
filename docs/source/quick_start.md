@@ -93,6 +93,7 @@ You can use ModelScope mirror to speed up download:
 <!-- tests/e2e/doctest/001-quickstart-test.sh should be considered updating as well -->
 
 ```bash
+pip install modelscope>=1.35.1
 export VLLM_USE_MODELSCOPE=True
 ```
 
