@@ -218,3 +218,6 @@ csrc/third_party/
 
 # claude code skills
 .claude/skills/*
+
+# PTO chunk-GDN JIT-compiled kernels
+vllm_ascend/ops/pto_chunk_gdn/kernels/compiled_lib/*.so

@@ -1,0 +1,112 @@
+#
+# Copyright (c) 2025 Huawei Technologies Co., Ltd. All Rights Reserved.
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+#
+# Minimum Dockerfile to build vllm-ascend with the PTO GDN megakernel.
+#
+# Usage:
+#   docker build \
+#     --build-arg VLLM_TAG=v0.19.1 \
+#     --build-arg SOC_VERSION=ascend910b4 \
+#     -t vllm-ascend-pto:latest \
+#     -f Dockerfile.pto .
+#
+#   docker run --rm -it --device /dev/davinci1 --device /dev/davinci_manager \
+#     --device /dev/devmm_svm --device /dev/hisi_hdc \
+#     -v /usr/local/dcmi:/usr/local/dcmi \
+#     -v /usr/local/bin/npu-smi:/usr/local/bin/npu-smi \
+#     -v /usr/local/Ascend/driver/lib64:/usr/local/Ascend/driver/lib64 \
+#     -v /usr/local/Ascend/driver/tools:/usr/local/Ascend/driver/tools \
+#     -v /path/to/model_weights:/models \
+#     -e VLLM_ASCEND_PTO_CHUNK_GDN=1 \
+#     vllm-ascend-pto:latest \
+#     python -m vllm.entrypoints.openai.api_server \
+#       --model /models/Qwen3.5-7B --max-model-len 8192
+#
+
+FROM quay.io/ascend/cann:8.5.1-910b-ubuntu22.04-py3.11
+
+ARG PIP_INDEX_URL="https://pypi.org/simple"
+ARG VLLM_REPO="https://github.com/vllm-project/vllm.git"
+ARG VLLM_TAG="v0.19.1"
+ARG SOC_VERSION="ascend910b4"
+
+WORKDIR /workspace
+
+# ── System packages ───────────────────────────────────────────────────────────
+RUN apt-get update -y && \
+    apt-get install -y --no-install-recommends \
+        git \
+        cmake \
+        ninja-build \
+        gcc \
+        g++ \
+        wget \
+        numactl \
+        libnuma-dev \
+    && rm -rf /var/lib/apt/lists/*
+
+# ── Python index ──────────────────────────────────────────────────────────────
+RUN pip config set global.index-url ${PIP_INDEX_URL}
+
+# ── vLLM (empty device — Triton not needed on Ascend) ────────────────────────
+RUN git clone --depth 1 -b ${VLLM_TAG} ${VLLM_REPO} /workspace/vllm && \
+    VLLM_TARGET_DEVICE="empty" pip install -v -e /workspace/vllm/ \
+        --extra-index-url https://download.pytorch.org/whl/cpu/ && \
+    pip uninstall -y triton && \
+    pip cache purge
+
+# ── vllm-ascend (with PTO submodule) ─────────────────────────────────────────
+COPY . /workspace/vllm-ascend/
+
+# Initialise the pto-isa submodule that the megakernel C++ code depends on.
+# If the COPY above already includes a populated submodule this is a no-op.
+RUN cd /workspace/vllm-ascend && \
+    git submodule update --init --recursive csrc/third_party/pto-isa
+
+ENV SOC_VERSION=${SOC_VERSION} \
+    TASK_QUEUE_ENABLE=1 \
+    OMP_NUM_THREADS=1
+
+RUN source /usr/local/Ascend/ascend-toolkit/set_env.sh && \
+    source /usr/local/Ascend/nnal/atb/set_env.sh 2>/dev/null || true && \
+    export PIP_EXTRA_INDEX_URL=https://mirrors.huaweicloud.com/ascend/repos/pypi && \
+    export LD_LIBRARY_PATH=$LD_LIBRARY_PATH:\
+/usr/local/Ascend/ascend-toolkit/latest/$(uname -i)-linux/devlib:\
+/usr/local/Ascend/ascend-toolkit/latest/$(uname -i)-linux/lib64 && \
+    pip install -v -e /workspace/vllm-ascend/ \
+        --extra-index-url https://download.pytorch.org/whl/cpu/ && \
+    pip uninstall -y triton triton-ascend 2>/dev/null || true && \
+    pip install -v triton-ascend==3.2.0 && \
+    pip cache purge
+
+# ── Optional: pre-compile PTO megakernel for common Qwen3.5/3.6 configs ─────
+# Remove this block if you prefer JIT compilation on first request (30-90 s).
+RUN source /usr/local/Ascend/ascend-toolkit/set_env.sh && \
+    cmake -S /workspace/vllm-ascend/csrc \
+          -B /workspace/vllm-ascend/csrc/build \
+          -DBUILD_PTO_CHUNK_GDN=ON \
+          -DCMAKE_BUILD_TYPE=Release && \
+    cmake --build /workspace/vllm-ascend/csrc/build \
+          --target pto_chunk_gdn_kernels -j$(nproc) && \
+    rm -rf /workspace/vllm-ascend/csrc/build
+
+# ── Runtime environment ───────────────────────────────────────────────────────
+ENV VLLM_WORKER_MULTIPROC_METHOD=spawn \
+    VLLM_ASCEND_PTO_CHUNK_GDN=1
+
+RUN echo "source /usr/local/Ascend/ascend-toolkit/set_env.sh" >> ~/.bashrc && \
+    echo "export LD_PRELOAD=/usr/lib/$(uname -m)-linux-gnu/libjemalloc.so.2:\$LD_PRELOAD" >> ~/.bashrc
+
+CMD ["/bin/bash"]

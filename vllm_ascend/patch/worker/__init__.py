@@ -23,6 +23,21 @@ if HAS_TRITON:
     import vllm_ascend.patch.worker.patch_triton
     import vllm_ascend.patch.worker.patch_v2.patch_triton  # noqa
 
+# PTO GDN kernel swap: must run after Triton patches install the baseline
+# chunk_gated_delta_rule, and before any model module imports gdn.py.
+if not is_310p():
+    from vllm_ascend import envs as _ascend_envs
+    if _ascend_envs.VLLM_ASCEND_PTO_CHUNK_GDN:
+        try:
+            from vllm_ascend.ops.pto_chunk_gdn.worker_hook import apply_pto_gdn_patch
+            apply_pto_gdn_patch()
+        except Exception as _pto_exc:
+            import warnings as _pto_warnings
+            _pto_warnings.warn(
+                f"VLLM_ASCEND_PTO_CHUNK_GDN: apply_pto_gdn_patch() failed: {_pto_exc!r}",
+                stacklevel=1,
+            )
+
 
 # isort: off
 import vllm_ascend.patch.worker.patch_weight_utils  # noqa

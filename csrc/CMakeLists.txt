@@ -273,6 +273,9 @@ if(NOT DEFINED COMPILED_OP_DIRS)
     set(COMPILED_OP_DIRS CACHE STRING "Compiled Ops Dirs" FORCE)
 endif()
 
+# PTO chunk-GDN kernels (optional, default OFF — set -DBUILD_PTO_CHUNK_GDN=ON to pre-compile)
+add_subdirectory(pto_chunk_gdn EXCLUDE_FROM_ALL)
+
 set(OP_LIST)
 set(OP_DIR_LIST)
 op_add_subdirectory(OP_LIST OP_DIR_LIST)
