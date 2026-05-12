@@ -601,6 +601,7 @@ class A5DeviceAdaptor(BaseDeviceAdaptor):
         decode_q_nope = decode_q_nope.view(bsz, atten_obj.num_heads, atten_obj.kv_lora_rank)
         decode_q_pe = decode_q_pe.view(bsz, atten_obj.num_heads, -1)
 
+        decode_q_nope, decode_q_pe = atten_obj.reorg_decode_q(decode_q_nope, decode_q_pe)
         from vllm_ascend.attention.mla_v1 import DecodeMLAPreprocessResult
 
         decode_preprocess_res = DecodeMLAPreprocessResult(decode_q_nope, decode_q_pe, decode_k_nope, decode_k_pe)
