@@ -360,7 +360,7 @@ def _test_npu_attention_correctness(
         "single_prefill",
     ],
 )
-@pytest.mark.parametrize("model", ["/home/weights/Qwen3-8B"])
+@pytest.mark.parametrize("model", ["Qwen/Qwen3-8B"])
 @pytest.mark.parametrize("tensor_parallel_size", [1, 2, 4])
 @npu_test(num_npus=1, npu_type="a2")
 def test_causal_backend_correctness(default_vllm_config, batch_spec_name: str, model: str, tensor_parallel_size: int):
@@ -381,7 +381,7 @@ def test_causal_backend_correctness(default_vllm_config, batch_spec_name: str, m
         "medium_encoder_prefill",
     ],
 )
-@pytest.mark.parametrize("model", ["/home/weights/Qwen3-8B"])
+@pytest.mark.parametrize("model", ["Qwen/Qwen3-8B"])
 @npu_test(num_npus=1, npu_type="a2")
 def test_encoder_only_backend_correctness(default_vllm_config, batch_spec_name: str, model: str):
     """Test backend's correctness with encoder-only attention."""
