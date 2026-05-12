@@ -19,9 +19,9 @@ from __future__ import annotations
 
 import math
 import os
+from importlib import import_module, util
 from typing import TYPE_CHECKING, Any
 from uuid import uuid4
-from importlib import import_module, util
 
 import torch
 import vllm.envs as envs_vllm
@@ -629,25 +629,17 @@ class NPUPlatform(Platform):
             )
         if key != (False, False):
             raise ValueError("FA3 backend does not support MLA and SFA.")
-        try:
-            if util.find_spec("flash_attn_v3") is None:
-                raise ValueError(
-                    "flash_attn_v3 is not installed but FA3 backend is requested. "
-                    "Please install flash_attn_v3 to enable FA3."
-                )
-            mod = import_module("flash_attn_v3")
-            if not hasattr(mod, "flash_attn_with_kvcache"):
-                raise ValueError(
-                    "flash_attn_v3 is installed but does not provide "
-                    "flash_attn_with_kvcache. Please check flash_attn_v3 "
-                    "whether it supports flash_attn_with_kvcache."
-                )
-        except ValueError:
-            raise
-        except ImportError:
+        if util.find_spec("flash_attn_v3") is None:
             raise ValueError(
                 "flash_attn_v3 is not installed but FA3 backend is requested. "
                 "Please install flash_attn_v3 to enable FA3."
+            )
+        mod = import_module("flash_attn_v3")
+        if not hasattr(mod, "flash_attn_with_kvcache"):
+            raise ValueError(
+                "flash_attn_v3 is installed but does not provide "
+                "flash_attn_with_kvcache. Please check flash_attn_v3 "
+                "whether it supports flash_attn_with_kvcache."
             )
         return "vllm_ascend.attention.fa3_v1.AscendFABackend"
 
