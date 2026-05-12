@@ -188,6 +188,7 @@
       "vllm-ascend/DeepSeek-V3.2-W8A8-Pruning",
       "vllm-ascend/EAGLE-LLaMA3.1-Instruct-8B",
       "vllm-ascend/EAGLE3-LLaMA3.1-Instruct-8B",
+      "vllm-ascend/GLM-4.7-W8A8C8",
       "vllm-ascend/Kimi-K2-Instruct-W8A8",
       "vllm-ascend/Kimi-K2-Thinking-Pruning",
       "vllm-ascend/Llama-2-7b-hf",
