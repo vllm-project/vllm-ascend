@@ -61,17 +61,13 @@ class NPUOffloadingConnectorWorker(OffloadingConnectorWorker):
             layer_names,
         )
         attn_backends = {
-            layer_name: layers[layer_name].get_attn_backend()
-            for layer_name in layer_names
-            if layer_name in layers
+            layer_name: layers[layer_name].get_attn_backend() for layer_name in layer_names if layer_name in layers
         }
 
         # NPU spec keeps the dict-of-tuples layout and the
         # ``(kv_caches, attn_backends)`` ``get_handlers`` signature
         # used by the existing :class:`CpuNpuOffloadingHandler`.
-        for src_cls, dst_cls, handler in self.spec.get_handlers(
-            kv_caches, attn_backends
-        ):
+        for src_cls, dst_cls, handler in self.spec.get_handlers(kv_caches, attn_backends):
             self.worker.register_handler(src_cls, dst_cls, handler)
 
 
@@ -82,13 +78,11 @@ class NPUOffloadingConnector(OffloadingConnector):
         self,
         vllm_config: VllmConfig,
         role: KVConnectorRole,
-        kv_cache_config: "KVCacheConfig | None" = None,
+        kv_cache_config: KVCacheConfig | None = None,
     ) -> None:
         super().__init__(vllm_config, role, kv_cache_config)
         # Replace the upstream worker with the NPU-aware variant; reuse
         # the spec already created by ``super().__init__`` so we do not
         # construct the (potentially expensive) OffloadingSpec twice.
         if role == KVConnectorRole.WORKER and self.connector_worker is not None:
-            self.connector_worker = NPUOffloadingConnectorWorker(
-                self.connector_worker.spec
-            )
+            self.connector_worker = NPUOffloadingConnectorWorker(self.connector_worker.spec)
