@@ -266,6 +266,7 @@
       "vllm-ascend/MiniMax-M2.5-eagle-model-0318",
       "Eco-Tech/Qwen3.5-397B-A17B-w8a8-mtp",
       "z-lab/Qwen3-8B-DFlash-b16",
+      "zai-org/GLM-4.1V-9B-Thinking", 
       "Eco-Tech/GLM-5.1-w8a8",
       "Eco-Tech/Qwen3.5-397B-A17B-w4a8-mtp", 
       "lightseekorg/kimi-k2.5-eagle3",
