@@ -147,9 +147,8 @@ class AttentionMaskBuilder310:
         if self.attn_mask_cache is not None:
             return self.attn_mask_cache
 
-        attention_mask_npu = torch.zeros(
-            size=(max_seq_len, max_seq_len), dtype=torch.bool, device=self.device
-        )
+        attention_mask_npu = torch.zeros(size=(max_seq_len, max_seq_len), dtype=torch.bool, device=self.device)
+        
         attention_mask_npu = nd_to_nz_2d(attention_mask_npu)
         self.attn_mask_cache = torch_npu.npu_format_cast(attention_mask_npu.contiguous(), 29)
 
