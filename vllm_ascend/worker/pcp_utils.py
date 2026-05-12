@@ -79,7 +79,7 @@ class PCPManager:
 
         # 在这里首先构造一个buffer用于承载最后生成的mask
         self.dcp_mtp_attn_mask = CpuGpuBuffer(
-            (max_num_reqs, self.self.decode_threshold, 16384),
+            (max_num_reqs, self.decode_threshold, 16384),
             dtype=torch.bool,
             device=device,
             pin_memory=pin_memory,
