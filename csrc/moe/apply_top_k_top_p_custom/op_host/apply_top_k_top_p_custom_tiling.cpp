@@ -15,7 +15,7 @@
 
 #include <iostream>
 #include <map>
-#include "error_log.h"
+#include "tiling_base/error_log.h"
 #include "tiling/platform/platform_ascendc.h"
 #include "platform/platform_infos_def.h"
 #include "register/op_def_registry.h"
@@ -100,14 +100,14 @@ ge::graphStatus ApplyTopKTopPCustomTiling::CheckShape() {
     OP_CHECK_NULL_WITH_CONTEXT(tilingcontext, sortedValueShapePtr);
     auto sortedValueShape = sortedValueShapePtr->GetStorageShape();
     if (sortedValueShape.GetDimNum() != DIM_TWO) {
-        OP_LOGE(opName_, "the dimNum of sorted_value should be 2, but got %u.", sortedValueShape.GetDimNum());
+        OP_LOGE(opName_, "the dimNum of sorted_value should be 2, but got %zu.", sortedValueShape.GetDimNum());
         return ge::GRAPH_FAILED;
     }
     auto sortedIndicesShapePtr = tilingcontext->GetInputShape(SORTED_INDICES_INPUT_INDEX);
     OP_CHECK_NULL_WITH_CONTEXT(tilingcontext, sortedIndicesShapePtr);
     auto sortedIndicesShape = sortedIndicesShapePtr->GetStorageShape();
     if (sortedIndicesShape.GetDimNum() != DIM_TWO) {
-        OP_LOGE(opName_, "the dimNum of sorted_indices should be 2, but got %u.", sortedIndicesShape.GetDimNum());
+        OP_LOGE(opName_, "the dimNum of sorted_indices should be 2, but got %zu.", sortedIndicesShape.GetDimNum());
         return ge::GRAPH_FAILED;
     }
     batchSize_ = sortedValueShape.GetDim(DIM_INDEX0);
@@ -122,7 +122,7 @@ ge::graphStatus ApplyTopKTopPCustomTiling::CheckShape() {
     auto pShape = pShapePtr->GetStorageShape();
     auto pDimNum = pShape.GetDimNum();
     if (pDimNum != DIM_ONE && pDimNum != 0) {
-        OP_LOGE(opName_, "the dimNum of p should be 1 or 0, but got %u.", pDimNum);
+        OP_LOGE(opName_, "the dimNum of p should be 1 or 0, but got %zu.", pDimNum);
         return ge::GRAPH_FAILED;
     }
     if (pDimNum != 0 && batchSize_ != pShape.GetDim(DIM_INDEX0)) {
@@ -135,7 +135,7 @@ ge::graphStatus ApplyTopKTopPCustomTiling::CheckShape() {
     auto kShape = kShapePtr->GetStorageShape();
     auto kDimNum = kShape.GetDimNum();
     if (kDimNum != DIM_ONE && kDimNum != 0) {
-        OP_LOGE(opName_, "the dimNum of k should be 1 or 0, but got %u.", kShape.GetDimNum());
+        OP_LOGE(opName_, "the dimNum of k should be 1 or 0, but got %zu.", kDimNum);
         return ge::GRAPH_FAILED;
     }
     if (kDimNum != 0 && batchSize_ != kShape.GetDim(DIM_INDEX0)) {
