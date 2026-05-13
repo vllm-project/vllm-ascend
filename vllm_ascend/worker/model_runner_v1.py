@@ -646,11 +646,9 @@ class NPUModelRunner(GPUModelRunner):
                 ],
                 dtype=np.int32,
             )
-        attn_state = self._build_attn_state(num_reqs, num_scheduled_tokens, num_valid_tokens)
-
-        # Determine if it's a splitfuse batch
-        with_prefill = attn_state not in [AscendAttentionState.DecodeOnly, AscendAttentionState.SpecDecoding]
-        self.with_prefill = with_prefill
+        self.attn_state, with_prefill = self._resolve_batch_attn_state(
+            num_reqs, num_scheduled_tokens, num_valid_tokens
+        )
 
         # Get positions.
         cu_num_tokens = self._get_cumsum_and_arange(
@@ -1176,42 +1174,67 @@ class NPUModelRunner(GPUModelRunner):
 
         return mm_embeds, is_mm_embed
 
-    def _build_attn_state(self, num_reqs, num_scheduled_tokens, num_valid_tokens):
+    def _resolve_batch_attn_state(
+        self, num_reqs, num_scheduled_tokens, num_valid_tokens
+    ) -> tuple[AscendAttentionState, bool]:
+        """Pure function: derive (attn_state, with_prefill) for the current batch.
+
+        Returns:
+            attn_state: the value to assign to ``self.attn_state``. The
+                PCP+eagle3 overlay (SpecDecoding -> ChunkedPrefill) is applied
+                here so downstream consumers (attn_metadata.attn_state) see
+                the downgraded value.
+            with_prefill: whether the batch contains any prefill work,
+                derived from the *raw* state before the PCP override so
+                splitfuse batch detection stays correct in PCP+eagle3.
+        """
+        raw_state = self._get_attn_state(
+            num_reqs, num_scheduled_tokens, num_valid_tokens
+        )
+        with_prefill = raw_state not in (
+            AscendAttentionState.DecodeOnly,
+            AscendAttentionState.SpecDecoding,
+        )
+        # PCP + eagle3 overlay: downgrade SpecDecoding to ChunkedPrefill for
+        # the per-layer attention metadata path while keeping with_prefill
+        # derived from the raw state.
+        # TODO: resolve the conflict between attn_state sunset and PCP needs.
+        if (
+            raw_state == AscendAttentionState.SpecDecoding
+            and self.speculative_config is not None
+            and self.speculative_config.method != "mtp"
+        ):
+            return AscendAttentionState.ChunkedPrefill, with_prefill
+        return raw_state, with_prefill
+
+    def _get_attn_state(
+        self, num_reqs, num_scheduled_tokens, num_valid_tokens
+    ) -> AscendAttentionState:
+        """Pure branch table — returns the raw attn state without overrides."""
         if np.all(self.input_batch.num_computed_tokens_cpu[:num_reqs] == 0):
-            attn_state = AscendAttentionState.PrefillNoCache
+            return AscendAttentionState.PrefillNoCache
         # We assume it is the decode stage, where prefill occurs but only one token is not hit in cache.
-        elif np.all(num_scheduled_tokens == 1):
-            attn_state = AscendAttentionState.DecodeOnly
+        if np.all(num_scheduled_tokens == 1):
             if self.speculative_config and self.speculative_config.method == "mtp":
                 # SpecDecoding now supports seq_len=1 and seq_len=2
                 # In Prefilling Decoding Disaggregation scenario, SpecDecoding need to supports seq_len=1
-                attn_state = AscendAttentionState.SpecDecoding
+                return AscendAttentionState.SpecDecoding
+            return AscendAttentionState.DecodeOnly
         # Speculative decoding.
-        elif np.all(num_valid_tokens == 1):
+        if np.all(num_valid_tokens == 1):
             if self.speculative_config:
-                attn_state = AscendAttentionState.SpecDecoding
-            else:
-                attn_state = AscendAttentionState.ChunkedPrefill
+                return AscendAttentionState.SpecDecoding
+            return AscendAttentionState.ChunkedPrefill
         # splitfuse
-        elif self.scheduler_config.enable_chunked_prefill:
-            attn_state = AscendAttentionState.ChunkedPrefill
-        else:
-            attn_state = AscendAttentionState.PrefillCacheHit
-
-        # For the overlay of the PCP feature and the eagle3, attn_state needs to be recovered
-        # TODO: Resolved the conflict between the sunset of attn_state and the PCP that requires this interface.
-        if attn_state == AscendAttentionState.SpecDecoding and self.speculative_config.method != "mtp":
-            self.attn_state = AscendAttentionState.ChunkedPrefill  # type: ignore
-        else:
-            self.attn_state = attn_state  # type: ignore
-
-        return attn_state
+        if self.scheduler_config.enable_chunked_prefill:
+            return AscendAttentionState.ChunkedPrefill
+        return AscendAttentionState.PrefillCacheHit
 
     def _calc_spec_decode_metadata(
         self,
         num_draft_tokens: np.ndarray,
         cu_num_scheduled_tokens: np.ndarray,
-        num_pcp_pads: np.ndarray | None,
+        num_pcp_pads: np.ndarray | None = None,
     ) -> SpecDecodeMetadata:
         # Inputs:
         # cu_num_scheduled_tokens:  [  4, 104, 107, 207, 209]
@@ -1249,17 +1272,15 @@ class NPUModelRunner(GPUModelRunner):
         bonus_logits_indices = cu_num_sampled_tokens - 1
 
         # Compute the draft logits indices.
-        # [3, 3, 5, 5, 6]
-        cu_num_draft_tokens = np.cumsum(num_draft_tokens, dtype=np.int32)
-        total_num_draft_tokens = cu_num_draft_tokens[-1]
-        # [0, 0, 0, 3, 3, 5]
-        cumsums_offsets = np.repeat(cu_num_draft_tokens - num_draft_tokens, num_draft_tokens)
-        # [0, 1, 2, 0, 1, 0]
-        arange = self.arange_np[:total_num_draft_tokens] - cumsums_offsets
+        # cu_num_draft_tokens: [3, 3, 5, 5, 6]
+        # _arange_scratch[:6]: [0, 1, 2, 0, 1, 0]
+        cu_num_draft_tokens = self._get_cumsum_and_arange(
+            num_draft_tokens, self._arange_scratch, cumsum_dtype=np.int32
+        )
         # [0, 0, 0, 5, 5, 9]
         target_logits_indices = np.repeat(cu_num_sampled_tokens - num_sampled_tokens, num_draft_tokens)
         # [0, 1, 2, 5, 6, 9]
-        target_logits_indices += arange
+        target_logits_indices += self._arange_scratch[: cu_num_draft_tokens[-1]]
 
         # TODO: Optimize the CPU -> NPU copy.
         cu_num_draft_tokens = torch.from_numpy(cu_num_draft_tokens).pin_memory().to(self.device, non_blocking=True)
