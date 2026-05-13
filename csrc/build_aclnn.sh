@@ -7,6 +7,7 @@ log() {
     echo "[build_aclnn] $*"
 }
 
+
 resolve_op_dir() {
     local op_name=$1
     local candidate_dir
