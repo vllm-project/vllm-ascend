@@ -56,7 +56,7 @@ jobs:
           git config --global url."https://gh-proxy.test.osinfra.cn/https://github.com/".insteadOf https://github.com/
       # NOTE: Do not update the version of checkout, there have some issue on self_hosted runner with the higher version
       - uses: actions/checkout@v6
-      - uses: dorny/paths-filter@v3
+      - uses: dorny/paths-filter@v4
         id: filter
         with:
           filters: |
@@ -80,18 +80,15 @@ jobs:
     name: e2e-full
     strategy:
       matrix:
-        vllm_version: [5af684c31912232e5c89484c2e8259e0fac6c55b, v0.19.0]
+        vllm_version: [c7aa186d67b6f051680831418e957c67f34ba7a2, v0.20.1]
     needs: [changes]
     if: ${{ needs.changes.outputs.e2e_tracker == 'true' || needs.changes.outputs.e2e_tracker == true }}
     uses: ./.github/workflows/_e2e_test.yaml
     with:
       vllm: ${{ matrix.vllm_version }}
-      image: swr.cn-southwest-2.myhuaweicloud.com/base_image/ascend-ci/cann:8.5.1-910b-ubuntu22.04-py3.11
+      image: swr.cn-southwest-2.myhuaweicloud.com/base_image/ascend-ci/cann:9.0.0-910b-ubuntu22.04-py3.11
       contains_310: false
       type: full
-    secrets:
-      HW_OBS_AK: ${{ secrets.HW_OBS_AK }}
-      HW_OBS_SK: ${{ secrets.HW_OBS_SK }}
 
   parse-trigger:
     name: Parse /e2e comment
@@ -105,13 +102,13 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        vllm_version: [v0.19.0]
+        vllm_version: [v0.20.1]
     needs: [parse-trigger]
     if: ${{ needs.parse-trigger.outputs.allowed == 'true' }}
     uses: ./.github/workflows/_e2e_test.yaml
     with:
       vllm: ${{ matrix.vllm_version }}
-      image: swr.cn-southwest-2.myhuaweicloud.com/base_image/ascend-ci/cann:8.5.0-910b-ubuntu22.04-py3.11
+      image: swr.cn-southwest-2.myhuaweicloud.com/base_image/ascend-ci/cann:9.0.0-910b-ubuntu22.04-py3.11
       type: comment
       ref: ${{ needs.parse-trigger.outputs.pr_sha }}
       singlecard_tests: ${{ needs.parse-trigger.outputs.singlecard_tests }}

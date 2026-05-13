@@ -1,4 +1,4 @@
-e2e-upstream-singlecard:
+e2e-upstream_singlecard:
   - name: tests/benchmarks/test_plot_filters.py
     estimated_time: 20
   - name: tests/compile/fullgraph/test_multimodal_compile.py
@@ -346,4 +346,180 @@ e2e-upstream-singlecard:
   - name: tests/v1/metrics/test_perf_metrics.py
     estimated_time: 20
   - name: tests/v1/streaming_input/test_async_llm_streaming.py
+    estimated_time: 20
+  - name: tests/benchmarks/test_random_dataset.py
+    estimated_time: 20
+  - name: tests/benchmarks/test_random_multimodal_dataset_video.py
+    estimated_time: 20
+  - name: tests/config/test_mp_reducer.py
+    estimated_time: 20
+  - name: tests/models/multimodal/processing/test_h2ovl.py
+    estimated_time: 20
+  - name: tests/models/multimodal/processing/test_phi3v.py
+    estimated_time: 20
+  - name: tests/multimodal/test_image.py
+    estimated_time: 20
+  - name: tests/v1/metrics/test_engine_logger_apis.py
+    estimated_time: 20
+  - name: tests/v1/structured_output/test_utils.py
+    estimated_time: 20
+  - name: tests/cuda/test_cuda_compatibility_path.py
+    estimated_time: 20
+  - name: tests/cuda/test_platform_no_cuda_init.py
+    estimated_time: 20
+  - name: tests/distributed/test_packed_tensor.py
+    estimated_time: 20
+  - name: tests/kernels/attention/test_use_trtllm_attention.py
+    estimated_time: 20
+  - name: tests/entrypoints/openai/responses/test_sampling_params.py
+    estimated_time: 20
+  - name: tests/kernels/moe/test_unquantized_backend_selection.py
+    estimated_time: 20
+  - name: tests/model_executor/model_loader/test_reload.py
+    estimated_time: 20
+  - name: tests/model_executor/test_oink_integration.py
+    estimated_time: 20
+  - name: tests/model_executor/test_qwen3_vl_mrope.py
+    estimated_time: 20
+  - name: tests/model_executor/test_routed_experts_capture.py
+    estimated_time: 20
+  - name: tests/models/language/pooling_mteb_test/test_voyage.py
+    estimated_time: 20
+  - name: tests/models/multimodal/pooling/test_llama_nemotron_vl.py
+    estimated_time: 20
+  - name: tests/models/multimodal/processing/test_qwen2_5_omni_embed.py
+    estimated_time: 20
+  - name: tests/multimodal/test_inputs.py
+    estimated_time: 20
+  - name: tests/plugins/lora_resolvers/test_hf_hub_resolver.py
+    estimated_time: 20
+  - name: tests/reasoning/test_step3p5_reasoning_parser.py
+    estimated_time: 20
+  - name: tests/renderers/inputs/test_preprocess.py
+    estimated_time: 20
+  - name: tests/renderers/test_completions.py
+    estimated_time: 20
+  - name: tests/renderers/test_process_multi_modal_uuids.py
+    estimated_time: 20
+  - name: tests/test_access_log_filter.py
+    estimated_time: 20
+  - name: tests/test_ray_env.py
+    estimated_time: 20
+  - name: tests/tool_parsers/test_step3p5_tool_parser.py
+    estimated_time: 20
+  - name: tests/tracing/test_loading_tracing.py
+    estimated_time: 20
+  - name: tests/v1/attention/test_mamba_update_block_table.py
+    estimated_time: 20
+  - name: tests/v1/core/test_repetition_detection.py
+    estimated_time: 20
+  - name: tests/v1/spec_decode/test_extract_hidden_states.py
+    estimated_time: 20
+  - name: tests/v1/worker/test_mamba_utils.py
+    estimated_time: 20
+  - name: tests/entrypoints/anthropic/test_anthropic_messages_conversion.py
+    estimated_time: 20
+  - name: tests/entrypoints/openai/chat_completion/test_chat_error.py
+    estimated_time: 20
+  - name: tests/entrypoints/openai/chat_completion/test_serving_chat_stream_harmony.py
+    estimated_time: 20
+  - name: tests/test_zen_cpu_platform_detection.py
+    estimated_time: 20
+  - name: tests/reasoning/test_nemotron_v3_reasoning_parser.py
+    estimated_time: 20
+  - name: tests/models/multimodal/processing/test_qwen3_vl.py
+    estimated_time: 20
+  - name: tests/models/multimodal/processing/test_deepseek_ocr.py
+    estimated_time: 20
+  - name: tests/models/multimodal/processing/test_audio_in_video.py
+    estimated_time: 20
+  - name: tests/models/language/pooling_mteb_test/test_ernie.py
+    estimated_time: 20
+  - name: tests/model_executor/test_cpu_unquantized_gemm_dispatch.py
+    estimated_time: 20
+  - name: tests/model_executor/model_loader/test_ep_weight_filter.py
+    estimated_time: 20
+  - name: tests/entrypoints/test_launch_cli.py
+    estimated_time: 20
+  - name: tests/entrypoints/pooling/embed/test_protocol.py
+    estimated_time: 20
+  - name: tests/entrypoints/pooling/embed/test_io_processor.py
+    estimated_time: 20
+  - name: tests/entrypoints/pooling/embed/test_cohere_online_vision.py
+    estimated_time: 20
+  - name: tests/entrypoints/pooling/embed/test_cohere_openai_parity.py
+    estimated_time: 20
+  - name: tests/entrypoints/pooling/embed/test_cohere_online.py
+    estimated_time: 20
+  - name: tests/tool_parsers/test_minimax_m2_tool_parser.py
+    estimated_time: 20
+  - name: tests/v1/kv_connector/unit/test_flexkv_connector.py
+    estimated_time: 20
+  - name: tests/v1/kv_connector/unit/test_kv_cache_layout.py
+    estimated_time: 20
+  - name: tests/v1/kv_connector/unit/test_kv_connector_lifecycle.py
+    estimated_time: 20
+  - name: tests/entrypoints/openai/parser/test_harmony_utils.py
+    estimated_time: 20
+  - name: tests/entrypoints/openai/responses/test_harmony_utils.py
+    estimated_time: 20
+  - name: tests/entrypoints/test_context.py
+    estimated_time: 20
+  - name: tests/kernels/helion/test_config_manager.py
+    estimated_time: 20
+  - name: tests/kernels/helion/test_register.py
+    estimated_time: 20
+  - name: tests/kernels/helion/test_utils.py
+    estimated_time: 20
+  - name: tests/model_executor/model_loader/runai_streamer_loader/test_runai_utils.py
+    estimated_time: 20
+  - name: tests/model_executor/test_model_load_with_params.py
+    estimated_time: 20
+  - name: tests/models/language/pooling_mteb_test/test_jina.py
+    estimated_time: 20
+  - name: tests/models/language/pooling_mteb_test/test_nemotron.py
+    estimated_time: 20
+  - name: tests/models/multimodal/pooling/test_siglip.py
+    estimated_time: 20
+  - name: tests/models/multimodal/processing/test_nemotron_vl.py
+    estimated_time: 20
+  - name: tests/models/test_terratorch.py
+    estimated_time: 20
+  - name: tests/multimodal/test_utils.py
+    estimated_time: 20
+  - name: tests/plugins_tests/test_bge_m3_sparse_io_processor_plugins.py
+    estimated_time: 20
+  - name: tests/plugins_tests/test_io_processor_plugins.py
+    estimated_time: 20
+  - name: tests/plugins_tests/test_terratorch_io_processor_plugins.py
+    estimated_time: 20
+  - name: tests/reasoning/test_base_thinking_reasoning_parser.py
+    estimated_time: 20
+  - name: tests/tool_parsers/test_openai_tool_parser.py
+    estimated_time: 20
+  - name: tests/v1/ec_connector/unit/test_ec_example_connector.py
+    estimated_time: 20
+  - name: tests/v1/worker/test_late_interaction_runner.py
+    estimated_time: 20
+  - name: tests/compile/fullgraph/test_multiple_graphs.py
+    estimated_time: 20
+  - name: tests/compile/fullgraph/test_toy_llama.py
+    estimated_time: 20
+  - name: tests/detokenizer/test_stop_reason.py
+    estimated_time: 20
+  - name: tests/entrypoints/openai/chat_completion/test_chat.py
+    estimated_time: 20
+  - name: tests/entrypoints/openai/chat_completion/test_chat_echo.py
+    estimated_time: 20
+  - name: tests/entrypoints/openai/chat_completion/test_chat_logit_bias_validation.py
+    estimated_time: 20
+e2e-upstream_a2_2:
+  - name: tests/v1/distributed/test_async_llm_dp.py
+    estimated_time: 20
+  - name: tests/v1/distributed/test_external_lb_dp.py
+    estimated_time: 20
+  - name: tests/v1/distributed/test_internal_lb_dp.py
+    estimated_time: 20
+e2e-upstream_a2_4:
+  - name: tests/v1/distributed/test_hybrid_lb_dp.py
     estimated_time: 20
