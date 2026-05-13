@@ -621,7 +621,7 @@ class NPUPlatform(Platform):
     def _use_fa3_backend(cls, key, attn_selector_config):
         if not attn_selector_config.use_batch_invariant:
             logger.info(
-                "FA3 will not be enabled when not in training-inference consistency scenario,"
+                "FA3 will not be enabled when not in training-inference consistency scenario. "
                 "Note that Ascend NPU will use its registered plugin backend instead."
             )
             return False
