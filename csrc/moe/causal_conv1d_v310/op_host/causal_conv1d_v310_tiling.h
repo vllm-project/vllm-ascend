@@ -23,7 +23,7 @@
 #include "register/op_impl_registry.h"
 #include "tiling/platform/platform_ascendc.h"
 #include "platform/platform_infos_def.h"
-#include "../tiling_base/error_log.h"
+#include "tiling_base/error_log.h"
 
 namespace optiling {
 
