@@ -3,7 +3,7 @@
 cmake>=3.26
 decorator
 einops
-numpy
+numpy==1.26.4
 packaging
 pip
 pybind11

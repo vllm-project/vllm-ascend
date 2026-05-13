@@ -77,6 +77,8 @@ jobs:
       UV_INDEX_URL: http://cache-service.nginx-pypi-cache.svc.cluster.local/pypi/simple
       UV_EXTRA_INDEX_URL: "https://mirrors.huaweicloud.com/ascend/repos/pypi https://triton-ascend.osinfra.cn/pypi/simple"
       UV_INDEX_STRATEGY: unsafe-best-match
+      UV_INSECURE_HOST: cache-service.nginx-pypi-cache.svc.cluster.local
+      UV_HTTP_TIMEOUT: 120
       UV_NO_CACHE: 1
       UV_SYSTEM_PYTHON: 1
       VLLM_ENGINE_READY_TIMEOUT_S: 1800
@@ -120,8 +122,6 @@ jobs:
       - name: Install vllm-project/vllm-ascend
         if: ${{ github.event_name == 'pull_request' }}
         working-directory: /vllm-workspace/vllm-ascend
-        env:
-          PIP_EXTRA_INDEX_URL: "https://mirrors.huaweicloud.com/ascend/repos/pypi https://triton-ascend.osinfra.cn/pypi/simple https://download.pytorch.org/whl/cpu/"
         run: |
           git config --global --add safe.directory /vllm-workspace/vllm-ascend
           pip install uc-manager

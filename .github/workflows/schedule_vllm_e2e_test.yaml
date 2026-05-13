@@ -37,6 +37,8 @@ env:
   UV_INDEX_URL: http://cache-service.nginx-pypi-cache.svc.cluster.local/pypi/simple
   UV_EXTRA_INDEX_URL: https://mirrors.huaweicloud.com/ascend/repos/pypi
   UV_INDEX_STRATEGY: unsafe-best-match
+  UV_INSECURE_HOST: cache-service.nginx-pypi-cache.svc.cluster.local
+  UV_HTTP_TIMEOUT: 120
   UV_NO_CACHE: 1
   UV_SYSTEM_PYTHON: 1
 
@@ -104,8 +106,6 @@ jobs:
               sed -i '5i\import vllm_ascend.patch.platform\nimport vllm_ascend.patch.worker' tests/conftest.py
 
           - name: Install vllm-project/vllm-ascend
-            env:
-              PIP_EXTRA_INDEX_URL: "https://mirrors.huaweicloud.com/ascend/repos/pypi https://triton-ascend.osinfra.cn/pypi/simple https://download.pytorch.org/whl/cpu/"
             run: |
               pip install uc-manager
               uv pip install -r requirements-dev.txt
@@ -185,8 +185,6 @@ jobs:
               sed -i '5i\import vllm_ascend.patch.platform\nimport vllm_ascend.patch.worker' tests/conftest.py
 
           - name: Install vllm-project/vllm-ascend
-            env:
-              PIP_EXTRA_INDEX_URL: "https://mirrors.huaweicloud.com/ascend/repos/pypi https://triton-ascend.osinfra.cn/pypi/simple https://download.pytorch.org/whl/cpu/"
             run: |
               pip install uc-manager
               uv pip install -r requirements-dev.txt
@@ -259,8 +257,6 @@ jobs:
               sed -i '5i\import vllm_ascend.patch.platform\nimport vllm_ascend.patch.worker' tests/conftest.py
 
           - name: Install vllm-project/vllm-ascend
-            env:
-              PIP_EXTRA_INDEX_URL: "https://mirrors.huaweicloud.com/ascend/repos/pypi https://triton-ascend.osinfra.cn/pypi/simple https://download.pytorch.org/whl/cpu/"
             run: |
               pip install uc-manager
               uv pip install -r requirements-dev.txt
