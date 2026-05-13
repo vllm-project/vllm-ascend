@@ -15,13 +15,6 @@
 # limitations under the License.
 # This file is a part of the vllm-ascend project.
 #
-"""NPU precision tests for AscendSFA sparse flash attention.
-
-Same scaffolding as PR #7216 (``BatchSpec``, ``create_vllm_config``,
-``create_common_attn_metadata``): parametrized over ``BATCH_SPECS``,
-``tensor_parallel_size`` in ``[1, 2, 4]``, dtypes, and model; kernel vs
-fp32 dense MQA reference.
-"""
 
 import math
 import os
