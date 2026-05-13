@@ -483,7 +483,8 @@ private:
 
         for (int32_t i = 0; i < copySize; ++i) {
             int32_t expertId = tmpExpertIdx.GetValue(i);
-            bool shouldFilter = (params.nodeId == 0) ? (expertId >= halfExperts) : (expertId < halfExperts);
+            bool selfInFirstHalf = params.rank < (params.EP / 2);
+            bool shouldFilter = selfInFirstHalf ? (expertId >= halfExperts) : (expertId < halfExperts);
             if (shouldFilter) {
                 tmpExpertIdx.SetValue(i, expertNum);  // Set to expertNum, moe_init_routing_quant_v2 won't dispatch this token
                 tmpProbs.SetValue(i, 0.0f);           // Set probs to 0, ensure unpermute weighted result is 0
@@ -798,13 +799,13 @@ private:
             // Cross-node peermem inaccessible, skip cross-node ranks
             if (IsCrossNodeRank(params, dstEpIdx)) {
                 // Treat tokenPerExpert of cross-node ranks as 0, write 0 directly to preSumBeforeRank
-                AscendC::LocalTensor<int32_t> zeroBuf = resource.ubBuf.template GetBufferByByte<int32_t>(0);
+                // Use prevSumBuf (which is tmpBuffer[numPerCore]) to avoid overwriting tmpBuffer data
                 AscendC::SetFlag<AscendC::HardEvent::MTE3_V>(EVENT_ID0);
                 AscendC::WaitFlag<AscendC::HardEvent::MTE3_V>(EVENT_ID0);
-                AscendC::Duplicate(zeroBuf, 0, params.expertPerRank);
+                AscendC::Duplicate(prevSumBuf, 0, params.expertPerRank);
                 AscendC::SetFlag<AscendC::HardEvent::V_MTE3>(EVENT_ID0);
                 AscendC::WaitFlag<AscendC::HardEvent::V_MTE3>(EVENT_ID0);
-                AscendC::DataCopyPad(preSumBeforeRank[dstEpIdx * params.expertPerRank], zeroBuf,
+                AscendC::DataCopyPad(preSumBeforeRank[dstEpIdx * params.expertPerRank], prevSumBuf,
                 AscendC::DataCopyParams{1, static_cast<uint16_t>(params.expertPerRank * sizeof(int32_t)), 0, 0});
                 continue;
             }
@@ -1030,7 +1031,8 @@ private:
             static_cast<int32_t>(L1TileShape::N),
             shmem,
             static_cast<int32_t>(peermemInfo.offsetD),
-            tokenPerExpertLayout
+            tokenPerExpertLayout,
+            params.nodeId
         };
         
         uint32_t n = params.problemShape.n();
