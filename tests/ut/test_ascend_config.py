@@ -13,6 +13,8 @@
 # This file is a part of the vllm-ascend project.
 #
 
+import json
+import os
 from unittest.mock import patch
 
 from vllm.config import VllmConfig
@@ -108,3 +110,36 @@ class TestAscendConfig(TestBase):
         clear_ascend_config()
         with self.assertRaises(RuntimeError):
             get_ascend_config()
+
+    @_clean_up_ascend_config
+    @patch("vllm_ascend.platform.NPUPlatform._fix_incompatible_config")
+    def test_init_ascend_config_with_dump_config_materializes_fixed_file(self, mock_fix_incompatible_config):
+        test_vllm_config = VllmConfig()
+        dump_config = {"task": "tensor", "level": "L1", "dump_path": "/tmp/msprobe_dump"}
+        test_vllm_config.additional_config = {"dump_config": dump_config}
+
+        ascend_config = init_ascend_config(test_vllm_config)
+        self.assertIsNotNone(ascend_config.dump_config_path)
+        assert ascend_config.dump_config_path is not None
+        expected_path = os.path.join(os.getcwd(), ".vllm_ascend", "msprobe", "msprobe_dump_config.json")
+        self.assertEqual(ascend_config.dump_config_path, expected_path)
+        self.assertTrue(os.path.exists(ascend_config.dump_config_path))
+        with open(ascend_config.dump_config_path, encoding="utf-8") as file:
+            persisted = json.load(file)
+        self.assertEqual(persisted, dump_config)
+
+    @_clean_up_ascend_config
+    @patch("vllm_ascend.platform.NPUPlatform._fix_incompatible_config")
+    def test_init_ascend_config_dump_config_and_path_conflict(self, mock_fix_incompatible_config):
+        test_vllm_config = VllmConfig()
+        test_vllm_config.additional_config = {"dump_config_path": "/tmp/config.json", "dump_config": {"task": "tensor"}}
+        with self.assertRaises(ValueError):
+            init_ascend_config(test_vllm_config)
+
+    @_clean_up_ascend_config
+    @patch("vllm_ascend.platform.NPUPlatform._fix_incompatible_config")
+    def test_init_ascend_config_dump_config_type_validation(self, mock_fix_incompatible_config):
+        test_vllm_config = VllmConfig()
+        test_vllm_config.additional_config = {"dump_config": "/tmp/config.json"}
+        with self.assertRaises(ValueError):
+            init_ascend_config(test_vllm_config)
