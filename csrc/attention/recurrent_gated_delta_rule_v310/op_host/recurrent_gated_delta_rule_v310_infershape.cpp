@@ -8,7 +8,7 @@
  */
 
 /* !
- * \file recurrent_gated_delta_rule_infershape_v310.cpp
+ * \file recurrent_gated_delta_rule_v310_infershape.cpp
  * \brief
  */
 

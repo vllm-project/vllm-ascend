@@ -8,7 +8,7 @@
  */
 
 /*!
- * \file recurrent_gated_delta_rule_tiling_v310.h
+ * \file recurrent_gated_delta_rule_v310_tiling.h
  * \brief
  */
 #ifndef __OP_HOST_RECURRENT_GATED_DELTA_RULE_V310_TILING_H__

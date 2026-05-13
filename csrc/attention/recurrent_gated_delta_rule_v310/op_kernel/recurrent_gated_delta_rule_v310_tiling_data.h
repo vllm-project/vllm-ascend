@@ -7,10 +7,6 @@
  * See LICENSE in the root of the software repository for the full text of the License.
  */
 
-/*!
- * \file recurrent_gated_delta_rule_v310.cpp
- * \brief
- */
 #ifndef RECURRENT_GATED_DELTA_RULE_V310_TILING_DATA_H
 #define RECURRENT_GATED_DELTA_RULE_V310_TILING_DATA_H
 
