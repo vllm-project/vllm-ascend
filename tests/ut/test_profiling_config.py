@@ -49,10 +49,15 @@ def test_local_scheduler_symbols_reference_existing_classes_and_methods():
 
     for symbol in scheduler_symbols:
         module_path, qualname = symbol.split(":", 1)
-        class_name, method_name = qualname.split(".", 1)
         source_path = PROJECT_ROOT / (module_path.replace(".", "/") + ".py")
 
         assert source_path.exists(), f"Missing module for profiling symbol: {symbol}"
         source = source_path.read_text(encoding="utf-8")
-        assert re.search(rf"^class\s+{re.escape(class_name)}\b", source, re.MULTILINE), symbol
-        assert re.search(rf"^\s+def\s+{re.escape(method_name)}\b", source, re.MULTILINE), symbol
+
+        if "." in qualname:
+            class_name, method_name = qualname.split(".", 1)
+            assert re.search(rf"^class\s+{re.escape(class_name)}\b", source, re.MULTILINE), symbol
+            assert re.search(rf"^\s+def\s+{re.escape(method_name)}\b", source, re.MULTILINE), symbol
+        else:
+            function_name = qualname
+            assert re.search(rf"^def\s+{re.escape(function_name)}\b", source, re.MULTILINE), symbol
