@@ -37,7 +37,7 @@ concurrency:
 
 env:
   UV_INDEX_URL: http://cache-service.nginx-pypi-cache.svc.cluster.local/pypi/simple
-  UV_EXTRA_INDEX_URL: https://mirrors.huaweicloud.com/ascend/repos/pypi
+  UV_EXTRA_INDEX_URL: "https://mirrors.huaweicloud.com/ascend/repos/pypi https://triton-ascend.osinfra.cn/pypi/simple"
   UV_INDEX_STRATEGY: unsafe-best-match
   UV_NO_CACHE: 1
   UV_SYSTEM_PYTHON: 1
@@ -78,22 +78,22 @@ jobs:
           # os × chip_type → image
           - os: ubuntu
             chip_type: a2
-            image: swr.cn-southwest-2.myhuaweicloud.com/base_image/ascend-ci/cann:8.5.1-910b-ubuntu22.04-py3.11
+            image: swr.cn-southwest-2.myhuaweicloud.com/base_image/ascend-ci/cann:9.0.0-910b-ubuntu22.04-py3.11
           - os: ubuntu
             chip_type: a3
-            image: swr.cn-southwest-2.myhuaweicloud.com/base_image/ascend-ci/cann:8.5.1-a3-ubuntu22.04-py3.11
+            image: swr.cn-southwest-2.myhuaweicloud.com/base_image/ascend-ci/cann:9.0.0-a3-ubuntu22.04-py3.11
           - os: ubuntu
             chip_type: 310p
-            image: swr.cn-southwest-2.myhuaweicloud.com/base_image/ascend-ci/cann:8.5.1-310p-ubuntu22.04-py3.11
+            image: swr.cn-southwest-2.myhuaweicloud.com/base_image/ascend-ci/cann:9.0.0-310p-ubuntu22.04-py3.11
           - os: openeuler
             chip_type: a2
-            image: swr.cn-southwest-2.myhuaweicloud.com/base_image/ascend-ci/cann:8.5.1-910b-openeuler24.03-py3.11
+            image: swr.cn-southwest-2.myhuaweicloud.com/base_image/ascend-ci/cann:9.0.0-910b-openeuler24.03-py3.11
           - os: openeuler
             chip_type: a3
-            image: swr.cn-southwest-2.myhuaweicloud.com/base_image/ascend-ci/cann:8.5.1-a3-openeuler24.03-py3.11
+            image: swr.cn-southwest-2.myhuaweicloud.com/base_image/ascend-ci/cann:9.0.0-a3-openeuler24.03-py3.11
           - os: openeuler
             chip_type: 310p
-            image: swr.cn-southwest-2.myhuaweicloud.com/base_image/ascend-ci/cann:8.5.1-310p-openeuler24.03-py3.11
+            image: swr.cn-southwest-2.myhuaweicloud.com/base_image/ascend-ci/cann:9.0.0-310p-openeuler24.03-py3.11
 
     container:
       image: ${{ matrix.image }}
@@ -176,13 +176,6 @@ jobs:
             export CPLUS_INCLUDE_PATH=$CPLUS_INCLUDE_PATH:/usr/include/c++/12:/usr/include/c++/12/${arch}-openEuler-linux
           fi
 
-          # X64 needs pytorch cpu whl index; ARM runner has no network access to it
-          if [ "${{ matrix.arch }}" = "X64" ]; then
-            EXTRA_INDEX="--extra-index-url https://download.pytorch.org/whl/cpu/"
-          else
-            EXTRA_INDEX=""
-          fi
-
           pip install uc-manager
-          uv pip install -r requirements-dev.txt $EXTRA_INDEX
-          uv pip install -v -e . $EXTRA_INDEX
+          uv pip install -r requirements-dev.txt --extra-index-url https://download.pytorch.org/whl/cpu/
+          uv pip install -e . --extra-index-url https://download.pytorch.org/whl/cpu/
