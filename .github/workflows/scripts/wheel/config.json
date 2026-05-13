@@ -9,7 +9,7 @@
       "variant_label": "310p",
       "properties": [
         "ascend :: npu_type :: 310p",
-        "ascend :: cann_version :: 8.5.1"
+        "ascend :: cann_version :: 9.0.0"
       ],
       "skip_plugin_validation": true
     },
@@ -17,7 +17,7 @@
       "variant_label": "a2",
       "properties": [
         "ascend :: npu_type :: a2",
-        "ascend :: cann_version :: 8.5.1"
+        "ascend :: cann_version :: 9.0.0"
       ],
       "skip_plugin_validation": true
     },
@@ -25,7 +25,7 @@
       "variant_label": "a3",
       "properties": [
         "ascend :: npu_type :: a3",
-        "ascend :: cann_version :: 8.5.1"
+        "ascend :: cann_version :: 9.0.0"
       ],
       "skip_plugin_validation": true
     }
