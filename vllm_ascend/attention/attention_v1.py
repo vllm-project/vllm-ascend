@@ -887,38 +887,6 @@ class AscendAttentionBackendImpl(AttentionImpl):
             actual_seq_lengths_kv = attn_metadata.seq_lens_list
         return key, value, block_size, block_table, actual_seq_lengths_kv
 
-    def _forward_fia_fullattention(
-        self,
-        query: torch.Tensor,
-        key: torch.Tensor,
-        value: torch.Tensor,
-        attn_metadata: AscendMetadata,
-        output: torch.Tensor,
-    ):
-        batch_size = 1
-        seq_q, num_q_heads, head_dim = query.shape
-        seq_kv, num_kv_heads, _ = key.shape
-
-        query_bsh = query.view(batch_size, seq_q, num_q_heads * head_dim)
-        key_bsh = key.view(batch_size, seq_kv, num_kv_heads * head_dim)
-        value_bsh = value.view(batch_size, seq_kv, num_kv_heads * head_dim)
-
-        attn_output, _ = torch_npu.npu_fused_infer_attention_score(
-            query_bsh,
-            key_bsh,
-            value_bsh,
-            num_heads=self.num_heads,
-            num_key_value_heads=self.num_kv_heads,
-            input_layout="BSH",
-            atten_mask=attn_metadata.attn_mask,
-            scale=self.scale,
-            sparse_mode=3,
-        )
-
-        attn_output = attn_output.view(seq_q, self.num_heads, self.head_size)
-        output[:seq_q] = attn_output[:seq_q]
-        return output
-
     @staticmethod
     def _cum_lens_to_lens(cum_lens: list[int] | torch.Tensor) -> list[int]:
         lens_src = cum_lens.tolist() if isinstance(cum_lens, torch.Tensor) else cum_lens
@@ -1068,13 +1036,7 @@ class AscendAttentionBackendImpl(AttentionImpl):
             and self.sinks is None
         ):
             return self._forward_fia_slidingwindow(query, attn_metadata, output)
-        if (
-            attn_metadata.attn_state == AscendAttentionState.PrefillNoCache
-            and self.attn_type != AttentionType.ENCODER_DECODER
-            and self.sliding_window is None
-            and self.sinks is None
-        ):
-            return self._forward_fia_fullattention(query, key, value, attn_metadata, output)
+
         passed_key = key
         key, value, block_size, block_table, actual_seq_lengths_kv = self._get_fia_params(
             key, value, attn_metadata, kv_cache
