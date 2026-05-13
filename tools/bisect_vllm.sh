@@ -321,7 +321,7 @@ get_ascend_install_cmd() {
 
 fix_triton_install() {
     python3 -m pip uninstall -y triton triton-ascend >/dev/null 2>&1 || true
-    python3 -m pip install -q triton-ascend==3.2.0
+    python3 -m pip install -q triton-ascend==3.2.1 --extra-index-url https://triton-ascend.osinfra.cn/pypi/simple
 }
 
 print_install_failure_log() {
