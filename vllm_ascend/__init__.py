@@ -18,21 +18,6 @@
 _GLOBAL_PATCH_APPLIED = False
 
 
-def register_qwen35_models():
-    """Register Qwen3.5 text models that support PP but aren't in vLLM's registry."""
-    from vllm import ModelRegistry
-    from vllm.model_executor.models.qwen3_5 import (
-        Qwen3_5ForCausalLM,
-        Qwen3_5MoeForCausalLM,
-    )
-
-    if "Qwen3_5ForCausalLM" not in ModelRegistry.get_supported_archs():
-        ModelRegistry.register_model("Qwen3_5ForCausalLM", Qwen3_5ForCausalLM)
-
-    if "Qwen3_5MoeForCausalLM" not in ModelRegistry.get_supported_archs():
-        ModelRegistry.register_model("Qwen3_5MoeForCausalLM", Qwen3_5MoeForCausalLM)
-
-
 def _ensure_global_patch():
     """Apply process-wide vLLM patches before engine-core initialization.
 
