@@ -3,17 +3,23 @@
 # ==========================================
 
 test_cases:
-  - name: "DeepSeek-V3.2-W8A8-TP8-DP2"
+  - name: "DeepSeek-V3.2-W8A8"
     model: "vllm-ascend/DeepSeek-V3.2-W8A8"
     envs:
-      HCCL_OP_EXPANSION_MODE: "AIV"
       OMP_PROC_BIND: "false"
       OMP_NUM_THREADS: "1"
-      HCCL_BUFFSIZE: "256"
-      VLLM_ASCEND_ENABLE_MLAPO: "1"
+      HCCL_OP_EXPANSION_MODE: "AIV"
       PYTORCH_NPU_ALLOC_CONF: "expandable_segments:True"
+      VLLM_USE_V1: "1"
+      HCCL_BUFFSIZE: "256"
+      ASCEND_AGGREGATE_ENABLE: "1"
+      ASCEND_TRANSPORT_PRINT: "1"
+      ACL_OP_INIT_MODE: "1"
+      ASCEND_A3_ENABLE: "1"
+      VLLM_NIXL_ABORT_REQUEST_TIMEOUT: "300000"
+      TASK_QUEUE_ENABLE: "1"
+      VLLM_ASCEND_ENABLE_MLAPO: "1"
       VLLM_ASCEND_ENABLE_FLASHCOMM1: "1"
-      VLLM_ENGINE_READY_TIMEOUT_S: "1800"
       SERVER_PORT: "DEFAULT_PORT"
     server_cmd:
       - "--enable-expert-parallel"
@@ -23,19 +29,23 @@ test_cases:
       - "2"
       - "--port"
       - "$SERVER_PORT"
+      - "--seed"
+      - "1024"
       - "--max-model-len"
-      - "8192"
+      - "67000"
       - "--max-num-batched-tokens"
-      - "8192"
+      - "4096"
       - "--max-num-seqs"
       - "8"
       - "--trust-remote-code"
       - "--quantization"
       - "ascend"
+      - "--async-scheduling"
       - "--gpu-memory-utilization"
-      - "0.93"
+      - "0.95"
       - "--compilation-config"
-      - '{"cudagraph_capture_sizes":[4, 8, 16, 20, 24, 28, 32], "cudagraph_mode":"FULL_DECODE_ONLY"}'
+      - '{"cudagraph_capture_sizes":[1,2,4,8,16,24,32,40,48], "cudagraph_mode":"FULL_DECODE_ONLY"}'
+      - "--no-enable-prefix-caching"
       - "--speculative-config"
       - '{"num_speculative_tokens": 3, "method":"deepseek_mtp"}'
       - "--reasoning-parser"
@@ -43,34 +53,34 @@ test_cases:
       - "--tokenizer_mode"
       - "deepseek_v32"
     benchmarks:
-      acc:
+      acc_aime2025:
         case_type: accuracy
-        dataset_path: vllm-ascend/gsm8k-lite
+        dataset_path: vllm-ascend/aime2025
         request_conf: vllm_api_general_chat
-        dataset_conf: gsm8k/gsm8k_gen_0_shot_cot_chat_prompt
-        max_out_len: 4096
-        batch_size: 8
-        baseline: 95
+        dataset_conf: aime2025/aime2025_gen_0_shot_chat_prompt
+        max_out_len: 72348
+        batch_size: 32
+        baseline: 86.67
         threshold: 5
-      perf_1:
-        case_type: performance
-        dataset_path: vllm-ascend/GSM8K-in3500-bs400
-        request_conf: vllm_api_stream_chat
-        dataset_conf: gsm8k/gsm8k_gen_0_shot_cot_str_perf
-        num_prompts: 1
-        max_out_len: 1500
-        batch_size: 1
-        request_rate: 11.2
-        baseline: 1
-        threshold: 0.97
+
+#      acc_GPQA:
+#        case_type: accuracy
+#        dataset_path: vllm-ascend/gpqa
+#        request_conf: vllm_api_general_chat
+#        dataset_conf: gpqa/gpqa_gen_0_shot_cot_chat_prompt
+#        max_out_len: 65536
+#        batch_size: 32
+#        baseline: 79.80
+#        threshold: 5
+
       perf_2:
         case_type: performance
         dataset_path: vllm-ascend/GSM8K-in3500-bs400
         request_conf: vllm_api_stream_chat
         dataset_conf: gsm8k/gsm8k_gen_0_shot_cot_str_perf
-        num_prompts: 128
+        num_prompts: 16
         max_out_len: 1500
-        batch_size: 32
-        request_rate: 11.2
-        baseline: 210
+        batch_size: 4
+        request_rate: 0
+        baseline: 1
         threshold: 0.97
