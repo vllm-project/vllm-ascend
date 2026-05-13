@@ -87,6 +87,8 @@ jobs:
               - 'vllm_ascend/ops/fused_moe/**'
               - 'vllm_ascend/patch/**'
               - 'CMakeLists.txt'
+              - 'csrc/**'
+              - 'cmake/**'
 
       - name: Determine smart UT test scope
         if: ${{ steps.filter.outputs.ut_tracker == 'true' || steps.filter.outputs.e2e_tracker == 'true' }}
