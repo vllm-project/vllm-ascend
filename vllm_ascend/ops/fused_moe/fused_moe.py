@@ -636,7 +636,7 @@ class AscendFusedMoE(FusedMoE):
             mc2_mask=mc2_mask,
         )
 
-        if self.dynamic_eplb:
+        if self.dynamic_eplb and _EXTRA_CTX.needs_dynamic_eplb:
             expert_tokens = fused_experts_results.expert_tokens
             group_list_type = fused_experts_results.group_list_type
             assert expert_tokens is not None and group_list_type is not None, (

@@ -68,6 +68,7 @@ def set_ascend_forward_context(
     skip_compiled: bool = False,
     max_tokens_across_pcp: int = 0,
     draft_attn_metadatas=None,
+    needs_dynamic_eplb: bool = True,
 ):
     """A context manager that stores the current forward context,
     can be attention metadata, etc.
@@ -166,6 +167,8 @@ def set_ascend_forward_context(
 
         forward_context.max_tokens_across_dp = max_tokens_across_dp
         forward_context.max_tokens_across_pcp = max_tokens_across_pcp
+
+        forward_context.needs_dynamic_eplb = needs_dynamic_eplb
 
         if num_tokens is not None:
             if num_actual_tokens is None:
@@ -331,6 +334,7 @@ class _ExtraForwardContextProxy:
         "num_accept_tokens",
         "in_profile_run",
         "padded_num_tokens",
+        "needs_dynamic_eplb",
     )
 
     def check_extra_attr(self, name: str):

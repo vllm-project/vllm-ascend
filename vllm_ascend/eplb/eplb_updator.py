@@ -120,7 +120,7 @@ class EplbUpdator:
             self.reqs = []
             self.eplb_loader.asyn_expert_weight_transfer(self.reqs)
 
-    def forward_end(self):
+    def forward_end(self, needs_dynamic_eplb: bool = False):
         if self.wakeup_eplb_worker_flag():
             self.compute_and_set_moe_load()
             self.wakeup_eplb_worker()
@@ -128,7 +128,8 @@ class EplbUpdator:
         if self.update_expert_weight_flag() and self.expert_map_record_path is None:
             self.eplb_loader.update_expert_map_and_weight(self.reqs)
 
-        self.update_iteration()
+        if self.cur_iterations >= self.expert_heat_collection_interval - 1 or needs_dynamic_eplb:
+            self.update_iteration()
 
     def compute_and_set_moe_load(self):
         local_load = self.adaptor.get_rank_expert_workload().unsqueeze(1)

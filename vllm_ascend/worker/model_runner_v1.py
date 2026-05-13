@@ -474,6 +474,11 @@ class NPUModelRunner(GPUModelRunner):
             self.kvcomp_meta_data = initialize_kvcomp_metadata(max_num_reqs=self.max_num_reqs,
                 block_size=self.block_size, device=self.device, vllm_config=self.vllm_config,
                 parallel_config=self.parallel_config, dtype=self.dtype)
+        self.needs_dynamic_eplb = True
+        self.is_kv_producer = (
+            self.vllm_config.kv_transfer_config is not None and self.vllm_config.kv_transfer_config.is_kv_producer
+        )
+        self.dp_enable = self.vllm_config.parallel_config.data_parallel_size > 1
 
     @property
     def use_cp(self) -> bool:
@@ -996,6 +1001,11 @@ class NPUModelRunner(GPUModelRunner):
             target.gpu[:, :total_num_scheduled_tokens] += drift
 
         use_spec_decode = len(scheduler_output.scheduled_spec_decode_tokens) > 0
+        if not self.is_kv_producer and (not self.dp_enable):
+            if len(scheduler_output.scheduled_new_reqs) == 0:
+                self.needs_dynamic_eplb = True
+            else:
+                self.needs_dynamic_eplb = False
         if not use_spec_decode:
             # NOTE(woosuk): Due to chunked prefills, the batch may contain
             # partial requests. While we should not sample any token
@@ -1753,6 +1763,7 @@ class NPUModelRunner(GPUModelRunner):
                 model_instance=self.model,
                 max_tokens_across_pcp=0 if self.pcp_size == 1 else self.pcp_manager.max_num_tokens_across_pcp,
                 skip_compiled=has_encoder_input,
+                needs_dynamic_eplb=self.needs_dynamic_eplb,
             ),
             self.maybe_get_kv_connector_output(
                 scheduler_output,
@@ -1993,7 +2004,7 @@ class NPUModelRunner(GPUModelRunner):
 
         if self.dynamic_eplb:
             with record_function_or_nullcontext("EPLB update"):
-                self.eplb_updator.forward_end()
+                self.eplb_updator.forward_end(self.needs_dynamic_eplb)
 
         if self.debugger is not None:
             self.debugger.stop()
@@ -2366,12 +2377,17 @@ class NPUModelRunner(GPUModelRunner):
         # Extra coordination when running data-parallel since we need to coordinate
         # across ranks
         should_ubatch, num_tokens_across_dp = False, None
-        if self.vllm_config.parallel_config.data_parallel_size > 1:
+        if self.dp_enable:
             _, num_tokens_across_dp, synced_cudagraph_mode = self._sync_metadata_across_dp(
                 num_tokens=num_tokens_padded,
                 cudagraph_mode=cudagraph_mode,
                 allow_dp_padding=(cudagraph_mode != CUDAGraphMode.NONE) or enable_sp(self.vllm_config),
             )
+            if not self.is_kv_producer:
+                if synced_cudagraph_mode == CUDAGraphMode.FULL:
+                    self.needs_dynamic_eplb = True
+                else:
+                    self.needs_dynamic_eplb = False
 
             # Extract DP padding if there is any
             if num_tokens_across_dp is not None:
@@ -2914,6 +2930,7 @@ class NPUModelRunner(GPUModelRunner):
                 aclgraph_runtime_mode=cudagraph_runtime_mode,
                 batch_descriptor=batch_desc,
                 model_instance=self.model,
+                needs_dynamic_eplb=self.needs_dynamic_eplb,
             ):
                 outputs = self._model_forward(
                     num_tokens_padded, input_ids, positions, intermediate_tensors, inputs_embeds
@@ -2939,8 +2956,8 @@ class NPUModelRunner(GPUModelRunner):
             if is_profile and self.dynamic_eplb:
                 target = self.model.language_model if hasattr(self.model, "language_model") else self.model
                 target.clear_all_moe_loads()
-            if self.dynamic_eplb:
-                self.eplb_updator.forward_end()
+            if not is_profile and self.dynamic_eplb:
+                self.eplb_updator.forward_end(self.needs_dynamic_eplb)
             return hidden_states, hidden_states
 
     @torch.inference_mode()
