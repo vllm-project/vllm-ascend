@@ -628,13 +628,10 @@ class AscendSpecDecodeBaseProposer(SpecDecodeBaseProposer):
                     self.runner.optimistic_seq_lens_cpu, num_reqs_padded
                 )
                 # Keep the upstream-canonical mirror length-aligned with the
-                # padded subclass field, but only if the caller already
-                # populated it (production cm_base does; some unit-test mocks
-                # leave it None and assert it stays None). ``.clone()`` keeps
-                # the two fields independent so per-step in-place updates in
+                # padded subclass field. ``.clone()`` keeps the two fields
+                # independent so per-step in-place updates in
                 # ``attn_update_stack_num_spec_norm`` don't double-count.
-                if common_attn_metadata._seq_lens_cpu is not None:
-                    common_attn_metadata._seq_lens_cpu = common_attn_metadata.seq_lens_cpu.clone()
+                common_attn_metadata._seq_lens_cpu = common_attn_metadata.seq_lens_cpu.clone()
             if common_attn_metadata.num_computed_tokens_cpu is not None:
                 common_attn_metadata.num_computed_tokens_cpu = self._adjust_tensor(
                     common_attn_metadata.num_computed_tokens_cpu, num_reqs_padded
@@ -1623,8 +1620,8 @@ class AscendSpecDecodeBaseProposer(SpecDecodeBaseProposer):
             query_start_loc=new_query_start_loc_cpu.to(device, non_blocking=True),
             query_start_loc_cpu=new_query_start_loc_cpu,
             seq_lens=new_seq_lens_cpu.to(device, non_blocking=True),
-            seq_lens_cpu=new_seq_lens_cpu,
             _seq_lens_cpu=new_seq_lens_cpu,
+            seq_lens_cpu=new_seq_lens_cpu,
             num_computed_tokens_cpu=common_attn_metadata.num_computed_tokens_cpu,
             _num_computed_tokens_cpu=common_attn_metadata._num_computed_tokens_cpu,
             seq_lens_cpu_upper_bound=new_seq_lens_cpu,
@@ -1712,8 +1709,8 @@ class AscendSpecDecodeBaseProposer(SpecDecodeBaseProposer):
         spec_common_attn_metadata = AscendCommonAttentionMetadata(
             query_start_loc=common_attn_metadata.query_start_loc,
             query_start_loc_cpu=query_start_loc_cpu,
-            seq_lens_cpu=common_attn_metadata.seq_lens_cpu,
             _seq_lens_cpu=common_attn_metadata._seq_lens_cpu,
+            seq_lens_cpu=common_attn_metadata.seq_lens_cpu,
             seq_lens_cpu_upper_bound=common_attn_metadata.seq_lens_cpu_upper_bound,
             num_reqs=common_attn_metadata.num_reqs,
             num_actual_tokens=common_attn_metadata.num_actual_tokens if self.pcp_size > 1 else total_num_tokens,
