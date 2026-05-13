@@ -184,7 +184,7 @@ vllm serve /root/.cache/modelscope/hub/models/vllm-ascend/DeepSeek-V4-Pro-w4a8-m
   --enable-expert-parallel \
   --quantization ascend \
   --enable-chunked-prefill \
-  --no-enable-prefix-caching \
+  --enable-prefix-caching \
   --tokenizer-mode deepseek_v4 \
   --tool-call-parser deepseek_v4 \
   --enable-auto-tool-choice \
@@ -251,7 +251,7 @@ vllm serve /root/.cache/modelscope/hub/models/vllm-ascend/DeepSeek-V4-Pro-w4a8-m
   --enable-expert-parallel \
   --quantization ascend \
   --enable-chunked-prefill \
-  --no-enable-prefix-caching \
+  --enable-prefix-caching \
   --async-scheduling \
   --tokenizer-mode deepseek_v4 \
   --tool-call-parser deepseek_v4 \
@@ -952,7 +952,7 @@ Before you start, please
           --enable-auto-tool-choice \
           --reasoning-parser deepseek_v4 \
           --enforce-eager \
-          --no-enable-prefix-caching \
+          --enable-prefix-caching \
           --speculative-config '{"num_speculative_tokens": 1, "method":"deepseek_mtp"}' \
           --additional_config '{"enable_cpu_binding": "True"}' \
           --kv-transfer-config \
