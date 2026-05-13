@@ -22,7 +22,7 @@ ARG PIP_INDEX_URL="https://mirrors.tuna.tsinghua.edu.cn/pypi/web/simple"
 WORKDIR /workspace
 
 RUN apt-get update -y && \
-    apt-get install -y python3-pip git vim wget net-tools gcc g++ cmake numactl libnuma-dev libjemalloc2 && \
+    apt-get install -y python3-pip git vim wget net-tools gcc g++ cmake numactl libnuma-dev libjemalloc2 pciutils && \
     rm -rf /var/cache/apt/* && \
     rm -rf /var/lib/apt/lists/*
 
