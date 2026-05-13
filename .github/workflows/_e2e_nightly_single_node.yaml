@@ -49,6 +49,10 @@ on:
         required: false
       OBS_SECRET_KEY:
         required: false
+      VLLM_ASCEND_CI_LLM_API_KEY:
+        required: false
+      VLLM_ASCEND_CI_LLM_BASE_URL:
+        required: false
 
 # Bash shells do not use ~/.profile or ~/.bashrc so these shells need to be explicitly
 # declared as "shell: bash -el {0}" on steps that need to be properly activated.
@@ -89,6 +93,14 @@ jobs:
           pip config set global.index-url http://cache-service.nginx-pypi-cache.svc.cluster.local/pypi/simple
           pip config set global.trusted-host cache-service.nginx-pypi-cache.svc.cluster.local
           pip install uv
+
+      - name: Checkout vllm-ascend (CI log helper scripts)
+        uses: actions/checkout@v6
+        with:
+          fetch-depth: 1
+          sparse-checkout: |
+            .github/workflows/scripts
+          sparse-checkout-cone-mode: false
       
       - name: uninstall vlm vllm-ascend and remove code (if pr test)
         if: ${{ github.event_name == 'pull_request' }}
@@ -200,10 +212,13 @@ jobs:
           VLLM_CI_RUNNER: ${{ inputs.runner }}
         working-directory: /vllm-workspace/vllm-ascend
         run: |
+          set -o pipefail
           export LD_LIBRARY_PATH=/usr/local/lib:$LD_LIBRARY_PATH
           echo "Running pytest with tests path: ${{ inputs.tests }}"
           pytest -sv "${{ inputs.tests }}" \
-          --ignore=tests/e2e/nightly/single_node/ops/singlecard_ops/test_fused_moe.py
+          --ignore=tests/e2e/nightly/single_node/ops/singlecard_ops/test_fused_moe.py \
+          2>&1 | tee /tmp/nightly-single-node-e2e.log
+          exit ${PIPESTATUS[0]}
 
       - name: Run Pytest (YAML-driven)
         if: ${{ always() && inputs.config_file_path != '' }}
@@ -215,10 +230,46 @@ jobs:
           BENCHMARK_JOB_NAME: ${{ inputs.vllm_ascend_branch }}-${{ inputs.name }}
         working-directory: /vllm-workspace/vllm-ascend
         run: |
+          set -o pipefail
           export LD_LIBRARY_PATH=/usr/local/lib:$LD_LIBRARY_PATH
           echo "export LD_LIBRARY_PATH=$LD_LIBRARY_PATH:/usr/local/lib" >> ~/.bashrc
           echo "Running YAML-driven test with config: ${{ inputs.config_file_path }}"
-          pytest -sv tests/e2e/nightly/single_node/models/scripts/test_single_node.py
+          pytest -sv tests/e2e/nightly/single_node/models/scripts/test_single_node.py \
+          2>&1 | tee -a /tmp/nightly-single-node-e2e.log
+          exit ${PIPESTATUS[0]}
+
+      - name: CI failure summary (human-readable)
+        if: failure()
+        continue-on-error: true
+        run: |
+          if [ ! -s /tmp/nightly-single-node-e2e.log ]; then exit 0; fi
+          python3 "$GITHUB_WORKSPACE/.github/workflows/scripts/ci_log_summary.py" \
+            --mode e2e \
+            --no-remote-meta \
+            --step-name "Nightly single-node (${{ inputs.name }})" \
+            --log-file /tmp/nightly-single-node-e2e.log \
+            --output "$GITHUB_STEP_SUMMARY"
+
+      - name: LLM failure diagnostics (optional)
+        if: failure()
+        continue-on-error: true
+        env:
+          VLLM_ASCEND_CI_LLM_BASE_URL: ${{ secrets.VLLM_ASCEND_CI_LLM_BASE_URL }}
+          VLLM_ASCEND_CI_LLM_API_KEY: ${{ secrets.VLLM_ASCEND_CI_LLM_API_KEY }}
+          VLLM_ASCEND_CI_LLM_MODEL: ${{ vars.VLLM_ASCEND_CI_LLM_MODEL }}
+        run: |
+          if [ ! -s /tmp/nightly-single-node-e2e.log ]; then exit 0; fi
+          python3 "$GITHUB_WORKSPACE/.github/workflows/scripts/ci_log_summary.py" \
+            --mode e2e \
+            --no-remote-meta \
+            --step-name "Nightly single-node (${{ inputs.name }})" \
+            --log-file /tmp/nightly-single-node-e2e.log \
+            --format llm-json \
+            --output /tmp/ci-llm-summary-nightly-sn.json
+          python3 "$GITHUB_WORKSPACE/.github/workflows/scripts/ci_log_llm_analyze.py" \
+            --step-name "Nightly single-node (${{ inputs.name }})" \
+            --log-file /tmp/nightly-single-node-e2e.log \
+            --structured-summary /tmp/ci-llm-summary-nightly-sn.json
 
       - name: Set benchmark artifact timestamp
         if: ${{ always() && inputs.config_file_path != '' }}

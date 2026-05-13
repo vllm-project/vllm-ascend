@@ -171,6 +171,8 @@ jobs:
       KUBECONFIG_B64: ${{ secrets.KUBECONFIG_B64 }}
       OBS_ACCESS_KEY: ${{ secrets.OBS_ACCESS_KEY }}
       OBS_SECRET_KEY: ${{ secrets.OBS_SECRET_KEY }}
+      VLLM_ASCEND_CI_LLM_API_KEY: ${{ secrets.VLLM_ASCEND_CI_LLM_API_KEY }}
+      VLLM_ASCEND_CI_LLM_BASE_URL: ${{ secrets.VLLM_ASCEND_CI_LLM_BASE_URL }}
 
 
   double-node-tests:
@@ -251,6 +253,8 @@ jobs:
       KUBECONFIG_B64: ${{ secrets.KUBECONFIG_B64 }}
       OBS_ACCESS_KEY: ${{ secrets.OBS_ACCESS_KEY }}
       OBS_SECRET_KEY: ${{ secrets.OBS_SECRET_KEY }}
+      VLLM_ASCEND_CI_LLM_API_KEY: ${{ secrets.VLLM_ASCEND_CI_LLM_API_KEY }}
+      VLLM_ASCEND_CI_LLM_BASE_URL: ${{ secrets.VLLM_ASCEND_CI_LLM_BASE_URL }}
 
   single-node-tests:
     name: single-node
@@ -335,6 +339,11 @@ jobs:
             contains(needs.parse-trigger.outputs.filter, format(',{0},', matrix.test_config.name))
           )
         }}
+    secrets:
+      OBS_ACCESS_KEY: ${{ secrets.OBS_ACCESS_KEY }}
+      OBS_SECRET_KEY: ${{ secrets.OBS_SECRET_KEY }}
+      VLLM_ASCEND_CI_LLM_API_KEY: ${{ secrets.VLLM_ASCEND_CI_LLM_API_KEY }}
+      VLLM_ASCEND_CI_LLM_BASE_URL: ${{ secrets.VLLM_ASCEND_CI_LLM_BASE_URL }}
 
   multi-card-tests:
     name: single-node
@@ -391,7 +400,8 @@ jobs:
     secrets:
       OBS_ACCESS_KEY: ${{ secrets.OBS_ACCESS_KEY }}
       OBS_SECRET_KEY: ${{ secrets.OBS_SECRET_KEY }}
-
+      VLLM_ASCEND_CI_LLM_API_KEY: ${{ secrets.VLLM_ASCEND_CI_LLM_API_KEY }}
+      VLLM_ASCEND_CI_LLM_BASE_URL: ${{ secrets.VLLM_ASCEND_CI_LLM_BASE_URL }}
 
   clear-pre-logs:
     runs-on: linux-aarch64-a3-0
