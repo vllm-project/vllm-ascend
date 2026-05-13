@@ -26,7 +26,7 @@ on:
   workflow_dispatch:
     inputs:
       vllm_ascend_branch:
-        description: 'Branch to test (main or releases/v0.18.0)'
+        description: 'Branch to test'
         required: true
         default: 'main'
         type: choice
@@ -65,8 +65,7 @@ concurrency:
 env:
   # Single source of truth for all shared variables across jobs.
   # NOTE: GitHub Actions does not support env context in reusable workflow `with:` inputs,
-  # so these values are exported as job outputs via the `setup-vars` job below.
-  CANN_IMAGE: 'swr.cn-southwest-2.myhuaweicloud.com/base_image/ascend-ci/cann:8.5.1-910b-ubuntu22.04-py3.11'
+  # so these values are exported as job outputs via the `parse-trigger` job below.
   ASCEND_LOG_PREFIX: '/root/.cache/ascend-logs'
 
 jobs:
@@ -78,49 +77,21 @@ jobs:
       contains(github.event.pull_request.labels.*.name, 'nightly-test')
     uses: ./.github/workflows/_parse_trigger.yaml
     with:
+      nightly_test_branch: '["main"]'
+      nightly_image_branch: '["main"]'
       test_cases: ${{ github.event_name == 'workflow_dispatch' && inputs.test_cases || '' }}
-
-  setup-vars:
-    name: Export global env vars as job outputs
-    needs: parse-trigger
-    runs-on: linux-aarch64-a2b3-0
-    outputs:
-      cann_image: ${{ steps.export.outputs.cann_image }}
-      ascend_log_prefix: ${{ steps.export.outputs.ascend_log_prefix }}
-      vllm_ascend_branches: ${{ steps.export.outputs.vllm_ascend_branches }}
-    steps:
-      - id: export
-        run: |
-          {
-            echo "cann_image=${{ env.CANN_IMAGE }}"
-            echo "ascend_log_prefix=${{ env.ASCEND_LOG_PREFIX }}"
-            if [ "${{ github.event_name }}" = "pull_request" ]; then
-              base_ref="${{ github.base_ref }}"
-              if [[ "$base_ref" == releases/* ]]; then
-                normalized=$(echo "$base_ref" | tr '/' '-')
-                echo "vllm_ascend_branches=[\"${normalized}\"]"
-              else
-                echo 'vllm_ascend_branches=["main"]'
-              fi
-            elif [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
-              input_branch="${{ inputs.vllm_ascend_branch }}"
-              # Normalize branch name for image tag (replace '/' with '-')
-              normalized=$(echo "$input_branch" | tr '/' '-')
-              echo "vllm_ascend_branches=[\"${normalized}\"]"
-            else
-              echo 'vllm_ascend_branches=["main"]'
-            fi
-          } >> $GITHUB_OUTPUT
+      vllm_ascend_branch_dispatch: ${{ github.event_name == 'workflow_dispatch' && inputs.vllm_ascend_branch || '' }}
 
   build-image:
     name: Build nightly-a2 image
+    needs: parse-trigger
     if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
     strategy:
       matrix:
         vllm_ascend_branch: >-
-          ${{ github.event_name == 'workflow_dispatch' 
+          ${{ github.event_name == 'workflow_dispatch'
               && fromJSON(format('["{0}"]', inputs.vllm_ascend_branch))
-              || fromJSON('["main"]') }}
+              || fromJSON(needs.parse-trigger.outputs.nightly_image_branch) }}
     uses: ./.github/workflows/_nightly_image_build.yaml
     with:
       target: a2
@@ -132,7 +103,7 @@ jobs:
 
   single-node-tests:
     name: single-node
-    needs: [setup-vars, parse-trigger, build-image]
+    needs: [parse-trigger, build-image]
     if: >-
       always() &&
       needs.parse-trigger.outputs.run == 'true' &&
@@ -140,7 +111,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        vllm_ascend_branch: ${{ fromJSON(needs.setup-vars.outputs.vllm_ascend_branches) }}
+        vllm_ascend_branch: ${{ fromJSON(needs.parse-trigger.outputs.vllm_ascend_branches) }}
         test_config:
           # pytest-driven tests
           - name: test_custom_op
@@ -187,6 +158,13 @@ jobs:
           needs.parse-trigger.outputs.run == 'true' && (
             needs.parse-trigger.outputs.filter == 'all' ||
             contains(needs.parse-trigger.outputs.filter, format(',{0},', matrix.test_config.name))
+          ) && (
+            matrix.test_config.config_file_path == '' ||
+            matrix.vllm_ascend_branch == 'main' ||
+            contains(
+              format(',{0},', needs.parse-trigger.outputs.single_node_configs),
+              format(',{0},', matrix.test_config.config_file_path)
+            )
           )
         }}
     secrets:
@@ -195,7 +173,7 @@ jobs:
 
   multi-node-tests:
     name: multi-node
-    needs: [setup-vars, parse-trigger, build-image, single-node-tests, single-node-accuracy-tests]
+    needs: [parse-trigger, build-image, single-node-tests, single-node-accuracy-tests]
     if: >-
       always() &&
       needs.parse-trigger.outputs.run == 'true' &&
@@ -204,7 +182,7 @@ jobs:
       fail-fast: false
       max-parallel: 5
       matrix:
-        vllm_ascend_branch: ${{ fromJSON(needs.setup-vars.outputs.vllm_ascend_branches) }}
+        vllm_ascend_branch: ${{ fromJSON(needs.parse-trigger.outputs.vllm_ascend_branches) }}
         test_config:
           - name: multi-node-deepseek-dp
             config_file_path: DeepSeek-R1-W8A8-A2.yaml
@@ -222,7 +200,7 @@ jobs:
       soc_version: a2
       runner: linux-amd64-cpu-8-hk
       image: 'swr.cn-southwest-2.myhuaweicloud.com/base_image/ascend-ci/vllm-ascend:nightly-ci-${{ matrix.vllm_ascend_branch }}-a2'
-      ascend_log_prefix: ${{ needs.setup-vars.outputs.ascend_log_prefix }}/${{ matrix.vllm_ascend_branch }}
+      ascend_log_prefix: ${{ needs.parse-trigger.outputs.ascend_log_prefix }}/${{ matrix.vllm_ascend_branch }}
       vllm_ascend_branch: ${{ matrix.vllm_ascend_branch }}
       replicas: 1
       size: ${{ matrix.test_config.size }}
@@ -234,6 +212,12 @@ jobs:
           needs.parse-trigger.outputs.run == 'true' && (
             needs.parse-trigger.outputs.filter == 'all' ||
             contains(needs.parse-trigger.outputs.filter, format(',{0},', matrix.test_config.name))
+          ) && (
+            matrix.vllm_ascend_branch == 'main' ||
+            contains(
+              format(',{0},', needs.parse-trigger.outputs.multi_node_configs),
+              format(',{0},', matrix.test_config.config_file_path)
+            )
           )
         }}
     secrets:
@@ -268,7 +252,7 @@ jobs:
           echo "pr_only_matrix=${PR_ONLY}" >> "$GITHUB_OUTPUT"
 
   single-node-accuracy-tests:
-    needs: [setup-vars, parse-trigger, build-image, generate-accuracy-matrix]
+    needs: [parse-trigger, build-image, generate-accuracy-matrix]
     if: >-
       always() &&
       needs.parse-trigger.outputs.run == 'true' &&
@@ -277,7 +261,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        vllm_ascend_branch: ${{ fromJSON(needs.setup-vars.outputs.vllm_ascend_branches) }}
+        vllm_ascend_branch: ${{ fromJSON(needs.parse-trigger.outputs.vllm_ascend_branches) }}
         test_config: ${{ fromJson(needs.generate-accuracy-matrix.outputs.nightly_matrix) }}
     uses: ./.github/workflows/_e2e_nightly_single_node_models.yaml
     with:
@@ -290,12 +274,15 @@ jobs:
           needs.parse-trigger.outputs.run == 'true' && (
             needs.parse-trigger.outputs.filter == 'all' ||
             contains(needs.parse-trigger.outputs.filter, format(',{0},', matrix.test_config.name))
+          ) && (
+            matrix.vllm_ascend_branch == 'main' ||
+            needs.parse-trigger.outputs.accuracy_model_configs != ''
           )
         }}
       upload: false
 
   single-node-accuracy-tests-pr-only:
-    needs: [setup-vars, parse-trigger, build-image, generate-accuracy-matrix]
+    needs: [parse-trigger, build-image, generate-accuracy-matrix]
     if: >-
       always() &&
       needs.parse-trigger.outputs.run == 'true' &&
@@ -305,7 +292,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        vllm_ascend_branch: ${{ fromJSON(needs.setup-vars.outputs.vllm_ascend_branches) }}
+        vllm_ascend_branch: ${{ fromJSON(needs.parse-trigger.outputs.vllm_ascend_branches) }}
         test_config: ${{ fromJson(needs.generate-accuracy-matrix.outputs.pr_only_matrix) }}
     uses: ./.github/workflows/_e2e_nightly_single_node_models.yaml
     with:
@@ -317,7 +304,10 @@ jobs:
         ${{
           needs.parse-trigger.outputs.run == 'true' &&
           needs.parse-trigger.outputs.filter != 'all' &&
-          contains(needs.parse-trigger.outputs.filter, format(',{0},', matrix.test_config.name))
+          contains(needs.parse-trigger.outputs.filter, format(',{0},', matrix.test_config.name)) && (
+            matrix.vllm_ascend_branch == 'main' ||
+            needs.parse-trigger.outputs.accuracy_model_configs != ''
+          )
         }}
       upload: false
 

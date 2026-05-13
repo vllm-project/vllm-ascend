@@ -24,6 +24,14 @@ on:
         required: false
         type: string
         default: linux-aarch64-a2b3-0
+      nightly_test_branch:
+        required: false
+        type: string
+        default: '[main]'
+      nightly_image_branch:
+        required: false
+        type: string
+        default: '[main]'
       parse_e2e_comment:
         required: false
         type: boolean
@@ -32,6 +40,18 @@ on:
         required: false
         type: string
         default: ''
+      ascend_log_prefix:
+        required: false
+        type: string
+        default: '/root/.cache/ascend-logs'
+      vllm_ascend_branch_dispatch:
+        required: false
+        type: string
+        default: ''
+      accuracy_config_dir:
+        required: false
+        type: string
+        default: 'tests/e2e/models/configs'
     outputs:
       run:
         description: "Whether nightly tests should run"
@@ -42,6 +62,27 @@ on:
       ref:
         description: "The vllm-ascend ref (commit SHA for PRs, branch/tag name otherwise)"
         value: ${{ jobs.parse_nightly_trigger.outputs.ref }}
+      nightly_test_branch:
+        description: "Branches to test (JSON array string)"
+        value: ${{ jobs.parse_nightly_trigger.outputs.nightly_test_branch }}
+      nightly_image_branch:
+        description: "Branches to build images for (JSON array string)"
+        value: ${{ jobs.parse_nightly_trigger.outputs.nightly_image_branch }}
+      ascend_log_prefix:
+        description: "Ascend log prefix path"
+        value: ${{ jobs.parse_nightly_trigger.outputs.ascend_log_prefix }}
+      vllm_ascend_branches:
+        description: "JSON array of vllm-ascend branches to test"
+        value: ${{ jobs.parse_nightly_trigger.outputs.vllm_ascend_branches }}
+      single_node_configs:
+        description: "Comma-separated list of existing single-node config files"
+        value: ${{ jobs.parse_nightly_trigger.outputs.single_node_configs }}
+      multi_node_configs:
+        description: "Comma-separated list of existing multi-node config files"
+        value: ${{ jobs.parse_nightly_trigger.outputs.multi_node_configs }}
+      accuracy_model_configs:
+        description: "Comma-separated list of existing accuracy model config files"
+        value: ${{ jobs.parse_nightly_trigger.outputs.accuracy_model_configs }}
       allowed:
         description: "Whether the actor is allowed to trigger e2e tests"
         value: ${{ jobs.parse_e2e_comment.outputs.allowed }}
@@ -70,7 +111,20 @@ jobs:
       run: ${{ steps.parse.outputs.run }}
       filter: ${{ steps.parse.outputs.filter }}
       ref: ${{ steps.parse.outputs.ref }}
+      nightly_test_branch: ${{ steps.passthrough.outputs.nightly_test_branch }}
+      nightly_image_branch: ${{ steps.passthrough.outputs.nightly_image_branch }}
+      ascend_log_prefix: ${{ steps.export-vars.outputs.ascend_log_prefix }}
+      vllm_ascend_branches: ${{ steps.export-vars.outputs.vllm_ascend_branches }}
+      single_node_configs: ${{ steps.list-configs.outputs.single_node_configs }}
+      multi_node_configs: ${{ steps.list-configs.outputs.multi_node_configs }}
+      accuracy_model_configs: ${{ steps.list-configs.outputs.accuracy_model_configs }}
     steps:
+      - name: Pass through branch inputs
+        id: passthrough
+        run: |
+          echo "nightly_test_branch=${{ inputs.nightly_test_branch }}" >> $GITHUB_OUTPUT
+          echo "nightly_image_branch=${{ inputs.nightly_image_branch }}" >> $GITHUB_OUTPUT
+
       - name: Parse trigger
         id: parse
         uses: actions/github-script@v7
@@ -158,6 +212,51 @@ jobs:
             // Fallback
             core.setOutput('run', 'false');
             core.setOutput('filter', '');
+
+      - name: Export branch vars
+        id: export-vars
+        run: |
+          {
+            echo "ascend_log_prefix=${{ inputs.ascend_log_prefix }}"
+            if [ "${{ github.event_name }}" = "pull_request" ]; then
+              base_ref="${{ github.base_ref }}"
+              normalized=$(echo "$base_ref" | tr '/' '-')
+              echo "vllm_ascend_branches=[\"${normalized}\"]"
+              echo "vllm_ascend_branch_ref=$base_ref"
+            elif [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
+              dispatch_branch="${{ inputs.vllm_ascend_branch_dispatch }}"
+              normalized=$(echo "$dispatch_branch" | tr '/' '-')
+              echo "vllm_ascend_branches=[\"${normalized}\"]"
+              echo "vllm_ascend_branch_ref=$dispatch_branch"
+            else
+              nightly_branch="${{ inputs.nightly_test_branch }}"
+              branches=$(echo "$nightly_branch" | sed 's/[[:space:]\[\]"]//g' | tr ',' '\n' | grep -v '^$')
+              json_branches=$(echo "$branches" | while read -r b; do echo "\"$(echo "$b" | tr '/' '-')\""; done | paste -sd',' -)
+              echo "vllm_ascend_branches=[${json_branches}]"
+              branch_ref=$(echo "$branches" | grep -v '^main$' | head -1)
+              echo "vllm_ascend_branch_ref=${branch_ref:-main}"
+            fi
+          } >> $GITHUB_OUTPUT
+
+      - uses: actions/checkout@v6
+        if: steps.parse.outputs.run == 'true' && steps.export-vars.outputs.vllm_ascend_branch_ref != 'main'
+        with:
+          ref: ${{ steps.export-vars.outputs.vllm_ascend_branch_ref }}
+          fetch-depth: 1
+
+      - name: List existing config files
+        id: list-configs
+        if: steps.parse.outputs.run == 'true' && steps.export-vars.outputs.vllm_ascend_branch_ref != 'main'
+        run: |
+          single=$(find tests/e2e/nightly/single_node/models/configs/ -maxdepth 1 -name '*.yaml' -printf '%f\n' 2>/dev/null | paste -sd',' - || echo '')
+          multi=$(find tests/e2e/nightly/multi_node/config/ -maxdepth 1 -name '*.yaml' -printf '%f\n' 2>/dev/null | paste -sd',' - || echo '')
+          accuracy_dir="${{ inputs.accuracy_config_dir }}"
+          accuracy=$(find "$accuracy_dir" -maxdepth 1 -name '*.yaml' -printf '%f\n' 2>/dev/null | paste -sd',' - || echo '')
+          {
+            echo "single_node_configs=$single"
+            echo "multi_node_configs=$multi"
+            echo "accuracy_model_configs=$accuracy"
+          } >> $GITHUB_OUTPUT
 
   parse_e2e_comment:
     name: Parse /e2e comment
