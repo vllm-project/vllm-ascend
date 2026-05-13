@@ -15,13 +15,6 @@
 # limitations under the License.
 # This file is a part of the vllm-ascend project.
 #
-"""NPU precision tests for ``vllm_ascend.attention.context_parallel.sfa_cp``.
-
-The suite follows PR #7216 style: one ``BATCH_SPECS`` table, one correctness
-helper, and one parametrized test over workload, topology, dtype, TP size, and
-model. In-scope branches are compared with a fp32 dense MQA reference on NPU.
-PCP>1 prefill/mixed needs real per-rank scheduler metadata and is skipped here.
-"""
 
 import math
 import sys
