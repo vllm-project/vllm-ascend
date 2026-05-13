@@ -1,12 +1,3 @@
-/**
- * CopyAndExpandEagleInputs 算子 Kernel 实现 (DataCopy 版)
- *
- * 多核策略：
- *   所有 GM 读写通过 DataCopy 完成（不使用 GlobalTensor::SetValue/GetValue 访问 GM）。
- *   UB (LocalTensor) 上使用 SetValue/GetValue 构建数据，再 DataCopy 到 GM。
- *   对齐处理参考 CANN 内置算子的 DataCopyCustom 模式。
- */
-
 #include "kernel_operator.h"
 
 using namespace AscendC;
@@ -44,7 +35,6 @@ public:
             myNumReqs = reqsPerCore;
         }
 
-        // 绑定 GM Tensor
         gmTargetTokenIds.SetGlobalBuffer((__gm__ int32_t*)targetTokenIds, totalInputTokens);
         gmTargetPositions.SetGlobalBuffer((__gm__ int32_t*)targetPositions, totalInputTokens);
         gmNextTokenIds.SetGlobalBuffer((__gm__ int32_t*)nextTokenIds, numReqs);
@@ -57,14 +47,11 @@ public:
         gmOutNewTokenIndices.SetGlobalBuffer((__gm__ int32_t*)outNewTokenIndices, numPaddingSlotsPerReq * numReqs);
         gmOutHiddenStateMapping.SetGlobalBuffer((__gm__ int32_t*)outHiddenStateMapping, totalInputTokens);
 
-        // 分配 UB 缓冲区 —— 每个 TBuf 的基地址自动 32 字节对齐
-        // 元数据各自独立 TBuf，避免 UB 地址不对齐
         uint32_t metaAligned = AlignUp((myNumReqs + 1) * sizeof(int32_t), ONE_BLK_SIZE);
         pipe.InitBuffer(qsBuf, metaAligned);
         pipe.InitBuffer(qeBuf, AlignUp(myNumReqs * sizeof(int32_t), ONE_BLK_SIZE));
         pipe.InitBuffer(ntBuf, AlignUp(myNumReqs * sizeof(int32_t), ONE_BLK_SIZE));
 
-        // I/O 缓冲区
         constexpr uint32_t MAX_PER_REQ = 4096;
         pipe.InitBuffer(inputBuf,  AlignUp(MAX_PER_REQ * sizeof(int32_t), ONE_BLK_SIZE));
         pipe.InitBuffer(outIdsBuf, AlignUp(MAX_PER_REQ * sizeof(int32_t), ONE_BLK_SIZE));
@@ -74,7 +61,6 @@ public:
         pipe.InitBuffer(ntiBuf,    AlignUp(64 * sizeof(int32_t), ONE_BLK_SIZE));
         pipe.InitBuffer(hsmBuf,    AlignUp(MAX_PER_REQ * sizeof(int32_t), ONE_BLK_SIZE));
 
-        // DataCopy 元数据到各自 UB
         if (myNumReqs > 0) {
             LocalTensor<int32_t> lqs = qsBuf.Get<int32_t>();
             DataCopyIn(lqs, gmQueryStartLoc, (int32_t)myStartReq, (int32_t)(myNumReqs + 1));
@@ -99,13 +85,8 @@ public:
         for (uint32_t rLocal = 0; rLocal < myNumReqs; rLocal++) {
             ProcessOneRequestShiftTrue(myStartReq + rLocal, rLocal);
         }
-        // shift_input_ids=true 下，generator 计算 totalDraftTokens = sum(outputLen[r])
-        // 但 outputStart 的步长会让相邻请求重叠 1 格（每个 qe==nqs 的请求都贡献 1 格）。
-        // 实际写入范围比 totalDraftTokens 短 N 格（N=重叠请求数）。剩余尾部 N 格不会
-        // 被任何请求写到，但 golden 把它们当作 zero-init 比对。kernel 不能依赖
-        // output GM 分配时被清零（pytest 连续跑会复用 GM），所以显式补零。
+
         if (myStartReq + myNumReqs == numReqs && totalDraftTokens > 0) {
-            // 计算实际写入到的最后位置 + 1（= last req 的 outputStart + outputLen）
             LocalTensor<int32_t> lqs = qsBuf.Get<int32_t>();
             LocalTensor<int32_t> lqe = qeBuf.Get<int32_t>();
             uint32_t lastLocal = myNumReqs - 1;
@@ -118,7 +99,7 @@ public:
             if (lastNumRejected < 0) lastNumRejected = 0;
             int32_t lastOutputLen = lastNumValid + (int32_t)numPaddingSlotsPerReq + lastNumRejected;
             int32_t lastOutputStart = lastQs + (int32_t)(myStartReq + lastLocal) * ((int32_t)numPaddingSlotsPerReq - 1);
-            int32_t writtenEnd = lastOutputStart + lastOutputLen;  // 下一个未写位置
+            int32_t writtenEnd = lastOutputStart + lastOutputLen;
             int32_t tailCount = (int32_t)totalDraftTokens - writtenEnd;
             if (tailCount > 0) {
                 LocalTensor<int32_t> lZero32 = outIdsBuf.Get<int32_t>();
@@ -136,18 +117,11 @@ public:
     }
 
 private:
-    // ============================================================
-    // AlignUp 辅助
-    // ============================================================
     static __aicore__ inline uint32_t AlignUp(uint32_t x, uint32_t a)
     {
         return (x + a - 1) / a * a;
     }
 
-    // ============================================================
-    // GM → UB: 标准 DataCopy，count 自动 round-up 到 block 对齐
-    // 多读的元素在 UB 中不会被使用，安全无害
-    // ============================================================
     __aicore__ inline void DataCopyIn(LocalTensor<int32_t>& dst,
                                        GlobalTensor<int32_t>& src,
                                        int32_t gmOffset, int32_t count)
@@ -159,10 +133,6 @@ private:
         pipe_barrier(PIPE_ALL);
     }
 
-    // ============================================================
-    // UB → GM: DataCopyPad + DataCopyExtParams（C220 支持任意字节数）
-    // 精确写入 count 个元素，不越界覆盖相邻数据
-    // ============================================================
     __aicore__ inline void DataCopyOut_int32(GlobalTensor<int32_t>& dst,
                                               LocalTensor<int32_t>& src,
                                               int32_t gmOffset, int32_t count)
@@ -185,9 +155,6 @@ private:
         pipe_barrier(PIPE_ALL);
     }
 
-    // ============================================================
-    // 元数据读取 (从各自 UB 缓冲区)
-    // ============================================================
     __aicore__ inline int32_t ReadQS(uint32_t rLocal) {
         return qsBuf.Get<int32_t>().GetValue(rLocal);
     }
@@ -218,21 +185,18 @@ private:
         int32_t outputStart = queryStart + (int32_t)r * (int32_t)numPaddingSlotsPerReq;
         int32_t outputLen = numValid + (int32_t)numPaddingSlotsPerReq + numRejected;
 
-        // 读取输入 token 到 UB
         int32_t numInputTokensForReq = nextQueryStart - queryStart;
         LocalTensor<int32_t> localInput = inputBuf.Get<int32_t>();
         if (numInputTokensForReq > 0) {
             DataCopyIn(localInput, gmTargetTokenIds, queryStart, numInputTokensForReq);
         }
 
-        // 读取起始 position
         LocalTensor<int32_t> localTmpPos = hsmBuf.Get<int32_t>();
         DataCopyIn(localTmpPos, gmTargetPositions, queryStart, 1);
         int32_t startPos = localTmpPos.GetValue(0);
 
         int32_t nextTokenId = ReadNT(rLocal);
 
-        // 构建输出到 UB
         LocalTensor<int32_t> lIds = outIdsBuf.Get<int32_t>();
         LocalTensor<int32_t> lPos = outPosBuf.Get<int32_t>();
         LocalTensor<int8_t>  lRej = outRejBuf.Get<int8_t>();
@@ -351,10 +315,6 @@ private:
             lMsk.SetValue(j, (int8_t)0);
         }
 
-        // shift_input_ids=true 下，当 nextQueryStart == queryEnd（该请求实际无 rejected token，
-        // 被 max(...,0) 钳到 0）时，outputLen 比相邻请求间距多 1，最后一格会与
-        // 下一个请求的 outputStart 重叠。NPU 的 DataCopyPad 在 sub-block RMW 下不保证
-        // "后写赢"，因此让本请求少写一格，由 req[r+1] 的首格来写它。
         int32_t outputLenToWrite = outputLen;
         if (nextQueryStart == queryEnd && (r + 1) < numReqs) {
             outputLenToWrite = outputLen - 1;
