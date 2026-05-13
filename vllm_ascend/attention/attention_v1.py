@@ -398,13 +398,6 @@ class AscendAttentionBackendImpl(AttentionImpl):
         self.layerIndex = 0
         self.enable_hamming_sparse = is_enable_hamming_sparse()
 
-    def _use_shared_kv_cache(self) -> bool:
-        return(
-            self.kv_share_target_layer_name is not None
-            and self.key_cache is not None
-            and self.value_cache is not None
-        )
-
     @staticmethod
     def update_graph_params(
         update_stream,
@@ -855,23 +848,11 @@ class AscendAttentionBackendImpl(AttentionImpl):
                 )
 
         if attn_metadata.attn_state == AscendAttentionState.PrefillNoCache:
-            if self._use_shared_kv_cache():
-                batch_size = attn_metadata.seq_lens.shape[0]
-                block_table = attn_metadata.block_tables[:batch_size, :]
-                num_block, block_size, _, _ = self.key_cache.shape  # type: ignore
-                key = self.key_cache.view(  # type: ignore
-                    num_block, block_size, -1
-                )
-                value = self.value_cache.view(  # type: ignore
-                    num_block, block_size, -1
-                )
-                actual_seq_lengths_kv = attn_metadata.seq_lens_list
-            else:
-                block_size = 128
-                block_table = None
-                actual_seq_lengths_kv = attn_metadata.actual_seq_lengths_q
-                if self.attn_type == AttentionType.ENCODER_DECODER:
-                    actual_seq_lengths_kv = torch.cumsum(attn_metadata.seq_lens, dim=0).tolist()
+            block_size = 128
+            block_table = None
+            actual_seq_lengths_kv = attn_metadata.actual_seq_lengths_q
+            if self.attn_type == AttentionType.ENCODER_DECODER:
+                actual_seq_lengths_kv = torch.cumsum(attn_metadata.seq_lens, dim=0).tolist()
         elif attn_metadata.attn_state == AscendAttentionState.PrefillCacheHit:
             batch_size = attn_metadata.seq_lens.shape[0]
             block_table = attn_metadata.block_tables[:batch_size, :]
