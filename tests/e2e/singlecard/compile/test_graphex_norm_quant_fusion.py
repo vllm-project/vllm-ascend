@@ -4,7 +4,7 @@ import pytest
 import torch
 import torch.nn as nn
 import torch_npu
-import torchair
+import npugraph_ex as nge
 import vllm.config
 from vllm.config import ModelConfig, VllmConfig
 from vllm.distributed import ensure_model_parallel_initialized, init_distributed_environment
@@ -25,7 +25,7 @@ def find_op(gm, op_default):
 
 
 def create_pattern_wrapper(assert_func):
-    original_func = torchair.npu_fx_compiler._optimize_fx
+    original_func = nge.npu_fx_compiler._optimize_fx
 
     def wrapper(gm, example_inputs=None, config=None):
         ret = original_func(gm, example_inputs, config)
