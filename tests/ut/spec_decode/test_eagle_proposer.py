@@ -309,6 +309,23 @@ class TestEagleProposerLoadModel(TestBase):
         self.vllm_config.additional_config = None
         init_ascend_config(self.vllm_config)
 
+        # Mock get_ascend_config to return a properly configured mock
+        self.mock_get_ascend_config = patch("vllm_ascend.utils.get_ascend_config")
+        mock_config = self.mock_get_ascend_config.start()
+        mock_ascend_config = MagicMock()
+        mock_ascend_config.enable_flashcomm2_parallel_size = 0
+        mock_ascend_config.enable_context_parallel = False
+        mock_ascend_config.enable_flashcomm1 = False
+        mock_ascend_config.enable_matmul_allreduce = False
+        mock_ascend_config.weight_nz_mode = 1
+        mock_ascend_config.enable_mlapo = True
+        mock_ascend_config.enable_fused_mc2 = 0
+        mock_ascend_config.hccl_so_path = None
+        mock_ascend_config.vllm_version = None
+        mock_ascend_config.msmonitor_use_daemon = False
+        mock_ascend_config.enable_transpose_kv_cache_by_block = True
+        mock_config.return_value = mock_ascend_config
+
         self.mock_cpugpubuffer = patch(_CPU_GPU_BUFFER_TARGET)
         self.mock_cpugpubuffer.start()
         self.mock_supports_multimodal_inputs = patch(
@@ -322,6 +339,7 @@ class TestEagleProposerLoadModel(TestBase):
         self.proposer.parallel_drafting = False
 
     def tearDown(self):
+        self.mock_get_ascend_config.stop()
         self.mock_cpugpubuffer.stop()
         self.mock_supports_multimodal_inputs.stop()
         # Clear the current vllm config
@@ -455,6 +473,23 @@ class TestEagleProposerDummyRun(TestBase):
         self.vllm_config.additional_config = None
         init_ascend_config(self.vllm_config)
 
+        # Mock get_ascend_config to return a properly configured mock
+        self.mock_get_ascend_config = patch("vllm_ascend.utils.get_ascend_config")
+        mock_config = self.mock_get_ascend_config.start()
+        mock_ascend_config = MagicMock()
+        mock_ascend_config.enable_flashcomm2_parallel_size = 0
+        mock_ascend_config.enable_context_parallel = False
+        mock_ascend_config.enable_flashcomm1 = False
+        mock_ascend_config.enable_matmul_allreduce = False
+        mock_ascend_config.weight_nz_mode = 1
+        mock_ascend_config.enable_mlapo = True
+        mock_ascend_config.enable_fused_mc2 = 0
+        mock_ascend_config.hccl_so_path = None
+        mock_ascend_config.vllm_version = None
+        mock_ascend_config.msmonitor_use_daemon = False
+        mock_ascend_config.enable_transpose_kv_cache_by_block = True
+        mock_config.return_value = mock_ascend_config
+
         self.mock_cpugpubuffer = patch(_CPU_GPU_BUFFER_TARGET)
         self.mock_cpugpubuffer.start()
         self.mock_supports_multimodal_inputs = patch(
@@ -481,6 +516,7 @@ class TestEagleProposerDummyRun(TestBase):
         self.proposer.update_stream = MagicMock()
 
     def tearDown(self):
+        self.mock_get_ascend_config.stop()
         self.mock_cpugpubuffer.stop()
         self.mock_supports_multimodal_inputs.stop()
         self.mock_tp_world_size.stop()
