@@ -14,11 +14,13 @@
 ## Prerequisites
 
 ### Hardware Requirements
+
 - **Recommended**: Huawei Ascend 910B/C (for optimal performance)
 - **Minimum**: Ascend 910A or Atlas A2 Series
 - **Memory**: ≥ 32GB HBM for fp32, ≥ 16GB for bfloat16
 
 ### Software Requirements
+
 - vLLM Ascend runtime installed
 - Python 3.9+
 - vLLM >= 0.6.0
@@ -35,6 +37,32 @@ pip install vllm-ascend
 
 # Verify installation
 python -c "import vllm; print(vllm.__version__)"
+```
+
+### Environment Variables for Ascend NPU
+
+```{test} bash
+:sync-yaml: tests/e2e/models/configs/chameleon-7b.yaml
+:sync-target: test_cases[0].envs
+:sync-class: env
+
+export VLLM_ATTENTION_BACKEND=ascend
+export ENFORCE_EAGER=1
+```
+
+### vLLM Serve Command
+
+```{test} bash
+:sync-yaml: tests/e2e/models/configs/chameleon-7b.yaml
+:sync-target: test_cases[0].model test_cases[0].server_cmd
+:sync-class: cmd
+
+vllm serve "facebook/chameleon-7b" \
+  --dtype bfloat16 \
+  --max-model-len 2048 \
+  --gpu-memory-utilization 0.75 \
+  --enforce-eager \
+  --trust-remote-code
 ```
 
 ## Quick Start: Text-Only Generation
@@ -280,11 +308,13 @@ outputs = llm.generate(["Prompt"], sampling_params)
 ## Important Notes for Ascend Deployment
 
 ### Memory Considerations
+
 - **Image Expansion**: Each image can expand to 500-2000 tokens depending on resolution
 - **Batch Processing**: Monitor total tokens (text + image tokens) not exceeding `max_model_len`
 - **Mixed Precision**: Use bfloat16 to balance performance and memory usage
 
 ### Known Limitations
+
 1. **enforce_eager=True required**: Graph compilation is not fully supported for Chameleon on Ascend
 2. **Single-card inference**: Currently optimized for single-card; tensor parallelism experimental
 3. **Image formats**: Supports JPEG, PNG, WebP (32KB-10MB recommended)
@@ -292,6 +322,7 @@ outputs = llm.generate(["Prompt"], sampling_params)
 ### Troubleshooting
 
 **Issue: "CUDA out of memory"**
+
 ```python
 # Solution: Reduce max_model_len or batch_size
 llm = LLM(
@@ -302,6 +333,7 @@ llm = LLM(
 ```
 
 **Issue: Image token limit exceeded**
+
 ```python
 # Resize images before inference
 from PIL import Image
@@ -315,6 +347,7 @@ def resize_image(image_path: str, max_size: int = 1024) -> str:
 ```
 
 **Issue: Slow generation speed**
+
 ```python
 # Check Ascend utilization and adjust batch size
 import os
@@ -406,15 +439,16 @@ if __name__ == "__main__":
 
 ## Additional Resources
 
-- **HuggingFace Model Card**: https://huggingface.co/facebook/chameleon-7b
-- **vLLM Documentation**: https://docs.vllm.ai/
-- **vLLM Ascend Guide**: https://docs.vllm.ai/projects/ascend/
-- **Ascend CANN Toolkit**: https://www.hiascend.com/
-- **Chameleon Paper**: https://arxiv.org/abs/2405.09818
+- **HuggingFace Model Card**: <https://huggingface.co/facebook/chameleon-7b>
+- **vLLM Documentation**: <https://docs.vllm.ai/>
+- **vLLM Ascend Guide**: <https://docs.vllm.ai/projects/ascend/>
+- **Ascend CANN Toolkit**: <https://www.hiascend.com/>
+- **Chameleon Paper**: <https://arxiv.org/abs/2405.09818>
 
 ## Support & Feedback
 
 For issues or questions:
-- **GitHub Issues**: https://github.com/vllm-project/vllm-ascend/issues
-- **vLLM Community**: https://github.com/vllm-project/vllm/discussions
+
+- **GitHub Issues**: <https://github.com/vllm-project/vllm-ascend/issues>
+- **vLLM Community**: <https://github.com/vllm-project/vllm/discussions>
 

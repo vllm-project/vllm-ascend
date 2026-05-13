@@ -12,6 +12,23 @@ model_name: "facebook/chameleon-7b"
 model_type: "vllm-vlm"
 hardware: "Atlas A2 Series"
 
+# Test case configuration for Chameleon-7B multimodal model
+test_cases:
+  - name: "Chameleon-7B-Multimodal-Case"
+    model: "facebook/chameleon-7b"
+    envs:
+      VLLM_ATTENTION_BACKEND: "ascend"
+      ENFORCE_EAGER: "1"
+    server_cmd:
+      - "--dtype"
+      - "bfloat16"
+      - "--max-model-len"
+      - "2048"
+      - "--gpu-memory-utilization"
+      - "0.75"
+      - "--enforce-eager"
+      - "--trust-remote-code"
+
 # Serving configuration with Ascend NPU optimizations
 serve:
   # Tensor parallelism: 1 for single-card inference
