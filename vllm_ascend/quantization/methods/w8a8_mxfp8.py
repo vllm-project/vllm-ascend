@@ -15,6 +15,7 @@
 # limitations under the License.
 #
 
+import math
 from collections.abc import Callable
 from typing import Any
 
@@ -62,7 +63,10 @@ class AscendW8A8MXFP8DynamicLinearMethod(AscendLinearScheme):
         self, input_size: int, output_size: int, params_dtype: torch.dtype, layer_type: str | None = None
     ) -> dict[str, Any]:
         params_dict = {}
-        params_dict["weight_scale"] = torch.empty(output_size, input_size // self.group_size, dtype=torch.uint8)
+        num_groups = input_size // self.group_size
+        if input_size % self.group_size != 0:
+            num_groups = math.ceil(input_size / self.group_size)
+        params_dict["weight_scale"] = torch.empty(output_size, num_groups, dtype=torch.uint8)
         return params_dict
 
     def apply(
