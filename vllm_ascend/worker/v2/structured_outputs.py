@@ -30,6 +30,7 @@ from vllm.triton_utils import tl, triton
 # Adapted from
 # https://github.com/mlc-ai/xgrammar/blob/main/python/xgrammar/kernels/apply_token_bitmask_inplace_triton.py
 # Ascend NPU bitmask kernel (BLOCK_SIZE_SUB tiling)
+# TODO: Optimize the kernel performance with NPU profiling data.
 @triton.jit
 def _apply_grammar_bitmask_kernel(
     logits_ptr,
