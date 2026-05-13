@@ -218,14 +218,15 @@ class NPUModelRunner(GPUModelRunner):
             expanded_idx_mapping = idx_mapping
             expanded_local_pos = torch.zeros(num_reqs, dtype=torch.int32, device=self.device)
         else:
-            num_draft_tokens_per_req = np.array(
+            num_draft_tokens_arr = np.array(
                 [len(draft_tokens.get(req_id, ())) for req_id in req_ids],
                 dtype=np.int32,
             )
-            total_num_draft_tokens = int(num_draft_tokens_per_req.sum())
+            num_draft_tokens_per_req = num_draft_tokens_arr
+            total_num_draft_tokens = int(num_draft_tokens_arr.sum())
             total_num_logits = num_reqs + total_num_draft_tokens
 
-            num_logits = num_draft_tokens_per_req + 1
+            num_logits = num_draft_tokens_arr + 1
             cu_num_logits_np = np.empty(num_reqs + 1, dtype=np.int32)
             cu_num_logits_np[0] = 0
             np.cumsum(num_logits, out=cu_num_logits_np[1:])
