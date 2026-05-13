@@ -13,7 +13,7 @@
  * \file causal_conv1d_tiling.cpp
  */
 
- #include "../tiling_base/tiling_templates_registry.h"
+ #include "tiling_base/tiling_templates_registry.h"
  #include "causal_conv1d_tiling_utils.h"
  #include "causal_conv1d_tiling_planner.h"
  #include "causal_conv1d_tiling_validation.h"

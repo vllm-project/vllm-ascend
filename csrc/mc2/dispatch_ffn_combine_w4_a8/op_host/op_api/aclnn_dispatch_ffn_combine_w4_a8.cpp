@@ -18,7 +18,6 @@
 #include <sys/stat.h>
 #include <sys/file.h>
 #include <climits>
-#include "../error_log.h"
 // using namespace op;
 
 #ifdef __cplusplus

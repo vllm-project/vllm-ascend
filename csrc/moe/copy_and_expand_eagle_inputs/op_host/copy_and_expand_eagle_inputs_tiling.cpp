@@ -4,7 +4,7 @@
  */
 
 #include "copy_and_expand_eagle_inputs_tiling.h"
-#include "error_log.h"
+#include "tiling_base/error_log.h"
 #include "register/op_def_registry.h"
 #include "log/ops_log.h"
 

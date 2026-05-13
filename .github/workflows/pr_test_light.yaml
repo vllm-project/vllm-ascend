@@ -81,6 +81,7 @@ jobs:
               - 'tests/ut/**'
             _310_tracker:
               - 'vllm_ascend/_310p/**'
+              - 'csrc/**'
               - 'tests/e2e/310p/**'
               - 'vllm_ascend/worker/**'
               - 'vllm_ascend/attention/attention_v1.py'
