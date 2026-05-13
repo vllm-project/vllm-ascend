@@ -990,9 +990,7 @@ class MooncakeConnectorScheduler:
             # Remote prefill: get all prompt blocks from remote.
             assert num_computed_tokens % self.block_size == 0
             # Note: We use the full token count as transmit data here.
-            # [AntGroup] The prefill node appends the first output token to
-            # prompt_token_ids, so subtract 1 to get the original prompt length.
-            num_original_prompt_tokens = len(request.prompt_token_ids) - 1
+            num_original_prompt_tokens = len(request.prompt_token_ids)
             count = max(num_original_prompt_tokens - num_computed_tokens, 0)
             return count, count > 0
 
