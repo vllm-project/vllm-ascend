@@ -575,7 +575,7 @@ def lightning_attention_npu(
     return output, kv
 
 
-class LightningAttentionKernelNPU:
+class AscendLightningAttentionKernel:
     """NPU-friendly lightning attention kernel for BailingMoE prefill.
 
     Replaces ``MiniMaxText01LinearKernel`` by providing an NPU-friendly
@@ -583,7 +583,7 @@ class LightningAttentionKernelNPU:
     """
 
     @staticmethod
-    def jit_linear_forward_prefix_npu(
+    def jit_linear_forward_prefix(
         q: torch.Tensor,
         k: torch.Tensor,
         v: torch.Tensor,
