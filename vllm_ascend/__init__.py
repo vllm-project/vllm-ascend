@@ -15,13 +15,12 @@
 # This file is a part of the vllm-ascend project.
 #
 
-from vllm import ModelRegistry
-
 _GLOBAL_PATCH_APPLIED = False
 
 
 def register_qwen35_models():
     """Register Qwen3.5 text models that support PP but aren't in vLLM's registry."""
+    from vllm import ModelRegistry
     from vllm.model_executor.models.qwen3_5 import (
         Qwen3_5ForCausalLM,
         Qwen3_5MoeForCausalLM,
