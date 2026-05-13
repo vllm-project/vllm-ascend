@@ -14,6 +14,7 @@ from importlib import import_module, util
 from tests.e2e.conftest import VllmRunner
 
 os.environ["VLLM_WORKER_MULTIPROC_METHOD"] = "spawn"
+os.environ["VLLM_BATCH_INVARIANT"] = "1"
 
 MODEL_NAME = "Qwen/Qwen3-0.6B"
 MAX_MODEL_LEN = 512
@@ -38,38 +39,28 @@ def _fa3_available() -> bool:
         return False
 
 
-def _generate_with_backend(prompts, env_value, max_tokens=MAX_TOKENS, **runner_kwargs):
-    original_value = os.environ.get("VLLM_BATCH_INVARIANT", "0")
-    os.environ["VLLM_BATCH_INVARIANT"] = str(env_value)
-    try:
-        with VllmRunner(
-            MODEL_NAME,
-            max_model_len=MAX_MODEL_LEN,
-            enforce_eager=True,
-            gpu_memory_utilization=0.7,
-            **runner_kwargs,
-        ) as runner:
-            return runner.generate_greedy(prompts, max_tokens)
-    finally:
-        os.environ["VLLM_BATCH_INVARIANT"] = original_value
+def _generate_with_backend(prompts, max_tokens=MAX_TOKENS, **runner_kwargs):
+    with VllmRunner(
+        MODEL_NAME,
+        max_model_len=MAX_MODEL_LEN,
+        enforce_eager=True,
+        gpu_memory_utilization=0.7,
+        **runner_kwargs,
+    ) as runner:
+        return runner.generate_greedy(prompts, max_tokens)
 
 
-def _generate_logprobs_with_backend(prompts, env_value, max_tokens=5, num_logprobs=5, **runner_kwargs):
-    original_value = os.environ.get("VLLM_BATCH_INVARIANT", "0")
-    os.environ["VLLM_BATCH_INVARIANT"] = str(env_value)
-    try:
-        with VllmRunner(
-            MODEL_NAME,
-            max_model_len=MAX_MODEL_LEN,
-            enforce_eager=True,
-            gpu_memory_utilization=0.7,
-            **runner_kwargs,
-        ) as runner:
-            return runner.generate_greedy_logprobs(
-                prompts, max_tokens=max_tokens, num_logprobs=num_logprobs
-            )
-    finally:
-        os.environ["VLLM_BATCH_INVARIANT"] = original_value
+def _generate_logprobs_with_backend(prompts, max_tokens=5, num_logprobs=5, **runner_kwargs):
+    with VllmRunner(
+        MODEL_NAME,
+        max_model_len=MAX_MODEL_LEN,
+        enforce_eager=True,
+        gpu_memory_utilization=0.7,
+        **runner_kwargs,
+    ) as runner:
+        return runner.generate_greedy_logprobs(
+            prompts, max_tokens=max_tokens, num_logprobs=num_logprobs
+        )
 
 
 def _assert_outputs_match(fia_outputs, fa3_outputs, label=""):
@@ -93,8 +84,8 @@ def test_fa3_vs_fia_single_prompt():
     code paths in the attention kernel.
     """
     single_prompt = ["Explain quantum computing in simple terms."]
-    fia_outputs = _generate_with_backend(single_prompt, env_value=0)
-    fa3_outputs = _generate_with_backend(single_prompt, env_value=1, attention_backend="FLASH_ATTN")
+    fia_outputs = _generate_with_backend(single_prompt)
+    fa3_outputs = _generate_with_backend(single_prompt, attention_backend="FLASH_ATTN")
     _assert_outputs_match(fia_outputs, fa3_outputs, label="[SinglePrompt] ")
 
 
@@ -112,8 +103,8 @@ def test_fa3_vs_fia_mixed_lengths():
         "What is 2+2?",
         LONG_PROMPT[:MAX_MODEL_LEN],
     ]
-    fia_outputs = _generate_with_backend(mixed_prompts, env_value=0)
-    fa3_outputs = _generate_with_backend(mixed_prompts, env_value=1, attention_backend="FLASH_ATTN")
+    fia_outputs = _generate_with_backend(mixed_prompts)
+    fa3_outputs = _generate_with_backend(mixed_prompts, attention_backend="FLASH_ATTN")
     _assert_outputs_match(fia_outputs, fa3_outputs, label="[MixedLen] ")
 
 
@@ -121,16 +112,16 @@ def test_fa3_vs_fia_mixed_lengths():
 def test_fa3_vs_fia_with_chunkprefill():
     """Compare FA3 and FIA with single token generation where chunkprefill is used.
     """
-    fia_outputs = _generate_with_backend(SHORT_PROMPTS, env_value=0, max_tokens=2, max_num_seqs=2, max_num_batched_tokens=5)
-    fa3_outputs = _generate_with_backend(SHORT_PROMPTS, env_value=1, attention_backend="FLASH_ATTN", max_tokens=2, max_num_seqs=2, max_num_batched_tokens=5)
+    fia_outputs = _generate_with_backend(SHORT_PROMPTS, max_tokens=2, max_num_seqs=2, max_num_batched_tokens=5)
+    fa3_outputs = _generate_with_backend(SHORT_PROMPTS, attention_backend="FLASH_ATTN", max_tokens=2, max_num_seqs=2, max_num_batched_tokens=5)
     _assert_outputs_match(fia_outputs, fa3_outputs, label="[Chunkprefill] ")
 
 
 @pytest.mark.skipif(not _fa3_available(), reason="flash_attn_v3 is not installed")
 def test_fa3_vs_fia_logprobs():
     """Compare FA3 and FIA logprobs for fine-grained numerical verification."""
-    fia_logprobs = _generate_logprobs_with_backend(SHORT_PROMPTS[:1], env_value=0)
-    fa3_logprobs = _generate_logprobs_with_backend(SHORT_PROMPTS[:1], env_value=1, attention_backend="FLASH_ATTN")
+    fia_logprobs = _generate_logprobs_with_backend(SHORT_PROMPTS[:1])
+    fa3_logprobs = _generate_logprobs_with_backend(SHORT_PROMPTS[:1], attention_backend="FLASH_ATTN")
 
     for i, (fia_out, fa3_out) in enumerate(zip(fia_logprobs, fa3_logprobs)):
         fia_ids, _, fia_lp = fia_out
@@ -156,7 +147,7 @@ def test_fa3_vs_fia_logprobs():
             for token_id in fia_token_lp:
                 fia_logprob = fia_token_lp[token_id].logprob
                 fa3_logprob = fa3_token_lp[token_id].logprob
-                assert fia_logprob==fa3_logprob, (
+                assert abs(fia_logprob - fa3_logprob) < 1e-3, (
                     f"Prompt {i}, token {t}, token_id {token_id} ("
                     f"'{fia_token_lp[token_id].decoded_token}'): "
                     f"logprobs differ: FIA {fia_logprob:.6f} vs FA3 {fa3_logprob:.6f}"

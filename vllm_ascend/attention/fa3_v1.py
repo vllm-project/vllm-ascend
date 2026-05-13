@@ -64,7 +64,7 @@ class AscendFAImpl(AscendAttentionBackendImpl):
         query: torch.Tensor,
         block_table: torch.Tensor,
         actual_seq_lengths: torch.Tensor,
-        seq_lens_list: list,
+        seq_lens: torch.Tensor,
         is_causal: bool,
         max_seq_len: int,
     ):
@@ -76,13 +76,11 @@ class AscendFAImpl(AscendAttentionBackendImpl):
             num_block, block_size, self.num_kv_heads, self.head_size
         )
 
-        kv_seqlen_list = torch.tensor(seq_lens_list, dtype=torch.int32).npu()
-
         attn_output = _fa3_fn(
             query,
             key_fa_blk,
             value_fa_blk,
-            cache_seqlens=kv_seqlen_list,  # kv sequence length for each individual request (NOT cumulative)
+            cache_seqlens=seq_lens,  # kv sequence length for each individual request (NOT cumulative)
             page_table=block_table,  #  must match the block table for the corresponding q
             cu_seqlens_q=actual_seq_lengths,  # cumulative sequence length for q
             max_seqlen_q=max_seq_len,
@@ -121,9 +119,9 @@ class AscendFAImpl(AscendAttentionBackendImpl):
                     query[:num_decode_tokens],
                     attn_metadata.block_tables[:num_decodes, :],
                     attn_metadata.query_start_loc[: num_decodes + 1],
-                    attn_metadata.seq_lens_list[:num_decodes],
+                    attn_metadata.seq_lens[:num_decodes].npu(),
                     False,
-                    max(attn_metadata.seq_lens_list[:num_decodes]),
+                    max(attn_metadata.seq_lens[:num_decodes]),
                 )
             )
 
@@ -133,9 +131,9 @@ class AscendFAImpl(AscendAttentionBackendImpl):
                     query[num_decode_tokens:],
                     attn_metadata.block_tables[num_decode_tokens:, :],
                     attn_metadata.query_start_loc[num_decodes:],
-                    attn_metadata.seq_lens_list[num_decodes:],
+                    attn_metadata.seq_lens[num_decodes:].npu(),
                     True,  # enable causal for prefill
-                    max(attn_metadata.seq_lens_list[num_decodes:]),
+                    max(attn_metadata.seq_lens[num_decodes:]),
                 )
             )
 
