@@ -113,7 +113,7 @@ class EplbUpdator:
                 expert_send_info,
                 expert_recv_info,
                 updated_expert_map_this_rank,
-                layer_id + self.adaptor.num_dense_layers,
+                self.adaptor.moe_registry.get_global_index(layer_id),
             )
 
             # set asynchronous stream for d2d expert weight update

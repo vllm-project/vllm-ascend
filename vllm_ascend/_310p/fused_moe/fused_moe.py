@@ -14,6 +14,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 #
+import re
 from collections.abc import Callable
 
 import torch
@@ -187,6 +188,16 @@ class AscendFusedMoE310(FusedMoE):
             self.quant_method,
             self.vllm_config.parallel_config.enable_dbo,
         )
+
+        # Register this MoE layer with EPLB for PP compatibility.
+        # PPMissingLayer (nn.Identity) never calls AscendFusedMoE310.__init__,
+        # so only real MoE layers on this rank are registered.
+        prefix = kwargs.get("prefix", "")
+        match = re.search(r"model\.layers\.(\d+)", prefix)
+        if match:
+            from vllm_ascend.eplb.utils import register_moe_layer
+
+            register_moe_layer(int(match.group(1)), self)
 
     @property
     def is_internal_router(self) -> bool:
