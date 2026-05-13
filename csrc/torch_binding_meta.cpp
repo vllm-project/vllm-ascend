@@ -665,7 +665,6 @@ at::Tensor npu_lightning_indexer_quant_meta(
     return lightning_indexer_quant_output;
 }
 
-<<<<<<< ngram_async_20260509
 // N-gram spec decode meta
 std::tuple<at::Tensor, at::Tensor, at::Tensor, at::Tensor> npu_ngram_spec_decode_meta(
     at::Tensor &token_ids,
@@ -682,7 +681,8 @@ std::tuple<at::Tensor, at::Tensor, at::Tensor, at::Tensor> npu_ngram_spec_decode
     at::Tensor draft_token_ids = at::empty({batch_size, k}, token_ids.options());
     at::Tensor num_valid_draft_tokens = at::empty({batch_size}, token_ids.options());
     return std::make_tuple(token_ids, next_token_ids, draft_token_ids, num_valid_draft_tokens);
-=======
+}
+
 std::tuple<at::Tensor, at::Tensor, at::Tensor> chunk_gated_delta_rule_fwd_h_meta(
     const at::Tensor & k,
     const at::Tensor & w,
@@ -762,7 +762,6 @@ at::Tensor chunk_fwd_o_meta(
     (void)transpose_state_layout;
 
     return o;
->>>>>>> main
 }
 
 } // namespace meta
@@ -836,15 +835,12 @@ TORCH_LIBRARY_IMPL_EXPAND(CONCAT(_C, _ascend), Meta, ops) {
     ops.impl("moe_grouped_matmul", &vllm_ascend::meta::moe_grouped_matmul_meta);
     // Lightning indexer quant
     ops.impl("npu_lightning_indexer_quant", &vllm_ascend::meta::npu_lightning_indexer_quant_meta);
-<<<<<<< ngram_async_20260509
     // N-gram spec decode
     ops.impl("npu_ngram_spec_decode", &vllm_ascend::meta::npu_ngram_spec_decode_meta);
-=======
     // chunk_gated_delta_rule_fwd_h
     ops.impl("chunk_gated_delta_rule_fwd_h", &vllm_ascend::meta::chunk_gated_delta_rule_fwd_h_meta);
     // chunk_fwd_o
     ops.impl("chunk_fwd_o", &vllm_ascend::meta::chunk_fwd_o_meta);
->>>>>>> main
 }
 }
 #endif
