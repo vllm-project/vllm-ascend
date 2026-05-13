@@ -12,7 +12,7 @@
  #ifndef CAUSAL_CONV1D_TILING_VALIDATION_H
  #define CAUSAL_CONV1D_TILING_VALIDATION_H
  
- #include "../tiling_base/tiling_util.h"
+ #include "tiling_base/tiling_util.h"
  #include "causal_conv1d_tiling_utils.h"
  #include "../op_kernel/causal_conv1d_tiling_data.h"
  

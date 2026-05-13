@@ -14,9 +14,9 @@
 #include "register/op_def_registry.h"
 #include "recurrent_gated_delta_rule_v310_tiling.h"
 #include "math_util.h"
-#include "../tiling_base/tiling_templates_registry.h"
-#include "../tiling_base/tiling_util.h"
-#include "../tiling_base/error_log.h"
+#include "tiling_base/tiling_templates_registry.h"
+#include "tiling_base/tiling_util.h"
+#include "tiling_base/error_log.h"
 #include <array>
 
 namespace optiling {
