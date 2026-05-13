@@ -28,10 +28,6 @@ _server_cmd: &server_cmd
   - "$SERVER_PORT"
   - "--max-model-len"
   - "32768"
-  - "--max-num-batched-tokens"
-  - "16384"
-  - "--max-num-seqs"
-  - "500"
   - "--async-scheduling"
   - "--quantization"
   - "ascend"
@@ -40,8 +36,6 @@ _server_cmd: &server_cmd
   - "0.9"
   - "--seed"
   - "42"
-  - "--compilation-config"
-  - '{"cudagraph_capture_sizes":[48,64,80,96,112,128], "cudagraph_mode":"FULL_DECODE_ONLY"}'
   - "--speculative-config"
   - '{"method":"eagle3", "model":"lightseekorg/kimi-k2.5-eagle3", "num_speculative_tokens":3}'
   - "--additional-config"
@@ -84,5 +78,26 @@ test_cases:
     envs:
       <<: *envs
     server_cmd: *server_cmd
+    server_cmd_extra:
+      - "--max-num-batched-tokens"
+      - "16384"
+      - "--max-num-seqs"
+      - "500"
+      - "--compilation-config"
+      - '{"cudagraph_capture_sizes":[48,64,80,96,112,128], "cudagraph_mode":"FULL_DECODE_ONLY"}'
+    benchmarks:
+      <<: *benchmarks
+  - name: "Kimi-K2.5-W4A8-16k-1k"
+    model: "Eco-Tech/Kimi-K2.5-W4A8"
+    envs:
+      <<: *envs
+    server_cmd: *server_cmd
+    server_cmd_extra:
+      - "--max-num-batched-tokens"
+      - "8192"
+      - "--max-num-seqs"
+      - "16"
+      - "--compilation-config"
+      - '{"cudagraph_capture_sizes":[4,8,12,16,20], "cudagraph_mode":"FULL_DECODE_ONLY"}'
     benchmarks:
       <<: *benchmarks
