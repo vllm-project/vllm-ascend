@@ -18,7 +18,12 @@
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-from vllm.model_executor.models.kimi_k25_vit import Learnable2DInterpPosEmbDivided_fixed, get_rope_shape_decorate
+from vllm.model_executor.models.kimi_k25_vit import (
+    Learnable2DInterpPosEmbDivided_fixed,
+    MoonViT3dPretrainedModel,
+    get_rope_shape_decorate,
+)
+from vllm_ascend.utils import AscendDeviceType, get_ascend_device_type
 
 
 @get_rope_shape_decorate
@@ -61,3 +66,19 @@ class AscendLearnable2DInterpPosEmbDivided_fixed(nn.Module):
 
 
 Learnable2DInterpPosEmbDivided_fixed.forward = AscendLearnable2DInterpPosEmbDivided_fixed.forward
+
+
+# Patch MoonViT3dPretrainedModel.to() to ignore the `dtype` argument.
+# When KimiK25ForConditionalGeneration.__init__ calls:
+#     self.vision_tower = self.vision_tower.to(device=..., dtype=model_config.dtype)
+# the `dtype=model_config.dtype` (e.g. bf16) would overwrite the fp8 parameters
+# created by the Ascend quantization scheme, causing a dtype mismatch later
+# in weight_loader when the checkpoint's fp8 weights are loaded.
+_original_moonvit_to = MoonViT3dPretrainedModel.to
+
+def _patched_moonvit_to(self, *args, **kwargs):
+    if get_ascend_device_type() == AscendDeviceType.A5:
+        kwargs.pop("dtype", None)
+    return _original_moonvit_to(self, *args, **kwargs)
+
+MoonViT3dPretrainedModel.to = _patched_moonvit_to
