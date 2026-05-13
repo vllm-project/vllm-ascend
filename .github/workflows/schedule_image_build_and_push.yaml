@@ -31,6 +31,8 @@ on:
         type: choice
         options:
           - main
+          - v0.19.1rc1
+          - v0.18.0
           - v0.18.0rc1
           - v0.17.0rc1
           - v0.16.0rc1
@@ -97,9 +99,6 @@ jobs:
       max-parallel: 6
       matrix:
         branch_meta:
-          - branch_ref: releases/v0.18.0
-            schedule_tag_pattern: releases-v0.18.0
-            artifact_prefix: digests-releases-v0.18.0
           - branch_ref: main
             schedule_tag_pattern: main
             artifact_prefix: digests

@@ -409,7 +409,7 @@ This is because HCCL one-sided communication connections are created lazily afte
 
 **MemCache depends on MemFabric. Therefore, MemFabric must be installed.Installing the memcache after the memfabric is installed.**
 
-* **memfabric_hybrid**: <https://gitcode.com/Ascend/memfabric_hybrid/tree/master/doc/build.md>
+* **memfabric_hybrid**: <https://gitcode.com/Ascend/memfabric_hybrid/blob/master/doc/installation.md>
 
 * **memcache**: <https://gitcode.com/Ascend/memcache/blob/master/doc/build.md>
 

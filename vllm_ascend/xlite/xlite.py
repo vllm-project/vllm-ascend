@@ -491,7 +491,7 @@ class XliteWrapper:
 
         rt_pool_size = self.xlite_model.get_tensor_pool_size()
         if rank == 0:
-            logger.info(f"xlite runtime pool size: {rt_pool_size} MB")
+            logger.info("xlite runtime pool size: %s MB", rt_pool_size)
         if self.xlite_rt.init_tensor_pool(rt_pool_size) != 0:
             raise ValueError(f"xlite wrapper init failed! runtime pool size: {rt_pool_size} MB")
 

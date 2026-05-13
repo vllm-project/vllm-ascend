@@ -7,6 +7,7 @@ This section provides a detailed usage guide of vLLM Ascend features.
 :maxdepth: 1
 graph_mode
 cpu_binding
+Ai_QoS_introduction_en
 quantization
 sleep_mode
 structured_output
@@ -29,4 +30,5 @@ weight_prefetch
 sequence_parallelism
 batch_invariance
 lmcache_ascend_deployment
+dynamic_chunk_pipeline_parallel
 :::

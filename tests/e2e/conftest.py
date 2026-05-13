@@ -234,7 +234,7 @@ class RemoteOpenAIServer:
         env["VLLM_WORKER_MULTIPROC_METHOD"] = "spawn"
         if env_dict is not None:
             env.update(env_dict)
-        logger.info(f"Starting server with command: {' '.join(server_cmd)}")
+        logger.info("Starting server with command: %s", " ".join(server_cmd))
         self.proc: subprocess.Popen = subprocess.Popen(
             server_cmd,
             env=env,
@@ -376,11 +376,11 @@ class RemoteOpenAIServer:
                     resp = client.get(url)
                     if resp.status_code == 200:
                         ready[node_ip] = True
-                        logger.info(f"[READY] Node {node_ip}: {url} is ready.")
+                        logger.info("[READY] Node %s: %s is ready.", node_ip, url)
                 except RequestException:
                     all_ready = False
                     if should_log:
-                        logger.debug(f"[WAIT] {url}: connection failed")
+                        logger.debug("[WAIT] %s: connection failed", url)
 
                     # check unexpected exit
                     result = self._poll()
@@ -1478,6 +1478,11 @@ def llama32_lora_files():
     from huggingface_hub import snapshot_download as hf_snapshot_download
 
     return hf_snapshot_download(repo_id="jeeejeee/llama32-3b-text2sql-spider", local_files_only=True)
+
+
+@pytest.fixture(scope="session")
+def qwen35_text_lora_files():
+    return snapshot_download(repo_id="vllm-ascend/qwen35-4b-text-only-sql-lora")
 
 
 def qwen_prompt(questions: list[str]) -> list[str]:

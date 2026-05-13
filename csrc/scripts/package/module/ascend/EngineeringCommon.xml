@@ -1,0 +1,14 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<block name="EngineeringCommon" install_own="$username:$usergroup" install_mod="440" install_type="all">
+    <dir_info value="common" install_mod="550">
+        <path value="$(TARGET_ENV)"/>
+        <path value="$(TARGET_ENV)/bin" install_softlink="bin"/>
+        <path value="$(TARGET_ENV)/include" install_softlink="include"/>
+        <path value="$(TARGET_ENV)/include/version" install_type="devel"/>
+        <path value="$(TARGET_ENV)/lib64" install_softlink="lib64"/>
+		<path value="$(TARGET_ENV)/devlib" install_softlink="devlib"/>
+        <path value="$(TARGET_ENV)/conf" install_softlink="conf"/>
+		<path value="$(TARGET_ENV)/pkg_inc" install_softlink="pkg_inc"/>
+        <path value="var" install_mod="750"/>
+    </dir_info>
+</block>

@@ -142,8 +142,8 @@ msgid "`[Kernel]` for changes affecting compute kernels and ops."
 msgstr "`[Kernel]`：影响计算内核和算子的更改。"
 
 #: ../../source/developer_guide/contribution/index.md:92
-msgid "`[Bugfix]` for bug fixes."
-msgstr "`[Bugfix]`：错误修复。"
+msgid "`[BugFix]` for bug fixes."
+msgstr "`[BugFix]`：错误修复。"
 
 #: ../../source/developer_guide/contribution/index.md:93
 msgid "`[Doc]` for documentation fixes and improvements."

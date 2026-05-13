@@ -39,7 +39,6 @@ deployment:
       --trust-remote-code
       --speculative-config '{"num_speculative_tokens": 3, "method":"deepseek_mtp"}'
       --compilation-config '{"cudagraph_capture_sizes": [8, 16, 24, 32, 40, 48], "cudagraph_mode": "FULL_DECODE_ONLY"}' 
-      --additional-config '{"layer_sharding": ["q_b_proj", "o_proj"]}'
       --tokenizer-mode deepseek_v32
       --reasoning-parser deepseek_v3
 
@@ -64,7 +63,6 @@ deployment:
       --trust-remote-code
       --speculative-config '{"num_speculative_tokens": 3, "method":"deepseek_mtp"}'
       --compilation-config '{"cudagraph_capture_sizes": [8, 16, 24, 32, 40, 48], "cudagraph_mode": "FULL_DECODE_ONLY"}' 
-      --additional-config '{"layer_sharding": ["q_b_proj", "o_proj"]}'
       --tokenizer-mode deepseek_v32
       --reasoning-parser deepseek_v3
 benchmarks:
