@@ -61,8 +61,13 @@ th:not(:first-child) {
 | Weight-Nz | ✅ | ✅ | ✅ | ✅ | ✅ | ❔ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ❌ | 🟠 | ✅ | ✅ | ✅ | ✅ |
 
 <sup>1</sup> Only dcp supports dp while pcp does not support dp.
+
 <sup>2</sup> Falshcomm is only enabled on the prefill stage.
+
 <sup>3</sup> layer_sharding is only enabled on the prefill stage.
+
 <sup>4</sup> lmhead_tensor_parallel is only enabled in the pure dp scenarios.
+
 <sup>5</sup> LoRA applies only to the language backbone of multimodal models (upstream).
+
 <sup>6</sup> MLAPO is only supported on the decode stage.
