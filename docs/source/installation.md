@@ -206,8 +206,24 @@ cd ..
 git clone --depth 1 --branch |vllm_ascend_version| https://github.com/vllm-project/vllm-ascend.git
 cd vllm-ascend
 git submodule update --init --recursive
+
+# [Optional] Set SOC_VERSION for your specific hardware.
+# If not set, the build system will auto-detect from npu-smi.
+# export SOC_VERSION=Ascend910B1  # For Atlas A2 (910B series)
+# export SOC_VERSION=Ascend910B4  # For Atlas A2 (910B4)
+# export SOC_VERSION=Ascend310P1  # For Atlas 300I (310P series)
+# export SOC_VERSION=Ascend910C   # For Atlas A3
+
 pip install -v -e .
 cd ..
+```
+
+```{note}
+**SOC_VERSION Configuration:** When building from source, the build system will auto-detect your Ascend device type using `npu-smi info`. If auto-detection fails or you need to build for a different target device, you can manually set the `SOC_VERSION` environment variable:
+- **Atlas A2 (910B1)**: `export SOC_VERSION=Ascend910B1`
+- **Atlas A2 (910B4)**: `export SOC_VERSION=Ascend910B4`
+- **Atlas 300I (310P)**: `export SOC_VERSION=Ascend310P1` (or `Ascend310P3`, `Ascend310P5`, etc.)
+- **Atlas A3**: `export SOC_VERSION=Ascend910C`
 ```
 
 If you are building custom operators for Atlas A3, you should run `git submodule update --init --recursive` manually, or ensure your environment has internet access.
