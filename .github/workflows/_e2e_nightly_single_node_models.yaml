@@ -69,11 +69,18 @@ jobs:
       env:
         VLLM_USE_MODELSCOPE: True
         UV_INDEX_URL: http://cache-service.nginx-pypi-cache.svc.cluster.local/pypi/simple
-        UV_EXTRA_INDEX_URL: https://mirrors.huaweicloud.com/ascend/repos/pypi
+        UV_EXTRA_INDEX_URL: "https://mirrors.huaweicloud.com/ascend/repos/pypi https://triton-ascend.osinfra.cn/pypi/simple"
         UV_INDEX_STRATEGY: unsafe-best-match
         UV_NO_CACHE: 1
         UV_SYSTEM_PYTHON: 1
     steps:
+      - name: Set global envs
+        run: |
+          set -a
+          . /usr/local/Ascend/ascend-toolkit/set_env.sh
+          set +a
+          env >> $GITHUB_ENV
+
       - name: Check npu and CANN info
         run: |
           npu-smi info
@@ -105,12 +112,12 @@ jobs:
         if: ${{ github.event_name == 'pull_request' }}
         working-directory: /vllm-workspace/vllm-ascend
         env:
-          PIP_EXTRA_INDEX_URL: https://mirrors.huaweicloud.com/ascend/repos/pypi
+          PIP_EXTRA_INDEX_URL: "https://mirrors.huaweicloud.com/ascend/repos/pypi https://triton-ascend.osinfra.cn/pypi/simple https://download.pytorch.org/whl/cpu/"
         run: |
           git config --global --add safe.directory /vllm-workspace/vllm-ascend
           pip install uc-manager
           uv pip install -r requirements-dev.txt
-          uv pip install -v -e .
+          uv pip install -e .
 
       - name: Install tensorflow (for Molmo-7B-D-0924)
         if: ${{ inputs.runner == 'linux-aarch64-a2b3-1' && contains(inputs.model_list, 'Molmo-7B-D-0924') }}
