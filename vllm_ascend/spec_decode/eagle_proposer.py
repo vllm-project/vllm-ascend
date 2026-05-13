@@ -1357,6 +1357,11 @@ class AscendSpecDecodeBaseProposer(SpecDecodeBaseProposer):
             common_attn_metadata.num_computed_tokens_cpu = common_attn_metadata.num_computed_tokens_cpu.clone()
         common_attn_metadata.positions = common_attn_metadata.positions.clone()
 
+        block_table_max_seq_len = common_attn_metadata.block_table_tensor.shape[1] * self.kernel_block_size
+        max_attend_len = min(self.max_model_len, block_table_max_seq_len)
+        next_seq_lens = common_attn_metadata.seq_lens[:batch_size] + 1
+        exceeds_block_table_len = next_seq_lens > block_table_max_seq_len
+
         # NOTE(woosuk): We should handle the case where the draft model
         # generates tokens beyond the max model length. Since it is complex
         # to remove such requests from the batch, we keep them in the batch
@@ -1364,32 +1369,36 @@ class AscendSpecDecodeBaseProposer(SpecDecodeBaseProposer):
         # out-of-range access during the model execution. The draft tokens
         # generated with this adjustment should be ignored.
         if self.uses_mrope:
-            exceeds_max_model_len = used_update_positions[0] >= self.max_model_len
+            exceeds_max_model_len = (used_update_positions[0] >= self.max_model_len) | exceeds_block_table_len
             # Mask out the position ids that exceed the max model length.
             # Otherwise, we may get out-of-range error in RoPE.
             clamped_positions = torch.where(
                 exceeds_max_model_len.unsqueeze(0), torch.zeros_like(used_update_positions), used_update_positions
             )
         else:
-            exceeds_max_model_len = used_update_positions >= self.max_model_len
+            exceeds_max_model_len = (used_update_positions >= self.max_model_len) | exceeds_block_table_len
             clamped_positions = torch.where(exceeds_max_model_len, 0, used_update_positions)
 
         # For data integrity when async scheduling, we shouldn't use in place
         # operations in case they are modified in next step's `prepare_input`
         # of main model.
-        # Increment the sequence lengths.
-        common_attn_metadata.seq_lens[:batch_size] += 1
         # For the requests that exceed the max model length, we set the
         # sequence length to 1 to minimize their overheads in attention.
-        common_attn_metadata.seq_lens[:batch_size].masked_fill_(exceeds_max_model_len, 1)
+        common_attn_metadata.seq_lens[:batch_size] = torch.where(
+            exceeds_max_model_len, torch.ones_like(next_seq_lens), next_seq_lens
+        )
         if common_attn_metadata.seq_lens_cpu is not None:
-            common_attn_metadata.seq_lens_cpu[:batch_size] = common_attn_metadata.seq_lens_cpu[:batch_size] + 1
-            exceeds_mask = common_attn_metadata.seq_lens_cpu[:batch_size] >= self.max_model_len
-            common_attn_metadata.seq_lens_cpu[:batch_size].masked_fill_(exceeds_mask, 1)
+            next_seq_lens_cpu = common_attn_metadata.seq_lens_cpu[:batch_size] + 1
+            exceeds_mask = next_seq_lens_cpu > max_attend_len
+            common_attn_metadata.seq_lens_cpu[:batch_size] = torch.where(
+                exceeds_mask, torch.ones_like(next_seq_lens_cpu), next_seq_lens_cpu
+            )
         if common_attn_metadata._seq_lens_cpu is not None:
-            common_attn_metadata._seq_lens_cpu[:batch_size] = common_attn_metadata._seq_lens_cpu[:batch_size] + 1
-            exceeds_mask_internal = common_attn_metadata._seq_lens_cpu[:batch_size] >= self.max_model_len
-            common_attn_metadata._seq_lens_cpu[:batch_size].masked_fill_(exceeds_mask_internal, 1)
+            next_seq_lens_cpu = common_attn_metadata._seq_lens_cpu[:batch_size] + 1
+            exceeds_mask_internal = next_seq_lens_cpu > max_attend_len
+            common_attn_metadata._seq_lens_cpu[:batch_size] = torch.where(
+                exceeds_mask_internal, torch.ones_like(next_seq_lens_cpu), next_seq_lens_cpu
+            )
         if common_attn_metadata.num_computed_tokens_cpu is not None:
             common_attn_metadata.num_computed_tokens_cpu[:batch_size] += 1
         if self.uses_mrope:

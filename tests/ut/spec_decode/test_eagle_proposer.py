@@ -1351,6 +1351,105 @@ class TestEagleProposerPropose:
             assert torch.equal(self.proposer.token_indices_to_sample[:3], torch.tensor([3, 16, 29]))
             assert self.proposer.token_indices_to_sample.shape == torch.Size([1024])
 
+    def test_attn_update_masks_seq_lens_past_block_table_capacity(self):
+        self.proposer.method = "mtp"
+        self.proposer.max_model_len = 131072
+        self.proposer.kernel_block_size = 128
+
+        common_attn_metadata = create_common_attn_metadata(
+            BatchSpec(seq_lens=[80000], query_lens=[1]),
+            block_size=self.proposer.kernel_block_size,
+            device=self.device,
+            arange_block_indices=True,
+        )
+
+        mock_attn_group = MagicMock()
+        mock_builder = MagicMock()
+        mock_builder.build_for_drafting.return_value = MagicMock()
+        mock_attn_group.get_metadata_builder.return_value = mock_builder
+
+        common_attn_metadata, _ = self.proposer.attn_update_stack_num_spec_norm(
+            draft_step=1,
+            old_attn_metadata=None,
+            old_common_metadata=common_attn_metadata,
+            batch_size=1,
+            input_batch_size=1,
+            used_update_positions=torch.tensor([79999], dtype=torch.int64),
+            aclgraph_runtime_mode=CUDAGraphMode.NONE,
+            attn_group=mock_attn_group,
+        )
+
+        assert common_attn_metadata.seq_lens[0].item() == 1
+        assert common_attn_metadata.seq_lens_cpu[0].item() == 1
+        assert common_attn_metadata.positions[0].item() == 0
+        assert common_attn_metadata.slot_mapping[0].item() == -1
+
+    def test_attn_update_masks_cpu_seq_lens_at_max_model_len(self):
+        self.proposer.method = "mtp"
+        self.proposer.max_model_len = 10
+        self.proposer.kernel_block_size = 128
+
+        common_attn_metadata = create_common_attn_metadata(
+            BatchSpec(seq_lens=[9], query_lens=[1]),
+            block_size=self.proposer.kernel_block_size,
+            device=self.device,
+            arange_block_indices=True,
+        )
+
+        mock_attn_group = MagicMock()
+        mock_builder = MagicMock()
+        mock_builder.build_for_drafting.return_value = MagicMock()
+        mock_attn_group.get_metadata_builder.return_value = mock_builder
+
+        common_attn_metadata, _ = self.proposer.attn_update_stack_num_spec_norm(
+            draft_step=1,
+            old_attn_metadata=None,
+            old_common_metadata=common_attn_metadata,
+            batch_size=1,
+            input_batch_size=1,
+            used_update_positions=torch.tensor([9], dtype=torch.int64),
+            aclgraph_runtime_mode=CUDAGraphMode.NONE,
+            attn_group=mock_attn_group,
+        )
+
+        assert common_attn_metadata.seq_lens[0].item() == 1
+        assert common_attn_metadata.seq_lens_cpu[0].item() == 1
+        assert common_attn_metadata.positions[0].item() == 0
+        assert common_attn_metadata.slot_mapping[0].item() == -1
+
+    def test_attn_update_keeps_seq_lens_at_valid_max_model_len(self):
+        self.proposer.method = "mtp"
+        self.proposer.max_model_len = 10
+        self.proposer.kernel_block_size = 128
+
+        common_attn_metadata = create_common_attn_metadata(
+            BatchSpec(seq_lens=[9], query_lens=[1]),
+            block_size=self.proposer.kernel_block_size,
+            device=self.device,
+            arange_block_indices=True,
+        )
+
+        mock_attn_group = MagicMock()
+        mock_builder = MagicMock()
+        mock_builder.build_for_drafting.return_value = MagicMock()
+        mock_attn_group.get_metadata_builder.return_value = mock_builder
+
+        common_attn_metadata, _ = self.proposer.attn_update_stack_num_spec_norm(
+            draft_step=1,
+            old_attn_metadata=None,
+            old_common_metadata=common_attn_metadata,
+            batch_size=1,
+            input_batch_size=1,
+            used_update_positions=torch.tensor([8], dtype=torch.int64),
+            aclgraph_runtime_mode=CUDAGraphMode.NONE,
+            attn_group=mock_attn_group,
+        )
+
+        assert common_attn_metadata.seq_lens[0].item() == 10
+        assert common_attn_metadata.seq_lens_cpu[0].item() == 10
+        assert common_attn_metadata.positions[0].item() == 9
+        assert common_attn_metadata.slot_mapping[0].item() == 9
+
     # prefill or decode
     def is_decode(self, flag_prefill_decode):
         if flag_prefill_decode == "decode":
