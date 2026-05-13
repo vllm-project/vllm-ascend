@@ -15,9 +15,11 @@
 # limitations under the License.
 #
 
+import importlib.util
+
 from vllm.triton_utils import HAS_TRITON
 
-from vllm_ascend.utils import is_310p, vllm_version_is
+from vllm_ascend.utils import is_310p, vllm_version_lt
 
 if HAS_TRITON:
     import vllm_ascend.patch.worker.patch_triton
@@ -40,7 +42,7 @@ if not is_310p():
     import vllm_ascend.patch.worker.patch_qwen3_5  # noqa
     import vllm_ascend.patch.worker.patch_gdn_attn  # noqa
 
-    if not vllm_version_is("0.19.0"):
+    if vllm_version_lt("0.19.1") and importlib.util.find_spec("vllm.model_executor.models.qwen3_dflash"):
         import vllm_ascend.patch.worker.patch_qwen3_dflash  # noqa
 import vllm_ascend.patch.worker.patch_rejection_sampler  # noqa
 import vllm_ascend.patch.worker.patch_v2.patch_uva  # noqa
@@ -55,4 +57,11 @@ import vllm_ascend.patch.worker.patch_v2.patch_input_batch  # noqa
 import vllm_ascend.patch.worker.patch_v2.patch_model_state  # noqa
 import vllm_ascend.patch.worker.patch_v2.patch_block_table  # noqa
 import vllm_ascend.patch.worker.patch_qwen3_c8  # noqa
-import vllm_ascend.patch.worker.patch_qwen3vl  # noqa
+import vllm_ascend.patch.worker.patch_gqa_c8  # noqa
+
+# Only import qwen3vl patch when the upstream module exists to avoid import-time
+# failures if upstream vLLM removed/renamed the module.
+if importlib.util.find_spec("vllm.model_executor.models.qwen3_vl"):
+    import vllm_ascend.patch.worker.patch_qwen3vl  # noqa
+import vllm_ascend.patch.worker.patch_v2.patch_attn_utils  # noqa
+import vllm_ascend.patch.worker.patch_bailing_moe_linear  # noqa

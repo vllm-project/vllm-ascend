@@ -1,0 +1,80 @@
+# SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: Copyright contributors to the vLLM Ascend project
+#
+# Chameleon-7B is an early-fusion multimodal model from Meta with unified
+# tokenization for text and images. This configuration supports both text-only
+# and multimodal inference scenarios on Ascend NPUs.
+#
+# Model URL: https://huggingface.co/facebook/chameleon-7b
+# Paper: https://arxiv.org/abs/2405.09818
+
+model_name: "facebook/chameleon-7b"
+model_type: "vllm-vlm"
+hardware: "Atlas A2 Series"
+
+# Serving configuration with Ascend NPU optimizations
+serve:
+  # Tensor parallelism: 1 for single-card inference
+  tensor_parallel_size: 1
+  
+  # dtype: Use bfloat16 for memory efficiency and performance
+  # Note: Chameleon supports mixed precision inference
+  dtype: bfloat16
+  
+  # max_model_len: Maximum sequence length for inference
+  # Chameleon supports variable context lengths; adjust based on available memory
+  max_model_len: 2048
+  
+  # Memory utilization: Leave headroom for image token expansion
+  gpu_memory_utilization: 0.75
+  
+  # Enable remote code execution for Chameleon's custom model implementation
+  trust_remote_code: true
+  
+  # Enforce eager mode to ensure compatibility with Ascend kernels
+  enforce_eager: true
+  
+  # Disable kv_cache normalization for early-fusion models
+  kv_cache_dtype: auto
+
+# Test configurations
+# Chameleon supports both text-only and image-based inference tasks
+test_scenarios:
+  - scenario: "text_generation"
+    description: "Text-only generation (fallback mode)"
+    num_prompts: 10
+    
+  - scenario: "image_understanding"
+    description: "Image understanding with unified tokenization"
+    num_prompts: 5
+    supported_formats: ["jpeg", "png", "webp"]
+
+# LM evaluation suite (optional - configure for accuracy benchmarking)
+tasks:
+  - name: "mmvp"
+    description: "Multimodal Vision Prompt benchmark"
+    metrics:
+      - name: "acc,none"
+        value: 0.48
+  
+  - name: "ceval-valid"
+    description: "Chinese evaluation benchmark (text-only)"
+    metrics:
+      - name: "acc,none"
+        value: 0.42
+
+# Test parameters
+num_fewshot: 0
+apply_chat_template: true
+fewshot_as_multiturn: false
+batch_size: 16
+
+# Logging configuration
+log_samples: true
+log_level: "INFO"
+
+# Performance optimization hints
+optimization_hints:
+  - "Use unified_tokenization=True for efficient image+text mixing"
+  - "Monitor memory usage during image batching (images expand to many tokens)"
+  - "Set enforce_eager=True to avoid graph compilation issues on Ascend"
