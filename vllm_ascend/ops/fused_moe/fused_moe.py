@@ -26,7 +26,7 @@ from vllm.distributed import get_dp_group, get_ep_group, get_tp_group, tensor_mo
 from vllm.forward_context import get_forward_context
 from vllm.logger import logger
 from vllm.model_executor.layers.fused_moe.config import FusedMoEConfig
-from vllm.model_executor.layers.fused_moe.layer import FusedMoE, UnquantizedFusedMoEMethod, get_compressed_expert_map
+from vllm.model_executor.layers.fused_moe.layer import FusedMoE, UnquantizedFusedMoEMethod
 from vllm.model_executor.layers.fused_moe.runner.moe_runner import MoERunner  # type: ignore
 
 import vllm_ascend.envs as envs_ascend
@@ -48,7 +48,20 @@ from vllm_ascend.utils import (
     npu_stream_switch,
     shared_expert_dp_enabled,
     shared_experts_calculation_stream,
+    vllm_version_is,
 )
+
+if vllm_version_is("0.20.2"):
+    from vllm.model_executor.layers.fused_moe.layer import get_compressed_expert_map
+else:
+
+    def get_compressed_expert_map(expert_map: torch.Tensor) -> str:
+        global_indices = torch.where(expert_map != -1)[0]
+        local_indices = expert_map[global_indices]
+        return ", ".join(
+            f"{local_index.item()}->{global_index.item()}"
+            for local_index, global_index in zip(local_indices, global_indices)
+        )
 
 
 @dataclass
