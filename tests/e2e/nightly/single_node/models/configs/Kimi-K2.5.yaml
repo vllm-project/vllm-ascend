@@ -73,20 +73,20 @@ _benchmarks: &benchmarks
 # ==========================================
 
 test_cases:
-  - name: "Kimi-K2.5-W4A8-Case"
-    model: "Eco-Tech/Kimi-K2.5-W4A8"
-    envs:
-      <<: *envs
-    server_cmd: *server_cmd
-    server_cmd_extra:
-      - "--max-num-batched-tokens"
-      - "16384"
-      - "--max-num-seqs"
-      - "500"
-      - "--compilation-config"
-      - '{"cudagraph_capture_sizes":[48,64,80,96,112,128], "cudagraph_mode":"FULL_DECODE_ONLY"}'
-    benchmarks:
-      <<: *benchmarks
+#  - name: "Kimi-K2.5-W4A8-Case"
+#    model: "Eco-Tech/Kimi-K2.5-W4A8"
+#    envs:
+#      <<: *envs
+#    server_cmd: *server_cmd
+#    server_cmd_extra:
+#      - "--max-num-batched-tokens"
+#      - "16384"
+#      - "--max-num-seqs"
+#      - "500"
+#      - "--compilation-config"
+#      - '{"cudagraph_capture_sizes":[48,64,80,96,112,128], "cudagraph_mode":"FULL_DECODE_ONLY"}'
+#    benchmarks:
+#      <<: *benchmarks
   - name: "Kimi-K2.5-W4A8-16k-1k"
     model: "Eco-Tech/Kimi-K2.5-W4A8"
     envs:
