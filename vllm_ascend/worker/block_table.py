@@ -201,7 +201,7 @@ class BlockTable:
             ) * self.cp_kv_cache_interleave_size + (virtual_block_offsets % self.cp_kv_cache_interleave_size)
 
             slot_ids = block_numbers.to(req_positions.dtype) * self.block_size + local_block_offsets
-            slot_ids = torch.where(is_local, slot_ids, PAD_SLOT_ID)
+            slot_ids = torch.where(is_local, slot_ids, torch.full_like(slot_ids, PAD_SLOT_ID))
             slot_mapping_gpu[start_idx:end_idx] = slot_ids.to(slot_mapping_gpu.dtype)
 
     def compute_slot_mapping_draft(self, req_indices: np.ndarray, positions: np.ndarray) -> None:
