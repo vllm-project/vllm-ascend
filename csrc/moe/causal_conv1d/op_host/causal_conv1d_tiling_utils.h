@@ -12,7 +12,7 @@
 #ifndef CAUSAL_CONV1D_TILING_UTILS_H
 #define CAUSAL_CONV1D_TILING_UTILS_H
 
-#include "../tiling_base/tiling_util.h"
+#include "tiling_base/tiling_util.h"
 #include "../op_kernel/causal_conv1d_tiling_key.h"
 
 namespace optiling::causal_conv1d_host {

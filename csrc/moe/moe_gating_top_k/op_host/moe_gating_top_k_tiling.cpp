@@ -16,13 +16,13 @@
 #include "register/op_def_registry.h"
 #include "exe_graph/runtime/infer_shape_context.h"
 #include "register/op_impl_registry.h"
-#include "../tiling_base/tiling_base.h"
-#include "../tiling_base/tiling_templates_registry.h"
+#include "tiling_base/tiling_base.h"
+#include "tiling_base/tiling_templates_registry.h"
 #include "platform/platform_info.h"
 
 
 
-#include "error_log.h"
+#include "tiling_base/error_log.h"
 #include "moe_gating_top_k_tiling.h"
 
 
@@ -265,9 +265,9 @@ ge::graphStatus MoeGatingTopKTilingBase::GetShapeAttrsInfo()
 
     auto biasShapePtr = context_->GetOptionalInputShape(BIAS_INPUT_INDEX);
     biasShape_ = biasShapePtr == nullptr ? nullptr : &biasShapePtr->GetStorageShape();
-     if (biasShape_ != nullptr) {
+    if (biasShape_ != nullptr) {
         OP_LOGI(context_, "113biasShape: %s", biasShape_->ToString().c_str());
-    } 
+    }
 
     auto yShapePtr = context_->GetOutputShape(Y_OUTPUT_INDEX);
     OP_CHECK_NULL_WITH_CONTEXT(context_, yShapePtr);

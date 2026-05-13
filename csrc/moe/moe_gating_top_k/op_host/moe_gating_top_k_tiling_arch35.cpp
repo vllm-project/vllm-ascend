@@ -13,12 +13,12 @@
  * \brief
  */
 
-#include "error_log.h"
+#include "tiling_base/error_log.h"
 #include "moe_gating_top_k_tiling.h"
 #include "register/op_def_registry.h"
 #include "platform/platform_info.h"
-#include "../tiling_base/tiling_base.h"
-#include "../tiling_base/tiling_templates_registry.h"
+#include "tiling_base/tiling_base.h"
+#include "tiling_base/tiling_templates_registry.h"
 
 #ifndef CEIL_ALIGN
 #define CEIL_ALIGN(val, align) ((((val) + (align) - 1) / (align)) * (align))
@@ -79,7 +79,7 @@ public:
 protected:
     bool IsCapable() override
     {
-        if (socVersion != platform_ascendc::SocVersion::ASCEND910_95) {
+        if (socVersion != platform_ascendc::SocVersion::ASCEND950) {
             return false;
         }
         return true;
