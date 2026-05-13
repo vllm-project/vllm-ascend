@@ -32,7 +32,7 @@ import regex as re
 DEFAULT_ENV = {
     "kind": "",
     "runner": "linux-aarch64-a3-4",
-    "image": "m.daocloud.io/quay.io/ascend/cann:8.5.1-a3-ubuntu22.04-py3.11",
+    "image": "m.daocloud.io/quay.io/ascend/cann:9.0.0-a3-ubuntu22.04-py3.11",
     "test_type": "e2e",
 }
 PATH_KIND_RULES = [

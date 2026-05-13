@@ -66,7 +66,7 @@ env:
   # Single source of truth for all shared variables across jobs.
   # NOTE: GitHub Actions does not support env context in reusable workflow `with:` inputs,
   # so these values are exported as job outputs via the `setup-vars` job below.
-  CANN_IMAGE: 'swr.cn-southwest-2.myhuaweicloud.com/base_image/ascend-ci/cann:8.5.1-910b-ubuntu22.04-py3.11'
+  CANN_IMAGE: 'swr.cn-southwest-2.myhuaweicloud.com/base_image/ascend-ci/cann:9.0.0-910b-ubuntu22.04-py3.11'
   ASCEND_LOG_PREFIX: '/root/.cache/ascend-logs'
 
 jobs:
