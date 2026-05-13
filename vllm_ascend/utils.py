@@ -829,9 +829,7 @@ def enable_sp(vllm_config=None, enable_shared_expert_dp: bool = False) -> bool:
     refresh = additional_config.get("refresh", False) if additional_config else False
 
     if _ENABLE_SP is None or refresh:
-        _ENABLE_SP = envs_ascend.VLLM_ASCEND_ENABLE_FLASHCOMM1 or bool(
-            int(os.getenv("VLLM_ASCEND_ENABLE_FLASHCOMM", "0"))
-        )
+        _ENABLE_SP = envs_ascend.VLLM_ASCEND_ENABLE_FLASHCOMM1
 
         if not _ENABLE_SP and enable_shared_expert_dp:
             _ENABLE_SP = True
