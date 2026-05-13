@@ -8,7 +8,7 @@ msgid ""
 msgstr ""
 "Project-Id-Version: vllm-ascend \n"
 "Report-Msgid-Bugs-To: \n"
-"POT-Creation-Date: 2026-04-21 02:03+0000\n"
+"POT-Creation-Date: 2026-05-06 02:14+0000\n"
 "PO-Revision-Date: 2026-01-22 16:25+0800\n"
 "Last-Translator: Gemini\n"
 "Language: zh_CN\n"
@@ -20,203 +20,991 @@ msgstr ""
 "Generated-By: Babel 2.18.0\n"
 
 #: ../../source/user_guide/feature_guide/ucm_deployment.md:1
-msgid "UCM-Enhanced Prefix Caching Deployment Guide"
-msgstr "UCM增强的前缀缓存部署指南"
+msgid "UCM Store Deployment Guide"
+msgstr "UCM存储部署指南"
 
 #: ../../source/user_guide/feature_guide/ucm_deployment.md:3
-msgid "Overview"
-msgstr "概述"
+msgid "Why Use UCM"
+msgstr "为何使用UCM"
 
 #: ../../source/user_guide/feature_guide/ucm_deployment.md:5
 msgid ""
-"Unified Cache Management (UCM) provides an external KV-cache storage "
-"layer designed for prefix-caching scenarios in vLLM/vLLM-Ascend. Unlike "
-"KV Pooling, which expands prefix-cache capacity only by aggregating "
-"device memory and therefore remains limited by on-chip memory/DRAM size "
-"and lacks persistence, UCM decouples compute from storage and adopts a "
-"tiered design. Each node uses local DRAM as a fast cache, while a shared "
-"backend—such as 3FS or enterprise-grade storage—serves as the persistent "
-"KV store. This approach removes the capacity ceiling imposed by device "
-"memory, enables durable and reliable prefix caching, and allows cache "
-"capacity to scale with the storage system rather than with compute "
-"resources."
+"Unified Cache Manager (UCM) provides an external KV-cache storage layer "
+"designed for prefix-caching scenarios in vLLM/vLLM-Ascend. Unlike KV "
+"Pooling, which expands prefix-cache capacity only by aggregating device "
+"memory and therefore remains limited by HBM/DRAM size and lacks "
+"persistence, UCM decouples compute from storage and adopts a tiered "
+"design. Each node uses local DRAM as a fast cache, while a shared "
+"backend—such as NFS, 3FS, or enterprise-grade storage—serves as the "
+"persistent KV store."
 msgstr ""
-"统一缓存管理（UCM）为 vLLM/vLLM-Ascend 中的前缀缓存场景提供了一个外部 KV 缓存存储层。与仅通过聚合设备内存来扩展前缀缓存容量、因此仍受片上内存/DRAM 大小限制且缺乏持久性的 KV 池化不同，UCM 将计算与存储解耦，并采用分层设计。每个节点使用本地 DRAM 作为快速缓存，而共享后端（如 3FS 或企业级存储）则作为持久化的 KV 存储。这种方法消除了设备内存带来的容量上限，实现了持久可靠的前缀缓存，并允许缓存容量随存储系统而非计算资源扩展。"
+"统一缓存管理器（UCM）为vLLM/vLLM-Ascend中的前缀缓存场景提供外部KV缓存存储层。"
+"与仅通过聚合设备内存扩展前缀缓存容量、因此仍受HBM/DRAM大小限制且缺乏持久性的"
+"KV池化不同，UCM将计算与存储解耦，采用分层设计。每个节点使用本地DRAM作为快速缓存，"
+"而共享后端（如NFS、3FS或企业级存储）则作为持久化KV存储。"
 
 #: ../../source/user_guide/feature_guide/ucm_deployment.md:7
+msgid "**Key benefits of using UCM:**"
+msgstr "**使用UCM的主要优势：**"
+
+#: ../../source/user_guide/feature_guide/ucm_deployment.md:9
+msgid ""
+"**Breaks Device Memory Capacity Limits**: Traditional prefix caching is "
+"constrained by HBM/DRAM size. UCM removes this ceiling by offloading KV "
+"cache to external storage, enabling cache capacity to scale with the "
+"storage system rather than with compute resources."
+msgstr ""
+"**突破设备内存容量限制**：传统前缀缓存受限于HBM/DRAM大小。UCM通过将KV缓存卸载到"
+"外部存储来消除这一上限，使缓存容量随存储系统而非计算资源扩展。"
+
+#: ../../source/user_guide/feature_guide/ucm_deployment.md:11
+msgid ""
+"**Persistent and Reliable KV Cache**: UCM provides durable KV cache "
+"storage, ensuring that cached prefix blocks survive across service "
+"restarts, instance failures, or scheduling migrations. This is critical "
+"for production-grade inference systems."
+msgstr ""
+"**持久可靠的KV缓存**：UCM提供持久的KV缓存存储，确保缓存的prefix块在服务重启、"
+"实例故障或调度迁移后仍然存活。这对生产级推理系统至关重要。"
+
+#: ../../source/user_guide/feature_guide/ucm_deployment.md:13
+msgid ""
+"**Multi-Scenario Acceleration**: UCM not only supports prefix caching but"
+" also offers training-free sparse attention methods (e.g., GSA, "
+"CacheBlend) for handling extremely long sequence inference tasks. "
+"Additionally, UCM provides PD disaggregation solutions based on storage-"
+"compute separation architecture, enabling flexible management of "
+"heterogeneous computing resources."
+msgstr ""
+"**多场景加速**：UCM不仅支持前缀缓存，还提供免训练的稀疏注意力方法（如GSA、"
+"CacheBlend）用于处理超长序列推理任务。此外，UCM基于存算分离架构提供PD分离"
+"解决方案，实现异构计算资源的灵活管理。"
+
+#: ../../source/user_guide/feature_guide/ucm_deployment.md:15
+msgid ""
+"**Significant Performance Improvement**: When integrated with vLLM, UCM "
+"achieves **3-10x reduction** in inference latency across various "
+"scenarios, including multi-turn dialogue and long-context reasoning "
+"tasks. Benchmarks show up to **8x improvement in TTFT** for prefix "
+"caching scenarios."
+msgstr ""
+"**显著性能提升**：与vLLM集成后，UCM在多轮对话和长上下文推理等多种场景下实现"
+"**3-10倍**推理延迟降低。基准测试显示，在前缀缓存场景中TTFT提升高达**8倍**。"
+
+#: ../../source/user_guide/feature_guide/ucm_deployment.md:17
+msgid "How UCM Works"
+msgstr "UCM工作原理"
+
+#: ../../source/user_guide/feature_guide/ucm_deployment.md:19
+msgid "Architecture"
+msgstr "架构"
+
+#: ../../source/user_guide/feature_guide/ucm_deployment.md:21
+msgid ""
+"UCM adopts a **centralized architecture** for KV cache management, "
+"constructing a three-tier cache hierarchy:"
+msgstr "UCM采用**集中式架构**进行KV缓存管理，构建三级缓存层次结构："
+
+#: ../../source/user_guide/feature_guide/ucm_deployment.md:27
+msgid "This three-tier design enables:"
+msgstr "这种三级设计实现了："
+
+#: ../../source/user_guide/feature_guide/ucm_deployment.md:29
+msgid "**HBM (Tier 1)**: Fastest access for active inference computation"
+msgstr "**HBM（第1层）**：为活跃推理计算提供最快访问"
+
+#: ../../source/user_guide/feature_guide/ucm_deployment.md:30
+msgid ""
+"**DRAM (Tier 2)**: High-speed local cache for frequently accessed KV "
+"blocks"
+msgstr "**DRAM（第2层）**：为频繁访问的KV块提供高速本地缓存"
+
+#: ../../source/user_guide/feature_guide/ucm_deployment.md:31
+msgid ""
+"**Storage Backend (Tier 3)**: Persistent storage layer including local "
+"SSD, NFS-mounted storage, or dedicated systems like 3FS for unlimited "
+"capacity scaling"
+msgstr "**存储后端（第3层）**：持久化存储层，包括本地SSD、NFS挂载存储或3FS等专用系统，实现无限容量扩展"
+
+#: ../../source/user_guide/feature_guide/ucm_deployment.md:33
+msgid ""
+"UCM chose the centralized approach (similar to DeepSeek's 3FS) over "
+"decentralized designs for several reasons:"
+msgstr "UCM选择集中式方法（类似于DeepSeek的3FS）而非去中心化设计，原因如下："
+
+#: ../../source/user_guide/feature_guide/ucm_deployment.md:35
+msgid ""
+"**Simplicity**: Avoids complex affinity scheduling required in "
+"decentralized architectures"
+msgstr "**简单性**：避免了去中心化架构中复杂的亲和性调度"
+
+#: ../../source/user_guide/feature_guide/ucm_deployment.md:36
+msgid ""
+"**Decoupling**: Keeps inference instances independent without reporting "
+"KV cache status to schedulers"
+msgstr "**解耦**：保持推理实例独立，无需向调度器报告KV缓存状态"
+
+#: ../../source/user_guide/feature_guide/ucm_deployment.md:37
+msgid ""
+"**No Data Silos**: Centralized storage prevents redundant KV cache "
+"accumulation across isolated instances"
+msgstr "**无数据孤岛**：集中式存储防止跨隔离实例的冗余KV缓存积累"
+
+#: ../../source/user_guide/feature_guide/ucm_deployment.md:38
+msgid ""
+"**Better Compatibility**: Superior compatibility with PD disaggregation "
+"and large-scale deployment"
+msgstr "**更好的兼容性**：与PD分离和大规模部署具有卓越兼容性"
+
+#: ../../source/user_guide/feature_guide/ucm_deployment.md:40
+msgid "Capabilities"
+msgstr "功能特性"
+
+#: ../../source/user_guide/feature_guide/ucm_deployment.md:42
+msgid "UCM currently provides the following capabilities:"
+msgstr "UCM目前提供以下功能："
+
+#: ../../source/user_guide/feature_guide/ucm_deployment.md
+msgid "Capability"
+msgstr "功能"
+
+#: ../../source/user_guide/feature_guide/ucm_deployment.md
+msgid "Description"
+msgstr "描述"
+
+#: ../../source/user_guide/feature_guide/ucm_deployment.md
+msgid "**Prefix Cache**"
+msgstr "**前缀缓存**"
+
+#: ../../source/user_guide/feature_guide/ucm_deployment.md
+msgid ""
+"Persistent KV cache storage with support for NFS Store, 3FS Store, and "
+"Pipeline Store"
+msgstr "持久化KV缓存存储，支持NFS存储、3FS存储和管道存储"
+
+#: ../../source/user_guide/feature_guide/ucm_deployment.md
+msgid "**Sparse Attention**"
+msgstr "**稀疏注意力**"
+
+#: ../../source/user_guide/feature_guide/ucm_deployment.md
+msgid ""
+"Training-free sparse attention methods including GSA (Graph-based Sparse "
+"Attention) and CacheBlend for long-context acceleration"
+msgstr "免训练的稀疏注意力方法，包括GSA（基于图的稀疏注意力）和CacheBlend，用于长上下文加速"
+
+#: ../../source/user_guide/feature_guide/ucm_deployment.md
+msgid "**PD Disaggregation**"
+msgstr "**PD分离**"
+
+#: ../../source/user_guide/feature_guide/ucm_deployment.md
+msgid ""
+"Prefill-Decode disaggregation with multiple modes: P2P, Centralized PD, "
+"NPGD, and xPYD"
+msgstr "Prefill-Decode分离，支持多种模式：P2P、集中式PD、NPGD和xPYD"
+
+#: ../../source/user_guide/feature_guide/ucm_deployment.md
+msgid "**ReRoPE**"
+msgstr "**ReRoPE**"
+
+#: ../../source/user_guide/feature_guide/ucm_deployment.md
+msgid "Support for Rotary Position Embedding extensions"
+msgstr "支持旋转位置嵌入扩展"
+
+#: ../../source/user_guide/feature_guide/ucm_deployment.md:51
+msgid "**Supported Platforms:**"
+msgstr "**支持平台：**"
+
+#: ../../source/user_guide/feature_guide/ucm_deployment.md:53
+msgid "CUDA (NVIDIA H100, H20, L40, L20)"
+msgstr "CUDA（NVIDIA H100、H20、L40、L20）"
+
+#: ../../source/user_guide/feature_guide/ucm_deployment.md:54
+msgid "CANN (Ascend 910C, 910B)"
+msgstr "CANN（Ascend 910C、910B）"
+
+#: ../../source/user_guide/feature_guide/ucm_deployment.md:55
+msgid "MUSA (Mthreads S5000)"
+msgstr "MUSA（Mthreads S5000）"
+
+#: ../../source/user_guide/feature_guide/ucm_deployment.md:56
+msgid "MACA (MetaX C500)"
+msgstr "MACA（MetaX C500）"
+
+#: ../../source/user_guide/feature_guide/ucm_deployment.md:58
+msgid "**Supported Frameworks:**"
+msgstr "**支持框架：**"
+
+#: ../../source/user_guide/feature_guide/ucm_deployment.md:60
+msgid "vLLM (main branch)"
+msgstr "vLLM（main分支）"
+
+#: ../../source/user_guide/feature_guide/ucm_deployment.md:61
+msgid "vLLM-Ascend (main branch)"
+msgstr "vLLM-Ascend（main分支）"
+
+#: ../../source/user_guide/feature_guide/ucm_deployment.md:62
+msgid "SGLang (main branch)"
+msgstr "SGLang（main分支）"
+
+#: ../../source/user_guide/feature_guide/ucm_deployment.md:64
+msgid ""
+"**Note**: For the complete and latest support matrix, refer to [UCM "
+"Support Matrix](https://ucm.readthedocs.io/en/latest/user-guide/support-"
+"matrix/support_matrix.html)."
+msgstr ""
+"**注意**：有关完整和最新的支持矩阵，请参考[UCM支持矩阵]"
+"(https://ucm.readthedocs.io/en/latest/user-guide/support-"
+"matrix/support_matrix.html)。"
+
+#: ../../source/user_guide/feature_guide/ucm_deployment.md:66
+msgid "Deployment Guide"
+msgstr "部署指南"
+
+#: ../../source/user_guide/feature_guide/ucm_deployment.md:68
 msgid "Prerequisites"
 msgstr "前提条件"
 
-#: ../../source/user_guide/feature_guide/ucm_deployment.md:9
+#: ../../source/user_guide/feature_guide/ucm_deployment.md:70
 msgid "OS: Linux"
 msgstr "操作系统：Linux"
 
-#: ../../source/user_guide/feature_guide/ucm_deployment.md:10
-msgid "Hardware with Ascend NPUs. It's usually the Atlas 800 A2 series."
-msgstr "配备 Ascend NPU 的硬件。通常为 Atlas 800 A2 系列。"
+#: ../../source/user_guide/feature_guide/ucm_deployment.md:71
+msgid "Hardware with Ascend NPUs. It is typically the Atlas 800 A2 series."
+msgstr "配备Ascend NPU的硬件，通常为Atlas 800 A2系列。"
 
-#: ../../source/user_guide/feature_guide/ucm_deployment.md:11
-msgid "**vLLM: main branch**"
-msgstr "**vLLM：main 分支**"
+#: ../../source/user_guide/feature_guide/ucm_deployment.md:72
+msgid "vLLM: main branch"
+msgstr "vLLM：main分支"
 
-#: ../../source/user_guide/feature_guide/ucm_deployment.md:12
-msgid "**vLLM Ascend: main branch**"
-msgstr "**vLLM Ascend：main 分支**"
+#: ../../source/user_guide/feature_guide/ucm_deployment.md:73
+msgid "vLLM Ascend: main branch"
+msgstr "vLLM Ascend：main分支"
 
-#: ../../source/user_guide/feature_guide/ucm_deployment.md:14
+#: ../../source/user_guide/feature_guide/ucm_deployment.md:75
 msgid "UCM Installation"
-msgstr "UCM 安装"
+msgstr "UCM安装"
 
-#: ../../source/user_guide/feature_guide/ucm_deployment.md:16
+#: ../../source/user_guide/feature_guide/ucm_deployment.md:77
 msgid ""
 "**Please refer to the [official UCM installation guide for Ascend "
 "NPU](https://ucm.readthedocs.io/en/latest/getting-"
 "started/quickstart_vllm_ascend.html)**"
 msgstr ""
-"**请参考 [针对 Ascend NPU 的官方 UCM 安装指南](https://ucm.readthedocs.io/en/latest/getting-started/quickstart_vllm_ascend.html)**"
-
-#: ../../source/user_guide/feature_guide/ucm_deployment.md:18
-msgid "Configure UCM for Prefix Caching"
-msgstr "为前缀缓存配置 UCM"
-
-#: ../../source/user_guide/feature_guide/ucm_deployment.md:20
-msgid ""
-"Modify the UCM configuration file to specify which UCM connector to use "
-"and where KV blocks should be stored. You may directly edit the example "
-"file at:"
-msgstr "修改 UCM 配置文件以指定要使用的 UCM 连接器以及 KV 块的存储位置。您可以直接编辑位于以下路径的示例文件："
-
-#: ../../source/user_guide/feature_guide/ucm_deployment.md:23
-msgid "`unified-cache-management/examples/ucm_config_example.yaml`"
-msgstr "`unified-cache-management/examples/ucm_config_example.yaml`"
-
-#: ../../source/user_guide/feature_guide/ucm_deployment.md:25
-msgid ""
-"**For updated configuration options, please refer to the [official UCM "
-"documentation for prefix-caching](https://ucm.readthedocs.io/en/latest/user-guide/prefix-cache/nfs_store.html)**"
-msgstr ""
-"**有关更新的配置选项，请参考 [针对前缀缓存的官方 UCM 文档](https://ucm.readthedocs.io/en/latest/user-guide/prefix-cache/nfs_store.html)**"
-
-#: ../../source/user_guide/feature_guide/ucm_deployment.md:27
-msgid "A minimal configuration looks like this:"
-msgstr "一个最小化的配置示例如下："
-
-#: ../../source/user_guide/feature_guide/ucm_deployment.md:39
-msgid "Explanation:"
-msgstr "参数说明："
-
-#: ../../source/user_guide/feature_guide/ucm_deployment.md:41
-msgid ""
-"ucm_connector_name: \"UcmNfsStore\": Specifies `UcmNfsStore` as the UCM "
-"connector."
-msgstr "ucm_connector_name: \"UcmNfsStore\"：指定 `UcmNfsStore` 作为 UCM 连接器。"
-
-#: ../../source/user_guide/feature_guide/ucm_deployment.md:44
-msgid ""
-"storage_backends: Specify the directory used for storing KV blocks. It "
-"can be a local directory or an NFS-mounted path. UCM will store KV blocks"
-" here.  **⚠️ Make sure to replace `\"/mnt/test\"` with your actual "
-"storage directory.**"
-msgstr ""
-"storage_backends：指定用于存储 KV 块的目录。它可以是本地目录或 NFS 挂载路径。UCM 将在此处存储 KV 块。**⚠️ 请务必将 `\"/mnt/test\"` 替换为您实际的存储目录。**"
-
-#: ../../source/user_guide/feature_guide/ucm_deployment.md:48
-msgid "use_direct: Whether to enable direct I/O (optional). Default is `false`."
-msgstr "use_direct：是否启用直接 I/O（可选）。默认为 `false`。"
-
-#: ../../source/user_guide/feature_guide/ucm_deployment.md:51
-msgid ""
-"load_only_first_rank: Controls whether only rank 0 loads KV cache and "
-"broadcasts it to other ranks.   This feature is currently not supported "
-"on Ascend, so it must be set to `false` (all ranks load/dump "
-"independently)."
-msgstr ""
-"load_only_first_rank：控制是否仅由 rank 0 加载 KV 缓存并广播给其他 rank。此功能目前在 Ascend 上不受支持，因此必须设置为 `false`（所有 rank 独立加载/转储）。"
-
-#: ../../source/user_guide/feature_guide/ucm_deployment.md:55
-msgid "Launching Inference"
-msgstr "启动推理"
-
-#: ../../source/user_guide/feature_guide/ucm_deployment.md:57
-msgid ""
-"In this guide, we describe **online inference** using vLLM with the UCM "
-"connector, deployed as an OpenAI-compatible server. For best performance "
-"with UCM, it is recommended to set `block_size` to 128."
-msgstr ""
-"在本指南中，我们介绍使用带有 UCM 连接器的 vLLM 进行**在线推理**，并部署为兼容 OpenAI 的服务器。为了获得 UCM 的最佳性能，建议将 `block_size` 设置为 128。"
-
-#: ../../source/user_guide/feature_guide/ucm_deployment.md:59
-msgid "To start the vLLM server with the Qwen/Qwen2.5-14B-Instruct model, run:"
-msgstr "要使用 Qwen/Qwen2.5-14B-Instruct 模型启动 vLLM 服务器，请运行："
+"**请参考[针对Ascend NPU的官方UCM安装指南](https://ucm.readthedocs.io/en/latest"
+"/getting-started/quickstart_vllm_ascend.html)**"
 
 #: ../../source/user_guide/feature_guide/ucm_deployment.md:79
-msgid ""
-"**⚠️ Make sure to replace `\"/vllm-workspace/unified-cache-"
-"management/examples/ucm_config_example.yaml\"` with your actual config "
-"file path.**"
-msgstr ""
-"**⚠️ 请务必将 `\"/vllm-workspace/unified-cache-management/examples/ucm_config_example.yaml\"` 替换为您实际的配置文件路径。**"
+msgid "PD Disaggregation Scenario"
+msgstr "PD分离场景"
 
 #: ../../source/user_guide/feature_guide/ucm_deployment.md:81
-msgid "If you see the log below:"
-msgstr "如果您看到如下日志："
+msgid "UCM supports two types of PD disaggregation architectures:"
+msgstr "UCM支持两种类型的PD分离架构："
 
-#: ../../source/user_guide/feature_guide/ucm_deployment.md:89
+#: ../../source/user_guide/feature_guide/ucm_deployment.md
+msgid "Type"
+msgstr "类型"
+
+#: ../../source/user_guide/feature_guide/ucm_deployment.md
+msgid "KV Transfer Method"
+msgstr "KV传输方式"
+
+#: ../../source/user_guide/feature_guide/ucm_deployment.md
+msgid "Characteristics"
+msgstr "特点"
+
+#: ../../source/user_guide/feature_guide/ucm_deployment.md
+msgid "**Centralized PD**"
+msgstr "**集中式PD**"
+
+#: ../../source/user_guide/feature_guide/ucm_deployment.md
+msgid "Via unified storage backend (NFS/3FS)"
+msgstr "通过统一存储后端（NFS/3FS）"
+
+#: ../../source/user_guide/feature_guide/ucm_deployment.md
+msgid "Simple architecture, complete decoupling, stateless instances"
+msgstr "架构简单、完全解耦、无状态实例"
+
+#: ../../source/user_guide/feature_guide/ucm_deployment.md
+msgid "**Distributed PD (P2P)**"
+msgstr "**分布式PD（P2P）**"
+
+#: ../../source/user_guide/feature_guide/ucm_deployment.md
+msgid "Direct transfer via Mooncake + UCM prefix cache"
+msgstr "通过Mooncake + UCM前缀缓存直接传输"
+
+#: ../../source/user_guide/feature_guide/ucm_deployment.md
+msgid "Lower latency, suitable for homogeneous P/D nodes"
+msgstr "更低延迟，适用于同构P/D节点"
+
+#: ../../source/user_guide/feature_guide/ucm_deployment.md:88
+msgid "Centralized PD Disaggregation"
+msgstr "集中式PD分离"
+
+#: ../../source/user_guide/feature_guide/ucm_deployment.md:90
 msgid ""
-"Congratulations, you have successfully started the vLLM server with UCM "
-"connector!"
-msgstr "恭喜，您已成功启动带有 UCM 连接器的 vLLM 服务器！"
-
-#: ../../source/user_guide/feature_guide/ucm_deployment.md:91
-msgid "Evaluating UCM Prefix Caching Performance"
-msgstr "评估 UCM 前缀缓存性能"
-
-#: ../../source/user_guide/feature_guide/ucm_deployment.md:93
-msgid ""
-"After launching the vLLM server with `UCMConnector` enabled, the easiest "
-"way to observe the prefix caching effect is to run the built-in `vllm "
-"bench` CLI. Executing the following command **twice** in a separate "
-"terminal shows the improvement clearly."
+"In centralized PD disaggregation, KV cache is transmitted via a unified "
+"storage pool. The Prefill node offloads KV cache to the storage backend, "
+"and the Decode node retrieves it with high prefix cache hit rates. This "
+"approach achieves the highest degree of decoupling and simplifies "
+"scheduling logic."
 msgstr ""
-"在启动启用 `UCMConnector` 的 vLLM 服务器后，观察前缀缓存效果最简单的方法是运行内置的 `vllm bench` CLI。在另一个终端中执行以下命令**两次**，可以清晰地看到性能提升。"
+"在集中式PD分离中，KV缓存通过统一存储池传输。Prefill节点将KV缓存卸载到存储后端，"
+"Decode节点以高前缀缓存命中率检索。这种方法实现了最高程度的解耦，并简化了调度逻辑。"
 
-#: ../../source/user_guide/feature_guide/ucm_deployment.md:112
-msgid "After the first execution"
-msgstr "第一次执行后"
-
-#: ../../source/user_guide/feature_guide/ucm_deployment.md:114
-msgid "The `vllm bench` terminal prints the benchmark result:"
-msgstr "`vllm bench` 终端打印基准测试结果："
-
-#: ../../source/user_guide/feature_guide/ucm_deployment.md:121
-msgid "Inspecting the vLLM server logs reveals entries like:"
-msgstr "检查 vLLM 服务器日志会发现如下条目："
-
-#: ../../source/user_guide/feature_guide/ucm_deployment.md:127
+#: ../../source/user_guide/feature_guide/ucm_deployment.md:92
 msgid ""
-"This indicates that for the first inference request, UCM did not hit any "
-"cached KV blocks. As a result, the full 16K-token prefill must be "
-"computed, leading to a relatively large TTFT."
-msgstr "这表明对于第一个推理请求，UCM 未命中任何缓存的 KV 块。因此，必须计算完整的 16K-token 预填充，导致 TTFT 相对较大。"
-
-#: ../../source/user_guide/feature_guide/ucm_deployment.md:129
-msgid "After the second execution"
-msgstr "第二次执行后"
-
-#: ../../source/user_guide/feature_guide/ucm_deployment.md:131
-msgid "Running the same benchmark again produces:"
-msgstr "再次运行相同的基准测试会产生："
-
-#: ../../source/user_guide/feature_guide/ucm_deployment.md:138
-msgid "The vLLM server logs now contain similar entries:"
-msgstr "vLLM 服务器日志现在包含类似的条目："
-
-#: ../../source/user_guide/feature_guide/ucm_deployment.md:144
-msgid ""
-"This indicates that during the second request, UCM successfully retrieved"
-" all 125 cached KV blocks from the storage backend. Leveraging the fully "
-"cached prefix significantly reduces the initial latency observed by the "
-"model, yielding an approximate **8× improvement in TTFT** compared to the"
-" initial run."
+"**Important**: For cross-node deployment, all Prefill and Decode nodes "
+"must have access to a **shared storage backend** (e.g., NFS-mounted "
+"directory or 3FS). Ensure the storage path is accessible from all nodes "
+"before proceeding."
 msgstr ""
-"这表明在第二个请求期间，UCM 成功地从存储后端检索了所有 125 个缓存的 KV 块。利用完全缓存的前缀显著降低了模型观察到的初始延迟，与初始运行相比，TTFT 提升了约 **8 倍**。"
+"**重要**：对于跨节点部署，所有Prefill和Decode节点必须能够访问**共享存储后端**"
+"（例如NFS挂载目录或3FS）。在继续之前，确保所有节点均可访问存储路径。"
+
+#: ../../source/user_guide/feature_guide/ucm_deployment.md:94
+#: ../../source/user_guide/feature_guide/ucm_deployment.md:210
+msgid "**Example: 2P2D Setup**"
+msgstr "**示例：2P2D设置**"
+
+#: ../../source/user_guide/feature_guide/ucm_deployment.md:96
+msgid ""
+"Assume 2 Prefill instances on node 192.168.10.1 (ports 7800, 7801) and 2 "
+"Decode instances on node 192.168.10.2 (ports 7802, 7803), with a shared "
+"NFS storage at `/mnt/test1`."
+msgstr ""
+"假设节点192.168.10.1上有2个Prefill实例（端口7800、7801），节点192.168.10.2上有2个Decode实例（端口7802、7803），共享NFS存储位于`/mnt/test1`。"
+
+#: ../../source/user_guide/feature_guide/ucm_deployment.md:98
+#: ../../source/user_guide/feature_guide/ucm_deployment.md:376
+msgid "**Step 1: Prepare UCM Configuration File**"
+msgstr "**步骤1：准备UCM配置文件**"
+
+#: ../../source/user_guide/feature_guide/ucm_deployment.md:100
+#: ../../source/user_guide/feature_guide/ucm_deployment.md:378
+msgid ""
+"Create a configuration file (e.g., `ucm_config_example.yaml`) with "
+"PipelineStore:"
+msgstr ""
+"创建包含PipelineStore的配置文件（例如`ucm_config_example.yaml`）："
+
+#: ../../source/user_guide/feature_guide/ucm_deployment.md:113
+#: ../../source/user_guide/feature_guide/ucm_deployment.md:391
+#: ../../source/user_guide/feature_guide/ucm_deployment.md:517
+msgid "Key configuration parameters:"
+msgstr "关键配置参数："
+
+#: ../../source/user_guide/feature_guide/ucm_deployment.md:115
+msgid ""
+"**storage_backends**: The shared storage directory accessible from all "
+"nodes (e.g., NFS-mounted path or 3FS). For cross-node PD disaggregation, "
+"this must be a shared storage path."
+msgstr ""
+"**storage_backends**：所有节点可访问的共享存储目录（例如NFS挂载路径或3FS）。对于跨节点PD分离部署，此路径必须为共享存储路径。"
+
+#: ../../source/user_guide/feature_guide/ucm_deployment.md:117
+msgid ""
+"**Note**: PipelineStore is the recommended connector for UCM. It chains "
+"Cache Store (Device ↔ Host) and Posix Store (Host ↔ Storage backend) for "
+"optimal transfer performance. For more configuration options, refer to "
+"[UCM PipelineStore Documentation](https://ucm.readthedocs.io/en/latest"
+"/user-guide/prefix-cache/pipeline_store.html)."
+msgstr ""
+"**注意**：PipelineStore是UCM推荐的连接器。它串联了Cache Store（设备↔主机）和Posix Store（主机↔存储后端）以实现最佳传输性能。更多配置选项请参考[UCM PipelineStore文档](https://ucm.readthedocs.io/en/latest/user-guide/prefix-cache/pipeline_store.html)。"
+
+#: ../../source/user_guide/feature_guide/ucm_deployment.md:119
+msgid "**Step 2: Run Prefill Servers**"
+msgstr "**步骤2：运行Prefill服务器**"
+
+#: ../../source/user_guide/feature_guide/ucm_deployment.md:145
+msgid ""
+"To start the second Prefill instance on the same node, modify `--port` "
+"(e.g., port 7801) and `ASCEND_RT_VISIBLE_DEVICES` accordingly."
+msgstr ""
+"要在同一节点上启动第二个Prefill实例，请相应修改`--port`（例如端口7801）和`ASCEND_RT_VISIBLE_DEVICES`。"
+
+#: ../../source/user_guide/feature_guide/ucm_deployment.md:147
+msgid "**Step 3: Run Decode Servers**"
+msgstr "**步骤3：运行Decode服务器**"
+
+#: ../../source/user_guide/feature_guide/ucm_deployment.md:173
+msgid ""
+"To start the second Decode instance on the same node, modify `--port` "
+"(e.g., port 7803) and `ASCEND_RT_VISIBLE_DEVICES` accordingly."
+msgstr ""
+"要在同一节点上启动第二个Decode实例，请相应修改`--port`（例如端口7803）和`ASCEND_RT_VISIBLE_DEVICES`。"
+
+#: ../../source/user_guide/feature_guide/ucm_deployment.md:175
+#: ../../source/user_guide/feature_guide/ucm_deployment.md:337
+#: ../../source/user_guide/feature_guide/ucm_deployment.md:748
+msgid "**Step 4: Run Load Balancing Service**"
+msgstr "**步骤4：运行负载均衡服务**"
+
+#: ../../source/user_guide/feature_guide/ucm_deployment.md:187
+#: ../../source/user_guide/feature_guide/ucm_deployment.md:349
+msgid "**Step 5: Performance Testing**"
+msgstr "**步骤5：性能测试**"
+
+#: ../../source/user_guide/feature_guide/ucm_deployment.md:204
+msgid "Distributed PD Disaggregation (P2P)"
+msgstr "分布式PD分离部署（P2P）"
+
+#: ../../source/user_guide/feature_guide/ucm_deployment.md:206
+msgid ""
+"In P2P distributed PD disaggregation, Mooncake handles direct KV cache "
+"transfer from Prefill to Decode nodes via high-speed network, while UCM "
+"provides prefix cache on Prefill nodes for KV cache reuse. This mode is "
+"suitable for scenarios with homogeneous P/D nodes and lower latency "
+"requirements."
+msgstr ""
+"在P2P分布式PD分离部署中，Mooncake通过高速网络处理从Prefill节点到Decode节点的直接KV缓存传输，而UCM在Prefill节点上提供前缀缓存以实现KV缓存复用。此模式适用于同构P/D节点且延迟要求较低的场景。"
+
+#: ../../source/user_guide/feature_guide/ucm_deployment.md:208
+msgid ""
+"**Note**: From vLLM-Ascend 0.11.0, the official image includes pre-"
+"installed Mooncake. For installation details, refer to [kvcache-"
+"ai/Mooncake](https://github.com/kvcache-ai/Mooncake)."
+msgstr ""
+"**注意**：从vLLM-Ascend 0.11.0开始，官方镜像已预装Mooncake。安装详情请参考[kvcache-ai/Mooncake](https://github.com/kvcache-ai/Mooncake)。"
+
+#: ../../source/user_guide/feature_guide/ucm_deployment.md:212
+msgid ""
+"Assume 2 Prefill instances on node 192.168.10.1 (ports 9000, 9001) and 2 "
+"Decode instances on node 192.168.10.2 (ports 9000, 9001)."
+msgstr ""
+"假设节点192.168.10.1上有2个Prefill实例（端口9000、9001），节点192.168.10.2上有2个Decode实例（端口9000、9001）。"
+
+#: ../../source/user_guide/feature_guide/ucm_deployment.md:214
+#: ../../source/user_guide/feature_guide/ucm_deployment.md:478
+msgid "**Step 1: Run Mooncake Master Service**"
+msgstr "**步骤1：运行Mooncake主服务**"
+
+#: ../../source/user_guide/feature_guide/ucm_deployment.md:216
+#: ../../source/user_guide/feature_guide/ucm_deployment.md:480
+msgid "Run Mooncake master on any node (e.g., 192.168.10.1):"
+msgstr "在任意节点上运行Mooncake主服务（例如192.168.10.1）："
+
+#: ../../source/user_guide/feature_guide/ucm_deployment.md:226
+msgid "Prepare `mooncake.json` on each node:"
+msgstr "在每个节点上准备`mooncake.json`："
+
+#: ../../source/user_guide/feature_guide/ucm_deployment.md:238
+msgid ""
+"Also prepare a UCM configuration file (`ucm_config_example.yaml`) for "
+"prefix cache on Prefill nodes:"
+msgstr ""
+"同时为Prefill节点上的前缀缓存准备UCM配置文件（`ucm_config_example.yaml`）："
+
+#: ../../source/user_guide/feature_guide/ucm_deployment.md:251
+#: ../../source/user_guide/feature_guide/ucm_deployment.md:395
+#: ../../source/user_guide/feature_guide/ucm_deployment.md:521
+msgid ""
+"**Note**: For more configuration options, refer to [UCM PipelineStore "
+"Documentation](https://ucm.readthedocs.io/en/latest/user-guide/prefix-"
+"cache/pipeline_store.html)."
+msgstr ""
+"**注意**：更多配置选项请参考[UCM PipelineStore文档](https://ucm.readthedocs.io/en/latest/user-guide/prefix-cache/pipeline_store.html)。"
+
+#: ../../source/user_guide/feature_guide/ucm_deployment.md:253
+msgid "**Step 2: Run Prefill Service**"
+msgstr "**步骤2：运行Prefill服务**"
+
+#: ../../source/user_guide/feature_guide/ucm_deployment.md:300
+msgid ""
+"To start multiple Prefill instances on the same node, modify `--port`, "
+"`kv_port`, and `ASCEND_RT_VISIBLE_DEVICES` for each instance (e.g., port "
+"9001 with kv_port 20002 for the second instance)."
+msgstr ""
+"要在同一节点上启动多个Prefill实例，请为每个实例修改`--port`、`kv_port`和`ASCEND_RT_VISIBLE_DEVICES`（例如第二个实例使用端口9001和kv_port 20002）。"
+
+#: ../../source/user_guide/feature_guide/ucm_deployment.md:302
+msgid "**Step 3: Run Decode Service**"
+msgstr "**步骤3：运行Decode服务**"
+
+#: ../../source/user_guide/feature_guide/ucm_deployment.md:335
+msgid ""
+"To start multiple Decode instances on the same node, modify `--port`, "
+"`kv_port`, and `ASCEND_RT_VISIBLE_DEVICES` for each instance (e.g., port "
+"9001 with kv_port 20002 for the second instance)."
+msgstr ""
+"要在同一节点上启动多个Decode实例，请为每个实例修改`--port`、`kv_port`和`ASCEND_RT_VISIBLE_DEVICES`（例如第二个实例使用端口9001和kv_port 20002）。"
+
+#: ../../source/user_guide/feature_guide/ucm_deployment.md:366
+msgid "PD-Mixed Inference"
+msgstr "PD混合推理"
+
+#: ../../source/user_guide/feature_guide/ucm_deployment.md:368
+msgid ""
+"PD-Mixed Inference refers to the standard vLLM serving mode where Prefill"
+" and Decode phases for different requests are processed concurrently "
+"within the same instance. Unlike PD Disaggregation which physically "
+"separates Prefill and Decode into dedicated instances, PD-Mixed handles "
+"both phases in a unified scheduler, allowing interleaved execution: while"
+" one request is in Decode phase, another request can simultaneously "
+"undergo Prefill."
+msgstr ""
+"PD混合推理是指标准vLLM服务模式，其中不同请求的Prefill和Decode阶段在同一实例内并发处理。与将Prefill和Decode物理分离到专用实例的PD分离部署不同，PD混合在统一调度器中处理两个阶段，允许交错执行：当一个请求处于Decode阶段时，另一个请求可以同时进行Prefill。"
+
+#: ../../source/user_guide/feature_guide/ucm_deployment.md:370
+msgid "UCM enhances PD-Mixed by providing persistent KV cache storage, enabling:"
+msgstr "UCM通过提供持久化KV缓存存储来增强PD混合，实现："
+
+#: ../../source/user_guide/feature_guide/ucm_deployment.md:372
+msgid "Prefix cache reuse across requests with shared prefixes"
+msgstr "跨共享前缀请求的前缀缓存复用"
+
+#: ../../source/user_guide/feature_guide/ucm_deployment.md:373
+msgid "KV cache persistence across service restarts"
+msgstr "服务重启后的KV缓存持久化"
+
+#: ../../source/user_guide/feature_guide/ucm_deployment.md:374
+msgid "Offloading KV cache to external storage to reduce GPU memory pressure"
+msgstr "将KV缓存卸载到外部存储以降低GPU内存压力"
+
+#: ../../source/user_guide/feature_guide/ucm_deployment.md:393
+msgid ""
+"**storage_backends**: Directory for KV cache storage. Can be local SSD or"
+" NFS-mounted path."
+msgstr ""
+"**storage_backends**：KV缓存存储目录。可以是本地SSD或NFS挂载路径。"
+
+#: ../../source/user_guide/feature_guide/ucm_deployment.md:397
+msgid "**Step 2: Run PD-Mixed Service**"
+msgstr "**步骤2：运行PD混合服务**"
+
+#: ../../source/user_guide/feature_guide/ucm_deployment.md:423
+msgid "**Step 3: Performance Testing**"
+msgstr "**步骤3：性能测试**"
+
+#: ../../source/user_guide/feature_guide/ucm_deployment.md:425
+msgid "Run the benchmark twice to observe the prefix cache effect:"
+msgstr "运行两次基准测试以观察前缀缓存效果："
+
+#: ../../source/user_guide/feature_guide/ucm_deployment.md:457
+msgid ""
+"After the second run, a significant reduction in TTFT should be observed "
+"due to UCM prefix cache hits. Review the vLLM logs for cache hit "
+"information:"
+msgstr ""
+"第二次运行后，由于UCM前缀缓存命中，应观察到TTFT显著降低。查看vLLM日志获取缓存命中信息："
+
+#: ../../source/user_guide/feature_guide/ucm_deployment.md:463
+msgid "Example: PD Disaggregation with Large Scale Expert Parallelism"
+msgstr "示例：大规模专家并行PD分离部署"
+
+#: ../../source/user_guide/feature_guide/ucm_deployment.md:465
+msgid ""
+"This section demonstrates PD disaggregation for MoE models with large-"
+"scale Expert Parallelism. MoE models require enabling data parallelism to"
+" distribute expert weights across multiple nodes."
+msgstr ""
+"本节演示了针对MoE模型的大规模专家并行PD分离部署。MoE模型需要启用数据并行以在多个节点间分布专家权重。"
+
+#: ../../source/user_guide/feature_guide/ucm_deployment.md:467
+msgid "**Deployment Configuration:**"
+msgstr "**部署配置：**"
+
+#: ../../source/user_guide/feature_guide/ucm_deployment.md:469
+msgid ""
+"**Prefill Instance**: 4 nodes (192.168.10.1-4), DP4TP8 (4 DP processes, "
+"each with TP8)"
+msgstr ""
+"**Prefill实例**：4个节点（192.168.10.1-4），DP4TP8（4个DP进程，每个TP8）"
+
+#: ../../source/user_guide/feature_guide/ucm_deployment.md:470
+msgid ""
+"**Decode Instance**: 4 nodes (192.168.10.5-8), DP8TP4 (8 DP processes, "
+"each with TP4)"
+msgstr ""
+"**Decode实例**：4个节点（192.168.10.5-8），DP8TP4（8个DP进程，每个TP4）"
+
+#: ../../source/user_guide/feature_guide/ucm_deployment.md:471
+msgid "**Total**: 8 Atlas 800T A2 servers with 8 Ascend 910B3 NPU cards each"
+msgstr "**总计**：8台Atlas 800T A2服务器，每台配备8张Ascend 910B3 NPU卡"
+
+#: ../../source/user_guide/feature_guide/ucm_deployment.md:472
+msgid ""
+"**Storage**: 8 servers connected to AI storage device A800 via CE8875 "
+"switch"
+msgstr ""
+"**存储**：8台服务器通过CE8875交换机连接到AI存储设备A800"
+
+#: ../../source/user_guide/feature_guide/ucm_deployment.md:474
+msgid ""
+"**Note**: For external load balancing data parallelism, refer to the vLLM"
+" official documentation: [Data Parallel Deployment of external Load "
+"Balancing](https://docs.vllm.ai/en/latest/serving/data_parallel_deployment"
+"/#external-load-balancing)."
+msgstr ""
+"**注意**：关于外部负载均衡数据并行，请参考vLLM官方文档：[外部负载均衡的数据并行部署](https://docs.vllm.ai/en/latest/serving/data_parallel_deployment/#external-load-balancing)。"
+
+#: ../../source/user_guide/feature_guide/ucm_deployment.md:476
+msgid "Deployment Steps"
+msgstr "部署步骤"
+
+#: ../../source/user_guide/feature_guide/ucm_deployment.md:490
+msgid "Prepare `mooncake.json` on all 8 nodes:"
+msgstr "在所有8个节点上准备`mooncake.json`："
+
+#: ../../source/user_guide/feature_guide/ucm_deployment.md:502
+msgid "**Step 2: Run Prefill Service (DP4TP8)**"
+msgstr "**步骤2：运行Prefill服务（DP4TP8）**"
+
+#: ../../source/user_guide/feature_guide/ucm_deployment.md:504
+msgid ""
+"First, prepare a UCM configuration file (`ucm_config_example.yaml`) for "
+"prefix cache on Prefill nodes (192.168.10.1-4):"
+msgstr ""
+"首先，为Prefill节点（192.168.10.1-4）上的前缀缓存准备UCM配置文件（`ucm_config_example.yaml`）："
+
+#: ../../source/user_guide/feature_guide/ucm_deployment.md:519
+msgid ""
+"**storage_backends**: The shared storage directory accessible from all "
+"nodes (e.g., NFS-mounted path or 3FS)."
+msgstr ""
+"**storage_backends**：所有节点可访问的共享存储目录（例如NFS挂载路径或3FS）。"
+
+#: ../../source/user_guide/feature_guide/ucm_deployment.md:523
+msgid "Prepare `prefill.sh` on Prefill nodes (192.168.10.1-4):"
+msgstr "在Prefill节点（192.168.10.1-4）上准备`prefill.sh`："
+
+#: ../../source/user_guide/feature_guide/ucm_deployment.md:601
+msgid "Prepare `run_multi_dp.sh` for Prefill nodes:"
+msgstr "为Prefill节点准备`run_multi_dp.sh`："
+
+#: ../../source/user_guide/feature_guide/ucm_deployment.md:635
+msgid ""
+"Execute `run_multi_dp.sh` on each Prefill node (192.168.10.1-4) with "
+"appropriate `local_ip` and `dp_rank_start`:"
+msgstr ""
+"在每个Prefill节点（192.168.10.1-4）上使用适当的`local_ip`和`dp_rank_start`执行`run_multi_dp.sh`："
+
+#: ../../source/user_guide/feature_guide/ucm_deployment.md:637
+msgid "192.168.10.1: `dp_rank_start=0`"
+msgstr "192.168.10.1：`dp_rank_start=0`"
+
+#: ../../source/user_guide/feature_guide/ucm_deployment.md:638
+msgid "192.168.10.2: `dp_rank_start=1`"
+msgstr "192.168.10.2：`dp_rank_start=1`"
+
+#: ../../source/user_guide/feature_guide/ucm_deployment.md:639
+msgid "192.168.10.3: `dp_rank_start=2`"
+msgstr "192.168.10.3：`dp_rank_start=2`"
+
+#: ../../source/user_guide/feature_guide/ucm_deployment.md:640
+msgid "192.168.10.4: `dp_rank_start=3`"
+msgstr "192.168.10.4：`dp_rank_start=3`"
+
+#: ../../source/user_guide/feature_guide/ucm_deployment.md:642
+msgid "**Step 3: Run Decode Service (DP8TP4)**"
+msgstr "**步骤3：运行Decode服务（DP8TP4）**"
+
+#: ../../source/user_guide/feature_guide/ucm_deployment.md:644
+msgid "Prepare `decode.sh` on Decode nodes (192.168.10.5-8):"
+msgstr "在Decode节点（192.168.10.5-8）上准备`decode.sh`："
+
+#: ../../source/user_guide/feature_guide/ucm_deployment.md:707
+msgid "Prepare `run_multi_dp.sh` for Decode nodes:"
+msgstr "为Decode节点准备`run_multi_dp.sh`："
+
+#: ../../source/user_guide/feature_guide/ucm_deployment.md:741
+msgid ""
+"Execute `run_multi_dp.sh` on each Decode node (192.168.10.5-8) with "
+"appropriate `local_ip` and `dp_rank_start`:"
+msgstr ""
+"在每个Decode节点（192.168.10.5-8）上使用适当的`local_ip`和`dp_rank_start`执行`run_multi_dp.sh`："
+
+#: ../../source/user_guide/feature_guide/ucm_deployment.md:743
+msgid "192.168.10.5: `dp_rank_start=0`"
+msgstr "192.168.10.5：`dp_rank_start=0`"
+
+#: ../../source/user_guide/feature_guide/ucm_deployment.md:744
+msgid "192.168.10.6: `dp_rank_start=2`"
+msgstr "192.168.10.6：`dp_rank_start=2`"
+
+#: ../../source/user_guide/feature_guide/ucm_deployment.md:745
+msgid "192.168.10.7: `dp_rank_start=4`"
+msgstr "192.168.10.7：`dp_rank_start=4`"
+
+#: ../../source/user_guide/feature_guide/ucm_deployment.md:746
+msgid "192.168.10.8: `dp_rank_start=6`"
+msgstr "192.168.10.8：`dp_rank_start=6`"
+
+#: ../../source/user_guide/feature_guide/ucm_deployment.md:760
+msgid "Benchmark Results"
+msgstr "基准测试结果"
+
+#: ../../source/user_guide/feature_guide/ucm_deployment.md:762
+msgid ""
+"The following benchmark demonstrates UCM prefix cache effectiveness in "
+"large-scale Expert Parallelism PD disaggregation scenarios."
+msgstr ""
+"以下基准测试展示了UCM前缀缓存在大规模专家并行PD分离部署场景中的有效性。"
+
+#: ../../source/user_guide/feature_guide/ucm_deployment.md:764
+msgid "**Test Configuration:**"
+msgstr "**测试配置：**"
+
+#: ../../source/user_guide/feature_guide/ucm_deployment.md:766
+msgid "Total requests: 128"
+msgstr "总请求数：128"
+
+#: ../../source/user_guide/feature_guide/ucm_deployment.md:767
+msgid "Request concurrency: 128"
+msgstr "请求并发数：128"
+
+#: ../../source/user_guide/feature_guide/ucm_deployment.md:768
+msgid ""
+"Constraint: Total requests kept within Prefill instance's available HBM "
+"capacity for KV cache storage"
+msgstr ""
+"约束条件：总请求数保持在Prefill实例可用HBM容量范围内以存储KV缓存"
+
+#: ../../source/user_guide/feature_guide/ucm_deployment.md:770
+msgid "**KV Cache Pre-seeding Procedure:**"
+msgstr "**KV 缓存预填充流程：**"
+
+#: ../../source/user_guide/feature_guide/ucm_deployment.md:772
+msgid ""
+"Before each test, KV cache must be pre-seeded with a prefix ratio of "
+"**0.8**:"
+msgstr "每次测试前，必须使用前缀比例 **0.8** 预填充 KV 缓存："
+
+#: ../../source/user_guide/feature_guide/ucm_deployment.md:774
+msgid ""
+"**Pre-seed Phase**: Send 128 requests with input length = "
+"`target_input_length × 0.8` and output length = 1 to establish the KV "
+"cache prefix"
+msgstr "**预填充阶段**：发送 128 个请求，输入长度 = `target_input_length × 0.8`，输出长度 = 1，以建立 KV 缓存前缀"
+
+#: ../../source/user_guide/feature_guide/ucm_deployment.md:775
+msgid ""
+"**Test Phase**: Send 128 requests with full target input length and "
+"output length = 1000"
+msgstr "**测试阶段**：发送 128 个请求，使用完整的目标输入长度，输出长度 = 1000"
+
+#: ../../source/user_guide/feature_guide/ucm_deployment.md:777
+msgid "Example for 32K input scenario:"
+msgstr "32K 输入场景示例："
+
+#: ../../source/user_guide/feature_guide/ucm_deployment.md:779
+msgid ""
+"Pre-seed: 128 requests with 25600 (32K × 0.8) input tokens + 1 output "
+"token"
+msgstr "预填充：128 个请求，包含 25600 (32K × 0.8) 个输入 token + 1 个输出 token"
+
+#: ../../source/user_guide/feature_guide/ucm_deployment.md:780
+msgid "Test: 128 requests with 32000 input tokens + 1000 output tokens"
+msgstr "测试：128 个请求，包含 32000 个输入 token + 1000 个输出 token"
+
+#: ../../source/user_guide/feature_guide/ucm_deployment.md:782
+#, python-format
+msgid ""
+"This procedure ensures the prefix portion (80% of input) is cached before"
+" measuring performance, simulating real-world prefix reuse scenarios."
+msgstr "此流程确保在测量性能之前缓存前缀部分（输入的 80%），模拟真实世界的前缀重用场景。"
+
+#: ../../source/user_guide/feature_guide/ucm_deployment.md:784
+msgid "**Test Commands:**"
+msgstr "**测试命令：**"
+
+#: ../../source/user_guide/feature_guide/ucm_deployment.md:816
+msgid "**Test Scenarios:**"
+msgstr "**测试场景：**"
+
+#: ../../source/user_guide/feature_guide/ucm_deployment.md
+msgid "Scenario"
+msgstr "场景"
+
+#: ../../source/user_guide/feature_guide/ucm_deployment.md
+msgid "**Recalculation**"
+msgstr "**重新计算**"
+
+#: ../../source/user_guide/feature_guide/ucm_deployment.md
+msgid "Baseline without UCM, HBM prefix cache disabled (full recomputation)"
+msgstr "无 UCM 的基线，HBM 前缀缓存禁用（完全重新计算）"
+
+#: ../../source/user_guide/feature_guide/ucm_deployment.md
+msgid "**HBM PC**"
+msgstr "**HBM PC**"
+
+#: ../../source/user_guide/feature_guide/ucm_deployment.md
+msgid "Without UCM, HBM prefix cache enabled"
+msgstr "无 UCM，HBM 前缀缓存启用"
+
+#: ../../source/user_guide/feature_guide/ucm_deployment.md
+msgid "**UCM PC**"
+msgstr "**UCM PC**"
+
+#: ../../source/user_guide/feature_guide/ucm_deployment.md
+msgid "With UCM prefix cache enabled"
+msgstr "启用 UCM 前缀缓存"
+
+#: ../../source/user_guide/feature_guide/ucm_deployment.md:824
+msgid "**Performance Results:**"
+msgstr "**性能结果：**"
+
+#: ../../source/user_guide/feature_guide/ucm_deployment.md:890
+msgid ""
+"**Note**: Due to data parallelism, requests during the test phase may not"
+" be routed to the same DP process that was used for KV cache pre-seeding."
+" As a result, HBM PC achieves an actual cache hit rate lower than the "
+"intended 0.8. UCM addresses this limitation by storing all KV cache in "
+"shared external storage, ensuring that requests can hit cached data "
+"regardless of which DP process handles them. This guarantees a true cache"
+" hit rate equal to the pre-seeding ratio of 0.8, significantly reducing "
+"TTFT compared to HBM PC. The improved TTFT effectively increases Prefill "
+"instance throughput, thereby boosting the overall system throughput."
+msgstr "**注意**：由于数据并行性，测试阶段的请求可能不会被路由到用于 KV 缓存预填充的同一 DP 进程。因此，HBM PC 的实际缓存命中率低于预期的 0.8。UCM 通过将所有 KV 缓存存储在共享外部存储中来解决此限制，确保无论请求由哪个 DP 进程处理，都能命中缓存数据。这保证了真实的缓存命中率等于预填充比例 0.8，与 HBM PC 相比显著降低了 TTFT。改进的 TTFT 有效提高了 Prefill 实例的吞吐量，从而提升了整体系统吞吐量。"
+
+#~ msgid "Overview"
+#~ msgstr "概述"
+
+#~ msgid "Configure UCM for Prefix Caching"
+#~ msgstr "为前缀缓存配置 UCM"
+
+#~ msgid ""
+#~ "Modify the UCM configuration file to "
+#~ "specify which UCM connector to use "
+#~ "and where KV blocks should be "
+#~ "stored. You may directly edit the "
+#~ "example file at:"
+#~ msgstr "修改 UCM 配置文件以指定要使用的 UCM 连接器以及 KV 块的存储位置。您可以直接编辑位于以下路径的示例文件："
+
+#~ msgid "`unified-cache-management/examples/ucm_config_example.yaml`"
+#~ msgstr "`unified-cache-management/examples/ucm_config_example.yaml`"
+
+#~ msgid "A minimal configuration looks like this:"
+#~ msgstr "一个最小化的配置示例如下："
+
+#~ msgid "Explanation:"
+#~ msgstr "参数说明："
+
+#~ msgid ""
+#~ "ucm_connector_name: \"UcmNfsStore\": Specifies "
+#~ "`UcmNfsStore` as the UCM connector."
+#~ msgstr "ucm_connector_name: \"UcmNfsStore\"：指定 `UcmNfsStore` 作为 UCM 连接器。"
+
+#~ msgid ""
+#~ "storage_backends: Specify the directory used"
+#~ " for storing KV blocks. It can "
+#~ "be a local directory or an NFS-"
+#~ "mounted path. UCM will store KV "
+#~ "blocks here.  **⚠️ Make sure to "
+#~ "replace `\"/mnt/test\"` with your actual "
+#~ "storage directory.**"
+#~ msgstr ""
+#~ "storage_backends：指定用于存储 KV 块的目录。它可以是本地目录或 NFS "
+#~ "挂载路径。UCM 将在此处存储 KV 块。**⚠️ 请务必将 "
+#~ "`\"/mnt/test\"` 替换为您实际的存储目录。**"
+
+#~ msgid ""
+#~ "use_direct: Whether to enable direct I/O"
+#~ " (optional). Default is `false`."
+#~ msgstr "use_direct：是否启用直接 I/O（可选）。默认为 `false`。"
+
+#~ msgid ""
+#~ "load_only_first_rank: Controls whether only "
+#~ "rank 0 loads KV cache and "
+#~ "broadcasts it to other ranks.   This "
+#~ "feature is currently not supported on"
+#~ " Ascend, so it must be set to"
+#~ " `false` (all ranks load/dump "
+#~ "independently)."
+#~ msgstr ""
+#~ "load_only_first_rank：控制是否仅由 rank 0 加载 KV "
+#~ "缓存并广播给其他 rank。此功能目前在 Ascend 上不受支持，因此必须设置为 "
+#~ "`false`（所有 rank 独立加载/转储）。"
+
+#~ msgid "Launching Inference"
+#~ msgstr "启动推理"
+
+#~ msgid ""
+#~ "In this guide, we describe **online "
+#~ "inference** using vLLM with the UCM "
+#~ "connector, deployed as an OpenAI-"
+#~ "compatible server. For best performance "
+#~ "with UCM, it is recommended to set"
+#~ " `block_size` to 128."
+#~ msgstr ""
+#~ "在本指南中，我们介绍使用带有 UCM 连接器的 vLLM 进行**在线推理**，并部署为兼容"
+#~ " OpenAI 的服务器。为了获得 UCM 的最佳性能，建议将 "
+#~ "`block_size` 设置为 128。"
+
+#~ msgid "To start the vLLM server with the Qwen/Qwen2.5-14B-Instruct model, run:"
+#~ msgstr "要使用 Qwen/Qwen2.5-14B-Instruct 模型启动 vLLM 服务器，请运行："
+
+#~ msgid ""
+#~ "**⚠️ Make sure to replace `\"/vllm-"
+#~ "workspace/unified-cache-"
+#~ "management/examples/ucm_config_example.yaml\"` with your"
+#~ " actual config file path.**"
+#~ msgstr ""
+#~ "**⚠️ 请务必将 `\"/vllm-workspace/unified-cache-"
+#~ "management/examples/ucm_config_example.yaml\"` 替换为您实际的配置文件路径。**"
+
+#~ msgid "If you see the log below:"
+#~ msgstr "如果您看到如下日志："
+
+#~ msgid ""
+#~ "Congratulations, you have successfully started"
+#~ " the vLLM server with UCM connector!"
+#~ msgstr "恭喜，您已成功启动带有 UCM 连接器的 vLLM 服务器！"
+
+#~ msgid "Evaluating UCM Prefix Caching Performance"
+#~ msgstr "评估 UCM 前缀缓存性能"
+
+#~ msgid ""
+#~ "After launching the vLLM server with "
+#~ "`UCMConnector` enabled, the easiest way "
+#~ "to observe the prefix caching effect "
+#~ "is to run the built-in `vllm "
+#~ "bench` CLI. Executing the following "
+#~ "command **twice** in a separate terminal"
+#~ " shows the improvement clearly."
+#~ msgstr ""
+#~ "在启动启用 `UCMConnector` 的 vLLM "
+#~ "服务器后，观察前缀缓存效果最简单的方法是运行内置的 `vllm bench` "
+#~ "CLI。在另一个终端中执行以下命令**两次**，可以清晰地看到性能提升。"
+
+#~ msgid "After the first execution"
+#~ msgstr "第一次执行后"
+
+#~ msgid "The `vllm bench` terminal prints the benchmark result:"
+#~ msgstr "`vllm bench` 终端打印基准测试结果："
+
+#~ msgid "Inspecting the vLLM server logs reveals entries like:"
+#~ msgstr "检查 vLLM 服务器日志会发现如下条目："
+
+#~ msgid ""
+#~ "This indicates that for the first "
+#~ "inference request, UCM did not hit "
+#~ "any cached KV blocks. As a result,"
+#~ " the full 16K-token prefill must "
+#~ "be computed, leading to a relatively "
+#~ "large TTFT."
+#~ msgstr "这表明对于第一个推理请求，UCM 未命中任何缓存的 KV 块。因此，必须计算完整的 16K-token 预填充，导致 TTFT 相对较大。"
+
+#~ msgid "After the second execution"
+#~ msgstr "第二次执行后"
+
+#~ msgid "Running the same benchmark again produces:"
+#~ msgstr "再次运行相同的基准测试会产生："
+
+#~ msgid "The vLLM server logs now contain similar entries:"
+#~ msgstr "vLLM 服务器日志现在包含类似的条目："
+
+#~ msgid ""
+#~ "This indicates that during the second"
+#~ " request, UCM successfully retrieved all"
+#~ " 125 cached KV blocks from the "
+#~ "storage backend. Leveraging the fully "
+#~ "cached prefix significantly reduces the "
+#~ "initial latency observed by the model,"
+#~ " yielding an approximate **8× improvement"
+#~ " in TTFT** compared to the initial"
+#~ " run."
+#~ msgstr ""
+#~ "这表明在第二个请求期间，UCM 成功地从存储后端检索了所有 125 个缓存的 KV "
+#~ "块。利用完全缓存的前缀显著降低了模型观察到的初始延迟，与初始运行相比，TTFT 提升了约 **8 "
+#~ "倍**。"
