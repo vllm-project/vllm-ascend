@@ -543,6 +543,7 @@ setup(
             "ascend_kv_connector = vllm_ascend:register_connector",
             "ascend_model_loader = vllm_ascend:register_model_loader",
             "ascend_service_profiling = vllm_ascend:register_service_profiling",
+            "ascend_qwen35 = vllm_ascend:register_qwen35_models",
         ],
     },
 )
