@@ -157,7 +157,6 @@ export HCCL_OP_EXPANSION_MODE="AIV"
 
 export USE_MULTI_BLOCK_POOL=1
 export USE_MULTI_GROUPS_KV_CACHE=1
-export ASCEND_BUFFER_POOL=0:0
 export TASK_QUEUE_ENABLE=1
 #export DYNAMIC_EPLB=true
 export VLLM_ASCEND_ENABLE_FLASHCOMM1=1
@@ -192,7 +191,6 @@ vllm serve /root/.cache/modelscope/hub/models/vllm-ascend/DeepSeek-V4-Pro-w4a8-m
   --reasoning-parser deepseek_v4 \
   --async-scheduling \
   --safetensors-load-strategy 'prefetch' \
-  --default-chat-template-kwargs '{"thinking": true}' \
   --profiler-config '{"profiler": "torch", "torch_profiler_dir": "/path", "torch_profiler_with_stack": false}' \
   --speculative-config '{"num_speculative_tokens": 1,"method": "mtp"}' \
   --additional-config '{"ascend_compilation_config":{"enable_npugraph_ex":true,"enable_static_kernel":false},"enable_cpu_binding":"True"}' \
@@ -225,7 +223,6 @@ export HCCL_OP_EXPANSION_MODE="AIV"
 
 export USE_MULTI_BLOCK_POOL=1
 export USE_MULTI_GROUPS_KV_CACHE=1
-export ASCEND_BUFFER_POOL=0:0
 export TASK_QUEUE_ENABLE=1
 #export DYNAMIC_EPLB=true
 export VLLM_ASCEND_ENABLE_FLASHCOMM1=1
@@ -261,7 +258,6 @@ vllm serve /root/.cache/modelscope/hub/models/vllm-ascend/DeepSeek-V4-Pro-w4a8-m
   --enable-auto-tool-choice \
   --reasoning-parser deepseek_v4 \
   --safetensors-load-strategy 'prefetch' \
-  --default-chat-template-kwargs '{"thinking": true}' \
   --speculative-config '{"num_speculative_tokens": 1,"method": "mtp"}' \
   --profiler-config '{"profiler": "torch", "torch_profiler_dir": "/path", "torch_profiler_with_stack": false}' \
   --additional-config '{"ascend_compilation_config":{"enable_npugraph_ex":true,"enable_static_kernel":false},"enable_cpu_binding":"True"}' \
@@ -695,7 +691,6 @@ Before you start, please
         export OMP_NUM_THREADS=10
         export PYTORCH_NPU_ALLOC_CONF=expandable_segments:True
         export HCCL_BUFFSIZE=1024
-        export ASCEND_BUFFER_POOL=4:8
 
         export USE_MULTI_GROUPS_KV_CACHE=1
         export USE_MULTI_BLOCK_POOL=1
@@ -924,7 +919,6 @@ Before you start, please
       export PYTORCH_NPU_ALLOC_CONF=expandable_segments:True
       export HCCL_BUFFSIZE=1024
       
-      export ASCEND_BUFFER_POOL=4:8
       export USE_MULTI_GROUPS_KV_CACHE=1
       export USE_MULTI_BLOCK_POOL=1
       export VLLM_USE_V1=1
@@ -955,7 +949,6 @@ Before you start, please
           --enable-auto-tool-choice \
           --reasoning-parser deepseek_v4 \
           --enforce-eager \
-          --default-chat-template-kwargs '{"thinking": true}' \
           --no-enable-prefix-caching \
           --speculative-config '{"num_speculative_tokens": 1, "method":"deepseek_mtp"}' \
           --additional_config '{"enable_cpu_binding": "True"}' \
@@ -1002,7 +995,6 @@ Before you start, please
       export PYTORCH_NPU_ALLOC_CONF=expandable_segments:True
       export HCCL_BUFFSIZE=1024
       
-      export ASCEND_BUFFER_POOL=4:8
       export USE_MULTI_GROUPS_KV_CACHE=1
       export USE_MULTI_BLOCK_POOL=1
       export VLLM_USE_V1=1
@@ -1033,7 +1025,6 @@ Before you start, please
           --enable-auto-tool-choice \
           --reasoning-parser deepseek_v4 \
           --safetensors-load-strategy 'prefetch' \
-          --default-chat-template-kwargs '{"thinking": true}' \
           --no-enable-prefix-caching \
           --speculative-config '{"num_speculative_tokens": 1, "method":"deepseek_mtp"}' \
           --compilation-config '{"cudagraph_mode": "FULL_DECODE_ONLY"}' \
