@@ -37,6 +37,7 @@ env:
   UV_INDEX_URL: http://cache-service.nginx-pypi-cache.svc.cluster.local/pypi/simple
   UV_EXTRA_INDEX_URL: https://mirrors.huaweicloud.com/ascend/repos/pypi
   UV_INDEX_STRATEGY: unsafe-best-match
+  UV_INSECURE_HOST: cache-service.nginx-pypi-cache.svc.cluster.local
   UV_NO_CACHE: 1
   UV_SYSTEM_PYTHON: 1
 
@@ -49,13 +50,21 @@ jobs:
             part: [0, 1, 2, 3]
             vllm: [v0.20.1]
         container:
-          image: swr.cn-southwest-2.myhuaweicloud.com/base_image/ascend-ci/cann:8.5.1-910b-ubuntu22.04-py3.11
+          image: swr.cn-southwest-2.myhuaweicloud.com/base_image/ascend-ci/cann:9.0.0-910b-ubuntu22.04-py3.11
           env:
             VLLM_LOGGING_LEVEL: ERROR
             HF_HUB_OFFLINE: 1
         steps:
+          - name: Set global envs
+            run: |
+              set -a
+              . /usr/local/Ascend/ascend-toolkit/set_env.sh
+              set +a
+              env >> $GITHUB_ENV
+
           - name: Checkout vllm-project/vllm-ascend repo
             uses: actions/checkout@v6
+
           - name: Check npu and CANN info
             run: |
               npu-smi info
@@ -97,11 +106,11 @@ jobs:
 
           - name: Install vllm-project/vllm-ascend
             env:
-              PIP_EXTRA_INDEX_URL: https://mirrors.huaweicloud.com/ascend/repos/pypi
+              PIP_EXTRA_INDEX_URL: "https://mirrors.huaweicloud.com/ascend/repos/pypi https://triton-ascend.osinfra.cn/pypi/simple https://download.pytorch.org/whl/cpu/"
             run: |
               pip install uc-manager
               uv pip install -r requirements-dev.txt
-              uv pip install -v -e .
+              uv pip install -e .
               uv pip install tblib 
               uv pip install runai_model_streamer pqdm timm schemathesis==3.39.15 "vllm[helion]" "runai-model-streamer[s3,gcs]"
               uv pip install "mteb[bm25s]" open_clip_torch terratorch==1.2.2 imagehash
@@ -178,11 +187,11 @@ jobs:
 
           - name: Install vllm-project/vllm-ascend
             env:
-              PIP_EXTRA_INDEX_URL: https://mirrors.huaweicloud.com/ascend/repos/pypi
+              PIP_EXTRA_INDEX_URL: "https://mirrors.huaweicloud.com/ascend/repos/pypi https://triton-ascend.osinfra.cn/pypi/simple https://download.pytorch.org/whl/cpu/"
             run: |
               pip install uc-manager
               uv pip install -r requirements-dev.txt
-              uv pip install -v -e .
+              uv pip install -e .
               uv pip install tblib
               uv pip uninstall triton
               uv pip uninstall triton-ascend
@@ -252,11 +261,11 @@ jobs:
 
           - name: Install vllm-project/vllm-ascend
             env:
-              PIP_EXTRA_INDEX_URL: https://mirrors.huaweicloud.com/ascend/repos/pypi
+              PIP_EXTRA_INDEX_URL: "https://mirrors.huaweicloud.com/ascend/repos/pypi https://triton-ascend.osinfra.cn/pypi/simple https://download.pytorch.org/whl/cpu/"
             run: |
               pip install uc-manager
               uv pip install -r requirements-dev.txt
-              uv pip install -v -e .
+              uv pip install -e .
               uv pip install tblib
               uv pip uninstall triton
               uv pip uninstall triton-ascend
