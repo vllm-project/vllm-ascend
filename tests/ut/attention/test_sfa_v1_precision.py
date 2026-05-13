@@ -23,17 +23,25 @@ Same scaffolding as PR #7216 (``BatchSpec``, ``create_vllm_config``,
 fp32 dense MQA reference.
 """
 
+# ruff: noqa: I001 - import order: load ``_torch_npu_inductor_shim`` before ``vllm`` / ``vllm_ascend``.
 import math
 import os
 import sys
 from unittest.mock import MagicMock
 
-from vllm_ascend.utils import enable_custom_op
-
-enable_custom_op()
-
 import pytest
 import torch
+
+import tests.ut.attention._torch_npu_inductor_shim as _torch_npu_inductor_shim  # noqa: F401
+from vllm.forward_context import set_forward_context
+
+from tests.ut.attention.utils import (
+    BatchSpec,
+    create_common_attn_metadata,
+    create_vllm_config,
+)
+from tests.ut.conftest import npu_test
+from vllm_ascend.attention.sfa_v1 import AscendSFAImpl
 
 # Metrics log: survives vLLM stdout/stderr redirection; path via env.
 _METRICS_LOG_PATH = os.environ.get(
@@ -54,19 +62,6 @@ def _emit_metric(line: str) -> None:
     except Exception:
         pass
 
-
-if "torch_npu._inductor" not in sys.modules:
-    sys.modules["torch_npu._inductor"] = MagicMock()
-
-from vllm.forward_context import set_forward_context  # noqa: E402
-
-from tests.ut.attention.utils import (  # noqa: E402
-    BatchSpec,
-    create_common_attn_metadata,
-    create_vllm_config,
-)
-from tests.ut.conftest import npu_test  # noqa: E402
-from vllm_ascend.attention.sfa_v1 import AscendSFAImpl  # noqa: E402
 
 SPARSE_COUNT = 2048  # indexer_select_post_process (sfa_v1)
 

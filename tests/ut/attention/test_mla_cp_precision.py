@@ -17,30 +17,24 @@
 #
 """NPU precision tests: ``AscendMlaCPImpl`` vs fp32 reference (``mla_cp.py``)."""
 
+# ruff: noqa: I001 - import order: load ``_torch_npu_inductor_shim`` before ``vllm`` / ``vllm_ascend``.
 import math
-import sys
 from contextlib import ExitStack
 from dataclasses import dataclass, field
 from typing import Any
 from unittest.mock import MagicMock, patch
 
-from vllm_ascend.utils import enable_custom_op
-
-enable_custom_op()
-
 import pytest
 import torch
 
-if "torch_npu._inductor" not in sys.modules:
-    sys.modules["torch_npu._inductor"] = MagicMock()
+import tests.ut.attention._torch_npu_inductor_shim as _torch_npu_inductor_shim  # noqa: F401
+from vllm.config import VllmConfig
 
-from vllm.config import VllmConfig  # noqa: E402
-
-from tests.ut.attention.utils import BatchSpec, create_vllm_config  # noqa: E402
-from tests.ut.conftest import npu_test  # noqa: E402
-from vllm_ascend.attention.attention_v1 import AscendAttentionState  # noqa: E402
-from vllm_ascend.attention.context_parallel.mla_cp import AscendMlaCPImpl  # noqa: E402
-from vllm_ascend.attention.mla_v1 import AscendMLAImpl  # noqa: E402
+from tests.ut.attention.utils import BatchSpec, create_vllm_config
+from tests.ut.conftest import npu_test
+from vllm_ascend.attention.attention_v1 import AscendAttentionState
+from vllm_ascend.attention.context_parallel.mla_cp import AscendMlaCPImpl
+from vllm_ascend.attention.mla_v1 import AscendMLAImpl
 
 KV_LORA_RANK = 512
 QK_NOPE_HEAD_DIM = 128
