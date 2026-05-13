@@ -319,15 +319,6 @@ After about several minutes, you can get the performance evaluation result.
 
 In this section, we provide simple scripts to re-produce our latest performance. It is also recommended to read instructions above to understand basic concepts or options in vLLM && vLLM-Ascend.
 
-### Environment
-
-- vLLM v0.13.0
-- vLLM-Ascend v0.13.0rc1
-- CANN 8.3.RC2
-- torch_npu 2.8.0
-- HDK/driver 25.3.RC1
-- triton_ascend 3.2.0
-
 ### Single Node A3 (64G*16)
 
 Example server scripts:

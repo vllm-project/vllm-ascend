@@ -1,14 +1,5 @@
 # Mooncake connector deployment Guide
 
-## Environmental Dependencies
-
-* Software:
-    * Python >= 3.10, < 3.12
-    * CANN == 8.3.rc2
-    * PyTorch == 2.8.0, torch-npu == 2.8.0
-    * vLLM (same version as vllm-ascend)
-    * mooncake-transfer-engine reference documentation: <https://github.com/kvcache-ai/Mooncake/blob/main/doc/zh/ascend_transport.md>
-
 The vllm version must be the same as the main branch of vllm-ascend, for example, 2025/07/30. The version is
 
 * vllm: v0.10.1

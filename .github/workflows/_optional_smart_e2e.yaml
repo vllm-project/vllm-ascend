@@ -56,7 +56,7 @@ jobs:
         VLLM_USE_MODELSCOPE: True
         MAX_JOBS: 4
         UV_INDEX_URL: http://cache-service.nginx-pypi-cache.svc.cluster.local/pypi/simple
-        UV_EXTRA_INDEX_URL: https://mirrors.huaweicloud.com/ascend/repos/pypi
+        UV_EXTRA_INDEX_URL: "https://mirrors.huaweicloud.com/ascend/repos/pypi https://triton-ascend.osinfra.cn/pypi/simple"
         UV_INDEX_STRATEGY: unsafe-best-match
         UV_NO_CACHE: 1
         UV_SYSTEM_PYTHON: 1
@@ -91,8 +91,8 @@ jobs:
       - name: Install vllm-project/vllm from source
         working-directory: ./vllm-empty
         run: |
-          VLLM_TARGET_DEVICE=empty uv pip install . ${{ steps.check_npu.outputs.has_npu == 'false' && '--extra-index-url https://download.pytorch.org/whl/cpu/' || '' }}
-          uv pip uninstall triton
+          VLLM_TARGET_DEVICE=empty pip install . ${{ steps.check_npu.outputs.has_npu == 'false' && '--extra-index-url https://download.pytorch.org/whl/cpu/' || '' }}
+          pip uninstall -y triton
 
       - name: Checkout vllm-project/vllm-ascend repo
         uses: actions/checkout@v6
@@ -121,14 +121,14 @@ jobs:
       - name: Install vllm-project/vllm-ascend with device
         if: ${{ steps.check_npu.outputs.has_npu == 'true' }}
         env:
-          PIP_EXTRA_INDEX_URL: https://mirrors.huaweicloud.com/ascend/repos/pypi
+          PIP_EXTRA_INDEX_URL: "https://mirrors.huaweicloud.com/ascend/repos/pypi https://triton-ascend.osinfra.cn/pypi/simple https://download.pytorch.org/whl/cpu/"
         run: |
           pip install uc-manager
           uv pip install -r requirements-dev.txt
           if find vllm_ascend -maxdepth 1 -name '*.so' -type f 2>/dev/null | grep -q .; then
-            COMPILE_CUSTOM_KERNELS=0 uv pip install -v -e .
+            COMPILE_CUSTOM_KERNELS=0 uv pip install -e .
           else
-            uv pip install -v -e .
+            uv pip install -e .
           fi
 
       - name: Install vllm-project/vllm-ascend no device
@@ -139,8 +139,8 @@ jobs:
         run: |
           pip install uc-manager
           export LD_LIBRARY_PATH=$LD_LIBRARY_PATH:/usr/local/Ascend/ascend-toolkit/latest/x86_64-linux/devlib
-          uv pip install -v . --extra-index-url https://download.pytorch.org/whl/cpu/
-          uv pip install -r requirements-dev.txt --extra-index-url https://download.pytorch.org/whl/cpu/
+          uv pip install . --extra-index-url https://download.pytorch.org/whl/cpu/ --extra-index-url https://triton-ascend.osinfra.cn/pypi/simple
+          uv pip install -r requirements-dev.txt --extra-index-url https://download.pytorch.org/whl/cpu/ --extra-index-url https://triton-ascend.osinfra.cn/pypi/simple
 
       - name: Run smart UT with device
         if: ${{ steps.check_npu.outputs.has_npu == 'true' }}
@@ -168,6 +168,7 @@ jobs:
         shell: bash
         run: |
           export LD_LIBRARY_PATH=$LD_LIBRARY_PATH:/usr/local/Ascend/ascend-toolkit/latest/x86_64-linux/devlib
+          . /usr/local/Ascend/ascend-toolkit/set_env.sh
 
           echo -e "\033[1;34m=== TEST INFO ===\033[0m"
           echo -e "  \033[33mDevice:\033[0m ${{ matrix.group.npu_type }}"
