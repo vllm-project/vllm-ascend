@@ -24,6 +24,10 @@ from unittest.mock import MagicMock
 import pytest
 import torch
 
+from vllm_ascend.utils import enable_custom_op
+
+enable_custom_op()
+
 # Metrics log: survives vLLM stdout/stderr redirection; path via env.
 _METRICS_LOG_PATH = os.environ.get(
     "SFA_V1_PRECISION_METRICS_LOG",
