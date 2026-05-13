@@ -2,7 +2,7 @@
 #define COPY_AND_EXPAND_EAGLE_INPUTS_TILING_H
 
 #include "register/tilingdata_base.h"
-#include "error_log.h"
+#include "tiling_base/error_log.h"
 #include "register/op_impl_registry.h"
 #include "tiling/platform/platform_ascendc.h"
 
