@@ -22,11 +22,12 @@ from vllm.forward_context import get_forward_context
 from vllm.model_executor.layers.fla.ops.l2norm import l2norm_fwd
 from vllm.model_executor.layers.mamba.gdn_linear_attn import GatedDeltaNetAttention
 from vllm.triton_utils import triton
-from vllm.v1.attention.backend import AttentionMetadata  # type: ignore
+from vllm.v1.attention.backend import AttentionBackend, AttentionMetadata  # type: ignore
 from vllm.v1.attention.backends.gdn_attn import GDNAttentionMetadata
 from vllm.v1.attention.backends.utils import PAD_SLOT_ID
 
 from vllm_ascend.attention.utils import maybe_save_kv_layer_to_connector
+from vllm_ascend.ops.gdn_attn_builder import AscendGDNAttentionBackend
 from vllm_ascend.ops.triton.fla.chunk import chunk_gated_delta_rule
 from vllm_ascend.ops.triton.fla.fused_qkvzba_split_reshape import fused_qkvzba_split_reshape_cat
 from vllm_ascend.ops.triton.fla.utils import clear_ssm_states
@@ -45,7 +46,7 @@ def _require_non_spec_prefill_fallback_meta(attn_metadata, field_name: str):
     fallback_meta = getattr(attn_metadata, "non_spec_prefill_fallback_meta", None)
     if fallback_meta is None:
         raise RuntimeError(
-            f"Expected attn_metadata.non_spec_prefill_fallback_meta.{field_name} for patched GDN non-spec prefill path."
+            f"Expected attn_metadata.non_spec_prefill_fallback_meta.{field_name} for Ascend GDN non-spec prefill path."
         )
     return fallback_meta
 
@@ -66,6 +67,9 @@ def get_non_spec_chunked_prefill_meta(attn_metadata):
 
 
 class AscendGatedDeltaNetAttention(GatedDeltaNetAttention):
+    def get_attn_backend(self) -> type[AttentionBackend]:
+        return AscendGDNAttentionBackend
+
     def forward(
         self,
         hidden_states: torch.Tensor,
