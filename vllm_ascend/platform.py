@@ -95,11 +95,13 @@ class NPUPlatform(Platform):
     _enum = PlatformEnum.OOT
     device_name: str = "npu"
     device_type: str = "npu"
-    # Ascend NPU uses torch_npu's Inductor backend ("npu") for
-    # STOCK_TORCH_COMPILE / DYNAMO_TRACE_ONCE modes. For VLLM_COMPILE mode,
-    # the actual compilation is handled by VllmBackend → AscendCompiler →
-    # TorchAIR ACL Graph, not by this attribute.
-    simple_compile_backend: str = "npu"
+    # simple_compile_backend is the default backend for @torch.compile
+    # decorators on individual utility functions (spec_decode, logprobs,
+    # MoE router, etc.). Keep as "eager" to avoid changing numerical
+    # behavior of these functions. Model-level compilation for
+    # STOCK_TORCH_COMPILE / DYNAMO_TRACE_ONCE modes uses
+    # get_compile_backend() which returns "npu".
+    simple_compile_backend: str = "eager"
     ray_device_key: str = "NPU"
     device_control_env_var: str = "ASCEND_RT_VISIBLE_DEVICES"
     dispatch_key: str = "PrivateUse1"

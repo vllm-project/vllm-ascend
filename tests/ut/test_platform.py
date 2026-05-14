@@ -54,7 +54,7 @@ class TestNPUPlatform(TestBase):
         self.assertEqual(NPUPlatform._enum, PlatformEnum.OOT)
         self.assertEqual(NPUPlatform.device_name, "npu")
         self.assertEqual(NPUPlatform.device_type, "npu")
-        self.assertEqual(NPUPlatform.simple_compile_backend, "npu")
+        self.assertEqual(NPUPlatform.simple_compile_backend, "eager")
         self.assertEqual(NPUPlatform.ray_device_key, "NPU")
         self.assertEqual(NPUPlatform.device_control_env_var, "ASCEND_RT_VISIBLE_DEVICES")
         self.assertEqual(NPUPlatform.dispatch_key, "PrivateUse1")
