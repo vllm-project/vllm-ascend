@@ -45,6 +45,7 @@ def register_connector():
     _ensure_global_patch()
 
     from vllm_ascend.distributed.kv_transfer import register_connector
+    from vllm_ascend.distributed.weight_transfer import hccl_engine  # noqa: F401
 
     register_connector()
 
