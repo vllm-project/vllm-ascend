@@ -590,6 +590,43 @@ class TestNPUPlatform(TestBase):
         ):
             self.platform.check_and_update_config(vllm_config)
 
+    @patch("vllm_ascend.quantization.utils.maybe_auto_detect_quantization")
+    @patch("vllm_ascend.utils.get_ascend_device_type", return_value=AscendDeviceType.A3)
+    @patch("vllm_ascend.ascend_config.init_ascend_config")
+    @patch("vllm_ascend.core.recompute_scheduler.RecomputeSchedulerConfig.initialize_from_config")
+    def test_check_and_update_config_rejects_both_balance_and_recompute_scheduler(
+        self, mock_init_recompute, mock_init_ascend, mock_soc_version, mock_auto_detect
+    ):
+        """Test that enabling both BalanceScheduler and RecomputeScheduler raises ValueError.
+        
+        This test verifies the mutual exclusion check added to prevent deadlock in
+        PD disaggregation mode with multi-DP MoE. See Issue #8975.
+        """
+        mock_ascend_config = TestNPUPlatform.mock_vllm_ascend_config()
+        mock_ascend_config.recompute_scheduler_enable = True
+        mock_init_ascend.return_value = mock_ascend_config
+
+        vllm_config = TestNPUPlatform.mock_vllm_config()
+        vllm_config.kv_transfer_config = MagicMock(kv_role="kv_producer", engine_id="engine0")
+        vllm_config.parallel_config.decode_context_parallel_size = 1
+        vllm_config.parallel_config.prefill_context_parallel_size = 1
+        vllm_config.parallel_config.tensor_parallel_size = 1
+        vllm_config.scheduler_config = MagicMock()
+        mock_init_recompute.return_value = MagicMock()
+
+        from vllm_ascend import platform
+
+        importlib.reload(platform)
+        self.platform = platform.NPUPlatform()
+
+        with (
+            patch("vllm_ascend.platform.envs_ascend.VLLM_ASCEND_BALANCE_SCHEDULING", True, create=True),
+            pytest.raises(ValueError, match=r"VLLM_ASCEND_BALANCE_SCHEDULING.*recompute_scheduler_enable.*cannot be enabled simultaneously"),
+            patch.object(platform.NPUPlatform, "_fix_incompatible_config"),
+            patch.object(platform, "check_kv_extra_config"),
+        ):
+            self.platform.check_and_update_config(vllm_config)
+
     def test_update_block_size_for_backend_preserves_hybrid_block_size(self):
         vllm_config = TestNPUPlatform.mock_vllm_config()
         vllm_config.model_config.is_hybrid = True
