@@ -1294,9 +1294,6 @@ class PCPManager:
             Each mask has shape [num_mtp_tokens, num_local_tokens]
             Returns None for non-decode requests or when no decode requests exist
         """
-        query_len = 1 + self.speculative_config.num_speculative_tokens
-        mtp_attn_mask = torch.ones(self.num_decode_reqs, query_len, 16384, dtype=torch.bool)  # max local_len is 16384
-
         # Calculate combined CP rank and size
         cp_rank = self.pcp_world_rank * self.dcp_world_size + self.dcp_world_rank
         cp_size = self.pcp_world_size * self.dcp_world_size
@@ -1306,7 +1303,8 @@ class PCPManager:
         mtp_len = decode_num_scheduled_tokens
 
         # Get local history tokens on each rank using _get_cp_local_seq_lens
-        num_computed_tokens_tensor = torch.from_numpy(np.array(decode_num_computed_tokens))
+        # decode_num_computed_tokens is already a list[int], use torch.tensor directly
+        num_computed_tokens_tensor = torch.tensor(decode_num_computed_tokens, dtype=torch.int32)
         local_seq_lens = self._get_cp_local_seq_lens(
             num_computed_tokens_tensor,
             self.pcp_world_size,
@@ -1317,8 +1315,9 @@ class PCPManager:
         # Get local history length for current rank
         local_history_lens = local_seq_lens[:, self.pcp_world_rank, self.dcp_world_rank]
 
-        # Pre-allocate list with known size to avoid append operations
-        mtp_masks = [None] * (self.num_decode_reqs + self.num_prefill_reqs)
+        # Reuse dcp_mtp_attn_mask buffer - it has shape [max_num_reqs, decode_threshold, 16384]
+        # Only update the portion we need
+        mtp_attn_mask = self.dcp_mtp_attn_mask.cpu_tensor[:self.num_decode_reqs]
 
         # Batch extract scalar values to minimize CPU-GPU sync overhead
         local_history_lens_np = local_history_lens.cpu().numpy()
@@ -1355,12 +1354,7 @@ class PCPManager:
             ])[None, :]  # [1, local]
             mask = mtp_pos_array < local_pos_array  # broadcasting: [mtp, local]
 
-            mtp_masks[req_idx] = torch.from_numpy(mask)
-
-        if mtp_masks[0] is not None:
-            mtp_masks = mtp_masks[: self.num_decode_reqs]
-            for i, mask in enumerate(mtp_masks):
-                S = mask.shape[0]
-                L = mask.shape[1]
-                mtp_attn_mask[i, :S, :L] = mask
+            # Directly fill the buffer instead of building a list
+            S, L = mask.shape
+            mtp_attn_mask[req_idx, :S, :L] = torch.from_numpy(mask)
         return mtp_attn_mask
