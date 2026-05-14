@@ -3,11 +3,10 @@ import math
 
 import vllm.model_executor.models.config
 from vllm.logger import logger
-from vllm.model_executor.layers.mamba.mamba_utils import MambaStateDtypeCalculator
 from vllm.model_executor.models import ModelRegistry
 from vllm.model_executor.models.config import MambaModelConfig
 from vllm.utils.math_utils import cdiv
-from vllm.utils.torch_utils import STR_DTYPE_TO_TORCH_DTYPE, get_dtype_size, get_kv_cache_torch_dtype
+from vllm.utils.torch_utils import STR_DTYPE_TO_TORCH_DTYPE, get_dtype_size
 
 
 @classmethod
@@ -108,19 +107,3 @@ def verify_and_update_config(cls, vllm_config) -> None:
 
 
 vllm.model_executor.models.config.HybridAttentionMambaModelConfig.verify_and_update_config = verify_and_update_config
-
-
-# =============================================================================
-# Patch: Remove float32 validation in linear_attention_state_dtype
-# =============================================================================
-# The original vLLM implementation raises ValueError when mamba_cache_dtype is
-# "float32" because it was not yet tested on GPU. Ascend NPU supports fp32
-# state for linear attention, so we replace the method with one that skips
-# this restriction.
-@classmethod  # type: ignore[misc]
-def _linear_attention_state_dtype_npu(cls, model_dtype, mamba_cache_dtype):
-    state_dtype = get_kv_cache_torch_dtype(mamba_cache_dtype, model_dtype)
-    return (state_dtype,)
-
-
-MambaStateDtypeCalculator.linear_attention_state_dtype = _linear_attention_state_dtype_npu
