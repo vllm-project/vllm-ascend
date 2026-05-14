@@ -52,10 +52,10 @@ class TestNPUWorker(TestBase):
     @patch("vllm_ascend.worker.worker.init_ascend_config")
     @patch("vllm_ascend.worker.worker.check_ascend_device_type")
     @patch(init_cached_hf_modules_path, create=True)
-    @patch("vllm_ascend.worker.worker.NPUWorker._create_profiler")
+    @patch("vllm_ascend.worker.worker.TorchNPUProfilerWrapper")
     def test_init_npu_worker_normal_case(
         self,
-        mock_create_profiler,
+        mock_profiler_wrapper,
         mock_init_cached_hf_modules,
         mock_check_ascend_device_type,
         mock_init_ascend_config,
@@ -94,7 +94,7 @@ class TestNPUWorker(TestBase):
         # Verify cache_dtype setting
         self.assertEqual(worker.cache_dtype, torch.float16)
         # Profiler is lazily initialized - not created during __init__ (RFC #6954)
-        mock_create_profiler.assert_not_called()
+        mock_profiler_wrapper.assert_not_called()
 
         # Verify init_cached_hf_modules is not called (trust_remote_code=False)
         mock_init_cached_hf_modules.assert_not_called()
@@ -107,10 +107,10 @@ class TestNPUWorker(TestBase):
     @patch("vllm_ascend.worker.worker.init_ascend_config")
     @patch("vllm_ascend.worker.worker.check_ascend_device_type")
     @patch(init_cached_hf_modules_path, create=True)
-    @patch("vllm_ascend.worker.worker.NPUWorker._create_profiler")
+    @patch("vllm_ascend.worker.worker.TorchNPUProfilerWrapper")
     def test_init_npu_worker_with_trust_remote_code(
         self,
-        mock_create_profiler,
+        mock_profiler_wrapper,
         mock_init_cached_hf_modules,
         mock_check_ascend_device_type,
         mock_init_ascend_config,
@@ -150,10 +150,10 @@ class TestNPUWorker(TestBase):
     @patch("vllm_ascend.worker.worker.init_ascend_config")
     @patch("vllm_ascend.worker.worker.check_ascend_device_type")
     @patch(init_cached_hf_modules_path, create=True)
-    @patch("vllm_ascend.worker.worker.NPUWorker._create_profiler")
+    @patch("vllm_ascend.worker.worker.TorchNPUProfilerWrapper")
     def test_init_npu_worker_with_custom_cache_dtype(
         self,
-        mock_create_profiler,
+        mock_profiler_wrapper,
         mock_init_cached_hf_modules,
         mock_check_ascend_device_type,
         mock_init_ascend_config,
@@ -284,7 +284,8 @@ class TestNPUWorker(TestBase):
             mock_profiler = MagicMock()
             worker.profiler = mock_profiler
 
-            worker.profile(is_start=True)
+            with patch("vllm.distributed.utils.get_worker_rank_suffix", return_value="dp0_pp0_tp0_dcp0_ep0_rank0"):
+                worker.profile(is_start=True)
             mock_profiler.start.assert_called_once()
 
             worker.profile(is_start=False)
@@ -307,7 +308,7 @@ class TestNPUWorker(TestBase):
             self.assertIn("Profiling is not enabled", str(cm.exception))
 
     def test_profile_with_prefix_uses_trace_name(self):
-        """[RFC #6954] profile() accepts profile_prefix and passes trace_name to _create_profiler"""
+        """[RFC #6954] profile() accepts profile_prefix and passes trace_name to TorchNPUProfilerWrapper"""
         from vllm_ascend.worker.worker import NPUWorker
 
         profiler_config = ProfilerConfig(
@@ -325,11 +326,15 @@ class TestNPUWorker(TestBase):
 
         with (
             patch("vllm.distributed.utils.get_worker_rank_suffix", return_value="dp0_pp0_tp0_dcp0_ep0_rank0"),
-            patch.object(NPUWorker, "_create_profiler", return_value=MagicMock()) as mock_create,
+            patch("vllm_ascend.worker.worker.TorchNPUProfilerWrapper") as mock_profiler_wrapper,
         ):
             worker.profile(is_start=True, profile_prefix="warmup")
 
-            mock_create.assert_called_once_with("warmup_dp0_pp0_tp0_dcp0_ep0_rank0")
+            mock_profiler_wrapper.assert_called_once_with(
+                profiler_config,
+                "warmup_dp0_pp0_tp0_dcp0_ep0_rank0",
+            )
+            mock_profiler_wrapper.return_value.start.assert_called_once()
 
     def test_profile_lazy_init(self):
         """[RFC #6954] Profiler is lazily created on first profile(is_start=True) call"""
@@ -342,7 +347,7 @@ class TestNPUWorker(TestBase):
         vllm_config_mock = MagicMock()
         vllm_config_mock.profiler_config = profiler_config
 
-        with patch.object(NPUWorker, "_create_profiler", return_value=MagicMock()) as mock_create:
+        with patch("vllm_ascend.worker.worker.TorchNPUProfilerWrapper") as mock_profiler_wrapper:
             with patch.object(NPUWorker, "__init__", lambda x, **kwargs: None):
                 worker = NPUWorker()
                 worker.profiler_config = profiler_config
@@ -350,13 +355,17 @@ class TestNPUWorker(TestBase):
                 worker.rank = 0
 
             self.assertIsNone(worker.profiler)
-            mock_create.assert_not_called()
+            mock_profiler_wrapper.assert_not_called()
 
             with patch("vllm.distributed.utils.get_worker_rank_suffix", return_value="dp0_pp0_tp0_dcp0_ep0_rank0"):
                 worker.profile(is_start=True)
 
-            mock_create.assert_called_once()
-            self.assertIsNotNone(worker.profiler)
+            mock_profiler_wrapper.assert_called_once_with(
+                profiler_config,
+                "dp0_pp0_tp0_dcp0_ep0_rank0",
+            )
+            self.assertIs(worker.profiler, mock_profiler_wrapper.return_value)
+            mock_profiler_wrapper.return_value.start.assert_called_once()
 
     def test_profile_restart_reuses_existing_profiler(self):
         """[RFC #6954] Restarting profile reuses existing profiler."""
@@ -376,63 +385,39 @@ class TestNPUWorker(TestBase):
 
         with (
             patch("vllm.distributed.utils.get_worker_rank_suffix", return_value="dp0_pp0_tp0_dcp0_ep0_rank0"),
-            patch.object(NPUWorker, "_create_profiler", return_value=mock_profiler) as mock_create,
+            patch("vllm_ascend.worker.worker.TorchNPUProfilerWrapper", return_value=mock_profiler) as mock_wrapper,
         ):
             worker.profile(is_start=True, profile_prefix="session1")
-            mock_create.assert_called_once_with("session1_dp0_pp0_tp0_dcp0_ep0_rank0")
+            mock_wrapper.assert_called_once_with(
+                profiler_config,
+                "session1_dp0_pp0_tp0_dcp0_ep0_rank0",
+            )
 
             worker.profile(is_start=False)
             worker.profile(is_start=True)  # Restart without new prefix
             # Should NOT create new profiler, just restart existing
-            mock_create.assert_called_once()
+            mock_wrapper.assert_called_once()
+            self.assertEqual(mock_profiler.start.call_count, 2)
+            mock_profiler.stop.assert_called_once()
 
-    def test_trace_handler_uses_worker_name(self):
-        """[RFC #6954] _create_profiler passes worker_name to tensorboard_trace_handler"""
+    @patch("vllm_ascend.worker.worker.logger")
+    def test_profile_stop_without_start_logs_warning(self, mock_logger):
+        """Test stopping profiling before start logs a warning and returns."""
         from vllm_ascend.worker.worker import NPUWorker
 
         profiler_config = ProfilerConfig(
             profiler="torch",
             torch_profiler_dir="/path/to/traces",
         )
-        vllm_config_mock = MagicMock()
-        vllm_config_mock.profiler_config = profiler_config
-
-        with patch("vllm_ascend.worker.worker.envs_ascend") as mock_envs:
-            mock_envs.MSMONITOR_USE_DAEMON = 0
-            with patch("torch_npu.profiler.tensorboard_trace_handler") as mock_handler:
-                with patch.object(NPUWorker, "__init__", lambda x, **kwargs: None):
-                    worker = NPUWorker()
-                    worker.profiler_config = profiler_config
-                    worker.vllm_config = vllm_config_mock
-
-                worker._create_profiler("warmup_dp0_pp0_tp0_dcp0_ep0_rank0")
-
-                mock_handler.assert_called_once()
-                call_kwargs = mock_handler.call_args[1] if mock_handler.call_args[1] else {}
-                self.assertEqual(call_kwargs.get("worker_name"), "warmup_dp0_pp0_tp0_dcp0_ep0_rank0")
-
-    @patch("vllm_ascend.worker.worker.envs_ascend")
-    def test_profile_and_msmonitor_both_enabled_raises_error(self, mock_envs_ascend):
-        """Test _create_profiler raises when both profiler and msmonitor are enabled"""
-        from vllm_ascend.worker.worker import NPUWorker
-
-        mock_envs_ascend.MSMONITOR_USE_DAEMON = 1
-
-        profiler_config = ProfilerConfig(profiler="torch", torch_profiler_dir="/path/to/traces")
-        vllm_config_mock = MagicMock()
-        vllm_config_mock.profiler_config = profiler_config
 
         with patch.object(NPUWorker, "__init__", lambda x, **kwargs: None):
             worker = NPUWorker()
             worker.profiler_config = profiler_config
-            worker.vllm_config = vllm_config_mock
+            worker.profiler = None
 
-            with self.assertRaises(RuntimeError) as cm:
-                _ = worker._create_profiler("test_trace")
+            worker.profile(is_start=False)
 
-            self.assertIn(
-                "MSMONITOR_USE_DAEMON and torch profiler cannot be both enabled at the same time.", str(cm.exception)
-            )
+        mock_logger.warning.assert_called_once_with("Profiler was not started, nothing to stop.")
 
     def test_lora_methods(self):
         """Test LoRA related methods"""
@@ -511,121 +496,6 @@ class TestNPUWorker(TestBase):
             mock_model_runner._dummy_run.assert_called_once_with(
                 num_tokens=mock_decode_token_per_req, uniform_decode=True
             )
-
-    @patch("vllm_ascend.worker.worker.envs_ascend")
-    @patch("torch_npu.profiler._ExperimentalConfig")
-    @patch("torch_npu.profiler.profile")
-    @patch("torch_npu.profiler.tensorboard_trace_handler")
-    @patch("torch_npu.profiler.ExportType")
-    @patch("torch_npu.profiler.ProfilerLevel")
-    @patch("torch_npu.profiler.AiCMetrics")
-    @patch("torch_npu.profiler.ProfilerActivity")
-    def test_create_profiler_enabled(
-        self,
-        mock_profiler_activity,
-        mock_aic_metrics,
-        mock_profiler_level,
-        mock_export_type,
-        mock_trace_handler,
-        mock_profile,
-        mock_experimental_config,
-        mock_envs_ascend,
-    ):
-        """Test _create_profiler - profiler enabled with worker_name for trace naming (RFC #6954)"""
-        from vllm_ascend.worker.worker import NPUWorker
-
-        mock_envs_ascend.MSMONITOR_USE_DAEMON = 0
-
-        profiler_config = ProfilerConfig(
-            profiler="torch",
-            torch_profiler_dir="/path/to/traces",
-            torch_profiler_with_stack=True,
-            torch_profiler_with_memory=True,
-        )
-        vllm_config_mock = MagicMock()
-        vllm_config_mock.profiler_config = profiler_config
-
-        mock_export_type.Text = "Text"
-        mock_profiler_level.Level1 = "Level1"
-        mock_aic_metrics.AiCoreNone = "AiCoreNone"
-        mock_profiler_activity.CPU = "CPU"
-        mock_profiler_activity.NPU = "NPU"
-
-        mock_experimental_config_instance = MagicMock()
-        mock_experimental_config.return_value = mock_experimental_config_instance
-        mock_trace_handler_instance = MagicMock()
-        mock_trace_handler.return_value = mock_trace_handler_instance
-        mock_profiler_instance = MagicMock()
-        mock_profile.return_value = mock_profiler_instance
-
-        with patch.object(NPUWorker, "__init__", lambda x, **kwargs: None):
-            worker = NPUWorker()
-            worker.profiler_config = profiler_config
-            worker.vllm_config = vllm_config_mock
-
-            result = worker._create_profiler("warmup_dp0_pp0_tp0_dcp0_ep0_rank0")
-
-            mock_experimental_config.assert_called_once()
-            config_call = mock_experimental_config.call_args
-            config_kwargs = config_call.kwargs
-            expected_config = {
-                "export_type": "Text",
-                "profiler_level": "Level1",
-                "msprof_tx": False,
-                "aic_metrics": "AiCoreNone",
-                "l2_cache": False,
-                "op_attr": False,
-                "data_simplification": True,
-                "record_op_args": False,
-                "gc_detect_threshold": None,
-            }
-            for key, expected_value in expected_config.items():
-                self.assertEqual(config_kwargs[key], expected_value)
-
-            # Verify trace handler called with worker_name (RFC #6954)
-            mock_trace_handler.assert_called_once_with(
-                "/path/to/traces",
-                worker_name="warmup_dp0_pp0_tp0_dcp0_ep0_rank0",
-            )
-
-            mock_profile.assert_called_once()
-            profile_kwargs = mock_profile.call_args.kwargs
-            expected_activities = ["CPU", "NPU"]
-            self.assertEqual(profile_kwargs["activities"], expected_activities)
-            self.assertTrue(profile_kwargs["profile_memory"])
-            self.assertEqual(profile_kwargs["on_trace_ready"], mock_trace_handler_instance)
-            self.assertEqual(result, mock_profiler_instance)
-
-    def test_create_profiler_disabled(self):
-        """Test _create_profiler raises when profiler disabled"""
-        from vllm_ascend.worker.worker import NPUWorker
-
-        profiler_config = ProfilerConfig(profiler=None, torch_profiler_dir="")
-
-        with patch.object(NPUWorker, "__init__", lambda x, **kwargs: None):
-            worker = NPUWorker()
-            worker.profiler_config = profiler_config
-
-            with self.assertRaises(RuntimeError) as cm:
-                worker._create_profiler("test_trace")
-            self.assertIn("Unrecognized profiler: None", str(cm.exception))
-
-    def test_create_profiler_empty_dir(self):
-        """Test _create_profiler raises when torch_profiler_dir is empty/falsy"""
-        from vllm_ascend.worker.worker import NPUWorker
-
-        # Use MagicMock to bypass ProfilerConfig validation (empty dir not allowed)
-        profiler_config = MagicMock()
-        profiler_config.profiler = "torch"
-        profiler_config.torch_profiler_dir = ""
-
-        with patch.object(NPUWorker, "__init__", lambda x, **kwargs: None):
-            worker = NPUWorker()
-            worker.profiler_config = profiler_config
-
-            with self.assertRaises(RuntimeError) as cm:
-                worker._create_profiler("test_trace")
-            self.assertIn("torch_profiler_dir cannot be empty", str(cm.exception))
 
     @patch("torch.npu.reset_peak_memory_stats")
     @patch("torch.npu.empty_cache")
@@ -860,6 +730,7 @@ class TestNPUWorker(TestBase):
             worker.vllm_config = MagicMock()
             worker.vllm_config.parallel_config = MagicMock()
             worker.vllm_config.parallel_config.distributed_executor_backend = "ray"
+            worker.profiler = None
 
             # Set as first rank
             mock_pp_group = MagicMock()
@@ -881,6 +752,49 @@ class TestNPUWorker(TestBase):
             worker.model_runner.execute_model.assert_called_once_with(mock_scheduler_output, None)
             self.assertEqual(result, mock_model_output)
 
+    def test_execute_model_calls_profiler_step_when_enabled(self):
+        """Test execute_model steps the profiler before model execution."""
+        from vllm.v1.outputs import ModelRunnerOutput
+
+        from vllm_ascend.worker.worker import NPUWorker
+
+        call_order = []
+
+        # Create worker mock
+        with (
+            patch.object(NPUWorker, "__init__", lambda x, **kwargs: None),
+            patch("vllm_ascend.worker.worker.get_pp_group") as mock_get_pp_group,
+        ):
+            worker = NPUWorker()
+            worker.model_runner = MagicMock()
+            worker.vllm_config = MagicMock()
+            worker.vllm_config.parallel_config = MagicMock()
+            worker.vllm_config.parallel_config.distributed_executor_backend = "ray"
+            worker.profiler = MagicMock()
+            worker.profiler.step.side_effect = lambda: call_order.append("step")
+
+            mock_pp_group = MagicMock()
+            mock_pp_group.is_first_rank = True
+            mock_pp_group.is_last_rank = True
+            mock_get_pp_group.return_value = mock_pp_group
+
+            mock_scheduler_output = MagicMock()
+            mock_scheduler_output.total_num_scheduled_tokens = 1
+            mock_model_output = MagicMock(spec=ModelRunnerOutput)
+
+            def execute_model(*args):
+                call_order.append("execute")
+                return mock_model_output
+
+            worker.model_runner.execute_model.side_effect = execute_model
+
+            result = worker.execute_model(mock_scheduler_output)
+
+            worker.profiler.step.assert_called_once()
+            worker.model_runner.execute_model.assert_called_once_with(mock_scheduler_output, None)
+            self.assertEqual(call_order, ["step", "execute"])
+            self.assertEqual(result, mock_model_output)
+
     @patch("vllm_ascend.worker.worker.enable_sp", return_value=False)
     @patch("vllm_ascend.worker.worker.get_pp_group")
     @patch("vllm_ascend.worker.worker.get_tp_group")
@@ -897,7 +811,7 @@ class TestNPUWorker(TestBase):
             worker.vllm_config = MagicMock()
             worker.vllm_config.parallel_config = MagicMock()
             worker.vllm_config.parallel_config.distributed_executor_backend = "ray"
-            worker._pp_send_work = []
+            worker.profiler = None
 
             # Set as middle rank (not first, not last)
             mock_pp_group = MagicMock()
@@ -905,12 +819,8 @@ class TestNPUWorker(TestBase):
             mock_pp_group.is_last_rank = False
             mock_get_pp_group.return_value = mock_pp_group
 
-            # Setup async tensor reception data (irecv_tensor_dict returns 3 values)
-            mock_pp_group.irecv_tensor_dict.return_value = (
-                {"tensor": "data"},  # tensor_dict
-                None,  # comm_handles
-                None,  # comm_postprocess
-            )
+            # Setup tensor reception data
+            mock_pp_group.recv_tensor_dict.return_value = {"tensor": "data"}
 
             # Mock return IntermediateTensors - use real type
             mock_intermediate_output = MagicMock(spec=IntermediateTensors)
@@ -924,8 +834,8 @@ class TestNPUWorker(TestBase):
             # Test execute_model
             result = worker.execute_model(mock_scheduler_output)
 
-            # Verify async tensor reception
-            mock_pp_group.irecv_tensor_dict.assert_called_once()
+            # Verify tensor reception
+            mock_pp_group.recv_tensor_dict.assert_called_once()
 
             # Verify model execution with intermediate_tensors
             # Second parameter should be AsyncIntermediateTensors instance
@@ -933,8 +843,8 @@ class TestNPUWorker(TestBase):
             args, kwargs = worker.model_runner.execute_model.call_args
             self.assertEqual(args[0], mock_scheduler_output)
 
-            # Verify async tensor sending
-            mock_pp_group.isend_tensor_dict.assert_called_once()
+            # Verify tensor sending
+            mock_pp_group.send_tensor_dict.assert_called_once()
 
             # Middle rank without kv_transfer_group should return None
             self.assertIsNone(result)
@@ -955,6 +865,7 @@ class TestNPUWorker(TestBase):
             worker.vllm_config = MagicMock()
             worker.vllm_config.parallel_config = MagicMock()
             worker.vllm_config.parallel_config.distributed_executor_backend = "external_launcher"
+            worker.profiler = None
 
             # Set as non-last rank
             mock_pp_group = MagicMock()
@@ -1189,6 +1100,7 @@ class TestNPUWorker(TestBase):
             worker.vllm_config = MagicMock()
             worker.vllm_config.parallel_config = MagicMock()
             worker.vllm_config.parallel_config.distributed_executor_backend = "ray"
+            worker.profiler = None
 
             # Set as middle rank (not first, not last)
             mock_pp_group = MagicMock()
