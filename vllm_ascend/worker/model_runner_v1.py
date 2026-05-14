@@ -102,6 +102,9 @@ from vllm_ascend.compilation.acl_graph import (
     set_graph_params,
     update_full_graph_params,
 )
+from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.layerwise_config import (
+    get_layerwise_config,
+)
 from vllm_ascend.eplb.adaptor.vllm_adaptor import VllmEplbAdaptor
 from vllm_ascend.eplb.core.eplb_device_transfer_loader import D2DExpertWeightLoader
 from vllm_ascend.eplb.core.eplb_worker import EplbProcess
@@ -2723,13 +2726,6 @@ class NPUModelRunner(GPUModelRunner):
         # prefill disaggregation need the addr of cache tensor be aligned with 2M
         alignment = 2 * 1024 * 1024
 
-        # KV cache offloading configuration
-        # NUM_SHARED_BUFFERS: number of shared KV cache buffers for round-robin reuse
-        # INDEPENDENT_LAYER_INDICES: layer indices that have their own dedicated KV cache
-        NUM_SHARED_BUFFERS = 2
-        INDEPENDENT_LAYER_INDICES = set()
-        enable_kvcache_offload = True
-
         # Step 1: Collect all attention layer indices and names
         attn_layer_map = {}
         for kv_cache_tensor in kv_cache_config.kv_cache_tensors:
@@ -2739,7 +2735,13 @@ class NPUModelRunner(GPUModelRunner):
                     attn_layer_map[layer_idx] = layer_name
 
         sorted_attn_indices = sorted(attn_layer_map.keys())
-        INDEPENDENT_LAYER_INDICES = {0, len(sorted_attn_indices)-1}
+        layerwise_config = get_layerwise_config(len(sorted_attn_indices))
+        NUM_SHARED_BUFFERS = layerwise_config.num_shared_buffers
+        INDEPENDENT_LAYER_INDICES = {
+            sorted_attn_indices[index]
+            for index in layerwise_config.independent_layers
+        }
+        enable_kvcache_offload = layerwise_config.has_layer_reuse
         # Step 2: Classify layers into three categories
         # - independent: own dedicated KV cache, no offloading (e.g., first/last layer)
         # - buffer_owner: owns a shared buffer, first NUM_SHARED_BUFFERS non-independent layers
