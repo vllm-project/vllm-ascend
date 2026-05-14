@@ -29,13 +29,13 @@ def _ref_gumbel_sample(
     for tok in range(num_tokens):
         req = expanded_idx_mapping[tok].item()
         temp = temperature[req].item()
-        l = logits[tok].float().clone()
+        token_logit = logits[tok].float().clone()
         if temp == 0.0:
-            result[tok] = l.argmax()
+            result[tok] = token_logit.argmax()
         else:
             if apply_temperature:
-                l = l / temp
-            result[tok] = l.argmax()
+                token_logit = token_logit / temp
+            result[tok] = token_logit.argmax()
     return result
 
 
@@ -54,18 +54,19 @@ def _ref_apply_temperature(
     return out
 
 
-@pytest.mark.parametrize("num_tokens,vocab_size", [
-    (1, 32000),
-    (8, 32000),
-    (48, 102400),
-    (64, 151936),
-])
+@pytest.mark.parametrize(
+    "num_tokens,vocab_size",
+    [
+        (1, 32000),
+        (8, 32000),
+        (48, 102400),
+        (64, 151936),
+    ],
+)
 def test_apply_temperature(num_tokens, vocab_size):
     torch.manual_seed(0)
     logits = torch.randn(num_tokens, vocab_size, dtype=torch.float32, device=DEVICE)
-    expanded_idx_mapping = torch.randint(
-        0, num_tokens, (num_tokens,), dtype=torch.int32, device=DEVICE
-    )
+    expanded_idx_mapping = torch.randint(0, num_tokens, (num_tokens,), dtype=torch.int32, device=DEVICE)
     temperature = torch.rand(num_tokens, dtype=torch.float32, device=DEVICE) * 1.8 + 0.2
     # inject edge cases
     temperature[0] = 0.0
@@ -79,82 +80,78 @@ def test_apply_temperature(num_tokens, vocab_size):
     logits_ref = _ref_apply_temperature(logits, expanded_idx_mapping, temperature)
 
     assert torch.allclose(logits_triton.float(), logits_ref, atol=1e-4, rtol=1e-5), (
-        f"apply_temperature mismatch: max_diff="
-        f"{(logits_triton.float() - logits_ref).abs().max().item():.6f}"
+        f"apply_temperature mismatch: max_diff={(logits_triton.float() - logits_ref).abs().max().item():.6f}"
     )
 
 
-@pytest.mark.parametrize("num_tokens,num_reqs,vocab_size", [
-    (4, 4, 32000),
-    (8, 4, 32000),   # expanded: multiple tokens per request
-    (16, 8, 102400),
-    (1, 1, 32000),
-])
+@pytest.mark.parametrize(
+    "num_tokens,num_reqs,vocab_size",
+    [
+        (4, 4, 32000),
+        (8, 4, 32000),  # expanded: multiple tokens per request
+        (16, 8, 102400),
+        (1, 1, 32000),
+    ],
+)
 def test_gumbel_sample_greedy(num_tokens, num_reqs, vocab_size):
     """temperature=0 must return argmax (greedy)."""
     torch.manual_seed(42)
     logits = torch.randn(num_tokens, vocab_size, dtype=torch.float32, device=DEVICE)
-    expanded_idx_mapping = torch.randint(
-        0, num_reqs, (num_tokens,), dtype=torch.int32, device=DEVICE
-    )
+    expanded_idx_mapping = torch.randint(0, num_reqs, (num_tokens,), dtype=torch.int32, device=DEVICE)
     temperature = torch.zeros(num_reqs, dtype=torch.float32, device=DEVICE)
     seed = torch.randint(0, 2**31, (num_reqs,), dtype=torch.int64, device=DEVICE)
     pos = torch.arange(num_tokens, dtype=torch.int32, device=DEVICE)
 
-    sampled = gumbel_sample(logits, expanded_idx_mapping, temperature, seed, pos,
-                            apply_temperature=False)
+    sampled = gumbel_sample(logits, expanded_idx_mapping, temperature, seed, pos, apply_temperature=False)
     torch.npu.synchronize()
 
     expected = logits.argmax(dim=-1)
-    assert torch.equal(sampled, expected), (
-        f"Greedy mismatch: sampled={sampled.tolist()} expected={expected.tolist()}"
-    )
+    assert torch.equal(sampled, expected), f"Greedy mismatch: sampled={sampled.tolist()} expected={expected.tolist()}"
 
 
-@pytest.mark.parametrize("num_tokens,num_reqs,vocab_size", [
-    (4, 4, 32000),
-    (8, 4, 32000),
-    (16, 8, 102400),
-])
+@pytest.mark.parametrize(
+    "num_tokens,num_reqs,vocab_size",
+    [
+        (4, 4, 32000),
+        (8, 4, 32000),
+        (16, 8, 102400),
+    ],
+)
 def test_gumbel_sample_deterministic(num_tokens, num_reqs, vocab_size):
     """Same seed must produce identical results across runs."""
     torch.manual_seed(7)
     logits = torch.randn(num_tokens, vocab_size, dtype=torch.float32, device=DEVICE)
-    expanded_idx_mapping = torch.randint(
-        0, num_reqs, (num_tokens,), dtype=torch.int32, device=DEVICE
-    )
+    expanded_idx_mapping = torch.randint(0, num_reqs, (num_tokens,), dtype=torch.int32, device=DEVICE)
     temperature = torch.rand(num_reqs, dtype=torch.float32, device=DEVICE) * 1.5 + 0.5
     seed = torch.randint(0, 2**31, (num_reqs,), dtype=torch.int64, device=DEVICE)
     pos = torch.arange(num_tokens, dtype=torch.int32, device=DEVICE)
 
-    r1 = gumbel_sample(logits, expanded_idx_mapping, temperature, seed, pos,
-                       apply_temperature=False)
+    r1 = gumbel_sample(logits, expanded_idx_mapping, temperature, seed, pos, apply_temperature=False)
     torch.npu.synchronize()
-    r2 = gumbel_sample(logits, expanded_idx_mapping, temperature, seed, pos,
-                       apply_temperature=False)
+    r2 = gumbel_sample(logits, expanded_idx_mapping, temperature, seed, pos, apply_temperature=False)
     torch.npu.synchronize()
 
     assert torch.equal(r1, r2), "gumbel_sample is non-deterministic with same seed"
 
 
-@pytest.mark.parametrize("num_tokens,num_reqs,vocab_size", [
-    (4, 4, 32000),
-    (8, 4, 32000),
-    (16, 8, 102400),
-])
+@pytest.mark.parametrize(
+    "num_tokens,num_reqs,vocab_size",
+    [
+        (4, 4, 32000),
+        (8, 4, 32000),
+        (16, 8, 102400),
+    ],
+)
 def test_gumbel_sample_valid_token_ids(num_tokens, num_reqs, vocab_size):
     """Sampled token IDs must be in [0, vocab_size)."""
     torch.manual_seed(3)
     logits = torch.randn(num_tokens, vocab_size, dtype=torch.float32, device=DEVICE)
-    expanded_idx_mapping = torch.randint(
-        0, num_reqs, (num_tokens,), dtype=torch.int32, device=DEVICE
-    )
+    expanded_idx_mapping = torch.randint(0, num_reqs, (num_tokens,), dtype=torch.int32, device=DEVICE)
     temperature = torch.rand(num_reqs, dtype=torch.float32, device=DEVICE) + 0.1
     seed = torch.randint(0, 2**31, (num_reqs,), dtype=torch.int64, device=DEVICE)
     pos = torch.arange(num_tokens, dtype=torch.int32, device=DEVICE)
 
-    sampled = gumbel_sample(logits, expanded_idx_mapping, temperature, seed, pos,
-                            apply_temperature=False)
+    sampled = gumbel_sample(logits, expanded_idx_mapping, temperature, seed, pos, apply_temperature=False)
     torch.npu.synchronize()
 
     assert sampled.shape == (num_tokens,)
@@ -163,10 +160,13 @@ def test_gumbel_sample_valid_token_ids(num_tokens, num_reqs, vocab_size):
     )
 
 
-@pytest.mark.parametrize("num_tokens,num_reqs,vocab_size", [
-    (4, 4, 32000),
-    (8, 4, 32000),
-])
+@pytest.mark.parametrize(
+    "num_tokens,num_reqs,vocab_size",
+    [
+        (4, 4, 32000),
+        (8, 4, 32000),
+    ],
+)
 def test_gumbel_sample_mixed_temperature(num_tokens, num_reqs, vocab_size):
     """Mix of temp=0 and temp>0: temp=0 tokens must be greedy."""
     torch.manual_seed(11)
@@ -175,19 +175,17 @@ def test_gumbel_sample_mixed_temperature(num_tokens, num_reqs, vocab_size):
     expanded_idx_mapping = torch.arange(num_tokens, dtype=torch.int32, device=DEVICE)
     temperature = torch.rand(num_tokens, dtype=torch.float32, device=DEVICE) + 0.5
     # force first half to greedy
-    temperature[:num_tokens // 2] = 0.0
+    temperature[: num_tokens // 2] = 0.0
     seed = torch.randint(0, 2**31, (num_tokens,), dtype=torch.int64, device=DEVICE)
     pos = torch.arange(num_tokens, dtype=torch.int32, device=DEVICE)
 
-    sampled = gumbel_sample(logits, expanded_idx_mapping, temperature, seed, pos,
-                            apply_temperature=False)
+    sampled = gumbel_sample(logits, expanded_idx_mapping, temperature, seed, pos, apply_temperature=False)
     torch.npu.synchronize()
 
     greedy = logits.argmax(dim=-1)
     for tok in range(num_tokens // 2):
         assert sampled[tok].item() == greedy[tok].item(), (
-            f"Token {tok} (temp=0) should be greedy: "
-            f"got {sampled[tok].item()}, expected {greedy[tok].item()}"
+            f"Token {tok} (temp=0) should be greedy: got {sampled[tok].item()}, expected {greedy[tok].item()}"
         )
 
 
@@ -200,15 +198,12 @@ def test_gumbel_sample_expanded_idx_mapping():
 
     logits = torch.randn(num_tokens, vocab_size, dtype=torch.float32, device=DEVICE)
     # tokens 0,1,2 -> req 0; tokens 3,4,5 -> req 1
-    expanded_idx_mapping = torch.tensor(
-        [0, 0, 0, 1, 1, 1], dtype=torch.int32, device=DEVICE
-    )
+    expanded_idx_mapping = torch.tensor([0, 0, 0, 1, 1, 1], dtype=torch.int32, device=DEVICE)
     temperature = torch.zeros(num_reqs, dtype=torch.float32, device=DEVICE)
     seed = torch.randint(0, 2**31, (num_reqs,), dtype=torch.int64, device=DEVICE)
     pos = torch.arange(num_tokens, dtype=torch.int32, device=DEVICE)
 
-    sampled = gumbel_sample(logits, expanded_idx_mapping, temperature, seed, pos,
-                            apply_temperature=False)
+    sampled = gumbel_sample(logits, expanded_idx_mapping, temperature, seed, pos, apply_temperature=False)
     torch.npu.synchronize()
 
     expected = logits.argmax(dim=-1)
@@ -217,10 +212,13 @@ def test_gumbel_sample_expanded_idx_mapping():
     )
 
 
-@pytest.mark.parametrize("num_tokens,num_reqs,vocab_size", [
-    (4, 4, 32000),
-    (8, 4, 102400),
-])
+@pytest.mark.parametrize(
+    "num_tokens,num_reqs,vocab_size",
+    [
+        (4, 4, 32000),
+        (8, 4, 102400),
+    ],
+)
 def test_gumbel_sample_apply_temperature_flag(num_tokens, num_reqs, vocab_size):
     """apply_temperature=True must divide logits by temperature before sampling."""
     torch.manual_seed(55)
@@ -232,10 +230,8 @@ def test_gumbel_sample_apply_temperature_flag(num_tokens, num_reqs, vocab_size):
     pos = torch.arange(num_tokens, dtype=torch.int32, device=DEVICE)
 
     # With temp=0, apply_temperature flag has no effect — both must be greedy
-    s_false = gumbel_sample(logits, expanded_idx_mapping, temperature, seed, pos,
-                            apply_temperature=False)
-    s_true = gumbel_sample(logits, expanded_idx_mapping, temperature, seed, pos,
-                           apply_temperature=True)
+    s_false = gumbel_sample(logits, expanded_idx_mapping, temperature, seed, pos, apply_temperature=False)
+    s_true = gumbel_sample(logits, expanded_idx_mapping, temperature, seed, pos, apply_temperature=True)
     torch.npu.synchronize()
 
     expected = logits.argmax(dim=-1)
@@ -243,24 +239,26 @@ def test_gumbel_sample_apply_temperature_flag(num_tokens, num_reqs, vocab_size):
     assert torch.equal(s_true, expected)
 
 
-@pytest.mark.parametrize("num_tokens,num_reqs,vocab_size", [
-    (4, 4, 32000),   # num_tokens == num_reqs
-    (8, 4, 32000),   # num_tokens > num_reqs (expanded)
-])
+@pytest.mark.parametrize(
+    "num_tokens,num_reqs,vocab_size",
+    [
+        (4, 4, 32000),  # num_tokens == num_reqs
+        (8, 4, 32000),  # num_tokens > num_reqs (expanded)
+    ],
+)
 def test_gumbel_sample_output_processed_logits(num_tokens, num_reqs, vocab_size):
     """output_processed_logits must contain logits/temperature per token."""
     torch.manual_seed(77)
     logits = torch.randn(num_tokens, vocab_size, dtype=torch.float32, device=DEVICE)
-    expanded_idx_mapping = torch.randint(
-        0, num_reqs, (num_tokens,), dtype=torch.int32, device=DEVICE
-    )
+    expanded_idx_mapping = torch.randint(0, num_reqs, (num_tokens,), dtype=torch.int32, device=DEVICE)
     temperature = torch.rand(num_reqs, dtype=torch.float32, device=DEVICE) * 1.5 + 0.5
     seed = torch.randint(0, 2**31, (num_reqs,), dtype=torch.int64, device=DEVICE)
     pos = torch.arange(num_tokens, dtype=torch.int32, device=DEVICE)
 
     out_logits = torch.zeros(num_tokens, vocab_size, dtype=torch.float32, device=DEVICE)
-    gumbel_sample(logits, expanded_idx_mapping, temperature, seed, pos,
-                  apply_temperature=True, output_processed_logits=out_logits)
+    gumbel_sample(
+        logits, expanded_idx_mapping, temperature, seed, pos, apply_temperature=True, output_processed_logits=out_logits
+    )
     torch.npu.synchronize()
 
     for tok in range(num_tokens):
@@ -273,10 +271,13 @@ def test_gumbel_sample_output_processed_logits(num_tokens, num_reqs, vocab_size)
         )
 
 
-@pytest.mark.parametrize("num_tokens,num_reqs,vocab_size", [
-    (6, 2, 32000),
-    (8, 4, 32000),
-])
+@pytest.mark.parametrize(
+    "num_tokens,num_reqs,vocab_size",
+    [
+        (6, 2, 32000),
+        (8, 4, 32000),
+    ],
+)
 def test_gumbel_sample_output_processed_logits_expanded(num_tokens, num_reqs, vocab_size):
     """output_processed_logits with expanded_idx_mapping: per-token, no race condition.
 
@@ -288,9 +289,7 @@ def test_gumbel_sample_output_processed_logits_expanded(num_tokens, num_reqs, vo
     torch.manual_seed(88)
     logits = torch.randn(num_tokens, vocab_size, dtype=torch.float32, device=DEVICE)
     # multiple tokens per request
-    expanded_idx_mapping = torch.randint(
-        0, num_reqs, (num_tokens,), dtype=torch.int32, device=DEVICE
-    )
+    expanded_idx_mapping = torch.randint(0, num_reqs, (num_tokens,), dtype=torch.int32, device=DEVICE)
     temperature = torch.rand(num_reqs, dtype=torch.float32, device=DEVICE) * 1.5 + 0.5
     # force first request to temp=0 to cover the greedy branch
     temperature[0] = 0.0
@@ -300,8 +299,9 @@ def test_gumbel_sample_output_processed_logits_expanded(num_tokens, num_reqs, vo
     # Buffer must be [num_tokens, vocab_size], not [num_reqs, vocab_size],
     # to avoid out-of-bounds writes when num_tokens > num_reqs.
     out_logits = torch.zeros(num_tokens, vocab_size, dtype=torch.float32, device=DEVICE)
-    gumbel_sample(logits, expanded_idx_mapping, temperature, seed, pos,
-                  apply_temperature=True, output_processed_logits=out_logits)
+    gumbel_sample(
+        logits, expanded_idx_mapping, temperature, seed, pos, apply_temperature=True, output_processed_logits=out_logits
+    )
     torch.npu.synchronize()
 
     for tok_idx in range(num_tokens):

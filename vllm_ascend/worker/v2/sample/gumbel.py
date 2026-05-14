@@ -118,10 +118,7 @@ def _gumbel_sample_kernel(
         else:
             col = 0
         tl.store(
-            processed_logits_ptr
-            + token_idx * processed_logits_stride
-            + col * vocab_size
-            + block,
+            processed_logits_ptr + token_idx * processed_logits_stride + col * vocab_size + block,
             logits,
             mask=mask,
         )
