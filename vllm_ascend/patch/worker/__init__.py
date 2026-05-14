@@ -54,6 +54,7 @@ if not is_310p():
     import vllm_ascend.patch.worker.patch_qwen3_5  # noqa
     import vllm_ascend.patch.worker.patch_gdn_attn  # noqa
     import vllm_ascend.patch.worker.patch_qwen3vl  # noqa
+
     if not vllm_version_is("0.19.1"):
         with contextlib.suppress(ModuleNotFoundError):
             import vllm_ascend.patch.worker.patch_qwen3_dflash  # noqa
