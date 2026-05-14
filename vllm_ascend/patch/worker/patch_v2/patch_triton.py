@@ -1,6 +1,6 @@
 from vllm.v1.worker.gpu import input_batch, model_runner, structured_outputs
 from vllm.v1.worker.gpu.sample import bad_words, gumbel, logprob, penalties, prompt_logprob, sampler, states
-from vllm.v1.worker.gpu.spec_decode import probabilistic_rejection_sampler_utils, rejection_sampler
+from vllm.v1.worker.gpu.spec_decode import rejection_sampler
 from vllm.v1.worker.gpu.spec_decode.eagle import speculator
 
 from vllm_ascend.utils import vllm_version_is
@@ -30,9 +30,11 @@ logprob.compute_token_logprobs = compute_token_logprobs
 structured_outputs._apply_grammar_bitmask_kernel = _apply_grammar_bitmask_kernel
 
 if not vllm_version_is("0.20.2"):
+    from vllm.v1.worker.gpu.spec_decode import rejection_sampler_utils
+
     from vllm_ascend.worker.v2.spec_decode.probabilistic_rejection_sampler_utils import (
-        probabilistic_rejection_sample as npu_probabilistic_rejection_sample,
+        rejection_sample as npu_rejection_sample,
     )
 
-    probabilistic_rejection_sampler_utils.probabilistic_rejection_sample = npu_probabilistic_rejection_sample
-    rejection_sampler.probabilistic_rejection_sample = npu_probabilistic_rejection_sample
+    rejection_sampler_utils.rejection_sample = npu_rejection_sample
+    rejection_sampler.rejection_sample = npu_rejection_sample
