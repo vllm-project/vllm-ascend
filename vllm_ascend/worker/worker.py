@@ -54,6 +54,7 @@ from vllm_ascend.cpu_binding import bind_cpus
 from vllm_ascend.device_allocator.camem import CaMemAllocator
 from vllm_ascend.distributed.parallel_state import init_ascend_model_parallel
 from vllm_ascend.ops.triton.triton_utils import init_device_properties_triton
+from vllm_ascend.usage_stats import maybe_report_v1_usage_stats
 from vllm_ascend.utils import (
     AscendDeviceType,
     check_ascend_device_type,
@@ -317,6 +318,9 @@ class NPUWorker(WorkerBase):
             self.model_runner = NPUModelRunnerV2(self.vllm_config, self.device)
         else:
             self.model_runner = NPUModelRunner(self.vllm_config, self.device)
+
+        if self.rank == 0:
+            maybe_report_v1_usage_stats(self.vllm_config)
 
     @torch.inference_mode()
     def determine_available_memory(self) -> int:
