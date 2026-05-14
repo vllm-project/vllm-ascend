@@ -8,7 +8,7 @@ msgid ""
 msgstr ""
 "Project-Id-Version:  vllm-ascend\n"
 "Report-Msgid-Bugs-To: \n"
-"POT-Creation-Date: 2026-05-13 02:38+0000\n"
+"POT-Creation-Date: 2026-05-14 02:40+0000\n"
 "PO-Revision-Date: 2025-07-18 10:09+0800\n"
 "Last-Translator: \n"
 "Language: zh_CN\n"
@@ -66,10 +66,10 @@ msgstr "Ascend HDK"
 #: ../../source/installation.md
 msgid ""
 "Refer to the documentation [CANN "
-"8.5.0](https://www.hiascend.com/document/detail/zh/canncommercial/850/releasenote/releasenote_0000.html)"
+"9.0.0](https://www.hiascend.com/document/detail/zh/canncommercial/900/releasenote/releasenote_0000.html)"
 msgstr ""
 "参考文档 [CANN "
-"8.5.0](https://www.hiascend.com/document/detail/zh/canncommercial/850/releasenote/releasenote_0000.html)"
+"9.0.0](https://www.hiascend.com/document/detail/zh/canncommercial/900/releasenote/releasenote_0000.html)"
 
 #: ../../source/installation.md
 msgid "Required for CANN"
@@ -80,8 +80,8 @@ msgid "CANN"
 msgstr "CANN"
 
 #: ../../source/installation.md
-msgid "== 8.5.1"
-msgstr "== 8.5.1"
+msgid "== 9.0.0"
+msgstr "== 9.0.0"
 
 #: ../../source/installation.md
 msgid "Required for vllm-ascend and torch-npu"
@@ -526,3 +526,6 @@ msgstr "在每个节点运行以下命令以启动容器（您应提前将权重
 
 #~ msgid "image-tag-310p-openeuler"
 #~ msgstr "镜像标签-310p-openeuler"
+
+#~ msgid "== 8.5.1"
+#~ msgstr "== 8.5.1"
