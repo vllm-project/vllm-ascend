@@ -74,13 +74,6 @@ jobs:
         VLLM_USE_MODELSCOPE: True
         HF_HUB_OFFLINE: 1
     steps:
-      - name: Set global envs
-        run: |
-          set -a
-          . /usr/local/Ascend/ascend-toolkit/set_env.sh
-          set +a
-          env >> $GITHUB_ENV
-
       - name: Checkout vllm-project/vllm-ascend repo
         uses: actions/checkout@v6
 
@@ -213,13 +206,6 @@ jobs:
         uses: actions/checkout@v6
         with:
           ref: ${{ inputs.ref }}
-
-      - name: Set global envs
-        run: |
-          set -a
-          . /usr/local/Ascend/ascend-toolkit/set_env.sh
-          set +a
-          env >> $GITHUB_ENV
 
       - name: Check npu and CANN info
         run: |
@@ -355,13 +341,6 @@ jobs:
         HCCL_BUFFSIZE: 1024
         HF_HUB_OFFLINE: 1
     steps:
-      - name: Set global envs
-        run: |
-          set -a
-          . /usr/local/Ascend/ascend-toolkit/set_env.sh
-          set +a
-          env >> $GITHUB_ENV
-
       - name: Checkout vllm-project/vllm-ascend repo
         uses: actions/checkout@v6
 
@@ -492,13 +471,6 @@ jobs:
         uses: actions/checkout@v6
         with:
           ref: ${{ inputs.ref }}
-
-      - name: Set global envs
-        run: |
-          set -a
-          . /usr/local/Ascend/ascend-toolkit/set_env.sh
-          set +a
-          env >> $GITHUB_ENV
 
       - name: Check npu and CANN info
         run: |
@@ -656,13 +628,6 @@ jobs:
         with:
           ref: ${{ inputs.ref }}
 
-      - name: Set global envs
-        run: |
-          set -a
-          . /usr/local/Ascend/ascend-toolkit/set_env.sh
-          set +a
-          env >> $GITHUB_ENV
-
       - name: Check npu and CANN info
         run: |
           npu-smi info
@@ -790,13 +755,6 @@ jobs:
         VLLM_USE_MODELSCOPE: True
         HF_HUB_OFFLINE: 1
     steps:
-      - name: Set global envs
-        run: |
-          set -a
-          . /usr/local/Ascend/ascend-toolkit/set_env.sh
-          set +a
-          env >> $GITHUB_ENV
-
       - name: Check npu and CANN info
         run: |
           npu-smi info
@@ -909,13 +867,6 @@ jobs:
         VLLM_USE_MODELSCOPE: True
         HF_HUB_OFFLINE: 1
     steps:
-      - name: Set global envs
-        run: |
-          set -a
-          . /usr/local/Ascend/ascend-toolkit/set_env.sh
-          set +a
-          env >> $GITHUB_ENV
-
       - name: Check npu and CANN info
         run: |
           npu-smi info
