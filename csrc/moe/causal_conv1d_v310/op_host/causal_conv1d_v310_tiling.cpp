@@ -15,8 +15,8 @@
  */
 
 #include "math_util.h"
-#include "../tiling_base/tiling_templates_registry.h"
-#include "../tiling_base/tiling_util.h"
+#include "tiling_base/tiling_templates_registry.h"
+#include "tiling_base/tiling_util.h"
 #include "../op_kernel/causal_conv1d_v310_tiling_data.h"
 #include "../op_kernel/causal_conv1d_v310_tiling_key.h"
 
