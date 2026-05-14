@@ -17,7 +17,7 @@ import vllm.model_executor.layers.attention.mla_attention
 
 from vllm_ascend.utils import vllm_version_is
 
-if not vllm_version_is("0.20.1"):
+if not vllm_version_is("0.20.2"):
     from vllm.v1.attention.backends.mla.prefill.base import MLAPrefillBackend
 
     class AscendMLAPrefillBackend(MLAPrefillBackend):

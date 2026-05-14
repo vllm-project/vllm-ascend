@@ -27,8 +27,10 @@ RUN apt-get update -y && \
 
 ARG VLLM_REPO=https://github.com/vllm-project/vllm.git
 # For lint purpose, actually we need make a main2main matching.
-ARG VLLM_TAG=v0.20.1
-RUN git clone --depth 1 -b $VLLM_TAG $VLLM_REPO /vllm-workspace/vllm
+ARG VLLM_COMMIT=ce29c26b31d432b1b4bc028c46bb2c3b07a667d8
+RUN git init /vllm-workspace/vllm && \
+    git -C /vllm-workspace/vllm fetch --depth 1 $VLLM_REPO $VLLM_COMMIT && \
+    git -C /vllm-workspace/vllm checkout FETCH_HEAD
 
 # # Install vLLM common dependencies
 RUN python3 -m pip install -r /vllm-workspace/vllm/requirements/common.txt --extra-index https://download.pytorch.org/whl/cpu/ && \
