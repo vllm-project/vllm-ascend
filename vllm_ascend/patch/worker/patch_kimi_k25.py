@@ -23,6 +23,7 @@ from vllm.model_executor.models.kimi_k25_vit import (
     MoonViT3dPretrainedModel,
     get_rope_shape_decorate,
 )
+
 from vllm_ascend.utils import AscendDeviceType, get_ascend_device_type
 
 
