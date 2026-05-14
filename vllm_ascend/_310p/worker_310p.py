@@ -28,10 +28,21 @@ from vllm.utils.torch_utils import set_random_seed  # noqa: E402
 from vllm_ascend._310p.model_runner_310p import NPUModelRunner310
 from vllm_ascend.worker.worker import NPUWorker, init_workspace_manager
 
+_IS_RC_DEVICE: bool | None = None
 
-def _is_rc_device():
-    result = subprocess.run(["lspci"], capture_output=True, text=True)
-    return not any("accelerators" in line.strip() for line in result.stdout.splitlines())
+
+def _is_rc_device() -> bool:
+    global _IS_RC_DEVICE
+    if _IS_RC_DEVICE is None:
+        try:
+            # Use lspci to detect if the device is in RC mode.
+            # In EP mode, "accelerators" typically appears in the output.
+            result = subprocess.run(["lspci"], capture_output=True, text=True, check=True)
+            _IS_RC_DEVICE = not any("accelerators" in line.strip() for line in result.stdout.splitlines())
+        except (subprocess.CalledProcessError, FileNotFoundError):
+            # Fallback to False if lspci is unavailable or fails.
+            _IS_RC_DEVICE = False
+    return _IS_RC_DEVICE
 
 
 class NPUWorker310(NPUWorker):
@@ -130,7 +141,6 @@ class NPUWorker310(NPUWorker):
         device = torch.device(f"npu:{self.local_rank}")
         torch.npu.set_device(device)
 
-        # Import _inductor for graph mode execution with triton
         # This lazy import avoids torch_npu re-initialization in patch
         # Note that this should be imported after torch.npu.set_device
         # to avoid repeated set_device in extra processes
