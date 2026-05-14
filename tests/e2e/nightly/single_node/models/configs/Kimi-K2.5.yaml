@@ -86,7 +86,7 @@ _benchmark_TPOT20_16K_1K: &_benchmark_TPOT20_16K_1K
   baseline: 1
   threshold: 0.97
 
-_benchmark_TPOT20_32K_0_5K: &_benchmark_TPOT20_32K_0_5K
+_benchmark_TPOT50_32K_0_5K: &_benchmark_TPOT50_32K_0_5K
   case_type: performance
   dataset_path: vllm-ascend/GSM8K-in3500-bs2800
   request_conf: vllm_api_stream_chat
@@ -99,6 +99,32 @@ _benchmark_TPOT20_32K_0_5K: &_benchmark_TPOT20_32K_0_5K
   baseline: 1
   threshold: 0.97
 
+_benchmark_TPOT50_32K_0_5K_pc90: &_benchmark_TPOT50_32K_0_5K_pc90
+  case_type: performance
+  dataset_path: vllm-ascend/GSM8K-in3500-bs2800
+  request_conf: vllm_api_stream_chat
+  dataset_conf: gsm8k/gsm8k_gen_0_shot_cot_str_perf
+  num_prompts: 40
+  max_out_len: 512
+  batch_size: 10
+  trust_remote_code: true
+  request_rate: 0
+  baseline: 1
+  threshold: 0.97
+
+_benchmark_TPOT20_32K_0_5K: &_benchmark_TPOT20_32K_0_5K
+  case_type: performance
+  dataset_path: vllm-ascend/GSM8K-in3500-bs2800
+  request_conf: vllm_api_stream_chat
+  dataset_conf: gsm8k/gsm8k_gen_0_shot_cot_str_perf
+  num_prompts: 40
+  max_out_len: 512
+  batch_size: 10
+  trust_remote_code: true
+  request_rate: 0
+  baseline: 1
+  threshold: 0.97
+
 _benchmark_TPOT20_32K_0_5K_pc90: &_benchmark_TPOT20_32K_0_5K_pc90
   case_type: performance
   dataset_path: vllm-ascend/GSM8K-in3500-bs2800
@@ -106,6 +132,32 @@ _benchmark_TPOT20_32K_0_5K_pc90: &_benchmark_TPOT20_32K_0_5K_pc90
   dataset_conf: gsm8k/gsm8k_gen_0_shot_cot_str_perf
   num_prompts: 40
   max_out_len: 512
+  batch_size: 10
+  trust_remote_code: true
+  request_rate: 0
+  baseline: 1
+  threshold: 0.97
+
+_benchmark_TPOT50_64K_1K_pc90: &_benchmark_TPOT50_64K_1K_pc90
+  case_type: performance
+  dataset_path: vllm-ascend/GSM8K-in3500-bs2800
+  request_conf: vllm_api_stream_chat
+  dataset_conf: gsm8k/gsm8k_gen_0_shot_cot_str_perf
+  num_prompts: 40
+  max_out_len: 1024
+  batch_size: 10
+  trust_remote_code: true
+  request_rate: 0
+  baseline: 1
+  threshold: 0.97
+
+_benchmark_TPOT20_64K_1K_pc90: &_benchmark_TPOT20_64K_1K_pc90
+  case_type: performance
+  dataset_path: vllm-ascend/GSM8K-in3500-bs2800
+  request_conf: vllm_api_stream_chat
+  dataset_conf: gsm8k/gsm8k_gen_0_shot_cot_str_perf
+  num_prompts: 40
+  max_out_len: 1024
   batch_size: 10
   trust_remote_code: true
   request_rate: 0
@@ -208,7 +260,8 @@ test_cases:
       - "--additional-config"
       - '{"enable_shared_expert_dp": true}'
     benchmarks:
-      <<: *_benchmark_TPOT20_32K_0_5K
+      <<: *_benchmark_TPOT50_32K_0_5K
+
   - name: "Kimi-K2.5-W4A8-32k-0.5k-TOPT50-prefix-cache90"
     model: "Eco-Tech/Kimi-K2.5-W4A8"
     envs:
@@ -232,4 +285,129 @@ test_cases:
       - "--additional-config"
       - '{"enable_shared_expert_dp": true}'
     benchmarks:
+      <<: *_benchmark_TPOT50_32K_0_5K_pc90
+
+  - name: "Kimi-K2.5-W4A8-TOPT20-32k-0.5k"
+    model: "Eco-Tech/Kimi-K2.5-W4A8"
+    envs:
+      <<: *envs
+      HCCL_BUFFSIZE: "450"
+      VLLM_ASCEND_BALANCE_SCHEDULING: "1"
+    server_cmd: *server_cmd
+    server_cmd_extra:
+      - "--no-enable-prefix-caching"
+      - "--enable-chunked-prefill"
+      - "--max-num-seqs"
+      - "32"
+      - "--max-model-len"
+      - "33792"
+      - "--max-num-batched-tokens"
+      - "8192"
+      - "--compilation-config"
+      - '{"cudagraph_capture_sizes":[16,32,48,64,80,96,112,128], "cudagraph_mode":"FULL_DECODE_ONLY"}'
+      - "--speculative-config"
+      - '{"method":"eagle3", "model":"lightseekorg/kimi-k2.5-eagle3", "num_speculative_tokens":3}'
+      - "--additional-config"
+      - '{"enable_shared_expert_dp": true}'
+    benchmarks:
+      <<: *_benchmark_TPOT20_32K_0_5K
+
+  - name: "Kimi-K2.5-W4A8-TOPT20-32k-0.5k-pc90"
+    model: "Eco-Tech/Kimi-K2.5-W4A8"
+    envs:
+      <<: *envs
+      HCCL_BUFFSIZE: "450"
+      VLLM_ASCEND_BALANCE_SCHEDULING: "1"
+    server_cmd: *server_cmd
+    server_cmd_extra:
+      - "--enable-prefix-caching"
+      - "--enable-chunked-prefill"
+      - "--max-num-seqs"
+      - "32"
+      - "--max-model-len"
+      - "33792"
+      - "--max-num-batched-tokens"
+      - "8192"
+      - "--compilation-config"
+      - '{"cudagraph_capture_sizes":[16,32,48,64,80,96,112,128], "cudagraph_mode":"FULL_DECODE_ONLY"}'
+      - "--speculative-config"
+      - '{"method":"eagle3", "model":"lightseekorg/kimi-k2.5-eagle3", "num_speculative_tokens":3}'
+      - "--additional-config"
+      - '{"enable_shared_expert_dp": true}'
+    benchmarks:
       <<: *_benchmark_TPOT20_32K_0_5K_pc90
+
+  - name: "Kimi-K2.5-W4A8-TOPT50-64k-1k-pc90"
+    model: "Eco-Tech/Kimi-K2.5-W4A8"
+    envs:
+      <<: *envs
+      HCCL_BUFFSIZE: "400"
+      VLLM_ASCEND_BALANCE_SCHEDULING: "1"
+    server_cmd: *server_cmd
+    server_cmd_extra:
+      - "--tool-call-parser"
+      - "kimi_k2"
+      - "--reasoning-parser"
+      - "kimi_k2"
+      - "--enable-auto-tool-choice"
+      - "--api-server-count"
+      - "1"
+      - "--aggregate-engine-logging"
+      - "--max-num-seqs"
+      - "3"
+      - "--max-model-len"
+      - "67000"
+      - "--max-num-batched-tokens"
+      - "8192"
+      - "--enable-prefix-caching"
+      - "--compilation-config"
+      - '{"cudagraph_capture_sizes":[8,12], "cudagraph_mode":"FULL_DECODE_ONLY"}'
+      - "--speculative-config"
+      - '{"method":"eagle3", "model":"lightseekorg/kimi-k2.5-eagle3", "num_speculative_tokens":3}'
+    benchmarks:
+      <<: *_benchmark_TPOT50_64K_1K_pc90
+
+  - name: "Kimi-K2.5-W4A8-TOPT20-64k-1k-pc90"
+    model: "Eco-Tech/Kimi-K2.5-W4A8"
+    envs:
+      <<: *envs
+      HCCL_BUFFSIZE: "400"
+      VLLM_ASCEND_BALANCE_SCHEDULING: "1"
+    server_cmd:
+      - "--tool-call-parser"
+      - "kimi_k2"
+      - "--reasoning-parser"
+      - "kimi_k2"
+      - "--enable-auto-tool-choice"
+      - "--quantization"
+      - "ascend"
+      - "--allowed-local-media-path"
+      - "/"
+      - "--trust-remote-code"
+      - "--data-parallel-size"
+      - "1"
+      - "--tensor-parallel-size"
+      - "16"
+      - "--enable-expert-parallel"
+      - "--max-num-seqs"
+      - "8"
+      - "--max-model-len"
+      - "67000"
+      - "--max-num-batched-tokens"
+      - "8192"
+      - "--gpu-memory-utilization"
+      - "0.9"
+      - "--seed"
+      - "1024"
+      - "--async-scheduling"
+      - "--enable-prefix-caching"
+      - "--compilation-config"
+      - '{"cudagraph_capture_sizes":[4,8,16], "cudagraph_mode":"FULL_DECODE_ONLY"}'
+      - "--speculative-config"
+      - '{"method":"eagle3", "model":"lightseekorg/kimi-k2.5-eagle3", "num_speculative_tokens":3}'
+      - "--mm-processor-cache-gb"
+      - "0"
+      - "--mm-encoder-tp-mode"
+      - "data"
+    benchmarks:
+      <<: *_benchmark_TPOT20_64K_1K_pc90
