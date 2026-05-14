@@ -36,9 +36,6 @@ from tests.ut.conftest import npu_test  # noqa: E402
 from vllm_ascend.attention.attention_v1 import AscendAttentionState  # noqa: E402
 from vllm_ascend.attention.context_parallel.mla_cp import AscendMlaCPImpl  # noqa: E402
 from vllm_ascend.attention.mla_v1 import AscendMLAImpl  # noqa: E402
-from vllm_ascend.utils import enable_custom_op
-
-enable_custom_op()
 
 _BLOCK_SIZE = 128
 _TEST_NUM_HEADS = 16
@@ -58,10 +55,10 @@ DEFAULT_ATOL = 1e-2
 FP16_RTOL = 2e-2
 FP16_ATOL = 2e-2
 
-_MAX_SIG_REL_ERR = 1e-2      # max |out-ref| / peak |ref|
-_MAX_MEAN_SIG_ERR = 5e-3     # mean |out-ref| / mean |ref|
-_MAX_REL_ERR = 1e-2          # max per-element rel err where |ref| >= floor
-_SIG_FLOOR_FRAC = 5e-1       # floor = this fraction of peak |ref|
+_MAX_SIG_REL_ERR = 1e-2  # max |out-ref| / peak |ref|
+_MAX_MEAN_SIG_ERR = 5e-3  # mean |out-ref| / mean |ref|
+_MAX_REL_ERR = 1e-2  # max per-element rel err where |ref| >= floor
+_SIG_FLOOR_FRAC = 5e-1  # floor = this fraction of peak |ref|
 
 
 def _validate_spec(spec: BatchSpec) -> None:
@@ -119,34 +116,19 @@ def _get_vllm_config(
 
 # Spec name prefixes drive the MLA-CP branch under test.
 BATCH_SPECS: dict[str, BatchSpec] = {
-    "decode_single": BatchSpec(
-        seq_lens=[1024], query_lens=[1], name="decode_single"),
-    "decode_small_batch": BatchSpec(
-        seq_lens=[64, 128, 256, 512], query_lens=[1, 1, 1, 1],
-        name="decode_small_batch"),
-    "decode_large_batch": BatchSpec(
-        seq_lens=[2048] * 16, query_lens=[1] * 16, name="decode_large_batch"),
-    "mtp_1_plus_1": BatchSpec(
-        seq_lens=[256, 512, 1024], query_lens=[2, 2, 2], name="mtp_1_plus_1"),
-    "mtp_1_plus_3": BatchSpec(
-        seq_lens=[256, 512, 1024, 1536], query_lens=[4, 4, 4, 4],
-        name="mtp_1_plus_3"),
-    "mtp_1_plus_7": BatchSpec(
-        seq_lens=[512, 1024, 2048], query_lens=[8, 8, 8], name="mtp_1_plus_7"),
-    "prefill_single": BatchSpec(
-        seq_lens=[256], query_lens=[256], name="prefill_single"),
-    "prefill_small_batch": BatchSpec(
-        seq_lens=[128, 256, 384], query_lens=[128, 256, 384],
-        name="prefill_small_batch"),
-    "prefill_medium_batch": BatchSpec(
-        seq_lens=[512, 1024], query_lens=[512, 1024],
-        name="prefill_medium_batch"),
-    "mixed_small": BatchSpec(
-        seq_lens=[64, 128, 256, 512], query_lens=[1, 1, 64, 128],
-        name="mixed_small"),
+    "decode_single": BatchSpec(seq_lens=[1024], query_lens=[1], name="decode_single"),
+    "decode_small_batch": BatchSpec(seq_lens=[64, 128, 256, 512], query_lens=[1, 1, 1, 1], name="decode_small_batch"),
+    "decode_large_batch": BatchSpec(seq_lens=[2048] * 16, query_lens=[1] * 16, name="decode_large_batch"),
+    "mtp_1_plus_1": BatchSpec(seq_lens=[256, 512, 1024], query_lens=[2, 2, 2], name="mtp_1_plus_1"),
+    "mtp_1_plus_3": BatchSpec(seq_lens=[256, 512, 1024, 1536], query_lens=[4, 4, 4, 4], name="mtp_1_plus_3"),
+    "mtp_1_plus_7": BatchSpec(seq_lens=[512, 1024, 2048], query_lens=[8, 8, 8], name="mtp_1_plus_7"),
+    "prefill_single": BatchSpec(seq_lens=[256], query_lens=[256], name="prefill_single"),
+    "prefill_small_batch": BatchSpec(seq_lens=[128, 256, 384], query_lens=[128, 256, 384], name="prefill_small_batch"),
+    "prefill_medium_batch": BatchSpec(seq_lens=[512, 1024], query_lens=[512, 1024], name="prefill_medium_batch"),
+    "mixed_small": BatchSpec(seq_lens=[64, 128, 256, 512], query_lens=[1, 1, 64, 128], name="mixed_small"),
     "mixed_medium": BatchSpec(
-        seq_lens=[1024, 1536, 2048, 256, 512], query_lens=[1, 1, 1, 64, 128],
-        name="mixed_medium"),
+        seq_lens=[1024, 1536, 2048, 256, 512], query_lens=[1, 1, 1, 64, 128], name="mixed_medium"
+    ),
 }
 
 
@@ -157,8 +139,7 @@ def _infer_mode(spec: BatchSpec) -> str:
         if name.startswith(prefix):
             return prefix.rstrip("_")
     raise ValueError(
-        f"BatchSpec name {name!r} does not start with a known mode prefix "
-        "('decode_', 'mtp_', 'prefill_', 'mixed_')"
+        f"BatchSpec name {name!r} does not start with a known mode prefix ('decode_', 'mtp_', 'prefill_', 'mixed_')"
     )
 
 
@@ -171,14 +152,8 @@ def _make_synthetic_kv_contexts(
 ) -> tuple[list[torch.Tensor], list[torch.Tensor]]:
     """Per-request K context (latent space) generated independently so values
     across requests are uncorrelated."""
-    k_nope = [
-        torch.randn(s, kv_lora_rank, dtype=dtype, device=device)
-        for s in seq_lens
-    ]
-    k_pe = [
-        torch.randn(s, qk_rope_head_dim, dtype=dtype, device=device)
-        for s in seq_lens
-    ]
+    k_nope = [torch.randn(s, kv_lora_rank, dtype=dtype, device=device) for s in seq_lens]
+    k_pe = [torch.randn(s, qk_rope_head_dim, dtype=dtype, device=device) for s in seq_lens]
     return k_nope, k_pe
 
 
@@ -199,13 +174,26 @@ def _build_paged_kv_cache(
     max_blocks_per_seq = max(blocks_per_seq)
 
     k_nope_cache = torch.zeros(
-        total_blocks, block_size, 1, kv_lora_rank, dtype=dtype, device=device,
+        total_blocks,
+        block_size,
+        1,
+        kv_lora_rank,
+        dtype=dtype,
+        device=device,
     )
     k_pe_cache = torch.zeros(
-        total_blocks, block_size, 1, qk_rope_head_dim, dtype=dtype, device=device,
+        total_blocks,
+        block_size,
+        1,
+        qk_rope_head_dim,
+        dtype=dtype,
+        device=device,
     )
     block_table = torch.zeros(
-        batch_size, max_blocks_per_seq, dtype=torch.int32, device=device,
+        batch_size,
+        max_blocks_per_seq,
+        dtype=torch.int32,
+        device=device,
     )
 
     next_block_id = 1
@@ -232,7 +220,11 @@ def _make_w_uv(
     device: torch.device,
 ) -> torch.Tensor:
     return torch.randn(
-        num_heads, kv_lora_rank, v_head_dim, dtype=dtype, device=device,
+        num_heads,
+        kv_lora_rank,
+        v_head_dim,
+        dtype=dtype,
+        device=device,
     ) * (1.0 / math.sqrt(kv_lora_rank))
 
 
@@ -299,16 +291,24 @@ def _prefill_reference(
     """Pure-PyTorch dense MLA prefill baseline in fp32 (causal)."""
     outputs: list[torch.Tensor] = []
     for q_nope, q_pe, k_nope, k_pe, v in zip(
-        q_nope_full, q_pe_full, k_nope_full_per_req, k_pe_full_per_req, v_full_per_req,
+        q_nope_full,
+        q_pe_full,
+        k_nope_full_per_req,
+        k_pe_full_per_req,
+        v_full_per_req,
     ):
         q_len = q_nope.shape[0]
         Q = torch.cat([q_nope, q_pe], dim=-1).float()
         K = torch.cat([k_nope, k_pe], dim=-1).float()
         V = v.float()
 
-        scores = torch.matmul(
-            Q.transpose(0, 1), K.transpose(0, 1).transpose(-1, -2),
-        ) * scale
+        scores = (
+            torch.matmul(
+                Q.transpose(0, 1),
+                K.transpose(0, 1).transpose(-1, -2),
+            )
+            * scale
+        )
         causal_mask = torch.triu(
             torch.ones(q_len, q_len, dtype=torch.bool, device=Q.device),
             diagonal=1,
@@ -364,10 +364,8 @@ def _patch_distributed_groups_cp(pcp_size: int, dcp_size: int) -> list:
     return [
         patch(f"{common_cp}.get_pcp_group", return_value=fake_pcp),
         patch(f"{common_cp}.get_dcp_group", return_value=fake_dcp),
-        patch(f"{common_cp}.get_decode_context_model_parallel_world_size",
-              return_value=dcp_size),
-        patch("torch.distributed.all_to_all_single",
-              side_effect=_fake_all_to_all_single),
+        patch(f"{common_cp}.get_decode_context_model_parallel_world_size", return_value=dcp_size),
+        patch("torch.distributed.all_to_all_single", side_effect=_fake_all_to_all_single),
     ]
 
 
@@ -425,9 +423,7 @@ def _make_fake_self(*, dtype: torch.dtype, **kwargs) -> MagicMock:
     _populate_impl_attrs(fake_self, **kwargs)
     fake_self.dtype = dtype
     fake_self._v_up_proj = lambda x: AscendMlaCPImpl._v_up_proj(fake_self, x)
-    fake_self._compute_prefill_context = lambda *a, **kw: (
-        AscendMLAImpl._compute_prefill_context(fake_self, *a, **kw)
-    )
+    fake_self._compute_prefill_context = lambda *a, **kw: (AscendMLAImpl._compute_prefill_context(fake_self, *a, **kw))
     return fake_self
 
 
@@ -467,7 +463,9 @@ def _make_decode_metadata(
 
 
 def _make_prefill_metadata(
-    *, query_lens: list[int], attn_mask: torch.Tensor,
+    *,
+    query_lens: list[int],
+    attn_mask: torch.Tensor,
 ) -> MagicMock:
     actual_seq_lengths_q = [sum(query_lens[: i + 1]) for i in range(len(query_lens))]
     prefill_meta = MagicMock()
@@ -558,8 +556,7 @@ def _run_mla_cp_decode_kernel(
     with ExitStack() as stack:
         for p in _patch_distributed_groups_cp(pcp_size, dcp_size):
             stack.enter_context(p)
-        stack.enter_context(_patch_extra_ctx(
-            "vllm_ascend.attention.context_parallel.mla_cp"))
+        stack.enter_context(_patch_extra_ctx("vllm_ascend.attention.context_parallel.mla_cp"))
         return AscendMlaCPImpl._forward_decode(
             fake_self,
             q_nope,
@@ -597,7 +594,8 @@ def _run_mla_cp_prefill_kernel(
 
     attn_mask = _build_prefill_attn_mask(device)
     attn_metadata = _make_prefill_metadata(
-        query_lens=query_lens, attn_mask=attn_mask,
+        query_lens=query_lens,
+        attn_mask=attn_mask,
     )
 
     impl = _make_real_impl(
@@ -611,8 +609,7 @@ def _run_mla_cp_prefill_kernel(
         for p in _patch_distributed_groups_cp(pcp_size, dcp_size):
             stack.enter_context(p)
         stack.enter_context(_patch_extra_ctx("vllm_ascend.attention.mla_v1"))
-        stack.enter_context(_patch_extra_ctx(
-            "vllm_ascend.attention.context_parallel.mla_cp"))
+        stack.enter_context(_patch_extra_ctx("vllm_ascend.attention.context_parallel.mla_cp"))
         return AscendMlaCPImpl._forward_prefill(
             impl,
             q_nope,
@@ -642,12 +639,9 @@ def _record_and_assert(
     which preserves input dtype end-to-end.
     """
     assert backend_output.shape == reference_output.shape, (
-        f"[{tag}] backend shape {tuple(backend_output.shape)} != "
-        f"reference shape {tuple(reference_output.shape)}"
+        f"[{tag}] backend shape {tuple(backend_output.shape)} != reference shape {tuple(reference_output.shape)}"
     )
-    assert torch.isfinite(backend_output).all(), (
-        f"[{tag}] MLA-CP attention produced non-finite values"
-    )
+    assert torch.isfinite(backend_output).all(), f"[{tag}] MLA-CP attention produced non-finite values"
     if backend_output.dtype != reference_output.dtype:
         backend_output = backend_output.to(reference_output.dtype)
 
@@ -722,15 +716,16 @@ def _test_mla_cp_correctness(
     """Test ``AscendMlaCPImpl`` against a fp32 dense MLA reference."""
     mode = _infer_mode(batch_spec)
     assert not (pcp_size > 1 and mode in ("prefill", "mixed")), (
-        f"PCP>1 {mode} is out of scope; the parametrize whitelist "
-        "should not have generated this combination"
+        f"PCP>1 {mode} is out of scope; the parametrize whitelist should not have generated this combination"
     )
 
     torch.manual_seed(2026)
     _validate_spec(batch_spec)
 
     vllm_config = _get_vllm_config(
-        model, dtype, tensor_parallel_size=tensor_parallel_size,
+        model,
+        dtype,
+        tensor_parallel_size=tensor_parallel_size,
     )
     device = torch.device("npu")
 
@@ -751,40 +746,43 @@ def _test_mla_cp_correctness(
     scale = 1.0 / math.sqrt(qk_head_dim)
 
     k_nope_contexts, k_pe_contexts = _make_synthetic_kv_contexts(
-        seq_lens, kv_lora_rank, qk_rope_head_dim, dtype, device,
+        seq_lens,
+        kv_lora_rank,
+        qk_rope_head_dim,
+        dtype,
+        device,
     )
     k_nope_cache, k_pe_cache, block_table = _build_paged_kv_cache(
-        seq_lens, k_nope_contexts, k_pe_contexts,
-        block_size, kv_lora_rank, qk_rope_head_dim, dtype, device,
+        seq_lens,
+        k_nope_contexts,
+        k_pe_contexts,
+        block_size,
+        kv_lora_rank,
+        qk_rope_head_dim,
+        dtype,
+        device,
     )
     q_nope_latent = torch.randn(
-        num_tokens, num_heads, kv_lora_rank, dtype=dtype, device=device,
+        num_tokens,
+        num_heads,
+        kv_lora_rank,
+        dtype=dtype,
+        device=device,
     )
     q_pe_latent = torch.randn(
-        num_tokens, num_heads, qk_rope_head_dim, dtype=dtype, device=device,
+        num_tokens,
+        num_heads,
+        qk_rope_head_dim,
+        dtype=dtype,
+        device=device,
     )
     W_UV = _make_w_uv(num_heads, kv_lora_rank, v_head_dim, dtype, device)
 
-    q_nope_full = [
-        torch.randn(q, num_heads, qk_nope_head_dim, dtype=dtype, device=device)
-        for q in query_lens
-    ]
-    q_pe_full = [
-        torch.randn(q, num_heads, qk_rope_head_dim, dtype=dtype, device=device)
-        for q in query_lens
-    ]
-    k_nope_full = [
-        torch.randn(q, num_heads, qk_nope_head_dim, dtype=dtype, device=device)
-        for q in query_lens
-    ]
-    k_pe_full = [
-        torch.randn(q, num_heads, qk_rope_head_dim, dtype=dtype, device=device)
-        for q in query_lens
-    ]
-    v_full = [
-        torch.randn(q, num_heads, v_head_dim, dtype=dtype, device=device)
-        for q in query_lens
-    ]
+    q_nope_full = [torch.randn(q, num_heads, qk_nope_head_dim, dtype=dtype, device=device) for q in query_lens]
+    q_pe_full = [torch.randn(q, num_heads, qk_rope_head_dim, dtype=dtype, device=device) for q in query_lens]
+    k_nope_full = [torch.randn(q, num_heads, qk_nope_head_dim, dtype=dtype, device=device) for q in query_lens]
+    k_pe_full = [torch.randn(q, num_heads, qk_rope_head_dim, dtype=dtype, device=device) for q in query_lens]
+    v_full = [torch.randn(q, num_heads, v_head_dim, dtype=dtype, device=device) for q in query_lens]
 
     impl_kwargs = dict(
         scale=scale,
@@ -798,10 +796,7 @@ def _test_mla_cp_correctness(
     )
 
     dt = "bf16" if dtype == torch.bfloat16 else "fp16"
-    tag_base = (
-        f"{mode}|{batch_spec.name}|pcp={pcp_size}|dcp={dcp_size}"
-        f"|tp={tensor_parallel_size}|{dt}"
-    )
+    tag_base = f"{mode}|{batch_spec.name}|pcp={pcp_size}|dcp={dcp_size}|tp={tensor_parallel_size}|{dt}"
 
     if mode in ("decode", "mtp"):
         causal = mode == "mtp"
@@ -847,8 +842,12 @@ def _test_mla_cp_correctness(
             out_dtype=dtype,
         )
         _record_and_assert(
-            backend_output, reference_output, tag_base,
-            dtype=dtype, atol=atol, rtol=rtol,
+            backend_output,
+            reference_output,
+            tag_base,
+            dtype=dtype,
+            atol=atol,
+            rtol=rtol,
         )
         return
 
@@ -879,8 +878,12 @@ def _test_mla_cp_correctness(
             out_dtype=dtype,
         )
         _record_and_assert(
-            backend_output, reference_output, tag_base,
-            dtype=dtype, atol=atol, rtol=rtol,
+            backend_output,
+            reference_output,
+            tag_base,
+            dtype=dtype,
+            atol=atol,
+            rtol=rtol,
         )
         return
 
@@ -925,8 +928,12 @@ def _test_mla_cp_correctness(
         out_dtype=dtype,
     )
     _record_and_assert(
-        decode_backend, decode_reference, f"{tag_base}|mixed_decode",
-        dtype=dtype, atol=atol, rtol=rtol,
+        decode_backend,
+        decode_reference,
+        f"{tag_base}|mixed_decode",
+        dtype=dtype,
+        atol=atol,
+        rtol=rtol,
     )
 
     prefill_backend = _run_mla_cp_prefill_kernel(
@@ -955,8 +962,12 @@ def _test_mla_cp_correctness(
         out_dtype=dtype,
     )
     _record_and_assert(
-        prefill_backend, prefill_reference, f"{tag_base}|mixed_prefill",
-        dtype=dtype, atol=atol, rtol=rtol,
+        prefill_backend,
+        prefill_reference,
+        f"{tag_base}|mixed_prefill",
+        dtype=dtype,
+        atol=atol,
+        rtol=rtol,
     )
 
 
@@ -972,10 +983,7 @@ _TOPOLOGIES_PCP1 = [(1, 2), (1, 4)]
 _TEST_CASES: list[tuple[str, int, int]] = [
     (name, pcp, dcp)
     for name in BATCH_SPECS
-    for (pcp, dcp) in (
-        _TOPOLOGIES_ALL if _infer_mode(BATCH_SPECS[name]) in ("decode", "mtp")
-        else _TOPOLOGIES_PCP1
-    )
+    for (pcp, dcp) in (_TOPOLOGIES_ALL if _infer_mode(BATCH_SPECS[name]) in ("decode", "mtp") else _TOPOLOGIES_PCP1)
 ]
 
 
