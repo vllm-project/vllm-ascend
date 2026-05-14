@@ -151,11 +151,6 @@ def _patched_process_input_socket(
 
         logger.info("All engine subscriptions received by DP coordinator")
 
-        recovery_pub = None
-        recovery_pull = None
-        recovery_results: dict[int, dict[str, Any]] = {}
-        recovery_in_progress = False
-
         recovery_addr_msg = _RECOVERY_MSG_PREFIX + pickle.dumps(
             ("RECOVERY_ADDRESSES", recovery_pub_address, recovery_pull_address)
         )

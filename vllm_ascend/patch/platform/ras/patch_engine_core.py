@@ -146,17 +146,6 @@ def _patched_engine_core_proc_init(
     *,
     engine_index=0,
 ):
-    _original_engine_core_proc_init(
-        self,
-        vllm_config,
-        local_client,
-        handshake_address,
-        executor_class,
-        log_stats,
-        client_handshake_address,
-        engine_index=engine_index,
-    )
-
     worker_count = vllm_config.parallel_config.local_world_size
 
     self._recovery_handler = RecoveryHandler(
@@ -167,6 +156,17 @@ def _patched_engine_core_proc_init(
 
     self._recovery_handler.start()
     self._recovery_handler.wait_for_worker_subscriptions()
+
+    _original_engine_core_proc_init(
+        self,
+        vllm_config,
+        local_client,
+        handshake_address,
+        executor_class,
+        log_stats,
+        client_handshake_address,
+        engine_index=engine_index,
+    )
 
 EngineCoreProc.__init__ = _patched_engine_core_proc_init
 
@@ -224,7 +224,7 @@ def _patched_process_input_sockets(
                         if msg[0] == "RECOVERY_ADDRESSES":
                             _, sub_addr, push_addr = msg
                             logger.info(
-                                "=========================Received recovery addresses: sub=%s, push=%s=========================",
+                                "Received recovery addresses: sub=%s, push=%s",
                                 sub_addr, push_addr,
                             )
                             self._recovery_handler.connect_coordinator(sub_addr, push_addr)
