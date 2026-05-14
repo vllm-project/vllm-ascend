@@ -195,9 +195,9 @@ class AscendFusedMoE310(FusedMoE):
         prefix = kwargs.get("prefix", "")
         match = re.search(r"model\.layers\.(\d+)", prefix)
         if match:
-            from vllm_ascend.eplb.utils import register_moe_layer
+            from vllm_ascend.eplb.adaptor.vllm_adaptor import VllmEplbAdaptor
 
-            register_moe_layer(int(match.group(1)), self)
+            VllmEplbAdaptor.register_layer(int(match.group(1)), self)
 
     @property
     def is_internal_router(self) -> bool:
