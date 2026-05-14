@@ -620,8 +620,12 @@ class TestNPUPlatform(TestBase):
         self.platform = platform.NPUPlatform()
 
         with (
-            patch("vllm_ascend.platform.envs_ascend.VLLM_ASCEND_BALANCE_SCHEDULING", True, create=True),
-            pytest.raises(ValueError, match=r"VLLM_ASCEND_BALANCE_SCHEDULING.*recompute_scheduler_enable.*cannot be enabled simultaneously"),
+            patch("vllm_ascend.platform.envs_ascend.VLLM_ASCEND_BALANCE_SCHEDULING",
+                  True, create=True),
+            pytest.raises(
+                ValueError,
+                match=r"VLLM_ASCEND_BALANCE_SCHEDULING.*recompute_scheduler_enable"
+                      r".*cannot be enabled simultaneously"),
             patch.object(platform.NPUPlatform, "_fix_incompatible_config"),
             patch.object(platform, "check_kv_extra_config"),
         ):
