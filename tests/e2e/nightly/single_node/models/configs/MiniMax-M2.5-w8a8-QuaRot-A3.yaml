@@ -24,26 +24,26 @@ test_cases:
       - "1"
       - "--port"
       - "$SERVER_PORT"
-      - "--trust-remote-code"
+      - "--enable-expert-parallel"
       - "--async-scheduling"
+      - "--max-num-seqs"
+      - "128"
+      - "--max-model-len"
+      - "196608"
+      - "--max-num-batched-tokens"
+      - "16384"
       - "--gpu-memory-utilization"
       - "0.85"
+      - "--trust-remote-code"
       - "--quantization"
       - "ascend"
       - "--no-enable-prefix-caching"
+      - "--compilation-config"
+      - '{"cudagraph_mode":"FULL_DECODE_ONLY"}'
       - "--additional-config"
       - '{"enable_cpu_binding":true}'
       - "--speculative_config"
       - '{"method":"eagle3","model":"vllm-ascend/MiniMax-M2.5-eagle-model-0318","num_speculative_tokens":3}'
-      - "--enable-expert-parallel"
-      - "--max-num-seqs"
-      - "128"
-      - "--max-num-batched-tokens"
-      - "16384"
-      - "--max-model-len"
-      - "196608"
-      - "--compilation-config"
-      - '{"cudagraph_mode":"FULL_DECODE_ONLY"}'
     benchmarks:
       acc:
         case_type: accuracy
@@ -65,4 +65,595 @@ test_cases:
         batch_size: 128
         request_rate: 0
         baseline: 1116
+        threshold: 0.97
+  - name: "MiniMax-M2.5-w8a8-in16k-120-30"
+    model: "Eco-Tech/MiniMax-M2.5-w8a8-QuaRot"
+    envs:
+      HCCL_OP_EXPANSION_MODE: "AIV"
+      HCCL_BUFFSIZE: "512"
+      PYTORCH_NPU_ALLOC_CONF: "expandable_segments:True"
+      VLLM_ASCEND_ENABLE__FUSED_MC2: "1"
+      OMP_NUM_THREADS: "1"
+      TASK_QUEUE_ENABLE: "1"
+      VLLM_ASCEND_ENABLE_FLASHCOMM1: "1"
+      VLLM-ASCEND_BALANCE_SCHEDULING: "1"
+      VLLM_ASCEND_ENABLE_NZ: "1"
+      VLLM_USE_MODELSCOPE: "true"
+      SERVER_PORT: "DEFAULT_PORT"
+    server_cmd:
+      - "--tensor-parallel-size"
+      - "8"
+      - "--data-parallel-size"
+      - "1"
+      - "--port"
+      - "$SERVER_PORT"
+      - "--enable-expert-parallel"
+      - "--no-enable-prefix-caching"
+      - "--async-scheduling"
+      - "--max-num-seqs"
+      - "120"
+      - "--max-model-len"
+      - "196608"
+      - "--max-num-batched-tokens"
+      - "16384"
+      - "--gpu-memory-utilization"
+      - "0.85"
+      - "--trust-remote-code"
+      - "--quantization"
+      - "ascend"
+      - "--compilation-config"
+      - '{"cudagraph_mode":"FULL_DECODE_ONLY"}'
+      - "--additional-config"
+      - '{"enable_cpu_binding":true}'
+      - "--speculative_config"
+      - '{"method":"eagle3","model":"vllm-ascend/MiniMax-M2.5-eagle-model-0318","num_speculative_tokens":3}'
+    benchmarks:
+      perf:
+        case_type: performance
+        dataset_path: vllm-ascend/GSM8K-in3500-bs2800
+        request_conf: vllm_api_stream_chat
+        dataset_conf: gsm8k/gsm8k_gen_0_shot_cot_str_perf
+        num_prompts: 120
+        max_out_len: 1024
+        batch_size: 30
+        request_rate: 0
+        baseline: 1
+        threshold: 0.97
+  - name: "MiniMax-M2.5-w8a8-in16k-16-4"
+    model: "Eco-Tech/MiniMax-M2.5-w8a8-QuaRot"
+    envs:
+      HCCL_OP_EXPANSION_MODE: "AIV"
+      HCCL_BUFFSIZE: "512"
+      PYTORCH_NPU_ALLOC_CONF: "expandable_segments:True"
+      VLLM_ASCEND_ENABLE__FUSED_MC2: "1"
+      OMP_NUM_THREADS: "1"
+      TASK_QUEUE_ENABLE: "1"
+      VLLM-ASCEND_ENABLE_NZ: "1"
+      VLLM_ASCEND_ENABLE_FLASHCOMM1: "1"
+      VLLM-ASCEND_BALANCE_SCHEDULING: "1"
+      VLLM_ASCEND_ENABLE_NZ: "1"
+      VLLM_USE_MODELSCOPE: "true"
+      SERVER_PORT: "DEFAULT_PORT"
+    server_cmd:
+      - "--tensor-parallel-size"
+      - "8"
+      - "--data-parallel-size"
+      - "1"
+      - "--port"
+      - "$SERVER_PORT"
+      - "--enable-expert-parallel"
+      - "--async-scheduling"
+      - "--max-num-seqs"
+      - "32"
+      - "--max-model-len"
+      - "196608"
+      - "--max-num-batched-tokens"
+      - "16384"
+      - "--gpu-memory-utilization"
+      - "0.85"
+      - "--trust-remote-code"
+      - "--quantization"
+      - "ascend"
+      - "--no-enable-prefix-caching"
+      - "--compilation-config"
+      - '{"cudagraph_mode":"FULL_DECODE_ONLY"}'
+      - "--additional-config"
+      - '{"enable_cpu_binding":true}'
+      - "--speculative_config"
+      - '{"method":"eagle3","model":"vllm-ascend/MiniMax-M2.5-eagle-model-0318","num_speculative_tokens":3}'
+    benchmarks:
+      perf:
+        case_type: performance
+        dataset_path: vllm-ascend/GSM8K-in3500-bs2800
+        request_conf: vllm_api_stream_chat
+        dataset_conf: gsm8k/gsm8k_gen_0_shot_cot_str_perf
+        num_prompts: 16
+        max_out_len: 1024
+        batch_size: 4
+        request_rate: 0
+        baseline: 1
+        threshold: 0.97
+  - name: "MiniMax-M2.5-w8a8-in32k-36-9"
+    model: "Eco-Tech/MiniMax-M2.5-w8a8-QuaRot"
+    envs:
+      HCCL_OP_EXPANSION_MODE: "AIV"
+      HCCL_BUFFSIZE: "512"
+      PYTORCH_NPU_ALLOC_CONF: "expandable_segments:True"
+      VLLM_ASCEND_ENABLE__FUSED_MC2: "1"
+      OMP_NUM_THREADS: "1"
+      TASK_QUEUE_ENABLE: "1"
+      VLLM_ASCEND_ENABLE_FLASHCOMM1: "1"
+      VLLM-ASCEND_BALANCE_SCHEDULING: "1"
+      VLLM_ASCEND_ENABLE_NZ: "1"
+      VLLM_USE_MODELSCOPE: "true"
+      SERVER_PORT: "DEFAULT_PORT"
+    server_cmd:
+      - "--tensor-parallel-size"
+      - "8"
+      - "--data-parallel-size"
+      - "1"
+      - "--port"
+      - "$SERVER_PORT"
+      - "--enable-expert-parallel"
+      - "--async-scheduling"
+      - "--max-num-seqs"
+      - "32"
+      - "--max-model-len"
+      - "196608"
+      - "--max-num-batched-tokens"
+      - "16384"
+      - "--gpu-memory-utilization"
+      - "0.85"
+      - "--trust-remote-code"
+      - "--quantization"
+      - "ascend"
+      - "--no-enable-prefix-caching"
+      - "--compilation-config"
+      - '{"cudagraph_mode":"FULL_DECODE_ONLY"}'
+      - "--additional-config"
+      - '{"enable_cpu_binding":true}'
+      - "--speculative_config"
+      - '{"method":"eagle3","model":"vllm-ascend/MiniMax-M2.5-eagle-model-0318","num_speculative_tokens":3}'
+    benchmarks:
+      perf:
+        case_type: performance
+        dataset_path: vllm-ascend/GSM8K-in3500-bs2800
+        request_conf: vllm_api_stream_chat
+        dataset_conf: gsm8k/gsm8k_gen_0_shot_cot_str_perf
+        num_prompts: 36
+        max_out_len: 512
+        batch_size: 9
+        request_rate: 0
+        baseline: 1
+        threshold: 0.97
+  - name: "MiniMax-M2.5-w8a8-in32k-80-20"
+    model: "Eco-Tech/MiniMax-M2.5-w8a8-QuaRot"
+    envs:
+      HCCL_OP_EXPANSION_MODE: "AIV"
+      HCCL_BUFFSIZE: "512"
+      PYTORCH_NPU_ALLOC_CONF: "expandable_segments:True"
+      VLLM_ASCEND_ENABLE__FUSED_MC2: "1"
+      OMP_NUM_THREADS: "1"
+      TASK_QUEUE_ENABLE: "1"
+      VLLM_ASCEND_ENABLE_FLASHCOMM1: "1"
+      VLLM-ASCEND_BALANCE_SCHEDULING: "1"
+      VLLM_ASCEND_ENABLE_NZ: "1"
+      VLLM_USE_MODELSCOPE: "true"
+      SERVER_PORT: "DEFAULT_PORT"
+    server_cmd:
+      - "--tensor-parallel-size"
+      - "8"
+      - "--data-parallel-size"
+      - "1"
+      - "--port"
+      - "$SERVER_PORT"
+      - "--enable-expert-parallel"
+      - "--async-scheduling"
+      - "--max-num-seqs"
+      - "32"
+      - "--max-model-len"
+      - "196608"
+      - "--max-num-batched-tokens"
+      - "16384"
+      - "--gpu-memory-utilization"
+      - "0.85"
+      - "--trust-remote-code"
+      - "--quantization"
+      - "ascend"
+      - "--enable-prefix-caching"
+      - "--compilation-config"
+      - '{"cudagraph_mode":"FULL_DECODE_ONLY"}'
+      - "--additional-config"
+      - '{"enable_cpu_binding":true}'
+      - "--speculative_config"
+      - '{"method":"eagle3","model":"vllm-ascend/MiniMax-M2.5-eagle-model-0318","num_speculative_tokens":3}'
+    benchmarks:
+      perf:
+        case_type: performance
+        dataset_path: vllm-ascend/GSM8K-in3500-bs2800
+        request_conf: vllm_api_stream_chat
+        dataset_conf: gsm8k/gsm8k_gen_0_shot_cot_str_perf
+        num_prompts: 80
+        max_out_len: 512
+        batch_size: 20
+        request_rate: 0
+        baseline: 1
+        threshold: 0.97
+  - name: "MiniMax-M2.5-w8a8-in32k-4-1"
+    model: "Eco-Tech/MiniMax-M2.5-w8a8-QuaRot"
+    envs:
+      HCCL_OP_EXPANSION_MODE: "AIV"
+      HCCL_BUFFSIZE: "512"
+      PYTORCH_NPU_ALLOC_CONF: "expandable_segments:True"
+      VLLM_ASCEND_ENABLE__FUSED_MC2: "1"
+      OMP_NUM_THREADS: "1"
+      TASK_QUEUE_ENABLE: "1"
+      VLLM_ASCEND_ENABLE_FLASHCOMM1: "1"
+      VLLM-ASCEND_BALANCE_SCHEDULING: "1"
+      VLLM_ASCEND_ENABLE_NZ: "1"
+      VLLM_USE_MODELSCOPE: "true"
+      SERVER_PORT: "DEFAULT_PORT"
+    server_cmd:
+      - "--tensor-parallel-size"
+      - "8"
+      - "--data-parallel-size"
+      - "1"
+      - "--port"
+      - "$SERVER_PORT"
+      - "--enable-expert-parallel"
+      - "--async-scheduling"
+      - "--max-num-seqs"
+      - "32"
+      - "--max-model-len"
+      - "196608"
+      - "--max-num-batched-tokens"
+      - "16384"
+      - "--gpu-memory-utilization"
+      - "0.85"
+      - "--trust-remote-code"
+      - "--quantization"
+      - "ascend"
+      - "--no-enable-prefix-caching"
+      - "--compilation-config"
+      - '{"cudagraph_mode":"FULL_DECODE_ONLY"}'
+      - "--additional-config"
+      - '{"enable_cpu_binding":true}'
+      - "--speculative_config"
+      - '{"method":"eagle3","model":"vllm-ascend/MiniMax-M2.5-eagle-model-0318","num_speculative_tokens":3}'
+    benchmarks:
+      perf:
+        case_type: performance
+        dataset_path: vllm-ascend/GSM8K-in3500-bs2800
+        request_conf: vllm_api_stream_chat
+        dataset_conf: gsm8k/gsm8k_gen_0_shot_cot_str_perf
+        num_prompts: 4
+        max_out_len: 512
+        batch_size: 1
+        request_rate: 0
+        baseline: 1
+        threshold: 0.97
+  - name: "MiniMax-M2.5-w8a8-in32k-4-1-90"
+    model: "Eco-Tech/MiniMax-M2.5-w8a8-QuaRot"
+    envs:
+      HCCL_OP_EXPANSION_MODE: "AIV"
+      HCCL_BUFFSIZE: "512"
+      PYTORCH_NPU_ALLOC_CONF: "expandable_segments:True"
+      VLLM_ASCEND_ENABLE__FUSED_MC2: "1"
+      OMP_NUM_THREADS: "1"
+      TASK_QUEUE_ENABLE: "1"
+      VLLM_ASCEND_ENABLE_FLASHCOMM1: "1"
+      VLLM-ASCEND_BALANCE_SCHEDULING: "1"
+      VLLM_ASCEND_ENABLE_NZ: "1"
+      VLLM_USE_MODELSCOPE: "true"
+      SERVER_PORT: "DEFAULT_PORT"
+    server_cmd:
+      - "--tensor-parallel-size"
+      - "8"
+      - "--data-parallel-size"
+      - "1"
+      - "--port"
+      - "$SERVER_PORT"
+      - "--enable-expert-parallel"
+      - "--async-scheduling"
+      - "--max-num-seqs"
+      - "32"
+      - "--max-model-len"
+      - "196608"
+      - "--max-num-batched-tokens"
+      - "16384"
+      - "--gpu-memory-utilization"
+      - "0.85"
+      - "--trust-remote-code"
+      - "--quantization"
+      - "ascend"
+      - "--enable-prefix-caching"
+      - "--compilation-config"
+      - '{"cudagraph_mode":"FULL_DECODE_ONLY"}'
+      - "--additional-config"
+      - '{"enable_cpu_binding":true}'
+      - "--speculative_config"
+      - '{"method":"eagle3","model":"vllm-ascend/MiniMax-M2.5-eagle-model-0318","num_speculative_tokens":3}'
+    benchmarks:
+      perf:
+        case_type: performance
+        dataset_path: vllm-ascend/GSM8K-in3500-bs2800
+        request_conf: vllm_api_stream_chat
+        dataset_conf: gsm8k/gsm8k_gen_0_shot_cot_str_perf
+        num_prompts: 4
+        max_out_len: 512
+        batch_size: 1
+        request_rate: 0
+        baseline: 1
+        threshold: 0.97
+  - name: "MiniMax-M2.5-w8a8-in64k-72-18"
+    model: "Eco-Tech/MiniMax-M2.5-w8a8-QuaRot"
+    envs:
+      HCCL_OP_EXPANSION_MODE: "AIV"
+      HCCL_BUFFSIZE: "512"
+      PYTORCH_NPU_ALLOC_CONF: "expandable_segments:True"
+      VLLM_ASCEND_ENABLE__FUSED_MC2: "1"
+      OMP_NUM_THREADS: "1"
+      TASK_QUEUE_ENABLE: "1"
+      VLLM_ASCEND_ENABLE_FLASHCOMM1: "1"
+      VLLM-ASCEND_BALANCE_SCHEDULING: "1"
+      VLLM_ASCEND_ENABLE_NZ: "1"
+      VLLM_USE_MODELSCOPE: "true"
+      SERVER_PORT: "DEFAULT_PORT"
+    server_cmd:
+      - "--tensor-parallel-size"
+      - "8"
+      - "--data-parallel-size"
+      - "1"
+      - "--port"
+      - "$SERVER_PORT"
+      - "--enable-expert-parallel"
+      - "--async-scheduling"
+      - "--max-num-seqs"
+      - "32"
+      - "--max-model-len"
+      - "196608"
+      - "--max-num-batched-tokens"
+      - "16384"
+      - "--gpu-memory-utilization"
+      - "0.85"
+      - "--trust-remote-code"
+      - "--quantization"
+      - "ascend"
+      - "--enable-prefix-caching"
+      - "--compilation-config"
+      - '{"cudagraph_mode":"FULL_DECODE_ONLY"}'
+      - "--additional-config"
+      - '{"enable_cpu_binding":true}'
+      - "--speculative_config"
+      - '{"method":"eagle3","model":"vllm-ascend/MiniMax-M2.5-eagle-model-0318","num_speculative_tokens":3}'
+    benchmarks:
+      perf:
+        case_type: performance
+        dataset_path: vllm-ascend/GSM8K-in3500-bs2800
+        request_conf: vllm_api_stream_chat
+        dataset_conf: gsm8k/gsm8k_gen_0_shot_cot_str_perf
+        num_prompts: 72
+        max_out_len: 1024
+        batch_size: 18
+        request_rate: 0
+        baseline: 1
+        threshold: 0.97
+  - name: "MiniMax-M2.5-w8a8-in64k-4-1"
+    model: "Eco-Tech/MiniMax-M2.5-w8a8-QuaRot"
+    envs:
+      HCCL_OP_EXPANSION_MODE: "AIV"
+      HCCL_BUFFSIZE: "512"
+      PYTORCH_NPU_ALLOC_CONF: "expandable_segments:True"
+      VLLM_ASCEND_ENABLE__FUSED_MC2: "1"
+      OMP_NUM_THREADS: "1"
+      TASK_QUEUE_ENABLE: "1"
+      VLLM_ASCEND_ENABLE_FLASHCOMM1: "1"
+      VLLM-ASCEND_BALANCE_SCHEDULING: "1"
+      VLLM_ASCEND_ENABLE_NZ: "1"
+      VLLM_USE_MODELSCOPE: "true"
+      SERVER_PORT: "DEFAULT_PORT"
+    server_cmd:
+      - "--tensor-parallel-size"
+      - "8"
+      - "--data-parallel-size"
+      - "1"
+      - "--port"
+      - "$SERVER_PORT"
+      - "--enable-expert-parallel"
+      - "--async-scheduling"
+      - "--max-num-seqs"
+      - "32"
+      - "--max-model-len"
+      - "196608"
+      - "--max-num-batched-tokens"
+      - "16384"
+      - "--gpu-memory-utilization"
+      - "0.85"
+      - "--trust-remote-code"
+      - "--quantization"
+      - "ascend"
+      - "--enable-prefix-caching"
+      - "--compilation-config"
+      - '{"cudagraph_mode":"FULL_DECODE_ONLY"}'
+      - "--additional-config"
+      - '{"enable_cpu_binding":true}'
+      - "--speculative_config"
+      - '{"method":"eagle3","model":"vllm-ascend/MiniMax-M2.5-eagle-model-0318","num_speculative_tokens":3}'
+    benchmarks:
+      perf:
+        case_type: performance
+        dataset_path: vllm-ascend/GSM8K-in3500-bs2800
+        request_conf: vllm_api_stream_chat
+        dataset_conf: gsm8k/gsm8k_gen_0_shot_cot_str_perf
+        num_prompts: 72
+        max_out_len: 1024
+        batch_size: 18
+        request_rate: 0
+        baseline: 1
+        threshold: 0.97
+  - name: "MiniMax-M2.5-w8a8-in128k-32-8"
+    model: "Eco-Tech/MiniMax-M2.5-w8a8-QuaRot"
+    envs:
+      HCCL_OP_EXPANSION_MODE: "AIV"
+      HCCL_BUFFSIZE: "512"
+      PYTORCH_NPU_ALLOC_CONF: "expandable_segments:True"
+      VLLM_ASCEND_ENABLE__FUSED_MC2: "1"
+      OMP_NUM_THREADS: "1"
+      TASK_QUEUE_ENABLE: "1"
+      VLLM_ASCEND_ENABLE_FLASHCOMM1: "1"
+      VLLM-ASCEND_BALANCE_SCHEDULING: "1"
+      VLLM_ASCEND_ENABLE_NZ: "1"
+      VLLM_USE_MODELSCOPE: "true"
+      SERVER_PORT: "DEFAULT_PORT"
+    server_cmd:
+      - "--tensor-parallel-size"
+      - "8"
+      - "--data-parallel-size"
+      - "1"
+      - "--port"
+      - "$SERVER_PORT"
+      - "--decode-context-parallel-size"
+      - "1"
+      - "--prefill-context-parallel-size"
+      - "2"
+      - "--enable-expert-parallel"
+      - "--async-scheduling"
+      - "--max-num-seqs"
+      - "32"
+      - "--max-model-len"
+      - "196608"
+      - "--max-num-batched-tokens"
+      - "16384"
+      - "--gpu-memory-utilization"
+      - "0.85"
+      - "--trust-remote-code"
+      - "--quantization"
+      - "ascend"
+      - "--enable-prefix-caching"
+      - "--compilation-config"
+      - '{"cudagraph_mode":"FULL_DECODE_ONLY"}'
+      - "--additional-config"
+      - '{"enable_cpu_binding":true}'
+      - "--speculative_config"
+      - '{"enforce_eager": true, "method": "eagle3", "model": "vllm-ascend/MiniMax-M2.5-eagle-model-0318", "num_speculative_tokens": 1}'
+    benchmarks:
+      perf:
+        case_type: performance
+        dataset_path: vllm-ascend/GSM8K-in3500-bs2800
+        request_conf: vllm_api_stream_chat
+        dataset_conf: gsm8k/gsm8k_gen_0_shot_cot_str_perf
+        num_prompts: 32
+        max_out_len: 1024
+        batch_size: 8
+        request_rate: 0
+        baseline: 1
+        threshold: 0.97
+  - name: "MiniMax-M2.5-w8a8-in128k-4-1"
+    model: "Eco-Tech/MiniMax-M2.5-w8a8-QuaRot"
+    envs:
+      HCCL_OP_EXPANSION_MODE: "AIV"
+      HCCL_BUFFSIZE: "512"
+      PYTORCH_NPU_ALLOC_CONF: "expandable_segments:True"
+      VLLM_ASCEND_ENABLE__FUSED_MC2: "1"
+      OMP_NUM_THREADS: "1"
+      TASK_QUEUE_ENABLE: "1"
+      VLLM_ASCEND_ENABLE_FLASHCOMM1: "1"
+      VLLM-ASCEND_BALANCE_SCHEDULING: "1"
+      VLLM_ASCEND_ENABLE_NZ: "1"
+      VLLM_USE_MODELSCOPE: "true"
+      SERVER_PORT: "DEFAULT_PORT"
+    server_cmd:
+      - "--tensor-parallel-size"
+      - "8"
+      - "--data-parallel-size"
+      - "1"
+      - "--port"
+      - "$SERVER_PORT"
+      - "--decode-context-parallel-size"
+      - "1"
+      - "--prefill-context-parallel-size"
+      - "2"
+      - "--enable-expert-parallel"
+      - "--async-scheduling"
+      - "--max-num-seqs"
+      - "32"
+      - "--max-model-len"
+      - "196608"
+      - "--max-num-batched-tokens"
+      - "16384"
+      - "--gpu-memory-utilization"
+      - "0.85"
+      - "--trust-remote-code"
+      - "--quantization"
+      - "ascend"
+      - "--enable-prefix-caching"
+      - "--compilation-config"
+      - '{"cudagraph_mode":"FULL_DECODE_ONLY"}'
+      - "--additional-config"
+      - '{"enable_cpu_binding":true}'
+      - "--speculative_config"
+      - '{"enforce_eager": true, "method": "eagle3", "model": "vllm-ascend/MiniMax-M2.5-eagle-model-0318", "num_speculative_tokens": 1}'
+    benchmarks:
+      perf:
+        case_type: performance
+        dataset_path: vllm-ascend/GSM8K-in3500-bs2800
+        request_conf: vllm_api_stream_chat
+        dataset_conf: gsm8k/gsm8k_gen_0_shot_cot_str_perf
+        num_prompts: 4
+        max_out_len: 1024
+        batch_size: 1
+        request_rate: 0
+        baseline: 1
+        threshold: 0.97
+  - name: "MiniMax-M2.5-w8a8-in128k-64-16"
+    model: "Eco-Tech/MiniMax-M2.5-w8a8-QuaRot"
+    envs:
+      HCCL_OP_EXPANSION_MODE: "AIV"
+      HCCL_BUFFSIZE: "512"
+      PYTORCH_NPU_ALLOC_CONF: "expandable_segments:True"
+      VLLM_ASCEND_ENABLE__FUSED_MC2: "1"
+      OMP_NUM_THREADS: "1"
+      TASK_QUEUE_ENABLE: "1"
+      VLLM_ASCEND_ENABLE_FLASHCOMM1: "1"
+      VLLM-ASCEND_BALANCE_SCHEDULING: "1"
+      VLLM_USE_MODELSCOPE: "true"
+      SERVER_PORT: "DEFAULT_PORT"
+    server_cmd:
+      - "--tensor-parallel-size"
+      - "16"
+      - "--data-parallel-size"
+      - "1"
+      - "--port"
+      - "$SERVER_PORT"
+      - "--enable-expert-parallel"
+      - "--async-scheduling"
+      - "--max-num-seqs"
+      - "32"
+      - "--max-model-len"
+      - "196608"
+      - "--max-num-batched-tokens"
+      - "65536"
+      - "--gpu-memory-utilization"
+      - "0.85"
+      - "--trust-remote-code"
+      - "--quantization"
+      - "ascend"
+      - "--enable-prefix-caching"
+      - "--compilation-config"
+      - '{"cudagraph_mode":"FULL_DECODE_ONLY"}'
+      - "--additional-config"
+      - '{"enable_cpu_binding":true}'
+      - "--speculative_config"
+      - '{"enforce_eager": true, "method": "eagle3", "model": "vllm-ascend/MiniMax-M2.5-eagle-model-0318", "num_speculative_tokens": 1}'
+    benchmarks:
+      perf:
+        case_type: performance
+        dataset_path: vllm-ascend/GSM8K-in3500-bs2800
+        request_conf: vllm_api_stream_chat
+        dataset_conf: gsm8k/gsm8k_gen_0_shot_cot_str_perf
+        num_prompts: 64
+        max_out_len: 1024
+        batch_size: 16
+        request_rate: 0
+        baseline: 1
         threshold: 0.97
