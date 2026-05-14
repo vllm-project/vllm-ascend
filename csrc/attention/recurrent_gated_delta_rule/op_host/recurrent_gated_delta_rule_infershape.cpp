@@ -20,7 +20,7 @@
 #include "exe_graph/runtime/shape.h"
 #include "exe_graph/runtime/storage_shape.h"
 #include "register/op_impl_registry.h"
-#include "error_log.h"
+#include "tiling_base/error_log.h"
 
 using namespace gert;
 namespace ops {
