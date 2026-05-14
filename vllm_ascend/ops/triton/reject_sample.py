@@ -145,16 +145,20 @@ def rejection_random_sample_kernel(
     cu_num_draft_tokens_ptr,  # [batch_size]
     draft_token_ids_ptr,  # [num_tokens]
     draft_probs_ptr,  # [num_tokens, vocab_size] or None
-    target_probs_ptr,  # [num_tokens, vocab_size]
+    target_probs_ptr,  # [num_tokens, vocab_size] or [num_tokens, compressed_vocab_size] if COMPRESSED_MODE
+    target_indices_ptr,  # [num_tokens, compressed_vocab_size] global vocab indices, only used if COMPRESSED_MODE
     bonus_token_ids_ptr,  # [batch_size]
     recovered_token_ids_ptr,  # [num_tokens]
     uniform_probs_ptr,  # [num_tokens]
     is_greedy_ptr,  # [batch_size]
     max_spec_len,
-    vocab_size,
+    vocab_size,  # vocab_size or compressed_vocab_size if COMPRESSED_MODE
+    global_vocab_size,  # global vocab size for draft_probs indexing (only used if COMPRESSED_MODE)
     vec_len,
     NO_DRAFT_PROBS: tl.constexpr,
+    COMPRESSED_MODE: tl.constexpr,  # Whether using compressed logits
     BLOCK_SIZE: tl.constexpr,
+    VOCAB_BLOCK_SIZE: tl.constexpr = 512,
 ):
     block_idx = tl.program_id(0)
     offsets = block_idx * BLOCK_SIZE + tl.arange(0, BLOCK_SIZE)
@@ -164,6 +168,7 @@ def rejection_random_sample_kernel(
     start_idxs = tl.where(offsets == 0, 0, tl.load(cu_num_draft_tokens_ptr + offsets - 1, not_greedy_mask))
     end_idxs = tl.load(cu_num_draft_tokens_ptr + offsets, not_greedy_mask)
     n_num_draft_tokens = end_idxs - start_idxs
+
     for req_i in range(BLOCK_SIZE):
         not_greedy = get_element(not_greedy_mask, (req_i,))
         if not_greedy:
@@ -171,27 +176,63 @@ def rejection_random_sample_kernel(
             start_idx = get_element(start_idxs, (req_i,))
             req_idx = block_idx * BLOCK_SIZE + req_i
             num_draft_tokens = get_element(n_num_draft_tokens, (req_i,))
+
             for pos in range(num_draft_tokens):
                 if not rejected:
-                    draft_token_id = tl.load(draft_token_ids_ptr + start_idx + pos)
-                    if NO_DRAFT_PROBS:
-                        draft_prob = 1
+                    token_idx = start_idx + pos
+                    draft_token_id = tl.load(draft_token_ids_ptr + token_idx)
+
+                    if COMPRESSED_MODE:
+                        target_prob = 0.0
+                        found = False
+
+                        for v_offset in range(0, vocab_size, VOCAB_BLOCK_SIZE):
+                            if not found:
+                                vocab_offsets = v_offset + tl.arange(0, VOCAB_BLOCK_SIZE)
+                                vocab_mask = vocab_offsets < vocab_size
+
+                                candidate_indices = tl.load(
+                                    target_indices_ptr + token_idx * vocab_size + vocab_offsets,
+                                    mask=vocab_mask,
+                                    other=-1,
+                                )
+
+                                match_mask = candidate_indices == draft_token_id
+
+                                candidate_probs = tl.load(
+                                    target_probs_ptr + token_idx * vocab_size + vocab_offsets,
+                                    mask=vocab_mask,
+                                    other=0.0,
+                                )
+
+                                current_match_prob = tl.sum(candidate_probs * match_mask, axis=0)
+                                if current_match_prob > 0.0:
+                                    target_prob = current_match_prob
+                                    found = True
                     else:
-                        draft_prob = tl.load(draft_probs_ptr + (start_idx + pos) * vocab_size + draft_token_id)
-                    target_prob = tl.load(target_probs_ptr + (start_idx + pos) * vocab_size + draft_token_id)
-                    uniform_prob = tl.load(uniform_probs_ptr + start_idx + pos)
-                    # NOTE(woosuk): While the draft probability should never be 0,
-                    # we check it to avoid NaNs. If it happens to be 0, we reject.
+                        target_prob = tl.load(target_probs_ptr + token_idx * vocab_size + draft_token_id)
+
+                    if NO_DRAFT_PROBS:
+                        draft_prob = 1.0
+                    else:
+                        vocab_for_draft = global_vocab_size if COMPRESSED_MODE else vocab_size
+                        draft_prob = tl.load(draft_probs_ptr + token_idx * vocab_for_draft + draft_token_id)
+
+                    uniform_prob = tl.load(uniform_probs_ptr + token_idx)
+
+                    # Acceptance condition
                     if draft_prob > 0 and target_prob / draft_prob >= uniform_prob:
-                        # Accept.
+                        # Accept
                         token_id = draft_token_id
                     else:
-                        # Reject. Use recovered token.
+                        # Reject - use recovered token
                         rejected = True
-                        token_id = tl.load(recovered_token_ids_ptr + start_idx + pos)
+                        token_id = tl.load(recovered_token_ids_ptr + token_idx)
+
                     tl.store(output_token_ids_ptr + req_idx * (max_spec_len + 1) + pos, token_id)
+
             if not rejected:
-                # If all tokens are accepted, append the bonus token.
+                # All tokens accepted - append bonus token
                 bonus_token_id = tl.load(bonus_token_ids_ptr + req_idx)
                 tl.store(
                     output_token_ids_ptr + req_idx * (max_spec_len + 1) + num_draft_tokens,
@@ -231,78 +272,131 @@ def expand_kernel(
 
 @triton.jit
 def sample_recovered_tokens_kernel(
-    output_token_ids_ptr,  # [num_tokens]
-    cu_num_draft_tokens_ptr,  # [batch_size]
-    draft_token_ids_ptr,  # [num_tokens]
-    draft_probs_ptr,  # [num_tokens, vocab_size] or None
-    target_probs_ptr,  # [num_tokens, vocab_size]
-    q_ptr,  # [batch_size, vocab_size]
-    vocab_size,
+    output_token_ids_ptr,
+    cu_num_draft_tokens_ptr,
+    draft_token_ids_ptr,
+    draft_probs_ptr,
+    target_probs_ptr,
+    target_indices_ptr,
+    q_ptr,
+    compressed_vocab_size,
+    global_vocab_size,
     PADDED_VOCAB_SIZE: tl.constexpr,
     NO_DRAFT_PROBS: tl.constexpr,
     BLOCK_VERIFY: tl.constexpr,
+    COMPRESSED_MODE: tl.constexpr,
     SUB_BLOCK: tl.constexpr,
 ):
     req_idx = tl.program_id(0)
-    start_idx = 0 if req_idx == 0 else tl.load(cu_num_draft_tokens_ptr + req_idx - 1)
+    pos = tl.program_id(1)
+
+    # Compute token index
+    start_idx = tl.where(req_idx == 0, 0, tl.load(cu_num_draft_tokens_ptr + req_idx - 1))
     end_idx = tl.load(cu_num_draft_tokens_ptr + req_idx)
     num_draft_tokens = end_idx - start_idx
 
-    # Early exit for out-of-range positions.
-    pos = tl.program_id(1)
     if pos >= num_draft_tokens:
         return
 
-    loop = (vocab_size + SUB_BLOCK - 1) // SUB_BLOCK
-    global_recovered_id = -1
-    global_max_p = -1.0
-    prefix_prob = 1.0
-    if BLOCK_VERIFY:
-        for prev_pos in range(pos):
-            prev_token_idx = start_idx + prev_pos
-            prev_draft_token_id = tl.load(draft_token_ids_ptr + prev_token_idx)
-            prev_target_prob = tl.load(target_probs_ptr + prev_token_idx * vocab_size + prev_draft_token_id)
-            if NO_DRAFT_PROBS:
-                prev_draft_prob = 1.0
-            else:
-                prev_draft_prob = tl.load(draft_probs_ptr + prev_token_idx * vocab_size + prev_draft_token_id)
-            if prev_draft_prob > 0:
-                prefix_prob = min(prefix_prob * prev_target_prob / prev_draft_prob, 1.0)
-            else:
-                prefix_prob = 0.0
+    token_idx = start_idx + pos
 
-    draft_token_id = tl.load(draft_token_ids_ptr + start_idx + pos)
-    for loop_i in range(loop):
-        vocab_start = loop_i * SUB_BLOCK
-        vocab_offset = vocab_start + tl.arange(0, SUB_BLOCK)
-        target_prob = tl.load(
-            target_probs_ptr + (start_idx + pos) * vocab_size + vocab_offset,
-            mask=vocab_offset < vocab_size,
-            other=0,
-        )
-        if NO_DRAFT_PROBS:
-            prob = prefix_prob * target_prob if BLOCK_VERIFY else target_prob
-            prob = tl.where(vocab_offset == draft_token_id, 0.0, prob)
-        else:
-            draft_prob = tl.load(
-                draft_probs_ptr + (start_idx + pos) * vocab_size + vocab_offset,
+    if COMPRESSED_MODE:
+        C = compressed_vocab_size
+        n_loop = tl.cdiv(C, SUB_BLOCK)
+
+        global_max_p = tl.full((), -float("inf"), tl.float32)
+        global_recovered_id = tl.full((), -1, tl.int64)
+        draft_token_id = tl.load(draft_token_ids_ptr + token_idx).to(tl.int64)
+
+        for li in range(n_loop):
+            c_start = li * SUB_BLOCK
+            offs = c_start + tl.arange(0, SUB_BLOCK)
+            mask = offs < C
+
+            # Load target prob and global index
+            tprob = tl.load(target_probs_ptr + token_idx * C + offs, mask=mask, other=0.0).to(tl.float32)
+
+            gidx = tl.load(target_indices_ptr + token_idx * C + offs, mask=mask, other=0).to(tl.int64)
+
+            if NO_DRAFT_PROBS:
+                is_draft = (gidx == draft_token_id) & mask
+                prob = tl.where(is_draft, 0.0, tprob)
+            else:
+                valid = (gidx >= 0) & (gidx < global_vocab_size) & mask
+                dprob = tl.load(draft_probs_ptr + token_idx * global_vocab_size + gidx, mask=valid, other=0.0).to(
+                    tl.float32
+                )
+                prob = tl.maximum(tprob - dprob, 0.0)
+
+            qv = tl.load(q_ptr + req_idx * C + offs, mask=mask, other=1.0).to(tl.float32)
+
+            bad_q = (qv <= 0) | tl.math.isinf(qv)
+            score = tl.where(bad_q, float("-inf"), prob / qv)
+            score = tl.where(mask, score, float("-inf"))
+
+            block_best_score = tl.max(score, axis=0)
+            block_best_idx = tl.argmax(score, axis=0).to(tl.int64)
+            block_best_global_id = tl.load(target_indices_ptr + token_idx * C + (c_start + block_best_idx)).to(tl.int64)
+
+            better = block_best_score > global_max_p
+            global_max_p = tl.where(better, block_best_score, global_max_p)
+            global_recovered_id = tl.where(better, block_best_global_id, global_recovered_id)
+
+        tl.store(output_token_ids_ptr + token_idx, global_recovered_id)
+    else:
+        vocab_size = global_vocab_size
+        loop = (vocab_size + SUB_BLOCK - 1) // SUB_BLOCK
+        global_recovered_id = -1
+        global_max_p = -1.0
+        prefix_prob = 1.0
+        if BLOCK_VERIFY:
+            for prev_pos in range(pos):
+                prev_token_idx = start_idx + prev_pos
+                prev_draft_token_id = tl.load(draft_token_ids_ptr + prev_token_idx)
+                prev_target_prob = tl.load(target_probs_ptr + prev_token_idx * vocab_size + prev_draft_token_id)
+                if NO_DRAFT_PROBS:
+                    prev_draft_prob = 1.0
+                else:
+                    prev_draft_prob = tl.load(draft_probs_ptr + prev_token_idx * vocab_size + prev_draft_token_id)
+                if prev_draft_prob > 0:
+                    prefix_prob = min(prefix_prob * prev_target_prob / prev_draft_prob, 1.0)
+                else:
+                    prefix_prob = 0.0
+
+        draft_token_id = tl.load(draft_token_ids_ptr + start_idx + pos)
+        for loop_i in range(loop):
+            vocab_start = loop_i * SUB_BLOCK
+            vocab_offset = vocab_start + tl.arange(0, SUB_BLOCK)
+            target_prob = tl.load(
+                target_probs_ptr + (start_idx + pos) * vocab_size + vocab_offset,
                 mask=vocab_offset < vocab_size,
                 other=0,
             )
-            if BLOCK_VERIFY:
-                prob = tl.maximum(prefix_prob * target_prob - draft_prob, 0.0)
+            if NO_DRAFT_PROBS:
+                prob = prefix_prob * target_prob if BLOCK_VERIFY else target_prob
+                prob = tl.where(vocab_offset == draft_token_id, 0.0, prob)
             else:
-                prob = tl.maximum(target_prob - draft_prob, 0.0)
+                draft_prob = tl.load(
+                    draft_probs_ptr + (start_idx + pos) * vocab_size + vocab_offset,
+                    mask=vocab_offset < vocab_size,
+                    other=0,
+                )
+                if BLOCK_VERIFY:
+                    prob = tl.maximum(prefix_prob * target_prob - draft_prob, 0.0)
+                else:
+                    prob = tl.maximum(target_prob - draft_prob, 0.0)
 
-        q = tl.load(q_ptr + req_idx * vocab_size + vocab_offset, mask=vocab_offset < vocab_size, other=float("-inf"))
-        new_p = prob / q
-        recovered_id = tl.argmax(new_p, axis=-1)
-        max_p = get_element(new_p, (recovered_id,))
-        if max_p > global_max_p:
-            global_max_p = max_p
-            global_recovered_id = vocab_start + recovered_id
+            q = tl.load(
+                q_ptr + req_idx * vocab_size + vocab_offset, mask=vocab_offset < vocab_size, other=float("-inf")
+            )
+            new_p = prob / q
+            recovered_id = tl.argmax(new_p, axis=-1)
+            max_p = get_element(new_p, (recovered_id,))
+            if max_p > global_max_p:
+                global_max_p = max_p
+                global_recovered_id = vocab_start + recovered_id
 
-    tl.store(output_token_ids_ptr + start_idx + pos, global_recovered_id)
+        tl.store(output_token_ids_ptr + start_idx + pos, global_recovered_id)
 
 
 def rejection_greedy_sample_with_triton(
@@ -364,102 +458,99 @@ def rejection_random_sample_block_verify_kernel(
     cu_num_draft_tokens_ptr,  # [batch_size]
     draft_token_ids_ptr,  # [num_tokens]
     draft_probs_ptr,  # [num_tokens, vocab_size] or None
-    target_probs_ptr,  # [num_tokens, vocab_size]
+    target_probs_ptr,  # [num_tokens, vocab_size] or [num_tokens, compressed_vocab_size] if COMPRESSED_MODE
+    target_indices_ptr,  # [num_tokens, compressed_vocab_size] global vocab indices, only used if COMPRESSED_MODE
     bonus_token_ids_ptr,  # [batch_size]
     recovered_token_ids_ptr,  # [num_tokens]
     uniform_probs_ptr,  # [num_tokens]
     is_greedy_ptr,  # [batch_size]
     max_spec_len,
-    vocab_size,
+    vocab_size,  # vocab_size or compressed_vocab_size if COMPRESSED_MODE
+    global_vocab_size,  # global vocab size for draft_probs indexing (only used if COMPRESSED_MODE)
     vec_len,
     NO_DRAFT_PROBS: tl.constexpr,
+    COMPRESSED_MODE: tl.constexpr,  # Whether using compressed logits
     BLOCK_SIZE: tl.constexpr,
-    SUB_BLOCK: tl.constexpr,
+    VOCAB_BLOCK_SIZE: tl.constexpr = 512,
 ):
     block_idx = tl.program_id(0)
     offsets = block_idx * BLOCK_SIZE + tl.arange(0, BLOCK_SIZE)
     mask = offsets < vec_len
     is_greedy = tl.load(is_greedy_ptr + offsets, mask, other=1)
     not_greedy_mask = is_greedy == 0
-    prev_mask = not_greedy_mask & (offsets > 0)
-    prev_end_idxs = tl.load(cu_num_draft_tokens_ptr + offsets - 1, prev_mask, other=0)
-    start_idxs = tl.where(offsets == 0, 0, prev_end_idxs)
+    start_idxs = tl.where(offsets == 0, 0, tl.load(cu_num_draft_tokens_ptr + offsets - 1, not_greedy_mask))
     end_idxs = tl.load(cu_num_draft_tokens_ptr + offsets, not_greedy_mask)
     n_num_draft_tokens = end_idxs - start_idxs
-    loop = (vocab_size + SUB_BLOCK - 1) // SUB_BLOCK
+
     for req_i in range(BLOCK_SIZE):
         not_greedy = get_element(not_greedy_mask, (req_i,))
         if not_greedy:
+            pi = 1.0
+            uniform_prob = 1.0
+            last_accepted_token_pos = -1
             start_idx = get_element(start_idxs, (req_i,))
             req_idx = block_idx * BLOCK_SIZE + req_i
             num_draft_tokens = get_element(n_num_draft_tokens, (req_i,))
-            if num_draft_tokens == 0:
-                bonus_token_id = tl.load(bonus_token_ids_ptr + req_idx)
-                tl.store(
-                    output_token_ids_ptr + req_idx * (max_spec_len + 1),
-                    bonus_token_id,
-                )
-                continue
 
-            accepted_len = 0
-            prefix_prob = 1.0
             for pos in range(num_draft_tokens):
                 token_idx = start_idx + pos
                 draft_token_id = tl.load(draft_token_ids_ptr + token_idx)
-                target_prob = tl.load(target_probs_ptr + token_idx * vocab_size + draft_token_id)
+
+                if COMPRESSED_MODE:
+                    target_prob = 0.0
+                    found = False
+
+                    for v_offset in range(0, vocab_size, VOCAB_BLOCK_SIZE):
+                        if not found:
+                            vocab_offsets = v_offset + tl.arange(0, VOCAB_BLOCK_SIZE)
+                            vocab_mask = vocab_offsets < vocab_size
+
+                            candidate_indices = tl.load(
+                                target_indices_ptr + token_idx * vocab_size + vocab_offsets, mask=vocab_mask, other=-1
+                            )
+
+                            match_mask = candidate_indices == draft_token_id
+
+                            candidate_probs = tl.load(
+                                target_probs_ptr + token_idx * vocab_size + vocab_offsets, mask=vocab_mask, other=0.0
+                            )
+
+                            current_match_prob = tl.sum(candidate_probs * match_mask, axis=0)
+
+                            if current_match_prob > 0.0:
+                                target_prob = current_match_prob
+                                found = True
+                else:
+                    target_prob = tl.load(target_probs_ptr + token_idx * vocab_size + draft_token_id)
+
+                tmp_uniform_prob = tl.load(uniform_probs_ptr + token_idx)
+                uniform_prob = uniform_prob * tmp_uniform_prob
 
                 if NO_DRAFT_PROBS:
                     draft_prob = 1.0
                 else:
-                    draft_prob = tl.load(draft_probs_ptr + token_idx * vocab_size + draft_token_id)
+                    vocab_for_draft = global_vocab_size if COMPRESSED_MODE else vocab_size
+                    draft_prob = tl.load(draft_probs_ptr + token_idx * vocab_for_draft + draft_token_id)
 
-                if draft_prob > 0:
-                    prefix_prob = min(prefix_prob * target_prob / draft_prob, 1.0)
-                else:
-                    prefix_prob = 0.0
+                pi = min(pi * target_prob / draft_prob, 1.0)
+                if draft_prob > 0 and pi >= uniform_prob:
+                    last_accepted_token_pos = pos
 
-                if pos == num_draft_tokens - 1:
-                    h_block = prefix_prob
-                else:
-                    next_token_idx = token_idx + 1
-                    if NO_DRAFT_PROBS:
-                        next_draft_token_id = tl.load(draft_token_ids_ptr + next_token_idx)
-                        next_target_prob = tl.load(target_probs_ptr + next_token_idx * vocab_size + next_draft_token_id)
-                        residual_mass = prefix_prob * (1.0 - next_target_prob)
-                    else:
-                        residual_mass = 0.0
-                        for loop_i in range(loop):
-                            vocab_start = loop_i * SUB_BLOCK
-                            vocab_offset = vocab_start + tl.arange(0, SUB_BLOCK)
-                            next_draft_prob = tl.load(
-                                draft_probs_ptr + next_token_idx * vocab_size + vocab_offset,
-                                mask=vocab_offset < vocab_size,
-                                other=0,
-                            )
-                            next_target_prob = tl.load(
-                                target_probs_ptr + next_token_idx * vocab_size + vocab_offset,
-                                mask=vocab_offset < vocab_size,
-                                other=0,
-                            )
-                            residual_prob = tl.maximum(prefix_prob * next_target_prob - next_draft_prob, 0.0)
-                            residual_mass += tl.sum(residual_prob, axis=0)
-                    denom = residual_mass + 1.0 - prefix_prob
-                    h_block = residual_mass / denom if denom > 0 else 0.0
+            # Store accepted tokens
+            if last_accepted_token_pos > -1:
+                for pos in range(last_accepted_token_pos + 1):
+                    token_id = tl.load(draft_token_ids_ptr + start_idx + pos)
+                    tl.store(output_token_ids_ptr + req_idx * (max_spec_len + 1) + pos, token_id)
 
-                uniform_prob = tl.load(uniform_probs_ptr + token_idx)
-                if uniform_prob <= h_block:
-                    accepted_len = pos + 1
-
-            for pos in range(accepted_len):
-                token_id = tl.load(draft_token_ids_ptr + start_idx + pos)
-                tl.store(output_token_ids_ptr + req_idx * (max_spec_len + 1) + pos, token_id)
-
-            if accepted_len == num_draft_tokens:
-                bonus_token_id = tl.load(bonus_token_ids_ptr + req_idx)
-                tl.store(output_token_ids_ptr + req_idx * (max_spec_len + 1) + num_draft_tokens, bonus_token_id)
-            else:
-                recovered_token_id = tl.load(recovered_token_ids_ptr + start_idx + accepted_len)
+            # Store recovered or bonus token
+            if last_accepted_token_pos + 1 < num_draft_tokens:
+                # Rejected - store recovered token
+                recovered_token_id = tl.load(recovered_token_ids_ptr + start_idx + last_accepted_token_pos + 1)
                 tl.store(
-                    output_token_ids_ptr + req_idx * (max_spec_len + 1) + accepted_len,
+                    output_token_ids_ptr + req_idx * (max_spec_len + 1) + last_accepted_token_pos + 1,
                     recovered_token_id,
                 )
+            else:
+                # All accepted - store bonus token
+                bonus_token_id = tl.load(bonus_token_ids_ptr + req_idx)
+                tl.store(output_token_ids_ptr + req_idx * (max_spec_len + 1) + num_draft_tokens, bonus_token_id)
