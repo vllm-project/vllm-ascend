@@ -12,13 +12,13 @@
 # We register a no-op AscendMLAPrefillBackend and patch get_mla_prefill_backend
 # so that MLAAttention.__init__ completes without error.
 
+import importlib.util
+
 import torch
 import vllm.model_executor.layers.attention.mla_attention
 
-from vllm_ascend.utils import vllm_version_is
-
-if not vllm_version_is("0.20.1"):
-    from vllm.v1.attention.backends.mla.prefill.base import MLAPrefillBackend
+if importlib.util.find_spec("vllm.v1.attention.backends.mla.prefill.base"):
+    from vllm.v1.attention.backends.mla.prefill.base import MLAPrefillBackend  # type: ignore[import-not-found]
 
     class AscendMLAPrefillBackend(MLAPrefillBackend):
         @staticmethod
