@@ -6,10 +6,13 @@ Unit tests for engine classes (parsing, validation, registry).
 Integration tests for HCCL weight transfer between processes using Ray.
 """
 
+import pickle
 from unittest.mock import MagicMock
 
+import pybase64 as base64
 import pytest
 import torch
+from torch.multiprocessing.reductions import reduce_tensor
 
 from vllm.config.parallel import ParallelConfig
 from vllm.config.weight_transfer import WeightTransferConfig
@@ -21,6 +24,12 @@ from vllm_ascend.distributed.weight_transfer.hccl_engine import (
     HCCLWeightTransferEngine,
     HCCLWeightTransferInitInfo,
     HCCLWeightTransferUpdateInfo,
+)
+from vllm_ascend.distributed.weight_transfer import npu_ipc_engine
+from vllm_ascend.distributed.weight_transfer.npu_ipc_engine import (
+    NPUIPCWeightTransferEngine,
+    NPUIPCWeightTransferInitInfo,
+    NPUIPCWeightTransferUpdateInfo,
 )
 from vllm_ascend.distributed.weight_transfer.packed_tensor import (
     DEFAULT_PACKED_BUFFER_SIZE_BYTES,
@@ -1128,3 +1137,416 @@ class TestPackedBroadcastRoundtrip:
             assert torch.allclose(
                 unpacked[name], original_tensor, rtol=1e-4, atol=1e-6
             )
+
+
+# ---------------------------------------------------------------------------
+# Unit Tests: NPU IPC Weight Transfer Engine
+# ---------------------------------------------------------------------------
+
+# NPU devices don't expose a uuid property via torch.npu.get_device_properties.
+# npu_generate_uuid() uses npu-smi to derive a physical chip identifier.
+# In tests we patch it to return a constant value.
+_TEST_NPU_UUID = "test-npu-uuid-0"
+
+
+@pytest.fixture(autouse=True)
+def _patch_npu_generate_uuid(monkeypatch):
+    """Patch npu_generate_uuid to return a constant test UUID."""
+    monkeypatch.setattr(
+        npu_ipc_engine, "npu_generate_uuid", lambda: _TEST_NPU_UUID
+    )
+
+
+class TestNPUIPCWeightTransferUpdateInfoValidation:
+    """Test NPUIPCWeightTransferUpdateInfo dataclass validation."""
+
+    def test_valid_update_info(self):
+        """Test creating valid NPUIPCWeightTransferUpdateInfo."""
+        if torch.accelerator.device_count() < 1:
+            pytest.skip("Need at least 1 NPU for this test")
+
+        dummy_tensor = torch.ones(10, 10, device="npu")
+        ipc_handle = reduce_tensor(dummy_tensor)
+        npu_uuid = _TEST_NPU_UUID
+        ipc_handles = [{npu_uuid: ipc_handle}]
+
+        info = NPUIPCWeightTransferUpdateInfo(
+            names=["layer.weight"],
+            dtype_names=["float32"],
+            shapes=[[10, 10]],
+            ipc_handles=ipc_handles,
+        )
+        assert info.names == ["layer.weight"]
+        assert info.dtype_names == ["float32"]
+        assert info.shapes == [[10, 10]]
+        assert len(info.ipc_handles) == 1
+
+    def test_mismatched_dtype_names_raises(self):
+        """Test that mismatched dtype_names length raises ValueError."""
+        if torch.accelerator.device_count() < 1:
+            pytest.skip("Need at least 1 NPU for this test")
+
+        dummy_tensor = torch.ones(10, 10, device="npu")
+        ipc_handle = reduce_tensor(dummy_tensor)
+        npu_uuid = _TEST_NPU_UUID
+        ipc_handles = [{npu_uuid: ipc_handle}, {npu_uuid: ipc_handle}]
+
+        with pytest.raises(ValueError, match="dtype_names"):
+            NPUIPCWeightTransferUpdateInfo(
+                names=["layer.weight", "layer.bias"],
+                dtype_names=["float32"],  # Only one dtype
+                shapes=[[10, 10], [10]],
+                ipc_handles=ipc_handles,
+            )
+
+    def test_mismatched_shapes_raises(self):
+        """Test that mismatched shapes length raises ValueError."""
+        if torch.accelerator.device_count() < 1:
+            pytest.skip("Need at least 1 NPU for this test")
+
+        dummy_tensor = torch.ones(10, 10, device="npu")
+        ipc_handle = reduce_tensor(dummy_tensor)
+        npu_uuid = _TEST_NPU_UUID
+        ipc_handles = [{npu_uuid: ipc_handle}, {npu_uuid: ipc_handle}]
+
+        with pytest.raises(ValueError, match="shapes"):
+            NPUIPCWeightTransferUpdateInfo(
+                names=["layer.weight", "layer.bias"],
+                dtype_names=["float32", "float32"],
+                shapes=[[10, 10]],  # Only one shape
+                ipc_handles=ipc_handles,
+            )
+
+    def test_mismatched_ipc_handles_raises(self):
+        """Test that mismatched ipc_handles length raises ValueError."""
+        if torch.accelerator.device_count() < 1:
+            pytest.skip("Need at least 1 NPU for this test")
+
+        dummy_tensor = torch.ones(10, 10, device="npu")
+        ipc_handle = reduce_tensor(dummy_tensor)
+        npu_uuid = _TEST_NPU_UUID
+        ipc_handles = [{npu_uuid: ipc_handle}]  # Only one handle
+
+        with pytest.raises(ValueError, match="ipc_handles"):
+            NPUIPCWeightTransferUpdateInfo(
+                names=["layer.weight", "layer.bias"],
+                dtype_names=["float32", "float32"],
+                shapes=[[10, 10], [10]],
+                ipc_handles=ipc_handles,
+            )
+
+    def test_both_handles_and_pickled_raises(self):
+        """Test that providing both ipc_handles and ipc_handles_pickled raises."""
+        if torch.accelerator.device_count() < 1:
+            pytest.skip("Need at least 1 NPU for this test")
+
+        dummy_tensor = torch.ones(10, 10, device="npu")
+        ipc_handle = reduce_tensor(dummy_tensor)
+        npu_uuid = _TEST_NPU_UUID
+        ipc_handles = [{npu_uuid: ipc_handle}]
+
+        pickled = base64.b64encode(pickle.dumps(ipc_handles)).decode("utf-8")
+
+        with pytest.raises(ValueError, match="Cannot specify both"):
+            NPUIPCWeightTransferUpdateInfo(
+                names=["layer.weight"],
+                dtype_names=["float32"],
+                shapes=[[10, 10]],
+                ipc_handles=ipc_handles,
+                ipc_handles_pickled=pickled,
+            )
+
+    def test_neither_handles_nor_pickled_raises(self):
+        """Test that providing neither ipc_handles nor ipc_handles_pickled raises."""
+        with pytest.raises(ValueError, match="must be provided"):
+            NPUIPCWeightTransferUpdateInfo(
+                names=["layer.weight"],
+                dtype_names=["float32"],
+                shapes=[[10, 10]],
+            )
+
+    def test_empty_lists_valid(self):
+        """Test that empty lists are valid."""
+        info = NPUIPCWeightTransferUpdateInfo(
+            names=[],
+            dtype_names=[],
+            shapes=[],
+            ipc_handles=[],
+        )
+        assert len(info.names) == 0
+
+
+class TestNPUIPCEngineParsing:
+    """Test NPUIPCWeightTransferEngine parsing methods."""
+
+    def test_parse_update_info_valid(self):
+        """Test parsing valid update info dict."""
+        if torch.accelerator.device_count() < 1:
+            pytest.skip("Need at least 1 NPU for this test")
+
+        config = create_mock_weight_transfer_config(backend="npu_ipc")
+        parallel_config = create_mock_parallel_config()
+        engine = NPUIPCWeightTransferEngine(config, parallel_config)
+
+        dummy_tensor1 = torch.ones(100, 100, device="npu")
+        dummy_tensor2 = torch.ones(50, device="npu")
+        ipc_handle1 = reduce_tensor(dummy_tensor1)
+        ipc_handle2 = reduce_tensor(dummy_tensor2)
+        npu_uuid = _TEST_NPU_UUID
+        ipc_handles = [{npu_uuid: ipc_handle1}, {npu_uuid: ipc_handle2}]
+
+        update_info = engine.parse_update_info(
+            {
+                "names": ["w1", "w2"],
+                "dtype_names": ["float32", "bfloat16"],
+                "shapes": [[100, 100], [50]],
+                "ipc_handles": ipc_handles,
+            }
+        )
+
+        assert isinstance(update_info, NPUIPCWeightTransferUpdateInfo)
+        assert update_info.names == ["w1", "w2"]
+        assert update_info.dtype_names == ["float32", "bfloat16"]
+        assert update_info.shapes == [[100, 100], [50]]
+        assert len(update_info.ipc_handles) == 2
+
+    def test_parse_update_info_pickled(self, monkeypatch):
+        """Test parsing update info with pickled IPC handles (HTTP path)."""
+        if torch.accelerator.device_count() < 1:
+            pytest.skip("Need at least 1 NPU for this test")
+
+        monkeypatch.setenv("VLLM_ALLOW_INSECURE_SERIALIZATION", "1")
+
+        config = create_mock_weight_transfer_config(backend="npu_ipc")
+        parallel_config = create_mock_parallel_config()
+        engine = NPUIPCWeightTransferEngine(config, parallel_config)
+
+        dummy_tensor1 = torch.ones(100, 100, device="npu")
+        dummy_tensor2 = torch.ones(50, device="npu")
+        ipc_handle1 = reduce_tensor(dummy_tensor1)
+        ipc_handle2 = reduce_tensor(dummy_tensor2)
+        npu_uuid = _TEST_NPU_UUID
+        ipc_handles = [{npu_uuid: ipc_handle1}, {npu_uuid: ipc_handle2}]
+
+        pickled = base64.b64encode(pickle.dumps(ipc_handles)).decode("utf-8")
+
+        update_info = engine.parse_update_info(
+            {
+                "names": ["w1", "w2"],
+                "dtype_names": ["float32", "bfloat16"],
+                "shapes": [[100, 100], [50]],
+                "ipc_handles_pickled": pickled,
+            }
+        )
+
+        assert isinstance(update_info, NPUIPCWeightTransferUpdateInfo)
+        assert update_info.names == ["w1", "w2"]
+        assert len(update_info.ipc_handles) == 2
+        assert update_info.ipc_handles_pickled is None
+        assert npu_uuid in update_info.ipc_handles[0]
+        assert npu_uuid in update_info.ipc_handles[1]
+
+
+class TestNPUIPCEngineRegistry:
+    """Test registry for NPU IPC backend."""
+
+    def test_create_engine_npu_ipc(self):
+        """Test factory creates NPU IPC engine."""
+        config = create_mock_weight_transfer_config(backend="npu_ipc")
+        parallel_config = create_mock_parallel_config()
+        engine = WeightTransferEngineFactory.create_engine(config, parallel_config)
+        assert isinstance(engine, NPUIPCWeightTransferEngine)
+
+    def test_register_duplicate_raises(self):
+        """Test registering duplicate engine name raises."""
+        with pytest.raises(ValueError, match="already registered"):
+            WeightTransferEngineFactory.register_engine(
+                "npu_ipc", NPUIPCWeightTransferEngine
+            )
+
+
+def test_npu_ipc_receive_weights_missing_uuid_raises():
+    """Test that receive_weights raises if NPU UUID not found in IPC handles."""
+    if torch.accelerator.device_count() < 1:
+        pytest.skip("Need at least 1 NPU for this test")
+
+    config = create_mock_weight_transfer_config(backend="npu_ipc")
+    parallel_config = create_mock_parallel_config()
+    engine = NPUIPCWeightTransferEngine(config, parallel_config)
+
+    dummy_tensor = torch.ones(10, 10, device="npu")
+    ipc_handle = reduce_tensor(dummy_tensor)
+    wrong_uuid = "wrong-uuid-12345"
+    ipc_handles = [{wrong_uuid: ipc_handle}]
+
+    update_info = NPUIPCWeightTransferUpdateInfo(
+        names=["w"],
+        dtype_names=["float32"],
+        shapes=[[10, 10]],
+        ipc_handles=ipc_handles,
+    )
+
+    with pytest.raises(ValueError, match="IPC handle not found"):
+        engine.receive_weights(update_info, lambda x: None)
+
+
+# ---------------------------------------------------------------------------
+# Integration Test: NPU IPC Weight Transfer Between Ray Tasks
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.skipif(
+    torch.accelerator.device_count() < 1,
+    reason="Need at least 1 NPU to run NPU IPC weight transfer test.",
+)
+def test_npu_ipc_weight_transfer_between_processes():
+    """Test NPU IPC weight transfer from trainer to inference process using Ray.
+
+    NPU IPC requires same-NPU access, so we use a placement group to
+    co-locate the trainer actor and inference task on the same NPU.
+    """
+    import ray
+    from ray.util.placement_group import placement_group
+    from ray.util.scheduling_strategies import PlacementGroupSchedulingStrategy
+
+    ray.init(ignore_reinit_error=True)
+
+    pg = placement_group([{"GPU": 1, "CPU": 2}])
+    ray.get(pg.ready())
+
+    scheduling_strategy = PlacementGroupSchedulingStrategy(
+        placement_group=pg,
+        placement_group_capture_child_tasks=True,
+    )
+
+    # Use a shared UUID constant that works across Ray worker boundaries
+    _TEST_NPU_UUID = "test-npu-uuid-0"
+
+    @ray.remote(num_gpus=0.5)
+    class TrainerActor:
+        """Trainer actor that creates and holds NPU IPC handles."""
+
+        def __init__(
+            self, tensor_shape: list[int], tensor_dtype: str, npu_uuid: str
+        ):
+            import torch
+            from torch.multiprocessing.reductions import reduce_tensor
+
+            dtype = getattr(torch, tensor_dtype)
+            self.tensor = torch.ones(tensor_shape, dtype=dtype, device="npu")
+            self.tensor.fill_(42.0)
+
+            ipc_handle = reduce_tensor(self.tensor)
+            torch.accelerator.synchronize()
+
+            self.ipc_handle_dict = {
+                "ipc_handle": ipc_handle,
+                "npu_uuid": npu_uuid,
+                "shape": tensor_shape,
+                "dtype": tensor_dtype,
+            }
+
+        def get_ipc_handle_dict(self) -> dict:
+            return self.ipc_handle_dict
+
+    @ray.remote(num_gpus=0.5)
+    def inference_receive_ipc_tensor(ipc_handle_dict: dict) -> dict:
+        """Inference task that receives tensor via NPUIPCWeightTransferEngine."""
+        from unittest.mock import MagicMock, patch
+
+        import torch
+
+        from vllm.config.parallel import ParallelConfig
+        from vllm_ascend.distributed.weight_transfer import npu_ipc_engine
+        from vllm_ascend.distributed.weight_transfer.npu_ipc_engine import (
+            NPUIPCWeightTransferEngine,
+            NPUIPCWeightTransferInitInfo,
+        )
+
+        config = MagicMock()
+        config.backend = "npu_ipc"
+
+        parallel_config = MagicMock(spec=ParallelConfig)
+        parallel_config.rank = 0
+        parallel_config.world_size = 1
+        parallel_config.data_parallel_rank = 0
+        parallel_config.data_parallel_index = 0
+
+        engine = NPUIPCWeightTransferEngine(config, parallel_config)
+
+        init_info = NPUIPCWeightTransferInitInfo()
+        engine.init_transfer_engine(init_info)
+
+        received_tensors = []
+
+        def noop_load_weights(weights: list[tuple[str, torch.Tensor]]):
+            for name, tensor in weights:
+                received_tensors.append((name, tensor.clone()))
+
+        ipc_handles = [
+            {ipc_handle_dict["npu_uuid"]: ipc_handle_dict["ipc_handle"]}
+        ]
+
+        update_info = engine.parse_update_info(
+            {
+                "names": ["test.weight"],
+                "dtype_names": [ipc_handle_dict["dtype"]],
+                "shapes": [ipc_handle_dict["shape"]],
+                "ipc_handles": ipc_handles,
+            }
+        )
+
+        # Patch npu_generate_uuid inside the Ray worker to match the
+        # UUID used by the trainer side.
+        with patch.object(
+            npu_ipc_engine,
+            "npu_generate_uuid",
+            return_value=ipc_handle_dict["npu_uuid"],
+        ):
+            engine.receive_weights(update_info, noop_load_weights)
+        torch.accelerator.synchronize()
+
+        success = False
+        received_shape = None
+        received_sum = None
+
+        if len(received_tensors) == 1:
+            name, tensor = received_tensors[0]
+            received_shape = list(tensor.shape)
+            received_sum = tensor.sum().item()
+            if received_shape == ipc_handle_dict["shape"]:
+                expected_sum = 42.0 * torch.tensor(
+                    ipc_handle_dict["shape"]
+                ).prod().item()
+                if abs(received_sum - expected_sum) < 0.01:
+                    success = True
+
+        engine.shutdown()
+
+        return {
+            "success": success,
+            "received_shape": received_shape,
+            "received_sum": received_sum,
+        }
+
+    tensor_shape = [100, 100]
+    tensor_dtype = "float32"
+    test_uuid = _TEST_NPU_UUID
+
+    trainer_actor = TrainerActor.options(
+        scheduling_strategy=scheduling_strategy
+    ).remote(tensor_shape, tensor_dtype, test_uuid)
+
+    ipc_handle_dict = ray.get(trainer_actor.get_ipc_handle_dict.remote())
+
+    inference_result = ray.get(
+        inference_receive_ipc_tensor.options(
+            scheduling_strategy=scheduling_strategy
+        ).remote(ipc_handle_dict)
+    )
+
+    assert inference_result["success"], (
+        f"NPU IPC weight transfer failed. "
+        f"Received shape: {inference_result['received_shape']}, "
+        f"Received sum: {inference_result['received_sum']}"
+    )
