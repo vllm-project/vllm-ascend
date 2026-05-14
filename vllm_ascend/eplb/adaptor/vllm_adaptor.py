@@ -27,6 +27,17 @@ from vllm_ascend.quantization.methods.base import QuantType
 
 
 class VllmEplbAdaptor:
+    @staticmethod
+    def register_layer(global_idx: int, layer: "torch.nn.Module") -> None:
+        """Register a MoE layer for EPLB. Called during layer initialization.
+
+        Only real layers call this; PPMissingLayer won't, so the registry
+        naturally contains only layers on this PP rank.
+        """
+        from vllm_ascend.eplb.utils import register_moe_layer
+
+        register_moe_layer(global_idx, layer)
+
     def __init__(self, model, **args):
         super().__init__(**args)
         if hasattr(model, "language_model"):

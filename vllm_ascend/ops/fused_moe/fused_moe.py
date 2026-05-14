@@ -450,9 +450,9 @@ class AscendFusedMoE(FusedMoE):
         prefix = kwargs.get("prefix", "")
         match = re.search(r"model\.layers\.(\d+)", prefix)
         if match:
-            from vllm_ascend.eplb.utils import register_moe_layer
+            from vllm_ascend.eplb.adaptor.vllm_adaptor import VllmEplbAdaptor
 
-            register_moe_layer(int(match.group(1)), self)
+            VllmEplbAdaptor.register_layer(int(match.group(1)), self)
 
     def _validate_shared_expert_consistency(self):
         """Validate that split shared expert computation matches integrated
