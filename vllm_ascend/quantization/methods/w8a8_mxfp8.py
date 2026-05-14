@@ -15,7 +15,7 @@
 # limitations under the License.
 #
 
-import math
+from vllm.utils.math_utils import cdiv
 from collections.abc import Callable
 from typing import Any
 
