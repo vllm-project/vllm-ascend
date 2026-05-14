@@ -42,7 +42,7 @@ from vllm_ascend.attention.utils import AscendCommonAttentionMetadata, AscendPre
 from vllm_ascend.quantization.utils import enable_fa_quant
 from vllm_ascend.utils import calc_split_factor, vllm_version_is
 
-if vllm_version_is("0.20.2"):
+if not vllm_version_is("0.20.2"):
     from vllm.v1.worker.gpu.model_states.interface import ModelSpecificAttnMetadata
 
 _ATTENTION_MASK_BUILDER = None
