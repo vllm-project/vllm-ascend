@@ -1336,26 +1336,18 @@ class PCPManager:
                 for mtp_idx in range(mtp_token_len)
                 if (global_history_len + mtp_idx) % cp_size == cp_rank
             ]
-            local_mtp_count = len(local_mtp_positions)
-
-            # local_len = history tokens on this rank + MTP tokens on this rank
-            local_len = history_len + local_mtp_count
 
             # All MTP tokens (not just assigned to this rank) can attend to local tokens
             # MTP token at global position m can attend to local token at position k if m >= k
+            # mask[m, k] = True if mtp_pos[m] < local_pos[k], False otherwise
             # local tokens consist of: history tokens (positions 0 to history_len-1) +
             # MTP tokens assigned to this rank (from local_mtp_positions)
             all_mtp_positions = list(range(global_history_len, global_history_len + mtp_token_len))
-            mask = np.ones((mtp_token_len, local_len), dtype=bool)
-            for m_idx, mtp_global_pos in enumerate(all_mtp_positions):
-                for k_idx in range(local_len):
-                    if k_idx < history_len:
-                        # History token at local position k_idx
-                        local_token_pos = k_idx
-                    else:
-                        # MTP token at local position - get its global position from local_mtp_positions
-                        local_token_pos = local_mtp_positions[k_idx - history_len]
-                    mask[m_idx, k_idx] = not (mtp_global_pos >= local_token_pos)
+
+            # Vectorized mask computation - replaces double loop
+            mtp_pos_array = np.array(all_mtp_positions, dtype=np.int32)[:, None]  # [mtp, 1]
+            local_pos_array = np.array(list(range(history_len)) + local_mtp_positions, dtype=np.int32)[None, :]  # [1, local]
+            mask = mtp_pos_array < local_pos_array  # broadcasting: [mtp, local]
 
             mtp_masks.append(torch.from_numpy(mask))
 
