@@ -177,6 +177,8 @@ class AscendConfig:
                 raise NotImplementedError(
                     "enable_kv_nz is only supported in pd scenario and can only be used in D node."
                 )
+        fault_tolerance_config = additional_config.get("fault_tolerance", {})
+        self.fault_tolerance_config = FaultToleranceConfig(fault_tolerance_config)
 
         from vllm_ascend.utils import AscendDeviceType, get_ascend_device_type
 
@@ -592,6 +594,12 @@ class EplbConfig:
 
         logger.info("Dynamic EPLB is %s", self.config["dynamic_eplb"])
         logger.info("The number of redundant experts is %s", self.config["num_redundant_experts"])
+
+
+class FaultToleranceConfig:
+    def __init__(self, fault_tolerance_config):
+        self.level = fault_tolerance_config.get("level", 0)
+        self.max_reinference_times = fault_tolerance_config.get("max_reinference_times", 3)
 
 
 _ASCEND_CONFIG: AscendConfig | None = None
