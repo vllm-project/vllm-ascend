@@ -1579,8 +1579,6 @@ class NPUModelRunner(GPUModelRunner):
             capturer = RoutedExpertsCapturer.get_instance()
             if capturer is not None:
                 capturer.clear_buffer()
-            else:
-                logger.warning("RoutedExpertsCapturer is not initialized.")
 
         if self.ascend_config.profiling_chunk_config.need_timing:
             # Check if the scheduler signaled that calibration is complete.
@@ -2088,8 +2086,6 @@ class NPUModelRunner(GPUModelRunner):
             capturer = RoutedExpertsCapturer.get_instance()
             if capturer is not None:
                 capturer.save_captured_experts(indices=self.cpu_slot_mapping)
-            else:
-                logger.warning("RoutedExpertsCapturer is not initialized.")
 
         model_runner_output = ModelRunnerOutput(
             req_ids=req_ids_output_copy,
@@ -2389,8 +2385,11 @@ class NPUModelRunner(GPUModelRunner):
             return round_up(num_scheduled_tokens, tp_size)
         return num_scheduled_tokens
 
-    # This is a function from the upstream vllm used to handle PP+SP. Since the judgment logic 
-    # of flashcomm1 in Ascend is inconsistent with SP in vllm, it needs to be overridden.
+    # These functions from upstream vllm handle PP+SP. Ascend's flashcomm1 SP
+    # differs from vllm's native SP: flashcomm1 does NOT scatter the residual
+    # before PP send, so the all_gather in sync_and_gather_intermediate_tensors
+    # must be skipped. Both overrides use enable_sp() rather than
+    # is_residual_scattered_for_sp() to reflect the actual Ascend SP state.
     def sync_and_slice_intermediate_tensors(
         self,
         num_tokens: int,
@@ -2400,8 +2399,6 @@ class NPUModelRunner(GPUModelRunner):
         assert self.intermediate_tensors is not None
         tp = self.vllm_config.parallel_config.tensor_parallel_size
 
-        # When sequence parallelism is enabled, the "residual" tensor is sharded
-        # across tensor parallel ranks, so each rank only needs its own slice.
         if sync_self:
             assert intermediate_tensors is not None
             for k, v in intermediate_tensors.items():
@@ -2417,6 +2414,19 @@ class NPUModelRunner(GPUModelRunner):
                 else v[:num_tokens]
                 for k, v in self.intermediate_tensors.items()
             }
+        )
+
+    def sync_and_gather_intermediate_tensors(
+        self,
+        num_tokens: int,
+        intermediate_tensors: IntermediateTensors | None,
+        sync_self: bool,
+    ) -> IntermediateTensors:
+        # vllm renamed sync_and_slice to sync_and_gather in v0.20.2.
+        # The Ascend override logic is identical: skip the upstream all_gather
+        # (flashcomm1 does not scatter residual before PP send).
+        return self.sync_and_slice_intermediate_tensors(
+            num_tokens, intermediate_tensors, sync_self
         )
 
     def _determine_batch_execution_and_padding(
