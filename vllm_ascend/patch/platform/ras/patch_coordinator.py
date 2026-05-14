@@ -10,6 +10,9 @@ from vllm.v1.engine.coordinator import DPCoordinator, DPCoordinatorProc
 from vllm.v1.utils import get_engine_client_zmq_addr
 from vllm.utils.system_utils import get_mp_context
 from vllm.v1.engine.coordinator import shutdown as coord_shutdown
+from vllm.v1.serial_utils import MsgpackDecoder
+from vllm.v1.engine import EngineCoreOutputs
+from vllm.utils.network_utils import make_zmq_socket
 
 
 _RECOVERY_MSG_PREFIX = b"\x00REC"
@@ -106,11 +109,6 @@ def _patched_process_input_socket(
     recovery_pub_address,
     recovery_pull_address,
 ):
-    from vllm.v1.serial_utils import MsgpackDecoder
-    from vllm.v1.engine import EngineCoreOutputs
-    from vllm.utils.network_utils import make_zmq_socket
-    import copy
-
     decoder = MsgpackDecoder(EngineCoreOutputs)
 
     current_wave = 0
@@ -182,7 +180,7 @@ def _patched_process_input_socket(
         poller.register(publish_front, zmq.POLLIN)
         poller.register(publish_back, zmq.POLLIN)
         poller.register(output_back, zmq.POLLIN)
-        if use_recovery:
+        if recovery_pull is not None:
             poller.register(recovery_pull, zmq.POLLIN)
 
         last_publish_time = 0

@@ -1,12 +1,14 @@
 import pickle
-import zmq
-from contextlib import ExitStack
 import threading
+from contextlib import ExitStack
+from typing import Any
 
-from vllm.v1.engine import EngineCoreRequestType
+import zmq
+from vllm.logger import logger
+from vllm.v1.engine import EngineCoreRequest, EngineCoreRequestType
 from vllm.v1.engine.core import EngineCoreProc
+from vllm.v1.serial_utils import MsgpackDecoder
 from vllm.utils.network_utils import make_zmq_socket
-from vllm_ascend.recovery.engine_core_handler import RecoveryHandler
 
 
 _RECOVERY_MSG_PREFIX = b"\x00REC"
@@ -64,7 +66,7 @@ class RecoveryHandler:
             coord_sub_addr, coord_push_addr,
         )
 
-    def notify_recovery_needed(self, plan: RecoveryPlan) -> None:
+    def notify_recovery_needed(self, plan: dict) -> None:
         # TODO: notify recovery needed
         return
 
