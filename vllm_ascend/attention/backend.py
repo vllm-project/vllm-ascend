@@ -1,0 +1,87 @@
+from abc import abstractmethod
+from dataclasses import dataclass
+
+import numpy as np
+import torch
+from vllm.config import get_current_vllm_config
+from vllm.v1.attention.backend import AttentionBackend
+from vllm.v1.worker.gpu.buffer_utils import async_copy_to_gpu
+from vllm.v1.worker.gpu.cudagraph_utils import BatchExecutionDescriptor
+
+from vllm_ascend.utils import singleton
+
+
+@dataclass
+class BackendExtraInput:
+    """Lazily filled by ``BackendExtraInputPreparer.prepare()``; constructed empty then populated."""
+
+    num_reqs_padded: int = 0
+    query_start_loc_np: np.ndarray | None = None
+    query_start_loc: torch.Tensor | None = None
+
+
+class BackendExtraInputPreparer:
+    @abstractmethod
+    def prepare(
+        self, num_reqs: int, query_start_loc_np: np.ndarray, decode_query_len: int, batch_desc: BatchExecutionDescriptor
+    ):
+        raise NotImplementedError
+
+
+@singleton
+class FiaExtraInputPreparer(BackendExtraInputPreparer):
+    def __init__(self):
+        # Buffers are allocated on first ``prepare()`` when ``set_current_vllm_config`` is active.
+        self.extra_input: BackendExtraInput | None = None
+
+    def _ensure_extra_input(self) -> None:
+        if self.extra_input is not None:
+            return
+        vllm_config = get_current_vllm_config()
+        max_num_reqs = vllm_config.scheduler_config.max_num_reqs
+        self.extra_input = BackendExtraInput(
+            query_start_loc_np=np.empty(max_num_reqs + 2, dtype=np.int32),
+            query_start_loc=torch.zeros(max_num_reqs + 2, dtype=torch.int32, device="npu"),
+        )
+
+    def prepare(
+        self, num_reqs: int, query_start_loc_np: np.ndarray, decode_query_len: int, batch_desc: BatchExecutionDescriptor
+    ):
+        """
+        This function is only designed to satisfied the constraint that when the layout is TND,
+        the first dimension of `hidden_states` must equal the last element of `actual_seq_lengths_q`.
+        """
+        self._ensure_extra_input()
+        extra = self.extra_input
+        assert extra is not None
+        num_reqs_padded = batch_desc.num_reqs or num_reqs
+        num_tokens_padded = batch_desc.num_tokens
+
+        extra.query_start_loc_np[: num_reqs_padded + 1] = query_start_loc_np[: num_reqs_padded + 1]
+        if num_tokens_padded == num_reqs_padded * decode_query_len:
+            # Uniform-batch case: num_reqs must be no greater than num_reqs_padded
+            assert num_reqs <= num_reqs_padded
+
+            last_loc = extra.query_start_loc_np[num_reqs]
+            extra.query_start_loc_np[num_reqs + 1 : num_reqs_padded + 1] = (
+                np.arange(1, num_reqs_padded + 1 - num_reqs) * decode_query_len + last_loc
+            )
+        else:
+            # Mixed-batch case: num_reqs must equal num_reqs_padded
+            assert num_reqs == num_reqs_padded
+
+            # Insert a dummy request instead of setting query_start_loc[num_reqs] = num_tokens_padded directly
+            extra.query_start_loc_np[num_reqs_padded + 1] = num_tokens_padded
+            num_reqs_padded = num_reqs_padded + 1
+
+        extra.num_reqs_padded = num_reqs_padded
+        async_copy_to_gpu(extra.query_start_loc_np, out=extra.query_start_loc)
+
+        return extra
+
+
+class AscendBaseAttnBackend(AttentionBackend):
+    @staticmethod
+    @abstractmethod
+    def get_extra_input_preparer() -> BackendExtraInputPreparer:
+        raise NotImplementedError

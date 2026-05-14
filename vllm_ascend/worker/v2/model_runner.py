@@ -44,6 +44,7 @@ from vllm_ascend.ascend_forward_context import (
     set_mc2_mask,
     set_mc2_tokens_capacity,
 )
+from vllm_ascend.attention.backend import BackendExtraInput
 from vllm_ascend.ops.rotary_embedding import set_cos_and_sin, update_cos_sin
 from vllm_ascend.utils import set_weight_prefetch_method
 from vllm_ascend.worker.v2.aclgraph_utils import ModelAclGraphManager
@@ -139,6 +140,35 @@ class NPUModelRunner(GPUModelRunner):
         # we need to use input_batch to set forward_context in run_fullgraph.
         # so we can inherit `execute_model` method.
         self.input_batch: AscendInputBatch | None = None
+        self.backend_extra_input_preparers = None
+
+    def prepare_backend_extra_input(
+        self,
+        batch_desc: BatchExecutionDescriptor,
+        num_reqs: int,
+        query_start_loc_np: np.ndarray,
+    ) -> BackendExtraInput:
+        """Apply FULL-graph padding requirements from attention backends (e.g. FIA TND)."""
+        if self.backend_extra_input_preparers is None:
+            self.backend_extra_input_preparers = set()
+            for backend in self.attn_backends:
+                if hasattr(backend, "get_extra_input_preparer"):
+                    self.backend_extra_input_preparers.add(backend.get_extra_input_preparer())
+
+        max_num_reqs_padded = 0
+        max_extra_input = None
+        for constructor in self.backend_extra_input_preparers:
+            extra_input = constructor.prepare(
+                num_reqs,
+                query_start_loc_np,
+                self.decode_query_len,
+                batch_desc,
+            )
+            if extra_input.num_reqs_padded > max_num_reqs_padded:
+                max_num_reqs_padded = extra_input.num_reqs_padded
+                max_extra_input = extra_input
+
+        return max_extra_input
 
     def initialize_kv_cache(self, kv_cache_config: KVCacheConfig) -> None:
         with graph_manager_wrapper(self):
@@ -237,30 +267,25 @@ class NPUModelRunner(GPUModelRunner):
 
         # Get query_start_loc.
         # NOTE: For FULL mode we change +1 to +2 to reserve extra space for padding.
-        # See _pad_query_start_loc_for_fia.
         num_reqs_padded = batch_desc.num_reqs or num_reqs
-        query_start_loc_np = np.empty(self.max_num_reqs + 2, dtype=np.int32)
+        query_start_loc_np = np.empty(self.max_num_reqs + 1, dtype=np.int32)
         query_start_loc_np[0] = 0
         np.cumsum(num_scheduled_tokens, out=query_start_loc_np[1 : num_reqs + 1])
         # Pad for full CUDA graph mode.
         # Some attention backends like FA3 require query_start_loc to be non-decreasing.
         query_start_loc_np[num_reqs + 1 :] = num_tokens
-
-        if batch_desc.cg_mode == CUDAGraphMode.FULL:
-            # This is only required for vllm-ascend.
-            query_start_loc_np, num_reqs_padded = self._pad_query_start_loc_for_fia(
-                num_tokens_after_padding,
-                num_reqs_padded,
-                num_reqs,
-                query_start_loc_np,
-                batch_desc.cg_mode,
-                batch_desc.num_reqs,
-            )
-
         async_copy_to_gpu(query_start_loc_np, out=self.input_buffers.query_start_loc)
+        query_start_loc = self.input_buffers.query_start_loc[: num_reqs + 1]
+
+        # Backend-specific padding (e.g. FIA TND): needs the full CPU buffer before slicing;
+        if batch_desc.cg_mode == CUDAGraphMode.FULL:
+            max_extra_input = self.prepare_backend_extra_input(batch_desc, num_reqs, query_start_loc_np)
+            if max_extra_input != None and max_extra_input.num_reqs_padded > num_reqs_padded:
+                num_reqs_padded = max_extra_input.num_reqs_padded
+                query_start_loc_np = max_extra_input.query_start_loc_np
+                query_start_loc = max_extra_input.query_start_loc
 
         query_start_loc_np = query_start_loc_np[: num_reqs_padded + 1]
-        query_start_loc = self.input_buffers.query_start_loc[: num_reqs + 1]
 
         # Get prefill tokens if any.
         if self.req_states.any_prefills(idx_mapping_np):
@@ -402,44 +427,6 @@ class NPUModelRunner(GPUModelRunner):
         # TODO(Ronald1995): just define the method in case calling error in
         # worker, implement it in the future.
         pass
-
-    def _pad_query_start_loc_for_fia(
-        self,
-        num_tokens_padded: int,
-        num_reqs_padded: int,
-        num_reqs: int,
-        query_start_loc_np: np.ndarray,
-        cudagraph_runtime_mode: CUDAGraphMode | None = None,
-        batch_desc_num_reqs: int | None = None,
-    ) -> tuple[np.ndarray, int]:
-        """
-        This function is only designed to satisfied the constraint that when the layout is TND,
-        the first dimension of `hidden_states` must equal the last element of `actual_seq_lengths_q`.
-        """
-        # TODO: need refactor later, related to vllm PR #34043 this pr delete func
-        # relax_for_mixed_batch_cudagraphs, num_reqs no longer equals the actual number of requests.
-        if cudagraph_runtime_mode == CUDAGraphMode.FULL:
-            num_reqs_padded = num_reqs
-        else:
-            num_reqs_padded = batch_desc_num_reqs if batch_desc_num_reqs is not None else num_reqs
-
-        if num_tokens_padded == num_reqs_padded * self.decode_query_len:
-            # Uniform-batch case: num_reqs must be no greater than num_reqs_padded
-            assert num_reqs <= num_reqs_padded
-
-            last_loc = query_start_loc_np[num_reqs]
-            query_start_loc_np[num_reqs + 1 : num_reqs_padded + 1] = (
-                np.arange(1, num_reqs_padded + 1 - num_reqs) * self.decode_query_len + last_loc
-            )
-        else:
-            # Mixed-batch case: num_reqs must equal num_reqs_padded
-            assert num_reqs == num_reqs_padded
-
-            # Insert a dummy request instead of setting query_start_loc[num_reqs] = num_tokens_padded directly
-            query_start_loc_np[num_reqs_padded + 1] = num_tokens_padded
-            num_reqs_padded = num_reqs_padded + 1
-
-        return query_start_loc_np, num_reqs_padded
 
 
 @contextmanager

@@ -13,7 +13,6 @@ from vllm.model_executor.layers.attention.mla_attention import MLACommonMetadata
 from vllm.model_executor.layers.linear import UnquantizedLinearMethod
 from vllm.triton_utils import HAS_TRITON
 from vllm.v1.attention.backend import (
-    AttentionBackend,  # type: ignore
     AttentionCGSupport,
     MLAAttentionImpl,
 )
@@ -24,6 +23,7 @@ from vllm_ascend.ascend_config import get_ascend_config
 from vllm_ascend.ascend_forward_context import _EXTRA_CTX
 from vllm_ascend.attention.attention_mask import AttentionMaskBuilder
 from vllm_ascend.attention.attention_v1 import AscendAttentionState
+from vllm_ascend.attention.backend import AscendBaseAttnBackend, FiaExtraInputPreparer
 from vllm_ascend.attention.context_parallel.common_cp import AscendPCPMetadata
 from vllm_ascend.attention.mla_v1 import MAX_O_PROJ_PREFETCH_SIZE, MLAPO_MAX_SUPPORTED_TOKENS
 from vllm_ascend.attention.utils import (
@@ -65,7 +65,7 @@ if TYPE_CHECKING:
 BMM_TRANS_MAX_SUPPORTED_TOKENS = 1024
 
 
-class AscendSFABackend(AttentionBackend):
+class AscendSFABackend(AscendBaseAttnBackend):
     accept_output_buffer: bool = True
 
     @staticmethod
@@ -100,6 +100,10 @@ class AscendSFABackend(AttentionBackend):
 
             return AscendSFACPImpl
         return AscendSFAImpl
+
+    @staticmethod
+    def get_extra_input_preparer() -> FiaExtraInputPreparer:
+        return FiaExtraInputPreparer()
 
     @staticmethod
     def get_supported_kernel_block_sizes() -> list[int]:

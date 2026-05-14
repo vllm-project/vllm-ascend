@@ -11,7 +11,6 @@ from vllm.model_executor.layers.attention.mla_attention import MLACommonMetadata
 from vllm.model_executor.layers.linear import UnquantizedLinearMethod
 from vllm.utils.math_utils import cdiv, round_down
 from vllm.v1.attention.backend import (
-    AttentionBackend,  # type: ignore
     AttentionCGSupport,
     MLAAttentionImpl,
 )
@@ -22,6 +21,7 @@ from vllm_ascend.ascend_config import get_ascend_config
 from vllm_ascend.ascend_forward_context import _EXTRA_CTX
 from vllm_ascend.attention.attention_mask import AttentionMaskBuilder
 from vllm_ascend.attention.attention_v1 import AscendAttentionState
+from vllm_ascend.attention.backend import AscendBaseAttnBackend, FiaExtraInputPreparer
 from vllm_ascend.attention.context_parallel.common_cp import AscendPCPMetadata, CPChunkedContextMetadata
 from vllm_ascend.attention.utils import (
     AscendCommonAttentionMetadata,
@@ -73,7 +73,7 @@ BUILD_METADATA_STEP_DECODE = 1
 MLAPO_MAX_SUPPORTED_TOKENS = 1024
 
 
-class AscendMLABackend(AttentionBackend):
+class AscendMLABackend(AscendBaseAttnBackend):
     accept_output_buffer: bool = True
 
     @staticmethod
@@ -108,6 +108,10 @@ class AscendMLABackend(AttentionBackend):
 
             return AscendMlaCPImpl
         return AscendMLAImpl
+
+    @staticmethod
+    def get_extra_input_preparer() -> FiaExtraInputPreparer:
+        return FiaExtraInputPreparer()
 
     @staticmethod
     def get_supported_kernel_block_sizes() -> list[int]:
