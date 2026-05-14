@@ -651,7 +651,9 @@ class AscendAttentionCPImpl(AscendAttentionBackendImpl):
                     self.scale,
                     attn_metadata.block_tables,
                     self.key_cache.shape[1],
-                    attn_metadata.decode_meta.num_computed_tokens_of_pcp_dcp[: attn_metadata.num_decodes, self.pcp_rank, self.dcp_rank],
+                    attn_metadata.decode_meta.num_computed_tokens_of_pcp_dcp[
+                        : attn_metadata.num_decodes, self.pcp_rank, self.dcp_rank
+                    ],
                     attn_metadata.actual_seq_lengths_q[: attn_metadata.num_decodes],
                     weak_ref_tensors(attn_out),
                     weak_ref_tensors(attn_lse),
