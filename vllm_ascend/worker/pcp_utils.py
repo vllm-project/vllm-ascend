@@ -1297,10 +1297,7 @@ class PCPManager:
         # Calculate combined CP rank and size
         cp_rank = self.pcp_world_rank * self.dcp_world_size + self.dcp_world_rank
         cp_size = self.pcp_world_size * self.dcp_world_size
-        assert cp_size > 0, "cp_size must be greater than 0"
-
-        # MTP token count is directly decode_num_scheduled_tokens
-        mtp_len = decode_num_scheduled_tokens
+        assert cp_size > 1, "cp_size must be greater than 1"
 
         # Get local history tokens on each rank using _get_cp_local_seq_lens
         # decode_num_computed_tokens is already a list[int], use torch.tensor directly
@@ -1317,15 +1314,13 @@ class PCPManager:
 
         # Reuse dcp_mtp_attn_mask buffer - it has shape [max_num_reqs, decode_threshold, 16384]
         # Only update the portion we need
-        mtp_attn_mask = self.dcp_mtp_attn_mask.cpu_tensor[:self.num_decode_reqs]
+        mtp_attn_mask = self.dcp_mtp_attn_mask.cpu[:self.num_decode_reqs]
 
         # Batch extract scalar values to minimize CPU-GPU sync overhead
-        local_history_lens_np = local_history_lens.cpu().numpy()
-        mtp_len_np = mtp_len.cpu().numpy() if hasattr(mtp_len, 'cpu') else mtp_len
 
         for req_idx in range(self.num_decode_reqs):
-            history_len = int(local_history_lens_np[req_idx])
-            mtp_token_len = int(mtp_len_np[req_idx])
+            history_len = int(local_history_lens[req_idx])
+            mtp_token_len = int(decode_num_scheduled_tokens[req_idx])
 
             if mtp_token_len <= 0 or history_len <= 0:
                 continue
