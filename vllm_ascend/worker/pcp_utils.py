@@ -1338,18 +1338,20 @@ class PCPManager:
             # mask[m, k] = True if mtp_pos[m] < local_pos[k], False otherwise
             # local tokens consist of: history tokens (positions 0 to history_len-1) +
             # MTP tokens assigned to this rank (from local_mtp_positions)
-            all_mtp_positions = np.arange(global_history_len, global_history_len + mtp_token_len, dtype=np.int32)
+            all_mtp_positions = torch.arange(
+                global_history_len, global_history_len + mtp_token_len, dtype=torch.int32
+            )
 
-            # Vectorized mask computation - replaces double loop
-            mtp_pos_array = all_mtp_positions[:, None]  # [mtp, 1]
-            # Use np.concatenate instead of list + range
-            local_pos_array = np.concatenate([
-                np.arange(history_len, dtype=np.int32),
-                local_mtp_positions
+            # Use torch for mask computation - avoids numpy->tensor conversion overhead
+            mtp_pos = all_mtp_positions[:, None]  # [mtp, 1]
+            # Create local positions tensor directly on the buffer's device
+            local_pos = torch.cat([
+                torch.arange(history_len, dtype=torch.int32, device=mtp_attn_mask.device),
+                torch.tensor(local_mtp_positions, dtype=torch.int32, device=mtp_attn_mask.device)
             ])[None, :]  # [1, local]
-            mask = mtp_pos_array < local_pos_array  # broadcasting: [mtp, local]
+            mask = mtp_pos < local_pos  # broadcasting: [mtp, local]
 
-            # Directly fill the buffer instead of building a list
-            S, L = mask.shape
-            mtp_attn_mask[req_idx, :S, :L] = torch.from_numpy(mask)
+            # Directly fill the buffer
+            S, L = mask.shape[0], mask.shape[1]
+            mtp_attn_mask[req_idx, :S, :L] = mask
         return mtp_attn_mask
