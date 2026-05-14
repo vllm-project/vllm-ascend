@@ -32,7 +32,6 @@ from vllm.logger import logger
 from vllm.sequence import IntermediateTensors
 from xlite._C import AttnMeta, AttnMHA, Model, ModelConfig, Runtime, ScoringFuncSigmoid, ScoringFuncSoftmax
 
-import vllm_ascend.envs as envs_ascend
 from vllm_ascend.ascend_config import get_ascend_config
 from vllm_ascend.attention.attention_v1 import AscendAttentionState, AscendMetadata
 from vllm_ascend.xlite.utils import _get_nested_attr
@@ -198,7 +197,7 @@ class LlamaXliteModel(XliteModel):
         xlite_config.moe_tp_size = 1
 
         xlite_config.attn_type = AttnMHA
-        xlite_config.weight_nz = envs_ascend.VLLM_ASCEND_ENABLE_NZ == 2
+        xlite_config.weight_nz = get_ascend_config().weight_nz_mode == 2
         scheduler_config = vllm_config.scheduler_config
         max_batch_size = scheduler_config.max_num_seqs
         max_seq_len = vllm_config.model_config.max_model_len
