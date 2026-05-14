@@ -53,7 +53,7 @@ on:
         default: ''
 env:
   UV_INDEX_URL: http://cache-service.nginx-pypi-cache.svc.cluster.local/pypi/simple
-  UV_EXTRA_INDEX_URL: "https://mirrors.huaweicloud.com/ascend/repos/pypi https://triton-ascend.osinfra.cn/pypi/simple https://download.pytorch.org/whl/cpu/"
+  UV_EXTRA_INDEX_URL: "https://mirrors.huaweicloud.com/ascend/repos/pypi https://triton-ascend.osinfra.cn/pypi/simple http://cache-service.nginx-pypi-cache.svc.cluster.local/whl/cpu/"
   UV_INDEX_STRATEGY: unsafe-best-match
   UV_NO_CACHE: 1
   UV_SYSTEM_PYTHON: 1
@@ -134,7 +134,7 @@ jobs:
 
       - name: Install vllm-project/vllm-ascend
         env:
-          PIP_EXTRA_INDEX_URL: "https://mirrors.huaweicloud.com/ascend/repos/pypi https://triton-ascend.osinfra.cn/pypi/simple https://download.pytorch.org/whl/cpu/"
+          PIP_EXTRA_INDEX_URL: "https://mirrors.huaweicloud.com/ascend/repos/pypi https://triton-ascend.osinfra.cn/pypi/simple http://cache-service.nginx-pypi-cache.svc.cluster.local/whl/cpu/"
         run: |
           pip install uc-manager
           pip install -r requirements-dev.txt
@@ -264,7 +264,7 @@ jobs:
 
       - name: Install vllm-project/vllm-ascend
         env:
-          PIP_EXTRA_INDEX_URL: "https://mirrors.huaweicloud.com/ascend/repos/pypi https://triton-ascend.osinfra.cn/pypi/simple https://download.pytorch.org/whl/cpu/"
+          PIP_EXTRA_INDEX_URL: "https://mirrors.huaweicloud.com/ascend/repos/pypi https://triton-ascend.osinfra.cn/pypi/simple http://cache-service.nginx-pypi-cache.svc.cluster.local/whl/cpu/"
         run: |
           pip install uc-manager
           pip install -r requirements-dev.txt
@@ -401,7 +401,7 @@ jobs:
 
       - name: Install vllm-project/vllm-ascend
         env:
-          PIP_EXTRA_INDEX_URL: "https://mirrors.huaweicloud.com/ascend/repos/pypi https://triton-ascend.osinfra.cn/pypi/simple https://download.pytorch.org/whl/cpu/"
+          PIP_EXTRA_INDEX_URL: "https://mirrors.huaweicloud.com/ascend/repos/pypi https://triton-ascend.osinfra.cn/pypi/simple http://cache-service.nginx-pypi-cache.svc.cluster.local/whl/cpu/"
         run: |
           pip install uc-manager
           pip install -r requirements-dev.txt
@@ -529,7 +529,7 @@ jobs:
 
       - name: Install vllm-project/vllm-ascend
         env:
-          PIP_EXTRA_INDEX_URL: "https://mirrors.huaweicloud.com/ascend/repos/pypi https://triton-ascend.osinfra.cn/pypi/simple https://download.pytorch.org/whl/cpu/"
+          PIP_EXTRA_INDEX_URL: "https://mirrors.huaweicloud.com/ascend/repos/pypi https://triton-ascend.osinfra.cn/pypi/simple http://cache-service.nginx-pypi-cache.svc.cluster.local/whl/cpu/"
         run: |
           pip install uc-manager
           pip install -r requirements-dev.txt
@@ -685,7 +685,7 @@ jobs:
 
       - name: Install vllm-project/vllm-ascend
         env:
-          PIP_EXTRA_INDEX_URL: "https://mirrors.huaweicloud.com/ascend/repos/pypi https://triton-ascend.osinfra.cn/pypi/simple https://download.pytorch.org/whl/cpu/"
+          PIP_EXTRA_INDEX_URL: "https://mirrors.huaweicloud.com/ascend/repos/pypi https://triton-ascend.osinfra.cn/pypi/simple http://cache-service.nginx-pypi-cache.svc.cluster.local/whl/cpu/"
         run: |
           pip install uc-manager
           pip install -r requirements-dev.txt
@@ -812,7 +812,7 @@ jobs:
 
       - name: Install vllm-project/vllm-ascend
         env:
-          PIP_EXTRA_INDEX_URL: "https://mirrors.huaweicloud.com/ascend/repos/pypi https://triton-ascend.osinfra.cn/pypi/simple https://download.pytorch.org/whl/cpu/"
+          PIP_EXTRA_INDEX_URL: "https://mirrors.huaweicloud.com/ascend/repos/pypi https://triton-ascend.osinfra.cn/pypi/simple http://cache-service.nginx-pypi-cache.svc.cluster.local/whl/cpu/"
         run: |
           pip install uc-manager
           pip install -r requirements-dev.txt
@@ -922,7 +922,7 @@ jobs:
 
       - name: Install vllm-project/vllm-ascend
         env:
-          PIP_EXTRA_INDEX_URL: "https://mirrors.huaweicloud.com/ascend/repos/pypi https://triton-ascend.osinfra.cn/pypi/simple https://download.pytorch.org/whl/cpu/"
+          PIP_EXTRA_INDEX_URL: "https://mirrors.huaweicloud.com/ascend/repos/pypi https://triton-ascend.osinfra.cn/pypi/simple http://cache-service.nginx-pypi-cache.svc.cluster.local/whl/cpu/"
         run: |
           pip install uc-manager
           pip install -r requirements-dev.txt
