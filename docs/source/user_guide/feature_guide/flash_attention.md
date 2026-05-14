@@ -1,7 +1,7 @@
 # Flash Attention 3
 
 ```{note}
-Flash Attention 3 on Ascend is currently in beta. The `flash_attn_npu` package required for FA3 has not yet been open-sourced and is expected to be released by the end of May.
+Flash Attention 3 on Ascend is currently in beta. The `flash_attn_npu` package required for FA3 has not yet been open-sourced and is expected to be released after May 20th.
 ```
 
 This document shows how to enable Flash Attention 3 (FA3) in vLLM-Ascend. FA3 provides a training-inference consistent attention implementation for Ascend NPUs.
@@ -16,11 +16,30 @@ FA3 is crucial for the following scenarios:
 - **Framework debugging**: Consistent attention implementations make it easier to debug issues by eliminating discrepancies between training and inference.
 - **Reinforcement Learning (RL)**: RL training often requires deterministic and consistent rollouts for reproducibility and stable training.
 
-## Differences from GPU Implementation
+## Feature Comparison
 
-```{note}
-This section is to be supplemented. FA3 on Ascend NPU has certain differences from the GPU-side Flash Attention implementation. Specific differences will be documented here in future updates.
-```
+The following table compares the features of `flash_attn_with_kvcache` between GPU FA3 and Ascend NPU FA3:
+
+| Feature | GPU FA3 | NPU FA3 |
+|---------|---------|---------|
+| FP16 (float16) | ✅ | ✅ |
+| BF16 (bfloat16) | ✅ | ✅ |
+| Causal Attention | ✅ | ✅ |
+| Sliding Window Attention | ✅ | - |
+| MQA/GQA | ✅ | ✅ |
+| Paged KV Cache | ✅ | ✅ |
+| Rotary Position Embedding (RoPE) | ✅ | - |
+| ALiBi | - | - |
+| Softcapping | ✅ | - |
+| FP8 Quantization | ✅ | - |
+| Variable-length Sequences | ✅ | ✅ |
+
+### Differences from GPU Implementation
+
+The `flash_attn_with_kvcache` interface on NPU is semantically consistent with the GPU FA3 version in terms of API parameters. The key differences are:
+
+1. **Unsupported features on NPU FA3**: Sliding window attention, RoPE, ALiBi, Softcapping, and FP8 quantization are not yet supported. These will be added in future releases.
+2. **Graph capture**: The tiling of `flash_attn_with_kvcache` is processed on the host side and is currently being optimized. It does not support ACL graph capture (i.e., cannot be captured into a computational graph for acceleration). Please use `enforce_eager=True` when enabling FA3.
 
 ## Hardware Requirements
 
@@ -32,13 +51,19 @@ We will support other NPUs in the future.
 FA3 requires the `flash_attn_npu` package, which provides the `flash_attn_v3` module with the `flash_attn_with_kvcache` operator.
 
 ```{warning}
-The `flash_attn_npu` package has not yet been open-sourced. It is expected to be released by the end of the month. Until then, external users cannot directly use Flash Attention 3.
+The `flash_attn_npu` package has not yet been open-sourced. It is expected to be released after May 20th. Until then, external users cannot directly use Flash Attention 3.
 ```
 
-Once `flash_attn_npu` is available, install it before using FA3:
+### Installation
+
+Install the `flash_attn_npu` wheel package as follows:
 
 ```bash
-pip install flash_attn_npu
+pip3 install flash_attn_npu-x.x.x-cp3xx-cp3xx-linux_aarch64.whl
+```
+
+```{note}
+Replace `x.x.x` with the actual package version, and `cp3xx` with the actual Python version tag matching your environment (e.g., `cp310` for Python 3.10, `cp311` for Python 3.11).
 ```
 
 ## Enabling Flash Attention 3
@@ -118,7 +143,11 @@ for output in outputs:
 
 - **Package not yet open-sourced**: The `flash_attn_npu` package required for FA3 has not yet been released. External users cannot use FA3 until the package is available.
 - **Sliding window not supported**: FA3 does not support sliding window attention. Models that require sliding window need to use the default FIA backend.
-- **ACL graph capture not supported**: FA3 does not support ACL graph capture with `FULL_DECODE_ONLY` mode. Please use `enforce_eager=True` when enabling FA3.
+- **ACL graph capture not supported**: The tiling of `flash_attn_with_kvcache` is processed on the host side and currently does not support ACL graph capture. Please use `enforce_eager=True` when enabling FA3.
+- **RoPE not supported**: FA3 does not support rotary position embedding within the attention kernel. vLLM-Ascend patches this by using the PyTorch native RoPE fallback instead.
+- **ALiBi not supported**: FA3 does not support ALiBi (Attention with Linear Biases).
+- **Softcapping not supported**: FA3 does not support attention logit softcapping.
+- **FP8 quantization not supported**: FA3 does not support FP8 quantized attention.
 - **MLA and SFA not supported**: FA3 does not support Multi-head Latent Attention (MLA) or Sparse Flash Attention (SFA).
 
 ```{note}
@@ -139,7 +168,12 @@ Other models have not been tested yet and will be supported in the future if not
 The FA3 feature is under active development. Planned improvements include:
 
 - Open-source the `flash_attn_npu` package
-- Document differences from GPU-side Flash Attention implementation
+- Support ACL graph capture (host-side tiling optimization)
+- Support sliding window attention
+- Support RoPE within the attention kernel
+- Support ALiBi
+- Support Softcapping
+- Support FP8 quantization
 - Support for additional NPUs series
 - Expanded model coverage
 - Performance optimizations
