@@ -190,7 +190,7 @@ class BaseDeviceAdaptor:
         )[0]
 
     @staticmethod
-    def mla_cache_load(cache_kv_c, cache_k_pe, block_table, context_seq_len_npu, seq_starts, key, value):
+    def kv_cache_load(cache_kv_c, cache_k_pe, block_table, context_seq_len_npu, seq_starts, key, value):
         torch_npu.atb.npu_paged_cache_load(
             cache_kv_c,
             cache_k_pe,
@@ -553,12 +553,12 @@ class A5DeviceAdaptor(BaseDeviceAdaptor):
         )[0]
 
     @staticmethod
-    def mla_cache_load(cache_kv_c, cache_k_pe, block_table, context_seq_len_npu, seq_offset, key, value):
+    def kv_cache_load(cache_kv_c, cache_k_pe, block_table, context_seq_len_npu, seq_offset, key, value):
         torch_npu.npu_gather_pa_kv_cache(
             cache_kv_c,
             cache_k_pe,
             block_table,
-            context_seq_len_npu,
+            context_seq_len_npu.contiguous(),
             seq_offset=seq_offset,
             key=key,
             value=value,
@@ -601,6 +601,7 @@ class A5DeviceAdaptor(BaseDeviceAdaptor):
         decode_q_nope = decode_q_nope.view(bsz, atten_obj.num_heads, atten_obj.kv_lora_rank)
         decode_q_pe = decode_q_pe.view(bsz, atten_obj.num_heads, -1)
 
+        decode_q_nope, decode_q_pe = atten_obj.reorg_decode_q(decode_q_nope, decode_q_pe)
         from vllm_ascend.attention.mla_v1 import DecodeMLAPreprocessResult
 
         decode_preprocess_res = DecodeMLAPreprocessResult(decode_q_nope, decode_q_pe, decode_k_nope, decode_k_pe)

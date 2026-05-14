@@ -15,6 +15,7 @@ from vllm.v1.attention.backend import AttentionCGSupport
 from vllm.v1.kv_cache_interface import AttentionSpec, MLAAttentionSpec
 
 from vllm_ascend.attention.attention_v1 import AscendAttentionState
+from vllm_ascend.device.device_op import DeviceOperator
 
 # isort: off
 from vllm_ascend.attention.mla_v1 import (
@@ -446,8 +447,8 @@ class AscendMlaCPImpl(AscendMLAImpl):
         slot_mapping = attn_metadata.slot_mapping[self.pcp_size * num_decode_tokens :]
         if self.is_kv_producer:
             attn_metadata.reshape_cache_event = torch.npu.Event()
-        torch_npu._npu_reshape_and_cache(
-            key=kv_c_normed, value=k_pe, key_cache=kv_cache[0], value_cache=kv_cache[1], slot_indices=slot_mapping
+        DeviceOperator.reshape_and_cache(
+            key=kv_c_normed, value=k_pe, key_cache=kv_cache[0], value_cache=kv_cache[1], slot_mapping=slot_mapping
         )
         if self.is_kv_producer:
             attn_metadata.reshape_cache_event.record()

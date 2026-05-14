@@ -1,16 +1,8 @@
 # Ascend Store Deployment Guide
 
-## Environmental Dependencies
+## KV Pool Parameter Description
 
-* Software:
-    * CANN >= 8.5.0
-    * vLLM：main branch
-    * vLLM-Ascend：main branch
-    * mooncake：>= 0.3.9
-
-### KV Pool Parameter Description
-
-#### `kv_connector_extra_config`: Additional Configurable Parameters for Pooling
+### `kv_connector_extra_config`: Additional Configurable Parameters for Pooling
 
 | Parameter | Description |
 | :--- | :--- |
