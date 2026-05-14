@@ -249,7 +249,7 @@ class AscendAttentionCPMetadataBuilder(AscendAttentionMetadataBuilder):
                 num_decodes:
             ]
         else:
-            actual_seq_lengths_q = [self.decode_threshold for _ in range(num_decodes)] + query_start_loc_cpu[
+            actual_seq_lengths_q = [self.decode_threshold * (i + 1) for i in range(num_decodes)] + query_start_loc_cpu[
                 num_decodes + 1 :
             ].tolist()
 
@@ -394,6 +394,7 @@ class AscendAttentionCPImpl(AscendAttentionBackendImpl):
                 input_layout = "TND"
                 if speculative_config is not None:
                     input_layout = "BSND"
+                    actual_seq_lengths_q = [actual_seq_lengths_q[0] for _ in range(len(actual_seq_lengths_q))]
                 torch_npu.npu_fused_infer_attention_score.out(
                     q_nope,
                     k_nope,
@@ -588,6 +589,7 @@ class AscendAttentionCPImpl(AscendAttentionBackendImpl):
             query = query.view(num_decodes, -1, query.shape[1], query.shape[-1])
             k_nope = self.key_cache.view(self.key_cache.shape[0], 1, self.key_cache.shape[1], -1)
             value = self.value_cache.view(self.value_cache.shape[0], 1, self.value_cache.shape[1], -1)
+            actual_seq_lengths_q = [actual_seq_lengths_q[0] for _ in range(len(actual_seq_lengths_q))]
 
         common_kwargs = {
             "num_heads": num_heads,
@@ -601,7 +603,7 @@ class AscendAttentionCPImpl(AscendAttentionBackendImpl):
             "block_table": attn_metadata.decode_meta.block_tables,
             "block_size": self.key_cache.shape[1],
             "actual_seq_lengths_kv": attn_metadata.decode_meta.num_computed_tokens_of_pcp_dcp[
-                :, self.pcp_rank, self.dcp_rank
+                : attn_metadata.num_decodes, self.pcp_rank, self.dcp_rank
             ],
             "actual_seq_lengths": actual_seq_lengths_q,
         }
@@ -649,7 +651,7 @@ class AscendAttentionCPImpl(AscendAttentionBackendImpl):
                     self.scale,
                     attn_metadata.block_tables,
                     self.key_cache.shape[1],
-                    attn_metadata.decode_meta.num_computed_tokens_of_pcp_dcp[:, self.pcp_rank, self.dcp_rank],
+                    attn_metadata.decode_meta.num_computed_tokens_of_pcp_dcp[: attn_metadata.num_decodes, self.pcp_rank, self.dcp_rank],
                     attn_metadata.actual_seq_lengths_q[: attn_metadata.num_decodes],
                     weak_ref_tensors(attn_out),
                     weak_ref_tensors(attn_lse),
