@@ -164,6 +164,32 @@ _benchmark_TPOT20_64K_1K_pc90: &_benchmark_TPOT20_64K_1K_pc90
   baseline: 1
   threshold: 0.97
 
+_benchmark_TPOT50_128K_1K_pc90: &_benchmark_TPOT50_128K_1K_pc90
+  case_type: performance
+  dataset_path: vllm-ascend/GSM8K-in3500-bs2800
+  request_conf: vllm_api_stream_chat
+  dataset_conf: gsm8k/gsm8k_gen_0_shot_cot_str_perf
+  num_prompts: 40
+  max_out_len: 1024
+  batch_size: 10
+  trust_remote_code: true
+  request_rate: 0
+  baseline: 1
+  threshold: 0.97
+
+_benchmark_TPOT20_128K_1K_pc90: &_benchmark_TPOT20_128K_1K_pc90
+  case_type: performance
+  dataset_path: vllm-ascend/GSM8K-in3500-bs2800
+  request_conf: vllm_api_stream_chat
+  dataset_conf: gsm8k/gsm8k_gen_0_shot_cot_str_perf
+  num_prompts: 40
+  max_out_len: 1024
+  batch_size: 10
+  trust_remote_code: true
+  request_rate: 0
+  baseline: 1
+  threshold: 0.97
+
 # ==========================================
 # ACTUAL TEST CASES
 # ==========================================
@@ -191,7 +217,7 @@ test_cases:
       - '{"enable_shared_expert_dp":true}'
     benchmarks:
       <<: *benchmarks
-  - name: "Kimi-K2.5-W4A8-16k-1k-TOPT50"
+  - name: "Kimi-K2.5-W4A8-TOPT50-16k-1k"
     model: "Eco-Tech/Kimi-K2.5-W4A8"
     envs:
       <<: *envs
@@ -213,7 +239,7 @@ test_cases:
       - '{"enable_shared_expert_dp":true}'
     benchmarks:
       <<: *_benchmark_TPOT50_16K_1K
-  - name: "Kimi-K2.5-W4A8-16k-1k-TOPT20"
+  - name: "Kimi-K2.5-W4A8-TOPT20-16k-1k"
     model: "Eco-Tech/Kimi-K2.5-W4A8"
     envs:
       <<: *envs
@@ -237,7 +263,7 @@ test_cases:
       - "--enable-auto-tool-choice"
     benchmarks:
       <<: *_benchmark_TPOT20_16K_1K
-  - name: "Kimi-K2.5-W4A8-32k-0.5k-TOPT50"
+  - name: "Kimi-K2.5-W4A8-TOPT50-32k-0.5k"
     model: "Eco-Tech/Kimi-K2.5-W4A8"
     envs:
       <<: *envs
@@ -262,7 +288,7 @@ test_cases:
     benchmarks:
       <<: *_benchmark_TPOT50_32K_0_5K
 
-  - name: "Kimi-K2.5-W4A8-32k-0.5k-TOPT50-prefix-cache90"
+  - name: "Kimi-K2.5-W4A8-TOPT50-32k-0.5k-prefix-cache90"
     model: "Eco-Tech/Kimi-K2.5-W4A8"
     envs:
       <<: *envs
@@ -411,3 +437,47 @@ test_cases:
       - "data"
     benchmarks:
       <<: *_benchmark_TPOT20_64K_1K_pc90
+
+  - name: "Kimi-K2.5-W4A8-TOPT50-128k-1k-pc90"
+    model: "Eco-Tech/Kimi-K2.5-W4A8"
+    envs:
+      <<: *envs
+    server_cmd: *server_cmd
+    server_cmd_extra:
+      - "--enable-chunked-prefill"
+      - "--max-num-seqs"
+      - "16"
+      - "--max-model-len"
+      - "133120"
+      - "--max-num-batched-tokens"
+      - "8192"
+      - "--compilation-config"
+      - '{"cudagraph_capture_sizes":[4,8,12,16,32], "cudagraph_mode":"FULL_DECODE_ONLY"}'
+      - "--speculative-config"
+      - '{"method":"eagle3", "model":"/mnt/share/weight/lightseekorg_kimi-k2.5-eagle3", "num_speculative_tokens":3}'
+      - "--additional-config"
+      - '{"enable_shared_expert_dp":true}'
+    benchmarks:
+      <<: *_benchmark_TPOT50_128K_1K_pc90
+
+  - name: "Kimi-K2.5-W4A8-TOPT20-128k-1k-pc90"
+    model: "Eco-Tech/Kimi-K2.5-W4A8"
+    envs:
+      <<: *envs
+    server_cmd: *server_cmd
+    server_cmd_extra:
+      - "--enable-chunked-prefill"
+      - "--max-num-seqs"
+      - "16"
+      - "--max-model-len"
+      - "133120"
+      - "--max-num-batched-tokens"
+      - "8192"
+      - "--compilation-config"
+      - '{"cudagraph_capture_sizes":[4,8,12,16,32], "cudagraph_mode":"FULL_DECODE_ONLY"}'
+      - "--speculative-config"
+      - '{"method":"eagle3", "model":"/mnt/share/weight/lightseekorg_kimi-k2.5-eagle3", "num_speculative_tokens":3}'
+      - "--additional-config"
+      - '{"enable_shared_expert_dp":true}'
+    benchmarks:
+      <<: *_benchmark_TPOT20_128K_1K_pc90
