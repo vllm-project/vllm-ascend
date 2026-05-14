@@ -36,6 +36,9 @@ from tests.ut.conftest import npu_test  # noqa: E402
 from vllm_ascend.attention.attention_v1 import AscendAttentionState  # noqa: E402
 from vllm_ascend.attention.context_parallel.mla_cp import AscendMlaCPImpl  # noqa: E402
 from vllm_ascend.attention.mla_v1 import AscendMLAImpl  # noqa: E402
+from vllm_ascend.utils import enable_custom_op
+
+enable_custom_op()
 
 _BLOCK_SIZE = 128
 _TEST_NUM_HEADS = 16
