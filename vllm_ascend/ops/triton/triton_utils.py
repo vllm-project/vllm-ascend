@@ -16,7 +16,7 @@ if HAS_TRITON:
 
 def _resolve_triton_ascend_op(op_name: str):
     if not HAS_TRITON:
-        raise RuntimeError(f"Triton op '{op_name}' cannot be resolved because HAS_TRITON is False")
+        return None
 
     if _extension_module is not None:
         extension_op = getattr(_extension_module, op_name, None)
@@ -27,10 +27,7 @@ def _resolve_triton_ascend_op(op_name: str):
     if tl_op is not None:
         return tl_op
 
-    raise RuntimeError(
-        f"Failed to resolve Triton op '{op_name}': "
-        "neither triton.language.extra.cann.extension nor triton.language provides it."
-    )
+    return None
 
 
 if HAS_TRITON:
