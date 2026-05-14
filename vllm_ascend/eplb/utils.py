@@ -76,16 +76,16 @@ class MoeLayerRegistry:
 
 
 def _get_expert_map(self, layer_id):
-    return self._moe_layer_registry.get_layer(layer_id).mlp.experts.expert_map
+    return self._moe_layer_registry.get_layer(layer_id).experts.expert_map
 
 
 def _get_log2phy_map(self, layer_id):
-    return self._moe_layer_registry.get_layer(layer_id).mlp.experts.get_log2phy_map()
+    return self._moe_layer_registry.get_layer(layer_id).experts.get_log2phy_map()
 
 
 def _get_all_moe_loads(self):
     loads = [
-        layer.mlp.experts.moe_load
+        layer.experts.moe_load
         for _, layer in self._moe_layer_registry.iter_layers()
     ]
     return torch.stack(loads, dim=0) if loads else torch.empty(0)
@@ -93,7 +93,7 @@ def _get_all_moe_loads(self):
 
 def _clear_all_moe_loads(self):
     for _, layer in self._moe_layer_registry.iter_layers():
-        layer.mlp.experts.clear_moe_load()
+        layer.experts.clear_moe_load()
 
 
 def model_register(model):
