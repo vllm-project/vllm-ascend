@@ -286,7 +286,7 @@ class VwnLlamaDecoderLayer(LlamaDecoderLayer):
                 positions=positions,
                 hidden_states=hidden_states,
             )
-            hidden_states_view = hidden_states.view(-1, self.hiddensize // self.m)
+            hidden_states_view = hidden_states.view(-1, self.hidden_size // self.m)
             upward_hidden_states_tmp = self.upward_after_attn(hidden_states_view)
             upward_hidden_states = upward_hidden_states_tmp.view(-1, self.wider_dim)
             wider_hidden_states = upward_hidden_states + hidden_residual
@@ -300,7 +300,7 @@ class VwnLlamaDecoderLayer(LlamaDecoderLayer):
             )
             hidden_states = self.post_attention_layernorm(hidden_states)
             hidden_states = self.mlp(hidden_states)
-            hidden_states_view = hidden_states.view(-1, self.hiddensize // self.m)
+            hidden_states_view = hidden_states.view(-1, self.hidden_size // self.m)
             upward_hidden_states_tmp = self.upward_after_mlp(hidden_states_view)
             upward_hidden_states = upward_hidden_states_tmp.view(-1, self.wider_dim)
             wider_hidden_states = upward_hidden_states + hidden_residual
@@ -308,7 +308,7 @@ class VwnLlamaDecoderLayer(LlamaDecoderLayer):
             # downward
             wider_hidden_states_view = wider_hidden_states.view(-1, self.wider_dim // self.m)
             hidden_state_tmp = self.downward(wider_hidden_states_view)
-            hidden_states = hidden_state_tmp.view(-1, self.hiddensize)
+            hidden_states = hidden_state_tmp.view(-1, self.hidden_size)
 
         return hidden_states, residual
 
