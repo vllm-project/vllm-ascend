@@ -127,6 +127,7 @@ class PreVwnLayerV1(nn.Module):
         hidden_size = config.hidden_size
         m = getattr(config, "vwn_m", 1)
         expanded_factor = getattr(config, "vwn_r", 1)
+        n = int(expanded_factor * m)
         wider_dim = int(hidden_size * expanded_factor)
         self.wider_dim = wider_dim
 
@@ -142,15 +143,21 @@ class PreVwnLayerV1(nn.Module):
             prefix=maybe_prefix(prefix, "fc"),
             return_bias=False,
         )
+        upward_input_size = hidden_size // m
+        upward_output_size = wider_dim // n
         self.upward = ReplicatedLinear(
-            input_size=hidden_size,
-            output_size=wider_dim,
+            input_size=upward_input_size,
+            output_size=upward_output_size,
             bias=False,
             params_dtype=vllm_config.model_config.dtype,
             quant_config=quant_config,
             prefix=maybe_prefix(prefix, "upward"),
             return_bias=False,
         )
+        self.m = m
+        self.n = n
+        self.hidden_size = hidden_size
+        self.wider_dim = wider_dim
 
     def forward(
         self,
@@ -161,7 +168,9 @@ class PreVwnLayerV1(nn.Module):
         norm_hidden = self.hidden_norm(hidden_states)
         hidden_to_fc = torch.cat([norm_embeds, norm_hidden], dim=-1)
         hidden_after_fc = self.fc(hidden_to_fc)
-        wider_hidden_states = self.upward(hidden_after_fc)
+        hidden_after_fc_new = hidden_after_fc.view(-1 , self.hidden_size // self.m)
+        wider_hidden_states_tmp = self.upward(hidden_after_fc_new)
+        wider_hidden_states = wider_hidden_states_tmp.view(-1 , self.wider_dim)
 
         return wider_hidden_states
 
@@ -179,10 +188,15 @@ class VwnLlamaDecoderLayer(LlamaDecoderLayer):
         quant_config = self.get_quant_config(vllm_config)
         m = getattr(config, "vwn_m", 1)
         expanded_factor = getattr(config, "vwn_r", 1)
+        n = int(expanded_factor * m)
         wider_dim = int(self.hidden_size * expanded_factor)
         self.wider_dim = wider_dim
-
-        if getattr(config, "eable_pre_vmn", True):
+        self.m = m
+        self.n = n
+        upward_input_size = self.hidden_size // m
+        upward_output_size = wider_dim // n
+        pre_vwn_version = getattr(config, "pre_vwn_version", 0)
+        if pre_vwn_version == 0:
             self.pre_vwn_layer = PreVwnLayerV0(
                 vllm_config,
                 prefix=maybe_prefix(prefix, f"layers.pre_vwn_layer"),
@@ -209,8 +223,8 @@ class VwnLlamaDecoderLayer(LlamaDecoderLayer):
         
         self.pre_attention_layernorm = RMSNorm(self.hidden_size, eps=config.rms_norm_eps)
         self.upward_after_attn = ReplicatedLinear(
-            input_size=self.hidden_size,
-            output_size=wider_dim,
+            input_size=upward_input_size,
+            output_size=upward_output_size,
             bias=False,
             params_dtype=vllm_config.model_config.dtype,
             quant_config=quant_config,
@@ -228,8 +242,8 @@ class VwnLlamaDecoderLayer(LlamaDecoderLayer):
         )
         self.post_attention_layernorm = RMSNorm(self.hidden_size, eps=config.rms_norm_eps)
         self.upward_after_mlp = ReplicatedLinear(
-            input_size=self.hidden_size,
-            output_size=wider_dim,
+            input_size=upward_input_size,
+            output_size=upward_output_size,
             bias=False,
             params_dtype=vllm_config.model_config.dtype,
             quant_config=quant_config,
@@ -237,8 +251,8 @@ class VwnLlamaDecoderLayer(LlamaDecoderLayer):
             return_bias=False,
         )
         self.downward = ReplicatedLinear(
-            input_size=wider_dim,
-            output_size=self.hidden_size,
+            input_size=upward_output_size,
+            output_size=upward_input_size,
             bias=False,
             params_dtype=vllm_config.model_config.dtype,
             quant_config=quant_config,
@@ -275,7 +289,9 @@ class VwnLlamaDecoderLayer(LlamaDecoderLayer):
                 positions=positions,
                 hidden_states=hidden_states,
             )
-            upward_hidden_states = self.upward_after_attn(hidden_states)
+            hidden_states_view = hidden_states.view(-1, self.hiddensize // self.m)
+            upward_hidden_states_tmp = self.upward_after_attn(hidden_states_view)
+            upward_hidden_states = upward_hidden_states_tmp.view(-1, self.wider_dim)
             wider_hidden_states = upward_hidden_states + hidden_residual
 
             # mlp
@@ -287,11 +303,15 @@ class VwnLlamaDecoderLayer(LlamaDecoderLayer):
             )
             hidden_states = self.post_attention_layernorm(hidden_states)
             hidden_states = self.mlp(hidden_states)
-            upward_hidden_states = self.upward_after_mlp(hidden_states)
+            hidden_states_view = hidden_states.view(-1, self.hiddensize // self.m)
+            upward_hidden_states_tmp = self.upward_after_mlp(hidden_states_view)
+            upward_hidden_states = upward_hidden_states_tmp.view(-1, self.wider_dim)
             wider_hidden_states = upward_hidden_states + hidden_residual
 
             # downward
-            hidden_states = self.downward(wider_hidden_states)
+            wider_hidden_states_view = wider_hidden_states.view(-1, self.wider_dim // self.n)
+            hidden_state_tmp = self.downward(wider_hidden_states_view)
+            hidden_states = hidden_state_tmp.view(-1, self.hiddensize)
 
         return hidden_states, residual
 
