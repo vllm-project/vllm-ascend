@@ -115,9 +115,11 @@ env_variables: dict[str, Callable[[], Any]] = {
     # If not set, defaults to "0" which means LRU capacity falls back to a fixed value.
     "VLLM_ASCEND_KV_POOL_DRAM_SIZE": lambda: os.getenv("VLLM_ASCEND_KV_POOL_DRAM_SIZE", "0"),
     # Number of reusable layerwise KV pool transfer buffers.
-    # Default: 2. Valid range: integer >= 1. Not sensitive.
-    "VLLM_ASCEND_KV_POOL_LAYERWISE_NUM_SHARED_BUFFERS": lambda: int(
-        os.getenv("VLLM_ASCEND_KV_POOL_LAYERWISE_NUM_SHARED_BUFFERS", "2")
+    # Default: None, which uses the number of layers and disables layer reuse.
+    # Valid range: integer >= 1. Set smaller than the number of non-independent
+    # layers to enable layer reuse/offload. Not sensitive.
+    "VLLM_ASCEND_KV_POOL_LAYERWISE_NUM_SHARED_BUFFERS": lambda: os.getenv(
+        "VLLM_ASCEND_KV_POOL_LAYERWISE_NUM_SHARED_BUFFERS", None
     ),
     # Number of layerwise KV pool load layers to prefetch.
     # Default: 2. Valid range: integer >= 1. Not sensitive.

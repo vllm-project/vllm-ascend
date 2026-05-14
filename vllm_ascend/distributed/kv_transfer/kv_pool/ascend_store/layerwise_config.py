@@ -23,8 +23,10 @@ def _parse_int_config(value: Any, name: str) -> int:
         raise TypeError(f"{name} must be an integer, got {value!r}") from err
 
 
-def get_layerwise_num_shared_buffers() -> int:
+def get_layerwise_num_shared_buffers(num_layers: int) -> int:
     value = envs_ascend.VLLM_ASCEND_KV_POOL_LAYERWISE_NUM_SHARED_BUFFERS
+    if value is None:
+        return num_layers
     num_shared_buffers = _parse_int_config(
         value,
         "VLLM_ASCEND_KV_POOL_LAYERWISE_NUM_SHARED_BUFFERS",
@@ -89,7 +91,7 @@ def get_layerwise_independent_layers(num_layers: int) -> list[int]:
 
 
 def get_layerwise_config(num_layers: int) -> LayerwiseConfig:
-    num_shared_buffers = get_layerwise_num_shared_buffers()
+    num_shared_buffers = get_layerwise_num_shared_buffers(num_layers)
     num_prefetch_layers = get_layerwise_num_prefetch_layers()
     independent_layers = get_layerwise_independent_layers(num_layers)
     independent_layer_indices = set(independent_layers)
