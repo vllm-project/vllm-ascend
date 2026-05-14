@@ -411,18 +411,18 @@ class KVCacheRecvingThread(threading.Thread):
         if remote_port_send_num is None:
             remote_port_send_num = {}
         trans_info = {
-                "request_id": request_id,
-                "local_block_ids": local_block_ids,
-                "remote_block_ids": remote_block_ids,
-                "remote_engine_id": remote_engine_id,
-                "remote_request_id": remote_request_id,
-                "remote_host": remote_host,
-                "remote_handshake_port": remote_handshake_port,
-                "offset": offset,
-                "tp_num_need_pulls": tp_num_need_pulls,
-                "remote_port_send_num": remote_port_send_num,
-                "all_task_done": all_task_done,
-            }
+            "request_id": request_id,
+            "local_block_ids": local_block_ids,
+            "remote_block_ids": remote_block_ids,
+            "remote_engine_id": remote_engine_id,
+            "remote_request_id": remote_request_id,
+            "remote_host": remote_host,
+            "remote_handshake_port": remote_handshake_port,
+            "offset": offset,
+            "tp_num_need_pulls": tp_num_need_pulls,
+            "remote_port_send_num": remote_port_send_num,
+            "all_task_done": all_task_done,
+        }
         logger.debug(f"Adding request {request_id} to the queue.Trans info:{trans_info}")
         self.request_queue.put(trans_info)
 
