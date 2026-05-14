@@ -147,11 +147,13 @@ def _patched_engine_core_proc_init(
     engine_index=0,
 ):
     worker_count = vllm_config.parallel_config.local_world_size
+    expect_coordinator = getattr(self, "has_coordinator", False)
 
     self._recovery_handler = RecoveryHandler(
         engine_core=self,
         worker_count=worker_count,
         engine_index=engine_index,
+        expect_coordinator=expect_coordinator,
     )
 
     self._recovery_handler.start()
@@ -239,9 +241,6 @@ def _patched_process_input_sockets(
                 type_frame, *data_frames = input_socket.recv_multipart(copy=False)
 
                 if input_socket == coord_socket and type_frame.buffer == b"READY":
-                    continue
-
-                if type_frame.buffer.startswith(_RECOVERY_MSG_PREFIX):
                     continue
 
                 request_type = EngineCoreRequestType(bytes(type_frame.buffer))
