@@ -127,7 +127,6 @@ class PreVwnLayerV1(nn.Module):
         hidden_size = config.hidden_size
         m = getattr(config, "vwn_m", 1)
         expanded_factor = getattr(config, "vwn_r", 1)
-        n = int(expanded_factor * m)
         wider_dim = int(hidden_size * expanded_factor)
         self.wider_dim = wider_dim
 
@@ -144,7 +143,7 @@ class PreVwnLayerV1(nn.Module):
             return_bias=False,
         )
         upward_input_size = hidden_size // m
-        upward_output_size = wider_dim // n
+        upward_output_size = wider_dim // m
         self.upward = ReplicatedLinear(
             input_size=upward_input_size,
             output_size=upward_output_size,
@@ -155,7 +154,6 @@ class PreVwnLayerV1(nn.Module):
             return_bias=False,
         )
         self.m = m
-        self.n = n
         self.hidden_size = hidden_size
         self.wider_dim = wider_dim
 
@@ -192,9 +190,8 @@ class VwnLlamaDecoderLayer(LlamaDecoderLayer):
         wider_dim = int(self.hidden_size * expanded_factor)
         self.wider_dim = wider_dim
         self.m = m
-        self.n = n
         upward_input_size = self.hidden_size // m
-        upward_output_size = wider_dim // n
+        upward_output_size = wider_dim // m
         pre_vwn_version = getattr(config, "pre_vwn_version", 0)
         if pre_vwn_version == 0:
             self.pre_vwn_layer = PreVwnLayerV0(
@@ -309,7 +306,7 @@ class VwnLlamaDecoderLayer(LlamaDecoderLayer):
             wider_hidden_states = upward_hidden_states + hidden_residual
 
             # downward
-            wider_hidden_states_view = wider_hidden_states.view(-1, self.wider_dim // self.n)
+            wider_hidden_states_view = wider_hidden_states.view(-1, self.wider_dim // self.m)
             hidden_state_tmp = self.downward(wider_hidden_states_view)
             hidden_states = hidden_state_tmp.view(-1, self.hiddensize)
 
