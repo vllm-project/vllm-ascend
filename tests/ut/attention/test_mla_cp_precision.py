@@ -747,7 +747,6 @@ def _test_mla_cp_correctness(
     qk_head_dim = qk_nope_head_dim + qk_rope_head_dim
     scale = 1.0 / math.sqrt(qk_head_dim)
 
-    # --- decode-path inputs (latent-space attention; paged KV cache) ---
     k_nope_contexts, k_pe_contexts = _make_synthetic_kv_contexts(
         seq_lens, kv_lora_rank, qk_rope_head_dim, dtype, device,
     )
@@ -763,7 +762,6 @@ def _test_mla_cp_correctness(
     )
     W_UV = _make_w_uv(num_heads, kv_lora_rank, v_head_dim, dtype, device)
 
-    # --- prefill-path inputs (dense space, projected K / V per request) ---
     q_nope_full = [
         torch.randn(q, num_heads, qk_nope_head_dim, dtype=dtype, device=device)
         for q in query_lens
@@ -883,7 +881,6 @@ def _test_mla_cp_correctness(
         )
         return
 
-    # mixed (chunked-prefill): decode prefix + prefill suffix.
     n_decode_reqs = sum(1 for q in query_lens if q == 1)
     assert all(q == 1 for q in query_lens[:n_decode_reqs]), (
         f"mixed spec {batch_spec.name}: decode requests must come first"
