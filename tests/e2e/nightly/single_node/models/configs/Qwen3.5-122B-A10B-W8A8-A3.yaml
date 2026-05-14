@@ -24,10 +24,7 @@ _server_cmd: &server_cmd
   - "128"
   - "--gpu-memory-utilization"
   - "0.9"
-  - "--compilation-config"
-  - '{"cudagraph_capture_sizes":[1,4,8,12,16,24,32,48,56,64,72,84,96,108,112,128,160,172,196,200,212,232,256,160,172,196,200,212,232,256,272,288,312,328,344,360,384,400,416,432,448,480,512], "cudagraph_mode":"FULL_DECODE_ONLY"}'
-  - "--speculative_config"
-  - '{"method": "qwen3_5_mtp", "num_speculative_tokens": 3, "enforce_eager": true}'
+  - "--no-enable-prefix-caching"
   - "--trust-remote-code"
   - "--async-scheduling"
   - "--allowed-local-media-path"
@@ -38,6 +35,115 @@ _server_cmd: &server_cmd
   - "0"
   - "--additional-config"
   - '{"enable_cpu_binding": true, "enable_shared_expert_dp": true}'
+
+_benchmark_acc: &_benchmark_acc
+  acc_GPQA:
+    case_type: accuracy
+    dataset_path: vllm-ascend/gpqa
+    request_conf: vllm_api_general_chat
+    dataset_conf: gpqa/gpqa_gen_0_shot_cot_chat_prompt
+    max_out_len: 65536
+    batch_size: 32
+    baseline: 85
+    threshold: 5
+    thinking: true
+    temperature: 1.0
+    top_p: 0.95
+    top_k: 20
+    min_p: 0.0
+    presence_penalty: 1.5
+    repetition_penalty: 1.0
+    ignore_eos: false
+  acc_aime2025:
+    case_type: accuracy
+    dataset_path: vllm-ascend/aime2025
+    request_conf: vllm_api_general_chat
+    dataset_conf: aime2025/aime2025_gen_0_shot_chat_prompt
+    max_out_len: 65536
+    batch_size: 32
+    baseline: 90
+    threshold: 5
+    thinking: true
+    temperature: 1.0
+    top_p: 0.95
+    top_k: 20
+    min_p: 0.0
+    presence_penalty: 1.5
+    repetition_penalty: 1.0
+    ignore_eos: false
+
+_benchmark_TPOT50_16K_1K: &_benchmark_TPOT50_16K_1K
+  case_type: performance
+  dataset_path: vllm-ascend/GSM8K-in3500-bs8000-qwen3
+  request_conf: vllm_api_stream_chat
+  dataset_conf: gsm8k/gsm8k_gen_0_shot_cot_str_perf
+  num_prompts: 320
+  max_out_len: 1024
+  batch_size: 80
+  request_rate: 0
+  baseline: 1
+  threshold: 0.97
+
+_benchmark_TPOT20_16K_1K: &_benchmark_TPOT20_16K_1K
+  case_type: performance
+  dataset_path: vllm-ascend/GSM8K-in3500-bs8000-qwen3
+  request_conf: vllm_api_stream_chat
+  dataset_conf: gsm8k/gsm8k_gen_0_shot_cot_str_perf
+  num_prompts: 320
+  max_out_len: 1024
+  batch_size: 80
+  request_rate: 0
+  baseline: 1
+  threshold: 0.97
+
+_benchmark_TPOT50_32K_0_5K: &_benchmark_TPOT50_32K_0_5K
+  case_type: performance
+  dataset_path: vllm-ascend/GSM8K-in3500-bs8000-qwen3
+  request_conf: vllm_api_stream_chat
+  dataset_conf: gsm8k/gsm8k_gen_0_shot_cot_str_perf
+  num_prompts: 320
+  max_out_len: 1024
+  batch_size: 80
+  request_rate: 0
+  baseline: 1
+  threshold: 0.97
+
+_benchmark_TPOT20_32K_0_5K: &_benchmark_TPOT20_32K_0_5K
+  case_type: performance
+  dataset_path: vllm-ascend/GSM8K-in3500-bs8000-qwen3
+  request_conf: vllm_api_stream_chat
+  dataset_conf: gsm8k/gsm8k_gen_0_shot_cot_str_perf
+  num_prompts: 320
+  max_out_len: 1024
+  batch_size: 80
+  request_rate: 0
+  baseline: 1
+  threshold: 0.97
+
+_benchmark_TPOT50_64K_1K: &_benchmark_TPOT50_64K_1K
+  case_type: performance
+  dataset_path: vllm-ascend/GSM8K-in3500-bs8000-qwen3
+  request_conf: vllm_api_stream_chat
+  dataset_conf: gsm8k/gsm8k_gen_0_shot_cot_str_perf
+  num_prompts: 320
+  max_out_len: 1024
+  batch_size: 80
+  request_rate: 0
+  baseline: 1
+  threshold: 0.97
+
+_benchmark_TPOT20_64K_1K: &_benchmark_TPOT20_64K_1K
+  case_type: performance
+  dataset_path: vllm-ascend/GSM8K-in3500-bs8000-qwen3
+  request_conf: vllm_api_stream_chat
+  dataset_conf: gsm8k/gsm8k_gen_0_shot_cot_str_perf
+  num_prompts: 320
+  max_out_len: 1024
+  batch_size: 80
+  request_rate: 0
+  baseline: 1
+  threshold: 0.97
+
 
 test_cases:
   - name: "Qwen3.5-122B-A10B-W8A8-A3"
@@ -50,6 +156,10 @@ test_cases:
       - "8000"
       - "--max-num-batched-tokens"
       - "8000"
+      - "--compilation-config"
+      - '{"cudagraph_capture_sizes":[1,4,8,12,16,24,32,48,56,64,72,84,96,108,112,128,160,172,196,200,212,232,256,160,172,196,200,212,232,256,272,288,312,328,344,360,384,400,416,432,448,480,512], "cudagraph_mode":"FULL_DECODE_ONLY"}'
+      - "--speculative_config"
+      - '{"method": "qwen3_5_mtp", "num_speculative_tokens": 3, "enforce_eager": true}'
     benchmarks:
       perf:
         case_type: performance
@@ -72,38 +182,112 @@ test_cases:
       - "131072"
       - "--max-num-batched-tokens"
       - "16384"
+      - "--compilation-config"
+      - '{"cudagraph_capture_sizes":[1,4,8,12,16,24,32,48,56,64,72,84,96,108,112,128,160,172,196,200,212,232,256,160,172,196,200,212,232,256,272,288,312,328,344,360,384,400,416,432,448,480,512], "cudagraph_mode":"FULL_DECODE_ONLY"}'
+      - "--speculative_config"
+      - '{"method": "qwen3_5_mtp", "num_speculative_tokens": 3, "enforce_eager": true}'
     benchmarks:
-      acc_GPQA:
-        case_type: accuracy
-        dataset_path: vllm-ascend/gpqa
-        request_conf: vllm_api_general_chat
-        dataset_conf: gpqa/gpqa_gen_0_shot_cot_chat_prompt
-        max_out_len: 65536
-        batch_size: 32
-        baseline: 85
-        threshold: 5
-        thinking: true
-        temperature: 1.0
-        top_p: 0.95
-        top_k: 20
-        min_p: 0.0
-        presence_penalty: 1.5
-        repetition_penalty: 1.0
-        ignore_eos: false
-      acc_aime2025:
-        case_type: accuracy
-        dataset_path: vllm-ascend/aime2025
-        request_conf: vllm_api_general_chat
-        dataset_conf: aime2025/aime2025_gen_0_shot_chat_prompt
-        max_out_len: 65536
-        batch_size: 32
-        baseline: 90
-        threshold: 5
-        thinking: true
-        temperature: 1.0
-        top_p: 0.95
-        top_k: 20
-        min_p: 0.0
-        presence_penalty: 1.5
-        repetition_penalty: 1.0
-        ignore_eos: false
+      <<: *_benchmark_acc
+
+  - name: "Qwen3.5-122B-A10B-W8A8-TPOT50-16k-1k"
+    model: "Eco-Tech/Qwen3.5-122B-A10B-w8a8-mtp"
+    envs:
+      <<: *envs
+    server_cmd: *server_cmd
+    server_cmd_extra:
+      - "--max-model-len"
+      - "18432"
+      - "--max-num-batched-tokens"
+      - "16384"
+      - "--compilation-config"
+      - '{"cudagraph_capture_sizes":[1,4,8,12,16,24,32,48,56,64,72,84,96,108,112,128,160,172,196,200,212,232,256,160,172,196,200,212,232,256,272,288,312,328,344,360,384,400,416,432,448,480,512], "cudagraph_mode":"FULL_DECODE_ONLY"}'
+      - "--speculative_config"
+      - '{"method": "qwen3_5_mtp", "num_speculative_tokens": 3, "enforce_eager": true}'
+    benchmarks:
+      <<: *_benchmark_TPOT50_16K_1K
+
+  - name: "Qwen3.5-122B-A10B-W8A8-TPOT20-16k-1k"
+    model: "Eco-Tech/Qwen3.5-122B-A10B-w8a8-mtp"
+    envs:
+      <<: *envs
+    server_cmd: *server_cmd
+    server_cmd_extra:
+      - "--max-model-len"
+      - "18432"
+      - "--max-num-batched-tokens"
+      - "16384"
+      - "--compilation-config"
+      - '{"cudagraph_capture_sizes":[1,6,12,18,24,30,36,42,48,54,72,78,84,90,96,102,108,144,192], "cudagraph_mode":"FULL_DECODE_ONLY"}'
+      - "--speculative-config"
+      - '{"method": "qwen3_5_mtp", "num_speculative_tokens": 5}'
+    benchmarks:
+      <<: *_benchmark_TPOT20_16K_1K
+
+  - name: "Qwen3.5-122B-A10B-W8A8-TPOT50-32k-0.5k"
+    model: "Eco-Tech/Qwen3.5-122B-A10B-w8a8-mtp"
+    envs:
+      <<: *envs
+    server_cmd: *server_cmd
+    server_cmd_extra:
+      - "--max-model-len"
+      - "34304"
+      - "--max-num-batched-tokens"
+      - "16384"
+      - "--compilation-config"
+      - '{"cudagraph_capture_sizes":[1,4,8,12,16,24,32,48,56,64,72,84,96,108,112,128,160,172,196,200,212,232,256,160,172,196,200,212,232,256,272,288,312,328,344,360,384,400,416,432,448,480,512], "cudagraph_mode":"FULL_DECODE_ONLY"}'
+      - "--speculative-config"
+      - '{"method": "qwen3_5_mtp", "num_speculative_tokens": 3, "enforce_eager": true}'
+    benchmarks:
+      <<: *_benchmark_TPOT50_32K_0_5K
+
+  - name: "Qwen3.5-122B-A10B-W8A8-TPOT20-32k-0.5k"
+    model: "Eco-Tech/Qwen3.5-122B-A10B-w8a8-mtp"
+    envs:
+      <<: *envs
+    server_cmd: *server_cmd
+    server_cmd_extra:
+      - "--max-model-len"
+      - "34304"
+      - "--max-num-batched-tokens"
+      - "16384"
+      - "--compilation-config"
+      - '{"cudagraph_capture_sizes":[1,4,8,12,16,24,32,48,56,64,72,84,96,108,112,128,160,172,196,200,212,232,256,160,172,196,200,212,232,256,272,288,312,328,344,360,384,400,416,432,448,480,512], "cudagraph_mode":"FULL_DECODE_ONLY"}'
+      - "--speculative-config"
+      - '{"method": "qwen3_5_mtp", "num_speculative_tokens": 3, "enforce_eager": true}'
+    benchmarks:
+      <<: *_benchmark_TPOT20_32K_0_5K
+
+  - name: "Qwen3.5-122B-A10B-W8A8-TPOT50-64k-1k"
+    model: "Eco-Tech/Qwen3.5-122B-A10B-w8a8-mtp"
+    envs:
+      <<: *envs
+    server_cmd: *server_cmd
+    server_cmd_extra:
+      - "--max-model-len"
+      - "67584"
+      - "--max-num-batched-tokens"
+      - "16384"
+      - "--compilation-config"
+      - '{"cudagraph_capture_sizes":[1,4,8,12,16,24,32,48,56,64,72,84,96,108,112,128,160,172,196,200,212,232,256,160,172,196,200,212,232,256,272,288,312,328,344,360,384,400,416,432,448,480,512], "cudagraph_mode":"FULL_DECODE_ONLY"}'
+      - "--speculative-config"
+      - '{"method": "qwen3_5_mtp", "num_speculative_tokens": 3, "enforce_eager": true}'
+    benchmarks:
+      <<: *_benchmark_TPOT50_64K_1K
+
+  - name: "Qwen3.5-122B-A10B-W8A8-TPOT20-64k-1k"
+    model: "Eco-Tech/Qwen3.5-122B-A10B-w8a8-mtp"
+    envs:
+      <<: *envs
+      VLLM_ASCEND_ENABLE_FLASHCOMM1: "0"
+    server_cmd: *server_cmd
+    server_cmd_extra:
+      - "--max-model-len"
+      - "67584"
+      - "--max-num-batched-tokens"
+      - "16384"
+      - "--compilation-config"
+      - '{"cudagraph_capture_sizes":[1,6,12,18,24,30,36,42,48,54,72,78,84,90,96,102,108,144,192], "cudagraph_mode":"FULL_DECODE_ONLY"}'
+      - "--speculative-config"
+      - '{"method": "qwen3_5_mtp", "num_speculative_tokens": 5}'
+    benchmarks:
+      <<: *_benchmark_TPOT20_64K_1K
