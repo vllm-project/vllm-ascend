@@ -1317,17 +1317,20 @@ class PCPManager:
         # Get local history length for current rank
         local_history_lens = local_seq_lens[:, self.pcp_world_rank, self.dcp_world_rank]
 
-        mtp_masks: list = []
+        # Pre-allocate list with known size to avoid append operations
+        mtp_masks = [None] * (self.num_decode_reqs + self.num_prefill_reqs)
+
+        # Batch extract scalar values to minimize CPU-GPU sync overhead
+        local_history_lens_np = local_history_lens.cpu().numpy()
+        mtp_len_np = mtp_len.cpu().numpy() if hasattr(mtp_len, 'cpu') else mtp_len
 
         for req_idx in range(self.num_decode_reqs):
-            history_len = local_history_lens[req_idx].item()
-            mtp_token_len = mtp_len[req_idx].item()
+            history_len = int(local_history_lens_np[req_idx])
+            mtp_token_len = int(mtp_len_np[req_idx])
 
             if mtp_token_len <= 0 or history_len <= 0:
-                mtp_masks.append(None)
                 continue
 
-            # Get global history length (before splitting) for position calculation
             global_history_len = decode_num_computed_tokens[req_idx]
 
             # Get the MTP tokens assigned to this rank based on position % cp_size
@@ -1338,22 +1341,21 @@ class PCPManager:
             ]
 
             # All MTP tokens (not just assigned to this rank) can attend to local tokens
-            # MTP token at global position m can attend to local token at position k if m >= k
             # mask[m, k] = True if mtp_pos[m] < local_pos[k], False otherwise
             # local tokens consist of: history tokens (positions 0 to history_len-1) +
             # MTP tokens assigned to this rank (from local_mtp_positions)
-            all_mtp_positions = list(range(global_history_len, global_history_len + mtp_token_len))
+            all_mtp_positions = np.arange(global_history_len, global_history_len + mtp_token_len, dtype=np.int32)
 
             # Vectorized mask computation - replaces double loop
-            mtp_pos_array = np.array(all_mtp_positions, dtype=np.int32)[:, None]  # [mtp, 1]
-            local_pos_array = np.array(list(range(history_len)) + local_mtp_positions, dtype=np.int32)[None, :]  # [1, local]
+            mtp_pos_array = all_mtp_positions[:, None]  # [mtp, 1]
+            # Use np.concatenate instead of list + range
+            local_pos_array = np.concatenate([
+                np.arange(history_len, dtype=np.int32),
+                local_mtp_positions
+            ])[None, :]  # [1, local]
             mask = mtp_pos_array < local_pos_array  # broadcasting: [mtp, local]
 
-            mtp_masks.append(torch.from_numpy(mask))
-
-        # Fill remaining slots with None for prefill requests
-        for _ in range(self.num_prefill_reqs):
-            mtp_masks.append(None)
+            mtp_masks[req_idx] = torch.from_numpy(mask)
 
         if mtp_masks[0] is not None:
             mtp_masks = mtp_masks[: self.num_decode_reqs]
