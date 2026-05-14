@@ -16,7 +16,6 @@ _envs: &envs
 
 _server_cmd: &server_cmd
   - "--enable-expert-parallel"
-  - "--no-enable-prefix-caching"
   - "--allowed-local-media-path"
   - "/"
   - "--tensor-parallel-size"
@@ -87,6 +86,32 @@ _benchmark_TPOT20_16K_1K: &_benchmark_TPOT20_16K_1K
   baseline: 1
   threshold: 0.97
 
+_benchmark_TPOT20_32K_0_5K: &_benchmark_TPOT20_32K_0_5K
+  case_type: performance
+  dataset_path: vllm-ascend/GSM8K-in3500-bs2800
+  request_conf: vllm_api_stream_chat
+  dataset_conf: gsm8k/gsm8k_gen_0_shot_cot_str_perf
+  num_prompts: 16
+  max_out_len: 512
+  batch_size: 4
+  trust_remote_code: true
+  request_rate: 0
+  baseline: 1
+  threshold: 0.97
+
+_benchmark_TPOT20_32K_0_5K_pc90: &_benchmark_TPOT20_32K_0_5K_pc90
+  case_type: performance
+  dataset_path: vllm-ascend/GSM8K-in3500-bs2800
+  request_conf: vllm_api_stream_chat
+  dataset_conf: gsm8k/gsm8k_gen_0_shot_cot_str_perf
+  num_prompts: 40
+  max_out_len: 512
+  batch_size: 10
+  trust_remote_code: true
+  request_rate: 0
+  baseline: 1
+  threshold: 0.97
+
 # ==========================================
 # ACTUAL TEST CASES
 # ==========================================
@@ -100,6 +125,7 @@ test_cases:
     server_cmd_extra:
       - "--max-model-len"
       - "32768"
+      - "--no-enable-prefix-caching"
       - "--enable-chunked-prefill"
       - "--max-num-batched-tokens"
       - "16384"
@@ -121,6 +147,7 @@ test_cases:
     server_cmd_extra:
       - "--max-model-len"
       - "32768"
+      - "--no-enable-prefix-caching"
       - "--enable-chunked-prefill"
       - "--max-num-batched-tokens"
       - "8192"
@@ -146,6 +173,7 @@ test_cases:
       - "8192"
       - "--max-num-seqs"
       - "1"
+      - "--no-enable-prefix-caching"
       - "--compilation-config"
       - '{"cudagraph_capture_sizes":[8], "cudagraph_mode":"FULL_DECODE_ONLY"}'
       - "--speculative-config"
@@ -157,3 +185,51 @@ test_cases:
       - "--enable-auto-tool-choice"
     benchmarks:
       <<: *_benchmark_TPOT20_16K_1K
+  - name: "Kimi-K2.5-W4A8-32k-0.5k-TOPT50"
+    model: "Eco-Tech/Kimi-K2.5-W4A8"
+    envs:
+      <<: *envs
+      HCCL_BUFFSIZE: "450"
+      VLLM_ASCEND_BALANCE_SCHEDULING: "1"
+    server_cmd: *server_cmd
+    server_cmd_extra:
+      - "--no-enable-prefix-caching"
+      - "--enable-chunked-prefill"
+      - "--max-num-seqs"
+      - "32"
+      - "--max-model-len"
+      - "33792"
+      - "--max-num-batched-tokens"
+      - "8192"
+      - "--compilation-config"
+      - '{"cudagraph_capture_sizes":[16,32,48,64,80,96,112,128], "cudagraph_mode":"FULL_DECODE_ONLY"}'
+      - "--speculative-config"
+      - '{"method":"eagle3", "model":"lightseekorg/kimi-k2.5-eagle3", "num_speculative_tokens":3}'
+      - "--additional-config"
+      - '{"enable_shared_expert_dp": true}'
+    benchmarks:
+      <<: *_benchmark_TPOT20_32K_0_5K
+  - name: "Kimi-K2.5-W4A8-32k-0.5k-TOPT50-prefix-cache90"
+    model: "Eco-Tech/Kimi-K2.5-W4A8"
+    envs:
+      <<: *envs
+      HCCL_BUFFSIZE: "450"
+      VLLM_ASCEND_BALANCE_SCHEDULING: "1"
+    server_cmd: *server_cmd
+    server_cmd_extra:
+      - "--enable-prefix-caching"
+      - "--enable-chunked-prefill"
+      - "--max-num-seqs"
+      - "32"
+      - "--max-model-len"
+      - "33792"
+      - "--max-num-batched-tokens"
+      - "8192"
+      - "--compilation-config"
+      - '{"cudagraph_capture_sizes":[16,32,48,64,80,96,112,128], "cudagraph_mode":"FULL_DECODE_ONLY"}'
+      - "--speculative-config"
+      - '{"method":"eagle3", "model":"lightseekorg/kimi-k2.5-eagle3", "num_speculative_tokens":3}'
+      - "--additional-config"
+      - '{"enable_shared_expert_dp": true}'
+    benchmarks:
+      <<: *_benchmark_TPOT20_32K_0_5K_pc90
