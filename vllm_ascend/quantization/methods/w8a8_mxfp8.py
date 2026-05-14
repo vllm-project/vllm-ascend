@@ -65,7 +65,7 @@ class AscendW8A8MXFP8DynamicLinearMethod(AscendLinearScheme):
         params_dict = {}
         num_groups = input_size // self.group_size
         if input_size % self.group_size != 0:
-            num_groups = math.ceil(input_size / self.group_size)
+            num_groups = cdiv(input_size, self.group_size)
         params_dict["weight_scale"] = torch.empty(output_size, num_groups, dtype=torch.uint8)
         return params_dict
 
