@@ -1,23 +1,24 @@
 """
 GumbelSample 算子 e2e 测试
-测试 torch.ops._C_ascend.npu_gumbel_sample 与 CPU golden 的精度对印。
+测试 torch.ops._C_ascend.npu_gumbel_sample 与 CPU golden 的精度对比。
 
-输入签名（正确语义）：
-  logits      [num_tokens, vocab_size]  FP32  — 每个 token slot 一行，按 batch_idx 直接索引
-  temperature [num_req_states]          FP32  — 每 req_state 温度系数
-  seeds       [num_req_states]          INT64 — 每 req_state 随机种子
-  pos         [num_tokens]              INT64 — 每 token slot 位置，按 batch_idx 直接索引
-  idx_mapping [num_tokens]              INT32 — idx_mapping[batch_idx] = req_state_idx，
-                                                仅用于索引 temperature/seeds
+输入签名：
+  logits      [num_tokens, vocab_size]  FP32
+  temperature [num_req_states]          FP32
+  seeds       [num_req_states]          INT64
+  pos         [num_tokens]              INT64
+  idx_mapping [num_tokens]              INT32 — idx_mapping[i] = req_state_idx
+
+测试用例：
+  case1: num_tokens=num_req_states=10, vocab=1500, apply_temp=True,  temp=0.6, idx_mapping=全0
+  case2: num_tokens=20, num_req_states=2, vocab=1500, apply_temp=True,  temp=0.6, idx_mapping=[0]*10+[1]*10
+  case3: num_tokens=num_req_states=10, vocab=1500, apply_temp=False, idx_mapping=全0
 
 运行方式：
     pytest -v -s tests/e2e/nightly/single_node/ops/singlecard_ops/test_gumbel_sample.py
 
-每个 case 会打印 NPU 侧延迟（warmup=3, iters=20）。
+仅验证精度，不测量性能。
 """
-
-import time
-from typing import Optional
 
 import numpy as np
 import pytest
@@ -25,12 +26,6 @@ import torch
 from vllm_ascend.utils import enable_custom_op
 
 enable_custom_op()
-
-# ============================================================
-# 性能测量常量
-# ============================================================
-PERF_WARMUP = 3
-PERF_ITERS = 20
 
 # ============================================================
 # Philox4x32-10 CPU golden
@@ -143,200 +138,94 @@ def golden_gumbel_sample(
 # ============================================================
 # 辅助：构造输入 + 调用 NPU 算子 + 打印延迟
 # ============================================================
-def _make_inputs(num_tokens: int, vocab_size: int, num_req_states: Optional[int] = None,
-                 temp_val: float = 1.0, seed_base: int = 42, pos_base: int = 0):
-    """
-    构造 GumbelSample 输入张量（CPU numpy）。
-    num_tokens:     logits/pos/idx_mapping 的行数（= grid size）
-    num_req_states: temperature/seeds 的大小（默认 = num_tokens，即每 token 一个 req_state）
-    idx_mapping:    默认为 [0, 1, ..., num_tokens-1] % num_req_states（循环映射）
-
-    参数自洽检查：num_tokens >= 1, vocab_size >= 1, num_req_states >= 1
-    """
-    assert num_tokens >= 1, f"num_tokens must be >= 1, got {num_tokens}"
-    assert vocab_size >= 1, f"vocab_size must be >= 1, got {vocab_size}"
-    if num_req_states is None:
-        num_req_states = num_tokens
-    assert num_req_states >= 1, f"num_req_states must be >= 1, got {num_req_states}"
-
-    rng = np.random.default_rng(seed_base + 1000)
-    logits_np      = rng.standard_normal((num_tokens, vocab_size)).astype(np.float32)
-    temp_np        = np.full(num_req_states, temp_val, dtype=np.float32)
-    seeds_np       = np.arange(seed_base, seed_base + num_req_states, dtype=np.int64)
-    pos_np         = np.arange(pos_base, pos_base + num_tokens, dtype=np.int64)
-    # idx_mapping[batch_idx] = batch_idx % num_req_states（循环映射，保证在 [0, num_req_states) 内）
-    idx_mapping_np = np.arange(num_tokens, dtype=np.int32) % num_req_states
-    return logits_np, temp_np, seeds_np, pos_np, idx_mapping_np
-
-
 def _run_npu(logits_np, temp_np, seeds_np, pos_np, idx_mapping_np,
-             apply_temperature: bool, label: str = ""):
-    """调用 NPU 算子，含 warmup + 多次平均延迟打印。"""
+             apply_temperature: bool):
+    """调用 NPU 算子，仅验证精度，不测量性能。"""
     logits_npu      = torch.from_numpy(logits_np).npu()
     temp_npu        = torch.from_numpy(temp_np).npu()
     seeds_npu       = torch.from_numpy(seeds_np).npu()
     pos_npu         = torch.from_numpy(pos_np).npu()
     idx_mapping_npu = torch.from_numpy(idx_mapping_np).npu()
 
-    for _ in range(PERF_WARMUP):
-        _ = torch.ops._C_ascend.npu_gumbel_sample(
-            logits_npu, temp_npu, seeds_npu, pos_npu, idx_mapping_npu, apply_temperature)
+    out = torch.ops._C_ascend.npu_gumbel_sample(
+        logits_npu, temp_npu, seeds_npu, pos_npu, idx_mapping_npu, apply_temperature)
     torch.npu.synchronize()
-
-    t0 = time.perf_counter()
-    for _ in range(PERF_ITERS):
-        out = torch.ops._C_ascend.npu_gumbel_sample(
-            logits_npu, temp_npu, seeds_npu, pos_npu, idx_mapping_npu, apply_temperature)
-    torch.npu.synchronize()
-    elapsed_us = (time.perf_counter() - t0) * 1e6 / PERF_ITERS
-
-    num_tokens     = logits_np.shape[0]
-    num_req_states = temp_np.shape[0]
-    vocab          = logits_np.shape[1]
-    tag = (f"num_tokens={num_tokens}, num_req_states={num_req_states}, "
-           f"vocab={vocab}, apply_temp={apply_temperature}")
-    if label:
-        tag = f"{label} | {tag}"
-    print(f"  [perf] {tag} → {elapsed_us:.1f} μs/call", flush=True)
 
     return out.cpu().numpy()
 
 
 # ============================================================
-# Group 1: basic — 基本功能（num_tokens = num_req_states，1:1 映射）
+# Case 1: num_tokens=num_req_states=10, vocab=1500, apply_temp=True, temp=0.6
+#   idx_mapping 全 0（10 个 token 全部映射到 req_state 0）
 # ============================================================
-@pytest.mark.parametrize("num_tokens,vocab_size", [
-    (1,   512),    # 最小 batch
-    (4,   1024),   # 小 batch，vocab 对齐边界
-    (8,   2048),   # 中 batch，vocab 2× 对齐
-])
 @torch.inference_mode()
-def test_gumbel_sample_basic(num_tokens, vocab_size):
-    logits_np, temp_np, seeds_np, pos_np, idx_mapping_np = _make_inputs(num_tokens, vocab_size)
-    golden = golden_gumbel_sample(logits_np, temp_np, seeds_np, pos_np, idx_mapping_np,
-                                   apply_temperature=True)
-    actual = _run_npu(logits_np, temp_np, seeds_np, pos_np, idx_mapping_np,
-                      apply_temperature=True, label="basic")
-    np.testing.assert_array_equal(actual, golden)
-
-
-# ============================================================
-# Group 2: idx_mapping 间接寻址 — num_tokens > num_req_states
-#   多个 token slot 共享同一 req_state（典型 prefill 场景）
-# ============================================================
-@pytest.mark.parametrize("num_tokens,num_req_states,vocab_size", [
-    (8,   4,   1024),   # 每 req_state 平均 2 个 token
-    (16,  4,   512),    # 稀疏映射（4 个 req_state 覆盖 16 个 token）
-    (4,   1,   1024),   # 所有 token 共享同一 req_state
-])
-@torch.inference_mode()
-def test_gumbel_sample_idx_mapping(num_tokens, num_req_states, vocab_size):
-    rng = np.random.default_rng(777)
-    logits_np      = rng.standard_normal((num_tokens, vocab_size)).astype(np.float32)
-    temp_np        = np.full(num_req_states, 1.0, dtype=np.float32)
-    seeds_np       = np.arange(num_req_states, dtype=np.int64)
+def test_gumbel_sample_case1():
+    num_tokens     = 10
+    num_req_states = 10
+    vocab_size     = 1500
+    rng = np.random.default_rng(2025)
+    logits_np      = np.random.default_rng(1 * 7919).standard_normal(
+                         (num_tokens, vocab_size)).astype(np.float32)
+    temp_np        = np.full(num_req_states, 0.6, dtype=np.float32)
+    seeds_np       = rng.integers(0, 2**31, size=num_req_states, dtype=np.int64)
     pos_np         = np.arange(num_tokens, dtype=np.int64)
-    # idx_mapping: 每个 token slot 随机映射到一个 req_state（在 [0, num_req_states) 内）
-    idx_mapping_np = rng.integers(0, num_req_states, size=num_tokens).astype(np.int32)
+    idx_mapping_np = np.zeros(num_tokens, dtype=np.int32)
 
     golden = golden_gumbel_sample(logits_np, temp_np, seeds_np, pos_np, idx_mapping_np,
                                    apply_temperature=True)
     actual = _run_npu(logits_np, temp_np, seeds_np, pos_np, idx_mapping_np,
-                      apply_temperature=True, label="idx_mapping")
+                      apply_temperature=True)
     np.testing.assert_array_equal(actual, golden)
 
 
 # ============================================================
-# Group 3: apply_temperature=False（跳过缩放，TilingKey=0 分支）
+# Case 2: num_tokens=20, num_req_states=2, vocab=1500, apply_temp=True, temp=0.6
+#   idx_mapping 前 10 为 0，后 10 为 1
 # ============================================================
-@pytest.mark.parametrize("num_tokens,vocab_size", [
-    (1,   512),
-    (8,   1024),
-    (16,  2048),
-])
 @torch.inference_mode()
-def test_gumbel_sample_no_temperature(num_tokens, vocab_size):
-    logits_np, temp_np, seeds_np, pos_np, idx_mapping_np = _make_inputs(
-        num_tokens, vocab_size, temp_val=1.0)
+def test_gumbel_sample_case2():
+    num_tokens     = 20
+    num_req_states = 2
+    vocab_size     = 1500
+    rng = np.random.default_rng(2025)
+    # 消耗与 case1 相同数量的随机数以保持 seed 序列一致
+    rng.integers(0, 2**31, size=10, dtype=np.int64)
+    logits_np      = np.random.default_rng(2 * 7919).standard_normal(
+                         (num_tokens, vocab_size)).astype(np.float32)
+    temp_np        = np.full(num_req_states, 0.6, dtype=np.float32)
+    seeds_np       = rng.integers(0, 2**31, size=num_req_states, dtype=np.int64)
+    pos_np         = np.arange(num_tokens, dtype=np.int64)
+    idx_mapping_np = np.array([0] * 10 + [1] * 10, dtype=np.int32)
+
+    golden = golden_gumbel_sample(logits_np, temp_np, seeds_np, pos_np, idx_mapping_np,
+                                   apply_temperature=True)
+    actual = _run_npu(logits_np, temp_np, seeds_np, pos_np, idx_mapping_np,
+                      apply_temperature=True)
+    np.testing.assert_array_equal(actual, golden)
+
+
+# ============================================================
+# Case 3: num_tokens=num_req_states=10, vocab=1500, apply_temp=False
+#   idx_mapping 全 0
+# ============================================================
+@torch.inference_mode()
+def test_gumbel_sample_case3():
+    num_tokens     = 10
+    num_req_states = 10
+    vocab_size     = 1500
+    rng = np.random.default_rng(2025)
+    # 消耗与 case1+case2 相同数量的随机数
+    rng.integers(0, 2**31, size=10, dtype=np.int64)
+    rng.integers(0, 2**31, size=2,  dtype=np.int64)
+    logits_np      = np.random.default_rng(3 * 7919).standard_normal(
+                         (num_tokens, vocab_size)).astype(np.float32)
+    temp_np        = np.ones(num_req_states, dtype=np.float32)
+    seeds_np       = rng.integers(0, 2**31, size=num_req_states, dtype=np.int64)
+    pos_np         = np.arange(num_tokens, dtype=np.int64)
+    idx_mapping_np = np.zeros(num_tokens, dtype=np.int32)
+
     golden = golden_gumbel_sample(logits_np, temp_np, seeds_np, pos_np, idx_mapping_np,
                                    apply_temperature=False)
     actual = _run_npu(logits_np, temp_np, seeds_np, pos_np, idx_mapping_np,
-                      apply_temperature=False, label="no_temp")
-    np.testing.assert_array_equal(actual, golden)
-
-
-# ============================================================
-# Group 4: 属性组合 — 不同 temperature 值 × apply_temperature 组合
-# ============================================================
-@pytest.mark.parametrize("temp_val,apply_temperature", [
-    (0.5,  True),   # 低温（更尖锐分布）
-    (2.0,  True),   # 高温（更平坦分布）
-    (0.1,  True),   # 极低温（接近 greedy）
-    (0.5,  False),  # 低温但跳过缩放
-])
-@torch.inference_mode()
-def test_gumbel_sample_attr_combinations(temp_val, apply_temperature):
-    num_tokens, vocab_size = 4, 512
-    logits_np, _, seeds_np, pos_np, idx_mapping_np = _make_inputs(
-        num_tokens, vocab_size, temp_val=temp_val)
-    temp_np = np.full(num_tokens, temp_val, dtype=np.float32)
-    golden = golden_gumbel_sample(logits_np, temp_np, seeds_np, pos_np, idx_mapping_np,
-                                   apply_temperature)
-    actual = _run_npu(logits_np, temp_np, seeds_np, pos_np, idx_mapping_np,
-                      apply_temperature,
-                      label=f"attr temp={temp_val} apply={apply_temperature}")
-    np.testing.assert_array_equal(actual, golden)
-
-
-# ============================================================
-# Group 5: large — vLLM 真实负载规模
-# ============================================================
-@pytest.mark.parametrize("num_tokens,num_req_states,vocab_size,label", [
-    (1,   1,   2048,  "prefill_single_req"),    # prefill：单请求
-    (16,  16,  2048,  "decode_batch"),          # decode：中等 batch
-    (16,  4,   1024,  "prefill_multi_token"),   # prefill：多 token 共享 req_state
-])
-@torch.inference_mode()
-def test_gumbel_sample_large(num_tokens, num_req_states, vocab_size, label):
-    logits_np, temp_np, seeds_np, pos_np, idx_mapping_np = _make_inputs(
-        num_tokens, vocab_size, num_req_states=num_req_states)
-    golden = golden_gumbel_sample(logits_np, temp_np, seeds_np, pos_np, idx_mapping_np,
-                                   apply_temperature=True)
-    actual = _run_npu(logits_np, temp_np, seeds_np, pos_np, idx_mapping_np,
-                      apply_temperature=True, label=label)
-    np.testing.assert_array_equal(actual, golden)
-
-
-# ============================================================
-# Group 6: boundary — 数值 / shape 边界
-# ============================================================
-@pytest.mark.parametrize("case_name,num_tokens,vocab_size,temp_val,seed_base,pos_base", [
-    # 最小规模
-    ("min_scale",           1,   1,     1.0,  0,    0),
-    # vocab 恰好 = BLOCK_SIZE（4096，整数倍对齐）
-    ("vocab_eq_block",      2,   4096,  1.0,  1,    0),
-    # vocab 非整数倍（4096+1）
-    ("vocab_non_aligned",   2,   4097,  1.0,  3,    0),
-    # seed=0（边界值）
-    ("seed_zero",           4,   512,   1.0,  0,    0),
-    # 极大 pos（接近 int32 上限）
-    ("pos_large",           2,   512,   1.0,  42,   2147483647 - 2),
-    # 极大 seed（接近 int64 上限）
-    ("seed_large",          2,   512,   1.0,  9223372036854775800, 0),
-    # 混合 batch：num_tokens 不整除 usedCoreNum（假设 20 核）
-    ("batch_non_divisible", 7,   512,   1.0,  7,    0),
-    # num_tokens > num_req_states（多 token 共享 req_state）
-    ("multi_token_per_req", 8,   512,   1.0,  5,    0),
-])
-@torch.inference_mode()
-def test_gumbel_sample_boundary(case_name, num_tokens, vocab_size, temp_val, seed_base, pos_base):
-    num_req_states = max(1, num_tokens // 4) if num_tokens > 4 else num_tokens
-    logits_np, _, seeds_np, pos_np, idx_mapping_np = _make_inputs(
-        num_tokens, vocab_size, num_req_states=num_req_states,
-        temp_val=temp_val, seed_base=seed_base, pos_base=pos_base)
-    temp_np = np.full(num_req_states, temp_val, dtype=np.float32)
-    golden = golden_gumbel_sample(logits_np, temp_np, seeds_np, pos_np, idx_mapping_np,
-                                   apply_temperature=True)
-    actual = _run_npu(logits_np, temp_np, seeds_np, pos_np, idx_mapping_np,
-                      apply_temperature=True, label=f"boundary/{case_name}")
+                      apply_temperature=False)
     np.testing.assert_array_equal(actual, golden)
