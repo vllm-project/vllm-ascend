@@ -1757,7 +1757,7 @@ class NPUModelRunner(GPUModelRunner):
                 model_instance=self.model,
                 max_tokens_across_pcp=0 if self.pcp_size == 1 else self.pcp_manager.max_num_tokens_across_pcp,
                 skip_compiled=has_encoder_input,
-                has_sinks = self._has_sinks
+                has_sinks = self._has_sinks,
             ),
             self.maybe_get_kv_connector_output(
                 scheduler_output,
@@ -2913,7 +2913,7 @@ class NPUModelRunner(GPUModelRunner):
                 aclgraph_runtime_mode=cudagraph_runtime_mode,
                 batch_descriptor=batch_desc,
                 model_instance=self.model,
-                has_sinks = self._has_sinks
+                has_sinks = self._has_sinks,
             ):
                 outputs = self._model_forward(
                     num_tokens_padded, input_ids, positions, intermediate_tensors, inputs_embeds

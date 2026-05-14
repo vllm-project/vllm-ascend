@@ -540,7 +540,6 @@ class AscendAttentionBackendImpl(AttentionImpl):
                         out=[attn_output, softmax_lse],
                     )
                     torch.npu.graph_task_update_end(update_stream)
-
                     event.record(update_stream)
         else:
             # FIA update logic
