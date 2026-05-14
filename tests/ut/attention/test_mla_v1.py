@@ -1526,7 +1526,7 @@ class TestAscendMLAImpl(TestBase):
         prefill_metadata.block_table = torch.randint(0, 100, (2, 4))
         attn_metadata.prefill = prefill_metadata
 
-        mock_device_operator.mla_cache_load = MagicMock()
+        mock_device_operator.kv_cache_load = MagicMock()
 
         mock_fia.return_value = (
             torch.randn(batch_size, self.impl.num_heads, self.impl.v_head_dim),

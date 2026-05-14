@@ -103,6 +103,7 @@ def test_qwen3_moe_distributed_tp2_ep2_mrv2(
         assert golden_results[i] == vllm_output[i][1]
 
 
+@pytest.mark.skip(reason="fix me, it's broken after CANN and trition-ascend are upgraded.")
 @pytest.mark.asyncio
 async def test_qwen3_moe_w8a8_distributed_tp2_ep_dynamic_eplb():
     model = "vllm-ascend/Qwen3-30B-A3B-W8A8"

@@ -81,6 +81,7 @@ jobs:
               - 'tests/ut/**'
             _310_tracker:
               - 'vllm_ascend/_310p/**'
+              - 'csrc/**'
               - 'tests/e2e/310p/**'
               - 'vllm_ascend/worker/**'
               - 'vllm_ascend/attention/attention_v1.py'
@@ -172,6 +173,6 @@ jobs:
     uses: ./.github/workflows/_e2e_test.yaml
     with:
       vllm: ${{ matrix.vllm_version }}
-      image: swr.cn-southwest-2.myhuaweicloud.com/base_image/ascend-ci/cann:8.5.1-910b-ubuntu22.04-py3.11
+      image: swr.cn-southwest-2.myhuaweicloud.com/base_image/ascend-ci/cann:9.0.0-910b-ubuntu22.04-py3.11
       contains_310: ${{ needs.changes.outputs._310_tracker == 'true' }}
       type: light

@@ -19,6 +19,22 @@
 
 namespace Ops {
 namespace Transformer {
+
+template <typename T>
+T CeilAlign(T a, T b)
+{
+    return (a + b - 1) / b * b;
+}
+
+template <typename T>
+T CeilDiv(T a, T b)
+{
+    if (b == 0) {
+        return a;
+    }
+    return (a + b - 1) / b;
+}
+
 namespace OpTiling {
 bool IsRegbaseSocVersion(const gert::TilingParseContext* context);
 

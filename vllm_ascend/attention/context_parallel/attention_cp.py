@@ -740,13 +740,13 @@ class AscendAttentionCPImpl(AscendAttentionBackendImpl):
         key = torch.empty(total_toks, num_heads, head_size, dtype=query.dtype, device=query.device)
         value = torch.empty(total_toks, num_heads, head_size, dtype=query.dtype, device=query.device)
         if total_toks > 0:
-            torch_npu.atb.npu_paged_cache_load(
+            DeviceOperator.kv_cache_load(
                 cache_key,
                 cache_value,
                 attn_metadata.prefill.block_tables,
                 local_chunked_kv_lens_rank,
                 # slot offsets of current chunk in current iteration
-                seq_starts=attn_metadata.prefill.chunked_context.starts,
+                attn_metadata.prefill.chunked_context.starts,
                 key=key,
                 value=value,
             )
