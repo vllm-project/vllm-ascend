@@ -14,10 +14,11 @@ from vllm.utils.network_utils import make_zmq_socket
 _RECOVERY_MSG_PREFIX = b"\x00REC"
 
 class RecoveryHandler:
-    def __init__(self, engine_core: Any, worker_count: int, engine_index: int = 0):
+    def __init__(self, engine_core: Any, worker_count: int, engine_index: int = 0, expect_coordinator: bool = False):
         self._engine_core = engine_core
         self._worker_count = worker_count
         self._engine_index = engine_index
+        self._expect_coordinator = expect_coordinator
 
 
         self._ctx = zmq.Context()
@@ -71,6 +72,7 @@ class RecoveryHandler:
         return
 
     def _run(self) -> None:
+        logger.info(f"======================{self._expect_coordinator=}=======================")
         if self._expect_coordinator:
             logger.info("======[RecoveryHandler] Waiting for coordinator connection...======")
             self._coord_ready_event.wait()
@@ -153,6 +155,7 @@ def _patched_engine_core_proc_init(
         engine_core=self,
         worker_count=worker_count,
         engine_index=engine_index,
+        expect_coordinator=expect_coordinator,
     )
 
     self._recovery_handler.start()
