@@ -236,7 +236,7 @@ def select_moe_comm_method(num_tokens: int, vllm_config: VllmConfig, is_draft_mo
        mode; otherwise use MC2 within capacity or all-to-all.
     5. On 310P, always use all-gather.
     6. On A5 with expert parallel, use MC2 when tokens fit the MC2 capacity
-       and the EP size is large enough; otherwise use all-gather when 
+       and the EP size is large enough; otherwise use all-gather when
        EP size is smaller than num of topK experts or all-to-all.
 
     Args:
