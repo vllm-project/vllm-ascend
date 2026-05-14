@@ -410,9 +410,7 @@ class KVCacheRecvingThread(threading.Thread):
         """Add a new request to the queue for processing."""
         if remote_port_send_num is None:
             remote_port_send_num = {}
-        logger.debug(f"Adding request {request_id} to the queue.")
-        self.request_queue.put(
-            {
+        trans_info = {
                 "request_id": request_id,
                 "local_block_ids": local_block_ids,
                 "remote_block_ids": remote_block_ids,
@@ -425,7 +423,8 @@ class KVCacheRecvingThread(threading.Thread):
                 "remote_port_send_num": remote_port_send_num,
                 "all_task_done": all_task_done,
             }
-        )
+        logger.debug(f"Adding request {request_id} to the queue.Trans info:{trans_info}")
+        self.request_queue.put(trans_info)
 
     def get_and_clear_finished_requests(self) -> set[str]:
         """
@@ -469,8 +468,7 @@ class KVCacheRecvingThread(threading.Thread):
         finally:
             self._send_done_signal_to_free_remote_port(remote_request_id, remote_host, remote_port_send_num)
             if all_task_done:
-                if len(req_meta["local_block_ids"]) > 0:
-                    self.task_tracker.update_done_task_count(request_id)
+                self.task_tracker.update_done_task_count(request_id)
                 if request_id in self.proc_not_transfer_request:
                     del self.proc_not_transfer_request[request_id]
             self.request_queue.task_done()
@@ -501,8 +499,6 @@ class KVCacheRecvingThread(threading.Thread):
         remote_engine_id = req_meta["remote_engine_id"]
         remote_host = req_meta["remote_host"]
         remote_handshake_port = req_meta["remote_handshake_port"]
-        # offset = req_meta["offset"]
-        # tp_num_need_pulls = req_meta["tp_num_need_pulls"]
 
         # Full prefix cache hit: do not need to read remote blocks, just notify
         # P worker that we have the blocks we need.
@@ -1048,11 +1044,10 @@ class MooncakeConnectorScheduler:
         self._reqs_need_send: dict[str, float] = {}
         self._reqs_in_batch: set[str] = set()
 
-        self.group_block_sizes = [g.kv_cache_spec.block_size for g in kv_cache_config.kv_cache_groups]
-        self._has_mamba = any(isinstance(group.kv_cache_spec, MambaSpec) for group in kv_cache_config.kv_cache_groups)
-
         # master-slave meta information for cross-nodes
         self.multi_nodes_meta_mapping: dict[str, dict[str, Any]] = {}
+        # Mamba metadata
+        self._is_mamba_group = [isinstance(group.kv_cache_spec, MambaSpec) for group in kv_cache_config.kv_cache_groups]
 
     def get_num_new_matched_tokens(self, request: "Request", num_computed_tokens: int) -> tuple[int, bool]:
         """
@@ -1168,8 +1163,10 @@ class MooncakeConnectorScheduler:
             self._reqs_need_send[request.request_id] = time.time()
 
         num_prompt_blocks = math.ceil(len(request.prompt_token_ids) / self.block_size)
-        if not self._has_mamba:
-            computed_block_ids = (computed_block_ids[0][:num_prompt_blocks],)
+        computed_block_ids = tuple(
+            block_ids[:num_prompt_blocks] if not self._is_mamba_group[i] else block_ids
+            for i, block_ids in enumerate(computed_block_ids)
+        )
 
         return delay_free_blocks, dict(
             do_remote_prefill=True,
