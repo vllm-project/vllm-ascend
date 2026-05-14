@@ -31,6 +31,7 @@ import regex as re
 import torch
 import torch_npu  # noqa: F401
 from packaging.version import InvalidVersion, Version
+from vllm.config.compilation import CUDAGraphMode
 from vllm.logger import logger
 from vllm.sequence import IntermediateTensors
 
@@ -527,6 +528,11 @@ def update_aclgraph_sizes(vllm_config: VllmConfig) -> None:
     # Store original configuration and temporarily clear it
     compilation_config = vllm_config.compilation_config
     original_sizes, compilation_config.cudagraph_capture_sizes = compilation_config.cudagraph_capture_sizes, None
+    aclgraph_resource_multiplier = 1
+    if compilation_config.cudagraph_mode == CUDAGraphMode.FULL_AND_PIECEWISE:
+        # FULL_AND_PIECEWISE captures both piecewise mixed graphs and full decode graphs.
+        # Use a conservative multiplier until this is tuned per 910B/A2/A3 hardware.
+        aclgraph_resource_multiplier = 2
 
     # Calculate parallel configuration factor
     if not vllm_config.model_config:
@@ -580,7 +586,9 @@ def update_aclgraph_sizes(vllm_config: VllmConfig) -> None:
         # Assume the following case:
         # MAX_CAPTURE_SIZE = 1920, num_hidden_layers = 48, data_parallel_size is 1, tensor_parallel_size is 4,
         # According to the formula, max_num_batch_sizes = math.floor(1920 / (48 + 1) / 2) = 19
-        max_num_batch_sizes = math.floor(MAX_CAPTURE_SIZE / resources_per_graph / parallel_factor)
+        max_num_batch_sizes = math.floor(
+            MAX_CAPTURE_SIZE / resources_per_graph / parallel_factor / aclgraph_resource_multiplier
+        )
         logger.info("Calculated maximum supported batch sizes for ACL graph: %s", max_num_batch_sizes)
     else:
         # enable pcp or dcp will add new communication and consume additional approximately less than 100 streams
@@ -602,7 +610,10 @@ def update_aclgraph_sizes(vllm_config: VllmConfig) -> None:
         # MAX_CAPTURE_SIZE = 1920, num_hidden_layers = 48, data_parallel_size is 1, tensor_parallel_size is 4,
         # According to the formula, max_num_batch_sizes = math.floor((1920 - 1 * 40) / (48 + 1) / (1 + 1 * 2)) = 12
         max_num_batch_sizes = math.floor(
-            (MAX_CAPTURE_SIZE - num_comm_groups * 40) / resources_per_graph / (1 + num_comm_groups * 2)
+            (MAX_CAPTURE_SIZE - num_comm_groups * 40)
+            / resources_per_graph
+            / (1 + num_comm_groups * 2)
+            / aclgraph_resource_multiplier
         )
         logger.info("Calculated maximum supported batch sizes for ACL graph: %s", max_num_batch_sizes)
         logger.warning(
