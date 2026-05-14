@@ -28,7 +28,7 @@ SHELL ["/bin/bash", "-c"]
 
 # Install clang (for triton-ascend) and Mooncake
 RUN yum update -y && \
-    yum install -y git vim wget net-tools gcc gcc-c++ make cmake numactl numactl-devel jemalloc clang && \
+    yum install -y git vim wget net-tools gcc gcc-c++ make cmake numactl numactl-devel jemalloc clang patch && \
     git clone --depth 1 --branch ${MOONCAKE_TAG} https://github.com/kvcache-ai/Mooncake /vllm-workspace/Mooncake && \
     mv /vllm-workspace/mooncake_installer.sh /vllm-workspace/Mooncake/ && \
     ARCH=$(uname -m) && \
@@ -67,8 +67,6 @@ COPY . /vllm-workspace/vllm-ascend/
 RUN export PIP_EXTRA_INDEX_URL="https://mirrors.huaweicloud.com/ascend/repos/pypi https://triton-ascend.osinfra.cn/pypi/simple" && \
     source /usr/local/Ascend/ascend-toolkit/set_env.sh && \
     source /usr/local/Ascend/nnal/atb/set_env.sh && \
-    export LD_LIBRARY_PATH=$LD_LIBRARY_PATH:/usr/local/Ascend/ascend-toolkit/latest/`uname -i`-linux/devlib && \
-    export CPLUS_INCLUDE_PATH=$CPLUS_INCLUDE_PATH:/usr/include/c++/12:/usr/include/c++/12/`uname -i`-openEuler-linux && \
     python3 -m pip install -e /vllm-workspace/vllm-ascend/ --extra-index https://download.pytorch.org/whl/cpu/ && \
     python3 -m pip uninstall -y triton triton-ascend && \
     python3 -m pip install triton-ascend==3.2.1 --extra-index-url https://triton-ascend.osinfra.cn/pypi/simple && \
