@@ -598,7 +598,7 @@ class TestNPUPlatform(TestBase):
         self, mock_init_recompute, mock_init_ascend, mock_soc_version, mock_auto_detect
     ):
         """Test that enabling both BalanceScheduler and RecomputeScheduler raises ValueError.
-        
+
         This test verifies the mutual exclusion check added to prevent deadlock in
         PD disaggregation mode with multi-DP MoE. See Issue #8975.
         """
@@ -620,12 +620,12 @@ class TestNPUPlatform(TestBase):
         self.platform = platform.NPUPlatform()
 
         with (
-            patch("vllm_ascend.platform.envs_ascend.VLLM_ASCEND_BALANCE_SCHEDULING",
-                  True, create=True),
+            patch("vllm_ascend.platform.envs_ascend.VLLM_ASCEND_BALANCE_SCHEDULING", True, create=True),
             pytest.raises(
                 ValueError,
                 match=r"VLLM_ASCEND_BALANCE_SCHEDULING.*recompute_scheduler_enable"
-                      r".*cannot be enabled simultaneously"),
+                r".*cannot be enabled simultaneously",
+            ),
             patch.object(platform.NPUPlatform, "_fix_incompatible_config"),
             patch.object(platform, "check_kv_extra_config"),
         ):
