@@ -9,17 +9,11 @@
 #     http://www.apache.org/licenses/LICENSE-2.0
 #
 """Compatibility shim around vLLM's RoutedExpertsCapturer.
-
-vLLM PR #39917 (post-0.20.2) reworked the routed-experts pipeline:
 - 0.20.2 exposed `RoutedExpertsCapturer.get_instance()` plus
   `clear_buffer()` / `save_captured_experts(indices=...)` methods.
 - main moved to module-level helpers (`get_global_experts_capturer`,
   `issue_routing_d2h_copy`, `extract_routed_experts_for_current_batch`,
   `free_routing_buffers`, `init_routed_experts_capturer_with_shared_cache`).
-
-We support exactly two vLLM versions: 0.20.2 (old API) and main (new
-API). Selection is via `vllm_version_is("0.20.2")` -- explicit, no
-runtime symbol probing.
 """
 
 from __future__ import annotations
