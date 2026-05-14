@@ -338,14 +338,3 @@ class HCCLWeightTransferEngine(
         )
         pyhccl = PyHcclCommunicator(pg, device=device)
         return pyhccl
-
-
-# Register built-in weight transfer engines here.
-# Registration should be centralized to ensure lazy loading -
-# engine modules are only imported when actually used.
-
-WeightTransferEngineFactory.register_engine(
-    "hccl",
-    "vllm_ascend.distributed.weight_transfer.hccl_engine",
-    "HCCLWeightTransferEngine",
-)

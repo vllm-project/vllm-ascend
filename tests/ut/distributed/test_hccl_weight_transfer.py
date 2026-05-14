@@ -15,6 +15,7 @@ from vllm.config.parallel import ParallelConfig
 from vllm.config.weight_transfer import WeightTransferConfig
 from vllm.distributed.weight_transfer import WeightTransferEngineFactory
 
+from vllm_ascend.distributed.weight_transfer import register_engine
 from vllm_ascend.distributed.weight_transfer.hccl_engine import (
     HCCLTrainerSendWeightsArgs,
     HCCLWeightTransferEngine,
@@ -25,6 +26,16 @@ from vllm_ascend.distributed.weight_transfer.packed_tensor import (
     DEFAULT_PACKED_BUFFER_SIZE_BYTES,
     DEFAULT_PACKED_NUM_BUFFERS,
 )
+
+
+@pytest.fixture(autouse=True, scope="module")
+def _register_hccl_engine():
+    """Ensure HCCL engine is registered before tests (idempotent)."""
+    try:
+        register_engine()
+    except ValueError:
+        # Already registered from a previous test module
+        pass
 
 
 def create_mock_parallel_config(
