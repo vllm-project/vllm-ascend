@@ -1174,7 +1174,7 @@ class MooncakeConnectorScheduler:
         return delay_free_blocks, dict(
             do_remote_prefill=True,
             do_remote_decode=False,
-            remote_block_ids=computed_block_ids[:num_prompt_blocks],
+            remote_block_ids=computed_block_ids,
             remote_engine_id=self.engine_id,
             remote_request_id=request.request_id,
             remote_host=self.side_channel_host,
