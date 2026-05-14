@@ -17,6 +17,7 @@
 # Todo: Once https://github.com/vllm-project/vllm/pull/23553 is merged in vllm. Remove this model register.
 import re
 import types
+from typing import Optional
 
 import torch
 
@@ -59,7 +60,7 @@ class MoeLayerRegistry:
         """local MoE index (0, 1, ...) -> global layer index."""
         return self._entries[local_idx][0]
 
-    def get_layer(self, global_idx: int) -> "torch.nn.Module" | None:
+    def get_layer(self, global_idx: int) -> Optional["torch.nn.Module"]:
         """Get layer by global index, returns None if not on this rank."""
         local_idx = self._global_to_local.get(global_idx)
         if local_idx is None:
