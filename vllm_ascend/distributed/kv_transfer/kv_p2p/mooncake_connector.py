@@ -1169,7 +1169,7 @@ class MooncakeConnectorScheduler:
 
         num_prompt_blocks = math.ceil(len(request.prompt_token_ids) / self.block_size)
         if not self._has_mamba:
-            computed_block_ids = (computed_block_ids[0][:num_prompt_blocks], )
+            computed_block_ids = (computed_block_ids[0][:num_prompt_blocks],)
 
         return delay_free_blocks, dict(
             do_remote_prefill=True,
