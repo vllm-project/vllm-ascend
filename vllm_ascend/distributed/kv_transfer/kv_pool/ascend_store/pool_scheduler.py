@@ -221,34 +221,45 @@ class KVPoolScheduler:
         keys_to_check = [
             f"{self.model_name}@{bh.hex()}" for bh in block_hashes_to_check
         ]
-        local_hit_blocks = 0 if self.layerwise_offload else min(num_computed_tokens // self._block_size, num_blocks)
-        remaining_keys = keys_to_check[local_hit_blocks:]
-        tracker = self._get_or_create_request_tracker(request.request_id)
-        # cached_gvas = tracker.block_gvas
-        # if cached_gvas:
-        #     cached_keys = keys_to_check[:len(cached_gvas)]
-        #     if not all(self.store_scheduler.batch_is_exist(cached_keys)):
-        #         raise ValueError(
-        #             f"Request {request.request_id}: cached gvas key(s) no longer exist in store")
-        #     remaining_keys = remaining_keys[len(cached_gvas):]
-        cached_gvas = []
-        num_remote_hit_blocks = 0
-        if remaining_keys:
-            key_infos = self.store_scheduler.batch_get_key_info(remaining_keys)
+        query_start_block = (
+            0 if self.layerwise_offload
+            else min(num_computed_tokens // self._block_size, num_blocks)
+        )
+        keys_to_query = keys_to_check[query_start_block:]
+        if not keys_to_query:
+            return 0, False
+
+        num_queried_hit_blocks = 0
+        if self.use_layerwise:
+            tracker = self._get_or_create_request_tracker(request.request_id)
+            cached_gvas = []
+            key_infos = self.store_scheduler.batch_get_key_info(
+                keys_to_query)
             for key_info in key_infos:
                 sizes = key_info.size()
                 if sizes and sizes > 0:
                     cached_gvas.append(key_info.gva_list()[0])
-                    num_remote_hit_blocks += 1
+                    num_queried_hit_blocks += 1
                 else:
                     break
-        num_hit_blocks = local_hit_blocks + num_remote_hit_blocks
+            num_hit_blocks = query_start_block + num_queried_hit_blocks
+            tracker.block_keys = keys_to_check[query_start_block:num_hit_blocks]
+            tracker.block_gvas = cached_gvas[:num_queried_hit_blocks]
+            tracker.gva_block_offset = query_start_block
+        else:
+            exists_states = self.store_scheduler.batch_is_exist(
+                keys_to_query)
+            for exists in exists_states:
+                if exists == 1:
+                    num_queried_hit_blocks += 1
+                    continue
+                if exists == 0:
+                    break
+                raise RuntimeError(
+                    "KV pool exists check failed for request "
+                    f"{request.request_id}: states={exists_states}")
+        num_hit_blocks = query_start_block + num_queried_hit_blocks
         num_external_hit_tokens = num_hit_blocks * self._block_size
-        tracker.block_keys = keys_to_check[local_hit_blocks:num_hit_blocks]
-        tracker.block_gvas = cached_gvas[:num_remote_hit_blocks]
-        tracker.gva_block_offset = local_hit_blocks
-        # TODO 这里没有命中的可以提前申请空间，避免后面申请的时候掩盖不住，这个可以异步进行。
-        # 先exists判断是否存在，然后异步获取地址和申请空间，这样是否更高效一点？
         if num_external_hit_tokens == request.num_tokens:
             num_external_hit_tokens -= 1
 
