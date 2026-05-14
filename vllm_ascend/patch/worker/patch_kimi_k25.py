@@ -74,11 +74,14 @@ Learnable2DInterpPosEmbDivided_fixed.forward = AscendLearnable2DInterpPosEmbDivi
 # the `dtype=model_config.dtype` (e.g. bf16) would overwrite the fp8 parameters
 # created by the Ascend quantization scheme, causing a dtype mismatch later
 # in weight_loader when the checkpoint's fp8 weights are loaded.
-_original_moonvit_to = MoonViT3dPretrainedModel.to
+if get_ascend_device_type() == AscendDeviceType.A5:
+    _original_moonvit_to = MoonViT3dPretrainedModel.to
 
-def _patched_moonvit_to(self, *args, **kwargs):
-    if get_ascend_device_type() == AscendDeviceType.A5:
+    def _patched_moonvit_to(self, *args, **kwargs):
+        # Filter out dtype from positional arguments and remove from kwargs
+        # to prevent overriding quantized weight dtypes on A5.
+        new_args = tuple(a for a in args if not isinstance(a, torch.dtype))
         kwargs.pop("dtype", None)
-    return _original_moonvit_to(self, *args, **kwargs)
+        return _original_moonvit_to(self, *new_args, **kwargs)
 
-MoonViT3dPretrainedModel.to = _patched_moonvit_to
+    MoonViT3dPretrainedModel.to = _patched_moonvit_to
