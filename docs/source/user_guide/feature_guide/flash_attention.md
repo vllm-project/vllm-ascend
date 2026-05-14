@@ -38,7 +38,7 @@ The following table compares the features of `flash_attn_with_kvcache` between G
 
 The `flash_attn_with_kvcache` interface on NPU is semantically consistent with the GPU FA3 version in terms of API parameters. The key differences are:
 
-1. **Unsupported features on NPU FA3**: Sliding window attention, RoPE, ALiBi, Softcapping, and FP8 quantization are not yet supported. These will be added in future releases.
+1. **Unsupported features on NPU FA3**: Sliding window attention, RoPE, ALiBi, Softcapping, and FP8 quantization are not yet supported.
 2. **Graph capture**: The tiling of `flash_attn_with_kvcache` is processed on the host side and is currently being optimized. It does not support ACL graph capture (i.e., cannot be captured into a computational graph for acceleration). Please use `enforce_eager=True` when enabling FA3.
 
 ## Hardware Requirements
@@ -169,11 +169,6 @@ The FA3 feature is under active development. Planned improvements include:
 
 - Open-source the `flash_attn_npu` package
 - Support ACL graph capture (host-side tiling optimization)
-- Support sliding window attention
-- Support RoPE within the attention kernel
-- Support ALiBi
-- Support Softcapping
-- Support FP8 quantization
 - Support for additional NPUs series
 - Expanded model coverage
 - Performance optimizations
