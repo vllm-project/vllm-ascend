@@ -71,7 +71,7 @@ If multi-node deployment is required, please follow the [Verify Multi-node Commu
 **Content Writing Requirements:**
 
 - Provide specific installation steps and commands (parameters should be explained with meaning, value range, units, etc.).
-- **Version number writing specification:** When version numbers appear in code examples, **prefer using placeholders** (actual values configured centrally); if a fixed value (inconsistent with the current version) is used, **add a comment** reminding users to fill in according to the actual version.
+- **Version Number Writing Specification:** Prefer using placeholders (values are centrally configured). If a fixed value is used and it differs from the documented validation version, a comment MUST be added stating: "Please replace with your actual version."
 - Provide verification commands and expected status: guide users to check the installation result by executing commands (e.g., docker ps), specifying success criteria such as status codes or output characteristics.
 
 ### 4.1 Docker Image Installation
