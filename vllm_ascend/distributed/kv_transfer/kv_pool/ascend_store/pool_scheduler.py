@@ -230,7 +230,8 @@ class KVPoolScheduler:
             return 0, False
 
         num_queried_hit_blocks = 0
-        if self.use_layerwise:
+        use_key_info_lookup = True
+        if use_key_info_lookup or self.use_layerwise:
             tracker = self._get_or_create_request_tracker(request.request_id)
             cached_gvas = []
             key_infos = self.store_scheduler.batch_get_key_info(
