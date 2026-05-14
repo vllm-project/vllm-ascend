@@ -1,5 +1,5 @@
-#ifndef NGRAM_SPEC_DECODE_TILING_H
-#define NGRAM_SPEC_DECODE_TILING_H
+#ifndef NGRAM_SPEC_DECODE_H
+#define NGRAM_SPEC_DECODE_H
 
 #include "kernel_tiling/kernel_tiling.h"
 
@@ -23,4 +23,4 @@ struct NgramSpecDecodeTilingData {
     NgramSpecDecodeInfo ngramInfo;
 };
 
-#endif  // NGRAM_SPEC_DECODE_TILING_H
+#endif  // NGRAM_SPEC_DECODE_H

@@ -3,7 +3,7 @@
 #include "log/ops_log.h"
 #include "graph/utils/type_utils.h"
 #include "register/op_def_registry.h"
-#include "../op_kernel/ngram_spec_decode_tiling.h"
+#include "../op_kernel/ngram_spec_decode.h"
 #include "tiling/platform/platform_ascendc.h"
 #include "platform/platform_infos_def.h"
 

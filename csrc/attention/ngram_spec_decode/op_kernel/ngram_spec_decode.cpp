@@ -9,7 +9,7 @@
 // limitations under the License.
 
 #include "kernel_operator.h"
-#include "ngram_spec_decode_tiling.h"
+#include "ngram_spec_decode.h"
 
 constexpr int32_t ELEM_SIZE = sizeof(int32_t);  // 4 bytes
 // Safety UB buffer size：32768(128KB)
