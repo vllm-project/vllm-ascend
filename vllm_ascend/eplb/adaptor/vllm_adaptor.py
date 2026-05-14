@@ -58,7 +58,7 @@ class VllmEplbAdaptor:
         # Get num_local_experts from first real MoE layer
         if self.num_moe_layers > 0:
             _, first_layer = next(self.moe_registry.iter_layers())
-            self.num_local_experts = first_layer.mlp.experts.local_num_experts
+            self.num_local_experts = first_layer.experts.local_num_experts
         else:
             self.num_local_experts = 0
 
@@ -92,7 +92,7 @@ class VllmEplbAdaptor:
         _, first_layer = next(self.moe_registry.iter_layers())
 
         if self.model.quant_config is not None:
-            quant_type = first_layer.mlp.experts.quant_type
+            quant_type = first_layer.experts.quant_type
             if quant_type == QuantType.W8A8:
                 self.expert_weight_names = [
                     "w13_weight_list",
@@ -112,7 +112,7 @@ class VllmEplbAdaptor:
             self.expert_param_per_layer[global_idx] = list()
             for name in self.expert_weight_names:
                 param_key = f"model.layers.{global_idx}.mlp.experts.{name}"
-                param_value = getattr(layer.mlp.experts, name)
+                param_value = getattr(layer.experts, name)
                 self.param_dict[param_key] = param_value
             for local_expert_id in range(self.num_local_experts):
                 per_expert_param = list()
@@ -173,7 +173,7 @@ class VllmEplbAdaptor:
     def get_global_expert_map(self):
         all_layer_global_expert_map = []
         for global_idx, layer in self.moe_registry.iter_layers():
-            map_cpu = layer.mlp.experts.global_expert_map.cpu()
+            map_cpu = layer.experts.global_expert_map.cpu()
             all_layer_global_expert_map.append(map_cpu)
             self.expert_map_per_layer_cpu[global_idx] = map_cpu[self.rank_id]
 
