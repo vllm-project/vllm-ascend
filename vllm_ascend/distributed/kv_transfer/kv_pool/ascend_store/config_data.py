@@ -335,6 +335,8 @@ class ReqMeta:
     req_id: str
     # Number of tokens in this chunk
     token_len_chunk: int
+    # Current logical token length of this request.
+    current_token_len: int
 
     block_ids: list[int]
 
@@ -433,7 +435,10 @@ class ReqMeta:
 
         # If we need to save, update the number of saved tokens
         if not skip_save:
-            tracker.num_saved_tokens = num_tokens_to_save
+            tracker.num_saved_tokens = max(
+                tracker.num_saved_tokens,
+                num_tokens_to_save,
+            )
 
         # Get the token ids for kv event generation in kv_transfer
         token_ids = None
@@ -454,6 +459,7 @@ class ReqMeta:
         return ReqMeta(
             req_id=tracker.req_id,
             token_len_chunk=num_tokens_to_save,
+            current_token_len=current_token_len,
             save_start_token=previous_saved_tokens,
             block_ids=tracker.allocated_block_ids,
             can_save=not skip_save,

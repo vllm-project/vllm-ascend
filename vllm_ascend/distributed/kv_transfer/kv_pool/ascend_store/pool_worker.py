@@ -392,6 +392,16 @@ class KVPoolWorker:
                 load_start_block = request.load_spec.vllm_cached_tokens // self.block_size
             cached_full_blocks = cached_tokens // self.block_size
             full_blocks = min(cached_full_blocks, len(request.block_hashes))
+            load_previous_last_block = (
+                self.layerwise_offload
+                and request.last_block_gva is not None
+                and cached_tokens > 0
+                and cached_tokens % self.block_size == 0
+                and cached_tokens == request.current_token_len - 1
+                and request.load_spec.vllm_cached_tokens == cached_tokens
+            )
+            if load_previous_last_block:
+                full_blocks = max(0, cached_full_blocks - 1)
             needs_last_block_at_boundary = (
                 cached_tokens > 0
                 and cached_tokens % self.block_size == 0
