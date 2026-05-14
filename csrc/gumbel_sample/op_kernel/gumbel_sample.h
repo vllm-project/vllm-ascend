@@ -157,47 +157,54 @@ __aicore__ inline void GumbelSampleOp<APPLY_TEMPERATURE>::Init(
     PipeBarrier<PIPE_V>();
 
     // 一次性把 temperature/seeds/idx_mapping/pos 搬入 UB（约束 #7：禁 GlobalTensor::GetValue）
+    // isPad=true + rightPadding：当 blockLen 不是 32 字节倍数时，用安全值填充超出部分，
+    // 避免 DataCopyPad 读取 GM 越界数据（越界数据可能是相邻张量的字节，导致计算错误）。
     {
+        auto Align32Bytes = [](uint32_t bytes) -> uint32_t {
+            return ((bytes + 31u) / 32u) * 32u;
+        };
+
         LocalTensor<float>   tempLocal       = tempUbBuf_.Get<float>();
         LocalTensor<int64_t> seedsLocal      = seedsUbBuf_.Get<int64_t>();
         LocalTensor<int32_t> idxMappingLocal = idxMappingUbBuf_.Get<int32_t>();
         LocalTensor<int64_t> posLocal        = posUbBuf_.Get<int64_t>();
 
-        DataCopyExtParams pTemp;
-        pTemp.blockCount = 1;
-        pTemp.blockLen   = t.numReqStates * static_cast<uint32_t>(sizeof(float));
-        pTemp.srcStride  = 0;
-        pTemp.dstStride  = 0;
-        pTemp.rsv        = 0;
-        DataCopyPadExtParams<float> ppTemp{false, 0, 0, 0.0f};
-        DataCopyPad(tempLocal, tempGm_, pTemp, ppTemp);
-
-        DataCopyExtParams pSeeds;
-        pSeeds.blockCount = 1;
-        pSeeds.blockLen   = t.numReqStates * static_cast<uint32_t>(sizeof(int64_t));
-        pSeeds.srcStride  = 0;
-        pSeeds.dstStride  = 0;
-        pSeeds.rsv        = 0;
-        DataCopyPadExtParams<int64_t> ppSeeds{false, 0, 0, 0};
-        DataCopyPad(seedsLocal, seedsGm_, pSeeds, ppSeeds);
-
-        DataCopyExtParams pIdxMapping;
-        pIdxMapping.blockCount = 1;
-        pIdxMapping.blockLen   = t.numTokens * static_cast<uint32_t>(sizeof(int32_t));
-        pIdxMapping.srcStride  = 0;
-        pIdxMapping.dstStride  = 0;
-        pIdxMapping.rsv        = 0;
-        DataCopyPadExtParams<int32_t> ppIdxMapping{false, 0, 0, 0};
-        DataCopyPad(idxMappingLocal, idxMappingGm_, pIdxMapping, ppIdxMapping);
-
-        DataCopyExtParams pPos;
-        pPos.blockCount = 1;
-        pPos.blockLen   = t.numTokens * static_cast<uint32_t>(sizeof(int64_t));
-        pPos.srcStride  = 0;
-        pPos.dstStride  = 0;
-        pPos.rsv        = 0;
-        DataCopyPadExtParams<int64_t> ppPos{false, 0, 0, 0};
-        DataCopyPad(posLocal, posGm_, pPos, ppPos);
+        {
+            uint32_t rawBytes = t.numReqStates * static_cast<uint32_t>(sizeof(float));
+            uint32_t padElems = (Align32Bytes(rawBytes) - rawBytes) / static_cast<uint32_t>(sizeof(float));
+            DataCopyExtParams pTemp;
+            pTemp.blockCount = 1; pTemp.blockLen = rawBytes;
+            pTemp.srcStride = 0; pTemp.dstStride = 0; pTemp.rsv = 0;
+            DataCopyPadExtParams<float> ppTemp{padElems > 0, 0, static_cast<uint8_t>(padElems), 0.0f};
+            DataCopyPad(tempLocal, tempGm_, pTemp, ppTemp);
+        }
+        {
+            uint32_t rawBytes = t.numReqStates * static_cast<uint32_t>(sizeof(int64_t));
+            uint32_t padElems = (Align32Bytes(rawBytes) - rawBytes) / static_cast<uint32_t>(sizeof(int64_t));
+            DataCopyExtParams pSeeds;
+            pSeeds.blockCount = 1; pSeeds.blockLen = rawBytes;
+            pSeeds.srcStride = 0; pSeeds.dstStride = 0; pSeeds.rsv = 0;
+            DataCopyPadExtParams<int64_t> ppSeeds{padElems > 0, 0, static_cast<uint8_t>(padElems), 0};
+            DataCopyPad(seedsLocal, seedsGm_, pSeeds, ppSeeds);
+        }
+        {
+            uint32_t rawBytes = t.numTokens * static_cast<uint32_t>(sizeof(int32_t));
+            uint32_t padElems = (Align32Bytes(rawBytes) - rawBytes) / static_cast<uint32_t>(sizeof(int32_t));
+            DataCopyExtParams pIdxMapping;
+            pIdxMapping.blockCount = 1; pIdxMapping.blockLen = rawBytes;
+            pIdxMapping.srcStride = 0; pIdxMapping.dstStride = 0; pIdxMapping.rsv = 0;
+            DataCopyPadExtParams<int32_t> ppIdxMapping{padElems > 0, 0, static_cast<uint8_t>(padElems), 0};
+            DataCopyPad(idxMappingLocal, idxMappingGm_, pIdxMapping, ppIdxMapping);
+        }
+        {
+            uint32_t rawBytes = t.numTokens * static_cast<uint32_t>(sizeof(int64_t));
+            uint32_t padElems = (Align32Bytes(rawBytes) - rawBytes) / static_cast<uint32_t>(sizeof(int64_t));
+            DataCopyExtParams pPos;
+            pPos.blockCount = 1; pPos.blockLen = rawBytes;
+            pPos.srcStride = 0; pPos.dstStride = 0; pPos.rsv = 0;
+            DataCopyPadExtParams<int64_t> ppPos{padElems > 0, 0, static_cast<uint8_t>(padElems), 0};
+            DataCopyPad(posLocal, posGm_, pPos, ppPos);
+        }
 
         event_t eMte2S = static_cast<event_t>(GetTPipePtr()->FetchEventID(HardEvent::MTE2_S));
         SetFlag<HardEvent::MTE2_S>(eMte2S);
@@ -383,13 +390,25 @@ __aicore__ inline void GumbelSampleOp<APPLY_TEMPERATURE>::ProcessOneRow(uint32_t
         Duplicate(logitsLocal, GUMBEL_NEG_INF, alignedLen);
         PipeBarrier<PIPE_V>();
 
+        // blockLen 必须是 32 字节的倍数（DMA 对齐要求）。
+        // 当 curLen * sizeof(float) 不是 32 的倍数时，用 isPad=true 填充超出部分，
+        // 避免读取 GM 越界数据（越界数据可能大于有效 logits，导致 argmax 返回越界索引，
+        // 进而被 FindFirstMatchIdx 截断为 0）。
+        uint32_t rawBytes    = curLen * static_cast<uint32_t>(sizeof(float));
+        uint32_t alignBytes  = ((rawBytes + 31u) / 32u) * 32u;
+        uint32_t rightPadElems = (alignBytes - rawBytes) / static_cast<uint32_t>(sizeof(float));
         DataCopyExtParams copyParams;
         copyParams.blockCount = 1;
-        copyParams.blockLen   = static_cast<uint32_t>(curLen * sizeof(float));
+        copyParams.blockLen   = rawBytes;
         copyParams.srcStride  = 0;
         copyParams.dstStride  = 0;
         copyParams.rsv        = 0;
-        DataCopyPadExtParams<float> padParams{false, 0, 0, 0.0f};
+        DataCopyPadExtParams<float> padParams{
+            rightPadElems > 0,
+            0,
+            static_cast<uint8_t>(rightPadElems),
+            GUMBEL_NEG_INF
+        };
         DataCopyPad(logitsLocal,
                     logitsGm_[static_cast<uint64_t>(reqIdx) * vocabSize_ + tileOffset],
                     copyParams, padParams);
