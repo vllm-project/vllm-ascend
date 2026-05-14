@@ -333,10 +333,10 @@ class RequestTracker:
 class ReqMeta:
     # Request id
     req_id: str
-    # Number of tokens in this chunk
-    token_len_chunk: int
-    # Current logical token length of this request.
-    current_token_len: int
+    # End token for full-block KV save.
+    save_end_token: int
+    # Token length after this scheduled step finishes.
+    target_token_len: int
 
     block_ids: list[int]
 
@@ -398,7 +398,7 @@ class ReqMeta:
         """
         if block_hashes is None:
             block_hashes = []
-        current_token_len = tracker.token_len
+        target_token_len = tracker.token_len
         previous_saved_tokens = tracker.num_saved_tokens
 
         # For save operation: do not save if the following condition is met
@@ -408,22 +408,22 @@ class ReqMeta:
         # Calculate number of tokens to save based on discard_partial_chunks
         # setting
         num_tokens_to_save = (
-            current_token_len // block_size * block_size
-        ) if discard_partial_chunks else current_token_len
-        full_block_count = current_token_len // block_size
+            target_token_len // block_size * block_size
+        ) if discard_partial_chunks else target_token_len
+        full_block_count = target_token_len // block_size
         boundary_without_hash = (
-            current_token_len > 0
-            and current_token_len % block_size == 0
+            target_token_len > 0
+            and target_token_len % block_size == 0
             and full_block_count > len(block_hashes)
         )
         if boundary_without_hash:
             num_tokens_to_save = len(block_hashes) * block_size
         if tracker.last_block_gva is not None and (
-            current_token_len % block_size != 0 or boundary_without_hash
+            target_token_len % block_size != 0 or boundary_without_hash
         ):
             partial_block_index = (
                 full_block_count
-                if current_token_len % block_size != 0
+                if target_token_len % block_size != 0
                 else full_block_count - 1
             )
         else:
@@ -458,8 +458,8 @@ class ReqMeta:
         logger.debug(f"request:{tracker.req_id}, meta save spec:{not skip_save}, meta load spec:{load_spec}")
         return ReqMeta(
             req_id=tracker.req_id,
-            token_len_chunk=num_tokens_to_save,
-            current_token_len=current_token_len,
+            save_end_token=num_tokens_to_save,
+            target_token_len=target_token_len,
             save_start_token=previous_saved_tokens,
             block_ids=tracker.allocated_block_ids,
             can_save=not skip_save,

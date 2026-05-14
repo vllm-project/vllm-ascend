@@ -317,7 +317,7 @@ class KVPoolWorker:
             load_spec = request.load_spec
             if load_spec is None or not load_spec.can_load:  # load =0
                 continue
-            token_len = request.token_len_chunk
+            token_len = request.save_end_token
             if (load_spec.kvpool_cached_tokens % self.block_size != 0) and (
                 load_spec.kvpool_cached_tokens == token_len - 1
             ):
@@ -356,7 +356,7 @@ class KVPoolWorker:
             if request.can_save is None or not request.can_save:
                 continue
             save_start_block = request.save_start_token // self.block_size
-            save_end_block = request.token_len_chunk // self.block_size
+            save_end_block = request.save_end_token // self.block_size
             if save_start_block >= save_end_block and request.partial_block_index is None:
                 continue
             partial_block_index = request.partial_block_index
@@ -397,7 +397,7 @@ class KVPoolWorker:
                 and request.last_block_gva is not None
                 and cached_tokens > 0
                 and cached_tokens % self.block_size == 0
-                and cached_tokens == request.current_token_len - 1
+                and cached_tokens == request.target_token_len - 1
                 and request.load_spec.vllm_cached_tokens == cached_tokens
             )
             if load_previous_last_block:

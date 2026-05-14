@@ -355,7 +355,7 @@ class KVCacheStoreSendingThread(KVTransferThread):
             return False
 
     def _handle_request(self, req_meta: ReqMeta):
-        token_len = req_meta.token_len_chunk
+        token_len = req_meta.save_end_token
         block_ids = req_meta.block_ids
         req_id = req_meta.req_id
         current_event = req_meta.current_event
