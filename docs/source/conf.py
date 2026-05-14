@@ -89,7 +89,7 @@ myst_substitutions = {
     # CANN version for main branch
     "main_cann_version": "9.0.0",
     # PyTorch/torch_npu version for main branch
-    "main_pytorch_torch_npu_version": "2.9.0 / 2.9.0",
+    "main_pytorch_torch_npu_version": "2.10.0 / 2.10.0",
     # Triton Ascend version for main branch
     "main_triton_ascend_version": "3.2.1",
 }
