@@ -8,7 +8,7 @@ msgid ""
 msgstr ""
 "Project-Id-Version: vllm-ascend \n"
 "Report-Msgid-Bugs-To: \n"
-"POT-Creation-Date: 2026-05-06 02:14+0000\n"
+"POT-Creation-Date: 2026-05-14 02:40+0000\n"
 "PO-Revision-Date: 2026-01-22 16:45+0800\n"
 "Last-Translator: Gemini\n"
 "Language: zh_CN\n"
@@ -142,6 +142,20 @@ msgid ""
 msgstr "是否刷新全局昇腾配置内容。通常用于 RLHF 训练或 UT/E2E 测试用例。"
 
 #: ../../source/user_guide/configuration/additional_config.md
+msgid "`dump_config`"
+msgstr "`dump_config`"
+
+#: ../../source/user_guide/configuration/additional_config.md
+msgid "`None`"
+msgstr "`None`"
+
+#: ../../source/user_guide/configuration/additional_config.md
+msgid ""
+"Inline msprobe dump configuration. vLLM-Ascend will materialize it to a "
+"temporary JSON file and pass that file to the debugger."
+msgstr "内联 msprobe dump 配置。vLLM-Ascend 会将其物化为临时 JSON 文件，并将该文件传递给调试器。"
+
+#: ../../source/user_guide/configuration/additional_config.md
 msgid "`dump_config_path`"
 msgstr "`dump_config_path`"
 
@@ -150,12 +164,8 @@ msgid "str"
 msgstr "str"
 
 #: ../../source/user_guide/configuration/additional_config.md
-msgid "`None`"
-msgstr "`None`"
-
-#: ../../source/user_guide/configuration/additional_config.md
-msgid "Configuration file path for msprobe dump(eager mode)."
-msgstr "msprobe dump 的配置文件路径（仅限 Eager 模式）。"
+msgid "Configuration file path for msprobe dump (compatible legacy option)."
+msgstr "msprobe dump 的配置文件路径（兼容旧版选项）。"
 
 #: ../../source/user_guide/configuration/additional_config.md
 msgid "`enable_async_exponential`"
@@ -229,7 +239,9 @@ msgstr "`True`"
 msgid ""
 "Enables Ascend-native CPU binding on ARM servers. Set to `False` to "
 "disable. See [CPU Binding](../feature_guide/cpu_binding.md)."
-msgstr "在 ARM 服务器上启用昇腾原生 CPU 绑定。设置为 `False` 以禁用。参见 [CPU 绑定](../feature_guide/cpu_binding.md)。"
+msgstr ""
+"在 ARM 服务器上启用昇腾原生 CPU 绑定。设置为 `False` 以禁用。参见 [CPU "
+"绑定](../feature_guide/cpu_binding.md)。"
 
 #: ../../source/user_guide/configuration/additional_config.md
 msgid "`SLO_limits_for_dynamic_batch`"
@@ -323,11 +335,11 @@ msgid ""
 "details."
 msgstr "动态分块流水线并行的配置选项。详情请参见[动态分块流水线并行](../feature_guide/dynamic_chunk_pipeline_parallel.md)。"
 
-#: ../../source/user_guide/configuration/additional_config.md:51
+#: ../../source/user_guide/configuration/additional_config.md:52
 msgid "The details of each configuration option are as follows:"
 msgstr "每个配置选项的详细说明如下："
 
-#: ../../source/user_guide/configuration/additional_config.md:53
+#: ../../source/user_guide/configuration/additional_config.md:54
 msgid "**xlite_graph_config**"
 msgstr "**xlite_graph_config**"
 
@@ -351,7 +363,7 @@ msgid ""
 "default, Xlite is only enabled for the decode stage."
 msgstr "是否在预填充和解码阶段同时启用 Xlite。默认情况下，Xlite 仅在解码阶段启用。"
 
-#: ../../source/user_guide/configuration/additional_config.md:60
+#: ../../source/user_guide/configuration/additional_config.md:61
 msgid "**weight_prefetch_config**"
 msgstr "**weight_prefetch_config**"
 
@@ -376,7 +388,7 @@ msgstr ""
 msgid "Prefetch ratio of each weight."
 msgstr "各项权重的预取比例。"
 
-#: ../../source/user_guide/configuration/additional_config.md:67
+#: ../../source/user_guide/configuration/additional_config.md:68
 msgid "**finegrained_tp_config**"
 msgstr "**finegrained_tp_config**"
 
@@ -416,7 +428,7 @@ msgstr "`mlp_tensor_parallel_size`"
 msgid "The custom tensor parallel size of mlp."
 msgstr "MLP 层的自定义张量并行大小。"
 
-#: ../../source/user_guide/configuration/additional_config.md:76
+#: ../../source/user_guide/configuration/additional_config.md:77
 msgid "**ascend_compilation_config**"
 msgstr "**ascend_compilation_config**"
 
@@ -471,7 +483,7 @@ msgstr "`fuse_muls_add`"
 msgid "Whether to enable fuse_muls_add pass."
 msgstr "是否启用 fuse_muls_add 优化通道。"
 
-#: ../../source/user_guide/configuration/additional_config.md:87
+#: ../../source/user_guide/configuration/additional_config.md:88
 msgid "**eplb_config**"
 msgstr "**eplb_config**"
 
@@ -535,7 +547,7 @@ msgstr "`num_redundant_experts`"
 msgid "Specify redundant experts during initialization."
 msgstr "在初始化阶段指定冗余专家的数量。"
 
-#: ../../source/user_guide/configuration/additional_config.md:98
+#: ../../source/user_guide/configuration/additional_config.md:99
 msgid "**profiling_chunk_config**"
 msgstr "**profiling_chunk_config**"
 
@@ -589,11 +601,11 @@ msgstr "True"
 msgid "Enable/disable Online Calibration"
 msgstr "启用/禁用在线校准"
 
-#: ../../source/user_guide/configuration/additional_config.md:107
+#: ../../source/user_guide/configuration/additional_config.md:108
 msgid "Example"
 msgstr "示例"
 
-#: ../../source/user_guide/configuration/additional_config.md:109
+#: ../../source/user_guide/configuration/additional_config.md:110
 msgid "An example of additional configuration is as follows:"
 msgstr "附加配置的一个示例如下："
 
