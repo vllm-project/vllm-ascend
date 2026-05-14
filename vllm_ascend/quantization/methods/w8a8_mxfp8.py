@@ -19,6 +19,7 @@ from collections.abc import Callable
 from typing import Any
 
 import torch
+import torch.nn.functional as F
 import torch_npu
 from vllm.config import CompilationMode, get_current_vllm_config
 from vllm.distributed import get_ep_group
@@ -124,7 +125,12 @@ class AscendW8A8MXFP8DynamicLinearMethod(AscendLinearScheme):
             }
 
         n_dim, k_dim = layer.weight_scale.data.shape
-        layer.weight_scale.data = layer.weight_scale.data.reshape(n_dim, k_dim // 2, 2)
+        # Shape should be padded if it cannot be divided by 2
+        if layer.weight_scale.data.shape[-1] % 2 != 0:
+            layer.weight_scale.data = F.pad(layer.weight_scale.data, (0, 1), mode="constant", value=0)
+            layer.weight_scale.data = layer.weight_scale.data.reshape(n_dim, k_dim // 2 + 1, 2)
+        else:
+            layer.weight_scale.data = layer.weight_scale.data.reshape(n_dim, k_dim // 2, 2)
         layer.weight.data = layer.weight.data.transpose(0, 1)
         layer.weight_scale.data = layer.weight_scale.data.transpose(0, 1)
 
