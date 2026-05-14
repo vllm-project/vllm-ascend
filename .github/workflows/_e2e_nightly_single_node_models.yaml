@@ -117,6 +117,7 @@ jobs:
           git config --global --add safe.directory /vllm-workspace/vllm-ascend
           pip install uc-manager
           uv pip install -r requirements-dev.txt
+          uv pip install --reinstall triton triton-ascend
           uv pip install -e .
 
       - name: Install tensorflow (for Molmo-7B-D-0924)
