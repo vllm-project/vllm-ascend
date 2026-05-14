@@ -34,16 +34,14 @@ from vllm.v1.kv_cache_interface import (
     MLAAttentionSpec,
     UniformTypeKVCacheSpecs,
 )
+from vllm.v1.worker.gpu.model_states.interface import ModelSpecificAttnMetadata
 from vllm.v1.worker.utils import AttentionGroup
 
 from vllm_ascend.attention.attention_mask import AttentionMaskBuilder
 from vllm_ascend.attention.attention_v1 import AscendAttentionState
 from vllm_ascend.attention.utils import AscendCommonAttentionMetadata, AscendPrefillContextParallelMetadata
 from vllm_ascend.quantization.utils import enable_fa_quant
-from vllm_ascend.utils import calc_split_factor, vllm_version_is
-
-if not vllm_version_is("0.20.2"):
-    from vllm.v1.worker.gpu.model_states.interface import ModelSpecificAttnMetadata
+from vllm_ascend.utils import calc_split_factor
 
 _ATTENTION_MASK_BUILDER = None
 

@@ -1,4 +1,4 @@
-# Adapt from https://github.com/vllm-project/vllm/blob/main/vllm/v1/worker/gpu/spec_decode/probabilistic_rejection_sampler_utils.py
+# Adapt from https://github.com/vllm-project/vllm/blob/main/vllm/v1/worker/gpu/spec_decode/rejection_sampler_utils.py
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 #
@@ -19,21 +19,11 @@
 
 import torch
 from vllm.triton_utils import tl, triton
-
-from vllm_ascend.utils import vllm_version_is
-
-if vllm_version_is("0.20.2"):
-    from vllm.v1.worker.gpu.spec_decode.probabilistic_rejection_sampler_utils import (
-        _compute_block_stats_kernel,
-        _compute_global_lse,
-        _insert_resampled_kernel,
-    )
-else:
-    from vllm.v1.worker.gpu.spec_decode.rejection_sampler_utils import (
-        _compute_block_stats_kernel,
-        _compute_global_lse,
-        _insert_resampled_kernel,
-    )
+from vllm.v1.worker.gpu.spec_decode.rejection_sampler_utils import (
+    _compute_block_stats_kernel,
+    _compute_global_lse,
+    _insert_resampled_kernel,
+)
 
 
 @triton.jit
@@ -486,7 +476,3 @@ def rejection_sample(
         PADDED_RESAMPLE_NUM_BLOCKS=padded_resample_num_blocks,
     )
     return sampled, num_sampled
-
-
-# Alias for the pre-PR-41035 upstream name (used by the 0.20.2 patch point).
-probabilistic_rejection_sample = rejection_sample
