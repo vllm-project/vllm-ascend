@@ -15,10 +15,6 @@ from vllm_ascend.worker.v2.sample.gumbel import apply_temperature, gumbel_sample
 DEVICE = "npu"
 
 
-# ---------------------------------------------------------------------------
-# PyTorch reference implementations
-# ---------------------------------------------------------------------------
-
 def _ref_gumbel_sample(
     logits: torch.Tensor,
     expanded_idx_mapping: torch.Tensor,
@@ -58,10 +54,6 @@ def _ref_apply_temperature(
     return out
 
 
-# ---------------------------------------------------------------------------
-# apply_temperature tests
-# ---------------------------------------------------------------------------
-
 @pytest.mark.parametrize("num_tokens,vocab_size", [
     (1, 32000),
     (8, 32000),
@@ -91,10 +83,6 @@ def test_apply_temperature(num_tokens, vocab_size):
         f"{(logits_triton.float() - logits_ref).abs().max().item():.6f}"
     )
 
-
-# ---------------------------------------------------------------------------
-# gumbel_sample tests
-# ---------------------------------------------------------------------------
 
 @pytest.mark.parametrize("num_tokens,num_reqs,vocab_size", [
     (4, 4, 32000),
