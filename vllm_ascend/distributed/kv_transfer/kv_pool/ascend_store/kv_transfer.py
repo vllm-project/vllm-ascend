@@ -743,6 +743,7 @@ class KVCacheStoreLayerRecvingThread(KVTransferThread):
             (self.tp_rank * len(req_meta.size_array)) // self.tp_size,
         )
         self._stagger_h2d_submit(layer_id, len(gvas_list_c))
+        # TODO 这里需要进一步拆分数据包大小
         res = self.m_store.store.batch_copy(gvas_list_c, addr_list_c, size_list_c, 1)
         if res != 0:
             logger.error("Layerwise %d load batch_copy failed with return code %d", layer_id, res)

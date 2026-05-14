@@ -536,11 +536,15 @@ class KVPoolWorker:
         else:
             done_sending = set()
 
-        done_recving = (
-            self.kv_recv_thread.get_and_clear_finished_requests()  # type: ignore[union-attr]
-            if self.load_async and self.kv_recv_thread is not None
-            else set()
-        )
+        done_recving = set()
+        if self.kv_recv_thread is not None:
+            if self.load_async:
+                done_recving = self.kv_recv_thread.get_and_clear_finished_requests()
+        else:
+            done_recving = {
+                request.req_id for request in meta.requests
+                if request.load_spec is not None and request.load_spec.can_load
+            }
 
         logger.debug(
             "Number of completed KV cache send requests: %d, receive requests: %d, tp_rank:%d",
