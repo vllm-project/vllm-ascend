@@ -54,6 +54,7 @@
 #include <memory>
 #include <mutex>
 #include <sstream>
+#include <vector>
 
 namespace vllm_ascend {
 
@@ -1082,6 +1083,26 @@ at::Tensor chunk_fwd_o(
     return o;
 }
 
+std::vector<int64_t> get_npu_storage_shape(const at::Tensor& tensor)
+{
+    TORCH_CHECK(
+        tensor.is_privateuseone(),
+        "get_npu_storage_shape only supports NPU tensors, but got device ",
+        tensor.device());
+    const auto& desc = NPUBridge::GetNpuStorageImplDesc(tensor);
+    return std::vector<int64_t>(desc.storage_sizes_.begin(), desc.storage_sizes_.end());
+}
+
+int64_t get_npu_storage_format(const at::Tensor& tensor)
+{
+    TORCH_CHECK(
+        tensor.is_privateuseone(),
+        "get_npu_storage_format only supports NPU tensors, but got device ",
+        tensor.device());
+    const auto& desc = NPUBridge::GetNpuStorageImplDesc(tensor);
+    return static_cast<int64_t>(desc.npu_format_);
+}
+
 } // namespace vllm_ascend
 
 #ifdef ASCEND_PLATFORM_310P
@@ -1189,6 +1210,14 @@ TORCH_LIBRARY_EXPAND(CONCAT(_C, _ascend), ops)
     ops.def("device_print_tensor(Tensor tensor) -> ()");
     ops.impl("device_print_tensor", c10::DispatchKey::CompositeExplicitAutograd,
              static_cast<void (*)(const at::Tensor&)>(&vllm_ascend::device_print));
+
+    ops.def("get_npu_storage_shape(Tensor tensor) -> int[]");
+    ops.impl("get_npu_storage_shape", c10::DispatchKey::CompositeExplicitAutograd,
+             &vllm_ascend::get_npu_storage_shape);
+
+    ops.def("get_npu_storage_format(Tensor tensor) -> int");
+    ops.impl("get_npu_storage_format", c10::DispatchKey::CompositeExplicitAutograd,
+             &vllm_ascend::get_npu_storage_format);
 
     ops.def(
         "grouped_matmul_swiglu_quant(Tensor x, Tensor weight, Tensor weight_scale, Tensor x_scale,"
