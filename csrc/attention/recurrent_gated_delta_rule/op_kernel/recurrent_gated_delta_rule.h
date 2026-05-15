@@ -419,75 +419,49 @@ private:
         }
     }
 
-    __aicore__ inline void ReduceSumBaseline(LocalTensor<float> &dstTensor, LocalTensor<float> &srcTensor,
-                                             uint32_t rows)
-    {
-#if defined(__CCE_AICORE__) && __CCE_AICORE__ == 200
-        for (uint32_t row = 0; row < rows; ++row) {
-            WholeReduceSum(dstTensor[row], srcTensor[row * alignK_], alignK_, 1, 1, 1, FP32_NUM_PER_BLOCK);
-        }
-#else
-        uint32_t stateShape[2] = {rows, alignK_};
-        ReduceSum<float, Pattern::Reduce::AR, true>(dstTensor, srcTensor, stateShape, true);
-#endif
-    }
-
-    __aicore__ inline void ReduceSumAddFold(LocalTensor<float> &dstTensor, LocalTensor<float> &srcTensor,
-                                            uint32_t rows)
-    {
-        if (alignK_ < REPEAT_LENTH) {
-            ReduceSumBaseline(dstTensor, srcTensor, rows);
-            return;
-        }
-
-        if ((alignK_ & (alignK_ - 1)) != 0) {
-            ReduceSumBaseline(dstTensor, srcTensor, rows);
-            return;
-        }
-
-        // First fold: src → foldTmpUb (out-of-place to avoid bank conflicts)
-        uint32_t curK = alignK_;
-        uint32_t half = curK >> 1;
-        uint8_t srcStride = curK / FP32_NUM_PER_BLOCK;
-        uint8_t foldStride = half / FP32_NUM_PER_BLOCK;
-        for (uint32_t j = 0; j < rows; j += MAX_REPEAT_TIME) {
-            uint32_t batch = Std::min(static_cast<uint32_t>(MAX_REPEAT_TIME), rows - j);
-            Add(foldTmpUb[j * half], srcTensor[j * alignK_], srcTensor[j * alignK_ + half],
-                half, batch, {1, 1, 1, foldStride, srcStride, srcStride});
-        }
-        curK = half;
-
-        // Subsequent folds: in-place on foldTmpUb until curK == REPEAT_LENTH
-        while (curK > REPEAT_LENTH) {
-            AscendC::PipeBarrier<PIPE_V>();
-            half = curK >> 1;
-            srcStride = curK / FP32_NUM_PER_BLOCK;
-            foldStride = half / FP32_NUM_PER_BLOCK;
-            for (uint32_t j = 0; j < rows; j += MAX_REPEAT_TIME) {
-                uint32_t batch = Std::min(static_cast<uint32_t>(MAX_REPEAT_TIME), rows - j);
-                Add(foldTmpUb[j * half], foldTmpUb[j * curK], foldTmpUb[j * curK + half],
-                    half, batch, {1, 1, 1, foldStride, srcStride, srcStride});
-            }
-            curK = half;
-        }
-
-        AscendC::PipeBarrier<PIPE_V>();
-        foldStride = curK / FP32_NUM_PER_BLOCK;
-        for (uint32_t j = 0; j < rows; j += MAX_REPEAT_TIME) {
-            uint32_t batchRows = Std::min(static_cast<uint32_t>(MAX_REPEAT_TIME), rows - j);
-            WholeReduceSum(dstTensor[j], foldTmpUb[j * curK],
-                           REPEAT_LENTH, batchRows, 1, 1, foldStride);
-        }
-    }
-
     __aicore__ inline void ReduceSumDispatch(LocalTensor<float> &dstTensor, LocalTensor<float> &srcTensor,
                                              uint32_t rows)
     {
-        if (useAddFoldReduce_ && alignK_ >= ADD_FOLD_REDUCE_MIN_K) {
-            ReduceSumAddFold(dstTensor, srcTensor, rows);
-            return;
+#if !(defined(__CCE_AICORE__) && __CCE_AICORE__ == 200)
+        uint32_t stateShape[2] = {rows, alignK_};
+        ReduceSum<float, Pattern::Reduce::AR, true>(dstTensor, srcTensor, stateShape, true);
+        return;
+#else
+        uint32_t curK = alignK_;
+        bool readFromSrc = true;
+
+        while (curK > REPEAT_LENTH) {
+            if (!readFromSrc) AscendC::PipeBarrier<PIPE_V>();
+            uint32_t half = curK >> 1;
+            uint8_t sStride = curK / FP32_NUM_PER_BLOCK;
+            uint8_t dStride = half / FP32_NUM_PER_BLOCK;
+            for (uint32_t j = 0; j < rows; j += MAX_REPEAT_TIME) {
+                uint32_t batch = Std::min(static_cast<uint32_t>(MAX_REPEAT_TIME), rows - j);
+                if (readFromSrc) {
+                    Add(foldTmpUb[j * half], srcTensor[j * alignK_], srcTensor[j * alignK_ + half],
+                        half, batch, {1, 1, 1, dStride, sStride, sStride});
+                } else {
+                    Add(srcTensor[j * half], foldTmpUb[j * curK], foldTmpUb[j * curK + half],
+                        half, batch, {1, 1, 1, dStride, sStride, sStride});
+                }
+            }
+            curK = half;
+            readFromSrc = !readFromSrc;
         }
-        ReduceSumBaseline(dstTensor, srcTensor, rows);
+
+        AscendC::PipeBarrier<PIPE_V>();
+        uint8_t foldStride = curK / FP32_NUM_PER_BLOCK;
+        for (uint32_t j = 0; j < rows; j += MAX_REPEAT_TIME) {
+            uint32_t batch = Std::min(static_cast<uint32_t>(MAX_REPEAT_TIME), rows - j);
+            if (readFromSrc) {
+                WholeReduceSum(dstTensor[j], srcTensor[j * alignK_],
+                               REPEAT_LENTH, batch, 1, 1, foldStride);
+            } else {
+                WholeReduceSum(dstTensor[j], foldTmpUb[j * curK],
+                               REPEAT_LENTH, batch, 1, 1, foldStride);
+            }
+        }
+#endif
     }
 
     __aicore__ inline void Compute(uint32_t curSingleV, uint64_t curQKOffset, uint64_t curVOffset)
@@ -508,7 +482,7 @@ private:
         MatVecMul(stateInUb, kInUb[curQKOffset], broadTmpInUb, curSingleV, false);
         AscendC::PipeBarrier<PIPE_V>();
         ReduceSumDispatch(deltaInUb, broadTmpInUb, curSingleV);
-        AscendC::PipeBarrier<PIPE_V>();
+        SetWaitFlag<HardEvent::V_S>(HardEvent::V_S);
         deltaInUb = vInUb[curVOffset] - deltaInUb;
         AscendC::PipeBarrier<PIPE_V>();
         Muls(deltaInUb, deltaInUb, beta_, curSingleV);
