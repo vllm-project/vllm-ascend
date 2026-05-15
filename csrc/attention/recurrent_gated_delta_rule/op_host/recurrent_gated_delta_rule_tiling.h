@@ -1,6 +1,7 @@
 /**
  * Copyright (c) 2025 Huawei Technologies Co., Ltd.
  * This program is free software, you can redistribute it and/or modify it under the terms and conditions of
+ * CANN Open Software License Agreement Version 2.0 (the "License").
  * Please refer to the License for details. You may not use this file except in compliance with the License.
  * THIS SOFTWARE IS PROVIDED ON AN "AS IS" BASIS, WITHOUT WARRANTIES OF ANY KIND, EITHER EXPRESS OR IMPLIED,
  * INCLUDING BUT NOT LIMITED TO NON-INFRINGEMENT, MERCHANTABILITY, OR FITNESS FOR A PARTICULAR PURPOSE.
@@ -16,7 +17,6 @@
 #include <tiling/tiling_api.h>
 #include "register/tilingdata_base.h"
 #include "tiling_base/tiling_base.h"
-#include "tiling_base/error_log.h"
 #include "../op_kernel/recurrent_gated_delta_rule_tiling_data.h"
 
 namespace optiling {
@@ -76,12 +76,7 @@ protected:
         int64_t workingUbBytes = 0;
         int64_t coeff = 0;
     };
-
     struct BufferProfile {
-        BufferProfile() = default;
-        BufferProfile(uint32_t s, uint32_t a, uint32_t v, uint32_t r, bool val)
-            : stateOutBufferNum(s), attnOutBufferNum(a), vStep(v), repeatTime(r), valid(val) {}
-
         uint32_t stateOutBufferNum = 1;
         uint32_t attnOutBufferNum = 1;
         uint32_t vStep = 0;
@@ -131,6 +126,8 @@ protected:
     RecurrentGatedDeltaRuleTilingData tilingData_;
     RecurrentGatedDeltaRuleInfo inputParams_;
     UbCalcContext ubCalcCtx_;
+    ge::DataType inputDtype_{ge::DT_BF16};
+    int64_t inTypeSize_{2}; // sizeof(inType): 2 for fp16/bf16, 4 for fp32
 };
 
 } // namespace optiling

@@ -1,6 +1,7 @@
 /**
  * Copyright (c) 2025 Huawei Technologies Co., Ltd.
  * This program is free software, you can redistribute it and/or modify it under the terms and conditions of
+ * CANN Open Software License Agreement Version 2.0 (the "License").
  * Please refer to the License for details. You may not use this file except in compliance with the License.
  * THIS SOFTWARE IS PROVIDED ON AN "AS IS" BASIS, WITHOUT WARRANTIES OF ANY KIND, EITHER EXPRESS OR IMPLIED,
  * INCLUDING BUT NOT LIMITED TO NON-INFRINGEMENT, MERCHANTABILITY, OR FITNESS FOR A PARTICULAR PURPOSE.
@@ -11,7 +12,7 @@
  * \file recurrent_gated_delta_rule.cpp
  * \brief
  */
-#include "../recurrent_gated_delta_rule.h"
+#include "recurrent_gated_delta_rule.h"
 #include "aclnn_kernels/common/op_error_check.h"
 #include "opdev/make_op_executor.h"
 #include "opdev/op_def.h"
@@ -34,7 +35,7 @@ const aclTensor *RecurrentGatedDeltaRule(const aclTensor *query, const aclTensor
     L0_DFX(RecurrentGatedDeltaRule, query, key, value, beta, stateRef, actualSeqLengths, ssmStateIndices, g, gk,
            numAcceptedTokens, scaleValue);
 
-    DataType outType = DataType::DT_BF16;
+    DataType outType = query->GetDataType();
     Format format = Format::FORMAT_ND;
 
     auto out = executor->AllocTensor(outType, format, format);
