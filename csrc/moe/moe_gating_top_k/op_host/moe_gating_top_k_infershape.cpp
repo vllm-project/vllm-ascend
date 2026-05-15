@@ -15,7 +15,7 @@
 
 #include "exe_graph/runtime/infer_shape_context.h"
 #include "register/op_impl_registry.h"
-#include "error_log.h"
+#include "tiling_base/error_log.h"
 
 #include <string>
 
