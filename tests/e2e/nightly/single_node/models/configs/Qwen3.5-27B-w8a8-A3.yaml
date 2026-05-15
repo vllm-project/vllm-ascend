@@ -83,7 +83,7 @@ test_cases:
       - "0.9"
       - "--compilation-config"
       - '{"cudagraph_capture_sizes":[1,4,8,12,16,24,32,48,56,64,72,84,96,108,112,128,160,172,196,200,212,232,256,272,288,312,328,344,360,384,400,416,432,448,480,512], "cudagraph_mode":"FULL_DECODE_ONLY"}'
-      - "speculative_config"
+      - "--speculative_config"
       - '{"method": "qwen3_5_mtp", "num_speculative_tokens": 3, "enforce_eager": true}'
       - "--trust-remote-code"
       - "--async-scheduling"
@@ -108,463 +108,463 @@ test_cases:
         request_rate: 0
         baseline: 1
         threshold: 0.97
-  - name: "Qwen3.5-27B-w8a8-in32k-56-14"
-    model: "Eco-Tech/Qwen3.5-27B-w8a8-mtp"
-    envs:
-      <<: *envs
-    server_cmd:
-      - "--data-parallel-size"
-      - "1"
-      - "--tensor-parallel-size"
-      - "2"
-      - "--port"
-      - "$SERVER_PORT"
-      - "--max-model-len"
-      - "34304"
-      - "--enable-prefix-caching"
-      - "--max-num-batched-tokens"
-      - "16384"
-      - "--max-num-seqs"
-      - "128"
-      - "--gpu-memory-utilization"
-      - "0.9"
-      - "--compilation-config"
-      - '{"cudagraph_capture_sizes":[1,4,8,12,16,24,32,48,56,64,72,84,96,108,112,128,160,172,196,200,212,232,256,272,288,312,328,344,360,384,400,416,432,448,480,512], "cudagraph_mode":"FULL_DECODE_ONLY"}'
-      - "speculative_config"
-      - '{"method": "qwen3_5_mtp", "num_speculative_tokens": 3, "enforce_eager": true}'
-      - "--trust-remote-code"
-      - "--async-scheduling"
-      - "--allowed-local-media-path"
-      - "/"
-      - "--quantization"
-      - "ascend"
-      - "--mm-processor-cache-gb"
-      - "0"
-      - "--additional-config"
-      - '{"enable_cpu_binding":true}'
-    benchmarks:
-      perf:
-        case_type: performance
-        dataset_path: vllm-ascend/GSM8K-in3500-bs2800
-        request_conf: vllm_api_stream_chat
-        dataset_conf: gsm8k/gsm8k_gen_0_shot_cot_str_perf
-        num_prompts: 56
-        max_out_len: 512
-        batch_size: 14
-        request_rate: 0
-        baseline: 1
-        threshold: 0.97
-  - name: "Qwen3.5-27B-w8a8-in64k-16-4"
-    model: "Eco-Tech/Qwen3.5-27B-w8a8-mtp"
-    envs:
-      <<: *envs
-    server_cmd:
-      - "--data-parallel-size"
-      - "1"
-      - "--tensor-parallel-size"
-      - "2"
-      - "--port"
-      - "$SERVER_PORT"
-      - "--max-model-len"
-      - "67584"
-      - "--max-num-batched-tokens"
-      - "16384"
-      - "--max-num-seqs"
-      - "128"
-      - "--gpu-memory-utilization"
-      - "0.9"
-      - "--compilation-config"
-      - '{"cudagraph_capture_sizes":[1,6,12,18,24,30,36,42,48,54,72,78,84,90,96,102,108,144,192], "cudagraph_mode":"FULL_DECODE_ONLY"}'
-      - "speculative_config"
-      - '{"method": "qwen3_5_mtp", "num_speculative_tokens": 5, "enforce_eager": true}'
-      - "--trust-remote-code"
-      - "--async-scheduling"
-      - "--allowed-local-media-path"
-      - "/"
-      - "--quantization"
-      - "ascend"
-      - "--mm-processor-cache-gb"
-      - "0"
-      - "--additional-config"
-      - '{"enable_cpu_binding":true}'
-      - "--no-enable-prefix-caching"
-    benchmarks:
-      perf:
-        case_type: performance
-        dataset_path: vllm-ascend/GSM8K-in3500-bs2800
-        request_conf: vllm_api_stream_chat
-        dataset_conf: gsm8k/gsm8k_gen_0_shot_cot_str_perf
-        num_prompts: 16
-        max_out_len: 1024
-        batch_size: 4
-        request_rate: 0
-        baseline: 1
-        threshold: 0.97
-  - name: "Qwen3.5-27B-w8a8-in64k-48-12"
-    model: "Eco-Tech/Qwen3.5-27B-w8a8-mtp"
-    envs:
-      <<: *envs
-    server_cmd:
-      - "--data-parallel-size"
-      - "1"
-      - "--tensor-parallel-size"
-      - "2"
-      - "--port"
-      - "$SERVER_PORT"
-      - "--max-model-len"
-      - "67584"
-      - "--enable-prefix-caching"
-      - "--max-num-batched-tokens"
-      - "16384"
-      - "--max-num-seqs"
-      - "128"
-      - "--gpu-memory-utilization"
-      - "0.9"
-      - "--compilation-config"
-      - '{"cudagraph_capture_sizes":[1,4,8,12,16,24,32,48,56,64,72,84,96,108,112,128,160,172,196,200,212,232,256,272,288,312,328,344,360,384,400,416,432,448,480,512], "cudagraph_mode":"FULL_DECODE_ONLY"}'
-      - "speculative_config"
-      - '{"method": "qwen3_5_mtp", "num_speculative_tokens": 3, "enforce_eager": true}'
-      - "--trust-remote-code"
-      - "--async-scheduling"
-      - "--allowed-local-media-path"
-      - "/"
-      - "--quantization"
-      - "ascend"
-      - "--mm-processor-cache-gb"
-      - "0"
-      - "--additional-config"
-      - '{"enable_cpu_binding":true}'
-    benchmarks:
-      perf:
-        case_type: performance
-        dataset_path: vllm-ascend/GSM8K-in3500-bs2800
-        request_conf: vllm_api_stream_chat
-        dataset_conf: gsm8k/gsm8k_gen_0_shot_cot_str_perf
-        num_prompts: 48
-        max_out_len: 1024
-        batch_size: 12
-        request_rate: 0
-        baseline: 1
-        threshold: 0.97
-  - name: "Qwen3.5-27B-w8a8-in128k-28-7"
-    model: "Eco-Tech/Qwen3.5-27B-w8a8-mtp"
-    envs:
-      <<: *envs
-    server_cmd:
-      - "--data-parallel-size"
-      - "1"
-      - "--tensor-parallel-size"
-      - "2"
-      - "--port"
-      - "$SERVER_PORT"
-      - "--max-model-len"
-      - "133120"
-      - "--enable-prefix-caching"
-      - "--max-num-batched-tokens"
-      - "16384"
-      - "--max-num-seqs"
-      - "128"
-      - "--gpu-memory-utilization"
-      - "0.9"
-      - "--compilation-config"
-      - '{"cudagraph_capture_sizes":[1,4,8,12,16,24,32,48,56,64,72,84,96,108,112,128,160,172,196,200,212,232,256,272,288,312,328,344,360,384,400,416,432,448,480,512], "cudagraph_mode":"FULL_DECODE_ONLY"}'
-      - "speculative_config"
-      - '{"method": "qwen3_5_mtp", "num_speculative_tokens": 3, "enforce_eager": true}'
-      - "--trust-remote-code"
-      - "--async-scheduling"
-      - "--allowed-local-media-path"
-      - "/"
-      - "--quantization"
-      - "ascend"
-      - "--mm-processor-cache-gb"
-      - "0"
-      - "--additional-config"
-      - '{"enable_cpu_binding":true}'
-    benchmarks:
-      perf:
-        case_type: performance
-        dataset_path: vllm-ascend/GSM8K-in3500-bs2800
-        request_conf: vllm_api_stream_chat
-        dataset_conf: gsm8k/gsm8k_gen_0_shot_cot_str_perf
-        num_prompts: 28
-        max_out_len: 1024
-        batch_size: 7
-        request_rate: 0
-        baseline: 1
-        threshold: 0.97
-  - name: "Qwen3.5-27B-w8a8-in16k-16-4"
-    model: "Eco-Tech/Qwen3.5-27B-w8a8-mtp"
-    envs:
-      <<: *envs
-    server_cmd:
-      - "--data-parallel-size"
-      - "1"
-      - "--tensor-parallel-size"
-      - "2"
-      - "--port"
-      - "$SERVER_PORT"
-      - "--max-model-len"
-      - "18432"
-      - "--max-num-batched-tokens"
-      - "16384"
-      - "--max-num-seqs"
-      - "128"
-      - "--gpu-memory-utilization"
-      - "0.9"
-      - "--compilation-config"
-      - '{"cudagraph_capture_sizes":[1,6,12,18,24,30,36,42,48,54,72,78,84,90,96,102,108,144,192], "cudagraph_mode":"FULL_DECODE_ONLY"}'
-      - "speculative_config"
-      - '{"method": "qwen3_5_mtp", "num_speculative_tokens": 5, "enforce_eager": true}'
-      - "--trust-remote-code"
-      - "--async-scheduling"
-      - "--allowed-local-media-path"
-      - "/"
-      - "--quantization"
-      - "ascend"
-      - "--mm-processor-cache-gb"
-      - "0"
-      - "--additional-config"
-      - '{"enable_cpu_binding":true}'
-      - "--no-enable-prefix-caching"
-    benchmarks:
-      perf:
-        case_type: performance
-        dataset_path: vllm-ascend/GSM8K-in3500-bs2800
-        request_conf: vllm_api_stream_chat
-        dataset_conf: gsm8k/gsm8k_gen_0_shot_cot_str_perf
-        num_prompts: 16
-        max_out_len: 1024
-        batch_size: 4
-        request_rate: 0
-        baseline: 1
-        threshold: 0.97
-  - name: "Qwen3.5-27B-w8a8-in32k-8-2"
-    model: "Eco-Tech/Qwen3.5-27B-w8a8-mtp"
-    envs:
-      <<: *envs
-    server_cmd:
-      - "--data-parallel-size"
-      - "1"
-      - "--tensor-parallel-size"
-      - "2"
-      - "--port"
-      - "$SERVER_PORT"
-      - "--max-model-len"
-      - "34304"
-      - "--max-num-batched-tokens"
-      - "16384"
-      - "--max-num-seqs"
-      - "128"
-      - "--gpu-memory-utilization"
-      - "0.9"
-      - "--compilation-config"
-      - '{"cudagraph_capture_sizes":[1,6,12,18,24,30,36,42,48,54,72,78,84,90,96,102,108,144,192], "cudagraph_mode":"FULL_DECODE_ONLY"}'
-      - "speculative_config"
-      - '{"method": "qwen3_5_mtp", "num_speculative_tokens": 5, "enforce_eager": true}'
-      - "--trust-remote-code"
-      - "--async-scheduling"
-      - "--allowed-local-media-path"
-      - "/"
-      - "--quantization"
-      - "ascend"
-      - "--mm-processor-cache-gb"
-      - "0"
-      - "--additional-config"
-      - '{"enable_cpu_binding":true}'
-      - "--no-enable-prefix-caching"
-    benchmarks:
-      perf:
-        case_type: performance
-        dataset_path: vllm-ascend/GSM8K-in3500-bs2800
-        request_conf: vllm_api_stream_chat
-        dataset_conf: gsm8k/gsm8k_gen_0_shot_cot_str_perf
-        num_prompts: 8
-        max_out_len: 512
-        batch_size: 2
-        request_rate: 0
-        baseline: 1
-        threshold: 0.97
-  - name: "Qwen3.5-27B-w8a8-in32k-16-4"
-    model: "Eco-Tech/Qwen3.5-27B-w8a8-mtp"
-    envs:
-      <<: *envs
-    server_cmd:
-      - "--data-parallel-size"
-      - "1"
-      - "--tensor-parallel-size"
-      - "2"
-      - "--port"
-      - "$SERVER_PORT"
-      - "--max-model-len"
-      - "34304"
-      - "--enable-prefix-caching"
-      - "--max-num-batched-tokens"
-      - "16384"
-      - "--max-num-seqs"
-      - "128"
-      - "--gpu-memory-utilization"
-      - "0.9"
-      - "--compilation-config"
-      - '{"cudagraph_capture_sizes":[1,4,8,12,16,24,32,48,56,64,72,84,96,108,112,128,160,172,196,200,212,232,256,272,288,312,328,344,360,384,400,416,432,448,480,512], "cudagraph_mode":"FULL_DECODE_ONLY"}'
-      - "speculative_config"
-      - '{"method": "qwen3_5_mtp", "num_speculative_tokens": 3, "enforce_eager": true}'
-      - "--trust-remote-code"
-      - "--async-scheduling"
-      - "--allowed-local-media-path"
-      - "/"
-      - "--quantization"
-      - "ascend"
-      - "--mm-processor-cache-gb"
-      - "0"
-      - "--additional-config"
-      - '{"enable_cpu_binding":true}'
-    benchmarks:
-      perf:
-        case_type: performance
-        dataset_path: vllm-ascend/GSM8K-in3500-bs2800
-        request_conf: vllm_api_stream_chat
-        dataset_conf: gsm8k/gsm8k_gen_0_shot_cot_str_perf
-        num_prompts: 16
-        max_out_len: 512
-        batch_size: 4
-        request_rate: 0
-        baseline: 1
-        threshold: 0.97
-  - name: "Qwen3.5-27B-w8a8-in64k-8-2"
-    model: "Eco-Tech/Qwen3.5-27B-w8a8-mtp"
-    envs:
-      <<: *envs
-    server_cmd:
-      - "--data-parallel-size"
-      - "1"
-      - "--tensor-parallel-size"
-      - "2"
-      - "--port"
-      - "$SERVER_PORT"
-      - "--max-model-len"
-      - "67584"
-      - "--max-num-batched-tokens"
-      - "16384"
-      - "--max-num-seqs"
-      - "128"
-      - "--gpu-memory-utilization"
-      - "0.9"
-      - "--compilation-config"
-      - '{"cudagraph_capture_sizes":[1,6,12,18,24,30,36,42,48,54,72,78,84,90,96,102,108,144,192], "cudagraph_mode":"FULL_DECODE_ONLY"}'
-      - "speculative_config"
-      - '{"method": "qwen3_5_mtp", "num_speculative_tokens": 5, "enforce_eager": true}'
-      - "--trust-remote-code"
-      - "--async-scheduling"
-      - "--allowed-local-media-path"
-      - "/"
-      - "--quantization"
-      - "ascend"
-      - "--mm-processor-cache-gb"
-      - "0"
-      - "--additional-config"
-      - '{"enable_cpu_binding":true}'
-      - "--no-enable-prefix-caching"
-    benchmarks:
-      perf:
-        case_type: performance
-        dataset_path: vllm-ascend/GSM8K-in3500-bs2800
-        request_conf: vllm_api_stream_chat
-        dataset_conf: gsm8k/gsm8k_gen_0_shot_cot_str_perf
-        num_prompts: 8
-        max_out_len: 1024
-        batch_size: 2
-        request_rate: 0
-        baseline: 1
-        threshold: 0.97
-  - name: "Qwen3.5-27B-w8a8-in64k-8-2-90"
-    model: "Eco-Tech/Qwen3.5-27B-w8a8-mtp"
-    envs:
-      <<: *envs
-    server_cmd:
-      - "--data-parallel-size"
-      - "1"
-      - "--tensor-parallel-size"
-      - "2"
-      - "--port"
-      - "$SERVER_PORT"
-      - "--max-model-len"
-      - "67584"
-      - "--enable-prefix-caching"
-      - "--max-num-batched-tokens"
-      - "16384"
-      - "--max-num-seqs"
-      - "128"
-      - "--gpu-memory-utilization"
-      - "0.9"
-      - "--compilation-config"
-      - '{"cudagraph_capture_sizes":[1,4,8,12,16,24,32,48,56,64,72,84,96,108,112,128,160,172,196,200,212,232,256,272,288,312,328,344,360,384,400,416,432,448,480,512], "cudagraph_mode":"FULL_DECODE_ONLY"}'
-      - "speculative_config"
-      - '{"method": "qwen3_5_mtp", "num_speculative_tokens": 3, "enforce_eager": true}'
-      - "--trust-remote-code"
-      - "--async-scheduling"
-      - "--allowed-local-media-path"
-      - "/"
-      - "--quantization"
-      - "ascend"
-      - "--mm-processor-cache-gb"
-      - "0"
-      - "--additional-config"
-      - '{"enable_cpu_binding":true}'
-    benchmarks:
-      perf:
-        case_type: performance
-        dataset_path: vllm-ascend/GSM8K-in3500-bs2800
-        request_conf: vllm_api_stream_chat
-        dataset_conf: gsm8k/gsm8k_gen_0_shot_cot_str_perf
-        num_prompts: 8
-        max_out_len: 1024
-        batch_size: 2
-        request_rate: 0
-        baseline: 1
-        threshold: 0.97
-  - name: "Qwen3.5-27B-w8a8-in128k-4-1"
-    model: "Eco-Tech/Qwen3.5-27B-w8a8-mtp"
-    envs:
-      <<: *envs
-    server_cmd:
-      - "--data-parallel-size"
-      - "1"
-      - "--tensor-parallel-size"
-      - "2"
-      - "--port"
-      - "$SERVER_PORT"
-      - "--max-model-len"
-      - "133120"
-      - "--enable-prefix-caching"
-      - "--max-num-batched-tokens"
-      - "16384"
-      - "--max-num-seqs"
-      - "128"
-      - "--gpu-memory-utilization"
-      - "0.9"
-      - "--compilation-config"
-      - '{"cudagraph_capture_sizes":[1,4,8,12,16,24,32,48,56,64,72,84,96,108,112,128,160,172,196,200,212,232,256,272,288,312,328,344,360,384,400,416,432,448,480,512], "cudagraph_mode":"FULL_DECODE_ONLY"}'
-      - "speculative_config"
-      - '{"method": "qwen3_5_mtp", "num_speculative_tokens": 3, "enforce_eager": true}'
-      - "--trust-remote-code"
-      - "--async-scheduling"
-      - "--allowed-local-media-path"
-      - "/"
-      - "--quantization"
-      - "ascend"
-      - "--mm-processor-cache-gb"
-      - "0"
-      - "--additional-config"
-      - '{"enable_cpu_binding":true}'
-    benchmarks:
-      perf:
-        case_type: performance
-        dataset_path: vllm-ascend/GSM8K-in3500-bs2800
-        request_conf: vllm_api_stream_chat
-        dataset_conf: gsm8k/gsm8k_gen_0_shot_cot_str_perf
-        num_prompts: 4
-        max_out_len: 1024
-        batch_size: 1
-        request_rate: 0
-        baseline: 1
-        threshold: 0.96
+#  - name: "Qwen3.5-27B-w8a8-in32k-56-14"
+#    model: "Eco-Tech/Qwen3.5-27B-w8a8-mtp"
+#    envs:
+#      <<: *envs
+#    server_cmd:
+#      - "--data-parallel-size"
+#      - "1"
+#      - "--tensor-parallel-size"
+#      - "2"
+#      - "--port"
+#      - "$SERVER_PORT"
+#      - "--max-model-len"
+#      - "34304"
+#      - "--enable-prefix-caching"
+#      - "--max-num-batched-tokens"
+#      - "16384"
+#      - "--max-num-seqs"
+#      - "128"
+#      - "--gpu-memory-utilization"
+#      - "0.9"
+#      - "--compilation-config"
+#      - '{"cudagraph_capture_sizes":[1,4,8,12,16,24,32,48,56,64,72,84,96,108,112,128,160,172,196,200,212,232,256,272,288,312,328,344,360,384,400,416,432,448,480,512], "cudagraph_mode":"FULL_DECODE_ONLY"}'
+#      - "--speculative_config"
+#      - '{"method": "qwen3_5_mtp", "num_speculative_tokens": 3, "enforce_eager": true}'
+#      - "--trust-remote-code"
+#      - "--async-scheduling"
+#      - "--allowed-local-media-path"
+#      - "/"
+#      - "--quantization"
+#      - "ascend"
+#      - "--mm-processor-cache-gb"
+#      - "0"
+#      - "--additional-config"
+#      - '{"enable_cpu_binding":true}'
+#    benchmarks:
+#      perf:
+#        case_type: performance
+#        dataset_path: vllm-ascend/GSM8K-in3500-bs2800
+#        request_conf: vllm_api_stream_chat
+#        dataset_conf: gsm8k/gsm8k_gen_0_shot_cot_str_perf
+#        num_prompts: 56
+#        max_out_len: 512
+#        batch_size: 14
+#        request_rate: 0
+#        baseline: 1
+#        threshold: 0.97
+#  - name: "Qwen3.5-27B-w8a8-in64k-16-4"
+#    model: "Eco-Tech/Qwen3.5-27B-w8a8-mtp"
+#    envs:
+#      <<: *envs
+#    server_cmd:
+#      - "--data-parallel-size"
+#      - "1"
+#      - "--tensor-parallel-size"
+#      - "2"
+#      - "--port"
+#      - "$SERVER_PORT"
+#      - "--max-model-len"
+#      - "67584"
+#      - "--max-num-batched-tokens"
+#      - "16384"
+#      - "--max-num-seqs"
+#      - "128"
+#      - "--gpu-memory-utilization"
+#      - "0.9"
+#      - "--compilation-config"
+#      - '{"cudagraph_capture_sizes":[1,6,12,18,24,30,36,42,48,54,72,78,84,90,96,102,108,144,192], "cudagraph_mode":"FULL_DECODE_ONLY"}'
+#      - "--speculative_config"
+#      - '{"method": "qwen3_5_mtp", "num_speculative_tokens": 5, "enforce_eager": true}'
+#      - "--trust-remote-code"
+#      - "--async-scheduling"
+#      - "--allowed-local-media-path"
+#      - "/"
+#      - "--quantization"
+#      - "ascend"
+#      - "--mm-processor-cache-gb"
+#      - "0"
+#      - "--additional-config"
+#      - '{"enable_cpu_binding":true}'
+#      - "--no-enable-prefix-caching"
+#    benchmarks:
+#      perf:
+#        case_type: performance
+#        dataset_path: vllm-ascend/GSM8K-in3500-bs2800
+#        request_conf: vllm_api_stream_chat
+#        dataset_conf: gsm8k/gsm8k_gen_0_shot_cot_str_perf
+#        num_prompts: 16
+#        max_out_len: 1024
+#        batch_size: 4
+#        request_rate: 0
+#        baseline: 1
+#        threshold: 0.97
+#  - name: "Qwen3.5-27B-w8a8-in64k-48-12"
+#    model: "Eco-Tech/Qwen3.5-27B-w8a8-mtp"
+#    envs:
+#      <<: *envs
+#    server_cmd:
+#      - "--data-parallel-size"
+#      - "1"
+#      - "--tensor-parallel-size"
+#      - "2"
+#      - "--port"
+#      - "$SERVER_PORT"
+#      - "--max-model-len"
+#      - "67584"
+#      - "--enable-prefix-caching"
+#      - "--max-num-batched-tokens"
+#      - "16384"
+#      - "--max-num-seqs"
+#      - "128"
+#      - "--gpu-memory-utilization"
+#      - "0.9"
+#      - "--compilation-config"
+#      - '{"cudagraph_capture_sizes":[1,4,8,12,16,24,32,48,56,64,72,84,96,108,112,128,160,172,196,200,212,232,256,272,288,312,328,344,360,384,400,416,432,448,480,512], "cudagraph_mode":"FULL_DECODE_ONLY"}'
+#      - "--speculative_config"
+#      - '{"method": "qwen3_5_mtp", "num_speculative_tokens": 3, "enforce_eager": true}'
+#      - "--trust-remote-code"
+#      - "--async-scheduling"
+#      - "--allowed-local-media-path"
+#      - "/"
+#      - "--quantization"
+#      - "ascend"
+#      - "--mm-processor-cache-gb"
+#      - "0"
+#      - "--additional-config"
+#      - '{"enable_cpu_binding":true}'
+#    benchmarks:
+#      perf:
+#        case_type: performance
+#        dataset_path: vllm-ascend/GSM8K-in3500-bs2800
+#        request_conf: vllm_api_stream_chat
+#        dataset_conf: gsm8k/gsm8k_gen_0_shot_cot_str_perf
+#        num_prompts: 48
+#        max_out_len: 1024
+#        batch_size: 12
+#        request_rate: 0
+#        baseline: 1
+#        threshold: 0.97
+#  - name: "Qwen3.5-27B-w8a8-in128k-28-7"
+#    model: "Eco-Tech/Qwen3.5-27B-w8a8-mtp"
+#    envs:
+#      <<: *envs
+#    server_cmd:
+#      - "--data-parallel-size"
+#      - "1"
+#      - "--tensor-parallel-size"
+#      - "2"
+#      - "--port"
+#      - "$SERVER_PORT"
+#      - "--max-model-len"
+#      - "133120"
+#      - "--enable-prefix-caching"
+#      - "--max-num-batched-tokens"
+#      - "16384"
+#      - "--max-num-seqs"
+#      - "128"
+#      - "--gpu-memory-utilization"
+#      - "0.9"
+#      - "--compilation-config"
+#      - '{"cudagraph_capture_sizes":[1,4,8,12,16,24,32,48,56,64,72,84,96,108,112,128,160,172,196,200,212,232,256,272,288,312,328,344,360,384,400,416,432,448,480,512], "cudagraph_mode":"FULL_DECODE_ONLY"}'
+#      - "--speculative_config"
+#      - '{"method": "qwen3_5_mtp", "num_speculative_tokens": 3, "enforce_eager": true}'
+#      - "--trust-remote-code"
+#      - "--async-scheduling"
+#      - "--allowed-local-media-path"
+#      - "/"
+#      - "--quantization"
+#      - "ascend"
+#      - "--mm-processor-cache-gb"
+#      - "0"
+#      - "--additional-config"
+#      - '{"enable_cpu_binding":true}'
+#    benchmarks:
+#      perf:
+#        case_type: performance
+#        dataset_path: vllm-ascend/GSM8K-in3500-bs2800
+#        request_conf: vllm_api_stream_chat
+#        dataset_conf: gsm8k/gsm8k_gen_0_shot_cot_str_perf
+#        num_prompts: 28
+#        max_out_len: 1024
+#        batch_size: 7
+#        request_rate: 0
+#        baseline: 1
+#        threshold: 0.97
+#  - name: "Qwen3.5-27B-w8a8-in16k-16-4"
+#    model: "Eco-Tech/Qwen3.5-27B-w8a8-mtp"
+#    envs:
+#      <<: *envs
+#    server_cmd:
+#      - "--data-parallel-size"
+#      - "1"
+#      - "--tensor-parallel-size"
+#      - "2"
+#      - "--port"
+#      - "$SERVER_PORT"
+#      - "--max-model-len"
+#      - "18432"
+#      - "--max-num-batched-tokens"
+#      - "16384"
+#      - "--max-num-seqs"
+#      - "128"
+#      - "--gpu-memory-utilization"
+#      - "0.9"
+#      - "--compilation-config"
+#      - '{"cudagraph_capture_sizes":[1,6,12,18,24,30,36,42,48,54,72,78,84,90,96,102,108,144,192], "cudagraph_mode":"FULL_DECODE_ONLY"}'
+#      - "--speculative_config"
+#      - '{"method": "qwen3_5_mtp", "num_speculative_tokens": 5, "enforce_eager": true}'
+#      - "--trust-remote-code"
+#      - "--async-scheduling"
+#      - "--allowed-local-media-path"
+#      - "/"
+#      - "--quantization"
+#      - "ascend"
+#      - "--mm-processor-cache-gb"
+#      - "0"
+#      - "--additional-config"
+#      - '{"enable_cpu_binding":true}'
+#      - "--no-enable-prefix-caching"
+#    benchmarks:
+#      perf:
+#        case_type: performance
+#        dataset_path: vllm-ascend/GSM8K-in3500-bs2800
+#        request_conf: vllm_api_stream_chat
+#        dataset_conf: gsm8k/gsm8k_gen_0_shot_cot_str_perf
+#        num_prompts: 16
+#        max_out_len: 1024
+#        batch_size: 4
+#        request_rate: 0
+#        baseline: 1
+#        threshold: 0.97
+#  - name: "Qwen3.5-27B-w8a8-in32k-8-2"
+#    model: "Eco-Tech/Qwen3.5-27B-w8a8-mtp"
+#    envs:
+#      <<: *envs
+#    server_cmd:
+#      - "--data-parallel-size"
+#      - "1"
+#      - "--tensor-parallel-size"
+#      - "2"
+#      - "--port"
+#      - "$SERVER_PORT"
+#      - "--max-model-len"
+#      - "34304"
+#      - "--max-num-batched-tokens"
+#      - "16384"
+#      - "--max-num-seqs"
+#      - "128"
+#      - "--gpu-memory-utilization"
+#      - "0.9"
+#      - "--compilation-config"
+#      - '{"cudagraph_capture_sizes":[1,6,12,18,24,30,36,42,48,54,72,78,84,90,96,102,108,144,192], "cudagraph_mode":"FULL_DECODE_ONLY"}'
+#      - "--speculative_config"
+#      - '{"method": "qwen3_5_mtp", "num_speculative_tokens": 5, "enforce_eager": true}'
+#      - "--trust-remote-code"
+#      - "--async-scheduling"
+#      - "--allowed-local-media-path"
+#      - "/"
+#      - "--quantization"
+#      - "ascend"
+#      - "--mm-processor-cache-gb"
+#      - "0"
+#      - "--additional-config"
+#      - '{"enable_cpu_binding":true}'
+#      - "--no-enable-prefix-caching"
+#    benchmarks:
+#      perf:
+#        case_type: performance
+#        dataset_path: vllm-ascend/GSM8K-in3500-bs2800
+#        request_conf: vllm_api_stream_chat
+#        dataset_conf: gsm8k/gsm8k_gen_0_shot_cot_str_perf
+#        num_prompts: 8
+#        max_out_len: 512
+#        batch_size: 2
+#        request_rate: 0
+#        baseline: 1
+#        threshold: 0.97
+#  - name: "Qwen3.5-27B-w8a8-in32k-16-4"
+#    model: "Eco-Tech/Qwen3.5-27B-w8a8-mtp"
+#    envs:
+#      <<: *envs
+#    server_cmd:
+#      - "--data-parallel-size"
+#      - "1"
+#      - "--tensor-parallel-size"
+#      - "2"
+#      - "--port"
+#      - "$SERVER_PORT"
+#      - "--max-model-len"
+#      - "34304"
+#      - "--enable-prefix-caching"
+#      - "--max-num-batched-tokens"
+#      - "16384"
+#      - "--max-num-seqs"
+#      - "128"
+#      - "--gpu-memory-utilization"
+#      - "0.9"
+#      - "--compilation-config"
+#      - '{"cudagraph_capture_sizes":[1,4,8,12,16,24,32,48,56,64,72,84,96,108,112,128,160,172,196,200,212,232,256,272,288,312,328,344,360,384,400,416,432,448,480,512], "cudagraph_mode":"FULL_DECODE_ONLY"}'
+#      - "--speculative_config"
+#      - '{"method": "qwen3_5_mtp", "num_speculative_tokens": 3, "enforce_eager": true}'
+#      - "--trust-remote-code"
+#      - "--async-scheduling"
+#      - "--allowed-local-media-path"
+#      - "/"
+#      - "--quantization"
+#      - "ascend"
+#      - "--mm-processor-cache-gb"
+#      - "0"
+#      - "--additional-config"
+#      - '{"enable_cpu_binding":true}'
+#    benchmarks:
+#      perf:
+#        case_type: performance
+#        dataset_path: vllm-ascend/GSM8K-in3500-bs2800
+#        request_conf: vllm_api_stream_chat
+#        dataset_conf: gsm8k/gsm8k_gen_0_shot_cot_str_perf
+#        num_prompts: 16
+#        max_out_len: 512
+#        batch_size: 4
+#        request_rate: 0
+#        baseline: 1
+#        threshold: 0.97
+#  - name: "Qwen3.5-27B-w8a8-in64k-8-2"
+#    model: "Eco-Tech/Qwen3.5-27B-w8a8-mtp"
+#    envs:
+#      <<: *envs
+#    server_cmd:
+#      - "--data-parallel-size"
+#      - "1"
+#      - "--tensor-parallel-size"
+#      - "2"
+#      - "--port"
+#      - "$SERVER_PORT"
+#      - "--max-model-len"
+#      - "67584"
+#      - "--max-num-batched-tokens"
+#      - "16384"
+#      - "--max-num-seqs"
+#      - "128"
+#      - "--gpu-memory-utilization"
+#      - "0.9"
+#      - "--compilation-config"
+#      - '{"cudagraph_capture_sizes":[1,6,12,18,24,30,36,42,48,54,72,78,84,90,96,102,108,144,192], "cudagraph_mode":"FULL_DECODE_ONLY"}'
+#      - "--speculative_config"
+#      - '{"method": "qwen3_5_mtp", "num_speculative_tokens": 5, "enforce_eager": true}'
+#      - "--trust-remote-code"
+#      - "--async-scheduling"
+#      - "--allowed-local-media-path"
+#      - "/"
+#      - "--quantization"
+#      - "ascend"
+#      - "--mm-processor-cache-gb"
+#      - "0"
+#      - "--additional-config"
+#      - '{"enable_cpu_binding":true}'
+#      - "--no-enable-prefix-caching"
+#    benchmarks:
+#      perf:
+#        case_type: performance
+#        dataset_path: vllm-ascend/GSM8K-in3500-bs2800
+#        request_conf: vllm_api_stream_chat
+#        dataset_conf: gsm8k/gsm8k_gen_0_shot_cot_str_perf
+#        num_prompts: 8
+#        max_out_len: 1024
+#        batch_size: 2
+#        request_rate: 0
+#        baseline: 1
+#        threshold: 0.97
+#  - name: "Qwen3.5-27B-w8a8-in64k-8-2-90"
+#    model: "Eco-Tech/Qwen3.5-27B-w8a8-mtp"
+#    envs:
+#      <<: *envs
+#    server_cmd:
+#      - "--data-parallel-size"
+#      - "1"
+#      - "--tensor-parallel-size"
+#      - "2"
+#      - "--port"
+#      - "$SERVER_PORT"
+#      - "--max-model-len"
+#      - "67584"
+#      - "--enable-prefix-caching"
+#      - "--max-num-batched-tokens"
+#      - "16384"
+#      - "--max-num-seqs"
+#      - "128"
+#      - "--gpu-memory-utilization"
+#      - "0.9"
+#      - "--compilation-config"
+#      - '{"cudagraph_capture_sizes":[1,4,8,12,16,24,32,48,56,64,72,84,96,108,112,128,160,172,196,200,212,232,256,272,288,312,328,344,360,384,400,416,432,448,480,512], "cudagraph_mode":"FULL_DECODE_ONLY"}'
+#      - "--speculative_config"
+#      - '{"method": "qwen3_5_mtp", "num_speculative_tokens": 3, "enforce_eager": true}'
+#      - "--trust-remote-code"
+#      - "--async-scheduling"
+#      - "--allowed-local-media-path"
+#      - "/"
+#      - "--quantization"
+#      - "ascend"
+#      - "--mm-processor-cache-gb"
+#      - "0"
+#      - "--additional-config"
+#      - '{"enable_cpu_binding":true}'
+#    benchmarks:
+#      perf:
+#        case_type: performance
+#        dataset_path: vllm-ascend/GSM8K-in3500-bs2800
+#        request_conf: vllm_api_stream_chat
+#        dataset_conf: gsm8k/gsm8k_gen_0_shot_cot_str_perf
+#        num_prompts: 8
+#        max_out_len: 1024
+#        batch_size: 2
+#        request_rate: 0
+#        baseline: 1
+#        threshold: 0.97
+#  - name: "Qwen3.5-27B-w8a8-in128k-4-1"
+#    model: "Eco-Tech/Qwen3.5-27B-w8a8-mtp"
+#    envs:
+#      <<: *envs
+#    server_cmd:
+#      - "--data-parallel-size"
+#      - "1"
+#      - "--tensor-parallel-size"
+#      - "2"
+#      - "--port"
+#      - "$SERVER_PORT"
+#      - "--max-model-len"
+#      - "133120"
+#      - "--enable-prefix-caching"
+#      - "--max-num-batched-tokens"
+#      - "16384"
+#      - "--max-num-seqs"
+#      - "128"
+#      - "--gpu-memory-utilization"
+#      - "0.9"
+#      - "--compilation-config"
+#      - '{"cudagraph_capture_sizes":[1,4,8,12,16,24,32,48,56,64,72,84,96,108,112,128,160,172,196,200,212,232,256,272,288,312,328,344,360,384,400,416,432,448,480,512], "cudagraph_mode":"FULL_DECODE_ONLY"}'
+#      - "--speculative_config"
+#      - '{"method": "qwen3_5_mtp", "num_speculative_tokens": 3, "enforce_eager": true}'
+#      - "--trust-remote-code"
+#      - "--async-scheduling"
+#      - "--allowed-local-media-path"
+#      - "/"
+#      - "--quantization"
+#      - "ascend"
+#      - "--mm-processor-cache-gb"
+#      - "0"
+#      - "--additional-config"
+#      - '{"enable_cpu_binding":true}'
+#    benchmarks:
+#      perf:
+#        case_type: performance
+#        dataset_path: vllm-ascend/GSM8K-in3500-bs2800
+#        request_conf: vllm_api_stream_chat
+#        dataset_conf: gsm8k/gsm8k_gen_0_shot_cot_str_perf
+#        num_prompts: 4
+#        max_out_len: 1024
+#        batch_size: 1
+#        request_rate: 0
+#        baseline: 1
+#        threshold: 0.97
