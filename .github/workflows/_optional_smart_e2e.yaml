@@ -168,7 +168,6 @@ jobs:
         shell: bash
         run: |
           export LD_LIBRARY_PATH=$LD_LIBRARY_PATH:/usr/local/Ascend/ascend-toolkit/latest/x86_64-linux/devlib
-          . /usr/local/Ascend/ascend-toolkit/set_env.sh
 
           echo -e "\033[1;34m=== TEST INFO ===\033[0m"
           echo -e "  \033[33mDevice:\033[0m ${{ matrix.group.npu_type }}"
