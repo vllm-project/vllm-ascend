@@ -1,6 +1,7 @@
 /**
  * Copyright (c) 2025 Huawei Technologies Co., Ltd.
  * This program is free software, you can redistribute it and/or modify it under the terms and conditions of
+ * CANN Open Software License Agreement Version 2.0 (the "License").
  * Please refer to the License for details. You may not use this file except in compliance with the License.
  * THIS SOFTWARE IS PROVIDED ON AN "AS IS" BASIS, WITHOUT WARRANTIES OF ANY KIND, EITHER EXPRESS OR IMPLIED,
  * INCLUDING BUT NOT LIMITED TO NON-INFRINGEMENT, MERCHANTABILITY, OR FITNESS FOR A PARTICULAR PURPOSE.
@@ -13,7 +14,7 @@
  */
 #include <dlfcn.h>
 #include "aclnn_recurrent_gated_delta_rule.h"
-#include "../recurrent_gated_delta_rule.h"
+#include "recurrent_gated_delta_rule.h"
 
 #include "securec.h"
 #include "aclnn_kernels/common/op_error_check.h"
@@ -42,7 +43,7 @@ constexpr size_t BETA_DIM_NUM = 2;
 constexpr size_t STATE_DIM_NUM = 4;
 
 struct RecurrentGatedDeltaRuleParams {
-    // mandatory
+    // madatory
     const aclTensor *query {nullptr};
     const aclTensor *key {nullptr};
     const aclTensor *value {nullptr};
@@ -61,14 +62,14 @@ struct RecurrentGatedDeltaRuleParams {
 };
 
 // support dtype
-static const std::initializer_list<op::DataType> QKV_TYPE_SUPPORT_LIST = {op::DataType::DT_BF16};
-static const std::initializer_list<op::DataType> STATE_TYPE_SUPPORT_LIST = {op::DataType::DT_BF16,op::DataType::DT_FLOAT};
-static const std::initializer_list<op::DataType> BETA_TYPE_SUPPORT_LIST = {op::DataType::DT_BF16};
+static const std::initializer_list<op::DataType> QKV_TYPE_SUPPORT_LIST = {op::DataType::DT_BF16, op::DataType::DT_FLOAT16, op::DataType::DT_FLOAT};
+static const std::initializer_list<op::DataType> STATE_TYPE_SUPPORT_LIST = {op::DataType::DT_BF16, op::DataType::DT_FLOAT16, op::DataType::DT_FLOAT};
+static const std::initializer_list<op::DataType> BETA_TYPE_SUPPORT_LIST = {op::DataType::DT_BF16, op::DataType::DT_FLOAT16, op::DataType::DT_FLOAT};
 static const std::initializer_list<op::DataType> SEQ_LENS_TYPE_SUPPORT_LIST = {op::DataType::DT_INT32};
 static const std::initializer_list<op::DataType> SSM_TYPE_SUPPORT_LIST = {op::DataType::DT_INT32};
 static const std::initializer_list<op::DataType> G_TYPE_SUPPORT_LIST = {op::DataType::DT_FLOAT};
 static const std::initializer_list<op::DataType> ACC_TO_TYPE_SUPPORT_LIST = {op::DataType::DT_INT32};
-static const std::initializer_list<op::DataType> OUT_TYPE_SUPPORT_LIST = {op::DataType::DT_BF16};
+static const std::initializer_list<op::DataType> OUT_TYPE_SUPPORT_LIST = {op::DataType::DT_BF16, op::DataType::DT_FLOAT16, op::DataType::DT_FLOAT};
 
 static inline bool CheckNotNull(const RecurrentGatedDeltaRuleParams &params)
 {
@@ -116,7 +117,7 @@ static aclnnStatus CheckParams(RecurrentGatedDeltaRuleParams &params)
     // 检查输入参数是否在支持的数据类型范围内
     CHECK_RET(CheckDtypeVaild(params), ACLNN_ERR_PARAM_INVALID);
 
-    OP_LOGD("RecurrentGatedDeltaRule check params success.");
+    OP_LOGD("RecurrentGatedDeltaRule check params sucess.");
 
     return ACLNN_SUCCESS;
 }
