@@ -156,6 +156,83 @@ def test_ngram_correctness(
     assert matches > int(0.66 * len(ref_outputs))
 
 
+@pytest.mark.parametrize("num_speculative_tokens", [3])
+def test_ngram_npu_async_acceptance(
+    test_prompts: list[list[dict[str, Any]]],
+    num_speculative_tokens: int,
+    model_name: str,
+):
+    """
+    Evaluate the per-position acceptance rate of ngram_gpu speculative
+    decoding with async scheduling enabled on NPU. Uses the mixed
+    repeat/sentence prompts (the ``test_prompts`` fixture) so the
+    suffix-matching ngram has a representative mix of high- and
+    low-acceptance inputs.
+    """
+    sampling_params = SamplingParams(
+        temperature=0,
+        ignore_eos=False,
+        max_tokens=256,
+    )
+
+    speculative_config = {
+        "method": "ngram_gpu",
+        "prompt_lookup_max": 2,
+        "prompt_lookup_min": 2,
+        "num_speculative_tokens": num_speculative_tokens,
+    }
+
+    compilation_config = CompilationConfig(cudagraph_capture_sizes=[12])
+
+    with VllmRunner(
+        model_name,
+        max_model_len=2048,
+        disable_log_stats=False,
+        tensor_parallel_size=1,
+        max_num_seqs=256,
+        distributed_executor_backend="mp",
+        gpu_memory_utilization=0.7,
+        speculative_config=speculative_config,
+        compilation_config=compilation_config,
+        async_scheduling=True,
+    ) as llm:
+        outputs = llm.model.chat(test_prompts, sampling_params)
+        metrics = llm.model.get_metrics()
+
+    for output in outputs:
+        prompt = output.prompt
+        generated_text = output.outputs[0].text
+        output_tokens = output.outputs[0].token_ids
+        print(f"Prompt: {prompt!r}, Generated text: {generated_text!r}")
+        print(f"Output tokens: {output_tokens}")
+
+    num_drafts = 0
+    num_accepted_tokens_per_pos = [0] * num_speculative_tokens
+    for metric in metrics:
+        if metric.name == "vllm:spec_decode_num_drafts":
+            assert isinstance(metric, Counter)
+            num_drafts += metric.value
+        elif metric.name == "vllm:spec_decode_num_accepted_tokens_per_pos":
+            assert isinstance(metric, Vector)
+            for pos in range(len(metric.values)):
+                num_accepted_tokens_per_pos[pos] += metric.values[pos]
+
+    assert num_drafts > 0, "no drafts produced — async ngram path not exercised"
+    acceptance_per_pos = [num_accepted_tokens / num_drafts for num_accepted_tokens in num_accepted_tokens_per_pos]
+
+    # NOTE: golden may need recalibration. Update if CI is stable on a
+    # better acceptance, mirroring the convention used by the other
+    # spec-decode acceptance tests in this file.
+    golden = [0.50, 0.30, 0.20]
+
+    match = all(abs(a - b) < 1.0 for a, b in zip(acceptance_per_pos, golden))
+    if not match:
+        print(f"acceptance_per_pos: {acceptance_per_pos}")
+        print(f"golden: {golden}")
+
+    assert match
+
+
 def test_qwen3_vl_eagle_correctness(
     test_prompts: list[list[dict[str, Any]]],
     sampling_config: SamplingParams,
