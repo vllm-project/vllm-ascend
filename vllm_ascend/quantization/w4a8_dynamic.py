@@ -211,7 +211,7 @@ class AscendW4A8DynamicFusedMoEMethod:
     """FusedMoe method for Ascend W4A8_DYNAMIC.
     """
 
-    def __init__(self):
+    def __init__(self, tid2eid=None):
         self.ep_group = get_ep_group()
 
         vllm_config = get_current_vllm_config()

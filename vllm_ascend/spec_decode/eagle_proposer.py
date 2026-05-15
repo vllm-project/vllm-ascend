@@ -93,6 +93,8 @@ class EagleProposer(VllmEagleProposer):
         super().__init__(vllm_config, device, runner)
 
         self.use_async_scheduling = self.vllm_config.scheduler_config.async_scheduling
+        self.use_compress = hasattr(self.vllm_config.model_config.hf_config,
+                                    "compress_ratios")
         # there is synchronization between mtp steps when enabling aclgraph,
         # disable aclgraph when use async scheduling to avoid the
         # synchronization overhead.
@@ -173,6 +175,12 @@ class EagleProposer(VllmEagleProposer):
         ]
 
         self._runnable = self._run_merged_draft
+
+        self.query_lens = torch.ones(
+            self.vllm_config.scheduler_config.max_num_seqs,
+            dtype=torch.int32,
+            device=self.device,
+        )
 
     def load_model(self, model: nn.Module) -> None:
         target_attn_layer_names = set(
@@ -257,11 +265,12 @@ class EagleProposer(VllmEagleProposer):
                     )
             else:
                 # MTP model
-                share_embeddings = True
-                logger.info(
-                    "Detected MTP model. "
-                    "Sharing target model embedding weights with the draft model."
-                )
+                share_embeddings = False if self.use_compress else True
+                if share_embeddings:
+                    logger.info(
+                        "Detected MTP model. "
+                        "Sharing target model embedding weights with the draft model."
+                    )
 
             if share_embeddings:
                 if hasattr(self.model.model, "embed_tokens"):
@@ -350,7 +359,7 @@ class EagleProposer(VllmEagleProposer):
                 num_computed_tokens_cpu=num_computed_tokens_cpu,
                 actual_seq_lengths_q=self.runner.actual_seq_lengths_q,
                 block_table_tensor=self.runner.input_batch.block_table[0].
-                get_device_tensor()[:num_reqs],
+                get_device_tensor(),
                 # This is used to hold a position.
                 slot_mapping=self.runner.input_batch.block_table[0].
                 slot_mapping.gpu,
@@ -946,9 +955,16 @@ class EagleProposer(VllmEagleProposer):
             slot_mapping=common_attn_metadata.slot_mapping,
             actual_seq_lengths_q=self.runner.actual_seq_lengths_q,
             positions=common_attn_metadata.positions[token_indices],
+            positions_cpu=common_attn_metadata.positions_cpu[token_indices]
+            if common_attn_metadata.positions_cpu is not None else
+            common_attn_metadata.positions_cpu,
             attn_state=self.runner.attn_state,
             decode_token_per_req=self.runner.decode_token_per_req,
-            max_seq_len=0)
+            max_seq_len=0,
+            state_ids=common_attn_metadata.state_ids,
+            swa_slot_mapping=common_attn_metadata.swa_slot_mapping,
+            swa_block_table=common_attn_metadata.swa_block_table,
+            state_block_table=common_attn_metadata.state_block_table)
         return spec_common_attn_metadata, token_indices
 
     def prepare_inputs_padded(
@@ -1028,12 +1044,17 @@ class EagleProposer(VllmEagleProposer):
             block_table_tensor=common_attn_metadata.block_table_tensor,
             slot_mapping=common_attn_metadata.slot_mapping,
             positions=common_attn_metadata.positions,
+            positions_cpu=common_attn_metadata.positions_cpu,
             attn_state=self.runner.attn_state,
             decode_token_per_req=self.runner.decode_token_per_req,
             num_computed_tokens_cpu=common_attn_metadata.
             num_computed_tokens_cpu,
             seq_lens=common_attn_metadata.seq_lens,
-            max_seq_len=0)
+            max_seq_len=0,
+            state_ids=common_attn_metadata.state_ids,
+            swa_slot_mapping=common_attn_metadata.swa_slot_mapping,
+            swa_block_table=common_attn_metadata.swa_block_table,
+            state_block_table=common_attn_metadata.state_block_table)
 
         return spec_common_attn_metadata, token_indices, token_indices_to_sample
 

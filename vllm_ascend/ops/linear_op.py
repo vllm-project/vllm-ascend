@@ -60,14 +60,15 @@ from vllm_ascend.ascend_config import get_ascend_config
 from vllm_ascend.distributed.parallel_state import (get_flashcomm2_odp_group,
                                                     get_flashcomm2_otp_group,
                                                     get_mlp_tp_group,
+                                                    get_olora_tp_group,
                                                     get_otp_group)
 from vllm_ascend.ops.flashcomm2_oshard_manager import flashcomm2_oshard_manager
 from vllm_ascend.utils import (enable_dsa_cp, enable_dsa_cp_with_layer_shard,
                                enable_sp, flashcomm2_enable,
                                get_flashcomm2_reorgnized_batch_ids,
                                matmul_allreduce_enable, mlp_tp_enable,
-                               oproj_tp_enable, parse_layer_idx,
-                               shared_expert_dp_enabled)
+                               olora_tp_enable, oproj_tp_enable,
+                               parse_layer_idx, shared_expert_dp_enabled)
 
 
 class CustomLinearOp:
@@ -277,6 +278,98 @@ class OProjRowParallelOp(CustomRowParallelOp):
         super().update_attrs()
         self.input_is_parallel = self.layer.input_is_parallel
         self.input_size_per_partition = self.layer.input_size_per_partition
+
+
+class OLoraColumnParallelOp(CustomColumnParallelOp):
+
+    def __init__(self, layer):
+        super().__init__(layer)
+
+    @property
+    def comm_group(self):
+        return get_olora_tp_group()
+
+    def apply_impl(
+        self,
+        input_: torch.Tensor,
+    ) -> Union[torch.Tensor, tuple[torch.Tensor, Optional[Parameter]]]:
+        # Prepare tensors for all-to-all communication
+        input_parallel = input_
+        local_batch_size, local_groups, hidden_dim = input_parallel.shape
+        total_batch_size = local_batch_size * self.tp_size
+
+        # Reshape tensor for efficient cross-device transfer:
+        # [batch, dim] -> [tp_size, batch, chunk] -> flattened
+        send_buf = (input_parallel.reshape(
+            local_batch_size, self.tp_size, local_groups // self.tp_size,
+            hidden_dim).transpose(0, 1).contiguous().view(-1))
+
+        # Create receive buffer
+        recv_buf = torch.empty(local_batch_size * local_groups,
+                               hidden_dim,
+                               dtype=input_parallel.dtype,
+                               device=input_parallel.device)
+
+        # Perform all-to-all communication
+        dist.all_to_all_single(recv_buf,
+                               send_buf,
+                               group=self.comm_group.device_group)
+        input_parallel = recv_buf.view(total_batch_size, -1, hidden_dim)
+
+        # Only fuse bias add for rank 0 to avoid duplicate bias addition in TP>1
+        output = torch_npu.npu_transpose_batchmatmul(input_parallel,
+                                                     self.layer.weight,
+                                                     bias=None,
+                                                     scale=None,
+                                                     perm_x1=(1, 0, 2),
+                                                     perm_x2=(0, 1, 2),
+                                                     perm_y=(1, 0, 2),
+                                                     batch_split_factor=1)
+        output = output.view(total_batch_size, -1)
+
+        # Handle bias return based on configuration
+        output_bias = self.bias if self.skip_bias_add else None
+        return output, output_bias
+
+
+class OLoraRowParallelOp(CustomRowParallelOp):
+
+    def __init__(self, layer):
+        super().__init__(layer)
+
+    @property
+    def comm_group(self):
+        return get_olora_tp_group()
+
+    def apply_impl(
+        self,
+        input_: torch.Tensor,
+    ) -> Union[torch.Tensor, tuple[torch.Tensor, Optional[Parameter]]]:
+
+        if self.input_is_parallel:
+            input_parallel = input_
+        else:
+            splitted_input = split_tensor_along_last_dim(
+                input_, num_partitions=self.tp_size)
+            input_parallel = splitted_input[self.tp_rank].contiguous()
+
+        # Prepare tensors for all-to-all communication
+        total_batch_size, hidden_dim = input_parallel.shape
+
+        # Only fuse bias add for rank 0 to avoid duplicate bias addition in TP>1
+        bias_ = None if (self.tp_rank > 0 or self.skip_bias_add) else self.bias
+        assert self.quant_method is not None
+        output_parallel = self.quant_method.apply(self.layer,
+                                                  input_parallel,
+                                                  bias=bias_)
+
+        # otp-specific: Combine partial results across devices
+        output = self.comm_group.reduce_scatter(output_parallel, dim=0)
+        output = output.view(total_batch_size // self.tp_size, -1)
+
+        # Handle bias return based on configuration
+        output_bias = self.bias if self.skip_bias_add else None
+        return output, output_bias
 
 
 class Flashcomm2OProjRowParallelOp(CustomRowParallelOp):
@@ -701,9 +794,12 @@ class ShardedCPColumnParallelOp(CustomColumnParallelOp):
 def _get_column_parallel_op(
     prefix, layer
 ) -> Optional[Union[MLPColumnParallelOp, SequenceColumnParallelOp,
-                    ShardedCPColumnParallelOp, Flashcomm2OshardQKVParallelOp]]:
+                    ShardedCPColumnParallelOp, Flashcomm2OshardQKVParallelOp,
+                    OLoraColumnParallelOp]]:
     if enable_dsa_cp() and ("q_b_proj" in prefix or "kv_b_proj" in prefix):
         return ShardedCPColumnParallelOp(layer)
+    if "wo_a" in prefix and olora_tp_enable():
+        return OLoraColumnParallelOp(layer)
     if "gate_up_proj" in prefix and mlp_tp_enable(
     ) and not is_moe_layer(prefix):
         return MLPColumnParallelOp(layer)
@@ -731,9 +827,12 @@ def _get_row_parallel_op(
     prefix, layer
 ) -> Optional[Union[MLPRowParallelOp, OProjRowParallelOp,
                     Flashcomm2OProjRowParallelOp, MatmulAllreduceRowParallelOp,
-                    SequenceRowParallelOp, ShardedCPRowParallelOp]]:
+                    SequenceRowParallelOp, ShardedCPRowParallelOp,
+                    OLoraRowParallelOp]]:
     if enable_dsa_cp_with_layer_shard() and "o_proj" in prefix:
         return ShardedCPRowParallelOp(layer)
+    if "wo_b" in prefix and olora_tp_enable():
+        return OLoraRowParallelOp(layer)
     if "down_proj" in prefix and mlp_tp_enable() and not is_moe_layer(prefix):
         return MLPRowParallelOp(layer)
     if "o_proj" in prefix and oproj_tp_enable():
@@ -751,6 +850,7 @@ def _get_row_parallel_op(
             "out_proj",  # attn output linear of Qwen3 Next
             "down_proj",  # second MLP of most LLMs
             "attention.dense",  # attn output linear of Bailing
+            "wo_b"  # attn output linear of dsv4
         ]
         for a_prefix in sp_row_prefixes:
             if a_prefix in prefix:

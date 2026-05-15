@@ -139,6 +139,7 @@ class AscendCompressedTensorsConfig(QuantizationConfig):
         self,
         layer: torch.nn.Module,
         prefix: str,
+        tid2eid: Optional[dict[int, int]] = None,
     ) -> Optional["QuantizeMethodBase"]:
         if isinstance(layer, LinearBase):
             layer.ascend_quant_method = COMPRESSED_TENSORS_METHOD

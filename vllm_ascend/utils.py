@@ -28,6 +28,7 @@ from functools import lru_cache
 from threading import Lock
 from typing import TYPE_CHECKING, Any, List, Optional, Tuple, Union
 
+import numpy as np
 import torch
 import torch_npu  # noqa: F401
 from packaging.version import InvalidVersion, Version
@@ -63,6 +64,7 @@ _ASCEND_CUSTOMOP_IS_REIGISTERED = False
 _DEFAULT_BUFFER_SIZE = 200
 _MIN_DP_BUFFER_SIZE = 50
 _IS_MOE_MODEL = None
+_IS_W8A8_DYNAMIC = None
 _IS_DRAFTER_MOE_MODEL = None
 _IS_OMNI_MODEL = None
 _IS_VL_MODEL = None
@@ -72,6 +74,13 @@ _SUBSCRIBED_COMPUTE_STREAMS = set()
 _GRAPH_PRINT_STREAM = None
 _GRAPH_PRINT_STREAM_LOCK = Lock()
 _HAS_ROPE = None
+_ATNN_CALCULATION_STREAM = None
+
+
+class QuantType(Enum):
+    NONE = 0
+    W8A8 = 1
+    W4A8 = 2
 
 
 def _print_callback_on_stream(*args):
@@ -351,6 +360,13 @@ def cp_chunkedprefill_comm_stream() -> torch.npu.Stream:
     if _CP_CHUNKEDPREFILL_COMM_STREAM is None:
         _CP_CHUNKEDPREFILL_COMM_STREAM = torch_npu.npu.Stream()
     return _CP_CHUNKEDPREFILL_COMM_STREAM
+
+
+def attention_calculation_stream() -> torch.npu.Stream:
+    global _ATNN_CALCULATION_STREAM
+    if _ATNN_CALCULATION_STREAM is None:
+        _ATNN_CALCULATION_STREAM = torch_npu.npu.Stream()
+    return _ATNN_CALCULATION_STREAM
 
 
 def adapt_patch(is_global_patch: bool = False):
@@ -730,6 +746,11 @@ def oproj_tp_enable() -> bool:
     ).finegrained_tp_config.oproj_tensor_parallel_size > 0
 
 
+def olora_tp_enable() -> bool:
+    return get_ascend_config(
+    ).finegrained_tp_config.olora_tensor_parallel_size > 1
+
+
 def mlp_tp_enable() -> bool:
     return get_ascend_config(
     ).finegrained_tp_config.mlp_tensor_parallel_size > 0
@@ -792,6 +813,20 @@ def is_moe_model(vllm_config: VllmConfig):
         model_configs = vllm_config.model_config.hf_text_config.to_dict()
         _IS_MOE_MODEL = _is_contain_expert(model_configs)
     return _IS_MOE_MODEL
+
+
+def is_w8a8_dynamic(quant_type: Optional[QuantType] = None):
+    """Checks if the MoE module is W8A8 DYNAMIC"""
+    global _IS_W8A8_DYNAMIC
+    # _IS_W8A8_DYNAMIC would be set in AscendFusedMoE initialization(ignore MTP draft model)
+    if _IS_W8A8_DYNAMIC is not None:
+        return _IS_W8A8_DYNAMIC
+    if quant_type is not None:
+        if quant_type == QuantType.W8A8:
+            _IS_W8A8_DYNAMIC = True
+        else:
+            _IS_W8A8_DYNAMIC = False
+    return _IS_W8A8_DYNAMIC
 
 
 def is_drafter_moe_model(vllm_config: VllmConfig):
@@ -1182,3 +1217,56 @@ def parse_layer_idx(prefix: str) -> Optional[int]:
         layer_idx = None
 
     return layer_idx
+
+
+def get_compressed_pos_and_indices(
+    num_computed_tokens: np.ndarray, num_scheduled_tokens: np.ndarray,
+    arrange_np: np.ndarray, use_compress: bool
+) -> tuple[Optional[List[np.ndarray]], Optional[List[np.ndarray]],
+           Optional[List[np.ndarray]]]:
+    """
+    Batch generate compressed position ids for multi-requests on DSv4.
+    Calculate compressed position ids independently for each single request.
+ 
+    Args:
+        num_computed_tokens: Historical processed token counts of multiple requests, shape=[num_reqs,]
+        num_scheduled_tokens: New scheduled token counts of multiple requests in current step, shape=[num_reqs,]
+ 
+    Returns:
+        tuple(np.ndarray, np.ndarray):
+            1. Flattened compressed position id array for all requests
+            2. Length of compressed position ids for each individual request
+    """
+    if not use_compress:
+        return None, None, None
+    # Assert input validity
+    assert num_computed_tokens.shape == num_scheduled_tokens.shape, "num_computed_tokens and num_scheduled_tokens must have the same shape"
+    assert np.all(num_computed_tokens >= 0) and np.all(
+        num_scheduled_tokens >= 0), "Token count cannot be negative value"
+
+    positions_compressed_list = []
+    req_indices_compressed_list = []
+    num_scheduled_tokens_compressed_list = []
+    compress_ratios = [4, 128]
+    for compress_ratio in compress_ratios:
+        # Calculate compressed length of historical & total tokens
+        compressed_historical_len = num_computed_tokens // compress_ratio
+        compressed_total_len = (num_computed_tokens +
+                                num_scheduled_tokens) // compress_ratio
+        # The number of new compressed position ids for each request
+        num_new_compressed_pos = compressed_total_len - compressed_historical_len
+
+        # Core vectorized calculation (no for-loop)
+        pos_starts = compressed_historical_len
+        prefix_offsets = np.concatenate([[0],
+                                         np.cumsum(num_new_compressed_pos[:-1])
+                                         ])
+        compressed_pos_ids = np.arange(
+            np.sum(num_new_compressed_pos)) + np.repeat(
+                pos_starts - prefix_offsets, num_new_compressed_pos)
+
+        req_indices_compressed = np.repeat(arrange_np, num_new_compressed_pos)
+        req_indices_compressed_list.append(req_indices_compressed)
+        positions_compressed_list.append(compressed_pos_ids)
+        num_scheduled_tokens_compressed_list.append(num_new_compressed_pos)
+    return positions_compressed_list, req_indices_compressed_list, num_scheduled_tokens_compressed_list

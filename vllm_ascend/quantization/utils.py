@@ -76,12 +76,16 @@ def get_quant_method(quant_description: Dict[str, Any],
                      prefix: str,
                      layer_type: str,
                      packed_modules_mapping: Optional[Dict[str, Any]] = None,
-                     layer: torch.nn.Module = None):
+                     layer: torch.nn.Module = None,
+                     tid2eid=None):
     if quant_description.get("quant_method") == COMPRESSED_TENSORS_METHOD:
         return get_quant_method_llmcompressor(layer)
 
-    return get_quant_method_modelslim(quant_description, prefix, layer_type,
-                                      packed_modules_mapping)
+    return get_quant_method_modelslim(quant_description,
+                                      prefix,
+                                      layer_type,
+                                      packed_modules_mapping,
+                                      tid2eid=tid2eid)
 
 
 def get_quant_method_llmcompressor(layer: torch.nn.Module):
@@ -95,7 +99,8 @@ def get_quant_method_modelslim(
         quant_description: Dict[str, Any],
         prefix: str,
         layer_type: str,
-        packed_modules_mapping: Optional[Dict[str, Any]] = None):
+        packed_modules_mapping: Optional[Dict[str, Any]] = None,
+        tid2eid=None):
     logger.info_once("Using the vLLM Ascend modelslim Quantization now!")
     if packed_modules_mapping is None:
         packed_modules_mapping = dict()
@@ -110,7 +115,10 @@ def get_quant_method_modelslim(
         method_map = ASCEND_QUANTIZATION_METHOD_MAP[quant_type]
         if layer_type in method_map.keys():
             method_cls = method_map[layer_type]
-            return method_cls()
+            if layer_type == "moe":
+                return method_cls(tid2eid=tid2eid)
+            else:
+                return method_cls()
         else:
             raise NotImplementedError(
                 f"Currently, vLLM Ascend doesn't support {quant_type} for {layer_type}."

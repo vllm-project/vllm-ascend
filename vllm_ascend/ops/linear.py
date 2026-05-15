@@ -381,6 +381,12 @@ class AscendColumnParallelLinear(ColumnParallelLinear):
 
         if self.custom_op is not None:
             self.custom_op.update_attrs()
+        self.prefix = prefix
+        if "wo_a" in prefix:
+            hf_config = get_current_vllm_config().model_config.hf_text_config
+            self.n_local_groups = getattr(hf_config, "o_groups",
+                                          0) // self.tp_size
+            self.o_lora_rank = getattr(hf_config, "o_lora_rank", 0)
 
     def forward(
         self,
@@ -390,6 +396,13 @@ class AscendColumnParallelLinear(ColumnParallelLinear):
             return self.custom_op.apply(input_)
 
         return super().forward(input_)
+
+    def weight_loader(self, param: Parameter, loaded_weight: torch.Tensor):
+        super().weight_loader(param, loaded_weight)
+        if "wo_a" in self.prefix:
+            self.weight.data = self.weight.data.view(
+                self.n_local_groups, self.o_lora_rank,
+                -1).transpose(2, 1).contiguous()
 
 
 class AscendReplicatedLinear(ReplicatedLinear):

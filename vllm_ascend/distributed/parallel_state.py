@@ -15,6 +15,7 @@ _MC2: Optional[GroupCoordinator] = None
 # Module specific tensor parallel groups
 _MLP_TP: Optional[GroupCoordinator] = None
 _OTP: Optional[GroupCoordinator] = None
+_OLORA_TP: Optional[GroupCoordinator] = None
 _LMTP: Optional[GroupCoordinator] = None
 _EMBED_TP: Optional[GroupCoordinator] = None
 
@@ -135,6 +136,8 @@ def init_ascend_model_parallel(parallel_config: ParallelConfig, ):
 
     otp_size = get_ascend_config(
     ).finegrained_tp_config.oproj_tensor_parallel_size
+    olora_tp_size = get_ascend_config(
+    ).finegrained_tp_config.olora_tensor_parallel_size
     lmhead_tp_size = get_ascend_config(
     ).finegrained_tp_config.lmhead_tensor_parallel_size
     embedding_tp_size = get_ascend_config(
@@ -142,10 +145,12 @@ def init_ascend_model_parallel(parallel_config: ParallelConfig, ):
     mlp_tp_size = get_ascend_config(
     ).finegrained_tp_config.mlp_tensor_parallel_size
 
-    global _OTP, _LMTP, _EMBED_TP, _MLP_TP
+    global _OTP, _LMTP, _EMBED_TP, _MLP_TP, _OLORA_TP
 
     if otp_size > 0:
         _OTP = _create_or_get_group(otp_size, "otp")
+    if olora_tp_size > 0:
+        _OLORA_TP = _create_or_get_group(olora_tp_size, "oloratp")
     if lmhead_tp_size > 0:
         _LMTP = _create_or_get_group(lmhead_tp_size, "lmheadtp")
     if embedding_tp_size > 0:
@@ -276,6 +281,12 @@ def get_otp_group() -> GroupCoordinator:
     return _OTP
 
 
+def get_olora_tp_group() -> GroupCoordinator:
+    assert _OLORA_TP is not None, (
+        "output tensor parallel group is not initialized")
+    return _OLORA_TP
+
+
 def get_lmhead_tp_group() -> GroupCoordinator:
     assert _LMTP is not None, (
         "lm head tensor parallel group is not initialized")
@@ -339,6 +350,11 @@ def destroy_ascend_model_parallel():
     if _OTP:
         _OTP.destroy()
     _OTP = None
+
+    global _OLORA_TP
+    if _OLORA_TP:
+        _OLORA_TP.destroy()
+    _OLORA_TP = None
 
     global _P_TP
     if _P_TP:

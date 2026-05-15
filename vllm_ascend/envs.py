@@ -139,6 +139,9 @@ env_variables: Dict[str, Callable[[], Any]] = {
     # Whether to anbale balance scheduling
     "VLLM_ASCEND_BALANCE_SCHEDULING":
     lambda: bool(int(os.getenv("VLLM_ASCEND_BALANCE_SCHEDULING", '0'))),
+    # Whether to use MultiBlockPool for KV cache management
+    "USE_MULTI_BLOCK_POOL":
+    lambda: bool(int(os.getenv("USE_MULTI_BLOCK_POOL", '0'))),
 }
 
 # end-env-vars-definition

@@ -13,7 +13,7 @@ enable_custom_op()
 
 def gmm_swiglu_quant(x: torch.Tensor, weight: torch.Tensor,
                      perChannelScale: torch.Tensor,
-                     perTokenScale: torch.Tensor, m: int):
+                     perTokenScale: torch.Tensor, m: int, swiglu_limit: float):
     """
     Perform quantized GMM (Grouped Matrix Multiplication) operation with SwiGLU activation function.
 
@@ -37,9 +37,12 @@ def gmm_swiglu_quant(x: torch.Tensor, weight: torch.Tensor,
     c_temp3 = torch.mul(c_temp2, perTokenScale.reshape(m, 1))
 
     # Split the result into two parts to apply SwiGLU activation function
-    c_temp4, gate = c_temp3.chunk(2, dim=-1)
-    c_temp5 = c_temp4 * torch.sigmoid(c_temp4)  # SwiGLU activation
-    c_temp6 = c_temp5 * gate  # Element-wise multiplication with gating values
+    gate, up = c_temp3.chunk(2, dim=-1)
+    if swiglu_limit > 0:
+        up = torch.clamp(up, min=-swiglu_limit, max=swiglu_limit)
+        gate = torch.clamp(gate, max=swiglu_limit)
+    c_temp6 = gate * torch.sigmoid(
+        gate) * up  # Element-wise multiplication with gating values
 
     # Quantize the output
     max = torch.max(
@@ -55,7 +58,7 @@ def gmm_swiglu_quant(x: torch.Tensor, weight: torch.Tensor,
 
 def process_groups(x: torch.Tensor, weight: torch.Tensor,
                    perChannelScale: torch.Tensor, perTokenScale: torch.Tensor,
-                   groupList: torch.Tensor):
+                   groupList: torch.Tensor, swiglu_limit: float):
     """
     Process input data by groups and call GMM_Swiglu_quant function for quantized computation.
 
@@ -91,7 +94,7 @@ def process_groups(x: torch.Tensor, weight: torch.Tensor,
                                  weight[i],
                                  perChannelScale[i],
                                  perTokenScale[start_idx:start_idx + tempV],
-                                 tempV)
+                                 tempV,swiglu_limit)
 
         start_idx += tempV  # Update starting index to process the next group
     return quantOutput, quantScaleOutput
@@ -122,15 +125,16 @@ def test_gmm_swiglu_quant_weight_nz_tensor_list():
     x_scale = x_scale.to(torch.float32)
 
     group_list = torch.tensor([2048, 4096, 6144, 8192], dtype=torch.int64)
-
+    swiglu_limit = 1
     output_cpu, output_scale_cpu = process_groups(x, weight, weight_scale,
-                                                  x_scale, group_list)
+                                                  x_scale, group_list,
+                                                  swiglu_limit)
     output_npu, output_scale_npu, _ = \
         torch.ops._C_ascend.grouped_matmul_swiglu_quant_weight_nz_tensor_list(x.npu(),
                                                                               weight_nz_npu,
                                                                               weight_scale_npu,
                                                                               x_scale.npu(),
-                                                                              group_list.npu())
+                                                                              group_list.npu(),swiglu_limit=swiglu_limit)
     output_npu_valid = output_npu[:group_list[-1], :]
     output_scale_npu_valid = output_scale_npu[:group_list[-1]]
 

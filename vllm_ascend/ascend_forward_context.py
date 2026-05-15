@@ -15,6 +15,7 @@ from vllm_ascend.ascend_config import get_ascend_config
 from vllm_ascend.utils import (AscendDeviceType, enable_sp, flashcomm2_enable,
                                get_ascend_device_type, has_layer_idx,
                                is_drafter_moe_model, is_moe_model,
+                               is_w8a8_dynamic,
                                speculative_enable_dispatch_gmm_combine_decode)
 
 
@@ -38,7 +39,8 @@ def set_ascend_forward_context(
         batch_descriptor: Optional[BatchDescriptor] = None,
         model_instance: torch.nn.Module = None,
         is_draft_model=False,
-        is_multimodal_model=False):
+        is_multimodal_model=False,
+        input_ids=None):
     """A context manager that stores the current forward context,
     can be attention metadata, etc.
     We add some additional param into forward_context.
@@ -53,6 +55,8 @@ def set_ascend_forward_context(
             batch_descriptor=batch_descriptor,
     ):
         forward_context = get_forward_context()
+
+        forward_context.input_ids = input_ids
 
         from vllm_ascend.ops.fused_moe.moe_comm_method import \
             get_moe_comm_method
@@ -236,6 +240,8 @@ def select_moe_comm_method(num_tokens: int,
     quant_type = getattr(
         vllm_config.model_config.hf_text_config, 'moe_quantize',
         getattr(vllm_config.model_config.hf_text_config, 'quantize', None))
+    if is_w8a8_dynamic():
+        quant_type = 'w8a8_dynamic'
 
     if not vllm_config.parallel_config.enable_expert_parallel or get_ep_group(
     ).world_size == 1:

@@ -35,3 +35,8 @@ def register_model_loader():
 def register_service_profiling():
     from .profiling_config import generate_service_profiling_config
     generate_service_profiling_config()
+
+
+def register_model():
+    from .models import register_model
+    register_model()

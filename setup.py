@@ -75,6 +75,9 @@ def get_value_from_lines(lines: List[str], key: str) -> str:
 
 def get_chip_type() -> str:
     try:
+        if envs.SOC_VERSION == 'ascend910_95':
+            logging.info("current compile op with SOC_VERSION: ascend910_95")
+            return envs.SOC_VERSION
         npu_info_lines = subprocess.check_output(
             ['npu-smi', 'info', '-l']).decode().strip().split('\n')
         npu_id = int(get_value_from_lines(npu_info_lines, 'NPU ID'))
@@ -172,6 +175,39 @@ def gen_build_info():
     logging.info(f"Generated _build_info.py with SOC version: {soc_version}")
 
 
+def get_general_soc_version():
+    soc_version = envs.SOC_VERSION
+
+    soc_to_general_soc = {
+        "910b": "A2",
+        "910c": "A3",
+        "310p": "_310P",
+        "ascend910b1": "ascend910b",
+        "ascend910b2": "ascend910b",
+        "ascend910b2c": "ascend910b",
+        "ascend910b3": "ascend910b",
+        "ascend910b4": "ascend910b",
+        "ascend910b4-1": "ascend910b",
+        "ascend910_9391": "ascend910_93",
+        "ascend910_9381": "ascend910_93",
+        "ascend910_9372": "ascend910_93",
+        "ascend910_9392": "ascend910_93",
+        "ascend910_9382": "ascend910_93",
+        "ascend910_9362": "ascend910_93",
+        "ascend310p1": "_310P",
+        "ascend310p3": "_310P",
+        "ascend310p5": "_310P",
+        "ascend310p7": "_310P",
+        "ascend310p3vir01": "_310P",
+        "ascend310p3vir02": "_310P",
+        "ascend310p3vir04": "_310P",
+        "ascend310p3vir08": "_310P",
+        "ascend910_95": "ascend910_95",
+        "ascend910_9579": "ascend910_95",
+    }
+    return soc_to_general_soc[soc_version]
+
+
 class CMakeExtension(Extension):
 
     def __init__(self,
@@ -209,8 +245,13 @@ class build_and_install_aclnn(Command):
     def run(self):
         try:
             print("Running bash build_aclnn.sh ...")
-            subprocess.check_call(
-                ["bash", "csrc/build_aclnn.sh", ROOT_DIR, envs.SOC_VERSION])
+            print("================ROOT_DIR is", ROOT_DIR)
+            print("================soc version is ", envs.SOC_VERSION,
+                  "======general soc version is", get_general_soc_version())
+            subprocess.check_call([
+                "bash", "csrc/build_aclnn.sh", ROOT_DIR,
+                get_general_soc_version()
+            ])
             print("buid_aclnn.sh executed successfully!")
         except subprocess.CalledProcessError as e:
             print(f"Error running build_aclnn.sh: {e}")
@@ -530,7 +571,8 @@ setup(
         "vllm.general_plugins": [
             "ascend_kv_connector = vllm_ascend:register_connector",
             "ascend_model_loader = vllm_ascend:register_model_loader",
-            "ascend_service_profiling = vllm_ascend:register_service_profiling"
+            "ascend_service_profiling = vllm_ascend:register_service_profiling",
+            "ascend_0day_model = vllm_ascend:register_model"
         ],
     },
 )

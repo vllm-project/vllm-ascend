@@ -15,6 +15,7 @@ from vllm_ascend.ascend_forward_context import set_ascend_forward_context
 from vllm_ascend.attention.attention_v1 import AscendAttentionState
 from vllm_ascend.attention.utils import AscendCommonAttentionMetadata
 from vllm_ascend.compilation.acl_graph import ACLGraphWrapper
+from vllm_ascend.ops.rope_dsv4 import get_cos_and_sin_dsa
 from vllm_ascend.ops.rotary_embedding import get_cos_and_sin_mla
 from vllm_ascend.spec_decode.eagle_proposer import EagleProposer
 from vllm_ascend.utils import ProfileExecuteDuration, lmhead_tp_enable
@@ -42,7 +43,9 @@ class MtpProposer(EagleProposer):
             num_tokens_across_dp,
             with_prefill,
             _,
-        ) = self.runner._sync_metadata_across_dp(num_tokens, with_prefill)
+        ) = self.runner._sync_metadata_across_dp(num_tokens,
+                                                 with_prefill,
+                                                 is_draft_model=True)
         if not self.use_cuda_graph:
             # there is synchronization between mtp steps when enabling aclgraph,
             # disable aclgraph when use async scheduling to avoid the
@@ -81,8 +84,7 @@ class MtpProposer(EagleProposer):
                     common_attn_metadata.prefill_context_parallel_metadata = \
                         self.runner.pcp_manager.long_seq_metadata
                     common_attn_metadata.block_table_tensor = \
-                        self.runner.input_batch.block_table[0].get_device_tensor()[
-                            :num_reqs * self.decode_threshold]
+                        self.runner.input_batch.block_table[0].get_device_tensor()
 
                 builder = self.runner.attn_groups[0][0].get_metadata_builder()
                 # `AscendAttentionState.SpecDecoding` is only designed for mla, `AscendAttentionState.ChunkedPrefill` is used in self-attention.
@@ -264,7 +266,8 @@ class MtpProposer(EagleProposer):
         # eager/acl piecewise mode need to update num_tokens_across_dp
         (num_input_tokens, num_tokens_across_dp, with_prefill,
          _) = self.runner._sync_metadata_across_dp(num_input_tokens,
-                                                   self.runner.with_prefill)
+                                                   self.runner.with_prefill,
+                                                   is_draft_model=True)
 
         # Enable shared_expert_dp and MTP FULL graph may cause accuracy issues.
         if scheduler_output and not self.enable_shared_expert_dp:
@@ -298,7 +301,11 @@ class MtpProposer(EagleProposer):
         # builder padding some elements.
         common_attn_metadata.graph_pad_size = graph_pad_size
         common_attn_metadata.num_input_tokens = num_input_tokens
-        builder = self.runner.attn_groups[0][0].get_metadata_builder()
+
+        if self.use_compress:
+            builder = self.runner.swa_metadata_builder
+        else:
+            builder = self.runner.attn_groups[0][0].get_metadata_builder()
         attn_metadata_mtp = builder.build(0, common_attn_metadata,
                                           self.runner.get_model())
         attn_metadata = {}
@@ -341,8 +348,12 @@ class MtpProposer(EagleProposer):
                                     query_lens[:attn_metadata[layer_name].
                                                num_decodes])
                             else:
-                                actual_size = len(
-                                    decode_metadata.actual_seq_lengths_q)
+                                if self.use_compress:
+                                    actual_size = len(decode_metadata.
+                                                      query_start_loc_cpu) - 1
+                                else:
+                                    actual_size = len(
+                                        decode_metadata.actual_seq_lengths_q)
 
                             decode_metadata.seq_lens_list = \
                                 decode_metadata.seq_lens_list[:actual_size]
@@ -408,7 +419,12 @@ class MtpProposer(EagleProposer):
                 positions = target_positions[last_token_indices]
                 hidden_states = hidden_states[last_token_indices]
                 slot_mapping = attn_metadata_i.slot_mapping[last_token_indices]
+                if self.use_compress:
+                    swa_slot_mapping = attn_metadata_i.swa_slot_mapping[
+                        last_token_indices]
                 attn_metadata_i.slot_mapping.fill_(-1)
+                if self.use_compress:
+                    attn_metadata_i.swa_slot_mapping.fill_(-1)
                 attn_metadata_i.query_start_loc = self.arange[:batch_size + 1]
                 last_token_indices = self.arange[:batch_size]
                 if getattr(attn_metadata_i, "num_decode_tokens", 0):
@@ -467,16 +483,28 @@ class MtpProposer(EagleProposer):
             # When disable_padded_drafter_batch=False, it should not to be updating these params, maybe.
             if decode_metadata is not None and (self.speculative_config.disable_padded_drafter_batch or \
                     aclgraph_runtime_mode != CUDAGraphMode.FULL):
-                decode_metadata.actual_seq_lengths_q = self.arange_cpu[
-                    1:batch_size + 1].tolist()
-                if aclgraph_runtime_mode == CUDAGraphMode.FULL:
-                    decode_metadata.actual_seq_lengths_q = \
-                        builder.pad_actual_seq_len_q_mtp_disable_pad(
-                            graph_pad_size - batch_size,
-                            batch_size,
-                            decode_metadata.actual_seq_lengths_q)
-                decode_metadata.cos, decode_metadata.sin = get_cos_and_sin_mla(
-                    positions[:batch_size])
+                if self.use_compress:
+                    decode_metadata.query_start_loc = self.arange[:batch_size +
+                                                                  1]
+                    decode_metadata.query_start_loc_cpu = self.arange_cpu[:
+                                                                          batch_size
+                                                                          + 1]
+
+                    decode_metadata.max_seqlen_q += 1
+                    decode_metadata.max_seqlen_kv = batch_size
+                    decode_metadata.cos, decode_metadata.sin = get_cos_and_sin_dsa(
+                        positions[:batch_size])
+                else:
+                    decode_metadata.actual_seq_lengths_q = self.arange_cpu[
+                        1:batch_size + 1].tolist()
+                    if aclgraph_runtime_mode == CUDAGraphMode.FULL:
+                        decode_metadata.actual_seq_lengths_q = \
+                            builder.pad_actual_seq_len_q_mtp_disable_pad(
+                                graph_pad_size - batch_size,
+                                batch_size,
+                                decode_metadata.actual_seq_lengths_q)
+                    decode_metadata.cos, decode_metadata.sin = get_cos_and_sin_mla(
+                        positions[:batch_size])
             # NOTE(woosuk): We should handle the case where the draft model
             # generates tokens beyond the max model length. Since it is complex
             # to remove such requests from the batch, we keep them in the batch
@@ -506,6 +534,10 @@ class MtpProposer(EagleProposer):
                 exceeds_max_model_len = exceeds_max_model_len.repeat_interleave(
                     slot_mapping.size(0) // exceeds_max_model_len.size(0))
             slot_mapping.masked_fill_(exceeds_max_model_len, PADDING_SLOT_ID)
+            if self.use_compress:
+                swa_slot_mapping += 1
+                swa_slot_mapping.masked_fill_(exceeds_max_model_len,
+                                              PADDING_SLOT_ID)
 
             # copy inputs to buffer for cudagraph
             self.input_ids[:batch_size] = input_ids
@@ -529,6 +561,11 @@ class MtpProposer(EagleProposer):
                                              self.pcp_size] = slot_mapping
             else:
                 attn_metadata_i.slot_mapping[:batch_size] = slot_mapping
+
+                if self.use_compress:
+                    attn_metadata_i.swa_slot_mapping[:
+                                                     batch_size] = swa_slot_mapping
+
             if self.speculative_config.disable_padded_drafter_batch:
                 self.positions[batch_size:num_input_tokens] = 0
                 self.input_ids[batch_size:num_input_tokens] = 0
@@ -547,14 +584,15 @@ class MtpProposer(EagleProposer):
                     self.runner.model_config.max_model_len)
             if decode_metadata is not None:
                 decode_metadata.seq_lens = attn_metadata_i.seq_lens
-                decode_metadata.seq_lens_list = decode_metadata.seq_lens.tolist(
-                )
-                decode_seq_lens_list = decode_metadata.seq_lens_list
-                if aclgraph_runtime_mode == CUDAGraphMode.FULL and \
-                        self.speculative_config.disable_padded_drafter_batch:
-                    decode_metadata.seq_lens_list = decode_seq_lens_list + [
-                        0
-                    ] * (graph_pad_size - len(decode_seq_lens_list))
+                if not self.use_compress:
+                    decode_metadata.seq_lens_list = decode_metadata.seq_lens.tolist(
+                    )
+                    decode_seq_lens_list = decode_metadata.seq_lens_list
+                    if aclgraph_runtime_mode == CUDAGraphMode.FULL and \
+                            self.speculative_config.disable_padded_drafter_batch:
+                        decode_metadata.seq_lens_list = decode_seq_lens_list + [
+                            0
+                        ] * (graph_pad_size - len(decode_seq_lens_list))
                 decode_metadata.input_positions = self.positions[:
                                                                  num_input_tokens]
                 decode_metadata.max_seq_lens += 1

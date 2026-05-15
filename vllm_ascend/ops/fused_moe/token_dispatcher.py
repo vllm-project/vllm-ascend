@@ -335,7 +335,7 @@ class TokenDispatcherWithAllGather(MoETokenDispatcher):
             global_num_experts = self.num_experts_local
 
         sorted_hidden_states, expanded_row_idx, expert_tokens, pertoken_scale = (
-            torch.ops._C_ascend.npu_moe_init_routing_custom(
+            torch_npu.npu_moe_init_routing_v2(
                 hidden_states,
                 topk_ids,
                 scale=pertoken_scale,

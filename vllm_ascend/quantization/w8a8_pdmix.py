@@ -42,7 +42,7 @@ class AscendW8A8PDMixLinearMethod(AscendW8A8DynamicLinearMethod):
 
 class AscendW8A8PDMixFusedMoeMethod(AscendW8A8DynamicFusedMoEMethod):
 
-    def __init__(self):
+    def __init__(self, tid2eid=None):
         super().__init__()
 
     @staticmethod

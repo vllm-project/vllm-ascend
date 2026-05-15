@@ -104,7 +104,7 @@ class AscendW8A8DynamicFusedMoEMethod:
     """FusedMoe method for Ascend W8A8_DYNAMIC.
     """
 
-    def __init__(self):
+    def __init__(self, tid2eid=None):
         self.ep_group = get_ep_group()
 
         vllm_config = get_current_vllm_config()
@@ -117,6 +117,7 @@ class AscendW8A8DynamicFusedMoEMethod:
         self.dynamic_eplb = ascend_config.dynamic_eplb or ascend_config.expert_map_record_path
         self.in_dtype = vllm_config.model_config.dtype
         self.supports_eplb = True
+        self.tid2eid = tid2eid
 
         try:
             device_group = get_mc2_group().device_group
@@ -221,7 +222,8 @@ class AscendW8A8DynamicFusedMoEMethod:
                 mix_placement=layer.mix_placement,
                 num_logical_experts=router_logits.shape[1],
                 num_shared_experts=n_shared_experts,
-                global_num_experts=global_num_experts)
+                global_num_experts=global_num_experts,
+                tid2eid=self.tid2eid)
         assert topk_ids is not None
         assert topk_weights is not None
         if zero_expert_num > 0 and zero_expert_type is not None:
