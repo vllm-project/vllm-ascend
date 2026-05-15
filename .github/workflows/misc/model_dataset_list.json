@@ -254,7 +254,7 @@
       "Eco-Tech/Qwen3.5-397B-A17B-w8a8-mtp",
       "z-lab/Qwen3-8B-DFlash-b16",
       "Eco-Tech/GLM-5.1-w8a8",
-      "Eco-Tech/Qwen3.5-397B-A17B-w4a8-mtp", 
+      "Eco-Tech/Qwen3.5-397B-A17B-w4a8-mtp",
       "lightseekorg/kimi-k2.5-eagle3",
       "Eco-Tech/Qwen3.5-122B-A10B-w8a8-mtp"
     ],
@@ -273,6 +273,7 @@
       "vllm-ascend/textvqa-perf-1080p",
       "vllm-ascend/gpqa",
       "vllm-ascend/GSM8K-in131072-bs100-qwen3",
-      "vllm-ascend/GSM8K_prefix90_in131072_bs100"
+      "vllm-ascend/GSM8K_prefix90_in131072_bs100",
+      "vllm-ascend/GSM8K_prefix0_in16384_bs200_qwen"
     ]
   }
