@@ -17,17 +17,20 @@
 
 from vllm.triton_utils import HAS_TRITON
 
-from vllm_ascend.utils import is_310p
+from vllm_ascend.utils import is_310p, vllm_version_is
+
+# v2 model runner is only supported on vllm > 0.20.2.
+_V2_MODEL_RUNNER_SUPPORTED = not vllm_version_is("0.20.2")
 
 if HAS_TRITON:
     import vllm_ascend.patch.worker.patch_triton
-    import vllm_ascend.patch.worker.patch_v2.patch_triton  # noqa
+
+    if _V2_MODEL_RUNNER_SUPPORTED:
+        import vllm_ascend.patch.worker.patch_v2.patch_triton  # noqa
 
 
-# isort: off
 import vllm_ascend.patch.worker.patch_weight_utils  # noqa
 import vllm_ascend.patch.platform.patch_sched_yield  # noqa
-import vllm_ascend.patch.worker.patch_bert  # noqa
 import vllm_ascend.patch.worker.patch_distributed  # noqa
 import vllm_ascend.patch.worker.patch_minimax_m2  # noqa
 import vllm_ascend.patch.worker.patch_minimax_m2_linear_attn  # noqa
@@ -42,15 +45,17 @@ if not is_310p():
 else:
     import vllm_ascend.patch.worker.patch_idex_310  # noqa
 import vllm_ascend.patch.worker.patch_rejection_sampler  # noqa
-import vllm_ascend.patch.worker.patch_v2.patch_uva  # noqa
 import vllm_ascend.patch.worker.patch_huanyuan_vl  # noqa
 import vllm_ascend.patch.worker.patch_npugraph_ex_triton  # noqa
 import vllm_ascend.patch.worker.patch_kimi_k25  # noqa
 import vllm_ascend.patch.worker.patch_draft_quarot  # noqa
 import vllm_ascend.patch.worker.patch_cudagraph  # noqa
 import vllm_ascend.patch.worker.patch_deepseek_mtp  # noqa
-import vllm_ascend.patch.worker.patch_v2.patch_input_batch  # noqa
-import vllm_ascend.patch.worker.patch_v2.patch_model_state  # noqa
-import vllm_ascend.patch.worker.patch_v2.patch_block_table  # noqa
 import vllm_ascend.patch.worker.patch_gqa_c8  # noqa
-import vllm_ascend.patch.worker.patch_v2.patch_attn_utils  # noqa
+
+if _V2_MODEL_RUNNER_SUPPORTED:
+    import vllm_ascend.patch.worker.patch_v2.patch_uva  # noqa
+    import vllm_ascend.patch.worker.patch_v2.patch_input_batch  # noqa
+    import vllm_ascend.patch.worker.patch_v2.patch_model_state  # noqa
+    import vllm_ascend.patch.worker.patch_v2.patch_block_table  # noqa
+    import vllm_ascend.patch.worker.patch_v2.patch_attn_utils  # noqa

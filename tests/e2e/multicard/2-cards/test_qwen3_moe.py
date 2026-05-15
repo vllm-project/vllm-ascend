@@ -75,7 +75,7 @@ def test_qwen3_moe_distributed_aiv_tp2():
         vllm_model.generate_greedy(example_prompts, max_tokens)
 
 
-@pytest.mark.skipif(vllm_version_is("0.20.1"), reason="no need to support model_runner for v0.20.1")
+@pytest.mark.skipif(vllm_version_is("0.20.2"), reason="no need to support model_runner for v0.20.2")
 @pytest.mark.parametrize("max_tokens", [5])
 @pytest.mark.parametrize("enforce_eager", [True])
 @patch.dict(os.environ, {"VLLM_USE_V2_MODEL_RUNNER": "1"})
