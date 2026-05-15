@@ -62,13 +62,23 @@ jobs:
         UV_SYSTEM_PYTHON: 1
         UV_PYTHON: python3
     steps:
-      - name: Check NPU availability
+      - name: Check Device and Arch
         id: check_npu
         run: |
           if npu-smi info > /dev/null 2>&1; then
-            echo "has_npu=true" >> $GITHUB_OUTPUT
+            echo "with_device=true" >> $GITHUB_OUTPUT
           else
-            echo "has_npu=false" >> $GITHUB_OUTPUT
+            echo "with_device=false" >> $GITHUB_OUTPUT
+          fi
+
+          arch=$(uname -m)
+          if [ "$arch" = "x86_64" ]; then
+            echo "arch=X64" >> $GITHUB_OUTPUT
+          elif [ "$arch" = "aarch64" ]; then
+            echo "arch=ARM64" >> $GITHUB_OUTPUT
+          else
+            echo "Unsupported architecture: $arch"
+            exit 1
           fi
 
       - name: Install packages
@@ -79,7 +89,6 @@ jobs:
           apt-get update -y
           apt-get install -y python3-pip git vim wget net-tools gcc g++ cmake libnuma-dev curl gnupg2
           git config --global --add safe.directory /__w/vllm-ascend/vllm-ascend
-          pip install uv
 
       - name: Checkout vllm-project/vllm repo
         uses: actions/checkout@v6
@@ -91,7 +100,7 @@ jobs:
       - name: Install vllm-project/vllm from source
         working-directory: ./vllm-empty
         run: |
-          VLLM_TARGET_DEVICE=empty pip install . ${{ steps.check_npu.outputs.has_npu == 'false' && '--extra-index-url https://download.pytorch.org/whl/cpu/' || '' }}
+          VLLM_TARGET_DEVICE=empty pip install . ${{ steps.check_npu.outputs.with_device == 'false' && '--extra-index-url http://cache-service.nginx-pypi-cache.svc.cluster.local/whl/cpu' || '' }}
           pip uninstall -y triton
 
       - name: Checkout vllm-project/vllm-ascend repo
@@ -106,44 +115,43 @@ jobs:
 
       - name: Cache vllm-ascend csrc
         id: cache-csrc
-        if: ${{ steps.check_npu.outputs.has_npu == 'true' }}
-        uses: runs-on/cache@v4
+        if: ${{ steps.check_npu.outputs.with_device == 'true' }}
+        uses: actions/cache@v4
         with:
           path: |
             vllm_ascend/_cann_ops_custom
             vllm_ascend/*.so
             vllm_ascend/lib
             vllm_ascend/include
-          key: vllm-ascend-build-v1-${{ runner.os }}-swr.cn-southwest-2.myhuaweicloud.com/base_image/ascend-ci/cann:${{ matrix.group.image_tag }}-${{ steps.get_csrc_hash.outputs.CSRC_HASH }}
-          restore-keys: |
-            vllm-ascend-build-v1-${{ runner.os }}-swr.cn-southwest-2.myhuaweicloud.com/base_image/ascend-ci/cann:${{ matrix.group.image_tag }}-${{ steps.get_csrc_hash.outputs.CSRC_HASH }}
+          key: vllm-ascend-build-v1-${{ steps.check_npu.outputs.arch }}-${{ matrix.group.image_tag }}-${{ steps.get_csrc_hash.outputs.CSRC_HASH }}
 
       - name: Install vllm-project/vllm-ascend with device
-        if: ${{ steps.check_npu.outputs.has_npu == 'true' }}
+        if: ${{ steps.check_npu.outputs.with_device == 'true' }}
         env:
-          PIP_EXTRA_INDEX_URL: "https://mirrors.huaweicloud.com/ascend/repos/pypi https://triton-ascend.osinfra.cn/pypi/simple https://download.pytorch.org/whl/cpu/"
+          PIP_EXTRA_INDEX_URL: "https://mirrors.huaweicloud.com/ascend/repos/pypi https://triton-ascend.osinfra.cn/pypi/simple http://cache-service.nginx-pypi-cache.svc.cluster.local/whl/cpu"
         run: |
           pip install uc-manager
           pip install -r requirements-dev.txt
           if find vllm_ascend -maxdepth 1 -name '*.so' -type f 2>/dev/null | grep -q .; then
-            COMPILE_CUSTOM_KERNELS=0 uv pip install -e .
+            COMPILE_CUSTOM_KERNELS=0 pip install -e .
           else
             pip install -e .
           fi
 
       - name: Install vllm-project/vllm-ascend no device
-        if: ${{ steps.check_npu.outputs.has_npu == 'false' }}
+        if: ${{ steps.check_npu.outputs.with_device == 'false' }}
         env:
           SOC_VERSION: ascend910b1
           COMPILE_CUSTOM_KERNELS: 0
+          PIP_EXTRA_INDEX_URL: "https://mirrors.huaweicloud.com/ascend/repos/pypi https://triton-ascend.osinfra.cn/pypi/simple http://cache-service.nginx-pypi-cache.svc.cluster.local/whl/cpu"
         run: |
           pip install uc-manager
           export LD_LIBRARY_PATH=$LD_LIBRARY_PATH:/usr/local/Ascend/ascend-toolkit/latest/x86_64-linux/devlib
-          pip install . --extra-index-url https://download.pytorch.org/whl/cpu/ --extra-index-url https://triton-ascend.osinfra.cn/pypi/simple
-          pip install -r requirements-dev.txt --extra-index-url https://download.pytorch.org/whl/cpu/ --extra-index-url https://triton-ascend.osinfra.cn/pypi/simple
+          pip install .
+          pip install -r requirements-dev.txt
 
       - name: Run smart UT with device
-        if: ${{ steps.check_npu.outputs.has_npu == 'true' }}
+        if: ${{ steps.check_npu.outputs.with_device == 'true' }}
         env:
           VLLM_WORKER_MULTIPROC_METHOD: spawn
           PYTORCH_NPU_ALLOC_CONF: max_split_size_mb:256
@@ -161,7 +169,7 @@ jobs:
           pytest -sv --color=yes ${{ matrix.group.tests }}
 
       - name: Run smart UT without device
-        if: ${{ steps.check_npu.outputs.has_npu == 'false' }}
+        if: ${{ steps.check_npu.outputs.with_device == 'false' }}
         env:
           VLLM_WORKER_MULTIPROC_METHOD: spawn
           TORCH_DEVICE_BACKEND_AUTOLOAD: 0

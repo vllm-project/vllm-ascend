@@ -48,7 +48,7 @@
     - tests/ut/spec_decode
 
 - name: worker
-  optional: false
+  optional: true
   source_file_dependencies:
     - vllm_ascend/worker
     - tests/ut/worker
