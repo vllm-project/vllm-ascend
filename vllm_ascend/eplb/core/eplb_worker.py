@@ -20,6 +20,7 @@ from typing import Any
 import numpy as np
 import torch
 import torch.distributed as dist
+from vllm.distributed import get_ep_group
 from vllm.logger import logger
 
 from vllm_ascend.eplb.core.eplb_utils import generate_log2phy_map
@@ -33,7 +34,7 @@ class EplbWorker:
         self.shared_dict = shared_dict
         self.old_expert_maps = None
         self.enable_d2d = enable_d2d
-        self.rank_id = dist.get_rank()
+        self.rank_id = get_ep_group().rank_in_group
         self.multi_stage = policy_type == 3
 
     def do_update(self):
