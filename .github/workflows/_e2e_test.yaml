@@ -61,7 +61,6 @@ env:
 jobs:
   e2e-light:
     name: singlecard-light
-    # Temporarily disabled to run only the four-card light job.
     if: ${{ inputs.type == 'light' }}
     runs-on: linux-aarch64-a2b3-1
     strategy:
@@ -328,7 +327,6 @@ jobs:
 
   e2e-2-cards-light:
     name: multicard-2-light
-    # Temporarily disabled to run only the four-card light job.
     if: ${{ inputs.type == 'light' }}
     runs-on: linux-aarch64-a3-2
     strategy:
@@ -714,10 +712,10 @@ jobs:
           find /lib /usr/lib /usr/local/lib /usr/local -name 'libibverbs.so*' 2>/dev/null || true
 
           echo "=== Locate Mooncake wheel ==="
-          MOONCAKE_WHEEL_DIR="/root/.cache/mooncake-wheelhouse"
+          MOONCAKE_WHEEL_DIR="/root/.cache/mooncake-wheelhouse-ascend/v0.3.9-py311-aarch64"
           ls -lh "${MOONCAKE_WHEEL_DIR}"
 
-          MOONCAKE_WHEEL="$(find "${MOONCAKE_WHEEL_DIR}" -maxdepth 1 -type f -name 'mooncake_transfer_engine-0.3.8.post1-cp311-cp311-*.whl' -print -quit)"
+          MOONCAKE_WHEEL="$(find "${MOONCAKE_WHEEL_DIR}" -maxdepth 1 -type f -name 'mooncake_transfer_engine_ascend-0.3.9-cp311-cp311-*.whl' -print -quit)"
 
           if [ -z "${MOONCAKE_WHEEL}" ]; then
             echo "Mooncake wheel not found in ${MOONCAKE_WHEEL_DIR}"
@@ -739,7 +737,7 @@ jobs:
           python3 -m pip install --no-cache-dir --no-deps "${MOONCAKE_WHEEL}"
 
           echo "=== Installed Mooncake package ==="
-          python3 -m pip show mooncake-transfer-engine
+          python3 -m pip show mooncake-transfer-engine-ascend
 
       - name: Install vllm-project/vllm-ascend
         env:

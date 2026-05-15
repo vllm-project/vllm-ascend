@@ -15,6 +15,14 @@
 # limitations under the License.
 # This file is a part of the vllm-ascend project.
 #
+"""Light tests for quick feature coverage.
+
+Coverage:
+- Dense inference on the piecewise graph path.
+- Embedding inference with graph capture.
+- Mamba/SSM multimodal reasoning with MTP and graph capture.
+- Dense W8A8 speculative decoding with Eagle-3 and full graph.
+"""
 
 import huggingface_hub
 from huggingface_hub import snapshot_download as hf_snapshot_download
@@ -35,7 +43,8 @@ from tests.e2e.utils import check_embeddings_close
 
 
 @wait_until_npu_memory_free()
-def test_qwen3_0_6b_dense_piecewise_graph():
+def test_dense_piecewise_graph():
+    """Verify dense generation on the piecewise graph path."""
     runner_kwargs = {
         "model_name": "Qwen/Qwen3-0.6B",
         "max_model_len": 1024,
@@ -45,20 +54,18 @@ def test_qwen3_0_6b_dense_piecewise_graph():
 
 
 @wait_until_npu_memory_free()
-def test_qwen3_embedding_full_decode_only():
+def test_embedding_full_graph():
+    """Verify embedding outputs with graph capture."""
     queries = ["What is the capital of China?", "Explain gravity"]
     model = "Qwen/Qwen3-Embedding-0.6B"
     model_name = modelscope_snapshot_download(
         model,
         local_files_only=huggingface_hub.constants.HF_HUB_OFFLINE,
     )
-    with VllmRunner(
-        model_name,
-        runner="pooling",
-        max_model_len=None,
-        compilation_config={"cudagraph_mode": "FULL_DECODE_ONLY", "cudagraph_capture_sizes": [4]},
-    ) as vllm_runner:
+    with VllmRunner(model_name, runner="pooling", max_model_len=None, cudagraph_capture_sizes=[4]) as vllm_runner:
         vllm_outputs = vllm_runner.embed(queries)
+        cleanup_dist_env_and_memory()
+        del vllm_runner
 
     with HfRunner(
         model_name,
@@ -66,6 +73,8 @@ def test_qwen3_embedding_full_decode_only():
         is_sentence_transformer=True,
     ) as hf_runner:
         hf_outputs = hf_runner.encode(queries)
+        cleanup_dist_env_and_memory()
+        del hf_runner
 
     check_embeddings_close(
         embeddings_0_lst=hf_outputs,
@@ -77,16 +86,15 @@ def test_qwen3_embedding_full_decode_only():
 
 
 @wait_until_npu_memory_free()
-def test_multimodal_vl_qwen3_5():
+def test_mamba_ssm_multimodal_reasoning_mtp_full_graph():
+    """Verify Mamba/SSM multimodal reasoning with MTP and graph capture."""
     image = ImageAsset("cherry_blossom").pil_image.convert("RGB")
-
     img_questions = [
         "What is the content of this image?",
         "Describe the content of this image in detail.",
         "What's in the image?",
         "Where is this image taken?",
     ]
-
     images = [image] * len(img_questions)
     prompts = qwen_prompt(img_questions)
 
@@ -113,27 +121,22 @@ def test_multimodal_vl_qwen3_5():
             "method": "qwen3_next_mtp",
             "num_speculative_tokens": 2,
         },
-    ) as vllm_model:
-        outputs = vllm_model.generate_greedy(
+    ) as runner:
+        outputs = runner.generate_greedy(
             prompts=prompts,
             images=images,
             max_tokens=64,
         )
 
         assert len(outputs) == len(prompts)
-
         for _, output_str in outputs:
             assert output_str, "Generated output should not be empty."
 
 
 @wait_until_npu_memory_free()
-def test_qwen3_w8a8_full_graph_eagle3():
-    example_prompts = [
-        "Hello, my name is",
-        "The president of the United States is",
-        "The capital of France is",
-        "The future of AI is",
-    ]
+def test_dense_w8a8_eagle3_full_graph():
+    """Verify dense W8A8 inference with Eagle-3 speculative decoding."""
+    example_prompts = PROMPTS_SHORT
     sampling_params = SamplingParams(
         max_tokens=300,
         temperature=0.0,
@@ -158,11 +161,11 @@ def test_qwen3_w8a8_full_graph_eagle3():
             "draft_tensor_parallel_size": 1,
             "max_model_len": 128,
         },
-        compilation_config=CompilationConfig(cudagraph_mode="FULL_DECODE_ONLY", cudagraph_capture_sizes=[1, 2, 4, 8]),
-    ) as llm:
-        spec_outputs = llm.generate(example_prompts, sampling_params)
+        compilation_config=CompilationConfig(cudagraph_mode="FULL", cudagraph_capture_sizes=[5, 12]),
+    ) as runner:
+        spec_outputs = runner.generate(example_prompts, sampling_params)
         cleanup_dist_env_and_memory()
-        del llm
+        del runner
 
     with VllmRunner(
         "vllm-ascend/Qwen3-8B-W8A8",
@@ -174,11 +177,11 @@ def test_qwen3_w8a8_full_graph_eagle3():
         seed=1024,
         async_scheduling=False,
         quantization="ascend",
-        compilation_config=CompilationConfig(cudagraph_mode="FULL_DECODE_ONLY", cudagraph_capture_sizes=[1, 2, 4, 8]),
-    ) as llm:
-        ref_outputs = llm.generate(example_prompts, sampling_params)
+        compilation_config=CompilationConfig(cudagraph_mode="FULL_DECODE_ONLY", cudagraph_capture_sizes=[12]),
+    ) as runner:
+        ref_outputs = runner.generate(example_prompts, sampling_params)
         cleanup_dist_env_and_memory()
-        del llm
+        del runner
 
     matches = 0
     threshold = 0.66
@@ -192,4 +195,3 @@ def test_qwen3_w8a8_full_graph_eagle3():
             print(f"spec_output: {spec_output[1][0]}")
 
     assert matches > int(threshold * len(ref_outputs))
-    cleanup_dist_env_and_memory()

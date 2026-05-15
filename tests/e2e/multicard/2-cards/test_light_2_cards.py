@@ -15,6 +15,13 @@
 # limitations under the License.
 # This file is a part of the vllm-ascend project.
 #
+"""Light tests for quick feature coverage.
+
+Coverage:
+- MoE inference with TP, EP, EPLB, and graph capture.
+- Multimodal reasoning with PP and graph capture.
+"""
+
 import json
 
 import requests
@@ -25,7 +32,8 @@ from tests.e2e.conftest import RemoteOpenAIServer, VllmRunner, qwen_prompt, wait
 
 
 @wait_until_npu_memory_free()
-def test_qwen3_moe_tp2_ep_eplb():
+def test_moe_tp_ep_eplb_full_graph():
+    """Verify MoE serving with TP, EP, EPLB, and graph capture."""
     model = "Qwen/Qwen3-30B-A3B"
     port = get_open_port()
     env_dict = {
@@ -75,7 +83,8 @@ def test_qwen3_moe_tp2_ep_eplb():
 
 
 @wait_until_npu_memory_free()
-def test_qwen3_vl_30b_pp2_full_decode_only_multimodal():
+def test_multimodal_reasoning_pp_full_graph():
+    """Verify multimodal generation with PP and graph capture."""
     image = ImageAsset("cherry_blossom").pil_image.convert("RGB")
 
     img_questions = [

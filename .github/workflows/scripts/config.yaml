@@ -2,23 +2,23 @@
 # e2e light tests
 # =============================
 e2e-singlecard-light:
-- name: tests/e2e/singlecard/test_light_singlecard.py::test_qwen3_0_6b_dense_piecewise_graph
+- name: tests/e2e/singlecard/test_light_singlecard.py::test_dense_piecewise_graph
   estimated_time: 197
-- name: tests/e2e/singlecard/test_light_singlecard.py::test_qwen3_embedding_full_decode_only
+- name: tests/e2e/singlecard/test_light_singlecard.py::test_embedding_full_graph
   estimated_time: 100
-- name: tests/e2e/singlecard/test_light_singlecard.py::test_multimodal_vl_qwen3_5
+- name: tests/e2e/singlecard/test_light_singlecard.py::test_mamba_ssm_multimodal_reasoning_mtp_full_graph
   estimated_time: 240
-- name: tests/e2e/singlecard/test_light_singlecard.py::test_qwen3_w8a8_full_graph_eagle3
+- name: tests/e2e/singlecard/test_light_singlecard.py::test_dense_w8a8_eagle3_full_graph
   estimated_time: 420
 e2e-2card-light:
-- name: tests/e2e/multicard/2-cards/test_light_2_cards.py::test_qwen3_moe_tp2_ep_eplb
+- name: tests/e2e/multicard/2-cards/test_light_2_cards.py::test_moe_tp_ep_eplb_full_graph
   estimated_time: 191
-- name: tests/e2e/multicard/2-cards/test_light_2_cards.py::test_qwen3_vl_30b_pp2_full_decode_only_multimodal
+- name: tests/e2e/multicard/2-cards/test_light_2_cards.py::test_multimodal_reasoning_pp_full_graph
   estimated_time: 240
 e2e-4card-light:
-- name: tests/e2e/multicard/4-cards/test_light_4_cards.py::test_deepseek_v3_w8a8_pruning_tp2_pp2_ep_full_decode_only
+- name: tests/e2e/multicard/4-cards/test_light_4_cards.py::test_moe_w8a8_tp_pp_ep_full_graph
   estimated_time: 300
-- name: tests/e2e/multicard/4-cards/test_light_4_cards.py::test_deepseek_v3_w8a8_pruning_1p1d_moe_full_decode_only
+- name: tests/e2e/multicard/4-cards/test_light_4_cards.py::test_pd_disaggregation_w8a8_sfa_dsa_full_graph
   estimated_time: 300
 
 # =============================

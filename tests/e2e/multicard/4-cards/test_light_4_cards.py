@@ -15,6 +15,13 @@
 # limitations under the License.
 # This file is a part of the vllm-ascend project.
 #
+"""Light tests for quick feature coverage.
+
+Coverage:
+- MoE W8A8 inference with TP, PP, EP, and graph capture.
+- 1P1D PD disaggregation with W8A8, SFA/DSA, and graph capture.
+"""
+
 import json
 import os
 from unittest.mock import patch
@@ -27,7 +34,8 @@ from tests.e2e.conftest import DisaggPDProxy, RemotePDServer, VllmRunner, wait_u
 
 @patch.dict(os.environ, {"VLLM_ASCEND_ENABLE_FLASHCOMM1": "1"})
 @wait_until_npu_memory_free()
-def test_deepseek_v3_w8a8_pruning_tp2_pp2_ep_full_decode_only():
+def test_moe_w8a8_tp_pp_ep_full_graph():
+    """Verify W8A8 MoE generation with TP, PP, EP, and graph capture."""
     model = "vllm-ascend/DeepSeek-V3.2-W8A8-Pruning"
     prompts = ["Hello, my name is"]
 
@@ -48,7 +56,8 @@ def test_deepseek_v3_w8a8_pruning_tp2_pp2_ep_full_decode_only():
 
 
 @wait_until_npu_memory_free()
-def test_deepseek_v3_w8a8_pruning_1p1d_moe_full_decode_only():
+def test_pd_disaggregation_w8a8_sfa_dsa_full_graph():
+    """Verify W8A8 1P1D PD disaggregation on the graph path."""
     prefiller_port = [get_open_port()]
     decoder_port = [get_open_port()]
     proxy_port = get_open_port()
