@@ -2,13 +2,20 @@
 
 Get the latest info here: https://github.com/vllm-project/vllm-ascend/issues/1608
 
+**Legend Description**:
+
+- ✅ = Supported model/feature
+- 🔵 = Experimental supported model/feature
+- ❌ = Not supported model/feature
+- 🟡 = Not tested or verified
+
 ## Text-Only Language Models
 
 ### Generative Models
 
 | Model                         | Support   | Note                                                                 | BF16 | Supported Hardware | W8A8 | Chunked Prefill | Automatic Prefix Cache | LoRA | Speculative Decoding | Async Scheduling | Tensor Parallel | Pipeline Parallel | Expert Parallel | Data Parallel | Prefill-decode Disaggregation | Piecewise AclGraph | Fullgraph AclGraph | max-model-len | MLP Weight Prefetch | Doc |
 |-------------------------------|-----------|----------------------------------------------------------------------|------|--------------------|------|-----------------|------------------------|------|----------------------|------------------|-----------------|-------------------|-----------------|---------------|-------------------------------|--------------------|--------------------|---------------|---------------------|-----|
-| DeepSeek V4               | ✅        |                                                                      | ✅ | A2/A3 | ✅ | ✅ ||| ✅ |✅| ✅ || ✅ | ✅ | ✅ || ✅ | 1M || [DeepSeek-V4](../../tutorials/DeepSeek-V4.md) |
+| DeepSeek V4               | 🔵        |                                                                      | ✅ | A2/A3 | ✅ | ✅ ||| ✅ |✅| ✅ || ✅ | ✅ | ✅ || ✅ | 1M || [DeepSeek-V4](../../tutorials/DeepSeek-V4.md) |
 | DeepSeek V3/3.1               | ✅        |                                                                      | ✅ | A2/A3 | ✅ | ✅ | ✅ || ✅ || ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | 240k || [DeepSeek-V3.1](../../tutorials/DeepSeek-V3.1.md) |
 | DeepSeek V3.2                 | 🔵        | Experimental                                                         | ✅ | A2/A3 | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | 160k | ✅ | [DeepSeek-V3.2](../../tutorials/DeepSeek-V3.2.md) |
 | DeepSeek R1                   | ✅        |                                                                      | ✅ | A2/A3 | ✅ | ✅ | ✅ || ✅ || ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | 128k || [DeepSeek-R1](../../tutorials/DeepSeek-R1.md) |
