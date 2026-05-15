@@ -75,6 +75,11 @@ from vllm.v1.outputs import (
     SamplerOutput,
     make_empty_encoder_model_runner_output,
 )
+
+from vllm_ascend.utils import vllm_version_is
+
+if not vllm_version_is("0.20.2"):
+    from vllm.v1.outputs import RoutedExpertsLists
 from vllm.v1.sample.logits_processor import build_logitsprocs
 from vllm.v1.sample.metadata import SamplingMetadata
 from vllm.v1.sample.rejection_sampler import RejectionSampler
@@ -1576,9 +1581,12 @@ class NPUModelRunner(GPUModelRunner):
         intermediate_tensors: IntermediateTensors | None = None,
     ) -> ModelRunnerOutput | IntermediateTensors | None:
         if self.vllm_config.model_config.enable_return_routed_experts:
-            capturer = RoutedExpertsCapturer.get_instance()
-            if capturer is not None:
-                capturer.clear_buffer()
+            if vllm_version_is("0.20.2"):
+                capturer = RoutedExpertsCapturer.get_instance()
+                if capturer is not None:
+                    capturer.clear_buffer()
+            elif self.routed_experts_initialized:
+                self.routed_experts_capturer.clear_buffer()
 
         if self.ascend_config.profiling_chunk_config.need_timing:
             # Check if the scheduler signaled that calibration is complete.
@@ -2082,10 +2090,29 @@ class NPUModelRunner(GPUModelRunner):
             if self.speculative_config is not None:
                 self.finalize_kv_connector()
 
+        routed_experts_lists = None
         if self.model_config.enable_return_routed_experts:
-            capturer = RoutedExpertsCapturer.get_instance()
-            if capturer is not None:
-                capturer.save_captured_experts(indices=self.cpu_slot_mapping)
+            if vllm_version_is("0.20.2"):
+                capturer = RoutedExpertsCapturer.get_instance()
+                if capturer is not None:
+                    capturer.save_captured_experts(indices=self.cpu_slot_mapping)
+            elif self.routed_experts_initialized:
+                # NOTE: this is the sync-scheduling path. async-scheduling
+                # would build a RoutedExpertsTensors snapshot instead and
+                # let AsyncGPUModelRunnerOutput finalize it -- left as a
+                # follow-up.
+                buf = self.routed_experts_capturer.get_device_buffer()
+                total = scheduler_output.total_num_scheduled_tokens
+                self.routed_experts_cpu[:total].copy_(buf[:total], non_blocking=True)
+                self.routed_experts_slot_mapping_cpu[:total].copy_(
+                    self.routed_experts_slot_mapping_device[:total],
+                    non_blocking=True,
+                )
+                torch.npu.current_stream().synchronize()
+                routed_experts_lists = RoutedExpertsLists(
+                    routing_data=self.routed_experts_cpu[:total].numpy(),
+                    slot_mapping=self.routed_experts_slot_mapping_cpu[:total].numpy(),
+                )
 
         model_runner_output = ModelRunnerOutput(
             req_ids=req_ids_output_copy,
@@ -2097,6 +2124,9 @@ class NPUModelRunner(GPUModelRunner):
             pooler_output=[],
             ec_connector_output=ec_connector_output if self.supports_mm_inputs else None,
             cudagraph_stats=cudagraph_stats,
+            **(
+                {} if vllm_version_is("0.20.2") else {"routed_experts": routed_experts_lists}
+            ),
         )
         if self.ascend_config.profiling_chunk_config.need_timing and hasattr(self, '_execution_start_time'):
             self._sync_device()
@@ -2625,7 +2655,16 @@ class NPUModelRunner(GPUModelRunner):
                     kv_cache_gid,
                 )
             if self.model_config.enable_return_routed_experts and kv_cache_gid == 0:
-                self.cpu_slot_mapping = slot_mapping.cpu().numpy()
+                if vllm_version_is("0.20.2"):
+                    self.cpu_slot_mapping = slot_mapping.cpu().numpy()
+                elif self.routed_experts_initialized:
+                    # snapshot slot_mapping into a private device
+                    # buffer so the next ``_prepare_inputs`` does not
+                    # overwrite it while D2H is still pending.
+                    n = slot_mapping.shape[0]
+                    self.routed_experts_slot_mapping_device[:n].copy_(
+                        slot_mapping
+                    )
             return blk_table_tensor, slot_mapping
 
         block_table_gid_0, slot_mapping_gid_0 = _get_block_table_and_slot_mapping(0)
@@ -3215,6 +3254,21 @@ class NPUModelRunner(GPUModelRunner):
 
         if self.model_config.enable_return_routed_experts:
             self.init_routed_experts_capturer()
+
+    def _bind_routed_experts_capturer(self, capturer) -> None:
+        # Upstream binds via ``module.router.set_capture_fn(...)`` on
+        # FusedMoE layers whose router is a ``BaseRouter``. Ascend's
+        # ``select_experts`` does not go through ``BaseRouter``, so the
+        # upstream hook never fires. Instead, stash the capturer as a
+        # plain attribute on every FusedMoE layer; ``apply()`` reads it
+        # back on the hot path. Only used on vLLM main (PR #39568+);
+        # the 0.20.2 path uses the ``RoutedExpertsCapturer.get_instance``
+        # singleton and never calls this method.
+        from vllm.model_executor.layers.fused_moe.layer import FusedMoE
+
+        for module in self.compilation_config.static_forward_context.values():
+            if isinstance(module, FusedMoE):
+                module._ascend_routed_experts_capturer = capturer
 
     def _align_memory(self, tensor: torch.Tensor, alignment: int) -> torch.Tensor:
         data_ptr = tensor.data_ptr()
