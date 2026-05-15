@@ -1383,10 +1383,11 @@ class PCPManager:
         )
 
         # mask: k_idx <= k_upper AND k_upper >= 0
-        # mask shape: [num_decode_reqs, query_len, 16384]
-        k_indices_full = torch.arange(16384, dtype=torch.int32)
+        # mask shape: [num_decode_reqs, query_len, max_k]
+        # Use max_k here to match valid_positions shape
+        k_indices_for_mask = torch.arange(max_k, dtype=torch.int32)
         k_upper_expanded = k_upper[:, :, None]  # [num_decode_reqs, query_len, 1]
-        mask = (k_indices_full[None, None, :] <= k_upper_expanded) & (k_upper_expanded >= 0)
+        mask = (k_indices_for_mask[None, None, :] <= k_upper_expanded) & (k_upper_expanded >= 0)
         valid_positions = valid_q_full[:, :, None] & valid_k[:, None, :]
 
         # Create output indices for flattening
@@ -1398,7 +1399,8 @@ class PCPManager:
         flat_target = (req_indices * query_len * 16384 + j_indices * 16384 + k_idx_output).view(-1)
 
         # Flatten mask and valid_positions
-        flat_mask = mask.permute(0, 2, 1).contiguous().view(-1)  # [num_decode_reqs * 16384 * query_len]
+        # Both now have shape [num_decode_reqs * max_k * query_len]
+        flat_mask = mask.permute(0, 2, 1).contiguous().view(-1)
         flat_valid = valid_positions.permute(0, 2, 1).contiguous().view(-1)
 
         # Use masked select to get valid mask values
