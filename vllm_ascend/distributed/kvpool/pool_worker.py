@@ -360,10 +360,10 @@ class KVPoolWorker:
             be the boolean mask indicating which tokens are retrieved and will
             only be returned in the last iteration. 
         """
-        token_len = request.token_len_chunk
-        mask_num = (
-            request.load_spec.vllm_cached_tokens  # type: ignore[union-attr]
-            // self.block_size * self.block_size)
+        load_spec = request.load_spec
+        assert load_spec is not None
+        token_len = load_spec.token_len
+        mask_num = load_spec.vllm_cached_tokens // self.block_size * self.block_size
         num_required_tokens = token_len - mask_num
 
         ret_mask = torch.zeros(token_len, dtype=torch.bool, device="cpu")
@@ -484,30 +484,42 @@ class KVPoolWorker:
 
     def get_and_clear_finished_requests(
             self, finished_req_ids, meta: AscendConnectorMetadata) -> set[str]:
-        finished_sending = set()
-        for req_id in meta.preempted_req_ids:
-            self.kv_send_thread.delete_finished_stored_request(  # type: ignore[union-attr]
-                req_id)
-        for req_id in self.kv_send_thread.stored_requests.copy(  # type: ignore[union-attr]
-        ):
-            if self.kv_send_thread.stored_requests[  # type: ignore[union-attr]
-                    req_id] == 0 and req_id in self.finished_store_req:
-                self.finished_store_req.remove(req_id)
-                finished_sending.add(req_id)
+        if self.use_layerwise:
+            kv_send_thread = self.kv_send_thread
+            assert kv_send_thread is not None
+            self.finished_store_req.update(
+                kv_send_thread.get_and_clear_finished_requests())
+            self.finished_store_req.difference_update(meta.preempted_req_ids)
+
+            finished_sending = self.finished_store_req.intersection(
+                finished_req_ids)
+            self.finished_store_req.difference_update(finished_sending)
+            return finished_sending
+        else:
+            finished_sending = set()
+            for req_id in meta.preempted_req_ids:
                 self.kv_send_thread.delete_finished_stored_request(  # type: ignore[union-attr]
                     req_id)
+            for req_id in self.kv_send_thread.stored_requests.copy(  # type: ignore[union-attr]
+            ):
+                if self.kv_send_thread.stored_requests[  # type: ignore[union-attr]
+                        req_id] == 0 and req_id in self.finished_store_req:
+                    self.finished_store_req.remove(req_id)
+                    finished_sending.add(req_id)
+                    self.kv_send_thread.delete_finished_stored_request(  # type: ignore[union-attr]
+                        req_id)
 
-        for req_id in finished_req_ids:
-            req_remain_jobs = self.kv_send_thread.stored_requests.get(  # type: ignore[union-attr]
-                req_id)
-            if req_remain_jobs == 0:
-                finished_sending.add(req_id)
-                self.kv_send_thread.delete_finished_stored_request(  # type: ignore[union-attr]
+            for req_id in finished_req_ids:
+                req_remain_jobs = self.kv_send_thread.stored_requests.get(  # type: ignore[union-attr]
                     req_id)
-            elif req_remain_jobs is not None:
-                self.finished_store_req.add(req_id)
+                if req_remain_jobs == 0:
+                    finished_sending.add(req_id)
+                    self.kv_send_thread.delete_finished_stored_request(  # type: ignore[union-attr]
+                        req_id)
+                elif req_remain_jobs is not None:
+                    self.finished_store_req.add(req_id)
 
-        return finished_sending
+            return finished_sending
 
     def lookup(
         self,
