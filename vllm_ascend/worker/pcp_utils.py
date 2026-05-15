@@ -1337,9 +1337,8 @@ class PCPManager:
         max_local = local_lens[valid_mask].max().item()
         num_valid = valid_mask.sum().item()
 
-        # Get valid request indices
+        # Get valid request indices as tensor for vectorized operations
         valid_indices = torch.nonzero(valid_mask, as_tuple=False).squeeze(-1)
-        num_valid = len(valid_indices)
 
         # Pre-allocate output buffer
         mtp_attn_mask = self.dcp_mtp_attn_mask.cpu[:self.num_decode_reqs]
@@ -1353,7 +1352,6 @@ class PCPManager:
         first_local_mtp = ((cp_rank - (global_histories % cp_size)) % cp_size) + global_histories
 
         # Vectorized construction of local_pos_tensor [num_valid, max_local]
-        # For each request: [0, 1, ..., history_len-1] + local_mtp_positions
         history_lens_valid = history_lens_arr[valid_indices]
         local_mtp_counts_valid = local_mtp_counts[valid_indices]
 
@@ -1361,45 +1359,67 @@ class PCPManager:
         local_pos_tensor = torch.zeros(num_valid, max_local, dtype=torch.int32)
 
         # Fill history positions (0 to history_len-1) for each request
-        # Vectorized: create a grid of (request_idx, position) and fill
         max_history = history_lens_valid.max().item()
         history_indices = torch.arange(max_history, dtype=torch.int32)
-        # For each request, history positions are 0 to history_len-1
-        # Use broadcasting to create [num_valid, max_history] mask
-        history_mask = history_indices[None, :] < history_lens_valid[:, None]  # [num_valid, max_history]
-        # Set values using masked scatter approach
+        history_mask = history_indices[None, :] < history_lens_valid[:, None]
         local_pos_tensor[:, :max_history] = torch.where(
             history_mask,
             history_indices[None, :].expand(num_valid, -1),
             torch.zeros_like(history_indices[None, :].expand(num_valid, -1))
         )
 
-        # Fill MTP positions: arithmetic sequence first, first+cp_size, ...
-        # For each request i: positions = first_local_mtp[i], first_local_mtp[i]+cp_size, ...
-        # These start at position history_lens_valid[i] in local_pos_tensor
-        for i in range(num_valid):
-            count = local_mtp_counts_valid[i].item()
-            if count > 0:
-                start_pos = history_lens_valid[i].item()
-                mtp_positions = torch.arange(
-                    first_local_mtp[i].item(),
-                    first_local_mtp[i].item() + count * cp_size,
-                    cp_size,
-                    dtype=torch.int32
-                )
-                local_pos_tensor[i, start_pos:start_pos + count] = mtp_positions
+        # Vectorized MTP positions using arithmetic sequence formula
+        # For request i: positions = first_local_mtp[i] + k * cp_size for k in [0, count)
+        max_local_mtp = local_mtp_counts_valid.max().item()
+        if max_local_mtp > 0:
+            k_indices = torch.arange(max_local_mtp, dtype=torch.int32)
+            # mtp_mask[i, k] = k < local_mtp_counts_valid[i]
+            mtp_mask = k_indices[None, :] < local_mtp_counts_valid[:, None]  # [num_valid, max_local_mtp]
+            mtp_global_pos = first_local_mtp[:, None] + k_indices[None, :] * cp_size  # [num_valid, max_local_mtp]
+            # Flatten and use masked scatter
+            mtp_indices, k_idx = torch.where(mtp_mask)
+            mtp_values = mtp_global_pos[mtp_indices, k_idx]
+            # Compute start positions for each request
+            start_positions = history_lens_valid  # [num_valid]
+            # Target indices in local_pos_tensor
+            scatter_indices = mtp_indices * max_local + (start_positions[mtp_indices] + k_idx)
+            local_pos_flat = local_pos_tensor.view(-1)
+            local_pos_flat.scatter_(0, scatter_indices, mtp_values)
 
-        # Vectorized mask: mtp_pos[:, :, None] < local_pos_tensor[:, None, :]
+        # Vectorized mask computation: mtp_pos[:, :, None] < local_pos_tensor[:, None, :]
         # Shape: [num_valid, max_mtp, max_local]
         masks = mtp_pos[:, :, None] < local_pos_tensor[:, None, :]
 
-        # Build idx map: for each valid request, find where to copy in output buffer
-        # Use index_copy_ for efficient batch assignment
-        for i, req_idx in enumerate(valid_indices.tolist()):
-            mtp_token_len = mtp_lens_arr[req_idx].item()
-            local_len = local_lens[req_idx].item()
-            # Get the mask slice for this request
-            req_mask = masks[i, :mtp_token_len, :local_len]
-            mtp_attn_mask[req_idx, :mtp_token_len, :local_len] = req_mask
+        # Vectorized valid position mask (q and k indices within bounds)
+        q_indices = torch.arange(max_mtp, dtype=torch.int32)
+        k_indices = torch.arange(max_local, dtype=torch.int32)
+        valid_q = q_indices[None, :] < mtp_lens_arr[valid_indices][:, None]   # [num_valid, max_mtp]
+        valid_k = k_indices[None, :] < local_lens[valid_indices][:, None]   # [num_valid, max_local]
+        valid_positions = valid_q[:, :, None] & valid_k[:, None, :]           # [num_valid, max_mtp, max_local]
+
+        # Use index_copy for batch fill - create flat index mapping
+        # For each request i, the output indices are:
+        # req_idx * query_len * 16384 + j * 16384 + k for valid (j,k)
+        # But since we have variable sizes, we need per-request copy
+
+        # Efficient copy using scatter for all valid requests at once
+        flat_masks = masks.permute(0, 2, 1).contiguous().view(-1)  # [num_valid * max_mtp * max_local]
+        flat_valid = valid_positions.permute(0, 2, 1).contiguous().view(-1)
+
+        # Create target indices in mtp_attn_mask buffer
+        # For each request i at valid position (j,k): target_idx = req_idx * max_mtp * 16384 + j * 16384 + k
+        # req_indices should be actual request indices, not 0..num_valid-1
+        actual_req_indices = valid_indices[:, None, None]  # [num_valid, 1, 1]
+        j_indices = torch.arange(max_mtp, dtype=torch.long)[None, :, None]      # [1, max_mtp, 1]
+        k_indices = torch.arange(max_local, dtype=torch.long)[None, None, :]    # [1, 1, max_local]
+        flat_target = (actual_req_indices * max_mtp * max_local + j_indices * max_local + k_indices).view(-1)
+
+        # Mask and scatter to output buffer
+        valid_target = flat_target[flat_valid]
+        valid_mask_values = flat_masks[flat_valid]
+
+        # Create flat view of mtp_attn_mask
+        mtp_attn_mask_flat = mtp_attn_mask.view(-1)
+        mtp_attn_mask_flat[valid_target] = valid_mask_values
 
         return mtp_attn_mask
