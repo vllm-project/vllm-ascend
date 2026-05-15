@@ -63,6 +63,7 @@ else:
             for local_index, global_index in zip(local_indices, global_indices)
         )
 
+
 # Compatibility shim for vLLM versions where base unquantized MoE method
 # does not expose `is_monolithic`.
 if not hasattr(UnquantizedFusedMoEMethod, "is_monolithic"):
