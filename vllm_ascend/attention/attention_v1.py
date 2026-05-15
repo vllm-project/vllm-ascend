@@ -15,6 +15,7 @@
 # This file is a part of the vllm-ascend project.
 #
 
+from collections.abc import Mapping
 from dataclasses import dataclass
 from enum import Enum
 
@@ -39,7 +40,7 @@ from vllm.v1.attention.backends.registry import (  # type: ignore
 from vllm.v1.core.sched.output import SchedulerOutput
 from vllm.v1.kv_cache_interface import AttentionSpec, CrossAttentionSpec
 
-from vllm_ascend.ascend_config import get_ascend_config
+from vllm_ascend.ascend_config import QuestDecodeConfig
 from vllm_ascend.ascend_forward_context import _EXTRA_CTX
 from vllm_ascend.attention.attention_mask import AttentionMaskBuilder
 from vllm_ascend.attention.context_parallel.common_cp import AscendMetadataForDecode, AscendMetadataForPrefill
@@ -80,6 +81,20 @@ QUEST_PAGE_SIZE = 128
 QUEST_HEAD_SIZE = 128
 QUEST_MAX_METADATA_BLOCKS_PER_REQ = 6
 QUEST_INDEX_ALIGNMENT = 8
+
+
+def _get_quest_decode_config(vllm_config: VllmConfig) -> QuestDecodeConfig:
+    """Resolve QUEST config without requiring the global AscendConfig singleton.
+
+    Attention backends can be constructed in CPU-only unit tests and other
+    lightweight contexts before init_ascend_config() has populated the singleton.
+    Reading the optional QUEST section directly from the current VllmConfig keeps
+    QUEST disabled by default while preserving the same validation rules.
+    """
+    additional_config = getattr(vllm_config, "additional_config", None)
+    if not isinstance(additional_config, Mapping):
+        return QuestDecodeConfig()
+    return QuestDecodeConfig(additional_config.get("quest_decode_config"))
 
 
 @register_backend(AttentionBackendEnum.CUSTOM, "ASCEND")
@@ -419,9 +434,9 @@ class AscendAttentionBackendImpl(AttentionImpl):
         self.num_queries_per_kv = self.num_heads // self.num_kv_heads
         self.key_cache = None
         self.value_cache = None
-        self.ascend_config = get_ascend_config()
-        self.quest_enabled = self.ascend_config.quest_decode_config.enable
-        self.quest_topk_pages = self.ascend_config.quest_decode_config.topk_pages
+        quest_decode_config = _get_quest_decode_config(self.vllm_config)
+        self.quest_enabled = quest_decode_config.enable
+        self.quest_topk_pages = quest_decode_config.topk_pages
         self.quest_layer_supported = (
             self.quest_enabled
             and not enable_cp()
