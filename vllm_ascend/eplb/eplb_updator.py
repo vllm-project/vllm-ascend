@@ -153,12 +153,14 @@ class EplbUpdator:
         for dst_rank in range(self.comm_group.world_size):
             if dst_rank == self.comm_group.rank_in_group:
                 continue
-            comm_op_list.append(dist.P2POp(dist.isend, src_tensor, dst_rank, group=self.comm_group.device_group))
+            global_dst = self.comm_group.ranks[dst_rank]
+            comm_op_list.append(dist.P2POp(dist.isend, src_tensor, global_dst, group=self.comm_group.device_group))
 
         for src_rank in range(self.comm_group.world_size):
             if src_rank == self.comm_group.rank_in_group:
                 continue
-            comm_op_list.append(dist.P2POp(dist.irecv, src_tensor, src_rank, group=self.comm_group.device_group))
+            global_src = self.comm_group.ranks[src_rank]
+            comm_op_list.append(dist.P2POp(dist.irecv, src_tensor, global_src, group=self.comm_group.device_group))
         if comm_op_list:
             reqs = dist.batch_isend_irecv(comm_op_list)
 
