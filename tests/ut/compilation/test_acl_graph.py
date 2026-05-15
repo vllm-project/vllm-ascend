@@ -788,7 +788,7 @@ class TestPCPDCPGraphParams(TestBase):
             self.graph_params = get_graph_params()
         else:
             self.graph_params = graph_params
-        mock_event = torch.npu.ExternalEvent()
+        mock_event = MagicMock()
         mock_event.record = MagicMock()
         self.graph_params.events[4] = []
         self.graph_params.handles[4] = []
