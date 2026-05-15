@@ -7,4 +7,5 @@ This section provides a detailed matrix supported by vLLM Ascend.
 :maxdepth: 1
 supported_models
 supported_features
+feature_matrix
 :::
