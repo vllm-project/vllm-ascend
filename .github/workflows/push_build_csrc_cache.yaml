@@ -186,4 +186,4 @@ jobs:
             export CPLUS_INCLUDE_PATH=$CPLUS_INCLUDE_PATH:/usr/include/c++/12:/usr/include/c++/12/${arch}-openEuler-linux
           fi
           pip install torch==2.9.0+cpu torch-npu==2.9.0 pybind11 setuptools setuptools-scm
-          pip install -e . --no-deps
+          pip install -e -v . --no-deps
