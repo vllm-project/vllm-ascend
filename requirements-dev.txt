@@ -22,5 +22,5 @@ soundfile
 pytest_mock
 mindstudio-probe>=8.3.0
 arctic-inference==0.1.1
-xlite==0.1.0rc4
+xlite==0.1.0rc7
 uc-manager
