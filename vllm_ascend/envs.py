@@ -66,10 +66,9 @@ env_variables: dict[str, Callable[[], Any]] = {
     # In this case, developers need to set this value to "0.9.0" to make sure
     # that the correct package is installed.
     "VLLM_VERSION": lambda: os.getenv("VLLM_VERSION", None),
-    # DEPRECATED: VLLM_ASCEND_ENABLE_MATMUL_ALLREDUCE env var is removed.
-    # Use --additional-config '{"enable_matmul_allreduce": true}'.
-    #     "VLLM_ASCEND_ENABLE_MATMUL_ALLREDUCE":
-    #         lambda: bool(int(os.getenv("VLLM_ASCEND_ENABLE_MATMUL_ALLREDUCE", "0"))),
+    # Whether to enable MatmulAllReduce fusion kernel when tensor parallel is enabled.
+    # this feature is supported in A2, and eager mode will get better performance.
+    "VLLM_ASCEND_ENABLE_MATMUL_ALLREDUCE": lambda: bool(int(os.getenv("VLLM_ASCEND_ENABLE_MATMUL_ALLREDUCE", "0"))),
     # Whether to enable FlashComm optimization when tensor parallel is enabled.
     # This feature will get better performance when concurrency is large.
     "VLLM_ASCEND_ENABLE_FLASHCOMM1": lambda: bool(int(os.getenv("VLLM_ASCEND_ENABLE_FLASHCOMM1", "0"))),
@@ -77,32 +76,21 @@ env_variables: dict[str, Callable[[], Any]] = {
     # The specific value set will be used as the O-matrix TP group size for flashcomm2.
     # For a detailed introduction to the parameters and the differences and applicable scenarios
     # between this feature and FLASHCOMM1, please refer to the feature guide in the documentation.
-    # DEPRECATED: VLLM_ASCEND_FLASHCOMM2_PARALLEL_SIZE env var is removed.
-    # Use --additional-config '{"enable_flashcomm2_parallel_size": 2}'.
-    #     "VLLM_ASCEND_FLASHCOMM2_PARALLEL_SIZE":
-    #         lambda: int(os.getenv("VLLM_ASCEND_FLASHCOMM2_PARALLEL_SIZE", 0)),
+    "VLLM_ASCEND_FLASHCOMM2_PARALLEL_SIZE": lambda: int(os.getenv("VLLM_ASCEND_FLASHCOMM2_PARALLEL_SIZE", 0)),
     # Whether to enable msMonitor tool to monitor the performance of vllm-ascend.
-    # DEPRECATED: MSMONITOR_USE_DAEMON env var is removed. Use --additional-config '{"msmonitor_use_daemon": true}'.
-    #     "MSMONITOR_USE_DAEMON": lambda: bool(int(os.getenv("MSMONITOR_USE_DAEMON", "0"))),
+    "MSMONITOR_USE_DAEMON": lambda: bool(int(os.getenv("MSMONITOR_USE_DAEMON", "0"))),
     # Whether to enable MLAPO optimization for DeepSeek W8A8 series models.
     # This option is enabled by default. MLAPO can improve performance, but
     # it will consume more NPU memory. If reducing NPU memory usage is a higher priority
     # for your DeepSeek W8A8 scene, then disable it.
-    # DEPRECATED: VLLM_ASCEND_ENABLE_MLAPO env var is removed.
-    # Use --additional-config '{"enable_mlapo": true}'.
-    #     "VLLM_ASCEND_ENABLE_MLAPO":
-    #         lambda: bool(int(os.getenv("VLLM_ASCEND_ENABLE_MLAPO", "1"))),
+    "VLLM_ASCEND_ENABLE_MLAPO": lambda: bool(int(os.getenv("VLLM_ASCEND_ENABLE_MLAPO", "1"))),
     # Whether to enable weight cast format to FRACTAL_NZ.
     # 0: close nz;
     # 1: only quant case enable nz;
     # 2: enable nz as long as possible.
-    # DEPRECATED: VLLM_ASCEND_ENABLE_NZ env var is removed.
-    # Use --additional-config '{"weight_nz_mode": 1}'.
-    #     "VLLM_ASCEND_ENABLE_NZ": lambda: int(os.getenv("VLLM_ASCEND_ENABLE_NZ", 1)),
-    # DEPRECATED: VLLM_ASCEND_ENABLE_CONTEXT_PARALLEL env var is removed.
-    # Use --additional-config '{"enable_context_parallel": true}'.
-    #     "VLLM_ASCEND_ENABLE_CONTEXT_PARALLEL":
-    #         lambda: bool(int(os.getenv("VLLM_ASCEND_ENABLE_CONTEXT_PARALLEL", "0"))),
+    "VLLM_ASCEND_ENABLE_NZ": lambda: int(os.getenv("VLLM_ASCEND_ENABLE_NZ", 1)),
+    # Decide whether we should enable CP parallelism.
+    "VLLM_ASCEND_ENABLE_CONTEXT_PARALLEL": lambda: bool(int(os.getenv("VLLM_ASCEND_ENABLE_CONTEXT_PARALLEL", "0"))),
     # Whether to anbale dynamic EPLB
     "DYNAMIC_EPLB": lambda: os.getenv("DYNAMIC_EPLB", "false").lower(),
     # Whether to enable fused MC2 (`dispatch_gmm_combine_decode` / `dispatch_ffn_combine`).
@@ -112,20 +100,15 @@ env_variables: dict[str, Callable[[], Any]] = {
     # 2: MC2 might be replaced by `dispatch_gmm_combine_decode` operator.
     # `dispatch_gmm_combine_decode` can be used only for **decode node** moe layer
     # with W8A8. And MTP layer must be W8A8.
-    # DEPRECATED: VLLM_ASCEND_ENABLE_FUSED_MC2 env var is removed.
-    # Use --additional-config '{"enable_fused_mc2": 1}'.
-    #     "VLLM_ASCEND_ENABLE_FUSED_MC2":
-    #         lambda: int(os.getenv("VLLM_ASCEND_ENABLE_FUSED_MC2", "0")),
+    "VLLM_ASCEND_ENABLE_FUSED_MC2": lambda: int(os.getenv("VLLM_ASCEND_ENABLE_FUSED_MC2", "0")),
     # Whether to enable balance scheduling in the v1 scheduler.
     # Platform validation: only PD-mixed mode (`kv_role='kv_both'` or no kv_transfer_config).
     # Not supported in PD-disaggregated mode (`kv_producer` / `kv_consumer` only).
     "VLLM_ASCEND_BALANCE_SCHEDULING": lambda: bool(int(os.getenv("VLLM_ASCEND_BALANCE_SCHEDULING", "0"))),
     # use fused op transpose_kv_cache_by_block, default is True
-    # DEPRECATED: VLLM_ASCEND_FUSION_OP_TRANSPOSE_KV_CACHE_BY_BLOCK env var is removed.
-    # Use --additional-config '{"enable_transpose_kv_cache_by_block": true}'.
-    #     "VLLM_ASCEND_FUSION_OP_TRANSPOSE_KV_CACHE_BY_BLOCK": lambda: bool(
-    #         int(os.getenv("VLLM_ASCEND_FUSION_OP_TRANSPOSE_KV_CACHE_BY_BLOCK", "1"))
-    #     ),
+    "VLLM_ASCEND_FUSION_OP_TRANSPOSE_KV_CACHE_BY_BLOCK": lambda: bool(
+        int(os.getenv("VLLM_ASCEND_FUSION_OP_TRANSPOSE_KV_CACHE_BY_BLOCK", "1"))
+    ),
     # Control the aclrtMemcpyBatchAsync compile path for KV cache offloading.
     # "1": force enable, "0": force disable, None: auto-detect from CANN headers.
     "VLLM_ASCEND_ENABLE_BATCH_MEMCPY": lambda: os.getenv("VLLM_ASCEND_ENABLE_BATCH_MEMCPY", None),

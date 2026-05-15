@@ -91,6 +91,73 @@ class TestAscendConfig(TestBase):
 
     @_clean_up_ascend_config
     @patch("vllm_ascend.platform.NPUPlatform._fix_incompatible_config")
+    def test_migrated_config_falls_back_to_envs(self, mock_fix_incompatible_config):
+        test_vllm_config = VllmConfig()
+        test_vllm_config.parallel_config.tensor_parallel_size = 4
+        with patch.dict(
+            os.environ,
+            {
+                "VLLM_ASCEND_ENABLE_CONTEXT_PARALLEL": "1",
+                "VLLM_ASCEND_ENABLE_MATMUL_ALLREDUCE": "1",
+                "VLLM_ASCEND_ENABLE_FUSED_MC2": "2",
+                "VLLM_ASCEND_ENABLE_MLAPO": "0",
+                "VLLM_ASCEND_FLASHCOMM2_PARALLEL_SIZE": "2",
+                "MSMONITOR_USE_DAEMON": "1",
+                "VLLM_ASCEND_FUSION_OP_TRANSPOSE_KV_CACHE_BY_BLOCK": "0",
+                "VLLM_ASCEND_ENABLE_NZ": "2",
+            },
+        ):
+            ascend_config = init_ascend_config(test_vllm_config)
+
+        self.assertTrue(ascend_config.enable_context_parallel)
+        self.assertTrue(ascend_config.enable_matmul_allreduce)
+        self.assertEqual(ascend_config.enable_fused_mc2, 2)
+        self.assertFalse(ascend_config.enable_mlapo)
+        self.assertEqual(ascend_config.enable_flashcomm2_parallel_size, 2)
+        self.assertTrue(ascend_config.msmonitor_use_daemon)
+        self.assertFalse(ascend_config.enable_transpose_kv_cache_by_block)
+        self.assertEqual(ascend_config.weight_nz_mode, 2)
+
+    @_clean_up_ascend_config
+    @patch("vllm_ascend.platform.NPUPlatform._fix_incompatible_config")
+    def test_migrated_config_overrides_envs(self, mock_fix_incompatible_config):
+        test_vllm_config = VllmConfig()
+        test_vllm_config.additional_config = {
+            "enable_context_parallel": False,
+            "enable_matmul_allreduce": False,
+            "enable_fused_mc2": 0,
+            "enable_mlapo": True,
+            "enable_flashcomm2_parallel_size": 0,
+            "msmonitor_use_daemon": False,
+            "enable_transpose_kv_cache_by_block": True,
+            "weight_nz_mode": 1,
+        }
+        with patch.dict(
+            os.environ,
+            {
+                "VLLM_ASCEND_ENABLE_CONTEXT_PARALLEL": "1",
+                "VLLM_ASCEND_ENABLE_MATMUL_ALLREDUCE": "1",
+                "VLLM_ASCEND_ENABLE_FUSED_MC2": "2",
+                "VLLM_ASCEND_ENABLE_MLAPO": "0",
+                "VLLM_ASCEND_FLASHCOMM2_PARALLEL_SIZE": "2",
+                "MSMONITOR_USE_DAEMON": "1",
+                "VLLM_ASCEND_FUSION_OP_TRANSPOSE_KV_CACHE_BY_BLOCK": "0",
+                "VLLM_ASCEND_ENABLE_NZ": "2",
+            },
+        ):
+            ascend_config = init_ascend_config(test_vllm_config)
+
+        self.assertFalse(ascend_config.enable_context_parallel)
+        self.assertFalse(ascend_config.enable_matmul_allreduce)
+        self.assertEqual(ascend_config.enable_fused_mc2, 0)
+        self.assertTrue(ascend_config.enable_mlapo)
+        self.assertEqual(ascend_config.enable_flashcomm2_parallel_size, 0)
+        self.assertFalse(ascend_config.msmonitor_use_daemon)
+        self.assertTrue(ascend_config.enable_transpose_kv_cache_by_block)
+        self.assertEqual(ascend_config.weight_nz_mode, 1)
+
+    @_clean_up_ascend_config
+    @patch("vllm_ascend.platform.NPUPlatform._fix_incompatible_config")
     def test_get_ascend_config(self, mock_fix_incompatible_config):
         test_vllm_config = VllmConfig()
         ascend_config = init_ascend_config(test_vllm_config)
