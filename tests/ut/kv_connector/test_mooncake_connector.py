@@ -1350,6 +1350,47 @@ class TestMooncakeConnectorWorker(unittest.TestCase):
             get_kv_split_metadata(False, 1, 1, 8, 1, 0, 16, 2, 8, 30000, [1], [1], 0),
         )
 
+    def test_get_kv_split_metadata_all_groups_keeps_only_final_mamba_state(self):
+        worker = MooncakeConnectorWorker.__new__(MooncakeConnectorWorker)
+        worker.use_mla = True
+        worker.use_sparse = False
+        worker.pcp_size = 1
+        worker.dcp_size = 1
+        worker.tp_size = 8
+        worker.tp_rank = 1
+        worker.pcp_rank = 0
+        worker.dcp_rank = 0
+        worker._prefill_tp_size = 8
+        worker.local_remote_block_port_mapping = {}
+        worker.remote_port_send_num = {}
+        worker.side_channel_port = 40000
+        worker.handshake_port = 40001
+        worker.block_size = 16
+        worker.num_key_value_heads = 1
+        worker.hma_group_size = 2
+        worker._is_mamba_group = [False, True]
+
+        meta = types.SimpleNamespace()
+        meta.remote_pcp_size = 2
+        meta.remote_dcp_size = 2
+        meta.remote_ptp_size = 8
+        meta.remote_port = 30000
+        meta.remote_engine_id = "remote_engine"
+        meta.remote_host = "127.0.0.1"
+        meta.remote_multi_nodes_meta_mapping = {}
+        meta.num_external_tokens = 4 * worker.block_size
+        meta.num_prompt_blocks = 4
+        meta.local_block_ids = ([101, 102, 103, 104], [501])
+        meta.remote_block_ids = ([1], [11])
+
+        remote_ports, local_splits, remote_splits = worker._get_kv_split_metadata_all_groups("req0", meta)
+
+        self.assertEqual(remote_ports, [[30001], [30008], [30009], [30000]])
+        self.assertEqual([split[0] for split in local_splits], [[101], [102], [103], [104]])
+        self.assertEqual([split[0] for split in remote_splits], [[1], [1], [1], [1]])
+        self.assertEqual([split[1] for split in local_splits], [[], [], [], [501]])
+        self.assertEqual([split[1] for split in remote_splits], [[], [], [], [11]])
+
     def test_get_tp_num_need_pulls(self):
         worker = MooncakeConnectorWorker(self.vllm_config, self.engine_id)
         worker.num_key_value_heads = 8

@@ -556,6 +556,8 @@ class KVCacheRecvingThread(threading.Thread):
                     grouped_local_block_ids = [[block_id] for block_id in local_block_ids[i]]
                     attention_group_reformat_block_ids.append((i, grouped_local_block_ids))
             else:
+                if len(remote_block_ids[i]) == 0 or len(local_block_ids[i]) == 0:
+                    continue
                 transfer_block_idx = len(remote_block_ids[i]) - self.num_speculative_tokens - 1
                 grouped_remote_block_ids = [[remote_block_ids[i][transfer_block_idx]]]
                 grouped_local_block_ids = [[local_block_ids[i][0]]]
@@ -1418,7 +1420,6 @@ class MooncakeConnectorWorker:
         self._has_mamba = any(self._is_mamba_group)
         if self._has_mamba:
             assert self._is_hma_required
-            assert self.pcp_size * self.dcp_size == 1
             mamba_spec = next(spec for spec in self._layer_specs.values() if isinstance(spec, MambaSpec))
             conv_nbytes, ssm_nbytes = (
                 torch.tensor([], dtype=mamba_spec.dtypes[0]).element_size(),  # type: ignore[misc]
@@ -1864,6 +1865,78 @@ class MooncakeConnectorWorker:
 
         return remote_handshake_port_list, local_block_ids_list, remote_block_ids_list
 
+    def _get_kv_split_metadata_all_groups(
+        self,
+        req_id: str,
+        meta: ReqMeta,
+    ) -> tuple[list[list[int]], list[list[list[int]]], list[list[list[int]]]]:
+        """Build PCP split metadata for hybrid KV cache groups.
+
+        Attention groups follow the normal block split. Mamba groups reuse the
+        same PCP port mapping but only transfer the final state block, because
+        conv/ssm cache represents the recurrent state after prompt processing
+        rather than a per-token attention history.
+        """
+        remote_handshake_port_list: list[list[int]] | None = None
+        all_group_local_block_ids: list[list[list[int]]] | None = None
+        all_group_remote_block_ids: list[list[list[int]]] | None = None
+
+        for group_idx in range(self.hma_group_size):
+            group_local_block_ids = list(meta.local_block_ids[group_idx])
+            group_remote_block_ids = list(meta.remote_block_ids[group_idx])
+            group_meta = copy.copy(meta)
+
+            if self._is_mamba_group[group_idx]:
+                num_external_blocks = math.ceil(meta.num_external_tokens / self.block_size)
+                local_cp_size = self.pcp_size * self.dcp_size
+                dummy_local_block_ids = list(range(math.ceil(num_external_blocks / local_cp_size)))
+                group_meta.local_block_ids = dummy_local_block_ids
+            else:
+                group_meta.local_block_ids = group_local_block_ids
+            group_meta.remote_block_ids = group_remote_block_ids
+
+            group_remote_ports, group_local_splits, group_remote_splits = self._get_kv_split_metadata(
+                req_id, group_meta
+            )
+
+            if remote_handshake_port_list is None:
+                remote_handshake_port_list = group_remote_ports
+                all_group_local_block_ids = [[] for _ in remote_handshake_port_list]
+                all_group_remote_block_ids = [[] for _ in remote_handshake_port_list]
+            else:
+                assert remote_handshake_port_list == group_remote_ports, (
+                    f"Inconsistent PCP port mapping for group {group_idx}: "
+                    f"{remote_handshake_port_list} vs {group_remote_ports}"
+                )
+
+            assert all_group_local_block_ids is not None
+            assert all_group_remote_block_ids is not None
+
+            if self._is_mamba_group[group_idx]:
+                final_split_idx = next(
+                    (idx for idx in range(len(group_remote_splits) - 1, -1, -1) if group_remote_splits[idx]),
+                    None,
+                )
+                for split_idx in range(len(group_remote_splits)):
+                    if final_split_idx is not None and split_idx == final_split_idx and group_local_block_ids:
+                        all_group_local_block_ids[split_idx].append(
+                            [group_local_block_ids[0]] * len(group_remote_splits[split_idx])
+                        )
+                        all_group_remote_block_ids[split_idx].append(group_remote_splits[split_idx])
+                    else:
+                        all_group_local_block_ids[split_idx].append([])
+                        all_group_remote_block_ids[split_idx].append([])
+            else:
+                for split_idx, (local_ids, remote_ids) in enumerate(zip(group_local_splits, group_remote_splits)):
+                    all_group_local_block_ids[split_idx].append(local_ids)
+                    all_group_remote_block_ids[split_idx].append(remote_ids)
+
+        if remote_handshake_port_list is None:
+            return [], [], []
+        assert all_group_local_block_ids is not None
+        assert all_group_remote_block_ids is not None
+        return remote_handshake_port_list, all_group_local_block_ids, all_group_remote_block_ids
+
     def start_load_kv(self, metadata: MooncakeConnectorMetadata):
         """Start loading KV blocks from remote engine."""
         for req_id, meta in metadata.requests.items():
@@ -1881,10 +1954,19 @@ class MooncakeConnectorWorker:
             tp_num_need_pulls = self._get_tp_num_need_pulls(prefill_tp_size)
             remote_req_id = meta.remote_request_id
 
-            if meta.remote_pcp_size * meta.remote_dcp_size > 1 and (not self._has_mamba):
-                remote_handshake_port_list, local_block_ids_list, remote_block_ids_list = self._get_kv_split_metadata(
-                    req_id, meta
-                )
+            if meta.remote_pcp_size * meta.remote_dcp_size > 1:
+                if self._has_mamba:
+                    (
+                        remote_handshake_port_list,
+                        local_block_ids_list,
+                        remote_block_ids_list,
+                    ) = self._get_kv_split_metadata_all_groups(req_id, meta)
+                else:
+                    (
+                        remote_handshake_port_list,
+                        local_block_ids_list,
+                        remote_block_ids_list,
+                    ) = self._get_kv_split_metadata(req_id, meta)
 
                 for pcp_dcp_rank in range(len(remote_handshake_port_list)):
                     for i in range(tp_num_need_pulls):
