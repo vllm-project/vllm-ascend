@@ -449,6 +449,11 @@ def vllm_version_is(target_vllm_version: str):
         import vllm
 
         vllm_version = vllm.__version__
+    
+    # Strip version suffix (e.g., "0.20.1+cpu" -> "0.20.1")
+    # This allows matching when vllm.__version__ contains build metadata
+    vllm_version = vllm_version.split('+')[0]
+    
     try:
         return Version(vllm_version) == Version(target_vllm_version)
     except InvalidVersion:
