@@ -1391,23 +1391,22 @@ class PCPManager:
         valid_positions = valid_q_full[:, :, None] & valid_k[:, None, :]
 
         # Create output indices for flattening
-        # Output buffer has shape [num_decode_reqs, query_len, 16384]
-        # flat index = req_idx * query_len * 16384 + q_idx * 16384 + local_idx
-        req_indices = torch.arange(self.num_decode_reqs, dtype=torch.long)[:, None, None]
-        j_indices = torch.arange(query_len, dtype=torch.long)[None, :, None]
-        k_idx_output = torch.arange(16384, dtype=torch.long)[None, None, :]
-        flat_target = (req_indices * query_len * 16384 + j_indices * 16384 + k_idx_output).view(-1)
+        # Build 3D index tensors that match the mask shape [num_decode_reqs, query_len, max_k]
+        req_indices_3d = torch.arange(self.num_decode_reqs, dtype=torch.long)[:, None, None].expand(self.num_decode_reqs, query_len, max_k)
+        q_indices_3d = torch.arange(query_len, dtype=torch.long)[None, :, None].expand(self.num_decode_reqs, query_len, max_k)
+        k_indices_3d = torch.arange(max_k, dtype=torch.long)[None, None, :].expand(self.num_decode_reqs, query_len, max_k)
 
-        # Flatten mask and valid_positions
-        # Both now have shape [num_decode_reqs * max_k * query_len]
-        flat_mask = mask.permute(0, 2, 1).contiguous().view(-1)
-        flat_valid = valid_positions.permute(0, 2, 1).contiguous().view(-1)
+        # Compute flat target indices: req_idx * query_len * 16384 + q_idx * 16384 + k_idx
+        flat_target = req_indices_3d * query_len * 16384 + q_indices_3d * 16384 + k_indices_3d
 
-        # Use masked select to get valid mask values
+        # Flatten mask, valid_positions, and flat_target
+        flat_mask = mask.view(-1)
+        flat_valid = valid_positions.view(-1)
+        flat_target = flat_target.view(-1)
+
+        # Use masked select to get valid mask values and valid target indices
         custom_mask = torch.masked_select(flat_mask, flat_valid)
-
-        # Flatten target indices for valid positions only
-        valid_target = flat_target[flat_valid]
+        valid_target = torch.masked_select(flat_target, flat_valid)
 
         # Scatter to output buffer
         mtp_attn_mask_flat = mtp_attn_mask.view(-1)
