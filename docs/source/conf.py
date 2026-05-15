@@ -79,19 +79,19 @@ myst_substitutions = {
     "pip_vllm_ascend_version": "0.19.1rc1",
     "pip_vllm_version": "0.19.1",
     # CANN image tag
-    "cann_image_tag": "8.5.1-910b-ubuntu22.04-py3.11",
+    "cann_image_tag": "9.0.0-910b-ubuntu22.04-py3.11",
     # vLLM commit hash for main branch
-    "main_vllm_commit": "d886c26d4d4fef7d079696beb4ece1cfb4b008a8",
+    "main_vllm_commit": "ce29c26b31d432b1b4bc028c46bb2c3b07a667d8",
     # vLLM tag for main branch
-    "main_vllm_tag": "v0.19.1",
+    "main_vllm_tag": "v0.20.2",
     # Python version for main branch
     "main_python_version": ">= 3.10, < 3.12",
     # CANN version for main branch
-    "main_cann_version": "8.5.0",
+    "main_cann_version": "9.0.0",
     # PyTorch/torch_npu version for main branch
-    "main_pytorch_torch_npu_version": "2.9.0 / 2.9.0",
+    "main_pytorch_torch_npu_version": "2.10.0 / 2.10.0",
     # Triton Ascend version for main branch
-    "main_triton_ascend_version": "3.2.0",
+    "main_triton_ascend_version": "3.2.1",
 }
 
 # For cross-file header anchors
