@@ -696,8 +696,6 @@ jobs:
         run: |
           set -euxo pipefail
 
-          echo "=== Install Mooncake system runtime deps ==="
-          apt-get update -y
           apt-get update -y
           apt-get install -y --no-install-recommends \
             libibverbs1 \
@@ -707,37 +705,11 @@ jobs:
             libcurl4
           ldconfig
 
-          echo "=== Check libibverbs ==="
-          ldconfig -p | grep libibverbs || true
-          find /lib /usr/lib /usr/local/lib /usr/local -name 'libibverbs.so*' 2>/dev/null || true
+          MOONCAKE_WHEEL="mooncake_transfer_engine_ascend-0.3.8.post1-cp311-cp311-manylinux_2_17_aarch64.manylinux_2_35_aarch64.whl"
+          pip install --no-cache-dir --no-deps \
+            "https://vllm-ascend.obs.cn-north-4.myhuaweicloud.com/vllm-ascend/${MOONCAKE_WHEEL}"
 
-          echo "=== Locate Mooncake wheel ==="
-          MOONCAKE_WHEEL_DIR="/root/.cache/mooncake-wheelhouse-ascend/v0.3.9-py311-aarch64"
-          ls -lh "${MOONCAKE_WHEEL_DIR}"
-
-          MOONCAKE_WHEEL="$(find "${MOONCAKE_WHEEL_DIR}" -maxdepth 1 -type f -name 'mooncake_transfer_engine_ascend-0.3.9-cp311-cp311-*.whl' -print -quit)"
-
-          if [ -z "${MOONCAKE_WHEEL}" ]; then
-            echo "Mooncake wheel not found in ${MOONCAKE_WHEEL_DIR}"
-            exit 1
-          fi
-
-          echo "Using Mooncake wheel: ${MOONCAKE_WHEEL}"
-
-          echo "=== Check SHA256 ==="
-          if [ -f "${MOONCAKE_WHEEL_DIR}/SHA256SUMS" ]; then
-            cd "${MOONCAKE_WHEEL_DIR}"
-            sha256sum -c SHA256SUMS
-            cd -
-          else
-            sha256sum "${MOONCAKE_WHEEL}"
-          fi
-
-          echo "=== Install Mooncake wheel ==="
-          python3 -m pip install --no-cache-dir --no-deps "${MOONCAKE_WHEEL}"
-
-          echo "=== Installed Mooncake package ==="
-          python3 -m pip show mooncake-transfer-engine-ascend
+          pip show mooncake-transfer-engine-ascend || true
 
       - name: Install vllm-project/vllm-ascend
         env:
