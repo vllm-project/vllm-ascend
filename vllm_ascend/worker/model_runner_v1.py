@@ -23,7 +23,7 @@ import time
 from collections import defaultdict
 from contextlib import contextmanager, nullcontext
 from copy import copy, deepcopy
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from functools import partial
 from multiprocessing import Manager
 from typing import TYPE_CHECKING, Any, NamedTuple, TypeAlias
@@ -79,6 +79,7 @@ from vllm.v1.sample.logits_processor import build_logitsprocs
 from vllm.v1.sample.metadata import SamplingMetadata
 from vllm.v1.sample.rejection_sampler import RejectionSampler
 from vllm.v1.spec_decode.metadata import SpecDecodeMetadata
+from vllm.v1.spec_decode.ngram_proposer_gpu import copy_num_valid_draft_tokens
 from vllm.v1.structured_output.utils import apply_grammar_bitmask
 from vllm.v1.utils import record_function_or_nullcontext
 from vllm.v1.worker import mamba_utils
@@ -125,6 +126,7 @@ from vllm_ascend.spec_decode.extract_hidden_states_proposer import (
 )
 from vllm_ascend.spec_decode.medusa_proposer import AscendMedusaProposer
 from vllm_ascend.spec_decode.ngram_proposer import AscendNgramProposer
+from vllm_ascend.spec_decode.ngram_proposer_npu import AscendNgramProposerNPU
 from vllm_ascend.spec_decode.suffix_proposer import AscendSuffixDecodingProposer
 from vllm_ascend.spec_decode.utils import update_num_computed_tokens_for_batch_change
 from vllm_ascend.utils import (
@@ -498,6 +500,7 @@ class NPUModelRunner(GPUModelRunner):
         # Set up speculative decoding.
         self.drafter: (
             AscendNgramProposer
+            | AscendNgramProposerNPU
             | AscendEagleProposer
             | AscendDraftModelProposer
             | AscendDflashProposer
@@ -1334,6 +1337,51 @@ class NPUModelRunner(GPUModelRunner):
             draft_token_ids = None
         elif isinstance(self.drafter, (AscendNgramProposer, AscendSuffixDecodingProposer)):
             draft_token_ids = self.drafter.propose(valid_sampled_token_ids)
+        elif isinstance(self.drafter, AscendNgramProposerNPU):
+            batch_size = min(self.input_batch.num_reqs, self.token_ids_gpu_tensor.shape[0])
+
+            # prepare sampled_token_ids tensor（list → padded tensor）
+            sampled_token_ids = valid_sampled_token_ids
+            if isinstance(sampled_token_ids, list):
+                max_len = max((len(sublist) for sublist in sampled_token_ids), default=0)
+                max_len = max(max_len, 1)
+                padded_list = [
+                    sublist + [-1] * (max_len - len(sublist))
+                    for sublist in sampled_token_ids
+                ]
+                sampled_token_ids_tensor = torch.tensor(
+                    padded_list, dtype=torch.int32, device=self.device
+                )
+            else:
+                sampled_token_ids_tensor = sampled_token_ids
+
+            (_token_ids, next_token_ids, draft_token_ids,
+             num_valid_draft_tokens) = torch.ops._C_ascend.npu_ngram_spec_decode(
+                self.token_ids_gpu_tensor[:batch_size],       # [B, max_seq_len], in-place
+                self.num_tokens_no_spec_gpu[:batch_size],      # [B]
+                sampled_token_ids_tensor[:batch_size],         # [B, max_new_tokens]
+                self.discard_request_mask.gpu[:batch_size],    # [B]
+                vocab_size=self.model_config.get_vocab_size(),
+                min_n=self.drafter.min_n,
+                max_n=self.drafter.max_n,
+                k=self.drafter.k,
+            )
+
+            # only async scheduling, set prev_sampled_token_ids，
+            if self.use_async_scheduling:
+                self.input_batch.prev_sampled_token_ids = next_token_ids.unsqueeze(1)
+
+            # save num_valid_draft_tokens for scheduler trim
+            self._num_valid_draft_tokens = num_valid_draft_tokens
+
+            # async D2H copy num_valid_draft_tokens
+            copy_num_valid_draft_tokens(
+                self._num_valid_draft_tokens_cpu,
+                self._num_valid_draft_tokens_copy_stream,
+                self._num_valid_draft_tokens_event,
+                self._num_valid_draft_tokens,
+                batch_size,
+            )
         elif isinstance(self.drafter, AscendMedusaProposer):
             draft_token_ids = self.drafter.propose(
                 valid_sampled_token_ids, sampling_metadata, spec_decode_metadata, sample_hidden_states
@@ -1491,6 +1539,36 @@ class NPUModelRunner(GPUModelRunner):
 
         return draft_token_ids
 
+    def _copy_draft_token_ids_to_cpu(
+        self, scheduler_output: "SchedulerOutput", zeros_only: bool = False
+    ) -> None:
+        if not self.num_spec_tokens:
+            return
+        if self.use_async_scheduling and not (
+            scheduler_output.has_structured_output_requests
+            or self.input_batch.sampling_metadata.output_token_ids
+        ):
+            return
+        self._draft_token_req_ids = self.input_batch.req_ids.copy()
+
+        draft_token_ids: torch.Tensor = self._draft_token_ids  # type: ignore[has-type]
+        if not torch.is_tensor(draft_token_ids):
+            return
+        assert self.draft_token_ids_event is not None
+        assert self.draft_token_ids_copy_stream is not None
+        assert self.draft_token_ids_cpu is not None
+        default_stream = torch.npu.current_stream()
+        num_reqs = draft_token_ids.shape[0]
+        with torch.npu.stream(self.draft_token_ids_copy_stream):
+            if not zeros_only:
+                self.draft_token_ids_copy_stream.wait_stream(default_stream)
+                self.draft_token_ids_cpu[:num_reqs].copy_(
+                    draft_token_ids, non_blocking=True
+                )
+            else:
+                self.draft_token_ids_cpu[:num_reqs] = 0
+            self.draft_token_ids_event.record()
+
     @torch.inference_mode()
     def execute_model(
         self,
@@ -1514,6 +1592,24 @@ class NPUModelRunner(GPUModelRunner):
                 self._execution_start_time = time.perf_counter()
         if self.execute_model_state is not None:
             raise RuntimeError("State error: sample_tokens() must be called after execute_model() returns None.")
+       
+        # If ngram_gpu is used, we need to copy the scheduler_output to avoid
+        # the modification has influence on the scheduler_output in engine core process.
+        # The replace is much faster than deepcopy.
+        if (
+            self.speculative_config is not None
+            and self.speculative_config.use_ngram_gpu()
+        ):
+            num_scheduled_tokens_copy = scheduler_output.num_scheduled_tokens.copy()
+            spec_decode_tokens_copy = (
+                scheduler_output.scheduled_spec_decode_tokens.copy()
+            )
+            scheduler_output = replace(
+                scheduler_output,
+                num_scheduled_tokens=num_scheduled_tokens_copy,
+                scheduled_spec_decode_tokens=spec_decode_tokens_copy,
+            )
+
         self._start_dump_data()
         # self._draft_token_ids is None when `input_fits_in_drafter=False`
         # and there is no draft tokens scheduled. so it need to update the
@@ -1536,6 +1632,25 @@ class NPUModelRunner(GPUModelRunner):
         num_scheduled_tokens = scheduler_output.total_num_scheduled_tokens
         with record_function_or_nullcontext("prepare input"):
             with self.synchronize_input_prep():
+                # Fix up prev_req_id_to_index for requests that were discarded
+                # in the previous sample_tokens step. If a request has
+                # prev_num_draft_len > 0 but is missing from
+                # prev_req_id_to_index, the parent _update_states would
+                # hit a KeyError. Reset prev_num_draft_len to 0 for such
+                # requests so they fall through safely.
+                if (
+                    self.use_async_scheduling
+                    and self.num_spec_tokens
+                    and self.input_batch.prev_req_id_to_index is not None
+                ):
+                    for req_id in scheduler_output.scheduled_cached_reqs.req_ids:
+                        if (
+                            req_id not in self.input_batch.prev_req_id_to_index
+                            and (req_state := self.requests.get(req_id)) is not None
+                            and req_state.prev_num_draft_len
+                        ):
+                            req_state.prev_num_draft_len = 0
+
                 # Update persistent batch states.
                 deferred_state_corrections_fn = self._update_states(scheduler_output)
 
@@ -1948,6 +2063,7 @@ class NPUModelRunner(GPUModelRunner):
                         self.speculative_config.use_eagle()
                         or self.speculative_config.uses_draft_model()
                         or self.speculative_config.uses_extract_hidden_states()
+                        or self.speculative_config.use_ngram_gpu()
                     )
                     and not self.speculative_config.disable_padded_drafter_batch
                 )
