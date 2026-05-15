@@ -148,6 +148,7 @@
       "llava-hf/llava-onevision-qwen2-0.5b-ov-hf",
       "llava-hf/llava-v1.6-mistral-7b-hf",
       "meta-llama/Llama-3.2-1B-Instruct",
+      "meta-llama/Llama-4-Scout-17B-16E-Instruct",
       "mistralai/Ministral-3-3B-Instruct-2512-BF16",
       "mistralai/Ministral-3-8B-Instruct-2512-BF16",
       "mistralai/Mistral-7B-Instruct-v0.1",

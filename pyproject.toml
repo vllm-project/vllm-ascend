@@ -121,4 +121,5 @@ exclude = [
     "docs/source/tutorials/models/Qwen3_reranker.md",
     "docs/source/tutorials/models/index.md",
     "docs/source/tutorials/models/Hunyuan-A13B-Instruct.md",
+    "docs/source/tutorials/models/llama4_scout.md",
 ]

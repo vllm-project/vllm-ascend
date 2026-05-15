@@ -1081,7 +1081,9 @@ class TestEagleProposerPropose:
                 seq_lens = torch.tensor([9], device=torch.device("cpu"), dtype=torch.int32)
                 max_query_len = 9
                 max_seq_len = 9
-                slot_mapping = torch.tensor([128, 129, 130, 131, 132, 133, 134, 135, 136], device=torch.device("cpu"), dtype=torch.int32)
+                slot_mapping = torch.tensor(
+                    [128, 129, 130, 131, 132, 133, 134, 135, 136], device=torch.device("cpu"), dtype=torch.int32
+                )
                 _seq_lens_cpu = torch.tensor([9], dtype=torch.int32)
                 seq_lens_cpu = torch.tensor([9], dtype=torch.int32)
                 positions = torch.cat([torch.arange(9), torch.zeros(8704 - 9)])
@@ -1090,13 +1092,21 @@ class TestEagleProposerPropose:
             mock_common_attn_metadata.batch_size.return_value = 3
             if model_type == 'qwen_moe':
                 seq_lens = torch.tensor([19, 17, 17], device=torch.device("cpu"), dtype=torch.int32)
-                slot_mapping = torch.tensor([143, 144, 145, 146, 269, 270, 271, 272, 397, 398, 399, 400], device=torch.device("cpu"), dtype=torch.int32)
+                slot_mapping = torch.tensor(
+                    [143, 144, 145, 146, 269, 270, 271, 272, 397, 398, 399, 400],
+                    device=torch.device("cpu"),
+                    dtype=torch.int32,
+                )
                 seq_lens_cpu = torch.tensor([19, 17, 17], dtype=torch.int32)
                 num_computed_tokens_cpu = torch.tensor([15, 13, 13], dtype=torch.int32)
                 positions = torch.cat([torch.tensor([15, 16, 17, 18, 13, 14, 15, 16, 13, 14, 15, 16, 8, 9, 10, 11, 12, 0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12]), torch.zeros(8704 - 30)])
             if model_type == 'deepseek':
                 seq_lens = torch.tensor([14, 13, 14], device=torch.device("cpu"), dtype=torch.int32)
-                slot_mapping = torch.tensor([138, 139, 140, 141, 265, 266, 267, 268, 394, 395, 396, 397], device=torch.device("cpu"), dtype=torch.int32)
+                slot_mapping = torch.tensor(
+                    [138, 139, 140, 141, 265, 266, 267, 268, 394, 395, 396, 397],
+                    device=torch.device("cpu"),
+                    dtype=torch.int32,
+                )
                 seq_lens_cpu = torch.tensor([14, 13, 14], dtype=torch.int32)
                 num_computed_tokens_cpu = torch.tensor([10, 9, 10], dtype=torch.int32)
                 positions = torch.cat([torch.tensor([10, 11, 12, 13, 9, 10, 11, 12, 10, 11, 12, 13, 8, 0, 1, 2, 3, 4, 5, 6, 7, 8, 9]), torch.zeros(8704 - 23)])
@@ -1715,7 +1725,6 @@ class TestPrepareNextTokenIdsPadded(TestBase):
         """Test case where all requests have valid sampled tokens"""
         num_reqs = 3
         vocab_size = 1000
-
         sampled_token_ids = torch.tensor(
             [
                 [100, 101, 102, 103, 104],
@@ -1737,7 +1746,6 @@ class TestPrepareNextTokenIdsPadded(TestBase):
             vocab_size=vocab_size,
             num_tokens_no_spec=[11, 16, 21],  # seq_len = num_tokens_no_spec - 1 = [10, 15, 20]
         )
-
         discard_request_indices = torch.tensor([], dtype=torch.int64)
         num_discarded_requests = 0
 
@@ -1762,7 +1770,6 @@ class TestPrepareNextTokenIdsPadded(TestBase):
         """Test case where some tokens are rejected (marked as -1)"""
         num_reqs = 3
         vocab_size = 1000
-
         sampled_token_ids = torch.tensor(
             [
                 [100, 101, -1, -1, -1],
@@ -3595,6 +3602,10 @@ class TestEagleProposerSetInputsFirstPass(TestBase):
                     runner=runner,
                 )
             proposer.block_size = BLOCK_SIZE
+            proposer.hidden_size = 4096
+            proposer.hidden_states = torch.zeros(
+                proposer.max_num_tokens, proposer.hidden_size, dtype=proposer.dtype, device=device
+            )
             return proposer, vllm_config
 
     def test_set_inputs_first_pass_default_eagle(self):

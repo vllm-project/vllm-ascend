@@ -172,7 +172,6 @@ class AscendFusedMoE310(FusedMoE):
 
         self.quant_method.create_weights(layer=self, **moe_quant_params)
         self.quant_type = self.get_quant_type()
-
         _MoECommMethods[MoECommType.ALLGATHER] = AllGatherCommImpl310(self.moe_config)
 
         from vllm_ascend.ops.fused_moe.fused_moe import AscendMoERunner
