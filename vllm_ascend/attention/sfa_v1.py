@@ -953,7 +953,7 @@ class AscendSFAImpl(MLAAttentionImpl):
             sin = sin.view(-1, 1, 1, self.qk_rope_head_dim)
 
             k_pe = k_pe.unsqueeze(2)
-            k_pe = torch_npu.npu_interleave_rope(k_pe, cos, sin)
+            k_pe = torch_npu.npu_rotary_mul(k_pe, cos, sin)
             k_pe = k_pe.squeeze(2)
 
             k = torch.cat([k_pe, k_nope], dim=-1)  # [b*s,128]
