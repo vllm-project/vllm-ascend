@@ -612,6 +612,47 @@ class NPUPlatform(Platform):
         return backend_map[key]
 
     @classmethod
+    def get_supported_vit_attn_backends(cls) -> list:
+        """Get supported ViT attention backends for NPU platform."""
+        from vllm.v1.attention.backends.registry import AttentionBackendEnum
+        return [
+            AttentionBackendEnum.TORCH_SDPA,
+        ]
+
+    @classmethod
+    def get_vit_attn_backend(
+        cls,
+        head_size: int,
+        dtype: torch.dtype,
+        backend = None,
+    ):
+        """
+        Get the vision attention backend class of a device.
+
+        NOTE: ViT Attention should be checked and override in the platform-specific
+        implementation. we should not override this in any other places, like
+        the model_executor/models/<model_name>.py.
+
+        We check if the backend is None or not:
+            1. If not, check if the backend is supported by the platform.
+            2. If None, continue to the default selection logic.
+        """
+        from vllm.v1.attention.backends.registry import AttentionBackendEnum
+        
+        if backend is not None:
+            assert backend in cls.get_supported_vit_attn_backends(), (
+                f"Backend {backend} is not supported for vit attention. "
+                f"Supported backends are: {cls.get_supported_vit_attn_backends()}"
+            )
+            logger.info_once(f"Using backend {backend} for vit attention")
+            return backend
+
+        logger.info_once(
+            f"Using default backend {AttentionBackendEnum.TORCH_SDPA} for vit attention"
+        )
+        return AttentionBackendEnum.TORCH_SDPA
+
+    @classmethod
     def get_punica_wrapper(cls) -> str:
         return "vllm_ascend.lora.punica_npu.PunicaWrapperNPU"
 
