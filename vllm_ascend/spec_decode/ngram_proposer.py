@@ -61,4 +61,10 @@ class AscendNgramProposer(NgramProposer):
             self.runner.input_batch.token_ids_cpu,
         )
 
+        target_len = self.k
+        for i in range(len(draft_token_ids)):
+            cur_len = len(draft_token_ids[i])
+            if cur_len < target_len:
+                draft_token_ids[i].extend([0] * (target_len - cur_len))
+
         return draft_token_ids
