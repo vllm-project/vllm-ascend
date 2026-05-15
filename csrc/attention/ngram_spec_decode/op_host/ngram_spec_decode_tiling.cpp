@@ -61,27 +61,9 @@ static ge::graphStatus NgramSpecDecodeTilingFunc(gert::TilingContext *context)
 
     auto ascendcPlatform = platform_ascendc::PlatformAscendC(context->GetPlatformInfo());
     uint32_t aivNum = ascendcPlatform.GetCoreNumAiv();
-    uint64_t ubSize = 0UL;
-    ascendcPlatform.GetCoreMemSize(platform_ascendc::CoreMemType::UB, ubSize);
-    int64_t ub_size_limit = static_cast<int64_t>(ubSize);
-
-    int64_t align_elems = 32 / ELEM_SIZE;
-    int64_t max_seq_len_align = ((max_seq_len + align_elems - 1) / align_elems) * align_elems;
-    int64_t max_new_tokens_align = ((max_new_tokens + align_elems - 1) / align_elems) * align_elems;
-    int64_t k_align = ((k + align_elems - 1) / align_elems) * align_elems;
-
-    int64_t ub_per_row = (max_seq_len_align + max_new_tokens_align + k_align) * ELEM_SIZE;
-    int64_t ub_overhead = 4 * 32 + static_cast<int64_t>(max_n) * ELEM_SIZE
-        + ((max_seq_len_align + 7) / 8);  // maskBuf
-    int64_t ub_available = ub_size_limit - ub_overhead;
-    int64_t max_block_rows = (ub_available > 0) ? (ub_available / ub_per_row) : 1;
-    max_block_rows = std::max(max_block_rows, static_cast<int64_t>(1));
-
     int64_t block_dim = std::min(batch_size, static_cast<int64_t>(aivNum));
     int64_t rows_per_core = (block_dim > 0) ? (batch_size / block_dim) : 0;
     int64_t former_num = batch_size % block_dim;
-    int64_t tail_rows = batch_size - former_num * rows_per_core;
-    int64_t block_rows = std::min(rows_per_core, max_block_rows);
 
     tilingData->ngramInfo.batchSize = static_cast<uint32_t>(batch_size);
     tilingData->ngramInfo.maxSeqLen = static_cast<uint32_t>(max_seq_len);
@@ -92,13 +74,11 @@ static ge::graphStatus NgramSpecDecodeTilingFunc(gert::TilingContext *context)
     tilingData->ngramInfo.k = static_cast<uint32_t>(k);
     tilingData->ngramInfo.formerNum = static_cast<uint32_t>(former_num);
     tilingData->ngramInfo.rowsPerCore = static_cast<uint32_t>(rows_per_core);
-    tilingData->ngramInfo.tailRows = static_cast<uint32_t>(tail_rows);
-    tilingData->ngramInfo.blockRows = static_cast<uint32_t>(block_rows);
 
     context->SetBlockDim(static_cast<uint32_t>(block_dim));
 
-    OPS_LOG_D(nodeName, "batchSize=%lu, maxSeqLen=%lu, maxNewTokens=%lu, k=%lu, blockDim=%lu, blockRows=%lu",
-        batch_size, max_seq_len, max_new_tokens, k, block_dim, block_rows);
+    OPS_LOG_D(nodeName, "batchSize=%lu, maxSeqLen=%lu, maxNewTokens=%lu, k=%lu, blockDim=%lu",
+        batch_size, max_seq_len, max_new_tokens, k, block_dim);
 
     return ge::GRAPH_SUCCESS;
 }

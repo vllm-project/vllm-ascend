@@ -74,9 +74,7 @@ public:
         this->k_val = static_cast<int32_t>(tilingData.ngramInfo.k);
         this->former_num = static_cast<int32_t>(tilingData.ngramInfo.formerNum);
         this->rows_per_core = static_cast<int32_t>(tilingData.ngramInfo.rowsPerCore);
-        this->tail_rows = static_cast<int32_t>(tilingData.ngramInfo.tailRows);
-        this->block_rows = static_cast<int32_t>(tilingData.ngramInfo.blockRows);
-
+        
         // Align dimensions to 32-byte boundaries (8 elements for int32)
         int32_t align_elems = 32 / ELEM_SIZE;
         this->max_seq_len_align = ((this->max_seq_len + align_elems - 1) / align_elems) * align_elems;
@@ -527,8 +525,6 @@ private:
     int32_t max_n_val;
     int32_t former_num;
     int32_t rows_per_core;
-    int32_t tail_rows;
-    int32_t block_rows;
     uint32_t my_rows;
     uint32_t row_offset;
     bool is_large_row;

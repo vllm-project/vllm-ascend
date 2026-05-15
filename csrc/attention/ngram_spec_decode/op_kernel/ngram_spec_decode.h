@@ -13,8 +13,6 @@ struct NgramSpecDecodeInfo {
     uint32_t k;
     uint32_t formerNum;
     uint32_t rowsPerCore;
-    uint32_t tailRows;
-    uint32_t blockRows;
 };
 
 struct NgramSpecDecodeTilingData {
