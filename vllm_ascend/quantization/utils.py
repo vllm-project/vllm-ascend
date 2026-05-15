@@ -70,7 +70,7 @@ def get_model_file(
             )
             return Path(downloaded_path)
     except Exception as e:
-        logger.debug(f"Could not download {filename} from {model}: {e}")
+        logger.debug("Could not download %s from %s: %s", filename, model, e)
         return None
 
 
@@ -197,3 +197,12 @@ def maybe_auto_detect_quantization(vllm_config) -> None:
     from vllm.config import VllmConfig as _VllmConfig
 
     vllm_config.quant_config = _VllmConfig._get_quantization_config(model_config, vllm_config.load_config)
+
+
+def enable_fa_quant(vllm_config, layer_name=None) -> bool:
+    if vllm_config.quant_config is not None and getattr(vllm_config.quant_config, "enable_fa_quant", False):
+        if layer_name is not None:
+            return vllm_config.quant_config.enabling_fa_quant(vllm_config, layer_name)
+        else:
+            return True
+    return False

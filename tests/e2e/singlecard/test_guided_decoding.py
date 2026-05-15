@@ -17,7 +17,9 @@
 # limitations under the License.
 #
 import json
+import os
 from typing import Any
+from unittest.mock import patch
 
 import jsonschema
 import pytest
@@ -26,10 +28,21 @@ from vllm.outputs import RequestOutput
 from vllm.sampling_params import SamplingParams, StructuredOutputsParams
 
 from tests.e2e.conftest import VllmRunner
+from vllm_ascend.utils import vllm_version_is
 
 MODEL_NAME = "Qwen/Qwen3-0.6B"
 
 GuidedDecodingBackend = ["xgrammar", "guidance", "outlines"]
+
+
+@pytest.fixture(params=[False, True], ids=["v1", "v2"])
+def model_runner_env(request):
+    use_v2_model_runner = request.param
+    if use_v2_model_runner and vllm_version_is("0.20.1"):
+        pytest.skip("No need to support v2 model runner for vLLM tag version.")
+
+    with patch.dict(os.environ, {"VLLM_USE_V2_MODEL_RUNNER": "1" if use_v2_model_runner else "0"}):
+        yield
 
 
 @pytest.fixture(scope="module")
@@ -66,7 +79,7 @@ def sample_json_schema():
 
 
 @pytest.mark.parametrize("guided_decoding_backend", GuidedDecodingBackend)
-def test_guided_json_completion(guided_decoding_backend: str, sample_json_schema):
+def test_guided_json_completion(guided_decoding_backend: str, sample_json_schema, model_runner_env):
     runner_kwargs: dict[str, Any] = {}
     sampling_params = SamplingParams(
         temperature=1.0, max_tokens=500, structured_outputs=StructuredOutputsParams(json=sample_json_schema)
@@ -96,7 +109,7 @@ def test_guided_json_completion(guided_decoding_backend: str, sample_json_schema
 
 
 @pytest.mark.parametrize("guided_decoding_backend", GuidedDecodingBackend)
-def test_guided_regex(guided_decoding_backend: str, sample_regex):
+def test_guided_regex(guided_decoding_backend: str, sample_regex, model_runner_env):
     if guided_decoding_backend == "outlines":
         pytest.skip("Outlines doesn't support regex-based guided decoding.")
     runner_kwargs: dict[str, Any] = {}

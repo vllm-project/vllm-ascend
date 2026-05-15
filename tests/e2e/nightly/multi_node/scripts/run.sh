@@ -13,7 +13,7 @@ export LD_LIBRARY_PATH=/usr/local/Ascend/ascend-toolkit/latest/python/site-packa
 export LD_LIBRARY_PATH=/usr/local/lib:$LD_LIBRARY_PATH
 # cann and atb environment setup
 source /usr/local/Ascend/ascend-toolkit/set_env.sh
-source /usr/local/Ascend/cann-8.5.1/share/info/ascendnpu-ir/bin/set_env.sh
+source /usr/local/Ascend/cann-9.0.0/share/info/ascendnpu-ir/bin/set_env.sh
 
 set +eu
 source /usr/local/Ascend/nnal/atb/set_env.sh
@@ -106,7 +106,7 @@ check_and_config() {
     echo "====> Configure mirrors and git proxy"
     git config --global url."https://ghfast.top/https://github.com/".insteadOf "https://github.com/"
     pip config set global.index-url https://mirrors.tuna.tsinghua.edu.cn/pypi/web/simple
-    export PIP_EXTRA_INDEX_URL=https://mirrors.huaweicloud.com/ascend/repos/pypi
+    export PIP_EXTRA_INDEX_URL="https://mirrors.huaweicloud.com/ascend/repos/pypi https://triton-ascend.osinfra.cn/pypi/simple"
 }
 
 install_extra_components() {
@@ -138,9 +138,9 @@ checkout_src() {
     echo "====> Checkout source code"
     mkdir -p "$WORKSPACE"
     cd "$WORKSPACE"
-    pip uninstall -y vllm vllm-ascend || true
+    pip uninstall -y vllm-ascend || true
     cp -r "$WORKSPACE/vllm-ascend/benchmark" /tmp/aisbench-backup || true
-    rm -rf "$WORKSPACE/vllm" "$WORKSPACE/vllm-ascend"
+    rm -rf "$WORKSPACE/vllm-ascend"
 
     if [ ! -d "$WORKSPACE/vllm-ascend" ]; then
         echo "Cloning vllm-ascend from $VLLM_ASCEND_REMOTE_URL"
@@ -155,16 +155,10 @@ checkout_src() {
             git checkout "$VLLM_ASCEND_REF"
         fi
     fi
-
-    if [ ! -d "$WORKSPACE/vllm" ]; then
-        echo "Cloning vllm version/ref: $VLLM_VERSION"
-        git clone --depth 1 --branch "$VLLM_VERSION" https://github.com/vllm-project/vllm.git "$WORKSPACE/vllm"
-    fi
 }
 
-install_vllm() {
-    echo "====> Install vllm and vllm-ascend"
-    VLLM_TARGET_DEVICE=empty pip install -e "$WORKSPACE/vllm"
+install_vllm_ascend() {
+    echo "====> Install vllm-ascend"
     pip install -r "$WORKSPACE/vllm-ascend/requirements-dev.txt"
     pip install -e "$WORKSPACE/vllm-ascend"
 }
@@ -215,12 +209,28 @@ If this is insufficient to pinpoint the error, please download and review the lo
     fi
 }
 
+clear_logs() {
+    print_section "Clearing logs from previous runs"
+    rm -fr "$HOME/ascend/log" || true
+}
+
+backup_ascend_logs() {
+    if [ -n "${LOG_PREFIX:-}" ]; then
+        local dest="${LOG_PREFIX}/node_${LWS_WORKER_INDEX:-unknown}_plogs"
+        mkdir -p "$dest"
+        cp -r /root/ascend/log/. "$dest/" 2>/dev/null || true
+        echo "Ascend logs backed up to $dest"
+    fi
+}
+
 main() {
+    trap backup_ascend_logs EXIT
     check_npu_info
+    clear_logs
     check_and_config
     if [[ "$IS_PR_TEST" == "true" ]]; then
         checkout_src
-        install_vllm
+        install_vllm_ascend
         install_aisbench
     fi
     show_vllm_info

@@ -20,6 +20,7 @@
 from typing import Any
 
 import torch
+from vllm.config.compilation import CUDAGraphMode
 from vllm.v1.kv_cache_interface import KVCacheConfig
 from vllm.v1.worker.gpu.model_states.default import DefaultModelState
 from vllm.v1.worker.utils import AttentionGroup
@@ -34,18 +35,30 @@ class AscendModelState(DefaultModelState):
     def prepare_attn(
         self,
         input_batch: AscendInputBatch,
+        cudagraph_mode: CUDAGraphMode,
         block_tables: tuple[torch.Tensor, ...],
         slot_mappings: torch.Tensor,
         attn_groups: list[list[AttentionGroup]],
         kv_cache_config: KVCacheConfig,
+        for_capture: bool = False,
     ) -> dict[str, Any]:
         """Override prepare_attn method because `build_attn_metadata` is different from vllm."""
+        if cudagraph_mode == CUDAGraphMode.FULL:
+            # Use padded sizes - padding is handled by model_runner.prepare_attn.
+            num_reqs = input_batch.num_reqs_after_padding
+            num_tokens = input_batch.num_tokens_after_padding
+        else:
+            # For piecewise cudagraphs and eager, use unpadded sizes.
+            num_reqs = input_batch.num_reqs
+            num_tokens = input_batch.num_tokens
         query_start_loc_cpu = torch.from_numpy(input_batch.query_start_loc_np)
         max_query_len = input_batch.num_scheduled_tokens.max().item()
-        attn_metadata = build_attn_metadata(
+        # attn_metadata is needed when update_full_graph_params, but no way can get it now.
+        # Temporarily store it in model_state.
+        self.attn_metadata = build_attn_metadata(
             attn_groups=attn_groups,
-            num_reqs=input_batch.num_reqs,
-            num_tokens=input_batch.num_tokens,
+            num_reqs=num_reqs,
+            num_tokens=num_tokens,
             query_start_loc_gpu=input_batch.query_start_loc,
             query_start_loc_cpu=query_start_loc_cpu,
             max_query_len=max_query_len,
@@ -57,6 +70,8 @@ class AscendModelState(DefaultModelState):
             dcp_local_seq_lens=input_batch.dcp_local_seq_lens,
             # extra attributes for ascend npus.
             seq_lens_np=input_batch.seq_lens_np,
+            positions=input_batch.positions,
             attn_state=input_batch.attn_state,
+            for_cudagraph_capture=for_capture,
         )
-        return attn_metadata
+        return self.attn_metadata

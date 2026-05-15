@@ -1,39 +1,40 @@
+--extra-index-url https://triton-ascend.osinfra.cn/pypi/simple
 # Should be mirrored in pyporject.toml
 cmake>=3.26
 decorator
 einops
-numpy<2.0.0
+numpy
 packaging
 pip
 pybind11
 pyyaml
+regex
 scipy
 pandas
 psutil
 setuptools>=64
 setuptools-scm>=8
-torch==2.9.0
-torchvision
-torchaudio
+torch==2.10.0
+torch-npu==2.10.0
+torchvision==0.25.0
+torchaudio==2.10.0
+triton-ascend==3.2.1
 wheel
 xgrammar>=0.1.30
 pandas-stubs
-opencv-python-headless<=4.11.0.86 # Required to avoid numpy version conflict with vllm
 compressed_tensors>=0.11.0
 
-# requirements for disaggregated prefill
+# Required for disaggregated prefill
 msgpack
 quart
 
 # Required for N-gram speculative decoding
 numba
 
-# Install torch_npu
-#--pre
-#--extra-index-url https://mirrors.huaweicloud.com/ascend/repos/pypi
-torch-npu==2.9.0
+# Required for kvpool supports memcache backend
+memfabric_hybrid
+memcache_hybrid
 
 arctic-inference==0.1.1
-transformers>=4.57.4
+transformers==5.5.3
 fastapi<0.124.0
-triton-ascend==3.2.0

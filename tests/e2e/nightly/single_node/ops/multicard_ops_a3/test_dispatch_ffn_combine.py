@@ -112,6 +112,7 @@ class TestDispatchFFNCombine:
         scale1 = torch.randint(0, 1, (e, n), dtype=torch.int64).npu()
         scale2 = torch.randint(0, 1, (e, n2), dtype=torch.int64).npu()
         probs = torch.randn(size=(m, topk), dtype=torch.float32).npu()
+        xactmask = torch.randint(0, 2, (m,), torch.bool).npu()
 
         weight1_nz_npu = []
         weight2_nz_npu = []
@@ -133,11 +134,14 @@ class TestDispatchFFNCombine:
             weight1=weight1_nz_npu,
             weight2=weight2_nz_npu,
             expert_idx=expert_idx,
+            bias1=torch.tensor([]),
+            bias2=torch.tensor([]),
             scale1=scale1_npu,
             scale2=scale2_npu,
             probs=probs,
             group=self.hcomm_info,
             max_output_size=512,
+            x_active_mask=xactmask,
             out=out,
             expert_token_nums=expert_token_nums,
         )
@@ -186,6 +190,8 @@ class TestDispatchFFNCombine:
             weight1=weight1_nz_npu,
             weight2=weight2_nz_npu,
             expert_idx=expert_idx,
+            bias1=torch.tensor([]),
+            bias2=torch.tensor([]),
             scale1=scale1_npu,
             scale2=scale2_npu,
             probs=probs,

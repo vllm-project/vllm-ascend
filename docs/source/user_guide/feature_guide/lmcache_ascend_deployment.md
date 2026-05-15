@@ -56,16 +56,16 @@ Assuming your working directory is ```/workspace``` and vllm/vllm-ascend have al
 
 1. Install LMCache Repo
 
-```bash
-NO_CUDA_EXT=1 pip install lmcache==0.3.12
-```
+    ```bash
+    NO_CUDA_EXT=1 pip install lmcache==0.3.12
+    ```
 
 2. Install LMCache-Ascend Repo
 
-```bash
-cd /workspace/LMCache-Ascend
-python3 -m pip install -v --no-build-isolation -e .
-```
+    ```bash
+    cd /workspace/LMCache-Ascend
+    python3 -m pip install --no-build-isolation -e .
+    ```
 
 ### Usage
 

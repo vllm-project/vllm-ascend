@@ -11,6 +11,7 @@ from vllm.v1.attention.backends.utils import CommonAttentionMetadata
 
 from vllm_ascend import envs
 from vllm_ascend.utils import AscendDeviceType, get_ascend_config, get_ascend_device_type
+from vllm_ascend.worker.kvcomp_utils import KVCompMetaData
 
 
 def ascend_chunked_prefill_workspace_size(vllm_config: VllmConfig) -> int:
@@ -87,11 +88,21 @@ class AscendPrefillContextParallelMetadata:
 
     kv_with_q_tail_mask_idx_tensor: torch.Tensor = None
 
+    kv_tail_proj_idx_tensor: torch.Tensor = None
+
+    kv_with_q_head_attn_idx_in_tail_tensor: torch.Tensor = None
+
+    kv_with_q_tail_attn_idx_in_tail_tensor: torch.Tensor = None
+
     attn_mask_seqlens: torch.Tensor = None
 
     head_attn_nomask_seqlens: torch.Tensor = None
 
     tail_attn_nomask_seqlens: torch.Tensor = None
+
+    head_actual_seq_lengths_kv: list[int] | None = None
+
+    tail_actual_seq_lengths_kv: list[int] | None = None
 
     q_full_idx: torch.Tensor = None
 
@@ -119,6 +130,18 @@ class AscendPrefillContextParallelMetadata:
 
     # the number of tokens padded in linear-attn per rank
     pcp_padded_tokens_fla: int = 0
+
+    # the max number of unpadded tokens in all ranks
+    max_num_tokens_across_pcp: int = 0
+
+    # the number of scheduled tokens on the current rank before padding
+    total_num_scheduled_tokens: int = 0
+
+    # Because the sequence shard in linear attention layers does not include padding,
+    # the full attention layers cannot obtain the correct query_lens with pcp pad for
+    # chunked prefill calculation. Therefore, this value needs to be passed to the backend.
+    # TODO:To be refactored.
+    attn_chunk_seqlens: torch.Tensor = None
 
 
 @dataclass
@@ -161,16 +184,21 @@ class AscendCommonAttentionMetadata(CommonAttentionMetadata):
 
     # Metadata for Prefill Context Parallelism (PCP) operations.
     prefill_context_parallel_metadata: AscendPrefillContextParallelMetadata | None = None
+    kvcomp_metadata: KVCompMetaData | None = None
 
     # TODO: Remove it when vLLM no longer uses this function.
     def unpadded(self, num_actual_tokens: int, num_actual_reqs: int) -> "AscendCommonAttentionMetadata":
         # This only use to eagle now. It will be use to enforce_eager in future.
+        # Helper to slice optional per-request tensors to ``num_actual_reqs``.
+        def _slice_reqs(x):
+            return x[:num_actual_reqs] if x is not None else None
+
         return AscendCommonAttentionMetadata(
             query_start_loc=self.query_start_loc[: num_actual_reqs + 1],
             query_start_loc_cpu=self.query_start_loc_cpu[: num_actual_reqs + 1],
             seq_lens=self.seq_lens[:num_actual_reqs],
-            seq_lens_cpu=self.seq_lens_cpu[:num_actual_reqs],
-            num_computed_tokens_cpu=self.num_computed_tokens_cpu[:num_actual_reqs],
+            seq_lens_cpu=_slice_reqs(self.seq_lens_cpu),
+            num_computed_tokens_cpu=_slice_reqs(self.num_computed_tokens_cpu),
             num_reqs=num_actual_reqs,
             num_actual_tokens=num_actual_tokens,
             max_query_len=self.max_query_len,
@@ -187,7 +215,27 @@ class AscendCommonAttentionMetadata(CommonAttentionMetadata):
             graph_pad_size=-1,  # It should be -1 when not run in fullgraph mode.
             num_input_tokens=self.num_input_tokens,
             prefill_context_parallel_metadata=self.prefill_context_parallel_metadata,
+            seq_lens_cpu_upper_bound=self.seq_lens_cpu_upper_bound[:num_actual_reqs]
+            if self.seq_lens_cpu_upper_bound is not None
+            else None,
             max_seq_len=self.max_seq_len,
+            # Propagate parent-class fields so the unpadded view is a
+            # faithful sub-batch of the original. Missing any of these
+            # would silently break downstream consumers (e.g. NPU
+            # backends preferring ``_seq_lens_cpu`` over ``seq_lens_cpu``,
+            # DCP backends needing ``dcp_local_seq_lens(_cpu)``,
+            # encoder-decoder layers needing ``encoder_seq_lens``, the
+            # mamba ``is_prefilling`` flag, and FastPrefill's
+            # ``logits_indices_padded`` / ``num_logits_indices``).
+            _seq_lens_cpu=_slice_reqs(self._seq_lens_cpu),
+            _num_computed_tokens_cpu=_slice_reqs(self._num_computed_tokens_cpu),
+            dcp_local_seq_lens=_slice_reqs(self.dcp_local_seq_lens),
+            dcp_local_seq_lens_cpu=_slice_reqs(self.dcp_local_seq_lens_cpu),
+            is_prefilling=_slice_reqs(self.is_prefilling),
+            encoder_seq_lens=_slice_reqs(self.encoder_seq_lens),
+            encoder_seq_lens_cpu=_slice_reqs(self.encoder_seq_lens_cpu),
+            logits_indices_padded=self.logits_indices_padded,
+            num_logits_indices=self.num_logits_indices,
         )
 
 
@@ -325,6 +373,9 @@ def transdata(nd_mat, block_size: tuple = (16, 16)):
 
 
 def enabling_mlapo(vllm_config: VllmConfig) -> bool:
+    if get_ascend_device_type() == AscendDeviceType.A5:
+        return bool(envs.VLLM_ASCEND_ENABLE_MLAPO)
+
     is_decode_instance = (
         vllm_config.kv_transfer_config is not None
         and vllm_config.kv_transfer_config.is_kv_consumer

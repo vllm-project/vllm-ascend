@@ -1,13 +1,14 @@
 # Standard
 import json
 import os
-import re
 from dataclasses import dataclass
 
+import regex as re
 import torch
 
 # Third Party
 from vllm.config import ParallelConfig
+from vllm.distributed.parallel_state import get_world_group
 from vllm.logger import logger
 from vllm.utils.network_utils import get_ip
 
@@ -30,7 +31,6 @@ class MooncakeBackend(Backend):
             ) from e
         self.config = MooncakeStoreConfig.load_from_env()
         self.store = MooncakeDistributedStore()
-        self.rank = parallel_config.rank
         if self.config.protocol == "ascend":
             local_hostname = get_ip()
             # ASCEND_ENABLE_USE_FABRIC_MEM: Enable unified memory address direct transmission scheme
@@ -61,13 +61,16 @@ class MooncakeBackend(Backend):
                     self.config.master_server_address,
                 )
 
-        if ret != 0:
-            msg = "Initialize mooncake failed."
-            logger.error(msg)
-            raise RuntimeError(msg)
+            if ret != 0:
+                msg = "Initialize mooncake failed."
+                logger.error(msg)
+                raise RuntimeError(msg)
+        else:
+            raise NotImplementedError(f"MooncakeBackend does not support protocol {self.config.protocol!r}.")
 
     def set_device(self):
-        device = torch.device(f"npu:{self.rank}")
+        local_rank = get_world_group().local_rank
+        device = torch.device(f"npu:{local_rank}")
         torch.npu.set_device(device)
 
     def register_buffer(self, ptrs: list[int], lengths: list[int]):
@@ -82,18 +85,18 @@ class MooncakeBackend(Backend):
             res = self.store.batch_put_from_multi_buffers(keys, addrs, sizes)
             for value in res:
                 if value < 0:
-                    logger.error(f"Failed to put key {keys},res:{res}")
+                    logger.error("Failed to put key %s,res:%s", keys, res)
         except Exception as e:
-            logger.error(f"Failed to put key {keys},error:{e}")
+            logger.error("Failed to put key %s,error:%s", keys, e)
 
     def get(self, keys: list[str], addrs: list[list[int]], sizes: list[list[int]]):
         try:
             res = self.store.batch_get_into_multi_buffers(keys, addrs, sizes)
             for value in res:
                 if value < 0:
-                    logger.error(f"Failed to get key {keys}, res:{res}")
+                    logger.error("Failed to get key %s, res:%s", keys, res)
         except Exception as e:
-            logger.error(f"Failed to get key {keys}, error:{e}")
+            logger.error("Failed to get key %s, error:%s", keys, e)
 
 
 @dataclass

@@ -20,13 +20,6 @@ name: 'e2e nightly models test'
 on:
   workflow_call:
     inputs:
-      vllm:
-        required: true
-        type: string
-      vllm-ascend:
-        required: false
-        type: string
-        default: main
       runner:
         required: true
         type: string
@@ -36,6 +29,10 @@ on:
       model_list:
         required: true
         type: string
+      model_filter:
+        required: false
+        type: string
+        default: ''
       upload:
         required: false
         type: boolean
@@ -43,6 +40,11 @@ on:
       is_run:
         required: true
         type: boolean
+    secrets:
+      OBS_ACCESS_KEY:
+        required: false
+      OBS_SECRET_KEY:
+        required: false
 
 # Bash shells do not use ~/.profile or ~/.bashrc so these shells need to be explicitly
 # declared as "shell: bash -el {0}" on steps that need to be properly activated.
@@ -66,9 +68,8 @@ jobs:
       image: "${{ inputs.image }}"
       env:
         VLLM_USE_MODELSCOPE: True
-        GHA_VLLM_ASCEND_VERSION: ${{ inputs.vllm-ascend }}
         UV_INDEX_URL: http://cache-service.nginx-pypi-cache.svc.cluster.local/pypi/simple
-        UV_EXTRA_INDEX_URL: https://mirrors.huaweicloud.com/ascend/repos/pypi
+        UV_EXTRA_INDEX_URL: "https://mirrors.huaweicloud.com/ascend/repos/pypi https://triton-ascend.osinfra.cn/pypi/simple"
         UV_INDEX_STRATEGY: unsafe-best-match
         UV_NO_CACHE: 1
         UV_SYSTEM_PYTHON: 1
@@ -77,47 +78,39 @@ jobs:
         run: |
           npu-smi info
           cat /usr/local/Ascend/ascend-toolkit/latest/"$(uname -i)"-linux/ascend_toolkit_install.info
-
-      - name: Config mirrors
-        run: |
-          sed -i 's|ports.ubuntu.com|mirrors.tuna.tsinghua.edu.cn|g' /etc/apt/sources.list
-          pip config set global.index-url https://mirrors.tuna.tsinghua.edu.cn/pypi/web/simple
-          apt-get update -y
-          apt install git -y
-          git config --global --add safe.directory /__w/vllm-ascend/vllm-ascend
-          git config --global url."https://gh-proxy.test.osinfra.cn/https://github.com/".insteadOf https://github.com/
-
-      - name: Checkout vllm-project/vllm-ascend repo
-        uses: actions/checkout@v6
-
-      - name: Install system dependencies
-        run: |
-          apt-get -y install `cat packages.txt`
-          apt-get -y install gcc g++ cmake libnuma-dev clang-15
-
-          update-alternatives --install /usr/bin/clang clang /usr/bin/clang-15 20
-          update-alternatives --install /usr/bin/clang++ clang++ /usr/bin/clang++-15 20
+          sed -Ei 's@(ports|archive).ubuntu.com@cache-service.nginx-pypi-cache.svc.cluster.local:8081@g' /etc/apt/sources.list
+          pip config set global.index-url http://cache-service.nginx-pypi-cache.svc.cluster.local/pypi/simple
+          pip config set global.trusted-host cache-service.nginx-pypi-cache.svc.cluster.local
           pip install uv
 
-      - name: Checkout vllm-project/vllm repo
+      - name: Uninstall vllm and remove code (if pr test)
+        if: ${{ github.event_name == 'pull_request' }}
+        run: |
+          pip uninstall -y vllm-ascend || true
+          rm -rf  /vllm-workspace/vllm-ascend
+
+      - name: Checkout vllm-project/vllm-ascend repo
+        if: ${{ github.event_name == 'pull_request' }}
         uses: actions/checkout@v6
         with:
-          repository: vllm-project/vllm
-          ref: ${{ inputs.vllm }}
-          path: ./vllm-empty
+          path: ./temp-vllm-ascend
+          fetch-depth: 1
 
-      - name: Install vllm-project/vllm from source
-        working-directory: ./vllm-empty
+      - name: Move vllm-ascend code to /vllm-workspace
+        if: ${{ github.event_name == 'pull_request' }}
         run: |
-          VLLM_TARGET_DEVICE=empty uv pip install -e .
+          mv ./temp-vllm-ascend /vllm-workspace/vllm-ascend
 
       - name: Install vllm-project/vllm-ascend
+        if: ${{ github.event_name == 'pull_request' }}
+        working-directory: /vllm-workspace/vllm-ascend
         env:
-          PIP_EXTRA_INDEX_URL: https://mirrors.huaweicloud.com/ascend/repos/pypi
+          PIP_EXTRA_INDEX_URL: "https://mirrors.huaweicloud.com/ascend/repos/pypi https://triton-ascend.osinfra.cn/pypi/simple https://download.pytorch.org/whl/cpu/"
         run: |
+          git config --global --add safe.directory /vllm-workspace/vllm-ascend
           pip install uc-manager
           uv pip install -r requirements-dev.txt
-          uv pip install -v -e .
+          uv pip install -e .
 
       - name: Install tensorflow (for Molmo-7B-D-0924)
         if: ${{ inputs.runner == 'linux-aarch64-a2b3-1' && contains(inputs.model_list, 'Molmo-7B-D-0924') }}
@@ -125,38 +118,14 @@ jobs:
         run: |
           pip install tensorflow==2.19.1 --no-cache-dir
 
-      - name: Resolve vllm-ascend version
-        run: |
-          VERSION_INPUT="${{ inputs.vllm-ascend }}"
-          
-          if [[ "$VERSION_INPUT" == "latest" ]]; then
-            TAGS=$(git ls-remote --tags --sort=-v:refname https://github.com/vllm-project/vllm-ascend "v*" | cut -f2 | sed 's|refs/tags/||')
-            LATEST_TAG=$(echo "$TAGS" | head -n1)
-            if [[ -z "$LATEST_TAG" ]]; then
-              RESOLVED_VERSION="main"
-            else
-              RESOLVED_VERSION="$LATEST_TAG"
-            fi
-          else
-            RESOLVED_VERSION="$VERSION_INPUT"
-          fi
-          echo "GHA_VLLM_ASCEND_VERSION=$RESOLVED_VERSION" >> $GITHUB_ENV
-
-      - name: Checkout vllm-project/vllm-ascend repo
-        uses: actions/checkout@v6
-        with:
-          repository: vllm-project/vllm-ascend
-          path: ./vllm-ascend
-          ref: ${{ env.GHA_VLLM_ASCEND_VERSION }}
-
       - name: Get vLLM commit hash and URL
-        working-directory: ./vllm-empty
+        working-directory: /vllm-workspace/vllm
         run: |
           VLLM_COMMIT=$(git rev-parse --short=7 HEAD)
           echo "VLLM_COMMIT=$VLLM_COMMIT" >> $GITHUB_ENV
 
       - name: Get vLLM-Ascend commit hash and URL
-        working-directory: ./vllm-ascend
+        working-directory: /vllm-workspace/vllm-ascend
         run: |
           VLLM_ASCEND_COMMIT=$(git rev-parse --short=7 HEAD)
           echo "VLLM_ASCEND_COMMIT=$VLLM_ASCEND_COMMIT" >> $GITHUB_ENV
@@ -180,32 +149,82 @@ jobs:
             pip show torch | grep "Version:" | awk '{print "GHA_TORCH_VERSION="$2}'
             pip show torch_npu | grep "Version:" | awk '{print "GHA_TORCH_NPU_VERSION="$2}'
             pip show vllm | grep "Version:" | awk '{print "GHA_VLLM_VERSION="$2}' | sed 's/+.*//'
+            pip show vllm-ascend | grep "Version:" | awk '{print "GHA_VLLM_ASCEND_VERSION="$2}' | sed 's/+.*//'
+          } >> "$GITHUB_ENV"
+
+      - name: Compute effective model list
+        run: |
+          model_filter='${{ inputs.model_filter }}'
+          all_models=$(echo '${{ inputs.model_list }}' | jq -r '.[]')
+
+          if [[ "$model_filter" == "all" ]] || [[ -z "$model_filter" ]]; then
+            effective_models="$all_models"
+          else
+            any_model_in_filter=false
+            while IFS= read -r model; do
+              if [[ "$model_filter" == *",${model},"* ]]; then
+                any_model_in_filter=true
+                break
+              fi
+            done <<< "$all_models"
+
+            if [[ "$any_model_in_filter" == "true" ]]; then
+              effective_models=""
+              while IFS= read -r model; do
+                if [[ "$model_filter" == *",${model},"* ]]; then
+                  effective_models+="$model"$'\n'
+                fi
+              done <<< "$all_models"
+              effective_models="${effective_models%$'\n'}"
+            else
+              effective_models="$all_models"
+            fi
+          fi
+
+          echo "Effective models to test:"
+          echo "$effective_models"
+          {
+            echo 'EFFECTIVE_MODELS<<EOF'
+            echo "$effective_models"
+            echo 'EOF'
           } >> "$GITHUB_ENV"
 
       - name: Run vllm-project/vllm-ascend accuracy test
         id: report
+        working-directory: /vllm-workspace/vllm-ascend
         env:
           VLLM_WORKER_MULTIPROC_METHOD: spawn
           HF_DATASETS_OFFLINE: True
           VLLM_USE_MODELSCOPE: True
+          HF_HUB_OFFLINE: 1
           VLLM_CI_RUNNER: ${{ inputs.runner }}
           VLLM_VERSION: ${{ env.GHA_VLLM_VERSION }}
           VLLM_COMMIT: ${{ env.VLLM_COMMIT }}
-          VLLM_ASCEND_VERSION: ${{ env.GHA_VLLM_ASCEND_VERSION || github.ref }}
+          VLLM_ASCEND_VERSION: ${{ env.GHA_VLLM_ASCEND_VERSION }}
           VLLM_ASCEND_COMMIT: ${{ env.VLLM_ASCEND_COMMIT }}
           CANN_VERSION: ${{ env.GHA_CANN_VERSION }}
           TORCH_VERSION: ${{ env.GHA_TORCH_VERSION }}
           TORCH_NPU_VERSION: ${{ env.GHA_TORCH_NPU_VERSION }}
         run: |
-          mkdir -p ./benchmarks/accuracy
+          mkdir -p benchmarks/accuracy
           echo "export LD_LIBRARY_PATH=$LD_LIBRARY_PATH:/usr/local/lib" >> ~/.bashrc
           echo "Received model_list: ${{ inputs.model_list }}"
-          models=$(echo '${{ inputs.model_list }}' | jq -r '.[]')
+          models="$EFFECTIVE_MODELS"
           any_failure=0
           for model in $models; do
             echo "Running test for model: $model"
-            pytest -sv ./tests/e2e/models/test_lm_eval_correctness.py \
-              --config "./tests/e2e/models/configs/${model}.yaml" || {
+            config_path="./tests/e2e/models/configs/${model}.yaml"
+            model_type=$(python3 -c "import yaml,sys; c=yaml.safe_load(open('${config_path}')); print(c.get('model_type','vllm'))" 2>/dev/null || echo "vllm")
+            if [[ "$model_type" == "vllm-asr" ]]; then
+              test_script="./tests/e2e/models/test_asr_eval_correctness.py"
+            elif [[ "$model_type" == "vllm-rm" ]]; then
+              test_script="./tests/e2e/models/test_rm_eval_correctness.py"
+            else
+              test_script="./tests/e2e/models/test_lm_eval_correctness.py"
+            fi
+            echo "  model_type=${model_type} → ${test_script}"
+            pytest -sv "${test_script}" \
+              --config "${config_path}" || {
               echo "Test failed for model: $model"
               any_failure=1
             }
@@ -217,12 +236,13 @@ jobs:
 
       - name: Generate step summary
         if: ${{ always() }}
+        working-directory: /vllm-workspace/vllm-ascend
         run: |
-          models=$(echo '${{ inputs.model_list }}' | jq -r '.[]')
+          models="$EFFECTIVE_MODELS"
           for model in $models; do
             echo "Processing model: $model"
             model_base_name=$(basename "$model")
-            cat ./benchmarks/accuracy/${model_base_name}.md >> $GITHUB_STEP_SUMMARY
+            cat benchmarks/accuracy/${model_base_name}.md >> $GITHUB_STEP_SUMMARY
           done
 
       - name: Set artifact timestamp
@@ -232,10 +252,23 @@ jobs:
 
       - name: Upload Report
         if: ${{ inputs.upload == true }}
+        continue-on-error: true
+        uses: ascend-gha-runners/artifact/upload@v0.3
+        with:
+          access_key: ${{ secrets.OBS_ACCESS_KEY }}
+          secret_key: ${{ secrets.OBS_SECRET_KEY }}
+          name: report-${{ env.GHA_VLLM_ASCEND_VERSION }}-${{ steps.ts.outputs.artifact_ts }}
+          path: ./benchmarks/accuracy/
+          if-no-files-found: warn
+          retention-days: 90
+
+      - name: Upload Report (GitHub Artifacts)
+        if: ${{ inputs.upload == true }}
+        continue-on-error: true
         uses: actions/upload-artifact@v7
         with:
           name: report-${{ env.GHA_VLLM_ASCEND_VERSION }}-${{ steps.ts.outputs.artifact_ts }}
-          path: ./benchmarks/accuracy/
+          path: /vllm-workspace/vllm-ascend/benchmarks/accuracy/
           if-no-files-found: warn
           retention-days: 90
           overwrite: true
