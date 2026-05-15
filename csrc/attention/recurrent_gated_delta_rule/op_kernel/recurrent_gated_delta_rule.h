@@ -439,24 +439,43 @@ private:
             ReduceSumBaseline(dstTensor, srcTensor, rows);
             return;
         }
-        
+
         if ((alignK_ & (alignK_ - 1)) != 0) {
             ReduceSumBaseline(dstTensor, srcTensor, rows);
             return;
         }
 
-        uint32_t half = alignK_ >> 1;
-        uint8_t srcStride = alignK_ / FP32_NUM_PER_BLOCK;
+        // First fold: src → foldTmpUb (out-of-place to avoid bank conflicts)
+        uint32_t curK = alignK_;
+        uint32_t half = curK >> 1;
+        uint8_t srcStride = curK / FP32_NUM_PER_BLOCK;
         uint8_t foldStride = half / FP32_NUM_PER_BLOCK;
         for (uint32_t j = 0; j < rows; j += MAX_REPEAT_TIME) {
             uint32_t batch = Std::min(static_cast<uint32_t>(MAX_REPEAT_TIME), rows - j);
             Add(foldTmpUb[j * half], srcTensor[j * alignK_], srcTensor[j * alignK_ + half],
                 half, batch, {1, 1, 1, foldStride, srcStride, srcStride});
         }
+        curK = half;
+
+        // Subsequent folds: in-place on foldTmpUb until curK == REPEAT_LENTH
+        while (curK > REPEAT_LENTH) {
+            AscendC::PipeBarrier<PIPE_V>();
+            half = curK >> 1;
+            srcStride = curK / FP32_NUM_PER_BLOCK;
+            foldStride = half / FP32_NUM_PER_BLOCK;
+            for (uint32_t j = 0; j < rows; j += MAX_REPEAT_TIME) {
+                uint32_t batch = Std::min(static_cast<uint32_t>(MAX_REPEAT_TIME), rows - j);
+                Add(foldTmpUb[j * half], foldTmpUb[j * curK], foldTmpUb[j * curK + half],
+                    half, batch, {1, 1, 1, foldStride, srcStride, srcStride});
+            }
+            curK = half;
+        }
+
         AscendC::PipeBarrier<PIPE_V>();
+        foldStride = curK / FP32_NUM_PER_BLOCK;
         for (uint32_t j = 0; j < rows; j += MAX_REPEAT_TIME) {
             uint32_t batchRows = Std::min(static_cast<uint32_t>(MAX_REPEAT_TIME), rows - j);
-            WholeReduceSum(dstTensor[j], foldTmpUb[j * half],
+            WholeReduceSum(dstTensor[j], foldTmpUb[j * curK],
                            REPEAT_LENTH, batchRows, 1, 1, foldStride);
         }
     }
