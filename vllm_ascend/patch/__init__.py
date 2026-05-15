@@ -282,26 +282,6 @@
 #       Remove this patch once the vLLM fix is included in the supported vLLM
 #       version.
 #
-# ** 12. File: platform/patch_rotary_embedding.py**
-# ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
-#   1. `vllm.model_executor.layers.rotary_embedding.common.ApplyRotaryEmb.__init__`
-#    Why:
-#       flash_attn_npu registers both flash_attn and flash_attn_v3 module names.
-#       vLLM's ApplyRotaryEmb.__init__ checks find_spec("flash_attn") and then
-#       imports flash_attn.ops.triton.rotary.apply_rotary, which is a GPU triton
-#       implementation that no module name 'flash_attn.ops' on NPU. This patch resets
-#       apply_rotary_emb_flash_attn to None so the fallback PyTorch native
-#       implementation is used instead.
-#    How：
-#       Monkey-patch ApplyRotaryEmb.__init__ to set apply_rotary_emb_flash_attn
-#       to None after the original __init__, when flash_attn_v3 is available
-#       (indicating NPU environment).
-#    Related PR (if no, explain why):
-#       No, flash_attn_npu module name conflict with GPU flash_attn.
-#    Future Plan:
-#       Remove this patch when flash_attn_npu no longer registers the flash_attn
-#       module name, or when vLLM adds platform-aware dispatch for rotary embedding.
-#
 # * Worker Patch:
 # ===============
 #
