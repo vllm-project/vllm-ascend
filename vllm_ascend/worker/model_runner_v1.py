@@ -2097,10 +2097,6 @@ class NPUModelRunner(GPUModelRunner):
                 if capturer is not None:
                     capturer.save_captured_experts(indices=self.cpu_slot_mapping)
             elif self.routed_experts_initialized:
-                # NOTE: this is the sync-scheduling path. async-scheduling
-                # would build a RoutedExpertsTensors snapshot instead and
-                # let AsyncGPUModelRunnerOutput finalize it -- left as a
-                # follow-up.
                 buf = self.routed_experts_capturer.get_device_buffer()
                 total = scheduler_output.total_num_scheduled_tokens
                 self.routed_experts_cpu[:total].copy_(buf[:total], non_blocking=True)

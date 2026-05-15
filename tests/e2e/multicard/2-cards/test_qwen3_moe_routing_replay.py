@@ -19,7 +19,6 @@ def test_qwen3_moe_routing_replay():
         cudagraph_capture_sizes=[1, 2, 4, 8],
         distributed_executor_backend="mp",
         enable_return_routed_experts=True,
-        async_scheduling=False,
     ) as vllm_model:
         sampling_params = SamplingParams(
             max_tokens=5, temperature=0.8, top_p=0.95, output_kind=RequestOutputKind.FINAL_ONLY
