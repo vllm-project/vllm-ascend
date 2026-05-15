@@ -274,15 +274,14 @@ def set_graph_params(aclgraph_capture_sizes: list[int]):
     global _graph_params
     if _graph_params is not None:
         raise ValueError("Graph parameters have already been set!")
-    _dummy_input_arg: dict = {size: [] for size in aclgraph_capture_sizes}
     _graph_params = GraphParams(
-        _dummy_input_arg,
+        {size: [] for size in aclgraph_capture_sizes},
         {size: None for size in aclgraph_capture_sizes},
-        _dummy_input_arg,
-        _dummy_input_arg,
-        _dummy_input_arg,
-        _dummy_input_arg,
-        _dummy_input_arg,
+        {size: [] for size in aclgraph_capture_sizes},
+        {size: [] for size in aclgraph_capture_sizes},
+        {size: [] for size in aclgraph_capture_sizes},
+        {size: [] for size in aclgraph_capture_sizes},
+        {size: [] for size in aclgraph_capture_sizes},
     )
 
 
@@ -303,15 +302,14 @@ def set_draft_graph_params(aclgraph_capture_sizes: list[int]):
     global _draft_graph_params
     if _draft_graph_params is not None:
         raise ValueError("DraftGraph parameters have already been set!")
-    _dummy_input_arg: dict = {size: [] for size in aclgraph_capture_sizes}
     _draft_graph_params = GraphParams(
-        _dummy_input_arg,
+        {size: [] for size in aclgraph_capture_sizes},
         {size: None for size in aclgraph_capture_sizes},
-        _dummy_input_arg,
-        _dummy_input_arg,
-        _dummy_input_arg,
-        _dummy_input_arg,
-        _dummy_input_arg,
+        {size: [] for size in aclgraph_capture_sizes},
+        {size: [] for size in aclgraph_capture_sizes},
+        {size: [] for size in aclgraph_capture_sizes},
+        {size: [] for size in aclgraph_capture_sizes},
+        {size: [] for size in aclgraph_capture_sizes},
     )
 
 
@@ -332,15 +330,14 @@ def set_draft_graph_prefill_params(aclgraph_capture_sizes: list[int]):
     global _draft_graph_prefill_params
     if _draft_graph_prefill_params is not None:
         raise ValueError("DraftGraph preill parameters have already been set!")
-    _dummy_input_arg: dict = {size: [] for size in aclgraph_capture_sizes}
     _draft_graph_prefill_params = GraphParams(
-        _dummy_input_arg,
+        {size: [] for size in aclgraph_capture_sizes},
         {size: None for size in aclgraph_capture_sizes},
-        _dummy_input_arg,
-        _dummy_input_arg,
-        _dummy_input_arg,
-        _dummy_input_arg,
-        _dummy_input_arg,
+        {size: [] for size in aclgraph_capture_sizes},
+        {size: [] for size in aclgraph_capture_sizes},
+        {size: [] for size in aclgraph_capture_sizes},
+        {size: [] for size in aclgraph_capture_sizes},
+        {size: [] for size in aclgraph_capture_sizes},
     )
 
 
