@@ -8,8 +8,9 @@ are compared for consistency.
 """
 
 import os
-import pytest
 from importlib import import_module, util
+
+import pytest
 
 from tests.e2e.conftest import VllmRunner
 
@@ -28,6 +29,7 @@ SHORT_PROMPTS = [
 ]
 
 LONG_PROMPT = "The quick brown fox jumps over the lazy dog. " * 50
+
 
 def _fa3_available() -> bool:
     try:
@@ -58,9 +60,7 @@ def _generate_logprobs_with_backend(prompts, max_tokens=5, num_logprobs=5, **run
         gpu_memory_utilization=0.7,
         **runner_kwargs,
     ) as runner:
-        return runner.generate_greedy_logprobs(
-            prompts, max_tokens=max_tokens, num_logprobs=num_logprobs
-        )
+        return runner.generate_greedy_logprobs(prompts, max_tokens=max_tokens, num_logprobs=num_logprobs)
 
 
 def _assert_outputs_match(fia_outputs, fa3_outputs, label=""):
@@ -74,6 +74,7 @@ def _assert_outputs_match(fia_outputs, fa3_outputs, label=""):
             f"  FIA text: {fia_text}\n"
             f"  FA3 text: {fa3_text}"
         )
+
 
 @pytest.mark.skipif(not _fa3_available(), reason="flash_attn_v3 is not installed")
 def test_fa3_vs_fia_single_prompt():
@@ -110,10 +111,11 @@ def test_fa3_vs_fia_mixed_lengths():
 
 @pytest.mark.skipif(not _fa3_available(), reason="flash_attn_v3 is not installed")
 def test_fa3_vs_fia_with_chunkprefill():
-    """Compare FA3 and FIA with single token generation where chunkprefill is used.
-    """
+    """Compare FA3 and FIA with single token generation where chunkprefill is used."""
     fia_outputs = _generate_with_backend(SHORT_PROMPTS, max_tokens=2, max_num_seqs=2, max_num_batched_tokens=5)
-    fa3_outputs = _generate_with_backend(SHORT_PROMPTS, attention_backend="FLASH_ATTN", max_tokens=2, max_num_seqs=2, max_num_batched_tokens=5)
+    fa3_outputs = _generate_with_backend(
+        SHORT_PROMPTS, attention_backend="FLASH_ATTN", max_tokens=2, max_num_seqs=2, max_num_batched_tokens=5
+    )
     _assert_outputs_match(fia_outputs, fa3_outputs, label="[Chunkprefill] ")
 
 
@@ -128,14 +130,11 @@ def test_fa3_vs_fia_logprobs():
         fa3_ids, _, fa3_lp = fa3_out
 
         assert fia_ids == fa3_ids, (
-            f"Prompt {i}: FA3 and FIA token ids differ.\n"
-            f"  FIA ids: {fia_ids}\n"
-            f"  FA3 ids: {fa3_ids}"
+            f"Prompt {i}: FA3 and FIA token ids differ.\n  FIA ids: {fia_ids}\n  FA3 ids: {fa3_ids}"
         )
 
         assert len(fia_lp) == len(fa3_lp), (
-            f"Prompt {i}: Different number of logprob steps: "
-            f"FIA {len(fia_lp)} vs FA3 {len(fa3_lp)}"
+            f"Prompt {i}: Different number of logprob steps: FIA {len(fia_lp)} vs FA3 {len(fa3_lp)}"
         )
 
         for t, (fia_token_lp, fa3_token_lp) in enumerate(zip(fia_lp, fa3_lp)):
