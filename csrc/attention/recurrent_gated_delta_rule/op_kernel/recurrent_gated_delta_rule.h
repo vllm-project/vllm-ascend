@@ -134,7 +134,7 @@ __aicore__ inline void DataCopyCustom(GlobalTensor<T> dstGm, LocalTensor<T> inLo
                         tmp[i] = inLocal.GetValue(elem - 1 - i);
                     }
                     DataCopyParams copyParamslast = {1, 1, 0, 0};
-                    SetWaitFlag<HardEvent::MTE3_MTE2>(HardEvent::S_MTE2);
+                    SetWaitFlag<HardEvent::S_MTE2>(HardEvent::S_MTE2);
                     SetWaitFlag<HardEvent::MTE3_MTE2>(HardEvent::MTE3_MTE2);
                     DataCopy(inLocal, dstGm[elem - numPerBlock], copyParamslast);
                     SetWaitFlag<HardEvent::MTE2_S>(HardEvent::MTE2_S);
@@ -482,8 +482,8 @@ private:
         MatVecMul(stateInUb, kInUb[curQKOffset], broadTmpInUb, curSingleV, false);
         AscendC::PipeBarrier<PIPE_V>();
         ReduceSumDispatch(deltaInUb, broadTmpInUb, curSingleV);
-        SetWaitFlag<HardEvent::V_S>(HardEvent::V_S);
-        deltaInUb = vInUb[curVOffset] - deltaInUb;
+        AscendC::PipeBarrier<PIPE_V>();
+        Sub(deltaInUb, vInUb[curVOffset], deltaInUb, curSingleV);
         AscendC::PipeBarrier<PIPE_V>();
         Muls(deltaInUb, deltaInUb, beta_, curSingleV);
         AscendC::PipeBarrier<PIPE_V>();
