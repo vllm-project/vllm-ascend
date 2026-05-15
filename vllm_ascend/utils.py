@@ -529,8 +529,7 @@ def update_aclgraph_sizes(vllm_config: VllmConfig) -> None:
     original_sizes, compilation_config.cudagraph_capture_sizes = compilation_config.cudagraph_capture_sizes, None
     cudagraph_mode = compilation_config.cudagraph_mode
     aclgraph_resource_multiplier = 1
-    if (cudagraph_mode.has_full_cudagraphs()
-            and cudagraph_mode.has_piecewise_cudagraphs()):
+    if cudagraph_mode.has_full_cudagraphs() and cudagraph_mode.has_piecewise_cudagraphs():
         # FULL_AND_PIECEWISE captures both piecewise mixed graphs and full decode
         # graphs. Use a conservative multiplier until this is tuned per hardware.
         aclgraph_resource_multiplier = 2
