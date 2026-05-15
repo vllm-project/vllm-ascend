@@ -15,7 +15,7 @@
 # This file is a part of the vllm-ascend project.
 #
 
-FROM quay.io/ascend/cann:8.5.1-910b-ubuntu22.04-py3.11
+FROM quay.io/ascend/cann:9.0.0-910b-ubuntu22.04-py3.11
 
 ARG PIP_INDEX_URL="https://mirrors.tuna.tsinghua.edu.cn/pypi/web/simple"
 ARG MOONCAKE_TAG="v0.3.9"
@@ -60,28 +60,13 @@ RUN VLLM_TARGET_DEVICE="empty" python3 -m pip install -v -e /vllm-workspace/vllm
 # Install vllm-ascend
 # Append `libascend_hal.so` path (devlib) to LD_LIBRARY_PATH
 # Installing vllm-ascend on x86 can pull upstream triton back in alongside triton-ascend. Remove it immediately after this step.
-RUN export PIP_EXTRA_INDEX_URL=https://mirrors.huaweicloud.com/ascend/repos/pypi && \
+RUN export PIP_EXTRA_INDEX_URL="https://mirrors.huaweicloud.com/ascend/repos/pypi https://triton-ascend.osinfra.cn/pypi/simple" && \
     source /usr/local/Ascend/ascend-toolkit/set_env.sh && \
     source /usr/local/Ascend/nnal/atb/set_env.sh && \
     export LD_LIBRARY_PATH=$LD_LIBRARY_PATH:/usr/local/Ascend/ascend-toolkit/latest/$(uname -i)-linux/devlib && \
     \
     python3 -m pip install -v -e /vllm-workspace/vllm-ascend/ --extra-index https://download.pytorch.org/whl/cpu/ && \
-    \
-    if [ "$(uname -i)" = "x86_64" ]; then python3 -m pip uninstall -y triton; fi && \
-    \
-    PYTHON_TAG=$(python3 -c "import sys; print(f'cp{sys.version_info.major}{sys.version_info.minor}')") && \
-    ARCH=$(python3 -c "import platform; m=platform.machine().lower(); map={'x86_64':'x86_64','amd64':'x86_64','aarch64':'aarch64','arm64':'aarch64'}; print(map.get(m,m))") && \
-    \
-    if [ "$PYTHON_TAG" = "cp310" ] && [ "$ARCH" = "aarch64" ]; then PTA_WHEEL="torch_npu-2.9.0.post1%2Bgit4c901a4-${PYTHON_TAG}-${PYTHON_TAG}-manylinux_2_28_${ARCH}.whl"; \
-    elif [ "$PYTHON_TAG" = "cp311" ] && [ "$ARCH" = "x86_64" ]; then PTA_WHEEL="torch_npu-2.9.0.post1%2Bgitdc51c2d-${PYTHON_TAG}-${PYTHON_TAG}-manylinux_2_28_${ARCH}.whl"; \
-    elif [ "$PYTHON_TAG" = "cp310" ] && [ "$ARCH" = "x86_64" ]; then PTA_WHEEL="torch_npu-2.9.0.post1%2Bgita74051c-${PYTHON_TAG}-${PYTHON_TAG}-manylinux_2_28_${ARCH}.whl"; \
-    elif [ "$PYTHON_TAG" = "cp311" ] && [ "$ARCH" = "aarch64" ]; then PTA_WHEEL="torch_npu-2.9.0.post1%2Bgitee7ba04-${PYTHON_TAG}-${PYTHON_TAG}-manylinux_2_28_${ARCH}.whl"; \
-    else echo "Unsupported PYTHON_TAG=$PYTHON_TAG ARCH=$ARCH"; exit 1; fi && \
-    \
-    TRITON_ASCEND_WHEEL="triton_ascend-3.2.0.dev20260322-${PYTHON_TAG}-${PYTHON_TAG}-manylinux_2_27_${ARCH}.manylinux_2_28_${ARCH}.whl" && \
-    \
-    python3 -m pip install "https://vllm-ascend.obs.cn-north-4.myhuaweicloud.com/vllm-ascend/${TRITON_ASCEND_WHEEL}" && \
-    python3 -m pip install "https://vllm-ascend.obs.cn-north-4.myhuaweicloud.com/vllm-ascend/${PTA_WHEEL}" && \
+    python3 -m pip install triton-ascend==3.2.1 --extra-index-url https://triton-ascend.osinfra.cn/pypi/simple && \
     python3 -m pip cache purge
 
 # Install clang-15 (for triton-ascend)
