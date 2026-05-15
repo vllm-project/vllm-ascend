@@ -24,11 +24,13 @@ paths and circular imports during startup.
 from typing import TYPE_CHECKING, Any
 
 if TYPE_CHECKING:
+    from .awq_config import AWQConfig
     from .compressed_tensors_config import AscendCompressedTensorsConfig
     from .modelslim_config import AscendModelSlimConfig
 
 __all__ = [
     "AscendModelSlimConfig",
+    "AWQConfig",
     "AscendCompressedTensorsConfig",
 ]
 
@@ -42,4 +44,8 @@ def __getattr__(name: str) -> Any:
         from .compressed_tensors_config import AscendCompressedTensorsConfig
 
         return AscendCompressedTensorsConfig
+    if name == "AWQConfig":
+        from .awq_config import AWQConfig
+
+        return AWQConfig
     raise AttributeError(f"module {__name__!r} has no attribute {name!r}")

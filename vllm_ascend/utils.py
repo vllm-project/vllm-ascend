@@ -44,6 +44,8 @@ else:
 
 COMPILATION_PASS_KEY = "graph_fusion_manager"
 ASCEND_QUANTIZATION_METHOD = "ascend"
+# AWQ quantization method identifier for Ascend NPU
+AWQ_QUANTIZATION_METHOD = "awq"
 COMPRESSED_TENSORS_METHOD = "compressed-tensors"
 SOC_VERSION_INFERENCE_SERIES = ["Ascend310P3"]
 REGISTERED_ASCEND_OPS = {}
