@@ -51,6 +51,7 @@ release = ""
 extensions = [
     "sphinx.ext.napoleon",
     "sphinx.ext.intersphinx",
+    "sphinx.ext.mathjax",
     "sphinx_copybutton",
     "sphinx.ext.autodoc",
     "sphinx.ext.autosummary",
@@ -61,36 +62,36 @@ extensions = [
     "sphinx_substitution_extensions",
 ]
 
-myst_enable_extensions = ["colon_fence", "substitution"]
+myst_enable_extensions = ["colon_fence", "amsmath", "dollarmath", "substitution"]
 
 # Change this when cut down release
 myst_substitutions = {
     # the branch of vllm, used in vllm clone
     # - main branch: 'main'
     # - vX.Y.Z branch: 'vX.Y.Z'
-    "vllm_version": "v0.18.0",
+    "vllm_version": "v0.19.1",
     # the branch of vllm-ascend, used in vllm-ascend clone and image tag
     # - main branch: 'main'
     # - vX.Y.Z branch: latest vllm-ascend release tag
-    "vllm_ascend_version": "v0.18.0rc1",
+    "vllm_ascend_version": "v0.19.1rc1",
     # the newest release version of vllm-ascend and matched vLLM, used in pip install.
     # This value should be updated when cut down release.
-    "pip_vllm_ascend_version": "0.18.0rc1",
-    "pip_vllm_version": "0.18.0",
+    "pip_vllm_ascend_version": "0.19.1rc1",
+    "pip_vllm_version": "0.19.1",
     # CANN image tag
-    "cann_image_tag": "8.5.1-910b-ubuntu22.04-py3.11",
+    "cann_image_tag": "9.0.0-910b-ubuntu22.04-py3.11",
     # vLLM commit hash for main branch
-    "main_vllm_commit": "5af684c31912232e5c89484c2e8259e0fac6c55b",
+    "main_vllm_commit": "ce29c26b31d432b1b4bc028c46bb2c3b07a667d8",
     # vLLM tag for main branch
-    "main_vllm_tag": "v0.19.0",
+    "main_vllm_tag": "v0.20.2",
     # Python version for main branch
     "main_python_version": ">= 3.10, < 3.12",
     # CANN version for main branch
-    "main_cann_version": "8.5.0",
+    "main_cann_version": "9.0.0",
     # PyTorch/torch_npu version for main branch
-    "main_pytorch_torch_npu_version": "2.9.0 / 2.9.0",
+    "main_pytorch_torch_npu_version": "2.10.0 / 2.10.0",
     # Triton Ascend version for main branch
-    "main_triton_ascend_version": "3.2.0",
+    "main_triton_ascend_version": "3.2.1",
 }
 
 # For cross-file header anchors
@@ -140,6 +141,27 @@ html_theme_options = {
 # html_static_path = ['_static']
 # Copy llms.txt to site root so it is available as /llms.txt.
 html_extra_path = ["llms.txt"]
+
+# -- Options for linkcheck builder -------------------------------------------
+
+# Check external links without validating remote anchors. Many third-party
+# sites render anchors dynamically, which makes anchor checks flaky in CI.
+linkcheck_anchors = False
+linkcheck_retries = 3
+linkcheck_timeout = 15
+linkcheck_workers = 10
+
+# Example service endpoints in docs are intentionally not reachable from CI.
+linkcheck_ignore = [
+    r"https?://localhost(:\d+)?($|/.*)",
+    r"https?://127\.0\.0\.1(:\d+)?($|/.*)",
+    r"https?://0\.0\.0\.0(:\d+)?($|/.*)",
+    r"https?://192\.0\.0\.1(:\d+)?($|/.*)",
+    r"https?://<[^>]+>.*",
+    r"https://github\.com/vllm-project/vllm-ascend/issues/new/choose",
+    r"https://github\.com/[^/?#]+/?$",
+    r"https?://.*\$%7B.*%7D.*",
+]
 
 READTHEDOCS_VERSION_TYPE = os.environ.get("READTHEDOCS_VERSION_TYPE")
 if READTHEDOCS_VERSION_TYPE == "tag":

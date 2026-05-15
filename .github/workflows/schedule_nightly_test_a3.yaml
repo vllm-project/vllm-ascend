@@ -105,7 +105,7 @@ jobs:
               normalized=$(echo "$input_branch" | tr '/' '-')
               echo "vllm_ascend_branches=[\"${normalized}\"]"
             else
-              echo 'vllm_ascend_branches=["releases-v0.18.0"]'
+              echo 'vllm_ascend_branches=["main"]'
             fi
           } >> $GITHUB_OUTPUT
 
@@ -117,7 +117,7 @@ jobs:
         vllm_ascend_branch: >-
           ${{ github.event_name == 'workflow_dispatch' 
               && fromJSON(format('["{0}"]', inputs.vllm_ascend_branch))
-              || fromJSON('["main", "releases/v0.18.0"]') }}
+              || fromJSON('["main"]') }}
     uses: ./.github/workflows/_nightly_image_build.yaml
     with:
       target: a3
@@ -145,6 +145,9 @@ jobs:
             size: 4
           - name: multi-node-deepseek-v3.2-W8A8-EP-aime2025
             config_file_path: DeepSeek-V3_2-W8A8-EP-aime2025.yaml
+            size: 4
+          - name: multi-node-GLM5_1-W8A8-EP
+            config_file_path: GLM5_1-W8A8-EP.yaml
             size: 4
     uses: ./.github/workflows/_e2e_nightly_multi_node.yaml
     with:
@@ -179,7 +182,7 @@ jobs:
       (needs.build-image.result == 'success' || needs.build-image.result == 'skipped')
     strategy:
       fail-fast: false
-      max-parallel: 2
+      max-parallel: 3
       matrix:
         vllm_ascend_branch: ${{ fromJSON(needs.setup-vars.outputs.vllm_ascend_branches) }}
         test_config:
@@ -219,6 +222,12 @@ jobs:
           - name: multi-node-deepseek-v3.1
             config_file_path: DeepSeek-V3.1-BF16.yaml
             size: 2
+          - name: multi-node-GLM-5.1-w8a8-A3
+            config_file_path: GLM5_1-W8A8-A3-dual-nodes.yaml
+            size: 2
+          - name: multi-node-glm4.7-w8a8c8-layerwise
+            config_file_path: GLM-4.7-W8A8C8-Mooncake-Layerwise.yaml
+            size: 2
     uses: ./.github/workflows/_e2e_nightly_multi_node.yaml
     with:
       soc_version: a3
@@ -252,7 +261,7 @@ jobs:
       (needs.build-image.result == 'success' || needs.build-image.result == 'skipped')
     strategy:
       fail-fast: false
-      max-parallel: 5
+      max-parallel: 7
       matrix:
         vllm_ascend_branch: ${{ fromJSON(needs.setup-vars.outputs.vllm_ascend_branches) }}
         test_config:
@@ -299,6 +308,15 @@ jobs:
           - name: Qwen3.5-397B-A17B-w8a8-mtp
             os: linux-aarch64-a3-16
             config_file_path: Qwen3.5-397B-A17B-W8A8-mtp-A3.yaml
+          - name: MiniMax-M2.5-w8a8-QuaRot-A3
+            os: linux-aarch64-a3-8
+            config_file_path: MiniMax-M2.5-w8a8-QuaRot-A3.yaml
+          - name: Qwen3.5-27B-w8a8-A3
+            os: linux-aarch64-a3-2
+            config_file_path: Qwen3.5-27B-w8a8-A3.yaml
+          - name: Qwen3.5-122B-A10B-W8A8-A3
+            os: linux-aarch64-a3-16
+            config_file_path: Qwen3.5-122B-A10B-W8A8-A3.yaml
           # pytest-driven tests
           - name: custom-multi-ops
             os: linux-aarch64-a3-16
@@ -344,21 +362,12 @@ jobs:
           - name: qwen3-next-80b-a3b-instruct-w8a8
             os: linux-aarch64-a3-4
             config_file_path: Qwen3-Next-80B-A3B-Instruct-W8A8.yaml
-          - name: qwq-32b
-            os: linux-aarch64-a3-4
-            config_file_path: QwQ-32B.yaml
           - name: qwen3-32b-int8
             os: linux-aarch64-a3-4
             config_file_path: Qwen3-32B-Int8.yaml
-          - name: qwen2-5-vl-7b
-            os: linux-aarch64-a3-4
-            config_file_path: Qwen2.5-VL-7B-Instruct.yaml
           - name: qwen2-5-vl-7b-epd
             os: linux-aarch64-a3-4
             config_file_path: Qwen2.5-VL-7B-Instruct-EPD.yaml
-          - name: qwen2-5-vl-32b
-            os: linux-aarch64-a3-4
-            config_file_path: Qwen2.5-VL-32B-Instruct.yaml
           - name: qwen3-32b-int8-prefix-cache
             os: linux-aarch64-a3-4
             config_file_path: Prefix-Cache-Qwen3-32B-Int8.yaml
@@ -405,7 +414,7 @@ jobs:
     steps:
       - name: Merge all benchmark result artifacts
         continue-on-error: true
-        uses: actions/upload-artifact/merge@v4
+        uses: actions/upload-artifact/merge@v7
         with:
           name: nightly-a3
           pattern: nightly-test-benchmark-results-*

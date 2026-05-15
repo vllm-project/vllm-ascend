@@ -16,9 +16,13 @@
 import pytest
 import torch
 
+from tests.ut.conftest import RunnerDeviceType, npu_test
 from vllm_ascend.ops.triton import gdn_chunk_meta
 from vllm_ascend.ops.triton.fla import chunk, chunk_o, chunk_o_update
 from vllm_ascend.ops.triton.gdn_chunk_meta import build_chunk_meta_device
+from vllm_ascend.utils import enable_custom_op
+
+enable_custom_op()
 
 
 class _FakeKernel:
@@ -62,6 +66,9 @@ class _DummyTensor:
         return self
 
     def contiguous(self):
+        return self
+
+    def to(self, *args, **kwargs):
         return self
 
 
@@ -140,6 +147,7 @@ def test_chunk_leaf_wrappers_use_prebuilt_chunk_offsets(
     assert fake_kernel.launch_kwargs["chunk_offsets"] is sentinel
 
 
+@npu_test(num_npus=1, npu_type=RunnerDeviceType.A2)
 def test_chunk_gated_delta_rule_fwd_threads_prebuilt_chunk_offsets(
     monkeypatch: pytest.MonkeyPatch,
 ):
@@ -176,9 +184,7 @@ def test_chunk_gated_delta_rule_fwd_threads_prebuilt_chunk_offsets(
             {
                 "world_size": world_size,
                 "rank_in_group": 0,
-                "all_gather": lambda self, value, dim: _GatherResult(
-                    [_DummyTensor("g0"), _DummyTensor("g1")]
-                ),
+                "all_gather": lambda self, value, dim: _GatherResult([_DummyTensor("g0"), _DummyTensor("g1")]),
             },
         )()
 
@@ -210,6 +216,16 @@ def test_chunk_gated_delta_rule_fwd_threads_prebuilt_chunk_offsets(
             lambda *args, **kwargs: _DummyTensor("zeros_like"),
             raising=False,
         )
+        monkeypatch.setattr(
+            torch.ops._C_ascend,
+            "chunk_gated_delta_rule_fwd_h",
+            lambda *args, **kwargs: (_DummyTensor("h"), _DummyTensor("v_new"), _DummyTensor("final_state")),
+        )
+        monkeypatch.setattr(
+            torch.ops._C_ascend,
+            "chunk_fwd_o",
+            lambda *args, **kwargs: _DummyTensor("o_ascend"),
+        )
 
         def fake_chunk_fwd_o(*args, **kwargs):
             calls.append(("o", kwargs["chunk_offsets"]))
@@ -236,10 +252,10 @@ def test_chunk_gated_delta_rule_fwd_threads_prebuilt_chunk_offsets(
         )
 
     run_case(1, non_pcp_calls)
-    assert non_pcp_calls == [("o", chunk_offsets)]
+    assert non_pcp_calls == []
 
     run_case(2, pcp_calls)
-    assert pcp_calls == [("o_update", chunk_offsets), ("o", chunk_offsets)]
+    assert pcp_calls == [("o_update", chunk_offsets)]
 
 
 def test_build_chunk_meta_device_rejects_non_npu_input():

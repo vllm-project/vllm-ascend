@@ -2,22 +2,28 @@ import json
 import logging
 import os
 import shlex
+import subprocess
+import sys
 from typing import Any
-import vllm
 
 import pytest
+import vllm
 
 from tests.e2e.conftest import RemoteOpenAIServer
-from tests.e2e.nightly.multi_node.scripts.multi_node_config import (
-    MultiNodeConfig, MultiNodeConfigLoader, ProxyLauncher)
+from tests.e2e.nightly.multi_node.scripts.multi_node_config import MultiNodeConfig, MultiNodeConfigLoader, ProxyLauncher
 from tools.aisbench import run_aisbench_cases
 
 logger = logging.getLogger(__name__)
 
 _PORT_ENV_KEYS = {"SERVER_PORT", "ENCODE_PORT", "PD_PORT", "PROXY_PORT"}
 _INFRA_ENV_KEYS = {
-    "HCCL_IF_IP", "HCCL_SOCKET_IFNAME", "GLOO_SOCKET_IFNAME",
-    "TP_SOCKET_IFNAME", "LOCAL_IP", "NIC_NAME", "MASTER_IP",
+    "HCCL_IF_IP",
+    "HCCL_SOCKET_IFNAME",
+    "GLOO_SOCKET_IFNAME",
+    "TP_SOCKET_IFNAME",
+    "LOCAL_IP",
+    "NIC_NAME",
+    "MASTER_IP",
     "DISAGGREGATED_PREFILL_PROXY_SCRIPT",
 }
 
@@ -51,9 +57,7 @@ def _extract_hardware(runner: str) -> str:
 def _extract_dtype(config: MultiNodeConfig) -> str:
     """Determine weight dtype: w8a8 if model name contains 'w8a8' and any node uses --quantization ascend."""
     has_w8a8 = "w8a8" in config.model.lower()
-    has_quant_ascend = any(
-        "--quantization ascend" in node.server_cmd for node in config.nodes
-    )
+    has_quant_ascend = any("--quantization ascend" in node.server_cmd for node in config.nodes)
     return "w8a8" if (has_w8a8 and has_quant_ascend) else "bf16"
 
 
@@ -201,9 +205,7 @@ def _build_task_entry(case_key: str, case_config: dict[str, Any], result: Any) -
                 continue
             total_str = metric_data.get("total", "")
             try:
-                value = float(
-                    total_str.replace("token/s", "").replace("ms", "").replace("s", "").strip()
-                )
+                value = float(total_str.replace("token/s", "").replace("ms", "").replace("s", "").strip())
                 metrics[_PERF_METRIC_RENAME.get(metric_name, metric_name)] = round(value, 4)
             except (ValueError, AttributeError):
                 pass
@@ -231,10 +233,7 @@ def _save_benchmark_results_json(config: MultiNodeConfig, results: list[Any]) ->
     # Filter out None benchmark cases; results align with the non-None ones in order
     valid_items = [(case["case_name"], case) for case in config.benchmark_cases]
 
-    tasks = [
-        _build_task_entry(key, case_cfg, result)
-        for (key, case_cfg), result in zip(valid_items, results)
-    ]
+    tasks = [_build_task_entry(key, case_cfg, result) for (key, case_cfg), result in zip(valid_items, results)]
 
     output: dict[str, Any] = {
         "model_name": config.model,
@@ -261,39 +260,48 @@ def _save_benchmark_results_json(config: MultiNodeConfig, results: list[Any]) ->
 @pytest.mark.asyncio
 async def test_multi_node() -> None:
     config = MultiNodeConfigLoader.from_yaml()
+    if config.special_dependencies:
+        for k, v in config.special_dependencies.items():
+            command = [
+                sys.executable,
+                "-m",
+                "pip",
+                "install",
+                f"{k}=={v}",
+            ]
+            subprocess.call(command)
 
-    with ProxyLauncher(
+    with (
+        ProxyLauncher(
             nodes=config.nodes,
             disagg_cfg=config.disagg_cfg,
             envs=config.envs,
             proxy_port=config.proxy_port,
             cur_index=config.cur_index,
-    ) as proxy:
+        ) as proxy,
+        RemoteOpenAIServer(
+            model=config.model,
+            vllm_serve_args=config.server_cmd,
+            server_port=config.server_port,
+            server_host=config.master_ip,
+            env_dict=config.envs,
+            auto_port=False,
+            proxy_port=proxy.proxy_port,
+            disaggregated_prefill=config.disagg_cfg,
+            nodes_info=config.nodes,
+            max_wait_seconds=2800,
+        ) as server,
+    ):
+        host, port = config.benchmark_endpoint
 
-        with RemoteOpenAIServer(
+        if config.is_master:
+            results = run_aisbench_cases(
                 model=config.model,
-                vllm_serve_args=config.server_cmd,
-                server_port=config.server_port,
-                server_host=config.master_ip,
-                env_dict=config.envs,
-                auto_port=False,
-                proxy_port=proxy.proxy_port,
-                disaggregated_prefill=config.disagg_cfg,
-                nodes_info=config.nodes,
-                max_wait_seconds=2800,
-        ) as server:
-
-            host, port = config.benchmark_endpoint
-
-            if config.is_master:
-                results = run_aisbench_cases(
-                    model=config.model,
-                    port=port,
-                    aisbench_cases=config.benchmark_cases,
-                    host_ip=host,
-                )
-                _save_benchmark_results_json(config, results)
-            else:
-                # We should keep listening on the master node's server url determining when to exit.
-                server.hang_until_terminated(
-                    f"http://{host}:{config.server_port}/health")
+                port=port,
+                aisbench_cases=config.benchmark_cases,
+                host_ip=host,
+            )
+            _save_benchmark_results_json(config, results)
+        else:
+            # We should keep listening on the master node's server url determining when to exit.
+            server.hang_until_terminated(f"http://{host}:{config.server_port}/health")

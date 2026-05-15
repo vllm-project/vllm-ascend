@@ -69,6 +69,10 @@ _IS_VL_MODEL = None
 _ENABLE_SP = None
 _HAS_LAYER_IDX = None
 _HAS_ROPE = None
+_CUSTOM_OP_VENDOR_DIR = "custom_transformer"
+_CUSTOM_OP_BASE_DIR = (
+    os.path.dirname(__file__) if os.path.isabs(__file__) else os.path.abspath(os.path.dirname(__file__))
+)
 
 
 def is_310p():
@@ -195,6 +199,26 @@ def _round_up(x: int, align: int):
     return (x + align - 1) // align * align
 
 
+def _prepend_env_path(env_name: str, path: str) -> None:
+    current_value = os.environ.get(env_name, "")
+    path_entries = [entry for entry in current_value.split(":") if entry]
+    if path not in path_entries:
+        path_entries.insert(0, path)
+        os.environ[env_name] = ":".join(path_entries)
+
+
+def bootstrap_custom_op_env(*, include_vendor_lib: bool = False) -> None:
+    vendor_path = os.path.join(_CUSTOM_OP_BASE_DIR, "_cann_ops_custom", "vendors", _CUSTOM_OP_VENDOR_DIR)
+    if not os.path.exists(vendor_path):
+        return
+    _prepend_env_path("ASCEND_CUSTOM_OPP_PATH", vendor_path)
+
+    if include_vendor_lib:
+        vendor_lib_path = os.path.join(vendor_path, "op_api", "lib")
+        if os.path.exists(vendor_lib_path):
+            _prepend_env_path("LD_LIBRARY_PATH", vendor_lib_path)
+
+
 def _custom_pad(x, pad_dims):
     # pad the input tensor to the shape of pad_dims
     # input: (13, 30), pad_dims: [0, 2, 0, 3]
@@ -295,6 +319,8 @@ def enable_custom_op():
         return _CUSTOM_OP_ENABLED
 
     try:
+        if not torch.compiler.is_compiling():
+            bootstrap_custom_op_env()
         # isort: off
         # register custom ops into torch_library here
         import vllm_ascend.vllm_ascend_C  # type: ignore  # noqa: F401
@@ -304,9 +330,22 @@ def enable_custom_op():
 
         # isort: on
         _CUSTOM_OP_ENABLED = True
-    except ImportError:
-        _CUSTOM_OP_ENABLED = False
-        logger.warning("Warning: Failed to register custom ops, all custom ops will be disabled")
+    except ImportError as e:
+        # Prefer the extension's rpath for vendor op_api loading. Only fall back
+        # to mutating LD_LIBRARY_PATH when the import proves it is still needed.
+        if (not torch.compiler.is_compiling()) and "libcust_opapi.so" in str(e):
+            try:
+                bootstrap_custom_op_env(include_vendor_lib=True)
+                import vllm_ascend.meta_registration  # type: ignore  # noqa: F401
+                import vllm_ascend.vllm_ascend_C  # type: ignore  # noqa: F401
+
+                _CUSTOM_OP_ENABLED = True
+            except ImportError:
+                _CUSTOM_OP_ENABLED = False
+                logger.warning("Warning: Failed to register custom ops, all custom ops will be disabled")
+        else:
+            _CUSTOM_OP_ENABLED = False
+            logger.warning("Warning: Failed to register custom ops, all custom ops will be disabled")
     return _CUSTOM_OP_ENABLED
 
 
@@ -623,8 +662,9 @@ def register_ascend_customop(vllm_config: VllmConfig | None = None):
     from vllm.model_executor.custom_op import CustomOp
 
     from vllm_ascend.ops.activation import AscendQuickGELU, AscendSiluAndMul
+    from vllm_ascend.ops.bailing_moe_linear_attn import AscendBailingMoELinearAttention
     from vllm_ascend.ops.conv import AscendConv3dLayer
-    from vllm_ascend.ops.fused_moe.fused_moe import AscendFusedMoE, AscendSharedFusedMoE
+    from vllm_ascend.ops.fused_moe.fused_moe import AscendFusedMoE
     from vllm_ascend.ops.gdn import AscendGatedDeltaNetAttention
     from vllm_ascend.ops.layernorm import AscendGemmaRMSNorm, AscendRMSNorm, AscendRMSNormGated
     from vllm_ascend.ops.linear import (
@@ -670,7 +710,6 @@ def register_ascend_customop(vllm_config: VllmConfig | None = None):
         "RMSNorm": AscendRMSNorm,
         "GemmaRMSNorm": AscendGemmaRMSNorm,
         "FusedMoE": AscendFusedMoE,
-        "SharedFusedMoE": AscendSharedFusedMoE,
         "MultiHeadLatentAttentionWrapper": AscendMultiHeadLatentAttention,
         "MMEncoderAttention": AscendMMEncoderAttention,
         "ApplyRotaryEmb": AscendApplyRotaryEmb,
@@ -679,12 +718,14 @@ def register_ascend_customop(vllm_config: VllmConfig | None = None):
         "RelPosAttention": AscendRelPosAttention,
         "CustomQwen2Decoder": AscendCustomQwen2Decoder,
         "GatedDeltaNetAttention": AscendGatedDeltaNetAttention,
+        "BailingMoELinearAttention": AscendBailingMoELinearAttention,
     }
 
     # 310P: override selected ops with 310P implementations (keep minimal changes outside _310p)
     if is_310p():
-        from vllm_ascend._310p.fused_moe.fused_moe import AscendFusedMoE310, AscendSharedFusedMoE310
+        from vllm_ascend._310p.fused_moe.fused_moe import AscendFusedMoE310
         from vllm_ascend._310p.ops.activation import AscendSiluAndMul310
+        from vllm_ascend._310p.ops.conv import AscendConv3dLayer310
         from vllm_ascend._310p.ops.fla.gdn_310 import AscendGatedDeltaNetAttention310
         from vllm_ascend._310p.ops.layernorm import (
             AscendGemmaRMSNorm310,
@@ -692,7 +733,7 @@ def register_ascend_customop(vllm_config: VllmConfig | None = None):
             AscendRMSNormGated310,
         )
         from vllm_ascend._310p.ops.mm_encoder_attention import AscendMMEncoderAttention310
-        from vllm_ascend._310p.ops.rotary_embedding import AscendRotaryEmbedding310
+        from vllm_ascend._310p.ops.rotary_embedding import AscendMRotaryEmbedding310, AscendRotaryEmbedding310
         from vllm_ascend._310p.ops.vocab_parallel_embedding import (
             AscendParallelLMHead310,
             AscendVocabParallelEmbedding310,
@@ -706,15 +747,14 @@ def register_ascend_customop(vllm_config: VllmConfig | None = None):
                 "GemmaRMSNorm": AscendGemmaRMSNorm310,
                 "RMSNormGated": AscendRMSNormGated310,
                 "FusedMoE": AscendFusedMoE310,
-                "SharedFusedMoE": AscendSharedFusedMoE310,
                 "ParallelLMHead": AscendParallelLMHead310,
                 "VocabParallelEmbedding": AscendVocabParallelEmbedding310,
                 "MMEncoderAttention": AscendMMEncoderAttention310,
+                "Conv3dLayer": AscendConv3dLayer310,
                 "GatedDeltaNetAttention": AscendGatedDeltaNetAttention310,
+                "MRotaryEmbedding": AscendMRotaryEmbedding310,
             }
         )
-
-        REGISTERED_ASCEND_OPS.pop("MRotaryEmbedding", None)
 
     for name, op_cls in REGISTERED_ASCEND_OPS.items():
         CustomOp.register_oot(_decorated_op_cls=op_cls, name=name)
@@ -1122,7 +1162,7 @@ def get_flashcomm2_config_and_validate(ascend_config, vllm_config):
     if not flashcomm2_enable():
         return 0
 
-    logger.info(f"Enable FLASHCOMM2 with flashcomm2_oproj_tensor_parallel_size = {flashcomm2_oproj_tp_size}")
+    logger.info("Enable FLASHCOMM2 with flashcomm2_oproj_tensor_parallel_size = %s", flashcomm2_oproj_tp_size)
 
     layer_sharding = ascend_config.layer_sharding or []
     if layer_sharding:
@@ -1283,11 +1323,10 @@ def enable_dsa_cp_with_layer_shard() -> bool:
     from vllm.config import get_current_vllm_config
 
     vllm_config = get_current_vllm_config()
-    # because the broadcast in layer sharding needs to be overlapped with a heavy compute stream to be
-    # effectively hidden, it is enabled only during the prefill stage.
-    is_prefill_instance = (
-        vllm_config.kv_transfer_config is not None and vllm_config.kv_transfer_config.kv_role == "kv_producer"
-    )
+    kv_transfer_config = vllm_config.kv_transfer_config
+    # Layer sharding broadcast only pays off when it can be hidden by the
+    # heavier prefill-stage compute, so enable it only on the P-side instance.
+    is_prefill_instance = kv_transfer_config is not None and kv_transfer_config.kv_role == "kv_producer"
     return is_prefill_instance
 
 
@@ -1298,9 +1337,12 @@ def enable_dsa_cp_with_o_proj_tp() -> bool:
     from vllm.config import get_current_vllm_config
 
     vllm_config = get_current_vllm_config()
-    # if is PD mix stage, using original TP o_proj weight, and also need to
-    # full gather for o_proj weight for prefill stage.
-    return vllm_config.kv_transfer_config is None
+    kv_transfer_config = vllm_config.kv_transfer_config
+
+    # In PD-mixed mode, keep the original TP o_proj weight when:
+    # 1) KV pooling is disabled, or
+    # 2) KV pooling is enabled with kv_role == "kv_both".
+    return kv_transfer_config is None or kv_transfer_config.kv_role == "kv_both"
 
 
 def check_gdn_layer(vllm_config) -> bool:
@@ -1387,3 +1429,21 @@ def kv_cache_spec_uses_sparse_c8(kv_cache_spec) -> bool:
     from vllm.v1.kv_cache_interface import MLAAttentionSpec
 
     return isinstance(kv_cache_spec, MLAAttentionSpec) and bool(getattr(kv_cache_spec, "cache_sparse_c8", False))
+
+
+@lru_cache(maxsize=1)
+def _libc_getenv():
+    import ctypes
+
+    libc = ctypes.CDLL(None)
+    libc.getenv.argtypes = [ctypes.c_char_p]
+    libc.getenv.restype = ctypes.c_char_p
+    return libc.getenv
+
+
+def get_c_env(name: str, encoding: str = "utf-8") -> str | None:
+    """Read env via C getenv; returns None if unset."""
+    raw = _libc_getenv()(name.encode(encoding))
+    if raw is None:
+        return None
+    return raw.decode(encoding)

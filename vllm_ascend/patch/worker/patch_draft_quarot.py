@@ -64,8 +64,8 @@ def get_rotataion_matrix(rotation_path):
         return Q
     except Exception as e:
         logger.error(
-            f"Failed to load rotation weight from '{rotation_path}'. "
-            "If you want to use quarot model with eagle3, take a check."
+            "Failed to load rotation weight from '%s'. If you want to use quarot model with eagle3, take a check.",
+            rotation_path,
         )
         raise e
 
@@ -111,7 +111,7 @@ def make_load_weights(target_model_path, rotation_path):
             if "fc." in name:
                 # anti-rotate fc
                 dtype = loaded_weight.dtype
-                loaded_weight = loaded_weight @ Q3.to(dtype)
+                loaded_weight = (loaded_weight.to(torch.float32) @ Q3.to(torch.float32)).to(dtype)
             if "embed_tokens" in name:
                 includes_embed_tokens = True
             model_weights[name] = loaded_weight
@@ -120,7 +120,9 @@ def make_load_weights(target_model_path, rotation_path):
         # process embedding if drafter does not have embedding
         if not includes_embed_tokens:
             name = "model.embed_tokens.weight"
-            loaded_weight = get_embedding_tensor(target_model_path).to(embed_dtype) @ Q.T.to(embed_dtype)
+            loaded_weight = (get_embedding_tensor(target_model_path).to(torch.float32) @ Q.T.to(torch.float32)).to(
+                embed_dtype
+            )
             model_weights[name] = loaded_weight
 
             includes_embed_tokens = True
