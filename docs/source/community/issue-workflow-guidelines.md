@@ -16,6 +16,8 @@ These labels track where an issue stands in the workflow.
 | `resolved` | Issue has been closed — either via a merged PR, or through non-code resolution (e.g., answered question, configuration guidance) |
 | `stale` | No activity for an extended period; parties have been notified and the issue will be auto-closed if there is no response |
 | `duplicated` | A duplicate of an existing open issue or merged PR |
+| `invalid` | The issue report is invalid, unclear, or not reproducible |
+| `wontfix` | The issue will not be addressed; includes an explanation |
 
 ### 1.2 Type Labels
 
