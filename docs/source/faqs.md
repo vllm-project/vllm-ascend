@@ -253,20 +253,7 @@ Copy the `vllm_ascend_<tag>.tar` file (where `<tag>` is the image tag you used) 
 
 When using `--shm-size`, you may need to add the `--privileged=true` flag to your `docker run` command to grant the container necessary permissions. Please be aware that using `--privileged=true` grants the container extensive privileges on the host system, which can be a security risk. Only use this option if you understand the implications and trust the container's source.
 
-### 21. How to achieve low latency in a small batch scenario?
-
-The performance of `torch_npu.npu_fused_infer_attention_score` in small batch scenarios is not satisfactory, mainly due to the lack of flash decoding function. We offer an alternative operator in `tools/install_flash_infer_attention_score_ops_a2.sh` and `tools/install_flash_infer_attention_score_ops_a3.sh`, you can install it using the following instruction:
-
-```bash
-bash tools/install_flash_infer_attention_score_ops_a2.sh
-# change to run the following instruction if you're using A3 machine
-# bash tools/install_flash_infer_attention_score_ops_a3.sh
-```
-
-**NOTE**: Don't set `additional_config.pa_shape_list` when using this method; otherwise, it will lead to another attention operator.
-**Important**: Please make sure you're using the **official image** of `vllm-ascend`; otherwise, you **must change** the directory `/vllm-workspace` in `tools/install_flash_infer_attention_score_ops_a2.sh` or `tools/install_flash_infer_attention_score_ops_a3.sh` to your own, or create one. If you're not the root user, you need `sudo` **privileges** to run this script.
-
-### 22. How to set `SOC_VERSION` when building from source on a CPU-only machine?
+### 21. How to set `SOC_VERSION` when building from source on a CPU-only machine?
 
 When building from source (e.g. `pip install -e .`), the build may try to infer the target chip via `npu-smi`. If `npu-smi` is not available (common in CPU-only build environments), you must set `SOC_VERSION` manually before installation.
 
@@ -286,7 +273,7 @@ export SOC_VERSION="ascend310p1"
 export SOC_VERSION="<value starting with ascend950>"
 ```
 
-### 23. Why TPOT increases drastically as concurrency grows?
+### 22. Why TPOT increases drastically as concurrency grows?
 
 When testing a vLLM server, one may find that TPOT increases as concurrency increases (for example, TPOT increases by 0.5 ~ 1ms when concurrency increases by 4). This phenomenon is normal in most cases. However, sometimes TPOT may increase dramatically (10 to 100ms for example) as concurrency grows. This is possibly caused by [**PREEMPTION**](https://docs.vllm.ai/en/latest/configuration/optimization/#preemption) in vLLM.
 Generally, when your server hits KV cache limits, vLLM tries to free KV cache of requests to ensure sufficient space for other requests, which is called preemption in vLLM. When a request is preempted, the default behavior is to recompute the KV cache of this request again in the future, which is why the performance might drop significantly. There are several ways to verify this:
