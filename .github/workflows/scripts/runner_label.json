@@ -2,51 +2,51 @@
     "linux-aarch64-310p-1": {
         "chip": "310p",
         "npu_num": 1,
-        "image_tag": "8.5.1-310p-ubuntu22.04-py3.11"
+        "image_tag": "9.0.0-310p-ubuntu22.04-py3.11"
     },
     "linux-aarch64-310p-2": {
         "chip": "310p",
         "npu_num": 2,
-        "image_tag": "8.5.1-310p-ubuntu22.04-py3.11"
+        "image_tag": "9.0.0-310p-ubuntu22.04-py3.11"
     },
     "linux-aarch64-310p-4": {
         "chip": "310p",
         "npu_num": 4,
-        "image_tag": "8.5.1-310p-ubuntu22.04-py3.11"
+        "image_tag": "9.0.0-310p-ubuntu22.04-py3.11"
     },
     "linux-aarch64-a3-2": {
         "chip": "a3",
         "npu_num": 2,
-        "image_tag": "8.5.1-a3-ubuntu22.04-py3.11"
+        "image_tag": "9.0.0-a3-ubuntu22.04-py3.11"
     },
     "linux-aarch64-a3-4": {
         "chip": "a3",
         "npu_num": 4,
-        "image_tag": "8.5.1-a3-ubuntu22.04-py3.11"
+        "image_tag": "9.0.0-a3-ubuntu22.04-py3.11"
     },
     "linux-aarch64-a3-8": {
         "chip": "a3",
         "npu_num": 8,
-        "image_tag": "8.5.1-a3-ubuntu22.04-py3.11"
+        "image_tag": "9.0.0-a3-ubuntu22.04-py3.11"
     },
     "linux-amd64-cpu-8-hk": {
         "chip": "cpu",
         "npu_num": 0,
-        "image_tag": "8.5.1-910b-ubuntu22.04-py3.11"
+        "image_tag": "9.0.0-910b-ubuntu22.04-py3.11"
     },
     "linux-aarch64-a2b3-1": {
         "chip": "a2",
         "npu_num": 1,
-        "image_tag": "8.5.1-910b-ubuntu22.04-py3.11"
+        "image_tag": "9.0.0-910b-ubuntu22.04-py3.11"
     },
     "linux-aarch64-a2b3-2": {
         "chip": "a2",
         "npu_num": 2,
-        "image_tag": "8.5.1-910b-ubuntu22.04-py3.11"
+        "image_tag": "9.0.0-910b-ubuntu22.04-py3.11"
     },
     "linux-aarch64-a2b3-4": {
         "chip": "a2",
         "npu_num": 4,
-        "image_tag": "8.5.1-910b-ubuntu22.04-py3.11"
+        "image_tag": "9.0.0-910b-ubuntu22.04-py3.11"
     }
 }

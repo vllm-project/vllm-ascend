@@ -1163,7 +1163,7 @@ class AscendMLAImpl(MLAAttentionImpl):
             kv_c_normed = torch.empty(toks, num_heads, latent_kv_dim, dtype=q_nope.dtype, device=q_nope.device)
             k_pe = torch.empty(toks, num_heads, rope_dim, dtype=q_nope.dtype, device=q_nope.device)
 
-            DeviceOperator.mla_cache_load(
+            DeviceOperator.kv_cache_load(
                 cache_kv_c,
                 cache_k_pe,
                 prefill_metadata.block_table,

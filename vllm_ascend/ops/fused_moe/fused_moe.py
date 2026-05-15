@@ -26,7 +26,7 @@ from vllm.distributed import get_dp_group, get_ep_group, get_tp_group, tensor_mo
 from vllm.forward_context import get_forward_context
 from vllm.logger import logger
 from vllm.model_executor.layers.fused_moe.config import FusedMoEConfig
-from vllm.model_executor.layers.fused_moe.layer import FusedMoE, UnquantizedFusedMoEMethod, get_compressed_expert_map
+from vllm.model_executor.layers.fused_moe.layer import FusedMoE, UnquantizedFusedMoEMethod
 from vllm.model_executor.layers.fused_moe.routed_experts_capturer import RoutedExpertsCapturer
 from vllm.model_executor.layers.fused_moe.runner.moe_runner import MoERunner  # type: ignore
 
@@ -48,7 +48,20 @@ from vllm_ascend.utils import (
     npu_stream_switch,
     shared_expert_dp_enabled,
     shared_experts_calculation_stream,
+    vllm_version_is,
 )
+
+if vllm_version_is("0.20.2"):
+    from vllm.model_executor.layers.fused_moe.layer import get_compressed_expert_map
+else:
+
+    def get_compressed_expert_map(expert_map: torch.Tensor) -> str:
+        global_indices = torch.where(expert_map != -1)[0]
+        local_indices = expert_map[global_indices]
+        return ", ".join(
+            f"{local_index.item()}->{global_index.item()}"
+            for local_index, global_index in zip(local_indices, global_indices)
+        )
 
 
 @dataclass
@@ -161,10 +174,7 @@ class AscendUnquantizedFusedMoEMethod(UnquantizedFusedMoEMethod):
         if layer.vllm_config.model_config is not None and layer.vllm_config.model_config.enable_return_routed_experts:
             capturer = RoutedExpertsCapturer.get_instance()
             if capturer is not None:
-                capturer.capture(
-                    layer_id=layer.layer_id,
-                    topk_ids=topk_ids,
-                )
+                capturer.capture(layer_id=layer.layer_id, topk_ids=topk_ids)
 
         if zero_expert_num > 0 and zero_expert_type is not None:
             topk_ids, topk_weights, zero_expert_result = zero_experts_compute(
@@ -307,6 +317,11 @@ class AscendFusedMoE(FusedMoE):
     gate_stream: torch.npu.Stream | None = None
 
     def __init__(self, *args, **kwargs):
+        # Save original routed_scaling_factor before super().__init__ modifies it.
+        # When apply_routed_scale_to_output=True, vLLM sets self.routed_scaling_factor
+        # to 1.0 and expects the runner to apply scaling to output. But vllm-ascend
+        # uses its own forward path, so we need the original value.
+        self._original_routed_scaling_factor = kwargs.get("routed_scaling_factor", 1.0)
         super().__init__(*args, **kwargs)
         self.use_overlapped = True
         self._routed_input_transform = kwargs.get("routed_input_transform")
@@ -578,7 +593,7 @@ class AscendFusedMoE(FusedMoE):
                     num_expert_group=self.num_expert_group,
                     custom_routing_function=self.custom_routing_function,
                     scoring_func=self.scoring_func,
-                    routed_scaling_factor=self.routed_scaling_factor,
+                    routed_scaling_factor=self._original_routed_scaling_factor,
                     e_score_correction_bias=self.e_score_correction_bias,
                     num_experts=self.moe_config.num_experts,
                 )
@@ -621,7 +636,7 @@ class AscendFusedMoE(FusedMoE):
             num_expert_group=self.num_expert_group,
             custom_routing_function=self.custom_routing_function,
             scoring_func=self.scoring_func,
-            routed_scaling_factor=self.routed_scaling_factor,
+            routed_scaling_factor=self._original_routed_scaling_factor,
             e_score_correction_bias=self.e_score_correction_bias,
             activation=self.activation,
             apply_router_weight_on_input=self.apply_router_weight_on_input,
