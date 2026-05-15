@@ -59,6 +59,7 @@ class VllmEplbAdaptor:
         if self.num_moe_layers > 0:
             _, first_layer = next(self.moe_registry.iter_layers())
             self.num_local_experts = first_layer.local_num_experts
+            self.ep_rank = first_layer.ep_rank
         else:
             self.num_local_experts = 0
 
@@ -175,6 +176,6 @@ class VllmEplbAdaptor:
         for global_idx, layer in self.moe_registry.iter_layers():
             map_cpu = layer.global_expert_map.cpu()
             all_layer_global_expert_map.append(map_cpu)
-            self.expert_map_per_layer_cpu[global_idx] = map_cpu[self.rank_id]
+            self.expert_map_per_layer_cpu[global_idx] = map_cpu[self.ep_rank]
 
         return torch.stack(all_layer_global_expert_map) if all_layer_global_expert_map else torch.empty(0)
