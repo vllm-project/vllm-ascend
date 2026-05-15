@@ -786,3 +786,45 @@ class TestNPUPlatform(TestBase):
             self.platform.get_static_graph_wrapper_cls(),
             "vllm_ascend.compilation.acl_graph.ACLGraphWrapper",
         )
+
+    def test_get_supported_vit_attn_backends(self):
+        """Test get_supported_vit_attn_backends returns correct backends."""
+        from vllm.v1.attention.backends.registry import AttentionBackendEnum
+        
+        backends = NPUPlatform.get_supported_vit_attn_backends()
+        self.assertIsInstance(backends, list)
+        self.assertIn(AttentionBackendEnum.TORCH_SDPA, backends)
+
+    def test_get_vit_attn_backend_default(self):
+        """Test get_vit_attn_backend returns default backend when backend is None."""
+        from vllm.v1.attention.backends.registry import AttentionBackendEnum
+        
+        backend = NPUPlatform.get_vit_attn_backend(
+            head_size=64,
+            dtype=torch.float16,
+            backend=None,
+        )
+        self.assertEqual(backend, AttentionBackendEnum.TORCH_SDPA)
+
+    def test_get_vit_attn_backend_with_valid_backend(self):
+        """Test get_vit_attn_backend returns the specified backend when valid."""
+        from vllm.v1.attention.backends.registry import AttentionBackendEnum
+        
+        backend = NPUPlatform.get_vit_attn_backend(
+            head_size=64,
+            dtype=torch.float16,
+            backend=AttentionBackendEnum.TORCH_SDPA,
+        )
+        self.assertEqual(backend, AttentionBackendEnum.TORCH_SDPA)
+
+    def test_get_vit_attn_backend_with_invalid_backend(self):
+        """Test get_vit_attn_backend raises error for invalid backend."""
+        from vllm.v1.attention.backends.registry import AttentionBackendEnum
+        
+        with self.assertRaises(AssertionError) as context:
+            NPUPlatform.get_vit_attn_backend(
+                head_size=64,
+                dtype=torch.float16,
+                backend=AttentionBackendEnum.FLASH_ATTN,
+            )
+        self.assertIn("not supported for vit attention", str(context.exception))
