@@ -1,0 +1,218 @@
+#
+# Copyright (c) 2025 Huawei Technologies Co., Ltd. All Rights Reserved.
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+# This file is a part of the vllm-ascend project.
+#
+
+# This workflow related to the resources atlas 800 A3
+# **Please note**: current A3 resource pool's maximum allowed concurrency is 5*16 NPUs
+# We will limit the concurrency of jobs on A3 to avoid the risk of insufficient resources
+name: Weekly-A3
+
+on:
+#   schedule:
+#       # Run test at 00:00 Beijing time (UTC+8) every Sunday
+#       - cron: "0 16 * * 6"
+  workflow_dispatch:
+    inputs:
+      vllm_ascend_branch:
+        description: 'Branch to test (main or releases/v0.18.0)'
+        required: true
+        default: 'main'
+        type: choice
+        options:
+          - main
+      test_cases:
+        description: 'Test cases to run (comma-separated, e.g., "test_custom_op,qwen3-32b,accuracy-group" or "all" for all tests)'
+        required: false
+        default: 'all'
+        type: string
+
+permissions:
+  contents: read
+  pull-requests: read
+  issues: read
+
+# Bash shells do not use ~/.profile or ~/.bashrc so these shells need to be explicitly
+# declared as "shell: bash -el {0}" on steps that need to be properly activated.
+# It's used to activate ascend-toolkit environment variables.
+defaults:
+  run:
+    shell: bash -el {0}
+
+concurrency:
+  group: ascend-weekly-${{ github.ref }}-a3
+  cancel-in-progress: true
+
+env:
+  # Single source of truth for all shared variables across jobs.
+  # NOTE: GitHub Actions does not support env context in reusable workflow `with:` inputs,
+  # so these values are exported as job outputs via the `setup-vars` job below.
+  ASCEND_LOG_PREFIX: '/root/.cache/ascend-logs'
+
+jobs:
+  setup-vars:
+    name: Export global env vars as job outputs
+    runs-on: ubuntu-latest
+    outputs:
+      ascend_log_prefix: ${{ steps.export.outputs.ascend_log_prefix }}
+      vllm_ascend_branches: ${{ steps.export.outputs.vllm_ascend_branches }}
+      filter: ${{ steps.export.outputs.filter }}
+    steps:
+      - id: export
+        env:
+          TEST_CASES_INPUT: ${{ inputs.test_cases }}
+        run: |
+          {
+            echo "ascend_log_prefix=${{ env.ASCEND_LOG_PREFIX }}"
+            if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
+              input_branch="${{ inputs.vllm_ascend_branch }}"
+              # Normalize branch name for image tag (replace '/' with '-')
+              normalized=$(echo "$input_branch" | tr '/' '-')
+              echo "vllm_ascend_branches=[\"${normalized}\"]"
+              if [ -z "$TEST_CASES_INPUT" ] || [ "$TEST_CASES_INPUT" = "all" ]; then
+                echo "filter=all"
+              else
+                # Comma-wrap for exact-name matching: ",name1,name2,"
+                cleaned=$(echo "$TEST_CASES_INPUT" | tr -d '[:space:]')
+                echo "filter=,${cleaned},"
+              fi
+            else
+              echo 'vllm_ascend_branches=["main"]'
+              echo "filter=all"
+            fi
+          } >> $GITHUB_OUTPUT
+
+  build-image:
+    name: Build weekly-a3 image
+    strategy:
+      matrix:
+        vllm_ascend_branch: >-
+          ${{ github.event_name == 'workflow_dispatch'
+              && fromJSON(format('["{0}"]', inputs.vllm_ascend_branch))
+              || fromJSON('["main"]') }}
+    uses: ./.github/workflows/_nightly_image_build.yaml
+    with:
+      target: a3
+      vllm_ascend_branch: ${{ matrix.vllm_ascend_branch }}
+    secrets:
+      HW_USERNAME: ${{ secrets.HW_USERNAME }}
+      HW_TOKEN: ${{ secrets.HW_TOKEN }}
+      GITEE_TOKEN: ${{ secrets.GITEE_TOKEN }}
+
+  double-node-tests:
+    name: double-node
+    needs: [setup-vars, build-image]
+    if: >-
+      always() &&
+      (needs.build-image.result == 'success' || needs.build-image.result == 'skipped')
+    strategy:
+      fail-fast: false
+      max-parallel: 3
+      matrix:
+        vllm_ascend_branch: ${{ fromJSON(needs.setup-vars.outputs.vllm_ascend_branches) }}
+        test_config:
+          - name: multi-node-GLM-5.1-w8a8-A3
+            config_file_path: GLM5_1-W8A8-A3-dual-nodes.yaml
+            size: 2
+    uses: ./.github/workflows/_e2e_nightly_multi_node.yaml
+    with:
+      soc_version: a3
+      runner: linux-aarch64-a3-0
+      image: 'swr.cn-southwest-2.myhuaweicloud.com/base_image/ascend-ci/vllm-ascend:nightly-ci-${{ matrix.vllm_ascend_branch }}-a3'
+      ascend_log_prefix: ${{ needs.setup-vars.outputs.ascend_log_prefix }}/${{ matrix.vllm_ascend_branch }}
+      vllm_ascend_branch: ${{ matrix.vllm_ascend_branch }}
+      replicas: 1
+      size: ${{ matrix.test_config.size }}
+      config_file_path: ${{ matrix.test_config.config_file_path }}
+      name: ${{ matrix.test_config.name }}
+      vllm_ascend_ref: ${{ github.sha }}
+      should_run: >-
+        ${{
+          needs.setup-vars.outputs.filter == 'all' ||
+          contains(needs.setup-vars.outputs.filter, format(',{0},', matrix.test_config.name))
+        }}
+    secrets:
+      KUBECONFIG_B64: ${{ secrets.KUBECONFIG_B64 }}
+      OBS_ACCESS_KEY: ${{ secrets.OBS_ACCESS_KEY }}
+      OBS_SECRET_KEY: ${{ secrets.OBS_SECRET_KEY }}
+
+  single-node-tests:
+    name: single-node
+    needs: [setup-vars, build-image, double-node-tests]
+    if: >-
+      always() &&
+      (needs.build-image.result == 'success' || needs.build-image.result == 'skipped')
+    strategy:
+      fail-fast: false
+      max-parallel: 7
+      matrix:
+        vllm_ascend_branch: ${{ fromJSON(needs.setup-vars.outputs.vllm_ascend_branches) }}
+        test_config:
+          # YAML-driven tests
+          - name: deepseek-v3-2-w8a8
+            os: linux-aarch64-a3-16
+            config_file_path: DeepSeek-V3.2-W8A8.yaml
+          - name: kimi-k2.5
+            os: linux-aarch64-a3-16
+            config_file_path: Kimi-K2.5.yaml
+          - name: Qwen3.5-397B-A17B-w8a8-mtp
+            os: linux-aarch64-a3-16
+            config_file_path: Qwen3.5-397B-A17B-W8A8-mtp-A3.yaml
+          - name: MiniMax-M2.5-w8a8-QuaRot-A3
+            os: linux-aarch64-a3-8
+            config_file_path: MiniMax-M2.5-w8a8-QuaRot-A3.yaml
+          - name: Qwen3.5-27B-w8a8-A3
+            os: linux-aarch64-a3-2
+            config_file_path: Qwen3.5-27B-w8a8-A3.yaml
+          - name: Qwen3.5-122B-A10B-W8A8-A3
+            os: linux-aarch64-a3-16
+            config_file_path: Qwen3.5-122B-A10B-W8A8-A3.yaml
+    uses: ./.github/workflows/_e2e_nightly_single_node.yaml
+    with:
+      runner: ${{ matrix.test_config.os }}
+      image: 'swr.cn-southwest-2.myhuaweicloud.com/base_image/ascend-ci/vllm-ascend:nightly-ci-${{ matrix.vllm_ascend_branch }}-a3'
+      config_file_path: ${{ matrix.test_config.config_file_path }}
+      name: ${{ matrix.test_config.name }}
+      should_run: >-
+        ${{
+          needs.setup-vars.outputs.filter == 'all' ||
+          contains(needs.setup-vars.outputs.filter, format(',{0},', matrix.test_config.name))
+        }}
+
+
+  clear-pre-logs:
+    runs-on: linux-aarch64-a3-0
+    needs: [double-node-tests]
+    if: needs.double-node-tests.result != 'skipped'
+    steps:
+      - name: Clear pre-logs on pvc
+        run: |
+          # Clear logs generated before the test to avoid confusion
+          rm -rf "${ASCEND_LOG_PREFIX:?}"/* || true
+
+  merge-benchmark-artifacts:
+    name: Merge benchmark artifacts into weekly-a3.zip
+    needs: [single-node-tests, double-node-tests]
+    if: always()
+    runs-on: ubuntu-latest
+    steps:
+      - name: Merge all benchmark result artifacts
+        continue-on-error: true
+        uses: actions/upload-artifact/merge@v7
+        with:
+          name: weekly-a3
+          pattern: nightly-test-benchmark-results-*
+          compression-level: 0
+          delete-merged: true
