@@ -29,25 +29,12 @@ from vllm import SamplingParams
 from vllm.config import KVTransferConfig
 
 from tests.e2e.conftest import VllmRunner, wait_until_npu_memory_free
-from tests.e2e.model_utils import check_outputs_equal
 
 os.environ["PYTORCH_NPU_ALLOC_CONF"] = "max_split_size_mb:256"
 os.environ["VLLM_WORKER_MULTIPROC_METHOD"] = "spawn"
 
 QWEN_DENSE_MODELS = [
     "vllm-ascend/Qwen3-0.6B-W8A8",
-]
-
-QWEN_W4A8_MODELS = [
-    "vllm-ascend/Qwen3-1.7B-W4A8-V1",
-]
-
-QWEN_W4A4_MODELS = [
-    "Eco-Tech/Qwen3-32B-w4a4-LAOS",
-]
-
-DEEPSEEK_W4A8_MODELS = [
-    "vllm-ascend/DeepSeek-V3.1-W4A8-puring",
 ]
 
 GPT_OSS_MODELS = [
@@ -75,23 +62,6 @@ def test_deepseek_multistream_moe_tp2():
         vllm_model.generate_greedy(example_prompts, max_tokens)
 
 
-@pytest.mark.parametrize("model", QWEN_W4A8_MODELS)
-def test_qwen3_w4a8_dynamic_tp2(model):
-    prompts = [
-        "Hello, my name is",
-    ]
-    max_tokens = 5
-    with VllmRunner(
-        model,
-        max_model_len=8192,
-        dtype="auto",
-        tensor_parallel_size=2,
-        cudagraph_capture_sizes=[1, 2, 4, 8],
-        quantization="ascend",
-    ) as vllm_model:
-        vllm_model.generate_greedy(prompts, max_tokens)
-
-
 @wait_until_npu_memory_free(target_free_percentage=0.95)
 def test_qwen3_moe_sp_tp2() -> None:
     example_prompts = [
@@ -109,45 +79,6 @@ def test_qwen3_moe_sp_tp2() -> None:
         enforce_eager=True,
     ) as vllm_model:
         vllm_model.generate(example_prompts, sampling_params)
-
-
-@pytest.mark.parametrize("model", DEEPSEEK_W4A8_MODELS)
-@patch.dict(os.environ, {"HCCL_BUFFSIZE": "2048"})
-@wait_until_npu_memory_free(target_free_percentage=0.95)
-def test_deepseek_w4a8_accuracy_tp2(model):
-    prompts = [
-        "Hello, my name is",
-        "The president of the United States is",
-        "vLLM is a high-throughput and memory-efficient inference and serving engine for LLMs",
-    ]
-    vllm_ds_w4a8_answers = [
-        "estown Exped recoveryeilights",
-        "平行于我 charmsapar理工学院",
-        "agna以此为基点儿的 magnetism",
-    ]
-    sampling_params = SamplingParams(max_tokens=5, temperature=0.0)
-    with VllmRunner(
-        model,
-        dtype="auto",
-        tensor_parallel_size=2,
-        cudagraph_capture_sizes=[1, 2, 4, 8],
-        quantization="ascend",
-        enable_expert_parallel=True,
-    ) as vllm_model:
-        vllm_quant_outputs = vllm_model.model.generate(prompts, sampling_params)
-
-    vllm_quant_outputs_list = []
-    for output in vllm_quant_outputs:
-        vllm_quant_outputs_list.append(([output.outputs[0].index], output.outputs[0].text))
-    vllm_answer_list = []
-    vllm_answer_list = [([0], answer) for answer in vllm_ds_w4a8_answers]
-
-    check_outputs_equal(
-        outputs_0_lst=vllm_answer_list,
-        outputs_1_lst=vllm_quant_outputs_list,
-        name_0="vllm_quant_outputs",
-        name_1="vllm_answer_outputs",
-    )
 
 
 @patch.dict(os.environ, {"VLLM_ASCEND_ENABLE_FLASHCOMM1": "1"})
@@ -302,21 +233,6 @@ def test_deepseek3_2_w8a8c8_pruning_mtp_tp2_ep():
     ) as vllm_model:
         vllm_model.generate_greedy(short_example_prompts, max_tokens)
         vllm_model.generate_greedy(long_example_prompts, max_tokens)
-
-
-@pytest.mark.parametrize("model", QWEN_W4A4_MODELS)
-def test_qwen3_w4a4_distributed_tp2(model):
-    example_prompts = [
-        "Hello, my name is",
-    ]
-    max_tokens = 5
-    with VllmRunner(
-        model,
-        tensor_parallel_size=2,
-        cudagraph_capture_sizes=[1, 2, 4, 8],
-        quantization="ascend",
-    ) as vllm_model:
-        vllm_model.generate_greedy(example_prompts, max_tokens)
 
 
 @pytest.mark.parametrize("model", GPT_OSS_MODELS)

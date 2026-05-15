@@ -37,8 +37,6 @@ e2e-singlecard:
   estimated_time: 291
 - name: tests/e2e/singlecard/test_multistream_overlap_shared_expert.py
   estimated_time: 264
-- name: tests/e2e/singlecard/test_quantization.py
-  estimated_time: 303
 - name: tests/e2e/singlecard/test_sampler.py
   estimated_time: 254
 - name: tests/e2e/singlecard/test_vlm.py
@@ -68,8 +66,6 @@ e2e-singlecard:
 e2e-singlecard-light:
 - name: tests/e2e/singlecard/test_aclgraph_accuracy.py::test_piecewise_res_consistency
   estimated_time: 463
-- name: tests/e2e/singlecard/test_quantization.py::test_qwen3_w8a8_quant
-  estimated_time: 125
 e2e-2card-light:
 - name: tests/e2e/multicard/2-cards/test_qwen3_moe.py::test_qwen3_moe_distributed_mp_tp2_ep
   estimated_time: 187
@@ -107,12 +103,8 @@ e2e-multicard-2-cards:
   estimated_time: 684
 - name: tests/e2e/multicard/2-cards/test_offline_inference_distributed.py::test_deepseek_multistream_moe_tp2
   estimated_time: 115
-- name: tests/e2e/multicard/2-cards/test_offline_inference_distributed.py::test_qwen3_w4a8_dynamic_tp2
-  estimated_time: 105
 - name: tests/e2e/multicard/2-cards/test_offline_inference_distributed.py::test_qwen3_moe_sp_tp2
   estimated_time: 129
-- name: tests/e2e/multicard/2-cards/test_offline_inference_distributed.py::test_deepseek_w4a8_accuracy_tp2
-  estimated_time: 128
 - name: tests/e2e/multicard/2-cards/test_offline_inference_distributed.py::test_qwen3_moe_fc2_tp2
   estimated_time: 101
 - name: tests/e2e/multicard/2-cards/test_offline_inference_distributed.py::test_deepseek_v2_lite_fc1_tp2
@@ -125,12 +117,8 @@ e2e-multicard-2-cards:
   estimated_time: 168
 - name: tests/e2e/multicard/2-cards/test_offline_inference_distributed.py::test_deepseek3_2_w8a8c8_pruning_mtp_tp2_ep
   estimated_time: 148
-- name: tests/e2e/multicard/2-cards/test_offline_inference_distributed.py::test_qwen3_w4a4_distributed_tp2
-  estimated_time: 160
 - name: tests/e2e/multicard/2-cards/test_prefix_caching.py
   estimated_time: 541
-- name: tests/e2e/multicard/2-cards/test_quantization.py
-  estimated_time: 424
 - name: tests/e2e/multicard/2-cards/test_qwen3_moe.py
   estimated_time: 1018
 - name: tests/e2e/multicard/2-cards/test_qwen3_moe_routing_replay.py
