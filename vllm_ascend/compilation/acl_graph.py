@@ -244,6 +244,17 @@ def update_full_graph_params(
         draft_attn_metadatas,
     )
 
+    from vllm_ascend.ops.gdn import update_conv1d_graph_params
+
+    update_conv1d_graph_params(
+        update_stream,
+        forward_context,
+        num_tokens,
+        vllm_config,
+        _EXTRA_CTX.is_draft_model,
+        draft_attn_metadatas,
+    )
+
 
 @dataclass
 class GraphParams:
@@ -251,6 +262,9 @@ class GraphParams:
     workspaces: dict[int, torch.Tensor]
     handles: dict[int, list[torch_npu._C._NPUTaskGroupHandle]]
     attn_params: dict[int, list[tuple]]
+    conv1d_params: dict[int, list[tuple]]  # for causal conv1d params
+    conv1d_handles: dict[int, list[torch_npu._C._NPUTaskGroupHandle]]  # for causal conv1d params handles
+    conv1d_events: dict[int, list[torch.npu.ExternalEvent]]  # for causal conv1d params events
 
 
 _graph_params: GraphParams | None = None
@@ -260,11 +274,15 @@ def set_graph_params(aclgraph_capture_sizes: list[int]):
     global _graph_params
     if _graph_params is not None:
         raise ValueError("Graph parameters have already been set!")
+    _dummy_input_arg: dict = {size: [] for size in aclgraph_capture_sizes}
     _graph_params = GraphParams(
-        {size: [] for size in aclgraph_capture_sizes},
+        _dummy_input_arg,
         {size: None for size in aclgraph_capture_sizes},
-        {size: [] for size in aclgraph_capture_sizes},
-        {size: [] for size in aclgraph_capture_sizes},
+        _dummy_input_arg,
+        _dummy_input_arg,
+        _dummy_input_arg,
+        _dummy_input_arg,
+        _dummy_input_arg,
     )
 
 
@@ -285,11 +303,15 @@ def set_draft_graph_params(aclgraph_capture_sizes: list[int]):
     global _draft_graph_params
     if _draft_graph_params is not None:
         raise ValueError("DraftGraph parameters have already been set!")
+    _dummy_input_arg: dict = {size: [] for size in aclgraph_capture_sizes}
     _draft_graph_params = GraphParams(
-        {size: [] for size in aclgraph_capture_sizes},
+        _dummy_input_arg,
         {size: None for size in aclgraph_capture_sizes},
-        {size: [] for size in aclgraph_capture_sizes},
-        {size: [] for size in aclgraph_capture_sizes},
+        _dummy_input_arg,
+        _dummy_input_arg,
+        _dummy_input_arg,
+        _dummy_input_arg,
+        _dummy_input_arg,
     )
 
 
@@ -310,11 +332,15 @@ def set_draft_graph_prefill_params(aclgraph_capture_sizes: list[int]):
     global _draft_graph_prefill_params
     if _draft_graph_prefill_params is not None:
         raise ValueError("DraftGraph preill parameters have already been set!")
+    _dummy_input_arg: dict = {size: [] for size in aclgraph_capture_sizes}
     _draft_graph_prefill_params = GraphParams(
-        {size: [] for size in aclgraph_capture_sizes},
+        _dummy_input_arg,
         {size: None for size in aclgraph_capture_sizes},
-        {size: [] for size in aclgraph_capture_sizes},
-        {size: [] for size in aclgraph_capture_sizes},
+        _dummy_input_arg,
+        _dummy_input_arg,
+        _dummy_input_arg,
+        _dummy_input_arg,
+        _dummy_input_arg,
     )
 
 

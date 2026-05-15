@@ -380,6 +380,17 @@
 #    Future Plan:
 #       Remove this patch when upstream exposes a backend hook for extending GDN
 #       metadata or when the optimization is accepted upstream directly.
+#   2. `vllm.v1.attention.backends.gdn_attn.GDNAttentionMetadataBuilde.build`
+#    Why:
+#       Qwen3.5/Qwen3Next GDN Decode/Specific Decode on NPU needs prebuilt varlen chunk metadata
+#       to avoid forward-time host round-trips that break async scheduling.
+#    How：
+#       Monkey-patch the upstream builder in-place, keep upstream code untouched,
+#       and attach prebuilt device metadata bundle onto the returned attention
+#       metadata object for Ascend-specific consumers.
+#    Future Plan:
+#       Remove this patch when upstream exposes a backend hook for extending GDN
+#       metadata or when the optimization is accepted upstream directly.
 #
 # ** 8. File: worker/patch_qwen3_next.py**
 # ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~

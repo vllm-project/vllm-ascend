@@ -55,9 +55,27 @@ class GDNCausalConv1dHostMetadata:
 
 
 @dataclass
+class GDNSpecCausalConv1dHostMetadata:
+    query_start_loc_cpu: torch.Tensor
+    cache_indices_cpu: torch.Tensor
+    num_accepted_tokens_cpu: torch.Tensor
+    _buffer_slot: object | None = None
+
+
+@dataclass
 class GDNPrefillFallbackMeta:
     causal_conv1d: GDNCausalConv1dHostMetadata
     chunk: GDNChunkedPrefillMetadata
+
+
+@dataclass
+class GDNDecodeFallbackMeta:
+    causal_conv1d: GDNCausalConv1dHostMetadata
+
+
+@dataclass
+class GDNSpecDecodeFallbackMeta:
+    spec_causal_conv1d: GDNSpecCausalConv1dHostMetadata
 
 
 @dataclass
@@ -74,6 +92,12 @@ class _GDNChunkedPrefillBufferSlot:
 class _GDNCausalConv1dHostBufferSlot:
     cache_indices_cpu: torch.Tensor
     has_initial_state_cpu: torch.Tensor
+
+
+@dataclass
+class _GDNSpecCausalConv1dHostBufferSlot:
+    cache_indices_cpu: torch.Tensor
+    num_accepted_tokens_cpu: torch.Tensor
 
 
 @dataclass
@@ -404,13 +428,9 @@ def _build_spec_sequence_masks_cpu(builder, num_decode_draft_tokens_cpu: torch.T
 
 def _build_non_spec_query_start_loc_cpu(
     builder,
-    attn_metadata,
     common_attn_metadata,
     num_decode_draft_tokens_cpu: torch.Tensor | None,
 ) -> torch.Tensor | None:
-    if attn_metadata.num_prefills <= 0:
-        return None
-
     query_start_loc_cpu = common_attn_metadata.query_start_loc_cpu
     spec_sequence_masks_cpu = _build_spec_sequence_masks_cpu(builder, num_decode_draft_tokens_cpu)
     if spec_sequence_masks_cpu is None:
@@ -428,6 +448,31 @@ def _build_non_spec_query_start_loc_cpu(
         out=non_spec_query_start_loc_cpu[1:],
     )
     return non_spec_query_start_loc_cpu
+
+
+def _build_spec_query_start_loc_cpu(
+    builder,
+    common_attn_metadata,
+    num_decode_draft_tokens_cpu: torch.Tensor | None,
+) -> torch.Tensor | None:
+    query_start_loc_cpu = common_attn_metadata.query_start_loc_cpu
+    spec_sequence_masks_cpu = _build_spec_sequence_masks_cpu(builder, num_decode_draft_tokens_cpu)
+    if spec_sequence_masks_cpu is None:
+        return query_start_loc_cpu
+
+    # query_start_loc_cpu is type of cumsum
+    query_lens_cpu = query_start_loc_cpu[1:] - query_start_loc_cpu[:-1]
+    spec_query_lens_cpu = query_lens_cpu[spec_sequence_masks_cpu]
+    spec_query_start_loc_cpu = torch.zeros(
+        spec_query_lens_cpu.numel() + 1,
+        dtype=query_start_loc_cpu.dtype,
+    )
+    torch.cumsum(
+        spec_query_lens_cpu,
+        dim=0,
+        out=spec_query_start_loc_cpu[1:],
+    )
+    return spec_query_start_loc_cpu
 
 
 def _allocate_causal_conv1d_host_slot(
@@ -470,6 +515,52 @@ def _acquire_causal_conv1d_host_slot(builder) -> _GDNCausalConv1dHostBufferSlot:
     return pool[builder._ascend_gdn_causal_conv1d_host_pool_idx]
 
 
+def _allocate_spec_causal_conv1d_host_slot(
+    builder,
+    device: torch.device,
+) -> _GDNSpecCausalConv1dHostBufferSlot:
+    max_num_seqs = builder.vllm_config.scheduler_config.max_num_seqs
+    spec_cfg = builder.vllm_config.speculative_config
+    num_speculative_tokens = spec_cfg.num_speculative_tokens if spec_cfg else 0
+    decode_cudagraph_max_bs = getattr(builder, "decode_cudagraph_max_bs", max_num_seqs)
+    max_elements = decode_cudagraph_max_bs * (num_speculative_tokens + 1)
+    return _GDNSpecCausalConv1dHostBufferSlot(
+        cache_indices_cpu=torch.empty(
+            max_elements,
+            dtype=torch.int32,
+            device="cpu",
+            pin_memory=device.type != "cpu",
+        ),
+        num_accepted_tokens_cpu=torch.empty(
+            max_elements,
+            dtype=torch.int32,
+            device="cpu",
+            pin_memory=device.type != "cpu",
+        ),
+    )
+
+
+def _ensure_spec_causal_conv1d_host_meta_state(builder, device: torch.device) -> None:
+    if getattr(builder, "_ascend_gdn_spec_causal_conv1d_host_meta_initialized", False):
+        return
+    builder._ascend_gdn_spec_causal_conv1d_host_meta_initialized = True
+    builder._ascend_gdn_spec_causal_conv1d_host_pool_idx = -1
+    builder._ascend_gdn_spec_causal_conv1d_host_pool = []
+    if device.type != "cpu":
+        builder._ascend_gdn_spec_causal_conv1d_host_pool = [
+            _allocate_spec_causal_conv1d_host_slot(builder, device),
+            _allocate_spec_causal_conv1d_host_slot(builder, device),
+        ]
+
+
+def _acquire_spec_causal_conv1d_host_slot(builder) -> _GDNSpecCausalConv1dHostBufferSlot:
+    pool = builder._ascend_gdn_spec_causal_conv1d_host_pool
+    builder._ascend_gdn_spec_causal_conv1d_host_pool_idx = (
+        builder._ascend_gdn_spec_causal_conv1d_host_pool_idx + 1
+    ) % len(pool)
+    return pool[builder._ascend_gdn_spec_causal_conv1d_host_pool_idx]
+
+
 def _copy_to_pinned_cpu(
     tensor: torch.Tensor,
     pinned_buffer: torch.Tensor | None,
@@ -477,8 +568,16 @@ def _copy_to_pinned_cpu(
     if tensor.device.type == "cpu":
         return tensor
 
-    assert pinned_buffer is not None
-    cpu_tensor = pinned_buffer[: tensor.numel()]
+    num_elements = tensor.numel()
+    if pinned_buffer is None or pinned_buffer.numel() < num_elements:
+        cpu_tensor = torch.empty(
+            num_elements,
+            dtype=tensor.dtype,
+            device="cpu",
+            pin_memory=True,
+        )
+    else:
+        cpu_tensor = pinned_buffer[:num_elements]
     cpu_tensor.copy_(
         tensor.reshape(-1),
         non_blocking=True,
@@ -519,6 +618,63 @@ def _build_non_spec_causal_conv1d_host_meta(
         query_start_loc_cpu=non_spec_query_start_loc_cpu,
         cache_indices_cpu=cache_indices_cpu,
         has_initial_state_cpu=has_initial_state_cpu,
+        _buffer_slot=slot,
+    )
+
+
+def _build_non_spec_decode_causal_conv1d_host_meta(
+    builder,
+    attn_metadata,
+    non_spec_query_start_loc_cpu: torch.Tensor,
+) -> GDNCausalConv1dHostMetadata:
+    if attn_metadata.non_spec_state_indices_tensor is None:
+        raise RuntimeError("Expected attn_metadata.non_spec_state_indices_tensor for patched GDN non-spec decode path.")
+
+    slot = None
+    if attn_metadata.non_spec_state_indices_tensor.device.type != "cpu":
+        slot = _acquire_causal_conv1d_host_slot(builder)
+
+    non_spec_cache_indices_cpu = _copy_to_pinned_cpu(
+        attn_metadata.non_spec_state_indices_tensor,
+        None if slot is None else slot.cache_indices_cpu,
+    )
+
+    return GDNCausalConv1dHostMetadata(
+        query_start_loc_cpu=non_spec_query_start_loc_cpu,
+        cache_indices_cpu=non_spec_cache_indices_cpu,
+        has_initial_state_cpu=None,
+        _buffer_slot=slot,
+    )
+
+
+def _build_spec_causal_conv1d_host_meta(
+    builder,
+    attn_metadata,
+    spec_query_start_loc_cpu: torch.Tensor,
+) -> GDNSpecCausalConv1dHostMetadata:
+    assert attn_metadata.spec_sequence_masks is not None
+    if attn_metadata.spec_state_indices_tensor is None:
+        raise RuntimeError("Expected attn_metadata.spec_state_indices_tensor for patched GDN speculative path.")
+
+    slot = None
+    if attn_metadata.spec_state_indices_tensor.device.type != "cpu":
+        slot = _acquire_spec_causal_conv1d_host_slot(builder)
+
+    num_spec_decodes = attn_metadata.num_spec_decodes
+    cache_indices_cpu = _copy_to_pinned_cpu(
+        attn_metadata.spec_state_indices_tensor[:num_spec_decodes, 0].contiguous(),
+        None if slot is None else slot.cache_indices_cpu,
+    )
+
+    num_accepted_tokens_cpu = _copy_to_pinned_cpu(
+        attn_metadata.num_accepted_tokens[:num_spec_decodes].contiguous(),
+        None if slot is None else slot.num_accepted_tokens_cpu,
+    )
+
+    return GDNSpecCausalConv1dHostMetadata(
+        query_start_loc_cpu=spec_query_start_loc_cpu,
+        cache_indices_cpu=cache_indices_cpu,
+        num_accepted_tokens_cpu=num_accepted_tokens_cpu,
         _buffer_slot=slot,
     )
 
@@ -566,8 +722,27 @@ def _patched_build(
         fast_build=fast_build,
     )
     attn_metadata.non_spec_prefill_fallback_meta = None
-    if attn_metadata.num_prefills <= 0:
-        return attn_metadata
+    attn_metadata.non_spec_decode_fallback_meta = None
+    attn_metadata.spec_decode_fallback_meta = None
+    if attn_metadata.spec_sequence_masks is not None:
+        _patched_build_spec(self, attn_metadata, common_attn_metadata, num_decode_draft_tokens_cpu)
+
+    if attn_metadata.num_prefills > 0:
+        _patched_build_prefill(self, attn_metadata, common_attn_metadata, num_decode_draft_tokens_cpu)
+
+    if attn_metadata.num_decodes > 0:
+        _patched_build_decode(self, attn_metadata, common_attn_metadata, num_decode_draft_tokens_cpu)
+
+    return attn_metadata
+
+
+def _patched_build_prefill(
+    self,
+    attn_metadata: gdn_attn.GDNAttentionMetadata,
+    common_attn_metadata,
+    num_decode_draft_tokens_cpu: torch.Tensor | None = None,
+):
+    assert attn_metadata.num_prefills > 0
 
     _ensure_chunk_meta_state(self, common_attn_metadata.query_start_loc.device)
     _ensure_causal_conv1d_host_meta_state(
@@ -576,7 +751,6 @@ def _patched_build(
     )
     non_spec_query_start_loc_cpu = _build_non_spec_query_start_loc_cpu(
         self,
-        attn_metadata,
         common_attn_metadata,
         num_decode_draft_tokens_cpu,
     )
@@ -619,6 +793,63 @@ def _init_reorder_batch_threshold(
             and speculative_config.method == "dflash"
         ):
             self.reorder_batch_threshold = 1 + speculative_config.num_speculative_tokens
+
+
+def _patched_build_spec(
+    self,
+    attn_metadata: gdn_attn.GDNAttentionMetadata,
+    common_attn_metadata,
+    num_decode_draft_tokens_cpu: torch.Tensor | None = None,
+):
+    assert attn_metadata.spec_sequence_masks is not None
+    _ensure_spec_causal_conv1d_host_meta_state(
+        self,
+        common_attn_metadata.query_start_loc.device,
+    )
+    spec_query_start_loc_cpu = _build_spec_query_start_loc_cpu(
+        self,
+        common_attn_metadata,
+        num_decode_draft_tokens_cpu,
+    )
+    assert spec_query_start_loc_cpu is not None
+    if attn_metadata.spec_query_start_loc is None:
+        raise RuntimeError("Expected attn_metadata.spec_query_start_loc for patched GDN speculative path.")
+    attn_metadata.spec_decode_fallback_meta = GDNSpecDecodeFallbackMeta(
+        spec_causal_conv1d=_build_spec_causal_conv1d_host_meta(
+            self,
+            attn_metadata,
+            spec_query_start_loc_cpu,
+        ),
+    )
+    return attn_metadata
+
+
+def _patched_build_decode(
+    self,
+    attn_metadata: gdn_attn.GDNAttentionMetadata,
+    common_attn_metadata,
+    num_decode_draft_tokens_cpu: torch.Tensor | None = None,
+):
+    assert attn_metadata.num_decodes > 0
+    _ensure_causal_conv1d_host_meta_state(
+        self,
+        common_attn_metadata.query_start_loc.device,
+    )
+    non_spec_query_start_loc_cpu = _build_non_spec_query_start_loc_cpu(
+        self,
+        common_attn_metadata,
+        num_decode_draft_tokens_cpu,
+    )
+    if non_spec_query_start_loc_cpu is None:
+        raise RuntimeError("Expected non-spec query_start_loc_cpu for patched GDN non-spec decode path.")
+    attn_metadata.non_spec_decode_fallback_meta = GDNDecodeFallbackMeta(
+        causal_conv1d=_build_non_spec_decode_causal_conv1d_host_meta(
+            self,
+            attn_metadata,
+            non_spec_query_start_loc_cpu,
+        ),
+    )
+    return attn_metadata
 
 
 if not _IS_PATCHED and not is_310p():
