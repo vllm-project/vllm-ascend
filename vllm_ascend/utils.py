@@ -450,12 +450,11 @@ def vllm_version_is(target_vllm_version: str):
 
         vllm_version = vllm.__version__
     
-    # Strip version suffix (e.g., "0.20.1+cpu" -> "0.20.1")
-    # This allows matching when vllm.__version__ contains build metadata
-    vllm_version = vllm_version.split('+')[0]
-    
     try:
-        return Version(vllm_version) == Version(target_vllm_version)
+        # Compare the public part of the versions to ignore local build metadata
+        # (e.g., +cpu). This ensures consistent behavior regardless of which side
+        # contains the build metadata.
+        return Version(vllm_version).public == Version(target_vllm_version).public
     except InvalidVersion:
         raise ValueError(
             f"Invalid vllm version {vllm_version} found. A dev version of vllm "
