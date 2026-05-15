@@ -112,6 +112,11 @@ env_variables: dict[str, Callable[[], Any]] = {
     # Control the aclrtMemcpyBatchAsync compile path for KV cache offloading.
     # "1": force enable, "0": force disable, None: auto-detect from CANN headers.
     "VLLM_ASCEND_ENABLE_BATCH_MEMCPY": lambda: os.getenv("VLLM_ASCEND_ENABLE_BATCH_MEMCPY", None),
+    # Whether to enable Flash Attention 3 (FA3) as the attention implementation
+    # on Ascend. When set to 1, the FA3 kernel (flash_attn_v3) will be used
+    # instead of the default fused_infer_attention (FIA) kernel.
+    # Default is 0 (disabled, using FIA).
+    "VLLM_ASCEND_ENABLE_FLASH_ATTN": lambda: bool(int(os.getenv("VLLM_ASCEND_ENABLE_FLASH_ATTN", "0"))),
 }
 
 # end-env-vars-definition
