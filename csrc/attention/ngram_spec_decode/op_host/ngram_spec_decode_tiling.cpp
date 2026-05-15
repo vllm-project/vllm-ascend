@@ -79,7 +79,7 @@ static ge::graphStatus NgramSpecDecodeTilingFunc(gert::TilingContext *context)
 
     int64_t block_dim = std::min(batch_size, static_cast<int64_t>(aivNum));
     int64_t rows_per_core = (block_dim > 0) ? (batch_size / block_dim) : 0;
-    int64_t former_num = (block_dim > 0) ? (block_dim - 1) : 0;
+    int64_t former_num = batch_size % block_dim;
     int64_t tail_rows = batch_size - former_num * rows_per_core;
     int64_t block_rows = std::min(rows_per_core, max_block_rows);
 
