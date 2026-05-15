@@ -166,8 +166,8 @@ class YuanrongBackend(Backend):
                             keys[start:end], blob_lists[start:end], 0
                         )
                     )
-            for key in failed_keys:
-                logger.error("Failed to get key %s", key)
+            if failed_keys:
+                logger.error("Failed to get %d keys. First few: %s", len(failed_keys), failed_keys[:10])
         except Exception as exc:
             logger.error("Failed to get keys %s: %s", keys, exc)
 
