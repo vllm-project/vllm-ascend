@@ -963,25 +963,6 @@ class NPUPlatform(Platform):
                 )
                 vllm_config.parallel_config.numa_bind_cpus = None
 
-            if getattr(vllm_config.parallel_config, "enable_dbo", False):
-                logger.warning(
-                    "'--enable-dbo' is currently ignored on Ascend NPU because the "
-                    "upstream generic DBO path has not yet aligned with the Ascend "
-                    "backend/runtime model. Ascend may use separate backend/model-"
-                    "specific overlap optimizations, and this may converge as the "
-                    "generic overlap framework evolves. Resetting to False."
-                )
-                vllm_config.parallel_config.enable_dbo = False
-
-            ubatch_size = getattr(vllm_config.parallel_config, "ubatch_size", 0)
-            if ubatch_size != 0:
-                logger.warning(
-                    "'--ubatch-size' is currently ignored on Ascend NPU because it "
-                    "depends on the generic DBO path, which is not yet aligned with "
-                    "the current Ascend backend/runtime model. Resetting to 0."
-                )
-                vllm_config.parallel_config.ubatch_size = 0
-
     @classmethod
     def use_custom_op_collectives(cls) -> bool:
         return True
