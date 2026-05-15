@@ -32,6 +32,7 @@ class BalanceScheduler(Scheduler):
         kv_cache_config: KVCacheConfig,
         structured_output_manager: StructuredOutputManager,
         block_size: int,
+        hash_block_size: int | None = None,
         mm_registry: MultiModalRegistry = MULTIMODAL_REGISTRY,
         include_finished_set: bool = False,
         log_stats: bool = False,
@@ -41,6 +42,7 @@ class BalanceScheduler(Scheduler):
             kv_cache_config,
             structured_output_manager,
             block_size,
+            hash_block_size,
             mm_registry,
             include_finished_set,
             log_stats,
@@ -266,7 +268,7 @@ class BalanceScheduler(Scheduler):
                 if len(self.running) == self.max_num_running_reqs:
                     break
 
-                balance_flag = max(t.item() for t in self.balance_queue) >= self.max_num_running_reqs - 1
+                balance_flag = max(t.item() for t in self.balance_queue) == self.max_num_running_reqs
                 if balance_flag:
                     break
 
@@ -293,7 +295,7 @@ class BalanceScheduler(Scheduler):
 
                 # Skip request if the structured output request is still waiting
                 # for FSM compilation.
-                if request.status == RequestStatus.WAITING_FOR_FSM:
+                if request.status == RequestStatus.WAITING_FOR_STRUCTURED_OUTPUT_GRAMMAR:
                     structured_output_req = request.structured_output_request
                     if structured_output_req and structured_output_req.grammar:
                         request.status = RequestStatus.WAITING
@@ -349,14 +351,19 @@ class BalanceScheduler(Scheduler):
                             skipped_waiting_requests.prepend_request(request)
                             continue
 
-                        request.num_external_computed_tokens = ext_tokens
                         num_external_computed_tokens = ext_tokens
-
                         connector_prefix_cache_queries = request.num_tokens - num_new_local_computed_tokens
                         connector_prefix_cache_hits = num_external_computed_tokens
 
                     # Total computed tokens (local + external).
                     num_computed_tokens = num_new_local_computed_tokens + num_external_computed_tokens
+
+                    if request.prefill_stats is not None:
+                        request.prefill_stats.set(
+                            num_prompt_tokens=request.num_prompt_tokens,
+                            num_local_cached_tokens=num_new_local_computed_tokens,
+                            num_external_cached_tokens=num_external_computed_tokens,
+                        )
                 else:
                     # KVTransfer: WAITING reqs have num_computed_tokens > 0
                     # after async KV recvs are completed.
@@ -496,9 +503,6 @@ class BalanceScheduler(Scheduler):
                 token_budget -= num_new_tokens
                 request.status = RequestStatus.RUNNING
                 request.num_computed_tokens = num_computed_tokens
-                # Count the number of prefix cached tokens.
-                if request.num_cached_tokens < 0:
-                    request.num_cached_tokens = num_computed_tokens
                 # Encoder-related.
                 if encoder_inputs_to_schedule:
                     scheduled_encoder_inputs[request_id] = encoder_inputs_to_schedule

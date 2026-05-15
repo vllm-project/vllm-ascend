@@ -2,9 +2,8 @@
 
 ## Version Specific FAQs
 
-- [[v0.18.0rc1] FAQ & Feedback](https://github.com/vllm-project/vllm-ascend/issues/7633)
-- [[v0.17.0rc1] FAQ & Feedback](https://github.com/vllm-project/vllm-ascend/issues/7173)
-- [[v0.13.0] FAQ & Feedback](https://github.com/vllm-project/vllm-ascend/issues/6583)
+- [[v0.19.1rc1] FAQ & Feedback](https://github.com/vllm-project/vllm-ascend/issues/8819)
+- [[v0.18.0] FAQ & Feedback](https://github.com/vllm-project/vllm-ascend/issues/8238)
 
 ## General FAQs
 
@@ -137,9 +136,9 @@ The problem is usually caused by the installation of a development or editable v
 
 OOM errors typically occur when the model exceeds the memory capacity of a single NPU. For general guidance, you can refer to [vLLM OOM troubleshooting documentation](https://docs.vllm.ai/en/latest/usage/troubleshooting/#out-of-memory).
 
-In scenarios where NPUs have limited high bandwidth memory (HBM) capacity, dynamic memory allocation/deallocation during inference can exacerbate memory fragmentation, leading to OOM. To address this:
+In scenarios where NPUs have limited high bandwidth memory (on-chip memory) capacity, dynamic memory allocation/deallocation during inference can exacerbate memory fragmentation, leading to OOM. To address this:
 
-- **Limit `--max-model-len`**: It can save the HBM usage for KV cache initialization step.
+- **Limit `--max-model-len`**: It can save the on-chip memory usage for KV cache initialization step.
 
 - **Adjust `--gpu-memory-utilization`**: If unspecified, the default value is `0.9`. You can decrease this value to reserve more memory to reduce fragmentation risks. See details in: [vLLM - Inference and Serving - Engine Arguments](https://docs.vllm.ai/en/latest/cli/serve/#-gpu-memory-utilization).
 
@@ -179,7 +178,7 @@ There are several factors that affect output determinism:
    # Create a sampling params object.
    sampling_params = SamplingParams(temperature=0)
    # Create an LLM.
-   llm = LLM(model="Qwen/Qwen2.5-0.5B-Instruct")
+   llm = LLM(model="Qwen/Qwen3-0.6B")
 
    # Generate texts from the prompts.
    outputs = llm.generate(prompts, sampling_params)
@@ -198,9 +197,9 @@ There are several factors that affect output determinism:
    export ATB_LLM_LCOC_ENABLE=0
    ```
 
-### 16. How to fix the error "ImportError: Please install vllm[audio] for audio support" for the Qwen2.5-Omni model？
+### 16. How to fix the error "ImportError: Please install vllm[audio] for audio support" for the multi-modal models？
 
-The `Qwen2.5-Omni` model requires the `librosa` package to be installed, you need to install the `qwen-omni-utils` package to ensure all dependencies are met, run `pip install qwen-omni-utils`.
+Some multi-modal models requires the `librosa` package to be installed, you need to install the `qwen-omni-utils` package to ensure all dependencies are met, for Qwen-omni, run `pip install qwen-omni-utils`.
 This package will install `librosa` and its related dependencies, resolving the `ImportError: No module named 'librosa'` issue and ensuring that the audio processing functionality works correctly.
 
 ### 17. How to troubleshoot and resolve size capture failures resulting from stream resource exhaustion, and what are the underlying causes?
@@ -254,20 +253,7 @@ Copy the `vllm_ascend_<tag>.tar` file (where `<tag>` is the image tag you used) 
 
 When using `--shm-size`, you may need to add the `--privileged=true` flag to your `docker run` command to grant the container necessary permissions. Please be aware that using `--privileged=true` grants the container extensive privileges on the host system, which can be a security risk. Only use this option if you understand the implications and trust the container's source.
 
-### 21. How to achieve low latency in a small batch scenario?
-
-The performance of `torch_npu.npu_fused_infer_attention_score` in small batch scenarios is not satisfactory, mainly due to the lack of flash decoding function. We offer an alternative operator in `tools/install_flash_infer_attention_score_ops_a2.sh` and `tools/install_flash_infer_attention_score_ops_a3.sh`, you can install it using the following instruction:
-
-```bash
-bash tools/install_flash_infer_attention_score_ops_a2.sh
-# change to run the following instruction if you're using A3 machine
-# bash tools/install_flash_infer_attention_score_ops_a3.sh
-```
-
-**NOTE**: Don't set `additional_config.pa_shape_list` when using this method; otherwise, it will lead to another attention operator.
-**Important**: Please make sure you're using the **official image** of `vllm-ascend`; otherwise, you **must change** the directory `/vllm-workspace` in `tools/install_flash_infer_attention_score_ops_a2.sh` or `tools/install_flash_infer_attention_score_ops_a3.sh` to your own, or create one. If you're not the root user, you need `sudo` **privileges** to run this script.
-
-### 22. How to set `SOC_VERSION` when building from source on a CPU-only machine?
+### 21. How to set `SOC_VERSION` when building from source on a CPU-only machine?
 
 When building from source (e.g. `pip install -e .`), the build may try to infer the target chip via `npu-smi`. If `npu-smi` is not available (common in CPU-only build environments), you must set `SOC_VERSION` manually before installation.
 
@@ -287,7 +273,7 @@ export SOC_VERSION="ascend310p1"
 export SOC_VERSION="<value starting with ascend950>"
 ```
 
-### 23. Why TPOT increases drastically as concurrency grows?
+### 22. Why TPOT increases drastically as concurrency grows?
 
 When testing a vLLM server, one may find that TPOT increases as concurrency increases (for example, TPOT increases by 0.5 ~ 1ms when concurrency increases by 4). This phenomenon is normal in most cases. However, sometimes TPOT may increase dramatically (10 to 100ms for example) as concurrency grows. This is possibly caused by [**PREEMPTION**](https://docs.vllm.ai/en/latest/configuration/optimization/#preemption) in vLLM.
 Generally, when your server hits KV cache limits, vLLM tries to free KV cache of requests to ensure sufficient space for other requests, which is called preemption in vLLM. When a request is preempted, the default behavior is to recompute the KV cache of this request again in the future, which is why the performance might drop significantly. There are several ways to verify this:

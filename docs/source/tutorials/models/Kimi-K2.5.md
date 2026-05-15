@@ -773,7 +773,7 @@ Refer to [Using AISBench for performance evaluation](../../developer_guide/evalu
 
 Run performance evaluation of `Kimi-K2.5-w4a8` as an example.
 
-Refer to [vllm benchmark](https://docs.vllm.ai/en/latest/contributing/benchmarks.html) for more details.
+Refer to [vllm benchmark](https://docs.vllm.ai/en/latest/benchmarking/) for more details.
 
 There are three `vllm bench` subcommands:
 
@@ -784,7 +784,7 @@ There are three `vllm bench` subcommands:
 Take the `serve` as an example. Run the code as follows.
 
 ```shell
-export VLLM_USE_MODELSCOPE=true
+export VLLM_USE_MODELSCOPE=True
 vllm bench serve --model Eco-Tech/Kimi-K2.5-w4a8 --dataset-name random --random-input 1024 --num-prompts 200 --request-rate 1 --save-result --result-dir ./
 ```
 
@@ -802,10 +802,6 @@ In this chapter, we recommend best practices for three scenarios:
 `max-model-len` and `max-num-seqs` need to be set according to the actual usage scenario. For other settings, please refer to the **[Deployment](#deployment)** chapter.
 
 ## FAQ
-
-- **Q: Why is the TPOT performance poor in Long-context test?**
-
-  A: Please ensure that the FIA operator replacement script has been executed successfully to complete the replacement of FIA operators. Here is the script: [A2](../../../../tools/install_flash_infer_attention_score_ops_a2.sh) and [A3](../../../../tools/install_flash_infer_attention_score_ops_a3.sh)
 
 - **Q: Startup fails with HCCL port conflicts (address already bound). What should I do?**
 

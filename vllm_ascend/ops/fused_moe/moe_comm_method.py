@@ -53,10 +53,13 @@ def get_moe_comm_method(moe_comm_type: MoECommType | None) -> MoECommMethod | No
 
 
 def setup_moe_comm_method(moe_config):
-    _MoECommMethods[MoECommType.ALLTOALL] = AlltoAllCommImpl(moe_config)
-    _MoECommMethods[MoECommType.ALLGATHER] = AllGatherCommImpl(moe_config)
-    _MoECommMethods[MoECommType.MC2] = MC2CommImpl(moe_config)
-    _MoECommMethods[MoECommType.FUSED_MC2] = FusedMC2CommImpl(moe_config)
+    if moe_config.ep_size > 1:
+        _MoECommMethods[MoECommType.ALLTOALL] = AlltoAllCommImpl(moe_config)
+        _MoECommMethods[MoECommType.ALLGATHER] = AllGatherCommImpl(moe_config)
+        _MoECommMethods[MoECommType.MC2] = MC2CommImpl(moe_config)
+        _MoECommMethods[MoECommType.FUSED_MC2] = FusedMC2CommImpl(moe_config)
+    else:
+        _MoECommMethods[MoECommType.ALLGATHER] = AllGatherCommImpl(moe_config)
 
 
 def set_gmmswigluquant_method():
@@ -292,6 +295,7 @@ class FusedMC2CommImpl(MoECommMethod):
                 probs=fused_experts_input.topk_weights.to(torch.float32),
                 group=self.token_dispatcher.moe_all_to_all_group_name,
                 max_output_size=65536,
+                x_active_mask=fused_experts_input.routing.mc2_mask,
                 out=out,
                 expert_token_nums=self.expert_token_nums,
             )

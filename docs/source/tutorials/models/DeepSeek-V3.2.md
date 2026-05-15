@@ -217,7 +217,6 @@ vllm serve /root/.cache/modelscope/hub/models/vllm-ascend/DeepSeek-V3.2-W8A8 \
 --no-enable-prefix-caching \
 --gpu-memory-utilization 0.92 \
 --compilation-config '{"cudagraph_mode": "FULL_DECODE_ONLY"}' \
---additional-config '{"layer_sharding": ["q_b_proj", "o_proj"]}' \
 --speculative-config '{"num_speculative_tokens": 3, "method": "deepseek_mtp"}'
 ```
 
@@ -268,7 +267,6 @@ vllm serve /root/.cache/modelscope/hub/models/vllm-ascend/DeepSeek-V3.2-W8A8 \
 --no-enable-prefix-caching \
 --gpu-memory-utilization 0.92 \
 --compilation-config '{"cudagraph_mode": "FULL_DECODE_ONLY"}' \
---additional-config '{"layer_sharding": ["q_b_proj", "o_proj"]}' \
 --speculative-config '{"num_speculative_tokens": 3, "method": "deepseek_mtp"}'
 ```
 
@@ -325,7 +323,6 @@ vllm serve /root/.cache/modelscope/hub/models/vllm-ascend/DeepSeek-V3.2-W8A8 \
 --no-enable-prefix-caching \
 --gpu-memory-utilization 0.92 \
 --compilation-config '{"cudagraph_mode": "FULL_DECODE_ONLY", "cudagraph_capture_sizes":[8, 16, 24, 32, 40, 48]}' \
---additional-config '{"layer_sharding": ["q_b_proj", "o_proj"]}' \
 --speculative-config '{"num_speculative_tokens": 3, "method": "deepseek_mtp"}'
 
 ```
@@ -381,7 +378,6 @@ vllm serve /root/.cache/modelscope/hub/models/vllm-ascend/DeepSeek-V3.2-W8A8 \
 --no-enable-prefix-caching \
 --gpu-memory-utilization 0.92 \
 --compilation-config '{"cudagraph_mode": "FULL_DECODE_ONLY", "cudagraph_capture_sizes":[8, 16, 24, 32, 40, 48]}' \
---additional-config '{"layer_sharding": ["q_b_proj", "o_proj"]}' \
 --speculative-config '{"num_speculative_tokens": 3, "method": "deepseek_mtp"}'
 
 ```
@@ -523,7 +519,8 @@ Before you start, please
         export ASCEND_TRANSPORT_PRINT=1
         export ACL_OP_INIT_MODE=1
         export ASCEND_A3_ENABLE=1
-        export VLLM_NIXL_ABORT_REQUEST_TIMEOUT=300000
+        # Timeout (in seconds) for automatically releasing the prefiller’s KV cache for a particular request.
+        export VLLM_MOONCAKE_ABORT_REQUEST_TIMEOUT=480
 
         export ASCEND_RT_VISIBLE_DEVICES=$1
 
@@ -597,7 +594,8 @@ Before you start, please
         export ASCEND_TRANSPORT_PRINT=1
         export ACL_OP_INIT_MODE=1
         export ASCEND_A3_ENABLE=1
-        export VLLM_NIXL_ABORT_REQUEST_TIMEOUT=300000
+        # Timeout (in seconds) for automatically releasing the prefiller’s KV cache for a particular request.
+        export VLLM_MOONCAKE_ABORT_REQUEST_TIMEOUT=480
 
         export ASCEND_RT_VISIBLE_DEVICES=$1
 
@@ -673,7 +671,8 @@ Before you start, please
         export ASCEND_TRANSPORT_PRINT=1
         export ACL_OP_INIT_MODE=1
         export ASCEND_A3_ENABLE=1
-        export VLLM_NIXL_ABORT_REQUEST_TIMEOUT=300000
+        # Timeout (in seconds) for automatically releasing the prefiller’s KV cache for a particular request.
+        export VLLM_MOONCAKE_ABORT_REQUEST_TIMEOUT=480
 
         export TASK_QUEUE_ENABLE=1
 
@@ -749,7 +748,8 @@ Before you start, please
         export ASCEND_TRANSPORT_PRINT=1
         export ACL_OP_INIT_MODE=1
         export ASCEND_A3_ENABLE=1
-        export VLLM_NIXL_ABORT_REQUEST_TIMEOUT=300000
+        # Timeout (in seconds) for automatically releasing the prefiller’s KV cache for a particular request.
+        export VLLM_MOONCAKE_ABORT_REQUEST_TIMEOUT=480
 
         export TASK_QUEUE_ENABLE=1
 
@@ -936,7 +936,7 @@ There are three `vllm bench` subcommands:
 Take the `serve` as an example. Run the code as follows.
 
 ```shell
-export VLLM_USE_MODELSCOPE=true
+export VLLM_USE_MODELSCOPE=True
 vllm bench serve --model /root/.cache/Eco-Tech/DeepSeek-V3.2-w8a8-mtp-QuaRot  --dataset-name random --random-input 200 --num-prompts 200 --request-rate 1 --save-result --result-dir ./
 ```
 

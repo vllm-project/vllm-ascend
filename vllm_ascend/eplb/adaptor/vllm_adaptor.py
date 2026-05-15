@@ -133,7 +133,7 @@ class VllmEplbAdaptor:
             self.expert_param_per_layer[layer_id][local_expert_to_replace], self.buffer_tensor_list[buffer_tensor_id]
         ):
             expert_tensor.copy_(buffer_tensor)
-            logger.debug(f"Expert tensor shape is :{expert_tensor.shape}")
+            logger.debug("Expert tensor shape is :%s", expert_tensor.shape)
 
     def do_update_log2phy_map(self, layer_id, updated_log2phy_map):
         if self.log2phy_map_per_layer[layer_id] is not None:

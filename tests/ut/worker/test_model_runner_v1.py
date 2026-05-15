@@ -9,7 +9,6 @@ from vllm_ascend.worker.model_runner_v1 import NPUModelRunner
 
 
 class TestNPUModelRunnerKVCache(unittest.TestCase):
-
     def _build_runner(self):
         runner = NPUModelRunner.__new__(NPUModelRunner)
         runner.device = torch.device("cpu")
@@ -84,8 +83,8 @@ class TestNPUModelRunnerKVCache(unittest.TestCase):
         self.assertEqual(k_cache.shape, (2, 16, 8, 64))
         self.assertEqual(v_cache.shape, (2, 16, 8, 64))
 
-class TestNPUModelRunnerOutputTokenIds(unittest.TestCase):
 
+class TestNPUModelRunnerOutputTokenIds(unittest.TestCase):
     def _build_runner(self):
         runner = NPUModelRunner.__new__(NPUModelRunner)
         runner.device = torch.device("cpu")
@@ -93,7 +92,7 @@ class TestNPUModelRunnerOutputTokenIds(unittest.TestCase):
         runner.model_config = MagicMock()
         return runner
 
-    @patch('vllm_ascend.worker.model_runner_v1.lmhead_tp_enable')
+    @patch("vllm_ascend.worker.model_runner_v1.lmhead_tp_enable")
     def test_sample_updates_output_token_ids_before_sampler(self, mock_lmhead_tp_enable):
         """Verify output_token_ids are updated before sampler is called"""
         mock_lmhead_tp_enable.return_value = False
@@ -123,6 +122,7 @@ class TestNPUModelRunnerOutputTokenIds(unittest.TestCase):
                 req_output = output_token_ids[index]
                 if req_output and req_output[-1] == -1:
                     req_output[-1] = sampled_ids[prev_index]
+
         input_batch.update_async_output_token_ids.side_effect = mock_update_output_token_ids
 
         # Build runner and inject dependencies
@@ -144,6 +144,46 @@ class TestNPUModelRunnerOutputTokenIds(unittest.TestCase):
         actual_output_token_ids = actual_sampling_metadata.output_token_ids
         self.assertEqual(actual_output_token_ids[0], [1, 2, 3, 6])
         self.assertEqual(actual_output_token_ids[1], [4, 5, 7])
+
+
+class TestNPUModelRunnerDebugger(unittest.TestCase):
+    def _build_runner(self, debugger=None):
+        runner = NPUModelRunner.__new__(NPUModelRunner)
+        runner.debugger = debugger or MagicMock()
+        runner.model = MagicMock()
+        runner.model_config = MagicMock()
+        runner.model_config.enforce_eager = False
+        runner._debugger_started = True
+        runner._debugger_step_dummy_data_before_execute = False
+        return runner
+
+    def test_finalize_dump_data_stops_stop_capable_debugger(self):
+        runner = self._build_runner()
+
+        runner._finalize_dump_data()
+
+        runner.debugger.stop.assert_called_once_with()
+        runner.debugger.step.assert_called_once_with()
+        self.assertFalse(runner._debugger_started)
+
+    def test_finalize_dump_data_steps_graph_debugger_without_stop(self):
+        debugger = MagicMock(spec=["start", "step"])
+        runner = self._build_runner(debugger)
+
+        runner._finalize_dump_data()
+
+        debugger.step.assert_called_once_with()
+        self.assertTrue(runner._debugger_started)
+
+    def test_start_dump_data_noop_when_already_started(self):
+        runner = self._build_runner(MagicMock(spec=["start", "step"]))
+
+        runner._start_dump_data()
+
+        runner.debugger.start.assert_not_called()
+        runner.debugger.step.assert_not_called()
+        self.assertTrue(runner._debugger_started)
+
 
 if __name__ == "__main__":
     unittest.main()

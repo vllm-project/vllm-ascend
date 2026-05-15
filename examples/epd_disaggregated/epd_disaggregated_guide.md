@@ -1,14 +1,5 @@
 # EPD disaggregated deployment Guide
 
-## Environmental Dependencies
-
-* Software:
-    * Python >= 3.10, < 3.12
-    * CANN == 8.5.0
-    * PyTorch == 2.8.0, torch-npu == 2.8.0
-    * vLLM (same version as vllm-ascend and >=0.13.0)
-    * mooncake-transfer-engine reference documentation(pd disaggregated needed): <https://github.com/kvcache-ai/Mooncake/blob/main/doc/zh/ascend_transport.md>
-
 ## run
 
 The EPD disaggregated technology accelerates model inference by decoupling the visual encoding computation and LLM computation stages. Currently, the EPD separation feature can achieve different data transmissions between E and P/PD nodes by configuring different connector backends. Vllm-ascend currently supports the ECExampleConnector backend implemented on vllm, and will support Mooncake as well as shared memory(SHM) backend transmission methods in the future.
@@ -133,7 +124,7 @@ curl http://localhost:8001/v1/chat/completions \
     {"role": "system", "content": "You are a helpful assistant."},
     {"role": "user", "content": [
         {"type": "image_url", "image_url": {"url": "https://modelscope.oss-cn-beijing.aliyuncs.com/resource/qwen.png"}},
-        {"type": "text", "text": "What is the text in the illustrate?"}
+        {"type": "text", "text": "What is the text in the illustration?"}
     ]}
     ]
     }'
@@ -310,7 +301,7 @@ curl http://localhost:8001/v1/chat/completions \
     {"role": "system", "content": "You are a helpful assistant."},
     {"role": "user", "content": [
         {"type": "image_url", "image_url": {"url": "https://modelscope.oss-cn-beijing.aliyuncs.com/resource/qwen.png"}},
-        {"type": "text", "text": "What is the text in the illustrate?"}
+        {"type": "text", "text": "What is the text in the illustration?"}
     ]}
     ]
     }'

@@ -123,7 +123,7 @@ jobs:
         use: true
 
     - name: Login to GitHub Container Registry (for cache)
-      uses: docker/login-action@v3
+      uses: docker/login-action@v4
       with:
         registry: ghcr.io
         username: ${{ github.actor }}
@@ -138,6 +138,32 @@ jobs:
           echo "value=buildcache-${{ matrix.tag }}" >> $GITHUB_OUTPUT
         fi
 
+    - name: Get csrc hash
+      id: get_csrc_hash
+      run: |
+        CSRC_HASH=$(find ./csrc ./setup.py ./CMakeLists.txt ./cmake \
+        -type f -not -path '*/.*' | sort | xargs sha256sum | sha256sum | awk '{print $1}')
+        echo "CSRC_HASH=$CSRC_HASH" >> $GITHUB_OUTPUT
+
+    - name: Get Dockerfile base image tag
+      id: get_base_image_tag
+      run: |
+        DOCKERFILE="${{ inputs.dockerfile || 'Dockerfile' }}"
+        BASE_IMAGE_TAG=$(grep -m1 '^FROM' "$DOCKERFILE" | awk -F: '{print $NF}')
+        echo "BASE_IMAGE_TAG=$BASE_IMAGE_TAG" >> $GITHUB_OUTPUT
+
+    - name: Cache vllm-ascend csrc
+      id: cache-csrc
+      uses: actions/cache/restore@v4
+      with:
+        path: |
+            vllm_ascend/_cann_ops_custom
+            vllm_ascend/*.so
+            vllm_ascend/lib
+            vllm_ascend/include
+        key: vllm-ascend-build-v1-${{ runner.arch }}-${{ steps.get_base_image_tag.outputs.BASE_IMAGE_TAG }}-${{ steps.get_csrc_hash.outputs.CSRC_HASH }}
+
+
     - name: Build and push
       uses: docker/build-push-action@v7
       id: build
@@ -151,6 +177,7 @@ jobs:
         outputs: type=image,name=${{ env.QUAY_REPO }},push-by-digest=true,name-canonical=true,push=${{ inputs.should_push }}
         build-args: |
           PIP_INDEX_URL=https://pypi.org/simple
+          COMPILE_CUSTOM_KERNELS=${{ steps.cache-csrc.outputs.cache-hit == 'true' && '0' || '1' }}
         provenance: false
         # To speed up the build, we use registry cache. The cache tag is determined by the suffix and architecture, and shared across different workflow runs.
         # For example, the cache tag for arm64 image with suffix "openeuler" will be "buildcache-openeuler-arm64".

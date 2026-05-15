@@ -11,11 +11,11 @@ This document describes how to install vllm-ascend manually.
 
     | Software      | Supported version                | Note                                      |
     |---------------|----------------------------------|-------------------------------------------|
-    | Ascend HDK    | Refer to the documentation [CANN 8.3.RC1](https://www.hiascend.com/document/detail/zh/canncommercial/83RC1/releasenote/releasenote_0000.html) | Required for CANN |
-    | CANN          | == 8.5.1                        | Required for vllm-ascend and torch-npu    |
-    | torch-npu     | == 2.9.0             | Required for vllm-ascend, No need to install manually, it will be auto installed in below steps |
-    | torch         | == 2.9.0                          | Required for torch-npu and vllm           |
-    | NNAL          | == 8.5.1                       | Required for libatb.so, enables advanced tensor operations |
+    | Ascend HDK    | Refer to the documentation [CANN 9.0.0](https://www.hiascend.com/document/detail/zh/canncommercial/900/releasenote/releasenote_0000.html) | Required for CANN |
+    | CANN          | == 9.0.0                        | Required for vllm-ascend and torch-npu    |
+    | torch-npu     | == 2.10.0                       | Required for vllm-ascend, No need to install manually, it will be auto installed in below steps |
+    | torch         | == 2.10.0                       | Required for torch-npu and vllm           |
+    | NNAL          | == 9.0.0                        | Required for libatb.so, enables advanced tensor operations |
 
 There are two installation methods:
 
@@ -87,21 +87,22 @@ python -m venv vllm-ascend-env
 source vllm-ascend-env/bin/activate
 
 # Install required Python packages.
-pip3 install -i https://pypi.tuna.tsinghua.edu.cn/simple attrs 'numpy<2.0.0' decorator sympy cffi pyyaml pathlib2 psutil protobuf scipy requests absl-py wheel typing_extensions
+python -m pip install --upgrade pip
+pip3 install attrs numpy decorator sympy cffi pyyaml pathlib2 psutil protobuf scipy requests absl-py wheel typing_extensions
 
 # Download and install the CANN package.
-wget --header="Referer: https://www.hiascend.com/" https://ascend-repo.obs.cn-east-2.myhuaweicloud.com/CANN/CANN%208.5.1/Ascend-cann-toolkit_8.5.1_linux-"$(uname -i)".run
-chmod +x ./Ascend-cann-toolkit_8.5.1_linux-"$(uname -i)".run
-./Ascend-cann-toolkit_8.5.1_linux-"$(uname -i)".run --full
+wget --header="Referer: https://www.hiascend.com/" https://ascend-repo.obs.cn-east-2.myhuaweicloud.com/CANN/CANN%209.0.0/Ascend-cann-toolkit_9.0.0_linux-"$(uname -i)".run
+chmod +x ./Ascend-cann-toolkit_9.0.0_linux-"$(uname -i)".run
+./Ascend-cann-toolkit_9.0.0_linux-"$(uname -i)".run --full
 source /usr/local/Ascend/ascend-toolkit/set_env.sh
 
-wget --header="Referer: https://www.hiascend.com/" https://ascend-repo.obs.cn-east-2.myhuaweicloud.com/CANN/CANN%208.5.1/Ascend-cann-910b-ops_8.5.1_linux-"$(uname -i)".run
-chmod +x ./Ascend-cann-910b-ops_8.5.1_linux-"$(uname -i)".run
-./Ascend-cann-910b-ops_8.5.1_linux-"$(uname -i)".run --install
+wget --header="Referer: https://www.hiascend.com/" https://ascend-repo.obs.cn-east-2.myhuaweicloud.com/CANN/CANN%209.0.0/Ascend-cann-910b-ops_9.0.0_linux-"$(uname -i)".run
+chmod +x ./Ascend-cann-910b-ops_9.0.0_linux-"$(uname -i)".run
+./Ascend-cann-910b-ops_9.0.0_linux-"$(uname -i)".run --install
 
-wget --header="Referer: https://www.hiascend.com/" https://ascend-repo.obs.cn-east-2.myhuaweicloud.com/CANN/CANN%208.5.1/Ascend-cann-nnal_8.5.1_linux-"$(uname -i)".run
-chmod +x ./Ascend-cann-nnal_8.5.1_linux-"$(uname -i)".run
-./Ascend-cann-nnal_8.5.1_linux-"$(uname -i)".run --install
+wget --header="Referer: https://www.hiascend.com/" https://ascend-repo.obs.cn-east-2.myhuaweicloud.com/CANN/CANN%209.0.0/Ascend-cann-nnal_9.0.0_linux-"$(uname -i)".run
+chmod +x ./Ascend-cann-nnal_9.0.0_linux-"$(uname -i)".run
+./Ascend-cann-nnal_9.0.0_linux-"$(uname -i)".run --install
 
 source /usr/local/Ascend/nnal/atb/set_env.sh
 ```
@@ -155,7 +156,7 @@ pip install vllm==|pip_vllm_version|
 
 # Install vllm-project/vllm-ascend.
 pip install \
---extra-index-url https://mirrors.huaweicloud.com/ascend/repos/pypi/simple  \
+--extra-index-url https://mirrors.huaweicloud.com/repository/pypi/simple  \
 vllm-ascend==|pip_vllm_ascend_version|
 
 ```
@@ -180,7 +181,7 @@ source $HOME/.local/bin/env
 pip install vllm==|pip_vllm_version|
 
 # Install vllm-project/vllm-ascend from wheelnext index.
-uv pip install --system -v \
+uv pip install --system \
 --extra-index-url https://mirrors.huaweicloud.com/ascend/repos/pypi/variant   \
 vllm-ascend==|pip_vllm_ascend_version|
 
@@ -198,14 +199,14 @@ or build from **source code**:
 # Install vLLM.
 git clone --depth 1 --branch |vllm_version| https://github.com/vllm-project/vllm
 cd vllm
-VLLM_TARGET_DEVICE=empty pip install -v -e .
+VLLM_TARGET_DEVICE=empty pip install -e .
 cd ..
 
 # Install vLLM Ascend.
 git clone --depth 1 --branch |vllm_ascend_version| https://github.com/vllm-project/vllm-ascend.git
 cd vllm-ascend
 git submodule update --init --recursive
-pip install -v -e .
+pip install -e .
 cd ..
 ```
 
@@ -322,7 +323,7 @@ python example.py
 If you encounter a connection error with Hugging Face (e.g., `We couldn't connect to 'https://huggingface.co' to load the files, and couldn't find them in the cached files.`), run the following commands to use ModelScope as an alternative:
 
 ```bash
-export VLLM_USE_MODELSCOPE=true
+export VLLM_USE_MODELSCOPE=True
 pip install modelscope
 python example.py
 ```
@@ -330,25 +331,86 @@ python example.py
 The output will be like:
 
 ```bash
-INFO 02-18 08:49:58 __init__.py:28] Available plugins for group vllm.platform_plugins:
-INFO 02-18 08:49:58 __init__.py:30] name=ascend, value=vllm_ascend:register
-INFO 02-18 08:49:58 __init__.py:32] all available plugins for group vllm.platform_plugins will be loaded.
-INFO 02-18 08:49:58 __init__.py:34] set environment variable VLLM_PLUGINS to control which plugins to load.
-INFO 02-18 08:49:58 __init__.py:42] plugin ascend loaded.
-INFO 02-18 08:49:58 __init__.py:174] Platform plugin ascend is activated
-INFO 02-18 08:50:12 config.py:526] This model supports multiple tasks: {'embed', 'classify', 'generate', 'score', 'reward'}. Defaulting to 'generate'.
-INFO 02-18 08:50:12 llm_engine.py:232] Initializing a V0 LLM engine (v0.7.1) with config: model='./Qwen3-0.6B', speculative_config=None, tokenizer='./Qwen3-0.6B', skip_tokenizer_init=False, tokenizer_mode=auto, revision=None, override_neuron_config=None, tokenizer_revision=None, trust_remote_code=False, dtype=torch.bfloat16, max_seq_len=32768, download_dir=None, load_format=auto, tensor_parallel_size=1, pipeline_parallel_size=1, disable_custom_all_reduce=False, quantization=None, enforce_eager=False, kv_cache_dtype=auto,  device_config=npu, decoding_config=DecodingConfig(guided_decoding_backend='xgrammar'), observability_config=ObservabilityConfig(otlp_traces_endpoint=None, collect_model_forward_time=False, collect_model_execute_time=False), seed=0, served_model_name=./Qwen3-0.6B, num_scheduler_steps=1, multi_step_stream_outputs=True, enable_prefix_caching=False, chunked_prefill_enabled=False, use_async_output_proc=True, disable_mm_preprocessor_cache=False, mm_processor_kwargs=None, pooler_config=None, compilation_config={"splitting_ops":[],"compile_sizes":[],"cudagraph_capture_sizes":[256,248,240,232,224,216,208,200,192,184,176,168,160,152,144,136,128,120,112,104,96,88,80,72,64,56,48,40,32,24,16,8,4,2,1],"max_capture_size":256}, use_cached_outputs=False,
-Loading safetensors checkpoint shards:   0% Completed | 0/1 [00:00<?, ?it/s]
-Loading safetensors checkpoint shards: 100% Completed | 1/1 [00:00<00:00,  5.86it/s]
-Loading safetensors checkpoint shards: 100% Completed | 1/1 [00:00<00:00,  5.85it/s]
-INFO 02-18 08:50:24 executor_base.py:108] # CPU blocks: 35064, # CPU blocks: 2730
-INFO 02-18 08:50:24 executor_base.py:113] Maximum concurrency for 32768 tokens per request: 136.97x
-INFO 02-18 08:50:25 llm_engine.py:429] init engine (profile, create kv cache, warmup model) took 3.87 seconds
-Processed prompts: 100%|█████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████| 4/4 [00:00<00:00,  8.46it/s, est. speed input: 46.55 toks/s, output: 135.41 toks/s]
-Prompt: 'Hello, my name is', Generated text: " Shinji, a teenage boy from New York City. I'm a computer science"
-Prompt: 'The president of the United States is', Generated text: ' a very important person. When he or she is elected, many people think that'
-Prompt: 'The capital of France is', Generated text: ' Paris. The oldest part of the city is Saint-Germain-des-Pr'
-Prompt: 'The future of AI is', Generated text: ' not bright\n\nThere is no doubt that the evolution of AI will have a huge'
+INFO 05-12 11:29:25 [__init__.py:44] Available plugins for group vllm.platform_plugins:
+INFO 05-12 11:29:25 [__init__.py:46] - ascend -> vllm_ascend:register
+INFO 05-12 11:29:25 [__init__.py:49] All plugins in this group will be loaded. Set `VLLM_PLUGINS` to control which plugins to load.
+INFO 05-12 11:29:25 [__init__.py:239] Platform plugin ascend is activated
+INFO 05-12 11:29:29 [__init__.py:110] Registered model loader `<class 'vllm_ascend.model_loader.netloader.netloader.ModelNetLoaderElastic'>` with load format `netloader`
+INFO 05-12 11:29:29 [__init__.py:110] Registered model loader `<class 'vllm_ascend.model_loader.rfork.rfork_loader.RForkModelLoader'>` with load format `rfork`
+INFO 05-12 11:29:29 [utils.py:233] non-default args: {'disable_log_stats': True, 'model': 'Qwen/Qwen3-0.6B'}
+INFO 05-12 11:29:29 [model.py:533] Resolved architecture: Qwen3ForCausalLM
+INFO 05-12 11:29:29 [model.py:1582] Using max model len 40960
+INFO 05-12 11:29:29 [scheduler.py:231] Chunked prefill is enabled with max_num_batched_tokens=8192.
+INFO 05-12 11:29:29 [vllm.py:754] Asynchronous scheduling is enabled.
+WARNING 05-12 11:29:29 [platform.py:765] Parameter '--disable-cascade-attn' is a GPU-specific feature. Resetting to False for Ascend.
+WARNING 05-12 11:29:29 [platform.py:854] Ignored parameter 'disable_flashinfer_prefill'. This is a GPU-specific feature not supported on Ascend. Resetting to False.
+INFO 05-12 11:29:29 [ascend_config.py:425] Dynamic EPLB is False
+INFO 05-12 11:29:29 [ascend_config.py:426] The number of redundant experts is 0
+INFO 05-12 11:29:29 [platform.py:370] PIECEWISE compilation enabled on NPU. use_inductor not supported - using only ACL Graph mode
+INFO 05-12 11:29:29 [utils.py:549] Calculated maximum supported batch sizes for ACL graph: 48
+WARNING 05-12 11:29:29 [utils.py:550] Currently, communication is performed using FFTS+ method, which reduces the number of available streams and, as a result, limits the range of runtime shapes that can be handled. To both improve communication performance and increase the number of supported shapes, set HCCL_OP_EXPANSION_MODE=AIV.
+INFO 05-12 11:29:29 [utils.py:582] No adjustment needed for ACL graph batch sizes: Qwen3ForCausalLM model (layers: 36) with 35 sizes
+INFO 05-12 11:29:29 [utils.py:1186] Block size is set to 128 if prefix cache or chunked prefill is enabled.
+INFO 05-12 11:29:29 [platform.py:518] Set PYTORCH_NPU_ALLOC_CONF=expandable_segments:True
+INFO 05-12 11:29:29 [compilation.py:289] Enabled custom fusions: norm_quant, act_quant
+(EngineCore pid=970) INFO 05-12 11:29:29 [core.py:103] Initializing a V1 LLM engine (v0.18.0) with config: model='Qwen/Qwen3-0.6B', speculative_config=None, tokenizer='Qwen/Qwen3-0.6B', skip_tokenizer_init=False, tokenizer_mode=auto, revision=None, tokenizer_revision=None, trust_remote_code=False, dtype=torch.bfloat16, max_seq_len=40960, download_dir=None, load_format=auto, tensor_parallel_size=1, pipeline_parallel_size=1, data_parallel_size=1, decode_context_parallel_size=1, dcp_comm_backend=ag_rs, disable_custom_all_reduce=True, quantization=None, enforce_eager=False, enable_return_routed_experts=False, kv_cache_dtype=auto, device_config=npu, structured_outputs_config=StructuredOutputsConfig(backend='auto', disable_any_whitespace=False, disable_additional_properties=False, reasoning_parser='', reasoning_parser_plugin='', enable_in_reasoning=False), observability_config=ObservabilityConfig(show_hidden_metrics_for_version=None, otlp_traces_endpoint=None, collect_detailed_traces=None, kv_cache_metrics=False, kv_cache_metrics_sample=0.01, cudagraph_metrics=False, enable_layerwise_nvtx_tracing=False, enable_mfu_metrics=False, enable_mm_processor_stats=False, enable_logging_iteration_details=False), seed=0, served_model_name=Qwen/Qwen3-0.6B, enable_prefix_caching=True, enable_chunked_prefill=True, pooler_config=None, compilation_config={'mode': <CompilationMode.VLLM_COMPILE: 3>, 'debug_dump_path': None, 'cache_dir': '', 'compile_cache_save_format': 'binary', 'backend': 'vllm_ascend.compilation.compiler_interface.AscendCompiler', 'custom_ops': ['all'], 'splitting_ops': ['vllm::unified_attention', 'vllm::unified_attention_with_output', 'vllm::unified_mla_attention', 'vllm::unified_mla_attention_with_output', 'vllm::mamba_mixer2', 'vllm::mamba_mixer', 'vllm::short_conv', 'vllm::linear_attention', 'vllm::plamo2_mamba_mixer', 'vllm::gdn_attention_core', 'vllm::olmo_hybrid_gdn_full_forward', 'vllm::kda_attention', 'vllm::sparse_attn_indexer', 'vllm::rocm_aiter_sparse_attn_indexer', 'vllm::unified_kv_cache_update', 'vllm::unified_mla_kv_cache_update', 'vllm::mla_forward'], 'compile_mm_encoder': False, 'compile_sizes': [], 'compile_ranges_endpoints': [8192], 'inductor_compile_config': {'enable_auto_functionalized_v2': False, 'combo_kernels': True, 'benchmark_combo_kernel': True}, 'inductor_passes': {}, 'cudagraph_mode': <CUDAGraphMode.PIECEWISE: 1>, 'cudagraph_num_of_warmups': 1, 'cudagraph_capture_sizes': [1, 2, 4, 8, 16, 24, 32, 40, 48, 56, 64, 72, 80, 88, 96, 104, 112, 120, 128, 136, 144, 152, 160, 168, 176, 184, 192, 200, 208, 216, 224, 232, 240, 248, 256], 'cudagraph_copy_inputs': False, 'cudagraph_specialize_lora': True, 'use_inductor_graph_partition': False, 'pass_config': {'fuse_norm_quant': True, 'fuse_act_quant': True, 'fuse_attn_quant': False, 'enable_sp': False, 'fuse_gemm_comms': False, 'fuse_allreduce_rms': False}, 'max_cudagraph_capture_size': 256, 'dynamic_shapes_config': {'type': <DynamicShapesType.BACKED: 'backed'>, 'evaluate_guards': False, 'assume_32_bit_indexing': False}, 'local_cache_dir': None, 'fast_moe_cold_start': True, 'static_all_moe_layers': []}
+(EngineCore pid=970) WARNING 05-12 11:29:30 [warnings.py:110] /usr/local/python3.11.10/lib/python3.11/site-packages/vllm_ascend/patch/worker/patch_weight_utils.py:80: UserWarning: pkg_resources is deprecated as an API. See https://setuptools.pypa.io/en/latest/pkg_resources.html. The pkg_resources package is slated for removal as early as 2025-11-30. Refrain from using this package or pin to Setuptools<81.
+(EngineCore pid=970) INFO 05-12 11:29:33 [parallel_state.py:1395] world_size=1 rank=0 local_rank=0 distributed_init_method=tcp://90.90.97.27:41723 backend=hccl
+[W512 11:29:53.116059090 socket.cpp:209] [c10d] The hostname of the client socket cannot be retrieved. err=-3
+[rank0]:[W512 11:30:33.152077370 ProcessGroupGloo.cpp:516] Warning: Unable to resolve hostname to a (local) address. Using the loopback address as fallback. Manually set the network interface to bind to with GLOO_SOCKET_IFNAME. (function operator())
+[Gloo] Rank 0 is connected to 0 peer ranks. Expected number of connected peer ranks is : 0
+[Gloo] Rank 0 is connected to 0 peer ranks. Expected number of connected peer ranks is : 0
+[Gloo] Rank 0 is connected to 0 peer ranks. Expected number of connected peer ranks is : 0
+[Gloo] Rank 0 is connected to 0 peer ranks. Expected number of connected peer ranks is : 0
+[Gloo] Rank 0 is connected to 0 peer ranks. Expected number of connected peer ranks is : 0
+[Gloo] Rank 0 is connected to 0 peer ranks. Expected number of connected peer ranks is : 0
+(EngineCore pid=970) INFO 05-12 11:33:53 [parallel_state.py:1717] rank 0 in world size 1 is assigned as DP rank 0, PP rank 0, PCP rank 0, TP rank 0, EP rank N/A, EPLB rank N/A
+[Gloo] Rank 0 is connected to 0 peer ranks. Expected number of connected peer ranks is : 0
+(EngineCore pid=970) INFO 05-12 11:34:36 [cpu_binding.py:329] [cpu_bind_mode] mode=global_slice rank=0 visible_npus=[0]
+(EngineCore pid=970) INFO 05-12 11:34:36 [cpu_binding.py:376] The CPU allocation plan is as follows:
+(EngineCore pid=970) INFO 05-12 11:34:36 [cpu_binding.py:381] NPU0: main=[2 3 4 5 6 7 8 9 10 11 12 13 14 15 16 17 18 19 20 21]  acl=[22]  release=[[23]]
+(EngineCore pid=970) INFO 05-12 11:34:36 [cpu_binding.py:403] [migrate] NPU:0 -> NUMA [0]
+(EngineCore pid=970) INFO 05-12 11:34:39 [cpu_binding.py:497] NPU0(PCI 0000:9d:00.0): sq_send_trigger_irq IRQ_ID=1113 -> CPU0, cq_update_irq IRQ_ID=1114 -> CPU1
+(EngineCore pid=970) INFO 05-12 11:34:39 [model_runner_v1.py:2572] Starting to load model Qwen/Qwen3-0.6B...
+(EngineCore pid=970) INFO 05-12 11:34:40 [compilation.py:942] Using OOT custom backend for compilation.
+(EngineCore pid=970) INFO 05-12 11:34:40 [compilation.py:942] Using OOT custom backend for compilation.
+Loading safetensors checkpoint shards:   0% Completed | 0/5 [00:00<?, ?it/s]
+Loading safetensors checkpoint shards:  20% Completed | 1/5 [00:04<00:16,  4.20s/it]
+Loading safetensors checkpoint shards:  40% Completed | 2/5 [00:08<00:11,  3.97s/it]
+Loading safetensors checkpoint shards:  60% Completed | 3/5 [00:11<00:07,  3.83s/it]
+Loading safetensors checkpoint shards:  80% Completed | 4/5 [00:14<00:03,  3.52s/it]
+Loading safetensors checkpoint shards: 100% Completed | 5/5 [00:16<00:00,  2.94s/it]
+Loading safetensors checkpoint shards: 100% Completed | 5/5 [00:16<00:00,  3.33s/it]
+(EngineCore pid=970) 
+(EngineCore pid=970) INFO 05-12 11:34:57 [default_loader.py:384] Loading weights took 16.73 seconds
+(EngineCore pid=970) INFO 05-12 11:34:57 [model_runner_v1.py:2599] Loading model weights took 15.2859 GB
+(EngineCore pid=970) INFO 05-12 11:35:02 [backends.py:988] Using cache directory: /root/.cache/vllm/torch_compile_cache/594f71dc42/rank_0_0/backbone for vLLM's torch.compile
+(EngineCore pid=970) INFO 05-12 11:35:02 [backends.py:1048] Dynamo bytecode transform time: 3.98 s
+(EngineCore pid=970) INFO 05-12 11:35:32 [backends.py:387] Compiling a graph for compile range (1, 8192) takes 12.79 s
+(EngineCore pid=970) INFO 05-12 11:35:42 [monitor.py:48] torch.compile and initial profiling/warmup run together took 44.36 s in total
+(EngineCore pid=970) INFO 05-12 11:35:44 [worker.py:357] Available KV cache memory: 39.06 GiB
+(EngineCore pid=970) INFO 05-12 11:35:44 [kv_cache_utils.py:1316] GPU KV cache size: 284,416 tokens
+(EngineCore pid=970) INFO 05-12 11:35:44 [kv_cache_utils.py:1321] Maximum concurrency for 40,960 tokens per request: 6.94x
+Capturing CUDA graphs (mixed prefill-decode, PIECEWISE): 100%|███████████████████████████████████████████████████████████████████████████████████████████████████████████████████| 35/35 [00:11<00:00,  3.03it/s]
+(EngineCore pid=970) INFO 05-12 11:35:59 [gpu_model_runner.py:5746] Graph capturing finished in 12 secs, took 0.13 GiB
+(EngineCore pid=970) INFO 05-12 11:35:59 [core.py:281] init engine (profile, create kv cache, warmup model) took 61.45 seconds
+(EngineCore pid=970) INFO 05-12 11:36:00 [platform.py:370] PIECEWISE compilation enabled on NPU. use_inductor not supported - using only ACL Graph mode
+(EngineCore pid=970) INFO 05-12 11:36:00 [utils.py:549] Calculated maximum supported batch sizes for ACL graph: 48
+(EngineCore pid=970) WARNING 05-12 11:36:00 [utils.py:550] Currently, communication is performed using FFTS+ method, which reduces the number of available streams and, as a result, limits the range of runtime shapes that can be handled. To both improve communication performance and increase the number of supported shapes, set HCCL_OP_EXPANSION_MODE=AIV.
+(EngineCore pid=970) INFO 05-12 11:36:00 [utils.py:582] No adjustment needed for ACL graph batch sizes: Qwen3ForCausalLM model (layers: 36) with 35 sizes
+(EngineCore pid=970) INFO 05-12 11:36:00 [platform.py:518] Set PYTORCH_NPU_ALLOC_CONF=expandable_segments:True
+INFO 05-12 11:36:00 [llm.py:391] Supported tasks: ['generate']
+Rendering prompts: 100%|███████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████| 4/4 [00:00<00:00, 92.51it/s]
+Processed prompts:   0%|                                                                                                               | 0/4 [00:00<?, ?it/s, est. speed input: 0.00 toks/s, output: 0.00 toks/s](EngineCore pid=970) INFO 05-12 11:36:00 [acl_graph.py:196] Replaying aclgraph
+Processed prompts: 100%|████████████████████████████████████████████████████████████████████████████████████████████████████| 4/4 [00:00<00:00,  8.75it/s, est. speed input: 48.17 toks/s, output: 140.12 toks/s]
+Prompt: 'Hello, my name is', Generated text: ' Lucy and I am an 8 year old who loves to draw and write stories'
+Prompt: 'The president of the United States is', Generated text: " a key leader in the federal government, and the president's role in the executive"
+Prompt: 'The capital of France is', Generated text: ' a city. What is the capital of France? The capital of France is Paris'
+Prompt: 'The future of AI is', Generated text: ' a topic that is being discussed in various contexts. In the business world, AI'
+(EngineCore pid=970) INFO 05-12 11:36:00 [core.py:1201] Shutdown initiated (timeout=0)
+(EngineCore pid=970) INFO 05-12 11:36:00 [core.py:1224] Shutdown complete
+ERROR 05-12 11:36:01 [core_client.py:704] Engine core proc EngineCore died unexpectedly, shutting down client.
+sys:1: DeprecationWarning: builtin type swigvarlink has no __module__ attribute
 ```
 
 ## Multi-node Deployment

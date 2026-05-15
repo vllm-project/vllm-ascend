@@ -193,13 +193,14 @@ std::tuple<at::Tensor&, at::Tensor&> dispatch_ffn_combine_meta(
     const at::Tensor& expert_idx,
     const at::TensorList& scale1,
     const at::TensorList& scale2,
-    const at::TensorList& bias1,
-    const at::TensorList& bias2,
+    const c10::optional<at::TensorList>& bias1,
+    const c10::optional<at::TensorList>& bias2,
     const at::Tensor& probs,
     c10::string_view group,
     int64_t max_output_size,
     at::Tensor& out,
-    at::Tensor& expert_token_nums
+    at::Tensor& expert_token_nums,
+    const c10::optional<at::Tensor> &x_active_mask
 ) {
     return {out, expert_token_nums};
 }
@@ -430,6 +431,53 @@ std::tuple<at::Tensor,at::Tensor, at::Tensor> npu_add_rms_norm_bias_meta(
     return std::tuple<at::Tensor, at::Tensor, at::Tensor>(y, rstd, x);
 }
 
+at::Tensor npu_reshape_and_cache_bnsd_meta(const at::Tensor& hashq, 
+                                           const at::Tensor& hashkCache,
+                                           const at::Tensor& slotMapping,
+                                           const at::Tensor& seqLen,
+                                           const at::Tensor& hashkCacheOut) {
+    at::Tensor output = at::empty(hashkCache.sizes(), hashkCache.options().dtype(hashkCache.dtype()).device(hashkCache.device()));                                        
+    return output;
+}
+
+
+at::Tensor npu_hamming_dist_top_k_meta(const at::Tensor &hashq, 
+                                       const at::Tensor &hashkCache,
+                                       const at::Tensor& hashkCacheRope,
+                                       const at::Tensor &topN,
+                                       const at::Tensor &seqLen, 
+                                       const c10::optional<at::Tensor> &chunkSize,
+                                       const c10::optional<int64_t> maxSeqLen, 
+                                       const c10::optional<int64_t> sink, 
+                                       const c10::optional<int64_t> recent, 
+                                       const c10::optional<int64_t> supportOffload,
+                                       const c10::optional<at::Tensor> &blockTable,
+                                       const c10::optional<at::Tensor> &mask,
+                                       const c10::optional<at::Tensor>& indices) {
+    if (indices.has_value()) {
+        return at::empty_like(indices.value());
+    }
+    uint32_t MAX_BLOCK_PER_REQ_INHSA = 512;
+
+    auto n_bs = hashq.size(0);
+    auto n_kv_heads = hashkCache.size(1); 
+    auto n_max_kv = MAX_BLOCK_PER_REQ_INHSA;
+    at::Tensor out = at::empty({n_bs, n_kv_heads, n_max_kv}, torch::TensorOptions().dtype(torch::kInt32).device(hashq.device()));
+    return out;
+}
+
+at::Tensor npu_sign_bits_pack_meta(const at::Tensor& input, 
+                                   const int64_t size) {
+    int64_t ySize = (input.size(0) + 7) / 8;
+    int64_t outDim = 0;
+    if (size != 0) {
+        outDim = ySize / size;
+    }
+
+    at::Tensor out = torch::empty({size, outDim}, torch::TensorOptions().dtype(torch::kUInt8).device(input.device()));                                 
+    return out;
+}
+
 std::tuple<at::Tensor, at::Tensor> npu_gemma_rms_norm_meta(
     const at::Tensor& x,
     const at::Tensor& gamma,
@@ -617,6 +665,87 @@ at::Tensor npu_lightning_indexer_quant_meta(
     return lightning_indexer_quant_output;
 }
 
+std::tuple<at::Tensor, at::Tensor, at::Tensor> chunk_gated_delta_rule_fwd_h_meta(
+    const at::Tensor & k,
+    const at::Tensor & w,
+    const at::Tensor & u,
+    const c10::optional<at::Tensor> & g,
+    const c10::optional<at::Tensor> & gk,
+    const c10::optional<at::Tensor> & initial_state,
+    c10::optional<bool> output_final_state,
+    c10::optional<int64_t> chunk_size,
+    c10::optional<bool> save_new_value,
+    c10::optional<at::IntArrayRef> cu_seqlens,
+    c10::optional<at::IntArrayRef> chunk_indices,
+    c10::optional<bool> use_exp2,
+    c10::optional<bool> transpose_state_layout)
+{
+    bool output_final_state_ = output_final_state.has_value() ? output_final_state.value() : false;
+    const at::Tensor &initial_state_ = c10::value_or_else(initial_state, [] { return at::Tensor(); });
+    int64_t chunk_size_ = chunk_size.has_value() ? chunk_size.value() : 64;
+    const at::Tensor &g_ = c10::value_or_else(g, [] { return at::Tensor(); });
+    const at::Tensor &gk_ = c10::value_or_else(gk, [] { return at::Tensor(); });
+
+    auto k_sizes = k.sizes();
+    auto u_sizes = u.sizes();
+    int K = k_sizes[3];
+    int B = k_sizes[0];
+    int T = k_sizes[2];
+    int HV = u_sizes[1];
+    int V = u_sizes[3];
+
+    int NT = 0;
+    if (chunk_indices.has_value()) {
+        auto chunk_indices_ref = chunk_indices.value();
+        NT = chunk_indices_ref.size() / 2;
+    } else {
+        NT = (T + chunk_size_ - 1) / chunk_size_;
+    }
+
+    at::Tensor h_out = at::zeros({B, HV, NT, K, V}, k.options());
+    at::Tensor v_new_out = at::zeros(u.sizes(), u.options());
+    at::Tensor final_state_out;
+    if (output_final_state_) {
+        int N = cu_seqlens.has_value() ? cu_seqlens->size() - 1 : B;
+        auto state_options = initial_state.has_value() ? initial_state->options() : h_out.options();
+        final_state_out = at::empty({N, HV, K, V}, state_options);
+    } else {
+        final_state_out = at::empty({1}, k.options());
+    }
+
+    bool save_new_value_ = save_new_value.value_or(true);
+    bool use_exp2_ = use_exp2.value_or(false);
+    bool transpose_state_layout_ = transpose_state_layout.value_or(false);
+
+    if (output_final_state_) {
+        return std::make_tuple(h_out, v_new_out, final_state_out);
+    } else {
+        return std::make_tuple(h_out, v_new_out, at::Tensor());
+    }
+}
+
+at::Tensor chunk_fwd_o_meta(
+    const at::Tensor & q,
+    const at::Tensor & k,
+    const at::Tensor & v,
+    const at::Tensor & h,
+    double scale,
+    const c10::optional<at::Tensor> & g,
+    const c10::optional<at::Tensor> & g_gamma,
+    c10::optional<at::IntArrayRef> cu_seqlens,
+    c10::optional<at::IntArrayRef> chunk_indices,
+    c10::optional<int64_t> chunk_size,
+    c10::optional<bool> transpose_state_layout)
+{
+    at::Tensor o = at::zeros(v.sizes(), v.options());
+    int64_t chunk_size_ = chunk_size.has_value() ? chunk_size.value() : 64;
+    const at::Tensor &g_ = c10::value_or_else(g, [] { return at::Tensor(); });
+    (void)g_gamma;
+    (void)transpose_state_layout;
+
+    return o;
+}
+
 } // namespace meta
 } // namespace vllm_ascend
 
@@ -674,6 +803,12 @@ TORCH_LIBRARY_IMPL_EXPAND(CONCAT(_C, _ascend), Meta, ops) {
     ops.impl("npu_add_rms_norm_bias", &vllm_ascend::meta::npu_add_rms_norm_bias_meta);
     // transpose_kv_cache_by_block
     ops.impl("transpose_kv_cache_by_block", &vllm_ascend::meta::transpose_kv_cache_by_block_meta);
+    // hamming_dist_top_k
+    ops.impl("npu_hamming_dist_top_k", &vllm_ascend::meta::npu_hamming_dist_top_k_meta);
+    // reshape_and_cache_bnsd
+    ops.impl("npu_reshape_and_cache_bnsd", &vllm_ascend::meta::npu_reshape_and_cache_bnsd_meta);
+    // npu_sign_bits_pack
+    ops.impl("npu_sign_bits_pack", &vllm_ascend::meta::npu_sign_bits_pack_meta);
     // CopyAndExpandEagleInputs
     ops.impl("npu_copy_and_expand_eagle_inputs", &vllm_ascend::meta::npu_copy_and_expand_eagle_inputs_meta);
     // causal_conv1d_fn
@@ -682,6 +817,10 @@ TORCH_LIBRARY_IMPL_EXPAND(CONCAT(_C, _ascend), Meta, ops) {
     ops.impl("moe_grouped_matmul", &vllm_ascend::meta::moe_grouped_matmul_meta);
     // Lightning indexer quant
     ops.impl("npu_lightning_indexer_quant", &vllm_ascend::meta::npu_lightning_indexer_quant_meta);
+    // chunk_gated_delta_rule_fwd_h
+    ops.impl("chunk_gated_delta_rule_fwd_h", &vllm_ascend::meta::chunk_gated_delta_rule_fwd_h_meta);
+    // chunk_fwd_o
+    ops.impl("chunk_fwd_o", &vllm_ascend::meta::chunk_fwd_o_meta);
 }
 }
 #endif
