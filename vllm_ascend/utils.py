@@ -31,7 +31,6 @@ import regex as re
 import torch
 import torch_npu  # noqa: F401
 from packaging.version import InvalidVersion, Version
-from vllm.config.compilation import CUDAGraphMode
 from vllm.logger import logger
 from vllm.sequence import IntermediateTensors
 
@@ -528,10 +527,12 @@ def update_aclgraph_sizes(vllm_config: VllmConfig) -> None:
     # Store original configuration and temporarily clear it
     compilation_config = vllm_config.compilation_config
     original_sizes, compilation_config.cudagraph_capture_sizes = compilation_config.cudagraph_capture_sizes, None
+    cudagraph_mode = compilation_config.cudagraph_mode
     aclgraph_resource_multiplier = 1
-    if compilation_config.cudagraph_mode == CUDAGraphMode.FULL_AND_PIECEWISE:
-        # FULL_AND_PIECEWISE captures both piecewise mixed graphs and full decode graphs.
-        # Use a conservative multiplier until this is tuned per 910B/A2/A3 hardware.
+    if (cudagraph_mode.has_full_cudagraphs()
+            and cudagraph_mode.has_piecewise_cudagraphs()):
+        # FULL_AND_PIECEWISE captures both piecewise mixed graphs and full decode
+        # graphs. Use a conservative multiplier until this is tuned per hardware.
         aclgraph_resource_multiplier = 2
 
     # Calculate parallel configuration factor
@@ -628,13 +629,13 @@ def update_aclgraph_sizes(vllm_config: VllmConfig) -> None:
     # If original sizes exceed maximum, sample a representative subset
     if max_num_batch_sizes < len(original_sizes):
         # Sample uniformly from original sizes
-        step = (len(original_sizes) - 1) / (max_num_batch_sizes - 1)
-        indices = [round(i * step) for i in range(max_num_batch_sizes)]
-
-        # Ensure first and last elements are preserved
-        indices[0], indices[-1] = 0, len(original_sizes) - 1
-
-        sampled_sizes = [original_sizes[i] for i in indices]
+        if max_num_batch_sizes <= 1:
+            sampled_sizes = [original_sizes[-1]]
+        else:
+            step = (len(original_sizes) - 1) / (max_num_batch_sizes - 1)
+            indices = [round(i * step) for i in range(max_num_batch_sizes)]
+            indices[0], indices[-1] = 0, len(original_sizes) - 1
+            sampled_sizes = [original_sizes[i] for i in indices]
         update_cudagraph_capture_sizes(vllm_config, sampled_sizes)
         logger.info(
             "Adjusted ACL graph batch sizes for %s model (layers: %d): %d → %d sizes",
