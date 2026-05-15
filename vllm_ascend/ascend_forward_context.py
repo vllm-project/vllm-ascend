@@ -68,6 +68,7 @@ def set_ascend_forward_context(
     skip_compiled: bool = False,
     max_tokens_across_pcp: int = 0,
     draft_attn_metadatas=None,
+    has_sinks=False,
 ):
     """A context manager that stores the current forward context,
     can be attention metadata, etc.
@@ -101,6 +102,9 @@ def set_ascend_forward_context(
         # NOTE: This cannot be set using set_forward_context
         # due to multiple warmups before actual capturing
         forward_context.capturing = False
+
+        # TODO: remove it when fia merge in fiav2
+        forward_context.sinks = has_sinks
 
         # TODO: remove it when torch_npu.npu_mm_reduce_scatter_base supports tp_size >= 16.
         mmrs_fusion = tp_world_size <= 8
@@ -331,6 +335,7 @@ class _ExtraForwardContextProxy:
         "num_accept_tokens",
         "in_profile_run",
         "padded_num_tokens",
+        "sinks",
     )
 
     def check_extra_attr(self, name: str):
