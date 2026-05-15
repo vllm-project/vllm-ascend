@@ -209,25 +209,6 @@ class GroupCoordinatorPatch(GroupCoordinator):
         if getattr(self, "mq_broadcaster", None) is not None:
             self.mq_broadcaster = None
 
-    def all_to_all(
-        self,
-        input_: torch.Tensor,
-        scatter_dim: int = 0,
-        gather_dim: int = -1,
-        scatter_sizes: list[int] | None = None,
-        gather_sizes: list[int] | None = None,
-    ) -> torch.Tensor:
-        if self.world_size == 1:
-            return input_
-        assert -input_.dim() <= scatter_dim < input_.dim(), (
-            f"Invalid scatter dim ({scatter_dim}) for input tensor with shape {input_.size()}"
-        )
-        assert -input_.dim() <= gather_dim < input_.dim(), (
-            f"Invalid gather dim ({gather_dim}) for input tensor with shape {input_.size()}"
-        )
-        assert self.device_communicator is not None, "device_communicator should be initialized when world_size > 1"
-        return self.device_communicator.all_to_all(input_, scatter_dim, gather_dim, scatter_sizes, gather_sizes)
-
 
 vllm.distributed.parallel_state.GroupCoordinator = GroupCoordinatorPatch
 _patch_destroy_distributed_environment()

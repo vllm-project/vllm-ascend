@@ -44,7 +44,6 @@ def mock_ep_and_mc2_group(mocker):
     mock_group.rank = 0
     mock_group.world_size = 4
     mock_group.device_group = "mock_group_ep"
-    mock_group.all_to_all = MagicMock(return_value=torch.randn(8, 8))
     return mock_group
 
 
