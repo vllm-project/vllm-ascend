@@ -221,7 +221,7 @@ test_cases:
 #      - "--speculative-config"
 #      - '{"method": "qwen3_5_mtp", "num_speculative_tokens": 5}'
 #    benchmarks:
-#      <<: *_benchmark_TPOT20_16K_1K
+#      perf: *_benchmark_TPOT20_16K_1K
 #
 #  - name: "Qwen3.5-122B-A10B-W8A8-TPOT50-32k-0.5k"
 #    model: "Eco-Tech/Qwen3.5-122B-A10B-w8a8-mtp"
