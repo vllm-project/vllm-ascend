@@ -203,8 +203,11 @@ class TestNPUWorker(TestBase):
             self.assertEqual(worker.cache_config.num_cpu_blocks, 50)
 
     @patch("vllm_ascend.worker.worker.CaMemAllocator")
-    @patch.dict("os.environ", {"VLLM_ASCEND_ENABLE_NZ": "0"})
-    def test_wake_up_mode_enabled(self, mock_allocator_class):
+    @patch("vllm_ascend.worker.worker.get_ascend_config")
+    def test_wake_up_mode_enabled(self, mock_get_config, mock_allocator_class):
+        mock_config = MagicMock()
+        mock_config.weight_nz_mode = 0
+        mock_get_config.return_value = mock_config
         """Test wake_up method when sleep mode is enabled"""
         from vllm_ascend.worker.worker import NPUWorker
 

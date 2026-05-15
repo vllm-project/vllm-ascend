@@ -1,4 +1,3 @@
-import os
 import unittest
 from unittest import mock
 from unittest.mock import MagicMock, patch
@@ -40,6 +39,8 @@ class BaseLinearTest(unittest.TestCase):
             ),
             patch("vllm_ascend.utils.mlp_tp_enable", return_value=True),
             patch("vllm_ascend.utils.oproj_tp_enable", return_value=True),
+            patch("vllm_ascend.ops.linear_op.enable_dsa_cp", return_value=False),
+            patch("vllm_ascend.ops.linear_op.enable_dsa_cp_with_layer_shard", return_value=False),
         ]
 
         for p in self.patches:
@@ -57,33 +58,43 @@ class TestAscendUnquantizedLinearMethod(TestBase):
         mock_dtype = mock.PropertyMock(return_value=torch.float16)
         type(self.layer.weight.data).dtype = mock_dtype
 
-    @patch.dict(os.environ, {"VLLM_ASCEND_ENABLE_NZ": "0"})
+    @patch("vllm_ascend.utils.get_ascend_config")
     @mock.patch("torch_npu.npu_format_cast")
-    def test_process_weights_after_loading_with_nz0(self, mock_format_cast):
+    def test_process_weights_after_loading_with_nz0(self, mock_format_cast, mock_get_config):
+        mock_config = MagicMock()
+        mock_config.weight_nz_mode = 0
+        mock_get_config.return_value = mock_config
         self.method.process_weights_after_loading(self.layer)
         mock_format_cast.assert_not_called()
 
-    @patch.dict(os.environ, {"VLLM_ASCEND_ENABLE_NZ": "1"})
+    @patch("vllm_ascend.utils.get_ascend_config")
     @mock.patch("torch_npu.npu_format_cast")
-    def test_process_weights_after_loading_with_nz1(self, mock_format_cast):
+    def test_process_weights_after_loading_with_nz1(self, mock_format_cast, mock_get_config):
+        mock_config = MagicMock()
+        mock_config.weight_nz_mode = 1
+        mock_get_config.return_value = mock_config
         self.method.process_weights_after_loading(self.layer)
         mock_format_cast.assert_not_called()
 
-    @patch.dict(os.environ, {"VLLM_ASCEND_ENABLE_NZ": "2"})
+    @patch("vllm_ascend.utils.get_ascend_config")
     @mock.patch("torch_npu.npu_format_cast")
-    def test_process_weights_after_loading_with_nz2(self, mock_format_cast):
+    def test_process_weights_after_loading_with_nz2(self, mock_format_cast, mock_get_config):
+        mock_config = MagicMock()
+        mock_config.weight_nz_mode = 2
+        mock_get_config.return_value = mock_config
         self.method.process_weights_after_loading(self.layer)
         mock_format_cast.assert_called_once()
 
 
 class TestAscendRowParallelLinear(BaseLinearTest):
     @patch("vllm_ascend.ops.linear_op.get_weight_prefetch_method", return_value=MagicMock())
-    @patch("vllm.config.get_current_vllm_config", return_value=MagicMock())
+    @patch("vllm_ascend.ops.linear.get_current_vllm_config", return_value=MagicMock())
+    @patch("vllm_ascend.ops.linear.enable_sp", return_value=False)
     @patch(
         "vllm_ascend.ops.linear.AscendUnquantizedLinearMethod.apply",
         new=lambda self, layer, x, bias=None: torch.nn.functional.linear(x, layer.weight, bias),
     )
-    def test_mlp_optimize(self, mock_get_current_vllm_config, mock_get_weight_prefetch_method):
+    def test_mlp_optimize(self, mock_enable_sp, mock_get_current_vllm_config, mock_get_weight_prefetch_method):
         ascend_config._ASCEND_CONFIG = MagicMock()
         ascend_config._ASCEND_CONFIG.recompute_scheduler_enable = False
         ascend_config._ASCEND_CONFIG.finegrained_tp_config.mlp_tensor_parallel_size = 2
@@ -100,12 +111,13 @@ class TestAscendRowParallelLinear(BaseLinearTest):
         linear(input_tensor)
 
     @patch("vllm_ascend.ops.linear_op.get_weight_prefetch_method", return_value=MagicMock())
-    @patch("vllm.config.get_current_vllm_config", return_value=MagicMock())
+    @patch("vllm_ascend.ops.linear.get_current_vllm_config", return_value=MagicMock())
+    @patch("vllm_ascend.ops.linear.enable_sp", return_value=False)
     @patch(
         "vllm_ascend.ops.linear.AscendUnquantizedLinearMethod.apply",
         new=lambda self, layer, x, bias=None: torch.nn.functional.linear(x, layer.weight, bias),
     )
-    def test_oproj_tp(self, mock_get_current_vllm_config, mock_get_weight_prefetch_method):
+    def test_oproj_tp(self, mock_enable_sp, mock_get_current_vllm_config, mock_get_weight_prefetch_method):
         ascend_config._ASCEND_CONFIG = MagicMock()
         ascend_config._ASCEND_CONFIG.recompute_scheduler_enable = False
         ascend_config._ASCEND_CONFIG.finegrained_tp_config.oproj_tensor_parallel_size = 2

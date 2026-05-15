@@ -21,7 +21,7 @@ from dataclasses import dataclass
 import torch
 from vllm.model_executor.layers.fused_moe import FusedMoEConfig
 
-import vllm_ascend.envs as envs_ascend
+from vllm_ascend.ascend_config import get_ascend_config
 from vllm_ascend.ascend_forward_context import _EXTRA_CTX, MoECommType
 from vllm_ascend.ops.fused_moe.moe_mlp import unified_apply_mlp
 from vllm_ascend.ops.fused_moe.moe_runtime_args import (
@@ -249,7 +249,7 @@ class FusedMC2CommImpl(MoECommMethod):
 
     def __init__(self, moe_config):
         super().__init__(moe_config)
-        if envs_ascend.VLLM_ASCEND_ENABLE_FUSED_MC2 == 1:
+        if get_ascend_config().enable_fused_mc2 == 1:
             self.expert_token_nums = torch.zeros([self.moe_config.num_local_experts], dtype=torch.int32, device="npu")
         else:
             self.expert_token_nums = None
@@ -278,7 +278,7 @@ class FusedMC2CommImpl(MoECommMethod):
             topk_ids = fused_experts_input.routing.log2phy[topk_ids]
 
         expert_tokens = None
-        if envs_ascend.VLLM_ASCEND_ENABLE_FUSED_MC2 == 1:
+        if get_ascend_config().enable_fused_mc2 == 1:
             out = torch.empty_like(fused_experts_input.hidden_states)
             torch.ops._C_ascend.dispatch_ffn_combine(  # type: ignore
                 x=fused_experts_input.hidden_states,
@@ -297,7 +297,7 @@ class FusedMC2CommImpl(MoECommMethod):
                 expert_token_nums=self.expert_token_nums,
             )
             expert_tokens = self.expert_token_nums
-        elif envs_ascend.VLLM_ASCEND_ENABLE_FUSED_MC2 == 2:
+        elif get_ascend_config().enable_fused_mc2 == 2:
             assert fused_experts_input.routing.expert_map is not None, "expert_map cannot be None."
             out, expert_tokens = torch.ops._C_ascend.dispatch_gmm_combine_decode(  # type: ignore
                 x=fused_experts_input.hidden_states,
@@ -315,5 +315,5 @@ class FusedMC2CommImpl(MoECommMethod):
                 global_bs=self.token_dispatcher.global_bs,
             )
         else:
-            raise ValueError(f"Wrong value of {envs_ascend.VLLM_ASCEND_ENABLE_FUSED_MC2=}")
+            raise ValueError(f"Wrong value of {get_ascend_config().enable_fused_mc2=}")
         return FusedExpertsResult(routed_out=out, expert_tokens=expert_tokens)

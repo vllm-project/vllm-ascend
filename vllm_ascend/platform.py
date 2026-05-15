@@ -31,7 +31,7 @@ from vllm.platforms import Platform, PlatformEnum
 os.environ["VLLM_DISABLE_SHARED_EXPERTS_STREAM"] = "1"
 
 import vllm_ascend.envs as envs_ascend
-from vllm_ascend.ascend_config import init_ascend_config
+from vllm_ascend.ascend_config import get_ascend_config, init_ascend_config
 
 # isort: off
 from vllm_ascend.utils import (
@@ -565,7 +565,7 @@ class NPUPlatform(Platform):
             os.environ["PYTORCH_NPU_ALLOC_CONF"] = npu_alloc_configs
             logger.info("Set PYTORCH_NPU_ALLOC_CONF=%s", npu_alloc_configs)
 
-        if ascend_config.enable_mc2_hierarchy_comm and envs_ascend.VLLM_ASCEND_ENABLE_FUSED_MC2:
+        if ascend_config.enable_mc2_hierarchy_comm and get_ascend_config().enable_fused_mc2:
             raise ValueError(
                 "fused mc2 op cannot be used with hierarchy communication."
                 "Please disable VLLM_ASCEND_ENABLE_FUSED_MC2 by setting it to 0."
