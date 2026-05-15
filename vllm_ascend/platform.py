@@ -640,10 +640,12 @@ class NPUPlatform(Platform):
         from vllm.v1.attention.backends.registry import AttentionBackendEnum
         
         if backend is not None:
-            assert backend in cls.get_supported_vit_attn_backends(), (
-                f"Backend {backend} is not supported for vit attention. "
-                f"Supported backends are: {cls.get_supported_vit_attn_backends()}"
-            )
+            supported_backends = cls.get_supported_vit_attn_backends()
+            if backend not in supported_backends:
+                raise ValueError(
+                    f"Backend {backend} is not supported for vit attention. "
+                    f"Supported backends are: {supported_backends}"
+                )
             logger.info_once(f"Using backend {backend} for vit attention")
             return backend
 

@@ -821,7 +821,7 @@ class TestNPUPlatform(TestBase):
         """Test get_vit_attn_backend raises error for invalid backend."""
         from vllm.v1.attention.backends.registry import AttentionBackendEnum
         
-        with self.assertRaises(AssertionError) as context:
+        with self.assertRaises(ValueError) as context:
             NPUPlatform.get_vit_attn_backend(
                 head_size=64,
                 dtype=torch.float16,
