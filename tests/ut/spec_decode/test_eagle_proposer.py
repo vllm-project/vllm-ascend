@@ -337,8 +337,6 @@ class TestEagleProposerLoadModel(TestBase):
         mock_ascend_config.weight_nz_mode = 1
         mock_ascend_config.enable_mlapo = True
         mock_ascend_config.enable_fused_mc2 = 0
-        mock_ascend_config.hccl_so_path = None
-        mock_ascend_config.vllm_version = None
         mock_ascend_config.msmonitor_use_daemon = False
         mock_ascend_config.enable_transpose_kv_cache_by_block = True
         mock_config.return_value = mock_ascend_config
@@ -501,8 +499,6 @@ class TestEagleProposerDummyRun(TestBase):
         mock_ascend_config.weight_nz_mode = 1
         mock_ascend_config.enable_mlapo = True
         mock_ascend_config.enable_fused_mc2 = 0
-        mock_ascend_config.hccl_so_path = None
-        mock_ascend_config.vllm_version = None
         mock_ascend_config.msmonitor_use_daemon = False
         mock_ascend_config.enable_transpose_kv_cache_by_block = True
         mock_config.return_value = mock_ascend_config

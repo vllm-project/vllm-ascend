@@ -22,7 +22,7 @@ from __future__ import annotations
 import functools
 import math
 import os
-from contextlib import nullcontext, suppress
+from contextlib import nullcontext
 from enum import Enum
 from functools import lru_cache
 from typing import TYPE_CHECKING, Any
@@ -364,17 +364,16 @@ def enable_custom_op():
 
 def find_hccl_library() -> str:
     """
-    We either use the library file specified by the `hccl_so_path`
-    configuration, or we find the library file brought by PyTorch.
+    We either use the library file specified by the `HCCL_SO_PATH`
+    environment variable, or we find the library file brought by PyTorch.
     After importing `torch`, `libhccl.so` can be
     found by `ctypes` automatically.
     """
-    config = get_ascend_config()
-    so_file = config.hccl_so_path
+    so_file = envs_ascend.HCCL_SO_PATH
 
     # manually load the hccl library
     if so_file:
-        logger.info("Found hccl from Config hccl_so_path=%s", so_file)
+        logger.info("Found hccl from environment variable HCCL_SO_PATH=%s", so_file)
     else:
         if torch.version.cann is not None:
             so_file = "libhccl.so"
@@ -457,14 +456,8 @@ def adapt_patch(is_global_patch: bool = False):
 
 @functools.cache
 def vllm_version_is(target_vllm_version: str):
-    # VLLM_VERSION env var is removed. Use AscendConfig.vllm_version or vllm.__version__.
-    # Note: This function may be called at module import time before AscendConfig is initialized.
-    # In that case, fall back to vllm.__version__ directly.
-    config_version = None
-    with suppress(RuntimeError):
-        config_version = get_ascend_config().vllm_version
-    if config_version is not None:
-        vllm_version = config_version
+    if envs_ascend.VLLM_VERSION is not None:
+        vllm_version = envs_ascend.VLLM_VERSION
     else:
         import vllm
 
@@ -474,9 +467,8 @@ def vllm_version_is(target_vllm_version: str):
     except InvalidVersion:
         raise ValueError(
             f"Invalid vllm version {vllm_version} found. A dev version of vllm "
-            "is installed probably. Use --additional-config "
-            '\'{"vllm_version": "x.y.z"}\' to override. '
-            "And please make sure the value follows the "
+            "is installed probably. Set the environment variable VLLM_VERSION "
+            "to control it by hand. And please make sure the value follows the "
             "format of x.y.z."
         )
 

@@ -56,17 +56,16 @@ env_variables: dict[str, Callable[[], Any]] = {
     # The home path for CANN toolkit. If not set, the default value is
     # /usr/local/Ascend/ascend-toolkit/latest
     "ASCEND_HOME_PATH": lambda: os.getenv("ASCEND_HOME_PATH", None),
-    # DEPRECATED: HCCL_SO_PATH env var is removed. Use --additional-config '{"hccl_so_path": "/path/to/libhccl.so"}'.
-    #     "HCCL_SO_PATH": lambda: os.getenv("HCCL_SO_PATH", None),
+    # The path for HCCL library, it's used by pyhccl communicator backend. If
+    # not set, the default value is libhccl.so.
+    "HCCL_SO_PATH": lambda: os.getenv("HCCL_SO_PATH", None),
     # The version of vllm is installed. This value is used for developers who
     # installed vllm from source locally. In this case, the version of vllm is
     # usually changed. For example, if the version of vllm is "0.9.0", but when
     # it's installed from source, the version of vllm is usually set to "0.9.1".
     # In this case, developers need to set this value to "0.9.0" to make sure
     # that the correct package is installed.
-    # DEPRECATED: VLLM_VERSION env var is removed.
-    # Use --additional-config '{"vllm_version": "0.9.0"}'.
-    #     "VLLM_VERSION": lambda: os.getenv("VLLM_VERSION", None),
+    "VLLM_VERSION": lambda: os.getenv("VLLM_VERSION", None),
     # DEPRECATED: VLLM_ASCEND_ENABLE_MATMUL_ALLREDUCE env var is removed.
     # Use --additional-config '{"enable_matmul_allreduce": true}'.
     #     "VLLM_ASCEND_ENABLE_MATMUL_ALLREDUCE":

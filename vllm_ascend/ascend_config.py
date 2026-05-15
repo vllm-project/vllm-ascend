@@ -123,11 +123,9 @@ class AscendConfig:
         self.enable_cpu_binding = additional_config.get("enable_cpu_binding", True)
         self.enable_context_parallel = additional_config.get("enable_context_parallel", False)
         self.enable_matmul_allreduce = additional_config.get("enable_matmul_allreduce", False)
-        self.hccl_so_path = additional_config.get("hccl_so_path", None)
         self.enable_fused_mc2 = additional_config.get("enable_fused_mc2", 0)
         self.enable_mlapo = additional_config.get("enable_mlapo", True)
         self.enable_flashcomm2_parallel_size = additional_config.get("enable_flashcomm2_parallel_size", 0)
-        self.vllm_version = additional_config.get("vllm_version", None)
         self.msmonitor_use_daemon = additional_config.get("msmonitor_use_daemon", False)
         self.enable_transpose_kv_cache_by_block = additional_config.get("enable_transpose_kv_cache_by_block", True)
 
