@@ -274,6 +274,20 @@
       "vllm-ascend/gpqa",
       "vllm-ascend/GSM8K-in131072-bs100-qwen3",
       "vllm-ascend/GSM8K_prefix90_in131072_bs100",
-      "vllm-ascend/GSM8K_prefix0_in16384_bs200_qwen"
+      "vllm-ascend/GSM8K_prefix0_in16384_bs200_qwen",
+      "vllm-ascend/GSM8K_prefix0_in32768_bs100_qwen",
+      "vllm-ascend/GSM8K_prefix90_in32768_bs100_qwen",
+      "vllm-ascend/GSM8K_prefix0_in65536_bs100_qwen",
+      "vllm-ascend/GSM8K_prefix90_in65536_bs100_qwen",
+      "vllm-ascend/GSM8K_prefix90_in131072_bs100_qwen",
+      "vllm-ascend/GSM8K_prefix0_in16384_bs100_glm",
+      "vllm-ascend/GSM8K_prefix0_in32768_bs100_glm",
+      "vllm-ascend/GSM8K_prefix90_in32768_bs100_glm",
+      "vllm-ascend/GSM8K_prefix90_in65536_bs100_glm",
+      "vllm-ascend/GSM8K_prefix0_in16384_bs200_Minimax",
+      "vllm-ascend/GSM8K_prefix90_in32768_bs800_Minimax",
+      "vllm-ascend/GSM8K_prefix0_in32768_bs1000_Minimax",
+      "vllm-ascend/GSM8K_prefix90_in65536_bs1000_Minimax",
+      "vllm-ascend/GSM8K_prefix90_in131072_bs1000_Minimax"
     ]
   }
