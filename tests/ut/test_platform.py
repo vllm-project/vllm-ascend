@@ -790,7 +790,7 @@ class TestNPUPlatform(TestBase):
     def test_get_supported_vit_attn_backends(self):
         """Test get_supported_vit_attn_backends returns correct backends."""
         from vllm.v1.attention.backends.registry import AttentionBackendEnum
-        
+
         backends = NPUPlatform.get_supported_vit_attn_backends()
         self.assertIsInstance(backends, list)
         self.assertIn(AttentionBackendEnum.TORCH_SDPA, backends)
@@ -798,7 +798,7 @@ class TestNPUPlatform(TestBase):
     def test_get_vit_attn_backend_default(self):
         """Test get_vit_attn_backend returns default backend when backend is None."""
         from vllm.v1.attention.backends.registry import AttentionBackendEnum
-        
+
         backend = NPUPlatform.get_vit_attn_backend(
             head_size=64,
             dtype=torch.float16,
@@ -809,7 +809,7 @@ class TestNPUPlatform(TestBase):
     def test_get_vit_attn_backend_with_valid_backend(self):
         """Test get_vit_attn_backend returns the specified backend when valid."""
         from vllm.v1.attention.backends.registry import AttentionBackendEnum
-        
+
         backend = NPUPlatform.get_vit_attn_backend(
             head_size=64,
             dtype=torch.float16,
@@ -820,7 +820,7 @@ class TestNPUPlatform(TestBase):
     def test_get_vit_attn_backend_with_invalid_backend(self):
         """Test get_vit_attn_backend raises error for invalid backend."""
         from vllm.v1.attention.backends.registry import AttentionBackendEnum
-        
+
         with self.assertRaises(ValueError) as context:
             NPUPlatform.get_vit_attn_backend(
                 head_size=64,

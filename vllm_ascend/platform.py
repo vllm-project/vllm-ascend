@@ -615,6 +615,7 @@ class NPUPlatform(Platform):
     def get_supported_vit_attn_backends(cls) -> list:
         """Get supported ViT attention backends for NPU platform."""
         from vllm.v1.attention.backends.registry import AttentionBackendEnum
+
         return [
             AttentionBackendEnum.TORCH_SDPA,
         ]
@@ -624,7 +625,7 @@ class NPUPlatform(Platform):
         cls,
         head_size: int,
         dtype: torch.dtype,
-        backend = None,
+        backend=None,
     ):
         """
         Get the vision attention backend class of a device.
@@ -638,7 +639,7 @@ class NPUPlatform(Platform):
             2. If None, continue to the default selection logic.
         """
         from vllm.v1.attention.backends.registry import AttentionBackendEnum
-        
+
         if backend is not None:
             supported_backends = cls.get_supported_vit_attn_backends()
             if backend not in supported_backends:
@@ -649,9 +650,7 @@ class NPUPlatform(Platform):
             logger.info_once(f"Using backend {backend} for vit attention")
             return backend
 
-        logger.info_once(
-            f"Using default backend {AttentionBackendEnum.TORCH_SDPA} for vit attention"
-        )
+        logger.info_once(f"Using default backend {AttentionBackendEnum.TORCH_SDPA} for vit attention")
         return AttentionBackendEnum.TORCH_SDPA
 
     @classmethod
