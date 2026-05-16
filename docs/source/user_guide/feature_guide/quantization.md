@@ -10,6 +10,12 @@ Model quantization is a technique that reduces model size and computational over
 > See <https://www.modelscope.cn/models/vllm-ascend/Kimi-K2-Instruct-W8A8>.
 > Before you quantize a model, ensure sufficient RAM is available.
 
+:::{warning}
+For DeepSeek-R1 MTP deployment, vLLM Ascend currently supports `W8A8 + MTP float quantization` only.
+The default MTP mix quantization configuration in some ModelSlim examples is not supported yet and may cause engine startup failures with unclear runtime errors.
+When preparing a DeepSeek-R1 quantized model for MTP serving, use float quantization for the MTP part instead of mix quantization.
+:::
+
 ## Quantization Tools
 
 vLLM Ascend supports models quantized by two main tools: `ModelSlim` and `LLM-Compressor`.
