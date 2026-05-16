@@ -513,14 +513,6 @@ e2e-upstream_singlecard:
     estimated_time: 20
   - name: tests/entrypoints/openai/chat_completion/test_chat_logit_bias_validation.py
     estimated_time: 20
-  - name: tests/models/multimodal/processing/test_glm4_1v.py
-    estimated_time: 20
-  - name: tests/models/multimodal/processing/test_smolvlm.py
-    estimated_time: 20
-  - name: tests/multimodal/test_video.py
-    estimated_time: 20
-  - name: tests/models/language/pooling_mteb_test/test_jina.py
-    estimated_time: 20
   - name: tests/benchmarks/test_bench_startup.py
     estimated_time: 20
   - name: tests/detokenizer/test_disable_detokenization.py
