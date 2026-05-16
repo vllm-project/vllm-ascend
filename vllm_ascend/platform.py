@@ -571,6 +571,56 @@ class NPUPlatform(Platform):
                 "Please disable VLLM_ASCEND_ENABLE_FUSED_MC2 by setting it to 0."
             )
 
+        cls._ensure_rpc_timeout(vllm_config)
+
+    @classmethod
+    def _ensure_rpc_timeout(cls, vllm_config: VllmConfig) -> None:
+        """Ensure RPC timeout is sufficient for Ascend NPU graph compilation.
+
+        The first inference step on Ascend NPU triggers ACL graph compilation,
+        which can take significantly longer than the upstream default timeout
+        (10s). This is especially problematic in multi-node configurations
+        where all workers must complete graph compilation before the executor
+        receives a response.
+        """
+        # Ascend default: 600s (10 min) for graph compilation on first step
+        ASCEND_DEFAULT_RPC_TIMEOUT_MS = 600000
+        ASCEND_DEFAULT_EXECUTE_MODEL_TIMEOUT_S = 600
+
+        parallel_config = vllm_config.parallel_config
+        is_multi_node = parallel_config and getattr(parallel_config, "nnodes_within_dp", 1) > 1
+
+        rpc_timeout_env = os.getenv("VLLM_RPC_TIMEOUT")
+        if rpc_timeout_env is None:
+            os.environ["VLLM_RPC_TIMEOUT"] = str(ASCEND_DEFAULT_RPC_TIMEOUT_MS)
+            envs_vllm.VLLM_RPC_TIMEOUT = ASCEND_DEFAULT_RPC_TIMEOUT_MS
+            if is_multi_node:
+                logger.info(
+                    "Multi-node detected (nnodes_within_dp=%d). "
+                    "VLLM_RPC_TIMEOUT not set, defaulting to %dms to allow "
+                    "sufficient time for Ascend NPU graph compilation. "
+                    "Set VLLM_RPC_TIMEOUT environment variable to override.",
+                    parallel_config.nnodes_within_dp,
+                    ASCEND_DEFAULT_RPC_TIMEOUT_MS,
+                )
+            else:
+                logger.info(
+                    "VLLM_RPC_TIMEOUT not set, defaulting to %dms for "
+                    "Ascend NPU graph compilation.",
+                    ASCEND_DEFAULT_RPC_TIMEOUT_MS,
+                )
+
+        execute_timeout_env = os.getenv("VLLM_EXECUTE_MODEL_TIMEOUT_SECONDS")
+        if execute_timeout_env is None:
+            os.environ["VLLM_EXECUTE_MODEL_TIMEOUT_SECONDS"] = str(ASCEND_DEFAULT_EXECUTE_MODEL_TIMEOUT_S)
+            envs_vllm.VLLM_EXECUTE_MODEL_TIMEOUT_SECONDS = ASCEND_DEFAULT_EXECUTE_MODEL_TIMEOUT_S
+            if is_multi_node:
+                logger.info(
+                    "VLLM_EXECUTE_MODEL_TIMEOUT_SECONDS not set, defaulting to %ds "
+                    "for multi-node Ascend NPU graph compilation.",
+                    ASCEND_DEFAULT_EXECUTE_MODEL_TIMEOUT_S,
+                )
+
     @classmethod
     def import_kernels(cls) -> None:
         # Directly importing vllm_ascend_C prevents ASCEND_RT_VISIBLE_DEVICES

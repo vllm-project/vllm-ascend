@@ -1,4 +1,5 @@
 import importlib
+import os
 from unittest.mock import MagicMock, patch
 
 import pytest
@@ -786,3 +787,64 @@ class TestNPUPlatform(TestBase):
             self.platform.get_static_graph_wrapper_cls(),
             "vllm_ascend.compilation.acl_graph.ACLGraphWrapper",
         )
+
+
+class TestEnsureRpcTimeout(TestBase):
+    """Tests for NPUPlatform._ensure_rpc_timeout."""
+
+    def setUp(self):
+        self.platform = NPUPlatform()
+        # Save original env state
+        self._orig_rpc = os.environ.pop("VLLM_RPC_TIMEOUT", None)
+        self._orig_exec = os.environ.pop("VLLM_EXECUTE_MODEL_TIMEOUT_SECONDS", None)
+
+    def tearDown(self):
+        # Restore original env state
+        if self._orig_rpc is not None:
+            os.environ["VLLM_RPC_TIMEOUT"] = self._orig_rpc
+        else:
+            os.environ.pop("VLLM_RPC_TIMEOUT", None)
+        if self._orig_exec is not None:
+            os.environ["VLLM_EXECUTE_MODEL_TIMEOUT_SECONDS"] = self._orig_exec
+        else:
+            os.environ.pop("VLLM_EXECUTE_MODEL_TIMEOUT_SECONDS", None)
+
+    def _make_config(self, nnodes_within_dp=1):
+        vllm_config = MagicMock()
+        vllm_config.parallel_config.nnodes_within_dp = nnodes_within_dp
+        return vllm_config
+
+    def test_sets_default_rpc_timeout_when_not_configured(self):
+        """VLLM_RPC_TIMEOUT should be set to 600000ms when not configured."""
+        vllm_config = self._make_config()
+        self.platform._ensure_rpc_timeout(vllm_config)
+        self.assertEqual(os.environ.get("VLLM_RPC_TIMEOUT"), "600000")
+
+    def test_sets_default_execute_timeout_when_not_configured(self):
+        """VLLM_EXECUTE_MODEL_TIMEOUT_SECONDS should be set to 600s."""
+        vllm_config = self._make_config()
+        self.platform._ensure_rpc_timeout(vllm_config)
+        self.assertEqual(os.environ.get("VLLM_EXECUTE_MODEL_TIMEOUT_SECONDS"), "600")
+
+    def test_preserves_user_configured_rpc_timeout(self):
+        """User-set VLLM_RPC_TIMEOUT should not be overridden."""
+        os.environ["VLLM_RPC_TIMEOUT"] = "3600000"
+        vllm_config = self._make_config()
+        self.platform._ensure_rpc_timeout(vllm_config)
+        self.assertEqual(os.environ.get("VLLM_RPC_TIMEOUT"), "3600000")
+
+    def test_preserves_user_configured_execute_timeout(self):
+        """User-set VLLM_EXECUTE_MODEL_TIMEOUT_SECONDS should not be overridden."""
+        os.environ["VLLM_EXECUTE_MODEL_TIMEOUT_SECONDS"] = "30000"
+        vllm_config = self._make_config()
+        self.platform._ensure_rpc_timeout(vllm_config)
+        self.assertEqual(os.environ.get("VLLM_EXECUTE_MODEL_TIMEOUT_SECONDS"), "30000")
+
+    def test_multi_node_logs_info(self):
+        """Multi-node config should log info about timeout defaults."""
+        vllm_config = self._make_config(nnodes_within_dp=2)
+        with self.assertLogs(logger="vllm", level="INFO") as cm:
+            self.platform._ensure_rpc_timeout(vllm_config)
+        log_output = "\n".join(cm.output)
+        self.assertIn("Multi-node detected", log_output)
+        self.assertIn("nnodes_within_dp=2", log_output)
