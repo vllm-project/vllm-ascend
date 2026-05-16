@@ -4,8 +4,15 @@ from typing import TYPE_CHECKING, Any, Optional
 import torch
 from ucm.integration.vllm.ucm_connector import UCMConnector
 from vllm.config import VllmConfig
-from vllm.distributed.kv_transfer.kv_connector.v1.base import KVConnectorBase_V1, KVConnectorMetadata, KVConnectorRole
+from vllm.distributed.kv_transfer.kv_connector.v1.base import (
+    KVConnectorBase_V1,
+    KVConnectorMetadata,
+    KVConnectorRole,
+    KVConnectorWorkerMetadata,
+    SupportsHMA,
+)
 from vllm.v1.core.sched.output import SchedulerOutput
+from vllm.v1.outputs import KVConnectorOutput
 
 # isort: off
 if TYPE_CHECKING:
@@ -23,7 +30,7 @@ if TYPE_CHECKING:
 # isort: on
 
 
-class UCMConnectorV1(KVConnectorBase_V1):
+class UCMConnectorV1(KVConnectorBase_V1, SupportsHMA):
     def __init__(
         self,
         vllm_config: "VllmConfig",
@@ -34,7 +41,7 @@ class UCMConnectorV1(KVConnectorBase_V1):
         assert vllm_config.kv_transfer_config is not None
 
         ImplCls = UCMConnector
-        self._ucm_engine = ImplCls(vllm_config, role)
+        self._ucm_engine = ImplCls(vllm_config, role, kv_cache_config)
 
     # ==============================
     # Worker-side methods
@@ -204,6 +211,25 @@ class UCMConnectorV1(KVConnectorBase_V1):
             returned by the engine.
         """
         return self._ucm_engine.request_finished(request, block_ids)
+
+    def request_finished_all_groups(
+        self,
+        request: "Request",
+        block_ids: tuple[list[int], ...],
+    ) -> tuple[bool, dict[str, Any] | None]:
+        return self._ucm_engine.request_finished_all_groups(request, block_ids)
+
+    def get_finished(
+        self,
+        finished_req_ids: set[str],
+    ) -> tuple[set[str] | None, set[str] | None]:
+        return self._ucm_engine.get_finished(finished_req_ids)
+
+    def build_connector_worker_meta(self) -> "KVConnectorWorkerMetadata | None":
+        return self._ucm_engine.build_connector_worker_meta()
+
+    def update_connector_output(self, connector_output: KVConnectorOutput) -> None:
+        self._ucm_engine.update_connector_output(connector_output)
 
     # ==============================
     # Metrics & Stats
