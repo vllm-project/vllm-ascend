@@ -15,11 +15,25 @@
 #
 
 name: Bisect vLLM
-run-name: Bisect vLLM caller-${{ inputs.caller_run_id }}
+run-name: >-
+  ${{
+    inputs.caller_type == 'main2main' &&
+    format(
+      'Bisect vLLM caller-{0} pr-{1} token-{2}',
+      inputs.caller_run_id,
+      inputs.main2main_pr_number,
+      inputs.main2main_dispatch_token
+    ) ||
+    format('Bisect vLLM caller-{0}', inputs.caller_run_id)
+  }}
 
 on:
   workflow_dispatch:
     inputs:
+      caller_type:
+        description: 'Calling mode: standalone or main2main'
+        required: false
+        default: 'standalone'
       caller_run_id:
         description: 'Caller workflow run id for traceability'
         required: false
@@ -36,10 +50,22 @@ on:
         description: 'Failing pytest command(s), semicolon-separated for batch mode'
         required: true
         default: 'pytest -sv tests/e2e/multicard/4-cards/long_sequence/test_accuracy.py'
+      main2main_pr_number:
+        description: 'Main2Main PR number for callback-safe finalize dispatch'
+        required: false
+        default: ''
+      main2main_dispatch_token:
+        description: 'Current guarded dispatch token for main2main callback'
+        required: false
+        default: ''
 
 defaults:
   run:
     shell: bash -el {0}
+
+concurrency:
+  group: ${{ inputs.caller_type == 'main2main' && format('main2main-bisect-pr-{0}', inputs.main2main_pr_number) || format('bisect-vllm-{0}', github.run_id) }}
+  cancel-in-progress: false
 
 jobs:
   set-params:
@@ -48,7 +74,7 @@ jobs:
     outputs:
       matrix: ${{ steps.resolve.outputs.matrix }}
     steps:
-      - name: Checkout vllm-benchmarks repo
+      - name: Checkout vllm-ascend repo
         uses: actions/checkout@v6
 
       - name: Install Python deps for bisect helper
@@ -57,7 +83,7 @@ jobs:
       - name: Resolve parameters and build matrix
         id: resolve
         run: |
-          python3 .github/workflows/scripts/bisect_helper.py batch-matrix \
+          python3 tools/bisect_helper.py batch-matrix \
             --test-cmds "${{ inputs.test_cmd }}" \
             --output-format github
 
@@ -87,7 +113,7 @@ jobs:
         UV_SYSTEM_PYTHON: ${{ matrix.cenv_UV_SYSTEM_PYTHON }}
         UV_PYTHON: ${{ matrix.cenv_UV_PYTHON }}
     steps:
-      - name: Checkout vllm-benchmarks repo
+      - name: Checkout vllm-ascend repo
         uses: actions/checkout@v6
         with:
           path: ./vllm-ascend
@@ -110,13 +136,13 @@ jobs:
           repository: vllm-project/vllm
           ref: ${{ inputs.bad_commit }}
           path: ./vllm-empty
-          fetch-depth: 500
+          fetch-depth: 0
 
       - name: Install vllm from source
         working-directory: ./vllm-empty
         run: ${{ matrix.vllm_install }}
 
-      - name: Install vllm-benchmarks
+      - name: Install vllm-ascend
         working-directory: ./vllm-ascend
         run: ${{ matrix.ascend_install }}
 
@@ -129,10 +155,10 @@ jobs:
             export "${key}=${val}"
           done
 
-          chmod +x .github/workflows/scripts/bisect_vllm.sh
+          chmod +x tools/bisect_vllm.sh
           echo "${{ matrix.test_cmds }}" > /tmp/bisect_cmds.txt
 
-          .github/workflows/scripts/bisect_vllm.sh \
+          tools/bisect_vllm.sh \
             --vllm-repo ../vllm-empty \
             --ascend-repo . \
             --test-cmds-file /tmp/bisect_cmds.txt \
@@ -164,7 +190,7 @@ jobs:
           path: /tmp/bisect_results
 
       - name: Combine summaries and emit bisect_result.json
-        run: |
+        run: |     
           : > /tmp/bisect_summary.md
           while IFS= read -r -d '' f; do
             cat "$f" >> /tmp/bisect_summary.md
@@ -173,11 +199,35 @@ jobs:
 
           cat /tmp/bisect_summary.md
 
+          python3 tools/bisect_helper.py result-json \
+            --caller-type "${{ inputs.caller_type }}" \
+            --caller-run-id "${{ inputs.caller_run_id }}" \
+            --bisect-run-id "${{ github.run_id }}" \
+            --good-commit "${{ inputs.good_commit }}" \
+            --bad-commit "${{ inputs.bad_commit }}" \
+            --test-cmd "${{ inputs.test_cmd }}" \
+            --results-dir /tmp/bisect_results \
+            --summary-file /tmp/bisect_summary.md \
+            --output /tmp/bisect_result.json
+
       - name: Upload combined summary and JSON result
         uses: actions/upload-artifact@v7
         with:
           name: bisect-summary
           path: |
             /tmp/bisect_summary.md
+            /tmp/bisect_result.json
           retention-days: 30
 
+  callback-main2main:
+    if: ${{ always() && inputs.caller_type == 'main2main' }}
+    needs: upload-all-results
+    runs-on: ubuntu-latest
+    env:
+      GH_TOKEN: ${{ secrets.PAT_TOKEN }}
+    steps:
+      - name: Dispatch reconcile for main2main caller
+        run: |
+          gh workflow run schedule_main2main_reconcile.yaml \
+            --repo nv-action/vllm-benchmarks \
+            -f pr_number="${{ inputs.main2main_pr_number }}"
