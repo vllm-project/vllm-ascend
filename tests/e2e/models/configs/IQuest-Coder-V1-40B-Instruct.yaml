@@ -1,0 +1,14 @@
+model_name: "IQuestLab/IQuest-Coder-V1-40B-Instruct"
+hardware: "Atlas A2 Series"
+trust_remote_code: true
+tasks:
+- name: "gsm8k"
+  metrics:
+  - name: "exact_match,strict-match"
+    value: 0.7559
+num_fewshot: 5
+gpu_memory_utilization: 0.7
+apply_chat_template: true
+tensor_parallel_size: 2
+max_model_len: 16384
+enforce_eager: True
