@@ -1134,3 +1134,58 @@ class TestNPUWorker(TestBase):
 
             # When both flags are False, return EMPTY_MODEL_RUNNER_OUTPUT directly.
             self.assertEqual(result, mock_empty_output)
+
+    @patch("vllm_ascend.utils.adapt_patch")
+    @patch("vllm_ascend.ops")
+    def test_shutdown_with_profiler(self, mock_ops, mock_adapt_patch):
+        """Test shutdown method - with profiler"""
+        from vllm_ascend.worker.worker import NPUWorker
+
+        # Create worker mock
+        with patch.object(NPUWorker, "__init__", lambda x, **kwargs: None):
+            worker = NPUWorker()
+            worker.profiler = MagicMock()
+            worker.model_runner = MagicMock()
+
+            # Test shutdown
+            worker.shutdown()
+
+            # Verify profiler and model_runner shutdown were called
+            worker.profiler.shutdown.assert_called_once()
+            worker.model_runner.shutdown.assert_called_once()
+
+    @patch("vllm_ascend.utils.adapt_patch")
+    @patch("vllm_ascend.ops")
+    def test_shutdown_without_profiler(self, mock_ops, mock_adapt_patch):
+        """Test shutdown method - without profiler"""
+        from vllm_ascend.worker.worker import NPUWorker
+
+        # Create worker mock
+        with patch.object(NPUWorker, "__init__", lambda x, **kwargs: None):
+            worker = NPUWorker()
+            worker.profiler = None
+            worker.model_runner = MagicMock()
+
+            # Test shutdown
+            worker.shutdown()
+
+            # Verify model_runner shutdown was called
+            worker.model_runner.shutdown.assert_called_once()
+
+    @patch("vllm_ascend.utils.adapt_patch")
+    @patch("vllm_ascend.ops")
+    def test_shutdown_without_model_runner(self, mock_ops, mock_adapt_patch):
+        """Test shutdown method - without model_runner"""
+        from vllm_ascend.worker.worker import NPUWorker
+
+        # Create worker mock
+        with patch.object(NPUWorker, "__init__", lambda x, **kwargs: None):
+            worker = NPUWorker()
+            worker.profiler = MagicMock()
+            # No model_runner attribute
+
+            # Test shutdown - should not raise error
+            worker.shutdown()
+
+            # Verify profiler shutdown was called
+            worker.profiler.shutdown.assert_called_once()
