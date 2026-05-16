@@ -1,6 +1,7 @@
 /**
  * Copyright (c) 2025 Huawei Technologies Co., Ltd.
  * This program is free software, you can redistribute it and/or modify it under the terms and conditions of
+ * CANN Open Software License Agreement Version 2.0 (the "License").
  * Please refer to the License for details. You may not use this file except in compliance with the License.
  * THIS SOFTWARE IS PROVIDED ON AN "AS IS" BASIS, WITHOUT WARRANTIES OF ANY KIND, EITHER EXPRESS OR IMPLIED,
  * INCLUDING BUT NOT LIMITED TO NON-INFRINGEMENT, MERCHANTABILITY, OR FITNESS FOR A PARTICULAR PURPOSE.
@@ -16,7 +17,7 @@
 
 
 using namespace AscendC;
-using namespace matmul; 
+using namespace matmul;
 using namespace RecurrentGatedDeltaRule;
 
 
@@ -28,10 +29,26 @@ recurrent_gated_delta_rule(GM_ADDR query, GM_ADDR key, GM_ADDR value, GM_ADDR be
     REGISTER_TILING_DEFAULT(RecurrentGatedDeltaRuleTilingData);
     GET_TILING_DATA(tilingData, tilingGM);
     KERNEL_TASK_TYPE_DEFAULT(KERNEL_TYPE_AIV_ONLY);
-    TPipe pipe;
-    RGDR<bfloat16_t, bfloat16_t, DTYPE_STATE> op(&tilingData);
     RGDRInitParams initParams{query, key, value, g, gk, beta, state, cuSeqlens,
                               ssmStateIndices, numAcceptedTokens, out, stateOut};
-    op.Init(initParams, &pipe);
-    op.Process();
+#if !(defined(__CCE_AICORE__) && __CCE_AICORE__ == 200)
+    if (TILING_KEY_IS(0)) {
+        TPipe pipe;
+        RGDR<bfloat16_t, bfloat16_t> op(&tilingData);
+        op.Init(initParams, &pipe);
+        op.Process();
+    }
+#endif
+    if (TILING_KEY_IS(1)) {
+        TPipe pipe;
+        RGDR<half, half> op(&tilingData);
+        op.Init(initParams, &pipe);
+        op.Process();
+    }
+    if (TILING_KEY_IS(2)) {
+        TPipe pipe;
+        RGDR<float, float> op(&tilingData);
+        op.Init(initParams, &pipe);
+        op.Process();
+    }
 }

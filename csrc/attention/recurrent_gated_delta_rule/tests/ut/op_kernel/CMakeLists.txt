@@ -7,12 +7,13 @@
 # INCLUDING BUT NOT LIMITED TO NON-INFRINGEMENT, MERCHANTABILITY, OR FITNESS FOR A PARTICULAR PURPOSE.
 # See LICENSE in the root of the software repository for the full text of the License.
 # -----------------------------------------------------------------------------------------------------------
-file(GLOB CURRENT_DIRS RELATIVE ${CMAKE_CURRENT_SOURCE_DIR} ${CMAKE_CURRENT_SOURCE_DIR}/*)
-if(NOT ENABLE_TEST AND NOT BENCHMARK)
-    list(REMOVE_ITEM CURRENT_DIRS tests)
+
+if (UT_TEST_ALL OR OP_KERNEL_UT)
+    # 算子自己的tiling文件路径
+    set(recurrent_gated_delta_rule_files
+        ${CMAKE_CURRENT_SOURCE_DIR}/../../../op_host/recurrent_gated_delta_rule_tiling.cpp
+    )
+
+    AddOpTestCase(recurrent_gated_delta_rule "Ascend910B1" "" "${recurrent_gated_delta_rule_files}")
+
 endif()
-foreach(SUB_DIR ${CURRENT_DIRS})
-    if(EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/${SUB_DIR}/CMakeLists.txt")
-        add_subdirectory(${SUB_DIR})
-    endif()
-endforeach()
