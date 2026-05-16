@@ -67,6 +67,7 @@ from vllm_ascend.worker.kvcomp_utils import KVCompMetaData
 
 # default max value of sliding window size
 SWA_INT_MAX = 2147483647
+FIA_TND_SUPPORTED_HEAD_SIZES = {64, 128, 192}
 
 
 @register_backend(AttentionBackendEnum.CUSTOM, "ASCEND")
@@ -382,6 +383,7 @@ class AscendAttentionBackendImpl(AttentionImpl):
             alibi_slopes = torch.tensor(alibi_slopes, dtype=torch.float32, device="npu")
         self.alibi_slopes = alibi_slopes
         self.attn_type = attn_type
+        self.kv_sharing_target_layer_name = kv_sharing_target_layer_name
 
         assert self.num_heads % self.num_kv_heads == 0
         self.num_queries_per_kv = self.num_heads // self.num_kv_heads
@@ -407,15 +409,18 @@ class AscendAttentionBackendImpl(AttentionImpl):
         num_dcp_pcp_tokens=None,
         draft_attn_metadatas=None,
     ):
-        if using_paged_attention(num_tokens, vllm_config):
-            # Paged Attention update logic
-            if _EXTRA_CTX.is_draft_model:
-                if _EXTRA_CTX.is_draft_model_prefill:
-                    graph_params = get_draft_graph_prefill_params()
-                else:
-                    graph_params = get_draft_graph_params()
+        if _EXTRA_CTX.is_draft_model:
+            if _EXTRA_CTX.is_draft_model_prefill:
+                graph_params = get_draft_graph_prefill_params()
             else:
-                graph_params = get_graph_params()
+                graph_params = get_draft_graph_params()
+        else:
+            graph_params = get_graph_params()
+        attn_params = graph_params.attn_params.get(num_tokens, [])
+        uses_paged_attention_params = len(attn_params) > 0 and all(len(param) == 9 for param in attn_params)
+
+        if uses_paged_attention_params or (using_paged_attention(num_tokens, vllm_config) and len(attn_params) == 0):
+            # Paged Attention update logic
             with torch.npu.stream(update_stream):
                 for key, param, handle, event in zip(
                     forward_context.attn_metadata,
@@ -472,7 +477,6 @@ class AscendAttentionBackendImpl(AttentionImpl):
                 attn_metadata = draft_attn_metadatas
                 attn_keys = list(attn_metadata[0].keys())
             else:
-                graph_params = get_graph_params()
                 attn_metadata = forward_context.attn_metadata
                 attn_keys = list(attn_metadata.keys())
             # For Qwen3-next, since the kv_cache_config has already categorized
@@ -495,6 +499,52 @@ class AscendAttentionBackendImpl(AttentionImpl):
                     graph_params.handles[num_tokens],
                     graph_params.events[num_tokens],
                 ):
+                    if len(param) == 9:
+                        (
+                            query,
+                            key_cache,
+                            value_cache,
+                            num_kv_heads,
+                            num_heads,
+                            scale,
+                            block_table,
+                            seq_lens,
+                            output,
+                        ) = param
+                        if _EXTRA_CTX.is_draft_model:
+                            draft_step = attn_count // num_layers
+                            seq_lens = attn_metadata[draft_step][key].seq_lens
+                            attn_count = attn_count + 1
+                        else:
+                            seq_lens = attn_metadata[key].seq_lens
+                        workspace = torch_npu._npu_paged_attention_get_workspace(
+                            query=query,
+                            key_cache=key_cache,
+                            value_cache=value_cache,
+                            num_kv_heads=num_kv_heads,
+                            num_heads=num_heads,
+                            scale_value=scale,
+                            block_table=block_table,
+                            context_lens=seq_lens,
+                            out=output,
+                        )
+                        torch.npu.graph_task_update_begin(update_stream, handle)
+                        torch_npu._npu_paged_attention(
+                            query=query,
+                            key_cache=key_cache,
+                            value_cache=value_cache,
+                            num_kv_heads=num_kv_heads,
+                            num_heads=num_heads,
+                            scale_value=scale,
+                            block_table=block_table,
+                            context_lens=seq_lens,
+                            out=output,
+                            workspace=workspace,
+                        )
+                        torch.npu.graph_task_update_end(update_stream)
+                        event.record(update_stream)
+                        continue
+
                     (
                         query,
                         key_cache,
@@ -1007,6 +1057,58 @@ class AscendAttentionBackendImpl(AttentionImpl):
             actual_seq_kvlen=attn_metadata.actual_seq_lengths_q,
         )[0]
 
+    def _forward_large_head_prefill_attention(
+        self,
+        query: torch.Tensor,
+        key: torch.Tensor,
+        value: torch.Tensor,
+        attn_metadata: AscendMetadata,
+        output: torch.Tensor,
+    ) -> torch.Tensor:
+        num_tokens = attn_metadata.actual_seq_lengths_q[-1]
+        query = query[:num_tokens]
+        key = key[:num_tokens]
+        value = value[:num_tokens]
+        sparse_mode = 4 if self.sliding_window is not None else 3 if attn_metadata.causal else 0
+        pre_tokens = self.sliding_window if self.sliding_window is not None else SWA_INT_MAX
+        next_tokens = 0 if attn_metadata.causal or self.sliding_window is not None else SWA_INT_MAX
+        attn_mask = attn_metadata.attn_mask
+        if attn_mask is not None and attn_mask.dtype not in (torch.bool, torch.uint8):
+            attn_mask = attn_mask.bool()
+        attn_output = torch_npu.npu_fusion_attention(
+            query=query,
+            key=key,
+            value=value,
+            head_num=self.num_heads,
+            input_layout="TND",
+            atten_mask=attn_mask,
+            scale=self.scale,
+            pre_tockens=pre_tokens,
+            next_tockens=next_tokens,
+            actual_seq_qlen=attn_metadata.actual_seq_lengths_q,
+            actual_seq_kvlen=attn_metadata.actual_seq_lengths_q,
+            sparse_mode=sparse_mode,
+        )[0]
+        output[:num_tokens] = attn_output[:num_tokens]
+        return output
+
+    def _should_use_large_head_attention_fallback(self) -> bool:
+        return self.sinks is None and self.head_size not in FIA_TND_SUPPORTED_HEAD_SIZES
+
+    def _get_current_token_shared_kv(
+        self,
+        attn_metadata: AscendMetadata,
+    ) -> tuple[torch.Tensor, torch.Tensor] | tuple[None, None]:
+        if self.key_cache is None or self.value_cache is None:
+            return None, None
+        num_tokens = attn_metadata.actual_seq_lengths_q[-1]
+        if attn_metadata.slot_mapping is None or attn_metadata.slot_mapping.numel() < num_tokens:
+            return None, None
+        slots = attn_metadata.slot_mapping[:num_tokens].long()
+        key = self.key_cache.reshape(-1, self.num_kv_heads, self.head_size).index_select(0, slots)
+        value = self.value_cache.reshape(-1, self.num_kv_heads, self.head_size).index_select(0, slots)
+        return key, value
+
     def do_kv_cache_update(
         self,
         layer: torch.nn.Module,
@@ -1043,6 +1145,10 @@ class AscendAttentionBackendImpl(AttentionImpl):
                 attn_metadata.reshape_cache_event = torch.npu.Event()
             if self.key_cache is None:
                 self.key_cache, self.value_cache = kv_cache[0], kv_cache[1]
+            if self.kv_sharing_target_layer_name is not None:
+                if self.is_kv_producer:
+                    attn_metadata.reshape_cache_event.record()
+                return query, key, value, output
             slots = attn_metadata.slot_mapping
             encoder_decoder = self.attn_type == AttentionType.ENCODER_DECODER
             DeviceOperator.reshape_and_cache(
@@ -1069,11 +1175,42 @@ class AscendAttentionBackendImpl(AttentionImpl):
     ):
         num_tokens = query.shape[0]
         if (
+            self.kv_sharing_target_layer_name is not None
+            and key is not None
+            and value is not None
+            and query.shape[0] == key.shape[0]
+            and attn_metadata.attn_state in (AscendAttentionState.PrefillNoCache, AscendAttentionState.ChunkedPrefill)
+        ):
+            shared_key, shared_value = self._get_current_token_shared_kv(attn_metadata)
+            if shared_key is not None and shared_value is not None:
+                return self._forward_large_head_prefill_attention(
+                    query,
+                    shared_key,
+                    shared_value,
+                    attn_metadata,
+                    output,
+                )
+
+        if (
             attn_metadata.attn_state == AscendAttentionState.DecodeOnly
             and using_paged_attention(num_tokens, self.vllm_config)
             and self.sliding_window is None
+        ) or (
+            self._should_use_large_head_attention_fallback()
+            and self.sliding_window is None
+            and attn_metadata.attn_state == AscendAttentionState.DecodeOnly
         ):
             output = self.forward_paged_attention(query, attn_metadata, output)
+        elif (
+            not _EXTRA_CTX.capturing
+            and self._should_use_large_head_attention_fallback()
+            and self.kv_sharing_target_layer_name is None
+            and key is not None
+            and value is not None
+            and query.shape[0] == key.shape[0]
+            and attn_metadata.attn_state in (AscendAttentionState.PrefillNoCache, AscendAttentionState.ChunkedPrefill)
+        ):
+            output = self._forward_large_head_prefill_attention(query, key, value, attn_metadata, output)
         else:
             output = self.forward_fused_infer_attention(query, key, value, attn_metadata, output, kv_cache)
 

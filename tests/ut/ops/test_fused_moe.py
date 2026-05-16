@@ -23,7 +23,10 @@ from pytest_mock import MockerFixture
 
 from tests.ut.base import TestBase
 from vllm_ascend.ascend_forward_context import MoECommType
-from vllm_ascend.ops.fused_moe.experts_selector import select_experts
+from vllm_ascend.ops.fused_moe.experts_selector import (
+    _custom_routing_accepts_num_experts,
+    select_experts,
+)
 from vllm_ascend.ops.fused_moe.fused_moe import AscendUnquantizedFusedMoEMethod
 from vllm_ascend.ops.fused_moe.moe_mlp import cumsum_group_list, unified_apply_mlp
 from vllm_ascend.ops.fused_moe.moe_runtime_args import (
@@ -268,6 +271,42 @@ class MockQuantMethod(nn.Module):
 
 
 class TestExpertsSelector:
+    def test_custom_routing_signature_without_num_experts(self):
+        def routing_function(hidden_states, gating_output, topk, renormalize):
+            pass
+
+        assert not _custom_routing_accepts_num_experts(routing_function)
+
+    def test_custom_routing_signature_with_num_experts(self):
+        def routing_function(hidden_states, gating_output, topk, renormalize, num_experts):
+            pass
+
+        assert _custom_routing_accepts_num_experts(routing_function)
+
+    def test_custom_routing_signature_with_kwargs(self):
+        def routing_function(**kwargs):
+            pass
+
+        assert _custom_routing_accepts_num_experts(routing_function)
+
+    def test_custom_routing_signature_uninspectable(self, mocker):
+        mocker.patch(
+            "vllm_ascend.ops.fused_moe.experts_selector.inspect.signature",
+            side_effect=ValueError,
+        )
+
+        assert not _custom_routing_accepts_num_experts(object())
+
+    def test_custom_routing_signature_unhashable_callable(self):
+        class RoutingFunction:
+            def __eq__(self, other: object) -> bool:
+                return self is other
+
+            def __call__(self, hidden_states, gating_output, topk, renormalize, num_experts):
+                pass
+
+        assert _custom_routing_accepts_num_experts(RoutingFunction())
+
     @pytest.mark.parametrize("num_experts", [256, 128])
     def test_select_experts(self, mock_dist_env, mock_moe_env, num_experts):
         x = torch.randn(8, 2)
