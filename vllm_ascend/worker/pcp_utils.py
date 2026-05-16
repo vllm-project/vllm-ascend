@@ -1312,10 +1312,12 @@ class PCPManager:
 
         # q_lens = mtp_token_len (num_scheduled_tokens)
         q_lens = torch.tensor(decode_num_scheduled_tokens[:self.num_decode_reqs], dtype=torch.int32)
-        # total_lens = history_len + mtp_token_len
-        total_lens = local_history_lens + q_lens
-        # context_lens = history_len (local)
-        context_lens = local_history_lens
+        # global_histories = decode_num_computed_tokens (global history lengths)
+        global_histories = torch.tensor(decode_num_computed_tokens, dtype=torch.int32)
+        # total_lens = global_history + mtp_token_len (global sequence length)
+        total_lens = global_histories + q_lens
+        # context_lens = total_lens - q_lens (consistent with reference)
+        context_lens = total_lens - q_lens
 
         # max indices for global sequences
         max_indices = total_lens - 1
@@ -1351,8 +1353,9 @@ class PCPManager:
             k_upper.new_full(k_upper.shape, -1)
         )
 
-        # mask: k_idx <= k_upper AND k_upper >= 0
-        mask = (k_indices[None, None, :] <= k_upper[:, :, None]) & (k_upper[:, :, None] >= 0)
+        # mask: k_idx > k_upper means k_idx is NOT in the masked region
+        # (i.e., k_idx can be attended to)
+        mask = (k_indices[None, None, :] > k_upper[:, :, None]) & (k_upper[:, :, None] >= 0)
         valid_positions = valid_q[:, :, None] & valid_k[:, None, :]
 
         # Get flattened valid mask (same as reference)
