@@ -262,6 +262,7 @@ class TestProfilingChunkScheduler(TestBase):
         model_config.hf_config = mock_hf_config
         model_config.hf_text_config = MagicMock()
         model_config.hf_text_config.is_encoder_decoder = False
+        model_config.runner_type = "generate"
 
         scheduler_config = SchedulerConfig(
             max_num_seqs=MAX_NUM_SEQS,
