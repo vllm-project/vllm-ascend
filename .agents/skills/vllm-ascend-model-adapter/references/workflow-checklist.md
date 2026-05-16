@@ -1,15 +1,23 @@
 # Workflow Checklist
 
+All scripts referenced below live in `.agents/skills/vllm-ascend-model-adapter/scripts/`.
+Make them executable once: `chmod +x .agents/skills/vllm-ascend-model-adapter/scripts/*.sh`
+
 ## 0) Environment prerequisites
 
-Set these once per session. Defaults match the official vllm-ascend Docker image.
+Set these once per session using the values confirmed at the Entry Points step.
 
 ```bash
-# --- configurable paths (adjust if your layout differs) ---
-VLLM_SRC=/vllm-workspace/vllm              # vLLM source root
-VLLM_ASCEND_SRC=/vllm-workspace/vllm-ascend # vllm-ascend source root
-WORK_DIR=/workspace                         # directory to run vllm serve from
-MODEL_ROOT=/models                          # parent directory of model checkpoints
+# --- set to values confirmed with user at entry ---
+VLLM_SRC=<user-specified vLLM source root>          # default: /vllm-workspace/vllm
+VLLM_ASCEND_SRC=<user-specified vllm-ascend root>   # default: /vllm-workspace/vllm-ascend
+WORK_DIR=/workspace                                  # directory to run vllm serve from
+MODEL_ROOT=<parent dir of MODEL_PATH>                # derived from user-specified checkpoint path
+
+# activate user-specified Python environment (if provided)
+# e.g.: conda activate vllm-ascend
+#       source /path/to/venv/bin/activate
+<activation command>
 ```
 
 Expected environment:
@@ -18,40 +26,34 @@ Expected environment:
 - Software: official vllm-ascend Docker image (see `./Dockerfile` for full contents)
 - TP=16 typical for A3 (16-NPU), TP=8 typical for A2 (8-NPU)
 
+## 0.5) NPU environment sanity check
+
+Run once at session start before any other work. If any check fails, stop and resolve the environment issue first.
+
+```bash
+# Default ATB path is /usr/local/Ascend/nnal/atb/set_env.sh.
+# If that path does not exist, the script will warn and continue without it.
+# Pass the correct path as the second argument if needed.
+bash scripts/check_npu_env.sh "$TP_SIZE"
+# or with explicit ATB path:
+bash scripts/check_npu_env.sh "$TP_SIZE" /path/to/atb/set_env.sh
+# or to skip ATB sourcing entirely:
+bash scripts/check_npu_env.sh "$TP_SIZE" none
+```
+
+If any assertion fails: **stop here**, resolve the environment issue, then restart the checklist from Step 0.
+
 ## 1) Fast triage commands
 
 ```bash
 MODEL_PATH=${MODEL_ROOT}/<model-name>
-echo "MODEL_PATH=$MODEL_PATH"
-
-# model inventory
-ls -la "$MODEL_PATH"
-
-# architecture + quant hints
-rg -n "architectures|model_type|quantization_config|torch_dtype|max_position_embeddings|num_nextn_predict_layers|version|num_attention_heads|num_key_value_heads|num_experts" "$MODEL_PATH/config.json"
-
-# state-dict key layout hints (if index exists)
-ls -la "$MODEL_PATH"/*index*.json 2>/dev/null || true
-
-# model custom code (if exists)
-ls -la "$MODEL_PATH"/*.py 2>/dev/null || true
+bash scripts/triage_model.sh "$MODEL_PATH"
 ```
 
 ## 2) Confirm implementation and delivery roots
 
 ```bash
-# implementation roots (fixed by Dockerfile)
-cd "$VLLM_SRC" && git status -s
-cd "$VLLM_ASCEND_SRC" && git status -s
-
-# runtime import source check (expect vllm-workspace path)
-python - <<'PY'
-import vllm
-print(vllm.__file__)
-PY
-
-# direct-run working directory
-cd "$WORK_DIR" && pwd
+bash scripts/check_roots.sh "$VLLM_SRC" "$VLLM_ASCEND_SRC" "$WORK_DIR"
 
 # delivery root (current repo)
 cd <current-repo>
@@ -61,21 +63,80 @@ git status -s
 ## 3) Session hygiene (before rerun)
 
 ```bash
-# stop stale servers
-pkill -f "vllm serve|api_server|EngineCore" || true
-
-# confirm port 8000 is free
-netstat -ltnp 2>/dev/null | rg ':8000' || true
+bash scripts/session_reset.sh
+# or with a custom port:
+bash scripts/session_reset.sh 8080
 ```
 
-When user explicitly requests reset:
+When user explicitly requests reset (destructive — confirm first):
 
 ```bash
 cd "$VLLM_SRC" && git reset --hard && git clean -fd
 cd "$VLLM_ASCEND_SRC" && git reset --hard && git clean -fd
 ```
 
-## 4) New model onboarding checklist
+## 4) Model type classification
+
+```bash
+python scripts/classify_model.py "$MODEL_PATH"
+```
+
+The script reads `config.json` and outputs:
+
+- **High-level type**: LLM / VLM (Vision-Language) / Whisper (ASR)
+- **LLM attention sub-type**: standard full attention / sliding-window / MLA / Mamba / hybrid
+- **MoE**: yes/no with routed expert count
+- **MTP**: enabled/disabled with layer count
+- **Quantization**: type or none
+- **Key numeric parameters**
+
+The final `CLASSIFICATION_SUMMARY:` line is a JSON object for easy parsing.
+
+## 5) Operator compatibility gate
+
+Scan the model's new modeling code for custom operators:
+
+```bash
+# look for CUDA extensions, triton kernels, custom ops
+rg -n "torch\.ops\.|\.cu\b|triton\.jit|@triton\.jit|load_inline|CUDAExtension" \
+  "$MODEL_PATH"/*.py "$VLLM_SRC"/vllm/model_executor/models/<new_model>.py 2>/dev/null || true
+```
+
+Decision table:
+
+| Operator type | Ascend status | Action |
+| --- | --- | --- |
+| Torch (native PyTorch) | ✅ functional | Note performance uncertainty in report |
+| Triton kernel | ⚠️ uncertain | Verify on Ascend; check accuracy |
+| CUDA kernel with fallback | ❌ CUDA blocked | Use fallback; document path |
+| CUDA kernel, no fallback | ❌ blocked | **Early exit** — file GitHub issue, skip validation |
+
+If early-exit applies, the GitHub issue must include:
+
+- operator name and file location,
+- why no fallback exists,
+- recommended path (e.g., custom Ascend op in `vllm-ascend`).
+
+## 6) Framework-side code analysis
+
+Identify vLLM framework modules changed alongside the new model:
+
+```bash
+# check what non-model files were touched in the upstream commit
+git -C "$VLLM_SRC" diff HEAD~1 --name-only | rg -v "model_executor/models/"
+```
+
+For each changed framework module, check vllm-ascend coverage:
+
+```bash
+# does vllm-ascend already patch this module?
+rg -rn "<module_name>" "$VLLM_ASCEND_SRC"/vllm_ascend/ 2>/dev/null || true
+```
+
+- If covered by vllm-ascend → no action needed; change is inherited automatically.
+- If not covered and contains Ascend-incompatible logic → add minimal override under `$VLLM_ASCEND_SRC/vllm_ascend/`.
+
+## 7) New model onboarding checklist
 
 ```bash
 # architecture mapping check in vLLM
@@ -101,15 +162,27 @@ If architecture is missing/incompatible, minimally do:
 - `$VLLM_SRC/vllm/model_executor/models/registry.py`
 - `$VLLM_ASCEND_SRC/vllm_ascend/...` (only if backend behavior requires it)
 
-## 6) Syntax sanity checks
+## 6.5) Intermediate NPU unit-test gate
+
+For each new operator (Step 5) and changed framework module (Step 6), write and run a minimal NPU unit test **before** launching `vllm serve`.
 
 ```bash
-python -m py_compile \
-  "$VLLM_SRC"/vllm/model_executor/models/<new_model>.py
+mkdir -p /tmp/npu_unit_tests
 
-python -m py_compile \
-  "$VLLM_SRC"/vllm/transformers_utils/processors/<new_model>.py 2>/dev/null || true
+# run all unit tests written for this adaptation
+python /tmp/npu_unit_tests/test_<operator_or_module>.py
 ```
+
+Retry policy (per test):
+
+| Attempt | Action |
+| --- | --- |
+| Test passes | Proceed to Stage A serve |
+| Fails (attempt 1) | Fix and re-run |
+| Fails (attempt 2) | Fix and re-run |
+| Fails after 2 attempts | **Early exit** — file GitHub issue; skip serve |
+
+GitHub issue must include: failing test name, error + stack trace, both fix attempts, recommended path forward.
 
 ## 7) Two-stage serve templates (direct run, default `:8000`)
 
@@ -174,19 +247,9 @@ TORCHDYNAMO_DISABLE=1
 ## 8) Readiness + smoke checks (must verify true-ready)
 
 ```bash
-# readiness
-for i in $(seq 1 200); do
-  curl -sf http://127.0.0.1:8000/v1/models >/tmp/models.json && break
-  sleep 3
-done
-
-# text smoke (required)
-curl -s http://127.0.0.1:8000/v1/chat/completions \
-  -H 'Content-Type: application/json' \
-  -d '{"model":"<served-name>","messages":[{"role":"user","content":"say hi"}],"temperature":0,"max_tokens":16}'
-
-# VL smoke (required for multimodal models)
-# send one text+image OpenAI-compatible request and require non-empty choices.
+# text smoke (required); add --multimodal for VL models
+bash scripts/smoke_test.sh <served-name>
+bash scripts/smoke_test.sh <served-name> 8000 --multimodal
 ```
 
 > `Application startup complete` alone is not success. If first request crashes, treat as runtime failure (false-ready).

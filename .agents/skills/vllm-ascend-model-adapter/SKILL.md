@@ -17,43 +17,143 @@ Adapt Hugging Face or local models to run on `vllm-ascend` with minimal changes,
 4. If checkpoint is fp8-on-NPU, read `references/fp8-on-npu-lessons.md`.
 5. Before handoff, read `references/deliverables.md`.
 
+## Scripts
+
+Reusable shell/Python scripts live in `.agents/skills/vllm-ascend-model-adapter/scripts/`. Make them executable once:
+
+```bash
+chmod +x .agents/skills/vllm-ascend-model-adapter/scripts/*.sh
+```
+
+| Script | Purpose |
+|---|---|
+| `check_npu_env.sh <TP_SIZE> [ATB_PATH]` | NPU sanity check (CANN, ATB, torch_npu, device count) |
+| `check_roots.sh <VLLM_SRC> <VLLM_ASCEND_SRC> [WORK_DIR]` | Verify source roots and runtime import |
+| `triage_model.sh <MODEL_PATH>` | Model directory listing + config.json field scan |
+| `classify_model.py <MODEL_PATH>` | Classify model type from config.json |
+| `session_reset.sh [PORT]` | Kill stale vllm processes and verify port is free |
+| `smoke_test.sh <SERVED_NAME> [PORT] [--multimodal]` | Readiness poll + OpenAI-compatible smoke requests |
+
 ## Hard constraints
 
 - Never upgrade `transformers`.
-- Primary implementation roots are fixed by Dockerfile:
-    - `/vllm-workspace/vllm`
-    - `/vllm-workspace/vllm-ascend`
+- Primary implementation roots are user-specified at entry (see Entry Points above). Defaults are `/vllm-workspace/vllm` and `/vllm-workspace/vllm-ascend` if the user does not specify otherwise.
 - Start `vllm serve` from `/workspace` with direct command by default.
 - Default API port is `8000` unless user explicitly asks otherwise.
-- Feature-first default: try best to validate ACLGraph / EP / flashcomm1 / MTP / multimodal out-of-box.
+- Feature-first default: try best to validate ACLGraph / EP / flashcomm1 / multimodal out-of-box. MTP is validated only when the checkpoint explicitly supports it (inferred from config + weight keys in Step 2).
 - `--enable-expert-parallel` and flashcomm1 checks are MoE-only; for non-MoE models mark as not-applicable with evidence.
 - If any feature cannot be enabled, keep evidence and explain reason in final report.
 - Do not rely on `PYTHONPATH=<modified-src>:$PYTHONPATH` unless debugging fallback is strictly needed.
 - Keep code changes minimal and focused on the target model.
+- **Never introduce modeling files or patches into `vllm-ascend`**. All model adaptation code belongs in `/vllm-workspace/vllm`. If a model cannot function on Ascend without adding modeling code to `vllm-ascend`, stop — raise a GitHub issue to analyze the root cause instead.
 - Final deliverable commit must be one single signed commit in the current working repo (`git commit -sm ...`).
 - Keep final docs in Chinese and compact.
 - **Dummy-first is encouraged for speed, but dummy is NOT fully equivalent to real weights.**
 - **Never sign off adaptation using dummy-only evidence; real-weight gate is mandatory.**
 
+## Entry points
+
+When this skill is invoked, **use the `AskUserQuestion` tool to interactively collect the required inputs before doing anything else**. Ask all inputs in a single call so the user sees one consolidated form. Do not proceed until all values are confirmed.
+
+Call `AskUserQuestion` in **two rounds** (tool limit: max 4 questions per call, min 2 options each):
+
+**Round 1** (4 questions):
+1. **Model checkpoint path** — options: `/models/<model-name>` / `Other (specify)`
+2. **Served model name** — options: `Same as checkpoint basename` / `Other (specify)`
+3. **Tensor parallel size** — options: `8 (A2)`, `16 (A3)`, `Other (specify)`
+4. **Python environment activation command** — options: `conda activate vllm-ascend`, `source <venv>/bin/activate`, `Other (specify)`, `None (already active)`
+
+**Round 2** (2 questions):
+5. **vLLM source root** — options: `/vllm-workspace/vllm` / `Other (specify)`
+6. **vllm-ascend source root** — options: `/vllm-workspace/vllm-ascend` / `Other (specify)`
+
+**Round 3 (conditional)** — only triggered during the NPU sanity check (§0.5), not upfront:
+- **CANN toolkit `set_env.sh` path** — ask via `AskUserQuestion` only if not auto-detected under `/usr/local/Ascend`. Options: `/usr/local/Ascend/ascend-toolkit/set_env.sh` / `Other (specify)`.
+- **Additional env file (ATB/NNAL)** — after sourcing CANN, ask: "Is there an additional env file to source (e.g. ATB/NNAL `set_env.sh`)?" Options: `Yes (specify path in notes)` / `No`. Source if provided.
+
+After the user submits, echo the resolved values back in a confirmation block before starting the execution playbook:
+
+```
+  Model checkpoint path  : <value>
+  Served model name      : <value>
+  Tensor parallel size   : <value>
+  vLLM source root       : <value>
+  vllm-ascend source root: <value>
+  Python env activate    : <value>
+```
+
+Then immediately run the activation command (if not `None`) and verify it succeeded before proceeding:
+
+```bash
+# activate the user-specified environment
+<activation command>
+
+# verify correct python is active
+which python
+python -c "import sys; print(sys.executable, sys.version)"
+```
+
+If activation fails, stop and report the error before continuing.
+
+---
+
 ## Execution playbook
 
 ### 1) Collect context
 
-- Confirm model path (default `/models/<model-name>`; if environment differs, confirm with user explicitly).
-- Confirm implementation roots (`/vllm-workspace/vllm`, `/vllm-workspace/vllm-ascend`).
-- Confirm delivery root (the current git repo where the final commit is expected).
-- Confirm runtime import path points to `/vllm-workspace/*` install.
-- Use default expected feature set: ACLGraph + EP + flashcomm1 + MTP + multimodal (if model has VL capability).
-- User requirements extend this baseline, not replace it.
+- **Run NPU environment sanity check first** using the provided script:
+  ```bash
+  bash scripts/check_npu_env.sh "$TP_SIZE"
+  # If ATB/NNAL set_env.sh is at a non-default path, pass it as the second argument.
+  # Default path tried: /usr/local/Ascend/nnal/atb/set_env.sh
+  ```
+  Verifies: CANN sourced, ATB/NNAL sourced, NPU devices visible, `torch_npu` importable, NPU tensor creation works, available NPU count ≥ TP size. If any check fails, stop and resolve before proceeding. See `references/workflow-checklist.md` §0.5 for details.
+- **Confirm implementation roots** using the provided script:
+  ```bash
+  bash scripts/check_roots.sh "$VLLM_SRC" "$VLLM_ASCEND_SRC" "$WORK_DIR"
+  ```
+- Model path, served model name, TP size, and implementation roots are already confirmed via the Entry Points above — use those values throughout.
 
 ### 2) Analyze model first
 
-- Inspect `config.json`, processor files, modeling files, tokenizer files.
-- Identify architecture class, attention variant, quantization type, and multimodal requirements.
+- **Run fast triage** to collect model inventory and key config fields:
+  ```bash
+  bash scripts/triage_model.sh "$MODEL_PATH"
+  ```
+- **Classify model type** using the provided script:
+  ```bash
+  python scripts/classify_model.py "$MODEL_PATH"
+  ```
+  The script reads `config.json` and outputs: high-level type (LLM / VLM / Whisper), attention sub-type (standard / sliding-window / MLA / Mamba / hybrid), MoE status, MTP status, quantization type, and key numeric parameters. Use the `CLASSIFICATION_SUMMARY:` JSON line for downstream decisions.
+- Inspect processor files, modeling files, tokenizer files as needed.
 - Check state-dict key prefixes (and safetensors index) to infer mapping needs.
 - Decide whether support already exists in `vllm/model_executor/models/registry.py`.
 
-### 3) Choose adaptation strategy (new-model capable)
+### 3) Analyze new operators (Ascend compatibility gate)
+
+- Identify any new operators introduced in the model or its modeling code.
+- Classify each new operator by type and draw the appropriate conclusion:
+    - **Torch** (native PyTorch op): Functional on Ascend ✅; performance is uncertain — note in report.
+    - **Triton** kernel: Functional correctness uncertain ⚠️; requires explicit verification on Ascend; accuracy also uncertain.
+    - **CUDA** kernel: Not supported on Ascend ❌; check whether a fallback implementation exists.
+- **CUDA operator early-exit gate**: If any CUDA operator has no fallback (pure CUDA kernel with no Torch/Triton alternative), **stop here** — skip all subsequent validation steps and directly file a GitHub issue that explains:
+    - which operator blocks Ascend support,
+    - why no fallback exists,
+    - recommended path forward (e.g., implement a custom Ascend op in `vllm-ascend`).
+- **Triton operator early-exit gate**: If a Triton kernel is verified to be non-functional on Ascend (correctness failure or unacceptable accuracy degradation), **stop here** — file a GitHub issue that explains:
+    - which Triton kernel fails and the observed failure mode,
+    - recommended path forward (e.g., replace with a Torch-native fallback or implement a custom Ascend op).
+- If every CUDA operator has a fallback and every Triton kernel passes verification, document fallback paths and continue.
+
+### 4) Analyze framework-side code
+
+- Identify vLLM framework modules changed to support the new model (e.g., scheduler, attention backend, sampler, weight loader, worker) — anything beyond the model file and operators.
+- For each changed module, check whether `vllm-ascend` already overrides or depends on it:
+    - If the module is a **common vLLM module already covered by vllm-ascend**, check whether the existing vllm-ascend patch still applies correctly after the upstream change. If the patch needs updating, update it; otherwise no further action is needed.
+    - If the module is **not covered by vllm-ascend** and contains Ascend-incompatible logic, add a minimal corresponding override under `/vllm-workspace/vllm-ascend`.
+- Keep framework-side patches minimal and scoped to the incompatible code paths only.
+
+### 5) Choose adaptation strategy (new-model capable)
 
 - Reuse existing vLLM architecture if compatible.
 - If architecture is missing or incompatible, implement native support:
@@ -63,15 +163,66 @@ Adapt Hugging Face or local models to run on `vllm-ascend` with minimal changes,
     - implement explicit weight loading/remap rules (including fp8 scale pairing, KV/QK norm sharding, rope variants).
 - If remote code needs newer transformers symbols, do not upgrade dependency.
 - If unavoidable, copy required modeling files from sibling transformers source and keep scope explicit.
-- If failure is backend-specific (kernel/op/platform), patch minimal required code in `/vllm-workspace/vllm-ascend`.
+- If failure is backend-specific (kernel/op/platform) and would require adding modeling code to `vllm-ascend`, do not proceed — raise a GitHub issue to analyze the root cause instead.
 
-### 4) Implement minimal code changes (in implementation roots)
+### 6) Implement minimal code changes (in vLLM source only)
 
+- Do not introduce modeling files or patches in `/vllm-workspace/vllm-ascend`.
 - Touch only files required for this model adaptation.
 - Keep weight mapping explicit and auditable.
 - Avoid unrelated refactors.
 
-### 5) Two-stage validation on Ascend (direct run)
+### 6.5) Intermediate NPU unit-test gate (before full serve)
+
+Run targeted unit tests on NPU for any new operators (from Step 3) and framework changes (from Step 4) **before** launching the full serve pipeline. This catches NPU-specific failures in seconds rather than minutes.
+
+Run the test directly:
+
+```bash
+python /tmp/npu_unit_tests/test_<operator_or_module>.py
+```
+
+#### What to test
+
+- **New operators**: for each new Torch/Triton operator introduced by the model, write a minimal standalone test that constructs a representative input tensor and asserts output shape and dtype are correct on NPU.
+- **Framework changes**: for each vLLM framework module touched (scheduler, attention backend, sampler, weight loader, worker), write a unit test that exercises the changed code path on NPU with a small synthetic input.
+
+#### Test structure
+
+```python
+# example skeleton — adapt per operator/module
+import torch
+import torch_npu  # ensures NPU backend is initialized
+
+def test_<operator_or_module>():
+    # construct minimal representative input on NPU
+    x = torch.randn(<shape>, dtype=torch.bfloat16, device="npu")
+    # invoke the operator or changed module path
+    out = <operator_or_function>(x, ...)
+    # assert correctness: shape, dtype, no exception, optionally a numeric check
+    assert out.shape == <expected_shape>
+    assert out.dtype == torch.bfloat16
+    assert not torch.isnan(out).any()
+
+if __name__ == "__main__":
+    test_<operator_or_module>()
+    print("PASS")
+```
+
+Place tests under `/tmp/npu_unit_tests/` (ephemeral; not committed).
+
+#### Retry and early-exit policy
+
+- Run each test. If it **passes**: proceed to Step 7.
+- If it **fails**: attempt a fix and re-run. This counts as **attempt 1**.
+- If it **fails again**: attempt a second fix and re-run. This counts as **attempt 2**.
+- If it **still fails after 2 attempts**: **early exit** — do not proceed to serve validation. File a GitHub issue documenting:
+    - which operator or module test failed,
+    - the observed failure mode (error message + stack trace),
+    - both fix attempts and why they did not resolve the issue,
+    - recommended path forward.
+
+### 7) Two-stage validation on Ascend (direct run)
 
 #### Stage A: dummy fast gate (recommended first)
 
@@ -95,11 +246,13 @@ Adapt Hugging Face or local models to run on `vllm-ascend` with minimal changes,
 - Require HTTP 200 and non-empty output before declaring success.
 - Do not pass Stage B on startup-only evidence.
 
-### 6) Validate inference and features
+### 8) Validate inference and features
 
-- Send `GET /v1/models` first.
-- Send at least one OpenAI-compatible text request.
-- For multimodal models, require at least one text+image request.
+- Run readiness poll and smoke requests using the provided script:
+  ```bash
+  bash scripts/smoke_test.sh <served-name>              # text-only
+  bash scripts/smoke_test.sh <served-name> 8000 --multimodal  # VL models
+  ```
 - Validate architecture registration and loader path with logs (no unresolved architecture, no fatal missing-key errors).
 - Try feature-first validation: EP + ACLGraph path first; eager path as fallback/isolation.
 - If startup succeeds but first request crashes (false-ready), treat as runtime failure and continue root-cause isolation.
@@ -108,7 +261,9 @@ Adapt Hugging Face or local models to run on `vllm-ascend` with minimal changes,
 - Capacity baseline by default (single machine): `max-model-len=128k` + `max-num-seqs=16`.
 - Then expand concurrency (e.g., 32/64) if requested or feasible.
 
-### 7) Backport, generate artifacts, and commit in delivery repo
+> **Note**: Accuracy evaluation and performance benchmarking are out of scope for this skill. They are handled by a dedicated separate skill. If requested, invoke that skill after completing this step.
+
+### 9) Backport, generate artifacts, and commit in delivery repo
 
 - If implementation happened in `/vllm-workspace/*`, backport minimal final diff to current working repo.
 - Generate test config YAML at `tests/e2e/models/configs/<ModelName>.yaml` following the schema of existing configs (must include `model_name`, `hardware`, `tasks` with accuracy metrics, and `num_fewshot`). Use accuracy results from evaluation to populate metric values.
@@ -117,7 +272,7 @@ Adapt Hugging Face or local models to run on `vllm-ascend` with minimal changes,
 - Confirm test config YAML and tutorial doc are included in the staged files.
 - Commit code changes once (single signed commit).
 
-### 8) Prepare handoff artifacts
+### 10) Prepare handoff artifacts
 
 - Write comprehensive Chinese analysis report.
 - Write compact Chinese runbook for server startup and validation commands.
@@ -130,7 +285,7 @@ Adapt Hugging Face or local models to run on `vllm-ascend` with minimal changes,
 
 - Service starts successfully from `/workspace` with direct command.
 - OpenAI-compatible inference request succeeds (not startup-only).
-- Key feature set is attempted and reported: ACLGraph / EP / flashcomm1 / MTP / multimodal.
+- Key feature set is attempted and reported: ACLGraph / EP / flashcomm1 / multimodal. MTP reported if checkpoint supports it.
 - Capacity baseline (`128k + bs16`) result is reported, or explicit reason why not feasible.
 - **Dummy stage evidence is present (if used), and real-weight stage evidence is present (mandatory).**
 - Test config YAML exists at `tests/e2e/models/configs/<ModelName>.yaml` and follows the established schema (`model_name`, `hardware`, `tasks`, `num_fewshot`).
