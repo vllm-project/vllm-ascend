@@ -4027,20 +4027,22 @@ class NPUModelRunner(GPUModelRunner):
         from vllm.model_executor.layers.rotary_embedding import _ROPE_DICT
         from vllm.v1.worker.workspace import reset_workspace_manager
 
-        # Calls torch.npu.synchronize()
+        # Synchronize all pending NPU operations before cleanup
+        torch.npu.synchronize()
+        
         if hasattr(self, "kv_caches") and self.kv_caches:
-            torch.npu.synchronize()
             for i in range(len(self.kv_caches)):
                 self.kv_caches[i] = None  # type: ignore
             self.kv_caches.clear()
-        
-        if hasattr(self, "cross_layers_kv_cache"):
-            torch.npu.synchronize()
+
+        if hasattr(self, "cross_layers_kv_cache") and self.cross_layers_kv_cache:
             for i in range(len(self.cross_layers_kv_cache)):
                 self.cross_layers_kv_cache[i] = None  # type: ignore
             self.cross_layers_kv_cache.clear()
 
-        self.compilation_config.static_forward_context.clear()
+        if hasattr(self, "compilation_config") and self.compilation_config:
+            self.compilation_config.static_forward_context.clear()
+        
         self.model = None  # type: ignore[assignment]
         _ROPE_DICT.clear()
 
