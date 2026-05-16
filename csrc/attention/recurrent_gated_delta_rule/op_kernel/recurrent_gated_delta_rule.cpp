@@ -11,7 +11,11 @@
  * \file recurrent_gated_delta_rule.cpp
  * \brief
  */
+#if defined(__CCE_AICORE__) && __CCE_AICORE__ == 310
+#include "arch35/recurrent_gated_delta_rule.h"
+#else
 #include "recurrent_gated_delta_rule.h"
+#endif
 #include "recurrent_gated_delta_rule_tiling_data.h"
 
 
