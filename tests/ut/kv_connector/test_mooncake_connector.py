@@ -11,6 +11,7 @@ from typing import Any
 from unittest.mock import MagicMock, patch
 
 import msgspec
+import torch
 import zmq
 from vllm.utils.network_utils import make_zmq_path
 
@@ -1159,6 +1160,21 @@ class TestMooncakeConnectorWorker(unittest.TestCase):
         self.assertTrue(worker.use_mla)
         self.assertEqual(len(worker.block_len), 2)
 
+    def test_register_kv_caches_gdn_mamba_case(self):
+        self.vllm_config.model_config.hf_text_config.num_hidden_layers = 1
+        conv_state = torch.empty(4, 12, 3, dtype=torch.float16)
+        ssm_state = torch.empty(4, 2, 8, 4, dtype=torch.float16)
+        gdn_caches = {"layer1": (conv_state, ssm_state)}
+
+        worker = MooncakeConnectorWorker(self.vllm_config, self.engine_id)
+        worker.register_kv_caches(gdn_caches)
+
+        self.assertTrue(worker.use_mamba)
+        self.assertFalse(worker.use_mla)
+        self.assertFalse(worker.use_sparse)
+        self.assertEqual(worker.tp_num_need_pulls, 1)
+        self.assertEqual(worker.block_len, [12 * 3 * 2, 2 * 8 * 4 * 2])
+
     def test_device_id_selection_with_physical_devices(self):
         # Test with physical devices set
         worker = MooncakeConnectorWorker(self.vllm_config, self.engine_id)
@@ -1366,6 +1382,42 @@ class TestMooncakeConnectorWorker(unittest.TestCase):
             get_kv_split_metadata(False, 1, 1, 8, 1, 0, 8, 2, 8, 30000, [1], [1], 0, 16),
             get_kv_split_metadata(False, 1, 1, 8, 1, 0, 16, 2, 8, 30000, [1], [1], 0),
         )
+
+    def test_get_kv_split_metadata_gdn_mamba_with_pcp(self):
+        worker = MooncakeConnectorWorker(self.vllm_config, self.engine_id)
+        worker.use_mamba = True
+        worker.use_mla = False
+        worker.use_sparse = False
+        worker.pcp_size = 1
+        worker.dcp_size = 1
+        worker.dcp_rank = 0
+        worker.tp_size = 8
+        worker.tp_rank = 1
+        worker.pcp_rank = 0
+        worker._prefill_tp_size = 8
+        worker.local_remote_block_port_mapping = {}
+        worker.remote_port_send_num = {}
+        worker.block_size = 16
+        worker.num_key_value_heads = 1
+
+        meta = types.SimpleNamespace()
+        meta.remote_pcp_size = 2
+        meta.remote_dcp_size = 1
+        meta.remote_ptp_size = None
+        meta.remote_port = 30000
+        meta.remote_block_ids = [1]
+        meta.local_block_ids = [1]
+        meta.num_external_tokens = worker.block_size
+        meta.num_prompt_blocks = 1
+        meta.remote_engine_id = "remote"
+        meta.remote_host = "127.0.0.1"
+        meta.remote_multi_nodes_meta_mapping = {}
+
+        remote_ports, local_blocks, remote_blocks = worker._get_kv_split_metadata("req-gdn", meta)
+
+        self.assertEqual(remote_ports, [[30009], [30001]])
+        self.assertEqual(local_blocks, [[], [1]])
+        self.assertEqual(remote_blocks, [[], [1]])
 
     def test_get_tp_num_need_pulls(self):
         worker = MooncakeConnectorWorker(self.vllm_config, self.engine_id)

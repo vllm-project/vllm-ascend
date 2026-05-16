@@ -65,6 +65,63 @@ GET_META_MSG = b"get_meta_msg"
 DONE_RECVING_MSG = b"done_recving_msg"
 
 
+def _get_cache_shape(cache: torch.Tensor) -> tuple[int, ...] | None:
+    try:
+        shape = tuple(cache.shape)
+        if shape:
+            return shape
+    except (AttributeError, TypeError):
+        pass
+
+    try:
+        shape = cache.size()
+        if isinstance(shape, tuple):
+            return shape
+    except (AttributeError, TypeError):
+        pass
+
+    return None
+
+
+def _is_mamba_cache_tuple(kv_cache_tuple: Any) -> bool:
+    """Detect Mamba/GDN state caches.
+
+    GDN uses MambaSpec and stores per-block state tensors, for example
+    conv_state: [num_blocks, conv_dim, state_len] and
+    ssm_state: [num_blocks, num_heads, v_dim, k_dim].  These tensors are not
+    paged attention K/V caches and must not go through MLA/GQA head splitting.
+    """
+    if not isinstance(kv_cache_tuple, (list, tuple)):
+        return False
+
+    first_shape = _get_cache_shape(kv_cache_tuple[0])
+    return first_shape is not None and len(first_shape) == 3
+
+
+def _is_mla_cache_tuple(kv_cache_tuple: Any) -> bool:
+    if not isinstance(kv_cache_tuple, (list, tuple)) or len(kv_cache_tuple) != 2:
+        return False
+    if _is_mamba_cache_tuple(kv_cache_tuple):
+        return False
+    try:
+        return kv_cache_tuple[0].size(-1) != kv_cache_tuple[1].size(-1)
+    except TypeError:
+        return False
+
+
+def _as_cache_tuple(cache_or_caches: Any) -> tuple[torch.Tensor, ...]:
+    if isinstance(cache_or_caches, (list, tuple)):
+        return tuple(cache_or_caches)
+    return (cache_or_caches,)
+
+
+def _get_num_cache_per_layer(kv_caches: dict[str, Any]) -> int:
+    if len(kv_caches) == 0:
+        return 1
+    cache_or_caches = next(iter(kv_caches.values()))
+    return len(_as_cache_tuple(cache_or_caches))
+
+
 class RemotePortInfo(TypedDict):
     num: int
     host: str
@@ -334,7 +391,14 @@ class KVCacheRecvingThread(threading.Thread):
         self.remote_te_port: dict[str, dict[int, int]] = SizedDict()
         self.block_len = block_len
         # TODO(jianzs): find a better way to detect MLA.
-        self.use_mla = len(block_len) == 2
+        first_kv_cache_tuple = next(iter(kv_caches.values()), None)
+        if first_kv_cache_tuple is not None:
+            first_kv_cache_tuple = _as_cache_tuple(first_kv_cache_tuple)
+        self.use_mamba = _is_mamba_cache_tuple(first_kv_cache_tuple)
+        if first_kv_cache_tuple is None:
+            self.use_mla = len(block_len) == 2
+        else:
+            self.use_mla = _is_mla_cache_tuple(first_kv_cache_tuple)
 
         self.request_queue: queue.Queue[Any] = queue.Queue()
         self.executor = ThreadPoolExecutor(max_workers=32)
@@ -360,7 +424,7 @@ class KVCacheRecvingThread(threading.Thread):
             rank: get_prefill_pp_indices(self.num_layers, rank, self._prefill_pp_size, prefill_pp_layer_partition)
             for rank in range(self._prefill_pp_size)
         }
-        if not is_vl_model(vllm_config):
+        if not is_vl_model(vllm_config) and not self.use_mamba:
             if self.use_mla:
                 self.k_head_dim = self.model_config.hf_text_config.kv_lora_rank
                 self.v_head_dim = self.model_config.hf_text_config.qk_rope_head_dim
@@ -568,7 +632,7 @@ class KVCacheRecvingThread(threading.Thread):
         if self.vllm_config.speculative_config is not None:
             if prefill_pp_rank == self._prefill_pp_size - 1:
                 end_layer_index = end_layer_index + self.num_draft_layers
-        num_cache_per_layer = len(list(self.kv_caches.values())[0])  # Number of KV caches per layer
+        num_cache_per_layer = _get_num_cache_per_layer(self.kv_caches)  # Number of KV caches per layer
         local_kv_caches_base_addrs = self.kv_caches_base_addr[self.local_engine_id][self.local_handshake_port][
             first_layer_index * num_cache_per_layer : end_layer_index * num_cache_per_layer
         ]
@@ -579,11 +643,16 @@ class KVCacheRecvingThread(threading.Thread):
 
         req_start_time = time.perf_counter()
         src_list, dst_list, length_list = [], [], []
+        num_cache_per_layer = _get_num_cache_per_layer(self.kv_caches)
+        local_kv_caches_block_lens = self.block_len[
+            first_layer_index * num_cache_per_layer : end_layer_index * num_cache_per_layer
+        ]
+        use_flat_block_lens = len(local_kv_caches_block_lens) == len(local_kv_caches_base_addrs)
         block_length = len(self.block_len)
         for k, (src_layer_base_addr, dst_layer_base_addr) in enumerate(
             zip(local_kv_caches_base_addrs, remote_kv_caches_base_addrs)
         ):
-            block_len = self.block_len[k % block_length]
+            block_len = local_kv_caches_block_lens[k] if use_flat_block_lens else self.block_len[k % block_length]
             inner_block_len = block_len // tp_num_need_pulls
             for remote_block_id, local_block_id in zip(grouped_remote_block_ids, grouped_local_block_ids):
                 src = src_layer_base_addr + local_block_id[0] * block_len + inner_offset * inner_block_len
@@ -615,8 +684,8 @@ class KVCacheRecvingThread(threading.Thread):
         # Determine if the current position is the offset position at the end of
         # the KV transmission.
         is_kv_transfer_end = global_offset == tp_num_need_pulls * self._prefill_pp_size - 1
-        need_cat_cache = tp_num_need_pulls > 1 and is_kv_transfer_end
-        need_nz_cache = get_ascend_config().enable_kv_nz and is_kv_transfer_end
+        need_cat_cache = not self.use_mamba and tp_num_need_pulls > 1 and is_kv_transfer_end
+        need_nz_cache = not self.use_mamba and get_ascend_config().enable_kv_nz and is_kv_transfer_end
         use_fused_op = ascend_envs.VLLM_ASCEND_FUSION_OP_TRANSPOSE_KV_CACHE_BY_BLOCK
         if need_nz_cache or need_cat_cache:
             # use fused op to reformat kv cache, we keep original implementation to provide ability to disable it.
@@ -1180,7 +1249,10 @@ class MooncakeConnectorWorker:
 
         self.max_device_id = self.tp_size * self.dp_size * self.pcp_size * self.pp_size
         self.kv_role = vllm_config.kv_transfer_config.kv_role
-        self.num_key_value_heads = self.vllm_config.model_config.hf_text_config.num_key_value_heads
+        hf_text_config = self.vllm_config.model_config.hf_text_config
+        self.num_key_value_heads = getattr(
+            hf_text_config, "num_key_value_heads", getattr(hf_text_config, "linear_num_key_heads", 1)
+        )
 
         # Handshake base port
         self.side_channel_port = (
@@ -1214,6 +1286,7 @@ class MooncakeConnectorWorker:
             self.tp_num_need_pulls = num_d_block_heads // num_p_block_heads
         self.local_remote_block_port_mapping: dict[str, list[list[int]] | None] = {}
         self.remote_port_send_num: dict[str, dict[int, RemotePortInfo]] = {}
+        self.use_mamba = False
 
     def _get_prefill_decode_size(self, vllm_config: VllmConfig):
         # get prefill tp and dp size from extra config
@@ -1241,23 +1314,22 @@ class MooncakeConnectorWorker:
         """Register the KV Cache data."""
 
         _, first_kv_cache_tuple = next(iter(kv_caches.items()))
+        first_kv_cache_tuple = _as_cache_tuple(first_kv_cache_tuple)
         first_kv_cache = first_kv_cache_tuple[0]
 
-        # TODO(tms): Find a more robust way to detect and handle MLA
-        self.use_mla = (
-            first_kv_cache_tuple[0].size(-1) != first_kv_cache_tuple[1].size(-1) and len(first_kv_cache_tuple) == 2
-        )
-        self.use_sparse = len(first_kv_cache_tuple) == 3
+        self.use_mamba = _is_mamba_cache_tuple(first_kv_cache_tuple)
+        self.use_mla = _is_mla_cache_tuple(first_kv_cache_tuple)
+        self.use_sparse = not self.use_mamba and len(first_kv_cache_tuple) == 3
+        if self.use_mamba:
+            self.tp_num_need_pulls = 1
 
         self.num_blocks = first_kv_cache.shape[0]
         logger.info("num_blocks: %s", self.num_blocks)
         self.block_len = []
-        if self.use_mla or self.use_sparse:
-            block_rank = 3  # [block_size, latent_dim]
+        if self.use_mla or self.use_sparse or self.use_mamba:
             for i in range(len(first_kv_cache_tuple)):
-                block_shape = first_kv_cache_tuple[i].shape[-block_rank:]
+                block_shape = first_kv_cache_tuple[i].shape[1:]
                 logger.info("block_shape: %s", block_shape)
-                self.block_len.append(first_kv_cache[i].element_size() * math.prod(block_shape))
         else:
             # eager:[num_block, block_size, num_head, hidden_dim]
             block_rank = (
@@ -1265,12 +1337,12 @@ class MooncakeConnectorWorker:
             )  # [block_size, kv_heads, head_dim] or [block_size, kv_heads*head_dim]
             block_shape = first_kv_cache.shape[-block_rank:]
             logger.info("block_shape: %s", block_shape)
-            self.block_len = [first_kv_cache.element_size() * math.prod(block_shape)]
 
         logger.info(
-            "Registering KV_Caches. use_mla: %s, use_sparse: %s, shape %s",
+            "Registering KV_Caches. use_mla: %s, use_sparse: %s, use_mamba: %s, shape %s",
             self.use_mla,
             self.use_sparse,
+            self.use_mamba,
             first_kv_cache.shape,
         )
 
@@ -1278,12 +1350,13 @@ class MooncakeConnectorWorker:
         kv_caches_base_addr = []
         ptrs = []
         lengths = []
-        length = len(self.block_len)
         for cache_or_caches in kv_caches.values():
-            # Normalize to always be a list of caches
-            for i, cache in enumerate(cache_or_caches, 0):
+            for cache in _as_cache_tuple(cache_or_caches):
                 base_addr = cache.data_ptr()
-                region_len = self.num_blocks * self.block_len[i % length]
+                block_shape = cache.shape[1:]
+                block_len = cache.element_size() * math.prod(block_shape)
+                self.block_len.append(block_len)
+                region_len = self.num_blocks * block_len
                 kv_caches_base_addr.append(base_addr)
                 ptrs.append(base_addr)
                 lengths.append(region_len)
@@ -1383,6 +1456,9 @@ class MooncakeConnectorWorker:
             remote_handshake_port_list = [[x + meta.remote_port for x in chosen_rank_list]]
             local_block_ids_list, remote_block_ids_list = [meta.local_block_ids], [meta.remote_block_ids]
             return remote_handshake_port_list, local_block_ids_list, remote_block_ids_list
+
+        if self.use_mamba:
+            return self._get_mamba_kv_split_metadata(req_id, meta, prefill_tp_size)
 
         def context_parallel_parameters_check():
             assert (meta.remote_pcp_size * meta.remote_dcp_size) % (self.pcp_size * self.dcp_size) == 0
@@ -1579,6 +1655,96 @@ class MooncakeConnectorWorker:
 
         return remote_handshake_port_list, local_block_ids_list, remote_block_ids_list
 
+    def _get_mamba_kv_split_metadata(
+        self,
+        req_id: str,
+        meta: ReqMeta,
+        prefill_tp_size: int,
+    ) -> tuple[list[list[int]], list[list[int]], list[list[int]]]:
+        assert prefill_tp_size == self.tp_size, (
+            "GDN/Mamba state cache transfer requires producer and consumer TP sizes to match. "
+            f"prefill_tp_size={prefill_tp_size}, decode_tp_size={self.tp_size}"
+        )
+        assert meta.remote_dcp_size == 1 and self.dcp_size == 1, (
+            "GDN/Mamba state cache transfer currently supports PCP only; DCP is not supported. "
+            f"remote_dcp_size={meta.remote_dcp_size}, local_dcp_size={self.dcp_size}"
+        )
+        assert meta.remote_pcp_size % self.pcp_size == 0, (
+            f"remote_pcp_size({meta.remote_pcp_size}) must be divisible by local_pcp_size({self.pcp_size})"
+        )
+
+        num_external_blocks = math.ceil(meta.num_external_tokens / self.block_size)
+        assert math.ceil(num_external_blocks / self.pcp_size) == len(meta.local_block_ids), (
+            f"num_external_blocks({num_external_blocks}), pcp_size({self.pcp_size}), "
+            f"local_block_ids_len ({len(meta.local_block_ids)})"
+        )
+        assert meta.num_prompt_blocks >= num_external_blocks, (
+            f"meta.num_prompt_blocks({meta.num_prompt_blocks}), num_external_blocks({num_external_blocks})"
+        )
+
+        remote_block_nums_all = [meta.num_prompt_blocks // meta.remote_pcp_size] * meta.remote_pcp_size
+        num_remain_blocks = meta.num_prompt_blocks % meta.remote_pcp_size
+        for i in range(num_remain_blocks):
+            remote_block_nums_all[i] += 1
+        last_block_location = (num_remain_blocks + meta.remote_pcp_size - 1) % meta.remote_pcp_size
+
+        num_prefix_cached_blocks = meta.num_prompt_blocks - num_external_blocks
+        remote_block_nums_all = [
+            block_num - num_prefix_cached_blocks // meta.remote_pcp_size for block_num in remote_block_nums_all
+        ]
+        num_remain_blocks = num_prefix_cached_blocks % meta.remote_pcp_size
+        for i in range(num_remain_blocks):
+            remote_block_nums_all[i] -= 1
+
+        remote_block_nums: list[int] = []
+        remote_pcp_ranks: list[int] = []
+        final_block_idx: int | None = None
+        for remote_pcp_rank, block_num in enumerate(remote_block_nums_all):
+            if remote_pcp_rank % self.pcp_size == self.pcp_rank:
+                if last_block_location == remote_pcp_rank:
+                    final_block_idx = len(remote_block_nums)
+                remote_pcp_ranks.append(remote_pcp_rank)
+                remote_block_nums.append(block_num)
+
+        if final_block_idx is not None:
+            final_block_num = remote_block_nums.pop(final_block_idx)
+            final_remote_pcp_rank = remote_pcp_ranks.pop(final_block_idx)
+            remote_block_nums.append(final_block_num)
+            remote_pcp_ranks.append(final_remote_pcp_rank)
+
+        remote_handshake_port_list = [
+            [meta.remote_port + remote_pcp_rank * prefill_tp_size + self.tp_rank]
+            for remote_pcp_rank in remote_pcp_ranks
+        ]
+        remote_port_send_num: dict[int, RemotePortInfo] = {}
+        for remote_pcp_rank in range(meta.remote_pcp_size):
+            for remote_tp_rank in range(prefill_tp_size):
+                rank = remote_pcp_rank * prefill_tp_size + remote_tp_rank
+                remote_host_info = meta.remote_multi_nodes_meta_mapping.get(str(rank), None)
+                remote_host = meta.remote_host if remote_host_info is None else remote_host_info["host"]
+                remote_port_send_num[meta.remote_port + rank] = {"num": 0, "host": remote_host}
+        for remote_port_list in remote_handshake_port_list:
+            for remote_port in remote_port_list:
+                remote_port_send_num[remote_port]["num"] += 1
+        self.remote_port_send_num[meta.remote_engine_id] = remote_port_send_num
+
+        local_block_ids_list, remote_block_ids_list = [], []
+        local_block_offset = 0
+        for num_blocks_to_pull in remote_block_nums:
+            remote_block_ids_list.append(meta.remote_block_ids[:num_blocks_to_pull])
+            local_block_ids_list.append(
+                meta.local_block_ids[local_block_offset : local_block_offset + num_blocks_to_pull]
+            )
+            local_block_offset += num_blocks_to_pull
+
+        logger.info(
+            "GDN/Mamba PCP kv split for request %s. remote_pcp_ranks: %s, remote_ports: %s",
+            req_id,
+            remote_pcp_ranks,
+            remote_handshake_port_list,
+        )
+        return remote_handshake_port_list, local_block_ids_list, remote_block_ids_list
+
     def start_load_kv(self, metadata: MooncakeConnectorMetadata):
         """Start loading KV blocks from remote engine."""
         for req_id, meta in metadata.requests.items():
@@ -1672,6 +1838,13 @@ class MooncakeConnectorWorker:
         if prefill_tp_size is None:
             prefill_tp_size = self._prefill_tp_size
 
+        if self.use_mamba:
+            assert prefill_tp_size == self.tp_size, (
+                "GDN/Mamba state cache transfer requires producer and consumer TP sizes to match. "
+                f"prefill_tp_size={prefill_tp_size}, decode_tp_size={self.tp_size}"
+            )
+            return 1
+
         if prefill_tp_size == self._prefill_tp_size:
             return self.tp_num_need_pulls
 
@@ -1743,7 +1916,7 @@ class MooncakeConnectorWorker:
             )
             return sampled_nums
         # use deepseek mla, num_key_value_heads == 128, but consider as 1
-        if self.vllm_config.model_config.is_deepseek_mla or self.use_sparse:
+        if self.vllm_config.model_config.is_deepseek_mla or self.use_sparse or self.use_mamba:
             num_kv_head = 1
         else:
             num_kv_head = self.num_key_value_heads
