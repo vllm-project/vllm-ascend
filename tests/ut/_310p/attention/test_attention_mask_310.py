@@ -29,8 +29,30 @@ class TestAttentionMaskBuilder310(TestBase):
     def test_get_attention_mask_310_for_pooling_model(self):
         model_config = MagicMock()
         model_config.runner_type = "pooling"
+        model_config.pooler_config.seq_pooling_type = "FIRST"
         with self.assertRaises(NotImplementedError):
             self.attention_mask_builder.get_attention_mask(model_config)
+
+    @patch("torch_npu.npu_format_cast")
+    def test_get_attention_mask_310_for_last_pooling_model(self, mock_format_cast):
+        mock_format_cast.side_effect = lambda x, y: x
+        model_config = MagicMock()
+        model_config.runner_type = "pooling"
+        model_config.pooler_config.seq_pooling_type = "LAST"
+        attn_mask = self.attention_mask_builder.get_attention_mask(model_config)
+        self.assertEqual(attn_mask.shape, (1, self.max_seqlen // 16, self.max_seqlen, 16))
+        self.assertEqual(attn_mask[0][-1][0][-1], torch.tensor(float("-inf"), dtype=torch.float16))
+
+    @patch("torch_npu.npu_format_cast")
+    def test_get_attention_mask_310_for_qwen_pooling_model(self, mock_format_cast):
+        mock_format_cast.side_effect = lambda x, y: x
+        model_config = MagicMock()
+        model_config.runner_type = "pooling"
+        model_config.hf_config.architectures = ["Qwen3ForCausalLM"]
+        model_config.pooler_config.seq_pooling_type = "FIRST"
+        attn_mask = self.attention_mask_builder.get_attention_mask(model_config)
+        self.assertEqual(attn_mask.shape, (1, self.max_seqlen // 16, self.max_seqlen, 16))
+        self.assertEqual(attn_mask[0][-1][0][-1], torch.tensor(float("-inf"), dtype=torch.float16))
 
     @patch("torch_npu.npu_format_cast")
     def test_get_attention_mask_310(self, mock_format_cast):
