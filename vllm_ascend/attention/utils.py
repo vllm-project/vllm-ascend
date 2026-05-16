@@ -143,6 +143,8 @@ class AscendPrefillContextParallelMetadata:
     # TODO:To be refactored.
     attn_chunk_seqlens: torch.Tensor = None
 
+    dcp_mtp_attn_mask: torch.Tensor = None
+
 
 @dataclass
 class AscendCommonAttentionMetadata(CommonAttentionMetadata):
@@ -382,3 +384,17 @@ def enabling_mlapo(vllm_config: VllmConfig) -> bool:
         and not vllm_config.kv_transfer_config.is_kv_producer
     )
     return bool(envs.VLLM_ASCEND_ENABLE_MLAPO and is_decode_instance)
+
+
+def generate_dcp_mtp_mask(masks, query_lens, num_decodes) -> torch.Tensor:
+    if masks and masks[0] is not None:
+        query_len = masks[0].shape[0]
+        mtp_attn_mask = torch.ones(num_decodes, query_len, 16384, dtype=torch.bool)
+        masks = masks[:num_decodes]
+        for i, mask in enumerate(masks):
+            S = mask.shape[0]
+            L = mask.shape[1]
+            mtp_attn_mask[i, :S, :L] = mask
+        return mtp_attn_mask
+    else:
+        return None

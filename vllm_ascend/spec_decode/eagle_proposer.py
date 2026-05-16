@@ -429,9 +429,6 @@ class AscendSpecDecodeBaseProposer(SpecDecodeBaseProposer):
             if self.pcp_size * self.dcp_size > 1:
                 # update long_seq related params and flatten block_table
                 common_attn_metadata.prefill_context_parallel_metadata = self.runner.pcp_manager.long_seq_metadata
-                common_attn_metadata.block_table_tensor = self.runner.input_batch.block_table[0].get_device_tensor()[
-                    : num_reqs * self.decode_threshold
-                ]
 
             assert len(self.draft_attn_groups) > 0
             builder = self.draft_attn_groups[0].get_metadata_builder()
@@ -444,8 +441,7 @@ class AscendSpecDecodeBaseProposer(SpecDecodeBaseProposer):
                 common_attn_metadata.query_start_loc = self.query_start_loc_group[draft_step][: num_reqs + 1]
                 if self.pcp_size * self.dcp_size > 1 and draft_step > 0:
                     assert self.block_table_tensor_clone is not None, "block_table_tensor_clone is not init"
-                    slicing_length = num_reqs * self.decode_threshold
-                    common_attn_metadata.block_table_tensor = self.block_table_tensor_clone[:slicing_length]
+                    common_attn_metadata.block_table_tensor = self.block_table_tensor_clone[:num_reqs]
                 attn_metadata_eagle = builder.build_for_graph_capture(
                     common_attn_metadata,
                     AscendAttentionState.SpecDecoding if self.method == "mtp" else AscendAttentionState.ChunkedPrefill,

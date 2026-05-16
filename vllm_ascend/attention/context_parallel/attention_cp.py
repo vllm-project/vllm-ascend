@@ -162,9 +162,7 @@ class AscendAttentionCPMetadataBuilder(AscendAttentionMetadataBuilder):
                 if self.pcp_size > 1 and common_long_seq_metadata.pcp_use_hybrid_attn:
                     query_lens = attn_chunk_seqlens * 2
                 local_context_lens_allranks = (
-                    torch.tensor(num_computed_tokens_of_pcp_dcp)[self.num_decodes_flatten :]
-                    .to(self.device)
-                    .to(dtype=torch.int32)
+                    torch.tensor(num_computed_tokens_of_pcp_dcp)[num_decodes:].to(self.device).to(dtype=torch.int32)
                 )
                 local_chunked_kv_lens_rank = local_context_lens_allranks[:, self.pcp_rank, self.dcp_rank]
                 actual_seq_lengths_kv = torch.cumsum(local_chunked_kv_lens_rank, dim=0).tolist()
@@ -228,28 +226,37 @@ class AscendAttentionCPMetadataBuilder(AscendAttentionMetadataBuilder):
                 pcp_metadata=pcp_metadata,
                 pcp_exit_fa_scatter_idx=common_long_seq_metadata.pcp_exit_fa_scatter_idx,
                 chunked_context=chunked_context_metadata,
-                block_tables=block_table[self.num_decodes_flatten :, ...],
+                block_tables=block_table[num_decodes:, ...],
                 actual_seq_lengths_q=torch.cumsum(query_lens, dim=0),
             )
 
         if num_decodes > 0:
             num_computed_tokens_array = np.array(num_computed_tokens_of_pcp_dcp)
-            num_computed_tokens_array = num_computed_tokens_array[: self.num_decodes_flatten]
-            # TODO: numpy array mode of the shared memory is used to improve performance
+            num_computed_tokens_array = num_computed_tokens_array[:num_decodes]
+            if common_long_seq_metadata.dcp_mtp_attn_mask is not None:
+                dcp_mtp_attn_mask = common_long_seq_metadata.dcp_mtp_attn_mask
+            else:
+                dcp_mtp_attn_mask = None
+
             decode_metadata = AscendMetadataForDecode(
                 num_computed_tokens_of_pcp_dcp=num_computed_tokens_array,
-                block_tables=block_table[: self.num_decodes_flatten],
+                block_tables=block_table[:num_decodes],
+                dcp_mtp_attn_mask=dcp_mtp_attn_mask,
             )
 
-        actual_seq_lengths_q = (torch.arange(self.num_decodes_flatten) + 1).tolist() + query_start_loc_cpu[1:].tolist()[
-            num_decodes:
-        ]
+        if self.decode_threshold == 1:
+            actual_seq_lengths_q = (torch.arange(num_decodes) + 1).tolist() + query_start_loc_cpu[1:].tolist()[
+                num_decodes:
+            ]
+        else:
+            actual_seq_lengths_q = [self.decode_threshold * (i + 1) for i in range(num_decodes)] + query_start_loc_cpu[
+                num_decodes + 1 :
+            ].tolist()
 
         attn_metadata = AscendMetadata(
             num_actual_tokens=num_actual_tokens,
             num_decode_tokens=num_decode_tokens,
             num_actual_tokens_pcp_padded=num_actual_tokens_pcp_padded,
-            num_decodes_flatten=self.num_decodes_flatten,
             block_tables=block_table,
             query_start_loc=query_start_loc,
             seq_lens=seq_lens,
@@ -353,6 +360,7 @@ class AscendAttentionCPImpl(AscendAttentionBackendImpl):
                     dcp_size,
                     pcp_rank,
                     dcp_rank,
+                    attn_mask,
                 ) = param
 
                 if _EXTRA_CTX.is_draft_model:
@@ -383,14 +391,18 @@ class AscendAttentionCPImpl(AscendAttentionBackendImpl):
 
                 torch.npu.graph_task_update_begin(update_stream, handle)
 
+                input_layout = "TND"
+                if speculative_config is not None:
+                    input_layout = "BSND"
+                    actual_seq_lengths_q = [actual_seq_lengths_q[0] for _ in range(len(actual_seq_lengths_q))]
                 torch_npu.npu_fused_infer_attention_score.out(
                     q_nope,
                     k_nope,
                     value,
                     num_heads=num_heads,
                     num_key_value_heads=num_kv_heads,
-                    input_layout="TND",
-                    atten_mask=None,
+                    input_layout=input_layout,
+                    atten_mask=attn_mask,
                     scale=scale,
                     antiquant_mode=0,
                     antiquant_scale=None,
@@ -563,11 +575,27 @@ class AscendAttentionCPImpl(AscendAttentionBackendImpl):
 
         k_nope = self.key_cache.view(self.key_cache.shape[0], self.key_cache.shape[1], -1)
         value = self.value_cache.view(self.key_cache.shape[0], self.key_cache.shape[1], -1)
+
+        attn_mask = None
+        input_layerout = "TND"
+        actual_seq_lengths_q = attn_metadata.actual_seq_lengths_q[: attn_metadata.num_decodes]
+        if self.vllm_config.speculative_config is not None:
+            input_layerout = "BSND"
+            num_decodes = attn_metadata.num_decodes
+            if attn_metadata.decode_meta.dcp_mtp_attn_mask is not None:
+                attn_mask = attn_metadata.decode_meta.dcp_mtp_attn_mask
+            else:
+                attn_mask = None
+            query = query.view(num_decodes, -1, query.shape[1], query.shape[-1])
+            k_nope = self.key_cache.view(self.key_cache.shape[0], 1, self.key_cache.shape[1], -1)
+            value = self.value_cache.view(self.value_cache.shape[0], 1, self.value_cache.shape[1], -1)
+            actual_seq_lengths_q = [actual_seq_lengths_q[0] for _ in range(len(actual_seq_lengths_q))]
+
         common_kwargs = {
             "num_heads": num_heads,
             "num_key_value_heads": self.num_kv_heads,
-            "input_layout": "TND",
-            "atten_mask": None,
+            "input_layout": input_layerout,
+            "atten_mask": attn_mask,
             "scale": self.scale,
             "antiquant_mode": 0,
             "antiquant_scale": None,
@@ -575,17 +603,19 @@ class AscendAttentionCPImpl(AscendAttentionBackendImpl):
             "block_table": attn_metadata.decode_meta.block_tables,
             "block_size": self.key_cache.shape[1],
             "actual_seq_lengths_kv": attn_metadata.decode_meta.num_computed_tokens_of_pcp_dcp[
-                :, self.pcp_rank, self.dcp_rank
+                : attn_metadata.num_decodes, self.pcp_rank, self.dcp_rank
             ],
-            "actual_seq_lengths": attn_metadata.actual_seq_lengths_q[: attn_metadata.num_decodes_flatten],
+            "actual_seq_lengths": actual_seq_lengths_q,
         }
 
         if _EXTRA_CTX.is_draft_model:
             graph_params = get_draft_graph_params()
         else:
             graph_params = get_graph_params()
-        num_tokens = query.shape[0]
-
+        if input_layerout == "TND":
+            num_tokens = query.shape[0]
+        else:
+            num_tokens = query.shape[0] * query.shape[1]
         if _EXTRA_CTX.capturing:
             stream = torch_npu.npu.current_stream()
 
@@ -604,7 +634,12 @@ class AscendAttentionCPImpl(AscendAttentionBackendImpl):
                 else:
                     update_graph_params_workspaces(num_tokens, workspace)
             attn_out = torch.empty_like(query)
-            attn_lse = torch.empty((num_tokens, num_heads, 1), dtype=torch.float, device=query.device)
+            if input_layerout == "TND":
+                attn_lse = torch.empty((num_tokens, num_heads, 1), dtype=torch.float, device=query.device)
+            else:
+                attn_lse = torch.empty(
+                    (query.shape[0], num_heads, query.shape[1], 1), dtype=torch.float, device=query.device
+                )
 
             graph_params.attn_params[num_tokens].append(
                 (
@@ -616,13 +651,16 @@ class AscendAttentionCPImpl(AscendAttentionBackendImpl):
                     self.scale,
                     attn_metadata.block_tables,
                     self.key_cache.shape[1],
-                    attn_metadata.decode_meta.num_computed_tokens_of_pcp_dcp[:, self.pcp_rank, self.dcp_rank],
-                    attn_metadata.actual_seq_lengths_q[: attn_metadata.num_decodes_flatten],
+                    attn_metadata.decode_meta.num_computed_tokens_of_pcp_dcp[
+                        : attn_metadata.num_decodes, self.pcp_rank, self.dcp_rank
+                    ],
+                    attn_metadata.actual_seq_lengths_q[: attn_metadata.num_decodes],
                     weak_ref_tensors(attn_out),
                     weak_ref_tensors(attn_lse),
                     self.dcp_size,
                     self.pcp_rank,
                     self.dcp_rank,
+                    attn_mask,
                 )
             )
             torch.npu.graph_task_group_begin(stream)
@@ -633,6 +671,9 @@ class AscendAttentionCPImpl(AscendAttentionBackendImpl):
             graph_params.handles[num_tokens].append(handle)
         else:
             attn_out, attn_lse = torch_npu.npu_fused_infer_attention_score(query, k_nope, value, **common_kwargs)
+        if input_layerout == "BSND":
+            attn_out = attn_out.view(-1, attn_out.shape[2], attn_out.shape[3])
+            attn_lse = attn_lse.transpose(1, 2).reshape(-1, attn_lse.shape[1], 1)
         attn_out_lse = _process_attn_out_lse(attn_out, attn_lse)
         attn_out = _npu_attention_update(self.head_size, attn_out_lse)
         return attn_out
