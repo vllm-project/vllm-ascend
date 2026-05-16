@@ -8,7 +8,7 @@ msgid ""
 msgstr ""
 "Project-Id-Version:  vllm-ascend\n"
 "Report-Msgid-Bugs-To: \n"
-"POT-Creation-Date: 2026-05-07 02:15+0000\n"
+"POT-Creation-Date: 2026-05-16 02:20+0000\n"
 "PO-Revision-Date: 2026-01-22 11:40+0800\n"
 "Last-Translator: Gemini <gemini@google.com>\n"
 "Language: zh_CN\n"
@@ -600,47 +600,12 @@ msgstr ""
 "会授予容器在宿主机系统上的极高权限，这可能存在安全风险。请仅在您了解后果并信任镜像来源的情况下使用此选项。"
 
 #: ../../source/faqs.md:256
-msgid "21. How to achieve low latency in a small batch scenario?"
-msgstr "21.如何在小批量场景下实现低延迟？"
+msgid ""
+"21. How to set `SOC_VERSION` when building from source on a CPU-only "
+"machine?"
+msgstr "21.在仅有 CPU 的机器上从源码构建时，如何设置 `SOC_VERSION`？"
 
 #: ../../source/faqs.md:258
-msgid ""
-"The performance of `torch_npu.npu_fused_infer_attention_score` in small "
-"batch scenarios is not satisfactory, mainly due to the lack of flash "
-"decoding function. We offer an alternative operator in "
-"`tools/install_flash_infer_attention_score_ops_a2.sh` and "
-"`tools/install_flash_infer_attention_score_ops_a3.sh`, you can install it"
-" using the following instruction:"
-msgstr ""
-"`torch_npu.npu_fused_infer_attention_score` 在小批量场景下的性能不够理想，主要是由于缺乏 Flash "
-"Decoding 功能。我们在 `tools/install_flash_infer_attention_score_ops_a2.sh` 和 "
-"`tools/install_flash_infer_attention_score_ops_a3.sh` "
-"中提供了替代算子，您可以按照以下指令进行安装："
-
-#: ../../source/faqs.md:266
-msgid ""
-"**NOTE**: Don't set `additional_config.pa_shape_list` when using this "
-"method; otherwise, it will lead to another attention operator. "
-"**Important**: Please make sure you're using the **official image** of "
-"`vllm-ascend`; otherwise, you **must change** the directory `/vllm-"
-"workspace` in `tools/install_flash_infer_attention_score_ops_a2.sh` or "
-"`tools/install_flash_infer_attention_score_ops_a3.sh` to your own, or "
-"create one. If you're not the root user, you need `sudo` **privileges** "
-"to run this script."
-msgstr ""
-"**注意**：使用此方法时请勿设置 `additional_config.pa_shape_list`，否则会导致使用另一种 Attention "
-"算子。**重要提示**：请确保您使用的是 `vllm-ascend` 的**官方镜像**；否则，您**必须将** "
-"`tools/install_flash_infer_attention_score_ops_a2.sh` 或 "
-"`tools/install_flash_infer_attention_score_ops_a3.sh` 脚本中的 `/vllm-"
-"workspace` 目录更改为您自己的目录，或创建一个。如果您不是 root 用户，运行此脚本需要 `sudo` **权限**。"
-
-#: ../../source/faqs.md:269
-msgid ""
-"22. How to set `SOC_VERSION` when building from source on a CPU-only "
-"machine?"
-msgstr "22.在仅有 CPU 的机器上从源码构建时，如何设置 `SOC_VERSION`？"
-
-#: ../../source/faqs.md:271
 msgid ""
 "When building from source (e.g. `pip install -e .`), the build may try to"
 " infer the target chip via `npu-smi`. If `npu-smi` is not available "
@@ -650,15 +615,15 @@ msgstr ""
 "从源码构建时（例如执行 `pip install -e .`），构建过程可能会尝试通过 `npu-smi` 推断目标芯片。如果 `npu-smi`"
 " 不可用（这在仅有 CPU 的构建环境中很常见），则必须在安装前手动设置 `SOC_VERSION`。"
 
-#: ../../source/faqs.md:273
+#: ../../source/faqs.md:260
 msgid "You can use the defaults from `Dockerfile*` as a reference. For example:"
 msgstr "你可以参考 `Dockerfile*` 中的默认值。例如："
 
-#: ../../source/faqs.md:289
-msgid "23. Why TPOT increases drastically as concurrency grows?"
-msgstr "23.为什么 TPOT 会随着并发数增加而急剧上升？"
+#: ../../source/faqs.md:276
+msgid "22. Why TPOT increases drastically as concurrency grows?"
+msgstr "22.为什么 TPOT 会随着并发数增加而急剧上升？"
 
-#: ../../source/faqs.md:291
+#: ../../source/faqs.md:278
 msgid ""
 "When testing a vLLM server, one may find that TPOT increases as "
 "concurrency increases (for example, TPOT increases by 0.5 ~ 1ms when "
@@ -680,7 +645,7 @@ msgstr ""
 " 引起的。通常，当你的服务器达到 KV 缓存限制时，vLLM 会尝试释放某些请求的 KV 缓存，以确保为其他请求提供足够的空间，这在 vLLM "
 "中称为抢占。当一个请求被抢占时，默认行为是在未来重新计算该请求的 KV 缓存，这就是性能可能显著下降的原因。有几种方法可以验证这一点："
 
-#: ../../source/faqs.md:294
+#: ../../source/faqs.md:281
 msgid ""
 "vLLM usually logs stats on your server. You might see metrics like `GPU "
 "KV cache usage: 99.0%,`. When reaching 100%, it triggers preemption."
@@ -688,7 +653,7 @@ msgstr ""
 "vLLM 通常会在服务器上记录统计信息。你可能会看到类似 `GPU KV cache usage: 99.0%,` 的指标。当达到 100% "
 "时，会触发抢占。"
 
-#: ../../source/faqs.md:295
+#: ../../source/faqs.md:282
 msgid ""
 "When launching a vLLM server, you will see logs like `GPU KV cache size: "
 "66340 tokens` and `Maximum concurrency for 16,384 tokens per request: "
@@ -699,7 +664,7 @@ msgstr ""
 "concurrency for 16,384 tokens per request: 4.05` 的日志。这些是针对单个 DP 组的估计 KV "
 "缓存容量。你可以据此调整总体请求流量。"
 
-#: ../../source/faqs.md:297
+#: ../../source/faqs.md:284
 msgid ""
 "Preemption cannot be avoided completely since KV cache usage always has a"
 " limit. But there are methods to reduce the chances of preemption. As is "
@@ -738,3 +703,48 @@ msgstr ""
 #~ msgstr ""
 #~ "[[v0.18.0rc1] 常见问题与反馈](https://github.com/vllm-project"
 #~ "/vllm-ascend/issues/7633)"
+
+#~ msgid "21. How to achieve low latency in a small batch scenario?"
+#~ msgstr "21.如何在小批量场景下实现低延迟？"
+
+#~ msgid ""
+#~ "The performance of "
+#~ "`torch_npu.npu_fused_infer_attention_score` in small "
+#~ "batch scenarios is not satisfactory, "
+#~ "mainly due to the lack of flash"
+#~ " decoding function. We offer an "
+#~ "alternative operator in "
+#~ "`tools/install_flash_infer_attention_score_ops_a2.sh` and "
+#~ "`tools/install_flash_infer_attention_score_ops_a3.sh`, you "
+#~ "can install it using the following "
+#~ "instruction:"
+#~ msgstr ""
+#~ "`torch_npu.npu_fused_infer_attention_score` "
+#~ "在小批量场景下的性能不够理想，主要是由于缺乏 Flash Decoding 功能。我们在 "
+#~ "`tools/install_flash_infer_attention_score_ops_a2.sh` 和 "
+#~ "`tools/install_flash_infer_attention_score_ops_a3.sh` "
+#~ "中提供了替代算子，您可以按照以下指令进行安装："
+
+#~ msgid ""
+#~ "**NOTE**: Don't set "
+#~ "`additional_config.pa_shape_list` when using this"
+#~ " method; otherwise, it will lead to"
+#~ " another attention operator. **Important**: "
+#~ "Please make sure you're using the "
+#~ "**official image** of `vllm-ascend`; "
+#~ "otherwise, you **must change** the "
+#~ "directory `/vllm-workspace` in "
+#~ "`tools/install_flash_infer_attention_score_ops_a2.sh` or "
+#~ "`tools/install_flash_infer_attention_score_ops_a3.sh` to "
+#~ "your own, or create one. If you're"
+#~ " not the root user, you need "
+#~ "`sudo` **privileges** to run this "
+#~ "script."
+#~ msgstr ""
+#~ "**注意**：使用此方法时请勿设置 `additional_config.pa_shape_list`，否则会导致使用另一种"
+#~ " Attention 算子。**重要提示**：请确保您使用的是 `vllm-ascend` "
+#~ "的**官方镜像**；否则，您**必须将** "
+#~ "`tools/install_flash_infer_attention_score_ops_a2.sh` 或 "
+#~ "`tools/install_flash_infer_attention_score_ops_a3.sh` 脚本中的 "
+#~ "`/vllm-workspace` 目录更改为您自己的目录，或创建一个。如果您不是 root "
+#~ "用户，运行此脚本需要 `sudo` **权限**。"
