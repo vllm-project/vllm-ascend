@@ -1,0 +1,239 @@
+#
+# Copyright (c) 2025 Huawei Technologies Co., Ltd. All Rights Reserved.
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+# This file is a part of the vllm-ascend project.
+#
+
+name: Bot Cherry-pick
+
+on:
+  issue_comment:
+    types: [created]
+
+concurrency:
+  group: cherry-pick-${{ github.event.issue.number }}-${{ github.event.comment.id }}
+  cancel-in-progress: false
+
+jobs:
+  cherry-pick:
+    runs-on: ubuntu-latest
+    if: >-
+      github.event.issue.pull_request != null &&
+      contains(github.event.issue.labels.*.name, 'cherry-pick') &&
+      startsWith(github.event.comment.body, '/cherry-pick')
+    permissions:
+      contents: write
+      pull-requests: write
+      issues: write
+
+    env:
+      UPSTREAM_REPO: vllm-project/vllm-ascend
+      FORK_OWNER: vllm-ascend-ci
+
+    steps:
+      - name: Parse comment and validate
+        id: parse
+        uses: actions/github-script@v7
+        with:
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+          script: |
+            const body = context.payload.comment.body.trim();
+            const match = body.match(/^\/cherry-pick\s+(\S+)/);
+            if (!match) {
+              await github.rest.issues.createComment({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                issue_number: context.issue.number,
+                body: '❌ Invalid command format. Usage: `/cherry-pick <target-branch>`',
+              });
+              core.setFailed('Invalid command format');
+              return;
+            }
+            const targetBranch = match[1];
+            const commenter = context.payload.comment.user.login;
+
+            // Check commenter permission
+            const { data: perm } = await github.rest.repos.getCollaboratorPermissionLevel({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              username: commenter,
+            });
+            if (!['write', 'admin'].includes(perm.permission)) {
+              await github.rest.issues.createComment({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                issue_number: context.issue.number,
+                body: `❌ @${commenter} does not have permission to cherry-pick. Only maintainers (write/admin) can trigger this command.`,
+              });
+              core.setFailed('Permission denied');
+              return;
+            }
+
+            // Get PR details
+            const { data: pr } = await github.rest.pulls.get({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              pull_number: context.issue.number,
+            });
+            if (!pr.merged) {
+              await github.rest.issues.createComment({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                issue_number: context.issue.number,
+                body: `❌ PR #${context.issue.number} has not been merged yet. Cherry-pick is only supported for merged PRs.`,
+              });
+              core.setFailed('PR not merged');
+              return;
+            }
+
+            core.setOutput('target_branch', targetBranch);
+            core.setOutput('merge_commit_sha', pr.merge_commit_sha);
+            core.setOutput('pr_number', String(context.issue.number));
+            core.setOutput('pr_title', pr.title);
+            core.setOutput('pr_body', pr.body || '');
+            core.setOutput('commenter', commenter);
+            core.info(`Cherry-pick PR #${context.issue.number} (${pr.merge_commit_sha}) → ${targetBranch}`);
+
+      - name: Checkout fork repository
+        uses: actions/checkout@v4
+        with:
+          repository: ${{ env.FORK_OWNER }}/${{ github.event.repository.name }}
+          token: ${{ secrets.PAT_TOKEN }}
+          fetch-depth: 0
+
+      - name: Cherry-pick and push to fork
+        id: cherry-pick
+        env:
+          TARGET_BRANCH: ${{ steps.parse.outputs.target_branch }}
+          MERGE_SHA: ${{ steps.parse.outputs.merge_commit_sha }}
+          PR_NUMBER: ${{ steps.parse.outputs.pr_number }}
+        run: |
+          git config user.name "${{ github.actor }}"
+          git config user.email "${{ github.actor }}@users.noreply.github.com"
+          git remote add upstream https://github.com/${{ env.UPSTREAM_REPO }}.git
+          git fetch upstream
+
+          NEW_BRANCH="cherry-pick/pr-${PR_NUMBER}-to-${TARGET_BRANCH}"
+          echo "NEW_BRANCH=${NEW_BRANCH}" >> $GITHUB_ENV
+
+          # Verify target branch exists on upstream
+          if ! git ls-remote --exit-code --heads upstream "${TARGET_BRANCH}" > /dev/null 2>&1; then
+            echo "CHERRY_PICK_ERROR=Target branch '${TARGET_BRANCH}' does not exist on upstream." >> $GITHUB_ENV
+            echo "cherry_pick_failed=true" >> $GITHUB_OUTPUT
+            exit 0
+          fi
+
+          git checkout -b "${NEW_BRANCH}" "upstream/${TARGET_BRANCH}"
+
+          # Cherry-pick the merge commit; -m 1 selects the mainline (first) parent
+          if ! git cherry-pick -x -s -m 1 "${MERGE_SHA}" 2>&1; then
+            CONFLICT_FILES=$(git diff --name-only --diff-filter=U | tr '\n' ' ')
+            git cherry-pick --abort || true
+            echo "CHERRY_PICK_ERROR=Cherry-pick failed due to conflicts in: ${CONFLICT_FILES}" >> $GITHUB_ENV
+            echo "cherry_pick_failed=true" >> $GITHUB_OUTPUT
+            exit 0
+          fi
+
+          git push -f origin "${NEW_BRANCH}:${NEW_BRANCH}"
+          echo "cherry_pick_failed=false" >> $GITHUB_OUTPUT
+
+      - name: Create cherry-pick PR
+        id: create_pr
+        if: steps.cherry-pick.outputs.cherry_pick_failed == 'false'
+        uses: actions/github-script@v7
+        env:
+          NEW_BRANCH: ${{ env.NEW_BRANCH }}
+          TARGET_BRANCH: ${{ steps.parse.outputs.target_branch }}
+          PR_NUMBER: ${{ steps.parse.outputs.pr_number }}
+          PR_TITLE: ${{ steps.parse.outputs.pr_title }}
+          PR_BODY: ${{ steps.parse.outputs.pr_body }}
+          COMMENTER: ${{ steps.parse.outputs.commenter }}
+        with:
+          github-token: ${{ secrets.PAT_TOKEN }}
+          script: |
+            const { NEW_BRANCH, TARGET_BRANCH, PR_NUMBER, PR_TITLE, PR_BODY, COMMENTER } = process.env;
+            const forkOwner = process.env.FORK_OWNER;
+            try {
+              const { data: newPr } = await github.rest.pulls.create({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                head: `${forkOwner}:${NEW_BRANCH}`,
+                base: TARGET_BRANCH,
+                title: `[Cherry-pick] ${PR_TITLE}`,
+                body: [
+                  `Cherry-pick of #${PR_NUMBER} onto \`${TARGET_BRANCH}\`.`,
+                  '',
+                  `Requested by @${COMMENTER}.`,
+                  '',
+                  '---',
+                  '',
+                  PR_BODY,
+                ].join('\n'),
+              });
+              core.setOutput('new_pr_url', newPr.html_url);
+              core.setOutput('new_pr_number', String(newPr.number));
+              core.info(`Created PR #${newPr.number}: ${newPr.html_url}`);
+            } catch (error) {
+              if (error.message.includes('A pull request already exists')) {
+                core.warning('A cherry-pick PR already exists for this branch.');
+                core.setOutput('new_pr_url', '');
+              } else {
+                throw error;
+              }
+            }
+
+      - name: Comment success on original PR
+        if: steps.cherry-pick.outputs.cherry_pick_failed == 'false'
+        uses: actions/github-script@v7
+        env:
+          NEW_PR_URL: ${{ steps.create_pr.outputs.new_pr_url }}
+          NEW_PR_NUMBER: ${{ steps.create_pr.outputs.new_pr_number }}
+          TARGET_BRANCH: ${{ steps.parse.outputs.target_branch }}
+        with:
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+          script: |
+            const { NEW_PR_URL, NEW_PR_NUMBER, TARGET_BRANCH } = process.env;
+            const msg = NEW_PR_URL
+              ? `✅ Cherry-pick to \`${TARGET_BRANCH}\` succeeded! Created PR #${NEW_PR_NUMBER}: ${NEW_PR_URL}`
+              : `✅ Cherry-pick to \`${TARGET_BRANCH}\` succeeded! (A PR already exists for this branch.)`;
+            await github.rest.issues.createComment({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              issue_number: context.issue.number,
+              body: msg,
+            });
+
+      - name: Comment failure on original PR
+        if: steps.cherry-pick.outputs.cherry_pick_failed == 'true'
+        uses: actions/github-script@v7
+        env:
+          CHERRY_PICK_ERROR: ${{ env.CHERRY_PICK_ERROR }}
+          TARGET_BRANCH: ${{ steps.parse.outputs.target_branch }}
+          COMMENTER: ${{ steps.parse.outputs.commenter }}
+        with:
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+          script: |
+            const { CHERRY_PICK_ERROR, TARGET_BRANCH, COMMENTER } = process.env;
+            await github.rest.issues.createComment({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              issue_number: context.issue.number,
+              body: [
+                `❌ Cherry-pick to \`${TARGET_BRANCH}\` failed.`,
+                '',
+                `**Error:** ${CHERRY_PICK_ERROR}`,
+                '',
+                `@${COMMENTER} Please resolve the conflicts manually.`,
+              ].join('\n'),
+            });
