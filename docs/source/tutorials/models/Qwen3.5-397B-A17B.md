@@ -124,6 +124,9 @@ vllm serve Eco-Tech/Qwen3.5-397B-A17B-w8a8-mtp \
 --trust-remote-code \
 --gpu-memory-utilization 0.90 \
 --enable-prefix-caching \
+--enable-auto-tool-choice \
+--tool-call-parser qwen3_coder \
+--reasoning-parser qwen3 \
 --speculative_config '{"method": "qwen3_5_mtp", "num_speculative_tokens": 3, "enforce_eager": true}' \
 --compilation-config '{"cudagraph_mode":"FULL_DECODE_ONLY"}' \
 --additional-config '{"enable_cpu_binding":true}' \
@@ -192,8 +195,12 @@ vllm serve Eco-Tech/Qwen3.5-397B-A17B-w8a8-mtp \
 --max-num-batched-tokens 4096 \
 --trust-remote-code \
 --async-scheduling \
+--quantization ascend \
 --gpu-memory-utilization 0.9 \
---no-enable-prefix-caching \
+--enable-prefix-caching \
+--enable-auto-tool-choice \
+--tool-call-parser qwen3_coder \
+--reasoning-parser qwen3 \
 --speculative_config '{"method": "qwen3_5_mtp", "num_speculative_tokens": 3, "enforce_eager": true}' \
 --compilation-config '{"cudagraph_mode":"FULL_DECODE_ONLY"}' \
 --additional-config '{"enable_cpu_binding":true, "multistream_overlap_shared_expert": true}'
@@ -241,10 +248,13 @@ vllm serve Eco-Tech/Qwen3.5-397B-A17B-w8a8-mtp \
 --max-num-batched-tokens 4096 \
 --enable-expert-parallel \
 --trust-remote-code \
+--quantization ascend \
 --async-scheduling \
 --gpu-memory-utilization 0.9 \
---no-enable-prefix-caching \
---speculative_config '{"method": "qwen3_5_mtp", "num_speculative_tokens": 3, "enforce_eager": true}' \
+--no-enable-prefix-caching \--enable-prefix-caching \
+--enable-auto-tool-choice \
+--tool-call-parser qwen3_coder \
+--reasoning-parser qwen3 \
 --compilation-config '{"cudagraph_mode":"FULL_DECODE_ONLY"}' \
 --additional-config '{"enable_cpu_binding":true, "multistream_overlap_shared_expert": true}'
 ```
@@ -311,7 +321,10 @@ To run the vllm-ascend `Prefill-Decode Disaggregation` service, you need to depl
        vllm serve Eco-Tech/Qwen3.5-397B-A17B-w8a8-mtp \
        --host ${IP_ADDRESS} \
        --port 30060 \
-       --no-enable-prefix-caching \
+       --enable-prefix-caching \
+       --enable-auto-tool-choice \
+       --tool-call-parser qwen3_coder \
+       --reasoning-parser qwen3 \
        --enable-expert-parallel \
        --data-parallel-size 8 \
        --data-parallel-size-local 8 \
@@ -391,6 +404,9 @@ To run the vllm-ascend `Prefill-Decode Disaggregation` service, you need to depl
        --host ${IP_ADDRESS} \
        --port 30050 \
        --no-enable-prefix-caching \
+       --enable-auto-tool-choice \
+       --tool-call-parser qwen3_coder \
+       --reasoning-parser qwen3 \
        --enable-expert-parallel \
        --data-parallel-size 16 \
        --data-parallel-size-local 8 \
@@ -472,6 +488,9 @@ To run the vllm-ascend `Prefill-Decode Disaggregation` service, you need to depl
        --port 30050 \
        --headless \
        --no-enable-prefix-caching \
+       --enable-auto-tool-choice \
+       --tool-call-parser qwen3_coder \
+       --reasoning-parser qwen3 \
        --enable-expert-parallel \
        --data-parallel-size 16 \
        --data-parallel-size-local 8 \
