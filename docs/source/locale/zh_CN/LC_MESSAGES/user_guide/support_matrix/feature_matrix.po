@@ -1,0 +1,265 @@
+# SOME DESCRIPTIVE TITLE.
+# Copyright (C) 2025, vllm-ascend team
+# This file is distributed under the same license as the vllm-ascend
+# package.
+# FIRST AUTHOR <EMAIL@ADDRESS>, 2026.
+#
+msgid ""
+msgstr ""
+"Project-Id-Version: vllm-ascend \n"
+"Report-Msgid-Bugs-To: \n"
+"POT-Creation-Date: 2026-05-15 02:40+0000\n"
+"PO-Revision-Date: YEAR-MO-DA HO:MI+ZONE\n"
+"Last-Translator: FULL NAME <EMAIL@ADDRESS>\n"
+"Language: zh_CN\n"
+"Language-Team: zh_CN <LL@li.org>\n"
+"Plural-Forms: nplurals=1; plural=0;\n"
+"MIME-Version: 1.0\n"
+"Content-Type: text/plain; charset=utf-8\n"
+"Content-Transfer-Encoding: 8bit\n"
+"Generated-By: Babel 2.18.0\n"
+
+#: ../../source/user_guide/support_matrix/feature_matrix.md:1
+msgid "Feature × Feature"
+msgstr "功能×功能"
+
+#: ../../source/user_guide/support_matrix/feature_matrix.md:3
+msgid ""
+"The tables below show mutually exclusive features and the support on "
+"Ascend hardware, extended from [vLLM "
+"table](https://docs.vllm.ai/en/latest/features/#feature-x-feature)."
+msgstr ""
+"下表展示了互斥功能及其在Ascend硬件上的支持情况，扩展自[vLLM表格](https://docs.vllm.ai/en/latest/features/#feature-x-feature)。"
+
+#: ../../source/user_guide/support_matrix/feature_matrix.md:5
+msgid "The symbols used have the following meanings:"
+msgstr "使用的符号含义如下："
+
+#: ../../source/user_guide/support_matrix/feature_matrix.md:7
+msgid "✅ = Full compatibility"
+msgstr "✅ = 完全兼容"
+
+#: ../../source/user_guide/support_matrix/feature_matrix.md:8
+msgid "🟠 = Partial compatibility"
+msgstr "🟠 = 部分兼容"
+
+#: ../../source/user_guide/support_matrix/feature_matrix.md:9
+msgid "❌ = No compatibility"
+msgstr "❌ = 不兼容"
+
+#: ../../source/user_guide/support_matrix/feature_matrix.md:10
+msgid "❔ = Unknown or TBD"
+msgstr "❔ = 未知或待定"
+
+#: ../../source/user_guide/support_matrix/feature_matrix.md
+msgid "Feature"
+msgstr "功能"
+
+#: ../../source/user_guide/support_matrix/feature_matrix.md
+msgid ""
+"[ACLGraph "
+"Full_Decode_Only](https://docs.vllm.ai/projects/ascend/en/latest/developer_guide/Design_Documents/ACL_Graph.html)"
+msgstr ""
+"[ACLGraph "
+"Full_Decode_Only](https://docs.vllm.ai/projects/ascend/en/latest/developer_guide/Design_Documents/ACL_Graph.html)"
+
+#: ../../source/user_guide/support_matrix/feature_matrix.md
+msgid ""
+"[ACLGraph "
+"Piecewise](https://docs.vllm.ai/projects/ascend/en/latest/developer_guide/Design_Documents/ACL_Graph.html)"
+msgstr ""
+"[ACLGraph "
+"Piecewise](https://docs.vllm.ai/projects/ascend/en/latest/developer_guide/Design_Documents/ACL_Graph.html)"
+
+#: ../../source/user_guide/support_matrix/feature_matrix.md
+msgid "Async Scheduling"
+msgstr "异步调度"
+
+#: ../../source/user_guide/support_matrix/feature_matrix.md
+msgid ""
+"[<abbr title=\"Automatic Prefix "
+"Caching\">APC</abbr>](https://docs.vllm.ai/en/latest/features/automatic_prefix_caching/)"
+msgstr ""
+"[<abbr title=\"自动前缀缓存\">APC</abbr>](https://docs.vllm.ai/en/latest/features/automatic_prefix_caching/)"
+
+#: ../../source/user_guide/support_matrix/feature_matrix.md
+msgid ""
+"[Chunked "
+"Prefill](https://docs.vllm.ai/en/stable/configuration/optimization"
+"/#chunked-prefill)"
+msgstr ""
+"[分块预填充](https://docs.vllm.ai/en/stable/configuration/optimization"
+"/#chunked-prefill)"
+
+#: ../../source/user_guide/support_matrix/feature_matrix.md
+msgid ""
+"[Context "
+"Parallel](https://docs.vllm.ai/projects/ascend/en/latest/developer_guide/Design_Documents/context_parallel.html)"
+msgstr ""
+"[上下文并行](https://docs.vllm.ai/projects/ascend/en/latest/developer_guide/Design_Documents/context_parallel.html)"
+
+#: ../../source/user_guide/support_matrix/feature_matrix.md
+msgid ""
+"[Cpu "
+"Binding](https://docs.vllm.ai/projects/ascend/en/latest/developer_guide/Design_Documents/cpu_binding.html)"
+msgstr ""
+"[CPU绑定](https://docs.vllm.ai/projects/ascend/en/latest/developer_guide/Design_Documents/cpu_binding.html)"
+
+#: ../../source/user_guide/support_matrix/feature_matrix.md
+msgid ""
+"[<abbr title=\"Data "
+"Parallel\">DP</abbr>](https://docs.vllm.ai/en/latest/serving/data_parallel_deployment/)"
+msgstr ""
+"[<abbr title=\"数据并行\">DP</abbr>](https://docs.vllm.ai/en/latest/serving/data_parallel_deployment/)"
+
+#: ../../source/user_guide/support_matrix/feature_matrix.md
+msgid ""
+"[Disaggregated "
+"Prefill](https://docs.vllm.ai/projects/ascend/en/latest/developer_guide/Design_Documents/disaggregated_prefill.html)"
+msgstr ""
+"[分离式预填充](https://docs.vllm.ai/projects/ascend/en/latest/developer_guide/Design_Documents/disaggregated_prefill.html)"
+
+#: ../../source/user_guide/support_matrix/feature_matrix.md
+msgid "[Eagle3](https://docs.vllm.ai/en/latest/features/speculative_decoding/eagle/)"
+msgstr "[Eagle3](https://docs.vllm.ai/en/latest/features/speculative_decoding/eagle/)"
+
+#: ../../source/user_guide/support_matrix/feature_matrix.md
+msgid "[Eplb](https://docs.vllm.ai/projects/ascend/en/latest/user_guide/feature_guide/eplb_swift_balancer.html)"
+msgstr "[EPLB](https://docs.vllm.ai/projects/ascend/en/latest/user_guide/feature_guide/eplb_swift_balancer.html)"
+
+#: ../../source/user_guide/support_matrix/feature_matrix.md
+msgid ""
+"[<abbr title=\"Expert-"
+"Parallel\">EP</abbr>](https://docs.vllm.ai/en/latest/serving/expert_parallel_deployment/)"
+msgstr ""
+"[<abbr title=\"专家并行\">EP</abbr>](https://docs.vllm.ai/en/latest/serving/expert_parallel_deployment/)"
+
+#: ../../source/user_guide/support_matrix/feature_matrix.md
+msgid "Flashcomm1"
+msgstr "Flashcomm1"
+
+#: ../../source/user_guide/support_matrix/feature_matrix.md
+msgid ""
+"[KV Cache "
+"Pool](https://docs.vllm.ai/projects/ascend/en/latest/developer_guide/Design_Documents/KV_Cache_Pool_Guide.html)"
+msgstr ""
+"[KV缓存池](https://docs.vllm.ai/projects/ascend/en/latest/developer_guide/Design_Documents/KV_Cache_Pool_Guide.html)"
+
+#: ../../source/user_guide/support_matrix/feature_matrix.md
+msgid "Layer Sharding"
+msgstr "层分片"
+
+#: ../../source/user_guide/support_matrix/feature_matrix.md
+msgid "Lmhead TP"
+msgstr "Lmhead TP"
+
+#: ../../source/user_guide/support_matrix/feature_matrix.md
+msgid "Mlapo"
+msgstr "MLAPO"
+
+#: ../../source/user_guide/support_matrix/feature_matrix.md
+msgid ""
+"[<abbr title=\"Multimodal "
+"Inputs\">mm</abbr>](https://docs.vllm.ai/en/latest/features/multimodal_inputs/)"
+msgstr ""
+"[<abbr title=\"多模态输入\">mm</abbr>](https://docs.vllm.ai/en/latest/features/multimodal_inputs/)"
+
+#: ../../source/user_guide/support_matrix/feature_matrix.md
+msgid "Multistream Moe"
+msgstr "多流MoE"
+
+#: ../../source/user_guide/support_matrix/feature_matrix.md
+msgid "Shared Expert DP"
+msgstr "共享专家DP"
+
+#: ../../source/user_guide/support_matrix/feature_matrix.md
+msgid ""
+"[Quantization "
+"W4A4](https://docs.vllm.ai/projects/ascend/en/latest/user_guide/feature_guide/quantization.html#)"
+msgstr ""
+"[量化W4A4](https://docs.vllm.ai/projects/ascend/en/latest/user_guide/feature_guide/quantization.html#)"
+
+#: ../../source/user_guide/support_matrix/feature_matrix.md
+msgid ""
+"[Quantization "
+"W4A8](https://docs.vllm.ai/projects/ascend/en/latest/user_guide/feature_guide/quantization.html#)"
+msgstr ""
+"[量化W4A8](https://docs.vllm.ai/projects/ascend/en/latest/user_guide/feature_guide/quantization.html#)"
+
+#: ../../source/user_guide/support_matrix/feature_matrix.md
+msgid ""
+"[Quantization "
+"W8A8](https://docs.vllm.ai/projects/ascend/en/latest/user_guide/feature_guide/quantization.html#)"
+msgstr ""
+"[量化W8A8](https://docs.vllm.ai/projects/ascend/en/latest/user_guide/feature_guide/quantization.html#)"
+
+#: ../../source/user_guide/support_matrix/feature_matrix.md
+msgid "<abbr title=\"Tensor Parallel\">TP</abbr>"
+msgstr "<abbr title=\"张量并行\">TP</abbr>"
+
+#: ../../source/user_guide/support_matrix/feature_matrix.md
+msgid "Weight nz"
+msgstr "权重非零"
+
+#: ../../source/user_guide/support_matrix/feature_matrix.md
+msgid "✅"
+msgstr "✅"
+
+#: ../../source/user_guide/support_matrix/feature_matrix.md
+msgid "❌"
+msgstr "❌"
+
+#: ../../source/user_guide/support_matrix/feature_matrix.md
+msgid "🟠<sup>1</sup>"
+msgstr "🟠<sup>1</sup>"
+
+#: ../../source/user_guide/support_matrix/feature_matrix.md
+msgid "🟠<sup>2</sup>"
+msgstr "🟠<sup>2</sup>"
+
+#: ../../source/user_guide/support_matrix/feature_matrix.md
+msgid "🟠"
+msgstr "🟠"
+
+#: ../../source/user_guide/support_matrix/feature_matrix.md
+msgid "🟠<sup>3</sup>"
+msgstr "🟠<sup>3</sup>"
+
+#: ../../source/user_guide/support_matrix/feature_matrix.md
+msgid "❔"
+msgstr "❔"
+
+#: ../../source/user_guide/support_matrix/feature_matrix.md
+msgid "🟠<sup>4</sup>"
+msgstr "🟠<sup>4</sup>"
+
+#: ../../source/user_guide/support_matrix/feature_matrix.md
+msgid "🟠<sup>6</sup>"
+msgstr "🟠<sup>6</sup>"
+
+#: ../../source/user_guide/support_matrix/feature_matrix.md:40
+msgid "<sup>1</sup> Only dcp supports dp while pcp does not support dp."
+msgstr "<sup>1</sup>仅dcp支持dp，pcp不支持dp。"
+
+#: ../../source/user_guide/support_matrix/feature_matrix.md:41
+msgid "<sup>2</sup> Falshcomm is only enabled on the prefill stage."
+msgstr "<sup>2</sup>Flashcomm仅在预填充阶段启用。"
+
+#: ../../source/user_guide/support_matrix/feature_matrix.md:42
+msgid "<sup>3</sup> Layer sharding is only enabled on the prefill stage."
+msgstr "<sup>3</sup>层分片仅在预填充阶段启用。"
+
+#: ../../source/user_guide/support_matrix/feature_matrix.md:43
+msgid "<sup>4</sup> Lmhead TP is only enabled in the pure dp scenarios."
+msgstr "<sup>4</sup>Lmhead TP仅在纯dp场景中启用。"
+
+#: ../../source/user_guide/support_matrix/feature_matrix.md:44
+msgid ""
+"<sup>5</sup> LoRA applies only to the language backbone of multimodal "
+"models (upstream)."
+msgstr ""
+"<sup>5</sup>LoRA仅适用于多模态模型的语言主干（上游）。"
+
+#: ../../source/user_guide/support_matrix/feature_matrix.md:45
+msgid "<sup>6</sup> MLAPO is only supported on the decode stage."
+msgstr "<sup>6</sup>MLAPO仅在解码阶段支持。"
