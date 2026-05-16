@@ -92,11 +92,15 @@ class MooncakeBackend(Backend):
     def get(self, keys: list[str], addrs: list[list[int]], sizes: list[list[int]]):
         try:
             res = self.store.batch_get_into_multi_buffers(keys, addrs, sizes)
-            for value in res:
+            for i, value in enumerate(res):
                 if value < 0:
                     logger.error("Failed to get key %s, res:%s", keys, res)
+                elif value > 0:
+                    res[i] = 0
+            return res
         except Exception as e:
             logger.error("Failed to get key %s, error:%s", keys, e)
+            return None
 
 
 @dataclass
