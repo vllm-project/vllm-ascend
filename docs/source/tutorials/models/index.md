@@ -35,4 +35,5 @@ MiniMax-M2.5.md
 Hunyuan-A13B-Instruct.md
 Minitron-8B-Base.md
 LLaVA-OneVision-Qwen2-0.5B-OV.md
+c4ai-command-r-v01.md
 :::
