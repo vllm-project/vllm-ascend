@@ -1,0 +1,27 @@
+model_name: "allenai/Molmo2-8B"
+hardware: "Atlas A2 Series"
+model: "vllm-vlm"
+tasks:
+  - name: "mmmu_val"
+    metrics:
+      - name: "acc,none"
+        # Reference: Ai2 Molmo2 family reports ~53.0% on MMMU (public model card / tech report).
+        # Harness-specific scores may differ slightly; rtol in test_lm_eval_correctness is 0.05.
+        value: 0.53
+max_model_len: 16384
+dtype: "bfloat16"
+trust_remote_code: True
+gpu_memory_utilization: 0.75
+enforce_eager: True
+# Doc sync only (check_docs_yaml_sync + docs/source/tutorials/models/Molmo2-8B.md). Ignored by lm-eval.
+# Split across model_name + doc_serve_options so the hook matches the standard `cmd` multi-target pattern.
+doc_serve_options:
+  - --trust-remote-code
+  - --dtype
+  - bfloat16
+  - --max-num-batched-tokens
+  - "36864"
+  - --limit-mm-per-prompt.image
+  - "1"
+  - --limit-mm-per-prompt.video
+  - "1"
