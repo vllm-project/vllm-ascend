@@ -2057,6 +2057,10 @@ class NPUModelRunner(GPUModelRunner):
 
         with record_function_or_nullcontext("draft_token"):
             if self.speculative_config:
+                input_fits_in_drafter =(
+                    spec_decode_common_attn_metadata.max_seq_len + self.num_spec_tokens
+                    <= self.effective_drafter_max_model_len
+                )
                 use_padded_batch = (
                     self.speculative_config
                     and (
@@ -2070,8 +2074,27 @@ class NPUModelRunner(GPUModelRunner):
                 if use_padded_batch:
                     # EAGLE speculative decoding can use the GPU sampled tokens
                     # as inputs, and does not need to wait for bookkeeping to finish.
-                    propose_draft_token_ids(sampler_output.sampled_token_ids)
-                if self.speculative_config and not use_padded_batch:
+                    if input_fits_in_drafter:
+                        propose_draft_token_ids(sampler_output.sampled_token_ids)
+                    elif self.valid_sampled_token_count_event is not None:
+                        common_attn_metadata = spec_decode_common_attn_metadata
+                        sampled_token_ids = sampler_output.sampled_token_ids
+                        next_token_ids, valid_sampled_tokens_count = self.drafter.prepare_next_token_ids_padded(
+                                common_attn_metadata,
+                                sampled_token_ids,
+                                self.requests,
+                                self.input_batch,
+                                self.discard_request_indices.gpu,
+                                self.num_discarded_requests,
+                            )
+                        self._copy_valid_sampled_token_count(
+                            next_token_ids, valid_sampled_tokens_count
+                        )
+                        self._draft_token_ids = torch.zeros(
+                            1, device=self.device, dtype=torch.int32
+                        ).expand(len(self.input_batch.req_ids), self.num_spec_tokens)
+                        self._copy_draft_token_ids_to_cpu(scheduler_output, zeros_only=True)
+                if self.speculative_config and not use_padded_batch and input_fits_in_drafter:
                     # ngram and other speculative decoding methods use the sampled
                     # tokens on the CPU, so they are run after bookkeeping.
                     propose_draft_token_ids(valid_sampled_token_ids)
