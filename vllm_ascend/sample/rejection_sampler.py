@@ -10,6 +10,12 @@ from vllm.v1.sample.rejection_sampler import (
     generate_uniform_probs,
 )
 
+from vllm_ascend import envs
+from vllm_ascend.ops.triton.fused_rejection_sampler import (
+    fused_rejection_sample_from_logits,
+    fused_rejection_sample_from_probs,
+    generate_uniform_resample,
+)
 from vllm_ascend.ops.triton.reject_sample import (
     cal_grid_and_block_size,
     expand_triton,
@@ -19,6 +25,46 @@ from vllm_ascend.ops.triton.reject_sample import (
     sample_recovered_tokens_kernel,
 )
 from vllm_ascend.sample.sampler import apply_top_k_top_p
+
+_SAMPLING_METADATA_DRAFT_LOGITS: dict[int, torch.Tensor] = {}
+# The upstream RejectionSampler call path does not pass draft logits through
+# its public signature, so Ascend stores them in a short-lived side table keyed
+# by the SamplingMetadata object identity.
+
+
+def _should_use_fused_rejection_sampler(
+    draft_logits: torch.Tensor | None,
+    draft_probs: torch.Tensor | None,
+    sampling_metadata: SamplingMetadata,
+    num_draft_tokens: list[int],
+    max_spec_len: int,
+    device: torch.device,
+) -> bool:
+    return (
+        envs.VLLM_ASCEND_USE_FUSED_REJECTION
+        and HAS_TRITON
+        and device.type == "npu"
+        and sampling_metadata.all_random
+        and (draft_logits is not None or draft_probs is not None)
+        and len(num_draft_tokens) > 0
+        and max(num_draft_tokens) > 0
+        and max(num_draft_tokens) <= max_spec_len
+    )
+
+
+def set_sampling_metadata_draft_logits(
+    sampling_metadata: SamplingMetadata,
+    draft_logits: torch.Tensor | None,
+) -> None:
+    key = id(sampling_metadata)
+    if draft_logits is None:
+        _SAMPLING_METADATA_DRAFT_LOGITS.pop(key, None)
+    else:
+        _SAMPLING_METADATA_DRAFT_LOGITS[key] = draft_logits
+
+
+def clear_sampling_metadata_draft_logits(sampling_metadata: SamplingMetadata) -> None:
+    _SAMPLING_METADATA_DRAFT_LOGITS.pop(id(sampling_metadata), None)
 
 
 def apply_sampling_constraints(
@@ -112,10 +158,10 @@ def rejection_sample(
     assert bonus_token_ids.is_contiguous()
     assert target_logits.shape == (num_tokens, vocab_size)
 
-    # When num_speculative_tokens>=3, using block verify.
-    # Skip block verify when draft_probs is None (suffix/ngram methods)
-    # to avoid incorrect verification results.
-    using_block_verify = max_spec_len >= 3 and draft_probs is not None
+    draft_logits = _SAMPLING_METADATA_DRAFT_LOGITS.get(id(sampling_metadata))
+    if draft_logits is not None:
+        assert draft_logits.ndim == 3
+        assert draft_logits.is_contiguous()
 
     # Create output buffer.
     output_token_ids = torch.empty(
@@ -169,10 +215,6 @@ def rejection_sample(
         if sampling_metadata.all_greedy:
             return output_token_ids
 
-    # Compute probability distribution from target logits.
-    target_probs = target_logits.softmax(dim=-1, dtype=torch.float32)
-    assert target_probs.is_contiguous()
-
     # Generate uniform probabilities for rejection sampling.
     # [num_tokens]
     uniform_probs = generate_uniform_probs(
@@ -181,6 +223,55 @@ def rejection_sample(
         sampling_metadata.generators,
         device,
     )
+
+    if _should_use_fused_rejection_sampler(
+        draft_logits,
+        draft_probs,
+        sampling_metadata,
+        num_draft_tokens,
+        max_spec_len,
+        device,
+    ):
+        uniform_resample = generate_uniform_resample(
+            batch_size,
+            vocab_size,
+            sampling_metadata.generators,
+            device,
+        )
+        if draft_logits is not None:
+            return fused_rejection_sample_from_logits(
+                draft_token_ids,
+                num_draft_tokens,
+                max_spec_len,
+                cu_num_draft_tokens,
+                draft_logits,
+                target_logits,
+                bonus_token_ids,
+                uniform_probs.to(torch.float32),
+                uniform_resample,
+                sampling_metadata.temperature,
+            )
+        return fused_rejection_sample_from_probs(
+            draft_token_ids,
+            num_draft_tokens,
+            max_spec_len,
+            cu_num_draft_tokens,
+            draft_probs,
+            target_logits,
+            bonus_token_ids,
+            uniform_probs.to(torch.float32),
+            uniform_resample,
+            sampling_metadata.temperature,
+        )
+
+    # When num_speculative_tokens>=3, using block verify.
+    # Skip block verify when draft probabilities are unavailable
+    # to avoid incorrect verification results.
+    using_block_verify = max_spec_len >= 3 and draft_probs is not None
+
+    # Compute probability distribution from target logits.
+    target_probs = target_logits.softmax(dim=-1, dtype=torch.float32)
+    assert target_probs.is_contiguous()
 
     # Sample recovered tokens for each position.
     # [num_tokens]
