@@ -213,7 +213,7 @@ def test_models_aclgraph_capture_replay_metrics_dp2(
     warmup_runs = 1 + (2 * max_batch_sizes)
     soc_version = get_ascend_device_type()
     if soc_version in {AscendDeviceType.A3} and "DeepSeek" in model:
-        # An extra warmup run is needed for MC2 warmup here
+        # An extra warmup run is needed for MC2 warmup here.
         warmup_runs += 1
 
     # Part B: Alignment padding (Empty runs to hit the 32-step boundary)
