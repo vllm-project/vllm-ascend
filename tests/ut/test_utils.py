@@ -398,3 +398,41 @@ class TestUtils(TestBase):
             result = utils.maybe_trans_nz(weight)
             self.assertIs(result, weight)
             assert_nz_cast(weight)
+
+    def test_vllm_version_is_with_suffix(self):
+        """Test that vllm_version_is correctly handles version suffixes.
+        
+        This test verifies the fix for Issue #9167 where vllm.__version__
+        contains build metadata (e.g., "0.20.1+cpu") causing version
+        comparison to fail.
+        """
+        from vllm_ascend.utils import vllm_version_is
+        from vllm_ascend import envs_ascend
+        
+        # Test case 1: Version with suffix should match base version
+        with mock.patch.object(envs_ascend, 'VLLM_VERSION', None):
+            with mock.patch('vllm.__version__', '0.20.1+cpu'):
+                vllm_version_is.cache_clear()
+                self.assertTrue(vllm_version_is('0.20.1'))
+        
+        # Test case 2: Version without suffix should match
+        with mock.patch.object(envs_ascend, 'VLLM_VERSION', None):
+            with mock.patch('vllm.__version__', '0.20.1'):
+                vllm_version_is.cache_clear()
+                self.assertTrue(vllm_version_is('0.20.1'))
+        
+        # Test case 3: Different versions should not match
+        with mock.patch.object(envs_ascend, 'VLLM_VERSION', None):
+            with mock.patch('vllm.__version__', '0.20.1+cpu'):
+                vllm_version_is.cache_clear()
+                self.assertFalse(vllm_version_is('0.20.0'))
+        
+        # Test case 4: VLLM_VERSION env var should override
+        with mock.patch.object(envs_ascend, 'VLLM_VERSION', '0.20.1'):
+            vllm_version_is.cache_clear()
+            self.assertTrue(vllm_version_is('0.20.1'))
+        
+        # Test case 5: VLLM_VERSION with suffix should also work
+        with mock.patch.object(envs_ascend, 'VLLM_VERSION', '0.20.1+cpu'):
+            vllm_version_is.cache_clear()
+            self.assertTrue(vllm_version_is('0.20.1'))
