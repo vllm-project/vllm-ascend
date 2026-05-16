@@ -10,7 +10,8 @@ from vllm.distributed.kv_events import (
     KVConnectorKVEvents,
     KVEventAggregator,
 )
-from vllm.distributed.kv_transfer.kv_connector.v1.base import KVConnectorBase_V1, KVConnectorMetadata, KVConnectorRole
+from vllm.distributed.kv_transfer.kv_connector.v1.base import \
+    KVConnectorBase_V1, KVConnectorMetadata, KVConnectorRole, SupportsHMA
 from vllm.forward_context import ForwardContext
 from vllm.logger import logger
 from vllm.utils.network_utils import make_zmq_socket
@@ -63,7 +64,7 @@ class AscendStoreKVEvents(KVConnectorKVEvents):
         return f"<AscendStoreKVEvents events={self.get_all_events()}>"
 
 
-class AscendStoreConnector(KVConnectorBase_V1):
+class AscendStoreConnector(KVConnectorBase_V1, SupportsHMA):
     @classmethod
     def requires_piecewise_for_cudagraph(cls, extra_config: dict[str, Any]) -> bool:
         """
@@ -96,11 +97,12 @@ class AscendStoreConnector(KVConnectorBase_V1):
         self.sended_but_unfinished_reqs: set[str] = set()
 
         if role == KVConnectorRole.SCHEDULER:
-            self.connector_scheduler = KVPoolScheduler(vllm_config, self.use_layerwise)
+            self.connector_scheduler = KVPoolScheduler(vllm_config, self.use_layerwise, kv_cache_config)
         else:
             self.connector_worker = KVPoolWorker(
                 vllm_config,
                 self.use_layerwise,
+                kv_cache_config
             )
 
             assert self.connector_worker is not None
@@ -133,6 +135,14 @@ class AscendStoreConnector(KVConnectorBase_V1):
     ) -> tuple[bool, dict[str, Any] | None]:
         assert self.connector_scheduler is not None
         return self.connector_scheduler.request_finished(request, block_ids)
+
+    def request_finished_all_groups(
+            self,
+            request: "Request",
+            block_ids: tuple[list[int], ...],
+    ) -> tuple[bool, dict[str, Any] | None]:
+        assert self.connector_scheduler is not None
+        return self.connector_scheduler.request_finished_all_groups(request, block_ids)
 
     def update_connector_output(self, connector_output: KVConnectorOutput):
         """
