@@ -122,6 +122,22 @@ class AscendConfig:
         self.recompute_scheduler_enable = additional_config.get("recompute_scheduler_enable", False)
         self.enable_cpu_binding = additional_config.get("enable_cpu_binding", True)
 
+        self.enable_context_parallel = additional_config.get(
+            "enable_context_parallel", ascend_envs.VLLM_ASCEND_ENABLE_CONTEXT_PARALLEL
+        )
+        self.enable_matmul_allreduce = additional_config.get(
+            "enable_matmul_allreduce", ascend_envs.VLLM_ASCEND_ENABLE_MATMUL_ALLREDUCE
+        )
+        self.enable_fused_mc2 = additional_config.get("enable_fused_mc2", ascend_envs.VLLM_ASCEND_ENABLE_FUSED_MC2)
+        self.enable_mlapo = additional_config.get("enable_mlapo", ascend_envs.VLLM_ASCEND_ENABLE_MLAPO)
+        self.enable_flashcomm2_parallel_size = additional_config.get(
+            "enable_flashcomm2_parallel_size", ascend_envs.VLLM_ASCEND_FLASHCOMM2_PARALLEL_SIZE
+        )
+        self.msmonitor_use_daemon = additional_config.get("msmonitor_use_daemon", ascend_envs.MSMONITOR_USE_DAEMON)
+        self.enable_transpose_kv_cache_by_block = additional_config.get(
+            "enable_transpose_kv_cache_by_block", ascend_envs.VLLM_ASCEND_FUSION_OP_TRANSPOSE_KV_CACHE_BY_BLOCK
+        )
+
         self.pd_tp_ratio = 1
         self.pd_head_ratio = 1
         self.num_head_replica = 1
@@ -155,6 +171,9 @@ class AscendConfig:
         # _npu_paged_attention in this cases. This should be removed once
         # npu_fused_infer_attention_score performs better on all scenarios.
         self.pa_shape_list = additional_config.get("pa_shape_list", [])
+        # Weight NZ mode configuration.
+        # 0: disabled, 1: only quant case enable nz (default), 2: BF16/FP16 also enable nz
+        self.weight_nz_mode = additional_config.get("weight_nz_mode", ascend_envs.VLLM_ASCEND_ENABLE_NZ)
 
         # when enable_async_exponential is True, AscendSampler will be different from vllm Sampler,
         # which make batch_invariant mode not working.
@@ -627,6 +646,9 @@ def init_ascend_config(vllm_config):
 def clear_ascend_config():
     global _ASCEND_CONFIG
     _ASCEND_CONFIG = None
+    from vllm_ascend.utils import clear_enable_sp
+
+    clear_enable_sp()
 
 
 def get_ascend_config():

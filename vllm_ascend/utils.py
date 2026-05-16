@@ -75,6 +75,15 @@ _CUSTOM_OP_BASE_DIR = (
 )
 
 
+def clear_enable_sp():
+    global _ENABLE_SP
+    _ENABLE_SP = None
+    enable_dsa_cp.cache_clear()
+    enable_dsa_cp_with_layer_shard.cache_clear()
+    enable_dsa_cp_with_o_proj_tp.cache_clear()
+    _libc_getenv.cache_clear()
+
+
 def is_310p():
     return get_ascend_device_type() == AscendDeviceType._310P
 
@@ -167,13 +176,17 @@ def _should_trans_nz(weight: torch.Tensor) -> bool:
     if is_310p():
         return True
 
-    # NZ is disabled on non-310P.
-    if not envs_ascend.VLLM_ASCEND_ENABLE_NZ:
+    # Get config value instead of env
+    config = get_ascend_config()
+    nz_mode = config.weight_nz_mode
+
+    # NZ is disabled when mode is 0.
+    if not nz_mode:
         return False
 
-    # BF16/FP16 convert only when enable_nz == 2.
+    # BF16/FP16 convert only when nz_mode == 2.
     if weight.dtype in {torch.bfloat16, torch.float16}:
-        return envs_ascend.VLLM_ASCEND_ENABLE_NZ == 2
+        return nz_mode == 2
 
     # Quantized or other supported dtypes convert by default.
     return True
@@ -827,7 +840,7 @@ def mlp_tp_enable() -> bool:
 
 
 def matmul_allreduce_enable() -> bool:
-    return envs_ascend.VLLM_ASCEND_ENABLE_MATMUL_ALLREDUCE
+    return get_ascend_config().enable_matmul_allreduce
 
 
 def enable_sp_by_pass():
@@ -836,17 +849,19 @@ def enable_sp_by_pass():
 
 def enable_sp(vllm_config=None, enable_shared_expert_dp: bool = False) -> bool:
     global _ENABLE_SP
-    if _ENABLE_SP is None:
-        if vllm_config is None:
+    if vllm_config is None:
+        try:
             from vllm.config import get_current_vllm_config
 
             vllm_config = get_current_vllm_config()
-        _ENABLE_SP = (
-            envs_ascend.VLLM_ASCEND_ENABLE_FLASHCOMM1
-            # Flash comm 1 should be enabled by env VLLM_ASCEND_ENABLE_FLASHCOMM1
-            # We retain the env VLLM_ASCEND_ENABLE_FLASHCOMM here for backward compatibility.
-            or bool(int(os.getenv("VLLM_ASCEND_ENABLE_FLASHCOMM", "0")))
-        )
+        except AssertionError:
+            vllm_config = None
+
+    additional_config = getattr(vllm_config, "additional_config", None) if vllm_config is not None else None
+    refresh = additional_config.get("refresh", False) if additional_config else False
+
+    if _ENABLE_SP is None or refresh:
+        _ENABLE_SP = envs_ascend.VLLM_ASCEND_ENABLE_FLASHCOMM1
 
         if not _ENABLE_SP and enable_shared_expert_dp:
             _ENABLE_SP = True
@@ -861,7 +876,7 @@ def shared_expert_dp_enabled() -> bool:
 
 
 def prefill_context_parallel_enable() -> bool:
-    return envs_ascend.VLLM_ASCEND_ENABLE_CONTEXT_PARALLEL
+    return get_ascend_config().enable_context_parallel
 
 
 def is_moe_model(vllm_config: VllmConfig):
@@ -1145,7 +1160,8 @@ def has_layer_idx(model_instance: torch.nn.Module) -> bool:
 
 
 def flashcomm2_enable() -> bool:
-    return envs_ascend.VLLM_ASCEND_FLASHCOMM2_PARALLEL_SIZE > 0
+    config_val = get_ascend_config().enable_flashcomm2_parallel_size
+    return config_val > 0
 
 
 def o_shard_enable() -> bool:
@@ -1156,10 +1172,10 @@ def o_shard_enable() -> bool:
 
 
 def get_flashcomm2_config_and_validate(ascend_config, vllm_config):
-    flashcomm2_oproj_tp_size = envs_ascend.VLLM_ASCEND_FLASHCOMM2_PARALLEL_SIZE
+    flashcomm2_oproj_tp_size = ascend_config.enable_flashcomm2_parallel_size
     global_tp_size = vllm_config.parallel_config.tensor_parallel_size
 
-    if not flashcomm2_enable():
+    if ascend_config.enable_flashcomm2_parallel_size <= 0:
         return 0
 
     logger.info("Enable FLASHCOMM2 with flashcomm2_oproj_tensor_parallel_size = %s", flashcomm2_oproj_tp_size)
