@@ -129,7 +129,7 @@ from typing import Any
 
 import httpx
 from fastapi import FastAPI, Request
-from fastapi.responses import StreamingResponse
+from fastapi.responses import Response, StreamingResponse
 
 try:
     from vllm.logger import init_logger
@@ -573,6 +573,18 @@ def with_cancellation(handler_func):
 app = FastAPI(lifespan=lifespan)
 
 
+def build_upstream_error_response(error: httpx.HTTPStatusError) -> Response:
+    headers = {}
+    content_type = error.response.headers.get("content-type")
+    if content_type:
+        headers["content-type"] = content_type
+    return Response(
+        content=error.response.content,
+        status_code=error.response.status_code,
+        headers=headers,
+    )
+
+
 async def send_request_to_service(
     client: httpx.AsyncClient,
     prefiller_id: int,
@@ -629,7 +641,11 @@ async def stream_service_response_with_retry(
     for attempt in range(1, max_retries + 1):
         try:
             async with client.stream("POST", endpoint, json=req_data, headers=headers) as response:
-                response.raise_for_status()
+                try:
+                    response.raise_for_status()
+                except httpx.HTTPStatusError:
+                    await response.aread()
+                    raise
                 first_chunk_sent = False
                 async for chunk in response.aiter_bytes():
                     first_chunk_sent = True
@@ -708,6 +724,7 @@ class InstanceInfo:
 
 
 async def _handle_completions(api: str, request: Request):
+    generator_owns_request_lifecycle = False
     try:
         proxy_state.request_num += 1
         req_data = await request.json()
@@ -810,6 +827,17 @@ async def _handle_completions(api: str, request: Request):
                         yield chunk
             except asyncio.CancelledError:
                 raise
+            except httpx.HTTPStatusError as e:
+                logger.error(
+                    "Upstream decoder %s returned status %s for request %s",
+                    instance_info.decoder.url,
+                    e.response.status_code,
+                    instance_info.request_id,
+                )
+                proxy_state.abort_prefiller_request(instance_info.prefiller_idx, instance_info.request_id)
+                release_prefiller_kv_once()
+                if not stream_flag:
+                    raise
             except Exception as e:
                 logger.error(
                     "Error during streaming from decoder %s: %s the aborted request %s "
@@ -820,6 +848,8 @@ async def _handle_completions(api: str, request: Request):
                 )
                 proxy_state.abort_prefiller_request(instance_info.prefiller_idx, instance_info.request_id)
                 release_prefiller_kv_once()
+                if not stream_flag:
+                    raise
             finally:
                 # After streaming is done or cancelled, release tokens.
                 release_prefiller_kv_once()
@@ -828,7 +858,18 @@ async def _handle_completions(api: str, request: Request):
 
         # Determine the correct media type based on stream flag
         media_type = "text/event-stream; charset=utf-8" if stream_flag else "application/json"
-        return StreamingResponse(generate_stream(), media_type=media_type)
+        if stream_flag:
+            return StreamingResponse(generate_stream(), media_type=media_type)
+
+        generator_owns_request_lifecycle = True
+        response_body = bytearray()
+        async for chunk in generate_stream():
+            response_body.extend(chunk)
+        return Response(content=bytes(response_body), media_type=media_type)
+    except httpx.HTTPStatusError as e:
+        if not generator_owns_request_lifecycle:
+            proxy_state.request_num -= 1
+        return build_upstream_error_response(e)
     except Exception as e:
         import traceback
 
@@ -836,7 +877,8 @@ async def _handle_completions(api: str, request: Request):
         print(f"Error occurred in disagg prefill proxy server - {api} endpoint")
         print(e)
         print("".join(traceback.format_exception(*exc_info)))
-        proxy_state.request_num -= 1
+        if not generator_owns_request_lifecycle:
+            proxy_state.request_num -= 1
         raise
 
 
