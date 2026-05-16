@@ -17,7 +17,6 @@ class RecoveryExecutor:
         """
         self._component_type = component_type.lower()
         self._action_handlers: Dict[str, Callable[..., bool]] = {}
-        self._register_default_handlers()
     
     def register_handler(self, action_name: str, action_func: Callable[..., bool]) -> None:
         """

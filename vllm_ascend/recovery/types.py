@@ -16,7 +16,7 @@ class RecoveryAction:
         config: Dictionary containing the parameters for this action
     """
     
-    def __init__(self, name: str, config: Optional[dictict[str, Any]] = None) -> None:
+    def __init__(self, name: str, config: Optional[dict[str, Any]] = None) -> None:
         self.name = name
         self.config = config if config is not None else {}
     
@@ -54,10 +54,8 @@ class RecoveryPlan(msgspec.Struct):
     Attributes:
         steps: List of RecoveryStep objects defining the recovery workflow
     """
-    
-    def __init__(self,name:str, steps: Optional[list[RecoveryStep]] = None) -> None:
-        self.name = name
-        self.steps = steps if steps is not None else []
+    name: str
+    steps: list[RecoveryStep] = msgspec.field(default_factory=list)
     
     def add_step(self, step: RecoveryStep) -> None:
         """Add a recovery step to the plan."""
@@ -72,19 +70,11 @@ class RecoveryPlan(msgspec.Struct):
         return len(self.steps)
 
 class FaultReport(msgspec.Struct):
-    def __init__(
-        self,
-        worker_rank: int,
-        fault_type: str,
-        recovery_plan: RecoveryPlan,    
-        context: Optional[dict],
-        timestamp: float
-    ) -> None:
-        self.worker_rank = worker_rank
-        self.fault_type = fault_type
-        self.recovery_plan = recovery_plan
-        self.context = context if context is not None else {}
-        self.timestamp = timestamp
+    worker_rank: int
+    fault_type: str
+    recovery_plan: RecoveryPlan
+    timestamp: float
+    context: dict = msgspec.field(default_factory=dict)
 
 class StepResult:
     def __init__(

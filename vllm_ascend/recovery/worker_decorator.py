@@ -1,10 +1,8 @@
 import functools
+import msgspec.msgpack
 
-from vllm.logger import init_logger
+from vllm.logger import logger
 from vllm_ascend.recovery.types import ExceptionInfo
-
-logger = init_logger(__name__)
-
 
 def fault_recovery_decorator():
     def decorator(func):
@@ -24,7 +22,8 @@ def fault_recovery_decorator():
                         exception_type=type(e).__name__,
                         message=str(e),
                     )
-                    self.worker_input_socket.send(exception_info)
+                    exception_encode = msgspec.msgpack.encode(exception_info)
+                    self.worker_input_socket.send(exception_encode)
                     raise e
         return wrapper
     return decorator

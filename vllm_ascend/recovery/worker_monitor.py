@@ -2,15 +2,12 @@ import threading
 import torch
 import torch_npu
 import msgspec.msgpack
-import pickle
-from vllm.tests.distributed.test_same_node import rank
 import zmq
 
-from vllm.tests.kernels.moe.test_moe import vllm_config
-from vllm.vllm.config import VllmConfig
+from vllm.config import VllmConfig
 
 
-from vllm.logger import init_logger
+from vllm.logger import logger
 from vllm.utils.network_utils import get_open_zmq_ipc_path, make_zmq_socket
 from vllm_ascend.recovery.exception_handler import ExceptionHandlerFactory, NetworkExceptionHandler
 from vllm_ascend.recovery.types import ExceptionInfo, FaultReport, RecoveryPlan, StepResult 
