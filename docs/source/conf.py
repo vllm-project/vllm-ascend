@@ -28,6 +28,8 @@ import os
 
 from docutils.parsers.rst import directives
 from sphinx.directives.code import CodeBlock
+from sphinx.highlighting import lexers
+from pygments.lexers.special import TextLexer
 
 # import sys
 # sys.path.insert(0, os.path.abspath('.'))
@@ -60,6 +62,7 @@ extensions = [
     "sphinx_design",
     "sphinx_togglebutton",
     "sphinx_substitution_extensions",
+    "sphinxcontrib.mermaid",
 ]
 
 myst_enable_extensions = ["colon_fence", "amsmath", "dollarmath", "substitution"]
@@ -185,7 +188,8 @@ class SyncMetadataCodeBlock(CodeBlock):
 
 def setup(app):
     app.add_directive("test", SyncMetadataCodeBlock)
-
+    # Disable Pygments highlighting for mermaid code blocks to let the mermaid extension handle rendering
+    lexers['mermaid'] = TextLexer()
 
 if __name__ == "__main__":
     print(json.dumps(myst_substitutions))
