@@ -53,7 +53,7 @@ on:
         default: ''
 env:
   UV_INDEX_URL: http://cache-service.nginx-pypi-cache.svc.cluster.local/pypi/simple
-  UV_EXTRA_INDEX_URL: "https://mirrors.huaweicloud.com/ascend/repos/pypi https://triton-ascend.osinfra.cn/pypi/simple https://download.pytorch.org/whl/cpu/"
+  UV_EXTRA_INDEX_URL: "https://mirrors.huaweicloud.com/ascend/repos/pypi https://triton-ascend.osinfra.cn/pypi/simple http://cache-service.nginx-pypi-cache.svc.cluster.local/whl/cpu"
   UV_INDEX_STRATEGY: unsafe-best-match
   UV_NO_CACHE: 1
   UV_SYSTEM_PYTHON: 1
@@ -120,21 +120,25 @@ jobs:
             -type f -not -path '*/.*' | sort | xargs sha256sum | sha256sum | awk '{print $1}')
           echo "CSRC_HASH=$CSRC_HASH" >> $GITHUB_OUTPUT
 
+      - name: Get Image Tag
+        id: get_image_tag
+        run: |
+          IMAGE="${{ inputs.image }}"
+          IMAGE_TAG="${IMAGE##*:}"
+          echo "IMAGE_TAG=$IMAGE_TAG" >> $GITHUB_OUTPUT
       - name: Cache vllm-ascend csrc
-        uses: runs-on/cache@v4
+        uses: actions/cache@v4
         with:
           path: |
             vllm_ascend/_cann_ops_custom
             vllm_ascend/*.so
             vllm_ascend/lib
             vllm_ascend/include
-          key: vllm-ascend-build-v1-${{ runner.os }}-${{ inputs.image }}-${{ steps.get_csrc_hash.outputs.CSRC_HASH }}
-          restore-keys: |
-            vllm-ascend-build-v1-${{ runner.os }}-${{ inputs.image }}-${{ steps.get_csrc_hash.outputs.CSRC_HASH }}
+          key: vllm-ascend-build-v1-ARM64-${{ steps.get_image_tag.outputs.IMAGE_TAG }}-${{ steps.get_csrc_hash.outputs.CSRC_HASH }}
 
       - name: Install vllm-project/vllm-ascend
         env:
-          PIP_EXTRA_INDEX_URL: "https://mirrors.huaweicloud.com/ascend/repos/pypi https://triton-ascend.osinfra.cn/pypi/simple https://download.pytorch.org/whl/cpu/"
+          PIP_EXTRA_INDEX_URL: "https://mirrors.huaweicloud.com/ascend/repos/pypi https://triton-ascend.osinfra.cn/pypi/simple http://cache-service.nginx-pypi-cache.svc.cluster.local/whl/cpu"
         run: |
           pip install uc-manager
           pip install -r requirements-dev.txt
@@ -250,21 +254,26 @@ jobs:
             -type f -not -path '*/.*' | sort | xargs sha256sum | sha256sum | awk '{print $1}')
           echo "CSRC_HASH=$CSRC_HASH" >> $GITHUB_OUTPUT
 
+      - name: Get Image Tag
+        id: get_image_tag
+        run: |
+          IMAGE="${{ inputs.image }}"
+          IMAGE_TAG="${IMAGE##*:}"
+          echo "IMAGE_TAG=$IMAGE_TAG" >> $GITHUB_OUTPUT
+
       - name: Cache vllm-ascend csrc
-        uses: runs-on/cache@v4
+        uses: actions/cache@v4
         with:
           path: |
             vllm_ascend/_cann_ops_custom
             vllm_ascend/*.so
             vllm_ascend/lib
             vllm_ascend/include
-          key: vllm-ascend-build-v1-${{ runner.os }}-${{ inputs.image }}-${{ steps.get_csrc_hash.outputs.CSRC_HASH }}
-          restore-keys: |
-            vllm-ascend-build-v1-${{ runner.os }}-${{ inputs.image }}-${{ steps.get_csrc_hash.outputs.CSRC_HASH }}
+          key: vllm-ascend-build-v1-ARM64-${{ steps.get_image_tag.outputs.IMAGE_TAG }}-${{ steps.get_csrc_hash.outputs.CSRC_HASH }}
 
       - name: Install vllm-project/vllm-ascend
         env:
-          PIP_EXTRA_INDEX_URL: "https://mirrors.huaweicloud.com/ascend/repos/pypi https://triton-ascend.osinfra.cn/pypi/simple"
+          PIP_EXTRA_INDEX_URL: "https://mirrors.huaweicloud.com/ascend/repos/pypi https://triton-ascend.osinfra.cn/pypi/simple http://cache-service.nginx-pypi-cache.svc.cluster.local/whl/cpu"
         run: |
           pip install uc-manager
           pip install -r requirements-dev.txt
@@ -387,21 +396,26 @@ jobs:
             -type f -not -path '*/.*' | sort | xargs sha256sum | sha256sum | awk '{print $1}')
           echo "CSRC_HASH=$CSRC_HASH" >> $GITHUB_OUTPUT
 
+      - name: Get Image Tag
+        id: get_image_tag
+        run: |
+          IMAGE="${{ inputs.image_a3 }}"
+          IMAGE_TAG="${IMAGE##*:}"
+          echo "IMAGE_TAG=$IMAGE_TAG" >> $GITHUB_OUTPUT
+
       - name: Cache vllm-ascend csrc
-        uses: runs-on/cache@v4
+        uses: actions/cache@v4
         with:
           path: |
             vllm_ascend/_cann_ops_custom
             vllm_ascend/*.so
             vllm_ascend/lib
             vllm_ascend/include
-          key: vllm-ascend-build-v1-${{ runner.os }}-${{ inputs.image_a3 }}-${{ steps.get_csrc_hash.outputs.CSRC_HASH }}
-          restore-keys: |
-            vllm-ascend-build-v1-${{ runner.os }}-${{ inputs.image_a3 }}-${{ steps.get_csrc_hash.outputs.CSRC_HASH }}
+          key: vllm-ascend-build-v1-ARM64-${{ steps.get_image_tag.outputs.IMAGE_TAG }}-${{ steps.get_csrc_hash.outputs.CSRC_HASH }}
 
       - name: Install vllm-project/vllm-ascend
         env:
-          PIP_EXTRA_INDEX_URL: "https://mirrors.huaweicloud.com/ascend/repos/pypi https://triton-ascend.osinfra.cn/pypi/simple https://download.pytorch.org/whl/cpu/"
+          PIP_EXTRA_INDEX_URL: "https://mirrors.huaweicloud.com/ascend/repos/pypi https://triton-ascend.osinfra.cn/pypi/simple http://cache-service.nginx-pypi-cache.svc.cluster.local/whl/cpu"
         run: |
           pip install uc-manager
           pip install -r requirements-dev.txt
@@ -515,21 +529,26 @@ jobs:
             -type f -not -path '*/.*' | sort | xargs sha256sum | sha256sum | awk '{print $1}')
           echo "CSRC_HASH=$CSRC_HASH" >> $GITHUB_OUTPUT
 
+      - name: Get Image Tag
+        id: get_image_tag
+        run: |
+          IMAGE="${{ inputs.image_a3 }}"
+          IMAGE_TAG="${IMAGE##*:}"
+          echo "IMAGE_TAG=$IMAGE_TAG" >> $GITHUB_OUTPUT
+
       - name: Cache vllm-ascend csrc
-        uses: runs-on/cache@v4
+        uses: actions/cache@v4
         with:
           path: |
             vllm_ascend/_cann_ops_custom
             vllm_ascend/*.so
             vllm_ascend/lib
             vllm_ascend/include
-          key: vllm-ascend-build-v1-${{ runner.os }}-${{ inputs.image_a3 }}-${{ steps.get_csrc_hash.outputs.CSRC_HASH }}
-          restore-keys: |
-            vllm-ascend-build-v1-${{ runner.os }}-${{ inputs.image_a3 }}-${{ steps.get_csrc_hash.outputs.CSRC_HASH }}
+          key: vllm-ascend-build-v1-ARM64-${{ steps.get_image_tag.outputs.IMAGE_TAG }}-${{ steps.get_csrc_hash.outputs.CSRC_HASH }}
 
       - name: Install vllm-project/vllm-ascend
         env:
-          PIP_EXTRA_INDEX_URL: "https://mirrors.huaweicloud.com/ascend/repos/pypi https://triton-ascend.osinfra.cn/pypi/simple"
+          PIP_EXTRA_INDEX_URL: "https://mirrors.huaweicloud.com/ascend/repos/pypi https://triton-ascend.osinfra.cn/pypi/simple http://cache-service.nginx-pypi-cache.svc.cluster.local/whl/cpu"
         run: |
           pip install uc-manager
           pip install -r requirements-dev.txt
@@ -671,21 +690,26 @@ jobs:
             -type f -not -path '*/.*' | sort | xargs sha256sum | sha256sum | awk '{print $1}')
           echo "CSRC_HASH=$CSRC_HASH" >> $GITHUB_OUTPUT
 
+      - name: Get Image Tag
+        id: get_image_tag
+        run: |
+          IMAGE="${{ inputs.image_a3 }}"
+          IMAGE_TAG="${IMAGE##*:}"
+          echo "IMAGE_TAG=$IMAGE_TAG" >> $GITHUB_OUTPUT
+
       - name: Cache vllm-ascend csrc
-        uses: runs-on/cache@v4
+        uses: actions/cache@v4
         with:
           path: |
             vllm_ascend/_cann_ops_custom
             vllm_ascend/*.so
             vllm_ascend/lib
             vllm_ascend/include
-          key: vllm-ascend-build-v1-${{ runner.os }}-${{ inputs.image_a3 }}-${{ steps.get_csrc_hash.outputs.CSRC_HASH }}
-          restore-keys: |
-            vllm-ascend-build-v1-${{ runner.os }}-${{ inputs.image_a3 }}-${{ steps.get_csrc_hash.outputs.CSRC_HASH }}
+          key: vllm-ascend-build-v1-ARM64-${{ steps.get_image_tag.outputs.IMAGE_TAG }}-${{ steps.get_csrc_hash.outputs.CSRC_HASH }}
 
       - name: Install vllm-project/vllm-ascend
         env:
-          PIP_EXTRA_INDEX_URL: "https://mirrors.huaweicloud.com/ascend/repos/pypi https://triton-ascend.osinfra.cn/pypi/simple"
+          PIP_EXTRA_INDEX_URL: "https://mirrors.huaweicloud.com/ascend/repos/pypi https://triton-ascend.osinfra.cn/pypi/simple http://cache-service.nginx-pypi-cache.svc.cluster.local/whl/cpu"
         run: |
           pip install uc-manager
           pip install -r requirements-dev.txt
@@ -798,21 +822,26 @@ jobs:
             -type f -not -path '*/.*' | sort | xargs sha256sum | sha256sum | awk '{print $1}')
           echo "CSRC_HASH=$CSRC_HASH" >> $GITHUB_OUTPUT
 
+      - name: Get Image Tag
+        id: get_image_tag
+        run: |
+          IMAGE="${{ inputs.image_310p }}"
+          IMAGE_TAG="${IMAGE##*:}"
+          echo "IMAGE_TAG=$IMAGE_TAG" >> $GITHUB_OUTPUT
+
       - name: Cache vllm-ascend csrc
-        uses: runs-on/cache@v4
+        uses: actions/cache@v4
         with:
           path: |
             vllm_ascend/_cann_ops_custom
             vllm_ascend/*.so
             vllm_ascend/lib
             vllm_ascend/include
-          key: vllm-ascend-build-v1-${{ runner.os }}-${{ inputs.image_310p }}-${{ steps.get_csrc_hash.outputs.CSRC_HASH }}
-          restore-keys: |
-            vllm-ascend-build-v1-${{ runner.os }}-${{ inputs.image_310p }}-${{ steps.get_csrc_hash.outputs.CSRC_HASH }}
+          key: vllm-ascend-build-v1-ARM64-${{ steps.get_image_tag.outputs.IMAGE_TAG }}-${{ steps.get_csrc_hash.outputs.CSRC_HASH }}
 
       - name: Install vllm-project/vllm-ascend
         env:
-          PIP_EXTRA_INDEX_URL: "https://mirrors.huaweicloud.com/ascend/repos/pypi https://triton-ascend.osinfra.cn/pypi/simple https://download.pytorch.org/whl/cpu/"
+          PIP_EXTRA_INDEX_URL: "https://mirrors.huaweicloud.com/ascend/repos/pypi https://triton-ascend.osinfra.cn/pypi/simple http://cache-service.nginx-pypi-cache.svc.cluster.local/whl/cpu"
         run: |
           pip install uc-manager
           pip install -r requirements-dev.txt
@@ -908,21 +937,26 @@ jobs:
             -type f -not -path '*/.*' | sort | xargs sha256sum | sha256sum | awk '{print $1}')
           echo "CSRC_HASH=$CSRC_HASH" >> $GITHUB_OUTPUT
 
+      - name: Get Image Tag
+        id: get_image_tag
+        run: |
+          IMAGE="${{ inputs.image_310p }}"
+          IMAGE_TAG="${IMAGE##*:}"
+          echo "IMAGE_TAG=$IMAGE_TAG" >> $GITHUB_OUTPUT
+
       - name: Cache vllm-ascend csrc
-        uses: runs-on/cache@v4
+        uses: actions/cache@v4
         with:
           path: |
             vllm_ascend/_cann_ops_custom
             vllm_ascend/*.so
             vllm_ascend/lib
             vllm_ascend/include
-          key: vllm-ascend-build-v1-${{ runner.os }}-${{ inputs.image_310p }}-${{ steps.get_csrc_hash.outputs.CSRC_HASH }}
-          restore-keys: |
-            vllm-ascend-build-v1-${{ runner.os }}-${{ inputs.image_310p }}-${{ steps.get_csrc_hash.outputs.CSRC_HASH }}
+          key: vllm-ascend-build-v1-ARM64-${{ steps.get_image_tag.outputs.IMAGE_TAG }}-${{ steps.get_csrc_hash.outputs.CSRC_HASH }}
 
       - name: Install vllm-project/vllm-ascend
         env:
-          PIP_EXTRA_INDEX_URL: "https://mirrors.huaweicloud.com/ascend/repos/pypi https://triton-ascend.osinfra.cn/pypi/simple https://download.pytorch.org/whl/cpu/"
+          PIP_EXTRA_INDEX_URL: "https://mirrors.huaweicloud.com/ascend/repos/pypi https://triton-ascend.osinfra.cn/pypi/simple http://cache-service.nginx-pypi-cache.svc.cluster.local/whl/cpu"
         run: |
           pip install uc-manager
           pip install -r requirements-dev.txt
