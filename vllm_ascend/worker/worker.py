@@ -780,6 +780,16 @@ class NPUWorker(WorkerBase):
             logger.info("query NPU card %s fail: %s", self.local_rank, e)
         return
 
+    def shutdown(self) -> None:
+        """Shutdown the worker and release NPU resources."""
+        if self.profiler is not None:
+            self.profiler.shutdown()
+
+        # Release NPU resources held by the model runner so that memory
+        # can be reclaimed when running in-process
+        if model_runner := getattr(self, "model_runner", None):
+            model_runner.shutdown()
+
 
 def parse_text_output(output) -> None:
     lines = output.strip().split("\n")
