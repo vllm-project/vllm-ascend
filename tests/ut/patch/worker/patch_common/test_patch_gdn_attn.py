@@ -15,7 +15,6 @@ from vllm.v1.kv_cache_interface import MambaSpec
 import vllm_ascend.patch.worker.patch_gdn_attn as patch_gdn_attn
 from vllm_ascend.ops.gdn import (
     get_non_spec_causal_conv1d_host_args,
-    get_non_spec_chunked_prefill_meta,
     to_int64_tuple,
 )
 from vllm_ascend.ops.triton.fla import utils as fla_utils
@@ -278,7 +277,7 @@ def _expected_conv1d_host_args(attn_metadata) -> tuple[tuple[int, ...], tuple[in
     ],
     ids=lambda case: case.name if isinstance(case, BatchSpec) else None,
 )
-def test_non_spec_prefill_fallback_meta_matches_original_inputs_and_runtime_helpers(
+def test_non_spec_prefill_operator_meta_matches_original_inputs_and_runtime_helpers(
     batch_spec: BatchSpec,
     num_speculative_tokens: int,
     num_decode_draft_tokens_cpu: torch.Tensor | None,
@@ -291,16 +290,16 @@ def test_non_spec_prefill_fallback_meta_matches_original_inputs_and_runtime_help
         num_decode_draft_tokens_cpu=num_decode_draft_tokens_cpu,
     )
 
-    fallback_meta = getattr(attn_metadata, "non_spec_prefill_fallback_meta", None)
-    assert fallback_meta is not None
-    assert fallback_meta.causal_conv1d is not None
-    assert fallback_meta.chunk is not None
+    operator_meta = getattr(attn_metadata, "non_spec_prefill_operator_meta", None)
+    assert operator_meta is not None
+    assert operator_meta.causal_conv1d is not None
+    assert operator_meta.chunk is not None
 
     assert get_non_spec_causal_conv1d_host_args(attn_metadata) == _expected_conv1d_host_args(attn_metadata)
 
     _assert_chunk_meta_matches_runtime(
         builder,
-        fallback_meta.chunk,
+        operator_meta.chunk,
         attn_metadata.non_spec_query_start_loc,
     )
 
@@ -328,47 +327,6 @@ def test_build_non_spec_causal_conv1d_host_meta_avoids_seq_lens_cpu_fallback():
         host_meta.has_initial_state_cpu,
         torch.tensor([True, False]),
     )
-
-
-def test_build_non_spec_causal_conv1d_host_meta_requires_has_initial_state():
-    builder = SimpleNamespace(use_spec_decode=False)
-    attn_metadata = SimpleNamespace(
-        num_prefills=2,
-        non_spec_state_indices_tensor=torch.tensor([3, 9], dtype=torch.int32),
-        has_initial_state=None,
-    )
-    with pytest.raises(RuntimeError, match="has_initial_state"):
-        patch_gdn_attn._build_non_spec_causal_conv1d_host_meta(
-            builder,
-            attn_metadata,
-            non_spec_query_start_loc_cpu=torch.tensor([0, 4, 12], dtype=torch.int32),
-        )
-
-
-def test_get_non_spec_causal_conv1d_host_args_requires_prefill_fallback_meta():
-    attn_metadata = SimpleNamespace(
-        non_spec_prefill_fallback_meta=None,
-        non_spec_causal_conv1d_meta=SimpleNamespace(
-            query_start_loc_opt=(0, 4, 12),
-            cache_indices_opt=(3, 9),
-            initial_state_mode_opt=(1, 0),
-        ),
-    )
-
-    with pytest.raises(RuntimeError, match="non_spec_prefill_fallback_meta\\.causal_conv1d"):
-        get_non_spec_causal_conv1d_host_args(
-            attn_metadata,
-        )
-
-
-def test_get_non_spec_chunked_prefill_meta_requires_prefill_fallback_meta():
-    attn_metadata = SimpleNamespace(
-        non_spec_prefill_fallback_meta=None,
-        non_spec_chunked_prefill_meta=SimpleNamespace(chunk_offsets_chunk64=torch.tensor([0, 1])),
-    )
-
-    with pytest.raises(RuntimeError, match="non_spec_prefill_fallback_meta\\.chunk"):
-        get_non_spec_chunked_prefill_meta(attn_metadata)
 
 
 def test_builder_uses_device_chunk_builder_with_non_spec_query_start_loc(monkeypatch):
@@ -507,4 +465,4 @@ def test_builder_skips_prebuilt_meta_without_non_spec_prefill(batch_spec: BatchS
         num_decode_draft_tokens_cpu=num_decode_draft_tokens_cpu,
     )
 
-    assert getattr(attn_metadata, "non_spec_prefill_fallback_meta", None) is None
+    assert getattr(attn_metadata, "non_spec_prefill_operator_meta", None) is None

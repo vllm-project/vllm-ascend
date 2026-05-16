@@ -92,15 +92,16 @@ def chunk_scaled_dot_kkt_fwd(
     r"""
     Compute beta * K * K^T.
 
+    `Hk` is the key head count and `Hg` is the gate/beta head count. They can
+    differ, so the comments use separate names instead of a single `H`.
+
     Args:
         k (torch.Tensor):
-            The key tensor of shape `[B, T, H, K]`.
+            The key tensor of shape `[B, T, Hk, K]`.
         beta (torch.Tensor):
-            The beta tensor of shape `[B, T, H]`.
-        g (torch.Tensor):
-            The cumulative sum of the gate tensor of shape `[B, T, H]`. Default: `None`.
-        gk (torch.Tensor):
-            The cumulative sum of the gate tensor of shape `[B, T, H, K]` applied to the key tensor. Default: `None`.
+            The beta tensor of shape `[B, T, Hg]`.
+        g_cumsum (torch.Tensor):
+            The cumulative sum of the gate tensor of shape `[B, T, Hg]`. Default: `None`.
         cu_seqlens (torch.LongTensor):
             The cumulative sequence lengths of the input tensor.
             Default: None
@@ -110,7 +111,7 @@ def chunk_scaled_dot_kkt_fwd(
             The dtype of the output tensor. Default: `torch.float32`
 
     Returns:
-        beta * K * K^T of shape `[B, T, H, BT]` where `BT` is the chunk size.
+        beta * K * K^T of shape `[B, T, Hg, BT]` where `BT` is the chunk size.
     """
     B, T, Hg, K = k.shape
 

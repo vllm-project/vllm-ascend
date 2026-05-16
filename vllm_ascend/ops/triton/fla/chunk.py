@@ -8,7 +8,6 @@
 # Copyright (c) 2023-2025, Songlin Yang, Yu Zhang
 # ruff: noqa: E501
 # mypy: ignore-errors
-import warnings
 
 import torch
 from einops import rearrange
@@ -231,26 +230,30 @@ def chunk_gated_delta_rule(
     use_qk_l2norm_in_kernel: bool = False,
 ):
     r"""
+    Dimension names follow the GDN operator convention: `Hk` is the query/key
+    head count, `Hv` is the value/state head count, and `Hg` is the gate/beta
+    head count. These counts can differ for Qwen3.5-style GDN models.
+
     Args:
         q (torch.Tensor):
-            queries of shape `[B, T, H, K]` if `head_first=False` else `[B, H, T, K]`.
+            queries of shape `[B, T, Hk, K]` if `head_first=False` else `[B, Hk, T, K]`.
         k (torch.Tensor):
-            keys of shape `[B, T, H, K]` if `head_first=False` else `[B, H, T, K]`.
+            keys of shape `[B, T, Hk, K]` if `head_first=False` else `[B, Hk, T, K]`.
         v (torch.Tensor):
-            values of shape `[B, T, H, V]` if `head_first=False` else `[B, H, T, V]`.
+            values of shape `[B, T, Hv, V]` if `head_first=False` else `[B, Hv, T, V]`.
         g (torch.Tensor):
-            (forget) gating tensor (in log space!) of shape `[B, T, H]` if `head_first=False` else `[B, H, T]`.
+            (forget) gating tensor (in log space!) of shape `[B, T, Hg]` if `head_first=False` else `[B, Hg, T]`.
         beta (torch.Tensor):
-            betas of shape `[B, T, H]` if `head_first=False` else `[B, H, T]`.
+            betas of shape `[B, T, Hg]` if `head_first=False` else `[B, Hg, T]`.
         scale (Optional[int]):
             Scale factor for the RetNet attention scores.
             If not provided, it will default to `1 / sqrt(K)`. Default: `None`.
         initial_state (Optional[torch.Tensor]):
-            Initial state of shape `[N, H, K, V]` for `N` input sequences.
+            Initial state of shape `[N, Hv, K, V]` for `N` input sequences.
             For equal-length input sequences, `N` equals the batch size `B`.
             Default: `None`.
         output_final_state (Optional[bool]):
-            Whether to output the final state of shape `[N, H, K, V]`. Default: `False`.
+            Whether to output the final state of shape `[N, Hv, K, V]`. Default: `False`.
         cu_seqlens (torch.LongTensor):
             Cumulative sequence lengths of shape `[N+1]` used for variable-length training,
             consistent with the FlashAttention API.
@@ -260,9 +263,9 @@ def chunk_gated_delta_rule(
 
     Returns:
         o (torch.Tensor):
-            Outputs of shape `[B, T, H, V]` if `head_first=False` else `[B, H, T, V]`.
+            Outputs of shape `[B, T, Hv, V]` if `head_first=False` else `[B, Hv, T, V]`.
         final_state (torch.Tensor):
-            Final state of shape `[N, H, K, V]` if `output_final_state=True` else `None`.
+            Final state of shape `[N, Hv, K, V]` if `output_final_state=True` else `None`.
 
     Examples::
         >>> import torch
@@ -270,13 +273,13 @@ def chunk_gated_delta_rule(
         >>> from einops import rearrange
         >>> from fla.ops.gated_delta_rule import chunk_gated_delta_rule
         # inputs with equal lengths
-        >>> B, T, H, K, V = 4, 2048, 4, 512, 512
-        >>> q = torch.randn(B, T, H, K, dtype=torch.bfloat16, device='cuda')
-        >>> k = F.normalize(torch.randn(B, T, H, K, dtype=torch.bfloat16, device='cuda'), p=2, dim=-1)
-        >>> v = torch.randn(B, T, H, V, dtype=torch.bfloat16, device='cuda')
-        >>> beta = torch.rand(B, T, H, dtype=torch.bfloat16, device='cuda').sigmoid()
-        >>> g = F.logsigmoid(torch.rand(B, T, H, dtype=torch.bfloat16, device='cuda'))
-        >>> h0 = torch.randn(B, H, K, V, dtype=torch.bfloat16, device='cuda')
+        >>> B, T, Hk, Hv, Hg, K, V = 4, 2048, 4, 8, 8, 512, 512
+        >>> q = torch.randn(B, T, Hk, K, dtype=torch.bfloat16, device='cuda')
+        >>> k = F.normalize(torch.randn(B, T, Hk, K, dtype=torch.bfloat16, device='cuda'), p=2, dim=-1)
+        >>> v = torch.randn(B, T, Hv, V, dtype=torch.bfloat16, device='cuda')
+        >>> beta = torch.rand(B, T, Hg, dtype=torch.bfloat16, device='cuda').sigmoid()
+        >>> g = F.logsigmoid(torch.rand(B, T, Hg, dtype=torch.bfloat16, device='cuda'))
+        >>> h0 = torch.randn(B, Hv, K, V, dtype=torch.bfloat16, device='cuda')
         >>> o, ht = chunk_gated_delta_rule(
             q, k, v, g, beta,
             initial_state=h0,
@@ -295,7 +298,7 @@ def chunk_gated_delta_rule(
     """
     assert q.dtype == k.dtype == v.dtype
     assert q.dtype != torch.float32, "ChunkGatedDeltaRuleFunction does not support float32. Please use bfloat16."
-    assert len(beta.shape) == 3, "beta must be of shape [B, T, H] if head_first=False, or [B, H, T] otherwise."
+    assert len(beta.shape) == 3, "beta must be of shape [B, T, Hg] if head_first=False, or [B, Hg, T] otherwise."
 
     if head_first:
         raise DeprecationWarning(
@@ -304,14 +307,6 @@ def chunk_gated_delta_rule(
             stacklevel=2,
         )
         q, k, v, beta, g = map(lambda x: rearrange(x, "b h t ... -> b t h ..."), (q, k, v, beta, g))
-    if not head_first and q.shape[1] < q.shape[2]:
-        warnings.warn(
-            f"Input tensor shape suggests potential format mismatch: seq_len ({q.shape[1]}) < num_heads ({q.shape[2]}). "
-            "This may indicate the inputs were passed in head-first format [B, H, T, ...] "
-            "when head_first=False was specified. "
-            "Please verify your input tensor format matches the expected shape [B, T, H, ...].",
-            stacklevel=2,
-        )
     if cu_seqlens is not None:
         if q.shape[0] != 1:
             raise ValueError(

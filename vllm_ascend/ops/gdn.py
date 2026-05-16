@@ -42,18 +42,9 @@ def to_int64_tuple(tensor: torch.Tensor) -> tuple[int, ...]:
     return tuple(tensor.tolist())
 
 
-def _require_non_spec_prefill_fallback_meta(attn_metadata, field_name: str):
-    fallback_meta = getattr(attn_metadata, "non_spec_prefill_fallback_meta", None)
-    if fallback_meta is None:
-        raise RuntimeError(
-            f"Expected attn_metadata.non_spec_prefill_fallback_meta.{field_name} for patched GDN non-spec prefill path."
-        )
-    return fallback_meta
-
-
 def get_non_spec_causal_conv1d_host_args(attn_metadata) -> tuple[tuple[int, ...], tuple[int, ...], tuple[int, ...]]:
-    fallback_meta = _require_non_spec_prefill_fallback_meta(attn_metadata, "causal_conv1d")
-    causal_conv1d_meta = fallback_meta.causal_conv1d
+    operator_meta = attn_metadata.non_spec_prefill_operator_meta
+    causal_conv1d_meta = operator_meta.causal_conv1d
     return (
         to_int64_tuple(causal_conv1d_meta.query_start_loc_cpu),
         to_int64_tuple(causal_conv1d_meta.cache_indices_cpu),
@@ -62,8 +53,7 @@ def get_non_spec_causal_conv1d_host_args(attn_metadata) -> tuple[tuple[int, ...]
 
 
 def get_non_spec_chunked_prefill_meta(attn_metadata):
-    fallback_meta = _require_non_spec_prefill_fallback_meta(attn_metadata, "chunk")
-    return fallback_meta.chunk
+    return attn_metadata.non_spec_prefill_operator_meta.chunk
 
 
 class AscendGatedDeltaNetAttention(GatedDeltaNetAttention):
