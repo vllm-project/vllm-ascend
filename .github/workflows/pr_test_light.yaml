@@ -43,7 +43,7 @@ jobs:
     with:
       vllm: ce29c26b31d432b1b4bc028c46bb2c3b07a667d8
   changes:
-    runs-on: linux-aarch64-a2b3-0
+    runs-on: linux-arm64-cpu-16
     container:
       image: swr.cn-southwest-2.myhuaweicloud.com/base_image/ascend-ci/vllm-ascend:nightly-cpu
     outputs:
