@@ -68,6 +68,7 @@ static inline DimTileChoice ChooseDimTileSize(gert::TilingContext *context, int6
     const int64_t candidates[] = {4096, 2048, 1024, 512, 384, 192};
 
     auto ChooseOnce = [&](bool requireExactDiv) -> DimTileChoice {
+        const bool preferMoreBlocks = (batch > static_cast<int64_t>(coreNum));
         DimTileChoice bestOver;
         int64_t bestOverGap = std::numeric_limits<int64_t>::max();
         DimTileChoice bestUnder;
@@ -79,7 +80,11 @@ static inline DimTileChoice ChooseDimTileSize(gert::TilingContext *context, int6
             if (requireExactDiv && (dim % dimTileSize != 0)) {
                 continue;
             }
-            const int64_t blocksPerSeq = requireExactDiv ? (dim / dimTileSize) : CeilDivInt64(dim, dimTileSize);
+            const int64_t testBlocksPerSeq = requireExactDiv ? (dim / dimTileSize) : CeilDivInt64(dim, dimTileSize);
+            if (preferMoreBlocks && testBlocksPerSeq <= 1) {
+                continue;
+            }
+            const int64_t blocksPerSeq = testBlocksPerSeq;
             const int64_t gridSize = batch * blocksPerSeq;
             if (gridSize <= 0) {
                 continue;
@@ -89,7 +94,6 @@ static inline DimTileChoice ChooseDimTileSize(gert::TilingContext *context, int6
             if (gridSize >= static_cast<int64_t>(coreNum)) {
                 const int64_t gap = gridSize - static_cast<int64_t>(coreNum);
                 if (gap < bestOverGap) {
-                    //                    bestOver = {dimTileSize, blocksPerSeq, gridSize};
                     bestOver.dimTileSize = dimTileSize;
                     bestOver.blocksPerSeq = blocksPerSeq;
                     bestOver.gridSize = gridSize;

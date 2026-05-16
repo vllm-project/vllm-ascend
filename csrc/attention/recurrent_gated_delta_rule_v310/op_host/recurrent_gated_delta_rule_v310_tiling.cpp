@@ -8,7 +8,7 @@
  */
 
 /*!
- * \file recurrent_gated_delta_rule_tiling_v310.cpp
+ * \file recurrent_gated_delta_rule_v310_tiling.cpp
  * \brief
  */
 #include "register/op_def_registry.h"

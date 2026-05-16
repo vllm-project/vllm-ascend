@@ -24,7 +24,7 @@ using namespace AscendC;
 constexpr uint64_t BUFFER_NUM = 1;
 constexpr uint32_t MAX_OUT_BUFFER_NUM = 2;
 constexpr uint64_t MAX_MTP = 8;
-constexpr uint64_t BF16_NUM_PER_BLOCK = 16;
+constexpr uint64_t FP16_NUM_PER_BLOCK = 16;
 constexpr uint64_t FP32_NUM_PER_BLOCK = 8;
 constexpr uint32_t REPEAT_LENTH = 64; // 256Byte for float
 constexpr uint32_t MAX_REPEAT_TIME = 255;
@@ -184,8 +184,8 @@ public:
         stateOutBufferNum_ = (tilingData->stateOutBufferNum == MAX_OUT_BUFFER_NUM) ? MAX_OUT_BUFFER_NUM : BUFFER_NUM;
         attnOutBufferNum_ = (tilingData->attnOutBufferNum == MAX_OUT_BUFFER_NUM) ? MAX_OUT_BUFFER_NUM : BUFFER_NUM;
         restUbSize_ = tilingData->ubRestBytes;
-        alignK_ = Ceil(tilingData->dk, BF16_NUM_PER_BLOCK) * BF16_NUM_PER_BLOCK;
-        alignV_ = Ceil(tilingData->dv, BF16_NUM_PER_BLOCK) * BF16_NUM_PER_BLOCK;
+        alignK_ = Ceil(tilingData->dk, FP16_NUM_PER_BLOCK) * FP16_NUM_PER_BLOCK;
+        alignV_ = Ceil(tilingData->dv, FP16_NUM_PER_BLOCK) * FP16_NUM_PER_BLOCK;
         load = 0;
         usedblk = 0;
     }
@@ -225,7 +225,7 @@ public:
         uint32_t vSize = MAX_MTP * alignV_ * sizeof(float);
         uint32_t kSize = MAX_MTP * alignK_ * sizeof(float);
         uint32_t betaUbSize =
-            Ceil(MAX_MTP * NV_, BF16_NUM_PER_BLOCK) * BF16_NUM_PER_BLOCK * sizeof(float); //  8: 8 * 4 = 32B;
+            Ceil(MAX_MTP * NV_, FP16_NUM_PER_BLOCK) * FP16_NUM_PER_BLOCK * sizeof(float); //  8: 8 * 4 = 32B;
         pipe_->InitBuffer(qInQueue_, BUFFER_NUM, MAX_MTP * alignK_ * sizeof(inType));
         pipe_->InitBuffer(kInQueue_, BUFFER_NUM, MAX_MTP * alignK_ * sizeof(inType));
         pipe_->InitBuffer(vInQueue_, BUFFER_NUM, MAX_MTP * alignV_ * sizeof(inType));
@@ -499,7 +499,7 @@ private:
     __aicore__ inline void CopyInGamaBeta(int32_t seq0, int32_t seq1)
     {
         int32_t seqLen = seq1 - seq0;
-        uint64_t bBatchSize = Ceil(seqLen * NV_, BF16_NUM_PER_BLOCK) * BF16_NUM_PER_BLOCK;
+        uint64_t bBatchSize = Ceil(seqLen * NV_, FP16_NUM_PER_BLOCK) * FP16_NUM_PER_BLOCK;
         LocalTensor<inType> betaLocal = betaInQueue_.AllocTensor<inType>();
         DataCopyParams betaInParams{1, static_cast<uint16_t>(seqLen * NV_ * sizeof(inType)), 0, 0};
         DataCopyCustom(betaLocal, betaGm_[seq0 * NV_], betaInParams);

@@ -8,7 +8,7 @@
  */
 
 /*!
- * \file recurrent_gated_delta_rule_v310.h.cpp
+ * \file recurrent_gated_delta_rule_v310_def.cpp
  * \brief
  */
 #include "register/op_def_registry.h"
