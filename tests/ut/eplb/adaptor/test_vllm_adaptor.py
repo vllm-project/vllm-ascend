@@ -31,11 +31,19 @@ class TestVllmAdaptor(unittest.TestCase):
         VllmEplbAdaptor(self.model)
 
     @patch("torch.empty_like", return_value=torch.zeros(16, 32))
-    def test_init_w8a8(self, mock_func):
+    @patch("vllm_ascend.eplb.adaptor.vllm_adaptor.get_ascend_config")
+    def test_init_w8a8(self, mock_get_config, mock_func):
+        mock_config = MagicMock()
+        mock_config.enable_fused_mc2 = 0
+        mock_get_config.return_value = mock_config
         VllmEplbAdaptor(self.model)
 
     @patch("torch.empty_like", return_value=torch.zeros(16, 32))
-    def test_language_model_w8a8(self, mock_func):
+    @patch("vllm_ascend.eplb.adaptor.vllm_adaptor.get_ascend_config")
+    def test_language_model_w8a8(self, mock_get_config, mock_func):
+        mock_config = MagicMock()
+        mock_config.enable_fused_mc2 = 0
+        mock_get_config.return_value = mock_config
         model = MagicMock()
         model.language_model = self.model
         model.config.text_config = self.model.config

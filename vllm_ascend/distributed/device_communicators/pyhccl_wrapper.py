@@ -189,7 +189,7 @@ class HCCLLibrary:
                 "Otherwise, the hccl library might not exist, be corrupted "
                 "or it does not support the current platform %s. "
                 "If you already have the library, please set the "
-                "environment variable HCCL_SO_PATH"
+                "config hccl_so_path via --additional-config"
                 " to point to the correct hccl library path.",
                 so_file,
                 platform.platform(),
