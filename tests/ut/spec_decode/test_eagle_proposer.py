@@ -17,7 +17,7 @@ from vllm.v1.spec_decode.draft_model import DraftModelProposer
 import vllm_ascend.spec_decode.eagle_proposer as eagle_proposer
 from tests.ut.base import TestBase
 from tests.ut.conftest import npu_test
-from vllm_ascend.ascend_config import init_ascend_config
+from vllm_ascend.ascend_config import clear_ascend_config, init_ascend_config
 from vllm_ascend.attention.attention_v1 import AscendAttentionState
 from vllm_ascend.attention.utils import AscendCommonAttentionMetadata
 from vllm_ascend.spec_decode.draft_proposer import AscendDraftModelProposer
@@ -923,6 +923,21 @@ class TestEagleProposerPropose:
         # that the mocked functions and parameters exist
         self.check_mock()
 
+        clear_ascend_config()
+        self.mock_get_ascend_config = patch("vllm_ascend.utils.get_ascend_config")
+        mock_get_ascend_config = self.mock_get_ascend_config.start()
+        mock_ascend_config = MagicMock()
+        mock_ascend_config.enable_flashcomm2_parallel_size = 0
+        mock_ascend_config.enable_context_parallel = False
+        mock_ascend_config.enable_flashcomm1 = False
+        mock_ascend_config.enable_matmul_allreduce = False
+        mock_ascend_config.weight_nz_mode = 1
+        mock_ascend_config.enable_mlapo = True
+        mock_ascend_config.enable_fused_mc2 = 0
+        mock_ascend_config.msmonitor_use_daemon = False
+        mock_ascend_config.enable_transpose_kv_cache_by_block = True
+        mock_get_ascend_config.return_value = mock_ascend_config
+
         self.vllm_config = MagicMock(spec=VllmConfig)
         self.vllm_config.speculative_config = MagicMock()
         self.vllm_config.speculative_config.num_speculative_tokens = 3
@@ -963,7 +978,8 @@ class TestEagleProposerPropose:
         self.vllm_config.speculative_config.draft_model_config.uses_mrope = False
         self.vllm_config.speculative_config.disable_padded_drafter_batch = False
         self.vllm_config.additional_config = None
-        init_ascend_config(self.vllm_config)
+        self.ascend_config = init_ascend_config(self.vllm_config)
+        self.ascend_config.enable_flashcomm2_parallel_size = 0
 
         self.mock_cpugpubuffer = patch(_CPU_GPU_BUFFER_TARGET)
         self.mock_cpugpubuffer.start()
@@ -999,8 +1015,10 @@ class TestEagleProposerPropose:
         self.mock_supports_multimodal_inputs.stop()
         self.mock_tp_world_size.stop()
         self.mock_dp_group.stop()
+        self.mock_get_ascend_config.stop()
         # Clear the current vllm config
         set_current_vllm_config(None)
+        clear_ascend_config()
 
     # config: prefill and decode, Qwen3-8B, tp1, enforce_eager, no_async_scheduling, eagle3, k=3, "disable_padded_drafter_batch": False
     @pytest.mark.parametrize(
