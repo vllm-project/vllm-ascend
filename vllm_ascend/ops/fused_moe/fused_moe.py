@@ -14,6 +14,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 #
+import re
 from collections.abc import Callable
 from dataclasses import dataclass, field
 from functools import wraps
@@ -453,6 +454,16 @@ class AscendFusedMoE(FusedMoE):
                 return result
 
             self.quant_method.process_weights_after_loading = wrapped_process_weights  # type: ignore
+
+        # Register this MoE layer with EPLB for PP compatibility.
+        # PPMissingLayer (nn.Identity) never calls AscendFusedMoE.__init__,
+        # so only real MoE layers on this rank are registered.
+        prefix = kwargs.get("prefix", "")
+        match = re.search(r"model\.layers\.(\d+)", prefix)
+        if match:
+            from vllm_ascend.eplb.adaptor.vllm_adaptor import VllmEplbAdaptor
+
+            VllmEplbAdaptor.register_layer(int(match.group(1)), self)
 
     def _validate_shared_expert_consistency(self):
         """Validate that split shared expert computation matches integrated
