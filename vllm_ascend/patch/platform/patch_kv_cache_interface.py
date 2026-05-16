@@ -7,8 +7,38 @@ import torch
 import vllm.model_executor.layers.attention.mla_attention
 import vllm.v1.kv_cache_interface
 from typing_extensions import Self
+from vllm.config import get_current_vllm_config
 from vllm.utils.torch_utils import get_dtype_size
-from vllm.v1.kv_cache_interface import MLAAttentionSpec
+from vllm.v1.kv_cache_interface import AttentionSpec, FullAttentionSpec, MLAAttentionSpec
+
+
+_orig_full_attention_spec_real_page_size_bytes = FullAttentionSpec.real_page_size_bytes.fget
+
+
+def _uses_c8_mxfp_kv_cache(spec: AttentionSpec) -> bool:
+    if getattr(spec, "cache_mxfp_scale", False):
+        return True
+    try:
+        vllm_config = get_current_vllm_config()
+    except Exception:
+        return False
+    quant_config = getattr(vllm_config, "quant_config", None)
+    quant_description = getattr(quant_config, "quant_description", {})
+    return quant_description.get("kv_cache_type") == "C8_MXFP" and spec.dtype == torch.float8_e4m3fn
+
+
+def _ascend_attention_spec_real_page_size_bytes(self: AttentionSpec) -> int:
+    real_page_size = _orig_full_attention_spec_real_page_size_bytes(self)
+    if not _uses_c8_mxfp_kv_cache(self):
+        return real_page_size
+    if self.head_size % 32 != 0:
+        raise ValueError(f"C8_MXFP KV cache requires head_size to be divisible by 32, got {self.head_size}.")
+    scale_head_size = self.head_size // 32
+    scale_page_size = 2 * self.block_size * self.num_kv_heads * scale_head_size
+    return real_page_size + scale_page_size
+
+
+FullAttentionSpec.real_page_size_bytes = property(_ascend_attention_spec_real_page_size_bytes)
 
 
 @dataclass(frozen=True)

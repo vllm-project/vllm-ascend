@@ -508,9 +508,11 @@ class AscendModelSlimConfig(QuantizationConfig):
         ):
             scheme = create_scheme_for_layer(self.quant_description, prefix, "attention", self.packed_modules_mapping)
             return AscendKVCacheMethod(scheme)
-        elif isinstance(layer, AttentionLayerBase) and self.quant_description.get("kv_cache_type") == "C8":
-            from .methods.kv_c8 import AscendC8KVCacheAttentionMethod
+        elif isinstance(layer, AttentionLayerBase) and self.quant_description.get("kv_cache_type") in ("C8", "C8_MXFP"):
+            from .methods.kv_c8 import AscendC8KVCacheAttentionMethod, AscendC8MXFPKVCacheAttentionMethod
 
+            if self.quant_description.get("kv_cache_type") == "C8_MXFP":
+                return AscendKVCacheMethod(AscendC8MXFPKVCacheAttentionMethod(self.quant_description, prefix))
             return AscendKVCacheMethod(AscendC8KVCacheAttentionMethod(self.quant_description, prefix))
         elif isinstance(layer, FusedMoE):
             if self.is_layer_skipped_ascend(prefix, self.packed_modules_mapping):
@@ -579,6 +581,8 @@ class AscendModelSlimConfig(QuantizationConfig):
         return False
 
     def get_kv_quant_dtype(self, layer_name, cache_dtype, model_config):
+        if self.quant_description.get("kv_cache_type") == "C8_MXFP":
+            return torch.float8_e4m3fn, torch.float8_e4m3fn
         if self.enable_fa_quant and self.is_fa_quant_layer(layer_name):
             ori_dtype = model_config.dtype
             quant_dtype = torch.int8

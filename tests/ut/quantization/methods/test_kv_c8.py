@@ -560,6 +560,55 @@ class TestAscendC8KVCacheAttentionMethod(TestBase):
             method.apply(layer, MagicMock(), MagicMock(), MagicMock(), None, None, None, None, None)
 
 
+class TestAscendC8MXFPKVCacheAttentionMethod(TestBase):
+    """Tests for AscendC8MXFPKVCacheAttentionMethod in kv_c8.py."""
+
+    def _make_method(self, is_kv_producer=False):
+        from vllm_ascend.quantization.methods.kv_c8 import AscendC8MXFPKVCacheAttentionMethod
+
+        mock_config = MagicMock(spec=VllmConfig)
+        if is_kv_producer:
+            kv_config = MagicMock(spec=KVTransferConfig)
+            kv_config.is_kv_producer = True
+            mock_config.kv_transfer_config = kv_config
+        else:
+            mock_config.kv_transfer_config = None
+
+        with (
+            patch("vllm_ascend.quantization.methods.kv_c8.get_current_vllm_config", return_value=mock_config),
+            patch("vllm_ascend.quantization.methods.kv_c8.ensure_mxfp8_linear_available"),
+        ):
+            return AscendC8MXFPKVCacheAttentionMethod(
+                quant_description={"kv_cache_type": "C8_MXFP"},
+                prefix="model.layers.0.self_attn.attn",
+            )
+
+    def _make_layer_with_impl(self):
+        layer = nn.Module()
+        layer.impl = MagicMock()
+        return layer
+
+    def test_create_weights_sets_fp8_dtype_and_scale_marker(self):
+        method = self._make_method(is_kv_producer=False)
+        layer = self._make_layer_with_impl()
+        method.create_weights(layer)
+        self.assertEqual(layer.kv_cache_torch_dtype, torch.float8_e4m3fn)
+        self.assertTrue(layer.kv_cache_has_mxfp_scale)
+
+    def test_create_weights_sets_fp8_dtype_for_kv_producer(self):
+        method = self._make_method(is_kv_producer=True)
+        layer = self._make_layer_with_impl()
+        method.create_weights(layer)
+        self.assertEqual(layer.kv_cache_torch_dtype, torch.float8_e4m3fn)
+        self.assertTrue(layer.kv_cache_has_mxfp_scale)
+
+    def test_apply_raises_runtime_error(self):
+        method = self._make_method()
+        layer = MagicMock()
+        with self.assertRaises(RuntimeError):
+            method.apply(layer, MagicMock(), MagicMock(), MagicMock(), None, None, None, None, None)
+
+
 class TestAscendC8AttentionBackendImplScales(TestBase):
     """Tests for AscendC8AttentionBackendImpl scale helpers (scalar scales/offsets)."""
 

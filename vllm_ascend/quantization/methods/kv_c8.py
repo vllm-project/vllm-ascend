@@ -2,6 +2,8 @@ import torch
 from vllm.config import get_current_vllm_config
 from vllm.distributed import get_tensor_model_parallel_rank, get_tensor_model_parallel_world_size
 
+from vllm_ascend.device.mxfp_compat import ensure_mxfp8_linear_available
+
 from .base import AscendAttentionScheme
 from .registry import register_scheme
 
@@ -148,4 +150,46 @@ class AscendC8KVCacheAttentionMethod(AscendAttentionScheme):
         raise RuntimeError(
             "AscendC8KVCacheAttentionMethod.apply should not be called. "
             "C8 KV cache quantization is handled by the attention backend."
+        )
+
+
+class AscendC8MXFPKVCacheAttentionMethod(AscendAttentionScheme):
+    """MXFP8 KV cache storage for dense-attention models.
+
+    This method only changes the cache storage path: K/V are cached as FP8 E4M3
+    and their per-32-element E8M0 scales are stored in extra cache tensors. The
+    attention operator call path intentionally stays unchanged for now.
+    """
+
+    def __init__(self, quant_description: dict, prefix: str):
+        ensure_mxfp8_linear_available("C8_MXFP KV cache storage")
+        self.quant_description = quant_description
+        self.prefix = prefix
+
+    def create_weights(self, layer: torch.nn.Module) -> None:
+        layer.kv_cache_has_mxfp_scale = True
+        layer.kv_cache_torch_dtype = torch.float8_e4m3fn
+        if hasattr(layer, "impl"):
+            from vllm_ascend.attention.attention_v1 import AscendC8MXFPAttentionBackendImpl
+
+            layer.impl.__class__ = AscendC8MXFPAttentionBackendImpl
+
+    def process_weights_after_loading(self, layer: torch.nn.Module) -> None:
+        pass
+
+    def apply(
+        self,
+        layer: torch.nn.Module,
+        query: torch.Tensor,
+        key: torch.Tensor,
+        value: torch.Tensor,
+        kv_cache,
+        attn_metadata,
+        attn_type,
+        scale,
+        output,
+    ) -> torch.Tensor:
+        raise RuntimeError(
+            "AscendC8MXFPKVCacheAttentionMethod.apply should not be called. "
+            "C8_MXFP KV cache quantization is handled by the attention backend."
         )

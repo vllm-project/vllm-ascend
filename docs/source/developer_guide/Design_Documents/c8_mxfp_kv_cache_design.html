@@ -1,0 +1,371 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>C8_MXFP KV Cache 存储设计</title>
+  <script src="https://cdn.jsdelivr.net/npm/mermaid@10/dist/mermaid.min.js"></script>
+  <script>
+    mermaid.initialize({ startOnLoad: true, theme: "default" });
+  </script>
+  <style>
+    :root {
+      color-scheme: light dark;
+      --bg: #ffffff;
+      --fg: #1f2937;
+      --muted: #6b7280;
+      --card: #f8fafc;
+      --border: #d1d5db;
+      --accent: #2563eb;
+      --code: #eef2ff;
+    }
+    @media (prefers-color-scheme: dark) {
+      :root {
+        --bg: #0f172a;
+        --fg: #e5e7eb;
+        --muted: #9ca3af;
+        --card: #111827;
+        --border: #374151;
+        --accent: #60a5fa;
+        --code: #1e293b;
+      }
+    }
+    body {
+      margin: 0;
+      background: var(--bg);
+      color: var(--fg);
+      font: 15px/1.65 -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+    }
+    main {
+      max-width: 1080px;
+      margin: 0 auto;
+      padding: 40px 24px 64px;
+    }
+    h1, h2, h3 {
+      line-height: 1.25;
+    }
+    h1 {
+      margin: 0 0 8px;
+      font-size: 34px;
+    }
+    h2 {
+      margin-top: 36px;
+      padding-bottom: 8px;
+      border-bottom: 1px solid var(--border);
+      font-size: 23px;
+    }
+    h3 {
+      margin-top: 24px;
+      font-size: 18px;
+    }
+    p {
+      margin: 10px 0;
+    }
+    code {
+      padding: 2px 5px;
+      border-radius: 4px;
+      background: var(--code);
+      font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+      font-size: 0.92em;
+    }
+    pre {
+      overflow: auto;
+      padding: 16px;
+      border: 1px solid var(--border);
+      border-radius: 10px;
+      background: var(--card);
+    }
+    table {
+      width: 100%;
+      border-collapse: collapse;
+      margin: 14px 0;
+    }
+    th, td {
+      padding: 10px 12px;
+      border: 1px solid var(--border);
+      text-align: left;
+      vertical-align: top;
+    }
+    th {
+      background: var(--card);
+    }
+    .subtitle {
+      color: var(--muted);
+      margin-bottom: 28px;
+    }
+    .card {
+      border: 1px solid var(--border);
+      border-radius: 12px;
+      background: var(--card);
+      padding: 16px 18px;
+      margin: 14px 0;
+    }
+    .tag {
+      display: inline-block;
+      margin: 2px 6px 2px 0;
+      padding: 2px 8px;
+      border: 1px solid var(--border);
+      border-radius: 999px;
+      color: var(--accent);
+      font-size: 12px;
+    }
+    .mermaid {
+      margin: 16px 0;
+      padding: 16px;
+      border: 1px solid var(--border);
+      border-radius: 12px;
+      background: var(--card);
+    }
+  </style>
+</head>
+<body>
+<main>
+  <h1>C8_MXFP KV Cache 存储设计</h1>
+  <p class="subtitle">目标：当 <code>quant_description["kv_cache_type"] == "C8_MXFP"</code> 时，KV cache 本体使用 FP8 E4M3，并额外缓存 K/V 的 E8M0 scale。当前阶段完成 scale cache 的写入和读取，但不把 scale 传给 attention 算子。</p>
+
+  <div class="card">
+    <span class="tag">GQA</span>
+    <span class="tag">KV Cache</span>
+    <span class="tag">MXFP8</span>
+    <span class="tag">E8M0 Scale</span>
+    <span class="tag">Read Scale</span>
+    <p>设计原则是复用现有 C8 KV cache 的接入方式，并仿照 sparse C8 的多 tensor cache 模式扩展 K/V scale cache。</p>
+  </div>
+
+  <h2>存储布局</h2>
+  <p>C8_MXFP 下 KV cache 从二元组扩展为四元组。GQA 场景按 <code>num_kv_heads</code> 存储，不按 <code>num_heads</code> 展开。</p>
+  <table>
+    <thead>
+      <tr>
+        <th>Tensor</th>
+        <th>dtype</th>
+        <th>shape</th>
+        <th>说明</th>
+      </tr>
+    </thead>
+    <tbody>
+      <tr>
+        <td><code>k_cache</code></td>
+        <td><code>torch.float8_e4m3fn</code></td>
+        <td><code>[num_blocks, block_size, num_kv_heads, head_size]</code></td>
+        <td>K cache 本体。</td>
+      </tr>
+      <tr>
+        <td><code>v_cache</code></td>
+        <td><code>torch.float8_e4m3fn</code></td>
+        <td><code>[num_blocks, block_size, num_kv_heads, head_size]</code></td>
+        <td>V cache 本体。</td>
+      </tr>
+      <tr>
+        <td><code>k_scale_cache</code></td>
+        <td><code>float8_e8m0fnu</code> 或 <code>uint8</code> 视图</td>
+        <td><code>[num_blocks, block_size, num_kv_heads, head_size / 32]</code></td>
+        <td>K 的 per-32 元素 scale。</td>
+      </tr>
+      <tr>
+        <td><code>v_scale_cache</code></td>
+        <td><code>float8_e8m0fnu</code> 或 <code>uint8</code> 视图</td>
+        <td><code>[num_blocks, block_size, num_kv_heads, head_size / 32]</code></td>
+        <td>V 的 per-32 元素 scale。</td>
+      </tr>
+    </tbody>
+  </table>
+
+  <pre><code>kv_caches[layer_name] = (
+    k_cache,
+    v_cache,
+    k_scale_cache,
+    v_scale_cache,
+)</code></pre>
+
+  <h2>关键约束</h2>
+  <ul>
+    <li><code>kv_cache_type</code> 必须为 <code>C8_MXFP</code> 才启用该存储路径。</li>
+    <li><code>head_size</code> 必须能被 32 整除；本阶段不引入 padding。</li>
+    <li>scale 按最后一维每 32 个元素共享一个 E8M0 scale。</li>
+    <li>KV scale cache 与 KV cache 使用相同 <code>slot_mapping</code> 写入。</li>
+    <li>decode 等没有新 K/V 写入的场景，也会在 backend <code>forward()</code> 入口读取 <code>kv_cache[2:4]</code> 并缓存到 backend 属性。</li>
+    <li>attention 算子调用保持现状，暂不把 scale cache 传给 FIA/PA。</li>
+    <li>当前阶段不考虑 PD 分离和 kv transfer，<code>C8_MXFP</code> 新增 cache tensor 不做 kv transfer 对齐或 producer/consumer 分支。</li>
+  </ul>
+
+  <h2>时序图</h2>
+  <div class="mermaid">
+sequenceDiagram
+    autonumber
+    participant Config as ModelSlimConfig
+    participant Method as AscendC8MXFPKVCacheAttentionMethod
+    participant Runner as ModelRunner
+    participant Backend as AscendC8MXFPAttentionBackendImpl
+    participant NPU as torch_npu
+    participant Cache as KVCacheTuple
+
+    Config->>Config: read quant_description.kv_cache_type
+    alt kv_cache_type == C8_MXFP
+        Config->>Method: create attention quant method
+        Method->>Method: set kv_cache_torch_dtype = fp8_e4m3
+        Method->>Method: mark kv_cache_has_mxfp_scale
+        Method->>Backend: switch layer.impl class
+    end
+
+    Runner->>Runner: compute page_size_bytes
+    Runner->>Cache: allocate k_cache and v_cache
+    Runner->>Cache: allocate k_scale_cache and v_scale_cache
+    Runner->>Cache: reshape as 4-tuple
+
+    Backend->>NPU: npu_dynamic_mx_quant(key)
+    NPU-->>Backend: quant_key and key_scale
+    Backend->>NPU: npu_dynamic_mx_quant(value)
+    NPU-->>Backend: quant_value and value_scale
+    Backend->>Cache: scatter quant_key and quant_value by slot_mapping
+    Backend->>Cache: scatter key_scale and value_scale by same slot_mapping
+
+    Backend->>Cache: read kv_cache[2] and kv_cache[3]
+    Cache-->>Backend: key_scale_cache and value_scale_cache references
+    Backend->>Backend: continue existing attention path
+  </div>
+
+  <h2>数据流</h2>
+  <div class="mermaid">
+flowchart LR
+    A["key/value bf16 or fp16"] --> B["view(-1, head_size)"]
+    B --> C["npu_dynamic_mx_quant"]
+    C --> D["quant K/V: fp8 e4m3"]
+    C --> E["K/V scale: e8m0"]
+    D --> F["reshape to tokens, kv_heads, head_size"]
+    E --> G["reshape to tokens, kv_heads, head_size/32"]
+    F --> H["K/V cache scatter"]
+    G --> I["K/V scale cache scatter"]
+    H --> J["paged KV cache"]
+    I --> J
+    J --> K["forward reads scale cache refs"]
+    K --> L["attention op path unchanged"]
+  </div>
+
+  <h2>Scale Cache 读取</h2>
+  <p>scale cache 的读取在 <code>AscendC8MXFPAttentionBackendImpl.forward()</code> 入口完成。这样 decode-only 场景即使没有新的 K/V 写入，也能从 <code>kv_cache</code> 四元组中恢复 scale cache 引用。</p>
+  <pre><code>def _read_mxfp_scale_cache(self, kv_cache):
+    if len(kv_cache) &lt; 4:
+        return None, None
+    self._init_mxfp_cache_refs(kv_cache)
+    return self.key_scale_cache, self.value_scale_cache</code></pre>
+  <p>读取后的引用保存在 backend 属性中：</p>
+  <pre><code>self.key_scale_cache = kv_cache[2]
+self.value_scale_cache = kv_cache[3]</code></pre>
+  <p>当前阶段只保证引用可读、可随 block copy/swap 同步维护，后续如果 attention 算子支持 mxfp8 KV 反量化，可在专门的 decode/prefill 路径中消费这两个属性。</p>
+
+  <h2>关键修改</h2>
+  <table>
+    <thead>
+      <tr>
+        <th>文件</th>
+        <th>修改点</th>
+      </tr>
+    </thead>
+    <tbody>
+      <tr>
+        <td><code>vllm_ascend/quantization/methods/kv_c8.py</code></td>
+        <td>新增 <code>AscendC8MXFPKVCacheAttentionMethod</code>，始终设置 FP8 KV cache dtype，标记额外 scale cache，并把 attention impl 切换到存储侧 backend；不再按 kv producer 跳过 dtype 设置。</td>
+      </tr>
+      <tr>
+        <td><code>vllm_ascend/quantization/modelslim_config.py</code></td>
+        <td>在 <code>get_quant_method</code> 中接入 <code>kv_cache_type == "C8_MXFP"</code>；在 <code>get_kv_quant_dtype</code> 中返回 FP8 E4M3 K/V cache dtype。</td>
+      </tr>
+      <tr>
+        <td><code>vllm_ascend/patch/platform/patch_kv_cache_interface.py</code></td>
+        <td>扩展 <code>FullAttentionSpec.real_page_size_bytes</code>，把 dense attention 的 K/V scale cache 字节数计入 page size；不影响 sliding-window 等其他 <code>AttentionSpec</code> 子类。</td>
+      </tr>
+      <tr>
+        <td><code>vllm_ascend/worker/v2/attn_utils.py</code></td>
+        <td>V2 runner 分配和 reshape <code>k_scale_cache/v_scale_cache</code>，返回四元 KV cache tuple；<code>C8_MXFP</code> 新增 tensor 不走 kv transfer 2M 对齐。</td>
+      </tr>
+      <tr>
+        <td><code>vllm_ascend/worker/model_runner_v1.py</code></td>
+        <td>V1 runner 同步扩展 raw tensor 分配、page size 计算、reshape 和四元 tuple 返回；<code>C8_MXFP</code> 新增 tensor 不走 kv transfer 2M 对齐。</td>
+      </tr>
+      <tr>
+        <td><code>vllm_ascend/attention/attention_v1.py</code></td>
+        <td>新增 <code>AscendC8MXFPAttentionBackendImpl</code>，完成 K/V 动态 MXFP8 量化、K/V scale cache 写入，以及 <code>forward()</code> 入口的 scale cache 读取；扩展 <code>swap_blocks/copy_blocks</code> 以同步额外 scale tensor。</td>
+      </tr>
+      <tr>
+        <td><code>vllm_ascend/device/device_op.py</code></td>
+        <td>新增 <code>reshape_and_cache_scales</code>，使用同一 <code>slot_mapping</code> 写入 K/V scale cache。</td>
+      </tr>
+      <tr>
+        <td><code>tests/ut/quantization/*</code></td>
+        <td>补充分发和 method 创建相关单测。</td>
+      </tr>
+    </tbody>
+  </table>
+
+  <h2>内存开销</h2>
+  <p>每个 K 或 V 元素本体为 1 byte FP8，每 32 个元素额外 1 byte scale。因此相对 K/V 本体，scale 额外开销为 <code>1 / 32 = 3.125%</code>。</p>
+  <pre><code>per_layer_page_bytes =
+    2 * block_size * num_kv_heads * head_size
+  + 2 * block_size * num_kv_heads * (head_size / 32)</code></pre>
+
+  <h2>当前不做的内容</h2>
+  <ul>
+    <li>不修改 FIA/PA attention 算子调用参数。</li>
+    <li>不新增 mxfp8 KV cache 反量化消费逻辑；scale cache 只读取到 backend 属性，不参与计算。</li>
+    <li>不处理 PD 分离、kv transfer producer/consumer 差异和跨实例 KV 搬运。</li>
+    <li>不支持 <code>head_size % 32 != 0</code> 的 padding。</li>
+    <li>不改 checkpoint scale name remap，因为 K/V scale 是运行时动态生成。</li>
+  </ul>
+
+  <h2>下一步计划</h2>
+  <p>下一阶段目标是重写 <code>AscendC8MXFPAttentionBackendImpl.forward()</code>，使用已缓存的 K/V scale 完成 MXFP8 全量化 attention 计算。届时当前的“读取但不使用”会升级为“读取并传递给支持 MXFP8 KV dequant 的 attention 算子”。</p>
+
+  <h3>目标行为</h3>
+  <ul>
+    <li>Query 仍保持现有 attention 输入 dtype，或按算子要求扩展为全量化 query 路径。</li>
+    <li>K/V cache 本体从 <code>kv_cache[0]</code> 和 <code>kv_cache[1]</code> 读取，dtype 为 <code>torch.float8_e4m3fn</code>。</li>
+    <li>K/V scale cache 从 <code>kv_cache[2]</code> 和 <code>kv_cache[3]</code> 读取，shape 为 <code>[num_blocks, block_size, num_kv_heads, head_size / 32]</code>。</li>
+    <li>attention 算子调用时同时传入 K/V 本体与 K/V scale，使算子按最后一维每 32 个元素共享一个 E8M0 scale 完成反量化或融合计算。</li>
+    <li>GQA 维度继续使用 <code>num_key_value_heads = num_kv_heads</code>，不展开到 query heads。</li>
+  </ul>
+
+  <h3>计划时序</h3>
+  <div class="mermaid">
+sequenceDiagram
+    autonumber
+    participant Forward as C8MXFPForward
+    participant Cache as KVCacheTuple
+    participant Op as MXFP8AttentionOp
+    participant Output as AttentionOutput
+
+    Forward->>Cache: read k_cache and v_cache
+    Forward->>Cache: read k_scale_cache and v_scale_cache
+    Forward->>Forward: validate head_size multiple of 32
+    Forward->>Forward: prepare block_table and sequence lengths
+    Forward->>Op: call attention with fp8 K/V and e8m0 scales
+    Op-->>Output: return full-precision attention output
+    Forward-->>Output: write output tensor
+  </div>
+
+  <h3>候选实现步骤</h3>
+  <ol>
+    <li>新增专用 decode/prefill 分支，避免影响当前 <code>AscendAttentionBackendImpl</code> 和 C8 INT8 路径。</li>
+    <li>在 <code>forward()</code> 中强制读取 <code>self.key_scale_cache</code> 和 <code>self.value_scale_cache</code>，缺失时直接报错，避免静默退化。</li>
+    <li>确认 torch_npu/CANN attention 算子的 MXFP8 scale 入参形式：scale dtype、shape、layout、是否支持 paged KV cache。</li>
+    <li>根据算子约束选择输入 layout。优先保持当前 paged KV cache layout：<code>[num_blocks, block_size, num_kv_heads, head_size]</code> 和 scale layout：<code>[num_blocks, block_size, num_kv_heads, head_size / 32]</code>。</li>
+    <li>把 scale cache 传入 attention op，完成 MXFP8 K/V 的 fused dequant attention 计算。</li>
+    <li>补充精度验证：同一输入下比较 BF16 KV baseline、当前 FP8 cache 写入结果和新 MXFP8 attention 输出误差。</li>
+  </ol>
+
+  <h3>风险与待确认</h3>
+  <ul>
+    <li>当前 torch_npu 文档主要明确 INT8 KV 伪量化 scale 约束，MXFP8 KV scale 的正式 attention op 入参仍需对齐。</li>
+    <li>如果现有 FIA/PA 不支持 E8M0 per-32 scale，需要新增自定义 op 或先走显式 dequant 后 attention 的功能验证路径。</li>
+    <li>全量化 attention 可能要求 query 也量化并提供 query scale，这会扩大修改范围，需要单独设计。</li>
+    <li>如果算子要求 NZ 或其它 layout，cache 写入布局和 scale layout 可能需要进一步调整。</li>
+  </ul>
+
+  <h2>验证状态</h2>
+  <ul>
+    <li>修改文件已通过 <code>python -m py_compile</code> 语法检查。</li>
+    <li>单测启动时被当前环境的 vLLM 依赖缺失阻断：<code>vllm.model_executor.layers.fused_moe.expert_map_manager</code> 不存在，尚未进入新增测试用例执行。</li>
+  </ul>
+</main>
+</body>
+</html>

@@ -112,13 +112,11 @@ class AscendAttentionBackend(AttentionBackend):
         dst_kv_cache: list[torch.Tensor],
         src_to_dst: torch.Tensor,
     ) -> None:
-        src_key_cache, src_value_cache = src_kv_cache[0], src_kv_cache[1]
-        dst_key_cache, dst_value_cache = dst_kv_cache[0], dst_kv_cache[1]
         src_indices = src_to_dst[:, 0]
         dst_indices = src_to_dst[:, 1]
 
-        dst_key_cache[dst_indices] = src_key_cache[src_indices].to(dst_key_cache.device)
-        dst_value_cache[dst_indices] = src_value_cache[src_indices].to(dst_key_cache.device)
+        for src_cache, dst_cache in zip(src_kv_cache, dst_kv_cache):
+            dst_cache[dst_indices] = src_cache[src_indices].to(dst_cache.device)
 
     @staticmethod
     def copy_blocks(
@@ -129,10 +127,8 @@ class AscendAttentionBackend(AttentionBackend):
         dst_indices = src_to_dists[:, 1]
 
         for kv_cache in kv_caches:
-            key_caches = kv_cache[0]
-            value_caches = kv_cache[1]
-            key_caches[dst_indices] = key_caches[src_indices]
-            value_caches[dst_indices] = value_caches[src_indices]
+            for cache in kv_cache:
+                cache[dst_indices] = cache[src_indices]
 
     @staticmethod
     def get_supported_kernel_block_sizes() -> list[int]:
@@ -1144,6 +1140,147 @@ class AscendAttentionBackendImpl(AttentionImpl):
             attn_output = self.forward_impl(query, key, value, kv_cache, attn_metadata, output)
         output[:num_tokens] = attn_output[:num_tokens]
         return output
+
+
+class AscendC8MXFPAttentionBackendImpl(AscendAttentionBackendImpl):
+    """Storage-only MXFP8 KV cache backend.
+
+    K/V are dynamically quantized to FP8 E4M3 before cache write, and their
+    E8M0 scales are written to extra cache tensors. The attention computation
+    path is intentionally inherited unchanged for now.
+    """
+
+    def _init_mxfp_cache_refs(self, kv_cache: tuple[torch.Tensor]) -> None:
+        if self.key_cache is None:
+            self.key_cache, self.value_cache = kv_cache[0], kv_cache[1]
+        if len(kv_cache) >= 4 and not hasattr(self, "key_scale_cache"):
+            self.key_scale_cache, self.value_scale_cache = kv_cache[2], kv_cache[3]
+
+    def _read_mxfp_scale_cache(
+        self,
+        kv_cache: tuple[torch.Tensor],
+    ) -> tuple[torch.Tensor | None, torch.Tensor | None]:
+        """Read MXFP scale cache references without passing them to attention ops."""
+        if len(kv_cache) < 4:
+            return None, None
+        self._init_mxfp_cache_refs(kv_cache)
+        return self.key_scale_cache, self.value_scale_cache
+
+    def _quantize_kv_to_mxfp8(
+        self,
+        key: torch.Tensor,
+        value: torch.Tensor,
+        num_actual_tokens: int,
+    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
+        actual_key = key[:num_actual_tokens]
+        actual_value = value[:num_actual_tokens]
+        if actual_key.shape[-1] % 32 != 0 or actual_value.shape[-1] % 32 != 0:
+            raise ValueError(
+                "C8_MXFP KV cache requires K/V head dims divisible by 32, "
+                f"got {actual_key.shape[-1]}/{actual_value.shape[-1]}."
+            )
+
+        k_shape = actual_key.shape
+        v_shape = actual_value.shape
+        quant_key, key_scale = torch_npu.npu_dynamic_mx_quant(
+            actual_key.contiguous().view(-1, k_shape[-1]),
+            dst_type=torch.float8_e4m3fn,
+        )
+        quant_value, value_scale = torch_npu.npu_dynamic_mx_quant(
+            actual_value.contiguous().view(-1, v_shape[-1]),
+            dst_type=torch.float8_e4m3fn,
+        )
+        quant_key = quant_key.view(k_shape)
+        quant_value = quant_value.view(v_shape)
+        key_scale = key_scale.view(*k_shape[:-1], -1)
+        value_scale = value_scale.view(*v_shape[:-1], -1)
+        return quant_key, quant_value, key_scale, value_scale
+
+    def _reshape_and_cache_mxfp8(
+        self,
+        key: torch.Tensor,
+        value: torch.Tensor,
+        kv_cache: tuple[torch.Tensor],
+        slot_mapping: torch.Tensor,
+        num_actual_tokens: int,
+    ) -> None:
+        self._init_mxfp_cache_refs(kv_cache)
+        quant_key, quant_value, key_scale, value_scale = self._quantize_kv_to_mxfp8(key, value, num_actual_tokens)
+        key_scale = key_scale.view(self.key_scale_cache.dtype)
+        value_scale = value_scale.view(self.value_scale_cache.dtype)
+        slots = slot_mapping[:num_actual_tokens]
+        DeviceOperator.reshape_and_cache(
+            key=quant_key,
+            value=quant_value,
+            key_cache=self.key_cache,
+            value_cache=self.value_cache,
+            slot_mapping=slots,
+        )
+        DeviceOperator.reshape_and_cache_scales(
+            key_scale=key_scale,
+            value_scale=value_scale,
+            key_scale_cache=self.key_scale_cache,
+            value_scale_cache=self.value_scale_cache,
+            slot_mapping=slots,
+        )
+
+    def do_kv_cache_update(
+        self,
+        layer: torch.nn.Module,
+        key: torch.Tensor,
+        value: torch.Tensor,
+        kv_cache: list[torch.Tensor],
+        slot_mapping: torch.Tensor,
+    ) -> None:
+        if self.attn_type in (AttentionType.ENCODER_ONLY):
+            return
+        if len(kv_cache) < 4:
+            return super().do_kv_cache_update(layer, key, value, kv_cache, slot_mapping)
+        self._reshape_and_cache_mxfp8(key, value, kv_cache, slot_mapping, key.shape[0])
+
+    def reshape_and_cache(
+        self,
+        query: torch.Tensor,
+        key: torch.Tensor,
+        value: torch.Tensor,
+        kv_cache: tuple[torch.Tensor],
+        attn_metadata: AscendMetadata,
+        output: torch.Tensor,
+    ):
+        if len(kv_cache) < 4:
+            return super().reshape_and_cache(query, key, value, kv_cache, attn_metadata, output)
+        slots = attn_metadata.slot_mapping
+        encoder_decoder = self.attn_type == AttentionType.ENCODER_DECODER
+        cache_key = key[: attn_metadata.num_actual_tokens] if not encoder_decoder else key
+        cache_value = value[: attn_metadata.num_actual_tokens] if not encoder_decoder else value
+        cache_slots = slots[: attn_metadata.num_actual_tokens] if not encoder_decoder else slots.to(torch.int32)
+        self._reshape_and_cache_mxfp8(cache_key, cache_value, kv_cache, cache_slots, cache_key.shape[0])
+        return query, key, value, output
+
+    def forward(
+        self,
+        layer: AttentionLayer,
+        query: torch.Tensor,
+        key: torch.Tensor,
+        value: torch.Tensor,
+        kv_cache: tuple[torch.Tensor],
+        attn_metadata: AscendMetadata,
+        output: torch.Tensor | None = None,
+        output_scale: torch.Tensor | None = None,
+        output_block_scale: torch.Tensor | None = None,
+    ) -> torch.Tensor:
+        self._read_mxfp_scale_cache(kv_cache)
+        return super().forward(
+            layer=layer,
+            query=query,
+            key=key,
+            value=value,
+            kv_cache=kv_cache,
+            attn_metadata=attn_metadata,
+            output=output,
+            output_scale=output_scale,
+            output_block_scale=output_block_scale,
+        )
 
 
 class AscendC8AttentionBackendImpl(AscendAttentionBackendImpl):
