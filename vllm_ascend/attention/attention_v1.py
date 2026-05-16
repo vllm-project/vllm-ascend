@@ -299,8 +299,6 @@ class AscendAttentionMetadataBuilder(AttentionMetadataBuilder[AscendMetadata]):
         if isinstance(self.kv_cache_spec, CrossAttentionSpec):
             seq_lens = common_attn_metadata.seq_lens
             slot_mapping = common_attn_metadata.slot_mapping.to(torch.int32)
-        elif self.speculative_config and self.speculative_config.parallel_drafting:
-            seq_lens = common_attn_metadata.seq_lens
 
         attn_state = common_attn_metadata.attn_state
 
