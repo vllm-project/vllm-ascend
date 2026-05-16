@@ -90,9 +90,6 @@ Currently, the multi-node test workflow is defined in the [nightly_test_a3.yaml]
             - name: multi-node-qwenw8a8-2node
               config_file_path: Qwen3-235B-W8A8.yaml
               size: 2
-            - name: multi-node-qwenw8a8-2node-eplb
-              config_file_path: Qwen3-235B-W8A8-EPLB.yaml
-              size: 2
       uses: ./.github/workflows/_e2e_nightly_multi_node.yaml
       with:
         soc_version: a3
