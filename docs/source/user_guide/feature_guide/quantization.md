@@ -23,13 +23,20 @@ vLLM Ascend supports models quantized by two main tools: `ModelSlim` and `LLM-Co
 To use ModelSlim for model quantization, install it from its [Git repository](https://gitcode.com/Ascend/msit):
 
 ```bash
-# Install br_release_MindStudio_8.3.0_20261231 version
+# Install the recommended release version
 git clone https://gitcode.com/Ascend/msit.git -b br_release_MindStudio_8.3.0_20261231
 
 cd msit/msmodelslim
 
 bash install.sh
 ```
+
+> **Important: Version Compatibility**
+>
+> - Always use a **release branch** (e.g., `br_release_MindStudio_8.3.0_20261231`) instead of `master` branch
+> - The `master` branch may contain unstable code with missing or incompatible modules
+> - Check the [ModelSlim releases](https://gitcode.com/Ascend/msit/tags) for the latest stable version
+> - Ensure your environment matches the requirements: `torch>=2.1.0`, `torch_npu`, `transformers>=4.48.0`
 
 #### Model Quantization
 
@@ -59,6 +66,58 @@ python3 quant_qwen_moe_w8a8.py --model_path $MODEL_PATH \
 After quantization completes, the output directory will contain the quantized model files.
 
 For more examples, refer to the [official examples](https://gitcode.com/Ascend/msit/tree/master/msmodelslim/example).
+
+#### Troubleshooting
+
+**Common Issues and Solutions:**
+
+<details>
+<summary><b>ModuleNotFoundError: No module named 'msmodelslim.pytorch.llm_ptq.anti_outlier.anti_utils'</b></summary>
+
+This error typically occurs when using an incompatible version of ModelSlim.
+
+**Solution:**
+
+1. Ensure you are using a release branch, not the `master` branch:
+
+   ```bash
+   git clone https://gitcode.com/Ascend/msit.git -b br_release_MindStudio_8.3.0_20261231
+   ```
+
+2. Run the installation script after cloning:
+
+   ```bash
+   cd msit/msmodelslim
+   bash install.sh
+   ```
+
+3. Verify the installation:
+
+   ```bash
+   python3 -c "import msmodelslim; print(msmodelslim.__version__)"
+   ```
+
+</details>
+
+<details>
+<summary><b>RuntimeError: Trying to create tensor with negative dimension</b></summary>
+
+This error may occur during the anti-outlier processing step.
+
+**Solution:**
+
+1. Check if your model architecture is supported by the quantization script
+2. Verify the calibration dataset format matches the expected input
+3. Try using a different release branch or report the issue to [Ascend/msit](https://gitee.com/ascend/msit/issues)
+
+</details>
+
+<details>
+<summary><b>Alternative: Use LLM-Compressor</b></summary>
+
+If you encounter persistent issues with ModelSlim, consider using [LLM-Compressor](#2-llm-compressor) as an alternative. It is maintained by the vLLM project and provides stable quantization support.
+
+</details>
 
 ### 2. LLM-Compressor
 
