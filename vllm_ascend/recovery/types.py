@@ -6,7 +6,6 @@ from regex import L
 class ExceptionInfo(msgspec.Struct):
     exception_type: str
     message: str
-    trace_back: str
 
 class RecoveryAction:
     """
@@ -92,8 +91,8 @@ class StepResult:
         self,
         step_name: str,
         worker_rank: int,
-        engine_index: int,
         is_success: bool,
+        engine_index: Optional[int] = None,
         error: Optional[str] = None,
     ):
         self.step_name = step_name
