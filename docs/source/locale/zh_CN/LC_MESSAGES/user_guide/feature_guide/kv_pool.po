@@ -8,7 +8,7 @@ msgid ""
 msgstr ""
 "Project-Id-Version: vllm-ascend \n"
 "Report-Msgid-Bugs-To: \n"
-"POT-Creation-Date: 2026-05-14 02:40+0000\n"
+"POT-Creation-Date: 2026-05-16 02:20+0000\n"
 "PO-Revision-Date: 2026-01-22 16:55+0800\n"
 "Last-Translator: Gemini\n"
 "Language: zh_CN\n"
@@ -205,8 +205,8 @@ msgid "800 I/T A3 series"
 msgstr "800 I/T A3 系列"
 
 #: ../../source/user_guide/feature_guide/kv_pool.md
-msgid "HDK >= 26.0.0<br>CANN >= 9.0.0"
-msgstr "HDK >= 26.0.0<br>CANN >= 9.0.0"
+msgid "HDK >= 25.5<br>CANN >= 9.0.0<br>LingQu Computing Network >= 1.5"
+msgstr "HDK >= 25.5<br>CANN >= 9.0.0<br>LingQu 计算网络 >= 1.5"
 
 #: ../../source/user_guide/feature_guide/kv_pool.md
 msgid "`export ASCEND_ENABLE_USE_FABRIC_MEM=1`"
@@ -850,3 +850,6 @@ msgstr "元戎不需要额外的缓冲区预注册步骤。该后端在构建 bl
 
 #~ msgid "mooncake：>= 0.3.9"
 #~ msgstr "mooncake：>= 0.3.9"
+
+#~ msgid "HDK >= 26.0.0<br>CANN >= 9.0.0"
+#~ msgstr "HDK >= 26.0.0<br>CANN >= 9.0.0"
