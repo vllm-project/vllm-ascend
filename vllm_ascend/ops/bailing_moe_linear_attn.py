@@ -27,16 +27,73 @@ import torch
 import torch.nn.functional as F
 from vllm.forward_context import get_forward_context
 from vllm.model_executor.layers.fla.ops.layernorm_guard import layernorm_fn
-from vllm.model_executor.layers.mamba.linear_attn import (
-    clear_linear_attention_cache_for_new_sequences,
-    linear_attention_decode,
-    linear_attention_prefill_and_mix,
-)
+from vllm.model_executor.layers.mamba.linear_attn import linear_attention_decode
 from vllm.model_executor.models.bailing_moe_linear import BailingMoELinearAttention
 from vllm.v1.attention.backend import AttentionMetadata
 from vllm.v1.attention.backends.linear_attn import LinearAttentionMetadata
 
-from vllm_ascend.ops.triton.mamba.lightning_attn import AscendLightningAttentionKernel
+from vllm_ascend.ops.triton.mamba.lightning_attn import (
+    AscendLightningAttentionKernel,
+    clear_linear_attention_cache_for_prefill_npu,
+    pack_qkv_for_prefill,
+)
+
+
+def ascend_linear_attention_prefill_and_mix(
+    q: torch.Tensor,
+    k: torch.Tensor,
+    v: torch.Tensor,
+    kv_cache: torch.Tensor,
+    state_indices_tensor: torch.Tensor,
+    attn_metadata: LinearAttentionMetadata,
+    slope_rate: torch.Tensor,
+    block_size: int,
+    decode_fn,
+    prefix_fn,
+    layer_idx: int | None = None,
+) -> torch.Tensor:
+    hidden = []
+    query_start_loc = getattr(attn_metadata, "query_start_loc_cpu", None)
+    if query_start_loc is None:
+        query_start_loc = attn_metadata.query_start_loc
+    state_indices = getattr(attn_metadata, "state_indices_cpu", None)
+    if state_indices is None:
+        state_indices = state_indices_tensor
+    offset = attn_metadata.num_decode_tokens
+    for prefill_idx in range(getattr(attn_metadata, "num_prefills", 0)):
+        if offset + prefill_idx + 1 >= len(query_start_loc):
+            break
+        if offset + prefill_idx >= len(state_indices):
+            break
+        start = int(query_start_loc[offset + prefill_idx])
+        end = int(query_start_loc[offset + prefill_idx + 1])
+        slot_id = state_indices[offset + prefill_idx]
+        if getattr(slot_id, "device", None) is not None and slot_id.device.type == "cpu":
+            slot_id = int(slot_id)
+
+        qs, ks, vs = pack_qkv_for_prefill(q, k, v, start, end)
+        slice_layer_cache = kv_cache[slot_id, ...]
+        out_slice = prefix_fn(
+            qs,
+            ks,
+            vs,
+            slice_layer_cache,
+            slope_rate,
+            block_size,
+            layer_idx=layer_idx,
+        )
+        hidden.append(out_slice)
+
+    if attn_metadata.num_decode_tokens > 0:
+        hidden_decode = decode_fn(q, k, v, kv_cache, state_indices_tensor, attn_metadata)
+        hidden.insert(0, hidden_decode)
+
+    if not hidden:
+        return torch.empty((0, q.shape[1] * q.shape[2]), device=q.device, dtype=q.dtype)
+
+    if len(hidden) == 1:
+        return hidden[0]
+    return torch.concat(hidden, dim=0).contiguous()
 
 
 class AscendBailingMoELinearAttention(BailingMoELinearAttention):
@@ -50,7 +107,7 @@ class AscendBailingMoELinearAttention(BailingMoELinearAttention):
     """
 
     def _prefill_and_mix_infer(self, q, k, v, kv_cache, state_indices_tensor, attn_metadata):
-        return linear_attention_prefill_and_mix(
+        return ascend_linear_attention_prefill_and_mix(
             q=q,
             k=k,
             v=v,
@@ -144,7 +201,8 @@ class AscendBailingMoELinearAttention(BailingMoELinearAttention):
         if attn_metadata is not None:
             kv_cache = self.kv_cache[0]
             state_indices_tensor = attn_metadata.state_indices_tensor
-            clear_linear_attention_cache_for_new_sequences(kv_cache, state_indices_tensor, attn_metadata)
+            if getattr(attn_metadata, "num_prefills", 0) > 0:
+                clear_linear_attention_cache_for_prefill_npu(kv_cache, state_indices_tensor, attn_metadata)
 
         # Compute attention
         decode_only = getattr(attn_metadata, "num_prefills", 0) == 0
