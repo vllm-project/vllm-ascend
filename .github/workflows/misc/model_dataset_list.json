@@ -150,6 +150,7 @@
       "meta-llama/Llama-3.2-1B-Instruct",
       "mistralai/Ministral-3-3B-Instruct-2512-BF16",
       "mistralai/Ministral-3-8B-Instruct-2512-BF16",
+      "mistralai/Mamba-Codestral-7B-v0.1",
       "mistralai/Mistral-7B-Instruct-v0.1",
       "mistralai/Mistral-Small-3.1-24B-Instruct-2503",
       "mlx-community/DeepSeek-V3-3bit-bf16",

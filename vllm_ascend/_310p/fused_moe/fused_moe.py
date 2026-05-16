@@ -34,6 +34,11 @@ from vllm_ascend.quantization.quant_type import QuantType
 from .experts_selector import select_experts
 from .moe_comm_method import AllGatherCommImpl310
 
+# Compatibility shim for vLLM versions where base unquantized MoE method
+# does not expose `is_monolithic`.
+if not hasattr(UnquantizedFusedMoEMethod, "is_monolithic"):
+    UnquantizedFusedMoEMethod.is_monolithic = property(lambda self: False)  # type: ignore[attr-defined]
+
 
 class AscendUnquantizedFusedMoEMethod310(UnquantizedFusedMoEMethod):
     def __init__(self, moe: FusedMoEConfig = None):

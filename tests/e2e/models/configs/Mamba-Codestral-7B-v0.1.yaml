@@ -1,0 +1,17 @@
+model_name: "mistralai/Mamba-Codestral-7B-v0.1"
+hardware: "Atlas A2 Series"
+tasks:
+- name: "gsm8k"
+  metrics:
+  - name: "exact_match,strict-match"
+    value: 0.1243
+  - name: "exact_match,flexible-extract"
+    value: 0.1259
+num_fewshot: 5
+max_model_len: 4096
+trust_remote_code: True
+apply_chat_template: False
+fewshot_as_multiturn: False
+batch_size: 1
+enforce_eager: True
+tokenizer_mode: "slow"

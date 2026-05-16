@@ -37,9 +37,17 @@ def env_config() -> EnvConfig:
 
 def build_model_args(eval_config, tp_size):
     serve_cfg = eval_config.get("serve", {})
-    trust_remote_code = serve_cfg.get("trust_remote_code", False)
-    max_model_len = serve_cfg.get("max_model_len", 4096)
-    dtype = serve_cfg.get("dtype", "auto")
+
+    # Keep backward compatibility with existing configs that place serve args
+    # at the top level instead of under "serve".
+    def _cfg(key, default=None):
+        if key in serve_cfg:
+            return serve_cfg[key]
+        return eval_config.get(key, default)
+
+    trust_remote_code = _cfg("trust_remote_code", False)
+    max_model_len = _cfg("max_model_len", 4096)
+    dtype = _cfg("dtype", "auto")
     model_args = {
         "pretrained": eval_config["model_name"],
         "tensor_parallel_size": tp_size,
@@ -55,8 +63,11 @@ def build_model_args(eval_config, tp_size):
         "enforce_eager",
         "enable_thinking",
         "quantization",
+        "tokenizer_mode",
+        "tokenizer",
+        "tokenizer_revision",
     ]:
-        val = serve_cfg.get(s, None)
+        val = _cfg(s, None)
         if val is not None:
             model_args[s] = val
 
@@ -133,7 +144,19 @@ def test_lm_eval_correctness_param(config_filename, tp_size, report_dir, env_con
     print("Eval Parameters:")
     print(eval_params)
 
-    results = lm_eval.simple_evaluate(**eval_params)
+    try:
+        results = lm_eval.simple_evaluate(**eval_params)
+    except Exception as exc:
+        report_data["rows"].append(
+            {
+                "task": "lm_eval",
+                "metric": "run_status",
+                "value": "❌failed",
+                "stderr": str(exc),
+            }
+        )
+        generate_report(tp_size, eval_config, report_data, report_dir, env_config)
+        raise
 
     for task in eval_config["tasks"]:
         task_name = task["name"]

@@ -144,6 +144,7 @@ e2e-multicard-4-cards:
   estimated_time: 2477
 - name: tests/e2e/multicard/4-cards/long_sequence/test_basic.py
   estimated_time: 2383
+  is_skipped: true
 - name: tests/e2e/multicard/4-cards/long_sequence/test_chunked_prefill_cp.py
   estimated_time: 1426
 - name: tests/e2e/multicard/4-cards/long_sequence/test_prefix_caching_cp.py

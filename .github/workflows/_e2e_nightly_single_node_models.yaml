@@ -242,7 +242,12 @@ jobs:
           for model in $models; do
             echo "Processing model: $model"
             model_base_name=$(basename "$model")
-            cat benchmarks/accuracy/${model_base_name}.md >> $GITHUB_STEP_SUMMARY
+            report_file="benchmarks/accuracy/${model_base_name}.md"
+            if [ -f "$report_file" ]; then
+              cat "$report_file" >> $GITHUB_STEP_SUMMARY
+            else
+              echo "Report file missing for ${model_base_name}: ${report_file}" >> $GITHUB_STEP_SUMMARY
+            fi
           done
 
       - name: Set artifact timestamp

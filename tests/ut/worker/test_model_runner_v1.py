@@ -3,7 +3,7 @@ from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
 import torch
-from vllm.v1.kv_cache_interface import FullAttentionSpec, KVCacheConfig, KVCacheGroupSpec, KVCacheTensor
+from vllm.v1.kv_cache_interface import FullAttentionSpec, KVCacheConfig, KVCacheGroupSpec, KVCacheTensor, MambaSpec
 
 from vllm_ascend.worker.model_runner_v1 import NPUModelRunner
 
@@ -53,6 +53,25 @@ class TestNPUModelRunnerKVCache(unittest.TestCase):
 
         self.assertEqual(k_cache_raw.numel(), kv_cache_spec.page_size_bytes)
         self.assertEqual(v_cache_raw.numel(), kv_cache_spec.page_size_bytes)
+
+    def test_allocate_kv_cache_initializes_pure_mamba_layers(self):
+        runner = self._build_runner()
+        kv_cache_spec = MambaSpec(
+            block_size=16,
+            shapes=((1,), (1,)),
+            dtypes=(torch.float32,),
+            mamba_cache_mode="none",
+        )
+        kv_cache_config = KVCacheConfig(
+            num_blocks=2,
+            kv_cache_tensors=[KVCacheTensor(size=kv_cache_spec.page_size_bytes, shared_by=["mamba_layer"])],
+            kv_cache_groups=[KVCacheGroupSpec(layer_names=["mamba_layer"], kv_cache_spec=kv_cache_spec)],
+        )
+
+        kv_cache_raw_tensors = runner._allocate_kv_cache_tensors(kv_cache_config)
+
+        self.assertIn("mamba_layer", kv_cache_raw_tensors)
+        self.assertEqual(kv_cache_raw_tensors["mamba_layer"].numel(), kv_cache_spec.page_size_bytes)
 
     def test_reshape_kv_cache_uses_layer_spec_for_draft_gqa(self):
         runner = self._build_runner()

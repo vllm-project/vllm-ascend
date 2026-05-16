@@ -2,6 +2,7 @@
 import inspect
 import unittest
 from dataclasses import dataclass
+from importlib import import_module
 from typing import Any
 from unittest.mock import MagicMock, patch
 
@@ -24,15 +25,25 @@ from vllm_ascend.spec_decode.draft_proposer import AscendDraftModelProposer
 from vllm_ascend.spec_decode.eagle_proposer import AscendEagleProposer
 from vllm_ascend.utils import vllm_version_is
 
-# vLLM #40732 moved `SpecDecodeBaseProposer` (and its `CpuGpuBuffer` import)
-# out of `vllm.v1.spec_decode.eagle` into `vllm.v1.spec_decode.llm_base_proposer`.
-# Pick the right patch path depending on the installed vllm version so the
-# tests can mock the buffer factory.
-_CPU_GPU_BUFFER_TARGET = (
-    "vllm.v1.spec_decode.eagle.CpuGpuBuffer"
-    if vllm_version_is("0.19.1")
-    else "vllm.v1.spec_decode.llm_base_proposer.CpuGpuBuffer"
-)
+
+def _resolve_cpu_gpu_buffer_target() -> str:
+    # vLLM moved CpuGpuBuffer from eagle.py to llm_base_proposer.py, but
+    # packaging/version tags can vary in CI. Resolve by symbol existence.
+    for module_name in (
+        "vllm.v1.spec_decode.llm_base_proposer",
+        "vllm.v1.spec_decode.eagle",
+    ):
+        try:
+            module = import_module(module_name)
+        except Exception:
+            continue
+        if hasattr(module, "CpuGpuBuffer"):
+            return f"{module_name}.CpuGpuBuffer"
+    # Keep a deterministic fallback for older layouts.
+    return "vllm.v1.spec_decode.eagle.CpuGpuBuffer"
+
+
+_CPU_GPU_BUFFER_TARGET = _resolve_cpu_gpu_buffer_target()
 
 BLOCK_SIZE = 16
 
@@ -3496,7 +3507,7 @@ class TestEagleProposerSetInputsFirstPass(TestBase):
         self.runner.max_num_tokens = 8192
         self.runner.max_num_reqs = 256
 
-        self.mock_cpugpubuffer = patch(_CPU_GPU_BUFFER_TARGET, MockCpuGpuBuffer)
+        self.mock_cpugpubuffer = patch(_CPU_GPU_BUFFER_TARGET)
         self.mock_cpugpubuffer.start()
         self.mock_supports_multimodal_inputs = patch(
             "vllm.multimodal.registry.MultiModalRegistry.supports_multimodal_inputs", return_value=False
@@ -3578,7 +3589,7 @@ class TestEagleProposerSetInputsFirstPass(TestBase):
         init_ascend_config(vllm_config)
 
         with (
-            patch(_CPU_GPU_BUFFER_TARGET, MockCpuGpuBuffer),
+            patch(_CPU_GPU_BUFFER_TARGET),
             patch("vllm.multimodal.registry.MultiModalRegistry.supports_multimodal_inputs", return_value=False),
             set_current_vllm_config(vllm_config),
         ):
