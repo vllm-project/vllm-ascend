@@ -262,6 +262,152 @@ at::Tensor npu_sparse_flash_attention_meta(
     at::Tensor output = at::empty(query.sizes(), query.options().dtype(query.dtype()));
     return output;
 }
+
+at::Tensor npu_paged_select_attention_meta(
+    const at::Tensor &query,
+    const at::Tensor &key,
+    const at::Tensor &value,
+    at::IntArrayRef actual_seq_lengths,
+    at::IntArrayRef actual_seq_lengths_kv,
+    const at::Tensor &block_table,
+    const at::Tensor &selected_kv_indices,
+    int64_t num_heads,
+    double scale_value,
+    int64_t num_key_value_heads,
+    int64_t block_size)
+{
+    return at::empty_like(query);
+}
+
+at::Tensor &npu_paged_select_attention_out_meta(
+    const at::Tensor &query,
+    const at::Tensor &key,
+    const at::Tensor &value,
+    at::IntArrayRef actual_seq_lengths,
+    at::IntArrayRef actual_seq_lengths_kv,
+    const at::Tensor &block_table,
+    const at::Tensor &selected_kv_indices,
+    int64_t num_heads,
+    double scale_value,
+    int64_t num_key_value_heads,
+    int64_t block_size,
+    at::Tensor &out)
+{
+    return out;
+}
+
+at::Tensor npu_paged_select_attention_get_workspace_meta(
+    const at::Tensor &query,
+    const at::Tensor &key,
+    const at::Tensor &value,
+    at::IntArrayRef actual_seq_lengths,
+    at::IntArrayRef actual_seq_lengths_kv,
+    const at::Tensor &block_table,
+    const at::Tensor &selected_kv_indices,
+    int64_t num_heads,
+    double scale_value,
+    int64_t num_key_value_heads,
+    int64_t block_size,
+    const at::Tensor &output)
+{
+    (void)query;
+    (void)key;
+    (void)value;
+    (void)actual_seq_lengths;
+    (void)actual_seq_lengths_kv;
+    (void)block_table;
+    (void)selected_kv_indices;
+    (void)num_heads;
+    (void)scale_value;
+    (void)num_key_value_heads;
+    (void)block_size;
+    (void)output;
+    return at::empty({0}, query.options().dtype(at::kByte));
+}
+
+at::Tensor &npu_paged_select_attention_graph_out_meta(
+    const at::Tensor &query,
+    const at::Tensor &key,
+    const at::Tensor &value,
+    at::IntArrayRef actual_seq_lengths,
+    at::IntArrayRef actual_seq_lengths_kv,
+    const at::Tensor &block_table,
+    const at::Tensor &selected_kv_indices,
+    int64_t num_heads,
+    double scale_value,
+    int64_t num_key_value_heads,
+    int64_t block_size,
+    const at::Tensor &workspace,
+    at::Tensor &out)
+{
+    (void)query;
+    (void)key;
+    (void)value;
+    (void)actual_seq_lengths;
+    (void)actual_seq_lengths_kv;
+    (void)block_table;
+    (void)selected_kv_indices;
+    (void)num_heads;
+    (void)scale_value;
+    (void)num_key_value_heads;
+    (void)block_size;
+    (void)workspace;
+    return out;
+}
+
+void npu_quest_prefill_metadata_meta(
+    const at::Tensor &k_cache,
+    const at::Tensor &block_tables,
+    const at::Tensor &seq_lens,
+    const at::Tensor &metadata_block_tables,
+    at::Tensor &maxblocks,
+    at::Tensor &minblocks)
+{
+    (void)k_cache;
+    (void)block_tables;
+    (void)seq_lens;
+    (void)metadata_block_tables;
+    (void)maxblocks;
+    (void)minblocks;
+}
+
+at::Tensor npu_quest_block_select_paged_meta(
+    const at::Tensor &query,
+    const at::Tensor &maxblocks,
+    const at::Tensor &minblocks,
+    const at::Tensor &metadata_block_tables,
+    const at::Tensor &seq_lens,
+    int64_t k,
+    int64_t tokens_since_metadata_update)
+{
+    (void)minblocks;
+    (void)metadata_block_tables;
+    (void)seq_lens;
+    (void)tokens_since_metadata_update;
+    TORCH_CHECK(k > 0, "k must be positive.");
+    return at::empty(
+        {query.size(0), query.size(1), k},
+        query.options().dtype(at::kInt));
+}
+
+at::Tensor &npu_quest_block_select_paged_out_meta(
+    const at::Tensor &query,
+    const at::Tensor &maxblocks,
+    const at::Tensor &minblocks,
+    const at::Tensor &metadata_block_tables,
+    const at::Tensor &seq_lens,
+    at::Tensor &out,
+    int64_t tokens_since_metadata_update)
+{
+    (void)query;
+    (void)maxblocks;
+    (void)minblocks;
+    (void)metadata_block_tables;
+    (void)seq_lens;
+    (void)tokens_since_metadata_update;
+    return out;
+}
+
 std::tuple<at::Tensor, at::Tensor> matmul_allreduce_add_rmsnorm_meta(
     const at::Tensor &x1,
     const at::Tensor &x2,
@@ -809,6 +955,19 @@ TORCH_LIBRARY_IMPL_EXPAND(CONCAT(_C, _ascend), Meta, ops) {
     ops.impl("npu_lightning_indexer", &vllm_ascend::meta::npu_lightning_indexer_meta);
     // Sparse flash attention
     ops.impl("npu_sparse_flash_attention", &vllm_ascend::meta::npu_sparse_flash_attention_meta);
+    // Paged select attention
+    ops.impl("npu_paged_select_attention", &vllm_ascend::meta::npu_paged_select_attention_meta);
+    ops.impl("npu_paged_select_attention_out", &vllm_ascend::meta::npu_paged_select_attention_out_meta);
+    ops.impl(
+        "npu_paged_select_attention_get_workspace",
+        &vllm_ascend::meta::npu_paged_select_attention_get_workspace_meta);
+    ops.impl(
+        "npu_paged_select_attention_graph_out",
+        &vllm_ascend::meta::npu_paged_select_attention_graph_out_meta);
+    // Quest metadata + block selection
+    ops.impl("npu_quest_prefill_metadata", &vllm_ascend::meta::npu_quest_prefill_metadata_meta);
+    ops.impl("npu_quest_block_select_paged", &vllm_ascend::meta::npu_quest_block_select_paged_meta);
+    ops.impl("npu_quest_block_select_paged_out", &vllm_ascend::meta::npu_quest_block_select_paged_out_meta);
     // MoE dispatch-ffn-combine
     ops.impl("dispatch_ffn_combine", &vllm_ascend::meta::dispatch_ffn_combine_meta);
     // matmul allreduce add rmsnorm

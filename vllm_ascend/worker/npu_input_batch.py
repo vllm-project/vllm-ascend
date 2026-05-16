@@ -41,6 +41,7 @@ class NPUInputBatch(InputBatch):
         block_sizes: list[int],  # The block_size of each kv cache group
         kernel_block_sizes: list[list[int]],
         max_num_blocks_per_req: list[int] | None = None,
+        quest_max_num_metadata_blocks_per_req: int = 0,
         logitsprocs: LogitsProcessors | None = None,
         logitsprocs_need_output_token_ids: bool = False,
         is_spec_decode: bool = False,
@@ -120,6 +121,37 @@ class NPUInputBatch(InputBatch):
             kernel_sizes=kernel_block_sizes,
             cp_kv_cache_interleave_size=cp_kv_cache_interleave_size,
         )
+
+        self.quest_metadata_block_tables: torch.Tensor | None = None
+        self.quest_metadata_owner_req_ids: list[str | None] = []
+        self.quest_metadata_valid_tokens_cpu_tensor: torch.Tensor | None = None
+        self.quest_metadata_valid_tokens: np.ndarray | None = None
+        self.quest_refresh_seq_lens: torch.Tensor | None = None
+        self.quest_refresh_seq_lens_cpu_tensor: torch.Tensor | None = None
+        self.quest_refresh_seq_lens_cpu: np.ndarray | None = None
+        if quest_max_num_metadata_blocks_per_req > 0:
+            total_metadata_blocks = max_num_reqs * quest_max_num_metadata_blocks_per_req
+            self.quest_metadata_block_tables = torch.arange(
+                total_metadata_blocks,
+                dtype=torch.int32,
+                device=device,
+            ).view(max_num_reqs, quest_max_num_metadata_blocks_per_req)
+            self.quest_metadata_owner_req_ids = [None] * max_num_reqs
+            self.quest_metadata_valid_tokens_cpu_tensor = torch.zeros(
+                (max_num_reqs,),
+                device="cpu",
+                dtype=torch.int32,
+                pin_memory=False,
+            )
+            self.quest_metadata_valid_tokens = self.quest_metadata_valid_tokens_cpu_tensor.numpy()
+            self.quest_refresh_seq_lens = torch.zeros((max_num_reqs,), dtype=torch.int32, device=device)
+            self.quest_refresh_seq_lens_cpu_tensor = torch.zeros(
+                (max_num_reqs,),
+                device="cpu",
+                dtype=torch.int32,
+                pin_memory=pin_memory,
+            )
+            self.quest_refresh_seq_lens_cpu = self.quest_refresh_seq_lens_cpu_tensor.numpy()
 
         # Sampling-related.
         self.temperature = torch.empty((max_num_reqs,), dtype=torch.float32, device=device)
