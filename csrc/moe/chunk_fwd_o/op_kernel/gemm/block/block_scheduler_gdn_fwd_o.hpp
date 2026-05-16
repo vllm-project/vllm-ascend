@@ -33,8 +33,10 @@ namespace Catlass::Gemm::Block {
 
 
 struct GDNFwdOOffsets {
-    uint32_t qkOffset;
-    uint32_t ovOffset;
+    uint32_t qOffset;
+    uint32_t kOffset;
+    uint32_t vOffset;
+    uint32_t oOffset;
     uint32_t hOffset;
     uint32_t gOffset;
     uint32_t attnWorkOffset;
@@ -56,6 +58,8 @@ struct BlockSchedulerGdnFwdO {
     uint32_t kHeadDim;
     uint32_t vHeadDim;
     uint32_t chunkSize;
+    uint32_t kStride0;
+    uint32_t vStride0;
     uint32_t isVariedLen;
     uint32_t tokenBatch;
     uint32_t numChunks{0};
@@ -113,6 +117,8 @@ struct BlockSchedulerGdnFwdO {
         kHeadDim = gdnFwdOTilingData->kHeadDim;
         vHeadDim = gdnFwdOTilingData->vHeadDim;
         chunkSize = gdnFwdOTilingData->chunkSize;
+        kStride0 = gdnFwdOTilingData->kStride0;
+        vStride0 = gdnFwdOTilingData->vStride0;
         isVariedLen = gdnFwdOTilingData->isVariedLen;
         tokenBatch = gdnFwdOTilingData->tokenBatch;
 
@@ -159,8 +165,10 @@ struct BlockSchedulerGdnFwdO {
         
         vHeadIdx = baseHeadIdx + headInnerIdx;
         kHeadIdx = vHeadIdx / headGroups;
-        offsets[currStage].qkOffset = (shapeBatchIdx * kNumHead * seqlen + kHeadIdx * seqlen + tokenOffset + batchChunkIdx * chunkSize) * kHeadDim;
-        offsets[currStage].ovOffset = (shapeBatchIdx * vNumHead * seqlen + vHeadIdx * seqlen + tokenOffset + batchChunkIdx * chunkSize) * vHeadDim;
+        offsets[currStage].qOffset = (shapeBatchIdx * kNumHead * seqlen + kHeadIdx * seqlen + tokenOffset + batchChunkIdx * chunkSize) * kHeadDim;
+        offsets[currStage].kOffset = shapeBatchIdx * kStride0 + kHeadIdx * seqlen * kHeadDim + tokenOffset * kHeadDim + batchChunkIdx * chunkSize * kHeadDim;
+        offsets[currStage].vOffset = shapeBatchIdx * vStride0 + vHeadIdx * seqlen * vHeadDim + tokenOffset * vHeadDim + batchChunkIdx * chunkSize * vHeadDim;
+        offsets[currStage].oOffset = (shapeBatchIdx * vNumHead * seqlen + vHeadIdx * seqlen + tokenOffset + batchChunkIdx * chunkSize) * vHeadDim;
         offsets[currStage].hOffset = (shapeBatchIdx * vNumHead * numChunks + vHeadIdx * numChunks + chunkIdx) * kHeadDim * vHeadDim;
         offsets[currStage].gOffset = shapeBatchIdx * vNumHead * seqlen + vHeadIdx * seqlen + tokenOffset + batchChunkIdx * chunkSize;
         offsets[currStage].attnWorkOffset = (cubeCoreIdx * PING_PONG_STAGES + currStage) * chunkSize * chunkSize;
