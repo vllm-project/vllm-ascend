@@ -1,18 +1,17 @@
 import pickle
 import time
-from typing import Any
 import weakref
 
 import msgspec.msgpack
 import zmq
 from vllm.logger import logger
+from vllm.v1.engine import EngineCoreOutputs
 from vllm.v1.engine.coordinator import DPCoordinator, DPCoordinatorProc
-from vllm.v1.utils import get_engine_client_zmq_addr
-from vllm.utils.system_utils import get_mp_context
 from vllm.v1.engine.coordinator import shutdown as coord_shutdown
 from vllm.v1.serial_utils import MsgpackDecoder
-from vllm.v1.engine import EngineCoreOutputs
+from vllm.v1.utils import get_engine_client_zmq_addr
 from vllm.utils.network_utils import make_zmq_socket
+from vllm.utils.system_utils import get_mp_context
 
 
 _RECOVERY_MSG_PREFIX = b"\x00REC"
@@ -39,8 +38,8 @@ def _patched_dp_coordinator_init(
     recovery_pub_address = get_engine_client_zmq_addr(local_only_eng, host)
     recovery_pull_address = get_engine_client_zmq_addr(local_only_eng, host)
     logger.info(
-        f"recovery_pub_address={recovery_pub_address}, "
-        f"recovery_pull_address={recovery_pull_address}"
+        "recovery_pub_address=%s, recovery_pull_address=%s",
+        recovery_pub_address, recovery_pull_address,
     )
 
     context = get_mp_context()
@@ -168,7 +167,7 @@ def _patched_process_input_socket(
                     "waiting for recovery subscriptions"
                 )
                 return
-        recovery_pub.send(b"RECOVERY_READY")
+        recovery_pub.send(b"DP_COORD_RECOVERY_READY")
         logger.info("All engine recovery subscriptions received")
 
         poller = zmq.Poller()
@@ -207,10 +206,9 @@ def _patched_process_input_socket(
                 if buffer == b"\x01":
                     publish_back.send(b"READY")
                 elif buffer != b"\x00":
-                    if not (buffer.startswith(_RECOVERY_MSG_PREFIX)):
-                        logger.error(
-                            "DP Coordinator received unexpected message from engines"
-                        )
+                    logger.error(
+                        "DP Coordinator received unexpected message from engines"
+                    )
 
             if publish_front in events:
                 buffer = publish_front.recv()
@@ -316,19 +314,14 @@ def _patched_process_input_socket(
 
             if recovery_pull in events:
                 buffer = recovery_pull.recv()
-                if buffer and buffer.startswith(_RECOVERY_MSG_PREFIX):
-                    payload = buffer[len(_RECOVERY_MSG_PREFIX):]
-                    try:
-                        msg = pickle.loads(payload)
-                    except Exception:
-                        logger.exception("=============Failed to deserialize recovery msg================")
-                        msg = None
+                try:
+                    msg = pickle.loads(buffer)
+                except Exception:
+                    logger.exception("Failed to deserialize recovery msg")
+                    msg = None
 
-                    if msg is not None:
-                        logger.info(f"================recovery msg==================: {msg}")
-                else:
-                    logger.exception(f"====================================Unknown recovery msg: {msg}")
-
+                if msg is not None:
+                    logger.info("Recovery msg: %s", msg)
 
             if wave_state_changed:
                 message = (None, current_wave, engines_running)
