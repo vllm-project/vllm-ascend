@@ -122,8 +122,6 @@ def build_fused_experts_input(
     w2: torch.Tensor | list[torch.Tensor],
     quant_type: QuantType,
     dynamic_eplb: bool,
-    expert_map: torch.Tensor | None = None,
-    global_redundant_expert_num: int = 0,
     mc2_mask: torch.Tensor | None = None,
     apply_router_weight_on_input: bool = False,
     log2phy: torch.Tensor | None = None,
@@ -162,8 +160,6 @@ def build_fused_experts_input(
             w2_offset=w2_offset,
         ),
         routing=MoERoutingParams(
-            expert_map=expert_map,
-            global_redundant_expert_num=global_redundant_expert_num,
             mc2_mask=mc2_mask,
             apply_router_weight_on_input=apply_router_weight_on_input,
             log2phy=log2phy,

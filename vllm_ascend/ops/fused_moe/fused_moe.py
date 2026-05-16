@@ -136,13 +136,13 @@ class AscendUnquantizedFusedMoEMethod(UnquantizedFusedMoEMethod):
         scoring_func: str = "softmax",
         routed_scaling_factor: float = 1.0,
         e_score_correction_bias: torch.Tensor | None = None,
+        global_redundant_expert_num: int = 0,
         num_experts: int = -1,
         expert_map: torch.Tensor | None = None,
         apply_router_weight_on_input: bool = False,
         activation: str = "silu",
         enable_force_load_balance: bool = False,
         log2phy: torch.Tensor = None,
-        global_redundant_expert_num: int = 0,
         pertoken_scale: torch.Tensor | None = None,
         mc2_mask: torch.Tensor | None = None,
     ) -> torch.Tensor:
@@ -226,8 +226,6 @@ class AscendUnquantizedFusedMoEMethod(UnquantizedFusedMoEMethod):
                 w2_bias=layer.w2_bias if self.moe.has_bias else None,
                 quant_type=QuantType.NONE,
                 dynamic_eplb=self.dynamic_eplb,
-                expert_map=expert_map,
-                global_redundant_expert_num=global_redundant_expert_num,
                 mc2_mask=mc2_mask,
                 apply_router_weight_on_input=apply_router_weight_on_input,
                 log2phy=log2phy,
@@ -643,7 +641,6 @@ class AscendFusedMoE(FusedMoE):
             apply_router_weight_on_input=self.apply_router_weight_on_input,
             enable_force_load_balance=enable_force_load_balance,
             log2phy=self.log2phy,
-            global_redundant_expert_num=self.global_redundant_expert_num,
             mc2_mask=mc2_mask,
         )
 

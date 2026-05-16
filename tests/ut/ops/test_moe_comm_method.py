@@ -221,8 +221,6 @@ class TestMoECommMethod(TestBase):
                     w2=[w2],
                 ),
                 routing=MoERoutingParams(
-                    expert_map=None,
-                    global_redundant_expert_num=0,
                     mc2_mask=None,
                     apply_router_weight_on_input=False,
                 ),

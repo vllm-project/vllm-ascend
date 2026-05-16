@@ -296,8 +296,6 @@ class AscendW8A8MXFP8DynamicFusedMoEMethod(AscendMoEScheme):
                 w2=layer.w2_weight,
                 quant_type=self.quant_type,
                 dynamic_eplb=self.dynamic_eplb,
-                expert_map=expert_map,
-                global_redundant_expert_num=global_redundant_expert_num,
                 mc2_mask=mc2_mask,
                 apply_router_weight_on_input=apply_router_weight_on_input,
                 log2phy=log2phy,

@@ -86,7 +86,6 @@ class MoETokenDispatchInput:
 class MoEMC2CombineMetadata:
     topk_ids: torch.Tensor
     topk_weights: torch.Tensor
-    expert_map: torch.Tensor | None
     ep_recv_counts: torch.Tensor
     tp_recv_counts: torch.Tensor
     assist_info_for_combine: torch.Tensor

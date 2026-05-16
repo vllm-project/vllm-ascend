@@ -40,7 +40,7 @@ class TokenDispatcherWithAllGather310(TokenDispatcherWithAllGather):
         hidden_states = token_dispatch_input.hidden_states
         topk_weights = token_dispatch_input.topk_weights
         topk_ids = token_dispatch_input.topk_ids
-        expert_map = token_dispatch_input.routing.expert_map
+        expert_map = self.expert_map
         apply_router_weight_on_input = token_dispatch_input.routing.apply_router_weight_on_input
         restore_shape = hidden_states.shape
 
