@@ -3,14 +3,14 @@ import torch_npu
 import copy
 import numpy as np
 
-import torchair
+import npugraph_ex as nge
 import torch.nn as nn
 from vllm_ascend.utils import enable_custom_op
 import unittest
 from unittest import TestCase
 
 import logging
-from torchair import logger
+from npugraph_ex.core.utils import logger
 
 enable_custom_op()
 logger.setLevel(logging.DEBUG)
@@ -60,10 +60,8 @@ class TestCustomReshapeAndCacheBnsd(TestCase):
                 )
         
         npu_mode = Network().to(f"npu:{self.device_id}")
-        from torchair.configs.compiler_config import CompilerConfig
-        config = CompilerConfig()
-        config.mode = "reduce-overhead"
-        npu_backend = torchair.get_npu_backend(compiler_config=config)
+        config = nge.CompilerConfig()
+        npu_backend = nge.get_npu_backend(compiler_config=config)
         
         npu_mode = torch.compile(npu_mode, backend=npu_backend, dynamic=False)
         return npu_mode(

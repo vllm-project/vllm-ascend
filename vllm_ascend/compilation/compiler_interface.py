@@ -76,23 +76,21 @@ def npugraph_ex_compile(
     compile_range: Range,
     key: str | None = None,
 ) -> tuple[Callable | None, Any | None]:
-    import torchair
+    import npugraph_ex as nge
 
     torch.npu.set_compile_mode(jit_compile=False)
-    config = torchair.CompilerConfig()
-    # use aclgraph mode, avoid the transformation from fx graph to Ascend IR.
-    config.mode = "reduce-overhead"
+    config = nge.CompilerConfig()
     # execute FX graph in eager mode before graph mode to optimize FX graph.
-    config.debug.run_eagerly = True
+    config.force_eager = True
     # This is a temporary fix to resolve issues with inplace operations in some testcases like test_whisper.
     # Avoid to change torch.ops.aten.gelu.default to torch.ops.aten.gelu_.default which will fallback to CPU
     # and cause copy_between_host_and_device error.
-    config.debug.aclgraph.disable_reinplace_inplaceable_ops_pass = True
+    config.inplace_pass = False
     if ascend_compilation_config.enable_static_kernel:
         logger.info(
             "enable_static_kernel is enabled, static shape kernel will be used to accelerate aclgraph execution."
         )
-        config.experimental_config.aclgraph._aclnn_static_shape_kernel = True
+        config.static_kernel_compile = True
         # According to the cudagraph_capture_size configuration, set the shapes
         # that can trigger the compilation of static kernel. If this configuration is
         # not applied, new shapes will trigger the compilation of static kernels,
@@ -105,9 +103,9 @@ def npugraph_ex_compile(
             for x in vllm_config.compilation_config.cudagraph_capture_sizes
             if max_num_tokens >= x >= uniform_decode_query_len
         ]
-        config.experimental_config.aclgraph._aclnn_static_shape_kernel_sym_value_range = decode_cudagraph_batch_sizes
+        config._vllm_aclnn_static_kernel_sym_range = decode_cudagraph_batch_sizes
 
-    npugraph_ex = torchair.get_npu_backend(compiler_config=config)
+    npugraph_ex = nge.get_npu_backend(compiler_config=config)
 
     # torch.compile requires the output of the fx graph to be a tuple
     if not graph_returns_tuple(graph):
