@@ -2,7 +2,7 @@ test_name: "test Qwen3-235B-A22B PD separation with mooncake layerwise connector
 model: "Qwen/Qwen3-235B-A22B"
 num_nodes: 2
 npu_per_node: 16
-env_common:
+env_common: &env_common
   VLLM_USE_MODELSCOPE: true
   OMP_PROC_BIND: false
   OMP_NUM_THREADS: 100
@@ -19,6 +19,8 @@ disaggregated_prefill:
 
 deployment:
   -
+    envs:
+      <<: *env_common
     server_cmd: >
         vllm serve "Qwen/Qwen3-235B-A22B"
         --host 0.0.0.0
@@ -56,6 +58,8 @@ deployment:
             }
         }'
   -
+    envs:
+      <<: *env_common
     server_cmd: >
         vllm serve "Qwen/Qwen3-235B-A22B"
         --host 0.0.0.0

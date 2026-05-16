@@ -2,7 +2,7 @@ test_name: "test Qwen3-235B-A22B multi-dp on A2"
 model: "Qwen/Qwen3-235B-A22B"
 num_nodes: 2
 npu_per_node: 8
-env_common:
+env_common: &env_common
   VLLM_USE_MODELSCOPE: true
   OMP_PROC_BIND: false
   OMP_NUM_THREADS: 1
@@ -14,6 +14,8 @@ env_common:
 
 deployment:
   -
+    envs:
+      <<: *env_common
     server_cmd: >
         vllm serve "Qwen/Qwen3-235B-A22B"
         --host 0.0.0.0
@@ -32,6 +34,8 @@ deployment:
         --gpu-memory-utilization 0.9
         --async-scheduling
   -
+    envs:
+      <<: *env_common
     server_cmd: >
         vllm serve "Qwen/Qwen3-235B-A22B"
         --headless

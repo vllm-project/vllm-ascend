@@ -2,7 +2,7 @@ test_name: "test DeepSeek-R1-W8A8 on A2"
 model: "vllm-ascend/DeepSeek-R1-0528-W8A8"
 num_nodes: 2
 npu_per_node: 8
-env_common:
+env_common: &env_common
   VLLM_ASCEND_BALANCE_SCHEDULING: 1
   HCCL_INTRA_PCIE_ENABLE: 1
   HCCL_INTRA_ROCE_ENABLE: 0
@@ -16,6 +16,8 @@ env_common:
 
 deployment:
   -
+    envs:
+      <<: *env_common
     server_cmd: >
       vllm serve vllm-ascend/DeepSeek-R1-0528-W8A8
       --host 0.0.0.0
@@ -38,6 +40,8 @@ deployment:
       --compilation-config '{"cudagraph_capture_sizes":[4,16,32,48,64], "cudagraph_mode": "FULL_DECODE_ONLY"}'
 
   -
+    envs:
+      <<: *env_common
     server_cmd: >
       vllm serve vllm-ascend/DeepSeek-R1-0528-W8A8
       --headless
