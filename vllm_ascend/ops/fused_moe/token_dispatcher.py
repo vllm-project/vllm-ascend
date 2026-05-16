@@ -339,14 +339,21 @@ class TokenDispatcherWithAllGather(MoETokenDispatcher[MoEAllGatherCombineMetadat
         self,
         token_dispatch_input: MoETokenDispatchInput,
     ):
-        with_quant = token_dispatch_input.quant.is_int_quant
+        with_quant = token_dispatch_input.quant.dispatch_with_quant
+        is_mxfp = token_dispatch_input.quant.is_mxfp
         hidden_states = token_dispatch_input.hidden_states
         topk_weights = token_dispatch_input.topk_weights
         topk_ids = token_dispatch_input.topk_ids
         expert_map = token_dispatch_input.routing.expert_map
-        pertoken_scale = token_dispatch_input.routing.pertoken_scale
+        dynamic_scale = token_dispatch_input.routing.pertoken_scale
         global_redundant_expert_num = token_dispatch_input.routing.global_redundant_expert_num
         restore_shape = hidden_states.shape
+        # Fuse the first dynamic quant of moe_mlp into initrouting when
+        # dispatch_with_quant is on but got a None dynamic_scale.
+        if with_quant and dynamic_scale is None:
+            quant_mode = 3 if is_mxfp else 1
+        else:
+            quant_mode = -1
 
         num_tokens = hidden_states.shape[:-1].numel()
         apply_router_weight_on_input = token_dispatch_input.routing.apply_router_weight_on_input
@@ -365,23 +372,23 @@ class TokenDispatcherWithAllGather(MoETokenDispatcher[MoEAllGatherCombineMetadat
             first_expert_idx = 0
             last_expert_idx = self.num_experts_local
             global_num_experts = self.num_experts_local
-        sorted_hidden_states, expanded_row_idx, expert_tokens, pertoken_scale = DeviceOperator.npu_moe_init_routing(
+        sorted_hidden_states, expanded_row_idx, expert_tokens, dynamic_scale = DeviceOperator.npu_moe_init_routing(
             hidden_states,
             topk_ids,
-            scale=pertoken_scale,
+            scale=dynamic_scale,
             active_num=num_tokens * self.top_k,
             expert_num=global_num_experts,
             expert_tokens_num_type=1,
             expert_tokens_num_flag=True,
             active_expert_range=[first_expert_idx, last_expert_idx],
-            quant_mode=1 if with_quant and pertoken_scale is None else -1,
+            quant_mode=quant_mode,
         )
         expert_tokens = expert_tokens.to(torch.int64)
         group_list_type = 1  # `count` mode
 
         return MoETokenDispatchOutput(
             hidden_states=sorted_hidden_states,
-            dynamic_scale=pertoken_scale if with_quant else None,
+            dynamic_scale=dynamic_scale if with_quant else None,
             group_list=expert_tokens,
             group_list_type=group_list_type,
             combine_metadata=MoEAllGatherCombineMetadata(

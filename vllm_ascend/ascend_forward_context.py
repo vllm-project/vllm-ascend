@@ -235,6 +235,9 @@ def select_moe_comm_method(num_tokens: int, vllm_config: VllmConfig, is_draft_mo
        quantization with small EP size, no dynamic_eplb, and not in MTP
        mode; otherwise use MC2 within capacity or all-to-all.
     5. On 310P, always use all-gather.
+    6. On A5 with expert parallel, use MC2 when tokens fit the MC2 capacity
+       and the EP size is large enough; otherwise use all-gather when
+       EP size is smaller than num of topK experts or all-to-all.
 
     Args:
         num_tokens (int): The number of tokens in the current batch.
@@ -296,8 +299,12 @@ def select_moe_comm_method(num_tokens: int, vllm_config: VllmConfig, is_draft_mo
     elif soc_version in {AscendDeviceType._310P}:
         moe_comm_type = MoECommType.ALLGATHER
     elif soc_version in {AscendDeviceType.A5}:
-        if num_tokens <= mc2_tokens_capacity and vllm_config.parallel_config.world_size_across_dp > 1:
+        num_experts_per_tok = vllm_config.model_config.hf_text_config.num_experts_per_tok
+        world_size = vllm_config.parallel_config.world_size_across_dp
+        if num_tokens <= mc2_tokens_capacity and world_size > 1:
             moe_comm_type = MoECommType.MC2
+        elif world_size <= num_experts_per_tok:
+            moe_comm_type = MoECommType.ALLGATHER
         else:
             moe_comm_type = MoECommType.ALLTOALL
     else:
