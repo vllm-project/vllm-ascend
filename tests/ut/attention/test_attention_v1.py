@@ -82,6 +82,32 @@ class TestAscendAttentionMetadataBuilder(TestBase):
 
         self.assertFalse(result)
 
+    def test_unpadded_preserves_internal_seq_lens_cpu(self):
+        internal_seq_lens_cpu = torch.tensor([4, 5, 6], dtype=torch.int32)
+        common_attn_metadata = AscendCommonAttentionMetadata(
+            query_start_loc=torch.tensor([0, 2, 5, 9]),
+            query_start_loc_cpu=torch.tensor([0, 2, 5, 9]),
+            seq_lens=torch.tensor([4, 5, 6], dtype=torch.int32),
+            _seq_lens_cpu=internal_seq_lens_cpu,
+            seq_lens_cpu=None,
+            num_computed_tokens_cpu=None,
+            num_reqs=3,
+            num_actual_tokens=9,
+            max_query_len=4,
+            block_table_tensor=torch.zeros((3, 1), dtype=torch.int32),
+            slot_mapping=torch.arange(9, dtype=torch.int32),
+            causal=True,
+            actual_seq_lengths_q=[2, 3, 4],
+            positions=torch.arange(9),
+            attn_state=AscendAttentionState.ChunkedPrefill,
+            max_seq_len=6,
+        )
+
+        unpadded_metadata = common_attn_metadata.unpadded(num_actual_tokens=5, num_actual_reqs=2)
+
+        self.assertTrue(torch.equal(unpadded_metadata._seq_lens_cpu, internal_seq_lens_cpu[:2]))
+        self.assertIsNone(unpadded_metadata.seq_lens_cpu)
+
     @patch("vllm_ascend.attention.attention_v1.AscendMetadata")
     def test_build(self, mock_ascend_metadata):
         common_attn_metadata = AscendCommonAttentionMetadata(
