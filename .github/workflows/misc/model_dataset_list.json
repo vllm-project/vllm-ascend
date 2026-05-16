@@ -16,6 +16,8 @@
       "DeepSeek-ai/DeepSeek-OCR",
       "DevQuasar/deepseek-ai.DeepSeek-V3.2-BF16",
       "Eco-Tech/DeepSeek-V3.1-w8a8-mtp-QuaRot",
+      "Eco-Tech/DeepSeek-V4-Flash-w8a8-mtp",
+      "Eco-Tech/DeepSeek-V4-Pro-w4a8-mtp",
       "Eco-Tech/Qwen3-30B-A3B-w8a8",
       "Eco-Tech/Kimi-K2.5-W4A8",
       "Eco-Tech/Qwen3-VL-235B-A22B-Instruct-w8a8-QuaRot",
@@ -286,6 +288,8 @@
       "vllm-ascend/textvqa-perf-1080p",
       "vllm-ascend/gpqa",
       "vllm-ascend/GSM8K-in131072-bs100-qwen3",
+      "vllm-ascend/GSM8K_noprefix_in8192_bs400",
+      "vllm-ascend/GSM8K_prefix99_in1024000_bs100",
       "vllm-ascend/GSM8K_prefix90_in131072_bs100"
     ]
   }

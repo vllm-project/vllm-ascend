@@ -1,0 +1,78 @@
+# ==========================================
+# ACTUAL TEST CASES
+# ==========================================
+
+test_cases:
+  - name: "DeepSeek-V4-Flash-W8A8-A3"
+    model: "Eco-Tech/DeepSeek-V4-Flash-w8a8-mtp"
+    envs:
+      OMP_PROC_BIND: "false"
+      OMP_NUM_THREADS: "10"
+      PYTORCH_NPU_ALLOC_CONF: "expandable_segments:True"
+      VLLM_USE_V1: "1"
+      USE_MULTI_BLOCK_POOL: "1"
+      USE_MULTI_GROUPS_KV_CACHE: "1"
+      HCCL_BUFFSIZE: "1024"
+      VLLM_ASCEND_ENABLE_FUSED_MC2: "1"
+      VLLM_ASCEND_ENABLE_FLASHCOMM1: "1"
+      SERVER_PORT: "DEFAULT_PORT"
+    server_cmd:
+      - "--max-model-len"
+      - "1024000"
+      - "--max-num-batched-tokens"
+      - "8192"
+      - "--gpu-memory-utilization"
+      - "0.9"
+      - "--max-num-seqs"
+      - "4"
+      - "--data-parallel-size"
+      - "4"
+      - "--tensor-parallel-size"
+      - "4"
+      - "--enable-expert-parallel"
+      - "--tokenizer-mode"
+      - "deepseek_v4"
+      - "--tool-call-parser"
+      - "deepseek_v4"
+      - "--enable-auto-tool-choice"
+      - "--reasoning-parser"
+      - "deepseek_v4"
+      - "--safetensors-load-strategy"
+      - "prefetch"
+      - "--quantization"
+      - "ascend"
+      - "--api-server-count"
+      - "1"
+      - "--speculative-config"
+      - '{"num_speculative_tokens": 1,"method": "deepseek_mtp"}'
+      - "--port"
+      - "$SERVER_PORT"
+      - "--block-size"
+      - "128"
+      - "--compilation-config"
+      - '{"cudagraph_mode": "FULL_DECODE_ONLY"}'
+      - "--async-scheduling"
+      - "--additional-config"
+      - '{"ascend_compilation_config":{"enable_npugraph_ex":true,"enable_static_kernel":false},"enable_cpu_binding":"true","multistream_overlap_shared_expert":false,"multistream_dsa_preprocess":false}'
+    benchmarks:
+      acc:
+        case_type: accuracy
+        dataset_path: vllm-ascend/gsm8k
+        request_conf: vllm_api_general_chat
+        dataset_conf: gsm8k/gsm8k_gen_0_shot_cot_chat_prompt
+        max_out_len: 32768
+        batch_size: 32
+        baseline: 90
+        threshold: 5
+
+      perf_2:
+        case_type: performance
+        dataset_path: vllm-ascend/GSM8K-in3500-bs400
+        request_conf: vllm_api_stream_chat
+        dataset_conf: gsm8k/gsm8k_gen_0_shot_cot_str_perf
+        num_prompts: 16
+        max_out_len: 1500
+        batch_size: 4
+        request_rate: 0
+        baseline: 1
+        threshold: 0.97
