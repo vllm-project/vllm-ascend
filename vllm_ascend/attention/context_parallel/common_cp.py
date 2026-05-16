@@ -17,6 +17,7 @@ class AscendPCPMetadata:
 
     q_head_idx: torch.Tensor = None
     q_tail_idx: torch.Tensor = None
+    q_head_tail_idx: torch.Tensor = None
     kv_with_q_head_nomask_idx: torch.Tensor = None
     kv_with_q_head_mask_idx: torch.Tensor = None
     kv_with_q_tail_nomask_idx: torch.Tensor = None
@@ -25,6 +26,7 @@ class AscendPCPMetadata:
     kv_with_q_head_attn_idx_in_tail: torch.Tensor = None
     kv_with_q_tail_attn_idx_in_tail: torch.Tensor = None
     attn_mask_seqlens: torch.Tensor = None
+    attn_mask_full_seqlens: torch.Tensor = None
     head_attn_nomask_seqlens: torch.Tensor = None
     tail_attn_nomask_seqlens: torch.Tensor = None
     head_actual_seq_lengths_kv: list[int] | None = None
@@ -42,7 +44,8 @@ class AscendPCPMetadata:
     max_num_tokens_across_pcp: int = 0
     total_num_scheduled_tokens: int = 0
     block_arange: torch.Tensor = None
-
+    full_overall_attn_seq_lens: torch.Tensor = None
+    prefill_full_seq_lens: torch.Tensor = None
 
 @dataclass
 class CPChunkedContextMetadata:

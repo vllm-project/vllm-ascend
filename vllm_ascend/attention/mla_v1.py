@@ -1214,6 +1214,18 @@ class AscendMLAImpl(MLAAttentionImpl):
         output_final, _ = torch_npu.npu_attention_update(tuple(lse_list), tuple(out_list), 0)
         return output_final.view(num_tokens, H, D), None
 
+    def _forward_prefill_absorb(
+        self,
+        q_nope: torch.Tensor,
+        q_pe: torch.Tensor,
+        k_nope: torch.Tensor,
+        k_pe: torch.Tensor,
+        value: torch.Tensor,
+        kv_c_and_k_pe_cache: tuple[torch.Tensor],
+        attn_metadata: AscendMLAMetadata,
+    ) -> torch.Tensor:
+        raise NotImplementedError("MLA _forward_prefill_absorb without cp is not supported yet.")
+    
     def _forward_prefill(
         self,
         q_nope: torch.Tensor,
@@ -1527,7 +1539,10 @@ class AscendMLAImpl(MLAAttentionImpl):
 
     def reorg_decode_q(self, decode_q_nope, decode_q_pe):
         return decode_q_nope, decode_q_pe
-
+    
+    def mla_preprocess_prefill_absorb(self, q_c, kv_no_split, kv_cache, attn_metadata):
+        raise NotImplementedError("MLA Preprocess prefill absorb without cp is not supported yet.")
+    
     def mla_preprocess_prefill(self, q_c, kv_no_split, kv_cache, attn_metadata):
         num_decode_tokens = attn_metadata.num_decode_tokens
         num_actual_tokens = attn_metadata.num_actual_tokens
@@ -1609,7 +1624,9 @@ class AscendMLAImpl(MLAAttentionImpl):
         if has_decode:
             decode_preprocess_res = self.mla_preprocess_decode(q_c, kv_no_split, kv_cache, attn_metadata)
         # Preprocess for prefill tokens
-        if has_prefill:
+        if has_prefill and enable_cp():
+            prefill_preprocess_res = self.mla_preprocess_prefill_absorb(q_c, kv_no_split, kv_cache, attn_metadata)
+        elif has_prefill:
             prefill_preprocess_res = self.mla_preprocess_prefill(q_c, kv_no_split, kv_cache, attn_metadata)
         if self.is_kv_producer and not self.is_kv_both:
             attn_metadata.reshape_cache_event.record()
@@ -1704,15 +1721,27 @@ class AscendMLAImpl(MLAAttentionImpl):
             # FIX: aicore move should be also placed on the comm stream in dbo,
             # otherwise it may affect the accuracy
             # TODO: use an elegant way to overlap
-            output_prefill = self._forward_prefill(
-                prefill_preprocess_res.q_nope,
-                prefill_preprocess_res.q_pe,
-                prefill_preprocess_res.k_nope,
-                prefill_preprocess_res.k_pe,
-                prefill_preprocess_res.value,
-                kv_cache,
-                attn_metadata,
-            )
+            if enable_cp():
+                output_prefill = self._forward_prefill_absorb(
+                    prefill_preprocess_res.q_nope,
+                    prefill_preprocess_res.q_pe,
+                    prefill_preprocess_res.k_nope,
+                    prefill_preprocess_res.k_pe,
+                    prefill_preprocess_res.value,
+                    kv_cache[0].shape[1],
+                    kv_cache,
+                    attn_metadata,
+                )
+            else:
+                output_prefill = self._forward_prefill(
+                    prefill_preprocess_res.q_nope,
+                    prefill_preprocess_res.q_pe,
+                    prefill_preprocess_res.k_nope,
+                    prefill_preprocess_res.k_pe,
+                    prefill_preprocess_res.value,
+                    kv_cache,
+                    attn_metadata,
+                )
 
             o_proj_input[num_decode_tokens:num_actual_tokens] = output_prefill
         # O proj

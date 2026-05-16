@@ -1133,6 +1133,7 @@ class PCPManager:
                 split_with_q_head_nomask_idx_reqs = []
                 split_kv_with_q_tail_nomask_idx_reqs = []
                 chunk_seqlens = []
+                chunk_full_seqlens = []
                 kv_with_q_head_nomask_seqlens, kv_with_q_tail_nomask_seqlens = [], []
                 head_actual_seq_lengths_kv, tail_actual_seq_lengths_kv = [], []
                 q_req_offset = 0
@@ -1144,6 +1145,7 @@ class PCPManager:
                         continue
                     chunk_len = seq_len // 2
                     chunk_seqlens.append(chunk_len)
+                    chunk_full_seqlens.extend([chunk_len] * 2)
                     q_head_idx.extend(list(range(q_req_offset, q_req_offset + chunk_len)))
                     kv_with_q_head_nomask_idx.extend(
                         list(range(kv_req_offset, kv_req_offset + chunk_len * q_head_chunk_id))
@@ -1194,6 +1196,7 @@ class PCPManager:
                 q_tail_idx_tensor = self._list_to_tensor(q_tail_idx, self.device)
                 self.q_head_idx_tensor = q_head_idx_tensor
                 self.q_tail_idx_tensor = q_tail_idx_tensor
+                self.q_head_tail_idx_tensor = torch.cat([q_head_idx_tensor, q_tail_idx_tensor], dim=0)
 
                 q_full_idx = torch.cat([q_head_idx_tensor, q_tail_idx_tensor])
                 q_full_idx = q_full_idx.to(torch.float32).argsort().to(torch.int32)
@@ -1214,6 +1217,7 @@ class PCPManager:
 
                 attn_chunk_seqlens = torch.tensor(chunk_seqlens, dtype=torch.int32)
                 attn_mask_seqlens = torch.cumsum(torch.tensor(chunk_seqlens, dtype=torch.int32), dim=0).tolist()
+                attn_mask_full_seqlens = torch.cumsum(torch.tensor(chunk_full_seqlens, dtype=torch.int32), dim=0).tolist()
                 head_attn_nomask_seqlens = torch.cumsum(
                     torch.tensor(kv_with_q_head_nomask_seqlens, dtype=torch.int32), dim=0
                 ).tolist()
@@ -1223,6 +1227,7 @@ class PCPManager:
 
                 self.extra_long_seq_kwargs = {
                     "attn_mask_seqlens": attn_mask_seqlens,
+                    "attn_mask_full_seqlens": attn_mask_full_seqlens,
                     "head_attn_nomask_seqlens": head_attn_nomask_seqlens,
                     "tail_attn_nomask_seqlens": tail_attn_nomask_seqlens,
                     "head_actual_seq_lengths_kv": head_actual_seq_lengths_kv,
@@ -1245,6 +1250,7 @@ class PCPManager:
                     long_seq_metadata.total_num_scheduled_tokens = self.total_num_scheduled_tokens
                 long_seq_metadata.q_head_idx_tensor = self.q_head_idx_tensor
                 long_seq_metadata.q_tail_idx_tensor = self.q_tail_idx_tensor
+                long_seq_metadata.q_head_tail_idx_tensor = self.q_head_tail_idx_tensor
                 long_seq_metadata.q_full_idx = self.q_full_idx
                 long_seq_metadata.kv_with_q_head_nomask_idx_tensor = self.kv_idx_names[
                     "kv_with_q_head_nomask_idx_tensor"
@@ -1262,6 +1268,7 @@ class PCPManager:
                     "kv_with_q_tail_attn_idx_in_tail_tensor"
                 ]
                 long_seq_metadata.attn_mask_seqlens = self.extra_long_seq_kwargs["attn_mask_seqlens"]
+                long_seq_metadata.attn_mask_full_seqlens = self.extra_long_seq_kwargs["attn_mask_full_seqlens"]
                 long_seq_metadata.head_attn_nomask_seqlens = self.extra_long_seq_kwargs["head_attn_nomask_seqlens"]
                 long_seq_metadata.tail_attn_nomask_seqlens = self.extra_long_seq_kwargs["tail_attn_nomask_seqlens"]
                 long_seq_metadata.head_actual_seq_lengths_kv = self.extra_long_seq_kwargs["head_actual_seq_lengths_kv"]
