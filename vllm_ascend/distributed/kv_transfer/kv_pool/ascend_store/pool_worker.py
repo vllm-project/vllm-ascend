@@ -15,7 +15,7 @@ from vllm.distributed import (
 )
 from vllm.distributed.kv_events import BlockStored
 from vllm.logger import logger
-from vllm.v1.core.kv_cache_utils import BlockHash
+from vllm.v1.core.kv_cache_utils import BlockHash, maybe_convert_block_hash
 
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.config_data import (
     AscendConnectorMetadata,
@@ -87,6 +87,7 @@ class KVPoolWorker:
             self.block_size *= self.pcp_size
         if self.dcp_size > 1:
             self.block_size *= self.dcp_size
+
         self.current_layer = 0
         self.num_layers = model_config.get_num_layers(parallel_config)
 
@@ -94,6 +95,60 @@ class KVPoolWorker:
             self.num_kv_head = 1
         else:
             self.num_kv_head = model_config.get_total_num_kv_heads()
+
+        # Peer TP size:
+        # - On prefill (kv_producer / kv_both): peer is decode -> use decode_tp_size
+        # - On decode (kv_consumer with consumer_is_to_put): peer is prefill -> use prefill_tp_size
+        extra_cfg = vllm_config.kv_transfer_config.kv_connector_extra_config
+        if self.kv_role == "kv_consumer":
+            self.peer_tp_size = int(extra_cfg.get("prefill_tp_size", self.tp_size))
+        else:
+            self.peer_tp_size = int(extra_cfg.get("decode_tp_size", self.tp_size))
+        # Keep decode_tp_size for backward-compat in lookup_scheduler key expansion
+        self.decode_tp_size = int(extra_cfg.get("decode_tp_size", self.tp_size))
+        # TP mismatch: local TP differs from peer TP.
+        # Only relevant for non-MLA models where each TP rank handles different KV heads,
+        # and num_kv_head must be >= max(local_tp, peer_tp) so that heads divide evenly.
+        self.effective_tp_size = max(self.tp_size, self.peer_tp_size)
+        self.tp_mismatch = (
+            self.peer_tp_size != self.tp_size
+            and not self.use_mla
+            and self.num_kv_head >= self.effective_tp_size
+            and self.num_kv_head % self.effective_tp_size == 0
+        )
+        if self.tp_mismatch:
+            if self.use_sparse:
+                raise ValueError(
+                    "TP mismatch (local_tp=%d, peer_tp=%d) is not supported with "
+                    "sparse KV layouts (use_sparse=True). Strided I/O requires "
+                    "uniform block_len across all cache entries." % (self.tp_size, self.peer_tp_size)
+                )
+            if self.use_layerwise:
+                raise ValueError(
+                    "TP mismatch (local_tp=%d, peer_tp=%d) is not supported with "
+                    "layerwise KV transfer (use_layerwise=True). The layerwise "
+                    "threads do not implement TP-mismatch handling."
+                    % (self.tp_size, self.peer_tp_size)
+                )
+            self.local_heads_per_rank = self.num_kv_head // self.tp_size
+            self.effective_heads_per_rank = self.num_kv_head // self.effective_tp_size
+            self.num_sub_keys = self.local_heads_per_rank // self.effective_heads_per_rank
+            logger.info(
+                "TP mismatch detected: local_tp=%d, peer_tp=%d, effective_tp=%d, "
+                "local_heads_per_rank=%d, effective_heads_per_rank=%d, num_sub_keys=%d",
+                self.tp_size,
+                self.peer_tp_size,
+                self.effective_tp_size,
+                self.local_heads_per_rank,
+                self.effective_heads_per_rank,
+                self.num_sub_keys,
+            )
+        else:
+            self.local_heads_per_rank = (
+                self.num_kv_head // self.tp_size if self.tp_size <= self.num_kv_head else 1
+            )
+            self.effective_heads_per_rank = self.local_heads_per_rank
+            self.num_sub_keys = 1
 
         if self.num_kv_head < self.tp_size:
             self.put_step = self.tp_size // self.num_kv_head
@@ -202,6 +257,21 @@ class KVPoolWorker:
         self.token_database.set_kv_caches_base_addr(self.kv_caches_base_addr)
         self.token_database.set_block_len(self.block_len)
 
+        if self.tp_mismatch:
+            first_cache = next(iter(kv_caches.values()))[0]
+            self.elem_size = first_cache.element_size()
+            self.head_dim = first_cache.shape[-1]
+            # Per-token bytes within one block for one layer-entry (K or V):
+            # block_len[0] = block_size * num_kv_head_per_local_rank * head_dim * elem_size
+            self.per_token_bytes = self.block_len[0] // self.block_size
+            # Bytes occupied by one sub-key's heads within one token
+            self.sub_size_bytes = self.effective_heads_per_rank * self.head_dim * self.elem_size
+            logger.info(
+                "TP mismatch strided I/O: per_token_bytes=%d, sub_size_bytes=%d",
+                self.per_token_bytes,
+                self.sub_size_bytes,
+            )
+
         if self.use_layerwise:
             self.get_event = threading.Event()
             if self.kv_role in ["kv_producer", "kv_both"]:
@@ -243,12 +313,19 @@ class KVPoolWorker:
                     self.kv_role,
                     ready_event_sending,
                     self.enable_kv_events,
+                    worker=self if self.tp_mismatch else None,
                 )
                 self.kv_send_thread.start()
             if self.load_async:
                 ready_event = threading.Event()
                 self.kv_recv_thread = KVCacheStoreRecvingThread(
-                    self.m_store, self.token_database, self.block_size, self.tp_rank, self.dcp_size, ready_event
+                    self.m_store,
+                    self.token_database,
+                    self.block_size,
+                    self.tp_rank,
+                    self.dcp_size,
+                    ready_event,
+                    worker=self if self.tp_mismatch else None,
                 )
                 self.kv_recv_thread.start()
                 ready_event.wait()
@@ -278,25 +355,30 @@ class KVPoolWorker:
                         request,
                     )
                 else:
-                    addr_list = []
-                    size_list = []
-                    key_list = []
                     mask_num = request.load_spec.vllm_cached_tokens // self.block_size * self.block_size
-                    for start, end, key in self.token_database.process_tokens(
-                        token_len, request.block_hashes, mask_num
-                    ):
-                        addr, size, _ = self.token_database.prepare_value(start, end, request.block_ids)
-                        key_list.append(key.to_string())
-                        addr_list.append(addr)
-                        size_list.append(size)
-                    key_list_c = key_list[self.tp_rank % len(key_list) :] + key_list[: self.tp_rank % len(key_list)]
-                    addr_list_c = (
-                        addr_list[self.tp_rank % len(addr_list) :] + addr_list[: self.tp_rank % len(addr_list)]
-                    )
-                    size_list_c = (
-                        size_list[self.tp_rank % len(size_list) :] + size_list[: self.tp_rank % len(size_list)]
-                    )
-                    self.m_store.get(key_list_c, addr_list_c, size_list_c)
+                    if self.tp_mismatch:
+                        self._load_kv_tp_mismatch(
+                            request.block_hashes, request.block_ids, token_len, mask_num
+                        )
+                    else:
+                        addr_list = []
+                        size_list = []
+                        key_list = []
+                        for start, end, key in self.token_database.process_tokens(
+                            token_len, request.block_hashes, mask_num
+                        ):
+                            addr, size, _ = self.token_database.prepare_value(start, end, request.block_ids)
+                            key_list.append(key.to_string())
+                            addr_list.append(addr)
+                            size_list.append(size)
+                        key_list_c = key_list[self.tp_rank % len(key_list) :] + key_list[: self.tp_rank % len(key_list)]
+                        addr_list_c = (
+                            addr_list[self.tp_rank % len(addr_list) :] + addr_list[: self.tp_rank % len(addr_list)]
+                        )
+                        size_list_c = (
+                            size_list[self.tp_rank % len(size_list) :] + size_list[: self.tp_rank % len(size_list)]
+                        )
+                        self.m_store.get(key_list_c, addr_list_c, size_list_c)
 
     def wait_for_layer_load(self) -> None:
         for layerwise_retriever in self.layerwise_retrievers:
@@ -478,6 +560,173 @@ class KVPoolWorker:
             for layer_id in range(self.num_layers):
                 yield
 
+    def _make_sub_key_str(self, base_key, effective_rank: int) -> str:
+        """Override the head_or_tp_rank field of base_key.to_string() with effective_rank.
+
+        Under TP mismatch, both sides agree to address the pool at granularity
+        ``effective_tp_size = max(local_tp, peer_tp)``. The key field
+        ``@head_or_tp_rank:`` therefore carries the effective rank rather than
+        the local TP rank.
+        """
+        key_str = base_key.to_string()
+        return key_str.replace(
+            f"@head_or_tp_rank:{self.metadata.head_or_tp_rank}",
+            f"@head_or_tp_rank:{effective_rank}",
+            1,
+        )
+
+    def _build_strided_addrs(
+        self, block_id: int, token_count: int, sub_idx: int
+    ) -> tuple[list[int], list[int]]:
+        """Build per-token strided (addr, size) pairs into local KV cache memory
+        for one sub-key at one block.
+
+        For each layer-entry (K and V of every layer) and each token within the
+        block, emit one (addr, size) pair pointing to the slice of heads that
+        belongs to ``sub_idx`` of this rank's local cache. The KV cache layout
+        is ``[num_block, block_size, num_kv_head_per_local_rank, head_dim]``,
+        so the heads of consecutive tokens are interleaved with token positions
+        and a sub-slice of heads requires one transfer per token.
+        """
+        head_offset_bytes = sub_idx * self.sub_size_bytes
+        addrs: list[int] = []
+        sizes: list[int] = []
+        num_entry_types = len(self.block_len)
+        for i, base_addr in enumerate(self.kv_caches_base_addr):
+            entry_block_len = self.block_len[i % num_entry_types]
+            entry_per_token_bytes = entry_block_len // self.block_size
+            block_base = base_addr + block_id * entry_block_len
+            for t in range(token_count):
+                addrs.append(block_base + t * entry_per_token_bytes + head_offset_bytes)
+                sizes.append(self.sub_size_bytes)
+        return addrs, sizes
+
+    def _build_tp_mismatch_keys_and_addrs(
+        self,
+        block_hashes: list,
+        block_ids: list[int],
+        token_len: int,
+        mask_num: int = 0,
+    ) -> tuple[list[str], list[list[int]], list[list[int]]]:
+        """Walk all chunks × sub-keys and build (keys, addrs, sizes) suitable
+        for backend.put / backend.get.
+
+        Each emitted key represents one (chunk, sub_idx) pair. Its addrs/sizes
+        cover all layer-entries × all tokens in the chunk, addressed at the
+        head-slice owned by sub_idx within this rank's local cache.
+        """
+        all_keys: list[str] = []
+        all_addrs: list[list[int]] = []
+        all_sizes: list[list[int]] = []
+        for start, end, base_key in self.token_database.process_tokens(
+            token_len, block_hashes, mask_num
+        ):
+            block_id = block_ids[start // self.block_size]
+            token_count = end - start
+            for sub_idx in range(self.num_sub_keys):
+                effective_rank = self.tp_rank * self.num_sub_keys + sub_idx
+                addrs, sizes = self._build_strided_addrs(block_id, token_count, sub_idx)
+                all_keys.append(self._make_sub_key_str(base_key, effective_rank))
+                all_addrs.append(addrs)
+                all_sizes.append(sizes)
+        return all_keys, all_addrs, all_sizes
+
+    def _load_kv_tp_mismatch(
+        self,
+        block_hashes: list,
+        block_ids: list[int],
+        token_len: int,
+        mask_num: int,
+    ) -> None:
+        """Load KV cache with TP mismatch by issuing strided gets.
+
+        Each prefill rank generates ``num_sub_keys`` keys per chunk and tells
+        the backend to write the result directly into the per-token strided
+        positions of its own KV cache. No temporary buffer is required.
+        """
+        keys, addrs, sizes = self._build_tp_mismatch_keys_and_addrs(
+            block_hashes, block_ids, token_len, mask_num
+        )
+        if not keys:
+            return
+        # Optional rotation for load-balancing across mooncake masters,
+        # mirroring the non-mismatch path in KVCacheStoreRecvingThread.
+        offset = self.tp_rank % len(keys)
+        keys_c = keys[offset:] + keys[:offset]
+        addrs_c = addrs[offset:] + addrs[:offset]
+        sizes_c = sizes[offset:] + sizes[:offset]
+        logger.info(f"keys_c:{keys_c}, addrs_c:{addrs_c}, sizes_c:{sizes_c}")
+        self.m_store.get(keys_c, addrs_c, sizes_c)
+
+    def _store_kv_tp_mismatch(self, req_meta: ReqMeta) -> None:
+        """Store KV cache with TP mismatch by issuing strided puts.
+
+        On the decode side this stores each (chunk, sub_idx) combination so the
+        keys align with prefill's effective TP layout. Existing keys are
+        skipped via a lookup, mirroring KVCacheStoreSendingThread._handle_request.
+        """
+        if self.kv_send_thread is None:
+            return
+        req_id = req_meta.req_id
+        # Thread-safe check: use the lock-guarded method instead of reading
+        # stored_requests directly.
+        if not self.kv_send_thread.is_stored_request(req_id):  # type: ignore[attr-defined]
+            return
+        token_len = req_meta.token_len_chunk
+        keys, addrs, sizes = self._build_tp_mismatch_keys_and_addrs(
+            req_meta.block_hashes, req_meta.block_ids, token_len, mask_num=0
+        )
+        if not keys:
+            self.kv_send_thread.dec_stored_request(req_id)  # type: ignore[attr-defined]
+            return
+        exists_states = self.kv_send_thread.lookup(keys)
+        missing_indices = [i for i, exists in enumerate(exists_states) if not exists]
+        if not missing_indices:
+            self.kv_send_thread.dec_stored_request(req_id)  # type: ignore[attr-defined]
+            return
+        keys = [keys[i] for i in missing_indices]
+        addrs = [addrs[i] for i in missing_indices]
+        sizes = [sizes[i] for i in missing_indices]
+        if req_meta.current_event is not None:
+            req_meta.current_event.synchronize()
+        logger.info(f"keys:{keys}, addrs:{addrs}, sizes:{sizes}")
+        self.m_store.put(keys, addrs, sizes)
+        logger.debug(
+            "TP-mismatch stored %d sub-keys for request %s",
+            len(keys),
+            req_id,
+        )
+
+        # Emit BlockStored events to match the normal store path.
+        if self.enable_kv_events:
+            stored_events: list[BlockStored] = []
+            prev_key = None
+            for idx, (start, end, _base_key) in enumerate(
+                self.token_database.process_tokens(token_len, req_meta.block_hashes)
+            ):
+                block_hash = maybe_convert_block_hash(req_meta.block_hashes[idx])
+                token_ids = (
+                    req_meta.token_ids[start:end]
+                    if req_meta.token_ids is not None
+                    else None
+                )
+                stored_events.append(
+                    BlockStored(
+                        block_hashes=[block_hash],
+                        parent_block_hash=prev_key,
+                        token_ids=token_ids,
+                        block_size=req_meta.original_block_size,
+                        lora_id=None,
+                        medium="cpu",
+                        lora_name=None,
+                    )
+                )
+                prev_key = block_hash
+            if stored_events:
+                self.kv_send_thread.update_kv_event(stored_events)
+
+        self.kv_send_thread.dec_stored_request(req_id)  # type: ignore[attr-defined]
+
     def get_finished(self, finished_req_ids: set[str], meta: AscendConnectorMetadata) -> tuple[set[str], set[str]]:
         done_sending = (
             self.get_and_clear_finished_requests(
@@ -510,15 +759,10 @@ class KVPoolWorker:
             self.kv_send_thread.delete_finished_stored_request(  # type: ignore[union-attr]
                 req_id
             )
-        for req_id in self.kv_send_thread.stored_requests.copy(  # type: ignore[union-attr]
-        ):
-            if (
-                self.kv_send_thread.stored_requests[  # type: ignore[union-attr]
-                    req_id
-                ]
-                == 0
-                and req_id in self.finished_store_req
-            ):
+        # Take a thread-safe snapshot to avoid TOCTOU races.
+        snapshot = self.kv_send_thread.get_stored_requests_snapshot()  # type: ignore[union-attr]
+        for req_id, count in snapshot.items():
+            if count == 0 and req_id in self.finished_store_req:
                 self.finished_store_req.remove(req_id)
                 finished_sending.add(req_id)
                 self.kv_send_thread.delete_finished_stored_request(  # type: ignore[union-attr]
@@ -526,7 +770,7 @@ class KVPoolWorker:
                 )
 
         for req_id in finished_req_ids:
-            req_remain_jobs = self.kv_send_thread.stored_requests.get(  # type: ignore[union-attr]
+            req_remain_jobs = self.kv_send_thread.get_stored_request_count(  # type: ignore[union-attr]
                 req_id
             )
             if req_remain_jobs == 0:
@@ -600,19 +844,28 @@ class KVPoolWorker:
                     keys.append(key.to_string())
                 starts.append(start)
 
+            # Under TP mismatch the keys live in the effective_tp_size namespace
+            # (= max(local_tp, peer_tp)). Otherwise falls back to local_tp.
+            check_tp_size = self.effective_tp_size
+            base_rank = self.metadata.head_or_tp_rank
             multi_tp_keys = keys[:]
-            for i in range(1, min(self.tp_size, self.num_kv_head)):
+            for i in range(min(check_tp_size, self.num_kv_head)):
+                if i == base_rank:
+                    continue
                 for item in keys:
                     new_str = item.replace(  # type: ignore[attr-defined]
-                        "@head_or_tp_rank:0", f"@head_or_tp_rank:{i}", 1
+                        f"@head_or_tp_rank:{base_rank}", f"@head_or_tp_rank:{i}", 1
                     )
                     multi_tp_keys.append(new_str)
 
             pp_base_keys = multi_tp_keys.copy()
-            for i in range(1, self.pp_size):
+            base_pp = self.metadata.pp_rank
+            for i in range(self.pp_size):
+                if i == base_pp:
+                    continue
                 for item in pp_base_keys:
                     new_str = item.replace(  # type: ignore[attr-defined]
-                        "@pp_rank:0", f"@pp_rank:{i}", 1
+                        f"@pp_rank:{base_pp}", f"@pp_rank:{i}", 1
                     )
                     multi_tp_keys.append(new_str)
 
@@ -623,7 +876,7 @@ class KVPoolWorker:
                 num_block = len(keys) // self.num_layers
             multi_tp_values = [
                 res[i * num_block : (i + 1) * num_block]  # type: ignore[index]
-                for i in range(min(self.tp_size, self.num_kv_head) * self.pp_size)
+                for i in range(min(check_tp_size, self.num_kv_head) * self.pp_size)
             ]
             index = self.find_min_first_non_one_index(multi_tp_values)
             if index != -1:
