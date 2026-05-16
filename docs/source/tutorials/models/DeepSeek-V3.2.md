@@ -29,6 +29,8 @@ If you want to deploy multi-node environment, you need to verify multi-node comm
 
 You can use our official docker image to run `DeepSeek-V3.2` directly.
 
+Current official images already include the operators required by `DeepSeek-V3.2`; no extra operator installation step is needed. If you are following older guides or using legacy images such as `v0.12.0rc1`, upgrade to a newer official image instead of trying to install extra operators manually.
+
 :::::{tab-set}
 :sync-group: install
 
