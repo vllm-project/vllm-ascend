@@ -21,4 +21,10 @@ class AscendSuffixDecodingProposer(SuffixDecodingProposer):
         pass
 
     def propose(self, valid_sampled_token_ids):
-        return super().propose(self.runner.input_batch, valid_sampled_token_ids)
+        target_len = self.num_speculative_tokens
+        draft_token_ids = super().propose(self.runner.input_batch, valid_sampled_token_ids)
+        for i in range(len(draft_token_ids)):
+            cur_len = len(draft_token_ids[i])
+            if cur_len < target_len:
+                draft_token_ids[i].extend([0] * (target_len - cur_len))
+        return draft_token_ids
