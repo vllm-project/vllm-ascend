@@ -23,6 +23,7 @@ import torch.distributed as dist
 from vllm.logger import logger
 
 import vllm_ascend.envs as envs_ascend
+from vllm_ascend.eplb.utils import get_moe_attr_name
 from vllm_ascend.quantization.methods.base import QuantType
 
 
@@ -42,7 +43,8 @@ class VllmEplbAdaptor:
 
         self.expert_map_per_layer_cpu = dict()  # copy of expert map on CPU to avoid device synchronize frequently
 
-        self.num_local_experts = self.model.model.layers[-1].mlp.experts.local_num_experts
+        self.moe_attr_name = get_moe_attr_name(self.model)
+        self.num_local_experts = getattr(self.model.model.layers[-1], self.moe_attr_name).experts.local_num_experts
         self.expert_param_per_layer = dict()
         self.init_expert_param_per_layer()
 
@@ -59,7 +61,7 @@ class VllmEplbAdaptor:
     def init_buffer_tensor(self, num_buffer_tensor):
         for buffer_id in range(num_buffer_tensor):
             for name in self.expert_weight_names:
-                complete_name = "model.layers." + str(self.num_dense_layers) + ".mlp.experts." + name
+                complete_name = f"model.layers.{self.num_dense_layers}.{self.moe_attr_name}.experts.{name}"
                 expert_tensor = self.param_dict[complete_name][0]
                 buffer_tensor = torch.empty_like(expert_tensor)
                 self.buffer_tensor_list[buffer_id].append(buffer_tensor)
@@ -67,7 +69,7 @@ class VllmEplbAdaptor:
     def init_expert_param_per_layer(self):
         self.param_dict = dict()
         if self.model.quant_config is not None:
-            quant_type = self.model.model.layers[self.num_dense_layers].mlp.experts.quant_type
+            quant_type = getattr(self.model.model.layers[self.num_dense_layers], self.moe_attr_name).experts.quant_type
             if quant_type == QuantType.W8A8:
                 self.expert_weight_names = [
                     "w13_weight_list",
@@ -85,15 +87,18 @@ class VllmEplbAdaptor:
 
         for layer_idx in range(self.num_dense_layers, self.config.num_hidden_layers):
             self.expert_param_per_layer[layer_idx] = list()
+            moe_layer = getattr(self.model.model.layers[layer_idx], self.moe_attr_name)
             for name in self.expert_weight_names:
-                param_key = f"model.layers.{layer_idx}.mlp.experts.{name}"
-                param_value = getattr(self.model.model.layers[layer_idx].mlp.experts, name)
+                param_key = f"model.layers.{layer_idx}.{self.moe_attr_name}.experts.{name}"
+                param_value = getattr(moe_layer.experts, name)
                 self.param_dict[param_key] = param_value
             for local_expert_id in range(self.num_local_experts):
                 per_expert_param = list()
                 for name in self.expert_weight_names:
                     per_expert_param.append(
-                        self.param_dict["model.layers." + str(layer_idx) + ".mlp.experts." + name][local_expert_id]
+                        self.param_dict[f"model.layers.{layer_idx}.{self.moe_attr_name}.experts.{name}"][
+                            local_expert_id
+                        ]
                     )
                 self.expert_param_per_layer[layer_idx].append(per_expert_param)
 
@@ -142,7 +147,8 @@ class VllmEplbAdaptor:
     def get_global_expert_map(self):
         all_layer_global_expert_map = []
         for layer_id in range(self.num_moe_layers):
-            map_cpu = self.model.model.layers[self.num_dense_layers + layer_id].mlp.experts.global_expert_map.cpu()
+            moe_layer = getattr(self.model.model.layers[self.num_dense_layers + layer_id], self.moe_attr_name)
+            map_cpu = moe_layer.experts.global_expert_map.cpu()
             all_layer_global_expert_map.append(map_cpu)
             self.expert_map_per_layer_cpu[self.num_dense_layers + layer_id] = map_cpu[self.rank_id]
 
