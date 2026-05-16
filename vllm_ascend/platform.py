@@ -471,6 +471,18 @@ class NPUPlatform(Platform):
         if get_ascend_device_type() != AscendDeviceType._310P:
             compilation_config.custom_ops = ["all"]
 
+        # NOTE: BalanceScheduler and RecomputeScheduler must not be enabled simultaneously.
+        # In PD disaggregation mode with multi-DP MoE, enabling both schedulers can cause
+        # MoE communication type mismatch across DP ranks (some perform All2AllV, others MC2),
+        # leading to AlltoAll deadlock. See https://github.com/vllm-project/vllm-ascend/issues/8975
+        if envs_ascend.VLLM_ASCEND_BALANCE_SCHEDULING and ascend_config.recompute_scheduler_enable:
+            raise ValueError(
+                "VLLM_ASCEND_BALANCE_SCHEDULING (balance scheduling) and recompute_scheduler_enable "
+                "cannot be enabled simultaneously. This combination causes MoE communication type "
+                "mismatch across DP ranks in PD disaggregation mode, leading to AlltoAll deadlock. "
+                "Please disable one of them."
+            )
+
         if envs_ascend.VLLM_ASCEND_BALANCE_SCHEDULING:
             kv_transfer_config = vllm_config.kv_transfer_config
             kv_role = getattr(kv_transfer_config, "kv_role", None)
