@@ -49,8 +49,8 @@ class MoEWeights:
     w2_bias: torch.Tensor | None = None
     w1_scale: torch.Tensor | list[torch.Tensor] | None = None
     w2_scale: torch.Tensor | list[torch.Tensor] | None = None
-    w1_scale_bias: torch.Tensor | None = None
-    w2_scale_bias: torch.Tensor | None = None
+    w1_scale_bias: torch.Tensor | list[torch.Tensor] | None = None
+    w2_scale_bias: torch.Tensor | list[torch.Tensor] | None = None
     w1_offset: torch.Tensor | None = None
     w2_offset: torch.Tensor | None = None
 

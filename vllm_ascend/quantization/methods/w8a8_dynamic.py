@@ -261,6 +261,8 @@ class AscendW8A8DynamicFusedMoEMethod(AscendMoEScheme):
             w1_scale = [layer.fused_w1_scale] if fused_scale_flag else [layer.w13_weight_scale_fp32]
             w2 = [layer.w2_weight]
             w2_scale = [layer.fused_w2_scale] if fused_scale_flag else [layer.w2_weight_scale]
+        w1_scale_bias = [torch.tensor([], dtype=torch.float32)] if fused_scale_flag else None
+        w2_scale_bias = [torch.tensor([], dtype=torch.float32)] if fused_scale_flag else None
 
         final_hidden_states = moe_comm_method.fused_experts(
             fused_experts_input=build_fused_experts_input(
@@ -280,6 +282,8 @@ class AscendW8A8DynamicFusedMoEMethod(AscendMoEScheme):
                 activation=activation,
                 w1_scale=w1_scale,
                 w2_scale=w2_scale,
+                w1_scale_bias=w1_scale_bias,
+                w2_scale_bias=w2_scale_bias,
             )
         )
         if zero_expert_num > 0 and zero_expert_type is not None:
