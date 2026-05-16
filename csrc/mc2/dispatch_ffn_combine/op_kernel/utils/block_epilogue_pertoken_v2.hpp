@@ -55,15 +55,28 @@ public:
         HcclShmem shmem;
         int32_t offsetD;
         Layout3D tokenPerExpertLayout;
+        int32_t nodeId;   // -1: no node distinction, 0: this rank on node0, 1: this rank on node1
         CATLASS_DEVICE
         Params() {};
         CATLASS_DEVICE
-        Params(int32_t EP_, int32_t expertPerRank_, int32_t rank_, __gm__ int32_t *ptrTokenPerExpert_, 
-        LayoutC layoutC_, int32_t n2_, int32_t n0_, HcclShmem& shmem_, int32_t offsetD_, Layout3D tokenPerExpertLayout_) : 
-        ptrTokenPerExpert(ptrTokenPerExpert_), EP(EP_), 
+        Params(int32_t EP_, int32_t expertPerRank_, int32_t rank_, __gm__ int32_t *ptrTokenPerExpert_,
+        LayoutC layoutC_, int32_t n2_, int32_t n0_, HcclShmem& shmem_, int32_t offsetD_, Layout3D tokenPerExpertLayout_,
+        int32_t nodeId_ = -1) :
+        ptrTokenPerExpert(ptrTokenPerExpert_), EP(EP_),
         expertPerRank(expertPerRank_),rank(rank_), layoutC(layoutC_), n2(n2_), n0(n0_),
-        shmem(shmem_), offsetD(offsetD_), tokenPerExpertLayout(tokenPerExpertLayout_)
+        shmem(shmem_), offsetD(offsetD_), tokenPerExpertLayout(tokenPerExpertLayout_), nodeId(nodeId_)
          {}
+
+        CATLASS_DEVICE
+        bool IsCrossNodeRank(int32_t dstEpIdx) const {
+            if (nodeId < 0) {
+                return false;
+            }
+            int32_t halfEP = EP / 2;
+            bool selfInFirstHalf = rank < halfEP;
+            bool dstInFirstHalf = dstEpIdx < halfEP;
+            return selfInFirstHalf != dstInFirstHalf;
+        }
     };
 
 
@@ -192,6 +205,10 @@ public:
 
         AscendC::WaitFlag<AscendC::HardEvent::V_MTE3>(event_id);
         for (int32_t dstEpIdx = 0; dstEpIdx < params.EP; dstEpIdx ++) {
+            // Cross-node peermem inaccessible, skip cross-node ranks
+            if (params.IsCrossNodeRank(dstEpIdx)) {
+                continue;
+            }
             int32_t lenRankInExpert = tokenPerExpert(tokenPerExpertLayout(dstEpIdx, params.rank, groupIdx));
             int32_t dstExpertOffset = preSumBeforeRank(dstEpIdx * params.expertPerRank + groupIdx);
             int32_t stRankInExpert = preSumRankInExpert;
