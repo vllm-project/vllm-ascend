@@ -340,7 +340,11 @@ class PrepareAndFinalizeWithAllGather(PrepareAndFinalize):
             # per-token activations in prepare. Keep quantization in the MoE MLP path.
             pass
         elif quant_type == QuantType.MXFP4:
-            # MXFP4 with AllGather+EP currently does not pre-quantize
+            # W4A4MXFP4 with AllGather+EP currently does not pre-quantize
+            # per-token activations in prepare. Keep quantization in the MoE MLP path.
+            pass
+        elif quant_type == QuantType.W4A8MXFP:
+            # W4A8MXFP4 with AllGather+EP currently does not pre-quantize
             # per-token activations in prepare. Keep quantization in the MoE MLP path.
             pass
 
