@@ -18,6 +18,7 @@
 #
 from collections.abc import Callable, Sequence
 
+import os
 import numpy as np
 import torch
 import vllm.v1.worker.gpu.buffer_utils
@@ -89,14 +90,38 @@ class MonitoredTorchTensor:
 
 
 class UvaBufferWrapper:
-    """Ascend NPU doesn't support UVA tensors directly. This is a wrapper class
-    that provides CPU and NPU views of a UVA tensor."""
+    """
+    Ascend NPU doesn't support UVA tensors directly. 
+    This is a wrapper class that provides CPU and NPU views of a UVA tensor.
+    However if users add os.environ['PYTORCH_NPU_ALLOC_CONF'] = 'pinned_mem_register:True' to environment, 
+    UVA feature is Supported.
+    """
 
     def __init__(self, size: int | Sequence[int], dtype: torch.dtype):
-        self._cpu: torch.Tensor = torch.zeros(size, dtype=dtype, device="cpu", pin_memory=True)
-        self._np = self._cpu.numpy()
-        self._uva: torch.Tensor = torch.zeros_like(self._cpu, device="npu")
-        self._modified_indices: set[int] = set()
+        key = "PYTORCH_NPU_ALLOC_CONF"
+        if key in os.environ:
+            value = os.environ[key]
+            if "pinned_mem_register:True" not in value:
+                # erro_info = (
+                #     f"UVA is not available, because environment_param {key} "
+                #     f"lack value 'pinned_mem_register:True', "
+                #     f"try to add os.environ['PYTORCH_NPU_ALLOC_CONF'] = 'pinned_mem_register:True'"
+                # )
+                raise RuntimeError("error")
+            self.cpu: torch.Tensor = torch.zeros(size, dtype=dtype, device="cpu", pin_memory=True)
+            if not self.cpu.is_pinned():
+                erro_info = (
+                    "UVA is not available, because cpu tensor is not pinned, "
+                    "try to use .pin_memory() to cpu_tensor wantted to use uva feature"
+                )
+                raise RuntimeError(erro_info)
+            self.np = self.cpu.numpy()
+            self.uva: torch.Tensor = self.cpu
+        else:
+            self._cpu: torch.Tensor = torch.zeros(size, dtype=dtype, device="cpu", pin_memory=True)
+            self._np = self._cpu.numpy()
+            self._uva: torch.Tensor = torch.zeros_like(self._cpu, device="npu")
+            self._modified_indices: set[int] = set()
 
     def _mark_cpu_modified(self, key: int):
         self._modified_indices.add(key)
