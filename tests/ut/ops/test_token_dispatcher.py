@@ -121,6 +121,13 @@ class TestTokenDispatcherWithMC2(TestBase):
         )
         self.ascend_soc_version_patch.start()
 
+        # Mock get_mc2_tokens_capacity since it requires hardware initialization
+        self.mc2_capacity_patch = patch(
+            "vllm_ascend.ops.fused_moe.token_dispatcher.get_mc2_tokens_capacity",
+            return_value=512,
+        )
+        self.mc2_capacity_patch.start()
+
         kwargs = {"with_quant": False, "top_k": 8, "num_experts": 128}
         self.dispatcher = TokenDispatcherWithMC2(**kwargs)
 
@@ -128,6 +135,7 @@ class TestTokenDispatcherWithMC2(TestBase):
         self.mc2_group_patch.stop()
         self.forward_context_patch.stop()
         self.ascend_soc_version_patch.stop()
+        self.mc2_capacity_patch.stop()
 
     def test_init(self):
         self.assertEqual(self.dispatcher.ep_rank_id, 0)

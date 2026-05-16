@@ -29,6 +29,7 @@ from vllm.config import get_current_vllm_config
 from vllm.distributed.parallel_state import get_ep_group
 
 from vllm_ascend.ascend_config import get_ascend_config
+from vllm_ascend.ascend_forward_context import get_mc2_tokens_capacity
 from vllm_ascend.device.device_op import DeviceOperator
 from vllm_ascend.distributed.parallel_state import get_mc2_group
 from vllm_ascend.ops.fused_moe.comm_utils import async_all_to_all, gather_from_sequence_parallel_region
@@ -108,19 +109,8 @@ class TokenDispatcherWithMC2(MoETokenDispatcher[MoEMC2CombineMetadata]):
         # Here we need to calculate the global_bs = max_bs_per_rank * ep_world_size to execute
         # dispatch & combine operators with different input num_tokens per rank.
         vllm_config = get_current_vllm_config()
-        scheduler_config = vllm_config.scheduler_config
-        compilation_config = vllm_config.compilation_config
-        speculative_config = vllm_config.speculative_config
         tp_size = vllm_config.parallel_config.tensor_parallel_size
-        uniform_decode_query_len = 1 if not speculative_config else 1 + speculative_config.num_speculative_tokens
-        decode_max_num_seqs = getattr(scheduler_config, "decode_max_num_seqs", 0)
-        max_num_reqs = max(scheduler_config.max_num_seqs, decode_max_num_seqs)
-        if compilation_config.cudagraph_capture_sizes:
-            max_num_tokens = compilation_config.max_cudagraph_capture_size
-        else:
-            max_num_tokens = min(max_num_reqs * uniform_decode_query_len, 512)
-        num_tokens_per_tp_rank = (max_num_tokens + tp_size - 1) // tp_size
-        _max_global_bs = num_tokens_per_tp_rank * self.ep_world_size
+        _max_global_bs = (get_mc2_tokens_capacity() // tp_size) * self.ep_world_size
 
         # When allreduce across DP is not skipped, tokens are uniform across ranks:
         # use global_bs=0 (uniform mode) and pass mc2_mask.
