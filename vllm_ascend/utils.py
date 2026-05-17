@@ -861,7 +861,13 @@ def enable_sp(vllm_config=None, enable_shared_expert_dp: bool = False) -> bool:
     refresh = additional_config.get("refresh", False) if additional_config else False
 
     if _ENABLE_SP is None or refresh:
-        _ENABLE_SP = envs_ascend.VLLM_ASCEND_ENABLE_FLASHCOMM1
+        if additional_config is not None and "enable_flashcomm1" in additional_config:
+            _ENABLE_SP = bool(additional_config["enable_flashcomm1"])
+        else:
+            try:
+                _ENABLE_SP = get_ascend_config().enable_flashcomm1
+            except RuntimeError:
+                _ENABLE_SP = envs_ascend.VLLM_ASCEND_ENABLE_FLASHCOMM1
 
         if not _ENABLE_SP and enable_shared_expert_dp:
             _ENABLE_SP = True
@@ -1189,7 +1195,7 @@ def get_flashcomm2_config_and_validate(ascend_config, vllm_config):
                 "FLASHCOMM2 only supports 'o_proj' as the sole layer sharding configuration! "
                 f"Found invalid layer_sharding: {layer_sharding}"
             )
-    if not envs_ascend.VLLM_ASCEND_ENABLE_FLASHCOMM1:
+    if not ascend_config.enable_flashcomm1:
         logger.warning_once(
             "It is recommended to enable FLASHCOMM1 simultaneously when starting FLASHCOMM2 for optimal performance."
         )

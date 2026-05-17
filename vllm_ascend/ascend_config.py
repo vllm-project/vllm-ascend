@@ -80,6 +80,12 @@ class AscendConfig:
             "VLLM_ASCEND_BALANCE_SCHEDULING",
             ascend_envs.VLLM_ASCEND_BALANCE_SCHEDULING,
         )
+        self.enable_flashcomm1 = self._get_config_value(
+            additional_config,
+            "enable_flashcomm1",
+            "VLLM_ASCEND_ENABLE_FLASHCOMM1",
+            ascend_envs.VLLM_ASCEND_ENABLE_FLASHCOMM1,
+        )
         if self.profiling_chunk_config.enabled and self.enable_balance_scheduling:
             raise ValueError(
                 "profiling_chunk_config and balance scheduling (enable_balance_scheduling) "
