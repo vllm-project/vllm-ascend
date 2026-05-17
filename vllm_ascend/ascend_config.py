@@ -262,9 +262,7 @@ class AscendConfig:
         self._check_enable_hamming_sparse()
 
     @staticmethod
-    def _get_config_value(
-        additional_config: dict[str, Any], config_key: str, env_key: str, env_value: Any
-    ) -> Any:
+    def _get_config_value(additional_config: dict[str, Any], config_key: str, env_key: str, env_value: Any) -> Any:
         if config_key in additional_config:
             value = additional_config[config_key]
             logger.info_once(f"AscendConfig.{config_key} is set from additional_config with value {value}.")
