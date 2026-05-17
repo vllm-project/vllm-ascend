@@ -471,12 +471,12 @@ class NPUPlatform(Platform):
         if get_ascend_device_type() != AscendDeviceType._310P:
             compilation_config.custom_ops = ["all"]
 
-        if envs_ascend.VLLM_ASCEND_BALANCE_SCHEDULING:
+        if ascend_config.enable_balance_scheduling:
             kv_transfer_config = vllm_config.kv_transfer_config
             kv_role = getattr(kv_transfer_config, "kv_role", None)
             if kv_transfer_config is not None and kv_role != "kv_both":
                 raise ValueError(
-                    "VLLM_ASCEND_BALANCE_SCHEDULING (balance scheduling) only supports PD-mixed mode "
+                    "enable_balance_scheduling only supports PD-mixed mode "
                     "(kv_role='kv_both' or no kv_transfer_config), and is not supported in "
                     "PD-disaggregated mode (kv_role='kv_producer'/'kv_consumer')."
                 )

@@ -74,9 +74,15 @@ class AscendConfig:
 
         from vllm_ascend import envs as ascend_envs
 
-        if self.profiling_chunk_config.enabled and ascend_envs.VLLM_ASCEND_BALANCE_SCHEDULING:
+        self.enable_balance_scheduling = self._get_config_value(
+            additional_config,
+            "enable_balance_scheduling",
+            "VLLM_ASCEND_BALANCE_SCHEDULING",
+            ascend_envs.VLLM_ASCEND_BALANCE_SCHEDULING,
+        )
+        if self.profiling_chunk_config.enabled and self.enable_balance_scheduling:
             raise ValueError(
-                "profiling_chunk_config and balance scheduling (VLLM_ASCEND_BALANCE_SCHEDULING) "
+                "profiling_chunk_config and balance scheduling (enable_balance_scheduling) "
                 "cannot be enabled at the same time. Please disable one of them."
             )
 
