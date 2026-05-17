@@ -667,7 +667,7 @@ class BalanceDPEngineCoreProc(DPEngineCoreProc):
 
 def run_engine_core(*args, dp_rank: int = 0, local_dp_rank: int = 0, **kwargs):
     """Launch EngineCore busy loop in background process."""
-    vllm_config = kwargs.get("vllm_config", None)
+    vllm_config = kwargs.get("vllm_config")
     if not _balance_scheduling_enabled(vllm_config):
         return _ORIGINAL_RUN_ENGINE_CORE(*args, dp_rank=dp_rank, local_dp_rank=local_dp_rank, **kwargs)
 
