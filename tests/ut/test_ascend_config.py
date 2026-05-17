@@ -90,8 +90,9 @@ class TestAscendConfig(TestBase):
         self.assertTrue(ascend_compilation_config.enable_static_kernel)
 
     @_clean_up_ascend_config
+    @patch("vllm_ascend.ascend_config.logger.info_once")
     @patch("vllm_ascend.platform.NPUPlatform._fix_incompatible_config")
-    def test_migrated_config_falls_back_to_envs(self, mock_fix_incompatible_config):
+    def test_migrated_config_falls_back_to_envs(self, mock_fix_incompatible_config, mock_info_once):
         test_vllm_config = VllmConfig()
         test_vllm_config.parallel_config.tensor_parallel_size = 4
         with patch.dict(
@@ -117,10 +118,17 @@ class TestAscendConfig(TestBase):
         self.assertTrue(ascend_config.msmonitor_use_daemon)
         self.assertFalse(ascend_config.enable_transpose_kv_cache_by_block)
         self.assertEqual(ascend_config.weight_nz_mode, 2)
+        mock_info_once.assert_any_call(
+            "AscendConfig.enable_mlapo falls back to environment variable VLLM_ASCEND_ENABLE_MLAPO with value False."
+        )
+        mock_info_once.assert_any_call(
+            "AscendConfig.weight_nz_mode falls back to environment variable VLLM_ASCEND_ENABLE_NZ with value 2."
+        )
 
     @_clean_up_ascend_config
+    @patch("vllm_ascend.ascend_config.logger.info_once")
     @patch("vllm_ascend.platform.NPUPlatform._fix_incompatible_config")
-    def test_migrated_config_overrides_envs(self, mock_fix_incompatible_config):
+    def test_migrated_config_overrides_envs(self, mock_fix_incompatible_config, mock_info_once):
         test_vllm_config = VllmConfig()
         test_vllm_config.additional_config = {
             "enable_context_parallel": False,
@@ -155,6 +163,8 @@ class TestAscendConfig(TestBase):
         self.assertFalse(ascend_config.msmonitor_use_daemon)
         self.assertTrue(ascend_config.enable_transpose_kv_cache_by_block)
         self.assertEqual(ascend_config.weight_nz_mode, 1)
+        mock_info_once.assert_any_call("AscendConfig.enable_mlapo is set from additional_config with value True.")
+        mock_info_once.assert_any_call("AscendConfig.weight_nz_mode is set from additional_config with value 1.")
 
     @_clean_up_ascend_config
     @patch("vllm_ascend.platform.NPUPlatform._fix_incompatible_config")
