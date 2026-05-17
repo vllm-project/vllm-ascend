@@ -122,43 +122,43 @@ class AscendConfig:
         self.recompute_scheduler_enable = additional_config.get("recompute_scheduler_enable", False)
         self.enable_cpu_binding = additional_config.get("enable_cpu_binding", True)
 
-        self.enable_context_parallel = self._get_migrated_config_value(
+        self.enable_context_parallel = self._get_config_value(
             additional_config,
             "enable_context_parallel",
             "VLLM_ASCEND_ENABLE_CONTEXT_PARALLEL",
             ascend_envs.VLLM_ASCEND_ENABLE_CONTEXT_PARALLEL,
         )
-        self.enable_matmul_allreduce = self._get_migrated_config_value(
+        self.enable_matmul_allreduce = self._get_config_value(
             additional_config,
             "enable_matmul_allreduce",
             "VLLM_ASCEND_ENABLE_MATMUL_ALLREDUCE",
             ascend_envs.VLLM_ASCEND_ENABLE_MATMUL_ALLREDUCE,
         )
-        self.enable_fused_mc2 = self._get_migrated_config_value(
+        self.enable_fused_mc2 = self._get_config_value(
             additional_config,
             "enable_fused_mc2",
             "VLLM_ASCEND_ENABLE_FUSED_MC2",
             ascend_envs.VLLM_ASCEND_ENABLE_FUSED_MC2,
         )
-        self.enable_mlapo = self._get_migrated_config_value(
+        self.enable_mlapo = self._get_config_value(
             additional_config,
             "enable_mlapo",
             "VLLM_ASCEND_ENABLE_MLAPO",
             ascend_envs.VLLM_ASCEND_ENABLE_MLAPO,
         )
-        self.enable_flashcomm2_parallel_size = self._get_migrated_config_value(
+        self.enable_flashcomm2_parallel_size = self._get_config_value(
             additional_config,
             "enable_flashcomm2_parallel_size",
             "VLLM_ASCEND_FLASHCOMM2_PARALLEL_SIZE",
             ascend_envs.VLLM_ASCEND_FLASHCOMM2_PARALLEL_SIZE,
         )
-        self.msmonitor_use_daemon = self._get_migrated_config_value(
+        self.msmonitor_use_daemon = self._get_config_value(
             additional_config,
             "msmonitor_use_daemon",
             "MSMONITOR_USE_DAEMON",
             ascend_envs.MSMONITOR_USE_DAEMON,
         )
-        self.enable_transpose_kv_cache_by_block = self._get_migrated_config_value(
+        self.enable_transpose_kv_cache_by_block = self._get_config_value(
             additional_config,
             "enable_transpose_kv_cache_by_block",
             "VLLM_ASCEND_FUSION_OP_TRANSPOSE_KV_CACHE_BY_BLOCK",
@@ -200,7 +200,7 @@ class AscendConfig:
         self.pa_shape_list = additional_config.get("pa_shape_list", [])
         # Weight NZ mode configuration.
         # 0: disabled, 1: only quant case enable nz (default), 2: BF16/FP16 also enable nz
-        self.weight_nz_mode = self._get_migrated_config_value(
+        self.weight_nz_mode = self._get_config_value(
             additional_config,
             "weight_nz_mode",
             "VLLM_ASCEND_ENABLE_NZ",
@@ -262,7 +262,9 @@ class AscendConfig:
         self._check_enable_hamming_sparse()
 
     @staticmethod
-    def _get_migrated_config_value(additional_config: dict[str, Any], config_key: str, env_key: str, env_value: Any) -> Any:
+    def _get_config_value(
+        additional_config: dict[str, Any], config_key: str, env_key: str, env_value: Any
+    ) -> Any:
         if config_key in additional_config:
             value = additional_config[config_key]
             logger.info_once(f"AscendConfig.{config_key} is set from additional_config with value {value}.")
