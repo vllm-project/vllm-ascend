@@ -125,6 +125,7 @@ jobs:
         if: ${{ github.event_name == 'pull_request' }}
         shell: bash -l {0}
         run: |
+          ll /root/.cache/modelscope/hub/datasets
           cd /vllm-workspace/vllm-ascend
           git clone https://github.com/AISBench/benchmark.git
           cd benchmark
