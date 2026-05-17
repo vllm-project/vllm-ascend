@@ -13,9 +13,9 @@ This document describes how to install vllm-ascend manually.
     |---------------|----------------------------------|-------------------------------------------|
     | Ascend HDK    | Refer to the documentation [CANN 9.0.0](https://www.hiascend.com/document/detail/zh/canncommercial/900/releasenote/releasenote_0000.html) | Required for CANN |
     | CANN          | == 9.0.0                        | Required for vllm-ascend and torch-npu    |
-    | torch-npu     | == 2.9.0             | Required for vllm-ascend, No need to install manually, it will be auto installed in below steps |
-    | torch         | == 2.9.0                          | Required for torch-npu and vllm           |
-    | NNAL          | == 9.0.0                       | Required for libatb.so, enables advanced tensor operations |
+    | torch-npu     | == 2.10.0                       | Required for vllm-ascend, No need to install manually, it will be auto installed in below steps |
+    | torch         | == 2.10.0                       | Required for torch-npu and vllm           |
+    | NNAL          | == 9.0.0                        | Required for libatb.so, enables advanced tensor operations |
 
 There are two installation methods:
 

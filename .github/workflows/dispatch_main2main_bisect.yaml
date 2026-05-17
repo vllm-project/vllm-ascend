@@ -93,13 +93,6 @@ jobs:
           path: ./vllm-ascend
           fetch-depth: 0
 
-      - name: Set global envs
-        run: |
-          set -a
-          . /usr/local/Ascend/ascend-toolkit/set_env.sh
-          set +a
-          env >> $GITHUB_ENV
-
       - name: Check npu and CANN info
         run: |
           npu-smi info || echo "npu-smi not available (expected on CPU runners)"
