@@ -66,7 +66,7 @@ def model_register(model):
 
     # Sort by global index ascending
     _moe_layer_entries.sort(key=lambda x: x[0])
-    model._moe_layers = _moe_layer_entries
+    model._moe_layers = list(_moe_layer_entries)
     model._moe_layer_map = dict(_moe_layer_entries)
 
     model.get_expert_map = types.MethodType(_get_expert_map, model)
