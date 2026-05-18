@@ -24,6 +24,7 @@ from typing import Any, TypeAlias, cast
 
 import torch
 import torch.nn as nn
+import torch_npu
 from transformers import PretrainedConfig
 from vllm.config import VllmConfig
 from vllm.distributed import get_ep_group, get_tensor_model_parallel_world_size, get_world_group
@@ -218,6 +219,7 @@ class LlamaXliteModel(XliteModel):
             xlite_config.mrope_section = rope_parameters.get("mrope_section", [])
         if hasattr(xlite_config, "mrope_interleaved"):
             xlite_config.mrope_interleaved = rope_parameters.get("mrope_interleaved", False)
+        self.quantization = vllm_config.quant_config is not None
 
     def _build_model(self) -> None:
         hf_config = self.hf_text_config
@@ -268,6 +270,73 @@ class LlamaXliteModel(XliteModel):
             if (weight := _get_nested_attr(layer, "self_attn", "k_norm", "weight")) is not None
         ]
 
+        if self.quantization:
+            xlite_config.quant_attn_weight_nz = self.is_tensor_nz(xlite_model.mha_qkv[0])
+            xlite_config.quant_attn_weight_transpose = True
+
+            norm_bias = params_dict.get(f"{model_prefix}model.norm.bias")
+            if norm_bias is not None and not self.all_tensors_zero([norm_bias]):
+                xlite_model.norm_bias = norm_bias
+            if params_dict.get(f"{model_prefix}model.layers.0.input_layernorm.bias") is not None:
+                attn_norm_bias = [layer.input_layernorm.bias for layer in layers]
+                if not self.all_tensors_zero(attn_norm_bias):
+                    xlite_model.attn_norm_bias = attn_norm_bias
+            if params_dict.get(f"{model_prefix}model.layers.0.post_attention_layernorm.bias") is not None:
+                mlp_norm_bias = [layer.post_attention_layernorm.bias for layer in layers]
+                if not self.all_tensors_zero(mlp_norm_bias):
+                    xlite_model.mlp_norm_bias = mlp_norm_bias
+
+            # attention may use static or dynamic quantization
+            if params_dict.get(f"{model_prefix}model.layers.0.self_attn.qkv_proj.deq_scale") is not None:
+                xlite_model.mha_qkv_input_scale = [
+                    layer.self_attn.qkv_proj.aclnn_input_scale_reciprocal for layer in layers
+                ]
+                xlite_model.mha_qkv_input_offset = [layer.self_attn.qkv_proj.aclnn_input_offset for layer in layers]
+                xlite_model.mha_qkv_quant_bias = [layer.self_attn.qkv_proj.quant_bias for layer in layers]
+                xlite_model.mha_qkv_deq_scale = [
+                    self._prepare_deq_scale_weights(layer.self_attn.qkv_proj.deq_scale) for layer in layers
+                ]
+                xlite_config.quant_attn_weight_transpose = True
+            elif params_dict.get(f"{model_prefix}model.layers.0.self_attn.qkv_proj.weight_scale") is not None:
+                xlite_model.mha_qkv_deq_scale = [
+                    self._prepare_deq_scale_weights(layer.self_attn.qkv_proj.weight_scale) for layer in layers
+                ]
+
+            if params_dict.get(f"{model_prefix}model.layers.0.self_attn.o_proj.deq_scale") is not None:
+                xlite_model.attn_out_input_scale = [
+                    layer.self_attn.o_proj.aclnn_input_scale_reciprocal for layer in layers
+                ]
+                xlite_model.attn_out_input_offset = [layer.self_attn.o_proj.aclnn_input_offset for layer in layers]
+                # only tp_rank == 0 in rowparallellinear need to add quant_bias
+                xlite_model.attn_out_quant_bias = [layer.self_attn.o_proj.quant_bias for layer in layers]
+                xlite_model.attn_out_deq_scale = [
+                    self._prepare_deq_scale_weights(layer.self_attn.o_proj.deq_scale) for layer in layers
+                ]
+            elif params_dict.get(f"{model_prefix}model.layers.0.self_attn.o_proj.weight_scale") is not None:
+                xlite_model.attn_out_deq_scale = [
+                    self._prepare_deq_scale_weights(layer.self_attn.o_proj.weight_scale) for layer in layers
+                ]
+
+            # for dense models
+            if params_dict.get(f"{model_prefix}model.layers.0.mlp.gate_up_proj.deq_scale") is not None:
+                xlite_model.mlp_up_gate_input_scale = [
+                    layer.mlp.gate_up_proj.aclnn_input_scale_reciprocal for layer in layers
+                ]
+                xlite_model.mlp_up_gate_input_offset = [layer.mlp.gate_up_proj.aclnn_input_offset for layer in layers]
+                xlite_model.mlp_up_gate_quant_bias = [layer.mlp.gate_up_proj.quant_bias for layer in layers]
+                xlite_model.mlp_up_gate_deq_scale = [
+                    self._prepare_deq_scale_weights(layer.mlp.gate_up_proj.deq_scale) for layer in layers
+                ]
+            if params_dict.get(f"{model_prefix}model.layers.0.mlp.down_proj.deq_scale") is not None:
+                xlite_model.mlp_down_input_scale = [
+                    layer.mlp.down_proj.aclnn_input_scale_reciprocal for layer in layers
+                ]
+                xlite_model.mlp_down_input_offset = [layer.mlp.down_proj.aclnn_input_offset for layer in layers]
+                xlite_model.mlp_down_quant_bias = [layer.mlp.down_proj.quant_bias for layer in layers]
+                xlite_model.mlp_down_deq_scale = [
+                    self._prepare_deq_scale_weights(layer.mlp.down_proj.deq_scale) for layer in layers
+                ]
+
         if len(mha_qkv_bias) != xlite_config.n_layers:
             xlite_config.qkv_bias = False
         else:
@@ -280,6 +349,15 @@ class LlamaXliteModel(XliteModel):
             xlite_config.qk_norm = True
             xlite_model.mha_q_norm = q_norm
             xlite_model.mha_k_norm = k_norm
+            if self.quantization:
+                if params_dict.get(f"{model_prefix}model.layers.0.self_attn.q_norm.bias") is not None:
+                    mha_q_norm_bias = [layer.self_attn.q_norm.bias for layer in layers]
+                    if not self.all_tensors_zero(mha_q_norm_bias):
+                        xlite_model.mha_q_norm_bias = mha_q_norm_bias
+                if params_dict.get(f"{model_prefix}model.layers.0.self_attn.k_norm.bias") is not None:
+                    mha_k_norm_bias = [layer.self_attn.k_norm.bias for layer in layers]
+                    if not self.all_tensors_zero(mha_k_norm_bias):
+                        xlite_model.mha_k_norm_bias = mha_k_norm_bias
 
         xlite_model.mlp_norm = [
             weight
@@ -324,6 +402,28 @@ class LlamaXliteModel(XliteModel):
         freq_cis = torch.cat((cos_cache, sin_cache), dim=-1)
         return freq_cis.to(device="npu")
 
+    def _prepare_deq_scale_weights(self, deq_scale: torch.Tensor):
+        """
+        The data format required by the fixpipe hardware is as follows:
+        Data is stored in uint64_t, with the upper 32 bits being 0 and
+        the lower 32 bits storing the FP32 format.The lower 10 bits of
+        the FP32 format are not involved in computation, and the actual
+        data format is TF32.
+        """
+        deq_scale_fp32 = deq_scale.to(torch.float32)
+        scale = torch.zeros(deq_scale.shape[0] * 2, dtype=torch.float32, device="npu")
+        scale[0::2] = deq_scale_fp32[0::1]
+        return scale
+
+    def is_tensor_nz(self, t: torch.Tensor):
+        format = torch_npu.get_npu_format(t)
+        return format == torch_npu.Format.FRACTAL_NZ
+
+    def all_tensors_zero(self, tensors: list[torch.Tensor]) -> bool:
+        if not tensors:
+            return True
+        return all(torch.all(t == 0).item() for t in tensors)
+
 
 class QwenMoeXliteModel(LlamaXliteModel):
     """xlite adapter for Qwen MoE architectures."""
@@ -353,6 +453,7 @@ class QwenMoeXliteModel(LlamaXliteModel):
 
         layers, _ = self._get_layers_and_model_prefix()
         xlite_model = self.xlite_model
+        xlite_config = self.xlite_config
         xlite_model.gate = [
             weight for layer in layers if (weight := _get_nested_attr(layer, "mlp", "gate", "weight")) is not None
         ]
@@ -368,6 +469,18 @@ class QwenMoeXliteModel(LlamaXliteModel):
             if (w2_weight := _get_nested_attr(layer, "mlp", "experts", "w2_weight")) is not None
             for weight in w2_weight[: _get_nested_attr(layer, "mlp", "experts", "local_num_experts", default=0)]
         ]
+        xlite_config.experts_weight_nz = self.is_tensor_nz(xlite_model.re_up_gate[0])
+        if self.quantization:
+            xlite_model.re_up_gate_scale = [
+                self._prepare_deq_scale_weights(layer.mlp.experts.w13_weight_scale_fp32[i])
+                for layer in layers
+                for i in range(layer.mlp.experts.local_num_experts)
+            ]
+            xlite_model.re_down_scale = [
+                self._prepare_deq_scale_weights(layer.mlp.experts.w2_weight_scale[i])
+                for layer in layers
+                for i in range(layer.mlp.experts.local_num_experts)
+            ]
 
 
 class Glm4MoeXliteModel(LlamaXliteModel):

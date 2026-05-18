@@ -8,7 +8,7 @@ msgid ""
 msgstr ""
 "Project-Id-Version: vllm-ascend \n"
 "Report-Msgid-Bugs-To: \n"
-"POT-Creation-Date: 2026-05-06 02:14+0000\n"
+"POT-Creation-Date: 2026-05-16 02:20+0000\n"
 "PO-Revision-Date: 2026-04-10 18:37+0800\n"
 "Last-Translator: FULL NAME <EMAIL@ADDRESS>\n"
 "Language: zh_CN\n"
@@ -521,9 +521,7 @@ msgstr "以 `Kimi-K2.5-w4a8` 为例运行性能评估。"
 msgid ""
 "Refer to [vllm benchmark](https://docs.vllm.ai/en/latest/benchmarking/) "
 "for more details."
-msgstr ""
-"更多详细信息请参考 [vLLM "
-"基准测试](https://docs.vllm.ai/en/latest/benchmarking/)。"
+msgstr "更多详细信息请参考 [vLLM 基准测试](https://docs.vllm.ai/en/latest/benchmarking/)。"
 
 #: ../../source/tutorials/models/Kimi-K2.5.md:778
 msgid "There are three `vllm bench` subcommands:"
@@ -591,36 +589,20 @@ msgid "FAQ"
 msgstr "常见问题"
 
 #: ../../source/tutorials/models/Kimi-K2.5.md:806
-msgid "**Q: Why is the TPOT performance poor in Long-context test?**"
-msgstr "**问：为什么长上下文测试中 TPOT 性能不佳？**"
-
-#: ../../source/tutorials/models/Kimi-K2.5.md:808
-msgid ""
-"A: Please ensure that the FIA operator replacement script has been "
-"executed successfully to complete the replacement of FIA operators. Here "
-"is the script: "
-"[A2](../../../../tools/install_flash_infer_attention_score_ops_a2.sh) and"
-" [A3](../../../../tools/install_flash_infer_attention_score_ops_a3.sh)"
-msgstr ""
-"答：请确保已成功执行 FIA 算子替换脚本以完成 FIA "
-"算子的替换。脚本如下：[A2](../../../../tools/install_flash_infer_attention_score_ops_a2.sh)"
-" 和 [A3](../../../../tools/install_flash_infer_attention_score_ops_a3.sh)"
-
-#: ../../source/tutorials/models/Kimi-K2.5.md:810
 msgid ""
 "**Q: Startup fails with HCCL port conflicts (address already bound). What"
 " should I do?**"
 msgstr "**问：启动失败，出现 HCCL 端口冲突（地址已被绑定）。该怎么办？**"
 
-#: ../../source/tutorials/models/Kimi-K2.5.md:812
+#: ../../source/tutorials/models/Kimi-K2.5.md:808
 msgid "A: Clean up old processes and restart: `pkill -f vLLM*`."
 msgstr "答：清理旧进程并重启：`pkill -f vLLM*`。"
 
-#: ../../source/tutorials/models/Kimi-K2.5.md:814
+#: ../../source/tutorials/models/Kimi-K2.5.md:810
 msgid "**Q: How to handle OOM or unstable startup?**"
 msgstr "**问：如何处理 OOM 或启动不稳定的问题？**"
 
-#: ../../source/tutorials/models/Kimi-K2.5.md:816
+#: ../../source/tutorials/models/Kimi-K2.5.md:812
 msgid ""
 "A: Reduce `--max-num-seqs` and `--max-model-len` first. If needed, reduce"
 " concurrency and load-testing pressure (e.g., `max-concurrency` / `num-"
