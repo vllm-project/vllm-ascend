@@ -320,12 +320,22 @@ class LAPSRequestQueue(RequestQueue):
         queue = self._select_schedulable_queue()
         if queue is None:
             raise IndexError("pop from empty LAPS queue")
+        return self.pop_request_from_queue(queue)
+
+    def pop_request_from_queue(
+        self, queue: RequestQueue, *, count_as_removal: bool = False
+    ) -> Request:
         request = queue.pop_request()
-        self._dispatch_counters[self._queue_name(queue)] += 1
+        if count_as_removal:
+            self._remove_counters[self._queue_name(queue)] += 1
+            event_name = "remove"
+        else:
+            self._dispatch_counters[self._queue_name(queue)] += 1
+            event_name = "dispatch"
         self._force_immediate_request_ids.discard(request.request_id)
         if queue is self._short_queue:
             self._on_short_queue_changed()
-        self._debug_state("dispatch", request=request, queue=queue)
+        self._debug_state(event_name, request=request, queue=queue)
         self._maybe_log_stats()
         return request
 
@@ -877,7 +887,12 @@ class LAPSScheduler(LAPSSchedulerMixin, BaseScheduler):
                             "%s is still in WAITING_FOR_REMOTE_KVS state.",
                             request_id,
                         )
-                    request_queue.pop_request()
+                    if laps_waiting is not None:
+                        laps_waiting.pop_request_from_queue(
+                            request_queue, count_as_removal=True
+                        )
+                    else:
+                        request_queue.pop_request()
                     step_skipped_waiting.prepend_request(request)
                     continue
 
@@ -889,7 +904,12 @@ class LAPSScheduler(LAPSSchedulerMixin, BaseScheduler):
                         and request.lora_request.lora_int_id not in scheduled_loras
                     )
                 ):
-                    request_queue.pop_request()
+                    if laps_waiting is not None:
+                        laps_waiting.pop_request_from_queue(
+                            request_queue, count_as_removal=True
+                        )
+                    else:
+                        request_queue.pop_request()
                     step_skipped_waiting.prepend_request(request)
                     continue
 
@@ -910,7 +930,12 @@ class LAPSScheduler(LAPSSchedulerMixin, BaseScheduler):
                         )
 
                         if ext_tokens is None:
-                            request_queue.pop_request()
+                            if laps_waiting is not None:
+                                laps_waiting.pop_request_from_queue(
+                                    request_queue, count_as_removal=True
+                                )
+                            else:
+                                request_queue.pop_request()
                             step_skipped_waiting.prepend_request(request)
                             continue
 
@@ -1050,7 +1075,10 @@ class LAPSScheduler(LAPSSchedulerMixin, BaseScheduler):
                             preempted=request.num_preemptions > 0,
                         )
 
-                request = request_queue.pop_request()
+                if laps_waiting is not None:
+                    request = laps_waiting.pop_request_from_queue(request_queue)
+                else:
+                    request = request_queue.pop_request()
                 if load_kv_async:
                     request.status = RequestStatus.WAITING_FOR_REMOTE_KVS
                     step_skipped_waiting.prepend_request(request)
