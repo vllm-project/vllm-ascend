@@ -136,6 +136,21 @@ Actions:
 3. If eager still fails, prioritize model/backend code fix path (not runtime flags only).
 4. Check `vllm-ascend` MLA/rope/platform implementation used by known-good runs.
 
+## `torch_npu` / `aclnn` operator blockage
+
+Symptoms:
+
+- Stack trace contains `torch_npu`, `torch.ops.npu`, `aclnn*`, or another Ascend-specific operator name.
+- Failure persists after one local code or flag adjustment.
+
+Actions:
+
+1. Extract the exact operator symbol and the failing call site from the stack trace.
+2. Search the **official HiAscend operator documentation** for that exact operator before another blind retry.
+3. Record the documented constraints: supported dtype, shape requirements, layout / contiguous expectations, graph-mode limitations, and any replacement or fallback guidance.
+4. Compare those constraints against the current invocation and patch the call site or fallback path accordingly.
+5. If the next attempt still fails, attach the consulted HiAscend page title / URL and the extracted constraint summary to the issue or final report.
+
 ## VL + TorchDynamo interpolate contiguous failure
 
 Symptoms:

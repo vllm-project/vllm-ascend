@@ -119,6 +119,8 @@ The agent scans all new operators in the model code and classifies them:
 | **CUDA** kernel with fallback | ❌ CUDA unsupported | Use fallback; document the path |
 | **CUDA** kernel, **no fallback** | ❌ Blocked | **Early exit — file GitHub issue immediately** |
 
+If the blocked path involves an Ascend-specific operator such as `torch_npu`, `torch.ops.npu`, or `aclnn*`, the agent should search the **official HiAscend operator documentation** before the next fix attempt and extract the operator's dtype, shape, layout/contiguous, and graph-mode constraints.
+
 > **CUDA early-exit rule**: If any operator is a pure CUDA kernel with no Torch/Triton alternative, the agent stops, skips all validation, and files a GitHub issue documenting the blocking operator, why no fallback exists, and the recommended path forward.
 >
 > **Triton early-exit rule**: If a Triton kernel is verified to be non-functional on Ascend (correctness failure or unacceptable accuracy degradation), the agent stops and files a GitHub issue documenting which kernel fails, the observed failure mode, and the recommended path forward (e.g., replace with a Torch-native fallback or implement a custom Ascend op).

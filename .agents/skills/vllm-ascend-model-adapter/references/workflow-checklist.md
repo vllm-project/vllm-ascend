@@ -145,6 +145,8 @@ Decision table:
 | CUDA kernel with fallback | ❌ CUDA blocked | Use fallback; document path |
 | CUDA kernel, no fallback | ❌ blocked | **Early exit** — file GitHub issue, skip validation |
 
+If the failing path is an Ascend-specific operator such as `torch_npu`, `torch.ops.npu`, or `aclnn*`, search the **official HiAscend operator documentation** before the next fix attempt. Capture the operator's dtype support, shape constraints, layout/contiguous requirements, graph-mode limitations, and any documented fallback guidance.
+
 If early-exit applies, the GitHub issue must include:
 
 - operator name and file location,
@@ -215,6 +217,8 @@ Retry policy (per test):
 | Fails (attempt 1) | Fix and re-run |
 | Fails (attempt 2) | Fix and re-run |
 | Fails after 2 attempts | **Early exit** — file GitHub issue; skip serve |
+
+For Ascend-specific operator failures, perform the HiAscend lookup before attempt 2 and include the consulted page title / URL plus the extracted constraints in the issue.
 
 GitHub issue must include: failing test name, error + stack trace, both fix attempts, recommended path forward.
 
