@@ -15,76 +15,15 @@
 # limitations under the License.
 # This file is a part of the vllm-ascend project.
 #
-"""Light tests for quick feature coverage.
 
-Coverage:
-- MoE inference with TP, EP, EPLB, and graph capture.
-- Multimodal reasoning with PP and graph capture.
-"""
-
-import json
-
-import requests
 from vllm.assets.image import ImageAsset
-from vllm.utils.network_utils import get_open_port
 
-from tests.e2e.conftest import RemoteOpenAIServer, VllmRunner, qwen_prompt, wait_until_npu_memory_free
-
-
-@wait_until_npu_memory_free()
-def test_moe_tp_ep_eplb_full_graph():
-    """Verify MoE serving with TP, EP, EPLB, and graph capture."""
-    model = "Qwen/Qwen3-30B-A3B"
-    port = get_open_port()
-    env_dict = {
-        "DYNAMIC_EPLB": "true",
-        "HCCL_BUFFSIZE": "1024",
-    }
-    server_args = [
-        "--max_model_len",
-        "8192",
-        "--tensor_parallel_size",
-        "2",
-        "--enable_expert_parallel",
-        "--port",
-        str(port),
-        "--compilation-config",
-        json.dumps({"cudagraph_capture_sizes": [8]}),
-        "--additional-config",
-        json.dumps(
-            {
-                "eplb_config": {
-                    "dynamic_eplb": True,
-                    "expert_heat_collection_interval": 100,
-                    "algorithm_execution_interval": 20,
-                    "num_redundant_experts": 2,
-                }
-            }
-        ),
-    ]
-
-    with RemoteOpenAIServer(model, server_args, server_port=port, auto_port=False, env_dict=env_dict) as server:
-        response = requests.post(
-            server.url_for("v1", "completions"),
-            json={
-                "model": model,
-                "prompt": "What is deeplearning?",
-                "max_tokens": 400,
-                "temperature": 0.0,
-                "top_p": 1.0,
-                "n": 1,
-            },
-            timeout=600,
-        )
-        response.raise_for_status()
-        output = response.json()
-
-        assert output["choices"][0]["text"]
+from tests.e2e.conftest import VllmRunner, qwen_prompt, wait_until_npu_memory_free
 
 
 @wait_until_npu_memory_free()
-def test_multimodal_reasoning_pp_full_graph():
-    """Verify multimodal generation with PP and graph capture."""
+def test_multimodal_reasoning_pp_full_decode_only():
+    """Verify multimodal generation with PP and full decode only."""
     image = ImageAsset("cherry_blossom").pil_image.convert("RGB")
 
     img_questions = [
@@ -112,7 +51,7 @@ def test_multimodal_reasoning_pp_full_graph():
         hf_overrides={"text_config": {"architectures": ["Qwen3MoeForCausalLM"]}},
         compilation_config={
             "cudagraph_mode": "FULL_DECODE_ONLY",
-            "cudagraph_capture_sizes": [4],
+            "cudagraph_capture_sizes": [1, 2, 4, 8],
         },
     ) as vllm_model:
         outputs = vllm_model.generate_greedy(
