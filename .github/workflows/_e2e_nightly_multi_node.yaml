@@ -20,6 +20,11 @@ on:
         required: true
         type: string
         description: the model config for multi_node test
+      config_base_path:
+        required: false
+        type: string
+        default: ''
+        description: override CONFIG_BASE_PATH used by the yaml loader inside the pod (defaults to nightly path)
       replicas:
         required: false
         default: "1"
@@ -186,6 +191,7 @@ jobs:
           replicas="${{ inputs.replicas }}"
           image="${{ inputs.image }}"
           config_file_path="${{ inputs.config_file_path }}"
+          config_base_path="${{ inputs.config_base_path }}"
           fail_tag="FAIL_TAG_${{ inputs.config_file_path }}"
           is_pr_test="${{ github.event_name == 'pull_request' }}"
           vllm_ascend_ref="${{ inputs.vllm_ascend_ref }}"
@@ -210,6 +216,7 @@ jobs:
             -D replicas="$replicas" \
             -D image="$image" \
             -D config_file_path="$config_file_path" \
+            -D config_base_path="$config_base_path" \
             -D npu_per_node="$npu_per_node" \
             -D fail_tag="$fail_tag" \
             -D is_pr_test="$is_pr_test" \
