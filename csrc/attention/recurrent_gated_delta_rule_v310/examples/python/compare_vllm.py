@@ -15,10 +15,10 @@ _OT_VENDOR = f"{_CANN}/opp/vendors/custom_transformer"
 _cur = os.environ.get("ASCEND_CUSTOM_OPP_PATH", "")
 os.environ["ASCEND_CUSTOM_OPP_PATH"] = f"{_OT_VENDOR}:{_VLLM_VENDOR}:{_cur}" if _cur else f"{_OT_VENDOR}:{_VLLM_VENDOR}"
 
-import torch
-import torch_npu
-import ctypes
-import argparse
+import argparse  # noqa: E402
+import ctypes  # noqa: E402
+
+import torch  # noqa: E402
 
 torch.manual_seed(42)
 
@@ -246,7 +246,10 @@ def compare(label, dtype, rtol, b, mtp, nk, nv, dk, dv, num_cache_slots):
     out_vllm = out_vllm.float().cpu()
     state_vllm = state_vllm.float().cpu()
 
-    print(f"  NaN check: golden={out_gold.isnan().any().item()} ours={out_ot.isnan().any().item()} vllm={out_vllm.isnan().any().item()}")
+    gold_nan = out_gold.isnan().any().item()
+    ours_nan = out_ot.isnan().any().item()
+    vllm_nan = out_vllm.isnan().any().item()
+    print(f"  NaN check: golden={gold_nan} ours={ours_nan} vllm={vllm_nan}")
 
     # benchmark
     warmup, iters = 10, 100

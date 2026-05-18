@@ -1,5 +1,8 @@
 """Single RGDR call for msprof profiling."""
-import os, sys, ctypes, torch, torch_npu
+import ctypes
+import os
+
+import torch
 
 torch.npu.set_device(0)
 
