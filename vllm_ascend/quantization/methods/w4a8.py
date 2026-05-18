@@ -443,15 +443,16 @@ class AscendW4A8DynamicFusedMoEMethod(AscendMoEScheme):
 
     def update_bias(self, layer, w13_bias, w2_bias):
         if self.new_quant_version:
-             # w13_scale_bias was registered as nn.Parameter by the weight loader,
-             # we need to replace it with a buffer (plain Tensor) after transformation.
-            w13_bias = layer.w13_scale_bias.data.transpose(1, 2).contiguous().sum(axis=1)
-            w2_bias = layer.w2_scale_bias.data.transpose(1, 2).contiguous().sum(axis=1)
-            delattr(layer, "w13_scale_bias")
-            delattr(layer, "w2_scale_bias")
-            layer.register_buffer("w13_scale_bias", w13_bias)
-            layer.register_buffer("w2_scale_bias", w2_bias)
-
+            # w13_scale_bias was registered as nn.Parameter by the weight loader,
+            # we need to replace it with a buffer (plain Tensor) after transformation.
+            w13_bias_new = layer.w13_scale_bias.data.transpose(1, 2).contiguous().sum(axis=1)
+            w2_bias_new = layer.w2_scale_bias.data.transpose(1, 2).contiguous().sum(axis=1)
+            if hasattr(layer, "w13_scale_bias"):
+                delattr(layer, "w13_scale_bias")
+            layer.register_buffer("w13_scale_bias", w13_bias_new)
+            if hasattr(layer, "w2_scale_bias"):
+                delattr(layer, "w2_scale_bias")
+            layer.register_buffer("w2_scale_bias", w2_bias_new)
         else:
             layer.register_buffer("w13_scale_bias", w13_bias)
             layer.register_buffer("w2_scale_bias", w2_bias)
