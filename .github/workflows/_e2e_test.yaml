@@ -53,8 +53,10 @@ on:
         default: ''
 env:
   UV_INDEX_URL: http://cache-service.nginx-pypi-cache.svc.cluster.local/pypi/simple
-  UV_EXTRA_INDEX_URL: "https://mirrors.huaweicloud.com/ascend/repos/pypi https://triton-ascend.osinfra.cn/pypi/simple https://download.pytorch.org/whl/cpu/"
+  UV_EXTRA_INDEX_URL: "https://mirrors.huaweicloud.com/ascend/repos/pypi https://triton-ascend.osinfra.cn/pypi/simple"
   UV_INDEX_STRATEGY: unsafe-best-match
+  UV_INSECURE_HOST: cache-service.nginx-pypi-cache.svc.cluster.local
+  UV_HTTP_TIMEOUT: 120
   UV_NO_CACHE: 1
   UV_SYSTEM_PYTHON: 1
 
@@ -98,6 +100,7 @@ jobs:
 
           update-alternatives --install /usr/bin/clang clang /usr/bin/clang-15 20
           update-alternatives --install /usr/bin/clang++ clang++ /usr/bin/clang++-15 20
+          pip install uv
 
       - name: Checkout vllm-project/vllm repo
         uses: actions/checkout@v6
@@ -110,7 +113,7 @@ jobs:
       - name: Install vllm-project/vllm from source
         working-directory: ./vllm-empty
         run: |
-          VLLM_TARGET_DEVICE=empty pip install -e .
+          VLLM_TARGET_DEVICE=empty uv pip install -e .
           pip uninstall -y triton
 
       - name: Get csrc hash
@@ -137,12 +140,13 @@ jobs:
           PIP_EXTRA_INDEX_URL: "https://mirrors.huaweicloud.com/ascend/repos/pypi https://triton-ascend.osinfra.cn/pypi/simple https://download.pytorch.org/whl/cpu/"
         run: |
           pip install uc-manager
-          pip install -r requirements-dev.txt
+          uv pip install -v --no-progress -r requirements-dev.txt
           if find vllm_ascend -maxdepth 1 -name '*.so' -type f 2>/dev/null | grep -q .; then
-            COMPILE_CUSTOM_KERNELS=0 pip install -e .
+            COMPILE_CUSTOM_KERNELS=0 uv pip install -e .
           else
-            pip install -e .
+            uv pip install -e .
           fi
+          uv pip install --force-reinstall --no-deps triton-ascend==3.2.1
 
       - name: Run vllm-project/vllm-ascend test
         env:
@@ -228,6 +232,7 @@ jobs:
 
           update-alternatives --install /usr/bin/clang clang /usr/bin/clang-15 20
           update-alternatives --install /usr/bin/clang++ clang++ /usr/bin/clang++-15 20
+          pip install uv
 
       - name: Checkout vllm-project/vllm repo
         uses: actions/checkout@v6
@@ -267,12 +272,13 @@ jobs:
           PIP_EXTRA_INDEX_URL: "https://mirrors.huaweicloud.com/ascend/repos/pypi https://triton-ascend.osinfra.cn/pypi/simple"
         run: |
           pip install uc-manager
-          pip install -r requirements-dev.txt
+          uv pip install -v --no-progress -r requirements-dev.txt
           if find vllm_ascend -maxdepth 1 -name '*.so' -type f 2>/dev/null | grep -q .; then
-            COMPILE_CUSTOM_KERNELS=0 pip install -e .
+            COMPILE_CUSTOM_KERNELS=0 uv pip install -e .
           else
-            pip install -e .
+            uv pip install -e .
           fi
+          pip install --force-reinstall --no-deps triton-ascend==3.2.1
 
       - name: Run e2e test
         if: ${{ inputs.type == 'full' }}
@@ -365,6 +371,7 @@ jobs:
 
           update-alternatives --install /usr/bin/clang clang /usr/bin/clang-15 20
           update-alternatives --install /usr/bin/clang++ clang++ /usr/bin/clang++-15 20
+          pip install uv
 
       - name: Checkout vllm-project/vllm repo
         uses: actions/checkout@v6
@@ -404,12 +411,13 @@ jobs:
           PIP_EXTRA_INDEX_URL: "https://mirrors.huaweicloud.com/ascend/repos/pypi https://triton-ascend.osinfra.cn/pypi/simple https://download.pytorch.org/whl/cpu/"
         run: |
           pip install uc-manager
-          pip install -r requirements-dev.txt
+          uv pip install -v --no-progress -r requirements-dev.txt
           if find vllm_ascend -maxdepth 1 -name '*.so' -type f 2>/dev/null | grep -q .; then
-            COMPILE_CUSTOM_KERNELS=0 pip install -e .
+            COMPILE_CUSTOM_KERNELS=0 uv pip install -e .
           else
-            pip install -e .
+            uv pip install -e .
           fi
+          pip install --force-reinstall --no-deps triton-ascend==3.2.1
       - name: Run vllm-project/vllm-ascend test (light)
         env:
           VLLM_WORKER_MULTIPROC_METHOD: spawn
@@ -493,6 +501,7 @@ jobs:
 
           update-alternatives --install /usr/bin/clang clang /usr/bin/clang-15 20
           update-alternatives --install /usr/bin/clang++ clang++ /usr/bin/clang++-15 20
+          pip install uv
 
       - name: Checkout vllm-project/vllm repo
         uses: actions/checkout@v6
@@ -532,12 +541,13 @@ jobs:
           PIP_EXTRA_INDEX_URL: "https://mirrors.huaweicloud.com/ascend/repos/pypi https://triton-ascend.osinfra.cn/pypi/simple"
         run: |
           pip install uc-manager
-          pip install -r requirements-dev.txt
+          uv pip install -v --no-progress -r requirements-dev.txt
           if find vllm_ascend -maxdepth 1 -name '*.so' -type f 2>/dev/null | grep -q .; then
-            COMPILE_CUSTOM_KERNELS=0 pip install -e .
+            COMPILE_CUSTOM_KERNELS=0 uv pip install -e .
           else
-            pip install -e .
+            uv pip install -e .
           fi
+          pip install --force-reinstall --no-deps triton-ascend==3.2.1
       - name: Run vllm-project/vllm-ascend test (full)
         if: ${{ inputs.type == 'full' }}
         env:
@@ -595,7 +605,7 @@ jobs:
         run: |
           set -o pipefail
           # we must uninstall triton-ascend first, then triton. Otherwise, the triton folder will be left behind.
-          python3 -m pip uninstall -y triton-ascend triton
+          uv pip uninstall -y triton-ascend triton
           pytest -sv --durations=0 tests/e2e/multicard/2-cards/test_aclgraph_capture_replay.py \
             2>&1 | tee /tmp/e2e-non-triton.log
           exit ${PIPESTATUS[0]}
@@ -804,6 +814,7 @@ jobs:
 
           update-alternatives --install /usr/bin/clang clang /usr/bin/clang-15 20
           update-alternatives --install /usr/bin/clang++ clang++ /usr/bin/clang++-15 20
+          pip install uv
 
       - name: Checkout vllm-project/vllm repo
         uses: actions/checkout@v6
@@ -843,12 +854,13 @@ jobs:
           PIP_EXTRA_INDEX_URL: "https://mirrors.huaweicloud.com/ascend/repos/pypi https://triton-ascend.osinfra.cn/pypi/simple"
         run: |
           pip install uc-manager
-          pip install -r requirements-dev.txt
+          uv pip install -v --no-progress -r requirements-dev.txt
           if find vllm_ascend -maxdepth 1 -name '*.so' -type f 2>/dev/null | grep -q .; then
-            COMPILE_CUSTOM_KERNELS=0 pip install -e .
+            COMPILE_CUSTOM_KERNELS=0 uv pip install -e .
           else
-            pip install -e .
+            uv pip install -e .
           fi
+          pip install --force-reinstall --no-deps triton-ascend==3.2.1
 
       - name: Run vllm-project/vllm-ascend test for V1 Engine
         if: ${{ inputs.type == 'full' }}
@@ -932,6 +944,7 @@ jobs:
         run: |
           apt-get -y install `cat packages.txt`
           apt-get -y install gcc g++ cmake libnuma-dev
+          pip install uv
 
       - name: Checkout vllm-project/vllm repo
         uses: actions/checkout@v6
@@ -944,7 +957,7 @@ jobs:
       - name: Install vllm-project/vllm from source
         working-directory: ./vllm-empty
         run: |
-          VLLM_TARGET_DEVICE=empty pip install -e .
+          VLLM_TARGET_DEVICE=empty uv pip install -e .
 
       - name: Get csrc hash
         id: get_csrc_hash
@@ -970,17 +983,17 @@ jobs:
           PIP_EXTRA_INDEX_URL: "https://mirrors.huaweicloud.com/ascend/repos/pypi https://triton-ascend.osinfra.cn/pypi/simple https://download.pytorch.org/whl/cpu/"
         run: |
           pip install uc-manager
-          pip install -r requirements-dev.txt
+          uv pip install -v --no-progress -r requirements-dev.txt
           if find vllm_ascend -maxdepth 1 -name '*.so' -type f 2>/dev/null | grep -q .; then
-            COMPILE_CUSTOM_KERNELS=0 pip install -e .
+            COMPILE_CUSTOM_KERNELS=0 uv pip install -e .
           else
-            pip install -e .
+            uv pip install -e .
           fi
-          pip uninstall -y triton triton-ascend
+          uv pip uninstall -y triton triton-ascend
 
       - name: Uninstall triton-ascend (310p e2e-light)
         if: ${{ inputs.type == 'light' }}
-        run: pip uninstall -y triton-ascend triton
+        run: uv pip uninstall -y triton-ascend triton
 
       - name: Run vllm-project/vllm-ascend test
         if: ${{ inputs.contains_310 }}
@@ -1042,6 +1055,7 @@ jobs:
         run: |
           apt-get -y install `cat packages.txt`
           apt-get -y install gcc g++ cmake libnuma-dev
+          pip install uv
 
       - name: Checkout vllm-project/vllm repo
         uses: actions/checkout@v6
@@ -1054,7 +1068,7 @@ jobs:
       - name: Install vllm-project/vllm from source
         working-directory: ./vllm-empty
         run: |
-          VLLM_TARGET_DEVICE=empty pip install -e .
+          VLLM_TARGET_DEVICE=empty uv pip install -e .
 
       - name: Get csrc hash
         id: get_csrc_hash
@@ -1080,17 +1094,17 @@ jobs:
           PIP_EXTRA_INDEX_URL: "https://mirrors.huaweicloud.com/ascend/repos/pypi https://triton-ascend.osinfra.cn/pypi/simple https://download.pytorch.org/whl/cpu/"
         run: |
           pip install uc-manager
-          pip install -r requirements-dev.txt
+          uv pip install -v --no-progress -r requirements-dev.txt
           if find vllm_ascend -maxdepth 1 -name '*.so' -type f 2>/dev/null | grep -q .; then
-            COMPILE_CUSTOM_KERNELS=0 pip install -e .
+            COMPILE_CUSTOM_KERNELS=0 uv pip install -e .
           else
-            pip install -e .
+            uv pip install -e .
           fi
-          pip uninstall -y triton triton-ascend
+          uv pip uninstall -y triton triton-ascend
 
       - name: Uninstall triton-ascend (310p e2e-light)
         if: ${{ inputs.type == 'light' }}
-        run: pip uninstall -y triton-ascend triton
+        run: uv pip uninstall -y triton-ascend triton
 
       - name: Run vllm-project/vllm-ascend test
         env:
