@@ -13,6 +13,10 @@
  */
 #include "register/op_def_registry.h"
 
+#ifndef VLLM_ASCEND_950_SOC_CONFIG
+#define VLLM_ASCEND_950_SOC_CONFIG "ascend950"
+#endif
+
 namespace ops {
 class RecurrentGatedDeltaRule : public OpDef {
 public:
@@ -89,6 +93,16 @@ public:
             .ExtendCfgInfo("softsync.flag", "true");
         this->AICore().AddConfig("ascend910b", aicConfig);
         this->AICore().AddConfig("ascend910_93", aicConfig);
+
+        OpAICoreConfig a5Config;
+        a5Config.DynamicCompileStaticFlag(true)
+            .DynamicFormatFlag(true)
+            .DynamicRankSupportFlag(true)
+            .DynamicShapeSupportFlag(true)
+            .NeedCheckSupportFlag(false)
+            .ExtendCfgInfo("softsync.flag", "true")
+            .ExtendCfgInfo("opFile.value", "recurrent_gated_delta_rule_apt");
+        this->AICore().AddConfig(VLLM_ASCEND_950_SOC_CONFIG, a5Config);
     }
 };
 

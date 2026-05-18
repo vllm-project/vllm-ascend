@@ -15,6 +15,10 @@
  */
 #include "register/op_def_registry.h"
 
+#ifndef VLLM_ASCEND_950_SOC_CONFIG
+#define VLLM_ASCEND_950_SOC_CONFIG "ascend950"
+#endif
+
 namespace ops {
 
 class CausalConv1d : public OpDef {
@@ -86,6 +90,7 @@ public:
             .ExtendCfgInfo("coreType.value", "AiCore");
         this->AICore().AddConfig("ascend910b", aicoreConfig);
         this->AICore().AddConfig("ascend910_93", aicoreConfig);
+        this->AICore().AddConfig(VLLM_ASCEND_950_SOC_CONFIG, aicoreConfig);
     }
 };
 OP_ADD(CausalConv1d);

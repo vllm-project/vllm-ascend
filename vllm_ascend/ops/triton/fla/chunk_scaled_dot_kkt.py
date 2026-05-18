@@ -138,5 +138,6 @@ def chunk_scaled_dot_kkt_fwd(
         num_warps=8,
         num_stages=3,
         multibuffer=True,
+        inject_block_all=True,
     )
     return A

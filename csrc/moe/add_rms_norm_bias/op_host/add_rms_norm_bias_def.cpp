@@ -14,6 +14,10 @@
  */
 #include "register/op_def_registry.h"
 
+#ifndef VLLM_ASCEND_950_SOC_CONFIG
+#define VLLM_ASCEND_950_SOC_CONFIG "ascend950"
+#endif
+
 namespace ops {
 class AddRmsNormBias : public OpDef {
 public:
@@ -65,6 +69,13 @@ public:
 
         this->AICore().AddConfig("ascend910b");
         this->AICore().AddConfig("ascend910_93");
+
+        OpAICoreConfig a5Config;
+        a5Config.DynamicCompileStaticFlag(true)
+            .DynamicRankSupportFlag(true)
+            .DynamicShapeSupportFlag(true)
+            .ExtendCfgInfo("opFile.value", "add_rms_norm_bias");
+        this->AICore().AddConfig(VLLM_ASCEND_950_SOC_CONFIG, a5Config);
     }
 };
 OP_ADD(AddRmsNormBias);

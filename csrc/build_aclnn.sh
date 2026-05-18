@@ -172,6 +172,17 @@ elif [[ "$SOC_VERSION" =~ ^ascend910_93 ]]; then
     )
     CUSTOM_OPS=$(IFS=';'; echo "${CUSTOM_OPS_ARRAY[*]}")
     SOC_ARG="ascend910_93"
+elif [[ "$SOC_VERSION" =~ ^ascend950 ]]; then
+    log "matched SOC branch: ascend950"
+    CUSTOM_OPS_ARRAY=(
+        "add_rms_norm_bias"
+        "causal_conv1d"
+        "recurrent_gated_delta_rule"
+        "chunk_fwd_o"
+        "chunk_gated_delta_rule_fwd_h"
+    )
+    CUSTOM_OPS=$(IFS=';'; echo "${CUSTOM_OPS_ARRAY[*]}")
+    SOC_ARG="ascend950"
 else
     # others
     # currently, no custom aclnn ops for other series

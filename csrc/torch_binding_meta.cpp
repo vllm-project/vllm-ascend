@@ -598,6 +598,23 @@ at::Tensor npu_recurrent_gated_delta_rule_310_meta(
     at::Tensor output = at::empty_symint(value.sym_sizes(), value.options());
     return output;
 }
+
+at::Tensor npu_recurrent_gated_delta_rule_custom_meta(
+    const at::Tensor& query,
+    const at::Tensor& key,
+    const at::Tensor& value,
+    const at::Tensor& beta,
+    at::Tensor& state,
+    const at::Tensor& actual_seq_lengths,
+    const at::Tensor& ssm_state_indices,
+    const c10::optional<at::Tensor>& g,
+    const c10::optional<at::Tensor>& gk,
+    const c10::optional<at::Tensor>& num_accepted_tokens,
+    double scale_value)
+{
+    at::Tensor output = at::empty_symint(value.sym_sizes(), value.options());
+    return output;
+}
   
 std::vector<at::Tensor> moe_grouped_matmul_meta(
     at::Tensor x,
@@ -831,6 +848,9 @@ TORCH_LIBRARY_IMPL_EXPAND(CONCAT(_C, _ascend), Meta, ops) {
     ops.impl("npu_copy_and_expand_eagle_inputs", &vllm_ascend::meta::npu_copy_and_expand_eagle_inputs_meta);
     // causal_conv1d_fn
     ops.impl("npu_causal_conv1d_custom", &vllm_ascend::meta::npu_causal_conv1d_custom_meta);
+    // recurrent_gated_delta_rule custom
+    ops.impl("npu_recurrent_gated_delta_rule_custom",
+             &vllm_ascend::meta::npu_recurrent_gated_delta_rule_custom_meta);
     // moe_grouped_matmul
     ops.impl("moe_grouped_matmul", &vllm_ascend::meta::moe_grouped_matmul_meta);
     // Lightning indexer quant

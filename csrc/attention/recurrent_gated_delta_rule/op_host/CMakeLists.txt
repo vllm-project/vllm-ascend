@@ -14,6 +14,16 @@ add_ops_compile_options(
         -Werror
 )
 
+if ("ascend950" IN_LIST ASCEND_COMPUTE_UNIT)
+    add_ops_compile_options(
+        OP_NAME RecurrentGatedDeltaRule
+        COMPUTE_UNIT Ascend950PR_9599
+        OPTIONS
+            -mllvm
+            -cce-aicore-dcci-before-kernel-end=false
+    )
+endif()
+
 if (NOT BUILD_OPS_RTY_KERNEL)
     add_modules_sources(OPTYPE recurrent_gated_delta_rule ACLNNTYPE aclnn_exclude)
     target_include_directories(${OPHOST_NAME}_tiling_obj PRIVATE
