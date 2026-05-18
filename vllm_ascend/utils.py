@@ -873,7 +873,7 @@ def enable_sp(vllm_config=None, enable_shared_expert_dp: bool = False) -> bool:
             _ENABLE_SP = True
             logger.info("shared_expert_dp requires enable_sp = True. has set enable_sp to True")
 
-    return _ENABLE_SP
+    return bool(_ENABLE_SP)
 
 
 # TODO remove it after vllm has this func
