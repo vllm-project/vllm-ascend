@@ -92,6 +92,10 @@ class KVPoolWorker:
             extra_config.get("h2d_stagger_dynamic_addrs_per_us", 0))
         self.h2d_stagger_max_us = int(
             extra_config.get("h2d_stagger_max_us", 0))
+        self.layerwise_max_transfer_blocks = int(
+            extra_config.get("layerwise_max_transfer_blocks", 0))
+        self.layerwise_max_transfer_bytes = int(
+            extra_config.get("layerwise_max_transfer_bytes", 0))
         self.original_block_size = vllm_config.cache_config.block_size
         self.block_size = vllm_config.cache_config.block_size
 
@@ -248,7 +252,9 @@ class KVPoolWorker:
                     self.layer_save_finished_events,
                     self.sync_save_events,
                     self.enable_kv_events,
-                    self.layer_transfer_finished_events
+                    self.layer_transfer_finished_events,
+                    self.layerwise_max_transfer_blocks,
+                    self.layerwise_max_transfer_bytes,
                 )
                 self.kv_send_thread.start()
             ready_event = threading.Event()
@@ -271,6 +277,8 @@ class KVPoolWorker:
                 self.h2d_stagger_group_size,
                 self.h2d_stagger_dynamic_addrs_per_us,
                 self.h2d_stagger_max_us,
+                self.layerwise_max_transfer_blocks,
+                self.layerwise_max_transfer_bytes,
             )
             self.kv_recv_thread.start()
             ready_event.wait()

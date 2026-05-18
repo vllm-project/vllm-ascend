@@ -41,6 +41,16 @@ def _circular_shift_to_list(value: np.ndarray, offset: int) -> list:
     return np.concatenate((value[offset:], value[:offset])).tolist()
 
 
+def _circular_shift_array(value: np.ndarray, offset: int) -> np.ndarray:
+    length = len(value)
+    if length == 0:
+        return value
+    offset %= length
+    if offset == 0:
+        return value
+    return np.concatenate((value[offset:], value[:offset]))
+
+
 def _select_rank_data(value, start: int, step: int) -> list:
     return value[start::step].tolist()
 
@@ -223,6 +233,7 @@ class KVTransferThread(threading.Thread):
         self.tp_size = tp_size
         self.dcp_size = dcp_size
         self.token_database = token_database
+        self.num_addrs_per_block = len(token_database.block_len)
         self.done_task_lock = threading.Lock()
         self.request_queue: queue.Queue[Any] = queue.Queue()
         # TODO(jianzs): make this configurable
@@ -262,6 +273,76 @@ class KVTransferThread(threading.Thread):
     def set_finished_request(self, req_id):
         with self.done_task_lock:
             self.finished_requests.add(req_id)
+
+    @staticmethod
+    def _split_transfer_packets(
+        gvas: np.ndarray,
+        addrs: np.ndarray,
+        sizes: np.ndarray,
+        max_transfer_bytes: int,
+    ) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+        if max_transfer_bytes <= 0:
+            return gvas, addrs, sizes
+
+        split_counts = (sizes + max_transfer_bytes - 1) // max_transfer_bytes
+        total_splits = int(split_counts.sum())
+        if total_splits == sizes.shape[0]:
+            return gvas, addrs, sizes
+
+        split_indices = np.arange(int(split_counts.max()), dtype=np.int64)
+        split_mask = split_indices[:, None] < split_counts[None, :]
+        entry_indices = np.broadcast_to(
+            np.arange(sizes.shape[0], dtype=np.int64),
+            split_mask.shape,
+        )[split_mask]
+        transfer_offsets = np.broadcast_to(
+            split_indices[:, None] * max_transfer_bytes,
+            split_mask.shape,
+        )[split_mask]
+
+        split_gvas = gvas[entry_indices] + transfer_offsets
+        split_addrs = addrs[entry_indices] + transfer_offsets
+        split_sizes = np.minimum(
+            max_transfer_bytes,
+            sizes[entry_indices] - transfer_offsets,
+        )
+        return split_gvas, split_addrs, split_sizes
+
+    def _batch_copy_with_limits(
+        self,
+        gvas: np.ndarray,
+        addrs: np.ndarray,
+        sizes: np.ndarray,
+        direction: int,
+        max_transfer_blocks: int,
+        max_transfer_bytes: int,
+    ) -> int:
+        if len(gvas) == 0:
+            return 0
+
+        max_transfer_addrs = 0
+        if max_transfer_blocks > 0:
+            max_transfer_addrs = max_transfer_blocks * self.num_addrs_per_block
+        if max_transfer_addrs <= 0:
+            max_transfer_addrs = len(gvas)
+
+        for start in range(0, len(gvas), max_transfer_addrs):
+            end = start + max_transfer_addrs
+            split_gvas, split_addrs, split_sizes = self._split_transfer_packets(
+                gvas[start:end],
+                addrs[start:end],
+                sizes[start:end],
+                max_transfer_bytes,
+            )
+            res = self.m_store.store.batch_copy(
+                split_gvas.tolist(),
+                split_addrs.tolist(),
+                split_sizes.tolist(),
+                direction,
+            )
+            if res != 0:
+                return res
+        return 0
 
     def run(self):
         """Run the thread to handle KV cache transfer requests."""
@@ -527,6 +608,8 @@ class KVCacheStoreLayerSendingThread(KVTransferThread):
         sync_save_events: list[torch.npu.Event],
         enable_kv_event: bool = False,
         layer_transfer_finished_events = None,
+        max_transfer_blocks: int = 0,
+        max_transfer_bytes: int = 0,
     ):
         super().__init__(
             m_store,
@@ -545,6 +628,8 @@ class KVCacheStoreLayerSendingThread(KVTransferThread):
         self.sync_save_events = sync_save_events
         self.stored_requests = defaultdict[str, int](int)
         self.layer_transfer_finished_events = layer_transfer_finished_events
+        self.max_transfer_blocks = max_transfer_blocks
+        self.max_transfer_bytes = max_transfer_bytes
         self.layer_batch_builder = LayerBatchBuilder(
             token_database,
             my_key_index,
@@ -596,16 +681,20 @@ class KVCacheStoreLayerSendingThread(KVTransferThread):
             return
         layer_id = req_meta.layer_id
         rank_start = self.tp_rank % self.put_step
-        addr_list = _select_rank_data(req_meta.addr_array,
-                                      rank_start, self.put_step)
-        size_list = _select_rank_data(req_meta.size_array,
-                                      rank_start, self.put_step)
-        gvas_list = _select_rank_data(req_meta.gvas_array,
-                                      rank_start, self.put_step)
+        addr_array = req_meta.addr_array[rank_start::self.put_step]
+        size_array = req_meta.size_array[rank_start::self.put_step]
+        gvas_array = req_meta.gvas_array[rank_start::self.put_step]
         for req_id in req_meta.req_ids:
             self.dec_stored_request(req_id)
         self.sync_save_events[layer_id].synchronize()
-        res = self.m_store.store.batch_copy(gvas_list, addr_list, size_list, 0)
+        res = self._batch_copy_with_limits(
+            gvas_array,
+            addr_array,
+            size_array,
+            0,
+            self.max_transfer_blocks,
+            self.max_transfer_bytes,
+        )
         # wait for KV transfer (PD)
         # if self.layer_transfer_finished_events is not None:
         #     is_finish = self.layer_transfer_finished_events[layer_id].wait(timeout=10)  # try---cache
@@ -647,6 +736,8 @@ class KVCacheStoreLayerRecvingThread(KVTransferThread):
         h2d_stagger_group_size: int = 0,
         h2d_stagger_dynamic_addrs_per_us: int = 0,
         h2d_stagger_max_us: int = 0,
+        max_transfer_blocks: int = 0,
+        max_transfer_bytes: int = 0,
     ):
         super().__init__(
             m_store,
@@ -666,6 +757,8 @@ class KVCacheStoreLayerRecvingThread(KVTransferThread):
         self.h2d_stagger_group_size = h2d_stagger_group_size
         self.h2d_stagger_dynamic_addrs_per_us = h2d_stagger_dynamic_addrs_per_us
         self.h2d_stagger_max_us = h2d_stagger_max_us
+        self.max_transfer_blocks = max_transfer_blocks
+        self.max_transfer_bytes = max_transfer_bytes
         self.layer_batch_builder = LayerBatchBuilder(
             token_database,
             my_key_index,
@@ -733,21 +826,27 @@ class KVCacheStoreLayerRecvingThread(KVTransferThread):
             logger.debug(f">>>>>>>>>>>>>>>>>>>> clear save layer {wait_for_save}")
             self.layer_save_finished_events[wait_for_save].clear()
 
-        gvas_list_c = _circular_shift_to_list(
+        gvas_array = _circular_shift_array(
             req_meta.gvas_array,
             (self.tp_rank * len(req_meta.gvas_array)) // self.tp_size,
         )
-        addr_list_c = _circular_shift_to_list(
+        addr_array = _circular_shift_array(
             req_meta.addr_array,
             (self.tp_rank * len(req_meta.addr_array)) // self.tp_size,
         )
-        size_list_c = _circular_shift_to_list(
+        size_array = _circular_shift_array(
             req_meta.size_array,
             (self.tp_rank * len(req_meta.size_array)) // self.tp_size,
         )
-        self._stagger_h2d_submit(layer_id, len(gvas_list_c))
-        # TODO 这里需要进一步拆分数据包大小
-        res = self.m_store.store.batch_copy(gvas_list_c, addr_list_c, size_list_c, 1)
+        self._stagger_h2d_submit(layer_id, len(gvas_array))
+        res = self._batch_copy_with_limits(
+            gvas_array,
+            addr_array,
+            size_array,
+            1,
+            self.max_transfer_blocks,
+            self.max_transfer_bytes,
+        )
         if res != 0:
             logger.error("Layerwise %d load batch_copy failed with return code %d", layer_id, res)
         elif layer_id == self.final_layer_id:
