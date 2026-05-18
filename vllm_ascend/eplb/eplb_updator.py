@@ -44,6 +44,12 @@ class EplbUpdator:
         self.world_size = dist.get_world_size()
         self.device = local_load.device
         self.eplb_loader.num_layers = self.adaptor.num_dense_layers + self.adaptor.num_moe_layers
+        logger.info(
+            "[EPLB-DEBUG] rank=%s set_adaptor: num_moe_layers=%s num_dense_layers=%s "
+            "expert_heat_collection_interval=%s algorithm_execution_interval=%s",
+            self.rank_id, self.num_moe_layers, self.adaptor.num_dense_layers,
+            self.expert_heat_collection_interval, self.algorithm_execution_interval,
+        )
 
     def init_eplb(self, expert_map_path, process):
         self.rank_id = dist.get_rank()
@@ -99,6 +105,13 @@ class EplbUpdator:
         self.eplb_process.planner_q.put(1)
 
     def forward_before(self):
+        logger.info(
+            "[EPLB-DEBUG] rank=%s cur_iter=%s forward_before ENTER "
+            "get_update=%s update_weight=%s wakeup=%s",
+            self.rank_id, self.cur_iterations,
+            self.get_update_info_flag(), self.update_expert_weight_flag(),
+            self.wakeup_eplb_worker_flag(),
+        )
         # Batch after eplb process being triggered, get update info provided by eplb process
         if self.get_update_info_flag():
             logger.info(
@@ -146,8 +159,19 @@ class EplbUpdator:
                 "[EPLB-DEBUG] rank=%s cur_iter=%s forward_before: asyn_expert_weight_transfer done, reqs count=%s",
                 self.rank_id, self.cur_iterations, len(self.reqs),
             )
+        logger.info(
+            "[EPLB-DEBUG] rank=%s cur_iter=%s forward_before EXIT",
+            self.rank_id, self.cur_iterations,
+        )
 
     def forward_end(self):
+        logger.info(
+            "[EPLB-DEBUG] rank=%s cur_iter=%s forward_end ENTER "
+            "get_update=%s update_weight=%s wakeup=%s",
+            self.rank_id, self.cur_iterations,
+            self.get_update_info_flag(), self.update_expert_weight_flag(),
+            self.wakeup_eplb_worker_flag(),
+        )
         if self.wakeup_eplb_worker_flag():
             logger.info(
                 "[EPLB-DEBUG] rank=%s cur_iter=%s forward_end: wakeup_eplb_worker_flag triggered",
@@ -172,6 +196,10 @@ class EplbUpdator:
             )
 
         self.update_iteration()
+        logger.info(
+            "[EPLB-DEBUG] rank=%s cur_iter=%s forward_end EXIT (after update_iteration)",
+            self.rank_id, self.cur_iterations,
+        )
 
     def compute_and_set_moe_load(self):
         logger.info(
