@@ -1,5 +1,8 @@
 """Test V310 kernel via ctypes API against golden CPU reference."""
-import os, ctypes, torch, torch_npu
+import ctypes
+import os
+
+import torch
 
 torch.manual_seed(42)
 torch.npu.set_device(0)
@@ -61,7 +64,9 @@ def call_v310(query, key, value, beta, state, seq_lens, indices, g, nat, scale):
 
 
 def golden(query, key, value, state, beta, scale, seq_lens, indices, g, nat):
-    k = key.float(); q = query.float(); v = value.float()
+    k = key.float()
+    q = query.float()
+    v = value.float()
     S = state.clone().float()
     T, nv, Dv = v.shape
     nk = q.shape[1]
