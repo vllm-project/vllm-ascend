@@ -21,7 +21,6 @@ import torch.distributed as dist
 import vllm.envs as envs
 from vllm.logger import logger
 
-from vllm.distributed.parallel_state import get_pp_group
 from vllm_ascend.distributed.parallel_state import get_dynamic_eplb_group
 from vllm_ascend.eplb.adaptor.vllm_adaptor import VllmEplbAdaptor
 from vllm_ascend.eplb.core.eplb_device_transfer_loader import D2DExpertWeightLoader
@@ -45,12 +44,6 @@ class EplbUpdator:
         self.world_size = dist.get_world_size()
         self.device = local_load.device
         self.eplb_loader.num_layers = self.adaptor.num_dense_layers + self.adaptor.num_moe_layers
-        logger.info(
-            "[EPLB-DEBUG] rank=%s set_adaptor: num_moe_layers=%s num_dense_layers=%s "
-            "expert_heat_collection_interval=%s algorithm_execution_interval=%s",
-            self.rank_id, self.num_moe_layers, self.adaptor.num_dense_layers,
-            self.expert_heat_collection_interval, self.algorithm_execution_interval,
-        )
 
     def init_eplb(self, expert_map_path, process):
         self.rank_id = dist.get_rank()
@@ -106,42 +99,17 @@ class EplbUpdator:
         self.eplb_process.planner_q.put(1)
 
     def forward_before(self):
-        logger.info(
-            "[EPLB-DEBUG] rank=%s cur_iter=%s forward_before ENTER "
-            "get_update=%s update_weight=%s wakeup=%s",
-            self.rank_id, self.cur_iterations,
-            self.get_update_info_flag(), self.update_expert_weight_flag(),
-            self.wakeup_eplb_worker_flag(),
-        )
         # Batch after eplb process being triggered, get update info provided by eplb process
         if self.get_update_info_flag():
-            logger.info(
-                "[EPLB-DEBUG] rank=%s cur_iter=%s forward_before: about to block_update_q.get()",
-                self.rank_id, self.cur_iterations,
-            )
             self.update_info_all = self.eplb_process.block_update_q.get()
-            logger.info(
-                "[EPLB-DEBUG] rank=%s cur_iter=%s forward_before: block_update_q.get() returned %s layers",
-                self.rank_id, self.cur_iterations, len(self.update_info_all),
-            )
         if self.update_expert_weight_flag():
             (expert_send_info, expert_recv_info, updated_expert_map, log2phy_map, layer_id) = self.update_info_all.pop(
                 0
             )
             global_layer_id = self.adaptor.moe_registry.get_global_index(layer_id)
-            logger.info(
-                "[EPLB-DEBUG] rank=%s cur_iter=%s forward_before: processing layer local=%s global=%s, "
-                "remaining=%s, send_info=%s, recv_info=%s",
-                self.rank_id, self.cur_iterations, layer_id, global_layer_id,
-                len(self.update_info_all), expert_send_info, expert_recv_info,
-            )
             log2phy_map_this_rank = torch.from_numpy(numpy.array(log2phy_map))
             self.eplb_loader.set_log2phy_map(log2phy_map_this_rank)
             updated_expert_map_this_rank = torch.from_numpy(numpy.array(updated_expert_map))
-            logger.info(
-                "[EPLB-DEBUG] rank=%s cur_iter=%s forward_before: calling generate_expert_d2d_transfer_task for layer %s",
-                self.rank_id, self.cur_iterations, global_layer_id,
-            )
             self.eplb_loader.generate_expert_d2d_transfer_task(
                 expert_send_info,
                 expert_recv_info,
@@ -151,75 +119,21 @@ class EplbUpdator:
 
             # set asynchronous stream for d2d expert weight update
             self.reqs = []
-            logger.info(
-                "[EPLB-DEBUG] rank=%s cur_iter=%s forward_before: calling asyn_expert_weight_transfer",
-                self.rank_id, self.cur_iterations,
-            )
             self.eplb_loader.asyn_expert_weight_transfer(self.reqs)
-            logger.info(
-                "[EPLB-DEBUG] rank=%s cur_iter=%s forward_before: asyn_expert_weight_transfer done, reqs count=%s",
-                self.rank_id, self.cur_iterations, len(self.reqs),
-            )
-        logger.info(
-            "[EPLB-DEBUG] rank=%s cur_iter=%s forward_before EXIT",
-            self.rank_id, self.cur_iterations,
-        )
 
     def forward_end(self):
-        import os as _os
-        logger.info(
-            "[EPLB-DEBUG] rank=%s cur_iter=%s forward_end ENTER "
-            "get_update=%s update_weight=%s wakeup=%s pp_rank=%s pp_last=%s",
-            self.rank_id, self.cur_iterations,
-            self.get_update_info_flag(), self.update_expert_weight_flag(),
-            self.wakeup_eplb_worker_flag(),
-            getattr(get_pp_group(), 'rank_in_group', -1),
-            getattr(get_pp_group(), 'is_last_rank', None),
-        )
         if self.wakeup_eplb_worker_flag():
-            logger.info(
-                "[EPLB-DEBUG] rank=%s cur_iter=%s forward_end: wakeup_eplb_worker_flag triggered",
-                self.rank_id, self.cur_iterations,
-            )
             self.compute_and_set_moe_load()
             self.wakeup_eplb_worker()
-            logger.info(
-                "[EPLB-DEBUG] rank=%s cur_iter=%s forward_end: worker woken up",
-                self.rank_id, self.cur_iterations,
-            )
 
         if self.update_expert_weight_flag() and self.expert_map_record_path is None:
-            logger.info(
-                "[EPLB-DEBUG] rank=%s cur_iter=%s forward_end: calling update_expert_map_and_weight",
-                self.rank_id, self.cur_iterations,
-            )
             self.eplb_loader.update_expert_map_and_weight(self.reqs)
-            logger.info(
-                "[EPLB-DEBUG] rank=%s cur_iter=%s forward_end: update_expert_map_and_weight done",
-                self.rank_id, self.cur_iterations,
-            )
 
         self.update_iteration()
-        logger.info(
-            "[EPLB-DEBUG] rank=%s cur_iter=%s forward_end EXIT (after update_iteration)",
-            self.rank_id, self.cur_iterations,
-        )
 
     def compute_and_set_moe_load(self):
-        logger.info(
-            "[EPLB-DEBUG] rank=%s cur_iter=%s compute_and_set_moe_load START, local_load shape=%s",
-            self.rank_id, self.cur_iterations, self.adaptor.get_rank_expert_workload().shape,
-        )
         local_load = self.adaptor.get_rank_expert_workload().unsqueeze(1)
-        logger.info(
-            "[EPLB-DEBUG] rank=%s cur_iter=%s before all_gather, group=%s world_size=%s",
-            self.rank_id, self.cur_iterations, self.comm_group.unique_name, self.comm_group.world_size,
-        )
         moe_load = self.comm_group.all_gather(local_load, dim=1).cpu()
-        logger.info(
-            "[EPLB-DEBUG] rank=%s cur_iter=%s after all_gather, moe_load shape=%s",
-            self.rank_id, self.cur_iterations, moe_load.shape,
-        )
 
         if self.multi_stage:
             moe_load = moe_load.permute(2, 0, 1, 3)
