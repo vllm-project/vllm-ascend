@@ -111,7 +111,8 @@ std::tuple<at::Tensor &, at::Tensor &, at::Tensor &, at::Tensor &, at::Tensor &>
 
 std::tuple<at::Tensor, at::Tensor, at::Tensor> grouped_matmul_swiglu_quant(
     const at::Tensor &x, const at::Tensor &weight, const at::Tensor &weight_scale, const at::Tensor &x_scale,
-    const at::Tensor &group_list, const c10::optional<at::Tensor> &bias, const c10::optional<at::Tensor> &offset)
+    const at::Tensor &group_list, const c10::optional<at::Tensor> &bias, const c10::optional<at::Tensor> &offset,
+    double swiglu_limit)
 {
     int m = x.sizes()[0];
     int n = weight.sizes()[2];
@@ -132,7 +133,8 @@ std::tuple<at::Tensor, at::Tensor, at::Tensor> grouped_matmul_swiglu_quant_weigh
     const at::Tensor & x_scale,
     const at::Tensor & group_list,
     const c10::optional<at::Tensor> & bias,
-    const c10::optional<at::Tensor> & offset)
+    const c10::optional<at::Tensor> & offset,
+    double swiglu_limit)
 {
     auto x_size = x.sizes();
     int n = weight[0].sizes()[1];
@@ -146,6 +148,37 @@ std::tuple<at::Tensor, at::Tensor, at::Tensor> grouped_matmul_swiglu_quant_weigh
     return std::tuple<at::Tensor, at::Tensor, at::Tensor>(output, output_scale, output_offset);
 }
 
+std::tuple<at::Tensor, at::Tensor> grouped_matmul_swiglu_quant_v2_meta(
+    const at::Tensor & x,
+    const at::TensorList &weight,
+    const at::TensorList &weight_scale,
+    const at::Tensor & x_scale,
+    const at::Tensor & group_list,
+    const c10::optional<at::Tensor> & smooth_scale,
+    const c10::optional<at::TensorList> weight_assist_matrix,
+    const c10::optional<at::Tensor> & bias,
+    c10::optional<int64_t> dequant_mode,
+    c10::optional<int64_t> dequant_dtype,
+    c10::optional<int64_t> quant_mode,
+    c10::optional<int64_t> quant_dtype,
+    bool transpose_weight,
+    int64_t group_list_type,
+    at::IntArrayRef tuning_config,
+    double swiglu_limit)
+{
+
+    auto x_size = x.sizes();
+    int n = weight_scale[0].sizes().back();
+    int m = x_size[0];
+    int k = x_size[1];
+
+    at::Tensor output =  at::empty({m, n/2}, x.options().dtype(at::kChar));
+    at::Tensor output_scale =  at::empty({m}, x.options().dtype(at::kFloat));
+
+
+
+    return std::tuple<at::Tensor, at::Tensor>(output, output_scale);
+}
 std::tuple<at::Tensor, at::Tensor> dispatch_gmm_combine_decode_meta(
     const at::Tensor &x,
     const at::Tensor &expert_ids,
@@ -173,9 +206,9 @@ std::tuple<at::Tensor, at::Tensor> dispatch_gmm_combine_decode_meta(
 
     bool is_shared_expert = (ep_rank_id < shared_expert_rank_num);
     int64_t num_local_experts = is_shared_expert ? 1 : moe_expert_num / (ep_rank_size - shared_expert_rank_num);
-    auto opts = expert_ids.options().dtype(at::kLong); 
-    at::Tensor expert_token_nums = at::empty({num_local_experts}, opts.device(at::kMeta)); 
-    
+    auto opts = expert_ids.options().dtype(at::kLong);
+    at::Tensor expert_token_nums = at::empty({num_local_experts}, opts.device(at::kMeta));
+
     return {output, expert_token_nums};
 }
 
@@ -302,15 +335,15 @@ std::tuple<at::Tensor, at::Tensor, at::Tensor, at::Tensor> npu_moe_init_routing_
     }
 
     int64_t x_dim = x.dim();
-    TORCH_CHECK(x_dim == DIM_X, "The x should be ", DIM_X, 
+    TORCH_CHECK(x_dim == DIM_X, "The x should be ", DIM_X,
                 "-Dimension, current is ", x_dim, "-Dimension.");
 
     int64_t expert_idx_dim = expert_idx.dim();
-    TORCH_CHECK(expert_idx_dim == DIM_EXPERT_IDX, "The expert_idx should be ", DIM_EXPERT_IDX, 
+    TORCH_CHECK(expert_idx_dim == DIM_EXPERT_IDX, "The expert_idx should be ", DIM_EXPERT_IDX,
                 "-Dimension, current is ", expert_idx_dim, "-Dimension.");
 
     int64_t active_expert_range_length = active_expert_range.size();
-    TORCH_CHECK(active_expert_range_length == LENGTH_ACTIVE_EXPERT_RANGE, "The active_expert_range should be ", LENGTH_ACTIVE_EXPERT_RANGE, 
+    TORCH_CHECK(active_expert_range_length == LENGTH_ACTIVE_EXPERT_RANGE, "The active_expert_range should be ", LENGTH_ACTIVE_EXPERT_RANGE,
                 "-Dimension, current is ", expert_idx_dim, "-Dimension.");
 
     int expert_length = active_expert_range[1] - active_expert_range[0];
@@ -374,7 +407,7 @@ std::tuple<at::Tensor,at::Tensor, at::Tensor> moe_gating_top_k_meta(
     double routed_scaling_factor,
     double eps,
     const c10::optional<at::Tensor>& bias_opt
-    
+
     )
 {
     TORCH_CHECK(x.dim() == 2, "The x should be 2D");
@@ -412,7 +445,7 @@ std::tuple<at::Tensor,at::Tensor, at::Tensor> npu_add_rms_norm_bias_meta(
     int64_t diff = dim_x - dim_gamma;
     c10::SymDimVector new_shape;
     at::Tensor rstd;
-    
+
     if (diff > 0) {
         new_shape.reserve(dim_x);
         auto x1_sizes = x1.sym_sizes();
@@ -431,25 +464,25 @@ std::tuple<at::Tensor,at::Tensor, at::Tensor> npu_add_rms_norm_bias_meta(
     return std::tuple<at::Tensor, at::Tensor, at::Tensor>(y, rstd, x);
 }
 
-at::Tensor npu_reshape_and_cache_bnsd_meta(const at::Tensor& hashq, 
+at::Tensor npu_reshape_and_cache_bnsd_meta(const at::Tensor& hashq,
                                            const at::Tensor& hashkCache,
                                            const at::Tensor& slotMapping,
                                            const at::Tensor& seqLen,
                                            const at::Tensor& hashkCacheOut) {
-    at::Tensor output = at::empty(hashkCache.sizes(), hashkCache.options().dtype(hashkCache.dtype()).device(hashkCache.device()));                                        
+    at::Tensor output = at::empty(hashkCache.sizes(), hashkCache.options().dtype(hashkCache.dtype()).device(hashkCache.device()));
     return output;
 }
 
 
-at::Tensor npu_hamming_dist_top_k_meta(const at::Tensor &hashq, 
+at::Tensor npu_hamming_dist_top_k_meta(const at::Tensor &hashq,
                                        const at::Tensor &hashkCache,
                                        const at::Tensor& hashkCacheRope,
                                        const at::Tensor &topN,
-                                       const at::Tensor &seqLen, 
+                                       const at::Tensor &seqLen,
                                        const c10::optional<at::Tensor> &chunkSize,
-                                       const c10::optional<int64_t> maxSeqLen, 
-                                       const c10::optional<int64_t> sink, 
-                                       const c10::optional<int64_t> recent, 
+                                       const c10::optional<int64_t> maxSeqLen,
+                                       const c10::optional<int64_t> sink,
+                                       const c10::optional<int64_t> recent,
                                        const c10::optional<int64_t> supportOffload,
                                        const c10::optional<at::Tensor> &blockTable,
                                        const c10::optional<at::Tensor> &mask,
@@ -460,13 +493,13 @@ at::Tensor npu_hamming_dist_top_k_meta(const at::Tensor &hashq,
     uint32_t MAX_BLOCK_PER_REQ_INHSA = 512;
 
     auto n_bs = hashq.size(0);
-    auto n_kv_heads = hashkCache.size(1); 
+    auto n_kv_heads = hashkCache.size(1);
     auto n_max_kv = MAX_BLOCK_PER_REQ_INHSA;
     at::Tensor out = at::empty({n_bs, n_kv_heads, n_max_kv}, torch::TensorOptions().dtype(torch::kInt32).device(hashq.device()));
     return out;
 }
 
-at::Tensor npu_sign_bits_pack_meta(const at::Tensor& input, 
+at::Tensor npu_sign_bits_pack_meta(const at::Tensor& input,
                                    const int64_t size) {
     int64_t ySize = (input.size(0) + 7) / 8;
     int64_t outDim = 0;
@@ -474,7 +507,7 @@ at::Tensor npu_sign_bits_pack_meta(const at::Tensor& input,
         outDim = ySize / size;
     }
 
-    at::Tensor out = torch::empty({size, outDim}, torch::TensorOptions().dtype(torch::kUInt8).device(input.device()));                                 
+    at::Tensor out = torch::empty({size, outDim}, torch::TensorOptions().dtype(torch::kUInt8).device(input.device()));
     return out;
 }
 
@@ -598,7 +631,7 @@ at::Tensor npu_recurrent_gated_delta_rule_310_meta(
     at::Tensor output = at::empty_symint(value.sym_sizes(), value.options());
     return output;
 }
-  
+
 std::vector<at::Tensor> moe_grouped_matmul_meta(
     at::Tensor x,
     at::Tensor weight,
@@ -627,6 +660,492 @@ std::vector<at::Tensor> moe_grouped_matmul_meta(
     return y;
 }
 
+std::tuple<at::Tensor, at::Tensor, at::Tensor> moe_gating_top_k_hash_meta(
+    const at::Tensor& x,
+    int64_t k,
+    const c10::optional<at::Tensor>& bias_opt,
+    const c10::optional<at::Tensor>& input_ids_opt,
+    const c10::optional<at::Tensor>& tid2eid_opt,
+    int64_t k_group,
+    int64_t group_count,
+    double routed_scaling_factor,
+    double eps,
+    int64_t group_select_mode,
+    int64_t renorm,
+    int64_t norm_type,
+    bool out_flag)
+{
+    TORCH_CHECK(x.dim() == 2, "x must be 2D, but got dim=", x.dim());
+    TORCH_CHECK(
+        x.scalar_type() == at::kHalf || x.scalar_type() == at::kFloat || x.scalar_type() == at::kBFloat16,
+        "x dtype must be float16/float32/bfloat16, but got ", x.scalar_type());
+
+    TORCH_CHECK(k > 0, "k must be > 0, but got k=", k);
+    TORCH_CHECK(k_group >= 1, "k_group must be >= 1, but got k_group=", k_group);
+    TORCH_CHECK(group_count >= 1, "group_count must be >= 1, but got group_count=", group_count);
+
+    TORCH_CHECK(group_select_mode == 0 || group_select_mode == 1,
+                "group_select_mode must be 0 or 1, but got ", group_select_mode);
+    TORCH_CHECK(renorm == 0,
+                "renorm can only be 0 currently, but got ", renorm);
+    TORCH_CHECK(norm_type == 0 || norm_type == 1 || norm_type ==2,
+                "norm_type must be 0 (softmax) or 1 (sigmoid) or 2 (softplus), but got ", norm_type);
+
+    TORCH_CHECK(eps > 0.0, "eps must be > 0, but got ", eps);
+    TORCH_CHECK(routed_scaling_factor > 0.0,
+                "routed_scaling_factor must be > 0, but got ", routed_scaling_factor);
+
+    const auto sizes = x.sizes();
+    const int64_t rows = sizes[0];
+    const int64_t expert_num = sizes[1];
+
+    TORCH_CHECK(expert_num > 0, "expert_num must be > 0");
+    TORCH_CHECK(expert_num <= 2048,
+                "expert_num (E) must be <= 2048, but got ", expert_num);
+
+    if (bias_opt.has_value() && bias_opt->defined()) {
+        const auto& bias = *bias_opt;
+        TORCH_CHECK(bias.dim() == 1, "bias must be 1D, but got dim=", bias.dim());
+        TORCH_CHECK(bias.size(0) == expert_num,
+                    "bias.size(0) must equal expert_num. bias.size(0)=",
+                    bias.size(0), ", expert_num=", expert_num);
+        TORCH_CHECK(bias.scalar_type() == x.scalar_type(),
+                    "bias dtype must equal x dtype. x=", x.scalar_type(),
+                    ", bias=", bias.scalar_type());
+    }
+
+    if (input_ids_opt.has_value() && input_ids_opt->defined()) {
+        const auto& input_ids = *input_ids_opt;
+        TORCH_CHECK(input_ids.scalar_type() == at::kInt || input_ids.scalar_type() == at::kLong,
+                    "input_ids dtype must be int32 or int64, but got ", input_ids.scalar_type());
+        TORCH_CHECK(input_ids.numel() == rows,
+                    "input_ids.numel() must equal x.size(0). input_ids.numel()=",
+                    input_ids.numel(), ", rows=", rows);
+    }
+
+    if (tid2eid_opt.has_value() && tid2eid_opt->defined()) {
+        const auto& tid2eid = *tid2eid_opt;
+        TORCH_CHECK(tid2eid.scalar_type() == at::kInt || tid2eid.scalar_type() == at::kLong,
+                    "tid2eid dtype must be int32 or int64, but got ", tid2eid.scalar_type());
+        TORCH_CHECK(tid2eid.dim() >= 1, "tid2eid must have dim>=1, but got dim=", tid2eid.dim());
+    }
+
+    at::Tensor y = at::empty({rows, k}, x.options());
+    at::Tensor expert_idx = at::empty({rows, k}, x.options().dtype(at::kInt));
+    at::Tensor out = at::empty({rows, expert_num}, x.options().dtype(at::kFloat));
+
+    return {y, expert_idx, out};
+}
+
+std::tuple<at::Tensor> construct_compressor_output_tensor(const at::Tensor &x, const at::Tensor &norm_weight,
+                                                          const at::Tensor &rope_sin, int64_t cmp_ratio, int64_t coff)
+{
+    constexpr int DIM_3 = 3;
+    auto x_dim = x.dim();
+    at::SmallVector<int64_t, 8> cmp_kv_size;
+    at::Tensor cmp_kv;
+    auto cmp_s = 0;
+    if (x_dim == DIM_3) {
+        cmp_s = (x.size(1) + cmp_ratio - 1) / cmp_ratio;
+        cmp_kv_size = {x.size(0), cmp_s, norm_weight.size(0)};
+    } else {
+        cmp_s = rope_sin.size(0);
+        cmp_kv_size = {cmp_s, norm_weight.size(0)};
+    }
+
+    cmp_kv = at::empty(cmp_kv_size, x.options().dtype(x.dtype()));
+
+    return std::tuple<at::Tensor>(cmp_kv);
+}
+
+std::tuple<at::Tensor>
+compressor_meta(const at::Tensor &x, const at::Tensor &wkv, const at::Tensor &wgate, at::Tensor &state_cache,
+                const at::Tensor &ape, const at::Tensor &norm_weight, const at::Tensor &rope_sin,
+                const at::Tensor &rope_cos, const c10::optional<at::Tensor> &state_block_table,
+                const c10::optional<at::Tensor> &cu_seqlens, const c10::optional<at::Tensor> &seqused,
+                const c10::optional<at::Tensor> &start_pos, int64_t rope_head_dim, int64_t cmp_ratio, int64_t coff,
+                double norm_eps, int64_t rotary_mode, int64_t cache_mode)
+{
+    // construct the output tensor
+    auto x_dim = x.dim();
+    auto norm_weight_dim = norm_weight.dim();
+    auto rope_sin_dim = rope_sin.dim();
+
+    std::tuple<at::Tensor> output = construct_compressor_output_tensor(x, norm_weight, rope_sin, cmp_ratio, coff);
+
+    return output;
+}
+
+std::tuple<at::Tensor, at::Tensor> construct_quant_lightning_indexer_output_tensor(const at::Tensor& query, const at::Tensor& key,
+                                                           int64_t sparse_count, std::string query_layout_str,
+                                                           std::string key_layout_str, bool return_value)
+{
+    constexpr int64_t SIZE = 8;
+    constexpr int64_t DIM_0 = 0;
+    constexpr int64_t DIM_1 = 1;
+    constexpr int64_t DIM_2 = 2;
+    constexpr int64_t DIM_3 = 3;
+    at::SmallVector<int64_t, SIZE> output_size;
+    for (size_t i = 0; i < query.sizes().size(); i++) {
+        TORCH_CHECK(query.size(i) > 0, "All values within query's shape should be greater "
+            "than 0, but shape[", i, "] is ", query.size(i));
+    }
+    for (size_t i = 0; i < key.sizes().size(); i++) {
+        TORCH_CHECK(key.size(i) > 0, "All values within key's shape should be greater "
+            "than 0, but shape[", i, "] is ", key.size(i));
+    }
+    TORCH_CHECK(sparse_count > 0, "sparse count should be greater than 0, but now is ", sparse_count);
+    int64_t keyHeadNum = (key_layout_str == "TND")? key.size(DIM_1) : key.size(DIM_2);
+    if (query_layout_str == "BSND") {
+        output_size = {query.size(DIM_0), query.size(DIM_1), keyHeadNum, sparse_count};
+    } else {
+        output_size = {query.size(DIM_0), keyHeadNum, sparse_count};
+    }
+    at::Tensor sparse_indices_out = at::empty(output_size, query.options().dtype(at::kInt));
+    at::Tensor sparse_values_out;
+    if (return_value) {
+        sparse_values_out = at::empty(output_size, query.options().dtype(at::kFloat));
+    } else {
+        sparse_values_out = at::empty({0}, query.options().dtype(at::kFloat));
+    }
+
+    return std::tuple<at::Tensor, at::Tensor>(sparse_indices_out, sparse_values_out);
+}
+
+std::tuple<at::Tensor, at::Tensor> npu_quant_lightning_indexer_meta(
+    const at::Tensor &query, const at::Tensor &key, const at::Tensor &weights,
+    const at::Tensor &query_dequant_scale, const at::Tensor &key_dequant_scale,
+    int64_t query_quant_mode, int64_t key_quant_mode,
+    const c10::optional<at::Tensor> &actual_seq_lengths_query,
+    const c10::optional<at::Tensor> &actual_seq_lengths_key,
+    const c10::optional<at::Tensor> &block_table,
+    const c10::optional<at::Tensor> &metadata,
+    c10::string_view layout_query, c10::string_view layout_key, int64_t sparse_count,
+    int64_t sparse_mode, int64_t pre_tokens, int64_t next_tokens, int64_t cmp_ratio, bool return_value)
+{
+    std::string query_layout_str = std::string(layout_query);
+    std::string key_layout_str = std::string(layout_key);
+    std::tuple<at::Tensor, at::Tensor> quant_lightning_indexer_output = construct_quant_lightning_indexer_output_tensor(
+            query, key, sparse_count, query_layout_str, key_layout_str, return_value);
+    at::Tensor sparse_indices_out = std::get<0>(quant_lightning_indexer_output);
+    at::Tensor sparse_values_out = std::get<1>(quant_lightning_indexer_output);
+
+    return std::tuple<at::Tensor, at::Tensor>(sparse_indices_out, sparse_values_out);
+}
+
+std::tuple<at::Tensor, at::Tensor> construct_output_tensor(const at::Tensor &q, std::string layout,
+    bool return_softmax_lse)
+{
+    for (size_t i = 0; i < q.sizes().size(); i++) {
+        TORCH_CHECK(q.size(i) > 0,
+            "All values within query's shape should be greater "
+            "than 0, but shape[",
+            i,
+            "] is ",
+            q.size(i));
+    }
+    at::Tensor output = at::empty(q.sizes(), q.options().dtype(q.dtype()));
+    at::Tensor softmax_lse;
+    if (return_softmax_lse) {
+        std::vector<int64_t> lse_sizes(q.sizes().begin(), q.sizes().end());
+        lse_sizes.back() = 1;
+        softmax_lse = at::empty(lse_sizes, q.options().dtype(c10::ScalarType::Float));
+    } else {
+        softmax_lse = at::empty({0}, q.options().dtype(c10::ScalarType::Float));
+    }
+    return std::tuple<at::Tensor, at::Tensor>(output, softmax_lse);
+}
+
+std::tuple<at::Tensor, at::Tensor> npu_sparse_attn_sharedkv_meta(const at::Tensor &q, const c10::optional<at::Tensor> &ori_kv,
+    const c10::optional<at::Tensor> &cmp_kv, const c10::optional<at::Tensor> &ori_sparse_indices,
+    const c10::optional<at::Tensor> &cmp_sparse_indices, const c10::optional<at::Tensor> &ori_block_table,
+    const c10::optional<at::Tensor> &cmp_block_table, const c10::optional<at::Tensor> &cu_seqlens_q,
+    const c10::optional<at::Tensor> &cu_seqlens_ori_kv, const c10::optional<at::Tensor> &cu_seqlens_cmp_kv,
+    const c10::optional<at::Tensor> &seqused_q, const c10::optional<at::Tensor> &seqused_kv,
+    const c10::optional<at::Tensor> &sinks, const c10::optional<at::Tensor> &metadata,
+    double softmax_scale, int64_t cmp_ratio, int64_t ori_mask_mode, int64_t cmp_mask_mode, int64_t ori_win_left,
+    int64_t ori_win_right, c10::string_view layout_q, c10::string_view layout_kv, bool return_softmax_lse)
+{
+    std::string layout_q_str = std::string(layout_q);
+    std::tuple<at::Tensor, at::Tensor> output = construct_output_tensor(q, layout_q_str, return_softmax_lse);
+
+    return output;
+}
+
+at::Tensor npu_sparse_attn_sharedkv_metadata_meta(
+    int64_t num_heads_q,
+    int64_t num_heads_kv,
+    int64_t head_dim,
+    const c10::optional<at::Tensor> &cu_seqlens_q,
+    const c10::optional<at::Tensor> &cu_seqlens_ori_kv,
+    const c10::optional<at::Tensor> &cu_seqlens_cmp_kv,
+    const c10::optional<at::Tensor> &seqused_q,
+    const c10::optional<at::Tensor> &seqused_kv,
+    int64_t batch_size,
+    int64_t max_seqlen_q,
+    int64_t max_seqlen_kv,
+    int64_t ori_topk,
+    int64_t cmp_topk,
+    int64_t cmp_ratio,
+    int64_t ori_mask_mode,
+    int64_t cmp_mask_mode,
+    int64_t ori_win_left,
+    int64_t ori_win_right,
+    c10::string_view layout_q,
+    c10::string_view layout_kv,
+    bool has_ori_kv,
+    bool has_cmp_kv,
+    const c10::string_view device)
+{
+    constexpr int64_t OUTPUT_SIZE = 1024;
+    at::Tensor output;
+    if (cu_seqlens_q.has_value()) {
+        output = torch::empty({OUTPUT_SIZE}, torch::dtype(torch::kInt32).device(cu_seqlens_q.value().device()));
+    } else if (cu_seqlens_ori_kv.has_value()) {
+        output = torch::empty({OUTPUT_SIZE}, torch::dtype(torch::kInt32).device(cu_seqlens_ori_kv.value().device()));
+    } else if (cu_seqlens_cmp_kv.has_value()) {
+        output = torch::empty({OUTPUT_SIZE}, torch::dtype(torch::kInt32).device(cu_seqlens_cmp_kv.value().device()));
+    } else if (seqused_q.has_value()) {
+        output = torch::empty({OUTPUT_SIZE}, torch::dtype(torch::kInt32).device(seqused_q.value().device()));
+    } else if (seqused_kv.has_value()) {
+        output = torch::empty({OUTPUT_SIZE}, torch::dtype(torch::kInt32).device(seqused_kv.value().device()));
+    } else {
+        auto deviceOri = at::Device(std::string(device));
+        std::string device_str = "meta";
+        if (deviceOri.has_index()) {
+            device_str += ":";
+            device_str += std::to_string(deviceOri.index());
+        }
+        output = torch::empty({OUTPUT_SIZE}, torch::dtype(torch::kInt32).device(at::Device(device_str)));
+    }
+    return output;
+}
+
+at::Tensor npu_quant_lightning_indexer_metadata_meta(
+    int64_t num_heads_q, int64_t num_heads_k, int64_t head_dim, int64_t query_quant_mode, int64_t key_quant_mode,
+    const c10::optional<at::Tensor> &actual_seq_lengths_query, const c10::optional<at::Tensor> &actual_seq_lengths_key, int64_t batch_size,
+    int64_t max_seqlen_q, int64_t max_seqlen_k, const c10::string_view layout_query, c10::string_view layout_key, int64_t sparse_count,
+    int64_t sparse_mode, int64_t pre_tokens, int64_t next_tokens, int64_t cmp_ratio, const c10::string_view device)
+{
+    constexpr int64_t OUTPUT_SIZE = 1024;
+    at::Tensor output;
+    if (actual_seq_lengths_query.has_value()) {
+        output = torch::empty({OUTPUT_SIZE}, torch::dtype(torch::kInt32).device(actual_seq_lengths_query.value().device()));
+    } else if (actual_seq_lengths_key.has_value()) {
+        output = torch::empty({OUTPUT_SIZE}, torch::dtype(torch::kInt32).device(actual_seq_lengths_key.value().device()));
+    } else {
+        auto deviceOri = at::Device(std::string(device));
+        std::string device_str = "meta";
+        if (deviceOri.has_index()) {
+            device_str += ":";
+            device_str += std::to_string(deviceOri.index());
+        }
+        output = torch::empty({OUTPUT_SIZE}, torch::dtype(torch::kInt32).device(at::Device(device_str)));
+    }
+
+    return output;
+}
+
+at::Tensor construct_hc_post_output_tensor(const at::Tensor& residual)
+{
+    c10::SymIntArrayRef output_size = residual.sym_sizes();
+    at::Tensor out = at::empty_symint(output_size, residual.options().dtype(residual.dtype()));
+    return out;
+}
+
+at::Tensor npu_hc_post_meta(
+    const at::Tensor& x,
+    const at::Tensor& residual,
+    const at::Tensor& post,
+    const at::Tensor& comb)
+{
+    at::Tensor outputs = construct_hc_post_output_tensor(residual);
+    return outputs;
+}
+
+std::tuple<at::Tensor, at::Tensor, at::Tensor> construct_hc_pre_output_tensor(const at::Tensor& x, int64_t hc_mult)
+{
+    auto xDims = x.dim();
+    at::SmallVector<c10::SymInt, 8> y_size;
+    at::SmallVector<c10::SymInt, 8> post_size;
+    at::SmallVector<c10::SymInt, 8> comb_frag_size;
+    if (xDims == 4) {
+        auto batch = x.sym_size(0);
+        auto size = x.sym_size(1);
+        auto d = x.sym_size(3);
+        y_size = {batch, size, d};
+        post_size = {batch, size, hc_mult};
+        comb_frag_size = {batch, size, hc_mult, hc_mult};
+    } else if (xDims == 3){
+        auto bs = x.sym_size(0);
+        auto d = x.sym_size(2);
+        y_size = {bs, d};
+        post_size = {bs, hc_mult};
+        comb_frag_size = {bs, hc_mult, hc_mult};
+    }
+
+    at::Tensor y = at::empty_symint(c10::SymIntArrayRef(y_size), x.options().dtype(at::kBFloat16));
+    at::Tensor post = at::empty_symint(c10::SymIntArrayRef(post_size), x.options().dtype(at::kFloat));
+    at::Tensor comb_frag = at::empty_symint(c10::SymIntArrayRef(comb_frag_size), x.options().dtype(at::kFloat));
+
+    return std::tuple<at::Tensor, at::Tensor, at::Tensor>(y, post, comb_frag);
+}
+
+at::Tensor construct_hc_pre_rsqrt_output_tensor(const at::Tensor& x, float epsilon=1e-6)
+{
+    constexpr int64_t SIZE = 8;
+    TORCH_CHECK(epsilon >= 0, "epsilon should be greater than 0.");
+
+    auto options = x.options();
+    auto xDims = x.dim();
+    c10::SmallVector<int64_t, SIZE> yOut_shape;
+    for (size_t i = 0; i < xDims - 2; i++) {
+        yOut_shape.push_back(x.sizes()[i]);
+    }
+    yOut_shape.push_back(1);
+    at::Tensor yOut = at::empty(yOut_shape, options.dtype(at::kFloat));
+
+    return yOut;
+}
+
+std::tuple<at::Tensor, at::Tensor, at::Tensor> npu_hc_pre_meta(
+    const at::Tensor& x, const at::Tensor& hc_fn, const at::Tensor& hc_scale, const at::Tensor& hc_base,
+    int64_t hc_mult, int64_t hc_sinkhorn_iters, double norm_eps, double hc_eps)
+{
+    auto output_tensors = construct_hc_pre_output_tensor(x, hc_mult);
+    at::Tensor y = std::get<0>(output_tensors);
+    at::Tensor post = std::get<1>(output_tensors);
+    at::Tensor comb_frag = std::get<2>(output_tensors);
+
+    return std::tuple<at::Tensor, at::Tensor, at::Tensor>(y, post, comb_frag);
+}
+
+at::Tensor construct_hc_pre_inv_rms_output_tensor(const at::Tensor& x, float epsilon=1e-20)
+{
+    constexpr int64_t SIZE = 8;
+    TORCH_CHECK(epsilon >= 0, "epsilon should be greater than 0.");
+
+    auto options = x.options();
+    auto xDims = x.dim();
+    c10::SmallVector<int64_t, SIZE> yOut_shape;
+    for (auto i = 0; i < xDims - 2; i++) {
+        yOut_shape.push_back(x.sizes()[i]);
+    }
+    yOut_shape.push_back(1);
+    at::Tensor yOut = at::empty(yOut_shape, options.dtype(at::kFloat));
+
+    return yOut;
+}
+
+at::Tensor npu_hc_pre_inv_rms_meta(const at::Tensor& x, double epsilon=1e-20)
+{
+    TORCH_CHECK(x.numel() > 0, "Input tensor x should not be empty.");
+    TORCH_CHECK(epsilon >= 0, "epsilon should be greater than 0.");
+
+    at::Tensor yOut;
+    yOut = construct_hc_pre_inv_rms_output_tensor(x, epsilon);
+
+    return yOut;
+}
+
+std::tuple<at::Tensor, at::Tensor, at::Tensor> construct_hc_pre_sinkhorn_output_tensor(const at::Tensor& mixes, const at::Tensor& x, int64_t hc_mult)
+{
+    auto xDims = x.dim();
+    at::SmallVector<int64_t, 8> y_size;
+    at::SmallVector<int64_t, 8> post_size;
+    at::SmallVector<int64_t, 8> comb_frag_size;
+    if (xDims == 4) {
+        auto batch = x.size(0);
+        auto size = x.size(1);
+        auto d = x.size(3);
+        y_size = {batch, size, d};
+        post_size = {batch, size, hc_mult};
+        comb_frag_size = {batch, size, hc_mult, hc_mult};
+    } else if (xDims == 3){
+        auto bs = x.size(0);
+        auto d = x.size(2);
+        y_size = {bs, d};
+        post_size = {bs, hc_mult};
+        comb_frag_size = {bs, hc_mult, hc_mult};
+    }
+
+    at::Tensor y = at::empty(y_size, x.options().dtype(at::kBFloat16));
+    at::Tensor post = at::empty(post_size, x.options().dtype(at::kFloat));
+    at::Tensor comb_frag = at::empty(comb_frag_size, x.options().dtype(at::kFloat));
+
+    return std::tuple<at::Tensor, at::Tensor, at::Tensor>(y, post, comb_frag);
+}
+
+std::tuple<at::Tensor, at::Tensor, at::Tensor> npu_hc_pre_sinkhorn_meta(
+    const at::Tensor& mixes, const at::Tensor& rsqrt, const at::Tensor& hc_scale, const at::Tensor& hc_base,
+    const at::Tensor& x, int64_t hc_mult, int64_t hc_sinkhorn_iters, double hc_eps)
+{
+    auto output_tensors = construct_hc_pre_sinkhorn_output_tensor(mixes, x, hc_mult);
+    at::Tensor y = std::get<0>(output_tensors);
+    at::Tensor post = std::get<1>(output_tensors);
+    at::Tensor comb_frag = std::get<2>(output_tensors);
+
+    return std::tuple<at::Tensor, at::Tensor, at::Tensor>(y, post, comb_frag);
+}
+
+void inplace_partial_rotary_mul_meta(
+    at::Tensor &x,
+    const at::Tensor &r1,
+    const at::Tensor &r2,
+    c10::string_view rotary_mode,
+    at::IntArrayRef partial_slice)
+{
+    auto origin_dim_num = x.dim();
+    return;
+}
+
+std::tuple<at::Tensor, at::Tensor> npu_rms_norm_dynamic_quant_meta(
+    const at::Tensor& x,
+    const at::Tensor& gamma,
+    const c10::optional<at::Tensor>& smooth_scale,
+    const c10::optional<at::Tensor>& beta,
+    double epsilon)
+{
+    constexpr int32_t SIZE = 8;
+    at::Tensor y_out = at::empty_like(x);
+    auto options = x.options();
+    c10::SmallVector<int64_t, SIZE> scale_out_shape;
+    for (size_t i = 0; i < x.sizes().size() - 1; i++) {
+        scale_out_shape.push_back(x.sizes()[i]);
+    }
+    at::Tensor scale_out = at::empty(scale_out_shape, options.dtype(at::kFloat));
+
+    return std::make_tuple(y_out, scale_out);
+}
+
+std::tuple<at::Tensor, at::Tensor> npu_dequant_swiglu_quant_meta(
+    const at::Tensor& x,
+    const c10::optional<at::Tensor>& weight_scale,
+    const c10::optional<at::Tensor>& activation_scale,
+    const c10::optional<at::Tensor>& bias,
+    const c10::optional<at::Tensor>& quant_scale,
+    const c10::optional<at::Tensor>& quant_offset,
+    const c10::optional<at::Tensor>& group_index,
+    bool activate_left,
+    int64_t quant_mode,
+    int64_t swiglu_mode,
+    double clamp_limit,
+    double glu_alpha,
+    double glu_bias)
+{
+    c10::SmallVector<int64_t, 8> y_size;
+    c10::SmallVector<int64_t, 8> scale_size;
+    for (int64_t i = 0; i < x.dim() - 1; ++i) {
+        y_size.push_back(x.size(i));
+        scale_size.push_back(x.size(i));
+    }
+    y_size.push_back(x.size(x.dim() - 1) / 2);
+
+    at::Tensor y = at::empty(y_size, x.options().dtype(c10::ScalarType::Char));
+    at::Tensor scale = at::empty(scale_size, x.options().dtype(c10::ScalarType::Float));
+    return {y, scale};
+}
+
 at::Tensor npu_lightning_indexer_quant_meta(
     const at::Tensor &query, const at::Tensor &key, const at::Tensor &weights,
     const at::Tensor &query_dequant_scale, const at::Tensor &key_dequant_scale,
@@ -637,7 +1156,7 @@ at::Tensor npu_lightning_indexer_quant_meta(
 {
     std::string query_layout_str = std::string(layout_query);
     std::string key_layout_str = std::string(layout_key);
-    
+
     const int SIZE = 8;
     const int DIM_0 = 0;
     const int DIM_1 = 1;
@@ -663,6 +1182,14 @@ at::Tensor npu_lightning_indexer_quant_meta(
     at::Tensor lightning_indexer_quant_output = at::empty(output_size, query.options().dtype(at::kInt));
 
     return lightning_indexer_quant_output;
+}
+
+void npu_scatter_nd_update_v2_meta(
+    at::Tensor& var,
+    const at::Tensor& indices,
+    const at::Tensor& update)
+{
+    return;
 }
 
 // N-gram spec decode meta
@@ -801,6 +1328,8 @@ TORCH_LIBRARY_IMPL_EXPAND(CONCAT(_C, _ascend), Meta, ops) {
     ops.impl("grouped_matmul_swiglu_quant", &vllm_ascend::meta::grouped_matmul_swiglu_quant);
     // Grouped matmul swiglu quant weight nz tensor list
     ops.impl("grouped_matmul_swiglu_quant_weight_nz_tensor_list", &vllm_ascend::meta::grouped_matmul_swiglu_quant_weight_nz_tensor_list_meta);
+    // Grouped matmul swiglu quant v2
+    ops.impl("grouped_matmul_swiglu_quant_v2", &vllm_ascend::meta::grouped_matmul_swiglu_quant_v2_meta);
     // dispatch_gmm_combine_decode meta implementation
     ops.impl("dispatch_gmm_combine_decode", &vllm_ascend::meta::dispatch_gmm_combine_decode_meta);
     // batch_matmul_transpose
@@ -833,6 +1362,20 @@ TORCH_LIBRARY_IMPL_EXPAND(CONCAT(_C, _ascend), Meta, ops) {
     ops.impl("npu_causal_conv1d_custom", &vllm_ascend::meta::npu_causal_conv1d_custom_meta);
     // moe_grouped_matmul
     ops.impl("moe_grouped_matmul", &vllm_ascend::meta::moe_grouped_matmul_meta);
+    ops.impl("moe_gating_top_k_hash", &vllm_ascend::meta::moe_gating_top_k_hash_meta);
+    ops.impl("compressor", &vllm_ascend::meta::compressor_meta);
+    ops.impl("npu_quant_lightning_indexer", &vllm_ascend::meta::npu_quant_lightning_indexer_meta);
+    ops.impl("npu_quant_lightning_indexer_metadata", &vllm_ascend::meta::npu_quant_lightning_indexer_metadata_meta);
+    ops.impl("npu_sparse_attn_sharedkv", &vllm_ascend::meta::npu_sparse_attn_sharedkv_meta);
+    ops.impl("npu_sparse_attn_sharedkv_metadata", &vllm_ascend::meta::npu_sparse_attn_sharedkv_metadata_meta);
+    ops.impl("npu_hc_post", &vllm_ascend::meta::npu_hc_post_meta);
+    ops.impl("npu_hc_pre", &vllm_ascend::meta::npu_hc_pre_meta);
+    ops.impl("npu_hc_pre_inv_rms", &vllm_ascend::meta::npu_hc_pre_inv_rms_meta);
+    ops.impl("npu_hc_pre_sinkhorn", &vllm_ascend::meta::npu_hc_pre_sinkhorn_meta);
+    ops.impl("inplace_partial_rotary_mul", &vllm_ascend::meta::inplace_partial_rotary_mul_meta);
+    ops.impl("npu_rms_norm_dynamic_quant", &vllm_ascend::meta::npu_rms_norm_dynamic_quant_meta);
+    ops.impl("npu_dequant_swiglu_quant", &vllm_ascend::meta::npu_dequant_swiglu_quant_meta);
+    ops.impl("npu_scatter_nd_update_v2", &vllm_ascend::meta::npu_scatter_nd_update_v2_meta);
     // Lightning indexer quant
     ops.impl("npu_lightning_indexer_quant", &vllm_ascend::meta::npu_lightning_indexer_quant_meta);
     // N-gram spec decode
