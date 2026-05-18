@@ -1107,6 +1107,11 @@ python -m vllm.entrypoints.openai.api_server \
 pip install openyuanrong-datasystem
 ```
 
+If the prebuilt package does not match the CANN or Ascend driver version in
+your environment, build Yuanrong Datasystem from source in the vLLM Ascend
+image. Follow the official Yuanrong Datasystem build instructions:
+<https://atomgit.com/openeuler/yuanrong-datasystem>
+
 ### Start etcd
 
 Yuanrong Datasystem uses etcd for service discovery. The following example
@@ -1149,7 +1154,8 @@ Start a Datasystem worker on each node by using `dscli`:
 dscli start -w \
   --worker_address "${WORKER_IP}:31501" \
   --etcd_address "${ETCD_IP}:2379" \
-  --shared_memory_size_mb 20480
+  --shared_memory_size_mb 40960 \
+  --enable_worker_worker_batch_get=true
 ```
 
 The `--worker_address` value is consumed later by `DS_WORKER_ADDR`, so keep
@@ -1174,7 +1180,7 @@ Set the following environment variables on each node before starting vLLM:
 | `PYTHONHASHSEED` | Yes | `0` | Must be consistent across all nodes to guarantee uniform hash generation. |
 | `DS_WORKER_ADDR` | Yes | N/A | Datasystem worker address in `<host>:<port>` format. This must match the local `dscli start --worker_address` value. |
 | `DS_ENABLE_EXCLUSIVE_CONNECTION` | No | `0` | Passed to Yuanrong `HeteroClient.enable_exclusive_connection`. Use `1` to enable the exclusive connection mode when required by your deployment. |
-| `DS_ENABLE_REMOTE_H2D` | No | `0` | Passed to Yuanrong `HeteroClient.enable_remote_h2d`. Use `1` only when remote host-to-device transfer is enabled in your Datasystem deployment. |
+| `DS_ENABLE_REMOTE_H2D` | No | `0` | Passed to Yuanrong `HeteroClient.enable_remote_h2d`. Use `1` only after the Remote H2D requirements below are met. |
 
 ```bash
 export PYTHONHASHSEED=0
@@ -1182,6 +1188,66 @@ export DS_WORKER_ADDR="${WORKER_IP}:31501"
 export DS_ENABLE_EXCLUSIVE_CONNECTION=0
 export DS_ENABLE_REMOTE_H2D=0
 ```
+
+#### Remote H2D Requirements
+
+Set `DS_ENABLE_REMOTE_H2D=1` only when Remote Host-to-Device transfer is
+enabled and verified in the Yuanrong Datasystem deployment:
+
+* Reserve enough 2 MiB HugeTLB pages before starting the worker. For 40 GiB
+  shared memory, reserve at least 20480 2 MiB huge pages.
+* Start each Datasystem worker with Remote H2D enabled. The worker start
+  command must include `--remote_h2d_device_ids`, `--enable_huge_tlb true`,
+  `--arena_per_tenant 1`, and `--enable_fallocate false`. Using multiple
+  available NPU device IDs is recommended, for example `"0,1,2,3,4,5,6,7"` on
+  an 8-NPU node.
+
+```bash
+dscli start -w \
+  --worker_address "${WORKER_IP}:31501" \
+  --etcd_address "${ETCD_IP}:2379" \
+  --shared_memory_size_mb 40960 \
+  --arena_per_tenant 1 \
+  --enable_huge_tlb true \
+  --enable_fallocate false \
+  --remote_h2d_device_ids "0,1,2,3,4,5,6,7" \
+  --enable_worker_worker_batch_get=true
+```
+
+* Make sure the NPU driver, firmware, and CANN toolkit required by Yuanrong
+  Remote H2D are installed and visible to the worker process. In containers,
+  mount the Ascend driver path, `npu-smi`, `hccn_tool`, `/etc/hccn.conf`,
+  `/etc/ascend_install.info`, and the required `/dev/davinci*` devices.
+* Verify the NPU and RoCE environment before enabling the client flag:
+
+```bash
+# Check the current 2 MiB HugeTLB page size, total count, and free count.
+grep -E "HugePages_Total|HugePages_Free|Hugepagesize" /proc/meminfo
+
+# Optional: check 2 MiB HugeTLB pages on each NUMA node.
+for node in /sys/devices/system/node/node*/hugepages/hugepages-2048kB; do
+  echo "$node total=$(cat "$node/nr_hugepages") free=$(cat "$node/free_hugepages")"
+done
+
+# Check that NPU devices and the driver are visible to the worker environment.
+npu-smi info
+
+# Check that the NPU topology is visible.
+npu-smi info -t topo
+
+# Check optical module detection on the selected local NPU.
+hccn_tool -i <local_npu_id> -optical -g
+
+# Check RoCE physical link status. The expected link status is UP.
+for i in {0..7}; do hccn_tool -i $i -link -g; done
+
+# Check the selected NPU IP address and reachability to the remote NPU.
+hccn_tool -i <local_npu_id> -ip -g
+hccn_tool -i <local_npu_id> -ping -g address <remote_npu_ip>
+```
+
+If these checks fail, keep `DS_ENABLE_REMOTE_H2D=0` and use the default
+Datasystem transfer path.
 
 ### Run AscendStoreConnector with Yuanrong backend
 
