@@ -88,6 +88,12 @@ _LONG_PROMPTS = [os.path.join(_TEST_DIR, "prompts", "long_prompt.txt")]
 DISAGG_EPD_PROXY_SCRIPT = (
     Path(__file__).parent.parent.parent / "examples" / "disaggregated_encoder" / "disagg_epd_proxy.py"
 )
+DISAGG_PD_PROXY_SCRIPT = (
+    Path(__file__).parent.parent.parent
+    / "examples"
+    / "disaggregated_prefill_v1"
+    / "load_balance_proxy_server_example.py"
+)
 
 
 def _check_npu_memory_worker(target_free_percentage: float, max_wait_seconds: float):
@@ -385,6 +391,7 @@ class RemoteOpenAIServer:
                     # check unexpected exit
                     result = self._poll()
                     if result is not None and result != 0:
+                        self._terminate_server()
                         raise RuntimeError(f"Server at {node_ip} exited unexpectedly.") from None
 
             if should_log:
@@ -434,6 +441,176 @@ class RemoteOpenAIServer:
         return openai.AsyncOpenAI(base_url=self.url_for("v1"), api_key=self.DUMMY_API_KEY, max_retries=0, **kwargs)
 
 
+def _get_pd_server_required_devices(vllm_serve_args: list[str]) -> int:
+    def get_size(arg_name: str) -> int:
+        value = 1
+        if arg_name in vllm_serve_args:
+            value = int(vllm_serve_args[vllm_serve_args.index(arg_name) + 1])
+        if value <= 0:
+            raise ValueError(f"{arg_name} must be positive, got {value}.")
+        return value
+
+    tensor_parallel_size = get_size("--tensor-parallel-size")
+    data_parallel_arg = (
+        "--data-parallel-size-local" if "--data-parallel-size-local" in vllm_serve_args else "--data-parallel-size"
+    )
+    data_parallel_size = get_size(data_parallel_arg)
+    return tensor_parallel_size * data_parallel_size
+
+
+class RemotePDServer(RemoteOpenAIServer):
+    def __init__(
+        self,
+        vllm_serve_args: list[str] | list[list[str]],
+        server_host: str = "127.0.0.1",
+        env_dict: dict[str, str] | None = None,
+        max_wait_seconds: float | None = 600,
+    ) -> None:
+        self._proc_list = []
+
+        self.env_dict: dict[str, str] = {}
+        if env_dict is not None:
+            self.env_dict.update(env_dict)
+
+        self.env_dict["VLLM_ALLOW_LONG_MAX_MODEL_LEN"] = "1"
+        self.env_dict["PYTORCH_NPU_ALLOC_CONF"] = "expandable_segments:True"
+        self.env_dict["VLLM_WORKER_MULTIPROC_METHOD"] = "spawn"
+
+        self.vllm_serve_args_list = []
+        self.health_url_list = []
+        self.host = server_host
+
+        if isinstance(vllm_serve_args, list):
+            if not all(isinstance(item, list) for item in vllm_serve_args):
+                args_copy = copy.deepcopy(vllm_serve_args)
+                self.vllm_serve_args_list = [[str(arg) for arg in args_copy]]
+            else:
+                self.vllm_serve_args_list = [
+                    [str(arg) for arg in sublist] for sublist in copy.deepcopy(vllm_serve_args)
+                ]
+        else:
+            raise RuntimeError("vllm_serves_args must be a list")
+        serve_arg_cmd = ["vllm", "serve"]
+        start_device_id = 0
+
+        for i, vllm_serve_arg in enumerate(self.vllm_serve_args_list):
+            if "--port" not in vllm_serve_arg:
+                raise ValueError("You have to manually specify the port")
+            self.port = int(vllm_serve_arg[vllm_serve_arg.index("--port") + 1])
+            self.health_url_list.append(self.url_for("health"))
+
+            required_devices = _get_pd_server_required_devices(vllm_serve_arg)
+            server_env = copy.deepcopy(self.env_dict)
+            server_env["ASCEND_RT_VISIBLE_DEVICES"] = ",".join(
+                str(device_id) for device_id in range(start_device_id, start_device_id + required_devices)
+            )
+            start_device_id += required_devices
+
+            vllm_serve_arg = [*serve_arg_cmd, *vllm_serve_arg]
+            proc = self._start_server_with_prefix(vllm_serve_arg, server_env, f"[PD_{i}] ")
+            self._proc_list.append(proc)
+
+        timeout_value = float(max_wait_seconds) if max_wait_seconds is not None else 2800.0
+        self._wait_for_multiple_servers(
+            [(self.host, url) for url in self.health_url_list], timeout=timeout_value, always_check_nodes=True
+        )
+
+    def _poll(self) -> int | None:
+        for proc in self._proc_list:
+            result = proc.poll()
+            if result is not None and result != 0:
+                return result
+        return None
+
+    def _read_output(self, pipe, prefix):
+        try:
+            with pipe:
+                for line in iter(pipe.readline, ""):
+                    if line:
+                        print(f"{prefix}: {line}", end="")
+
+        except Exception as e:
+            print(f"error: {e}")
+            traceback.print_exc()
+
+    def _start_server_with_prefix(self, server_cmd: list[str], env_dict: dict[str, str] | None, log_prefix: str):
+        env = os.environ.copy()
+        if env_dict is not None:
+            env.update(env_dict)
+        proc = subprocess.Popen(
+            server_cmd, env=env, stdout=subprocess.PIPE, stderr=subprocess.PIPE, universal_newlines=True, bufsize=1
+        )
+        stdout_thread = threading.Thread(target=self._read_output, args=(proc.stdout, log_prefix), daemon=True)
+        stderr_thread = threading.Thread(target=self._read_output, args=(proc.stderr, log_prefix), daemon=True)
+
+        stdout_thread.start()
+        stderr_thread.start()
+        return proc
+
+    def _terminate_server(self) -> None:
+        print("pd instance is stopping")
+        for proc in self._proc_list:
+            with contextlib.suppress(psutil.NoSuchProcess):
+                parent = psutil.Process(proc.pid)
+                children = parent.children(recursive=True)
+                for child in children:
+                    with contextlib.suppress(psutil.NoSuchProcess):
+                        child.terminate()
+
+                gone, still_alive = psutil.wait_procs(children, timeout=10)
+
+                for child in still_alive:
+                    with contextlib.suppress(psutil.NoSuchProcess):
+                        child.kill()
+
+                try:
+                    parent.terminate()
+                    parent.wait(timeout=10)
+                except (psutil.NoSuchProcess, psutil.TimeoutExpired):
+                    with contextlib.suppress(psutil.NoSuchProcess):
+                        parent.kill()
+
+
+class DisaggPDProxy(RemotePDServer):
+    def __init__(
+        self,
+        port: int,
+        prefiller_ports: list[int],
+        decoder_ports: list[int],
+        host: str = "127.0.0.1",
+        env_dict: dict[str, str] | None = None,
+        max_wait_seconds: float | None = 600,
+    ) -> None:
+        self.env_dict: dict[str, str] = {}
+        if env_dict is not None:
+            self.env_dict.update(env_dict)
+        self._proc_list = []
+        self.host = host
+        self.port = int(port)
+        self.proxy_args = [
+            "--host",
+            host,
+            "--port",
+            str(port),
+            "--prefiller-hosts",
+            *[host] * len(prefiller_ports),
+            "--prefiller-ports",
+            *[str(port) for port in prefiller_ports],
+            "--decoder-hosts",
+            *[host] * len(decoder_ports),
+            "--decoder-ports",
+            *[str(port) for port in decoder_ports],
+        ]
+
+        print(f"proxy param is: {self.proxy_args}")
+        proxy_cmd = [sys.executable, str(DISAGG_PD_PROXY_SCRIPT), *self.proxy_args]
+        proc = self._start_server_with_prefix(proxy_cmd, self.env_dict, "[PD_PROXY] ")
+        self._proc_list.append(proc)
+
+        timeout_value = float(max_wait_seconds) if max_wait_seconds is not None else 600.0
+        self._wait_for_multiple_servers([(self.host, self.url_for("healthcheck"))], timeout=timeout_value)
+
+
 class RemoteEPDServer(RemoteOpenAIServer):
     def _start_server(self, model: str, server_cmd: list[str], env_dict: dict[str, str] | None) -> None:
         """Subclasses override this method to customize server process launch"""
@@ -477,7 +654,7 @@ class RemoteEPDServer(RemoteOpenAIServer):
             self.env_dict["ASCEND_RT_VISIBLE_DEVICES"] = str(i)
             if isinstance(vllm_serve_arg, list):
                 if "--port" not in vllm_serve_arg:
-                    raise ValueError("You have manually specified the port ")
+                    raise ValueError("You have to manually specify the port")
                 else:
                     port_arg = "--port"
                     try:
@@ -489,7 +666,7 @@ class RemoteEPDServer(RemoteOpenAIServer):
             else:
                 vllm_serve_arg_str = str(vllm_serve_arg)
                 if "--port" not in vllm_serve_arg_str:
-                    raise ValueError("You have manually specified the port ")
+                    raise ValueError("You have to manually specify the port")
                 else:
                     raise ValueError(f"Unexpected type for vllm_serve_arg: {type(vllm_serve_arg)}")
 
