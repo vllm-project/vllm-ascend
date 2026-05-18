@@ -14,6 +14,7 @@
 # limitations under the License.
 # This file is a part of the vllm-ascend project.
 #
+import os
 from enum import Enum
 
 import torch.distributed as dist
@@ -48,6 +49,11 @@ class D2DExpertWeightLoader:
             logger.warning_once("current d2d weight update tasks are on-going, cannot accept new weight update task")
             return
 
+        logger.info(
+            "[EPLB-DEBUG] pid=%s layer=%s generate_d2d_task: send_info=%s recv_info=%s state=%s",
+            os.getpid(), layer_id, expert_send_info, expert_recv_info, self.state,
+        )
+
         self.updated_expert_map = updated_expert_map
 
         self.layer_id = layer_id
@@ -59,6 +65,11 @@ class D2DExpertWeightLoader:
                 self.comm_op_list.append(
                     dist.P2POp(dist.isend, src_tensor, self.comm_group.ranks[dst_rank], group=self.comm_group.device_group)
                 )
+                logger.info(
+                    "[EPLB-DEBUG] pid=%s layer=%s isend: local_expert=%s global_expert=%s dst_ep_rank=%s dst_global_rank=%s",
+                    os.getpid(), layer_id, local_expert_id, global_expert_id_to_send, dst_rank,
+                    self.comm_group.ranks[dst_rank],
+                )
 
         for buffer_tensor_id, recv_info in enumerate(expert_recv_info):
             recv_rank, global_expert_id_to_recv = recv_info
@@ -66,9 +77,18 @@ class D2DExpertWeightLoader:
                 self.comm_op_list.append(
                     dist.P2POp(dist.irecv, buffer_tensor, self.comm_group.ranks[recv_rank], group=self.comm_group.device_group)
                 )
+                logger.info(
+                    "[EPLB-DEBUG] pid=%s layer=%s irecv: buffer_id=%s global_expert=%s src_ep_rank=%s src_global_rank=%s",
+                    os.getpid(), layer_id, buffer_tensor_id, global_expert_id_to_recv, recv_rank,
+                    self.comm_group.ranks[recv_rank],
+                )
             local_expert_to_replace = self.updated_expert_map[global_expert_id_to_recv].item()
             self.recv_expert_list.append((local_expert_to_replace, buffer_tensor_id))
 
+        logger.info(
+            "[EPLB-DEBUG] pid=%s layer=%s generate_d2d_task DONE: total_ops=%s recv_list=%s",
+            os.getpid(), layer_id, len(self.comm_op_list), self.recv_expert_list,
+        )
         self.state = ExpertWeightUpdateState.READY
 
     def set_log2phy_map(self, log2phy_map):
@@ -77,23 +97,61 @@ class D2DExpertWeightLoader:
     def asyn_expert_weight_transfer(self, reqs):
         # Only when send/recv tasks are parsed into self.comm_op_list, d2d send/recv tasks can be launched
         if self.state != ExpertWeightUpdateState.READY:
+            logger.info(
+                "[EPLB-DEBUG] pid=%s layer=%s asyn_transfer SKIP: state=%s (not READY)",
+                os.getpid(), self.layer_id, self.state,
+            )
             return
 
         # set asynchronous stream for d2d expert weight transfer
         if self.comm_op_list:
+            logger.info(
+                "[EPLB-DEBUG] pid=%s layer=%s asyn_transfer: launching batch_isend_irecv with %s ops",
+                os.getpid(), self.layer_id, len(self.comm_op_list),
+            )
             ret_list = dist.batch_isend_irecv(self.comm_op_list)
             reqs.extend(ret_list)
+            logger.info(
+                "[EPLB-DEBUG] pid=%s layer=%s asyn_transfer: batch_isend_irecv launched, %s reqs",
+                os.getpid(), self.layer_id, len(ret_list),
+            )
+        else:
+            logger.info(
+                "[EPLB-DEBUG] pid=%s layer=%s asyn_transfer: no ops to launch (empty comm_op_list)",
+                os.getpid(), self.layer_id,
+            )
 
         self.state = ExpertWeightUpdateState.TRANSFERRING
 
     def update_expert_map_and_weight(self, reqs):
         # Only after send/recv tasks have been launched, expert_map and weight can be updated
         if self.state != ExpertWeightUpdateState.TRANSFERRING:
+            logger.info(
+                "[EPLB-DEBUG] pid=%s layer=%s update_map_weight SKIP: state=%s (not TRANSFERRING)",
+                os.getpid(), self.layer_id, self.state,
+            )
             return
 
         # Waiting for send/recv tasks finish
-        for req in reqs:
+        logger.info(
+            "[EPLB-DEBUG] pid=%s layer=%s update_map_weight: waiting for %s reqs to complete",
+            os.getpid(), self.layer_id, len(reqs),
+        )
+        for i, req in enumerate(reqs):
+            logger.info(
+                "[EPLB-DEBUG] pid=%s layer=%s update_map_weight: waiting req %s/%s",
+                os.getpid(), self.layer_id, i, len(reqs),
+            )
             req.wait()
+            logger.info(
+                "[EPLB-DEBUG] pid=%s layer=%s update_map_weight: req %s/%s done",
+                os.getpid(), self.layer_id, i, len(reqs),
+            )
+
+        logger.info(
+            "[EPLB-DEBUG] pid=%s layer=%s update_map_weight: all reqs done, updating maps and weights",
+            os.getpid(), self.layer_id,
+        )
 
         if self.comm_op_list is not None:
             self.comm_op_list = None
@@ -117,3 +175,7 @@ class D2DExpertWeightLoader:
         self.updated_expert_map = None
         self.layer_id = -1
         self.state = ExpertWeightUpdateState.WAITING
+        logger.info(
+            "[EPLB-DEBUG] pid=%s update_map_weight DONE, state reset to WAITING",
+            os.getpid(),
+        )
