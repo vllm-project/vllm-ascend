@@ -30,7 +30,6 @@ from vllm.model_executor.layers.fused_moe.layer import FusedMoE, UnquantizedFuse
 from vllm.model_executor.layers.fused_moe.routed_experts_capturer import RoutedExpertsCapturer
 from vllm.model_executor.layers.fused_moe.runner.moe_runner import MoERunner  # type: ignore
 
-import vllm_ascend.envs as envs_ascend
 from vllm_ascend.ascend_config import get_ascend_config
 from vllm_ascend.ascend_forward_context import _EXTRA_CTX, MoECommType
 from vllm_ascend.distributed.parallel_state import get_mc2_group
@@ -115,7 +114,7 @@ class AscendUnquantizedFusedMoEMethod(UnquantizedFusedMoEMethod):
         # ND format (or other formats), remove this specific 'if' check and the forced
         # npu_format_cast. At that point, the operator should be able to handle weights
         # in their native format without explicit casting here.
-        if envs_ascend.VLLM_ASCEND_ENABLE_FUSED_MC2:
+        if get_ascend_config().enable_fused_mc2:
             layer.w13_weight.data = torch_npu.npu_format_cast(layer.w13_weight.data, ACL_FORMAT_FRACTAL_NZ)
             layer.w2_weight.data = torch_npu.npu_format_cast(layer.w2_weight.data, ACL_FORMAT_FRACTAL_NZ)
         else:
