@@ -1309,9 +1309,9 @@ class PCPManager:
         )
 
         # q_lens = mtp_token_len (num_scheduled_tokens)
-        q_lens = self._list_to_tensor(decode_num_scheduled_tokens[:self.num_decode_reqs], self.device)
+        q_lens = torch.tensor(decode_num_scheduled_tokens[:self.num_decode_reqs], dtype=torch.int32)
         # global_histories = decode_num_computed_tokens (global history lengths)
-        global_histories = self._list_to_tensor(decode_num_computed_tokens, self.device)
+        global_histories = torch.tensor(decode_num_computed_tokens, dtype=torch.int32)
         # total_lens = global_history + mtp_token_len (global sequence length)
         total_lens = global_histories + q_lens
         # context_lens = total_lens - q_lens (consistent with reference)
@@ -1346,8 +1346,8 @@ class PCPManager:
         max_k = int(k_lens[valid].max().item())
 
         # Generate indices up to max dimensions
-        q_indices = self._list_to_tensor(list(range(max_q)), self.device)
-        k_indices = self._list_to_tensor(list(range(max_k)), self.device)
+        q_indices = torch.arange(max_q, dtype=torch.int32)
+        k_indices = torch.arange(max_k, dtype=torch.int32)
 
         # valid_q: [num_decode_reqs, max_q] - which q indices are valid for each req
         valid_q = valid[:, None] & (q_indices[None, :] < q_lens[:, None])
