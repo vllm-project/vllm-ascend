@@ -1,7 +1,21 @@
 """Expert Offload Manager — manages CPU-side expert weights and NPU paging."""
 
+import queue
+import threading
+from collections import Counter, deque
+from concurrent.futures import ThreadPoolExecutor
+from dataclasses import dataclass
+from typing import TYPE_CHECKING
+
 import torch
 from vllm.config import VllmConfig
+from vllm.logger import logger
+
+from vllm_ascend.expert_offload.hotness_tracker import ExpertHotnessTracker
+from vllm_ascend.expert_offload.sliding_window_counter import SlidingWindowCounter
+
+if TYPE_CHECKING:
+    pass
 
 
 class ExpertOffloadManager:
@@ -36,6 +50,16 @@ class ExpertOffloadManager:
 
         # Temporary storage for weights loaded before create_weights()
         self._pending_weights: dict = {}
+
+        # --- Prefetch components ---
+        self._hotness_counter: SlidingWindowCounter | None = None
+        self._hotness_tracker: ExpertHotnessTracker | None = None
+        self._transfer_thread: ExpertOffloadThread | None = None
+        self._prefetch_config = {
+            "enabled": True,
+            "hotness_top_k": self.offload_config.prefetch_hotness_top_k,
+            "min_hotness_threshold": self.offload_config.prefetch_min_threshold,
+        }
 
         ExpertOffloadManager._instance = self
 
@@ -108,6 +132,36 @@ class ExpertOffloadManager:
                 layer.w2_weight.data[j].copy_(
                     self.w2_weights_cpu[i][j].to(dev).to(dt))
 
+    def init_async_offload(self, num_layers: int, window_size: int = 200):
+        """Initialize async offload components (prefetch thread, hotness tracker).
+
+        Args:
+            num_layers: MoE layer count
+            window_size: Sliding window size for hotness tracking
+        """
+        if not self._prefetch_config["enabled"]:
+            logger.info("Expert prefetch is disabled")
+            return
+
+        self._hotness_counter = SlidingWindowCounter(num_layers, window_size)
+        self._hotness_tracker = ExpertHotnessTracker(
+            self._hotness_counter,
+            top_k_default=self._prefetch_config["hotness_top_k"]
+        )
+        self._transfer_thread = ExpertOffloadThread(self)
+        self._transfer_thread.start()
+        logger.info(
+            f"Expert async offload initialized: num_layers={num_layers}, "
+            f"window_size={window_size}"
+        )
+
+    def shutdown_async_offload(self):
+        """Shutdown async offload thread."""
+        if self._transfer_thread:
+            self._transfer_thread.stop()
+            self._transfer_thread = None
+            logger.info("Expert async offload shutdown")
+
     # ------------------------------------------------------------------ #
     #  Forward path: page in experts based on topk_ids                    #
     # ------------------------------------------------------------------ #
@@ -173,6 +227,81 @@ class ExpertOffloadManager:
 
         return n_copies
 
+    def trigger_prefetch_for_next_layer(
+        self,
+        current_layer_idx: int,
+        current_expert_ids: list[int],
+    ) -> None:
+        """Layer N 计算完成后，触发 Layer N+1 的 prefetch。
+
+        预取并集来源:
+        1. Layer N 激活的 expert 编号
+        2. Layer N+1 上个 step 的 expert 编号
+        3. Layer N+1 的热点 expert 编号
+
+        Args:
+            current_layer_idx: Layer N 的索引
+            current_expert_ids: Layer N 激活的 expert ID 列表
+        """
+        if not self._prefetch_config["enabled"]:
+            return
+
+        next_layer_idx = current_layer_idx + 1
+        if next_layer_idx >= len(self.moe_layers):
+            return
+
+        if not self._transfer_thread or not self._hotness_tracker:
+            return
+
+        self._hotness_tracker.record_step_experts(
+            next_layer_idx, current_expert_ids
+        )
+
+        self._hotness_counter.record(current_layer_idx, current_expert_ids)
+
+        union_experts = self._hotness_tracker.get_union_experts(
+            layer_idx=current_layer_idx,
+            source1_experts=current_expert_ids,
+            hotness_top_k=self._prefetch_config["hotness_top_k"]
+        )
+
+        if not union_experts:
+            return
+
+        layer = self.moe_layers[next_layer_idx]
+        log2phy = layer.log2phy
+
+        slot_owner: dict[int, int] = {}
+        for eid in range(len(log2phy)):
+            s = log2phy[eid].item()
+            if s >= 0:
+                slot_owner[s] = eid
+
+        on_device = set(slot_owner.values())
+        need_prefetch = union_experts - on_device
+
+        if not need_prefetch:
+            return
+
+        logger.debug(
+            f"[Prefetch] Layer {next_layer_idx}: prefetching "
+            f"{len(need_prefetch)} experts from union of {len(union_experts)}"
+        )
+
+        for eid in need_prefetch:
+            self._transfer_thread.add_prefetch_task(
+                layer_idx=next_layer_idx,
+                expert_ids=[eid],
+                priority=2
+            )
+
+    def reset_request_scope(self) -> None:
+        """请求结束时重置滑动窗口计数器和历史记录。"""
+        if self._hotness_counter:
+            self._hotness_counter.reset()
+        if self._hotness_tracker:
+            self._hotness_tracker.reset()
+
     # ------------------------------------------------------------------ #
     #  Internal helpers                                                    #
     # ------------------------------------------------------------------ #
@@ -200,12 +329,131 @@ class ExpertOffloadManager:
         self._pending_weights.clear()
 
 
+class ExpertOffloadThread(threading.Thread):
+    """异步 H2D 传输线程，处理 expert 权重的异步预取。"""
+
+    def __init__(self, manager: ExpertOffloadManager):
+        super().__init__(daemon=True, name="ExpertOffloadThread")
+        self._manager = manager
+        self._task_queue: queue.Queue = queue.Queue()
+        self._executor = ThreadPoolExecutor(max_workers=8)
+        self._running = True
+        self._lock = threading.Lock()
+        self._pending_tasks: dict[int, dict] = {}
+        self._task_id_counter = 0
+
+    def add_prefetch_task(
+        self,
+        layer_idx: int,
+        expert_ids: list[int],
+        priority: int = 1,
+        task_id: int | None = None,
+    ) -> int:
+        """添加预取任务到队列。
+
+        Args:
+            layer_idx: MoE 层索引
+            expert_ids: 需要预取的 expert ID 列表
+            priority: 优先级，数值越小优先级越高
+            task_id: 任务 ID，如果为 None 则自动生成
+
+        Returns:
+            任务 ID
+        """
+        if task_id is None:
+            task_id = self._task_id_counter
+            self._task_id_counter += 1
+
+        task = {
+            "layer_idx": layer_idx,
+            "expert_ids": expert_ids,
+            "priority": priority,
+        }
+
+        with self._lock:
+            self._pending_tasks[task_id] = task
+
+        self._task_queue.put((priority, task_id, task))
+        return task_id
+
+    def run(self):
+        """传输线程主循环。"""
+        torch.npu.set_device()
+        while self._running:
+            try:
+                _, task_id, task = self._task_queue.get(timeout=0.1)
+            except queue.Empty:
+                continue
+
+            try:
+                self._execute_transfer(task)
+            except Exception as e:
+                logger.error(f"Expert transfer failed: {e}")
+
+            with self._lock:
+                self._pending_tasks.pop(task_id, None)
+
+            self._task_queue.task_done()
+
+    def _execute_transfer(self, task: dict):
+        """执行实际的 H2D 传输。"""
+        layer_idx = task["layer_idx"]
+        expert_ids = task["expert_ids"]
+
+        layer = self._manager.moe_layers[layer_idx]
+        dev = layer.w13_weight.device
+        dt = layer.w13_weight.dtype
+        log2phy = layer.log2phy
+
+        slot_owner: dict[int, int] = {}
+        for eid in range(len(log2phy)):
+            s = log2phy[eid].item()
+            if s >= 0:
+                slot_owner[s] = eid
+
+        on_device = set(slot_owner.values())
+        need_load = [eid for eid in expert_ids if eid not in on_device]
+
+        if not need_load:
+            return
+
+        all_slots = set(range(len(log2phy)))
+        occupied = set(slot_owner.keys())
+        free_slots = list(all_slots - occupied)
+
+        if not free_slots:
+            return
+
+        for eid in need_load:
+            if not free_slots:
+                break
+
+            slot = free_slots.pop(0)
+
+            layer.w13_weight.data[slot].copy_(
+                self._manager.w13_weights_cpu[layer_idx][eid].to(dev).to(dt)
+            )
+            layer.w2_weight.data[slot].copy_(
+                self._manager.w2_weights_cpu[layer_idx][eid].to(dev).to(dt)
+            )
+
+            log2phy[eid] = slot
+            slot_owner[slot] = eid
+
+            logger.debug(
+                f"[Transfer] Layer {layer_idx}: loaded expert {eid} to slot {slot}"
+            )
+
+    def stop(self):
+        """停止传输线程。"""
+        self._running = False
+        self._executor.shutdown(wait=False)
+
+
 _EXPERT_OFFLOAD_MANAGER: ExpertOffloadManager = None
 
 
 def maybe_init_expert_offload_manager(vllm_config: VllmConfig):
-    # if no need to init offload manager:
-    #     return
     global _EXPERT_OFFLOAD_MANAGER
     if _EXPERT_OFFLOAD_MANAGER is None:
         _EXPERT_OFFLOAD_MANAGER = ExpertOffloadManager(vllm_config)

@@ -169,9 +169,13 @@ class AscendUnquantizedFusedMoEMethod(UnquantizedFusedMoEMethod):
         # Expert offload: incrementally page in needed experts, update log2phy
         if getattr(layer, 'enable_expert_offload', False):
             from vllm_ascend.expert_offload import ExpertOffloadManager
-            ExpertOffloadManager.get_instance().update_weights(
-                layer, topk_ids, layer.log2phy)
+            manager = ExpertOffloadManager.get_instance()
+            manager.update_weights(layer, topk_ids, layer.log2phy)
             log2phy = layer.log2phy = layer.log2phy.to(topk_ids.device)
+            # Trigger prefetch for next layer
+            current_expert_ids = topk_ids.unique().cpu().tolist()
+            layer_idx = manager.moe_layers.index(layer)
+            manager.trigger_prefetch_for_next_layer(layer_idx, current_expert_ids)
 
         if zero_expert_num > 0 and zero_expert_type is not None:
             topk_ids, topk_weights, zero_expert_result = zero_experts_compute(

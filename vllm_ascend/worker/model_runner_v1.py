@@ -484,6 +484,11 @@ class NPUModelRunner(GPUModelRunner):
             maybe_init_expert_offload_manager(self.vllm_config)
             if has_expert_offload_manager():
                 self.offload_manager = get_expert_offload_manager()
+                if self.offload_manager._prefetch_config["enabled"]:
+                    self.offload_manager.init_async_offload(
+                        num_layers=len(self.offload_manager.moe_layers),
+                        window_size=self.ascend_config.expert_offload_config.prefetch_window_size
+                    )
 
     @property
     def use_cp(self) -> bool:
@@ -1563,6 +1568,8 @@ class NPUModelRunner(GPUModelRunner):
                         self._dummy_run(1)
                     if not has_kv_transfer_group():
                         # Return empty ModelRunnerOutput if no work to do.
+                        if hasattr(self, 'offload_manager') and self.offload_manager:
+                            self.offload_manager.reset_request_scope()
                         return EMPTY_MODEL_RUNNER_OUTPUT
                     return self.kv_connector_no_forward(scheduler_output, self.vllm_config)
                 if self.cache_config.kv_sharing_fast_prefill:

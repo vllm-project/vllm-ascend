@@ -577,6 +577,11 @@ class ExpertOffloadConfig:
         "expert_offload": False,
         "num_device_experts": 32,
         "expert_map_path": None,
+        "enable_prefetch": True,
+        "prefetch_hotness_top_k": 8,
+        "prefetch_min_threshold": 2,
+        "prefetch_window_size": 200,
+        "prefetch_num_workers": 8,
     }
 
     def __init__(self, user_config: dict | None = None):
@@ -610,6 +615,22 @@ class ExpertOffloadConfig:
             raise ValueError(f"num_device_experts must >= 0; got {self.config['num_device_experts']} instead")
         if not isinstance(self.config["expert_offload"], bool):
             raise TypeError("expert_offload must be a boolean")
+        if not isinstance(self.config["enable_prefetch"], bool):
+            raise TypeError("enable_prefetch must be a boolean")
+        if not isinstance(self.config["prefetch_hotness_top_k"], int):
+            raise TypeError("prefetch_hotness_top_k must be an integer")
+        if self.config["prefetch_hotness_top_k"] < 0:
+            raise ValueError(f"prefetch_hotness_top_k must >= 0; got {self.config['prefetch_hotness_top_k']} instead")
+        if not isinstance(self.config["prefetch_min_threshold"], int):
+            raise TypeError("prefetch_min_threshold must be an integer")
+        if not isinstance(self.config["prefetch_window_size"], int):
+            raise TypeError("prefetch_window_size must be an integer")
+        if self.config["prefetch_window_size"] <= 0:
+            raise ValueError(f"prefetch_window_size must > 0; got {self.config['prefetch_window_size']} instead")
+        if not isinstance(self.config["prefetch_num_workers"], int):
+            raise TypeError("prefetch_num_workers must be an integer")
+        if self.config["prefetch_num_workers"] < 1:
+            raise ValueError(f"prefetch_num_workers must >= 1; got {self.config['prefetch_num_workers']} instead")
 
 
 _ASCEND_CONFIG: AscendConfig | None = None
