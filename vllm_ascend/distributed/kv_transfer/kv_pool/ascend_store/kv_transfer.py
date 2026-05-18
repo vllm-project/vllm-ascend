@@ -137,6 +137,8 @@ class KVCacheStoreSendingThread(KVTransferThread):
         self.stored_requests = defaultdict[str, int](int)
         self.group_uses_align_state = group_uses_align_state
         self.enable_kv_event = enable_kv_event
+        self.completed_blocks_lock = threading.Lock()
+        self.completed_blocks: dict[str, dict[int, int]] = {}
 
     def add_stored_request(self, req_id: str):
         with self.done_task_lock:
@@ -152,6 +154,17 @@ class KVCacheStoreSendingThread(KVTransferThread):
             if req_id in self.stored_requests:
                 del self.stored_requests[req_id]
 
+    def mark_completed_blocks(self, req_id: str, block_ids: list[int]) -> None:
+        with self.completed_blocks_lock:
+            req_completed_blocks = self.completed_blocks.setdefault(req_id, dict())
+            req_completed_blocks.update({block_id: 1 for block_id in block_ids})
+
+    def get_completed_blocks(self):
+        with self.completed_blocks_lock:
+            completed_blocks = self.completed_blocks.copy()
+            self.completed_blocks.clear()
+        return completed_blocks
+
     def _handle_request(self, req_meta: ReqMeta):
         token_len = req_meta.token_len_chunk
         req_id = req_meta.req_id
@@ -160,99 +173,103 @@ class KVCacheStoreSendingThread(KVTransferThread):
         if req_id not in self.stored_requests:
             self.request_queue.task_done()
             return
+        try:
+            for group_id, block_ids in enumerate(req_meta.block_ids_by_group):
+                starts = []
+                ends = []
+                keys = []
+                block_hashes = []
+                group_block_size = self.block_size[group_id]
+                for start, end, key in self.token_database.process_tokens_with_block_ids(
+                        token_len,
+                        req_meta.block_hashes,
+                        block_ids,
+                        kv_cache_group_id=group_id,
+                        skip_null_blocks=self.group_uses_align_state[group_id]):
+                    starts.append(start)
+                    ends.append(end)
+                    keys.append(key.to_string())
+                    block_hashes.append(req_meta.block_hashes[start // group_block_size])
 
-        for group_id, block_ids in enumerate(req_meta.block_ids_by_group):
-            starts = []
-            ends = []
-            keys = []
-            block_hashes = []
-            group_block_size = self.block_size[group_id]
-            for start, end, key in self.token_database.process_tokens_with_block_ids(
-                    token_len,
-                    req_meta.block_hashes,
-                    block_ids,
-                    kv_cache_group_id=group_id,
-                    skip_null_blocks=self.group_uses_align_state[group_id]):
-                starts.append(start)
-                ends.append(end)
-                keys.append(key.to_string())
-                block_hashes.append(req_meta.block_hashes[start // group_block_size])
+                if not self.dcp_size > 1 and not self.group_uses_align_state[group_id]:
+                    starts = starts[self.tp_rank % self.put_step :: self.put_step]
+                    ends = ends[self.tp_rank % self.put_step :: self.put_step]
+                    keys = keys[self.tp_rank % self.put_step :: self.put_step]
+                    block_hashes = block_hashes[self.tp_rank % self.put_step :: self.put_step]
 
-            if not self.dcp_size > 1 and not self.group_uses_align_state[group_id]:
-                starts = starts[self.tp_rank % self.put_step :: self.put_step]
-                ends = ends[self.tp_rank % self.put_step :: self.put_step]
-                keys = keys[self.tp_rank % self.put_step :: self.put_step]
-                block_hashes = block_hashes[self.tp_rank % self.put_step :: self.put_step]
+                if not keys:
+                    continue
 
-            if not keys:
-                continue
+                exists_states = self.lookup(keys)
+                missing_indices = [index for index, exists in enumerate(exists_states) if not exists]
 
-            exists_states = self.lookup(keys)
-            missing_indices = [index for index, exists in enumerate(exists_states) if not exists]
+                if not missing_indices:
+                    continue
 
-            if not missing_indices:
-                continue
+                starts = [starts[index] for index in missing_indices]
+                ends = [ends[index] for index in missing_indices]
+                keys = [keys[index] for index in missing_indices]
+                block_hashes = [block_hashes[index] for index in missing_indices]
 
-            starts = [starts[index] for index in missing_indices]
-            ends = [ends[index] for index in missing_indices]
-            keys = [keys[index] for index in missing_indices]
-            block_hashes = [block_hashes[index] for index in missing_indices]
-
-            if logger.isEnabledFor(logging.DEBUG):
-                logger.debug(
-                    "Storing KV cache for %d out of %d blocks (missing_count=%d) for request %s",
-                    len(keys),
-                    token_len // group_block_size,
-                    len(missing_indices),
-                    req_id,
-                )
-
-            """
-            Note: Due to a bug in ADXL, calling current_event.synchronize() may occasionally hang.
-            This issue will be fixed in CANN version 8.5.rc1.
-            You can manually build the master branch of the project at https://gitcode.com/cann/hixl
-            to resolve this issue before the 8.5.RC1 release.
-            """
-            addrs = []
-            sizes = []
-            stored_events: list[BlockStored] = []
-            prev_key = None
-            new_block_hashes = [maybe_convert_block_hash(bh) for bh in block_hashes]
-            for index, start in enumerate(starts):
-                addr, size, _ = self.token_database.prepare_value(start, ends[index], block_ids, group_id)
-                addrs.append(addr)
-                sizes.append(size)
-
-                # Create KV event
-                if self.enable_kv_event:
-                    token_ids = req_meta.token_ids[start : ends[index]] if req_meta.token_ids is not None else None
-                    block_size = \
-                        req_meta.original_block_size[group_id] if req_meta.original_block_size is not None else None
-                    stored_event = BlockStored(
-                        block_hashes=[new_block_hashes[index]],
-                        parent_block_hash=prev_key,
-                        token_ids=token_ids,
-                        block_size=block_size,
-                        lora_id=None,
-                        medium="cpu",
-                        lora_name=None,
-                        group_idx=group_id
+                if logger.isEnabledFor(logging.DEBUG):
+                    logger.debug(
+                        "Storing KV cache for %d out of %d blocks (missing_count=%d) for request %s",
+                        len(keys),
+                        token_len // group_block_size,
+                        len(missing_indices),
+                        req_id,
                     )
-                    stored_events.append(stored_event)
-                    prev_key = new_block_hashes[index]
-                    logger.debug("Added kv cache event '%s' to kv cache events queue", stored_event)
 
-            if self.kv_role == "kv_consumer":
-                keys, addrs, sizes = self.token_database.decode_adaptor_prefill_pp(keys, addrs, sizes)
+                """
+                Note: Due to a bug in ADXL, calling current_event.synchronize() may occasionally hang.
+                This issue will be fixed in CANN version 8.5.rc1.
+                You can manually build the master branch of the project at https://gitcode.com/cann/hixl
+                to resolve this issue before the 8.5.RC1 release.
+                """
+                addrs = []
+                sizes = []
+                stored_events: list[BlockStored] = []
+                prev_key = None
+                new_block_hashes = [maybe_convert_block_hash(bh) for bh in block_hashes]
+                for index, start in enumerate(starts):
+                    addr, size, _ = self.token_database.prepare_value(start, ends[index], block_ids, group_id)
+                    addrs.append(addr)
+                    sizes.append(size)
 
-            if current_event is not None:
-                current_event.synchronize()
-            self.m_store.put(keys, addrs, sizes)
+                    # Create KV event
+                    if self.enable_kv_event:
+                        token_ids = req_meta.token_ids[start : ends[index]] if req_meta.token_ids is not None else None
+                        block_size = \
+                            req_meta.original_block_size[group_id] if req_meta.original_block_size is not None else None
+                        stored_event = BlockStored(
+                            block_hashes=[new_block_hashes[index]],
+                            parent_block_hash=prev_key,
+                            token_ids=token_ids,
+                            block_size=block_size,
+                            lora_id=None,
+                            medium="cpu",
+                            lora_name=None,
+                            group_idx=group_id
+                        )
+                        stored_events.append(stored_event)
+                        prev_key = new_block_hashes[index]
+                        logger.debug("Added kv cache event '%s' to kv cache events queue", stored_event)
 
-            # TODO Query specific replica info to update the event
-            if self.enable_kv_event and stored_events is not None:
-                self.update_kv_event(stored_events)
+                if self.kv_role == "kv_consumer":
+                    keys, addrs, sizes = self.token_database.decode_adaptor_prefill_pp(keys, addrs, sizes)
 
+                if current_event is not None:
+                    current_event.synchronize()
+                self.m_store.put(keys, addrs, sizes)
+
+                # TODO Query specific replica info to update the event
+                if self.enable_kv_event and stored_events is not None:
+                    self.update_kv_event(stored_events)
+        finally:
+            # always free blocks
+            for group_id, mamba_group in enumerate(self.group_uses_align_state):
+                if mamba_group:
+                    self.mark_completed_blocks(req_id, req_meta.block_ids_by_group[group_id])
         self.dec_stored_request(req_id)
         self.request_queue.task_done()
 

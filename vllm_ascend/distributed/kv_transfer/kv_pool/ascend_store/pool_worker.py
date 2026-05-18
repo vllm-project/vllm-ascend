@@ -23,7 +23,7 @@ from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.config_data import
     ChunkedTokenDatabase,
     KeyMetadata,
     LayerMultiBlockReqMeta,
-    ReqMeta, get_block_hashes
+    ReqMeta, get_block_hashes, AscendStoreKVConnectorWorkerMetadata
 )
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.kv_transfer import (
     KVCacheStoreLayerRecvingThread,
@@ -782,3 +782,8 @@ class KVPoolWorker:
             events = self.kv_send_thread.get_kv_events()
             return events
         return []
+
+    def build_connector_worker_meta(self) -> AscendStoreKVConnectorWorkerMetadata | None:
+        if self.use_mamba and isinstance(self.kv_send_thread, KVCacheStoreSendingThread):
+            return AscendStoreKVConnectorWorkerMetadata(self.kv_send_thread.get_completed_blocks())
+        return None

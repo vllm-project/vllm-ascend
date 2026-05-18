@@ -1,9 +1,9 @@
 from collections.abc import Iterable
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Optional, cast
 
 import torch
-from vllm.distributed.kv_transfer.kv_connector.v1.base import KVConnectorMetadata
+from vllm.distributed.kv_transfer.kv_connector.v1.base import KVConnectorMetadata, KVConnectorWorkerMetadata
 from vllm.logger import logger
 from vllm.utils.math_utils import cdiv
 from vllm.v1.core.kv_cache_utils import BlockHash, BlockHashListWithBlockSize, BlockHashList
@@ -460,6 +460,31 @@ class LayerMultiBlockReqMeta:
     layer_id: int
     is_last_chunk: bool | None = True
     current_event: torch.npu.Event | None = None
+
+
+@dataclass
+class AscendStoreKVConnectorWorkerMetadata(KVConnectorWorkerMetadata):
+
+    completed_blocks: dict[str, dict[int, int]] = field(default_factory=dict)
+
+    def mark_completed_blocks(self, req_id: str, block_ids: list[int]) -> None:
+        req_completed_blocks = self.completed_blocks.setdefault(req_id, dict())
+        req_completed_blocks.update({block_id: 1 for block_id in block_ids})
+
+    def aggregate(
+        self, other: "KVConnectorWorkerMetadata"
+    ) -> "KVConnectorWorkerMetadata":
+        assert isinstance(other, AscendStoreKVConnectorWorkerMetadata)
+
+        merged = dict()
+        for req_id in other.completed_blocks:
+            if req_id not in self.completed_blocks:
+                merged[req_id] = dict(other.completed_blocks[req_id])
+            else:
+                merged[req_id] = dict(self.completed_blocks[req_id])
+                for k, v in other.completed_blocks[req_id].items():
+                    merged[req_id][k] = merged[req_id].get(k, 0) + v
+        return AscendStoreKVConnectorWorkerMetadata(merged)
 
 
 def get_block_hashes(block_hashes: list[BlockHash], group_block_size: int, hash_block_size: int) -> BlockHashList:
