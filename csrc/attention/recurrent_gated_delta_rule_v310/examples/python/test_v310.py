@@ -1,4 +1,5 @@
 """Test V310 kernel via ctypes API against golden CPU reference."""
+
 import ctypes
 import os
 
@@ -11,6 +12,7 @@ _CANN = os.environ.get("ASCEND_HOME_PATH", "/usr/local/Ascend/ascend-toolkit/lat
 _CUST = f"{_CANN}/opp/vendors/custom_transformer/op_api/lib"
 _LIB_PATHS = [_CUST, f"{_CANN}/lib64", f"{_CANN}/aarch64-linux/lib64"]
 
+
 def _find_lib(name, paths):
     for p in paths:
         full = os.path.join(p, name)
@@ -18,28 +20,44 @@ def _find_lib(name, paths):
             return full
     return name
 
+
 _acl = ctypes.CDLL(_find_lib("libnnopbase.so", _LIB_PATHS))
 _opapi = ctypes.CDLL(_find_lib("libcust_opapi.so", _LIB_PATHS))
 
 _acl.aclCreateTensor.restype = ctypes.c_void_p
 _acl.aclCreateTensor.argtypes = [
-    ctypes.POINTER(ctypes.c_int64), ctypes.c_uint64,
-    ctypes.c_int, ctypes.POINTER(ctypes.c_int64), ctypes.c_int64,
-    ctypes.c_int, ctypes.POINTER(ctypes.c_int64), ctypes.c_uint64,
+    ctypes.POINTER(ctypes.c_int64),
+    ctypes.c_uint64,
+    ctypes.c_int,
+    ctypes.POINTER(ctypes.c_int64),
+    ctypes.c_int64,
+    ctypes.c_int,
+    ctypes.POINTER(ctypes.c_int64),
+    ctypes.c_uint64,
     ctypes.c_void_p,
 ]
 _acl.aclDestroyTensor.argtypes = [ctypes.c_void_p]
 
 _DTYPE_MAP = {torch.float16: 1, torch.float32: 0, torch.int32: 3}
 
+
 def mk(t):
     if t is None:
         return None
     shape, strides, ndim = list(t.shape), list(t.stride()), len(t.shape)
-    return ctypes.c_void_p(_acl.aclCreateTensor(
-        (ctypes.c_int64 * ndim)(*shape), ndim, _DTYPE_MAP[t.dtype],
-        (ctypes.c_int64 * ndim)(*strides), ctypes.c_int64(0),
-        2, (ctypes.c_int64 * ndim)(*shape), ndim, ctypes.c_void_p(t.data_ptr())))
+    return ctypes.c_void_p(
+        _acl.aclCreateTensor(
+            (ctypes.c_int64 * ndim)(*shape),
+            ndim,
+            _DTYPE_MAP[t.dtype],
+            (ctypes.c_int64 * ndim)(*strides),
+            ctypes.c_int64(0),
+            2,
+            (ctypes.c_int64 * ndim)(*shape),
+            ndim,
+            ctypes.c_void_p(t.data_ptr()),
+        )
+    )
 
 
 def call_v310(query, key, value, beta, state, seq_lens, indices, g, nat, scale):
@@ -47,10 +65,21 @@ def call_v310(query, key, value, beta, state, seq_lens, indices, g, nat, scale):
     ws_size = ctypes.c_uint64(0)
     executor = ctypes.c_void_p(0)
     ret = _opapi.aclnnRecurrentGatedDeltaRuleV310GetWorkspaceSize(
-        mk(query), mk(key), mk(value), mk(beta), mk(state),
-        mk(seq_lens), mk(indices), mk(g), None, mk(nat),
-        ctypes.c_float(scale), mk(out),
-        ctypes.byref(ws_size), ctypes.byref(executor))
+        mk(query),
+        mk(key),
+        mk(value),
+        mk(beta),
+        mk(state),
+        mk(seq_lens),
+        mk(indices),
+        mk(g),
+        None,
+        mk(nat),
+        ctypes.c_float(scale),
+        mk(out),
+        ctypes.byref(ws_size),
+        ctypes.byref(executor),
+    )
     assert ret == 0, f"GetWorkspaceSize failed: {ret}"
     ws_ptr = ctypes.c_void_p(0)
     if ws_size.value > 0:
@@ -94,7 +123,7 @@ def golden(query, key, value, state, beta, scale, seq_lens, indices, g, nat):
 
 
 def test(label, b, mtp, nk, nv, dk, dv, num_slots):
-    scale = dk ** -0.5
+    scale = dk**-0.5
     seq_lens = torch.ones(b, dtype=torch.int32) * mtp
     T = int(seq_lens.sum())
     state = torch.rand(num_slots, nv, dv, dk, dtype=torch.float16)
@@ -109,8 +138,18 @@ def test(label, b, mtp, nk, nv, dk, dv, num_slots):
     out_gold, state_gold = golden(query, key, value, state, beta, scale, seq_lens, indices, g, nat)
 
     state_npu = state.clone().npu()
-    out_npu = call_v310(query.npu(), key.npu(), value.npu(), beta.npu(), state_npu,
-                        seq_lens.npu(), indices.npu(), g.npu(), nat.npu(), scale)
+    out_npu = call_v310(
+        query.npu(),
+        key.npu(),
+        value.npu(),
+        beta.npu(),
+        state_npu,
+        seq_lens.npu(),
+        indices.npu(),
+        g.npu(),
+        nat.npu(),
+        scale,
+    )
     out_npu = out_npu.float().cpu()
     state_npu = state_npu.float().cpu()
 
@@ -126,5 +165,5 @@ def test(label, b, mtp, nk, nv, dk, dv, num_slots):
 ok = True
 ok &= test("Qwen3.5 b=1 mtp=1", b=1, mtp=1, nk=8, nv=16, dk=128, dv=128, num_slots=444)
 ok &= test("Qwen3.5 b=2 mtp=2", b=2, mtp=2, nk=8, nv=16, dk=128, dv=128, num_slots=444)
-ok &= test("small dk=64",        b=4, mtp=2, nk=4, nv=4,  dk=64,  dv=64,  num_slots=32)
+ok &= test("small dk=64", b=4, mtp=2, nk=4, nv=4, dk=64, dv=64, num_slots=32)
 print(f"\n{'ALL PASSED' if ok else 'SOME FAILED'}")
