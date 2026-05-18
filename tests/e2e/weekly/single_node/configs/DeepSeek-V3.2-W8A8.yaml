@@ -77,4 +77,3 @@ test_cases:
         request_rate: 11.2
         baseline: 210
         threshold: 0.97
- 
