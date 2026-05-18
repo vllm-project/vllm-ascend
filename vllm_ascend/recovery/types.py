@@ -1,13 +1,11 @@
 import msgspec
-from typing import Any, Dict, List, Optional
-
-from regex import L
+from typing import Any, Optional
 
 class ExceptionInfo(msgspec.Struct):
     exception_type: str
     message: str
 
-class RecoveryAction:
+class RecoveryAction(msgspec.Struct):
     """
     Represents a single recovery action with its name and parameters.
     
@@ -15,13 +13,10 @@ class RecoveryAction:
         name: Name of the recovery action
         config: Dictionary containing the parameters for this action
     """
-    
-    def __init__(self, name: str, config: Optional[dict[str, Any]] = None) -> None:
-        self.name = name
-        self.config = config if config is not None else {}
-    
+    name: str
+    config: dict[str, Any] = msgspec.field(default_factory=dict)
 
-class RecoveryStep:
+class RecoveryStep(msgspec.Struct):
     """
     Represents a single step in the recovery plan.
     
@@ -34,18 +29,10 @@ class RecoveryStep:
         actions: List of RecoveryAction objects to be executed
         timeout: Timeout in seconds for this step (None means no timeout)
     """
-    
-    def __init__(
-        self,
-        name: str,
-        executor: str,
-        actions: Optional[list[RecoveryAction]] = None,
-        timeout: Optional[float] = None,
-    ) -> None:
-        self.name = name
-        self.executor = executor
-        self.actions = actions if actions is not None else []
-        self.timeout = timeout
+    name: str
+    executor: str
+    actions: list[RecoveryAction] = msgspec.field(default_factory=list)
+    timeout: Optional[float] = None
     
 class RecoveryPlan(msgspec.Struct):
     """
@@ -56,7 +43,6 @@ class RecoveryPlan(msgspec.Struct):
     """
     name: str
     steps: list[RecoveryStep] = msgspec.field(default_factory=list)
-    
     def add_step(self, step: RecoveryStep) -> None:
         """Add a recovery step to the plan."""
         self.steps.append(step)
@@ -76,17 +62,9 @@ class FaultReport(msgspec.Struct):
     timestamp: float
     context: dict = msgspec.field(default_factory=dict)
 
-class StepResult:
-    def __init__(
-        self,
-        step_name: str,
-        worker_rank: int,
-        is_success: bool,
-        engine_index: Optional[int] = None,
-        error: Optional[str] = None,
-    ):
-        self.step_name = step_name
-        self.worker_rank = worker_rank
-        self.engine_index = engine_index
-        self.is_success = is_success
-        self.error = error
+class StepResult(msgspec.Struct):
+    step_name: str
+    worker_rank: int
+    is_success: bool
+    engine_index: Optional[int] = None
+    error: Optional[str] = None

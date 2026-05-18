@@ -1,4 +1,5 @@
 import threading
+import time
 import torch
 import torch_npu
 import msgspec.msgpack
@@ -12,8 +13,6 @@ from vllm.utils.network_utils import get_open_zmq_ipc_path, make_zmq_socket
 from vllm_ascend.recovery.exception_handler import ExceptionHandlerFactory, NetworkExceptionHandler
 from vllm_ascend.recovery.types import ExceptionInfo, FaultReport, RecoveryPlan, StepResult 
 from vllm_ascend.recovery.recovery_executor import RecoveryExecutor
-
-logger = init_logger(__name__)
 
 class WorkerMonitor:
     """
@@ -50,15 +49,16 @@ class WorkerMonitor:
     def register_recovery_executor(self):
         recovery_executor = RecoveryExecutor(component_type="worker")
 
-        recovery_executor.register_handler("stop_device", self.stop_device)
-        recovery_executor.register_handler("restart_device", self.restart_device)
-        recovery_executor.register_handler("reinit_process_group", self.reinit_process_group)
-        recovery_executor.register_handler("clean_cache", self.clean_cache)
+        recovery_executor.register_handler("stop_device", self._stop_device)
+        recovery_executor.register_handler("restart_device", self._restart_device)
+        recovery_executor.register_handler("reinit_process_group", self._reinit_process_group)
+        recovery_executor.register_handler("clean_cache", self._clean_cache)
+        recovery_executor.register_handler("recovery", self._recovery_from_fault)
         return recovery_executor
 
-    def stop_device(self, context:dict | None) -> bool:
+    def _stop_device(self, context:dict | None) -> bool:
         try:
-            stop_result = torch_npu.npu.stop_device(torch.npu.current_device())
+            stop_result = torch_npu.npu.stop_device(self.worker.local_rank)
             if stop_result == 0:
                 logger.info("stop_device executed successfully")
                 return True
@@ -69,7 +69,7 @@ class WorkerMonitor:
             logger.error(f"stop_device executed failed with exception: {e}")
             return False
     
-    def restart_device(self, context:dict | None) -> bool:
+    def _restart_device(self, context:dict | None) -> bool:
         try:
             ctx = context or {}
             torch_npu.npu.restart_device(
@@ -80,7 +80,7 @@ class WorkerMonitor:
             logger.error(f"restart_device executed failed with exception: {e}")
             return False
 
-    def reinit_process_group(self, context:dict | None) -> bool:
+    def _reinit_process_group(self, context:dict | None) -> bool:
         try:
             ctx = context or {}
             torch.distributed.reinit_process_group(
@@ -91,7 +91,7 @@ class WorkerMonitor:
             logger.error(f"reinit_process_group executed failed with exception: {e}")
             return False
 
-    def clean_cache(self, context:dict | None) -> bool:
+    def _clean_cache(self, context:dict | None) -> bool:
         try:
             ctx = context or {}
             abort_list = context.get("abort_list", [])
@@ -104,6 +104,10 @@ class WorkerMonitor:
         except Exception as e:
             logger.error(f"worker clean_cached failed with exception: {e}")
             return False
+
+    def _recovery_from_fault(self, context:dict | None) -> bool:
+        self.worker.in_recovery = False
+        return True
 
     def start(self):
         self._monitor_thread = threading.Thread(

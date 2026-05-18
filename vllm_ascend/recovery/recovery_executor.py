@@ -1,4 +1,4 @@
-from typing import Callable, Dict, List, Optional, Any, Type
+from typing import Callable, Optional, Any, Type
 from vllm_ascend.recovery.types import RecoveryPlan, RecoveryStep, RecoveryAction
 
 import torch_npu
@@ -27,11 +27,11 @@ class RecoveryExecutor:
         """
         self._action_handlers[action_name] = action_func
     
-    def register_handlers(self, handlers: Dict[str, Callable[..., bool]]) -> None:
+    def register_handlers(self, handlers: dict[str, Callable[..., bool]]) -> None:
         """批量注册 action handlers"""
         self._action_handlers.update(handlers)
     
-    def filter_steps_by_executor(self, plan: RecoveryPlan) -> List[RecoveryStep]:
+    def filter_steps_by_executor(self, plan: RecoveryPlan) -> list[RecoveryStep]:
         """
         过滤RecoveryStep,仅保留当前executor对应的Step
         """
@@ -64,6 +64,6 @@ class RecoveryExecutor:
             )
         
         try:
-            return handler(**action.config)
+            return handler(action.config)
         except Exception as e:
             raise RuntimeError(f"Failed to execute action '{action.name}': {str(e)}") from e
