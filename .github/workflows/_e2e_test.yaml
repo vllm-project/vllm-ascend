@@ -142,9 +142,9 @@ jobs:
           pip install uc-manager
           uv pip install -r requirements-dev.txt
           if find vllm_ascend -maxdepth 1 -name '*.so' -type f 2>/dev/null | grep -q .; then
-            COMPILE_CUSTOM_KERNELS=0 uv pip install -e .
+            COMPILE_CUSTOM_KERNELS=0 pip install -e .
           else
-            uv pip install -e .
+            pip install -e .
           fi
 
       - name: Run vllm-project/vllm-ascend test
