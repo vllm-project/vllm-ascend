@@ -25,12 +25,13 @@ class KeyMetadata:
     """ Initialize the current pipeline parallel rank """
     pp_rank: int
 
+    kv_cache_group_id: int
+
 
 @dataclass(order=True)
 class PoolKey:
     key_metadata: KeyMetadata
     chunk_hash: str
-    kv_cache_group_id: int
 
     def __hash__(self):
         return hash(
@@ -40,7 +41,7 @@ class PoolKey:
                 self.key_metadata.pcp_rank,
                 self.key_metadata.dcp_rank,
                 self.key_metadata.pp_rank,
-                self.kv_cache_group_id,
+                self.key_metadata.kv_cache_group_id,
                 self.chunk_hash,
             )
         )
@@ -51,7 +52,7 @@ class PoolKey:
             f"@pcp{self.key_metadata.pcp_rank}@dcp{self.key_metadata.dcp_rank}"
             f"@head_or_tp_rank:{self.key_metadata.head_or_tp_rank}"
             f"@pp_rank:{self.key_metadata.pp_rank}"
-            f"@group:{self.kv_cache_group_id}@{self.chunk_hash}"
+            f"@group:{self.key_metadata.kv_cache_group_id}@{self.chunk_hash}"
         )
 
     def split_layers(self, num_layers: int) -> list["LayerPoolKey"]:
@@ -62,7 +63,6 @@ class PoolKey:
                 LayerPoolKey(
                     self.key_metadata,
                     self.chunk_hash,
-                    self.kv_cache_group_id,
                     layer_id,
                 )
             )
@@ -97,7 +97,7 @@ class LayerPoolKey(PoolKey):
 
 class ChunkedTokenDatabase:
     def __init__(self,
-                 metadata: KeyMetadata,
+                 metadata: list[KeyMetadata],
                  block_size: list[int],
                  partitions: list[int] | None,
                  use_hybrid: bool = False,
@@ -113,9 +113,8 @@ class ChunkedTokenDatabase:
     def _make_key_by_hash(self, chunk_hash: str, layer_id: int | None = None, kv_cache_group_id: int = 0):
         assert self.metadata is not None
         return PoolKey(
-            self.metadata,
-            chunk_hash,
-            kv_cache_group_id
+            self.metadata[kv_cache_group_id],
+            chunk_hash
         )
 
     def set_kv_caches_base_addr(self, kv_caches_base_addr: list[list[int]]):

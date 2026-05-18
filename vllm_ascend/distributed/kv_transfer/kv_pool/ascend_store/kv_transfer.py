@@ -178,7 +178,7 @@ class KVCacheStoreSendingThread(KVTransferThread):
                 keys.append(key.to_string())
                 block_hashes.append(req_meta.block_hashes[start // group_block_size])
 
-            if not self.dcp_size > 1:
+            if not self.dcp_size > 1 and not self.group_uses_align_state[group_id]:
                 starts = starts[self.tp_rank % self.put_step :: self.put_step]
                 ends = ends[self.tp_rank % self.put_step :: self.put_step]
                 keys = keys[self.tp_rank % self.put_step :: self.put_step]
@@ -277,10 +277,10 @@ class KVCacheStoreRecvingThread(KVTransferThread):
         token_len = req_meta.load_spec.token_len  # type: ignore[union-attr]
         req_id = req_meta.req_id
 
-        addr_list = []
-        size_list = []
-        key_list = []
         for group_id, block_ids in enumerate(req_meta.block_ids_by_group, 0):
+            addr_list = []
+            size_list = []
+            key_list = []
             group_block_size = self.block_size[group_id]
             mask_num = (
                     req_meta.load_spec.vllm_cached_tokens  # type: ignore[union-attr]
@@ -299,10 +299,10 @@ class KVCacheStoreRecvingThread(KVTransferThread):
                 addr_list.append(addr)
                 size_list.append(size)
 
-        key_list_c = key_list[self.tp_rank % len(key_list) :] + key_list[: self.tp_rank % len(key_list)]
-        addr_list_c = addr_list[self.tp_rank % len(addr_list) :] + addr_list[: self.tp_rank % len(addr_list)]
-        size_list_c = size_list[self.tp_rank % len(size_list) :] + size_list[: self.tp_rank % len(size_list)]
-        self.m_store.get(key_list_c, addr_list_c, size_list_c)
+            key_list_c = key_list[self.tp_rank % len(key_list) :] + key_list[: self.tp_rank % len(key_list)]
+            addr_list_c = addr_list[self.tp_rank % len(addr_list) :] + addr_list[: self.tp_rank % len(addr_list)]
+            size_list_c = size_list[self.tp_rank % len(size_list) :] + size_list[: self.tp_rank % len(size_list)]
+            self.m_store.get(key_list_c, addr_list_c, size_list_c)
         self.set_finished_request(req_id)
         self.request_queue.task_done()
 

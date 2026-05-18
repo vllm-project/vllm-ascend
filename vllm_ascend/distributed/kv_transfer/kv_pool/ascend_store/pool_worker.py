@@ -148,14 +148,6 @@ class KVPoolWorker:
             self.head_or_tp_rank = self.tp_rank
             self.put_step = 1
 
-        self.metadata = KeyMetadata(
-            model_config.model.rstrip("/").split("/")[-1],
-            self.head_or_tp_rank,
-            self.pcp_rank,
-            self.dcp_rank,
-            self.pp_rank,
-        )
-
         partitions = None
         if self.kv_role == "kv_consumer" and self.consumer_is_to_put:
             num_hidden_layers = model_config.hf_text_config.num_hidden_layers
@@ -180,6 +172,20 @@ class KVPoolWorker:
                 if remaining_layers := num_hidden_layers % prefill_pp_size:
                     for i in range(2, remaining_layers + 2):
                         partitions[-i] += 1
+
+        self.metadata: list[KeyMetadata] = []
+        for group_id in range(self.hma_group_size):
+            group_tp_rank = self.tp_rank if self.group_uses_align_state[group_id] else self.head_or_tp_rank
+            self.metadata.append(
+                KeyMetadata(
+                    model_config.model.rstrip("/").split("/")[-1],
+                    group_tp_rank,
+                    self.pcp_rank,
+                    self.dcp_rank,
+                    self.pp_rank,
+                    group_id
+                )
+            )
 
         self.token_database = ChunkedTokenDatabase(self.metadata,
                                                    self.grouped_block_size,
@@ -358,10 +364,10 @@ class KVPoolWorker:
                         request,
                     )
                 else:
-                    addr_list = []
-                    size_list = []
-                    key_list = []
                     for group_id, block_ids in enumerate(request.block_ids_by_group, 0):
+                        addr_list = []
+                        size_list = []
+                        key_list = []
                         block_size = self.grouped_block_size[group_id]
                         mask_num = request.load_spec.vllm_cached_tokens // block_size * block_size
 
@@ -377,14 +383,14 @@ class KVPoolWorker:
                             key_list.append(key.to_string())
                             addr_list.append(addr)
                             size_list.append(size)
-                    key_list_c = key_list[self.tp_rank % len(key_list) :] + key_list[: self.tp_rank % len(key_list)]
-                    addr_list_c = (
-                        addr_list[self.tp_rank % len(addr_list) :] + addr_list[: self.tp_rank % len(addr_list)]
-                    )
-                    size_list_c = (
-                        size_list[self.tp_rank % len(size_list) :] + size_list[: self.tp_rank % len(size_list)]
-                    )
-                    self.m_store.get(key_list_c, addr_list_c, size_list_c)
+                        key_list_c = key_list[self.tp_rank % len(key_list) :] + key_list[: self.tp_rank % len(key_list)]
+                        addr_list_c = (
+                            addr_list[self.tp_rank % len(addr_list) :] + addr_list[: self.tp_rank % len(addr_list)]
+                        )
+                        size_list_c = (
+                            size_list[self.tp_rank % len(size_list) :] + size_list[: self.tp_rank % len(size_list)]
+                        )
+                        self.m_store.get(key_list_c, addr_list_c, size_list_c)
 
     def wait_for_layer_load(self) -> None:
         for layerwise_retriever in self.layerwise_retrievers:
@@ -699,7 +705,8 @@ class KVPoolWorker:
                     return 0
 
                 multi_tp_keys = keys[:]
-                for i in range(1, min(self.tp_size, self.num_kv_head)):
+                multi_tp_size = self.get_group_tp_size(group_id)
+                for i in range(1, multi_tp_size):
                     for item in keys:
                         new_str = item.replace(  # type: ignore[attr-defined]
                             "@head_or_tp_rank:0", f"@head_or_tp_rank:{i}", 1
@@ -721,7 +728,7 @@ class KVPoolWorker:
                     num_block = len(keys) // self.num_layers
                 multi_tp_values = [
                     res[i * num_block : (i + 1) * num_block]  # type: ignore[index]
-                    for i in range(min(self.tp_size, self.num_kv_head) * self.pp_size)
+                    for i in range(multi_tp_size * self.pp_size)
                 ]
                 if self.group_uses_align_state[group_id]:
                     # mamba group with align mode will skip some null block, we must loop it in reverse order
@@ -732,20 +739,23 @@ class KVPoolWorker:
                     else:
                         return 0
                 else:
-                    index = self.find_min_first_non_one_index(multi_tp_values)
-                    if index != -1:
-                        for i in range(index, 0, -1):
-                            if starts[i] % self.lcm_block_size == 0:
-                                hits.append(starts[i])
-                                break
-                        else:
-                            return 0
+                    index = self.find_max_hit_index(multi_tp_values, num_block)
+                    logger.info(f"look up index: {index}")
+                    for i in range(index, -1, -1):
+                        if ends[i] % self.lcm_block_size == 0:
+                            hits.append(ends[i])
+                            break
                     else:
                         return 0
         except Exception as e:
             logger.error("Remote connection failed in contains: %s", e)
             return 0
         return min(hits) if hits else 0
+
+    def get_group_tp_size(self, kv_cache_group_id: int):
+        if self.group_uses_align_state[kv_cache_group_id]:
+            return self.tp_size
+        return min(self.num_kv_head, self.tp_size)
 
     def check_all_layers_exists(self, res: list[int], num_layers: int) -> list[int]:
         total_chunks = len(res) // num_layers
@@ -759,11 +769,12 @@ class KVPoolWorker:
 
         return result
 
-    def find_min_first_non_one_index(self, arr):
-        try:
-            return min(idx for row in arr for idx, val in enumerate(row) if val != 1)
-        except ValueError:
-            return -1
+    def find_max_hit_index(self, arr, num_blocks: int):
+        for i in range(num_blocks):
+            if any(row[i] != 1 for row in arr):
+                return i - 1
+        else:
+            return len(arr[0]) - 1
 
     def get_kv_events(self) -> list[BlockStored]:
         if self.enable_kv_events and self.kv_send_thread is not None:
