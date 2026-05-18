@@ -166,4 +166,4 @@ class VllmEplbAdaptor:
             all_layer_global_expert_map.append(map_cpu)
             self.expert_map_per_layer_cpu[local_idx] = map_cpu[self.ep_rank]
 
-        return torch.stack(all_layer_global_expert_map) if all_layer_global_expert_map else torch.empty(0)
+        return torch.stack(all_layer_global_expert_map)
