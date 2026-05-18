@@ -283,7 +283,7 @@ test_cases:
       - '{"method": "qwen3_5_mtp", "num_speculative_tokens": 3, "enforce_eager": true}'
     benchmarks:
       perf: *_benchmark_TPOT50_64K_1K
-      acc: *_benchmark_acc
+      <<: *_benchmark_acc
 #
 #  - name: "Qwen3.5-122B-A10B-W8A8-TPOT20-64k-1k"
 #    model: "Eco-Tech/Qwen3.5-122B-A10B-w8a8-mtp"
