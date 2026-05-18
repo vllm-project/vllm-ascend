@@ -528,7 +528,10 @@ class NPUModelRunner(GPUModelRunner):
                 elif self.speculative_config.method == "extract_hidden_states":
                     assert isinstance(self.drafter, AscendExtractHiddenStatesProposer)
                     self.use_aux_hidden_state_outputs = True
-                self.rejection_sampler = RejectionSampler(self.sampler)
+                elif self.speculative_config.method == "dflash":
+                    assert isinstance(self.drafter, AscendDflashProposer)
+                    self.use_aux_hidden_state_outputs = True
+                self.rejection_sampler = RejectionSampler(self.sampler, self.speculative_config, self.device)
         self.discard_request_indices = self._make_buffer(self.max_num_reqs, dtype=torch.int64)
         self.num_discarded_requests = 0
 
@@ -1476,14 +1479,22 @@ class NPUModelRunner(GPUModelRunner):
                     target_positions = self._get_positions(num_scheduled_tokens)
                     target_hidden_states = hidden_states
                     if self.use_aux_hidden_state_outputs:
-                        target_hidden_states = torch.cat([h for h in aux_hidden_states], dim=-1)
+                        target_hidden_states = (
+                            aux_hidden_states
+                            if isinstance(aux_hidden_states, torch.Tensor)
+                            else torch.cat([h for h in aux_hidden_states], dim=-1)
+                        )
                 else:
                     token_indices_to_sample = None
                     # input_ids can be None for multimodal models.
                     target_token_ids = self.input_ids.gpu[:num_scheduled_tokens]
                     target_positions = self._get_positions(num_scheduled_tokens)
                     if self.use_aux_hidden_state_outputs:
-                        target_hidden_states = torch.cat([h[:num_scheduled_tokens] for h in aux_hidden_states], dim=-1)
+                        target_hidden_states = (
+                            aux_hidden_states[:num_scheduled_tokens]
+                            if isinstance(aux_hidden_states, torch.Tensor)
+                            else torch.cat([h[:num_scheduled_tokens] for h in aux_hidden_states], dim=-1)
+                        )
                     else:
                         target_hidden_states = hidden_states[:num_scheduled_tokens]
             else:
@@ -1513,12 +1524,20 @@ class NPUModelRunner(GPUModelRunner):
                     target_positions = positions
                     target_hidden_states = hidden_states
                     if self.use_aux_hidden_state_outputs:
-                        target_hidden_states = torch.cat([h for h in aux_hidden_states], dim=-1)
+                        target_hidden_states = (
+                            aux_hidden_states
+                            if isinstance(aux_hidden_states, torch.Tensor)
+                            else torch.cat([h for h in aux_hidden_states], dim=-1)
+                        )
                 else:
                     target_token_ids = self.input_ids.gpu[token_indices]
                     target_positions = self._get_positions(token_indices)
                     if self.use_aux_hidden_state_outputs:
-                        target_hidden_states = torch.cat([h[token_indices] for h in aux_hidden_states], dim=-1)
+                        target_hidden_states = (
+                            aux_hidden_states[token_indices]
+                            if isinstance(aux_hidden_states, torch.Tensor)
+                            else torch.cat([h[token_indices] for h in aux_hidden_states], dim=-1)
+                        )
                     else:
                         target_hidden_states = hidden_states[token_indices]
             assert self.drafter is not None
@@ -2336,7 +2355,11 @@ class NPUModelRunner(GPUModelRunner):
         if isinstance(hidden_states, tuple):
             return (
                 NPUModelRunner._all_gather_hidden_states(hidden_states[0]),
-                NPUModelRunner._all_gather_hidden_states_list(hidden_states[1]),
+                (
+                    NPUModelRunner._all_gather_hidden_states(hidden_states[1])
+                    if isinstance(hidden_states[1], torch.Tensor)
+                    else NPUModelRunner._all_gather_hidden_states_list(hidden_states[1])
+                ),
             )
         return NPUModelRunner._all_gather_hidden_states(hidden_states)
 

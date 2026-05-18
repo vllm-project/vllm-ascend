@@ -487,6 +487,15 @@ class AscendAttentionBackendImpl(AttentionImpl):
                 return
             if _EXTRA_CTX.is_draft_model:
                 attn_keys = attn_keys * (len(graph_params.attn_params[num_tokens]) // num_layers)
+            def _resolve_attn_key(metadata: dict, captured_key, fallback_key):
+                if captured_key in metadata:
+                    return captured_key
+                if captured_key is not None:
+                    for candidate in metadata:
+                        if candidate.endswith(captured_key) or captured_key.endswith(candidate):
+                            return candidate
+                return fallback_key
+
             attn_count = 0
             with torch.npu.stream(update_stream):
                 for key, param, handle, event in zip(
@@ -516,19 +525,23 @@ class AscendAttentionBackendImpl(AttentionImpl):
                         c8_k_aq_offset,
                         c8_v_aq_scale,
                         c8_v_aq_offset,
+                        *captured_layer_name,
                     ) = param
+                    captured_key = captured_layer_name[0] if captured_layer_name else None
 
                     if _EXTRA_CTX.is_draft_model:
                         draft_step = attn_count // num_layers
-                        seq_lens = attn_metadata[draft_step][key].seq_lens_list
-                        actual_seq_lengths_q = attn_metadata[draft_step][key].actual_seq_lengths_q
-                        block_tables = attn_metadata[draft_step][key].block_tables
+                        metadata_key = _resolve_attn_key(attn_metadata[draft_step], captured_key, key)
+                        seq_lens = attn_metadata[draft_step][metadata_key].seq_lens_list
+                        actual_seq_lengths_q = attn_metadata[draft_step][metadata_key].actual_seq_lengths_q
+                        block_tables = attn_metadata[draft_step][metadata_key].block_tables
                         attn_count = attn_count + 1
-                        if not attn_metadata[draft_step][key].causal:
+                        if not attn_metadata[draft_step][metadata_key].causal:
                             sparse_mode = 0
                     else:
-                        seq_lens = attn_metadata[key].seq_lens_list
-                        actual_seq_lengths_q = attn_metadata[key].actual_seq_lengths_q
+                        metadata_key = _resolve_attn_key(attn_metadata, captured_key, key)
+                        seq_lens = attn_metadata[metadata_key].seq_lens_list
+                        actual_seq_lengths_q = attn_metadata[metadata_key].actual_seq_lengths_q
                         # NOTE:
                         # For models with sliding-window attention on the FIA full-graph replay path,
                         # rebinding `block_tables` to the latest metadata tensor causes corrupted /
@@ -538,8 +551,7 @@ class AscendAttentionBackendImpl(AttentionImpl):
                         # Non-SWA models preserve the original behavior and continue to refresh
                         # block_tables from attn_metadata.
                         if not hasattr(vllm_config.model_config.hf_text_config, "sliding_window"):
-                            block_tables = attn_metadata[key].block_tables
-
+                            block_tables = attn_metadata[metadata_key].block_tables
                     torch.npu.graph_task_update_begin(update_stream, handle)
                     input_layout = "TND"
                     extra_args = {}
@@ -687,6 +699,7 @@ class AscendAttentionBackendImpl(AttentionImpl):
             pre_tokens,
             next_tokens,
         )
+        layer_name = getattr(layer, "layer_name", None)
         if self.enable_c8_quant:
             attn_params = attn_params + (
                 weak_ref_tensors(layer._c8_k_aq_scale),
@@ -696,6 +709,7 @@ class AscendAttentionBackendImpl(AttentionImpl):
             )  # type: ignore
         else:
             attn_params = attn_params + (None, None, None, None)  # type: ignore
+        attn_params = attn_params + (layer_name,)  # type: ignore
         graph_params.attn_params[num_tokens].append(attn_params)
 
         torch.npu.graph_task_group_begin(stream)
@@ -857,12 +871,13 @@ class AscendAttentionBackendImpl(AttentionImpl):
         attn_metadata: AscendMetadata,
         output: torch.Tensor,
         kv_cache=None,
+        layer: AttentionLayer | None = None,
     ):
         # we inherit ForwardContext in model runner v2, when enable model
         # runner v2, there is not capturing attribute in forward_context,
         # just use getattr to avoid attribute error.
         if _EXTRA_CTX.capturing:
-            attn_output, num_tokens = self.full_graph_fia(query, key, value, attn_metadata, output)
+            attn_output, num_tokens = self.full_graph_fia(query, key, value, attn_metadata, output, layer)
             output[:num_tokens] = attn_output[:num_tokens]
             return output
 
@@ -1066,6 +1081,7 @@ class AscendAttentionBackendImpl(AttentionImpl):
         kv_cache: tuple[torch.Tensor],
         attn_metadata: AscendMetadata,
         output: torch.Tensor,
+        layer: AttentionLayer | None = None,
     ):
         num_tokens = query.shape[0]
         if (
@@ -1075,7 +1091,7 @@ class AscendAttentionBackendImpl(AttentionImpl):
         ):
             output = self.forward_paged_attention(query, attn_metadata, output)
         else:
-            output = self.forward_fused_infer_attention(query, key, value, attn_metadata, output, kv_cache)
+            output = self.forward_fused_infer_attention(query, key, value, attn_metadata, output, kv_cache, layer)
 
         return output
 
@@ -1139,9 +1155,9 @@ class AscendAttentionBackendImpl(AttentionImpl):
             output[:num_tokens] = attn_output[:num_tokens]
             return output
         if output_padded is not None:
-            attn_output = self.forward_impl(query, key, value, kv_cache, attn_metadata, output_padded)
+            attn_output = self.forward_impl(query, key, value, kv_cache, attn_metadata, output_padded, layer)
         else:
-            attn_output = self.forward_impl(query, key, value, kv_cache, attn_metadata, output)
+            attn_output = self.forward_impl(query, key, value, kv_cache, attn_metadata, output, layer)
         output[:num_tokens] = attn_output[:num_tokens]
         return output
 
@@ -1220,9 +1236,9 @@ class AscendC8AttentionBackendImpl(AscendAttentionBackendImpl):
                     output[:num_tokens] = attn_output[:num_tokens]
                     return output
                 if output_padded is not None:
-                    attn_output = self.forward_impl(query, key, value, kv_cache, attn_metadata, output_padded)
+                    attn_output = self.forward_impl(query, key, value, kv_cache, attn_metadata, output_padded, layer)
                 else:
-                    attn_output = self.forward_impl(query, key, value, kv_cache, attn_metadata, output)
+                    attn_output = self.forward_impl(query, key, value, kv_cache, attn_metadata, output, layer)
                 output[:num_tokens] = attn_output[:num_tokens]
                 return output
             elif not self.is_kv_producer:
