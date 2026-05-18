@@ -83,7 +83,7 @@ public:
     CATLASS_DEVICE
     BlockEpilogue(Arch::Resource<ArchTag> const &resource, int32_t n, Params const &params = Params{}) : params(params)
     {
-        size_t ubOffset = 0;
+        ubOffset = 0;
         int32_t eventVMTE2 = 0;
         int32_t eventMTE2V = 0;
         int32_t eventMTE3V = 0;
@@ -176,7 +176,8 @@ public:
                     AscendC::GlobalTensor<int32_t> const &cumsumMM, uint32_t MOffset,
                     AscendC::GlobalTensor<ElementPerTokenScale> const &gmPerTokenScale2, uint32_t expertPerRank,
                     uint32_t EP, AscendC::GlobalTensor<float> const &gmGMM1, int32_t rank, int32_t listLen,
-                    uint32_t epilogueCoreNum = 40, Callback &&callback = Callback{})
+                    Arch::Resource<ArchTag> const &resource,
+                    uint32_t epilogueCoreNum = 40, float swigluLimit = 0.0f, Callback &&callback = Callback{})
     {
         callback();
         uint32_t blockM = shapeC.row();
@@ -195,6 +196,9 @@ public:
 
         uint32_t perCoreData = blockM / epilogueCoreNum;
         uint32_t remainderData = blockM % epilogueCoreNum;
+
+        uint32_t scaleBlock = (perCoreData * sizeof(ElementPerTokenScale) + 31) / 32 * 32;
+        sharedTmpBuffer = resource.ubBuf.template GetBufferByByte<uint8_t>(ubOffset + scaleBlock);
 
         uint32_t tasksForIdx = epilogueCoreIdx < remainderData ? perCoreData + 1 : perCoreData;
         uint32_t loopStartIdx =
@@ -306,6 +310,13 @@ public:
             // Multiply FP32 C with per-token scale value
             AscendC::PipeBarrier<PIPE_V>();
             AscendC::Muls(ubCFp32, ubCFp32, perTokenScale, blockN);
+
+            if (swigluLimit > 0.0f) {
+                AscendC::PipeBarrier<PIPE_V>();
+                AscendC::ClampMax(ubCFp32, ubCFp32, sharedTmpBuffer, swigluLimit, blockN);
+                AscendC::PipeBarrier<PIPE_V>();
+                AscendC::ClampMin(ubCFp32[ChunkTileLen], ubCFp32[ChunkTileLen], sharedTmpBuffer, -1.0f * swigluLimit, ChunkTileLen);
+            }
 
 #ifdef W4A8_DEBUG
             // PipeBarrier<PIPE_ALL>();
@@ -431,6 +442,7 @@ private:
     int32_t eventxLowVMTE3List[UB_STAGES];
 
     uint32_t ubListId{0};
+    size_t ubOffset;
 
     AscendC::LocalTensor<float> ubCFp32;
     AscendC::LocalTensor<float> ubCFp32ChunkN;
@@ -439,6 +451,7 @@ private:
     AscendC::LocalTensor<int32_t> ubQuantS32;
     AscendC::LocalTensor<half> ubQuantF16;
     AscendC::LocalTensor<float> ubPerTokenScaleOutput;
+    AscendC::LocalTensor<uint8_t> sharedTmpBuffer;
 
     CopyGmToUbC copyGmToUbC;
     CopyUbToGmD copyUbToGmD;
