@@ -20,25 +20,6 @@ import types
 import torch
 
 
-# Module-level registry populated by layers during __init__.
-# Each entry is (global_layer_idx, layer).
-_moe_layer_entries: list[tuple[int, "torch.nn.Module"]] = []
-
-
-def register_moe_layer(global_idx: int, layer: "torch.nn.Module") -> None:
-    """Register a MoE layer with EPLB. Called during layer initialization.
-
-    Only real layers call this; PPMissingLayer (nn.Identity) won't,
-    so the registry naturally contains only layers on this PP rank.
-    """
-    _moe_layer_entries.append((global_idx, layer))
-
-
-def _clear_moe_layer_entries() -> None:
-    """Reset the registry before building a new model."""
-    _moe_layer_entries.clear()
-
-
 def _get_expert_map(self, layer_id):
     return self._moe_layer_map[layer_id]._expert_map
 
@@ -64,15 +45,15 @@ def model_register(model):
     if hasattr(model, "language_model"):
         model = model.language_model
 
-    # Sort by global index ascending
-    _moe_layer_entries.sort(key=lambda x: x[0])
-    model._moe_layers = list(_moe_layer_entries)
-    model._moe_layer_map = dict(_moe_layer_entries)
+    from vllm_ascend.eplb.adaptor.vllm_adaptor import VllmEplbAdaptor
+
+    entries = VllmEplbAdaptor._registered_moe_layers
+    entries.sort(key=lambda x: x[0])
+    model._moe_layers = list(entries)
+    model._moe_layer_map = dict(entries)
+    entries.clear()
 
     model.get_expert_map = types.MethodType(_get_expert_map, model)
     model.get_log2phy_map = types.MethodType(_get_log2phy_map, model)
     model.get_all_moe_loads = types.MethodType(_get_all_moe_loads, model)
     model.clear_all_moe_loads = types.MethodType(_clear_all_moe_loads, model)
-
-    # Clear after use to avoid leaking between model loads
-    _clear_moe_layer_entries()
