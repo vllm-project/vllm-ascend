@@ -50,14 +50,15 @@ class VllmEplbAdaptor:
         self.world_size = dist.get_world_size()
         self.num_dense_layers = getattr(self.config, "first_k_dense_replace", 0)
 
-        self.moe_registry = self.model._moe_layer_registry
-        self.num_moe_layers = self.moe_registry.num_layers
+        self.moe_layers = self.model._moe_layers
+        self._moe_layer_map = self.model._moe_layer_map
+        self.num_moe_layers = len(self.moe_layers)
 
         self.expert_map_per_layer_cpu = dict()  # copy of expert map on CPU to avoid device synchronize frequently
 
         # Get num_local_experts from first real MoE layer
         if self.num_moe_layers > 0:
-            _, first_layer = next(self.moe_registry.iter_layers())
+            _, first_layer = self.moe_layers[0]
             self.num_local_experts = first_layer.local_num_experts
             self.ep_rank = first_layer.ep_rank
         else:
@@ -71,13 +72,13 @@ class VllmEplbAdaptor:
         self.init_buffer_tensor(num_buffer_tensor)
 
         self.log2phy_map_per_layer = dict()
-        for global_idx, _ in self.moe_registry.iter_layers():
+        for global_idx, _ in self.moe_layers:
             self.log2phy_map_per_layer[global_idx] = self.model.get_log2phy_map(global_idx)
 
     def init_buffer_tensor(self, num_buffer_tensor):
         if self.num_moe_layers == 0:
             return
-        first_global_idx = self.moe_registry.get_global_index(0)
+        first_global_idx = self.moe_layers[0][0]
         for buffer_id in range(num_buffer_tensor):
             for name in self.expert_weight_names:
                 complete_name = "model.layers." + str(first_global_idx) + ".mlp.experts." + name
@@ -90,7 +91,7 @@ class VllmEplbAdaptor:
         if self.num_moe_layers == 0:
             return
 
-        _, first_layer = next(self.moe_registry.iter_layers())
+        _, first_layer = self.moe_layers[0]
 
         if self.model.quant_config is not None:
             quant_type = first_layer.quant_type
@@ -109,7 +110,7 @@ class VllmEplbAdaptor:
         else:
             self.expert_weight_names = ["w13_weight", "w2_weight"]
 
-        for global_idx, layer in self.moe_registry.iter_layers():
+        for global_idx, layer in self.moe_layers:
             self.expert_param_per_layer[global_idx] = list()
             for name in self.expert_weight_names:
                 param_key = f"model.layers.{global_idx}.mlp.experts.{name}"
@@ -152,12 +153,12 @@ class VllmEplbAdaptor:
                 json.dump(record, f, indent=4)
 
     def do_update_expert_map(self, layer_id, updated_expert_map):
-        if not self.moe_registry.has_layer(layer_id):
+        if layer_id not in self._moe_layer_map:
             return
         self.expert_map_per_layer_cpu[layer_id].copy_(updated_expert_map)
 
     def do_update_expert_weight(self, layer_id, local_expert_to_replace, buffer_tensor_id):
-        if not self.moe_registry.has_layer(layer_id):
+        if layer_id not in self._moe_layer_map:
             return
         for expert_tensor, buffer_tensor in zip(
             self.expert_param_per_layer[layer_id][local_expert_to_replace], self.buffer_tensor_list[buffer_tensor_id]
@@ -166,14 +167,14 @@ class VllmEplbAdaptor:
             logger.debug("Expert tensor shape is :%s", expert_tensor.shape)
 
     def do_update_log2phy_map(self, layer_id, updated_log2phy_map):
-        if not self.moe_registry.has_layer(layer_id):
+        if layer_id not in self._moe_layer_map:
             return
         if self.log2phy_map_per_layer[layer_id] is not None:
             self.log2phy_map_per_layer[layer_id].copy_(updated_log2phy_map)
 
     def get_global_expert_map(self):
         all_layer_global_expert_map = []
-        for global_idx, layer in self.moe_registry.iter_layers():
+        for global_idx, layer in self.moe_layers:
             map_cpu = layer.global_expert_map.cpu()
             all_layer_global_expert_map.append(map_cpu)
             self.expert_map_per_layer_cpu[global_idx] = map_cpu[self.ep_rank]
