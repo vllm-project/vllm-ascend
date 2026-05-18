@@ -821,7 +821,7 @@ jobs:
           else
             pip install -e .
           fi
-          pip uninstall -y triton triton-ascend
+          pip uninstall -y triton-ascend triton
 
       - name: Uninstall triton-ascend (310p e2e-light)
         if: ${{ inputs.type == 'light' }}
@@ -931,7 +931,7 @@ jobs:
           else
             pip install -e .
           fi
-          pip uninstall -y triton triton-ascend
+          pip uninstall -y triton-ascend triton
 
       - name: Uninstall triton-ascend (310p e2e-light)
         if: ${{ inputs.type == 'light' }}
