@@ -30,7 +30,6 @@ from vllm.v1.metrics.reader import Counter, Vector
 
 from tests.e2e.conftest import VllmRunner
 
-
 os.environ["VLLM_WORKER_MULTIPROC_METHOD"] = "spawn"
 
 MODELS = {
