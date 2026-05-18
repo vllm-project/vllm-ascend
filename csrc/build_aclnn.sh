@@ -212,16 +212,21 @@ elif [[ "$SOC_VERSION" =~ ^ascend950 ]]; then
 
     CUSTOM_OPS_ARRAY=(
         "moe_gating_top_k_hash"
+        "indexer_compress_epilog"
         "inplace_partial_rotary_mul"
+        "kv_compress_epilog"
         "compressor"
         "quant_lightning_indexer"
         "quant_lightning_indexer_metadata"
-        "sparse_attn_sharedkv"
-        "sparse_attn_sharedkv_metadata"
+        "kv_quant_sparse_attn_sharedkv"
+        "kv_quant_sparse_attn_sharedkv_metadata"
         "hc_pre_sinkhorn"
         "hc_pre_inv_rms"
         "hc_post"
-        "grouped_matmul_swiglu_quant_v2"
+        "hc_pre"
+        "swiglu_group_quant"
+        "load_index_kv_cache"
+        "indexer_compress_epilog_v2"
     )
 
     CUSTOM_OPS=$(IFS=';'; echo "${CUSTOM_OPS_ARRAY[*]}")
