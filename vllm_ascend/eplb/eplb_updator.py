@@ -21,6 +21,7 @@ import torch.distributed as dist
 import vllm.envs as envs
 from vllm.logger import logger
 
+from vllm.distributed.parallel_state import get_pp_group
 from vllm_ascend.distributed.parallel_state import get_dynamic_eplb_group
 from vllm_ascend.eplb.adaptor.vllm_adaptor import VllmEplbAdaptor
 from vllm_ascend.eplb.core.eplb_device_transfer_loader import D2DExpertWeightLoader
@@ -165,12 +166,15 @@ class EplbUpdator:
         )
 
     def forward_end(self):
+        import os as _os
         logger.info(
             "[EPLB-DEBUG] rank=%s cur_iter=%s forward_end ENTER "
-            "get_update=%s update_weight=%s wakeup=%s",
+            "get_update=%s update_weight=%s wakeup=%s pp_rank=%s pp_last=%s",
             self.rank_id, self.cur_iterations,
             self.get_update_info_flag(), self.update_expert_weight_flag(),
             self.wakeup_eplb_worker_flag(),
+            getattr(get_pp_group(), 'rank_in_group', -1),
+            getattr(get_pp_group(), 'is_last_rank', None),
         )
         if self.wakeup_eplb_worker_flag():
             logger.info(
