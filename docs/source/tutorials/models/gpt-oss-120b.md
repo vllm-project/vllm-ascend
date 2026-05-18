@@ -1,7 +1,3 @@
----
-testcases:
-    - TODO: add test case
----
 # gpt-oss-120b
 
 ## Introduction
