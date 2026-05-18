@@ -165,7 +165,7 @@ class EplbUpdator:
             self.rank_id, self.cur_iterations,
         )
 
-    def eplb_forward_end(self):
+    def forward_end(self):
         import os as _os
         logger.info(
             "[EPLB-DEBUG] rank=%s cur_iter=%s forward_end ENTER "

@@ -1790,7 +1790,7 @@ class NPUModelRunner(GPUModelRunner):
                     self.kv_connector_output = kv_connector_output
                     self._finalize_dump_data()
                     if self.dynamic_eplb:
-                        self.eplb_updator.eplb_forward_end()
+                        self.eplb_updator.forward_end()
                     return hidden_states
                 if self.is_pooling_model:
                     # Return the pooling output.
@@ -1994,7 +1994,7 @@ class NPUModelRunner(GPUModelRunner):
 
         if self.dynamic_eplb:
             with record_function_or_nullcontext("EPLB update"):
-                self.eplb_updator.eplb_forward_end()
+                self.eplb_updator.forward_end()
 
         self._finalize_dump_data()
 
@@ -2687,6 +2687,7 @@ class NPUModelRunner(GPUModelRunner):
         is_profile: bool = False,
         create_mixed_batch: bool = False,
         allow_microbatching: bool = True,
+        skip_eplb: bool = False,
         remove_lora: bool = True,
         is_graph_capturing: bool = False,
         num_active_loras: int = 0,
@@ -2938,7 +2939,7 @@ class NPUModelRunner(GPUModelRunner):
                 target = self.model.language_model if hasattr(self.model, "language_model") else self.model
                 target.clear_all_moe_loads()
             if self.dynamic_eplb:
-                self.eplb_updator.eplb_forward_end()
+                self.eplb_updator.forward_end()
             self._finalize_dump_data(dump=False)
             return hidden_states, hidden_states
 
