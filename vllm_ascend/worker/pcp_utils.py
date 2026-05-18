@@ -1346,8 +1346,8 @@ class PCPManager:
         max_k = int(k_lens[valid].max().item())
 
         # Generate indices up to max dimensions
-        q_indices = torch.arange(max_q, dtype=torch.int32)
-        k_indices = torch.arange(max_k, dtype=torch.int32)
+        q_indices = self._list_to_tensor(list(range(max_q)), self.device)
+        k_indices = self._list_to_tensor(list(range(max_k)), self.device)
 
         # valid_q: [num_decode_reqs, max_q] - which q indices are valid for each req
         valid_q = valid[:, None] & (q_indices[None, :] < q_lens[:, None])
