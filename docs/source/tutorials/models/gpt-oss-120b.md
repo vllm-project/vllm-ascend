@@ -1,3 +1,7 @@
+---
+testcases:
+    - TODO: add test case
+---
 # gpt-oss-120b
 
 ## Introduction
@@ -76,13 +80,14 @@ In addition, if you don't want to use the docker image as above, you can also bu
 ## Deployment
 
 ### Troubleshooting
+
 Run into
 
 "openai_harmony.HarmonyError: error downloading or loading vocab file: failed to download or load vocab error"
 
 Solution: This is caused by a bug in openai_harmony code. This can be worked around by downloading the tiktoken encoding files in advance and setting the TIKTOKEN_ENCODINGS_BASE environment variable. See this [GitHub](https://github.com/openai/harmony/pull/41) issue for more information.
 
-```
+```bash
 mkdir -p tiktoken_encodings
 wget -O tiktoken_encodings/o200k_base.tiktoken "https://openaipublic.blob.core.windows.net/encodings/o200k_base.tiktoken"
 wget -O tiktoken_encodings/cl100k_base.tiktoken "https://openaipublic.blob.core.windows.net/encodings/cl100k_base.tiktoken"
