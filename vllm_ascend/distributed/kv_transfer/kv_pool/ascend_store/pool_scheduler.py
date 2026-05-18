@@ -610,6 +610,8 @@ class KVPoolScheduler:
         """
         if self.kv_role == "kv_consumer" and not self.consumer_is_to_put:
             return False, None
+        if self.use_layerwise:
+            return False, None
         tracker = self._request_trackers.get(request.request_id)
         if tracker is not None and tracker.num_saved_tokens <= 0:
             return False, None

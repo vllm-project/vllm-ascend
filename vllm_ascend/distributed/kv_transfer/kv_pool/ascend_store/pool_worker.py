@@ -488,7 +488,13 @@ class KVPoolWorker:
     def save_kv_layer(self, connector_metadata: AscendConnectorMetadata) -> None:
         # Wait for KV cache saving to complete on the final layer that requires offloading.
         self.sync_save_events[self.current_layer].record()
-        self.kv_send_thread.add_request(self.layer_save_tasks[self.current_layer])
+        if self.layer_save_tasks[self.current_layer]:
+            for block_range in self.layer_save_tasks[self.current_layer][0].block_ranges:
+                self.kv_send_thread.add_stored_request(
+                    block_range.request.req_id)
+            self.kv_send_thread.add_request(self.layer_save_tasks[self.current_layer])
+        else:
+            self.layer_save_finished_events[self.current_layer].set()
         if self.current_layer == self.num_layers - 1:
             is_finish = self.layer_save_finished_events[self.num_layers - 1].wait(timeout=10)
             if not is_finish:
@@ -528,12 +534,16 @@ class KVPoolWorker:
             for req_id in meta.preempted_req_ids:
                 self.kv_send_thread.delete_finished_stored_request(req_id)
             self.kv_send_thread.discard_finished_requests(meta.preempted_req_ids)
-            # The layerwise sender can finish saving the prompt KV before the
-            # request finishes decoding. Only clear and report requests after
-            # the scheduler has marked them finished.
-            done_sending = self.kv_send_thread.get_and_clear_finished_requests(
-                finished_req_ids
-            )
+            if self.use_layerwise:
+                self.kv_send_thread.get_and_clear_finished_requests()
+                done_sending = set()
+            else:
+                # The layerwise sender can finish saving the prompt KV before the
+                # request finishes decoding. Only clear and report requests after
+                # the scheduler has marked them finished.
+                done_sending = self.kv_send_thread.get_and_clear_finished_requests(
+                    finished_req_ids
+                )
         else:
             done_sending = set()
 

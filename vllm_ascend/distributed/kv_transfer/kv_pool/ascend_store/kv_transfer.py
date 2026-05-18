@@ -588,6 +588,10 @@ class KVCacheStoreLayerSendingThread(KVTransferThread):
             raise ValueError(f"Expected at most one layer transfer task, got {len(transfer_tasks)}")
         req_meta = self.layer_batch_builder.build(transfer_tasks[0])
         if req_meta is None:
+            layer_id = transfer_tasks[0].layer_id
+            assert not self.layer_save_finished_events[layer_id].is_set(), f"thread: {layer_id} save failed "
+            logger.debug(f">>>>>>>>>>>>>>>>>>>> set save layer {layer_id}")
+            self.layer_save_finished_events[layer_id].set()
             self.request_queue.task_done()
             return
         layer_id = req_meta.layer_id
@@ -610,10 +614,9 @@ class KVCacheStoreLayerSendingThread(KVTransferThread):
         #     self.layer_transfer_finished_events[layer_id].clear()
         if res != 0:
             logger.error("Layerwise %d save batch_copy failed with return code %d", layer_id, res)
-        elif layer_id == self.final_layer_id:
-            for req_id, is_last_chunk in zip(req_meta.req_ids,
-                                             req_meta.is_last_chunks):
-                if is_last_chunk:
+        else:
+            for req_id in req_meta.req_ids:
+                if self.try_finish_and_delete_stored_request(req_id):
                     self.set_finished_request(req_id)
         assert not self.layer_save_finished_events[layer_id].is_set(), f"thread: {layer_id} save failed "
         logger.debug(f">>>>>>>>>>>>>>>>>>>> set save layer {layer_id}")
