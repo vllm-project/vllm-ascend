@@ -123,23 +123,20 @@ public:
         AscendC::SetFlag<AscendC::HardEvent::MTE3_V>(EVENT_ID5);
 #endif
 
-        ubD = resource.ubBuf.template GetBufferByByte<ElementD>(ubOffset);
-        ubOffset += blockN * sizeof(ElementD);
         ubCFp32 = resource.ubBuf.template GetBufferByByte<float>(ubOffset);
-        ubOffset += blockN * sizeof(float) * 2;
-        ubCFp32ChunkN = resource.ubBuf.template GetBufferByByte<float>(ubOffset);
-        ubOffset += ChunkTileLen * sizeof(float);
         ubCFp32ChunkNAbs = resource.ubBuf.template GetBufferByByte<float>(ubOffset);
-        ubOffset += ChunkTileLen * sizeof(float);
-        ubCFp32ChunkNMax = resource.ubBuf.template GetBufferByByte<float>(ubOffset);
-        ubOffset += HalfChunkTileLen * sizeof(float);
         ubQuantS32 = ubCFp32ChunkNAbs.template ReinterpretCast<int32_t>();
         ubQuantF16 = ubCFp32ChunkNAbs.template ReinterpretCast<half>();
+        ubCFp32ChunkNMax = resource.ubBuf.template GetBufferByByte<float>(ubOffset + ChunkTileLen * sizeof(float));
+        sharedTmpBuffer = resource.ubBuf.template GetBufferByByte<uint8_t>(ubOffset + blockN * sizeof(float));
+        ubOffset += blockN * sizeof(float) * 2;
 
+        ubCFp32ChunkN = resource.ubBuf.template GetBufferByByte<float>(ubOffset);
+        ubD = resource.ubBuf.template GetBufferByByte<ElementD>(ubOffset);
         xLowHalfTensor = resource.ubBuf.template GetBufferByByte<half>(ubOffset);
-        ubOffset += ChunkTileLen * sizeof(half);
-        xLowHalfTensor2 = resource.ubBuf.template GetBufferByByte<half>(ubOffset);
-        ubOffset += ChunkTileLen * sizeof(half);
+        xLowHalfTensor2 = resource.ubBuf.template GetBufferByByte<half>(ubOffset + ChunkTileLen * sizeof(half));
+        ubOffset += ChunkTileLen * sizeof(float);
+
         xLowI16Tensor = resource.ubBuf.template GetBufferByByte<int16_t>(ubOffset);
         ubOffset += 128 * sizeof(int16_t);
 
@@ -197,9 +194,6 @@ public:
         uint32_t perCoreData = blockM / epilogueCoreNum;
         uint32_t remainderData = blockM % epilogueCoreNum;
 
-        uint32_t scaleBlock = (perCoreData * sizeof(ElementPerTokenScale) + 31) / 32 * 32;
-        sharedTmpBuffer = resource.ubBuf.template GetBufferByByte<uint8_t>(ubOffset + scaleBlock);
-
         uint32_t tasksForIdx = epilogueCoreIdx < remainderData ? perCoreData + 1 : perCoreData;
         uint32_t loopStartIdx =
             epilogueCoreIdx * perCoreData + (epilogueCoreIdx < remainderData ? epilogueCoreIdx : remainderData);
@@ -226,7 +220,6 @@ public:
             PipeBarrier<PIPE_V>();
 
             auto &ubAbs = ubCFp32ChunkNAbs;
-            auto &ubMax = ubCFp32ChunkNMax;
             auto &ubReduceMax = ubCFp32ChunkNMax;
             auto &ubOutputTmp = ubAbs;
             auto &sharedUbTmpBuffer = ubReduceMax;
@@ -338,7 +331,7 @@ public:
             // TODO: Check if division affects subsequent data
             AscendC::Div(ubCFp32ChunkN, ubCFp32, ubCFp32ChunkN, ChunkTileLen);
             AscendC::PipeBarrier<PIPE_V>();
-            AscendC::Mul(ubCFp32ChunkN, ubCFp32ChunkN, ubCFp32[ChunkTileLen], ChunkTileLen);
+            AscendC::Mul(ubCFp32ChunkN, ubCFp32ChunkN, ubCFp32[ChunkTileLen], ChunkTileLen); //ubCFp32 finished
 
             // Quantization
             AscendC::PipeBarrier<PIPE_V>();
@@ -357,7 +350,7 @@ public:
             ubPerTokenScaleOutput.SetValue(ubPerTokenScaleOutputOffset, GMubDequantScale / 127.f);
 
             AscendC::WaitFlag<AscendC::HardEvent::S_V>(0);
-            AscendC::Muls(ubOutputTmp, ubCFp32ChunkN, 127.f / GMubDequantScale, ChunkTileLen);
+            AscendC::Muls(ubOutputTmp, ubCFp32ChunkN, 127.f / GMubDequantScale, ChunkTileLen); // ubCFp32ChunkN finished
             AscendC::PipeBarrier<PIPE_V>();
 
             AscendC::Cast(ubQuantS32, ubOutputTmp, AscendC::RoundMode::CAST_RINT, ChunkTileLen);
@@ -424,7 +417,6 @@ private:
     AscendC::LocalTensor<float> ubweighAuxList[UB_STAGES];
     AscendC::LocalTensor<int4b_t> xHighI4TensorList[UB_STAGES];
     AscendC::LocalTensor<int4b_t> xLowI4TensorList[UB_STAGES];
-    AscendC::LocalTensor<half> xHighHalfTensor;
     AscendC::LocalTensor<half> xLowHalfTensor;
     AscendC::LocalTensor<half> xLowHalfTensor2;
     AscendC::LocalTensor<int16_t> xLowI16Tensor;
