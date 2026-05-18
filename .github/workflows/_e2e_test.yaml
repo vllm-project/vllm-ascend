@@ -113,8 +113,8 @@ jobs:
       - name: Install vllm-project/vllm from source
         working-directory: ./vllm-empty
         run: |
-          VLLM_TARGET_DEVICE=empty uv pip install -e .
-          uv pip uninstall -y triton
+          VLLM_TARGET_DEVICE=empty pip install -e .
+          pip uninstall -y triton
 
       - name: Get csrc hash
         id: get_csrc_hash
@@ -244,8 +244,8 @@ jobs:
       - name: Install vllm-project/vllm from source
         working-directory: ./vllm-empty
         run: |
-          VLLM_TARGET_DEVICE=empty uv pip install -e .
-          uv pip uninstall -y triton
+          VLLM_TARGET_DEVICE=empty pip install -e .
+          pip uninstall -y triton
 
       - name: Get csrc hash
         id: get_csrc_hash
@@ -382,8 +382,8 @@ jobs:
       - name: Install vllm-project/vllm from source
         working-directory: ./vllm-empty
         run: |
-          VLLM_TARGET_DEVICE=empty uv pip install -e .
-          uv pip uninstall -y triton
+          VLLM_TARGET_DEVICE=empty pip install -e .
+          pip uninstall -y triton
 
       - name: Get csrc hash
         id: get_csrc_hash
@@ -511,8 +511,8 @@ jobs:
       - name: Install vllm-project/vllm from source
         working-directory: ./vllm-empty
         run: |
-          VLLM_TARGET_DEVICE=empty uv pip install -e .
-          uv pip uninstall -y triton
+          VLLM_TARGET_DEVICE=empty pip install -e .
+          pip uninstall -y triton
 
       - name: Get csrc hash
         id: get_csrc_hash
@@ -668,8 +668,8 @@ jobs:
       - name: Install vllm-project/vllm from source
         working-directory: ./vllm-empty
         run: |
-          VLLM_TARGET_DEVICE=empty uv pip install -e .
-          uv pip uninstall -y triton
+          VLLM_TARGET_DEVICE=empty pip install -e .
+          pip uninstall -y triton
 
       - name: Get csrc hash
         id: get_csrc_hash
