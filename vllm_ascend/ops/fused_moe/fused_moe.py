@@ -546,15 +546,20 @@ class AscendFusedMoE(FusedMoE):
         if self.dynamic_eplb:
             if self.policy_type == 4:
                 # TODO ALL2ALL case, currently only support ALLGATHER
-                topk_ids = fused_experts_results.topk_ids.reshape(get_ep_group().world_size, -1, self.top_k)[get_ep_group().rank]
                 if self.token2req[0] is not None:
-                    expanded_req_ids = self.token2req[0]
-                    indices = torch.add(topk_ids, expanded_req_ids, alpha=self.global_num_experts).view(-1)
-                    self.moe_load_local.view(-1).index_add_(
-                        0, 
-                        indices, 
-                        self.ones_buffer[:indices.shape[0]]  
-                    )
+                    topk_ids = fused_experts_results.topk_ids.reshape(get_dp_group().world_size, -1, self.top_k)[get_dp_group().rank_in_group]
+                    if topk_ids.shape[0] !=self.token2req[0].shape[0]:
+                        logger.warning_once(
+                            f"Mismatch in the number of tokens for MoE load calculation. topk_ids has {topk_ids.shape[0]} tokens, while token2req has {self.token2req[0].shape[0]} tokens. This may lead to incorrect MoE load tracking."
+                        )
+                    else:
+                        expanded_req_ids = self.token2req[0]
+                        indices = torch.add(topk_ids, expanded_req_ids, alpha=self.global_num_experts).view(-1)
+                        self.moe_load_local.view(-1).index_add_(
+                            0, 
+                            indices, 
+                            self.ones_buffer[:indices.shape[0]]  
+                        )
             else:
                 expert_tokens = fused_experts_results.expert_tokens
                 group_list_type = fused_experts_results.group_list_type
