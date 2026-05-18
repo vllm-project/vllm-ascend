@@ -1,0 +1,181 @@
+#
+# Copyright (c) 2026 Huawei Technologies Co., Ltd. All Rights Reserved.
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+# This file is a part of the vllm-ascend project.
+#
+
+# Cartesian product: 2 arch × 2 os × 3 chip_type = 12 jobs
+name: 'Cache csrc Build Artifacts'
+on:
+  push:
+    branches: [ "main" ]
+    paths:
+      - 'csrc/**'
+      - 'setup.py'
+      - 'CMakeLists.txt'
+      - 'cmake/**'
+  workflow_dispatch:
+
+defaults:
+  run:
+    shell: bash -el {0}
+
+concurrency:
+  group: ascend-csrc-build-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  UV_INDEX_URL: http://cache-service.nginx-pypi-cache.svc.cluster.local/pypi/simple
+  UV_EXTRA_INDEX_URL: "https://mirrors.huaweicloud.com/ascend/repos/pypi https://triton-ascend.osinfra.cn/pypi/simple"
+  UV_INDEX_STRATEGY: unsafe-best-match
+  UV_NO_CACHE: 1
+  UV_SYSTEM_PYTHON: 1
+
+jobs:
+  build-cache:
+    name: build-${{ matrix.arch }}-${{ matrix.chip_type }}-${{ matrix.os }}-cache
+    runs-on: ${{ matrix.runner }}
+    strategy:
+      fail-fast: false
+      matrix:
+        arch:
+          - X64
+          - ARM64
+        os:
+          - ubuntu
+          - openeuler
+        chip_type:
+          - a2
+          - a3
+          - 310p
+
+        include:
+          # arch → runner
+          - arch: X64
+            runner: linux-amd64-cpu-16-hk
+          - arch: ARM64
+            runner: linux-arm64-cpu-16
+
+          # chip_type → soc_version
+          - chip_type: a2
+            soc_version: ascend910b1
+          - chip_type: a3
+            soc_version: ascend910_9391
+          - chip_type: 310p
+            soc_version: ascend310p1
+
+          # os × chip_type → image
+          - os: ubuntu
+            chip_type: a2
+            image: swr.cn-southwest-2.myhuaweicloud.com/base_image/ascend-ci/cann:9.0.0-910b-ubuntu22.04-py3.11
+          - os: ubuntu
+            chip_type: a3
+            image: swr.cn-southwest-2.myhuaweicloud.com/base_image/ascend-ci/cann:9.0.0-a3-ubuntu22.04-py3.11
+          - os: ubuntu
+            chip_type: 310p
+            image: swr.cn-southwest-2.myhuaweicloud.com/base_image/ascend-ci/cann:9.0.0-310p-ubuntu22.04-py3.11
+          - os: openeuler
+            chip_type: a2
+            image: swr.cn-southwest-2.myhuaweicloud.com/base_image/ascend-ci/cann:9.0.0-910b-openeuler24.03-py3.11
+          - os: openeuler
+            chip_type: a3
+            image: swr.cn-southwest-2.myhuaweicloud.com/base_image/ascend-ci/cann:9.0.0-a3-openeuler24.03-py3.11
+          - os: openeuler
+            chip_type: 310p
+            image: swr.cn-southwest-2.myhuaweicloud.com/base_image/ascend-ci/cann:9.0.0-310p-openeuler24.03-py3.11
+
+    container:
+      image: ${{ matrix.image }}
+    steps:
+      - name: Checkout repo
+        uses: actions/checkout@v6
+
+      - name: Config mirrors (ubuntu)
+        if: matrix.os == 'ubuntu'
+        run: |
+          sed -Ei 's@(ports|archive).ubuntu.com@cache-service.nginx-pypi-cache.svc.cluster.local:8081@g' /etc/apt/sources.list
+          pip config set global.index-url http://cache-service.nginx-pypi-cache.svc.cluster.local/pypi/simple
+          pip config set global.trusted-host cache-service.nginx-pypi-cache.svc.cluster.local
+          apt-get update -y
+          apt-get install -y git zstd
+          git config --global --add safe.directory /__w/vllm-ascend/vllm-ascend
+
+      - name: Config mirrors (openeuler)
+        if: matrix.os == 'openeuler'
+        run: |
+          pip config set global.index-url http://cache-service.nginx-pypi-cache.svc.cluster.local/pypi/simple
+          pip config set global.trusted-host cache-service.nginx-pypi-cache.svc.cluster.local
+          sed -Ei 's@https?://[^/]+/(openeuler|centos|fedora)@http://cache-service.nginx-pypi-cache.svc.cluster.local:8081/\1@g' /etc/yum.repos.d/*.repo
+          yum install -y git zstd
+          git config --global --add safe.directory /__w/vllm-ascend/vllm-ascend
+
+      - name: Install system dependencies (ubuntu)
+        if: matrix.os == 'ubuntu'
+        run: |
+          apt-get -y install `cat packages.txt`
+          apt-get -y install gcc g++ cmake libnuma-dev zstd clang-15
+          update-alternatives --install /usr/bin/clang clang /usr/bin/clang-15 20
+          update-alternatives --install /usr/bin/clang++ clang++ /usr/bin/clang++-15 20
+          pip install uv
+
+      - name: Install system dependencies (openeuler)
+        if: matrix.os == 'openeuler'
+        run: |
+          yum install -y gcc gcc-c++ cmake numactl-devel clang
+          pip install uv
+
+      - name: Get image tag
+        id: get_image_tag
+        run: |
+          IMAGE="${{ matrix.image }}"
+          IMAGE_TAG="${IMAGE##*:}"
+          echo "IMAGE_TAG=$IMAGE_TAG" >> $GITHUB_OUTPUT
+
+      - name: Get csrc hash
+        id: get_csrc_hash
+        run: |
+          CSRC_HASH=$(find ./csrc ./setup.py ./CMakeLists.txt ./cmake \
+            -type f -not -path '*/.*' | sort | xargs sha256sum | sha256sum | awk '{print $1}')
+          echo "CSRC_HASH=$CSRC_HASH" >> $GITHUB_OUTPUT
+
+      - name: Cache vllm-ascend csrc
+        id: cache-csrc
+        uses: actions/cache@v4
+        with:
+          path: |
+            vllm_ascend/_cann_ops_custom
+            vllm_ascend/*.so
+            vllm_ascend/lib
+            vllm_ascend/include
+          key: vllm-ascend-build-v1-${{ matrix.arch }}-${{ steps.get_image_tag.outputs.IMAGE_TAG }}-${{ steps.get_csrc_hash.outputs.CSRC_HASH }}
+
+      - name: Install vllm-ascend
+        if: steps.cache-csrc.outputs.cache-hit != 'true'
+        env:
+          SOC_VERSION: ${{ matrix.soc_version }}
+          MAX_JOBS: "16"
+        run: |
+          source /usr/local/Ascend/ascend-toolkit/set_env.sh
+          source /usr/local/Ascend/nnal/atb/set_env.sh
+          arch=$(uname -i)
+          export LD_LIBRARY_PATH=$LD_LIBRARY_PATH:/usr/local/Ascend/ascend-toolkit/latest/${arch}-linux/devlib
+
+          # os-specific: openeuler needs C++ include path for compilation
+          if [ "${{ matrix.os }}" = "openeuler" ]; then
+            export CPLUS_INCLUDE_PATH=$CPLUS_INCLUDE_PATH:/usr/include/c++/12:/usr/include/c++/12/${arch}-openEuler-linux
+          fi
+
+          pip install uc-manager
+          uv pip install -r requirements-dev.txt --extra-index-url https://download.pytorch.org/whl/cpu/
+          uv pip install -e . --extra-index-url https://download.pytorch.org/whl/cpu/

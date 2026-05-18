@@ -18,7 +18,6 @@
 #
 
 import torch
-from triton.runtime import driver  # type: ignore
 from vllm.triton_utils import tl, triton
 
 
@@ -269,7 +268,9 @@ def linear_persistent(x, y):
     # Allocate output tensor (same data type as x)
     output = torch.zeros((M, N), dtype=x.dtype, device=x.device)
 
-    grid_size = driver.active.utils.get_device_properties(torch.npu.current_device())["num_vectorcore"] // 2
+    grid_size = (
+        triton.runtime.driver.active.utils.get_device_properties(torch.npu.current_device())["num_vectorcore"] // 2
+    )
 
     # Define block sizes (can be adjusted based on hardware)
     BLOCK_K = 256

@@ -1,3 +1,4 @@
+import logging
 import queue
 import threading
 from collections import defaultdict
@@ -14,7 +15,7 @@ from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.backend.backend im
 # isort: off
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.config_data import (
     ChunkedTokenDatabase,
-    LasyerMultiBlockReqMeta,
+    LayerMultiBlockReqMeta,
     ReqMeta,
 )
 # isort: on
@@ -48,7 +49,7 @@ class KVTransferThread(threading.Thread):
 
     def add_request(
         self,
-        request: ReqMeta | LasyerMultiBlockReqMeta,
+        request: ReqMeta | LayerMultiBlockReqMeta,
     ) -> torch.Tensor:
         self.request_queue.put(request)
 
@@ -80,7 +81,7 @@ class KVTransferThread(threading.Thread):
                     continue
                 self._handle_request(request_data)
             except Exception as e:
-                logger.error(f"Error in KVCacheTransferThread: {e}")
+                logger.error("Error in KVCacheTransferThread: %s", e)
 
     def _handle_request(self, req_meta: Any):
         pass
@@ -88,22 +89,20 @@ class KVTransferThread(threading.Thread):
     def lookup(
         self,
         keys: list[str],
-    ) -> int:
+    ) -> list[bool]:
         """
-        Checks the existence of KV cache of the tokens from the cache engine.
-        :param tokens: the input tokens, with shape [seq_len]
-        :return: An int indicating how many prefix tokens are cached.
+        Check the existence of all keys from the cache engine.
+        :return: A bool list where True means the key exists in store.
         """
         try:
             res = self.m_store.exists(keys)  # type: ignore[assignment]
+            exists_list = [False] * len(keys)
             for index, value in enumerate(res):  # type: ignore[arg-type]
-                if value != 1:
-                    return index
-            # all tokens where found, return the maximal end
+                exists_list[index] = value == 1
+            return exists_list
         except Exception as e:
-            logger.error(f"Remote connection failed in contains: {e}")
-            return 0
-        return len(keys)
+            logger.error("Remote connection failed in contains: %s", e)
+            return [False] * len(keys)
 
     def update_kv_event(self, event: list[BlockStored]):
         with self.kv_event_lock:
@@ -159,41 +158,47 @@ class KVCacheStoreSendingThread(KVTransferThread):
         starts = []
         ends = []
         keys = []
+        block_hashes = []
         if req_id not in self.stored_requests:
             self.request_queue.task_done()
             return
 
-        for start, end, key in self.token_database.process_tokens(token_len, req_meta.block_hashes):
+        for index, (start, end, key) in enumerate(self.token_database.process_tokens(token_len, req_meta.block_hashes)):
             starts.append(start)
             ends.append(end)
             keys.append(key.to_string())
+            block_hashes.append(req_meta.block_hashes[index])
 
         if not self.dcp_size > 1:
             starts = starts[self.tp_rank % self.put_step :: self.put_step]
             ends = ends[self.tp_rank % self.put_step :: self.put_step]
             keys = keys[self.tp_rank % self.put_step :: self.put_step]
+            block_hashes = block_hashes[self.tp_rank % self.put_step :: self.put_step]
 
         if not keys:
             self.dec_stored_request(req_id)
             return
 
-        skip_block_num = self.lookup(keys)
+        exists_states = self.lookup(keys)
+        missing_indices = [index for index, exists in enumerate(exists_states) if not exists]
 
-        if skip_block_num == len(keys):
+        if not missing_indices:
             self.dec_stored_request(req_id)
             return
 
-        starts = starts[skip_block_num:]
-        ends = ends[skip_block_num:]
-        keys = keys[skip_block_num:]
+        starts = [starts[index] for index in missing_indices]
+        ends = [ends[index] for index in missing_indices]
+        keys = [keys[index] for index in missing_indices]
+        block_hashes = [block_hashes[index] for index in missing_indices]
 
-        logger.debug(
-            "Storing KV cache for %d out of %d blocks (skip_block_num=%d) for request %s",
-            len(keys),
-            token_len // self.block_size,
-            skip_block_num,
-            req_id,
-        )
+        if logger.isEnabledFor(logging.DEBUG):
+            logger.debug(
+                "Storing KV cache for %d out of %d blocks (missing_count=%d) for request %s",
+                len(keys),
+                token_len // self.block_size,
+                len(missing_indices),
+                req_id,
+            )
 
         if keys:
             """
@@ -206,7 +211,7 @@ class KVCacheStoreSendingThread(KVTransferThread):
             sizes = []
             stored_events: list[BlockStored] = []
             prev_key = None
-            new_block_hashes = [maybe_convert_block_hash(bh) for bh in req_meta.block_hashes[skip_block_num:]]
+            new_block_hashes = [maybe_convert_block_hash(bh) for bh in block_hashes]
             for index, start in enumerate(starts):
                 addr, size, _ = self.token_database.prepare_value(start, ends[index], block_ids)
                 addrs.append(addr)
@@ -226,7 +231,7 @@ class KVCacheStoreSendingThread(KVTransferThread):
                     )
                     stored_events.append(stored_event)
                     prev_key = new_block_hashes[index]
-                    logger.debug(f"Added kv cache event '{stored_event}' to kv cache events queue")
+                    logger.debug("Added kv cache event '%s' to kv cache events queue", stored_event)
 
             if self.kv_role == "kv_consumer":
                 keys, addrs, sizes = self.token_database.decode_adaptor_prefill_pp(keys, addrs, sizes)
@@ -307,7 +312,7 @@ class KVCacheStoreLayerSendingThread(KVTransferThread):
         self.request_queue.put(req_meta)
 
     def _handle_request(  # type: ignore[override]
-        self, req_meta: LasyerMultiBlockReqMeta
+        self, req_meta: LayerMultiBlockReqMeta
     ):
         starts = req_meta.starts
         ends = req_meta.ends
@@ -330,16 +335,17 @@ class KVCacheStoreLayerSendingThread(KVTransferThread):
         for key in keys:
             key_list.append(key.to_string())
 
-        skip_block_num = self.lookup(key_list)
+        exists_states = self.lookup(key_list)
+        missing_indices = [index for index, exists in enumerate(exists_states) if not exists]
 
-        if skip_block_num == len(key_list):
+        if not missing_indices:
             if is_last_chunk and layer_id == self.final_layer_id:
                 self.set_finished_request(req_meta.req_id)
             return
 
-        starts = starts[skip_block_num:]
-        ends = ends[skip_block_num:]
-        key_list = key_list[skip_block_num:]
+        starts = [starts[index] for index in missing_indices]
+        ends = [ends[index] for index in missing_indices]
+        key_list = [key_list[index] for index in missing_indices]
 
         addr_list = []
         size_list = []
@@ -359,10 +365,10 @@ class KVCacheStoreLayerSendingThread(KVTransferThread):
         self.request_queue.task_done()
 
         logger.info(
-            "Storing KV cache for %d out of %d blocks (skip_block_num=%d) for request %s",
-            len(keys),
+            "Storing KV cache for %d out of %d blocks (missing_count=%d) for request %s",
+            len(key_list),
             total_block,
-            skip_block_num,
+            len(missing_indices),
             req_meta.req_id,
         )
 
@@ -384,12 +390,12 @@ class KVCacheStoreLayerRecvingThread(KVTransferThread):
         self.get_event = get_event
 
     def add_request(  # type: ignore[override]
-        self, req_meta: LasyerMultiBlockReqMeta
+        self, req_meta: LayerMultiBlockReqMeta
     ) -> torch.Tensor:
         self.request_queue.put(req_meta)
 
     def _handle_request(  # type: ignore[override]
-        self, req_meta: LasyerMultiBlockReqMeta
+        self, req_meta: LayerMultiBlockReqMeta
     ):
         addr_list = []
         size_list = []

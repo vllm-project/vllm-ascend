@@ -33,6 +33,10 @@ class NPUCommunicator(DeviceCommunicatorBase):
         # init device according to rank
         self.device = torch.npu.current_device()
 
+        # For compatibility (mainly for reusing graph capturing code in vllm),
+        # init custom all-reduce implementation interface as in CUDACommunicator.
+        self.ca_comm = None
+
     def all_to_all(
         self,
         input_: torch.Tensor,

@@ -237,7 +237,6 @@ def generate_test_case(rng, num_reqs, num_padding_slots, shift_input_ids,
 # ---------------------------------------------------------------------------
 # Parametrized tests
 # ---------------------------------------------------------------------------
-
 @pytest.mark.parametrize("num_reqs", [1, 2, 4, 8, 16])
 @pytest.mark.parametrize("num_padding_slots", [1, 2, 3, 5])
 @pytest.mark.parametrize("shift_input_ids", [False, True])

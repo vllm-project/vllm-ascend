@@ -1,4 +1,4 @@
-# Qwen-VL-Dense(Qwen2.5VL-3B/7B, Qwen3-VL-2B/4B/8B/32B)
+# Qwen-VL-Dense(Qwen3-VL-2B/4B/8B/32B)
 
 ## Introduction
 
@@ -6,7 +6,7 @@ The Qwen-VL(Vision-Language)series from Alibaba Cloud comprises a family of powe
 
 This document will show the main verification steps of the model, including supported features, feature configuration, environment preparation, NPU deployment, accuracy and performance evaluation.
 
-This tutorial uses the vLLM-Ascend `v0.11.0rc3-a3` version for demonstration, showcasing the `Qwen3-VL-8B-Instruct` model as an example for single NPU deployment and the `Qwen2.5-VL-32B-Instruct` model as an example for multi-NPU deployment.
+This tutorial uses the vLLM-Ascend `v0.11.0rc3-a3` version for demonstration, showcasing the `Qwen3-VL-8B-Instruct` model as an example for single NPU and multi-NPU deployment.
 
 ## Supported Features
 
@@ -20,16 +20,10 @@ Refer to [feature guide](../../user_guide/feature_guide/index.md) to get the fea
 
 require 1 Atlas 800I A2 (64G × 8) node or 1 Atlas 800 A3 (64G × 16) node:
 
-- `Qwen2.5-VL-3B-Instruct`: [Download model weight](https://modelscope.cn/models/Qwen/Qwen2.5-VL-3B-Instruct)
-- `Qwen2.5-VL-7B-Instruct`: [Download model weight](https://modelscope.cn/models/Qwen/Qwen2.5-VL-7B-Instruct)
-- `Qwen2.5-VL-32B-Instruct`:[Download model weight](https://modelscope.cn/models/Qwen/Qwen2.5-VL-32B-Instruct)
-- `Qwen2.5-VL-72B-Instruct`:[Download model weight](https://modelscope.cn/models/Qwen/Qwen2.5-VL-72B-Instruct)
 - `Qwen3-VL-2B-Instruct`:   [Download model weight](https://modelscope.cn/models/Qwen/Qwen3-VL-2B-Instruct)
 - `Qwen3-VL-4B-Instruct`:   [Download model weight](https://modelscope.cn/models/Qwen/Qwen3-VL-4B-Instruct)
 - `Qwen3-VL-8B-Instruct`:   [Download model weight](https://modelscope.cn/models/Qwen/Qwen3-VL-8B-Instruct)
 - `Qwen3-VL-32B-Instruct`:  [Download model weight](https://modelscope.cn/models/Qwen/Qwen3-VL-32B-Instruct)
-
-A sample Qwen2.5-VL quantization script can be found in the modelslim code repository. [Qwen2.5-VL Quantization Script Example](https://gitcode.com/Ascend/msit/blob/master/msmodelslim/example/multimodal_vlm/Qwen2.5-VL/README.md)
 
 It is recommended to download the model weight to the shared directory of multiple nodes, such as `/root/.cache/`
 
@@ -214,7 +208,7 @@ The logo is designed to be easily recognizable across various media and scales, 
 ```
 
 ::::
-::::{tab-item} Qwen2.5-VL-32B-Instruct
+::::{tab-item} Qwen3-VL-32B-Instruct
 :sync: multi
 
 Run the following script to execute offline inference on multi-NPU:
@@ -228,7 +222,7 @@ from transformers import AutoProcessor
 from vllm import LLM, SamplingParams
 from qwen_vl_utils import process_vision_info
 
-MODEL_PATH = "Qwen/Qwen2.5-VL-32B-Instruct"
+MODEL_PATH = "Qwen/Qwen3-VL-32B-Instruct"
 
 llm = LLM(
     model=MODEL_PATH,
@@ -328,7 +322,7 @@ vllm serve Qwen/Qwen3-VL-8B-Instruct \
 ```
 
 :::{note}
-Add `--max_model_len` option to avoid ValueError that the Qwen3-VL-8B-Instruct model's max seq len (256000) is larger than the maximum number of tokens that can be stored in KV cache. This will differ with different NPU series base on the HBM size. Please modify the value according to a suitable value for your NPU series.
+Add `--max_model_len` option to avoid ValueError that the Qwen3-VL-8B-Instruct model's max seq len (256000) is larger than the maximum number of tokens that can be stored in KV cache. This will differ with different NPU series based on the on-chip memory size. Please modify the value according to a suitable value for your NPU series.
 :::
 
 If your service start successfully, you can see the info shown below:
@@ -350,7 +344,7 @@ curl http://localhost:8000/v1/chat/completions \
     {"role": "system", "content": "You are a helpful assistant."},
     {"role": "user", "content": [
         {"type": "image_url", "image_url": {"url": "https://modelscope.oss-cn-beijing.aliyuncs.com/resource/qwen.png"}},
-        {"type": "text", "text": "What is the text in the illustrate?"}
+        {"type": "text", "text": "What is the text in the illustration?"}
     ]}
     ]
     }'
@@ -374,7 +368,7 @@ INFO 12-05 08:42:23 [loggers.py:127] Engine 000: Avg prompt throughput: 0.0 toke
 ```
 
 ::::
-::::{tab-item} Qwen2.5-VL-32B-Instruct
+::::{tab-item} Qwen3-VL-32B-Instruct
 :sync: multi
 
 Run docker container to start the vLLM server on multi-NPU:
@@ -400,7 +394,7 @@ export HCCL_OP_EXPANSION_MODE="AIV"
 # Set vLLM to Engine V1
 export VLLM_USE_V1=1
 
-vllm serve Qwen/Qwen2.5-VL-32B-Instruct \
+vllm serve Qwen/Qwen3-VL-32B-Instruct \
     --host 0.0.0.0 \
     --port 8000 \
     --async-scheduling \
@@ -415,7 +409,7 @@ vllm serve Qwen/Qwen2.5-VL-32B-Instruct \
 ```
 
 :::{note}
-Add `--max_model_len` option to avoid ValueError that the Qwen2.5-VL-32B-Instruct model's max_model_len (128000) is larger than the maximum number of tokens that can be stored in KV cache. This will differ with different NPU series base on the HBM size. Please modify the value according to a suitable value for your NPU series.
+Add `--max_model_len` option to avoid ValueError that the Qwen3-VL-32B-Instruct model's max_model_len (128000) is larger than the maximum number of tokens that can be stored in KV cache. This will differ with different NPU series base on the on-chip memory size. Please modify the value according to a suitable value for your NPU series.
 :::
 
 If your service start successfully, you can see the info shown below:
@@ -432,12 +426,12 @@ Once your server is started, you can query the model with input prompts:
 curl http://localhost:8000/v1/chat/completions \
     -H "Content-Type: application/json" \
     -d '{
-    "model": "Qwen/Qwen2.5-VL-32B-Instruct",
+    "model": "Qwen/Qwen3-VL-32B-Instruct",
     "messages": [
     {"role": "system", "content": "You are a helpful assistant."},
     {"role": "user", "content": [
         {"type": "image_url", "image_url": {"url": "https://modelscope.oss-cn-beijing.aliyuncs.com/resource/qwen.png"}},
-        {"type": "text", "text": "What is the text in the illustrate?"}
+        {"type": "text", "text": "What is the text in the illustration?"}
     ]}
     ]
     }'
@@ -446,7 +440,7 @@ curl http://localhost:8000/v1/chat/completions \
 If you query the server successfully, you can see the info shown below (client):
 
 ```bash
-{"id":"chatcmpl-c07088bf992a4b77a89d79480122a483","object":"chat.completion","created":1764905884,"model":"Qwen/Qwen2.5-VL-32B-Instruct","choices":[{"index":0,"message":{"role":"assistant","content":"The text in the illustration is:\n\n**TONGYI Qwen**","refusal":null,"annotations":null,"audio":null,"function_call":null,"tool_calls":[],"reasoning":null,"reasoning_content":null},"logprobs":null,"finish_reason":"stop","stop_reason":null,"token_ids":null}],"service_tier":null,"system_fingerprint":null,"usage":{"prompt_tokens":73,"total_tokens":89,"completion_tokens":16,"prompt_tokens_details":null},"prompt_logprobs":null,"prompt_token_ids":null,"kv_transfer_params":null}
+{"id":"chatcmpl-c07088bf992a4b77a89d79480122a483","object":"chat.completion","created":1764905884,"model":"Qwen/Qwen3-VL-32B-Instruct","choices":[{"index":0,"message":{"role":"assistant","content":"The text in the illustration is:\n\n**TONGYI Qwen**","refusal":null,"annotations":null,"audio":null,"function_call":null,"tool_calls":[],"reasoning":null,"reasoning_content":null},"logprobs":null,"finish_reason":"stop","stop_reason":null,"token_ids":null}],"service_tier":null,"system_fingerprint":null,"usage":{"prompt_tokens":73,"total_tokens":89,"completion_tokens":16,"prompt_tokens_details":null},"prompt_logprobs":null,"prompt_token_ids":null,"kv_transfer_params":null}
 ```
 
 Logs of the vllm server:
@@ -454,7 +448,7 @@ Logs of the vllm server:
 ```bash
 The image processor of type `Qwen2VLImageProcessor` is now loaded as a fast processor by default, even if the model checkpoint was saved with a slow processor. This is a breaking change and may produce slightly different outputs. To continue using the slow processor, instantiate this class with `use_fast=False`. Note that this behavior will be extended to all models in a future release.
 INFO 12-05 08:50:57 [chat_utils.py:560] Detected the chat template content format to be 'openai'. You can set `--chat-template-content-format` to override this.
-Downloading Model from https://www.modelscope.cn to directory: /root/.cache/modelscope/hub/models/Qwen/Qwen2.5-VL-32B-Instruct
+Downloading Model from https://www.modelscope.cn to directory: /root/.cache/modelscope/hub/models/Qwen/Qwen3-VL-32B-Instruct
 2025-12-05 08:50:58,913 - modelscope - INFO - Target directory already exists, skipping creation.
 INFO 12-05 08:51:00 [acl_graph.py:187] Replaying aclgraph
 INFO:     127.0.0.1:50720 - "POST /v1/chat/completions HTTP/1.1" 200 OK
@@ -471,82 +465,40 @@ INFO 12-05 08:51:20 [loggers.py:127] Engine 000: Avg prompt throughput: 0.0 toke
 
 The accuracy of some models is already within our CI monitoring scope, including:
 
-- `Qwen2.5-VL-7B-Instruct`
 - `Qwen3-VL-8B-Instruct`
-
-You can refer to the [monitoring configuration](https://github.com/vllm-project/vllm-ascend/blob/main/.github/workflows/vllm_ascend_test_nightly_a2.yaml).
-
-:::::{tab-set}
-:sync-group: install
-
-::::{tab-item} Qwen3-VL-8B-Instruct
-:sync: single
 
 As an example, take the `mmmu_val` dataset as a test dataset, and run accuracy evaluation of `Qwen3-VL-8B-Instruct` in offline mode.
 
 1. Refer to [Using lm_eval](../../developer_guide/evaluation/using_lm_eval.md) for more details on `lm_eval` installation.
 
-```shell
-pip install lm_eval
-```
+    ```shell
+    pip install lm_eval
+    ```
 
 2. Run `lm_eval` to execute the accuracy evaluation.
 
-```shell
-lm_eval \
-    --model vllm-vlm \
-    --model_args pretrained=Qwen/Qwen3-VL-8B-Instruct,max_model_len=8192,gpu_memory_utilization=0.7 \
-    --tasks mmmu_val \
-    --batch_size 32 \
-    --apply_chat_template \
-    --trust_remote_code \
-    --output_path ./results
-```
+    ```shell
+    lm_eval \
+        --model vllm-vlm \
+        --model_args pretrained=Qwen/Qwen3-VL-8B-Instruct,max_model_len=8192,gpu_memory_utilization=0.7 \
+        --tasks mmmu_val \
+        --batch_size 32 \
+        --apply_chat_template \
+        --trust_remote_code \
+        --output_path ./results
+    ```
 
 3. After execution, you can get the result, here is the result of `Qwen3-VL-8B-Instruct` in `vllm-ascend:0.11.0rc3` for reference only.
 
-|  Tasks  |Version|Filter|n-shot|Metric|   |Value |   |Stderr|
-|---------|------:|------|-----:|------|---|-----:|---|-----:|
-|mmmu_val |      0|none  |      |acc   |↑  |0.5389|±  |0.0159|
-
-::::
-::::{tab-item} Qwen2.5-VL-32B-Instruct
-:sync: multi
-
-As an example, take the `mmmu_val` dataset as a test dataset, and run accuracy evaluation of `Qwen2.5-VL-32B-Instruct` in offline mode.
-
-1. Refer to [Using lm_eval](../../developer_guide/evaluation/using_lm_eval.md) for more details on `lm_eval` installation.
-
-```shell
-pip install lm_eval
-```
-
-2. Run `lm_eval` to execute the accuracy evaluation.
-
-```shell
-lm_eval \
-    --model vllm-vlm \
-    --model_args pretrained=Qwen/Qwen2.5-VL-32B-Instruct,max_model_len=8192,tensor_parallel_size=2 \
-    --tasks mmmu_val \
-    --apply_chat_template \
-    --trust_remote_code \
-    --output_path ./results
-```
-
-3. After execution, you can get the result, here is the result of `Qwen2.5-VL-32B-Instruct` in `vllm-ascend:0.11.0rc3` for reference only.
-
-|  Tasks  |Version|Filter|n-shot|Metric|   |Value |   |Stderr|
-|---------|------:|------|-----:|------|---|-----:|---|-----:|
-|mmmu_val |      0|none  |      |acc   |↑  |0.5744|±  |0.0158|
-
-::::
-:::::
+    |  Tasks  |Version|Filter|n-shot|Metric|   |Value |   |Stderr|
+    |---------|------:|------|-----:|------|---|-----:|---|-----:|
+    |mmmu_val |      0|none  |      |acc   |↑  |0.5389|±  |0.0159|
 
 ## Performance
 
 ### Using vLLM Benchmark
 
-Refer to [vllm benchmark](https://docs.vllm.ai/en/latest/contributing/benchmarks.html) for more details.
+Refer to [vllm benchmark](https://docs.vllm.ai/en/latest/benchmarking/) for more details.
 
 There are three `vllm bench` subcommands:
 
@@ -556,25 +508,8 @@ There are three `vllm bench` subcommands:
 
 The performance evaluation must be conducted in an online mode. Take the `serve` as an example. Run the code as follows.
 
-:::::{tab-set}
-:sync-group: install
-
-::::{tab-item} Qwen3-VL-8B-Instruct
-:sync: single
-
 ```shell
 vllm bench serve --model Qwen/Qwen3-VL-8B-Instruct  --dataset-name random --random-input 200 --num-prompts 200 --request-rate 1 --save-result --result-dir ./
 ```
-
-::::
-::::{tab-item} Qwen2.5-VL-32B-Instruct
-:sync: multi
-
-```shell
-vllm bench serve --model Qwen/Qwen2.5-VL-32B-Instruct  --dataset-name random --random-input 200 --num-prompts 200 --request-rate 1 --save-result --result-dir ./
-```
-
-::::
-:::::
 
 After about several minutes, you can get the performance evaluation result.

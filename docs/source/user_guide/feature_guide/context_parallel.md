@@ -11,7 +11,7 @@ Context parallel mainly solves the problem of serving long context requests. As 
 - For long context prefill, we can use context parallel to reduce TTFT (time to first token) by amortizing the computation time of the prefill across query tokens.
 - For long context decode, we can use context parallel to reduce KV cache duplication and offer more space for KV cache to increase the batch size (and hence the throughput).
 
-To learn more about the theory and implementation details of context parallel, please refer to the [context parallel developer guide](../../developer_guide/feature_guide/context_parallel.md).
+To learn more about the theory and implementation details of context parallel, please refer to the [context parallel developer guide](../../developer_guide/Design_Documents/context_parallel.md).
 
 ## Supported Scenarios
 
@@ -79,7 +79,7 @@ The total world size is `tensor_parallel_size` * `prefill_context_parallel_size`
 
 ## Experimental Results
 
-To evaluate the effectiveness of Context Parallel in long sequence LLM inference scenarios, we use **DeepSeek-R1-W8A8** and **Qwen3-235B**, deploy PD disaggregate instances in the environment of 64 cards Ascend 910C*64G (A3), the configuration and performance data are as follows.
+To evaluate the effectiveness of Context Parallel in long sequence LLM inference scenarios, we use **DeepSeek-R1-W8A8** and **Qwen3-235B**, deploy PD disaggregate instances in the environment of 64 cards Ascend Atlas A3 inference products*64G (A3), the configuration and performance data are as follows.
 
 - DeepSeek-R1-W8A8:
 
