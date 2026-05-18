@@ -133,6 +133,10 @@ class AscendStoreConnector(KVConnectorBase_V1):
         Args:
             connector_output (KVConnectorOutput): the worker-side connectors output.
         """
+        assert self.connector_scheduler is not None
+        self.connector_scheduler.update_finished_sending(
+            connector_output.finished_sending)
+
         # Get the KV events
         kv_cache_events = connector_output.kv_cache_events
         if not kv_cache_events or not isinstance(kv_cache_events, AscendStoreKVEvents):

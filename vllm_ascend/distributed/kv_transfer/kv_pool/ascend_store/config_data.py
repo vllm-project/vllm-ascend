@@ -477,10 +477,16 @@ class ReqMeta:
 
 
 class AscendConnectorMetadata(KVConnectorMetadata):
-    def __init__(self, unfinished_request_ids, preempted_req_ids):
+    def __init__(
+        self,
+        unfinished_request_ids,
+        preempted_req_ids,
+        delayed_free_req_ids: set[str] | None = None,
+    ):
         self.requests = []
         self.unfinished_request_ids = unfinished_request_ids
         self.preempted_req_ids = preempted_req_ids
+        self.delayed_free_req_ids = delayed_free_req_ids or set()
 
     def add_request(self, req_meta: ReqMeta) -> None:
         """Add a request to the metadata.

@@ -51,6 +51,7 @@ class KVPoolScheduler:
         self._discard_partial_chunks = True
         self._unfinished_requests: dict[str, tuple[Request, list[int]]] = {}
         self._unfinished_request_ids: set[str] = set()
+        self._delayed_free_req_ids: set[str] = set()
 
         self.page_size_bytes = page_size_bytes
         logger.info(f"==============> page_size_bytes {page_size_bytes}")
@@ -346,8 +347,13 @@ class KVPoolScheduler:
             self._preempted_req_ids.update(scheduler_output.preempted_req_ids)
             self._request_trackers.pop(req_id, None)
             self._unfinished_requests.pop(req_id, None)
+            self._delayed_free_req_ids.discard(req_id)
 
-        meta = AscendConnectorMetadata(self._unfinished_request_ids, scheduler_output.preempted_req_ids)
+        meta = AscendConnectorMetadata(
+            self._unfinished_request_ids,
+            scheduler_output.preempted_req_ids,
+            self._delayed_free_req_ids.copy(),
+        )
 
         for request in scheduler_output.scheduled_new_reqs:
             # Right now, we only load KV for new requests
@@ -609,16 +615,26 @@ class KVPoolScheduler:
         should be freed now or will be sent asynchronously and freed later.
         """
         if self.kv_role == "kv_consumer" and not self.consumer_is_to_put:
+            self._delayed_free_req_ids.discard(request.request_id)
             return False, None
         if self.use_layerwise:
+            self._delayed_free_req_ids.discard(request.request_id)
             return False, None
         tracker = self._request_trackers.get(request.request_id)
-        if tracker is not None and tracker.num_saved_tokens <= 0:
+        if tracker is None or tracker.num_saved_tokens <= 0:
+            self._delayed_free_req_ids.discard(request.request_id)
             return False, None
         delay_free_blocks = len(block_ids) > 0
         if delay_free_blocks:
+            self._delayed_free_req_ids.add(request.request_id)
             logger.debug("Delaying free of %d blocks for request %s", len(block_ids), request.request_id)
+        else:
+            self._delayed_free_req_ids.discard(request.request_id)
         return delay_free_blocks, None
+
+    def update_finished_sending(self, finished_sending: set[str] | None) -> None:
+        if finished_sending:
+            self._delayed_free_req_ids.difference_update(finished_sending)
 
 
 def get_zmq_rpc_path_lookup(vllm_config: "VllmConfig") -> str:

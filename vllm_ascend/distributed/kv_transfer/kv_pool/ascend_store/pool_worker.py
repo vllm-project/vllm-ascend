@@ -613,11 +613,12 @@ class KVPoolWorker:
                 self.kv_send_thread.get_and_clear_finished_requests()
                 done_sending = set()
             else:
-                # The layerwise sender can finish saving the prompt KV before the
-                # request finishes decoding. Only clear and report requests after
-                # the scheduler has marked them finished.
+                stale_finished_req_ids = (
+                    finished_req_ids - meta.delayed_free_req_ids)
+                self.kv_send_thread.discard_finished_requests(
+                    stale_finished_req_ids)
                 done_sending = self.kv_send_thread.get_and_clear_finished_requests(
-                    finished_req_ids
+                    meta.delayed_free_req_ids
                 )
         else:
             done_sending = set()
