@@ -123,15 +123,9 @@ def chunk_gated_delta_rule_fwd(
         q_ascendc = q.to(torch.bfloat16).transpose(1, 2).contiguous()
 
         cu_seqlens_int64 = cu_seqlens.to(torch.int64) if cu_seqlens is not None else None
-        chunk_indices_int64 = (
-            None if chunk_indices_chunk64 is None else chunk_indices_chunk64.to(torch.int64)
-        )
-        cu_seqlens_int64_list = (
-            cu_seqlens_int64.tolist() if cu_seqlens_int64 is not None else None
-        )
-        chunk_indices_int64_list = (
-            chunk_indices_int64.flatten().tolist() if chunk_indices_int64 is not None else None
-        )
+        chunk_indices_int64 = None if chunk_indices_chunk64 is None else chunk_indices_chunk64.to(torch.int64)
+        cu_seqlens_int64_list = cu_seqlens_int64.tolist() if cu_seqlens_int64 is not None else None
+        chunk_indices_int64_list = chunk_indices_int64.flatten().tolist() if chunk_indices_int64 is not None else None
         h, v_new, final_state = torch.ops._C_ascend.chunk_gated_delta_rule_fwd_h(
             k_ascendc,
             w_ascendc,
