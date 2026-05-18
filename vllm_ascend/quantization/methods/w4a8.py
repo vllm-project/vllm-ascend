@@ -161,8 +161,7 @@ class AscendW4A8DynamicLinearMethod(AscendLinearScheme):
                     layer.scale_bias.data = layer.scale_bias.data.contiguous()
         else:
             if scale_bias is not None:
-                param = torch.nn.Parameter(scale_bias, requires_grad=False)
-                layer.register_parameter("weight_scale_bias", param)
+                layer.register_buffer("weight_scale_bias", scale_bias)
 
         # Convert to NPU-specific int4pack format
         if self.new_quant_version:
@@ -404,8 +403,8 @@ class AscendW4A8DynamicFusedMoEMethod(AscendMoEScheme):
                 activation=activation,
                 w1_scale=[layer.w13_weight_scale],
                 w2_scale=[layer.w2_weight_scale],
-                w1_scale_bias=layer.w13_scale_bias if hasattr(layer, "w13_scale_bias") else None,
-                w2_scale_bias=layer.w2_scale_bias if hasattr(layer, "w2_scale_bias") else None,
+                w1_scale_bias=layer.w13_scale_bias.data if hasattr(layer, "w13_scale_bias") else None,
+                w2_scale_bias=layer.w2_scale_bias.data if hasattr(layer, "w2_scale_bias") else None,
             )
         )
 
@@ -447,10 +446,8 @@ class AscendW4A8DynamicFusedMoEMethod(AscendMoEScheme):
             layer.w13_scale_bias.data = layer.w13_scale_bias.data.transpose(1, 2).contiguous().sum(axis=1)
             layer.w2_scale_bias.data = layer.w2_scale_bias.data.transpose(1, 2).contiguous().sum(axis=1)
         else:
-            w13_scale_bias = torch.nn.Parameter(w13_bias, requires_grad=False)
-            layer.register_parameter("w13_scale_bias", w13_scale_bias)
-            w2_scale_bias = torch.nn.Parameter(w2_bias, requires_grad=False)
-            layer.register_parameter("w2_scale_bias", w2_scale_bias)
+            layer.register_buffer("w13_scale_bias", w13_bias)
+            layer.register_buffer("w2_scale_bias", w2_bias)
 
     def pack_to_int32(self, weight: torch.Tensor):
         if self.new_quant_version:
@@ -506,10 +503,8 @@ class AscendW4A8DynamicFusedMoEMethod(AscendMoEScheme):
         layer.w13_weight_scale.data = process_scale_compressed_tensors(layer.w13_weight_scale.data)
         layer.w2_weight_scale.data = process_scale_compressed_tensors(layer.w2_weight_scale.data)
 
-        w13_scale_bias = torch.nn.Parameter(w13_bias, requires_grad=False)
-        layer.register_parameter("w13_scale_bias", w13_scale_bias)
-        w2_scale_bias = torch.nn.Parameter(w2_bias, requires_grad=False)
-        layer.register_parameter("w2_scale_bias", w2_scale_bias)
+        layer.register_buffer("w13_scale_bias", w13_bias)
+        layer.register_buffer("w2_scale_bias", w2_bias)
 
         # Accuracy problem in nz format
         # layer.w13_weight.data = maybe_trans_nz(layer.w13_weight.data)
