@@ -305,11 +305,12 @@ class KVPoolWorker:
                 ready_event.wait()
 
     def start_load_kv(self, metadata: AscendConnectorMetadata):
-        if len(metadata.requests) == 0:
-            return
         self.current_layer = 0
         if self.use_layerwise:
             self.next_layer_to_submit = 0
+        if len(metadata.requests) == 0:
+            return
+        if self.use_layerwise:
             self.process_layer_data(metadata.requests)
             return
 
