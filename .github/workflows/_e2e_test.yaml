@@ -822,6 +822,10 @@ jobs:
             uv pip install -v -e .
           fi
 
+      - name: Uninstall triton-ascend (310p e2e-light)
+        if: ${{ inputs.type == 'light' }}
+        run: uv pip uninstall triton-ascend
+
       - name: Run vllm-project/vllm-ascend test
         if: ${{ inputs.contains_310 }}
         env:
@@ -928,6 +932,10 @@ jobs:
           else
             uv pip install -v -e .
           fi
+
+      - name: Uninstall triton-ascend (310p e2e-light)
+        if: ${{ inputs.type == 'light' }}
+        run: uv pip uninstall triton-ascend
 
       - name: Run vllm-project/vllm-ascend test
         env:

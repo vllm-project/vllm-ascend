@@ -29,23 +29,23 @@
 #include "ops.h"
 #include "utils.h"
 #include "aclnn_torch_adapter/op_api_common.h"
-#include "add_rms_norm_bias/add_rms_norm_bias_torch_adpt.h"
-#include "apply_top_k_top_p_custom/apply_top_k_top_p_custom_torch_adpt.h"
+#include "moe/add_rms_norm_bias/add_rms_norm_bias_torch_adpt.h"
+#include "moe/apply_top_k_top_p_custom/apply_top_k_top_p_custom_torch_adpt.h"
 #include "batch_matmul_transpose/batch_matmul_transpose_torch_adpt.h"
-#include "dispatch_ffn_combine/dispatch_ffn_combine_torch_adpt.h"
-#include "dispatch_gmm_combine_decode/dispatch_gmm_combine_decode_torch_adpt.h"
-#include "dispatch_layout/dispatch_layout_torch_adpt.h"
-#include "grouped_matmul_swiglu_quant_weight_nz_tensor_list/grouped_matmul_swiglu_quant_torch_adpt.h"
-#include "lightning_indexer_vllm/lightning_indexer_vllm_torch_adpt.h"
-#include "matmul_allreduce_add_rmsnorm/matmul_allreduce_add_rmsnorm_torch_adpt.h"
+#include "mc2/dispatch_ffn_combine/dispatch_ffn_combine_torch_adpt.h"
+#include "mc2/dispatch_gmm_combine_decode/dispatch_gmm_combine_decode_torch_adpt.h"
+#include "mc2/dispatch_layout/dispatch_layout_torch_adpt.h"
+#include "gmm/grouped_matmul_swiglu_quant_weight_nz_tensor_list/grouped_matmul_swiglu_quant_torch_adpt.h"
+#include "attention/lightning_indexer_vllm/lightning_indexer_vllm_torch_adpt.h"
+#include "mc2/matmul_allreduce_add_rmsnorm/matmul_allreduce_add_rmsnorm_torch_adpt.h"
 #include "mla_preprocess/mla_preprocess_torch_adpt.h"
-#include "moe_combine_normal/moe_combine_normal_torch_adpt.h"
-#include "moe_gating_top_k/moe_gating_top_k_torch_adpt.h"
-#include "moe_init_routing_custom/moe_init_routing_custom_torch_adpt.h"
-#include "sparse_flash_attention/sparse_flash_attention_torch_adpt.h"
-#include "lightning_indexer_quant/lightning_indexer_quant_torch_adpt.h"
-#include "causal_conv1d_v310/causal_conv1d_310_torch_adpt.h"
-#include "recurrent_gated_delta_rule_v310/recurrent_gated_delta_rule_310_torch_adpt.h"
+#include "mc2/moe_combine_normal/moe_combine_normal_torch_adpt.h"
+#include "moe/moe_gating_top_k/moe_gating_top_k_torch_adpt.h"
+#include "moe/moe_init_routing_custom/moe_init_routing_custom_torch_adpt.h"
+#include "attention/sparse_flash_attention/sparse_flash_attention_torch_adpt.h"
+#include "attention/lightning_indexer_quant/lightning_indexer_quant_torch_adpt.h"
+#include "moe/causal_conv1d_v310/causal_conv1d_310_torch_adpt.h"
+#include "attention/recurrent_gated_delta_rule_v310/recurrent_gated_delta_rule_310_torch_adpt.h"
 #include <c10/core/Device.h>
 #include <c10/core/Scalar.h>
 #include <c10/util/Exception.h>
@@ -905,12 +905,12 @@ npu_copy_and_expand_eagle_inputs(
     int64_t num_reqs = query_start_loc.size(0) - 1;
 
     auto device = target_token_ids.device();
-    at::Tensor out_input_ids = at::empty({total_draft_tokens}, at::dtype(at::kInt).device(device));
-    at::Tensor out_positions = at::empty({total_draft_tokens}, at::dtype(at::kInt).device(device));
-    at::Tensor out_is_rejected_token_mask = at::empty({total_draft_tokens}, at::dtype(at::kChar).device(device));
-    at::Tensor out_is_masked_token_mask = at::empty({total_draft_tokens}, at::dtype(at::kChar).device(device));
-    at::Tensor out_new_token_indices = at::empty({num_reqs * num_padding_slots_per_request}, at::dtype(at::kInt).device(device));
-    at::Tensor out_hidden_state_mapping = at::empty({total_input_tokens}, at::dtype(at::kInt).device(device));
+    at::Tensor out_input_ids = at::zeros({total_draft_tokens}, at::dtype(at::kInt).device(device));
+    at::Tensor out_positions = at::zeros({total_draft_tokens}, at::dtype(at::kInt).device(device));
+    at::Tensor out_is_rejected_token_mask = at::zeros({total_draft_tokens}, at::dtype(at::kChar).device(device));
+    at::Tensor out_is_masked_token_mask = at::zeros({total_draft_tokens}, at::dtype(at::kChar).device(device));
+    at::Tensor out_new_token_indices = at::zeros({num_reqs * num_padding_slots_per_request}, at::dtype(at::kInt).device(device));
+    at::Tensor out_hidden_state_mapping = at::zeros({total_input_tokens}, at::dtype(at::kInt).device(device));
 
     EXEC_NPU_CMD(aclnnCopyAndExpandEagleInputs,
         target_token_ids, target_positions, next_token_ids, query_start_loc, query_end_loc,

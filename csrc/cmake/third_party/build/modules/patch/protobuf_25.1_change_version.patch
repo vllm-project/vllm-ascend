@@ -1,0 +1,357 @@
+diff --git a/CMakeLists.txt b/CMakeLists.txt
+index 4137ce2..1d9e1ca 100644
+--- a/CMakeLists.txt
++++ b/CMakeLists.txt
+@@ -79,7 +79,7 @@ if (protobuf_BUILD_SHARED_LIBS)
+ endif ()
+ 
+ # Version metadata
+-set(protobuf_VERSION_STRING "4.25.1")
++set(protobuf_VERSION_STRING "3.13.0")
+ set(protobuf_DESCRIPTION "Protocol Buffers")
+ set(protobuf_CONTACT "protobuf@googlegroups.com")
+ 
+@@ -105,7 +105,7 @@ message(STATUS "${protobuf_VERSION_PRERELEASE}")
+ 
+ # Package version
+ set(protobuf_VERSION
+-  "${protobuf_VERSION_MINOR}.${protobuf_VERSION_PATCH}")
++  "${protobuf_VERSION_MAJOR}.${protobuf_VERSION_MINOR}.${protobuf_VERSION_PATCH}")
+ 
+ if(protobuf_VERSION_PRERELEASE)
+   set(protobuf_VERSION "${protobuf_VERSION}.${protobuf_VERSION_PRERELEASE}")
+@@ -122,30 +122,6 @@ if(protobuf_VERBOSE)
+   message(STATUS "]")
+ endif()
+ 
+-file(WRITE ${CMAKE_CURRENT_BINARY_DIR}/cmaketest.map
+-"{
+-  global:
+-    main;
+-  local:
+-    *;
+-};")
+-# CheckLinkerFlag module available in CMake >=3.18.
+-if(${CMAKE_VERSION} VERSION_GREATER 3.18 OR ${CMAKE_VERSION} VERSION_EQUAL 3.18)
+-  include(CheckLinkerFlag)
+-  check_linker_flag(CXX -Wl,--version-script=${CMAKE_CURRENT_BINARY_DIR}/cmaketest.map protobuf_HAVE_LD_VERSION_SCRIPT)
+-else()
+-  include(CheckCXXSourceCompiles)
+-  set(OLD_CMAKE_REQUIRED_FLAGS ${CMAKE_REQUIRED_FLAGS})
+-  set(CMAKE_REQUIRED_FLAGS ${CMAKE_REQUIRED_FLAGS} -Wl,--version-script=${CMAKE_CURRENT_BINARY_DIR}/cmaketest.map)
+-  check_cxx_source_compiles("
+-    int main() {
+-      return 0;
+-    }
+-  " protobuf_HAVE_LD_VERSION_SCRIPT)
+-  set(CMAKE_REQUIRED_FLAGS ${OLD_CMAKE_REQUIRED_FLAGS})
+-endif()
+-file(REMOVE ${CMAKE_CURRENT_BINARY_DIR}/cmaketest.map)
+-
+ find_package(Threads REQUIRED)
+ 
+ # We can install dependencies from submodules if we're running
+diff --git a/src/google/protobuf/arenastring.cc b/src/google/protobuf/arenastring.cc
+index bf9d0bb..0e4f450 100644
+--- a/src/google/protobuf/arenastring.cc
++++ b/src/google/protobuf/arenastring.cc
+@@ -11,6 +11,7 @@
+ 
+ #include "absl/log/absl_check.h"
+ #include "absl/strings/string_view.h"
++#include "absl/strings/escaping.h"
+ #include "absl/synchronization/mutex.h"
+ #include "google/protobuf/io/coded_stream.h"
+ #include "google/protobuf/message_lite.h"
+@@ -116,7 +117,7 @@ void ArenaStringPtr::Set(absl::string_view value, Arena* arena) {
+       old->assign("garbagedata");
+     }
+ #else   // PROTOBUF_FORCE_COPY_DEFAULT_STRING
+-    UnsafeMutablePointer()->assign(value.data(), value.length());
++    UnsafeMutablePointer()->assign(std::string(value.data(), value.length()));
+ #endif  // PROTOBUF_FORCE_COPY_DEFAULT_STRING
+   }
+ }
+@@ -263,6 +264,30 @@ void ArenaStringPtr::ClearToDefault(const LazyString& default_value,
+   }
+ }
+ 
++void ArenaStringPtr::Set(EmptyDefault, const std::string& value, Arena* arena) {
++  Set(value, arena);
++}
++
++void ArenaStringPtr::Set(EmptyDefault, absl::string_view value, Arena* arena) {
++  Set(value, arena);
++}
++
++void ArenaStringPtr::Set(EmptyDefault, std::string&& value, Arena* arena) {
++  Set(value, arena);
++}
++
++void ArenaStringPtr::Set(EmptyDefault, const char* s, Arena* arena) {
++  Set(s, arena);
++}
++
++void ArenaStringPtr::Set(EmptyDefault, const char* s, size_t n, Arena* arena) {
++  Set(s, n, arena);
++}
++
++void ArenaStringPtr::Set(EmptyDefault, const void* p, size_t n, Arena* arena) {
++  Set(absl::string_view{static_cast<const char*>(p), n}, arena);
++}
++
+ const char* EpsCopyInputStream::ReadArenaString(const char* ptr,
+                                                 ArenaStringPtr* s,
+                                                 Arena* arena) {
+@@ -277,8 +302,11 @@ const char* EpsCopyInputStream::ReadArenaString(const char* ptr,
+   GOOGLE_PROTOBUF_PARSER_ASSERT(ptr);
+   return ptr;
+ }
+-
+ }  // namespace internal
++
++std::string CEscape(const std::string &src) {
++  return absl::CEscape(absl::string_view(src));
++}
+ }  // namespace protobuf
+ }  // namespace google
+ 
+diff --git a/src/google/protobuf/arenastring.h b/src/google/protobuf/arenastring.h
+index dea2aec..ffe2343 100644
+--- a/src/google/protobuf/arenastring.h
++++ b/src/google/protobuf/arenastring.h
+@@ -19,6 +19,8 @@
+ #include "google/protobuf/arena.h"
+ #include "google/protobuf/explicitly_constructed.h"
+ #include "google/protobuf/port.h"
++#include "absl/strings/string_view.h"
++#include "absl/strings/escaping.h"
+ 
+ // must be last:
+ #include "google/protobuf/port_def.inc"
+@@ -298,7 +300,15 @@ struct PROTOBUF_EXPORT ArenaStringPtr {
+   void Set(const std::string& value, Arena* arena);
+   void Set(const char* s, Arena* arena);
+   void Set(const char* s, size_t n, Arena* arena);
+-
++  // Compatibility with undefined symbol modifications in opp_kernel packages compiled based on protobuf 3.14
++  struct EmptyDefault {};
++  void Set(EmptyDefault, const std::string& value, Arena* arena);
++  void Set(EmptyDefault, absl::string_view value, Arena* arena);
++  void Set(EmptyDefault, std::string&& value, Arena* arena);
++  void Set(EmptyDefault, const char* s, Arena* arena);
++  void Set(EmptyDefault, const char* s, size_t n, Arena* arena);
++  void Set(EmptyDefault, const void* p, size_t n, Arena* arena);
++  
+   void SetBytes(absl::string_view value, Arena* arena);
+   void SetBytes(std::string&& value, Arena* arena);
+   template <typename... OverloadDisambiguator>
+@@ -528,9 +538,9 @@ inline std::string* ArenaStringPtr::UnsafeMutablePointer() {
+   ABSL_DCHECK(tagged_ptr_.Get() != nullptr);
+   return tagged_ptr_.Get();
+ }
+-
+-
+ }  // namespace internal
++
++PROTOBUF_EXPORT std::string CEscape(const std::string& src);
+ }  // namespace protobuf
+ }  // namespace google
+ 
+diff --git a/src/google/protobuf/compiler/cpp/field_generators/string_field.cc b/src/google/protobuf/compiler/cpp/field_generators/string_field.cc
+index 748a8d6..1834c39 100644
+--- a/src/google/protobuf/compiler/cpp/field_generators/string_field.cc
++++ b/src/google/protobuf/compiler/cpp/field_generators/string_field.cc
+@@ -347,7 +347,7 @@ void SingularString::ReleaseImpl(io::Printer* p) const {
+   p->Emit(R"cc(
+     auto* released = $field_$.Release();
+ #ifdef PROTOBUF_FORCE_COPY_DEFAULT_STRING
+-    $field_$.Set("", $set_args$);
++    $field_$.Set(::google::protobuf::internal::ArenaStringPtr::EmptyDefault{}, "", $set_args$);
+ #endif  // PROTOBUF_FORCE_COPY_DEFAULT_STRING
+     return released;
+   )cc");
+@@ -393,7 +393,7 @@ void SingularString::SetAllocatedImpl(io::Printer* p) const {
+     p->Emit(R"cc(
+ #ifdef PROTOBUF_FORCE_COPY_DEFAULT_STRING
+       if ($field_$.IsDefault()) {
+-        $field_$.Set("", $set_args$);
++        $field_$.Set(::google::protobuf::internal::ArenaStringPtr::EmptyDefault{}, "", $set_args$);
+       }
+ #endif  // PROTOBUF_FORCE_COPY_DEFAULT_STRING
+     )cc");
+@@ -442,7 +442,7 @@ void SingularString::GenerateInlineAccessorDefinitions(io::Printer* p) const {
+           $TsanDetectConcurrentMutation$;
+           $PrepareSplitMessageForWrite$;
+           $update_hasbit$;
+-          $field_$.$Set$(static_cast<Arg_&&>(arg), args..., $set_args$);
++          $field_$.Set(::google::protobuf::internal::ArenaStringPtr::EmptyDefault{}, static_cast<Arg_&&>(arg), args..., $set_args$);
+           $annotate_set$;
+           // @@protoc_insertion_point(field_set:$pkg.Msg.field$)
+         }
+@@ -463,7 +463,7 @@ void SingularString::GenerateInlineAccessorDefinitions(io::Printer* p) const {
+           $update_hasbit$;
+           //~ Don't use $Set$ here; we always want the std::string variant
+           //~ regardless of whether this is a `bytes` field.
+-          $field_$.Set(value, $set_args$);
++          $field_$.Set(::google::protobuf::internal::ArenaStringPtr::EmptyDefault{}, value, $set_args$);
+         }
+         inline std::string* $Msg$::_internal_mutable_$name$() {
+           $TsanDetectConcurrentMutation$;
+@@ -599,7 +599,7 @@ void SingularString::GenerateConstructorCode(io::Printer* p) const {
+   if (IsString(field_, *opts_) && EmptyDefault()) {
+     p->Emit(R"cc(
+ #ifdef PROTOBUF_FORCE_COPY_DEFAULT_STRING
+-      $field_$.Set("", GetArena());
++      $field_$.Set(::google::protobuf::internal::ArenaStringPtr::EmptyDefault{}, "", GetArena());
+ #endif  // PROTOBUF_FORCE_COPY_DEFAULT_STRING
+     )cc");
+   }
+@@ -636,7 +636,7 @@ void SingularString::GenerateCopyConstructorCode(io::Printer* p) const {
+         }}},
+       R"cc(
+         if ($hazzer$) {
+-          _this->$field_$.Set(from._internal_$name$(), $set_args$);
++          _this->$field_$.Set(::google::protobuf::internal::ArenaStringPtr::EmptyDefault{}, from._internal_$name$(), $set_args$);
+         }
+       )cc");
+ }
+diff --git a/src/google/protobuf/compiler/cpp/helpers.cc b/src/google/protobuf/compiler/cpp/helpers.cc
+index 2c8d275..d0abac8 100644
+--- a/src/google/protobuf/compiler/cpp/helpers.cc
++++ b/src/google/protobuf/compiler/cpp/helpers.cc
+@@ -1706,8 +1706,7 @@ bool IsFileDescriptorProto(const FileDescriptor* file, const Options& options) {
+ }
+ 
+ bool ShouldGenerateClass(const Descriptor* descriptor, const Options& options) {
+-  return !IsMapEntryMessage(descriptor) ||
+-         HasDescriptorMethods(descriptor->file(), options);
++  return true;
+ }
+ 
+ }  // namespace cpp
+diff --git a/src/google/protobuf/compiler/cpp/helpers.h b/src/google/protobuf/compiler/cpp/helpers.h
+index 9b74835..a1b6f58 100644
+--- a/src/google/protobuf/compiler/cpp/helpers.h
++++ b/src/google/protobuf/compiler/cpp/helpers.h
+@@ -1002,7 +1002,7 @@ inline bool ShouldGenerateExternSpecializations(const Options& options) {
+   // Some compilers can't handle that much input in a single translation unit.
+   // These specializations are just a link size optimization and do not affect
+   // correctness or performance, so it is ok to omit them.
+-  return !options.opensource_runtime;
++  return true;
+ }
+ 
+ struct OneOfRangeImpl {
+diff --git a/src/google/protobuf/compiler/csharp/csharp_helpers.cc b/src/google/protobuf/compiler/csharp/csharp_helpers.cc
+index af5c0b2..254e77c 100644
+--- a/src/google/protobuf/compiler/csharp/csharp_helpers.cc
++++ b/src/google/protobuf/compiler/csharp/csharp_helpers.cc
+@@ -254,7 +254,7 @@ std::string GetFieldConstantName(const FieldDescriptor* field) {
+ 
+ std::string GetPropertyName(const FieldDescriptor* descriptor) {
+   // Names of members declared or overridden in the message.
+-  static const auto& reserved_member_names = *new absl::flat_hash_set<absl::string_view>({
++  static const auto& reserved_member_names = *new std::set<absl::string_view>({
+     "Types",
+     "Descriptor",
+     "Equals",
+diff --git a/src/google/protobuf/compiler/java/names.cc b/src/google/protobuf/compiler/java/names.cc
+index d934973..caa3c47 100644
+--- a/src/google/protobuf/compiler/java/names.cc
++++ b/src/google/protobuf/compiler/java/names.cc
+@@ -37,7 +37,7 @@ const char* DefaultPackage(Options options) {
+ 
+ bool IsReservedName(absl::string_view name) {
+   static const auto& kReservedNames =
+-      *new absl::flat_hash_set<absl::string_view>({
++      *new std::set<absl::string_view>({
+           "abstract",   "assert",       "boolean",   "break",      "byte",
+           "case",       "catch",        "char",      "class",      "const",
+           "continue",   "default",      "do",        "double",     "else",
+@@ -49,7 +49,7 @@ bool IsReservedName(absl::string_view name) {
+           "switch",     "synchronized", "this",      "throw",      "throws",
+           "transient",  "try",          "void",      "volatile",   "while",
+       });
+-  return kReservedNames.contains(name);
++  return kReservedNames.count(name) != 0U;
+ }
+ 
+ bool IsForbidden(absl::string_view field_name) {
+@@ -59,7 +59,7 @@ bool IsForbidden(absl::string_view field_name) {
+   // Keep this list in sync with specialFieldNames in
+   // java/core/src/main/java/com/google/protobuf/DescriptorMessageInfoFactory.java
+   static const auto& kForbiddenNames =
+-      *new absl::flat_hash_set<absl::string_view>({
++      *new std::set<absl::string_view>({
+         // java.lang.Object:
+           "Class",
+           // com.google.protobuf.MessageLiteOrBuilder:
+@@ -75,7 +75,7 @@ bool IsForbidden(absl::string_view field_name) {
+           // obsolete. kept for backwards compatibility of generated code
+           "CachedSize",
+       });
+-  return kForbiddenNames.contains(UnderscoresToCamelCase(field_name, true));
++  return kForbiddenNames.count(UnderscoresToCamelCase(field_name, true)) != 0U;
+ }
+ 
+ std::string FieldName(const FieldDescriptor* field) {
+diff --git a/src/google/protobuf/extension_set.h b/src/google/protobuf/extension_set.h
+index f45a1c8..e2191b7 100644
+--- a/src/google/protobuf/extension_set.h
++++ b/src/google/protobuf/extension_set.h
+@@ -166,7 +166,7 @@ class PROTOBUF_EXPORT GeneratedExtensionFinder {
+ // off to the ExtensionSet for parsing.  Etc.
+ class PROTOBUF_EXPORT ExtensionSet {
+  public:
+-  constexpr ExtensionSet() : ExtensionSet(nullptr) {}
++  constexpr ExtensionSet();
+   ExtensionSet(const ExtensionSet& rhs) = delete;
+ 
+   // Arena enabled constructors: for internal use only.
+@@ -912,6 +912,9 @@ class PROTOBUF_EXPORT ExtensionSet {
+   static void DeleteFlatMap(const KeyValue* flat, uint16_t flat_capacity);
+ };
+ 
++constexpr ExtensionSet::ExtensionSet()
++    : arena_(nullptr), flat_capacity_(0), flat_size_(0), map_{nullptr} {}
++
+ constexpr ExtensionSet::ExtensionSet(Arena* arena)
+     : arena_(arena), flat_capacity_(0), flat_size_(0), map_{nullptr} {}
+ 
+diff --git a/src/google/protobuf/message_lite.h b/src/google/protobuf/message_lite.h
+index de8bd19..60bc923 100644
+--- a/src/google/protobuf/message_lite.h
++++ b/src/google/protobuf/message_lite.h
+@@ -505,12 +505,10 @@ class PROTOBUF_EXPORT MessageLite {
+     return Arena::CreateMaybeMessage<T>(arena);
+   }
+ 
+-#ifdef PROTOBUF_EXPLICIT_CONSTRUCTORS
+   template <typename T>
+   static T* CreateMaybeMessage(Arena* arena, const T& from) {
+     return Arena::CreateMaybeMessage<T>(arena, from);
+   }
+-#endif  // PROTOBUF_EXPLICIT_CONSTRUCTORS
+ 
+   inline explicit MessageLite(Arena* arena) : _internal_metadata_(arena) {}
+ 
+diff --git a/src/google/protobuf/port_def.inc b/src/google/protobuf/port_def.inc
+index 25abc30..f17d861 100644
+--- a/src/google/protobuf/port_def.inc
++++ b/src/google/protobuf/port_def.inc
+@@ -572,14 +572,6 @@ static_assert(PROTOBUF_ABSL_MIN(20230125, 3),
+ #error PROTOBUF_FORCE_COPY_DEFAULT_STRING was previously defined
+ #endif
+ 
+-// Set (and leave set) PROTOBUF_EXPLICIT_CONSTRUCTORS
+-// This flag changes the internal implementation class and its uses from using
+-// aggregate initialization to using explicit constructor based initialization.
+-// TODO: remove this flag and make the code permanent.
+-#ifndef PROTOBUF_EXPLICIT_CONSTRUCTORS
+-#define PROTOBUF_EXPLICIT_CONSTRUCTORS
+-#endif
+-
+ #ifdef PROTOBUF_FORCE_ALLOCATION_ON_CONSTRUCTION
+ #error PROTOBUF_FORCE_ALLOCATION_ON_CONSTRUCTION was previously defined
+ #endif
