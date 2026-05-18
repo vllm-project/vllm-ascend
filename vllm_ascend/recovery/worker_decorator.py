@@ -15,15 +15,19 @@ def fault_recovery_decorator():
                     output = func(self, *args, **kwargs)
                     return output
                 except Exception as e:
-                    logger.error(f"Func {func.__name__} occurred exception: {e}")
-                    self.in_recovery = True
+                    if self.in_recovery:
+                        logger.info(f"[WorkerDecorator] Func {func.__name__} caught exception in recovery phase.Don't send error to worker monitor")
+                        raise e
+                    else:
+                        logger.error(f"[WorkerDecorator] Func {func.__name__} occurred exception: {e}")
+                        self.in_recovery = True
                     
-                    exception_info = ExceptionInfo(
-                        exception_type=type(e).__name__,
-                        message=str(e),
-                    )
-                    exception_encode = msgspec.msgpack.encode(exception_info)
-                    self.worker_input_socket.send(exception_encode)
-                    raise e
+                        exception_info = ExceptionInfo(
+                            exception_type=type(e).__name__,
+                            message=str(e),
+                        )
+                        exception_encode = msgspec.msgpack.encode(exception_info)
+                        self.worker_input_socket.send(exception_encode)
+                        raise e
         return wrapper
     return decorator

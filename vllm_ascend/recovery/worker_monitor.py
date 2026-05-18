@@ -53,61 +53,9 @@ class WorkerMonitor:
         recovery_executor.register_handler("restart_device", self._restart_device)
         recovery_executor.register_handler("reinit_process_group", self._reinit_process_group)
         recovery_executor.register_handler("clean_cache", self._clean_cache)
-        recovery_executor.register_handler("recovery", self._recovery_from_fault)
+        recovery_executor.register_handler("recovery_finished", self._recovery_finished)
+        recovery_executor.register_handler("recovery_begin", self._recovery_begin)
         return recovery_executor
-
-    def _stop_device(self, context:dict | None) -> bool:
-        try:
-            stop_result = torch_npu.npu.stop_device(self.worker.local_rank)
-            if stop_result == 0:
-                logger.info("stop_device executed successfully")
-                return True
-            else:
-                logger.error(f"stop_device failed with result: {stop_result}")
-                return False
-        except Exception as e:
-            logger.error(f"stop_device executed failed with exception: {e}")
-            return False
-    
-    def _restart_device(self, context:dict | None) -> bool:
-        try:
-            ctx = context or {}
-            torch_npu.npu.restart_device(
-                torch.npu.current_device(), rebuild_all_resources=ctx.get("rebuild_all_resources", False)
-            )
-            return True
-        except Exception as e:
-            logger.error(f"restart_device executed failed with exception: {e}")
-            return False
-
-    def _reinit_process_group(self, context:dict | None) -> bool:
-        try:
-            ctx = context or {}
-            torch.distributed.reinit_process_group(
-                group=ctx.get("group", None), rebuild_link=ctx.get("rebuild_link", True)
-            )
-            return True
-        except Exception as e:
-            logger.error(f"reinit_process_group executed failed with exception: {e}")
-            return False
-
-    def _clean_cache(self, context:dict | None) -> bool:
-        try:
-            ctx = context or {}
-            abort_list = context.get("abort_list", [])
-            model_runner = self.worker.model_runner
-            for req_id in abort_list:
-                model_runner.requests.pop(req_id, None)
-                model_runner.num_prompt_logprobs.pop(req_id, None)
-                model_runner.input_batch.remove_request(req_id)
-            return True
-        except Exception as e:
-            logger.error(f"worker clean_cached failed with exception: {e}")
-            return False
-
-    def _recovery_from_fault(self, context:dict | None) -> bool:
-        self.worker.in_recovery = False
-        return True
 
     def start(self):
         self._monitor_thread = threading.Thread(
@@ -186,6 +134,64 @@ class WorkerMonitor:
                     )
                     step_result_encode = msgspec.msgpack.encode(("stepresult", step_result))
                     core_output_socket.send(step_result_encode)
+    
+    def _stop_device(self, context:dict | None) -> bool:
+        try:
+            stop_result = torch_npu.npu.stop_device(self.worker.local_rank)
+            if stop_result == 0:
+                logger.info("stop_device executed successfully")
+                return True
+            else:
+                logger.error(f"stop_device failed with result: {stop_result}")
+                return False
+        except Exception as e:
+            logger.error(f"stop_device executed failed with exception: {e}")
+            return False
+    
+    def _restart_device(self, context:dict | None) -> bool:
+        try:
+            ctx = context or {}
+            torch_npu.npu.restart_device(
+                torch.npu.current_device(), rebuild_all_resources=ctx.get("rebuild_all_resources", False)
+            )
+            return True
+        except Exception as e:
+            logger.error(f"restart_device executed failed with exception: {e}")
+            return False
+
+    def _reinit_process_group(self, context:dict | None) -> bool:
+        try:
+            ctx = context or {}
+            torch.distributed.reinit_process_group(
+                group=ctx.get("group", None), rebuild_link=ctx.get("rebuild_link", True)
+            )
+            return True
+        except Exception as e:
+            logger.error(f"reinit_process_group executed failed with exception: {e}")
+            return False
+
+    def _clean_cache(self, context:dict | None) -> bool:
+        try:
+            ctx = context or {}
+            abort_list = context.get("abort_list", [])
+            model_runner = self.worker.model_runner
+            for req_id in abort_list:
+                model_runner.requests.pop(req_id, None)
+                model_runner.num_prompt_logprobs.pop(req_id, None)
+                model_runner.input_batch.remove_request(req_id)
+            return True
+        except Exception as e:
+            logger.error(f"worker clean_cached failed with exception: {e}")
+            return False
+
+    def _recovery_finished(self, context:dict | None) -> bool:
+        self.worker.in_recovery = False
+        return True
+
+
+    def _recovery_begin(self, context: dict | None) -> bool:
+        self.worker.in_recovery = True
+        return True
 
 def create_worker_monitor(worker, vllm_config:VllmConfig):
     if hasattr(worker, 'worker_monitor') and worker.worker_monitor is not None:
