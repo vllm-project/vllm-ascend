@@ -100,6 +100,7 @@ jobs:
 
           update-alternatives --install /usr/bin/clang clang /usr/bin/clang-15 20
           update-alternatives --install /usr/bin/clang++ clang++ /usr/bin/clang++-15 20
+          pip install uv
 
       - name: Checkout vllm-project/vllm repo
         uses: actions/checkout@v6
@@ -230,6 +231,7 @@ jobs:
 
           update-alternatives --install /usr/bin/clang clang /usr/bin/clang-15 20
           update-alternatives --install /usr/bin/clang++ clang++ /usr/bin/clang++-15 20
+          pip install uv
 
       - name: Checkout vllm-project/vllm repo
         uses: actions/checkout@v6
@@ -367,6 +369,7 @@ jobs:
 
           update-alternatives --install /usr/bin/clang clang /usr/bin/clang-15 20
           update-alternatives --install /usr/bin/clang++ clang++ /usr/bin/clang++-15 20
+          pip install uv
 
       - name: Checkout vllm-project/vllm repo
         uses: actions/checkout@v6
@@ -495,6 +498,7 @@ jobs:
 
           update-alternatives --install /usr/bin/clang clang /usr/bin/clang-15 20
           update-alternatives --install /usr/bin/clang++ clang++ /usr/bin/clang++-15 20
+          pip install uv
 
       - name: Checkout vllm-project/vllm repo
         uses: actions/checkout@v6
@@ -651,6 +655,7 @@ jobs:
 
           update-alternatives --install /usr/bin/clang clang /usr/bin/clang-15 20
           update-alternatives --install /usr/bin/clang++ clang++ /usr/bin/clang++-15 20
+          pip install uv
 
       - name: Checkout vllm-project/vllm repo
         uses: actions/checkout@v6
@@ -779,6 +784,7 @@ jobs:
         run: |
           apt-get -y install `cat packages.txt`
           apt-get -y install gcc g++ cmake libnuma-dev
+          pip install uv
 
       - name: Checkout vllm-project/vllm repo
         uses: actions/checkout@v6
@@ -889,6 +895,7 @@ jobs:
         run: |
           apt-get -y install `cat packages.txt`
           apt-get -y install gcc g++ cmake libnuma-dev
+          pip install uv
 
       - name: Checkout vllm-project/vllm repo
         uses: actions/checkout@v6
