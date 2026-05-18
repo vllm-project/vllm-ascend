@@ -180,6 +180,8 @@ echo "OK: model path verified at $MODEL_PATH"
     - **Torch** (native PyTorch op): Functional on Ascend ✅; performance is uncertain — note in report.
     - **Triton** kernel: Functional correctness uncertain ⚠️; requires explicit verification on Ascend; accuracy also uncertain.
     - **CUDA** kernel: Not supported on Ascend ❌; check whether a fallback implementation exists.
+- If the failing path involves an Ascend-specific operator such as `torch_npu`, `torch.ops.npu`, or `aclnn*`, do not rely on blind local retries alone. After the first unsuccessful fix attempt, search the **official HiAscend operator documentation** for that operator before the next attempt.
+- The HiAscend lookup must capture at least: supported dtype, shape constraints, layout/contiguous requirements, graph-mode limitations, and any fallback or replacement guidance. Record the page title / URL and use that evidence in the next fix attempt.
 - **CUDA operator early-exit gate**: If any CUDA operator has no fallback (pure CUDA kernel with no Torch/Triton alternative), **stop here** — skip all subsequent validation steps and directly file a GitHub issue that explains:
     - which operator blocks Ascend support,
     - why no fallback exists,
@@ -259,11 +261,13 @@ Place tests under `/tmp/npu_unit_tests/` (ephemeral; not committed).
 
 - Run each test. If it **passes**: proceed to Step 7.
 - If it **fails**: attempt a fix and re-run. This counts as **attempt 1**.
+- If the failure is on an Ascend-specific operator (`torch_npu`, `torch.ops.npu`, `aclnn*`, or an operator error clearly emitted by Ascend runtime), perform an **official HiAscend operator-doc lookup before attempt 2**. Use the documented dtype / shape / layout / graph constraints to guide the next patch.
 - If it **fails again**: attempt a second fix and re-run. This counts as **attempt 2**.
 - If it **still fails after 2 attempts**: **early exit** — do not proceed to serve validation. File a GitHub issue documenting:
     - which operator or module test failed,
     - the observed failure mode (error message + stack trace),
     - both fix attempts and why they did not resolve the issue,
+    - any HiAscend operator documentation consulted (page title + URL) and what constraint it revealed,
     - recommended path forward.
 
 ### 7) Two-stage validation on Ascend (direct run)
