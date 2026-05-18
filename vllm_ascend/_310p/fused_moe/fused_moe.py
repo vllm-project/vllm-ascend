@@ -453,8 +453,7 @@ class AscendSharedFusedMoE310(SharedFusedMoE, AscendFusedMoE310):
         self, hidden_states: torch.Tensor, router_logits: torch.Tensor
     ):
         overlap_shared_expert = (
-            getattr(self, "multistream_overlap_shared_expert", False)
-            and self._shared_experts is not None
+            getattr(self, "multistream_overlap_shared_expert", False) and self._shared_experts is not None
         )
         if overlap_shared_expert:
             self._require_split_shared_experts()
