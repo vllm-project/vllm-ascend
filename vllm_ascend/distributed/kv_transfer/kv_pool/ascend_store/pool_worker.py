@@ -3,6 +3,7 @@ import math
 import threading
 
 import torch
+from vllm import envs
 from vllm.config import VllmConfig
 from vllm.distributed import (
     get_decode_context_model_parallel_rank,
@@ -15,6 +16,11 @@ from vllm.distributed.kv_events import BlockStored
 from vllm.logger import logger
 from vllm.v1.core.kv_cache_utils import BlockHash
 
+from vllm_ascend.ascend_config import get_ascend_config
+from vllm_ascend.cpu_binding import (
+    bind_thread_to_cpus,
+    get_kv_transfer_thread_cpus,
+)
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.config_data import (
     AscendConnectorMetadata,
     ChunkedTokenDatabase,
@@ -63,6 +69,7 @@ class KVPoolWorker:
         model_config = vllm_config.model_config
         parallel_config = vllm_config.parallel_config
         self.dp_rank = parallel_config.data_parallel_rank
+        self.local_rank = envs.LOCAL_RANK
         self.use_mla = False
         if hasattr(model_config, "use_mla") and isinstance(model_config.use_mla, bool) and model_config.use_mla:
             self.use_mla = True
@@ -181,6 +188,19 @@ class KVPoolWorker:
         self.layer_load_finished_events = None
         self.layer_save_finished_events = None
         self.layer_transfer_finished_events = None
+        self.kv_transfer_thread_cpus: list[int] = []
+        if get_ascend_config().enable_cpu_binding:
+            try:
+                self.kv_transfer_thread_cpus = get_kv_transfer_thread_cpus(
+                    self.local_rank,
+                    2,
+                )
+            except Exception as err:
+                logger.warning(
+                    "Failed to get KV transfer thread CPUs for rank%d: %s",
+                    self.local_rank,
+                    err,
+                )
         self.next_layer_to_submit = 0
         layerwise_config = get_layerwise_config(self.num_layers)
         self.layerwise_offload = layerwise_config.has_layer_reuse
@@ -189,6 +209,43 @@ class KVPoolWorker:
         self.independent_layers = layerwise_config.independent_layers
         self.prefetch_layer_map = layerwise_config.prefetch_layer_map
         self.sync_save_events = None
+
+    def _bind_kv_transfer_thread(
+        self,
+        thread: KVTransferThread | None,
+        cpu_index: int,
+        name: str,
+    ) -> None:
+        if thread is None or thread.native_id is None:
+            return
+        if cpu_index >= len(self.kv_transfer_thread_cpus):
+            return
+        cpu = self.kv_transfer_thread_cpus[cpu_index]
+        try:
+            bind_thread_to_cpus(thread.native_id, [cpu])
+            logger.info("Bound %s thread %d to CPU%d", name, thread.native_id, cpu)
+        except Exception as err:
+            logger.warning(
+                "Failed to bind %s thread %d to CPU%d: %s",
+                name,
+                thread.native_id,
+                cpu,
+                err,
+            )
+
+    def rebind_kv_transfer_threads(self) -> None:
+        if not self.use_layerwise:
+            return
+        self._bind_kv_transfer_thread(
+            self.kv_send_thread,
+            0,
+            "layerwise send",
+        )
+        self._bind_kv_transfer_thread(
+            self.kv_recv_thread,
+            1,
+            "layerwise recv",
+        )
 
     def register_kv_caches(self, kv_caches: dict[str, torch.Tensor]):
         _, first_kv_cache_tuple = next(iter(kv_caches.items()))
@@ -257,6 +314,11 @@ class KVPoolWorker:
                     self.layerwise_max_transfer_bytes,
                 )
                 self.kv_send_thread.start()
+                self._bind_kv_transfer_thread(
+                    self.kv_send_thread,
+                    0,
+                    "layerwise send",
+                )
             ready_event = threading.Event()
             self.kv_recv_thread = KVCacheStoreLayerRecvingThread(
                 self.m_store,
@@ -281,6 +343,11 @@ class KVPoolWorker:
                 self.layerwise_max_transfer_bytes,
             )
             self.kv_recv_thread.start()
+            self._bind_kv_transfer_thread(
+                self.kv_recv_thread,
+                1,
+                "layerwise recv",
+            )
             ready_event.wait()
         else:
             if self.kv_role in ["kv_producer", "kv_both"] or self.consumer_is_to_put:

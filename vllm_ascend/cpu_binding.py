@@ -13,6 +13,7 @@ from vllm_ascend.utils import AscendDeviceType, get_ascend_device_type
 
 MASK_BIT = 32  # Number of bits in a CPU affinity mask group
 MIN_CPUS_PER_NPU = 5  # 2(IRQ) + 1(main, at least 1 CPU) + 1(acl) + 1(release) = 5 CPUs per NPU
+KV_TRANSFER_CPUS_PER_NPU = 2
 ALLOWED_CPUS_PATH = "/proc/self/status"
 ASCEND_RT_VISIBLE_DEVICES = os.getenv("ASCEND_RT_VISIBLE_DEVICES")
 
@@ -154,6 +155,7 @@ class CpuAlloc:
         self.assign_main: dict[int, list[int]] = {}
         self.assign_acl: dict[int, list[int]] = {}
         self.assign_rel: dict[int, list[int]] = {}
+        self.assign_kv_transfer: dict[int, list[int]] = {}
 
     @staticmethod
     def cpu_to_mask(cpu: int) -> str:
@@ -351,25 +353,37 @@ class CpuAlloc:
 
     def allocate(self) -> None:
         for npu, pool in self.npu_cpu_pool.items():
-            if len(pool) >= MIN_CPUS_PER_NPU:
-                main = pool[2:-2]
-                acl = [pool[-2]]
-                rel = [pool[-1]]
-            else:
+            if len(pool) < MIN_CPUS_PER_NPU:
                 raise RuntimeError(
                     f"The number of CPUs is insufficient. Each NPU requires at least {MIN_CPUS_PER_NPU} CPUs."
                 )
+            if len(pool) >= MIN_CPUS_PER_NPU + KV_TRANSFER_CPUS_PER_NPU:
+                main = pool[2:-2 - KV_TRANSFER_CPUS_PER_NPU]
+                kv_transfer = pool[-2 - KV_TRANSFER_CPUS_PER_NPU:-2]
+            else:
+                main = pool[2:-2]
+                kv_transfer = []
+                logger.warning(
+                    "No dedicated KV transfer CPUs reserved for NPU%d because "
+                    "the CPU pool only has %d cores.",
+                    npu,
+                    len(pool),
+                )
+            acl = [pool[-2]]
+            rel = [pool[-1]]
             self.assign_main[npu] = main
             self.assign_acl[npu] = acl
             self.assign_rel[npu] = rel
+            self.assign_kv_transfer[npu] = kv_transfer
 
     def print_plan(self) -> None:
         logger.info("The CPU allocation plan is as follows:")
         current_npu = self.device_info.running_npu_list[self.rank_id]
         main = " ".join(map(str, self.assign_main[current_npu]))
+        kv_transfer = " ".join(map(str, self.assign_kv_transfer[current_npu]))
         acl = " ".join(map(str, self.assign_acl[current_npu]))
         rel = str(self.assign_rel[current_npu]) if self.assign_rel[current_npu] else ""
-        logger.info(f"NPU{current_npu}: main=[{main}]  acl=[{acl}]  release=[{rel}]")
+        logger.info(f"NPU{current_npu}: main=[{main}]  kv_transfer=[{kv_transfer}]  acl=[{acl}]  release=[{rel}]")
 
     def bind_memory(self, pid: str, npu: int) -> None:
         def _get_npu_numa_node(npu_id: int) -> int | None:
@@ -508,3 +522,17 @@ def bind_cpus(rank_id: int) -> None:
         return
     binder = CpuAlloc(rank_id)
     binder.run_all()
+
+
+def get_kv_transfer_thread_cpus(rank_id: int, num_threads: int = KV_TRANSFER_CPUS_PER_NPU) -> list[int]:
+    if not is_arm_cpu():
+        return []
+    binder = CpuAlloc(rank_id)
+    binder.build_cpu_pools()
+    binder.allocate()
+    current_npu = binder.device_info.running_npu_list[rank_id]
+    return binder.assign_kv_transfer[current_npu][:num_threads]
+
+
+def bind_thread_to_cpus(thread_id: int, cpus: list[int]) -> None:
+    CpuAlloc.bind(str(thread_id), cpus, False)
