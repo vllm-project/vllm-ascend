@@ -370,6 +370,23 @@ class KVCacheRecvingThread(threading.Thread):
                 self.v_head_dim = self.model_config.hf_text_config.head_dim
                 self.num_kv_heads = max(self.model_config.hf_text_config.num_key_value_heads // self.tp_size, 1)
         self.proc_not_transfer_request: dict[str, bool] = {}
+        self.failed_recv_requests: set[str] = set()
+        self.invalid_block_ids: set[int] = set()
+        self.failed_recv_requests_lock = threading.Lock()
+
+        self.num_draft_layers = 0
+        if self.vllm_config.speculative_config is not None:
+            if self.vllm_config.speculative_config.method == "mtp":
+                # all MTP layer use the same kv cache layer, so only need to transfer once
+                self.num_draft_layers = 1
+            elif (
+                hasattr(self.vllm_config.speculative_config.draft_model_config, "hf_config")
+                and getattr(self.vllm_config.speculative_config.draft_model_config.hf_config, "num_hidden_layers", None)
+                is not None
+            ):
+                self.num_draft_layers = (
+                    self.vllm_config.speculative_config.draft_model_config.hf_config.num_hidden_layers
+                )
 
     def add_request(
         self,
@@ -413,6 +430,26 @@ class KVCacheRecvingThread(threading.Thread):
         """
         return self.task_tracker.get_and_clear_finished_requests()
 
+    def get_and_clear_invalid_block_ids(self) -> set[int]:
+        """Get and clear block ids that failed to load."""
+        with self.failed_recv_requests_lock:
+            invalid_block_ids = self.invalid_block_ids
+            self.invalid_block_ids = set()
+        return invalid_block_ids
+
+    def _is_failed_recv_request(self, request_id: str) -> bool:
+        with self.failed_recv_requests_lock:
+            return request_id in self.failed_recv_requests
+
+    def _mark_failed_recv_request(self, request_id: str, local_block_ids: list[int]) -> None:
+        with self.failed_recv_requests_lock:
+            self.failed_recv_requests.add(request_id)
+            self.invalid_block_ids.update(local_block_ids)
+
+    def _clear_failed_recv_request(self, request_id: str) -> None:
+        with self.failed_recv_requests_lock:
+            self.failed_recv_requests.discard(request_id)
+
     def run(self):
         """Run the thread to handle KV cache transfer requests."""
         self.ready_event.set()
@@ -434,20 +471,32 @@ class KVCacheRecvingThread(threading.Thread):
         remote_handshake_port = req_meta["remote_handshake_port"]
         remote_port_send_num = req_meta["remote_port_send_num"]
         all_task_done = req_meta["all_task_done"]
+        transfer_failed = self._is_failed_recv_request(request_id)
 
         try:
-            logger.debug("Starting to transfer KV cache for request %s.", remote_request_id)
-            self._transfer_kv_cache(req_meta)
-            logger.debug("Finished transferring KV cache for request %s.", remote_request_id)
-        except Exception as e:
-            logger.exception("Failed to transfer KV cache for request %s: %s", remote_request_id, e)
+            if transfer_failed:
+                self._mark_failed_recv_request(request_id, req_meta["local_block_ids"])
+                logger.warning(
+                    "Skipping KV cache transfer for request %s because a previous transfer failed.",
+                    remote_request_id,
+                )
+            else:
+                try:
+                    logger.debug("Starting to transfer KV cache for request %s.", remote_request_id)
+                    self._transfer_kv_cache(req_meta)
+                    logger.debug("Finished transferring KV cache for request %s.", remote_request_id)
+                except Exception as e:
+                    transfer_failed = True
+                    self._mark_failed_recv_request(request_id, req_meta["local_block_ids"])
+                    logger.exception("Failed to transfer KV cache for request %s: %s", remote_request_id, e)
         finally:
             self._send_done_signal_to_free_remote_port(remote_request_id, remote_host, remote_port_send_num)
             if all_task_done:
-                if len(req_meta["local_block_ids"]) > 0:
+                if len(req_meta["local_block_ids"]) > 0 or transfer_failed:
                     self.task_tracker.update_done_task_count(request_id)
                 if request_id in self.proc_not_transfer_request:
                     del self.proc_not_transfer_request[request_id]
+                self._clear_failed_recv_request(request_id)
             self.request_queue.task_done()
             # Always send the done signal to the remote host to ensure proper
             # resource cleanup. Failing to do so may cause a memory leak on the
@@ -515,11 +564,10 @@ class KVCacheRecvingThread(threading.Thread):
 
         remote_kv_caches_base_addrs = self.kv_caches_base_addr[remote_engine_id][remote_handshake_port]
         first_layer_index, end_layer_index = self.pp_layer_indices[prefill_pp_rank]
-        # support MTP layer kv transfer
+        # support MTP layer and draft model kv transfer
         if self.vllm_config.speculative_config is not None:
-            # all MTP layer use the same kv cache layer, so only need to transfer once
             if prefill_pp_rank == self._prefill_pp_size - 1:
-                end_layer_index = end_layer_index + 1
+                end_layer_index = end_layer_index + self.num_draft_layers
         num_cache_per_layer = len(list(self.kv_caches.values())[0])  # Number of KV caches per layer
         local_kv_caches_base_addrs = self.kv_caches_base_addr[self.local_engine_id][self.local_handshake_port][
             first_layer_index * num_cache_per_layer : end_layer_index * num_cache_per_layer
@@ -864,6 +912,11 @@ class MooncakeConnector(KVConnectorBase_V1):
         """Get the finished recving and sending requests."""
         assert self.connector_worker is not None
         return self.connector_worker.get_finished()
+
+    def get_block_ids_with_load_errors(self) -> set[int]:
+        """Get the block ids whose KV load failed."""
+        assert self.connector_worker is not None
+        return self.connector_worker.get_block_ids_with_load_errors()
 
     def start_load_kv(self, forward_context: "ForwardContext", **kwargs) -> None:
         assert self.connector_worker is not None
@@ -1309,6 +1362,11 @@ class MooncakeConnectorWorker:
                     len(done_recving),
                 )
         return done_sending, done_recving
+
+    def get_block_ids_with_load_errors(self) -> set[int]:
+        if self.kv_role == "kv_consumer" and self.kv_recv_thread is not None:
+            return self.kv_recv_thread.get_and_clear_invalid_block_ids()
+        return set()
 
     def _get_kv_split_metadata(
         self,

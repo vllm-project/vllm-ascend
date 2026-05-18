@@ -31,8 +31,6 @@ from vllm.v1.kv_cache_interface import KVCacheConfig
 from vllm.v1.request import Request, RequestStatus
 from vllm.v1.structured_output import StructuredOutputManager
 
-from vllm_ascend.utils import vllm_version_is
-
 
 class BudgetRefiner:
     """This budget refiner can make dynamic adjustment to the token budget
@@ -491,10 +489,6 @@ class SchedulerDynamicBatch(Scheduler):
                 token_budget -= num_new_tokens
                 request.status = RequestStatus.RUNNING
                 request.num_computed_tokens = num_computed_tokens
-                if vllm_version_is("0.19.1"):
-                    # Count the number of prefix cached tokens.
-                    if request.num_cached_tokens < 0:
-                        request.num_cached_tokens = num_computed_tokens
                 # Encoder-related.
                 if encoder_inputs_to_schedule:
                     scheduled_encoder_inputs[request.request_id] = encoder_inputs_to_schedule

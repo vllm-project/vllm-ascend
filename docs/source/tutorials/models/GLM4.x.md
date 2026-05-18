@@ -123,12 +123,6 @@ If you want to deploy multi-node environment, you need to set up environment on 
 
 ## Deployment
 
-**Notice:**
-
-We have optimized the FIA operator in CANN 8.5.1. Manual replacement of the files related to the FIA operator is required. Please execute the FIA operator replacement script:
-[A2](../../../../tools/install_flash_infer_attention_score_ops_a2.sh) and [A3](../../../../tools/install_flash_infer_attention_score_ops_a3.sh)
-The optimization of the FIA operator will be enabled by default in CANN 9.x releases, and manual replacement will no longer be required. Please stay tuned for updates to this document.
-
 ### Single-node Deployment
 
 - In low-latency scenarios, we recommend a single-machine deployment.
@@ -161,7 +155,7 @@ vllm serve Eco-Tech/GLM-4.7-W8A8-floatmtp \
   --gpu-memory-utilization 0.9 \
   --speculative-config '{"num_speculative_tokens": 3, "method":"mtp"}' \
   --compilation-config '{"cudagraph_capture_sizes": [1,2,4,8,16,32,64,128,256,512], "cudagraph_mode": "FULL_DECODE_ONLY"}' \
-  --additional-config '{"enable_shared_expert_dp": true, "ascend_fusion_config": {"fusion_ops_gmmswigluquant": false}}'\
+  --additional-config '{"enable_shared_expert_dp": true, "ascend_fusion_config": {"fusion_ops_gmmswigluquant": false}}'
 ```
 
 **Notice:**
@@ -578,7 +572,7 @@ Before you start, please
                                 "tp_size": 4
                         }
                 }
-            }' \
+            }'
         ```
 
     4. Decode node 1
@@ -648,7 +642,7 @@ Before you start, please
                                 "tp_size": 4
                         }
                 }
-            }' \
+            }'
         ```
 
 Once the preparation is done, you can start the server with the following command on each node:
@@ -806,10 +800,6 @@ In this chapter, we recommend best practices for three scenarios:
 `max-model-len` and `max-num-seqs` need to be set according to the actual usage scenario. For other settings, please refer to the **[Deployment](#deployment)** chapter.
 
 ## FAQ
-
-- **Q: Why is the TPOT performance poor in Long-context test?**
-
-  A: Please ensure that the FIA operator replacement script has been executed successfully to complete the replacement of FIA operators. Here is the script: [A2](../../../../tools/install_flash_infer_attention_score_ops_a2.sh) and [A3](../../../../tools/install_flash_infer_attention_score_ops_a3.sh)
 
 - **Q: Startup fails with HCCL port conflicts (address already bound). What should I do?**
 

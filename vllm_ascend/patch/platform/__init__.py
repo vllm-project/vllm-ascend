@@ -18,6 +18,8 @@ import os
 
 import vllm_ascend.patch.platform.patch_distributed  # noqa
 import vllm_ascend.patch.platform.patch_kv_cache_interface  # noqa
+import vllm_ascend.patch.platform.patch_kv_cache_utils  # noqa
+import vllm_ascend.patch.platform.patch_mla_prefill_backend  # noqa
 from vllm_ascend import envs
 from vllm_ascend.utils import is_310p
 
@@ -26,8 +28,11 @@ if not is_310p():
 else:
     import vllm_ascend.patch.platform.patch_mamba_config_310  # noqa
 import vllm_ascend.patch.platform.patch_minimax_m2_config  # noqa
+import vllm_ascend.patch.platform.patch_minimax_usage_accounting  # noqa
+import vllm_ascend.patch.platform.patch_glm_tool_call_parser  # noqa
 import vllm_ascend.patch.platform.patch_sched_yield  # noqa
 import vllm_ascend.patch.platform.patch_torch_accelerator  # noqa
+import vllm_ascend.patch.platform.patch_tool_choice_none_content  # noqa
 
 if os.getenv("DYNAMIC_EPLB", "false").lower() in ("true", "1") or os.getenv("EXPERT_MAP_RECORD", "false") == "true":
     import vllm_ascend.patch.platform.patch_multiproc_executor  # noqa

@@ -13,6 +13,7 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
+import json
 import os
 from typing import TYPE_CHECKING, Any
 
@@ -52,6 +53,18 @@ class AscendConfig:
 
         profiling_chunk_config = additional_config.get("profiling_chunk_config", {})
         self.profiling_chunk_config = ProfilingChunkConfig(profiling_chunk_config)
+        if self.profiling_chunk_config.enabled:
+            max_batched = vllm_config.scheduler_config.max_num_batched_tokens
+            if max_batched < self.profiling_chunk_config.min_chunk:
+                logger.warning(
+                    "max_num_batched_tokens (%d) is smaller than "
+                    "profiling_chunk_config.min_chunk (%d). "
+                    "Clamping min_chunk to %d to avoid it being silently ignored.",
+                    max_batched,
+                    self.profiling_chunk_config.min_chunk,
+                    max_batched,
+                )
+                self.profiling_chunk_config.min_chunk = max_batched
         if self.profiling_chunk_config.enabled and vllm_config.parallel_config.pipeline_parallel_size <= 1:
             raise ValueError(
                 "profiling_chunk_config requires pipeline parallelism (pp > 1). "
@@ -68,14 +81,14 @@ class AscendConfig:
             )
 
         # Dump / PrecisionDebugger configuration
-        self.dump_config_path = additional_config.get("dump_config_path", None)
+        self.dump_config_path = self._resolve_dump_config_path(additional_config)
         self.layer_sharding = additional_config.get("layer_sharding", None)
         if self.layer_sharding:
             logger.info_once(
                 "Linear layer sharding enabled with config: %s. "
                 "Note: This feature works optimally with FLASHCOMM2 and DSA-CP enabled; "
                 "using it without these features may result in significant performance degradation.",
-                self.layer_sharding,
+                str(self.layer_sharding),
             )
 
         self.enable_shared_expert_dp = (
@@ -100,8 +113,8 @@ class AscendConfig:
                 logger.warning_once(
                     "When using FLASHCOMM1, the max_num_batched_tokens should be divisible "
                     "by tp_size * pcp_size (%s). It has been adjusted to %s.",
-                    tp_pcp_size,
-                    vllm_config.scheduler_config.max_num_batched_tokens,
+                    str(tp_pcp_size),
+                    str(vllm_config.scheduler_config.max_num_batched_tokens),
                 )
         self.multistream_overlap_shared_expert = additional_config.get("multistream_overlap_shared_expert", False)
         self.multistream_overlap_gate = additional_config.get("multistream_overlap_gate", False)
@@ -206,6 +219,34 @@ class AscendConfig:
         if self.enable_hamming_sparse:
             if isinstance(self.sparse_json, str) and not os.path.isfile(self.sparse_json):
                 raise ValueError("Hamming sparse config json file doesn't exist.")
+
+    @staticmethod
+    def _materialize_dump_config_to_file(dump_config: dict[str, Any]) -> str:
+        dump_config_dir = os.path.join(os.getcwd(), ".vllm_ascend", "msprobe")
+        os.makedirs(dump_config_dir, exist_ok=True)
+        dump_config_file_path = os.path.join(dump_config_dir, "msprobe_dump_config.json")
+        with open(dump_config_file_path, "w", encoding="utf-8") as file:
+            json.dump(dump_config, file, ensure_ascii=False, indent=2)
+        logger.info("Materialized additional_config.dump_config to file: %s", dump_config_file_path)
+        return dump_config_file_path
+
+    @classmethod
+    def _resolve_dump_config_path(cls, additional_config: dict[str, Any]) -> str | None:
+        dump_config_path = additional_config.get("dump_config_path")
+        dump_config = additional_config.get("dump_config")
+        if dump_config_path is not None and dump_config is not None:
+            raise ValueError(
+                "Only one of additional_config.dump_config_path or additional_config.dump_config can be set."
+            )
+        if dump_config is not None:
+            if not isinstance(dump_config, dict):
+                raise ValueError(f"additional_config.dump_config must be a dict, got {type(dump_config).__name__}.")
+            return cls._materialize_dump_config_to_file(dump_config)
+        if dump_config_path is not None and not isinstance(dump_config_path, str):
+            raise ValueError(
+                f"additional_config.dump_config_path must be a string, got {type(dump_config_path).__name__}."
+            )
+        return dump_config_path
 
     @staticmethod
     def _has_sparse_c8_layer_config(quant_config: Any) -> bool:
@@ -472,8 +513,15 @@ class ProfilingChunkConfig:
         if config is None:
             config = {}
         self.enabled: bool = config.get("enabled", False)
-        self.smooth_factor: float = float(config.get("smooth_factor", 0.8))
+        self.smooth_factor: float = float(config.get("smooth_factor", 1.0))
         self.min_chunk: int = int(config.get("min_chunk", 4096))
+        # Controls online history-aware calibration. When True, the model
+        # runner synchronizes the device each step to measure execution time
+        # and feeds it back for incremental refitting.  Automatically set to
+        # False once calibration completes.  Users can set it to False from
+        # the start to skip online calibration entirely and rely solely on
+        # the startup profiling model (avoids per-step sync overhead).
+        self.need_timing: bool = config.get("need_timing", self.enabled)
         self._validate()
 
     def _validate(self):

@@ -102,6 +102,9 @@ def select_experts(
             e_score_correction_bias=e_score_correction_bias,
             num_experts=num_experts,
         )
+        # Apply routed scaling factor to weights
+        if routed_scaling_factor != 1.0:
+            topk_weights = topk_weights * routed_scaling_factor
     if mix_placement:
         shared_expert_routing_factor = 1.0 if is_support_npu_moe_gating_top_k else (1 / routed_scaling_factor)
         batch_size = topk_ids.shape[0]

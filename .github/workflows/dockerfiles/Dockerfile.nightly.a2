@@ -19,7 +19,7 @@ ARG VLLM_ASCEND_BRANCH=""
 FROM quay.io/ascend/vllm-ascend:nightly-${VLLM_ASCEND_BRANCH}
 
 ARG PIP_INDEX_URL="https://mirrors.tuna.tsinghua.edu.cn/pypi/web/simple"
-ARG AIS_BENCH_TAG="v3.1-20260330-master"
+ARG AIS_BENCH_TAG="v3.1-20260429-master"
 ARG AIS_BENCH_URL="https://github.com/AISBench/benchmark.git"
 ARG GITEE_USERNAME=""
 ARG GITEE_TOKEN=""
@@ -32,7 +32,7 @@ WORKDIR /workspace
 RUN pip config set global.index-url ${PIP_INDEX_URL}
 
 # Install requirements-dev.txt for tests
-RUN export PIP_EXTRA_INDEX_URL=https://mirrors.huaweicloud.com/ascend/repos/pypi && \
+RUN export PIP_EXTRA_INDEX_URL="https://mirrors.huaweicloud.com/ascend/repos/pypi https://triton-ascend.osinfra.cn/pypi/simple" && \
     cd /vllm-workspace/vllm-ascend && \
     python3 -m pip install -r requirements-dev.txt && \
     python3 -m pip cache purge

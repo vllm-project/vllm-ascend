@@ -39,7 +39,7 @@ from vllm_ascend.ops.triton.mamba.causal_conv1d import (
     causal_conv1d_fn,
     causal_conv1d_update_npu,
 )
-from vllm_ascend.utils import enable_sp
+from vllm_ascend.utils import enable_sp, vllm_version_is
 
 # ──────────────────────────────────────────────────────────────────
 # All-mode prefix caching helpers (P4)
@@ -407,31 +407,41 @@ class AscendGatedDeltaNetAttention(GatedDeltaNetAttention):
         2. Core attention (custom op)
         3. Output projection
         """
-        if not self.gqa_interleaved_layout:
-            mixed_qkvz, _ = self.in_proj_qkvz(hidden_states)
-            num_tokens = mixed_qkvz.size(0)
-            qkv_size = (self.key_dim * 2 + self.value_dim) // self.tp_size
-            z_size = self.value_dim // self.tp_size
-            mixed_qkv, z = mixed_qkvz.split([qkv_size, z_size], dim=-1)
-            z = z.reshape(z.size(0), -1, self.head_v_dim)
+        num_tokens = hidden_states.size(0)
+        if hasattr(self, "in_proj_qkv"):
+            mixed_qkv, _ = self.in_proj_qkv(hidden_states)
             ba, _ = self.in_proj_ba(hidden_states)
+            z, _ = self.in_proj_z(hidden_states)
+            z = z.reshape(z.size(0), -1, self.head_v_dim)
             b, a = ba.chunk(2, dim=-1)
-
             b = b.contiguous()
             a = a.contiguous()
         else:
-            projected_states_qkvz, _ = self.in_proj_qkvz(hidden_states)
-            projected_states_ba, _ = self.in_proj_ba(hidden_states)
-            num_tokens = projected_states_qkvz.size(0)
+            if not self.gqa_interleaved_layout:
+                mixed_qkvz, _ = self.in_proj_qkvz(hidden_states)
+                num_tokens = mixed_qkvz.size(0)
+                qkv_size = (self.key_dim * 2 + self.value_dim) // self.tp_size
+                z_size = self.value_dim // self.tp_size
+                mixed_qkv, z = mixed_qkvz.split([qkv_size, z_size], dim=-1)
+                z = z.reshape(z.size(0), -1, self.head_v_dim)
+                ba, _ = self.in_proj_ba(hidden_states)
+                b, a = ba.chunk(2, dim=-1)
 
-            mixed_qkv, z, b, a = fused_qkvzba_split_reshape_cat(
-                projected_states_qkvz,
-                projected_states_ba,
-                triton.cdiv(self.num_k_heads, self.tp_size),
-                triton.cdiv(self.num_v_heads, self.tp_size),
-                self.head_k_dim,
-                self.head_v_dim,
-            )
+                b = b.contiguous()
+                a = a.contiguous()
+            else:
+                projected_states_qkvz, _ = self.in_proj_qkvz(hidden_states)
+                projected_states_ba, _ = self.in_proj_ba(hidden_states)
+                num_tokens = projected_states_qkvz.size(0)
+
+                mixed_qkv, z, b, a = fused_qkvzba_split_reshape_cat(
+                    projected_states_qkvz,
+                    projected_states_ba,
+                    triton.cdiv(self.num_k_heads, self.tp_size),
+                    triton.cdiv(self.num_v_heads, self.tp_size),
+                    self.head_k_dim,
+                    self.head_v_dim,
+                )
 
         # ============================================================
         # Part 2: Core Attention (Custom Op)
@@ -444,13 +454,23 @@ class AscendGatedDeltaNetAttention(GatedDeltaNetAttention):
             device=hidden_states.device,
         )
 
-        torch.ops.vllm.gdn_attention_core(
-            mixed_qkv,
-            b,
-            a,
-            core_attn_out,
-            self.prefix,
-        )
+        if vllm_version_is("0.20.2"):
+            torch.ops.vllm.gdn_attention_core(
+                mixed_qkv,
+                b,
+                a,
+                core_attn_out,
+                self.prefix,
+            )
+        else:
+            torch.ops.vllm.gdn_attention_core(
+                mixed_qkv,
+                b,
+                a,
+                core_attn_out,
+                False,
+                self.prefix,
+            )
 
         # ============================================================
         # Part 3: Output Projection
