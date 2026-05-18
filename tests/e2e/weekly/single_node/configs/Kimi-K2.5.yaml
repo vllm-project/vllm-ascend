@@ -216,7 +216,7 @@ test_cases:
       - "--additional-config"
       - '{"enable_shared_expert_dp":true}'
     benchmarks:
-      <<: *benchmarks
+      perf: *benchmarks
   - name: "Kimi-K2.5-W4A8-TOPT50-16k-1k"
     model: "Eco-Tech/Kimi-K2.5-W4A8"
     envs:
@@ -238,7 +238,7 @@ test_cases:
       - "--additional-config"
       - '{"enable_shared_expert_dp":true}'
     benchmarks:
-      <<: *_benchmark_TPOT50_16K_1K
+      perf: *_benchmark_TPOT50_16K_1K
   - name: "Kimi-K2.5-W4A8-TOPT20-16k-1k"
     model: "Eco-Tech/Kimi-K2.5-W4A8"
     envs:
@@ -262,7 +262,7 @@ test_cases:
       - "kimi_k2"
       - "--enable-auto-tool-choice"
     benchmarks:
-      <<: *_benchmark_TPOT20_16K_1K
+      perf: *_benchmark_TPOT20_16K_1K
   - name: "Kimi-K2.5-W4A8-TOPT50-32k-0.5k"
     model: "Eco-Tech/Kimi-K2.5-W4A8"
     envs:
@@ -286,8 +286,7 @@ test_cases:
       - "--additional-config"
       - '{"enable_shared_expert_dp": true}'
     benchmarks:
-      <<: *_benchmark_TPOT50_32K_0_5K
-
+      perf: *_benchmark_TPOT50_32K_0_5K
   - name: "Kimi-K2.5-W4A8-TOPT50-32k-0.5k-prefix-cache90"
     model: "Eco-Tech/Kimi-K2.5-W4A8"
     envs:
@@ -311,8 +310,7 @@ test_cases:
       - "--additional-config"
       - '{"enable_shared_expert_dp": true}'
     benchmarks:
-      <<: *_benchmark_TPOT50_32K_0_5K_pc90
-
+      perf: *_benchmark_TPOT50_32K_0_5K_pc90
   - name: "Kimi-K2.5-W4A8-TOPT20-32k-0.5k"
     model: "Eco-Tech/Kimi-K2.5-W4A8"
     envs:
@@ -336,8 +334,7 @@ test_cases:
       - "--additional-config"
       - '{"enable_shared_expert_dp": true}'
     benchmarks:
-      <<: *_benchmark_TPOT20_32K_0_5K
-
+      perf: *_benchmark_TPOT20_32K_0_5K
   - name: "Kimi-K2.5-W4A8-TOPT20-32k-0.5k-pc90"
     model: "Eco-Tech/Kimi-K2.5-W4A8"
     envs:
@@ -361,8 +358,7 @@ test_cases:
       - "--additional-config"
       - '{"enable_shared_expert_dp": true}'
     benchmarks:
-      <<: *_benchmark_TPOT20_32K_0_5K_pc90
-
+      perf: *_benchmark_TPOT20_32K_0_5K_pc90
   - name: "Kimi-K2.5-W4A8-TOPT50-64k-1k-pc90"
     model: "Eco-Tech/Kimi-K2.5-W4A8"
     envs:
@@ -391,8 +387,7 @@ test_cases:
       - "--speculative-config"
       - '{"method":"eagle3", "model":"lightseekorg/kimi-k2.5-eagle3", "num_speculative_tokens":3}'
     benchmarks:
-      <<: *_benchmark_TPOT50_64K_1K_pc90
-
+      perf: *_benchmark_TPOT50_64K_1K_pc90
   - name: "Kimi-K2.5-W4A8-TOPT20-64k-1k-pc90"
     model: "Eco-Tech/Kimi-K2.5-W4A8"
     envs:
@@ -436,8 +431,7 @@ test_cases:
       - "--mm-encoder-tp-mode"
       - "data"
     benchmarks:
-      <<: *_benchmark_TPOT20_64K_1K_pc90
-
+      perf: *_benchmark_TPOT20_64K_1K_pc90
   - name: "Kimi-K2.5-W4A8-TOPT50-128k-1k-pc90"
     model: "Eco-Tech/Kimi-K2.5-W4A8"
     envs:
@@ -458,8 +452,7 @@ test_cases:
       - "--additional-config"
       - '{"enable_shared_expert_dp":true}'
     benchmarks:
-      <<: *_benchmark_TPOT50_128K_1K_pc90
-
+      perf: *_benchmark_TPOT50_128K_1K_pc90
   - name: "Kimi-K2.5-W4A8-TOPT20-128k-1k-pc90"
     model: "Eco-Tech/Kimi-K2.5-W4A8"
     envs:
@@ -480,4 +473,4 @@ test_cases:
       - "--additional-config"
       - '{"enable_shared_expert_dp":true}'
     benchmarks:
-      <<: *_benchmark_TPOT20_128K_1K_pc90
+      perf: *_benchmark_TPOT20_128K_1K_pc90
