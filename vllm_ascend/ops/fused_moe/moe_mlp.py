@@ -181,7 +181,7 @@ def quant_apply_mlp(
             if quantized_hidden_states is not None:
                 dispose_tensor(quantized_hidden_states)
             # act_fn: swiglu
-            hidden_states, swiglu_out_scale = torch_npu.npu_dequant_swiglu_quant(
+            hidden_states, swiglu_out_scale = torch.ops._C_ascend.npu_dequant_swiglu_quant(
                 x=hidden_states,
                 weight_scale=w1_scale[0],
                 activation_scale=pertoken_scale,
