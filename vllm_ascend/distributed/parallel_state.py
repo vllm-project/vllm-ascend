@@ -25,6 +25,7 @@ _SHARD_WEIGHT: GroupCoordinator | None = None
 _P_TP: GroupCoordinator | None = None
 
 _DYNAMIC_EPLB: GroupCoordinator | None = None
+_DYNAMIC_EPLB_LOAD_SYNC: GroupCoordinator | None = None
 
 
 def init_ascend_model_parallel(
