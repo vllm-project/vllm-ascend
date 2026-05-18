@@ -31,13 +31,13 @@ def _get_log2phy_map(self, layer_id):
 def _get_all_moe_loads(self):
     loads = [
         layer.moe_load
-        for _, layer in self._moe_layers
+        for layer in self._moe_layers
     ]
     return torch.stack(loads, dim=0) if loads else torch.empty(0)
 
 
 def _clear_all_moe_loads(self):
-    for _, layer in self._moe_layers:
+    for layer in self._moe_layers:
         layer.clear_moe_load()
 
 
@@ -49,7 +49,7 @@ def model_register(model):
 
     entries = VllmEplbAdaptor._registered_moe_layers
     entries.sort(key=lambda x: x[0])
-    model._moe_layers = list(entries)
+    model._moe_layers = [layer for _, layer in entries]
     model._moe_layer_map = dict(entries)
     entries.clear()
 
