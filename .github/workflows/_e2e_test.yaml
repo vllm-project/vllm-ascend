@@ -139,14 +139,14 @@ jobs:
         env:
           PIP_EXTRA_INDEX_URL: "https://mirrors.huaweicloud.com/ascend/repos/pypi https://triton-ascend.osinfra.cn/pypi/simple https://download.pytorch.org/whl/cpu/"
         run: |
-          # pip install uc-manager
-          uv pip install -r requirements-dev.txt --exclude triton-ascend --exclude uc-manager
-          uv pip install triton-ascend==3.2.1 uc-manager
+          pip install uc-manager
+          uv pip install -r requirements-dev.txt
           if find vllm_ascend -maxdepth 1 -name '*.so' -type f 2>/dev/null | grep -q .; then
             COMPILE_CUSTOM_KERNELS=0 uv pip install -e .
           else
             uv pip install -e .
           fi
+          uv pip install --force-reinstall --no-deps triton-ascend==3.2.1
 
       - name: Run vllm-project/vllm-ascend test
         env:
@@ -278,7 +278,7 @@ jobs:
           else
             uv pip install -e .
           fi
-          pip install --no-deps triton-ascend==3.2.1
+          pip install --force-reinstall --no-deps triton-ascend==3.2.1
 
       - name: Run e2e test
         if: ${{ inputs.type == 'full' }}
@@ -417,7 +417,7 @@ jobs:
           else
             uv pip install -e .
           fi
-          pip install --no-deps triton-ascend==3.2.1
+          pip install --force-reinstall --no-deps triton-ascend==3.2.1
       - name: Run vllm-project/vllm-ascend test (light)
         env:
           VLLM_WORKER_MULTIPROC_METHOD: spawn
@@ -547,7 +547,7 @@ jobs:
           else
             uv pip install -e .
           fi
-          pip install --no-deps triton-ascend==3.2.1
+          pip install --force-reinstall --no-deps triton-ascend==3.2.1
       - name: Run vllm-project/vllm-ascend test (full)
         if: ${{ inputs.type == 'full' }}
         env:
@@ -705,7 +705,7 @@ jobs:
           else
             uv pip install -e .
           fi
-          pip install --no-deps triton-ascend==3.2.1
+          pip install --force-reinstall --no-deps triton-ascend==3.2.1
 
       - name: Run vllm-project/vllm-ascend test for V1 Engine
         if: ${{ inputs.type == 'full' }}
