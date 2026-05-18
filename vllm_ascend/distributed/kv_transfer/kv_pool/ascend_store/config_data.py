@@ -469,19 +469,20 @@ class AscendStoreKVConnectorWorkerMetadata(KVConnectorWorkerMetadata):
 
     def mark_completed_blocks(self, req_id: str, block_ids: list[int]) -> None:
         req_completed_blocks = self.completed_blocks.setdefault(req_id, dict())
-        req_completed_blocks.update({block_id: 1 for block_id in block_ids})
+        req_completed_blocks.update({block_id: 1 for block_id in block_ids if block_id > 0})
 
     def aggregate(
         self, other: "KVConnectorWorkerMetadata"
     ) -> "KVConnectorWorkerMetadata":
         assert isinstance(other, AscendStoreKVConnectorWorkerMetadata)
 
-        merged = dict()
+        merged = {}
+        for k, v in self.completed_blocks.items():
+            merged[k] = dict(v)
         for req_id in other.completed_blocks:
             if req_id not in self.completed_blocks:
                 merged[req_id] = dict(other.completed_blocks[req_id])
             else:
-                merged[req_id] = dict(self.completed_blocks[req_id])
                 for k, v in other.completed_blocks[req_id].items():
                     merged[req_id][k] = merged[req_id].get(k, 0) + v
         return AscendStoreKVConnectorWorkerMetadata(merged)

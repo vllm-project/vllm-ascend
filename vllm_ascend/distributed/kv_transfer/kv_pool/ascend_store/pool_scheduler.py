@@ -385,7 +385,8 @@ class KVPoolScheduler:
                 else:
                     prev_blocks[block_id] = total
             logger.debug("free blocks: %s", to_free_block_ids)
-            self._block_pool.free_blocks([self._block_pool.blocks[block_id] for block_id in to_free_block_ids])
+            if to_free_block_ids:
+                self._block_pool.free_blocks([self._block_pool.blocks[block_id] for block_id in to_free_block_ids])
             if not prev_blocks:
                 del self.sending_blocks[req_id]
 

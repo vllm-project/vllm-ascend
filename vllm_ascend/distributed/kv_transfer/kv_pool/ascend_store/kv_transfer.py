@@ -157,7 +157,7 @@ class KVCacheStoreSendingThread(KVTransferThread):
     def mark_completed_blocks(self, req_id: str, block_ids: list[int]) -> None:
         with self.completed_blocks_lock:
             req_completed_blocks = self.completed_blocks.setdefault(req_id, dict())
-            req_completed_blocks.update({block_id: 1 for block_id in block_ids})
+            req_completed_blocks.update({block_id: 1 for block_id in block_ids if block_id > 0})
 
     def get_completed_blocks(self):
         with self.completed_blocks_lock:
