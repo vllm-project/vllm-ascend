@@ -386,6 +386,8 @@ if (base_aclnn_srcs)
             string(REGEX REPLACE "_def$" "" _op_name ${name_without_ext})
             list(APPEND generate_aclnn_srcs ${base_aclnn_binary_dir}/aclnn_${_op_name}.cpp)
             list(APPEND generate_aclnn_headers ${base_aclnn_binary_dir}/aclnn_${_op_name}.h)
+            append_versioned_aclnn_outputs("${_src}" "aclnn" "${_op_name}" "${base_aclnn_binary_dir}"
+                                           generate_aclnn_srcs generate_aclnn_headers)
             list(APPEND generate_proto_srcs    ${generate_proto_dir}/${_op_name}_proto.cpp)
             list(APPEND generate_proto_headers ${generate_proto_dir}/${_op_name}_proto.h)
         endif ()

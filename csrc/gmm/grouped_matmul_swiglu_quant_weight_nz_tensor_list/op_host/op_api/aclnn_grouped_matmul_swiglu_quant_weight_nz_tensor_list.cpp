@@ -82,7 +82,7 @@ static bool CheckNotNull(const aclTensor* x, const aclTensorList* weight, const 
   return true;
 }
 
-static bool CheckInputOutDims(const aclTensor* x, const aclTensorList* weight, const aclTensorList* weightScale, 
+static bool CheckInputOutDims(const aclTensor* x, const aclTensorList* weight, const aclTensorList* weightScale,
                               const aclTensor* xScale, const aclTensor* groupList,
                               const aclTensor* output, const aclTensor* outputScale)
 {
@@ -101,7 +101,7 @@ static bool CheckInputOutDims(const aclTensor* x, const aclTensorList* weight, c
   return true;
 }
 
-static bool CheckInputOutShape(const aclTensor* x, const aclTensorList* weight, const aclTensorList* weightScale, 
+static bool CheckInputOutShape(const aclTensor* x, const aclTensorList* weight, const aclTensorList* weightScale,
                               const aclTensor* xScale, const aclTensor* groupList,
                               const aclTensor* output, const aclTensor* outputScale)
 {
@@ -110,22 +110,22 @@ static bool CheckInputOutShape(const aclTensor* x, const aclTensorList* weight, 
   int64_t n = (*weightScale)[0]->GetViewShape().GetDim(0);
   int64_t e = weight->Size();
   if (n % SPLIT != 0){
-    OP_LOGE(ACLNN_ERR_PARAM_INVALID, 
+    OP_LOGE(ACLNN_ERR_PARAM_INVALID,
       "aclnnGroupedMatmulSwigluQuantWeightNzTensorList, N is %ld , not an even number.", n);
     return false;
   }
   int64_t nAfterHalve = static_cast<int64_t>(n / SPLIT);
-  // x shape is expected to be [M, K] 
+  // x shape is expected to be [M, K]
   op::Shape xExpectShape = {m, k};
-  // The ND shape of each weight in TensorList is expected to be [K, N] 
+  // The ND shape of each weight in TensorList is expected to be [K, N]
   op::Shape weightNDExpectShape = {k, n};
-  // The NZ shape of each weight in TensorList is expected to be [N // 32, K // 16, 16, 32] 
-  op::Shape weightNZExpectShape = {static_cast<int64_t>(n / NZ_DIM_3), 
+  // The NZ shape of each weight in TensorList is expected to be [N // 32, K // 16, 16, 32]
+  op::Shape weightNZExpectShape = {static_cast<int64_t>(n / NZ_DIM_3),
                                    static_cast<int64_t>(k / NZ_DIM_2),
                                    NZ_DIM_2, NZ_DIM_3};
-  // weightScale shape is expected to be [N] 
+  // weightScale shape is expected to be [N]
   op::Shape weightScaleExpectShape = {n};
-  // xScale shape is expected to be [E, N] 
+  // xScale shape is expected to be [E, N]
   op::Shape xScaleExpectShape = {m};
   // output shape is expected to be [M, N]
   op::Shape outputExpectShape = {m, nAfterHalve};
@@ -148,20 +148,20 @@ static bool CheckInputOutShape(const aclTensor* x, const aclTensorList* weight, 
   // The length of groupList should be less than or equal to the number of experts in weight
   int64_t groupListLen = groupList->GetViewShape().GetDim(0);
   if(groupListLen > e) {
-    OP_LOGE(ACLNN_ERR_PARAM_INVALID, 
+    OP_LOGE(ACLNN_ERR_PARAM_INVALID,
       "aclnnGroupedMatmulSwigluQuantWeightNzTensorList, Length of 'groupList' out of range (expected to be in range of [1, %ld], but got %ld)",
       e, groupListLen);
     return false;
   }
   if(nAfterHalve > N_LIMIT) {
-    OP_LOGE(ACLNN_ERR_PARAM_INVALID, 
+    OP_LOGE(ACLNN_ERR_PARAM_INVALID,
       "aclnnGroupedMatmulSwigluQuantWeightNzTensorList, The current version does not support the scenario.\
       where N after halve is %ld greater than %ld.",
       nAfterHalve, N_LIMIT);
     return false;
   }
   if(k >= K_LIMIT) {
-    OP_LOGE(ACLNN_ERR_PARAM_INVALID, 
+    OP_LOGE(ACLNN_ERR_PARAM_INVALID,
       "aclnnGroupedMatmulSwigluQuantWeightNzTensorList, The current version does not support the scenario.\
       The tail axis dimension of input0(x) is %ld, which need lower than %ld.",
       k, K_LIMIT);
@@ -170,7 +170,7 @@ static bool CheckInputOutShape(const aclTensor* x, const aclTensorList* weight, 
   return true;
 }
 
-static bool CheckDtypeValid(const aclTensor* x, const aclTensorList* weight, const aclTensorList* weightScale, 
+static bool CheckDtypeValid(const aclTensor* x, const aclTensorList* weight, const aclTensorList* weightScale,
                             const aclTensor* xScale, const aclTensor* groupList,
                             const aclTensor* output, const aclTensor* outputScale)
 {
@@ -212,19 +212,19 @@ static aclnnStatus CheckParams(const aclTensor* x, const aclTensorList* weight, 
                                const aclTensorList* weightScale, const aclTensor* xScale, const aclTensor* groupList,
                                const aclTensor* output, const aclTensor* outputScale, const aclTensor* outputOffset) {
   // 1. Check if parameters are null pointers
-  CHECK_RET(CheckNotNull(x, weight, bias, offset, weightScale, xScale, 
+  CHECK_RET(CheckNotNull(x, weight, bias, offset, weightScale, xScale,
                          groupList, output, outputScale, outputOffset), ACLNN_ERR_PARAM_NULLPTR);
 
   // 2. Verify input and output parameter dimensions
-  CHECK_RET(CheckInputOutDims(x, weight, weightScale, xScale, 
+  CHECK_RET(CheckInputOutDims(x, weight, weightScale, xScale,
                               groupList, output, outputScale), ACLNN_ERR_PARAM_INVALID);
-  
+
   // 3. Verify input and output shape parameters
-  CHECK_RET(CheckInputOutShape(x, weight, weightScale, xScale, 
+  CHECK_RET(CheckInputOutShape(x, weight, weightScale, xScale,
                                groupList, output, outputScale), ACLNN_ERR_PARAM_INVALID);
 
   // 4. Check if the input data types are within the supported data type range
-  CHECK_RET(CheckDtypeValid(x, weight, weightScale, xScale, 
+  CHECK_RET(CheckDtypeValid(x, weight, weightScale, xScale,
                             groupList, output, outputScale), ACLNN_ERR_PARAM_INVALID);
 
   // 5. Check if data format is supported
@@ -235,8 +235,8 @@ static aclnnStatus CheckParams(const aclTensor* x, const aclTensorList* weight, 
 
 static aclnnStatus aclnnGroupedMatmulSwigluQuantWeightNzTensorListGetWorkspaceSizeCommon(const aclTensor *x, const aclTensorList *weight,
                                                                        const aclTensor *bias, const aclTensor *offset,
-                                                                       const aclTensorList *weightScale, const aclTensor *xScale, 
-                                                                       const aclTensor *groupList,  
+                                                                       const aclTensorList *weightScale, const aclTensor *xScale,
+                                                                       const aclTensor *groupList,  float swigluLimit,
                                                                        aclTensor *output, aclTensor *outputScale,
                                                                        aclTensor *outputOffset, uint64_t *workspaceSize,
                                                                        aclOpExecutor **executor){
@@ -244,7 +244,7 @@ static aclnnStatus aclnnGroupedMatmulSwigluQuantWeightNzTensorListGetWorkspaceSi
   auto uniqueExecutor = CREATE_EXECUTOR();
   CHECK_RET(uniqueExecutor.get() != nullptr, ACLNN_ERR_INNER_CREATE_EXECUTOR);
   // Fixed pattern, parameter check
-  auto ret = CheckParams(x, weight, bias, offset, weightScale, xScale, 
+  auto ret = CheckParams(x, weight, bias, offset, weightScale, xScale,
                          groupList, output, outputScale, outputOffset);
   CHECK_RET(ret == ACLNN_SUCCESS, ret);
   // Empty tensor scenario
@@ -264,7 +264,7 @@ static aclnnStatus aclnnGroupedMatmulSwigluQuantWeightNzTensorListGetWorkspaceSi
   groupList = l0op::Contiguous(groupList, uniqueExecutor.get());
   CHECK_RET(groupList != nullptr, ACLNN_ERR_INNER_NULLPTR);
   // Call L0 operator capability
-  auto ret_0 = l0op::GroupedMatmulSwigluQuantWeightNzTensorList(x, weight, weightScale, xScale, groupList, uniqueExecutor.get());
+  auto ret_0 = l0op::GroupedMatmulSwigluQuantWeightNzTensorList(x, weight, weightScale, xScale, groupList, swigluLimit, uniqueExecutor.get());
   CHECK_RET(ret_0 != std::tuple(nullptr, nullptr), ACLNN_ERR_INNER_NULLPTR);
   auto out0 = std::get<OUTPUT_IDX_0>(ret_0);
   auto ret_1 = l0op::ViewCopy(out0, output, uniqueExecutor.get());
@@ -279,14 +279,14 @@ static aclnnStatus aclnnGroupedMatmulSwigluQuantWeightNzTensorListGetWorkspaceSi
 
 aclnnStatus aclnnGroupedMatmulSwigluQuantWeightNzTensorListGetWorkspaceSize(const aclTensor *x, const aclTensorList *weight,
                                                                   const aclTensor *bias, const aclTensor *offset,
-                                                                  const aclTensorList *weightScale, const aclTensor *xScale, 
-                                                                  const aclTensor *groupList,  
+                                                                  const aclTensorList *weightScale, const aclTensor *xScale,
+                                                                  const aclTensor *groupList, float swigluLimit,
                                                                   aclTensor *output, aclTensor *outputScale,
                                                                   aclTensor *outputOffset, uint64_t *workspaceSize,
                                                                   aclOpExecutor **executor) {
   OP_CHECK_COMM_INPUT(workspaceSize, executor);
   L2_DFX_PHASE_1(aclnnGroupedMatmulSwigluQuantWeightNzTensorList,
-                 DFX_IN(x, weight, bias, offset, weightScale, xScale, groupList),
+                 DFX_IN(x, weight, bias, offset, weightScale, xScale, groupList,swigluLimit),
                  DFX_OUT(output, outputScale, outputOffset));
   // weight is forcibly bound to StorageFormat and ViewFormat as NZ in this scenario
   CHECK_RET(weight != nullptr, ACLNN_ERR_PARAM_NULLPTR);
@@ -294,7 +294,7 @@ aclnnStatus aclnnGroupedMatmulSwigluQuantWeightNzTensorListGetWorkspaceSize(cons
     auto storgeShape = (*weight)[i]->GetStorageShape();
     auto viewShape = (*weight)[i]->GetViewShape();
     aclTensor* weightNZ = const_cast<aclTensor*>((*weight)[i]);
-    CHECK_COND((storgeShape.GetDimNum() == WEIGHT_NZ_DIM_LIMIT), 
+    CHECK_COND((storgeShape.GetDimNum() == WEIGHT_NZ_DIM_LIMIT),
               ACLNN_ERR_PARAM_INVALID,
               "aclnnGroupedMatmulSwigluQuantWeightNZTensorList, The dimnum of storageShape for second input (weight) \
               must be 4. \n But StorageShape got %s , and dimNum is %lu.",
@@ -310,12 +310,12 @@ aclnnStatus aclnnGroupedMatmulSwigluQuantWeightNzTensorListGetWorkspaceSize(cons
     }
   }
   // Call the common interface
-  return aclnnGroupedMatmulSwigluQuantWeightNzTensorListGetWorkspaceSizeCommon(x, weight, bias, offset, weightScale, xScale, groupList, 
+  return aclnnGroupedMatmulSwigluQuantWeightNzTensorListGetWorkspaceSizeCommon(x, weight, bias, offset, weightScale, xScale, groupList, swigluLimit,
     output, outputScale, outputOffset, workspaceSize, executor);
 }
 
-aclnnStatus aclnnGroupedMatmulSwigluQuantWeightNzTensorList(void *workspace, 
-                                          uint64_t workspaceSize, 
+aclnnStatus aclnnGroupedMatmulSwigluQuantWeightNzTensorList(void *workspace,
+                                          uint64_t workspaceSize,
                                           aclOpExecutor *executor,
                                           aclrtStream stream) {
   L2_DFX_PHASE_2(aclnnGroupedMatmulSwigluQuantWeightNzTensorList);
