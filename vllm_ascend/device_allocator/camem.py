@@ -241,7 +241,7 @@ class CaMemAllocator:
         conf = os.environ.get("PYTORCH_CUDA_ALLOC_CONF", "")
         expandable_was_enabled = "expandable_segments:True" in conf
         if expandable_was_enabled:
-            torch.cuda.memory._set_allocator_settings("expandable_segments:False")
+            torch.npu.memory._set_allocator_settings("expandable_segments:False")
 
         old_tag = self.current_tag
         self.current_tag = tag
@@ -267,7 +267,7 @@ class CaMemAllocator:
                 self.current_tag = old_tag
         finally:
             if expandable_was_enabled:
-                torch.cuda.memory._set_allocator_settings("expandable_segments:True")
+                torch.npu.memory._set_allocator_settings("expandable_segments:True")
 
     def get_current_usage(self) -> int:
         """
