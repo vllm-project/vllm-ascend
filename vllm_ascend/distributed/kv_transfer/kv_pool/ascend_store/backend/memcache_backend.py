@@ -20,7 +20,12 @@ class MmcDirect(Enum):
 
 
 class MemcacheBackend(Backend):
-    def __init__(self, parallel_config: ParallelConfig, lazy_init: bool = False):
+    # ``**kwargs`` is accepted per the Backend ABC contract (carries the
+    # connector ``kv_connector_extra_config``); MemcacheBackend has no
+    # connector-level overrides and ignores the extras. ``lazy_init`` is
+    # forwarded by ``KVPoolWorker`` for the DSV4/compressed-model path
+    # (see vllm-ascend PR #9771).
+    def __init__(self, parallel_config: ParallelConfig, lazy_init: bool = False, **kwargs):
         self.local_rank = get_world_group().local_rank
         self.store: Any | None = None
         self._is_a2 = get_ascend_device_type() in {AscendDeviceType.A2}
