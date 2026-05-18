@@ -1337,30 +1337,43 @@ class PCPManager:
         mtp_attn_mask = self.dcp_mtp_attn_mask.cpu[:self.num_decode_reqs]
         mtp_attn_mask.zero_()
 
-        # Directly compute and write mask for each valid request
-        # Avoids scatter (expand + nonzero + index_put) which is slow
+        # Vectorized approach: compute all masks in batch, then assign directly
+        # Avoids nonzero/index_put which are slow
         num_valid = valid.sum().item()
         if num_valid == 0:
             return mtp_attn_mask
 
-        for req_idx in range(self.num_decode_reqs):
-            if not valid[req_idx]:
-                continue
+        # Get max dimensions for vectorized computation
+        max_q = int(q_lens[valid].max().item())
+        max_k = int(k_lens[valid].max().item())
 
-            ctx_len = context_lens[req_idx].item()
-            q_len = q_lens[req_idx].item()
-            k_len = k_lens[req_idx].item()
+        # Generate indices up to max dimensions
+        q_indices = torch.arange(max_q, dtype=torch.int32)
+        k_indices = torch.arange(max_k, dtype=torch.int32)
 
-            # Compute k_upper for this request: floor((ctx_len + q_idx - cp_rank) / cp_size)
-            q_indices_req = torch.arange(q_len, dtype=torch.int32)
-            k_upper = (ctx_len + q_indices_req - cp_rank) // cp_size
+        # valid_q: [num_decode_reqs, max_q] - which q indices are valid for each req
+        valid_q = valid[:, None] & (q_indices[None, :] < q_lens[:, None])
+        # valid_k: [num_decode_reqs, max_k] - which k indices are valid for each req
+        valid_k = valid[:, None] & (k_indices[None, :] < k_lens[:, None])
 
-            # Compute mask: k_idx > k_upper AND k_upper >= 0
-            # [q_len, k_len] mask
-            k_indices_req = torch.arange(k_len, dtype=torch.int32)
-            mask = (k_indices_req.unsqueeze(0) > k_upper.unsqueeze(1)) & (k_upper.unsqueeze(1) >= 0)
+        # k_upper for all requests: [num_decode_reqs, max_q]
+        # floor((context_lens + q_idx - cp_rank) / cp_size)
+        k_upper = (context_lens[:, None] + q_indices - cp_rank) // cp_size
 
-            # Direct assignment instead of scatter
-            mtp_attn_mask[req_idx, :q_len, :k_len] = mask
+        # Compute full mask tensor [num_decode_reqs, max_q, max_k]
+        # mask is True where: k_idx > k_upper AND k_upper >= 0
+        k_upper_expanded = k_upper[:, :, None]  # [num_decode_reqs, max_q, 1]
+        k_idx_expanded = k_indices[None, None, :]  # [1, 1, max_k]
+        full_mask = (k_idx_expanded > k_upper_expanded) & (k_upper_expanded >= 0)
+
+        # Apply validity: only where both q and k are valid
+        valid_mask_3d = valid_q[:, :, None] & valid_k[:, None, :]  # [num_decode_reqs, max_q, max_k]
+        full_mask = full_mask & valid_mask_3d
+
+        # Directly assign full mask to output buffer without for loop
+        # mtp_attn_mask shape: [num_decode_reqs, num_mtp_tokens, 16384]
+        # full_mask shape: [num_decode_reqs, max_q, max_k]
+        # Direct slice assignment is vectorized and avoids any scatter
+        mtp_attn_mask[:self.num_decode_reqs, :max_q, :max_k] = full_mask
 
         return mtp_attn_mask
