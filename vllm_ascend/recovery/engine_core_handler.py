@@ -2,6 +2,7 @@ import threading
 from typing import Any
 
 import zmq
+from vllm.config import VllmConfig
 from vllm.logger import logger
 from vllm.utils.network_utils import make_zmq_socket
 
@@ -10,14 +11,15 @@ class RecoveryHandler:
     def __init__(
         self,
         engine_core: Any,
-        worker_count: int,
-        engine_index: int = 0,
-        expect_coordinator: bool = False,
+        vllm_config: VllmConfig,
     ):
         self._engine_core = engine_core
-        self._worker_count = worker_count
-        self._engine_index = engine_index
-        self._expect_coordinator = expect_coordinator
+        self._vllm_config = vllm_config
+
+        parallel_config = vllm_config.parallel_config
+        self._worker_count = parallel_config.local_world_size
+        self._engine_index = parallel_config.data_parallel_rank
+        self._expect_coordinator = vllm_config.needs_dp_coordinator
 
         self._ctx = zmq.Context()
         self._coord_push_sock: zmq.Socket | None = None
@@ -47,17 +49,18 @@ class RecoveryHandler:
         )
 
     def wait_for_worker_subscriptions(self) -> None:
-        for i in range(self._worker_count):
-            msg = self._recover_step_pub_sock.recv()
-            if msg != b"\x01":
-                logger.error(
-                    "[RecoveryHandler] Unexpected subscription message: %s", msg
-                )
-        self._recover_step_pub_sock.send(b"HELLO")
-        logger.info(
-            "[RecoveryHandler] All %d workers subscribed to recovery step channel",
-            self._worker_count,
-        )
+        return
+        # for i in range(self._worker_count):
+        #     msg = self._recover_step_pub_sock.recv()
+        #     if msg != b"\x01":
+        #         logger.error(
+        #             "[RecoveryHandler] Unexpected subscription message: %s", msg
+        #         )
+        # self._recover_step_pub_sock.send(b"HELLO")
+        # logger.info(
+        #     "[RecoveryHandler] All %d workers subscribed to recovery step channel",
+        #     self._worker_count,
+        # )
 
     def connect_coordinator(self, coord_sub_addr: str, coord_push_addr: str) -> None:
         self._coord_sub_sock = make_zmq_socket(
