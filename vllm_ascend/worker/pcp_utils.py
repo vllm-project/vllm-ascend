@@ -1333,54 +1333,34 @@ class PCPManager:
         k_lens = torch.div(max_indices - cp_rank, cp_size, rounding_mode="floor") + 1
         k_lens = torch.where(valid, k_lens, torch.zeros_like(k_lens))
 
-        # obtain the max length of all prefill reqs (same as reference)
-        max_q = int(q_lens[valid].max().item())
-        max_k = int(k_lens[valid].max().item())
-
-        # generate local q and k indices
-        q_indices = torch.arange(max_q, dtype=torch.int32)
-        k_indices = torch.arange(max_k, dtype=torch.int32)
-
-        # valid q and k indices of each reqs
-        valid_q = valid[:, None] & (q_indices[None, :] < q_lens[:, None])
-        valid_k = valid[:, None] & (k_indices[None, :] < k_lens[:, None])
-
-        # k_upper = floor((context_lens + q_indices - cp_rank) / cp_size)
-        k_upper = torch.div(context_lens[:, None] + q_indices - cp_rank, cp_size, rounding_mode="floor")
-        k_upper = torch.where(
-            valid_q,
-            torch.clamp(k_upper, min=-1),
-            k_upper.new_full(k_upper.shape, -1)
-        )
-
-        # mask: k_idx > k_upper means k_idx is NOT in the masked region
-        # (i.e., k_idx can be attended to)
-        mask = (k_indices[None, None, :] > k_upper[:, :, None]) & (k_upper[:, :, None] >= 0)
-        valid_positions = valid_q[:, :, None] & valid_k[:, None, :]
-
-        # Get flattened valid mask (same as reference)
-        custom_mask = torch.masked_select(mask, valid_positions)
-
         # Pre-allocate output buffer
         mtp_attn_mask = self.dcp_mtp_attn_mask.cpu[:self.num_decode_reqs]
         mtp_attn_mask.zero_()
 
-        # Create output indices for each position
-        req_indices = torch.arange(self.num_decode_reqs, dtype=torch.long)[:, None, None].expand(self.num_decode_reqs, max_q, max_k)
-        q_indices_expanded = q_indices[None, :, None].expand(self.num_decode_reqs, max_q, max_k)
-        k_indices_expanded = k_indices[None, None, :].expand(self.num_decode_reqs, max_q, max_k)
+        # Directly compute and write mask for each valid request
+        # Avoids scatter (expand + nonzero + index_put) which is slow
+        num_valid = valid.sum().item()
+        if num_valid == 0:
+            return mtp_attn_mask
 
-        # Get indices for valid positions only
-        valid_req_grid = req_indices[valid_positions]
-        valid_q_grid = q_indices_expanded[valid_positions]
-        valid_k_grid = k_indices_expanded[valid_positions]
+        for req_idx in range(self.num_decode_reqs):
+            if not valid[req_idx]:
+                continue
 
-        # Compute flat target indices for output buffer
-        query_len = 1 + self.speculative_config.num_speculative_tokens
-        flat_target = valid_req_grid * query_len * 16384 + valid_q_grid * 16384 + valid_k_grid
+            ctx_len = context_lens[req_idx].item()
+            q_len = q_lens[req_idx].item()
+            k_len = k_lens[req_idx].item()
 
-        # Scatter to output buffer
-        mtp_attn_mask_flat = mtp_attn_mask.view(-1)
-        mtp_attn_mask_flat[flat_target] = custom_mask
+            # Compute k_upper for this request: floor((ctx_len + q_idx - cp_rank) / cp_size)
+            q_indices_req = torch.arange(q_len, dtype=torch.int32)
+            k_upper = (ctx_len + q_indices_req - cp_rank) // cp_size
+
+            # Compute mask: k_idx > k_upper AND k_upper >= 0
+            # [q_len, k_len] mask
+            k_indices_req = torch.arange(k_len, dtype=torch.int32)
+            mask = (k_indices_req.unsqueeze(0) > k_upper.unsqueeze(1)) & (k_upper.unsqueeze(1) >= 0)
+
+            # Direct assignment instead of scatter
+            mtp_attn_mask[req_idx, :q_len, :k_len] = mask
 
         return mtp_attn_mask
