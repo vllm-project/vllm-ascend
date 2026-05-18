@@ -144,8 +144,9 @@ jobs:
           if find vllm_ascend -maxdepth 1 -name '*.so' -type f 2>/dev/null | grep -q .; then
             COMPILE_CUSTOM_KERNELS=0 uv pip install -e .
           else
-            pip install -e .
+            uv pip install -e .
           fi
+          pip install --no-deps triton-ascend==3.2.1
 
       - name: Run vllm-project/vllm-ascend test
         env:
@@ -277,6 +278,7 @@ jobs:
           else
             uv pip install -e .
           fi
+          pip install --no-deps triton-ascend==3.2.1
 
       - name: Run e2e test
         if: ${{ inputs.type == 'full' }}
@@ -544,6 +546,7 @@ jobs:
           else
             uv pip install -e .
           fi
+          pip install --no-deps triton-ascend==3.2.1
       - name: Run vllm-project/vllm-ascend test (full)
         if: ${{ inputs.type == 'full' }}
         env:
@@ -701,6 +704,7 @@ jobs:
           else
             uv pip install -e .
           fi
+          pip install --no-deps triton-ascend==3.2.1
 
       - name: Run vllm-project/vllm-ascend test for V1 Engine
         if: ${{ inputs.type == 'full' }}
