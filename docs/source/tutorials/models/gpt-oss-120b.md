@@ -77,9 +77,9 @@ In addition, if you don't want to use the docker image as above, you can also bu
 
 ### Troubleshooting
 Run into
-``` 
-openai_harmony.HarmonyError: error downloading or loading vocab file: failed to download or load vocab error
-```
+
+"openai_harmony.HarmonyError: error downloading or loading vocab file: failed to download or load vocab error"
+
 Solution: This is caused by a bug in openai_harmony code. This can be worked around by downloading the tiktoken encoding files in advance and setting the TIKTOKEN_ENCODINGS_BASE environment variable. See this [GitHub](https://github.com/openai/harmony/pull/41) issue for more information.
 
 ```
@@ -91,7 +91,7 @@ export TIKTOKEN_ENCODINGS_BASE=${PWD}/tiktoken_encodings
 
 ### Single-node Deployment
 
-`gpt-oss-120b` can both be deployed on 1 Atlas 800 A3(64G × 16), 1 Atlas 800 A2(64G × 8). 
+`gpt-oss-120b` can both be deployed on 1 Atlas 800 A3(64G × 16), 1 Atlas 800 A2(64G × 8).
 
 Run the following script to execute online inference.
 
