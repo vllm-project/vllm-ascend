@@ -338,6 +338,10 @@ __aicore__ inline void CausalConv1dV310<T>::WriteBackState(int32_t cacheIdx, int
     if (len <= 0) {
         return;
     }
+    const int32_t expectedDimTileSize = (c0 + dimTileSize <= dim) ? dimTileSize : (dim - c0);
+    if (c0 < 0 || c0 >= dim || dimTileSize <= 0 || dimTileSize > expectedDimTileSize) {
+        return;
+    }
 
     const int32_t lastT = len - 1;
     LocalTensor<T> ring = inBuf.Get<T>();
