@@ -1307,13 +1307,11 @@ class PCPManager:
             self.dcp_world_size,
             self.vllm_config.parallel_config.cp_kv_cache_interleave_size,
         )
-        # Shape: [num_decode_reqs, pcp_world_size, dcp_world_size]
-        local_history_lens = local_seq_lens[:, self.pcp_world_rank, self.dcp_world_rank].int()
 
         # q_lens = mtp_token_len (num_scheduled_tokens)
-        q_lens = torch.tensor(decode_num_scheduled_tokens[:self.num_decode_reqs], dtype=torch.int32)
+        q_lens = self._list_to_tensor(decode_num_scheduled_tokens[:self.num_decode_reqs], self.device)
         # global_histories = decode_num_computed_tokens (global history lengths)
-        global_histories = torch.tensor(decode_num_computed_tokens, dtype=torch.int32)
+        global_histories = self._list_to_tensor(decode_num_computed_tokens, self.device)
         # total_lens = global_history + mtp_token_len (global sequence length)
         total_lens = global_histories + q_lens
         # context_lens = total_lens - q_lens (consistent with reference)
