@@ -113,7 +113,7 @@ jobs:
       - name: Install vllm-project/vllm from source
         working-directory: ./vllm-empty
         run: |
-          VLLM_TARGET_DEVICE=empty pip install -e .
+          VLLM_TARGET_DEVICE=empty uv pip install -e .
           pip uninstall -y triton
 
       - name: Get csrc hash
@@ -140,9 +140,9 @@ jobs:
           PIP_EXTRA_INDEX_URL: "https://mirrors.huaweicloud.com/ascend/repos/pypi https://triton-ascend.osinfra.cn/pypi/simple https://download.pytorch.org/whl/cpu/"
         run: |
           pip install uc-manager
-          uv pip install -r requirements-dev.txt
+          pip install -r requirements-dev.txt
           if find vllm_ascend -maxdepth 1 -name '*.so' -type f 2>/dev/null | grep -q .; then
-            COMPILE_CUSTOM_KERNELS=0 pip install -e .
+            uv COMPILE_CUSTOM_KERNELS=0 pip install -e .
           else
             pip install -e .
           fi
