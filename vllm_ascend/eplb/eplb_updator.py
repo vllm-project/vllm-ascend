@@ -106,7 +106,6 @@ class EplbUpdator:
             (expert_send_info, expert_recv_info, updated_expert_map, log2phy_map, layer_id) = self.update_info_all.pop(
                 0
             )
-            global_layer_id = self.adaptor.moe_layers[layer_id][0]
             log2phy_map_this_rank = torch.from_numpy(numpy.array(log2phy_map))
             self.eplb_loader.set_log2phy_map(log2phy_map_this_rank)
             updated_expert_map_this_rank = torch.from_numpy(numpy.array(updated_expert_map))
@@ -114,7 +113,7 @@ class EplbUpdator:
                 expert_send_info,
                 expert_recv_info,
                 updated_expert_map_this_rank,
-                global_layer_id,
+                layer_id,
             )
 
             # set asynchronous stream for d2d expert weight update
