@@ -3016,9 +3016,14 @@ class NPUModelRunner(GPUModelRunner):
         with DeviceMemoryProfiler() as m:  # noqa: SIM117
             if self.eplb_enable:
                 self.vllm_config.parallel_config.enable_eplb = True
+            t0 = time.perf_counter()
             self.model: nn.Module = get_model(vllm_config=self.vllm_config)
+            t1 = time.perf_counter()
+            logger.info("get_model took %.2f seconds (including weight loading)", t1 - t0)
             if hasattr(self, 'offload_manager'):
                 self._register_offload_layers()
+                t2 = time.perf_counter()
+                logger.info("_register_offload_layers took %.2f seconds", t2 - t1)
             if self.dynamic_eplb:
                 model_register(self.model)
             if self.drafter:
@@ -3066,6 +3071,7 @@ class NPUModelRunner(GPUModelRunner):
         first = moe_layers[0]
         w13_up_dim = (first.w13_weight.shape[2] if hasattr(first, 'w13_weight')
                       else first.intermediate_size_per_partition * 2)
+        t_a = time.perf_counter()
         self.offload_manager.create_weights(
             num_moe_layers=len(moe_layers),
             num_total_experts=first.global_num_experts,
@@ -3074,9 +3080,15 @@ class NPUModelRunner(GPUModelRunner):
             intermediate_size_per_partition=first.intermediate_size_per_partition,
             params_dtype=first.params_dtype,
         )
-        for layer in moe_layers:
+        t_b = time.perf_counter()
+        for i, layer in enumerate(moe_layers):
             self.offload_manager.register_moe_layer(layer)
+            self.offload_manager.maybe_create_scale_buffers(layer, i)
+        t_c = time.perf_counter()
         self.offload_manager.init_device_experts()
+        t_d = time.perf_counter()
+        logger.info("offload steps: create_weights=%.1fs  scale_buffers=%.1fs  init_device=%.1fs",
+                     t_b - t_a, t_c - t_b, t_d - t_c)
 
     def initialize_kv_cache(self, kv_cache_config: KVCacheConfig) -> None:
         """

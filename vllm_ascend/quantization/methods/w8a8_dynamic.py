@@ -247,6 +247,13 @@ class AscendW8A8DynamicFusedMoEMethod(AscendMoEScheme):
         assert topk_weights is not None
         topk_weights = topk_weights.to(self.in_dtype)
 
+        # Expert offload: incrementally page in needed experts, update log2phy
+        if getattr(layer, 'enable_expert_offload', False):
+            from vllm_ascend.expert_offload import ExpertOffloadManager
+            ExpertOffloadManager.get_instance().update_weights(
+                layer, topk_ids, layer.log2phy)
+            log2phy = layer.log2phy = layer.log2phy.to(topk_ids.device)
+
         moe_comm_method = _EXTRA_CTX.moe_comm_method
         fused_scale_flag = (
             _EXTRA_CTX.moe_comm_type == MoECommType.FUSED_MC2 and envs_ascend.VLLM_ASCEND_ENABLE_FUSED_MC2 == 1

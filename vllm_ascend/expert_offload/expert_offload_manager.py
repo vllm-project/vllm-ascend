@@ -61,6 +61,16 @@ class ExpertOffloadManager:
             "min_hotness_threshold": self.offload_config.prefetch_min_threshold,
         }
 
+        # CPU buffers for quantized model scale/offset parameters.
+        # Keyed by attr_name (e.g. "w13_weight_scale", "w2_weight_offset").
+        # Each value is a list of layers, each layer is a list of expert tensors.
+        self.scale_cpu_buffers: dict[str, list[list[torch.Tensor]]] = {}
+        self.offset_cpu_buffers: dict[str, list[list[torch.Tensor]]] = {}
+
+        # Temporary storage for scale/offset weights loaded before
+        # maybe_create_scale_buffers runs.
+        self._pending_scales: dict[tuple, dict[str, torch.Tensor]] = {}
+
         ExpertOffloadManager._instance = self
 
     # ------------------------------------------------------------------ #
@@ -120,17 +130,133 @@ class ExpertOffloadManager:
             return
         self.w2_weights_cpu[layer_moe_idx][expert_id].copy_(loaded_weight.cpu().t())
 
+    # ------------------------------------------------------------------ #
+    #  Scale / offset helpers (quantized models only)                     #
+    # ------------------------------------------------------------------ #
+
+    def _add_pending_scale(self, layer_moe_idx: int, expert_id: int,
+                           attr_name: str, shard_id: str,
+                           loaded_weight: torch.Tensor):
+        """Store a scale/offset weight that arrived before CPU buffers exist."""
+        key = (layer_moe_idx, expert_id)
+        sub_key = f"{attr_name}_{shard_id}"
+        self._pending_scales.setdefault(key, {})[sub_key] = \
+            loaded_weight.cpu().clone()
+
+    def maybe_create_scale_buffers(self, layer, layer_moe_idx: int):
+        """Inspect layer for scale/offset params and allocate CPU buffers.
+
+        Called from _register_offload_layers AFTER process_weights_after_loading
+        has transformed device tensor shapes, so we detect the final per-expert
+        shape from the device tensor.
+        """
+        attr_names = [
+            ("scale_cpu_buffers", "w13_weight_scale"),
+            ("scale_cpu_buffers", "w2_weight_scale"),
+            ("offset_cpu_buffers", "w13_weight_offset"),
+            ("offset_cpu_buffers", "w2_weight_offset"),
+        ]
+        created_any = False
+        global_num_experts = len(self.w13_weights_cpu[layer_moe_idx])
+
+        for buffer_dict_name, attr_name in attr_names:
+            if not hasattr(layer, attr_name):
+                continue
+            dev_tensor = getattr(layer, attr_name)
+            per_expert_shape = dev_tensor.shape[1:]
+            dtype = dev_tensor.dtype
+            buffer_dict: dict = getattr(self, buffer_dict_name)
+            if attr_name not in buffer_dict:
+                buffer_dict[attr_name] = []
+            buffers = buffer_dict[attr_name]
+            while len(buffers) <= layer_moe_idx:
+                buffers.append([])
+            for _ in range(global_num_experts):
+                buffers[layer_moe_idx].append(
+                    torch.empty(per_expert_shape, dtype=dtype, device="cpu"))
+            created_any = True
+
+        if created_any:
+            self._drain_pending_scales()
+
+    def _drain_pending_scales(self):
+        """Drain _pending_scales into CPU buffers, assembling w1/w3 shards.
+
+        Only removes entries that were successfully copied to CPU buffers.
+        Entries for layers whose buffers haven't been created yet are left
+        in _pending_scales for the next call.
+        """
+        if not self._pending_scales:
+            return
+        processed_keys: list[tuple] = []
+        for (layer_idx, eid), items in self._pending_scales.items():
+            if layer_idx >= len(self.w13_weights_cpu):
+                continue
+            if eid >= len(self.w13_weights_cpu[layer_idx]):
+                continue
+            # Group shards by attr_name
+            attr_shards: dict[str, dict[str, torch.Tensor]] = {}
+            for sub_key, w in items.items():
+                # sub_key format: "{attr_name}_{shard_id}"
+                # attr_name may contain underscores (e.g. "w13_weight_scale")
+                # shard_id is always "w1", "w2", or "w3" (no underscores)
+                parts = sub_key.rsplit("_", 1)
+                if len(parts) == 2 and parts[1] in ("w1", "w2", "w3"):
+                    attr_name, shard = parts[0], parts[1]
+                else:
+                    attr_name, shard = parts[0], parts[1] if len(parts) > 1 else ""
+                attr_shards.setdefault(attr_name, {})[shard] = w
+
+            copied_any = False
+            for attr_name, shards in attr_shards.items():
+                target_dict = None
+                if "scale" in attr_name:
+                    target_dict = self.scale_cpu_buffers
+                elif "offset" in attr_name:
+                    target_dict = self.offset_cpu_buffers
+                if target_dict is None or attr_name not in target_dict:
+                    continue
+                buffers = target_dict[attr_name]
+                if layer_idx >= len(buffers) or eid >= len(buffers[layer_idx]):
+                    continue
+                target = buffers[layer_idx][eid]
+
+                if attr_name.startswith("w13_"):
+                    # w13 scale/offset: assemble w1 + w3 shards along dim 0
+                    if "w1" in shards and "w3" in shards:
+                        assembled = torch.cat(
+                            [shards["w1"].cpu(), shards["w3"].cpu()], dim=0)
+                        # squeeze trailing dim-1 if present (W8A8_DYNAMIC)
+                        assembled = assembled.reshape(target.shape)
+                        target.copy_(assembled)
+                        copied_any = True
+                elif attr_name.startswith("w2_"):
+                    # w2 scale/offset: single shard
+                    if "w2" in shards:
+                        w_cpu = shards["w2"]
+                        if w_cpu.device.type != "cpu":
+                            w_cpu = w_cpu.cpu()
+                        w_cpu = w_cpu.reshape(target.shape)
+                        target.copy_(w_cpu)
+                        copied_any = True
+            if copied_any:
+                processed_keys.append((layer_idx, eid))
+        # Only remove successfully processed entries
+        for key in processed_keys:
+            del self._pending_scales[key]
+
     def init_device_experts(self):
-        """Copy the first num_device_experts experts from CPU to NPU."""
+        """Refresh derived fp32 scale after weight loading.
+
+        Device experts are already loaded by the weight loader and
+        process_weights_after_loading. Only refresh w13_weight_scale_fp32.
+        """
         for i, layer in enumerate(self.moe_layers):
-            dev = layer.w13_weight.device
-            dt = layer.w13_weight.dtype
-            for j in range(min(self.num_device_experts,
-                               layer.w13_weight.shape[0])):
-                layer.w13_weight.data[j].copy_(
-                    self.w13_weights_cpu[i][j].to(dev).to(dt))
-                layer.w2_weight.data[j].copy_(
-                    self.w2_weights_cpu[i][j].to(dev).to(dt))
+            ndev = min(self.num_device_experts, layer.w13_weight.shape[0])
+            if hasattr(layer, 'w13_weight_scale_fp32'):
+                for j in range(ndev):
+                    layer.w13_weight_scale_fp32[j].copy_(
+                        layer.w13_weight_scale.data[j].to(torch.float32))
 
     def init_async_offload(self, num_layers: int, window_size: int = 200):
         """Initialize async offload components (prefetch thread, hotness tracker).
@@ -203,6 +329,23 @@ class ExpertOffloadManager:
         reusable_slots = [s for s, e in slot_owner.items()
                           if e not in needed]          # slots to recycle
 
+        # Debug: print routing info for first 30 calls
+        if not hasattr(self, '_dbg_call'):
+            self._dbg_call = 0
+        if self._dbg_call < 10000:
+            import logging
+            _dbg = logging.getLogger(__name__)
+            _dbg.warning("[UPDATE-W] l=%d call=%d topk_shape=%s |needed|=%d |on_dev|=%d |to_load|=%d reusable=%d needed=%s",
+                         layer_idx, self._dbg_call, tuple(topk_ids.shape),
+                         len(needed), len(on_device),
+                         len(need_to_load), len(reusable_slots),
+                         sorted(needed)[:30])
+            if need_to_load and len(need_to_load) > len(reusable_slots):
+                _dbg.warning("[UPDATE-W] l=%d SHORTFALL: need %d load but only %d slots, to_load=%s",
+                             layer_idx, len(need_to_load), len(reusable_slots),
+                             sorted(need_to_load)[:20])
+            self._dbg_call += 1
+
         if not need_to_load:
             return 0
 
@@ -212,13 +355,37 @@ class ExpertOffloadManager:
 
         for eid in need_to_load:
             if not reusable_slots:
+                import logging
+                logging.getLogger(__name__).warning(
+                    "[UPDATE-W] l=%d NO SLOTS: %d experts could not be loaded, missed=%s",
+                    layer_idx, len(need_to_load) - n_copies,
+                    sorted(list(need_to_load))[n_copies:][:20])
                 break  # no free slots — should not happen in normal usage
             slot = reusable_slots.pop()
-            # Copy from CPU to NPU
+            # Copy weights from CPU to NPU
             layer.w13_weight.data[slot].copy_(
                 self.w13_weights_cpu[layer_idx][eid].to(dev).to(dt))
             layer.w2_weight.data[slot].copy_(
                 self.w2_weights_cpu[layer_idx][eid].to(dev).to(dt))
+            # Copy scales/offsets from CPU to NPU
+            for attr_name, buffers in self.scale_cpu_buffers.items():
+                if layer_idx >= len(buffers) or eid >= len(buffers[layer_idx]):
+                    continue
+                dev_tensor = getattr(layer, attr_name, None)
+                if dev_tensor is None:
+                    continue
+                dev_tensor.data[slot].copy_(buffers[layer_idx][eid].to(dev))
+            for attr_name, buffers in self.offset_cpu_buffers.items():
+                if layer_idx >= len(buffers) or eid >= len(buffers[layer_idx]):
+                    continue
+                dev_tensor = getattr(layer, attr_name, None)
+                if dev_tensor is None:
+                    continue
+                dev_tensor.data[slot].copy_(buffers[layer_idx][eid].to(dev))
+            # Refresh derived fp32 scale if present (W8A8_DYNAMIC)
+            if hasattr(layer, 'w13_weight_scale_fp32'):
+                layer.w13_weight_scale_fp32[slot].copy_(
+                    layer.w13_weight_scale.data[slot].to(torch.float32))
             # Update mapping
             log2phy[slot_owner[slot]] = -1   # evict old occupant
             log2phy[eid] = slot               # assign slot to new expert

@@ -145,7 +145,8 @@ class MoECommMethod(ABC):
         # Expert offload: trim group_list to match shrunk weight dimension.
         # log2phy already remapped topk_ids to [0, ndev), so entries
         # beyond ndev in the group_list are all zero — safe to drop.
-        num_weight_experts = fused_experts_input.weights.w1.shape[0]
+        w1_ref = fused_experts_input.weights.w1
+        num_weight_experts = w1_ref[0].shape[0] if isinstance(w1_ref, list) else w1_ref.shape[0]
         if (group_list_size := mlp_compute_input.group_list.size(0)) != num_weight_experts:
             object.__setattr__(mlp_compute_input, 'group_list',
                                mlp_compute_input.group_list[:num_weight_experts])
