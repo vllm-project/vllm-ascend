@@ -52,44 +52,7 @@ These labels describe the nature of the issue.
 
 ## 2. Workflow
 
-```mermaid
-flowchart LR
-    A([Issue Filed]) --> B
-
-    subgraph P1["Phase 1 — First Response"]
-        direction LR
-        B[On-Call Maintainer]
-        B -- Can be classified --> B1[Add label: triaged & module label]
-        B -- Can not be classified --> B2[Add label: triage review]
-    end
-
-    B1 --> C
-    B2 -- Assessment pass --> C
-    B2 -- Assessment failed --> E([Close])
-
-    subgraph P2["Phase 2 — Triage & Analysis"]
-        direction LR
-        C[Module Maintainer]
-        C -- Valid --> C2[Verify issue type label]
-        C -- Duplicate --> C3[Add: duplicated → Close]
-        C -- Invalid --> C4[Explain + add: resolved]
-        C4 --> C4a[Wait for issue creator response]
-        C4a --> C4b[No further questions → Close]
-        C2 --> C5[opt: Add priority label/help wanted/good first issue]
-        C5 --> C6[Assign issue owner]
-    end
-
-    C6 --> D
-
-    subgraph P3["Phase 3 — Closure"]
-        direction LR
-        D[Track & Implement] -- Resolved --> D2[Apply: resolved → Close]
-    end
-
-    style P1 fill:#dbeafe,stroke:#3b82f6
-    style P2 fill:#dcfce7,stroke:#22c55e
-    style P3 fill:#fef9c3,stroke:#eab308
-```
+![issue_label_workflow](./images/issue_label_workflow.png)
 
 ### Phase 1 — First Response
 
