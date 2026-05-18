@@ -32,7 +32,11 @@ from vllm_ascend.ops.triton.fla.fused_qkvzba_split_reshape import fused_qkvzba_s
 from vllm_ascend.ops.triton.fla.utils import clear_ssm_states
 from vllm_ascend.ops.triton.fused_gdn_gating import fused_gdn_gating_patch
 from vllm_ascend.ops.triton.mamba.causal_conv1d import causal_conv1d_update_npu
-from vllm_ascend.utils import vllm_version_is
+from vllm_ascend.utils import (
+    vllm_version_is
+    AscendDeviceType,
+    get_ascend_device_type,
+)
 
 
 def to_int64_tuple(tensor: torch.Tensor) -> tuple[int, ...]:

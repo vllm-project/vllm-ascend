@@ -2,9 +2,40 @@
 
 ROOT_DIR=$1
 SOC_VERSION=$2
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+if [[ -z "${ROOT_DIR}" ]]; then
+    ROOT_DIR="$(cd "${SCRIPT_DIR}/.." && pwd)"
+else
+    ROOT_DIR="$(cd "${ROOT_DIR}" && pwd)"
+fi
 
 log() {
     echo "[build_aclnn] $*"
+}
+
+prepare_catlass_dependency() {
+    # chunk_fwd_h/o kernels include catlass headers directly, so make the
+    # submodule available before invoking the CANN op build.
+    git config --global --add safe.directory "$ROOT_DIR"
+
+    CATLASS_PATH=${ROOT_DIR}/csrc/third_party/catlass/include
+    CATLASS_COMMIT=$(git config -f "${ROOT_DIR}/.gitmodules" --get submodule.csrc/third_party/catlass.commit)
+    if [[ ! -d "${CATLASS_PATH}" ]]; then
+        echo "dependency catlass is missing, try to fetch it..."
+        git -C "${ROOT_DIR}" submodule sync
+        if ! git -C "${ROOT_DIR}" submodule update --init --recursive; then
+            echo "fetch failed"
+            exit 1
+        fi
+        cd "${ROOT_DIR}/csrc/third_party/catlass" || exit 1
+        git fetch origin
+        git checkout "${CATLASS_COMMIT}" || exit 1
+        cd - || exit 1
+    fi
+
+    ABSOLUTE_CATLASS_PATH=$(cd "${CATLASS_PATH}" && pwd)
+    export CPATH=${ABSOLUTE_CATLASS_PATH}:${CPATH}
+    log "catlass include=${ABSOLUTE_CATLASS_PATH}"
 }
 
 resolve_op_dir() {
@@ -63,24 +94,7 @@ elif [[ "$SOC_VERSION" =~ ^ascend910b ]]; then
     log "matched SOC branch: ascend910b"
     # ASCEND910B (A2) series
     # dependency: catlass
-    git config --global --add safe.directory "$ROOT_DIR"
-    CATLASS_PATH=${ROOT_DIR}/csrc/third_party/catlass/include
-    CATLASS_COMMIT=$(git config -f "${ROOT_DIR}/.gitmodules" --get submodule.csrc/third_party/catlass.commit)
-    if [[ ! -d "${CATLASS_PATH}" ]]; then
-        echo "dependency catlass is missing, try to fetch it..."
-        git submodule sync
-        if ! git submodule update --init --recursive; then
-            echo "fetch failed"
-            exit 1
-        fi
-        cd "${ROOT_DIR}/csrc/third_party/catlass" || exit 1
-        git fetch origin
-        git checkout "${CATLASS_COMMIT}" || exit 1
-        cd - || exit 1
-    fi
-    ABSOLUTE_CATLASS_PATH=$(cd "${CATLASS_PATH}" && pwd)
-    export CPATH=${ABSOLUTE_CATLASS_PATH}:${CPATH}
-    log "catlass include=${ABSOLUTE_CATLASS_PATH}"
+    prepare_catlass_dependency
 
     CUSTOM_OPS_ARRAY=(
         "moe_grouped_matmul"
@@ -110,21 +124,7 @@ elif [[ "$SOC_VERSION" =~ ^ascend910_93 ]]; then
     log "matched SOC branch: ascend910_93"
     # ASCEND910C (A3) series
     # dependency: catlass
-    git config --global --add safe.directory "$ROOT_DIR"
-    CATLASS_PATH=${ROOT_DIR}/csrc/third_party/catlass/include
-    CATLASS_COMMIT=$(git config -f "${ROOT_DIR}/.gitmodules" --get submodule.csrc/third_party/catlass.commit)
-    if [[ ! -d "${CATLASS_PATH}" ]]; then
-        echo "dependency catlass is missing, try to fetch it..."
-        git submodule sync
-        if ! git submodule update --init --recursive; then
-            echo "fetch failed"
-            exit 1
-        fi
-        cd "${ROOT_DIR}/csrc/third_party/catlass" || exit 1
-        git fetch origin
-        git checkout "${CATLASS_COMMIT}" || exit 1
-        cd - || exit 1
-    fi
+    prepare_catlass_dependency
     # dependency: cann-toolkit file moe_distribute_base.h
     HCCL_STRUCT_FILE_PATH=$(find -L "${ASCEND_TOOLKIT_HOME}" -name "moe_distribute_base.h" 2>/dev/null | head -n1)
     if [ -z "$HCCL_STRUCT_FILE_PATH" ]; then
@@ -174,6 +174,9 @@ elif [[ "$SOC_VERSION" =~ ^ascend910_93 ]]; then
     SOC_ARG="ascend910_93"
 elif [[ "$SOC_VERSION" =~ ^ascend950 ]]; then
     log "matched SOC branch: ascend950"
+    # dependency: catlass
+    prepare_catlass_dependency
+
     CUSTOM_OPS_ARRAY=(
         "add_rms_norm_bias"
         "causal_conv1d"
@@ -207,7 +210,7 @@ log_selected_ops
   set -euo pipefail
 
   log "subshell cwd before cd=$(pwd)"
-  cd csrc
+  cd "${ROOT_DIR}/csrc"
   log "subshell cwd after cd=$(pwd)"
   log "cleaning csrc build dirs"
   rm -rf -- build output build_out

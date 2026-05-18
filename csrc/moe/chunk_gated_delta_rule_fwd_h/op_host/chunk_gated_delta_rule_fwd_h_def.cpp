@@ -105,7 +105,7 @@ public:
 
         this->AICore().AddConfig("ascend910b", aicore_config);
         this->AICore().AddConfig("ascend910_93", aicore_config);
-        this->AICore().AddConfig(VLLM_ASCEND_950_SOC_CONFIG, aicoreConfig);
+        this->AICore().AddConfig("ascend950", aicore_config);
 
     }
 };
