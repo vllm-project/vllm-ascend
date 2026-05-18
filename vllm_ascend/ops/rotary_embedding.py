@@ -561,11 +561,12 @@ class AscendApplyRotaryEmb(ApplyRotaryEmb):
         is_neox_style: bool = True,
         enable_fp32_compute: bool = False,
     ) -> None:
-        super().__init__(
-            enforce_enable=enforce_enable,
-            is_neox_style=is_neox_style,
-            enable_fp32_compute=enable_fp32_compute,
-        )
+        from vllm.model_executor.custom_op import CustomOp
+
+        CustomOp.__init__(self, enforce_enable=enforce_enable)
+        self.is_neox_style = is_neox_style
+        self.enable_fp32_compute = enable_fp32_compute
+        self.apply_rotary_emb_flash_attn = None
 
     def forward_oot(
         self,

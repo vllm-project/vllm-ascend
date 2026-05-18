@@ -19,6 +19,7 @@ from __future__ import annotations
 
 import math
 import os
+from importlib import import_module, util
 from typing import TYPE_CHECKING, Any
 from uuid import uuid4
 
@@ -29,6 +30,8 @@ from vllm.platforms import Platform, PlatformEnum
 
 # todo: please remove it when solve cuda hard code in vllm
 os.environ["VLLM_DISABLE_SHARED_EXPERTS_STREAM"] = "1"
+
+from vllm.v1.attention.backends.registry import AttentionBackendEnum
 
 import vllm_ascend.envs as envs_ascend
 from vllm_ascend.ascend_config import init_ascend_config
@@ -591,6 +594,9 @@ class NPUPlatform(Platform):
     def get_attn_backend_cls(cls, selected_backend, attn_selector_config, num_heads: int | None = None):
         key = (attn_selector_config.use_mla, attn_selector_config.use_sparse)
 
+        if selected_backend == AttentionBackendEnum.FLASH_ATTN and cls._validate_fa3_backend(key, attn_selector_config):
+            return "vllm_ascend.attention.fa3_v1.AscendFABackend"
+
         backend_map = {
             (True, False): "vllm_ascend.attention.mla_v1.AscendMLABackend",
             (False, False): "vllm_ascend.attention.attention_v1.AscendAttentionBackend",
@@ -610,6 +616,33 @@ class NPUPlatform(Platform):
             return backend_map_310.get(key, backend_map_310[(False, False)])
 
         return backend_map[key]
+
+    @classmethod
+    def _validate_fa3_backend(cls, key, attn_selector_config):
+        if not attn_selector_config.use_batch_invariant:
+            logger.info(
+                "FA3 will not be enabled when not in training-inference consistency scenario. "
+                "Note that Ascend NPU will use its registered plugin backend instead."
+            )
+            return False
+        if key != (False, False):
+            raise ValueError("FA3 backend does not support MLA and SFA.")
+        if util.find_spec("flash_attn_v3") is None:
+            raise ValueError(
+                "flash_attn_v3 is not installed but FA3 backend is requested. "
+                "Please install flash_attn_v3 to enable FA3."
+            )
+        mod = import_module("flash_attn_v3")
+        if not hasattr(mod, "flash_attn_with_kvcache"):
+            raise ValueError(
+                "flash_attn_v3 is installed but does not provide "
+                "flash_attn_with_kvcache. Please check flash_attn_v3 "
+                "whether it supports flash_attn_with_kvcache."
+            )
+        logger.info(
+            "In training-inference consistency scenario, FA3 will be enabled, which may cause performance degradation."
+        )
+        return True
 
     @classmethod
     def get_punica_wrapper(cls) -> str:
@@ -900,8 +933,13 @@ class NPUPlatform(Platform):
                 )
                 att_config.flash_attn_version = None
 
-            # Notify user that the backend will be managed by Ascend plugins
-            if getattr(att_config, "backend", None) is not None:
+            # Notify user that the backend will be managed by Ascend plugins,
+            # and for training-inference consistency, when att_config.backend
+            # == AttentionBackendEnum.FLASH_ATTN,it is NOT reset to None
+            if (
+                getattr(att_config, "backend", None) is not None
+                and att_config.backend != AttentionBackendEnum.FLASH_ATTN
+            ):
                 logger.info(
                     "User specified attention backend '%s'. Note that Ascend NPU "
                     "will use its registered plugin backend instead. Resetting to None.",
