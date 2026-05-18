@@ -1,11 +1,15 @@
 from abc import ABC, abstractmethod
+from typing import Any
 
 from vllm.config import ParallelConfig
 
 
 class Backend(ABC):
     @abstractmethod
-    def __init__(self, parallel_config: ParallelConfig):
+    def __init__(self, parallel_config: ParallelConfig, **kwargs: Any):
+        """Backends accept the parallel config plus a ``**kwargs`` bag for
+        connector-level overrides (e.g. ``kv_connector_extra_config``).
+        Backends that don't care can simply ignore the extras."""
         pass
 
     @abstractmethod
