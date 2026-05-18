@@ -243,7 +243,7 @@ timing data to improve estimates.",
     parser.add_argument(
         "--timing-report-json",
         type=Path,
-        default=Path("test_timing_data.json"),
+        default=Path("/tmp/test_timing_data.json"),
         help="Path to write the JSON timing data for CI aggregation",
     )
     args = parser.parse_args()
