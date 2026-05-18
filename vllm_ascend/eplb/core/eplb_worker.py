@@ -14,7 +14,6 @@
 # limitations under the License.
 # This file is a part of the vllm-ascend project.
 #
-import os
 from multiprocessing import Process, Queue
 from typing import Any
 

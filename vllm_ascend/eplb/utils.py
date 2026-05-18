@@ -15,7 +15,6 @@
 # This file is a part of the vllm-ascend project.
 #
 # Todo: Once https://github.com/vllm-project/vllm/pull/23553 is merged in vllm. Remove this model register.
-import re
 import types
 from typing import Optional
 
