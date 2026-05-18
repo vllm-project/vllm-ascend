@@ -51,6 +51,7 @@ class KVPoolScheduler:
         self._discard_partial_chunks = True
         self._unfinished_requests: dict[str, tuple[Request, list[int]]] = {}
         self._unfinished_request_ids: set[str] = set()
+        self._loading_req_ids: set[str] = set()
         self._delayed_free_req_ids: set[str] = set()
 
         self.page_size_bytes = page_size_bytes
@@ -324,6 +325,8 @@ class KVPoolScheduler:
         )
 
         self.load_specs[request.request_id].can_load = True
+        if self.load_async and not self.use_layerwise:
+            self._loading_req_ids.add(request.request_id)
 
     def build_connector_meta(self, scheduler_output: SchedulerOutput) -> KVConnectorMetadata:
         """Attach the connector metadata to the request object.
@@ -342,16 +345,19 @@ class KVPoolScheduler:
             self._unfinished_requests.pop(finished_req_id, None)
             self._unfinished_request_ids.discard(finished_req_id)
             self._preempted_req_ids.discard(finished_req_id)
+            self._loading_req_ids.discard(finished_req_id)
 
         for req_id in scheduler_output.preempted_req_ids:
             self._preempted_req_ids.update(scheduler_output.preempted_req_ids)
             self._request_trackers.pop(req_id, None)
             self._unfinished_requests.pop(req_id, None)
+            self._loading_req_ids.discard(req_id)
             self._delayed_free_req_ids.discard(req_id)
 
         meta = AscendConnectorMetadata(
             self._unfinished_request_ids,
             scheduler_output.preempted_req_ids,
+            self._loading_req_ids.copy(),
             self._delayed_free_req_ids.copy(),
         )
 
@@ -635,6 +641,10 @@ class KVPoolScheduler:
     def update_finished_sending(self, finished_sending: set[str] | None) -> None:
         if finished_sending:
             self._delayed_free_req_ids.difference_update(finished_sending)
+
+    def update_finished_recving(self, finished_recving: set[str] | None) -> None:
+        if finished_recving:
+            self._loading_req_ids.difference_update(finished_recving)
 
 
 def get_zmq_rpc_path_lookup(vllm_config: "VllmConfig") -> str:

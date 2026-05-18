@@ -481,11 +481,13 @@ class AscendConnectorMetadata(KVConnectorMetadata):
         self,
         unfinished_request_ids,
         preempted_req_ids,
+        loading_req_ids: set[str] | None = None,
         delayed_free_req_ids: set[str] | None = None,
     ):
         self.requests = []
         self.unfinished_request_ids = unfinished_request_ids
         self.preempted_req_ids = preempted_req_ids
+        self.loading_req_ids = loading_req_ids or set()
         self.delayed_free_req_ids = delayed_free_req_ids or set()
 
     def add_request(self, req_meta: ReqMeta) -> None:

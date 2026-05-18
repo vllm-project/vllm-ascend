@@ -134,6 +134,8 @@ class AscendStoreConnector(KVConnectorBase_V1):
             connector_output (KVConnectorOutput): the worker-side connectors output.
         """
         assert self.connector_scheduler is not None
+        self.connector_scheduler.update_finished_recving(
+            connector_output.finished_recving)
         self.connector_scheduler.update_finished_sending(
             connector_output.finished_sending)
 
