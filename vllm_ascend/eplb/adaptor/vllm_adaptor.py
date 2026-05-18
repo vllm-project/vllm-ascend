@@ -51,7 +51,6 @@ class VllmEplbAdaptor:
         self.num_dense_layers = getattr(self.config, "first_k_dense_replace", 0)
 
         self.moe_layers = self.model._moe_layers
-        self._moe_layer_map = self.model._moe_layer_map
         self.num_moe_layers = len(self.moe_layers)
 
         self.expert_map_per_layer_cpu = dict()  # copy of expert map on CPU to avoid device synchronize frequently
@@ -76,8 +75,6 @@ class VllmEplbAdaptor:
             self.log2phy_map_per_layer[global_idx] = self.model.get_log2phy_map(global_idx)
 
     def init_buffer_tensor(self, num_buffer_tensor):
-        if self.num_moe_layers == 0:
-            return
         first_global_idx = self.moe_layers[0][0]
         for buffer_id in range(num_buffer_tensor):
             for name in self.expert_weight_names:
@@ -88,8 +85,6 @@ class VllmEplbAdaptor:
 
     def init_expert_param_per_layer(self):
         self.param_dict = dict()
-        if self.num_moe_layers == 0:
-            return
 
         _, first_layer = self.moe_layers[0]
 
@@ -111,17 +106,16 @@ class VllmEplbAdaptor:
             self.expert_weight_names = ["w13_weight", "w2_weight"]
 
         for global_idx, layer in self.moe_layers:
+            key_prefix = "model.layers." + str(global_idx) + ".mlp.experts."
             self.expert_param_per_layer[global_idx] = list()
             for name in self.expert_weight_names:
-                param_key = f"model.layers.{global_idx}.mlp.experts.{name}"
+                param_key = key_prefix + name
                 param_value = getattr(layer, name)
                 self.param_dict[param_key] = param_value
             for local_expert_id in range(self.num_local_experts):
                 per_expert_param = list()
                 for name in self.expert_weight_names:
-                    per_expert_param.append(
-                        self.param_dict["model.layers." + str(global_idx) + ".mlp.experts." + name][local_expert_id]
-                    )
+                    per_expert_param.append(self.param_dict[key_prefix + name][local_expert_id])
                 self.expert_param_per_layer[global_idx].append(per_expert_param)
 
     def get_rank_expert_workload(self) -> torch.Tensor:
@@ -153,13 +147,9 @@ class VllmEplbAdaptor:
                 json.dump(record, f, indent=4)
 
     def do_update_expert_map(self, layer_id, updated_expert_map):
-        if layer_id not in self._moe_layer_map:
-            return
         self.expert_map_per_layer_cpu[layer_id].copy_(updated_expert_map)
 
     def do_update_expert_weight(self, layer_id, local_expert_to_replace, buffer_tensor_id):
-        if layer_id not in self._moe_layer_map:
-            return
         for expert_tensor, buffer_tensor in zip(
             self.expert_param_per_layer[layer_id][local_expert_to_replace], self.buffer_tensor_list[buffer_tensor_id]
         ):
@@ -167,8 +157,6 @@ class VllmEplbAdaptor:
             logger.debug("Expert tensor shape is :%s", expert_tensor.shape)
 
     def do_update_log2phy_map(self, layer_id, updated_log2phy_map):
-        if layer_id not in self._moe_layer_map:
-            return
         if self.log2phy_map_per_layer[layer_id] is not None:
             self.log2phy_map_per_layer[layer_id].copy_(updated_log2phy_map)
 
