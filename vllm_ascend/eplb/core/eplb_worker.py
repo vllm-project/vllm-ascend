@@ -14,6 +14,7 @@
 # limitations under the License.
 # This file is a part of the vllm-ascend project.
 #
+import os
 from multiprocessing import Process, Queue
 from typing import Any
 
@@ -47,21 +48,30 @@ class EplbWorker:
         # H2D
         # Get initial expert_map
         torch.set_num_threads(1)
+        logger.info("[EPLB-DEBUG] worker pid=%s do_update: start, rank_id=%s", os.getpid(), self.rank_id)
         if self.old_expert_maps is None:
             self.old_expert_maps = self.get_init_expert_maps()
             if self.old_expert_maps is not None:
                 self.num_local_experts = self.old_expert_maps.max() + 1
             else:
                 raise ValueError("Failed to get expert_maps from shared_dict.")
+        logger.info(
+            "[EPLB-DEBUG] worker pid=%s do_update: old_expert_maps shape=%s num_local_experts=%s",
+            os.getpid(), self.old_expert_maps.shape, self.num_local_experts,
+        )
 
         # Get MOE load information
         load_info = self.fetch_and_sum_load_info()
         if load_info is None:
+            logger.info("[EPLB-DEBUG] worker pid=%s do_update: load_info is None, returning", os.getpid())
             return
+        logger.info("[EPLB-DEBUG] worker pid=%s do_update: load_info shape=%s", os.getpid(), load_info.shape)
 
         # Get the updated expert table based on the workload information
         old_placement = self.global2local(self.old_expert_maps, self.num_local_experts)
+        logger.info("[EPLB-DEBUG] worker pid=%s do_update: old_placement shape=%s", os.getpid(), old_placement.shape)
         _, _, new_placement = self.calculate_rebalance_experts(load_info, old_placement)
+        logger.info("[EPLB-DEBUG] worker pid=%s do_update: new_placement computed", os.getpid())
 
         if self.rank_id == 0:
             if self.multi_stage:
@@ -82,6 +92,7 @@ class EplbWorker:
             new_placement = torch.tensor(new_placement)
         self.check_expert_placement(old_placement, new_placement)
         new_expert_maps = self.local2global(new_placement)
+        logger.info("[EPLB-DEBUG] worker pid=%s do_update: new_expert_maps shape=%s", os.getpid(), new_expert_maps.shape)
         self.update_expert_map(new_expert_maps)
 
         update_info = self.compose_expert_update_info_greedy(new_expert_maps, self.old_expert_maps)
@@ -89,6 +100,10 @@ class EplbWorker:
         logger.debug("EPLB Process compute complete")
 
         packed_update_info = self.pack_update_info(update_info)
+        logger.info(
+            "[EPLB-DEBUG] worker pid=%s do_update: packed %s layers",
+            os.getpid(), len(packed_update_info),
+        )
 
         return packed_update_info
 
@@ -132,6 +147,10 @@ class EplbWorker:
     # TODO: Here only expert weight exchange is considered, need to be extended to cover other weight update cases
     def compose_expert_update_info_greedy(self, updated_expert_maps, current_expert_maps):
         num_layers = current_expert_maps.shape[0]
+        logger.info(
+            "[EPLB-DEBUG] worker pid=%s compose_greedy: num_layers=%s rank_id=%s",
+            os.getpid(), num_layers, self.rank_id,
+        )
         for layer_id in range(num_layers):
             updated_expert_maps_this_layer = updated_expert_maps[layer_id]
             current_expert_maps_this_layer = current_expert_maps[layer_id]
@@ -141,6 +160,10 @@ class EplbWorker:
 
             # Guard Clause: if there is no expert weight update, avoid subsequent processing
             if torch.equal(updated_expert_maps_this_layer, current_expert_maps_this_layer):
+                logger.info(
+                    "[EPLB-DEBUG] worker pid=%s compose_greedy: layer %s no change, yielding empty",
+                    os.getpid(), layer_id,
+                )
                 yield (
                     expert_send_info_this_layer,
                     expert_recv_info_this_layer,
@@ -157,6 +180,11 @@ class EplbWorker:
             # Parse expert_ids each rank needs to send to other ranks
             src_rank_indices, experts_to_send = torch.where(
                 (current_expert_maps_this_layer != -1) & (updated_expert_maps_this_layer == -1)
+            )
+
+            logger.info(
+                "[EPLB-DEBUG] worker pid=%s compose_greedy: layer %s recv_count=%s send_count=%s",
+                os.getpid(), layer_id, len(dst_rank_indices), len(src_rank_indices),
             )
 
             for idx in range(len(dst_rank_indices)):
@@ -180,6 +208,11 @@ class EplbWorker:
                 expert_send_info_this_layer[src_rank_id].append((dst_rank_id, expert_id))
                 expert_recv_info_this_layer[dst_rank_id].append((src_rank_id, expert_id))
 
+            logger.info(
+                "[EPLB-DEBUG] worker pid=%s compose_greedy: layer %s yielding send_keys=%s recv_keys=%s",
+                os.getpid(), layer_id,
+                list(expert_send_info_this_layer.keys()), list(expert_recv_info_this_layer.keys()),
+            )
             yield (
                 expert_send_info_this_layer,
                 expert_recv_info_this_layer,
@@ -261,6 +294,10 @@ class EplbWorker:
         for send_info, recv_info, new_expert_map, layer_id in update_info_generator:
             send_info_this_rank = send_info.get(self.rank_id, [])
             recv_info_this_rank = recv_info.get(self.rank_id, [])
+            logger.info(
+                "[EPLB-DEBUG] worker pid=%s pack_update: layer=%s rank_id=%s send=%s recv=%s",
+                os.getpid(), layer_id, self.rank_id, send_info_this_rank, recv_info_this_rank,
+            )
             send_all.append(send_info_this_rank)
             recv_all.append(recv_info_this_rank)
 
@@ -341,14 +378,22 @@ class EplbProcess:
             warm_up()
         while True:
             try:
+                logger.info("[EPLB-DEBUG] worker pid=%s: waiting for planner_q...", os.getpid())
                 planner_q.get()
+                logger.info("[EPLB-DEBUG] worker pid=%s: woken up, starting do_update()", os.getpid())
 
                 packed_update_info = self.worker.do_update()
 
+                logger.info(
+                    "[EPLB-DEBUG] worker pid=%s: do_update() done, %s layers to update, putting to block_update_q",
+                    os.getpid(), len(packed_update_info) if packed_update_info else 0,
+                )
                 while True:
                     if not block_update_q.empty():
+                        logger.info("[EPLB-DEBUG] worker pid=%s: block_update_q still full, waiting...", os.getpid())
                         continue
                     block_update_q.put(packed_update_info)
+                    logger.info("[EPLB-DEBUG] worker pid=%s: packed_update_info put in block_update_q", os.getpid())
                     break
 
             except Exception as e:
