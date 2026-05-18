@@ -25,6 +25,8 @@ spec:
             env:
               - name: CONFIG_YAML_PATH
                 value: {{ config_file_path | default("DeepSeek-V3.yaml") }}
+              - name: CONFIG_BASE_PATH
+                value: "{{ config_base_path | default("") }}"
               - name: LOG_PREFIX
                 value: {{ log_prefix | default("/root/.cache/ascend-logs") }}
               - name: WORKSPACE
@@ -96,6 +98,8 @@ spec:
             env:
               - name: CONFIG_YAML_PATH
                 value: {{ config_file_path | default("DeepSeek-V3.yaml") }}
+              - name: CONFIG_BASE_PATH
+                value: "{{ config_base_path | default("") }}"
               - name: LOG_PREFIX
                 value: {{ log_prefix | default("/root/.cache/ascend-logs") }}
               - name: WORKSPACE
