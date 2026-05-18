@@ -314,7 +314,7 @@ class TestAscendAttentionBackendImpl(TestBase):
         assert output.shape == (10, 8, 64)
 
     @patch("vllm_ascend.ascend_forward_context.get_forward_context")
-    @patch("torch_npu.npu_fused_infer_attention_score")
+    @patch("torch_npu.npu_fused_infer_attention_score_v2")
     @patch("torch_npu._npu_reshape_and_cache")
     def test_forward_decode_only_swa_sink(
         self, mock_npu_reshape_and_cache, mock_fused_infer_attention_score, mock_get_forward_context
@@ -331,6 +331,7 @@ class TestAscendAttentionBackendImpl(TestBase):
         metadata = self.attn_metadata
         metadata.attn_state = AscendAttentionState.DecodeOnly
         metadata.seq_lens = torch.tensor([10] * 10)
+        metadata.attn_mask = torch.randn(1, 1, 10, 10)
         metadata.block_tables = torch.zeros(1, 5, dtype=torch.long)
         metadata.num_actual_tokens = 100
         metadata.slot_mapping = torch.zeros(10, dtype=torch.long)
