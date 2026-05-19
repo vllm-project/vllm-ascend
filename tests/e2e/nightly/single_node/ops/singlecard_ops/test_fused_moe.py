@@ -31,11 +31,11 @@ from vllm.model_executor.layers.activation import SiluAndMul
 from vllm_ascend.ops.fused_moe.experts_selector import check_npu_moe_gating_top_k, select_experts
 from vllm_ascend.ops.fused_moe.moe_mlp import unified_apply_mlp
 from vllm_ascend.ops.fused_moe.moe_runtime_args import (
-    build_fused_experts_input,
-    build_mlp_compute_input,
     MoEQuantParams,
     MoERoutingParams,
     MoETokenDispatchInput,
+    build_fused_experts_input,
+    build_mlp_compute_input,
 )
 from vllm_ascend.ops.fused_moe.token_dispatcher import TokenDispatcherWithAllGather
 from vllm_ascend.quantization.quant_type import QuantType

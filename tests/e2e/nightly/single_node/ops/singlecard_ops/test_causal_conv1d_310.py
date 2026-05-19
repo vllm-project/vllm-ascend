@@ -33,7 +33,6 @@ def to_int64_tuple(t):
 def test_ascend_causal_conv1d_310_fn(
     dim, width, extra_state_len, seq_len, has_bias, silu_activation, has_initial_state
 ):
-
     torch.random.manual_seed(0)
     enable_custom_op()
     device = "npu"

@@ -5,6 +5,7 @@ with parametrized test cases covering various configurations.
 """
 
 import time
+
 import numpy as np
 import pytest
 import torch
@@ -22,11 +23,12 @@ PERF_ITERS = 20
 # Golden reference (CPU, pure Python/NumPy)
 # ---------------------------------------------------------------------------
 
+
 def golden_ngram_spec_decode(
-    token_ids: np.ndarray,           # [B, M], int32,
+    token_ids: np.ndarray,  # [B, M], int32,
     num_tokens_no_spec: np.ndarray,  # [B], int32
-    sampled_token_ids: np.ndarray,   # [B, N], int32
-    discard_request_mask: np.ndarray, # [B], int32
+    sampled_token_ids: np.ndarray,  # [B, N], int32
+    discard_request_mask: np.ndarray,  # [B], int32
     vocab_size: int,
     min_n: int,
     max_n: int,
@@ -89,10 +91,10 @@ def golden_ngram_spec_decode(
                 if wc <= 0:
                     break
 
-                suffix = token_ids[i, nt - ngram_len: nt].tolist()
+                suffix = token_ids[i, nt - ngram_len : nt].tolist()
                 found = False
                 for pos in range(wc):
-                    window = token_ids[i, pos: pos + ngram_len].tolist()
+                    window = token_ids[i, pos : pos + ngram_len].tolist()
                     if window == suffix:
                         best_match_pos = pos
                         best_ngram_len = ngram_len
@@ -127,6 +129,7 @@ def golden_ngram_spec_decode(
 # ---------------------------------------------------------------------------
 # inputs construct helper
 # ---------------------------------------------------------------------------
+
 
 def _make_inputs(
     batch_size: int,
@@ -165,27 +168,24 @@ def _make_inputs(
         discard_mask = rng.rand(batch_size) < discard_rate
         discard_request_mask[discard_mask] = 1
 
-    return token_ids, num_tokens_no_spec, sampled_token_ids, discard_request_mask, \
-           vocab_size, min_n, max_n, k
+    return token_ids, num_tokens_no_spec, sampled_token_ids, discard_request_mask, vocab_size, min_n, max_n, k
 
 
-def _run_npu(token_ids, num_tokens_no_spec, sampled_token_ids, discard_request_mask,
-             vocab_size, min_n, max_n, k):
+def _run_npu(token_ids, num_tokens_no_spec, sampled_token_ids, discard_request_mask, vocab_size, min_n, max_n, k):
     token_ids_t = torch.from_numpy(token_ids).to("npu")
     num_tokens_t = torch.from_numpy(num_tokens_no_spec).to("npu")
     sampled_t = torch.from_numpy(sampled_token_ids).to("npu")
     discard_t = torch.from_numpy(discard_request_mask).to("npu")
 
     result = torch.ops._C_ascend.npu_ngram_spec_decode(
-        token_ids_t, num_tokens_t, sampled_t, discard_t,
-        vocab_size, min_n, max_n, k)
+        token_ids_t, num_tokens_t, sampled_t, discard_t, vocab_size, min_n, max_n, k
+    )
     torch.npu.synchronize()
 
     return result
 
 
-def _measure_perf(token_ids, num_tokens_no_spec, sampled_token_ids, discard_request_mask,
-                  vocab_size, min_n, max_n, k):
+def _measure_perf(token_ids, num_tokens_no_spec, sampled_token_ids, discard_request_mask, vocab_size, min_n, max_n, k):
     token_ids_t = torch.from_numpy(token_ids.copy()).to("npu")
     num_tokens_t = torch.from_numpy(num_tokens_no_spec.copy()).to("npu")
     sampled_t = torch.from_numpy(sampled_token_ids.copy()).to("npu")
@@ -193,107 +193,132 @@ def _measure_perf(token_ids, num_tokens_no_spec, sampled_token_ids, discard_requ
 
     for _ in range(PERF_WARMUP):
         _ = torch.ops._C_ascend.npu_ngram_spec_decode(
-            token_ids_t, num_tokens_t, sampled_t, discard_t,
-            vocab_size, min_n, max_n, k)
+            token_ids_t, num_tokens_t, sampled_t, discard_t, vocab_size, min_n, max_n, k
+        )
     torch.npu.synchronize()
 
     t0 = time.perf_counter()
     for _ in range(PERF_ITERS):
         _ = torch.ops._C_ascend.npu_ngram_spec_decode(
-            token_ids_t, num_tokens_t, sampled_t, discard_t,
-            vocab_size, min_n, max_n, k)
+            token_ids_t, num_tokens_t, sampled_t, discard_t, vocab_size, min_n, max_n, k
+        )
     torch.npu.synchronize()
     elapsed_us = (time.perf_counter() - t0) * 1e6 / PERF_ITERS
 
-    print(f"  [perf] B={token_ids.shape[0]} M={token_ids.shape[1]} N={sampled_token_ids.shape[1]} "
-          f"k={k} min_n={min_n} max_n={max_n} -> {elapsed_us:.1f} us/call", flush=True)
+    print(
+        f"  [perf] B={token_ids.shape[0]} M={token_ids.shape[1]} N={sampled_token_ids.shape[1]} "
+        f"k={k} min_n={min_n} max_n={max_n} -> {elapsed_us:.1f} us/call",
+        flush=True,
+    )
 
 
 # ===========================================================================
 # Group 1: basic - basic function
 # ===========================================================================
 
-@pytest.mark.parametrize("batch_size,seq_len,max_new_tokens,k", [
-    (1, 16, 4, 3),
-    (4, 64, 8, 5),
-    (16, 128, 16, 5),
-])
+
+@pytest.mark.parametrize(
+    "batch_size,seq_len,max_new_tokens,k",
+    [
+        (1, 16, 4, 3),
+        (4, 64, 8, 5),
+        (16, 128, 16, 5),
+    ],
+)
 @torch.inference_mode()
 def test_ngram_spec_decode_basic(batch_size, seq_len, max_new_tokens, k):
     inputs = _make_inputs(batch_size, seq_len, max_new_tokens, k)
-    token_ids, num_tokens_no_spec, sampled_token_ids, discard_request_mask, \
-        vocab_size, min_n, max_n, k = inputs
+    token_ids, num_tokens_no_spec, sampled_token_ids, discard_request_mask, vocab_size, min_n, max_n, k = inputs
 
     # CPU golden
     golden_ids, golden_next, golden_draft, golden_valid = golden_ngram_spec_decode(
-        token_ids.copy(), num_tokens_no_spec.copy(), sampled_token_ids.copy(),
-        discard_request_mask.copy(), vocab_size, min_n, max_n, k)
+        token_ids.copy(),
+        num_tokens_no_spec.copy(),
+        sampled_token_ids.copy(),
+        discard_request_mask.copy(),
+        vocab_size,
+        min_n,
+        max_n,
+        k,
+    )
 
     # NPU
     result_ids, result_next, result_draft, result_valid = _run_npu(
-        token_ids, num_tokens_no_spec, sampled_token_ids, discard_request_mask,
-        vocab_size, min_n, max_n, k)
+        token_ids, num_tokens_no_spec, sampled_token_ids, discard_request_mask, vocab_size, min_n, max_n, k
+    )
 
     # compare
-    assert result_ids.cpu().numpy().tolist() == golden_ids.tolist(), \
-        f"token_ids mismatch: B={batch_size}"
-    assert result_next.cpu().numpy().tolist() == golden_next.tolist(), \
-        f"next_token_ids mismatch: B={batch_size}"
-    assert result_draft.cpu().numpy().tolist() == golden_draft.tolist(), \
-        f"draft_token_ids mismatch: B={batch_size}"
-    assert result_valid.cpu().numpy().tolist() == golden_valid.tolist(), \
+    assert result_ids.cpu().numpy().tolist() == golden_ids.tolist(), f"token_ids mismatch: B={batch_size}"
+    assert result_next.cpu().numpy().tolist() == golden_next.tolist(), f"next_token_ids mismatch: B={batch_size}"
+    assert result_draft.cpu().numpy().tolist() == golden_draft.tolist(), f"draft_token_ids mismatch: B={batch_size}"
+    assert result_valid.cpu().numpy().tolist() == golden_valid.tolist(), (
         f"num_valid_draft_tokens mismatch: B={batch_size}"
+    )
 
-    _measure_perf(token_ids, num_tokens_no_spec, sampled_token_ids, discard_request_mask,
-                  vocab_size, min_n, max_n, k)
+    _measure_perf(token_ids, num_tokens_no_spec, sampled_token_ids, discard_request_mask, vocab_size, min_n, max_n, k)
 
 
 # ===========================================================================
 # Group 2: padding / optional
 # ===========================================================================
 
-@pytest.mark.parametrize("batch_size,seq_len,max_new_tokens,k,invalid_rate", [
-    (4, 64, 8, 5, 0.3),
-    (4, 64, 8, 5, 0.7),
-    (4, 128, 16, 5, 0.5),
-])
+
+@pytest.mark.parametrize(
+    "batch_size,seq_len,max_new_tokens,k,invalid_rate",
+    [
+        (4, 64, 8, 5, 0.3),
+        (4, 64, 8, 5, 0.7),
+        (4, 128, 16, 5, 0.5),
+    ],
+)
 @torch.inference_mode()
 def test_ngram_spec_decode_padding(batch_size, seq_len, max_new_tokens, k, invalid_rate):
     inputs = _make_inputs(batch_size, seq_len, max_new_tokens, k, invalid_rate=invalid_rate)
-    token_ids, num_tokens_no_spec, sampled_token_ids, discard_request_mask, \
-        vocab_size, min_n, max_n, k = inputs
+    token_ids, num_tokens_no_spec, sampled_token_ids, discard_request_mask, vocab_size, min_n, max_n, k = inputs
 
     golden_ids, golden_next, golden_draft, golden_valid = golden_ngram_spec_decode(
-        token_ids.copy(), num_tokens_no_spec.copy(), sampled_token_ids.copy(),
-        discard_request_mask.copy(), vocab_size, min_n, max_n, k)
+        token_ids.copy(),
+        num_tokens_no_spec.copy(),
+        sampled_token_ids.copy(),
+        discard_request_mask.copy(),
+        vocab_size,
+        min_n,
+        max_n,
+        k,
+    )
 
     result_ids, result_next, result_draft, result_valid = _run_npu(
-        token_ids, num_tokens_no_spec, sampled_token_ids, discard_request_mask,
-        vocab_size, min_n, max_n, k)
+        token_ids, num_tokens_no_spec, sampled_token_ids, discard_request_mask, vocab_size, min_n, max_n, k
+    )
 
     assert result_ids.cpu().numpy().tolist() == golden_ids.tolist()
     assert result_next.cpu().numpy().tolist() == golden_next.tolist()
     assert result_draft.cpu().numpy().tolist() == golden_draft.tolist()
     assert result_valid.cpu().numpy().tolist() == golden_valid.tolist()
 
-    _measure_perf(token_ids, num_tokens_no_spec, sampled_token_ids, discard_request_mask,
-                  vocab_size, min_n, max_n, k)
+    _measure_perf(token_ids, num_tokens_no_spec, sampled_token_ids, discard_request_mask, vocab_size, min_n, max_n, k)
 
 
 @pytest.mark.parametrize("discard_rate", [0.2, 0.5, 1.0])
 @torch.inference_mode()
 def test_ngram_spec_decode_discard(discard_rate):
     inputs = _make_inputs(4, 64, 8, 5, discard_rate=discard_rate)
-    token_ids, num_tokens_no_spec, sampled_token_ids, discard_request_mask, \
-        vocab_size, min_n, max_n, k = inputs
+    token_ids, num_tokens_no_spec, sampled_token_ids, discard_request_mask, vocab_size, min_n, max_n, k = inputs
 
     golden_ids, golden_next, golden_draft, golden_valid = golden_ngram_spec_decode(
-        token_ids.copy(), num_tokens_no_spec.copy(), sampled_token_ids.copy(),
-        discard_request_mask.copy(), vocab_size, min_n, max_n, k)
+        token_ids.copy(),
+        num_tokens_no_spec.copy(),
+        sampled_token_ids.copy(),
+        discard_request_mask.copy(),
+        vocab_size,
+        min_n,
+        max_n,
+        k,
+    )
 
     result_ids, result_next, result_draft, result_valid = _run_npu(
-        token_ids, num_tokens_no_spec, sampled_token_ids, discard_request_mask,
-        vocab_size, min_n, max_n, k)
+        token_ids, num_tokens_no_spec, sampled_token_ids, discard_request_mask, vocab_size, min_n, max_n, k
+    )
 
     assert result_ids.cpu().numpy().tolist() == golden_ids.tolist()
     assert result_next.cpu().numpy().tolist() == golden_next.tolist()
@@ -305,103 +330,130 @@ def test_ngram_spec_decode_discard(discard_rate):
 # Group 3: min_n / max_n / k
 # ===========================================================================
 
-@pytest.mark.parametrize("min_n,max_n,k", [
-    (1, 1, 3),
-    (2, 4, 5),
-    (1, 8, 10),
-    (3, 3, 1),
-    (5, 10, 8),
-])
+
+@pytest.mark.parametrize(
+    "min_n,max_n,k",
+    [
+        (1, 1, 3),
+        (2, 4, 5),
+        (1, 8, 10),
+        (3, 3, 1),
+        (5, 10, 8),
+    ],
+)
 @torch.inference_mode()
 def test_ngram_spec_decode_attrs(min_n, max_n, k):
     inputs = _make_inputs(4, 128, 16, k, min_n=min_n, max_n=max_n)
-    token_ids, num_tokens_no_spec, sampled_token_ids, discard_request_mask, \
-        vocab_size, _, _, _ = inputs
+    token_ids, num_tokens_no_spec, sampled_token_ids, discard_request_mask, vocab_size, _, _, _ = inputs
 
     golden_ids, golden_next, golden_draft, golden_valid = golden_ngram_spec_decode(
-        token_ids.copy(), num_tokens_no_spec.copy(), sampled_token_ids.copy(),
-        discard_request_mask.copy(), vocab_size, min_n, max_n, k)
+        token_ids.copy(),
+        num_tokens_no_spec.copy(),
+        sampled_token_ids.copy(),
+        discard_request_mask.copy(),
+        vocab_size,
+        min_n,
+        max_n,
+        k,
+    )
 
     result_ids, result_next, result_draft, result_valid = _run_npu(
-        token_ids, num_tokens_no_spec, sampled_token_ids, discard_request_mask,
-        vocab_size, min_n, max_n, k)
+        token_ids, num_tokens_no_spec, sampled_token_ids, discard_request_mask, vocab_size, min_n, max_n, k
+    )
 
     assert result_ids.cpu().numpy().tolist() == golden_ids.tolist()
     assert result_next.cpu().numpy().tolist() == golden_next.tolist()
     assert result_draft.cpu().numpy().tolist() == golden_draft.tolist()
     assert result_valid.cpu().numpy().tolist() == golden_valid.tolist()
 
-    _measure_perf(token_ids, num_tokens_no_spec, sampled_token_ids, discard_request_mask,
-                  vocab_size, min_n, max_n, k)
+    _measure_perf(token_ids, num_tokens_no_spec, sampled_token_ids, discard_request_mask, vocab_size, min_n, max_n, k)
 
 
 # ===========================================================================
 # Group 4: large scale
 # ===========================================================================
 
+
 @torch.inference_mode()
 def test_ngram_spec_decode_prefill():
     inputs = _make_inputs(1, 2048, 16, 5, vocab_size=32000)
-    token_ids, num_tokens_no_spec, sampled_token_ids, discard_request_mask, \
-        vocab_size, min_n, max_n, k = inputs
+    token_ids, num_tokens_no_spec, sampled_token_ids, discard_request_mask, vocab_size, min_n, max_n, k = inputs
 
     golden_ids, golden_next, golden_draft, golden_valid = golden_ngram_spec_decode(
-        token_ids.copy(), num_tokens_no_spec.copy(), sampled_token_ids.copy(),
-        discard_request_mask.copy(), vocab_size, min_n, max_n, k)
+        token_ids.copy(),
+        num_tokens_no_spec.copy(),
+        sampled_token_ids.copy(),
+        discard_request_mask.copy(),
+        vocab_size,
+        min_n,
+        max_n,
+        k,
+    )
 
     result_ids, result_next, result_draft, result_valid = _run_npu(
-        token_ids, num_tokens_no_spec, sampled_token_ids, discard_request_mask,
-        vocab_size, min_n, max_n, k)
+        token_ids, num_tokens_no_spec, sampled_token_ids, discard_request_mask, vocab_size, min_n, max_n, k
+    )
 
     assert result_ids.cpu().numpy().tolist() == golden_ids.tolist()
     assert result_next.cpu().numpy().tolist() == golden_next.tolist()
     assert result_draft.cpu().numpy().tolist() == golden_draft.tolist()
     assert result_valid.cpu().numpy().tolist() == golden_valid.tolist()
 
-    _measure_perf(token_ids, num_tokens_no_spec, sampled_token_ids, discard_request_mask,
-                  vocab_size, min_n, max_n, k)
+    _measure_perf(token_ids, num_tokens_no_spec, sampled_token_ids, discard_request_mask, vocab_size, min_n, max_n, k)
 
 
 @torch.inference_mode()
 def test_ngram_spec_decode_decode():
     inputs = _make_inputs(64, 32, 5, 3, vocab_size=32000)
-    token_ids, num_tokens_no_spec, sampled_token_ids, discard_request_mask, \
-        vocab_size, min_n, max_n, k = inputs
+    token_ids, num_tokens_no_spec, sampled_token_ids, discard_request_mask, vocab_size, min_n, max_n, k = inputs
 
     golden_ids, golden_next, golden_draft, golden_valid = golden_ngram_spec_decode(
-        token_ids.copy(), num_tokens_no_spec.copy(), sampled_token_ids.copy(),
-        discard_request_mask.copy(), vocab_size, min_n, max_n, k)
+        token_ids.copy(),
+        num_tokens_no_spec.copy(),
+        sampled_token_ids.copy(),
+        discard_request_mask.copy(),
+        vocab_size,
+        min_n,
+        max_n,
+        k,
+    )
 
     result_ids, result_next, result_draft, result_valid = _run_npu(
-        token_ids, num_tokens_no_spec, sampled_token_ids, discard_request_mask,
-        vocab_size, min_n, max_n, k)
+        token_ids, num_tokens_no_spec, sampled_token_ids, discard_request_mask, vocab_size, min_n, max_n, k
+    )
 
     assert result_ids.cpu().numpy().tolist() == golden_ids.tolist()
     assert result_next.cpu().numpy().tolist() == golden_next.tolist()
     assert result_draft.cpu().numpy().tolist() == golden_draft.tolist()
     assert result_valid.cpu().numpy().tolist() == golden_valid.tolist()
 
-    _measure_perf(token_ids, num_tokens_no_spec, sampled_token_ids, discard_request_mask,
-                  vocab_size, min_n, max_n, k)
+    _measure_perf(token_ids, num_tokens_no_spec, sampled_token_ids, discard_request_mask, vocab_size, min_n, max_n, k)
 
 
 # ===========================================================================
 # Group 5: boundary
 # ===========================================================================
 
+
 @torch.inference_mode()
 def test_ngram_spec_decode_minimal():
     inputs = _make_inputs(1, 4, 1, 1, vocab_size=100)
-    token_ids, num_tokens_no_spec, sampled_token_ids, discard_request_mask, \
-        vocab_size, min_n, max_n, k = inputs
+    token_ids, num_tokens_no_spec, sampled_token_ids, discard_request_mask, vocab_size, min_n, max_n, k = inputs
 
     golden_ids, golden_next, golden_draft, golden_valid = golden_ngram_spec_decode(
-        token_ids.copy(), num_tokens_no_spec.copy(), sampled_token_ids.copy(),
-        discard_request_mask.copy(), vocab_size, min_n, max_n, k)
+        token_ids.copy(),
+        num_tokens_no_spec.copy(),
+        sampled_token_ids.copy(),
+        discard_request_mask.copy(),
+        vocab_size,
+        min_n,
+        max_n,
+        k,
+    )
 
     result_ids, result_next, result_draft, result_valid = _run_npu(
-        token_ids, num_tokens_no_spec, sampled_token_ids, discard_request_mask,
-        vocab_size, min_n, max_n, k)
+        token_ids, num_tokens_no_spec, sampled_token_ids, discard_request_mask, vocab_size, min_n, max_n, k
+    )
 
     assert result_ids.cpu().numpy().tolist() == golden_ids.tolist()
     assert result_next.cpu().numpy().tolist() == golden_next.tolist()
@@ -412,17 +464,23 @@ def test_ngram_spec_decode_minimal():
 @torch.inference_mode()
 def test_ngram_spec_decode_no_valid_sampled():
     inputs = _make_inputs(4, 64, 8, 5)
-    token_ids, num_tokens_no_spec, sampled_token_ids, discard_request_mask, \
-        vocab_size, min_n, max_n, k = inputs
+    token_ids, num_tokens_no_spec, sampled_token_ids, discard_request_mask, vocab_size, min_n, max_n, k = inputs
     sampled_token_ids[:] = -1
 
     golden_ids, golden_next, golden_draft, golden_valid = golden_ngram_spec_decode(
-        token_ids.copy(), num_tokens_no_spec.copy(), sampled_token_ids.copy(),
-        discard_request_mask.copy(), vocab_size, min_n, max_n, k)
+        token_ids.copy(),
+        num_tokens_no_spec.copy(),
+        sampled_token_ids.copy(),
+        discard_request_mask.copy(),
+        vocab_size,
+        min_n,
+        max_n,
+        k,
+    )
 
     result_ids, result_next, result_draft, result_valid = _run_npu(
-        token_ids, num_tokens_no_spec, sampled_token_ids, discard_request_mask,
-        vocab_size, min_n, max_n, k)
+        token_ids, num_tokens_no_spec, sampled_token_ids, discard_request_mask, vocab_size, min_n, max_n, k
+    )
 
     assert result_ids.cpu().numpy().tolist() == golden_ids.tolist()
     assert result_next.cpu().numpy().tolist() == golden_next.tolist()
@@ -432,29 +490,40 @@ def test_ngram_spec_decode_no_valid_sampled():
 
 @torch.inference_mode()
 def test_ngram_spec_decode_exact_match():
-    B, M, N, k = 2, 32, 4, 3
+    k = 3
     vocab_size = 1000
-    token_ids = np.array([
-        [1, 2, 3, 1, 2, 3, 4, 5, 0, 0, 0, 0, 0, 0, 0, 0,
-         0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0],
-        [10, 20, 10, 20, 30, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
-         0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0],
-    ], dtype=np.int32)
+    token_ids = np.array(
+        [
+            [1, 2, 3, 1, 2, 3, 4, 5, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0],
+            [10, 20, 10, 20, 30, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0],
+        ],
+        dtype=np.int32,
+    )
     num_tokens_no_spec = np.array([6, 5], dtype=np.int32)
     # sampled tokens
-    sampled_token_ids = np.array([
-        [1, 2, 3, -1],
-        [10, 20, -1, -1],
-    ], dtype=np.int32)
+    sampled_token_ids = np.array(
+        [
+            [1, 2, 3, -1],
+            [10, 20, -1, -1],
+        ],
+        dtype=np.int32,
+    )
     discard_request_mask = np.array([0, 0], dtype=np.int32)
 
     golden_ids, golden_next, golden_draft, golden_valid = golden_ngram_spec_decode(
-        token_ids.copy(), num_tokens_no_spec.copy(), sampled_token_ids.copy(),
-        discard_request_mask.copy(), vocab_size, 3, 5, k)
+        token_ids.copy(),
+        num_tokens_no_spec.copy(),
+        sampled_token_ids.copy(),
+        discard_request_mask.copy(),
+        vocab_size,
+        3,
+        5,
+        k,
+    )
 
     result_ids, result_next, result_draft, result_valid = _run_npu(
-        token_ids, num_tokens_no_spec, sampled_token_ids, discard_request_mask,
-        vocab_size, 3, 5, k)
+        token_ids, num_tokens_no_spec, sampled_token_ids, discard_request_mask, vocab_size, 3, 5, k
+    )
 
     assert result_ids.cpu().numpy().tolist() == golden_ids.tolist()
     assert result_next.cpu().numpy().tolist() == golden_next.tolist()
@@ -465,17 +534,23 @@ def test_ngram_spec_decode_exact_match():
 @torch.inference_mode()
 def test_ngram_spec_decode_full_capacity():
     inputs = _make_inputs(4, 48, 16, 5, min_n=2, max_n=4)
-    token_ids, num_tokens_no_spec, sampled_token_ids, discard_request_mask, \
-        vocab_size, min_n, max_n, k = inputs
+    token_ids, num_tokens_no_spec, sampled_token_ids, discard_request_mask, vocab_size, min_n, max_n, k = inputs
     num_tokens_no_spec[:] = token_ids.shape[1] - sampled_token_ids.shape[1]
 
     golden_ids, golden_next, golden_draft, golden_valid = golden_ngram_spec_decode(
-        token_ids.copy(), num_tokens_no_spec.copy(), sampled_token_ids.copy(),
-        discard_request_mask.copy(), vocab_size, min_n, max_n, k)
+        token_ids.copy(),
+        num_tokens_no_spec.copy(),
+        sampled_token_ids.copy(),
+        discard_request_mask.copy(),
+        vocab_size,
+        min_n,
+        max_n,
+        k,
+    )
 
     result_ids, result_next, result_draft, result_valid = _run_npu(
-        token_ids, num_tokens_no_spec, sampled_token_ids, discard_request_mask,
-        vocab_size, min_n, max_n, k)
+        token_ids, num_tokens_no_spec, sampled_token_ids, discard_request_mask, vocab_size, min_n, max_n, k
+    )
 
     assert result_ids.cpu().numpy().tolist() == golden_ids.tolist()
     assert result_next.cpu().numpy().tolist() == golden_next.tolist()
@@ -486,16 +561,22 @@ def test_ngram_spec_decode_full_capacity():
 @torch.inference_mode()
 def test_ngram_spec_decode_k1():
     inputs = _make_inputs(4, 64, 8, 1, min_n=2, max_n=3)
-    token_ids, num_tokens_no_spec, sampled_token_ids, discard_request_mask, \
-        vocab_size, min_n, max_n, k = inputs
+    token_ids, num_tokens_no_spec, sampled_token_ids, discard_request_mask, vocab_size, min_n, max_n, k = inputs
 
     golden_ids, golden_next, golden_draft, golden_valid = golden_ngram_spec_decode(
-        token_ids.copy(), num_tokens_no_spec.copy(), sampled_token_ids.copy(),
-        discard_request_mask.copy(), vocab_size, min_n, max_n, k)
+        token_ids.copy(),
+        num_tokens_no_spec.copy(),
+        sampled_token_ids.copy(),
+        discard_request_mask.copy(),
+        vocab_size,
+        min_n,
+        max_n,
+        k,
+    )
 
     result_ids, result_next, result_draft, result_valid = _run_npu(
-        token_ids, num_tokens_no_spec, sampled_token_ids, discard_request_mask,
-        vocab_size, min_n, max_n, k)
+        token_ids, num_tokens_no_spec, sampled_token_ids, discard_request_mask, vocab_size, min_n, max_n, k
+    )
 
     assert result_ids.cpu().numpy().tolist() == golden_ids.tolist()
     assert result_next.cpu().numpy().tolist() == golden_next.tolist()
