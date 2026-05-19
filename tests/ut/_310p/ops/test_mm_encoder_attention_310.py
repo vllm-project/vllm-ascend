@@ -15,7 +15,9 @@
 
 from unittest import mock
 
+import pytest
 import torch
+from vllm.v1.attention.backends.registry import AttentionBackendEnum
 
 from vllm_ascend import utils
 from vllm_ascend._310p.ops.mm_encoder_attention import AscendMMEncoderAttention310
@@ -43,6 +45,7 @@ def test_mm_encoder_attention_310_forward_oot_with_padding():
     layer.head_size = 80
     layer.enable_pad = True
     layer.scale_value = layer.head_size**-0.5
+    layer.attn_backend = AttentionBackendEnum.FLASH_ATTN
 
     bsz, q_len, kv_len = 2, 3, 3
     query = torch.randn(bsz, q_len, layer.num_heads, layer.head_size)
@@ -78,3 +81,51 @@ def test_mm_encoder_attention_310_forward_oot_with_padding():
 
     assert out.shape == query.shape
     torch.testing.assert_close(out, query + 1.0)
+
+
+def test_mm_encoder_attention_310_forward_oot_respects_torch_sdpa_backend():
+    layer = AscendMMEncoderAttention310.__new__(AscendMMEncoderAttention310)
+    layer.attn_backend = AttentionBackendEnum.TORCH_SDPA
+
+    query = torch.randn(2, 3, 4, 80)
+    key = torch.randn(2, 3, 2, 80)
+    value = torch.randn(2, 3, 2, 80)
+    expected = torch.randn_like(query)
+
+    with (
+        mock.patch.object(
+            AscendMMEncoderAttention310,
+            "_forward_sdpa",
+            autospec=True,
+            return_value=expected,
+        ) as mock_sdpa,
+        mock.patch(
+            "vllm_ascend._310p.ops.mm_encoder_attention.torch_npu._npu_flash_attention_unpad",
+            create=True,
+        ) as mock_npu_flash_attention,
+    ):
+        output = layer.forward_oot(query, key, value)
+
+    assert output is expected
+    mock_sdpa.assert_called_once_with(layer, query, key, value, None)
+    mock_npu_flash_attention.assert_not_called()
+
+
+def test_mm_encoder_attention_310_forward_oot_rejects_unsupported_backend():
+    layer = AscendMMEncoderAttention310.__new__(AscendMMEncoderAttention310)
+    layer.attn_backend = AttentionBackendEnum.TRITON_ATTN
+
+    query = torch.randn(2, 3, 4, 80)
+    key = torch.randn(2, 3, 2, 80)
+    value = torch.randn(2, 3, 2, 80)
+
+    with (
+        mock.patch(
+            "vllm_ascend._310p.ops.mm_encoder_attention.torch_npu._npu_flash_attention_unpad",
+            create=True,
+        ) as mock_npu_flash_attention,
+        pytest.raises(ValueError, match="Unsupported multi-modal encoder attention backend"),
+    ):
+        layer.forward_oot(query, key, value)
+
+    mock_npu_flash_attention.assert_not_called()
