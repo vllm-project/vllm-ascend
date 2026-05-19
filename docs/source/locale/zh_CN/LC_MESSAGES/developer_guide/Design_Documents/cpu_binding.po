@@ -393,7 +393,6 @@ msgid "SQ/CQ IRQ"
 msgstr "SQ/CQ中断"
 
 #: ../../source/developer_guide/Design_Documents/cpu_binding.md
-#, fuzzy
 msgid "`pool[0]`, `pool[1]`"
 msgstr "`pool[0]`、`pool[1]`"
 
@@ -402,7 +401,6 @@ msgid "Main worker process and subthreads"
 msgstr "主工作进程及子线程"
 
 #: ../../source/developer_guide/Design_Documents/cpu_binding.md
-#, fuzzy
 msgid "`pool[2:-2]`"
 msgstr "`pool[2:-2]`"
 
@@ -411,7 +409,6 @@ msgid "ACL thread"
 msgstr "ACL线程"
 
 #: ../../source/developer_guide/Design_Documents/cpu_binding.md
-#, fuzzy
 msgid "`pool[-2]`"
 msgstr "`pool[-2]`"
 
@@ -420,7 +417,6 @@ msgid "Release thread"
 msgstr "释放线程"
 
 #: ../../source/developer_guide/Design_Documents/cpu_binding.md
-#, fuzzy
 msgid "`pool[-1]`"
 msgstr "`pool[-1]`"
 
@@ -473,27 +469,22 @@ msgid "Examples"
 msgstr "示例"
 
 #: ../../source/developer_guide/Design_Documents/cpu_binding.md:139
-#, fuzzy
 msgid "A3 inference server with 640 CPUs and 16 NPUs"
 msgstr "具有640个CPU和16个NPU的A3推理服务器"
 
 #: ../../source/developer_guide/Design_Documents/cpu_binding.md:141
-#, fuzzy
 msgid "Inputs:"
 msgstr "输入："
 
 #: ../../source/developer_guide/Design_Documents/cpu_binding.md:143
-#, fuzzy
 msgid "`allowed_cpus = [0..639]`"
 msgstr "`allowed_cpus = [0..639]`"
 
 #: ../../source/developer_guide/Design_Documents/cpu_binding.md:144
-#, fuzzy
 msgid "`total_logic_npus = 16`"
 msgstr "`total_logic_npus = 16`"
 
 #: ../../source/developer_guide/Design_Documents/cpu_binding.md:145
-#, fuzzy
 msgid "`running_npu_list = [0..15]`"
 msgstr "`running_npu_list = [0..15]`"
 
@@ -502,7 +493,6 @@ msgid "Computation:"
 msgstr "计算："
 
 #: ../../source/developer_guide/Design_Documents/cpu_binding.md:149
-#, fuzzy
 msgid "`base = 640 // 16 = 40`"
 msgstr "`base = 640 // 16 = 40`"
 
@@ -518,7 +508,6 @@ msgstr ""
 "驱动逻辑NPU `i`的工作进程`i`接收CPU切片`[i * 40 .. i * 40 + 39]`。"
 
 #: ../../source/developer_guide/Design_Documents/cpu_binding.md:154
-#, fuzzy
 msgid "Global slice view:"
 msgstr "全局切片视图："
 
@@ -555,7 +544,6 @@ msgid "ACL CPU"
 msgstr "ACL CPU"
 
 #: ../../source/developer_guide/Design_Documents/cpu_binding.md
-#, fuzzy
 msgid "Release CPU"
 msgstr "释放CPU"
 
@@ -568,22 +556,18 @@ msgid "0-39"
 msgstr "0-39"
 
 #: ../../source/developer_guide/Design_Documents/cpu_binding.md
-#, fuzzy
 msgid "0-1"
 msgstr "0-1"
 
 #: ../../source/developer_guide/Design_Documents/cpu_binding.md
-#, fuzzy
 msgid "2-37"
 msgstr "2-37"
 
 #: ../../source/developer_guide/Design_Documents/cpu_binding.md
-#, fuzzy
 msgid "38"
 msgstr "38"
 
 #: ../../source/developer_guide/Design_Documents/cpu_binding.md
-#, fuzzy
 msgid "39"
 msgstr "39"
 
@@ -596,12 +580,10 @@ msgid "40-79"
 msgstr "40-79"
 
 #: ../../source/developer_guide/Design_Documents/cpu_binding.md
-#, fuzzy
 msgid "40-41"
 msgstr "40-41"
 
 #: ../../source/developer_guide/Design_Documents/cpu_binding.md
-#, fuzzy
 msgid "42-77"
 msgstr "42-77"
 
@@ -626,12 +608,10 @@ msgid "600-639"
 msgstr "600-639"
 
 #: ../../source/developer_guide/Design_Documents/cpu_binding.md
-#, fuzzy
 msgid "600-601"
 msgstr "600-601"
 
 #: ../../source/developer_guide/Design_Documents/cpu_binding.md
-#, fuzzy
 msgid "602-637"
 msgstr "602-637"
 
@@ -640,12 +620,10 @@ msgid "638"
 msgstr "638"
 
 #: ../../source/developer_guide/Design_Documents/cpu_binding.md
-#, fuzzy
 msgid "639"
 msgstr "639"
 
 #: ../../source/developer_guide/Design_Documents/cpu_binding.md:179
-#, fuzzy
 msgid ""
 "This layout remains deterministic even when different worker processes "
 "share the same cpuset, because slicing is based on the global logical NPU"
@@ -702,7 +680,6 @@ msgid "Visible NPU"
 msgstr "可见NPU"
 
 #: ../../source/developer_guide/Design_Documents/cpu_binding.md
-#, fuzzy
 msgid "Final CPU pool"
 msgstr "最终CPU池"
 
@@ -711,7 +688,6 @@ msgid "A"
 msgstr "A"
 
 #: ../../source/developer_guide/Design_Documents/cpu_binding.md
-#, fuzzy
 msgid "144-167"
 msgstr "144-167"
 
@@ -724,7 +700,6 @@ msgid "2"
 msgstr "2"
 
 #: ../../source/developer_guide/Design_Documents/cpu_binding.md
-#, fuzzy
 msgid "168-191"
 msgstr "168-191"
 
@@ -740,12 +715,10 @@ msgid "Logs"
 msgstr "日志"
 
 #: ../../source/developer_guide/Design_Documents/cpu_binding.md:207
-#, fuzzy
 msgid "The allocator logs the selected mode and allocation plan:"
 msgstr "分配器记录所选模式和分配计划："
 
 #: ../../source/developer_guide/Design_Documents/cpu_binding.md:215
-#, fuzzy
 msgid "Limitations"
 msgstr "限制"
 

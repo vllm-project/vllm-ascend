@@ -101,7 +101,7 @@ Get the latest info here: <https://github.com/vllm-project/vllm-ascend/issues/16
 | Llama3.2                       | 🔵            |                                                                      | A2/A3 |
 | PaddleOCR-VL                   | 🔵            |                                                                      | A2/A3 |
 | Llama4                         | ❌            | [1972](https://github.com/vllm-project/vllm-ascend/issues/1972)      |       |
-| Keye-VL-8B-Preview             | ❌            | [1963](https://github.com/vllm-project/vllm-ascend/issues/1963)      |       |
+| Keye-VL-8B-Preview             | ❌            | [1961](https://github.com/vllm-project/vllm-ascend/issues/1961)      |       |
 | Florence-2                     | ❌            | [2259](https://github.com/vllm-project/vllm-ascend/issues/2259)      |       |
 | GLM-4V                         | ❌            | [2260](https://github.com/vllm-project/vllm-ascend/issues/2260)      |       |
 | InternVL2.0/2.5/3.0<br>InternVideo2.5/Mono-InternVL | ❌ | [2064](https://github.com/vllm-project/vllm-ascend/issues/2064) |  |

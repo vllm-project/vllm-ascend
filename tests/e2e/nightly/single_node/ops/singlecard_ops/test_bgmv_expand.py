@@ -38,7 +38,7 @@ def test_bgmv_expand():
 
     # Compare the results.
     torch.testing.assert_close(y_out_npu.cpu(),
-                               y_out,
+                               y_out.cpu(),
                                atol=DEFAULT_ATOL,
                                rtol=DEFAULT_RTOL)
     gc.collect()

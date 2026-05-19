@@ -519,13 +519,15 @@ class AscendAttentionBackendImpl(AttentionImpl):
                         scale,
                         attn_output,
                         softmax_lse,
+                        sparse_mode,
+                        pre_tokens,
+                        next_tokens,
                         c8_k_aq_scale,
                         c8_k_aq_offset,
                         c8_v_aq_scale,
                         c8_v_aq_offset,
                     ) = param
 
-                    sparse_mode = 3
                     if _EXTRA_CTX.is_draft_model:
                         draft_step = attn_count // num_layers
                         seq_lens = attn_metadata[draft_step][key].seq_lens_list
@@ -537,7 +539,16 @@ class AscendAttentionBackendImpl(AttentionImpl):
                     else:
                         seq_lens = attn_metadata[key].seq_lens_list
                         actual_seq_lengths_q = attn_metadata[key].actual_seq_lengths_q
-                        block_tables = attn_metadata[key].block_tables
+                        # NOTE:
+                        # For models with sliding-window attention on the FIA full-graph replay path,
+                        # rebinding `block_tables` to the latest metadata tensor causes corrupted /
+                        # repeated outputs in our repro on Ascend NPU.
+                        #
+                        # Keep the captured block_tables tensor on this affected path.
+                        # Non-SWA models preserve the original behavior and continue to refresh
+                        # block_tables from attn_metadata.
+                        if not hasattr(vllm_config.model_config.hf_text_config, "sliding_window"):
+                            block_tables = attn_metadata[key].block_tables
 
                     torch.npu.graph_task_update_begin(update_stream, handle)
                     input_layout = "TND"
@@ -573,6 +584,8 @@ class AscendAttentionBackendImpl(AttentionImpl):
                         num_heads=num_heads,
                         scale=scale,
                         sparse_mode=sparse_mode,
+                        pre_tokens=pre_tokens,
+                        next_tokens=next_tokens,
                         **extra_args,
                         workspace=graph_params.workspaces.get(num_tokens),
                         out=[attn_output, softmax_lse],
@@ -633,7 +646,10 @@ class AscendAttentionBackendImpl(AttentionImpl):
         softmax_lse = torch.empty(1, dtype=query.dtype, device=query.device)
         input_layout = "TND"
         attn_mask = attn_metadata.attn_mask
-        sparse_mode = 3 if attn_metadata.causal else 0
+        sparse_mode = 4 if self.sliding_window else 3 if attn_metadata.causal else 0
+        pre_tokens = self.sliding_window or SWA_INT_MAX
+        next_tokens = 0 if self.sliding_window else SWA_INT_MAX
+
         extra_args = {}
 
         # head_size=512 requires BNSD layout on Ascend NPU
@@ -676,6 +692,8 @@ class AscendAttentionBackendImpl(AttentionImpl):
                 num_key_value_heads=self.num_kv_heads,
                 num_heads=self.num_heads,
                 sparse_mode=sparse_mode,
+                pre_tokens=pre_tokens,
+                next_tokens=next_tokens,
                 scale=self.scale,
                 **extra_args,
             )
@@ -705,6 +723,9 @@ class AscendAttentionBackendImpl(AttentionImpl):
             self.scale,
             weak_ref_tensors(output),
             weak_ref_tensors(softmax_lse),
+            sparse_mode,
+            pre_tokens,
+            next_tokens,
         )
         if self.enable_c8_quant:
             attn_params = attn_params + (
@@ -745,6 +766,8 @@ class AscendAttentionBackendImpl(AttentionImpl):
             num_heads=self.num_heads,
             scale=self.scale,
             sparse_mode=sparse_mode,
+            pre_tokens=pre_tokens,
+            next_tokens=next_tokens,
             workspace=workspace,
             out=[output, softmax_lse],
             **extra_args,
@@ -1113,6 +1136,24 @@ class AscendAttentionBackendImpl(AttentionImpl):
                     num_heads=self.num_heads,
                     scale=self.scale,
                     sparse_mode=0,
+                )
+            elif self.sliding_window is not None:
+                attn_output, _ = torch_npu.npu_fused_infer_attention_score(
+                    query=query,
+                    key=key,
+                    value=value,
+                    atten_mask=attn_metadata.attn_mask,
+                    block_table=block_table,
+                    input_layout="TND",
+                    block_size=block_size,
+                    actual_seq_lengths=attn_metadata.actual_seq_lengths_q,
+                    actual_seq_lengths_kv=actual_seq_lengths_kv,
+                    num_key_value_heads=self.num_kv_heads,
+                    num_heads=self.num_heads,
+                    scale=self.scale,
+                    pre_tokens=self.sliding_window,
+                    next_tokens=0,
+                    sparse_mode=4,
                 )
             else:
                 attn_output, _ = torch_npu.npu_fused_infer_attention_score(
