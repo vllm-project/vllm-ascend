@@ -8,7 +8,7 @@ msgid ""
 msgstr ""
 "Project-Id-Version: vllm-ascend \n"
 "Report-Msgid-Bugs-To: \n"
-"POT-Creation-Date: 2026-05-16 02:20+0000\n"
+"POT-Creation-Date: 2026-05-19 04:27+0000\n"
 "PO-Revision-Date: 2026-04-10 18:37+0800\n"
 "Last-Translator: FULL NAME <EMAIL@ADDRESS>\n"
 "Language: zh_CN\n"
@@ -127,7 +127,7 @@ msgstr ""
 
 #: ../../source/tutorials/models/GLM4.x.md:27
 msgid ""
-"`Method of Quantify`: [quantization scheme](https://ai.gitcode.com"
+"`Method of Quantization`: [quantization scheme](https://ai.gitcode.com"
 "/Ascend-SACT/GLM-4.5-w8a8). You can use these methods to quantify the "
 "model."
 msgstr ""
@@ -267,9 +267,9 @@ msgstr "预填充-解码分离部署"
 
 #: ../../source/tutorials/models/GLM4.x.md:274
 msgid ""
-"We'd like to show the deployment guide of `GLM4.7` on multi-node "
+"We'd like to show the deployment guide of `GLM-4.7` on multi-node "
 "environment with 2P1D for better performance."
-msgstr "我们将在多节点环境下以 2P1D 方式展示 `GLM4.7` 的部署指南，以获得更好的性能。"
+msgstr "我们将在多节点环境下以 2P1D 方式展示 `GLM-4.7` 的部署指南，以获得更好的性能。"
 
 #: ../../source/tutorials/models/GLM4.x.md:276
 msgid "Before you start, please"
