@@ -1,0 +1,214 @@
+import threading
+import time
+import torch
+import torch_npu
+import msgspec.msgpack
+import zmq
+
+from vllm.config import VllmConfig
+
+
+from vllm.logger import logger
+from vllm.utils.network_utils import get_open_zmq_ipc_path, make_zmq_socket
+from vllm_ascend.recovery.exception_handler import ExceptionHandlerFactory, NetworkExceptionHandler
+from vllm_ascend.recovery.types import ExceptionInfo, FaultReport, RecoveryPlan, StepResult, WorkerStepDispatch
+from vllm_ascend.recovery.recovery_executor import RecoveryExecutor
+from vllm_ascend.recovery.utils import get_engine_recovery_bind_address
+
+class WorkerMonitor:
+    """
+    故障处理线程
+    搞3个zmq socket
+    1. 接收worker的错误信息
+    2. 接收EngineCore下发的RecoveryPlan
+    3. 向EngineCore发送故障信息和执行结果
+    """
+    def __init__(self, vllm_config:VllmConfig, worker, ctx:zmq.Context) -> None:
+        self.vllm_config = vllm_config
+        self._worker = worker
+        self.ctx = ctx
+        
+        self.exception_handler_factory = self.build_exception_handler_factory()
+        self.worker_input_address = get_open_zmq_ipc_path()
+        self.engine_index = self.vllm_config.parallel_config.data_parallel_rank
+        (
+            self.core_input_address,
+            self.core_report_address,
+            self.core_result_address,
+        ) = get_engine_recovery_bind_address(engine_index)
+        
+        self._exception_decoder = msgspec.msgpack.Decoder(ExceptionInfo)
+        self._recovery_decoder = msgspec.msgpack.Decoder(WorkerStepDispatch)
+        self._monitor_thread = threading.Thread | None
+    
+    def build_exception_handler_factory(self) -> ExceptionHandlerFactory:
+        exception_handler_factory = ExceptionHandlerFactory()
+        network_handler = NetworkExceptionHandler()
+
+        exception_handler_factory._register_handler(network_handler)
+        
+        return exception_handler_factory
+
+    def start(self):
+        self._monitor_thread = threading.Thread(
+            target=self._run_monitor,
+            name="WorkerMonitorThread",
+            daemon=True,
+        )
+        self._monitor_thread.start()
+
+    def _run_monitor(self):
+        with (
+            make_zmq_socket(
+                path=self.worker_input_address, 
+                ctx=self.ctx,
+                socket_type=zmq.PULL,
+                bind=True,
+            ) as worker_input_socket,
+            make_zmq_socket(
+                path=self.core_input_address,
+                ctx=self.ctx,
+                socket_type=zmq.XSUB,
+                bind=None,
+            ) as core_input_socket,
+            make_zmq_socket(
+                path=self.core_report_address,
+                ctx=self.ctx,
+                socket_type=zmq.PUSH,
+                bind=False,
+            ) as core_report_socket,
+            make_zmq_socket(
+                path=self.core_result_address,
+                ctx=self.ctx,
+                socket_type=zmq.PUSH,
+                bind=False,
+            ) as core_result_socket,
+        ):
+            core_input_socket.send(b"\x01")
+
+            poller = zmq.Poller()
+            poller.register(worker_input_socket, zmq.POLLIN)
+            poller.register(core_input_socket, zmq.POLLIN)
+
+            while True:
+                events = poller.poll()
+                events = dict(events)
+                if worker_input_socket in events:
+                    logger.info("[WorkerMonitor] WorkerProc hit with an exception")
+                    buffer = worker_input_socket.recv()
+                    try:
+                        exc = self._exception_decoder.decode(buffer)
+                    except msgspec.DecodeError as e:
+                        logger.error("[WorkerMonitor] Failed to decode exception info from worker thread: %s", e)
+                        continue
+                    handler = self.exception_handler_factory.get_handler(exc)
+                    if handler is None:
+                        logger.info("[WorkerMonitor] Non-recoverable error detected in worker thread.")
+                        continue
+                    
+                    recovery_plan = handler.generate_plan(exc, self.vllm_config)
+
+                    fault_report = FaultReport(
+                        worker_rank=self._worker.rank,
+                        engine_index=self.engine_index,
+                        exp=exc,
+                        recovery_plan=recovery_plan,
+                    )
+                    report_encode = msgspec.msgpack.encode(("faultreport", fault_report))
+                    core_report_socket.send(report_encode)
+
+                if core_input_socket in events:
+                    logger.info("[WorkerMonitor] Receive recovery_step from EngineCoreProc")
+                    buffer = core_input_socket.recv()
+                    try:
+                        recovery_step_with_cfg = self._recovery_decoder.decode(buffer)
+                    except msgspec.DecodeError as e:
+                        logger.error("[WorkerMonitor] Failed to decode recovery plan from enginecore: %s", e)
+                        continue
+
+                    recovery_step = recovery_step_with_cfg.step
+                    cfg = recovery_step_with_cfg.cfg
+                    cfg, is_success = recovery_step.execute(self._worker, cfg)
+                    
+                    step_result = StepResult(
+                        worker_rank=self._worker.rank,
+                        step_name=recovery_step.name,
+                        is_success=is_success,
+                        cfg=cfg
+                    )
+                    step_result_encode = msgspec.msgpack.encode(("stepresult", step_result))
+                    core_result_socket.send(step_result_encode)
+    
+    def _stop_device(executor: NPUWorker, cfg: dict | None) -> bool:
+        try:
+            stop_result = torch_npu.npu.stop_device(executor.local_rank)
+            if stop_result == 0:
+                logger.info("stop_device executed successfully")
+                return True
+            else:
+                logger.error(f"stop_device failed with result: {stop_result}")
+                return False
+        except Exception as e:
+            logger.error(f"stop_device executed failed with exception: {e}")
+            return False
+    
+    def _restart_device(executor: NPUWorker, context:dict | None) -> bool:
+        try:
+            ctx = context or {}
+            torch_npu.npu.restart_device(
+                torch.npu.current_device(), rebuild_all_resources=ctx.get("rebuild_all_resources", False)
+            )
+            return True
+        except Exception as e:
+            logger.error(f"restart_device executed failed with exception: {e}")
+            return False
+
+    def _reinit_process_group(executor: NPUWorker, context:dict | None) -> bool:
+        try:
+            ctx = context or {}
+            torch.distributed.reinit_process_group(
+                group=ctx.get("group", None), rebuild_link=ctx.get("rebuild_link", True)
+            )
+            return True
+        except Exception as e:
+            logger.error(f"reinit_process_group executed failed with exception: {e}")
+            return False
+
+    def _clean_cache(executor: NPUWorker, context:dict | None) -> bool:
+        try:
+            ctx = context or {}
+            abort_list = context.get("abort_list", [])
+            model_runner = executor._worker.model_runner
+            for req_id in abort_list:
+                model_runner.requests.pop(req_id, None)
+                model_runner.num_prompt_logprobs.pop(req_id, None)
+                model_runner.input_batch.remove_request(req_id)
+            return True
+        except Exception as e:
+            logger.error(f"worker clean_cached failed with exception: {e}")
+            return False
+
+    def _recovery_finished(executor: NPUWorker, context:dict | None) -> bool:
+        executor.in_recovery = False
+        return True
+
+
+    def _recovery_begin(executor: NPUWorker, context:dict | None) -> bool:
+        executor.in_recovery = True
+        return True
+
+def create_worker_monitor(worker, vllm_config:VllmConfig):
+    if hasattr(worker, 'worker_monitor') and worker.worker_monitor is not None:
+        logger.info("WorkerMonitor already exists, skipping creation")
+        return
+
+    ctx=zmq.Context()
+    worker.in_recovery = False
+    worker_monitor = WorkerMonitor(vllm_config, worker, ctx)
+    worker.worker_monitor = worker_monitor
+    worker.worker_input_socket = make_zmq_socket(
+        path=worker_monitor.worker_input_address,
+        ctx=ctx,
+        socket_type=zmq.PUSH,
+        bind=None,
+    )
