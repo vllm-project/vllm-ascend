@@ -120,7 +120,8 @@ from vllm_ascend.device.mxfp_compat import (
     mxfp_kv_page_size_bytes,
     mxfp_resolve_kv_cache_layout,
     mxfp_v_scale_numel,
-    mxfp_view_scale_cache,
+    mxfp_view_k_scale_cache,
+    mxfp_view_v_scale_cache,
 )
 from vllm_ascend.ops.rotary_embedding import set_cos_and_sin, update_cos_sin
 from vllm_ascend.patch.worker.patch_draft_quarot import patch_load_weights
@@ -3242,12 +3243,13 @@ class NPUModelRunner(GPUModelRunner):
         kv_cache_spec: AttentionSpec,
         raw_cache_tensors: tuple[torch.Tensor, ...] | list[torch.Tensor] | None = None,
     ) -> bool:
-        if not self._is_c8_mxfp_quant_enabled():
-            return False
         if isinstance(kv_cache_spec, MLAAttentionSpec):
             return False
+        # Split k/v/k_scale/v_scale buffers are the ground truth for reshape path.
         if raw_cache_tensors is not None and len(raw_cache_tensors) >= 4:
             return True
+        if not self._is_c8_mxfp_quant_enabled():
+            return False
         from vllm.v1.kv_cache_interface import FullAttentionSpec
 
         return isinstance(kv_cache_spec, FullAttentionSpec)
@@ -3261,12 +3263,13 @@ class NPUModelRunner(GPUModelRunner):
         layer_name: str,
         raw_cache_tensors: tuple[torch.Tensor, ...] | list[torch.Tensor],
         kv_cache_spec: AttentionSpec,
+        num_blocks_hint: int | None = None,
     ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
         raw_k_tensor, raw_v_tensor, raw_k_scale_tensor, raw_v_scale_tensor = raw_cache_tensors
         k_dim, v_dim = self._get_attention_kv_cache_dims(layer_name, kv_cache_spec)
         block_size = kv_cache_spec.block_size
         num_heads = kv_cache_spec.num_kv_heads
-        _, k_shape, v_shape, k_scale_shape, v_scale_shape = mxfp_resolve_kv_cache_layout(
+        _, k_shape, v_shape, _, _ = mxfp_resolve_kv_cache_layout(
             raw_k_numel=raw_k_tensor.numel(),
             raw_v_numel=raw_v_tensor.numel(),
             raw_k_scale_numel=raw_k_scale_tensor.numel(),
@@ -3276,7 +3279,10 @@ class NPUModelRunner(GPUModelRunner):
             k_dim=k_dim,
             v_dim=v_dim,
             layer_name=layer_name,
+            num_blocks_hint=num_blocks_hint,
         )
+        resolved_k_dim = k_shape[-1]
+        resolved_v_dim = v_shape[-1]
         k_cache_dtype = v_cache_dtype = torch.float8_e4m3fn
         if self.is_kv_consumer and enable_fa_quant(self.vllm_config):
             k_cache_dtype, v_cache_dtype = self.vllm_config.quant_config.get_kv_quant_dtype(
@@ -3284,8 +3290,12 @@ class NPUModelRunner(GPUModelRunner):
             )
         k_cache = raw_k_tensor.view(k_cache_dtype).view(k_shape)
         v_cache = raw_v_tensor.view(v_cache_dtype).view(v_shape)
-        k_scale_cache = mxfp_view_scale_cache(raw_k_scale_tensor, k_scale_shape)
-        v_scale_cache = mxfp_view_scale_cache(raw_v_scale_tensor, v_scale_shape)
+        k_scale_cache = mxfp_view_k_scale_cache(
+            raw_k_scale_tensor, block_size, num_heads, resolved_k_dim, layer_name=layer_name
+        )
+        v_scale_cache = mxfp_view_v_scale_cache(
+            raw_v_scale_tensor, block_size, num_heads, resolved_v_dim, layer_name=layer_name
+        )
         return k_cache, v_cache, k_scale_cache, v_scale_cache
 
     def _allocate_raw_cache_tensor(self, size: int, alignment: int, needs_alignment: bool | None = None) -> torch.Tensor:
@@ -3363,6 +3373,16 @@ class NPUModelRunner(GPUModelRunner):
                 f"Expected MLAAttention layer for {layer_name}, got {type(attn_layer).__name__}."
             )
 
+        from vllm.model_executor.layers.attention import Attention
+
+        attn_layers = get_layers_from_vllm_config(
+            self.vllm_config,
+            AttentionLayerBase,
+            [layer_name],
+        )
+        attn_layer = attn_layers[layer_name]
+        if isinstance(attn_layer, Attention):
+            return attn_layer.head_size, attn_layer.head_size_v
         head_size_v = kv_cache_spec.head_size_v if hasattr(kv_cache_spec, "head_size_v") else kv_cache_spec.head_size
         return kv_cache_spec.head_size, head_size_v
 
@@ -3635,6 +3655,7 @@ class NPUModelRunner(GPUModelRunner):
                                 layer_name,
                                 raw_cache_tensors,
                                 current_kv_cache_spec,
+                                num_blocks_hint=kv_cache_config.num_blocks,
                             )
                             continue
                         sum_page_size_bytes = sum(tensor.numel() for tensor in raw_cache_tensors)

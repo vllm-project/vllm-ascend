@@ -100,3 +100,28 @@ class TestMxfpKvPageSizeBytes(unittest.TestCase):
         for dim in k_scale_shape:
             scale_numel *= dim
         self.assertEqual(scale_numel, raw_k_scale)
+
+    def test_resolve_layout_reconciles_spec_k_dim_with_scale_buffer(self):
+        block_size = 128
+        num_kv_heads = 8
+        num_blocks = 1476
+        true_k_dim = 128
+        wrong_k_dim = 64
+        raw_k = num_blocks * block_size * num_kv_heads * true_k_dim
+        raw_v = raw_k
+        raw_k_scale = mxfp_k_scale_numel(num_blocks, block_size, num_kv_heads, true_k_dim)
+        raw_v_scale = mxfp_v_scale_numel(num_blocks, block_size, num_kv_heads, true_k_dim)
+
+        _, k_shape, _, k_scale_shape, _ = mxfp_resolve_kv_cache_layout(
+            raw_k_numel=raw_k,
+            raw_v_numel=raw_v,
+            raw_k_scale_numel=raw_k_scale,
+            raw_v_scale_numel=raw_v_scale,
+            block_size=block_size,
+            num_kv_heads=num_kv_heads,
+            k_dim=wrong_k_dim,
+            v_dim=true_k_dim,
+            num_blocks_hint=num_blocks,
+        )
+        self.assertEqual(k_shape[-1], true_k_dim)
+        self.assertEqual(k_scale_shape[0], num_blocks)

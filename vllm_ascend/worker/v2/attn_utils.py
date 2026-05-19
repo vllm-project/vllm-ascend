@@ -46,7 +46,8 @@ from vllm_ascend.device.mxfp_compat import (
     mxfp_kv_page_size_bytes,
     mxfp_resolve_kv_cache_layout,
     mxfp_v_scale_numel,
-    mxfp_view_scale_cache,
+    mxfp_view_k_scale_cache,
+    mxfp_view_v_scale_cache,
 )
 from vllm_ascend.quantization.utils import enable_fa_quant
 from vllm_ascend.utils import calc_split_factor
@@ -212,6 +213,13 @@ def _get_attention_kv_cache_dims(layer_name: str, kv_cache_spec: AttentionSpec) 
             raise TypeError(f"Expected MLAAttention layer for {layer_name}, got {type(attn_layer).__name__}.")
         return attn_layer.kv_lora_rank, attn_layer.qk_rope_head_dim
 
+    from vllm.model_executor.layers.attention import Attention
+
+    vllm_config = get_current_vllm_config()
+    attn_layers = get_layers_from_vllm_config(vllm_config, AttentionLayerBase, [layer_name])
+    attn_layer = attn_layers[layer_name]
+    if isinstance(attn_layer, Attention):
+        return attn_layer.head_size, attn_layer.head_size_v
     head_size_v = kv_cache_spec.head_size_v if hasattr(kv_cache_spec, "head_size_v") else kv_cache_spec.head_size
     return kv_cache_spec.head_size, head_size_v
 
@@ -236,12 +244,12 @@ def _is_c8_mxfp_kv_cache(
 ) -> bool:
     from vllm.v1.kv_cache_interface import FullAttentionSpec
 
-    if not _is_c8_mxfp_quant_enabled(vllm_config):
-        return False
     if isinstance(kv_cache_spec, MLAAttentionSpec):
         return False
     if raw_cache_tensors is not None and len(raw_cache_tensors) >= 4:
         return True
+    if not _is_c8_mxfp_quant_enabled(vllm_config):
+        return False
     return isinstance(kv_cache_spec, FullAttentionSpec)
 
 
@@ -251,10 +259,11 @@ def _reshape_c8_mxfp_kv_cache(
     raw_cache_tensors: tuple[torch.Tensor, ...] | list[torch.Tensor],
     kv_cache_spec: AttentionSpec,
     is_kv_consumer: bool,
+    num_blocks_hint: int | None = None,
 ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
     raw_k_tensor, raw_v_tensor, raw_k_scale_tensor, raw_v_scale_tensor = raw_cache_tensors
     k_dim, v_dim = _get_attention_kv_cache_dims(layer_name, kv_cache_spec)
-    _, k_shape, v_shape, k_scale_shape, v_scale_shape = mxfp_resolve_kv_cache_layout(
+    _, k_shape, v_shape, _, _ = mxfp_resolve_kv_cache_layout(
         raw_k_numel=raw_k_tensor.numel(),
         raw_v_numel=raw_v_tensor.numel(),
         raw_k_scale_numel=raw_k_scale_tensor.numel(),
@@ -264,7 +273,10 @@ def _reshape_c8_mxfp_kv_cache(
         k_dim=k_dim,
         v_dim=v_dim,
         layer_name=layer_name,
+        num_blocks_hint=num_blocks_hint,
     )
+    resolved_k_dim = k_shape[-1]
+    resolved_v_dim = v_shape[-1]
     k_cache_dtype = v_cache_dtype = torch.float8_e4m3fn
     if is_kv_consumer and enable_fa_quant(vllm_config):
         k_cache_dtype, v_cache_dtype = vllm_config.quant_config.get_kv_quant_dtype(
@@ -272,8 +284,20 @@ def _reshape_c8_mxfp_kv_cache(
         )
     k_cache = raw_k_tensor.view(k_cache_dtype).view(k_shape)
     v_cache = raw_v_tensor.view(v_cache_dtype).view(v_shape)
-    k_scale_cache = mxfp_view_scale_cache(raw_k_scale_tensor, k_scale_shape)
-    v_scale_cache = mxfp_view_scale_cache(raw_v_scale_tensor, v_scale_shape)
+    k_scale_cache = mxfp_view_k_scale_cache(
+        raw_k_scale_tensor,
+        kv_cache_spec.block_size,
+        kv_cache_spec.num_kv_heads,
+        resolved_k_dim,
+        layer_name=layer_name,
+    )
+    v_scale_cache = mxfp_view_v_scale_cache(
+        raw_v_scale_tensor,
+        kv_cache_spec.block_size,
+        kv_cache_spec.num_kv_heads,
+        resolved_v_dim,
+        layer_name=layer_name,
+    )
     return k_cache, v_cache, k_scale_cache, v_scale_cache
 
 
@@ -434,6 +458,7 @@ def _reshape_kv_cache(
                         raw_cache_tensors,
                         kv_cache_spec,
                         is_kv_consumer,
+                        num_blocks_hint=kv_cache_config.num_blocks,
                     )
                     continue
                 sum_page_size_bytes = sum(tensor.numel() for tensor in raw_cache_tensors)
