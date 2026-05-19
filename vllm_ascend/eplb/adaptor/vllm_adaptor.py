@@ -78,14 +78,7 @@ class VllmEplbAdaptor:
                 if envs_ascend.VLLM_ASCEND_ENABLE_FUSED_MC2 == 1:
                     self.expert_weight_names.append("fused_w1_scale_list")
                     self.expert_weight_names.append("fused_w2_scale_list")
-<<<<<<< eplb
-            elif quant_type == QuantType.MXFP4 or QuantType.MXFP8:
-                self.expert_weight_names = [
-                    "w13_weight",
-                    "w2_weight",
-                    "w13_weight_scale",
-                    "w2_weight_scale",
-=======
+
             elif quant_type == QuantType.W4A8:
                 if envs_ascend.VLLM_ASCEND_ENABLE_FUSED_MC2 != 1:
                     raise ValueError("EPLB not support W4A8 with fused MC2 disabled")
@@ -96,7 +89,14 @@ class VllmEplbAdaptor:
                     "w2_weight_scale_list",
                     "w13_scale_bias_list",
                     "w2_scale_bias_list",
->>>>>>> main
+                ]
+                
+            elif quant_type == QuantType.MXFP4 or QuantType.MXFP8:
+                self.expert_weight_names = [
+                    "w13_weight",
+                    "w2_weight",
+                    "w13_weight_scale",
+                    "w2_weight_scale",
                 ]
             else:
                 raise ValueError(f"EPLB not support {quant_type}")
