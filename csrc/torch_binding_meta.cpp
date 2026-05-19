@@ -37,6 +37,7 @@ namespace vllm_ascend {
 namespace meta {
 const int64_t INT4_NUMS_IN_INT32 = 8;
 
+#ifdef VLLM_ENABLE_ATB_AND_DIRECT_KERNELS
 std::tuple<at::Tensor, at::Tensor> get_masked_input_and_mask_meta(
     at::Tensor &input,
     const int64_t org_vocab_start_index,
@@ -49,16 +50,6 @@ std::tuple<at::Tensor, at::Tensor> get_masked_input_and_mask_meta(
     at::Tensor mask = at::empty_like(input, input.options().dtype(at::kBool));
 
     return {masked_input, mask};
-}
-
-void device_print_meta(c10::string_view msg)
-{
-    (void)msg;
-}
-
-void device_print_tensor_meta(const at::Tensor& tensor)
-{
-    (void)tensor;
 }
 
 at::Tensor bgmv_expand_meta(at::Tensor &x, at::Tensor &weight, at::Tensor &indices, at::Tensor &y,
@@ -107,6 +98,24 @@ std::tuple<at::Tensor &, at::Tensor &, at::Tensor &, at::Tensor &, at::Tensor &>
     )
 {
     return {q_out0, kv_cache_out0, q_out1, kv_cache_out1, inner_out};
+}
+
+void batch_matmul_transpose(const at::Tensor &tensor_a, const at::Tensor &tensor_b, at::Tensor &tensor_c,
+                                    c10::optional<c10::string_view> format_mode,
+                                    c10::optional<c10::string_view> quant_mode)
+{
+    return;
+}
+#endif
+
+void device_print_meta(c10::string_view msg)
+{
+    (void)msg;
+}
+
+void device_print_tensor_meta(const at::Tensor& tensor)
+{
+    (void)tensor;
 }
 
 std::tuple<at::Tensor, at::Tensor, at::Tensor> grouped_matmul_swiglu_quant(
@@ -210,13 +219,6 @@ std::tuple<at::Tensor, at::Tensor> dispatch_gmm_combine_decode_meta(
     at::Tensor expert_token_nums = at::empty({num_local_experts}, opts.device(at::kMeta));
 
     return {output, expert_token_nums};
-}
-
-void batch_matmul_transpose(const at::Tensor &tensor_a, const at::Tensor &tensor_b, at::Tensor &tensor_c,
-                                    c10::optional<c10::string_view> format_mode,
-                                    c10::optional<c10::string_view> quant_mode)
-{
-    return;
 }
 
 std::tuple<at::Tensor&, at::Tensor&> dispatch_ffn_combine_meta(
@@ -1118,6 +1120,232 @@ std::tuple<at::Tensor, at::Tensor> npu_rms_norm_dynamic_quant_meta(
     return std::make_tuple(y_out, scale_out);
 }
 
+void indexer_compress_epilog_meta(
+    at::Tensor& indexer_compress_cache,
+    at::Tensor& indexer_compress_cache_scale,
+    const at::Tensor& x,
+    const at::Tensor& slot_mapping,
+    int64_t quant_mode = 1,
+    bool round_scale = true)
+{
+    return;
+}
+
+void kv_compress_epilog_meta(
+    at::Tensor& kv_compress_cache,
+    const at::Tensor& x,
+    const at::Tensor& slot_mapping,
+    int64_t quant_group_size,
+    int64_t quant_mode,
+    bool round_scale_flag,
+    int64_t layout)
+{
+    return;
+}
+
+std::tuple<at::Tensor, at::Tensor> npu_kv_quant_sparse_attn_sharedkv_meta(
+    const at::Tensor& q,
+    int64_t kv_quant_mode,
+    const c10::optional<at::Tensor>& ori_kv,
+    const c10::optional<at::Tensor>& cmp_kv,
+    const c10::optional<at::Tensor>& ori_sparse_indices,
+    const c10::optional<at::Tensor>& cmp_sparse_indices,
+    const c10::optional<at::Tensor>& ori_block_table,
+    const c10::optional<at::Tensor>& cmp_block_table,
+    const c10::optional<at::Tensor>& cu_seqlens_q,
+    const c10::optional<at::Tensor>& cu_seqlens_ori_kv,
+    const c10::optional<at::Tensor>& cu_seqlens_cmp_kv,
+    const c10::optional<at::Tensor>& seqused_q,
+    const c10::optional<at::Tensor>& seqused_kv,
+    const c10::optional<at::Tensor>& sinks,
+    const c10::optional<at::Tensor>& metadata,
+    int64_t tile_size,
+    int64_t rope_head_dim,
+    double softmax_scale,
+    int64_t cmp_ratio,
+    int64_t ori_mask_mode,
+    int64_t cmp_mask_mode,
+    int64_t ori_win_left,
+    int64_t ori_win_right,
+    c10::string_view layout_q,
+    c10::string_view layout_kv,
+    bool return_softmax_lse)
+{
+    std::string layout_q_str = std::string(layout_q);
+    return construct_output_tensor(q, layout_q_str, return_softmax_lse);
+}
+
+at::Tensor npu_kv_quant_sparse_attn_sharedkv_metadata_meta(
+    int64_t num_heads_q,
+    int64_t num_heads_kv,
+    int64_t head_dim,
+    int64_t kv_quant_mode,
+    const c10::optional<at::Tensor>& cu_seqlens_q,
+    const c10::optional<at::Tensor>& cu_seqlens_ori_kv,
+    const c10::optional<at::Tensor>& cu_seqlens_cmp_kv,
+    const c10::optional<at::Tensor>& seqused_q,
+    const c10::optional<at::Tensor>& seqused_kv,
+    int64_t batch_size,
+    int64_t max_seqlen_q,
+    int64_t max_seqlen_kv,
+    int64_t ori_topk,
+    int64_t cmp_topk,
+    int64_t tile_size,
+    int64_t rope_head_dim,
+    int64_t cmp_ratio,
+    int64_t ori_mask_mode,
+    int64_t cmp_mask_mode,
+    int64_t ori_win_left,
+    int64_t ori_win_right,
+    c10::string_view layout_q,
+    c10::string_view layout_kv,
+    bool has_ori_kv,
+    bool has_cmp_kv,
+    const c10::string_view device)
+{
+    constexpr int64_t OUTPUT_SIZE = 1024;
+    if (cu_seqlens_q.has_value()) {
+        return torch::empty({OUTPUT_SIZE}, torch::dtype(torch::kInt32).device(cu_seqlens_q.value().device()));
+    }
+    if (cu_seqlens_ori_kv.has_value()) {
+        return torch::empty({OUTPUT_SIZE}, torch::dtype(torch::kInt32).device(cu_seqlens_ori_kv.value().device()));
+    }
+    if (cu_seqlens_cmp_kv.has_value()) {
+        return torch::empty({OUTPUT_SIZE}, torch::dtype(torch::kInt32).device(cu_seqlens_cmp_kv.value().device()));
+    }
+    if (seqused_q.has_value()) {
+        return torch::empty({OUTPUT_SIZE}, torch::dtype(torch::kInt32).device(seqused_q.value().device()));
+    }
+    if (seqused_kv.has_value()) {
+        return torch::empty({OUTPUT_SIZE}, torch::dtype(torch::kInt32).device(seqused_kv.value().device()));
+    }
+
+    auto device_ori = at::Device(std::string(device));
+    std::string device_str = "meta";
+    if (device_ori.has_index()) {
+        device_str += ":";
+        device_str += std::to_string(device_ori.index());
+    }
+    return torch::empty({OUTPUT_SIZE}, torch::dtype(torch::kInt32).device(at::Device(device_str)));
+}
+
+int64_t get_type_code(at::ScalarType dst_type)
+{
+    switch (dst_type) {
+        case at::ScalarType::Float8_e5m2:
+            return 35;
+        case at::ScalarType::Float8_e4m3fn:
+            return 36;
+        case at::ScalarType::Half:
+            return 1;
+        case at::ScalarType::BFloat16:
+            return 27;
+        default:
+            TORCH_CHECK(false, "Unsupported dtype: ", dst_type);
+    }
+    return 0;
+}
+
+std::tuple<at::Tensor, at::Tensor, at::Tensor> construct_swiglu_group_quant_output_tensor(
+    const at::Tensor& x,
+    int64_t dst_type,
+    int64_t quant_mode,
+    bool ue8m0_scale)
+{
+    constexpr int64_t SIZE = 8;
+    constexpr int64_t SWIGLU_FACTOR = 2;
+    constexpr int64_t PER_BLOCK_FP16 = 128;
+    constexpr int64_t PER_MX_FP16 = 32;
+    constexpr int64_t MX_SCALE_ALIGN_FACTOR = 2;
+    constexpr int64_t GROUP_QUANT = 1;
+    constexpr int64_t MX_QUANT = 2;
+    constexpr int64_t FP8_QUANT = 3;
+
+    at::SmallVector<int64_t, SIZE> y_size(x.sizes().begin(), x.sizes().end());
+    TORCH_CHECK(x.dtype() == at::kHalf || x.dtype() == at::kBFloat16,
+                "x should be FLOAT16 or BFLOAT16.");
+    int64_t x_last_dim = x.sizes().back();
+    TORCH_CHECK(quant_mode == GROUP_QUANT || quant_mode == MX_QUANT || quant_mode == FP8_QUANT,
+                "Unsupported quant mode, only support ", GROUP_QUANT, " or ", MX_QUANT, " or ", FP8_QUANT, ".");
+    if (quant_mode == GROUP_QUANT || quant_mode == FP8_QUANT) {
+        TORCH_CHECK(x_last_dim % 256 == 0,
+                    "In group quant, the last dim of x should be divisible by 256, actual ", x_last_dim, ".");
+    } else {
+        TORCH_CHECK(x_last_dim % 128 == 0,
+                    "In mx quant, the last dim of x should be divisible by 128, actual ", x_last_dim, ".");
+    }
+
+    y_size.back() = y_size.back() / SWIGLU_FACTOR;
+    int64_t y_last_dim = y_size.back();
+    auto y_dtype = dst_type == 35 ? at::kFloat8_e5m2 : at::kFloat8_e4m3fn;
+    at::Tensor y = at::empty(y_size, x.options().dtype(y_dtype));
+
+    at::SmallVector<int64_t, SIZE> scale_size(y_size.begin(), y_size.end());
+    if (quant_mode == GROUP_QUANT || quant_mode == FP8_QUANT) {
+        scale_size.back() = (y_last_dim + PER_BLOCK_FP16 - 1) / PER_BLOCK_FP16;
+    } else if (quant_mode == MX_QUANT) {
+        int64_t scale_last_dim = (y_last_dim + PER_MX_FP16 - 1) / PER_MX_FP16;
+        scale_last_dim = (scale_last_dim + MX_SCALE_ALIGN_FACTOR - 1) / MX_SCALE_ALIGN_FACTOR;
+        scale_size.back() = scale_last_dim;
+        scale_size.push_back(MX_SCALE_ALIGN_FACTOR);
+    }
+
+    auto scale_type = at::kFloat;
+    if (quant_mode == MX_QUANT || (quant_mode == FP8_QUANT && ue8m0_scale)) {
+        scale_type = at::kFloat8_e8m0fnu;
+    }
+    at::Tensor scale = at::empty(scale_size, x.options().dtype(scale_type));
+    at::Tensor y_origin = at::empty(y_size, x.options().dtype(x.dtype()));
+
+    return std::tuple<at::Tensor, at::Tensor, at::Tensor>(y, scale, y_origin);
+}
+
+std::tuple<at::Tensor, at::Tensor, at::Tensor> npu_swiglu_group_quant_meta(
+    const at::Tensor& x,
+    const c10::optional<at::Tensor>& topk_weight,
+    const c10::optional<at::Tensor>& group_index,
+    at::ScalarType dst_type = at::ScalarType::Float8_e4m3fn,
+    int64_t quant_mode = 1,
+    int64_t group_size = 128,
+    bool round_scale = false,
+    bool ue8m0_scale = false,
+    bool output_origin = false,
+    int64_t group_list_type = 0,
+    double clamp_value = 0.0)
+{
+    int64_t dst_type_code = get_type_code(dst_type);
+    return construct_swiglu_group_quant_output_tensor(x, dst_type_code, quant_mode, ue8m0_scale);
+}
+
+std::tuple<at::Tensor, at::Tensor> construct_load_index_kv_cache_output_tensor(
+    const at::Tensor& kv_cache,
+    const at::Tensor& slot_mapping)
+{
+    constexpr int64_t KV_LAST_DIM = 128;
+    int64_t n = slot_mapping.size(0);
+
+    at::Tensor kv = at::empty({n, KV_LAST_DIM}, kv_cache.options().dtype(at::kFloat8_e4m3fn));
+    at::Tensor kv_scale = at::empty({n}, kv_cache.options().dtype(at::kFloat));
+
+    return std::tuple<at::Tensor, at::Tensor>(kv, kv_scale);
+}
+
+std::tuple<at::Tensor, at::Tensor> npu_load_index_kv_cache_meta(
+    const at::Tensor& kv_cache,
+    const at::Tensor& slot_mapping)
+{
+    return construct_load_index_kv_cache_output_tensor(kv_cache, slot_mapping);
+}
+
+void indexer_compress_epilog_v2_meta(
+    at::Tensor& indexer_compress_cache,
+    const at::Tensor& x,
+    const at::Tensor& slot_mapping,
+    int64_t layout = 2)
+{
+    return;
+}
+
 std::tuple<at::Tensor, at::Tensor> npu_dequant_swiglu_quant_meta(
     const at::Tensor& x,
     const c10::optional<at::Tensor>& weight_scale,
@@ -1312,18 +1540,24 @@ namespace {
 TORCH_LIBRARY_IMPL_EXPAND(CONCAT(_C, _ascend), Meta, ops) {
     //Gemma rmsnorm meta implementation
     ops.impl("npu_gemma_rms_norm", &vllm_ascend::meta::npu_gemma_rms_norm_meta);
-    // Masked input and mask meta implementation
-    ops.impl("get_masked_input_and_mask", &vllm_ascend::meta::get_masked_input_and_mask_meta);
     // Launch host print from device
     ops.impl("device_print", &vllm_ascend::meta::device_print_meta);
     // launch host print from device for tensors
     ops.impl("device_print_tensor", &vllm_ascend::meta::device_print_tensor_meta);
+#ifdef VLLM_ENABLE_ATB_AND_DIRECT_KERNELS
+    // Direct kernel meta implementations
+    ops.impl("get_masked_input_and_mask", &vllm_ascend::meta::get_masked_input_and_mask_meta);
     // Bgmv expand
     ops.impl("bgmv_expand", &vllm_ascend::meta::bgmv_expand_meta);
     // Sgmv expand
     ops.impl("sgmv_expand", &vllm_ascend::meta::sgmv_expand_meta);
     // MLA preprocess
     ops.impl("mla_preprocess", &vllm_ascend::meta::mla_preprocess);
+    // batch_matmul_transpose
+    ops.impl("batch_matmul_transpose", &vllm_ascend::meta::batch_matmul_transpose);
+#endif
+    // grouped_matmul_swiglu_quant_weight_nz meta implementation
+    ops.impl("grouped_matmul_swiglu_quant_weight_nz", &vllm_ascend::meta::grouped_matmul_swiglu_quant);
     // grouped_matmul_swiglu_quant meta implementation
     ops.impl("grouped_matmul_swiglu_quant", &vllm_ascend::meta::grouped_matmul_swiglu_quant);
     // Grouped matmul swiglu quant weight nz tensor list
@@ -1332,8 +1566,6 @@ TORCH_LIBRARY_IMPL_EXPAND(CONCAT(_C, _ascend), Meta, ops) {
     ops.impl("grouped_matmul_swiglu_quant_v2", &vllm_ascend::meta::grouped_matmul_swiglu_quant_v2_meta);
     // dispatch_gmm_combine_decode meta implementation
     ops.impl("dispatch_gmm_combine_decode", &vllm_ascend::meta::dispatch_gmm_combine_decode_meta);
-    // batch_matmul_transpose
-    ops.impl("batch_matmul_transpose", &vllm_ascend::meta::batch_matmul_transpose);
     // Lightning indexer
     ops.impl("npu_lightning_indexer", &vllm_ascend::meta::npu_lightning_indexer_meta);
     // Sparse flash attention
@@ -1370,10 +1602,19 @@ TORCH_LIBRARY_IMPL_EXPAND(CONCAT(_C, _ascend), Meta, ops) {
     ops.impl("npu_sparse_attn_sharedkv_metadata", &vllm_ascend::meta::npu_sparse_attn_sharedkv_metadata_meta);
     ops.impl("npu_hc_post", &vllm_ascend::meta::npu_hc_post_meta);
     ops.impl("npu_hc_pre", &vllm_ascend::meta::npu_hc_pre_meta);
+    ops.impl("npu_hc_pre_v2", &vllm_ascend::meta::npu_hc_pre_meta);
     ops.impl("npu_hc_pre_inv_rms", &vllm_ascend::meta::npu_hc_pre_inv_rms_meta);
     ops.impl("npu_hc_pre_sinkhorn", &vllm_ascend::meta::npu_hc_pre_sinkhorn_meta);
     ops.impl("inplace_partial_rotary_mul", &vllm_ascend::meta::inplace_partial_rotary_mul_meta);
     ops.impl("npu_rms_norm_dynamic_quant", &vllm_ascend::meta::npu_rms_norm_dynamic_quant_meta);
+    ops.impl("indexer_compress_epilog", &vllm_ascend::meta::indexer_compress_epilog_meta);
+    ops.impl("kv_compress_epilog", &vllm_ascend::meta::kv_compress_epilog_meta);
+    ops.impl("npu_kv_quant_sparse_attn_sharedkv", &vllm_ascend::meta::npu_kv_quant_sparse_attn_sharedkv_meta);
+    ops.impl("npu_kv_quant_sparse_attn_sharedkv_metadata",
+             &vllm_ascend::meta::npu_kv_quant_sparse_attn_sharedkv_metadata_meta);
+    ops.impl("npu_swiglu_group_quant", &vllm_ascend::meta::npu_swiglu_group_quant_meta);
+    ops.impl("npu_load_index_kv_cache", &vllm_ascend::meta::npu_load_index_kv_cache_meta);
+    ops.impl("indexer_compress_epilog_v2", &vllm_ascend::meta::indexer_compress_epilog_v2_meta);
     ops.impl("npu_dequant_swiglu_quant", &vllm_ascend::meta::npu_dequant_swiglu_quant_meta);
     ops.impl("npu_scatter_nd_update_v2", &vllm_ascend::meta::npu_scatter_nd_update_v2_meta);
     // Lightning indexer quant
