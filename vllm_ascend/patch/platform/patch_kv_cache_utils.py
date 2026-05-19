@@ -1,50 +1,49 @@
 from functools import partial
 
 import vllm
-from vllm_ascend import envs
 from vllm.config import VllmConfig
-from vllm.logger import init_logger
-from vllm.utils.hashing import sha256_cbor, xxhash_cbor
-from vllm.utils.math_utils import cdiv
-from vllm.utils.mem_utils import format_gib
+from vllm.v1.core.kv_cache_utils import (
+    _auto_fit_max_model_len,
+    _check_enough_kv_cache_memory,
+    _estimate_max_model_len_from_groups,
+    _max_memory_usage_bytes_from_groups,
+    _project_kv_cache_groups_to_worker,
+    _report_kv_cache_config,
+    get_kv_cache_groups,
+    get_uniform_page_size,
+    may_override_num_blocks,
+)
 from vllm.v1.kv_cache_interface import (
-    ChunkedLocalAttentionSpec,
-    FullAttentionSpec,
     KVCacheConfig,
     KVCacheGroupSpec,
     KVCacheSpec,
     KVCacheTensor,
-    SlidingWindowSpec,
     UniformTypeKVCacheSpecs,
 )
-from vllm.v1.core.kv_cache_utils import (
-    may_override_num_blocks,
-    get_kv_cache_groups,
-    _project_kv_cache_groups_to_worker,
-    _auto_fit_max_model_len,
-    _check_enough_kv_cache_memory,
-    _max_memory_usage_bytes_from_groups,
-    _estimate_max_model_len_from_groups,
-    get_uniform_page_size
-)
-from vllm.v1.request import Request
-from vllm.v1.utils import tensor_data
 
-def get_kv_cache_num_layers(vllm_config: VllmConfig) -> int | None:
-    """Get the effective number of layers for KV cache allocation.
+from vllm_ascend import envs
 
-    When KV cache reuse is enabled (via CacheConfig.kv_cache_reuse_layers
-    or the VLLM_KV_CACHE_REUSE_LAYERS env var), only this many layers
-    need unique KV cache storage. Returns None if reuse is not enabled.
-    """
-    # reuse_layers = vllm_config.cache_config.kv_cache_reuse_layers
-    # if reuse_layers is None:
-    reuse_layers = envs.VLLM_KV_CACHE_REUSE_LAYERS
+
+def get_kv_cache_reuse_layers(max_layers: int | None = None) -> int | None:
+    """Return configured KV cache reuse slots, or None when disabled."""
+    reuse_layers = envs.VLLM_ASCEND_KV_CACHE_REUSE_LAYERS
+    if reuse_layers == 0:
+        return None
+    if reuse_layers < 0:
+        raise ValueError(f"VLLM_ASCEND_KV_CACHE_REUSE_LAYERS must be 0 or a positive integer, got {reuse_layers}.")
+    if max_layers is not None and reuse_layers > max_layers:
+        raise ValueError(
+            "VLLM_ASCEND_KV_CACHE_REUSE_LAYERS must not exceed the number "
+            f"of KV cache layers, got {reuse_layers} > {max_layers}."
+        )
     return reuse_layers
 
 
 def get_num_blocks(
-    vllm_config: VllmConfig, num_layers: int, available_memory: int, page_size: int
+    vllm_config: VllmConfig,
+    num_layers: int,
+    available_memory: int,
+    page_size: int,
 ) -> int:
     """
     Get the number of kv cache blocks.
@@ -55,12 +54,11 @@ def get_num_blocks(
         available_memory: Memory available for KV cache in bytes.
         page_size: The page size of the KV cache.
     """
-    reuse_layers = get_kv_cache_num_layers(vllm_config)
-    effective_layers = reuse_layers if reuse_layers is not None else num_layers
-    num_blocks = int(available_memory // page_size // effective_layers)
+    num_blocks = int(available_memory // page_size // num_layers)
     num_blocks = max(num_blocks, 0)
     num_blocks = may_override_num_blocks(vllm_config, num_blocks)
     return num_blocks
+
 
 def get_kv_cache_config_from_groups(
     vllm_config: VllmConfig,
@@ -88,23 +86,41 @@ def get_kv_cache_config_from_groups(
         )
 
     # Determine how model runners should initialize the KV cache tensors.
-    if len(kv_cache_groups) == 1 and isinstance(
-        kv_cache_groups[0].kv_cache_spec, UniformTypeKVCacheSpecs
-    ):
+    if len(kv_cache_groups) == 1 and isinstance(kv_cache_groups[0].kv_cache_spec, UniformTypeKVCacheSpecs):
         # Special case: all layers have the same type of KV cache but with
         # different hidden size. Allocate different amount of memory for each
         # layer based on its hidden size.
-        num_blocks = (
-            available_memory // kv_cache_groups[0].kv_cache_spec.page_size_bytes
+        group = kv_cache_groups[0]
+        reuse_layers = get_kv_cache_reuse_layers(len(group.layer_names))
+        per_layer_specs = group.kv_cache_spec.kv_cache_specs
+
+        if reuse_layers is not None:
+            page_sizes = {per_layer_specs[layer_name].page_size_bytes for layer_name in group.layer_names}
+            if len(page_sizes) != 1:
+                raise ValueError(
+                    "VLLM_ASCEND_KV_CACHE_REUSE_LAYERS is not supported for "
+                    "UniformTypeKVCacheSpecs with different per-layer page "
+                    f"sizes, got {sorted(page_sizes)}."
+                )
+
+        if reuse_layers is None:
+            storage_slots = [[layer_name] for layer_name in group.layer_names]
+        else:
+            storage_slots = [[] for _ in range(reuse_layers)]
+            for i, layer_name in enumerate(group.layer_names):
+                storage_slots[i % reuse_layers].append(layer_name)
+
+        page_size = sum(
+            max(per_layer_specs[layer_name].page_size_bytes for layer_name in slot) for slot in storage_slots
         )
+        num_blocks = available_memory // page_size
         num_blocks = may_override_num_blocks(vllm_config, num_blocks)
-        per_layer_specs = kv_cache_groups[0].kv_cache_spec.kv_cache_specs
         kv_cache_tensors = [
             KVCacheTensor(
-                size=per_layer_specs[layer_name].page_size_bytes * num_blocks,
-                shared_by=[layer_name],
+                size=max(per_layer_specs[layer_name].page_size_bytes for layer_name in slot) * num_blocks,
+                shared_by=slot,
             )
-            for layer_name in kv_cache_groups[0].layer_names
+            for slot in storage_slots
         ]
     else:
         # General case:
@@ -117,28 +133,28 @@ def get_kv_cache_config_from_groups(
         # full.1, sw.2: share another Tensor with size=available_memory//2
         group_size = max(len(group.layer_names) for group in kv_cache_groups)
 
-        page_size = get_uniform_page_size(
-            [group.kv_cache_spec for group in kv_cache_groups]
-        )
+        page_size = get_uniform_page_size([group.kv_cache_spec for group in kv_cache_groups])
         assert group_size > 0, "group_size must be greater than 0"
-        num_blocks = get_num_blocks(
-            vllm_config, group_size, available_memory, page_size
-        )
+        reuse_layers = get_kv_cache_reuse_layers(group_size)
+        storage_group_size = reuse_layers if reuse_layers is not None else group_size
+        num_blocks = get_num_blocks(vllm_config, storage_group_size, available_memory, page_size)
         kv_cache_tensors = []
-        for i in range(group_size):
+        for i in range(storage_group_size):
             shared_by = []
-            for j in range(len(kv_cache_groups)):
-                if i < len(kv_cache_groups[j].layer_names):
-                    shared_by.append(kv_cache_groups[j].layer_names[i])
-            kv_cache_tensors.append(
-                KVCacheTensor(size=page_size * num_blocks, shared_by=shared_by)
-            )
+            for group in kv_cache_groups:
+                shared_by.extend(
+                    layer_name
+                    for layer_index, layer_name in enumerate(group.layer_names)
+                    if layer_index % storage_group_size == i
+                )
+            kv_cache_tensors.append(KVCacheTensor(size=page_size * num_blocks, shared_by=shared_by))
 
     return KVCacheConfig(
         num_blocks=num_blocks,
         kv_cache_tensors=kv_cache_tensors,
         kv_cache_groups=kv_cache_groups,
     )
+
 
 def get_kv_cache_configs(
     vllm_config: VllmConfig,
@@ -185,8 +201,7 @@ def get_kv_cache_configs(
                 merged_kv_cache_specs[layer_name] = layer_spec
             else:
                 assert merged_kv_cache_specs[layer_name] == layer_spec, (
-                    "The KV cache specs for the same layer are different "
-                    "across workers. This is not supported yet."
+                    "The KV cache specs for the same layer are different across workers. This is not supported yet."
                 )
 
     # Get global KV cache groups. This also handles spec unification for
@@ -198,28 +213,21 @@ def get_kv_cache_configs(
     # determine the maximum model length that fits in available GPU memory.
     # We use per-worker projected groups to account for PP sharding.
     projected_groups_per_worker = [
-        _project_kv_cache_groups_to_worker(global_kv_cache_groups, worker_spec)
-        for worker_spec in kv_cache_specs
+        _project_kv_cache_groups_to_worker(global_kv_cache_groups, worker_spec) for worker_spec in kv_cache_specs
     ]
 
     if vllm_config.model_config.original_max_model_len == -1:
-        _auto_fit_max_model_len(
-            vllm_config, projected_groups_per_worker, available_memory
-        )
+        _auto_fit_max_model_len(vllm_config, projected_groups_per_worker, available_memory)
 
     # Check if the available memory is enough per worker.
-    reuse_layers = get_kv_cache_num_layers(vllm_config)
+    total_layers = vllm_config.model_config.get_num_layers(vllm_config.parallel_config)
+    reuse_layers = get_kv_cache_reuse_layers(total_layers)
     for groups, avail_mem in zip(projected_groups_per_worker, available_memory):
         if not groups:
             continue
         effective_avail_mem = avail_mem
         if reuse_layers is not None:
-            total_layers = vllm_config.model_config.get_num_layers(
-                vllm_config.parallel_config
-            )
-            effective_avail_mem = (
-                avail_mem // reuse_layers * total_layers
-            )
+            effective_avail_mem = avail_mem * total_layers // reuse_layers
         _check_enough_kv_cache_memory(
             effective_avail_mem,
             partial(_max_memory_usage_bytes_from_groups, vllm_config, groups),
@@ -227,7 +235,35 @@ def get_kv_cache_configs(
             partial(_estimate_max_model_len_from_groups, vllm_config, groups),
         )
 
-vllm.v1.core.kv_cache_utils.get_num_blocks = get_num_blocks
+    kv_cache_configs: list[KVCacheConfig] = []
+    for projected_groups, kv_cache_spec_one_worker, available_memory_one_worker in zip(
+        projected_groups_per_worker, kv_cache_specs, available_memory
+    ):
+        assert sum(len(group.layer_names) for group in projected_groups) == len(kv_cache_spec_one_worker), (
+            "Some layers are not assigned to any group."
+        )
+        kv_cache_configs.append(
+            get_kv_cache_config_from_groups(vllm_config, projected_groups, available_memory_one_worker)
+        )
+
+    # Change the num_blocks of each rank to the smallest among all ranks.
+    # We also need to shrink the tensor size proportionally to avoid
+    # allocating unused memory.
+    min_num_blocks = min(kv_cache_config.num_blocks for kv_cache_config in kv_cache_configs)
+    for kv_cache_config in kv_cache_configs:
+        num_blocks_old = kv_cache_config.num_blocks
+        kv_cache_config.num_blocks = min_num_blocks
+
+        # Shrink tensor size proportionally
+        for tensor in kv_cache_config.kv_cache_tensors:
+            assert tensor.size % num_blocks_old == 0
+            tensor.size = tensor.size // num_blocks_old * min_num_blocks
+
+        if len(kv_cache_config.kv_cache_groups) > 0:
+            _report_kv_cache_config(vllm_config, kv_cache_config)
+
+    return kv_cache_configs
+
+
 vllm.v1.core.kv_cache_utils.get_kv_cache_configs = get_kv_cache_configs
-vllm.v1.core.kv_cache_utils.get_kv_cache_num_layers = get_kv_cache_num_layers
 vllm.v1.core.kv_cache_utils.get_kv_cache_config_from_groups = get_kv_cache_config_from_groups
