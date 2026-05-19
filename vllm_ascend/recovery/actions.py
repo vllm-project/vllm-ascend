@@ -3,9 +3,7 @@ from typing import Any, Callable, Tuple
 
 from vllm.logger import logger
 from vllm.v1.engine import EngineCoreEventType
-from vllm.v1.engine.core import EngineCore
 from vllm.v1.request import RequestStatus
-from vllm_ascend.worker.worker import NPUWorker
 
 ActionFunc = Callable[[Any, dict], Tuple[dict, bool]]
 
@@ -42,7 +40,7 @@ def get_worker_action(name: str) -> ActionFunc:
 
 
 @engine_core_action("clear_requests")
-def clear_requests(executer: EngineCore, cfg: dict) -> Tuple[dict, bool]:
+def clear_requests(executer: Any, cfg: dict) -> Tuple[dict, bool]:
     if executer.batch_queue is not None:
         while executer.batch_queue:
             future, _, _ = executer.batch_queue.pop()
@@ -82,7 +80,7 @@ def clear_requests(executer: EngineCore, cfg: dict) -> Tuple[dict, bool]:
     return cfg, True
 
 @worker_action("stop_device")
-def _stop_device(executor: NPUWorker, cfg: dict | None) -> bool:
+def _stop_device(executor: Any, cfg: dict | None) -> bool:
         try:
             stop_result = torch_npu.npu.stop_device(executor.local_rank)
             if stop_result == 0:
@@ -96,7 +94,7 @@ def _stop_device(executor: NPUWorker, cfg: dict | None) -> bool:
             return cfg, False
 
 @worker_action("restart_device")
-def _restart_device(executor: NPUWorker, context:dict | None) -> bool:
+def _restart_device(executor: Any, context:dict | None) -> bool:
     try:
         ctx = context or {}
         torch_npu.npu.restart_device(
@@ -108,7 +106,7 @@ def _restart_device(executor: NPUWorker, context:dict | None) -> bool:
         return cfg, False
 
 @worker_action("reinit_process_group")
-def _reinit_process_group(executor: NPUWorker, context:dict | None) -> bool:
+def _reinit_process_group(executor: Any, context:dict | None) -> bool:
     try:
         ctx = context or {}
         torch.distributed.reinit_process_group(
@@ -120,7 +118,7 @@ def _reinit_process_group(executor: NPUWorker, context:dict | None) -> bool:
         return cfg, False
 
 @worker_action("clean_cache")
-def _clean_cache(executor: NPUWorker, context:dict | None) -> bool:
+def _clean_cache(executor: Any, context:dict | None) -> bool:
     try:
         ctx = context or {}
         abort_list = context.get("abort_list", [])
@@ -135,11 +133,11 @@ def _clean_cache(executor: NPUWorker, context:dict | None) -> bool:
         return cfg, False
 
 @worker_action("recovery_finished")
-def _recovery_finished(executor: NPUWorker, context:dict | None) -> bool:
+def _recovery_finished(executor: Any, context:dict | None) -> bool:
     executor.in_recovery = False
     return cfg, True
 
 @worker_action("recovery_begin")
-def _recovery_begin(executor: NPUWorker, context:dict | None) -> bool:
+def _recovery_begin(executor: Any, context:dict | None) -> bool:
     executor.in_recovery = True
     return cfg, True

@@ -9,7 +9,7 @@ from vllm.logger import logger
 from vllm.utils.network_utils import make_zmq_socket
 from vllm_ascend.recovery.types import (
     FaultReport,
-    RecveryPlan,
+    RecoveryPlan,
     RecoveryComplete,
     RecoveryPlanResult,
     StepResult,
@@ -40,6 +40,9 @@ class RecoveryHandler:
         self._coord_sub_sock: zmq.Socket | None = None
         self._coord_ready_event = threading.Event()
 
+        self._report_decoder = msgspec.msgpack.Decoder(FaultReport)
+        self._result_decoder = msgspec.msgpack.Decoder(StepResult)
+    
     def start(self) -> None:
         self._thread = threading.Thread(
             target=self._run, name="RecoveryHandler", daemon=True
@@ -144,7 +147,7 @@ class RecoveryHandler:
     def _handle_worker_msg(self) -> None:
         buffer = self._recover_report_pull_sock.recv()
         try:
-            msg = msgspec.msgpack.decode(buffer)
+            msg = self._report_decoder(buffer)
         except Exception:
             logger.exception(
                 "[RecoveryHandler][engine=%d] Failed to deserialize FaultReport",
@@ -174,7 +177,7 @@ class RecoveryHandler:
         self._begin_recovery()
         if self._expect_coordinator:
             if self._coord_push_sock is not None:
-                self._coord_push_sock.send(msgspec.msgpack.encode(msg))
+                self._coord_push_sock.send(msgspec.msgpack.encode(("faultreport", msg)))
                 logger.info(
                     "[RecoveryHandler][engine=%d] Forwarded FaultReport to "
                     "coordinator, waiting for RecoveryPlan",
@@ -198,6 +201,8 @@ class RecoveryHandler:
         buffer = self._coord_sub_sock.recv()
         try:
             msg = msgspec.msgpack.decode(buffer)
+            msg_type = msg[0]
+            msg_data = msg[1]
         except Exception:
             logger.exception(
                 "[RecoveryHandler][engine=%d] Failed to deserialize coord msg",
@@ -205,20 +210,22 @@ class RecoveryHandler:
             )
             return
 
-        if isinstance(msg, RecveryPlan):
+        if msg_type == "recoveryplan":
+            recovery_plan = msgspec.convert(msg_data, type=RecoveryPlan)
             logger.info(
                 "[RecoveryHandler][engine=%d] Received RecoveryPlan: %s",
-                self._engine_index, msg.name,
+                self._engine_index, recovery_plan.name,
             )
             if not self.is_recovering:
                 self._begin_recovery()
-            self._execute_recovery(msg)
-        elif isinstance(msg, RecoveryComplete):
-            self._handle_recovery_complete(msg)
+            self._execute_recovery(recovery_plan)
+        elif msg_type == "recoverycomplete":
+            recovery_complete = msgspec.convert(msg_data, type=RecoveryComplete)
+            self._handle_recovery_complete(recovery_complete)
         else:
             logger.warning(
                 "[RecoveryHandler][engine=%d] Unknown coord msg type: %s",
-                self._engine_index, type(msg),
+                self._engine_index, msg_type,
             )
 
     def _handle_recovery_complete(self, msg: RecoveryComplete) -> None:
@@ -242,7 +249,7 @@ class RecoveryHandler:
 
         self._finish_recovery(success=msg.success)
 
-    def _execute_recovery(self, plan: RecveryPlan) -> None:
+    def _execute_recovery(self, plan: RecoveryPlan) -> None:
         logger.info(
             "[RecoveryHandler][engine=%d] Executing RecoveryPlan '%s' with "
             "%d steps",
@@ -302,7 +309,7 @@ class RecoveryHandler:
         return cfg, success
 
     def _finalize_recovery(
-        self, plan: RecveryPlan, result: RecoveryPlanResult
+        self, plan: RecoveryPlan, result: RecoveryPlanResult
     ) -> None:
         if self._expect_coordinator:
             self._report_plan_result(result)
@@ -368,7 +375,7 @@ class RecoveryHandler:
             if self._recover_step_result_pull_sock in events:
                 buffer = self._recover_step_result_pull_sock.recv()
                 try:
-                    msg = msgspec.msgpack.decode(buffer)
+                    msg = self._result_decoder(buffer)
                 except Exception:
                     logger.exception(
                         "[RecoveryHandler][engine=%d] Failed to deserialize "
@@ -403,7 +410,7 @@ class RecoveryHandler:
 
     def _report_plan_result(self, result: RecoveryPlanResult) -> None:
         if self._coord_push_sock is not None:
-            self._coord_push_sock.send(msgspec.msgpack.encode(result))
+            self._coord_push_sock.send(msgspec.msgpack.encode(("recoveryplanresult", result)))
             logger.info(
                 "[RecoveryHandler][engine=%d] Reported RecoveryPlanResult to "
                 "coordinator: plan=%s success=%s",

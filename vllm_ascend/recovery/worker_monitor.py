@@ -12,7 +12,6 @@ from vllm.logger import logger
 from vllm.utils.network_utils import get_open_zmq_ipc_path, make_zmq_socket
 from vllm_ascend.recovery.exception_handler import ExceptionHandlerFactory, NetworkExceptionHandler
 from vllm_ascend.recovery.types import ExceptionInfo, FaultReport, RecoveryPlan, StepResult, WorkerStepDispatch
-from vllm_ascend.recovery.recovery_executor import RecoveryExecutor
 from vllm_ascend.recovery.utils import get_engine_recovery_bind_address
 
 class WorkerMonitor:
@@ -35,7 +34,7 @@ class WorkerMonitor:
             self.core_input_address,
             self.core_report_address,
             self.core_result_address,
-        ) = get_engine_recovery_bind_address(engine_index)
+        ) = get_engine_recovery_bind_address(self.engine_index)
         
         self._exception_decoder = msgspec.msgpack.Decoder(ExceptionInfo)
         self._recovery_decoder = msgspec.msgpack.Decoder(WorkerStepDispatch)
@@ -112,9 +111,9 @@ class WorkerMonitor:
                         worker_rank=self._worker.rank,
                         engine_index=self.engine_index,
                         exp=exc,
-                        recovery_plan=recovery_plan,
+                        plan=recovery_plan,
                     )
-                    report_encode = msgspec.msgpack.encode(("faultreport", fault_report))
+                    report_encode = msgspec.msgpack.encode(fault_report)
                     core_report_socket.send(report_encode)
 
                 if core_input_socket in events:
