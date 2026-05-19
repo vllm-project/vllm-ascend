@@ -30,7 +30,7 @@ class RecoveryStep(msgspec.Struct):
         timeout: Timeout in seconds for this step (None means no timeout)
     """
     name: str
-    executor: str
+    target: str
     actions: list[RecoveryAction] = msgspec.field(default_factory=list)
     timeout: Optional[float] = None
     

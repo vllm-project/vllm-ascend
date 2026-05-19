@@ -29,28 +29,22 @@ class NetworkExceptionHandler(ExceptionHandler):
         网络链路故障(比如灵衢l1-l2链路故障)底层可自愈，无需额外的恢复手段，恢复计划中应包含：
         1. npu故障恢复阶段: stop_device -> restart_device -> reinit_process_group
         """
+        config = dict[str, Any]()
         stop_device = RecoveryAction(
             name="stop_device"
         )
-        
         cudagraph_mode = vllm_config.compilation_config.cudagraph_mode
         rebuild_all_resources = cudagraph_mode == CUDAGraphMode.FULL
         
         restart_device = RecoveryAction(
             name="restart_device",
-            config={
-                "rebuild_all_resources": rebuild_all_resources
-            }
         )
-        # TODO:这里可能涉及根据代际来判断是否需要rebuild_link
+        config["rebuild_all_resources"] = rebuild_all_resources
         reinit_process_group = RecoveryAction(
             name="reinit_process_group",
-            config={
-                "group": None,
-                "rebuild_link": False
-            }
         )
-        
+        config["group"]=None
+        config["rebuild_link"]=False
         npu_recover_step = RecoveryStep(
             name="npu_recover",
             executor="worker",
@@ -74,12 +68,13 @@ class NetworkExceptionHandler(ExceptionHandler):
         封装为最终的recovery plan并返回,包含恢复网络链路故障的全部动作
         """
         network_recover_plan = RecoveryPlan(
-            name="network_recover_play",
-            steps=[npu_recover_step, clean_step]
+            name="network_recover_plan",
+            steps=[npu_recover_step, clean_step],
+            cfg=config,
+            timeout_s=300
         )
         return network_recover_plan
         
-
 class ExceptionHandlerFactory:
     def __init__(self) -> None:
         self.handlers: list[ExceptionHandler] = []
