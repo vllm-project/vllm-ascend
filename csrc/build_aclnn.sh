@@ -143,6 +143,7 @@ elif [[ "$SOC_VERSION" =~ ^ascend910_93 ]]; then
     cp "$HCCL_STRUCT_FILE_PATH" "$TARGET_DIR"
     
     CUSTOM_OPS_ARRAY=(
+        "scatter_nd_update_v2"
         "grouped_matmul_swiglu_quant_weight_nz_tensor_list"
         "lightning_indexer_vllm"
         "sparse_flash_attention"
@@ -156,6 +157,7 @@ elif [[ "$SOC_VERSION" =~ ^ascend910_93 ]]; then
         "notify_dispatch"
         "moe_init_routing_custom"
         "moe_gating_top_k"
+        "moe_gating_top_k_hash"
         "add_rms_norm_bias"
         "apply_top_k_top_p_custom"
         "transpose_kv_cache_by_block"
@@ -163,6 +165,19 @@ elif [[ "$SOC_VERSION" =~ ^ascend910_93 ]]; then
         "causal_conv1d"
         "moe_grouped_matmul"
         "lightning_indexer_quant"
+        "compressor"
+        "quant_lightning_indexer"
+        "quant_lightning_indexer_metadata"
+        "sparse_attn_sharedkv"
+        "sparse_attn_sharedkv_metadata"
+        "hc_pre_sinkhorn"
+        "hc_pre_inv_rms"
+        "hc_post"
+        "inplace_partial_rotary_mul"
+        "rms_norm_dynamic_quant"
+        "dequant_swiglu_quant"
+        "grouped_matmul_swiglu_quant"
+        "grouped_matmul_swiglu_quant_v2"
         "hamming_dist_top_k"
         "reshape_and_cache_bnsd"
         "recurrent_gated_delta_rule"
@@ -172,6 +187,45 @@ elif [[ "$SOC_VERSION" =~ ^ascend910_93 ]]; then
     )
     CUSTOM_OPS=$(IFS=';'; echo "${CUSTOM_OPS_ARRAY[*]}")
     SOC_ARG="ascend910_93"
+elif [[ "$SOC_VERSION" =~ ^ascend950 ]]; then
+    log "matched SOC branch: ascend950"
+    # ASCEND950 (A5) series
+    # dependency: catlass
+    git config --global --add safe.directory "$ROOT_DIR"
+    CATLASS_PATH=${ROOT_DIR}/csrc/third_party/catlass/include
+    CATLASS_COMMIT=$(git config -f "${ROOT_DIR}/.gitmodules" --get submodule.csrc/third_party/catlass.commit)
+    if [[ ! -d "${CATLASS_PATH}" ]]; then
+        echo "dependency catlass is missing, try to fetch it..."
+        git submodule sync
+        if ! git submodule update --init --recursive; then
+            echo "fetch failed"
+            exit 1
+        fi
+        cd "${ROOT_DIR}/csrc/third_party/catlass" || exit 1
+        git fetch origin
+        git checkout "${CATLASS_COMMIT}" || exit 1
+        cd - || exit 1
+    fi
+    ABSOLUTE_CATLASS_PATH=$(cd "${CATLASS_PATH}" && pwd)
+    export CPATH=${ABSOLUTE_CATLASS_PATH}:${CPATH}
+    log "catlass include=${ABSOLUTE_CATLASS_PATH}"
+
+    CUSTOM_OPS_ARRAY=(
+        "moe_gating_top_k_hash"
+        "inplace_partial_rotary_mul"
+        "compressor"
+        "quant_lightning_indexer"
+        "quant_lightning_indexer_metadata"
+        "sparse_attn_sharedkv"
+        "sparse_attn_sharedkv_metadata"
+        "hc_pre_sinkhorn"
+        "hc_pre_inv_rms"
+        "hc_post"
+        "grouped_matmul_swiglu_quant_v2"
+    )
+
+    CUSTOM_OPS=$(IFS=';'; echo "${CUSTOM_OPS_ARRAY[*]}")
+    SOC_ARG="ascend950"
 else
     # others
     # currently, no custom aclnn ops for other series

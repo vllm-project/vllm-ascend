@@ -17,9 +17,10 @@
 #define GROUPED_MATMUL_SWIGLU_QUANT_TORCH_ADPT_H
 namespace vllm_ascend {
 const int64_t INT4_NUMS_IN_INT32 = 8;
-std::tuple<at::Tensor, at::Tensor, at::Tensor> grouped_matmul_swiglu_quant(
+std::tuple<at::Tensor, at::Tensor, at::Tensor> grouped_matmul_swiglu_quant_weight_nz(
     const at::Tensor &x, const at::Tensor &weight, const at::Tensor &weight_scale, const at::Tensor &x_scale,
-    const at::Tensor &group_list, const c10::optional<at::Tensor> &bias, const c10::optional<at::Tensor> &offset)
+    const at::Tensor &group_list, const c10::optional<at::Tensor> &bias, const c10::optional<at::Tensor> &offset,
+    double swiglu_limit)
 {
     int m = x.sizes()[0];
     int n = weight.sizes()[2];
@@ -31,6 +32,7 @@ std::tuple<at::Tensor, at::Tensor, at::Tensor> grouped_matmul_swiglu_quant(
     at::Tensor output = at::empty({m, n/2}, x.options().dtype(c10::ScalarType::Char));
     at::Tensor output_scale = at::empty({m}, x.options().dtype(c10::ScalarType::Float));
     at::Tensor output_offset = at::empty({}, x.options().dtype(c10::ScalarType::Float));
+    double swiglu_limit_f = static_cast<double>(swiglu_limit);
 
     EXEC_NPU_CMD(
         aclnnGroupedMatmulSwigluQuantWeightNZ,
@@ -41,10 +43,20 @@ std::tuple<at::Tensor, at::Tensor, at::Tensor> grouped_matmul_swiglu_quant(
         weight_scale,
         x_scale,
         group_list,
+        swiglu_limit_f,
         output,
         output_scale,
         output_offset);
     return std::tuple<at::Tensor, at::Tensor, at::Tensor>(output, output_scale, output_offset);
+}
+
+std::tuple<at::Tensor, at::Tensor, at::Tensor> grouped_matmul_swiglu_quant(
+    const at::Tensor &x, const at::Tensor &weight, const at::Tensor &weight_scale, const at::Tensor &x_scale,
+    const at::Tensor &group_list, const c10::optional<at::Tensor> &bias, const c10::optional<at::Tensor> &offset,
+    double swiglu_limit)
+{
+    return grouped_matmul_swiglu_quant_weight_nz(
+        x, weight, weight_scale, x_scale, group_list, bias, offset, swiglu_limit);
 }
 
 std::tuple<at::Tensor, at::Tensor, at::Tensor> grouped_matmul_swiglu_quant_weight_nz_tensor_list(
@@ -54,7 +66,8 @@ std::tuple<at::Tensor, at::Tensor, at::Tensor> grouped_matmul_swiglu_quant_weigh
     const at::Tensor & x_scale,
     const at::Tensor & group_list,
     const c10::optional<at::Tensor> & bias,
-    const c10::optional<at::Tensor> & offset)
+    const c10::optional<at::Tensor> & offset,
+    double swiglu_limit)
 {
     auto x_size = x.sizes();
     int n = weight[0].sizes()[1];
@@ -64,6 +77,7 @@ std::tuple<at::Tensor, at::Tensor, at::Tensor> grouped_matmul_swiglu_quant_weigh
     at::Tensor output = at::empty({m, n/2}, x.options().dtype(at::kChar));
     at::Tensor output_scale = at::empty({m}, x.options().dtype(at::kFloat));
     at::Tensor output_offset = at::empty({m}, x.options().dtype(at::kFloat));
+    float swiglu_limit_f = static_cast<float>(swiglu_limit);
 
     EXEC_NPU_CMD(
         aclnnGroupedMatmulSwigluQuantWeightNzTensorList,
@@ -74,6 +88,7 @@ std::tuple<at::Tensor, at::Tensor, at::Tensor> grouped_matmul_swiglu_quant_weigh
         weight_scale,
         x_scale,
         group_list,
+        swiglu_limit_f,
         output,
         output_scale,
         output_offset);

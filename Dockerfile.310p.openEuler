@@ -51,8 +51,7 @@ RUN export PIP_EXTRA_INDEX_URL="https://mirrors.huaweicloud.com/ascend/repos/pyp
     source /usr/local/Ascend/ascend-toolkit/set_env.sh && \
     source /usr/local/Ascend/nnal/atb/set_env.sh && \
     python3 -m pip install -e /vllm-workspace/vllm-ascend/ --extra-index https://download.pytorch.org/whl/cpu/ && \
-    python3 -m pip uninstall -y triton-ascend triton&& \
-    python3 -m pip install triton-ascend==3.2.1 --extra-index-url https://triton-ascend.osinfra.cn/pypi/simple && \
+    python3 -m pip uninstall -y triton-ascend triton && \
     python3 -m pip cache purge
 
 RUN echo "export LD_PRELOAD=/usr/lib64/libjemalloc.so.2:$LD_PRELOAD" >> ~/.bashrc

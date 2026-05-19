@@ -119,7 +119,6 @@ from vllm_ascend.eplb.eplb_updator import EplbUpdator
 from vllm_ascend.eplb.utils import model_register
 from vllm_ascend.ops.rotary_embedding import set_cos_and_sin, update_cos_sin
 from vllm_ascend.patch.worker.patch_draft_quarot import patch_load_weights
-from vllm_ascend.patch.worker.patch_module import patch_torch_npu_argsort
 from vllm_ascend.quantization.utils import enable_fa_quant
 from vllm_ascend.sample.sampler import AscendSampler
 from vllm_ascend.spec_decode import get_spec_decode_method
@@ -2723,7 +2722,6 @@ class NPUModelRunner(GPUModelRunner):
             extra_attn_metadata_args = {}
             if use_spec_decode and isinstance(builder, GDNAttentionMetadataBuilder):
                 assert ubid is None, "UBatching not supported with GDN yet"
-                patch_torch_npu_argsort()
                 extra_attn_metadata_args = dict(
                     num_accepted_tokens=self.num_accepted_tokens.gpu[:num_reqs_padded],
                     num_decode_draft_tokens_cpu=self.num_decode_draft_tokens.cpu[:num_reqs_padded],

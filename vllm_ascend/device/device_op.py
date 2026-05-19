@@ -124,13 +124,13 @@ class BaseDeviceAdaptor:
         if use_mxfp_quant:
             raise RuntimeError("MXFP MoE quantization is only supported on Ascend A5.")
 
-        return torch_npu.npu_grouped_matmul_swiglu_quant(
+        return torch.ops._C_ascend.grouped_matmul_swiglu_quant(
             x=x,
             weight=weight,
-            bias=bias,
-            group_list=group_list,
             weight_scale=weight_scale,
             x_scale=x_scale,
+            group_list=group_list,
+            bias=bias,
         )
 
     @staticmethod
