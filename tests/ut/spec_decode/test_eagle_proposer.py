@@ -143,6 +143,8 @@ def assert_attr_equal(attr: str | tuple[str, Any, Any], expect: Any, actual: Any
         assert torch.equal(expect_value, actual_value), f"{attr_name} tensor mismatch"
     else:
         assert expect_value == actual_value, f"{attr_name} value mismatch"
+
+
 def test_prepare_inputs_padded_preserves_internal_seq_lens_cpu():
     proposer = AscendEagleProposer.__new__(AscendEagleProposer)
     proposer.pcp_size = 1
