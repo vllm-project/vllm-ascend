@@ -48,6 +48,7 @@ public:
             .ParamType(REQUIRED)
             .DataType({ge::DT_FLOAT,ge::DT_FLOAT,ge::DT_FLOAT})
             .Format({ge::FORMAT_ND,ge::FORMAT_ND,ge::FORMAT_ND});
+        this->Attr("swiglu_limit").AttrType(REQUIRED).Float(1e-8);
         OpAICoreConfig aicore_config;
         aicore_config.DynamicCompileStaticFlag(true)
             .DynamicFormatFlag(true)
@@ -60,6 +61,6 @@ public:
         this->AICore().AddConfig("ascend910_93", aicore_config);
     }
 };
- 
+
 OP_ADD(GroupedMatmulSwigluQuantWeightNzTensorList);
 }
