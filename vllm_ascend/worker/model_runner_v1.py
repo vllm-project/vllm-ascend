@@ -2088,7 +2088,6 @@ class NPUModelRunner(GPUModelRunner):
                         assert spec_decode_common_attn_metadata is not None
                         if self.drafter is not None: # Fix mypy type check for drafter None check
                             next_token_ids, valid_sampled_tokens_count = self.drafter.prepare_next_token_ids_padded(
-                                    spec_decode_common_attn_metadata,
                                     sampled_token_ids,
                                     self.requests,
                                     self.input_batch,
