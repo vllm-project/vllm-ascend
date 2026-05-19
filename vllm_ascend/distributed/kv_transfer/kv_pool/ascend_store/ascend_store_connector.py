@@ -18,6 +18,9 @@ from vllm.v1.kv_cache_interface import KVCacheConfig
 from vllm.v1.outputs import KVConnectorOutput
 from vllm.v1.request import Request
 
+from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.layerwise_config import (
+    get_layerwise_config,
+)
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.pool_scheduler import (
     KVPoolScheduler,
 )
@@ -74,6 +77,18 @@ class AscendStoreConnector(KVConnectorBase_V1):
                 "It is recommended to use the AscendStoreConnector, "
                 "as the MoonCakeStoreConnector will be removed in the future."
             )
+
+        if role == KVConnectorRole.SCHEDULER and self.use_layerwise:
+            num_layers = vllm_config.model_config.get_num_layers(
+                vllm_config.parallel_config)
+            if (get_layerwise_config(num_layers).has_layer_reuse
+                    and self.kv_role != "kv_producer"):
+                logger.warning(
+                    "[KV POOL PERFORMANCE WARNING] Layerwise KV cache reuse "
+                    "is only expected to perform well on the prefill "
+                    "producer node in PD disaggregation. Current kv_role is "
+                    "%s, so this mode can have very poor performance.",
+                    self.kv_role)
 
         self.kv_caches: dict[str, torch.Tensor] = {}
         self._kv_cache_events: AscendStoreKVEvents | None = None
