@@ -1128,10 +1128,13 @@ class PCPManager:
                 q_head_idx, q_tail_idx = [], []
                 kv_with_q_head_nomask_idx, kv_with_q_head_mask_idx = [], []
                 kv_with_q_tail_nomask_idx, kv_with_q_tail_mask_idx = [], []
+                kv_tail_proj_idx: list[int] = []
+                kv_with_q_head_attn_idx_in_tail, kv_with_q_tail_attn_idx_in_tail = [], []
                 split_with_q_head_nomask_idx_reqs = []
                 split_kv_with_q_tail_nomask_idx_reqs = []
                 chunk_seqlens = []
                 kv_with_q_head_nomask_seqlens, kv_with_q_tail_nomask_seqlens = [], []
+                head_actual_seq_lengths_kv, tail_actual_seq_lengths_kv = [], []
                 q_req_offset = 0
                 kv_req_offset = 0
                 q_head_chunk_id = self.pcp_world_rank
@@ -1173,6 +1176,17 @@ class PCPManager:
                     split_kv_with_q_tail_nomask_idx_reqs.append(
                         list(range(kv_req_offset, kv_req_offset + chunk_len * q_tail_chunk_id))
                     )
+                    tail_proj_offset = len(kv_tail_proj_idx)
+                    tail_proj_len = chunk_len * (q_tail_chunk_id + 1)
+                    kv_tail_proj_idx.extend(list(range(kv_req_offset, kv_req_offset + tail_proj_len)))
+                    kv_with_q_head_attn_idx_in_tail.extend(
+                        list(range(tail_proj_offset, tail_proj_offset + chunk_len * (q_head_chunk_id + 1)))
+                    )
+                    kv_with_q_tail_attn_idx_in_tail.extend(
+                        list(range(tail_proj_offset, tail_proj_offset + tail_proj_len))
+                    )
+                    head_actual_seq_lengths_kv.append(len(kv_with_q_head_attn_idx_in_tail))
+                    tail_actual_seq_lengths_kv.append(len(kv_with_q_tail_attn_idx_in_tail))
                     q_req_offset += seq_len
                     kv_req_offset += seq_len * self.pcp_world_size
 
@@ -1190,6 +1204,9 @@ class PCPManager:
                     "kv_with_q_head_mask_idx_tensor": kv_with_q_head_mask_idx,
                     "kv_with_q_tail_nomask_idx_tensor": kv_with_q_tail_nomask_idx,
                     "kv_with_q_tail_mask_idx_tensor": kv_with_q_tail_mask_idx,
+                    "kv_tail_proj_idx_tensor": kv_tail_proj_idx,
+                    "kv_with_q_head_attn_idx_in_tail_tensor": kv_with_q_head_attn_idx_in_tail,
+                    "kv_with_q_tail_attn_idx_in_tail_tensor": kv_with_q_tail_attn_idx_in_tail,
                 }
                 for key, value in self.kv_idx_names.items():
                     tensor_npu = self._list_to_tensor(value, self.device)
@@ -1208,6 +1225,8 @@ class PCPManager:
                     "attn_mask_seqlens": attn_mask_seqlens,
                     "head_attn_nomask_seqlens": head_attn_nomask_seqlens,
                     "tail_attn_nomask_seqlens": tail_attn_nomask_seqlens,
+                    "head_actual_seq_lengths_kv": head_actual_seq_lengths_kv,
+                    "tail_actual_seq_lengths_kv": tail_actual_seq_lengths_kv,
                 }
                 long_seq_metadata.pcp_allgather_restore_idx = self.pcp_allgather_restore_idx.gpu[
                     :num_actual_tokens_pcp_padded
@@ -1235,9 +1254,18 @@ class PCPManager:
                     "kv_with_q_tail_nomask_idx_tensor"
                 ]
                 long_seq_metadata.kv_with_q_tail_mask_idx_tensor = self.kv_idx_names["kv_with_q_tail_mask_idx_tensor"]
+                long_seq_metadata.kv_tail_proj_idx_tensor = self.kv_idx_names["kv_tail_proj_idx_tensor"]
+                long_seq_metadata.kv_with_q_head_attn_idx_in_tail_tensor = self.kv_idx_names[
+                    "kv_with_q_head_attn_idx_in_tail_tensor"
+                ]
+                long_seq_metadata.kv_with_q_tail_attn_idx_in_tail_tensor = self.kv_idx_names[
+                    "kv_with_q_tail_attn_idx_in_tail_tensor"
+                ]
                 long_seq_metadata.attn_mask_seqlens = self.extra_long_seq_kwargs["attn_mask_seqlens"]
                 long_seq_metadata.head_attn_nomask_seqlens = self.extra_long_seq_kwargs["head_attn_nomask_seqlens"]
                 long_seq_metadata.tail_attn_nomask_seqlens = self.extra_long_seq_kwargs["tail_attn_nomask_seqlens"]
+                long_seq_metadata.head_actual_seq_lengths_kv = self.extra_long_seq_kwargs["head_actual_seq_lengths_kv"]
+                long_seq_metadata.tail_actual_seq_lengths_kv = self.extra_long_seq_kwargs["tail_actual_seq_lengths_kv"]
                 long_seq_metadata.attn_chunk_seqlens = attn_chunk_seqlens
 
         self.long_seq_metadata = long_seq_metadata

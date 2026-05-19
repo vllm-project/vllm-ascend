@@ -8,7 +8,7 @@ msgid ""
 msgstr ""
 "Project-Id-Version: vllm-ascend \n"
 "Report-Msgid-Bugs-To: \n"
-"POT-Creation-Date: 2026-04-23 02:08+0000\n"
+"POT-Creation-Date: 2026-05-09 02:22+0000\n"
 "PO-Revision-Date: YEAR-MO-DA HO:MI+ZONE\n"
 "Last-Translator: FULL NAME <EMAIL@ADDRESS>\n"
 "Language: zh_CN\n"
@@ -206,10 +206,10 @@ msgstr "以运行 `Hunyuan-A13B-Instruct` 的性能评估为例。"
 
 #: ../../source/tutorials/models/Hunyuan-A13B-Instruct.md:209
 msgid ""
-"Refer to [vllm "
-"benchmark](https://docs.vllm.ai/en/latest/contributing/benchmarks.html) "
+"Refer to [vllm benchmark](https://docs.vllm.ai/en/latest/benchmarking/) "
 "for more details."
-msgstr "更多详情请参考 [vllm benchmark](https://docs.vllm.ai/en/latest/contributing/benchmarks.html)。"
+msgstr ""
+"更多详情请参考 [vllm benchmark](https://docs.vllm.ai/en/latest/benchmarking/)。"
 
 #: ../../source/tutorials/models/Hunyuan-A13B-Instruct.md:211
 msgid "There are three `vllm bench` subcommands:"

@@ -826,7 +826,6 @@ class AscendMLAImpl(MLAAttentionImpl):
                     dequant_scale_q_nope,
                     fak_descale_float,
                 ) = param
-
                 if _EXTRA_CTX.is_draft_model:
                     draft_step = attn_count // num_layers
                     attn_metadata_current = attn_metadata[draft_step]
@@ -835,7 +834,7 @@ class AscendMLAImpl(MLAAttentionImpl):
                     attn_metadata_current = attn_metadata
 
                 seq_lens_list = attn_metadata_current[key].decode.seq_lens_list
-                if speculative_config and speculative_config.method == "mtp" and not _EXTRA_CTX.is_draft_model:
+                if speculative_config and speculative_config.use_eagle() and not _EXTRA_CTX.is_draft_model:
                     actual_seq_lengths = attn_metadata_current[key].decode.actual_seq_lengths_q
                     spec_multiple = speculative_config.num_speculative_tokens + 1
                     seq_lens_list = seq_lens_list + [0] * (num_tokens // spec_multiple - len(seq_lens_list))
@@ -968,9 +967,9 @@ class AscendMLAImpl(MLAAttentionImpl):
                 )
         if self.enable_mlapo:
             if get_ascend_device_type() == AscendDeviceType.A5:
-                self.process_weights_for_fused_mlapo_a5(act_dtype)
+                self._process_weights_for_fused_mlapo_a5(act_dtype)
             else:
-                self.process_weights_for_fused_mlapo(act_dtype)
+                self._process_weights_for_fused_mlapo(act_dtype)
         elif self.fa_quant_layer:
             self._process_weights_for_fused_fa_quant()
         else:
@@ -1079,7 +1078,7 @@ class AscendMLAImpl(MLAAttentionImpl):
             self.q_proj.quant_bias = None
             torch.npu.empty_cache()
 
-    def process_weights_for_fused_mlapo_a5(self, act_dtype: torch.dtype):
+    def _process_weights_for_fused_mlapo_a5(self, act_dtype: torch.dtype):
         assert self.fused_qkv_a_proj is not None
 
         weight_dq = self.fused_qkv_a_proj.weight.data[..., : self.q_lora_rank].contiguous()
@@ -1163,7 +1162,7 @@ class AscendMLAImpl(MLAAttentionImpl):
             kv_c_normed = torch.empty(toks, num_heads, latent_kv_dim, dtype=q_nope.dtype, device=q_nope.device)
             k_pe = torch.empty(toks, num_heads, rope_dim, dtype=q_nope.dtype, device=q_nope.device)
 
-            DeviceOperator.mla_cache_load(
+            DeviceOperator.kv_cache_load(
                 cache_kv_c,
                 cache_k_pe,
                 prefill_metadata.block_table,
@@ -1671,7 +1670,11 @@ class AscendMLAImpl(MLAAttentionImpl):
         o_proj_input = torch.empty(o_proj_input_shape, dtype=hidden_states.dtype, device=hidden_states.device)
 
         # MLA Preprocess
-        if self.fa_quant_layer or (self.enable_mlapo and attn_metadata.num_decode_tokens <= MLAPO_MAX_SUPPORTED_TOKENS):
+        if self.fa_quant_layer or (
+            self.enable_mlapo
+            and attn_metadata.num_decode_tokens <= MLAPO_MAX_SUPPORTED_TOKENS
+            and attn_metadata.num_prefills == 0
+        ):
             hidden_states = torch.ops.vllm.maybe_all_gather_and_maybe_unpad(
                 hidden_states.contiguous(), need_gather_q_kv
             )
