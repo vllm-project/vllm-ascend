@@ -4,12 +4,13 @@ import argparse
 import base64
 import copy
 import json
-import re
 import subprocess
 import sys
 from collections import defaultdict
 from pathlib import Path
 from typing import Any
+
+import regex as re
 
 """
 Generate CI failure summaries from a local pytest log or a GitHub Actions run.
