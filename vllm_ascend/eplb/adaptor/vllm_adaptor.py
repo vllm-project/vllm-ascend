@@ -105,16 +105,14 @@ class VllmEplbAdaptor:
             self.expert_weight_names = ["w13_weight", "w2_weight"]
 
         for local_idx, layer in enumerate(self.moe_layers):
-            key_prefix = "model.layers." + str(local_idx) + ".mlp.experts."
             self.expert_param_per_layer[local_idx] = list()
             for name in self.expert_weight_names:
-                param_key = key_prefix + name
-                param_value = getattr(layer, name)
-                self.param_dict[param_key] = param_value
+                param_key = f"{local_idx}.{name}"
+                self.param_dict[param_key] = getattr(layer, name)
             for local_expert_id in range(self.num_local_experts):
                 per_expert_param = list()
                 for name in self.expert_weight_names:
-                    per_expert_param.append(self.param_dict[key_prefix + name][local_expert_id])
+                    per_expert_param.append(self.param_dict[f"{local_idx}.{name}"][local_expert_id])
                 self.expert_param_per_layer[local_idx].append(per_expert_param)
 
     def get_rank_expert_workload(self) -> torch.Tensor:
