@@ -41,6 +41,12 @@ def register():
     return "vllm_ascend.platform.NPUPlatform"
 
 
+def register_patch_general():
+    import importlib
+
+    importlib.import_module("vllm_ascend.patch.general")
+
+
 def register_connector():
     _ensure_global_patch()
 
