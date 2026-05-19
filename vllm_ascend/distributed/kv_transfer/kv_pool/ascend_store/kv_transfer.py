@@ -137,8 +137,8 @@ class KVCacheStoreSendingThread(KVTransferThread):
         self.stored_requests = defaultdict[str, int](int)
         self.group_uses_align_state = group_uses_align_state
         self.enable_kv_event = enable_kv_event
-        self.completed_blocks_lock = threading.Lock()
-        self.completed_blocks: dict[str, dict[int, int]] = {}
+        self.completed_events_lock = threading.Lock()
+        self.completed_events: dict[int, int] = {}
 
     def add_stored_request(self, req_id: str):
         with self.done_task_lock:
@@ -154,16 +154,16 @@ class KVCacheStoreSendingThread(KVTransferThread):
             if req_id in self.stored_requests:
                 del self.stored_requests[req_id]
 
-    def mark_completed_blocks(self, req_id: str, block_ids: list[int]) -> None:
-        with self.completed_blocks_lock:
-            req_completed_blocks = self.completed_blocks.setdefault(req_id, dict())
-            req_completed_blocks.update({block_id: 1 for block_id in block_ids if block_id > 0})
+    def mark_completed_events(self, event_id: int | None) -> None:
+        if event_id is not None:
+            with self.completed_events_lock:
+                self.completed_events[event_id] = 1
 
-    def get_completed_blocks(self):
-        with self.completed_blocks_lock:
-            completed_blocks = self.completed_blocks.copy()
-            self.completed_blocks.clear()
-        return completed_blocks
+    def get_completed_events(self):
+        with self.completed_events_lock:
+            completed_events = self.completed_events.copy()
+            self.completed_events.clear()
+        return completed_events
 
     def _handle_request(self, req_meta: ReqMeta):
         token_len = req_meta.token_len_chunk
@@ -267,9 +267,7 @@ class KVCacheStoreSendingThread(KVTransferThread):
                     self.update_kv_event(stored_events)
         finally:
             # always free blocks
-            for group_id, mamba_group in enumerate(self.group_uses_align_state):
-                if mamba_group:
-                    self.mark_completed_blocks(req_id, req_meta.block_ids_by_group[group_id])
+            self.mark_completed_events(req_meta.event_id)
         self.dec_stored_request(req_id)
         self.request_queue.task_done()
 

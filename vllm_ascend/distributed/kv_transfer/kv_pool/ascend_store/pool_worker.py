@@ -785,5 +785,5 @@ class KVPoolWorker:
 
     def build_connector_worker_meta(self) -> AscendStoreKVConnectorWorkerMetadata | None:
         if self.use_mamba and isinstance(self.kv_send_thread, KVCacheStoreSendingThread):
-            return AscendStoreKVConnectorWorkerMetadata(self.kv_send_thread.get_completed_blocks())
+            return AscendStoreKVConnectorWorkerMetadata(self.kv_send_thread.get_completed_events())
         return None

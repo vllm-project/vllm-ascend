@@ -87,7 +87,9 @@ class KVPoolScheduler:
         self._unfinished_requests: dict[str, tuple[Request, list[list[int]]]] = {}
         self._unfinished_request_ids: set[str] = set()
         self._block_pool: BlockPool | None = None
-        self.sending_blocks: dict[str, dict[int, int]] = {}
+        self.sending_event_id = 0
+        self.sending_blocks: dict[int, list[int]] = {}
+        self.sending_events: dict[int, int] = {}
         self._expected_worker_count = vllm_config.parallel_config.world_size
 
     def get_num_new_matched_tokens(
@@ -352,43 +354,47 @@ class KVPoolScheduler:
                     meta.add_request(req_meta)
         return meta
 
+    def get_sending_event_id(self):
+        using_id = self.sending_event_id
+        # todo: reset sending_event_id, in case infinitely increasing
+        self.sending_event_id += 1
+        return using_id
+
     def touch_sending_blocks(self, req_meta: ReqMeta):
         if not self.use_hybrid or len(self.mamba_group_ids) == 0 or not req_meta.can_save:
             return
-
-        prev_sending = self.sending_blocks.setdefault(req_meta.req_id, dict())
-        current_step_sending: dict[int, int] = {}
+        using_event_id = self.get_sending_event_id()
+        req_meta.event_id = using_event_id
+        current_step_sending: list[int] = []
         for group_id in self.mamba_group_ids:
-            # Todo: only touch cdiv(req_meta.token_len_chunk, self.grouped_block_size[group_id]) blocks?
             group_block_ids = req_meta.block_ids_by_group[group_id]
-            current_step_sending.update(
-                {block_id: 0 for block_id in group_block_ids if (block_id not in prev_sending and block_id > 0)}
+            current_step_sending.extend(
+                [block_id for block_id in group_block_ids if block_id > 0]
             )
-        logger.debug("touch blocks: %s", [block_id for block_id in current_step_sending])
+        logger.debug("event: %s touch blocks: %s", using_event_id, current_step_sending)
         self._block_pool.touch(
             [self._block_pool.blocks[block_id] for block_id in current_step_sending]
         )
-        prev_sending.update(current_step_sending)
+        self.sending_events[using_event_id] = 0
+        self.sending_blocks[using_event_id] = current_step_sending
 
     def update_connector_output(self, connector_output: KVConnectorOutput):
         meta = connector_output.kv_connector_worker_meta
         if not isinstance(meta, AscendStoreKVConnectorWorkerMetadata):
             return
-        for req_id, blocks in meta.completed_blocks.items():
-            prev_blocks = self.sending_blocks[req_id]
-            to_free_block_ids: list[int] = []
-            for block_id, count in blocks.items():
-                total = prev_blocks.get(block_id, 0) + count
-                if total >= self._expected_worker_count:
-                    prev_blocks.pop(block_id, None)
-                    to_free_block_ids.append(block_id)
-                else:
-                    prev_blocks[block_id] = total
+        to_free_block_ids: list[int] = []
+        for event_id, count in meta.completed_events.items():
+            logger.info("event %s update with %s", event_id, count)
+            total = self.sending_events[event_id] + count
+            if total >= self._expected_worker_count:
+                to_free_block_ids.extend(self.sending_blocks.pop(event_id, []))
+                self.sending_events.pop(event_id, None)
+            else:
+                self.sending_events[event_id] = total
+
+        if to_free_block_ids:
             logger.debug("free blocks: %s", to_free_block_ids)
-            if to_free_block_ids:
-                self._block_pool.free_blocks([self._block_pool.blocks[block_id] for block_id in to_free_block_ids])
-            if not prev_blocks:
-                del self.sending_blocks[req_id]
+            self._block_pool.free_blocks([self._block_pool.blocks[block_id] for block_id in to_free_block_ids])
 
 
     def request_finished(

@@ -358,6 +358,8 @@ class ReqMeta:
     token_ids: list[int] | None = None
     original_block_size: list[int] | None = None
 
+    event_id: int | None = None
+
     @staticmethod
     def from_request_tracker(
         tracker: RequestTracker,
@@ -465,26 +467,23 @@ class LayerMultiBlockReqMeta:
 @dataclass
 class AscendStoreKVConnectorWorkerMetadata(KVConnectorWorkerMetadata):
 
-    completed_blocks: dict[str, dict[int, int]] = field(default_factory=dict)
+    completed_events: dict[int, int] = field(default_factory=dict)
 
-    def mark_completed_blocks(self, req_id: str, block_ids: list[int]) -> None:
-        req_completed_blocks = self.completed_blocks.setdefault(req_id, dict())
-        req_completed_blocks.update({block_id: 1 for block_id in block_ids if block_id > 0})
+    def mark_completed_events(self, event_id: int | None) -> None:
+        if event_id is not None:
+            self.completed_events[event_id] = 1
 
     def aggregate(
         self, other: "KVConnectorWorkerMetadata"
     ) -> "KVConnectorWorkerMetadata":
         assert isinstance(other, AscendStoreKVConnectorWorkerMetadata)
 
-        merged = {}
-        for k, v in self.completed_blocks.items():
-            merged[k] = dict(v)
-        for req_id in other.completed_blocks:
-            if req_id not in self.completed_blocks:
-                merged[req_id] = dict(other.completed_blocks[req_id])
+        merged: dict[int, int] = dict(self.completed_events)
+        for event_id in other.completed_events:
+            if event_id not in merged:
+                merged[event_id] = other.completed_events[event_id]
             else:
-                for k, v in other.completed_blocks[req_id].items():
-                    merged[req_id][k] = merged[req_id].get(k, 0) + v
+                merged[event_id] = merged[event_id] + other.completed_events[event_id]
         return AscendStoreKVConnectorWorkerMetadata(merged)
 
 
