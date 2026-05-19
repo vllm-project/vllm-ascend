@@ -12,10 +12,9 @@ class StepTarget(str, Enum):
 
 class RecoveryAction(msgspec.Struct):
     name: str
-    target: str
 
-    def execute(self, executer: Any, cfg: dict) -> Tuple[dict, bool]:
-        if self.target == StepTarget.ENGINE_CORE.value:
+    def execute(self, executer: Any, cfg: dict, target: str) -> Tuple[dict, bool]:
+        if target == StepTarget.ENGINE_CORE.value:
             handler = get_engine_core_action(self.name)
         else:
             handler = get_worker_action(self.name)
@@ -30,10 +29,8 @@ class RecoveryStep(msgspec.Struct):
 
     def execute(self, executer: Any, cfg: dict) -> Tuple[dict, bool]:
         for action_data in self.actions:
-            action = RecoveryAction(
-                name=action_data[0], target=action_data[1]
-            )
-            cfg, success = action.execute(executer, cfg)
+            action = RecoveryAction(name=action_data)
+            cfg, success = action.execute(executer, cfg, self.target)
             if not success:
                 return cfg, False
         return cfg, True
@@ -41,7 +38,6 @@ class RecoveryStep(msgspec.Struct):
 
 class StepResult(msgspec.Struct):
     step_name: str
-    target: str
     success: bool
     cfg: dict
     worker_rank: int = -1

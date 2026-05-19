@@ -267,7 +267,6 @@ class RecoveryHandler:
             step_results.append(
                 StepResult(
                     step_name=step.name,
-                    target=step.target,
                     success=step_success,
                     cfg=cfg,
                     worker_rank=-1,
