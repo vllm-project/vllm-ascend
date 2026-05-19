@@ -37,7 +37,18 @@ _server_cmd: &server_cmd
   - "--mm-encoder-tp-mode"
   - "data"
 
-_benchmarks: &benchmarks
+_benchmark_acc: &_benchmark_acc
+  acc_gsm8k:
+    case_type: accuracy
+    dataset_path: vllm-ascend/gsm8k-lite
+    request_conf: vllm_api_general_chat
+    dataset_conf: gsm8k/gsm8k_gen_0_shot_cot_chat_prompt
+    max_out_len: 4096
+    batch_size: 8
+    baseline: 95
+    threshold: 5
+
+_benchmark_TPOT50_3_5k_1_5k: &_benchmark_TPOT50_3_5k_1_5k
   perf:
     case_type: performance
     dataset_path: vllm-ascend/GSM8K-in3500-bs2800
@@ -50,15 +61,6 @@ _benchmarks: &benchmarks
     request_rate: 0
     baseline: 1
     threshold: 0.97
-  acc:
-    case_type: accuracy
-    dataset_path: vllm-ascend/gsm8k-lite
-    request_conf: vllm_api_general_chat
-    dataset_conf: gsm8k/gsm8k_gen_0_shot_cot_chat_prompt
-    max_out_len: 4096
-    batch_size: 8
-    baseline: 95
-    threshold: 5
 
 _benchmark_TPOT50_16K_1K: &_benchmark_TPOT50_16K_1K
   case_type: performance
@@ -216,7 +218,7 @@ test_cases:
 #      - "--additional-config"
 #      - '{"enable_shared_expert_dp":true}'
 #    benchmarks:
-#      perf: *benchmarks
+#      perf: *_benchmark_TPOT50_3_5k_1_5k
 #  - name: "Kimi-K2.5-W4A8-TOPT50-16k-1k"
 #    model: "Eco-Tech/Kimi-K2.5-W4A8"
 #    envs:
@@ -474,3 +476,4 @@ test_cases:
       - '{"enable_shared_expert_dp":true}'
     benchmarks:
       perf: *_benchmark_TPOT20_128K_1K_pc90
+      <<: *_benchmark_acc

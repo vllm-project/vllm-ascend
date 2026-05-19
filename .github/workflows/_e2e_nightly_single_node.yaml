@@ -132,7 +132,7 @@ jobs:
         run: |
           cp -r /tmp/aisbench-backup /vllm-workspace/vllm-ascend/benchmark
           cd /vllm-workspace/vllm-ascend/benchmark
-          pip install pytest asyncio pytest-asyncio datasets
+          pip install pytest asyncio pytest-asyncio
           pip install -e . -r requirements/api.txt -r requirements/extra.txt
           python3 -m pip cache purge
 
