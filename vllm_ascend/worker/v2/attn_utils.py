@@ -410,11 +410,22 @@ def _reshape_kv_cache(
                     cache_dtype,
                 )
                 if not isinstance(kv_cache_spec, MLAAttentionSpec):
-                    k_shape = kv_cache_shape[1:]
-                    if hasattr(kv_cache_spec, "head_size_v"):
-                        v_shape = (*kv_cache_shape[1:-1], kv_cache_spec.head_size_v)
+                    if _is_c8_mxfp_kv_cache(vllm_config, kv_cache_spec):
+                        k_dim, v_dim = _get_attention_kv_cache_dims(layer_name, kv_cache_spec)
+                        block_size = kv_cache_spec.block_size
+                        num_heads = kv_cache_spec.num_kv_heads
+                        raw_k_scale_tensor, raw_v_scale_tensor = raw_cache_tensors[2:]
+                        k_scale_per_block = mxfp_k_scale_numel(1, block_size, num_heads, k_dim)
+                        assert raw_k_scale_tensor.numel() % k_scale_per_block == 0
+                        mxfp_num_blocks = raw_k_scale_tensor.numel() // k_scale_per_block
+                        k_shape = (mxfp_num_blocks, block_size, num_heads, k_dim)
+                        v_shape = (mxfp_num_blocks, block_size, num_heads, v_dim)
                     else:
-                        v_shape = k_shape
+                        k_shape = kv_cache_shape[1:]
+                        if hasattr(kv_cache_spec, "head_size_v"):
+                            v_shape = (*kv_cache_shape[1:-1], kv_cache_spec.head_size_v)
+                        else:
+                            v_shape = k_shape
                 else:
                     # k_cache: nope_cache    v_cache: rope_cache
                     mla_num_blocks, mla_block_size, num_kv_heads, _ = kv_cache_shape
@@ -431,9 +442,13 @@ def _reshape_kv_cache(
                 k_cache = raw_k_tensor.view(k_cache_dtype).view(k_shape)
                 v_cache = raw_v_tensor.view(v_cache_dtype).view(v_shape)
                 if _is_c8_mxfp_kv_cache(vllm_config, kv_cache_spec):
+                    k_dim, v_dim = _get_attention_kv_cache_dims(layer_name, kv_cache_spec)
+                    block_size = kv_cache_spec.block_size
+                    num_heads = kv_cache_spec.num_kv_heads
+                    mxfp_num_blocks = k_shape[0]
                     raw_k_scale_tensor, raw_v_scale_tensor = raw_cache_tensors[2:]
-                    k_scale_shape = mxfp_k_scale_cache_shape(*k_shape)
-                    v_scale_shape = mxfp_v_scale_cache_shape(*v_shape)
+                    k_scale_shape = mxfp_k_scale_cache_shape(mxfp_num_blocks, block_size, num_heads, k_dim)
+                    v_scale_shape = mxfp_v_scale_cache_shape(mxfp_num_blocks, block_size, num_heads, v_dim)
                     k_scale_cache = raw_k_scale_tensor.view(_get_mxfp_scale_dtype()).view(k_scale_shape)
                     v_scale_cache = raw_v_scale_tensor.view(_get_mxfp_scale_dtype()).view(v_scale_shape)
                     kv_caches[layer_name] = (k_cache, v_cache, k_scale_cache, v_scale_cache)
