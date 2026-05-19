@@ -28,7 +28,6 @@ from vllm_ascend.quantization.methods.base import QuantType
 from vllm_ascend.utils import enable_custom_op
 
 
-
 class AddRMSNormQuantPattern(BasePattern):
     def __init__(self, vllm_config: VllmConfig, eps: float = 1e-6):
         super().__init__(vllm_config, eps)
@@ -476,6 +475,7 @@ class AddRMSNormDynamicQuantSPPatternWithBias(BasePattern):
 
         return replacement
 
+
 class AddRMSNormDynamicMXQuantPattern(BasePattern):
     def __init__(self, vllm_config: VllmConfig, eps: float = 1e-6):
         super().__init__(vllm_config, eps)
@@ -571,6 +571,7 @@ class AddRMSNormQuantFusionPass(VllmInductorPass):
                 AddRMSNormDynamicQuantSPPatternWithBias(vllm_config, eps=eps).register(self.pattern_match_passes)
             if quant_type == QuantType.MXFP8:
                 AddRMSNormDynamicMXQuantPattern(vllm_config, eps=eps).register(self.pattern_match_passes)
+
     def __call__(self, graph: torch.fx.Graph):
         self.begin()
         self.matched_count = self.pattern_match_passes.apply(graph)
