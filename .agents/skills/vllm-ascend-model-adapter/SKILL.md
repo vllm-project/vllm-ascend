@@ -316,8 +316,10 @@ Place tests under `/tmp/npu_unit_tests/` (ephemeral; not committed).
 - If implementation happened in `/vllm-workspace/*`, backport minimal final diff to current working repo.
 - Generate test config YAML at `tests/e2e/models/configs/<ModelName>.yaml` following the schema of existing configs (must include `model_name`, `hardware`, `tasks` with accuracy metrics, and `num_fewshot`). Use accuracy results from evaluation to populate metric values.
 - Generate tutorial markdown at `docs/source/tutorials/models/<ModelName>.md` following the standard template (Introduction, Supported Features, Environment Preparation with docker tabs, Deployment with serve script, Functional Verification with curl example, Accuracy Evaluation, Performance). Fill in model-specific details: HF path, hardware requirements, TP size, max-model-len, served-model-name, sample curl, and accuracy table.
-- Update `docs/source/tutorials/models/index.md` to include the new tutorial.
-- Confirm test config YAML and tutorial doc are included in the staged files.
+- Generate adaptation report markdown at `docs/source/tutorials/models/<ModelName>-adaptation-report.md`. The report must summarize architecture, blocking root causes, consulted HiAscend operator docs (if any), code changes, dummy-vs-real differences, false-ready cases, and final validation evidence.
+- If the adaptation report lives under `docs/source/tutorials/models/` and is not tutorial-style, add it to `[tool.check_docs_yaml_sync].exclude` in `pyproject.toml`.
+- Update `docs/source/tutorials/models/index.md` to include both the new tutorial and the adaptation report entry.
+- Confirm test config YAML, tutorial doc, and adaptation report are included in the staged files.
 - Commit code changes once (single signed commit).
 
 ### 10) Prepare handoff artifacts
@@ -338,6 +340,7 @@ Place tests under `/tmp/npu_unit_tests/` (ephemeral; not committed).
 - **Dummy stage evidence is present (if used), and real-weight stage evidence is present (mandatory).**
 - Test config YAML exists at `tests/e2e/models/configs/<ModelName>.yaml` and follows the established schema (`model_name`, `hardware`, `tasks`, `num_fewshot`).
 - Tutorial doc exists at `docs/source/tutorials/models/<ModelName>.md` and follows the standard template (Introduction, Supported Features, Environment Preparation, Deployment, Functional Verification, Accuracy Evaluation, Performance).
-- Tutorial index at `docs/source/tutorials/models/index.md` includes the new model entry.
+- Adaptation report exists at `docs/source/tutorials/models/<ModelName>-adaptation-report.md` and includes root-cause + validation history.
+- Tutorial index at `docs/source/tutorials/models/index.md` includes the new model entry and adaptation report entry.
 - Exactly one signed commit contains all code changes in current working repo.
 - Final response includes commit hash, file paths, key commands, known limits, and failure reasons where applicable.

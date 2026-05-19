@@ -345,7 +345,9 @@ Confirm:
 - Generate `docs/source/tutorials/models/<ModelName>.md` from the standard template.
 - Fill in model-specific details: HF path, hardware requirements, TP size, max-model-len, served-model-name, sample curl request, accuracy table.
 - Must include sections: Introduction, Supported Features, Environment Preparation (with docker tabs for A2/A3), Deployment (with serve script), Functional Verification (with curl example), Accuracy Evaluation, Performance.
-- Update `docs/source/tutorials/models/index.md` to include the new tutorial entry.
+- Generate `docs/source/tutorials/models/<ModelName>-adaptation-report.md` summarizing the adaptation path, root causes, code changes, consulted HiAscend docs, dummy-vs-real differences, and final validation evidence.
+- If the adaptation report is placed under `docs/source/tutorials/models/` and does not follow tutorial sync-block conventions, add it to `[tool.check_docs_yaml_sync].exclude` in `pyproject.toml`.
+- Update `docs/source/tutorials/models/index.md` to include the new tutorial entry and the adaptation report entry.
 
 ### GitHub issue comment
 
