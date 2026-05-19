@@ -21,7 +21,7 @@ import torch
 from vllm.triton_utils import tl, triton
 
 
-@triton.jit
+@triton.jit(do_not_specialize=["logits_stride", "vocab_size"])
 def _temperature_kernel(
     logits_ptr,
     logits_stride,
@@ -73,7 +73,13 @@ def apply_temperature(
     )
 
 
-@triton.jit
+@triton.jit(do_not_specialize=[
+    "local_argmax_stride",
+    "local_max_stride",
+    "processed_logits_stride",
+    "logits_stride",
+    "vocab_size",
+])
 def _gumbel_sample_kernel(
     local_argmax_ptr,
     local_argmax_stride,
@@ -111,14 +117,13 @@ def _gumbel_sample_kernel(
         logits = logits / temp
 
     if processed_logits_ptr is not None:
-        # Store the temperature-applied logits per token (not per request),
-        # matching upstream semantics where output shape is [num_tokens, vocab_size].
+        # Store the temperature-applied logits.
         if processed_logits_col_ptr is not None:
             col = tl.load(processed_logits_col_ptr)
         else:
             col = 0
         tl.store(
-            processed_logits_ptr + token_idx * processed_logits_stride + col * vocab_size + block,
+            processed_logits_ptr + req_state_idx * processed_logits_stride + col * vocab_size + block,
             logits,
             mask=mask,
         )
@@ -155,6 +160,7 @@ def gumbel_sample(
     apply_temperature: bool,
     output_processed_logits: torch.Tensor | None = None,
     output_processed_logits_col: torch.Tensor | None = None,
+    use_fp64: bool = False,
 ) -> torch.Tensor:
     num_tokens, vocab_size = logits.shape
     BLOCK_SIZE = 1024
