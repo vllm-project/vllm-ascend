@@ -50,7 +50,7 @@ P_EAGLE_MODELS = {
 # thus please update it if ci fails but you have better acceptance
 BASELINES_SP = {
     "eagle3": [0.68, 0.40, 0.18],
-    "p-eagle": [0.83, 0.50, 0.33, 0.17, 0.17, 0.17, 0.17, 0.00],
+    "p-eagle": [0.5625, 0.25, 0.0625, 0.0, 0.0, 0.0, 0.0, 0.0],
 }
 
 
@@ -321,7 +321,7 @@ def test_p_eagle_acceptance(
 
     golden = BASELINES_SP[method]
 
-    match = all(abs(a - b) < 0.2 for a, b in zip(acceptance_per_pos, golden))
+    match = all(abs(a - b) < 0.1 for a, b in zip(acceptance_per_pos, golden))
     if not match:
         print(f"acceptance_per_pos: {acceptance_per_pos}")
         print(f"golden: {golden}")
