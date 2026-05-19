@@ -8,7 +8,7 @@ from vllm_ascend.recovery.types import (
     StepResult,
     StepTarget,
 )
-from vllm_ascend.recovery.worker_monitor import RecoveryMonitor
+from vllm_ascend.recovery.worker_recovery_monitor import RecoveryMonitor
 
 __all__ = [
     "RecoveryHandler",
