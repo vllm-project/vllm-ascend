@@ -1,4 +1,4 @@
-# Should be mirrored in pyporject.toml
+# Should be mirrored in pyproject.toml
 cmake>=3.26
 decorator
 einops
