@@ -59,7 +59,7 @@ export LD_LIBRARY_PATH=$LD_LIBRARY_PATH:/usr/local/Ascend/ascend-toolkit/latest/
 # For cpu environment, set SOC_VERSION for different chips.
 # See https://github.com/vllm-project/vllm-ascend/blob/3cb0af0bcf3299089ca7e72159fa36e825a470f8/setup.py#L132 for detail.
 export SOC_VERSION="ascend910b1"
-python3 -m pip install -v .
+python3 -m pip install .
 python3 -m pip install -r requirements-dev.txt
 ```
 

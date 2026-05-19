@@ -22,9 +22,9 @@ find_package(Torch REQUIRED)
 
 run_python(TORCH_VERSION
   "import torch; print(torch.__version__)" "Failed to locate torch path")
-# check torch version is 2.9.0
-if(NOT ${TORCH_VERSION} VERSION_EQUAL "2.9.0")
-  message(FATAL_ERROR "Expected PyTorch version 2.9.0, but found ${TORCH_VERSION}")
+# check torch version is 2.10.0
+if(NOT ${TORCH_VERSION} VERSION_EQUAL "2.10.0")
+  message(FATAL_ERROR "Expected PyTorch version 2.10.0, but found ${TORCH_VERSION}")
 endif()
 
 set(RUN_MODE "npu" CACHE STRING "cpu/sim/npu")
@@ -152,12 +152,6 @@ else()
     message(STATUS "aclrtMemcpyBatchAsync: not found in CANN headers, using fallback aclrtMemcpyAsync loop")
   endif()
 endif()
-# Prefer the CANN ACL headers over torch_npu's bundled third_party ACL copy.
-# torch_npu 2.9.0 ships an older acl_rt.h that does not declare
-# aclrtLaunchHostFunc, which breaks host-print compilation.
-target_include_directories(vllm_ascend_C BEFORE PRIVATE
-  ${ASCEND_HOME_PATH}/include
-)
 
 if(SOC_VERSION MATCHES "ascend310p.*")
     target_compile_definitions(vllm_ascend_C PRIVATE -DASCEND_PLATFORM_310P)

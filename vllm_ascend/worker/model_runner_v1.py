@@ -277,12 +277,21 @@ class NPUModelRunner(GPUModelRunner):
         dump_cfg = self.ascend_config.dump_config_path
         self.debugger = None
         if dump_cfg is not None:
-            if self.model_config.enforce_eager:
+            self._debugger_started = False
+            if self.compilation_config.cudagraph_mode == CUDAGraphMode.NONE:
                 from msprobe.pytorch import PrecisionDebugger
 
                 self.debugger = PrecisionDebugger(dump_cfg)
             else:
-                raise RuntimeError("Dumping/debugging only works in eager mode.")
+                try:
+                    from msprobe.pytorch import AclGraphDumper
+                except Exception as exc:
+                    raise RuntimeError(
+                        "Failed to import AclGraphDumper from msprobe. "
+                        "Please install/rebuild msprobe with aclgraph_dump enabled."
+                    ) from exc
+
+                self.debugger = AclGraphDumper(dump_cfg)
         # use_hybrid_blocks: if hybrid blocks is used.
         self.use_hybrid_blocks: bool = False
         self.need_accepted_tokens: bool = False
@@ -1492,8 +1501,6 @@ class NPUModelRunner(GPUModelRunner):
             capturer = RoutedExpertsCapturer.get_instance()
             if capturer is not None:
                 capturer.clear_buffer()
-            else:
-                logger.warning("RoutedExpertsCapturer is not initialized.")
 
         if self.ascend_config.profiling_chunk_config.need_timing:
             # Check if the scheduler signaled that calibration is complete.
@@ -1507,6 +1514,7 @@ class NPUModelRunner(GPUModelRunner):
                 self._execution_start_time = time.perf_counter()
         if self.execute_model_state is not None:
             raise RuntimeError("State error: sample_tokens() must be called after execute_model() returns None.")
+        self._start_dump_data()
         # self._draft_token_ids is None when `input_fits_in_drafter=False`
         # and there is no draft tokens scheduled. so it need to update the
         # spec_decoding info in scheduler_output with async_scheduling.
@@ -1537,6 +1545,7 @@ class NPUModelRunner(GPUModelRunner):
                         encoder_cache=self.encoder_cache,
                     ) as ec_connector_output:
                         self._execute_mm_encoder(scheduler_output)
+                        self._finalize_dump_data()
                         return make_empty_encoder_model_runner_output(scheduler_output)
 
                 if not num_scheduled_tokens:
@@ -1718,14 +1727,6 @@ class NPUModelRunner(GPUModelRunner):
             cudagraph_mode = CUDAGraphMode.NONE
             # Mark KV scales as calculated after the first forward pass
             self.calculate_kv_scales = False  # type: ignore[has-type]
-        # prevent debugger is None
-        if self.debugger is not None:
-            dbg_cfg = getattr(self.debugger, "config", None)
-            dump_level = str(getattr(dbg_cfg, "level", "L1")).upper() if dbg_cfg is not None else "L1"
-            if dump_level in ("L0", "MIX"):
-                self.debugger.start(model=self.model)
-            else:
-                self.debugger.start()
         if self.ascend_config.enable_async_exponential:
             self.sampler.do_async_exponential(
                 b_s=logits_indices.shape[0],
@@ -1785,9 +1786,7 @@ class NPUModelRunner(GPUModelRunner):
                     assert isinstance(hidden_states, IntermediateTensors)
                     hidden_states.kv_connector_output = kv_connector_output
                     self.kv_connector_output = kv_connector_output
-                    if self.debugger is not None:
-                        self.debugger.stop()
-                        self.debugger.step()
+                    self._finalize_dump_data()
                     return hidden_states
                 if self.is_pooling_model:
                     # Return the pooling output.
@@ -1795,9 +1794,7 @@ class NPUModelRunner(GPUModelRunner):
                         hidden_states, num_scheduled_tokens, num_scheduled_tokens_np, kv_connector_output
                     )
                     output.kv_connector_output = kv_connector_output
-                    if self.debugger is not None:
-                        self.debugger.stop()
-                        self.debugger.step()
+                    self._finalize_dump_data()
                     return output
 
                 sample_hidden_states = hidden_states[logits_indices]
@@ -1973,8 +1970,6 @@ class NPUModelRunner(GPUModelRunner):
             capturer = RoutedExpertsCapturer.get_instance()
             if capturer is not None:
                 capturer.save_captured_experts(indices=self.cpu_slot_mapping)
-            else:
-                logger.warning("RoutedExpertsCapturer is not initialized.")
 
         model_runner_output = ModelRunnerOutput(
             req_ids=req_ids_output_copy,
@@ -1995,9 +1990,7 @@ class NPUModelRunner(GPUModelRunner):
             with record_function_or_nullcontext("EPLB update"):
                 self.eplb_updator.forward_end()
 
-        if self.debugger is not None:
-            self.debugger.stop()
-            self.debugger.step()
+        self._finalize_dump_data()
 
         if self.need_accepted_tokens:
             assert self.sampling_done_event is not None
@@ -2276,8 +2269,11 @@ class NPUModelRunner(GPUModelRunner):
             return round_up(num_scheduled_tokens, tp_size)
         return num_scheduled_tokens
 
-    # This is a function from the upstream vllm used to handle PP+SP. Since the judgment logic 
-    # of flashcomm1 in Ascend is inconsistent with SP in vllm, it needs to be overridden.
+    # These functions from upstream vllm handle PP+SP. Ascend's flashcomm1 SP
+    # differs from vllm's native SP: flashcomm1 does NOT scatter the residual
+    # before PP send, so the all_gather in sync_and_gather_intermediate_tensors
+    # must be skipped. Both overrides use enable_sp() rather than
+    # is_residual_scattered_for_sp() to reflect the actual Ascend SP state.
     def sync_and_slice_intermediate_tensors(
         self,
         num_tokens: int,
@@ -2287,8 +2283,6 @@ class NPUModelRunner(GPUModelRunner):
         assert self.intermediate_tensors is not None
         tp = self.vllm_config.parallel_config.tensor_parallel_size
 
-        # When sequence parallelism is enabled, the "residual" tensor is sharded
-        # across tensor parallel ranks, so each rank only needs its own slice.
         if sync_self:
             assert intermediate_tensors is not None
             for k, v in intermediate_tensors.items():
@@ -2304,6 +2298,19 @@ class NPUModelRunner(GPUModelRunner):
                 else v[:num_tokens]
                 for k, v in self.intermediate_tensors.items()
             }
+        )
+
+    def sync_and_gather_intermediate_tensors(
+        self,
+        num_tokens: int,
+        intermediate_tensors: IntermediateTensors | None,
+        sync_self: bool,
+    ) -> IntermediateTensors:
+        # vllm renamed sync_and_slice to sync_and_gather in v0.20.2.
+        # The Ascend override logic is identical: skip the upstream all_gather
+        # (flashcomm1 does not scatter residual before PP send).
+        return self.sync_and_slice_intermediate_tensors(
+            num_tokens, intermediate_tensors, sync_self
         )
 
     def _determine_batch_execution_and_padding(
@@ -2941,6 +2948,7 @@ class NPUModelRunner(GPUModelRunner):
                 target.clear_all_moe_loads()
             if self.dynamic_eplb:
                 self.eplb_updator.forward_end()
+            self._finalize_dump_data(dump=False)
             return hidden_states, hidden_states
 
     @torch.inference_mode()
@@ -3035,6 +3043,24 @@ class NPUModelRunner(GPUModelRunner):
                 use_eagle=self.use_eagle,
                 enable_enpu=self.enable_enpu,
             )
+
+        if self.compilation_config.cudagraph_mode != CUDAGraphMode.NONE:
+            self._start_dump_data()
+
+    def _start_dump_data(self) -> None:
+        if self.debugger is None or self._debugger_started:
+            return
+        self.debugger.start(self.model)
+        self._debugger_started = True
+
+    def _finalize_dump_data(self, **kwargs) -> None:
+        if self.debugger is None or not self._debugger_started:
+            return
+        if hasattr(self.debugger, "stop"):
+            self.debugger.stop()
+            self._debugger_started = False
+
+        self.debugger.step(**kwargs)
 
     def initialize_kv_cache(self, kv_cache_config: KVCacheConfig) -> None:
         """

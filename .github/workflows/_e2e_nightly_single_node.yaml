@@ -26,7 +26,7 @@ on:
       image:
         required: false
         type: string
-        default: "swr.cn-southwest-2.myhuaweicloud.com/base_image/ascend-ci/cann:8.5.1-910b-ubuntu22.04-py3.11"
+        default: "swr.cn-southwest-2.myhuaweicloud.com/base_image/ascend-ci/cann:9.0.0-910b-ubuntu22.04-py3.11"
       tests:
         required: false
         type: string
@@ -75,7 +75,7 @@ jobs:
       HF_HUB_OFFLINE: 1
       VLLM_USE_MODELSCOPE: True
       UV_INDEX_URL: http://cache-service.nginx-pypi-cache.svc.cluster.local/pypi/simple
-      UV_EXTRA_INDEX_URL: https://mirrors.huaweicloud.com/ascend/repos/pypi
+      UV_EXTRA_INDEX_URL: "https://mirrors.huaweicloud.com/ascend/repos/pypi https://triton-ascend.osinfra.cn/pypi/simple"
       UV_INDEX_STRATEGY: unsafe-best-match
       UV_NO_CACHE: 1
       UV_SYSTEM_PYTHON: 1
@@ -89,14 +89,13 @@ jobs:
           pip config set global.index-url http://cache-service.nginx-pypi-cache.svc.cluster.local/pypi/simple
           pip config set global.trusted-host cache-service.nginx-pypi-cache.svc.cluster.local
           pip install uv
-      
+
       - name: uninstall vlm vllm-ascend and remove code (if pr test)
         if: ${{ github.event_name == 'pull_request' }}
         run: |
           pip uninstall -y vllm-ascend || true
           cp -r /vllm-workspace/vllm-ascend/benchmark /tmp/aisbench-backup || true
           rm -rf  /vllm-workspace/vllm-ascend
-
 
       - name: Checkout vllm-project/vllm-ascend repo
         if: ${{ github.event_name == 'pull_request' }}
@@ -115,12 +114,12 @@ jobs:
         if: ${{ github.event_name == 'pull_request' }}
         working-directory: /vllm-workspace/vllm-ascend
         env:
-          PIP_EXTRA_INDEX_URL: https://mirrors.huaweicloud.com/ascend/repos/pypi
+          PIP_EXTRA_INDEX_URL: "https://mirrors.huaweicloud.com/ascend/repos/pypi https://triton-ascend.osinfra.cn/pypi/simple https://download.pytorch.org/whl/cpu/"
         run: |
           git config --global --add safe.directory /vllm-workspace/vllm-ascend
           pip install uc-manager
           uv pip install -r requirements-dev.txt
-          uv pip install -v -e .
+          uv pip install -e .
 
       - name: Install aisbench
         if: ${{ github.event_name == 'pull_request' }}

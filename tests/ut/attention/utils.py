@@ -160,8 +160,20 @@ def create_vllm_config(
     enable_chunked_prefill: bool = True,
     add_mock_model_methods: bool = True,
     hf_config_override: dict | None = None,
+<<<<<<< HEAD
 ) -> VllmConfig:
     """Create a VllmConfig for testing with reasonable defaults."""
+=======
+    hf_overrides: dict | None = None,
+) -> VllmConfig:
+    """Create a VllmConfig for testing with reasonable defaults.
+
+    ``hf_overrides`` is forwarded to ``ModelConfig.__init__`` (vLLM-native
+    mechanism); this is required for fp8-quantized DSA models such as
+    ``deepseek-ai/DeepSeek-V3.2-Exp`` whose ``quantization_config`` would
+    otherwise be rejected by Ascend's ``ModelConfig`` validator.
+    """
+>>>>>>> 43abdf08316acf9b4b17beeea3a7278570e530d2
 
     model_config = ModelConfig(
         model=model_name,
@@ -170,6 +182,10 @@ def create_vllm_config(
         dtype=dtype,
         seed=0,
         max_model_len=max_model_len,
+<<<<<<< HEAD
+=======
+        hf_overrides=hf_overrides or {},
+>>>>>>> 43abdf08316acf9b4b17beeea3a7278570e530d2
     )
 
     cache_config = CacheConfig(
@@ -212,7 +228,18 @@ def create_vllm_config(
         )
 
     if hf_config_override:
+<<<<<<< HEAD
         model_config.hf_config.update(hf_config_override)
+=======
+        # Apply the override to BOTH ``hf_config`` and ``hf_text_config`` so
+        # the attribute is visible to backends regardless of which view they
+        # reach for. For text-only models these usually point to the same
+        # object; for multimodal models ``hf_text_config`` may be different.
+        for k, v in hf_config_override.items():
+            setattr(model_config.hf_config, k, v)
+            if model_config.hf_text_config is not model_config.hf_config:
+                setattr(model_config.hf_text_config, k, v)
+>>>>>>> 43abdf08316acf9b4b17beeea3a7278570e530d2
 
     return VllmConfig(
         model_config=model_config,

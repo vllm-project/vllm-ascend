@@ -56,12 +56,21 @@ jobs:
         VLLM_USE_MODELSCOPE: True
         MAX_JOBS: 4
         UV_INDEX_URL: http://cache-service.nginx-pypi-cache.svc.cluster.local/pypi/simple
-        UV_EXTRA_INDEX_URL: https://mirrors.huaweicloud.com/ascend/repos/pypi
+        UV_EXTRA_INDEX_URL: "https://mirrors.huaweicloud.com/ascend/repos/pypi https://triton-ascend.osinfra.cn/pypi/simple"
         UV_INDEX_STRATEGY: unsafe-best-match
         UV_NO_CACHE: 1
         UV_SYSTEM_PYTHON: 1
         UV_PYTHON: python3
     steps:
+      - name: Check NPU availability
+        id: check_npu
+        run: |
+          if npu-smi info > /dev/null 2>&1; then
+            echo "has_npu=true" >> $GITHUB_OUTPUT
+          else
+            echo "has_npu=false" >> $GITHUB_OUTPUT
+          fi
+
       - name: Install packages
         run: |
           sed -Ei 's@(ports|archive).ubuntu.com@cache-service.nginx-pypi-cache.svc.cluster.local:8081@g' /etc/apt/sources.list
@@ -82,8 +91,8 @@ jobs:
       - name: Install vllm-project/vllm from source
         working-directory: ./vllm-empty
         run: |
-          VLLM_TARGET_DEVICE=empty uv pip install . ${{ runner.arch == 'X64' && '--extra-index-url https://download.pytorch.org/whl/cpu/' || '' }}
-          uv pip uninstall triton
+          VLLM_TARGET_DEVICE=empty pip install . ${{ steps.check_npu.outputs.has_npu == 'false' && '--extra-index-url https://download.pytorch.org/whl/cpu/' || '' }}
+          pip uninstall -y triton
 
       - name: Checkout vllm-project/vllm-ascend repo
         uses: actions/checkout@v6
@@ -96,7 +105,8 @@ jobs:
           echo "CSRC_HASH=$CSRC_HASH" >> $GITHUB_OUTPUT
 
       - name: Cache vllm-ascend csrc
-        if: ${{ runner.arch != 'X64' }}
+        id: cache-csrc
+        if: ${{ steps.check_npu.outputs.has_npu == 'true' }}
         uses: runs-on/cache@v4
         with:
           path: |
@@ -108,32 +118,32 @@ jobs:
           restore-keys: |
             vllm-ascend-build-v1-${{ runner.os }}-swr.cn-southwest-2.myhuaweicloud.com/base_image/ascend-ci/cann:${{ matrix.group.image_tag }}-${{ steps.get_csrc_hash.outputs.CSRC_HASH }}
 
-      - name: Install vllm-project/vllm-ascend
-        if: ${{ runner.arch != 'X64' }}
+      - name: Install vllm-project/vllm-ascend with device
+        if: ${{ steps.check_npu.outputs.has_npu == 'true' }}
         env:
-          PIP_EXTRA_INDEX_URL: https://mirrors.huaweicloud.com/ascend/repos/pypi
+          PIP_EXTRA_INDEX_URL: "https://mirrors.huaweicloud.com/ascend/repos/pypi https://triton-ascend.osinfra.cn/pypi/simple https://download.pytorch.org/whl/cpu/"
         run: |
           pip install uc-manager
-          uv pip install -r requirements-dev.txt
+          pip install -r requirements-dev.txt
           if find vllm_ascend -maxdepth 1 -name '*.so' -type f 2>/dev/null | grep -q .; then
-            COMPILE_CUSTOM_KERNELS=0 uv pip install -v -e .
+            COMPILE_CUSTOM_KERNELS=0 uv pip install -e .
           else
-            uv pip install -v -e .
+            pip install -e .
           fi
 
-      - name: Install vllm-project/vllm-ascend
-        if: ${{ runner.arch == 'X64' }}
+      - name: Install vllm-project/vllm-ascend no device
+        if: ${{ steps.check_npu.outputs.has_npu == 'false' }}
         env:
           SOC_VERSION: ascend910b1
           COMPILE_CUSTOM_KERNELS: 0
         run: |
           pip install uc-manager
           export LD_LIBRARY_PATH=$LD_LIBRARY_PATH:/usr/local/Ascend/ascend-toolkit/latest/x86_64-linux/devlib
-          uv pip install -v . --extra-index-url https://download.pytorch.org/whl/cpu/
-          uv pip install -r requirements-dev.txt --extra-index-url https://download.pytorch.org/whl/cpu/
+          pip install . --extra-index-url https://download.pytorch.org/whl/cpu/ --extra-index-url https://triton-ascend.osinfra.cn/pypi/simple
+          pip install -r requirements-dev.txt --extra-index-url https://download.pytorch.org/whl/cpu/ --extra-index-url https://triton-ascend.osinfra.cn/pypi/simple
 
       - name: Run smart UT with device
-        if: ${{ runner.arch != 'X64' }}
+        if: ${{ steps.check_npu.outputs.has_npu == 'true' }}
         env:
           VLLM_WORKER_MULTIPROC_METHOD: spawn
           PYTORCH_NPU_ALLOC_CONF: max_split_size_mb:256
@@ -151,7 +161,7 @@ jobs:
           pytest -sv --color=yes ${{ matrix.group.tests }}
 
       - name: Run smart UT without device
-        if: ${{ runner.arch == 'X64' }}
+        if: ${{ steps.check_npu.outputs.has_npu == 'false' }}
         env:
           VLLM_WORKER_MULTIPROC_METHOD: spawn
           TORCH_DEVICE_BACKEND_AUTOLOAD: 0
