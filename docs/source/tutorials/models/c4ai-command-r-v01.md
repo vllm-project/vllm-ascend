@@ -114,7 +114,6 @@ Expected result:
 - Response JSON contains `choices`.
 - `finish_reason` is `stop`.
 
-
 ## Accuracy Evaluation
 
 Run the LM-Eval correctness test with the model config:
@@ -132,7 +131,6 @@ Reference values (from `tests/e2e/models/configs/c4ai-command-r-v01.yaml`):
 | --- | --- | --- |
 | gsm8k | exact_match,strict-match | 0.20 |
 | gsm8k | exact_match,flexible-extract | 0.15 |
-
 
 ## FAQ
 
