@@ -3234,7 +3234,12 @@ class NPUModelRunner(GPUModelRunner):
     def _is_c8_mxfp_kv_cache(self, kv_cache_spec: AttentionSpec) -> bool:
         quant_config = getattr(self.vllm_config, "quant_config", None)
         quant_description = getattr(quant_config, "quant_description", {})
-        return quant_description.get("kv_cache_type") == "C8_MXFP" and kv_cache_spec.dtype == torch.float8_e4m3fn
+        if quant_description.get("kv_cache_type") != "C8_MXFP":
+            return False
+        # Spec dtype may still be default if KV specs were built before quant json loaded.
+        from vllm.v1.kv_cache_interface import FullAttentionSpec
+
+        return isinstance(kv_cache_spec, FullAttentionSpec)
 
     @staticmethod
     def _get_mxfp_scale_dtype() -> torch.dtype:
@@ -3392,15 +3397,16 @@ class NPUModelRunner(GPUModelRunner):
                         k_dim, v_dim = self._get_attention_kv_cache_dims(layer_name, current_kv_cache_spec)
                         assert k_dim > 0 and v_dim > 0
                         if self._is_c8_mxfp_kv_cache(current_kv_cache_spec):
-                            kv_dtype_size = get_dtype_size(current_kv_cache_spec.dtype)
-                            page_size_bytes = mxfp_kv_page_size_bytes(
+                            page_size_bytes = current_kv_cache_spec.page_size_bytes
+                            kv_dtype_size = get_dtype_size(torch.float8_e4m3fn)
+                            expected_page_size_bytes = mxfp_kv_page_size_bytes(
                                 current_kv_cache_spec.block_size,
                                 current_kv_cache_spec.num_kv_heads,
                                 k_dim,
                                 v_dim,
                                 kv_dtype_size,
                             )
-                            assert page_size_bytes == current_kv_cache_spec.page_size_bytes, (
+                            assert page_size_bytes == expected_page_size_bytes, (
                                 f"C8_MXFP page_size mismatch: computed={page_size_bytes}, "
                                 f"spec.page_size_bytes={current_kv_cache_spec.page_size_bytes}, "
                                 f"layer={layer_name}, block_size={current_kv_cache_spec.block_size}, "

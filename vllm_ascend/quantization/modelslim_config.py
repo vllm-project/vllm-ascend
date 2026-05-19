@@ -383,6 +383,7 @@ class AscendModelSlimConfig(QuantizationConfig):
         self.hf_to_vllm_mapper: WeightsMapper | None = None
         self._mapper_applied = False
         self._add_kvcache_quant_metadata()
+        self._maybe_enable_c8_mxfp_kv_page_size()
 
     def __repr__(self) -> str:
         return "AscendModelSlimConfig:\n" + super().__repr__()
@@ -441,6 +442,7 @@ class AscendModelSlimConfig(QuantizationConfig):
         if self.quant_description:
             self.quant_description = hf_to_vllm_mapper.apply_dict(self.quant_description)
             self._add_kvcache_quant_metadata()
+            self._maybe_enable_c8_mxfp_kv_page_size()
             logger.info("Applied hf_to_vllm_mapper to quant_description keys")
 
     def get_cache_scale(self, name: str) -> str | None:
@@ -640,6 +642,7 @@ class AscendModelSlimConfig(QuantizationConfig):
                 self.quant_description = json.load(f)
             self._apply_extra_quant_adaptations()
             self._add_kvcache_quant_metadata()
+            self._maybe_enable_c8_mxfp_kv_page_size()
             return
 
         # Collect diagnostic info for the error message
@@ -709,6 +712,12 @@ class AscendModelSlimConfig(QuantizationConfig):
                 new_k = k.replace("weight_packed", "weight")
                 extra_quant_dict[new_k] = self.quant_description[k]
         self.quant_description.update(extra_quant_dict)
+
+    def _maybe_enable_c8_mxfp_kv_page_size(self) -> None:
+        if self.quant_description.get("kv_cache_type") == "C8_MXFP":
+            from vllm_ascend.patch.platform.patch_kv_cache_interface import enable_c8_mxfp_kv_page_size
+
+            enable_c8_mxfp_kv_page_size()
 
     def _add_kvcache_quant_metadata(self):
         fa_quant_type = self.quant_description.get("fa_quant_type", "")

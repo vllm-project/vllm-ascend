@@ -225,9 +225,13 @@ def _align_memory(tensor: torch.Tensor, alignment: int) -> torch.Tensor:
 
 
 def _is_c8_mxfp_kv_cache(vllm_config: VllmConfig, kv_cache_spec: AttentionSpec) -> bool:
+    from vllm.v1.kv_cache_interface import FullAttentionSpec
+
     quant_config = getattr(vllm_config, "quant_config", None)
     quant_description = getattr(quant_config, "quant_description", {})
-    return quant_description.get("kv_cache_type") == "C8_MXFP" and kv_cache_spec.dtype == torch.float8_e4m3fn
+    if quant_description.get("kv_cache_type") != "C8_MXFP":
+        return False
+    return isinstance(kv_cache_spec, FullAttentionSpec)
 
 
 def _get_mxfp_scale_dtype() -> torch.dtype:
@@ -286,15 +290,16 @@ def _allocate_kv_cache(
         k_dim, v_dim = _get_attention_kv_cache_dims(example_layer_name, example_kv_cache_spec)
         assert k_dim > 0 and v_dim > 0
         if _is_c8_mxfp_kv_cache(vllm_config, example_kv_cache_spec):
-            kv_dtype_size = example_kv_cache_spec.dtype.itemsize
-            page_size_bytes = mxfp_kv_page_size_bytes(
+            page_size_bytes = example_kv_cache_spec.page_size_bytes
+            kv_dtype_size = torch.float8_e4m3fn.itemsize
+            expected_page_size_bytes = mxfp_kv_page_size_bytes(
                 example_kv_cache_spec.block_size,
                 example_kv_cache_spec.num_kv_heads,
                 k_dim,
                 v_dim,
                 kv_dtype_size,
             )
-            assert page_size_bytes == example_kv_cache_spec.page_size_bytes, (
+            assert page_size_bytes == expected_page_size_bytes, (
                 f"C8_MXFP page_size mismatch: computed={page_size_bytes}, "
                 f"spec.page_size_bytes={example_kv_cache_spec.page_size_bytes}, "
                 f"layer={example_layer_name}, block_size={example_kv_cache_spec.block_size}, "
