@@ -14,11 +14,6 @@
         "npu_num": 4,
         "image_tag": "9.0.0-310p-ubuntu22.04-py3.11"
     },
-    "linux-aarch64-a3-1": {
-        "chip": "a3",
-        "npu_num": 1,
-        "image_tag": "9.0.0-a3-ubuntu22.04-py3.11"
-    },
     "linux-aarch64-a3-2": {
         "chip": "a3",
         "npu_num": 2,

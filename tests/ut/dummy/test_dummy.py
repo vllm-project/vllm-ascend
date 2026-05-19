@@ -12,7 +12,7 @@ def test_dummy_with_a3():
 
 
 @npu_test(num_npus=1, npu_type="a2")
-@npu_test(num_npus=1, npu_type="a3")
+@npu_test(num_npus=2, npu_type="a3")
 @npu_test(num_npus=1, npu_type="310p")
 def test_dummy_with_multiple_npu_requirements():
     assert True

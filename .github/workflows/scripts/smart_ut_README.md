@@ -104,10 +104,12 @@ class TestMoERouting:
 
 ### Multiple NPU runners
 
-Stack multiple `@npu_test` decorators when the same test can run on more than
-one NPU runner. The test is routed to every declared runner group.
+Stack multiple `@npu_test` decorators when the same test should be validated on
+more than one NPU runner. `@npu_test` is routing metadata only; Smart UT routes
+the test to every declared runner group.
 
-**note**: `@npu_test` should be used consecutively, with no other decorators inserted in between; otherwise, parsing errors may occur.
+Keep stacked `@npu_test` decorators consecutive so the routing metadata is easy
+to read.
 
 ```python
 from tests.ut.conftest import npu_test
