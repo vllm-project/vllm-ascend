@@ -92,6 +92,14 @@ class AscendDflashProposer(AscendEagleProposer):
 
         has_num_rejected = num_rejected_tokens_gpu is not None
 
+        if target_positions.dim() == 2:
+            draft_block_table = self.runner.input_batch.block_table[self.kv_cache_gid].get_device_tensor()[:batch_size]
+            original_context_slot_mapping = cad.slot_mapping[:num_context].to(torch.int32).clone()
+            original_seq_lens = cad.seq_lens[:batch_size].clone()
+
+            if has_num_rejected:
+                original_seq_lens = original_seq_lens - num_rejected_tokens_gpu[:batch_size]  # type: ignore[index]
+
         copy_and_expand_dflash_inputs_kernel_single_grid[1,](
             # Inputs
             next_token_ids_ptr=next_token_ids,
@@ -118,6 +126,36 @@ class AscendDflashProposer(AscendEagleProposer):
             batch_size=batch_size,
             HAS_NUM_REJECTED=has_num_rejected,
         )
+
+        if target_positions.dim() == 2:
+            self._context_slot_mapping_buffer[:num_context].copy_(
+                original_context_slot_mapping.to(dtype=self._context_slot_mapping_buffer.dtype)
+            )
+
+            block_size = self.kernel_block_size
+            base_pos = (
+                original_seq_lens[:batch_size]
+                .to(
+                    device=self.device,
+                    dtype=torch.long,
+                )
+                .view(batch_size, 1)
+            )
+            q_offsets = torch.arange(
+                num_query_per_req,
+                device=self.device,
+                dtype=torch.long,
+            ).view(1, num_query_per_req)
+            query_logical_pos = base_pos + q_offsets
+
+            block_numbers = query_logical_pos // block_size
+            block_offsets = query_logical_pos % block_size
+
+            block_ids = draft_block_table.gather(1, block_numbers)
+            query_slots = block_ids.to(torch.long) * block_size + block_offsets
+            self._slot_mapping_buffer[: batch_size * num_query_per_req].copy_(
+                query_slots.reshape(-1).to(dtype=self._context_slot_mapping_buffer.dtype)
+            )
 
         query_slot_mapping = self._slot_mapping_buffer[:num_query_total]
         new_query_start_loc = self.arange_dflash[: batch_size + 1] * num_query_per_req
