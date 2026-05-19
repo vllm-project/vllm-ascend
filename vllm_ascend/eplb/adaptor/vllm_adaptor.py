@@ -20,7 +20,6 @@ from typing import Any
 
 import torch
 import torch.distributed as dist
-import torch_npu
 from vllm.logger import logger
 
 import vllm_ascend.envs as envs_ascend
@@ -77,7 +76,7 @@ class VllmEplbAdaptor:
         for buffer_id in range(num_buffer_tensor):
             for name in self.expert_weight_names:
                 expert_tensor = self.param_dict[f"0.{name}"][0]
-                buffer_tensor = torch_npu.empty_like(expert_tensor)
+                buffer_tensor = torch.empty(expert_tensor.size(), dtype=expert_tensor.dtype, device=expert_tensor.device)
                 self.buffer_tensor_list[buffer_id].append(buffer_tensor)
 
     def init_expert_param_per_layer(self):
