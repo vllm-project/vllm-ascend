@@ -172,6 +172,43 @@ class PreVwnLayerV1(nn.Module):
 
         return wider_hidden_states
 
+class PreVwnLayerV2(nn.Module):
+    def __init__(
+        self,
+        vllm_config: VllmConfig,
+        prefix: str = "",
+        config: LlamaConfig | None = None,
+        quant_config: QuantizationConfig = None,
+    ) -> None:
+        super().__init__()
+        config = config or vllm_config.model_config.hf_config
+        hidden_size = config.hidden_size
+
+        self.input_layernorm = RMSNorm(hidden_size, eps=config.rms_norm_eps)
+        self.hidden_norm = RMSNorm(hidden_size, eps=config.rms_norm_eps)
+        fc_input_size = 2 * hidden_size
+        self.fc = ReplicatedLinear(
+            input_size=fc_input_size,
+            output_size=hidden_size,
+            bias=False,
+            params_dtype=vllm_config.model_config.dtype,
+            quant_config=quant_config,
+            prefix=maybe_prefix(prefix, "fc"),
+            return_bias=False,
+        )
+
+    def forward(
+        self,
+        embeds: torch.Tensor,
+        hidden_states: torch.Tensor
+    ):
+        norm_embeds = self.input_layernorm(embeds)
+        norm_hidden = self.hidden_norm(hidden_states)
+        hidden_to_fc = torch.cat([norm_embeds, norm_hidden], dim=-1)
+        hidden_after_fc = self.fc(hidden_to_fc)
+        return hidden_after_fc
+
+
 class VwnLlamaDecoderLayer(LlamaDecoderLayer):
     def __init__(
         self,
@@ -193,6 +230,7 @@ class VwnLlamaDecoderLayer(LlamaDecoderLayer):
         upward_input_size = self.hidden_size // m
         upward_output_size = wider_dim // m
         pre_vwn_version = getattr(config, "pre_vwn_version", 0)
+        self.pre_vwn_version = pre_vwn_version
         if pre_vwn_version == 0:
             self.pre_vwn_layer = PreVwnLayerV0(
                 vllm_config,
@@ -200,8 +238,15 @@ class VwnLlamaDecoderLayer(LlamaDecoderLayer):
                 config=config,
                 quant_config=quant_config
             )
-        else:
+        elif pre_vwn_version == 1:
             self.pre_vwn_layer = PreVwnLayerV1(
+                vllm_config,
+                prefix=maybe_prefix(prefix, f"layers.pre_vwn_layer"),
+                config=config,
+                quant_config=quant_config
+            )
+        else:
+            self.pre_vwn_layer = PreVwnLayerV2(
                 vllm_config,
                 prefix=maybe_prefix(prefix, f"layers.pre_vwn_layer"),
                 config=config,
@@ -306,9 +351,10 @@ class VwnLlamaDecoderLayer(LlamaDecoderLayer):
             wider_hidden_states = upward_hidden_states + hidden_residual
 
             # downward
-            wider_hidden_states_view = wider_hidden_states.view(-1, self.wider_dim // self.m)
-            hidden_state_tmp = self.downward(wider_hidden_states_view)
-            hidden_states = hidden_state_tmp.view(-1, self.hidden_size)
+            if self.pre_vwn_version != 2:
+                wider_hidden_states_view = wider_hidden_states.view(-1, self.wider_dim // self.m)
+                hidden_state_tmp = self.downward(wider_hidden_states_view)
+                hidden_states = hidden_state_tmp.view(-1, self.hidden_size)
 
         return hidden_states, residual
 
