@@ -133,7 +133,6 @@ Reference thresholds (from `tests/e2e/models/configs/c4ai-command-r-v01.yaml`):
 | gsm8k | exact_match,strict-match       | 0.20            |
 | gsm8k | exact_match,flexible-extract   | 0.15            |
 
-For more evaluation methods, refer to [Using lm_eval](../developer_guide/evaluation/using_lm_eval.md).
 
 ## FAQ
 
