@@ -31,10 +31,6 @@ def _ref_apply_temperature(
     return out
 
 
-# ===================================================================
-# Section 1: apply_temperature tests
-# ===================================================================
-
 @pytest.mark.parametrize(
     "num_tokens,vocab_size",
     [
@@ -82,10 +78,6 @@ def test_apply_temperature_skip_zero_and_one():
     assert torch.equal(logits, original), "Logits changed for temp=0.0 or temp=1.0"
 
 
-# ===================================================================
-# Section 2: gumbel_sample — greedy (temp=0) tests
-# ===================================================================
-
 @pytest.mark.parametrize(
     "num_tokens,num_reqs,vocab_size",
     [
@@ -129,10 +121,6 @@ def test_gumbel_sample_greedy_apply_temp_flag_irrelevant():
     assert torch.equal(s_false, expected)
     assert torch.equal(s_true, expected)
 
-
-# ===================================================================
-# Section 3: gumbel_sample — non-greedy (temp>0) tests
-# ===================================================================
 
 @pytest.mark.parametrize(
     "num_tokens,num_reqs,vocab_size",
@@ -248,10 +236,6 @@ def test_gumbel_sample_temperature_affects_distribution():
     )
 
 
-# ===================================================================
-# Section 4: Mixed temperature tests (temp=0 + temp>0)
-# ===================================================================
-
 @pytest.mark.parametrize(
     "num_tokens,num_reqs,vocab_size",
     [
@@ -280,10 +264,6 @@ def test_gumbel_sample_mixed_temperature(num_tokens, num_reqs, vocab_size):
             f"Token {tok} (temp=0) should be greedy: got {sampled[tok].item()}, expected {greedy[tok].item()}"
         )
 
-
-# ===================================================================
-# Section 5: Expanded index mapping tests
-# ===================================================================
 
 def test_gumbel_sample_expanded_idx_mapping():
     """Multiple tokens mapping to the same request must work correctly."""
@@ -333,10 +313,6 @@ def test_gumbel_sample_shared_seed_same_request():
         f"got {sampled[0].item()} vs {sampled[1].item()}"
     )
 
-
-# ===================================================================
-# Section 6: apply_temperature flag with non-zero temperature
-# ===================================================================
 
 def test_gumbel_sample_apply_temperature_true_nonzero():
     """apply_temperature=True with temp>0 must divide logits by temperature
@@ -405,11 +381,6 @@ def test_gumbel_sample_apply_temperature_false_nonzero():
             f"max_diff={(out_logits[req].float() - expected).abs().max().item():.6f}"
         )
 
-
-# ===================================================================
-# Section 7: output_processed_logits with non-contiguous idx_mapping
-#   (EAGLE speculative decoding scenario)
-# ===================================================================
 
 def test_gumbel_sample_processed_logits_req_state_idx():
     """Processed logits must be stored at req_state_idx position, not token_idx.
@@ -553,10 +524,6 @@ def test_gumbel_sample_processed_logits_mixed_temp():
         )
 
 
-# ===================================================================
-# Section 8: use_fp64 API compatibility
-# ===================================================================
-
 def test_gumbel_sample_use_fp64_param():
     """use_fp64 parameter should be accepted (but ignored on NPU)."""
     torch.manual_seed(42)
@@ -576,10 +543,6 @@ def test_gumbel_sample_use_fp64_param():
     assert torch.equal(s1, expected), "use_fp64=False result mismatch"
     assert torch.equal(s2, expected), "use_fp64=True result mismatch"
 
-
-# ===================================================================
-# Section 9: Edge cases
-# ===================================================================
 
 def test_gumbel_sample_single_token():
     """Single token with temperature > 0 should work."""
