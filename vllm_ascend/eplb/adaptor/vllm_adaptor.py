@@ -75,8 +75,7 @@ class VllmEplbAdaptor:
     def init_buffer_tensor(self, num_buffer_tensor):
         for buffer_id in range(num_buffer_tensor):
             for name in self.expert_weight_names:
-                complete_name = "model.layers.0.mlp.experts." + name
-                expert_tensor = self.param_dict[complete_name][0]
+                expert_tensor = self.param_dict[f"0.{name}"][0]
                 buffer_tensor = torch.empty_like(expert_tensor)
                 self.buffer_tensor_list[buffer_id].append(buffer_tensor)
 
