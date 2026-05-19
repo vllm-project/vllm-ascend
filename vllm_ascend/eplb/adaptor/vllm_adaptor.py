@@ -56,12 +56,10 @@ class VllmEplbAdaptor:
         self.expert_map_per_layer_cpu = dict()  # copy of expert map on CPU to avoid device synchronize frequently
 
         # Get num_local_experts from first real MoE layer
-        if self.num_moe_layers > 0:
-            first_layer = self.moe_layers[0]
-            self.num_local_experts = first_layer.local_num_experts
-            self.ep_rank = first_layer.ep_rank
-        else:
-            self.num_local_experts = 0
+        first_layer = self.moe_layers[0]
+        self.num_local_experts = first_layer.local_num_experts
+        self.ep_rank = first_layer.ep_rank
+
 
         self.expert_param_per_layer = dict()
         self.init_expert_param_per_layer()
