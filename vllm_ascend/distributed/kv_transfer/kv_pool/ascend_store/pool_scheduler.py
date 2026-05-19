@@ -47,8 +47,6 @@ class KVPoolScheduler:
         # request_id -> full_token_ids
         self._request_trackers: dict[str, RequestTracker] = {}
         self._preempted_req_ids: set[str] = set()
-        self.prefill_offload = False
-        self._discard_partial_chunks = True
         self._unfinished_requests: dict[str, tuple[Request, list[int]]] = {}
         self._unfinished_request_ids: set[str] = set()
         self._loading_req_ids: set[str] = set()
@@ -61,7 +59,6 @@ class KVPoolScheduler:
 
         model_config = vllm_config.model_config
         self.tp_size = vllm_config.parallel_config.tensor_parallel_size
-        self.pp_size = vllm_config.parallel_config.pipeline_parallel_size
         self.use_mla = False
         if hasattr(model_config, "use_mla") and isinstance(model_config.use_mla, bool) and model_config.use_mla:
             self.use_mla = True
