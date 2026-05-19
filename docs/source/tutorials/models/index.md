@@ -37,3 +37,12 @@ Minitron-8B-Base.md
 LLaVA-OneVision-Qwen2-0.5B-OV.md
 TeleChat2-3B.md
 :::
+
+## Adaptation Reports
+
+:::{toctree}
+:caption: Model Adaptation Reports
+:maxdepth: 1
+TeleChat2-3B-adaptation-report.md
+Gemma4-E4B-it-adaptation-report.md
+:::

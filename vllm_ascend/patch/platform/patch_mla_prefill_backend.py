@@ -15,10 +15,19 @@
 import torch
 import vllm.model_executor.layers.attention.mla_attention
 
-from vllm_ascend.utils import vllm_version_is
-
-if not vllm_version_is("0.20.1"):
+# Newer upstream versions removed the legacy MLAPrefillBackend module path and
+# no longer expose get_mla_prefill_backend(). In that case this compatibility
+# patch is intentionally a no-op.
+try:
     from vllm.v1.attention.backends.mla.prefill.base import MLAPrefillBackend
+except ModuleNotFoundError:
+    MLAPrefillBackend = None
+
+if (
+    MLAPrefillBackend is not None
+    and hasattr(vllm.model_executor.layers.attention.mla_attention,
+                "get_mla_prefill_backend")
+):
 
     class AscendMLAPrefillBackend(MLAPrefillBackend):
         @staticmethod

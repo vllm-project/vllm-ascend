@@ -133,6 +133,7 @@ class TestAscendAttentionBackendImpl(TestBase):
         self.layer_no_quant._k_scale_float = 1.0
         self.layer_no_quant._v_scale_float = 1.0
         self.mock_vllm_config = MagicMock()
+        self.mock_vllm_config.kv_transfer_config = None
         self.config_patcher = patch(
             "vllm_ascend.attention.attention_v1.get_current_vllm_config", return_value=self.mock_vllm_config
         )
@@ -190,6 +191,19 @@ class TestAscendAttentionBackendImpl(TestBase):
             kv_sharing_target_layer_name=None,
         )
 
+        self.impl_shared = AscendAttentionBackendImpl(
+            num_heads=8,
+            head_size=64,
+            scale=1.0,
+            num_kv_heads=8,
+            alibi_slopes=None,
+            sliding_window=None,
+            kv_cache_dtype="float16",
+            logits_soft_cap=None,
+            attn_type=self.attention_type.DECODER,
+            kv_sharing_target_layer_name="model.layers.0.self_attn.attn",
+        )
+
     def test_forward_no_attn_metadata(self):
         """Test forward pass when attn_metadata is None"""
         query = torch.randn(10, 8 * 64)
@@ -202,6 +216,87 @@ class TestAscendAttentionBackendImpl(TestBase):
         output = self.impl.forward(layer, query, key, value, kv_cache, None, output)
 
         assert output.shape == (10, 8 * 64)
+
+    @patch("vllm_ascend.attention.attention_v1.DeviceOperator.reshape_and_cache")
+    def test_reshape_and_cache_skips_shared_kv_cache_update(self, mock_reshape_and_cache):
+        query = torch.randn(3, 8, 64)
+        key = torch.randn(3, 8, 64)
+        value = torch.randn(3, 8, 64)
+        kv_cache = (
+            torch.zeros(5, 128, 8, 64),
+            torch.zeros(5, 128, 8, 64),
+        )
+        output = torch.empty_like(query)
+        metadata = MagicMock()
+        metadata.num_actual_tokens = 3
+        metadata.slot_mapping = torch.zeros(3, dtype=torch.long)
+
+        result = self.impl_shared.reshape_and_cache(
+            query, key, value, kv_cache, metadata, output
+        )
+
+        mock_reshape_and_cache.assert_not_called()
+        self.assertIs(self.impl_shared.key_cache, kv_cache[0])
+        self.assertIs(self.impl_shared.value_cache, kv_cache[1])
+        self.assertEqual(result, (query, key, value, output))
+
+    @patch("vllm_ascend.attention.attention_v1.DeviceOperator.reshape_and_cache")
+    def test_do_kv_cache_update_skips_shared_kv_cache_update(self, mock_reshape_and_cache):
+        key = torch.randn(3, 8, 64)
+        value = torch.randn(3, 8, 64)
+        kv_cache = (
+            torch.zeros(5, 128, 8, 64),
+            torch.zeros(5, 128, 8, 64),
+        )
+        slot_mapping = torch.zeros(3, dtype=torch.long)
+
+        self.impl_shared.do_kv_cache_update(
+            self.layer_no_quant, key, value, kv_cache, slot_mapping
+        )
+
+        mock_reshape_and_cache.assert_not_called()
+        self.assertIs(self.impl_shared.key_cache, kv_cache[0])
+        self.assertIs(self.impl_shared.value_cache, kv_cache[1])
+
+    def test_get_fia_params_prefill_shared_layer_uses_shared_cache(self):
+        key_cache = torch.arange(5 * 128 * 8 * 64, dtype=torch.float32).view(
+            5, 128, 8, 64
+        )
+        value_cache = torch.arange(
+            5 * 128 * 8 * 64, 2 * 5 * 128 * 8 * 64, dtype=torch.float32
+        ).view(5, 128, 8, 64)
+        self.impl_shared.key_cache = key_cache
+        self.impl_shared.value_cache = value_cache
+
+        metadata = MagicMock()
+        metadata.attn_state = AscendAttentionState.PrefillNoCache
+        metadata.seq_lens = torch.tensor([3], dtype=torch.int32)
+        metadata.seq_lens_list = [3]
+        metadata.block_tables = torch.tensor([[0, 1]], dtype=torch.long)
+        metadata.actual_seq_lengths_q = [3]
+
+        key = torch.randn(3, 8, 64)
+        value = torch.randn(3, 8, 64)
+
+        (
+            result_key,
+            result_value,
+            block_size,
+            block_table,
+            actual_seq_lengths_kv,
+        ) = self.impl_shared._get_fia_params(key, value, metadata)
+
+        self.assertEqual(block_size, 128)
+        self.assertTrue(torch.equal(block_table, metadata.block_tables))
+        self.assertEqual(actual_seq_lengths_kv, [3])
+        self.assertEqual(result_key.shape, (5, 128, 8 * 64))
+        self.assertEqual(result_value.shape, (5, 128, 8 * 64))
+        self.assertTrue(
+            torch.equal(result_key[0, 0], key_cache[0, 0].reshape(-1))
+        )
+        self.assertTrue(
+            torch.equal(result_value[1, 0], value_cache[1, 0].reshape(-1))
+        )
 
     @patch("torch_npu._npu_reshape_and_cache")
     @patch("torch_npu.npu_fused_infer_attention_score")
