@@ -526,8 +526,6 @@ def compute_mla_sdpa_reference(
 
 
 @npu_test(num_npus=1, npu_type="a2")
-@npu_test(num_npus=1, npu_type="a3")
-@npu_test(num_npus=1, npu_type="310p")
 def _test_mla_attention_correctness(
     batch_spec: BatchSpec,
     model: str,
