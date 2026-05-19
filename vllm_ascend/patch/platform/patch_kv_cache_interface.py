@@ -1,32 +1,45 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 
 import torch
 import vllm.model_executor.layers.attention.mla_attention
 import vllm.v1.kv_cache_interface
 from typing_extensions import Self
-from vllm.config import get_current_vllm_config
+from vllm.config import VllmConfig, get_current_vllm_config
+from vllm.model_executor.layers.attention import Attention
 from vllm.utils.torch_utils import get_dtype_size
 from vllm.v1.kv_cache_interface import AttentionSpec, FullAttentionSpec, MLAAttentionSpec
 
-from vllm_ascend.device.mxfp_compat import mxfp_kv_page_size_bytes
+from vllm_ascend.device.mxfp_compat import MXFP_KV_SCALE_GROUP_SIZE, mxfp_kv_page_size_bytes
 
 
 _orig_full_attention_spec_real_page_size_bytes = FullAttentionSpec.real_page_size_bytes.fget
+_orig_attention_get_kv_cache_spec = Attention.get_kv_cache_spec
+
+# Set when any layer builds a C8_MXFP KV cache spec. Used when page_size_bytes is
+# read before get_current_vllm_config() is available during KV cache sizing.
+_c8_mxfp_kv_cache_enabled = False
 
 
-def _uses_c8_mxfp_kv_cache(spec: AttentionSpec) -> bool:
-    if getattr(spec, "cache_mxfp_scale", False):
-        return True
-    try:
-        vllm_config = get_current_vllm_config()
-    except Exception:
+def _is_c8_mxfp_quant_config(vllm_config: VllmConfig | None) -> bool:
+    if vllm_config is None:
         return False
     quant_config = getattr(vllm_config, "quant_config", None)
     quant_description = getattr(quant_config, "quant_description", {})
-    return quant_description.get("kv_cache_type") == "C8_MXFP" and spec.dtype == torch.float8_e4m3fn
+    return quant_description.get("kv_cache_type") == "C8_MXFP"
+
+
+def _uses_c8_mxfp_kv_cache(spec: AttentionSpec) -> bool:
+    if spec.dtype != torch.float8_e4m3fn:
+        return False
+    if _c8_mxfp_kv_cache_enabled:
+        return True
+    try:
+        return _is_c8_mxfp_quant_config(get_current_vllm_config())
+    except Exception:
+        return False
 
 
 def _ascend_attention_spec_real_page_size_bytes(self: AttentionSpec) -> int:
@@ -44,6 +57,25 @@ def _ascend_attention_spec_real_page_size_bytes(self: AttentionSpec) -> int:
 
 
 FullAttentionSpec.real_page_size_bytes = property(_ascend_attention_spec_real_page_size_bytes)
+
+
+def _ascend_attention_get_kv_cache_spec(self, vllm_config: VllmConfig):
+    global _c8_mxfp_kv_cache_enabled
+    spec = _orig_attention_get_kv_cache_spec(self, vllm_config)
+    if spec is None or not isinstance(spec, FullAttentionSpec):
+        return spec
+    if not _is_c8_mxfp_quant_config(vllm_config):
+        return spec
+    if spec.block_size % MXFP_KV_SCALE_GROUP_SIZE != 0:
+        raise ValueError(
+            f"C8_MXFP KV cache requires cache block_size divisible by {MXFP_KV_SCALE_GROUP_SIZE}, "
+            f"got {spec.block_size}."
+        )
+    _c8_mxfp_kv_cache_enabled = True
+    return replace(spec, dtype=torch.float8_e4m3fn)
+
+
+Attention.get_kv_cache_spec = _ascend_attention_get_kv_cache_spec
 
 
 @dataclass(frozen=True)

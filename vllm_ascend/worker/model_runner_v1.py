@@ -3407,11 +3407,18 @@ class NPUModelRunner(GPUModelRunner):
                                 f"num_kv_heads={current_kv_cache_spec.num_kv_heads}, k_dim={k_dim}, "
                                 f"v_dim={v_dim}, kv_dtype_size={kv_dtype_size}"
                             )
+                            inferred_alloc_page = (
+                                kv_cache_tensor.size // kv_cache_config.num_blocks
+                                if kv_cache_config.num_blocks
+                                else None
+                            )
                             assert kv_cache_tensor.size % page_size_bytes == 0, (
                                 f"C8_MXFP kv_cache_tensor.size not divisible by page_size_bytes: "
                                 f"kv_cache_tensor.size={kv_cache_tensor.size}, page_size_bytes={page_size_bytes}, "
                                 f"remainder={kv_cache_tensor.size % page_size_bytes}, "
                                 f"spec.page_size_bytes={current_kv_cache_spec.page_size_bytes}, "
+                                f"inferred_alloc_page={inferred_alloc_page}, "
+                                f"num_blocks={kv_cache_config.num_blocks}, "
                                 f"layer={layer_name}, block_size={current_kv_cache_spec.block_size}, "
                                 f"num_kv_heads={current_kv_cache_spec.num_kv_heads}, k_dim={k_dim}, "
                                 f"v_dim={v_dim}, kv_dtype_size={kv_dtype_size}"
