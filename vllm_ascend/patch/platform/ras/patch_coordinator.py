@@ -12,6 +12,7 @@ from vllm.v1.serial_utils import MsgpackDecoder
 from vllm.v1.utils import get_engine_client_zmq_addr
 from vllm.utils.network_utils import make_zmq_socket
 from vllm.utils.system_utils import get_mp_context
+from vllm_ascend.recovery.types import FaultReport, RecoveryComplete, RecoveryPlanResult
 
 
 _RECOVERY_MSG_PREFIX = b"\x00REC"
@@ -116,6 +117,7 @@ def _patched_process_input_socket(
     last_stats_step = -1
     last_stats_wave = -1
     last_step_counts = None
+    is_recovering = False
 
     with (
         make_zmq_socket(
@@ -167,7 +169,6 @@ def _patched_process_input_socket(
                     "waiting for recovery subscriptions"
                 )
                 return
-        recovery_pub.send(b"DP_COORD_RECOVERY_READY")
         logger.info("All engine recovery subscriptions received")
 
         poller = zmq.Poller()
@@ -321,7 +322,109 @@ def _patched_process_input_socket(
                     msg = None
 
                 if msg is not None:
-                    logger.info("Recovery msg: %s", msg)
+                    if isinstance(msg, FaultReport):
+                        if is_recovering:
+                            logger.info(
+                                "[RAS] Ignoring FaultReport from engine %d worker %d "
+                                "while recovering, exp=%s",
+                                msg.engine_index,
+                                msg.worker_rank,
+                                msg.exp.exception_msg,
+                            )
+                            continue
+                        is_recovering = True
+                        plan_results: dict[int, RecoveryPlanResult] = {}
+                        plan_deadline = time.time() + msg.plan.timeout_s
+                        logger.info(
+                            "[RAS] Received FaultReport from engine %d worker %d: %s",
+                            msg.engine_index,
+                            msg.worker_rank,
+                            msg.exp.exception_msg,
+                        )
+                        recovery_pub.send(pickle.dumps(msg.plan))
+                        logger.info(
+                            "[RAS] Broadcast RecoveryPlan '%s' to all engines "
+                            "(timeout=%ds, deadline=%.3f)",
+                            msg.plan.name,
+                            msg.plan.timeout_s,
+                            plan_deadline,
+                        )
+                    elif isinstance(msg, RecoveryPlanResult):
+                        assert is_recovering, "Received RecoveryPlanResult while not recovering"
+                        plan_results[msg.engine_index] = msg
+                        logger.info(
+                            "[RAS] Received RecoveryPlanResult from engine %d: "
+                            "plan=%s success=%s (%d/%d)",
+                            msg.engine_index,
+                            msg.plan_name,
+                            msg.success,
+                            len(plan_results),
+                            engine_count,
+                        )
+                        if not msg.success:
+                            logger.error(
+                                "[RAS] Engine %d reported FAILURE for plan '%s', "
+                                "aborting recovery",
+                                msg.engine_index,
+                                msg.plan_name,
+                            )
+                            recovery_pub.send(pickle.dumps(
+                                RecoveryComplete(
+                                    plan_name=msg.plan_name,
+                                    success=False,
+                                    current_wave=current_wave,
+                                )
+                            ))
+                            is_recovering = False
+                            logger.info(
+                                "[RAS] Broadcast RecoveryComplete(failed) to all engines"
+                            )
+                        elif len(plan_results) == engine_count:
+                            is_recovering = False
+                            logger.info(
+                                "[RAS] All engines reported: ALL SUCCESS",
+                            )
+                            current_wave += 1
+                            recovery_pub.send(pickle.dumps(
+                                RecoveryComplete(
+                                    plan_name=msg.plan_name,
+                                    success=True,
+                                    current_wave=current_wave,
+                                )
+                            ))
+                            logger.info(
+                                "[RAS] Broadcast RecoveryComplete(success, wave=%d) "
+                                "to all engines",
+                                current_wave,
+                            )
+                            
+                    else:
+                        logger.warning(
+                            "[RAS] Unknown recovery msg type: %s", type(msg)
+                        )
+
+            if is_recovering and time.time() > plan_deadline:
+                missing = [
+                    i for i in range(engine_count) if i not in plan_results
+                ]
+                logger.error(
+                    "[RAS] RecoveryPlan timed out! Missing results from engines: %s "
+                    "(received %d/%d)",
+                    missing,
+                    len(plan_results),
+                    engine_count,
+                )
+                recovery_pub.send(pickle.dumps(
+                    RecoveryComplete(
+                        plan_name="",
+                        success=False,
+                        current_wave=current_wave,
+                    )
+                ))
+                is_recovering = False
+                logger.info(
+                    "[RAS] Broadcast RecoveryComplete(timeout) to all engines"
+                )
 
             if wave_state_changed:
                 message = (None, current_wave, engines_running)

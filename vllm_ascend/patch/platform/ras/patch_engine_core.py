@@ -1,5 +1,6 @@
 import pickle
 import signal
+import time
 from contextlib import ExitStack
 
 import zmq
@@ -7,13 +8,12 @@ from vllm.config import ParallelConfig, VllmConfig
 from vllm.logger import logger
 from vllm.transformers_utils.config import maybe_register_config_serialize_by_value
 from vllm.utils.system_utils import set_process_title
-from vllm.v1.engine import EngineCoreRequest, EngineCoreRequestType
+from vllm.v1.engine import EngineCoreOutputs, EngineCoreRequest, EngineCoreRequestType
 from vllm.v1.engine.core import DPEngineCoreProc, EngineCoreProc, EngineShutdownState
-from vllm.v1.executor.multiproc_executor import WorkerProc
 from vllm.v1.serial_utils import MsgpackDecoder
-from vllm.v1.utils import get_engine_client_zmq_addr
 from vllm.utils.network_utils import make_zmq_socket
-from vllm_ascend.recovery import RecoveryHandler
+from vllm_ascend.recovery.engine_core_recovery_handler import RecoveryHandler
+from vllm_ascend.recovery.utils import get_engine_recovery_bind_address
 
 
 _RECOVERY_MSG_PREFIX = b"\x00REC"
@@ -24,16 +24,11 @@ class RasDPEngineCoreProc(DPEngineCoreProc):
     def __init__(self, *args, **kwargs):
         vllm_config: VllmConfig = kwargs["vllm_config"]
 
-        recover_step_pub_addr = get_engine_client_zmq_addr(
-            local_only=True, host="127.0.0.1"
-        )
-        recover_report_pull_addr = get_engine_client_zmq_addr(
-            local_only=True, host="127.0.0.1"
-        )
-        self._recovery_addrs = {
-            "recover_step_pub_addr": recover_step_pub_addr,
-            "recover_report_pull_addr": recover_report_pull_addr,
-        }
+        recover_step_xpub_addr, recover_report_pull_addr, \
+            recover_step_result_pull_addr = \
+            get_engine_recovery_bind_address(
+                vllm_config.parallel_config.data_parallel_rank
+            )
 
         self._recovery_handler = RecoveryHandler(
             engine_core=None,
@@ -41,7 +36,17 @@ class RasDPEngineCoreProc(DPEngineCoreProc):
         )
 
         logger.info(
-            "[RAS] RecoveryHandler started: recovery_addrs=%s", self._recovery_addrs
+            "[RAS] RecoveryHandler bind recovery_addrs=%s",
+            {
+                "recover_step_xpub_addr": recover_step_xpub_addr,
+                "recover_report_pull_addr": recover_report_pull_addr,
+                "recover_step_result_pull_addr": recover_step_result_pull_addr,
+            }
+        )
+        self._recovery_handler.setup_recover_sockets(
+            recover_step_xpub_addr,
+            recover_report_pull_addr,
+            recover_step_result_pull_addr,
         )
 
         super().__init__(*args, **kwargs)
@@ -148,6 +153,88 @@ class RasDPEngineCoreProc(DPEngineCoreProc):
                             self.aborts_queue.put_nowait(request)
 
                     self.input_queue.put_nowait((request_type, request))
+
+    def run_busy_loop(self):
+        while self._handle_shutdown():
+            if self._recovery_handler.is_recovering:
+                self._wait_for_recovery()
+                continue
+
+            try:
+                self._process_input_queue()
+
+                if self.eep_scaling_state is not None:
+                    _ = self.eep_scaling_state.progress()
+                    if self.eep_scaling_state.is_complete():
+                        self.process_input_queue_block = True
+                        self.eep_scaling_state = None
+
+                executed = self._process_engine_step()
+                self._maybe_publish_request_counts()
+
+                local_unfinished_reqs = self.scheduler.has_unfinished_requests()
+                if not executed:
+                    if not local_unfinished_reqs and not self.engines_running:
+                        continue
+                    self.execute_dummy_batch()
+
+                self.engines_running = self._has_global_unfinished_reqs(
+                    local_unfinished_reqs
+                )
+
+                if not self.engines_running:
+                    if self.dp_rank == 0 or not self.has_coordinator:
+                        logger.debug(
+                            "Wave %d finished, pausing engine loop.",
+                            self.current_wave,
+                        )
+                        client_index = -1 if self.has_coordinator else 0
+                        self.output_queue.put_nowait(
+                            (
+                                client_index,
+                                EngineCoreOutputs(
+                                    wave_complete=self.current_wave
+                                ),
+                            )
+                        )
+                    self.current_wave += 1
+                    self.step_counter = 0
+
+            except Exception:
+                if self._wait_for_recovery_on_exception():
+                    continue
+                raise
+
+        raise SystemExit
+
+    def _wait_for_recovery(self) -> None:
+        logger.info(
+            "[RAS] EngineCore entering recovery wait (wave=%d)", self.current_wave
+        )
+        self._recovery_handler.wait_for_recovery()
+        if self._recovery_handler.get_recovery_success():
+            logger.info("[RAS] Recovery succeeded, resuming engine loop")
+        else:
+            logger.error("[RAS] Recovery failed, raising exception")
+            raise RuntimeError("Recovery failed")
+
+    def _wait_for_recovery_on_exception(self) -> bool:
+        logger.info(
+            "[RAS] EngineCore caught exception, waiting up to 5s for "
+            "recovery signal..."
+        )
+        deadline = time.time() + 5.0
+        while time.time() < deadline:
+            if self._recovery_handler.is_recovering:
+                logger.info(
+                    "[RAS] Recovery signal received, suppressing exception"
+                )
+                return True
+            time.sleep(0.1)
+        logger.info(
+            "[RAS] No recovery signal within 5s, re-raising exception"
+        )
+        return False
 
 
 def _patched_run_engine_core(*args, dp_rank: int = 0, local_dp_rank: int = 0, **kwargs):
