@@ -112,7 +112,14 @@ from vllm_ascend.eplb.core.eplb_device_transfer_loader import D2DExpertWeightLoa
 from vllm_ascend.eplb.core.eplb_worker import EplbProcess
 from vllm_ascend.eplb.eplb_updator import EplbUpdator
 from vllm_ascend.eplb.utils import model_register
-from vllm_ascend.device.mxfp_compat import FLOAT8_E8M0FNU_DTYPE
+from vllm_ascend.device.mxfp_compat import (
+    FLOAT8_E8M0FNU_DTYPE,
+    mxfp_k_scale_cache_shape,
+    mxfp_k_scale_numel,
+    mxfp_kv_block_scale_groups,
+    mxfp_v_scale_cache_shape,
+    mxfp_v_scale_numel,
+)
 from vllm_ascend.ops.rotary_embedding import set_cos_and_sin, update_cos_sin
 from vllm_ascend.patch.worker.patch_draft_quarot import patch_load_weights
 from vllm_ascend.patch.worker.patch_module import patch_torch_npu_argsort
@@ -3392,10 +3399,11 @@ class NPUModelRunner(GPUModelRunner):
                             num_blocks = kv_cache_tensor.size // current_kv_cache_spec.page_size_bytes
                             num_heads = current_kv_cache_spec.num_kv_heads
                             block_size = current_kv_cache_spec.block_size
+                            mxfp_kv_block_scale_groups(block_size)
                             k_tensor_size = num_blocks * block_size * num_heads * k_dim
                             v_tensor_size = num_blocks * block_size * num_heads * v_dim
-                            k_scale_tensor_size = num_blocks * block_size * num_heads * (k_dim // 32)
-                            v_scale_tensor_size = num_blocks * block_size * num_heads * (v_dim // 32)
+                            k_scale_tensor_size = mxfp_k_scale_numel(num_blocks, block_size, num_heads, k_dim)
+                            v_scale_tensor_size = mxfp_v_scale_numel(num_blocks, block_size, num_heads, v_dim)
                             k_tensor_split_factor = v_tensor_split_factor = None
                         else:
                             kv_head_dim_list = [
@@ -3660,8 +3668,8 @@ class NPUModelRunner(GPUModelRunner):
                     else:
                         if self._is_c8_mxfp_kv_cache(current_kv_cache_spec):
                             raw_k_scale_tensor, raw_v_scale_tensor = raw_cache_tensors[2:]
-                            k_scale_shape = (*k_shape[:-1], k_shape[-1] // 32)
-                            v_scale_shape = (*v_shape[:-1], v_shape[-1] // 32)
+                            k_scale_shape = mxfp_k_scale_cache_shape(*k_shape)
+                            v_scale_shape = mxfp_v_scale_cache_shape(*v_shape)
                             k_scale_cache = raw_k_scale_tensor.view(self._get_mxfp_scale_dtype()).view(k_scale_shape)
                             v_scale_cache = raw_v_scale_tensor.view(self._get_mxfp_scale_dtype()).view(v_scale_shape)
                             kv_caches[layer_name] = (k_cache, v_cache, k_scale_cache, v_scale_cache)

@@ -11,6 +11,8 @@ from vllm.config import get_current_vllm_config
 from vllm.utils.torch_utils import get_dtype_size
 from vllm.v1.kv_cache_interface import AttentionSpec, FullAttentionSpec, MLAAttentionSpec
 
+from vllm_ascend.device.mxfp_compat import FLOAT8_E8M0FNU_DTYPE
+
 
 _orig_full_attention_spec_real_page_size_bytes = FullAttentionSpec.real_page_size_bytes.fget
 
@@ -33,8 +35,9 @@ def _ascend_attention_spec_real_page_size_bytes(self: AttentionSpec) -> int:
         return real_page_size
     if self.head_size % 32 != 0:
         raise ValueError(f"C8_MXFP KV cache requires head_size to be divisible by 32, got {self.head_size}.")
-    scale_head_size = self.head_size // 32
-    scale_page_size = 2 * self.block_size * self.num_kv_heads * scale_head_size
+    mxfp_scale_dtype = FLOAT8_E8M0FNU_DTYPE or torch.uint8
+    scale_dtype_size = get_dtype_size(mxfp_scale_dtype)
+    scale_page_size = 2 * self.block_size * self.num_kv_heads * scale_dtype_size // 32
     return real_page_size + scale_page_size
 
 

@@ -33,12 +33,6 @@ class BaseDeviceAdaptor:
             key=key, value=value, key_cache=key_cache, value_cache=value_cache, slot_indices=slot_mapping
         )
 
-    @classmethod
-    def reshape_and_cache_scales(cls, key_scale, value_scale, key_scale_cache, value_scale_cache, slot_mapping):
-        slot_mapping = slot_mapping.to(torch.long)
-        key_scale_cache.view(-1, *key_scale_cache.shape[2:])[slot_mapping] = key_scale
-        value_scale_cache.view(-1, *value_scale_cache.shape[2:])[slot_mapping] = value_scale
-
     @staticmethod
     def npu_moe_init_routing(
         hidden_states,

@@ -309,12 +309,13 @@ self.value_scale_cache = kv_cache[3]</code></pre>
     <li>不修改 FIA/PA attention 算子调用参数。</li>
     <li>不新增 mxfp8 KV cache 反量化消费逻辑；scale cache 只读取到 backend 属性，不参与计算。</li>
     <li>不处理 PD 分离、kv transfer producer/consumer 差异和跨实例 KV 搬运。</li>
+    <li>不支持 hamming sparse KV compression；开关打开时 <code>C8_MXFP</code> backend 会显式报错。</li>
     <li>不支持 <code>head_size % 32 != 0</code> 的 padding。</li>
     <li>不改 checkpoint scale name remap，因为 K/V scale 是运行时动态生成。</li>
   </ul>
 
   <h2>下一步计划</h2>
-  <p>下一阶段目标是重写 <code>AscendC8MXFPAttentionBackendImpl.forward()</code>，使用已缓存的 K/V scale 完成 MXFP8 全量化 attention 计算。届时当前的“读取但不使用”会升级为“读取并传递给支持 MXFP8 KV dequant 的 attention 算子”。</p>
+  <p><code>AscendC8MXFPAttentionBackendImpl.forward()</code> 已重写为 MXFP8 attention 路径：动态量化 query，读取已缓存的 K/V scale，并把 query/key/value 的 E8M0 scale 传给 quantized FIA 调用。当前实现依赖 torch_npu runtime 对 FusedInferAttentionScore V5 风格 MXFP8 scale 参数的支持。</p>
 
   <h3>目标行为</h3>
   <ul>
@@ -343,14 +344,14 @@ sequenceDiagram
     Forward-->>Output: write output tensor
   </div>
 
-  <h3>候选实现步骤</h3>
+  <h3>已实施步骤</h3>
   <ol>
-    <li>新增专用 decode/prefill 分支，避免影响当前 <code>AscendAttentionBackendImpl</code> 和 C8 INT8 路径。</li>
-    <li>在 <code>forward()</code> 中强制读取 <code>self.key_scale_cache</code> 和 <code>self.value_scale_cache</code>，缺失时直接报错，避免静默退化。</li>
-    <li>确认 torch_npu/CANN attention 算子的 MXFP8 scale 入参形式：scale dtype、shape、layout、是否支持 paged KV cache。</li>
-    <li>根据算子约束选择输入 layout。优先保持当前 paged KV cache layout：<code>[num_blocks, block_size, num_kv_heads, head_size]</code> 和 scale layout：<code>[num_blocks, block_size, num_kv_heads, head_size / 32]</code>。</li>
-    <li>把 scale cache 传入 attention op，完成 MXFP8 K/V 的 fused dequant attention 计算。</li>
-    <li>补充精度验证：同一输入下比较 BF16 KV baseline、当前 FP8 cache 写入结果和新 MXFP8 attention 输出误差。</li>
+    <li>新增专用 <code>forward()</code> 路径，避免影响当前 <code>AscendAttentionBackendImpl</code> 和 C8 INT8 路径。</li>
+    <li>在 <code>forward()</code> 中强制要求 <code>kv_cache[2:4]</code> 存在，缺失时直接报错，避免静默退化。</li>
+    <li>对 query 调用 <code>npu_dynamic_mx_quant</code>，生成 FP8 E4M3 query 和 E8M0 query scale。</li>
+    <li>decode/cache-hit/chunked-prefill 路径读取 <code>self.key_scale_cache</code> 和 <code>self.value_scale_cache</code>；prefill-no-cache 路径直接量化当前 K/V 并使用即时 scale。</li>
+    <li>通过 <code>npu_fused_infer_attention_score_v2</code> 传入 <code>dequant_scale_query</code>、<code>dequant_scale_key</code>、<code>dequant_scale_value</code>、量化模式和 dtype 参数，承接 V5 风格 MXFP8 scale 语义。</li>
+    <li>补充精度验证仍待执行：同一输入下比较 BF16 KV baseline、当前 FP8 cache 写入结果和新 MXFP8 attention 输出误差。</li>
   </ol>
 
   <h3>风险与待确认</h3>
@@ -359,6 +360,7 @@ sequenceDiagram
     <li>如果现有 FIA/PA 不支持 E8M0 per-32 scale，需要新增自定义 op 或先走显式 dequant 后 attention 的功能验证路径。</li>
     <li>全量化 attention 可能要求 query 也量化并提供 query scale，这会扩大修改范围，需要单独设计。</li>
     <li>如果算子要求 NZ 或其它 layout，cache 写入布局和 scale layout 可能需要进一步调整。</li>
+    <li>hamming sparse KV compression 当前未接入 C8_MXFP scale cache，后续若需要支持，需要补齐压缩块与 scale cache 的一致性维护。</li>
   </ul>
 
   <h2>验证状态</h2>
