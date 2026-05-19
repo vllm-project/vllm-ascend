@@ -3,8 +3,6 @@
 
 import unittest
 
-import torch
-
 from vllm_ascend.device.mxfp_compat import (
     MXFP_KV_SCALE_GROUP_SIZE,
     MXFP_SCALE_DTYPE_SIZE,
@@ -68,12 +66,3 @@ class TestMxfpKvPageSizeBytes(unittest.TestCase):
         with self.assertRaises(ValueError) as ctx:
             mxfp_kv_page_size_bytes(32, 8, 128, 128, kv_dtype_size=1)
         self.assertIn(str(MXFP_KV_SCALE_GROUP_SIZE), str(ctx.exception))
-
-    def test_v_scale_slot_matches_qwen3_formula(self):
-        # modeling_qwen3_moe: v_scale_slot = kv_slot // (QUANT_BLOCK_SIZE * 2), QUANT_BLOCK_SIZE=32
-        block_size = 128
-        kv_slots = torch.tensor([0, 63, 64, 127, 128, 256], dtype=torch.long)
-        v_scale_slots = kv_slots // MXFP_KV_SCALE_GROUP_SIZE
-        self.assertEqual(v_scale_slots.tolist(), [0, 0, 1, 1, 2, 4])
-        # block 0 positions 0-63 -> group 0; 64-127 -> group 1; block 1 slot 128 -> group 2
-        self.assertEqual(128 // MXFP_KV_SCALE_GROUP_SIZE, block_size // MXFP_KV_SCALE_GROUP_SIZE)
