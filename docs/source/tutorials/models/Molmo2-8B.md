@@ -1,6 +1,6 @@
 # Molmo2-8B (Molmo2ForConditionalGeneration)
 
-## 1 Introduction
+## Introduction
 
 [Molmo2-8B](https://huggingface.co/allenai/Molmo2-8B) is an open vision–language model from the Allen Institute for AI (Ai2). It uses a **Qwen3-8B** language backbone and **SigLIP 2** as the vision encoder, and supports **image** and **video** inputs with pointing and dense captioning-style outputs. In upstream vLLM it is registered as `Molmo2ForConditionalGeneration`; see the [vLLM supported models](https://docs.vllm.ai/en/latest/models/supported_models.html) list.
 
@@ -8,15 +8,15 @@ This document will demonstrate the primary validation steps for the model, inclu
 
 This document is validated and written based on **vLLM-Ascend v0.13.0**. The current model (Molmo2-8B) is fully supported in this version, and all **v0.13.0 and later versions** can run stably.
 
-## 2 Feature Matrix
+## Feature Matrix
 
 Please refer to the [Supported Features List](../../user_guide/support_matrix/supported_models.md) for the model support matrix.
 
 Please refer to the [Feature Guide](../../user_guide/feature_guide/index.md) for feature configuration information.
 
-## 3 Environment Preparation
+## Environment Preparation
 
-### 3.1 Model Weight
+### Model Weight
 
 | Model Version | Hardware Requirements | Download Link |
 | ---------- | ---------- | ---------- |
@@ -26,13 +26,13 @@ Optional mirror: set `export VLLM_USE_MODELSCOPE=true` if you pull weights via M
 
 Weights are large; use a shared cache (for example `/root/.cache/huggingface`) on the host and mount it into the container when using Docker.
 
-### 3.2 Verify Multi-node Communication (Optional)
+### Verify Multi-node Communication (Optional)
 
 If multi-node deployment is required, please follow the [Verify Multi-node Communication Environment](../../installation.md#verify-multi-node-communication) guide for communication verification.
 
-## 4 Installation
+## Installation
 
-### 4.1 Docker Image Installation
+### Docker Image Installation
 
 Use the same Ascend driver/CANN stack and vLLM Ascend image as in [Installation](../../installation.md) and [Quickstart](https://docs.vllm.ai/projects/ascend/en/latest/quick_start.html).
 
@@ -66,9 +66,9 @@ export VLLM_USE_MODELSCOPE=true   # optional, for faster downloads in CN regions
 export PYTORCH_NPU_ALLOC_CONF=max_split_size_mb:256
 ```
 
-## 5 Online Service Deployment
+## Online Service Deployment
 
-### 5.1 Single-Node Online Deployment
+### Single-Node Online Deployment
 
 Single-node deployment completes both Prefill and Decode within the same node, suitable for most inference scenarios.
 
@@ -99,7 +99,7 @@ Key parameters:
 On a single **64G** NPU, if you hit OOM, lower `max_model_len`, reduce `max_num_batched_tokens`, or serve with `tensor_parallel_size` across more NPUs.
 :::
 
-## 6 Functional Verification
+## Functional Verification
 
 After the service is started, the model can be invoked by sending a prompt:
 
@@ -122,7 +122,7 @@ curl http://<node0_ip>:<port>/v1/chat/completions \
     }'
 ```
 
-## 7 Accuracy Evaluation
+## Accuracy Evaluation
 
 Nightly accuracy for this model is configured in `tests/e2e/models/configs/Molmo2-8B.yaml` using the `mmmu_val` task. The reference `acc,none` target is aligned with the public **~53% MMMU** figure for Molmo2-8B.
 
@@ -134,7 +134,7 @@ For details, please refer to [Using AISBench](../../developer_guide/evaluation/u
 
 For details, please refer to [Using lm_eval](../../developer_guide/evaluation/using_lm_eval.md).
 
-## 8 Best Practices
+## Best Practices
 
 Provide recommended configurations for different scenarios:
 
@@ -142,7 +142,7 @@ Provide recommended configurations for different scenarios:
 - **Low latency**: Use single-NPU deployment with `trust_remote_code=True` and `dtype=bfloat16`.
 - **High throughput**: Deploy across multiple NPUs with `tensor_parallel_size` for better throughput.
 
-## 9 FAQ
+## FAQ
 
 ### Problem: Download timeout during model weight fetching
 
