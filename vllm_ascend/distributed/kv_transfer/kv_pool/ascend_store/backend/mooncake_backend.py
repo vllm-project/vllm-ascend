@@ -1,7 +1,7 @@
 # Standard
 import json
 import os
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from typing import Any, Literal
 
 import regex as re
@@ -42,7 +42,7 @@ MooncakeMode = Literal["embedded", "standalone-store"]
 # Disk-staging budget helpers (adapted from upstream worker.py)
 # ---------------------------------------------------------------------------
 def _align_up(value: int, alignment: int) -> int:
-    return ((value + alignment - 1) // alignment * alignment)
+    return (value + alignment - 1) // alignment * alignment
 
 
 def _estimate_disk_offload_staging_bytes(size_list: list[int]) -> int:
@@ -129,9 +129,9 @@ def _classify_replica_tier(replica_descs: Any) -> str:
         return "unknown"
     if _call_replica_predicate(replica_desc, "is_memory_replica"):
         return "memory"
-    if _call_replica_predicate(
-        replica_desc, "is_disk_replica"
-    ) or _call_replica_predicate(replica_desc, "is_local_disk_replica"):
+    if _call_replica_predicate(replica_desc, "is_disk_replica") or _call_replica_predicate(
+        replica_desc, "is_local_disk_replica"
+    ):
         return "disk"
     return "unknown"
 
@@ -235,9 +235,7 @@ class MooncakeBackend(Backend):
         self.store = MooncakeDistributedStore()
         if self.config.protocol == "ascend":
             base_hostname = get_ip()
-            local_hostname = mooncake_rdma_utils.get_requester_local_hostname(
-                base_hostname
-            )
+            local_hostname = mooncake_rdma_utils.get_requester_local_hostname(base_hostname)
             # ASCEND_ENABLE_USE_FABRIC_MEM: Enable unified memory address direct transmission scheme
             # and only can be used for 800 I/T A3 series.
             # Required supporting hardware versions are as follows:
@@ -277,9 +275,7 @@ class MooncakeBackend(Backend):
         # Preferred-segment override controls which owner segment a PUT
         # lands on. In standalone-store + SSD mode the SSD tier lives on
         # one owner; without pinning, replicas may scatter and miss SSD.
-        self.preferred_segment = mooncake_rdma_utils.get_configured_preferred_segment(
-            extra_config
-        )
+        self.preferred_segment = mooncake_rdma_utils.get_configured_preferred_segment(extra_config)
         self.replicate_config: Any = None
         if ReplicateConfig is not None:
             try:
@@ -304,21 +300,16 @@ class MooncakeBackend(Backend):
         # When ``enable_offload`` is on, the owner allocates a fixed-size
         # DirectIO staging buffer; we must size each GET sub-batch to fit.
         self.disk_offload_buffer_budget_bytes: int | None = (
-            DEFAULT_MOONCAKE_DISK_STAGING_BUFFER_BYTES
-            if self.config.enable_offload
-            else None
+            DEFAULT_MOONCAKE_DISK_STAGING_BUFFER_BYTES if self.config.enable_offload else None
         )
         self.usable_disk_offload_buffer_budget_bytes: int | None = (
             None
             if self.disk_offload_buffer_budget_bytes is None
-            else _get_usable_disk_offload_buffer_budget_bytes(
-                self.disk_offload_buffer_budget_bytes
-            )
+            else _get_usable_disk_offload_buffer_budget_bytes(self.disk_offload_buffer_budget_bytes)
         )
 
         logger.info(
-            "Mooncake mode=%s (global_segment_size=%d, local_buffer_size=%d, "
-            "preferred_segment=%s, enable_offload=%s)",
+            "Mooncake mode=%s (global_segment_size=%d, local_buffer_size=%d, preferred_segment=%s, enable_offload=%s)",
             self.config.mode,
             self.config.global_segment_size,
             self.config.local_buffer_size,
@@ -334,14 +325,12 @@ class MooncakeBackend(Backend):
                 )
             if self.preferred_segment is not None:
                 logger.warning(
-                    "preferred_segment=%s with mode=embedded: rank-contributed "
-                    "segments will be idle.",
+                    "preferred_segment=%s with mode=embedded: rank-contributed segments will be idle.",
                     self.preferred_segment,
                 )
         elif self.config.mode == "standalone-store" and not self.config.enable_offload:
             logger.warning(
-                "standalone-store mode without enable_offload: large prefills "
-                "may exceed the owner DirectIO budget."
+                "standalone-store mode without enable_offload: large prefills may exceed the owner DirectIO budget."
             )
 
     def set_device(self):
@@ -376,9 +365,7 @@ class MooncakeBackend(Backend):
         (no ``replicate_config`` kwarg) still work."""
         if self.replicate_config is not None:
             try:
-                return self.store.batch_put_from_multi_buffers(
-                    keys, addrs, sizes, self.replicate_config
-                )
+                return self.store.batch_put_from_multi_buffers(keys, addrs, sizes, self.replicate_config)
             except TypeError:
                 # Old mooncake signature without ``replicate_config``.
                 logger.debug(
@@ -396,9 +383,7 @@ class MooncakeBackend(Backend):
             self.usable_disk_offload_buffer_budget_bytes is not None
             and self.disk_offload_buffer_budget_bytes is not None
         ):
-            total_staging_bytes = sum(
-                _estimate_disk_offload_staging_bytes(size) for size in sizes
-            )
+            total_staging_bytes = sum(_estimate_disk_offload_staging_bytes(size) for size in sizes)
             if total_staging_bytes > self.usable_disk_offload_buffer_budget_bytes:
                 load_batches, oversized_key = _split_disk_offload_load_batches(
                     keys,
@@ -409,9 +394,7 @@ class MooncakeBackend(Backend):
                 )
                 if oversized_key is not None:
                     oversized_key_index = keys.index(oversized_key)
-                    oversized_key_bytes = _estimate_disk_offload_staging_bytes(
-                        sizes[oversized_key_index]
-                    )
+                    oversized_key_bytes = _estimate_disk_offload_staging_bytes(sizes[oversized_key_index])
                     logger.warning(
                         "Skipping Mooncake load for key %s because it requires "
                         "%d staging bytes, exceeding the owner DirectIO budget "
@@ -430,20 +413,13 @@ class MooncakeBackend(Backend):
                 tiers_by_key: dict[str, str] | None = None
                 if tier_log_enabled:
                     tiers_by_key = _get_replica_tiers_by_key(self.store, batch_keys)
-                res = self.store.batch_get_into_multi_buffers(
-                    batch_keys, batch_addrs, batch_sizes
-                )
+                res = self.store.batch_get_into_multi_buffers(batch_keys, batch_addrs, batch_sizes)
                 if tiers_by_key is not None:
                     _log_mooncake_load_tier_summary(batch_keys, res, tiers_by_key)
-                failed = [
-                    (key, value)
-                    for key, value in zip(batch_keys, res, strict=True)
-                    if value < 0
-                ]
+                failed = [(key, value) for key, value in zip(batch_keys, res, strict=True) if value < 0]
                 if failed:
                     logger.error(
-                        "Failed to get %d Mooncake keys from sub-batch "
-                        "(batch_keys=%d, first_failures=%s)",
+                        "Failed to get %d Mooncake keys from sub-batch (batch_keys=%d, first_failures=%s)",
                         len(failed),
                         len(batch_keys),
                         failed[:3],
@@ -508,9 +484,7 @@ class MooncakeStoreConfig:
             global_segment_size=_parse_global_segment_size(
                 config.get("global_segment_size", DEFAULT_GLOBAL_SEGMENT_SIZE)
             ),
-            local_buffer_size=_parse_global_segment_size(
-                config.get("local_buffer_size", DEFAULT_LOCAL_BUFFER_SIZE)
-            ),
+            local_buffer_size=_parse_global_segment_size(config.get("local_buffer_size", DEFAULT_LOCAL_BUFFER_SIZE)),
             enable_offload=bool(config.get("enable_offload", False)),
         )
 

@@ -115,10 +115,7 @@ env_variables: dict[str, Callable[[], Any]] = {
     # Mooncake KV-store: log a per-batch breakdown of memory/disk replica
     # tiers on external GETs. Useful when enabling disk offload to verify
     # the SSD tier is actually being hit.
-    "VLLM_MOONCAKE_STORE_TIER_LOG": lambda: os.getenv(
-        "VLLM_MOONCAKE_STORE_TIER_LOG", "False"
-    ).lower()
-    in ("true", "1"),
+    "VLLM_MOONCAKE_STORE_TIER_LOG": lambda: os.getenv("VLLM_MOONCAKE_STORE_TIER_LOG", "False").lower() in ("true", "1"),
     # Mooncake disk offload: fraction of the owner-side DirectIO staging
     # buffer the worker will fill per GET batch. Caps how aggressively we
     # pack multiple keys into a single ``batch_get_into_multi_buffers``
@@ -131,9 +128,7 @@ env_variables: dict[str, Callable[[], Any]] = {
     # SSD tier so puts land on the owner that has the SSD attached.
     "MOONCAKE_PREFERRED_SEGMENT": lambda: os.getenv("MOONCAKE_PREFERRED_SEGMENT"),
     # Mooncake: override the hostname this rank registers as a requester.
-    "MOONCAKE_REQUESTER_LOCAL_HOSTNAME": lambda: os.getenv(
-        "MOONCAKE_REQUESTER_LOCAL_HOSTNAME"
-    ),
+    "MOONCAKE_REQUESTER_LOCAL_HOSTNAME": lambda: os.getenv("MOONCAKE_REQUESTER_LOCAL_HOSTNAME"),
 }
 
 # end-env-vars-definition

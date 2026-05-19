@@ -8,7 +8,7 @@
 
 Provides:
 
-* ``get_requester_local_hostname``: overrideable local hostname (env var
+* ``get_requester_local_hostname``: overridable local hostname (env var
   ``MOONCAKE_REQUESTER_LOCAL_HOSTNAME``).
 * ``get_configured_preferred_segment``: extracts ``preferred_segment``
   override from the kv-connector ``extra_config`` (per-request) and falls
@@ -25,8 +25,9 @@ from __future__ import annotations
 from collections.abc import Mapping
 from typing import Any
 
-import vllm_ascend.envs as ascend_envs
 from vllm.logger import init_logger
+
+import vllm_ascend.envs as ascend_envs
 
 logger = init_logger(__name__)
 
@@ -63,9 +64,7 @@ def get_requester_local_hostname(local_ip: str) -> str:
       1. ``MOONCAKE_REQUESTER_LOCAL_HOSTNAME`` env override (non-empty).
       2. ``local_ip`` argument.
     """
-    override = normalize_string_override(
-        ascend_envs.MOONCAKE_REQUESTER_LOCAL_HOSTNAME
-    )
+    override = normalize_string_override(ascend_envs.MOONCAKE_REQUESTER_LOCAL_HOSTNAME)
     if override is not None:
         return override
     return local_ip
@@ -88,9 +87,7 @@ def get_configured_preferred_segment(
     if preferred_segment is not None:
         return preferred_segment
     if raw is not None:
-        raise ValueError(
-            "Mooncake preferred_segment override must be a non-empty string"
-        )
+        raise ValueError("Mooncake preferred_segment override must be a non-empty string")
 
     env_value = normalize_string_override(ascend_envs.MOONCAKE_PREFERRED_SEGMENT)
     if env_value is not None:
@@ -106,23 +103,17 @@ def _get_explicit_worker_rnic(device_list: str) -> str:
     """Pick the local NPU's RNIC from a CSV list (indexed by physical NPU)."""
     entries = [entry.strip() for entry in device_list.split(",")]
     if any(not entry for entry in entries):
-        raise ValueError(
-            "Mooncake worker device_name contains an empty RDMA device entry"
-        )
+        raise ValueError("Mooncake worker device_name contains an empty RDMA device entry")
     if len(entries) == 1:
         return entries[0]
 
     npu_index = get_current_physical_npu_index()
     if npu_index is None:
         raise RuntimeError(
-            "Mooncake RDMA requester could not determine the local "
-            "physical NPU index for per-rank RNIC selection"
+            "Mooncake RDMA requester could not determine the local physical NPU index for per-rank RNIC selection"
         )
     if npu_index >= len(entries):
-        raise ValueError(
-            "Mooncake worker device list does not cover local NPU "
-            f"{npu_index}: {device_list}"
-        )
+        raise ValueError(f"Mooncake worker device list does not cover local NPU {npu_index}: {device_list}")
     device_name = entries[npu_index]
     logger.info(
         "Mooncake selected worker RNIC %s from explicit device list for local NPU %s",

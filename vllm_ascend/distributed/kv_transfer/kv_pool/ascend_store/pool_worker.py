@@ -151,9 +151,7 @@ class KVPoolWorker:
         # ``**kwargs``, so backends that don't care simply ignore it.
         self.m_store = real_backend(  # type: ignore[misc]
             parallel_config,
-            kv_connector_extra_config=(
-                vllm_config.kv_transfer_config.kv_connector_extra_config or {}
-            ),
+            kv_connector_extra_config=(vllm_config.kv_transfer_config.kv_connector_extra_config or {}),
         )
         kv_event_config = vllm_config.kv_events_config
         self.enable_kv_events = False
