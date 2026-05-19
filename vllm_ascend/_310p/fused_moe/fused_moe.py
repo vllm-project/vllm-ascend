@@ -23,9 +23,9 @@ import torch.nn.functional as F
 import torch_npu
 from vllm.distributed import get_dp_group, get_ep_group, get_tp_group
 from vllm.logger import logger
+from vllm.model_executor.layers.fused_moe import SharedFusedMoE
 from vllm.model_executor.layers.fused_moe.config import FusedMoEConfig
 from vllm.model_executor.layers.fused_moe.layer import FusedMoE, UnquantizedFusedMoEMethod
-from vllm.model_executor.layers.fused_moe.shared_fused_moe import SharedFusedMoE
 
 from vllm_ascend.ascend_config import get_ascend_config
 from vllm_ascend.ascend_forward_context import _EXTRA_CTX, MoECommType
@@ -386,15 +386,20 @@ class AscendSharedFusedMoE310(SharedFusedMoE, AscendFusedMoE310):
             )
 
     def _shared_experts_part1(self, hidden_states: torch.Tensor):
-        shared_gate_up, _ = self._shared_experts.gate_up_proj(hidden_states)  # type: ignore
+        shared_experts = self._shared_experts
+        assert shared_experts is not None
+        shared_gate_up, _ = shared_experts.gate_up_proj(hidden_states)  # type: ignore
         return shared_gate_up
 
     def _shared_experts_part2(self, hidden_states: torch.Tensor, shared_gate_up: torch.Tensor):
-        shared_act = self._shared_experts.act_fn(shared_gate_up)  # type: ignore
-        shared_out, _ = self._shared_experts.down_proj(shared_act)  # type: ignore
+        shared_experts = self._shared_experts
+        assert shared_experts is not None
+        shared_act = shared_experts.act_fn(shared_gate_up)  # type: ignore
+        shared_out, _ = shared_experts.down_proj(shared_act)  # type: ignore
 
-        if hasattr(self._shared_experts, "expert_gate") and self._shared_experts.expert_gate is not None:
-            gate_out, _ = self._shared_experts.expert_gate(hidden_states)  # type: ignore
+        expert_gate = getattr(shared_experts, "expert_gate", None)
+        if expert_gate is not None:
+            gate_out, _ = expert_gate(hidden_states)  # type: ignore
             shared_out = F.sigmoid(gate_out) * shared_out
         return shared_out
 
