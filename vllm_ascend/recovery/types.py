@@ -12,7 +12,6 @@ class StepTarget(str, Enum):
 
 class RecoveryAction(msgspec.Struct):
     name: str
-    target: str
 
     def execute(self, executer: Any, cfg: dict, target: str) -> Tuple[dict, bool]:
         if target == StepTarget.ENGINE_CORE.value:
@@ -25,14 +24,12 @@ class RecoveryAction(msgspec.Struct):
 class RecoveryStep(msgspec.Struct):
     name: str
     target: str
-    actions: list
     timeout_s: int = 5
+    actions: list[RecoveryAction] = msgspec.field(default_factory=list)
+    
 
     def execute(self, executer: Any, cfg: dict) -> Tuple[dict, bool]:
-        for action_data in self.actions:
-            action = RecoveryAction(
-                name=action_data[0], target=action_data[1]
-            )
+        for action in self.actions:
             cfg, success = action.execute(executer, cfg, self.target)
             if not success:
                 return cfg, False
@@ -51,7 +48,7 @@ class StepResult(msgspec.Struct):
 class RecoveryPlan(msgspec.Struct):
     name: str
     timeout_s: int
-    steps: list = msgspec.field(default_factory=list)
+    steps: list[RecoveryStep] = msgspec.field(default_factory=list)
     cfg: dict = msgspec.field(default_factory=dict)
     
 
@@ -77,7 +74,7 @@ class RecoveryPlanResult(msgspec.Struct):
     plan_name: str
     engine_index: int
     success: bool
-    step_results: list = msgspec.field(default_factory=list)
+    step_results: list[StepResult] = msgspec.field(default_factory=list)
 
 
 class RecoveryComplete(msgspec.Struct):

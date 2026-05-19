@@ -1,4 +1,6 @@
 import time
+import torch
+import torch_npu
 from typing import Any, Callable, Tuple
 
 from vllm.logger import logger
@@ -94,11 +96,11 @@ def _stop_device(executor: Any, cfg: dict | None) -> bool:
             return cfg, False
 
 @worker_action("restart_device")
-def _restart_device(executor: Any, context:dict | None) -> bool:
+def _restart_device(executor: Any, cfg:dict | None) -> bool:
     try:
-        ctx = context or {}
+        cfg = cfg or {}
         torch_npu.npu.restart_device(
-            torch.npu.current_device(), rebuild_all_resources=ctx.get("rebuild_all_resources", False)
+            torch.npu.current_device(), rebuild_all_resources=cfg.get("rebuild_all_resources", False)
         )
         return cfg, True
     except Exception as e:
@@ -106,11 +108,11 @@ def _restart_device(executor: Any, context:dict | None) -> bool:
         return cfg, False
 
 @worker_action("reinit_process_group")
-def _reinit_process_group(executor: Any, context:dict | None) -> bool:
+def _reinit_process_group(executor: Any, cfg:dict | None) -> bool:
     try:
-        ctx = context or {}
+        cfg = cfg or {}
         torch.distributed.reinit_process_group(
-            group=ctx.get("group", None), rebuild_link=ctx.get("rebuild_link", True)
+            group=cfg.get("group", None), rebuild_link=cfg.get("rebuild_link", True)
         )
         return cfg, True
     except Exception as e:
@@ -118,10 +120,10 @@ def _reinit_process_group(executor: Any, context:dict | None) -> bool:
         return cfg, False
 
 @worker_action("clean_cache")
-def _clean_cache(executor: Any, context:dict | None) -> bool:
+def _clean_cache(executor: Any, cfg:dict | None) -> bool:
     try:
-        ctx = context or {}
-        abort_list = context.get("abort_list", [])
+        cfg = cfg or {}
+        abort_list = cfg.get("abort_list", [])
         model_runner = executor._worker.model_runner
         for req_id in abort_list:
             model_runner.requests.pop(req_id, None)
@@ -133,11 +135,11 @@ def _clean_cache(executor: Any, context:dict | None) -> bool:
         return cfg, False
 
 @worker_action("recovery_finished")
-def _recovery_finished(executor: Any, context:dict | None) -> bool:
+def _recovery_finished(executor: Any, cfg:dict | None) -> bool:
     executor.in_recovery = False
     return cfg, True
 
 @worker_action("recovery_begin")
-def _recovery_begin(executor: Any, context:dict | None) -> bool:
+def _recovery_begin(executor: Any, cfg:dict | None) -> bool:
     executor.in_recovery = True
     return cfg, True
