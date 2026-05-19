@@ -557,7 +557,10 @@ class AddRMSNormQuantFusionPass(VllmInductorPass):
         if dtype not in (torch.bfloat16, torch.float16):
             logger.debug("Quant fusion not enabled: unsupported dtype %s", dtype)
             return
-
+        if self.model.quant_config is not None:
+            quant_type = self.model.model.layers[self.num_dense_layers].mlp.experts.quant_type
+        else:
+            quant_type = None
         common_epsilons = [1e-5, 1e-6]
         for eps in common_epsilons:
             AddRMSNormDynamicQuantPattern(vllm_config, eps=eps).register(self.pattern_match_passes)
