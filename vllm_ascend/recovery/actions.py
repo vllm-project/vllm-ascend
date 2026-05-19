@@ -81,14 +81,65 @@ def clear_requests(executer: EngineCore, cfg: dict) -> Tuple[dict, bool]:
     cfg["aborted_req_ids"] = running_req_ids
     return cfg, True
 
-
 @worker_action("stop_device")
-def stop_device(executer: NPUWorker, cfg: dict) -> Tuple[dict, bool]:
-    # TODO: add stop device logic
+def _stop_device(executor: NPUWorker, cfg: dict | None) -> bool:
+        try:
+            stop_result = torch_npu.npu.stop_device(executor.local_rank)
+            if stop_result == 0:
+                logger.info("stop_device executed successfully")
+                return cfg, True
+            else:
+                logger.error(f"stop_device failed with result: {stop_result}")
+                return cfg, False
+        except Exception as e:
+            logger.error(f"stop_device executed failed with exception: {e}")
+            return cfg, False
+
+@worker_action("restart_device")
+def _restart_device(executor: NPUWorker, context:dict | None) -> bool:
+    try:
+        ctx = context or {}
+        torch_npu.npu.restart_device(
+            torch.npu.current_device(), rebuild_all_resources=ctx.get("rebuild_all_resources", False)
+        )
+        return cfg, True
+    except Exception as e:
+        logger.error(f"restart_device executed failed with exception: {e}")
+        return cfg, False
+
+@worker_action("reinit_process_group")
+def _reinit_process_group(executor: NPUWorker, context:dict | None) -> bool:
+    try:
+        ctx = context or {}
+        torch.distributed.reinit_process_group(
+            group=ctx.get("group", None), rebuild_link=ctx.get("rebuild_link", True)
+        )
+        return cfg, True
+    except Exception as e:
+        logger.error(f"reinit_process_group executed failed with exception: {e}")
+        return cfg, False
+
+@worker_action("clean_cache")
+def _clean_cache(executor: NPUWorker, context:dict | None) -> bool:
+    try:
+        ctx = context or {}
+        abort_list = context.get("abort_list", [])
+        model_runner = executor._worker.model_runner
+        for req_id in abort_list:
+            model_runner.requests.pop(req_id, None)
+            model_runner.num_prompt_logprobs.pop(req_id, None)
+            model_runner.input_batch.remove_request(req_id)
+        return cfg, True
+    except Exception as e:
+        logger.error(f"worker clean_cached failed with exception: {e}")
+        return cfg, False
+
+@worker_action("recovery_finished")
+def _recovery_finished(executor: NPUWorker, context:dict | None) -> bool:
+    executor.in_recovery = False
     return cfg, True
 
-
-@worker_action("abort_requests")
-def abort_requests(executer: NPUWorker, cfg: dict) -> Tuple[dict, bool]:
-    # TODO: add worker abort logic
+@worker_action("recovery_begin")
+def _recovery_begin(executor: NPUWorker, context:dict | None) -> bool:
+    executor.in_recovery = True
     return cfg, True

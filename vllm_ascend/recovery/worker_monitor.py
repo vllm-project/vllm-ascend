@@ -139,63 +139,6 @@ class WorkerMonitor:
                     step_result_encode = msgspec.msgpack.encode(("stepresult", step_result))
                     core_result_socket.send(step_result_encode)
     
-    def _stop_device(executor: NPUWorker, cfg: dict | None) -> bool:
-        try:
-            stop_result = torch_npu.npu.stop_device(executor.local_rank)
-            if stop_result == 0:
-                logger.info("stop_device executed successfully")
-                return True
-            else:
-                logger.error(f"stop_device failed with result: {stop_result}")
-                return False
-        except Exception as e:
-            logger.error(f"stop_device executed failed with exception: {e}")
-            return False
-    
-    def _restart_device(executor: NPUWorker, context:dict | None) -> bool:
-        try:
-            ctx = context or {}
-            torch_npu.npu.restart_device(
-                torch.npu.current_device(), rebuild_all_resources=ctx.get("rebuild_all_resources", False)
-            )
-            return True
-        except Exception as e:
-            logger.error(f"restart_device executed failed with exception: {e}")
-            return False
-
-    def _reinit_process_group(executor: NPUWorker, context:dict | None) -> bool:
-        try:
-            ctx = context or {}
-            torch.distributed.reinit_process_group(
-                group=ctx.get("group", None), rebuild_link=ctx.get("rebuild_link", True)
-            )
-            return True
-        except Exception as e:
-            logger.error(f"reinit_process_group executed failed with exception: {e}")
-            return False
-
-    def _clean_cache(executor: NPUWorker, context:dict | None) -> bool:
-        try:
-            ctx = context or {}
-            abort_list = context.get("abort_list", [])
-            model_runner = executor._worker.model_runner
-            for req_id in abort_list:
-                model_runner.requests.pop(req_id, None)
-                model_runner.num_prompt_logprobs.pop(req_id, None)
-                model_runner.input_batch.remove_request(req_id)
-            return True
-        except Exception as e:
-            logger.error(f"worker clean_cached failed with exception: {e}")
-            return False
-
-    def _recovery_finished(executor: NPUWorker, context:dict | None) -> bool:
-        executor.in_recovery = False
-        return True
-
-
-    def _recovery_begin(executor: NPUWorker, context:dict | None) -> bool:
-        executor.in_recovery = True
-        return True
 
 def create_worker_monitor(worker, vllm_config:VllmConfig):
     if hasattr(worker, 'worker_monitor') and worker.worker_monitor is not None:
