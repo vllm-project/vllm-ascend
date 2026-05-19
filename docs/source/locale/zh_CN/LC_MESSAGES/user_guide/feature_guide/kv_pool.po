@@ -8,7 +8,7 @@ msgid ""
 msgstr ""
 "Project-Id-Version: vllm-ascend \n"
 "Report-Msgid-Bugs-To: \n"
-"POT-Creation-Date: 2026-05-16 02:20+0000\n"
+"POT-Creation-Date: 2026-05-19 04:27+0000\n"
 "PO-Revision-Date: 2026-01-22 16:55+0800\n"
 "Last-Translator: Gemini\n"
 "Language: zh_CN\n"
@@ -104,7 +104,7 @@ msgid "Prefill PP layer partition, needs to be set when Prefill node enables PP.
 msgstr "Prefill PP 层划分，当 Prefill 节点启用 PP 时需要设置。"
 
 #: ../../source/user_guide/feature_guide/kv_pool.md:17
-#: ../../source/user_guide/feature_guide/kv_pool.md:1168
+#: ../../source/user_guide/feature_guide/kv_pool.md:1174
 msgid "Environment Variable Configuration"
 msgstr "环境变量配置"
 
@@ -645,7 +645,7 @@ msgid "**Run_pd_mix_2.sh:**"
 msgstr "**Run_pd_mix_2.sh:**"
 
 #: ../../source/user_guide/feature_guide/kv_pool.md:1097
-#: ../../source/user_guide/feature_guide/kv_pool.md:1224
+#: ../../source/user_guide/feature_guide/kv_pool.md:1290
 msgid "[2.Run Inference](#2run-inference)"
 msgstr "[2、运行推理](#2run-inference)"
 
@@ -664,36 +664,47 @@ msgid "Install Yuanrong Datasystem"
 msgstr "安装元戎数据系统"
 
 #: ../../source/user_guide/feature_guide/kv_pool.md:1110
+msgid ""
+"If the prebuilt package does not match the CANN or Ascend driver version "
+"in your environment, build Yuanrong Datasystem from source in the vLLM "
+"Ascend image. Follow the official Yuanrong Datasystem build instructions:"
+" <https://atomgit.com/openeuler/yuanrong-datasystem>"
+msgstr ""
+"如果预构建包与您环境中的 CANN 或 Ascend 驱动版本不匹配，请在 vLLM "
+"Ascend 镜像中从源码构建元戎数据系统。请遵循官方元戎数据系统构建说明："
+" <https://atomgit.com/openeuler/yuanrong-datasystem>"
+
+#: ../../source/user_guide/feature_guide/kv_pool.md:1115
 msgid "Start etcd"
 msgstr "启动 etcd"
 
-#: ../../source/user_guide/feature_guide/kv_pool.md:1112
+#: ../../source/user_guide/feature_guide/kv_pool.md:1117
 msgid ""
 "Yuanrong Datasystem uses etcd for service discovery. The following "
 "example starts a single-node etcd cluster:"
 msgstr "元戎数据系统使用 etcd 进行服务发现。以下示例启动一个单节点 etcd 集群："
 
-#: ../../source/user_guide/feature_guide/kv_pool.md:1141
+#: ../../source/user_guide/feature_guide/kv_pool.md:1146
 msgid ""
 "For production environments, refer to the official etcd clustering "
 "documentation: <https://etcd.io/docs/v3.7/op-guide/clustering/>"
 msgstr "对于生产环境，请参考官方 etcd 集群文档：<https://etcd.io/docs/v3.7/op-guide/clustering/>"
 
-#: ../../source/user_guide/feature_guide/kv_pool.md:1144
+#: ../../source/user_guide/feature_guide/kv_pool.md:1149
 msgid "Start Datasystem Worker"
 msgstr "启动数据系统工作节点"
 
-#: ../../source/user_guide/feature_guide/kv_pool.md:1146
+#: ../../source/user_guide/feature_guide/kv_pool.md:1151
 msgid "Start a Datasystem worker on each node by using `dscli`:"
 msgstr "使用 `dscli` 在每个节点上启动一个数据系统工作节点："
 
-#: ../../source/user_guide/feature_guide/kv_pool.md:1155
+#: ../../source/user_guide/feature_guide/kv_pool.md:1161
 msgid ""
 "The `--worker_address` value is consumed later by `DS_WORKER_ADDR`, so "
 "keep the host and port identical on the same node."
 msgstr "`--worker_address` 的值稍后会被 `DS_WORKER_ADDR` 使用，因此请确保同一节点上的主机和端口保持一致。"
 
-#: ../../source/user_guide/feature_guide/kv_pool.md:1158
+#: ../../source/user_guide/feature_guide/kv_pool.md:1164
 msgid ""
 "For more parameters, refer to the `dscli` usage documentation on the "
 "Yuanrong Datasystem official site: <https://atomgit.com/openeuler"
@@ -702,11 +713,11 @@ msgstr ""
 "有关更多参数，请参考元戎数据系统官方网站上的 `dscli` 使用文档：<https://atomgit.com/openeuler"
 "/yuanrong-datasystem>"
 
-#: ../../source/user_guide/feature_guide/kv_pool.md:1162
+#: ../../source/user_guide/feature_guide/kv_pool.md:1168
 msgid "To stop the worker:"
 msgstr "要停止工作节点："
 
-#: ../../source/user_guide/feature_guide/kv_pool.md:1170
+#: ../../source/user_guide/feature_guide/kv_pool.md:1176
 msgid "Set the following environment variables on each node before starting vLLM:"
 msgstr "在启动 vLLM 之前，在每个节点上设置以下环境变量："
 
@@ -770,30 +781,74 @@ msgstr "`DS_ENABLE_REMOTE_H2D`"
 
 #: ../../source/user_guide/feature_guide/kv_pool.md
 msgid ""
-"Passed to Yuanrong `HeteroClient.enable_remote_h2d`. Use `1` only when "
-"remote host-to-device transfer is enabled in your Datasystem deployment."
-msgstr "传递给元戎 `HeteroClient.enable_remote_h2d`。仅当您的数据系统部署中启用了远程主机到设备传输时，才使用 `1`。"
+"Passed to Yuanrong `HeteroClient.enable_remote_h2d`. Use `1` only after "
+"the Remote H2D requirements below are met."
+msgstr "传递给元戎 `HeteroClient.enable_remote_h2d`。仅当满足以下远程 H2D 要求后才使用 `1`。"
 
-#: ../../source/user_guide/feature_guide/kv_pool.md:1186
+#: ../../source/user_guide/feature_guide/kv_pool.md:1192
+msgid "Remote H2D Requirements"
+msgstr "远程 H2D 要求"
+
+#: ../../source/user_guide/feature_guide/kv_pool.md:1194
+msgid ""
+"Set `DS_ENABLE_REMOTE_H2D=1` only when Remote Host-to-Device transfer is "
+"enabled and verified in the Yuanrong Datasystem deployment:"
+msgstr "仅在元戎数据系统部署中启用并验证了远程主机到设备传输时，才设置 `DS_ENABLE_REMOTE_H2D=1`："
+
+#: ../../source/user_guide/feature_guide/kv_pool.md:1197
+msgid ""
+"Reserve enough 2 MiB HugeTLB pages before starting the worker. For 40 GiB"
+" shared memory, reserve at least 20480 2 MiB huge pages."
+msgstr "在启动工作节点前预留足够的 2 MiB HugeTLB 页面。对于 40 GiB 共享内存，至少预留 20480 个 2 MiB 巨页。"
+
+#: ../../source/user_guide/feature_guide/kv_pool.md:1199
+msgid ""
+"Start each Datasystem worker with Remote H2D enabled. The worker start "
+"command must include `--remote_h2d_device_ids`, `--enable_huge_tlb true`,"
+" `--arena_per_tenant 1`, and `--enable_fallocate false`. Using multiple "
+"available NPU device IDs is recommended, for example "
+"`\"0,1,2,3,4,5,6,7\"` on an 8-NPU node."
+msgstr "以启用远程 H2D 的方式启动每个数据系统工作节点。工作节点启动命令必须包含 `--remote_h2d_device_ids`、`--enable_huge_tlb true`、`--arena_per_tenant 1` 和 `--enable_fallocate false`。建议使用多个可用的 NPU 设备 ID，例如在 8-NPU 节点上使用 `\"0,1,2,3,4,5,6,7\"`。"
+
+#: ../../source/user_guide/feature_guide/kv_pool.md:1217
+msgid ""
+"Make sure the NPU driver, firmware, and CANN toolkit required by Yuanrong"
+" Remote H2D are installed and visible to the worker process. In "
+"containers, mount the Ascend driver path, `npu-smi`, `hccn_tool`, "
+"`/etc/hccn.conf`, `/etc/ascend_install.info`, and the required "
+"`/dev/davinci*` devices."
+msgstr "确保元戎远程 H2D 所需的 NPU 驱动、固件和 CANN 工具包已安装且对工作进程可见。在容器中，挂载 Ascend 驱动路径、`npu-smi`、`hccn_tool`、`/etc/hccn.conf`、`/etc/ascend_install.info` 以及所需的 `/dev/davinci*` 设备。"
+
+#: ../../source/user_guide/feature_guide/kv_pool.md:1221
+msgid "Verify the NPU and RoCE environment before enabling the client flag:"
+msgstr "在启用客户端标志前验证 NPU 和 RoCE 环境："
+
+#: ../../source/user_guide/feature_guide/kv_pool.md:1249
+msgid ""
+"If these checks fail, keep `DS_ENABLE_REMOTE_H2D=0` and use the default "
+"Datasystem transfer path."
+msgstr "如果这些检查失败，请保持 `DS_ENABLE_REMOTE_H2D=0` 并使用默认的数据系统传输路径。"
+
+#: ../../source/user_guide/feature_guide/kv_pool.md:1252
 msgid "Run AscendStoreConnector with Yuanrong backend"
 msgstr "使用元戎后端运行 AscendStoreConnector"
 
-#: ../../source/user_guide/feature_guide/kv_pool.md:1188
+#: ../../source/user_guide/feature_guide/kv_pool.md:1254
 msgid "Use `AscendStoreConnector` with `backend: \"yuanrong\"`:"
 msgstr "使用 `AscendStoreConnector` 并设置 `backend: \"yuanrong\"`："
 
-#: ../../source/user_guide/feature_guide/kv_pool.md:1213
+#: ../../source/user_guide/feature_guide/kv_pool.md:1279
 msgid ""
 "`lookup_rpc_port` is the RPC port used between the pooling scheduler "
 "process and the worker process. Each instance must use a unique port "
 "value."
 msgstr "`lookup_rpc_port` 是池化调度进程与工作进程之间使用的 RPC 端口。每个实例必须使用唯一的端口值。"
 
-#: ../../source/user_guide/feature_guide/kv_pool.md:1216
+#: ../../source/user_guide/feature_guide/kv_pool.md:1282
 msgid "Notes"
 msgstr "注意事项"
 
-#: ../../source/user_guide/feature_guide/kv_pool.md:1218
+#: ../../source/user_guide/feature_guide/kv_pool.md:1284
 msgid ""
 "The Yuanrong backend normalizes KV keys before calling Datasystem. Keys "
 "longer than 255 characters or containing unsupported characters are "
@@ -803,7 +858,7 @@ msgstr ""
 "元戎后端在调用数据系统之前会对 KV 键进行规范化处理。长度超过 255 "
 "个字符或包含不支持字符的键会被重写，因此在调试后端存储时，请勿依赖原始的键字符串。"
 
-#: ../../source/user_guide/feature_guide/kv_pool.md:1221
+#: ../../source/user_guide/feature_guide/kv_pool.md:1287
 msgid ""
 "No extra buffer pre-registration step is required for Yuanrong. The "
 "backend uses device pointers directly when building blob lists."
