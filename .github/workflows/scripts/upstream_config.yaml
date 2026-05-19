@@ -831,6 +831,8 @@ e2e-upstream_singlecard:
     estimated_time: 20
   - name: tests/test_fxgraphcache_pickle_patch.py
     estimated_time: 20
+  - name: tests/models/multimodal/generation/test_keye.py
+    estimated_time: 20
 e2e-upstream_a2_2:
   - name: tests/v1/distributed/test_async_llm_dp.py
     estimated_time: 20
