@@ -1,7 +1,23 @@
 e2e-upstream_singlecard:
   - name: tests/model_executor/model_loader/runai_streamer_loader/test_runai_model_streamer_s3.py
     estimated_time: 20
+  - name: tests/reasoning/test_mistral_reasoning_parser.py
+    estimated_time: 20
+  - name: tests/plugins/lora_resolvers/test_hf_hub_resolver.py
+    estimated_time: 20
   - name: tests/entrypoints/openai/completion/test_token_in_token_out.py
+    estimated_time: 20
+  - name: tests/reasoning/test_olmo3_reasoning_parser.py
+    estimated_time: 20
+  - name: tests/tokenizers_/test_basic.py
+    estimated_time: 20
+  - name: tests/renderers/test_mistral.py
+    estimated_time: 20
+  - name: tests/tool_parsers/test_mistral_tool_parser.py
+    estimated_time: 20
+  - name: tests/tokenizers_/test_mistral.py
+    estimated_time: 20
+  - name: tests/v1/structured_output/test_backend_guidance.py
     estimated_time: 20
   - name: tests/reasoning/test_kimi_k2_reasoning_parser.py
     estimated_time: 20
