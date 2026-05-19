@@ -452,7 +452,7 @@ class AscendFusedMoE(FusedMoE):
         if match:
             from vllm_ascend.eplb.adaptor.vllm_adaptor import VllmEplbAdaptor
 
-            VllmEplbAdaptor.register_layer(int(match.group(1)), self)
+            VllmEplbAdaptor.register_layer(self)
 
     def _validate_shared_expert_consistency(self):
         """Validate that split shared expert computation matches integrated
