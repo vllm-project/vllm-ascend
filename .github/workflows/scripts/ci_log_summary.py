@@ -133,6 +133,10 @@ def _normalize_error_match(error_type: str, error_msg: str) -> tuple[str, str]:
     error_msg = re.sub(r"(\\n|\n).*$", "", error_msg)
     error_msg = re.sub(r"\\['\"]", "'", error_msg).strip()
     error_msg = re.sub(r"(?:\\[nr])+$", "", error_msg).strip(" \t,")
+    if error_msg.startswith('",'):
+        error_msg = error_msg[2:].lstrip().rstrip('"').strip(" \t,")
+    elif error_msg.startswith('"') and error_msg.endswith('"'):
+        error_msg = error_msg[1:-1].strip(" \t,")
     while True:
         updated = error_msg
         for suffix_re in (_ERROR_NUMERIC_SUFFIX_RE, _ERROR_LOCATION_SUFFIX_RE):

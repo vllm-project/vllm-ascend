@@ -761,7 +761,7 @@ jobs:
         if: ${{ inputs.continue_on_error == true && github.event_name != 'pull_request' }}
         with:
           name: timing-data-4card-light-part${{ matrix.part }}
-          path: test_timing_data.json
+          path: /tmp/test_timing_data.json
           if-no-files-found: warn
           retention-days: 5
 

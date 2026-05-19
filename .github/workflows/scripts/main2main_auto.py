@@ -2,10 +2,11 @@ from __future__ import annotations
 
 import argparse
 import json
-import re
 import subprocess
 from pathlib import Path
 from typing import Any
+
+import regex as re
 
 
 def _run_git(repo: Path, *args: str) -> str:
@@ -48,30 +49,6 @@ def collect_commit_range(*, repo: Path, start_ref: str, end_ref: str) -> list[di
             }
         )
     return commits
-
-
-def render_pr_body(
-    *,
-    old_commit: str,
-    new_commit: str,
-    summary_markdown: str,
-    commits_markdown: str = "",
-) -> str:
-    lines = [
-        "Automated adaptation to upstream vLLM main branch changes.",
-        f"Commit range: {old_commit}...{new_commit}",
-        "",
-    ]
-
-    commits_markdown = commits_markdown.strip()
-    if commits_markdown:
-        lines.extend(["## Created Commits", "", commits_markdown, ""])
-
-    summary_markdown = summary_markdown.strip()
-    if summary_markdown:
-        lines.extend(["## main2main Summary", "", summary_markdown])
-
-    return "\n".join(lines).rstrip() + "\n"
 
 
 def _clean_summary_value(value: str) -> str:
@@ -300,12 +277,6 @@ def _build_parser() -> argparse.ArgumentParser:
     final_summary_parser = subparsers.add_parser("parse-final-summary")
     final_summary_parser.add_argument("--summary-md", type=Path, required=True)
 
-    pr_parser = subparsers.add_parser("render-pr-body")
-    pr_parser.add_argument("--old-commit", required=True)
-    pr_parser.add_argument("--new-commit", required=True)
-    pr_parser.add_argument("--summary-md", type=Path, required=True)
-    pr_parser.add_argument("--commits-md", type=Path)
-
     issue_parser = subparsers.add_parser("render-manual-review-issue")
     issue_parser.add_argument("--pr-url", required=True)
     issue_parser.add_argument("--old-commit", required=True)
@@ -340,20 +311,6 @@ def main() -> None:
 
     if args.command == "print-claude-stream":
         print(render_claude_stream(args.input), end="")
-        return
-
-    if args.command == "render-pr-body":
-        summary_markdown = args.summary_md.read_text(encoding="utf-8")
-        commits_markdown = args.commits_md.read_text(encoding="utf-8") if args.commits_md and args.commits_md.exists() else ""
-        print(
-            render_pr_body(
-                old_commit=args.old_commit,
-                new_commit=args.new_commit,
-                summary_markdown=summary_markdown,
-                commits_markdown=commits_markdown,
-            ),
-            end="",
-        )
         return
 
     if args.command == "render-manual-review-issue":
