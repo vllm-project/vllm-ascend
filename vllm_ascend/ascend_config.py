@@ -354,7 +354,7 @@ class FinegrainedTPConfig:
             enabled_configs.append(f"oproj_tensor_parallel_size={self.oproj_tensor_parallel_size}")
             # dummy_run does not run the entire attention module in eager mode,
             # so the o_proj tp split can only be used in graph mode.
-            if vllm_config.model_config.enforce_eager is True:
+            if vllm_config.model_config.enforce_eager:
                 raise AssertionError("oproj_tensor_parallel_size is only supported in graph mode")
             if vllm_config.kv_transfer_config is None or not vllm_config.kv_transfer_config.is_kv_consumer:
                 raise AssertionError(
