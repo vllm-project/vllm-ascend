@@ -496,7 +496,7 @@ def run_cp_attention(
     query: torch.Tensor,
     key: torch.Tensor,
     value: torch.Tensor,
-    kv_cache: tuple[torch.Tensor],
+    kv_cache: tuple[torch.Tensor, torch.Tensor],
     attn_metadata: AscendMetadata,
     impl: AscendAttentionCPImpl,
     device: torch.device,
