@@ -164,7 +164,9 @@ def mxfp_kv_page_size_bytes(
 
 def mxfp_get_scale_dtype() -> torch.dtype:
     """Dtype used for MXFP E8M0 scale cache tensors (always 1 byte per element)."""
-    return FLOAT8_E8M0FNU_DTYPE or torch.uint8
+    if FLOAT8_E8M0FNU_DTYPE is not None:
+        return FLOAT8_E8M0FNU_DTYPE
+    return torch.uint8
 
 
 def mxfp_resolve_kv_cache_layout(
@@ -225,12 +227,6 @@ def mxfp_resolve_kv_cache_layout(
 
 def mxfp_view_scale_cache(raw_tensor: torch.Tensor, shape: tuple[int, ...]) -> torch.Tensor:
     """View a 1-byte-per-element raw scale buffer as the MXFP scale cache tensor."""
-    scale_dtype = mxfp_get_scale_dtype()
-    if torch.tensor([], dtype=scale_dtype).element_size != 1:
-        raise RuntimeError(
-            f"C8_MXFP scale dtype {scale_dtype} must have element size 1, got "
-            f"{torch.tensor([], dtype=scale_dtype).element_size}."
-        )
     expected_numel = 1
     for dim in shape:
         expected_numel *= dim
@@ -239,6 +235,8 @@ def mxfp_view_scale_cache(raw_tensor: torch.Tensor, shape: tuple[int, ...]) -> t
             f"C8_MXFP scale view size mismatch: raw_numel={raw_tensor.numel()}, "
             f"shape={shape}, expected_numel={expected_numel}"
         )
+    # Raw buffers are allocated as int8 bytes; reshape in uint8, then cast to E8M0.
+    scale_dtype = mxfp_get_scale_dtype()
     return raw_tensor.view(torch.uint8).view(shape).view(scale_dtype)
 
 
