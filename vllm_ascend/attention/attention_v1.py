@@ -501,9 +501,9 @@ class AscendAttentionBackendImpl(AttentionImpl):
                         continue
 
                     param_info = params_by_key[key]
-                    param = param_info['params']
-                    handle = param_info['handle']
-                    event = param_info['event']
+                    param = param_info["params"]
+                    handle = param_info["handle"]
+                    event = param_info["event"]
 
                     (
                         query,
@@ -615,10 +615,8 @@ class AscendAttentionBackendImpl(AttentionImpl):
 
         # Try to extract layer index from layer_name
         if "layers." in str(layer_name_raw):
-            try:
+            with contextlib.suppress(ValueError, IndexError):
                 self.layerIndex = int(str(layer_name_raw).split("layers.")[1].split(".")[0])
-            except (ValueError, IndexError):
-                pass
 
         passed_key = key
         key, value, block_size, block_table, actual_seq_lengths_kv = self._get_fia_params(key, value, attn_metadata)
@@ -746,9 +744,9 @@ class AscendAttentionBackendImpl(AttentionImpl):
         # Also store in attn_params_by_key for reliable lookup during REPLAY
         # We'll update the handle and event after they are created
         graph_params.attn_params_by_key[num_tokens][attn_key] = {
-            'params': attn_params,
-            'handle': None,  # Will be set after graph_task_group_end
-            'event': event,  # Already created above
+            "params": attn_params,
+            "handle": None,  # Will be set after graph_task_group_end
+            "event": event,  # Already created above
         }
 
         torch.npu.graph_task_group_begin(stream)
@@ -784,7 +782,7 @@ class AscendAttentionBackendImpl(AttentionImpl):
 
         # Update handle in attn_params_by_key
         if attn_key in graph_params.attn_params_by_key[num_tokens]:
-            graph_params.attn_params_by_key[num_tokens][attn_key]['handle'] = handle
+            graph_params.attn_params_by_key[num_tokens][attn_key]["handle"] = handle
 
         return output, num_tokens
 
@@ -1079,10 +1077,7 @@ class AscendAttentionBackendImpl(AttentionImpl):
         ):
             key = key[:num_tokens]
             value = value[:num_tokens]
-        if (
-            self.head_size == 512
-            and self.sinks is None
-        ):
+        if self.head_size == 512 and self.sinks is None:
             return self._forward_fia_bnsd(
                 query=query,
                 key=key,
@@ -1321,13 +1316,11 @@ class AscendAttentionBackendImpl(AttentionImpl):
         assert output is not None, "Output tensor must be provided."
 
         # Try to extract layer index from layer_name
-        if hasattr(layer, 'layer_name'):
+        if hasattr(layer, "layer_name"):
             layer_name_str = str(layer.layer_name)
             if "layers." in layer_name_str:
-                try:
+                with contextlib.suppress(ValueError, IndexError):
                     self.layerIndex = int(layer_name_str.split("layers.")[1].split(".")[0])
-                except (ValueError, IndexError):
-                    pass
 
         if output_scale is not None or output_block_scale is not None:
             raise NotImplementedError("fused output quantization is not yet supported for AscendAttentionBackendImpl")
