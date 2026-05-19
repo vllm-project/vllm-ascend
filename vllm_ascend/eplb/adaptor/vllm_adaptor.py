@@ -78,7 +78,7 @@ class VllmEplbAdaptor:
                 if envs_ascend.VLLM_ASCEND_ENABLE_FUSED_MC2 == 1:
                     self.expert_weight_names.append("fused_w1_scale_list")
                     self.expert_weight_names.append("fused_w2_scale_list")
-            if quant_type == QuantType.MXFP4 or QuantType.MXFP8:
+            elif quant_type == QuantType.MXFP4 or QuantType.MXFP8:
                 self.expert_weight_names = [
                     "w13_weight",
                     "w2_weight",
