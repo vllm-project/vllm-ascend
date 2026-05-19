@@ -78,6 +78,17 @@ class VllmEplbAdaptor:
                 if envs_ascend.VLLM_ASCEND_ENABLE_FUSED_MC2 == 1:
                     self.expert_weight_names.append("fused_w1_scale_list")
                     self.expert_weight_names.append("fused_w2_scale_list")
+            elif quant_type == QuantType.W4A8:
+                if envs_ascend.VLLM_ASCEND_ENABLE_FUSED_MC2 != 1:
+                    raise ValueError("EPLB not support W4A8 with fused MC2 disabled")
+                self.expert_weight_names = [
+                    "w13_weight_list",
+                    "w2_weight_list",
+                    "w13_weight_scale_list",
+                    "w2_weight_scale_list",
+                    "w13_scale_bias_list",
+                    "w2_scale_bias_list",
+                ]
             else:
                 raise ValueError(f"EPLB not support {quant_type}")
         else:
@@ -133,7 +144,7 @@ class VllmEplbAdaptor:
             self.expert_param_per_layer[layer_id][local_expert_to_replace], self.buffer_tensor_list[buffer_tensor_id]
         ):
             expert_tensor.copy_(buffer_tensor)
-            logger.debug(f"Expert tensor shape is :{expert_tensor.shape}")
+            logger.debug("Expert tensor shape is :%s", expert_tensor.shape)
 
     def do_update_log2phy_map(self, layer_id, updated_log2phy_map):
         if self.log2phy_map_per_layer[layer_id] is not None:

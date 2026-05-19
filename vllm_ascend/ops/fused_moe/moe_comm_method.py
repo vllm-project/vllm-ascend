@@ -53,10 +53,13 @@ def get_moe_comm_method(moe_comm_type: MoECommType | None) -> MoECommMethod | No
 
 
 def setup_moe_comm_method(moe_config):
-    _MoECommMethods[MoECommType.ALLTOALL] = AlltoAllCommImpl(moe_config)
-    _MoECommMethods[MoECommType.ALLGATHER] = AllGatherCommImpl(moe_config)
-    _MoECommMethods[MoECommType.MC2] = MC2CommImpl(moe_config)
-    _MoECommMethods[MoECommType.FUSED_MC2] = FusedMC2CommImpl(moe_config)
+    if moe_config.ep_size > 1:
+        _MoECommMethods[MoECommType.ALLTOALL] = AlltoAllCommImpl(moe_config)
+        _MoECommMethods[MoECommType.ALLGATHER] = AllGatherCommImpl(moe_config)
+        _MoECommMethods[MoECommType.MC2] = MC2CommImpl(moe_config)
+        _MoECommMethods[MoECommType.FUSED_MC2] = FusedMC2CommImpl(moe_config)
+    else:
+        _MoECommMethods[MoECommType.ALLGATHER] = AllGatherCommImpl(moe_config)
 
 
 def set_gmmswigluquant_method():
@@ -119,7 +122,13 @@ class MoECommMethod(ABC):
         fused_experts_input: MoEFusedExpertsInput,
     ):
         # Check constraints
-        assert fused_experts_input.hidden_states.dtype in [torch.float32, torch.float16, torch.bfloat16, torch.int8]
+        assert fused_experts_input.hidden_states.dtype in [
+            torch.float32,
+            torch.float16,
+            torch.bfloat16,
+            torch.int8,
+            torch.float8_e4m3fn,
+        ]
 
         moe_comm_method = _EXTRA_CTX.moe_comm_method
         assert moe_comm_method is not None, "Missing communication context"
@@ -292,6 +301,7 @@ class FusedMC2CommImpl(MoECommMethod):
                 probs=fused_experts_input.topk_weights.to(torch.float32),
                 group=self.token_dispatcher.moe_all_to_all_group_name,
                 max_output_size=65536,
+                x_active_mask=fused_experts_input.routing.mc2_mask,
                 out=out,
                 expert_token_nums=self.expert_token_nums,
             )

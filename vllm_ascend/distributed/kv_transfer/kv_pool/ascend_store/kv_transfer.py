@@ -1,3 +1,4 @@
+import logging
 import queue
 import threading
 from collections import defaultdict
@@ -80,7 +81,7 @@ class KVTransferThread(threading.Thread):
                     continue
                 self._handle_request(request_data)
             except Exception as e:
-                logger.error(f"Error in KVCacheTransferThread: {e}")
+                logger.error("Error in KVCacheTransferThread: %s", e)
 
     def _handle_request(self, req_meta: Any):
         pass
@@ -100,7 +101,7 @@ class KVTransferThread(threading.Thread):
                 exists_list[index] = value == 1
             return exists_list
         except Exception as e:
-            logger.error(f"Remote connection failed in contains: {e}")
+            logger.error("Remote connection failed in contains: %s", e)
             return [False] * len(keys)
 
     def update_kv_event(self, event: list[BlockStored]):
@@ -190,13 +191,14 @@ class KVCacheStoreSendingThread(KVTransferThread):
         keys = [keys[index] for index in missing_indices]
         block_hashes = [block_hashes[index] for index in missing_indices]
 
-        logger.debug(
-            "Storing KV cache for %d out of %d blocks (missing_count=%d) for request %s",
-            len(keys),
-            token_len // self.block_size,
-            len(missing_indices),
-            req_id,
-        )
+        if logger.isEnabledFor(logging.DEBUG):
+            logger.debug(
+                "Storing KV cache for %d out of %d blocks (missing_count=%d) for request %s",
+                len(keys),
+                token_len // self.block_size,
+                len(missing_indices),
+                req_id,
+            )
 
         if keys:
             """
@@ -229,7 +231,7 @@ class KVCacheStoreSendingThread(KVTransferThread):
                     )
                     stored_events.append(stored_event)
                     prev_key = new_block_hashes[index]
-                    logger.debug(f"Added kv cache event '{stored_event}' to kv cache events queue")
+                    logger.debug("Added kv cache event '%s' to kv cache events queue", stored_event)
 
             if self.kv_role == "kv_consumer":
                 keys, addrs, sizes = self.token_database.decode_adaptor_prefill_pp(keys, addrs, sizes)

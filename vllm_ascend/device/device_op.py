@@ -124,13 +124,13 @@ class BaseDeviceAdaptor:
         if use_mxfp_quant:
             raise RuntimeError("MXFP MoE quantization is only supported on Ascend A5.")
 
-        return torch_npu.npu_grouped_matmul_swiglu_quant(
+        return torch.ops._C_ascend.grouped_matmul_swiglu_quant(
             x=x,
             weight=weight,
-            bias=bias,
-            group_list=group_list,
             weight_scale=weight_scale,
             x_scale=x_scale,
+            group_list=group_list,
+            bias=bias,
         )
 
     @staticmethod
@@ -190,7 +190,7 @@ class BaseDeviceAdaptor:
         )[0]
 
     @staticmethod
-    def mla_cache_load(cache_kv_c, cache_k_pe, block_table, context_seq_len_npu, seq_starts, key, value):
+    def kv_cache_load(cache_kv_c, cache_k_pe, block_table, context_seq_len_npu, seq_starts, key, value):
         torch_npu.atb.npu_paged_cache_load(
             cache_kv_c,
             cache_k_pe,
@@ -289,6 +289,22 @@ class BaseDeviceAdaptor:
             decode_q_nope, decode_q_pe, decode_k_nope, decode_k_pe, dequant_scale_q_nope=dequant_scale_q_nope
         )
         return decode_preprocess_res, None
+
+    def npu_flash_attention(query, key, value, seq_lens_cpu, head_num, scale_value, num_kv_heads):
+        context_layer = torch.empty_like(query)
+
+        torch_npu._npu_flash_attention_unpad(
+            query=query,
+            key=key,
+            value=value,
+            seq_len=seq_lens_cpu,
+            scale_value=scale_value,
+            num_heads=head_num,
+            num_kv_heads=num_kv_heads,
+            out=context_layer,
+        )
+
+        return context_layer
 
 
 class A5DeviceAdaptor(BaseDeviceAdaptor):
@@ -537,12 +553,12 @@ class A5DeviceAdaptor(BaseDeviceAdaptor):
         )[0]
 
     @staticmethod
-    def mla_cache_load(cache_kv_c, cache_k_pe, block_table, context_seq_len_npu, seq_offset, key, value):
+    def kv_cache_load(cache_kv_c, cache_k_pe, block_table, context_seq_len_npu, seq_offset, key, value):
         torch_npu.npu_gather_pa_kv_cache(
             cache_kv_c,
             cache_k_pe,
             block_table,
-            context_seq_len_npu,
+            context_seq_len_npu.contiguous(),
             seq_offset=seq_offset,
             key=key,
             value=value,
@@ -585,10 +601,27 @@ class A5DeviceAdaptor(BaseDeviceAdaptor):
         decode_q_nope = decode_q_nope.view(bsz, atten_obj.num_heads, atten_obj.kv_lora_rank)
         decode_q_pe = decode_q_pe.view(bsz, atten_obj.num_heads, -1)
 
+        decode_q_nope, decode_q_pe = atten_obj.reorg_decode_q(decode_q_nope, decode_q_pe)
         from vllm_ascend.attention.mla_v1 import DecodeMLAPreprocessResult
 
         decode_preprocess_res = DecodeMLAPreprocessResult(decode_q_nope, decode_q_pe, decode_k_nope, decode_k_pe)
         return decode_preprocess_res, None
+
+    def npu_flash_attention(query, key, value, seq_lens_cpu, head_num, scale_value, num_kv_heads):
+        seq_lens_cpu = list(seq_lens_cpu.cumsum(0))
+
+        context_layer = torch_npu.npu_fusion_attention(
+            query=query,
+            key=key,
+            value=value,
+            actual_seq_qlen=seq_lens_cpu,
+            actual_seq_kvlen=seq_lens_cpu,
+            head_num=head_num,
+            scale=scale_value,
+            input_layout="TND",
+        )[0]
+
+        return context_layer
 
 
 def get_device_adaptor() -> type["BaseDeviceAdaptor"]:

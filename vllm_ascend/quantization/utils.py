@@ -70,7 +70,7 @@ def get_model_file(
             )
             return Path(downloaded_path)
     except Exception as e:
-        logger.debug(f"Could not download {filename} from {model}: {e}")
+        logger.debug("Could not download %s from %s: %s", filename, model, e)
         return None
 
 

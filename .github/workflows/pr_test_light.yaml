@@ -41,7 +41,7 @@ jobs:
   lint:
     uses: ./.github/workflows/_pre_commit.yml
     with:
-      vllm: 6f786f2c506cb07f4566771fdc62e640e2c4a176
+      vllm: 0d4d334eaa583b9c09aa4eb7538c22db99fd84b3
   changes:
     runs-on: linux-aarch64-a2b3-0
     container:
@@ -77,8 +77,13 @@ jobs:
               - 'requirements-dev.txt'
               - 'requirements-lint.txt'
               - 'packages.txt'
+            ut_tracker:
+              - 'tests/ut/**'
             _310_tracker:
+              - '.github/workflows/pr_test_light.yaml'
+              - '.github/workflows/_e2e_test.yaml'
               - 'vllm_ascend/_310p/**'
+              - 'csrc/**'
               - 'tests/e2e/310p/**'
               - 'vllm_ascend/worker/**'
               - 'vllm_ascend/attention/attention_v1.py'
@@ -87,7 +92,7 @@ jobs:
               - 'CMakeLists.txt'
 
       - name: Determine smart UT test scope
-        if: ${{ steps.filter.outputs.e2e_tracker == 'true' }}
+        if: ${{ steps.filter.outputs.ut_tracker == 'true' || steps.filter.outputs.e2e_tracker == 'true' }}
         id: scope
         run: |
           git config --global --add safe.directory /__w/vllm-ascend/vllm-ascend
@@ -152,7 +157,7 @@ jobs:
     if: ${{ needs.lint.result == 'success' && needs.changes.outputs.has_tests == 'true' }}
     strategy:
       matrix:
-        vllm_version: [6f786f2c506cb07f4566771fdc62e640e2c4a176, v0.19.0]
+        vllm_version: [0d4d334eaa583b9c09aa4eb7538c22db99fd84b3, v0.20.2]
     uses: ./.github/workflows/_optional_smart_e2e.yaml
     with:
       vllm: ${{ matrix.vllm_version }}
@@ -162,7 +167,7 @@ jobs:
     name: e2e-light
     strategy:
       matrix:
-        vllm_version: [6f786f2c506cb07f4566771fdc62e640e2c4a176, v0.19.0]
+        vllm_version: [0d4d334eaa583b9c09aa4eb7538c22db99fd84b3, v0.20.2]
     # Note (yikun): If CI resource are limited we can split job into two chain jobs
     needs: [lint, changes]
     # only trigger e2e test after lint passed and the change is e2e related with pull request.
@@ -170,6 +175,6 @@ jobs:
     uses: ./.github/workflows/_e2e_test.yaml
     with:
       vllm: ${{ matrix.vllm_version }}
-      image: swr.cn-southwest-2.myhuaweicloud.com/base_image/ascend-ci/cann:8.5.1-910b-ubuntu22.04-py3.11
+      image: swr.cn-southwest-2.myhuaweicloud.com/base_image/ascend-ci/cann:9.0.0-910b-ubuntu22.04-py3.11
       contains_310: ${{ needs.changes.outputs._310_tracker == 'true' }}
       type: light

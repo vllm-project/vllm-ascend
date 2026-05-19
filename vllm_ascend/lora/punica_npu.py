@@ -281,9 +281,9 @@ class PunicaWrapperNPU(PunicaWrapperBase):
         Semantics:
             for i in range(len(lora_a_stacked)):
                 y[i] += (
-                    x[i].unsqueeze(0)
-                    @ lora_a_stacked[indices[i], layer_idx, :, :]
-                    @ lora_b_stacked[indices[i], layer_idx, :, :]
+                    x[i].unsqueeze(0) @ lora_a_stacked[
+                    indices[i], layer_idx, :, :] @ lora_b_stacked[
+                    indices[i], layer_idx, :, :]
                     * scale
                     ).squeeze(0)+lora_bias_stacked[i]
 

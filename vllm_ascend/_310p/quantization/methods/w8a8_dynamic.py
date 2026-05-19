@@ -27,10 +27,11 @@ from vllm_ascend._310p.fused_moe.experts_selector import select_experts
 from vllm_ascend.ascend_forward_context import _EXTRA_CTX
 from vllm_ascend.ops.fused_moe.experts_selector import zero_experts_compute
 from vllm_ascend.ops.fused_moe.moe_runtime_args import build_fused_experts_input
-from vllm_ascend.quantization.methods.base import AscendLinearScheme, AscendMoEScheme, QuantType
+from vllm_ascend.quantization.methods.base import AscendMoEScheme, QuantType
 from vllm_ascend.utils import maybe_trans_nz
 
 from .registry import register_scheme
+from .w8a8_base import AscendW8A8Linear310pScheme
 
 
 @register_scheme("W8A8_DYNAMIC", "moe")
@@ -85,7 +86,7 @@ class AscendW8A8DynamicFusedMoEMethod310(AscendMoEScheme):
         top_k: int,
         renormalize: bool,
         use_grouped_topk: bool = False,
-        global_num_experts: int = -1,
+        num_experts: int = -1,
         expert_map: torch.Tensor | None = None,
         topk_group: int | None = None,
         num_expert_group: int | None = None,
@@ -115,15 +116,16 @@ class AscendW8A8DynamicFusedMoEMethod310(AscendMoEScheme):
             num_expert_group=num_expert_group,
             custom_routing_function=custom_routing_function,
             scoring_func=scoring_func,
+            routed_scaling_factor=routed_scaling_factor,
             e_score_correction_bias=e_score_correction_bias,
-            global_num_experts=global_num_experts,
+            global_num_experts=num_experts,
         )
 
         if zero_expert_num > 0 and zero_expert_type is not None:
             topk_ids, topk_weights, zero_expert_result = zero_experts_compute(
                 expert_indices=topk_ids,
                 expert_scales=topk_weights,
-                num_experts=global_num_experts,
+                num_experts=num_experts,
                 zero_expert_type=zero_expert_type,
                 hidden_states=x,
             )
@@ -159,20 +161,12 @@ class AscendW8A8DynamicFusedMoEMethod310(AscendMoEScheme):
 
 
 @register_scheme("W8A8_DYNAMIC", "linear")
-class AscendW8A8DynamicLinearMethod310(AscendLinearScheme):
+class AscendW8A8DynamicLinearMethod310(AscendW8A8Linear310pScheme):
     """310P-only W8A8 dynamic linear scheme.
 
     Notes:
       - This scheme is discovered via 310P local registry.
     """
-
-    def get_weight(
-        self,
-        input_size: int,
-        output_size: int,
-        params_dtype: torch.dtype = torch.float16,
-    ) -> dict[str, Any]:
-        return {"weight": torch.empty(output_size, input_size, dtype=torch.int8)}
 
     def get_perchannel_param(
         self,

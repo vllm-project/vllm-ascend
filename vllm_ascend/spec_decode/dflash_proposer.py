@@ -54,6 +54,10 @@ class AscendDflashProposer(AscendEagleProposer):
 
         self.arange_dflash = torch.arange(self.max_positions + 1, device=device, dtype=torch.int32)
 
+        self._dflash_hidden_states = torch.zeros(
+            (self.max_num_tokens, self.hidden_size), dtype=self.dtype, device=self.device
+        )
+
         self.parallel_drafting_hidden_state_tensor = None
 
     def set_inputs_first_pass(
@@ -78,7 +82,7 @@ class AscendDflashProposer(AscendEagleProposer):
         num_query_total = batch_size * num_query_per_req
 
         self._dflash_num_context = num_context
-        self._dflash_hidden_states = target_hidden_states
+        self._dflash_hidden_states[:num_context] = target_hidden_states
 
         token_indices_to_sample = torch.empty(
             batch_size * self.num_speculative_tokens,
@@ -107,7 +111,7 @@ class AscendDflashProposer(AscendEagleProposer):
             num_rejected_tokens_ptr=(num_rejected_tokens_gpu if has_num_rejected else 0),
             # Scalars
             parallel_drafting_token_id=self.parallel_drafting_token_id,
-            block_size=self.block_size,
+            block_size=self.kernel_block_size,
             num_query_per_req=num_query_per_req,
             num_speculative_tokens=self.num_speculative_tokens,
             total_input_tokens=num_context,
@@ -176,6 +180,7 @@ class AscendDflashProposer(AscendEagleProposer):
                 query_start_loc=self.arange_dflash[: num_reqs + 1] * num_query_per_req,
                 query_start_loc_cpu=torch.from_numpy(self.token_arange_np[: num_reqs + 1]).clone() * num_query_per_req,
                 seq_lens_cpu=self.runner.optimistic_seq_lens_cpu,
+                seq_lens_cpu_upper_bound=self.runner.optimistic_seq_lens_cpu,
                 seq_lens=self.runner.seq_lens[:num_reqs],
                 num_reqs=num_reqs,
                 num_actual_tokens=num_query_tokens,
@@ -184,7 +189,9 @@ class AscendDflashProposer(AscendEagleProposer):
                 slot_mapping=self._slot_mapping_buffer[:num_query_total],
                 attn_state=AscendAttentionState.ChunkedPrefill,
                 causal=False,
-                block_table_tensor=self.runner.input_batch.block_table[0].get_device_tensor()[:num_reqs],
+                block_table_tensor=self.runner.input_batch.block_table[self.kv_cache_gid].get_device_tensor()[
+                    :num_reqs
+                ],
             )
 
             attn_metadata_dflash = builder.build_for_graph_capture(
@@ -212,13 +219,25 @@ class AscendDflashProposer(AscendEagleProposer):
             is_draft_model=True,
             draft_attn_metadatas=multi_steps_attn_metadata,
         ):
-            self.model.precompute_and_store_context_kv(context_states, context_positions)
+            if is_profile:
+                self.model.precompute_and_store_context_kv(context_states, context_positions)
+                self.model(
+                    input_ids=self.input_ids[:num_query_total],
+                    positions=self._get_positions(num_query_total),
+                    inputs_embeds=None,
+                )
 
-            self.model(
-                input_ids=self.input_ids[:num_query_total],
-                positions=self._get_positions(num_query_total),
-                inputs_embeds=None,
-            )
+            else:
+                self._dflash_num_context = num_input_tokens
+                self._runnable(
+                    num_input_tokens=num_input_tokens,
+                    batch_size=num_reqs,
+                    token_indices_to_sample=self.token_indices_to_sample[: num_reqs * self.num_speculative_tokens],
+                    target_positions=self._get_positions(num_input_tokens),
+                    inputs_embeds=None,
+                    multi_steps_attn_metadata=multi_steps_attn_metadata,
+                    num_tokens=num_input_tokens,
+                )
 
             forward_context = get_forward_context()
             if forward_context.cudagraph_runtime_mode == CUDAGraphMode.FULL and not _EXTRA_CTX.capturing:
@@ -231,7 +250,7 @@ class AscendDflashProposer(AscendEagleProposer):
         num_context = self._dflash_num_context
 
         self.model.precompute_and_store_context_kv(
-            self._dflash_hidden_states,
+            self._dflash_hidden_states[:num_context],
             self._context_positions_buffer[:num_context],
             self._context_slot_mapping_buffer[:num_context],
         )
@@ -239,3 +258,6 @@ class AscendDflashProposer(AscendEagleProposer):
         return dict(
             input_ids=self.input_ids[:num_input_tokens], positions=self.positions[:num_input_tokens], inputs_embeds=None
         )
+
+    def _raise_if_multimodal(self):
+        pass

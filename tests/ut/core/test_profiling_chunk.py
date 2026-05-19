@@ -76,7 +76,7 @@ class TestProfilingChunkConfig(TestBase):
     def test_default_values(self):
         cfg = ProfilingChunkConfig()
         self.assertFalse(cfg.enabled)
-        self.assertAlmostEqual(cfg.smooth_factor, 0.8)
+        self.assertAlmostEqual(cfg.smooth_factor, 1.0)
         self.assertEqual(cfg.min_chunk, 4096)
 
     def test_invalid_smooth_factor_raises(self):
@@ -262,6 +262,7 @@ class TestProfilingChunkScheduler(TestBase):
         model_config.hf_config = mock_hf_config
         model_config.hf_text_config = MagicMock()
         model_config.hf_text_config.is_encoder_decoder = False
+        model_config.runner_type = "generate"
 
         scheduler_config = SchedulerConfig(
             max_num_seqs=MAX_NUM_SEQS,

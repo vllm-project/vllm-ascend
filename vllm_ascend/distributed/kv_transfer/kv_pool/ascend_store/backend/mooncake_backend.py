@@ -85,18 +85,18 @@ class MooncakeBackend(Backend):
             res = self.store.batch_put_from_multi_buffers(keys, addrs, sizes)
             for value in res:
                 if value < 0:
-                    logger.error(f"Failed to put key {keys},res:{res}")
+                    logger.error("Failed to put key %s,res:%s", keys, res)
         except Exception as e:
-            logger.error(f"Failed to put key {keys},error:{e}")
+            logger.error("Failed to put key %s,error:%s", keys, e)
 
     def get(self, keys: list[str], addrs: list[list[int]], sizes: list[list[int]]):
         try:
             res = self.store.batch_get_into_multi_buffers(keys, addrs, sizes)
             for value in res:
                 if value < 0:
-                    logger.error(f"Failed to get key {keys}, res:{res}")
+                    logger.error("Failed to get key %s, res:%s", keys, res)
         except Exception as e:
-            logger.error(f"Failed to get key {keys}, error:{e}")
+            logger.error("Failed to get key %s, error:%s", keys, e)
 
 
 @dataclass

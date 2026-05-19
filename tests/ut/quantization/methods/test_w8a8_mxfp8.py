@@ -156,7 +156,7 @@ class TestAscendW8A8MXFP8MoEMethod(TestBase):
             router_logits,
             top_k=2,
             renormalize=True,
-            global_num_experts=self.num_experts,
+            num_experts=self.num_experts,
             activation="silu",
             pertoken_scale=torch.randn(tokens),
         )
