@@ -587,8 +587,6 @@ class AscendAttentionCPImpl(AscendAttentionBackendImpl):
             else:
                 attn_mask = None
             query = query.view(num_decodes, -1, query.shape[1], query.shape[-1])
-            k_nope = self.key_cache.view(self.key_cache.shape[0], 1, self.key_cache.shape[1], -1)
-            value = self.value_cache.view(self.value_cache.shape[0], 1, self.value_cache.shape[1], -1)
             actual_seq_lengths_q = [actual_seq_lengths_q[0] for _ in range(len(actual_seq_lengths_q))]
 
         common_kwargs = {

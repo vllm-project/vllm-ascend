@@ -1288,60 +1288,32 @@ class PCPManager:
         Args:
             decode_num_computed_tokens: List of global history lengths for decode requests
             decode_num_scheduled_tokens: Array of scheduled token counts for decode requests
-
-        Returns:
-            List of attention mask tensors for decode requests, one per request
-            Each mask has shape [num_mtp_tokens, num_local_tokens]
-            Returns None for non-decode requests or when no decode requests exist
         """
-        # Calculate combined CP rank and size (same as dcp_rank/dcp_size in reference)
         cp_rank = self.pcp_world_rank * self.dcp_world_size + self.dcp_world_rank
         cp_size = self.pcp_world_size * self.dcp_world_size
         assert cp_size > 1, "cp_size must be greater than 1"
 
-        # Get local history tokens on each rank (similar to k_lens in reference)
-        num_computed_tokens_tensor = torch.tensor(decode_num_computed_tokens, dtype=torch.int32)
-        local_seq_lens = self._get_cp_local_seq_lens(
-            num_computed_tokens_tensor,
-            self.pcp_world_size,
-            self.dcp_world_size,
-            self.vllm_config.parallel_config.cp_kv_cache_interleave_size,
-        )
-
-        # q_lens = mtp_token_len (num_scheduled_tokens)
         q_lens = torch.tensor(decode_num_scheduled_tokens[:self.num_decode_reqs], dtype=torch.int32)
-        # global_histories = decode_num_computed_tokens (global history lengths)
         global_histories = torch.tensor(decode_num_computed_tokens, dtype=torch.int32)
-        # total_lens = global_history + mtp_token_len (global sequence length)
         total_lens = global_histories + q_lens
-        # context_lens = total_lens - q_lens (consistent with reference)
         context_lens = total_lens - q_lens
 
-        # max indices for global sequences
         max_indices = total_lens - 1
-
-        # if max_indices are smaller than cp_rank, current rank has no cache, is invalid
         valid = (max_indices >= cp_rank)
 
         if not valid.any():
             return self.dcp_mtp_attn_mask.cpu[:self.num_decode_reqs]
 
-        # local kv lens on current cp_rank (similar to k_lens calculation in reference)
-        # k_lens = floor((max_index - cp_rank) / cp_size) + 1
         k_lens = torch.div(max_indices - cp_rank, cp_size, rounding_mode="floor") + 1
         k_lens = torch.where(valid, k_lens, torch.zeros_like(k_lens))
 
-        # Pre-allocate output buffer
         mtp_attn_mask = self.dcp_mtp_attn_mask.cpu[:self.num_decode_reqs]
         mtp_attn_mask.zero_()
 
-        # Vectorized approach: compute all masks in batch, then assign directly
-        # Avoids nonzero/index_put which are slow
         num_valid = valid.sum().item()
         if num_valid == 0:
             return mtp_attn_mask
 
-        # Get max dimensions for vectorized computation
         max_q = int(q_lens[valid].max().item())
         max_k = int(k_lens[valid].max().item())
 
@@ -1349,29 +1321,17 @@ class PCPManager:
         q_indices = torch.arange(max_q, dtype=torch.int32)
         k_indices = torch.arange(max_k, dtype=torch.int32)
 
-        # valid_q: [num_decode_reqs, max_q] - which q indices are valid for each req
         valid_q = valid[:, None] & (q_indices[None, :] < q_lens[:, None])
-        # valid_k: [num_decode_reqs, max_k] - which k indices are valid for each req
         valid_k = valid[:, None] & (k_indices[None, :] < k_lens[:, None])
 
-        # k_upper for all requests: [num_decode_reqs, max_q]
-        # floor((context_lens + q_idx - cp_rank) / cp_size)
         k_upper = (context_lens[:, None] + q_indices - cp_rank) // cp_size
-
-        # Compute full mask tensor [num_decode_reqs, max_q, max_k]
-        # mask is True where: k_idx > k_upper AND k_upper >= 0
         k_upper_expanded = k_upper[:, :, None]  # [num_decode_reqs, max_q, 1]
         k_idx_expanded = k_indices[None, None, :]  # [1, 1, max_k]
         full_mask = (k_idx_expanded > k_upper_expanded) & (k_upper_expanded >= 0)
 
-        # Apply validity: only where both q and k are valid
-        valid_mask_3d = valid_q[:, :, None] & valid_k[:, None, :]  # [num_decode_reqs, max_q, max_k]
+        valid_mask_3d = valid_q[:, :, None] & valid_k[:, None, :]
         full_mask = full_mask & valid_mask_3d
 
-        # Directly assign full mask to output buffer without for loop
-        # mtp_attn_mask shape: [num_decode_reqs, num_mtp_tokens, 16384]
-        # full_mask shape: [num_decode_reqs, max_q, max_k]
-        # Direct slice assignment is vectorized and avoids any scatter
         mtp_attn_mask[:self.num_decode_reqs, :max_q, :max_k] = full_mask
 
         return mtp_attn_mask
