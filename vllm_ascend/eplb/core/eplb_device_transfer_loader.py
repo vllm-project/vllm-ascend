@@ -58,7 +58,7 @@ class D2DExpertWeightLoader:
             local_expert_id = self.eplb_adaptor.expert_map_per_layer_cpu[layer_id][global_expert_id_to_send].item()
             for src_tensor in self.eplb_adaptor.expert_param_per_layer[layer_id][local_expert_id]:
                 self.comm_op_list.append(
-                    dist.P2POp(dist.isend, src_tensor, self.comm_group.ranks[dst_rank], group=self.comm_group.device_group)
+                    dist.P2POp(dist.isend, src_tensor.contiguous(), self.comm_group.ranks[dst_rank], group=self.comm_group.device_group)
                 )
 
         for buffer_tensor_id, recv_info in enumerate(expert_recv_info):
