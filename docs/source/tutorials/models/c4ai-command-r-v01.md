@@ -126,12 +126,12 @@ python -m pytest -sv tests/e2e/models/test_lm_eval_correctness.py \
   --report-dir ./benchmarks/accuracy
 ```
 
-Reference thresholds (from `tests/e2e/models/configs/c4ai-command-r-v01.yaml`):
+Reference values (from `tests/e2e/models/configs/c4ai-command-r-v01.yaml`):
 
-| Task  | Metric                         | Expected (yaml) |
-|-------|--------------------------------|-----------------|
-| gsm8k | exact_match,strict-match       | 0.20            |
-| gsm8k | exact_match,flexible-extract   | 0.15            |
+| Task | Metric | Expected (yaml) |
+| --- | --- | --- |
+| gsm8k | exact_match,strict-match | 0.20 |
+| gsm8k | exact_match,flexible-extract | 0.15 |
 
 
 ## FAQ
