@@ -500,9 +500,7 @@ class AddRMSNormDynamicMXQuantPattern(BasePattern):
             Return format aligns with AddRMSNormDynamicQuantPattern:
             (quant_y, scale, out1)
             """
-            output = torch.ops.npu.npu_add_rms_norm(
-                rms_norm_input, residual, rms_norm_weight, self.eps
-            )
+            output = torch.ops.npu.npu_add_rms_norm(rms_norm_input, residual, rms_norm_weight, self.eps)
             out0 = output[0]
             out1 = output[2]
 
