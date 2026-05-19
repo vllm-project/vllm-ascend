@@ -85,8 +85,6 @@ class VllmEplbAdaptor:
                     "w13_weight_scale",
                     "w2_weight_scale",
                 ]
-            if quant_type == QuantType.W4A8MXFP:
-                raise ValueError("EPLB not support WeightNZ on 950")
             else:
                 raise ValueError(f"EPLB not support {quant_type}")
         else:
