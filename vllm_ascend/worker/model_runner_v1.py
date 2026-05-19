@@ -951,9 +951,10 @@ class NPUModelRunner(GPUModelRunner):
         # CPU values are optimistic (all drafts accepted). The kernel
         # corrects on GPU using the previous step's
         # valid_sampled_token_count_gpu. Otherwise, just copy from CPU.
-        cpu_values = self.input_batch.num_computed_tokens_cpu_tensor[:num_reqs].to(
-            device=self.device, non_blocking=True
-        )
+        if self.use_async_spec_decode:
+            cpu_values = self.input_batch.num_computed_tokens_cpu_tensor[:num_reqs].to(
+                device=self.device, non_blocking=True
+            )
         if (
             self.use_async_spec_decode
             and self.valid_sampled_token_count_gpu is not None

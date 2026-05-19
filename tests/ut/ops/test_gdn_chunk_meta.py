@@ -259,6 +259,84 @@ def test_chunk_gated_delta_rule_fwd_threads_prebuilt_chunk_offsets(
     assert pcp_calls == [("o_update", chunk_offsets)]
 
 
+def test_chunk_gated_delta_rule_fwd_uses_prebuilt_host_meta_without_runtime_tolist(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    prebuilt_meta = type(
+        "PrebuiltMeta",
+        (),
+        {
+            "block_indices_cumsum": None,
+            "cu_seqlens_host": (0, 4, 7),
+            "chunk_indices_chunk64_host": (0, 0, 1, 0),
+            "chunk_indices_chunk64": torch.tensor([[0, 0], [1, 0]], dtype=torch.int32),
+            "chunk_offsets_chunk64": torch.tensor([0, 1, 2], dtype=torch.int32),
+            "update_chunk_offsets_chunk64": torch.tensor([0, 2, 4], dtype=torch.int32),
+            "final_chunk_indices_chunk64": torch.tensor([1, 3], dtype=torch.int32),
+            "chunk_indices_large_block": None,
+        },
+    )()
+
+    q = _DummyTensor("q")
+    k = _DummyTensor("k")
+    v = _DummyTensor("v")
+    g = _DummyTensor("g")
+    beta = _DummyTensor("beta")
+    initial_state = _DummyTensor("initial_state")
+
+    captured: dict[str, tuple[int, ...] | None] = {}
+
+    monkeypatch.setattr(chunk, "get_forward_context", lambda: type("Ctx", (), {"attn_metadata": None})())
+    monkeypatch.setattr(
+        chunk,
+        "get_pcp_group",
+        lambda: type("Group", (), {"world_size": 1, "rank_in_group": 0})(),
+    )
+    monkeypatch.setattr(chunk, "chunk_local_cumsum", lambda *args, **kwargs: _DummyTensor("g_cumsum"))
+    monkeypatch.setattr(chunk, "chunk_scaled_dot_kkt_fwd", lambda *args, **kwargs: _DummyTensor("A"))
+    monkeypatch.setattr(chunk, "solve_tril", lambda *args, **kwargs: _DummyTensor("A_solved"))
+    monkeypatch.setattr(chunk, "recompute_w_u_fwd", lambda *args, **kwargs: (_DummyTensor("w"), _DummyTensor("u")))
+    monkeypatch.setattr(
+        torch.ops._C_ascend,
+        "chunk_gated_delta_rule_fwd_h",
+        lambda *args, **kwargs: (
+            captured.update(
+                {
+                    "cu_seqlens": kwargs["cu_seqlens"],
+                    "chunk_indices": kwargs["chunk_indices"],
+                }
+            )
+            or (_DummyTensor("h"), _DummyTensor("v_new"), _DummyTensor("final_state"))
+        ),
+    )
+    monkeypatch.setattr(
+        torch.ops._C_ascend,
+        "chunk_fwd_o",
+        lambda *args, **kwargs: _DummyTensor("o_ascend"),
+    )
+    monkeypatch.setattr(
+        torch.Tensor,
+        "tolist",
+        lambda self: pytest.fail("runtime should not convert device tensors to host tuples"),
+    )
+
+    chunk.chunk_gated_delta_rule_fwd(
+        q=q,
+        k=k,
+        v=v,
+        g=g,
+        beta=beta,
+        scale=1.0,
+        initial_state=initial_state,
+        output_final_state=False,
+        cu_seqlens=torch.tensor([0, 4, 7], dtype=torch.int32),
+        prebuilt_meta=prebuilt_meta,
+    )
+
+    assert captured["cu_seqlens"] == prebuilt_meta.cu_seqlens_host
+    assert captured["chunk_indices"] == prebuilt_meta.chunk_indices_chunk64_host
+
+
 def test_build_chunk_meta_device_rejects_non_npu_input():
     cu_seqlens = torch.tensor([0, 4, 4, 12], dtype=torch.int32)
 
