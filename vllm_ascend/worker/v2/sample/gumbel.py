@@ -73,13 +73,15 @@ def apply_temperature(
     )
 
 
-@triton.jit(do_not_specialize=[
-    "local_argmax_stride",
-    "local_max_stride",
-    "processed_logits_stride",
-    "logits_stride",
-    "vocab_size",
-])
+@triton.jit(
+    do_not_specialize=[
+        "local_argmax_stride",
+        "local_max_stride",
+        "processed_logits_stride",
+        "logits_stride",
+        "vocab_size",
+    ]
+)
 def _gumbel_sample_kernel(
     local_argmax_ptr,
     local_argmax_stride,

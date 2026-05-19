@@ -62,8 +62,7 @@ def test_apply_temperature(num_tokens, vocab_size):
     logits_ref = _ref_apply_temperature(logits, expanded_idx_mapping, temperature)
 
     assert torch.allclose(logits_triton.float(), logits_ref, atol=1e-4, rtol=1e-5), (
-        f"apply_temperature mismatch: max_diff="
-        f"{(logits_triton.float() - logits_ref).abs().max().item():.6f}"
+        f"apply_temperature mismatch: max_diff={(logits_triton.float() - logits_ref).abs().max().item():.6f}"
     )
 
 
@@ -109,9 +108,7 @@ def test_gumbel_sample_greedy(num_tokens, num_reqs, vocab_size):
     torch.npu.synchronize()
 
     expected = logits.argmax(dim=-1)
-    assert torch.equal(sampled, expected), (
-        f"Greedy mismatch: sampled={sampled.tolist()} expected={expected.tolist()}"
-    )
+    assert torch.equal(sampled, expected), f"Greedy mismatch: sampled={sampled.tolist()} expected={expected.tolist()}"
 
 
 def test_gumbel_sample_greedy_apply_temp_flag_irrelevant():
@@ -233,12 +230,8 @@ def test_gumbel_sample_temperature_affects_distribution():
         seed = torch.tensor([i * 1000 + 42], dtype=torch.int64, device=DEVICE)
         pos = torch.tensor([i], dtype=torch.int32, device=DEVICE)
 
-        s_low = gumbel_sample(
-            logits_base.clone(), expanded_idx_mapping, low_temp, seed, pos, apply_temperature=True
-        )
-        s_high = gumbel_sample(
-            logits_base.clone(), expanded_idx_mapping, high_temp, seed, pos, apply_temperature=True
-        )
+        s_low = gumbel_sample(logits_base.clone(), expanded_idx_mapping, low_temp, seed, pos, apply_temperature=True)
+        s_high = gumbel_sample(logits_base.clone(), expanded_idx_mapping, high_temp, seed, pos, apply_temperature=True)
         if s_low.item() == 0:
             low_temp_winner_count += 1
         if s_high.item() == 0:
@@ -247,8 +240,7 @@ def test_gumbel_sample_temperature_affects_distribution():
     torch.npu.synchronize()
     # Low temp should pick the winner much more often than high temp
     assert low_temp_winner_count > high_temp_winner_count, (
-        f"Low temp winner count ({low_temp_winner_count}) should be > "
-        f"high temp winner count ({high_temp_winner_count})"
+        f"Low temp winner count ({low_temp_winner_count}) should be > high temp winner count ({high_temp_winner_count})"
     )
     # Low temp with such a strong signal should almost always pick token 0
     assert low_temp_winner_count > num_trials * 0.9, (
@@ -285,8 +277,7 @@ def test_gumbel_sample_mixed_temperature(num_tokens, num_reqs, vocab_size):
     greedy = logits.argmax(dim=-1)
     for tok in range(num_tokens // 2):
         assert sampled[tok].item() == greedy[tok].item(), (
-            f"Token {tok} (temp=0) should be greedy: got {sampled[tok].item()}, "
-            f"expected {greedy[tok].item()}"
+            f"Token {tok} (temp=0) should be greedy: got {sampled[tok].item()}, expected {greedy[tok].item()}"
         )
 
 
@@ -361,7 +352,11 @@ def test_gumbel_sample_apply_temperature_true_nonzero():
     # Use processed_logits to verify temperature was applied
     out_logits = torch.zeros(num_reqs, vocab_size, dtype=torch.float32, device=DEVICE)
     gumbel_sample(
-        logits, expanded_idx_mapping, temperature, seed, pos,
+        logits,
+        expanded_idx_mapping,
+        temperature,
+        seed,
+        pos,
         apply_temperature=True,
         output_processed_logits=out_logits,
     )
@@ -391,7 +386,11 @@ def test_gumbel_sample_apply_temperature_false_nonzero():
 
     out_logits = torch.zeros(num_reqs, vocab_size, dtype=torch.float32, device=DEVICE)
     gumbel_sample(
-        logits, expanded_idx_mapping, temperature, seed, pos,
+        logits,
+        expanded_idx_mapping,
+        temperature,
+        seed,
+        pos,
         apply_temperature=False,
         output_processed_logits=out_logits,
     )
@@ -434,7 +433,11 @@ def test_gumbel_sample_processed_logits_req_state_idx():
 
     out_logits = torch.zeros(max_num_reqs, vocab_size, dtype=torch.float32, device=DEVICE)
     gumbel_sample(
-        logits, expanded_idx_mapping, temperature, seed, pos,
+        logits,
+        expanded_idx_mapping,
+        temperature,
+        seed,
+        pos,
         apply_temperature=True,
         output_processed_logits=out_logits,
     )
@@ -446,17 +449,14 @@ def test_gumbel_sample_processed_logits_req_state_idx():
         expected = logits[tok].float() / temp
         actual = out_logits[req]
         assert torch.allclose(actual.float(), expected, atol=1e-4, rtol=1e-4), (
-            f"Token {tok} -> Req {req}: data at req_state_idx position mismatch, "
-            f"max_diff={(actual.float() - expected).abs().max().item():.6f}"
+            f"Req {req} (tok={tok}, temp={temp:.3f}): max_diff={(actual.float() - expected).abs().max().item():.6f}"
         )
 
     # Also verify that unused request slots remain zero
     used_reqs = set(expanded_idx_mapping.tolist())
     for req in range(max_num_reqs):
         if req not in used_reqs:
-            assert (out_logits[req] == 0).all(), (
-                f"Unused request slot {req} should be all zeros"
-            )
+            assert (out_logits[req] == 0).all(), f"Unused request slot {req} should be all zeros"
 
 
 def test_gumbel_sample_processed_logits_col():
@@ -482,7 +482,11 @@ def test_gumbel_sample_processed_logits_col():
     # Write to column (step) 1
     col_tensor = torch.tensor(1, dtype=torch.int32, device=DEVICE)
     gumbel_sample(
-        logits, expanded_idx_mapping, temperature, seed, pos,
+        logits,
+        expanded_idx_mapping,
+        temperature,
+        seed,
+        pos,
         apply_temperature=True,
         output_processed_logits=draft_logits,
         output_processed_logits_col=col_tensor,
@@ -496,8 +500,7 @@ def test_gumbel_sample_processed_logits_col():
         # Data should be at draft_logits[req, 1, :]  (column 1)
         actual = draft_logits[req, 1, :]
         assert torch.allclose(actual.float(), expected, atol=1e-4, rtol=1e-4), (
-            f"Token {tok} at col=1: mismatch, "
-            f"max_diff={(actual.float() - expected).abs().max().item():.6f}"
+            f"Token {tok} at col=1: mismatch, max_diff={(actual.float() - expected).abs().max().item():.6f}"
         )
         # Column 0 and 2 should be untouched (zeros)
         assert (draft_logits[req, 0, :] == 0).all(), f"Col 0 should be zeros for req {req}"
@@ -527,7 +530,11 @@ def test_gumbel_sample_processed_logits_mixed_temp():
 
     out_logits = torch.zeros(num_reqs, vocab_size, dtype=torch.float32, device=DEVICE)
     gumbel_sample(
-        logits, expanded_idx_mapping, temperature, seed, pos,
+        logits,
+        expanded_idx_mapping,
+        temperature,
+        seed,
+        pos,
         apply_temperature=True,
         output_processed_logits=out_logits,
     )
@@ -542,8 +549,7 @@ def test_gumbel_sample_processed_logits_mixed_temp():
             expected = logits[tok].float() / temp
         actual = out_logits[req]
         assert torch.allclose(actual.float(), expected, atol=1e-4, rtol=1e-4), (
-            f"Req {req} (tok={tok}, temp={temp:.3f}): "
-            f"max_diff={(actual.float() - expected).abs().max().item():.6f}"
+            f"Req {req} (tok={tok}, temp={temp:.3f}): max_diff={(actual.float() - expected).abs().max().item():.6f}"
         )
 
 
@@ -562,10 +568,8 @@ def test_gumbel_sample_use_fp64_param():
     pos = torch.arange(num_tokens, dtype=torch.int32, device=DEVICE)
 
     # Both should produce greedy results
-    s1 = gumbel_sample(logits, expanded_idx_mapping, temperature, seed, pos,
-                       apply_temperature=False, use_fp64=False)
-    s2 = gumbel_sample(logits, expanded_idx_mapping, temperature, seed, pos,
-                       apply_temperature=False, use_fp64=True)
+    s1 = gumbel_sample(logits, expanded_idx_mapping, temperature, seed, pos, apply_temperature=False, use_fp64=False)
+    s2 = gumbel_sample(logits, expanded_idx_mapping, temperature, seed, pos, apply_temperature=False, use_fp64=True)
     torch.npu.synchronize()
 
     expected = logits.argmax(dim=-1)
