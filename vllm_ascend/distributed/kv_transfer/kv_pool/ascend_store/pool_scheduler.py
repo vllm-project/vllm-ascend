@@ -139,6 +139,13 @@ class KVPoolScheduler:
         request_tracker: RequestTracker,
         block_hashes,
     ) -> None:
+        """Ensure layerwise KV pool GVA exists for all requested full blocks.
+
+        Layerwise transfer uses batch_copy with explicit GVA addresses instead
+        of the normal key-based put/get path. Existing block keys reuse their
+        stored GVA; missing keys are allocated here so later layer load/save
+        tasks can build complete transfer arrays.
+        """
         block_keys, _ = self.generate_keys(block_hashes)
         if not block_keys:
             request_tracker.block_keys = []
@@ -402,16 +409,17 @@ class KVPoolScheduler:
             num_blocks = num_tokens_to_compute // self._block_size
             has_last_block = num_tokens_to_compute % self._block_size != 0
 
-            self._ensure_tracker_gvas_cover_blocks(
-                request_tracker,
-                request_real.block_hashes[:num_blocks],
-            )
-            if has_last_block:
-                self._generate_keys_and_alloc(
-                    [],
-                    request_tracker=request_tracker,
-                    has_last_block=True,
+            if self.use_layerwise:
+                self._ensure_tracker_gvas_cover_blocks(
+                    request_tracker,
+                    request_real.block_hashes[:num_blocks],
                 )
+                if has_last_block:
+                    self._generate_keys_and_alloc(
+                        [],
+                        request_tracker=request_tracker,
+                        has_last_block=True,
+                    )
 
             req_meta = ReqMeta.from_request_tracker(
                 request_tracker,
@@ -472,16 +480,17 @@ class KVPoolScheduler:
 
                     num_blocks = len(new_block_ids)
                     has_last_block = num_tokens_to_compute % self._block_size != 0
-                    self._ensure_tracker_gvas_cover_blocks(
-                        request_tracker,
-                        request_real.block_hashes[:num_blocks],
-                    )
-                    if has_last_block:
-                        self._generate_keys_and_alloc(
-                            [],
-                            request_tracker=request_tracker,
-                            has_last_block=True,
+                    if self.use_layerwise:
+                        self._ensure_tracker_gvas_cover_blocks(
+                            request_tracker,
+                            request_real.block_hashes[:num_blocks],
                         )
+                        if has_last_block:
+                            self._generate_keys_and_alloc(
+                                [],
+                                request_tracker=request_tracker,
+                                has_last_block=True,
+                            )
 
                     last_chunk_tokens_num = (
                         (len(request_real.prompt_token_ids) // self._block_size * self._block_size)
@@ -530,7 +539,7 @@ class KVPoolScheduler:
                         request_tracker.token_len % self._block_size != 0
                         or current_hash_count > len(request.block_hashes)
                     )
-                    if new_hash_count > 0 or has_last_block:
+                    if self.use_layerwise and (new_hash_count > 0 or has_last_block):
                         self._ensure_tracker_gvas_cover_blocks(
                             request_tracker,
                             request.block_hashes[:current_hash_count],
@@ -593,16 +602,17 @@ class KVPoolScheduler:
 
                 num_blocks = num_tokens_to_compute // self._block_size
                 has_last_block = num_tokens_to_compute % self._block_size != 0
-                self._ensure_tracker_gvas_cover_blocks(
-                    request_tracker,
-                    request.block_hashes[:num_blocks],
-                )
-                if has_last_block:
-                    self._generate_keys_and_alloc(
-                        [],
-                        request_tracker=request_tracker,
-                        has_last_block=True,
+                if self.use_layerwise:
+                    self._ensure_tracker_gvas_cover_blocks(
+                        request_tracker,
+                        request.block_hashes[:num_blocks],
                     )
+                    if has_last_block:
+                        self._generate_keys_and_alloc(
+                            [],
+                            request_tracker=request_tracker,
+                            has_last_block=True,
+                        )
 
                 req_meta = ReqMeta.from_request_tracker(
                     request_tracker,
