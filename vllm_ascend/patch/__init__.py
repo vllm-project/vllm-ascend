@@ -67,18 +67,6 @@
 #    Future Plan:
 #       Remove this patch when vLLM fix the issue.
 #
-# ** 4. File: platform/patch_sched_yield.py**
-# ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
-#   1. `vllm.distributed.utils.USE_SCHED_YIELD`
-#    Why:
-#       os.sched_yield() doesn't work on Arm systems.
-#    How：
-#       avoid using os.sched_yield() on Arm systems.
-#    Related PR (if no, explain why):
-#       https://github.com/vllm-project/vllm/pull/30228
-#    Future Plan:
-#       Remove this patch when vLLM merge the PR.
-#
 # ** 5. File: platform/patch_balance_schedule.py**
 # ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 #   1. `vllm.v1.engine.core.EngineCoreProc.run_engine_core`
@@ -337,22 +325,6 @@
 #       1. make these functions as class func of RejectionSampler, create AscendRejectionSampler
 #           to override them, then delete the patch file `worker/patch_rejection_sampler.py`.
 #       2. make these functions as costom op, then remove AscendRejectionSampler
-#
-## ** 6. File: worker/patch_module.py**
-# ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
-#   1. `vllm.v1.attention.backends.gdn_attn.torch.argsort`
-#    Why:
-#       1. 'torch.argsort' func of npu does not support bool.
-#       2. Without `stable=True`, the output will have a lot of redundant tokens.
-#    How：
-#       Replace with a new torch.argsort that will cast the input to torch.int32
-#       and do stable sort.
-#    Related PR (if no, explain why):
-#       1. It depends on torch_npu.
-#       2. https://github.com/vllm-project/vllm/pull/30632
-#    Future Plan:
-#       Remove this patch when bool is supported in 'torch.argsort' func of npu.
-#       Make 'torch.argsort' in `vllm.v1.attention.backends.gdn_attn` be stable.
 #
 # ** 7. File: worker/patch_gdn_attn.py**
 # ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
