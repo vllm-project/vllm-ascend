@@ -53,7 +53,7 @@ FA3 requires the `flash_attn_npu` package, which provides the `flash_attn_npu_v3
 
 ### Installation
 
-Install the `flash_attn_npu` wheel package refer to: https://github.com/MinghuasLab/flash-attention-npu/blob/main/README.md#installation.
+Install the `flash_attn_npu` wheel package refer to: <https://github.com/MinghuasLab/flash-attention-npu/blob/main/README.md#installation>.
 
 ## Enabling Flash Attention 3
 
