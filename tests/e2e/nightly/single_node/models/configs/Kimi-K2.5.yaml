@@ -448,7 +448,7 @@ test_cases:
 #      - "--compilation-config"
 #      - '{"cudagraph_capture_sizes":[4,8,12,16,32], "cudagraph_mode":"FULL_DECODE_ONLY"}'
 #      - "--speculative-config"
-#      - '{"method":"eagle3", "model":"/mnt/share/weight/lightseekorg_kimi-k2.5-eagle3", "num_speculative_tokens":3}'
+#      - '{"method":"eagle3", "model":"lightseekorg/kimi-k2.5-eagle3", "num_speculative_tokens":3}'
 #      - "--additional-config"
 #      - '{"enable_shared_expert_dp":true}'
 #    benchmarks:
@@ -469,7 +469,7 @@ test_cases:
       - "--compilation-config"
       - '{"cudagraph_capture_sizes":[4,8,12,16,32], "cudagraph_mode":"FULL_DECODE_ONLY"}'
       - "--speculative-config"
-      - '{"method":"eagle3", "model":"/mnt/share/weight/lightseekorg_kimi-k2.5-eagle3", "num_speculative_tokens":3}'
+      - '{"method":"eagle3", "model":"lightseekorg/kimi-k2.5-eagle3", "num_speculative_tokens":3}'
       - "--additional-config"
       - '{"enable_shared_expert_dp":true}'
     benchmarks:
