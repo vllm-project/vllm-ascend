@@ -45,6 +45,7 @@ from vllm_ascend.device.mxfp_compat import (
     mxfp_k_scale_cache_shape,
     mxfp_k_scale_numel,
     mxfp_kv_block_scale_groups,
+    mxfp_kv_page_size_bytes,
     mxfp_v_scale_cache_shape,
     mxfp_v_scale_numel,
 )
@@ -285,10 +286,16 @@ def _allocate_kv_cache(
         k_dim, v_dim = _get_attention_kv_cache_dims(example_layer_name, example_kv_cache_spec)
         assert k_dim > 0 and v_dim > 0
         if _is_c8_mxfp_kv_cache(vllm_config, example_kv_cache_spec):
-            if k_dim % 32 != 0 or v_dim % 32 != 0:
-                raise ValueError(f"C8_MXFP KV cache requires K/V head dims divisible by 32, got {k_dim}/{v_dim}.")
-            assert kv_cache_tensor.size % example_kv_cache_spec.page_size_bytes == 0
-            num_blocks = kv_cache_tensor.size // example_kv_cache_spec.page_size_bytes
+            page_size_bytes = mxfp_kv_page_size_bytes(
+                example_kv_cache_spec.block_size,
+                example_kv_cache_spec.num_kv_heads,
+                k_dim,
+                v_dim,
+                example_kv_cache_spec.dtype.itemsize,
+            )
+            assert page_size_bytes == example_kv_cache_spec.page_size_bytes
+            assert kv_cache_tensor.size % page_size_bytes == 0
+            num_blocks = kv_cache_tensor.size // page_size_bytes
             num_heads = example_kv_cache_spec.num_kv_heads
             block_size = example_kv_cache_spec.block_size
             mxfp_kv_block_scale_groups(block_size)

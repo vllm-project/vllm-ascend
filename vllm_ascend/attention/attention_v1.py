@@ -61,7 +61,7 @@ from vllm_ascend.compilation.acl_graph import (
     update_graph_params_workspaces,
 )
 from vllm_ascend.device.device_op import DeviceOperator
-from vllm_ascend.device.mxfp_compat import FLOAT8_E8M0FNU_DTYPE
+from vllm_ascend.device.mxfp_compat import FLOAT8_E8M0FNU_DTYPE, MXFP_KV_SCALE_GROUP_SIZE
 from vllm_ascend.ops.flashcomm2_oshard_manager import flashcomm2_oshard_manager
 from vllm_ascend.utils import weak_ref_tensors
 from vllm_ascend.worker.kvcomp_utils import KVCompMetaData
@@ -1196,9 +1196,12 @@ class AscendC8MXFPAttentionBackendImpl(AscendAttentionBackendImpl):
     ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
         actual_key = key[:num_actual_tokens]
         actual_value = value[:num_actual_tokens]
-        if actual_key.shape[-1] % 32 != 0 or actual_value.shape[-1] % 32 != 0:
+        if (
+            actual_key.shape[-1] % MXFP_KV_SCALE_GROUP_SIZE != 0
+            or actual_value.shape[-1] % MXFP_KV_SCALE_GROUP_SIZE != 0
+        ):
             raise ValueError(
-                "C8_MXFP KV cache requires K/V head dims divisible by 32, "
+                f"C8_MXFP KV cache requires K/V head dims divisible by {MXFP_KV_SCALE_GROUP_SIZE}, "
                 f"got {actual_key.shape[-1]}/{actual_value.shape[-1]}."
             )
 

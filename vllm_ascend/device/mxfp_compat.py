@@ -70,6 +70,8 @@ def ensure_mxfp4_moe_available(feature: str) -> None:
 # V cache:  [num_blocks, num_kv_heads, block_size // 64, head_dim, 2]
 MXFP_KV_SCALE_GROUP_SIZE = 64
 MXFP_KV_SCALE_VALUES_PER_GROUP = 2
+# E8M0 scale elements are always 1 byte in KV cache budgeting.
+MXFP_SCALE_DTYPE_SIZE = 1
 
 
 def mxfp_kv_scale_groups(head_dim: int) -> int:
@@ -137,6 +139,27 @@ def mxfp_v_scale_numel(num_blocks: int, block_size: int, num_kv_heads: int, head
         * MXFP_KV_SCALE_VALUES_PER_GROUP
     )
 
+
+def mxfp_kv_page_size_bytes(
+    block_size: int,
+    num_kv_heads: int,
+    k_dim: int,
+    v_dim: int,
+    kv_dtype_size: int,
+) -> int:
+    """Bytes per KV cache page for C8_MXFP (FP8 K/V tensors + E8M0 scale caches)."""
+    if k_dim % MXFP_KV_SCALE_GROUP_SIZE != 0 or v_dim % MXFP_KV_SCALE_GROUP_SIZE != 0:
+        raise ValueError(
+            f"C8_MXFP KV cache requires K/V head dims divisible by {MXFP_KV_SCALE_GROUP_SIZE}, "
+            f"got {k_dim}/{v_dim}."
+        )
+    mxfp_kv_block_scale_groups(block_size)
+    kv_bytes = block_size * num_kv_heads * (k_dim + v_dim) * kv_dtype_size
+    scale_bytes = (
+        mxfp_k_scale_numel(1, block_size, num_kv_heads, k_dim)
+        + mxfp_v_scale_numel(1, block_size, num_kv_heads, v_dim)
+    ) * MXFP_SCALE_DTYPE_SIZE
+    return kv_bytes + scale_bytes
 
 
 # Backward-compatible aliases.
