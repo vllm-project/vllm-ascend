@@ -109,7 +109,7 @@ export OMP_PROC_BIND=false
 export VLLM_USE_V1=1
 export TASK_QUEUE_ENABLE=1
 export OMP_NUM_THREADS=1
-export TIKTOKEN_ENCODINGS_BASE=/{PWD}/tiktoken_encodings
+export TIKTOKEN_ENCODINGS_BASE=/${PWD}/tiktoken_encodings
 
 vllm serve unsloth/gpt-oss-120b-BF16 \
 --served-model-name gpt-oss-120b-bf16 \
@@ -127,7 +127,7 @@ vllm serve unsloth/gpt-oss-120b-BF16 \
 
 The parameters are explained as follows:
 
-- `--tensor-parallel-size` are common settings ford tensor parallelism (TP) sizes.
+- `--tensor-parallel-size` are common settings for tensor parallelism (TP) sizes.
 - `--max-model-len` represents the context length, which is the maximum value of the input plus output for a single request.
 - `--max-num-seqs` indicates the maximum number of requests that each DP group is allowed to process. If the number of requests sent to the service exceeds this limit, the excess requests will remain in a waiting state and will not be scheduled. Note that the time spent in the waiting state is also counted in metrics such as TTFT and TPOT. Therefore, when testing performance, it is generally recommended that `--max-num-seqs` * `--data-parallel-size` >= the actual total concurrency.
 - `--max-num-batched-tokens` represents the maximum number of tokens that the model can process in a single step. Currently, vLLM v1 scheduling enables ChunkPrefill/SplitFuse by default, which means:
