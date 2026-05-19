@@ -24,40 +24,6 @@ It is recommended to use `hf-transfer` to speed up the download process and down
 
 You can use the official docker image to run `GLM-4.1V-9B-Thinking` directly.
 
-:::::{tab-set}
-:sync-group: install
-
-::::{tab-item} A3 series
-:sync: A3
-
-Start the docker image on your node.
-
-```{code-block} bash
-   :substitutions:
-
-export IMAGE=quay.io/ascend/vllm-ascend:|vllm_ascend_version|-a3
-docker run --rm \
-    --name vllm-ascend \
-    --shm-size=1g \
-    --net=host \
-    --device /dev/davinci0 \
-    --device /dev/davinci_manager \
-    --device /dev/devmm_svm \
-    --device /dev/hisi_hdc \
-    -v /usr/local/dcmi:/usr/local/dcmi \
-    -v /usr/local/Ascend/driver/tools/hccn_tool:/usr/local/Ascend/driver/tools/hccn_tool \
-    -v /usr/local/bin/npu-smi:/usr/local/bin/npu-smi \
-    -v /usr/local/Ascend/driver/lib64/:/usr/local/Ascend/driver/lib64/ \
-    -v /usr/local/Ascend/driver/version.info:/usr/local/Ascend/driver/version.info \
-    -v /etc/ascend_install.info:/etc/ascend_install.info \
-    -v /root/.cache:/root/.cache \
-    -it $IMAGE bash
-```
-
-::::
-::::{tab-item} A2 series
-:sync: A2
-
 Start the docker image on your node.
 
 ```{code-block} bash
@@ -81,9 +47,6 @@ docker run --rm \
     -v /root/.cache:/root/.cache \
     -it $IMAGE bash
 ```
-
-::::
-:::::
 
 In addition, if you don't want to use the docker image as above, you can also build all from source:
 
