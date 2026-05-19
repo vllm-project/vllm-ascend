@@ -197,7 +197,7 @@ class AscendFusedMoE310(FusedMoE):
         if match:
             from vllm_ascend.eplb.adaptor.vllm_adaptor import VllmEplbAdaptor
 
-            VllmEplbAdaptor.register_layer(int(match.group(1)), self)
+            VllmEplbAdaptor.register_layer(self)
 
     @property
     def is_internal_router(self) -> bool:
