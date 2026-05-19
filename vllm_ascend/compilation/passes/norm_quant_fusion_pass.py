@@ -24,7 +24,7 @@ from vllm.config.compilation import Range
 from vllm.logger import logger
 
 from vllm_ascend.compilation.passes.base_pattern import BasePattern
-from vllm_ascend.quantization.methods.base import QuantType
+from vllm_ascend.quantization.quant_type import QuantType
 from vllm_ascend.utils import enable_custom_op
 
 
@@ -549,7 +549,7 @@ class AddRMSNormQuantFusionPass(VllmInductorPass):
     A pass for fusing AddRMSNorm and W8A8 quantization operations on Ascend.
     """
 
-    def __init__(self, vllm_config: VllmConfig):
+    def __init__(self, vllm_config: VllmConfig, quant_type: QuantType,):
         super().__init__(vllm_config)
         self.pattern_match_passes: PatternMatcherPass = PatternMatcherPass(pass_name="rmsnorm_quant_fusion_pass")
 
@@ -557,10 +557,7 @@ class AddRMSNormQuantFusionPass(VllmInductorPass):
         if dtype not in (torch.bfloat16, torch.float16):
             logger.debug("Quant fusion not enabled: unsupported dtype %s", dtype)
             return
-        if self.model.quant_config is not None:
-            quant_type = self.model.model.layers[self.num_dense_layers].mlp.experts.quant_type
-        else:
-            quant_type = None
+            
         common_epsilons = [1e-5, 1e-6]
         for eps in common_epsilons:
             AddRMSNormDynamicQuantPattern(vllm_config, eps=eps).register(self.pattern_match_passes)
