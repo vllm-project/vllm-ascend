@@ -1,6 +1,6 @@
 model_name: "CohereLabs/c4ai-command-r-v01"
+model_type: "vllm"
 hardware: "Atlas A2 Series"
-trust_remote_code: true
 
 test_cases:
   - model: "CohereLabs/c4ai-command-r-v01"
@@ -17,6 +17,14 @@ test_cases:
       - --port
       - "8000"
 
+serve:
+  tensor_parallel_size: 4
+  dtype: auto
+  max_model_len: 8192
+  gpu_memory_utilization: 0.90
+  enforce_eager: true
+  trust_remote_code: true
+
 tasks:
   - name: "gsm8k"
     metrics:
@@ -25,11 +33,8 @@ tasks:
       - name: "exact_match,flexible-extract"
         value: 0.15
 
-tensor_parallel_size: 4
 num_fewshot: 5
-num_samples: 1000
-max_model_len: 8192
-max_num_batched_tokens: 8192
+limit: 1000
 apply_chat_template: true
 fewshot_as_multiturn: false
-gpu_memory_utilization: 0.90
+batch_size: "auto"
