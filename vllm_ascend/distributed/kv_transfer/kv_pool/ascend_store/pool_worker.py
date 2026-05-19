@@ -14,7 +14,6 @@ from vllm.distributed import (
 )
 from vllm.distributed.kv_events import BlockStored
 from vllm.logger import logger
-from vllm.v1.core.kv_cache_utils import BlockHash
 
 from vllm_ascend.ascend_config import get_ascend_config
 from vllm_ascend.cpu_binding import (
@@ -634,119 +633,6 @@ class KVPoolWorker:
             self.tp_rank,
         )
         return done_sending, done_recving
-
-    def lookup(
-        self,
-        token_len: int,
-        block_hashes: list[BlockHash],
-        use_layerwise: bool,
-    ) -> int:
-        """
-        Checks the existence of KV cache of the tokens from the cache engine.
-        :param tokens: the input tokens, with shape [seq_len]
-        :return: An int indicating how many prefix tokens are cached.
-        """
-        end = 0
-        keys = []
-        try:
-            starts = []
-            for start, end, key in self.token_database.process_tokens(token_len, block_hashes):
-                if use_layerwise:
-                    keys_multi_layer = key.split_layers(self.num_layers)
-                    for item in keys_multi_layer:
-                        keys.append(item.to_string())
-                else:
-                    keys.append(key.to_string())
-                starts.append(start)
-
-            res = self.m_store.exists(keys)  # type: ignore[assignment]
-
-            if use_layerwise:
-                res = self.check_all_layers_exists(res, self.num_layers)
-            for index, value in enumerate(res):  # type: ignore[arg-type]
-                if value != 1:
-                    return starts[index]
-            # all tokens where found, return the maximal end
-        except Exception as e:
-            logger.error(f"Remote connection failed in contains: {e}")
-            return start
-        return end
-
-    def lookup_scheduler(
-        self,
-        token_len: int,
-        block_hashes: list[BlockHash],
-        use_layerwise: bool,
-    ) -> int:
-        """
-        Checks the existence of KV cache of the tokens from the cache engine.
-        :param tokens: the input tokens, with shape [seq_len]
-        :return: An int indicating how many prefix tokens are cached.
-        """
-        end = 0
-        keys = []
-        try:
-            starts = []
-            for start, end, key in self.token_database.process_tokens(token_len, block_hashes):
-                if use_layerwise:
-                    keys_multi_layer = key.split_layers(self.num_layers)
-                    for item in keys_multi_layer:
-                        keys.append(item.to_string())
-                else:
-                    keys.append(key.to_string())
-                starts.append(start)
-
-            multi_tp_keys = keys[:]
-            for i in range(1, min(self.tp_size, self.num_kv_head)):
-                for item in keys:
-                    new_str = item.replace(  # type: ignore[attr-defined]
-                        "@head_or_tp_rank:0", f"@head_or_tp_rank:{i}", 1
-                    )
-                    multi_tp_keys.append(new_str)
-
-            pp_base_keys = multi_tp_keys.copy()
-            for i in range(1, self.pp_size):
-                for item in pp_base_keys:
-                    new_str = item.replace(  # type: ignore[attr-defined]
-                        "@pp_rank:0", f"@pp_rank:{i}", 1
-                    )
-                    multi_tp_keys.append(new_str)
-
-            res = self.m_store.exists(multi_tp_keys)  # type: ignore[assignment]
-            num_block = len(keys)
-            if use_layerwise:
-                res = self.check_all_layers_exists(res, self.num_layers)
-                num_block = len(keys) // self.num_layers
-            multi_tp_values = [
-                res[i * num_block : (i + 1) * num_block]  # type: ignore[index]
-                for i in range(min(self.tp_size, self.num_kv_head) * self.pp_size)
-            ]
-            index = self.find_min_first_non_one_index(multi_tp_values)
-            if index != -1:
-                return starts[index]
-        # all tokens where found, return the maximal end
-        except Exception as e:
-            logger.error(f"Remote connection failed in contains: {e}")
-            return start
-        return end
-
-    def check_all_layers_exists(self, res: list[int], num_layers: int) -> list[int]:
-        total_chunks = len(res) // num_layers
-        result = []
-
-        for chunk_idx in range(total_chunks):
-            start = chunk_idx * num_layers
-            end = start + num_layers
-            chunk = res[start:end]
-            result.append(1 if all(x == 1 for x in chunk) else 0)
-
-        return result
-
-    def find_min_first_non_one_index(self, arr):
-        try:
-            return min(idx for row in arr for idx, val in enumerate(row) if val != 1)
-        except ValueError:
-            return -1
 
     def get_kv_events(self) -> list[BlockStored]:
         if self.enable_kv_events and self.kv_send_thread is not None:

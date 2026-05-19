@@ -1,6 +1,4 @@
 from typing import Any
-
-import vllm.envs as envs
 from memcache_hybrid import DistributedObjectStore  # type: ignore
 from vllm.config import VllmConfig
 from vllm.distributed.kv_transfer.kv_connector.v1.base import KVConnectorMetadata
@@ -652,21 +650,3 @@ class KVPoolScheduler:
     def update_finished_recving(self, finished_recving: set[str] | None) -> None:
         if finished_recving:
             self._loading_req_ids.difference_update(finished_recving)
-
-
-def get_zmq_rpc_path_lookup(vllm_config: "VllmConfig") -> str:
-    dp_rank = vllm_config.parallel_config.data_parallel_rank
-    base_url = envs.VLLM_RPC_BASE_PATH
-    # Default to 0 if not configured
-    rpc_port = 0
-    if vllm_config is not None:
-        extra_config = vllm_config.kv_transfer_config.kv_connector_extra_config
-        if "lookup_rpc_port" in extra_config:
-            rpc_port = extra_config["lookup_rpc_port"]
-        elif "mooncake_rpc_port" in extra_config:
-            rpc_port = extra_config["mooncake_rpc_port"]
-            logger.warning(
-                "It is recommended to use the lookup_rpc_port, as the mooncake_rpc_port will be removed in the future."
-            )
-    logger.debug("Base URL: %s, RPC Port: %s", base_url, rpc_port)
-    return f"ipc://{base_url}/lookup_rpc_port_{rpc_port}_dp_rank{dp_rank}"
