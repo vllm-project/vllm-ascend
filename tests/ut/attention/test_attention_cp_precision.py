@@ -315,15 +315,6 @@ def build_cp_attn_metadata(
     kv_cache_prepopulated: bool = False,
     decode_threshold: int = 1,
 ) -> AscendMetadata:
-    """Build AscendMetadata for CP attention testing.
-
-    Args:
-        kv_cache_prepopulated: If True, decode tokens have been written to
-            KV cache. num_computed_tokens_of_pcp_dcp should equal seq_lens
-            (total tokens in cache) instead of context_lens.
-        decode_threshold: Requests with query_lens <= decode_threshold are
-            classified as decode. MTP needs decode_threshold >= 1 + num_spec_tokens.
-    """
     common_attn_metadata = create_common_attn_metadata(batch_spec, vllm_config.cache_config.block_size, device)
 
     num_reqs = common_attn_metadata.num_reqs
