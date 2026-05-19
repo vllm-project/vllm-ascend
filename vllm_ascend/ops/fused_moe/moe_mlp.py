@@ -181,7 +181,7 @@ def quant_apply_mlp(
             if quantized_hidden_states is not None:
                 dispose_tensor(quantized_hidden_states)
             # act_fn: swiglu
-            hidden_states, swiglu_out_scale = torch_npu.npu_dequant_swiglu_quant(
+            hidden_states, swiglu_out_scale = torch.ops._C_ascend.npu_dequant_swiglu_quant(
                 x=hidden_states,
                 weight_scale=w1_scale[0],
                 activation_scale=pertoken_scale,
@@ -243,8 +243,8 @@ def quant_apply_mlp(
             if group_list_type == 0:
                 group_list = torch.cat([group_list[:1], torch.diff(group_list, dim=0)])
                 group_list_type = 1
-            bias1 = [w1_scale_bias] if not fusion else w1_scale_bias
-            bias2 = [w2_scale_bias]
+            bias1 = w1_scale_bias
+            bias2 = w2_scale_bias
             # TODO w4a8 scene: dynamic acquisition of dtype in the future
             _output_dtype = torch.bfloat16
 
