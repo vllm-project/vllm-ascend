@@ -1,6 +1,7 @@
 from unittest.mock import MagicMock, patch
 
 import torch
+from vllm.v1.attention.backend import AttentionCGSupport
 
 from tests.ut.base import TestBase
 from vllm_ascend.attention.attention_v1 import (
@@ -81,6 +82,22 @@ class TestAscendAttentionMetadataBuilder(TestBase):
         result = self.builder.reorder_batch(mock_input_batch, mock_scheduler_output)
 
         self.assertFalse(result)
+
+    def test_get_cudagraph_support_for_supported_head_size(self):
+        mock_kv_cache_spec = MagicMock()
+        mock_kv_cache_spec.head_size = 128
+
+        result = AscendAttentionMetadataBuilder.get_cudagraph_support(self.mock_vllm_config, mock_kv_cache_spec)
+
+        self.assertEqual(result, AttentionCGSupport.ALWAYS)
+
+    def test_get_cudagraph_support_for_large_head_size(self):
+        mock_kv_cache_spec = MagicMock()
+        mock_kv_cache_spec.head_size = 512
+
+        result = AscendAttentionMetadataBuilder.get_cudagraph_support(self.mock_vllm_config, mock_kv_cache_spec)
+
+        self.assertEqual(result, AttentionCGSupport.ALWAYS)
 
     @patch("vllm_ascend.attention.attention_v1.AscendMetadata")
     def test_build(self, mock_ascend_metadata):
@@ -203,6 +220,33 @@ class TestAscendAttentionBackendImpl(TestBase):
             kv_sharing_target_layer_name=None,
             sinks=torch.tensor([-3.4062], dtype=torch.bfloat16),
         )
+
+    def test_gather_paged_kv_to_dense(self):
+        block_size = 2
+        key_cache = torch.arange(4 * block_size * 8 * 64).reshape(4, block_size, 8, 64)
+        value_cache = key_cache + 10000
+        block_table = torch.tensor([[1, 3], [0, 2]])
+        seq_lens = [3, 4]
+
+        dense_key, dense_value = self.impl._gather_paged_kv_to_dense(
+            key_cache,
+            value_cache,
+            block_table,
+            seq_lens,
+        )
+
+        expected_key = torch.cat(
+            (
+                key_cache[1],
+                key_cache[3, :1],
+                key_cache[0],
+                key_cache[2],
+            ),
+            dim=0,
+        )
+        expected_value = expected_key + 10000
+        torch.testing.assert_close(dense_key, expected_key)
+        torch.testing.assert_close(dense_value, expected_value)
 
     def test_forward_no_attn_metadata(self):
         """Test forward pass when attn_metadata is None"""
