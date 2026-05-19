@@ -366,7 +366,6 @@ def test_determine_batch_execution_and_padding(
                 )
                 # Padding can only increase, never shrink
                 assert batch_desc.num_tokens >= num_tokens
-
         # dp_size=1: no micro-batching, no cross-dp coordination
         assert should_ubatch is False
         assert num_tokens_across_dp is None
