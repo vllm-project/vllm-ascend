@@ -280,9 +280,11 @@ class AscendConfig:
             value = additional_config[config_key]
             logger.info_once(f"AscendConfig.{config_key} is set from additional_config with value {value}.")
             return value
-        logger.info_once(
-            f"AscendConfig.{config_key} falls back to environment variable {env_key} with value {env_value}."
-        )
+        if env_key in os.environ:
+            logger.info_once(
+                f"AscendConfig.{config_key} falls back to environment variable {env_key} with value {env_value}. "
+                f"Please use additional_config.{config_key} instead, because {env_key} will be removed in the next release."
+            )
         return env_value
 
     def _check_mix_placement(self):

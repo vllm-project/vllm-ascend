@@ -122,11 +122,28 @@ class TestAscendConfig(TestBase):
         self.assertFalse(ascend_config.enable_transpose_kv_cache_by_block)
         self.assertEqual(ascend_config.weight_nz_mode, 2)
         mock_info_once.assert_any_call(
-            "AscendConfig.enable_mlapo falls back to environment variable VLLM_ASCEND_ENABLE_MLAPO with value False."
+            "AscendConfig.enable_mlapo falls back to environment variable VLLM_ASCEND_ENABLE_MLAPO with value False. "
+            "Please use additional_config.enable_mlapo instead, because VLLM_ASCEND_ENABLE_MLAPO will be removed in the next release."
         )
         mock_info_once.assert_any_call(
-            "AscendConfig.weight_nz_mode falls back to environment variable VLLM_ASCEND_ENABLE_NZ with value 2."
+            "AscendConfig.weight_nz_mode falls back to environment variable VLLM_ASCEND_ENABLE_NZ with value 2. "
+            "Please use additional_config.weight_nz_mode instead, because VLLM_ASCEND_ENABLE_NZ will be removed in the next release."
         )
+
+    @_clean_up_ascend_config
+    @patch("vllm_ascend.ascend_config.logger.info_once")
+    @patch("vllm_ascend.platform.NPUPlatform._fix_incompatible_config")
+    def test_migrated_config_skips_default_env_fallback_logs(self, mock_fix_incompatible_config, mock_info_once):
+        test_vllm_config = VllmConfig()
+        with patch.dict(os.environ, {}, clear=True):
+            init_ascend_config(test_vllm_config)
+
+        fallback_logs = [
+            call.args[0]
+            for call in mock_info_once.call_args_list
+            if "falls back to environment variable" in call.args[0]
+        ]
+        self.assertEqual(fallback_logs, [])
 
     @_clean_up_ascend_config
     @patch("vllm_ascend.ascend_config.logger.info_once")
