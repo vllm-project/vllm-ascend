@@ -66,10 +66,16 @@ class RunnerDeviceType(str, Enum):
     CPU = "cpu"
 
 
+_NPU_TEST_REQUIREMENTS_ATTR = "_npu_test_requirements"
+_NPU_TEST_WRAPPER_ATTR = "_npu_test_wrapper"
+
+
 def npu_test(num_npus: int = 1, npu_type: str | RunnerDeviceType = RunnerDeviceType.A2):
     """Decorator that marks a test with NPU resource requirements.
 
     Can be applied to either a single test function/method or a test class.
+    Function/method decorators can be stacked to mark a test as runnable on
+    multiple NPU runner types.
 
     Serves two purposes, depending on the target:
 
@@ -93,30 +99,49 @@ def npu_test(num_npus: int = 1, npu_type: str | RunnerDeviceType = RunnerDeviceT
     """
     if not isinstance(npu_type, RunnerDeviceType):
         npu_type = RunnerDeviceType(npu_type)
+    requirement = (num_npus, npu_type)
+
+    def _format_requirements(requirements):
+        return ", ".join(f"{req_type.value} x{req_num_npus}" for req_num_npus, req_type in requirements)
 
     def _wrap_callable(func):
+        requirements = list(getattr(func, _NPU_TEST_REQUIREMENTS_ATTR, ()))
+        if requirement not in requirements:
+            requirements.append(requirement)
+        setattr(func, _NPU_TEST_REQUIREMENTS_ATTR, tuple(requirements))
+
+        if getattr(func, _NPU_TEST_WRAPPER_ATTR, False):
+            return func
+
         @functools.wraps(func)
         def wrapper(*args, **kwargs):
-            if npu_type == RunnerDeviceType.CPU:
+            requirements = getattr(wrapper, _NPU_TEST_REQUIREMENTS_ATTR, (requirement,))
+            npu_requirements = [req for req in requirements if req[1] != RunnerDeviceType.CPU]
+            if not npu_requirements:
                 return func(*args, **kwargs)
-            # CI routes this test to a runner matching (npu_type, num_npus).
+            # CI routes this test to a runner matching one of the declared
+            # (npu_type, num_npus) requirements.
             # If the requirements are not met at runtime, the routing or the
             # runner environment is broken — fail loudly instead of skipping.
             if not _npu_available:
                 raise RuntimeError(
                     f"NPU required but not available on this runner "
-                    f"(test needs {npu_type.value} x{num_npus}). "
+                    f"(test needs {_format_requirements(npu_requirements)}). "
                     "Check runner_label.json and the runner's NPU setup."
                 )
             import torch  # noqa
 
             device_count = torch.npu.device_count()
-            if device_count < num_npus:
+            if not any(device_count >= req_num_npus for req_num_npus, _ in npu_requirements):
                 raise RuntimeError(
-                    f"Insufficient NPUs on this runner: need {num_npus}, have {device_count}. Check runner_label.json."
+                    "Insufficient NPUs on this runner: "
+                    f"need {_format_requirements(npu_requirements)}, "
+                    f"have {device_count}. Check runner_label.json."
                 )
             return func(*args, **kwargs)
 
+        setattr(wrapper, _NPU_TEST_REQUIREMENTS_ATTR, tuple(requirements))
+        setattr(wrapper, _NPU_TEST_WRAPPER_ATTR, True)
         return wrapper
 
     def decorator(obj):

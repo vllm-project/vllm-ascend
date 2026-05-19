@@ -102,6 +102,22 @@ class TestMoERouting:
         ...
 ```
 
+### Multiple NPU runners
+
+Stack multiple `@npu_test` decorators when the same test can run on more than
+one NPU runner. The test is routed to every declared runner group.
+
+**note**: `@npu_test` should be used consecutively, with no other decorators inserted in between; otherwise, parsing errors may occur.
+
+```python
+from tests.ut.conftest import npu_test
+
+@npu_test(num_npus=1, npu_type="a2")
+@npu_test(num_npus=2, npu_type="a3")
+def test_rms_norm_multi_runner():
+    ...
+```
+
 ### No decorator (CPU)
 
 Tests without `@npu_test` are routed to the CPU runner.
