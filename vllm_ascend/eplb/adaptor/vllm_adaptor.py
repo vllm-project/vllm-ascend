@@ -90,8 +90,8 @@ class VllmEplbAdaptor:
                     "w13_scale_bias_list",
                     "w2_scale_bias_list",
                 ]
-                
-            elif quant_type == QuantType.MXFP4 or QuantType.MXFP8:
+
+            elif quant_type in (QuantType.MXFP4, QuantType.MXFP8):
                 self.expert_weight_names = [
                     "w13_weight",
                     "w2_weight",
