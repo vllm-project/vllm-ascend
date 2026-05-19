@@ -17,6 +17,7 @@
 
 from typing import Any
 
+import torch
 import torch_npu
 from vllm.v1.attention.backends.registry import (  # type: ignore
     AttentionBackendEnum,
@@ -31,6 +32,7 @@ from vllm_ascend.attention.attention_v1 import (
     AscendAttentionMetadataBuilder,
     AscendAttentionState,
     AscendMetadata,
+    AttentionLayer,
 )
 
 
@@ -221,7 +223,16 @@ class AscendAttentionBackendImpl310(AscendAttentionBackendImpl):
 
         return output
 
-    def forward_impl(self, query, key, value, kv_cache, attn_metadata, output):
+    def forward_impl(
+        self,
+        query: torch.Tensor,
+        key: torch.Tensor,
+        value: torch.Tensor,
+        kv_cache: tuple[torch.Tensor],
+        attn_metadata: AscendMetadata,
+        output: torch.Tensor,
+        layer: AttentionLayer | None = None,
+    ):
         """
         Main dispatch method for attention operations.
 

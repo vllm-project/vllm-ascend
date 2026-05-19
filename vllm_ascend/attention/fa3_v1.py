@@ -1,11 +1,12 @@
 import torch
 import vllm.envs as envs_vllm
 from flash_attn_v3 import flash_attn_with_kvcache as _fa3_fn  # type: ignore[import-not-found]
-from vllm.v1.attention.backend import AttentionBackend  # type: ignore
+from vllm.v1.attention.backend import AttentionBackend, AttentionLayer  # type: ignore
 
 from vllm_ascend.attention.attention_v1 import (
     AscendAttentionBackendImpl,
     AscendAttentionMetadataBuilder,
+    AscendMetadata,
 )
 
 
@@ -102,8 +103,9 @@ class AscendFAImpl(AscendAttentionBackendImpl):
         key: torch.Tensor,
         value: torch.Tensor,
         kv_cache: tuple[torch.Tensor],
-        attn_metadata,
+        attn_metadata: AscendMetadata,
         output: torch.Tensor,
+        layer: AttentionLayer | None = None,
     ):
         num_tokens = attn_metadata.actual_seq_lengths_q[-1]
         query = query[:num_tokens]

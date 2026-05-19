@@ -253,7 +253,7 @@ class GraphParams:
     attn_params: dict[int, list[tuple]]
     # New: key -> (params, handle, event) mapping for reliable lookup
     # Structure: {num_tokens: {layer_key: (params_tuple, handle, event)}}
-    attn_params_by_key: dict[int, dict[str, tuple]] = None
+    attn_params_by_key: dict[int, dict[str, tuple]] | None = None
 
     def __post_init__(self):
         if self.attn_params_by_key is None:

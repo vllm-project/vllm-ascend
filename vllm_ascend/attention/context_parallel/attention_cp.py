@@ -35,6 +35,7 @@ from vllm_ascend.attention.attention_v1 import (
     AscendAttentionBackendImpl,
     AscendAttentionMetadataBuilder,
     AscendMetadata,
+    AttentionLayer,
 )
 from vllm_ascend.attention.context_parallel.common_cp import (
     AscendMetadataForDecode,
@@ -915,6 +916,7 @@ class AscendAttentionCPImpl(AscendAttentionBackendImpl):
         kv_cache: tuple[torch.Tensor],
         attn_metadata: AscendMetadata,
         output: torch.Tensor,
+        layer: AttentionLayer | None = None,
     ) -> torch.Tensor:
         assert attn_metadata is not None
         has_decode = attn_metadata.num_decodes > 0
