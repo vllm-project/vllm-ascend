@@ -1,12 +1,15 @@
-# Qwen3.5-27B
+# Qwen3.5-27B/Qwen3.6-27B
 
 ## Introduction
 
-Qwen3.5 represents a significant leap forward, integrating breakthroughs in multimodal learning, architectural efficiency, reinforcement learning scale, and global accessibility to empower developers and enterprises with unprecedented capability and efficiency.
+Qwen3.5 and Qwen3.6-27B are dense models (not MoE) that share the same hybrid attention design (GDN + full attention). Deployment on vLLM Ascend follows the same pattern for both; only model weights, context length defaults, and first-supported versions differ.
 
-This document will show the main verification steps of the model, including supported features, feature configuration, environment preparation, single-node and multi-node deployment, accuracy and performance evaluation.
+Qwen3.5 represents a significant leap forward in multimodal learning, architectural efficiency, and global accessibility. Qwen3.6-27B builds on that architecture with stronger agentic coding, native multimodal support, and up to 262144 context length.
 
-The `Qwen3.5-27B` model is first supported in `vllm-ascend:v0.17.0rc1`.
+This document covers supported features, environment setup, single-node deployment, and accuracy/performance evaluation.
+
+- `Qwen3.5-27B` is first supported in `vllm-ascend:v0.17.0rc1`.
+- `Qwen3.6-27B` is first supported in `vllm-ascend:v0.18.0rc1`.
 
 ## Supported Features
 
@@ -18,8 +21,15 @@ Refer to [feature guide](../../user_guide/feature_guide/index.md) to get the fea
 
 ### Model Weight
 
+**Qwen3.5-27B**
+
 - `Qwen3.5-27B`(BF16 version): requires 1 Atlas 800 A3 (64G × 16) node or 1 Atlas 800 A2 (64G × 8) node. [Download model weight](https://modelscope.cn/models/Qwen/Qwen3.5-27B)
 - `Qwen3.5-27B-w8a8`(Quantized version): requires 1 Atlas 800 A3 (64G × 16) node or 1 Atlas 800 A2 (64G × 8) node. [Download model weight](https://www.modelscope.cn/models/Eco-Tech/Qwen3.5-27B-w8a8-mtp)
+
+**Qwen3.6-27B**
+
+- `Qwen3.6-27B`(BF16 version): requires 1 Atlas 800 A3 (64G × 16) node or 1 Atlas 800 A2 (64G × 8) node. [Download model weight](https://modelscope.cn/models/Qwen/Qwen3.6-27B)
+- `Qwen3.6-27B-w8a8`(Quantized version): requires 1 Atlas 800 A3 (64G × 16) node or 1 Atlas 800 A2 (64G × 8) node. [Download model weight](https://www.modelscope.cn/models/Eco-Tech/Qwen3.6-27B-w8a8)
 
 It is recommended to download the model weight to the shared directory of multiple nodes, such as `/root/.cache/`.
 
@@ -32,9 +42,9 @@ If you want to deploy multi-node environment, you need to verify multi-node comm
 :::::{tab-set}
 ::::{tab-item} Use docker image
 
-For example, using images `quay.io/ascend/vllm-ascend:v0.17.0rc1`(for Atlas 800 A2) and `quay.io/ascend/vllm-ascend:v0.17.0rc1-a3`(for Atlas 800 A3).
+For example, using images `quay.io/ascend/vllm-ascend:v0.17.0rc1` / `v0.18.0rc1` (for Atlas 800 A2) and `quay.io/ascend/vllm-ascend:v0.17.0rc1-a3` / `v0.18.0rc1-a3` (for Atlas 800 A3).
 
-Select an image based on your machine type and start the docker image on your node, refer to [using docker](../../installation.md#set-up-using-docker).
+Select an image based on your machine type and model version, then start the docker image on your node. Refer to [using docker](../../installation.md#set-up-using-docker).
 
 ```{code-block} bash
   :substitutions:
@@ -87,7 +97,9 @@ If you want to deploy multi-node environment, you need to set up environment on 
 
 ### Single-node Deployment
 
-`Qwen3.5-27B` and `Qwen3.5-27B-w8a8` can both be deployed on 1 Atlas 800 A3(64G × 16), 1 Atlas 800 A2(64G × 8). Quantized version needs to start with parameter --quantization ascend.
+`Qwen3.5-27B`, `Qwen3.5-27B-w8a8`, `Qwen3.6-27B`, and `Qwen3.6-27B-w8a8` can all be deployed on 1 Atlas 800 A3 (64G × 16) or 1 Atlas 800 A2 (64G × 8). Quantized versions need `--quantization ascend`.
+
+#### Qwen3.5-27B-w8a8
 
 Run the following script to execute online 128k inference.
 
@@ -122,6 +134,41 @@ vllm serve Eco-Tech/Qwen3.5-27B-w8a8-mtp \
 --async-scheduling
 ```
 
+#### Qwen3.6-27B-w8a8
+
+Run the following script to execute online inference with up to 262144 context length.
+
+```shell
+#!/bin/sh
+# Load model from ModelScope to speed up download
+export VLLM_USE_MODELSCOPE=True
+# To reduce memory fragmentation and avoid out of memory
+export PYTORCH_NPU_ALLOC_CONF=expandable_segments:True
+export HCCL_BUFFSIZE=512
+export OMP_PROC_BIND=false
+export OMP_NUM_THREADS=1
+export TASK_QUEUE_ENABLE=1
+
+vllm serve Eco-Tech/Qwen3.6-27B-w8a8 \
+--host 0.0.0.0 \
+--port 8000 \
+--data-parallel-size 1 \
+--tensor-parallel-size 2 \
+--seed 1024 \
+--quantization ascend \
+--served-model-name qwen3.6 \
+--max-num-seqs 32 \
+--max-model-len 262144 \
+--max-num-batched-tokens 8096 \
+--trust-remote-code \
+--gpu-memory-utilization 0.90 \
+--no-enable-prefix-caching \
+--speculative_config '{"method": "qwen3_5_mtp", "num_speculative_tokens": 3, "enforce_eager": true}' \
+--compilation-config '{"cudagraph_mode":"FULL_DECODE_ONLY"}' \
+--additional-config '{"enable_cpu_binding":true}' \
+--async-scheduling
+```
+
 **Notice:**
 
 The parameters are explained as follows:
@@ -136,13 +183,14 @@ The parameters are explained as follows:
 - `--gpu-memory-utilization` represents the proportion of HBM that vLLM will use for actual inference. Its essential function is to calculate the available kv_cache size. During the warm-up phase (referred to as profile run in vLLM), vLLM records the peak GPU memory usage during an inference process with an input size of `--max-num-batched-tokens`. The available kv_cache size is then calculated as: `--gpu-memory-utilization` * HBM size - peak GPU memory usage. Therefore, the larger the value of `--gpu-memory-utilization`, the more kv_cache can be used. However, since the GPU memory usage during the warm-up phase may differ from that during actual inference (e.g., due to uneven EP load), setting `--gpu-memory-utilization` too high may lead to OOM (Out of Memory) issues during actual inference. The default value is `0.9`.
 - `--no-enable-prefix-caching` indicates that prefix caching is disabled. To enable it, for mamba-like models Qwen3.5, set `--enable-prefix-caching` and `--mamba-cache-mode align`. Notice the current implementation of hybrid kv cache might result in a very large block_size when scheduling. For example, the block_size may be adjusted to 2048, which means that any prefix shorter than 2048 will never be cached.
 - `--quantization` "ascend" indicates that quantization is used. To disable quantization, remove this option.
+- `--speculative_config` uses `qwen3_5_mtp` for both Qwen3.5 and Qwen3.6 because they share the same MTP head design.
 - `--compilation-config` contains configurations related to the aclgraph graph mode. The most significant configurations are "cudagraph_mode" and "cudagraph_capture_sizes", which have the following meanings:
 "cudagraph_mode": represents the specific graph mode. Currently, "PIECEWISE" and "FULL_DECODE_ONLY" are supported. The graph mode is mainly used to reduce the cost of operator dispatch. Currently, "FULL_DECODE_ONLY" is recommended.
 - "cudagraph_capture_sizes": represents different levels of graph modes. The default value is [1, 2, 4, 8, 16, 24, 32, 40,..., `--max-num-seqs`]. In the graph mode, the input for graphs at different levels is fixed, and inputs between levels are automatically padded to the next level. Currently, the default setting is recommended. Only in some scenarios is it necessary to set this separately to achieve optimal performance.
 
 ## Functional Verification
 
-Once your server is started, you can query the model with input prompts:
+Once your server is started, you can query the model with input prompts. Use the `--served-model-name` you configured (`qwen3.5` or `qwen3.6`):
 
 ```shell
 curl http://localhost:8000/v1/completions \
@@ -163,7 +211,7 @@ Here are two accuracy evaluation methods.
 
 1. Refer to [Using AISBench](../../developer_guide/evaluation/using_ais_bench.md) for details.
 
-2. After execution, you can get the result, here is the result of `Qwen3.5-27B-w8a8` in `vllm-ascend:v0.17.0rc1` for reference only.
+2. After execution, you can get the result. Here is the result of `Qwen3.5-27B-w8a8` in `vllm-ascend:v0.17.0rc1` for reference only.
 
 | dataset | version | metric | mode | vllm-api-general-chat |
 |----- | ----- | ----- | ----- | -----|
@@ -177,7 +225,7 @@ Refer to [Using AISBench for performance evaluation](../../developer_guide/evalu
 
 ### Using vLLM Benchmark
 
-Run performance evaluation of `Qwen3.5-27B-w8a8` as an example.
+Run performance evaluation of `Qwen3.5-27B-w8a8` or `Qwen3.6-27B-w8a8` as an example.
 
 Refer to [vllm benchmark](https://docs.vllm.ai/en/latest/contributing/benchmarks.html) for more details.
 
@@ -191,7 +239,10 @@ Take the `serve` as an example. Run the code as follows.
 
 ```shell
 export VLLM_USE_MODELSCOPE=True
+# For Qwen3.5-27B-w8a8:
 vllm bench serve --model Eco-Tech/Qwen3.5-27B-w8a8-mtp --dataset-name random --random-input 200 --num-prompts 200 --request-rate 1 --save-result --result-dir ./
+# For Qwen3.6-27B-w8a8:
+vllm bench serve --model Eco-Tech/Qwen3.6-27B-w8a8 --dataset-name random --random-input 200 --num-prompts 200 --request-rate 1 --save-result --result-dir ./
 ```
 
 After about several minutes, you can get the performance evaluation result.

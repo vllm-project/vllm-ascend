@@ -491,8 +491,28 @@ msgid "Qwen3.5-27B"
 msgstr "Qwen3.5-27B"
 
 #: ../../source/user_guide/support_matrix/supported_models.md
-msgid "[Qwen3.5-27B](../../tutorials/models/Qwen3.5-27B.md)"
-msgstr "[Qwen3.5-27B](../../tutorials/models/Qwen3.5-27B.md)"
+msgid "[Qwen3.5-27B / Qwen3.6-27B](../../tutorials/models/Qwen3.5-27B-Qwen3.6-27B.md)"
+msgstr "[Qwen3.5-27B / Qwen3.6-27B](../../tutorials/models/Qwen3.5-27B-Qwen3.6-27B.md)"
+
+#: ../../source/user_guide/support_matrix/supported_models.md
+msgid "Qwen3.5-35B-A3B"
+msgstr "Qwen3.5-35B-A3B"
+
+#: ../../source/user_guide/support_matrix/supported_models.md
+msgid "[Qwen3.6-35B-A3B](../../tutorials/models/Qwen3.6-35B-A3B.md)"
+msgstr "[Qwen3.6-35B-A3B](../../tutorials/models/Qwen3.6-35B-A3B.md)"
+
+#: ../../source/user_guide/support_matrix/supported_models.md
+msgid "262144"
+msgstr "262144"
+
+#: ../../source/user_guide/support_matrix/supported_models.md
+msgid "Qwen3.6-35B-A3B"
+msgstr "Qwen3.6-35B-A3B"
+
+#: ../../source/user_guide/support_matrix/supported_models.md
+msgid "Qwen3.6-27B"
+msgstr "Qwen3.6-27B"
 
 #: ../../source/user_guide/support_matrix/supported_models.md
 msgid "Qwen3-Omni-30B-A3B-Thinking"
