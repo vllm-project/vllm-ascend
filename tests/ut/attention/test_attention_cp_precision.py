@@ -625,6 +625,7 @@ def _assert_close(output, reference, rtol, atol, backend_name):
 # ---------------------------------------------------------------------------
 # Pure prefill (seq_lens == query_lens, no context)
 # ---------------------------------------------------------------------------
+@npu_test(num_npus=1, npu_type="a2")
 def _test_cp_prefill_precision_no_cp(
     batch_spec: BatchSpec,
     model: str,
@@ -685,6 +686,7 @@ def _test_cp_prefill_precision_no_cp(
 # ---------------------------------------------------------------------------
 # Pure decode (query_lens == 1, context in KV cache)
 # ---------------------------------------------------------------------------
+@npu_test(num_npus=1, npu_type="a2")
 def _test_cp_decode_precision_no_cp(
     batch_spec: BatchSpec,
     model: str,
@@ -801,6 +803,7 @@ def _test_cp_decode_precision_no_cp(
 # without chunked context. Therefore prefill sequences in mixed mode must
 # have seq_lens == query_lens (no context).
 # ---------------------------------------------------------------------------
+@npu_test(num_npus=1, npu_type="a2")
 def _test_cp_mixed_precision_no_cp(
     batch_spec: BatchSpec,
     model: str,
@@ -917,7 +920,6 @@ class TestCPAttentionPrecision:
         ],
     )
     @pytest.mark.parametrize("model", MODELS)
-    @npu_test(num_npus=1, npu_type="a2")
     @patch_distributed_groups(dcp_size=1, pcp_size=1)
     def test_cp_prefill_precision(
         self,
@@ -939,7 +941,6 @@ class TestCPAttentionPrecision:
         ],
     )
     @pytest.mark.parametrize("model", MODELS)
-    @npu_test(num_npus=1, npu_type="a2")
     @patch_distributed_groups(dcp_size=1, pcp_size=1)
     def test_cp_decode_precision(
         self,
@@ -961,7 +962,6 @@ class TestCPAttentionPrecision:
         ],
     )
     @pytest.mark.parametrize("model", MODELS)
-    @npu_test(num_npus=1, npu_type="a2")
     @patch_distributed_groups(dcp_size=1, pcp_size=1)
     def test_cp_mixed_precision(
         self,
@@ -983,7 +983,6 @@ class TestCPAttentionPrecision:
         ],
     )
     @pytest.mark.parametrize("model", MODELS)
-    @npu_test(num_npus=1, npu_type="a2")
     @patch_distributed_groups(dcp_size=1, pcp_size=1)
     def test_cp_mtp_decode_precision(
         self,
