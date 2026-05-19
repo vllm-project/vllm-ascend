@@ -17,9 +17,7 @@ def _patch_gdn_runtime(monkeypatch: pytest.MonkeyPatch) -> None:
 
 
 def _make_attention() -> gdn_310.AscendGatedDeltaNetAttention310:
-    attn = gdn_310.AscendGatedDeltaNetAttention310.__new__(
-        gdn_310.AscendGatedDeltaNetAttention310
-    )
+    attn = gdn_310.AscendGatedDeltaNetAttention310.__new__(gdn_310.AscendGatedDeltaNetAttention310)
     attn.prefix = "model.layers.0.linear_attn"
     attn.activation = None
     attn.conv1d = SimpleNamespace(
