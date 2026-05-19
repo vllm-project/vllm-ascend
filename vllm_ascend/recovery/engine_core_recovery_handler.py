@@ -147,7 +147,7 @@ class RecoveryHandler:
     def _handle_worker_msg(self) -> None:
         buffer = self._recover_report_pull_sock.recv()
         try:
-            msg = self._report_decoder(buffer)
+            msg = self._report_decoder.decode(buffer)
         except Exception:
             logger.exception(
                 "[RecoveryHandler][engine=%d] Failed to deserialize FaultReport",
@@ -375,7 +375,7 @@ class RecoveryHandler:
             if self._recover_step_result_pull_sock in events:
                 buffer = self._recover_step_result_pull_sock.recv()
                 try:
-                    msg = self._result_decoder(buffer)
+                    msg = self._result_decoder.decode(buffer)
                 except Exception:
                     logger.exception(
                         "[RecoveryHandler][engine=%d] Failed to deserialize "
