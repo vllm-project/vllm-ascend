@@ -3,7 +3,7 @@
 ## Required outputs in current repo
 
 1. One final signed commit (`git commit -sm ...`) containing the adaptation changes.
-2. Chinese analysis report（精简但完整）:
+2. Chinese analysis report doc at `docs/source/tutorials/models/<ModelName>-adaptation-report.md`（精简但完整）:
    - model architecture summary
    - incompatibility root causes
    - code changes and rationale
@@ -20,7 +20,9 @@
    - optional `TORCHDYNAMO_DISABLE=1` fallback command (if relevant)
 4. Test config YAML at `tests/e2e/models/configs/<ModelName>.yaml` — must include `model_name`, `hardware`, `tasks` with accuracy metrics (name + value), and `num_fewshot`. Use accuracy results from evaluation to populate metric values. Follow the schema of existing configs (e.g. `Qwen3-8B.yaml`).
 5. Tutorial doc at `docs/source/tutorials/models/<ModelName>.md` — must follow the standard template: Introduction, Supported Features, Environment Preparation (with docker tabs for A2/A3), Deployment (with serve script), Functional Verification (with curl example), Accuracy Evaluation, Performance. Fill in model-specific details (HF path, hardware requirements, TP size, max-model-len, served-model-name, sample curl, accuracy table).
-6. Post SKILL.md content or AI-assisted workflow summary as a comment on the originating GitHub issue.
+6. Update `docs/source/tutorials/models/index.md` to include the tutorial entry and the adaptation report entry.
+7. If the adaptation report is stored under `docs/source/tutorials/models/` and is not tutorial-style, add it to `[tool.check_docs_yaml_sync].exclude` in `pyproject.toml`.
+8. Post SKILL.md content or AI-assisted workflow summary as a comment on the originating GitHub issue.
 
 ## Commit discipline
 
