@@ -920,8 +920,8 @@ class TestCPAttentionPrecision:
         ],
     )
     @pytest.mark.parametrize("model", MODELS)
-    @npu_test(num_npus=1, npu_type="a2")
     @patch_distributed_groups(dcp_size=1, pcp_size=1)
+    @npu_test(num_npus=1, npu_type="a2")
     def test_cp_prefill_precision(
         self,
         mock_all2all,
@@ -942,8 +942,8 @@ class TestCPAttentionPrecision:
         ],
     )
     @pytest.mark.parametrize("model", MODELS)
-    @npu_test(num_npus=1, npu_type="a2")
     @patch_distributed_groups(dcp_size=1, pcp_size=1)
+    @npu_test(num_npus=1, npu_type="a2")
     def test_cp_decode_precision(
         self,
         mock_all2all,
@@ -964,8 +964,8 @@ class TestCPAttentionPrecision:
         ],
     )
     @pytest.mark.parametrize("model", MODELS)
-    @npu_test(num_npus=1, npu_type="a2")
     @patch_distributed_groups(dcp_size=1, pcp_size=1)
+    @npu_test(num_npus=1, npu_type="a2")
     def test_cp_mixed_precision(
         self,
         mock_all2all,
@@ -986,8 +986,8 @@ class TestCPAttentionPrecision:
         ],
     )
     @pytest.mark.parametrize("model", MODELS)
-    @npu_test(num_npus=1, npu_type="a2")
     @patch_distributed_groups(dcp_size=1, pcp_size=1)
+    @npu_test(num_npus=1, npu_type="a2")
     def test_cp_mtp_decode_precision(
         self,
         mock_all2all,
