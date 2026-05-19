@@ -4,6 +4,18 @@ The goal of diagnosis isn't just "find the failing test" — it's to trace each 
 
 **Write `vllm_error_analyze.md` immediately after Step 1** — start with just the skeleton (Overview table, error list), then fill in upstream commit details as Step 2 progresses. This ensures a useful record exists even if context runs low before finishing.
 
+## Re-orient (every fix round, not just the first)
+
+Re-read this file before each fix round. The error pattern table in Step 2 and
+the `reference/error-pattern-examples.md` reference help match CI failures to
+known fix patterns — this lookup produces better fixes than reasoning from the
+error message alone, especially after multiple rounds when context is saturated.
+
+Before starting, confirm:
+- Current step, round number, compatible release tag (`main_vllm_tag`)
+- Which issues from `vllm_error_analyze.md` are still open
+- The upstream patch for this step: `/tmp/main2main/steps/<step-id>/upstream.patch`
+
 ---
 
 ## Step 1: Read structured CI output
@@ -56,17 +68,21 @@ Only `code_bugs` need fixing. If only `env_flakes` remain, record CI as
 | Round | <M> |
 | Good commit | `<sha>` |
 | Bad commit | `<sha>` |
+| Compatible release | `<main_vllm_tag>` |
 | Code bugs | <count> |
 | Env flakes | <count> |
 
 ## Issues
-| # | Error type | Message | Root cause commit | Status |
-|:---|:---|:---|:---|:---|
-| 1 | TypeError | forward_oot() got... | TBD | open |
+| # | Error type | Message | Root cause commit | Version guard needed | Status |
+|:---|:---|:---|:---|:---|:---|
+| 1 | TypeError | forward_oot() got... | TBD | TBD | open |
 
 ## Details
 (fill in during Step 2)
 ```
+
+The **Version guard needed** column forces an explicit decision per issue —
+fill in YES / NO / N/A during Step 2.
 
 ---
 
@@ -81,15 +97,24 @@ For each code bug from the script output, use the error type, message, and conte
 - `NotImplementedError` → new abstract method added to base class
 - Unfamiliar downstream error (e.g., `KeyError: 'choices'`) → read the traceback upward to find the actual root cause
 
+Then look up the matching pattern in `reference/error-pattern-examples.md` —
+it has concrete fix examples for each error type. Don't skip this lookup in
+later rounds; the reference covers edge cases (like signature consistency
+across version-guarded branches) that are easy to miss when reasoning from
+the error alone.
+
 **2. Extract a search term from the error message** and search the step's upstream.patch:  `/tmp/main2main/steps/<step-id>/upstream.patch`
 
 This reveals the diff chunk that introduced the change — not just the symptom, but the full context of what changed and why.
 
 **3. Identify the intent of the upstream change.** Was it a rename? A removal? A new parameter? This determines the fix:
 - New parameter → add to vllm-ascend's override with a default, use `vllm_version_is()` guard
-- Removal → delete the usage from vllm-ascend
-- Rename → update to new name everywhere with `vllm_version_is()` guard
+- Removal → delete the usage from vllm-ascend, guarded by `vllm_version_is()` if release still has it
+- Rename → update to new name with `vllm_version_is()` guard
 - New abstract method → implement in `AscendPlatform` or relevant class
+
+For each fix, decide whether a version guard is needed using the decision
+tree in `reference/adapt-guide.md` Step 2.
 
 **4. Update `vllm_error_analyze.md`** with the root cause commit and fix plan:
 
@@ -103,34 +128,43 @@ This reveals the diff chunk that introduced the change — not just the symptom,
 | Root cause commit | `abc1234` — "refactor attention forward signature" |
 | Changed file | `vllm/model_executor/layers/attention/backends/abstract.py` |
 | vllm-ascend file | `vllm_ascend/attention/ascend_attn_backend.py` |
+| Version guard needed | **YES** — release uses old signature without `kv_cache_dtype` |
 
 **Error Traceback:**
 (use context from script output)
 
 **Explanation:** <Why this change breaks vllm-ascend>
 
-**Fix Suggestion:** <Specific code change needed>
-Add `kv_cache_dtype` parameter with `vllm_version_is()` guard
+**Fix:** <Specific code change, with vllm_version_is() guard if YES above>
 ```
 
 **5. Apply fixes**
 
-For each issue, apply the fix suggested in **Fix Suggestion**. Map each error to the corresponding fix pattern in the Common Error Patterns Reference in `reference/error-patterns-examples.md`, which documents frequent upstream vLLM evolution issues with concrete fix examples.
+For each issue, apply the fix from the plan above. Map each error to the
+corresponding fix pattern in `reference/error-pattern-examples.md`.
 
 ---
 
-## Step 3: Verify and Track progress
+## Step 3: Verify Before Re-running CI
 
-After fixing, re-run CI using **Verify by CI** in SKILL.md. Then compare the new
+Run the verification checks from `reference/adapt-guide.md` Step 3 before
+re-running CI. The same checks apply: version guards present, version string
+consistent, no temp files in repo.
+
+---
+
+## Step 4: Re-run CI and Track Progress
+
+Re-run CI using **Verify by CI** in SKILL.md. Then compare the new
 `round-<N>-summary.json` error signatures with the previous round:
 
 - **Fewer failing tests** → making progress, continue
-- **Same error signatures two rounds in a row** → all fix isn't working, trigger partial stop
+- **Same error signatures two rounds in a row** → fix isn't working, trigger partial stop
 - **New errors not in the previous round** → fix introduced a regression, revert and trigger partial stop
 
 Update the Status column in `vllm_error_analyze.md` each round.
 
-**Stop conditions** (same as in SKILL.md):
+**Stop conditions** (authoritative list — check before each round):
 1. Only `env_flakes` remain → record CI as `env_flake_pass`
 2. Two consecutive rounds with identical error signatures → partial stop
 3. This round produced no code diff → partial stop
@@ -145,3 +179,4 @@ CI logs can be enormous. Never read raw logs into context:
 - Always use `round-<N>-summary.json` first — it contains only structured output
 - To read a specific section of the raw log: `grep -A 10 '<pattern>' <logfile> | head -30`
 - Write `vllm_error_analyze.md` incrementally — it serves as external memory for this task. Re-orient by reading the file rather than reconstructing from context
+- At the start of each fix round, re-read this file's Re-orient block and the open issues in `vllm_error_analyze.md` before writing any code

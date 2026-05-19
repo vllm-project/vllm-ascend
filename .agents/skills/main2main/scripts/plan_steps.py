@@ -7,11 +7,14 @@ lines in vllm/ source files.
 Algorithm:
   1. git rev-list --reverse base..target → ordered commit list
   2. For each commit, git diff --numstat → changed files + lines
-  3. Classify files: vllm/ source → "vllm", requirements* → "requirements",
-     everything else → "ignored"
+  3. Classify files: vllm/ source → "vllm"; conservative dependency files
+     (pyproject.toml, setup.py, requirements/common.txt, requirements/build/*)
+     → "requirements"; everything else → "ignored"
   4. Requirements commits get their own step (dependency changes are isolated)
-  5. Commits accumulate into a step until vllm_changed_lines exceeds 500
-  6. A single commit with vllm_changed_lines > 500 becomes its own step
+  5. Commits accumulate into a step until vllm_changed_lines exceeds 1000
+     or the step reaches the sublinear commit-count budget derived from
+     LINE_BUDGET
+  6. A single commit with vllm_changed_lines > 1000 becomes its own step
   7. "ignored" files (docs, tests, CI) can be batched into any step but don't
      count toward the line budget
 
@@ -30,12 +33,31 @@ from __future__ import annotations
 
 import argparse
 import json
+import math
 import subprocess
 import sys
 from pathlib import Path
 from typing import Any
 
-LINE_BUDGET = 500
+LINE_BUDGET = 1000
+BASE_LINE_BUDGET = 1000
+BASE_COMMIT_COUNT_BUDGET = 10
+REQUIREMENTS_FILES = {
+    "pyproject.toml",
+    "setup.py",
+    "requirements/common.txt",
+}
+REQUIREMENTS_PREFIXES = (
+    "requirements/build/",
+)
+
+
+def _commit_count_budget(line_budget: int = LINE_BUDGET) -> int:
+    """Return commit-count budget scaled sublinearly from line_budget."""
+    return max(
+        1,
+        round(BASE_COMMIT_COUNT_BUDGET * math.sqrt(line_budget / BASE_LINE_BUDGET)),
+    )
 
 
 def _run_git(repo: Path, *args: str) -> str:
@@ -90,7 +112,7 @@ def _numstat(repo: Path, sha: str) -> list[dict[str, Any]]:
 
 def _classify_file(filepath: str) -> str:
     """Classify a file as 'vllm', 'requirements', or 'ignored'."""
-    if filepath.startswith("requirements") or filepath == "pyproject.toml":
+    if filepath in REQUIREMENTS_FILES or filepath.startswith(REQUIREMENTS_PREFIXES):
         return "requirements"
     if filepath.startswith("vllm/"):
         return "vllm"
@@ -145,12 +167,14 @@ def plan_steps(
             "index": len(steps) + 1,
             "id": f"step-{len(steps) + 1}",
             "commits": list(current_commits),
+            "commit_count": len(current_commits),
             "start_commit": start,
             "end_commit": current_commits[-1]["sha"],
             "categories": sorted(current_cats),
             "vllm_changed_lines": current_vllm_lines,
             "total_changed_lines": current_total_lines,
             "line_budget": LINE_BUDGET,
+            "commit_count_budget": _commit_count_budget(),
             "files_changed": sorted(set(current_files)),
         })
         current_commits = []
@@ -194,8 +218,11 @@ def plan_steps(
             prev_end = steps[-1]["end_commit"] if steps else base_commit
             continue
 
-        # Would exceed budget? → flush first
-        if current_vllm_lines + vllm_lines > LINE_BUDGET:
+        # Would exceed a step budget? → flush first
+        if (
+            current_vllm_lines + vllm_lines > LINE_BUDGET
+            or len(current_commits) >= _commit_count_budget()
+        ):
             _flush(prev_end)
             prev_end = steps[-1]["end_commit"] if steps else base_commit
 
@@ -221,7 +248,8 @@ def _render_markdown(plan: dict[str, Any]) -> str:
         "",
     ]
     for step in plan["steps"]:
-        lines.append(f"## {step['id']} (vllm: {step['vllm_changed_lines']} lines, "
+        lines.append(f"## {step['id']} (commits: {step['commit_count']}, "
+                      f"vllm: {step['vllm_changed_lines']} lines, "
                       f"total: {step['total_changed_lines']} lines)")
         lines.append("")
         lines.append(f"- Categories: {', '.join(step['categories'])}")

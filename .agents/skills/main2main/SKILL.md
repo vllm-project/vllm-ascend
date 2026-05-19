@@ -1,10 +1,13 @@
 ---
 name: main2main
 description: >-
-  Adapt vLLM-Ascend to track upstream vLLM main branch changes. Use whenever
-  the user mentions upgrading, syncing, or bumping vllm-ascend to a newer vLLM
-  commit, or provides both a vllm path and vllm-ascend path for syncing. Also
-  triggers on keywords: main2main, vLLM API changes.
+  Adapt vLLM-Ascend to track upstream vLLM main branch changes incrementally:
+  detect commit drift, plan steps, adapt code, run CI, and commit verified
+  changes. Use whenever the user mentions main2main, upgrading or syncing
+  vllm-ascend to a newer vLLM commit, vLLM API changes breaking vllm-ascend,
+  or provides both a vllm path and vllm-ascend path for syncing. Also triggers
+  on: "vLLM broke our plugin", "bump the vLLM commit", "ascend CI failing
+  after upstream update".
 ---
 
 # main2main
@@ -40,30 +43,13 @@ These protect the repo. The reasoning behind each one matters more than the rule
 
 Each step has two phases: **adapt** (proactively modify vllm-ascend based on upstream.patch) and **fix** (react to CI failures your adaptation missed).
 
-**Adapt:** Read upstream.patch, use `changed-files.txt` to identify which subsystems are affected, then find and update the corresponding code in vllm-ascend. The file mapping table and key areas are in `reference/adapt-guide.md`.
+The detailed workflows, file mapping tables, error pattern references, and stop conditions are in `reference/adapt-guide.md` and `reference/diagnosis-guide.md`. Read them at every step and fix round — they contain per-step lookup tables that surface different vllm-ascend files for each step's patch, not one-time background reading.
 
-When adapting, the goal isn't to copy upstream changes mechanically — it's to ask "how does this upstream change affect the contract between vLLM and vllm-ascend?" For example:
-
-> **Upstream** adds a new abstract method `get_cache_config()` to the Platform base class.
-> **Wrong approach**: Ignore it because no test currently calls it.
-> **Right approach**: Check whether `AscendPlatform` inherits from this class — if yes, vllm-ascend will fail to instantiate at runtime with `TypeError: Can't instantiate abstract class`. Add the method immediately with the best Ascend-compatible implementation available; use a clearly marked stub only when the feature genuinely cannot be supported yet.
-
-The pattern to internalize: upstream changes to **abstract methods, function signatures, and config field locations, etc.** always need vllm-ascend follow-up, because vllm-ascend overrides or reads these directly. Changes to **internal implementation** of methods vllm-ascend doesn't override can usually be skipped.
+The core judgment call in both phases: upstream changes to **abstract methods, function signatures, config field locations, and import paths** always need vllm-ascend follow-up, because vllm-ascend overrides or reads these directly. Changes to **internal implementation** of methods vllm-ascend doesn't override can be skipped — unless vllm-ascend calls that method and depends on its return value, side effects, or error behavior.
 
 No-op adapt is allowed, but it does not skip CI: every step must run CI after the commit reference is updated.
 
-**Fix:** When CI fails, read the structured summary written by `run_main2main_ci.py`. Focus only on `code_bugs` (ignore `env_flakes`). For each bug, search `upstream.patch` for the function/class/field name from the error — this connects the symptom to the upstream change, giving you the full picture. Fix based on that complete context, not just the error message. Detailed diagnostic workflow and progress judgment are in `reference/diagnosis-guide.md`.
-
-The fix loop ends when any of these is true — check before each round:
-1. Only `env_flakes` remain → record CI as `env_flake_pass`, proceed to commit
-2. Two consecutive rounds with identical error signatures → partial stop
-3. This round produced no code diff → partial stop
-4. The CI summary reports no actionable `code_bugs` → partial stop
-5. Hard cap of 5 rounds → partial stop
-
-These are the only partial-stop reasons during step execution. Do not create a
-partial final summary because the remaining steps would take many hours, because
-the current session is long, or because additional CI runs are required.
+The only valid partial-stop reasons are the stop conditions listed in `reference/diagnosis-guide.md` Step 4. Do not create a partial final summary because the remaining steps would take many hours, because the current session is long, or because additional CI runs are required.
 
 **Context management:** CI logs can be 10K+ lines. Never read raw logs into context — use the `round-N-summary.json` produced by `run_main2main_ci.py` first. If you need a specific log section, filter with `grep -A 10 '<pattern>' <log> | head -30`.
 
@@ -135,8 +121,12 @@ python3 <skill_dir>/scripts/update_commit_reference.py \
   --new-commit <step_end_commit>
 ```
 
-3. **Adapt.** 
-Read the patch, identify affected subsystems, update vllm-ascend code if needed. See "Adaptation and CI Diagnosis" above and `reference/adapt-guide.md`. If no code adaptation is needed, record that conclusion and continue to CI.
+3. **Adapt.**
+Read `reference/adapt-guide.md` and follow its Steps 1-3. The guide contains
+file mapping tables and key area lists that identify different vllm-ascend
+files for each step's patch — this lookup must happen every step, not just
+the first. If no code adaptation is needed, record that conclusion and
+continue to CI.
 
 4. **Verify by CI (mandatory for every step)**
 Run CI after the commit reference update and adapt phase, even when adapt made no extra code changes. A step is only complete after CI passes.
@@ -145,7 +135,9 @@ Run CI after the commit reference update and adapt phase, even when adapt made n
 python3 <skill_dir>/scripts/run_main2main_ci.py \
   --ascend-path <ascend_path> \
   --step-id <step-id> \
-  --suite e2e-main2main \
+  --suite e2e-singlecard-light \
+  --suite e2e-2card-light \
+  --suite e2e-4card-light \
   --round 1
 ```
 
@@ -182,9 +174,14 @@ python3 <skill_dir>/scripts/check_and_commit.py \
 git -C <vllm_path> checkout <step_end_commit>
 ```
 
-6. **If CI result does not allow commit, diagnose and fix.** Follow `reference/diagnosis-guide.md` for the diagnostic workflow. Re-run CI after each fix round. Stop conditions listed above.
+6. **If CI result does not allow commit, diagnose and fix.**
+Read `reference/diagnosis-guide.md` and follow its Steps 1-4. The guide
+contains error type → fix pattern mappings and references
+`reference/error-pattern-examples.md` for concrete fix examples — use these
+lookups each round rather than reasoning from the error message alone. Re-run
+CI after each fix round. Stop conditions are listed in the diagnosis guide.
 
-**If the fix loop is exhausted** (stop conditions triggered in "Adaptation and CI Diagnosis"):
+**If the fix loop is exhausted** (a stop condition from `reference/diagnosis-guide.md` is triggered):
 - Save current changes: `git diff > /tmp/main2main/steps/<step-id>/failed.patch`
 - Write failure details to `/tmp/main2main/steps/<step-id>/failed-summary.json`
 - Rollback to `last_verified_head`: `git checkout -- .`

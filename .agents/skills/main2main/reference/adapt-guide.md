@@ -9,6 +9,21 @@ This file is only about adaptation decisions and code changes. Mechanical
 pipeline work, such as updating the pinned vLLM commit reference, is handled by
 `SKILL.md` and `scripts/update_commit_reference.py`.
 
+## Re-orient (every step, not just the first)
+
+Re-read this file at the start of every step — not because the instructions
+change, but because the lookup tables below (Key Areas, File Mapping) surface
+different results for each step's patch. A step that touches `vllm/config*.py`
+needs different vllm-ascend files than one that touches `vllm/platforms/`. The
+tables do the routing; skipping them means guessing.
+
+Before starting, confirm:
+- Current step and upstream range
+- Compatible release tag (`main_vllm_tag` from conf.py) — needed for any `vllm_version_is()` guards
+- Guardrails from SKILL.md still apply: only modify vllm-ascend, temp files in `/tmp/main2main/`, never `git add .`
+
+---
+
 ## Inputs
 
 For each step, use these files:
@@ -23,18 +38,19 @@ which parts of `upstream.patch` deserve attention.
 
 ## Step 1: Analyze vLLM Changes
 
-1. Read `upstream.patch` and `changed-files.txt`. Cross-reference against the 'vLLM Key Areas to Focus On' table below to identify which subsystems are touched before reading any actual diff.
+1. Read `changed-files.txt`. Cross-reference each path against the **Key Areas** table below to identify which subsystems are touched — do this before reading any actual diff.
 2. Find the relevant chunks in `upstream.patch` and identify the concrete change: new/removed abstract methods, changed signatures, renamed config fields, moved imports, changed constructor args, dependency bumps, or changed return types.
-3. Use the File Mapping Table below to find likely vllm-ascend locations.
+3. Use the **File Mapping Table** below to find likely vllm-ascend locations that need adaptation.
 
-The key question: **does vllm-ascend subclass, override, call, import, or read anything this patch changed?**, Internal implementation changes only need adaptation when vllm-ascend directly depends on the behavior.
+The key question: **does vllm-ascend subclass, override, call, import, or read anything this patch changed?** Internal implementation changes only need adaptation when vllm-ascend directly depends on the behavior.
 
 ## Step 2: Adapt vLLM Ascend Project
-For each related change in vLLM , evaluate whether adaptation in vLLM Ascend is needed:
+
+For each related change in vLLM, evaluate whether adaptation in vLLM Ascend is needed:
 
 - **Internal Architecture Changes**
   Check internal interfaces of vLLM core modules (scheduler, executor, model runner, etc.)
-  Update vLLM Ascend's Ascend-specific implementations (e.g., NPU worker/model runner, custom attention、custom ops)
+  Update vLLM Ascend's Ascend-specific implementations (e.g., NPU worker/model runner, custom attention, custom ops)
   Preserve vLLM Ascend specific modifications (e.g., code under vllm_ascend/)
 
 - **Dependency Changes**
@@ -42,11 +58,46 @@ For each related change in vLLM , evaluate whether adaptation in vLLM Ascend is 
   Update dependency declarations in vLLM Ascend
 
 - **Version Compatibility**
-   Use `vllm_version_is()` guards when the change must coexist with the release version (see Version Compatibility Rules in SKILL.md)
+
+  Every signature change, config field move, or import path change is a
+  potential version boundary. Use this decision tree for each code change:
+
+  ```
+  Does this change touch an API that differs between release and upstream main?
+    ├─ YES → wrap with vllm_version_is("<release_tag>")
+    └─ NO  → no guard needed
+  ```
+
+  When unsure, check existing patterns:
+  ```bash
+  grep -rn 'vllm_version_is' <ascend_path>/vllm_ascend/ | head -20
+  ```
+  Follow the same import style, version string, and branching structure.
+  Full version guard rules are in SKILL.md — Version Compatibility Rules section.
 
 When a feature genuinely can't be supported on Ascend yet, add a stub with a `# TODO` comment referencing the issue.
 
 A no-op adapt (nothing to change) is fine, but it does not skip CI — the updated commit reference still needs verification.
+
+---
+
+## Step 3: Verify Before CI
+
+Run these checks before CI. They catch the most common mistakes mechanically —
+no judgment needed, just run the commands.
+
+```bash
+# 1. Version guards present where needed?
+#    For each file you changed that touches a vLLM interface:
+git -C <ascend_path> diff --name-only HEAD
+grep -n 'vllm_version_is' <ascend_path>/<changed_file>
+
+# 2. Version string consistent?
+grep -rn 'vllm_version_is' <ascend_path>/vllm_ascend/ | grep -v '<release_tag>'
+
+# 3. No temp files in repo?
+git -C <ascend_path> status --short | grep -E '\.(log|patch|jsonl)|vllm_changes|vllm_error_analyze'
+```
 
 ---
 
@@ -133,18 +184,7 @@ When analyzing vLLM changes, pay special attention to these areas that typically
 | **Utility Modules** | |
 | Common utilities | `vllm_ascend/utils.py` |
 | Ascend config | `vllm_ascend/ascend_config.py` |
-| Common utilities | `vllm_ascend/utils.py` |
 | Environment variables | `vllm_ascend/envs.py` |
-| Attention | `vllm_ascend/attention/` |
-| Worker | `vllm_ascend/worker/` |
-| Ops | `vllm_ascend/ops/` |
-| Distributed | `vllm_ascend/distributed/` |
-| Compilation | `vllm_ascend/compilation/` |
-| Quantization | `vllm_ascend/quantization/` |
-| Speculative decoding | `vllm_ascend/spec_decode/` |
-| 310P specific | `vllm_ascend/_310p/` |
-| EPLB | `vllm_ascend/eplb/` |
-| XLite | `vllm_ascend/xlite/` |
 
 ---
 

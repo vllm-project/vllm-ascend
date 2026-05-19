@@ -24,6 +24,7 @@ import sys
 from pathlib import Path
 
 PASS_RESULTS = {"passed", "env_flake_pass"}
+DEFAULT_SUITES = ["e2e-singlecard-light"]
 
 
 def _run_to_log(command: list[str], cwd: Path, log_path: Path, env: dict[str, str]) -> int:
@@ -126,8 +127,9 @@ def main() -> None:
                         help="Step identifier, for example step-1")
     parser.add_argument("--round", type=int, default=1,
                         help="CI round number for this step")
-    parser.add_argument("--suite", action="append", required=True,
-                        help="run_suite.py suite name. Can be specified multiple times.")
+    parser.add_argument("--suite", action="append",
+                        help="run_suite.py suite name. Can be specified multiple times. "
+                             "Defaults to e2e-singlecard-light.")
     parser.add_argument("--workspace", type=Path, default=Path("/tmp/main2main"),
                         help="main2main workspace directory")
     args = parser.parse_args()
@@ -148,7 +150,7 @@ def main() -> None:
     env.setdefault("VLLM_WORKER_MULTIPROC_METHOD", "spawn")
     env.setdefault("VLLM_USE_MODELSCOPE", "true")
 
-    suite_names = args.suite
+    suite_names = args.suite or DEFAULT_SUITES
     suite_label = suite_names[0] if len(suite_names) == 1 else "+".join(suite_names)
     command = [
         sys.executable,

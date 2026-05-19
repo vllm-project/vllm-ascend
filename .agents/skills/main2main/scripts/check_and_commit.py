@@ -5,6 +5,7 @@ This script enforces the main2main guardrails before committing:
   - All changed files must be inside the ascend-path repository.
   - No temporary/intermediate files should be staged (logs, patches, etc.).
   - No untracked temporary files should exist in the repo.
+  - Files under csrc/ or cmake/ are skipped and never staged by main2main.
 
 Usage:
     python3 check_and_commit.py \\
@@ -36,6 +37,11 @@ FORBIDDEN_PATTERNS = [
     "ci-summary",
 ]
 
+SKIPPED_PATH_PREFIXES = [
+    "csrc/",
+    "cmake/",
+]
+
 
 def _run_git(repo: Path, *args: str) -> str:
     result = subprocess.run(
@@ -63,6 +69,24 @@ def _get_untracked_files(repo: Path) -> list[str]:
     """Return list of untracked files."""
     output = _run_git(repo, "ls-files", "--others", "--exclude-standard")
     return [f for f in output.strip().splitlines() if f.strip()]
+
+
+def _is_skipped_path(file_path: str) -> bool:
+    """Return whether file_path should be left out of main2main commits."""
+    normalized = file_path.replace("\\", "/")
+    return any(normalized.startswith(prefix) for prefix in SKIPPED_PATH_PREFIXES)
+
+
+def _split_committable_files(files: list[str]) -> tuple[list[str], list[str]]:
+    """Split changed files into files to commit and files to leave untouched."""
+    committable = []
+    skipped = []
+    for f in files:
+        if _is_skipped_path(f):
+            skipped.append(f)
+        else:
+            committable.append(f)
+    return committable, skipped
 
 
 def _check_forbidden(files: list[str]) -> list[str]:
@@ -98,9 +122,10 @@ def main() -> None:
     tracked_changed = _get_tracked_changed_files(repo)
     untracked = _get_untracked_files(repo)
     changed = sorted(set(tracked_changed + untracked))
+    committable, skipped = _split_committable_files(changed)
 
     # Check for forbidden files before the no-op case so stray logs fail loudly.
-    forbidden = _check_forbidden(changed)
+    forbidden = _check_forbidden(committable)
     if forbidden:
         print(
             f"Error: forbidden files in working tree:\n"
@@ -109,12 +134,19 @@ def main() -> None:
         )
         sys.exit(1)
 
-    if not changed:
+    if not committable:
+        if skipped:
+            print(
+                f"Error: no committable changes to commit; skipped files:\n"
+                + "\n".join(f"  - {f}" for f in skipped),
+                file=sys.stderr,
+            )
+            sys.exit(1)
         print("Error: no changes to commit", file=sys.stderr)
         sys.exit(1)
 
     # Stage specific files (not git add .).
-    for f in changed:
+    for f in committable:
         _run_git(repo, "add", f)
 
     # Commit with sign-off
@@ -126,7 +158,7 @@ def main() -> None:
     result = {
         "commit_sha": sha,
         "step_id": args.step_id,
-        "files_committed": changed,
+        "files_committed": committable,
     }
 
     print(json.dumps(result, indent=2))
