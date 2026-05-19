@@ -162,6 +162,86 @@ def mxfp_kv_page_size_bytes(
     return kv_bytes + scale_bytes
 
 
+def mxfp_get_scale_dtype() -> torch.dtype:
+    """Dtype used for MXFP E8M0 scale cache tensors (always 1 byte per element)."""
+    return FLOAT8_E8M0FNU_DTYPE or torch.uint8
+
+
+def mxfp_resolve_kv_cache_layout(
+    *,
+    raw_k_numel: int,
+    raw_v_numel: int,
+    raw_k_scale_numel: int,
+    raw_v_scale_numel: int,
+    block_size: int,
+    num_kv_heads: int,
+    k_dim: int,
+    v_dim: int,
+    layer_name: str = "",
+) -> tuple[
+    int,
+    tuple[int, int, int, int],
+    tuple[int, int, int, int],
+    tuple[int, int, int, int, int],
+    tuple[int, int, int, int, int],
+]:
+    """Derive C8_MXFP KV cache shapes from allocated raw buffer sizes.
+
+    Returns (num_blocks, k_shape, v_shape, k_scale_shape, v_scale_shape).
+    """
+    mxfp_kv_block_scale_groups(block_size)
+    k_scale_per_block = mxfp_k_scale_numel(1, block_size, num_kv_heads, k_dim)
+    v_scale_per_block = mxfp_v_scale_numel(1, block_size, num_kv_heads, v_dim)
+    k_per_block = block_size * num_kv_heads * k_dim
+    v_per_block = block_size * num_kv_heads * v_dim
+
+    def _blocks_from_numel(numel: int, per_block: int, name: str) -> int:
+        if per_block <= 0 or numel % per_block != 0:
+            raise ValueError(
+                f"C8_MXFP {name} buffer size mismatch for layer={layer_name}: "
+                f"numel={numel}, per_block={per_block}, block_size={block_size}, "
+                f"num_kv_heads={num_kv_heads}, k_dim={k_dim}, v_dim={v_dim}"
+            )
+        return numel // per_block
+
+    num_blocks_candidates = {
+        "k": _blocks_from_numel(raw_k_numel, k_per_block, "k"),
+        "v": _blocks_from_numel(raw_v_numel, v_per_block, "v"),
+        "k_scale": _blocks_from_numel(raw_k_scale_numel, k_scale_per_block, "k_scale"),
+        "v_scale": _blocks_from_numel(raw_v_scale_numel, v_scale_per_block, "v_scale"),
+    }
+    unique_blocks = set(num_blocks_candidates.values())
+    if len(unique_blocks) != 1:
+        raise ValueError(
+            f"C8_MXFP KV cache block count mismatch for layer={layer_name}: {num_blocks_candidates}"
+        )
+    num_blocks = num_blocks_candidates["k"]
+    k_shape = (num_blocks, block_size, num_kv_heads, k_dim)
+    v_shape = (num_blocks, block_size, num_kv_heads, v_dim)
+    k_scale_shape = mxfp_k_scale_cache_shape(num_blocks, block_size, num_kv_heads, k_dim)
+    v_scale_shape = mxfp_v_scale_cache_shape(num_blocks, block_size, num_kv_heads, v_dim)
+    return num_blocks, k_shape, v_shape, k_scale_shape, v_scale_shape
+
+
+def mxfp_view_scale_cache(raw_tensor: torch.Tensor, shape: tuple[int, ...]) -> torch.Tensor:
+    """View a 1-byte-per-element raw scale buffer as the MXFP scale cache tensor."""
+    scale_dtype = mxfp_get_scale_dtype()
+    if torch.tensor([], dtype=scale_dtype).element_size != 1:
+        raise RuntimeError(
+            f"C8_MXFP scale dtype {scale_dtype} must have element size 1, got "
+            f"{torch.tensor([], dtype=scale_dtype).element_size}."
+        )
+    expected_numel = 1
+    for dim in shape:
+        expected_numel *= dim
+    if raw_tensor.numel() != expected_numel:
+        raise ValueError(
+            f"C8_MXFP scale view size mismatch: raw_numel={raw_tensor.numel()}, "
+            f"shape={shape}, expected_numel={expected_numel}"
+        )
+    return raw_tensor.view(torch.uint8).view(shape).view(scale_dtype)
+
+
 # Backward-compatible aliases.
 mxfp_kv_scale_cache_shape = mxfp_k_scale_cache_shape
 mxfp_kv_scale_numel = mxfp_k_scale_numel

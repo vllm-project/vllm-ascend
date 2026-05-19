@@ -114,12 +114,13 @@ from vllm_ascend.eplb.eplb_updator import EplbUpdator
 from vllm_ascend.eplb.utils import model_register
 from vllm_ascend.device.mxfp_compat import (
     FLOAT8_E8M0FNU_DTYPE,
-    mxfp_k_scale_cache_shape,
+    mxfp_get_scale_dtype,
     mxfp_k_scale_numel,
     mxfp_kv_block_scale_groups,
     mxfp_kv_page_size_bytes,
-    mxfp_v_scale_cache_shape,
+    mxfp_resolve_kv_cache_layout,
     mxfp_v_scale_numel,
+    mxfp_view_scale_cache,
 )
 from vllm_ascend.ops.rotary_embedding import set_cos_and_sin, update_cos_sin
 from vllm_ascend.patch.worker.patch_draft_quarot import patch_load_weights
@@ -3231,19 +3232,61 @@ class NPUModelRunner(GPUModelRunner):
         offset = (aligned_addr - data_ptr) // tensor.element_size()
         return tensor[int(offset) :]
 
-    def _is_c8_mxfp_kv_cache(self, kv_cache_spec: AttentionSpec) -> bool:
+    def _is_c8_mxfp_quant_enabled(self) -> bool:
         quant_config = getattr(self.vllm_config, "quant_config", None)
         quant_description = getattr(quant_config, "quant_description", {})
-        if quant_description.get("kv_cache_type") != "C8_MXFP":
+        return quant_description.get("kv_cache_type") == "C8_MXFP"
+
+    def _is_c8_mxfp_kv_cache(
+        self,
+        kv_cache_spec: AttentionSpec,
+        raw_cache_tensors: tuple[torch.Tensor, ...] | list[torch.Tensor] | None = None,
+    ) -> bool:
+        if not self._is_c8_mxfp_quant_enabled():
             return False
-        # Spec dtype may still be default if KV specs were built before quant json loaded.
+        if isinstance(kv_cache_spec, MLAAttentionSpec):
+            return False
+        if raw_cache_tensors is not None and len(raw_cache_tensors) >= 4:
+            return True
         from vllm.v1.kv_cache_interface import FullAttentionSpec
 
         return isinstance(kv_cache_spec, FullAttentionSpec)
 
     @staticmethod
     def _get_mxfp_scale_dtype() -> torch.dtype:
-        return FLOAT8_E8M0FNU_DTYPE or torch.uint8
+        return mxfp_get_scale_dtype()
+
+    def _reshape_c8_mxfp_kv_cache(
+        self,
+        layer_name: str,
+        raw_cache_tensors: tuple[torch.Tensor, ...] | list[torch.Tensor],
+        kv_cache_spec: AttentionSpec,
+    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
+        raw_k_tensor, raw_v_tensor, raw_k_scale_tensor, raw_v_scale_tensor = raw_cache_tensors
+        k_dim, v_dim = self._get_attention_kv_cache_dims(layer_name, kv_cache_spec)
+        block_size = kv_cache_spec.block_size
+        num_heads = kv_cache_spec.num_kv_heads
+        _, k_shape, v_shape, k_scale_shape, v_scale_shape = mxfp_resolve_kv_cache_layout(
+            raw_k_numel=raw_k_tensor.numel(),
+            raw_v_numel=raw_v_tensor.numel(),
+            raw_k_scale_numel=raw_k_scale_tensor.numel(),
+            raw_v_scale_numel=raw_v_scale_tensor.numel(),
+            block_size=block_size,
+            num_kv_heads=num_heads,
+            k_dim=k_dim,
+            v_dim=v_dim,
+            layer_name=layer_name,
+        )
+        k_cache_dtype = v_cache_dtype = torch.float8_e4m3fn
+        if self.is_kv_consumer and enable_fa_quant(self.vllm_config):
+            k_cache_dtype, v_cache_dtype = self.vllm_config.quant_config.get_kv_quant_dtype(
+                layer_name, kv_cache_spec.dtype, self.model_config
+            )
+        k_cache = raw_k_tensor.view(k_cache_dtype).view(k_shape)
+        v_cache = raw_v_tensor.view(v_cache_dtype).view(v_shape)
+        k_scale_cache = mxfp_view_scale_cache(raw_k_scale_tensor, k_scale_shape)
+        v_scale_cache = mxfp_view_scale_cache(raw_v_scale_tensor, v_scale_shape)
+        return k_cache, v_cache, k_scale_cache, v_scale_cache
 
     def _allocate_raw_cache_tensor(self, size: int, alignment: int, needs_alignment: bool | None = None) -> torch.Tensor:
         if needs_alignment is None:
@@ -3587,6 +3630,13 @@ class NPUModelRunner(GPUModelRunner):
                     else:
                         raw_cache_tensors = kv_cache_raw_tensors[layer_name]  # type: ignore
                         raw_k_tensor, raw_v_tensor = raw_cache_tensors[:2]
+                        if self._is_c8_mxfp_kv_cache(current_kv_cache_spec, raw_cache_tensors):
+                            kv_caches[layer_name] = self._reshape_c8_mxfp_kv_cache(
+                                layer_name,
+                                raw_cache_tensors,
+                                current_kv_cache_spec,
+                            )
+                            continue
                         sum_page_size_bytes = sum(tensor.numel() for tensor in raw_cache_tensors)
                     assert raw_k_tensor is not None
                     assert raw_v_tensor is not None
@@ -3641,26 +3691,11 @@ class NPUModelRunner(GPUModelRunner):
                             current_kv_cache_spec.head_size,
                         )
                     if not isinstance(current_kv_cache_spec, MLAAttentionSpec):
-                        if self._is_c8_mxfp_kv_cache(current_kv_cache_spec):
-                            k_dim, v_dim = self._get_attention_kv_cache_dims(layer_name, current_kv_cache_spec)
-                            block_size = current_kv_cache_spec.block_size
-                            num_heads = current_kv_cache_spec.num_kv_heads
-                            raw_k_scale_tensor, raw_v_scale_tensor = raw_cache_tensors[2:]
-                            k_scale_per_block = mxfp_k_scale_numel(1, block_size, num_heads, k_dim)
-                            assert raw_k_scale_tensor.numel() % k_scale_per_block == 0, (
-                                f"C8_MXFP k_scale buffer size mismatch: numel={raw_k_scale_tensor.numel()}, "
-                                f"per_block={k_scale_per_block}, layer={layer_name}, block_size={block_size}, "
-                                f"num_kv_heads={num_heads}, k_dim={k_dim}"
-                            )
-                            mxfp_num_blocks = raw_k_scale_tensor.numel() // k_scale_per_block
-                            k_shape = (mxfp_num_blocks, block_size, num_heads, k_dim)
-                            v_shape = (mxfp_num_blocks, block_size, num_heads, v_dim)
+                        k_shape = kv_cache_shape[1:]
+                        if hasattr(current_kv_cache_spec, "head_size_v"):
+                            v_shape = (*kv_cache_shape[1:-1], current_kv_cache_spec.head_size_v)
                         else:
-                            k_shape = kv_cache_shape[1:]
-                            if hasattr(current_kv_cache_spec, "head_size_v"):
-                                v_shape = (*kv_cache_shape[1:-1], current_kv_cache_spec.head_size_v)
-                            else:
-                                v_shape = k_shape
+                            v_shape = k_shape
                     else:
                         # k_cache: nope_cache    v_cache: rope_cache
                         mla_num_blocks, mla_block_size, num_kv_heads, _ = kv_cache_shape
@@ -3714,18 +3749,7 @@ class NPUModelRunner(GPUModelRunner):
                             dsa_k_cache = raw_dsa_k_tensor.view(current_kv_cache_spec.dtype).view(dsa_k_cache_shape)
                             kv_caches[layer_name] = (k_cache, v_cache, dsa_k_cache)
                     else:
-                        if self._is_c8_mxfp_kv_cache(current_kv_cache_spec):
-                            k_dim, v_dim = self._get_attention_kv_cache_dims(layer_name, current_kv_cache_spec)
-                            block_size = current_kv_cache_spec.block_size
-                            num_heads = current_kv_cache_spec.num_kv_heads
-                            mxfp_num_blocks = k_shape[0]
-                            k_scale_shape = mxfp_k_scale_cache_shape(mxfp_num_blocks, block_size, num_heads, k_dim)
-                            v_scale_shape = mxfp_v_scale_cache_shape(mxfp_num_blocks, block_size, num_heads, v_dim)
-                            k_scale_cache = raw_k_scale_tensor.view(self._get_mxfp_scale_dtype()).view(k_scale_shape)
-                            v_scale_cache = raw_v_scale_tensor.view(self._get_mxfp_scale_dtype()).view(v_scale_shape)
-                            kv_caches[layer_name] = (k_cache, v_cache, k_scale_cache, v_scale_cache)
-                        else:
-                            kv_caches[layer_name] = (k_cache, v_cache)
+                        kv_caches[layer_name] = (k_cache, v_cache)
                 elif isinstance(current_kv_cache_spec, MambaSpec):
                     raw_tensor = kv_cache_raw_tensors[layer_name]
                     assert raw_tensor is not None
