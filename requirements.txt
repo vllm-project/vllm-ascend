@@ -1,4 +1,3 @@
---extra-index-url https://triton-ascend.osinfra.cn/pypi/simple
 # Should be mirrored in pyporject.toml
 cmake>=3.26
 decorator
