@@ -2,6 +2,7 @@ from collections.abc import Iterable
 from typing import Any
 
 import torch
+
 from vllm.config import VllmConfig
 from vllm.distributed.kv_events import (
     KVCacheEvent,
@@ -17,7 +18,6 @@ from vllm.v1.core.sched.output import SchedulerOutput
 from vllm.v1.kv_cache_interface import KVCacheConfig
 from vllm.v1.outputs import KVConnectorOutput
 from vllm.v1.request import Request
-
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.layerwise_config import (
     get_layerwise_config,
 )
@@ -93,11 +93,8 @@ class AscendStoreConnector(KVConnectorBase_V1):
         self.kv_caches: dict[str, torch.Tensor] = {}
         self._kv_cache_events: AscendStoreKVEvents | None = None
 
-        self.sended_but_unfinished_reqs: set[str] = set()
-
         if role == KVConnectorRole.SCHEDULER:
             page_size_bytes = kv_cache_config.kv_cache_groups[0].kv_cache_spec.page_size_bytes
-            logger.info(f"==========================> page_size_bytes {page_size_bytes}")
             self.connector_scheduler = KVPoolScheduler(vllm_config, self.use_layerwise, page_size_bytes=page_size_bytes)
         else:
             self.connector_worker = KVPoolWorker(

@@ -7,7 +7,6 @@ from vllm.logger import logger
 from vllm.v1.core.kv_cache_manager import KVCacheBlocks
 from vllm.v1.core.sched.output import SchedulerOutput
 from vllm.v1.request import Request
-
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.backend import (
     backend_map,
 )
@@ -55,7 +54,7 @@ class KVPoolScheduler:
         self._delayed_free_req_ids: set[str] = set()
 
         self.page_size_bytes = page_size_bytes
-        logger.info(f"==============> page_size_bytes {page_size_bytes}")
+        logger.info("KV pool page_size_bytes: %d", page_size_bytes)
         backend_name = vllm_config.kv_transfer_config.kv_connector_extra_config.get(
             "backend", "mooncake")
         backend = backend_map.get(backend_name.lower())

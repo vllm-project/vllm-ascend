@@ -7,8 +7,8 @@ import subprocess
 from collections import defaultdict
 
 import psutil
-from vllm.logger import logger
 
+from vllm.logger import logger
 from vllm_ascend.utils import AscendDeviceType, get_ascend_device_type
 
 MASK_BIT = 32  # Number of bits in a CPU affinity mask group

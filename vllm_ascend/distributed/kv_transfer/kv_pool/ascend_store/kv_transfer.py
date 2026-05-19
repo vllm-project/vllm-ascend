@@ -7,10 +7,10 @@ from typing import Any
 
 import numpy as np
 import torch
+
 from vllm.distributed.kv_events import BlockStored
 from vllm.logger import logger
 from vllm.v1.core.kv_cache_utils import maybe_convert_block_hash
-
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.backend.backend import Backend
 
 # isort: off
@@ -31,16 +31,6 @@ def _circular_shift(lst: list, offset: int) -> list:
     return lst[offset:] + lst[:offset]
 
 
-def _circular_shift_to_list(value: np.ndarray, offset: int) -> list:
-    length = len(value)
-    if length == 0:
-        return []
-    offset %= length
-    if offset == 0:
-        return value.tolist()
-    return np.concatenate((value[offset:], value[:offset])).tolist()
-
-
 def _circular_shift_array(value: np.ndarray, offset: int) -> np.ndarray:
     length = len(value)
     if length == 0:
@@ -49,10 +39,6 @@ def _circular_shift_array(value: np.ndarray, offset: int) -> np.ndarray:
     if offset == 0:
         return value
     return np.concatenate((value[offset:], value[:offset]))
-
-
-def _select_rank_data(value, start: int, step: int) -> list:
-    return value[start::step].tolist()
 
 
 class LayerBatchBuilder:
