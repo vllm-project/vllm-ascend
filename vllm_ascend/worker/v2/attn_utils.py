@@ -286,15 +286,28 @@ def _allocate_kv_cache(
         k_dim, v_dim = _get_attention_kv_cache_dims(example_layer_name, example_kv_cache_spec)
         assert k_dim > 0 and v_dim > 0
         if _is_c8_mxfp_kv_cache(vllm_config, example_kv_cache_spec):
+            kv_dtype_size = example_kv_cache_spec.dtype.itemsize
             page_size_bytes = mxfp_kv_page_size_bytes(
                 example_kv_cache_spec.block_size,
                 example_kv_cache_spec.num_kv_heads,
                 k_dim,
                 v_dim,
-                example_kv_cache_spec.dtype.itemsize,
+                kv_dtype_size,
             )
-            assert page_size_bytes == example_kv_cache_spec.page_size_bytes
-            assert kv_cache_tensor.size % page_size_bytes == 0
+            assert page_size_bytes == example_kv_cache_spec.page_size_bytes, (
+                f"C8_MXFP page_size mismatch: computed={page_size_bytes}, "
+                f"spec.page_size_bytes={example_kv_cache_spec.page_size_bytes}, "
+                f"layer={example_layer_name}, block_size={example_kv_cache_spec.block_size}, "
+                f"num_kv_heads={example_kv_cache_spec.num_kv_heads}, k_dim={k_dim}, v_dim={v_dim}"
+            )
+            assert kv_cache_tensor.size % page_size_bytes == 0, (
+                f"C8_MXFP kv_cache_tensor.size not divisible by page_size_bytes: "
+                f"kv_cache_tensor.size={kv_cache_tensor.size}, page_size_bytes={page_size_bytes}, "
+                f"remainder={kv_cache_tensor.size % page_size_bytes}, "
+                f"spec.page_size_bytes={example_kv_cache_spec.page_size_bytes}, "
+                f"layer={example_layer_name}, block_size={example_kv_cache_spec.block_size}, "
+                f"num_kv_heads={example_kv_cache_spec.num_kv_heads}, k_dim={k_dim}, v_dim={v_dim}"
+            )
             num_blocks = kv_cache_tensor.size // page_size_bytes
             num_heads = example_kv_cache_spec.num_kv_heads
             block_size = example_kv_cache_spec.block_size

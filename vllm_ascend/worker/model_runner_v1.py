@@ -3392,15 +3392,30 @@ class NPUModelRunner(GPUModelRunner):
                         k_dim, v_dim = self._get_attention_kv_cache_dims(layer_name, current_kv_cache_spec)
                         assert k_dim > 0 and v_dim > 0
                         if self._is_c8_mxfp_kv_cache(current_kv_cache_spec):
+                            kv_dtype_size = get_dtype_size(current_kv_cache_spec.dtype)
                             page_size_bytes = mxfp_kv_page_size_bytes(
                                 current_kv_cache_spec.block_size,
                                 current_kv_cache_spec.num_kv_heads,
                                 k_dim,
                                 v_dim,
-                                get_dtype_size(current_kv_cache_spec.dtype),
+                                kv_dtype_size,
                             )
-                            assert page_size_bytes == current_kv_cache_spec.page_size_bytes
-                            assert kv_cache_tensor.size % page_size_bytes == 0
+                            assert page_size_bytes == current_kv_cache_spec.page_size_bytes, (
+                                f"C8_MXFP page_size mismatch: computed={page_size_bytes}, "
+                                f"spec.page_size_bytes={current_kv_cache_spec.page_size_bytes}, "
+                                f"layer={layer_name}, block_size={current_kv_cache_spec.block_size}, "
+                                f"num_kv_heads={current_kv_cache_spec.num_kv_heads}, k_dim={k_dim}, "
+                                f"v_dim={v_dim}, kv_dtype_size={kv_dtype_size}"
+                            )
+                            assert kv_cache_tensor.size % page_size_bytes == 0, (
+                                f"C8_MXFP kv_cache_tensor.size not divisible by page_size_bytes: "
+                                f"kv_cache_tensor.size={kv_cache_tensor.size}, page_size_bytes={page_size_bytes}, "
+                                f"remainder={kv_cache_tensor.size % page_size_bytes}, "
+                                f"spec.page_size_bytes={current_kv_cache_spec.page_size_bytes}, "
+                                f"layer={layer_name}, block_size={current_kv_cache_spec.block_size}, "
+                                f"num_kv_heads={current_kv_cache_spec.num_kv_heads}, k_dim={k_dim}, "
+                                f"v_dim={v_dim}, kv_dtype_size={kv_dtype_size}"
+                            )
                             num_blocks = kv_cache_tensor.size // page_size_bytes
                             num_heads = current_kv_cache_spec.num_kv_heads
                             block_size = current_kv_cache_spec.block_size
