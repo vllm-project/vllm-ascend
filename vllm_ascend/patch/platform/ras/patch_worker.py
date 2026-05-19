@@ -41,7 +41,7 @@ from vllm.distributed.parallel_state import (
     model_parallel_is_initialized,
 )
 from vllm.envs import enable_envs_cache
-from vllm.logger import init_logger
+from vllm.logger import logger
 from vllm.platforms import current_platform
 from vllm.tracing import instrument, maybe_init_worker_tracer
 from vllm.utils.network_utils import (
@@ -66,12 +66,11 @@ def enqueue_output(self, output: Any):
     worker_response_mq. If the output is an Exception, it is
     converted to a FAILURE response.
     """
-    logger.info("进入了patch代码的逻辑~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~")
     if isinstance(output, AsyncModelRunnerOutput):
         try:
             output = output.get_output()
         except Exception as e:
-            logger.error("[WorkerDecorator] Enqueue_output detected exception")
+            logger.error("[WorkerProc] Enqueue_output detected exception")
             output = e
     if isinstance(output, Exception):
         result = (WorkerProc.ResponseStatus.FAILURE, str(output))
@@ -80,4 +79,4 @@ def enqueue_output(self, output: Any):
     if (response_mq := self.worker_response_mq) is not None:
         response_mq.enqueue(result)
 
-vllm.v1.executor.multiproc_executor.MultiprocExecutor.enqueue_output = enqueue_output
+vllm.v1.executor.multiproc_executor.WorkerProc.enqueue_output = enqueue_output
