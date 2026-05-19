@@ -123,11 +123,13 @@ class TestAscendConfig(TestBase):
         self.assertEqual(ascend_config.weight_nz_mode, 2)
         mock_info_once.assert_any_call(
             "AscendConfig.enable_mlapo falls back to environment variable VLLM_ASCEND_ENABLE_MLAPO with value False. "
-            "Please use additional_config.enable_mlapo instead, because VLLM_ASCEND_ENABLE_MLAPO will be removed in the next release."
+            "Please use additional_config.enable_mlapo instead, because VLLM_ASCEND_ENABLE_MLAPO will be "
+            "removed in the next release."
         )
         mock_info_once.assert_any_call(
             "AscendConfig.weight_nz_mode falls back to environment variable VLLM_ASCEND_ENABLE_NZ with value 2. "
-            "Please use additional_config.weight_nz_mode instead, because VLLM_ASCEND_ENABLE_NZ will be removed in the next release."
+            "Please use additional_config.weight_nz_mode instead, because VLLM_ASCEND_ENABLE_NZ will be removed "
+            "in the next release."
         )
 
     @_clean_up_ascend_config
