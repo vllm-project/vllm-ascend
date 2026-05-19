@@ -20,6 +20,9 @@ from vllm_ascend.cpu_binding import (
     bind_thread_to_cpus,
     get_kv_transfer_thread_cpus,
 )
+from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.backend import (
+    backend_map,
+)
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.config_data import (
     AscendConnectorMetadata,
     ChunkedTokenDatabase,
@@ -40,22 +43,6 @@ from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.kv_transfer import
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.layerwise_config import (
     get_layerwise_config,
 )
-
-backend_map = {
-    "mooncake": {
-        "name": "MooncakeBackend",
-        "path": "vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.backend.mooncake_backend",
-    },
-    "memcache": {
-        "name": "MemcacheBackend",
-        "path": "vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.backend.memcache_backend",
-    },
-    "yuanrong": {
-        "name": "YuanrongBackend",
-        "path": "vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.backend.yuanrong_backend",
-    },
-}
-
 
 class KVPoolWorker:
     # The main class for the cache engine.

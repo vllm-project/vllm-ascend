@@ -1,5 +1,6 @@
+import importlib
 from typing import Any
-from memcache_hybrid import DistributedObjectStore  # type: ignore
+
 from vllm.config import VllmConfig
 from vllm.distributed.kv_transfer.kv_connector.v1.base import KVConnectorMetadata
 from vllm.logger import logger
@@ -7,6 +8,9 @@ from vllm.v1.core.kv_cache_manager import KVCacheBlocks
 from vllm.v1.core.sched.output import SchedulerOutput
 from vllm.v1.request import Request
 
+from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.backend import (
+    backend_map,
+)
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.config_data import (
     AscendConnectorMetadata,
     LoadSpec,
@@ -52,8 +56,17 @@ class KVPoolScheduler:
 
         self.page_size_bytes = page_size_bytes
         logger.info(f"==============> page_size_bytes {page_size_bytes}")
-        self.store_scheduler = DistributedObjectStore()
-        self.store_scheduler.init(device_id=0, init_bm=False)
+        backend_name = vllm_config.kv_transfer_config.kv_connector_extra_config.get(
+            "backend", "mooncake")
+        backend = backend_map.get(backend_name.lower())
+        if backend is None:
+            raise ValueError(f"Unsupported KV pool backend: {backend_name}")
+        backend_path = backend.get("path")
+        backend_class_name = backend.get("name")
+        assert backend_path is not None and backend_class_name is not None
+        backend_module = importlib.import_module(backend_path)
+        backend_class = getattr(backend_module, backend_class_name)
+        self.store_scheduler = backend_class(vllm_config.parallel_config)
 
         model_config = vllm_config.model_config
         self.tp_size = vllm_config.parallel_config.tensor_parallel_size
@@ -234,8 +247,7 @@ class KVPoolScheduler:
             return 0, False
 
         num_queried_hit_blocks = 0
-        use_key_info_lookup = True
-        if use_key_info_lookup or self.use_layerwise:
+        if self.use_layerwise:
             tracker = self._get_or_create_request_tracker(request.request_id)
             cached_gvas = []
             key_infos = self.store_scheduler.batch_get_key_info(

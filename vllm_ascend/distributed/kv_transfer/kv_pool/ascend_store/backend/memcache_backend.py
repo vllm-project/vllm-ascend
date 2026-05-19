@@ -66,6 +66,12 @@ class MemcacheBackend(Backend):
     def exists(self, keys: list[str]) -> list[int]:
         return self.store.batch_is_exist(keys)
 
+    def batch_get_key_info(self, keys: list[str]):
+        return self.store.batch_get_key_info(keys)
+
+    def batch_alloc(self, keys: list[str], sizes: list[int]) -> list[int]:
+        return self.store.batch_alloc(keys, sizes)
+
     def get(self, key: list[str], addr: list[list[int]], size: list[list[int]]):
         try:
             res = self.store.batch_get_into_layers(key, addr, size, MmcDirect.COPY_G2L.value)
