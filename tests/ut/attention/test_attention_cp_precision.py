@@ -15,6 +15,8 @@ from tests.ut.attention.utils import (
     patch_distributed_groups,
 )
 from tests.ut.conftest import npu_test
+from vllm_ascend.attention.attention_mask import AttentionMaskBuilder
+from vllm_ascend.attention.attention_v1 import AscendMetadata
 from vllm_ascend.attention.context_parallel.attention_cp import (
     AscendAttentionCPImpl,
 )
@@ -23,8 +25,6 @@ from vllm_ascend.attention.context_parallel.common_cp import (
     AscendMetadataForPrefill,
     AscendPCPMetadata,
 )
-from vllm_ascend.attention.attention_v1 import AscendMetadata
-from vllm_ascend.attention.attention_mask import AttentionMaskBuilder
 
 BATCH_SPECS = {
     "single_prefill": BatchSpec(seq_lens=[128], query_lens=[128]),
@@ -96,15 +96,22 @@ def compute_sdpa_reference(
             causal_mask = torch.tril(torch.ones(q_len, q_len, device=q.device))
             attn_mask[:, context_len:] = causal_mask
             sdpa_out = torch.nn.functional.scaled_dot_product_attention(
-                q_sdpa, k_sdpa, v_sdpa,
-                attn_mask=attn_mask, is_causal=False,
-                enable_gqa=enable_gqa, scale=scale,
+                q_sdpa,
+                k_sdpa,
+                v_sdpa,
+                attn_mask=attn_mask,
+                is_causal=False,
+                enable_gqa=enable_gqa,
+                scale=scale,
             )
         else:
             sdpa_out = torch.nn.functional.scaled_dot_product_attention(
-                q_sdpa, k_sdpa, v_sdpa,
+                q_sdpa,
+                k_sdpa,
+                v_sdpa,
                 is_causal=True,
-                enable_gqa=enable_gqa, scale=scale,
+                enable_gqa=enable_gqa,
+                scale=scale,
             )
 
         all_sdpa_outputs.append(sdpa_out.transpose(1, 2).squeeze(0))
@@ -151,13 +158,22 @@ def compute_mixed_sdpa_reference(
             causal_mask = torch.tril(torch.ones(q_len, q_len, device=full_q.device))
             attn_mask[:, context_len:] = causal_mask
             sdpa_out = torch.nn.functional.scaled_dot_product_attention(
-                q_sdpa, k_sdpa, v_sdpa, attn_mask=attn_mask,
-                is_causal=False, enable_gqa=enable_gqa, scale=scale,
+                q_sdpa,
+                k_sdpa,
+                v_sdpa,
+                attn_mask=attn_mask,
+                is_causal=False,
+                enable_gqa=enable_gqa,
+                scale=scale,
             )
         else:
             sdpa_out = torch.nn.functional.scaled_dot_product_attention(
-                q_sdpa, k_sdpa, v_sdpa,
-                is_causal=True, enable_gqa=enable_gqa, scale=scale,
+                q_sdpa,
+                k_sdpa,
+                v_sdpa,
+                is_causal=True,
+                enable_gqa=enable_gqa,
+                scale=scale,
             )
 
         all_outputs.append(sdpa_out.transpose(1, 2).squeeze(0))
@@ -205,8 +221,10 @@ def _make_kv_cache_for_decode(
 
         num_blocks_for_seq = (s_len + block_size - 1) // block_size
         block_table[i, :num_blocks_for_seq] = torch.arange(
-            block_start, block_start + num_blocks_for_seq,
-            dtype=torch.int32, device=device,
+            block_start,
+            block_start + num_blocks_for_seq,
+            dtype=torch.int32,
+            device=device,
         )
 
         for t_idx in range(context_len):
@@ -263,8 +281,10 @@ def _make_kv_cache_for_mixed(
         if is_decode and context_len > 0:
             num_blocks_for_seq = (s_len + block_size - 1) // block_size
             block_table[i, :num_blocks_for_seq] = torch.arange(
-                block_start, block_start + num_blocks_for_seq,
-                dtype=torch.int32, device=device,
+                block_start,
+                block_start + num_blocks_for_seq,
+                dtype=torch.int32,
+                device=device,
             )
 
             for t_idx in range(context_len):
@@ -304,9 +324,7 @@ def build_cp_attn_metadata(
         decode_threshold: Requests with query_lens <= decode_threshold are
             classified as decode. MTP needs decode_threshold >= 1 + num_spec_tokens.
     """
-    common_attn_metadata = create_common_attn_metadata(
-        batch_spec, vllm_config.cache_config.block_size, device
-    )
+    common_attn_metadata = create_common_attn_metadata(batch_spec, vllm_config.cache_config.block_size, device)
 
     num_reqs = common_attn_metadata.num_reqs
     num_actual_tokens = common_attn_metadata.num_actual_tokens
@@ -352,13 +370,15 @@ def build_cp_attn_metadata(
 
             kv_total = total_prefill_tokens * pcp_size
             kv_with_q_head_mask_idx = torch.arange(
-                prefill_tokens_offset, prefill_tokens_offset + kv_total,
-                device=device, dtype=torch.long,
+                prefill_tokens_offset,
+                prefill_tokens_offset + kv_total,
+                device=device,
+                dtype=torch.long,
             )
             kv_with_q_head_nomask_idx = (
-                torch.arange(prefill_tokens_offset, prefill_tokens_offset + kv_total,
-                             device=device, dtype=torch.long)
-                if pcp_rank > 0 else torch.tensor([], device=device, dtype=torch.long)
+                torch.arange(prefill_tokens_offset, prefill_tokens_offset + kv_total, device=device, dtype=torch.long)
+                if pcp_rank > 0
+                else torch.tensor([], device=device, dtype=torch.long)
             )
             q_full_idx = torch.arange(chunk_size, device=device, dtype=torch.long)
             kv_with_q_tail_nomask_idx = torch.tensor([], device=device, dtype=torch.long)
@@ -366,13 +386,17 @@ def build_cp_attn_metadata(
             pcp_allgather_restore_idx = list(range(total_prefill_tokens * pcp_size))
         else:
             q_head_idx = torch.arange(
-                prefill_tokens_offset, prefill_tokens_offset + total_prefill_tokens,
-                device=device, dtype=torch.long,
+                prefill_tokens_offset,
+                prefill_tokens_offset + total_prefill_tokens,
+                device=device,
+                dtype=torch.long,
             )
             q_tail_idx = torch.tensor([], device=device, dtype=torch.long)
             kv_with_q_head_mask_idx = torch.arange(
-                prefill_tokens_offset, prefill_tokens_offset + total_prefill_tokens,
-                device=device, dtype=torch.long,
+                prefill_tokens_offset,
+                prefill_tokens_offset + total_prefill_tokens,
+                device=device,
+                dtype=torch.long,
             )
             kv_with_q_head_nomask_idx = torch.tensor([], device=device, dtype=torch.long)
             kv_with_q_tail_nomask_idx = torch.tensor([], device=device, dtype=torch.long)
@@ -411,9 +435,7 @@ def build_cp_attn_metadata(
         decode_seq_lens = seq_lens_cpu[:num_decodes].tolist()
 
         if kv_cache_prepopulated:
-            num_computed_tokens_arr = np.zeros(
-                (num_decodes_flatten, pcp_size, 1), dtype=np.int32
-            )
+            num_computed_tokens_arr = np.zeros((num_decodes_flatten, pcp_size, 1), dtype=np.int32)
             flat_idx = 0
             for i in range(num_decodes):
                 s_len = int(decode_seq_lens[i])
@@ -423,9 +445,7 @@ def build_cp_attn_metadata(
                     num_computed_tokens_arr[flat_idx, pcp_rank, 0] = context_len + t + 1
                     flat_idx += 1
         else:
-            num_computed_tokens_arr = np.zeros(
-                (num_decodes_flatten, pcp_size, 1), dtype=np.int32
-            )
+            num_computed_tokens_arr = np.zeros((num_decodes_flatten, pcp_size, 1), dtype=np.int32)
 
         # Tile block_table for MTP: each decode request may have multiple tokens
         if num_decodes_flatten > num_decodes:
@@ -476,7 +496,7 @@ def run_cp_attention(
     query: torch.Tensor,
     key: torch.Tensor,
     value: torch.Tensor,
-    kv_cache: tuple[torch.Tensor],
+    kv_cache: tuple[torch.Tensor, torch.Tensor],
     attn_metadata: AscendMetadata,
     impl: AscendAttentionCPImpl,
     device: torch.device,
@@ -510,6 +530,7 @@ def run_cp_attention(
         mock_layer = MockAttentionLayer(device)
 
         import vllm_ascend.device.device_op as device_op_module
+
         original_reshape_and_cache = device_op_module.DeviceOperator.reshape_and_cache
         original_kv_cache_load = device_op_module.DeviceOperator.kv_cache_load
 
@@ -593,7 +614,10 @@ def _assert_close(output, reference, rtol, atol, backend_name):
         return f"[{name}] output differs from SDPA baseline. {msg}"
 
     torch.testing.assert_close(
-        output, reference, rtol=rtol, atol=atol,
+        output,
+        reference,
+        rtol=rtol,
+        atol=atol,
         msg=partial(error_msg, name=backend_name),
     )
 
@@ -601,6 +625,7 @@ def _assert_close(output, reference, rtol, atol, backend_name):
 # ---------------------------------------------------------------------------
 # Pure prefill (seq_lens == query_lens, no context)
 # ---------------------------------------------------------------------------
+@npu_test(num_npus=1, npu_type="a2")
 def _test_cp_prefill_precision_no_cp(
     batch_spec: BatchSpec,
     model: str,
@@ -624,7 +649,7 @@ def _test_cp_prefill_precision_no_cp(
     num_kv_heads = vllm_config.model_config.get_num_kv_heads(vllm_config.parallel_config)
     head_size = vllm_config.model_config.get_head_size()
     dtype = torch.bfloat16
-    scale = 1.0 / (head_size ** 0.5)
+    scale = 1.0 / (head_size**0.5)
 
     num_tokens = batch_spec.compute_num_tokens()
     total_kv = sum(batch_spec.seq_lens)
@@ -634,7 +659,13 @@ def _test_cp_prefill_precision_no_cp(
     value_vllm = torch.randn(total_kv, num_kv_heads, head_size, dtype=dtype, device=device)
 
     sdpa_output = compute_sdpa_reference(
-        query_vllm, key_vllm, value_vllm, batch_spec, scale, num_q_heads, num_kv_heads,
+        query_vllm,
+        key_vllm,
+        value_vllm,
+        batch_spec,
+        scale,
+        num_q_heads,
+        num_kv_heads,
     )
 
     attn_metadata = build_cp_attn_metadata(batch_spec, vllm_config, device, pcp_size=1, pcp_rank=0)
@@ -655,6 +686,7 @@ def _test_cp_prefill_precision_no_cp(
 # ---------------------------------------------------------------------------
 # Pure decode (query_lens == 1, context in KV cache)
 # ---------------------------------------------------------------------------
+@npu_test(num_npus=1, npu_type="a2")
 def _test_cp_decode_precision_no_cp(
     batch_spec: BatchSpec,
     model: str,
@@ -679,7 +711,7 @@ def _test_cp_decode_precision_no_cp(
     num_kv_heads = vllm_config.model_config.get_num_kv_heads(vllm_config.parallel_config)
     head_size = vllm_config.model_config.get_head_size()
     dtype = torch.bfloat16
-    scale = 1.0 / (head_size ** 0.5)
+    scale = 1.0 / (head_size**0.5)
 
     total_kv = sum(batch_spec.seq_lens)
 
@@ -688,7 +720,13 @@ def _test_cp_decode_precision_no_cp(
     value_full = torch.randn(total_kv, num_kv_heads, head_size, dtype=dtype, device=device)
 
     sdpa_output = compute_mixed_sdpa_reference(
-        query_full, key_full, value_full, batch_spec, scale, num_q_heads, num_kv_heads,
+        query_full,
+        key_full,
+        value_full,
+        batch_spec,
+        scale,
+        num_q_heads,
+        num_kv_heads,
     )
 
     # Backend inputs: only the new (decode) tokens
@@ -716,14 +754,25 @@ def _test_cp_decode_precision_no_cp(
     value_vllm = torch.cat(all_v, dim=0)
 
     attn_metadata = build_cp_attn_metadata(
-        batch_spec, vllm_config, device, pcp_size=1, pcp_rank=0,
+        batch_spec,
+        vllm_config,
+        device,
+        pcp_size=1,
+        pcp_rank=0,
         kv_cache_prepopulated=True,
         decode_threshold=decode_threshold,
     )
 
     k_cache, v_cache = _make_kv_cache_for_decode(
-        batch_spec, num_kv_heads, head_size, block_size, dtype, device,
-        key_full, value_full, attn_metadata.block_tables,
+        batch_spec,
+        num_kv_heads,
+        head_size,
+        block_size,
+        dtype,
+        device,
+        key_full,
+        value_full,
+        attn_metadata.block_tables,
     )
 
     # Re-tile decode block tables after _make_kv_cache_for_decode updates
@@ -754,6 +803,7 @@ def _test_cp_decode_precision_no_cp(
 # without chunked context. Therefore prefill sequences in mixed mode must
 # have seq_lens == query_lens (no context).
 # ---------------------------------------------------------------------------
+@npu_test(num_npus=1, npu_type="a2")
 def _test_cp_mixed_precision_no_cp(
     batch_spec: BatchSpec,
     model: str,
@@ -777,7 +827,7 @@ def _test_cp_mixed_precision_no_cp(
     num_kv_heads = vllm_config.model_config.get_num_kv_heads(vllm_config.parallel_config)
     head_size = vllm_config.model_config.get_head_size()
     dtype = torch.bfloat16
-    scale = 1.0 / (head_size ** 0.5)
+    scale = 1.0 / (head_size**0.5)
 
     total_kv = sum(batch_spec.seq_lens)
 
@@ -786,7 +836,13 @@ def _test_cp_mixed_precision_no_cp(
     value_full = torch.randn(total_kv, num_kv_heads, head_size, dtype=dtype, device=device)
 
     sdpa_output = compute_mixed_sdpa_reference(
-        query_full, key_full, value_full, batch_spec, scale, num_q_heads, num_kv_heads,
+        query_full,
+        key_full,
+        value_full,
+        batch_spec,
+        scale,
+        num_q_heads,
+        num_kv_heads,
     )
 
     # Backend inputs: only the new tokens
@@ -814,13 +870,24 @@ def _test_cp_mixed_precision_no_cp(
     value_vllm = torch.cat(all_v, dim=0)
 
     attn_metadata = build_cp_attn_metadata(
-        batch_spec, vllm_config, device, pcp_size=1, pcp_rank=0,
+        batch_spec,
+        vllm_config,
+        device,
+        pcp_size=1,
+        pcp_rank=0,
         kv_cache_prepopulated=True,
     )
 
     k_cache, v_cache = _make_kv_cache_for_mixed(
-        batch_spec, num_kv_heads, head_size, block_size, dtype, device,
-        key_full, value_full, attn_metadata.block_tables,
+        batch_spec,
+        num_kv_heads,
+        head_size,
+        block_size,
+        dtype,
+        device,
+        key_full,
+        value_full,
+        attn_metadata.block_tables,
     )
     kv_cache = (k_cache, v_cache)
 
@@ -830,6 +897,7 @@ def _test_cp_mixed_precision_no_cp(
     _assert_close(output, sdpa_output, rtol, atol, "CP_Mixed")
 
 
+@npu_test(num_npus=1, npu_type="a2")
 class TestCPAttentionPrecision:
     """Precision tests for AscendAttentionCPImpl.
 
@@ -843,50 +911,91 @@ class TestCPAttentionPrecision:
     - MTP (Multi-Token Prediction) decode, PCP=1, DCP=1
     """
 
-    @pytest.mark.parametrize("batch_spec_name", [
-        "single_prefill", "small_prefill", "medium_prefill", "large_prefill",
-    ])
+    @pytest.mark.parametrize(
+        "batch_spec_name",
+        [
+            "single_prefill",
+            "small_prefill",
+            "medium_prefill",
+            "large_prefill",
+        ],
+    )
     @pytest.mark.parametrize("model", MODELS)
-    @npu_test(num_npus=1, npu_type="a2")
     @patch_distributed_groups(dcp_size=1, pcp_size=1)
+    @npu_test(num_npus=1, npu_type="a2")
     def test_cp_prefill_precision(
-        self, mock_all2all, mock_dcp, mock_pcp, batch_spec_name, model,
+        self,
+        mock_all2all,
+        mock_dcp,
+        mock_pcp,
+        batch_spec_name,
+        model,
     ):
         batch_spec = BATCH_SPECS[batch_spec_name]
         _test_cp_prefill_precision_no_cp(batch_spec, model)
 
-    @pytest.mark.parametrize("batch_spec_name", [
-        "single_decode", "small_decode", "medium_decode",
-    ])
+    @pytest.mark.parametrize(
+        "batch_spec_name",
+        [
+            "single_decode",
+            "small_decode",
+            "medium_decode",
+        ],
+    )
     @pytest.mark.parametrize("model", MODELS)
-    @npu_test(num_npus=1, npu_type="a2")
     @patch_distributed_groups(dcp_size=1, pcp_size=1)
+    @npu_test(num_npus=1, npu_type="a2")
     def test_cp_decode_precision(
-        self, mock_all2all, mock_dcp, mock_pcp, batch_spec_name, model,
+        self,
+        mock_all2all,
+        mock_dcp,
+        mock_pcp,
+        batch_spec_name,
+        model,
     ):
         batch_spec = BATCH_SPECS[batch_spec_name]
         _test_cp_decode_precision_no_cp(batch_spec, model)
 
-    @pytest.mark.parametrize("batch_spec_name", [
-        "mixed_small", "mixed_medium", "mixed_large",
-    ])
+    @pytest.mark.parametrize(
+        "batch_spec_name",
+        [
+            "mixed_small",
+            "mixed_medium",
+            "mixed_large",
+        ],
+    )
     @pytest.mark.parametrize("model", MODELS)
-    @npu_test(num_npus=1, npu_type="a2")
     @patch_distributed_groups(dcp_size=1, pcp_size=1)
+    @npu_test(num_npus=1, npu_type="a2")
     def test_cp_mixed_precision(
-        self, mock_all2all, mock_dcp, mock_pcp, batch_spec_name, model,
+        self,
+        mock_all2all,
+        mock_dcp,
+        mock_pcp,
+        batch_spec_name,
+        model,
     ):
         batch_spec = BATCH_SPECS[batch_spec_name]
         _test_cp_mixed_precision_no_cp(batch_spec, model)
 
-    @pytest.mark.parametrize("batch_spec_name", [
-        "mtp_1_plus_3_tiny", "mtp_1_plus_3_small", "mtp_1_plus_3_medium",
-    ])
+    @pytest.mark.parametrize(
+        "batch_spec_name",
+        [
+            "mtp_1_plus_3_tiny",
+            "mtp_1_plus_3_small",
+            "mtp_1_plus_3_medium",
+        ],
+    )
     @pytest.mark.parametrize("model", MODELS)
-    @npu_test(num_npus=1, npu_type="a2")
     @patch_distributed_groups(dcp_size=1, pcp_size=1)
+    @npu_test(num_npus=1, npu_type="a2")
     def test_cp_mtp_decode_precision(
-        self, mock_all2all, mock_dcp, mock_pcp, batch_spec_name, model,
+        self,
+        mock_all2all,
+        mock_dcp,
+        mock_pcp,
+        batch_spec_name,
+        model,
     ):
         """MTP decode: each request produces 1 target + 3 speculative tokens.
 
