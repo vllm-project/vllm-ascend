@@ -1,0 +1,10 @@
+model_name: "TeleAI/TeleChat2-3B"
+hardware: "Atlas A2 Series"
+tasks:
+- name: "gsm8k"
+  metrics:
+  - name: "exact_match,strict-match"
+    value: 0.0
+  - name: "exact_match,flexible-extract"
+    value: 0.0
+num_fewshot: 5
