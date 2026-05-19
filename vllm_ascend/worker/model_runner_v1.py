@@ -2936,8 +2936,7 @@ class NPUModelRunner(GPUModelRunner):
                     is_profile=is_profile,
                 )
             if is_profile and self.dynamic_eplb:
-                target = self.model.language_model if hasattr(self.model, "language_model") else self.model
-                target.clear_all_moe_loads()
+                self.eplb_updator.adaptor.clear_all_moe_loads()
             if self.dynamic_eplb:
                 self.eplb_updator.forward_end()
             self._finalize_dump_data(dump=False)

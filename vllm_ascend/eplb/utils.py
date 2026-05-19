@@ -15,30 +15,6 @@
 # This file is a part of the vllm-ascend project.
 #
 # Todo: Once https://github.com/vllm-project/vllm/pull/23553 is merged in vllm. Remove this model register.
-import types
-
-import torch
-
-
-def _get_expert_map(self, layer_id):
-    return self._moe_layer_map[layer_id]._expert_map
-
-
-def _get_log2phy_map(self, layer_id):
-    return self._moe_layer_map[layer_id].get_log2phy_map()
-
-
-def _get_all_moe_loads(self):
-    loads = [
-        layer.moe_load
-        for layer in self._moe_layers
-    ]
-    return torch.stack(loads, dim=0) if loads else torch.empty(0)
-
-
-def _clear_all_moe_loads(self):
-    for layer in self._moe_layers:
-        layer.clear_moe_load()
 
 
 def model_register(model):
@@ -49,11 +25,5 @@ def model_register(model):
 
     entries = VllmEplbAdaptor._registered_moe_layers
     entries.sort(key=lambda x: x[0])
-    model._moe_layers = [layer for _, layer in entries]
-    model._moe_layer_map = dict(entries)
+    VllmEplbAdaptor._sorted_layers = [layer for _, layer in entries]
     entries.clear()
-
-    model.get_expert_map = types.MethodType(_get_expert_map, model)
-    model.get_log2phy_map = types.MethodType(_get_log2phy_map, model)
-    model.get_all_moe_loads = types.MethodType(_get_all_moe_loads, model)
-    model.clear_all_moe_loads = types.MethodType(_clear_all_moe_loads, model)

@@ -28,6 +28,7 @@ from vllm_ascend.quantization.methods.base import QuantType
 
 class VllmEplbAdaptor:
     _registered_moe_layers: list[tuple[int, "torch.nn.Module"]] = []
+    _sorted_layers: list["torch.nn.Module"] = []
 
     @staticmethod
     def register_layer(global_idx: int, layer: "torch.nn.Module") -> None:
@@ -50,7 +51,7 @@ class VllmEplbAdaptor:
         self.world_size = dist.get_world_size()
         self.num_dense_layers = getattr(self.config, "first_k_dense_replace", 0)
 
-        self.moe_layers = self.model._moe_layers
+        self.moe_layers = VllmEplbAdaptor._sorted_layers
         self.num_moe_layers = len(self.moe_layers)
 
         self.expert_map_per_layer_cpu = dict()  # copy of expert map on CPU to avoid device synchronize frequently
@@ -118,8 +119,13 @@ class VllmEplbAdaptor:
                 self.expert_param_per_layer[local_idx].append(per_expert_param)
 
     def get_rank_expert_workload(self) -> torch.Tensor:
-        self.moe_load = self.model.get_all_moe_loads()
+        loads = [layer.moe_load for layer in self.moe_layers]
+        self.moe_load = torch.stack(loads, dim=0) if loads else torch.empty(0)
         return self.moe_load
+
+    def clear_all_moe_loads(self):
+        for layer in self.moe_layers:
+            layer.clear_moe_load()
 
     def _export_tensor_to_file(self, expert_maps, expert_map_record_path: str):
         if self.rank_id == 0:

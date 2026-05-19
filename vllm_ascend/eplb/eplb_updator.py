@@ -80,7 +80,7 @@ class EplbUpdator:
             if self.expert_map_record_path is not None:
                 self.adaptor._export_tensor_to_file(self.shared_dict["expert_maps"], self.expert_map_record_path)
 
-            self.adaptor.model.clear_all_moe_loads()
+            self.adaptor.clear_all_moe_loads()
             self.cur_iterations = 0
 
     def get_update_info_flag(self):
