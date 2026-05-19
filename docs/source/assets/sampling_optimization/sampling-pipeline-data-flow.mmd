@@ -1,0 +1,28 @@
+sequenceDiagram
+    participant MR as model_runner
+    participant ADP as Adapter
+    participant LP as LogitsProc
+    participant K as Kernels
+
+    MR->>ADP: call with logits
+    ADP->>ADP: build mapping ctx
+    ADP->>LP: apply
+
+    alt default mode
+        LP->>K: logit bias
+        LP->>K: penalties
+        LP->>K: bad words
+        LP->>K: temperature
+        LP->>K: min p
+        LP->>K: topk and topp
+    else skip mode
+        LP->>LP: check and warn
+        Note over LP: no kernel launches
+    end
+
+    LP-->>ADP: processed logits
+    ADP->>K: gumbel sample
+    K-->>ADP: sampled ids
+    ADP->>K: compute logprobs
+    K-->>ADP: logprobs tensors
+    ADP-->>MR: SamplerOutput
