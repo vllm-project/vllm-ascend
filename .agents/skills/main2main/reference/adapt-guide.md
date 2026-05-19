@@ -83,21 +83,15 @@ A no-op adapt (nothing to change) is fine, but it does not skip CI — the updat
 
 ## Step 3: Verify Before CI
 
-Run these checks before CI. They catch the most common mistakes mechanically —
-no judgment needed, just run the commands.
-
 ```bash
-# 1. Version guards present where needed?
-#    For each file you changed that touches a vLLM interface:
-git -C <ascend_path> diff --name-only HEAD
-grep -n 'vllm_version_is' <ascend_path>/<changed_file>
-
-# 2. Version string consistent?
-grep -rn 'vllm_version_is' <ascend_path>/vllm_ascend/ | grep -v '<release_tag>'
-
-# 3. No temp files in repo?
-git -C <ascend_path> status --short | grep -E '\.(log|patch|jsonl)|vllm_changes|vllm_error_analyze'
+python3 <skill_dir>/scripts/pre_ci_check.py \
+  --ascend-path <ascend_path> \
+  --release-tag <main_vllm_tag>
 ```
+
+The script checks version guard presence in changed files, version string
+consistency, and temp file cleanliness. Review any failures before running CI —
+a missing version guard here is cheaper to fix than a CI round-trip.
 
 ---
 

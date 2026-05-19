@@ -147,9 +147,15 @@ corresponding fix pattern in `reference/error-pattern-examples.md`.
 
 ## Step 3: Verify Before Re-running CI
 
-Run the verification checks from `reference/adapt-guide.md` Step 3 before
-re-running CI. The same checks apply: version guards present, version string
-consistent, no temp files in repo.
+Run `scripts/pre_ci_check.py` before re-running CI — same script as in the
+adapt phase. Review any failures; a missing version guard on a YES issue from
+`vllm_error_analyze.md` means the fix is incomplete.
+
+```bash
+python3 <skill_dir>/scripts/pre_ci_check.py \
+  --ascend-path <ascend_path> \
+  --release-tag <main_vllm_tag>
+```
 
 ---
 

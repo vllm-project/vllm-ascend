@@ -99,6 +99,7 @@ The skill itself does not create PRs; it produces committed, CI-verified changes
 | `reference/final-summary.md` | Template for the final reviewer-facing summary |
 | `scripts/detect_commits.py` | Detect base and target commits in both repos |
 | `scripts/plan_steps.py` | Split the commit range into manageable steps |
+| `scripts/per_ci_check.py` | Pre-CI checks: version guards, version string consistency, temp files |
 | `scripts/run_main2main_ci.py` | Run CI suites and produce structured result summaries |
 | `scripts/check_and_commit.py` | Verify preconditions and commit changes |
 | `scripts/update_commit_reference.py` | Update the vLLM commit reference in vllm-ascend |
