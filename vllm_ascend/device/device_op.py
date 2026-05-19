@@ -316,6 +316,7 @@ class A5DeviceAdaptor(BaseDeviceAdaptor):
             key_cache=key_cache,
             value_cache=value_cache,
             slot_mapping=slot_mapping.contiguous(),
+            cache_mode="Norm",
         )
 
     @staticmethod
