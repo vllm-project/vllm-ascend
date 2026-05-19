@@ -896,7 +896,7 @@ def _test_cp_mixed_precision_no_cp(
 
     _assert_close(output, sdpa_output, rtol, atol, "CP_Mixed")
 
-
+@npu_test(num_npus=1, npu_type="a2")
 class TestCPAttentionPrecision:
     """Precision tests for AscendAttentionCPImpl.
 
