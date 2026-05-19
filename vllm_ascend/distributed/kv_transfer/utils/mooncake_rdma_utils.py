@@ -25,11 +25,9 @@ from __future__ import annotations
 from collections.abc import Mapping
 from typing import Any
 
-from vllm.logger import init_logger
+from vllm.logger import logger
 
 import vllm_ascend.envs as ascend_envs
-
-logger = init_logger(__name__)
 
 
 def normalize_string_override(value: Any) -> str | None:
