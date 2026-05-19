@@ -193,6 +193,14 @@ vllm-ascend==|pip_vllm_ascend_version|
 :::{dropdown} Click here to see "Build from source code"
 or build from **source code**:
 
+```{note}
+To install `triton-ascend`, run:
+
+pip install triton-ascend==3.2.1 --extra-index-url https://mirrors.huaweicloud.com/ascend/repos/pypi
+
+If you are installing via `uv`, make sure to install `triton-ascend` **last**, after all other packages have been installed, to avoid dependency resolution conflicts.
+```
+
 ```{code-block} bash
    :substitutions:
 
