@@ -1,7 +1,7 @@
-import pickle
 import time
 import weakref
 
+import msgspec
 import msgspec.msgpack
 import zmq
 from vllm.logger import logger
@@ -12,7 +12,11 @@ from vllm.v1.serial_utils import MsgpackDecoder
 from vllm.v1.utils import get_engine_client_zmq_addr
 from vllm.utils.network_utils import make_zmq_socket
 from vllm.utils.system_utils import get_mp_context
-from vllm_ascend.recovery.types import FaultReport, RecoveryComplete, RecoveryPlanResult
+from vllm_ascend.recovery.types import (
+    FaultReport,
+    RecoveryComplete,
+    RecoveryPlanResult,
+)
 
 
 _RECOVERY_MSG_PREFIX = b"\x00REC"
@@ -152,7 +156,7 @@ def _patched_process_input_socket(
 
         logger.info("All engine subscriptions received by DP coordinator")
 
-        recovery_addr_msg = _RECOVERY_MSG_PREFIX + pickle.dumps(
+        recovery_addr_msg = _RECOVERY_MSG_PREFIX + msgspec.msgpack.encode(
             ("RECOVERY_ADDRESSES", recovery_pub_address, recovery_pull_address)
         )
         publish_back.send(recovery_addr_msg)
@@ -316,7 +320,7 @@ def _patched_process_input_socket(
             if recovery_pull in events:
                 buffer = recovery_pull.recv()
                 try:
-                    msg = pickle.loads(buffer)
+                    msg = msgspec.msgpack.decode(buffer)
                 except Exception:
                     logger.exception("Failed to deserialize recovery msg")
                     msg = None
@@ -341,7 +345,7 @@ def _patched_process_input_socket(
                             msg.worker_rank,
                             msg.exp.exception_msg,
                         )
-                        recovery_pub.send(pickle.dumps(msg.plan))
+                        recovery_pub.send(msgspec.msgpack.encode(msg.plan))
                         logger.info(
                             "[RAS] Broadcast RecoveryPlan '%s' to all engines "
                             "(timeout=%ds, deadline=%.3f)",
@@ -368,7 +372,7 @@ def _patched_process_input_socket(
                                 msg.engine_index,
                                 msg.plan_name,
                             )
-                            recovery_pub.send(pickle.dumps(
+                            recovery_pub.send(msgspec.msgpack.encode(
                                 RecoveryComplete(
                                     plan_name=msg.plan_name,
                                     success=False,
@@ -385,7 +389,7 @@ def _patched_process_input_socket(
                                 "[RAS] All engines reported: ALL SUCCESS",
                             )
                             current_wave += 1
-                            recovery_pub.send(pickle.dumps(
+                            recovery_pub.send(msgspec.msgpack.encode(
                                 RecoveryComplete(
                                     plan_name=msg.plan_name,
                                     success=True,
@@ -414,7 +418,7 @@ def _patched_process_input_socket(
                     len(plan_results),
                     engine_count,
                 )
-                recovery_pub.send(pickle.dumps(
+                recovery_pub.send(msgspec.msgpack.encode(
                     RecoveryComplete(
                         plan_name="",
                         success=False,

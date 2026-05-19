@@ -7,6 +7,7 @@ from vllm_ascend.recovery.types import (
     RecoveryPlanResult,
     StepResult,
     StepTarget,
+    WorkerStepDispatch,
 )
 from vllm_ascend.recovery.worker_recovery_monitor import RecoveryMonitor
 
@@ -20,4 +21,5 @@ __all__ = [
     "RecoveryPlanResult",
     "StepResult",
     "StepTarget",
+    "WorkerStepDispatch",
 ]

@@ -1,8 +1,8 @@
-import pickle
 import signal
 import time
 from contextlib import ExitStack
 
+import msgspec.msgpack
 import zmq
 from vllm.config import ParallelConfig, VllmConfig
 from vllm.logger import logger
@@ -104,7 +104,7 @@ class RasDPEngineCoreProc(DPEngineCoreProc):
                 if buffer.startswith(_RECOVERY_MSG_PREFIX):
                     payload = buffer[len(_RECOVERY_MSG_PREFIX) :]
                     try:
-                        msg = pickle.loads(payload)
+                        msg = msgspec.msgpack.decode(payload)
                         if msg[0] == "RECOVERY_ADDRESSES":
                             _, sub_addr, push_addr = msg
                             logger.info(

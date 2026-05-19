@@ -1,8 +1,8 @@
-import pickle
 import threading
 import time
 from typing import Any, Tuple
-
+  
+import msgspec.msgpack
 import zmq
 from vllm.config import VllmConfig
 from vllm.logger import logger
@@ -15,7 +15,6 @@ from vllm_ascend.recovery.types import (
     StepResult,
     StepTarget,
     WorkerStepDispatch,
-    WorkerStepResult,
 )
 
 
@@ -145,7 +144,7 @@ class RecoveryHandler:
     def _handle_worker_msg(self) -> None:
         buffer = self._recover_report_pull_sock.recv()
         try:
-            msg = pickle.loads(buffer)
+            msg = msgspec.msgpack.decode(buffer)
         except Exception:
             logger.exception(
                 "[RecoveryHandler][engine=%d] Failed to deserialize FaultReport",
@@ -175,7 +174,7 @@ class RecoveryHandler:
         self._begin_recovery()
         if self._expect_coordinator:
             if self._coord_push_sock is not None:
-                self._coord_push_sock.send(pickle.dumps(msg))
+                self._coord_push_sock.send(msgspec.msgpack.encode(msg))
                 logger.info(
                     "[RecoveryHandler][engine=%d] Forwarded FaultReport to "
                     "coordinator, waiting for RecoveryPlan",
@@ -198,7 +197,7 @@ class RecoveryHandler:
     def _handle_coord_msg(self) -> None:
         buffer = self._coord_sub_sock.recv()
         try:
-            msg = pickle.loads(buffer)
+            msg = msgspec.msgpack.decode(buffer)
         except Exception:
             logger.exception(
                 "[RecoveryHandler][engine=%d] Failed to deserialize coord msg",
@@ -254,9 +253,9 @@ class RecoveryHandler:
         cfg = plan.cfg
 
         for step in plan.steps:
-            if step.target == StepTarget.ENGINE_CORE:
+            if step.target == StepTarget.ENGINE_CORE.value:
                 cfg, step_success = self._execute_engine_core_step(step, cfg)
-            elif step.target == StepTarget.WORKER:
+            elif step.target == StepTarget.WORKER.value:
                 cfg, step_success = self._dispatch_worker_step(step, cfg)
             else:
                 logger.error(
@@ -271,6 +270,7 @@ class RecoveryHandler:
                     target=step.target,
                     success=step_success,
                     cfg=cfg,
+                    worker_rank=-1,
                 )
             )
             if not step_success:
@@ -346,7 +346,7 @@ class RecoveryHandler:
             self._engine_index, step.name, self._worker_count,
         )
         self._recover_step_pub_sock.send(
-            pickle.dumps(WorkerStepDispatch(step, cfg))
+            msgspec.msgpack.encode(WorkerStepDispatch(step=step, cfg=cfg))
         )
 
         received = 0
@@ -368,7 +368,7 @@ class RecoveryHandler:
             if self._recover_step_result_pull_sock in events:
                 buffer = self._recover_step_result_pull_sock.recv()
                 try:
-                    msg = pickle.loads(buffer)
+                    msg = msgspec.msgpack.decode(buffer)
                 except Exception:
                     logger.exception(
                         "[RecoveryHandler][engine=%d] Failed to deserialize "
@@ -376,10 +376,10 @@ class RecoveryHandler:
                         self._engine_index,
                     )
                     continue
-                if not isinstance(msg, WorkerStepResult):
+                if not isinstance(msg, StepResult):
                     logger.warning(
                         "[RecoveryHandler][engine=%d] Expected "
-                        "WorkerStepResult, got %s",
+                        "StepResult, got %s",
                         self._engine_index, type(msg),
                     )
                     continue
@@ -403,7 +403,7 @@ class RecoveryHandler:
 
     def _report_plan_result(self, result: RecoveryPlanResult) -> None:
         if self._coord_push_sock is not None:
-            self._coord_push_sock.send(pickle.dumps(result))
+            self._coord_push_sock.send(msgspec.msgpack.encode(result))
             logger.info(
                 "[RecoveryHandler][engine=%d] Reported RecoveryPlanResult to "
                 "coordinator: plan=%s success=%s",
