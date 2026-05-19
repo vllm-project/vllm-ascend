@@ -1,0 +1,7 @@
+e2e-upstream_singlecard:
+  - name: tests/model_executor/model_loader/runai_streamer_loader/test_runai_model_streamer_s3.py
+    estimated_time: 20
+  - name: tests/entrypoints/openai/completion/test_token_in_token_out.py
+    estimated_time: 20
+  - name: tests/reasoning/test_kimi_k2_reasoning_parser.py
+    estimated_time: 20
