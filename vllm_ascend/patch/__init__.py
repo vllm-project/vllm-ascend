@@ -67,18 +67,6 @@
 #    Future Plan:
 #       Remove this patch when vLLM fix the issue.
 #
-# ** 4. File: platform/patch_sched_yield.py**
-# ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
-#   1. `vllm.distributed.utils.USE_SCHED_YIELD`
-#    Why:
-#       os.sched_yield() doesn't work on Arm systems.
-#    How：
-#       avoid using os.sched_yield() on Arm systems.
-#    Related PR (if no, explain why):
-#       https://github.com/vllm-project/vllm/pull/30228
-#    Future Plan:
-#       Remove this patch when vLLM merge the PR.
-#
 # ** 5. File: platform/patch_balance_schedule.py**
 # ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 #   1. `vllm.v1.engine.core.EngineCoreProc.run_engine_core`
@@ -193,7 +181,26 @@
 #       Remove this patch once the runtime vLLM version contains the GLM parser
 #       and streaming finish-chunk fixes.
 #
-# ** 9. File: platform/patch_kv_cache_interface.py**
+# ** 10a. File: platform/patch_kv_cache_utils.py**
+# ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+#   1. `vllm.v1.core.kv_cache_utils.resolve_kv_cache_block_sizes`
+#      `vllm.v1.engine.core.resolve_kv_cache_block_sizes`
+#    Why:
+#       vLLM PR #40860 added a restriction that hybrid KV cache groups with
+#       multiple block sizes do not support context parallelism (dcp/pcp > 1).
+#       This restriction is correct for CUDA but not for Ascend, which
+#       implements context parallelism for MLA and SWA-MLA layers separately.
+#    How：
+#       Monkey-patch resolve_kv_cache_block_sizes to handle the multiple-groups
+#       + CP case by returning lcm(block_sizes) * dcp * pcp as scheduler_block_size
+#       instead of raising ValueError.
+#    Related PR (if no, explain why):
+#       vLLM PR #40860 ([Feat] DeepSeek V4 Rebased).
+#    Future Plan:
+#       Remove this patch once upstream vLLM supports hybrid KV cache + CP for
+#       non-CUDA backends, or exposes a platform hook for this behavior.
+#
+# ** 10. File: platform/patch_kv_cache_interface.py**
 # ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 #   1. `vllm.v1.kv_cache_interface.MLAAttentionSpec`
 #    Why:
@@ -278,19 +285,6 @@
 #    Future Plan:
 #       Remove this patch when the refactor of all2all manager is done.
 #
-# ** 2. File: worker/patch_bert.py**
-# ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
-#   1. `vllm.model_executor.models.bert._encode_token_type_ids`
-#      `vllm.model_executor.models.bert._decode_token_type_ids`
-#    Why:
-#       shift operation in `_encode_token_type_ids` and `_decode_token_type_ids` cannot run in ascend aclgraph mode
-#    How：
-#       Replace shift operation with multiplication and division.
-#    Related PR (if no, explain why):
-#       No, this need CANN add an aclnn shift operation
-#    Future Plan:
-#       Revert this when CANN support shift aclnn operation
-#
 # ** 3. File: worker/patch_triton.py**
 # ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 #   1. `vllm.model_executor.layers.mamba.ops`, `vllm.model_executor.layers.fla.ops`,
@@ -331,22 +325,6 @@
 #       1. make these functions as class func of RejectionSampler, create AscendRejectionSampler
 #           to override them, then delete the patch file `worker/patch_rejection_sampler.py`.
 #       2. make these functions as costom op, then remove AscendRejectionSampler
-#
-## ** 6. File: worker/patch_module.py**
-# ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
-#   1. `vllm.v1.attention.backends.gdn_attn.torch.argsort`
-#    Why:
-#       1. 'torch.argsort' func of npu does not support bool.
-#       2. Without `stable=True`, the output will have a lot of redundant tokens.
-#    How：
-#       Replace with a new torch.argsort that will cast the input to torch.int32
-#       and do stable sort.
-#    Related PR (if no, explain why):
-#       1. It depends on torch_npu.
-#       2. https://github.com/vllm-project/vllm/pull/30632
-#    Future Plan:
-#       Remove this patch when bool is supported in 'torch.argsort' func of npu.
-#       Make 'torch.argsort' in `vllm.v1.attention.backends.gdn_attn` be stable.
 #
 # ** 7. File: worker/patch_gdn_attn.py**
 # ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
@@ -394,16 +372,6 @@
 #    Future Plan:
 #       Remove this patch when vLLM support these operators.
 #
-# ** 9. File: worker/patch_huanyuan_vl.py**
-# ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
-#   1. `vllm.transformers_utils.processors.hunyuan_vl.HunYuanVLProcessor.__call__`
-#    Why:
-#       The `add_special_tokens` parameter is not supported by default in the processor.
-#    How：
-#       Remove the `add_special_tokens` parameter from kwargs before calling the original method.
-#    Future Plan:
-#       Remove this patch when vLLM aligns with the latest processor implementation.
-#
 # ** 10. File: worker/patch_qwen3vl.py**
 # ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 #   1. `vllm.model_executor.models.qwen3_vl.Qwen3VLForConditionalGeneration._get_deepstack_input_embeds`
@@ -413,6 +381,18 @@
 #       override _get_deepstack_input_embeds method with the flash comm v1 implementation.
 #    Future Plan:
 #       Remove this patch when https://github.com/vllm-project/vllm-ascend/issues/5712 is completed.
+#   2. `vllm.model_executor.models.qwen3_vl_moe.Qwen3MoeLLMForCausalLM.start_layer`,
+#      `vllm.model_executor.models.qwen3_vl_moe.Qwen3MoeLLMForCausalLM.end_layer`
+#    Why:
+#       Qwen3-VL-MoE checks the language-model pipeline boundary on non-first
+#       PP ranks, but Qwen3MoeLLMForCausalLM keeps start_layer/end_layer only
+#       on the inner model object.
+#    How:
+#       Expose start_layer/end_layer properties on Qwen3MoeLLMForCausalLM and
+#       forward them to the inner model.
+#    Future Plan:
+#       Remove this patch when upstream vLLM exposes these PP layer boundaries
+#       on the Qwen3-VL-MoE language-model wrapper.
 #
 # ** 11. File: worker/patch_npugraph_ex_triton.py**
 # ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~

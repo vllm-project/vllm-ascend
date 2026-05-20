@@ -211,6 +211,25 @@ class TestKVCacheRecvingLayerThread(unittest.TestCase):
         self.meta = MooncakeAgentMetadata(te_rpc_port=6000, kv_caches_base_addr=[0x1, 0x2])
         self.ready_event = threading.Event()
 
+    def test_get_and_clear_done_requests(self):
+        th = KVCacheRecvingLayerThread(
+            tp_rank=0,
+            side_channel_port=5555,
+            tp_size=2,
+            pd_head_ratio=1,
+            local_engine_id="engineA",
+            metadata=self.meta,
+            ready_event=self.ready_event,
+        )
+
+        with th.lock:
+            th.done_requests.update({"r1", "r2"})
+        got = th.get_and_clear_done_requests()
+        self.assertEqual(got, {"r1", "r2"})
+
+        got2 = th.get_and_clear_done_requests()
+        self.assertEqual(got2, set())
+
     def test_get_and_clear_finished_requests(self):
         th = KVCacheRecvingLayerThread(
             tp_rank=0,
@@ -224,13 +243,13 @@ class TestKVCacheRecvingLayerThread(unittest.TestCase):
 
         with th.lock:
             th.done_requests.update({"r1", "r2"})
-        got = th.get_and_clear_finished_requests()
+        got = th.get_and_clear_failed_requests()
         self.assertEqual(got, {"r1", "r2"})
 
-        got2 = th.get_and_clear_finished_requests()
+        got2 = th.get_and_clear_failed_requests()
         self.assertEqual(got2, set())
 
-    def test_update_task_aggregates_by_pd_head_ratio(self):
+    def test_update_failed_task_aggregates_by_pd_head_ratio(self):
         th = KVCacheRecvingLayerThread(
             tp_rank=0,
             side_channel_port=5555,
@@ -245,12 +264,32 @@ class TestKVCacheRecvingLayerThread(unittest.TestCase):
             th.task_tracker["reqX"] = 0
             th.request_map["reqX"] = "reqX"
 
-        th.update_task("reqX", 2)
+        th.update_failed_task("reqX")
+        with th.lock:
+            self.assertNotIn("reqX", th.task_tracker)
+            self.assertIn("reqX", th.failed_requests)
+
+    def test_update_done_task_aggregates_by_pd_head_ratio(self):
+        th = KVCacheRecvingLayerThread(
+            tp_rank=0,
+            side_channel_port=5555,
+            tp_size=2,
+            pd_head_ratio=2,
+            local_engine_id="engineA",
+            metadata=self.meta,
+            ready_event=self.ready_event,
+        )
+
+        with th.lock:
+            th.task_tracker["reqX"] = 0
+            th.request_map["reqX"] = "reqX"
+
+        th.update_done_task("reqX", 2)
         with th.lock:
             self.assertIn("reqX", th.task_tracker)
             self.assertNotIn("reqX", th.done_requests)
 
-        th.update_task("reqX", 2)
+        th.update_done_task("reqX", 2)
         with th.lock:
             self.assertNotIn("reqX", th.task_tracker)
             self.assertIn("reqX", th.done_requests)

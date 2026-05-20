@@ -63,8 +63,9 @@ class AscendW4A4LaosDynamicLinearMethod(AscendLinearScheme):
             scale=layer.weight_scale.data.view(-1),
             pertoken_scale=pertoken_scale,
             bias=None,
-            output_dtype=dtype,
+            output_dtype=torch.float16,
         )
+        output = output.to(dtype)
         if bias is not None:
             output = output + bias.to(dtype)
         return output

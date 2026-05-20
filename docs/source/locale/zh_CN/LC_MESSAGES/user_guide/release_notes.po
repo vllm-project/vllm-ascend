@@ -5024,7 +5024,7 @@ msgid ""
 msgstr ""
 "[实验性功能] 已支持预填充上下文并行（Prefill Context Parallel）和解码上下文并行（Decode Context "
 "Parallel），请注意这目前是一个实验性功能，欢迎任何反馈。详情请参考 "
-"[上下文并行功能指南](https://docs.vllm.ai/projects/ascend/en/latest/user_guide/feature_guide/context_parallel.html)"
+"[上下文并行特性指南](https://docs.vllm.ai/projects/ascend/en/latest/user_guide/feature_guide/context_parallel.html)"
 
 #: ../../source/user_guide/release_notes.md:830
 msgid ""
