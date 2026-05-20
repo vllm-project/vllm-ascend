@@ -668,6 +668,8 @@ class AscendAttentionCPImpl(AscendAttentionBackendImpl):
             handle = torch.npu.graph_task_group_end(stream)
             graph_params.handles[num_tokens].append(handle)
         else:
+            if input_layerout == "BSND" and query.shape[0] == 1:
+                common_kwargs["atten_mask"] = None
             attn_out, attn_lse = torch_npu.npu_fused_infer_attention_score(query, k_nope, value, **common_kwargs)
         if input_layerout == "BSND":
             attn_out = attn_out.view(-1, attn_out.shape[2], attn_out.shape[3])
