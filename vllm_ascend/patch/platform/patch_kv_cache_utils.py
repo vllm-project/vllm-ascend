@@ -6,11 +6,12 @@ from collections import defaultdict
 import vllm.v1.core.kv_cache_utils
 from vllm.config import VllmConfig
 from vllm.utils.math_utils import cdiv, round_up
-from vllm.v1.core.kv_cache_utils import _approximate_gcd
+from vllm.v1.core.kv_cache_utils import _approximate_gcd, may_override_num_blocks
 from vllm.v1.kv_cache_interface import (
     KVCacheConfig,
     KVCacheGroupSpec,
     KVCacheSpec,
+    KVCacheTensor,
     MLAAttentionSpec,
     SlidingWindowMLASpec,
     UniformTypeKVCacheSpecs,
@@ -180,8 +181,72 @@ def _get_kv_cache_groups_uniform_groups(
     return [full_mla_group, full_mla_c128_group, *swa_mla_groups]
 
 
+def _get_kv_cache_config_deepseek_v4(
+    vllm_config: VllmConfig,
+    kv_cache_groups: list[KVCacheGroupSpec],
+    available_memory: int,
+) -> tuple[int, list[KVCacheTensor]]:
+    """DeepseekV4 KV cache tensor layout planning.
+
+    Precondition: kv_cache_groups[0] is the full-MLA group; its page sizes
+    define the canonical bucket set. Non-full-MLA groups must have been
+    page_size-padded upstream (see _get_kv_cache_groups_uniform_groups) so
+    every layer's page_size matches one of the full-MLA bucket sizes.
+
+    For each group, bucket its layers by page_size_bytes and place each
+    layer at tuple_idx = position-within-bucket. Emit one KVCacheTensor
+    per (tuple_idx, bucket) whose shared_by is the union of per-group
+    layers at that slot.
+    """
+    full_mla_spec = kv_cache_groups[0].kv_cache_spec
+    assert isinstance(full_mla_spec, UniformTypeKVCacheSpecs)
+    page_sizes = sorted(full_mla_spec.get_page_sizes())
+    layer_tuple_page_bytes = sum(page_sizes)
+
+    # Pre-bucket each group's layers by page_size (registration order within
+    # bucket). bucketed[g_idx][page_size] = [layer_name, ...].
+    mtp_layer_names = []
+    mtp_page_size = 0
+    bucketed: list[dict[int, list[str]]] = []
+    for group in kv_cache_groups:
+        assert isinstance(group.kv_cache_spec, UniformTypeKVCacheSpecs)
+        specs = group.kv_cache_spec.kv_cache_specs
+        b: dict[int, list[str]] = defaultdict(list)
+        for name in group.layer_names:
+            if "mtp" not in name:
+                b[specs[name].page_size_bytes].append(name)
+            else:
+                mtp_layer_names.append(name)
+                mtp_page_size = specs[name].page_size_bytes
+        bucketed.append(b)
+
+    # num_layer_tuples = longest bucket list across all groups. For the
+    # full-MLA group this equals the count of layers in the largest
+    # per-page-size bucket (= get_num_layer_tuples()); for SWA sub-groups
+    # this equals the sub-group size (each has a single page_size).
+    num_layer_tuples = max(len(layers) for b in bucketed for layers in b.values()) + len(mtp_layer_names)
+
+    num_blocks = available_memory // (layer_tuple_page_bytes * num_layer_tuples)
+    num_blocks = may_override_num_blocks(vllm_config, num_blocks)
+
+    kv_cache_tensors: list[KVCacheTensor] = []
+    for tuple_idx in range(num_layer_tuples - len(mtp_layer_names)):
+        for ps in page_sizes:
+            shared_by: list[str] = []
+            for b in bucketed:
+                bucket = b.get(ps)
+                if bucket is not None and tuple_idx < len(bucket):
+                    shared_by.append(bucket[tuple_idx])
+            kv_cache_tensors.append(KVCacheTensor(size=ps * num_blocks, shared_by=shared_by))
+    for i in range(len(mtp_layer_names)):
+        kv_cache_tensors.append(KVCacheTensor(size=mtp_page_size * num_blocks, shared_by=[mtp_layer_names[i]]))
+
+    return num_blocks, kv_cache_tensors
+
+
 vllm.v1.core.kv_cache_utils.resolve_kv_cache_block_sizes = _ascend_resolve_kv_cache_block_sizes
 vllm.v1.core.kv_cache_utils.group_and_unify_kv_cache_specs = group_and_unify_kv_cache_specs
+vllm.v1.core.kv_cache_utils._get_kv_cache_config_deepseek_v4 = _get_kv_cache_config_deepseek_v4
 vllm.v1.core.kv_cache_utils._get_kv_cache_groups_uniform_groups = _get_kv_cache_groups_uniform_groups
 
 # Also patch the reference used by engine/core.py which imports the function directly.
