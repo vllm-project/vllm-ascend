@@ -69,7 +69,7 @@ def test_deepseek_mtp(
         ),
     ) as spec_llm:
         sampling_config = SamplingParams(temperature=0, max_tokens=256, ignore_eos=False)
-        spec_outputs = spec_llm.generate(example_prompts, sampling_config)
+        spec_llm.generate(example_prompts, sampling_config)
 
     cleanup_dist_env_and_memory()
     del spec_llm

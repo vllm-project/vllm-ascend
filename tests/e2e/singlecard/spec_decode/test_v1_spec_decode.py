@@ -1,14 +1,13 @@
 # SPDX-License-Identifier: Apache-2.0
 from __future__ import annotations
 
-import math
 import os
 import random
 from typing import Any
 
 import pytest
 from transformers import AutoTokenizer
-from vllm import LLM, SamplingParams
+from vllm import SamplingParams
 from vllm.config import CompilationConfig
 from vllm.tokenizers.registry import resolve_tokenizer_args
 from vllm.v1.metrics.reader import Counter, Vector
@@ -129,7 +128,7 @@ def test_ngram(
         max_model_len=1024,
         cudagraph_capture_sizes=[1, 2, 4, 8],
     ) as runner:
-        spec_outputs = runner.model.chat(test_prompts, sampling_config)
+        runner.model.chat(test_prompts, sampling_config)
 
 
 @pytest.mark.parametrize("num_speculative_tokens", [3])
@@ -223,7 +222,7 @@ def test_qwen3_vl_eagle(
         max_model_len=1024,
         cudagraph_capture_sizes=[1, 2, 4, 8],
     ) as ref_llm:
-        ref_outputs = ref_llm.model.chat(test_prompts, sampling_config)
+        ref_llm.model.chat(test_prompts, sampling_config)
 
 
 def test_suffix_acceptance(
