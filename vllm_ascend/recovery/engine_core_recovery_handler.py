@@ -357,6 +357,8 @@ class RecoveryHandler:
 
         received = 0
         deadline = time.monotonic() + step.timeout_s
+        poller = zmq.Poller()
+        poller.register(self._recover_step_result_pull_sock, zmq.POLLIN)
         while received < self._worker_count:
             remaining = deadline - time.monotonic()
             if remaining <= 0:
@@ -368,7 +370,7 @@ class RecoveryHandler:
                 )
                 return cfg, False
 
-            events = dict(self._recover_step_result_pull_sock.poll(
+            events = dict(poller.poll(
                 timeout=min(1000, int(remaining * 1000))
             ))
             if self._recover_step_result_pull_sock in events:
