@@ -136,6 +136,8 @@ jobs:
             vllm-ascend-build-v1-${{ runner.os }}-${{ inputs.image }}-${{ steps.get_csrc_hash.outputs.CSRC_HASH }}
 
       - name: Install vllm-project/vllm-ascend
+        env:
+          MAX_JOBS: "23"
         run: |
           pip install uc-manager
           uv pip install -r requirements-dev.txt
@@ -266,6 +268,8 @@ jobs:
             vllm-ascend-build-v1-${{ runner.os }}-${{ inputs.image }}-${{ steps.get_csrc_hash.outputs.CSRC_HASH }}
 
       - name: Install vllm-project/vllm-ascend
+        env:
+          MAX_JOBS: "23"
         run: |
           pip install uc-manager
           uv pip install -r requirements-dev.txt
