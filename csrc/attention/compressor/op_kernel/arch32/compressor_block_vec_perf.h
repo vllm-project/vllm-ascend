@@ -16,8 +16,8 @@
 #ifndef COMPRESSOR_BLOCK_VEC_PERF_H
 #define COMPRESSOR_BLOCK_VEC_PERF_H
 
-#include "../compressor_comm.h"
-#include "../compressor_tools.h"
+#include "compressor_comm.h"
+#include "compressor_tools.h"
 #include "compressor_vector_comm.h"
 #include "rms_norm.h"
 #include "rope.h"

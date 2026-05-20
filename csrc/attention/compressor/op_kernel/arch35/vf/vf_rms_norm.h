@@ -53,13 +53,10 @@ __simd_vf__ void RmsNormVFImpl(__ubuf__ T * inputBuf, __ubuf__ GammaType * gamma
 
     for(uint32_t i = 0; i < repeatTimes; ++i){
         MicroAPI::RegTensor<T> vregX;
-        // MicroAPI::RegTensor<GammaType> vregGamma;
         MicroAPI::RegTensor<T> vregGammaCast;
         uint16_t loopOffset = i * FLOAT_REP_SIZE;
 
         MicroAPI::LoadAlign<T, MicroAPI::LoadDist::DIST_NORM>(vregX, inputBuf + loopOffset);
-        // MicroAPI::LoadAlign<GammaType, MicroAPI::LoadDist::DIST_UNPACK_B16>(vregGamma, gammaBuf + loopOffset);
-        // MicroAPI::Cast<T, GammaType, castTraitB162B32>(vregGammaCast, vregGamma, maskAll);
         MicroAPI::LoadAlign<GammaType, MicroAPI::LoadDist::DIST_NORM>(vregGammaCast, gammaBuf + loopOffset);
 
         MicroAPI::Div(vregX, vregX, vregDiv, maskAll);

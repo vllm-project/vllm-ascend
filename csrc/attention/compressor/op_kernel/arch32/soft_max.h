@@ -17,7 +17,7 @@
 #ifndef SOFT_MAX_H
 #define SOFT_MAX_H
 
-#include "../compressor_comm.h"
+#include "compressor_comm.h"
 #include "compressor_vector_comm.h"
 
 namespace Compressor {
