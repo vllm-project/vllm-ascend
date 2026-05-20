@@ -93,6 +93,8 @@ class NPUWorker310(NPUWorker):
         ) as profile_result:
             self.model_runner.profile_run()
             free_memory, total_memory = torch.npu.mem_get_info()
+            # The host memory or device memory for RC devices refers to the available portion of memory
+            # which cannot be obtained via torch.npu.mem_get_info()
             if _is_rc_device():
                 free_memory = psutil.virtual_memory().available
             torch_memory = torch.npu.memory_reserved()
@@ -116,7 +118,9 @@ class NPUWorker310(NPUWorker):
         # Divide the available memory by 2, to reserved more memory for other operators workspace and other cache
         # This could avoid OOM with default gpu_memory_utilization
         # The 310P RC device shares the host memory and device memory.
-        # Therefore, all occupied memory needs to be obtained.
+        # Therefore, the space available for allocating KV cache and Mamba cache needs to be calculated
+        # based on the already occupied space of the system memory.
+
 
         if _is_rc_device():
             self.available_kv_cache_memory_bytes = (self.requested_memory - psutil.virtual_memory().used) // 2
