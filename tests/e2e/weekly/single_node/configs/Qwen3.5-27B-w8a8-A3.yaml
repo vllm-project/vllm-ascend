@@ -44,13 +44,17 @@ test_cases:
     benchmarks:
       acc:
         case_type: accuracy
-        dataset_path: vllm-ascend/gpqa
+        dataset_path: vllm-ascend/aime2025
         request_conf: vllm_api_general_chat
+<<<<<<< HEAD:tests/e2e/weekly/single_node/configs/Qwen3.5-27B-w8a8-A3.yaml
 <<<<<<< HEAD:tests/e2e/weekly/single_node/configs/Qwen3.5-27B-w8a8-A3.yaml
         dataset_conf: gpqa/gpqa_gen_0_shot_cot_chat_prompt
 =======
         dataset_conf: gsm8k/gpqa_gen_0_shot_str
 >>>>>>> 6caf70c6 (add nightly Qwen3.5-27B-w8a8-A3 Qwen3.5-27B-w8a8-A2):tests/e2e/nightly/single_node/models/configs/Qwen3.5-27B-w8a8-A3.yaml
+=======
+        dataset_conf: aime2025/aime2025_gen_0_shot_chat_prompt
+>>>>>>> 77dae67a (mod MiniMax-M2.5-w8a8-QuaRot-A3 config):tests/e2e/nightly/single_node/models/configs/Qwen3.5-27B-w8a8-A3.yaml
         max_out_len: 32768
         batch_size: 32
         baseline: 85
