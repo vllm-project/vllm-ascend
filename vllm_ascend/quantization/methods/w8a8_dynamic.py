@@ -186,6 +186,7 @@ class AscendW8A8DynamicFusedMoEMethod(AscendMoEScheme):
         activation: str = "silu",
         apply_router_weight_on_input: bool = False,
         mc2_mask: torch.Tensor | None = None,
+        tid2eid: torch.Tensor | None = None,
     ) -> torch.Tensor:
         zero_expert_num = getattr(layer, "zero_expert_num", 0)
         zero_expert_type = getattr(layer, "zero_expert_type", None)
@@ -226,6 +227,7 @@ class AscendW8A8DynamicFusedMoEMethod(AscendMoEScheme):
                 num_logical_experts=router_logits.shape[1],
                 num_shared_experts=n_shared_experts,
                 num_experts=num_logical_experts,
+                tid2eid=tid2eid,
             )
         assert topk_ids is not None
         assert topk_weights is not None
@@ -262,6 +264,9 @@ class AscendW8A8DynamicFusedMoEMethod(AscendMoEScheme):
             w2 = [layer.w2_weight]
             w2_scale = [layer.fused_w2_scale] if fused_scale_flag else [layer.w2_weight_scale]
 
+        w1_scale_bias = [torch.tensor([], dtype=torch.float32)] if fused_scale_flag else None
+        w2_scale_bias = [torch.tensor([], dtype=torch.float32)] if fused_scale_flag else None
+
         final_hidden_states = moe_comm_method.fused_experts(
             fused_experts_input=build_fused_experts_input(
                 hidden_states=x,
@@ -280,6 +285,9 @@ class AscendW8A8DynamicFusedMoEMethod(AscendMoEScheme):
                 activation=activation,
                 w1_scale=w1_scale,
                 w2_scale=w2_scale,
+                w1_scale_bias=w1_scale_bias,
+                w2_scale_bias=w2_scale_bias,
+                swiglu_limit=layer.swiglu_limit,
             )
         )
         if zero_expert_num > 0 and zero_expert_type is not None:
