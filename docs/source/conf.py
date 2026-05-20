@@ -190,7 +190,7 @@ def setup(app):
     app.add_directive("test", SyncMetadataCodeBlock)
     # Disable Pygments highlighting for mermaid code blocks to let the mermaid extension handle rendering
     lexers["mermaid"] = TextLexer()
-    
+
 
 if __name__ == "__main__":
     print(json.dumps(myst_substitutions))
