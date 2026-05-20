@@ -568,11 +568,8 @@ def update_aclgraph_sizes(vllm_config: VllmConfig) -> None:
     compilation_config = vllm_config.compilation_config
     original_sizes, compilation_config.cudagraph_capture_sizes = compilation_config.cudagraph_capture_sizes, None
     cudagraph_mode = compilation_config.cudagraph_mode
-    aclgraph_resource_multiplier = 1
     if cudagraph_mode.has_full_cudagraphs() and cudagraph_mode.has_piecewise_cudagraphs():
-        # FULL_AND_PIECEWISE captures both piecewise mixed graphs and full decode
-        # graphs. Use a conservative multiplier until this is tuned per hardware.
-        aclgraph_resource_multiplier = 2
+        MAX_CAPTURE_SIZE = max(0, MAX_CAPTURE_SIZE - len(original_sizes))
 
     # Calculate parallel configuration factor
     if not vllm_config.model_config:
@@ -626,9 +623,7 @@ def update_aclgraph_sizes(vllm_config: VllmConfig) -> None:
         # Assume the following case:
         # MAX_CAPTURE_SIZE = 1920, num_hidden_layers = 48, data_parallel_size is 1, tensor_parallel_size is 4,
         # According to the formula, max_num_batch_sizes = math.floor(1920 / (48 + 1) / 2) = 19
-        max_num_batch_sizes = math.floor(
-            MAX_CAPTURE_SIZE / resources_per_graph / parallel_factor / aclgraph_resource_multiplier
-        )
+        max_num_batch_sizes = math.floor(MAX_CAPTURE_SIZE / resources_per_graph / parallel_factor)
         logger.info("Calculated maximum supported batch sizes for ACL graph: %s", max_num_batch_sizes)
     else:
         # enable pcp or dcp will add new communication and consume additional approximately less than 100 streams
@@ -650,10 +645,7 @@ def update_aclgraph_sizes(vllm_config: VllmConfig) -> None:
         # MAX_CAPTURE_SIZE = 1920, num_hidden_layers = 48, data_parallel_size is 1, tensor_parallel_size is 4,
         # According to the formula, max_num_batch_sizes = math.floor((1920 - 1 * 40) / (48 + 1) / (1 + 1 * 2)) = 12
         max_num_batch_sizes = math.floor(
-            (MAX_CAPTURE_SIZE - num_comm_groups * 40)
-            / resources_per_graph
-            / (1 + num_comm_groups * 2)
-            / aclgraph_resource_multiplier
+            (MAX_CAPTURE_SIZE - num_comm_groups * 40) / resources_per_graph / (1 + num_comm_groups * 2)
         )
         logger.info("Calculated maximum supported batch sizes for ACL graph: %s", max_num_batch_sizes)
         logger.warning(
@@ -669,6 +661,7 @@ def update_aclgraph_sizes(vllm_config: VllmConfig) -> None:
     if max_num_batch_sizes < len(original_sizes):
         # Sample uniformly from original sizes
         if max_num_batch_sizes <= 1:
+            # Avoid division by zero when only one capture size can be kept.
             sampled_sizes = [original_sizes[-1]]
         else:
             step = (len(original_sizes) - 1) / (max_num_batch_sizes - 1)
