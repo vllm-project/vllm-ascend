@@ -56,6 +56,13 @@ def _clean_summary_value(value: str) -> str:
 
 
 def parse_final_summary_markdown(markdown: str) -> dict[str, Any]:
+    partial_stop_fields = {
+        "reason": "reason",
+        "unresolved failures": "unresolved_failures",
+        "saved patch": "patch_path",
+        "saved failure summary": "summary_path",
+        "repository state": "repository_state",
+    }
     result: dict[str, Any] = {
         "status": "unknown",
         "upstream_range": "",
@@ -64,11 +71,35 @@ def parse_final_summary_markdown(markdown: str) -> dict[str, Any]:
         "steps_total": 0,
         "partial_stop": {},
     }
+    partial: dict[str, str] = {}
+    in_partial = False
 
     for raw_line in markdown.splitlines():
         line = raw_line.strip()
         if not line:
             continue
+
+        if line == "### Partial Stop":
+            in_partial = True
+            continue
+        if in_partial:
+            if line.startswith("### "):
+                in_partial = False
+            elif line.startswith("- "):
+                item = line[2:]
+                if ":" not in item:
+                    continue
+                key, value = item.split(":", 1)
+                normalized_key = key.strip().lower()
+                cleaned_value = _clean_summary_value(value)
+                if normalized_key == "stopped at":
+                    partial["stopped_at"] = cleaned_value
+                    step_match = re.match(r"([^,]+)", cleaned_value)
+                    if step_match:
+                        partial["step_id"] = _clean_summary_value(step_match.group(1))
+                elif normalized_key in partial_stop_fields:
+                    partial[partial_stop_fields[normalized_key]] = cleaned_value
+                continue
 
         if line.startswith("Status:"):
             result["status"] = _clean_summary_value(line.split(":", 1)[1]).lower()
@@ -80,45 +111,9 @@ def parse_final_summary_markdown(markdown: str) -> dict[str, Any]:
             result["reached_commit"] = _clean_summary_value(line.split(":", 1)[1])
             continue
 
-        steps_match = re.match(r"^Steps:\s*(\d+)\s*/\s*(\d+)\s*$", line)
-        if steps_match:
+        if steps_match := re.match(r"^Steps:\s*(\d+)\s*/\s*(\d+)\s*$", line):
             result["steps_completed"] = int(steps_match.group(1))
             result["steps_total"] = int(steps_match.group(2))
-            continue
-
-    partial: dict[str, str] = {}
-    in_partial = False
-    for raw_line in markdown.splitlines():
-        line = raw_line.strip()
-        if line == "### Partial Stop":
-            in_partial = True
-            continue
-        if in_partial and line.startswith("### "):
-            break
-        if not in_partial or not line.startswith("- "):
-            continue
-
-        item = line[2:]
-        if ":" not in item:
-            continue
-        key, value = item.split(":", 1)
-        normalized_key = key.strip().lower()
-        cleaned_value = _clean_summary_value(value)
-        if normalized_key == "stopped at":
-            partial["stopped_at"] = cleaned_value
-            step_match = re.match(r"([^,]+)", cleaned_value)
-            if step_match:
-                partial["step_id"] = _clean_summary_value(step_match.group(1))
-        elif normalized_key == "reason":
-            partial["reason"] = cleaned_value
-        elif normalized_key == "unresolved failures":
-            partial["unresolved_failures"] = cleaned_value
-        elif normalized_key == "saved patch":
-            partial["patch_path"] = cleaned_value
-        elif normalized_key == "saved failure summary":
-            partial["summary_path"] = cleaned_value
-        elif normalized_key == "repository state":
-            partial["repository_state"] = cleaned_value
 
     if partial:
         result["partial_stop"] = partial
@@ -262,6 +257,10 @@ def render_manual_review_issue(
     return "\n".join(lines).rstrip() + "\n"
 
 
+def _print_json(value: Any) -> None:
+    print(json.dumps(value, ensure_ascii=False, indent=2))
+
+
 def _build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description="Helper CLI for main2main auto workflow.")
     subparsers = parser.add_subparsers(dest="command", required=True)
@@ -290,23 +289,11 @@ def main() -> None:
     args = _build_parser().parse_args()
 
     if args.command == "collect-commit-range":
-        print(
-            json.dumps(
-                collect_commit_range(repo=args.repo, start_ref=args.start_ref, end_ref=args.end_ref),
-                ensure_ascii=False,
-                indent=2,
-            )
-        )
+        _print_json(collect_commit_range(repo=args.repo, start_ref=args.start_ref, end_ref=args.end_ref))
         return
 
     if args.command == "parse-final-summary":
-        print(
-            json.dumps(
-                parse_final_summary_markdown(args.summary_md.read_text(encoding="utf-8")),
-                ensure_ascii=False,
-                indent=2,
-            )
-        )
+        _print_json(parse_final_summary_markdown(args.summary_md.read_text(encoding="utf-8")))
         return
 
     if args.command == "print-claude-stream":

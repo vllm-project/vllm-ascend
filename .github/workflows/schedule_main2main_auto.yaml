@@ -48,7 +48,7 @@ env:
   VLLM_DIR: vllm-upstream
   NODE_VERSION: 18.20.8
   MAIN2MAIN_SUITE: e2e-main2main  
-  MAIN2MAIN_MODEL: ${{ vars.MAIN2MAIN_MODEL || 'qwen3.6-plus' }}
+  MAIN2MAIN_MODEL: ${{ vars.MAIN2MAIN_MODEL || 'glm-5' }}
   MAIN2MAIN_IMAGE: swr.cn-southwest-2.myhuaweicloud.com/base_image/ascend-ci/cann:9.0.0-a3-ubuntu22.04-py3.11
   CLAUDE_ALLOWED_TOOLS: Bash(git *),Bash(gh *),Bash(grep *),Bash(sed *),Bash(jq *),Bash(python3 *),Bash(mkdir *),Bash(cat *),Bash(tee *),Bash(head *),Bash(tail *),Bash(test *),Bash(ls *),Bash(find *),Bash(pwd),Read,Write,Edit,Glob,Grep
   UV_INDEX_URL: http://cache-service.nginx-pypi-cache.svc.cluster.local/pypi/simple
@@ -572,7 +572,6 @@ jobs:
             --method POST \
             -H "Accept: application/vnd.github+json" \
             "/repos/${UPSTREAM_REPO}/issues/${PR_NUMBER}/labels" \
-            -f labels[]='main2main' \
             -f labels[]='ready' \
             -f labels[]='ready-for-test' || {
             echo "::warning::Failed to add PR labels: main2main ready ready-for-test"
