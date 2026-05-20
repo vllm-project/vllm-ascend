@@ -8,9 +8,9 @@ import torch_npu
 
 def _fa3_available() -> bool:
     try:
-        if util.find_spec("flash_attn_v3") is None:
+        if util.find_spec("flash_attn_npu_v3") is None:
             return False
-        mod = import_module("flash_attn_v3")
+        mod = import_module("flash_attn_npu_v3")
         return hasattr(mod, "flash_attn_with_kvcache")
     except ImportError:
         return False
@@ -75,7 +75,7 @@ test_cases = [
 ]
 
 
-@pytest.mark.skipif(not _fa3_available(), reason="flash_attn_v3 is not installed")
+@pytest.mark.skipif(not _fa3_available(), reason="flash_attn_npu_v3 is not installed")
 @pytest.mark.parametrize(
     "data_type, batch_size, num_heads, kv_heads, q_seqlen, kv_seqlen, head_size, block_size, is_causal", test_cases
 )
@@ -140,7 +140,7 @@ def test_fa_custom_ops_tnd(
         new_q_seqlen_list.append(pre_seq_sum)
     new_q_seqlen_list = torch.tensor(new_q_seqlen_list, dtype=torch.int32).npu()
 
-    from flash_attn_v3 import flash_attn_with_kvcache  # type: ignore[import-not-found]
+    from flash_attn_npu_v3 import flash_attn_with_kvcache  # type: ignore[import-not-found]
 
     out_out = flash_attn_with_kvcache(
         query,

@@ -1,6 +1,6 @@
 import torch
 import vllm.envs as envs_vllm
-from flash_attn_v3 import flash_attn_with_kvcache as _fa3_fn  # type: ignore[import-not-found]
+from flash_attn_npu_v3 import flash_attn_with_kvcache as _fa3_fn  # type: ignore[import-not-found]
 from vllm.v1.attention.backend import AttentionBackend  # type: ignore
 
 from vllm_ascend.attention.attention_v1 import (
@@ -81,7 +81,7 @@ class AscendFAImpl(AscendAttentionBackendImpl):
             key_fa_blk,
             value_fa_blk,
             cache_seqlens=seq_lens,  # kv sequence length for each individual request (NOT cumulative)
-            page_table=block_table,  #  must match the block table for the corresponding q
+            page_table=block_table,  # must match the block table for the corresponding q
             cu_seqlens_q=actual_seq_lengths,  # cumulative sequence length for q
             max_seqlen_q=max_seq_len,
             causal=is_causal,
