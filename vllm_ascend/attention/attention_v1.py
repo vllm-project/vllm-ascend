@@ -1288,9 +1288,9 @@ class AscendC8AttentionBackendImpl(AscendAttentionBackendImpl):
         layer,
     ) -> tuple[torch.Tensor, torch.Tensor]:
         """Gather paged INT8 KV blocks and dequantize."""
-        if key.dtype == torch.float_e4m3fn:
+        if key.dtype == torch.float8_e4m3fn:
             key = key.to(target_dtype)
-        if value.dtype == torch.float_e4m3fn:
+        if value.dtype == torch.float8_e4m3fn:
             value = value.to(target_dtype)
         batch_size = block_table.shape[0]
         block_size = key.shape[1]
@@ -1332,12 +1332,12 @@ class AscendC8AttentionBackendImpl(AscendAttentionBackendImpl):
             torch.round(actual_key * layer._c8_k_inv_scale),
             FP8_MIN,
             FP8_MAX,
-        ).to(torch.float_e4m3fn)
+        ).to(torch.float8_e4m3fn)
         v_FP8 = torch.clamp(
             torch.round(actual_value * layer._c8_v_inv_scale),
             FP8_MIN,
             FP8_MAX,
-        ).to(torch.float_e4m3fn)
+        ).to(torch.float8_e4m3fn)
         return k_FP8, v_FP8
 
     def _forward_c8_decode(
@@ -1502,7 +1502,7 @@ class AscendC8AttentionBackendImpl(AscendAttentionBackendImpl):
             key = key[:num_tokens]
             value = value[:num_tokens]
 
-        if key.dtype == torch.float_e4m3fn:
+        if key.dtype == torch.float8_e4m3fn:
             if block_table is not None:
                 seq_lens = (
                     actual_seq_lengths_kv if isinstance(actual_seq_lengths_kv, list) else actual_seq_lengths_kv.tolist()
