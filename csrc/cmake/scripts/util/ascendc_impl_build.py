@@ -12,6 +12,7 @@
 import argparse
 import datetime
 import glob
+import io
 import json
 import os
 import sys
@@ -21,6 +22,16 @@ import opdesc_parser
 import regex as re
 
 PYF_PATH = os.path.dirname(os.path.realpath(__file__))
+
+
+def write_if_different(path: str, content: str):
+    if os.path.exists(path):
+        with open(path) as fd:
+            if fd.read() == content:
+                return
+    with os.fdopen(os.open(path, const_var.WFLAGS, const_var.WMODES), "w") as fd:
+        fd.write(content)
+
 
 IMPL_HEAD = '''#!/usr/bin/env python
 # -*- coding: UTF-8 -*-
@@ -376,19 +387,20 @@ class AdpBuilder(opdesc_parser.OpDesc):
             os.makedirs(out_path, exist_ok=True)
         adpfile = os.path.join(out_path, self.op_file + ".py")
         self._gen_op_compile_option(op_compile_option_all)
-        with os.fdopen(os.open(adpfile, const_var.WFLAGS, const_var.WMODES), "w") as fd:
-            self._write_head(fd)
-            self._write_argparse(fd)
-            self._get_impl_mode()
-            self._write_impl(fd, impl_path)
-            if self.op_chk_support:
-                self._write_cap("check_supported", fd)
-                self._write_cap("get_op_support_info", fd)
-            if self.op_fmt_sel:
-                self._write_cap("op_select_format", fd)
-                self._write_cap("get_op_specific_info", fd)
-            if self.op_range_limit == "limited" or self.op_range_limit == "dynamic":
-                self._write_glz(fd)
+        fd = io.StringIO()
+        self._write_head(fd)
+        self._write_argparse(fd)
+        self._get_impl_mode()
+        self._write_impl(fd, impl_path)
+        if self.op_chk_support:
+            self._write_cap("check_supported", fd)
+            self._write_cap("get_op_support_info", fd)
+        if self.op_fmt_sel:
+            self._write_cap("op_select_format", fd)
+            self._write_cap("get_op_specific_info", fd)
+        if self.op_range_limit == "limited" or self.op_range_limit == "dynamic":
+            self._write_glz(fd)
+        write_if_different(adpfile, fd.getvalue())
 
     def _gen_op_compile_option(self: any, op_compile_option_all: list = None):
         if op_compile_option_all is not None:
