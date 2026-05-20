@@ -5,9 +5,12 @@ import unittest
 
 from vllm_ascend.device.mxfp_compat import (
     MXFP_KV_SCALE_GROUP_SIZE,
+    MXFP8_GROUP_SIZE,
     MXFP_SCALE_DTYPE_SIZE,
     mxfp_k_scale_numel,
     mxfp_kv_page_size_bytes,
+    mxfp_k_scale_page_bytes,
+    mxfp_v_scale_page_bytes,
     mxfp_resolve_kv_cache_layout,
     mxfp_v_scale_numel,
 )
@@ -43,6 +46,20 @@ class TestMxfpKvPageSizeBytes(unittest.TestCase):
         # block=128, heads=8, head=128, fp8 kv -> 270336 bytes/page
         page_size = mxfp_kv_page_size_bytes(128, 8, 128, 128, kv_dtype_size=1)
         self.assertEqual(page_size, 270336)
+
+    def test_k_and_v_scale_page_bytes_unified_formula(self):
+        block_size = 128
+        num_kv_heads = 8
+        head_dim = 128
+        expected = num_kv_heads * block_size * head_dim // MXFP8_GROUP_SIZE
+        self.assertEqual(expected, 4096)
+        self.assertEqual(mxfp_k_scale_page_bytes(num_kv_heads, block_size, head_dim), expected)
+        self.assertEqual(mxfp_v_scale_page_bytes(num_kv_heads, block_size, head_dim), expected)
+        self.assertEqual(
+            mxfp_k_scale_numel(1, block_size, num_kv_heads, head_dim),
+            mxfp_v_scale_numel(1, block_size, num_kv_heads, head_dim),
+        )
+        self.assertEqual(mxfp_k_scale_numel(16, block_size, num_kv_heads, head_dim), 16 * expected)
 
     def test_page_size_asymmetric_k_v_dims(self):
         block_size = 64
@@ -81,7 +98,7 @@ class TestMxfpKvPageSizeBytes(unittest.TestCase):
         raw_v_scale = mxfp_v_scale_numel(num_blocks, block_size, num_kv_heads, v_dim)
         self.assertEqual(raw_k_scale, 6045696)
 
-        resolved_blocks, k_shape, v_shape, k_scale_shape, v_scale_shape = mxfp_resolve_kv_cache_layout(
+        k_shape, v_shape, k_scale_shape, v_scale_shape = mxfp_resolve_kv_cache_layout(
             raw_k_numel=raw_k,
             raw_v_numel=raw_v,
             raw_k_scale_numel=raw_k_scale,
@@ -91,8 +108,8 @@ class TestMxfpKvPageSizeBytes(unittest.TestCase):
             k_dim=k_dim,
             v_dim=v_dim,
         )
-        self.assertEqual(resolved_blocks, 1476)
         self.assertEqual(k_shape, (1476, 128, 8, 128))
+        self.assertEqual(k_shape[0], num_blocks)
         self.assertEqual(k_scale_shape, (1476, 8, 128, 2, 2))
         self.assertEqual(v_scale_shape, (1476, 8, 2, 128, 2))
         self.assertEqual(k_shape[0] * k_shape[1] * k_shape[2] * k_shape[3], raw_k)
@@ -101,7 +118,7 @@ class TestMxfpKvPageSizeBytes(unittest.TestCase):
             scale_numel *= dim
         self.assertEqual(scale_numel, raw_k_scale)
 
-    def test_resolve_layout_reconciles_spec_k_dim_with_scale_buffer(self):
+    def test_resolve_layout_rejects_spec_k_dim_mismatch_with_buffers(self):
         block_size = 128
         num_kv_heads = 8
         num_blocks = 1476
@@ -112,16 +129,15 @@ class TestMxfpKvPageSizeBytes(unittest.TestCase):
         raw_k_scale = mxfp_k_scale_numel(num_blocks, block_size, num_kv_heads, true_k_dim)
         raw_v_scale = mxfp_v_scale_numel(num_blocks, block_size, num_kv_heads, true_k_dim)
 
-        _, k_shape, _, k_scale_shape, _ = mxfp_resolve_kv_cache_layout(
-            raw_k_numel=raw_k,
-            raw_v_numel=raw_v,
-            raw_k_scale_numel=raw_k_scale,
-            raw_v_scale_numel=raw_v_scale,
-            block_size=block_size,
-            num_kv_heads=num_kv_heads,
-            k_dim=wrong_k_dim,
-            v_dim=true_k_dim,
-            num_blocks_hint=num_blocks,
-        )
-        self.assertEqual(k_shape[-1], true_k_dim)
-        self.assertEqual(k_scale_shape[0], num_blocks)
+        with self.assertRaises(ValueError):
+            mxfp_resolve_kv_cache_layout(
+                raw_k_numel=raw_k,
+                raw_v_numel=raw_v,
+                raw_k_scale_numel=raw_k_scale,
+                raw_v_scale_numel=raw_v_scale,
+                block_size=block_size,
+                num_kv_heads=num_kv_heads,
+                k_dim=wrong_k_dim,
+                v_dim=true_k_dim,
+                num_blocks_hint=num_blocks,
+            )

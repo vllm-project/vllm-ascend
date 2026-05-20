@@ -70,24 +70,46 @@ def ensure_mxfp4_moe_available(feature: str) -> None:
 # V cache:  [num_blocks, num_kv_heads, block_size // 64, head_dim, 2]
 MXFP_KV_SCALE_GROUP_SIZE = 64
 MXFP_KV_SCALE_VALUES_PER_GROUP = 2
+# Unified per-block scale bytes: num_kv_heads * block_size * head_dim / MXFP8_GROUP_SIZE (K and V).
+MXFP8_GROUP_SIZE = 32
 # E8M0 scale elements are always 1 byte in KV cache budgeting.
 MXFP_SCALE_DTYPE_SIZE = 1
 
 
-def mxfp_kv_scale_groups(head_dim: int) -> int:
+def validate_mxfp_k_scale_head_dim(head_dim: int) -> None:
     if head_dim % MXFP_KV_SCALE_GROUP_SIZE != 0:
         raise ValueError(
-            f"C8_MXFP KV scale cache requires head_dim divisible by {MXFP_KV_SCALE_GROUP_SIZE}, got {head_dim}."
+            f"C8_MXFP K scale cache requires head_dim divisible by {MXFP_KV_SCALE_GROUP_SIZE}, got {head_dim}."
         )
-    return head_dim // MXFP_KV_SCALE_GROUP_SIZE
 
 
-def mxfp_kv_block_scale_groups(block_size: int) -> int:
+def validate_mxfp_v_scale_block_size(block_size: int) -> None:
     if block_size % MXFP_KV_SCALE_GROUP_SIZE != 0:
         raise ValueError(
             f"C8_MXFP V scale cache requires block_size divisible by {MXFP_KV_SCALE_GROUP_SIZE}, got {block_size}."
         )
+
+
+def mxfp_kv_scale_groups(head_dim: int) -> int:
+    validate_mxfp_k_scale_head_dim(head_dim)
+    return head_dim // MXFP_KV_SCALE_GROUP_SIZE
+
+
+def mxfp_kv_block_scale_groups(block_size: int) -> int:
+    validate_mxfp_v_scale_block_size(block_size)
     return block_size // MXFP_KV_SCALE_GROUP_SIZE
+
+
+def mxfp_k_scale_page_bytes(num_kv_heads: int, block_size: int, head_dim: int) -> int:
+    """Bytes per block for k_scale cache."""
+    validate_mxfp_k_scale_head_dim(head_dim)
+    return num_kv_heads * block_size * head_dim // MXFP8_GROUP_SIZE
+
+
+def mxfp_v_scale_page_bytes(num_kv_heads: int, block_size: int, head_dim: int) -> int:
+    """Bytes per block for v_scale cache."""
+    validate_mxfp_v_scale_block_size(block_size)
+    return num_kv_heads * block_size * head_dim // MXFP8_GROUP_SIZE
 
 
 def mxfp_k_scale_cache_shape(
@@ -121,23 +143,11 @@ def mxfp_v_scale_cache_shape(
 
 
 def mxfp_k_scale_numel(num_blocks: int, block_size: int, num_kv_heads: int, head_dim: int) -> int:
-    return (
-        num_blocks
-        * num_kv_heads
-        * block_size
-        * mxfp_kv_scale_groups(head_dim)
-        * MXFP_KV_SCALE_VALUES_PER_GROUP
-    )
+    return num_blocks * mxfp_k_scale_page_bytes(num_kv_heads, block_size, head_dim)
 
 
 def mxfp_v_scale_numel(num_blocks: int, block_size: int, num_kv_heads: int, head_dim: int) -> int:
-    return (
-        num_blocks
-        * num_kv_heads
-        * mxfp_kv_block_scale_groups(block_size)
-        * head_dim
-        * MXFP_KV_SCALE_VALUES_PER_GROUP
-    )
+    return num_blocks * mxfp_v_scale_page_bytes(num_kv_heads, block_size, head_dim)
 
 
 def mxfp_kv_page_size_bytes(
@@ -148,16 +158,10 @@ def mxfp_kv_page_size_bytes(
     kv_dtype_size: int,
 ) -> int:
     """Bytes per KV cache page for C8_MXFP (FP8 K/V tensors + E8M0 scale caches)."""
-    if k_dim % MXFP_KV_SCALE_GROUP_SIZE != 0 or v_dim % MXFP_KV_SCALE_GROUP_SIZE != 0:
-        raise ValueError(
-            f"C8_MXFP KV cache requires K/V head dims divisible by {MXFP_KV_SCALE_GROUP_SIZE}, "
-            f"got {k_dim}/{v_dim}."
-        )
-    mxfp_kv_block_scale_groups(block_size)
     kv_bytes = block_size * num_kv_heads * (k_dim + v_dim) * kv_dtype_size
     scale_bytes = (
-        mxfp_k_scale_numel(1, block_size, num_kv_heads, k_dim)
-        + mxfp_v_scale_numel(1, block_size, num_kv_heads, v_dim)
+        mxfp_k_scale_page_bytes(num_kv_heads, block_size, k_dim)
+        + mxfp_v_scale_page_bytes(num_kv_heads, block_size, v_dim)
     ) * MXFP_SCALE_DTYPE_SIZE
     return kv_bytes + scale_bytes
 
@@ -167,44 +171,6 @@ def mxfp_get_scale_dtype() -> torch.dtype:
     if FLOAT8_E8M0FNU_DTYPE is not None:
         return FLOAT8_E8M0FNU_DTYPE
     return torch.uint8
-
-
-def mxfp_infer_head_dim_from_k_scale_numel(
-    raw_k_scale_numel: int,
-    num_blocks: int,
-    block_size: int,
-    num_kv_heads: int,
-) -> int:
-    """Infer K head dim from the k_scale raw buffer and resolved num_blocks."""
-    denom = (
-        num_blocks
-        * num_kv_heads
-        * block_size
-        * MXFP_KV_SCALE_VALUES_PER_GROUP
-    )
-    if raw_k_scale_numel % denom != 0:
-        raise ValueError(
-            f"C8_MXFP cannot infer k_dim from k_scale numel={raw_k_scale_numel}, "
-            f"num_blocks={num_blocks}, block_size={block_size}, num_kv_heads={num_kv_heads}."
-        )
-    return (raw_k_scale_numel // denom) * MXFP_KV_SCALE_GROUP_SIZE
-
-
-def mxfp_infer_head_dim_from_v_scale_numel(
-    raw_v_scale_numel: int,
-    num_blocks: int,
-    block_size: int,
-    num_kv_heads: int,
-) -> int:
-    """Infer V head dim from the v_scale raw buffer and resolved num_blocks."""
-    block_groups = mxfp_kv_block_scale_groups(block_size)
-    denom = num_blocks * num_kv_heads * block_groups * MXFP_KV_SCALE_VALUES_PER_GROUP
-    if raw_v_scale_numel % denom != 0:
-        raise ValueError(
-            f"C8_MXFP cannot infer v_dim from v_scale numel={raw_v_scale_numel}, "
-            f"num_blocks={num_blocks}, block_size={block_size}, num_kv_heads={num_kv_heads}."
-        )
-    return raw_v_scale_numel // denom
 
 
 def mxfp_resolve_kv_cache_layout(
@@ -220,142 +186,69 @@ def mxfp_resolve_kv_cache_layout(
     layer_name: str = "",
     num_blocks_hint: int | None = None,
 ) -> tuple[
-    int,
     tuple[int, int, int, int],
     tuple[int, int, int, int],
     tuple[int, int, int, int, int],
     tuple[int, int, int, int, int],
 ]:
-    """Derive C8_MXFP KV cache shapes from allocated raw buffer sizes only.
+    """Derive C8_MXFP KV cache shapes from spec dims and allocated raw buffer sizes.
 
-    Never uses page_size_bytes or KVCacheSpec head_size when they disagree with
-    the split int8 buffers. Reconciles k_dim/v_dim against scale buffers when needed.
+    ``num_blocks`` is derived from the k_scale buffer; ``k_dim``/``v_dim`` come from the caller
+    (typically ``KVCacheSpec``). All four raw buffers must match the expected numel.
 
-    Returns (num_blocks, k_shape, v_shape, k_scale_shape, v_scale_shape).
+    Returns (k_shape, v_shape, k_scale_shape, v_scale_shape).
     """
-    mxfp_kv_block_scale_groups(block_size)
-    kv_slot_per_block = block_size * num_kv_heads
+    validate_mxfp_v_scale_block_size(block_size)
+    validate_mxfp_k_scale_head_dim(k_dim)
+    if v_dim != k_dim:
+        validate_mxfp_k_scale_head_dim(v_dim)
 
-    def _try_match_k_dim(trial_k_dim: int) -> tuple[int, int] | None:
-        if trial_k_dim % MXFP_KV_SCALE_GROUP_SIZE != 0:
-            return None
-        k_scale_per_block = mxfp_k_scale_numel(1, block_size, num_kv_heads, trial_k_dim)
-        if raw_k_scale_numel % k_scale_per_block != 0:
-            return None
-        num_blocks = raw_k_scale_numel // k_scale_per_block
-        k_per_block = kv_slot_per_block * trial_k_dim
-        if num_blocks <= 0 or raw_k_numel != num_blocks * k_per_block:
-            return None
-        return num_blocks, trial_k_dim
-
-    matching: list[tuple[int, int]] = []
-    for trial_k_dim in (k_dim, v_dim):
-        matched = _try_match_k_dim(trial_k_dim)
-        if matched is not None:
-            matching.append(matched)
-    if not matching:
-        max_k_dim = raw_k_numel // kv_slot_per_block if kv_slot_per_block else 0
-        for trial_k_dim in range(MXFP_KV_SCALE_GROUP_SIZE, max_k_dim + 1, MXFP_KV_SCALE_GROUP_SIZE):
-            matched = _try_match_k_dim(trial_k_dim)
-            if matched is not None:
-                matching.append(matched)
-    if not matching:
-        raise ValueError(
-            f"C8_MXFP cannot resolve k/k_scale layout for layer={layer_name}: "
-            f"raw_k_numel={raw_k_numel}, raw_k_scale_numel={raw_k_scale_numel}, "
-            f"k_dim={k_dim}, v_dim={v_dim}, block_size={block_size}, num_kv_heads={num_kv_heads}."
-        )
-
-    if num_blocks_hint is not None:
-        hinted = [m for m in matching if m[0] == num_blocks_hint]
-        if len(hinted) == 1:
-            num_blocks, resolved_k_dim = hinted[0]
-        elif len(hinted) > 1:
-            num_blocks, resolved_k_dim = max(hinted, key=lambda item: item[1])
-        else:
-            num_blocks, resolved_k_dim = min(matching, key=lambda item: item[0])
-    elif len(matching) == 1:
-        num_blocks, resolved_k_dim = matching[0]
-    else:
-        num_blocks, resolved_k_dim = min(matching, key=lambda item: item[0])
-
-    resolved_v_dim = v_dim
-    if raw_v_numel != num_blocks * kv_slot_per_block * resolved_v_dim:
-        inferred_v_dim = mxfp_infer_head_dim_from_v_scale_numel(
-            raw_v_scale_numel, num_blocks, block_size, num_kv_heads
-        )
-        if raw_v_numel != num_blocks * kv_slot_per_block * inferred_v_dim:
-            raise ValueError(
-                f"C8_MXFP v/v_scale layout mismatch for layer={layer_name}: "
-                f"raw_v_numel={raw_v_numel}, raw_v_scale_numel={raw_v_scale_numel}, "
-                f"num_blocks={num_blocks}, spec_v_dim={v_dim}, inferred_v_dim={inferred_v_dim}, "
-                f"block_size={block_size}, num_kv_heads={num_kv_heads}."
-            )
-        resolved_v_dim = inferred_v_dim
-
-    k_shape = (num_blocks, block_size, num_kv_heads, resolved_k_dim)
-    v_shape = (num_blocks, block_size, num_kv_heads, resolved_v_dim)
-    k_scale_shape = mxfp_k_scale_cache_shape(num_blocks, block_size, num_kv_heads, resolved_k_dim)
-    v_scale_shape = mxfp_v_scale_cache_shape(num_blocks, block_size, num_kv_heads, resolved_v_dim)
-    return num_blocks, k_shape, v_shape, k_scale_shape, v_scale_shape
-
-
-def _mxfp_view_scale_cache_raw(raw_tensor: torch.Tensor, shape: tuple[int, ...]) -> torch.Tensor:
-    expected_numel = 1
-    for dim in shape:
-        expected_numel *= dim
-    if raw_tensor.numel() != expected_numel:
-        raise ValueError(
-            f"C8_MXFP scale view size mismatch: raw_numel={raw_tensor.numel()}, "
-            f"shape={shape}, expected_numel={expected_numel}."
-        )
-    scale_dtype = mxfp_get_scale_dtype()
-    return raw_tensor.view(torch.uint8).view(shape).view(scale_dtype)
-
-
-def mxfp_view_k_scale_cache(
-    raw_tensor: torch.Tensor,
-    block_size: int,
-    num_kv_heads: int,
-    head_dim: int,
-    layer_name: str = "",
-) -> torch.Tensor:
-    """View k_scale raw buffer; shape is derived from numel, never passed in."""
-    per_block = mxfp_k_scale_numel(1, block_size, num_kv_heads, head_dim)
-    if raw_tensor.numel() % per_block != 0:
+    k_scale_per_block = mxfp_k_scale_page_bytes(num_kv_heads, block_size, k_dim)
+    v_scale_per_block = mxfp_v_scale_page_bytes(num_kv_heads, block_size, v_dim)
+    if raw_k_scale_numel % k_scale_per_block != 0:
         raise ValueError(
             f"C8_MXFP k_scale buffer size mismatch for layer={layer_name}: "
-            f"numel={raw_tensor.numel()}, per_block={per_block}, block_size={block_size}, "
-            f"num_kv_heads={num_kv_heads}, head_dim={head_dim}."
+            f"raw_k_scale_numel={raw_k_scale_numel}, k_scale_per_block={k_scale_per_block}, "
+            f"k_dim={k_dim}, block_size={block_size}, num_kv_heads={num_kv_heads}."
         )
-    num_blocks = raw_tensor.numel() // per_block
-    shape = mxfp_k_scale_cache_shape(num_blocks, block_size, num_kv_heads, head_dim)
-    return _mxfp_view_scale_cache_raw(raw_tensor, shape)
-
-
-def mxfp_view_v_scale_cache(
-    raw_tensor: torch.Tensor,
-    block_size: int,
-    num_kv_heads: int,
-    head_dim: int,
-    layer_name: str = "",
-) -> torch.Tensor:
-    """View v_scale raw buffer; shape is derived from numel, never passed in."""
-    per_block = mxfp_v_scale_numel(1, block_size, num_kv_heads, head_dim)
-    if raw_tensor.numel() % per_block != 0:
+    num_blocks = raw_k_scale_numel // k_scale_per_block
+    if num_blocks <= 0:
         raise ValueError(
-            f"C8_MXFP v_scale buffer size mismatch for layer={layer_name}: "
-            f"numel={raw_tensor.numel()}, per_block={per_block}, block_size={block_size}, "
-            f"num_kv_heads={num_kv_heads}, head_dim={head_dim}."
+            f"C8_MXFP invalid num_blocks={num_blocks} for layer={layer_name}, "
+            f"raw_k_scale_numel={raw_k_scale_numel}, k_scale_per_block={k_scale_per_block}."
         )
-    num_blocks = raw_tensor.numel() // per_block
-    shape = mxfp_v_scale_cache_shape(num_blocks, block_size, num_kv_heads, head_dim)
-    return _mxfp_view_scale_cache_raw(raw_tensor, shape)
+    if num_blocks_hint is not None and num_blocks != num_blocks_hint:
+        raise ValueError(
+            f"C8_MXFP num_blocks mismatch for layer={layer_name}: "
+            f"from_k_scale={num_blocks}, num_blocks_hint={num_blocks_hint}."
+        )
 
+    kv_slot_per_block = block_size * num_kv_heads
+    expected_k = num_blocks * kv_slot_per_block * k_dim
+    expected_v = num_blocks * kv_slot_per_block * v_dim
+    expected_k_scale = num_blocks * k_scale_per_block
+    expected_v_scale = num_blocks * v_scale_per_block
+    if (
+        raw_k_numel != expected_k
+        or raw_v_numel != expected_v
+        or raw_k_scale_numel != expected_k_scale
+        or raw_v_scale_numel != expected_v_scale
+    ):
+        raise ValueError(
+            f"C8_MXFP KV cache buffer layout mismatch for layer={layer_name}: "
+            f"num_blocks={num_blocks}, k_dim={k_dim}, v_dim={v_dim}, "
+            f"raw_k_numel={raw_k_numel} (expected {expected_k}), "
+            f"raw_v_numel={raw_v_numel} (expected {expected_v}), "
+            f"raw_k_scale_numel={raw_k_scale_numel} (expected {expected_k_scale}), "
+            f"raw_v_scale_numel={raw_v_scale_numel} (expected {expected_v_scale}), "
+            f"block_size={block_size}, num_kv_heads={num_kv_heads}."
+        )
 
-def mxfp_view_scale_cache(raw_tensor: torch.Tensor, shape: tuple[int, ...]) -> torch.Tensor:
-    """Backward-compatible wrapper; prefer mxfp_view_k/v_scale_cache."""
-    return _mxfp_view_scale_cache_raw(raw_tensor, shape)
+    k_shape = (num_blocks, block_size, num_kv_heads, k_dim)
+    v_shape = (num_blocks, block_size, num_kv_heads, v_dim)
+    k_scale_shape = mxfp_k_scale_cache_shape(num_blocks, block_size, num_kv_heads, k_dim)
+    v_scale_shape = mxfp_v_scale_cache_shape(num_blocks, block_size, num_kv_heads, v_dim)
+    return k_shape, v_shape, k_scale_shape, v_scale_shape
 
 
 # Backward-compatible aliases.

@@ -1238,8 +1238,6 @@ class AscendC8MXFPAttentionBackendImpl(AscendAttentionBackendImpl):
             dst_type=torch.float8_e4m3fn,
         )
         query_scale = query_scale.view(FLOAT8_E8M0FNU_DTYPE)
-        key_scale = key_scale.view(FLOAT8_E8M0FNU_DTYPE)
-        value_scale = value_scale.view(FLOAT8_E8M0FNU_DTYPE)
 
         actual_seq_qlen = attn_metadata.actual_seq_lengths_q
         if attn_metadata.attn_state == AscendAttentionState.DecodeOnly:
@@ -1316,8 +1314,6 @@ class AscendC8MXFPAttentionBackendImpl(AscendAttentionBackendImpl):
     ) -> None:
         self._init_mxfp_cache_refs(kv_cache)
         quant_key, quant_value, key_scale, value_scale = self._quantize_kv_to_mxfp8(key, value, num_actual_tokens)
-        key_scale = key_scale.view(self.key_scale_cache.dtype)
-        value_scale = value_scale.view(self.value_scale_cache.dtype)
         slots = slot_mapping[:num_actual_tokens]
         DeviceOperator.reshape_and_cache(
             key=quant_key,

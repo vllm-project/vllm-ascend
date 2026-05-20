@@ -116,12 +116,10 @@ from vllm_ascend.device.mxfp_compat import (
     FLOAT8_E8M0FNU_DTYPE,
     mxfp_get_scale_dtype,
     mxfp_k_scale_numel,
-    mxfp_kv_block_scale_groups,
+    validate_mxfp_v_scale_block_size,
     mxfp_kv_page_size_bytes,
     mxfp_resolve_kv_cache_layout,
     mxfp_v_scale_numel,
-    mxfp_view_k_scale_cache,
-    mxfp_view_v_scale_cache,
 )
 from vllm_ascend.ops.rotary_embedding import set_cos_and_sin, update_cos_sin
 from vllm_ascend.patch.worker.patch_draft_quarot import patch_load_weights
@@ -3269,7 +3267,7 @@ class NPUModelRunner(GPUModelRunner):
         k_dim, v_dim = self._get_attention_kv_cache_dims(layer_name, kv_cache_spec)
         block_size = kv_cache_spec.block_size
         num_heads = kv_cache_spec.num_kv_heads
-        _, k_shape, v_shape, _, _ = mxfp_resolve_kv_cache_layout(
+        k_shape, v_shape, k_scale_shape, v_scale_shape = mxfp_resolve_kv_cache_layout(
             raw_k_numel=raw_k_tensor.numel(),
             raw_v_numel=raw_v_tensor.numel(),
             raw_k_scale_numel=raw_k_scale_tensor.numel(),
@@ -3281,29 +3279,25 @@ class NPUModelRunner(GPUModelRunner):
             layer_name=layer_name,
             num_blocks_hint=num_blocks_hint,
         )
-        resolved_k_dim = k_shape[-1]
-        resolved_v_dim = v_shape[-1]
-        k_cache_dtype = v_cache_dtype = torch.float8_e4m3fn
-        if self.is_kv_consumer and enable_fa_quant(self.vllm_config):
-            k_cache_dtype, v_cache_dtype = self.vllm_config.quant_config.get_kv_quant_dtype(
-                layer_name, kv_cache_spec.dtype, self.model_config
-            )
-        k_cache = raw_k_tensor.view(k_cache_dtype).view(k_shape)
-        v_cache = raw_v_tensor.view(v_cache_dtype).view(v_shape)
-        k_scale_cache = mxfp_view_k_scale_cache(
-            raw_k_scale_tensor, block_size, num_heads, resolved_k_dim, layer_name=layer_name
-        )
-        v_scale_cache = mxfp_view_v_scale_cache(
-            raw_v_scale_tensor, block_size, num_heads, resolved_v_dim, layer_name=layer_name
-        )
+        k_cache = raw_k_tensor.view(k_shape)
+        v_cache = raw_v_tensor.view(v_shape)
+        k_scale_cache = raw_k_scale_tensor.view(k_scale_shape)
+        v_scale_cache = raw_v_scale_tensor.view(v_scale_shape)
         return k_cache, v_cache, k_scale_cache, v_scale_cache
 
-    def _allocate_raw_cache_tensor(self, size: int, alignment: int, needs_alignment: bool | None = None) -> torch.Tensor:
+    def _allocate_raw_cache_tensor(
+        self,
+        size: int,
+        alignment: int,
+        needs_alignment: bool | None = None,
+        *,
+        dtype: torch.dtype = torch.int8,
+    ) -> torch.Tensor:
         if needs_alignment is None:
             needs_alignment = self.vllm_config.kv_transfer_config is not None
         if not needs_alignment:
-            return torch.zeros(size, dtype=torch.int8, device=self.device)
-        tensor = torch.zeros(size + alignment, dtype=torch.int8, device=self.device)
+            return torch.zeros(size, dtype=dtype, device=self.device)
+        tensor = torch.zeros(size + alignment, dtype=dtype, device=self.device)
         return self._align_memory(tensor, alignment)[:size]
 
     def initialize_kv_cache_tensors(self, kv_cache_config: KVCacheConfig) -> dict[str, torch.Tensor]:
@@ -3373,16 +3367,6 @@ class NPUModelRunner(GPUModelRunner):
                 f"Expected MLAAttention layer for {layer_name}, got {type(attn_layer).__name__}."
             )
 
-        from vllm.model_executor.layers.attention import Attention
-
-        attn_layers = get_layers_from_vllm_config(
-            self.vllm_config,
-            AttentionLayerBase,
-            [layer_name],
-        )
-        attn_layer = attn_layers[layer_name]
-        if isinstance(attn_layer, Attention):
-            return attn_layer.head_size, attn_layer.head_size_v
         head_size_v = kv_cache_spec.head_size_v if hasattr(kv_cache_spec, "head_size_v") else kv_cache_spec.head_size
         return kv_cache_spec.head_size, head_size_v
 
@@ -3495,7 +3479,7 @@ class NPUModelRunner(GPUModelRunner):
                             num_blocks = kv_cache_tensor.size // page_size_bytes
                             num_heads = current_kv_cache_spec.num_kv_heads
                             block_size = current_kv_cache_spec.block_size
-                            mxfp_kv_block_scale_groups(block_size)
+                            validate_mxfp_v_scale_block_size(block_size)
                             k_tensor_size = num_blocks * block_size * num_heads * k_dim
                             v_tensor_size = num_blocks * block_size * num_heads * v_dim
                             k_scale_tensor_size = mxfp_k_scale_numel(num_blocks, block_size, num_heads, k_dim)
@@ -3530,17 +3514,37 @@ class NPUModelRunner(GPUModelRunner):
                         dsa_k_scale_tensor_size = int(kv_cache_tensor.size // dsa_k_scale_tensor_split_factor)
 
                     # for other attentions, e.g., self_attn, sliding window attn
-                    needs_alignment = False if self._is_c8_mxfp_kv_cache(current_kv_cache_spec) else None
-                    k_tensor = self._allocate_raw_cache_tensor(k_tensor_size, alignment, needs_alignment=needs_alignment)
-                    v_tensor = self._allocate_raw_cache_tensor(v_tensor_size, alignment, needs_alignment=needs_alignment)
-                    if k_scale_tensor_size is not None:
+                    if self._is_c8_mxfp_kv_cache(current_kv_cache_spec):
+                        mxfp_kv_dtype = torch.float8_e4m3fn
+                        needs_alignment = False
+                        k_tensor = self._allocate_raw_cache_tensor(
+                            k_tensor_size, alignment, needs_alignment=False, dtype=mxfp_kv_dtype
+                        )
+                        v_tensor = self._allocate_raw_cache_tensor(
+                            v_tensor_size, alignment, needs_alignment=False, dtype=mxfp_kv_dtype
+                        )
                         k_scale_tensor = self._allocate_raw_cache_tensor(
-                            k_scale_tensor_size, alignment, needs_alignment=False
+                            k_scale_tensor_size, alignment, needs_alignment=False, dtype=torch.uint8
                         )
-                    if v_scale_tensor_size is not None:
                         v_scale_tensor = self._allocate_raw_cache_tensor(
-                            v_scale_tensor_size, alignment, needs_alignment=False
+                            v_scale_tensor_size, alignment, needs_alignment=False, dtype=torch.uint8
                         )
+                    else:
+                        needs_alignment = None
+                        k_tensor = self._allocate_raw_cache_tensor(
+                            k_tensor_size, alignment, needs_alignment=needs_alignment
+                        )
+                        v_tensor = self._allocate_raw_cache_tensor(
+                            v_tensor_size, alignment, needs_alignment=needs_alignment
+                        )
+                        if k_scale_tensor_size is not None:
+                            k_scale_tensor = self._allocate_raw_cache_tensor(
+                                k_scale_tensor_size, alignment, needs_alignment=False
+                            )
+                        if v_scale_tensor_size is not None:
+                            v_scale_tensor = self._allocate_raw_cache_tensor(
+                                v_scale_tensor_size, alignment, needs_alignment=False
+                            )
                     #### for deepseek sparse attention
                     if dsa_k_tensor_size is not None:
                         dsa_k_tensor = self._allocate_raw_cache_tensor(dsa_k_tensor_size, alignment)
