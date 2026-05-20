@@ -234,14 +234,8 @@ def test_gdn_310_forward_core_prefill_uses_chunk_fallback_and_updates_state(monk
 
     monkeypatch.setattr(
         gdn_310.torch.ops._C_ascend,
-        "npu_causal_conv1d_310_host",
-        fake_causal_conv1d,
-        raising=False,
-    )
-    monkeypatch.setattr(
-        gdn_310.torch.ops._C_ascend,
         "npu_causal_conv1d_310",
-        lambda *args, **kwargs: pytest.fail("prefill should use host metadata op"),
+        fake_causal_conv1d,
         raising=False,
     )
     monkeypatch.setattr(gdn_310, "chunk_gated_delta_rule_pytorch", fake_chunk_gated_delta_rule_pytorch)
@@ -255,10 +249,9 @@ def test_gdn_310_forward_core_prefill_uses_chunk_fallback_and_updates_state(monk
 
     _, _, conv_kwargs = conv_calls[0]
     assert conv_kwargs["run_mode"] == 0
-    assert conv_kwargs["query_start_loc"] == (0, 2, 5)
-    assert conv_kwargs["cache_indices"] == (1, 3)
-    assert conv_kwargs["initial_state_mode"] == (1, 0)
-    assert conv_kwargs["num_accepted_tokens"] == ()
+    assert torch.equal(conv_kwargs["query_start_loc"], torch.tensor([0, 2, 5], dtype=torch.int64))
+    assert torch.equal(conv_kwargs["cache_indices"], torch.tensor([1, 3], dtype=torch.int64))
+    assert torch.equal(conv_kwargs["initial_state_mode"], torch.tensor([1, 0], dtype=torch.int64))
 
     chunk_call = chunk_calls[0]
     assert chunk_call["cu_seqlens"] is metadata.non_spec_query_start_loc

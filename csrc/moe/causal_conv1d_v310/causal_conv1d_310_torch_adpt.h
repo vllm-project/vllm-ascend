@@ -49,37 +49,5 @@ at::Tensor npu_causal_conv1d_310(
     return output;
 }
 
-at::Tensor npu_causal_conv1d_310_host(
-    const at::Tensor& x,
-    const at::Tensor& weight,
-    const c10::optional<at::Tensor>& bias,
-    const at::Tensor& conv_states,
-    at::IntArrayRef query_start_loc,
-    at::IntArrayRef cache_indices,
-    at::IntArrayRef initial_state_mode,
-    at::IntArrayRef num_accepted_tokens,
-    int64_t activation_mode,
-    int64_t pad_slot_id,
-    int64_t run_mode)
-{
-    at::Tensor output = at::empty(x.sizes(), x.options());
-    EXEC_NPU_CMD(aclnnCausalConv1dV310,
-                 x,
-                 weight,
-                 bias,
-                 conv_states,
-                 query_start_loc,
-                 cache_indices,
-                 initial_state_mode,
-                 num_accepted_tokens,
-                 activation_mode,
-                 pad_slot_id,
-                 run_mode,
-                 output
-                );
-
-    return output;
-}
-
 }
 #endif

@@ -57,29 +57,6 @@ def _flatten_state_indices(
     return ssm_state_indices.masked_select(valid)[:total_tokens].to(torch.int32).contiguous()
 
 
-def _to_int64_tuple(tensor: torch.Tensor | None) -> tuple[int, ...]:
-    if tensor is None:
-        return ()
-    tensor = tensor.to(dtype=torch.int64, device="cpu")
-    if tensor.dim() == 0:
-        return (int(tensor.item()),)
-    return tuple(int(value) for value in tensor.reshape(-1).tolist())
-
-
-def _cached_int64_tuple(
-    attn_metadata: GDNAttentionMetadata,
-    name: str,
-    tensor: torch.Tensor | None,
-) -> tuple[int, ...]:
-    cache = getattr(attn_metadata, "_ascend_causal_conv1d_host_args", None)
-    if cache is None:
-        cache = {}
-        attn_metadata._ascend_causal_conv1d_host_args = cache
-    if name not in cache:
-        cache[name] = _to_int64_tuple(tensor)
-    return cache[name]
-
-
 def npu_recurrent_gated_delta_rule_310(
     q: torch.Tensor,
     k: torch.Tensor,
@@ -192,27 +169,15 @@ class AscendGatedDeltaNetAttention310(GatedDeltaNetAttention):
         # 1.2: Process the remaining part
         if attn_metadata.num_prefills > 0:
             if mixed_qkv_non_spec is not None:
-                mixed_qkv_non_spec = torch.ops._C_ascend.npu_causal_conv1d_310_host(
+                mixed_qkv_non_spec = torch.ops._C_ascend.npu_causal_conv1d_310(
                     mixed_qkv_non_spec,
                     conv_weights,
                     bias=self.conv1d.bias,
                     conv_states=conv_state,
-                    query_start_loc=_cached_int64_tuple(
-                        attn_metadata,
-                        "non_spec_query_start_loc",
-                        non_spec_query_start_loc,
-                    ),
-                    cache_indices=_cached_int64_tuple(
-                        attn_metadata,
-                        "non_spec_state_indices_tensor",
-                        non_spec_state_indices_tensor,
-                    ),
-                    initial_state_mode=_cached_int64_tuple(
-                        attn_metadata,
-                        "has_initial_state",
-                        has_initial_state,
-                    ),
-                    num_accepted_tokens=(),
+                    query_start_loc=non_spec_query_start_loc.to(torch.int64),
+                    cache_indices=non_spec_state_indices_tensor.to(torch.int64),
+                    initial_state_mode=has_initial_state.to(torch.int64),
+                    num_accepted_tokens=None,
                     activation_mode=activation_num,
                     pad_slot_id=PAD_SLOT_ID,
                     run_mode=0,
