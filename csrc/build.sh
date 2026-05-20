@@ -41,6 +41,7 @@ ENABLE_BUILT_JIT=FALSE
 ENABLE_BUILT_CUSTOM=FALSE
 ENABLE_STATIC=FALSE
 ENABLE_EXPERIMENTAL=FALSE
+ENABLE_INCREMENTAL=FALSE
 ASCEND_SOC_UNITS="ascend910b"
 SUPPORT_COMPUTE_UNIT_SHORT=("ascend310p" "ascend910b" "ascend910_93" "ascend950" "kirinx90")
 CMAKE_BUILD_MODE=""
@@ -92,6 +93,7 @@ function help_info() {
                 echo "    --soc=soc_version      Compile for specified Ascend SoC (comma-separated for multiple)"
                 echo "    --vendor_name=name     Specify custom operator package vendor name"
                 echo "    --ops=op1,op2,...      Compile specified operators (comma-separated for multiple)"
+                echo "    --incremental          Reuse the existing CMake build directory"
                 echo "    -j[n]                  Compile thread nums, default is 8, eg: -j8"
                 echo "    -O[n]                  Compile optimization options, support [O0 O1 O2 O3], eg:-O3"
                 echo "    --experimental         Build experimental version"
@@ -371,6 +373,21 @@ function clean_third_party()
     if [ -d "${THIRD_PARTY_PATH}" ]; then
         rm -rf ${THIRD_PARTY_PATH}/abseil-cpp
         rm -rf ${THIRD_PARTY_PATH}/ascend_protobuf
+    fi
+}
+
+function refresh_cmake_cache_for_incremental()
+{
+    local current_cann_path
+    local cached_cann_path
+    current_cann_path=$(realpath -m "${ASCEND_CANN_PACKAGE_PATH}")
+
+    if [[ -f "${BUILD_DIR}/CMakeCache.txt" ]]; then
+        cached_cann_path=$(sed -n 's/^CUSTOM_ASCEND_CANN_PACKAGE_PATH:.*=//p' "${BUILD_DIR}/CMakeCache.txt")
+        if [[ -n "${cached_cann_path}" && "$(realpath -m "${cached_cann_path}")" != "${current_cann_path}" ]]; then
+            log "Info: CANN package path changed, refresh CMake cache."
+            rm -rf "${BUILD_DIR}"
+        fi
     fi
 }
 
@@ -879,6 +896,10 @@ while [[ $# -gt 0 ]]; do
         ENABLE_STATIC=TRUE
         shift
         ;;
+    --incremental)
+        ENABLE_INCREMENTAL=TRUE
+        shift
+        ;;
     --jit)
         ENABLE_BUILT_JIT=TRUE
         shift
@@ -1383,7 +1404,12 @@ CUSTOM_OPTION="${CUSTOM_OPTION} -DCUSTOM_ASCEND_CANN_PACKAGE_PATH=${ASCEND_CANN_
 
 set_env
 
-clean
+if [[ "$ENABLE_INCREMENTAL" == "TRUE" ]]; then
+    refresh_cmake_cache_for_incremental
+    mkdir -p "${BUILD_DIR}" "${OUTPUT_DIR}"
+else
+    clean
+fi
 
 if [ -n "${CCACHE_PROGRAM}" ]; then
     if [ "${CCACHE_PROGRAM}" == "false" ] || [ "${CCACHE_PROGRAM}" == "off" ]; then
@@ -1579,7 +1605,10 @@ elif [[ "$ENABLE_BUILD_PKG" == "TRUE" ]]; then      # --pkg 新命令新使用
         soc=$(echo "${soc}" | xargs)  # 去除前后空格
         soc_options=" -DASCEND_COMPUTE_UNIT=${soc}"
         if [[ -n "${soc}" ]]; then  # 检查非空
-            build_pkg_for_single_soc ${soc_options} && make clean
+            build_pkg_for_single_soc ${soc_options}
+            if [[ "$ENABLE_INCREMENTAL" != "TRUE" ]]; then
+                make clean
+            fi
         fi
     done
 else

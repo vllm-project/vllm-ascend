@@ -2,6 +2,7 @@
 
 ROOT_DIR=$1
 SOC_VERSION=$2
+ROOT_DIR=$(cd "${ROOT_DIR}" && pwd -P)
 
 log() {
     echo "[build_aclnn] $*"
@@ -270,22 +271,26 @@ log_selected_ops
   set -euo pipefail
 
   log "subshell cwd before cd=$(pwd)"
-  cd csrc
+  cd "${ROOT_DIR}/csrc"
   log "subshell cwd after cd=$(pwd)"
-  log "cleaning csrc build dirs"
-  rm -rf -- build output build_out
 
   : "${ROOT_DIR:?ROOT_DIR is not set}"
   : "${CUSTOM_OPS:?CUSTOM_OPS is not set}"
   : "${SOC_VERSION:?SOC_VERSION is not set}"
   : "${SOC_ARG:?SOC_ARG is not set}"
 
-  log "build command: bash build.sh --pkg --ops=\"${CUSTOM_OPS}\" --soc=\"${SOC_ARG}\""
+  custom_ops_install_dir="${ROOT_DIR}/vllm_ascend/_cann_ops_custom"
+
+  rm -f ./build/cann-ops-transformer*.run
+  log "build command: bash build.sh --incremental --pkg --ops=\"${CUSTOM_OPS}\" --soc=\"${SOC_ARG}\""
   log "building custom ops ${CUSTOM_OPS} for ${SOC_VERSION}"
-  bash build.sh --pkg --ops="${CUSTOM_OPS}" --soc="${SOC_ARG}"
+  bash build.sh --incremental --pkg --ops="${CUSTOM_OPS}" --soc="${SOC_ARG}"
   log "build.sh finished"
 
-  custom_ops_install_dir="${ROOT_DIR}/vllm_ascend/_cann_ops_custom"
+  shopt -s nullglob
+  installer_candidates=(./build/cann-ops-transformer*.run)
+  shopt -u nullglob
+
   log "custom_ops_install_dir=${custom_ops_install_dir}"
 
   mkdir -p -- "$custom_ops_install_dir"
@@ -294,10 +299,6 @@ log_selected_ops
   find "$custom_ops_install_dir" -mindepth 1 -maxdepth 1 \
     ! -name '.gitkeep' \
     -exec rm -rf -- {} +
-
-  shopt -s nullglob
-  installer_candidates=(./build/cann-ops-transformer*.run)
-  shopt -u nullglob
 
   log "installer candidate count=${#installer_candidates[@]}"
   for installer_file in "${installer_candidates[@]}"; do
