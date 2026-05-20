@@ -12,6 +12,7 @@ from vllm_ascend.recovery.types import (
     RecoveryPlan,
     RecoveryComplete,
     RecoveryPlanResult,
+    RecoveryStep,
     StepResult,
     StepTarget,
     WorkerStepDispatch,
@@ -254,6 +255,14 @@ class RecoveryHandler:
             "[RecoveryHandler][engine=%d] Executing RecoveryPlan '%s' with "
             "%d steps",
             self._engine_index, plan.name, len(plan.steps),
+        )
+        plan.steps.append(
+            RecoveryStep(
+                name="recovery_completed",
+                target="worker",
+                actions=["recovery_finished"],
+                timeout_s=5
+            )
         )
         step_results: list[StepResult] = []
         success = True
