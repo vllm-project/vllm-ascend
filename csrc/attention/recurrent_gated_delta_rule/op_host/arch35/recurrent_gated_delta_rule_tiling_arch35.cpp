@@ -123,17 +123,7 @@ private:
             const char *name;
             HostRuleFn fn;
         };
-        // const std::array<RuleItem, 4> ubRules = {{
-        //     {"RuleInitUbCalcContext", &RecurrentGatedDeltaRuleTiling::RuleInitUbCalcContext},
-        //     {"RuleCalcFixedUbBytes", &RecurrentGatedDeltaRuleTiling::RuleCalcFixedUbBytes},
-        //     {"RuleCalcWorkingUbBytes", &RecurrentGatedDeltaRuleTiling::RuleCalcWorkingUbBytes},
-        //     {"RuleCalcVStepCoeff", &RecurrentGatedDeltaRuleTiling::RuleCalcVStepCoeff},
-        // }};
-        // for (const auto &rule : ubRules) {
-        //     OP_CHECK_IF((this->*(rule.fn))() != ge::GRAPH_SUCCESS,
-        //                 OP_LOGE(inputParams_.opName, "CalUbSize rule failed: %s", rule.name),
-        //                 return ge::GRAPH_FAILED);
-        // }
+
         OP_CHECK_IF(RuleInitUbCalcContext() != ge::GRAPH_SUCCESS,
             OP_LOGE(inputParams_.opName, "CalUbSize rule failed: RuleInitUbCalcContext"),
             return ge::GRAPH_FAILED);
