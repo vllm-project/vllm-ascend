@@ -1401,8 +1401,8 @@ class TestNPUWorkerWeightUpdate(TestBase):
 
         engine.receive_weights.side_effect = fake_receive
         worker = self._make_worker(engine=engine)
-        fake_param = MagicMock()
-        worker.model_runner.model.get_parameter.return_value = fake_param
+        param = torch.nn.Parameter(torch.ones(2), requires_grad=True)
+        worker.model_runner.model.get_parameter.return_value = param
 
         if vllm_version_is("0.20.2"):
             typed = MagicMock()
@@ -1416,7 +1416,8 @@ class TestNPUWorkerWeightUpdate(TestBase):
         worker.update_weights({"foo": "bar"})
 
         worker.model_runner.model.get_parameter.assert_called_once_with("layer.weight")
-        fake_param.copy_.assert_called_once()
+        torch.testing.assert_close(param.detach(), torch.zeros(2))
+        self.assertTrue(param.requires_grad)
 
     @patch.dict("os.environ", {"VLLM_ASCEND_ENABLE_NZ": "1"})
     def test_update_weights_rejects_nz(self):

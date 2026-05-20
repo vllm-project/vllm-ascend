@@ -366,9 +366,10 @@ class NPUWorker(WorkerBase):
                 else:
 
                     def load_weights_direct(weights: list[tuple[str, torch.Tensor]]) -> None:
-                        for name, weight in weights:
-                            param = model.get_parameter(name)
-                            param.copy_(weight)
+                        with torch.no_grad():
+                            for name, weight in weights:
+                                param = model.get_parameter(name)
+                                param.copy_(weight)
 
                     self.weight_transfer_engine.receive_weights(
                         typed_update_info,
@@ -388,9 +389,10 @@ class NPUWorker(WorkerBase):
                 else:
 
                     def load_weights_direct(weights: list[tuple[str, torch.Tensor]]) -> None:
-                        for name, weight in weights:
-                            param = model.get_parameter(name)
-                            param.copy_(weight)
+                        with torch.no_grad():
+                            for name, weight in weights:
+                                param = model.get_parameter(name)
+                                param.copy_(weight)
 
                     self.weight_transfer_engine.receive_weights(
                         typed_update_info,
