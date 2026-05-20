@@ -119,10 +119,10 @@ jobs:
               PYTORCH_NPU_ALLOC_CONF: max_split_size_mb:256
               VLLM_WORKER_MULTIPROC_METHOD: spawn
             run: |
-              mkdir -p tiktoken_encodings
-              curl -L -o tiktoken_encodings/o200k_base.tiktoken "https://openaipublic.blob.core.windows.net/encodings/o200k_base.tiktoken"
-              curl -L -o tiktoken_encodings/cl100k_base.tiktoken "https://openaipublic.blob.core.windows.net/encodings/cl100k_base.tiktoken"
-              export TIKTOKEN_ENCODINGS_BASE=${PWD}/tiktoken_encodings
+              # mkdir -p tiktoken_encodings
+              # curl -L -o tiktoken_encodings/o200k_base.tiktoken "https://openaipublic.blob.core.windows.net/encodings/o200k_base.tiktoken"
+              # curl -L -o tiktoken_encodings/cl100k_base.tiktoken "https://openaipublic.blob.core.windows.net/encodings/cl100k_base.tiktoken"
+              # export TIKTOKEN_ENCODINGS_BASE=${PWD}/tiktoken_encodings
               python3 ../.github/workflows/scripts/run_suite.py \
                 --suite e2e-upstream_singlecard \
                 --auto-partition-id "${{ matrix.part }}" \
