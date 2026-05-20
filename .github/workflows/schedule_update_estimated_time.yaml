@@ -45,7 +45,7 @@ jobs:
           token: ${{ secrets.PAT_TOKEN }}
 
       - name: Download all timing artifacts
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@v8
         with:
           pattern: timing-data-*
           path: timing-artifacts/
