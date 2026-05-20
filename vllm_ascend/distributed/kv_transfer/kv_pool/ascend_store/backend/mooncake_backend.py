@@ -2,6 +2,7 @@
 import json
 import os
 from dataclasses import dataclass
+from typing import Any
 
 import regex as re
 import torch
@@ -61,12 +62,10 @@ class MooncakeBackend(Backend):
                     self.config.master_server_address,
                 )
 
-            if ret != 0:
-                msg = "Initialize mooncake failed."
-                logger.error(msg)
-                raise RuntimeError(msg)
-        else:
-            raise NotImplementedError(f"MooncakeBackend does not support protocol {self.config.protocol!r}.")
+        if ret != 0:
+            msg = "Initialize mooncake failed."
+            logger.error(msg)
+            raise RuntimeError(msg)
 
     def set_device(self):
         local_rank = get_world_group().local_rank
@@ -85,18 +84,30 @@ class MooncakeBackend(Backend):
             res = self.store.batch_put_from_multi_buffers(keys, addrs, sizes)
             for value in res:
                 if value < 0:
-                    logger.error("Failed to put key %s,res:%s", keys, res)
+                    logger.error(f"Failed to put key {keys},res:{res}")
         except Exception as e:
-            logger.error("Failed to put key %s,error:%s", keys, e)
+            logger.error(f"Failed to put key {keys},error:{e}")
 
     def get(self, keys: list[str], addrs: list[list[int]], sizes: list[list[int]]):
+        logger.info(
+            "MooncakeBackend.get enter keys=%d sample_keys=%s",
+            len(keys),
+            keys[:3],
+        )
         try:
             res = self.store.batch_get_into_multi_buffers(keys, addrs, sizes)
-            for value in res:
+            res_list = list(res)
+            logger.info(
+                "MooncakeBackend.get result keys=%d result_sample=%s negative_count=%d",
+                len(keys),
+                res_list[:12],
+                sum(1 for value in res_list if value < 0),
+            )
+            for value in res_list:
                 if value < 0:
-                    logger.error("Failed to get key %s, res:%s", keys, res)
+                    logger.error(f"Failed to get key {keys}, res:{res_list}")
         except Exception as e:
-            logger.error("Failed to get key %s, error:%s", keys, e)
+            logger.error(f"Failed to get key {keys}, error:{e}")
 
 
 @dataclass
