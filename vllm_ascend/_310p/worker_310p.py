@@ -121,7 +121,6 @@ class NPUWorker310(NPUWorker):
         # Therefore, the space available for allocating KV cache and Mamba cache needs to be calculated
         # based on the already occupied space of the system memory.
 
-
         if _is_rc_device():
             self.available_kv_cache_memory_bytes = (self.requested_memory - psutil.virtual_memory().used) // 2
         else:
