@@ -62,7 +62,7 @@ class ModelNetLoaderElastic(BaseModelLoader):
         extra = load_config.model_loader_extra_config
         if extra and "CONFIG_FILE" in extra:
             try:
-                logger.info("Reading configs in file %s ...", load_config.model_loader_extra_config["CONFIG_FILE"])
+                logger.info("Reading configs in file %s ...", extra["CONFIG_FILE"])
                 with open(extra["CONFIG_FILE"]) as f:
                     config = json.load(f)
             except FileNotFoundError:
@@ -211,7 +211,7 @@ class ModelNetLoaderElastic(BaseModelLoader):
             driver_ip = get_ip()
 
             if driver_ip == "0.0.0.0":
-                logger.error("Driver IP is not set, skip to start Netloader server")
+                logger.warning("Driver IP is not set, skip to start Netloader server")
             else:
                 if self.listen_port is None:
                     self.listen_port = find_free_port()
@@ -233,12 +233,20 @@ class ModelNetLoaderElastic(BaseModelLoader):
                             "Successfully wrote server address to file: %s", self.output_prefix + str(device_id)
                         )
                     except FileNotFoundError:
-                        logger.error("File path %s does not exist.", self.output_prefix + str(device_id))
+                        logger.warning(
+                            "File path %s does not exist, server address not persisted.",
+                            self.output_prefix + str(device_id),
+                        )
                     except PermissionError:
-                        logger.error("No permission to write to file %s.", self.output_prefix + str(device_id))
+                        logger.warning(
+                            "No permission to write to file %s, server address not persisted.",
+                            self.output_prefix + str(device_id),
+                        )
                     except OSError as e:
-                        logger.error(
-                            "I/O error occurred while writing to file %s: %s", self.output_prefix + str(device_id), e
+                        logger.warning(
+                            "I/O error while writing to file %s: %s, server address not persisted.",
+                            self.output_prefix + str(device_id),
+                            e,
                         )
                     except Exception as e:
                         logger.error("Unknown error: %s", e)
@@ -259,7 +267,13 @@ class ModelNetLoaderElastic(BaseModelLoader):
                     )
                     elastic_server.start()
                 except Exception as e:
-                    logger.error("Failed to start Netloader server for rank: %s, details: %s", device_id, e)
+                    logger.error(
+                        "Failed to start Netloader server for rank=%s, ip=%s, port=%s, details: %s",
+                        device_id,
+                        driver_ip,
+                        self.listen_port,
+                        e,
+                    )
         else:
             logger.info("Skip to start Netloader server")
 
@@ -270,7 +284,9 @@ class ModelNetLoaderElastic(BaseModelLoader):
             process_weights_after_loading(model, model_config, torch.device(device_config.device))
 
         if model is None:
-            logger.error("NetLoader elastic loads model fails")
+            logger.error(
+                "Both elastic loading and default model loader fallback returned None"
+            )
             return None
 
         return model.eval()
