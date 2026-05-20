@@ -35,6 +35,8 @@ from vllm.model_executor.models.minimax_m2 import (
 from vllm.platforms import current_platform
 from vllm.sequence import IntermediateTensors
 
+from vllm.logger import logger
+
 from vllm_ascend.ops.rotary_embedding import get_cos_and_sin_slice
 
 FP8_DTYPES = tuple(
@@ -142,12 +144,14 @@ def _dequantize_fp8_block_weight(
     n_tiles = (n + block_n - 1) // block_n
     k_tiles = (k + block_k - 1) // block_k
     if tuple(weight_scale_inv.shape) != (n_tiles, k_tiles):
-        raise ValueError(
+        err_msg = (
             "Unexpected fp8 scale shape: "
             f"weight={tuple(fp8_weight.shape)}, "
             f"scale={tuple(weight_scale_inv.shape)}, "
             f"block_size={block_size}"
         )
+        logger.error(err_msg)
+        raise ValueError(err_msg)
     expanded_scale = weight_scale_inv.repeat_interleave(block_n, dim=0).repeat_interleave(block_k, dim=1)
     expanded_scale = expanded_scale[:n, :k].to(dtype=torch.bfloat16)
     return fp8_weight.to(dtype=torch.bfloat16) * expanded_scale
@@ -185,11 +189,13 @@ def _fp8_dequant_weight_iter(
         yield name, loaded_weight
 
     if pending_fp8_weights or pending_fp8_scales:
-        raise ValueError(
+        err_msg = (
             "Unpaired fp8 MiniMax-M2 weight/scale tensors detected: "
             f"pending_weights={len(pending_fp8_weights)}, "
             f"pending_scales={len(pending_fp8_scales)}"
         )
+        logger.error(err_msg)
+        raise ValueError(err_msg)
 
 
 MiniMaxM2Model._need_dequantize_fp8_weights = _need_dequantize_fp8_weights
@@ -204,6 +210,7 @@ def _patched_load_weights(
     weights: Iterable[tuple[str, torch.Tensor]],
 ) -> set[str]:
     if self._need_dequantize_fp8_weights():
+        logger.info("MiniMax-M2 fp8 weights detected on NPU, applying dequantization during weight loading.")
         weights = self._fp8_dequant_weight_iter(weights)
     return _original_load_weights(self, weights)
 
@@ -235,7 +242,9 @@ def _patched_minimax_m2_forward(
             hidden_states = self.embed_input_ids(input_ids)
         residual = None
     else:
-        assert intermediate_tensors is not None
+        assert intermediate_tensors is not None, (
+            "intermediate_tensors is None at MiniMax patched forward (not first PP rank)"
+        )
         hidden_states = intermediate_tensors["hidden_states"]
         residual = intermediate_tensors["residual"]
 

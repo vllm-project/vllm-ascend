@@ -32,6 +32,8 @@ from vllm.model_executor.layers.mamba.linear_attn import (
 )
 from vllm.platforms import current_platform
 
+from vllm.logger import logger
+
 _ORIG_QK_METHOD_NAME: str | None = None
 _original_qk_method = None
 _qk_is_staticmethod = False
@@ -86,7 +88,9 @@ def _patched_qk(
 
         return q, k
 
-    assert _original_qk_method is not None
+    assert _original_qk_method is not None, (
+        "no original qk method found for non-NPU fallback path in MiniMax linear attention"
+    )
     # We install the patch as a staticmethod below, so prefer the static calling
     # convention for the original as well.
     return _original_qk_method(q_norm, k_norm, q, k)
@@ -122,11 +126,13 @@ def _patched_init(
     self.weight_shard_rank = self.tp_rank if weight_shard_rank is None else weight_shard_rank
 
     if hidden_size % self.weight_shard_world != 0:
-        raise ValueError(
+        err_msg = (
             "MiniMaxText01RMSNormTP hidden_size must be divisible by "
             f"weight_shard_world_size, got hidden_size={hidden_size}, "
             f"weight_shard_world_size={self.weight_shard_world}"
         )
+        logger.error(err_msg)
+        raise ValueError(err_msg)
 
     self.weight = nn.Parameter(torch.ones(int(hidden_size / self.weight_shard_world)))
     self.weight.weight_loader = partial(
