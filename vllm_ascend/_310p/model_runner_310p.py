@@ -19,7 +19,7 @@ from __future__ import annotations
 
 import math
 from contextlib import contextmanager, nullcontext
-from typing import cast
+from typing import Any, cast
 
 import numpy as np
 import torch
@@ -177,11 +177,11 @@ class NPUModelRunner310(NPUModelRunner):
         self.query_start_loc.copy_to_gpu()
         return num_reqs_padded
 
-    def _prepare_inputs(
+    def _prepare_inputs(  # type: ignore[override]
         self,
         scheduler_output: SchedulerOutput,
         num_scheduled_tokens: np.ndarray,
-    ) -> tuple[torch.Tensor, SpecDecodeMetadata | None, int]:
+    ) -> tuple[torch.Tensor, SpecDecodeMetadata | None, int, list[np.ndarray[Any, Any]] | None]:
         """
         310P cannot use the Triton slot-mapping kernel or the generic NPU Add
         kernels used by the base runner for decode metadata. Keep those pieces
@@ -514,6 +514,7 @@ class NPUModelRunner310(NPUModelRunner):
             logits_indices,
             spec_decode_metadata,
             total_num_scheduled_tokens,
+            None,  # num_scheduled_tokens_compressed_list (not used in 310P)
         )
 
     @torch.inference_mode()
