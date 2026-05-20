@@ -14,6 +14,11 @@ from vllm.triton_utils import tl, triton
 
 from .utils import prepare_chunk_indices, safe_exp
 
+from vllm_ascend.utils import (
+    AscendDeviceType,
+    get_ascend_device_type,
+)
+
 
 @triton.heuristics(
     {
@@ -140,7 +145,5 @@ def chunk_scaled_dot_kkt_fwd(
         multibuffer=True,
         **({"disable_tightly_coupled_buffer_reuse": True}
         if get_ascend_device_type() == AscendDeviceType.A5 else {}),
-        # inject_block_all=True
-        # disable_tightly_coupled_buffer_reuse=True
     )
     return A
