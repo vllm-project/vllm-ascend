@@ -93,6 +93,4 @@ public:
     }
 };
 
-OP_ADD(RecurrentGatedDeltaRule);
-
 } // namespace ops
