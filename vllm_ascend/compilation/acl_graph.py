@@ -244,6 +244,19 @@ def update_full_graph_params(
         draft_attn_metadatas,
     )
 
+    from vllm_ascend.ops.gdn import update_conv1d_graph_params
+
+    # For GDN Attention: AscendC operate(conv1d update) update graph params
+    # No patch can be loaded, update method call is temporarily placed here
+    update_conv1d_graph_params(
+        update_stream,
+        forward_context,
+        num_tokens,
+        vllm_config,
+        _EXTRA_CTX.is_draft_model,
+        draft_attn_metadatas,
+    )
+
 
 @dataclass
 class GraphParams:
@@ -251,14 +264,15 @@ class GraphParams:
     workspaces: dict[int, torch.Tensor]
     handles: dict[int, list[torch_npu._C._NPUTaskGroupHandle]]
     attn_params: dict[int, list[tuple]]
+    conv1d_params: dict[int, list[tuple]]  # for causal conv1d params
+    conv1d_handles: dict[int, list[torch_npu._C._NPUTaskGroupHandle]]  # for causal conv1d params handles
+    conv1d_events: dict[int, list[torch.npu.ExternalEvent]]  # for causal conv1d params events
     # New: key -> (params, handle, event) mapping for reliable lookup
     # Structure: {num_tokens: {layer_key: (params_tuple, handle, event)}}
     attn_params_by_key: dict[int, dict[str, tuple]] | None = None
-
     def __post_init__(self):
         if self.attn_params_by_key is None:
             self.attn_params_by_key = {size: {} for size in self.attn_params}
-
 
 _graph_params: GraphParams | None = None
 
@@ -273,6 +287,9 @@ def set_graph_params(aclgraph_capture_sizes: list[int]):
         {size: [] for size in aclgraph_capture_sizes},
         {size: [] for size in aclgraph_capture_sizes},
         {size: {} for size in aclgraph_capture_sizes},  # attn_params_by_key
+        {size: [] for size in aclgraph_capture_sizes},
+        {size: [] for size in aclgraph_capture_sizes},
+        {size: [] for size in aclgraph_capture_sizes},
     )
 
 
@@ -299,6 +316,9 @@ def set_draft_graph_params(aclgraph_capture_sizes: list[int]):
         {size: [] for size in aclgraph_capture_sizes},
         {size: [] for size in aclgraph_capture_sizes},
         {size: {} for size in aclgraph_capture_sizes},  # attn_params_by_key
+        {size: [] for size in aclgraph_capture_sizes},
+        {size: [] for size in aclgraph_capture_sizes},
+        {size: [] for size in aclgraph_capture_sizes},
     )
 
 
@@ -325,6 +345,9 @@ def set_draft_graph_prefill_params(aclgraph_capture_sizes: list[int]):
         {size: [] for size in aclgraph_capture_sizes},
         {size: [] for size in aclgraph_capture_sizes},
         {size: {} for size in aclgraph_capture_sizes},  # attn_params_by_key
+        {size: [] for size in aclgraph_capture_sizes},
+        {size: [] for size in aclgraph_capture_sizes},
+        {size: [] for size in aclgraph_capture_sizes},
     )
 
 
