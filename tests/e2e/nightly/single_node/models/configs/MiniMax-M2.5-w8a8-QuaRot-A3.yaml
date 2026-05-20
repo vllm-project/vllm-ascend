@@ -36,7 +36,7 @@ test_cases:
       - '{"method":"eagle3","model":"vllm-ascend/MiniMax-M2.5-eagle-model-0318","num_speculative_tokens":3}'
       - "--enable-expert-parallel"
       - "--max-num-seqs"
-      - "32"
+      - "128"
       - "--max-num-batched-tokens"
       - "16384"
       - "--max-model-len"
