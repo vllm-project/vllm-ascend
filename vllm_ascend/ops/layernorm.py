@@ -1,4 +1,3 @@
-#
 # Copyright (c) 2025 Huawei Technologies Co., Ltd. All Rights Reserved.
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
@@ -37,11 +36,28 @@ class AscendRMSNorm(RMSNorm):
         super().__init__(hidden_size, eps, var_hidden_size, has_weight, dtype)
         vllm_config = get_current_vllm_config()
         self.bias = None
+        self.bias_loaded = False
+
         # quantization with anti_method m4 will generate none-zero norm bias
         if vllm_config.quant_config is not None and any(
             "norm.bias" in name for name in vllm_config.quant_config.quant_description
         ):
             self.bias = torch.nn.Parameter(torch.zeros(hidden_size), requires_grad=False)
+            self.bias.weight_loader = self._bias_weight_loader
+
+    def _bias_weight_loader(self, param: torch.nn.Parameter, loaded_weight: torch.Tensor) -> None:
+        if param.numel() == 1 and loaded_weight.numel() == 1:
+            # Sometimes scalar values aren't considered tensors with shapes
+            # so if both param and loaded_weight are a scalar,
+            # "broadcast" instead of copy
+            param.data.fill_(loaded_weight.item())
+        else:
+            assert param.size() == loaded_weight.size(), (
+                f"Attempted to load weight ({loaded_weight.size()}) into parameter ({param.size()})"
+            )
+
+            param.data.copy_(loaded_weight)
+        self.bias_loaded = True
 
     def forward_oot(
         self,
@@ -51,6 +67,7 @@ class AscendRMSNorm(RMSNorm):
         import torch_npu
 
         if residual is not None:
+            residual = torch.ops.vllm.maybe_chunk_residual(x, residual)
             if enable_custom_op():
                 x, _, residual = torch.ops._C_ascend.npu_add_rms_norm_bias(
                     x, residual, self.weight, self.bias, self.variance_epsilon
@@ -62,7 +79,7 @@ class AscendRMSNorm(RMSNorm):
             return x, residual
 
         x, residual = torch_npu.npu_rms_norm(x, self.weight, self.variance_epsilon)
-        if self.bias is not None:
+        if self.bias_loaded:
             x.add_(self.bias)
 
         weight_prefetch_method = get_weight_prefetch_method()
@@ -79,6 +96,7 @@ class AscendGemmaRMSNorm(GemmaRMSNorm):
         import torch_npu
 
         if residual is not None:
+            residual = torch.ops.vllm.maybe_chunk_residual(x, residual)
             if enable_custom_op():
                 x, _, residual = torch.ops._C_ascend.npu_add_rms_norm_bias(
                     x, residual, 1.0 + self.weight, None, self.variance_epsilon
@@ -87,13 +105,24 @@ class AscendGemmaRMSNorm(GemmaRMSNorm):
                 x, _, residual = torch_npu.npu_add_rms_norm(x, residual, 1.0 + self.weight, self.variance_epsilon)
             return x, residual
 
-        x, _ = torch_npu.npu_rms_norm(x, 1.0 + self.weight, self.variance_epsilon)
+        x, _ = torch.ops._C_ascend.npu_gemma_rms_norm(x, self.weight, self.variance_epsilon)
         return x
 
 
 class LayerNormFn(torch.autograd.Function):
     @staticmethod
-    def forward(ctx, x, weight, bias, z=None, eps=1e-6, group_size=None, norm_before_gate=True, is_rms_norm=False):
+    def forward(
+        ctx,
+        x,
+        weight,
+        bias,
+        z=None,
+        eps=1e-6,
+        group_size=None,
+        norm_before_gate=True,
+        is_rms_norm=False,
+        activation: str = "swish",
+    ):
         """If z is not None, we do norm(x) * silu(z) if norm_before_gate, else norm(x * silu(z))"""
 
         x_shape_og = x.shape
@@ -137,12 +166,24 @@ class AscendRMSNormGated(RMSNormGated):
         norm_before_gate: bool = False,
         device: torch.device | None = None,
         dtype: torch.dtype | None = None,
+        # `activation` was added in vLLM #40245 (Qwen3-Next/GDN). Accept and
+        # forward it; older vllm versions did not pass this kwarg so the
+        # default keeps existing behavior.
+        activation: str = "swish",
     ):
         """If group_size is not None, we do GroupNorm with each group having group_size elements.
         group_size=None is equivalent to group_size=hidden_size (i.e. there's only 1 group).
         """
         factory_kwargs = {"device": device, "dtype": dtype}
-        super().__init__(hidden_size, eps, group_size, norm_before_gate, device, dtype)
+        super().__init__(
+            hidden_size,
+            eps,
+            group_size,
+            norm_before_gate,
+            device,
+            dtype,
+            activation=activation,
+        )
         self.eps = eps
         self.weight = nn.Parameter(torch.empty(hidden_size, **factory_kwargs))
         self.register_parameter("bias", None)

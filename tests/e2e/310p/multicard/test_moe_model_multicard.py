@@ -15,6 +15,7 @@
 # limitations under the License.
 # This file is a part of the vllm-ascend project.
 
+
 from tests.e2e.conftest import VllmRunner
 
 
@@ -33,22 +34,6 @@ def test_qwen3_moe_tp4_fp16():
         vllm_model.generate_greedy(example_prompts, max_tokens)
 
 
-def test_qwen3_moe_ep4_fp16():
-    example_prompts = [
-        "Hello, my name is",
-    ]
-    max_tokens = 5
-    with VllmRunner(
-        "Qwen/Qwen3-30B-A3B",
-        tensor_parallel_size=4,
-        enforce_eager=True,
-        dtype="float16",
-        enable_expert_parallel=True,
-        max_model_len=16384,
-    ) as vllm_model:
-        vllm_model.generate_greedy(example_prompts, max_tokens)
-
-
 def test_qwen3_moe_tp2_w8a8():
     example_prompts = [
         "Hello, my name is",
@@ -60,6 +45,21 @@ def test_qwen3_moe_tp2_w8a8():
         enforce_eager=True,
         dtype="float16",
         quantization="ascend",
+        max_model_len=16384,
+    ) as vllm_model:
+        vllm_model.generate_greedy(example_prompts, max_tokens)
+
+
+def test_qwen3_5_moe_tp4_fp16():
+    example_prompts = [
+        "Hello, my name is",
+    ]
+    max_tokens = 5
+    with VllmRunner(
+        "Qwen/Qwen3.5-35B-A3B",
+        tensor_parallel_size=4,
+        enforce_eager=True,
+        dtype="float16",
         max_model_len=16384,
     ) as vllm_model:
         vllm_model.generate_greedy(example_prompts, max_tokens)

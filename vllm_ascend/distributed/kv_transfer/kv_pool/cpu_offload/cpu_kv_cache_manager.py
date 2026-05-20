@@ -65,7 +65,7 @@ class CPUKVCacheManager:
         self.num_cpu_blocks = num_cpu_blocks
         self.caching_hash_fn = sha256 if caching_hash_algo == "sha256" else hash
         self.use_eagle = use_eagle
-        self.block_pool = BlockPool(self.num_cpu_blocks, True, enable_kv_cache_events)
+        self.block_pool = BlockPool(self.num_cpu_blocks, True, self.block_size, enable_kv_cache_events)
         self.single_type_manager = get_manager_for_kv_cache_spec(
             kv_cache_spec=kv_cache_spec,
             block_pool=self.block_pool,
@@ -151,13 +151,13 @@ class CPUKVCacheManager:
         return req_to_new_blocks
 
     def record_request_cache_and_free_slots(self, request: Request):
-        logger.debug(f"record_request_cache_and_free_slots for request {request.request_id} in cpu_kv_cache_manager")
+        logger.debug("record_request_cache_and_free_slots for request %s in cpu_kv_cache_manager", request.request_id)
         self.req_to_free[request.request_id] = request
 
     def cache_and_free_slots(self, request_id: str):
-        logger.debug(f"Cache and free slots for request {request_id} in cpu_kv_cache_manager")
+        logger.debug("Cache and free slots for request %s in cpu_kv_cache_manager", request_id)
         if request_id not in self.req_to_free:
-            logger.Error(f"request {request_id} not in req_to_free, maybe bug!")
+            logger.error("request %s not in req_to_free, maybe bug!", request_id)
             return
         request = self.req_to_free[request_id]
         if not self.req_failed_to_allocate[request_id]:
@@ -166,7 +166,7 @@ class CPUKVCacheManager:
                 self.req_to_num_tokens[request_id],
             )
         self._free_slots(request_id)
-        logger.debug(f"delete request {request_id} in cpu_kv_cache_manager req_to_free")
+        logger.debug("delete request %s in cpu_kv_cache_manager req_to_free", request_id)
         del self.req_to_free[request_id]
 
     def _free_slots(self, request_id: str):

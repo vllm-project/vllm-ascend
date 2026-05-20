@@ -2,9 +2,9 @@
 
 ## Overview
 
-Like vLLM, vllm-ascend supports LoRA as well. The usage and more details can be found in [vLLM official document](https://docs.vllm.ai/en/latest/features/lora.html).
+Like vLLM, vllm-ascend supports LoRA as well. The usage and more details can be found in [vLLM official document](https://docs.vllm.ai/en/latest/features/lora/).
 
-You can refer to [Supported Models](https://docs.vllm.ai/en/latest/models/supported_models.html#list-of-text-only-language-models) to find which models support LoRA in vLLM.
+You can refer to [Supported Models](https://docs.vllm.ai/en/latest/models/supported_models/) to find which models support LoRA in vLLM.
 
 You can run LoRA with ACLGraph mode now. Please refer to [Graph Mode Guide](./graph_mode.md) for a better LoRA performance.
 
@@ -25,4 +25,4 @@ vllm serve meta-llama/Llama-2-7b \
 
 ## Custom LoRA Operators
 
-We have implemented LoRA-related AscendC operators, such as bgmv_shrink, bgmv_expand, sgmv_shrink and sgmv_expand. You can find them under the "csrc/kernels" directory of [vllm-ascend repo](https://github.com/vllm-project/vllm-ascend.git).
+We have implemented LoRA-related AscendC operators, such as bgmv_shrink, bgmv_expand, sgmv_shrink and sgmv_expand. You can find them under the "csrc/kernels" directory of [vllm-ascend repo](https://github.com/vllm-project/vllm-ascend/tree/main/csrc/kernels).

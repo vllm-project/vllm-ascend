@@ -84,6 +84,8 @@ std::tuple<at::Tensor &, at::Tensor &, at::Tensor &, at::Tensor &, at::Tensor &>
         hiddenState,
         wdqkv,
         wuk,
+        gamma1,
+        kv_cache_rope,
         cache_mode,
         quant_mode,
         enableInnerOut

@@ -1,3 +1,5 @@
+import gc
+
 import pytest
 import torch
 import torch.nn.functional as F
@@ -7,7 +9,7 @@ from vllm_ascend.ops.triton.triton_utils import init_device_properties_triton
 
 
 @pytest.mark.parametrize(
-    ('B', 'T', 'H', 'D', 'dtype'),
+    ("B", "T", "H", "D", "dtype"),
     [
         pytest.param(*test, id="B{}-T{}-H{}-D{}-{}".format(*test))
         for test in [
@@ -32,3 +34,6 @@ def test_l2norm(B: int, T: int, H: int, D: int, dtype: torch.dtype):
     tri = l2norm_fwd(x)
 
     assert torch.allclose(tri, ref, rtol=rtol, atol=atol)
+    gc.collect()
+    torch.npu.empty_cache()
+    torch.npu.reset_peak_memory_stats()

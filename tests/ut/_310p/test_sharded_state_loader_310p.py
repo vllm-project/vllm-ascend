@@ -77,7 +77,7 @@ class TestShardedStateLoader310(TestBase):
         model = MockModel(quant_config=quant_config, with_int_weights=False)
 
         with tempfile.TemporaryDirectory() as tmpdir:
-            ShardedStateLoader310.generate_quant_description(model, tmpdir)
+            ShardedStateLoader310.generate_quant_description(model, tmpdir, quant_config)
 
             json_path = Path(tmpdir) / "parameters_type_map.json"
             self.assertTrue(json_path.exists())
@@ -93,6 +93,24 @@ class TestShardedStateLoader310(TestBase):
             self.assertEqual(quant_description["linear.bias"], "FLOAT")
 
     @patch("vllm.model_executor.model_loader.ShardedStateLoader._filter_subtensors")
+    def test_generate_quant_description_no_quant_config_310(self, mock_filter):
+        """When quant_config is None, treat model as FLOAT."""
+        mock_filter.side_effect = lambda x: x
+        model = MockModel(quant_config=None, with_int_weights=False)
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            ShardedStateLoader310.generate_quant_description(model, tmpdir, None)
+
+            json_path = Path(tmpdir) / "parameters_type_map.json"
+            self.assertTrue(json_path.exists())
+
+            with open(json_path, encoding="utf-8") as f:
+                quant_description = json.load(f)
+
+            self.assertEqual(quant_description["model_quant_type"], "FLOAT")
+            self.assertEqual(quant_description["linear.weight"], "FLOAT")
+
+    @patch("vllm.model_executor.model_loader.ShardedStateLoader._filter_subtensors")
     def test_generate_quant_description_int_model_310(self, mock_filter):
         """Test generate_quant_description for int8 quantized model."""
         mock_filter.side_effect = lambda x: x
@@ -100,7 +118,7 @@ class TestShardedStateLoader310(TestBase):
         model = MockModel(quant_config=quant_config, with_int_weights=True)
 
         with tempfile.TemporaryDirectory() as tmpdir:
-            ShardedStateLoader310.generate_quant_description(model, tmpdir)
+            ShardedStateLoader310.generate_quant_description(model, tmpdir, quant_config)
 
             json_path = Path(tmpdir) / "parameters_type_map.json"
             self.assertTrue(json_path.exists())

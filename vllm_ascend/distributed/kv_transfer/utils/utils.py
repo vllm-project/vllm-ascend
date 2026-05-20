@@ -244,13 +244,17 @@ def get_local_remote_block_port_mappings(
             if head in head_to_d_groups:
                 target_d_ranks.update(head_to_d_groups[head])
             else:
-                logger.info(f"Warning: Head {head} exists in P but not in D mapping.")
+                logger.info("Warning: Head %s exists in P but not in D mapping.", head)
         pd_head_mapping[p_rank] = sorted(list(target_d_ranks))
     logger.debug(
-        f"MooncakeLayerwiseConnector _get_kv_split_metadata {req_id=} "
-        f"P-side logic_block to rank mapping: {p_rank_block_mapping}, "
-        f"D-side logic_block to rank mapping: {d_block_rank_mapping}, "
-        f"P&D head_group_rank mapping: {pd_head_mapping}"
+        "MooncakeLayerwiseConnector _get_kv_split_metadata req_id=%r "
+        "P-side logic_block to rank mapping: %s, "
+        "D-side logic_block to rank mapping: %s, "
+        "P&D head_group_rank mapping: %s",
+        req_id,
+        p_rank_block_mapping,
+        d_block_rank_mapping,
+        pd_head_mapping,
     )
     return p_rank_block_mapping, d_block_rank_mapping, pd_head_mapping, d_trans_count_mapping
 
@@ -261,6 +265,7 @@ def get_transfer_mappings(
     pd_head_mapping: dict[int, set],
     d_trans_count_mapping: dict[tuple[str, int], int],
     req_meta,
+    block_group_idx: int,
     p_parallel_info: parallel_info,
     req_id: str,
     transed_idx: int,
@@ -272,15 +277,17 @@ def get_transfer_mappings(
     transfer_mappings: dict[tuple[str, int], dict[str, Any]] = {}
     p_head_group_rank = (tp_rank - dcp_rank) // p_parallel_info.dcp_size
     p_block_idxs: list[int] = p_rank_block_mapping[pcp_rank][p_head_group_rank][dcp_rank]
+    p_block_ids = req_meta.local_block_ids[block_group_idx]
+    d_block_ids = req_meta.remote_block_ids[block_group_idx]
     for p_block_idx, logic_block_idx in enumerate(p_block_idxs):
         if logic_block_idx < transed_idx or logic_block_idx >= to_trans_idx:
             continue
         for d_head_group_rank in pd_head_mapping[p_head_group_rank]:
-            p_block_id = req_meta.local_block_ids[p_block_idx]
+            p_block_id = p_block_ids[p_block_idx]
             remote_host = d_block_rank_mapping[logic_block_idx][d_head_group_rank]["host"]
             remote_port = d_block_rank_mapping[logic_block_idx][d_head_group_rank]["port"]
             d_block_idx = d_block_rank_mapping[logic_block_idx][d_head_group_rank]["block_idx"]
-            d_block_id = req_meta.remote_block_ids[d_block_idx]
+            d_block_id = d_block_ids[d_block_idx]
             if (remote_host, remote_port) not in transfer_mappings:
                 transfer_mappings[(remote_host, remote_port)] = {
                     "local_block_ids": [],
@@ -291,5 +298,5 @@ def get_transfer_mappings(
             transfer_mappings[(remote_host, remote_port)]["remote_block_ids"].append(d_block_id)
     for (host, port), block_dict in transfer_mappings.items():
         block_dict["trans_count"] = d_trans_count_mapping[(host, port)]
-    logger.debug(f"MooncakeLayerwiseConnector Request {req_id} transfer tasks: {transfer_mappings}")
+    logger.debug("MooncakeLayerwiseConnector Request %s transfer tasks: %s", req_id, transfer_mappings)
     return transfer_mappings

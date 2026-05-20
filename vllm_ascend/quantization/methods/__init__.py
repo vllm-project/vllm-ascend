@@ -32,12 +32,14 @@ from typing import Any
 # Import base classes
 from .base import AscendAttentionScheme, AscendLinearScheme, AscendMoEScheme, QuantType
 
+# Import all scheme classes for external access
+from .kv_c8 import AscendFAQuantAttentionMethod
+
 # Import registry functions
 from .registry import get_scheme_class, register_scheme
-
-# Import all scheme classes for external access
 from .w4a4_flatquant import AscendW4A4FlatQuantDynamicLinearMethod
 from .w4a4_laos_dynamic import AscendW4A4LaosDynamicLinearMethod
+from .w4a4_mxfp4 import AscendW4A4MXFP4DynamicFusedMoEMethod, AscendW4A4MXFP4DynamicLinearMethod
 from .w4a8 import AscendW4A8DynamicFusedMoEMethod, AscendW4A8DynamicLinearMethod
 from .w4a16 import AscendW4A16FusedMoEMethod
 from .w8a8_dynamic import AscendW8A8DynamicFusedMoEMethod, AscendW8A8DynamicLinearMethod
@@ -49,7 +51,11 @@ from .w8a16 import AscendW8A16LinearMethod
 
 def is_mx_quant_type(instance: Any) -> bool:
     """Checks if the quantization method is a microscaling (MX) type."""
-    MX_QUANT_TYPES = (AscendW8A8MXFP8DynamicLinearMethod,)
+    MX_QUANT_TYPES = (
+        AscendW8A8MXFP8DynamicLinearMethod,
+        AscendW4A4MXFP4DynamicLinearMethod,
+        AscendW4A4MXFP4DynamicFusedMoEMethod,
+    )
     return isinstance(instance, MX_QUANT_TYPES)
 
 
@@ -77,4 +83,7 @@ __all__ = [
     "AscendW4A16FusedMoEMethod",
     "AscendW4A4FlatQuantDynamicLinearMethod",
     "AscendW4A4LaosDynamicLinearMethod",
+    "AscendFAQuantAttentionMethod",
+    "AscendW4A4MXFP4DynamicLinearMethod",
+    "AscendW4A4MXFP4DynamicFusedMoEMethod",
 ]

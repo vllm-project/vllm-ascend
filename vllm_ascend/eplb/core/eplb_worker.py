@@ -17,22 +17,24 @@
 from multiprocessing import Process, Queue
 from typing import Any
 
+import numpy as np
 import torch
 import torch.distributed as dist
 from vllm.logger import logger
 
 from vllm_ascend.eplb.core.eplb_utils import generate_log2phy_map
-from vllm_ascend.eplb.core.policy.policy_factory import DynamicConfig, PolicyFactory
+from vllm_ascend.eplb.core.policy.policy_factory import PolicyFactory
 
 
 class EplbWorker:
     def __init__(self, shared_dict, policy_type, enable_d2d: bool = True):
         self.policy_type = policy_type
-        self.policy = PolicyFactory.generate_policy(policy_type, DynamicConfig())
+        self.policy = PolicyFactory.generate_policy(policy_type)
         self.shared_dict = shared_dict
         self.old_expert_maps = None
         self.enable_d2d = enable_d2d
         self.rank_id = dist.get_rank()
+        self.multi_stage = policy_type == 3
 
     def do_update(self):
         # put data in to queue
@@ -60,6 +62,21 @@ class EplbWorker:
         old_placement = self.global2local(self.old_expert_maps, self.num_local_experts)
         _, _, new_placement = self.calculate_rebalance_experts(load_info, old_placement)
 
+        if self.rank_id == 0:
+            if self.multi_stage:
+                hotness = self._calculate_hotness(old_placement, load_info.sum(0))
+            else:
+                hotness = self._calculate_hotness(old_placement, load_info)
+            current_mean, current_max = self._compute_imbalance(old_placement, hotness)
+            update_mean, update_max = self._compute_imbalance(new_placement, hotness)
+            logger.info(
+                "[Expert Hotness] Current: mean=%.3f, max=%.3f, Updated: mean=%.3f, max=%.3f",
+                current_mean,
+                current_max,
+                update_mean,
+                update_max,
+            )
+
         if not torch.is_tensor(new_placement):
             new_placement = torch.tensor(new_placement)
         self.check_expert_placement(old_placement, new_placement)
@@ -81,7 +98,7 @@ class EplbWorker:
         for layer_id in range(num_layers):
             # check if any logical expert is not placed on any rank
             if torch.unique(new_placement[layer_id]).numel() < torch.unique(old_placement[layer_id]).numel():
-                logger.error(f"There exists expert not placed on any rank in layer {layer_id}")
+                logger.error("There exists expert not placed on any rank in layer %s", layer_id)
                 new_placement[layer_id] = old_placement[layer_id]
                 continue
 
@@ -92,8 +109,10 @@ class EplbWorker:
                 # check if same logical experts are placed on the same NPU
                 if new_placement_check.numel() != torch.unique(new_placement_check).numel():
                     logger.error(
-                        "Replicated experts are placed on the same NPU; expert placement on "
-                        f"layer {layer_id}, rank {rank_id} is invalid"
+                        "Replicated experts are placed on the same NPU; "
+                        "expert placement on layer %s, rank %s is invalid",
+                        layer_id,
+                        rank_id,
                     )
                     new_placement[layer_id] = old_placement[layer_id]
                     break
@@ -102,8 +121,9 @@ class EplbWorker:
                 expert_not_move = torch.isin(new_placement_check, old_placement_check)
                 if not torch.equal(new_placement_check[expert_not_move], old_placement_check[expert_not_move]):
                     logger.error(
-                        "There exists expert movement inside NPU; expert placement on "
-                        f"layer {layer_id}, rank {rank_id} is invalid"
+                        "There exists expert movement inside NPU; expert placement on layer %s, rank %s is invalid",
+                        layer_id,
+                        rank_id,
                     )
                     new_placement[layer_id] = old_placement[layer_id]
                     break
@@ -251,6 +271,36 @@ class EplbWorker:
 
         return list(zip(send_all, recv_all, maps, log2phy_all, layer_ids))
 
+    @staticmethod
+    def _compute_imbalance(deployment_all_layer, hotness_all_layer: np.ndarray):
+        imbalance_list = []
+        deployment_all_layer = np.array(deployment_all_layer)
+        for deployment, hotness in zip(deployment_all_layer, hotness_all_layer):
+            counts = np.bincount(deployment.reshape(-1), minlength=hotness.shape[0])
+
+            unit_hotness = np.divide(hotness, counts, out=np.zeros_like(hotness, dtype=float), where=counts != 0)
+
+            stage_load = unit_hotness[deployment].sum(-1)
+            stage_par = stage_load.max() / stage_load.mean()
+            imbalance_list.append(stage_par)
+
+        max_val = max(imbalance_list)
+        mean_val = sum(imbalance_list) / len(imbalance_list)
+        return mean_val, max_val
+
+    @staticmethod
+    def _calculate_hotness(deployment_all_layer, moe_load_all_layer):
+        hotnesses = []
+        num_of_expert = deployment_all_layer.shape[1] * deployment_all_layer.shape[2]
+        for deployment, rank_load in zip(deployment_all_layer, moe_load_all_layer.numpy()):
+            hotness = np.zeros(num_of_expert, dtype=rank_load.dtype)
+            deployment_flat = deployment.ravel()
+            rank_load_flat = rank_load.ravel()
+            np.add.at(hotness, deployment_flat, rank_load_flat)
+            hotnesses.append(hotness)
+
+        return np.array(hotnesses)
+
 
 class EplbProcess:
     def __init__(self, shared_dict, policy_type: int = 0, enable_d2d: bool = True):
@@ -274,6 +324,15 @@ class EplbProcess:
         Subprocess entry: bind to specified NPU, loop waiting for planner_q to wake up,
         call do_update, then notify main process update is complete.
         """
+        try:
+            from ms_service_metric.adapters.vllm.adapter import get_vllm_adapter, initialize_vllm_metric  # type: ignore
+
+            initialize_vllm_metric()
+            adapter = get_vllm_adapter()
+            logger.info("[EPLB metrics] The adapter initialized: %s", adapter.is_initialized())
+        except Exception as e:
+            logger.warning("[EPLB metrics] Failed to initialize metrics: %s", e)
+
         if self.policy_type == 3:
             from vllm_ascend.eplb.core.policy.policy_flashlb import warm_up
 
@@ -292,7 +351,8 @@ class EplbProcess:
 
             except Exception as e:
                 logger.warning(
-                    f"[EPLB subprocess exiting due to error: {e}]",
+                    "[EPLB subprocess exiting due to error: %s]",
+                    e,
                     exc_info=True,
                 )
                 break

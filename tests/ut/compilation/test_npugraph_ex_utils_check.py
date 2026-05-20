@@ -13,8 +13,7 @@
 # This file is a part of the vllm-ascend project.
 #
 
-from vllm_ascend.compilation.passes.utils.npugraph_ex_utils_check import \
-    extra_stream_scope_check
+from vllm_ascend.compilation.passes.utils.npugraph_ex_utils_check import extra_stream_scope_check
 
 
 def test_extra_stream_scope_check_logic():
@@ -24,31 +23,25 @@ def test_extra_stream_scope_check_logic():
     """
 
     class MockNode:
-
         def __init__(self, stream_label=None):
             self.op = "call_function"
             self.meta = {"stream_label": stream_label}
 
     class MockMatch:
-
         def __init__(self, nodes):
             self.nodes = nodes
 
     # Test 1: all default → OK
-    assert extra_stream_scope_check(
-        MockMatch([MockNode(None), MockNode(None)])) is True
+    assert extra_stream_scope_check(MockMatch([MockNode(None), MockNode(None)])) is True
 
     # Test 2: same non-default → OK
-    assert extra_stream_scope_check(
-        MockMatch([MockNode("s1"), MockNode("s1")])) is True
+    assert extra_stream_scope_check(MockMatch([MockNode("s1"), MockNode("s1")])) is True
 
     # Test 3: mixed non-default → FAIL
-    assert extra_stream_scope_check(
-        MockMatch([MockNode("s1"), MockNode("s2")])) is False
+    assert extra_stream_scope_check(MockMatch([MockNode("s1"), MockNode("s2")])) is False
 
     # Test 4: default + non-default → FAIL
-    assert extra_stream_scope_check(
-        MockMatch([MockNode(None), MockNode("s1")])) is False
+    assert extra_stream_scope_check(MockMatch([MockNode(None), MockNode("s1")])) is False
 
     # Test 5: empty → OK
     assert extra_stream_scope_check(MockMatch([])) is True

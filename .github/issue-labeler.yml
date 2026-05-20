@@ -1,0 +1,74 @@
+core-features:
+  - '/((pd|(prefill[- ]?decode))\s+disaggregation|kv cache pool|aclgraph|async scheduler|cpu binding|quantization)/i'
+pd-disaggregation:
+  - '/((pd|(prefill[- ]?decode))\s+disaggregation)/i'
+kv-cache-pool:
+  - '/(kv cache pool)/i'
+aclgraph:
+  - '/(aclgraph)/i'
+async-scheduler:
+  - '/(async scheduler)/i'
+cpu-binding:
+  - '/(cpu binding)/i'
+quantization:
+  - '/(quantization)/i'
+advanced-features:
+  - '/(long sequence|dpc|pcp|mtp|speculative decode|\beplb)/i'
+long-seq:
+  - '/(long sequence|dpc|pcp)/i'
+mtp/speculative-decode:
+  - '/(mtp|speculative decode)/i'
+eplb:
+  - '/(\beplb)/i'
+llm-model:
+  - '/(deepseek(?:[- ]*(?:r1|v3(?:\.2)?))?\S*|(kimi k2|kimik2|kimi-k2)(?!\.5)|(kimi k2\.5|kimik2\.5|kimi-k2\.5)|glm5|glm-5|glm 5|qwen3-(?:235b|480b)\S*|Qwen3-(?:32B|8B|30B)\S*|qwen3-next\S*|\bglm[- ]?4\.[0-9]+(?![^v\s]*v)\S*)/i'
+deepseek:
+  - '/(deepseek(?:[- ]*(?:r1|v3(?:\.2)?))?\S*)/i'
+kimi-k2:
+  - '/((kimi k2|kimik2|kimi-k2)(?!\.5))/i'
+kimi-k2.5:
+  - '/((kimi k2\.5|kimik2\.5|kimi-k2\.5))/i'
+glm5:
+  - '/(glm5|glm-5|glm 5)/i'
+qwen3-moe:
+  - '/(Qwen3-(?:235B|480B)\S*)/i'
+qwen3-dense:
+  - '/(Qwen3-(?:32B|8B|30B)\S*)/i'
+qwen3-next:
+  - '/(qwen3-next\S*)/i'
+glm-4:
+  - '/(\bglm[- ]?4\.[0-9]+(?![^v\s]*v)\S*)/i'
+multi-modality-generate:
+  - '/(seedance\S*|seedream\S*|\bwan\d[\d.]*|hunyuan\S*|fLux\S*|kimi k2\.5|kimi-k2\.5|kimik2\.5|minimax\S*|qwen-image\S*)/i'
+seedance:
+  - '/(seedance\S*)/i'
+seedream:
+  - '/(seedream\S*)/i'
+wan:
+  - '/(\bwan\d[\d.]*)/i'
+hunyuan:
+  - '/(hunyuan\S*)/i'
+fLux:
+  - '/(fLux\S*)/i'
+qwen-image:
+  - '/(qwen-image\S*)/i'
+minimax:
+  - '/(minimax\S*)/i'
+multimodal-understanding:
+  - '/(glm-?4\.\S*v\b|qwen3\.5\S*|deepseek-ocr\S*)/i'
+glm-4v:
+  - '/(glm-?4\.\S*v\b)/i'
+qwen-3.5:
+  - '/(qwen3\.5\S*)/i'
+deepseek-ocr:
+  - '/(deepseek-ocr\S*)/i'
+audio-model:
+  - '/(qwen3-tts\S*)/i'
+omni-model:
+  - '/(qwen3-Omni\S*)/i'
+multimodal-unified-autoregress:
+  - '/(hunyuan\S*|\bemu\S*)/i'
+paddle:
+  - '/(paddle\S*)/i'
+310p:
+  - '/(310p\S*)/i'

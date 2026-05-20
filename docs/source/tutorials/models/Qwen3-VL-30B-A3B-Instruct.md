@@ -117,7 +117,7 @@ curl http://localhost:8000/v1/chat/completions \
         {"role": "system", "content": "You are a helpful assistant."},
         {"role": "user", "content": [
             {"type": "image_url", "image_url": {"url": "https://modelscope.oss-cn-beijing.aliyuncs.com/resource/qwen.png"}},
-            {"type": "text", "text": "What is the text in the illustrate?"}
+            {"type": "text", "text": "What is the text in the illustration?"}
         ]}
     ],
     "max_completion_tokens": 100
@@ -204,4 +204,4 @@ INFO 12-24 09:49:22 [loggers.py:257] Engine 000: Avg prompt throughput: 19.6 tok
 
 ### Offline Inference
 
-The usage of offline inference with `Qwen3-VL-30B-A3B-Instruct` is totally the same as that of `Qwen3-VL-8B-Instruct`, find more details at [link](https://docs.vllm.ai/projects/ascend/en/latest/tutorials/Qwen-VL-Dense.html#offline-inference).
+The usage of offline inference with `Qwen3-VL-30B-A3B-Instruct` is totally the same as that of `Qwen3-VL-8B-Instruct`, find more details at [Qwen3-VL-8B-Instruct](https://docs.vllm.ai/projects/ascend/en/latest/tutorials/models/Qwen-VL-Dense.html#offline-inference).

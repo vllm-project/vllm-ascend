@@ -121,7 +121,7 @@ Moonshot AI. Installation and compilation guide:
 First, obtain the Mooncake project using the following command:
 
 ```bash
-git clone -b v0.3.8.post1 --depth 1 https://github.com/kvcache-ai/Mooncake.git
+git clone -b v0.3.9 --depth 1 https://github.com/kvcache-ai/Mooncake.git
 cd Mooncake
 git submodule update --init --recursive
 ```
@@ -185,7 +185,6 @@ The template for the mooncake.json file is as follows:
     "metadata_server": "P2PHANDSHAKE",
     "protocol": "ascend",
     "device_name": "",
-    "use_ascend_direct": true,
     "master_server_address": "<your_server_ip>:50088",
     "global_segment_size": 107374182400
 }
@@ -195,7 +194,6 @@ The template for the mooncake.json file is as follows:
 | --------------| ------------------------| -----------------------------------|
 | metadata_server | P2PHANDSHAKE              | Point-to-point handshake mode  |
 | protocol              | ascend              | Ascend proprietary protocol    |
-| use_ascend_direct     | true                | Enable direct hardware access  |
 | master_server_address | 90.90.100.188:50088(for example) | Master server address|
 | global_segment_size   | 107374182400    | Size per segment (100 GB)      |
 
@@ -285,8 +283,8 @@ Send Dataset A to Instance 1 on Node 1 and record the Time to First Token
 ### Preparation for Step 2
 
 Before Step 2, send a fully random Dataset B to Instance 1. Due to the
-unified HBM/DRAM KV Cache with LRU (Least Recently Used) eviction policy,
-Dataset B's cache evicts Dataset A's cache from HBM, leaving Dataset A's
+unified on-chip memory/DRAM KV Cache with LRU (Least Recently Used) eviction policy,
+Dataset B's cache evicts Dataset A's cache from on-chip memory, leaving Dataset A's
 cache only in Node 1's DRAM.
 
 ### Step 2: Local DRAM Hit
