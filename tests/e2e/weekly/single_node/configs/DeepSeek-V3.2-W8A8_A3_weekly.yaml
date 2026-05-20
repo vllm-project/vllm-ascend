@@ -47,7 +47,7 @@ _server_cmd: &server_cmd
       - '{"num_speculative_tokens": 3, "method":"deepseek_mtp"}'
       - "--reasoning-parser"
       - "deepseek_v3"
-      - "--tokenizer_mode"
+      - "--tokenizer-mode"
       - "deepseek_v32"
 
 _benchmarks: &benchmarks
