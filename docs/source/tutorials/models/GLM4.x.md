@@ -24,7 +24,7 @@ Refer to [feature guide](../../user_guide/feature_guide/index.md) to get the fea
 - `GLM-4.5-w8a8-with-float-mtp`(Quantized version with mtp): [Download model weight](https://modelers.cn/models/Modelers_Park/GLM-4.5-w8a8).
 - `GLM-4.6-w8a8`(Quantized version without mtp): [Download model weight](https://modelers.cn/models/Modelers_Park/GLM-4.6-w8a8). Because vllm does not support GLM4.6 mtp in October, we do not provide an mtp version. Last month, it was supported; you can use the following quantization scheme to add mtp weights to the quantized weights.
 - `GLM-4.7-w8a8-with-float-mtp`(Quantized version without mtp): [Download model weight](https://modelscope.cn/models/Eco-Tech/GLM-4.7-W8A8-floatmtp).
-- `Method of Quantify`: [quantization scheme](https://ai.gitcode.com/Ascend-SACT/GLM-4.5-w8a8). You can use these methods to quantify the model.
+- `Method of Quantization`: [quantization scheme](https://ai.gitcode.com/Ascend-SACT/GLM-4.5-w8a8). You can use these methods to quantify the model.
 
 It is recommended to download the model weight to the shared directory of multiple nodes, such as `/root/.cache/`.
 
@@ -122,12 +122,6 @@ In addition, if you don't want to use the docker image as above, you can also bu
 If you want to deploy multi-node environment, you need to set up environment on each node.
 
 ## Deployment
-
-**Notice:**
-
-We have optimized the FIA operator in CANN 8.5.1. Manual replacement of the files related to the FIA operator is required. Please execute the FIA operator replacement script:
-[A2](../../../../tools/install_flash_infer_attention_score_ops_a2.sh) and [A3](../../../../tools/install_flash_infer_attention_score_ops_a3.sh)
-The optimization of the FIA operator will be enabled by default in CANN 9.x releases, and manual replacement will no longer be required. Please stay tuned for updates to this document.
 
 ### Single-node Deployment
 
@@ -277,7 +271,7 @@ vllm serve Eco-Tech/GLM-4.7-W8A8-floatmtp \
 
 ### Prefill-Decode Disaggregation
 
-We'd like to show the deployment guide of `GLM4.7` on multi-node environment with 2P1D for better performance.
+We'd like to show the deployment guide of `GLM-4.7` on multi-node environment with 2P1D for better performance.
 
 Before you start, please
 
@@ -806,10 +800,6 @@ In this chapter, we recommend best practices for three scenarios:
 `max-model-len` and `max-num-seqs` need to be set according to the actual usage scenario. For other settings, please refer to the **[Deployment](#deployment)** chapter.
 
 ## FAQ
-
-- **Q: Why is the TPOT performance poor in Long-context test?**
-
-  A: Please ensure that the FIA operator replacement script has been executed successfully to complete the replacement of FIA operators. Here is the script: [A2](../../../../tools/install_flash_infer_attention_score_ops_a2.sh) and [A3](../../../../tools/install_flash_infer_attention_score_ops_a3.sh)
 
 - **Q: Startup fails with HCCL port conflicts (address already bound). What should I do?**
 
