@@ -4,8 +4,9 @@ from unittest.mock import MagicMock, patch
 
 import torch
 from vllm.v1.kv_cache_interface import FullAttentionSpec, KVCacheConfig, KVCacheGroupSpec, KVCacheTensor
+from vllm.v1.outputs import SamplerOutput
 
-from vllm_ascend.worker.model_runner_v1 import NPUModelRunner
+from vllm_ascend.worker.model_runner_v1 import ExecuteModelState, NPUModelRunner
 
 
 class TestNPUModelRunnerKVCache(unittest.TestCase):
@@ -129,6 +130,7 @@ class TestNPUModelRunnerOutputTokenIds(unittest.TestCase):
         runner = self._build_runner()
         runner.input_batch = input_batch
         runner.sampler = MagicMock(return_value=MagicMock())
+        runner._v1_sampler_adapter = None
 
         # Call sample method
         logits = torch.randn(2, 32000)
@@ -144,6 +146,410 @@ class TestNPUModelRunnerOutputTokenIds(unittest.TestCase):
         actual_output_token_ids = actual_sampling_metadata.output_token_ids
         self.assertEqual(actual_output_token_ids[0], [1, 2, 3, 6])
         self.assertEqual(actual_output_token_ids[1], [4, 5, 7])
+
+
+class TestNPUModelRunnerV1SamplerAdapter(unittest.TestCase):
+    def _build_runner(self):
+        runner = NPUModelRunner.__new__(NPUModelRunner)
+        sampling_metadata = SimpleNamespace(
+            output_token_ids=[
+                [1, 2, -1],
+                [3, -1],
+            ]
+        )
+        input_batch = MagicMock()
+        input_batch.sampling_metadata = sampling_metadata
+        input_batch.num_reqs = 2
+        input_batch.update_async_output_token_ids = MagicMock()
+
+        runner.input_batch = input_batch
+        runner.sampler = MagicMock(return_value="default-sampler-output")
+        runner.rejection_sampler = MagicMock(return_value="rejection-sampler-output")
+        runner._v1_sampler_adapter = None
+        runner._positions_at_logits = torch.tensor([10, 11], dtype=torch.int64)
+        runner._input_ids_at_logits = torch.tensor([101, 102], dtype=torch.int64)
+        runner._req_indices_at_logits = torch.tensor([0, 1], dtype=torch.int32)
+        runner._req_ids_at_logits = ("req0", "req1")
+        return runner
+
+    @patch("vllm_ascend.worker.model_runner_v1.lmhead_tp_enable")
+    def test_sample_uses_default_sampler_when_sampling_optimization_disabled(self, mock_lmhead_tp_enable):
+        mock_lmhead_tp_enable.return_value = False
+        runner = self._build_runner()
+        logits = torch.randn(2, 8)
+
+        output = runner._sample(logits=logits, spec_decode_metadata=None)
+
+        self.assertEqual(output, "default-sampler-output")
+        runner.input_batch.update_async_output_token_ids.assert_called_once_with()
+        runner.sampler.assert_called_once_with(
+            logits=logits,
+            sampling_metadata=runner.input_batch.sampling_metadata,
+        )
+        runner.rejection_sampler.assert_not_called()
+
+    @patch("vllm_ascend.worker.model_runner_v1.lmhead_tp_enable")
+    def test_sample_uses_v1_adapter_for_non_spec_decode_when_enabled(self, mock_lmhead_tp_enable):
+        mock_lmhead_tp_enable.return_value = False
+        runner = self._build_runner()
+        runner._v1_sampler_adapter = MagicMock(return_value="adapter-output")
+        logits = torch.randn(4, 8)
+
+        output = runner._sample(logits=logits, spec_decode_metadata=None)
+
+        self.assertEqual(output, "adapter-output")
+        runner.input_batch.update_async_output_token_ids.assert_called_once_with()
+        runner._v1_sampler_adapter.assert_called_once_with(
+            logits=logits,
+            sampling_metadata=runner.input_batch.sampling_metadata,
+            num_reqs=runner.input_batch.num_reqs,
+            positions=runner._positions_at_logits,
+            input_ids=runner._input_ids_at_logits,
+            req_indices=runner._req_indices_at_logits,
+            req_ids=runner._req_ids_at_logits,
+        )
+        runner.sampler.assert_not_called()
+        runner.rejection_sampler.assert_not_called()
+
+    @patch("vllm_ascend.worker.model_runner_v1.lmhead_tp_enable")
+    def test_sample_truncates_lmhead_tp_logits_before_v1_adapter(self, mock_lmhead_tp_enable):
+        mock_lmhead_tp_enable.return_value = True
+        runner = self._build_runner()
+        runner._v1_sampler_adapter = MagicMock(return_value="adapter-output")
+        logits = torch.randn(5, 8)
+
+        output = runner._sample(logits=logits, spec_decode_metadata=None)
+
+        self.assertEqual(output, "adapter-output")
+        adapter_logits = runner._v1_sampler_adapter.call_args.kwargs["logits"]
+        self.assertEqual(adapter_logits.shape, (runner.input_batch.num_reqs, 8))
+        torch.testing.assert_close(adapter_logits, logits[: runner.input_batch.num_reqs])
+        runner.sampler.assert_not_called()
+
+    @patch("vllm_ascend.worker.model_runner_v1.lmhead_tp_enable")
+    def test_sample_updates_async_output_token_ids_before_v1_adapter(self, mock_lmhead_tp_enable):
+        mock_lmhead_tp_enable.return_value = False
+        runner = self._build_runner()
+        runner.input_batch.sampled_token_ids_cpu = torch.tensor([6, 7])
+        runner.input_batch.prev_req_id_to_index = {
+            "req0": 0,
+            "req1": 1,
+        }
+
+        def update_output_token_ids():
+            output_token_ids = runner.input_batch.sampling_metadata.output_token_ids
+            sampled_ids = runner.input_batch.sampled_token_ids_cpu.tolist()
+            output_token_ids[0][-1] = sampled_ids[0]
+            output_token_ids[1][-1] = sampled_ids[1]
+
+        def adapter_side_effect(**kwargs):
+            sampling_metadata = kwargs["sampling_metadata"]
+            self.assertEqual(sampling_metadata.output_token_ids[0], [1, 2, 6])
+            self.assertEqual(sampling_metadata.output_token_ids[1], [3, 7])
+            return "adapter-output"
+
+        runner.input_batch.update_async_output_token_ids.side_effect = update_output_token_ids
+        runner._v1_sampler_adapter = MagicMock(side_effect=adapter_side_effect)
+
+        output = runner._sample(logits=torch.randn(2, 8), spec_decode_metadata=None)
+
+        self.assertEqual(output, "adapter-output")
+        runner.input_batch.update_async_output_token_ids.assert_called_once_with()
+        runner._v1_sampler_adapter.assert_called_once()
+
+    @patch("vllm_ascend.worker.model_runner_v1.lmhead_tp_enable")
+    def test_sample_uses_v1_adapter_for_spec_decode_when_enabled(self, mock_lmhead_tp_enable):
+        mock_lmhead_tp_enable.return_value = True
+        runner = self._build_runner()
+        runner._v1_sampler_adapter = MagicMock(return_value="adapter-output")
+        runner._positions_at_logits = torch.tensor([10, 11, 20], dtype=torch.int64)
+        runner._input_ids_at_logits = torch.tensor([101, 102, 201], dtype=torch.int64)
+        runner._req_indices_at_logits = torch.tensor([0, 0, 1], dtype=torch.int32)
+        spec_decode_metadata = SimpleNamespace(logits_indices=[0, 2, 4])
+        logits = torch.randn(5, 8)
+
+        output = runner._sample(logits=logits, spec_decode_metadata=spec_decode_metadata)
+
+        self.assertEqual(output, "adapter-output")
+        adapter_kwargs = runner._v1_sampler_adapter.call_args.kwargs
+        torch.testing.assert_close(adapter_kwargs["logits"], logits[:3])
+        self.assertIs(adapter_kwargs["sampling_metadata"], runner.input_batch.sampling_metadata)
+        self.assertEqual(adapter_kwargs["num_reqs"], runner.input_batch.num_reqs)
+        torch.testing.assert_close(adapter_kwargs["positions"], runner._positions_at_logits)
+        torch.testing.assert_close(adapter_kwargs["input_ids"], runner._input_ids_at_logits)
+        torch.testing.assert_close(adapter_kwargs["req_indices"], runner._req_indices_at_logits)
+        self.assertEqual(adapter_kwargs["req_ids"], runner._req_ids_at_logits)
+        runner.sampler.assert_not_called()
+        runner.rejection_sampler.assert_not_called()
+
+    def test_sample_tokens_caches_positions_and_input_ids_for_adapter(self):
+        runner = NPUModelRunner.__new__(NPUModelRunner)
+        runner.kv_connector_output = None
+        runner.need_accepted_tokens = False
+        runner.speculative_config = None
+        runner.model_config = SimpleNamespace(enable_return_routed_experts=False)
+        runner.ascend_config = SimpleNamespace(
+            profiling_chunk_config=SimpleNamespace(need_timing=False),
+        )
+        runner.dynamic_eplb = False
+        runner.use_async_scheduling = False
+        runner.supports_mm_inputs = False
+        runner.device = torch.device("cpu")
+        runner._v1_sampler_adapter = MagicMock()
+        runner._sample = MagicMock(
+            return_value=SamplerOutput(
+                sampled_token_ids=torch.tensor([[1], [2]], dtype=torch.int64),
+                logprobs_tensors=None,
+            )
+        )
+        runner._bookkeeping_sync = MagicMock(
+            return_value=(
+                None,
+                [[1], [2]],
+                {},
+                ["req0", "req1"],
+                {"req0": 0, "req1": 1},
+                [],
+            )
+        )
+        runner._finalize_dump_data = MagicMock()
+        runner.input_batch = SimpleNamespace(
+            num_reqs=2,
+            req_ids=["req0", "req1"],
+            input_ids=torch.tensor([101, 102, 999], dtype=torch.int64),
+            sampling_metadata=SimpleNamespace(),
+        )
+        runner.req_indices = SimpleNamespace(gpu=torch.tensor([0, 1, 99], dtype=torch.int32))
+        runner.input_ids = SimpleNamespace(gpu=torch.tensor([101, 102, 999], dtype=torch.int64))
+        logits = torch.randn(2, 8)
+        hidden_states = torch.randn(2, 4)
+        positions = torch.tensor([10, 11, 999], dtype=torch.int64)
+        logits_indices = torch.tensor([1, 0], dtype=torch.int64)
+        runner.execute_model_state = ExecuteModelState(
+            scheduler_output=SimpleNamespace(total_num_scheduled_tokens=2),
+            logits=logits,
+            spec_decode_metadata=None,
+            spec_decode_common_attn_metadata=None,
+            hidden_states=hidden_states,
+            sample_hidden_states=hidden_states,
+            aux_hidden_states=None,
+            attn_metadata={},
+            positions=positions,
+            logits_indices=logits_indices,
+            ec_connector_output=None,
+            cudagraph_stats=None,
+            batch_desc=SimpleNamespace(),
+        )
+
+        runner.sample_tokens(grammar_output=None)
+
+        runner._sample.assert_called_once_with(logits, None)
+        torch.testing.assert_close(runner._positions_at_logits, positions[logits_indices])
+        torch.testing.assert_close(
+            runner._input_ids_at_logits,
+            runner.input_ids.gpu[logits_indices],
+        )
+        torch.testing.assert_close(
+            runner._req_indices_at_logits,
+            torch.tensor([1, 0], dtype=torch.int32),
+        )
+        self.assertEqual(runner._req_ids_at_logits, ("req0", "req1"))
+
+    def test_sample_tokens_builds_spec_decode_request_mapping_for_adapter(self):
+        runner = NPUModelRunner.__new__(NPUModelRunner)
+        runner.kv_connector_output = None
+        runner.need_accepted_tokens = False
+        runner.speculative_config = None
+        runner.model_config = SimpleNamespace(enable_return_routed_experts=False)
+        runner.ascend_config = SimpleNamespace(
+            profiling_chunk_config=SimpleNamespace(need_timing=False),
+        )
+        runner.dynamic_eplb = False
+        runner.use_async_scheduling = False
+        runner.supports_mm_inputs = False
+        runner.device = torch.device("cpu")
+        runner._v1_sampler_adapter = MagicMock()
+        runner._sample = MagicMock(
+            return_value=SamplerOutput(
+                sampled_token_ids=torch.tensor(
+                    [
+                        [1, 2, 3],
+                        [4, -1, -1],
+                    ],
+                    dtype=torch.int64,
+                ),
+                logprobs_tensors=None,
+            )
+        )
+        runner._bookkeeping_sync = MagicMock(
+            return_value=(
+                None,
+                [[1, 2, 3], [4]],
+                {},
+                ["req0", "req1"],
+                {"req0": 0, "req1": 1},
+                [],
+            )
+        )
+        runner._finalize_dump_data = MagicMock()
+        runner.input_batch = SimpleNamespace(
+            num_reqs=2,
+            req_ids=["req0", "req1"],
+            input_ids=torch.tensor([101, 102, 103, 201, 999], dtype=torch.int64),
+            sampling_metadata=SimpleNamespace(),
+        )
+        runner.req_indices = SimpleNamespace(gpu=torch.tensor([0, 0, 0, 1, 99], dtype=torch.int32))
+        runner.input_ids = SimpleNamespace(gpu=torch.tensor([101, 102, 103, 201, 999], dtype=torch.int64))
+        logits = torch.randn(4, 8)
+        hidden_states = torch.randn(5, 4)
+        positions = torch.tensor([10, 11, 12, 20, 999], dtype=torch.int64)
+        logits_indices = torch.tensor([0, 1, 2, 3], dtype=torch.int64)
+        spec_decode_metadata = SimpleNamespace(
+            num_draft_tokens=[2, 0],
+        )
+        runner.execute_model_state = ExecuteModelState(
+            scheduler_output=SimpleNamespace(total_num_scheduled_tokens=4),
+            logits=logits,
+            spec_decode_metadata=spec_decode_metadata,
+            spec_decode_common_attn_metadata=SimpleNamespace(),
+            hidden_states=hidden_states,
+            sample_hidden_states=hidden_states[logits_indices],
+            aux_hidden_states=None,
+            attn_metadata={},
+            positions=positions,
+            logits_indices=logits_indices,
+            ec_connector_output=None,
+            cudagraph_stats=None,
+            batch_desc=SimpleNamespace(),
+        )
+
+        runner.sample_tokens(grammar_output=None)
+
+        runner._sample.assert_called_once_with(logits, spec_decode_metadata)
+        torch.testing.assert_close(runner._positions_at_logits, positions[logits_indices])
+        torch.testing.assert_close(
+            runner._input_ids_at_logits,
+            runner.input_ids.gpu[logits_indices],
+        )
+        torch.testing.assert_close(
+            runner._req_indices_at_logits,
+            torch.tensor([0, 0, 0, 1], dtype=torch.int32),
+        )
+        self.assertEqual(runner._req_ids_at_logits, ("req0", "req1"))
+
+    def test_sample_tokens_accepts_non_spec_expanded_rows_with_explicit_mapping(self):
+        runner = NPUModelRunner.__new__(NPUModelRunner)
+        runner.kv_connector_output = None
+        runner.need_accepted_tokens = False
+        runner.speculative_config = None
+        runner.model_config = SimpleNamespace(enable_return_routed_experts=False)
+        runner.ascend_config = SimpleNamespace(
+            profiling_chunk_config=SimpleNamespace(need_timing=False),
+        )
+        runner.dynamic_eplb = False
+        runner.use_async_scheduling = False
+        runner.supports_mm_inputs = False
+        runner.device = torch.device("cpu")
+        runner._v1_sampler_adapter = MagicMock()
+        runner._sample = MagicMock(
+            return_value=SamplerOutput(
+                sampled_token_ids=torch.tensor(
+                    [
+                        [1, 2],
+                        [3, -1],
+                    ],
+                    dtype=torch.int64,
+                ),
+                logprobs_tensors=None,
+            )
+        )
+        runner._bookkeeping_sync = MagicMock(
+            return_value=(
+                None,
+                [[1, 2], [3]],
+                {},
+                ["req0", "req1"],
+                {"req0": 0, "req1": 1},
+                [],
+            )
+        )
+        runner._finalize_dump_data = MagicMock()
+        runner.input_batch = SimpleNamespace(
+            num_reqs=2,
+            req_ids=["req0", "req1"],
+            input_ids=torch.tensor([101, 102, 201], dtype=torch.int64),
+            sampling_metadata=SimpleNamespace(),
+        )
+        runner.req_indices = SimpleNamespace(gpu=torch.tensor([0, 0, 1], dtype=torch.int32))
+        runner.input_ids = SimpleNamespace(gpu=torch.tensor([101, 102, 201], dtype=torch.int64))
+        logits = torch.randn(3, 8)
+        hidden_states = torch.randn(3, 4)
+        positions = torch.tensor([10, 11, 20], dtype=torch.int64)
+        logits_indices = torch.tensor([0, 1, 2], dtype=torch.int64)
+        runner.execute_model_state = ExecuteModelState(
+            scheduler_output=SimpleNamespace(total_num_scheduled_tokens=3),
+            logits=logits,
+            spec_decode_metadata=None,
+            spec_decode_common_attn_metadata=None,
+            hidden_states=hidden_states,
+            sample_hidden_states=hidden_states[logits_indices],
+            aux_hidden_states=None,
+            attn_metadata={},
+            positions=positions,
+            logits_indices=logits_indices,
+            ec_connector_output=None,
+            cudagraph_stats=None,
+            batch_desc=SimpleNamespace(),
+        )
+
+        runner.sample_tokens(grammar_output=None)
+
+        runner._sample.assert_called_once_with(logits, None)
+        torch.testing.assert_close(
+            runner._req_indices_at_logits,
+            torch.tensor([0, 0, 1], dtype=torch.int32),
+        )
+
+    def test_sample_tokens_rejects_mismatched_spec_decode_mapping(self):
+        runner = NPUModelRunner.__new__(NPUModelRunner)
+        runner.kv_connector_output = None
+        runner.need_accepted_tokens = False
+        runner.speculative_config = None
+        runner.model_config = SimpleNamespace(enable_return_routed_experts=False)
+        runner.ascend_config = SimpleNamespace(
+            profiling_chunk_config=SimpleNamespace(need_timing=False),
+        )
+        runner.dynamic_eplb = False
+        runner.use_async_scheduling = False
+        runner.supports_mm_inputs = False
+        runner.device = torch.device("cpu")
+        runner._v1_sampler_adapter = MagicMock()
+        runner.input_batch = SimpleNamespace(
+            num_reqs=2,
+            req_ids=["req0", "req1"],
+            input_ids=torch.tensor([101, 102, 201], dtype=torch.int64),
+            sampling_metadata=SimpleNamespace(),
+        )
+        runner.req_indices = SimpleNamespace(gpu=torch.tensor([0, 0, 1], dtype=torch.int32))
+        runner.input_ids = SimpleNamespace(gpu=torch.tensor([101, 102, 201], dtype=torch.int64))
+        runner.execute_model_state = ExecuteModelState(
+            scheduler_output=SimpleNamespace(total_num_scheduled_tokens=3),
+            logits=torch.randn(3, 8),
+            spec_decode_metadata=SimpleNamespace(num_draft_tokens=[2, 1]),
+            spec_decode_common_attn_metadata=SimpleNamespace(),
+            hidden_states=torch.randn(3, 4),
+            sample_hidden_states=torch.randn(3, 4),
+            aux_hidden_states=None,
+            attn_metadata={},
+            positions=torch.tensor([10, 11, 20], dtype=torch.int64),
+            logits_indices=torch.tensor([0, 1, 2], dtype=torch.int64),
+            ec_connector_output=None,
+            cudagraph_stats=None,
+            batch_desc=SimpleNamespace(),
+        )
+
+        with self.assertRaisesRegex(ValueError, "speculative logits-row mapping"):
+            runner.sample_tokens(grammar_output=None)
 
 
 class TestNPUModelRunnerDebugger(unittest.TestCase):

@@ -24,6 +24,25 @@ if TYPE_CHECKING:
     from vllm.config import VllmConfig
 
 
+class SamplingConfig:
+    """Configuration for sampling path optimization in v1 model runner."""
+
+    def __init__(self, config: dict | None = None):
+        if config is None:
+            config = {}
+        self.enable_sampling_optimization: bool = config.get("enable_sampling_optimization", False)
+        self.enable_batch_parallel: bool = config.get("enable_batch_parallel", False)
+        self.logits_processing_mode: str = config.get("logits_processing_mode", "default")
+        self._validate()
+
+    def _validate(self):
+        if self.logits_processing_mode not in ("default", "skip", "fused"):
+            raise ValueError(
+                f"logits_processing_mode must be 'default', 'skip', or 'fused', "
+                f"got '{self.logits_processing_mode}'"
+            )
+
+
 class AscendConfig:
     """
     Configuration Object for additional_config from vllm.configs.
@@ -53,6 +72,9 @@ class AscendConfig:
 
         profiling_chunk_config = additional_config.get("profiling_chunk_config", {})
         self.profiling_chunk_config = ProfilingChunkConfig(profiling_chunk_config)
+
+        sampling_config = additional_config.get("sampling_config", {})
+        self.sampling_config = SamplingConfig(sampling_config)
         if self.profiling_chunk_config.enabled:
             max_batched = vllm_config.scheduler_config.max_num_batched_tokens
             if max_batched < self.profiling_chunk_config.min_chunk:
