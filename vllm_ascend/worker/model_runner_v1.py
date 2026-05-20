@@ -23,7 +23,7 @@ import time
 from collections import defaultdict
 from contextlib import contextmanager, nullcontext
 from copy import copy, deepcopy
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from functools import partial
 from multiprocessing import Manager
 from typing import TYPE_CHECKING, Any, NamedTuple, TypeAlias
@@ -75,10 +75,16 @@ from vllm.v1.outputs import (
     SamplerOutput,
     make_empty_encoder_model_runner_output,
 )
+
+from vllm_ascend.utils import vllm_version_is
+
+if not vllm_version_is("0.20.2"):
+    from vllm.v1.outputs import RoutedExpertsLists
 from vllm.v1.sample.logits_processor import build_logitsprocs
 from vllm.v1.sample.metadata import SamplingMetadata
 from vllm.v1.sample.rejection_sampler import RejectionSampler
 from vllm.v1.spec_decode.metadata import SpecDecodeMetadata
+from vllm.v1.spec_decode.ngram_proposer_gpu import copy_num_valid_draft_tokens
 from vllm.v1.structured_output.utils import apply_grammar_bitmask
 from vllm.v1.utils import record_function_or_nullcontext
 from vllm.v1.worker import mamba_utils
@@ -113,7 +119,6 @@ from vllm_ascend.eplb.eplb_updator import EplbUpdator
 
 from vllm_ascend.ops.rotary_embedding import set_cos_and_sin, update_cos_sin
 from vllm_ascend.patch.worker.patch_draft_quarot import patch_load_weights
-from vllm_ascend.patch.worker.patch_module import patch_torch_npu_argsort
 from vllm_ascend.quantization.utils import enable_fa_quant
 from vllm_ascend.sample.sampler import AscendSampler
 from vllm_ascend.spec_decode import get_spec_decode_method
@@ -125,6 +130,7 @@ from vllm_ascend.spec_decode.extract_hidden_states_proposer import (
 )
 from vllm_ascend.spec_decode.medusa_proposer import AscendMedusaProposer
 from vllm_ascend.spec_decode.ngram_proposer import AscendNgramProposer
+from vllm_ascend.spec_decode.ngram_proposer_npu import AscendNgramProposerNPU
 from vllm_ascend.spec_decode.suffix_proposer import AscendSuffixDecodingProposer
 from vllm_ascend.spec_decode.utils import update_num_computed_tokens_for_batch_change
 from vllm_ascend.utils import (
@@ -498,6 +504,7 @@ class NPUModelRunner(GPUModelRunner):
         # Set up speculative decoding.
         self.drafter: (
             AscendNgramProposer
+            | AscendNgramProposerNPU
             | AscendEagleProposer
             | AscendDraftModelProposer
             | AscendDflashProposer
@@ -1334,6 +1341,51 @@ class NPUModelRunner(GPUModelRunner):
             draft_token_ids = None
         elif isinstance(self.drafter, (AscendNgramProposer, AscendSuffixDecodingProposer)):
             draft_token_ids = self.drafter.propose(valid_sampled_token_ids)
+        elif isinstance(self.drafter, AscendNgramProposerNPU):
+            batch_size = min(self.input_batch.num_reqs, self.token_ids_gpu_tensor.shape[0])
+
+            # prepare sampled_token_ids tensor（list → padded tensor）
+            sampled_token_ids = valid_sampled_token_ids
+            if isinstance(sampled_token_ids, list):
+                max_len = max((len(sublist) for sublist in sampled_token_ids), default=0)
+                max_len = max(max_len, 1)
+                padded_list = [
+                    sublist + [-1] * (max_len - len(sublist))
+                    for sublist in sampled_token_ids
+                ]
+                sampled_token_ids_tensor = torch.tensor(
+                    padded_list, dtype=torch.int32, device=self.device
+                )
+            else:
+                sampled_token_ids_tensor = sampled_token_ids
+
+            (_token_ids, next_token_ids, draft_token_ids,
+             num_valid_draft_tokens) = torch.ops._C_ascend.npu_ngram_spec_decode(
+                self.token_ids_gpu_tensor[:batch_size],       # [B, max_seq_len], in-place
+                self.num_tokens_no_spec_gpu[:batch_size],      # [B]
+                sampled_token_ids_tensor[:batch_size],         # [B, max_new_tokens]
+                self.discard_request_mask.gpu[:batch_size],    # [B]
+                vocab_size=self.model_config.get_vocab_size(),
+                min_n=self.drafter.min_n,
+                max_n=self.drafter.max_n,
+                k=self.drafter.k,
+            )
+
+            # only async scheduling, set prev_sampled_token_ids，
+            if self.use_async_scheduling:
+                self.input_batch.prev_sampled_token_ids = next_token_ids.unsqueeze(1)
+
+            # save num_valid_draft_tokens for scheduler trim
+            self._num_valid_draft_tokens = num_valid_draft_tokens
+
+            # async D2H copy num_valid_draft_tokens
+            copy_num_valid_draft_tokens(
+                self._num_valid_draft_tokens_cpu,
+                self._num_valid_draft_tokens_copy_stream,
+                self._num_valid_draft_tokens_event,
+                self._num_valid_draft_tokens,
+                batch_size,
+            )
         elif isinstance(self.drafter, AscendMedusaProposer):
             draft_token_ids = self.drafter.propose(
                 valid_sampled_token_ids, sampling_metadata, spec_decode_metadata, sample_hidden_states
@@ -1491,6 +1543,36 @@ class NPUModelRunner(GPUModelRunner):
 
         return draft_token_ids
 
+    def _copy_draft_token_ids_to_cpu(
+        self, scheduler_output: "SchedulerOutput", zeros_only: bool = False
+    ) -> None:
+        if not self.num_spec_tokens:
+            return
+        if self.use_async_scheduling and not (
+            scheduler_output.has_structured_output_requests
+            or self.input_batch.sampling_metadata.output_token_ids
+        ):
+            return
+        self._draft_token_req_ids = self.input_batch.req_ids.copy()
+
+        draft_token_ids: torch.Tensor = self._draft_token_ids  # type: ignore[has-type]
+        if not torch.is_tensor(draft_token_ids):
+            return
+        assert self.draft_token_ids_event is not None
+        assert self.draft_token_ids_copy_stream is not None
+        assert self.draft_token_ids_cpu is not None
+        default_stream = torch.npu.current_stream()
+        num_reqs = draft_token_ids.shape[0]
+        with torch.npu.stream(self.draft_token_ids_copy_stream):
+            if not zeros_only:
+                self.draft_token_ids_copy_stream.wait_stream(default_stream)
+                self.draft_token_ids_cpu[:num_reqs].copy_(
+                    draft_token_ids, non_blocking=True
+                )
+            else:
+                self.draft_token_ids_cpu[:num_reqs] = 0
+            self.draft_token_ids_event.record()
+
     @torch.inference_mode()
     def execute_model(
         self,
@@ -1498,11 +1580,12 @@ class NPUModelRunner(GPUModelRunner):
         intermediate_tensors: IntermediateTensors | None = None,
     ) -> ModelRunnerOutput | IntermediateTensors | None:
         if self.vllm_config.model_config.enable_return_routed_experts:
-            capturer = RoutedExpertsCapturer.get_instance()
-            if capturer is not None:
-                capturer.clear_buffer()
-            else:
-                logger.warning("RoutedExpertsCapturer is not initialized.")
+            if vllm_version_is("0.20.2"):
+                capturer = RoutedExpertsCapturer.get_instance()
+                if capturer is not None:
+                    capturer.clear_buffer()
+            elif self.routed_experts_initialized:
+                self.routed_experts_capturer.clear_buffer()
 
         if self.ascend_config.profiling_chunk_config.need_timing:
             # Check if the scheduler signaled that calibration is complete.
@@ -1516,6 +1599,24 @@ class NPUModelRunner(GPUModelRunner):
                 self._execution_start_time = time.perf_counter()
         if self.execute_model_state is not None:
             raise RuntimeError("State error: sample_tokens() must be called after execute_model() returns None.")
+       
+        # If ngram_gpu is used, we need to copy the scheduler_output to avoid
+        # the modification has influence on the scheduler_output in engine core process.
+        # The replace is much faster than deepcopy.
+        if (
+            self.speculative_config is not None
+            and self.speculative_config.use_ngram_gpu()
+        ):
+            num_scheduled_tokens_copy = scheduler_output.num_scheduled_tokens.copy()
+            spec_decode_tokens_copy = (
+                scheduler_output.scheduled_spec_decode_tokens.copy()
+            )
+            scheduler_output = replace(
+                scheduler_output,
+                num_scheduled_tokens=num_scheduled_tokens_copy,
+                scheduled_spec_decode_tokens=spec_decode_tokens_copy,
+            )
+
         self._start_dump_data()
         # self._draft_token_ids is None when `input_fits_in_drafter=False`
         # and there is no draft tokens scheduled. so it need to update the
@@ -1538,6 +1639,25 @@ class NPUModelRunner(GPUModelRunner):
         num_scheduled_tokens = scheduler_output.total_num_scheduled_tokens
         with record_function_or_nullcontext("prepare input"):
             with self.synchronize_input_prep():
+                # Fix up prev_req_id_to_index for requests that were discarded
+                # in the previous sample_tokens step. If a request has
+                # prev_num_draft_len > 0 but is missing from
+                # prev_req_id_to_index, the parent _update_states would
+                # hit a KeyError. Reset prev_num_draft_len to 0 for such
+                # requests so they fall through safely.
+                if (
+                    self.use_async_scheduling
+                    and self.num_spec_tokens
+                    and self.input_batch.prev_req_id_to_index is not None
+                ):
+                    for req_id in scheduler_output.scheduled_cached_reqs.req_ids:
+                        if (
+                            req_id not in self.input_batch.prev_req_id_to_index
+                            and (req_state := self.requests.get(req_id)) is not None
+                            and req_state.prev_num_draft_len
+                        ):
+                            req_state.prev_num_draft_len = 0
+
                 # Update persistent batch states.
                 deferred_state_corrections_fn = self._update_states(scheduler_output)
 
@@ -1952,6 +2072,7 @@ class NPUModelRunner(GPUModelRunner):
                         self.speculative_config.use_eagle()
                         or self.speculative_config.uses_draft_model()
                         or self.speculative_config.uses_extract_hidden_states()
+                        or self.speculative_config.use_ngram_gpu()
                     )
                     and not self.speculative_config.disable_padded_drafter_batch
                 )
@@ -1970,12 +2091,25 @@ class NPUModelRunner(GPUModelRunner):
             if self.speculative_config is not None:
                 self.finalize_kv_connector()
 
+        routed_experts_lists = None
         if self.model_config.enable_return_routed_experts:
-            capturer = RoutedExpertsCapturer.get_instance()
-            if capturer is not None:
-                capturer.save_captured_experts(indices=self.cpu_slot_mapping)
-            else:
-                logger.warning("RoutedExpertsCapturer is not initialized.")
+            if vllm_version_is("0.20.2"):
+                capturer = RoutedExpertsCapturer.get_instance()
+                if capturer is not None:
+                    capturer.save_captured_experts(indices=self.cpu_slot_mapping)
+            elif self.routed_experts_initialized:
+                buf = self.routed_experts_capturer.get_device_buffer()
+                total = scheduler_output.total_num_scheduled_tokens
+                self.routed_experts_cpu[:total].copy_(buf[:total], non_blocking=True)
+                self.routed_experts_slot_mapping_cpu[:total].copy_(
+                    self.routed_experts_slot_mapping_device[:total],
+                    non_blocking=True,
+                )
+                torch.npu.current_stream().synchronize()
+                routed_experts_lists = RoutedExpertsLists(
+                    routing_data=self.routed_experts_cpu[:total].numpy(),
+                    slot_mapping=self.routed_experts_slot_mapping_cpu[:total].numpy(),
+                )
 
         model_runner_output = ModelRunnerOutput(
             req_ids=req_ids_output_copy,
@@ -1987,6 +2121,9 @@ class NPUModelRunner(GPUModelRunner):
             pooler_output=[],
             ec_connector_output=ec_connector_output if self.supports_mm_inputs else None,
             cudagraph_stats=cudagraph_stats,
+            **(
+                {} if vllm_version_is("0.20.2") else {"routed_experts": routed_experts_lists}
+            ),
         )
         if self.ascend_config.profiling_chunk_config.need_timing and hasattr(self, '_execution_start_time'):
             self._sync_device()
@@ -2275,8 +2412,11 @@ class NPUModelRunner(GPUModelRunner):
             return round_up(num_scheduled_tokens, tp_size)
         return num_scheduled_tokens
 
-    # This is a function from the upstream vllm used to handle PP+SP. Since the judgment logic 
-    # of flashcomm1 in Ascend is inconsistent with SP in vllm, it needs to be overridden.
+    # These functions from upstream vllm handle PP+SP. Ascend's flashcomm1 SP
+    # differs from vllm's native SP: flashcomm1 does NOT scatter the residual
+    # before PP send, so the all_gather in sync_and_gather_intermediate_tensors
+    # must be skipped. Both overrides use enable_sp() rather than
+    # is_residual_scattered_for_sp() to reflect the actual Ascend SP state.
     def sync_and_slice_intermediate_tensors(
         self,
         num_tokens: int,
@@ -2286,8 +2426,6 @@ class NPUModelRunner(GPUModelRunner):
         assert self.intermediate_tensors is not None
         tp = self.vllm_config.parallel_config.tensor_parallel_size
 
-        # When sequence parallelism is enabled, the "residual" tensor is sharded
-        # across tensor parallel ranks, so each rank only needs its own slice.
         if sync_self:
             assert intermediate_tensors is not None
             for k, v in intermediate_tensors.items():
@@ -2303,6 +2441,19 @@ class NPUModelRunner(GPUModelRunner):
                 else v[:num_tokens]
                 for k, v in self.intermediate_tensors.items()
             }
+        )
+
+    def sync_and_gather_intermediate_tensors(
+        self,
+        num_tokens: int,
+        intermediate_tensors: IntermediateTensors | None,
+        sync_self: bool,
+    ) -> IntermediateTensors:
+        # vllm renamed sync_and_slice to sync_and_gather in v0.20.2.
+        # The Ascend override logic is identical: skip the upstream all_gather
+        # (flashcomm1 does not scatter residual before PP send).
+        return self.sync_and_slice_intermediate_tensors(
+            num_tokens, intermediate_tensors, sync_self
         )
 
     def _determine_batch_execution_and_padding(
@@ -2501,7 +2652,16 @@ class NPUModelRunner(GPUModelRunner):
                     kv_cache_gid,
                 )
             if self.model_config.enable_return_routed_experts and kv_cache_gid == 0:
-                self.cpu_slot_mapping = slot_mapping.cpu().numpy()
+                if vllm_version_is("0.20.2"):
+                    self.cpu_slot_mapping = slot_mapping.cpu().numpy()
+                elif self.routed_experts_initialized:
+                    # snapshot slot_mapping into a private device
+                    # buffer so the next ``_prepare_inputs`` does not
+                    # overwrite it while D2H is still pending.
+                    n = slot_mapping.shape[0]
+                    self.routed_experts_slot_mapping_device[:n].copy_(
+                        slot_mapping
+                    )
             return blk_table_tensor, slot_mapping
 
         block_table_gid_0, slot_mapping_gid_0 = _get_block_table_and_slot_mapping(0)
@@ -2564,7 +2724,6 @@ class NPUModelRunner(GPUModelRunner):
             extra_attn_metadata_args = {}
             if use_spec_decode and isinstance(builder, GDNAttentionMetadataBuilder):
                 assert ubid is None, "UBatching not supported with GDN yet"
-                patch_torch_npu_argsort()
                 extra_attn_metadata_args = dict(
                     num_accepted_tokens=self.num_accepted_tokens.gpu[:num_reqs_padded],
                     num_decode_draft_tokens_cpu=self.num_decode_draft_tokens.cpu[:num_reqs_padded],
@@ -2997,7 +3156,10 @@ class NPUModelRunner(GPUModelRunner):
 
         with DeviceMemoryProfiler() as m:  # noqa: SIM117
             if self.eplb_enable:
-                self.vllm_config.parallel_config.enable_eplb = True
+                def mock_pass(param1, param2):
+                    return
+                from vllm.model_executor.model_loader.default_loader import DefaultModelLoader
+                DefaultModelLoader._init_ep_weight_filter = mock_pass
             self.model: nn.Module = get_model(vllm_config=self.vllm_config)
             if self.drafter:
                 logger.info("Loading drafter model...")
@@ -3088,6 +3250,21 @@ class NPUModelRunner(GPUModelRunner):
 
         if self.model_config.enable_return_routed_experts:
             self.init_routed_experts_capturer()
+
+    def _bind_routed_experts_capturer(self, capturer) -> None:
+        # Upstream binds via ``module.router.set_capture_fn(...)`` on
+        # FusedMoE layers whose router is a ``BaseRouter``. Ascend's
+        # ``select_experts`` does not go through ``BaseRouter``, so the
+        # upstream hook never fires. Instead, stash the capturer as a
+        # plain attribute on every FusedMoE layer; ``apply()`` reads it
+        # back on the hot path. Only used on vLLM main (PR #39568+);
+        # the 0.20.2 path uses the ``RoutedExpertsCapturer.get_instance``
+        # singleton and never calls this method.
+        from vllm.model_executor.layers.fused_moe.layer import FusedMoE
+
+        for module in self.compilation_config.static_forward_context.values():
+            if isinstance(module, FusedMoE):
+                module._ascend_routed_experts_capturer = capturer
 
     def _align_memory(self, tensor: torch.Tensor, alignment: int) -> torch.Tensor:
         data_ptr = tensor.data_ptr()
