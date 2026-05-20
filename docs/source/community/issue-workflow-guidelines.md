@@ -58,8 +58,8 @@ These labels describe the nature of the issue.
 
 When an issue is first picked up by the on-call maintainer:
 
-- Apply `triage review` to signal that the issue has entered the initial review queue.
-- Add the relevant module label so the issue can be routed to the appropriate module maintainer for detailed triage.
+- Apply `triaged` to signal that the issue can be classified and Add the relevant module label so the issue can be routed to the appropriate module maintainer for detailed triage.
+- Apply `triage review` to signal that the issue requires more review and specitfic analysis before classification.
 
 ### Phase 2 — Triage and Analysis
 
