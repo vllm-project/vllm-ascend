@@ -144,14 +144,6 @@ Provide recommended configurations for different scenarios:
 
 ## FAQ
 
-### Problem: Download timeout during model weight fetching
-
-**Phenomenon**: `Error while downloading ... model-00005-of-00008.safetensors ... Read timed out.`
-
-**Cause**: Large model shard download from Hugging Face is unstable.
-
-**Solution**: Pre-download model weights locally and use local path for deployment.
-
 ### Problem: OOM on single NPU
 
 **Phenomenon**: Out of memory error when serving the model.
