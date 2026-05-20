@@ -6,7 +6,7 @@ import torch
 from vllm.distributed.kv_transfer.kv_connector.v1.base import KVConnectorMetadata
 from vllm.logger import logger
 from vllm.utils.math_utils import cdiv
-from vllm.v1.core.kv_cache_utils import BlockHash
+from vllm.v1.core.kv_cache_utils import BlockHash, BlockHashListWithBlockSize
 from vllm.v1.core.sched.output import NewRequestData
 
 
@@ -24,6 +24,10 @@ class KeyMetadata:
     dcp_rank: int
     """ Initialize the current pipeline parallel rank """
     pp_rank: int
+    """ HMA: distinguishes KV-cache groups (hybrid attn / mamba / SWA).
+    Single-group (legacy) deployments leave this at 0 — backwards-compatible
+    with keys produced before HMA was introduced. """
+    group_id: int = 0
 
 
 @dataclass(order=True)
@@ -39,11 +43,24 @@ class PoolKey:
                 self.key_metadata.pcp_rank,
                 self.key_metadata.dcp_rank,
                 self.key_metadata.pp_rank,
+                self.key_metadata.group_id,
                 self.chunk_hash,
             )
         )
 
     def to_string(self):
+        # ``@group:0`` is only emitted when group_id != 0 so that legacy
+        # single-group keys (HMA disabled) remain bit-identical to the
+        # pre-HMA serialization. This keeps already-stored keys readable.
+        if self.key_metadata.group_id != 0:
+            return (
+                f"{self.key_metadata.model_name}"
+                f"@pcp{self.key_metadata.pcp_rank}@dcp{self.key_metadata.dcp_rank}"
+                f"@head_or_tp_rank:{self.key_metadata.head_or_tp_rank}"
+                f"@pp_rank:{self.key_metadata.pp_rank}"
+                f"@group:{self.key_metadata.group_id}"
+                f"@{self.chunk_hash}"
+            )
         return (
             f"{self.key_metadata.model_name}"
             f"@pcp{self.key_metadata.pcp_rank}@dcp{self.key_metadata.dcp_rank}"
@@ -92,9 +109,28 @@ class LayerPoolKey(PoolKey):
 
 
 class ChunkedTokenDatabase:
-    def __init__(self, metadata: KeyMetadata, block_size: int, partitions: list[int] | None):
+    def __init__(
+        self,
+        metadata: KeyMetadata,
+        block_size: int,
+        partitions: list[int] | None,
+        hash_block_size: int | None = None,
+    ):
+        """``block_size`` is the per-group KV chunk size (LCM-aligned for
+        the scheduler under HMA). ``hash_block_size`` is the granularity
+        at which the engine computes ``Request.block_hashes`` — for HMA
+        with mixed group block sizes, it equals the GCD; otherwise the
+        single group's block size. ``None`` (default) keeps the legacy
+        behavior: ``hash_block_size = block_size``.
+        """
         self.metadata = metadata
         self.block_size = block_size
+        self.hash_block_size = hash_block_size or block_size
+        if self.block_size % self.hash_block_size != 0:
+            raise ValueError(
+                f"block_size ({self.block_size}) must be a multiple of "
+                f"hash_block_size ({self.hash_block_size})"
+            )
         self.kv_caches_base_addr: list[int] = []
         self.block_len: list[int] = []
         self.partitions = partitions
@@ -164,21 +200,37 @@ class ChunkedTokenDatabase:
         """
         if not block_hashes:
             return
-        if not isinstance(block_hashes[0], str):
-            block_hashes = [
-                h.hex()  # type: ignore[union-attr]
-                for h in block_hashes
-            ]
-        start_idx = 0
-        for chunk_id, hash_val in enumerate(block_hashes):
+
+        # HMA path: when this database's block_size is a multiple of the
+        # hash_block_size, the engine produced finer-grained hashes (one
+        # per ``hash_block_size`` tokens). Re-bucket them up to this
+        # group's block_size so each yielded chunk corresponds to one
+        # KV-cache block in this group.
+        #
+        # Legacy single-group path: ``hash_block_size == block_size``,
+        # so ``BlockHashListWithBlockSize`` is a no-op pass-through.
+        if (
+            self.block_size != self.hash_block_size
+            and not isinstance(block_hashes[0], str)
+        ):
+            chunk_hashes_iter: Iterable[BlockHash | str] = (
+                BlockHashListWithBlockSize(
+                    block_hashes,  # type: ignore[arg-type]
+                    self.hash_block_size,
+                    self.block_size,
+                )
+            )
+        else:
+            chunk_hashes_iter = block_hashes
+        for chunk_id, h in enumerate(chunk_hashes_iter):
             start_idx = chunk_id * self.block_size
             if start_idx >= token_len:
                 break
             end_idx = min(start_idx + self.block_size, token_len)
             if start_idx < mask_num:
                 continue
-            else:
-                yield start_idx, end_idx, self._make_key_by_hash(hash_val)
+            hash_str = h if isinstance(h, str) else h.hex()
+            yield start_idx, end_idx, self._make_key_by_hash(hash_str)
 
     def decode_adaptor_prefill_pp(self, key, addr, size):
         if self.partitions is None or len(self.partitions) == 1:
@@ -223,11 +275,16 @@ class RequestTracker:
 
     token_len: int
 
-    # The block ids that has been allocated so far
-    # NOTE: allocated blocks could be more than the number of tokens
-    # FIXME: need to check whether the block ids will be changed after
-    #        preemption
-    allocated_block_ids: list[int]
+    # Per-KV-cache-group allocated block ids (HMA-aware).
+    #
+    # Each entry is the block list for one kv-cache group, in the order
+    # established at worker registration time. Single-group (legacy)
+    # deployments hold a 1-tuple — callers can ignore the per-group
+    # dimension by indexing [0].
+    #
+    # NOTE: allocated blocks may exceed the number of tokens (rounded up
+    # to the group's block_size).
+    allocated_block_ids: tuple[list[int], ...]
 
     # The number of tokens that has been savd
     num_saved_tokens: int = 0
@@ -248,14 +305,16 @@ class RequestTracker:
             num_tokens_to_compute (int): the number of tokens that will
                 be 'computed', including the `num_computed_tokens` (vLLM's
                 local cache hit) and new tokens that will be scheduled.
-
         """
-        unfolded_block_ids = []
-
-        if not isinstance(new_request.block_ids[0], list):
-            unfolded_block_ids = new_request.block_ids.copy()
+        # ``NewRequestData.block_ids`` is ``tuple[list[int], ...]`` on
+        # HMA-aware vllm and ``list[int]`` on legacy. Normalize to tuple.
+        raw_block_ids = new_request.block_ids
+        if isinstance(raw_block_ids, tuple):
+            unfolded_block_ids: tuple[list[int], ...] = tuple(
+                b.copy() for b in raw_block_ids
+            )
         else:
-            unfolded_block_ids = new_request.block_ids[0].copy()
+            unfolded_block_ids = (list(raw_block_ids).copy(),)
 
         return RequestTracker(
             req_id=new_request.req_id,
@@ -269,18 +328,24 @@ class RequestTracker:
         self,
         new_block_ids: tuple[list[int], ...] | list[int],
     ) -> None:
-        """Update the request tracker when a running request is
-        scheduled again
+        """Extend per-group block lists when a running request is rescheduled.
+
+        Legacy callers passing ``list[int]`` are broadcast onto a 1-tuple
+        — only valid when this tracker tracks a single group.
         """
-        if len(new_block_ids) == 0:
-            new_block_ids = []
-        elif isinstance(new_block_ids, tuple):
-            new_block_ids = new_block_ids[0]
-        elif isinstance(new_block_ids, list):
-            pass
-        else:
-            raise ValueError(f"Unsupported new_block_ids type {type(new_block_ids)}")
-        self.allocated_block_ids.extend(new_block_ids)
+        if isinstance(new_block_ids, list):
+            new_block_ids = (new_block_ids,)
+        if len(new_block_ids) != len(self.allocated_block_ids):
+            raise ValueError(
+                f"Group count mismatch: tracker has "
+                f"{len(self.allocated_block_ids)} groups, update has "
+                f"{len(new_block_ids)}"
+            )
+        for existing, new in zip(
+            self.allocated_block_ids, new_block_ids, strict=True
+        ):
+            if new:
+                existing.extend(new)
 
 
 @dataclass
@@ -290,7 +355,10 @@ class ReqMeta:
     # Number of tokens in this chunk
     token_len_chunk: int
 
-    block_ids: list[int]
+    # Per-KV-cache-group block ids (HMA-aware). Single-group deployments
+    # hold a 1-tuple — kv_transfer consumers index [0] to recover the
+    # legacy ``list[int]`` flat shape.
+    block_ids: tuple[list[int], ...]
 
     block_hashes: list[BlockHash]
 

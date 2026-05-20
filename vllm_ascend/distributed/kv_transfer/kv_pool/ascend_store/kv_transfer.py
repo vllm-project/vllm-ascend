@@ -3,7 +3,7 @@ import queue
 import threading
 from collections import defaultdict
 from concurrent.futures import ThreadPoolExecutor
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 import torch
 from vllm.distributed.kv_events import BlockStored
@@ -20,17 +20,34 @@ from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.config_data import
 )
 # isort: on
 
+if TYPE_CHECKING:
+    from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.coordinator import (
+        MooncakeStoreCoordinator,
+    )
+
+
+def _normalize_databases(
+    token_databases: "ChunkedTokenDatabase | list[ChunkedTokenDatabase]",
+) -> list[ChunkedTokenDatabase]:
+    """Accept either the legacy single-db argument or the HMA list form.
+    Always returns a list — single-group is a 1-list.
+    """
+    if isinstance(token_databases, ChunkedTokenDatabase):
+        return [token_databases]
+    return list(token_databases)
+
 
 class KVTransferThread(threading.Thread):
     def __init__(
         self,
         m_store: Backend,
-        token_database: ChunkedTokenDatabase,
+        token_databases: "ChunkedTokenDatabase | list[ChunkedTokenDatabase]",
         block_size: int,
         tp_rank: int,
         dcp_size: int,
         ready_event: threading.Event,
         name: str,
+        coord: "MooncakeStoreCoordinator | None" = None,
     ):
         super().__init__(daemon=True, name=name)
         self.m_store = m_store
@@ -38,7 +55,11 @@ class KVTransferThread(threading.Thread):
         self.block_size = block_size
         self.tp_rank = tp_rank
         self.dcp_size = dcp_size
-        self.token_database = token_database
+        # ``token_databases`` is per-group under HMA; ``token_database`` aliases
+        # group 0 so layerwise subclasses (single-group only) keep working.
+        self.token_databases = _normalize_databases(token_databases)
+        self.token_database = self.token_databases[0]
+        self.coord = coord
         self.done_task_lock = threading.Lock()
         self.request_queue: queue.Queue[Any] = queue.Queue()
         # TODO(jianzs): make this configurable
@@ -119,7 +140,7 @@ class KVCacheStoreSendingThread(KVTransferThread):
     def __init__(
         self,
         m_store: Backend,
-        token_database: ChunkedTokenDatabase,
+        token_databases: "ChunkedTokenDatabase | list[ChunkedTokenDatabase]",
         block_size: int,
         tp_rank: int,
         dcp_size: int,
@@ -127,9 +148,17 @@ class KVCacheStoreSendingThread(KVTransferThread):
         kv_role: str,
         ready_event: threading.Event,
         enable_kv_event: bool = False,
+        coord: "MooncakeStoreCoordinator | None" = None,
     ):
         super().__init__(
-            m_store, token_database, block_size, tp_rank, dcp_size, ready_event, name="KVCacheSendingThread"
+            m_store,
+            token_databases,
+            block_size,
+            tp_rank,
+            dcp_size,
+            ready_event,
+            name="KVCacheSendingThread",
+            coord=coord,
         )
         self.put_step = put_step
         self.kv_role = kv_role
@@ -152,28 +181,61 @@ class KVCacheStoreSendingThread(KVTransferThread):
 
     def _handle_request(self, req_meta: ReqMeta):
         token_len = req_meta.token_len_chunk
-        block_ids = req_meta.block_ids
         req_id = req_meta.req_id
         current_event = req_meta.current_event
-        starts = []
-        ends = []
-        keys = []
-        block_hashes = []
         if req_id not in self.stored_requests:
             self.request_queue.task_done()
             return
 
-        for index, (start, end, key) in enumerate(self.token_database.process_tokens(token_len, req_meta.block_hashes)):
-            starts.append(start)
-            ends.append(end)
-            keys.append(key.to_string())
-            block_hashes.append(req_meta.block_hashes[index])
+        # HMA: ``store_mask`` tells us which chunks each group should
+        # actually persist — for groups whose spec doesn't populate a
+        # given chunk (e.g. SWA pre-window), masking it out avoids
+        # writing garbage that no future load would ever read. Without
+        # coord, the mask degenerates to all-True per group.
+        if self.coord is not None and token_len > 0:
+            store_masks = self.coord.store_mask(token_len)
+        else:
+            store_masks = None
+
+        starts: list[int] = []
+        ends: list[int] = []
+        keys: list[str] = []
+        block_hashes: list[Any] = []
+        # Parallel to ``keys`` — which db produced this key, used by
+        # prepare_value / decode_adaptor_prefill_pp at write time.
+        key_db_idx: list[int] = []
+        # Parallel to ``keys`` — the per-group block_ids list to address.
+        key_block_ids: list[list[int]] = []
+
+        for g_idx, db in enumerate(self.token_databases):
+            group_mask = store_masks[g_idx] if store_masks is not None else None
+            group_block_ids = block_ids[g_idx]
+            for chunk_idx, (start, end, key) in enumerate(
+                db.process_tokens(token_len, req_meta.block_hashes)
+            ):
+                if group_mask is not None and (
+                    chunk_idx >= len(group_mask) or not group_mask[chunk_idx]
+                ):
+                    continue
+                # block_hashes is the engine's per-hash_block_size list; the
+                # event payload below maps a *group chunk* to its first hash.
+                bh_idx = (start // db.hash_block_size) if db.hash_block_size else chunk_idx
+                if bh_idx >= len(req_meta.block_hashes):
+                    bh_idx = chunk_idx
+                starts.append(start)
+                ends.append(end)
+                keys.append(key.to_string())
+                block_hashes.append(req_meta.block_hashes[bh_idx])
+                key_db_idx.append(g_idx)
+                key_block_ids.append(group_block_ids)
 
         if not self.dcp_size > 1:
             starts = starts[self.tp_rank % self.put_step :: self.put_step]
             ends = ends[self.tp_rank % self.put_step :: self.put_step]
             keys = keys[self.tp_rank % self.put_step :: self.put_step]
             block_hashes = block_hashes[self.tp_rank % self.put_step :: self.put_step]
+            key_db_idx = key_db_idx[self.tp_rank % self.put_step :: self.put_step]
+            key_block_ids = key_block_ids[self.tp_rank % self.put_step :: self.put_step]
 
         if not keys:
             self.dec_stored_request(req_id)
@@ -190,6 +252,8 @@ class KVCacheStoreSendingThread(KVTransferThread):
         ends = [ends[index] for index in missing_indices]
         keys = [keys[index] for index in missing_indices]
         block_hashes = [block_hashes[index] for index in missing_indices]
+        key_db_idx = [key_db_idx[index] for index in missing_indices]
+        key_block_ids = [key_block_ids[index] for index in missing_indices]
 
         if logger.isEnabledFor(logging.DEBUG):
             logger.debug(
@@ -213,7 +277,8 @@ class KVCacheStoreSendingThread(KVTransferThread):
             prev_key = None
             new_block_hashes = [maybe_convert_block_hash(bh) for bh in block_hashes]
             for index, start in enumerate(starts):
-                addr, size, _ = self.token_database.prepare_value(start, ends[index], block_ids)
+                db = self.token_databases[key_db_idx[index]]
+                addr, size, _ = db.prepare_value(start, ends[index], key_block_ids[index])
                 addrs.append(addr)
                 sizes.append(size)
 
@@ -234,6 +299,9 @@ class KVCacheStoreSendingThread(KVTransferThread):
                     logger.debug("Added kv cache event '%s' to kv cache events queue", stored_event)
 
             if self.kv_role == "kv_consumer":
+                # decode_adaptor_prefill_pp only depends on the pp partition
+                # config which is identical across groups — using group 0's
+                # database is safe.
                 keys, addrs, sizes = self.token_database.decode_adaptor_prefill_pp(keys, addrs, sizes)
 
             if current_event is not None:
@@ -252,14 +320,22 @@ class KVCacheStoreRecvingThread(KVTransferThread):
     def __init__(
         self,
         m_store: Backend,
-        token_database: ChunkedTokenDatabase,
+        token_databases: "ChunkedTokenDatabase | list[ChunkedTokenDatabase]",
         block_size: int,
         tp_rank: int,
         dcp_size: int,
         ready_event: threading.Event,
+        coord: "MooncakeStoreCoordinator | None" = None,
     ):
         super().__init__(
-            m_store, token_database, block_size, tp_rank, dcp_size, ready_event, name="KVCacheStoreRecvingThread"
+            m_store,
+            token_databases,
+            block_size,
+            tp_rank,
+            dcp_size,
+            ready_event,
+            name="KVCacheStoreRecvingThread",
+            coord=coord,
         )
 
     def _handle_request(self, req_meta: ReqMeta):
@@ -270,14 +346,35 @@ class KVCacheStoreRecvingThread(KVTransferThread):
             // self.block_size
             * self.block_size
         )
-        addr_list = []
-        size_list = []
-        key_list = []
-        for start, end, key in self.token_database.process_tokens(token_len, req_meta.block_hashes, mask_num):
-            addr, size, _ = self.token_database.prepare_value(start, end, req_meta.block_ids)
-            key_list.append(key.to_string())
-            addr_list.append(addr)
-            size_list.append(size)
+        # HMA: ``load_mask`` is the per-group mask of which chunks this
+        # consumer's spec actually populates locally (e.g. SWA tail vs.
+        # Mamba single-state). Without coord the mask degenerates to all-True.
+        if self.coord is not None and token_len > 0:
+            load_masks = self.coord.load_mask(req_meta.block_hashes, token_len)
+        else:
+            load_masks = None
+
+        addr_list: list[Any] = []
+        size_list: list[Any] = []
+        key_list: list[str] = []
+        for g_idx, db in enumerate(self.token_databases):
+            group_mask = load_masks[g_idx] if load_masks is not None else None
+            group_block_ids = req_meta.block_ids[g_idx]
+            for chunk_idx, (start, end, key) in enumerate(
+                db.process_tokens(token_len, req_meta.block_hashes, mask_num)
+            ):
+                if group_mask is not None and (
+                    chunk_idx >= len(group_mask) or not group_mask[chunk_idx]
+                ):
+                    continue
+                addr, size, _ = db.prepare_value(start, end, group_block_ids)
+                key_list.append(key.to_string())
+                addr_list.append(addr)
+                size_list.append(size)
+        if not key_list:
+            self.set_finished_request(req_id)
+            self.request_queue.task_done()
+            return
         key_list_c = key_list[self.tp_rank % len(key_list) :] + key_list[: self.tp_rank % len(key_list)]
         addr_list_c = addr_list[self.tp_rank % len(addr_list) :] + addr_list[: self.tp_rank % len(addr_list)]
         size_list_c = size_list[self.tp_rank % len(size_list) :] + size_list[: self.tp_rank % len(size_list)]

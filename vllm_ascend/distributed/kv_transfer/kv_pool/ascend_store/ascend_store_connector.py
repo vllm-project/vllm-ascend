@@ -10,14 +10,22 @@ from vllm.distributed.kv_events import (
     KVConnectorKVEvents,
     KVEventAggregator,
 )
-from vllm.distributed.kv_transfer.kv_connector.v1.base import KVConnectorBase_V1, KVConnectorMetadata, KVConnectorRole
+from vllm.distributed.kv_transfer.kv_connector.v1.base import (
+    KVConnectorBase_V1,
+    KVConnectorMetadata,
+    KVConnectorRole,
+)
 from vllm.forward_context import ForwardContext
 from vllm.logger import logger
 from vllm.utils.network_utils import make_zmq_socket
 from vllm.v1.attention.backend import AttentionMetadata  # type: ignore
 from vllm.v1.core.kv_cache_manager import KVCacheBlocks
 from vllm.v1.core.sched.output import SchedulerOutput
-from vllm.v1.kv_cache_interface import KVCacheConfig
+from vllm.v1.kv_cache_interface import (
+    CrossAttentionSpec,
+    KVCacheConfig,
+    MambaSpec,
+)
 from vllm.v1.outputs import KVConnectorOutput
 from vllm.v1.request import Request
 from vllm.v1.serial_utils import MsgpackDecoder
@@ -27,6 +35,17 @@ from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.pool_scheduler imp
     get_zmq_rpc_path_lookup,
 )
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.pool_worker import KVPoolWorker
+
+# Optional import: SupportsHMA may not exist in older vllm versions. When
+# unavailable, fall back to a marker-only stub so this module still imports
+# and the connector behaves like a single-group connector.
+try:
+    from vllm.distributed.kv_transfer.kv_connector.v1.base import SupportsHMA
+except ImportError:  # pragma: no cover - older vllm
+    class SupportsHMA:  # type: ignore[no-redef]
+        """Stub marker for vllm versions without HMA support."""
+
+        pass
 
 
 class AscendStoreKVEvents(KVConnectorKVEvents):
@@ -63,7 +82,7 @@ class AscendStoreKVEvents(KVConnectorKVEvents):
         return f"<AscendStoreKVEvents events={self.get_all_events()}>"
 
 
-class AscendStoreConnector(KVConnectorBase_V1):
+class AscendStoreConnector(KVConnectorBase_V1, SupportsHMA):
     @classmethod
     def requires_piecewise_for_cudagraph(cls, extra_config: dict[str, Any]) -> bool:
         """
@@ -90,22 +109,80 @@ class AscendStoreConnector(KVConnectorBase_V1):
                 "as the MoonCakeStoreConnector will be removed in the future."
             )
 
+        # HMA preconditions — refuse to construct if the workload requires
+        # a kv-cache layout the connector can't handle correctly.
+        self._validate_kv_cache_config(vllm_config, kv_cache_config, self.use_layerwise)
+
         self.kv_caches: dict[str, torch.Tensor] = {}
         self._kv_cache_events: AscendStoreKVEvents | None = None
 
         self.sended_but_unfinished_reqs: set[str] = set()
 
         if role == KVConnectorRole.SCHEDULER:
-            self.connector_scheduler = KVPoolScheduler(vllm_config, self.use_layerwise)
+            self.connector_scheduler = KVPoolScheduler(
+                vllm_config, self.use_layerwise, kv_cache_config=kv_cache_config
+            )
         else:
             self.connector_worker = KVPoolWorker(
                 vllm_config,
                 self.use_layerwise,
+                kv_cache_config=kv_cache_config,
             )
 
             assert self.connector_worker is not None
             if vllm_config.parallel_config.rank == 0:
                 self.lookup_server = LookupKeyServer(self.connector_worker, vllm_config, self.use_layerwise)
+
+    @staticmethod
+    def _validate_kv_cache_config(
+        vllm_config: VllmConfig,
+        kv_cache_config: KVCacheConfig | None,
+        use_layerwise: bool,
+    ) -> None:
+        """Reject configurations this connector can't honor correctly.
+
+        - Cross-attention KV groups aren't supported by the prefix-cache
+          path (no token-aligned hashes), so storing them is unsound.
+        - Mamba groups must be in **align mode** (i.e. their block_size
+          matches ``cache_config.block_size``), otherwise per-group
+          alignment math breaks down.
+        - PCP/DCP with multi-group hybrid attention is unsupported: the
+          legacy ``block_size *= pcp * dcp`` scaling conflicts with the
+          per-group LCM math that HMA requires.
+        - Layerwise transfer is currently single-group only — refusing
+          HMA + layerwise is preferable to producing wrong-by-group keys.
+        """
+        if kv_cache_config is None:
+            return
+        groups = kv_cache_config.kv_cache_groups
+        is_hma = len(groups) > 1
+        cache_block_size = vllm_config.cache_config.block_size
+        unsupported: list[str] = []
+        for g_idx, g in enumerate(groups):
+            spec = g.kv_cache_spec
+            if isinstance(spec, CrossAttentionSpec):
+                unsupported.append(f"group {g_idx}: CrossAttentionSpec")
+            if isinstance(spec, MambaSpec) and spec.block_size != cache_block_size:
+                unsupported.append(
+                    f"group {g_idx}: MambaSpec with block_size="
+                    f"{spec.block_size} != cache_config.block_size="
+                    f"{cache_block_size} (mamba_cache_mode != 'align')"
+                )
+        if is_hma:
+            pcp = getattr(vllm_config.parallel_config, "prefill_context_parallel_size", 1)
+            dcp = getattr(vllm_config.parallel_config, "decode_context_parallel_size", 1)
+            if pcp * dcp > 1:
+                unsupported.append(
+                    f"PCP/DCP > 1 (pcp={pcp}, dcp={dcp}) with hybrid attention"
+                )
+            if use_layerwise:
+                unsupported.append(
+                    "layerwise transfer with hybrid attention (multi-group kv-cache)"
+                )
+        if unsupported:
+            raise ValueError(
+                "AscendStoreConnector does not support: " + "; ".join(unsupported)
+            )
 
     ############################################################
     # Scheduler Side Methods
@@ -129,8 +206,22 @@ class AscendStoreConnector(KVConnectorBase_V1):
     def request_finished(
         self,
         request: "Request",
-        block_ids: list[int],
+        block_ids: "list[int] | tuple[list[int], ...]",
     ) -> tuple[bool, dict[str, Any] | None]:
+        # Legacy single-group hook. HMA-aware engines call
+        # ``request_finished_all_groups`` instead and pass a per-group tuple.
+        assert self.connector_scheduler is not None
+        return self.connector_scheduler.request_finished(request, block_ids)
+
+    def request_finished_all_groups(
+        self,
+        request: "Request",
+        block_ids: tuple[list[int], ...],
+    ) -> tuple[bool, dict[str, Any] | None]:
+        """HMA hook: engine calls this once per request with per-group
+        block_ids. We forward to ``KVPoolScheduler.request_finished`` whose
+        body accepts both shapes.
+        """
         assert self.connector_scheduler is not None
         return self.connector_scheduler.request_finished(request, block_ids)
 

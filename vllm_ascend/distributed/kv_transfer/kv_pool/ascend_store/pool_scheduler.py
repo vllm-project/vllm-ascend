@@ -10,6 +10,7 @@ from vllm.utils.network_utils import make_zmq_socket
 from vllm.v1.core.kv_cache_manager import KVCacheBlocks
 from vllm.v1.core.kv_cache_utils import BlockHash
 from vllm.v1.core.sched.output import SchedulerOutput
+from vllm.v1.kv_cache_interface import KVCacheConfig
 from vllm.v1.request import Request
 from vllm.v1.serial_utils import MsgpackEncoder
 
@@ -21,8 +22,43 @@ from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.config_data import
 )
 
 
+def _resolve_block_sizes_compat(
+    vllm_config: "VllmConfig",
+    kv_cache_config: "KVCacheConfig | None",
+) -> tuple[int, int]:
+    """Compute ``(scheduler_block_size, hash_block_size)`` for this connector.
+
+    HMA path (multiple KV-cache groups): defer to vLLM's
+    ``resolve_kv_cache_block_sizes`` — it computes the LCM of group block
+    sizes for ``scheduler_block_size`` and the GCD (or override) for
+    ``hash_block_size``. Single-group / legacy path: fall back to the
+    pre-HMA formula ``block_size * pcp * dcp`` so existing deployments
+    keep producing bit-identical keys.
+    """
+    pcp = getattr(vllm_config.parallel_config, "prefill_context_parallel_size", 1)
+    dcp = getattr(vllm_config.parallel_config, "decode_context_parallel_size", 1)
+    if kv_cache_config is not None and len(kv_cache_config.kv_cache_groups) > 1:
+        try:
+            from vllm.v1.core.kv_cache_utils import resolve_kv_cache_block_sizes
+            return resolve_kv_cache_block_sizes(kv_cache_config, vllm_config)
+        except ImportError:
+            # Older vllm versions: HMA cannot be enabled, fall through.
+            pass
+    bs = vllm_config.cache_config.block_size
+    if pcp > 1:
+        bs *= pcp
+    if dcp > 1:
+        bs *= dcp
+    return bs, bs
+
+
 class KVPoolScheduler:
-    def __init__(self, vllm_config: "VllmConfig", use_layerwise):
+    def __init__(
+        self,
+        vllm_config: "VllmConfig",
+        use_layerwise,
+        kv_cache_config: "KVCacheConfig | None" = None,
+    ):
         self.use_layerwise = use_layerwise
         self.kv_role = vllm_config.kv_transfer_config.kv_role
         self.consumer_is_to_load = vllm_config.kv_transfer_config.kv_connector_extra_config.get(
@@ -39,11 +75,16 @@ class KVPoolScheduler:
         self.dcp_size = getattr(vllm_config.parallel_config, "decode_context_parallel_size", 1)
 
         self.original_block_size = vllm_config.cache_config.block_size
-        self._block_size = vllm_config.cache_config.block_size
-        if self.pcp_size > 1:
-            self._block_size *= self.pcp_size
-        if self.dcp_size > 1:
-            self._block_size *= self.dcp_size
+        # HMA: defer to ``resolve_kv_cache_block_sizes`` when multi-group;
+        # single-group keeps the legacy formula bit-for-bit.
+        self._block_size, self._hash_block_size = _resolve_block_sizes_compat(
+            vllm_config, kv_cache_config
+        )
+        self._kv_cache_groups_count: int | None = (
+            len(kv_cache_config.kv_cache_groups)
+            if kv_cache_config is not None
+            else None
+        )
         # request_id -> full_token_ids
         self._request_trackers: dict[str, RequestTracker] = {}
         self._preempted_req_ids: set[str] = set()
@@ -51,7 +92,12 @@ class KVPoolScheduler:
         self._discard_partial_chunks = vllm_config.kv_transfer_config.get_from_extra_config(
             "discard_partial_chunks", True
         )
-        self._unfinished_requests: dict[str, tuple[Request, list[int]]] = {}
+        # ``block_ids`` is per-group (HMA): each group keeps its own block
+        # list. Single-group deployments store a 1-tuple, preserving the
+        # legacy ``[block_ids]`` layout transparently.
+        self._unfinished_requests: dict[
+            str, tuple[Request, tuple[list[int], ...]]
+        ] = {}
         self._unfinished_request_ids: set[str] = set()
 
     def get_num_new_matched_tokens(
@@ -118,9 +164,23 @@ class KVPoolScheduler:
         For SharedStorageConnector, update _request_needs_load
         if the CacheManager this allocated blocks for us.
         """
-        local_block_ids = []
+        # HMA: ``blocks.get_block_ids()`` returns ``tuple[list[int], ...]``
+        # — one list per kv-cache group. Keep the per-group structure;
+        # single-group is a 1-tuple — downstream is HMA-aware. When there
+        # are no external tokens, still seed empty per-group lists so the
+        # downstream loop iterating groups doesn't IndexError on tuple().
         if num_external_tokens > 0:
-            local_block_ids = blocks.get_block_ids()[0]
+            local_block_ids = blocks.get_block_ids()
+            if isinstance(local_block_ids, list):
+                # Tolerate vllm versions that return a flat list.
+                local_block_ids = (local_block_ids,)
+        else:
+            # Empty per-group lists, sized off whatever the load-spec
+            # implies — fall back to a 1-tuple when we can't tell.
+            num_groups = 1
+            if self._kv_cache_groups_count is not None:
+                num_groups = self._kv_cache_groups_count
+            local_block_ids = tuple([] for _ in range(num_groups))
 
         self._unfinished_requests[request.request_id] = (request, local_block_ids)
         self._unfinished_request_ids.add(request.request_id)
@@ -179,10 +239,15 @@ class KVPoolScheduler:
             num_tokens_to_compute = request.num_computed_tokens + scheduler_output.num_scheduled_tokens[request.req_id]
             request_tuple = self._unfinished_requests.get(request.req_id)
             request_real = request_tuple[0]  # type: ignore[index]
-            if not isinstance(request.block_ids[0], list):
-                unfolded_block_ids = request.block_ids.copy()
+            # HMA: preserve per-group block_ids. Single-group requests
+            # arrive as ``list[int]`` (legacy shape) — wrap into a
+            # 1-tuple so downstream is uniformly ``tuple[list[int], ...]``.
+            if isinstance(request.block_ids, tuple):
+                unfolded_block_ids: tuple[list[int], ...] = tuple(
+                    b.copy() for b in request.block_ids
+                )
             else:
-                unfolded_block_ids = request.block_ids[0].copy()
+                unfolded_block_ids = (request.block_ids.copy(),)
             request_tracker = RequestTracker(
                 req_id=request.req_id,
                 token_len=num_tokens_to_compute,
@@ -218,10 +283,11 @@ class KVPoolScheduler:
                 if not new_block_ids:
                     continue
                 if req_id in self._preempted_req_ids:
+                    # HMA: keep per-group structure for resumed requests.
                     if isinstance(new_block_ids, tuple):
-                        new_block_ids = new_block_ids[0].copy()
+                        new_block_ids = tuple(b.copy() for b in new_block_ids)
                     else:
-                        new_block_ids = new_block_ids.copy()
+                        new_block_ids = (new_block_ids.copy(),)
                     self._preempted_req_ids.discard(req_id)
                     load_spec = self.load_specs.pop(req_id, None)
                     request_tuple = self._unfinished_requests.get(req_id)
@@ -324,21 +390,34 @@ class KVPoolScheduler:
     def request_finished(
         self,
         request: "Request",
-        block_ids: list[int],
+        block_ids: "list[int] | tuple[list[int], ...]",
     ) -> tuple[bool, dict[str, Any] | None]:
         """
         Once a request is finished, determine whether request blocks
         should be freed now or will be sent asynchronously and freed later.
+
+        ``block_ids`` accepts both shapes for backward compatibility:
+        legacy single-group callers pass ``list[int]``; HMA-aware callers
+        pass ``tuple[list[int], ...]`` (one list per kv-cache group).
         """
         if self.kv_role == "kv_consumer" and not self.consumer_is_to_put:
             return False, None
         tracker = self._request_trackers.get(request.request_id)
         if tracker is not None and tracker.num_saved_tokens <= 0:
             return False, None
-        delay_free_blocks = len(block_ids) > 0
+        # Total block count across all groups (1 group → unchanged math).
+        if isinstance(block_ids, tuple):
+            total_blocks = sum(len(g) for g in block_ids)
+        else:
+            total_blocks = len(block_ids)
+        delay_free_blocks = total_blocks > 0
         if delay_free_blocks:
             if logger.isEnabledFor(logging.DEBUG):
-                logger.debug("Delaying free of %d blocks for request %s", len(block_ids), request.request_id)
+                logger.debug(
+                    "Delaying free of %d blocks for request %s",
+                    total_blocks,
+                    request.request_id,
+                )
         return delay_free_blocks, None
 
 
