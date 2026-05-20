@@ -78,7 +78,11 @@ class AscendLinearMethod(LinearMethodBase):
             layer.register_parameter(weight_name, param)
             set_weight_attrs(param, extra_weight_attrs)
 
-        pertensor_dict = self.quant_method.get_pertensor_param(params_dtype)
+        # NOTE: In flatquant quantization implementation,
+        # the shape of pertensor_param requires introducing layer_type
+        layer_type = "row" if isinstance(layer, RowParallelLinear) else "others"   
+
+        pertensor_dict = self.quant_method.get_pertensor_param(params_dtype, layer_type=layer_type)
         for pertensor_name, pertensor_param in pertensor_dict.items():
             param = PerTensorScaleParameter(data=pertensor_param, weight_loader=weight_loader)
             # disable warning
