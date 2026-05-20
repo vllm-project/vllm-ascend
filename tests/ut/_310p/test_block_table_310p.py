@@ -106,6 +106,28 @@ class TestBlockTable310(TestBase):
         np.testing.assert_array_equal(block_table.slot_mapping.np[:16], expected)
         np.testing.assert_array_equal(block_table.slot_mapping.gpu[:16].cpu().numpy(), expected)
 
+    def test_compute_slot_mapping_rejects_device_tensor_inputs(self):
+        block_table = self._create_block_table(
+            dcp_world_size=1,
+            dcp_rank=0,
+            pcp_world_size=1,
+            pcp_rank=0,
+            cp_kv_cache_interleave_size=1,
+        )
+        self._setup_block_table_data(block_table, num_reqs=2)
+
+        req_indices = np.array([0, 0, 1, 1], dtype=np.int64)
+        device_positions = torch.empty(4, dtype=torch.int64, device="meta")
+
+        with self.assertRaisesRegex(TypeError, "D2H"):
+            block_table.compute_slot_mapping(req_indices, device_positions)
+
+        device_query_start_loc = torch.empty(3, dtype=torch.int32, device="meta")
+        positions = torch.arange(4, dtype=torch.int64)
+
+        with self.assertRaisesRegex(TypeError, "D2H"):
+            block_table.compute_slot_mapping(2, device_query_start_loc, positions)
+
 
 if __name__ == "__main__":
     unittest.main()

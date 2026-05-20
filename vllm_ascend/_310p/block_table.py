@@ -11,6 +11,9 @@ from vllm_ascend.worker.block_table import MultiGroupBlockTable as AscendMultiGr
 class BlockTable(AscendBlockTable):
     def compute_slot_mapping(self, *args) -> None:
         req_indices, positions = self._normalize_slot_mapping_inputs(*args)
+        self._compute_slot_mapping_numpy(req_indices, positions)
+
+    def _compute_slot_mapping_numpy(self, req_indices: np.ndarray, positions: np.ndarray) -> None:
         num_tokens = positions.shape[0]
         if num_tokens == 0:
             self.slot_mapping.copy_to_gpu(0)
@@ -44,7 +47,7 @@ class BlockTable(AscendBlockTable):
 
         self.slot_mapping.copy_to_gpu(num_tokens)
 
-    def _get_block_table_indices(self, req_indices: np.ndarray, logical_block_idx: np.ndarray) -> np.ndarray:
+    def _get_block_table_indices(self, req_indices, logical_block_idx):
         row_stride = self.max_num_blocks_per_req * self.blocks_per_phys_block
         return req_indices * row_stride + logical_block_idx
 
@@ -73,7 +76,12 @@ class BlockTable(AscendBlockTable):
         if isinstance(value, np.ndarray):
             return value.astype(np.int64, copy=False)
         if isinstance(value, torch.Tensor):
-            return value.detach().cpu().numpy().astype(np.int64, copy=False)
+            if value.device.type != "cpu":
+                raise TypeError(
+                    "310P slot mapping must be computed from CPU req_indices/positions; "
+                    "device tensor inputs would require unsupported NPU arithmetic or D2H"
+                )
+            return value.detach().numpy().astype(np.int64, copy=False)
         return np.asarray(value, dtype=np.int64)
 
 
