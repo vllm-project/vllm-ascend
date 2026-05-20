@@ -37,20 +37,23 @@ def _l2norm(x: torch.Tensor, eps: float = 1e-6) -> torch.Tensor:
 
 def _flatten_state_indices(
     ssm_state_indices: torch.Tensor,
-    cu_seqlens: torch.Tensor,
+    actual_seq_lengths: torch.Tensor,
     total_tokens: int,
 ) -> torch.Tensor:
     if ssm_state_indices.ndim == 1:
         return ssm_state_indices[:total_tokens].to(torch.int32).contiguous()
 
-    seq_lens = cu_seqlens[1:] - cu_seqlens[:-1]
-    ssm_state_indices = ssm_state_indices[: seq_lens.shape[0]]
+    num_sequences = actual_seq_lengths.shape[0]
+    ssm_state_indices = ssm_state_indices[:num_sequences]
+    if ssm_state_indices.shape[1] == 1 and total_tokens == num_sequences:
+        return ssm_state_indices.reshape(-1).to(torch.int32).contiguous()
+
     positions = torch.arange(
         ssm_state_indices.shape[1],
         device=ssm_state_indices.device,
-        dtype=seq_lens.dtype,
+        dtype=actual_seq_lengths.dtype,
     )
-    valid = positions.unsqueeze(0) < seq_lens.unsqueeze(1)
+    valid = positions.unsqueeze(0) < actual_seq_lengths.unsqueeze(1)
     return ssm_state_indices.masked_select(valid)[:total_tokens].to(torch.int32).contiguous()
 
 
@@ -71,8 +74,8 @@ def npu_recurrent_gated_delta_rule_310(
         k = _l2norm(k)
 
     total_tokens = v.shape[1]
-    flat_state_indices = _flatten_state_indices(ssm_state_indices, cu_seqlens, total_tokens)
     actual_seq_lengths = (cu_seqlens[1:] - cu_seqlens[:-1]).to(torch.int32).contiguous()
+    flat_state_indices = _flatten_state_indices(ssm_state_indices, actual_seq_lengths, total_tokens)
     accepted_tokens = None
     if num_accepted_tokens is not None:
         accepted_tokens = num_accepted_tokens[: actual_seq_lengths.shape[0]].to(torch.int32).contiguous()
@@ -186,7 +189,7 @@ class AscendGatedDeltaNetAttention310(GatedDeltaNetAttention):
                 bias=self.conv1d.bias,
                 conv_states=conv_state,
                 query_start_loc=None,
-                cache_indices=non_spec_state_indices_tensor[: attn_metadata.num_actual_tokens].to(torch.int64),
+                cache_indices=non_spec_state_indices_tensor[:num_actual_tokens].to(torch.int64),
                 initial_state_mode=None,
                 num_accepted_tokens=None,
                 activation_mode=activation_num,

@@ -12,7 +12,7 @@ class FakeGDNAttentionMetadata(SimpleNamespace):
 
 def _patch_gdn_runtime(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(gdn_310, "GDNAttentionMetadata", FakeGDNAttentionMetadata)
-    monkeypatch.setattr(gdn_310, "enable_sp", lambda: False)
+    monkeypatch.setattr(gdn_310, "is_conv_state_dim_first", lambda: False)
     monkeypatch.setattr(gdn_310, "maybe_save_kv_layer_to_connector", lambda *args, **kwargs: None)
 
 
@@ -79,6 +79,20 @@ def _patch_gating(monkeypatch: pytest.MonkeyPatch) -> None:
         return g, beta
 
     monkeypatch.setattr(gdn_310, "fused_gdn_gating_pytorch", fake_gating)
+
+
+def test_flatten_state_indices_width_one_fast_path():
+    actual_seq_lengths = torch.tensor([1, 1, 1], dtype=torch.int32)
+    state_indices = torch.tensor([[5], [6], [7]], dtype=torch.int64)
+
+    out = gdn_310._flatten_state_indices(
+        ssm_state_indices=state_indices,
+        actual_seq_lengths=actual_seq_lengths,
+        total_tokens=3,
+    )
+
+    assert out.dtype == torch.int32
+    assert torch.equal(out, torch.tensor([5, 6, 7], dtype=torch.int32))
 
 
 def test_npu_recurrent_gated_delta_rule_310_flattens_state_indices(monkeypatch):
@@ -172,7 +186,8 @@ def test_gdn_310_forward_core_decode_uses_recurrent_op(monkeypatch):
 
     attn._forward_core(mixed_qkv, b, a, core_attn_out)
 
-    _, _, conv_kwargs = conv_calls[0]
+    conv_input, _, conv_kwargs = conv_calls[0]
+    assert conv_input.shape[0] == 3
     assert conv_kwargs["run_mode"] == 1
     assert torch.equal(conv_kwargs["cache_indices"], torch.tensor([5, 6, 7], dtype=torch.int64))
 
