@@ -108,8 +108,9 @@ class RasDPEngineCoreProc(DPEngineCoreProc):
                         if msg[0] == "RECOVERY_ADDRESSES":
                             _, sub_addr, push_addr = msg
                             logger.info(
-                                "[RAS] Received recovery addresses from "
+                                "[RAS][engine=%d] Received recovery addresses from "
                                 "dp coordinator: sub=%s, push=%s",
+                                self.dp_rank,
                                 sub_addr,
                                 push_addr,
                             )
@@ -118,7 +119,8 @@ class RasDPEngineCoreProc(DPEngineCoreProc):
                             )
                     except Exception as e:
                         logger.exception(
-                            "[RAS] Failed to deserialize recovery addr msg: %s", e
+                            "[RAS][engine=%d] Failed to deserialize recovery addr msg: %s",
+                            self.dp_rank, e
                         )
 
             ready_event.set()
@@ -209,30 +211,36 @@ class RasDPEngineCoreProc(DPEngineCoreProc):
 
     def _wait_for_recovery(self) -> None:
         logger.info(
-            "[RAS] EngineCore entering recovery wait (wave=%d)", self.current_wave
+            "[RAS][engine=%d] EngineCore entering recovery wait (wave=%d)",
+            self.dp_rank, self.current_wave
         )
         self._recovery_handler.wait_for_recovery()
         if self._recovery_handler.get_recovery_success():
-            logger.info("[RAS] Recovery succeeded, resuming engine loop")
+            logger.info("[RAS][engine=%d] Recovery succeeded, resuming engine loop",
+                        self.dp_rank)
         else:
-            logger.error("[RAS] Recovery failed, raising exception")
+            logger.error("[RAS][engine=%d] Recovery failed, raising exception",
+                         self.dp_rank)
             raise RuntimeError("Recovery failed")
 
     def _wait_for_recovery_on_exception(self) -> bool:
         logger.info(
-            "[RAS] EngineCore caught exception, waiting up to 5s for "
-            "recovery signal..."
+            "[RAS][engine=%d] EngineCore caught exception, waiting up to 5s for "
+            "recovery signal...",
+            self.dp_rank,
         )
         deadline = time.time() + 5.0
         while time.time() < deadline:
             if self._recovery_handler.is_recovering:
                 logger.info(
-                    "[RAS] Recovery signal received, suppressing exception"
+                    "[RAS][engine=%d] Recovery signal received, suppressing exception",
+                    self.dp_rank,
                 )
                 return True
             time.sleep(0.1)
         logger.info(
-            "[RAS] No recovery signal within 5s, re-raising exception"
+            "[RAS][engine=%d] No recovery signal within 5s, re-raising exception",
+            self.dp_rank,
         )
         return False
 
