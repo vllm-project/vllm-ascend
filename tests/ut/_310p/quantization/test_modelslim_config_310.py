@@ -21,8 +21,8 @@ from vllm.model_executor.layers.linear import LinearBase
 
 from tests.ut.base import TestBase
 from vllm_ascend._310p.fused_moe.fused_moe import AscendUnquantizedFusedMoEMethod310
-from vllm_ascend.ops.linear import AscendUnquantizedLinearMethod
 from vllm_ascend._310p.quantization.modelslim_config import AscendModelSlimConfig310
+from vllm_ascend.ops.linear import AscendUnquantizedLinearMethod
 
 
 class TestAscendModelSlimConfig310(TestBase):

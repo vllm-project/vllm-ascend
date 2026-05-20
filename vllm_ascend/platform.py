@@ -19,6 +19,7 @@ from __future__ import annotations
 
 import math
 import os
+from importlib import import_module, util
 from typing import TYPE_CHECKING, Any
 from uuid import uuid4
 
@@ -30,6 +31,9 @@ from vllm.platforms import Platform, PlatformEnum
 # todo: please remove it when solve cuda hard code in vllm
 os.environ["VLLM_DISABLE_SHARED_EXPERTS_STREAM"] = "1"
 
+from vllm.v1.attention.backends.registry import AttentionBackendEnum
+
+import vllm_ascend.envs as envs_ascend
 from vllm_ascend.ascend_config import init_ascend_config
 
 # isort: off
@@ -38,11 +42,11 @@ from vllm_ascend.utils import (
     COMPILATION_PASS_KEY,
     COMPRESSED_TENSORS_METHOD,
     AscendDeviceType,
+    bootstrap_custom_op_env,
     check_kv_extra_config,
     flashcomm2_enable,
     get_ascend_device_type,
     is_moe_model,
-    is_vl_model,
     refresh_block_size,
     update_aclgraph_sizes,
     update_cudagraph_capture_sizes,
@@ -154,8 +158,59 @@ class NPUPlatform(Platform):
         config_deprecated_logging()
 
     @classmethod
+    def _get_default_max_cudagraph_capture_size(cls, vllm_config: VllmConfig) -> int | None:
+        """Mirror the default-max branch in vLLM's `_set_cudagraph_sizes()`.
+
+        This helper corresponds to the upstream block under
+        "determine the initial max_cudagraph_capture_size" when
+        `compilation_config.max_cudagraph_capture_size is None`.
+
+        Ascend injects this default earlier via `apply_config_platform_defaults()`
+        so the rest of `_set_cudagraph_sizes()` can keep using upstream logic for
+        size-list generation, token-cap clipping, SP filtering, and later
+        post-processing. The only intentional difference from upstream is removing
+        the CUDA-oriented trailing `* 2`: Ascend wants the default capture upper
+        bound to track `max_num_seqs * decode_query_len`, capped at 512.
+
+        Returning `None` means the platform should not inject a default. This
+        covers the cases where the user has already provided either
+        `max_cudagraph_capture_size` or `cudagraph_capture_sizes`.
+        """
+        compilation_config = vllm_config.compilation_config
+        if compilation_config.max_cudagraph_capture_size is not None:
+            return None
+        if compilation_config.cudagraph_capture_sizes is not None:
+            return None
+
+        scheduler_config = getattr(vllm_config, "scheduler_config", None)
+        max_num_seqs = getattr(scheduler_config, "max_num_seqs", None)
+        if max_num_seqs is None:
+            return None
+
+        decode_query_len = 1
+        speculative_config = getattr(vllm_config, "speculative_config", None)
+        if speculative_config and speculative_config.num_speculative_tokens:
+            decode_query_len += speculative_config.num_speculative_tokens
+
+        return min(max_num_seqs * decode_query_len, 512)
+
+    @classmethod
     def get_device_capability(cls, device_id: int = 0):
         return None
+
+    @classmethod
+    def apply_config_platform_defaults(cls, vllm_config: VllmConfig) -> None:
+        """Apply Ascend-specific defaults. Set sp_min_token_num=1 when enable_sp and not set."""
+        pass_config = vllm_config.compilation_config.pass_config
+        if pass_config.enable_sp and pass_config.sp_min_token_num is None:
+            from vllm_ascend.compilation.passes.sequence_parallelism import get_sp_min_token_num
+
+            pass_config.sp_min_token_num = get_sp_min_token_num(vllm_config)
+            logger.info("set sp_min_token_num to %s", pass_config.sp_min_token_num)
+
+        default_max_cg_capture_size = cls._get_default_max_cudagraph_capture_size(vllm_config)
+        if default_max_cg_capture_size is not None:
+            vllm_config.compilation_config.max_cudagraph_capture_size = default_max_cg_capture_size
 
     @classmethod
     def get_device_name(cls, device_id: int = 0) -> str:
@@ -169,12 +224,54 @@ class NPUPlatform(Platform):
         return device_props.uuid
 
     @classmethod
+    def num_compute_units(cls, device_id: int = 0) -> int:
+        """Return the number of Cube Cores on the NPU device.
+        This is the NPU equivalent of CUDA's ``multi_processor_count``
+        (SM count).  On Ascend hardware the closest concept is
+        ``cube_core_num`` exposed by ``torch.npu.get_device_properties``,
+        which represents the matrix-compute units (analogous to CUDA SMs).
+        This value is consumed by vLLM's
+        ``layernorm_guard.calc_rows_per_block`` to size the Triton kernel
+        launch grid.  Note that the result is clamped to 4 by that
+        function, so the exact value has minimal impact on correctness;
+        it only affects kernel occupancy heuristics.
+        """
+        props = torch.npu.get_device_properties(device_id)
+        # cube_core_num is the matrix-compute unit count, semantically
+        # closest to CUDA's multi_processor_count (SM count).
+        cube_core_num = getattr(props, "cube_core_num", None)
+        if cube_core_num is not None and cube_core_num > 0:
+            return int(cube_core_num)
+        # Fallback for older torch-npu versions that may not expose cube_core_num
+        vector_core_num = getattr(props, "vector_core_num", None)
+        if vector_core_num is not None and vector_core_num > 0:
+            return int(vector_core_num)
+        return 24  # safe default (24 Cube Cores)
+
+    @classmethod
     def inference_mode(cls):
         return torch.inference_mode()
 
     @classmethod
+    def update_block_size_for_backend(cls, vllm_config: VllmConfig) -> None:
+        # TODO: NPU still sets block_size in check_and_update_config.
+        # Move that logic here so block_size is chosen by the backend.
+        pass
+
+    @classmethod
     def set_device(cls, device: torch.device):
         torch.npu.set_device(device)
+
+    @classmethod
+    def _validate_layer_sharding_config(cls, vllm_config: VllmConfig) -> None:
+        additional_config = vllm_config.additional_config or {}
+        layer_sharding = additional_config.get("layer_sharding") or []
+        if not layer_sharding:
+            return
+
+        kv_transfer_config = vllm_config.kv_transfer_config
+        if kv_transfer_config is None or kv_transfer_config.kv_role != "kv_producer":
+            raise ValueError("additional_config.layer_sharding can only be enabled in PD-disaggregated's P node.")
 
     @classmethod
     def check_and_update_config(cls, vllm_config: VllmConfig) -> None:
@@ -183,8 +280,11 @@ class NPUPlatform(Platform):
         if vllm_config.model_config is not None:
             maybe_auto_detect_quantization(vllm_config)
 
+        cls._validate_layer_sharding_config(vllm_config)
+
         # initialize ascend config from vllm additional_config
         cls._fix_incompatible_config(vllm_config)
+
         ascend_config = init_ascend_config(vllm_config)
 
         if vllm_config.kv_transfer_config is not None:
@@ -205,6 +305,7 @@ class NPUPlatform(Platform):
                 if not isinstance(ascend_compilation_config, dict)
                 else ascend_compilation_config
             )
+
         ascend_config.update_compile_ranges_split_points()
 
         if model_config and hasattr(model_config.hf_text_config, "index_topk"):
@@ -224,11 +325,15 @@ class NPUPlatform(Platform):
 
         from vllm.config.compilation import CUDAGraphMode
 
-        if ascend_config.xlite_graph_config.enabled and ascend_config.xlite_graph_config.full_mode:
-            logger.info("ACLGraph is disabled under xlite full mode")
-            enforce_eager = True
-            model_config.enforce_eager = True
-            compilation_config.cudagraph_mode = CUDAGraphMode.NONE
+        if ascend_config.xlite_graph_config.enabled:
+            if ascend_config.xlite_graph_config.full_mode:
+                logger.info("ACLGraph is disabled under xlite full mode")
+                enforce_eager = True
+                model_config.enforce_eager = True
+                compilation_config.cudagraph_mode = CUDAGraphMode.NONE
+            else:
+                logger.info("Falling back to FULL_DECODE_ONLY under xlite decode-only mode")
+                compilation_config.cudagraph_mode = CUDAGraphMode.FULL_DECODE_ONLY
 
         if enforce_eager:
             logger.info("Compilation disabled, using eager mode by default")
@@ -244,7 +349,10 @@ class NPUPlatform(Platform):
             )
             compilation_config.cudagraph_mode = CUDAGraphMode.NONE
 
-        # set cudaprah sizes before extending `compilation_config.splitting_ops`
+        # Recompute cudagraph sizes after Ascend-specific compatibility updates.
+        # The platform default max is injected earlier via
+        # `apply_config_platform_defaults`, so this late pass should only honor
+        # the current max / size inputs after the mode adjustments above.
         vllm_config._set_cudagraph_sizes()
         # TODO delete graph size update here when compilation_config.pass_config.enable_sp
         # is supported by vllm-ascend.
@@ -261,6 +369,10 @@ class NPUPlatform(Platform):
                 f"{vllm_config.parallel_config.tensor_parallel_size}"
             )
             if len(sp_aclgraph_sizes) != len(original_sizes):
+                # If user set the max_num_seqs miss fit the multiple of tp_size,
+                # we need to match the max_cudagraph_capture_size with the valid max size,
+                # so we can avoid initialization error of vllm server.
+                compilation_config.max_cudagraph_capture_size = sp_aclgraph_sizes[-1]
                 compilation_config.cudagraph_capture_sizes = sp_aclgraph_sizes
                 update_cudagraph_capture_sizes(vllm_config, sp_aclgraph_sizes)
 
@@ -268,11 +380,24 @@ class NPUPlatform(Platform):
         if compilation_config.cudagraph_mode == CUDAGraphMode.FULL_AND_PIECEWISE:
             compilation_config.cudagraph_mode = CUDAGraphMode.PIECEWISE
 
-        # encoder-decoder models currently only support piecewise mode
-        if model_config and model_config.is_encoder_decoder is True:
-            if compilation_config.cudagraph_mode == CUDAGraphMode.FULL_DECODE_ONLY:
-                logger.warning("encoder-decoder model doesn't support FULL_DECODE_ONLY, fallback to PIECEWISE ")
-            compilation_config.cudagraph_mode = CUDAGraphMode.PIECEWISE
+        # Encoder-decoder models currently only support PIECEWISE mode
+        # TODO(Jian Li): Confirm this behavior and explain why
+        if (
+            model_config
+            and model_config.is_encoder_decoder
+            and compilation_config.cudagraph_mode not in (CUDAGraphMode.NONE, CUDAGraphMode.PIECEWISE)
+        ):
+            cudagraph_mode = (
+                CUDAGraphMode.PIECEWISE
+                if compilation_config.mode == CompilationMode.VLLM_COMPILE
+                else CUDAGraphMode.NONE
+            )
+            logger.info_once(
+                "Encoder-decoder models don't support %s, fallback to %s.",
+                compilation_config.cudagraph_mode,
+                cudagraph_mode,
+            )
+            compilation_config.cudagraph_mode = cudagraph_mode
 
         # get custom compile backend for graph fusion
         compilation_config.oot_compiler = cls.get_compile_backend()
@@ -346,7 +471,8 @@ class NPUPlatform(Platform):
 
         if parallel_config and parallel_config.worker_cls == "auto":
             # TODO: this is a tricky way to disable `use_sequence_parallel_moe` in vllm.
-            parallel_config.all2all_backend = "flashinfer_all2allv"
+            if not vllm_config.compilation_config.pass_config.enable_sp:
+                parallel_config.all2all_backend = "flashinfer_all2allv"
             if is_310p():
                 parallel_config.worker_cls = "vllm_ascend._310p.worker_310p.NPUWorker310"
             elif ascend_config.xlite_graph_config.enabled:
@@ -361,7 +487,25 @@ class NPUPlatform(Platform):
         if get_ascend_device_type() != AscendDeviceType._310P:
             compilation_config.custom_ops = ["all"]
 
+        if envs_ascend.VLLM_ASCEND_BALANCE_SCHEDULING:
+            kv_transfer_config = vllm_config.kv_transfer_config
+            kv_role = getattr(kv_transfer_config, "kv_role", None)
+            if kv_transfer_config is not None and kv_role != "kv_both":
+                raise ValueError(
+                    "VLLM_ASCEND_BALANCE_SCHEDULING (balance scheduling) only supports PD-mixed mode "
+                    "(kv_role='kv_both' or no kv_transfer_config), and is not supported in "
+                    "PD-disaggregated mode (kv_role='kv_producer'/'kv_consumer')."
+                )
+
         if ascend_config.recompute_scheduler_enable:
+            kv_transfer_config = vllm_config.kv_transfer_config
+            kv_role = getattr(kv_transfer_config, "kv_role", None)
+            if kv_transfer_config is None or kv_role == "kv_both":
+                raise ValueError(
+                    "recompute_scheduler_enable can only be enabled in PD-disaggregated mode "
+                    "(kv_role='kv_producer' or 'kv_consumer'), and is not supported in PD-mixed mode."
+                )
+
             from vllm_ascend.core.recompute_scheduler import RecomputeSchedulerConfig
 
             recompute_scheduler_config = RecomputeSchedulerConfig.initialize_from_config(vllm_config)
@@ -374,6 +518,13 @@ class NPUPlatform(Platform):
             )
             vllm_config.scheduler_config.enable_chunked_prefill = True
             vllm_config.scheduler_config.SLO_limits_for_dynamic_batch = ascend_config.SLO_limits_for_dynamic_batch
+
+        # Use ProfilingChunkScheduler when profiling-based chunk sizing is on.
+        if ascend_config.profiling_chunk_config.enabled:
+            vllm_config.scheduler_config.scheduler_cls = (
+                "vllm_ascend.core.scheduler_profiling_chunk.ProfilingChunkScheduler"
+            )
+            import vllm_ascend.patch.platform.patch_profiling_chunk  # noqa
 
         cp_size = parallel_config.decode_context_parallel_size * parallel_config.prefill_context_parallel_size
         if (
@@ -402,11 +553,6 @@ class NPUPlatform(Platform):
             vllm_config.parallel_config.cp_kv_cache_interleave_size = cache_config.block_size
 
         if enable_sp(vllm_config):
-            assert not is_vl_model(vllm_config), """Flash Comm V1 is not supported for VL models. \
-                Please disable it by setting VLLM_ASCEND_ENABLE_FLASHCOMM1=0. \
-                For optimal performance with VL models, we recommend enabling Sequence Parallelism \
-                via --compilation-config '{"pass_config": {"enable_sp": true}}'."""
-
             assert vllm_config.parallel_config.tensor_parallel_size > 1, (
                 "Flash Comm v1 is only supported when tp_size > 1."
             )
@@ -435,20 +581,11 @@ class NPUPlatform(Platform):
             os.environ["PYTORCH_NPU_ALLOC_CONF"] = npu_alloc_configs
             logger.info("Set PYTORCH_NPU_ALLOC_CONF=%s", npu_alloc_configs)
 
-        # NOTE: vllm sets `speculative_config.enforce_eager` as True if using
-        # deepseek_v32 with mtp. Since we support graph mode, we simply ignore
-        # it here. However, this fix will also implicitly ignore user setting of
-        # `speculative_config.enforce_eager`, we need to take care and remove it
-        # once vllm supports this feature.
-        speculative_config = vllm_config.speculative_config
-        if (
-            model_config
-            and speculative_config
-            and hasattr(model_config.hf_text_config, "model_type")
-            and model_config.hf_text_config.model_type == "deepseek_v32"
-            and speculative_config.enforce_eager
-        ):
-            speculative_config.enforce_eager = False
+        if ascend_config.enable_mc2_hierarchy_comm and envs_ascend.VLLM_ASCEND_ENABLE_FUSED_MC2:
+            raise ValueError(
+                "fused mc2 op cannot be used with hierarchy communication."
+                "Please disable VLLM_ASCEND_ENABLE_FUSED_MC2 by setting it to 0."
+            )
 
         cls._ensure_rpc_timeout(vllm_config)
 
@@ -513,19 +650,15 @@ class NPUPlatform(Platform):
         global _CUSTOM_OP_REGISTERED
         if _CUSTOM_OP_REGISTERED:
             return
-        CUR_DIR = os.path.dirname(os.path.realpath(__file__))
-        CUSTOM_OPP_PATH = os.path.join(CUR_DIR, "_cann_ops_custom", "vendors", "vllm-ascend")
-        if os.path.exists(CUSTOM_OPP_PATH):
-            current_cust_opp_path = os.environ.get("ASCEND_CUSTOM_OPP_PATH", "")
-            if current_cust_opp_path:
-                os.environ["ASCEND_CUSTOM_OPP_PATH"] = f"{CUSTOM_OPP_PATH}:{current_cust_opp_path}"
-            else:
-                os.environ["ASCEND_CUSTOM_OPP_PATH"] = CUSTOM_OPP_PATH
+        bootstrap_custom_op_env()
         _CUSTOM_OP_REGISTERED = True
 
     @classmethod
     def get_attn_backend_cls(cls, selected_backend, attn_selector_config, num_heads: int | None = None):
         key = (attn_selector_config.use_mla, attn_selector_config.use_sparse)
+
+        if selected_backend == AttentionBackendEnum.FLASH_ATTN and cls._validate_fa3_backend(key, attn_selector_config):
+            return "vllm_ascend.attention.fa3_v1.AscendFABackend"
 
         backend_map = {
             (True, False): "vllm_ascend.attention.mla_v1.AscendMLABackend",
@@ -546,6 +679,33 @@ class NPUPlatform(Platform):
             return backend_map_310.get(key, backend_map_310[(False, False)])
 
         return backend_map[key]
+
+    @classmethod
+    def _validate_fa3_backend(cls, key, attn_selector_config):
+        if not attn_selector_config.use_batch_invariant:
+            logger.info(
+                "FA3 will not be enabled when not in training-inference consistency scenario. "
+                "Note that Ascend NPU will use its registered plugin backend instead."
+            )
+            return False
+        if key != (False, False):
+            raise ValueError("FA3 backend does not support MLA and SFA.")
+        if util.find_spec("flash_attn_npu_v3") is None:
+            raise ValueError(
+                "flash_attn_npu_v3 is not installed but FA3 backend is requested. "
+                "Please install flash_attn_npu_v3 to enable FA3."
+            )
+        mod = import_module("flash_attn_npu_v3")
+        if not hasattr(mod, "flash_attn_with_kvcache"):
+            raise ValueError(
+                "flash_attn_npu_v3 is installed but does not provide "
+                "flash_attn_with_kvcache. Please check flash_attn_npu_v3 "
+                "whether it supports flash_attn_with_kvcache."
+            )
+        logger.info(
+            "In training-inference consistency scenario, FA3 will be enabled, which may cause performance degradation."
+        )
+        return True
 
     @classmethod
     def get_punica_wrapper(cls) -> str:
@@ -589,7 +749,6 @@ class NPUPlatform(Platform):
         attn_metadata: dict[str, Any],
         vllm_config: VllmConfig,
         dp_metadata,
-        virtual_engine: int = 0,
         num_tokens: int = 0,
         num_tokens_across_dp: torch.Tensor | None = None,
         cudagraph_runtime_mode=None,
@@ -603,7 +762,6 @@ class NPUPlatform(Platform):
             vllm_config (VllmConfig): configuration of vllm.
             dp_metadata (Dpmetadata): metadata for data parallelism.
                 lack of typehint because of circular import.
-            virtual_engine (int, optional): index of virtual engine. Defaults to 0.
             num_tokens (int | None, optional): number of tokens. Defaults to None.
             num_tokens_across_dp (torch.Tensor | None, optional): number of tokens
                 across data parallelism.Defaults to None.
@@ -618,7 +776,11 @@ class NPUPlatform(Platform):
             dict[str, Any]: _description_
         """
         # NOTE(Ronald1995): avoid circular import.
-        from vllm_ascend.ascend_forward_context import get_mc2_mask, select_moe_comm_method
+        from vllm_ascend.ascend_forward_context import (
+            get_mc2_mask,
+            get_mrv2_in_profile_run,
+            select_moe_comm_method,
+        )
         from vllm_ascend.ops.fused_moe.moe_comm_method import get_moe_comm_method
         from vllm.distributed import get_dp_group, get_tensor_model_parallel_world_size
 
@@ -634,17 +796,21 @@ class NPUPlatform(Platform):
         # when v1's forward context is refactored, we can remove this branch.
         # Currently, model runner v2 use the new forward context.
         # compared to v1, v2's forward context lacks some fields, such as:
-        # in_profile_run, is_first_layer, prefetch_mlp_gate_up_proj,
-        # prefetch_mlp_gate_down_proj, prefetch_mlp_enabled, model_instance,
-        # is_draft_model.
+        # is_first_layer, prefetch_mlp_gate_up_proj, prefetch_mlp_gate_down_proj,
+        # prefetch_mlp_enabled, model_instance, is_draft_model.
         if not envs_vllm.VLLM_USE_V2_MODEL_RUNNER:
             return {}
 
+        # is_draft_model will be removed later, so we set it to False temporarily.
+        is_draft_model = False
+        # v2 has 2 graphs in eager, one for prefill, the other for decodes, this flag is aimed to distinguish them.
+        is_draft_model_prefill = False
+
+        in_profile_run = get_mrv2_in_profile_run()
         moe_comm_type = select_moe_comm_method(
             num_tokens,
             vllm_config,
-            # is_draft_model will be removed later, so we set it to False temporarily.
-            is_draft_model=False,
+            is_draft_model=is_draft_model,
         )
         moe_comm_method = get_moe_comm_method(moe_comm_type)
 
@@ -671,7 +837,7 @@ class NPUPlatform(Platform):
 
         # TODO(Levi-JQ): another PR to normalize the enabling logic for sp/fc2
         flashcomm_v2_enabled = flashcomm2_enable() and tp_world_size > 1 and num_tokens is not None
-        pad_size = None
+        pad_size = 0
         padded_length = None
         if flash_comm_v1_enabled or flashcomm_v2_enabled:
             pad_size = (tp_world_size - (num_tokens % tp_world_size)) % tp_world_size
@@ -680,13 +846,14 @@ class NPUPlatform(Platform):
             num_tokens = list(attn_metadata.values())[0].num_actual_tokens
         dp_world_size = get_dp_group().world_size
         if dp_world_size > 1 and dp_metadata is not None:
-            max_tokens_across_dp = dp_metadata.max_tokens_across_dp_cpu.item()
+            max_tokens_across_dp = dp_metadata.num_tokens_across_dp_cpu.max().item()
             if flash_comm_v1_enabled or flashcomm_v2_enabled:
                 padded_length = (max_tokens_across_dp + tp_world_size - 1) // tp_world_size * tp_world_size
                 pad_size = padded_length - num_tokens
         else:
             max_tokens_across_dp = num_tokens
         mc2_mask = None
+        padded_num_tokens = None
         if num_tokens is not None:
             num_actual_tokens = num_tokens
             # NOTE: token num which need to pad to when mc2
@@ -708,6 +875,10 @@ class NPUPlatform(Platform):
             "padded_length": padded_length,
             "max_tokens_across_dp": max_tokens_across_dp,
             "mc2_mask": mc2_mask,
+            "is_draft_model": is_draft_model,
+            "is_draft_model_prefill": is_draft_model_prefill,
+            "in_profile_run": in_profile_run,
+            "padded_num_tokens": padded_num_tokens,
         }
 
     @staticmethod
@@ -825,8 +996,13 @@ class NPUPlatform(Platform):
                 )
                 att_config.flash_attn_version = None
 
-            # Notify user that the backend will be managed by Ascend plugins
-            if getattr(att_config, "backend", None) is not None:
+            # Notify user that the backend will be managed by Ascend plugins,
+            # and for training-inference consistency, when att_config.backend
+            # == AttentionBackendEnum.FLASH_ATTN,it is NOT reset to None
+            if (
+                getattr(att_config, "backend", None) is not None
+                and att_config.backend != AttentionBackendEnum.FLASH_ATTN
+            ):
                 logger.info(
                     "User specified attention backend '%s'. Note that Ascend NPU "
                     "will use its registered plugin backend instead. Resetting to None.",
@@ -841,3 +1017,76 @@ class NPUPlatform(Platform):
                     "ignored on Ascend. Resetting to default (32)."
                 )
                 att_config.flash_attn_max_num_splits_for_cuda_graph = 32
+
+        # ==================== 9. Parallel Config ====================
+        if vllm_config.parallel_config:
+            # ray_workers_use_nsight requires NVIDIA Nsight which is not
+            # available on Ascend NPU
+            if getattr(vllm_config.parallel_config, "ray_workers_use_nsight", False):
+                logger.warning(
+                    "'--ray-workers-use-nsight' requires NVIDIA Nsight which is "
+                    "not available on Ascend NPU. Resetting to False."
+                )
+                vllm_config.parallel_config.ray_workers_use_nsight = False
+
+            # --numa-bind relies on GPU-to-NUMA topology detection which is
+            # not supported on Ascend NPU.  Seamlessly replace with the
+            # Ascend-native CPU binding via additional_config.
+            # --numa-bind-nodes and --numa-bind-cpus are also ignored because
+            # the Ascend NPU implementation performs automatic topo-affinity
+            # CPU binding internally.
+            if getattr(vllm_config.parallel_config, "numa_bind", False):
+                vllm_config.parallel_config.numa_bind = False
+                if vllm_config.additional_config is None:
+                    vllm_config.additional_config = {}
+                vllm_config.additional_config.setdefault("enable_cpu_binding", True)
+                logger.info(
+                    "'--numa-bind' is not supported on Ascend NPU (GPU-to-"
+                    "NUMA topology detection unavailable). Automatically "
+                    "converted to --additional-config "
+                    "'{\"enable_cpu_binding\": true}' for Ascend-native "
+                    "CPU-core binding."
+                )
+
+            if getattr(vllm_config.parallel_config, "numa_bind_nodes", None):
+                logger.info(
+                    "'--numa-bind-nodes' is ignored on Ascend NPU. The "
+                    "Ascend-native CPU binding automatically performs "
+                    "topo-affinity core allocation."
+                )
+                vllm_config.parallel_config.numa_bind_nodes = None
+
+            if getattr(vllm_config.parallel_config, "numa_bind_cpus", None):
+                logger.info(
+                    "'--numa-bind-cpus' is ignored on Ascend NPU. The "
+                    "Ascend-native CPU binding automatically performs "
+                    "topo-affinity core allocation."
+                )
+                vllm_config.parallel_config.numa_bind_cpus = None
+
+            if getattr(vllm_config.parallel_config, "enable_dbo", False):
+                logger.warning(
+                    "'--enable-dbo' is currently ignored on Ascend NPU because the "
+                    "upstream generic DBO path has not yet aligned with the Ascend "
+                    "backend/runtime model. Ascend may use separate backend/model-"
+                    "specific overlap optimizations, and this may converge as the "
+                    "generic overlap framework evolves. Resetting to False."
+                )
+                vllm_config.parallel_config.enable_dbo = False
+
+            ubatch_size = getattr(vllm_config.parallel_config, "ubatch_size", 0)
+            if ubatch_size != 0:
+                logger.warning(
+                    "'--ubatch-size' is currently ignored on Ascend NPU because it "
+                    "depends on the generic DBO path, which is not yet aligned with "
+                    "the current Ascend backend/runtime model. Resetting to 0."
+                )
+                vllm_config.parallel_config.ubatch_size = 0
+
+    @classmethod
+    def use_custom_op_collectives(cls) -> bool:
+        return True
+
+    @classmethod
+    def manual_seed_all(cls, seed: int) -> None:
+        pass
