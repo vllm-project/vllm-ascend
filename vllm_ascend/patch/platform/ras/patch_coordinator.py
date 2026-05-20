@@ -122,6 +122,7 @@ def _patched_process_input_socket(
     last_stats_wave = -1
     last_step_counts = None
     is_recovering = False
+    engine_count = len(self.engines)
 
     with (
         make_zmq_socket(
