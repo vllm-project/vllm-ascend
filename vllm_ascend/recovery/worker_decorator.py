@@ -24,7 +24,7 @@ def fault_recovery_decorator():
                     
                         exception_info = ExceptionInfo(
                             exception_type=type(e).__name__,
-                            message=str(e),
+                            exception_msg=str(e),
                         )
                         exception_encode = msgspec.msgpack.encode(exception_info)
                         self.worker_input_socket.send(exception_encode)

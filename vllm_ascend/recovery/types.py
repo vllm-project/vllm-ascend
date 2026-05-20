@@ -24,12 +24,13 @@ class RecoveryAction(msgspec.Struct):
 class RecoveryStep(msgspec.Struct):
     name: str
     target: str
-    actions: list = []
     timeout_s: int = 5
+    actions: list[RecoveryAction] = msgspec.field(default_factory=list)
+    
 
     def execute(self, executer: Any, cfg: dict) -> Tuple[dict, bool]:
-        for action_data in self.actions:
-            action = RecoveryAction(name=action_data)
+        for action in self.actions:
+            action = RecoveryAction(name=action)
             cfg, success = action.execute(executer, cfg, self.target)
             if not success:
                 return cfg, False
@@ -39,42 +40,44 @@ class RecoveryStep(msgspec.Struct):
 class StepResult(msgspec.Struct):
     step_name: str
     success: bool
-    cfg: dict
-    worker_rank: int = -1
+    worker_rank: int
+    cfg: dict = msgspec.field(default_factory=dict)
+    
 
 
-class RecveryPlan(msgspec.Struct):
+class RecoveryPlan(msgspec.Struct):
     name: str
-    steps: list = []
-    cfg: dict = {}
-    timeout_s: int = 30
+    timeout_s: int
+    steps: list[RecoveryStep] = msgspec.field(default_factory=list)
+    cfg: dict = msgspec.field(default_factory=dict)
+    
 
 
 class ExceptionInfo(msgspec.Struct):
-    exception_type: str = ""
-    exception_msg: str = ""
+    exception_type: str
+    exception_msg: str
 
 
 class FaultReport(msgspec.Struct):
-    worker_rank: int = 0
-    engine_index: int = 0
-    exp: ExceptionInfo = ExceptionInfo()
-    plan: RecveryPlan = RecveryPlan()
+    worker_rank: int
+    engine_index: int
+    exp: ExceptionInfo
+    plan: RecoveryPlan 
 
 
 class WorkerStepDispatch(msgspec.Struct):
-    step: RecoveryStep = RecoveryStep()
-    cfg: dict = {}
+    step: RecoveryStep
+    cfg: dict = msgspec.field(default_factory=dict)
 
 
 class RecoveryPlanResult(msgspec.Struct):
-    plan_name: str = ""
-    engine_index: int = 0
-    success: bool = False
-    step_results: list = []
+    plan_name: str
+    engine_index: int
+    success: bool
+    step_results: list[StepResult] = msgspec.field(default_factory=list)
 
 
 class RecoveryComplete(msgspec.Struct):
-    plan_name: str = ""
-    success: bool = False
-    current_wave: int = 0
+    plan_name: str
+    success: bool
+    current_wave: int

@@ -1,5 +1,6 @@
 from abc import ABC, abstractmethod
 from enum import Enum
+from typing import Any
 
 from vllm.config import CUDAGraphMode, VllmConfig
 from vllm_ascend.recovery.types import ExceptionInfo, RecoveryAction, RecoveryStep, RecoveryPlan
@@ -18,7 +19,7 @@ class NetworkExceptionHandler(ExceptionHandler):
     error_code = ["507057"]
 
     def can_handle(self, exception: ExceptionInfo) -> bool:
-        exc_str = exception.message
+        exc_str = exception.exception_msg
         for code in self.error_code:
             if code in exc_str:
                 return True
@@ -30,6 +31,9 @@ class NetworkExceptionHandler(ExceptionHandler):
         1. npu故障恢复阶段: stop_device -> restart_device -> reinit_process_group
         """
         config = dict[str, Any]()
+        recovery_begin = RecoveryAction(
+            name="recovery_begin"
+        )
         stop_device = RecoveryAction(
             name="stop_device"
         )
@@ -47,8 +51,9 @@ class NetworkExceptionHandler(ExceptionHandler):
         config["rebuild_link"]=False
         npu_recover_step = RecoveryStep(
             name="npu_recover",
-            executor="worker",
-            actions=[stop_device, restart_device, reinit_process_group]
+            target="worker",
+            actions=[recovery_begin, stop_device, restart_device, reinit_process_group],
+            timeout_s=5
         )
 
         """
@@ -56,13 +61,14 @@ class NetworkExceptionHandler(ExceptionHandler):
         2. abort出错batch及后续batch的缓存信息
         """
         clean_action = RecoveryAction(
-            name="clean_cache"
+            name="clear_requests"
         )
         
         clean_step = RecoveryStep(
-            name="clean_cache",
-            executor="enginecore",
+            name="clear_requests",
+            target="engine_core",
             actions=[clean_action],
+            timeout_s=5
         )
         """
         封装为最终的recovery plan并返回,包含恢复网络链路故障的全部动作
@@ -71,7 +77,7 @@ class NetworkExceptionHandler(ExceptionHandler):
             name="network_recover_plan",
             steps=[npu_recover_step, clean_step],
             cfg=config,
-            timeout_s=300
+            timeout_s=30
         )
         return network_recover_plan
         

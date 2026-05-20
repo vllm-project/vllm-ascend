@@ -321,63 +321,67 @@ def _patched_process_input_socket(
                 buffer = recovery_pull.recv()
                 try:
                     msg = msgspec.msgpack.decode(buffer)
+                    msg_type = msg[0]
+                    msg_data = msg[1]
                 except Exception:
                     logger.exception("Failed to deserialize recovery msg")
                     msg = None
 
                 if msg is not None:
-                    if isinstance(msg, FaultReport):
+                    if msg_type == "faultreport":
+                        fault_report = msgspec.convert(msg_data, type=FaultReport)
                         if is_recovering:
                             logger.info(
                                 "[RAS] Ignoring FaultReport from engine %d worker %d "
                                 "while recovering, exp=%s",
-                                msg.engine_index,
-                                msg.worker_rank,
-                                msg.exp.exception_msg,
+                                fault_report.engine_index,
+                                fault_report.worker_rank,
+                                fault_report.exp.exception_msg,
                             )
                             continue
                         is_recovering = True
                         plan_results: dict[int, RecoveryPlanResult] = {}
-                        plan_deadline = time.time() + msg.plan.timeout_s
+                        plan_deadline = time.time() + fault_report.plan.timeout_s
                         logger.info(
                             "[RAS] Received FaultReport from engine %d worker %d: %s",
-                            msg.engine_index,
-                            msg.worker_rank,
-                            msg.exp.exception_msg,
+                            fault_report.engine_index,
+                            fault_report.worker_rank,
+                            fault_report.exp.exception_msg,
                         )
-                        recovery_pub.send(msgspec.msgpack.encode(msg.plan))
+                        recovery_pub.send(msgspec.msgpack.encode(("recoveryplan", fault_report.plan)))
                         logger.info(
                             "[RAS] Broadcast RecoveryPlan '%s' to all engines "
                             "(timeout=%ds, deadline=%.3f)",
-                            msg.plan.name,
-                            msg.plan.timeout_s,
+                            fault_report.plan.name,
+                            fault_report.plan.timeout_s,
                             plan_deadline,
                         )
-                    elif isinstance(msg, RecoveryPlanResult):
+                    elif msg_type == "recoveryplanresult":
+                        recovery_plan_result = msgspec.convert(msg_data, type=RecoveryPlanResult)
                         assert is_recovering, "Received RecoveryPlanResult while not recovering"
-                        plan_results[msg.engine_index] = msg
+                        plan_results[recovery_plan_result.engine_index] = recovery_plan_result
                         logger.info(
                             "[RAS] Received RecoveryPlanResult from engine %d: "
                             "plan=%s success=%s (%d/%d)",
-                            msg.engine_index,
-                            msg.plan_name,
-                            msg.success,
+                            recovery_plan_result.engine_index,
+                            recovery_plan_result.plan_name,
+                            recovery_plan_result.success,
                             len(plan_results),
                             engine_count,
                         )
-                        if not msg.success:
+                        if not recovery_plan_result.success:
                             logger.error(
                                 "[RAS] Engine %d reported FAILURE for plan '%s', "
                                 "aborting recovery",
-                                msg.engine_index,
-                                msg.plan_name,
+                                recovery_plan_result.engine_index,
+                                recovery_plan_result.plan_name,
                             )
                             recovery_pub.send(msgspec.msgpack.encode(
-                                RecoveryComplete(
-                                    plan_name=msg.plan_name,
+                                ("recoverycomplete", RecoveryComplete(
+                                    plan_name=recovery_plan_result.plan_name,
                                     success=False,
                                     current_wave=current_wave,
-                                )
+                                ))
                             ))
                             is_recovering = False
                             logger.info(
@@ -390,11 +394,11 @@ def _patched_process_input_socket(
                             )
                             current_wave += 1
                             recovery_pub.send(msgspec.msgpack.encode(
-                                RecoveryComplete(
-                                    plan_name=msg.plan_name,
+                                ("recoverycomplete", RecoveryComplete(
+                                    plan_name=recovery_plan_result.plan_name,
                                     success=True,
                                     current_wave=current_wave,
-                                )
+                                ))
                             ))
                             logger.info(
                                 "[RAS] Broadcast RecoveryComplete(success, wave=%d) "
@@ -404,7 +408,7 @@ def _patched_process_input_socket(
                             
                     else:
                         logger.warning(
-                            "[RAS] Unknown recovery msg type: %s", type(msg)
+                            "[RAS] Unknown recovery msg type: %s", msg_type
                         )
 
             if is_recovering and time.time() > plan_deadline:
@@ -419,11 +423,11 @@ def _patched_process_input_socket(
                     engine_count,
                 )
                 recovery_pub.send(msgspec.msgpack.encode(
-                    RecoveryComplete(
+                    ("recoverycomplete", RecoveryComplete(
                         plan_name="",
                         success=False,
                         current_wave=current_wave,
-                    )
+                    ))
                 ))
                 is_recovering = False
                 logger.info(
