@@ -165,15 +165,15 @@ class RasDPEngineCoreProc(DPEngineCoreProc):
                 continue
             if exception_occurred:
                 exception_occurred = False
-                if executer.batch_queue is not None:
-                    while executer.batch_queue:
-                        future, _, _ = executer.batch_queue.pop()
+                if self.batch_queue is not None:
+                    while self.batch_queue:
+                        future, _, _ = self.batch_queue.pop()
                         try:
                             logger.info("[RAS][engine=%d] main thread pop future", self.dp_rank)
                             future.result()
                         except Exception:
                             pass
-                    executer.batch_queue.clear()
+                    self.batch_queue.clear()
                     logger.info("[RAS][engine=%d] batch_queue drained", self.dp_rank)
                 self.scheduler.reset_prefix_cache(reset_running_requests=True)
             try:
