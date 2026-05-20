@@ -61,7 +61,11 @@ from vllm_ascend.compilation.acl_graph import (
     update_graph_params_workspaces,
 )
 from vllm_ascend.device.device_op import DeviceOperator
-from vllm_ascend.device.mxfp_compat import FLOAT8_E8M0FNU_DTYPE, MXFP_KV_SCALE_GROUP_SIZE
+from vllm_ascend.device.mxfp_compat import (
+    FLOAT8_E8M0FNU_DTYPE,
+    MXFP_KV_SCALE_GROUP_SIZE,
+    scatter_mxfp_v_scale_cache,
+)
 from vllm_ascend.ops.flashcomm2_oshard_manager import flashcomm2_oshard_manager
 from vllm_ascend.utils import weak_ref_tensors
 from vllm_ascend.worker.kvcomp_utils import KVCompMetaData
@@ -1293,15 +1297,12 @@ class AscendC8MXFPAttentionBackendImpl(AscendAttentionBackendImpl):
             -1, key_scale_cache.shape[1], key_scale_cache.shape[3], key_scale_cache.shape[4]
         )[slots] = key_scale
 
-        # TODO: V scale cache scatter is not finalized yet. Expected layouts:
-        # value_scale: [cmotion(num_tokens, 64), num_kv_heads, head_dim, 2]
-        # value_scale_cache: [num_blocks, num_kv_heads, block_size // 64, head_dim, 2]
-        # block_ids = slots // block_size
-        # pos_in_block = slots % block_size
-        # cache_group_ids = pos_in_block // 64
-        # write_group_ids = torch.arange(key_scale.shape[0], device=slots.device, dtype=torch.long) // 64
-        # value_scale_cache[block_ids, :, cache_group_ids, :, :] = value_scale[write_group_ids]
-        del value_scale, value_scale_cache, block_size
+        scatter_mxfp_v_scale_cache(
+            value_scale,
+            value_scale_cache,
+            slots,
+            block_size,
+        )
 
     def _reshape_and_cache_mxfp8(
         self,

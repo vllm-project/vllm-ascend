@@ -251,6 +251,59 @@ def mxfp_resolve_kv_cache_layout(
     return k_shape, v_shape, k_scale_shape, v_scale_shape
 
 
+def scatter_mxfp_v_scale_cache(
+    value_scale: torch.Tensor,
+    value_scale_cache: torch.Tensor,
+    slot_mapping: torch.Tensor,
+    block_size: int,
+) -> None:
+    """Scatter per-batch V scales into the paged V-scale cache.
+
+    Matches ``modeling_qwen3_moe.py`` MXFP prefill slot derivation::
+
+        v_scale_slot = (kv_slot_mapping // (QUANT_BLOCK_SIZE * 2)).unique()
+
+    with ``QUANT_BLOCK_SIZE=32`` (i.e. group size 64 along the token axis).
+
+    ``value_scale`` comes from ``npu_dynamic_mx_quant(..., axis=0)`` and has shape
+    ``[ceil(num_tokens, 64), num_kv_heads, head_dim, 2]``. The cache layout is
+    ``[num_blocks, num_kv_heads, block_size // 64, head_dim, 2]``.
+    """
+    validate_mxfp_v_scale_block_size(block_size)
+    slots = slot_mapping.to(torch.long)
+    num_tokens = slots.numel()
+    if num_tokens == 0:
+        return
+
+    num_scale_groups = (num_tokens + MXFP_KV_SCALE_GROUP_SIZE - 1) // MXFP_KV_SCALE_GROUP_SIZE
+    if value_scale.shape[0] != num_scale_groups:
+        raise ValueError(
+            f"C8_MXFP value_scale batch dim mismatch: got {value_scale.shape[0]}, "
+            f"expected {num_scale_groups} for num_tokens={num_tokens}."
+        )
+
+    groups_per_block = mxfp_kv_block_scale_groups(block_size)
+    write_group_ids = torch.arange(num_tokens, device=slots.device, dtype=torch.long)
+    write_group_ids = write_group_ids // MXFP_KV_SCALE_GROUP_SIZE
+    slot_groups = slots // MXFP_KV_SCALE_GROUP_SIZE
+
+    sort_idx = torch.argsort(slot_groups, stable=True)
+    sorted_groups = slot_groups[sort_idx]
+    sorted_write_groups = write_group_ids[sort_idx]
+    unique_mask = torch.cat(
+        (
+            torch.tensor([True], device=slots.device),
+            sorted_groups[1:] != sorted_groups[:-1],
+        )
+    )
+    unique_slot_groups = sorted_groups[unique_mask]
+    unique_write_groups = sorted_write_groups[unique_mask]
+
+    block_ids = unique_slot_groups // groups_per_block
+    cache_group_ids = unique_slot_groups % groups_per_block
+    value_scale_cache[block_ids, :, cache_group_ids, :, :] = value_scale[unique_write_groups]
+
+
 # Backward-compatible aliases.
 mxfp_kv_scale_cache_shape = mxfp_k_scale_cache_shape
 mxfp_kv_scale_numel = mxfp_k_scale_numel
