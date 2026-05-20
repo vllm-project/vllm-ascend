@@ -94,7 +94,9 @@ def _patched_verify_quantization(self: ModelConfig) -> None:
         return orig_platform_verify(quant_method)
 
     # Some versions may read self.quantization before calling platform verifier.
-    _disable_fp8(self, log=True)
+    # The actual warning is emitted inside _platform_verify_hook (log=True there)
+    # to avoid duplicate logging on the normal path.
+    _disable_fp8(self, log=False)
 
     try:
         if orig_platform_verify is not None:
@@ -131,9 +133,13 @@ def _patched_verify_cuda_graph(self: ModelConfig) -> None:
 
 if _original_verify_quantization is not None:
     ModelConfig._verify_quantization = _patched_verify_quantization
+else:
+    logger.debug("ModelConfig._verify_quantization not found, skipping fp8 disable patch for MiniMax-M2 on NPU.")
 
 if _original_verify_cuda_graph is not None:
     ModelConfig._verify_cuda_graph = _patched_verify_cuda_graph
+else:
+    logger.debug("ModelConfig._verify_cuda_graph not found, skipping HCCL expansion mode patch for MiniMax-M2 on NPU.")
 
 
 # ---------------------------------------------------------------------------
@@ -257,7 +263,8 @@ def _patch_eagle3_registry_alias() -> None:
     """Register Eagle3MiniMaxM2ForCausalLM architecture alias if missing."""
     try:
         import vllm.model_executor.models.registry as registry  # type: ignore
-    except Exception:
+    except Exception as e:
+        logger.debug("vllm.model_executor.models.registry import failed (%s), skip eagle3 alias patch.", e)
         return
 
     # Prefer patching the underlying dicts when available.
@@ -274,7 +281,8 @@ def _patch_eagle3_registry_alias() -> None:
                 "Eagle3MiniMaxM2ForCausalLM",
                 ("llama_eagle3", "Eagle3LlamaForCausalLM"),
             )
-        except Exception:
+        except Exception as e:
+            logger.debug("Failed to patch ModelRegistry for eagle3 alias (%s), skip.", e)
             return
 
 
