@@ -48,28 +48,55 @@ def elastic_load(
     # Filter sources for the current device
     sources_this_device = []
     for s in sources:
-        if isinstance(s, dict) and "device_id" in s and s["device_id"] == device_id and isinstance(s["sources"], list):
+        if (
+            isinstance(s, dict)
+            and "device_id" in s
+            and s["device_id"] == device_id
+            and isinstance(s["sources"], list)
+        ):
             sources_this_device += s["sources"]
     if len(sources_this_device) == 0:
+        logger.warning(
+            "No source found for device_id=%s, elastic load skipped",
+            device_id,
+        )
         return None
 
     try:
         # Initialize the interaction layer with the ElasticClient
-        with ElasticClient(sources_this_device, device_id, model_path, tp, pp) as client_interaction_layer:
-            if client_interaction_layer.s is None or client_interaction_layer.server_addr is None:
-                raise RuntimeError("Failed to initialize ElasticClient: socket or server_addr is None")
+        with ElasticClient(
+            sources_this_device, device_id, model_path, tp, pp
+        ) as client_interaction_layer:
+            if (
+                client_interaction_layer.s is None
+                or client_interaction_layer.server_addr is None
+            ):
+                raise RuntimeError(
+                    "Failed to initialize ElasticClient: socket or server_addr is None"
+                )
             ack = client_interaction_layer.ack
             if ack is None:
                 raise RuntimeError("ElasticClient.register did not return ack")
 
             t0 = time.perf_counter()
-            elastic_loader = P2PLoad(ack[0], client_interaction_layer.server_addr, ack[1])
+            elastic_loader = P2PLoad(
+                ack[0], client_interaction_layer.server_addr, ack[1]
+            )
             model_loaded = elastic_loader.load(model=model)
             if model_loaded is None:
-                logger.error("Failed to load model")
+                logger.error(
+                    "Failed to load model for device_id=%s, sources=%s",
+                    device_id,
+                    sources_this_device,
+                )
                 return None
             logger.info("Finish elastic load (duration: %ss)", time.perf_counter() - t0)
             return model_loaded
     except Exception as e:
-        logger.info("elastic_load error: %s", e)
+        logger.warning(
+            "elastic_load error for device_id=%s: %s, "
+            "fall back to default model loader",
+            device_id,
+            e,
+        )
         return None
