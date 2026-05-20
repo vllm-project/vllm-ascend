@@ -348,11 +348,11 @@ class VwnLlamaDecoderLayer(LlamaDecoderLayer):
             hidden_states_view = hidden_states.view(-1, self.hidden_size // self.m)
             upward_hidden_states_tmp = self.upward_after_mlp(hidden_states_view)
             upward_hidden_states = upward_hidden_states_tmp.view(-1, self.wider_dim)
-            wider_hidden_states = upward_hidden_states + hidden_residual
+            hidden_states = upward_hidden_states + hidden_residual
 
             # downward
             if self.pre_vwn_version != 2:
-                wider_hidden_states_view = wider_hidden_states.view(-1, self.wider_dim // self.m)
+                wider_hidden_states_view = hidden_states.view(-1, self.wider_dim // self.m)
                 hidden_state_tmp = self.downward(wider_hidden_states_view)
                 hidden_states = hidden_state_tmp.view(-1, self.hidden_size)
 
