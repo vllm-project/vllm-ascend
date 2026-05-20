@@ -16,8 +16,8 @@
 #ifndef COMPRESSOR_BLOCK_VEC_PERF_H
 #define COMPRESSOR_BLOCK_VEC_PERF_H
 
-#include "../compressor_comm.h"
-#include "../compressor_tools.h"
+#include "compressor_comm.h"
+#include "compressor_tools.h"
 #include "compressor_vector_comm.h"
 #include "rms_norm.h"
 #include "rope.h"
@@ -325,12 +325,12 @@ __aicore__ inline void CompressorBlockVectorPerf<COMP>::InitBuffers(TPipe *pipe)
     pipe->InitBuffer(apeBuf, BUFFER_SIZE_BYTE_32K);
     normWeightUb = normWeightBuf.Get<T>();
     apeUb = apeBuf.Get<T>();
-    LocalTensor<X_T> normweightInUb = inputQue1.AllocTensor<X_T>();
+    LocalTensor<T> normweightInUb = inputQue1.AllocTensor<T>();
     LocalTensor<int32_t> gatherOffsetUb = gatherOffsetBuf.Get<int32_t>();
     DataCopy(normweightInUb, normWeightGm_, constInfo_.headDim); // 获取normWeight，常驻
     inputQue1.EnQue(normweightInUb);
-    inputQue1.DeQue<X_T>();
-    Cast(normWeightUb, normweightInUb, RoundMode::CAST_NONE, constInfo_.headDim);
+    inputQue1.DeQue<T>();
+    DataCopy(normWeightUb, normweightInUb, constInfo_.headDim);
     inputQue1.FreeTensor(normweightInUb);
     if constexpr (COMP::rotaryMode == Compressor::ROTARY_MODE::INTERLEAVE) {
         SetGatherSrcOffset<float>(gatherOffsetUb, constInfo_.ropeHeadDim);
@@ -816,7 +816,7 @@ __aicore__ inline void CompressorBlockVectorPerf<COMP>::ReadFromCacheState(
         if (copyFinishRowCnt + copyRowCount > seqCnt) {
             copyRowCount = seqCnt - copyFinishRowCnt;
         }
-        uint64_t stateOffset = idInBlockTable * constInfo_.stride +
+        uint64_t stateOffset = idInBlockTable * constInfo_.stateCacheStrideDim0 +
                                 remainRowCnt * 2 * coff_ * constInfo_.headDim +
                                 stateIdx * coff_ * constInfo_.headDim + dStartIdx;
 
@@ -845,7 +845,7 @@ __aicore__ inline void CompressorBlockVectorPerf<COMP>::WriteToCacheState(
             copyRowCount = seqCnt - copyFinishRowCnt;
         }
         if (idInBlockTable != 0) { // 32
-            uint64_t stateOffset = idInBlockTable * constInfo_.stride +
+            uint64_t stateOffset = idInBlockTable * constInfo_.stateCacheStrideDim0 +
                                     remainRowCnt * 2 * coff_ * constInfo_.headDim +
                                     stateIdx * coff_ * constInfo_.headDim + dStartIdx;
             DataCopyWithOutputQue(state[stateOffset], input[copyFinishRowCnt * coff_ * dDealSize], copyRowCount,
@@ -1408,10 +1408,6 @@ __aicore__ inline void CompressorBlockVectorPerf<COMP>::SplitCoreV2(const Compre
             v2TcEndIdx = i + 1;
             GetScIdxInfo(info.bStart, info.bCompressedId, info.dealScSize, v2TcStartIdx, v2TcEndIdx, OutputBStartIdx,
                          OutputSStartIdx, OutputSize);
-            // printf("[SplitCoreV2] bStart:%u, bCompressedId:%u, dealScSize:%u, v2TcStartIdx:%u, v2TcEndIdx:%u, "
-            //        "OutputBStartIdx:%u, OutputSStartIdx:%u, OutputSize:%u\n",
-            //        info.bStart, info.bCompressedId, info.dealScSize, v2TcStartIdx, v2TcEndIdx, OutputBStartIdx,
-            //        OutputSStartIdx, OutputSize);
             return;
         }
     }
