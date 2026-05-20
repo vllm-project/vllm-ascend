@@ -1237,7 +1237,6 @@ class AscendC8MXFPAttentionBackendImpl(AscendAttentionBackendImpl):
             query.contiguous(),
             dst_type=torch.float8_e4m3fn,
         )
-        query_scale = query_scale.view(FLOAT8_E8M0FNU_DTYPE)
 
         actual_seq_qlen = attn_metadata.actual_seq_lengths_q
         if attn_metadata.attn_state == AscendAttentionState.DecodeOnly:
