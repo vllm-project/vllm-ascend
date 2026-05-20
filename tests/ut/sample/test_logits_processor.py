@@ -119,33 +119,62 @@ class TestLogitsProcessor(TestBase):
             ],
         )
 
-    def test_default_delegates_to_upstream_apply_sampling_params(self):
+    def test_default_uses_upstream_sampling_ops_without_bridge_state(self):
         from vllm_ascend.worker.v1.sample import logits_processor as logits_processor_module
         from vllm_ascend.worker.v1.sample.logits_processor import LogitsProcessor
 
-        processor = LogitsProcessor("default")
-        logits = torch.tensor([[1.0, 2.0], [3.0, 4.0]], dtype=torch.float16)
-        processed = torch.empty_like(logits, dtype=torch.float32)
-        ctx = _ctx()
+        class MinPProcessor:
+            min_p_count = 1
 
-        with patch.object(
-            logits_processor_module._RefactoredSampler,
-            "apply_sampling_params",
-            return_value=processed,
-        ) as apply_sampling_params:
-            output = processor.apply(logits, _metadata(), ctx, num_speculative_tokens=3)
+            @staticmethod
+            def get_min_p_by_index(req_idx):
+                return [0.0, 0.2][req_idx]
+
+        processor = LogitsProcessor("default")
+        logits = torch.tensor([[1.0, 2.0], [3.0, 4.0], [5.0, 6.0]], dtype=torch.float16)
+        processed = torch.empty_like(logits, dtype=torch.float32)
+        ctx = _expanded_ctx()
+        metadata = _metadata(
+            no_penalties=False,
+            prompt_token_ids=torch.tensor([[1], [2]], dtype=torch.int64),
+            presence_penalties=torch.tensor([0.0, 0.1], dtype=torch.float32),
+            frequency_penalties=torch.tensor([0.0, 0.2], dtype=torch.float32),
+            repetition_penalties=torch.tensor([1.0, 1.1], dtype=torch.float32),
+            output_token_ids=[[1], [2]],
+            bad_words_token_ids={1: [[3, 4]]},
+            temperature=torch.tensor([1.0, 0.5], dtype=torch.float32),
+            top_k=torch.tensor([2, 2], dtype=torch.int32),
+            top_p=torch.tensor([1.0, 0.9], dtype=torch.float32),
+            logitsprocs=SimpleNamespace(
+                argmax_invariant=[MinPProcessor()],
+                non_argmax_invariant=[],
+            ),
+        )
+
+        self.assertFalse(hasattr(processor, "_apply_sampling_params_bridge"))
+        with (
+            patch.object(logits_processor_module, "_apply_bad_words_op") as bad_words,
+            patch.object(
+                logits_processor_module,
+                "_apply_penalties_op",
+                side_effect=lambda *_: None,
+            ) as penalties,
+            patch.object(logits_processor_module, "_apply_temperature") as temperature,
+            patch.object(logits_processor_module, "_apply_min_p") as min_p,
+            patch.object(
+                logits_processor_module,
+                "_apply_top_k_top_p",
+                return_value=processed,
+            ) as top_k_top_p,
+        ):
+            output = processor.apply(logits, metadata, ctx, num_speculative_tokens=3)
 
         self.assertIs(output, processed)
-        apply_sampling_params.assert_called_once()
-        args = apply_sampling_params.call_args.args
-        self.assertIs(args[0], processor._apply_sampling_params_bridge)
-        self.assertIs(args[1], logits)
-        self.assertIs(args[2], ctx.expanded_idx_mapping)
-        self.assertIs(args[3], ctx.idx_mapping_np)
-        self.assertIs(args[4], ctx.pos)
-        self.assertIs(args[5], ctx.input_ids)
-        self.assertIs(args[6], ctx.expanded_local_pos)
-        self.assertEqual(processor._apply_sampling_params_bridge.num_speculative_tokens, 3)
+        bad_words.assert_called_once()
+        penalties.assert_called_once()
+        temperature.assert_called_once()
+        min_p.assert_called_once()
+        top_k_top_p.assert_called_once()
 
     def test_skip_returns_unprocessed_logits_and_warns_once(self):
         from vllm_ascend.worker.v1.sample import logits_processor as logits_processor_module
@@ -211,6 +240,16 @@ class TestLogitsProcessor(TestBase):
 
         self.assertEqual(output.dtype, torch.float32)
         self.assertEqual(warnings, [])
+
+    def test_skip_reuses_fp32_logits_without_copy(self):
+        from vllm_ascend.worker.v1.sample.logits_processor import LogitsProcessor
+
+        processor = LogitsProcessor("skip")
+        logits = torch.ones((2, 4), dtype=torch.float32)
+
+        output = processor.apply(logits, _metadata(), _ctx(), num_speculative_tokens=1)
+
+        self.assertIs(output, logits)
 
     def test_skip_warns_when_top_k_or_top_p_filtering_would_be_skipped(self):
         from vllm_ascend.worker.v1.sample import logits_processor as logits_processor_module
