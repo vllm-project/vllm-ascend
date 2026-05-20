@@ -1546,7 +1546,8 @@ class AscendSpecDecodeBaseProposer(SpecDecodeBaseProposer):
         discard_sampled_tokens_req_indices = discard_request_indices[:num_discarded_requests]
 
         valid_sampled_token_ids_gpu = sampled_token_ids.clone()
-        valid_sampled_token_ids_gpu.index_fill_(0, discard_sampled_tokens_req_indices, -1)
+        if discard_sampled_tokens_req_indices.numel() != 0:
+            valid_sampled_token_ids_gpu.index_fill_(0, discard_sampled_tokens_req_indices, -1)
 
         # Generate a mask for all valid tokens within those requests
         valid_mask = (valid_sampled_token_ids_gpu != -1) & (valid_sampled_token_ids_gpu < gpu_input_batch.vocab_size)

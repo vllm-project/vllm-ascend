@@ -221,6 +221,10 @@ class AscendAttentionBackendImpl310(AscendAttentionBackendImpl):
 
         return output
 
+    def forward_spec_decoding_310(self, query, attn_metadata, output):
+        """Execute SpecDecoding on 310P using full query rows plus splitfuse mask."""
+        return self.forward_chunked_prefill_310(query, attn_metadata, output)
+
     def forward_impl(self, query, key, value, kv_cache, attn_metadata, output):
         """
         Main dispatch method for attention operations.
@@ -254,6 +258,8 @@ class AscendAttentionBackendImpl310(AscendAttentionBackendImpl):
         elif state in [AscendAttentionState.ChunkedPrefill, AscendAttentionState.PrefillCacheHit]:
             output = self.forward_chunked_prefill_310(query, attn_metadata, output)
         # Condition for SpecDecoding: Specified for mtp, which is not supported yet.
+        elif state == AscendAttentionState.SpecDecoding:
+            output = self.forward_spec_decoding_310(query, attn_metadata, output)
         else:
             raise NotImplementedError(f"AscendAttentionState: {state} is not supported for 310P currently.")
         return output
