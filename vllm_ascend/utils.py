@@ -1224,6 +1224,19 @@ def get_flashcomm2_reorgnized_batch_ids(global_tp_size) -> list[list[int]]:
     return reorgnized_batch_ids
 
 
+# C8_MXFP (FP8 KV + E8M0 scales) on Ascend A5 uses 512-token pages for the FIA path.
+A5_C8_MXFP_KV_CACHE_BLOCK_SIZE = 512
+
+
+def is_a5_c8_mxfp_kv_quant(vllm_config: VllmConfig) -> bool:
+    """True when running C8_MXFP KV cache quantization on Ascend A5."""
+    if get_ascend_device_type() != AscendDeviceType.A5:
+        return False
+    quant_config = getattr(vllm_config, "quant_config", None)
+    quant_description = getattr(quant_config, "quant_description", {})
+    return quant_description.get("kv_cache_type") == "C8_MXFP"
+
+
 def refresh_block_size(vllm_config):
     """
     Refresh the block size in cache config.
@@ -1237,6 +1250,17 @@ def refresh_block_size(vllm_config):
 
     if cache_config.block_size is None:
         cache_config.block_size = 128
+
+    if is_a5_c8_mxfp_kv_quant(vllm_config):
+        if cache_config.block_size != A5_C8_MXFP_KV_CACHE_BLOCK_SIZE:
+            logger.info(
+                "Ascend A5 with C8_MXFP KV cache requires block_size=%s; "
+                "overriding block_size from %s.",
+                A5_C8_MXFP_KV_CACHE_BLOCK_SIZE,
+                cache_config.block_size,
+            )
+            cache_config.block_size = A5_C8_MXFP_KV_CACHE_BLOCK_SIZE
+        return
 
     if not scheduler_config or not model_config:
         return

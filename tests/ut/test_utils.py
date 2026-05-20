@@ -398,3 +398,45 @@ class TestUtils(TestBase):
             result = utils.maybe_trans_nz(weight)
             self.assertIs(result, weight)
             assert_nz_cast(weight)
+
+    @mock.patch(
+        "vllm_ascend.utils.get_ascend_device_type",
+        return_value=utils.AscendDeviceType.A5,
+    )
+    def test_refresh_block_size_a5_c8_mxfp_forces_512(self, _mock_device_type):
+        vllm_config = mock.MagicMock()
+        vllm_config.cache_config = mock.MagicMock(
+            block_size=128,
+            enable_prefix_caching=True,
+        )
+        vllm_config.scheduler_config = mock.MagicMock(enable_chunked_prefill=True)
+        vllm_config.model_config = mock.MagicMock(is_hybrid=False)
+        vllm_config.quant_config = mock.MagicMock(
+            quant_description={"kv_cache_type": "C8_MXFP"},
+        )
+
+        utils.refresh_block_size(vllm_config)
+
+        self.assertEqual(vllm_config.cache_config.block_size, 512)
+
+    @mock.patch(
+        "vllm_ascend.utils.get_ascend_device_type",
+        return_value=utils.AscendDeviceType.A3,
+    )
+    def test_refresh_block_size_prefix_cache_still_128_without_a5_c8_mxfp(
+        self, _mock_device_type
+    ):
+        vllm_config = mock.MagicMock()
+        vllm_config.cache_config = mock.MagicMock(
+            block_size=512,
+            enable_prefix_caching=True,
+        )
+        vllm_config.scheduler_config = mock.MagicMock(enable_chunked_prefill=False)
+        vllm_config.model_config = mock.MagicMock(is_hybrid=False)
+        vllm_config.quant_config = mock.MagicMock(
+            quant_description={"kv_cache_type": "C8_MXFP"},
+        )
+
+        utils.refresh_block_size(vllm_config)
+
+        self.assertEqual(vllm_config.cache_config.block_size, 128)
