@@ -113,13 +113,13 @@ Run a single singlecard test:
 Run a 2-card test:
 
 ```text
-/e2e tests/e2e/multicard/2-cards/test_quantization.py
+/e2e tests/e2e/multicard/2-cards/test_data_parallel.py
 ```
 
 Run tests across multiple hardware categories in one comment:
 
 ```text
-/e2e tests/e2e/singlecard/test_offline_inference.py tests/e2e/multicard/2-cards/test_quantization.py
+/e2e tests/e2e/singlecard/test_offline_inference.py tests/e2e/multicard/2-cards/test_data_parallel.py
 ```
 
 Re-trigger after fixing an issue: just push a new commit. The `synchronize` event
