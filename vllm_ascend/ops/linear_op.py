@@ -643,6 +643,7 @@ def _get_column_parallel_op(
             "qkv_proj",  # qkv linear of most LLMs
             "conv1d",  # gated deltanet of Qwen3 Next
             "query_key_value",  # qkv linear of Bailing
+            "self_attn.g_proj",  # attn gate of Bailing linear attention
         ]
         for a_prefix in sp_column_prefix:
             if a_prefix in prefix:
@@ -680,7 +681,7 @@ def _get_row_parallel_op(
             "o_proj",  # attn output linear of most LLMs
             "out_proj",  # attn output linear of Qwen3 Next
             "down_proj",  # second MLP of most LLMs
-            "attention.dense",  # attn output linear of Bailing
+            "self_attn.dense",  # attn output linear of Bailing
         ]
         for a_prefix in sp_row_prefixes:
             if a_prefix in prefix:

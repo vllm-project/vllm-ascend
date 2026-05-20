@@ -84,6 +84,7 @@ class AscendBailingMoELinearAttention(BailingMoELinearAttention):
     def _forward(self, hidden_states, output, positions):
         forward_context = get_forward_context()
         attn_metadata: AttentionMetadata = forward_context.attn_metadata
+        flash_comm_v1_enabled = getattr(forward_context, "flash_comm_v1_enabled", False)
         if attn_metadata is not None:
             assert isinstance(attn_metadata, dict)
             attn_metadata = attn_metadata[self.prefix]
@@ -92,8 +93,21 @@ class AscendBailingMoELinearAttention(BailingMoELinearAttention):
         else:
             num_actual_tokens = hidden_states.shape[0]
 
+        # Under flashcomm1 the inbound hidden_states is reduce-scattered
+        # ([padded_length / tp, h]); query_key_value / g_proj are
+        # SequenceColumnParallelOps that internally all-gather + unpad it back to
+        # [forward_context.num_tokens, h]. Slicing by num_actual_tokens here is
+        # invalid (the index is in unscattered space), so pass the tensor through
+        # and trim after the projection.
+        if flash_comm_v1_enabled:
+            qkv_input = hidden_states
+            gate_input = hidden_states
+        else:
+            qkv_input = hidden_states[:num_actual_tokens]
+            gate_input = hidden_states[:num_actual_tokens]
+
         # QKV projection
-        qkv, _ = self.query_key_value(hidden_states[:num_actual_tokens])
+        qkv, _ = self.query_key_value(qkv_input)
 
         qkv = qkv.to(torch.float32)
         if self.linear_silu:
@@ -127,14 +141,23 @@ class AscendBailingMoELinearAttention(BailingMoELinearAttention):
             q = q.reshape(-1, self.q_size_per_rank)
             k = k.reshape(-1, self.kv_size_per_rank)
 
-        # Apply rotary embeddings
+        # qkv has shape [forward_context.num_tokens, ...] under flashcomm1, else
+        # [num_actual_tokens, ...]; positions must match q/k row count.
         if self.linear_rope:
-            q, k = self.rotary_emb(positions[:num_actual_tokens], q, k)
+            rope_positions = positions[: qkv.shape[0]] if flash_comm_v1_enabled else positions[:num_actual_tokens]
+            q, k = self.rotary_emb(rope_positions, q, k)
 
         # Reshape to [batch, heads, head_dim]
         q = q.view((qkv.shape[0], self.tp_heads, self.head_dim))
         k = k.view((qkv.shape[0], self.tp_kv_heads, self.head_dim))
         v = v.view((qkv.shape[0], self.tp_kv_heads, self.head_dim))
+
+        # The attention kernel only consumes real tokens; trim padding rows that
+        # the column-parallel all-gather introduced under flashcomm1.
+        if flash_comm_v1_enabled and q.shape[0] > num_actual_tokens:
+            q = q[:num_actual_tokens]
+            k = k[:num_actual_tokens]
+            v = v[:num_actual_tokens]
 
         # Apply scaling if using minimax backend
         if self.linear_scale:
@@ -157,13 +180,26 @@ class AscendBailingMoELinearAttention(BailingMoELinearAttention):
                 hidden = self._decode_infer(q, k, v, kv_cache, state_indices_tensor, attn_metadata)
 
         # Apply group norm and gate (matching SGLang behavior).
-        gate, _ = self.g_proj(hidden_states[:num_actual_tokens])
+        gate, _ = self.g_proj(gate_input)
+        if flash_comm_v1_enabled and gate.shape[0] > num_actual_tokens:
+            gate = gate[:num_actual_tokens]
 
         hidden = self.g_norm(hidden)
         hidden = F.sigmoid(gate) * hidden
 
         hidden = hidden.to(hidden_states.dtype)
 
-        # Output projection
-        dense_out, _ = self.dense(hidden)
-        output[:num_actual_tokens] = dense_out
+        # Output projection. Under flashcomm1, `dense` is a SequenceRowParallelOp
+        # that pad-and-reduce-scatter's its input, requiring exactly
+        # forward_context.num_tokens rows; pad back here. The reduce-scatter
+        # output already has the same scattered shape as `output`, so we copy
+        # straight in without slicing.
+        if flash_comm_v1_enabled:
+            full_len = forward_context.num_tokens
+            if hidden.shape[0] < full_len:
+                hidden = F.pad(hidden, (0, 0, 0, full_len - hidden.shape[0]))
+            dense_out, _ = self.dense(hidden)
+            output[:] = dense_out
+        else:
+            dense_out, _ = self.dense(hidden)
+            output[:num_actual_tokens] = dense_out
