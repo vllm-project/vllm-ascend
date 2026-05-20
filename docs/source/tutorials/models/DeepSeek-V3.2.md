@@ -866,7 +866,8 @@ python load_balance_proxy_layerwise_server_example.py \
 
 Once your server is started, you can query the model with input prompts:
 
-**Note**: 
+**Note**:
+
 - `<node0_ip>`: The IP address of the node where the server is running (e.g., localhost).
 - `<port>`: The port number specified in the server startup command (e.g., 8000).
 
