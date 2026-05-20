@@ -68,6 +68,7 @@ def set_ascend_forward_context(
     skip_compiled: bool = False,
     max_tokens_across_pcp: int = 0,
     draft_attn_metadatas=None,
+    input_ids=None,
 ):
     """A context manager that stores the current forward context,
     can be attention metadata, etc.
@@ -85,6 +86,8 @@ def set_ascend_forward_context(
     with set_forward_context(**forward_context_kwargs):
         forward_context = get_forward_context()
         forward_context.draft_attn_metadatas = draft_attn_metadatas
+
+        forward_context.input_ids = input_ids
 
         from vllm_ascend.ops.fused_moe.moe_comm_method import get_moe_comm_method
 

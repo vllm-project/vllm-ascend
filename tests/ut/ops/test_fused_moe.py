@@ -403,6 +403,7 @@ class TestAscendUnquantizedFusedMoEMethod:
         method = AscendUnquantizedFusedMoEMethod.__new__(AscendUnquantizedFusedMoEMethod)
         method.moe = SimpleNamespace(has_bias=True)
         method.dynamic_eplb = False
+        method.tid2eid = None
         layer = self._build_layer(has_bias=True)
         hidden_states = torch.randn(2, 4, dtype=torch.float16)
         router_logits = torch.randn(2, 4)
@@ -417,6 +418,7 @@ class TestAscendUnquantizedFusedMoEMethod:
         )
         select_experts_mock = MagicMock(return_value=(topk_weights, topk_ids))
         monkeypatch.setattr(fused_moe_module, "select_experts", select_experts_mock)
+        monkeypatch.setattr(fused_moe_module, "get_forward_context", MagicMock(return_value=MagicMock(input_ids=None)))
 
         result = method.apply(
             layer=layer,
@@ -457,6 +459,7 @@ class TestAscendUnquantizedFusedMoEMethod:
         method = AscendUnquantizedFusedMoEMethod.__new__(AscendUnquantizedFusedMoEMethod)
         method.moe = SimpleNamespace(has_bias=False)
         method.dynamic_eplb = True
+        method.tid2eid = None
         layer = self._build_layer(has_bias=False, zero_expert_num=1)
         hidden_states = torch.randn(2, 4)
         topk_weights = torch.ones(2, 2)
@@ -476,6 +479,7 @@ class TestAscendUnquantizedFusedMoEMethod:
         zero_experts_mock = MagicMock(return_value=(topk_ids, topk_weights, zero_hidden))
         monkeypatch.setattr(fused_moe_module, "zero_experts_compute", zero_experts_mock)
         monkeypatch.setattr(torch, "rand", MagicMock(return_value=torch.tensor([[0.2, 0.1], [0.4, 0.3]])))
+        monkeypatch.setattr(fused_moe_module, "get_forward_context", MagicMock(return_value=MagicMock(input_ids=None)))
 
         result = method.apply(
             layer=layer,
@@ -725,6 +729,7 @@ class TestAscendFusedMoESharedExperts:
         layer = AscendFusedMoE.__new__(AscendFusedMoE)
         if not hasattr(type(layer), "gate"):
             pytest.skip("Current AscendFusedMoE does not expose gate property")
+        layer.multistream_overlap_shared_expert = False
         layer._gate = MagicMock()
         layer.use_overlapped = True
         assert layer.gate is layer._gate
@@ -767,6 +772,7 @@ class TestAscendFusedMoESharedExperts:
         layer = AscendFusedMoE.__new__(AscendFusedMoE)
         if not hasattr(layer, "shared_forward_impl"):
             pytest.skip("Current AscendFusedMoE has no shared_forward_impl")
+        layer.multistream_overlap_shared_expert = False
         layer.shared_multistream_overlap_gate = False
         layer._shared_experts = MagicMock() if has_shared_experts else None
         hidden_states = torch.randn(2, 4)

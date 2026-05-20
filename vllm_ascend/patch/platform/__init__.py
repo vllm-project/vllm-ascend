@@ -30,6 +30,7 @@ else:
 import vllm_ascend.patch.platform.patch_minimax_m2_config  # noqa
 import vllm_ascend.patch.platform.patch_minimax_usage_accounting  # noqa
 import vllm_ascend.patch.platform.patch_glm_tool_call_parser  # noqa
+import vllm_ascend.patch.platform.patch_deepseek_v4_tool_call_parser  # noqa
 import vllm_ascend.patch.platform.patch_torch_accelerator  # noqa
 import vllm_ascend.patch.platform.patch_tool_choice_none_content  # noqa
 
@@ -38,3 +39,7 @@ if os.getenv("DYNAMIC_EPLB", "false").lower() in ("true", "1") or os.getenv("EXP
 
 if envs.VLLM_ASCEND_BALANCE_SCHEDULING:
     import vllm_ascend.patch.platform.patch_balance_schedule  # noqa
+
+if envs.VLLM_ASCEND_APPLY_DSV4_PATCH:
+    import vllm_ascend.patch.platform.patch_kv_cache_coordinator  # noqa
+    import vllm_ascend.patch.platform.patch_speculative_config  # noqa

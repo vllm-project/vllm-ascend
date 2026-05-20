@@ -145,6 +145,7 @@ class TestAscendW8A8FusedMoEMethod(TestBase):
         )
         layer.w13_weight_scale_fp32 = torch.ones(self.num_experts, 2 * self.intermediate_size, dtype=torch.float32)
         layer.w2_weight_scale = torch.ones(self.num_experts, hidden_size, dtype=torch.float32)
+        layer.swiglu_limit = 1000000
 
         x = torch.randn(tokens, hidden_size, dtype=torch.float32)
         router_logits = torch.randn(tokens, self.num_experts, dtype=torch.float32)

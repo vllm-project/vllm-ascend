@@ -255,6 +255,7 @@ class AscendMoEScheme(ABC):
         activation: str = "silu",
         apply_router_weight_on_input: bool = False,
         mc2_mask: torch.Tensor | None = None,
+        tid2eid: Any | None = None,
     ) -> torch.Tensor:
         """Forward computation for MoE layer.
 
