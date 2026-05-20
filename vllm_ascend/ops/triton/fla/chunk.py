@@ -39,6 +39,8 @@ def chunk_gated_delta_rule_fwd(
     output_final_state: bool,
     cu_seqlens: torch.LongTensor | None = None,
     prebuilt_meta=None,
+    return_intermediate_states: bool = False,
+    state_dtype: torch.dtype | None = None,
 ):
     forward_context = get_forward_context()
     num_decodes = 0
@@ -86,29 +88,59 @@ def chunk_gated_delta_rule_fwd(
         chunk_indices=chunk_indices_chunk64,
     )
 
-    k_ascendc = k.to(torch.bfloat16).transpose(1, 2).contiguous()
-    w_ascendc = w.to(torch.bfloat16).transpose(1, 2).contiguous()
-    u_ascendc = u.to(torch.bfloat16).transpose(1, 2).contiguous()
-    g_ascendc = g.transpose(1, 2).contiguous()
-    q_ascendc = q.to(torch.bfloat16).transpose(1, 2).contiguous()
+    # Backend dispatch:
+    #   return_intermediate_states=True  -> all-mode caller: needs Triton path so that
+    #       (a) state_dtype (fp32) is honored for scatter precision, and
+    #       (b) h has PR16's [B, NT, H, K, V] layout consumed by _scatter_intermediate_states.
+    #   return_intermediate_states=False -> align-mode caller: take main's AscendC fast path
+    #       (PR #9018 / commit 12a34900) which fuses chunk_fwd_h+chunk_fwd_o in bf16.
+    if return_intermediate_states:
+        # ---- Triton path (PR16 all-mode) ----
+        h, v_new, final_state = chunk_gated_delta_rule_fwd_h(
+            k=k,
+            w=w,
+            u=u,
+            g=g,
+            initial_state=initial_state,
+            output_final_state=output_final_state,
+            cu_seqlens=cu_seqlens,
+            chunk_indices=chunk_indices_chunk64,
+            chunk_offsets=chunk_offsets_chunk64,
+            state_dtype=state_dtype,
+        )
+        # Cleared variables that the AscendC branch would set; used only by AscendC chunk_fwd_o.
+        k_ascendc = None
+        q_ascendc = None
+        g_ascendc = None
+        cu_seqlens_int64_list = None
+        chunk_indices_int64_list = None
+    else:
+        # ---- AscendC path (main, align-mode perf) ----
+        k_ascendc = k.to(torch.bfloat16).transpose(1, 2).contiguous()
+        w_ascendc = w.to(torch.bfloat16).transpose(1, 2).contiguous()
+        u_ascendc = u.to(torch.bfloat16).transpose(1, 2).contiguous()
+        g_ascendc = g.transpose(1, 2).contiguous()
+        q_ascendc = q.to(torch.bfloat16).transpose(1, 2).contiguous()
 
-    cu_seqlens = cu_seqlens.to(torch.int64)
-    chunk_indices = None if chunk_indices_chunk64 is None else chunk_indices_chunk64.to(torch.int64)
-    h, v_new, final_state = torch.ops._C_ascend.chunk_gated_delta_rule_fwd_h(
-        k_ascendc,
-        w_ascendc,
-        u_ascendc,
-        g=g_ascendc,
-        gk=None,
-        initial_state=initial_state,
-        output_final_state=True,
-        chunk_size=64,
-        save_new_value=True,
-        cu_seqlens=cu_seqlens.tolist() if cu_seqlens is not None else None,
-        chunk_indices=chunk_indices.flatten().tolist() if chunk_indices is not None else None,
-        use_exp2=False,
-        transpose_state_layout=False,
-    )
+        cu_seqlens_int64 = cu_seqlens.to(torch.int64) if cu_seqlens is not None else None
+        chunk_indices_int64 = None if chunk_indices_chunk64 is None else chunk_indices_chunk64.to(torch.int64)
+        cu_seqlens_int64_list = cu_seqlens_int64.tolist() if cu_seqlens_int64 is not None else None
+        chunk_indices_int64_list = chunk_indices_int64.flatten().tolist() if chunk_indices_int64 is not None else None
+        h, v_new, final_state = torch.ops._C_ascend.chunk_gated_delta_rule_fwd_h(
+            k_ascendc,
+            w_ascendc,
+            u_ascendc,
+            g=g_ascendc,
+            gk=None,
+            initial_state=initial_state,
+            output_final_state=True,
+            chunk_size=64,
+            save_new_value=True,
+            cu_seqlens=cu_seqlens_int64_list,
+            chunk_indices=chunk_indices_int64_list,
+            use_exp2=False,
+            transpose_state_layout=False,
+        )
 
     if get_pcp_group().world_size > 1:
         h_update = chunk_gated_delta_rule_fwd_hupdate(
@@ -154,28 +186,45 @@ def chunk_gated_delta_rule_fwd(
             chunk_offsets=chunk_offsets_chunk64,
         )
 
-    o_ascendc = torch.ops._C_ascend.chunk_fwd_o(
-        q_ascendc,
-        k_ascendc,
-        v_new,
-        h,
-        scale,
-        g=g_ascendc,
-        g_gamma=None,
-        cu_seqlens=cu_seqlens.tolist() if cu_seqlens is not None else None,
-        chunk_indices=chunk_indices.flatten().tolist() if chunk_indices is not None else None,
-        chunk_size=64,
-        transpose_state_layout=False,
-    )
-
-    o = o_ascendc.to(torch.bfloat16).transpose(1, 2).contiguous()
-    v_new = v_new.to(torch.bfloat16).transpose(1, 2).contiguous()
-    h = h.to(torch.bfloat16).transpose(1, 2).contiguous()
+    if return_intermediate_states:
+        # ---- Triton chunk_fwd_o (PR16 all-mode) ----
+        o = chunk_fwd_o(
+            q=q,
+            k=k,
+            v=v_new,
+            h=h,
+            g=g,
+            scale=scale,
+            cu_seqlens=cu_seqlens,
+            chunk_offsets=chunk_offsets_chunk64,
+        )
+        # h: [B, NT, H, K, V] — intermediate chunk states (state BEFORE each chunk),
+        # consumed by _scatter_intermediate_states in gdn.py.
+        intermediate_states = h
+    else:
+        # ---- AscendC chunk_fwd_o (main align-mode perf) ----
+        o_ascendc = torch.ops._C_ascend.chunk_fwd_o(
+            q_ascendc,
+            k_ascendc,
+            v_new,
+            h,
+            scale,
+            g=g_ascendc,
+            g_gamma=None,
+            cu_seqlens=cu_seqlens_int64_list,
+            chunk_indices=chunk_indices_int64_list,
+            chunk_size=64,
+            transpose_state_layout=False,
+        )
+        o = o_ascendc.to(torch.bfloat16).transpose(1, 2).contiguous()
+        v_new = v_new.to(torch.bfloat16).transpose(1, 2).contiguous()
+        h = h.to(torch.bfloat16).transpose(1, 2).contiguous()
+        intermediate_states = None
 
     if SUPPRESS_LEVEL < 3:
-        return g, o, A, final_state, None, None, None
+        return g, o, A, final_state, None, None, None, intermediate_states
     elif SUPPRESS_LEVEL >= 3:
-        return g, o, A, final_state, w, h, v_new
+        return g, o, A, final_state, w, h, v_new, intermediate_states
 
 
 class ChunkGatedDeltaRuleFunction(torch.autograd.Function):
@@ -194,11 +243,13 @@ class ChunkGatedDeltaRuleFunction(torch.autograd.Function):
         cu_seqlens: torch.LongTensor | None = None,
         prebuilt_meta=None,
         use_qk_l2norm_in_kernel: bool = False,
+        return_intermediate_states: bool = False,
+        state_dtype: torch.dtype | None = None,
     ):
         if use_qk_l2norm_in_kernel:
             q = l2norm_fwd(q)
             k = l2norm_fwd(k)
-        g, o, A, final_state, w, h, v_new = chunk_gated_delta_rule_fwd(
+        g, o, A, final_state, w, h, v_new, intermediate_states = chunk_gated_delta_rule_fwd(
             q=q,
             k=k,
             v=v,
@@ -209,10 +260,12 @@ class ChunkGatedDeltaRuleFunction(torch.autograd.Function):
             output_final_state=output_final_state,
             cu_seqlens=cu_seqlens,
             prebuilt_meta=prebuilt_meta,
+            return_intermediate_states=return_intermediate_states,
+            state_dtype=state_dtype,
         )
         ctx.scale = scale
         ctx.use_qk_l2norm_in_kernel = use_qk_l2norm_in_kernel
-        return o.to(q.dtype), final_state
+        return o.to(q.dtype), final_state, intermediate_states
 
 
 @torch.compiler.disable
@@ -229,6 +282,8 @@ def chunk_gated_delta_rule(
     prebuilt_meta=None,
     head_first: bool = False,
     use_qk_l2norm_in_kernel: bool = False,
+    return_intermediate_states: bool = False,
+    state_dtype: torch.dtype | None = None,
 ):
     r"""
     Args:
@@ -263,6 +318,8 @@ def chunk_gated_delta_rule(
             Outputs of shape `[B, T, H, V]` if `head_first=False` else `[B, H, T, V]`.
         final_state (torch.Tensor):
             Final state of shape `[N, H, K, V]` if `output_final_state=True` else `None`.
+        intermediate_states (torch.Tensor):
+            Returned only when `return_intermediate_states=True`.
 
     Examples::
         >>> import torch
@@ -325,7 +382,7 @@ def chunk_gated_delta_rule(
             )
     if scale is None:
         scale = k.shape[-1] ** -0.5
-    o, final_state = ChunkGatedDeltaRuleFunction.apply(
+    o, final_state, intermediate_states = ChunkGatedDeltaRuleFunction.apply(
         q,
         k,
         v,
@@ -337,7 +394,11 @@ def chunk_gated_delta_rule(
         cu_seqlens,
         prebuilt_meta,
         use_qk_l2norm_in_kernel,
+        return_intermediate_states,
+        state_dtype,
     )
     if head_first:
         o = rearrange(o, "b t h ... -> b h t ...")
+    if return_intermediate_states:
+        return o, final_state, intermediate_states
     return o, final_state
