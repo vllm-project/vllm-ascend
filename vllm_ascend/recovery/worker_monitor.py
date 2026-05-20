@@ -135,7 +135,7 @@ class WorkerMonitor:
                         is_success=is_success,
                         cfg=cfg
                     )
-                    step_result_encode = msgspec.msgpack.encode(("stepresult", step_result))
+                    step_result_encode = msgspec.msgpack.encode(step_result)
                     core_result_socket.send(step_result_encode)
     
 
