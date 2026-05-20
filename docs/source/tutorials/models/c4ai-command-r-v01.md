@@ -106,6 +106,7 @@ Reference values (from `tests/e2e/models/configs/c4ai-command-r-v01.yaml`):
 ## FAQ
 
 ### HCCL init failure (EI0010 / error code 5)
+
 **Symptoms:**
 
 - `hcclCommInitRootInfoConfig ... error code is 5`
