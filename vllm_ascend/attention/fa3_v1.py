@@ -82,7 +82,7 @@ class AscendFAImpl(AscendAttentionBackendImpl):
             key_fa_blk,
             value_fa_blk,
             cache_seqlens=seq_lens,  # kv sequence length for each individual request (NOT cumulative)
-            page_table=block_table,  #  must match the block table for the corresponding q
+            page_table=block_table,  # must match the block table for the corresponding q
             cu_seqlens_q=actual_seq_lengths,  # cumulative sequence length for q
             max_seqlen_q=max_seq_len,
             causal=is_causal,
