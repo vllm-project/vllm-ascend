@@ -542,7 +542,7 @@ Before you start, please
             "torch_profiler_dir": "./vllm_profile",
             "torch_profiler_with_stack": false}' \
             --seed 1024 \
-            --served-model-name deepseek_v3_2 \
+            --served-model-name deepseek_v3.2 \
             --max-model-len 68000 \
             --max-num-batched-tokens 32560 \
             --trust-remote-code \
@@ -617,7 +617,7 @@ Before you start, please
             "torch_profiler_dir": "./vllm_profile",
             "torch_profiler_with_stack": false}' \
             --seed 1024 \
-            --served-model-name deepseek_v3_2 \
+            --served-model-name deepseek_v3.2 \
             --max-model-len 68000 \
             --max-num-batched-tokens 32560 \
             --trust-remote-code \
@@ -694,7 +694,7 @@ Before you start, please
             "torch_profiler_dir": "./vllm_profile",
             "torch_profiler_with_stack": false}' \
             --seed 1024 \
-            --served-model-name deepseek_v3_2 \
+            --served-model-name deepseek_v3.2 \
             --max-model-len 68000 \
             --max-num-batched-tokens 12 \
             --compilation-config '{"cudagraph_mode":"FULL_DECODE_ONLY", "cudagraph_capture_sizes":[3, 6, 9, 12]}' \
@@ -771,7 +771,7 @@ Before you start, please
             "torch_profiler_dir": "./vllm_profile",
             "torch_profiler_with_stack": false}' \
             --seed 1024 \
-            --served-model-name deepseek_v3_2 \
+            --served-model-name deepseek_v3.2 \
             --max-model-len 68000 \
             --max-num-batched-tokens 12 \
             --compilation-config '{"cudagraph_mode":"FULL_DECODE_ONLY",  "cudagraph_capture_sizes":[3, 6, 9, 12]}' \
@@ -874,7 +874,7 @@ Once your server is started, you can query the model with input prompts:
 curl http://<node0_ip>:<port>/v1/completions \
     -H "Content-Type: application/json" \
     -d '{
-        "model": "deepseek_v3_2",
+        "model": "deepseek_v3.2",
         "prompt": "The future of AI is",
         "max_completion_tokens": 50,
         "temperature": 0
