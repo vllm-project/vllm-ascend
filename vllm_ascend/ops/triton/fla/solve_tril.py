@@ -102,7 +102,7 @@ def solve_tril_16x16_kernel(
 
         # for loop to update N_BLOCKS row vector
         for i in range(1, 16):
-            nblks_vec16 = -extract_slice(local_ori_A, (i, 0), (1, 16 * N_BLOCKS), (16 * N_BLOCKS, 1))
+            nblks_vec16 = -extract_slice(local_ori_A, (i, 0), (1, 16 * N_BLOCKS), (1, 1))
             b_a = tl.reshape(nblks_vec16, (N_BLOCKS, 16))
 
             dot_tmp = tl.trans(b_a[:, :, None] * b_A, (1, 0, 2))

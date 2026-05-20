@@ -967,6 +967,37 @@ at::Tensor npu_causal_conv1d_custom(
     return output;
 }
 
+at::Tensor npu_recurrent_gated_delta_rule_custom(
+    const at::Tensor& query,
+    const at::Tensor& key,
+    const at::Tensor& value,
+    const at::Tensor& beta,
+    at::Tensor& state,
+    const at::Tensor& actual_seq_lengths,
+    const at::Tensor& ssm_state_indices,
+    const c10::optional<at::Tensor>& g,
+    const c10::optional<at::Tensor>& gk,
+    const c10::optional<at::Tensor>& num_accepted_tokens,
+    double scale_value)
+{
+    at::Tensor output = at::empty(value.sizes(), value.options());
+    float scale_real = static_cast<float>(scale_value);
+    EXEC_NPU_CMD(aclnnRecurrentGatedDeltaRule,
+                 query,
+                 key,
+                 value,
+                 beta,
+                 state,
+                 actual_seq_lengths,
+                 ssm_state_indices,
+                 g,
+                 gk,
+                 num_accepted_tokens,
+                 scale_real,
+                 output);
+    return output;
+}
+
 // It is expected that further improvements will be made after it is incorporated into CANN on June 30th.
 std::vector<at::Tensor> moe_grouped_matmul(
     at::Tensor x,
@@ -2572,6 +2603,21 @@ TORCH_LIBRARY_EXPAND(CONCAT(_C, _ascend), ops)
         "                         int run_mode"
         ") -> (Tensor output)");
     ops.impl("npu_causal_conv1d_custom", torch::kPrivateUse1, &vllm_ascend::npu_causal_conv1d_custom);
+    ops.def(
+        "npu_recurrent_gated_delta_rule_custom(Tensor query, "
+        "                                      Tensor key, "
+        "                                      Tensor value, "
+        "                                      Tensor beta, "
+        "                                      Tensor state, "
+        "                                      Tensor actual_seq_lengths, "
+        "                                      Tensor ssm_state_indices, "
+        "                                      Tensor? g=None, "
+        "                                      Tensor? gk=None, "
+        "                                      Tensor? num_accepted_tokens=None, "
+        "                                      float scale_value=1.0) -> (Tensor output)");
+    ops.impl("npu_recurrent_gated_delta_rule_custom",
+             torch::kPrivateUse1,
+             &vllm_ascend::npu_recurrent_gated_delta_rule_custom);
     ops.def(
         "moe_grouped_matmul("
             "Tensor x,"
