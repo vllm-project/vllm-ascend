@@ -21,6 +21,7 @@ import torch
 import torch.nn.functional as F
 from vllm.forward_context import get_forward_context
 from vllm.model_executor.layers.mamba.gdn_linear_attn import GatedDeltaNetAttention
+from vllm.model_executor.layers.mamba.mamba_utils import is_conv_state_dim_first
 from vllm.v1.attention.backend import AttentionMetadata  # type: ignore
 from vllm.v1.attention.backends.gdn_attn import GDNAttentionMetadata
 from vllm.v1.attention.backends.utils import PAD_SLOT_ID
@@ -28,7 +29,6 @@ from vllm.v1.attention.backends.utils import PAD_SLOT_ID
 from vllm_ascend._310p.ops.fla.chunk_gated_delta_rule import chunk_gated_delta_rule_pytorch
 from vllm_ascend._310p.ops.fla.fused_gdn_gating import fused_gdn_gating_pytorch
 from vllm_ascend.attention.utils import maybe_save_kv_layer_to_connector
-from vllm_ascend.utils import enable_sp
 
 
 def _l2norm(x: torch.Tensor, eps: float = 1e-6) -> torch.Tensor:
@@ -124,15 +124,14 @@ class AscendGatedDeltaNetAttention310(GatedDeltaNetAttention):
         spec_state_indices_tensor = attn_metadata.spec_state_indices_tensor  # noqa: E501
         non_spec_state_indices_tensor = attn_metadata.non_spec_state_indices_tensor  # noqa: E501
         self_kv_cache = self.kv_cache
-        conv_state = self_kv_cache[0]
+        conv_state = self_kv_cache[0].transpose(-1, -2) if is_conv_state_dim_first() else self_kv_cache[0]
         ssm_state = self_kv_cache[1]
         num_actual_tokens = attn_metadata.num_actual_tokens
         num_accepted_tokens = attn_metadata.num_accepted_tokens
 
-        if not enable_sp():
-            mixed_qkv = mixed_qkv[:num_actual_tokens]
-            b = b[:num_actual_tokens]
-            a = a[:num_actual_tokens]
+        mixed_qkv = mixed_qkv[:num_actual_tokens]
+        b = b[:num_actual_tokens]
+        a = a[:num_actual_tokens]
 
         # 1. Convolution sequence transformation
         conv_weights = self.conv1d.weight.view(self.conv1d.weight.size(0), self.conv1d.weight.size(2)).transpose(0, 1)
@@ -297,18 +296,9 @@ class AscendGatedDeltaNetAttention310(GatedDeltaNetAttention):
             )
             merged_out.index_copy_(1, spec_token_indx, core_attn_out_spec)
             merged_out.index_copy_(1, non_spec_token_indx, core_attn_out_non_spec)
-            if not enable_sp():
-                core_attn_out[:num_actual_tokens] = merged_out.squeeze(0)
-            else:
-                core_attn_out[:num_actual_tokens] = merged_out.squeeze(0)[:num_actual_tokens]
+            core_attn_out[:num_actual_tokens] = merged_out.squeeze(0)
         elif spec_sequence_masks is not None:
-            if not enable_sp():
-                core_attn_out[:num_actual_tokens] = core_attn_out_spec.squeeze(0)
-            else:
-                core_attn_out[:num_actual_tokens] = core_attn_out_spec.squeeze(0)[:num_actual_tokens]
+            core_attn_out[:num_actual_tokens] = core_attn_out_spec.squeeze(0)
         else:
-            if not enable_sp():
-                core_attn_out[:num_actual_tokens] = core_attn_out_non_spec.squeeze(0)
-            else:
-                core_attn_out[:num_actual_tokens] = core_attn_out_non_spec.squeeze(0)[:num_actual_tokens]
+            core_attn_out[:num_actual_tokens] = core_attn_out_non_spec.squeeze(0)
         maybe_save_kv_layer_to_connector("", [])
