@@ -157,11 +157,25 @@ class RasDPEngineCoreProc(DPEngineCoreProc):
                     self.input_queue.put_nowait((request_type, request))
 
     def run_busy_loop(self):
+        exception_occurred = False
         while self._handle_shutdown():
             if self._recovery_handler.is_recovering:
                 self._wait_for_recovery()
+                exception_occurred = True
                 continue
-
+            if exception_occurred:
+                exception_occurred = False
+                if executer.batch_queue is not None:
+                    while executer.batch_queue:
+                        future, _, _ = executer.batch_queue.pop()
+                        try:
+                            logger.info("[RAS][engine=%d] main thread pop future", self.dp_rank)
+                            future.result()
+                        except Exception:
+                            pass
+                    executer.batch_queue.clear()
+                    logger.info("[RAS][engine=%d] batch_queue drained", self.dp_rank)
+                self.scheduler.reset_prefix_cache(reset_running_requests=True)
             try:
                 self._process_input_queue()
 
@@ -204,6 +218,7 @@ class RasDPEngineCoreProc(DPEngineCoreProc):
 
             except Exception:
                 if self._wait_for_recovery_on_exception():
+                    exception_occurred = True
                     continue
                 raise
 
