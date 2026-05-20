@@ -2,7 +2,10 @@ import numpy as np
 import torch
 from vllm.distributed import get_dcp_group, get_pcp_group
 from vllm.utils.math_utils import cdiv
+from vllm.v1.attention.backends.utils import PAD_SLOT_ID
 from vllm.v1.utils import CpuGpuBuffer
+from vllm.v1.worker.block_table import _compute_slot_mapping_kernel
+from vllm.v1.worker.cp_utils import get_total_cp_world_size
 
 
 class BlockTable:
@@ -103,6 +106,12 @@ class BlockTable:
         self.num_blocks_per_row[row_idx] = 0
         self.append_row(block_ids, row_idx)
 
+    def clear_row(self, row_idx: int) -> None:
+        num_blocks = self.num_blocks_per_row[row_idx]
+        if num_blocks > 0:
+            self.block_table.np[row_idx, :num_blocks] = 0
+        self.num_blocks_per_row[row_idx] = 0
+
     def move_row(self, src: int, tgt: int) -> None:
         num_blocks = self.num_blocks_per_row[src]
         self.block_table.np[tgt, :num_blocks] = self.block_table.np[src, :num_blocks]
@@ -116,7 +125,32 @@ class BlockTable:
 
         self.block_table.np[[src, tgt]] = self.block_table.np[[tgt, src]]
 
-    def compute_slot_mapping(self, req_indices: np.ndarray, positions: np.ndarray) -> None:
+    def compute_slot_mapping(
+        self,
+        num_reqs: int,
+        query_start_loc: torch.Tensor,
+        positions: torch.Tensor,
+    ) -> None:
+        num_tokens = positions.shape[0]
+        total_cp_world_size = self.pcp_world_size * self.dcp_world_size
+        total_cp_rank = self.pcp_rank * self.dcp_world_size + self.dcp_rank
+        _compute_slot_mapping_kernel[(num_reqs + 1,)](
+            num_tokens,
+            self.max_num_batched_tokens,
+            query_start_loc,
+            positions,
+            self.block_table.gpu,
+            self.block_table.gpu.stride(0),
+            self.block_size,
+            self.slot_mapping.gpu,
+            TOTAL_CP_WORLD_SIZE=total_cp_world_size,
+            TOTAL_CP_RANK=total_cp_rank,
+            CP_KV_CACHE_INTERLEAVE_SIZE=self.cp_kv_cache_interleave_size,
+            PAD_ID=PAD_SLOT_ID,
+            BLOCK_SIZE=1024,
+        )
+
+    def compute_slot_mapping_draft(self, req_indices: np.ndarray, positions: np.ndarray) -> None:
         # E.g., [0, 1, 0, 1, 2, 3, 4, 0, 1, 2]
         # -> [0, 0, K, K, K + 1, K + 1, K + 2, 2 * K, 2 * K, 2 * K + 1]
         # where K is the max_num_blocks_per_req and the block size is 2.
@@ -187,9 +221,6 @@ class BlockTable:
     def commit_block_table(self, num_reqs: int) -> None:
         self.block_table.copy_to_gpu(num_reqs)
 
-    def commit_slot_mapping(self, num_tokens: int) -> None:
-        self.slot_mapping.copy_to_gpu(num_tokens)
-
     def clear(self) -> None:
         self.block_table.fill_(0)
         self.block_table.cpu.fill_(0)
@@ -239,21 +270,10 @@ class MultiGroupBlockTable:
         device: torch.device,
         block_sizes: list[int],
         num_speculative_tokens: int = 0,
+        max_num_blocks: list[int] | None = None,
         kernel_sizes: list[list[int]] | None = None,
         cp_kv_cache_interleave_size: int = 1,
     ) -> None:
-        # Note(hc): each dcp rank only store
-        # (max_model_len//dcp_world_size) tokens in kvcache,
-        # so the block_size which used for calc max_num_blocks_per_req
-        # must be multiplied by dcp_world_size.
-        try:
-            dcp_world_size = get_dcp_group().world_size
-            pcp_world_size = get_pcp_group().world_size
-        except AssertionError:
-            # DCP might not be initialized in testing
-            dcp_world_size = 1
-            pcp_world_size = 1
-
         if kernel_sizes is None:
             kernel_sizes = [[0]] * len(block_sizes)
         # Ensure kernel_sizes matches block_sizes length
@@ -264,12 +284,25 @@ class MultiGroupBlockTable:
                 f"kernel_sizes length ({len(kernel_sizes)}) must match block_sizes length ({len(block_sizes)})"
             )
 
+        if max_num_blocks is None:
+            # Note(hc): each dcp rank only store
+            # (max_model_len//dcp_world_size) tokens in kvcache,
+            # so the block_size which used for calc max_num_blocks_per_req
+            # must be multiplied by dcp_world_size.
+            total_cp_world_size = get_total_cp_world_size()
+            max_num_blocks = [cdiv(max_model_len, block_size * total_cp_world_size) for block_size in block_sizes]
+
+        if len(max_num_blocks) != len(block_sizes):
+            raise ValueError(
+                f"max_num_blocks length ({len(max_num_blocks)}) must match block_sizes length ({len(block_sizes)})"
+            )
+
         # Use zip to pair block_sizes with kernel_sizes one-to-one
         self.block_tables = [
             BlockTable(
                 block_size,
                 max_num_reqs,
-                max(cdiv(max_model_len, block_size * dcp_world_size * pcp_world_size), 1 + num_speculative_tokens),
+                max_num_blocks_per_req,
                 max_num_batched_tokens,
                 pin_memory,
                 device,
@@ -277,7 +310,7 @@ class MultiGroupBlockTable:
                 cp_kv_cache_interleave_size,
                 num_speculative_tokens,
             )
-            for block_size, kernel_size_list in zip(block_sizes, kernel_sizes)
+            for block_size, kernel_size_list, max_num_blocks_per_req in zip(block_sizes, kernel_sizes, max_num_blocks)
         ]
 
     def append_row(self, block_ids: tuple[list[int], ...], row_idx: int) -> None:
@@ -288,6 +321,10 @@ class MultiGroupBlockTable:
         for i, block_table in enumerate(self.block_tables):
             block_table.add_row(block_ids[i], row_idx)
 
+    def clear_row(self, row_idx: int) -> None:
+        for block_table in self.block_tables:
+            block_table.clear_row(row_idx)
+
     def move_row(self, src: int, tgt: int) -> None:
         for block_table in self.block_tables:
             block_table.move_row(src, tgt)
@@ -296,17 +333,22 @@ class MultiGroupBlockTable:
         for block_table in self.block_tables:
             block_table.swap_row(src, tgt)
 
-    def compute_slot_mapping(self, req_indices: np.ndarray, positions: np.ndarray) -> None:
+    def compute_slot_mapping(
+        self,
+        num_reqs: int,
+        query_start_loc: torch.Tensor,
+        positions: torch.Tensor,
+    ) -> None:
         for block_table in self.block_tables:
-            block_table.compute_slot_mapping(req_indices, positions)
+            block_table.compute_slot_mapping(num_reqs, query_start_loc, positions)
+
+    def compute_slot_mapping_draft(self, req_indices: np.ndarray, positions: np.ndarray) -> None:
+        for block_table in self.block_tables:
+            block_table.compute_slot_mapping_draft(req_indices, positions)
 
     def commit_block_table(self, num_reqs: int) -> None:
         for block_table in self.block_tables:
             block_table.commit_block_table(num_reqs)
-
-    def commit_slot_mapping(self, num_tokens: int) -> None:
-        for block_table in self.block_tables:
-            block_table.commit_slot_mapping(num_tokens)
 
     def clear(self) -> None:
         for block_table in self.block_tables:

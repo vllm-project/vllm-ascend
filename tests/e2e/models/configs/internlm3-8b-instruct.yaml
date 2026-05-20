@@ -1,13 +1,21 @@
 model_name: "Shanghai_AI_Laboratory/internlm3-8b-instruct"
+model_type: "vllm"
 hardware: "Atlas A2 Series"
+
+serve:
+  tensor_parallel_size: 1
+  dtype: "bfloat16"
+  max_model_len: 2048
+  gpu_memory_utilization: 0.8
+  trust_remote_code: true
+
 tasks:
 - name: "ceval-valid"
   metrics:
   - name: "acc,none"
     value: 0.42
+
 num_fewshot: 5
-max_model_len: 2048
-trust_remote_code: True
-dtype: "bfloat16"
-apply_chat_template: False
-fewshot_as_multiturn: False
+apply_chat_template: false
+fewshot_as_multiturn: false
+batch_size: "auto"

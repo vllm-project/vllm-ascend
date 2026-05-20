@@ -18,17 +18,12 @@ from __future__ import annotations
 
 import torch
 from torch._inductor.pattern_matcher import PatternMatcherPass
+from vllm.compilation.passes.vllm_inductor_pass import VllmInductorPass
 from vllm.config import VllmConfig
 from vllm.config.compilation import Range
 from vllm.logger import logger
 
 from vllm_ascend.compilation.passes.base_pattern import BasePattern
-from vllm_ascend.utils import vllm_version_is
-
-if vllm_version_is("0.15.0"):
-    from vllm.compilation.vllm_inductor_pass import VllmInductorPass  # type: ignore
-else:
-    from vllm.compilation.passes.vllm_inductor_pass import VllmInductorPass
 
 
 class MulsAddPattern(BasePattern):

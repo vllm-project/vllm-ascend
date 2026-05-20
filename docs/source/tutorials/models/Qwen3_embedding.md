@@ -41,7 +41,7 @@ vllm serve Qwen/Qwen3-Embedding-8B --runner pooling --host 127.0.0.1 --port 8888
 Once your server is started, you can query the model with input prompts.
 
 ```bash
-curl http://127.0.0.1:8888/v1/embeddings -H "Content-Type: application/json" -d '{
+curl http://localhost:8888/v1/embeddings -H "Content-Type: application/json" -d '{
   "input": [
         "The capital of China is Beijing.",
         "Gravity is a force that attracts two bodies towards each other. It gives weight to physical objects and is responsible for the movement of planets around the sun."
@@ -95,7 +95,7 @@ Processed prompts: 100%|██████████████████�
 
 ## Performance
 
-Run performance of `Qwen3-Reranker-8B` as an example.
+Run performance of `Qwen3-Embedding-8B` as an example.
 Refer to [vllm benchmark](https://docs.vllm.ai/en/latest/contributing/) for more details.
 
 Take the `serve` as an example. Run the code as follows.

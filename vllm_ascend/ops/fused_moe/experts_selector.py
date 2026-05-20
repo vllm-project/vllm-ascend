@@ -18,6 +18,7 @@ from collections.abc import Callable
 
 import torch
 
+from vllm_ascend.device.device_op import DeviceOperator
 from vllm_ascend.utils import get_weight_prefetch_method
 
 
@@ -34,7 +35,10 @@ def select_experts(
     routed_scaling_factor=1.0,
     e_score_correction_bias: torch.Tensor | None = None,
     indices_type: torch.dtype | None = None,
-    global_num_experts: int = -1,
+    mix_placement: bool = False,
+    num_logical_experts: int = -1,
+    num_shared_experts: int = 0,
+    num_experts: int = -1,
 ):
     """
     Fused experts with select experts.
@@ -51,7 +55,7 @@ def select_experts(
         scoring_func: Scoring function to use.
         e_score_correction_bias: Correction bias to apply to expert scores.
         indices_type: dtype of indices
-        global_num_experts: Global number of experts.
+        num_experts: Number of experts.
 
     Returns:
         topk_weights: router weights of shape (num_tokens, top_k).
@@ -59,7 +63,8 @@ def select_experts(
     """
     # prefetch w1_w3_proj.weight preprocess
     weight_prefetch_method = get_weight_prefetch_method()
-    weight_prefetch_method.maybe_prefetch_moe_weight_preprocess(hidden_states, "gate_up")
+    if weight_prefetch_method:
+        weight_prefetch_method.maybe_prefetch_moe_weight_preprocess(hidden_states, "gate_up")
     is_support_npu_moe_gating_top_k = check_npu_moe_gating_top_k(
         hidden_states=hidden_states,
         top_k=top_k,
@@ -82,7 +87,6 @@ def select_experts(
             num_expert_group=num_expert_group,
             scoring_func=scoring_func,
             routed_scaling_factor=routed_scaling_factor,
-            global_num_experts=global_num_experts,
         )
     else:
         topk_weights, topk_ids = _native_select_experts(
@@ -96,8 +100,28 @@ def select_experts(
             custom_routing_function=custom_routing_function,
             scoring_func=scoring_func,
             e_score_correction_bias=e_score_correction_bias,
-            global_num_experts=global_num_experts,
+            num_experts=num_experts,
         )
+        # Apply routed scaling factor to weights
+        if routed_scaling_factor != 1.0:
+            topk_weights = topk_weights * routed_scaling_factor
+    if mix_placement:
+        shared_expert_routing_factor = 1.0 if is_support_npu_moe_gating_top_k else (1 / routed_scaling_factor)
+        batch_size = topk_ids.shape[0]
+        pad_shared_expert_ids = torch.arange(
+            num_logical_experts, num_logical_experts + num_shared_experts, dtype=topk_ids.dtype, device=topk_ids.device
+        ).repeat(batch_size, 1)
+
+        pad_shared_expert_weights = torch.full(
+            (topk_weights.shape[0], num_shared_experts),
+            shared_expert_routing_factor,
+            dtype=topk_weights.dtype,
+            device=topk_weights.device,
+        )
+
+        topk_ids = torch.cat([topk_ids, pad_shared_expert_ids], dim=1)
+        topk_weights = torch.cat([topk_weights, pad_shared_expert_weights], dim=1)
+
     return topk_weights, topk_ids
 
 
@@ -208,7 +232,6 @@ def _select_experts_with_fusion_ops(
     num_expert_group: int | None,
     scoring_func: str = "softmax",
     routed_scaling_factor=1.0,
-    global_num_experts: int = -1,
 ):
     topk_group = topk_group if topk_group is not None else 1
     num_expert_group = num_expert_group if num_expert_group is not None else 1
@@ -216,7 +239,7 @@ def _select_experts_with_fusion_ops(
     norm_type = 0 if scoring_func == "softmax" else 1
     if e_score_correction_bias is not None and e_score_correction_bias.dtype != router_logits.dtype:
         e_score_correction_bias = e_score_correction_bias.to(router_logits.dtype)
-    topk_weights, topk_ids, _ = torch.ops._C_ascend.moe_gating_top_k(
+    topk_weights, topk_ids, _ = DeviceOperator.moe_gating_top_k(
         router_logits,
         k=top_k,
         k_group=topk_group,
@@ -244,7 +267,7 @@ def _native_select_experts(
     custom_routing_function: Callable | None = None,
     scoring_func: str = "softmax",
     e_score_correction_bias: torch.Tensor | None = None,
-    global_num_experts: torch.Tensor | None = None,
+    num_experts: torch.Tensor | None = None,
 ) -> tuple[torch.Tensor, torch.Tensor]:
     """
     Select top-k experts based on router logits.
@@ -292,7 +315,7 @@ def _native_select_experts(
             gating_output=router_logits,
             topk=top_k,
             renormalize=renormalize,
-            global_num_experts=global_num_experts,
+            num_experts=num_experts,
         )
         # Required by npu_moe_init_routing
         topk_ids = topk_ids.to(torch.int32)

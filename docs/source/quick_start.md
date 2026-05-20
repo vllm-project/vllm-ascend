@@ -12,6 +12,8 @@
 
 ## Setup environment using container
 
+Before using containers, make sure Docker is installed on your system. If Docker is not installed, please refer to the [Docker installation guide](https://docs.docker.com/get-docker/) for installation instructions.
+
 :::::{tab-set}
 ::::{tab-item} Ubuntu
 
@@ -91,7 +93,8 @@ You can use ModelScope mirror to speed up download:
 <!-- tests/e2e/doctest/001-quickstart-test.sh should be considered updating as well -->
 
 ```bash
-export VLLM_USE_MODELSCOPE=true
+pip install modelscope>=1.35.1
+export VLLM_USE_MODELSCOPE=True
 ```
 
 There are two ways to start vLLM on Ascend NPU:

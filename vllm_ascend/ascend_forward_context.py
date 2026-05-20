@@ -1,9 +1,11 @@
 import math
 from contextlib import contextmanager
+from contextvars import ContextVar
 from enum import Enum
 from typing import Any
 
 import torch
+import vllm.envs as envs_vllm
 from vllm.config import CUDAGraphMode, VllmConfig
 from vllm.distributed import get_dp_group, get_ep_group, get_tensor_model_parallel_world_size
 from vllm.forward_context import BatchDescriptor, get_forward_context, set_forward_context
@@ -28,11 +30,33 @@ class MoECommType(Enum):
     FUSED_MC2 = 3
 
 
+_MRV2_IN_PROFILE_RUN: ContextVar[bool] = ContextVar("_MRV2_IN_PROFILE_RUN", default=False)
+
+
+@contextmanager
+def override_mrv2_in_profile_run(enabled: bool):
+    """Override MRv2's extra profile-run marker for one forward path.
+
+    MRv2 builds the base forward context inside upstream vLLM, so Ascend's
+    platform hook cannot tell whether the current forward is the extra MC2
+    profile dummy run. A ContextVar keeps this MRv2-only state scoped to the
+    current forward path without adding default fallback behavior.
+    """
+    token = _MRV2_IN_PROFILE_RUN.set(enabled)
+    try:
+        yield
+    finally:
+        _MRV2_IN_PROFILE_RUN.reset(token)
+
+
+def get_mrv2_in_profile_run() -> bool:
+    return _MRV2_IN_PROFILE_RUN.get()
+
+
 @contextmanager
 def set_ascend_forward_context(
     attn_metadata: Any,
     vllm_config: VllmConfig,
-    virtual_engine: int = 0,
     num_tokens: int = 0,
     num_tokens_across_dp: torch.Tensor | None = None,
     in_profile_run: bool = False,
@@ -52,21 +76,21 @@ def set_ascend_forward_context(
     forward_context_kwargs = {
         "attn_metadata": attn_metadata,
         "vllm_config": vllm_config,
-        "virtual_engine": virtual_engine,
         "num_tokens": num_tokens,
         "num_tokens_across_dp": num_tokens_across_dp,
         "cudagraph_runtime_mode": aclgraph_runtime_mode,
         "batch_descriptor": batch_descriptor,
         "skip_compiled": skip_compiled,
     }
-
     with set_forward_context(**forward_context_kwargs):
         forward_context = get_forward_context()
         forward_context.draft_attn_metadatas = draft_attn_metadatas
 
         from vllm_ascend.ops.fused_moe.moe_comm_method import get_moe_comm_method
 
-        moe_comm_type = select_moe_comm_method(num_tokens, vllm_config, is_draft_model)
+        max_num_tokens = int(num_tokens_across_dp.max().item()) if num_tokens_across_dp is not None else num_tokens
+        moe_comm_type = select_moe_comm_method(max_num_tokens, vllm_config, is_draft_model)
+
         forward_context.moe_comm_type = moe_comm_type
         forward_context.moe_comm_method = get_moe_comm_method(moe_comm_type)
 
@@ -123,13 +147,15 @@ def set_ascend_forward_context(
         forward_context.prefetch_mlp_down_proj = False
         forward_context.model_instance = model_instance
         forward_context.is_draft_model = is_draft_model
+        forward_context.is_draft_model_prefill = False
 
         if num_tokens is None and attn_metadata is not None:
             num_tokens = attn_metadata.num_actual_tokens
 
         dp_world_size = get_dp_group().world_size
         if dp_world_size > 1 and forward_context.dp_metadata is not None:
-            max_tokens_across_dp = forward_context.dp_metadata.max_tokens_across_dp_cpu.item()
+            dp_meta = forward_context.dp_metadata
+            max_tokens_across_dp = dp_meta.num_tokens_across_dp_cpu.max().item()
             if forward_context.flash_comm_v1_enabled or forward_context.flashcomm_v2_enabled:
                 padded_length = (max_tokens_across_dp + tp_world_size - 1) // tp_world_size * tp_world_size
                 pad_size = padded_length - num_tokens
@@ -186,7 +212,9 @@ def set_mc2_mask(vllm_config, device):
     if _reserved_mc2_mask is not None:
         return
     if is_moe_model(vllm_config):
-        _reserved_mc2_mask = torch.zeros(get_mc2_tokens_capacity(), dtype=torch.bool, device=device)
+        _reserved_mc2_mask = torch.zeros(
+            vllm_config.scheduler_config.max_num_batched_tokens, dtype=torch.bool, device=device
+        )
     else:
         _reserved_mc2_mask = None
 
@@ -207,6 +235,9 @@ def select_moe_comm_method(num_tokens: int, vllm_config: VllmConfig, is_draft_mo
        quantization with small EP size, no dynamic_eplb, and not in MTP
        mode; otherwise use MC2 within capacity or all-to-all.
     5. On 310P, always use all-gather.
+    6. On A5 with expert parallel, use MC2 when tokens fit the MC2 capacity
+       and the EP size is large enough; otherwise use all-gather when
+       EP size is smaller than num of topK experts or all-to-all.
 
     Args:
         num_tokens (int): The number of tokens in the current batch.
@@ -232,11 +263,12 @@ def select_moe_comm_method(num_tokens: int, vllm_config: VllmConfig, is_draft_mo
     if not vllm_config.parallel_config.enable_expert_parallel or get_ep_group().world_size == 1:
         moe_comm_type = MoECommType.ALLGATHER
     elif soc_version in {AscendDeviceType.A2}:
-        if (
-            num_tokens <= mc2_tokens_capacity
-            and vllm_config.parallel_config.world_size_across_dp / vllm_config.parallel_config.pipeline_parallel_size
-            >= 16
-        ):
+        num_experts = vllm_config.model_config.get_num_experts()
+        ep_world_size = (
+            vllm_config.parallel_config.world_size_across_dp // vllm_config.parallel_config.pipeline_parallel_size
+        )
+        num_experts_per_device = num_experts // ep_world_size
+        if num_experts_per_device <= 24 and ep_world_size >= 16 and num_tokens <= mc2_tokens_capacity:
             moe_comm_type = MoECommType.MC2
         else:
             moe_comm_type = MoECommType.ALLGATHER
@@ -244,14 +276,18 @@ def select_moe_comm_method(num_tokens: int, vllm_config: VllmConfig, is_draft_mo
     elif soc_version in {AscendDeviceType.A3}:
         # TODO: drop the EP-size guard when dispatch_ffn_combine supports larger EP sizes
         # TODO: drop speculative method guard when dispatch_gmm_combine_decode supports w16a16
-        fused_mc2_enable = envs_ascend.VLLM_ASCEND_ENABLE_FUSED_MC2 and quant_type == "w8a8_dynamic"
-        dispatch_ffn_combine_enable = get_ep_group().world_size <= 32 and (not is_draft_model)
+        fused_mc2_enable = envs_ascend.VLLM_ASCEND_ENABLE_FUSED_MC2
+        dispatch_ffn_combine_enable = get_ep_group().world_size <= 32
         if num_tokens <= mc2_tokens_capacity:
             fused_decode_enable = fused_mc2_enable
             if envs_ascend.VLLM_ASCEND_ENABLE_FUSED_MC2 == 1:
                 fused_decode_enable = fused_mc2_enable and dispatch_ffn_combine_enable
             elif envs_ascend.VLLM_ASCEND_ENABLE_FUSED_MC2 == 2:
-                fused_decode_enable = fused_mc2_enable and speculative_enable_dispatch_gmm_combine_decode(vllm_config)
+                fused_decode_enable = (
+                    fused_mc2_enable
+                    and speculative_enable_dispatch_gmm_combine_decode(vllm_config)
+                    and quant_type == "w8a8_dynamic"
+                )
             moe_comm_type = MoECommType.FUSED_MC2 if fused_decode_enable else MoECommType.MC2
         else:
             fused_prefill_enable = fused_mc2_enable
@@ -263,10 +299,73 @@ def select_moe_comm_method(num_tokens: int, vllm_config: VllmConfig, is_draft_mo
     elif soc_version in {AscendDeviceType._310P}:
         moe_comm_type = MoECommType.ALLGATHER
     elif soc_version in {AscendDeviceType.A5}:
-        if num_tokens <= mc2_tokens_capacity and vllm_config.parallel_config.world_size_across_dp > 1:
+        num_experts_per_tok = vllm_config.model_config.hf_text_config.num_experts_per_tok
+        world_size = vllm_config.parallel_config.world_size_across_dp
+        if num_tokens <= mc2_tokens_capacity and world_size > 1:
             moe_comm_type = MoECommType.MC2
+        elif world_size <= num_experts_per_tok:
+            moe_comm_type = MoECommType.ALLGATHER
         else:
             moe_comm_type = MoECommType.ALLTOALL
     else:
         raise ValueError(f"Unsupported soc_version: {soc_version}")
     return moe_comm_type
+
+
+class _ExtraForwardContextProxy:
+    """Unified forward-context access for v1/v2 model runners."""
+
+    extra_attrs = (
+        "capturing",
+        "moe_comm_type",
+        "moe_comm_method",
+        "mmrs_fusion",
+        "num_tokens",
+        "flash_comm_v1_enabled",
+        "flashcomm_v2_enabled",
+        "pad_size",
+        "padded_length",
+        "num_tokens_across_dp",
+        "mc2_mask",
+        "is_draft_model",
+        "is_draft_model_prefill",
+        "prefetch_mlp_gate_up_proj",
+        "prefetch_mlp_down_proj",
+        "model_instance",
+        "layer_idx",
+        "max_tokens_across_dp",
+        "max_tokens_across_pcp",
+        "num_accept_tokens",
+        "in_profile_run",
+        "padded_num_tokens",
+    )
+
+    def check_extra_attr(self, name: str):
+        if name not in self.extra_attrs:
+            raise AttributeError(
+                f"{name} is not extra forward context attribute, "
+                "please get/set it from vllm's _forward_context directly."
+            )
+
+    @staticmethod
+    def _ctx():
+        return get_forward_context()
+
+    def __getattr__(self, name: str) -> Any:
+        self.check_extra_attr(name)
+        ctx = self._ctx()
+        if envs_vllm.VLLM_USE_V2_MODEL_RUNNER:
+            return ctx.additional_kwargs[name]
+        return getattr(ctx, name)
+
+    def __setattr__(self, name: str, value: Any) -> None:
+        self.check_extra_attr(name)
+        ctx = self._ctx()
+        if envs_vllm.VLLM_USE_V2_MODEL_RUNNER:
+            ctx.additional_kwargs[name] = value
+        else:
+            setattr(ctx, name, value)
+
+
+# usage: from vllm_ascend.ascend_forward_context import _EXTRA_CTX
+_EXTRA_CTX = _ExtraForwardContextProxy()

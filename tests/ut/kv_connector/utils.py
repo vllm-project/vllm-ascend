@@ -4,7 +4,7 @@
 # Copyright (c) 2025 Huawei Technologies Co., Ltd. All Rights Reserved.
 
 import os
-from typing import Any, Optional
+from typing import Any
 
 import torch
 from vllm import SamplingParams
@@ -122,7 +122,7 @@ def create_request(
 
     block_hasher = get_request_block_hasher(block_size, sha256)
 
-    kv_transfer_params: Optional[dict[str, Any]] = None
+    kv_transfer_params: dict[str, Any] | None = None
 
     if do_remote_decode:
         assert not do_remote_prefill
@@ -162,8 +162,8 @@ def create_request(
 
 def create_model_runner_output(
     reqs: list[Request],
-    finished_sending: Optional[list[str]] = None,
-    finished_recving: Optional[list[str]] = None,
+    finished_sending: list[str] | None = None,
+    finished_recving: list[str] | None = None,
     use_eos: bool = False,
 ) -> ModelRunnerOutput:
     """Make dummy model runner output for testing."""

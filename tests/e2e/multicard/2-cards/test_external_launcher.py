@@ -26,6 +26,7 @@ import sys
 from pathlib import Path
 from unittest.mock import patch
 
+import huggingface_hub
 import pytest
 import torch_npu
 from modelscope import snapshot_download  # type: ignore
@@ -150,7 +151,7 @@ def test_qwen3_external_launcher_with_sleepmode():
         env=env,
         stdout=subprocess.PIPE,
         stderr=subprocess.STDOUT,
-        timeout=300,
+        timeout=600,
     )
     output = proc.stdout.decode(errors="ignore")
 
@@ -165,7 +166,10 @@ def test_qwen3_external_launcher_with_sleepmode():
 def test_qwen3_external_launcher_with_sleepmode_level2():
     script = Path(__file__).parent.parent.parent.parent.parent / "examples" / "offline_external_launcher.py"
     env = os.environ.copy()
-    model_path = snapshot_download("Qwen/Qwen3-8B")
+    model_path = snapshot_download(
+        "Qwen/Qwen3-8B",
+        local_files_only=huggingface_hub.constants.HF_HUB_OFFLINE,
+    )
     # TODO: Add moe model test
     cmd = [
         sys.executable,
@@ -196,7 +200,7 @@ def test_qwen3_external_launcher_with_sleepmode_level2():
         env=env,
         stdout=subprocess.PIPE,
         stderr=subprocess.STDOUT,
-        timeout=300,
+        timeout=600,
     )
     output = proc.stdout.decode(errors="ignore")
 

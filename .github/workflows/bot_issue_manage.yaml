@@ -1,0 +1,26 @@
+name: "Issue Create/Update Labeler"
+on:
+  issues:
+    types: [opened, edited]
+
+permissions:
+  issues: write
+  contents: read
+
+jobs:
+  triage:
+    runs-on: ubuntu-latest
+    if: |
+      startsWith(github.event.issue.title, '[Bug]:') ||
+      startsWith(github.event.issue.title, '[Installation]:') ||
+      startsWith(github.event.issue.title, '[Usage]:') ||
+      startsWith(github.event.issue.title, '[Doc]:') ||
+      startsWith(github.event.issue.title, '[Misc]:')
+    steps:
+    - uses: github/issue-labeler@v3.4 
+      with:
+        configuration-path: .github/issue-labeler.yml
+        enable-versioned-regex: 0
+        repo-token: ${{ secrets.GITHUB_TOKEN }}
+        include-title: 1
+        include-body: 0
