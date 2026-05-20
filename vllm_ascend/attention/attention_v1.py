@@ -655,7 +655,7 @@ class AscendAttentionBackendImpl(AttentionImpl):
         use_bnsd_for_d512 = self.head_size == 512 and self.sinks is None
         if use_bnsd_for_d512:
             input_layout = "BNSD"
-            query = query.unsqueeze(2)  # [batch, heads, 512] -> [batch, heads, 1, 512]
+            query = query.unsqueeze(2)
             output = output.unsqueeze(2)
             # Decode mode doesn't need attn_mask, sparse_mode=0
             if attn_metadata.attn_state == AscendAttentionState.DecodeOnly:
@@ -1004,36 +1004,6 @@ class AscendAttentionBackendImpl(AttentionImpl):
         output[:num_tokens] = attn_output_tnd[:num_tokens]
         return output
 
-    def _forward_fia_slidingwindow(self, query: torch.Tensor, attn_metadata: AscendMetadata, output: torch.Tensor):
-        batch_size = attn_metadata.seq_lens.shape[0]
-        block_size = 128
-        query = query.view(batch_size, 1, self.num_heads * self.head_size)
-        key = self.key_cache
-        value = self.value_cache
-        if self.key_cache is not None and self.value_cache is not None:
-            block_size = self.key_cache.shape[1]
-            key = self.key_cache.flatten(2, 3).contiguous()
-            value = self.value_cache.flatten(2, 3).contiguous()
-
-        attn_output, _ = torch_npu.npu_fused_infer_attention_score(
-            query,
-            key,
-            value,
-            num_heads=self.num_heads,
-            num_key_value_heads=self.num_kv_heads,
-            input_layout="BSH",
-            block_size=block_size,
-            pre_tokens=self.sliding_window,
-            scale=self.scale,
-            block_table=attn_metadata.block_tables,
-            actual_seq_lengths=[1] * len(attn_metadata.seq_lens),
-            actual_seq_lengths_kv=attn_metadata.seq_lens,
-        )
-
-        attn_output = attn_output.view(batch_size, self.num_heads, self.head_size)
-        output[:batch_size] = attn_output[:batch_size]
-        return output
-
     def forward_fused_infer_attention(
         self,
         query: torch.Tensor,
@@ -1051,13 +1021,6 @@ class AscendAttentionBackendImpl(AttentionImpl):
             attn_output, num_tokens = self.full_graph_fia(query, key, value, attn_metadata, output, layer)
             output[:num_tokens] = attn_output[:num_tokens]
             return output
-        if (
-            attn_metadata.attn_state == AscendAttentionState.DecodeOnly
-            and self.sliding_window is not None
-            and attn_metadata.seq_lens.shape[0] == query.size(0)
-            and self.sinks is None
-        ):
-            return self._forward_fia_slidingwindow(query, attn_metadata, output)
 
         passed_key = key
         key, value, block_size, block_table, actual_seq_lengths_kv = self._get_fia_params(
