@@ -44,38 +44,9 @@ docker run --rm \
 -it $IMAGE bash
 ```
 
-Build from source:
-
-```{code-block} bash
-:substitutions:
-
-# Install vLLM.
-git clone --depth 1 --branch |vllm_version| https://github.com/vllm-project/vllm
-cd vllm
-VLLM_TARGET_DEVICE=empty pip install -v -e .
-cd ..
-
-# Install vLLM Ascend.
-git clone --depth 1 --branch |vllm_ascend_version| https://github.com/vllm-project/vllm-ascend.git
-cd vllm-ascend
-git submodule update --init --recursive
-pip install -v -e .
-cd ..
-```
-
 ## Deployment
 
-Set environment variables before starting the service:
-
-```bash
-source /usr/local/Ascend/ascend-toolkit/set_env.sh
-source /usr/local/Ascend/nnrt/set_env.sh 2>/dev/null || true
-unset ASCEND_DEVICE_ID DEVICE_ID ASCEND_VISIBLE_DEVICES
-export ASCEND_RT_VISIBLE_DEVICES=0,1,2,3
-export HCCL_INTRA_ROCE_ENABLE=1
-```
-
-Startup command:
+This document is validated on vLLM-Ascend 0.17.0rc2.dev with CANN 8.5.1 on Atlas 800I A2.
 
 ```{test} bash
 :sync-yaml: tests/e2e/models/configs/c4ai-command-r-v01.yaml
@@ -135,7 +106,6 @@ Reference values (from `tests/e2e/models/configs/c4ai-command-r-v01.yaml`):
 ## FAQ
 
 ### HCCL init failure (EI0010 / error code 5)
-
 **Symptoms:**
 
 - `hcclCommInitRootInfoConfig ... error code is 5`
@@ -143,7 +113,6 @@ Reference values (from `tests/e2e/models/configs/c4ai-command-r-v01.yaml`):
 
 **Recommended checks:**
 
-- Ensure `ASCEND_RT_VISIBLE_DEVICES` matches `--tensor-parallel-size`.
-- Set `HCCL_INTRA_ROCE_ENABLE=1`.
-- Keep device mapping consistent across worker processes.
-- For baseline startup, try `--tensor-parallel-size 1` first.
+- Confirm visible NPU count matches `--tensor-parallel-size` (this model uses TP4).
+- Verify multi-card interconnect and driver/toolkit installation in your deployment environment.
+- Retry after ensuring all workers use consistent device mapping.
