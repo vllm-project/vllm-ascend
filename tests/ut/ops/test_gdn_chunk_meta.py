@@ -159,6 +159,8 @@ def test_chunk_gated_delta_rule_fwd_threads_prebuilt_chunk_offsets(
         (),
         {
             "block_indices_cumsum": None,
+            "cu_seqlens_host": (0, 4, 7),
+            "chunk_indices_chunk64_host": (0, 0, 1, 0),
             "chunk_indices_chunk64": None,
             "chunk_offsets_chunk64": chunk_offsets,
             "update_chunk_offsets_chunk64": update_chunk_offsets,
@@ -308,11 +310,13 @@ def test_chunk_gated_delta_rule_fwd_uses_prebuilt_host_meta_without_runtime_toli
             )
             or (_DummyTensor("h"), _DummyTensor("v_new"), _DummyTensor("final_state"))
         ),
+        raising=False,
     )
     monkeypatch.setattr(
         torch.ops._C_ascend,
         "chunk_fwd_o",
         lambda *args, **kwargs: _DummyTensor("o_ascend"),
+        raising=False,
     )
     monkeypatch.setattr(
         torch.Tensor,
