@@ -58,7 +58,12 @@ from vllm_ascend import envs as ascend_envs
 from vllm_ascend.ascend_config import get_ascend_config, init_ascend_config
 from vllm_ascend.distributed.kv_transfer.utils.mooncake_transfer_engine import global_te
 from vllm_ascend.distributed.kv_transfer.utils.utils import get_transfer_timeout_value
-from vllm_ascend.utils import enable_custom_op, is_vl_model
+from vllm_ascend.utils import (
+    enable_custom_op, 
+    is_vl_model,
+    AscendDeviceType,
+    get_ascend_device_type,
+)
 
 # isort: off
 if TYPE_CHECKING:

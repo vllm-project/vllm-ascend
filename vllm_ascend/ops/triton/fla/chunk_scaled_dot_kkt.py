@@ -138,5 +138,9 @@ def chunk_scaled_dot_kkt_fwd(
         num_warps=8,
         num_stages=3,
         multibuffer=True,
+        **({"disable_tightly_coupled_buffer_reuse": True}
+        if get_ascend_device_type() == AscendDeviceType.A5 else {}),
+        # inject_block_all=True
+        # disable_tightly_coupled_buffer_reuse=True
     )
     return A
