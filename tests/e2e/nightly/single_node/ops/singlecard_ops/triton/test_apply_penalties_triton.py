@@ -4,10 +4,11 @@
 # Requires NPU and Triton-Ascend.
 
 import gc
+
 import pytest
 import torch
-
 from vllm.v1.sample.ops.penalties import apply_all_penalties as v1_apply_all_penalties
+
 from vllm_ascend.sample.penalties import apply_all_penalties as ascend_apply_all_penalties
 
 # Same scenario grid as test_apply_penalties_model_executor (equivalence + boundaries).
@@ -30,14 +31,10 @@ def _make_tokens(
     device: str,
 ) -> torch.Tensor:
     if mode == "all_padding":
-        return torch.full(
-            (num_seqs, seq_len), vocab_size, device=device, dtype=torch.int64
-        )
+        return torch.full((num_seqs, seq_len), vocab_size, device=device, dtype=torch.int64)
     if seq_len == 0:
         return torch.empty((num_seqs, 0), device=device, dtype=torch.int64)
-    tokens = torch.randint(
-        0, vocab_size, (num_seqs, seq_len), device=device, dtype=torch.int64
-    )
+    tokens = torch.randint(0, vocab_size, (num_seqs, seq_len), device=device, dtype=torch.int64)
     pad_mask = torch.rand(num_seqs, seq_len, device=device) > 0.7
     tokens[pad_mask] = vocab_size
     return tokens
@@ -69,12 +66,8 @@ def test_apply_all_penalties_v1_vs_ascend(
     logits_v1 = torch.randn(num_seqs, vocab_size, device=device, dtype=dtype)
     logits_ascend = logits_v1.clone()
 
-    prompt_tokens = _make_tokens(
-        num_seqs, max_prompt_len, vocab_size, token_mode, device
-    )
-    output_tokens = _make_tokens(
-        num_seqs, max_output_len, vocab_size, token_mode, device
-    )
+    prompt_tokens = _make_tokens(num_seqs, max_prompt_len, vocab_size, token_mode, device)
+    output_tokens = _make_tokens(num_seqs, max_output_len, vocab_size, token_mode, device)
     output_token_ids = [row.tolist() for row in output_tokens.cpu()]
 
     presence_penalties = torch.rand(num_seqs, device=device, dtype=torch.float32) * 0.2
@@ -100,9 +93,7 @@ def test_apply_all_penalties_v1_vs_ascend(
 
     atol = 1e-2 if dtype == torch.bfloat16 else 1e-3
     rtol = 1e-2 if dtype == torch.bfloat16 else 1e-3
-    assert torch.allclose(
-        logits_ascend.float(), logits_v1.float(), atol=atol, rtol=rtol
-    ), (
+    assert torch.allclose(logits_ascend.float(), logits_v1.float(), atol=atol, rtol=rtol), (
         f"Max diff: {(logits_ascend.float() - logits_v1.float()).abs().max().item()}"
     )
     gc.collect()
