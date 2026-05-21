@@ -21,7 +21,12 @@
 import torch
 from vllm.triton_utils import tl, triton
 
-pow = triton.language.extra.libdevice.pow
+try:
+    pow = triton.language.extra.libdevice.pow
+except AttributeError:
+
+    def pow(base, exponent):
+        return base**exponent
 
 
 @triton.jit

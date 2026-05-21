@@ -1903,7 +1903,7 @@ class NPUModelRunner(GPUModelRunner):
             cudagraph_mode = CUDAGraphMode.NONE
             # Mark KV scales as calculated after the first forward pass
             self.calculate_kv_scales = False  # type: ignore[has-type]
-        if self.ascend_config.enable_async_exponential:
+        if self.ascend_config.enable_async_exponential and self._gpu_sampler_bridge is None:
             self.sampler.do_async_exponential(
                 b_s=logits_indices.shape[0],
                 head_dim=self.model_config.get_vocab_size(),

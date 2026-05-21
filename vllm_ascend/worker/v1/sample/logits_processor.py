@@ -19,14 +19,14 @@ import numpy as np
 import torch
 from vllm.logger import logger
 from vllm.v1.sample.metadata import SamplingMetadata
-from vllm.v1.worker.gpu.sample.bad_words import apply_bad_words as _apply_bad_words_op
-from vllm.v1.worker.gpu.sample.gumbel import apply_temperature as _apply_temperature
-from vllm.v1.worker.gpu.sample.min_p import apply_min_p as _apply_min_p
-from vllm.v1.worker.gpu.sample.penalties import apply_penalties as _apply_penalties_op
 from vllm.v1.worker.gpu.sample.sampler import Sampler as _GpuSampler
-from vllm.v1.worker.gpu.sample.states import apply_top_k_top_p as _apply_top_k_top_p
 
+from vllm_ascend.sample.sampler import apply_top_k_top_p as _apply_top_k_top_p
 from vllm_ascend.worker.v1.sample.context import V1MappingContext
+from vllm_ascend.worker.v2.sample.bad_words import apply_bad_words as _apply_bad_words_op
+from vllm_ascend.worker.v2.sample.gumbel import apply_temperature as _apply_temperature
+from vllm_ascend.worker.v2.sample.min_p import apply_min_p as _apply_min_p
+from vllm_ascend.worker.v2.sample.penalties import apply_penalties as _apply_penalties_op
 
 
 class _SamplingParamsBridge:

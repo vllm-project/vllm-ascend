@@ -117,7 +117,7 @@ class TestGpuSamplerBridge(TestBase):
         self.assertEqual(output.sampled_token_ids.tolist(), [[1], [2], [3]])
         self.assertIs(output.logprobs_tensors, logprobs_tensors)
 
-    @patch("vllm_ascend.worker.v1.sample.adapter.GpuRejectionSampler")
+    @patch("vllm_ascend.worker.v1.sample.adapter.AscendRejectionSampler")
     def test_spec_decode_uses_gpu_rejection_sampler_flow(self, mock_rejection_sampler_cls):
         from vllm_ascend.worker.v1.sample.adapter import GpuSamplerBridge
 
@@ -168,7 +168,7 @@ class TestGpuSamplerBridge(TestBase):
         self.assertEqual(actual_input_batch.cu_num_logits_np.tolist(), [0, 2, 3])
         self.assertEqual(actual_input_batch.expanded_idx_mapping.tolist(), [0, 0, 1])
 
-    @patch("vllm_ascend.worker.v1.sample.adapter.GpuRejectionSampler")
+    @patch("vllm_ascend.worker.v1.sample.adapter.AscendRejectionSampler")
     def test_spec_decode_preserves_compact_cu_logprobs_for_bookkeeping(self, mock_rejection_sampler_cls):
         from vllm_ascend.worker.v1.sample.adapter import GpuSamplerBridge
 
@@ -346,7 +346,7 @@ class TestGpuSamplerBridge(TestBase):
     def test_probabilistic_spec_decode_logprobs_use_bridge_modes(self):
         from vllm_ascend.worker.v1.sample.adapter import GpuSamplerBridge
 
-        class FakeGpuRejectionSampler:
+        class FakeAscendRejectionSampler:
             def __init__(self, sampler, _spec_config, _device):
                 self.sampler = sampler
 
@@ -392,8 +392,8 @@ class TestGpuSamplerBridge(TestBase):
         )
 
         with patch(
-            "vllm_ascend.worker.v1.sample.adapter.GpuRejectionSampler",
-            FakeGpuRejectionSampler,
+            "vllm_ascend.worker.v1.sample.adapter.AscendRejectionSampler",
+            FakeAscendRejectionSampler,
         ):
             output = adapter.sample_from_v1(
                 logits=logits,
