@@ -26,8 +26,8 @@ from vllm.logger import logger
 from vllm_ascend.compilation.passes.base_pattern import BasePattern
 from vllm_ascend.utils import (
     AscendDeviceType,
-    get_ascend_device_type,
     enable_custom_op,
+    get_ascend_device_type,
 )
 
 class AddRMSNormQuantPattern(BasePattern):
