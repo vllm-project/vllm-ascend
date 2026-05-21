@@ -282,8 +282,15 @@ class DeepseekV4MoE(nn.Module):
 
         self.hash = layer_idx < config.num_hash_layers and not is_draft_layer
         if self.hash:
+            # Use randint instead of empty to avoid garbage values causing
+            # invalid memory access in dummy mode (--load-format="dummy")
             self.gate.tid2eid = nn.Parameter(
-                torch.empty(config.vocab_size, config.num_experts_per_tok, dtype=torch.int32), requires_grad=False
+                torch.randint(
+                    0,
+                    config.n_routed_experts,
+                    (config.vocab_size, config.num_experts_per_tok),
+                    dtype=torch.int32,
+                )
             )
             self.gate.e_score_correction_bias = None
         else:
