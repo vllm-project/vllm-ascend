@@ -32,13 +32,14 @@ from vllm.utils.torch_utils import direct_register_custom_op
 from vllm.v1.attention.backend import AttentionMetadata
 from vllm.v1.attention.backends.mla.sparse_swa import DeepseekV4SWACache
 
+from vllm_ascend.attention.dsa_v1 import dsv4_dsa_overlap_stream
 from vllm_ascend.models.layer.attention.layer import DSAAttention
 from vllm_ascend.utils import (
     AscendDeviceType,
     get_ascend_device_type,
     npu_stream_switch,
 )
-from vllm_ascend.attention.dsa_v1 import dsv4_dsa_overlap_stream
+
 
 @dataclass
 class DSAModules:
@@ -193,27 +194,26 @@ def dsa_forward(
         # for ACL graph compatibility.
         impl = self.dsa_attn.impl
         if impl.multistream_dsv4_dsa_overlap:
-            dummy = torch.zeros(1, hidden_states.shape[-1],
-                                dtype=hidden_states.dtype,
-                                device=hidden_states.device)
+            dummy = torch.zeros(1, hidden_states.shape[-1], dtype=hidden_states.dtype, device=hidden_states.device)
             aux_stream = dsv4_dsa_overlap_stream()
             e_warmup = torch.npu.current_stream().record_event()
             with npu_stream_switch(aux_stream, enabled=True):
                 torch.npu.current_stream().wait_event(e_warmup)
-                if hasattr(impl.wkv, 'weight_scale') and impl.wkv.weight.dtype == torch.int8:
+                if hasattr(impl.wkv, "weight_scale") and impl.wkv.weight.dtype == torch.int8:
                     kv_q_dummy, kv_s_dummy = torch_npu.npu_dynamic_quant(dummy)
                     _ = torch_npu.npu_quant_matmul(
                         kv_q_dummy,
                         impl.wkv.weight,
                         impl.wkv.weight_scale,
                         pertoken_scale=kv_s_dummy,
-                        output_dtype=hidden_states.dtype)
+                        output_dtype=hidden_states.dtype,
+                    )
                 else:
                     _ = impl.cv_wkv.quantize(dummy)
                     _ = impl.cv_wkv.matmul(dummy, None)
-                kv_dummy = torch.zeros(1, impl.nope_head_dim + impl.rope_head_dim,
-                                       dtype=hidden_states.dtype,
-                                       device=hidden_states.device)
+                kv_dummy = torch.zeros(
+                    1, impl.nope_head_dim + impl.rope_head_dim, dtype=hidden_states.dtype, device=hidden_states.device
+                )
                 _ = impl.kv_norm(kv_dummy)
             torch.npu.current_stream().wait_stream(aux_stream)
         output.fill_(0)

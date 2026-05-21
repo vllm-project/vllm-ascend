@@ -45,9 +45,9 @@ class CVLinearWrapper:
         if isinstance(quant_method, AscendW8A8DynamicLinearMethod):
             return True
         # Case 2: quant_method is a wrapper class, requiring .quant_method to get the actual method
-        return (hasattr(quant_method, 'quant_method')
-                and isinstance(quant_method.quant_method,
-                               AscendW8A8DynamicLinearMethod))
+        return hasattr(quant_method, "quant_method") and isinstance(
+            quant_method.quant_method, AscendW8A8DynamicLinearMethod
+        )
 
     @staticmethod
     def _detect_communication(linear):
@@ -61,13 +61,14 @@ class CVLinearWrapper:
         Note: ColumnParallelLinear even with custom_op=None only communicates when gather_output=True.
               wq_b uses default gather_output=False, so no communication and can be split.
         """
-        custom_op = getattr(linear, 'custom_op', None)
+        custom_op = getattr(linear, "custom_op", None)
         if custom_op is not None:
             from vllm_ascend.ops.linear_op import CustomReplicatedOp
+
             if not isinstance(custom_op, CustomReplicatedOp):
                 return True
 
-        return hasattr(linear, 'gather_output') and linear.gather_output
+        return hasattr(linear, "gather_output") and linear.gather_output
 
     def quantize(self, x: torch.Tensor):
         """
@@ -119,7 +120,6 @@ class CVLinearWrapper:
                 bias=bias,
                 output_dtype=self.linear.weight_scale.dtype,
             )
-
 
             if need_unsqz:
                 output = output.unsqueeze(dim=1)

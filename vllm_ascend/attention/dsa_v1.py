@@ -53,6 +53,7 @@ def dsv4_dsa_overlap_stream() -> torch.npu.Stream:
         _DSV4_DSA_OVERLAP_STREAM = torch_npu.npu.Stream()
     return _DSV4_DSA_OVERLAP_STREAM
 
+
 # mypy: disable-error-code="has-type"
 
 
@@ -1488,8 +1489,9 @@ class AscendDSAImpl(DSAAttentionImpl):
         main_stream = torch.npu.current_stream()
         aux_stream = dsv4_dsa_overlap_stream()
 
-        is_w8a8 = (not isinstance(self.wq_b.quant_method, AscendUnquantizedLinearMethod)) and \
-                  isinstance(self.wq_b.quant_method.quant_method, AscendW8A8DynamicLinearMethod)
+        is_w8a8 = (not isinstance(self.wq_b.quant_method, AscendUnquantizedLinearMethod)) and isinstance(
+            self.wq_b.quant_method.quant_method, AscendW8A8DynamicLinearMethod
+        )
 
         # Part1: q_quant[V] -> q_a_down[C]  ||  kv_quant[V]
         q_quant, q_pertoken_scale = self.cv_wq_a.quantize(hidden_states)
@@ -1516,7 +1518,8 @@ class AscendDSAImpl(DSAAttentionImpl):
             qr_pertoken_scale = None
         elif is_w8a8:
             qr, qr_pertoken_scale = torch.ops._C_ascend.npu_rms_norm_dynamic_quant(
-                wq_a_result, self.q_norm.weight, epsilon=self.eps)
+                wq_a_result, self.q_norm.weight, epsilon=self.eps
+            )
             q_b_quant, q_b_scale = qr, qr_pertoken_scale
         else:
             qr = self.q_norm(wq_a_result)
@@ -1533,7 +1536,10 @@ class AscendDSAImpl(DSAAttentionImpl):
             kv = self.kv_norm(kv)
             kv = kv.view(-1, 1, self.nope_head_dim + self.rope_head_dim)
             torch.ops._C_ascend.inplace_partial_rotary_mul(
-                kv.unsqueeze(1), cos, sin, rotary_mode="interleave",
+                kv.unsqueeze(1),
+                cos,
+                sin,
+                rotary_mode="interleave",
                 partial_slice=[self.nope_head_dim, self.head_dim],
             )
             torch.ops._C_ascend.npu_scatter_nd_update_v2(swa_kv_cache, slot_mapping, kv)
@@ -1542,8 +1548,11 @@ class AscendDSAImpl(DSAAttentionImpl):
             q = self.cv_wq_b.matmul(q_b_quant, q_b_scale).unflatten(-1, (self.n_local_heads, self.head_dim))
         elif is_w8a8:
             q = torch_npu.npu_quant_matmul(
-                q_b_quant, self.wq_b.weight, self.wq_b.weight_scale,
-                pertoken_scale=q_b_scale, bias=self.wq_b.bias,
+                q_b_quant,
+                self.wq_b.weight,
+                self.wq_b.weight_scale,
+                pertoken_scale=q_b_scale,
+                bias=self.wq_b.bias,
                 output_dtype=hidden_states.dtype,
             ).unflatten(-1, (self.n_local_heads, self.head_dim))
         else:
@@ -1554,7 +1563,10 @@ class AscendDSAImpl(DSAAttentionImpl):
 
         q = triton_q_rms(q, self.eps)
         torch.ops._C_ascend.inplace_partial_rotary_mul(
-            q.unsqueeze(1), cos, sin, rotary_mode="interleave",
+            q.unsqueeze(1),
+            cos,
+            sin,
+            rotary_mode="interleave",
             partial_slice=[self.nope_head_dim, self.head_dim],
         )
 
@@ -1600,8 +1612,8 @@ class AscendDSAImpl(DSAAttentionImpl):
         if self.multistream_dsv4_dsa_overlap:
             # mla prolog: q + kv dual-stream parallel
             q, qr, qr_pertoken_scale = self._mla_prolog_multistream(
-                hidden_states, cos, sin, swa_kv_cache,
-                swa_metadata.prefill.slot_mapping, is_prefill=True)
+                hidden_states, cos, sin, swa_kv_cache, swa_metadata.prefill.slot_mapping, is_prefill=True
+            )
         else:
             # mlaprolog
             # q
@@ -1784,8 +1796,8 @@ class AscendDSAImpl(DSAAttentionImpl):
         if self.multistream_dsv4_dsa_overlap:
             # mla prolog: q + kv dual-stream parallel
             q, qr, qr_pertoken_scale = self._mla_prolog_multistream(
-                hidden_states, cos, sin, swa_kv_cache,
-                swa_metadata.decode.slot_mapping, is_prefill=False)
+                hidden_states, cos, sin, swa_kv_cache, swa_metadata.decode.slot_mapping, is_prefill=False
+            )
         else:
             wait_hidden_state_cal_event = (
                 torch.npu.current_stream().record_event() if self.multistream_dsa_preprocess else None
