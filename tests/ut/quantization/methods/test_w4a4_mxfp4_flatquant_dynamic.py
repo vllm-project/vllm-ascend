@@ -54,25 +54,15 @@ class TestAscendW4A4MXFP4FlatQuantDynamicLinearMethod(TestBase):
             quant_description={"group_size": group_size, "max_supported_tp": max_supported_tp}
         )
         with (
-
             patch("vllm_ascend.quantization.methods.w4a4_mxfp4_flatquant.ensure_mxfp4_flatquant_linear_available"),
-
             patch(
-
                "vllm_ascend.quantization.methods.w4a4_mxfp4_flatquant.get_current_vllm_config",
-
                 return_value=mock_vllm_config,
-
             ),
-
             patch(
-
                 "vllm_ascend.quantization.methods.w4a4_mxfp4_flatquant.get_tensor_model_parallel_world_size",
-
                 return_value=tp_size,
-
             ),
-
          ):
              return AscendW4A4MXFP4FlatQuantDynamicLinearMethod()
 
@@ -166,7 +156,6 @@ class TestAscendW4A4MXFP4FlatQuantDynamicLinearMethod(TestBase):
         x = torch.randn(2, 4, self.input_size, dtype=torch.bfloat16)
         mock_torch_npu.npu_kronecker_quant.return_value = (MagicMock(), MagicMock())
         mock_torch_npu.npu_quant_matmul.return_value = torch.randn(8, self.output_size, dtype=torch.bfloat16)
- 
         output = self.method.apply(layer, x)
         self.assertEqual(output.shape, (2, 4, self.output_size))
 
@@ -250,4 +239,3 @@ class TestAscendW4A4MXFP4FlatQuantDynamicLinearMethod(TestBase):
 
 if __name__ == "__main__":
     unittest.main(argv=["first-arg-is-ignored"], exit=False)
-    

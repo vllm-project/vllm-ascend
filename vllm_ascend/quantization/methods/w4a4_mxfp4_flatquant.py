@@ -17,6 +17,7 @@
 
 import math
 from typing import Any
+
 import torch
 import torch_npu
 from vllm.config import get_current_vllm_config
@@ -186,4 +187,3 @@ class AscendW4A4MXFP4FlatQuantDynamicLinearMethod(AscendLinearScheme):
         layer.right_trans = torch.nn.Parameter(layer.right_trans.data)
         layer.clip_ratio = torch.nn.Parameter(layer.clip_ratio.data.to(torch.float32))
         layer.aclnn_clip_ratio = layer.clip_ratio.item()
-        
