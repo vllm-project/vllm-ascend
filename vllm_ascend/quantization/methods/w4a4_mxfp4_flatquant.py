@@ -97,12 +97,12 @@ class AscendW4A4MXFP4FlatQuantDynamicLinearMethod(AscendLinearScheme):
             left_trans_dim = origin_size // right_trans_dim
         else:
             left_trans_dim, right_trans_dim = get_decompose_dim(self.input_size, 1)
-                 
+
         params_dict["left_trans"] = torch.empty(left_trans_dim, left_trans_dim, dtype=params_dtype)
         params_dict["right_trans"] = torch.empty(right_trans_dim, right_trans_dim, dtype=params_dtype)
         params_dict["clip_ratio"] = torch.empty(1, dtype=torch.float32)
         return params_dict
-    
+
     def get_pergroup_param(
         self, input_size: int, output_size: int, params_dtype: torch.dtype, layer_type: str | None = None
     ) -> dict[str, Any]:
