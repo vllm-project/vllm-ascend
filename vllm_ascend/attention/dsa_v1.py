@@ -68,6 +68,19 @@ def rotate_activation(x: torch.Tensor, hadamard: torch.Tensor) -> torch.Tensor:
     return hadamard_transform_ref(x, hadamard=hadamard, scale=hidden_size**-0.5)
 
 
+def _is_w8a8_dynamic(linear) -> bool:
+    """True iff ``linear`` is wired up with ``AscendW8A8DynamicLinearMethod``.
+
+    Returns False for unquantized layers or any other quant scheme, so callers
+    can fall back to the plain Linear call path.
+    """
+    qm = getattr(linear, "quant_method", None)
+    if qm is None or isinstance(qm, AscendUnquantizedLinearMethod):
+        return False
+    inner = getattr(qm, "quant_method", None)
+    return isinstance(inner, AscendW8A8DynamicLinearMethod)
+
+
 def pad_to_blocks(x: torch.Tensor, length_list: torch.Tensor, block_size: int = 128):
     """
     Pads a ragged/packed tensor into fixed-size blocks.
@@ -1496,9 +1509,40 @@ class AscendDSAImpl(DSAAttentionImpl):
         actual_seq_lengths_key = compress_common_attn_metadata.prefill.seq_lens
 
         # mlaprolog
+        # Share one dynamic-quant of hidden_states between wq_a and wkv when
+        # both sides are W8A8 dynamic; otherwise keep the plain Linear path.
+        share_hs_quant = _is_w8a8_dynamic(self.wq_a) and _is_w8a8_dynamic(self.wkv)
+        if share_hs_quant:
+            hs_int8, hs_pertoken_scale = torch_npu.npu_dynamic_quant(hidden_states)
+            q_a = torch_npu.npu_quant_matmul(
+                hs_int8,
+                self.wq_a.weight,
+                self.wq_a.weight_scale,
+                pertoken_scale=hs_pertoken_scale,
+                bias=self.wq_a.bias,
+                output_dtype=hidden_states.dtype,
+            )
+        else:
+            q_a = self.wq_a(hidden_states)
+
         # q
-        qr = self.q_norm(self.wq_a(hidden_states))
-        q = self.wq_b(qr).unflatten(-1, (self.n_local_heads, self.head_dim))
+        if _is_w8a8_dynamic(self.wq_b):
+            qr, qr_pertoken_scale = torch.ops._C_ascend.npu_rms_norm_dynamic_quant(
+                q_a, self.q_norm.weight, epsilon=self.eps
+            )
+            q = torch_npu.npu_quant_matmul(
+                qr,
+                self.wq_b.weight,
+                self.wq_b.weight_scale,
+                pertoken_scale=qr_pertoken_scale,
+                bias=self.wq_b.bias,
+                output_dtype=hidden_states.dtype,
+            ).unflatten(-1, (self.n_local_heads, self.head_dim))
+        else:
+            qr = self.q_norm(q_a)
+            q = self.wq_b(qr).unflatten(-1, (self.n_local_heads, self.head_dim))
+            qr_pertoken_scale = None
+
         q = triton_q_rms(q, self.eps)
 
         torch.ops._C_ascend.inplace_partial_rotary_mul(
@@ -1509,7 +1553,17 @@ class AscendDSAImpl(DSAAttentionImpl):
             partial_slice=[self.nope_head_dim, self.head_dim],
         )
         # win kv & tok_dis
-        kv = self.wkv(hidden_states)
+        if share_hs_quant:
+            kv = torch_npu.npu_quant_matmul(
+                hs_int8,
+                self.wkv.weight,
+                self.wkv.weight_scale,
+                pertoken_scale=hs_pertoken_scale,
+                bias=self.wkv.bias,
+                output_dtype=hidden_states.dtype,
+            )
+        else:
+            kv = self.wkv(hidden_states)
         kv = self.kv_norm(kv)
         assert self.rope_head_dim is not None
         kv = kv.view(-1, 1, self.nope_head_dim + self.rope_head_dim)
@@ -1542,6 +1596,7 @@ class AscendDSAImpl(DSAAttentionImpl):
                     actual_seq_lengths_query=actual_seq_lengths_query,
                     actual_seq_lengths_key=actual_seq_lengths_key,
                     with_prefill=True,
+                    qr_pertoken_scale=qr_pertoken_scale,
                 )
 
             coff = 2 if self.compressor_overlap else 1
@@ -1672,15 +1727,33 @@ class AscendDSAImpl(DSAAttentionImpl):
         sin = compress_common_attn_metadata.decode.sin[layer_name]
         actual_seq_lengths_query = compress_common_attn_metadata.decode.query_start_loc
         actual_seq_lengths_key = compress_common_attn_metadata.decode.seq_lens
+
+        # Share one dynamic-quant of hidden_states between wq_a (main stream)
+        # and wkv (attention stream) when both sides are W8A8 dynamic. The
+        # shared quant must land before record_event() so the attention stream
+        # observes it via wait_event; the two matmuls stay on their own streams
+        # and remain parallel.
+        share_hs_quant = _is_w8a8_dynamic(self.wq_a) and _is_w8a8_dynamic(self.wkv)
+        if share_hs_quant:
+            hs_int8, hs_pertoken_scale = torch_npu.npu_dynamic_quant(hidden_states)
+
         wait_hidden_state_cal_event = (
             torch.npu.current_stream().record_event() if self.multistream_dsa_preprocess else None
         )
 
         # q
-        if (not isinstance(self.wq_b.quant_method, AscendUnquantizedLinearMethod)) and isinstance(
-            self.wq_b.quant_method.quant_method, AscendW8A8DynamicLinearMethod
-        ):
-            q_a = self.wq_a(hidden_states)
+        if _is_w8a8_dynamic(self.wq_b):
+            if share_hs_quant:
+                q_a = torch_npu.npu_quant_matmul(
+                    hs_int8,
+                    self.wq_a.weight,
+                    self.wq_a.weight_scale,
+                    pertoken_scale=hs_pertoken_scale,
+                    bias=self.wq_a.bias,
+                    output_dtype=hidden_states.dtype,
+                )
+            else:
+                q_a = self.wq_a(hidden_states)
             qr, qr_pertoken_scale = torch.ops._C_ascend.npu_rms_norm_dynamic_quant(
                 q_a, self.q_norm.weight, epsilon=self.eps
             )
@@ -1693,7 +1766,18 @@ class AscendDSAImpl(DSAAttentionImpl):
                 output_dtype=hidden_states.dtype,
             ).unflatten(-1, (self.n_local_heads, self.head_dim))
         else:
-            qr = q = self.q_norm(self.wq_a(hidden_states))
+            if share_hs_quant:
+                q_a = torch_npu.npu_quant_matmul(
+                    hs_int8,
+                    self.wq_a.weight,
+                    self.wq_a.weight_scale,
+                    pertoken_scale=hs_pertoken_scale,
+                    bias=self.wq_a.bias,
+                    output_dtype=hidden_states.dtype,
+                )
+                qr = q = self.q_norm(q_a)
+            else:
+                qr = q = self.q_norm(self.wq_a(hidden_states))
             q = self.wq_b(q).unflatten(-1, (self.n_local_heads, self.head_dim))
             qr_pertoken_scale = None
 
@@ -1712,7 +1796,17 @@ class AscendDSAImpl(DSAAttentionImpl):
                 torch.npu.current_stream().wait_event(wait_hidden_state_cal_event)
 
             # win kv & tok_dis
-            kv = self.wkv(hidden_states)
+            if share_hs_quant:
+                kv = torch_npu.npu_quant_matmul(
+                    hs_int8,
+                    self.wkv.weight,
+                    self.wkv.weight_scale,
+                    pertoken_scale=hs_pertoken_scale,
+                    bias=self.wkv.bias,
+                    output_dtype=hidden_states.dtype,
+                )
+            else:
+                kv = self.wkv(hidden_states)
             kv = self.kv_norm(kv)
             assert self.rope_head_dim is not None
             kv = kv.view(-1, 1, self.nope_head_dim + self.rope_head_dim)
@@ -1861,11 +1955,7 @@ class AscendDSAImpl(DSAAttentionImpl):
         # sorted keys: [attn, compressor.state_cache, indexer.compressor.state_cache, indexer.k_cache, swa_cache]
         (_, _, indexer_kv_state_metadata, indexer_kv_scale_metadata, _) = attn_metadata  # type: ignore[misc]
 
-        if (
-            (not isinstance(self.inderxer_wq_b.quant_method, AscendUnquantizedLinearMethod))
-            and isinstance(self.inderxer_wq_b.quant_method.quant_method, AscendW8A8DynamicLinearMethod)
-            and qr_pertoken_scale is not None
-        ):
+        if _is_w8a8_dynamic(self.inderxer_wq_b) and qr_pertoken_scale is not None:
             q = torch_npu.npu_quant_matmul(
                 qr,
                 self.inderxer_wq_b.weight,
