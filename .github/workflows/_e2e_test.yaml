@@ -602,6 +602,7 @@ jobs:
           set -o pipefail
           # we must uninstall triton-ascend first, then triton. Otherwise, the triton folder will be left behind.
           python3 -m pip uninstall -y triton-ascend triton
+          python3 -m pip install regex
           pytest -sv --durations=0 tests/e2e/multicard/2-cards/test_aclgraph_capture_replay.py \
             2>&1 | tee /tmp/e2e-non-triton.log
           exit ${PIPESTATUS[0]}
