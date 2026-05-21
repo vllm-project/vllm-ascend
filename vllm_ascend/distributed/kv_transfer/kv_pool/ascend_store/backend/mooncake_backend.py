@@ -137,6 +137,13 @@ def _classify_replica_tier(replica_descs: Any) -> str:
 
 
 def _get_replica_tiers_by_key(store: Any, keys: list[str]) -> dict[str, str]:
+    """Return ``key -> tier`` for the given keys.
+
+    Tolerates two return shapes from ``store.batch_get_replica_desc``:
+    a mapping (preferred, dict-like) and a list parallel to ``keys``.
+    Unknown shapes or per-key errors degrade to "unknown" without
+    interrupting tier-log emission.
+    """
     tiers_by_key = {key: "unknown" for key in keys}
     try:
         replica_descs_by_key = store.batch_get_replica_desc(keys)
@@ -149,13 +156,17 @@ def _get_replica_tiers_by_key(store: Any, keys: list[str]) -> dict[str, str]:
         )
         return tiers_by_key
 
-    for key in keys:
-        if hasattr(replica_descs_by_key, "get"):
+    # Prefer mapping access; fall back to positional indexing for list-like
+    # returns so we don't silently mark every entry "unknown" when the
+    # backend gives us a parallel list.
+    is_mapping = hasattr(replica_descs_by_key, "get")
+    for index, key in enumerate(keys):
+        if is_mapping:
             replica_descs = replica_descs_by_key.get(key)
         else:
             try:
-                replica_descs = replica_descs_by_key[key]
-            except (KeyError, TypeError):
+                replica_descs = replica_descs_by_key[index]
+            except (IndexError, KeyError, TypeError):
                 replica_descs = None
         tiers_by_key[key] = _classify_replica_tier(replica_descs)
     return tiers_by_key
@@ -375,15 +386,28 @@ class MooncakeBackend(Backend):
         return self.store.batch_put_from_multi_buffers(keys, addrs, sizes)
 
     def get(self, keys: list[str], addrs: list[list[int]], sizes: list[list[int]]):
-        # Decide whether to split into sub-batches to fit the SSD-tier
-        # staging buffer on the owner side.
-        load_batches: list[tuple[list[str], list[list[int]], list[list[int]]]]
-        load_batches = [(keys, addrs, sizes)]
+        """Batched ``batch_get_into_multi_buffers`` with disk-offload guards.
+
+        When ``enable_offload`` is on, the owner allocates a fixed-size
+        DirectIO staging buffer; sending one giant batch through it can
+        overflow. We pre-split into sub-batches that fit the soft budget
+        and skip any single key whose staging footprint exceeds the
+        hard budget. ``VLLM_MOONCAKE_STORE_TIER_LOG`` emits a per-batch
+        memory/disk-replica breakdown when set.
+        """
+        if not keys:
+            return
+
+        load_batches: list[tuple[list[str], list[list[int]], list[list[int]]]] = [
+            (keys, addrs, sizes)
+        ]
         if (
             self.usable_disk_offload_buffer_budget_bytes is not None
             and self.disk_offload_buffer_budget_bytes is not None
         ):
-            total_staging_bytes = sum(_estimate_disk_offload_staging_bytes(size) for size in sizes)
+            total_staging_bytes = sum(
+                _estimate_disk_offload_staging_bytes(size) for size in sizes
+            )
             if total_staging_bytes > self.usable_disk_offload_buffer_budget_bytes:
                 load_batches, oversized_key = _split_disk_offload_load_batches(
                     keys,
@@ -394,7 +418,9 @@ class MooncakeBackend(Backend):
                 )
                 if oversized_key is not None:
                     oversized_key_index = keys.index(oversized_key)
-                    oversized_key_bytes = _estimate_disk_offload_staging_bytes(sizes[oversized_key_index])
+                    oversized_key_bytes = _estimate_disk_offload_staging_bytes(
+                        sizes[oversized_key_index]
+                    )
                     logger.warning(
                         "Skipping Mooncake load for key %s because it requires "
                         "%d staging bytes, exceeding the owner DirectIO budget "
@@ -413,37 +439,28 @@ class MooncakeBackend(Backend):
                 tiers_by_key: dict[str, str] | None = None
                 if tier_log_enabled:
                     tiers_by_key = _get_replica_tiers_by_key(self.store, batch_keys)
-                res = self.store.batch_get_into_multi_buffers(batch_keys, batch_addrs, batch_sizes)
+                res = self.store.batch_get_into_multi_buffers(
+                    batch_keys, batch_addrs, batch_sizes
+                )
                 if tiers_by_key is not None:
                     _log_mooncake_load_tier_summary(batch_keys, res, tiers_by_key)
-                failed = [(key, value) for key, value in zip(batch_keys, res, strict=True) if value < 0]
+                failed = [
+                    (key, value)
+                    for key, value in zip(batch_keys, res, strict=True)
+                    if value < 0
+                ]
                 if failed:
                     logger.error(
-                        "Failed to get %d Mooncake keys from sub-batch (batch_keys=%d, first_failures=%s)",
+                        "Failed to get %d Mooncake keys from sub-batch "
+                        "(batch_keys=%d, first_failures=%s)",
                         len(failed),
                         len(batch_keys),
                         failed[:3],
                     )
-                    # Same semantic as upstream: stop on first failed sub-batch.
+                    # Match upstream semantics: stop on first failed sub-batch
+                    # so callers don't see partial fills mixed with errors.
                     break
-        logger.debug(
-            "MooncakeBackend.get enter keys=%d sample_keys=%s",
-            len(keys),
-            keys[:3],
-        )
-        try:
-            res = self.store.batch_get_into_multi_buffers(keys, addrs, sizes)
-            res_list = list(res)
-            logger.debug(
-                "MooncakeBackend.get result keys=%d result_sample=%s negative_count=%d",
-                len(keys),
-                res_list[:12],
-                sum(1 for value in res_list if value < 0),
-            )
-            for value in res_list:
-                if value < 0:
-                    logger.error("Failed to get key %s, res:%s", keys, res_list)
-        except Exception as e:
+        except Exception as e:  # noqa: BLE001 — backend errors must not crash transfer threads
             logger.error(
                 "Failed to get Mooncake sub-batch %s, error: %s",
                 current_batch_keys[:3],

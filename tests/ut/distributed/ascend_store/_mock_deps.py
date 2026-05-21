@@ -68,6 +68,7 @@ _vllm_mock_modules = [
     "vllm.distributed.parallel_state",
     "vllm.envs",
     "vllm.forward_context",
+    "vllm.logger",
     "vllm.model_executor",
     "vllm.model_executor.layers",
     "vllm.model_executor.layers.linear",
@@ -166,6 +167,17 @@ for _pkg in ["vllm_ascend", "vllm_ascend.distributed"]:
     if _pkg not in sys.modules:
         sys.modules[_pkg] = _make_pkg(_pkg)
 
+# Provide a stub ``vllm_ascend.envs`` so backend modules can import it
+# without pulling in numpy / torch_npu transitively. Tests can mutate
+# attributes via ``patch.object`` or by setting them on this module.
+if "vllm_ascend.envs" not in sys.modules:
+    _ascend_envs_mod = types.ModuleType("vllm_ascend.envs")
+    _ascend_envs_mod.VLLM_MOONCAKE_STORE_TIER_LOG = False  # type: ignore[attr-defined]
+    _ascend_envs_mod.VLLM_MOONCAKE_DISK_STAGING_USABLE_RATIO = 0.9  # type: ignore[attr-defined]
+    _ascend_envs_mod.MOONCAKE_PREFERRED_SEGMENT = None  # type: ignore[attr-defined]
+    _ascend_envs_mod.MOONCAKE_REQUESTER_LOCAL_HOSTNAME = None  # type: ignore[attr-defined]
+    sys.modules["vllm_ascend.envs"] = _ascend_envs_mod
+
 _kv_transfer_init = _make_pkg("vllm_ascend.distributed.kv_transfer")
 _kv_transfer_init.register_connector = MagicMock()  # type: ignore[attr-defined]
 sys.modules["vllm_ascend.distributed.kv_transfer"] = _kv_transfer_init
@@ -173,6 +185,15 @@ sys.modules["vllm_ascend.distributed.kv_transfer"] = _kv_transfer_init
 _kv_utils_pkg = _make_pkg("vllm_ascend.distributed.kv_transfer.utils")
 sys.modules["vllm_ascend.distributed.kv_transfer.utils"] = _kv_utils_pkg
 sys.modules["vllm_ascend.distributed.kv_transfer.utils.mooncake_transfer_engine"] = MagicMock()
+
+# Stub mooncake_rdma_utils with the helpers MooncakeBackend imports. The
+# real module pulls in torch + global state; keep the surface minimal.
+_mooncake_rdma_utils_stub = types.ModuleType("vllm_ascend.distributed.kv_transfer.utils.mooncake_rdma_utils")
+_mooncake_rdma_utils_stub.get_configured_worker_rnic = lambda **kwargs: ""  # type: ignore[attr-defined]
+_mooncake_rdma_utils_stub.get_configured_preferred_segment = lambda *args, **kwargs: None  # type: ignore[attr-defined]
+_mooncake_rdma_utils_stub.get_requester_local_hostname = lambda local_ip: local_ip  # type: ignore[attr-defined]
+sys.modules["vllm_ascend.distributed.kv_transfer.utils.mooncake_rdma_utils"] = _mooncake_rdma_utils_stub
+_kv_utils_pkg.mooncake_rdma_utils = _mooncake_rdma_utils_stub  # type: ignore[attr-defined]
 
 _kv_pool_pkg = _make_pkg("vllm_ascend.distributed.kv_transfer.kv_pool")
 sys.modules["vllm_ascend.distributed.kv_transfer.kv_pool"] = _kv_pool_pkg
