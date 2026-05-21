@@ -119,7 +119,7 @@ jobs:
         if: ${{ github.event_name == 'pull_request' }}
         working-directory: /vllm-workspace/vllm-ascend
         env:
-          PIP_EXTRA_INDEX_URL: "https://mirrors.huaweicloud.com/ascend/repos/pypi https://triton-ascend.osinfra.cn/pypi/simple https://download.pytorch.org/whl/cpu/"
+          PIP_EXTRA_INDEX_URL: "https://repo.huaweicloud.com/ascend/repos/pypi https://triton-ascend.osinfra.cn/pypi/simple https://download.pytorch.org/whl/cpu/"
         run: |
           git config --global --add safe.directory /vllm-workspace/vllm-ascend
           pip install uc-manager
