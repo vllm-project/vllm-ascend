@@ -92,6 +92,7 @@ class V1MappingContext:
         req_ids: tuple[str, ...] | None = None,
         expanded_local_pos: torch.Tensor | None = None,
         cu_num_logits_np: np.ndarray | None = None,
+        idx_mapping_np: np.ndarray | None = None,
     ) -> "V1MappingContext":
         """Construct mapping context for v1 logits rows.
 
@@ -108,7 +109,12 @@ class V1MappingContext:
             raise ValueError("req_ids length must match num_reqs")
 
         expanded_idx_mapping = req_indices_at_logits.to(device=device, dtype=torch.int32)
-        idx_mapping_np = expanded_idx_mapping.detach().cpu().numpy().astype(np.int32)
+        if idx_mapping_np is None:
+            idx_mapping_np = expanded_idx_mapping.detach().cpu().numpy().astype(np.int32)
+        else:
+            idx_mapping_np = np.asarray(idx_mapping_np, dtype=np.int32)
+            if int(idx_mapping_np.shape[0]) != num_logits:
+                raise ValueError("idx_mapping_np must have one entry per logits row")
         if idx_mapping_np.size and (idx_mapping_np.min() < 0 or idx_mapping_np.max() >= num_reqs):
             raise ValueError("req_indices_at_logits contains an out-of-range request index")
 

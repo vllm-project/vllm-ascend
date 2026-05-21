@@ -1,4 +1,5 @@
 import unittest
+from unittest.mock import patch
 
 import numpy as np
 import torch
@@ -96,6 +97,25 @@ class TestV1MappingContext(TestBase):
         self.assertEqual(ctx.expanded_local_pos.tolist(), [0, 1, 0])
         np.testing.assert_array_equal(ctx.num_logits_per_req_np, np.array([2, 1], dtype=np.int32))
         np.testing.assert_array_equal(ctx.cu_num_logits_np, np.array([0, 2, 3], dtype=np.int32))
+
+    def test_from_logits_can_use_cpu_mapping_without_tensor_copy(self):
+        from vllm_ascend.worker.v1.sample.context import V1MappingContext
+
+        with patch.object(
+            torch.Tensor,
+            "cpu",
+            side_effect=AssertionError("unexpected cpu copy"),
+        ):
+            ctx = V1MappingContext.from_v1_logits(
+                num_reqs=2,
+                positions_at_logits=torch.tensor([3, 4, 7], dtype=torch.int64),
+                input_ids_at_logits=torch.tensor([13, 14, 17], dtype=torch.int64),
+                req_indices_at_logits=torch.tensor([0, 0, 1], dtype=torch.int32),
+                device=torch.device("cpu"),
+                idx_mapping_np=np.array([0, 0, 1], dtype=np.int32),
+            )
+
+        np.testing.assert_array_equal(ctx.idx_mapping_np, np.array([0, 0, 1], dtype=np.int32))
 
     def test_from_logits_rejects_mismatched_row_tensors(self):
         from vllm_ascend.worker.v1.sample.context import V1MappingContext

@@ -21,6 +21,7 @@ from vllm.v1.outputs import SamplerOutput
 from vllm.v1.sample.metadata import SamplingMetadata
 from vllm.v1.spec_decode.metadata import SpecDecodeMetadata
 from vllm.v1.worker.gpu.sample.output import SamplerOutput as GpuSamplerOutput
+from vllm.v1.worker.gpu.sample.states import NO_LOGPROBS, SamplingStates
 from vllm.v1.worker.gpu.spec_decode.rejection_sampler import RejectionSampler as GpuRejectionSampler
 
 from vllm_ascend.ascend_config import SamplingConfig
@@ -78,6 +79,7 @@ class GpuSamplerBridge:
         input_ids: torch.Tensor,  # [num_logits]
         req_indices: torch.Tensor,  # [num_logits]
         req_ids: tuple[str, ...] | None = None,
+        req_indices_np: np.ndarray | None = None,
         spec_decode_metadata: SpecDecodeMetadata | None = None,
         draft_logits: torch.Tensor | None = None,
     ) -> SamplerOutput:
@@ -90,6 +92,7 @@ class GpuSamplerBridge:
             req_indices_at_logits=req_indices,
             device=self._device,
             req_ids=req_ids,
+            idx_mapping_np=req_indices_np,
         )
 
         if spec_decode_metadata is not None:
@@ -241,6 +244,7 @@ class GpuSamplerBridge:
             req_ids=active_ctx.req_ids,
             expanded_local_pos=expanded_local_pos,
             cu_num_logits_np=active_ctx.cu_num_logits_np,
+            idx_mapping_np=active_ctx.idx_mapping_np,
         )
         processed_logits = self._logits_processor.apply(
             logits,
@@ -262,6 +266,7 @@ class GpuSamplerBridge:
             req_ids=active_ctx.req_ids,
             expanded_local_pos=input_batch.expanded_local_pos,
             cu_num_logits_np=active_ctx.cu_num_logits_np,
+            idx_mapping_np=active_ctx.idx_mapping_np,
         )
 
     def _activate_gpu_sampler(
@@ -272,8 +277,7 @@ class GpuSamplerBridge:
     ) -> None:
         self._active_sampling_metadata = sampling_metadata
         self._active_ctx = ctx
-        self.sampling_states = _GpuSamplingStatesBridge(
-            self,
+        self.sampling_states = self._build_sampling_states(
             sampling_metadata,
             ctx,
             disable_gpu_logprobs,
@@ -289,6 +293,36 @@ class GpuSamplerBridge:
         if self._active_sampling_metadata is None or self._active_ctx is None:
             raise RuntimeError("GpuSamplerBridge is not active for a worker.gpu sampler call")
         return self._active_sampling_metadata, self._active_ctx
+
+    def _build_sampling_states(
+        self,
+        sampling_metadata: SamplingMetadata,
+        ctx: V1MappingContext,
+        disable_gpu_logprobs: bool,
+    ) -> SamplingStates:
+        if ctx.num_reqs > self._max_num_reqs:
+            raise ValueError("active request count exceeds GpuSamplerBridge capacity")
+        try:
+            states = SamplingStates(self._max_num_reqs, self._vocab_size)
+        except RuntimeError as exc:
+            if "UVA is not available" not in str(exc):
+                raise
+            states = SamplingStates.__new__(SamplingStates)
+            states.max_num_reqs = self._max_num_reqs
+            states.vocab_size = self._vocab_size
+            states.temperature = SimpleNamespace(gpu=None)
+            states.seeds = SimpleNamespace(gpu=None)
+            states.num_logprobs = np.empty(self._max_num_reqs, dtype=np.int32)
+            states.num_logprobs.fill(NO_LOGPROBS)
+        states.temperature.gpu = self._temperature_for_sampling(sampling_metadata, ctx)
+        states.seeds.gpu = self._compute_seeds(sampling_metadata, ctx)
+
+        max_num_logprobs = sampling_metadata.max_num_logprobs
+        if disable_gpu_logprobs or max_num_logprobs is None:
+            states.num_logprobs[: ctx.num_reqs] = NO_LOGPROBS
+        else:
+            states.num_logprobs[: ctx.num_reqs] = int(max_num_logprobs)
+        return states
 
     def _sample(
         self,
@@ -578,25 +612,3 @@ class _GpuRejectionInputBatch(SimpleNamespace):
             cu_num_logits_np=ctx.cu_num_logits_np,
             seq_lens=torch.zeros(num_reqs, device=device, dtype=torch.int32),
         )
-
-
-class _GpuSamplingStatesBridge:
-    def __init__(
-        self,
-        bridge: GpuSamplerBridge,
-        sampling_metadata: SamplingMetadata,
-        ctx: V1MappingContext,
-        disable_gpu_logprobs: bool = False,
-    ):
-        self.temperature = SimpleNamespace(
-            gpu=bridge._temperature_for_sampling(sampling_metadata, ctx)
-        )
-        self.seeds = SimpleNamespace(gpu=bridge._compute_seeds(sampling_metadata, ctx))
-        self._max_num_logprobs = sampling_metadata.max_num_logprobs
-        self._disable_gpu_logprobs = disable_gpu_logprobs
-
-    def max_num_logprobs(self, idx_mapping_np: np.ndarray) -> int:
-        del idx_mapping_np
-        if self._disable_gpu_logprobs:
-            return -1
-        return -1 if self._max_num_logprobs is None else self._max_num_logprobs

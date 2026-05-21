@@ -168,6 +168,92 @@ class TestGpuSamplerBridge(TestBase):
         self.assertEqual(actual_input_batch.cu_num_logits_np.tolist(), [0, 2, 3])
         self.assertEqual(actual_input_batch.expanded_idx_mapping.tolist(), [0, 0, 1])
 
+    @patch("vllm_ascend.worker.v1.sample.adapter.GpuRejectionSampler")
+    def test_spec_decode_preserves_compact_cu_logprobs_for_bookkeeping(self, mock_rejection_sampler_cls):
+        from vllm_ascend.worker.v1.sample.adapter import GpuSamplerBridge
+
+        adapter = GpuSamplerBridge(
+            max_num_reqs=2,
+            vocab_size=8,
+            device=torch.device("cpu"),
+            num_speculative_tokens=1,
+            spec_config=SimpleNamespace(
+                num_speculative_tokens=1,
+                rejection_sample_method="strict",
+                synthetic_acceptance_rates=None,
+            ),
+            sampling_config=_enabled_sampling_config(),
+        )
+        logprobs_tensors = LogprobsTensors(
+            logprob_token_ids=torch.tensor([[1], [2], [3]], dtype=torch.int32),
+            logprobs=torch.tensor([[-0.1], [-0.2], [-0.3]], dtype=torch.float32),
+            selected_token_ranks=torch.tensor([1, 1, 1], dtype=torch.int32),
+            cu_num_generated_tokens=[0, 2, 3],
+        )
+        mock_rejection_sampler_cls.return_value.return_value = SimpleNamespace(
+            sampled_token_ids=torch.tensor([[1, 2], [3, 99]], dtype=torch.int32),
+            logprobs_tensors=logprobs_tensors,
+            num_sampled=torch.tensor([2, 1], dtype=torch.int32),
+        )
+
+        output = adapter.sample_from_v1(
+            logits=torch.randn(3, 8),
+            sampling_metadata=_metadata(max_num_logprobs=0),
+            num_reqs=2,
+            positions=torch.tensor([0, 1, 0], dtype=torch.int64),
+            input_ids=torch.tensor([10, 11, 20], dtype=torch.int64),
+            req_indices=torch.tensor([0, 0, 1], dtype=torch.int32),
+            spec_decode_metadata=SimpleNamespace(num_draft_tokens=[1, 0]),
+        )
+
+        self.assertIs(output.logprobs_tensors, logprobs_tensors)
+        self.assertEqual(output.logprobs_tensors.cu_num_generated_tokens, [0, 2, 3])
+
+    def test_activation_uses_upstream_sampling_states(self):
+        from vllm.v1.worker.gpu.sample.states import NO_LOGPROBS, SamplingStates
+
+        from vllm_ascend.worker.v1.sample.adapter import GpuSamplerBridge
+        from vllm_ascend.worker.v1.sample.context import V1MappingContext
+
+        adapter = GpuSamplerBridge(
+            max_num_reqs=3,
+            vocab_size=8,
+            device=torch.device("cpu"),
+            sampling_config=_enabled_sampling_config(),
+        )
+        ctx = V1MappingContext.from_v1_logits(
+            num_reqs=2,
+            positions_at_logits=torch.tensor([0, 1], dtype=torch.int64),
+            input_ids_at_logits=torch.tensor([10, 11], dtype=torch.int64),
+            req_indices_at_logits=torch.tensor([0, 1], dtype=torch.int32),
+            device=torch.device("cpu"),
+            req_ids=("req0", "req1"),
+        )
+
+        adapter._activate_gpu_sampler(_metadata(max_num_logprobs=2), ctx)
+        try:
+            self.assertIsInstance(adapter.sampling_states, SamplingStates)
+            self.assertEqual(adapter.sampling_states.max_num_logprobs(ctx.idx_mapping_np), 2)
+            torch.testing.assert_close(
+                adapter.sampling_states.temperature.gpu,
+                torch.ones(2, dtype=torch.float32),
+            )
+        finally:
+            adapter._deactivate_gpu_sampler()
+
+        adapter._activate_gpu_sampler(
+            _metadata(max_num_logprobs=2),
+            ctx,
+            disable_gpu_logprobs=True,
+        )
+        try:
+            self.assertEqual(
+                adapter.sampling_states.max_num_logprobs(ctx.idx_mapping_np),
+                NO_LOGPROBS,
+            )
+        finally:
+            adapter._deactivate_gpu_sampler()
+
     def test_probabilistic_spec_decode_requires_draft_logits(self):
         from vllm_ascend.worker.v1.sample.adapter import GpuSamplerBridge
 

@@ -98,6 +98,7 @@ class AscendSpecDecodeBaseProposer(SpecDecodeBaseProposer):
 
         self.use_async_scheduling = self.vllm_config.scheduler_config.async_scheduling
         self.pass_hidden_states_to_model = pass_hidden_states_to_model
+        self.draft_logits: torch.Tensor | None = None
         self.decode_threshold = 1 + self.num_speculative_tokens
         self.query_start_loc = self.runner._make_buffer(self.runner.max_num_reqs + 2, dtype=torch.int32)
         self.arange_cpu = torch.arange(self.arange.shape[0], device="cpu", dtype=torch.int32)
@@ -512,6 +513,18 @@ class AscendSpecDecodeBaseProposer(SpecDecodeBaseProposer):
         if forward_context.cudagraph_runtime_mode == CUDAGraphMode.FULL:
             self._update_full_graph_params(forward_context, num_input_tokens, multi_steps_attn_metadata)
 
+    def _new_draft_logits_buffer(
+        self,
+        batch_size: int,
+        logits: torch.Tensor,
+    ) -> torch.Tensor | None:
+        if getattr(self.speculative_config, "rejection_sample_method", "strict") != "probabilistic":
+            self.draft_logits = None
+            return None
+        return logits.new_empty(
+            (batch_size, self.num_speculative_tokens, int(logits.shape[-1])),
+        )
+
     def _propose(
         self,
         # [num_tokens]
@@ -924,14 +937,35 @@ class AscendSpecDecodeBaseProposer(SpecDecodeBaseProposer):
             token_indices_to_sample = token_indices_to_sample[:num_indices]
 
         draft_token_ids = logits.argmax(dim=-1)
+        draft_logits = self._new_draft_logits_buffer(int(logits.shape[0]), logits)
+        if draft_logits is not None:
+            draft_logits[:, 0, :].copy_(logits)
 
         # Early exit if there is only one draft token to be generated.
         if self.num_speculative_tokens == 1 or self.parallel_drafting:
             # [batch_size, 1]
+            if (
+                draft_logits is not None
+                and self.parallel_drafting
+                and self.num_speculative_tokens > 1
+            ):
+                if int(logits.shape[0]) % self.num_speculative_tokens != 0:
+                    raise ValueError("parallel draft logits cannot be reshaped by speculative token count")
+                self.draft_logits = logits.reshape(
+                    -1,
+                    self.num_speculative_tokens,
+                    int(logits.shape[-1]),
+                ).contiguous()
+            else:
+                self.draft_logits = draft_logits
             return draft_token_ids.view(-1, self.num_speculative_tokens)
 
         if self.pcp_size * self.dcp_size > 1 and is_prefill:
             draft_token_ids = logits.argmax(dim=-1)
+            if draft_logits is not None:
+                for draft_step in range(1, self.num_speculative_tokens):
+                    draft_logits[:, draft_step, :].copy_(logits)
+                self.draft_logits = draft_logits
             draft_token_ids_list = []
             for _ in range(self.num_speculative_tokens):
                 draft_token_ids_list.append(draft_token_ids)
@@ -1060,9 +1094,15 @@ class AscendSpecDecodeBaseProposer(SpecDecodeBaseProposer):
             hidden_states = hidden_states[:batch_size]
             draft_token_ids = logits.argmax(dim=-1)
             draft_token_ids_tensor[draft_step + 1] = draft_token_ids
+            if draft_logits is not None:
+                num_draft_logits = min(int(draft_logits.shape[0]), int(logits.shape[0]))
+                draft_logits[:num_draft_logits, draft_step + 1, :].copy_(
+                    logits[:num_draft_logits]
+                )
 
         # [batch_size, num_speculative_tokens]
         draft_token_ids = draft_token_ids_tensor.swapaxes(0, 1)
+        self.draft_logits = draft_logits
         return draft_token_ids
 
     def set_inputs_first_pass(

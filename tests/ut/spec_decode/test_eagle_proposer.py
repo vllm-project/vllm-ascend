@@ -21,7 +21,7 @@ from vllm_ascend.ascend_config import init_ascend_config
 from vllm_ascend.attention.attention_v1 import AscendAttentionState
 from vllm_ascend.attention.utils import AscendCommonAttentionMetadata
 from vllm_ascend.spec_decode.draft_proposer import AscendDraftModelProposer
-from vllm_ascend.spec_decode.eagle_proposer import AscendEagleProposer
+from vllm_ascend.spec_decode.eagle_proposer import AscendEagleProposer, AscendSpecDecodeBaseProposer
 from vllm_ascend.utils import vllm_version_is
 
 # vLLM #40732 moved `SpecDecodeBaseProposer` (and its `CpuGpuBuffer` import)
@@ -35,6 +35,36 @@ _CPU_GPU_BUFFER_TARGET = (
 )
 
 BLOCK_SIZE = 16
+
+
+class TestEagleProposerDraftLogits(TestBase):
+    def test_probabilistic_rejection_allocates_draft_logits_buffer(self):
+        proposer = AscendSpecDecodeBaseProposer.__new__(AscendSpecDecodeBaseProposer)
+        proposer.speculative_config = MagicMock(rejection_sample_method="probabilistic")
+        proposer.num_speculative_tokens = 2
+        proposer.draft_logits = torch.ones((1, 1, 1))
+        logits = torch.randn(3, 5, dtype=torch.float32)
+
+        draft_logits = proposer._new_draft_logits_buffer(3, logits)
+
+        self.assertEqual(draft_logits.shape, (3, 2, 5))
+        self.assertEqual(draft_logits.dtype, logits.dtype)
+        self.assertEqual(draft_logits.device, logits.device)
+        self.assertTrue(torch.equal(proposer.draft_logits, torch.ones((1, 1, 1))))
+
+    def test_non_probabilistic_rejection_clears_stale_draft_logits(self):
+        proposer = AscendSpecDecodeBaseProposer.__new__(AscendSpecDecodeBaseProposer)
+        proposer.speculative_config = MagicMock(rejection_sample_method="strict")
+        proposer.num_speculative_tokens = 2
+        proposer.draft_logits = torch.ones((1, 1, 1))
+
+        draft_logits = proposer._new_draft_logits_buffer(
+            3,
+            torch.randn(3, 5, dtype=torch.float32),
+        )
+
+        self.assertIsNone(draft_logits)
+        self.assertIsNone(proposer.draft_logits)
 
 
 @dataclass

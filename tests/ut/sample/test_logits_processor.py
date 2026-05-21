@@ -176,6 +176,19 @@ class TestLogitsProcessor(TestBase):
         min_p.assert_called_once()
         top_k_top_p.assert_called_once()
 
+    def test_temperature_stage_does_not_cpu_sync_for_noop_temperatures(self):
+        from vllm_ascend.worker.v1.sample import logits_processor as logits_processor_module
+        from vllm_ascend.worker.v1.sample.logits_processor import LogitsProcessor
+
+        processor = LogitsProcessor("default")
+        logits = torch.ones((2, 4), dtype=torch.float32)
+        metadata = _metadata(temperature=torch.ones(2, dtype=torch.float32))
+
+        with patch.object(logits_processor_module, "_apply_temperature") as temperature:
+            processor._apply_temperature(logits, metadata, _ctx())
+
+        temperature.assert_called_once()
+
     def test_skip_returns_unprocessed_logits_and_warns_once(self):
         from vllm_ascend.worker.v1.sample import logits_processor as logits_processor_module
         from vllm_ascend.worker.v1.sample.logits_processor import LogitsProcessor

@@ -226,13 +226,6 @@ class LogitsProcessor:
         if temp is None:
             return
         temp = self._request_param_tensor(temp, ctx, logits.device, dtype=torch.float32)
-        if temp.is_cpu:
-            temp_cpu = temp.numpy()
-        else:
-            temp_cpu = temp.cpu().numpy()
-        if np.all((temp_cpu == 0.0) | (temp_cpu == 1.0)):
-            return
-
         _apply_temperature(logits, ctx.expanded_idx_mapping, temp)
 
     def _apply_argmax_invariant(self, logits, sampling_metadata, ctx):

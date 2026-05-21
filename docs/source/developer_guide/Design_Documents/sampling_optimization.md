@@ -185,9 +185,10 @@ Phase 1 supports two logits processing modes:
 
 - `default`: full sampling-parameter processing, using upstream sampler
   orchestration and Ascend-compatible state adapters.
-- `skip`: bypass logits processing and return an FP32 copy of logits. This is
-  useful for workloads that do not use penalties, bad words, logit bias,
-  min-p/top-k/top-p, or custom logits processors.
+- `skip`: bypass logits processing and return logits in FP32 form. If the
+  input logits are already FP32, skip mode may return the original tensor
+  without copying. This is useful for workloads that do not use penalties, bad
+  words, logit bias, min-p/top-k/top-p, or custom logits processors.
 
 The default pipeline should reuse upstream sampler orchestration:
 
@@ -240,10 +241,11 @@ processed_logits = torch.empty_like(logits, dtype=torch.float32).copy_(logits)
 This preserves raw logits for `raw_logprobs` and avoids aliasing bugs caused by
 in-place processing.
 
-Skip mode must also return a separate FP32 tensor:
+Skip mode does not need a defensive copy because it does not mutate logits. It
+only converts non-FP32 inputs:
 
 ```python
-return torch.empty_like(logits, dtype=torch.float32).copy_(logits)
+return logits if logits.dtype == torch.float32 else logits.to(dtype=torch.float32)
 ```
 
 Skip mode does not silently claim semantic equivalence. It should warn once per
@@ -660,8 +662,9 @@ Expanded `cu_num_logits` support is included from the beginning.
 
 **Risk**: In-place logits processing can corrupt `raw_logprobs`.
 
-**Mitigation**: Default, skip, and fused modes must return a separate FP32
-working tensor instead of mutating raw logits.
+**Mitigation**: Default and fused modes must mutate only a separate FP32
+working tensor. Skip mode must not mutate logits and may reuse the original
+FP32 tensor.
 
 ### 8.4 Gumbel vs Exponential Sampling
 

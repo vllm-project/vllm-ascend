@@ -26,7 +26,7 @@ from copy import copy, deepcopy
 from dataclasses import dataclass, replace
 from functools import partial
 from multiprocessing import Manager
-from typing import TYPE_CHECKING, Any, NamedTuple, TypeAlias
+from typing import TYPE_CHECKING, Any, NamedTuple, Sequence, TypeAlias
 
 import numpy as np
 import torch
@@ -82,7 +82,7 @@ if not vllm_version_is("0.20.2"):
     from vllm.v1.outputs import RoutedExpertsLists
 from vllm.v1.sample.logits_processor import build_logitsprocs
 from vllm.v1.sample.metadata import SamplingMetadata
-from vllm.v1.sample.rejection_sampler import RejectionSampler
+from vllm.v1.sample.rejection_sampler import PLACEHOLDER_TOKEN_ID, RejectionSampler
 from vllm.v1.spec_decode.metadata import SpecDecodeMetadata
 from vllm.v1.spec_decode.ngram_proposer_gpu import copy_num_valid_draft_tokens
 from vllm.v1.structured_output.utils import apply_grammar_bitmask
@@ -1049,7 +1049,9 @@ class NPUModelRunner(GPUModelRunner):
             if self.use_cp:
                 logits_indices = self.pcp_manager.get_logits_indices(cu_num_tokens, num_reqs, tokens_original)
                 logits_indices = logits_indices.pin_memory().to(self.device, non_blocking=True)
+                logits_indices_np = None
             else:
+                logits_indices_np = cu_num_tokens[:num_reqs] - 1
                 logits_indices = self.query_start_loc.gpu[1 : num_reqs + 1] - 1
         else:
             # Get the number of draft tokens for each request.
@@ -1080,6 +1082,7 @@ class NPUModelRunner(GPUModelRunner):
                 num_pcp_pads=self.pcp_manager.num_pcp_pads_cpu[:num_reqs] if self.pcp_size > 1 else None,
             )
             logits_indices = spec_decode_metadata.logits_indices
+            logits_indices_np = None
             num_sampled_tokens = num_draft_tokens + 1
 
             # For DECODE only cuda graph of some attention backends (e.g., GDN).
@@ -1088,6 +1091,7 @@ class NPUModelRunner(GPUModelRunner):
             self.num_decode_draft_tokens.copy_to_gpu()
         # save logits_indices for pcp spec decode usage
         self.logits_indices = logits_indices
+        self._logits_indices_np = logits_indices_np
 
         # Hot-Swap lora model
         if self.lora_config:
@@ -2037,51 +2041,71 @@ class NPUModelRunner(GPUModelRunner):
 
         # Store positions and input_ids for the GpuSamplerBridge
         if self._gpu_sampler_bridge is not None:
-            num_logits = int(logits_indices.shape[0])
+            logits_indices_for_sampling = logits_indices
+            if lmhead_tp_enable():
+                if spec_decode_metadata is not None:
+                    num_logits = len(spec_decode_metadata.logits_indices)
+                else:
+                    unpadded_logits_indices = getattr(self, "logits_indices", None)
+                    num_logits = (
+                        int(unpadded_logits_indices.shape[0])
+                        if unpadded_logits_indices is not None
+                        else self.input_batch.num_reqs
+                    )
+                logits_indices_for_sampling = logits_indices[:num_logits]
+            else:
+                num_logits = int(logits_indices.shape[0])
             req_indices_gpu = getattr(getattr(self, "req_indices", None), "gpu", None)
             if spec_decode_metadata is None and num_logits != self.input_batch.num_reqs and req_indices_gpu is None:
                 raise NotImplementedError(
                     "GpuSamplerBridge needs an explicit logits-row to request mapping "
                     "when a non-speculative step produces multiple logits per request."
                 )
-            logits_indices_for_positions = logits_indices.to(device=positions.device, dtype=torch.long)
-            logits_indices_for_input_ids = logits_indices.to(device=self.input_ids.gpu.device, dtype=torch.long)
+            logits_indices_for_positions = logits_indices_for_sampling.to(device=positions.device, dtype=torch.long)
+            logits_indices_for_input_ids = logits_indices_for_sampling.to(
+                device=self.input_ids.gpu.device,
+                dtype=torch.long,
+            )
             self._positions_at_logits = positions.index_select(0, logits_indices_for_positions)
             self._input_ids_at_logits = self.input_ids.gpu.index_select(0, logits_indices_for_input_ids)
             num_logits_per_req_list = None
+            self._req_indices_at_logits_np = None
             if spec_decode_metadata is not None:
                 num_logits_per_req_list = [
                     num_draft_tokens + 1 for num_draft_tokens in spec_decode_metadata.num_draft_tokens
                 ]
                 if sum(num_logits_per_req_list) != num_logits:
                     raise ValueError("speculative logits-row mapping does not match logits_indices")
-            if req_indices_gpu is not None:
-                logits_indices_for_req_indices = logits_indices.to(device=req_indices_gpu.device, dtype=torch.long)
-                self._req_indices_at_logits = req_indices_gpu.index_select(0, logits_indices_for_req_indices).to(
+                self._req_indices_at_logits_np = np.repeat(
+                    np.arange(self.input_batch.num_reqs, dtype=np.int32),
+                    np.asarray(num_logits_per_req_list, dtype=np.int32),
+                )
+                self._req_indices_at_logits = torch.from_numpy(self._req_indices_at_logits_np).to(
                     device=self.device,
                     dtype=torch.int32,
                 )
-            elif spec_decode_metadata is None:
+            elif req_indices_gpu is None:
+                self._req_indices_at_logits_np = np.arange(self.input_batch.num_reqs, dtype=np.int32)
                 self._req_indices_at_logits = torch.arange(
                     self.input_batch.num_reqs,
                     device=self.device,
                     dtype=torch.int32,
                 )
             else:
-                assert num_logits_per_req_list is not None
-                num_logits_per_req = torch.tensor(
-                    num_logits_per_req_list,
-                    device=self.device,
+                assert req_indices_gpu is not None
+                logits_indices_for_req_indices = logits_indices_for_sampling.to(
+                    device=req_indices_gpu.device,
                     dtype=torch.long,
                 )
-                self._req_indices_at_logits = torch.repeat_interleave(
-                    torch.arange(
-                        self.input_batch.num_reqs,
-                        device=self.device,
-                        dtype=torch.int32,
-                    ),
-                    num_logits_per_req,
+                self._req_indices_at_logits = req_indices_gpu.index_select(0, logits_indices_for_req_indices).to(
+                    device=self.device,
+                    dtype=torch.int32,
                 )
+                logits_indices_np = getattr(self, "_logits_indices_np", None)
+                if logits_indices_np is not None:
+                    self._req_indices_at_logits_np = self.req_indices.np[
+                        np.asarray(logits_indices_np[:num_logits], dtype=np.int64)
+                    ].astype(np.int32)
             self._req_ids_at_logits = tuple(self.input_batch.req_ids[: self.input_batch.num_reqs])
 
         # Apply structured output bitmasks if present.
@@ -2256,17 +2280,21 @@ class NPUModelRunner(GPUModelRunner):
             assert self._positions_at_logits is not None
             assert self._input_ids_at_logits is not None
             assert self._req_indices_at_logits is not None
-            return self._gpu_sampler_bridge.sample_from_v1(
-                logits=logits,
-                sampling_metadata=sampling_metadata,
-                num_reqs=self.input_batch.num_reqs,
-                positions=self._positions_at_logits,
-                input_ids=self._input_ids_at_logits,
-                req_indices=self._req_indices_at_logits,
-                req_ids=self._req_ids_at_logits,
-                spec_decode_metadata=spec_decode_metadata,
-                draft_logits=getattr(getattr(self, "drafter", None), "draft_logits", None),
-            )
+            bridge_kwargs = {
+                "logits": logits,
+                "sampling_metadata": sampling_metadata,
+                "num_reqs": self.input_batch.num_reqs,
+                "positions": self._positions_at_logits,
+                "input_ids": self._input_ids_at_logits,
+                "req_indices": self._req_indices_at_logits,
+                "req_ids": self._req_ids_at_logits,
+                "spec_decode_metadata": spec_decode_metadata,
+                "draft_logits": getattr(getattr(self, "drafter", None), "draft_logits", None),
+            }
+            req_indices_np = getattr(self, "_req_indices_at_logits_np", None)
+            if req_indices_np is not None:
+                bridge_kwargs["req_indices_np"] = req_indices_np
+            return self._gpu_sampler_bridge.sample_from_v1(**bridge_kwargs)
 
         # Default path (unchanged)
         if spec_decode_metadata is None:
@@ -2286,6 +2314,59 @@ class NPUModelRunner(GPUModelRunner):
             sampling_metadata,
         )
         return sampler_output
+
+    def _parse_spec_decode_output(
+        self,
+        sampled_token_ids: torch.Tensor,
+        logprobs_tensors: LogprobsTensors | None,
+        discard_sampled_tokens_req_indices: Sequence[int],
+    ) -> tuple[list[list[int]], LogprobsLists | None]:
+        sampled_token_ids_np = sampled_token_ids.cpu().numpy()
+        valid_mask = (sampled_token_ids_np != PLACEHOLDER_TOKEN_ID) & (
+            sampled_token_ids_np < self.input_batch.vocab_size
+        )
+
+        logprobs_lists = None
+        if logprobs_tensors is not None:
+            cu_num_tokens = [0] + valid_mask.sum(axis=1).cumsum().tolist()
+            if logprobs_tensors.cu_num_generated_tokens is None:
+                filtered_tensors = logprobs_tensors.filter(valid_mask.flatten())
+            else:
+                original_counts = np.diff(
+                    np.asarray(logprobs_tensors.cu_num_generated_tokens, dtype=np.int32)
+                )
+                accepted_counts = valid_mask.sum(axis=1).astype(np.int32)
+                if original_counts.shape[0] != accepted_counts.shape[0]:
+                    raise ValueError("spec decode logprobs grouping does not match sampled output")
+                if np.any(accepted_counts > original_counts):
+                    raise ValueError("spec decode accepted more tokens than logprobs rows")
+                compact_mask = np.concatenate(
+                    [
+                        np.arange(original_count, dtype=np.int32) < accepted_count
+                        for original_count, accepted_count in zip(
+                            original_counts,
+                            accepted_counts,
+                        )
+                    ]
+                )
+                compact_logprobs_tensors = LogprobsTensors(
+                    logprobs_tensors.logprob_token_ids,
+                    logprobs_tensors.logprobs,
+                    logprobs_tensors.selected_token_ranks,
+                )
+                filtered_tensors = compact_logprobs_tensors.filter(
+                    torch.from_numpy(compact_mask).to(
+                        device=logprobs_tensors.logprob_token_ids.device,
+                    )
+                )
+            logprobs_lists = filtered_tensors.tolists(cu_num_tokens)
+
+        if len(discard_sampled_tokens_req_indices) > 0:
+            valid_mask[discard_sampled_tokens_req_indices] = False
+        valid_sampled_token_ids = [
+            row[valid_mask[i]].tolist() for i, row in enumerate(sampled_token_ids_np)
+        ]
+        return valid_sampled_token_ids, logprobs_lists
 
     # TODO: remove this func after eagle_proposer is refactored and
     #  _bookkeeping_sync is moved after propose_draft_token_ids
@@ -2336,12 +2417,22 @@ class NPUModelRunner(GPUModelRunner):
             else:
                 # Includes spec decode tokens.
                 # parse_output returns (list[list[int]], LogprobsLists | None)
-                valid_sampled_token_ids, logprobs_lists = RejectionSampler.parse_output(
-                    sampled_token_ids,
-                    self.input_batch.vocab_size,
-                    discard_sampled_tokens_req_indices,
-                    logprobs_tensors=logprobs_tensors,
-                )
+                if (
+                    logprobs_tensors is not None
+                    and logprobs_tensors.cu_num_generated_tokens is not None
+                ):
+                    valid_sampled_token_ids, logprobs_lists = self._parse_spec_decode_output(
+                        sampled_token_ids,
+                        logprobs_tensors,
+                        discard_sampled_tokens_req_indices,
+                    )
+                else:
+                    valid_sampled_token_ids, logprobs_lists = RejectionSampler.parse_output(
+                        sampled_token_ids,
+                        self.input_batch.vocab_size,
+                        discard_sampled_tokens_req_indices,
+                        logprobs_tensors=logprobs_tensors,
+                    )
         else:
             valid_sampled_token_ids = []
             invalid_req_indices = discard_sampled_tokens_req_indices.tolist()
