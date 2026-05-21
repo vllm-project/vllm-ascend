@@ -477,9 +477,8 @@ class AddRMSNormDynamicQuantSPPatternWithBias(BasePattern):
 
 
 class AddRMSNormDynamicMXQuantPattern(BasePattern):
-    def __init__(self, vllm_config: VllmConfig, eps: float = 1e-6, dst_type=None):
+    def __init__(self, vllm_config: VllmConfig, eps: float = 1e-6):
         super().__init__(vllm_config, eps)
-        self.dst_type = dst_type
 
     def get_inputs(self):
         """
@@ -507,7 +506,7 @@ class AddRMSNormDynamicMXQuantPattern(BasePattern):
 
             quantized_output = torch_npu.npu_dynamic_mx_quant(
                 out0,
-                dst_type=self.dst_type,
+                dst_type=torch.float8_e4m3fn,
             )
 
             return quantized_output[0], quantized_output[1], out1
@@ -535,7 +534,7 @@ class AddRMSNormDynamicMXQuantPattern(BasePattern):
                 epsilon=self.eps,
                 scale_alg=0,
                 round_mode="rint",
-                dst_type=self.dst_type,
+                dst_type=torch.float8_e4m3fn,
             )
             return (
                 output[0],
@@ -561,19 +560,10 @@ class AddRMSNormQuantFusionPass(VllmInductorPass):
             return
 
         common_epsilons = [1e-5, 1e-6]
-        mx_quant_dst_types = [
-            torch.float8_e4m3fn,  # MXFP8
-            torch_npu.float4_e2m1fn_x2,  # MXFP4
-        ]
         for eps in common_epsilons:
             AddRMSNormDynamicQuantPattern(vllm_config, eps=eps).register(self.pattern_match_passes)
             AddRMSNormDynamicQuantSPPattern(vllm_config, eps=eps).register(self.pattern_match_passes)
-            for dst_type in mx_quant_dst_types:
-                AddRMSNormDynamicMXQuantPattern(
-                    vllm_config,
-                    eps=eps,
-                    dst_type=dst_type,
-                ).register(self.pattern_match_passes)
+            AddRMSNormDynamicMXQuantPattern(vllm_config, eps=eps).register(self.pattern_match_passes)
             if enable_custom_op():
                 AddRMSNormQuantPattern(vllm_config, eps=eps).register(self.pattern_match_passes)
                 AddRMSNormQuantSPPattern(vllm_config, eps=eps).register(self.pattern_match_passes)
