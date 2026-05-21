@@ -30,6 +30,7 @@ from vllm_ascend.utils import (
     get_ascend_device_type,
 )
 
+
 class AddRMSNormQuantPattern(BasePattern):
     def __init__(self, vllm_config: VllmConfig, eps: float = 1e-6):
         super().__init__(vllm_config, eps)
