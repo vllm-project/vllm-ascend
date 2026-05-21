@@ -13,6 +13,9 @@ if (BUILD_OPEN_PROJECT)
     )
 endif()
 
+set(KERNEL_DIR "${CMAKE_CURRENT_SOURCE_DIR}/../op_kernel")
+get_filename_component(KERNEL_DIR_ABS ${KERNEL_DIR} ABSOLUTE)
+
 add_ops_compile_options(
     OP_NAME ChunkGatedDeltaRuleFwdH
     OPTIONS
@@ -21,6 +24,8 @@ add_ops_compile_options(
         -Werror
         -I${CATLASS_INCLUDE_DIR_ABS}
         -I${COMMON_KERNEL_UTILS_DIR_ABS}
+        -include
+        ${KERNEL_DIR_ABS}/compat_310p.h
 )
 
 if (NOT BUILD_OPS_RTY_KERNEL)
