@@ -355,7 +355,7 @@ class AscendFusedMoE(FusedMoE):
                 self.token2req = [None]
                 self.moe_load_prev = None
                 self.moe_load = torch.zeros(self.local_num_experts, dtype=torch.int64).npu()
-                self.ones_buffer = torch.ones(1024*16, dtype=torch.float32).npu()
+                self.ones_buffer = torch.ones(get_current_vllm_config().scheduler_config.max_num_batched_tokens, dtype=torch.float32).npu()
                 self.moe_load_local = torch.zeros([eplb_config.max_batch_token, self.global_num_experts], dtype=torch.float32).npu()
         self.moe_config.num_experts = self.global_num_experts
         self.moe_config.num_local_experts = self.local_num_experts
@@ -549,9 +549,11 @@ class AscendFusedMoE(FusedMoE):
                 if self.token2req[0] is not None:
                     topk_ids = fused_experts_results.topk_ids.reshape(get_dp_group().world_size, -1, self.top_k)[get_dp_group().rank_in_group]
                     if topk_ids.shape[0] !=self.token2req[0].shape[0]:
-                        logger.warning_once(
-                            f"Mismatch in the number of tokens for MoE load calculation. topk_ids has {topk_ids.shape[0]} tokens, while token2req has {self.token2req[0].shape[0]} tokens. This may lead to incorrect MoE load tracking."
-                        )
+                        # shape while mismatch when this device in dumy run
+                        # logger.warning_once(
+                        #     f"Mismatch in the number of tokens for MoE load calculation. topk_ids has {topk_ids.shape[0]} tokens, while token2req has {self.token2req[0].shape[0]} tokens. This may lead to incorrect MoE load tracking."
+                        # )
+                        pass
                     else:
                         expanded_req_ids = self.token2req[0]
                         indices = torch.add(topk_ids, expanded_req_ids, alpha=self.global_num_experts).view(-1)
