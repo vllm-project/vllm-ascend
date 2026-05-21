@@ -43,6 +43,10 @@ from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.kv_transfer import
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.layerwise_config import (
     get_layerwise_config,
 )
+from vllm_ascend.memcache_comm_fence import (
+    get_attention_compute_start_gate,
+    reset_attention_compute_start_gate,
+)
 
 
 class KVPoolWorker:
@@ -366,6 +370,7 @@ class KVPoolWorker:
         self.current_layer = 0
         if self.use_layerwise:
             self.next_layer_to_submit = 0
+            reset_attention_compute_start_gate()
         if len(metadata.requests) == 0:
             return
         if self.use_layerwise:
@@ -513,11 +518,15 @@ class KVPoolWorker:
             if not self.layer_load_tasks[layer_id]:
                 return False
             wait_for_save_layer = self.prefetch_layer_map.get(layer_id)
+            attention_start_gate = None
+            if layer_id != self.current_layer:
+                attention_start_gate = get_attention_compute_start_gate()
             self.kv_recv_thread.add_request(
                 LayerLoadTask(
                     wait_for_save_layer=wait_for_save_layer,
                     transfer_tasks=self.layer_load_tasks[layer_id],
                     layer_id=layer_id,
+                    attention_start_gate=attention_start_gate,
                 )
             )
             return True
@@ -532,6 +541,7 @@ class KVPoolWorker:
                 submitted_layers += 1
 
     def wait_for_layer_load(self) -> None:
+        reset_attention_compute_start_gate()
         self._submit_ready_layer_loads()
         should_wait = bool(self.layer_load_tasks[self.current_layer])
         if not should_wait:

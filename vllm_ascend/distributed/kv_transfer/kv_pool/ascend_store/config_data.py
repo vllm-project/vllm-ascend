@@ -1,3 +1,4 @@
+import threading
 from collections.abc import Iterable
 from dataclasses import dataclass, field
 from typing import Optional
@@ -531,3 +532,4 @@ class LayerLoadTask:
     wait_for_save_layer: int | None
     transfer_tasks: list[LayerTransferTask]
     layer_id: int
+    attention_start_gate: threading.Event | None = None

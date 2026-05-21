@@ -782,6 +782,7 @@ class KVCacheStoreLayerRecvingThread(KVTransferThread):
         wait_for_save = data.wait_for_save_layer
         transfer_tasks = data.transfer_tasks
         layer_id = data.layer_id
+        attention_start_gate = data.attention_start_gate
 
         if len(transfer_tasks) == 0:
             if wait_for_save is not None:
@@ -811,6 +812,10 @@ class KVCacheStoreLayerRecvingThread(KVTransferThread):
                 logger.info("Layerwise %d save wait timed out, keep waiting before load", wait_for_save)
             logger.debug(f">>>>>>>>>>>>>>>>>>>> clear save layer {wait_for_save}")
             self.layer_save_finished_events[wait_for_save].clear()
+
+        if attention_start_gate is not None:
+            while not attention_start_gate.wait(timeout=10):
+                logger.info("Layerwise %d load waits for attention start", layer_id)
 
         gvas_array = _circular_shift_array(
             req_meta.gvas_array,

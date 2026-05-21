@@ -41,6 +41,7 @@ from vllm_ascend.compilation.acl_graph import (
     update_graph_params_workspaces,
 )
 from vllm_ascend.device.device_op import DeviceOperator
+from vllm_ascend.memcache_comm_fence import record_attention_compute_start
 from vllm_ascend.ops.layer_shard_linear import (
     is_hidden_layer,
     post_process_after_loading_for_shard_weight_series,
@@ -1190,6 +1191,7 @@ class AscendMLAImpl(MLAAttentionImpl):
             "actual_seq_lengths_kv": actual_seq_lengths_kv,
         }
         wait_for_kv_layer_from_connector(layer_name)
+        record_attention_compute_start()
         attn_output, attn_lse = torch_npu.npu_fused_infer_attention_score(q_nope, k_nope, value, **common_kwargs)
 
         attn_output, attn_lse = self._compute_prefill_context(
@@ -1696,6 +1698,7 @@ class AscendMLAImpl(MLAAttentionImpl):
             # MLA Preprocess for decoding
             # TODO prefill kv offload need to remove
             wait_for_kv_layer_from_connector(layer_name)
+            record_attention_compute_start()
             output_decode = self._forward_decode(
                 decode_preprocess_res.ql_nope,
                 decode_preprocess_res.q_pe,
