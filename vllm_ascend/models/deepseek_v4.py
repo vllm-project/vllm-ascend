@@ -290,7 +290,8 @@ class DeepseekV4MoE(nn.Module):
                     config.n_routed_experts,
                     (config.vocab_size, config.num_experts_per_tok),
                     dtype=torch.int32,
-                )
+                ),
+                requires_grad=False,
             )
             self.gate.e_score_correction_bias = None
         else:
