@@ -114,11 +114,6 @@ env_variables: dict[str, Callable[[], Any]] = {
     # Control the aclrtMemcpyBatchAsync compile path for KV cache offloading.
     # "1": force enable, "0": force disable, None: auto-detect from CANN headers.
     "VLLM_ASCEND_ENABLE_BATCH_MEMCPY": lambda: os.getenv("VLLM_ASCEND_ENABLE_BATCH_MEMCPY", None),
-    # Number of KV cache storage slots reused across model layers.
-    # 0: disabled, positive integer: enabled with this many slots.
-    # Valid range is validated against model layers at runtime.
-    # This variable is not sensitive.
-    "VLLM_ASCEND_KV_CACHE_REUSE_LAYERS": lambda: int(os.getenv("VLLM_ASCEND_KV_CACHE_REUSE_LAYERS", "0")),
     # The DRAM size allocated for KV pool storage (e.g., "2GB", "512MB", "1073741824").
     # Used to calculate LRU cache capacity for KV block management.
     # If not set, defaults to "0" which means LRU capacity falls back to a fixed value.

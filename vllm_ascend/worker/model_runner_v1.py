@@ -90,7 +90,6 @@ from vllm.v1.worker.ubatch_utils import (
 from vllm.v1.worker.utils import AttentionGroup
 
 # yapf: enable
-from vllm_ascend import envs
 from vllm_ascend.ascend_config import get_ascend_config
 from vllm_ascend.attention.attention_v1 import AscendAttentionState
 from vllm_ascend.attention.utils import AscendCommonAttentionMetadata, using_paged_attention
@@ -102,6 +101,9 @@ from vllm_ascend.compilation.acl_graph import (
     set_draft_graph_params,
     set_graph_params,
     update_full_graph_params,
+)
+from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.layerwise_config import (
+    get_layerwise_kv_cache_reuse_layers,
 )
 from vllm_ascend.eplb.adaptor.vllm_adaptor import VllmEplbAdaptor
 from vllm_ascend.eplb.core.eplb_device_transfer_loader import D2DExpertWeightLoader
@@ -2726,6 +2728,8 @@ class NPUModelRunner(GPUModelRunner):
         # the same tensor format must be maintained even if some layers
         # have only linear or attention layers, for example, the mtp layer.
         self.hybrid_with_attn_and_mamba = False
+        reuse_layers = get_layerwise_kv_cache_reuse_layers(
+            self.model_config.get_num_layers(self.parallel_config))
         for kv_cache_tensor in kv_cache_config.kv_cache_tensors:
             use_mamba, use_attn = False, False
             for layer_name in kv_cache_tensor.shared_by:
@@ -2733,9 +2737,9 @@ class NPUModelRunner(GPUModelRunner):
                     use_mamba = True
                 if isinstance(layer_kv_cache_spec[layer_name], AttentionSpec):
                     use_attn = True
-            if use_mamba and use_attn and envs.VLLM_ASCEND_KV_CACHE_REUSE_LAYERS:
+            if use_mamba and use_attn and reuse_layers is not None:
                 raise ValueError(
-                    "VLLM_ASCEND_KV_CACHE_REUSE_LAYERS is not supported for "
+                    "Layerwise KV cache reuse is not supported for "
                     "hybrid attention+mamba KV cache tensors."
                 )
             self.hybrid_with_attn_and_mamba = self.hybrid_with_attn_and_mamba or (use_mamba and use_attn)

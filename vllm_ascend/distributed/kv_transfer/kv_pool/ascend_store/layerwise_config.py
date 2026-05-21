@@ -114,3 +114,10 @@ def get_layerwise_config(num_layers: int) -> LayerwiseConfig:
         prefetch_layer_map=prefetch_layer_map,
         has_layer_reuse=has_layer_reuse,
     )
+
+
+def get_layerwise_kv_cache_reuse_layers(num_layers: int) -> int | None:
+    layerwise_config = get_layerwise_config(num_layers)
+    if not layerwise_config.has_layer_reuse:
+        return None
+    return layerwise_config.num_shared_buffers

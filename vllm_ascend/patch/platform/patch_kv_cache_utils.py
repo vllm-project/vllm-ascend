@@ -20,20 +20,21 @@ from vllm.v1.kv_cache_interface import (
     KVCacheTensor,
     UniformTypeKVCacheSpecs,
 )
-
-from vllm_ascend import envs
+from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.layerwise_config import (
+    get_layerwise_kv_cache_reuse_layers,
+)
 
 
 def get_kv_cache_reuse_layers(max_layers: int | None = None) -> int | None:
     """Return configured KV cache reuse slots, or None when disabled."""
-    reuse_layers = envs.VLLM_ASCEND_KV_CACHE_REUSE_LAYERS
-    if reuse_layers == 0:
+    if max_layers is None:
         return None
-    if reuse_layers < 0:
-        raise ValueError(f"VLLM_ASCEND_KV_CACHE_REUSE_LAYERS must be 0 or a positive integer, got {reuse_layers}.")
+    reuse_layers = get_layerwise_kv_cache_reuse_layers(max_layers)
+    if reuse_layers is None:
+        return None
     if max_layers is not None and reuse_layers > max_layers:
         raise ValueError(
-            "VLLM_ASCEND_KV_CACHE_REUSE_LAYERS must not exceed the number "
+            "VLLM_ASCEND_KV_POOL_LAYERWISE_NUM_SHARED_BUFFERS must not exceed the number "
             f"of KV cache layers, got {reuse_layers} > {max_layers}."
         )
     return reuse_layers
@@ -98,7 +99,7 @@ def get_kv_cache_config_from_groups(
             page_sizes = {per_layer_specs[layer_name].page_size_bytes for layer_name in group.layer_names}
             if len(page_sizes) != 1:
                 raise ValueError(
-                    "VLLM_ASCEND_KV_CACHE_REUSE_LAYERS is not supported for "
+                    "Layerwise KV cache reuse is not supported for "
                     "UniformTypeKVCacheSpecs with different per-layer page "
                     f"sizes, got {sorted(page_sizes)}."
                 )

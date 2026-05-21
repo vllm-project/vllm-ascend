@@ -35,5 +35,5 @@ if os.getenv("DYNAMIC_EPLB", "false").lower() in ("true", "1") or os.getenv("EXP
 
 if envs.VLLM_ASCEND_BALANCE_SCHEDULING:
     import vllm_ascend.patch.platform.patch_balance_schedule  # noqa
-if envs.VLLM_ASCEND_KV_CACHE_REUSE_LAYERS:
+if envs.VLLM_ASCEND_KV_POOL_LAYERWISE_NUM_SHARED_BUFFERS is not None:
     import vllm_ascend.patch.platform.patch_kv_cache_utils  # noqa
