@@ -137,10 +137,77 @@ class TestTorchNPUProfilerWrapper(TestBase):
         self.assertIn("torch_profiler_dir cannot be empty", str(cm.exception))
 
     @patch("vllm_ascend.profiler.torch_npu_profiler.envs_ascend")
-    def test_create_profiler_raises_when_msmonitor_enabled(self, mock_envs_ascend):
+    @patch("vllm_ascend.profiler.torch_npu_profiler.get_ascend_config")
+    def test_create_profiler_raises_when_msmonitor_env_enabled(self, mock_get_ascend_config, mock_envs_ascend):
         from vllm_ascend.profiler.torch_npu_profiler import TorchNPUProfilerWrapper
 
         mock_envs_ascend.MSMONITOR_USE_DAEMON = 1
+        mock_get_ascend_config.side_effect = RuntimeError("Ascend config is not initialized")
+        profiler_config = ProfilerConfig(
+            profiler="torch",
+            torch_profiler_dir="/path/to/traces",
+        )
+
+        with self.assertRaises(RuntimeError) as cm:
+            TorchNPUProfilerWrapper._create_profiler(profiler_config, "test_trace")
+
+        self.assertIn(
+            "MSMONITOR_USE_DAEMON and torch profiler cannot be both enabled at the same time.",
+            str(cm.exception),
+        )
+
+    @patch("vllm_ascend.profiler.torch_npu_profiler.envs_ascend")
+    @patch("torch_npu.profiler._ExperimentalConfig")
+    @patch("torch_npu.profiler.profile")
+    @patch("torch_npu.profiler.tensorboard_trace_handler")
+    @patch("torch_npu.profiler.ExportType")
+    @patch("torch_npu.profiler.ProfilerLevel")
+    @patch("torch_npu.profiler.AiCMetrics")
+    @patch("torch_npu.profiler.ProfilerActivity")
+    @patch("vllm_ascend.profiler.torch_npu_profiler.get_ascend_config")
+    def test_create_profiler_config_overrides_msmonitor_env(
+        self,
+        mock_get_ascend_config,
+        mock_profiler_activity,
+        mock_aic_metrics,
+        mock_profiler_level,
+        mock_export_type,
+        mock_trace_handler,
+        mock_profile,
+        mock_experimental_config,
+        mock_envs_ascend,
+    ):
+        from vllm_ascend.profiler.torch_npu_profiler import TorchNPUProfilerWrapper
+
+        mock_envs_ascend.MSMONITOR_USE_DAEMON = 1
+        mock_ascend_config = MagicMock()
+        mock_ascend_config.msmonitor_use_daemon = False
+        mock_get_ascend_config.return_value = mock_ascend_config
+
+        profiler_config = ProfilerConfig(
+            profiler="torch",
+            torch_profiler_dir="/path/to/traces",
+        )
+        mock_export_type.Text = "Text"
+        mock_profiler_level.Level1 = "Level1"
+        mock_aic_metrics.AiCoreNone = "AiCoreNone"
+        mock_profiler_activity.CPU = "CPU"
+        mock_profiler_activity.NPU = "NPU"
+        mock_profile.return_value = MagicMock()
+
+        TorchNPUProfilerWrapper._create_profiler(profiler_config, "test_trace")
+
+        mock_profile.assert_called_once()
+
+    @patch("vllm_ascend.profiler.torch_npu_profiler.envs_ascend")
+    @patch("vllm_ascend.profiler.torch_npu_profiler.get_ascend_config")
+    def test_create_profiler_config_enables_msmonitor_over_env(self, mock_get_ascend_config, mock_envs_ascend):
+        from vllm_ascend.profiler.torch_npu_profiler import TorchNPUProfilerWrapper
+
+        mock_envs_ascend.MSMONITOR_USE_DAEMON = 0
+        mock_ascend_config = MagicMock()
+        mock_ascend_config.msmonitor_use_daemon = True
+        mock_get_ascend_config.return_value = mock_ascend_config
         profiler_config = ProfilerConfig(
             profiler="torch",
             torch_profiler_dir="/path/to/traces",
