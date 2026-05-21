@@ -39,7 +39,7 @@ extern aclnnStatus aclnnInnerDispatchFFNCombineW4A8GetWorkspaceSize(const aclTen
                                                          const aclTensorList* bias1, const aclTensorList * bias2,
                                                          const aclTensor* probs,
                                                          const char* group, int64_t maxOutputSize,
-                                                         bool transB, bool weightNz,
+                                                         bool transB, bool weightNz, double swigluLimit,
                                                          const aclTensor* out, const aclTensor* expertTokenNums,
                                                          uint64_t* workspaceSize, aclOpExecutor** executor);
 extern aclnnStatus aclnnInnerDispatchFFNCombineW4A8(void *workspace, uint64_t workspaceSize,
@@ -51,17 +51,17 @@ extern "C" void __attribute__((weak)) NnopbaseSetHcclServerType(void *executor, 
 aclnnStatus aclnnDispatchFFNCombineW4A8GetWorkspaceSize(const aclTensor* x, const aclTensorList* weight1, const aclTensorList* weight2,
                                                     const aclTensor* expertId, const aclTensorList* scale1, const aclTensorList* scale2,
                                                     const aclTensorList* bias1, const aclTensorList * bias2,
-                                                    const aclTensor* probs, const char* group, int64_t maxOutputSize,
+                                                    const aclTensor* probs, const char* group, int64_t maxOutputSize, double swigluLimit,
                                                     const aclTensor* out, const aclTensor* expertTokenNums,
                                                     uint64_t* workspaceSize, aclOpExecutor** executor)
 {
     bool transB = false;
     bool weightNz = true;
 
-    aclnnStatus ret = aclnnInnerDispatchFFNCombineW4A8GetWorkspaceSize(x, weight1, weight2, expertId, 
-                                                                    scale1, scale2, bias1, bias2, 
-                                                                    probs, group, maxOutputSize, 
-                                                                    transB, weightNz,
+    aclnnStatus ret = aclnnInnerDispatchFFNCombineW4A8GetWorkspaceSize(x, weight1, weight2, expertId,
+                                                                    scale1, scale2, bias1, bias2,
+                                                                    probs, group, maxOutputSize,
+                                                                    transB, weightNz, swigluLimit,
                                                                     out, expertTokenNums, workspaceSize, executor);
     return ret;
 }
