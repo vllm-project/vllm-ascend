@@ -254,7 +254,6 @@ class AscendDSACPMetadataBuilder(AttentionMetadataBuilder[AscendDSAMetadata]):
 
         slot_mapping = common_attn_metadata.slot_mapping[:num_input_tokens]
         self.slot_mapping[:num_input_tokens] = torch.stack([slot_mapping // self.block_size, slot_mapping % self.block_size], axis=-1)
-        self.slot_mapping[self.num_actual_tokens:num_input_tokens].fill_(-1)
 
         self.block_table = common_attn_metadata.block_table_tensor[:num_reqs]
 
