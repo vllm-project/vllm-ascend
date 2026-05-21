@@ -128,11 +128,10 @@ class WorkerMonitor:
                     recovery_step = recovery_step_with_cfg.step
                     cfg = recovery_step_with_cfg.cfg
                     cfg, is_success = recovery_step.execute(self._worker, cfg)
-                    
                     step_result = StepResult(
-                        worker_rank=self._worker.rank,
                         step_name=recovery_step.name,
-                        is_success=is_success,
+                        success=is_success,
+                        worker_rank=self._worker.rank,
                         cfg=cfg
                     )
                     step_result_encode = msgspec.msgpack.encode(step_result)
