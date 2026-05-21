@@ -132,6 +132,16 @@ class MultiGroupBlockTable(AscendMultiGroupBlockTable):
             for block_size, kernel_size_list, max_num_blocks_per_req in zip(block_sizes, kernel_sizes, max_num_blocks)
         ]
 
-    def compute_slot_mapping(self, *args) -> None:
-        for block_table in self.block_tables:
-            block_table.compute_slot_mapping(*args)
+    def compute_slot_mapping(
+        self,
+        num_reqs: int,
+        query_start_loc: torch.Tensor,
+        positions: torch.Tensor,
+        positions_compressed_list: list[np.ndarray] | None = None,
+        req_indices_compressed_list: list[np.ndarray] | None = None,
+    ) -> None:
+        for i, block_table in enumerate(self.block_tables):
+            if positions_compressed_list and req_indices_compressed_list:
+                block_table.compute_slot_mapping_draft(req_indices_compressed_list[i], positions_compressed_list[i])
+            else:
+                block_table.compute_slot_mapping(num_reqs, query_start_loc, positions)
