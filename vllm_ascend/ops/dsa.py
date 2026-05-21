@@ -188,7 +188,9 @@ def dsa_forward(
 
     if attn_metadata is None:
         # Profiling run.
-        # When dual-stream is enabled, the aux stream runs ops during forward that have never been exercised during profiling. This warmup ensures all aux-stream op patterns are captured for ACL graph compatibility.
+        # When dual-stream is enabled, the aux stream runs ops during forward that have never been
+        # exercised during profiling. This warmup ensures all aux-stream op patterns are captured
+        # for ACL graph compatibility.
         impl = self.dsa_attn.impl
         if impl.multistream_dsv4_dsa_overlap:
             dummy = torch.zeros(1, hidden_states.shape[-1],

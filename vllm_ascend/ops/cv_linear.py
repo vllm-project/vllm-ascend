@@ -45,9 +45,9 @@ class CVLinearWrapper:
         if isinstance(quant_method, AscendW8A8DynamicLinearMethod):
             return True
         # Case 2: quant_method is a wrapper class, requiring .quant_method to get the actual method
-        if hasattr(quant_method, 'quant_method') and isinstance(quant_method.quant_method, AscendW8A8DynamicLinearMethod):
-            return True
-        return False
+        return (hasattr(quant_method, 'quant_method')
+                and isinstance(quant_method.quant_method,
+                               AscendW8A8DynamicLinearMethod))
 
     @staticmethod
     def _detect_communication(linear):
@@ -67,10 +67,7 @@ class CVLinearWrapper:
             if not isinstance(custom_op, CustomReplicatedOp):
                 return True
 
-        if hasattr(linear, 'gather_output') and linear.gather_output:
-            return True
-
-        return False
+        return hasattr(linear, 'gather_output') and linear.gather_output
 
     def quantize(self, x: torch.Tensor):
         """
