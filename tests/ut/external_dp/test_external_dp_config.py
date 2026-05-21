@@ -7,11 +7,13 @@ from tests.ut.external_dp.conftest import GENERIC_EXTERNAL_DP_YAML, write_config
 def test_parse_generic_dp_yaml(generic_config):
     assert generic_config.test_name == "generic external dp unit"
     assert generic_config.model == "Qwen/Qwen3-0.6B"
-    assert generic_config.request_model == "Qwen3-0.6B"
     assert generic_config.routing.type == "generic_dp"
     assert generic_config.routing.proxy_host == "10.0.0.1"
     assert generic_config.node_configs[1].dp_rank_start == 2
     assert generic_config.node_configs[1].dp_address == "10.0.0.1"
+    assert not hasattr(generic_config.node_configs[1], "node_index")
+    assert not hasattr(generic_config, "env_common")
+    assert not hasattr(generic_config, "config_common")
 
 
 def test_parse_disaggregated_prefill_yaml(pd_config):
@@ -20,16 +22,13 @@ def test_parse_disaggregated_prefill_yaml(pd_config):
     assert pd_config.routing.groups["decoder"] == [1]
 
 
-def test_request_model_defaults_to_model(tmp_path):
-    content = GENERIC_EXTERNAL_DP_YAML.replace('request_model: "Qwen3-0.6B"\n', "")
-    config = ExternalDPConfigLoader.from_yaml(str(write_config(tmp_path, content)))
-    assert config.request_model == config.model
-    assert not config.request_model_explicit
-
-
 def test_config_template_length_mismatch(tmp_path):
     content = GENERIC_EXTERNAL_DP_YAML.replace(
-        "  - envs:\n      <<: *env_common\n    server_cmd_template: *cmd\n",
+        "  - envs:\n"
+        "      <<: *env_common\n"
+        '      ASCEND_RT_VISIBLE_DEVICES: "${VISIBLE_DEVICES}"\n'
+        '      SERVER_PORT: "${PORT}"\n'
+        "    server_cmd_template: *cmd\n",
         "",
     )
     with pytest.raises(AssertionError, match="templates size"):
@@ -48,9 +47,9 @@ def test_invalid_group_index(tmp_path):
         ExternalDPConfigLoader.from_yaml(str(write_config(tmp_path, content)))
 
 
-def test_config_index_must_equal_node_index(tmp_path):
+def test_yaml_node_index_must_equal_config_index(tmp_path):
     content = GENERIC_EXTERNAL_DP_YAML.replace("node_index: 1", "node_index: 0", 1)
-    with pytest.raises(AssertionError, match="unique"):
+    with pytest.raises(ValueError, match=r"config\[1\]\.node_index must equal 1"):
         ExternalDPConfigLoader.from_yaml(str(write_config(tmp_path, content)))
 
 

@@ -13,6 +13,14 @@ def _commands_for(config, endpoints):
     return [builder.build(endpoint, config.templates[endpoint.config_index]) for endpoint in endpoints]
 
 
+def _with_env(command, **env):
+    return type(command)(
+        cmd=command.cmd,
+        env={**command.env, **env},
+        display_cmd=command.display_cmd,
+    )
+
+
 def test_external_dp_topology_summary(generic_config):
     endpoints = EndpointResolver(generic_config).resolve()
     result = build_benchmark_results(
@@ -52,6 +60,20 @@ def test_keep_existing_result_fields(generic_config):
         assert key in result
     assert result["model_name"] == generic_config.model
     assert result["tasks"][0]["pass_fail"] == "pass"
+    assert result["environment"] == {"VLLM_USE_MODELSCOPE": "true"}
+
+
+def test_result_features_come_from_actual_command_env(generic_config):
+    endpoints = EndpointResolver(generic_config).resolve()
+    commands = _commands_for(generic_config, endpoints)
+    commands[-1] = _with_env(commands[-1], VLLM_ASCEND_ENABLE_FLASHCOMM1="1")
+    result = build_benchmark_results(
+        config=generic_config,
+        endpoints=endpoints,
+        commands=commands,
+        results=[["csv", {"Output Token Throughput": {"total": "10 token/s"}}]],
+    )
+    assert "flashcomm1" in result["feature"]
 
 
 def test_write_result_json(generic_config, tmp_path):

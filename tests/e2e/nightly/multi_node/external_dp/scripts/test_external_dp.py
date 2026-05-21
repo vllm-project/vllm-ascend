@@ -1,10 +1,11 @@
 import logging
 import os
 import time
-from copy import deepcopy
 from pathlib import Path
 
 from tests.e2e.nightly.multi_node.external_dp.scripts.external_dp_config import (
+    BACKEND_HEALTHCHECK_PATH,
+    BACKEND_READY_TIMEOUT,
     EndpointResolver,
     ExternalDPConfig,
     ExternalDPConfigLoader,
@@ -21,7 +22,7 @@ from tests.e2e.nightly.multi_node.external_dp.scripts.external_dp_utils import (
     wait_http_ready,
     write_benchmark_results_json,
 )
-from tools.aisbench import maybe_download_from_modelscope, run_aisbench_cases
+from tools.aisbench import run_aisbench_cases
 
 logging.basicConfig(
     level=logging.INFO,
@@ -51,7 +52,7 @@ class ExternalDPServerManager:
         self.processes: list[tuple[int, ExternalDPEndpoint]] = []
 
     def start_current_node(self) -> None:
-        local_endpoints = [endpoint for endpoint in self.endpoints if endpoint.node_index == self.current_node_index]
+        local_endpoints = [endpoint for endpoint in self.endpoints if endpoint.config_index == self.current_node_index]
         logger.info("Starting %d external DP endpoints on node %d", len(local_endpoints), self.current_node_index)
         try:
             for endpoint in local_endpoints:
@@ -62,10 +63,10 @@ class ExternalDPServerManager:
                 self.processes.append((process.pid, endpoint))
 
             for _, endpoint in self.processes:
-                if endpoint.node_index != self.current_node_index:
+                if endpoint.config_index != self.current_node_index:
                     continue
-                url = f"http://{endpoint.host}:{endpoint.port}{endpoint.healthcheck_path}"
-                wait_http_ready(url, endpoint.ready_timeout)
+                url = f"http://{endpoint.host}:{endpoint.port}{BACKEND_HEALTHCHECK_PATH}"
+                wait_http_ready(url, BACKEND_READY_TIMEOUT)
                 logger.info("External DP endpoint ready: %s", url)
         except Exception:
             self.cleanup()
@@ -75,7 +76,7 @@ class ExternalDPServerManager:
         for pid, endpoint in reversed(self.processes):
             logger.info(
                 "Stopping external DP endpoint node=%d rank=%d pid=%d",
-                endpoint.node_index,
+                endpoint.config_index,
                 endpoint.local_rank,
                 pid,
             )
@@ -83,7 +84,7 @@ class ExternalDPServerManager:
         self.processes.clear()
 
     def _endpoint_log_file(self, endpoint: ExternalDPEndpoint) -> Path:
-        return self.log_root / f"node-{endpoint.node_index}" / f"rank-{endpoint.local_rank}.log"
+        return self.log_root / f"node-{endpoint.config_index}" / f"rank-{endpoint.local_rank}.log"
 
 
 class ExternalDPProxyLauncher:
@@ -145,17 +146,6 @@ def _wait_done_signal(config: ExternalDPConfig, timeout: int) -> None:
     raise TimeoutError(f"Timed out waiting for external DP done signal: {signal_path}")
 
 
-def _prepare_aisbench_cases(config: ExternalDPConfig) -> list[dict]:
-    cases = [deepcopy(case) for case in config.benchmark_cases()]
-    if config.request_model == config.model:
-        return cases
-
-    model_path = maybe_download_from_modelscope(config.model)
-    for case in cases:
-        case.setdefault("model_path", model_path)
-    return cases
-
-
 def _build_all_commands(config: ExternalDPConfig):
     endpoints = EndpointResolver(config).resolve()
     builder = CommandBuilder(config)
@@ -165,7 +155,7 @@ def _build_all_commands(config: ExternalDPConfig):
 
 def _wait_all_endpoints_ready(endpoints, timeout: int) -> None:
     for endpoint in endpoints:
-        url = f"http://{endpoint.host}:{endpoint.port}{endpoint.healthcheck_path}"
+        url = f"http://{endpoint.host}:{endpoint.port}{BACKEND_HEALTHCHECK_PATH}"
         wait_http_ready(url, timeout=timeout)
         logger.info("External DP endpoint ready from master: %s", url)
 
@@ -208,11 +198,10 @@ def test_external_dp() -> None:
 
         if is_master:
             wait_http_ready(proxy_health_url(config), timeout=300)
-            aisbench_cases = _prepare_aisbench_cases(config)
             results = run_aisbench_cases(
-                model=config.request_model,
+                model=config.model,
                 port=config.routing.proxy_port,
-                aisbench_cases=aisbench_cases,
+                aisbench_cases=config.benchmark_cases(),
                 host_ip=config.routing.proxy_host,
             )
             all_endpoints, all_commands = _build_all_commands(config)

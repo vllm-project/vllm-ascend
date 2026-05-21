@@ -1,6 +1,5 @@
 test_name: "test DeepSeek-V2-Lite-W8A8 external dp disaggregated_prefill"
 model: "vllm-ascend/DeepSeek-V2-Lite-W8A8"
-request_model: "DeepSeek-V2-Lite-W8A8"
 num_nodes: 2
 npu_per_node: 16
 
@@ -14,13 +13,11 @@ config_common: &config_common
   host: "0.0.0.0"
   port_start: 7100
   dp_rpc_port: 12321
-  healthcheck_path: "/health"
-  ready_timeout: 1800
 
 routing:
   type: "disaggregated_prefill"
   proxy_node_index: 0
-  proxy_host: "$NODE_0_IP"
+  proxy_host: "${NODE_0_IP}"
   proxy_port: 1999
   proxy_script: "examples/disaggregated_prefill_v1/load_balance_proxy_server_example.py"
   groups:
@@ -36,7 +33,7 @@ config:
     dp_rank_start: 0
     tp_size: 1
     pp_size: 1
-    dp_address: "$NODE_0_IP"
+    dp_address: "${NODE_0_IP}"
 
   - node_index: 1
     <<: *config_common
@@ -46,18 +43,20 @@ config:
     dp_rank_start: 0
     tp_size: 1
     pp_size: 1
-    dp_address: "$NODE_1_IP"
+    dp_address: "${NODE_1_IP}"
 
 templates:
   - envs:
       <<: *env_common
+      ASCEND_RT_VISIBLE_DEVICES: "${VISIBLE_DEVICES}"
       HCCL_BUFFSIZE: "256"
+      SERVER_PORT: "${PORT}"
       VLLM_ASCEND_ENABLE_FLASHCOMM1: "1"
     server_cmd_template:
       - --host
       - ${HOST}
       - --port
-      - ${PORT}
+      - $SERVER_PORT
       - --data-parallel-size
       - ${DP_SIZE}
       - --data-parallel-rank
@@ -68,8 +67,6 @@ templates:
       - ${DP_RPC_PORT}
       - --tensor-parallel-size
       - ${TP_SIZE}
-      - --served-model-name
-      - ${REQUEST_MODEL}
       - --trust-remote-code
       - --quantization
       - ascend
@@ -79,13 +76,15 @@ templates:
 
   - envs:
       <<: *env_common
+      ASCEND_RT_VISIBLE_DEVICES: "${VISIBLE_DEVICES}"
       HCCL_BUFFSIZE: "256"
+      SERVER_PORT: "${PORT}"
       VLLM_ASCEND_ENABLE_FLASHCOMM1: "1"
     server_cmd_template:
       - --host
       - ${HOST}
       - --port
-      - ${PORT}
+      - $SERVER_PORT
       - --data-parallel-size
       - ${DP_SIZE}
       - --data-parallel-rank
@@ -96,8 +95,6 @@ templates:
       - ${DP_RPC_PORT}
       - --tensor-parallel-size
       - ${TP_SIZE}
-      - --served-model-name
-      - ${REQUEST_MODEL}
       - --trust-remote-code
       - --quantization
       - ascend

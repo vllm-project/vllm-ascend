@@ -4,101 +4,120 @@
 
 当前 vllm-ascend nightly multi-node 测试框架主要覆盖 internal load balancing 或 hybrid load balancing 场景。
 
-DeepSeek-V3.1 文档中的外部负载均衡部署方式与当前 nightly 抽象存在明显差异：
+DeepSeek-V3.1 文档中的 external DP / external load balancing 部署方式与当前 nightly 抽象存在明显差异：
 
 ```text
-当前 nightly 常见抽象：
+当前常见 nightly 抽象：
   一个 node -> 一个 server_cmd -> 一个 vLLM endpoint
 
 external DP 抽象：
   一个 node -> 多个 local DP rank -> 多个 vLLM endpoint
 ```
 
-文档中的 external DP 方式大致由两部分组成：
+文档中的 external DP 部署方式可以理解为：
 
 ```text
-1. launch_online_dp.py
-   负责根据 dp_size_local / dp_rank_start / tp_size / port_start 等参数，
+1. launch_online_dp.py 根据 dp_size_local / dp_rank_start / tp_size / port_start 等参数，
    在当前节点上启动多个 vLLM backend。
 
-2. run_dp_template.sh
-   负责接收 launch_online_dp.py 传入的参数，
+2. run_dp_template.sh 接收 launch_online_dp.py 传入的参数，
    生成最终 vllm serve 命令。
+
+3. 外部 proxy 根据 endpoint 列表做请求分发：
+   - generic_dp 使用 dp_load_balance_proxy_server.py
+   - disaggregated_prefill 使用 load_balance_proxy_server_example.py
 ```
 
-本次设计目标是：在 nightly multi-node 测试框架中新增一套 external DP 测试能力，使其既支持非 PD 分离场景，也支持 PD 分离场景。
+本方案的目标是在 nightly multi-node 测试框架中新增一套 external DP 测试能力，使其同时支持：
+
+```text
+1. generic_dp：非 PD 分离 external DP 场景
+2. disaggregated_prefill：PD 分离 external DP 场景
+```
+
+当前实现已经落地在：
+
+```text
+tests/e2e/nightly/multi_node/external_dp/
+```
+
+并新增了独立 workflow：
+
+```text
+.github/workflows/_e2e_nightly_external_dp.yaml
+.github/workflows/schedule_nightly_external_dp_a3.yaml
+```
 
 ---
 
-## 2. 目标
+## 2. 设计目标
 
 ### 2.1 功能目标
 
-新增 external DP 测试框架，支持：
+新增 external DP nightly 测试框架，支持：
 
 ```text
-1. generic_dp
-   非 PD 分离 external DP 场景。
-   多个 vLLM backend endpoint 由 generic DP proxy 做负载均衡。
-
-2. disaggregated_prefill
-   PD 分离 external DP 场景。
-   多个 prefiller endpoint 和 decoder endpoint 由 PD proxy 做请求转发。
+1. YAML 驱动 external DP 拓扑描述
+2. 一个节点启动多个 vLLM backend endpoint
+3. 自动推导 local_rank / dp_rank / port / visible_devices
+4. 自动渲染 envs 和 server_cmd_template
+5. 自动拼接 vllm serve <model>
+6. 支持 generic_dp proxy
+7. 支持 disaggregated_prefill proxy
+8. 支持 AISBench accuracy / performance
+9. 支持 benchmark result JSON 输出
+10. benchmark result JSON 新增 external_dp_topology 字段
+11. 支持 UT 验证配置解析、endpoint 推导、命令生成、proxy 命令生成、结果写入
+12. 支持独立 external_dp workflow
 ```
 
-### 2.2 YAML 驱动目标
+---
 
-测试配置完全由 YAML 驱动。
+### 2.2 YAML 驱动目标
 
 YAML 需要同时满足：
 
 ```text
 1. 可读性强
 2. 接近文档中的 launch_online_dp.py + run_dp_template.sh 方式
-3. 不保留旧式 server_cmd
-4. 支持 config 参数回填到 env 和 server_cmd_template
-5. 支持每个节点独立模板
-6. 支持 routing 通过序号引用 config/template
-7. 支持框架自动生成 DP_RANK / PORT / VISIBLE_DEVICES
-8. 支持最终完整命令可打印、可追踪、可 debug
+3. 不保留旧式完整 server_cmd
+4. config 参数可以回填到 envs 和 server_cmd_template
+5. 每个节点有独立 template
+6. routing 通过序号引用 config/template
+7. 框架自动生成 DP_RANK / PORT / VISIBLE_DEVICES
+8. 最终完整命令可打印、可追踪、可 debug
+9. AISBench 请求直接使用顶层 model，和现有多节点 nightly 保持一致
+10. env 可以引用 config 变量，server_cmd_template 可以用 shell 风格 $VAR 引用已渲染 env
 ```
+
+---
 
 ### 2.3 测试目标
 
-新增：
+当前包含三类 YAML：
 
 ```text
-1. generic_dp 小规模 e2e case
-   - 使用 Qwen/Qwen3-0.6B
-   - 2 节点，每个节点启动多个 external DP endpoint
+1. generic_dp_smoke.yaml
+   - 非 PD external DP 小规模验证
+   - 2 节点
+   - 每个节点启动多个 backend endpoint
+   - 使用 generic DP proxy
 
-2. disaggregated_prefill 小规模 e2e case
-   - 使用 vllm-ascend/DeepSeek-V2-Lite-W8A8
-   - 2 节点，prefiller / decoder 分离
-   - 覆盖 Mooncake kv_producer / kv_consumer 路径
+2. disaggregated_prefill_smoke.yaml
+   - PD 分离 external DP 小规模验证
+   - 2 节点
+   - node 0 为 prefiller
+   - node 1 为 decoder
+   - 使用 PD proxy
+   - 覆盖 kv_producer / kv_consumer 路径
 
-3. DeepSeek-V3.1 external DP PD 正式拓扑 YAML
-   - 按 DeepSeek-V3.1 文档中的 W8A8 2P1D Layerwise external DP PD 拓扑编写
-   - 默认只支持 workflow_dispatch 手动触发，不进入第一版定时 schedule
-
-4. 配置解析 / 命令生成 / endpoint 推导 / proxy 命令生成 / result writer UT
-
-5. 独立 external_dp reusable workflow 和 A3 schedule workflow
-
-6. benchmark result JSON 新增 external_dp_topology 字段
-```
-
-### 2.4 实现约束
-
-后续编码应遵循以下工程约束：
-
-```text
-1. 先明确假设，再编码
-2. 只实现 external DP 测试框架需要的最小能力
-3. 不顺手重构现有 multi_node 测试框架
-4. 每个新增行为都要有可验证的 UT 或 e2e 验收点
-5. 代码改动保持外科式，避免 speculative abstraction
-6. 优先保证现有 nightly 用例不受影响
+3. DeepSeek-V3.1-external-dp-pd.yaml
+   - DeepSeek-V3.1 external DP + PD 分离正式拓扑
+   - 4 节点
+   - 2P1D
+   - prefiller: node 0 / node 1
+   - decoder: node 2 / node 3
+   - 默认用于 workflow_dispatch 手动触发
 ```
 
 ---
@@ -111,28 +130,21 @@ YAML 需要同时满足：
 1. 不改造现有 RemoteOpenAIServer 行为
 2. 不破坏现有 tests/e2e/nightly/multi_node 用例
 3. 不强行复用现有 disaggregated_prefill YAML 结构
-4. 不将 DeepSeek-V3.1 完整拓扑加入第一版定时 schedule
+4. 不将 DeepSeek-V3.1 完整拓扑默认加入定时 schedule
 5. 不实现 nginx / ingress / AIBrix 等生产级 external router
 6. 不要求主节点 CI summary 打印所有 endpoint 状态
-7. 不新增 vLLM Ascend 运行时环境变量
-8. 不要求提供通用本地部署工具，文档中已有本地部署方案，本次设计为 CI 测试框架服务
+7. 不把 external DP 作为通用本地部署工具，本方案主要服务 CI nightly 测试
 ```
 
 ---
 
-## 4. 总体设计
+## 4. 当前目录结构
 
-新增目录：
-
-```text
-tests/e2e/nightly/multi_node/external_dp/
-```
-
-推荐目录结构：
+当前实现采用紧凑结构，而不是早期方案中拆成很多单独文件。
 
 ```text
 tests/e2e/nightly/multi_node/external_dp/
-  __init__.py
+  README.md
 
   config/
     generic_dp_smoke.yaml
@@ -140,16 +152,10 @@ tests/e2e/nightly/multi_node/external_dp/
     DeepSeek-V3.1-external-dp-pd.yaml
 
   scripts/
-    __init__.py
     external_dp_config.py
-    endpoint_resolver.py
-    command_builder.py
-    proxy_launcher.py
-    server_manager.py
-    process_utils.py
-    result_writer.py
-    test_external_dp.py
+    external_dp_utils.py
     run.sh
+    test_external_dp.py
 
 tests/ut/external_dp/
   test_external_dp_config.py
@@ -159,10 +165,51 @@ tests/ut/external_dp/
   test_result_writer.py
 ```
 
-整体执行链路：
+当前职责划分：
 
 ```text
-YAML
+external_dp_config.py
+  - dataclass 定义
+  - YAML 读取
+  - routing 解析
+  - config/templates 解析
+  - cluster IP 解析
+  - $NODE_i_IP / $LOCAL_IP / $MASTER_IP 等占位符替换
+  - 配置校验
+  - EndpointResolver
+
+external_dp_utils.py
+  - CommandBuilder
+  - process utils
+  - wait_http_ready
+  - build_proxy_command
+  - format_command
+  - collect_logs
+  - write_benchmark_results_json
+
+test_external_dp.py
+  - ExternalDPServerManager
+  - ExternalDPProxyLauncher
+  - pytest e2e 编排
+  - backend 启动
+  - proxy 启动
+  - AISBench 调用
+  - done signal
+  - cleanup
+
+run.sh
+  - 容器环境初始化
+  - 安装 / 准备依赖
+  - 执行 pytest
+  - 收集 Ascend logs
+```
+
+---
+
+## 5. 总体执行链路
+
+```text
+YAML config
   |
   v
 ExternalDPConfigLoader
@@ -183,22 +230,47 @@ ExternalDPProxyLauncher
 AISBench accuracy / performance
   |
   v
-ResultWriter
+write_benchmark_results_json
+  |
+  v
+benchmark result artifact + logs artifact
+```
+
+运行时节点分工：
+
+```text
+所有节点：
+  1. 加载 YAML
+  2. 解析所有 endpoint
+  3. 找出当前节点 endpoint
+  4. 启动本节点多个 vLLM backend
+  5. 等待本节点 backend /health ready
+
+master 节点，即 node 0：
+  1. 等待所有 backend ready
+  2. 启动 proxy
+  3. 等待 proxy /healthcheck ready
+  4. 运行 AISBench perf / acc
+  5. 写 benchmark result JSON
+  6. 写 done signal
+
+非 master 节点：
+  1. 启动 backend 后等待 done signal
+  2. 收到 done signal 后 cleanup
 ```
 
 ---
 
-## 5. YAML 总体结构
+## 6. YAML 总体结构
 
-最终 YAML 采用如下结构：
+当前 YAML 采用如下结构：
 
 ```yaml
 test_name: "test xxx"
 model: "xxx"
-request_model: "xxx"  # optional
-num_nodes: 4
+num_nodes: 2
 npu_per_node: 16
-cluster_hosts: []  # optional, only for non-K8s/local debug
+cluster_hosts: []     # optional, local debug only
 
 env_common: &env_common
   ...
@@ -218,24 +290,22 @@ templates:
   - ...
 
 benchmarks:
-  ...
+  perf:
+    ...
+  acc:
+    ...
 ```
 
-各部分含义：
+字段说明：
 
 ```text
 test_name:
-  测试名称。
+  测试名称，也可作为 benchmark job name fallback。
 
 model:
-  vllm serve 使用的模型路径或模型名。
-
-request_model:
-  可选字段。
-  AISBench / OpenAI API 请求中使用的 model 名称。
-  如果未配置，则默认使用顶层 model。
-  如果 server_cmd_template 中显式配置了 --served-model-name，
-  建议同步配置 request_model，避免请求模型名和服务暴露模型名不一致。
+  vllm serve 和 AISBench/OpenAI API 请求共同使用的模型路径或模型名。
+  CommandBuilder 会自动拼接：
+    vllm serve <model> <rendered_server_cmd_template>
 
 num_nodes:
   当前测试需要的节点数量。
@@ -244,8 +314,8 @@ npu_per_node:
   每个节点的 NPU 数量，用于校验 visible_devices 是否越界。
 
 cluster_hosts:
-  可选调试字段。
-  CI 中默认不配置，框架通过 LWS DNS 解析所有节点 IP。
+  可选字段，主要用于非 K8s / 本地 debug。
+  CI 中通常不配置，框架通过 LWS DNS 解析所有节点 IP。
   如果配置，则 len(cluster_hosts) 必须等于 num_nodes，
   且 cluster_hosts[i] 对应 $NODE_i_IP。
 
@@ -253,30 +323,32 @@ env_common:
   所有节点可复用的基础环境变量。
 
 config_common:
-  所有节点可复用的基础测试框架配置，例如 host、port_start、dp_rpc_port。
+  所有节点可复用的基础测试框架配置。
+  例如 host、port_start、dp_rpc_port。
+  backend healthcheck_path 和 ready_timeout 由测试框架后台常量控制，不在 YAML 中配置。
 
 routing:
-  描述当前 external DP 路由类型，以及哪些 config/template 属于 prefiller、decoder 或 worker。
+  描述当前 external DP 路由类型，以及哪些 config/template 属于 worker、prefiller、decoder。
 
 config:
   节点级结构化配置列表。
   config[i] 表示第 i 个节点的 external DP 配置。
-  第一版强制 config[i].node_index == i。
+  node_index 可作为可读性字段保留；如果出现，必须等于 i，但不会进入 NodeConfig 数据类。
 
 templates:
   节点级模板列表。
   templates[i] 与 config[i] 一一对应。
-  templates[i] 里定义该节点的 envs 和 server_cmd_template。
+  templates[i] 定义该节点的 envs 和 server_cmd_template。
 
 benchmarks:
-  accuracy / performance 测试配置。
+  AISBench accuracy / performance 测试配置。
 ```
 
 ---
 
-## 6. YAML 关键设计原则
+## 7. YAML 关键设计原则
 
-### 6.1 config 和 templates 通过序号一一对应
+### 7.1 config 和 templates 通过序号一一对应
 
 规则：
 
@@ -291,16 +363,14 @@ config[2] + templates[2] -> 第 2 个节点的配置和模板
 
 ```text
 len(config) == len(templates) == num_nodes
-config[i].node_index == i
+如果 config[i].node_index 存在，则必须等于 i
 ```
-
-如果不满足，直接报错。
 
 第一版不支持 config 顺序和 node_index 不一致的写法，避免 routing 序号、config 下标、node_index 三者产生歧义。
 
 ---
 
-### 6.2 routing 使用序号引用 config/template
+### 7.2 routing 使用序号引用 config/template
 
 PD 分离场景：
 
@@ -337,9 +407,11 @@ config[0] + templates[0] 属于 worker
 config[1] + templates[1] 属于 worker
 ```
 
+EndpointResolver 会根据 routing.groups 给每个 endpoint 标注 role。
+
 ---
 
-### 6.3 server_cmd_template 不写 vllm serve
+### 7.3 server_cmd_template 不写 vllm serve
 
 YAML 顶层已经写了：
 
@@ -356,33 +428,10 @@ vllm serve <model>
 框架最终自动拼接：
 
 ```bash
-vllm serve ${MODEL} ${rendered_server_cmd_template}
+vllm serve ${model} ${rendered_server_cmd_template}
 ```
 
-如果需要设置 `--served-model-name`，直接把它作为普通参数写在 `server_cmd_template` 中。
-
-框架不为 `--served-model-name` 提供单独顶层字段，也不对它做特殊处理。
-
-如果配置了 `--served-model-name`，建议同时配置：
-
-```yaml
-request_model: "<served-model-name>"
-```
-
-这样 AISBench 请求模型名与服务暴露模型名一致。
-
----
-
-### 6.4 不再保留旧式 server_cmd
-
-不使用：
-
-```yaml
-server_cmd: >
-  vllm serve ...
-```
-
-而是使用：
+例如 YAML 中写：
 
 ```yaml
 server_cmd_template:
@@ -394,19 +443,61 @@ server_cmd_template:
   - ${DP_SIZE}
 ```
 
-它不是最终命令，而是会被每个 local rank 渲染多次的参数模板。
+最终渲染为：
+
+```bash
+vllm serve Qwen/Qwen3-0.6B \
+  --host 0.0.0.0 \
+  --port 7100 \
+  --data-parallel-size 4
+```
 
 ---
 
-## 7. YAML 变量体系
+### 7.4 不保留旧式完整 server_cmd
 
-YAML 中存在两类变量。
+不使用：
+
+```yaml
+server_cmd: >
+  vllm serve ...
+```
+
+使用：
+
+```yaml
+server_cmd_template:
+  - --host
+  - ${HOST}
+  - --port
+  - ${PORT}
+  - --data-parallel-size
+  - ${DP_SIZE}
+```
+
+`server_cmd_template` 不是最终命令，而是会被每个 local rank 渲染多次的参数模板。
 
 ---
 
-### 7.1 集群占位符
+## 8. YAML 变量体系
 
-这类变量使用 `$XXX` 形式，主要出现在 `config`、`routing`、`envs` 中。
+YAML 中存在两类变量：
+
+```text
+1. $XXX
+   集群占位符，主要出现在 config、routing、envs 中。
+
+2. ${XXX}
+   严格模板变量，可出现在 envs 和 server_cmd_template 中。
+3. $VAR
+   shell 风格变量，envs 可用它引用 config 派生变量；server_cmd_template 可用它引用已渲染 env。
+```
+
+---
+
+### 8.1 集群占位符
+
+使用 `$XXX` 形式。
 
 支持：
 
@@ -427,26 +518,32 @@ dp_address: "$NODE_2_IP"
 proxy_host: "$NODE_0_IP"
 ```
 
-说明：
+解析规则：
 
 ```text
-1. 如果 cluster_hosts 非空，则 $NODE_i_IP 来自 cluster_hosts[i]。
-2. 如果 cluster_hosts 为空，则 $NODE_i_IP 由 LWS DNS / 当前 CI 机制解析。
-3. $LOCAL_IP 对应当前 LWS_WORKER_INDEX 的节点 IP。
-4. $MASTER_IP 默认等价于 $NODE_0_IP。
+1. 如果 cluster_hosts 非空：
+     $NODE_i_IP 来自 cluster_hosts[i]
+
+2. 如果 cluster_hosts 为空：
+     $NODE_i_IP 由 LWS DNS / 当前 CI 机制解析
+
+3. $LOCAL_IP：
+     当前 LWS_WORKER_INDEX 对应的节点 IP
+
+4. $MASTER_IP：
+     默认等价于 $NODE_0_IP
 ```
 
 ---
 
-### 7.2 命令模板变量
+### 8.2 config 派生模板变量
 
-这类变量使用 `${XXX}` 形式，主要出现在 `server_cmd_template` 中。
+使用 `${XXX}` 形式。
 
-支持：
+当前支持：
 
 ```text
 ${MODEL}
-${REQUEST_MODEL}
 ${HOST}
 ${PORT_START}
 ${PORT}
@@ -464,19 +561,86 @@ ${NODE_INDEX}
 ${CONFIG_INDEX}
 ```
 
-其中：
+含义：
 
 ```text
-${MODEL} = YAML 顶层 model，用作 vllm serve 模型名
-${REQUEST_MODEL} = YAML 顶层 request_model；如果未配置，则等于 model
-${PORT} = port_start + local_rank
-${DP_RANK} = dp_rank_start + local_rank
-${VISIBLE_DEVICES} = 根据 local_rank 和 tp_size 自动生成
+${MODEL}
+  YAML 顶层 model，用作 vllm serve 和 AISBench 请求模型名。
+
+${HOST}
+  config[i].host。
+
+${PORT_START}
+  config[i].port_start。
+
+${PORT}
+  port_start + local_rank。
+
+${DP_SIZE}
+  config[i].dp_size。
+
+${DP_SIZE_LOCAL}
+  config[i].dp_size_local。
+
+${DP_RANK_START}
+  config[i].dp_rank_start。
+
+${DP_RANK}
+  dp_rank_start + local_rank。
+
+${LOCAL_RANK}
+  当前节点内第几个 local rank。
+
+${TP_SIZE}
+  config[i].tp_size。
+
+${PP_SIZE}
+  config[i].pp_size。
+
+${DP_ADDRESS}
+  config[i].dp_address。
+
+${DP_RPC_PORT}
+  config[i].dp_rpc_port。
+
+${VISIBLE_DEVICES}
+  根据 local_rank 和 tp_size 自动生成。
+
+${NODE_INDEX}
+  当前节点 index。
+
+${CONFIG_INDEX}
+  当前 config/template 下标。
+```
+
+如果 `server_cmd_template` 引用了未知 `${XXX}`，CommandBuilder 应直接报错，不应静默忽略。
+
+### 8.3 env 到 cmd 的 shell 风格变量
+
+渲染顺序：
+
+```text
+1. 先渲染 template.envs。
+2. envs 可以使用 `${PORT}` 或 `$PORT` 这类 config 派生变量。
+3. 再渲染 server_cmd_template。
+4. server_cmd_template 可以使用 `$SERVER_PORT` 这类已渲染 env。
+```
+
+示例：
+
+```yaml
+templates:
+  - envs:
+      ASCEND_RT_VISIBLE_DEVICES: "$VISIBLE_DEVICES"
+      SERVER_PORT: "$PORT"
+    server_cmd_template:
+      - --port
+      - $SERVER_PORT
 ```
 
 ---
 
-## 8. Endpoint 自动推导规则
+## 9. Endpoint 自动推导规则
 
 对每个 `config[i]`，框架根据 `dp_size_local` 展开多个 endpoint。
 
@@ -486,7 +650,6 @@ ${VISIBLE_DEVICES} = 根据 local_rank 和 tp_size 自动生成
 for local_rank in range(dp_size_local):
     dp_rank = dp_rank_start + local_rank
     port = port_start + local_rank
-
     visible_devices = ",".join(
         str(device)
         for device in range(
@@ -517,22 +680,138 @@ local_rank 1  -> dp_rank 17 -> port 7101 -> visible_devices 1
 local_rank 15 -> dp_rank 31 -> port 7115 -> visible_devices 15
 ```
 
----
-
-## 9. YAML Schema：generic_dp smoke 示例
-
-非 PD 场景使用 `generic_dp`。
-
-该 YAML 对应：
+当前 `ExternalDPEndpoint` 需要携带的信息包括：
 
 ```text
-config/generic_dp_smoke.yaml
+config_index
+role
+dp_group
+local_rank
+dp_rank
+host
+bind_host
+port
+visible_devices
+dp_size
+dp_size_local
+tp_size
+pp_size
+dp_address
+dp_rpc_port
 ```
+
+---
+
+## 10. routing 类型
+
+当前支持两种 routing type：
+
+```text
+1. generic_dp
+2. disaggregated_prefill
+```
+
+---
+
+### 10.1 generic_dp
+
+YAML：
+
+```yaml
+routing:
+  type: "generic_dp"
+  proxy_node_index: 0
+  proxy_host: "$NODE_0_IP"
+  proxy_port: 1999
+  proxy_script: "examples/external_online_dp/dp_load_balance_proxy_server.py"
+  groups:
+    worker: [0, 1]
+```
+
+框架行为：
+
+```text
+1. 收集 role == worker 的所有 endpoint。
+2. 生成 generic DP proxy 命令。
+3. proxy 参数使用：
+     --dp-hosts
+     --dp-ports
+```
+
+最终 proxy 命令形式：
+
+```bash
+python examples/external_online_dp/dp_load_balance_proxy_server.py \
+  --host <proxy_host> \
+  --port <proxy_port> \
+  --dp-hosts <worker_host_0> <worker_host_1> ... \
+  --dp-ports <worker_port_0> <worker_port_1> ...
+```
+
+---
+
+### 10.2 disaggregated_prefill
+
+YAML：
+
+```yaml
+routing:
+  type: "disaggregated_prefill"
+  proxy_node_index: 0
+  proxy_host: "$NODE_0_IP"
+  proxy_port: 1999
+  proxy_script: "examples/disaggregated_prefill_v1/load_balance_proxy_server_example.py"
+  groups:
+    prefiller: [0]
+    decoder: [1]
+```
+
+框架行为：
+
+```text
+1. 收集 role == prefiller 的所有 endpoint。
+2. 收集 role == decoder 的所有 endpoint。
+3. 生成 PD proxy 命令。
+4. proxy 参数使用：
+     --prefiller-hosts
+     --prefiller-ports
+     --decoder-hosts
+     --decoder-ports
+```
+
+最终 proxy 命令形式：
+
+```bash
+python examples/disaggregated_prefill_v1/load_balance_proxy_server_example.py \
+  --host <proxy_host> \
+  --port <proxy_port> \
+  --prefiller-hosts <prefiller_host_0> <prefiller_host_1> ... \
+  --prefiller-ports <prefiller_port_0> <prefiller_port_1> ... \
+  --decoder-hosts <decoder_host_0> <decoder_host_1> ... \
+  --decoder-ports <decoder_port_0> <decoder_port_1> ...
+```
+
+---
+
+## 11. generic_dp smoke YAML 要点
+
+对应文件：
+
+```text
+tests/e2e/nightly/multi_node/external_dp/config/generic_dp_smoke.yaml
+```
+
+用途：
+
+```text
+非 PD external DP 小规模 e2e 验证。
+```
+
+核心结构：
 
 ```yaml
 test_name: "test generic external dp"
 model: "Qwen/Qwen3-0.6B"
-request_model: "Qwen3-0.6B"
 num_nodes: 2
 npu_per_node: 16
 
@@ -545,8 +824,6 @@ config_common: &config_common
   host: "0.0.0.0"
   port_start: 7100
   dp_rpc_port: 12321
-  healthcheck_path: "/health"
-  ready_timeout: 900
 
 routing:
   type: "generic_dp"
@@ -554,7 +831,6 @@ routing:
   proxy_host: "$NODE_0_IP"
   proxy_port: 1999
   proxy_script: "examples/external_online_dp/dp_load_balance_proxy_server.py"
-
   groups:
     worker: [0, 1]
 
@@ -582,12 +858,13 @@ config:
 templates:
   - envs:
       <<: *env_common
-
+      ASCEND_RT_VISIBLE_DEVICES: "$VISIBLE_DEVICES"
+      SERVER_PORT: "$PORT"
     server_cmd_template:
       - --host
       - ${HOST}
       - --port
-      - ${PORT}
+      - $SERVER_PORT
       - --data-parallel-size
       - ${DP_SIZE}
       - --data-parallel-rank
@@ -598,18 +875,17 @@ templates:
       - ${DP_RPC_PORT}
       - --tensor-parallel-size
       - ${TP_SIZE}
-      - --served-model-name
-      - ${REQUEST_MODEL}
       - --trust-remote-code
 
   - envs:
       <<: *env_common
-
+      ASCEND_RT_VISIBLE_DEVICES: "$VISIBLE_DEVICES"
+      SERVER_PORT: "$PORT"
     server_cmd_template:
       - --host
       - ${HOST}
       - --port
-      - ${PORT}
+      - $SERVER_PORT
       - --data-parallel-size
       - ${DP_SIZE}
       - --data-parallel-rank
@@ -620,57 +896,37 @@ templates:
       - ${DP_RPC_PORT}
       - --tensor-parallel-size
       - ${TP_SIZE}
-      - --served-model-name
-      - ${REQUEST_MODEL}
       - --trust-remote-code
-
-benchmarks:
-  perf:
-    case_type: performance
-    dataset_path: vllm-ascend/GSM8K-in3500-bs2800
-    request_conf: vllm_api_stream_chat
-    dataset_conf: gsm8k/gsm8k_gen_0_shot_cot_str_perf
-    num_prompts: 16
-    max_out_len: 128
-    batch_size: 4
-    request_rate: 1
-    baseline: 1
-    threshold: 0.1
-
-  acc:
-    case_type: accuracy
-    dataset_path: vllm-ascend/gsm8k
-    request_conf: vllm_api_general_chat
-    dataset_conf: gsm8k/gsm8k_gen_0_shot_cot_chat_prompt
-    max_out_len: 512
-    batch_size: 4
-    baseline: 0
-    threshold: 100
 ```
 
 ---
 
-## 10. YAML Schema：disaggregated_prefill smoke 示例
+## 12. disaggregated_prefill smoke YAML 要点
 
-PD 分离 smoke 使用 2 节点结构：
+对应文件：
+
+```text
+tests/e2e/nightly/multi_node/external_dp/config/disaggregated_prefill_smoke.yaml
+```
+
+用途：
+
+```text
+PD 分离 external DP 小规模 e2e 验证。
+```
+
+拓扑：
 
 ```text
 node 0 -> prefiller
 node 1 -> decoder
 ```
 
-该 YAML 对应：
-
-```text
-config/disaggregated_prefill_smoke.yaml
-```
-
-如果 `vllm-ascend/DeepSeek-V2-Lite-W8A8` 在 smoke 场景中资源、依赖或稳定性不满足 CI 要求，允许替换为仓库 nightly 中已有、能覆盖 kv_transfer 的更小 PD 模型；替换不影响 external_dp 框架设计。
+核心结构：
 
 ```yaml
 test_name: "test DeepSeek-V2-Lite-W8A8 external dp disaggregated_prefill"
 model: "vllm-ascend/DeepSeek-V2-Lite-W8A8"
-request_model: "DeepSeek-V2-Lite-W8A8"
 num_nodes: 2
 npu_per_node: 16
 
@@ -684,8 +940,6 @@ config_common: &config_common
   host: "0.0.0.0"
   port_start: 7100
   dp_rpc_port: 12321
-  healthcheck_path: "/health"
-  ready_timeout: 1800
 
 routing:
   type: "disaggregated_prefill"
@@ -693,7 +947,6 @@ routing:
   proxy_host: "$NODE_0_IP"
   proxy_port: 1999
   proxy_script: "examples/disaggregated_prefill_v1/load_balance_proxy_server_example.py"
-
   groups:
     prefiller: [0]
     decoder: [1]
@@ -718,194 +971,140 @@ config:
     tp_size: 1
     pp_size: 1
     dp_address: "$NODE_1_IP"
+```
 
-templates:
-  - envs:
-      <<: *env_common
-      HCCL_BUFFSIZE: "256"
-      VLLM_ASCEND_ENABLE_FLASHCOMM1: "1"
+模板要点：
 
-    server_cmd_template:
-      - --host
-      - ${HOST}
-      - --port
-      - ${PORT}
-      - --data-parallel-size
-      - ${DP_SIZE}
-      - --data-parallel-rank
-      - ${DP_RANK}
-      - --data-parallel-address
-      - ${DP_ADDRESS}
-      - --data-parallel-rpc-port
-      - ${DP_RPC_PORT}
-      - --tensor-parallel-size
-      - ${TP_SIZE}
-      - --served-model-name
-      - ${REQUEST_MODEL}
-      - --trust-remote-code
-      - --quantization
-      - ascend
-      - --enable-expert-parallel
-      - --kv-transfer-config
-      - '{"kv_connector":"MooncakeConnectorV1","kv_role":"kv_producer","kv_port":"30000","engine_id":"0"}'
-
-  - envs:
-      <<: *env_common
-      HCCL_BUFFSIZE: "256"
-      VLLM_ASCEND_ENABLE_FLASHCOMM1: "1"
-
-    server_cmd_template:
-      - --host
-      - ${HOST}
-      - --port
-      - ${PORT}
-      - --data-parallel-size
-      - ${DP_SIZE}
-      - --data-parallel-rank
-      - ${DP_RANK}
-      - --data-parallel-address
-      - ${DP_ADDRESS}
-      - --data-parallel-rpc-port
-      - ${DP_RPC_PORT}
-      - --tensor-parallel-size
-      - ${TP_SIZE}
-      - --served-model-name
-      - ${REQUEST_MODEL}
-      - --trust-remote-code
-      - --quantization
-      - ascend
-      - --enable-expert-parallel
-      - --kv-transfer-config
-      - '{"kv_connector":"MooncakeConnectorV1","kv_role":"kv_consumer","kv_port":"30200","engine_id":"1"}'
-
-benchmarks:
-  perf:
-    case_type: performance
-    dataset_path: vllm-ascend/GSM8K-in3500-bs2800
-    request_conf: vllm_api_stream_chat
-    dataset_conf: gsm8k/gsm8k_gen_0_shot_cot_str_perf
-    num_prompts: 16
-    max_out_len: 128
-    batch_size: 4
-    request_rate: 1
-    baseline: 1
-    threshold: 0.1
-
-  acc:
-    case_type: accuracy
-    dataset_path: vllm-ascend/gsm8k
-    request_conf: vllm_api_general_chat
-    dataset_conf: gsm8k/gsm8k_gen_0_shot_cot_chat_prompt
-    max_out_len: 512
-    batch_size: 4
-    baseline: 0
-    threshold: 100
+```text
+1. prefiller template 中 kv-transfer-config 使用 kv_role=kv_producer。
+2. decoder template 中 kv-transfer-config 使用 kv_role=kv_consumer。
+3. 两侧均通过 server_cmd_template 显式写出 vLLM 参数。
+4. 框架自动补齐 vllm serve <model>。
 ```
 
 ---
 
-## 11. YAML Schema：DeepSeek-V3.1 正式拓扑要点
+## 13. DeepSeek-V3.1 正式拓扑 YAML 要点
 
-正式拓扑 YAML 对应：
+对应文件：
 
 ```text
-config/DeepSeek-V3.1-external-dp-pd.yaml
+tests/e2e/nightly/multi_node/external_dp/config/DeepSeek-V3.1-external-dp-pd.yaml
 ```
 
-该配置第一版只支持 `workflow_dispatch` 手动触发，不进入定时 schedule。
-
-正式拓扑要求：
+用途：
 
 ```text
-1. routing.type = disaggregated_prefill
-2. num_nodes = 4
-3. npu_per_node = 16
-4. routing.groups.prefiller = [0, 1]
-5. routing.groups.decoder = [2, 3]
-
-prefiller:
-  node 0:
-    dp_group = prefill_0
-    dp_size = 2
-    dp_size_local = 2
-    dp_rank_start = 0
-    tp_size = 8
-    dp_address = $NODE_0_IP
-
-  node 1:
-    dp_group = prefill_1
-    dp_size = 2
-    dp_size_local = 2
-    dp_rank_start = 0
-    tp_size = 8
-    dp_address = $NODE_1_IP
-
-decoder:
-  node 2:
-    dp_group = decode
-    dp_size = 32
-    dp_size_local = 16
-    dp_rank_start = 0
-    tp_size = 1
-    dp_address = $NODE_2_IP
-
-  node 3:
-    dp_group = decode
-    dp_size = 32
-    dp_size_local = 16
-    dp_rank_start = 16
-    tp_size = 1
-    dp_address = $NODE_2_IP
+DeepSeek-V3.1 external DP + PD 分离正式拓扑。
+默认用于 workflow_dispatch 手动触发，不作为第一版 schedule 默认用例。
 ```
 
-该 YAML 的 `templates` 需要根据实际 DeepSeek-V3.1 W8A8 2P1D Layerwise 文档补齐：
+拓扑：
 
 ```text
-1. DeepSeek-V3.1 模型路径
-2. quantization
-3. expert parallel
-4. kv-transfer-config
-5. layerwise / PD 相关参数
-6. speculative / compilation 等实际需要参数
-7. prefiller 和 decoder 的差异化 env
+num_nodes = 4
+npu_per_node = 16
+
+routing.type = disaggregated_prefill
+routing.groups.prefiller = [0, 1]
+routing.groups.decoder = [2, 3]
+```
+
+节点配置：
+
+```text
+node 0:
+  dp_group = prefill_0
+  dp_size = 2
+  dp_size_local = 2
+  dp_rank_start = 0
+  tp_size = 8
+  dp_address = $NODE_0_IP
+
+node 1:
+  dp_group = prefill_1
+  dp_size = 2
+  dp_size_local = 2
+  dp_rank_start = 0
+  tp_size = 8
+  dp_address = $NODE_1_IP
+
+node 2:
+  dp_group = decode
+  dp_size = 32
+  dp_size_local = 16
+  dp_rank_start = 0
+  tp_size = 1
+  dp_address = $NODE_2_IP
+
+node 3:
+  dp_group = decode
+  dp_size = 32
+  dp_size_local = 16
+  dp_rank_start = 16
+  tp_size = 1
+  dp_address = $NODE_2_IP
+```
+
+展开结果：
+
+```text
+node 0:
+  local_rank 0 -> dp_rank 0 -> port 7100 -> visible_devices 0,1,2,3,4,5,6,7
+  local_rank 1 -> dp_rank 1 -> port 7101 -> visible_devices 8,9,10,11,12,13,14,15
+
+node 1:
+  local_rank 0 -> dp_rank 0 -> port 7100 -> visible_devices 0,1,2,3,4,5,6,7
+  local_rank 1 -> dp_rank 1 -> port 7101 -> visible_devices 8,9,10,11,12,13,14,15
+
+node 2:
+  local_rank 0  -> dp_rank 0  -> port 7100 -> visible_devices 0
+  ...
+  local_rank 15 -> dp_rank 15 -> port 7115 -> visible_devices 15
+
+node 3:
+  local_rank 0  -> dp_rank 16 -> port 7100 -> visible_devices 0
+  ...
+  local_rank 15 -> dp_rank 31 -> port 7115 -> visible_devices 15
 ```
 
 ---
 
-## 12. 命令生成规则
+## 14. 命令生成规则
 
-对每个节点，框架执行：
+对每个节点：
 
 ```text
 config[i] + templates[i] -> node i 的启动配置
 ```
 
-对每个 local rank，框架执行：
+对每个 local rank：
 
 ```text
 1. 计算 LOCAL_RANK
 2. 计算 DP_RANK
 3. 计算 PORT
 4. 计算 VISIBLE_DEVICES
-5. 渲染 envs
-6. 渲染 server_cmd_template
-7. 拼接 vllm serve <model>
-8. 启动 subprocess
+5. 渲染 template.envs
+6. 渲染 template.server_cmd_template
+7. ASCEND_RT_VISIBLE_DEVICES 由 template.envs 使用 $VISIBLE_DEVICES 显式渲染
+8. 自动拼接 vllm serve <model>
+9. 启动 subprocess
 ```
 
 最终命令形式：
 
 ```bash
-ASCEND_RT_VISIBLE_DEVICES=<visible_devices> \
-<rendered envs> \
-vllm serve <model> <rendered server_cmd_template>
+ASCEND_RT_VISIBLE_DEVICES=<rendered_visible_devices> SERVER_PORT=<rendered_port> \
+vllm serve <model> <rendered_server_cmd_template>
 ```
 
 示例：
 
 ```bash
 ASCEND_RT_VISIBLE_DEVICES=0 \
-vllm serve /weights/DeepSeek-V3.1-w8a8-mtp-QuaRot \
+SERVER_PORT=7100 \
+vllm serve vllm-ascend/DeepSeek-R1-0528-W8A8 \
   --host 0.0.0.0 \
   --port 7100 \
   --data-parallel-size 32 \
@@ -913,7 +1112,6 @@ vllm serve /weights/DeepSeek-V3.1-w8a8-mtp-QuaRot \
   --data-parallel-address 10.0.0.2 \
   --data-parallel-rpc-port 12321 \
   --tensor-parallel-size 1 \
-  --served-model-name DeepSeek-V3.1 \
   --trust-remote-code \
   --quantization ascend \
   --enable-expert-parallel \
@@ -922,72 +1120,7 @@ vllm serve /weights/DeepSeek-V3.1-w8a8-mtp-QuaRot \
 
 ---
 
-## 13. Proxy 命令生成规则
-
-### 13.1 generic_dp
-
-读取：
-
-```yaml
-routing:
-  type: "generic_dp"
-  groups:
-    worker: [0, 1]
-```
-
-框架收集 `config[0]` 和 `config[1]` 展开的所有 endpoint。
-
-生成：
-
-```bash
-python examples/external_online_dp/dp_load_balance_proxy_server.py \
-  --host ${proxy_host} \
-  --port ${proxy_port} \
-  --dp-hosts <all worker endpoint hosts> \
-  --dp-ports <all worker endpoint ports>
-```
-
----
-
-### 13.2 disaggregated_prefill
-
-读取：
-
-```yaml
-routing:
-  type: "disaggregated_prefill"
-  groups:
-    prefiller: [0, 1]
-    decoder: [2, 3]
-```
-
-框架收集：
-
-```text
-prefiller endpoints:
-  config[0] 展开的所有 endpoint
-  config[1] 展开的所有 endpoint
-
-decoder endpoints:
-  config[2] 展开的所有 endpoint
-  config[3] 展开的所有 endpoint
-```
-
-生成：
-
-```bash
-python examples/disaggregated_prefill_v1/load_balance_proxy_server_example.py \
-  --host ${proxy_host} \
-  --port ${proxy_port} \
-  --prefiller-hosts <prefiller hosts> \
-  --prefiller-ports <prefiller ports> \
-  --decoder-hosts <decoder hosts> \
-  --decoder-ports <decoder ports>
-```
-
----
-
-## 14. 配置校验规则
+## 15. 配置校验规则
 
 框架加载 YAML 后必须校验：
 
@@ -995,371 +1128,492 @@ python examples/disaggregated_prefill_v1/load_balance_proxy_server_example.py \
 1. num_nodes > 0
 2. len(config) == num_nodes
 3. len(templates) == num_nodes
-4. config[i].node_index 唯一
-5. 第一版强制 config[i].node_index == i
-6. config[i] 与 templates[i] 一一对应
-7. routing.type 必须是 generic_dp 或 disaggregated_prefill
-8. generic_dp 必须存在 routing.groups.worker
-9. disaggregated_prefill 必须存在 routing.groups.prefiller 和 routing.groups.decoder
-10. routing.groups 中的 index 必须在 [0, num_nodes) 范围内
+4. 如果 config[i].node_index 存在，则必须等于 i
+5. config[i] 与 templates[i] 一一对应
+6. routing.type 必须是 generic_dp 或 disaggregated_prefill
+7. generic_dp 必须存在 routing.groups.worker
+8. disaggregated_prefill 必须存在 routing.groups.prefiller 和 routing.groups.decoder
+9. routing.groups 中的 index 必须在 [0, num_nodes) 范围内
+10. 同一个 config index 不能同时出现在多个 routing group 中
 11. dp_size_local * tp_size <= npu_per_node
 12. dp_rank_start + dp_size_local <= dp_size
 13. 同一节点内 port 不冲突
 14. 同一节点内 visible_devices 不重叠
-15. proxy_node_index 必须在 [0, num_nodes) 范围内
+15. routing.proxy_node_index 必须在 [0, num_nodes) 范围内
 16. 每个 config 必须包含 host / port_start / dp_rpc_port / dp_size / dp_size_local / dp_rank_start / tp_size / dp_address
 17. 每个 template 必须包含 envs 和 server_cmd_template
-18. backend healthcheck_path 默认 /health
-19. 第一版 proxy healthcheck_path 固定 /healthcheck；如后续 proxy 脚本不一致，再在 routing 中增加 proxy_healthcheck_path
-20. 如果 cluster_hosts 非空，则 len(cluster_hosts) 必须等于 num_nodes
-21. 如果 request_model 未配置，则 request_model 默认等于 model
+18. backend healthcheck_path 由框架固定为 /health
+19. 第一版 proxy healthcheck_path 固定 /healthcheck
+20. backend ready_timeout 由框架后台常量控制
+21. 如果 cluster_hosts 非空，则 len(cluster_hosts) 必须等于 num_nodes
 ```
 
 ---
 
-## 15. 模块设计
+## 16. 模块设计：external_dp_config.py
 
-### 15.1 external_dp_config.py
+`external_dp_config.py` 是配置解析和 endpoint 推导入口。
 
 职责：
 
 ```text
-1. 读取 YAML
-2. 解析 test_name / model / request_model / num_nodes / npu_per_node
-3. 解析 env_common
-4. 解析 config_common
-5. 解析 routing
-6. 解析 config 列表
-7. 解析 templates 列表
-8. 解析 benchmarks
-9. 执行基础字段校验
-10. 支持 $NODE_i_IP 等占位符替换
-11. 支持 cluster_hosts 作为非 K8s 调试入口
+1. 定义 RoutingConfig
+2. 定义 NodeConfig
+3. 定义 NodeTemplate
+4. 定义 ExternalDPEndpoint
+5. 定义 ExternalDPConfig
+6. 读取 YAML
+7. 解析 test_name / model / num_nodes / npu_per_node
+8. 解析 cluster_hosts
+9. 解析 env_common
+10. 解析 config_common
+11. 解析 routing
+12. 解析 config 列表
+13. 解析 templates 列表
+14. 解析 benchmarks
+15. 支持 $NODE_i_IP / $LOCAL_IP / $MASTER_IP / $LWS_WORKER_INDEX 替换
+16. 执行基础配置校验
+17. EndpointResolver 展开所有 rank 级 endpoint
 ```
 
-输出核心对象：
+核心对象：
 
 ```python
 @dataclass
-class ExternalDPConfig:
-    test_name: str
-    model: str
-    request_model: str
-    num_nodes: int
-    npu_per_node: int
-    cluster_hosts: list[str] | None
-    routing: RoutingConfig
-    node_configs: list[NodeConfig]
-    templates: list[NodeTemplate]
-    benchmarks: dict[str, Any]
-```
+class RoutingConfig:
+    type: str
+    proxy_node_index: int
+    proxy_host: str
+    proxy_port: int
+    proxy_script: str
+    groups: dict[str, list[int]]
 
----
+@dataclass
+class NodeConfig:
+    node_ip: str
+    host: str
+    port_start: int
+    dp_rpc_port: int
+    dp_group: str
+    dp_size: int
+    dp_size_local: int
+    dp_rank_start: int
+    tp_size: int
+    pp_size: int
+    dp_address: str
 
-### 15.2 endpoint_resolver.py
+@dataclass
+class NodeTemplate:
+    envs: dict[str, str]
+    server_cmd_template: list[str]
 
-职责：
-
-```text
-1. 根据 config 展开 rank 级 endpoint
-2. 生成 DP_RANK
-3. 生成 PORT
-4. 生成 VISIBLE_DEVICES
-5. 根据 routing.groups 给 endpoint 标注 role
-6. 输出所有 endpoint
-```
-
-Endpoint 结构：
-
-```python
 @dataclass
 class ExternalDPEndpoint:
     config_index: int
-    node_index: int
     role: str
     dp_group: str
     local_rank: int
     dp_rank: int
     host: str
+    bind_host: str
     port: int
     visible_devices: str
     dp_size: int
     dp_size_local: int
     tp_size: int
+    pp_size: int
     dp_address: str
+    dp_rpc_port: int
+
+@dataclass
+class ExternalDPConfig:
+    test_name: str
+    model: str
+    num_nodes: int
+    npu_per_node: int
+    cluster_hosts: list[str] | None
+    env_common: dict[str, str]
+    config_common: dict[str, str]
+    routing: RoutingConfig
+    node_configs: list[NodeConfig]
+    templates: list[NodeTemplate]
+    benchmarks: dict[str, Any]
+    cluster_ips: list[str]
 ```
 
 ---
 
-### 15.3 command_builder.py
+## 17. 模块设计：external_dp_utils.py
+
+`external_dp_utils.py` 当前承担命令生成、进程工具、proxy 命令生成、结果写入等职责。
+
+主要职责：
+
+```text
+1. CommandBuilder
+2. format_command
+3. start_process
+4. terminate_process_tree
+5. wait_http_ready
+6. collect_logs
+7. build_proxy_command
+8. write_benchmark_results_json
+```
+
+---
+
+### 17.1 CommandBuilder
 
 职责：
 
 ```text
-1. 接收 ExternalDPEndpoint
-2. 接收对应 templates[config_index]
-3. 构造变量表
-4. 回填 envs
-5. 回填 server_cmd_template
-6. 拼接 vllm serve <model>
-7. 注入 ASCEND_RT_VISIBLE_DEVICES=<visible_devices>
-8. 返回最终 command list 和 env dict
+1. 接收 ExternalDPConfig
+2. 接收 ExternalDPEndpoint
+3. 找到 templates[endpoint.config_index]
+4. 构造变量表
+5. 渲染 envs
+6. 渲染 server_cmd_template
+7. 从 template.envs 渲染 ASCEND_RT_VISIBLE_DEVICES 等环境变量
+8. 自动拼接 ["vllm", "serve", config.model, ...]
+9. 返回 command list 和 env dict
 ```
 
 渲染规则：
 
 ```text
 1. ${XXX} 找不到时直接报错
-2. envs 中的 $NODE_i_IP 等占位符也需要替换
-3. server_cmd_template 是 list[str]
-4. 最终命令也是 list[str]
-5. 不使用 shell=True，减少转义风险
-6. ${MODEL} 必须来自顶层 model
-7. ${REQUEST_MODEL} 必须来自顶层 request_model；若未配置则等于 model
+2. server_cmd_template 是 list[str]
+3. 最终命令也是 list[str]
+4. 不使用 shell=True，减少转义风险
+5. ${MODEL} 来自顶层 model
+6. envs 里的 $NODE_i_IP 等集群占位符需要替换
+7. envs 可以用 $PORT / $VISIBLE_DEVICES 引用 config 派生变量
+8. server_cmd_template 可以用 $SERVER_PORT 引用已渲染 env
+9. envs 的值最终都需要转为字符串
 ```
 
 ---
 
-### 15.4 server_manager.py
+### 17.2 format_command
 
 职责：
 
 ```text
-1. 判断当前 LWS_WORKER_INDEX
-2. 找到当前节点对应的 config/template
-3. 展开当前节点所有 endpoint
-4. 对每个 endpoint 生成命令
-5. 启动多个 vLLM subprocess
-6. 每个 endpoint 写独立日志
-7. 等待本节点所有 endpoint health ready
-8. health URL 使用 http://<node_ip>:<port><healthcheck_path>
-9. 测试结束清理进程
+1. 将 env 和 command list 格式化成可读命令
+2. 用于日志打印和 benchmark result 中 serve_cmd 字段
+3. 敏感 env key 需要脱敏
 ```
 
-日志建议：
+敏感 key 包含：
 
 ```text
-/tmp/external_dp_logs/
-  node-0/
-    rank-0.log
-    rank-1.log
-    server_manager.log
-  node-1/
-    rank-0.log
-    rank-1.log
-    server_manager.log
+TOKEN
+SECRET
+PASSWORD
+ACCESS_KEY
 ```
 
 ---
 
-### 15.5 proxy_launcher.py
+### 17.3 process utils
 
-职责：
+当前进程工具包括：
 
 ```text
-1. 只在 routing.proxy_node_index 节点启动 proxy
-2. 根据 routing.type 生成不同 proxy 命令
-3. generic_dp 使用 --dp-hosts / --dp-ports
-4. disaggregated_prefill 使用 --prefiller-hosts / --prefiller-ports / --decoder-hosts / --decoder-ports
-5. 等待 proxy health ready，第一版 URL 固定为 http://<proxy_host>:<proxy_port>/healthcheck
-6. 测试结束清理 proxy 进程
-```
-
----
-
-### 15.6 process_utils.py
-
-单独抽出进程工具模块。
-
-建议接口：
-
-```python
-def start_process(
-    cmd: list[str],
-    env: dict[str, str],
-    log_file: Path,
-) -> subprocess.Popen:
-    ...
-
-def terminate_process_tree(
-    pid: int,
-    timeout: int = 30,
-) -> None:
-    ...
-
-def wait_http_ready(
-    url: str,
-    timeout: int,
-    interval: float = 2.0,
-) -> None:
-    ...
-
-def collect_logs(
-    src_dir: Path,
-    output_tar: Path,
-) -> None:
-    ...
+start_process()
+terminate_process_tree()
+wait_http_ready()
+collect_logs()
 ```
 
 要求：
 
 ```text
-1. 启动失败要记录完整 command
-2. health check 失败要记录 endpoint URL
-3. cleanup 必须在 finally 中执行
-4. kill 进程树，不只 kill 父进程
-5. 命令格式化日志工具需要避免泄露敏感 token
+1. start_process 使用 subprocess.Popen
+2. stdout/stderr 写入指定 log file
+3. 使用 start_new_session=True，便于按进程树清理
+4. terminate_process_tree 优先使用 psutil
+5. 如果 psutil 不可用，则 fallback 到 os.killpg
+6. cleanup 必须在 finally 中执行
 ```
 
 ---
 
-### 15.7 result_writer.py
+### 17.4 build_proxy_command
+
+根据 routing.type 生成不同 proxy 命令。
+
+generic_dp：
+
+```text
+输入：
+  role == worker 的所有 endpoint
+
+输出：
+  python dp_load_balance_proxy_server.py
+    --host <proxy_host>
+    --port <proxy_port>
+    --dp-hosts ...
+    --dp-ports ...
+```
+
+disaggregated_prefill：
+
+```text
+输入：
+  role == prefiller 的所有 endpoint
+  role == decoder 的所有 endpoint
+
+输出：
+  python load_balance_proxy_server_example.py
+    --host <proxy_host>
+    --port <proxy_port>
+    --prefiller-hosts ...
+    --prefiller-ports ...
+    --decoder-hosts ...
+    --decoder-ports ...
+```
+
+---
+
+### 17.5 write_benchmark_results_json
 
 职责：
 
 ```text
-1. 复用现有 benchmark result JSON 字段
-2. 新增 external_dp_topology
-3. 记录 summary 和 endpoints
-4. model_name 使用 YAML 顶层 model
-5. AISBench 请求模型名使用 YAML 顶层 request_model
+1. 生成 benchmark result JSON
+2. 保留现有 nightly 结果字段风格
+3. 新增 external_dp_topology
+4. 记录所有 endpoint 的 rank 级明细
+5. 记录所有最终渲染后的 serve_cmd
 ```
 
-新增字段示例：
+---
+
+## 18. 模块设计：test_external_dp.py
+
+`test_external_dp.py` 是 e2e pytest 入口。
+
+当前内部定义：
+
+```text
+ExternalDPServerManager
+ExternalDPProxyLauncher
+```
+
+---
+
+### 18.1 ExternalDPServerManager
+
+职责：
+
+```text
+1. 判断当前 LWS_WORKER_INDEX
+2. 找到当前节点的 endpoints
+3. 对每个 endpoint 调用 CommandBuilder
+4. 启动多个 vLLM backend subprocess
+5. 每个 endpoint 写独立日志
+6. 等待本节点所有 backend /health ready
+7. cleanup 本节点所有 backend 进程
+```
+
+日志路径：
+
+```text
+/tmp/external_dp_logs/node-{node_index}/rank-{local_rank}.log
+```
+
+---
+
+### 18.2 ExternalDPProxyLauncher
+
+职责：
+
+```text
+1. 只在 routing.proxy_node_index 节点启动 proxy
+2. 调用 build_proxy_command 生成 proxy 命令
+3. 启动 proxy subprocess
+4. 等待 proxy /healthcheck ready
+5. cleanup proxy 进程
+```
+
+proxy healthcheck：
+
+```text
+http://<proxy_host>:<proxy_port>/healthcheck
+```
+
+---
+
+### 18.3 pytest 主流程
+
+伪代码：
+
+```python
+def test_external_dp():
+    config = load_external_dp_config()
+    endpoints = EndpointResolver(config).resolve()
+    current_node_index = resolve_current_node_index(config)
+
+    local_endpoints = [
+        endpoint for endpoint in endpoints
+        if endpoint.config_index == current_node_index
+    ]
+
+    server_manager = ExternalDPServerManager(config, local_endpoints)
+    proxy_launcher = ExternalDPProxyLauncher(config, endpoints)
+
+    try:
+        server_manager.start_current_node()
+        server_manager.wait_local_ready()
+
+        if current_node_index == 0:
+            wait_all_backends_ready(endpoints)
+            proxy_launcher.start()
+            proxy_launcher.wait_ready()
+
+            run_aisbench_cases(
+                model=config.model,
+                host_ip=config.routing.proxy_host,
+                port=config.routing.proxy_port,
+                aisbench_cases=config.benchmarks,
+            )
+
+            write_benchmark_results_json(...)
+            write_done_signal()
+        else:
+            wait_done_signal()
+    finally:
+        proxy_launcher.cleanup()
+        server_manager.cleanup()
+        collect_external_dp_logs()
+```
+
+---
+
+## 19. run.sh 设计
+
+`run.sh` 是 LWS pod 内实际执行脚本。
+
+职责：
+
+```text
+1. 初始化 Ascend / CANN / ATB 相关环境
+2. 设置 BENCHMARK_HOME / VLLM_LOGGING_LEVEL / HF_HUB_OFFLINE 等
+3. 检查 NPU 信息
+4. 配置 pip / git proxy
+5. PR 场景下 checkout vllm-ascend 并安装
+6. 安装 AISBench
+7. 执行 pytest
+8. 退出时备份 Ascend logs
+```
+
+pytest 入口：
+
+```text
+tests/e2e/nightly/multi_node/external_dp/scripts/test_external_dp.py
+```
+
+配置路径：
+
+```text
+CONFIG_BASE_PATH=tests/e2e/nightly/multi_node/external_dp/config/
+CONFIG_FILE_PATH=<yaml file name>
+```
+
+---
+
+## 20. benchmark result JSON
+
+结果默认写入：
+
+```text
+/root/.cache/benchmark_results/<job_name>/<job_name>.json
+```
+
+主要字段：
+
+```text
+model_name
+hardware
+dtype
+feature
+vllm_version
+vllm_ascend_version
+tasks
+serve_cmd
+environment
+external_dp_topology
+```
+
+---
+
+### 20.1 external_dp_topology.summary
+
+示例：
 
 ```json
 {
-  "external_dp_topology": {
-    "summary": {
-      "routing_type": "disaggregated_prefill",
-      "num_nodes": 4,
-      "npu_per_node": 16,
-      "proxy": {
-        "node_index": 0,
-        "host": "10.0.0.1",
-        "port": 1999
-      },
-      "groups": {
-        "prefiller": [0, 1],
-        "decoder": [2, 3]
-      }
-    },
-    "endpoints": [
-      {
-        "config_index": 3,
-        "node_index": 3,
-        "role": "decoder",
-        "dp_group": "decode",
-        "local_rank": 0,
-        "dp_rank": 16,
-        "host": "10.0.0.4",
-        "port": 7100,
-        "visible_devices": "0",
-        "tp_size": 1
-      }
-    ]
+  "routing_type": "disaggregated_prefill",
+  "num_nodes": 4,
+  "npu_per_node": 16,
+  "proxy": {
+    "node_index": 0,
+    "host": "10.0.0.1",
+    "port": 1999
+  },
+  "groups": {
+    "prefiller": [0, 1],
+    "decoder": [2, 3]
   }
 }
 ```
 
 ---
 
-## 16. E2E 测试流程
+### 20.2 external_dp_topology.endpoints
 
-新增入口：
+示例：
 
-```text
-tests/e2e/nightly/multi_node/external_dp/scripts/test_external_dp.py
-```
-
-流程：
-
-```text
-1. 加载 YAML
-2. 读取 LWS_WORKER_INDEX
-3. 解析当前集群所有 node IP
-4. 替换 $NODE_i_IP / $LOCAL_IP 等变量
-5. 解析 config 和 templates
-6. resolve 所有 endpoint
-7. 当前节点启动本地 endpoint
-8. 等待本节点 backend ready
-9. proxy_node 启动 proxy
-10. master node 等待 proxy ready
-11. master node 使用 request_model 执行 AISBench perf / acc
-12. master node 写 benchmark result JSON
-13. 所有节点收集日志
-14. finally 清理本节点进程
-```
-
----
-
-## 17. UT 设计
-
-UT 放置在：
-
-```text
-tests/ut/external_dp/
-```
-
-UT 不依赖 LWS，不依赖真实 NPU，不启动真实 vLLM。
-
-### 17.1 YAML 解析 UT
-
-```text
-test_parse_generic_dp_yaml
-test_parse_disaggregated_prefill_yaml
-test_cluster_hosts_override_dns_resolution
-test_config_template_length_mismatch
-test_invalid_routing_type
-test_invalid_group_index
-test_request_model_defaults_to_model
-test_config_index_must_equal_node_index
-```
-
-### 17.2 Endpoint 推导 UT
-
-```text
-test_resolve_generic_dp_endpoints
-test_resolve_pd_endpoints
-test_dp_rank_auto_increment
-test_port_auto_increment
-test_visible_devices_auto_increment
-test_detect_device_overflow
-test_detect_invalid_dp_rank_range
-```
-
-### 17.3 Command Builder UT
-
-```text
-test_render_server_cmd_template
-test_render_envs
-test_replace_config_variables
-test_replace_generated_variables
-test_missing_variable_error
-test_final_command_auto_prefix_vllm_serve_model
-test_request_model_variable_rendering
-```
-
-### 17.4 Proxy Launcher UT
-
-```text
-test_generic_dp_proxy_command
-test_pd_proxy_command
-test_generic_dp_requires_worker_group
-test_pd_requires_prefiller_decoder_group
-```
-
-### 17.5 Result Writer UT
-
-```text
-test_external_dp_topology_summary
-test_external_dp_topology_endpoints
-test_keep_existing_result_fields
+```json
+[
+  {
+    "config_index": 3,
+    "node_index": 3,
+    "role": "decoder",
+    "dp_group": "decode",
+    "local_rank": 0,
+    "dp_rank": 16,
+    "host": "10.0.0.4",
+    "port": 7100,
+    "visible_devices": "0",
+    "dp_size": 32,
+    "dp_size_local": 16,
+    "tp_size": 1,
+    "pp_size": 1,
+    "dp_address": "10.0.0.3",
+    "dp_rpc_port": 12321
+  }
+]
 ```
 
 ---
 
-## 18. Workflow 设计
+### 20.3 serve_cmd
+
+`serve_cmd` 应记录每个 endpoint 的最终命令，便于失败后复现。
+
+示例：
+
+```json
+{
+  "node3-rank16": "ASCEND_RT_VISIBLE_DEVICES=0 vllm serve ... --data-parallel-rank 16 ..."
+}
+```
+
+---
+
+## 21. Workflow 设计
 
 新增 workflow：
 
@@ -1368,36 +1622,37 @@ test_keep_existing_result_fields
 .github/workflows/schedule_nightly_external_dp_a3.yaml
 ```
 
-external_dp workflow 与现有 multi_node workflow 独立：
+---
+
+### 21.1 _e2e_nightly_external_dp.yaml
+
+职责：
 
 ```text
-1. 复用 LWS 集群拉起、日志上传、benchmark artifact 上传思路
-2. Prepare scripts 阶段安装 tests/e2e/nightly/multi_node/external_dp/scripts/run.sh
-3. CONFIG_BASE_PATH 默认指向 tests/e2e/nightly/multi_node/external_dp/config/
-4. pytest 入口固定为 tests/e2e/nightly/multi_node/external_dp/scripts/test_external_dp.py
-5. 不修改 .github/workflows/_e2e_nightly_multi_node.yaml
+1. 接收 soc_version / runner / image / config_file_path / size 等输入
+2. 生成 LWS_NAME
+3. 准备 external_dp/scripts/run.sh
+4. 通过 lws.yaml.jinja2 启动 LWS 集群
+5. 等待所有 pods ready
+6. stream leader pod 日志
+7. 收集 benchmark results
+8. 收集 Ascend logs
+9. 收集 external dp logs
+10. 上传 artifacts
 ```
 
-matrix 中同时跑两个小规模 case：
+---
 
-```yaml
-strategy:
-  fail-fast: false
-  max-parallel: 1
-  matrix:
-    test_config:
-      - name: external-dp-generic-smoke
-        config_file_path: generic_dp_smoke.yaml
-        size: 2
-        model: Qwen/Qwen3-0.6B
+### 21.2 schedule_nightly_external_dp_a3.yaml
 
-      - name: external-dp-pd-smoke
-        config_file_path: disaggregated_prefill_smoke.yaml
-        size: 2
-        model: vllm-ascend/DeepSeek-V2-Lite-W8A8
+当前 schedule matrix 跑两个小规模 case：
+
+```text
+1. generic_dp_smoke.yaml
+2. disaggregated_prefill_smoke.yaml
 ```
 
-DeepSeek-V3.1 正式拓扑可以先通过 `workflow_dispatch` 手动触发。
+DeepSeek-V3.1 正式拓扑通过 workflow_dispatch 手动触发：
 
 ```yaml
 workflow_dispatch:
@@ -1414,64 +1669,161 @@ workflow_dispatch:
 
 ---
 
-## 19. 验收标准
+## 22. UT 设计
 
-### 19.1 generic_dp case
-
-必须满足：
+UT 放置在：
 
 ```text
-1. Qwen/Qwen3-0.6B generic_dp_smoke.yaml 在 LWS 2 节点正常拉起
-2. 每个节点能启动多个 vLLM backend
-3. 所有 backend /health ready
-4. proxy 使用 dp_load_balance_proxy_server.py 启动成功
-5. proxy 参数包含 --dp-hosts / --dp-ports，且 /healthcheck ready
-6. AISBench perf 通过
-7. AISBench acc 通过
-8. benchmark result JSON 生成成功
-9. external_dp_topology.summary 存在
-10. external_dp_topology.endpoints 存在
-11. 日志 artifact 上传成功
-12. 退出后无残留 vLLM / proxy 进程
+tests/ut/external_dp/
 ```
 
-### 19.2 disaggregated_prefill case
+UT 不依赖 LWS，不依赖真实 NPU，不启动真实 vLLM。
+
+---
+
+### 22.1 YAML 解析 UT
+
+```text
+test_parse_generic_dp_yaml
+test_parse_disaggregated_prefill_yaml
+test_cluster_hosts_override_dns_resolution
+test_config_template_length_mismatch
+test_invalid_routing_type
+test_invalid_group_index
+test_yaml_node_index_must_equal_config_index
+```
+
+---
+
+### 22.2 Endpoint 推导 UT
+
+```text
+test_resolve_generic_dp_endpoints
+test_resolve_pd_endpoints
+test_dp_rank_auto_increment
+test_port_auto_increment
+test_visible_devices_auto_increment
+test_detect_device_overflow
+test_detect_invalid_dp_rank_range
+```
+
+---
+
+### 22.3 Command Builder UT
+
+```text
+test_render_server_cmd_template
+test_render_envs
+test_replace_config_variables
+test_replace_generated_variables
+test_missing_variable_error
+test_final_command_auto_prefix_vllm_serve_model
+test_command_can_render_from_env
+```
+
+---
+
+### 22.4 Proxy Launcher UT
+
+```text
+test_generic_dp_proxy_command
+test_pd_proxy_command
+test_generic_dp_requires_worker_group
+test_pd_requires_prefiller_decoder_group
+```
+
+---
+
+### 22.5 Result Writer UT
+
+```text
+test_external_dp_topology_summary
+test_external_dp_topology_endpoints
+test_keep_existing_result_fields
+```
+
+---
+
+## 23. E2E 验收标准
+
+### 23.1 generic_dp case
 
 必须满足：
 
 ```text
-1. vllm-ascend/DeepSeek-V2-Lite-W8A8 disaggregated_prefill_smoke.yaml 在 LWS 2 节点正常拉起
+1. generic_dp_smoke.yaml 在 LWS 2 节点正常拉起
+2. 每个节点启动多个 vLLM backend
+3. 所有 backend /health ready
+4. proxy 使用 dp_load_balance_proxy_server.py 启动成功
+5. proxy 参数包含 --dp-hosts / --dp-ports
+6. proxy /healthcheck ready
+7. AISBench perf 通过
+8. AISBench acc 通过
+9. benchmark result JSON 生成成功
+10. external_dp_topology.summary 存在
+11. external_dp_topology.endpoints 存在
+12. logs artifact 上传成功
+13. 退出后无残留 vLLM / proxy 进程
+```
+
+---
+
+### 23.2 disaggregated_prefill case
+
+必须满足：
+
+```text
+1. disaggregated_prefill_smoke.yaml 在 LWS 2 节点正常拉起
 2. prefiller backend 正常启动
 3. decoder backend 正常启动
 4. proxy 使用 load_balance_proxy_server_example.py 启动成功
-5. proxy 参数包含 prefiller-hosts / prefiller-ports / decoder-hosts / decoder-ports，且 /healthcheck ready
-6. AISBench perf 通过
-7. AISBench acc 通过
-8. benchmark result JSON 生成成功
-9. external_dp_topology.summary 存在
-10. external_dp_topology.endpoints 存在
-11. 日志 artifact 上传成功
-12. 退出后无残留 vLLM / proxy 进程
+5. proxy 参数包含：
+     --prefiller-hosts
+     --prefiller-ports
+     --decoder-hosts
+     --decoder-ports
+6. proxy /healthcheck ready
+7. AISBench perf 通过
+8. AISBench acc 通过
+9. benchmark result JSON 生成成功
+10. external_dp_topology.summary 存在
+11. external_dp_topology.endpoints 存在
+12. logs artifact 上传成功
+13. 退出后无残留 vLLM / proxy 进程
 ```
 
-### 19.3 DeepSeek-V3.1 正式拓扑
+---
+
+### 23.3 DeepSeek-V3.1 正式拓扑
 
 必须满足：
 
 ```text
 1. DeepSeek-V3.1-external-dp-pd.yaml 与文档 W8A8 2P1D Layerwise 拓扑一致
-2. 4 节点：prefiller [0, 1]，decoder [2, 3]
-3. prefiller: dp_size=2, dp_size_local=2, tp_size=8
-4. decoder: dp_size=32, dp_size_local=16, tp_size=1
-5. decoder node 0 使用 dp_rank_start=0，decoder node 1 使用 dp_rank_start=16
-6. 默认不进入 schedule matrix，只能通过 workflow_dispatch 手动指定运行
+2. 4 节点：
+     prefiller [0, 1]
+     decoder [2, 3]
+3. prefiller:
+     dp_size=2
+     dp_size_local=2
+     tp_size=8
+4. decoder:
+     dp_size=32
+     dp_size_local=16
+     tp_size=1
+5. decoder node 2:
+     dp_rank_start=0
+6. decoder node 3:
+     dp_rank_start=16
+7. 默认不进入 schedule matrix
+8. 通过 workflow_dispatch 手动指定运行
 ```
 
 ---
 
-## 20. 风险与规避
+## 24. 风险与规避
 
-### 20.1 端口冲突
+### 24.1 端口冲突
 
 风险：
 
@@ -1482,14 +1834,14 @@ workflow_dispatch:
 规避：
 
 ```text
-1. 启动前检查端口可用性
-2. port_start 和 proxy_port 由 YAML 配置
-3. 端口冲突时打印 node_index / local_rank / port
+1. port_start 和 proxy_port 由 YAML 配置
+2. 端口冲突时打印 node_index / local_rank / port
+3. 日志中记录最终 endpoint 列表
 ```
 
 ---
 
-### 20.2 多进程清理失败
+### 24.2 多进程清理失败
 
 风险：
 
@@ -1500,15 +1852,15 @@ workflow_dispatch:
 规避：
 
 ```text
-1. 所有进程由 ExternalDPServerManager 记录 PID
+1. 所有进程由 ExternalDPServerManager / ExternalDPProxyLauncher 记录 PID
 2. cleanup 使用 process tree 级别清理
 3. finally 中强制 cleanup
-4. CI 结束前可做一次兜底 pkill，但要限制匹配范围
+4. start_process 使用 start_new_session=True
 ```
 
 ---
 
-### 20.3 YAML 模板变量错误
+### 24.3 YAML 模板变量错误
 
 风险：
 
@@ -1519,14 +1871,14 @@ server_cmd_template 中写错 ${XXX}，导致命令生成错误。
 规避：
 
 ```text
-1. command_builder 对未知变量直接报错
+1. CommandBuilder 对未知变量直接报错
 2. UT 覆盖常见变量
 3. 日志打印最终渲染命令
 ```
 
 ---
 
-### 20.4 routing.groups 配置错误
+### 24.4 routing.groups 配置错误
 
 风险：
 
@@ -1540,315 +1892,177 @@ routing.groups 引用错误 index，导致 proxy backend 列表错误。
 1. 加载 YAML 时校验 index 范围
 2. disaggregated_prefill 必须同时包含 prefiller 和 decoder
 3. generic_dp 必须包含 worker
-4. result JSON 中记录 groups 和 endpoint 明细
+4. 同一个 index 不能同时出现在多个 group
+5. result JSON 中记录 groups 和 endpoint 明细
 ```
 
 ---
 
-### 20.5 request_model 与 served-model-name 不一致
+### 24.5 请求模型名与服务暴露模型名不一致
 
 风险：
 
 ```text
-server_cmd_template 中配置了 --served-model-name，
-但 AISBench 请求仍使用 model 字段，导致请求模型名不匹配。
+如果 vllm serve 命令显式暴露了不同于顶层 model 的模型名，
+但 AISBench 请求仍使用 model 字段，可能导致请求模型名不匹配。
 ```
 
 规避：
 
 ```text
-1. 新增 request_model 字段
-2. request_model 未配置时默认等于 model
-3. 如果模板中包含 --served-model-name 但 request_model 未显式配置，可以打印 warning
+1. 第一版不新增独立请求模型字段，AISBench 固定使用顶层 model。
+2. 默认 YAML 不配置额外服务暴露名，让 vLLM 暴露名称与 model 保持一致。
+3. 如果后续必须在 vllm serve 命令中显式设置服务暴露名，需要同步确认请求 model 策略。
 ```
 
 ---
 
-### 20.6 影响现有 nightly
+### 24.6 日志分散导致排查困难
 
 风险：
 
 ```text
-新框架修改现有 nightly 公共逻辑，影响已有用例。
+多节点、多 endpoint、多进程日志分散，失败时难定位。
 ```
 
 规避：
 
 ```text
-1. 新增 external_dp 子目录
-2. 不修改 RemoteOpenAIServer 行为
-3. 不替换现有 multi_node workflow
-4. 新增独立 external_dp workflow
+1. 每个 endpoint 独立 rank log
+2. 每个节点打包 external_dp logs artifact
+3. benchmark result JSON 记录 serve_cmd 和 endpoint topology
+4. leader pod stream 主流程日志
 ```
 
 ---
 
-## 21. Agent 开发任务拆分
+## 25. 当前实现和早期方案的差异
 
-### Task 1：新增目录结构
-
-创建：
+早期方案曾计划拆分为：
 
 ```text
-tests/e2e/nightly/multi_node/external_dp/
-tests/e2e/nightly/multi_node/external_dp/config/
-tests/e2e/nightly/multi_node/external_dp/scripts/
-tests/ut/external_dp/
+endpoint_resolver.py
+command_builder.py
+proxy_launcher.py
+server_manager.py
+process_utils.py
+result_writer.py
+```
+
+当前实际实现更紧凑：
+
+```text
+external_dp_config.py
+  - config loader
+  - placeholder resolver
+  - dataclass
+  - EndpointResolver
+
+external_dp_utils.py
+  - CommandBuilder
+  - process utils
+  - proxy command builder
+  - result writer
+
+test_external_dp.py
+  - ExternalDPServerManager
+  - ExternalDPProxyLauncher
+  - pytest orchestration
+```
+
+这样做的优点：
+
+```text
+1. 第一版文件更少
+2. 逻辑更集中
+3. 便于快速 review
+4. 不影响现有 multi_node 框架
+```
+
+后续如果 external_dp 框架继续扩展，可以再按职责拆分文件。
+
+---
+
+## 26. 当前代码阅读顺序
+
+建议按以下顺序阅读：
+
+```text
+1. config/generic_dp_smoke.yaml
+   先看非 PD 的最小结构。
+
+2. config/disaggregated_prefill_smoke.yaml
+   再看 PD 分离的最小结构。
+
+3. config/DeepSeek-V3.1-external-dp-pd.yaml
+   看完整 4 节点正式拓扑。
+
+4. scripts/external_dp_config.py
+   看 YAML 如何被读成 ExternalDPConfig，
+   以及 endpoint 如何展开。
+
+5. scripts/external_dp_utils.py
+   看 server_cmd_template 如何被渲染成 vllm serve 命令，
+   以及 proxy command / result JSON 如何生成。
+
+6. scripts/test_external_dp.py
+   看每个节点如何启动 backend，
+   master 如何启动 proxy 和跑 AISBench。
+
+7. scripts/run.sh
+   看容器内如何准备环境并调用 pytest。
+
+8. workflows
+   看 LWS 如何拉起、日志如何收集、benchmark result 如何上传。
 ```
 
 ---
 
-### Task 2：实现 YAML config loader
+## 27. 后续可选优化
 
-文件：
-
-```text
-tests/e2e/nightly/multi_node/external_dp/scripts/external_dp_config.py
-```
-
-实现：
+当前第一版可运行即可，后续可以考虑：
 
 ```text
-1. YAML 加载
-2. test_name / model / request_model 解析
-3. env_common 解析
-4. config_common 解析
-5. routing 解析
-6. config/templates 一一对应校验
-7. config[i].node_index == i 校验
-8. benchmarks 解析
-9. $NODE_i_IP 变量替换
-10. cluster_hosts 调试入口
+1. 将 ExternalDPServerManager 从 test_external_dp.py 拆到 server_manager.py
+2. 将 ExternalDPProxyLauncher 从 test_external_dp.py 拆到 proxy_launcher.py
+3. 将 build_proxy_command 拆到 proxy_utils.py
+4. 将 write_benchmark_results_json 拆到 result_writer.py
+5. 支持更多 proxy ready 策略
+6. 支持 endpoint_override
+7. 支持不同节点不同 port_start 策略
+8. 支持更多 routing type
+9. 支持更细粒度 CI summary
+10. 支持更严格的端口可用性预检查
 ```
 
 ---
 
-### Task 3：实现 endpoint resolver
+## 28. 一句话总结
 
-文件：
-
-```text
-tests/e2e/nightly/multi_node/external_dp/scripts/endpoint_resolver.py
-```
-
-实现：
+当前 external DP nightly 框架通过 `config[i] + templates[i]` 复刻文档中 `launch_online_dp.py + run_dp_template.sh` 的思想：
 
 ```text
-1. 根据 dp_size_local 展开 endpoint
-2. 自动生成 dp_rank
-3. 自动生成 port
-4. 自动生成 visible_devices
-5. 根据 routing.groups 赋 role
+config:
+  描述节点级 DP 拓扑，例如 dp_size、dp_size_local、dp_rank_start、tp_size、port_start、dp_address。
+
+templates:
+  描述节点级 envs 和 server_cmd_template。
+
+routing.groups:
+  通过序号声明哪些 config/template 属于 worker、prefiller、decoder。
+
+Python manager:
+  自动生成每个 local rank 的 DP_RANK / PORT / VISIBLE_DEVICES，
+  渲染 envs 和 server_cmd_template，
+  自动拼接 vllm serve <model>，
+  启动多个 vLLM backend。
+
+Proxy launcher:
+  根据 routing.type 启动 generic_dp proxy 或 disaggregated_prefill proxy。
+
+Result writer:
+  输出 benchmark result JSON，
+  并新增 external_dp_topology.summary 和 external_dp_topology.endpoints。
 ```
 
----
-
-### Task 4：实现 command builder
-
-文件：
-
-```text
-tests/e2e/nightly/multi_node/external_dp/scripts/command_builder.py
-```
-
-实现：
-
-```text
-1. 回填 templates[i].envs
-2. 回填 templates[i].server_cmd_template
-3. 自动拼接 vllm serve <model>
-4. 生成最终 command list
-5. 生成最终 env dict
-6. 设置 ASCEND_RT_VISIBLE_DEVICES
-7. 支持 ${REQUEST_MODEL}
-8. 打印最终命令到日志
-```
-
----
-
-### Task 5：实现 process utils
-
-文件：
-
-```text
-tests/e2e/nightly/multi_node/external_dp/scripts/process_utils.py
-```
-
-实现：
-
-```text
-1. start_process
-2. terminate_process_tree
-3. wait_http_ready
-4. collect_logs
-5. 命令格式化日志工具
-```
-
----
-
-### Task 6：实现 server manager
-
-文件：
-
-```text
-tests/e2e/nightly/multi_node/external_dp/scripts/server_manager.py
-```
-
-实现：
-
-```text
-1. 当前节点启动本地所有 endpoint
-2. 每个 endpoint 独立日志
-3. 等待本地 endpoint ready
-4. finally 清理本地进程
-```
-
----
-
-### Task 7：实现 proxy launcher
-
-文件：
-
-```text
-tests/e2e/nightly/multi_node/external_dp/scripts/proxy_launcher.py
-```
-
-实现：
-
-```text
-1. generic_dp proxy 命令生成
-2. disaggregated_prefill proxy 命令生成
-3. proxy 只在 proxy_node_index 启动
-4. proxy health ready 检查
-5. proxy 进程清理
-```
-
----
-
-### Task 8：实现 result writer
-
-文件：
-
-```text
-tests/e2e/nightly/multi_node/external_dp/scripts/result_writer.py
-```
-
-实现：
-
-```text
-1. 复用现有 benchmark result 字段
-2. 新增 external_dp_topology.summary
-3. 新增 external_dp_topology.endpoints
-4. 使用 request_model 作为 AISBench 请求模型名
-```
-
----
-
-### Task 9：实现 e2e pytest
-
-文件：
-
-```text
-tests/e2e/nightly/multi_node/external_dp/scripts/test_external_dp.py
-```
-
-实现完整 e2e 流程：
-
-```text
-1. 加载 YAML
-2. resolve endpoint
-3. 启动 backend
-4. 启动 proxy
-5. master 跑 benchmark
-6. 写 result
-7. 收集日志
-8. 清理进程
-```
-
-新增运行脚本：
-
-```text
-tests/e2e/nightly/multi_node/external_dp/scripts/run.sh
-```
-
-要求：
-
-```text
-1. 复用现有 multi_node/scripts/run.sh 中必要的环境初始化
-2. pytest 入口改为 external_dp/scripts/test_external_dp.py
-3. 不改变现有 multi_node/scripts/run.sh
-```
-
----
-
-### Task 10：新增 YAML
-
-新增：
-
-```text
-tests/e2e/nightly/multi_node/external_dp/config/generic_dp_smoke.yaml
-tests/e2e/nightly/multi_node/external_dp/config/disaggregated_prefill_smoke.yaml
-tests/e2e/nightly/multi_node/external_dp/config/DeepSeek-V3.1-external-dp-pd.yaml
-```
-
-对应：
-
-```text
-generic_dp_smoke.yaml:
-  Qwen/Qwen3-0.6B, 2 nodes
-
-disaggregated_prefill_smoke.yaml:
-  vllm-ascend/DeepSeek-V2-Lite-W8A8, 2 nodes
-
-DeepSeek-V3.1-external-dp-pd.yaml:
-  W8A8 2P1D Layerwise, 4 nodes, manual only
-```
-
----
-
-### Task 11：新增 UT
-
-新增：
-
-```text
-tests/ut/external_dp/test_external_dp_config.py
-tests/ut/external_dp/test_endpoint_resolver.py
-tests/ut/external_dp/test_command_builder.py
-tests/ut/external_dp/test_proxy_launcher.py
-tests/ut/external_dp/test_result_writer.py
-```
-
----
-
-### Task 12：新增 workflow
-
-新增：
-
-```text
-.github/workflows/_e2e_nightly_external_dp.yaml
-.github/workflows/schedule_nightly_external_dp_a3.yaml
-```
-
----
-
-## 22. 最终交付物
-
-最终 PR 应包含：
-
-```text
-1. external DP 测试框架代码
-2. Qwen/Qwen3-0.6B generic_dp smoke YAML
-3. vllm-ascend/DeepSeek-V2-Lite-W8A8 disaggregated_prefill smoke YAML
-4. DeepSeek-V3.1 W8A8 external DP PD 正式 YAML
-5. UT 覆盖
-6. external_dp 独立 reusable workflow 和 A3 schedule workflow
-7. benchmark result JSON 新增 external_dp_topology
-8. external_dp/scripts/run.sh
-9. README 或开发说明文档
-```
-
----
-
-## 23. 一句话总结
-
-本设计通过 `config[i] + templates[i]` 的方式复刻文档中 `launch_online_dp.py + run_dp_template.sh` 的思想：`config` 负责描述节点级 DP 拓扑，`templates` 负责描述节点级命令模板，`routing.groups` 通过序号声明 endpoint 分组，Python manager 自动生成每个 local rank 的 `DP_RANK / PORT / VISIBLE_DEVICES`，最终渲染出完整 `vllm serve <model>` 命令，并同时支持 generic external DP 和 PD 分离 external DP 两种 external load balancing 场景。
+最终效果是：同一套 YAML 驱动框架同时支持 generic external DP 和 PD 分离 external DP，两类 smoke case 进入 external_dp nightly workflow，DeepSeek-V3.1 完整 external DP PD 拓扑通过 workflow_dispatch 手动触发。

@@ -13,9 +13,12 @@ The first version is intentionally scoped to CI:
   JSON keeps the existing benchmark fields and adds `external_dp_topology`.
 
 `server_cmd_template` contains only arguments after `vllm serve <model>`.
-The top-level `model` is the serve model path. `request_model` is optional and
-is used for OpenAI/AISBench requests when `--served-model-name` is set in the
-template.
+The top-level `model` is used both for `vllm serve` and for OpenAI/AISBench
+requests, matching the existing multi-node nightly flow.
+
+Template env values use framework variables such as `${PORT}` and
+`${VISIBLE_DEVICES}`. Command arguments can reference rendered env values with
+shell-style `$VARNAME`, for example `--port $SERVER_PORT`.
 
 The Python entrypoints under `scripts/` are intentionally kept compact:
 

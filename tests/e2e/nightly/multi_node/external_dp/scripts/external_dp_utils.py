@@ -32,7 +32,8 @@ except Exception:
 
 logger = logging.getLogger(__name__)
 
-BRACED_VARIABLE_RE = re.compile(r"\$\{([A-Z0-9_]+)\}")
+BRACED_VARIABLE_RE = re.compile(r"\$\{([A-Za-z_][A-Za-z0-9_]*)\}")
+UNBRACED_VARIABLE_RE = re.compile(r"(?<!\$)\$([A-Za-z_][A-Za-z0-9_]*)")
 PROXY_HEALTHCHECK_PATH = "/healthcheck"
 SENSITIVE_ENV_TOKENS = ("TOKEN", "SECRET", "PASSWORD", "ACCESS_KEY")
 _PORT_ENV_KEYS = {"SERVER_PORT", "ENCODE_PORT", "PD_PORT", "PROXY_PORT"}
@@ -69,15 +70,23 @@ class CommandBuilder:
     def build(self, endpoint: ExternalDPEndpoint, template: NodeTemplate) -> BuiltCommand:
         variables = self._build_variables(endpoint)
         rendered_env = self._render_envs(template.envs, endpoint, variables)
-        rendered_args = [self._render_braced_variables(arg, variables) for arg in template.server_cmd_template]
+        rendered_args = [
+            self._render_string(
+                arg,
+                endpoint=endpoint,
+                braced_variables=variables,
+                unbraced_variables=rendered_env,
+                allow_missing_unbraced=False,
+            )
+            for arg in template.server_cmd_template
+        ]
         cmd = ["vllm", "serve", self.config.model, *rendered_args]
 
         env = {key: str(value) for key, value in rendered_env.items()}
-        env["ASCEND_RT_VISIBLE_DEVICES"] = endpoint.visible_devices
         display_cmd = format_command(cmd, env)
         logger.info(
             "External DP endpoint command node=%s rank=%s: %s",
-            endpoint.node_index,
+            endpoint.config_index,
             endpoint.local_rank,
             display_cmd,
         )
@@ -86,7 +95,6 @@ class CommandBuilder:
     def _build_variables(self, endpoint: ExternalDPEndpoint) -> dict[str, str]:
         return {
             "MODEL": self.config.model,
-            "REQUEST_MODEL": self.config.request_model,
             "HOST": endpoint.bind_host,
             "PORT_START": str(endpoint.port_start),
             "PORT": str(endpoint.port),
@@ -100,7 +108,7 @@ class CommandBuilder:
             "DP_ADDRESS": endpoint.dp_address,
             "DP_RPC_PORT": str(endpoint.dp_rpc_port),
             "VISIBLE_DEVICES": endpoint.visible_devices,
-            "NODE_INDEX": str(endpoint.node_index),
+            "NODE_INDEX": str(endpoint.config_index),
             "CONFIG_INDEX": str(endpoint.config_index),
         }
 
@@ -112,26 +120,62 @@ class CommandBuilder:
     ) -> dict[str, str]:
         rendered_envs: dict[str, str] = {}
         for key, value in envs.items():
-            value = replace_cluster_placeholders(
-                value,
-                cluster_ips=self.config.cluster_ips,
-                local_ip=endpoint.host,
-                current_node_index=endpoint.node_index,
-            )
             if isinstance(value, str):
-                value = self._render_braced_variables(value, variables)
+                value = self._render_string(
+                    value,
+                    endpoint=endpoint,
+                    braced_variables=variables,
+                    unbraced_variables={**os.environ, **rendered_envs},
+                    allow_missing_unbraced=True,
+                )
             rendered_envs[str(key)] = str(value)
         return rendered_envs
 
+    def _render_string(
+        self,
+        value: str,
+        *,
+        endpoint: ExternalDPEndpoint,
+        braced_variables: dict[str, str],
+        unbraced_variables: dict[str, str],
+        allow_missing_unbraced: bool,
+    ) -> str:
+        value = replace_cluster_placeholders(
+            value,
+            cluster_ips=self.config.cluster_ips,
+            local_ip=endpoint.host,
+            current_node_index=endpoint.config_index,
+        )
+        value = self._render_variables(
+            value,
+            braced_variables,
+            pattern=BRACED_VARIABLE_RE,
+            allow_missing=False,
+        )
+        return self._render_variables(
+            value,
+            unbraced_variables,
+            pattern=UNBRACED_VARIABLE_RE,
+            allow_missing=allow_missing_unbraced,
+        )
+
     @staticmethod
-    def _render_braced_variables(value: str, variables: dict[str, str]) -> str:
+    def _render_variables(
+        value: str,
+        variables: dict[str, str],
+        *,
+        pattern: re.Pattern[str],
+        allow_missing: bool,
+    ) -> str:
         def repl(match: re.Match[str]) -> str:
             key = match.group(1)
             if key not in variables:
+                if allow_missing:
+                    return ""
                 raise KeyError(f"Unknown external DP template variable: {key}")
             return variables[key]
 
-        return BRACED_VARIABLE_RE.sub(repl, value)
+        return pattern.sub(repl, value)
 
 
 def format_command(cmd: list[str], env: dict[str, str] | None = None) -> str:
@@ -321,25 +365,42 @@ def _filter_environment(envs: dict[str, Any]) -> dict[str, Any]:
     return {key: value for key, value in envs.items() if key not in exclude}
 
 
+def _common_command_envs(commands: list[BuiltCommand]) -> dict[str, str]:
+    if not commands:
+        return {}
+
+    common_keys = set(commands[0].env)
+    for command in commands[1:]:
+        common_keys.intersection_update(command.env)
+
+    common_envs: dict[str, str] = {}
+    for key in sorted(common_keys):
+        values = {command.env[key] for command in commands}
+        if len(values) == 1:
+            common_envs[key] = next(iter(values))
+    return common_envs
+
+
 def _extract_dtype(config: ExternalDPConfig, commands: list[BuiltCommand]) -> str:
     has_w8a8 = "w8a8" in config.model.lower()
     has_quant_ascend = any("--quantization ascend" in command.display_cmd for command in commands)
     return "w8a8" if has_w8a8 and has_quant_ascend else "bf16"
 
 
-def _extract_features(commands: list[BuiltCommand], envs: dict[str, Any]) -> list[str]:
+def _extract_features(commands: list[BuiltCommand]) -> list[str]:
     if not commands:
         return []
-    cmd = commands[0].cmd
-    display = " ".join(shlex.quote(arg) for arg in cmd)
     features: list[str] = []
-    if "--async-scheduling" in cmd:
+    command_args = [command.cmd for command in commands]
+    command_displays = [" ".join(shlex.quote(arg) for arg in command.cmd) for command in commands]
+
+    if any("--async-scheduling" in cmd for cmd in command_args):
         features.append("async_scheduling")
-    if "--enable-expert-parallel" in cmd:
+    if any("--enable-expert-parallel" in cmd for cmd in command_args):
         features.append("expert_parallel")
-    if "--speculative-config" in cmd:
+    if any("--speculative-config" in cmd for cmd in command_args):
         features.append("speculative")
-    if "cudagraph_mode" in display:
+    if any("cudagraph_mode" in display for display in command_displays):
         features.append("aclgraph")
 
     feature_envs = {
@@ -352,8 +413,8 @@ def _extract_features(commands: list[BuiltCommand], envs: dict[str, Any]) -> lis
         "VLLM_ASCEND_ENABLE_FUSED_MC2": "fused_mc2",
     }
     for env_key, feature_name in feature_envs.items():
-        val = str(envs.get(env_key, "0"))
-        if val not in ("0", "", "false", "False"):
+        values = [str(command.env.get(env_key, "0")) for command in commands]
+        if any(value not in ("0", "", "false", "False") for value in values):
             features.append(feature_name)
     return features
 
@@ -368,7 +429,7 @@ def _build_serve_cmd(
         prefix = endpoint.role
         if config.routing.type == ROUTING_PD:
             prefix = "prefill" if endpoint.role == "prefiller" else "decode"
-        entries[f"{prefix}-node{endpoint.node_index}-rank{endpoint.local_rank}"] = command.display_cmd
+        entries[f"{prefix}-node{endpoint.config_index}-rank{endpoint.local_rank}"] = command.display_cmd
     key = "external_dp_pd" if config.routing.type == ROUTING_PD else "external_dp"
     return {key: entries}
 
@@ -378,8 +439,6 @@ def _build_topology(config: ExternalDPConfig, endpoints: list[ExternalDPEndpoint
     for endpoint in endpoints:
         item = asdict(endpoint)
         item.pop("bind_host", None)
-        item.pop("ready_timeout", None)
-        item.pop("healthcheck_path", None)
         item.pop("port_start", None)
         item.pop("dp_rpc_port", None)
         item.pop("pp_size", None)
@@ -414,17 +473,18 @@ def build_benchmark_results(
     valid_items = [(case["case_name"], case) for case in config.benchmark_cases()]
     tasks = [_build_task_entry(key, case, result) for (key, case), result in zip(valid_items, results)]
     runner = os.environ.get("VLLM_CI_RUNNER", "")
+    common_envs = _common_command_envs(commands)
 
     return {
         "model_name": config.model,
         "hardware": _extract_hardware(runner),
         "dtype": _extract_dtype(config, commands),
-        "feature": _extract_features(commands, config.env_common),
+        "feature": _extract_features(commands),
         "vllm_version": VLLM_VERSION,
         "vllm_ascend_version": os.environ.get("VLLM_ASCEND_REF", ""),
         "tasks": tasks,
         "serve_cmd": _build_serve_cmd(config, endpoints, commands),
-        "environment": _filter_environment(config.env_common),
+        "environment": _filter_environment(common_envs),
         "external_dp_topology": _build_topology(config, endpoints),
     }
 

@@ -7,7 +7,6 @@ from tests.e2e.nightly.multi_node.external_dp.scripts.external_dp_config import 
 GENERIC_EXTERNAL_DP_YAML = """
 test_name: "generic external dp unit"
 model: "Qwen/Qwen3-0.6B"
-request_model: "Qwen3-0.6B"
 num_nodes: 2
 npu_per_node: 16
 cluster_hosts:
@@ -19,12 +18,10 @@ config_common: &config_common
   host: "0.0.0.0"
   port_start: 7100
   dp_rpc_port: 12321
-  healthcheck_path: "/health"
-  ready_timeout: 30
 routing:
   type: "generic_dp"
   proxy_node_index: 0
-  proxy_host: "$NODE_0_IP"
+  proxy_host: "${NODE_0_IP}"
   proxy_port: 1999
   proxy_script: "examples/external_online_dp/dp_load_balance_proxy_server.py"
   groups:
@@ -38,7 +35,7 @@ config:
     dp_rank_start: 0
     tp_size: 1
     pp_size: 1
-    dp_address: "$NODE_0_IP"
+    dp_address: "${NODE_0_IP}"
   - node_index: 1
     <<: *config_common
     dp_group: default
@@ -47,16 +44,18 @@ config:
     dp_rank_start: 2
     tp_size: 1
     pp_size: 1
-    dp_address: "$NODE_0_IP"
+    dp_address: "${NODE_0_IP}"
 templates:
   - envs:
       <<: *env_common
-      LOCAL_ENDPOINT: "$LOCAL_IP:${PORT}"
+      ASCEND_RT_VISIBLE_DEVICES: "${VISIBLE_DEVICES}"
+      SERVER_PORT: "${PORT}"
+      LOCAL_ENDPOINT: "${LOCAL_IP}:${PORT}"
     server_cmd_template: &cmd
       - --host
       - ${HOST}
       - --port
-      - ${PORT}
+      - $SERVER_PORT
       - --data-parallel-size
       - ${DP_SIZE}
       - --data-parallel-rank
@@ -67,10 +66,10 @@ templates:
       - ${DP_RPC_PORT}
       - --tensor-parallel-size
       - ${TP_SIZE}
-      - --served-model-name
-      - ${REQUEST_MODEL}
   - envs:
       <<: *env_common
+      ASCEND_RT_VISIBLE_DEVICES: "${VISIBLE_DEVICES}"
+      SERVER_PORT: "${PORT}"
     server_cmd_template: *cmd
 benchmarks:
   perf:
@@ -88,10 +87,10 @@ benchmarks:
 
 
 PD_EXTERNAL_DP_YAML = GENERIC_EXTERNAL_DP_YAML.replace(
-    'type: "generic_dp"\n  proxy_node_index: 0\n  proxy_host: "$NODE_0_IP"\n'
+    'type: "generic_dp"\n  proxy_node_index: 0\n  proxy_host: "${NODE_0_IP}"\n'
     '  proxy_port: 1999\n  proxy_script: "examples/external_online_dp/dp_load_balance_proxy_server.py"\n'
     "  groups:\n    worker: [0, 1]",
-    'type: "disaggregated_prefill"\n  proxy_node_index: 0\n  proxy_host: "$NODE_0_IP"\n'
+    'type: "disaggregated_prefill"\n  proxy_node_index: 0\n  proxy_host: "${NODE_0_IP}"\n'
     '  proxy_port: 1999\n  proxy_script: "examples/disaggregated_prefill_v1/load_balance_proxy_server_example.py"\n'
     "  groups:\n    prefiller: [0]\n    decoder: [1]",
 )

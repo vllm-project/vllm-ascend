@@ -14,10 +14,12 @@ logger = logging.getLogger(__name__)
 
 DEFAULT_CONFIG_BASE_PATH = "tests/e2e/nightly/multi_node/external_dp/config/"
 DEFAULT_CONFIG_NAME = "generic_dp_smoke.yaml"
+BACKEND_HEALTHCHECK_PATH = "/health"
+BACKEND_READY_TIMEOUT = 3600
 ROUTING_GENERIC_DP = "generic_dp"
 ROUTING_PD = "disaggregated_prefill"
 SUPPORTED_ROUTING_TYPES = {ROUTING_GENERIC_DP, ROUTING_PD}
-CLUSTER_PLACEHOLDER_RE = re.compile(r"\$(NODE_(\d+)_IP|LOCAL_IP|MASTER_IP|LWS_WORKER_INDEX)\b")
+CLUSTER_PLACEHOLDER_RE = re.compile(r"\$\{(NODE_(\d+)_IP|LOCAL_IP|MASTER_IP|LWS_WORKER_INDEX)\}")
 
 
 @dataclass(frozen=True)
@@ -32,7 +34,6 @@ class RoutingConfig:
 
 @dataclass(frozen=True)
 class NodeConfig:
-    node_index: int
     node_ip: str
     host: str
     port_start: int
@@ -44,8 +45,6 @@ class NodeConfig:
     tp_size: int
     dp_address: str
     pp_size: int = 1
-    healthcheck_path: str = "/health"
-    ready_timeout: int = 900
 
 
 @dataclass(frozen=True)
@@ -57,7 +56,6 @@ class NodeTemplate:
 @dataclass(frozen=True)
 class ExternalDPEndpoint:
     config_index: int
-    node_index: int
     role: str
     dp_group: str
     local_rank: int
@@ -73,22 +71,16 @@ class ExternalDPEndpoint:
     dp_address: str
     dp_rpc_port: int
     port_start: int
-    healthcheck_path: str
-    ready_timeout: int
 
 
 @dataclass(frozen=True)
 class ExternalDPConfig:
     test_name: str
     model: str
-    request_model: str
-    request_model_explicit: bool
     num_nodes: int
     npu_per_node: int
     cluster_hosts: list[str] | None
     cluster_ips: list[str]
-    env_common: dict[str, Any]
-    config_common: dict[str, Any]
     routing: RoutingConfig
     node_configs: list[NodeConfig]
     templates: list[NodeTemplate]
@@ -143,7 +135,7 @@ def replace_cluster_placeholders(
         if node_index is not None:
             idx = int(node_index)
             if idx >= len(cluster_ips):
-                raise ValueError(f"Cluster placeholder ${token} is out of range")
+                raise ValueError(f"Cluster placeholder ${{{token}}} is out of range")
             return cluster_ips[idx]
         if token == "MASTER_IP":
             return cluster_ips[0]
@@ -225,19 +217,14 @@ class ExternalDPConfigLoader:
         yaml_path: str | None = None,
         *,
         cluster_ips: list[str] | None = None,
-        current_node_index: int | None = None,
     ) -> ExternalDPConfig:
         raw_config = cls._load_yaml(yaml_path)
         cls._validate_root(raw_config)
 
         num_nodes = int(raw_config["num_nodes"])
         resolved_cluster_ips = cls._resolve_cluster_ips(raw_config, num_nodes, cluster_ips)
-        if current_node_index is None:
-            current_node_index = int(os.environ.get("LWS_WORKER_INDEX", "0"))
 
         model = str(raw_config["model"])
-        request_model_explicit = bool(raw_config.get("request_model"))
-        request_model = str(raw_config.get("request_model") or model)
         routing = cls._parse_routing(raw_config["routing"], resolved_cluster_ips)
         node_configs = cls._parse_node_configs(raw_config, resolved_cluster_ips)
         templates = cls._parse_templates(raw_config)
@@ -245,21 +232,16 @@ class ExternalDPConfigLoader:
         config = ExternalDPConfig(
             test_name=str(raw_config.get("test_name", "external_dp_test")),
             model=model,
-            request_model=request_model,
-            request_model_explicit=request_model_explicit,
             num_nodes=num_nodes,
             npu_per_node=int(raw_config["npu_per_node"]),
             cluster_hosts=raw_config.get("cluster_hosts"),
             cluster_ips=resolved_cluster_ips,
-            env_common=raw_config.get("env_common", {}),
-            config_common=raw_config.get("config_common", {}),
             routing=routing,
             node_configs=node_configs,
             templates=templates,
             benchmarks=raw_config.get("benchmarks", {}),
         )
         cls._validate_config(config)
-        cls._warn_request_model(config)
         return config
 
     @staticmethod
@@ -336,19 +318,18 @@ class ExternalDPConfigLoader:
     def _parse_node_configs(raw_config: dict[str, Any], cluster_ips: list[str]) -> list[NodeConfig]:
         node_configs: list[NodeConfig] = []
         for index, raw_node in enumerate(raw_config["config"]):
-            node_index = int(raw_node.get("node_index", index))
-            if node_index >= len(cluster_ips) or node_index < 0:
-                raise ValueError(f"config[{index}].node_index out of range")
+            raw_node_index = raw_node.get("node_index")
+            if raw_node_index is not None and int(raw_node_index) != index:
+                raise ValueError(f"config[{index}].node_index must equal {index}")
             node = replace_cluster_placeholders(
                 raw_node,
                 cluster_ips=cluster_ips,
-                local_ip=cluster_ips[node_index],
-                current_node_index=node_index,
+                local_ip=cluster_ips[index],
+                current_node_index=index,
             )
             node_configs.append(
                 NodeConfig(
-                    node_index=node_index,
-                    node_ip=cluster_ips[node_index],
+                    node_ip=cluster_ips[index],
                     host=str(node["host"]),
                     port_start=int(node["port_start"]),
                     dp_rpc_port=int(node["dp_rpc_port"]),
@@ -359,8 +340,6 @@ class ExternalDPConfigLoader:
                     tp_size=int(node["tp_size"]),
                     pp_size=int(node.get("pp_size", 1)),
                     dp_address=str(node["dp_address"]),
-                    healthcheck_path=str(node.get("healthcheck_path", "/health")),
-                    ready_timeout=int(node.get("ready_timeout", 900)),
                 )
             )
         return node_configs
@@ -390,13 +369,6 @@ class ExternalDPConfigLoader:
         if len(config.templates) != config.num_nodes:
             raise AssertionError(f"templates size ({len(config.templates)}) != num_nodes ({config.num_nodes})")
 
-        node_indices = [node.node_index for node in config.node_configs]
-        if len(set(node_indices)) != len(node_indices):
-            raise AssertionError("config.node_index values must be unique")
-        for index, node in enumerate(config.node_configs):
-            if node.node_index != index:
-                raise AssertionError("config[i].node_index must equal i in the first external DP version")
-
         if config.routing.type not in SUPPORTED_ROUTING_TYPES:
             raise ValueError(f"Unsupported routing.type: {config.routing.type}")
         groups = config.routing.groups
@@ -421,37 +393,25 @@ class ExternalDPConfigLoader:
         if config.cluster_hosts and len(config.cluster_hosts) != config.num_nodes:
             raise AssertionError("cluster_hosts size mismatch")
 
-        for node in config.node_configs:
+        for node_index, node in enumerate(config.node_configs):
             if node.dp_size_local * node.tp_size > config.npu_per_node:
                 raise ValueError(
-                    f"node {node.node_index} uses {node.dp_size_local * node.tp_size} NPUs, "
+                    f"node {node_index} uses {node.dp_size_local * node.tp_size} NPUs, "
                     f"but npu_per_node is {config.npu_per_node}"
                 )
             if node.dp_rank_start + node.dp_size_local > node.dp_size:
-                raise ValueError(f"node {node.node_index} dp rank range exceeds dp_size")
+                raise ValueError(f"node {node_index} dp rank range exceeds dp_size")
             ports = [node.port_start + local_rank for local_rank in range(node.dp_size_local)]
             if len(set(ports)) != len(ports):
-                raise ValueError(f"node {node.node_index} has duplicate endpoint ports")
+                raise ValueError(f"node {node_index} has duplicate endpoint ports")
 
             used_devices: set[int] = set()
             for local_rank in range(node.dp_size_local):
                 devices = range(local_rank * node.tp_size, (local_rank + 1) * node.tp_size)
                 overlap = used_devices.intersection(devices)
                 if overlap:
-                    raise ValueError(f"node {node.node_index} visible_devices overlap: {sorted(overlap)}")
+                    raise ValueError(f"node {node_index} visible_devices overlap: {sorted(overlap)}")
                 used_devices.update(devices)
-
-    @staticmethod
-    def _warn_request_model(config: ExternalDPConfig) -> None:
-        if config.request_model_explicit:
-            return
-        for index, template in enumerate(config.templates):
-            if "--served-model-name" in template.server_cmd_template:
-                logger.warning(
-                    "templates[%d] contains --served-model-name, but request_model is not set. "
-                    "AISBench requests will use the top-level model.",
-                    index,
-                )
 
 
 class EndpointResolver:
@@ -478,7 +438,7 @@ class EndpointResolver:
         return role_by_index
 
     @staticmethod
-    def _expand_node(config_index: int, role: str, node_config: NodeConfig) -> list[ExternalDPEndpoint]:
+    def _expand_node(node_index: int, role: str, node_config: NodeConfig) -> list[ExternalDPEndpoint]:
         endpoints: list[ExternalDPEndpoint] = []
         for local_rank in range(node_config.dp_size_local):
             dp_rank = node_config.dp_rank_start + local_rank
@@ -487,8 +447,7 @@ class EndpointResolver:
             visible_devices = ",".join(str(device) for device in device_range)
             endpoints.append(
                 ExternalDPEndpoint(
-                    config_index=config_index,
-                    node_index=node_config.node_index,
+                    config_index=node_index,
                     role=role,
                     dp_group=node_config.dp_group,
                     local_rank=local_rank,
@@ -504,11 +463,6 @@ class EndpointResolver:
                     dp_address=node_config.dp_address,
                     dp_rpc_port=node_config.dp_rpc_port,
                     port_start=node_config.port_start,
-                    healthcheck_path=node_config.healthcheck_path,
-                    ready_timeout=node_config.ready_timeout,
                 )
             )
         return endpoints
-
-
-

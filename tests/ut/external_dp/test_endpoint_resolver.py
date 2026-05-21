@@ -11,7 +11,12 @@ def test_resolve_generic_dp_endpoints(generic_config):
     endpoints = EndpointResolver(generic_config).resolve()
     assert len(endpoints) == 4
     assert [endpoint.role for endpoint in endpoints] == ["worker", "worker", "worker", "worker"]
-    assert [(endpoint.node_index, endpoint.local_rank) for endpoint in endpoints] == [(0, 0), (0, 1), (1, 0), (1, 1)]
+    assert [(endpoint.config_index, endpoint.local_rank) for endpoint in endpoints] == [
+        (0, 0),
+        (0, 1),
+        (1, 0),
+        (1, 1),
+    ]
 
 
 def test_resolve_pd_endpoints(pd_config):
