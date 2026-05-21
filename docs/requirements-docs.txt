@@ -10,4 +10,3 @@ sphinx-substitution-extensions
 sphinx-intl
 openai
 regex
-sphinxcontrib-mermaid
