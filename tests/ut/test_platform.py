@@ -399,7 +399,7 @@ class TestNPUPlatform(TestBase):
 
         # Test DYNAMO_TRACE_ONCE mode is allowed
         vllm_config.compilation_config.mode = CompilationMode.DYNAMO_TRACE_ONCE
-        vllm_config.compilation_config.cudagraph_mode = None
+        vllm_config.compilation_config.cudagraph_mode = CUDAGraphMode.NONE
 
         with self.assertLogs(logger="vllm", level="INFO") as cm:
             with patch.object(platform.NPUPlatform, "_fix_incompatible_config"):
@@ -409,12 +409,10 @@ class TestNPUPlatform(TestBase):
             self.assertTrue(any("DYNAMO_TRACE_ONCE compilation mode enabled" in msg for msg in cm.output))
             # Mode should remain DYNAMO_TRACE_ONCE
             self.assertEqual(vllm_config.compilation_config.mode, CompilationMode.DYNAMO_TRACE_ONCE)
-            # cudagraph_mode should be set to NONE by default
-            self.assertEqual(vllm_config.compilation_config.cudagraph_mode, CUDAGraphMode.NONE)
 
         # Test STOCK_TORCH_COMPILE mode is allowed
         vllm_config.compilation_config.mode = CompilationMode.STOCK_TORCH_COMPILE
-        vllm_config.compilation_config.cudagraph_mode = None
+        vllm_config.compilation_config.cudagraph_mode = CUDAGraphMode.NONE
 
         with self.assertLogs(logger="vllm", level="INFO") as cm:
             with patch.object(platform.NPUPlatform, "_fix_incompatible_config"):

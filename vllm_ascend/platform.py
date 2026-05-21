@@ -333,13 +333,7 @@ class NPUPlatform(Platform):
 
         # Handle different compilation modes
         if compilation_config.mode in [CompilationMode.STOCK_TORCH_COMPILE, CompilationMode.DYNAMO_TRACE_ONCE]:
-            # Get the enum name for logging
-            mode_name = compilation_config.mode.name
-            logger.info("%s compilation mode enabled on Ascend NPU.", mode_name)
-            # For STOCK_TORCH_COMPILE and DYNAMO_TRACE_ONCE, we don't use ACL Graph by default
-            # but allow users to explicitly enable it if they want
-            if compilation_config.cudagraph_mode is None:
-                compilation_config.cudagraph_mode = CUDAGraphMode.NONE
+            logger.info("%s compilation mode enabled on Ascend NPU.", compilation_config.mode.name)
 
         # Recompute cudagraph sizes after Ascend-specific compatibility updates.
         # The platform default max is injected earlier via
@@ -381,45 +375,25 @@ class NPUPlatform(Platform):
         # get custom compile backend for graph fusion
         compilation_config.oot_compiler = cls.get_compile_backend()
 
-        if compilation_config.cudagraph_mode == CUDAGraphMode.NONE:
-            # Only force mode to NONE for VLLM_COMPILE mode
-            # For STOCK_TORCH_COMPILE and DYNAMO_TRACE_ONCE, keep the mode
-            if compilation_config.mode == CompilationMode.VLLM_COMPILE:
-                compilation_config.backend = "eager"
-                compilation_config.mode = CompilationMode.NONE
-            ascend_config.ascend_compilation_config.enable_npugraph_ex = False
-        elif compilation_config.cudagraph_mode == CUDAGraphMode.PIECEWISE:
-            if compilation_config.mode == CompilationMode.VLLM_COMPILE:
+        if compilation_config.mode == CompilationMode.VLLM_COMPILE:
+            # VLLM_COMPILE uses ACL Graph. Dispatch by cudagraph_mode.
+            if compilation_config.cudagraph_mode == CUDAGraphMode.PIECEWISE:
                 logger.info(
                     "PIECEWISE compilation enabled on NPU. use_inductor not supported - using only ACL Graph mode"
                 )
-                # VLLM_COMPILE uses VllmBackend → AscendCompiler → TorchAIR ACL Graph.
-                # Set backend to "eager" so make_compiler() uses EagerAdaptor (actual
-                # compilation is done by AscendCompiler, not Inductor).
                 compilation_config.backend = "eager"
                 compilation_config.set_splitting_ops_for_v1(
                     all2all_backend=vllm_config.parallel_config.all2all_backend,
                     data_parallel_size=vllm_config.parallel_config.data_parallel_size,
                 )
                 compilation_config.use_inductor = False
-                # NOTE: Theoretically, we should also add vllm::mla_forward in the attention ops.
-                # Since the process is created in the spawn mode, the value of the class attribute
-                # attention ops transmitted is still the one before modification, so it has not been modified.
-                # This will cause in scenarios where both piecewise and splitting ops are configured simultaneously,
-                # If splitting ops does not contain the vllm::mla forward value, this configuration issue will
-                # not be detected in advance assert.
                 compilation_config.splitting_ops.extend(["vllm::mla_forward"])
                 update_aclgraph_sizes(vllm_config)
                 ascend_config.ascend_compilation_config.enable_npugraph_ex = False
-            else:
-                # For STOCK_TORCH_COMPILE and DYNAMO_TRACE_ONCE, allow PIECEWISE
-                logger.info("PIECEWISE cudagraph_mode with %s compilation mode on Ascend NPU.", compilation_config.mode)
-                # Don't force use_inductor=False for these modes - let them use inductor if available
-        elif (
-            compilation_config.cudagraph_mode == CUDAGraphMode.FULL_DECODE_ONLY
-            or compilation_config.cudagraph_mode == CUDAGraphMode.FULL
-        ):
-            if compilation_config.mode == CompilationMode.VLLM_COMPILE:
+            elif (
+                compilation_config.cudagraph_mode == CUDAGraphMode.FULL_DECODE_ONLY
+                or compilation_config.cudagraph_mode == CUDAGraphMode.FULL
+            ):
                 logger.info(
                     "FULL_DECODE_ONLY compilation enabled on NPU. "
                     "use_inductor not supported - using only ACL Graph mode"
@@ -440,25 +414,32 @@ class NPUPlatform(Platform):
                 **********************************************************************************\033[0m
                 """
                 logger.warning(warning_message)
+            elif compilation_config.cudagraph_mode == CUDAGraphMode.NONE:
+                compilation_config.backend = "eager"
+                compilation_config.mode = CompilationMode.NONE
+                ascend_config.ascend_compilation_config.enable_npugraph_ex = False
             else:
-                # For STOCK_TORCH_COMPILE and DYNAMO_TRACE_ONCE, allow
                 logger.info(
-                    "%s cudagraph_mode with %s compilation mode on Ascend NPU.",
+                    "%s cudagraph_mode is not support on NPU. falling back to NONE",
                     compilation_config.cudagraph_mode,
-                    compilation_config.mode,
-                )
-                # Don't force use_inductor=False - let inductor be used if available
-        else:
-            if compilation_config.mode == CompilationMode.VLLM_COMPILE:
-                logger.info(
-                    "%s cudagraph_mode is not support on NPU. falling back to NONE", compilation_config.cudagraph_mode
                 )
                 compilation_config.backend = "eager"
                 compilation_config.cudagraph_mode = CUDAGraphMode.NONE
                 compilation_config.mode = CompilationMode.NONE
                 ascend_config.ascend_compilation_config.enable_npugraph_ex = False
-            else:
-                # For STOCK_TORCH_COMPILE and DYNAMO_TRACE_ONCE, just warn but don't force mode change
+        else:
+            # STOCK_TORCH_COMPILE, DYNAMO_TRACE_ONCE, or NONE:
+            # don't interfere with mode, just log cudagraph compatibility
+            cg_mode = compilation_config.cudagraph_mode
+            if cg_mode == CUDAGraphMode.PIECEWISE:
+                logger.info("PIECEWISE cudagraph_mode with %s compilation mode on Ascend NPU.", compilation_config.mode)
+            elif cg_mode in (CUDAGraphMode.FULL_DECODE_ONLY, CUDAGraphMode.FULL):
+                logger.info(
+                    "%s cudagraph_mode with %s compilation mode on Ascend NPU.",
+                    compilation_config.cudagraph_mode,
+                    compilation_config.mode,
+                )
+            elif cg_mode != CUDAGraphMode.NONE:
                 logger.warning(
                     "%s cudagraph_mode may not be fully supported with %s compilation mode on Ascend NPU.",
                     compilation_config.cudagraph_mode,
