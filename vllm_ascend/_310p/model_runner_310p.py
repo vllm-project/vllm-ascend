@@ -357,7 +357,7 @@ class NPUModelRunner310(NPUModelRunner):
             out=positions_np,
         )
         block_table = cast(MultiGroupBlockTable310, self.input_batch.block_table)
-        block_table.compute_slot_mapping(
+        block_table.compute_slot_mapping_draft(
             req_indices,
             positions_np[:total_num_scheduled_tokens],
         )
