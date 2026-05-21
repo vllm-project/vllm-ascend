@@ -1,0 +1,96 @@
+test_name: "test generic external dp"
+model: "Qwen/Qwen3-0.6B"
+request_model: "Qwen3-0.6B"
+num_nodes: 2
+npu_per_node: 16
+
+env_common: &env_common
+  VLLM_USE_MODELSCOPE: "true"
+  OMP_PROC_BIND: "false"
+  OMP_NUM_THREADS: "10"
+
+config_common: &config_common
+  host: "0.0.0.0"
+  port_start: 7100
+  dp_rpc_port: 12321
+  healthcheck_path: "/health"
+  ready_timeout: 900
+
+routing:
+  type: "generic_dp"
+  proxy_node_index: 0
+  proxy_host: "$NODE_0_IP"
+  proxy_port: 1999
+  proxy_script: "examples/external_online_dp/dp_load_balance_proxy_server.py"
+  groups:
+    worker: [0, 1]
+
+config:
+  - node_index: 0
+    <<: *config_common
+    dp_group: default
+    dp_size: 4
+    dp_size_local: 2
+    dp_rank_start: 0
+    tp_size: 1
+    pp_size: 1
+    dp_address: "$NODE_0_IP"
+
+  - node_index: 1
+    <<: *config_common
+    dp_group: default
+    dp_size: 4
+    dp_size_local: 2
+    dp_rank_start: 2
+    tp_size: 1
+    pp_size: 1
+    dp_address: "$NODE_0_IP"
+
+templates:
+  - envs:
+      <<: *env_common
+    server_cmd_template: &generic_server_cmd
+      - --host
+      - ${HOST}
+      - --port
+      - ${PORT}
+      - --data-parallel-size
+      - ${DP_SIZE}
+      - --data-parallel-rank
+      - ${DP_RANK}
+      - --data-parallel-address
+      - ${DP_ADDRESS}
+      - --data-parallel-rpc-port
+      - ${DP_RPC_PORT}
+      - --tensor-parallel-size
+      - ${TP_SIZE}
+      - --served-model-name
+      - ${REQUEST_MODEL}
+      - --trust-remote-code
+
+  - envs:
+      <<: *env_common
+    server_cmd_template: *generic_server_cmd
+
+benchmarks:
+  perf:
+    case_type: performance
+    dataset_path: vllm-ascend/GSM8K-in3500-bs2800
+    request_conf: vllm_api_stream_chat
+    dataset_conf: gsm8k/gsm8k_gen_0_shot_cot_str_perf
+    num_prompts: 16
+    max_out_len: 128
+    batch_size: 4
+    request_rate: 1
+    baseline: 1
+    threshold: 0.1
+
+  acc:
+    case_type: accuracy
+    dataset_path: vllm-ascend/gsm8k
+    request_conf: vllm_api_general_chat
+    dataset_conf: gsm8k/gsm8k_gen_0_shot_cot_chat_prompt
+    max_out_len: 512
+    batch_size: 4
+    baseline: 0
+    threshold: 100

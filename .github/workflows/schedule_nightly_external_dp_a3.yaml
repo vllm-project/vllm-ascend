@@ -1,0 +1,89 @@
+name: Nightly-External-DP-A3
+
+on:
+  schedule:
+    - cron: "15 17 * * *"
+  workflow_dispatch:
+    inputs:
+      config_file_path:
+        description: "External DP config file"
+        required: true
+        default: "DeepSeek-V3.1-external-dp-pd.yaml"
+        type: string
+      size:
+        description: "LWS size"
+        required: true
+        default: "4"
+        type: string
+      vllm_ascend_branch:
+        description: "Branch to test"
+        required: true
+        default: "main"
+        type: string
+
+permissions:
+  contents: read
+  pull-requests: read
+  issues: read
+
+defaults:
+  run:
+    shell: bash -el {0}
+
+concurrency:
+  group: ascend-nightly-${{ github.ref }}-external-dp-a3
+  cancel-in-progress: true
+
+jobs:
+  external-dp-smoke:
+    name: external-dp-smoke
+    if: github.event_name == 'schedule'
+    strategy:
+      fail-fast: false
+      max-parallel: 1
+      matrix:
+        test_config:
+          - name: external-dp-generic-smoke
+            config_file_path: generic_dp_smoke.yaml
+            size: 2
+          - name: external-dp-pd-smoke
+            config_file_path: disaggregated_prefill_smoke.yaml
+            size: 2
+    uses: ./.github/workflows/_e2e_nightly_external_dp.yaml
+    with:
+      soc_version: a3
+      runner: linux-aarch64-a3-0
+      image: 'swr.cn-southwest-2.myhuaweicloud.com/base_image/ascend-ci/vllm-ascend:nightly-ci-main-a3'
+      ascend_log_prefix: /root/.cache/ascend-logs/external-dp/main
+      vllm_ascend_branch: main
+      replicas: 1
+      size: ${{ matrix.test_config.size }}
+      config_file_path: ${{ matrix.test_config.config_file_path }}
+      name: ${{ matrix.test_config.name }}
+      vllm_ascend_ref: main
+      should_run: true
+    secrets:
+      KUBECONFIG_B64: ${{ secrets.KUBECONFIG_B64 }}
+      OBS_ACCESS_KEY: ${{ secrets.OBS_ACCESS_KEY }}
+      OBS_SECRET_KEY: ${{ secrets.OBS_SECRET_KEY }}
+
+  external-dp-manual:
+    name: external-dp-manual
+    if: github.event_name == 'workflow_dispatch'
+    uses: ./.github/workflows/_e2e_nightly_external_dp.yaml
+    with:
+      soc_version: a3
+      runner: linux-aarch64-a3-0
+      image: 'swr.cn-southwest-2.myhuaweicloud.com/base_image/ascend-ci/vllm-ascend:nightly-ci-${{ inputs.vllm_ascend_branch }}-a3'
+      ascend_log_prefix: /root/.cache/ascend-logs/external-dp/${{ inputs.vllm_ascend_branch }}
+      vllm_ascend_branch: ${{ inputs.vllm_ascend_branch }}
+      replicas: 1
+      size: ${{ inputs.size }}
+      config_file_path: ${{ inputs.config_file_path }}
+      name: external-dp-manual
+      vllm_ascend_ref: ${{ inputs.vllm_ascend_branch }}
+      should_run: true
+    secrets:
+      KUBECONFIG_B64: ${{ secrets.KUBECONFIG_B64 }}
+      OBS_ACCESS_KEY: ${{ secrets.OBS_ACCESS_KEY }}
+      OBS_SECRET_KEY: ${{ secrets.OBS_SECRET_KEY }}

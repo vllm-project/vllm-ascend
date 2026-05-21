@@ -1,0 +1,129 @@
+test_name: "test DeepSeek-V2-Lite-W8A8 external dp disaggregated_prefill"
+model: "vllm-ascend/DeepSeek-V2-Lite-W8A8"
+request_model: "DeepSeek-V2-Lite-W8A8"
+num_nodes: 2
+npu_per_node: 16
+
+env_common: &env_common
+  VLLM_USE_MODELSCOPE: "true"
+  OMP_PROC_BIND: "false"
+  OMP_NUM_THREADS: "10"
+  PYTORCH_NPU_ALLOC_CONF: "expandable_segments:True"
+
+config_common: &config_common
+  host: "0.0.0.0"
+  port_start: 7100
+  dp_rpc_port: 12321
+  healthcheck_path: "/health"
+  ready_timeout: 1800
+
+routing:
+  type: "disaggregated_prefill"
+  proxy_node_index: 0
+  proxy_host: "$NODE_0_IP"
+  proxy_port: 1999
+  proxy_script: "examples/disaggregated_prefill_v1/load_balance_proxy_server_example.py"
+  groups:
+    prefiller: [0]
+    decoder: [1]
+
+config:
+  - node_index: 0
+    <<: *config_common
+    dp_group: prefill
+    dp_size: 2
+    dp_size_local: 2
+    dp_rank_start: 0
+    tp_size: 1
+    pp_size: 1
+    dp_address: "$NODE_0_IP"
+
+  - node_index: 1
+    <<: *config_common
+    dp_group: decode
+    dp_size: 2
+    dp_size_local: 2
+    dp_rank_start: 0
+    tp_size: 1
+    pp_size: 1
+    dp_address: "$NODE_1_IP"
+
+templates:
+  - envs:
+      <<: *env_common
+      HCCL_BUFFSIZE: "256"
+      VLLM_ASCEND_ENABLE_FLASHCOMM1: "1"
+    server_cmd_template:
+      - --host
+      - ${HOST}
+      - --port
+      - ${PORT}
+      - --data-parallel-size
+      - ${DP_SIZE}
+      - --data-parallel-rank
+      - ${DP_RANK}
+      - --data-parallel-address
+      - ${DP_ADDRESS}
+      - --data-parallel-rpc-port
+      - ${DP_RPC_PORT}
+      - --tensor-parallel-size
+      - ${TP_SIZE}
+      - --served-model-name
+      - ${REQUEST_MODEL}
+      - --trust-remote-code
+      - --quantization
+      - ascend
+      - --enable-expert-parallel
+      - --kv-transfer-config
+      - '{"kv_connector":"MooncakeConnectorV1","kv_role":"kv_producer","kv_port":"30000","engine_id":"0"}'
+
+  - envs:
+      <<: *env_common
+      HCCL_BUFFSIZE: "256"
+      VLLM_ASCEND_ENABLE_FLASHCOMM1: "1"
+    server_cmd_template:
+      - --host
+      - ${HOST}
+      - --port
+      - ${PORT}
+      - --data-parallel-size
+      - ${DP_SIZE}
+      - --data-parallel-rank
+      - ${DP_RANK}
+      - --data-parallel-address
+      - ${DP_ADDRESS}
+      - --data-parallel-rpc-port
+      - ${DP_RPC_PORT}
+      - --tensor-parallel-size
+      - ${TP_SIZE}
+      - --served-model-name
+      - ${REQUEST_MODEL}
+      - --trust-remote-code
+      - --quantization
+      - ascend
+      - --enable-expert-parallel
+      - --kv-transfer-config
+      - '{"kv_connector":"MooncakeConnectorV1","kv_role":"kv_consumer","kv_port":"30200","engine_id":"1"}'
+
+benchmarks:
+  perf:
+    case_type: performance
+    dataset_path: vllm-ascend/GSM8K-in3500-bs2800
+    request_conf: vllm_api_stream_chat
+    dataset_conf: gsm8k/gsm8k_gen_0_shot_cot_str_perf
+    num_prompts: 16
+    max_out_len: 128
+    batch_size: 4
+    request_rate: 1
+    baseline: 1
+    threshold: 0.1
+
+  acc:
+    case_type: accuracy
+    dataset_path: vllm-ascend/gsm8k
+    request_conf: vllm_api_general_chat
+    dataset_conf: gsm8k/gsm8k_gen_0_shot_cot_chat_prompt
+    max_out_len: 512
+    batch_size: 4
+    baseline: 0
+    threshold: 100
