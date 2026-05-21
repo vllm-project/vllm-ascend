@@ -235,6 +235,7 @@ class ExecuteModelState(NamedTuple):
     aux_hidden_states: list[torch.Tensor] | None
     attn_metadata: "PerLayerAttnMetadata"
     positions: torch.Tensor
+    logits_indices: torch.Tensor
     ec_connector_output: "ECConnectorOutput | None"
     cudagraph_stats: CUDAGraphStat | None
     batch_desc: BatchDescriptor
@@ -286,11 +287,34 @@ class NPUModelRunner(GPUModelRunner):
         self.dp_size = vllm_config.parallel_config.data_parallel_size
         self.dp_rank = vllm_config.parallel_config.data_parallel_rank
 
-        self.sampler = AscendSampler()
+        self.sampler = AscendSampler(logprobs_mode=self.model_config.logprobs_mode)
         self.attn_state: AscendAttentionState | None = None
 
         # Ascend-specific configurations
         self.ascend_config = get_ascend_config()
+
+        # GPU sampler bridge (opt-in via sampling_config)
+        self._gpu_sampler_bridge = None
+        sc = self.ascend_config.sampling_config
+        if sc.enable_sampling_optimization:
+            from vllm_ascend.worker.v1.sample.adapter import GpuSamplerBridge
+
+            num_spec_tokens = self.vllm_config.speculative_config.num_speculative_tokens \
+                if self.vllm_config.speculative_config else 0
+            self._gpu_sampler_bridge = GpuSamplerBridge(
+                max_num_reqs=self.max_num_reqs,
+                vocab_size=self.model_config.get_vocab_size(),
+                device=self.device,
+                logprobs_mode=self.model_config.logprobs_mode,
+                num_speculative_tokens=num_spec_tokens,
+                spec_config=self.vllm_config.speculative_config,
+                sampling_config=sc,
+            )
+        self._positions_at_logits: torch.Tensor | None = None
+        self._input_ids_at_logits: torch.Tensor | None = None
+        self._req_indices_at_logits: torch.Tensor | None = None
+        self._req_ids_at_logits: tuple[str, ...] | None = None
+
         set_weight_prefetch_method(self.ascend_config.weight_prefetch_config)
         # Dump / PrecisionDebugger configuration now comes from AscendConfig
         dump_cfg = self.ascend_config.dump_config_path
@@ -2020,6 +2044,7 @@ class NPUModelRunner(GPUModelRunner):
                 aux_hidden_states,
                 attn_metadata,
                 positions,
+                self.logits_indices,
                 ec_connector_output,
                 cudagraph_stats,
                 batch_desc,
@@ -2068,12 +2093,62 @@ class NPUModelRunner(GPUModelRunner):
             aux_hidden_states,
             attn_metadata,
             positions,
+            logits_indices,
             ec_connector_output,
             cudagraph_stats,
             batch_desc,
         ) = self.execute_model_state
         # Clear ephemeral state.
         self.execute_model_state = None
+
+        # Store positions and input_ids for the GpuSamplerBridge
+        if self._gpu_sampler_bridge is not None:
+            num_logits = int(logits_indices.shape[0])
+            req_indices_gpu = getattr(getattr(self, "req_indices", None), "gpu", None)
+            if spec_decode_metadata is None and num_logits != self.input_batch.num_reqs and req_indices_gpu is None:
+                raise NotImplementedError(
+                    "GpuSamplerBridge needs an explicit logits-row to request mapping "
+                    "when a non-speculative step produces multiple logits per request."
+                )
+            logits_indices_for_positions = logits_indices.to(device=positions.device, dtype=torch.long)
+            logits_indices_for_input_ids = logits_indices.to(device=self.input_ids.gpu.device, dtype=torch.long)
+            self._positions_at_logits = positions.index_select(0, logits_indices_for_positions)
+            self._input_ids_at_logits = self.input_ids.gpu.index_select(0, logits_indices_for_input_ids)
+            num_logits_per_req_list = None
+            if spec_decode_metadata is not None:
+                num_logits_per_req_list = [
+                    num_draft_tokens + 1 for num_draft_tokens in spec_decode_metadata.num_draft_tokens
+                ]
+                if sum(num_logits_per_req_list) != num_logits:
+                    raise ValueError("speculative logits-row mapping does not match logits_indices")
+            if req_indices_gpu is not None:
+                logits_indices_for_req_indices = logits_indices.to(device=req_indices_gpu.device, dtype=torch.long)
+                self._req_indices_at_logits = req_indices_gpu.index_select(0, logits_indices_for_req_indices).to(
+                    device=self.device,
+                    dtype=torch.int32,
+                )
+            elif spec_decode_metadata is None:
+                self._req_indices_at_logits = torch.arange(
+                    self.input_batch.num_reqs,
+                    device=self.device,
+                    dtype=torch.int32,
+                )
+            else:
+                assert num_logits_per_req_list is not None
+                num_logits_per_req = torch.tensor(
+                    num_logits_per_req_list,
+                    device=self.device,
+                    dtype=torch.long,
+                )
+                self._req_indices_at_logits = torch.repeat_interleave(
+                    torch.arange(
+                        self.input_batch.num_reqs,
+                        device=self.device,
+                        dtype=torch.int32,
+                    ),
+                    num_logits_per_req,
+                )
+            self._req_ids_at_logits = tuple(self.input_batch.req_ids[: self.input_batch.num_reqs])
 
         # Apply structured output bitmasks if present.
         if grammar_output is not None:
@@ -2261,6 +2336,28 @@ class NPUModelRunner(GPUModelRunner):
         # Sample the next token and get logprobs if needed.
         sampling_metadata = self.input_batch.sampling_metadata
         self.input_batch.update_async_output_token_ids()
+
+        # GPU sampler bridge path (opt-in via sampling_config)
+        if self._gpu_sampler_bridge is not None:
+            if lmhead_tp_enable() and logits is not None:
+                assert self._req_indices_at_logits is not None
+                logits = logits[: int(self._req_indices_at_logits.shape[0])]
+            assert self._positions_at_logits is not None
+            assert self._input_ids_at_logits is not None
+            assert self._req_indices_at_logits is not None
+            return self._gpu_sampler_bridge.sample_from_v1(
+                logits=logits,
+                sampling_metadata=sampling_metadata,
+                num_reqs=self.input_batch.num_reqs,
+                positions=self._positions_at_logits,
+                input_ids=self._input_ids_at_logits,
+                req_indices=self._req_indices_at_logits,
+                req_ids=self._req_ids_at_logits,
+                spec_decode_metadata=spec_decode_metadata,
+                draft_logits=getattr(getattr(self, "drafter", None), "draft_logits", None),
+            )
+
+        # Default path (unchanged)
         if spec_decode_metadata is None:
             if lmhead_tp_enable() and logits is not None:
                 logits = logits[: self.input_batch.num_reqs]

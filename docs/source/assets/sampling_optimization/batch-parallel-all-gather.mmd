@@ -1,0 +1,21 @@
+sequenceDiagram
+    participant R0 as Rank0
+    participant R1 as Rank1
+    participant R2 as Rank2
+    participant R3 as Rank3
+
+    Note over R0,R3: each rank has full logits 10 x V
+
+    R0->>R0: slice rows 0-1 and sample locally
+    R1->>R1: slice rows 2-4 and sample locally
+    R2->>R2: slice rows 5-6 and sample locally
+    R3->>R3: slice rows 7-9 and sample locally
+
+    Note over R0,R3: all-gather sampled token ids
+
+    R0->>R0: pad and all-gather
+    R1->>R1: pad and all-gather
+    R2->>R2: pad and all-gather
+    R3->>R3: pad and all-gather
+
+    Note over R0,R3: truncate to 10 and restore order

@@ -8,6 +8,7 @@ This section provides an overview of the features implemented in vLLM Ascend. De
 patch
 cpu_binding
 ModelRunner_prepare_inputs
+sampling_optimization
 disaggregated_prefill
 eplb_swift_balancer
 ACL_Graph
