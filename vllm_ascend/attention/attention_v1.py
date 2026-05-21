@@ -1140,7 +1140,7 @@ class AscendAttentionBackendImpl(AttentionImpl):
                 )
                 attn_output = attn_output.view(num_tokens, self.num_heads, self.head_size)
                 output[:num_tokens] = attn_output[:num_tokens]
-                return
+                return output
             else:
                 sparse_mode = 3 if attn_metadata.causal else 0
                 actual_seq_lengths_q = attn_metadata.actual_seq_lengths_q
