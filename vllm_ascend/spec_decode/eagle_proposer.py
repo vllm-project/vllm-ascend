@@ -97,6 +97,7 @@ class AscendSpecDecodeBaseProposer(SpecDecodeBaseProposer):
         self.runner = runner
 
         self.use_async_scheduling = self.vllm_config.scheduler_config.async_scheduling
+        self.use_compress = hasattr(self.vllm_config.model_config.hf_config, "compress_ratios")
         self.pass_hidden_states_to_model = pass_hidden_states_to_model
         self.decode_threshold = 1 + self.num_speculative_tokens
         self.query_start_loc = self.runner._make_buffer(self.runner.max_num_reqs + 2, dtype=torch.int32)
@@ -211,7 +212,12 @@ class AscendSpecDecodeBaseProposer(SpecDecodeBaseProposer):
             AttentionLayerBase,  # type: ignore[type-abstract]
         )
         all_indexer_layer_names = set(get_layers_from_vllm_config(self.vllm_config, DeepseekV32IndexerCache).keys())
-        self._draft_attn_layer_names = set(all_attn_layers.keys()) - target_attn_layer_names - all_indexer_layer_names
+        # Filter to only layers that have KV cache specs.
+        self._draft_attn_layer_names = {
+            name
+            for name in (set(all_attn_layers.keys()) - target_attn_layer_names)
+            if all_attn_layers[name].get_kv_cache_spec(self.vllm_config) is not None
+        } - all_indexer_layer_names
 
         self.attn_layer_names = list(sorted(self._draft_attn_layer_names))
         draft_attn_layers_dict = get_layers_from_vllm_config(self.vllm_config, AttentionLayerBase)
@@ -245,6 +251,7 @@ class AscendSpecDecodeBaseProposer(SpecDecodeBaseProposer):
 
         # share embed_tokens with the target model if needed
         self._maybe_share_embeddings(target_language_model)
+        self._maybe_share_topk_indices(target_language_model)
         self._maybe_share_lm_head(model)
 
         if (
@@ -307,8 +314,9 @@ class AscendSpecDecodeBaseProposer(SpecDecodeBaseProposer):
                     )
             else:
                 # MTP model
-                share_embeddings = True
-                logger.info("Detected MTP model. Sharing target model embedding weights with the draft model.")
+                share_embeddings = not self.use_compress
+                if share_embeddings:
+                    logger.info("Detected MTP model. Sharing target model embedding weights with the draft model.")
 
             if share_embeddings:
                 if hasattr(self.model.model, "embed_tokens"):
@@ -348,6 +356,16 @@ class AscendSpecDecodeBaseProposer(SpecDecodeBaseProposer):
                 enable_enpu=self.enable_enpu,
             )
 
+    def _maybe_share_topk_indices(self, target_language_model: nn.Module) -> None:
+        if hasattr(target_language_model.model, "topk_indices_buffer"):
+            if hasattr(self.model.model, "topk_indices_buffer"):
+                del self.model.model.topk_indices_buffer
+            self.model.model.topk_indices_buffer = target_language_model.model.topk_indices_buffer
+            logger.info(
+                "Detecting MTP model with topk_indices_buffer."
+                "Sharing target model topk_indices_buffer with the draft model."
+            )
+
     def get_model(self) -> nn.Module:
         # get raw model out of the aclgraph wrapper.
         if isinstance(self.model, ACLGraphWrapper):
@@ -358,6 +376,13 @@ class AscendSpecDecodeBaseProposer(SpecDecodeBaseProposer):
         # Currently, new objects will be assigned to the lists in attn_metadata
         # when update. So we can use the shallow copy.
         return copy.copy(attn_metadata)
+
+    def _freeze_draft_step_attn_metadata(self, attn_metadata):
+        decode_metadata = getattr(attn_metadata, "decode", None)
+        if decode_metadata is not None:
+            if decode_metadata.sas_metadata is not None:
+                decode_metadata.sas_metadata = decode_metadata.sas_metadata.clone()
+        return attn_metadata
 
     @torch.inference_mode()
     def dummy_run(
@@ -683,7 +708,15 @@ class AscendSpecDecodeBaseProposer(SpecDecodeBaseProposer):
         # FIXME(woosuk): The below two ops cause synchronization. Optimize.
         assert len(self.draft_attn_groups) > 0
         builder = self.draft_attn_groups[0].get_metadata_builder()
-        attn_metadata = builder.build(0, common_attn_metadata, self.runner.get_model())
+        extra_attn_metadata_args: dict = {}
+        if self.use_compress:
+            extra_attn_metadata_args = dict(
+                prefill_ratio_to_sas_metadata=dict(),
+                decode_ratio_to_sas_metadata=dict(),
+                common_ratio_to_sas_metadata=dict(),
+                block_size=self.draft_attn_groups[0].kv_cache_spec.block_size,
+            )
+        attn_metadata = builder.build(0, common_attn_metadata, self.runner.get_model(), **extra_attn_metadata_args)
 
         if hasattr(attn_metadata, "causal") and not attn_metadata.causal:
             attn_metadata.attn_mask = None
@@ -995,7 +1028,7 @@ class AscendSpecDecodeBaseProposer(SpecDecodeBaseProposer):
             # copy inputs to buffer for cudagraph
             self.input_ids[:batch_size] = input_ids
             self._set_positions(batch_size, clamped_positions)
-            self.hidden_states[:batch_size] = hidden_states
+            self.hidden_states[:batch_size] = hidden_states.view(batch_size, -1)
             if self.supports_mm_inputs:
                 self.inputs_embeds[:batch_size] = self.model.embed_input_ids(input_ids)
 
@@ -1167,7 +1200,7 @@ class AscendSpecDecodeBaseProposer(SpecDecodeBaseProposer):
                 target_positions = target_positions[0]
 
             self._set_positions(num_tokens, target_positions)
-            self.hidden_states[:num_tokens] = target_hidden_states
+            self.hidden_states[:num_tokens] = target_hidden_states.view(num_tokens, -1)
 
             return num_tokens, token_indices_to_sample, cad, (query_lens_d, ori_token_indices_to_sample)
         else:
@@ -1406,6 +1439,8 @@ class AscendSpecDecodeBaseProposer(SpecDecodeBaseProposer):
             # However, in vllm-ascend, the above value can be multiple of `kernel_block_size`,
             # which is not correct for computing `slot_mapping` below.
             block_size = self.kernel_block_size
+            if not isinstance(block_size, int) or self.use_compress:
+                block_size = 128
 
             # Compute the slot mapping.
             if self.uses_mrope:
@@ -1442,10 +1477,24 @@ class AscendSpecDecodeBaseProposer(SpecDecodeBaseProposer):
 
         attn_metadata_builder = attn_group.get_metadata_builder()
 
-        attn_metadata = attn_metadata_builder.build_for_drafting(
-            common_attn_metadata=common_attn_metadata,
-            draft_index=draft_step,
-        )
+        if self.use_compress:
+            extra_attn_metadata_args = dict(
+                prefill_ratio_to_sas_metadata=dict(),
+                decode_ratio_to_sas_metadata=dict(),
+                common_ratio_to_sas_metadata=dict(),
+                block_size=self.draft_attn_groups[0].kv_cache_spec.block_size,
+            )
+            attn_metadata = attn_metadata_builder.build_for_drafting(
+                draft_step,
+                common_attn_metadata,
+                **extra_attn_metadata_args,
+            )
+        else:
+            attn_metadata = attn_metadata_builder.build(
+                0,
+                common_attn_metadata,
+                self.runner.get_model(),
+            )
 
         if self.pcp_size * self.dcp_size > 1:
             if self.vllm_config.model_config.use_mla:
@@ -1627,6 +1676,9 @@ class AscendSpecDecodeBaseProposer(SpecDecodeBaseProposer):
             slot_mapping=common_attn_metadata.slot_mapping,
             actual_seq_lengths_q=self.runner.actual_seq_lengths_q,
             positions=common_attn_metadata.positions[token_indices],
+            positions_cpu=common_attn_metadata.positions_cpu[token_indices]
+            if common_attn_metadata.positions_cpu is not None
+            else None,
             attn_state=self.runner.attn_state,
             decode_token_per_req=self.runner.decode_token_per_req,
             max_seq_len=0,
@@ -1714,6 +1766,7 @@ class AscendSpecDecodeBaseProposer(SpecDecodeBaseProposer):
             block_table_tensor=common_attn_metadata.block_table_tensor,
             slot_mapping=common_attn_metadata.slot_mapping,
             positions=common_attn_metadata.positions,
+            positions_cpu=common_attn_metadata.positions_cpu,
             attn_state=self.runner.attn_state,
             decode_token_per_req=self.runner.decode_token_per_req,
             num_computed_tokens_cpu=common_attn_metadata.num_computed_tokens_cpu,

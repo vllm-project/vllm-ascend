@@ -426,6 +426,23 @@ class MooncakeBackend(Backend):
                     )
                     # Same semantic as upstream: stop on first failed sub-batch.
                     break
+        logger.debug(
+            "MooncakeBackend.get enter keys=%d sample_keys=%s",
+            len(keys),
+            keys[:3],
+        )
+        try:
+            res = self.store.batch_get_into_multi_buffers(keys, addrs, sizes)
+            res_list = list(res)
+            logger.debug(
+                "MooncakeBackend.get result keys=%d result_sample=%s negative_count=%d",
+                len(keys),
+                res_list[:12],
+                sum(1 for value in res_list if value < 0),
+            )
+            for value in res_list:
+                if value < 0:
+                    logger.error("Failed to get key %s, res:%s", keys, res_list)
         except Exception as e:
             logger.error(
                 "Failed to get Mooncake sub-batch %s, error: %s",

@@ -22,8 +22,7 @@ global_rank_id = 0
 def golden_op_matmul_allreduce_add_rmsnorm(a, b, residual, gamma, epsilon):
     c_ret = torch.nn.functional.linear(a, b)
     dist.all_reduce(c_ret)
-    rmsnorm_ret, _, add_ret = torch_npu.npu_add_rms_norm(
-        c_ret, residual, gamma, epsilon)
+    rmsnorm_ret, _, add_ret = torch_npu.npu_add_rms_norm(c_ret, residual, gamma, epsilon)
     return rmsnorm_ret, add_ret
 
 
@@ -34,30 +33,34 @@ def worker(rank, ep_world_size, batch_size, m, k, n):
 
     os.environ["MASTER_ADDR"] = "127.0.0.1"
     os.environ["MASTER_PORT"] = "29500"
-    dist.init_process_group(backend="hccl",
-                            rank=rank,
-                            world_size=ep_world_size)
+    dist.init_process_group(backend="hccl", rank=rank, world_size=ep_world_size)
 
     ep_ranks_list = list(np.arange(0, ep_world_size))
 
     ep_group = dist.new_group(backend="hccl", ranks=ep_ranks_list)
 
     torch_npu.npu.set_device(rank)
-    ep_hcomm_info = ep_group._get_backend(
-        torch.device("npu")).get_hccl_comm_name(rank)
+    ep_hcomm_info = ep_group._get_backend(torch.device("npu")).get_hccl_comm_name(rank)
 
     torch_npu.npu.synchronize(rank)
 
     class Module(torch.nn.Module):
-
         def __init__(self) -> None:
             super().__init__()
 
-        def forward(self, x1, x2, residual, gamma, ep_hcomm_info, epsilon,
-                    is_trans_b, is_allgather_add_out):
+        def forward(self, x1, x2, residual, gamma, ep_hcomm_info, epsilon, is_trans_b, is_allgather_add_out):
             out1, add_out1 = torch.ops._C_ascend.matmul_allreduce_add_rmsnorm(
-                x1, x2, residual, gamma, ep_hcomm_info, ep_world_size,
-                global_rank_id, epsilon, is_trans_b, is_allgather_add_out)
+                x1,
+                x2,
+                residual,
+                gamma,
+                ep_hcomm_info,
+                ep_world_size,
+                global_rank_id,
+                epsilon,
+                is_trans_b,
+                is_allgather_add_out,
+            )
             return out1, add_out1
 
     DTYPE = torch.bfloat16
@@ -87,8 +90,7 @@ def worker(rank, ep_world_size, batch_size, m, k, n):
 
     def run_golden_case(loop_cnt):
         for _ in range(loop_cnt):
-            golden_out, golden_add_out = golden_op_matmul_allreduce_add_rmsnorm(
-                x1, x2, residual, gamma, epsilon)
+            golden_out, golden_add_out = golden_op_matmul_allreduce_add_rmsnorm(x1, x2, residual, gamma, epsilon)
         torch_npu.npu.synchronize(rank)
         return golden_out, golden_add_out
 
@@ -103,8 +105,7 @@ def worker(rank, ep_world_size, batch_size, m, k, n):
 
     def run_custom_case(loop_cnt):
         for _ in range(loop_cnt):
-            out, add_out = opt_model(x1, x2, residual, gamma, ep_hcomm_info,
-                                     epsilon, is_trans_b, is_allgather_add_out)
+            out, add_out = opt_model(x1, x2, residual, gamma, ep_hcomm_info, epsilon, is_trans_b, is_allgather_add_out)
         torch_npu.npu.synchronize(rank)
         return out, add_out
 

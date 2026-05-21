@@ -29,6 +29,7 @@ Get the latest info here: <https://github.com/vllm-project/vllm-ascend/issues/16
 | Kimi-K2-Thinking              | 🔵        |                                                                      || A2/A3 |||||||||||||||| [Kimi-K2-Thinking](../../tutorials/models/Kimi-K2-Thinking.md) |
 | DeepseekOCR2                  | ✅        |                                                                      | ✅ | A2/A3 ||✅||||✅|||||||||| [DeepSeekOCR2](../../tutorials/models/DeepSeekOCR2.md) |
 | MiniMax-M2.5                  | ✅        |                                                                      | ✅ | A2/A3 |✅|✅|✅|❌|✅|✅|✅|🟡|✅|✅|✅|✅|✅|192k|🟡| [MiniMax-M2.5](../../tutorials/models/MiniMax-M2.5.md) |
+| Qwen2.5-Math-RM-72B           | ✅        | vllm-rm, tensor_parallel_size=4, max_model_len=4096 | ✅ | A2 | ✅ | 🟡 | 🟡 | ❌ | 🟡 | ✅ | ✅ | 🟡 | 🟡 | 🟡 | 🟡 | 🟡 | 🟡 | 4096 | 🟡 | [Qwen2.5-Math-RM-72B](../../tutorials/models/Qwen2.5-Math-RM-72B.md) |
 
 #### Extended Compatible Models
 
@@ -68,6 +69,7 @@ Get the latest info here: <https://github.com/vllm-project/vllm-ascend/issues/16
 | Molmo                         | 🔵        | [1942](https://github.com/vllm-project/vllm-ascend/issues/1942)      |         A2/A3            |      |
 | XLM-RoBERTa-based             | 🔵        |                                                                      |         A2/A3            |      |
 | Bert                          | 🔵        |                                                                      |         A2/A3            |      |
+| Qwen2.5-Math-RM-72B           | ✅        | Reward Model, gsm8k_correctness accuracy=0.80 | A2 | [Qwen2.5-Math-RM-72B](../../tutorials/models/Qwen2.5-Math-RM-72B.md) |
 
 ## Multimodal Language Models
 

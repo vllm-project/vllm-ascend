@@ -1,16 +1,13 @@
 import torch
-import pytest
-from vllm.triton_utils import tl, triton
-from vllm.v1.worker.gpu.block_table import _compute_slot_mappings_kernel as \
-    ref_compute_slot_mappings_kernel
-from vllm_ascend.worker.v2.block_table import _compute_slot_mappings_kernel as \
-    ascend_compute_slot_mappings_kernel
+from vllm.v1.worker.gpu.block_table import _compute_slot_mappings_kernel as ref_compute_slot_mappings_kernel
+
+from vllm_ascend.worker.v2.block_table import _compute_slot_mappings_kernel as ascend_compute_slot_mappings_kernel
+
 
 def test_compute_slot_mapping_npu_kernel():
-
     """
     Computes the physical slot IDs in KV cache for each token in the current batch.
-    This function maps the logical positions of tokens to their actual storage locations 
+    This function maps the logical positions of tokens to their actual storage locations
     in the block-managed KV cache, which is critical for efficient memory access in LLM inference.
 
     Input:
@@ -34,7 +31,6 @@ def test_compute_slot_mapping_npu_kernel():
         - slot_mappings (torch.Tensor): [num_kv_cache_groups, max_num_batched_tokens], int32 → Output slot ID tensor
     """
 
-
     torch.manual_seed(42)
 
     device = "npu" if torch.npu.is_available() else "cuda" if torch.cuda.is_available() else "cpu"
@@ -42,7 +38,7 @@ def test_compute_slot_mapping_npu_kernel():
     max_num_batched_tokens = 8192
     idx_mapping = torch.tensor([63], dtype=torch.int32, device=device)
     query_start_loc = torch.tensor([0, 5], dtype=torch.int32, device=device)
-    positions = torch.tensor([0,1,2,3,4,0,0,0], dtype=torch.int64, device=device)
+    positions = torch.tensor([0, 1, 2, 3, 4, 0, 0, 0], dtype=torch.int64, device=device)
 
     num_kv_cache_groups = 1
     max_num_reqs = 64
@@ -64,7 +60,7 @@ def test_compute_slot_mapping_npu_kernel():
     num_groups = num_kv_cache_groups
 
     try:
-        ascend_compute_slot_mappings_kernel[(num_groups, num_reqs+1)](
+        ascend_compute_slot_mappings_kernel[(num_groups, num_reqs + 1)](
             max_num_batched_tokens,
             idx_mapping,
             query_start_loc,
@@ -82,7 +78,7 @@ def test_compute_slot_mapping_npu_kernel():
             TOTAL_BLOCK_SIZE=4096,
         )
 
-        ref_compute_slot_mappings_kernel[(num_groups, num_reqs+1)](
+        ref_compute_slot_mappings_kernel[(num_groups, num_reqs + 1)](
             max_num_batched_tokens,
             idx_mapping,
             query_start_loc,
@@ -99,13 +95,15 @@ def test_compute_slot_mapping_npu_kernel():
             TRITON_BLOCK_SIZE=1024,  # type: ignore
         )
 
-         # ========== Verify results ==========
-        assert torch.equal(slot_mappings, ref_slot_mappings), \
-            f"ascend output differs from gpu reference.\n" \
-            f"Max diff: {torch.max(torch.abs(slot_mappings - ref_slot_mappings))}\n" \
+        # ========== Verify results ==========
+        assert torch.equal(slot_mappings, ref_slot_mappings), (
+            f"ascend output differs from gpu reference.\n"
+            f"Max diff: {torch.max(torch.abs(slot_mappings - ref_slot_mappings))}\n"
             f"Mean diff: {torch.mean(torch.abs(slot_mappings - ref_slot_mappings).float())}"
+        )
 
     except Exception as e:
-        print(f'Error during executionm: {e}')
+        print(f"Error during executionm: {e}")
         import traceback
+
         traceback.print_exc()

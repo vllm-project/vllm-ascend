@@ -99,7 +99,7 @@ public:
             .ParamType(REQUIRED)
             .DataType({ge::DT_FLOAT8_E4M3FN})
             .Format({ge::FORMAT_ND})
-            .AutoContiguous();
+            .IgnoreContiguous();
         aicore_config_950.Input("weights")
             .ParamType(REQUIRED)
             .DataType({ge::DT_FLOAT})
@@ -114,7 +114,7 @@ public:
             .ParamType(REQUIRED)
             .DataType({ge::DT_FLOAT})
             .Format({ge::FORMAT_ND})
-            .AutoContiguous();
+            .IgnoreContiguous();
         aicore_config_950.Input("actual_seq_lengths_query")
             .ParamType(OPTIONAL)
             .DataType({ge::DT_INT32})
