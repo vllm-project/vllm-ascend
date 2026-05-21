@@ -49,7 +49,7 @@ env:
   NODE_VERSION: 18.20.8
   MAIN2MAIN_SUITE: e2e-main2main  
   MAIN2MAIN_MODEL: ${{ vars.MAIN2MAIN_MODEL || 'glm-5' }}
-  MAIN2MAIN_IMAGE: swr.cn-southwest-2.myhuaweicloud.com/base_image/ascend-ci/cann:9.0.0-a3-ubuntu22.04-py3.11
+  MAIN2MAIN_IMAGE: swr.cn-southwest-2.myhuaweicloud.com/base_image/ascend-ci/cann:9.0.0-910b-ubuntu22.04-py3.11
   CLAUDE_ALLOWED_TOOLS: Bash(git *),Bash(gh *),Bash(grep *),Bash(sed *),Bash(jq *),Bash(python3 *),Bash(mkdir *),Bash(cat *),Bash(tee *),Bash(head *),Bash(tail *),Bash(test *),Bash(ls *),Bash(find *),Bash(pwd),Read,Write,Edit,Glob,Grep
   UV_INDEX_URL: http://cache-service.nginx-pypi-cache.svc.cluster.local/pypi/simple
   UV_EXTRA_INDEX_URL: "https://repo.huaweicloud.com/ascend/repos/pypi http://cache-service.nginx-pypi-cache.svc.cluster.local/whl/cpu/"
@@ -61,13 +61,13 @@ env:
 
 jobs:
   main2main:
-    runs-on: linux-aarch64-a3-4
+    runs-on: linux-aarch64-a2b3-4
     timeout-minutes: 2880
     concurrency:
       group: main2main-auto
       cancel-in-progress: false
     container:
-      image: swr.cn-southwest-2.myhuaweicloud.com/base_image/ascend-ci/cann:9.0.0-a3-ubuntu22.04-py3.11
+      image: swr.cn-southwest-2.myhuaweicloud.com/base_image/ascend-ci/cann:9.0.0-910b-ubuntu22.04-py3.11
       env:
         VLLM_LOGGING_LEVEL: ERROR
         VLLM_USE_MODELSCOPE: True
