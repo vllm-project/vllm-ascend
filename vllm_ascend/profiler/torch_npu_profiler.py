@@ -16,6 +16,7 @@
 # This file is a part of the vllm-ascend project.
 #
 
+from contextlib import suppress
 from typing import Any
 
 import torch_npu
@@ -23,6 +24,7 @@ from vllm.config import ProfilerConfig
 from vllm.profiler.wrapper import WorkerProfiler
 
 import vllm_ascend.envs as envs_ascend
+from vllm_ascend.ascend_config import get_ascend_config
 
 
 class TorchNPUProfilerWrapper(WorkerProfiler):
@@ -38,7 +40,10 @@ class TorchNPUProfilerWrapper(WorkerProfiler):
             raise RuntimeError(f"Unrecognized profiler: {profiler_config.profiler}")
         if not profiler_config.torch_profiler_dir:
             raise RuntimeError("torch_profiler_dir cannot be empty.")
-        if envs_ascend.MSMONITOR_USE_DAEMON:
+        msmonitor_use_daemon = envs_ascend.MSMONITOR_USE_DAEMON
+        with suppress(RuntimeError):
+            msmonitor_use_daemon = get_ascend_config().msmonitor_use_daemon
+        if msmonitor_use_daemon:
             raise RuntimeError("MSMONITOR_USE_DAEMON and torch profiler cannot be both enabled at the same time.")
 
         experimental_config = torch_npu.profiler._ExperimentalConfig(

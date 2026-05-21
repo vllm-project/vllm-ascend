@@ -1,3 +1,5 @@
+import os
+
 import numpy as np
 import pytest
 from vllm.config import (
@@ -26,6 +28,7 @@ from vllm_ascend.worker.npu_input_batch import NPUInputBatch
 BLOCK_SIZE = 128
 NUM_BLOCKS = 10
 DEVICE_TYPE = current_platform.device_type
+FAKE_WEIGHT_PATH = os.path.join(os.path.dirname(__file__), "..", "fake_weight")
 
 
 def initialize_kv_cache(runner: NPUModelRunner):
@@ -62,9 +65,10 @@ def initialize_kv_cache(runner: NPUModelRunner):
 
 def get_vllm_config():
     model_config = ModelConfig(
-        model="facebook/opt-125m",
+        model=FAKE_WEIGHT_PATH,
         dtype="float16",
         seed=42,
+        skip_tokenizer_init=True,
     )
     scheduler_config = SchedulerConfig(
         max_num_seqs=10,
