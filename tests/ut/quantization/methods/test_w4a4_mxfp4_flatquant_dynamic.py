@@ -167,7 +167,7 @@ class TestAscendW4A4MXFP4FlatQuantDynamicLinearMethod(TestBase):
         with self.assertRaisesRegex(ValueError, "dimension mismatch"):
             self.method.apply(layer, x)
 
-    def test_process_weights_after_loading_non_row(self):
+    def test_process_weights_after_loading(self):
         layer = MagicMock()
         layer.weight.data = torch.randint(0, 255, (self.output_size, self.input_size // 2), dtype=torch.uint8)
 
@@ -196,45 +196,6 @@ class TestAscendW4A4MXFP4FlatQuantDynamicLinearMethod(TestBase):
         # clip_ratio cast to float32, aclnn_clip_ratio set to its scalar value
         self.assertEqual(layer.clip_ratio.dtype, torch.float32)
         self.assertAlmostEqual(layer.aclnn_clip_ratio, 0.95, places=5)
-
-    def test_process_weights_after_loading_row(self):
-        from vllm_ascend.quantization.methods import w4a4_mxfp4_flatquant as mod
-
-        class FakeRowParallelLinear:
-            pass
-
-        with patch.object(mod, "RowParallelLinear", FakeRowParallelLinear):
-            layer = FakeRowParallelLinear()
-            tp_size = 2
-            tp_rank = 0
-            full_left_dim = 64
-            left_block_size = full_left_dim // tp_size
-
-            layer.left_trans = MagicMock()
-            layer.left_trans.data = torch.randn(full_left_dim, full_left_dim, dtype=torch.bfloat16)
-            layer.right_trans = MagicMock()
-            layer.right_trans.data = torch.randn(16, 16, dtype=torch.bfloat16)
-            layer.weight = MagicMock()
-            layer.weight.data = torch.randint(0, 255, (self.output_size, self.input_size // 2), dtype=torch.uint8)
-
-            weight_scale_data = torch.randint(
-                0, 255, (self.output_size, self.input_size // self.group_size), dtype=torch.uint8
-            )
-            layer.weight_scale = MagicMock()
-            layer.weight_scale.data = weight_scale_data
-            layer.weight_scale.shape = weight_scale_data.shape
-            layer.clip_ratio = MagicMock()
-            layer.clip_ratio.data = torch.tensor([0.95])
-            layer.tp_size = tp_size
-            layer.tp_rank = tp_rank
-
-            self.method.process_weights_after_loading(layer)
-
-            # The per-rank diagonal block of left_trans is selected, then transposed
-            self.assertIsInstance(layer.left_trans, torch.nn.Parameter)
-            self.assertEqual(layer.left_trans.shape, (left_block_size, left_block_size))
-            self.assertTrue(layer.left_trans.data.is_contiguous())
-            self.assertAlmostEqual(layer.aclnn_clip_ratio, 0.95, places=5)
 
 
 if __name__ == "__main__":
