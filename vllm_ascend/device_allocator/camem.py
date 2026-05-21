@@ -245,7 +245,7 @@ class CaMemAllocator:
 
         old_tag = self.current_tag
         self.current_tag = tag
-        try:    
+        try:
             with use_memory_pool_with_allocator(self.python_malloc_callback, self.python_free_callback) as data:
                 # start to hit another PyTorch bug in PyTorch 2.6,
                 # possibly because of gc-related issue w.r.t. the allocator and
