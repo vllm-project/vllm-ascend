@@ -1,3 +1,5 @@
+from typing import cast, overload
+
 import numpy as np
 import torch
 from vllm.utils.math_utils import cdiv
@@ -8,9 +10,22 @@ from vllm.v1.worker.cp_utils import get_total_cp_world_size
 from vllm_ascend.worker.block_table import BlockTable as AscendBlockTable
 from vllm_ascend.worker.block_table import MultiGroupBlockTable as AscendMultiGroupBlockTable
 
+SlotMappingInput = np.ndarray | torch.Tensor
+
 
 class BlockTable(AscendBlockTable):
-    def compute_slot_mapping(self, *args) -> None:
+    @overload
+    def compute_slot_mapping(self, req_indices: SlotMappingInput, positions: SlotMappingInput) -> None: ...
+
+    @overload
+    def compute_slot_mapping(
+        self,
+        num_reqs: int,
+        query_start_loc: SlotMappingInput,
+        positions: SlotMappingInput,
+    ) -> None: ...
+
+    def compute_slot_mapping(self, *args: object) -> None:
         req_indices, positions = self._normalize_slot_mapping_inputs(*args)
         self._compute_slot_mapping_numpy(req_indices, positions)
 
@@ -87,6 +102,8 @@ class BlockTable(AscendBlockTable):
 
 
 class MultiGroupBlockTable(AscendMultiGroupBlockTable):
+    block_tables: list[BlockTable]
+
     def __init__(
         self,
         max_num_reqs: int,
@@ -157,9 +174,9 @@ class MultiGroupBlockTable(AscendMultiGroupBlockTable):
 
     def compute_slot_mapping(
         self,
-        num_reqs_or_req_indices: int | np.ndarray,
-        query_start_loc_or_positions: torch.Tensor | np.ndarray,
-        positions: torch.Tensor | np.ndarray | None = None,
+        num_reqs_or_req_indices: int | SlotMappingInput,
+        query_start_loc_or_positions: SlotMappingInput,
+        positions: SlotMappingInput | None = None,
         positions_compressed_list: list[np.ndarray] | None = None,
         req_indices_compressed_list: list[np.ndarray] | None = None,
     ) -> None:
@@ -171,12 +188,12 @@ class MultiGroupBlockTable(AscendMultiGroupBlockTable):
                 )
             elif positions is None:
                 block_table.compute_slot_mapping(
-                    num_reqs_or_req_indices,
+                    cast(SlotMappingInput, num_reqs_or_req_indices),
                     query_start_loc_or_positions,
                 )
             else:
                 block_table.compute_slot_mapping(
-                    num_reqs_or_req_indices,
+                    cast(int, num_reqs_or_req_indices),
                     query_start_loc_or_positions,
                     positions,
                 )
