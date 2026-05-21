@@ -82,8 +82,6 @@ def npu_test(num_npus: int = 1, npu_type: str | RunnerDeviceType = RunnerDeviceT
         num_npus: Number of NPU devices required (default 1).
         npu_type: The NPU chip type required (default A2).
     """
-    if not isinstance(npu_type, RunnerDeviceType):
-        RunnerDeviceType(npu_type)
 
     def decorator(obj):
         return obj
