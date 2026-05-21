@@ -27,7 +27,7 @@ from vllm_ascend.distributed.parallel_state import get_dynamic_eplb_group
 
 def _tensor_checksum(t: torch.Tensor, tag: str = "") -> str:
     """Compute a deterministic hex checksum for a tensor. Debug only."""
-    data = t.contiguous().cpu().numpy().tobytes()
+    data = t.contiguous().cpu().float().numpy().tobytes()
     h = hashlib.sha256(data).hexdigest()[:16]
     logger.info("[EPLB_CHK] %s shape=%s dtype=%s device=%s hash=%s", tag, t.shape, t.dtype, t.device, h)
     return h

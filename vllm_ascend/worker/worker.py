@@ -425,7 +425,7 @@ class NPUWorker(WorkerBase):
             )
             assert tensor_dict is not None
             for key, tensor in tensor_dict.items():
-                data = tensor.contiguous().cpu().numpy().tobytes()
+                data = tensor.contiguous().cpu().float().numpy().tobytes()
                 h = hashlib.sha256(data).hexdigest()[:16]
                 logger.info("[PP_CHK] RECV rank=%s pp_rank=%s key=%s shape=%s hash=%s",
                     dist.get_rank(), get_pp_group().rank_in_group, key, tensor.shape, h)
@@ -452,7 +452,7 @@ class NPUWorker(WorkerBase):
         else:
             all_gather_group = get_tp_group()
         for key, tensor in output.tensors.items():
-            data = tensor.contiguous().cpu().numpy().tobytes()
+            data = tensor.contiguous().cpu().float().numpy().tobytes()
             h = hashlib.sha256(data).hexdigest()[:16]
             logger.info("[PP_CHK] SEND rank=%s pp_rank=%s key=%s shape=%s hash=%s",
                 dist.get_rank(), get_pp_group().rank_in_group, key, tensor.shape, h)
