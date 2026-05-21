@@ -117,6 +117,19 @@ class TestV1MappingContext(TestBase):
 
         np.testing.assert_array_equal(ctx.idx_mapping_np, np.array([0, 0, 1], dtype=np.int32))
 
+    def test_from_logits_rejects_cpu_mapping_mirror_mismatch(self):
+        from vllm_ascend.worker.v1.sample.context import V1MappingContext
+
+        with self.assertRaisesRegex(ValueError, "idx_mapping_np must match"):
+            V1MappingContext.from_v1_logits(
+                num_reqs=2,
+                positions_at_logits=torch.tensor([3, 4, 7], dtype=torch.int64),
+                input_ids_at_logits=torch.tensor([13, 14, 17], dtype=torch.int64),
+                req_indices_at_logits=torch.tensor([0, 0, 1], dtype=torch.int32),
+                device=torch.device("cpu"),
+                idx_mapping_np=np.array([0, 1, 1], dtype=np.int32),
+            )
+
     def test_from_logits_rejects_mismatched_row_tensors(self):
         from vllm_ascend.worker.v1.sample.context import V1MappingContext
 

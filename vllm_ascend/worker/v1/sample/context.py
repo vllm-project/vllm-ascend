@@ -108,13 +108,18 @@ class V1MappingContext:
         if req_ids is not None and len(req_ids) != num_reqs:
             raise ValueError("req_ids length must match num_reqs")
 
-        expanded_idx_mapping = req_indices_at_logits.to(device=device, dtype=torch.int32)
         if idx_mapping_np is None:
+            expanded_idx_mapping = req_indices_at_logits.to(device=device, dtype=torch.int32)
             idx_mapping_np = expanded_idx_mapping.detach().cpu().numpy().astype(np.int32)
         else:
             idx_mapping_np = np.asarray(idx_mapping_np, dtype=np.int32)
             if int(idx_mapping_np.shape[0]) != num_logits:
                 raise ValueError("idx_mapping_np must have one entry per logits row")
+            if req_indices_at_logits.device.type == "cpu":
+                req_indices_np = req_indices_at_logits.detach().numpy().astype(np.int32, copy=False)
+                if not np.array_equal(idx_mapping_np, req_indices_np):
+                    raise ValueError("idx_mapping_np must match req_indices_at_logits")
+            expanded_idx_mapping = torch.from_numpy(idx_mapping_np).to(device=device, dtype=torch.int32)
         if idx_mapping_np.size and (idx_mapping_np.min() < 0 or idx_mapping_np.max() >= num_reqs):
             raise ValueError("req_indices_at_logits contains an out-of-range request index")
 

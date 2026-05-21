@@ -57,6 +57,18 @@ def _sampled_logprob_values(output):
     return values
 
 
+def _sampled_logprob_ranks(output):
+    output_token_ids, _output_text, output_logprobs = output
+    assert output_logprobs is not None
+    ranks = []
+    for token_id, step_logprobs in zip(output_token_ids, output_logprobs):
+        assert token_id in step_logprobs
+        rank = getattr(step_logprobs[token_id], "rank", None)
+        assert rank is not None
+        ranks.append(int(rank))
+    return ranks
+
+
 def test_sampling_optimization_logprobs_match_default_sampler() -> None:
     reference_outputs = _generate_logprobs()
     optimized_outputs = _generate_logprobs(_sampling_optimization_config())
@@ -73,3 +85,4 @@ def test_sampling_optimization_logprobs_match_default_sampler() -> None:
             _sampled_logprob_values(reference_output),
             abs=1e-3,
         )
+        assert _sampled_logprob_ranks(optimized_output) == _sampled_logprob_ranks(reference_output)

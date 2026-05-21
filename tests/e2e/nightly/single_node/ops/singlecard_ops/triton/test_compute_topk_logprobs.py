@@ -1,7 +1,8 @@
-import torch
 import pytest
-from vllm_ascend.worker.v2.sample.logprob import compute_topk_logprobs
+import torch
+
 from vllm_ascend.ops.triton.triton_utils import init_device_properties_triton
+from vllm_ascend.worker.v2.sample.logprob import compute_topk_logprobs
 
 
 @pytest.mark.parametrize("batch_size,vocab_size,num_logprobs", [
@@ -42,7 +43,7 @@ def test_compute_topk_logprobs(batch_size, vocab_size, num_logprobs):
     ref_logprobs = torch.gather(ref_all_logprobs, dim=1, index=ref_token_ids)
 
     sampled_logits = torch.gather(logits, 1, sampled_token_ids.unsqueeze(-1))
-    ref_ranks = (logits > sampled_logits).sum(dim=1).to(torch.int64)
+    ref_ranks = (logits >= sampled_logits).sum(dim=1).to(torch.int64)
 
     # ========== 4. Verify results ==========
     assert torch.equal(triton_output.logprob_token_ids, ref_token_ids), \

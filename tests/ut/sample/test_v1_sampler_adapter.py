@@ -755,6 +755,36 @@ class TestGpuSamplerBridge(TestBase):
         self.assertEqual(logprobs.logprob_token_ids.tolist(), [[3, 1, 2]])
         self.assertEqual(logprobs.selected_token_ranks.tolist(), [3])
 
+    def test_compute_logprobs_rank_is_one_based_when_logits_tie(self):
+        from vllm_ascend.worker.v1.sample.adapter import GpuSamplerBridge
+        from vllm_ascend.worker.v1.sample.context import V1MappingContext
+
+        adapter = GpuSamplerBridge(
+            max_num_reqs=1,
+            vocab_size=4,
+            device=torch.device("cpu"),
+            logprobs_mode="raw_logprobs",
+            sampling_config=_enabled_sampling_config(),
+        )
+        logits = torch.tensor([[2.0, 2.0, 1.0, 0.0]], dtype=torch.float32)
+        ctx = V1MappingContext.from_v1_logits(
+            num_reqs=1,
+            positions_at_logits=torch.tensor([0], dtype=torch.int64),
+            input_ids_at_logits=torch.tensor([10], dtype=torch.int64),
+            req_indices_at_logits=torch.tensor([0], dtype=torch.int32),
+            device=torch.device("cpu"),
+        )
+
+        logprobs = adapter._compute_logprobs(
+            raw_logits=logits,
+            processed_logits=logits,
+            sampled=torch.tensor([0], dtype=torch.int64),
+            sampling_metadata=_metadata(max_num_logprobs=1),
+            ctx=ctx,
+        )
+
+        self.assertEqual(logprobs.selected_token_ranks.tolist(), [2])
+
     def test_specific_logprob_token_ids_take_precedence(self):
         from vllm_ascend.worker.v1.sample.adapter import GpuSamplerBridge
         from vllm_ascend.worker.v1.sample.context import V1MappingContext

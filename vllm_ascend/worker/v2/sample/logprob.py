@@ -110,7 +110,7 @@ def _ranks_kernel(
             for i in range(0, vocab_size, BLOCK_SIZE):
                 block = i + tl.arange(0, BLOCK_SIZE)
                 logits = tl.load(row_ptr + block, mask=block < vocab_size, other=float("-inf"))
-                n_vec += (logits > x).to(tl.int32)
+                n_vec += (logits >= x).to(tl.int32)
             n = tl.sum(n_vec)
             tl.store(output_ptr + req_idx, n)
 
