@@ -301,7 +301,7 @@ class CpuAlloc:
         self.skipped_socket_cpus = skipped_socket_cpus
         self.device_info.allowed_cpus = allowed_cpus
 
-    def slice_skipped_socket_cpus(self, npu: int, num_threads: int = KV_TRANSFER_CPUS_PER_NPU) -> list[int]:
+    def slice_skipped_socket_cpus(self, npu: int) -> list[int]:
         if not self.skipped_socket_cpus:
             return []
         cpus = sorted(set(self.skipped_socket_cpus))
@@ -315,7 +315,7 @@ class CpuAlloc:
         extra = len(cpus) % total_npus
         start = npu * base + (npu if npu < extra else extra)
         take = base + (1 if npu < extra else 0)
-        return cpus[start:start + take][:num_threads]
+        return cpus[start:start + take]
 
     def build_global_slice_cpu_pool(self) -> None:
         """
@@ -438,10 +438,10 @@ class CpuAlloc:
             if len(pool) < MIN_CPUS_PER_NPU:
                 raise RuntimeError(
                     f"The number of CPUs is insufficient. Each NPU requires at least {MIN_CPUS_PER_NPU} CPUs."
-                )
+            )
             if self.skipped_socket_cpus:
                 main = pool[2:-2]
-                kv_transfer = self.slice_skipped_socket_cpus(npu)
+                kv_transfer = self.slice_skipped_socket_cpus(npu)[:KV_TRANSFER_CPUS_PER_NPU]
             elif len(pool) >= MIN_CPUS_PER_NPU + KV_TRANSFER_CPUS_PER_NPU:
                 main = pool[2:-2 - KV_TRANSFER_CPUS_PER_NPU]
                 kv_transfer = pool[-2 - KV_TRANSFER_CPUS_PER_NPU:-2]
@@ -616,9 +616,17 @@ def get_kv_transfer_thread_cpus(rank_id: int, num_threads: int = KV_TRANSFER_CPU
     binder.build_cpu_pools()
     current_npu = binder.device_info.running_npu_list[rank_id]
     if binder.skipped_socket_cpus:
-        return binder.slice_skipped_socket_cpus(current_npu, num_threads)
+        return binder.slice_skipped_socket_cpus(current_npu)[:num_threads]
     binder.allocate()
     return binder.assign_kv_transfer[current_npu][:num_threads]
+
+
+def get_memcache_client_cpus(rank_id: int) -> list[int]:
+    binder = CpuAlloc(rank_id)
+    binder.build_cpu_node_map()
+    binder.exclude_skip_sockets()
+    current_npu = binder.device_info.running_npu_list[rank_id]
+    return binder.slice_skipped_socket_cpus(current_npu)[KV_TRANSFER_CPUS_PER_NPU:]
 
 
 def bind_thread_to_cpus(thread_id: int, cpus: list[int]) -> None:
