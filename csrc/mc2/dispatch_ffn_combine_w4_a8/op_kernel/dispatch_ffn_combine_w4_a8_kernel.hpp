@@ -116,6 +116,7 @@ public:
         uint64_t initRoutingQuantTilingKey;
         uint32_t epilogueCoreNum;
         optiling::MoeInitRoutingQuantV2TilingData moeInitRoutingQuantV2TilingData;
+        float swigluLimit;
         //--------------
 
         // Methods
@@ -132,7 +133,7 @@ public:
                GM_ADDR ptrOutput_, LayoutD2 layoutD1_, LayoutD2 layoutD2_, GM_ADDR expertIdx_,
                GM_ADDR moeInitRoutingQuantV2Scale_, GM_ADDR moeInitRoutingQuantV2Offset_,
                GM_ADDR expertTokensBeforeCapacity_, GM_ADDR probs_, GM_ADDR ptrWorkspace_, GM_ADDR gmExpertTokenNums_,
-               int32_t ubMoveNum_, optiling::MoeInitRoutingQuantV2TilingData moeInitRoutingQuantV2TilingData_,
+               int32_t ubMoveNum_, optiling::MoeInitRoutingQuantV2TilingData moeInitRoutingQuantV2TilingData_, float swigluLimit_,
                GM_ADDR symmetricPtr_ = nullptr)
             : problemShape(problemShape_),
               EP(EP_),
@@ -169,7 +170,8 @@ public:
               ptrExpertTokenNums(gmExpertTokenNums_),
               ubMoveNum(ubMoveNum_),
               symmetricPtr(symmetricPtr_),
-              moeInitRoutingQuantV2TilingData(moeInitRoutingQuantV2TilingData_)
+              moeInitRoutingQuantV2TilingData(moeInitRoutingQuantV2TilingData_),
+              swigluLimit(swigluLimit_)
         {
             moeInitRoutingQuantV2TilingData.vbsComputeParamsOp = moeInitRoutingQuantV2TilingData_.vbsComputeParamsOp;
             moeInitRoutingQuantV2TilingData.vmsMiddleComputeParamsOp =
@@ -1017,8 +1019,8 @@ private:
                 if constexpr (std::is_same_v<ElementB, AscendC::int4b_t>) {
                     blockEpilogue1(gmC[gmOffsetC * 2], shapeC, gmPerTokenScale1[rowStartThisCore], params.ptrMAux1,
                                     gmA2I4_I8[gmOffsetD], cumsumMM, rowStartThisCore, gmPerTokenScale2[rowStartThisCore],
-                                    params.expertPerRank, params.EP, gmCGMM1[gmOffsetC], params.rank, params.listLen,
-                                    params.epilogueCoreNum);
+                                    params.expertPerRank, params.EP, gmCGMM1[gmOffsetC], params.rank, params.listLen, resource,
+                                    params.epilogueCoreNum, params.swigluLimit);
                 }
             }
             AscendC::SyncAll<true>();

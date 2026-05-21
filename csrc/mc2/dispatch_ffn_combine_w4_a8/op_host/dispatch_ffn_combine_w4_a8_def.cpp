@@ -82,6 +82,7 @@ class DispatchFFNCombineW4A8 : public OpDef {
     this->Attr("M").AttrType(OPTIONAL).Int();
     this->Attr("transB").AttrType(OPTIONAL).Bool(false);
     this->Attr("weightNz").AttrType(OPTIONAL).Bool(false);
+    this->Attr("swigluLimit").AttrType(OPTIONAL).Float(0.0f);
 
     OpAICoreConfig aicore_config;
     aicore_config.DynamicCompileStaticFlag(true)
