@@ -19,10 +19,12 @@
 
 import copy
 import gc
+import hashlib
 import logging
 from types import NoneType
 
 import torch
+import torch.distributed as dist
 import torch.nn as nn
 import torch_npu
 import vllm.envs as envs_vllm
@@ -422,6 +424,11 @@ class NPUWorker(WorkerBase):
                 all_gather_group=all_gather_group
             )
             assert tensor_dict is not None
+            for key, tensor in tensor_dict.items():
+                data = tensor.contiguous().cpu().numpy().tobytes()
+                h = hashlib.sha256(data).hexdigest()[:16]
+                logger.info("[PP_CHK] RECV rank=%s pp_rank=%s key=%s shape=%s hash=%s",
+                    dist.get_rank(), get_pp_group().rank_in_group, key, tensor.shape, h)
             intermediate_tensors = AsyncIntermediateTensors(
                 tensor_dict,
                 comm_handles=comm_handles,
@@ -444,6 +451,11 @@ class NPUWorker(WorkerBase):
             all_gather_group = None
         else:
             all_gather_group = get_tp_group()
+        for key, tensor in output.tensors.items():
+            data = tensor.contiguous().cpu().numpy().tobytes()
+            h = hashlib.sha256(data).hexdigest()[:16]
+            logger.info("[PP_CHK] SEND rank=%s pp_rank=%s key=%s shape=%s hash=%s",
+                dist.get_rank(), get_pp_group().rank_in_group, key, tensor.shape, h)
         self._pp_send_work = get_pp_group().isend_tensor_dict(
             output.tensors,
             all_gather_group=all_gather_group,

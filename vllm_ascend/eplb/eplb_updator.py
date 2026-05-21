@@ -106,6 +106,9 @@ class EplbUpdator:
             (expert_send_info, expert_recv_info, updated_expert_map, log2phy_map, layer_id) = self.update_info_all.pop(
                 0
             )
+            logger.info("[EPLB_SYNC] rank=%s pp_rank=%s cur_iter=%s layer_id=%s remaining=%s",
+                dist.get_rank(), self.comm_group.rank_in_group,
+                self.cur_iterations, layer_id, len(self.update_info_all))
             log2phy_map_this_rank = torch.from_numpy(numpy.array(log2phy_map))
             self.eplb_loader.set_log2phy_map(log2phy_map_this_rank)
             updated_expert_map_this_rank = torch.from_numpy(numpy.array(updated_expert_map))
@@ -122,11 +125,17 @@ class EplbUpdator:
 
     def forward_end(self):
         if self.wakeup_eplb_worker_flag():
+            logger.info("[EPLB_SYNC] rank=%s pp_rank=%s WAKEUP cur_iter=%s",
+                dist.get_rank(), self.comm_group.rank_in_group, self.cur_iterations)
             self.compute_and_set_moe_load()
             self.wakeup_eplb_worker()
 
-        if self.update_expert_weight_flag() and self.expert_map_record_path is None:
-            self.eplb_loader.update_expert_map_and_weight(self.reqs)
+        if self.update_expert_weight_flag():
+            logger.info("[EPLB_SYNC] rank=%s pp_rank=%s WEIGHT_UPDATE cur_iter=%s layer_id=%s",
+                dist.get_rank(), self.comm_group.rank_in_group,
+                self.cur_iterations, self.eplb_loader.layer_id)
+            if self.expert_map_record_path is None:
+                self.eplb_loader.update_expert_map_and_weight(self.reqs)
 
         self.update_iteration()
 
@@ -143,6 +152,10 @@ class EplbUpdator:
         return moe_load
 
     def warm_up_eplb(self):
+        logger.info("[EPLB_GROUP] rank=%s pp_rank=%s eplb_group_ranks=%s world_size=%s rank_in_group=%s num_moe_layers=%s",
+            dist.get_rank(), self.comm_group.rank_in_group,
+            self.comm_group.ranks, self.comm_group.world_size,
+            self.comm_group.rank_in_group, self.adaptor.num_moe_layers)
         self.shared_dict["expert_maps"] = self.adaptor.get_global_expert_map()
         self.compute_and_set_moe_load()
 

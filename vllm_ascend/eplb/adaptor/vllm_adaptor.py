@@ -52,6 +52,8 @@ class VllmEplbAdaptor:
 
         self.moe_layers = VllmEplbAdaptor._registered_moe_layers
         self.num_moe_layers = len(self.moe_layers)
+        logger.info("[EPLB_INIT] rank=%s num_moe_layers=%s ep_rank info from first layer: %s",
+            dist.get_rank(), self.num_moe_layers, self.moe_layers[0].ep_rank if self.num_moe_layers > 0 else "N/A")
 
         self.expert_map_per_layer_cpu = dict()  # copy of expert map on CPU to avoid device synchronize frequently
 

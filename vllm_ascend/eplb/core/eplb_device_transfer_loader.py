@@ -14,13 +14,23 @@
 # limitations under the License.
 # This file is a part of the vllm-ascend project.
 #
+import hashlib
 import os
 from enum import Enum
 
+import torch
 import torch.distributed as dist
 from vllm.logger import logger
 
 from vllm_ascend.distributed.parallel_state import get_dynamic_eplb_group
+
+
+def _tensor_checksum(t: torch.Tensor, tag: str = "") -> str:
+    """Compute a deterministic hex checksum for a tensor. Debug only."""
+    data = t.contiguous().cpu().numpy().tobytes()
+    h = hashlib.sha256(data).hexdigest()[:16]
+    logger.info("[EPLB_CHK] %s shape=%s dtype=%s device=%s hash=%s", tag, t.shape, t.dtype, t.device, h)
+    return h
 
 
 class ExpertWeightUpdateState(Enum):
@@ -57,6 +67,7 @@ class D2DExpertWeightLoader:
             dst_rank, global_expert_id_to_send = send_info
             local_expert_id = self.eplb_adaptor.expert_map_per_layer_cpu[layer_id][global_expert_id_to_send].item()
             for src_tensor in self.eplb_adaptor.expert_param_per_layer[layer_id][local_expert_id]:
+                _tensor_checksum(src_tensor, f"SEND layer={layer_id} global_expert={global_expert_id_to_send} local_expert={local_expert_id} dst_rank={dst_rank}")
                 self.comm_op_list.append(
                     dist.P2POp(dist.isend, src_tensor.contiguous(), self.comm_group.ranks[dst_rank], group=self.comm_group.device_group)
                 )
@@ -99,6 +110,12 @@ class D2DExpertWeightLoader:
         if self.comm_op_list is not None:
             self.comm_op_list = None
 
+        # checksum received buffer before applying
+        for buffer_tensor_id, recv_expert_info in enumerate(self.recv_expert_list):
+            local_expert_to_replace, _ = recv_expert_info
+            for buf in self.eplb_adaptor.buffer_tensor_list[buffer_tensor_id]:
+                _tensor_checksum(buf, f"RECV layer={self.layer_id} buffer_id={buffer_tensor_id} local_expert={local_expert_to_replace}")
+
         # update expert_map
         self.eplb_adaptor.do_update_expert_map(self.layer_id, self.updated_expert_map)
 
@@ -110,6 +127,9 @@ class D2DExpertWeightLoader:
         for recv_expert_info in self.recv_expert_list:
             local_expert_to_replace, buffer_tensor_id = recv_expert_info
             self.eplb_adaptor.do_update_expert_weight(self.layer_id, local_expert_to_replace, buffer_tensor_id)
+            # checksum after copy_
+            for updated_tensor in self.eplb_adaptor.expert_param_per_layer[self.layer_id][local_expert_to_replace]:
+                _tensor_checksum(updated_tensor, f"COPY_DONE layer={self.layer_id} local_expert={local_expert_to_replace}")
 
         if self.layer_id == self.num_layers - 1:
             logger.info("[EPLB] finished update expert weight.")
