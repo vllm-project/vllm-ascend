@@ -410,7 +410,7 @@ jobs:
     runs-on: ubuntu-24.04
     steps:
       - name: Download all variant wheels
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@v8
         with:
           pattern: '*-wheel'
           path: all-wheels/

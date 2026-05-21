@@ -310,7 +310,7 @@ class AddRMSNormDynamicQuantPattern(BasePattern):
             Replacement for the AddRMSNormQuant fusion.
             """
             output = torch.ops.npu.npu_add_rms_norm_dynamic_quant(
-                rms_norm_input, residual, rms_norm_weight, epsilon=self.eps, output_mask=[True, True]
+                rms_norm_input, residual, rms_norm_weight, epsilon=self.eps, output_mask=[True, False]
             )
             return (
                 output[0],
@@ -366,7 +366,7 @@ class AddRMSNormDynamicQuantPatternWithBias(BasePattern):
             Replacement for the AddRMSNormQuant fusion.
             """
             output = torch.ops.npu.npu_add_rms_norm_dynamic_quant(
-                rms_norm_input, residual, rms_norm_weight, epsilon=self.eps, output_mask=[True, True], beta=bias
+                rms_norm_input, residual, rms_norm_weight, epsilon=self.eps, output_mask=[True, False], beta=bias
             )
             return (
                 output[0],
@@ -410,7 +410,7 @@ class AddRMSNormDynamicQuantSPPattern(BasePattern):
             Replacement for the AddRMSNormQuant fusion.
             """
             output = torch.ops.npu.npu_add_rms_norm_dynamic_quant(
-                rms_norm_input, residual, rms_norm_weight, epsilon=self.eps, output_mask=[True, True]
+                rms_norm_input, residual, rms_norm_weight, epsilon=self.eps, output_mask=[True, False]
             )
             out3 = output[3]
             quantized_output = torch.ops.vllm.maybe_all_gather_and_maybe_unpad(output[0], True)
@@ -466,7 +466,7 @@ class AddRMSNormDynamicQuantSPPatternWithBias(BasePattern):
             Replacement for the AddRMSNormQuant fusion.
             """
             output = torch.ops.npu.npu_add_rms_norm_dynamic_quant(
-                rms_norm_input, residual, rms_norm_weight, epsilon=self.eps, output_mask=[True, True], beta=bias
+                rms_norm_input, residual, rms_norm_weight, epsilon=self.eps, output_mask=[True, False], beta=bias
             )
             out3 = output[3]
             quantized_output = torch.ops.vllm.maybe_all_gather_and_maybe_unpad(output[0], True)

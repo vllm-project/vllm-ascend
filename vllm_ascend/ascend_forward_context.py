@@ -68,6 +68,7 @@ def set_ascend_forward_context(
     skip_compiled: bool = False,
     max_tokens_across_pcp: int = 0,
     draft_attn_metadatas=None,
+    input_ids=None,
 ):
     """A context manager that stores the current forward context,
     can be attention metadata, etc.
@@ -85,6 +86,8 @@ def set_ascend_forward_context(
     with set_forward_context(**forward_context_kwargs):
         forward_context = get_forward_context()
         forward_context.draft_attn_metadatas = draft_attn_metadatas
+
+        forward_context.input_ids = input_ids
 
         from vllm_ascend.ops.fused_moe.moe_comm_method import get_moe_comm_method
 
@@ -277,7 +280,7 @@ def select_moe_comm_method(num_tokens: int, vllm_config: VllmConfig, is_draft_mo
         # TODO: drop the EP-size guard when dispatch_ffn_combine supports larger EP sizes
         # TODO: drop speculative method guard when dispatch_gmm_combine_decode supports w16a16
         fused_mc2_enable = envs_ascend.VLLM_ASCEND_ENABLE_FUSED_MC2
-        dispatch_ffn_combine_enable = get_ep_group().world_size <= 32 and (not is_draft_model)
+        dispatch_ffn_combine_enable = get_ep_group().world_size <= 32
         if num_tokens <= mc2_tokens_capacity:
             fused_decode_enable = fused_mc2_enable
             if envs_ascend.VLLM_ASCEND_ENABLE_FUSED_MC2 == 1:

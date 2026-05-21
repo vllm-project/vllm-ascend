@@ -380,11 +380,24 @@ class NPUPlatform(Platform):
         if compilation_config.cudagraph_mode == CUDAGraphMode.FULL_AND_PIECEWISE:
             compilation_config.cudagraph_mode = CUDAGraphMode.PIECEWISE
 
-        # encoder-decoder models currently only support piecewise mode
-        if model_config and model_config.is_encoder_decoder is True:
-            if compilation_config.cudagraph_mode == CUDAGraphMode.FULL_DECODE_ONLY:
-                logger.warning("encoder-decoder model doesn't support FULL_DECODE_ONLY, fallback to PIECEWISE ")
-            compilation_config.cudagraph_mode = CUDAGraphMode.PIECEWISE
+        # Encoder-decoder models currently only support PIECEWISE mode
+        # TODO(Jian Li): Confirm this behavior and explain why
+        if (
+            model_config
+            and model_config.is_encoder_decoder
+            and compilation_config.cudagraph_mode not in (CUDAGraphMode.NONE, CUDAGraphMode.PIECEWISE)
+        ):
+            cudagraph_mode = (
+                CUDAGraphMode.PIECEWISE
+                if compilation_config.mode == CompilationMode.VLLM_COMPILE
+                else CUDAGraphMode.NONE
+            )
+            logger.info_once(
+                "Encoder-decoder models don't support %s, fallback to %s.",
+                compilation_config.cudagraph_mode,
+                cudagraph_mode,
+            )
+            compilation_config.cudagraph_mode = cudagraph_mode
 
         # get custom compile backend for graph fusion
         compilation_config.oot_compiler = cls.get_compile_backend()
@@ -592,15 +605,17 @@ class NPUPlatform(Platform):
 
     @classmethod
     def get_attn_backend_cls(cls, selected_backend, attn_selector_config, num_heads: int | None = None):
+        use_compress = getattr(attn_selector_config, "use_compress", False)
         key = (attn_selector_config.use_mla, attn_selector_config.use_sparse)
 
         if selected_backend == AttentionBackendEnum.FLASH_ATTN and cls._validate_fa3_backend(key, attn_selector_config):
             return "vllm_ascend.attention.fa3_v1.AscendFABackend"
 
         backend_map = {
-            (True, False): "vllm_ascend.attention.mla_v1.AscendMLABackend",
-            (False, False): "vllm_ascend.attention.attention_v1.AscendAttentionBackend",
-            (True, True): "vllm_ascend.attention.sfa_v1.AscendSFABackend",
+            (True, False, False): "vllm_ascend.attention.mla_v1.AscendMLABackend",
+            (False, False, False): "vllm_ascend.attention.attention_v1.AscendAttentionBackend",
+            (True, True, False): "vllm_ascend.attention.sfa_v1.AscendSFABackend",
+            (True, False, True): "vllm_ascend.attention.dsa_v1.AscendDSABackend",
         }
         backend_map_310 = {
             (
@@ -615,7 +630,7 @@ class NPUPlatform(Platform):
         if is_310p():
             return backend_map_310.get(key, backend_map_310[(False, False)])
 
-        return backend_map[key]
+        return backend_map[(attn_selector_config.use_mla, attn_selector_config.use_sparse, use_compress)]
 
     @classmethod
     def _validate_fa3_backend(cls, key, attn_selector_config):
@@ -627,16 +642,16 @@ class NPUPlatform(Platform):
             return False
         if key != (False, False):
             raise ValueError("FA3 backend does not support MLA and SFA.")
-        if util.find_spec("flash_attn_v3") is None:
+        if util.find_spec("flash_attn_npu_v3") is None:
             raise ValueError(
-                "flash_attn_v3 is not installed but FA3 backend is requested. "
-                "Please install flash_attn_v3 to enable FA3."
+                "flash_attn_npu_v3 is not installed but FA3 backend is requested. "
+                "Please install flash_attn_npu_v3 to enable FA3."
             )
-        mod = import_module("flash_attn_v3")
+        mod = import_module("flash_attn_npu_v3")
         if not hasattr(mod, "flash_attn_with_kvcache"):
             raise ValueError(
-                "flash_attn_v3 is installed but does not provide "
-                "flash_attn_with_kvcache. Please check flash_attn_v3 "
+                "flash_attn_npu_v3 is installed but does not provide "
+                "flash_attn_with_kvcache. Please check flash_attn_npu_v3 "
                 "whether it supports flash_attn_with_kvcache."
             )
         logger.info(
