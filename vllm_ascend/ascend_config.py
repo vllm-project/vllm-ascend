@@ -620,6 +620,15 @@ class ExpertOffloadConfig:
         "num_device_experts": 32,
         "num_device_layers": 2,
         "expert_map_path": None,
+        "cache_policy_enabled": False,
+        "cache_recent_window": 32,
+        "cache_ema_beta": 0.9,
+        "cache_recent_weight": 1.0,
+        "cache_ema_weight": 0.5,
+        "cache_router_weight": 0.3,
+        "cache_age_weight": 0.01,
+        "cache_stats_log_interval": 1000,
+        "cache_debug_log_updates": False,
     }
 
     def __init__(self, user_config: dict | None = None):
@@ -657,6 +666,29 @@ class ExpertOffloadConfig:
             raise ValueError(f"num_device_layers must >= 1; got {self.config['num_device_layers']} instead")
         if not isinstance(self.config["expert_offload"], bool):
             raise TypeError("expert_offload must be a boolean")
+        if not isinstance(self.config["cache_policy_enabled"], bool):
+            raise TypeError("cache_policy_enabled must be a boolean")
+        if not isinstance(self.config["cache_recent_window"], int):
+            raise TypeError("cache_recent_window must be an integer")
+        if self.config["cache_recent_window"] < 1:
+            raise ValueError("cache_recent_window must >= 1")
+        for key in (
+            "cache_ema_beta",
+            "cache_recent_weight",
+            "cache_ema_weight",
+            "cache_router_weight",
+            "cache_age_weight",
+        ):
+            if not isinstance(self.config[key], (int, float)):
+                raise TypeError(f"{key} must be a number")
+        if not 0 <= self.config["cache_ema_beta"] < 1:
+            raise ValueError("cache_ema_beta must be in [0, 1)")
+        if not isinstance(self.config["cache_stats_log_interval"], int):
+            raise TypeError("cache_stats_log_interval must be an integer")
+        if self.config["cache_stats_log_interval"] < 0:
+            raise ValueError("cache_stats_log_interval must >= 0")
+        if not isinstance(self.config["cache_debug_log_updates"], bool):
+            raise TypeError("cache_debug_log_updates must be a boolean")
 
 
 _ASCEND_CONFIG: AscendConfig | None = None
