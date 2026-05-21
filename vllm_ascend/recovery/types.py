@@ -30,7 +30,6 @@ class RecoveryStep(msgspec.Struct):
 
     def execute(self, executer: Any, cfg: dict) -> Tuple[dict, bool]:
         for action in self.actions:
-            action = RecoveryAction(name=action)
             cfg, success = action.execute(executer, cfg, self.target)
             if not success:
                 return cfg, False
