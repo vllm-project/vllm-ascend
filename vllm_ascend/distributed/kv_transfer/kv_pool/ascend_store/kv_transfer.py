@@ -815,7 +815,7 @@ class KVCacheStoreLayerRecvingThread(KVTransferThread):
 
         if attention_start_gate is not None:
             while not attention_start_gate.wait(timeout=10):
-                logger.info("Layerwise %d load waits for attention start", layer_id)
+                logger.info("Layerwise %d load waits for attention compute start", layer_id)
 
         gvas_array = _circular_shift_array(
             req_meta.gvas_array,

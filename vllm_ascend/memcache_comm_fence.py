@@ -18,12 +18,48 @@ from __future__ import annotations
 
 import threading
 
+import torch
+
 
 _lock = threading.RLock()
-_attention_compute_start_gate: threading.Event | None = None
+_attention_compute_start_gate: AttentionComputeStartGate | None = None
 
 
-def reset_attention_compute_start_gate() -> threading.Event:
+class AttentionComputeStartGate:
+    """Gate that opens when the compute stream reaches attention.
+
+    The attention worker records an NPU event immediately before submitting the
+    attention op. MemCache worker threads wait for that event to complete before
+    submitting H2D/L2G work, so transfer starts when the compute stream is
+    actually at the attention boundary rather than merely after the Python call
+    site was reached.
+    """
+
+    def __init__(self) -> None:
+        self._condition = threading.Condition()
+        self._event: torch.npu.Event | None = None
+
+    def record(self, stream: torch.npu.Stream | None = None) -> None:
+        stream = stream or torch.npu.current_stream()
+        event = torch.npu.Event()
+        event.record(stream)
+        with self._condition:
+            if self._event is None:
+                self._event = event
+                self._condition.notify_all()
+
+    def wait(self, timeout: float = 10.0) -> bool:
+        with self._condition:
+            while self._event is None:
+                if not self._condition.wait(timeout=timeout):
+                    return False
+            event = self._event
+
+        event.synchronize()
+        return True
+
+
+def reset_attention_compute_start_gate() -> AttentionComputeStartGate:
     """Create a new per-layer gate for MemCache work.
 
     Layerwise prefetch tasks keep a reference to the gate that was current when
@@ -31,13 +67,13 @@ def reset_attention_compute_start_gate() -> threading.Event:
     compute is about to be launched.
     """
     global _attention_compute_start_gate
-    gate = threading.Event()
+    gate = AttentionComputeStartGate()
     with _lock:
         _attention_compute_start_gate = gate
     return gate
 
 
-def get_attention_compute_start_gate() -> threading.Event:
+def get_attention_compute_start_gate() -> AttentionComputeStartGate:
     with _lock:
         gate = _attention_compute_start_gate
     if gate is None:
@@ -46,8 +82,8 @@ def get_attention_compute_start_gate() -> threading.Event:
 
 
 def record_attention_compute_start() -> None:
-    """Open the current gate when attention compute is about to be submitted."""
+    """Record the compute-stream boundary immediately before attention."""
     with _lock:
         gate = _attention_compute_start_gate
     if gate is not None:
-        gate.set()
+        gate.record()
