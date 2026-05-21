@@ -108,6 +108,8 @@ def _gumbel_sample_kernel(
 
     temp = tl.load(temp_ptr + req_state_idx).to(tl.float32)
     if temp != 0.0 and APPLY_TEMPERATURE:
+        # NOTE(woosuk): Match the behavior of _temperature_kernel.
+        # E.g., if the kernel uses tl.div_rn, we should use tl.div_rn here too.
         logits = logits / temp
 
     if processed_logits_ptr is not None:
@@ -116,7 +118,10 @@ def _gumbel_sample_kernel(
         else:
             col = 0
         tl.store(
-            processed_logits_ptr + req_state_idx * processed_logits_stride + col * vocab_size + block,
+            processed_logits_ptr
+            + req_state_idx * processed_logits_stride
+            + col * vocab_size
+            + block,
             logits,
             mask=mask,
         )
@@ -156,9 +161,13 @@ def gumbel_sample(
     output_processed_logits: torch.Tensor | None = None,
     output_processed_logits_col: torch.Tensor | None = None,
     use_fp64: bool = False,
+    processed_logits_out: torch.Tensor | None = None,
 ) -> torch.Tensor:
     if use_fp64:
         raise NotImplementedError("FP64 Gumbel sampling is not supported on NPU.")
+    if output_processed_logits is None:
+        output_processed_logits = processed_logits_out
+
     num_reqs, vocab_size = logits.shape
     BLOCK_SIZE = 1024
     num_blocks = triton.cdiv(vocab_size, BLOCK_SIZE)
