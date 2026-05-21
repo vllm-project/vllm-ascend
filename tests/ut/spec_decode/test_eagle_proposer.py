@@ -14,7 +14,7 @@ from vllm.model_executor.models.llama_eagle3 import Eagle3LlamaForCausalLM
 from vllm.platforms import current_platform
 from vllm.v1.spec_decode.draft_model import DraftModelProposer
 
-import vllm_ascend.spec_decode.eagle_proposer as eagle_proposer
+import vllm_ascend.spec_decode.llm_base_proposer as llm_base_proposer
 from tests.ut.base import TestBase
 from tests.ut.conftest import npu_test
 from vllm_ascend.ascend_config import clear_ascend_config, init_ascend_config
@@ -362,9 +362,9 @@ class TestEagleProposerLoadModel(TestBase):
         # Clear the current vllm config
         set_current_vllm_config(None)
 
-    @patch("vllm_ascend.spec_decode.eagle_proposer.get_layers_from_vllm_config")
-    @patch("vllm_ascend.spec_decode.eagle_proposer.get_model")
-    @patch("vllm_ascend.spec_decode.eagle_proposer.get_pp_group")
+    @patch("vllm_ascend.spec_decode.llm_base_proposer.get_layers_from_vllm_config")
+    @patch("vllm_ascend.spec_decode.llm_base_proposer.get_model")
+    @patch("vllm_ascend.spec_decode.llm_base_proposer.get_pp_group")
     def test_load_model_pp1(self, mock_pp_group, mock_get_model, mock_get_layers):
         mock_pp_group.return_value.world_size = 1
         mock_target_layer1 = MagicMock()
@@ -397,9 +397,9 @@ class TestEagleProposerLoadModel(TestBase):
             self.assertEqual(self.proposer.attn_layer_names, ["layer3"])
             self.assertIs(self.proposer.model.model.embed_tokens, mock_model.model.embed_tokens)
 
-    @patch("vllm_ascend.spec_decode.eagle_proposer.get_layers_from_vllm_config")
-    @patch("vllm_ascend.spec_decode.eagle_proposer.get_model")
-    @patch("vllm_ascend.spec_decode.eagle_proposer.get_pp_group")
+    @patch("vllm_ascend.spec_decode.llm_base_proposer.get_layers_from_vllm_config")
+    @patch("vllm_ascend.spec_decode.llm_base_proposer.get_model")
+    @patch("vllm_ascend.spec_decode.llm_base_proposer.get_pp_group")
     def test_load_model_pp_gt1(self, mock_pp_group, mock_get_model, mock_get_layers):
         mock_pp_group.return_value.world_size = 2
         mock_target_layer1 = MagicMock()
@@ -419,10 +419,10 @@ class TestEagleProposerLoadModel(TestBase):
             self.assertIsNot(self.proposer.model.model.embed_tokens, mock_model.model.embed_tokens)
             self.assertEqual(self.proposer.attn_layer_names, ["layer2"])
 
-    @patch("vllm_ascend.spec_decode.eagle_proposer.get_layers_from_vllm_config")
-    @patch("vllm_ascend.spec_decode.eagle_proposer.get_model")
-    @patch("vllm_ascend.spec_decode.eagle_proposer.get_pp_group")
-    @patch("vllm_ascend.spec_decode.eagle_proposer.supports_multimodal")
+    @patch("vllm_ascend.spec_decode.llm_base_proposer.get_layers_from_vllm_config")
+    @patch("vllm_ascend.spec_decode.llm_base_proposer.get_model")
+    @patch("vllm_ascend.spec_decode.llm_base_proposer.get_pp_group")
+    @patch("vllm_ascend.spec_decode.llm_base_proposer.supports_multimodal")
     def test_load_model_multimodal(self, mock_supports_multi, mock_pp_group, mock_get_model, mock_get_layers):
         mock_model = MagicMock()
         mock_model.get_language_model.return_value.lm_head = MagicMock()
@@ -542,9 +542,9 @@ class TestEagleProposerDummyRun(TestBase):
     # cpu does not support parallel-group, let alone `sp`
     @patch("vllm_ascend.ascend_forward_context.get_forward_context")
     @patch(
-        "vllm_ascend.spec_decode.eagle_proposer.get_forward_context", **{"return_value.flash_comm_v1_enabled": False}
+        "vllm_ascend.spec_decode.llm_base_proposer.get_forward_context", **{"return_value.flash_comm_v1_enabled": False}
     )
-    @patch("vllm_ascend.spec_decode.eagle_proposer.set_ascend_forward_context")
+    @patch("vllm_ascend.spec_decode.llm_base_proposer.set_ascend_forward_context")
     def test_dummy_run_basic(self, mock_context, mock_get_context, mock_get_context_2):
         num_tokens = 32
         with_prefill = False
@@ -559,9 +559,9 @@ class TestEagleProposerDummyRun(TestBase):
     # cpu does not support parallel-group, let alone `sp`
     @patch("vllm_ascend.ascend_forward_context.get_forward_context")
     @patch(
-        "vllm_ascend.spec_decode.eagle_proposer.get_forward_context", **{"return_value.flash_comm_v1_enabled": False}
+        "vllm_ascend.spec_decode.llm_base_proposer.get_forward_context", **{"return_value.flash_comm_v1_enabled": False}
     )
-    @patch("vllm_ascend.spec_decode.eagle_proposer.set_ascend_forward_context")
+    @patch("vllm_ascend.spec_decode.llm_base_proposer.set_ascend_forward_context")
     def test_dummy_run_with_prefill(self, mock_context, mock_get_context, mock_get_context_2):
         mock_context.return_value.__enter__.return_value = None
         # cpu does not support `torch.ops.vllm.maybe_pad_and_reduce`
@@ -571,9 +571,9 @@ class TestEagleProposerDummyRun(TestBase):
             self.assertTrue(self.proposer._runnable.call_count == 1)
 
     @patch("vllm_ascend.ascend_forward_context.get_forward_context")
-    @patch("vllm_ascend.spec_decode.eagle_proposer.update_full_graph_params")
-    @patch("vllm_ascend.spec_decode.eagle_proposer.get_forward_context")
-    @patch("vllm_ascend.spec_decode.eagle_proposer.set_ascend_forward_context")
+    @patch("vllm_ascend.spec_decode.llm_base_proposer.update_full_graph_params")
+    @patch("vllm_ascend.spec_decode.llm_base_proposer.get_forward_context")
+    @patch("vllm_ascend.spec_decode.llm_base_proposer.set_ascend_forward_context")
     def test_dummy_run_in_graph_capture(
         self, mock_context, mock_get_context, mock_update_full_graph_params, mock_get_context_2
     ):
@@ -595,9 +595,9 @@ class TestEagleProposerDummyRun(TestBase):
             self.proposer.use_cuda_graph = last_use_cuda_graph
 
     @patch("vllm_ascend.ascend_forward_context.get_forward_context")
-    @patch("vllm_ascend.spec_decode.eagle_proposer.update_full_graph_params")
-    @patch("vllm_ascend.spec_decode.eagle_proposer.get_forward_context")
-    @patch("vllm_ascend.spec_decode.eagle_proposer.set_ascend_forward_context")
+    @patch("vllm_ascend.spec_decode.llm_base_proposer.update_full_graph_params")
+    @patch("vllm_ascend.spec_decode.llm_base_proposer.get_forward_context")
+    @patch("vllm_ascend.spec_decode.llm_base_proposer.set_ascend_forward_context")
     def test_dummy_run_in_graph_run(
         self, mock_context, mock_get_context, mock_update_full_graph_params, mock_get_context_2
     ):
@@ -740,7 +740,7 @@ class TestEagleProposerMaybePadAndGather:
             return input_tensor[::2].contiguous()
 
         with (
-            patch("vllm_ascend.spec_decode.eagle_proposer._EXTRA_CTX", new=self._extra_ctx(flash_comm_v1_enabled)),
+            patch("vllm_ascend.spec_decode.llm_base_proposer._EXTRA_CTX", new=self._extra_ctx(flash_comm_v1_enabled)),
             patch("torch.ops.vllm.maybe_pad_and_reduce", side_effect=fake_pad_and_reduce, create=True) as mock_reduce,
         ):
             reduced_hidden_states, reduced_positions = proposer.maybe_pad_and_reduce(
@@ -779,8 +779,8 @@ class TestEagleProposerMaybePadAndGather:
         tp_group.rank = 1
 
         with (
-            patch("vllm_ascend.spec_decode.eagle_proposer._EXTRA_CTX", new=self._extra_ctx(flash_comm_v1_enabled)),
-            patch("vllm_ascend.spec_decode.eagle_proposer.get_tp_group", return_value=tp_group) as mock_get_tp_group,
+            patch("vllm_ascend.spec_decode.llm_base_proposer._EXTRA_CTX", new=self._extra_ctx(flash_comm_v1_enabled)),
+            patch("vllm_ascend.spec_decode.llm_base_proposer.get_tp_group", return_value=tp_group) as mock_get_tp_group,
         ):
             reduced_hidden_states, reduced_positions = proposer.maybe_pad_and_reduce(
                 model_hidden_states, model_positions
@@ -869,7 +869,7 @@ class TestEagleProposerMaybePadAndGather:
             return torch.cat((input_tensor, input_tensor + 100), dim=0)
 
         with (
-            patch("vllm_ascend.spec_decode.eagle_proposer._EXTRA_CTX", new=self._extra_ctx(flash_comm_v1_enabled)),
+            patch("vllm_ascend.spec_decode.llm_base_proposer._EXTRA_CTX", new=self._extra_ctx(flash_comm_v1_enabled)),
             patch(
                 "torch.ops.vllm.maybe_all_gather_and_maybe_unpad",
                 side_effect=fake_all_gather_and_unpad,
@@ -898,10 +898,10 @@ class TestEagleProposerMaybePadAndGather:
             assert gathered_hidden_states is hidden_states
 
     def check_mock(self):
-        import vllm_ascend.spec_decode.eagle_proposer
+        import vllm_ascend.spec_decode.llm_base_proposer
 
-        assert hasattr(vllm_ascend.spec_decode.eagle_proposer, "AscendSpecDecodeBaseProposer")
-        RunnerCls = vllm_ascend.spec_decode.eagle_proposer.AscendSpecDecodeBaseProposer
+        assert hasattr(vllm_ascend.spec_decode.llm_base_proposer, "AscendSpecDecodeBaseProposer")
+        RunnerCls = vllm_ascend.spec_decode.llm_base_proposer.AscendSpecDecodeBaseProposer
 
         assert hasattr(RunnerCls, "maybe_pad_and_reduce")
         sig = inspect.signature(RunnerCls.maybe_pad_and_reduce)
@@ -1550,9 +1550,9 @@ class TestEagleProposerPropose:
         assert sig_name == ['self', 'num_tokens_padded', 'num_reqs_padded', 'num_reqs', 'cudagraph_runtime_mode', 'batch_desc_num_reqs']
 
 
-        import vllm_ascend.spec_decode.eagle_proposer
-        assert hasattr(vllm_ascend.spec_decode.eagle_proposer, "AscendSpecDecodeBaseProposer")
-        RunnerCls = vllm_ascend.spec_decode.eagle_proposer.AscendSpecDecodeBaseProposer
+        import vllm_ascend.spec_decode.llm_base_proposer
+        assert hasattr(vllm_ascend.spec_decode.llm_base_proposer, "AscendSpecDecodeBaseProposer")
+        RunnerCls = vllm_ascend.spec_decode.llm_base_proposer.AscendSpecDecodeBaseProposer
         assert hasattr(RunnerCls, "_get_model")
         assert hasattr(RunnerCls, "_update_full_graph_params")
         assert hasattr(RunnerCls, "_propose")
@@ -1642,9 +1642,9 @@ class TestEagleProposerPropose:
         assert not missing, f"Missing dataclass fields: {missing}"
 
 
-        import vllm_ascend.spec_decode.eagle_proposer
-        assert hasattr(vllm_ascend.spec_decode.eagle_proposer, "AscendSpecDecodeBaseProposer")
-        RunnerCls = vllm_ascend.spec_decode.eagle_proposer.AscendSpecDecodeBaseProposer
+        import vllm_ascend.spec_decode.llm_base_proposer
+        assert hasattr(vllm_ascend.spec_decode.llm_base_proposer, "AscendSpecDecodeBaseProposer")
+        RunnerCls = vllm_ascend.spec_decode.llm_base_proposer.AscendSpecDecodeBaseProposer
         assert hasattr(RunnerCls, "_run_merged_draft")
         sig = inspect.signature(RunnerCls._run_merged_draft)
         sig_name = self.get_param_names(sig)
@@ -2267,13 +2267,13 @@ class TestRunMergedDraft(TestBase):
             "vllm.multimodal.registry.MultiModalRegistry.supports_multimodal_inputs", return_value=False
         )
         self.mock_supports_multimodal_inputs.start()
-        self.mock_enable_sp = patch("vllm_ascend.spec_decode.eagle_proposer.enable_sp", return_value=False)
+        self.mock_enable_sp = patch("vllm_ascend.spec_decode.llm_base_proposer.enable_sp", return_value=False)
         self.mock_enable_sp.start()
         self.mock_shared_expert_dp = patch(
-            "vllm_ascend.spec_decode.eagle_proposer.shared_expert_dp_enabled", return_value=False
+            "vllm_ascend.spec_decode.llm_base_proposer.shared_expert_dp_enabled", return_value=False
         )
         self.mock_shared_expert_dp.start()
-        self.mock_extra_ctx = patch("vllm_ascend.spec_decode.eagle_proposer._EXTRA_CTX", new=MagicMock())
+        self.mock_extra_ctx = patch("vllm_ascend.spec_decode.llm_base_proposer._EXTRA_CTX", new=MagicMock())
         self.mock_extra_ctx.start()
         set_current_vllm_config(self.vllm_config)
         self.proposer = AscendEagleProposer(vllm_config=self.vllm_config, device=self.device, runner=self.runner)
@@ -2424,10 +2424,9 @@ class TestRunMergedDraft(TestBase):
         missing = fields - extra_attrs
         assert not missing, f"Missing extra forward context attrs: {missing}"
 
-        import vllm_ascend.spec_decode.eagle_proposer
+        import vllm_ascend.spec_decode.llm_base_proposer
 
         for attr in (
-            "AscendEagleProposer",
             "AscendSpecDecodeBaseProposer",
             "enable_sp",
             "shared_expert_dp_enabled",
@@ -2435,10 +2434,10 @@ class TestRunMergedDraft(TestBase):
             "get_forward_context",
             "_EXTRA_CTX",
         ):
-            assert hasattr(vllm_ascend.spec_decode.eagle_proposer, attr), (
-                f"vllm_ascend.spec_decode.eagle_proposer.{attr} not found"
+            assert hasattr(vllm_ascend.spec_decode.llm_base_proposer, attr), (
+                f"vllm_ascend.spec_decode.llm_base_proposer.{attr} not found"
             )
-        RunnerCls = vllm_ascend.spec_decode.eagle_proposer.AscendSpecDecodeBaseProposer
+        RunnerCls = vllm_ascend.spec_decode.llm_base_proposer.AscendSpecDecodeBaseProposer
         for attr in (
             "_run_merged_draft",
             "maybe_pad_and_reduce",
@@ -2533,8 +2532,8 @@ class TestRunMergedDraft(TestBase):
         multi_steps_attn_metadata = [MagicMock(), MagicMock(), MagicMock()]
 
         with (
-            patch.object(eagle_proposer, "lmhead_tp_enable", return_value=False),
-            patch.object(eagle_proposer, "get_forward_context", return_value=forward_context),
+            patch.object(llm_base_proposer, "lmhead_tp_enable", return_value=False),
+            patch.object(llm_base_proposer, "get_forward_context", return_value=forward_context),
         ):
             draft_token_ids = self.proposer._run_merged_draft(
                 num_input_tokens=12,
@@ -2579,8 +2578,8 @@ class TestRunMergedDraft(TestBase):
         self.assertTrue(torch.equal(model.logit_inputs[0], model.returned_hidden_states[0][0][token_indices_to_sample]))
         self.assertEqual(forward_context.moe_layer_index, 0)
         self.assertIs(forward_context.attn_metadata, multi_steps_attn_metadata[2])
-        self.assertEqual(eagle_proposer._EXTRA_CTX.num_tokens, 3)
-        self.assertEqual(eagle_proposer._EXTRA_CTX.num_accept_tokens, 3)
+        self.assertEqual(llm_base_proposer._EXTRA_CTX.num_tokens, 3)
+        self.assertEqual(llm_base_proposer._EXTRA_CTX.num_accept_tokens, 3)
 
     def test_run_merged_draft_dflash_uses_first_pass_inputs_and_returns_early(self):
         self.proposer.method = "dflash"
@@ -2595,7 +2594,7 @@ class TestRunMergedDraft(TestBase):
             }
         )
 
-        with patch.object(eagle_proposer, "lmhead_tp_enable", return_value=False):
+        with patch.object(llm_base_proposer, "lmhead_tp_enable", return_value=False):
             draft_token_ids = self.proposer._run_merged_draft(
                 num_input_tokens=12,
                 batch_size=2,
@@ -2646,8 +2645,8 @@ class TestRunMergedDraft(TestBase):
         multi_steps_attn_metadata = [MagicMock(), MagicMock(), MagicMock()]
 
         with (
-            patch.object(eagle_proposer, "lmhead_tp_enable", return_value=True),
-            patch.object(eagle_proposer, "get_forward_context", return_value=forward_context),
+            patch.object(llm_base_proposer, "lmhead_tp_enable", return_value=True),
+            patch.object(llm_base_proposer, "get_forward_context", return_value=forward_context),
         ):
             draft_token_ids = self.proposer._run_merged_draft(
                 num_input_tokens=6,
@@ -2711,7 +2710,7 @@ class TestRunMergedDraft(TestBase):
                 self.proposer.input_ids[:4] = torch.tensor([279, 1196, 374, 8014], dtype=torch.int32)
                 self.proposer.positions[:4] = torch.tensor([17, 18, 19, 20], dtype=torch.int64)
 
-                with patch.object(eagle_proposer, "lmhead_tp_enable", return_value=False):
+                with patch.object(llm_base_proposer, "lmhead_tp_enable", return_value=False):
                     draft_token_ids = self.proposer._run_merged_draft(
                         num_input_tokens=4,
                         batch_size=2,
@@ -2785,7 +2784,7 @@ class TestDraftProposerHelperMethods(TestBase):
 
     
     @patch('torch.ops._C_ascend.npu_copy_and_expand_eagle_inputs', create=True)
-    @patch("vllm_ascend.spec_decode.eagle_proposer.compute_new_slot_mapping")
+    @patch("vllm_ascend.spec_decode.llm_base_proposer.compute_new_slot_mapping")
     def test_set_inputs_first_pass(self, mock_slot, mock_expand):
         self.assertTrue(self.proposer.needs_extra_input_slots)
         target_token_ids = torch.tensor([0,1,2,3,4])
@@ -3337,7 +3336,7 @@ class TestEagleProposerPrepareInputsPadded:
 
         with (
             patch(
-                "vllm_ascend.spec_decode.eagle_proposer.HAS_TRITON",
+                "vllm_ascend.spec_decode.llm_base_proposer.HAS_TRITON",
                 has_triton,
             ),
             patch.multiple(
@@ -3463,7 +3462,7 @@ class TestEagleProposerPrepareInputsPadded:
 
         with (
             patch(
-                "vllm_ascend.spec_decode.eagle_proposer.HAS_TRITON",
+                "vllm_ascend.spec_decode.llm_base_proposer.HAS_TRITON",
                 has_triton,
             ),
             patch.multiple(
