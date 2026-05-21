@@ -56,15 +56,15 @@ class TestAscendW4A4MXFP4FlatQuantDynamicLinearMethod(TestBase):
         with (
             patch("vllm_ascend.quantization.methods.w4a4_mxfp4_flatquant.ensure_mxfp4_flatquant_linear_available"),
             patch(
-               "vllm_ascend.quantization.methods.w4a4_mxfp4_flatquant.get_current_vllm_config",
+                "vllm_ascend.quantization.methods.w4a4_mxfp4_flatquant.get_current_vllm_config",
                 return_value=mock_vllm_config,
             ),
             patch(
                 "vllm_ascend.quantization.methods.w4a4_mxfp4_flatquant.get_tensor_model_parallel_world_size",
                 return_value=tp_size,
             ),
-         ):
-             return AscendW4A4MXFP4FlatQuantDynamicLinearMethod()
+        ):
+            return AscendW4A4MXFP4FlatQuantDynamicLinearMethod()
 
     def setUp(self):
         self.method = self._build_method()
