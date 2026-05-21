@@ -105,9 +105,110 @@ def test_generate_pcp_metadata_basic(
                 assert hasattr(result, "kv_with_q_head_mask_idx_tensor")
                 assert hasattr(result, "kv_with_q_tail_nomask_idx_tensor")
                 assert hasattr(result, "kv_with_q_tail_mask_idx_tensor")
+                assert hasattr(result, "kv_tail_proj_idx_tensor")
+                assert hasattr(result, "kv_with_q_head_attn_idx_in_tail_tensor")
+                assert hasattr(result, "kv_with_q_tail_attn_idx_in_tail_tensor")
                 assert hasattr(result, "attn_mask_seqlens")
                 assert hasattr(result, "head_attn_nomask_seqlens")
                 assert hasattr(result, "tail_attn_nomask_seqlens")
+                assert hasattr(result, "head_actual_seq_lengths_kv")
+                assert hasattr(result, "tail_actual_seq_lengths_kv")
+
+
+@pytest.mark.parametrize(
+    "pcp_size, pcp_rank, query_lens",
+    [
+        (2, 0, [8]),
+        (2, 1, [8]),
+        (4, 0, [8, 12]),
+        (4, 3, [8, 12]),
+    ],
+)
+def test_generate_pcp_metadata_mla_tail_projection_indices(pcp_size, pcp_rank, query_lens):
+    vllm_config = MagicMock()
+    vllm_config.model_config = MagicMock()
+    vllm_config.model_config.use_mla = True
+    vllm_config.model_config.hf_config.model_type = "deepseek_v2"
+    vllm_config.parallel_config.cp_kv_cache_interleave_size = 64
+    vllm_config.scheduler_config.max_num_batched_tokens = 10000
+    vllm_config.scheduler_config.max_num_seqs = 1000
+    vllm_config.speculative_config.num_speculative_tokens = 0
+
+    pcp_manager = PCPManager(
+        pcp_world_size=pcp_size,
+        pcp_rank=pcp_rank,
+        dcp_world_size=1,
+        dcp_rank=0,
+        max_buffer_num_tokens=10000,
+        max_num_reqs=1000,
+        device="cpu",
+        vllm_config=vllm_config,
+        use_async_scheduling=False,
+        pin_memory=False,
+    )
+
+    num_reqs = len(query_lens)
+    num_scheduled_tokens = np.array(query_lens, dtype=np.int32)
+    pcp_manager.init_batch_info(num_scheduled_tokens, num_reqs)
+
+    input_batch = MagicMock()
+    input_batch.num_reqs = num_reqs
+    input_batch.num_computed_tokens_cpu = np.zeros(num_reqs, dtype=np.int32)
+    input_batch.num_prompt_tokens = torch.tensor(query_lens)
+    input_batch.num_tokens = torch.tensor(query_lens)
+
+    result, _ = pcp_manager.generate_pcp_metadata(
+        int(num_scheduled_tokens.sum()),
+        torch.tensor(query_lens, dtype=torch.int32),
+        input_batch,
+        num_scheduled_tokens,
+        torch.zeros((num_reqs, 1), dtype=torch.int32),
+        num_reqs_padded=num_reqs,
+        num_reqs=num_reqs,
+    )
+
+    assert result is not None
+    tail_idx = result.kv_tail_proj_idx_tensor
+    full_kv_len = int(num_scheduled_tokens.sum()) * pcp_size
+    assert tail_idx.numel() <= full_kv_len
+    assert tail_idx.numel() > 0
+    assert tail_idx.min().item() >= 0
+    assert tail_idx.max().item() < full_kv_len
+
+    expected_tail_idx: list[int] = []
+    expected_head_attn_idx_in_tail = []
+    expected_tail_attn_idx_in_tail = []
+    expected_head_actual_seq_lengths_kv = []
+    expected_tail_actual_seq_lengths_kv = []
+    kv_req_offset = 0
+    q_head_chunk_id = pcp_rank
+    q_tail_chunk_id = pcp_size * 2 - 1 - pcp_rank
+    for seq_len in query_lens:
+        chunk_len = seq_len // 2
+        tail_proj_offset = len(expected_tail_idx)
+        tail_proj_len = chunk_len * (q_tail_chunk_id + 1)
+        expected_tail_idx.extend(list(range(kv_req_offset, kv_req_offset + tail_proj_len)))
+        expected_head_attn_idx_in_tail.extend(
+            list(range(tail_proj_offset, tail_proj_offset + chunk_len * (q_head_chunk_id + 1)))
+        )
+        expected_tail_attn_idx_in_tail.extend(list(range(tail_proj_offset, tail_proj_offset + tail_proj_len)))
+        expected_head_actual_seq_lengths_kv.append(len(expected_head_attn_idx_in_tail))
+        expected_tail_actual_seq_lengths_kv.append(len(expected_tail_attn_idx_in_tail))
+        kv_req_offset += seq_len * pcp_size
+
+    assert torch.equal(tail_idx.cpu(), torch.tensor(expected_tail_idx, dtype=tail_idx.dtype))
+    head_attn_idx = result.kv_with_q_head_attn_idx_in_tail_tensor
+    tail_attn_idx = result.kv_with_q_tail_attn_idx_in_tail_tensor
+    assert torch.equal(
+        head_attn_idx.cpu(),
+        torch.tensor(expected_head_attn_idx_in_tail, dtype=head_attn_idx.dtype),
+    )
+    assert torch.equal(
+        tail_attn_idx.cpu(),
+        torch.tensor(expected_tail_attn_idx_in_tail, dtype=tail_attn_idx.dtype),
+    )
+    assert result.head_actual_seq_lengths_kv == expected_head_actual_seq_lengths_kv
+    assert result.tail_actual_seq_lengths_kv == expected_tail_actual_seq_lengths_kv
 
 
 @pytest.mark.parametrize(

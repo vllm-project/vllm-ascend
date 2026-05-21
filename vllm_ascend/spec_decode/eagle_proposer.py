@@ -25,6 +25,7 @@ from vllm.model_executor.model_loader import get_model
 from vllm.model_executor.models import supports_multimodal
 from vllm.model_executor.models.deepseek_v2 import DeepseekV32IndexerCache
 from vllm.model_executor.models.llama_eagle3 import Eagle3LlamaForCausalLM
+from vllm.model_executor.models.qwen3_dflash import DFlashQwen3ForCausalLM
 from vllm.triton_utils import HAS_TRITON, triton
 from vllm.utils.math_utils import cdiv
 from vllm.utils.platform_utils import is_pin_memory_available
@@ -47,12 +48,7 @@ from vllm_ascend.attention.utils import AscendCommonAttentionMetadata
 from vllm_ascend.compilation.acl_graph import ACLGraphWrapper, update_full_graph_params
 from vllm_ascend.ops.triton.spec_decode.utils import prepare_inputs_padded_kernel
 from vllm_ascend.ops.triton.triton_utils import get_vectorcore_num
-from vllm_ascend.utils import enable_sp, lmhead_tp_enable, shared_expert_dp_enabled, vllm_version_is
-
-if not vllm_version_is("0.19.1"):
-    from vllm.model_executor.models.qwen3_dflash import DFlashQwen3ForCausalLM
-else:
-    DFlashQwen3ForCausalLM = None
+from vllm_ascend.utils import enable_sp, lmhead_tp_enable, shared_expert_dp_enabled
 
 # Currently we will fix block size to a small one since `num_reqs` can't be too large
 _PREPARE_INPUTS_BLOCK_SIZE = 4
@@ -101,6 +97,7 @@ class AscendSpecDecodeBaseProposer(SpecDecodeBaseProposer):
         self.runner = runner
 
         self.use_async_scheduling = self.vllm_config.scheduler_config.async_scheduling
+        self.use_compress = hasattr(self.vllm_config.model_config.hf_config, "compress_ratios")
         self.pass_hidden_states_to_model = pass_hidden_states_to_model
         self.decode_threshold = 1 + self.num_speculative_tokens
         self.query_start_loc = self.runner._make_buffer(self.runner.max_num_reqs + 2, dtype=torch.int32)
@@ -215,7 +212,12 @@ class AscendSpecDecodeBaseProposer(SpecDecodeBaseProposer):
             AttentionLayerBase,  # type: ignore[type-abstract]
         )
         all_indexer_layer_names = set(get_layers_from_vllm_config(self.vllm_config, DeepseekV32IndexerCache).keys())
-        self._draft_attn_layer_names = set(all_attn_layers.keys()) - target_attn_layer_names - all_indexer_layer_names
+        # Filter to only layers that have KV cache specs.
+        self._draft_attn_layer_names = {
+            name
+            for name in (set(all_attn_layers.keys()) - target_attn_layer_names)
+            if all_attn_layers[name].get_kv_cache_spec(self.vllm_config) is not None
+        } - all_indexer_layer_names
 
         self.attn_layer_names = list(sorted(self._draft_attn_layer_names))
         draft_attn_layers_dict = get_layers_from_vllm_config(self.vllm_config, AttentionLayerBase)
@@ -249,6 +251,7 @@ class AscendSpecDecodeBaseProposer(SpecDecodeBaseProposer):
 
         # share embed_tokens with the target model if needed
         self._maybe_share_embeddings(target_language_model)
+        self._maybe_share_topk_indices(target_language_model)
         self._maybe_share_lm_head(model)
 
         if (
@@ -311,8 +314,9 @@ class AscendSpecDecodeBaseProposer(SpecDecodeBaseProposer):
                     )
             else:
                 # MTP model
-                share_embeddings = True
-                logger.info("Detected MTP model. Sharing target model embedding weights with the draft model.")
+                share_embeddings = not self.use_compress
+                if share_embeddings:
+                    logger.info("Detected MTP model. Sharing target model embedding weights with the draft model.")
 
             if share_embeddings:
                 if hasattr(self.model.model, "embed_tokens"):
@@ -344,22 +348,23 @@ class AscendSpecDecodeBaseProposer(SpecDecodeBaseProposer):
 
         if self.vllm_config.compilation_config.cudagraph_mode.has_full_cudagraphs() and self.use_cuda_graph:
             self.update_stream = torch.npu.Stream()
-            if self.method == "dflash":
-                self.model = ACLGraphWrapper(
-                    self.model,
-                    self.vllm_config,
-                    runtime_mode=CUDAGraphMode.FULL,
-                    use_eagle=self.use_eagle,
-                    enable_enpu=self.enable_enpu,
-                )
-            else:
-                self._runnable = ACLGraphWrapper(
-                    self._run_merged_draft,
-                    self.vllm_config,
-                    runtime_mode=CUDAGraphMode.FULL,
-                    use_eagle=self.use_eagle,
-                    enable_enpu=self.enable_enpu,
-                )
+            self._runnable = ACLGraphWrapper(
+                self._run_merged_draft,
+                self.vllm_config,
+                runtime_mode=CUDAGraphMode.FULL,
+                use_eagle=self.use_eagle,
+                enable_enpu=self.enable_enpu,
+            )
+
+    def _maybe_share_topk_indices(self, target_language_model: nn.Module) -> None:
+        if hasattr(target_language_model.model, "topk_indices_buffer"):
+            if hasattr(self.model.model, "topk_indices_buffer"):
+                del self.model.model.topk_indices_buffer
+            self.model.model.topk_indices_buffer = target_language_model.model.topk_indices_buffer
+            logger.info(
+                "Detecting MTP model with topk_indices_buffer."
+                "Sharing target model topk_indices_buffer with the draft model."
+            )
 
     def get_model(self) -> nn.Module:
         # get raw model out of the aclgraph wrapper.
@@ -371,6 +376,13 @@ class AscendSpecDecodeBaseProposer(SpecDecodeBaseProposer):
         # Currently, new objects will be assigned to the lists in attn_metadata
         # when update. So we can use the shallow copy.
         return copy.copy(attn_metadata)
+
+    def _freeze_draft_step_attn_metadata(self, attn_metadata):
+        decode_metadata = getattr(attn_metadata, "decode", None)
+        if decode_metadata is not None:
+            if decode_metadata.sas_metadata is not None:
+                decode_metadata.sas_metadata = decode_metadata.sas_metadata.clone()
+        return attn_metadata
 
     @torch.inference_mode()
     def dummy_run(
@@ -423,6 +435,7 @@ class AscendSpecDecodeBaseProposer(SpecDecodeBaseProposer):
                 query_start_loc=self.query_start_loc.gpu[: num_reqs + 1],
                 query_start_loc_cpu=self.query_start_loc.cpu[: num_reqs + 1],
                 seq_lens_cpu=self.runner.optimistic_seq_lens_cpu,
+                seq_lens_cpu_upper_bound=self.runner.optimistic_seq_lens_cpu,
                 seq_lens=self.runner.seq_lens[:num_reqs],
                 num_reqs=num_reqs,
                 num_actual_tokens=num_tokens,
@@ -630,6 +643,14 @@ class AscendSpecDecodeBaseProposer(SpecDecodeBaseProposer):
                 common_attn_metadata.seq_lens_cpu = self._adjust_tensor(
                     self.runner.optimistic_seq_lens_cpu, num_reqs_padded
                 )
+                # Keep the upstream-canonical mirror length-aligned with the
+                # padded subclass field, but only if the caller already
+                # populated it (production cm_base does; some unit-test mocks
+                # leave it None and assert it stays None). ``.clone()`` keeps
+                # the two fields independent so per-step in-place updates in
+                # ``attn_update_stack_num_spec_norm`` don't double-count.
+                if common_attn_metadata._seq_lens_cpu is not None:
+                    common_attn_metadata._seq_lens_cpu = common_attn_metadata.seq_lens_cpu.clone()
             if common_attn_metadata.num_computed_tokens_cpu is not None:
                 common_attn_metadata.num_computed_tokens_cpu = self._adjust_tensor(
                     common_attn_metadata.num_computed_tokens_cpu, num_reqs_padded
@@ -687,7 +708,15 @@ class AscendSpecDecodeBaseProposer(SpecDecodeBaseProposer):
         # FIXME(woosuk): The below two ops cause synchronization. Optimize.
         assert len(self.draft_attn_groups) > 0
         builder = self.draft_attn_groups[0].get_metadata_builder()
-        attn_metadata = builder.build(0, common_attn_metadata, self.runner.get_model())
+        extra_attn_metadata_args: dict = {}
+        if self.use_compress:
+            extra_attn_metadata_args = dict(
+                prefill_ratio_to_sas_metadata=dict(),
+                decode_ratio_to_sas_metadata=dict(),
+                common_ratio_to_sas_metadata=dict(),
+                block_size=self.draft_attn_groups[0].kv_cache_spec.block_size,
+            )
+        attn_metadata = builder.build(0, common_attn_metadata, self.runner.get_model(), **extra_attn_metadata_args)
 
         if hasattr(attn_metadata, "causal") and not attn_metadata.causal:
             attn_metadata.attn_mask = None
@@ -999,7 +1028,7 @@ class AscendSpecDecodeBaseProposer(SpecDecodeBaseProposer):
             # copy inputs to buffer for cudagraph
             self.input_ids[:batch_size] = input_ids
             self._set_positions(batch_size, clamped_positions)
-            self.hidden_states[:batch_size] = hidden_states
+            self.hidden_states[:batch_size] = hidden_states.view(batch_size, -1)
             if self.supports_mm_inputs:
                 self.inputs_embeds[:batch_size] = self.model.embed_input_ids(input_ids)
 
@@ -1122,7 +1151,10 @@ class AscendSpecDecodeBaseProposer(SpecDecodeBaseProposer):
                 if num_tokens_d:
                     # remove padding (from pcp all-gather) in decode part
                     mask_start_loc = torch.cat(
-                        [torch.tensor([0], dtype=torch.int32), torch.cumsum(query_lens_d * self.pcp_size, dim=0)[:-1]]
+                        [
+                            torch.tensor([0], dtype=torch.int32, device=query_lens_d.device),
+                            torch.cumsum(query_lens_d * self.pcp_size, dim=0)[:-1],
+                        ]
                     )
                     mask_len = query_lens_d
                     mask = []
@@ -1155,7 +1187,10 @@ class AscendSpecDecodeBaseProposer(SpecDecodeBaseProposer):
                     cad.num_actual_tokens = num_tokens
                     cad.max_query_len = max(self.decode_threshold, max_query_len_p)
                     cad.seq_lens[-num_prefill_reqs:] = seq_lens_p
-                    cad.seq_lens_cpu[-num_prefill_reqs:] = seq_lens_p
+                    if cad.seq_lens_cpu is not None:
+                        cad.seq_lens_cpu[-num_prefill_reqs:] = seq_lens_p
+                    if cad._seq_lens_cpu is not None:
+                        cad._seq_lens_cpu[-num_prefill_reqs:] = seq_lens_p
                     query_start_loc_p = cu_num_tokens_p[1:] + cad.query_start_loc[num_decode_reqs].item()
                     cad.query_start_loc[-num_prefill_reqs:] = query_start_loc_p
                     cad.query_start_loc_cpu[-num_prefill_reqs:] = query_start_loc_p
@@ -1165,7 +1200,7 @@ class AscendSpecDecodeBaseProposer(SpecDecodeBaseProposer):
                 target_positions = target_positions[0]
 
             self._set_positions(num_tokens, target_positions)
-            self.hidden_states[:num_tokens] = target_hidden_states
+            self.hidden_states[:num_tokens] = target_hidden_states.view(num_tokens, -1)
 
             return num_tokens, token_indices_to_sample, cad, (query_lens_d, ori_token_indices_to_sample)
         else:
@@ -1245,9 +1280,30 @@ class AscendSpecDecodeBaseProposer(SpecDecodeBaseProposer):
                 arange=self.arange,
                 new_slot_mapping=new_slot_mapping,
             )
-            # FIXME(klyzhenko-vadim): seq_lens_cpu is deprecated in vllm.
-            # Updating using .replace() does not work for seq_lens_cpu!
-            new_cad._seq_lens_cpu = new_cad.seq_lens.to("cpu")
+            # ``extend_all_queries_by_N`` adds N to every per-row GPU
+            # ``seq_lens`` but cannot touch the host-side mirrors (it
+            # only knows about upstream's deprecated ``_seq_lens_cpu``
+            # field; the Ascend subclass also has its own
+            # ``seq_lens_cpu`` field, which would be silently stale
+            # after the dataclass ``replace``).
+            #
+            # NPU attention backends (MLA, AscendAttention, SFA) read
+            # those CPU mirrors as kernel input, so they MUST be in
+            # sync with the GPU view. We compute the +N update on CPU
+            # to avoid an extra GPU->CPU sync (which was the original
+            # FIXME): every consumer that needs the post-extend value
+            # already had a valid pre-extend mirror, so a CPU-only
+            # ``+N`` keeps both in lock-step at zero device-side cost.
+            N = self.net_num_new_slots_per_request
+            if cad._seq_lens_cpu is not None:
+                new_cad._seq_lens_cpu = cad._seq_lens_cpu + N
+            elif cad.seq_lens_cpu is not None:
+                # Parent field absent but Ascend subclass field set:
+                # populate ``_seq_lens_cpu`` so upstream code paths
+                # that prefer the parent field still get a fresh value.
+                new_cad._seq_lens_cpu = cad.seq_lens_cpu + N
+            if cad.seq_lens_cpu is not None:
+                new_cad.seq_lens_cpu = cad.seq_lens_cpu + N
 
             return total_num_output_tokens, token_indices_to_sample, new_cad, None
 
@@ -1383,6 +1439,8 @@ class AscendSpecDecodeBaseProposer(SpecDecodeBaseProposer):
             # However, in vllm-ascend, the above value can be multiple of `kernel_block_size`,
             # which is not correct for computing `slot_mapping` below.
             block_size = self.kernel_block_size
+            if not isinstance(block_size, int) or self.use_compress:
+                block_size = 128
 
             # Compute the slot mapping.
             if self.uses_mrope:
@@ -1419,10 +1477,24 @@ class AscendSpecDecodeBaseProposer(SpecDecodeBaseProposer):
 
         attn_metadata_builder = attn_group.get_metadata_builder()
 
-        attn_metadata = attn_metadata_builder.build_for_drafting(
-            common_attn_metadata=common_attn_metadata,
-            draft_index=draft_step,
-        )
+        if self.use_compress:
+            extra_attn_metadata_args = dict(
+                prefill_ratio_to_sas_metadata=dict(),
+                decode_ratio_to_sas_metadata=dict(),
+                common_ratio_to_sas_metadata=dict(),
+                block_size=self.draft_attn_groups[0].kv_cache_spec.block_size,
+            )
+            attn_metadata = attn_metadata_builder.build_for_drafting(
+                draft_step,
+                common_attn_metadata,
+                **extra_attn_metadata_args,
+            )
+        else:
+            attn_metadata = attn_metadata_builder.build(
+                0,
+                common_attn_metadata,
+                self.runner.get_model(),
+            )
 
         if self.pcp_size * self.dcp_size > 1:
             if self.vllm_config.model_config.use_mla:
@@ -1526,7 +1598,14 @@ class AscendSpecDecodeBaseProposer(SpecDecodeBaseProposer):
 
         device = common_attn_metadata.query_start_loc.device
         query_start_loc_cpu = common_attn_metadata.query_start_loc_cpu[: num_actual_reqs + 1]
-        seq_lens_cpu = common_attn_metadata.seq_lens_cpu[:num_actual_reqs]
+        # Prefer the upstream-canonical ``_seq_lens_cpu``; fall back to the
+        # Ascend subclass field. In async-spec mode the model runner only
+        # populates ``_seq_lens_cpu`` (optimistic_seq_lens_cpu) and leaves
+        # ``seq_lens_cpu`` as None, so an unguarded read here would crash.
+        if common_attn_metadata._seq_lens_cpu is not None:
+            seq_lens_cpu = common_attn_metadata._seq_lens_cpu[:num_actual_reqs]
+        else:
+            seq_lens_cpu = common_attn_metadata.seq_lens_cpu[:num_actual_reqs]
         new_seq_lens_cpu = seq_lens_cpu - num_rejected_tokens
 
         # [0, q1, q1 + q2, q1 + q2 + q3] -> [q1, q2, q3]
@@ -1577,12 +1656,18 @@ class AscendSpecDecodeBaseProposer(SpecDecodeBaseProposer):
         # NOTE: Currently positions and seq_lens are not used in attn forward
         # so we do not need to fixed them. But if they are used in the future,
         # we should fixed them.
+        # Mirror ``new_seq_lens_cpu`` into the upstream-canonical
+        # ``_seq_lens_cpu`` slot so consumers preferring the parent field
+        # (e.g. attention_cp builder) see the rejection-adjusted value.
         spec_common_attn_metadata = AscendCommonAttentionMetadata(
             query_start_loc=new_query_start_loc_cpu.to(device, non_blocking=True),
             query_start_loc_cpu=new_query_start_loc_cpu,
             seq_lens=new_seq_lens_cpu.to(device, non_blocking=True),
             seq_lens_cpu=new_seq_lens_cpu,
+            _seq_lens_cpu=new_seq_lens_cpu,
             num_computed_tokens_cpu=common_attn_metadata.num_computed_tokens_cpu,
+            _num_computed_tokens_cpu=common_attn_metadata._num_computed_tokens_cpu,
+            seq_lens_cpu_upper_bound=new_seq_lens_cpu,
             num_reqs=common_attn_metadata.num_reqs,
             num_actual_tokens=total_num_tokens,
             num_input_tokens=common_attn_metadata.num_input_tokens,
@@ -1591,6 +1676,9 @@ class AscendSpecDecodeBaseProposer(SpecDecodeBaseProposer):
             slot_mapping=common_attn_metadata.slot_mapping,
             actual_seq_lengths_q=self.runner.actual_seq_lengths_q,
             positions=common_attn_metadata.positions[token_indices],
+            positions_cpu=common_attn_metadata.positions_cpu[token_indices]
+            if common_attn_metadata.positions_cpu is not None
+            else None,
             attn_state=self.runner.attn_state,
             decode_token_per_req=self.runner.decode_token_per_req,
             max_seq_len=0,
@@ -1657,10 +1745,19 @@ class AscendSpecDecodeBaseProposer(SpecDecodeBaseProposer):
         # NOTE: Currently positions and seq_lens are not used in attn forward
         # so we do not need to fixed them. But if they are used in the future,
         # we should fixed them.
+        # ``prepare_inputs_padded`` does not change ``seq_lens`` (rejected
+        # tokens are kept as padding and filtered out later). Pass through
+        # both the subclass ``seq_lens_cpu`` field and the upstream-canonical
+        # ``_seq_lens_cpu`` field unchanged. In async-spec mode only the
+        # latter is populated (subclass field is None to signal "GPU is
+        # authoritative"); dropping ``_seq_lens_cpu`` here causes downstream
+        # backends (e.g. attention_cp) to crash on a None subscript.
         spec_common_attn_metadata = AscendCommonAttentionMetadata(
             query_start_loc=common_attn_metadata.query_start_loc,
             query_start_loc_cpu=query_start_loc_cpu,
             seq_lens_cpu=common_attn_metadata.seq_lens_cpu,
+            _seq_lens_cpu=common_attn_metadata._seq_lens_cpu,
+            seq_lens_cpu_upper_bound=common_attn_metadata.seq_lens_cpu_upper_bound,
             num_reqs=common_attn_metadata.num_reqs,
             num_actual_tokens=common_attn_metadata.num_actual_tokens if self.pcp_size > 1 else total_num_tokens,
             num_input_tokens=common_attn_metadata.num_input_tokens,
@@ -1669,9 +1766,11 @@ class AscendSpecDecodeBaseProposer(SpecDecodeBaseProposer):
             block_table_tensor=common_attn_metadata.block_table_tensor,
             slot_mapping=common_attn_metadata.slot_mapping,
             positions=common_attn_metadata.positions,
+            positions_cpu=common_attn_metadata.positions_cpu,
             attn_state=self.runner.attn_state,
             decode_token_per_req=self.runner.decode_token_per_req,
             num_computed_tokens_cpu=common_attn_metadata.num_computed_tokens_cpu,
+            _num_computed_tokens_cpu=common_attn_metadata._num_computed_tokens_cpu,
             seq_lens=common_attn_metadata.seq_lens,
             max_seq_len=0,
         )
@@ -1791,7 +1890,9 @@ class AscendSpecDecodeBaseProposer(SpecDecodeBaseProposer):
                 last_hidden_states = torch.ops.vllm.maybe_all_gather_and_maybe_unpad(
                     last_hidden_states.contiguous(), True
                 )
-                positions = torch.ops.vllm.maybe_all_gather_and_maybe_unpad(positions.contiguous(), True)
+                # in mm model, positions not need allgather, because it not reduced before(see maybe_pad_and_reduce())
+                if not self.is_multimodal_model:
+                    positions = torch.ops.vllm.maybe_all_gather_and_maybe_unpad(positions.contiguous(), True)
                 if hidden_states is not None:
                     hidden_states = last_hidden_states
         else:
