@@ -58,6 +58,7 @@ from vllm.utils.system_utils import (
 )
 from vllm.v1.core.sched.output import GrammarOutput, SchedulerOutput
 from vllm.v1.executor.abstract import Executor, FailureCallback
+from vllm.v1.executor.multiproc_executor import WorkerProc
 from vllm.v1.outputs import AsyncModelRunnerOutput, DraftTokenIds, ModelRunnerOutput
 from vllm.v1.worker.worker_base import WorkerWrapperBase
 
@@ -79,4 +80,4 @@ def enqueue_output(self, output: Any):
     if (response_mq := self.worker_response_mq) is not None:
         response_mq.enqueue(result)
 
-vllm.v1.executor.multiproc_executor.WorkerProc.enqueue_output = enqueue_output
+WorkerProc.enqueue_output = enqueue_output

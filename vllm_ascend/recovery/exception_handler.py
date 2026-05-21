@@ -8,11 +8,11 @@ from vllm_ascend.recovery.types import ExceptionInfo, RecoveryAction, RecoverySt
 class ExceptionHandler(ABC):
     
     @abstractmethod
-    def can_handle(self, exception: Exception) -> bool:
+    def can_handle(self, exception: ExceptionInfo) -> bool:
         pass
 
     @abstractmethod
-    def generate_plan(self, exception: Exception) -> RecoveryPlan:
+    def generate_plan(self, exception: ExceptionInfo, vllm_config: VllmConfig) -> RecoveryPlan:
         pass
 
 class NetworkExceptionHandler(ExceptionHandler):
@@ -88,7 +88,7 @@ class ExceptionHandlerFactory:
     def _register_handler(self, handler: ExceptionHandler) -> None:
         self.handlers.append(handler)
 
-    def get_handler(self, exception: Exception) -> ExceptionHandler:
+    def get_handler(self, exception: ExceptionInfo) -> ExceptionHandler:
         for handler in self.handlers:
             if handler.can_handle(exception):
                 return handler
