@@ -29,7 +29,7 @@ from vllm_ascend.worker.v1.sample.context import V1MappingContext
 
 
 class LogitsProcessor:
-    """Configurable logits processing pipeline for the v1 sampler adapter.
+    """Configurable logits processing pipeline for the GPU sampler bridge.
 
     The default pipeline follows the upstream sampler stage order while
     directly calling upstream sampling ops:
@@ -274,8 +274,8 @@ class LogitsProcessor:
             else:
                 raise NotImplementedError(
                     f"{type(processor).__name__} does not support expanded logits "
-                    "in V1SamplerAdapter. Add a mapping-aware implementation before "
-                    "enabling this processor on the adapter path."
+                    "in GpuSamplerBridge. Add a mapping-aware implementation before "
+                    "enabling this processor on the bridge path."
                 )
         return logits
 

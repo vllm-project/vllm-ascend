@@ -13,10 +13,15 @@
 # limitations under the License.
 # This file is a part of the vllm-ascend project.
 
+from types import SimpleNamespace
+
 import numpy as np
 import torch
 from vllm.v1.outputs import SamplerOutput
 from vllm.v1.sample.metadata import SamplingMetadata
+from vllm.v1.spec_decode.metadata import SpecDecodeMetadata
+from vllm.v1.worker.gpu.sample.output import SamplerOutput as GpuSamplerOutput
+from vllm.v1.worker.gpu.spec_decode.rejection_sampler import RejectionSampler as GpuRejectionSampler
 
 from vllm_ascend.ascend_config import SamplingConfig
 from vllm_ascend.worker.v1.sample.context import V1MappingContext
@@ -28,13 +33,12 @@ _UINT64_MODULUS = 2**64
 _PLACEHOLDER_TOKEN_ID = -1
 
 
-class V1SamplerAdapter:
-    """Bridges v1 model runner's _sample() to the new sampling pipeline
-    with Ascend-optimized kernels.
+class GpuSamplerBridge:
+    """Bridges the old v1 runner to the worker.gpu sampling interfaces.
 
-    Usage: Created in NPUModelRunner.__init__() when sampling_config enables
-           the optimization. Called from NPUModelRunner._sample() instead of
-           self.sampler().
+    ``sample_from_v1`` is the old model-runner entry point. ``__call__`` and
+    ``apply_sampling_params`` are the sampler facade expected by
+    ``vllm.v1.worker.gpu.spec_decode.rejection_sampler.RejectionSampler``.
     """
 
     def __init__(
@@ -44,6 +48,7 @@ class V1SamplerAdapter:
         device: torch.device,
         logprobs_mode: str = "raw_logprobs",
         num_speculative_tokens: int = 1,
+        spec_config=None,
         sampling_config: SamplingConfig | None = None,
     ):
         self._max_num_reqs = max_num_reqs
@@ -51,13 +56,20 @@ class V1SamplerAdapter:
         self._device = device
         self._logprobs_mode = logprobs_mode
         self._num_speculative_tokens = num_speculative_tokens
+        self._spec_config = spec_config
         self._sampling_config = sampling_config or SamplingConfig()
         self._request_seeds: dict[str, int] = {}
+        self.logprobs_mode = logprobs_mode
+        self.compute_nans = False
+        self.sampling_states = None
+        self._active_sampling_metadata: SamplingMetadata | None = None
+        self._active_ctx: V1MappingContext | None = None
+        self._active_processed_logits: torch.Tensor | None = None
 
         # Logits processing pipeline
         self._logits_processor = LogitsProcessor(self._sampling_config.logits_processing_mode)
 
-    def __call__(
+    def sample_from_v1(
         self,
         logits: torch.Tensor,  # [num_logits, vocab_size]
         sampling_metadata: SamplingMetadata,
@@ -66,9 +78,10 @@ class V1SamplerAdapter:
         input_ids: torch.Tensor,  # [num_logits]
         req_indices: torch.Tensor,  # [num_logits]
         req_ids: tuple[str, ...] | None = None,
+        spec_decode_metadata: SpecDecodeMetadata | None = None,
+        draft_logits: torch.Tensor | None = None,
     ) -> SamplerOutput:
-        """Main entry point. Replaces self.sampler(logits, sampling_metadata)."""
-
+        """Model-runner entry point. Replaces self.sampler(logits, metadata)."""
         # 1. Build mapping context from v1 data
         ctx = V1MappingContext.from_v1_logits(
             num_reqs=num_reqs,
@@ -78,6 +91,15 @@ class V1SamplerAdapter:
             device=self._device,
             req_ids=req_ids,
         )
+
+        if spec_decode_metadata is not None:
+            return self._sample_spec_decode(
+                logits,
+                sampling_metadata,
+                spec_decode_metadata,
+                ctx,
+                draft_logits,
+            )
 
         # 2. Logits processing (mode-controlled pipeline)
         processed_logits = self._logits_processor.apply(
@@ -105,6 +127,168 @@ class V1SamplerAdapter:
             sampled_token_ids=sampled_token_ids,
             logprobs_tensors=logprobs_tensors,
         )
+
+    def _sample_spec_decode(
+        self,
+        logits: torch.Tensor,
+        sampling_metadata: SamplingMetadata,
+        spec_decode_metadata: SpecDecodeMetadata,
+        ctx: V1MappingContext,
+        draft_logits: torch.Tensor | None,
+    ) -> SamplerOutput:
+        if ctx.cu_num_logits_np is None:
+            raise ValueError("speculative decoding requires grouped logits rows")
+        expected_counts = np.asarray(
+            [num_draft_tokens + 1 for num_draft_tokens in spec_decode_metadata.num_draft_tokens],
+            dtype=np.int32,
+        )
+        if not np.array_equal(ctx.num_logits_per_req_np, expected_counts):
+            raise ValueError("speculative logits-row mapping does not match spec decode metadata")
+        spec_config = self._spec_config or SimpleNamespace(
+            num_speculative_tokens=self._num_speculative_tokens,
+            rejection_sample_method="strict",
+            synthetic_acceptance_rates=None,
+        )
+        rejection_sample_method = getattr(spec_config, "rejection_sample_method", "strict")
+        if rejection_sample_method == "probabilistic" and draft_logits is None:
+            raise NotImplementedError(
+                "probabilistic rejection sampling requires draft logits from the drafter."
+            )
+
+        self._activate_gpu_sampler(
+            sampling_metadata,
+            ctx,
+            disable_gpu_logprobs=rejection_sample_method == "probabilistic",
+        )
+        try:
+            rejection_sampler = GpuRejectionSampler(self, spec_config, self._device)
+            input_batch = _GpuRejectionInputBatch.from_context(ctx)
+            output = rejection_sampler(logits, input_batch, draft_logits)
+            sampled_token_ids = self._mask_unsampled_tokens(
+                output.sampled_token_ids,
+                output.num_sampled,
+            )
+            logprobs_tensors = output.logprobs_tensors
+            if rejection_sample_method == "probabilistic":
+                if self._active_processed_logits is None:
+                    raise RuntimeError("probabilistic rejection sampling did not process logits")
+                sampled_for_logprobs = self._flatten_sampled_token_ids(
+                    sampled_token_ids,
+                    output.num_sampled,
+                    ctx,
+                )
+                logprobs_tensors = self._compute_logprobs(
+                    logits,
+                    self._active_processed_logits,
+                    sampled_for_logprobs,
+                    sampling_metadata,
+                    ctx,
+                )
+        finally:
+            self._deactivate_gpu_sampler()
+        return SamplerOutput(
+            sampled_token_ids=sampled_token_ids.to(torch.int32),
+            logprobs_tensors=logprobs_tensors,
+        )
+
+    def __call__(
+        self,
+        logits: torch.Tensor,
+        input_batch: "_GpuRejectionInputBatch",
+    ) -> GpuSamplerOutput:
+        sampling_metadata, _ = self._active_gpu_sampler_state()
+        ctx = self._ctx_from_input_batch(input_batch)
+        processed_logits = self.apply_sampling_params(
+            logits,
+            input_batch.expanded_idx_mapping,
+            input_batch.idx_mapping_np,
+            input_batch.positions[input_batch.logits_indices],
+            input_batch.input_ids[input_batch.logits_indices],
+            input_batch.expanded_local_pos,
+        )
+        sampled = self._sample(processed_logits, sampling_metadata, ctx)
+        logprobs_tensors = self._compute_logprobs(
+            logits,
+            processed_logits,
+            sampled,
+            sampling_metadata,
+            ctx,
+        )
+        return GpuSamplerOutput(
+            sampled_token_ids=sampled.view(-1, 1).to(torch.int32),
+            logprobs_tensors=logprobs_tensors,
+            num_nans=None,
+            num_sampled=torch.ones(ctx.num_reqs, dtype=torch.int32, device=logits.device),
+        )
+
+    def apply_sampling_params(
+        self,
+        logits: torch.Tensor,
+        expanded_idx_mapping: torch.Tensor,
+        idx_mapping_np: np.ndarray,
+        pos: torch.Tensor,
+        input_ids: torch.Tensor,
+        expanded_local_pos: torch.Tensor,
+    ) -> torch.Tensor:
+        sampling_metadata, active_ctx = self._active_gpu_sampler_state()
+        del idx_mapping_np
+        ctx = V1MappingContext.from_v1_logits(
+            num_reqs=active_ctx.num_reqs,
+            positions_at_logits=pos,
+            input_ids_at_logits=input_ids,
+            req_indices_at_logits=expanded_idx_mapping,
+            device=logits.device,
+            req_ids=active_ctx.req_ids,
+            expanded_local_pos=expanded_local_pos,
+            cu_num_logits_np=active_ctx.cu_num_logits_np,
+        )
+        processed_logits = self._logits_processor.apply(
+            logits,
+            sampling_metadata,
+            ctx,
+            self._num_speculative_tokens,
+        )
+        self._active_processed_logits = processed_logits
+        return processed_logits
+
+    def _ctx_from_input_batch(self, input_batch: "_GpuRejectionInputBatch") -> V1MappingContext:
+        _, active_ctx = self._active_gpu_sampler_state()
+        return V1MappingContext.from_v1_logits(
+            num_reqs=active_ctx.num_reqs,
+            positions_at_logits=input_batch.positions[input_batch.logits_indices],
+            input_ids_at_logits=input_batch.input_ids[input_batch.logits_indices],
+            req_indices_at_logits=input_batch.expanded_idx_mapping,
+            device=input_batch.expanded_idx_mapping.device,
+            req_ids=active_ctx.req_ids,
+            expanded_local_pos=input_batch.expanded_local_pos,
+            cu_num_logits_np=active_ctx.cu_num_logits_np,
+        )
+
+    def _activate_gpu_sampler(
+        self,
+        sampling_metadata: SamplingMetadata,
+        ctx: V1MappingContext,
+        disable_gpu_logprobs: bool = False,
+    ) -> None:
+        self._active_sampling_metadata = sampling_metadata
+        self._active_ctx = ctx
+        self.sampling_states = _GpuSamplingStatesBridge(
+            self,
+            sampling_metadata,
+            ctx,
+            disable_gpu_logprobs,
+        )
+
+    def _deactivate_gpu_sampler(self) -> None:
+        self._active_sampling_metadata = None
+        self._active_ctx = None
+        self._active_processed_logits = None
+        self.sampling_states = None
+
+    def _active_gpu_sampler_state(self) -> tuple[SamplingMetadata, V1MappingContext]:
+        if self._active_sampling_metadata is None or self._active_ctx is None:
+            raise RuntimeError("GpuSamplerBridge is not active for a worker.gpu sampler call")
+        return self._active_sampling_metadata, self._active_ctx
 
     def _sample(
         self,
@@ -170,6 +354,44 @@ class V1SamplerAdapter:
         output[ctx.expanded_idx_mapping.to(torch.long), ctx.expanded_local_pos.to(torch.long)] = sampled
         return output
 
+    @staticmethod
+    def _mask_unsampled_tokens(
+        sampled_token_ids: torch.Tensor,
+        num_sampled: torch.Tensor,
+    ) -> torch.Tensor:
+        steps = torch.arange(
+            sampled_token_ids.shape[1],
+            device=sampled_token_ids.device,
+            dtype=torch.long,
+        )
+        valid_mask = steps.unsqueeze(0) < num_sampled.to(
+            device=sampled_token_ids.device,
+            dtype=torch.long,
+        ).unsqueeze(1)
+        return sampled_token_ids.masked_fill(~valid_mask, _PLACEHOLDER_TOKEN_ID)
+
+    @staticmethod
+    def _flatten_sampled_token_ids(
+        sampled_token_ids: torch.Tensor,
+        num_sampled: torch.Tensor,
+        ctx: V1MappingContext,
+    ) -> torch.Tensor:
+        req_indices = ctx.expanded_idx_mapping.to(
+            device=sampled_token_ids.device,
+            dtype=torch.long,
+        )
+        local_pos = ctx.expanded_local_pos.to(
+            device=sampled_token_ids.device,
+            dtype=torch.long,
+        )
+        num_sampled_per_row = num_sampled.to(
+            device=sampled_token_ids.device,
+            dtype=torch.long,
+        )[req_indices]
+        valid_mask = local_pos < num_sampled_per_row
+        sampled = sampled_token_ids[req_indices, local_pos]
+        return torch.where(valid_mask, sampled, torch.zeros_like(sampled))
+
     def _compute_seeds(
         self,
         sampling_metadata: SamplingMetadata,
@@ -219,34 +441,33 @@ class V1SamplerAdapter:
         sampling_metadata: SamplingMetadata,
         ctx: V1MappingContext,
     ):
-        """Compute top-k logprobs if requested."""
+        """Compute logprobs/logits tensors if requested."""
         from vllm.v1.outputs import LogprobsTensors
 
         max_num_logprobs = sampling_metadata.max_num_logprobs
-        if max_num_logprobs is None:
+        logprob_token_ids = getattr(sampling_metadata, "logprob_token_ids", None)
+        if max_num_logprobs is None and not logprob_token_ids:
             return None
 
-        # Select logits source based on logprobs_mode
-        if self._logprobs_mode in ("processed_logprobs", "processed_logits"):
-            logits_for_logprobs = processed_logits
-        else:  # "raw_logprobs"
-            logits_for_logprobs = raw_logits
+        logprob_values_source = self._logprob_values_source(raw_logits, processed_logits)
+        if logprob_token_ids:
+            return self._gather_specific_token_logprobs(
+                logprob_values_source,
+                logprob_token_ids,
+                sampled,
+                ctx,
+            )
 
         if max_num_logprobs == -1:
-            # Return the full unsorted and unranked logprobs.
-            raw_logprobs = logits_for_logprobs.log_softmax(dim=-1, dtype=torch.float32)
             return LogprobsTensors(
-                torch.empty(0, device=raw_logprobs.device, dtype=torch.int32),
-                raw_logprobs,
-                torch.empty(0, device=raw_logprobs.device, dtype=torch.int32),
+                torch.empty(0, device=logprob_values_source.device, dtype=torch.int32),
+                logprob_values_source,
+                torch.empty(0, device=logprob_values_source.device, dtype=torch.int32),
                 ctx.cu_num_logits_np.tolist() if ctx.expanded_logits else None,
             )
 
         if max_num_logprobs < 0:
             return None
-
-        # Compute log softmax for the raw/processed logits
-        logprobs = logits_for_logprobs.log_softmax(dim=-1, dtype=torch.float32)
 
         # Use int64 for indexing (required by gather), convert to int32 later
         sampled_int64 = sampled.to(torch.int64)
@@ -254,15 +475,15 @@ class V1SamplerAdapter:
 
         # Get top-k logprobs. max_num_logprobs == 0 returns sampled-token-only
         # logprobs, matching upstream v1 semantics.
-        topk_logprobs, topk_indices = torch.topk(logprobs, max_num_logprobs, dim=-1)
-        sampled_logprobs = logprobs.gather(-1, sampled_token_ids)
+        topk_logprobs, topk_indices = torch.topk(logprob_values_source, max_num_logprobs, dim=-1)
+        sampled_logprobs = logprob_values_source.gather(-1, sampled_token_ids)
 
         logprob_token_ids = torch.cat([sampled_token_ids, topk_indices], dim=1)
         logprob_values = torch.cat([sampled_logprobs, topk_logprobs], dim=1)
 
         # Compute token ranks
-        sampled_logits = logits_for_logprobs.gather(-1, sampled_token_ids)
-        token_ranks = (logits_for_logprobs >= sampled_logits).sum(dim=-1)
+        sampled_values = logprob_values_source.gather(-1, sampled_token_ids)
+        token_ranks = (logprob_values_source >= sampled_values).sum(dim=-1)
 
         return LogprobsTensors(
             logprob_token_ids=logprob_token_ids.to(torch.int32),
@@ -270,3 +491,112 @@ class V1SamplerAdapter:
             selected_token_ranks=token_ranks,
             cu_num_generated_tokens=ctx.cu_num_logits_np.tolist() if ctx.expanded_logits else None,
         )
+
+    def _logprob_values_source(
+        self,
+        raw_logits: torch.Tensor,
+        processed_logits: torch.Tensor,
+    ) -> torch.Tensor:
+        if self._logprobs_mode == "raw_logits":
+            return raw_logits.to(dtype=torch.float32)
+        if self._logprobs_mode == "processed_logits":
+            return processed_logits.to(dtype=torch.float32)
+        if self._logprobs_mode == "processed_logprobs":
+            return processed_logits.log_softmax(dim=-1, dtype=torch.float32)
+        if self._logprobs_mode == "raw_logprobs":
+            return raw_logits.log_softmax(dim=-1, dtype=torch.float32)
+        raise NotImplementedError(f"Unsupported logprobs_mode: {self._logprobs_mode}")
+
+    def _gather_specific_token_logprobs(
+        self,
+        logprob_values_source: torch.Tensor,
+        logprob_token_ids: dict[int, list[int]],
+        sampled: torch.Tensor,
+        ctx: V1MappingContext,
+    ):
+        from vllm.v1.outputs import LogprobsTensors
+
+        max_num_tokens = max((len(token_ids) for token_ids in logprob_token_ids.values()), default=0)
+        width = max_num_tokens + 1
+        token_ids = torch.zeros(
+            (ctx.num_logits, width),
+            dtype=torch.int64,
+            device=logprob_values_source.device,
+        )
+        valid_mask = torch.zeros(
+            (ctx.num_logits, width),
+            dtype=torch.bool,
+            device=logprob_values_source.device,
+        )
+        token_ids[:, 0] = sampled.to(device=logprob_values_source.device, dtype=torch.int64)
+        valid_mask[:, 0] = True
+
+        for row, req_idx in enumerate(ctx.idx_mapping_np.tolist()):
+            req_token_ids = logprob_token_ids.get(req_idx)
+            if not req_token_ids:
+                continue
+            count = len(req_token_ids)
+            token_ids[row, 1 : count + 1] = torch.tensor(
+                req_token_ids,
+                dtype=torch.int64,
+                device=logprob_values_source.device,
+            )
+            valid_mask[row, 1 : count + 1] = True
+
+        values = logprob_values_source.gather(-1, token_ids)
+        values = values.masked_fill(~valid_mask, float("-inf"))
+        sampled_values = logprob_values_source.gather(-1, token_ids[:, :1])
+        token_ranks = (logprob_values_source >= sampled_values).sum(dim=-1)
+        return LogprobsTensors(
+            logprob_token_ids=token_ids.to(torch.int32),
+            logprobs=values,
+            selected_token_ranks=token_ranks,
+            cu_num_generated_tokens=ctx.cu_num_logits_np.tolist() if ctx.expanded_logits else None,
+        )
+
+
+class _GpuRejectionInputBatch(SimpleNamespace):
+    @classmethod
+    def from_context(cls, ctx: V1MappingContext) -> "_GpuRejectionInputBatch":
+        if ctx.cu_num_logits_np is None:
+            raise ValueError("cu_num_logits_np is required for speculative decoding")
+        device = ctx.expanded_idx_mapping.device
+        num_reqs = ctx.num_reqs
+        idx_mapping = torch.arange(num_reqs, device=device, dtype=torch.int32)
+        logits_indices = torch.arange(ctx.num_logits, device=device, dtype=torch.long)
+        cu_num_logits = torch.from_numpy(ctx.cu_num_logits_np).to(device=device, dtype=torch.int32)
+        return cls(
+            num_reqs=num_reqs,
+            idx_mapping=idx_mapping,
+            idx_mapping_np=np.arange(num_reqs, dtype=np.int32),
+            expanded_idx_mapping=ctx.expanded_idx_mapping,
+            expanded_local_pos=ctx.expanded_local_pos,
+            positions=ctx.pos,
+            input_ids=ctx.input_ids,
+            logits_indices=logits_indices,
+            cu_num_logits=cu_num_logits,
+            cu_num_logits_np=ctx.cu_num_logits_np,
+            seq_lens=torch.zeros(num_reqs, device=device, dtype=torch.int32),
+        )
+
+
+class _GpuSamplingStatesBridge:
+    def __init__(
+        self,
+        bridge: GpuSamplerBridge,
+        sampling_metadata: SamplingMetadata,
+        ctx: V1MappingContext,
+        disable_gpu_logprobs: bool = False,
+    ):
+        self.temperature = SimpleNamespace(
+            gpu=bridge._temperature_for_sampling(sampling_metadata, ctx)
+        )
+        self.seeds = SimpleNamespace(gpu=bridge._compute_seeds(sampling_metadata, ctx))
+        self._max_num_logprobs = sampling_metadata.max_num_logprobs
+        self._disable_gpu_logprobs = disable_gpu_logprobs
+
+    def max_num_logprobs(self, idx_mapping_np: np.ndarray) -> int:
+        del idx_mapping_np
+        if self._disable_gpu_logprobs:
+            return -1
+        return -1 if self._max_num_logprobs is None else self._max_num_logprobs

@@ -130,7 +130,7 @@ class TestNPUModelRunnerOutputTokenIds(unittest.TestCase):
         runner = self._build_runner()
         runner.input_batch = input_batch
         runner.sampler = MagicMock(return_value=MagicMock())
-        runner._v1_sampler_adapter = None
+        runner._gpu_sampler_bridge = None
 
         # Call sample method
         logits = torch.randn(2, 32000)
@@ -148,7 +148,7 @@ class TestNPUModelRunnerOutputTokenIds(unittest.TestCase):
         self.assertEqual(actual_output_token_ids[1], [4, 5, 7])
 
 
-class TestNPUModelRunnerV1SamplerAdapter(unittest.TestCase):
+class TestNPUModelRunnerGpuSamplerBridge(unittest.TestCase):
     def _build_runner(self):
         runner = NPUModelRunner.__new__(NPUModelRunner)
         sampling_metadata = SimpleNamespace(
@@ -165,7 +165,7 @@ class TestNPUModelRunnerV1SamplerAdapter(unittest.TestCase):
         runner.input_batch = input_batch
         runner.sampler = MagicMock(return_value="default-sampler-output")
         runner.rejection_sampler = MagicMock(return_value="rejection-sampler-output")
-        runner._v1_sampler_adapter = None
+        runner._gpu_sampler_bridge = None
         runner._positions_at_logits = torch.tensor([10, 11], dtype=torch.int64)
         runner._input_ids_at_logits = torch.tensor([101, 102], dtype=torch.int64)
         runner._req_indices_at_logits = torch.tensor([0, 1], dtype=torch.int32)
@@ -189,17 +189,19 @@ class TestNPUModelRunnerV1SamplerAdapter(unittest.TestCase):
         runner.rejection_sampler.assert_not_called()
 
     @patch("vllm_ascend.worker.model_runner_v1.lmhead_tp_enable")
-    def test_sample_uses_v1_adapter_for_non_spec_decode_when_enabled(self, mock_lmhead_tp_enable):
+    def test_sample_uses_gpu_bridge_for_non_spec_decode_when_enabled(self, mock_lmhead_tp_enable):
         mock_lmhead_tp_enable.return_value = False
         runner = self._build_runner()
-        runner._v1_sampler_adapter = MagicMock(return_value="adapter-output")
+        runner._gpu_sampler_bridge = SimpleNamespace(
+            sample_from_v1=MagicMock(return_value="bridge-output")
+        )
         logits = torch.randn(4, 8)
 
         output = runner._sample(logits=logits, spec_decode_metadata=None)
 
-        self.assertEqual(output, "adapter-output")
+        self.assertEqual(output, "bridge-output")
         runner.input_batch.update_async_output_token_ids.assert_called_once_with()
-        runner._v1_sampler_adapter.assert_called_once_with(
+        runner._gpu_sampler_bridge.sample_from_v1.assert_called_once_with(
             logits=logits,
             sampling_metadata=runner.input_batch.sampling_metadata,
             num_reqs=runner.input_batch.num_reqs,
@@ -207,27 +209,31 @@ class TestNPUModelRunnerV1SamplerAdapter(unittest.TestCase):
             input_ids=runner._input_ids_at_logits,
             req_indices=runner._req_indices_at_logits,
             req_ids=runner._req_ids_at_logits,
+            spec_decode_metadata=None,
+            draft_logits=None,
         )
         runner.sampler.assert_not_called()
         runner.rejection_sampler.assert_not_called()
 
     @patch("vllm_ascend.worker.model_runner_v1.lmhead_tp_enable")
-    def test_sample_truncates_lmhead_tp_logits_before_v1_adapter(self, mock_lmhead_tp_enable):
+    def test_sample_truncates_lmhead_tp_logits_before_gpu_bridge(self, mock_lmhead_tp_enable):
         mock_lmhead_tp_enable.return_value = True
         runner = self._build_runner()
-        runner._v1_sampler_adapter = MagicMock(return_value="adapter-output")
+        runner._gpu_sampler_bridge = SimpleNamespace(
+            sample_from_v1=MagicMock(return_value="bridge-output")
+        )
         logits = torch.randn(5, 8)
 
         output = runner._sample(logits=logits, spec_decode_metadata=None)
 
-        self.assertEqual(output, "adapter-output")
-        adapter_logits = runner._v1_sampler_adapter.call_args.kwargs["logits"]
-        self.assertEqual(adapter_logits.shape, (runner.input_batch.num_reqs, 8))
-        torch.testing.assert_close(adapter_logits, logits[: runner.input_batch.num_reqs])
+        self.assertEqual(output, "bridge-output")
+        bridge_logits = runner._gpu_sampler_bridge.sample_from_v1.call_args.kwargs["logits"]
+        self.assertEqual(bridge_logits.shape, (runner.input_batch.num_reqs, 8))
+        torch.testing.assert_close(bridge_logits, logits[: runner.input_batch.num_reqs])
         runner.sampler.assert_not_called()
 
     @patch("vllm_ascend.worker.model_runner_v1.lmhead_tp_enable")
-    def test_sample_updates_async_output_token_ids_before_v1_adapter(self, mock_lmhead_tp_enable):
+    def test_sample_updates_async_output_token_ids_before_gpu_bridge(self, mock_lmhead_tp_enable):
         mock_lmhead_tp_enable.return_value = False
         runner = self._build_runner()
         runner.input_batch.sampled_token_ids_cpu = torch.tensor([6, 7])
@@ -242,47 +248,54 @@ class TestNPUModelRunnerV1SamplerAdapter(unittest.TestCase):
             output_token_ids[0][-1] = sampled_ids[0]
             output_token_ids[1][-1] = sampled_ids[1]
 
-        def adapter_side_effect(**kwargs):
+        def bridge_side_effect(**kwargs):
             sampling_metadata = kwargs["sampling_metadata"]
             self.assertEqual(sampling_metadata.output_token_ids[0], [1, 2, 6])
             self.assertEqual(sampling_metadata.output_token_ids[1], [3, 7])
-            return "adapter-output"
+            return "bridge-output"
 
         runner.input_batch.update_async_output_token_ids.side_effect = update_output_token_ids
-        runner._v1_sampler_adapter = MagicMock(side_effect=adapter_side_effect)
+        runner._gpu_sampler_bridge = SimpleNamespace(
+            sample_from_v1=MagicMock(side_effect=bridge_side_effect)
+        )
 
         output = runner._sample(logits=torch.randn(2, 8), spec_decode_metadata=None)
 
-        self.assertEqual(output, "adapter-output")
+        self.assertEqual(output, "bridge-output")
         runner.input_batch.update_async_output_token_ids.assert_called_once_with()
-        runner._v1_sampler_adapter.assert_called_once()
+        runner._gpu_sampler_bridge.sample_from_v1.assert_called_once()
 
     @patch("vllm_ascend.worker.model_runner_v1.lmhead_tp_enable")
-    def test_sample_uses_v1_adapter_for_spec_decode_when_enabled(self, mock_lmhead_tp_enable):
+    def test_sample_uses_gpu_bridge_for_spec_decode_when_enabled(self, mock_lmhead_tp_enable):
         mock_lmhead_tp_enable.return_value = True
         runner = self._build_runner()
-        runner._v1_sampler_adapter = MagicMock(return_value="adapter-output")
+        runner._gpu_sampler_bridge = SimpleNamespace(
+            sample_from_v1=MagicMock(return_value="bridge-output")
+        )
         runner._positions_at_logits = torch.tensor([10, 11, 20], dtype=torch.int64)
         runner._input_ids_at_logits = torch.tensor([101, 102, 201], dtype=torch.int64)
         runner._req_indices_at_logits = torch.tensor([0, 0, 1], dtype=torch.int32)
+        runner.drafter = SimpleNamespace(draft_logits="draft-logits")
         spec_decode_metadata = SimpleNamespace(logits_indices=[0, 2, 4])
         logits = torch.randn(5, 8)
 
         output = runner._sample(logits=logits, spec_decode_metadata=spec_decode_metadata)
 
-        self.assertEqual(output, "adapter-output")
-        adapter_kwargs = runner._v1_sampler_adapter.call_args.kwargs
-        torch.testing.assert_close(adapter_kwargs["logits"], logits[:3])
-        self.assertIs(adapter_kwargs["sampling_metadata"], runner.input_batch.sampling_metadata)
-        self.assertEqual(adapter_kwargs["num_reqs"], runner.input_batch.num_reqs)
-        torch.testing.assert_close(adapter_kwargs["positions"], runner._positions_at_logits)
-        torch.testing.assert_close(adapter_kwargs["input_ids"], runner._input_ids_at_logits)
-        torch.testing.assert_close(adapter_kwargs["req_indices"], runner._req_indices_at_logits)
-        self.assertEqual(adapter_kwargs["req_ids"], runner._req_ids_at_logits)
+        self.assertEqual(output, "bridge-output")
+        bridge_kwargs = runner._gpu_sampler_bridge.sample_from_v1.call_args.kwargs
+        torch.testing.assert_close(bridge_kwargs["logits"], logits[:3])
+        self.assertIs(bridge_kwargs["sampling_metadata"], runner.input_batch.sampling_metadata)
+        self.assertEqual(bridge_kwargs["num_reqs"], runner.input_batch.num_reqs)
+        torch.testing.assert_close(bridge_kwargs["positions"], runner._positions_at_logits)
+        torch.testing.assert_close(bridge_kwargs["input_ids"], runner._input_ids_at_logits)
+        torch.testing.assert_close(bridge_kwargs["req_indices"], runner._req_indices_at_logits)
+        self.assertEqual(bridge_kwargs["req_ids"], runner._req_ids_at_logits)
+        self.assertIs(bridge_kwargs["spec_decode_metadata"], spec_decode_metadata)
+        self.assertEqual(bridge_kwargs["draft_logits"], "draft-logits")
         runner.sampler.assert_not_called()
         runner.rejection_sampler.assert_not_called()
 
-    def test_sample_tokens_caches_positions_and_input_ids_for_adapter(self):
+    def test_sample_tokens_caches_positions_and_input_ids_for_bridge(self):
         runner = NPUModelRunner.__new__(NPUModelRunner)
         runner.kv_connector_output = None
         runner.need_accepted_tokens = False
@@ -295,7 +308,7 @@ class TestNPUModelRunnerV1SamplerAdapter(unittest.TestCase):
         runner.use_async_scheduling = False
         runner.supports_mm_inputs = False
         runner.device = torch.device("cpu")
-        runner._v1_sampler_adapter = MagicMock()
+        runner._gpu_sampler_bridge = MagicMock()
         runner._sample = MagicMock(
             return_value=SamplerOutput(
                 sampled_token_ids=torch.tensor([[1], [2]], dtype=torch.int64),
@@ -355,7 +368,7 @@ class TestNPUModelRunnerV1SamplerAdapter(unittest.TestCase):
         )
         self.assertEqual(runner._req_ids_at_logits, ("req0", "req1"))
 
-    def test_sample_tokens_builds_spec_decode_request_mapping_for_adapter(self):
+    def test_sample_tokens_builds_spec_decode_request_mapping_for_bridge(self):
         runner = NPUModelRunner.__new__(NPUModelRunner)
         runner.kv_connector_output = None
         runner.need_accepted_tokens = False
@@ -368,7 +381,7 @@ class TestNPUModelRunnerV1SamplerAdapter(unittest.TestCase):
         runner.use_async_scheduling = False
         runner.supports_mm_inputs = False
         runner.device = torch.device("cpu")
-        runner._v1_sampler_adapter = MagicMock()
+        runner._gpu_sampler_bridge = MagicMock()
         runner._sample = MagicMock(
             return_value=SamplerOutput(
                 sampled_token_ids=torch.tensor(
@@ -450,7 +463,7 @@ class TestNPUModelRunnerV1SamplerAdapter(unittest.TestCase):
         runner.use_async_scheduling = False
         runner.supports_mm_inputs = False
         runner.device = torch.device("cpu")
-        runner._v1_sampler_adapter = MagicMock()
+        runner._gpu_sampler_bridge = MagicMock()
         runner._sample = MagicMock(
             return_value=SamplerOutput(
                 sampled_token_ids=torch.tensor(
@@ -523,7 +536,7 @@ class TestNPUModelRunnerV1SamplerAdapter(unittest.TestCase):
         runner.use_async_scheduling = False
         runner.supports_mm_inputs = False
         runner.device = torch.device("cpu")
-        runner._v1_sampler_adapter = MagicMock()
+        runner._gpu_sampler_bridge = MagicMock()
         runner.input_batch = SimpleNamespace(
             num_reqs=2,
             req_ids=["req0", "req1"],

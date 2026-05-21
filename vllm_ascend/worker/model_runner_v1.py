@@ -275,26 +275,27 @@ class NPUModelRunner(GPUModelRunner):
         self.dp_size = vllm_config.parallel_config.data_parallel_size
         self.dp_rank = vllm_config.parallel_config.data_parallel_rank
 
-        self.sampler = AscendSampler()
+        self.sampler = AscendSampler(logprobs_mode=self.model_config.logprobs_mode)
         self.attn_state: AscendAttentionState | None = None
 
         # Ascend-specific configurations
         self.ascend_config = get_ascend_config()
 
-        # V1 Sampler Adapter (opt-in via sampling_config)
-        self._v1_sampler_adapter = None
+        # GPU sampler bridge (opt-in via sampling_config)
+        self._gpu_sampler_bridge = None
         sc = self.ascend_config.sampling_config
         if sc.enable_sampling_optimization:
-            from vllm_ascend.worker.v1.sample.adapter import V1SamplerAdapter
+            from vllm_ascend.worker.v1.sample.adapter import GpuSamplerBridge
 
             num_spec_tokens = self.vllm_config.speculative_config.num_speculative_tokens \
                 if self.vllm_config.speculative_config else 0
-            self._v1_sampler_adapter = V1SamplerAdapter(
+            self._gpu_sampler_bridge = GpuSamplerBridge(
                 max_num_reqs=self.max_num_reqs,
                 vocab_size=self.model_config.get_vocab_size(),
                 device=self.device,
-                logprobs_mode="raw_logprobs",
+                logprobs_mode=self.model_config.logprobs_mode,
                 num_speculative_tokens=num_spec_tokens,
+                spec_config=self.vllm_config.speculative_config,
                 sampling_config=sc,
             )
         self._positions_at_logits: torch.Tensor | None = None
@@ -2034,13 +2035,13 @@ class NPUModelRunner(GPUModelRunner):
         # Clear ephemeral state.
         self.execute_model_state = None
 
-        # Store positions and input_ids for the V1SamplerAdapter
-        if self._v1_sampler_adapter is not None:
+        # Store positions and input_ids for the GpuSamplerBridge
+        if self._gpu_sampler_bridge is not None:
             num_logits = int(logits_indices.shape[0])
             req_indices_gpu = getattr(getattr(self, "req_indices", None), "gpu", None)
             if spec_decode_metadata is None and num_logits != self.input_batch.num_reqs and req_indices_gpu is None:
                 raise NotImplementedError(
-                    "V1SamplerAdapter needs an explicit logits-row to request mapping "
+                    "GpuSamplerBridge needs an explicit logits-row to request mapping "
                     "when a non-speculative step produces multiple logits per request."
                 )
             logits_indices_for_positions = logits_indices.to(device=positions.device, dtype=torch.long)
@@ -2247,15 +2248,15 @@ class NPUModelRunner(GPUModelRunner):
         sampling_metadata = self.input_batch.sampling_metadata
         self.input_batch.update_async_output_token_ids()
 
-        # Adapter path (opt-in via sampling_config)
-        if self._v1_sampler_adapter is not None:
+        # GPU sampler bridge path (opt-in via sampling_config)
+        if self._gpu_sampler_bridge is not None:
             if lmhead_tp_enable() and logits is not None:
                 assert self._req_indices_at_logits is not None
                 logits = logits[: int(self._req_indices_at_logits.shape[0])]
             assert self._positions_at_logits is not None
             assert self._input_ids_at_logits is not None
             assert self._req_indices_at_logits is not None
-            return self._v1_sampler_adapter(
+            return self._gpu_sampler_bridge.sample_from_v1(
                 logits=logits,
                 sampling_metadata=sampling_metadata,
                 num_reqs=self.input_batch.num_reqs,
@@ -2263,6 +2264,8 @@ class NPUModelRunner(GPUModelRunner):
                 input_ids=self._input_ids_at_logits,
                 req_indices=self._req_indices_at_logits,
                 req_ids=self._req_ids_at_logits,
+                spec_decode_metadata=spec_decode_metadata,
+                draft_logits=getattr(getattr(self, "drafter", None), "draft_logits", None),
             )
 
         # Default path (unchanged)
