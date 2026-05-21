@@ -15,7 +15,7 @@
 # This file is a part of the vllm-ascend project.
 #
 
-FROM quay.io/ascend/cann:9.0.0-910b-ubuntu22.04-py3.11
+FROM quay.io/ascend/cann:9.0.0-910b-ubuntu22.04-py3.12
 
 ARG PIP_INDEX_URL="https://mirrors.tuna.tsinghua.edu.cn/pypi/web/simple"
 ARG MOONCAKE_TAG="v0.3.8.post1"
@@ -41,9 +41,8 @@ RUN apt-get update -y && \
     rm -rf /var/cache/apt/* && \
     rm -rf /var/lib/apt/lists/*
 
-# Install modelscope (for fast download) and ray (for multinode)
-RUN pip config set global.index-url ${PIP_INDEX_URL} && \
-    python3 -m pip install modelscope 'ray>=2.47.1,<=2.48.0' 'protobuf>3.20.0' && \
+# Install memfabric_hybrid and memcache_hybrid via pip
+RUN python3 -m pip install memfabric_hybrid memcache_hybrid && \
     python3 -m pip cache purge
 
 # Install vLLM
