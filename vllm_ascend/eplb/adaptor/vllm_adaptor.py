@@ -22,7 +22,7 @@ import torch
 import torch.distributed as dist
 from vllm.logger import logger
 
-import vllm_ascend.envs as envs_ascend
+from vllm_ascend.ascend_config import get_ascend_config
 from vllm_ascend.quantization.methods.base import QuantType
 
 
@@ -75,12 +75,12 @@ class VllmEplbAdaptor:
                     "w13_weight_scale_fp32_list",
                     "w2_weight_scale_list",
                 ]
-                if envs_ascend.VLLM_ASCEND_ENABLE_FUSED_MC2 == 1:
+                if get_ascend_config().enable_fused_mc2 == 1:
                     self.expert_weight_names.append("fused_w1_scale_list")
                     self.expert_weight_names.append("fused_w2_scale_list")
 
             elif quant_type == QuantType.W4A8:
-                if envs_ascend.VLLM_ASCEND_ENABLE_FUSED_MC2 != 1:
+                if get_ascend_config().enable_fused_mc2 != 1:
                     raise ValueError("EPLB not support W4A8 with fused MC2 disabled")
                 self.expert_weight_names = [
                     "w13_weight_list",
