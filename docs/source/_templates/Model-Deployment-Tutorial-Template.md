@@ -47,7 +47,7 @@ Please refer to the [Supported Features List](../user_guide/support_matrix/suppo
 
 Please refer to the [Feature Guide](../user_guide/feature_guide/index.md) for feature configuration information.
 
-## 3 Environment Preparation
+## 3 Prerequisites
 
 ### 3.1 Model Weight
 
@@ -58,7 +58,7 @@ Please refer to the [Feature Guide](../user_guide/feature_guide/index.md) for fe
 - `DeepSeek-V3.2-Exp-W8A8` (Quantized version): requires 1 Atlas 800 A3 (64G × 16) node or 2 Atlas 800 A2 (64G × 8) nodes. [Model Weight](https://www.modelscope.cn/models/vllm-ascend/DeepSeek-V3.2-Exp-W8A8)
 - `DeepSeek-V3.2-w8a8` (Quantized version): requires 1 Atlas 800 A3 (64G × 16) node or 2 Atlas 800 A2 (64G × 8) nodes. [Model Weight](https://www.modelscope.cn/models/vllm-ascend/DeepSeek-V3.2-W8A8/)
 
-It is recommended to download the model weight to a shared directory across multiple nodes (e.g., `/root/.cache/`).
+It is recommended to download the model weight to a shared directory across multiple nodes.
 
 ### 3.2 Verify Multi-node Communication (Optional)
 
@@ -91,6 +91,7 @@ If multi-node deployment is required, please follow the [Verify Multi-node Commu
 - Describe the architectural characteristics and applicable scenarios of single-node deployment.
 - Provide startup command templates and key parameter descriptions.
 - Provide service verification methods (e.g., curl commands) and expected results, specifying success indicators (e.g., 200 OK).
+- Below the startup command, provide guidance on common issues; if already described in the public FAQ, a direct link may be provided.
 
 **Example:**
 
@@ -101,6 +102,8 @@ Startup Command:
 ```bash
 # Omitted
 ```
+
+Common Issues Tip: If you encounter XXX issues, please refer to the [Public FAQ](https://docs.vllm.ai/projects/ascend/en/latest/faqs.html) for troubleshooting.
 
 Service Verification:
 
@@ -117,6 +120,7 @@ Expected Result: Omitted (fill in according to actual output).
 - Describe the principles of PD separation architecture and applicable scenarios.
 - Provide startup procedures, key configurations, and **deployment verification instructions**.
 - Indicate performance metrics.
+- Below the startup command, provide guidance on common issues; if already described in the public FAQ, a direct link may be provided.
 
 **Example:** Omitted
 
@@ -212,12 +216,12 @@ The following optimizations are enabled by default and require no additional con
 
 **Example:**
 
-| Optimization Technique | Technical Principle | Enablement Method | Applicable Scenarios | Precautions |
-| --------- | --------- | --------- | --------- | --------- |
-| FlashComm_v1 | Decomposes traditional Allreduce into Reduce-Scatter and All-Gather, reducing RMSNorm computation dimensions | `export VLLM_ASCEND_ENABLE_FLASHCOMM1=1` | High-concurrency, Tensor Parallelism (TP) scenarios | Threshold protection: Only takes effect when the actual number of tokens exceeds the threshold to avoid performance degradation in low-concurrency scenarios |
-| Matmul-ReduceScatter Fusion | Fuses matrix multiplication and Reduce-Scatter operations to achieve pipelined parallel processing | Automatically enabled after enabling FlashComm_v1 | Large-scale distributed environments | Same as FlashComm_v1, has threshold protection |
-| Weight Prefetch | Utilizes vector computation time to prefetch MLP weights into L2 cache in advance | `export VLLM_ASCEND_ENABLE_PREFETCH_MLP=1` | MLP-intensive scenarios (Dense models) | Requires coordination with prefetch buffer size adjustment |
-| Asynchronous Scheduling | Non-blocking task scheduling to improve concurrent processing capability | `--async-scheduling` | Large-scale models, high-concurrency scenarios | Should be used in coordination with FullGraph optimization |
+| Optimization Technique | Applicable Scenarios | Enablement Method | Technical Principle | Precautions |
+| --------------------- | -------------------- | ----------------- | ------------------- | ----------- |
+| FlashComm_v1 | High-concurrency, Tensor Parallelism (TP) scenarios | `export VLLM_ASCEND_ENABLE_FLASHCOMM1=1` | Decomposes traditional Allreduce into Reduce-Scatter and All-Gather, reducing RMSNorm computation dimensions | Threshold protection: Only takes effect when the actual number of tokens exceeds the threshold to avoid performance degradation in low-concurrency scenarios |
+| Matmul-ReduceScatter Fusion | Large-scale distributed environments | Automatically enabled after enabling FlashComm_v1 | Fuses matrix multiplication and Reduce-Scatter operations to achieve pipelined parallel processing | Same as FlashComm_v1, has threshold protection |
+| Weight Prefetch | MLP-intensive scenarios (Dense models) | `export VLLM_ASCEND_ENABLE_PREFETCH_MLP=1` | Utilizes vector computation time to prefetch MLP weights into L2 cache in advance | Requires coordination with prefetch buffer size adjustment |
+| Asynchronous Scheduling | Large-scale models, high-concurrency scenarios | `--async-scheduling` | Non-blocking task scheduling to improve concurrent processing capability | Should be used in coordination with FullGraph optimization |
 
 ### 10.2 Optimization Highlights
 
@@ -233,4 +237,5 @@ During the actual tuning process, the following points are most critical for per
 
 **Content Writing Requirements:**
 
-Provide solutions to common problems, including but not limited to problem phenomenon description, cause analysis, and solution measures.
+- Add a note at the beginning of the section: For common environment, installation, and general parameter issues, please refer to the [Public FAQ](https://docs.vllm.ai/projects/ascend/en/latest/faqs.html); this chapter only covers model-specific issues.
+- For **model-specific issues**, provide the following elements: problem phenomenon description, cause analysis, and solution measures.

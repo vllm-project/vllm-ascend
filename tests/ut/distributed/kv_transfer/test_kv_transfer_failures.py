@@ -168,6 +168,28 @@ class TestRecordFailedBlocks(unittest.TestCase):
         self.assertEqual(result, set())
         mock_logger.error.assert_not_called()
 
+    @patch("vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.kv_transfer.logger")
+    def test_non_hybrid_single_block_semantics(self, mock_logger: MagicMock):
+        """Test non-hybrid callers still map one return code to one block."""
+        block_ids: list[int] = [10, 11, 12]
+        ret_codes: list[int] = [0, 1, 0]
+
+        result = record_failed_blocks(block_ids, ret_codes)
+
+        self.assertEqual(result, {11})
+        mock_logger.error.assert_called_once()
+
+    @patch("vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.kv_transfer.logger")
+    def test_hybrid_peer_blocks_fail_together(self, mock_logger: MagicMock):
+        """Test hybrid peer block sets are marked invalid together."""
+        block_ids: list[int | set[int]] = [{10, 20}, {11, 21}, {12, 22}]
+        ret_codes: list[int] = [0, 1, 0]
+
+        result = record_failed_blocks(block_ids, ret_codes)
+
+        self.assertEqual(result, {11, 21})
+        mock_logger.error.assert_called_once()
+
 
 class TestRecordFailedBlocksEdgeCases(unittest.TestCase):
     """Additional edge case tests for record_failed_blocks."""
