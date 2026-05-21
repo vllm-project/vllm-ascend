@@ -7,9 +7,14 @@ Usage:
   export LD_LIBRARY_PATH=/.../opp/vendors/custom_transformer/op_api/lib/:$LD_LIBRARY_PATH
   python test_aclnn_ctypes.py
 """
-import sys, os, ctypes, math
+
+import ctypes
+import os
+import sys
+
 import torch
 import torch_npu
+
 
 # ── Load CANN libs ──────────────────────────────────────────────
 def _find_lib(name):
@@ -22,6 +27,7 @@ def _find_lib(name):
         if os.path.isfile(p):
             return p
     return name  # let ctypes try default search
+
 
 _acl = ctypes.CDLL(_find_lib("libascendcl.so"))
 _nnop = ctypes.CDLL(_find_lib("libnnopbase.so"))
@@ -37,9 +43,15 @@ c_bool = ctypes.c_bool
 # aclCreateTensor is in libnnopbase, not libascendcl
 _nnop.aclCreateTensor.restype = c_void_p
 _nnop.aclCreateTensor.argtypes = [
-    ctypes.POINTER(c_int64), c_uint64, c_int,
-    ctypes.POINTER(c_int64), c_int64, c_int,
-    ctypes.POINTER(c_int64), c_uint64, c_void_p,
+    ctypes.POINTER(c_int64),
+    c_uint64,
+    c_int,
+    ctypes.POINTER(c_int64),
+    c_int64,
+    c_int,
+    ctypes.POINTER(c_int64),
+    c_uint64,
+    c_void_p,
 ]
 
 # aclDestroyTensor
@@ -66,13 +78,24 @@ if not _getws or not _exec:
 # GetWorkspaceSize(k,w,u, g,gk,init, outFS,chunkSz,saveNV, cuSeq,chunkIdx, exp2,transpose, h,vn,fs, wsSize,executor)
 _getws.restype = c_int
 _getws.argtypes = [
-    c_void_p, c_void_p, c_void_p,      # k, w, u
-    c_void_p, c_void_p, c_void_p,      # g, gk, initial_state
-    c_bool, c_int64, c_bool,            # output_final_state, chunk_size, save_new_value
-    c_void_p, c_void_p,                 # cu_seqlens, chunk_indices
-    c_bool, c_bool,                     # use_exp2, transpose_state_layout
-    c_void_p, c_void_p, c_void_p,      # h_out, v_new_out, final_state_out
-    ctypes.POINTER(c_uint64), ctypes.POINTER(c_void_p),  # ws_size, executor
+    c_void_p,
+    c_void_p,
+    c_void_p,  # k, w, u
+    c_void_p,
+    c_void_p,
+    c_void_p,  # g, gk, initial_state
+    c_bool,
+    c_int64,
+    c_bool,  # output_final_state, chunk_size, save_new_value
+    c_void_p,
+    c_void_p,  # cu_seqlens, chunk_indices
+    c_bool,
+    c_bool,  # use_exp2, transpose_state_layout
+    c_void_p,
+    c_void_p,
+    c_void_p,  # h_out, v_new_out, final_state_out
+    ctypes.POINTER(c_uint64),
+    ctypes.POINTER(c_void_p),  # ws_size, executor
 ]
 
 # Execute(workspace, ws_size, executor, stream)
@@ -81,11 +104,11 @@ _exec.argtypes = [c_void_p, c_uint64, c_void_p, c_void_p]
 
 # ── ACL dtype map ───────────────────────────────────────────────
 _DTYPE_MAP = {
-    torch.float16: 1,   # ACL_FLOAT16
-    torch.float32: 0,   # ACL_FLOAT
-    torch.int64: 9,     # ACL_INT64
-    torch.int32: 3,     # ACL_INT32
-    torch.bfloat16: 27, # ACL_BF16
+    torch.float16: 1,  # ACL_FLOAT16
+    torch.float32: 0,  # ACL_FLOAT
+    torch.int64: 9,  # ACL_INT64
+    torch.int32: 3,  # ACL_INT32
+    torch.bfloat16: 27,  # ACL_BF16
 }
 ACL_FORMAT_ND = 2
 ACL_MEM_MALLOC_HUGE_FIRST = 0
@@ -100,9 +123,15 @@ def _make_acl_tensor(t):
     storage_dim = c_int64(t.storage().nbytes() // t.element_size())
     storage_base = c_void_p(t.untyped_storage().data_ptr())
     return _nnop.aclCreateTensor(
-        shape, len(t.shape), _DTYPE_MAP[t.dtype],
-        strides, t.storage_offset(), ACL_FORMAT_ND,
-        ctypes.byref(storage_dim), 1, storage_base,
+        shape,
+        len(t.shape),
+        _DTYPE_MAP[t.dtype],
+        strides,
+        t.storage_offset(),
+        ACL_FORMAT_ND,
+        ctypes.byref(storage_dim),
+        1,
+        storage_base,
     )
 
 
@@ -129,8 +158,8 @@ def call_kernel(k, w, u, g, initial_state=None, chunk_size=64):
     buf = torch.empty(total, dtype=k.dtype, device=k.device)
 
     h_out = buf[:h_elems].view(B, HV, NT, K, V)
-    vn_out = buf[h_pad // k.element_size():][:vn_elems].view(B, HV, T, V)
-    fs_out = buf[h_pad // k.element_size() + vn_pad // k.element_size():][:1]
+    vn_out = buf[h_pad // k.element_size() :][:vn_elems].view(B, HV, T, V)
+    fs_out = buf[h_pad // k.element_size() + vn_pad // k.element_size() :][:1]
 
     # Create aclTensors
     acl_k = _make_acl_tensor(k)
@@ -149,12 +178,24 @@ def call_kernel(k, w, u, g, initial_state=None, chunk_size=64):
     ws_size = c_uint64(0)
     executor = c_void_p(None)
     ret = _getws(
-        acl_k, acl_w, acl_u,
-        acl_g, None, acl_init,
-        False, chunk_size, True,
-        None, None, False, False,
-        acl_h, acl_vn, acl_fs,
-        ctypes.byref(ws_size), ctypes.byref(executor),
+        acl_k,
+        acl_w,
+        acl_u,
+        acl_g,
+        None,
+        acl_init,
+        False,
+        chunk_size,
+        True,
+        None,
+        None,
+        False,
+        False,
+        acl_h,
+        acl_vn,
+        acl_fs,
+        ctypes.byref(ws_size),
+        ctypes.byref(executor),
     )
     assert ret == 0, f"GetWorkspaceSize failed: {ret}"
 
@@ -192,17 +233,17 @@ def cpu_reference(k, w, u, g, initial_state=None, chunk_size=64):
 
     for c in range(NT):
         t0 = c * chunk_size
-        W_chunk = w[:, :, t0:t0+chunk_size, :]
-        ws = torch.einsum('bhik,bhkv->bhiv', W_chunk, h)
-        g_chunk = g[:, :, t0:t0+chunk_size]
+        W_chunk = w[:, :, t0 : t0 + chunk_size, :]
+        ws = torch.einsum("bhik,bhkv->bhiv", W_chunk, h)
+        g_chunk = g[:, :, t0 : t0 + chunk_size]
         v_update = torch.zeros(B, HV, chunk_size, V)
         for i in range(chunk_size):
             gi_cum = g_chunk[:, :, -1] - g_chunk[:, :, i]
-            vn = u[:, :, t0+i, :] - ws[:, :, i, :]
-            v_new[:, :, t0+i, :] = vn
+            vn = u[:, :, t0 + i, :] - ws[:, :, i, :]
+            v_new[:, :, t0 + i, :] = vn
             v_update[:, :, i, :] = gi_cum.unsqueeze(-1).exp() * vn
-        K_chunk = k[:, :, t0:t0+chunk_size, :]
-        h_work = torch.einsum('bhik,bhiv->bhkv', K_chunk, v_update)
+        K_chunk = k[:, :, t0 : t0 + chunk_size, :]
+        h_work = torch.einsum("bhik,bhiv->bhkv", K_chunk, v_update)
         h = h * g_chunk[:, :, -1:].unsqueeze(-1).exp() + h_work
         h_chunks.append(h.clone())
     return h_chunks, v_new
@@ -236,8 +277,12 @@ def main():
 
     print("NPU kernel (aclnn via ctypes)...")
     h_out, vn_out = call_kernel(
-        k.npu(), w.npu(), u.npu(), g.npu(),
-        initial_state=init.npu(), chunk_size=CHUNK,
+        k.npu(),
+        w.npu(),
+        u.npu(),
+        g.npu(),
+        initial_state=init.npu(),
+        chunk_size=CHUNK,
     )
     torch.npu.synchronize()
     h_npu = h_out.cpu().float()
@@ -253,7 +298,7 @@ def main():
         npu = h_npu[0, :, c].flatten()
         c_val = cosine(npu, ref)
         mae = (npu - ref).abs().mean().item()
-        tag = "init" if c == 0 else f"after chunk {c-1}"
+        tag = "init" if c == 0 else f"after chunk {c - 1}"
         passed = c_val >= 0.999
         if not passed:
             ok = False

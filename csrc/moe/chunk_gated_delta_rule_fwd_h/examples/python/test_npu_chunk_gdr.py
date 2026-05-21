@@ -3,8 +3,10 @@ Precision test: chunk_gated_delta_rule_fwd_h on Ascend 310P.
 Uses the vllm-ascend Python API (chunk_gated_delta_rule_pytorch).
 Compares NPU fp16 vs CPU fp32 reference.
 """
-import sys
+
 import math
+import sys
+
 import torch
 import torch_npu
 
@@ -36,15 +38,29 @@ def run_test(label, B, T, Hqk, Hv, K, V, dtype=torch.float16):
 
     # CPU fp32 reference
     ref_out, ref_state = chunk_gated_delta_rule_pytorch(
-        q=q.float(), k=k.float(), v=v.float(), g=g.float(), beta=beta.float(),
-        initial_state=init.float(), output_final_state=True,
-        head_first=False, use_qk_l2norm_in_kernel=True)
+        q=q.float(),
+        k=k.float(),
+        v=v.float(),
+        g=g.float(),
+        beta=beta.float(),
+        initial_state=init.float(),
+        output_final_state=True,
+        head_first=False,
+        use_qk_l2norm_in_kernel=True,
+    )
 
     # NPU
     npu_out, npu_state = chunk_gated_delta_rule_pytorch(
-        q=q.to("npu"), k=k.to("npu"), v=v.to("npu"), g=g.to("npu"), beta=beta.to("npu"),
-        initial_state=init.to("npu"), output_final_state=True,
-        head_first=False, use_qk_l2norm_in_kernel=True)
+        q=q.to("npu"),
+        k=k.to("npu"),
+        v=v.to("npu"),
+        g=g.to("npu"),
+        beta=beta.to("npu"),
+        initial_state=init.to("npu"),
+        output_final_state=True,
+        head_first=False,
+        use_qk_l2norm_in_kernel=True,
+    )
     torch.npu.synchronize()
     npu_out = npu_out.cpu().float()
     npu_state = npu_state.cpu().float() if npu_state is not None else None
@@ -59,15 +75,15 @@ def run_test(label, B, T, Hqk, Hv, K, V, dtype=torch.float16):
 
 
 def main():
-    print(f"chunk_gated_delta_rule 310P precision test")
+    print("chunk_gated_delta_rule 310P precision test")
     print(f"Device: {torch_npu.npu.get_device_name(0)}")
     print()
 
     ok = True
-    ok &= run_test("small",        B=1, T=64,  Hqk=2, Hv=4, K=16,  V=16)
-    ok &= run_test("Qwen3 1chunk", B=1, T=64,  Hqk=4, Hv=8, K=192, V=128)
+    ok &= run_test("small", B=1, T=64, Hqk=2, Hv=4, K=16, V=16)
+    ok &= run_test("Qwen3 1chunk", B=1, T=64, Hqk=4, Hv=8, K=192, V=128)
     ok &= run_test("Qwen3 8chunk", B=1, T=512, Hqk=4, Hv=8, K=192, V=128)
-    ok &= run_test("batch=4",      B=4, T=128, Hqk=2, Hv=4, K=128, V=128)
+    ok &= run_test("batch=4", B=4, T=128, Hqk=2, Hv=4, K=128, V=128)
 
     print(f"\n{'PASS' if ok else 'FAIL'}")
     return 0 if ok else 1
