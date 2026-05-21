@@ -254,6 +254,68 @@ class TestGpuSamplerBridge(TestBase):
         finally:
             adapter._deactivate_gpu_sampler()
 
+    def test_activation_falls_back_when_uva_state_rejects_oot_platform(self):
+        from vllm.v1.worker.gpu.sample.states import SamplingStates
+
+        from vllm_ascend.worker.v1.sample.adapter import GpuSamplerBridge
+        from vllm_ascend.worker.v1.sample.context import V1MappingContext
+
+        adapter = GpuSamplerBridge(
+            max_num_reqs=3,
+            vocab_size=8,
+            device=torch.device("cpu"),
+            sampling_config=_enabled_sampling_config(),
+        )
+        ctx = V1MappingContext.from_v1_logits(
+            num_reqs=2,
+            positions_at_logits=torch.tensor([0, 1], dtype=torch.int64),
+            input_ids_at_logits=torch.tensor([10, 11], dtype=torch.int64),
+            req_indices_at_logits=torch.tensor([0, 1], dtype=torch.int32),
+            device=torch.device("cpu"),
+            req_ids=("req0", "req1"),
+        )
+
+        with patch.object(
+            SamplingStates,
+            "__init__",
+            side_effect=ValueError(
+                "`get_accelerator_view_from_cpu_tensor` is currently not supported in: npu"
+            ),
+        ):
+            adapter._activate_gpu_sampler(_metadata(max_num_logprobs=1), ctx)
+
+        try:
+            self.assertIsInstance(adapter.sampling_states, SamplingStates)
+            self.assertTrue(adapter._sampling_states_uva_unavailable)
+            torch.testing.assert_close(
+                adapter.sampling_states.temperature.gpu,
+                torch.ones(2, dtype=torch.float32),
+            )
+            self.assertEqual(adapter.sampling_states.top_k.gpu.tolist(), [8, 8])
+            self.assertEqual(adapter.sampling_states.top_p.gpu.tolist(), [1.0, 1.0])
+            self.assertIs(adapter._logits_processor._sampling_states, adapter.sampling_states)
+        finally:
+            adapter._deactivate_gpu_sampler()
+
+        self.assertIsNone(adapter._logits_processor._sampling_states)
+
+    def test_probabilistic_spec_config_rejects_drafters_without_logits(self):
+        from vllm_ascend.worker.v1.sample.adapter import GpuSamplerBridge
+
+        with self.assertRaisesRegex(ValueError, "requires a drafter that exposes draft_logits"):
+            GpuSamplerBridge(
+                max_num_reqs=2,
+                vocab_size=8,
+                device=torch.device("cpu"),
+                spec_config=SimpleNamespace(
+                    method="ngram",
+                    num_speculative_tokens=2,
+                    rejection_sample_method="probabilistic",
+                    synthetic_acceptance_rates=None,
+                ),
+                sampling_config=_enabled_sampling_config(),
+            )
+
     def test_probabilistic_spec_decode_requires_draft_logits(self):
         from vllm_ascend.worker.v1.sample.adapter import GpuSamplerBridge
 

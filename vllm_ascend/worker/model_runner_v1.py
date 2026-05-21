@@ -21,12 +21,13 @@ import math
 import sys
 import time
 from collections import defaultdict
+from collections.abc import Sequence
 from contextlib import contextmanager, nullcontext
 from copy import copy, deepcopy
 from dataclasses import dataclass, replace
 from functools import partial
 from multiprocessing import Manager
-from typing import TYPE_CHECKING, Any, NamedTuple, Sequence, TypeAlias
+from typing import TYPE_CHECKING, Any, NamedTuple, TypeAlias
 
 import numpy as np
 import torch
@@ -167,6 +168,16 @@ else:
 
 
 from vllm.model_executor.layers.attention import Attention, MLAAttention
+
+_PROBABILISTIC_DRAFT_LOGITS_METHODS = frozenset(
+    {
+        "draft_model",
+        "dflash",
+        "eagle",
+        "eagle3",
+        "mtp",
+    }
+)
 
 # if true, allow tensor initialization and casting with internal format (e.g., NZ)
 torch.npu.config.allow_internal_format = True
@@ -541,6 +552,7 @@ class NPUModelRunner(GPUModelRunner):
         self.actual_seq_lengths_q: list[int] = []
         self.decode_token_per_req = 1
         if self.speculative_config:
+            self._validate_probabilistic_rejection_config()
             spec_token_num = self.speculative_config.num_speculative_tokens
             assert spec_token_num > 0
             self.decode_token_per_req = 1 + spec_token_num
@@ -555,6 +567,19 @@ class NPUModelRunner(GPUModelRunner):
                 self.rejection_sampler = RejectionSampler(self.sampler)
         self.discard_request_indices = self._make_buffer(self.max_num_reqs, dtype=torch.int64)
         self.num_discarded_requests = 0
+
+    def _validate_probabilistic_rejection_config(self) -> None:
+        if getattr(self.speculative_config, "rejection_sample_method", "strict") != "probabilistic":
+            return
+        method = getattr(self.speculative_config, "method", None)
+        if method in _PROBABILISTIC_DRAFT_LOGITS_METHODS:
+            return
+        supported = ", ".join(sorted(_PROBABILISTIC_DRAFT_LOGITS_METHODS))
+        raise ValueError(
+            "probabilistic rejection sampling on Ascend requires a drafter "
+            f"that exposes draft_logits; got method={method!r}. "
+            f"Supported methods: {supported}."
+        )
 
     def _get_drafter(self):
         return get_spec_decode_method(self.speculative_config.method, self.vllm_config, self.device, self)

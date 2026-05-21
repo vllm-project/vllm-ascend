@@ -172,6 +172,25 @@ class TestNPUModelRunnerGpuSamplerBridge(unittest.TestCase):
         runner._req_ids_at_logits = ("req0", "req1")
         return runner
 
+    def test_probabilistic_rejection_rejects_drafters_without_logits(self):
+        runner = self._build_runner()
+        runner.speculative_config = SimpleNamespace(
+            method="ngram",
+            rejection_sample_method="probabilistic",
+        )
+
+        with self.assertRaisesRegex(ValueError, "requires a drafter that exposes draft_logits"):
+            runner._validate_probabilistic_rejection_config()
+
+    def test_probabilistic_rejection_allows_draft_logits_drafters(self):
+        runner = self._build_runner()
+        runner.speculative_config = SimpleNamespace(
+            method="eagle",
+            rejection_sample_method="probabilistic",
+        )
+
+        runner._validate_probabilistic_rejection_config()
+
     @patch("vllm_ascend.worker.model_runner_v1.lmhead_tp_enable")
     def test_sample_uses_default_sampler_when_sampling_optimization_disabled(self, mock_lmhead_tp_enable):
         mock_lmhead_tp_enable.return_value = False

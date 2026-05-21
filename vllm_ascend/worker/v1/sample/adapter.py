@@ -32,6 +32,31 @@ _NP_INT64_MIN = np.iinfo(np.int64).min
 _NP_INT64_MAX = np.iinfo(np.int64).max
 _UINT64_MODULUS = 2**64
 _PLACEHOLDER_TOKEN_ID = -1
+_PROBABILISTIC_DRAFT_LOGITS_METHODS = frozenset(
+    {
+        "draft_model",
+        "dflash",
+        "eagle",
+        "eagle3",
+        "mtp",
+    }
+)
+
+
+class _DeviceBackedStateTensor:
+    """Small SamplingStates-compatible tensor wrapper for non-UVA platforms."""
+
+    def __init__(self, size: int, dtype: torch.dtype, device: torch.device):
+        self.dtype = dtype
+        self.device = device
+        self.cpu = torch.zeros(size, dtype=dtype, device="cpu")
+        self.np = self.cpu.numpy()
+        self.gpu = torch.zeros(size, dtype=dtype, device=device)
+
+    def copy_to_uva(self, n: int | None = None) -> torch.Tensor:
+        values = self.cpu[:n] if n is not None else self.cpu
+        self.gpu = values.to(device=self.device, non_blocking=True)
+        return self.gpu
 
 
 class GpuSamplerBridge:
@@ -59,10 +84,12 @@ class GpuSamplerBridge:
         self._num_speculative_tokens = num_speculative_tokens
         self._spec_config = spec_config
         self._sampling_config = sampling_config or SamplingConfig()
+        self._validate_probabilistic_spec_config(spec_config)
         self._request_seeds: dict[str, int] = {}
         self.logprobs_mode = logprobs_mode
         self.compute_nans = False
         self.sampling_states = None
+        self._sampling_states_uva_unavailable = False
         self._active_sampling_metadata: SamplingMetadata | None = None
         self._active_ctx: V1MappingContext | None = None
         self._active_processed_logits: torch.Tensor | None = None
@@ -104,21 +131,25 @@ class GpuSamplerBridge:
                 draft_logits,
             )
 
-        # 2. Logits processing (mode-controlled pipeline)
-        processed_logits = self._logits_processor.apply(
-            logits,
-            sampling_metadata,
-            ctx,
-            self._num_speculative_tokens,
-        )
+        self._activate_gpu_sampler(sampling_metadata, ctx)
+        try:
+            # 2. Logits processing (mode-controlled pipeline)
+            processed_logits = self._logits_processor.apply(
+                logits,
+                sampling_metadata,
+                ctx,
+                self._num_speculative_tokens,
+            )
 
-        # 3. Sampling (Gumbel sampling with Ascend kernel)
-        sampled = self._sample(processed_logits, sampling_metadata, ctx)
+            # 3. Sampling (Gumbel sampling with Ascend kernel)
+            sampled = self._sample(processed_logits, sampling_metadata, ctx)
 
-        # 4. Logprobs computation
-        logprobs_tensors = self._compute_logprobs(
-            logits, processed_logits, sampled, sampling_metadata, ctx
-        )
+            # 4. Logprobs computation
+            logprobs_tensors = self._compute_logprobs(
+                logits, processed_logits, sampled, sampling_metadata, ctx
+            )
+        finally:
+            self._deactivate_gpu_sampler()
 
         # 5. Convert to int32 to match the upstream SamplerOutput dtype.
         #    _bookkeeping_sync uses sampled_token_ids_pinned_cpu which is int32.
@@ -282,12 +313,14 @@ class GpuSamplerBridge:
             ctx,
             disable_gpu_logprobs,
         )
+        self._logits_processor.set_sampling_states(self.sampling_states)
 
     def _deactivate_gpu_sampler(self) -> None:
         self._active_sampling_metadata = None
         self._active_ctx = None
         self._active_processed_logits = None
         self.sampling_states = None
+        self._logits_processor.set_sampling_states(None)
 
     def _active_gpu_sampler_state(self) -> tuple[SamplingMetadata, V1MappingContext]:
         if self._active_sampling_metadata is None or self._active_ctx is None:
@@ -302,20 +335,42 @@ class GpuSamplerBridge:
     ) -> SamplingStates:
         if ctx.num_reqs > self._max_num_reqs:
             raise ValueError("active request count exceeds GpuSamplerBridge capacity")
-        try:
-            states = SamplingStates(self._max_num_reqs, self._vocab_size)
-        except RuntimeError as exc:
-            if "UVA is not available" not in str(exc):
-                raise
-            states = SamplingStates.__new__(SamplingStates)
-            states.max_num_reqs = self._max_num_reqs
-            states.vocab_size = self._vocab_size
-            states.temperature = SimpleNamespace(gpu=None)
-            states.seeds = SimpleNamespace(gpu=None)
-            states.num_logprobs = np.empty(self._max_num_reqs, dtype=np.int32)
-            states.num_logprobs.fill(NO_LOGPROBS)
-        states.temperature.gpu = self._temperature_for_sampling(sampling_metadata, ctx)
-        states.seeds.gpu = self._compute_seeds(sampling_metadata, ctx)
+        if self._sampling_states_uva_unavailable:
+            states = self._new_device_backed_sampling_states()
+        else:
+            try:
+                states = SamplingStates(self._max_num_reqs, self._vocab_size)
+            except (RuntimeError, ValueError) as exc:
+                if not self._is_sampling_states_uva_unavailable(exc):
+                    raise
+                self._sampling_states_uva_unavailable = True
+                states = self._new_device_backed_sampling_states()
+
+        self._write_state_tensor(
+            states.temperature,
+            self._temperature_for_sampling(sampling_metadata, ctx),
+            ctx.num_reqs,
+        )
+        self._write_state_tensor(
+            states.seeds,
+            self._compute_seeds(sampling_metadata, ctx),
+            ctx.num_reqs,
+        )
+        self._write_state_tensor(
+            states.top_k,
+            self._top_k_for_sampling(sampling_metadata, ctx),
+            ctx.num_reqs,
+        )
+        self._write_state_tensor(
+            states.top_p,
+            self._top_p_for_sampling(sampling_metadata, ctx),
+            ctx.num_reqs,
+        )
+        self._write_state_tensor(
+            states.min_p,
+            self._min_p_for_sampling(sampling_metadata, ctx),
+            ctx.num_reqs,
+        )
 
         max_num_logprobs = sampling_metadata.max_num_logprobs
         if disable_gpu_logprobs or max_num_logprobs is None:
@@ -323,6 +378,52 @@ class GpuSamplerBridge:
         else:
             states.num_logprobs[: ctx.num_reqs] = int(max_num_logprobs)
         return states
+
+    @staticmethod
+    def _is_sampling_states_uva_unavailable(exc: Exception) -> bool:
+        message = str(exc)
+        return (
+            "UVA is not available" in message
+            or "`get_accelerator_view_from_cpu_tensor` is currently not supported" in message
+        )
+
+    def _new_device_backed_sampling_states(self) -> SamplingStates:
+        states = SamplingStates.__new__(SamplingStates)
+        states.max_num_reqs = self._max_num_reqs
+        states.vocab_size = self._vocab_size
+        states.temperature = _DeviceBackedStateTensor(self._max_num_reqs, torch.float32, self._device)
+        states.top_k = _DeviceBackedStateTensor(self._max_num_reqs, torch.int32, self._device)
+        states.top_p = _DeviceBackedStateTensor(self._max_num_reqs, torch.float32, self._device)
+        states.min_p = _DeviceBackedStateTensor(self._max_num_reqs, torch.float32, self._device)
+        states.seeds = _DeviceBackedStateTensor(self._max_num_reqs, torch.int64, self._device)
+        states.top_k.np.fill(self._vocab_size)
+        states.top_k.copy_to_uva()
+        states.top_p.np.fill(1.0)
+        states.top_p.copy_to_uva()
+        states.num_logprobs = np.empty(self._max_num_reqs, dtype=np.int32)
+        states.num_logprobs.fill(NO_LOGPROBS)
+        return states
+
+    @staticmethod
+    def _write_state_tensor(state_tensor, values: torch.Tensor, count: int) -> None:
+        values = values[:count].to(dtype=state_tensor.dtype)
+        state_tensor.np[:count] = values.detach().cpu().numpy()
+        state_tensor.gpu = values
+
+    @staticmethod
+    def _validate_probabilistic_spec_config(spec_config) -> None:
+        if spec_config is None:
+            return
+        if getattr(spec_config, "rejection_sample_method", "strict") != "probabilistic":
+            return
+        method = getattr(spec_config, "method", None)
+        if method is not None and method not in _PROBABILISTIC_DRAFT_LOGITS_METHODS:
+            supported = ", ".join(sorted(_PROBABILISTIC_DRAFT_LOGITS_METHODS))
+            raise ValueError(
+                "probabilistic rejection sampling on Ascend requires a drafter "
+                f"that exposes draft_logits; got method={method!r}. "
+                f"Supported methods: {supported}."
+            )
 
     def _sample(
         self,
@@ -333,11 +434,12 @@ class GpuSamplerBridge:
         """Sample tokens using Gumbel sampling with Ascend kernel."""
         from vllm_ascend.worker.v2.sample.gumbel import gumbel_sample
 
-        # Prepare temperature tensor on device
-        temp = self._temperature_for_sampling(sampling_metadata, ctx)
-
-        # Prepare seeds tensor
-        seeds = self._compute_seeds(sampling_metadata, ctx)
+        if self.sampling_states is not None:
+            temp = self.sampling_states.temperature.gpu
+            seeds = self.sampling_states.seeds.gpu
+        else:
+            temp = self._temperature_for_sampling(sampling_metadata, ctx)
+            seeds = self._compute_seeds(sampling_metadata, ctx)
 
         sampled = gumbel_sample(
             logits=logits,
@@ -366,6 +468,81 @@ class GpuSamplerBridge:
         if int(temperature.shape[0]) < ctx.num_reqs:
             raise ValueError("temperature must have at least one entry per active request")
         return temperature[:ctx.num_reqs].to(dtype=torch.float32)
+
+    def _top_k_for_sampling(
+        self,
+        sampling_metadata: SamplingMetadata,
+        ctx: V1MappingContext,
+    ) -> torch.Tensor:
+        top_k = self._request_param_or_default(
+            getattr(sampling_metadata, "top_k", None),
+            ctx,
+            default=self._vocab_size,
+            dtype=torch.int32,
+        )
+        vocab_size = torch.full_like(top_k, self._vocab_size)
+        return torch.where((top_k <= 0) | (top_k > self._vocab_size), vocab_size, top_k)
+
+    def _top_p_for_sampling(
+        self,
+        sampling_metadata: SamplingMetadata,
+        ctx: V1MappingContext,
+    ) -> torch.Tensor:
+        return self._request_param_or_default(
+            getattr(sampling_metadata, "top_p", None),
+            ctx,
+            default=1.0,
+            dtype=torch.float32,
+        )
+
+    def _min_p_for_sampling(
+        self,
+        sampling_metadata: SamplingMetadata,
+        ctx: V1MappingContext,
+    ) -> torch.Tensor:
+        min_p = self._request_param_or_default(
+            getattr(sampling_metadata, "min_p", None),
+            ctx,
+            default=0.0,
+            dtype=torch.float32,
+        )
+        logitsprocs = getattr(sampling_metadata, "logitsprocs", None)
+        if logitsprocs is None:
+            return min_p
+        for processor in getattr(logitsprocs, "argmax_invariant", ()):
+            if not (
+                hasattr(processor, "min_p_count")
+                and hasattr(processor, "get_min_p_by_index")
+            ):
+                continue
+            if processor.min_p_count <= 0:
+                continue
+            min_p = min_p.clone()
+            for req_idx in range(ctx.num_reqs):
+                min_p[req_idx] = float(processor.get_min_p_by_index(req_idx))
+            break
+        return min_p
+
+    def _request_param_or_default(
+        self,
+        value,
+        ctx: V1MappingContext,
+        default: int | float,
+        dtype: torch.dtype,
+    ) -> torch.Tensor:
+        if value is None:
+            return torch.full((ctx.num_reqs,), default, dtype=dtype, device=self._device)
+        if not isinstance(value, torch.Tensor):
+            value = torch.tensor(value, dtype=dtype, device=self._device)
+        elif value.device != self._device:
+            value = value.to(self._device)
+        if value.dtype != dtype:
+            value = value.to(dtype=dtype)
+        if value.ndim == 0:
+            return value.expand(ctx.num_reqs)
+        if int(value.shape[0]) < ctx.num_reqs:
+            raise ValueError("request parameter tensor must cover all active requests")
+        return value[:ctx.num_reqs]
 
     def _format_sampled_token_ids(
         self,

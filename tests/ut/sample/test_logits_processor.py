@@ -119,7 +119,7 @@ class TestLogitsProcessor(TestBase):
             ],
         )
 
-    def test_default_uses_upstream_sampling_ops_without_bridge_state(self):
+    def test_default_uses_upstream_sampler_orchestration_and_ops(self):
         from vllm_ascend.worker.v1.sample import logits_processor as logits_processor_module
         from vllm_ascend.worker.v1.sample.logits_processor import LogitsProcessor
 
@@ -151,7 +151,7 @@ class TestLogitsProcessor(TestBase):
             ),
         )
 
-        self.assertFalse(hasattr(processor, "_apply_sampling_params_bridge"))
+        self.assertTrue(hasattr(processor, "_apply_sampling_params_bridge"))
         with (
             patch.object(logits_processor_module, "_apply_bad_words_op") as bad_words,
             patch.object(
@@ -188,6 +188,88 @@ class TestLogitsProcessor(TestBase):
             processor._apply_temperature(logits, metadata, _ctx())
 
         temperature.assert_called_once()
+
+    def test_default_sampling_stages_use_active_sampling_states(self):
+        from vllm_ascend.worker.v1.sample.logits_processor import LogitsProcessor
+
+        calls = []
+
+        class MinPProcessor:
+            min_p_count = 1
+
+            @staticmethod
+            def get_min_p_by_index(req_idx):
+                return [0.0, 0.2][req_idx]
+
+            @staticmethod
+            def apply(_logits):
+                raise AssertionError("min_p should be applied through SamplingStates")
+
+        class FakeStates:
+            def apply_temperature(self, logits, expanded_idx_mapping, idx_mapping_np):
+                calls.append(("temperature", expanded_idx_mapping.tolist(), idx_mapping_np.tolist()))
+                logits.add_(1)
+
+            def apply_min_p(self, logits, expanded_idx_mapping, idx_mapping_np):
+                calls.append(("min_p", expanded_idx_mapping.tolist(), idx_mapping_np.tolist()))
+                logits.add_(2)
+
+            @staticmethod
+            def apply_top_k_top_p(logits, expanded_idx_mapping, idx_mapping_np):
+                calls.append(("top_k_top_p", expanded_idx_mapping.tolist(), idx_mapping_np.tolist()))
+                return logits + 3
+
+        processor = LogitsProcessor("default")
+        processor.set_sampling_states(FakeStates())
+        metadata = _metadata(
+            logitsprocs=SimpleNamespace(
+                argmax_invariant=[MinPProcessor()],
+                non_argmax_invariant=[],
+            )
+        )
+        logits = torch.zeros((3, 4), dtype=torch.float32)
+        ctx = _expanded_ctx()
+
+        processor._apply_temperature(logits, metadata, ctx)
+        processor._apply_argmax_invariant(logits, metadata, ctx)
+        output = processor._apply_top_k_top_p(logits, metadata, ctx)
+
+        torch.testing.assert_close(output, torch.full((3, 4), 6.0))
+        self.assertEqual(
+            calls,
+            [
+                ("temperature", [0, 0, 1], [0, 0, 1]),
+                ("min_p", [0, 0, 1], [0, 0, 1]),
+                ("top_k_top_p", [0, 0, 1], [0, 0, 1]),
+            ],
+        )
+
+    def test_penalty_state_tensors_are_built_on_device(self):
+        from vllm_ascend.worker.v1.sample.logits_processor import LogitsProcessor
+
+        processor = LogitsProcessor("default")
+        ctx = _ctx()
+        logits = torch.zeros((2, 40), dtype=torch.float32)
+
+        prompt_bin_mask, output_bin_counts = processor._build_penalty_state_tensors(
+            prompt_token_ids=torch.tensor(
+                [
+                    [0, 31, 32, 999],
+                    [1, 2, 3, 999],
+                ],
+                dtype=torch.int64,
+            ),
+            output_token_ids=[[2, 2, 39], [1, 1000]],
+            ctx=ctx,
+            logits=logits,
+        )
+
+        self.assertEqual(prompt_bin_mask.device, logits.device)
+        self.assertEqual(output_bin_counts.device, logits.device)
+        self.assertEqual(prompt_bin_mask.tolist(), [[-2147483647, 1], [14, 0]])
+        self.assertEqual(output_bin_counts[0, 2].item(), 2)
+        self.assertEqual(output_bin_counts[0, 39].item(), 1)
+        self.assertEqual(output_bin_counts[1, 1].item(), 1)
 
     def test_skip_returns_unprocessed_logits_and_warns_once(self):
         from vllm_ascend.worker.v1.sample import logits_processor as logits_processor_module

@@ -23,9 +23,183 @@ from vllm.v1.worker.gpu.sample.bad_words import apply_bad_words as _apply_bad_wo
 from vllm.v1.worker.gpu.sample.gumbel import apply_temperature as _apply_temperature
 from vllm.v1.worker.gpu.sample.min_p import apply_min_p as _apply_min_p
 from vllm.v1.worker.gpu.sample.penalties import apply_penalties as _apply_penalties_op
+from vllm.v1.worker.gpu.sample.sampler import Sampler as _GpuSampler
 from vllm.v1.worker.gpu.sample.states import apply_top_k_top_p as _apply_top_k_top_p
 
 from vllm_ascend.worker.v1.sample.context import V1MappingContext
+
+
+class _SamplingParamsBridge:
+    """Facade that lets the upstream GPU sampler drive Ascend state adapters."""
+
+    def __init__(self, processor: "LogitsProcessor"):
+        self._processor = processor
+
+    def apply(
+        self,
+        logits: torch.Tensor,
+        sampling_metadata: SamplingMetadata,
+        ctx: V1MappingContext,
+        num_speculative_tokens: int,
+    ) -> torch.Tensor:
+        facade = _GpuSamplerFacade(
+            logit_bias_state=_LogitBiasStateAdapter(self._processor, sampling_metadata, ctx),
+            penalties_state=_PenaltiesStateAdapter(self._processor, sampling_metadata, ctx),
+            bad_words_state=_BadWordsStateAdapter(self._processor, sampling_metadata, ctx),
+            sampling_states=_SamplingStatesAdapter(self._processor, sampling_metadata, ctx),
+            num_speculative_tokens=num_speculative_tokens,
+        )
+        return _GpuSampler.apply_sampling_params(
+            facade,
+            logits,
+            ctx.expanded_idx_mapping,
+            ctx.idx_mapping_np,
+            ctx.pos,
+            ctx.input_ids.to(device=logits.device, dtype=torch.int32),
+            ctx.expanded_local_pos,
+        )
+
+
+class _GpuSamplerFacade:
+    def __init__(
+        self,
+        logit_bias_state,
+        penalties_state,
+        bad_words_state,
+        sampling_states,
+        num_speculative_tokens: int,
+    ):
+        self.logit_bias_state = logit_bias_state
+        self.penalties_state = penalties_state
+        self.bad_words_state = bad_words_state
+        self.sampling_states = sampling_states
+        self.num_speculative_tokens = num_speculative_tokens
+
+
+class _LogitBiasStateAdapter:
+    def __init__(
+        self,
+        processor: "LogitsProcessor",
+        sampling_metadata: SamplingMetadata,
+        ctx: V1MappingContext,
+    ):
+        self._processor = processor
+        self._sampling_metadata = sampling_metadata
+        self._ctx = ctx
+
+    def apply_logit_bias(
+        self,
+        logits: torch.Tensor,
+        expanded_idx_mapping: torch.Tensor,
+        idx_mapping_np: np.ndarray,
+        pos: torch.Tensor,
+    ) -> None:
+        del expanded_idx_mapping, idx_mapping_np, pos
+        self._processor._apply_allowed_token_ids(logits, self._sampling_metadata, self._ctx)
+        updated_logits = self._processor._apply_non_argmax_invariant(
+            logits,
+            self._sampling_metadata,
+            self._ctx,
+        )
+        if updated_logits is not logits:
+            logits.copy_(updated_logits)
+
+
+class _PenaltiesStateAdapter:
+    def __init__(
+        self,
+        processor: "LogitsProcessor",
+        sampling_metadata: SamplingMetadata,
+        ctx: V1MappingContext,
+    ):
+        self._processor = processor
+        self._sampling_metadata = sampling_metadata
+        self._ctx = ctx
+
+    def apply_penalties(
+        self,
+        logits: torch.Tensor,
+        expanded_idx_mapping: torch.Tensor,
+        idx_mapping_np: np.ndarray,
+        input_ids: torch.Tensor,
+        expanded_local_pos: torch.Tensor,
+        num_speculative_tokens: int,
+    ) -> None:
+        del expanded_idx_mapping, idx_mapping_np, input_ids, expanded_local_pos
+        self._processor._apply_penalties(
+            logits,
+            self._sampling_metadata,
+            self._ctx,
+            num_speculative_tokens,
+        )
+
+
+class _BadWordsStateAdapter:
+    def __init__(
+        self,
+        processor: "LogitsProcessor",
+        sampling_metadata: SamplingMetadata,
+        ctx: V1MappingContext,
+    ):
+        self._processor = processor
+        self._sampling_metadata = sampling_metadata
+        self._ctx = ctx
+
+    def apply_bad_words(
+        self,
+        logits: torch.Tensor,
+        expanded_idx_mapping: torch.Tensor,
+        idx_mapping_np: np.ndarray,
+        input_ids: torch.Tensor,
+        expanded_local_pos: torch.Tensor,
+    ) -> None:
+        del expanded_idx_mapping, idx_mapping_np, input_ids, expanded_local_pos
+        self._processor._apply_bad_words(logits, self._sampling_metadata, self._ctx)
+
+
+class _SamplingStatesAdapter:
+    def __init__(
+        self,
+        processor: "LogitsProcessor",
+        sampling_metadata: SamplingMetadata,
+        ctx: V1MappingContext,
+    ):
+        self._processor = processor
+        self._sampling_metadata = sampling_metadata
+        self._ctx = ctx
+
+    def apply_temperature(
+        self,
+        logits: torch.Tensor,
+        expanded_idx_mapping: torch.Tensor,
+        idx_mapping_np: np.ndarray,
+    ) -> None:
+        del expanded_idx_mapping, idx_mapping_np
+        self._processor._apply_temperature(logits, self._sampling_metadata, self._ctx)
+
+    def apply_min_p(
+        self,
+        logits: torch.Tensor,
+        expanded_idx_mapping: torch.Tensor,
+        idx_mapping_np: np.ndarray,
+    ) -> None:
+        del expanded_idx_mapping, idx_mapping_np
+        updated_logits = self._processor._apply_argmax_invariant(
+            logits,
+            self._sampling_metadata,
+            self._ctx,
+        )
+        if updated_logits is not logits:
+            logits.copy_(updated_logits)
+
+    def apply_top_k_top_p(
+        self,
+        logits: torch.Tensor,
+        expanded_idx_mapping: torch.Tensor,
+        idx_mapping_np: np.ndarray,
+    ) -> torch.Tensor:
+        del expanded_idx_mapping, idx_mapping_np
+        return self._processor._apply_top_k_top_p(logits, self._sampling_metadata, self._ctx)
 
 
 class LogitsProcessor:
@@ -72,6 +246,11 @@ class LogitsProcessor:
     def __init__(self, mode: str):
         self.mode: str = mode  # "default" | "skip" | "fused"
         self._skip_warnings_issued: set[str] = set()
+        self._sampling_states = None
+        self._apply_sampling_params_bridge = _SamplingParamsBridge(self)
+
+    def set_sampling_states(self, sampling_states) -> None:
+        self._sampling_states = sampling_states
 
     def apply(
         self,
@@ -104,27 +283,12 @@ class LogitsProcessor:
         num_speculative_tokens: int,
     ) -> torch.Tensor:
         """Full logits processing pipeline using upstream v1 sampling ops."""
-        processed_logits = torch.empty_like(logits, dtype=torch.float32).copy_(logits)
-        self._apply_allowed_token_ids(processed_logits, sampling_metadata, ctx)
-        processed_logits = self._apply_non_argmax_invariant(
-            processed_logits,
-            sampling_metadata,
-            ctx,
-        )
-        self._apply_penalties(
-            processed_logits,
+        return self._apply_sampling_params_bridge.apply(
+            logits,
             sampling_metadata,
             ctx,
             num_speculative_tokens,
         )
-        self._apply_bad_words(processed_logits, sampling_metadata, ctx)
-        self._apply_temperature(processed_logits, sampling_metadata, ctx)
-        processed_logits = self._apply_argmax_invariant(
-            processed_logits,
-            sampling_metadata,
-            ctx,
-        )
-        return self._apply_top_k_top_p(processed_logits, sampling_metadata, ctx)
 
     def _apply_allowed_token_ids(self, logits, sampling_metadata, ctx):
         """Apply allowed token IDs whitelist masking."""
@@ -222,6 +386,13 @@ class LogitsProcessor:
 
     def _apply_temperature(self, logits, sampling_metadata, ctx):
         """Apply temperature scaling using Ascend Triton kernel."""
+        if self._sampling_states is not None:
+            self._sampling_states.apply_temperature(
+                logits,
+                ctx.expanded_idx_mapping,
+                ctx.idx_mapping_np,
+            )
+            return
         temp = sampling_metadata.temperature
         if temp is None:
             return
@@ -234,6 +405,19 @@ class LogitsProcessor:
         These include min_p and any custom argmax-invariant processors.
         Applied after temperature, same as the v1 Sampler.
         """
+        if self._sampling_states is not None:
+            logits = self._apply_logits_processors(
+                logits,
+                sampling_metadata.logitsprocs.argmax_invariant,
+                ctx,
+                skip_state_min_p=True,
+            )
+            self._sampling_states.apply_min_p(
+                logits,
+                ctx.expanded_idx_mapping,
+                ctx.idx_mapping_np,
+            )
+            return logits
         return self._apply_logits_processors(
             logits,
             sampling_metadata.logitsprocs.argmax_invariant,
@@ -242,6 +426,12 @@ class LogitsProcessor:
 
     def _apply_top_k_top_p(self, logits, sampling_metadata, ctx):
         """Apply top-k and top-p filtering using upstream op."""
+        if self._sampling_states is not None:
+            return self._sampling_states.apply_top_k_top_p(
+                logits,
+                ctx.expanded_idx_mapping,
+                ctx.idx_mapping_np,
+            )
         k = self._expand_optional_request_rows(sampling_metadata.top_k, ctx, logits.device)
         p = self._expand_optional_request_rows(sampling_metadata.top_p, ctx, logits.device)
         return _apply_top_k_top_p(logits, k, p)
@@ -251,13 +441,19 @@ class LogitsProcessor:
         logits: torch.Tensor,
         processors: Iterable,
         ctx: V1MappingContext,
+        skip_state_min_p: bool = False,
     ) -> torch.Tensor:
         for processor in processors:
+            use_state_min_p = skip_state_min_p and self._is_min_p_processor(processor)
             if ctx.is_identity_request_mapping:
+                if use_state_min_p:
+                    continue
                 logits = processor.apply(logits)
-            elif self._try_apply_min_p_processor(logits, processor, ctx):
-                continue
-            elif self._try_apply_logit_bias_processor(logits, processor, ctx):
+            elif (
+                use_state_min_p
+                or self._try_apply_min_p_processor(logits, processor, ctx)
+                or self._try_apply_logit_bias_processor(logits, processor, ctx)
+            ):
                 continue
             elif hasattr(processor, "apply_with_spec_decode"):
                 logits = processor.apply_with_spec_decode(
@@ -271,6 +467,10 @@ class LogitsProcessor:
                     "enabling this processor on the bridge path."
                 )
         return logits
+
+    @staticmethod
+    def _is_min_p_processor(processor) -> bool:
+        return hasattr(processor, "min_p_count") and hasattr(processor, "get_min_p_by_index")
 
     def _try_apply_min_p_processor(
         self,
@@ -329,25 +529,62 @@ class LogitsProcessor:
             raise ValueError("prompt_token_ids is required when penalties are active")
 
         vocab_size = int(logits.shape[-1])
-        prompt_bin_mask_np = np.zeros((ctx.num_reqs, (vocab_size + 31) // 32), dtype=np.int32)
-        prompt_rows = self._request_rows(prompt_token_ids, ctx, logits.device).detach().cpu().tolist()
-        for req_idx, tokens in enumerate(prompt_rows):
-            for token_id in tokens:
-                token_id = int(token_id)
-                if 0 <= token_id < vocab_size:
-                    prompt_bin_mask_np[req_idx, token_id // 32] |= 1 << (token_id % 32)
-
-        output_bin_counts_np = np.zeros((ctx.num_reqs, vocab_size), dtype=np.int32)
-        for req_idx, tokens in enumerate(output_token_ids[: ctx.num_reqs]):
-            for token_id in tokens:
-                token_id = int(token_id)
-                if 0 <= token_id < vocab_size:
-                    output_bin_counts_np[req_idx, token_id] += 1
-
-        return (
-            torch.from_numpy(prompt_bin_mask_np).to(device=logits.device),
-            torch.from_numpy(output_bin_counts_np).to(device=logits.device),
+        device = logits.device
+        prompt_rows = self._request_rows(prompt_token_ids, ctx, device).to(torch.long)
+        valid_prompt_tokens = (prompt_rows >= 0) & (prompt_rows < vocab_size)
+        safe_prompt_tokens = prompt_rows.masked_fill(~valid_prompt_tokens, 0)
+        prompt_token_mask = torch.zeros(
+            (ctx.num_reqs, vocab_size),
+            dtype=torch.bool,
+            device=device,
         )
+        prompt_row_indices = torch.arange(ctx.num_reqs, device=device).unsqueeze(1).expand_as(prompt_rows)
+        prompt_token_mask[
+            prompt_row_indices[valid_prompt_tokens],
+            safe_prompt_tokens[valid_prompt_tokens],
+        ] = True
+
+        padded_vocab_size = ((vocab_size + 31) // 32) * 32
+        if padded_vocab_size != vocab_size:
+            prompt_token_mask = torch.cat(
+                [
+                    prompt_token_mask,
+                    torch.zeros(
+                        (ctx.num_reqs, padded_vocab_size - vocab_size),
+                        dtype=torch.bool,
+                        device=device,
+                    ),
+                ],
+                dim=1,
+            )
+        bit_values = torch.bitwise_left_shift(
+            torch.ones(32, dtype=torch.int32, device=device),
+            torch.arange(32, dtype=torch.int32, device=device),
+        )
+        prompt_bin_mask = (
+            prompt_token_mask.view(ctx.num_reqs, -1, 32).to(torch.int32)
+            * bit_values.view(1, 1, 32)
+        ).sum(dim=-1, dtype=torch.int32)
+
+        output_bin_counts = torch.zeros(
+            (ctx.num_reqs, vocab_size),
+            dtype=torch.int32,
+            device=device,
+        )
+        for req_idx, tokens in enumerate(output_token_ids[: ctx.num_reqs]):
+            if not tokens:
+                continue
+            token_ids = torch.as_tensor(tokens, dtype=torch.long, device=device)
+            token_ids = token_ids[(token_ids >= 0) & (token_ids < vocab_size)]
+            if token_ids.numel() == 0:
+                continue
+            output_bin_counts[req_idx].scatter_add_(
+                0,
+                token_ids,
+                torch.ones_like(token_ids, dtype=torch.int32),
+            )
+
+        return prompt_bin_mask, output_bin_counts
 
     def _build_bad_words_state_tensors(
         self,
