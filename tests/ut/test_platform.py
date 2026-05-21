@@ -789,7 +789,6 @@ class TestNPUPlatform(TestBase):
 
     def test_balance_scheduler_and_recompute_scheduler_mutex_check(self):
         """Test that BalanceScheduler and RecomputeScheduler cannot be enabled simultaneously."""
-        from vllm_ascend.ascend_config import init_ascend_config
 
         # Mock vllm_config with both schedulers enabled
         mock_vllm_config = self.mock_vllm_config()
@@ -799,14 +798,13 @@ class TestNPUPlatform(TestBase):
         }
 
         # Should raise ValueError when both are enabled
-        with self.assertRaises(ValueError) as context:
-            with patch("vllm_ascend.platform.init_ascend_config") as mock_init:
-                mock_ascend_config = self.mock_vllm_ascend_config()
-                mock_ascend_config.enable_balance_scheduling = True
-                mock_ascend_config.recompute_scheduler_enable = True
-                mock_init.return_value = mock_ascend_config
+        with self.assertRaises(ValueError) as context, patch("vllm_ascend.platform.init_ascend_config") as mock_init:
+            mock_ascend_config = self.mock_vllm_ascend_config()
+            mock_ascend_config.enable_balance_scheduling = True
+            mock_ascend_config.recompute_scheduler_enable = True
+            mock_init.return_value = mock_ascend_config
 
-                self.platform.check_and_update_config(mock_vllm_config)
+            self.platform.check_and_update_config(mock_vllm_config)
 
         self.assertIn("cannot be enabled simultaneously", str(context.exception))
 
