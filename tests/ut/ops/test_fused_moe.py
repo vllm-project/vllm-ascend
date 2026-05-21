@@ -383,7 +383,9 @@ class TestAscendUnquantizedFusedMoEMethod:
         format_cast = MagicMock(side_effect=lambda weight, _: weight)
         maybe_trans_nz = MagicMock(side_effect=lambda weight: weight)
 
-        monkeypatch.setattr(fused_moe_module.envs_ascend, "VLLM_ASCEND_ENABLE_FUSED_MC2", enable_fused_mc2)
+        mock_ascend_config = MagicMock()
+        mock_ascend_config.enable_fused_mc2 = enable_fused_mc2
+        monkeypatch.setattr(fused_moe_module, "get_ascend_config", lambda: mock_ascend_config)
         monkeypatch.setattr(fused_moe_module.torch_npu, "npu_format_cast", format_cast)
         monkeypatch.setattr(fused_moe_module, "maybe_trans_nz", maybe_trans_nz)
 
