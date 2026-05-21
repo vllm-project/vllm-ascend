@@ -816,6 +816,8 @@ class TestNPUPlatform(TestBase):
         mock_vllm_config.additional_config = {
             "enable_balance_scheduling": True,
         }
+        # Configure valid kv_role for balance scheduling (kv_both or None)
+        mock_vllm_config.kv_transfer_config = None
 
         with patch("vllm_ascend.platform.init_ascend_config") as mock_init:
             mock_ascend_config = self.mock_vllm_ascend_config()
@@ -824,12 +826,7 @@ class TestNPUPlatform(TestBase):
             mock_init.return_value = mock_ascend_config
 
             # Should not raise any error
-            try:
-                self.platform.check_and_update_config(mock_vllm_config)
-            except ValueError as e:
-                # Only fail if it's the mutex check error
-                if "cannot be enabled simultaneously" in str(e):
-                    self.fail("BalanceScheduler alone should not raise mutex error")
+            self.platform.check_and_update_config(mock_vllm_config)
 
     def test_recompute_scheduler_alone_works(self):
         """Test that RecomputeScheduler alone works fine."""
@@ -837,6 +834,9 @@ class TestNPUPlatform(TestBase):
         mock_vllm_config.additional_config = {
             "recompute_scheduler_enable": True,
         }
+        # Configure valid kv_role for recompute scheduler (kv_producer or kv_consumer)
+        mock_vllm_config.kv_transfer_config = MagicMock()
+        mock_vllm_config.kv_transfer_config.kv_role = "kv_producer"
 
         with patch("vllm_ascend.platform.init_ascend_config") as mock_init:
             mock_ascend_config = self.mock_vllm_ascend_config()
@@ -845,9 +845,4 @@ class TestNPUPlatform(TestBase):
             mock_init.return_value = mock_ascend_config
 
             # Should not raise any error
-            try:
-                self.platform.check_and_update_config(mock_vllm_config)
-            except ValueError as e:
-                # Only fail if it's the mutex check error
-                if "cannot be enabled simultaneously" in str(e):
-                    self.fail("RecomputeScheduler alone should not raise mutex error")
+            self.platform.check_and_update_config(mock_vllm_config)
