@@ -40,6 +40,7 @@ from vllm_ascend.ops.fused_moe.moe_runtime_args import (
     MoETokenDispatchOutput,
     TMoECombineMetadata,
 )
+from vllm_ascend.quantization.quant_type import QuantType
 from vllm_ascend.utils import (
     AscendDeviceType,
     get_ascend_device_type,
@@ -254,7 +255,7 @@ class TokenDispatcherWithMC2(MoETokenDispatcher[MoEMC2CombineMetadata]):
                 tp_recv_counts=tp_recv_counts,
                 assist_info_for_combine=assist_info_for_combine,
                 expand_scales=expand_scales,
-                dispatch_with_quant=token_dispatch_input.quant.dispatch_with_quant,
+                quant=token_dispatch_input.quant,
                 mc2_mask=token_dispatch_input.routing.mc2_mask if self.global_bs == 0 else None,
             ),
         )
@@ -267,9 +268,18 @@ class TokenDispatcherWithMC2(MoETokenDispatcher[MoEMC2CombineMetadata]):
         tp_recv_counts = combine_metadata.tp_recv_counts
         assist_info_for_combine = combine_metadata.assist_info_for_combine
         expand_scales = combine_metadata.expand_scales
+        quant_type = combine_metadata.quant.quant_type
+        comm_quant_mode = combine_metadata.quant.comm_quant_mode
 
         assert expert_map is not None
-
+        # NOTE: quant_mode differs by quant features:
+        # - A5 MXFP communication uses quant_mode=4 only for MXFP8 currently.
+        if comm_quant_mode is not None:
+            quant_mode = comm_quant_mode
+        elif quant_type == QuantType.MXFP8:
+            quant_mode = 4
+        else:
+            quant_mode = 0
         kwargs_mc2 = {
             "expand_x": hidden_states,
             "expert_ids": topk_ids,
@@ -282,7 +292,7 @@ class TokenDispatcherWithMC2(MoETokenDispatcher[MoEMC2CombineMetadata]):
         if self.global_bs == 0:
             kwargs_mc2["x_active_mask"] = combine_metadata.mc2_mask
 
-        if combine_metadata.dispatch_with_quant:
+        if combine_metadata.quant.dispatch_with_quant:
             tp_recv_counts = torch.empty(1, dtype=torch.int32, device=hidden_states.device)
 
         stage3_kwargs = {
@@ -291,6 +301,7 @@ class TokenDispatcherWithMC2(MoETokenDispatcher[MoEMC2CombineMetadata]):
             "ep_world_size": self.ep_world_size,
             "ep_rank_id": self.ep_rank_id,
             "expand_scales": expand_scales,
+            "comm_quant_mode": quant_mode,
         }
 
         if self.enable_dispatch_v2:

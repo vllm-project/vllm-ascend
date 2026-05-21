@@ -183,6 +183,13 @@ class TestTokenDispatcherWithMC2(TestBase):
         tp_recv_counts = torch.tensor([0, 1, 2, 3, 4, 5, 6, 7])
         assist_info_for_combine = torch.arange(10)
 
+        token_dispatch_input = build_token_dispatch_input_fixture(
+            hidden_states=hidden_states,
+            topk_weights=topk_weights,
+            topk_ids=topk_ids,
+            expert_map=expert_map,
+        )
+
         combine_metadata = MoEMC2CombineMetadata(
             topk_ids=topk_ids,
             topk_weights=topk_weights,
@@ -191,7 +198,7 @@ class TestTokenDispatcherWithMC2(TestBase):
             tp_recv_counts=tp_recv_counts,
             assist_info_for_combine=assist_info_for_combine,
             expand_scales=None,
-            dispatch_with_quant=True,
+            quant=token_dispatch_input.quant,
         )
 
         self.dispatcher.need_extra_args = True
@@ -259,7 +266,7 @@ class TestTokenDispatcherWithMC2(TestBase):
 
         mock_dispatch.assert_called_once()
         self.assertIsNone(output.dynamic_scale)
-        self.assertFalse(output.combine_metadata.dispatch_with_quant)
+        self.assertFalse(output.combine_metadata.quant.dispatch_with_quant)
 
 
 class TestTokenDispatcherWithAllGather(TestBase):
