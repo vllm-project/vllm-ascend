@@ -336,7 +336,7 @@ class AscendDSACPMetadataBuilder(AttentionMetadataBuilder[AscendDSAMetadata]):
                 use_cache=not has_prefill)
 
         slot_mapping_size = self._get_slot_mapping_size(
-            self.compressor_ratio, num_reqs)
+            input_positions, self.compressor_ratio)
         slot_mapping = self.slot_mapping[:slot_mapping_size]
 
         # --- SAS metadata (all requests combined) ---
@@ -458,11 +458,11 @@ class AscendDSACPMetadataBuilder(AttentionMetadataBuilder[AscendDSAMetadata]):
             return None
         return self.cu_seqlens_cmp_kv
 
-    def _get_slot_mapping_size(self, compress_ratio, num_reqs):
+    def _get_slot_mapping_size(self, input_positions, compress_ratio):
         if compress_ratio <= 1:
             return self.num_actual_tokens
-        return min(self.num_actual_tokens,
-                   self.num_actual_tokens // compress_ratio + num_reqs)
+        mask = ((input_positions + 1) % compress_ratio) == 0
+        return mask.sum()
 
     # --- helper: build SAS metadata ---
     def _build_sas_metadata(self, num_heads, query_start_loc, seq_lens,
