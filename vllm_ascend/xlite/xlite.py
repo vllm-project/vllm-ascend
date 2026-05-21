@@ -33,7 +33,6 @@ from vllm.logger import logger
 from vllm.sequence import IntermediateTensors
 from xlite._C import AttnMeta, AttnMHA, Model, ModelConfig, Runtime, ScoringFuncSigmoid, ScoringFuncSoftmax
 
-import vllm_ascend.envs as envs_ascend
 from vllm_ascend.ascend_config import get_ascend_config
 from vllm_ascend.attention.attention_v1 import AscendAttentionState, AscendMetadata
 from vllm_ascend.xlite.utils import _get_nested_attr
@@ -199,7 +198,7 @@ class LlamaXliteModel(XliteModel):
         xlite_config.moe_tp_size = 1
 
         xlite_config.attn_type = AttnMHA
-        xlite_config.weight_nz = envs_ascend.VLLM_ASCEND_ENABLE_NZ == 2
+        xlite_config.weight_nz = get_ascend_config().weight_nz_mode == 2
         scheduler_config = vllm_config.scheduler_config
         max_batch_size = scheduler_config.max_num_seqs
         max_seq_len = vllm_config.model_config.max_model_len
@@ -517,6 +516,7 @@ class Glm4MoeXliteModel(LlamaXliteModel):
 
         layers, _ = self._get_layers_and_model_prefix()
         xlite_model = self.xlite_model
+        xlite_config = self.xlite_config
         xlite_model.gate = [
             weight for layer in layers if (weight := _get_nested_attr(layer, "mlp", "gate", "weight")) is not None
         ]
@@ -548,6 +548,82 @@ class Glm4MoeXliteModel(LlamaXliteModel):
             for w2_weight_i in w2_weight[: _get_nested_attr(layer, "mlp", "experts", "local_num_experts", default=0)]
         ]
 
+        if xlite_model.re_up_gate:
+            xlite_config.experts_weight_nz = self.is_tensor_nz(xlite_model.re_up_gate[0])
+
+
+class MiniMaxM2XliteModel(LlamaXliteModel):
+    """xlite adapter for MiniMax M2 architectures."""
+
+    def _build_model_config(self) -> None:
+        super()._build_model_config()
+
+        vllm_config = self.vllm_config
+        hf_config = self.hf_text_config
+        xlite_config = self.xlite_config
+
+        ep_group = get_ep_group()
+        xlite_config.rope_head_dim = hf_config.rotary_dim
+        xlite_config.n_dense_layers = 0
+        xlite_config.n_routed_experts = hf_config.num_local_experts
+        xlite_config.n_shared_experts = 0
+        xlite_config.n_act_experts = hf_config.num_experts_per_tok
+        xlite_config.def_dp_size = vllm_config.parallel_config.data_parallel_size
+        xlite_config.moe_ep_size = ep_group.world_size if vllm_config.parallel_config.enable_expert_parallel else 1
+        xlite_config.moe_tp_size = 1 if vllm_config.parallel_config.enable_expert_parallel else ep_group.world_size
+        xlite_config.experts_weight_transpose = True
+        xlite_config.moe_intermediate_size = hf_config.intermediate_size
+        xlite_config.norm_topk_prob = True
+        xlite_config.qk_norm_full = True
+        xlite_config.scoring_func = ScoringFuncSigmoid
+
+    def _build_model(self) -> None:
+        super()._build_model()
+
+        layers, _ = self._get_layers_and_model_prefix()
+        xlite_model = self.xlite_model
+        xlite_config = self.xlite_config
+        xlite_model.gate = [
+            weight
+            for layer in layers
+            if (weight := _get_nested_attr(layer, "block_sparse_moe", "gate", "weight")) is not None
+        ]
+        xlite_model.gate_bias = [
+            bias.to(torch.float32)  # NOTE: type conversion for numerical stability in xlite's implementation
+            for layer in layers
+            if (bias := _get_nested_attr(layer, "block_sparse_moe", "e_score_correction_bias")) is not None
+        ]
+        xlite_model.re_up_gate = [
+            w13_weight_i
+            for layer in layers
+            if (w13_weight := _get_nested_attr(layer, "block_sparse_moe", "experts", "w13_weight")) is not None
+            for w13_weight_i in w13_weight[
+                : _get_nested_attr(layer, "block_sparse_moe", "experts", "local_num_experts", default=0)
+            ]
+        ]
+        xlite_model.re_down = [
+            w2_weight_i
+            for layer in layers
+            if (w2_weight := _get_nested_attr(layer, "block_sparse_moe", "experts", "w2_weight")) is not None
+            for w2_weight_i in w2_weight[
+                : _get_nested_attr(layer, "block_sparse_moe", "experts", "local_num_experts", default=0)
+            ]
+        ]
+
+        if xlite_model.re_up_gate:
+            xlite_config.experts_weight_nz = self.is_tensor_nz(xlite_model.re_up_gate[0])
+        if self.quantization:
+            xlite_model.re_up_gate_scale = [
+                self._prepare_deq_scale_weights(layer.block_sparse_moe.experts.w13_weight_scale_fp32[i])
+                for layer in layers
+                for i in range(layer.block_sparse_moe.experts.local_num_experts)
+            ]
+            xlite_model.re_down_scale = [
+                self._prepare_deq_scale_weights(layer.block_sparse_moe.experts.w2_weight_scale[i])
+                for layer in layers
+                for i in range(layer.block_sparse_moe.experts.local_num_experts)
+            ]
+
 
 def xlite_model_init(runnable: nn.Module, vllm_config: VllmConfig) -> XliteInitResult:
     """Construct and initialize an architecture-specific xlite model adapter.
@@ -570,6 +646,7 @@ def xlite_model_init(runnable: nn.Module, vllm_config: VllmConfig) -> XliteInitR
         "Qwen3MoeForCausalLM": QwenMoeXliteModel,
         "Qwen3VLMoeForConditionalGeneration": QwenMoeXliteModel,
         "Glm4MoeForCausalLM": Glm4MoeXliteModel,
+        "MiniMaxM2ForCausalLM": MiniMaxM2XliteModel,
     }
 
     architecture = vllm_config.model_config.architectures[0]
