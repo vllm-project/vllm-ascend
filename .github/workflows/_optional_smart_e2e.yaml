@@ -121,6 +121,8 @@ jobs:
             vllm-ascend-build-v1-${{ runner.os }}-swr.cn-southwest-2.myhuaweicloud.com/base_image/ascend-ci/cann:${{ matrix.group.image_tag }}-${{ steps.get_csrc_hash.outputs.CSRC_HASH }}
 
       - name: Install vllm-project/vllm-ascend with device
+        env:
+          MAX_JOBS: 23
         if: ${{ steps.check_npu.outputs.has_npu == 'true' }}
         run: |
           pip install uc-manager
