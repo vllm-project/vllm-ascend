@@ -161,9 +161,15 @@ class KVPoolWorker:
         backend_module = importlib.import_module(backend_path)
         real_backend = getattr(backend_module, backend_name)
 
-        self.m_store = real_backend(  # type: ignore[misc]
-            parallel_config
-        )
+        if self.backend.lower() == "memcache":
+            self.m_store = real_backend(  # type: ignore[misc]
+                parallel_config,
+                extra_config.get("memcache_client_cpus"),
+            )
+        else:
+            self.m_store = real_backend(  # type: ignore[misc]
+                parallel_config
+            )
         kv_event_config = vllm_config.kv_events_config
         self.enable_kv_events = False
         if kv_event_config and kv_event_config.enable_kv_cache_events:

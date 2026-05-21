@@ -1,4 +1,3 @@
-# Standard
 from enum import Enum
 
 import torch
@@ -7,6 +6,9 @@ from vllm.config import ParallelConfig
 from vllm.distributed.parallel_state import get_world_group
 from vllm.logger import logger
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.backend.backend import Backend
+from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.memcache_utils import (
+    set_memcache_client_cpu_affinity,
+)
 from vllm_ascend.utils import AscendDeviceType, get_ascend_device_type
 
 
@@ -21,6 +23,7 @@ class MemcacheBackend(Backend):
     def __init__(
         self,
         parallel_config: ParallelConfig,
+        memcache_client_cpus=None,
         local_rank: int | None = None,
         init_bm: bool = True,
     ):
@@ -40,6 +43,8 @@ class MemcacheBackend(Backend):
                 torch.distributed.all_gather(output_tensor_list, tmp_tensor, group=get_world_group().device_group)
             self.local_rank = local_rank if local_rank is not None else get_world_group().local_rank
             self.store = DistributedObjectStore()
+            set_memcache_client_cpu_affinity(
+                self.store, self.local_rank, memcache_client_cpus)
             res = self.store.init(self.local_rank, init_bm=init_bm)
             assert res == 0
         except ValueError as e:

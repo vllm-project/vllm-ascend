@@ -20,6 +20,18 @@ vllm serve Qwen/Qwen2.5-7B-Instruct \
   --additional-config '{"enable_cpu_binding": false}'
 ```
 
+### Online serving example with KV transfer threads on a reserved socket
+
+```bash
+export VLLM_ASCEND_CPU_BIND_SKIP_SOCKET=0
+vllm serve Qwen/Qwen2.5-7B-Instruct \
+  --additional-config '{"enable_cpu_binding": true}'
+```
+
+`VLLM_ASCEND_CPU_BIND_SKIP_SOCKET` accepts a comma-separated list of CPU socket ids, such as `0,2`.
+CPUs on these sockets are reserved for KV transfer and MemCache client threads, while other vLLM worker
+threads are allocated from the remaining sockets.
+
 ### Offline inference example with CPU binding enabled
 
 ```python
