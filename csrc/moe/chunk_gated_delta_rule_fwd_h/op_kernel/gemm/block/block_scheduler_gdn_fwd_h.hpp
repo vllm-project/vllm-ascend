@@ -223,10 +223,10 @@ struct BlockSchedulerGdnFwdH {
         offsets[currStage].hWorkOffset = (cubeCoreIdx * PING_PONG_STAGES + currStage) * kHeadDim * vHeadDim;
         offsets[currStage].vWorkOffset = (cubeCoreIdx * PING_PONG_STAGES + currStage) * chunkSize * vHeadDim;
         offsets[currStage].blockTokens = offsets[currStage].isFinalState ? (batchTokens - chunkIdx * chunkSize) : chunkSize;
-        offsets[currStage].isDummyHead = headInnerLoop < PING_PONG_STAGES && headInnerIdx >= headInnerLoop; 
-        offsets[currStage].batchIdx = batchIdx; 
-        offsets[currStage].headIdx = vHeadIdx; 
-        offsets[currStage].chunkIdx = chunkIdx; 
+        offsets[currStage].isDummyHead = headInnerLoop < PING_PONG_STAGES && headInnerIdx >= headInnerLoop;
+        offsets[currStage].batchIdx = batchIdx;
+        offsets[currStage].headIdx = vHeadIdx;
+        offsets[currStage].chunkIdx = chunkIdx;
 
         processNewTask = chunkIdx == batchChunks - 1 && headInnerIdx == PING_PONG_STAGES - 1;
         if (processNewTask) {

@@ -13,6 +13,7 @@
  */
 
 // #include "chunk_gated_delta_rule_fwd_h.h"
+#include "compat_310p.h"
 #include "gemm/kernel/gdn_fwd_h_kernel.hpp"
 #include "lib/matmul_intf.h"
 
@@ -26,10 +27,12 @@ extern "C" __global__ __aicore__ void chunk_gated_delta_rule_fwd_h(GM_ADDR k, GM
     KERNEL_TASK_TYPE_DEFAULT(KERNEL_TYPE_MIX_AIC_1_2);
 
     GM_ADDR user = AscendC::GetUserWorkspace(workspace);
-    
+
     __gm__ ChunkGatedDeltaRuleFwdHTilingData *__restrict gdnFwdHTilingData = reinterpret_cast<__gm__ ChunkGatedDeltaRuleFwdHTilingData *__restrict>(tiling);
+
     using workspaceType = float;
     // dtype: 0 - fp16, 1 - bf16, 2 - fp32
+#ifndef CATLASS_UNIFIED_CORE
     if (gdnFwdHTilingData->dataType == 1) {
         if (gdnFwdHTilingData->stateDataType == 2) {
             if (gdnFwdHTilingData->gDataType == 2) {
@@ -56,7 +59,9 @@ extern "C" __global__ __aicore__ void chunk_gated_delta_rule_fwd_h(GM_ADDR k, GM
                 gdnFwdH.Process();
             }
         }
-    } else {
+    } else
+#endif
+    {
         if (gdnFwdHTilingData->stateDataType == 2) {
             if (gdnFwdHTilingData->gDataType == 2) {
                 using GDNFwdHKernel = Catlass::Gemm::Kernel::GDNFwdHKernel<half, float, float, workspaceType>;
