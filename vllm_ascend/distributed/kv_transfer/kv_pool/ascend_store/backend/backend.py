@@ -8,6 +8,10 @@ class Backend(ABC):
     def __init__(self, parallel_config: ParallelConfig):
         pass
 
+    @classmethod
+    def create_scheduler_client(cls, parallel_config: ParallelConfig):
+        return cls(parallel_config)
+
     @abstractmethod
     def set_device(self):
         pass

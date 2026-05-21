@@ -65,7 +65,8 @@ class KVPoolScheduler:
         assert backend_path is not None and backend_class_name is not None
         backend_module = importlib.import_module(backend_path)
         backend_class = getattr(backend_module, backend_class_name)
-        self.store_scheduler = backend_class(vllm_config.parallel_config)
+        self.store_scheduler = backend_class.create_scheduler_client(
+            vllm_config.parallel_config)
 
         model_config = vllm_config.model_config
         self.tp_size = vllm_config.parallel_config.tensor_parallel_size

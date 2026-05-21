@@ -2,9 +2,10 @@
 from enum import Enum
 
 import torch
-from vllm.config import ParallelConfig
-from vllm.logger import logger
 
+from vllm.config import ParallelConfig
+from vllm.distributed.parallel_state import get_world_group
+from vllm.logger import logger
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.backend.backend import Backend
 from vllm_ascend.utils import AscendDeviceType, get_ascend_device_type
 
@@ -17,7 +18,12 @@ class MmcDirect(Enum):
 
 
 class MemcacheBackend(Backend):
-    def __init__(self, parallel_config: ParallelConfig):
+    def __init__(
+        self,
+        parallel_config: ParallelConfig,
+        local_rank: int | None = None,
+        init_bm: bool = True,
+    ):
         try:
             from memcache_hybrid import DistributedObjectStore  # type: ignore
         except ImportError as e:
@@ -28,22 +34,14 @@ class MemcacheBackend(Backend):
             ) from e
         try:
             soc_version = get_ascend_device_type()
-            if soc_version in {AscendDeviceType.A2}:
-                import torch
-                from vllm.distributed import get_world_group
-
+            if init_bm and soc_version in {AscendDeviceType.A2}:
                 tmp_tensor = torch.zeros(1, device="npu")
                 output_tensor_list = [torch.empty_like(tmp_tensor) for _ in range(torch.distributed.get_world_size())]
                 torch.distributed.all_gather(output_tensor_list, tmp_tensor, group=get_world_group().device_group)
-                self.rank = parallel_config.rank
-                self.store = DistributedObjectStore()
-                res = self.store.init(self.rank)
-                assert res == 0
-            else:
-                self.rank = parallel_config.rank
-                self.store = DistributedObjectStore()
-                res = self.store.init(self.rank)
-                assert res == 0
+            self.local_rank = local_rank if local_rank is not None else get_world_group().local_rank
+            self.store = DistributedObjectStore()
+            res = self.store.init(self.local_rank, init_bm=init_bm)
+            assert res == 0
         except ValueError as e:
             logger.error("Configuration loading failed: %s", e)
             raise
@@ -51,8 +49,15 @@ class MemcacheBackend(Backend):
             logger.error("An error occurred while loading the configuration: %s", exc)
             raise
 
+    @classmethod
+    def create_scheduler_client(cls, parallel_config: ParallelConfig):
+        # The scheduler is a single metadata client. It is initialized before
+        # the world group exists and must not initialize memcache storage, so
+        # keep the old device_id=0/init_bm=False behavior here.
+        return cls(parallel_config, local_rank=0, init_bm=False)
+
     def set_device(self):
-        device = torch.device(f"npu:{self.rank}")
+        device = torch.device(f"npu:{self.local_rank}")
         torch.npu.set_device(device)
 
     def register_buffer(self, ptrs: list[int], sizes: list[int]):
