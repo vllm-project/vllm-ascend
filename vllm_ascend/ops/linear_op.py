@@ -81,6 +81,7 @@ from vllm_ascend.utils import (
     oproj_tp_enable,
     shared_expert_dp_enabled,
 )
+from vllm_ascend.attention.utils import enable_cp
 
 
 class CustomLinearOp:
@@ -627,7 +628,7 @@ class ShardedCPColumnParallelOp(CustomColumnParallelOp):
 def _get_column_parallel_op(
     prefix, layer
 ) -> MLPColumnParallelOp | SequenceColumnParallelOp | ShardedCPColumnParallelOp | Flashcomm2OshardQKVParallelOp | None:
-    if enable_dsa_cp() and ("q_b_proj" in prefix or "kv_b_proj" in prefix):
+    if enable_dsa_cp() and ("q_b_proj" in prefix or "kv_b_proj" in prefix) and not enable_cp():
         return ShardedCPColumnParallelOp(layer)
     if "gate_up_proj" in prefix and mlp_tp_enable() and not is_moe_layer(prefix):
         return MLPColumnParallelOp(layer)
@@ -681,7 +682,6 @@ def _get_row_parallel_op(
             "out_proj",  # attn output linear of Qwen3 Next
             "down_proj",  # second MLP of most LLMs
             "attention.dense",  # attn output linear of Bailing
-            "wo_b",  # attn output linear of v4
         ]
         for a_prefix in sp_row_prefixes:
             if a_prefix in prefix:
@@ -750,3 +750,4 @@ def is_moe_layer(prefix: str) -> bool:
     n_routed_experts, first_k_dense_replace, moe_layer_freq = get_moe_params()
 
     return n_routed_experts is not None and layer_idx >= first_k_dense_replace and layer_idx % moe_layer_freq == 0
+
