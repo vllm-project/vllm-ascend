@@ -162,13 +162,9 @@ class AscendW4A4MXFP4FlatQuantDynamicLinearMethod(AscendLinearScheme):
             This is the special weight loading logic for FlatQuant row parallelism. 
             """
             left_dim = layer.left_trans.data.shape[0]
-
             # Calculate block sizes
-
             left_block_size = left_dim // layer.tp_size
-
             # Extract diagonal block for current rank
-
             layer.left_trans.data = layer.left_trans.data[
                 layer.tp_rank * left_block_size : (layer.tp_rank + 1) * left_block_size,
                 layer.tp_rank * left_block_size : (layer.tp_rank + 1) * left_block_size,
