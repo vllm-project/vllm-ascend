@@ -422,7 +422,7 @@ class A5DeviceAdaptor(BaseDeviceAdaptor):
         weight_quant_type: torch.dtype | int = torch.float8_e4m3fn,
     ):
         if not use_mxfp_quant:
-            return BaseDeviceAdaptor.npu_grouped_matmul_swiglu_quant(
+            return torch_npu.npu_grouped_matmul_swiglu_quant_v2(
                 x=x,
                 weight=weight,
                 group_list=group_list,
