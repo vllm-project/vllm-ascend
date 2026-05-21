@@ -78,7 +78,8 @@ class AscendW4A4MXFP4FlatQuantDynamicLinearMethod(AscendLinearScheme):
         if self.tp_size > self.max_supported_tp:
             raise ValueError(
                 f"For W4A4_MXFP4_FLATQUANT, TP size ({self.tp_size}) is not supported. "
-                f"Max supported TP size is {self.max_supported_tp}, according to the max_supported_tp parameter in quant_description."
+                f"Max supported TP size is {self.max_supported_tp}, "
+                f"according to the max_supported_tp parameter in quant_description."
             )
 
     def get_weight(self, input_size: int, output_size: int, params_dtype: torch.dtype) -> dict[str, Any]:
