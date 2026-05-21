@@ -227,12 +227,12 @@ class AscendDSACPMetadataBuilder(AttentionMetadataBuilder[AscendDSAMetadata]):
         **kwargs,
     ) -> AscendDSAMetadata:
         num_reqs = common_attn_metadata.num_reqs
-        query_start_loc = common_attn_metadata.query_start_loc[:num_reqs + 1]
+        query_start_loc = common_attn_metadata.query_start_loc
         num_reqs_actual = kwargs.get("num_reqs_actual", None)
         self.block_size = kwargs.get("block_size", 128)
 
         self.common_ratio_to_sas_metadata = kwargs.get(
-            "common_ratio_to_sas_metadata", {})
+            "common_ratio_to_sas_metadata", None)
         self.num_actual_tokens = common_attn_metadata.num_actual_tokens
         attn_state = kwargs.get("attn_state", common_attn_metadata.attn_state)
         has_prefill = _has_prefill(attn_state)
@@ -289,7 +289,7 @@ class AscendDSACPMetadataBuilder(AttentionMetadataBuilder[AscendDSAMetadata]):
         """Build a single unified metadata for all requests (prefill + decode)."""
         num_reqs = common_attn_metadata.num_reqs
         has_prefill = _has_prefill(attn_state)
-        query_start_loc = common_attn_metadata.query_start_loc[:num_reqs + 1]
+        query_start_loc = common_attn_metadata.query_start_loc
 
         seq_lens_q = query_start_loc[1:] - query_start_loc[:-1]
 
