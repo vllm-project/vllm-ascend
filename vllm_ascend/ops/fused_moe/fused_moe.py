@@ -355,7 +355,7 @@ class AscendFusedMoE(FusedMoE):
                 self.token2req = [None]
                 self.moe_load_prev = None
                 self.moe_load = torch.zeros(self.local_num_experts, dtype=torch.int64).npu()
-                self.ones_buffer = torch.ones(get_current_vllm_config().scheduler_config.max_num_batched_tokens, dtype=torch.float32).npu()
+                self.ones_buffer = torch.ones(get_current_vllm_config().scheduler_config.max_num_batched_tokens * self.top_k + 1, dtype=torch.float32).npu()
                 self.moe_load_local = torch.zeros([eplb_config.max_batch_token, self.global_num_experts], dtype=torch.float32).npu()
         self.moe_config.num_experts = self.global_num_experts
         self.moe_config.num_local_experts = self.local_num_experts
