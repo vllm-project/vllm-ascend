@@ -121,10 +121,10 @@ jobs:
             vllm-ascend-build-v1-${{ runner.os }}-swr.cn-southwest-2.myhuaweicloud.com/base_image/ascend-ci/cann:${{ matrix.group.image_tag }}-${{ steps.get_csrc_hash.outputs.CSRC_HASH }}
 
       - name: Install vllm-project/vllm-ascend with device
-        env:
-          MAX_JOBS: 23
         if: ${{ steps.check_npu.outputs.has_npu == 'true' }}
         run: |
+          export MAX_JOBS=$(( ${{ matrix.group.num_npus }} * 23 ))
+          
           pip install uc-manager
           uv pip install -r requirements-dev.txt
           uv pip install --force-reinstall --no-deps triton-ascend==3.2.1
