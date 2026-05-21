@@ -106,6 +106,11 @@ class AscendLinearMethod(LinearMethodBase):
             set_weight_attrs(param, {"output_dim": 0})
             layer.register_parameter(pergroup_name, param)
             set_weight_attrs(param, extra_weight_attrs)
+            set_weight_attrs(param, {
+                "packed_dim": 0,
+                "packed_factor": 128,
+                }
+            )   
             if (
                 "weight_scale_second" in pergroup_name
                 or "weight_offset_second" in pergroup_name

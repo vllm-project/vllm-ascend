@@ -42,6 +42,10 @@ from vllm.utils.torch_utils import direct_register_custom_op
 
 from vllm_ascend.ops.linear_op import get_parallel_op, get_replicated_op
 from vllm_ascend.utils import enable_sp, maybe_trans_nz
+from vllm_ascend.utils import (
+    AscendDeviceType,
+    get_ascend_device_type,
+)
 
 
 def unquantized_gemm(
@@ -444,10 +448,10 @@ class AscendColumnParallelLinear(ColumnParallelLinear):
             return self.custom_op.apply(input_)
 
         return super().forward(input_)
-
+    
     def weight_loader(self, param: Parameter, loaded_weight: torch.Tensor):
         super().weight_loader(param, loaded_weight)
-        if "wo_a" in self.prefix:
+        if "wo_a" in self.prefix and get_ascend_device_type() != AscendDeviceType.A5:
             self.weight.data = (
                 self.weight.data.view(self.n_local_groups, self.o_lora_rank, -1).transpose(2, 1).contiguous()
             )

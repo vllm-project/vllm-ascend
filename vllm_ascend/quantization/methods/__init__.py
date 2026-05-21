@@ -33,6 +33,7 @@ from typing import Any
 from .base import AscendAttentionScheme, AscendLinearScheme, AscendMoEScheme, QuantType
 
 # Import all scheme classes for external access
+from .fp8 import AscendW4A8MXFPDSDynamicFusedMoEMethod, AscendW8A8MXFP8DSDynamicLinearMethod
 from .kv_c8 import AscendFAQuantAttentionMethod
 
 # Import registry functions
@@ -86,4 +87,6 @@ __all__ = [
     "AscendFAQuantAttentionMethod",
     "AscendW4A4MXFP4DynamicLinearMethod",
     "AscendW4A4MXFP4DynamicFusedMoEMethod",
+    "AscendW8A8MXFP8DSDynamicLinearMethod",
+    "AscendW4A8MXFPDSDynamicFusedMoEMethod",
 ]

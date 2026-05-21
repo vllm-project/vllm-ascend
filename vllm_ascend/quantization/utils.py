@@ -21,7 +21,7 @@ from pathlib import Path
 from vllm import envs
 from vllm.logger import logger
 
-from vllm_ascend.utils import ASCEND_QUANTIZATION_METHOD, COMPRESSED_TENSORS_METHOD
+from vllm_ascend.utils import ASCEND_QUANTIZATION_METHOD, COMPRESSED_TENSORS_METHOD, FP8_METHOD
 
 
 def get_model_file(
@@ -70,7 +70,7 @@ def get_model_file(
             )
             return Path(downloaded_path)
     except Exception as e:
-        logger.debug("Could not download %s from %s: %s", filename, model, e)
+        logger.debug(f"Could not download {filename} from {model}: {e}")
         return None
 
 
@@ -121,6 +121,10 @@ def detect_quantization_method(model: str, revision: str | None = None) -> str |
                 quant_method = quant_cfg.get("quant_method", "")
                 if quant_method == COMPRESSED_TENSORS_METHOD:
                     return COMPRESSED_TENSORS_METHOD
+            if isinstance(quant_cfg, dict):
+                quant_method = quant_cfg.get("quant_method", "")
+                if quant_method == FP8_METHOD:
+                    return FP8_METHOD
         except (json.JSONDecodeError, OSError):
             pass
 
