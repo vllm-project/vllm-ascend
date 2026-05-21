@@ -88,7 +88,9 @@ class KVPoolScheduler:
         self._unfinished_request_ids: set[str] = set()
         self._block_pool: BlockPool | None = None
         self.sending_event_id = 0
+        # {event_id, flattened block_ids}
         self.sending_blocks: dict[int, list[int]] = {}
+        # {event_id, completed_woke_count}
         self.sending_events: dict[int, int] = {}
         self._expected_worker_count = vllm_config.parallel_config.world_size
 
@@ -384,7 +386,7 @@ class KVPoolScheduler:
             return
         to_free_block_ids: list[int] = []
         for event_id, count in meta.completed_events.items():
-            logger.info("event %s update with %s", event_id, count)
+            logger.debug("event %s update with %s", event_id, count)
             total = self.sending_events[event_id] + count
             if total >= self._expected_worker_count:
                 to_free_block_ids.extend(self.sending_blocks.pop(event_id, []))

@@ -39,3 +39,5 @@ if os.getenv("DYNAMIC_EPLB", "false").lower() in ("true", "1") or os.getenv("EXP
 
 if envs.VLLM_ASCEND_BALANCE_SCHEDULING:
     import vllm_ascend.patch.platform.patch_balance_schedule  # noqa
+
+import vllm_ascend.patch.platform.patch_scheduler

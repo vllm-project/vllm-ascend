@@ -160,6 +160,8 @@ class KVCacheStoreSendingThread(KVTransferThread):
                 self.completed_events[event_id] = 1
 
     def get_completed_events(self):
+        if not self.completed_events:
+            return None
         with self.completed_events_lock:
             completed_events = self.completed_events.copy()
             self.completed_events.clear()
