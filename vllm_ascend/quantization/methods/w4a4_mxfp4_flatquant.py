@@ -90,8 +90,9 @@ class AscendW4A4MXFP4FlatQuantDynamicLinearMethod(AscendLinearScheme):
 
         return params_dict
 
-    def get_pertensor_param(self, params_dtype: torch.dtype, layer_type: str | None = None) -> dict[str, Any]:
+    def get_pertensor_param(self, params_dtype: torch.dtype, **kwargs: Any) -> dict[str, Any]:
         params_dict = {}
+        layer_type = kwargs.get("layer_type")
         if layer_type == "row":
             origin_size = self.input_size * self.tp_size
             _, right_trans_dim = get_decompose_dim(origin_size // self.max_supported_tp, self.max_supported_tp)
