@@ -36,8 +36,6 @@ _server_cmd: &server_cmd
   - "--speculative-config"
   - '{"num_speculative_tokens": 3, "method": "deepseek_mtp"}'
 
-_special_dependencies: &special_dependencies
-  transformers: "5.2.0"
 
 _benchmarks: &benchmarks
   perf:
