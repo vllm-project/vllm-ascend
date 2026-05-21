@@ -62,6 +62,49 @@ class TestBlockTable310(TestBase):
                 num_speculative_tokens=0,
             )
 
+    def _create_multi_group_block_table(
+        self,
+        dcp_world_size,
+        dcp_rank,
+        pcp_world_size,
+        pcp_rank,
+        cp_kv_cache_interleave_size,
+        block_sizes=None,
+        max_num_blocks=None,
+        kernel_sizes=None,
+    ):
+        block_sizes = block_sizes or [self.block_size]
+        max_num_blocks = max_num_blocks or [self.max_num_blocks_per_req] * len(block_sizes)
+        kernel_sizes = kernel_sizes or [[self.block_size]] * len(block_sizes)
+
+        with (
+            patch("vllm_ascend.worker.block_table.get_dcp_group") as mock_get_dcp_group,
+            patch("vllm_ascend.worker.block_table.get_pcp_group") as mock_get_pcp_group,
+        ):
+            mock_dcp_group = MagicMock(spec=GroupCoordinator)
+            mock_dcp_group.world_size = dcp_world_size
+            mock_dcp_group.rank_in_group = dcp_rank
+            mock_get_dcp_group.return_value = mock_dcp_group
+
+            mock_pcp_group = MagicMock(spec=GroupCoordinator)
+            mock_pcp_group.world_size = pcp_world_size
+            mock_pcp_group.rank_in_group = pcp_rank
+            mock_get_pcp_group.return_value = mock_pcp_group
+
+            from vllm_ascend._310p.block_table import MultiGroupBlockTable
+
+            return MultiGroupBlockTable(
+                max_num_reqs=self.max_num_reqs,
+                max_model_len=self.block_size * self.max_num_blocks_per_req,
+                max_num_batched_tokens=self.max_num_batched_tokens,
+                pin_memory=self.pin_memory,
+                device=self.device,
+                block_sizes=block_sizes,
+                max_num_blocks=max_num_blocks,
+                kernel_sizes=kernel_sizes,
+                cp_kv_cache_interleave_size=cp_kv_cache_interleave_size,
+            )
+
     @staticmethod
     def _setup_block_table_data(block_table, num_reqs=2):
         for i in range(num_reqs):
@@ -86,6 +129,67 @@ class TestBlockTable310(TestBase):
         expected = np.array([0, 1, 512, 513], dtype=np.int32)
         np.testing.assert_array_equal(block_table.slot_mapping.np[:4], expected)
         np.testing.assert_array_equal(block_table.slot_mapping.gpu[:4].cpu().numpy(), expected)
+
+    def test_multi_group_compute_slot_mapping_accepts_none_compressed_args(self):
+        multi_group_block_table = self._create_multi_group_block_table(
+            dcp_world_size=1,
+            dcp_rank=0,
+            pcp_world_size=1,
+            pcp_rank=0,
+            cp_kv_cache_interleave_size=1,
+        )
+        self._setup_block_table_data(multi_group_block_table[0], num_reqs=2)
+
+        query_start_loc = torch.tensor([0, 2, 4], dtype=torch.int32)
+        positions = torch.tensor([0, 1, 0, 1], dtype=torch.int64)
+
+        multi_group_block_table.compute_slot_mapping(2, query_start_loc, positions, None, None)
+
+        expected = np.array([0, 1, 512, 513], dtype=np.int32)
+        np.testing.assert_array_equal(multi_group_block_table[0].slot_mapping.np[:4], expected)
+        np.testing.assert_array_equal(multi_group_block_table[0].slot_mapping.gpu[:4].cpu().numpy(), expected)
+
+    def test_multi_group_compute_slot_mapping_uses_compressed_inputs_per_group(self):
+        multi_group_block_table = self._create_multi_group_block_table(
+            dcp_world_size=1,
+            dcp_rank=0,
+            pcp_world_size=1,
+            pcp_rank=0,
+            cp_kv_cache_interleave_size=1,
+            block_sizes=[self.block_size, self.block_size],
+            max_num_blocks=[self.max_num_blocks_per_req, self.max_num_blocks_per_req],
+            kernel_sizes=[[self.block_size], [self.block_size]],
+        )
+        for block_table in multi_group_block_table.block_tables:
+            self._setup_block_table_data(block_table, num_reqs=2)
+
+        query_start_loc = torch.tensor([0, 2, 4], dtype=torch.int32)
+        positions = torch.tensor([0, 1, 0, 1], dtype=torch.int64)
+        positions_compressed_list = [
+            np.array([0, 1], dtype=np.int64),
+            np.array([0], dtype=np.int64),
+        ]
+        req_indices_compressed_list = [
+            np.array([0, 0], dtype=np.int64),
+            np.array([1], dtype=np.int64),
+        ]
+
+        multi_group_block_table.compute_slot_mapping(
+            2,
+            query_start_loc,
+            positions,
+            positions_compressed_list,
+            req_indices_compressed_list,
+        )
+
+        np.testing.assert_array_equal(
+            multi_group_block_table[0].slot_mapping.np[:2],
+            np.array([0, 1], dtype=np.int32),
+        )
+        np.testing.assert_array_equal(
+            multi_group_block_table[1].slot_mapping.np[:1],
+            np.array([512], dtype=np.int32),
+        )
 
     def test_compute_slot_mapping_with_req_indices_signature(self):
         block_table = self._create_block_table(

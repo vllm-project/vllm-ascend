@@ -13,11 +13,12 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-from unittest.mock import call, patch
+from unittest.mock import MagicMock, call, patch
 
 import torch
 
 from tests.ut.base import TestBase
+from vllm_ascend._310p.fused_moe.moe_comm_method import AllGatherCommImpl310
 from vllm_ascend._310p.fused_moe.moe_mlp import unified_apply_mlp
 from vllm_ascend.ops.fused_moe.moe_runtime_args import (
     MoEMlpComputeInput,
@@ -54,6 +55,20 @@ def build_mlp_compute_input_fixture(
 
 
 class TestUnifiedApplyMLP310(TestBase):
+    @patch("vllm_ascend._310p.fused_moe.moe_comm_method.unified_apply_mlp")
+    def test_all_gather_apply_mlp_returns_common_tuple_contract(self, mock_unified_apply_mlp):
+        mlp_compute_input = MagicMock(spec=MoEMlpComputeInput)
+        mlp_output = torch.randn(10, 20, dtype=torch.float16)
+        mock_unified_apply_mlp.return_value = mlp_output
+
+        comm_impl = AllGatherCommImpl310.__new__(AllGatherCommImpl310)
+
+        output, before_gmm2_evt = comm_impl._apply_mlp(mlp_compute_input)
+
+        self.assertIs(output, mlp_output)
+        self.assertIsNone(before_gmm2_evt)
+        mock_unified_apply_mlp.assert_called_once_with(mlp_compute_input=mlp_compute_input)
+
     @patch("torch_npu.npu_grouped_matmul")
     @patch("torch_npu.npu_swiglu")
     def test_unified_apply_mlp_without_quantization_310(self, mock_npu_swiglu, mock_npu_grouped_matmul):
