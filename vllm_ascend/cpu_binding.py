@@ -155,6 +155,7 @@ class CpuAlloc:
         self.cpu_socket: dict[int, int] = {}
         self.numa_to_cpu_map: dict[int, list[int]] = defaultdict(list)
         self.npu_cpu_pool: dict[int, list[int]] = {}
+        self.skipped_socket_cpus: list[int] = []
         self.assign_main: dict[int, list[int]] = {}
         self.assign_acl: dict[int, list[int]] = {}
         self.assign_rel: dict[int, list[int]] = {}
@@ -279,16 +280,42 @@ class CpuAlloc:
         allowed_cpus = [
             cpu for cpu in self.device_info.allowed_cpus if self.cpu_socket.get(cpu) not in self.skip_sockets
         ]
+        skipped_socket_cpus = [
+            cpu for cpu in self.device_info.allowed_cpus if self.cpu_socket.get(cpu) in self.skip_sockets
+        ]
         if not allowed_cpus:
             raise RuntimeError(
                 "No CPUs remain after applying VLLM_ASCEND_CPU_BIND_SKIP_SOCKET="
                 f"{sorted(self.skip_sockets)}."
             )
+        if not skipped_socket_cpus:
+            raise RuntimeError(
+                "No CPUs on skipped sockets are available in Cpus_allowed_list after applying "
+                f"VLLM_ASCEND_CPU_BIND_SKIP_SOCKET={sorted(self.skip_sockets)}."
+            )
         logger.info(
             f"[cpu_bind_skip_socket] rank={self.rank_id} skip_sockets={sorted(self.skip_sockets)} "
-            f"allowed_cpus_before={len(self.device_info.allowed_cpus)} allowed_cpus_after={len(allowed_cpus)}"
+            f"allowed_cpus_before={len(self.device_info.allowed_cpus)} allowed_cpus_after={len(allowed_cpus)} "
+            f"kv_transfer_cpus={len(skipped_socket_cpus)}"
         )
+        self.skipped_socket_cpus = skipped_socket_cpus
         self.device_info.allowed_cpus = allowed_cpus
+
+    def slice_skipped_socket_cpus(self, npu: int, num_threads: int = KV_TRANSFER_CPUS_PER_NPU) -> list[int]:
+        if not self.skipped_socket_cpus:
+            return []
+        cpus = sorted(set(self.skipped_socket_cpus))
+        if self.device_info.total_logic_npus > 0:
+            total_npus = self.device_info.total_logic_npus
+        elif self.device_info.npu_affinity:
+            total_npus = len(self.device_info.npu_affinity)
+        else:
+            total_npus = len(self.device_info.running_npu_list)
+        base = len(cpus) // total_npus
+        extra = len(cpus) % total_npus
+        start = npu * base + (npu if npu < extra else extra)
+        take = base + (1 if npu < extra else 0)
+        return cpus[start:start + take][:num_threads]
 
     def build_global_slice_cpu_pool(self) -> None:
         """
@@ -412,7 +439,10 @@ class CpuAlloc:
                 raise RuntimeError(
                     f"The number of CPUs is insufficient. Each NPU requires at least {MIN_CPUS_PER_NPU} CPUs."
                 )
-            if len(pool) >= MIN_CPUS_PER_NPU + KV_TRANSFER_CPUS_PER_NPU:
+            if self.skipped_socket_cpus:
+                main = pool[2:-2]
+                kv_transfer = self.slice_skipped_socket_cpus(npu)
+            elif len(pool) >= MIN_CPUS_PER_NPU + KV_TRANSFER_CPUS_PER_NPU:
                 main = pool[2:-2 - KV_TRANSFER_CPUS_PER_NPU]
                 kv_transfer = pool[-2 - KV_TRANSFER_CPUS_PER_NPU:-2]
             else:
@@ -584,8 +614,10 @@ def get_kv_transfer_thread_cpus(rank_id: int, num_threads: int = KV_TRANSFER_CPU
         return []
     binder = CpuAlloc(rank_id)
     binder.build_cpu_pools()
-    binder.allocate()
     current_npu = binder.device_info.running_npu_list[rank_id]
+    if binder.skipped_socket_cpus:
+        return binder.slice_skipped_socket_cpus(current_npu, num_threads)
+    binder.allocate()
     return binder.assign_kv_transfer[current_npu][:num_threads]
 
 
