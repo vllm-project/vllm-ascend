@@ -407,6 +407,8 @@ jobs:
             vllm-ascend-build-v1-${{ runner.os }}-${{ inputs.image_a3 }}-${{ steps.get_csrc_hash.outputs.CSRC_HASH }}
 
       - name: Install vllm-project/vllm-ascend
+        env:
+          MAX_JOBS: "46"
         run: |
           pip install uc-manager
           uv pip install -r requirements-dev.txt
@@ -535,6 +537,8 @@ jobs:
             vllm-ascend-build-v1-${{ runner.os }}-${{ inputs.image_a3 }}-${{ steps.get_csrc_hash.outputs.CSRC_HASH }}
 
       - name: Install vllm-project/vllm-ascend
+        env:
+          MAX_JOBS: "46"
         run: |
           pip install uc-manager
           uv pip install -r requirements-dev.txt
@@ -720,6 +724,8 @@ jobs:
           pip show mooncake-transfer-engine-ascend || true
 
       - name: Install vllm-project/vllm-ascend
+        env:
+          MAX_JOBS: "92"
         run: |
           pip install uc-manager
           uv pip install -r requirements-dev.txt
@@ -847,6 +853,8 @@ jobs:
             vllm-ascend-build-v1-${{ runner.os }}-${{ inputs.image_a3 }}-${{ steps.get_csrc_hash.outputs.CSRC_HASH }}
 
       - name: Install vllm-project/vllm-ascend
+        env:
+          MAX_JOBS: "92"
         run: |
           pip install uc-manager
           uv pip install -r requirements-dev.txt
@@ -974,6 +982,8 @@ jobs:
             vllm-ascend-build-v1-${{ runner.os }}-${{ inputs.image_310p }}-${{ steps.get_csrc_hash.outputs.CSRC_HASH }}
 
       - name: Install vllm-project/vllm-ascend
+        env:
+          MAX_JOBS: "23"
         run: |
           pip install uc-manager
           uv pip install -r requirements-dev.txt
@@ -1084,6 +1094,8 @@ jobs:
             vllm-ascend-build-v1-${{ runner.os }}-${{ inputs.image_310p }}-${{ steps.get_csrc_hash.outputs.CSRC_HASH }}
 
       - name: Install vllm-project/vllm-ascend
+        env:
+          MAX_JOBS: "92"
         run: |
           pip install uc-manager
           uv pip install -r requirements-dev.txt
