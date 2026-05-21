@@ -125,6 +125,11 @@ env_variables: dict[str, Callable[[], Any]] = {
     "VLLM_ASCEND_KV_POOL_LAYERWISE_NUM_SHARED_BUFFERS": lambda: os.getenv(
         "VLLM_ASCEND_KV_POOL_LAYERWISE_NUM_SHARED_BUFFERS", None
     ),
+    # Comma-separated CPU socket ids to exclude from CPU binding.
+    # Default: None, which means all sockets in Cpus_allowed_list are eligible.
+    # Valid range: non-negative socket ids reported by `lscpu -e=CPU,NODE,SOCKET`.
+    # This variable is not sensitive.
+    "VLLM_ASCEND_CPU_BIND_SKIP_SOCKET": lambda: os.getenv("VLLM_ASCEND_CPU_BIND_SKIP_SOCKET", None),
     # Number of layerwise KV pool load layers to prefetch.
     # Default: 2. Valid range: integer >= 1. Not sensitive.
     "VLLM_ASCEND_KV_POOL_LAYERWISE_PREFETCH_LAYERS": lambda: int(
