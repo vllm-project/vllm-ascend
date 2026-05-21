@@ -16,18 +16,21 @@
 #
 
 import math
-from typing import Any, Dict, Optional, Tuple
+from typing import Any
 import torch
 import torch_npu
 from vllm.config import get_current_vllm_config
+from vllm.distributed import get_tensor_model_parallel_world_size
 from vllm.model_executor.layers.linear import RowParallelLinear
-from vllm.distributed import get_tensor_model_parallel_rank, get_tensor_model_parallel_world_size  
+ 
 from vllm_ascend.device.mxfp_compat import ensure_mxfp4_flatquant_linear_available
+
 from .base import AscendLinearScheme
 from .registry import register_scheme
 
 # Maximum supported dimension for Kronecker quantization left_trans_dim and right_trans_dim
 MAX_SUPPORT_DIM = 256
+
 
 def get_decompose_dim(n: int, m: int) -> tuple[int, int]:
     """Get decomposed dimensions for Kronecker quantization.
@@ -60,9 +63,11 @@ def get_decompose_dim(n: int, m: int) -> tuple[int, int]:
 
     return a - b, a + b
 
+
 @register_scheme("W4A4_MXFP4_FLATQUANT", "linear")
 class AscendW4A4MXFP4FlatQuantDynamicLinearMethod(AscendLinearScheme):
     """Linear method for Ascend W4A4_MXFP4_FLATQUANT_DYNAMIC."""
+
     def __init__(self):
         ensure_mxfp4_flatquant_linear_available("W4A4_MXFP4_FLATQUANT linear quantization")
         vllm_config = get_current_vllm_config()
@@ -79,16 +84,15 @@ class AscendW4A4MXFP4FlatQuantDynamicLinearMethod(AscendLinearScheme):
         if input_size % 2 != 0:
             raise ValueError(f"input_size ({input_size}) must be divisible by 2 for fp4 packing")
         self.input_size = input_size
-        params_dict = {
-            "weight": torch.empty(output_size, input_size // 2, dtype=torch.uint8)
-        }
+        params_dict = {"weight": torch.empty(output_size, input_size // 2, dtype=torch.uint8)}
+
         return params_dict
     
     def get_pertensor_param(self, params_dtype: torch.dtype, layer_type: str | None = None) -> dict[str, Any]:
         params_dict = {}
         if layer_type == "row":
             origin_size = self.input_size * self.tp_size
-            _ , right_trans_dim = get_decompose_dim(origin_size // self.max_supported_tp, self.max_supported_tp)       
+            _, right_trans_dim = get_decompose_dim(origin_size // self.max_supported_tp, self.max_supported_tp)       
             left_trans_dim = origin_size // right_trans_dim
         else:
             left_trans_dim, right_trans_dim = get_decompose_dim(self.input_size, 1)   
@@ -98,23 +102,22 @@ class AscendW4A4MXFP4FlatQuantDynamicLinearMethod(AscendLinearScheme):
         params_dict["clip_ratio"] = torch.empty(1, dtype=torch.float32)
         return params_dict
     
-    def get_pergroup_param(self,
-                           input_size: int,
-                           output_size: int,
-                           params_dtype: torch.dtype,
-                           layer_type: Optional[str] = None) -> Dict[str, Any]:
+    def get_pergroup_param(
+
+        self, input_size: int, output_size: int, params_dtype: torch.dtype, layer_type: str | None = None
+
+    ) -> dict[str, Any]:
         params_dict = {}
-        params_dict["weight_scale"] = torch.empty(output_size,
-                                                  input_size // self.group_size,
-                                                  dtype=torch.uint8)
+        params_dict["weight_scale"] = torch.empty(output_size, input_size // self.group_size, dtype=torch.uint8)
+
         return params_dict
 
     def apply(
         self,
         layer: torch.nn.Module,
         x: torch.Tensor,
-        bias: Optional[torch.Tensor] = None,
-        tp_rank: Optional[int] = 0,
+        bias: torch.Tensor | None = None,
+        tp_rank: int | None = 0,
     ) -> torch.Tensor:
         original_dtype = x.dtype
         input_shape = x.shape
@@ -128,8 +131,13 @@ class AscendW4A4MXFP4FlatQuantDynamicLinearMethod(AscendLinearScheme):
             )
         x_reshaped = x.view(-1, left_dim, right_dim)
         x_quantized_fp4, pertoken_scale = torch_npu.npu_kronecker_quant(
-            x_reshaped, layer.left_trans, layer.right_trans, layer.aclnn_clip_ratio, dst_dtype=torch_npu.float4_e2m1fn_x2
-        )
+            x_reshaped,
+            layer.left_trans,
+            layer.right_trans,
+            layer.aclnn_clip_ratio,
+            dst_dtype=torch_npu.float4_e2m1fn_x2,
+
+         )
 
         output = torch_npu.npu_quant_matmul(
             x_quantized_fp4,
@@ -142,8 +150,9 @@ class AscendW4A4MXFP4FlatQuantDynamicLinearMethod(AscendLinearScheme):
             output_dtype=original_dtype,
             x1_dtype=torch_npu.float4_e2m1fn_x2,
             x2_dtype=torch_npu.float4_e2m1fn_x2,
-            group_sizes=[1, 1, self.group_size])
-        
+            group_sizes=[1, 1, self.group_size],
+
+        )
         output = output.view(*input_shape[:-1], -1)
         return output
 
@@ -153,14 +162,21 @@ class AscendW4A4MXFP4FlatQuantDynamicLinearMethod(AscendLinearScheme):
             Process weights after loading with TP diagonal block extraction. 
             This is the special weight loading logic for FlatQuant row parallelism. 
             """     
-            left_dim = layer.left_trans.data.shape[0]    
-            # Calculate block sizes  
-            left_block_size = left_dim // layer.tp_size  
-            # Extract diagonal block for current rank  
-            layer.left_trans.data = layer.left_trans.data[  
-                layer.tp_rank * left_block_size : (layer.tp_rank + 1) * left_block_size,  
-                layer.tp_rank * left_block_size : (layer.tp_rank + 1) * left_block_size  
-            ]  
+            left_dim = layer.left_trans.data.shape[0]
+
+            # Calculate block sizes
+
+            left_block_size = left_dim // layer.tp_size
+
+            # Extract diagonal block for current rank
+
+            layer.left_trans.data = layer.left_trans.data[
+
+                layer.tp_rank * left_block_size : (layer.tp_rank + 1) * left_block_size,
+
+                layer.tp_rank * left_block_size : (layer.tp_rank + 1) * left_block_size,
+
+            ]
 
         layer.weight_scale.data = layer.weight_scale.data.view(-1, layer.weight_scale.shape[-1] // 2, 2)
         layer.weight.data = layer.weight.data.transpose(0, 1)
@@ -170,3 +186,4 @@ class AscendW4A4MXFP4FlatQuantDynamicLinearMethod(AscendLinearScheme):
         layer.right_trans = torch.nn.Parameter(layer.right_trans.data)
         layer.clip_ratio = torch.nn.Parameter(layer.clip_ratio.data.to(torch.float32))
         layer.aclnn_clip_ratio = layer.clip_ratio.item()
+        

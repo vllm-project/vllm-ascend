@@ -15,11 +15,9 @@ class TestGetDecomposeDim(TestBase):
     """Unit tests for the get_decompose_dim helper."""
 
     def test_perfect_square_decomposition(self):
-        # 1024 = 32*32 -> a=32, b=0 -> (32, 32)
         self.assertEqual(get_decompose_dim(1024, 1), (32, 32))
 
     def test_non_square_decomposition(self):
-        # 32 = 6^2 - 2^2 -> a=6, b=2 -> (4, 8); 4*8 == 32
         left, right = get_decompose_dim(32, 1)
         self.assertEqual((left, right), (4, 8))
         self.assertEqual(left * right, 32)
@@ -29,14 +27,11 @@ class TestGetDecomposeDim(TestBase):
         self.assertEqual(left * right, 256)
 
     def test_raises_when_dim_sum_exceeds_max(self):
-        # (MAX_SUPPORT_DIM + 1)^2 -> a=MAX_SUPPORT_DIM+1, b=0 -> a+b > MAX_SUPPORT_DIM
         n = (MAX_SUPPORT_DIM + 1) ** 2
         with self.assertRaisesRegex(ValueError, "should be less than"):
             get_decompose_dim(n, 1)
 
     def test_fallback_when_left_times_m_exceeds_max(self):
-        # n=MAX_SUPPORT_DIM^2 -> a=MAX_SUPPORT_DIM, b=0 -> a+b==MAX_SUPPORT_DIM (no raise);
-        # m=2 -> (a-b)*m = 2*MAX_SUPPORT_DIM > MAX_SUPPORT_DIM -> fallback
         n = MAX_SUPPORT_DIM * MAX_SUPPORT_DIM
         left, right = get_decompose_dim(n, 2)
         self.assertEqual(left, MAX_SUPPORT_DIM)
@@ -58,16 +53,28 @@ class TestAscendW4A4MXFP4FlatQuantDynamicLinearMethod(TestBase):
         mock_vllm_config.quant_config = Mock(
             quant_description={"group_size": group_size, "max_supported_tp": max_supported_tp}
         )
-        with patch(
-            "vllm_ascend.quantization.methods.w4a4_mxfp4_flatquant.ensure_mxfp4_flatquant_linear_available"
-        ), patch(
-            "vllm_ascend.quantization.methods.w4a4_mxfp4_flatquant.get_current_vllm_config",
-            return_value=mock_vllm_config,
-        ), patch(
-            "vllm_ascend.quantization.methods.w4a4_mxfp4_flatquant.get_tensor_model_parallel_world_size",
-            return_value=tp_size,
-        ):
-            return AscendW4A4MXFP4FlatQuantDynamicLinearMethod()
+        with (
+
+            patch("vllm_ascend.quantization.methods.w4a4_mxfp4_flatquant.ensure_mxfp4_flatquant_linear_available"),
+
+            patch(
+
+               "vllm_ascend.quantization.methods.w4a4_mxfp4_flatquant.get_current_vllm_config",
+
+                return_value=mock_vllm_config,
+
+            ),
+
+            patch(
+
+                "vllm_ascend.quantization.methods.w4a4_mxfp4_flatquant.get_tensor_model_parallel_world_size",
+
+                return_value=tp_size,
+
+            ),
+
+         ):
+             return AscendW4A4MXFP4FlatQuantDynamicLinearMethod()
 
     def setUp(self):
         self.method = self._build_method()
@@ -158,9 +165,8 @@ class TestAscendW4A4MXFP4FlatQuantDynamicLinearMethod(TestBase):
         layer.aclnn_clip_ratio = 0.9
         x = torch.randn(2, 4, self.input_size, dtype=torch.bfloat16)
         mock_torch_npu.npu_kronecker_quant.return_value = (MagicMock(), MagicMock())
-        mock_torch_npu.npu_quant_matmul.return_value = torch.randn(
-            8, self.output_size, dtype=torch.bfloat16
-        )
+        mock_torch_npu.npu_quant_matmul.return_value = torch.randn(8, self.output_size, dtype=torch.bfloat16)
+ 
         output = self.method.apply(layer, x)
         self.assertEqual(output.shape, (2, 4, self.output_size))
 
@@ -174,9 +180,8 @@ class TestAscendW4A4MXFP4FlatQuantDynamicLinearMethod(TestBase):
 
     def test_process_weights_after_loading_non_row(self):
         layer = MagicMock()
-        layer.weight.data = torch.randint(
-            0, 255, (self.output_size, self.input_size // 2), dtype=torch.uint8
-        )
+        layer.weight.data = torch.randint(0, 255, (self.output_size, self.input_size // 2), dtype=torch.uint8)
+
         weight_scale_data = torch.randint(
             0, 255, (self.output_size, self.input_size // self.group_size), dtype=torch.uint8
         )
@@ -221,9 +226,8 @@ class TestAscendW4A4MXFP4FlatQuantDynamicLinearMethod(TestBase):
             layer.right_trans = MagicMock()
             layer.right_trans.data = torch.randn(16, 16, dtype=torch.bfloat16)
             layer.weight = MagicMock()
-            layer.weight.data = torch.randint(
-                0, 255, (self.output_size, self.input_size // 2), dtype=torch.uint8
-            )
+            layer.weight.data = torch.randint(0, 255, (self.output_size, self.input_size // 2), dtype=torch.uint8)
+
             weight_scale_data = torch.randint(
                 0, 255, (self.output_size, self.input_size // self.group_size), dtype=torch.uint8
             )
@@ -246,3 +250,4 @@ class TestAscendW4A4MXFP4FlatQuantDynamicLinearMethod(TestBase):
 
 if __name__ == "__main__":
     unittest.main(argv=["first-arg-is-ignored"], exit=False)
+    
