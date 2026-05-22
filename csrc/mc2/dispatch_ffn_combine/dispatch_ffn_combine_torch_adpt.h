@@ -31,7 +31,8 @@ std::tuple<at::Tensor&, at::Tensor&> dispatch_ffn_combine(
     int64_t max_output_size,
     at::Tensor& out,
     at::Tensor& expert_token_nums,
-    const c10::optional<at::Tensor>& x_active_mask
+    const c10::optional<at::Tensor>& x_active_mask,
+    double swiglu_limit
 ) {
     char *group_ep_ptr = const_cast<char *>(group.data());
     bool is_int8 = weight1[0].dtype() == at::kChar;
@@ -48,6 +49,7 @@ std::tuple<at::Tensor&, at::Tensor&> dispatch_ffn_combine(
                  x_active_mask.has_value() ? x_active_mask.value() : at::Tensor(),
                  group_ep_ptr,
                  max_output_size,
+                 swiglu_limit,
                  out,
                  expert_token_nums);
     } else if (is_int4){
