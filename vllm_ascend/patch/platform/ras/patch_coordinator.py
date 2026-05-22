@@ -393,7 +393,6 @@ def _patched_process_input_socket(
                             logger.info(
                                 "[RAS] All engines reported: ALL SUCCESS",
                             )
-                            current_wave += 1
                             recovery_pub.send(msgspec.msgpack.encode(
                                 ("recoverycomplete", RecoveryComplete(
                                     plan_name=recovery_plan_result.plan_name,
