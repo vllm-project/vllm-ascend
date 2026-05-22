@@ -96,6 +96,7 @@ def _stop_device(executor: Any, cfg: dict | None) -> bool:
                         break
                 if not executor.exception_occur:
                     logger.warning("exception not occur after stop_device, worker may passed fucntion call")
+                executor.device_stopped = True
                 return cfg, True
             else:
                 logger.error(f"stop_device failed with result: {stop_result}")
