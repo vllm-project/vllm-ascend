@@ -2,6 +2,7 @@
 # has trailing whitespace stripped.  If an error is encountered when running
 # python, a fatal message `ERR_MSG` is issued.
 #
+
 function (run_python OUT EXPR ERR_MSG)
   execute_process(
     COMMAND
