@@ -243,8 +243,8 @@ def dsa_forward(
                     torch.ops._C_ascend.npu_scatter_nd_update_v2(
                         indexer_scale_cache, slot_mapping_dummy, kv_scale_dummy)
 
-                # Part3 kv_comprecessor module
-                _ = impl.weights_proj(dummy)
+                    # Part4 kv_comprecessor module
+                    _ = impl.weights_proj(dummy)
 
             torch.npu.current_stream().wait_stream(aux_stream)
         output.fill_(0)

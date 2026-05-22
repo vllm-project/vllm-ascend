@@ -2623,7 +2623,7 @@ class AscendDSAImpl(DSAAttentionImpl):
             x: torch.Tensor,
             qr: torch.Tensor,
             kv_cache: tuple[torch.Tensor],
-            attn_metadata: list[M],
+            attn_metadata: DSAMetadataList,
             cos: torch.Tensor,
             sin: torch.Tensor,
             compressed_cos: torch.Tensor,
@@ -2632,7 +2632,7 @@ class AscendDSAImpl(DSAAttentionImpl):
             with_prefill: bool = False,
             qr_pertoken_scale: torch.Tensor = None,
     ):
-        q, kv, ik, isc, ist, isc_meta, wp = self._indexer_qkv_prepare(
+        q, kv, ik, isc, indexer_kv_state_meta, isc_meta, wp = self._indexer_qkv_prepare(
             x, qr, kv_cache, attn_metadata, cos, sin,
             compressed_cos, compressed_sin,
             actual_seq_lengths_query, with_prefill, qr_pertoken_scale,
@@ -2642,7 +2642,7 @@ class AscendDSAImpl(DSAAttentionImpl):
                                           self.indexer_heads ** -0.5)
 
         return self._indexer_qli_finish(
-            q, kv, weights, ik, isc, ist, isc_meta, wp)
+            q, kv, weights, ik, isc, indexer_kv_state_meta, isc_meta, wp)
 
 
     def cv_indexer_select_qli(
@@ -2650,7 +2650,7 @@ class AscendDSAImpl(DSAAttentionImpl):
         x: torch.Tensor,
         qr: torch.Tensor,
         kv_cache: tuple[torch.Tensor],
-        attn_metadata: list[M],
+        attn_metadata: DSAMetadataList,
         cos: torch.Tensor,
         sin: torch.Tensor,
         compressed_cos: torch.Tensor,
