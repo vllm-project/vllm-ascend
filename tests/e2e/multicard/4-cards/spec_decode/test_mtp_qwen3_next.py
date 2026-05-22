@@ -58,7 +58,7 @@ def test_qwen3_next_mtp_acceptance_tp4(model_name):
             "method": "qwen3_next_mtp",
             "num_speculative_tokens": 3,
         },
-        compilation_config=CompilationConfig(cudagraph_capture_sizes=[20]),
+        compilation_config=CompilationConfig(cudagraph_mode="FULL_DECODE_ONLY", cudagraph_capture_sizes=[20]),
     ) as spec_vllm_model:
         _ = spec_vllm_model.generate_greedy(example_prompts, max_tokens)
         metrics = spec_vllm_model.model.get_metrics()
@@ -82,108 +82,4 @@ def test_qwen3_next_mtp_acceptance_tp4(model_name):
         print(f"golden: {golden}")
 
     assert match
-    cleanup_dist_env_and_memory()
-
-
-# FIXME: When applying `FULL_DECODE_ONLY` in this e2e, ci will fail.
-# The failure can not be reproduced locally.
-@pytest.mark.parametrize("model_name", MODELS)
-@pytest.mark.parametrize("num_speculative_tokens", [1])
-@pytest.mark.parametrize("disable_padded_drafter_batch", [True, False])
-@pytest.mark.skip("Skip this CI.")
-def test_qwen3_next_mtp_correctness_tp4(
-    model_name: str, num_speculative_tokens: int, disable_padded_drafter_batch: bool
-):
-    example_prompts = [
-        "Hello, my name is",
-        "The president of the United States is",
-        "The capital of France is",
-        "The future of AI is",
-        "Hello, my name is",
-        "The president of the United States is",
-        "The capital of France is",
-        "The future of AI is",
-        "Who are you?",
-    ]
-
-    max_tokens = 20
-    """
-    Compare the outputs of a original LLM and a speculative LLM
-    should be the same when using mtp speculative decoding.
-    """
-    with VllmRunner(
-        model_name,
-        tensor_parallel_size=4,
-        max_model_len=4096,
-        gpu_memory_utilization=0.8,
-        distributed_executor_backend="mp",
-        speculative_config={
-            "method": "mtp",
-            "num_speculative_tokens": num_speculative_tokens,
-            "disable_padded_drafter_batch": disable_padded_drafter_batch,
-        },
-        compilation_config=CompilationConfig(cudagraph_capture_sizes=[20]),
-    ) as spec_llm:
-        spec_outputs = spec_llm.generate_greedy(example_prompts, max_tokens)
-    del spec_llm
-
-    with VllmRunner(
-        model_name,
-        tensor_parallel_size=4,
-        max_model_len=4096,
-        gpu_memory_utilization=0.8,
-        distributed_executor_backend="mp",
-        compilation_config=CompilationConfig(cudagraph_capture_sizes=[20]),
-    ) as ref_llm:
-        ref_outputs = ref_llm.generate_greedy(example_prompts, max_tokens)
-    del ref_llm
-
-    matches = 0
-    misses = 0
-    for ref_output, spec_output in zip(ref_outputs, spec_outputs):
-        ref_token_ids = ref_output[0]
-        spec_token_ids = spec_output[0]
-        if ref_token_ids == spec_token_ids[: len(ref_token_ids)]:
-            matches += 1
-        else:
-            misses += 1
-            print(f"ref_output: {ref_output[1]}")
-            print(f"spec_output: {spec_output[1]}")
-
-    # Heuristic: expect at least 66% of the prompts to match exactly
-    # Upon failure, inspect the outputs to check for inaccuracy.
-    assert matches > int(0.66 * len(ref_outputs))
-    cleanup_dist_env_and_memory()
-
-
-@pytest.mark.parametrize("model_name", MODELS)
-@pytest.mark.parametrize("num_speculative_tokens", [1])
-def test_qwen3_next_mtp_full_decode(model_name: str, num_speculative_tokens: int):
-    example_prompts = [
-        "Hello, my name is",
-        "The president of the United States is",
-        "The capital of France is",
-        "The future of AI is",
-    ]
-
-    max_tokens = 20
-    """
-    Compare the outputs of a original LLM and a speculative LLM
-    should be the same when using mtp speculative decoding.
-    """
-    with VllmRunner(
-        model_name,
-        tensor_parallel_size=4,
-        max_model_len=4096,
-        gpu_memory_utilization=0.8,
-        distributed_executor_backend="mp",
-        speculative_config={
-            "method": "qwen3_next_mtp",
-            "num_speculative_tokens": num_speculative_tokens,
-        },
-        compilation_config=CompilationConfig(cudagraph_mode="FULL_DECODE_ONLY", cudagraph_capture_sizes=[4]),
-    ) as llm:
-        outputs = llm.generate_greedy(example_prompts, max_tokens)
-        print(outputs)
-    del llm
     cleanup_dist_env_and_memory()
