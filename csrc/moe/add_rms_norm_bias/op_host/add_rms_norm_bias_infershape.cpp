@@ -12,7 +12,7 @@
  * \file add_rms_norm_bias_infershape.cpp
  * \brief
  */
-#include "log/log.h"
+#include "tiling_base/error_log.h"
 #include "util/shape_util.h"
 #include "register/op_impl_registry.h"
 

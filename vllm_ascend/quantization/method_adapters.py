@@ -200,9 +200,10 @@ class AscendFusedMoEMethod(FusedMoEMethodBase):
         moe_config: The FusedMoE configuration.
     """
 
-    def __init__(self, scheme: AscendMoEScheme, moe_config: FusedMoEConfig) -> None:
+    def __init__(self, scheme: AscendMoEScheme, moe_config: FusedMoEConfig, tid2eid=None) -> None:
         super().__init__(moe_config)
         self.quant_method = scheme
+        self.tid2eid = tid2eid
 
     def create_weights(
         self,
@@ -285,6 +286,7 @@ class AscendFusedMoEMethod(FusedMoEMethodBase):
             activation=activation,
             apply_router_weight_on_input=apply_router_weight_on_input,
             mc2_mask=mc2_mask,
+            tid2eid=self.tid2eid,
         )
 
     def process_weights_after_loading(self, layer: torch.nn.Module) -> None:
