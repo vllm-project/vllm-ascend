@@ -2489,7 +2489,7 @@ class AscendDSAImpl(DSAAttentionImpl):
         with_prefill: bool = False,
         qr_pertoken_scale: torch.Tensor = None,
     ):
-        q, kv, ik, isc, ist, isc_meta, wp = self._indexer_qkv_prepare(
+        q, kv, ik, isc, indexer_kv_state_metadata, isc_meta, wp = self._indexer_qkv_prepare(
             x,
             qr,
             kv_cache,
@@ -2505,4 +2505,4 @@ class AscendDSAImpl(DSAAttentionImpl):
 
         weights = self.weights_proj(x) * (self.indexer_softmax_scale * self.indexer_heads**-0.5)
 
-        return self._indexer_qli_finish(q, kv, weights, ik, isc, ist, isc_meta, wp)
+        return self._indexer_qli_finish(q, kv, weights, ik, isc, indexer_kv_state_metadata, isc_meta, wp)
