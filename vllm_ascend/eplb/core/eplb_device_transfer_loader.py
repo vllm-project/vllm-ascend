@@ -14,8 +14,6 @@
 # limitations under the License.
 # This file is a part of the vllm-ascend project.
 #
-import hashlib
-import os
 from enum import Enum
 
 import torch
@@ -23,14 +21,6 @@ import torch.distributed as dist
 from vllm.logger import logger
 
 from vllm_ascend.distributed.parallel_state import get_dynamic_eplb_group
-
-
-def _tensor_checksum(t: torch.Tensor, tag: str = "") -> str:
-    """Compute a deterministic hex checksum for a tensor. Debug only."""
-    data = t.contiguous().cpu().float().numpy().tobytes()
-    h = hashlib.sha256(data).hexdigest()[:16]
-    logger.info("[EPLB_CHK] %s shape=%s dtype=%s device=%s hash=%s", tag, t.shape, t.dtype, t.device, h)
-    return h
 
 
 class ExpertWeightUpdateState(Enum):
@@ -63,27 +53,12 @@ class D2DExpertWeightLoader:
 
         self.layer_id = layer_id
         self.comm_op_list = []
-
-        # DEBUG: dump expert mapping before update
-        old_map = self.eplb_adaptor.expert_map_per_layer_cpu[layer_id]
-        old_experts = sorted([(i, int(old_map[i])) for i in range(len(old_map)) if old_map[i] != -1],
-                             key=lambda x: x[1])
-        logger.info("[EPLB_DEBUG] rank=%s layer=%s BEFORE: local_slot->global_expert mapping: %s",
-            dist.get_rank(), layer_id, old_experts)
-        logger.info("[EPLB_DEBUG] rank=%s layer=%s SEND plan: %s",
-            dist.get_rank(), layer_id, expert_send_info)
-        logger.info("[EPLB_DEBUG] rank=%s layer=%s RECV plan: %s",
-            dist.get_rank(), layer_id, expert_recv_info)
-        logger.info("[EPLB_DEBUG] rank=%s layer=%s NEW expert_map: %s",
-            dist.get_rank(), layer_id,
-            [(i, int(updated_expert_map[i])) for i in range(len(updated_expert_map)) if updated_expert_map[i] != -1])
         for send_info in expert_send_info:
             dst_rank, global_expert_id_to_send = send_info
             # Plan now carries the local expert ID directly (not a slot index).
             # expert_param_per_layer is indexed by local expert ID.
             local_expert_id = global_expert_id_to_send
             for src_tensor in self.eplb_adaptor.expert_param_per_layer[layer_id][local_expert_id]:
-                _tensor_checksum(src_tensor, f"SEND layer={layer_id} expert={global_expert_id_to_send} local_expert={local_expert_id} dst_rank={dst_rank}")
                 self.comm_op_list.append(
                     dist.P2POp(dist.isend, src_tensor.contiguous(), self.comm_group.ranks[dst_rank], group=self.comm_group.device_group)
                 )
@@ -126,12 +101,6 @@ class D2DExpertWeightLoader:
         if self.comm_op_list is not None:
             self.comm_op_list = None
 
-        # checksum received buffer before applying
-        for buffer_tensor_id, recv_expert_info in enumerate(self.recv_expert_list):
-            local_expert_to_replace, _ = recv_expert_info
-            for buf in self.eplb_adaptor.buffer_tensor_list[buffer_tensor_id]:
-                _tensor_checksum(buf, f"RECV layer={self.layer_id} buffer_id={buffer_tensor_id} local_expert={local_expert_to_replace}")
-
         # update expert_map
         self.eplb_adaptor.do_update_expert_map(self.layer_id, self.updated_expert_map)
 
@@ -143,19 +112,6 @@ class D2DExpertWeightLoader:
         for recv_expert_info in self.recv_expert_list:
             local_expert_to_replace, buffer_tensor_id = recv_expert_info
             self.eplb_adaptor.do_update_expert_weight(self.layer_id, local_expert_to_replace, buffer_tensor_id)
-            # checksum after copy_
-            for updated_tensor in self.eplb_adaptor.expert_param_per_layer[self.layer_id][local_expert_to_replace]:
-                _tensor_checksum(updated_tensor, f"COPY_DONE layer={self.layer_id} local_expert={local_expert_to_replace}")
-
-        # DEBUG: dump expert mapping after update
-        new_map = self.eplb_adaptor.expert_map_per_layer_cpu[self.layer_id]
-        new_experts = sorted([(i, int(new_map[i])) for i in range(len(new_map)) if new_map[i] != -1],
-                             key=lambda x: x[1])
-        logger.info("[EPLB_DEBUG] rank=%s layer=%s AFTER:  local_slot->global_expert mapping: %s",
-            dist.get_rank(), self.layer_id, new_experts)
-
-        if self.layer_id == self.num_layers - 1:
-            logger.info("[EPLB] finished update expert weight.")
 
         self.recv_expert_list = []
         self.updated_expert_map = None
