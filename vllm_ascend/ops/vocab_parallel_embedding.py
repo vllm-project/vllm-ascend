@@ -264,10 +264,10 @@ class AscendLogitsProcessor(LogitsProcessor):
     ) -> torch.Tensor | None:
         # Gather hidden states from all devices in tensor parallel group
         gathered_hidden_states = get_lmhead_tp_group().all_gather(hidden_states, dim=0)
-        local_logits = lm_head.quant_method.apply(lm_head, gathered_hidden_states, bias=embedding_bias)
+        logits = lm_head.quant_method.apply(lm_head, gathered_hidden_states, bias=embedding_bias)
         # Gather logits for tensor parallel
         if not get_ascend_config().enable_reduce_sample:
-            logits = get_lmhead_tp_group().all_to_all(local_logits)
+            logits = get_lmhead_tp_group().all_to_all(logits)
 
         # Remove paddings in vocab (if any)
         if logits is not None:
