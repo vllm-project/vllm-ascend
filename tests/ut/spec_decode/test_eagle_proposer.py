@@ -2187,7 +2187,7 @@ class MockDraftModel:
             return last_hidden_states, hidden_states
         return last_hidden_states
 
-    def compute_logits(self, sample_hidden_states, enable_reduce_sample):
+    def compute_logits(self, sample_hidden_states, enable_reduce_sample=False):
         self.logit_inputs.append(sample_hidden_states.clone())
         token_ids = sample_hidden_states[:, 0].to(torch.long)
         logits = torch.full((sample_hidden_states.shape[0], self.vocab_size), -1000.0)
@@ -2601,7 +2601,7 @@ class TestRunMergedDraft(TestBase):
         )
 
         mock_ascend_config = MagicMock()
-        mock_ascend_config.enable_reduce_sample = True
+        mock_ascend_config.enable_reduce_sample = False
         with (
             patch.object(llm_base_proposer, "lmhead_tp_enable", return_value=False),
             patch.object(llm_base_proposer, "get_ascend_config", return_value=mock_ascend_config),
