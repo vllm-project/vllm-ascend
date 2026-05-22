@@ -61,6 +61,7 @@ from vllm.model_executor.models.utils import extract_layer_index
 
 from vllm_ascend.ascend_config import get_ascend_config
 from vllm_ascend.ascend_forward_context import _EXTRA_CTX
+from vllm_ascend.attention.utils import enable_cp
 from vllm_ascend.distributed.parallel_state import (
     get_flashcomm2_odp_group,
     get_flashcomm2_otp_group,
@@ -81,7 +82,6 @@ from vllm_ascend.utils import (
     oproj_tp_enable,
     shared_expert_dp_enabled,
 )
-from vllm_ascend.attention.utils import enable_cp
 
 
 class CustomLinearOp:
@@ -750,4 +750,3 @@ def is_moe_layer(prefix: str) -> bool:
     n_routed_experts, first_k_dense_replace, moe_layer_freq = get_moe_params()
 
     return n_routed_experts is not None and layer_idx >= first_k_dense_replace and layer_idx % moe_layer_freq == 0
-
