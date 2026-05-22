@@ -542,7 +542,7 @@ Before you start, please
             "torch_profiler_dir": "./vllm_profile",
             "torch_profiler_with_stack": false}' \
             --seed 1024 \
-            --served-model-name dsv3 \
+            --served-model-name deepseek_v3.2 \
             --max-model-len 68000 \
             --max-num-batched-tokens 32560 \
             --trust-remote-code \
@@ -617,7 +617,7 @@ Before you start, please
             "torch_profiler_dir": "./vllm_profile",
             "torch_profiler_with_stack": false}' \
             --seed 1024 \
-            --served-model-name dsv3 \
+            --served-model-name deepseek_v3.2 \
             --max-model-len 68000 \
             --max-num-batched-tokens 32560 \
             --trust-remote-code \
@@ -694,7 +694,7 @@ Before you start, please
             "torch_profiler_dir": "./vllm_profile",
             "torch_profiler_with_stack": false}' \
             --seed 1024 \
-            --served-model-name dsv3 \
+            --served-model-name deepseek_v3.2 \
             --max-model-len 68000 \
             --max-num-batched-tokens 12 \
             --compilation-config '{"cudagraph_mode":"FULL_DECODE_ONLY", "cudagraph_capture_sizes":[3, 6, 9, 12]}' \
@@ -771,7 +771,7 @@ Before you start, please
             "torch_profiler_dir": "./vllm_profile",
             "torch_profiler_with_stack": false}' \
             --seed 1024 \
-            --served-model-name dsv3 \
+            --served-model-name deepseek_v3.2 \
             --max-model-len 68000 \
             --max-num-batched-tokens 12 \
             --compilation-config '{"cudagraph_mode":"FULL_DECODE_ONLY",  "cudagraph_capture_sizes":[3, 6, 9, 12]}' \
@@ -865,6 +865,11 @@ python load_balance_proxy_layerwise_server_example.py \
 ## Functional Verification
 
 Once your server is started, you can query the model with input prompts:
+
+**Note**:
+
+- `<node0_ip>`: The IP address of the node where the server is running (e.g., localhost).
+- `<port>`: The port number specified in the server startup command (e.g., 8000).
 
 ```shell
 curl http://<node0_ip>:<port>/v1/completions \
