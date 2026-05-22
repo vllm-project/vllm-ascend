@@ -20,25 +20,24 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 from dataclasses import dataclass
-from typing import Optional
 
 import torch
 from torch import nn
-from vllm.v1.attention.backend import AttentionMetadata
 from vllm.config import CacheConfig, get_current_vllm_config
 from vllm.forward_context import ForwardContext, get_forward_context
 from vllm.model_executor.layers.mla import MultiHeadLatentAttentionWrapper
 from vllm.model_executor.layers.quantization import QuantizationConfig
 from vllm.utils.torch_utils import direct_register_custom_op
+from vllm.v1.attention.backend import AttentionMetadata
 from vllm.v1.attention.backends.mla.sparse_swa import DeepseekV4SWACache
+
+from vllm_ascend.attention.dsa_v1 import _dsa_sub_stream
+from vllm_ascend.models.layer.attention.layer import DSAAttention
 from vllm_ascend.utils import (
     AscendDeviceType,
     get_ascend_device_type,
     npu_stream_switch,
 )
-
-from vllm_ascend.models.layer.attention.layer import DSAAttention
-from vllm_ascend.attention.dsa_v1 import _dsa_sub_stream
 
 
 @dataclass
@@ -60,7 +59,6 @@ class DSAModules:
 
 
 class AscendDeepseekSparseAttention(MultiHeadLatentAttentionWrapper):
-
     def __init__(
         self,
         dim: int,
@@ -139,8 +137,7 @@ class AscendDeepseekSparseAttention(MultiHeadLatentAttentionWrapper):
             cache_config=cache_config,
             quant_config=quant_config,
             prefix=f"{prefix}.attn",
-
-            #extra
+            # extra
             wq_a=self.wq_a,
             wq_b=self.wq_b,
             wkv=self.wkv,
@@ -161,24 +158,22 @@ class AscendDeepseekSparseAttention(MultiHeadLatentAttentionWrapper):
         compilation_config.static_forward_context[prefix] = self
 
     def forward(
-            self,
-            positions: torch.Tensor,
-            hidden_states: torch.Tensor,
-            kv_cache: Optional[torch.Tensor] = None,
-            attn_metadata: Optional[AttentionMetadata] = None) -> torch.Tensor:
+        self,
+        positions: torch.Tensor,
+        hidden_states: torch.Tensor,
+        kv_cache: torch.Tensor | None = None,
+        attn_metadata: AttentionMetadata | None = None,
+    ) -> torch.Tensor:
         need_gather_q_kv = get_forward_context().flash_comm_v1_enabled
         output_shape = hidden_states.shape
 
-        output = torch.empty(output_shape,
-                             dtype=hidden_states.dtype,
-                             device=hidden_states.device)
+        output = torch.empty(output_shape, dtype=hidden_states.dtype, device=hidden_states.device)
 
         # All DSA forward paths run inside dsa_forward custom op boundary,
         # which is required for ACL graph capture (registered with
         # dispatch_key="PrivateUse1").  When dual-stream is disabled,
         # dsa_forward dispatches to the original serial path.
-        torch.ops.vllm.dsa_forward(
-            hidden_states, need_gather_q_kv, output, self.prefix)
+        torch.ops.vllm.dsa_forward(hidden_states, need_gather_q_kv, output, self.prefix)
 
         output = output.view(-1, output_shape[-1])
         return output
@@ -207,9 +202,7 @@ def dsa_forward(
         if self.compress_ratio == 4:
             impl = self.dsa_attn.impl
             if impl._use_dual_stream():
-                dummy = torch.zeros(1, hidden_states.shape[-1],
-                                    dtype=hidden_states.dtype,
-                                    device=hidden_states.device)
+                dummy = torch.zeros(1, hidden_states.shape[-1], dtype=hidden_states.dtype, device=hidden_states.device)
                 e1 = torch.npu.current_stream().record_event()
                 with npu_stream_switch(_dsa_sub_stream()):
                     torch.npu.current_stream().wait_event(e1)
@@ -226,8 +219,7 @@ def dsa_forward(
     use_dual = impl._use_dual_stream()
 
     if use_dual and self.compress_ratio == 4 and (has_decode or has_prefill):
-        hidden_states = torch.ops.vllm.maybe_all_gather_and_maybe_unpad(
-            hidden_states, need_gather_q_kv)
+        hidden_states = torch.ops.vllm.maybe_all_gather_and_maybe_unpad(hidden_states, need_gather_q_kv)
 
         decode_tokens = attn_metadata[0].num_decode_tokens
         actual_tokens = attn_metadata[0].num_actual_tokens
@@ -240,21 +232,16 @@ def dsa_forward(
 
         if has_decode:
             decode_hs = hidden_states[:decode_tokens]
-            decode_result = impl.dsa_decode_prepare(
-                self.dsa_attn.layer_name, decode_hs,
-                kv_cache, attn_metadata)
+            decode_result = impl.dsa_decode_prepare(self.dsa_attn.layer_name, decode_hs, kv_cache, attn_metadata)
 
         if has_prefill:
             prefill_hs = hidden_states[decode_tokens:actual_tokens]
-            prefill_result = impl.dsa_prefill_prepare(
-                self.dsa_attn.layer_name, prefill_hs,
-                kv_cache, attn_metadata)
+            prefill_result = impl.dsa_prefill_prepare(self.dsa_attn.layer_name, prefill_hs, kv_cache, attn_metadata)
 
         # ============================================================
         # Phase 2: Compressor + dual-stream weights_proj overlap
         # ============================================================
-        (compressor_attn_metadata,
-         compressor_kv_state_metadata, _, _, _) = attn_metadata
+        (compressor_attn_metadata, compressor_kv_state_metadata, _, _, _) = attn_metadata
 
         coff = 2 if impl.compressor_overlap else 1
         unfolded_state_cache = kv_cache[2]
@@ -262,9 +249,9 @@ def dsa_forward(
         # Decode compressor
         decode_compressed_kv = None
         if has_decode:
-            (q, compress_cos, compress_sin,
-             actual_seq_lengths_query, q_idx, kv_idx,
-             ik, isc, isc_meta, wp) = decode_result
+            (q, compress_cos, compress_sin, actual_seq_lengths_query, q_idx, kv_idx, ik, isc, isc_meta, wp) = (
+                decode_result
+            )
 
             decode_compressed_kv = torch.ops._C_ascend.compressor(
                 decode_hs,
@@ -290,9 +277,18 @@ def dsa_forward(
         # Prefill compressor
         prefill_compressed_kv = None
         if has_prefill:
-            (pq, pcompress_cos, pcompress_sin,
-             pactual_seq_lengths_query, pq_idx, pkv_idx,
-             pik, pisc, pisc_meta, pwp) = prefill_result
+            (
+                pq,
+                pcompress_cos,
+                pcompress_sin,
+                pactual_seq_lengths_query,
+                pq_idx,
+                pkv_idx,
+                pik,
+                pisc,
+                pisc_meta,
+                pwp,
+            ) = prefill_result
 
             prefill_compressed_kv = torch.ops._C_ascend.compressor(
                 prefill_hs,
@@ -329,8 +325,7 @@ def dsa_forward(
         decode_q_quant = None
         decode_q_scale = None
         if has_decode:
-            decode_q_quant, decode_q_scale, _, _ = impl._indexer_quant_scatter(
-                q_idx, kv_idx, ik, isc, isc_meta, wp)
+            decode_q_quant, decode_q_scale, _, _ = impl._indexer_quant_scatter(q_idx, kv_idx, ik, isc, isc_meta, wp)
 
             torch.ops._C_ascend.npu_scatter_nd_update_v2(
                 kv_cache[0],
@@ -342,7 +337,8 @@ def dsa_forward(
         prefill_q_scale = None
         if has_prefill:
             prefill_q_quant, prefill_q_scale, _, _ = impl._indexer_quant_scatter(
-                pq_idx, pkv_idx, pik, pisc, pisc_meta, pwp)
+                pq_idx, pkv_idx, pik, pisc, pisc_meta, pwp
+            )
 
             torch.ops._C_ascend.npu_scatter_nd_update_v2(
                 kv_cache[0],
@@ -352,7 +348,7 @@ def dsa_forward(
 
         torch.npu.current_stream().wait_stream(_dsa_sub_stream())
 
-        scale = impl.indexer_softmax_scale * impl.indexer_heads ** -0.5
+        scale = impl.indexer_softmax_scale * impl.indexer_heads**-0.5
 
         # Split weights into decode and prefill portions
         decode_weights = None
@@ -371,7 +367,8 @@ def dsa_forward(
         # Phase 3: QLI + sparse attention + o_proj (unified)
         # ============================================================
         impl.dsa_dual_stream_finish(
-            self.dsa_attn.layer_name, output,
+            self.dsa_attn.layer_name,
+            output,
             decode_q=q if has_decode else None,
             decode_q_quant=decode_q_quant,
             decode_q_scale=decode_q_scale,
@@ -386,9 +383,9 @@ def dsa_forward(
             num_actual_tokens=actual_tokens,
         )
     else:
-        self.dsa_attn.impl.forward(self.dsa_attn.layer_name, hidden_states,
-                                   kv_cache, attn_metadata, need_gather_q_kv,
-                                   output)
+        self.dsa_attn.impl.forward(
+            self.dsa_attn.layer_name, hidden_states, kv_cache, attn_metadata, need_gather_q_kv, output
+        )
     return
 
 
@@ -409,9 +406,11 @@ direct_register_custom_op(
     dispatch_key="PrivateUse1",
 )
 
+
 def filter_metadata(metadata, prefix):
     # filter using prefix, sort by key for deterministic order
     return [v for k, v in sorted(metadata.items()) if k.startswith(prefix)]
+
 
 def _build_kv_cache(self, forward_context):
     """Construct the 6-tuple KV cache used by impl.forward()."""
@@ -426,23 +425,29 @@ def _build_kv_cache(self, forward_context):
         state_cache = self.compressor.state_cache.kv_cache
         compress_kv_cache = self.dsa_attn.kv_cache
         virtual_engine = getattr(forward_context, "virtual_engine", None)
-        if virtual_engine is not None and isinstance(compress_kv_cache,
-                                                     (list, tuple)):
+        if virtual_engine is not None and isinstance(compress_kv_cache, (list, tuple)):
             compress_kv_cache = compress_kv_cache[virtual_engine]
     if self.compress_ratio == 4:
         indexer_state_cache = self.indexer.compressor.state_cache.kv_cache
-        indexer_k_cache, indexer_scale_cache = (self.indexer.k_cache.kv_cache[0][0],
-                                                 self.indexer.k_cache.kv_cache[0][1])
+        indexer_k_cache, indexer_scale_cache = (
+            self.indexer.k_cache.kv_cache[0][0],
+            self.indexer.k_cache.kv_cache[0][1],
+        )
 
-    return tuple([
-        unfold_kvcache(cache) for cache in (
-        compress_kv_cache,
-        swa_kv_cache,
-        state_cache,
-        indexer_state_cache,
-        indexer_k_cache,
-        indexer_scale_cache,
-    )])
+    return tuple(
+        [
+            unfold_kvcache(cache)
+            for cache in (
+                compress_kv_cache,
+                swa_kv_cache,
+                state_cache,
+                indexer_state_cache,
+                indexer_k_cache,
+                indexer_scale_cache,
+            )
+        ]
+    )
+
 
 def unfold_kvcache(kvcache):
     while isinstance(kvcache, list) and len(kvcache) == 1:
