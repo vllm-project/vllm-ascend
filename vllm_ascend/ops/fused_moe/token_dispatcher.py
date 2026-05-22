@@ -353,7 +353,7 @@ class TokenDispatcherWithAllGather(MoETokenDispatcher[MoEAllGatherCombineMetadat
         self,
         token_dispatch_input: MoETokenDispatchInput,
     ):
-        # TODO: After AllGather MXFP4 communication quantization thorough verification, remove this judgment
+        # TODO: After AllGather MXFP4 communication quantization thorough verification, remove this judgment.
         #  MXFP4 keeps dispatch unquantized in AllGather path, and quantizes again inside the MLP path.
         with_quant = (
             token_dispatch_input.quant.dispatch_with_quant and token_dispatch_input.quant.quant_type != QuantType.MXFP4
