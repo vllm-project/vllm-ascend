@@ -51,6 +51,7 @@ from vllm_ascend.ops.triton.mamba.causal_conv1d import causal_conv1d_fn
 from vllm_ascend.utils import weak_ref_tensors
 
 
+
 def to_int64_tuple(tensor: torch.Tensor) -> tuple[int, ...]:
     tensor = tensor.to(torch.int64)
     if tensor.dim() == 0:
