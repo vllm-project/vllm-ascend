@@ -53,7 +53,7 @@ on:
         default: ''
 env:
   UV_INDEX_URL: http://cache-service.nginx-pypi-cache.svc.cluster.local/pypi/simple
-  UV_EXTRA_INDEX_URL: "https://repo.huaweicloud.com/ascend/repos/pypi"
+  UV_EXTRA_INDEX_URL: "https://repo.huaweicloud.com/ascend/repos/pypi http://cache-service.nginx-pypi-cache.svc.cluster.local/whl/cpu/"
   UV_PACKAGE_INDEXES: '{
     "torch": "http://cache-service.nginx-pypi-cache.svc.cluster.local/whl/cpu/",
     "torchvision": "http://cache-service.nginx-pypi-cache.svc.cluster.local/whl/cpu/",
@@ -142,7 +142,7 @@ jobs:
 
       - name: Install vllm-project/vllm-ascend
         env:
-          MAX_JOBS: "23"
+          MAX_JOBS: "46"
         run: |
           pip install uc-manager
           uv pip install -v -r requirements-dev.txt
@@ -411,11 +411,11 @@ jobs:
 
       - name: Install vllm-project/vllm-ascend
         env:
-          MAX_JOBS: "46"
-          PIP_EXTRA_INDEX_URL: "https://repo.huaweicloud.com/ascend/repos/pypi https://triton-ascend.osinfra.cn/pypi/simple"
+          MAX_JOBS: "92"
+          PIP_EXTRA_INDEX_URL: "https://repo.huaweicloud.com/ascend/repos/pypi http://cache-service.nginx-pypi-cache.svc.cluster.local/whl/cpu/"
         run: |
           pip install uc-manager
-          pip install -v -r requirements-dev.txt
+          pip install -vv -r requirements-dev.txt
           pip install --force-reinstall --no-deps triton-ascend==3.2.1
           if find vllm_ascend -maxdepth 1 -name '*.so' -type f 2>/dev/null | grep -q .; then
             COMPILE_CUSTOM_KERNELS=0 uv pip install -e .
