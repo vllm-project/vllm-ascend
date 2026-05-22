@@ -141,6 +141,8 @@ jobs:
         run: |
           pip install uc-manager
           # Use CPU version package
+          # The torch-cpu repository cannot be placed in a public repository, as many packages are not available on torch-cpu. 
+          # If placed in a public repository, this will cause other package query requests to be frequently forwarded to the official repository, leading to probabilistic errors.
           uv pip install torch==2.10.0 torchvision==0.25.0 torchaudio==2.10.0 --extra-index-url  http://cache-service.nginx-pypi-cache.svc.cluster.local/whl/cpu/
           uv pip install -r requirements-dev.txt
           # Concurrent installation of triton-ascend can cause files to be overwritten by other packages.
