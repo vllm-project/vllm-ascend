@@ -2,11 +2,11 @@ import gc
 import pytest
 import torch
 from einops import rearrange
-from vllm.model_executor.models.qwen3_next import Qwen3NextGatedDeltaNet
+from vllm.model_executor.layers.mamba.gdn_linear_attn import GatedDeltaNetAttention
 
 from vllm_ascend.ops.triton.fla.fused_qkvzba_split_reshape import \
     fused_qkvzba_split_reshape_cat
-
+from vllm_ascend.ops.triton.triton_utils import init_device_properties_triton
 
 def validate_cmp(y_cal, y_ref, dtype, device='npu'):
     y_cal = y_cal.to(device)
@@ -58,7 +58,7 @@ def test_fused_qkvzba_split_reshape_cat(
 
     torch.random.manual_seed(0)
     device = "npu"
-
+    init_device_properties_triton()
     projected_states_qkvz = torch.randn(seq_len,
                                         2 * head_qk_dim * num_heads_qk +
                                         2 * head_v_dim * num_heads_v,
@@ -82,7 +82,7 @@ def test_fused_qkvzba_split_reshape_cat(
         head_v_dim,
     )
 
-    gdn = Qwen3NextGatedDeltaNet.__new__(Qwen3NextGatedDeltaNet)
+    gdn = GatedDeltaNetAttention.__new__(GatedDeltaNetAttention)
     gdn.num_k_heads = num_heads_qk
     gdn.num_v_heads = num_heads_v
     gdn.head_k_dim = head_qk_dim

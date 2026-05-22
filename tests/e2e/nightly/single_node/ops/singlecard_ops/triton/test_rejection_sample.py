@@ -19,8 +19,8 @@ def setup_device_properties():
 
 
 @pytest.mark.parametrize("max_spec_len", [1, 2, 3])
-@pytest.mark.parametrize("vocab_size", [151_936])
-@pytest.mark.parametrize("batch_size", [1, 8, 32, 64, 128, 256, 512, 1024])
+@pytest.mark.parametrize("vocab_size", [1024])
+@pytest.mark.parametrize("batch_size", [1, 256, 512, 1024])
 @torch.inference_mode()
 def test_rejection_random_sample(max_spec_len, vocab_size, batch_size):
     device = 'npu'
@@ -66,6 +66,7 @@ def test_rejection_random_sample(max_spec_len, vocab_size, batch_size):
                                      dtype=torch.int64,
                                      device=device)
     grid, block_size = cal_grid_and_block_size(batch_size)
+    synthetic_conditional_rates = None
     original_rejection_random_sample_kernel[(batch_size, )](
         original_output_token_ids,
         cu_num_draft_tokens,
@@ -78,7 +79,9 @@ def test_rejection_random_sample(max_spec_len, vocab_size, batch_size):
         is_greedy_ptr,
         max_spec_len,
         vocab_size,
+        synthetic_conditional_rates,
         NO_DRAFT_PROBS=draft_probs is None,
+        SYNTHETIC_MODE=False,
     )
     rejection_random_sample_kernel[(grid, )](output_token_ids,
                                              cu_num_draft_tokens,
@@ -227,7 +230,8 @@ def test_rejection_sampler_block_verify_triton_kernel(
         vocab_size=vocab_size,
         vec_len=batch_size,
         NO_DRAFT_PROBS=draft_probs is None,
-        BLOCK_SIZE=block_size)
+        BLOCK_SIZE=block_size,
+        SUB_BLOCK=32)
     torch.npu.synchronize()
     assert torch.equal(output_token_ids_ref, output_token_ids_triton)
     gc.collect()

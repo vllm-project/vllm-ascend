@@ -18,8 +18,10 @@ def pytest_runtest_teardown(item, nextitem):
     global _current_file
 
     file_path = item.fspath
+    if not hasattr(item, 'start_time'):
+        return
+    
     duration = time.time() - item.start_time
-
 
     if file_path not in _per_file_slow_cases:
         _per_file_slow_cases[file_path] = 0

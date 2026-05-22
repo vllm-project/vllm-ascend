@@ -63,7 +63,7 @@ def test_prepare_inputs_padded(num_reqs):
 
     # Run Triton kernel
     out_tri = torch.empty(num_reqs, dtype=torch.int32, device=device)
-
+    num_rejected_tokens = torch.empty(num_reqs, dtype=torch.int32, device=device)
     num_blocks_needed = triton.cdiv(num_reqs, BLOCK_SIZE)
     num_vector_core = get_vectorcore_num()
     grid_size = min(num_blocks_needed, num_vector_core)
@@ -74,6 +74,7 @@ def test_prepare_inputs_padded(num_reqs):
         valid_sampled_tokens_count,
         query_start_loc,
         out_tri,
+        num_rejected_tokens,
         num_reqs,
         BLOCK_SIZE=BLOCK_SIZE,
     )

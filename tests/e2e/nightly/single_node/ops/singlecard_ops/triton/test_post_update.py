@@ -4,7 +4,7 @@ import torch
 import pytest
 from vllm.v1.worker.gpu.input_batch import post_update as post_update_gpu
 from vllm_ascend.worker.v2.input_batch import post_update as post_update_npu
-
+from vllm_ascend.ops.triton.triton_utils import init_device_properties_triton
 
 def generate_test_data(num_reqs: int, max_num_reqs: int, vocab_size: int, num_speculative_steps: int, device: str) -> \
         Dict[str, Any]:
@@ -76,7 +76,7 @@ def test_post_update(num_reqs: int, max_num_reqs: int, vocab_size: int, num_spec
                           "all_token_ids",
                           "total_len"
                           ]
-
+    init_device_properties_triton()
     data = generate_test_data(num_reqs, max_num_reqs, vocab_size, num_speculative_steps, device="npu")
     kernel_inputs_gpu = {k: data[k].clone() for k in post_update_params}
     kernel_inputs_npu = {k: data[k].clone() for k in post_update_params}

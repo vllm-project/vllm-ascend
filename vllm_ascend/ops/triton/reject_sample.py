@@ -393,13 +393,6 @@ def rejection_random_sample_block_verify_kernel(
             start_idx = get_element(start_idxs, (req_i,))
             req_idx = block_idx * BLOCK_SIZE + req_i
             num_draft_tokens = get_element(n_num_draft_tokens, (req_i,))
-            if num_draft_tokens == 0:
-                bonus_token_id = tl.load(bonus_token_ids_ptr + req_idx)
-                tl.store(
-                    output_token_ids_ptr + req_idx * (max_spec_len + 1),
-                    bonus_token_id,
-                )
-                continue
 
             accepted_len = 0
             prefix_prob = 1.0
