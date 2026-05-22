@@ -266,10 +266,15 @@ class AscendLogitsProcessor(LogitsProcessor):
         gathered_hidden_states = get_lmhead_tp_group().all_gather(hidden_states, dim=0)
         local_logits = lm_head.quant_method.apply(lm_head, gathered_hidden_states, bias=embedding_bias)
         # Gather logits for tensor parallel
-        logits = get_lmhead_tp_group().all_to_all(local_logits)
+        if not get_ascend_config().enable_reduce_sample:
+            logits = get_lmhead_tp_group().all_to_all(local_logits)
+
         # Remove paddings in vocab (if any)
         if logits is not None:
-            logits = logits[..., : self.org_vocab_size]
+            if not get_ascend_config().enable_reduce_sample:
+                logits = logits[..., : self.org_vocab_size]
+            else:
+                logits = logits[..., : lm_head.num_org_embeddings_per_partition]
         return logits
 
     def _get_logits_normal(
