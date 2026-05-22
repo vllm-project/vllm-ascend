@@ -87,6 +87,15 @@ def _stop_device(executor: Any, cfg: dict | None) -> bool:
             stop_result = torch_npu.npu.stop_device(executor.local_rank)
             if stop_result == 0:
                 logger.info("stop_device executed successfully")
+                retry = 0
+                while not executor.exception_occur:
+                    time.sleep(1)
+                    retry += 1
+                    if retry > 20:
+                        logger.error("stop_device retry 20 times, still not occur exception")
+                        break
+                if not executor.exception_occur:
+                    logger.warning("exception not occur after stop_device, worker may passed fucntion call")
                 return cfg, True
             else:
                 logger.error(f"stop_device failed with result: {stop_result}")

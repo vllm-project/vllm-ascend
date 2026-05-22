@@ -26,7 +26,10 @@ class WorkerMonitor:
         self.vllm_config = vllm_config
         self._worker = worker
         self.ctx = ctx
-        
+        self.in_recovery = False
+        self.exception_occur = False
+        self.device_stopped = False
+
         self.exception_handler_factory = self.build_exception_handler_factory()
         self.worker_input_address = get_open_zmq_ipc_path()
         self.engine_index = self.vllm_config.parallel_config.data_parallel_rank

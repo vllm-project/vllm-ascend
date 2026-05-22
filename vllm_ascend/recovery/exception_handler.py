@@ -52,8 +52,9 @@ class NetworkExceptionHandler(ExceptionHandler):
         npu_recover_step = RecoveryStep(
             name="npu_recover",
             target="worker",
-            actions=[recovery_begin, stop_device, restart_device, reinit_process_group],
-            timeout_s=5
+            #actions=[recovery_begin, stop_device, restart_device, reinit_process_group],
+            actions=[recovery_begin, stop_device],
+            timeout_s=60
         )
 
         """
@@ -77,7 +78,7 @@ class NetworkExceptionHandler(ExceptionHandler):
             name="network_recover_plan",
             steps=[npu_recover_step, clean_step],
             cfg=config,
-            timeout_s=30
+            timeout_s=300
         )
         return network_recover_plan
         
