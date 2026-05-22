@@ -68,6 +68,9 @@ class _DummyTensor:
     def contiguous(self):
         return self
 
+    def clone(self):
+        return self
+
     def to(self, *args, **kwargs):
         return self
 
@@ -177,13 +180,13 @@ def test_chunk_gated_delta_rule_fwd_threads_prebuilt_chunk_offsets(
     non_pcp_calls: list[tuple[str, object]] = []
     pcp_calls: list[tuple[str, object]] = []
 
-    def run_case(world_size: int, calls: list[tuple[str, object]]):
+    def run_case(world_size: int, rank_in_group: int, calls: list[tuple[str, object]]):
         group = type(
             "Group",
             (),
             {
                 "world_size": world_size,
-                "rank_in_group": 0,
+                "rank_in_group": rank_in_group,
                 "all_gather": lambda self, value, dim: _GatherResult([_DummyTensor("g0"), _DummyTensor("g1")]),
             },
         )()
@@ -194,11 +197,14 @@ def test_chunk_gated_delta_rule_fwd_threads_prebuilt_chunk_offsets(
         monkeypatch.setattr(chunk, "chunk_scaled_dot_kkt_fwd", lambda *args, **kwargs: _DummyTensor("A"))
         monkeypatch.setattr(chunk, "solve_tril", lambda *args, **kwargs: _DummyTensor("A_solved"))
         monkeypatch.setattr(chunk, "recompute_w_u_fwd", lambda *args, **kwargs: (_DummyTensor("w"), _DummyTensor("u")))
-        monkeypatch.setattr(
-            chunk,
-            "chunk_gated_delta_rule_fwd_h",
-            lambda *args, **kwargs: (_DummyTensor("h"), _DummyTensor("v_new"), _DummyTensor("final_state")),
-        )
+        h_calls: list[object] = []
+        o_calls: list[tuple[str, str]] = []
+
+        def fake_chunk_gated_delta_rule_fwd_h(*args, **kwargs):
+            h_calls.append(kwargs["chunk_offsets"])
+            return _DummyTensor("h_rerun"), _DummyTensor("v_new_rerun"), _DummyTensor("final_state")
+
+        monkeypatch.setattr(chunk, "chunk_gated_delta_rule_fwd_h", fake_chunk_gated_delta_rule_fwd_h)
         monkeypatch.setattr(
             chunk,
             "chunk_gated_delta_rule_fwd_hupdate",
@@ -219,24 +225,22 @@ def test_chunk_gated_delta_rule_fwd_threads_prebuilt_chunk_offsets(
         monkeypatch.setattr(
             torch.ops._C_ascend,
             "chunk_gated_delta_rule_fwd_h",
-            lambda *args, **kwargs: (_DummyTensor("h"), _DummyTensor("v_new"), _DummyTensor("final_state")),
+            lambda *args, **kwargs: (
+                _DummyTensor("h_original"),
+                _DummyTensor("v_new_original"),
+                _DummyTensor("final_state"),
+            ),
         )
+
+        def fake_chunk_fwd_o(q, k, v, h, *args, **kwargs):
+            o_calls.append((v.name, h.name))
+            return _DummyTensor("o_ascend")
+
         monkeypatch.setattr(
             torch.ops._C_ascend,
             "chunk_fwd_o",
-            lambda *args, **kwargs: _DummyTensor("o_ascend"),
+            fake_chunk_fwd_o,
         )
-
-        def fake_chunk_fwd_o(*args, **kwargs):
-            calls.append(("o", kwargs["chunk_offsets"]))
-            return _DummyTensor("o")
-
-        def fake_chunk_fwd_o_update(*args, **kwargs):
-            calls.append(("o_update", kwargs["chunk_offsets"]))
-            return _DummyTensor("h_updated")
-
-        monkeypatch.setattr(chunk, "chunk_fwd_o", fake_chunk_fwd_o)
-        monkeypatch.setattr(chunk, "chunk_fwd_o_update", fake_chunk_fwd_o_update)
 
         chunk.chunk_gated_delta_rule_fwd(
             q=q,
@@ -250,12 +254,22 @@ def test_chunk_gated_delta_rule_fwd_threads_prebuilt_chunk_offsets(
             cu_seqlens=torch.tensor([0, 4, 7], dtype=torch.int32),
             prebuilt_meta=prebuilt_meta,
         )
+        return h_calls, o_calls
 
-    run_case(1, non_pcp_calls)
+    non_pcp_h_calls, non_pcp_o_calls = run_case(1, 0, non_pcp_calls)
     assert non_pcp_calls == []
+    assert non_pcp_h_calls == []
+    assert non_pcp_o_calls == [("v_new_original", "h_original")]
 
-    run_case(2, pcp_calls)
-    assert pcp_calls == [("o_update", chunk_offsets)]
+    pcp_rank0_h_calls, pcp_rank0_o_calls = run_case(2, 0, pcp_calls)
+    assert pcp_calls == []
+    assert pcp_rank0_h_calls == []
+    assert pcp_rank0_o_calls == [("v_new_original", "h_original")]
+
+    pcp_rank1_h_calls, pcp_rank1_o_calls = run_case(2, 1, pcp_calls)
+    assert pcp_calls == []
+    assert pcp_rank1_h_calls == [chunk_offsets]
+    assert pcp_rank1_o_calls == [("v_new_rerun", "h_rerun")]
 
 
 def test_build_chunk_meta_device_rejects_non_npu_input():

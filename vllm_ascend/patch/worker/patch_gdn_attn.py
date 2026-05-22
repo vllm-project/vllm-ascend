@@ -434,7 +434,10 @@ def _build_non_spec_query_start_loc_cpu(
     query_start_loc_cpu = common_attn_metadata.query_start_loc_cpu
     spec_sequence_masks_cpu = _build_spec_sequence_masks_cpu(builder, num_decode_draft_tokens_cpu)
     if spec_sequence_masks_cpu is None:
-        return query_start_loc_cpu
+        return _compact_query_start_loc_cpu(
+            query_start_loc_cpu,
+            _active_query_mask_cpu(common_attn_metadata),
+        )
 
     query_lens_cpu = query_start_loc_cpu[1:] - query_start_loc_cpu[:-1]
     non_spec_query_lens_cpu = query_lens_cpu[~spec_sequence_masks_cpu]
@@ -473,6 +476,184 @@ def _build_spec_query_start_loc_cpu(
         out=spec_query_start_loc_cpu[1:],
     )
     return spec_query_start_loc_cpu
+
+
+def _compact_query_start_loc_cpu(query_start_loc_cpu: torch.Tensor, active_mask: torch.Tensor) -> torch.Tensor:
+    query_lens_cpu = query_start_loc_cpu[1:] - query_start_loc_cpu[:-1]
+    active_query_lens_cpu = query_lens_cpu[active_mask]
+    compact_query_start_loc_cpu = torch.zeros(
+        active_query_lens_cpu.numel() + 1,
+        dtype=query_start_loc_cpu.dtype,
+    )
+    torch.cumsum(
+        active_query_lens_cpu,
+        dim=0,
+        out=compact_query_start_loc_cpu[1:],
+    )
+    return compact_query_start_loc_cpu
+
+
+def _compact_query_start_loc(query_start_loc: torch.Tensor, active_mask: torch.Tensor) -> torch.Tensor:
+    active_mask = active_mask.to(device=query_start_loc.device)
+    query_lens = query_start_loc[1:] - query_start_loc[:-1]
+    active_query_lens = query_lens[active_mask]
+    compact_query_start_loc = torch.zeros(
+        active_query_lens.numel() + 1,
+        dtype=query_start_loc.dtype,
+        device=query_start_loc.device,
+    )
+    torch.cumsum(
+        active_query_lens,
+        dim=0,
+        out=compact_query_start_loc[1:],
+    )
+    return compact_query_start_loc
+
+
+def _active_query_mask_cpu(common_attn_metadata) -> torch.Tensor:
+    query_start_loc_cpu = common_attn_metadata.query_start_loc_cpu
+    query_lens_cpu = query_start_loc_cpu[1:] - query_start_loc_cpu[:-1]
+    return (query_lens_cpu > 0) & (query_start_loc_cpu[:-1] < common_attn_metadata.num_actual_tokens)
+
+
+def _trim_no_spec_decode_padding(
+    builder,
+    attn_metadata,
+    common_attn_metadata,
+    num_decode_draft_tokens_cpu: torch.Tensor | None,
+) -> None:
+    if (
+        attn_metadata.num_decodes == 0
+        or attn_metadata.num_prefills > 0
+        or _build_spec_sequence_masks_cpu(builder, num_decode_draft_tokens_cpu) is not None
+    ):
+        return
+
+    query_start_loc_cpu = common_attn_metadata.query_start_loc_cpu
+    query_lens_cpu = query_start_loc_cpu[1:] - query_start_loc_cpu[:-1]
+    active_mask = _active_query_mask_cpu(common_attn_metadata)
+    num_active_rows = int(active_mask.sum().item())
+    if num_active_rows == attn_metadata.num_decodes:
+        return
+
+    attn_metadata.num_decodes = num_active_rows
+    attn_metadata.num_decode_tokens = int(query_lens_cpu[active_mask].sum().item())
+    attn_metadata.non_spec_query_start_loc = _compact_query_start_loc(
+        common_attn_metadata.query_start_loc,
+        active_mask,
+    )
+    attn_metadata.non_spec_state_indices_tensor = attn_metadata.non_spec_state_indices_tensor[:num_active_rows]
+
+
+def _patch_full_graph_no_spec_decode_metadata(
+    builder,
+    attn_metadata,
+    common_attn_metadata,
+    num_decode_draft_tokens_cpu: torch.Tensor | None,
+) -> None:
+    if (
+        not getattr(builder, "use_full_cuda_graph", False)
+        or attn_metadata.num_prefills > 0
+        or attn_metadata.num_decodes == 0
+        or _build_spec_sequence_masks_cpu(builder, num_decode_draft_tokens_cpu) is not None
+    ):
+        return
+
+    active_mask = _active_query_mask_cpu(common_attn_metadata)
+    num_active_rows = int(active_mask.sum().item())
+    if num_active_rows == 0:
+        return
+
+    query_start_loc_cpu = common_attn_metadata.query_start_loc_cpu
+    query_lens_cpu = query_start_loc_cpu[1:] - query_start_loc_cpu[:-1]
+    batch_size = max(
+        int(common_attn_metadata.num_actual_tokens),
+        int(getattr(common_attn_metadata, "num_input_tokens", common_attn_metadata.num_actual_tokens)),
+    )
+
+    if batch_size > builder.decode_cudagraph_max_bs:
+        return
+
+    state_indices = attn_metadata.non_spec_state_indices_tensor
+    if state_indices is None:
+        return
+    if state_indices.numel() >= active_mask.numel():
+        active_state_indices = state_indices[: active_mask.numel()][active_mask.to(device=state_indices.device)]
+    else:
+        active_state_indices = state_indices[:num_active_rows]
+    active_state_indices = active_state_indices.contiguous()
+
+    compact_query_start_loc = _compact_query_start_loc(
+        common_attn_metadata.query_start_loc,
+        active_mask,
+    )
+
+    builder.non_spec_state_indices_tensor[:num_active_rows].copy_(
+        active_state_indices,
+        non_blocking=True,
+    )
+    non_spec_state_indices_tensor = builder.non_spec_state_indices_tensor[:batch_size]
+    non_spec_state_indices_tensor[num_active_rows:].fill_(gdn_attn.NULL_BLOCK_ID)
+
+    builder.non_spec_query_start_loc[: num_active_rows + 1].copy_(
+        compact_query_start_loc,
+        non_blocking=True,
+    )
+    num_query_tokens = compact_query_start_loc[-1]
+    non_spec_query_start_loc = builder.non_spec_query_start_loc[: batch_size + 1]
+    non_spec_query_start_loc[num_active_rows + 1 :].fill_(num_query_tokens)
+
+    attn_metadata.num_decodes = num_active_rows
+    attn_metadata.num_decode_tokens = int(query_lens_cpu[active_mask].sum().item())
+    attn_metadata.non_spec_state_indices_tensor = non_spec_state_indices_tensor
+    attn_metadata.non_spec_query_start_loc = non_spec_query_start_loc
+
+
+def _patch_no_spec_prefill_metadata(
+    builder,
+    attn_metadata,
+    common_attn_metadata,
+    num_decode_draft_tokens_cpu: torch.Tensor | None,
+    non_spec_query_start_loc_cpu: torch.Tensor,
+) -> None:
+    if _build_spec_sequence_masks_cpu(builder, num_decode_draft_tokens_cpu) is not None:
+        return
+
+    active_mask = _active_query_mask_cpu(common_attn_metadata)
+    num_active_rows = int(active_mask.sum().item())
+    if num_active_rows == 0:
+        return
+
+    attn_metadata.non_spec_query_start_loc = non_spec_query_start_loc_cpu.to(
+        device=common_attn_metadata.query_start_loc.device,
+        non_blocking=True,
+    )
+
+    active_mask_device = active_mask.to(device=attn_metadata.non_spec_state_indices_tensor.device)
+    if attn_metadata.non_spec_state_indices_tensor.numel() >= active_mask.numel():
+        attn_metadata.non_spec_state_indices_tensor = attn_metadata.non_spec_state_indices_tensor[
+            : active_mask.numel()
+        ][active_mask_device].contiguous()
+    else:
+        attn_metadata.non_spec_state_indices_tensor = attn_metadata.non_spec_state_indices_tensor[
+            :num_active_rows
+        ].contiguous()
+
+    if attn_metadata.has_initial_state is not None:
+        active_mask_device = active_mask.to(device=attn_metadata.has_initial_state.device)
+        if attn_metadata.has_initial_state.numel() >= active_mask.numel():
+            attn_metadata.has_initial_state = attn_metadata.has_initial_state[: active_mask.numel()][
+                active_mask_device
+            ].contiguous()
+        else:
+            attn_metadata.has_initial_state = attn_metadata.has_initial_state[:num_active_rows].contiguous()
+
+
+def _build_non_spec_decode_query_start_loc_cpu(common_attn_metadata) -> torch.Tensor:
+    return _compact_query_start_loc_cpu(
+        common_attn_metadata.query_start_loc_cpu,
+        _active_query_mask_cpu(common_attn_metadata),
+    )
 
 
 def _allocate_causal_conv1d_host_slot(
@@ -605,12 +786,13 @@ def _build_non_spec_causal_conv1d_host_meta(
     ):
         slot = _acquire_causal_conv1d_host_slot(builder)
 
+    num_host_seqs = non_spec_query_start_loc_cpu.numel() - 1
     cache_indices_cpu = _copy_to_pinned_cpu(
-        attn_metadata.non_spec_state_indices_tensor,
+        attn_metadata.non_spec_state_indices_tensor[:num_host_seqs],
         None if slot is None else slot.cache_indices_cpu,
     )
     has_initial_state_cpu = _copy_to_pinned_cpu(
-        attn_metadata.has_initial_state,
+        attn_metadata.has_initial_state[:num_host_seqs],
         None if slot is None else slot.has_initial_state_cpu,
     )
 
@@ -634,8 +816,9 @@ def _build_non_spec_decode_causal_conv1d_host_meta(
     if attn_metadata.non_spec_state_indices_tensor.device.type != "cpu":
         slot = _acquire_causal_conv1d_host_slot(builder)
 
+    num_host_seqs = non_spec_query_start_loc_cpu.numel() - 1
     non_spec_cache_indices_cpu = _copy_to_pinned_cpu(
-        attn_metadata.non_spec_state_indices_tensor,
+        attn_metadata.non_spec_state_indices_tensor[:num_host_seqs],
         None if slot is None else slot.cache_indices_cpu,
     )
 
@@ -724,6 +907,13 @@ def _patched_build(
     attn_metadata.non_spec_prefill_fallback_meta = None
     attn_metadata.non_spec_decode_fallback_meta = None
     attn_metadata.spec_decode_fallback_meta = None
+    _trim_no_spec_decode_padding(self, attn_metadata, common_attn_metadata, num_decode_draft_tokens_cpu)
+    _patch_full_graph_no_spec_decode_metadata(
+        self,
+        attn_metadata,
+        common_attn_metadata,
+        num_decode_draft_tokens_cpu,
+    )
     if attn_metadata.spec_sequence_masks is not None:
         _patched_build_spec(self, attn_metadata, common_attn_metadata, num_decode_draft_tokens_cpu)
 
@@ -757,6 +947,13 @@ def _patched_build_prefill(
     assert non_spec_query_start_loc_cpu is not None
     if attn_metadata.non_spec_query_start_loc is None:
         raise RuntimeError("Expected attn_metadata.non_spec_query_start_loc for patched GDN non-spec prefill path.")
+    _patch_no_spec_prefill_metadata(
+        self,
+        attn_metadata,
+        common_attn_metadata,
+        num_decode_draft_tokens_cpu,
+        non_spec_query_start_loc_cpu,
+    )
     attn_metadata.non_spec_prefill_fallback_meta = GDNPrefillFallbackMeta(
         causal_conv1d=_build_non_spec_causal_conv1d_host_meta(
             self,
@@ -835,13 +1032,16 @@ def _patched_build_decode(
         self,
         common_attn_metadata.query_start_loc.device,
     )
-    non_spec_query_start_loc_cpu = _build_non_spec_query_start_loc_cpu(
-        self,
-        common_attn_metadata,
-        num_decode_draft_tokens_cpu,
-    )
-    if non_spec_query_start_loc_cpu is None:
-        raise RuntimeError("Expected non-spec query_start_loc_cpu for patched GDN non-spec decode path.")
+    if attn_metadata.num_prefills > 0:
+        non_spec_query_start_loc_cpu = _build_non_spec_query_start_loc_cpu(
+            self,
+            common_attn_metadata,
+            num_decode_draft_tokens_cpu,
+        )
+        if non_spec_query_start_loc_cpu is None:
+            raise RuntimeError("Expected non-spec query_start_loc_cpu for patched GDN non-spec decode path.")
+    else:
+        non_spec_query_start_loc_cpu = _build_non_spec_decode_query_start_loc_cpu(common_attn_metadata)
     attn_metadata.non_spec_decode_fallback_meta = GDNDecodeFallbackMeta(
         causal_conv1d=_build_non_spec_decode_causal_conv1d_host_meta(
             self,

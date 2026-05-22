@@ -14,6 +14,7 @@ from vllm.v1.kv_cache_interface import MambaSpec
 
 import vllm_ascend.patch.worker.patch_gdn_attn as patch_gdn_attn
 from vllm_ascend.ops.gdn import (
+    _extract_last_conv_state,
     get_non_spec_causal_conv1d_host_args,
     get_non_spec_chunked_prefill_meta,
     to_int64_tuple,
@@ -102,6 +103,38 @@ def create_common_attn_metadata(
     )
 
 
+def test_extract_last_conv_state_matches_state_first_cache_layout():
+    x = torch.arange(5 * 4, dtype=torch.float32).reshape(5, 4)
+    query_start_loc = torch.tensor([0, 2, 5], dtype=torch.int32)
+    conv_state = torch.empty(2, 3, 4)
+
+    actual = _extract_last_conv_state(x, query_start_loc, conv_state)
+    expected = torch.stack(
+        (
+            torch.stack((torch.zeros(4), x[0], x[1])),
+            torch.stack((x[2], x[3], x[4])),
+        )
+    )
+
+    assert torch.equal(actual, expected)
+
+
+def test_extract_last_conv_state_matches_dim_first_cache_layout():
+    x = torch.arange(5 * 4, dtype=torch.float32).reshape(5, 4)
+    query_start_loc = torch.tensor([0, 2, 5], dtype=torch.int32)
+    conv_state = torch.empty(2, 4, 3)
+
+    actual = _extract_last_conv_state(x, query_start_loc, conv_state)
+    expected = torch.stack(
+        (
+            torch.stack((torch.zeros(4), x[0], x[1])),
+            torch.stack((x[2], x[3], x[4])),
+        )
+    ).permute(0, 2, 1)
+
+    assert torch.equal(actual, expected)
+
+
 def _make_vllm_config(
     *,
     max_model_len: int = 8192,
@@ -109,6 +142,8 @@ def _make_vllm_config(
     max_num_batched_tokens: int = 8192,
     num_heads: int = 32,
     num_speculative_tokens: int = 0,
+    cudagraph_mode: CUDAGraphMode = CUDAGraphMode.NONE,
+    max_cudagraph_capture_size: int | None = None,
 ):
     speculative_config = None
     if num_speculative_tokens > 0:
@@ -123,8 +158,8 @@ def _make_vllm_config(
     return SimpleNamespace(
         cache_config=SimpleNamespace(mamba_cache_mode="none"),
         compilation_config=SimpleNamespace(
-            cudagraph_mode=CUDAGraphMode.NONE,
-            max_cudagraph_capture_size=None,
+            cudagraph_mode=cudagraph_mode,
+            max_cudagraph_capture_size=max_cudagraph_capture_size,
         ),
         speculative_config=speculative_config,
         scheduler_config=SimpleNamespace(
@@ -139,10 +174,19 @@ def _make_vllm_config(
     )
 
 
-def _make_builder(*, device: torch.device, num_heads: int, num_speculative_tokens: int):
+def _make_builder(
+    *,
+    device: torch.device,
+    num_heads: int,
+    num_speculative_tokens: int,
+    cudagraph_mode: CUDAGraphMode = CUDAGraphMode.NONE,
+    max_cudagraph_capture_size: int | None = None,
+):
     vllm_config = _make_vllm_config(
         num_heads=num_heads,
         num_speculative_tokens=num_speculative_tokens,
+        cudagraph_mode=cudagraph_mode,
+        max_cudagraph_capture_size=max_cudagraph_capture_size,
     )
     spec = MambaSpec(
         block_size=16,
@@ -508,3 +552,100 @@ def test_builder_skips_prebuilt_meta_without_non_spec_prefill(batch_spec: BatchS
     )
 
     assert getattr(attn_metadata, "non_spec_prefill_fallback_meta", None) is None
+
+
+def test_full_graph_decode_metadata_ignores_zero_length_padded_rows():
+    builder = _make_builder(
+        device=torch.device("cpu"),
+        num_heads=32,
+        num_speculative_tokens=0,
+        cudagraph_mode=CUDAGraphMode.FULL_DECODE_ONLY,
+        max_cudagraph_capture_size=4,
+    )
+    common_attn_metadata = create_common_attn_metadata(
+        batch_spec=BatchSpec(
+            seq_lens=[5, 6, 7, 0],
+            query_lens=[1, 1, 1, 0],
+            name="decode_with_padding",
+        ),
+        block_size=16,
+        device=torch.device("cpu"),
+    )
+    common_attn_metadata.block_table_tensor = torch.tensor(
+        [[2], [14], [10], [99]],
+        dtype=torch.int32,
+    )
+
+    attn_metadata = builder.build(0, common_attn_metadata)
+
+    assert attn_metadata.num_decodes == 3
+    assert attn_metadata.num_decode_tokens == 3
+    assert torch.equal(
+        attn_metadata.non_spec_query_start_loc,
+        torch.tensor([0, 1, 2, 3], dtype=torch.int32),
+    )
+    assert torch.equal(
+        attn_metadata.non_spec_state_indices_tensor,
+        torch.tensor([2, 14, 10], dtype=torch.int32),
+    )
+
+
+def test_full_graph_decode_metadata_ignores_graph_virtual_row():
+    builder = _make_builder(
+        device=torch.device("cpu"),
+        num_heads=32,
+        num_speculative_tokens=0,
+        cudagraph_mode=CUDAGraphMode.FULL_DECODE_ONLY,
+        max_cudagraph_capture_size=4,
+    )
+    common_attn_metadata = create_common_attn_metadata(
+        batch_spec=BatchSpec(
+            seq_lens=[5, 6, 7, 1],
+            query_lens=[1, 1, 1, 1],
+            name="decode_with_virtual_graph_row",
+        ),
+        block_size=16,
+        device=torch.device("cpu"),
+    )
+    common_attn_metadata.num_actual_tokens = 3
+    common_attn_metadata.num_input_tokens = 4
+    common_attn_metadata.block_table_tensor = torch.tensor(
+        [[2], [14], [10], [99]],
+        dtype=torch.int32,
+    )
+
+    attn_metadata = builder.build(0, common_attn_metadata)
+
+    assert attn_metadata.num_actual_tokens == 3
+    assert attn_metadata.num_decodes == 3
+    assert attn_metadata.num_decode_tokens == 3
+    assert torch.equal(
+        attn_metadata.non_spec_query_start_loc,
+        torch.tensor([0, 1, 2, 3, 3], dtype=torch.int32),
+    )
+    assert torch.equal(
+        attn_metadata.non_spec_state_indices_tensor,
+        torch.tensor([2, 14, 10, 0], dtype=torch.int32),
+    )
+
+    fallback_meta = attn_metadata.non_spec_decode_fallback_meta
+    assert fallback_meta is not None
+    assert torch.equal(
+        fallback_meta.causal_conv1d.query_start_loc_cpu,
+        torch.tensor([0, 1, 2, 3], dtype=torch.int32),
+    )
+    assert torch.equal(
+        fallback_meta.causal_conv1d.cache_indices_cpu,
+        torch.tensor([2, 14, 10], dtype=torch.int32),
+    )
+
+    fallback_meta = attn_metadata.non_spec_decode_fallback_meta
+    assert fallback_meta is not None
+    assert torch.equal(
+        fallback_meta.causal_conv1d.query_start_loc_cpu,
+        torch.tensor([0, 1, 2, 3], dtype=torch.int32),
+    )
+    assert torch.equal(
+        fallback_meta.causal_conv1d.cache_indices_cpu,
+        torch.tensor([2, 14, 10], dtype=torch.int32),
+    )

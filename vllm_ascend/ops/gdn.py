@@ -18,9 +18,16 @@
 import torch
 import torch_npu
 from einops import rearrange
+from vllm.config import CUDAGraphMode
+from vllm.distributed import get_pcp_group
 from vllm.forward_context import get_forward_context
+from vllm.model_executor.layers.fla.ops.fused_recurrent import (
+    fused_recurrent_gated_delta_rule_packed_decode,
+)
 from vllm.model_executor.layers.fla.ops.l2norm import l2norm_fwd
 from vllm.model_executor.layers.mamba.gdn_linear_attn import GatedDeltaNetAttention
+from vllm.model_executor.layers.mamba.mamba_utils import is_conv_state_dim_first
+from vllm.model_executor.layers.mamba.ops.causal_conv1d import causal_conv1d_update
 from vllm.triton_utils import triton
 from vllm.v1.attention.backend import AttentionMetadata  # type: ignore
 from vllm.v1.attention.backends.gdn_attn import GDNAttentionMetadata
@@ -127,6 +134,93 @@ def _pad_conv1d_host_args_to_capture(
     if with_num_accepted:
         num_accepted_host = tuple(num_accepted_host) + (1,) * pad_seqs
     return qsl_host, cidx_host, num_accepted_host
+
+
+def _extract_last_conv_state(
+    x: torch.Tensor,
+    query_start_loc: torch.Tensor,
+    conv_state: torch.Tensor,
+) -> torch.Tensor:
+    if conv_state.shape[-1] == x.shape[-1]:
+        state_len = conv_state.shape[-2]
+        dim_first = False
+    elif conv_state.shape[-2] == x.shape[-1]:
+        state_len = conv_state.shape[-1]
+        dim_first = True
+    else:
+        raise RuntimeError(
+            f"Cannot infer conv_state layout from x.shape={tuple(x.shape)} "
+            f"and conv_state.shape={tuple(conv_state.shape)}"
+        )
+    start_loc = query_start_loc[:-1]
+    end_loc = query_start_loc[1:]
+    offsets = torch.arange(state_len, device=x.device)
+    indices = end_loc.unsqueeze(1) - state_len + offsets.unsqueeze(0)
+    valid = indices >= start_loc.unsqueeze(1)
+    indices = indices.clamp(min=0)
+    states = x.index_select(0, indices.reshape(-1))
+    states = states.reshape(indices.shape[0], state_len, x.shape[-1])
+    if dim_first:
+        states = states.permute(0, 2, 1).contiguous()
+        valid = valid.unsqueeze(1)
+    else:
+        valid = valid.unsqueeze(-1)
+    return torch.where(valid, states, torch.zeros_like(states))
+
+
+def _prepare_pcp_prefill_conv_state(
+    mixed_qkv: torch.Tensor,
+    conv_state: torch.Tensor,
+    cache_indices: torch.Tensor,
+    query_start_loc: torch.Tensor,
+    num_decodes: int,
+    initial_state_mode: tuple[int, ...],
+) -> tuple[tuple[int, ...], torch.Tensor | None, torch.Tensor | None]:
+    pcp_group = get_pcp_group()
+    if pcp_group.world_size <= 1:
+        return initial_state_mode, None, None
+
+    prefill_cache_indices = cache_indices[num_decodes:]
+    if prefill_cache_indices.numel() == 0:
+        return initial_state_mode, None, None
+
+    prefill_query_start_loc = query_start_loc[num_decodes:]
+    last_conv_state = _extract_last_conv_state(
+        mixed_qkv,
+        prefill_query_start_loc,
+        conv_state,
+    )
+    all_last_conv_state = pcp_group.all_gather(
+        last_conv_state.unsqueeze(0).contiguous(),
+        0,
+    )
+
+    valid_cache_mask = prefill_cache_indices != PAD_SLOT_ID
+    valid_cache_indices = prefill_cache_indices[valid_cache_mask]
+    final_conv_state = all_last_conv_state[-1, valid_cache_mask]
+    if valid_cache_indices.numel() > 0 and pcp_group.rank_in_group > 0:
+        conv_state[valid_cache_indices] = all_last_conv_state[
+            pcp_group.rank_in_group - 1,
+            valid_cache_mask,
+        ]
+
+    if pcp_group.rank_in_group > 0:
+        initial_state_mode = tuple(value if idx < num_decodes else 1 for idx, value in enumerate(initial_state_mode))
+    return initial_state_mode, final_conv_state, valid_cache_indices
+
+
+def _finalize_pcp_prefill_conv_state(
+    conv_state: torch.Tensor,
+    final_conv_state: torch.Tensor | None,
+    valid_cache_indices: torch.Tensor | None,
+) -> None:
+    if final_conv_state is None or valid_cache_indices is None or valid_cache_indices.numel() == 0:
+        return
+    conv_state[valid_cache_indices] = final_conv_state
+
+
+def _is_full_aclgraph_decode(forward_context) -> bool:
+    return getattr(forward_context, "cudagraph_runtime_mode", CUDAGraphMode.NONE) == CUDAGraphMode.FULL
 
 
 def update_conv1d_graph_params(
@@ -465,6 +559,18 @@ class AscendGatedDeltaNetAttention(GatedDeltaNetAttention):
                     cache_indices_opt,
                     initial_state_mode_opt,
                 ) = get_non_spec_causal_conv1d_host_args(attn_metadata)
+                (
+                    initial_state_mode_opt,
+                    final_conv_state,
+                    valid_cache_indices,
+                ) = _prepare_pcp_prefill_conv_state(
+                    mixed_qkv_non_spec,
+                    self_kv_cache[0],
+                    non_spec_state_indices_tensor,
+                    non_spec_query_start_loc,
+                    attn_metadata.num_decodes,
+                    initial_state_mode_opt,
+                )
                 mixed_qkv_non_spec_output = torch.empty_like(mixed_qkv_non_spec)
                 torch.ops._C_ascend.npu_causal_conv1d_custom(
                     mixed_qkv_non_spec_output,
@@ -480,13 +586,29 @@ class AscendGatedDeltaNetAttention(GatedDeltaNetAttention):
                     pad_slot_id=PAD_SLOT_ID,
                     run_mode=0,
                 )
+                _finalize_pcp_prefill_conv_state(
+                    self_kv_cache[0],
+                    final_conv_state,
+                    valid_cache_indices,
+                )
                 mixed_qkv_non_spec = mixed_qkv_non_spec_output
         elif attn_metadata.num_decodes > 0:
             conv_weights_T = conv_weights.transpose(0, 1)
             activation_num = 1 if self.activation else 0
             non_spec_qsl_host, non_spec_ci_host = get_causal_conv1d_update_host_args(attn_metadata)
             # graph capture branch
-            if _EXTRA_CTX.capturing:
+            if _is_full_aclgraph_decode(forward_context):
+                conv_state = self_kv_cache[0] if is_conv_state_dim_first() else self_kv_cache[0].transpose(-1, -2)
+                mixed_qkv_non_spec = causal_conv1d_update(
+                    mixed_qkv_non_spec,
+                    conv_state,
+                    conv_weights,
+                    self.conv1d.bias,
+                    self.activation,
+                    conv_state_indices=non_spec_state_indices_tensor[:num_actual_tokens],
+                    validate_data=False,
+                )
+            elif _EXTRA_CTX.capturing:
                 stream = torch_npu.npu.current_stream()
                 event = torch.npu.ExternalEvent()
                 event.wait(stream)
@@ -623,23 +745,39 @@ class AscendGatedDeltaNetAttention(GatedDeltaNetAttention):
                 last_recurrent_state.transpose(-1, -2).contiguous().to(ssm_state.dtype)
             )
         elif attn_metadata.num_decodes > 0:
-            cu_seqlens = non_spec_query_start_loc[: attn_metadata.num_decodes + 1]
-            actual_seq_lengths = torch.cat([cu_seqlens[:1], cu_seqlens[1:] - cu_seqlens[:-1]])
-            query_non_spec = l2norm_fwd(query_non_spec)
-            key_non_spec = l2norm_fwd(key_non_spec)
-            # Dispatches to the vllm-ascend AscendC custom operator
-            # (csrc/recurrent_gated_delta_rule), NOT the built-in CANN operator.
-            core_attn_out_non_spec = torch_npu.npu_recurrent_gated_delta_rule(
-                query=query_non_spec.squeeze(0),
-                key=key_non_spec.squeeze(0),
-                value=value_non_spec.squeeze(0),
-                g=g_non_spec.squeeze(0) if g_non_spec is not None else g_non_spec,
-                beta=beta_non_spec.squeeze(0) if beta_non_spec is not None else beta_non_spec,
-                state=ssm_state,
-                scale=key_non_spec.shape[-1] ** -0.5,
-                actual_seq_lengths=actual_seq_lengths,
-                ssm_state_indices=non_spec_state_indices_tensor,
-            ).unsqueeze(0)
+            if _is_full_aclgraph_decode(forward_context):
+                out_buf = core_attn_out[:num_actual_tokens].unsqueeze(1)
+                fused_recurrent_gated_delta_rule_packed_decode(
+                    mixed_qkv=mixed_qkv_non_spec,
+                    a=a,
+                    b=b,
+                    A_log=self.A_log,
+                    dt_bias=self.dt_bias,
+                    scale=self.head_k_dim**-0.5,
+                    initial_state=ssm_state,
+                    out=out_buf,
+                    ssm_state_indices=non_spec_state_indices_tensor[:num_actual_tokens],
+                    use_qk_l2norm_in_kernel=True,
+                )
+                core_attn_out_non_spec = core_attn_out[:num_actual_tokens].unsqueeze(0)
+            else:
+                cu_seqlens = non_spec_query_start_loc[: attn_metadata.num_decodes + 1]
+                actual_seq_lengths = torch.cat([cu_seqlens[:1], cu_seqlens[1:] - cu_seqlens[:-1]])
+                query_non_spec = l2norm_fwd(query_non_spec)
+                key_non_spec = l2norm_fwd(key_non_spec)
+                # Dispatches to the vllm-ascend AscendC custom operator
+                # (csrc/recurrent_gated_delta_rule), NOT the built-in CANN operator.
+                core_attn_out_non_spec = torch_npu.npu_recurrent_gated_delta_rule(
+                    query=query_non_spec.squeeze(0),
+                    key=key_non_spec.squeeze(0),
+                    value=value_non_spec.squeeze(0),
+                    g=g_non_spec.squeeze(0) if g_non_spec is not None else g_non_spec,
+                    beta=beta_non_spec.squeeze(0) if beta_non_spec is not None else beta_non_spec,
+                    state=ssm_state,
+                    scale=key_non_spec.shape[-1] ** -0.5,
+                    actual_seq_lengths=actual_seq_lengths,
+                    ssm_state_indices=non_spec_state_indices_tensor,
+                ).unsqueeze(0)
         else:
             core_attn_out_non_spec, last_recurrent_state = None, None
 

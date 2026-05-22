@@ -847,7 +847,7 @@ class AscendAttentionCPImpl(AscendAttentionBackendImpl):
             attn_metadata.prefill.pcp_metadata.pcp_enter_fa_restore_idx if attn_metadata.prefill.pcp_metadata else None
         )
         actual_qkv = torch.index_select(all_qkv, 0, pcp_enter_fa_restore_idx)
-        qkv_fa_padding_workspace = query.new_empty(
+        qkv_fa_padding_workspace = query.new_zeros(
             (num_actual_tokens_pcp_padded, (self.num_heads + 2 * self.num_kv_heads) * self.head_size)
         )
 
