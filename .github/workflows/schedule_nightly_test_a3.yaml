@@ -377,6 +377,12 @@ jobs:
           - name: Qwen3-30B-A3B-W4A8-llm-compressor
             os: linux-aarch64-a3-2
             config_file_path: Qwen3-30B-A3B-W4A8-llm-compressor.yaml
+          - name: Qwen3-30B-QuaRot
+            os: linux-aarch64-a3-2
+            config_file_path: Qwen3-30B-QuaRot-eagle3.yaml
+          - name: Qwen3-32B-QuaRot
+            os: linux-aarch64-a3-2
+            config_file_path: Qwen3-32B-QuaRot-eagle3.yaml
     uses: ./.github/workflows/_e2e_nightly_single_node.yaml
     with:
       runner: ${{ matrix.test_config.os }}

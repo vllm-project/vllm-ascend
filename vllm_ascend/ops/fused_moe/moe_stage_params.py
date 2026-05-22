@@ -61,6 +61,7 @@ class MoEQuantParams:
     quant_type: QuantType = QuantType.NONE
     comm_quant_mode: int | None = None
     mxfp: MoEMxfpParams | None = None
+    is_per_channel_weight: bool = False
 
     @property
     def is_quant(self) -> bool:
@@ -73,6 +74,10 @@ class MoEQuantParams:
     @property
     def is_int_quant(self) -> bool:
         return self.quant_type in (QuantType.W8A8, QuantType.W4A8)
+
+    @property
+    def use_w4a8_per_channel_gmm_swiglu(self) -> bool:
+        return self.quant_type == QuantType.W4A8 and self.is_per_channel_weight
 
     @property
     def dispatch_with_quant(self) -> bool:

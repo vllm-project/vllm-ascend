@@ -274,6 +274,7 @@ class NPUModelRunner(GPUModelRunner):
         # gdn_query_start_loc is an unpadded version of query_start_loc.
         # TODO delete it if fia's check is removed.
         self._has_gdn = check_gdn_layer(vllm_config)
+        self._has_sinks = False
         if self._has_gdn:
             self.gdn_query_start_loc = self._make_buffer(
                 self.max_num_reqs + 1,  # type: ignore[has-type]
@@ -1942,6 +1943,7 @@ class NPUModelRunner(GPUModelRunner):
                 model_instance=self.model,
                 max_tokens_across_pcp=0 if self.pcp_size == 1 else self.pcp_manager.max_num_tokens_across_pcp,
                 skip_compiled=has_encoder_input,
+                has_sinks=self._has_sinks,
                 input_ids=input_ids,
             ),
             self.maybe_get_kv_connector_output(
@@ -3218,6 +3220,7 @@ class NPUModelRunner(GPUModelRunner):
                 aclgraph_runtime_mode=cudagraph_runtime_mode,
                 batch_descriptor=batch_desc,
                 model_instance=self.model,
+                has_sinks = self._has_sinks,
                 input_ids=input_ids,
             ):
                 outputs = self._model_forward(
@@ -3311,6 +3314,13 @@ class NPUModelRunner(GPUModelRunner):
                 from vllm.model_executor.model_loader.default_loader import DefaultModelLoader
                 DefaultModelLoader._init_ep_weight_filter = mock_pass
             self.model: nn.Module = get_model(vllm_config=self.vllm_config)
+            for name, _ in self.model.named_parameters():
+                # sinks is a kind of parameter in attention
+                # only set in weight name
+                # TODO: remove it when fia merge in fiav2
+                if "sink" in name:
+                    self._has_sinks = True
+                    break
             if self.dynamic_eplb:
                 model_register(self.model)
             if self.drafter:
