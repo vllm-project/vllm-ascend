@@ -21,6 +21,8 @@ import torch.distributed as dist
 import vllm.envs as envs
 from vllm.logger import logger
 
+from vllm.distributed.parallel_state import get_pp_group
+
 from vllm_ascend.distributed.parallel_state import get_dynamic_eplb_group
 from vllm_ascend.eplb.adaptor.vllm_adaptor import VllmEplbAdaptor
 from vllm_ascend.eplb.core.eplb_device_transfer_loader import D2DExpertWeightLoader
@@ -38,6 +40,7 @@ class EplbUpdator:
         self.comm_group = get_dynamic_eplb_group()
 
     def set_adaptor(self, adaptor: VllmEplbAdaptor):
+        self.pp_rank = get_pp_group().rank_in_group
         self.adaptor = adaptor
         self.num_moe_layers = self.adaptor.num_moe_layers
         local_load = self.adaptor.get_rank_expert_workload()
@@ -99,8 +102,13 @@ class EplbUpdator:
         self.eplb_process.planner_q.put(1)
 
     def forward_before(self):
+        # If EPLB is restricted to a specific PP stage and this is not it, skip
+        if self.eplb_config.eplb_pp_stage != -1 and self.pp_rank != self.eplb_config.eplb_pp_stage:
+            return
         # Batch after eplb process being triggered, get update info provided by eplb process
         if self.get_update_info_flag():
+            logger.info("[EPLB_SYNC] rank=%s pp_rank=%s cur_iter=%s getting update info",
+                dist.get_rank(), self.pp_rank, self.cur_iterations)
             self.update_info_all = self.eplb_process.block_update_q.get()
         if self.update_expert_weight_flag():
             (expert_send_info, expert_recv_info, updated_expert_map, log2phy_map, layer_id) = self.update_info_all.pop(
@@ -124,6 +132,10 @@ class EplbUpdator:
             self.eplb_loader.asyn_expert_weight_transfer(self.reqs)
 
     def forward_end(self):
+        # If EPLB is restricted to a specific PP stage and this is not it, skip
+        if self.eplb_config.eplb_pp_stage != -1 and self.pp_rank != self.eplb_config.eplb_pp_stage:
+            return
+
         if self.wakeup_eplb_worker_flag():
             logger.info("[EPLB_SYNC] rank=%s pp_rank=%s WAKEUP cur_iter=%s",
                 dist.get_rank(), self.comm_group.rank_in_group, self.cur_iterations)
