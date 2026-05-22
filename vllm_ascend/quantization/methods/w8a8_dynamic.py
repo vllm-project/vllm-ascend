@@ -129,10 +129,13 @@ class AscendW8A8DynamicFusedMoEMethod(AscendMoEScheme):
 
         try:
             device_group = get_mc2_group().device_group
-            # TODO: Try local_rank = ep_group.rank_in_group
-            local_rank = torch.distributed.get_rank(group=device_group)
+            # Use global rank instead of group-local rank to avoid
+            # HCCL communicator name collisions across PP stages.
+            # When PP > 1, different stages have the same local rank
+            # but run on different physical devices.
+            global_rank = torch.distributed.get_rank()
             backend = device_group._get_backend(torch.device("npu"))
-            self.moe_all_to_all_group_name = backend.get_hccl_comm_name(local_rank)
+            self.moe_all_to_all_group_name = backend.get_hccl_comm_name(global_rank)
         except AttributeError:
             self.moe_all_to_all_group_name = ""
 
