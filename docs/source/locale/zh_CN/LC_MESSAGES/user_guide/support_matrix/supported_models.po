@@ -8,7 +8,7 @@ msgid ""
 msgstr ""
 "Project-Id-Version:  vllm-ascend\n"
 "Report-Msgid-Bugs-To: \n"
-"POT-Creation-Date: 2026-05-09 02:22+0000\n"
+"POT-Creation-Date: 2026-05-22 04:30+0000\n"
 "PO-Revision-Date: 2026-01-22 16:18+0800\n"
 "Last-Translator: Gemini\n"
 "Language: zh_CN\n"
@@ -54,12 +54,12 @@ msgid "Text-Only Language Models"
 msgstr "纯文本语言模型"
 
 #: ../../source/user_guide/support_matrix/supported_models.md:14
-#: ../../source/user_guide/support_matrix/supported_models.md:74
+#: ../../source/user_guide/support_matrix/supported_models.md:76
 msgid "Generative Models"
 msgstr "生成模型"
 
 #: ../../source/user_guide/support_matrix/supported_models.md:16
-#: ../../source/user_guide/support_matrix/supported_models.md:76
+#: ../../source/user_guide/support_matrix/supported_models.md:78
 msgid "Core Supported Models"
 msgstr "核心支持的模型"
 
@@ -289,8 +289,28 @@ msgstr "192k"
 msgid "[MiniMax-M2.5](../../tutorials/models/MiniMax-M2.5.md)"
 msgstr "[MiniMax-M2.5](../../tutorials/models/MiniMax-M2.5.md)"
 
-#: ../../source/user_guide/support_matrix/supported_models.md:33
-#: ../../source/user_guide/support_matrix/supported_models.md:86
+#: ../../source/user_guide/support_matrix/supported_models.md
+msgid "Qwen2.5-Math-RM-72B"
+msgstr "Qwen2.5-Math-RM-72B"
+
+#: ../../source/user_guide/support_matrix/supported_models.md
+msgid "vllm-rm, tensor_parallel_size=4, max_model_len=4096"
+msgstr "vllm-rm, tensor_parallel_size=4, max_model_len=4096"
+
+#: ../../source/user_guide/support_matrix/supported_models.md
+msgid "A2"
+msgstr "A2"
+
+#: ../../source/user_guide/support_matrix/supported_models.md
+msgid "4096"
+msgstr "4096"
+
+#: ../../source/user_guide/support_matrix/supported_models.md
+msgid "[Qwen2.5-Math-RM-72B](../../tutorials/models/Qwen2.5-Math-RM-72B.md)"
+msgstr "[Qwen2.5-Math-RM-72B](../../tutorials/models/Qwen2.5-Math-RM-72B.md)"
+
+#: ../../source/user_guide/support_matrix/supported_models.md:34
+#: ../../source/user_guide/support_matrix/supported_models.md:88
 msgid "Extended Compatible Models"
 msgstr "扩展兼容模型"
 
@@ -390,7 +410,7 @@ msgstr "Mllama"
 msgid "MiniMax-Text"
 msgstr "MiniMax-Text"
 
-#: ../../source/user_guide/support_matrix/supported_models.md:60
+#: ../../source/user_guide/support_matrix/supported_models.md:61
 msgid "Pooling Models"
 msgstr "池化模型"
 
@@ -442,7 +462,11 @@ msgstr "基于XLM-RoBERTa"
 msgid "Bert"
 msgstr "Bert"
 
-#: ../../source/user_guide/support_matrix/supported_models.md:72
+#: ../../source/user_guide/support_matrix/supported_models.md
+msgid "Reward Model, gsm8k_correctness accuracy=0.80"
+msgstr "奖励模型，gsm8k_correctness 准确率=0.80"
+
+#: ../../source/user_guide/support_matrix/supported_models.md:74
 msgid "Multimodal Language Models"
 msgstr "多模态语言模型"
 

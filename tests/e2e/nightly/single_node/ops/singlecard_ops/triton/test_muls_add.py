@@ -31,4 +31,3 @@ def test_muls_add_triton_correctness(shape, dtype, scale):
     assert out_triton.shape == out_ref.shape
     assert out_triton.dtype == out_ref.dtype
     assert torch.allclose(out_triton, out_ref, rtol=rtol, atol=atol)
-

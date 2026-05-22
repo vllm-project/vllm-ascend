@@ -1,6 +1,6 @@
 import os
 import unittest
-from unittest.mock import patch
+from unittest.mock import MagicMock, patch
 
 # isort: off
 import torch
@@ -13,9 +13,11 @@ from vllm_ascend.eplb.core.eplb_utils import init_eplb_config
 
 
 class TestAscendConfig(unittest.TestCase):
+    @patch("vllm.config.VllmConfig.__post_init__", MagicMock())
     @patch("vllm_ascend.platform.NPUPlatform._fix_incompatible_config")
     def setUp(self, mock_fix_incompatible_config):
         vllm_config = VllmConfig()
+        vllm_config.model_config = MagicMock()
         vllm_config.additional_config = {
             "refresh": True,
             "eplb_config": {"dynamic_eplb": True, "num_redundant_experts": 2},

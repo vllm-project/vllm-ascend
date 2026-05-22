@@ -49,8 +49,8 @@ class MoEWeights:
     w2_bias: torch.Tensor | None = None
     w1_scale: torch.Tensor | list[torch.Tensor] | None = None
     w2_scale: torch.Tensor | list[torch.Tensor] | None = None
-    w1_scale_bias: torch.Tensor | None = None
-    w2_scale_bias: torch.Tensor | None = None
+    w1_scale_bias: torch.Tensor | list[torch.Tensor] | None = None
+    w2_scale_bias: torch.Tensor | list[torch.Tensor] | None = None
     w1_offset: torch.Tensor | None = None
     w2_offset: torch.Tensor | None = None
 
@@ -68,6 +68,7 @@ class MoEFusedExpertsInput:
     activation: str = "silu"
     need_trans: bool = False
     dynamic_eplb: bool = False
+    swiglu_limit: int = 0
 
 
 @dataclass(frozen=True, slots=True)
@@ -91,7 +92,7 @@ class MoEMC2CombineMetadata:
     tp_recv_counts: torch.Tensor
     assist_info_for_combine: torch.Tensor
     expand_scales: torch.Tensor | None
-    dispatch_with_quant: bool
+    quant: MoEQuantParams
     mc2_mask: torch.Tensor | None = None
 
 
@@ -139,6 +140,7 @@ class MoEMlpComputeInput:
     activation: str = "silu"
     need_trans: bool = False
     dynamic_eplb: bool = False
+    swiglu_limit: int = 0
 
 
 __all__ = [

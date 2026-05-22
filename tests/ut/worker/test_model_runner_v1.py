@@ -14,6 +14,7 @@ class TestNPUModelRunnerKVCache(unittest.TestCase):
         runner.device = torch.device("cpu")
         runner.use_sparse = False
         runner.use_sparse_c8_indexer = False
+        runner.use_compress = False
         runner.use_hybrid_blocks = False
         runner.hybrid_with_attn_and_mamba = False
         runner.runner_only_attn_layers = set()
@@ -90,6 +91,7 @@ class TestNPUModelRunnerOutputTokenIds(unittest.TestCase):
         runner.device = torch.device("cpu")
         runner.vllm_config = MagicMock()
         runner.model_config = MagicMock()
+        runner.use_compress = False
         return runner
 
     @patch("vllm_ascend.worker.model_runner_v1.lmhead_tp_enable")
@@ -155,6 +157,7 @@ class TestNPUModelRunnerDebugger(unittest.TestCase):
         runner.model_config.enforce_eager = False
         runner._debugger_started = True
         runner._debugger_step_dummy_data_before_execute = False
+        runner.use_compress = False
         return runner
 
     def test_finalize_dump_data_stops_stop_capable_debugger(self):

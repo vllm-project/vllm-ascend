@@ -1,4 +1,5 @@
 import gc
+
 import pytest
 import torch
 import torch.nn.functional as F
@@ -8,7 +9,7 @@ from vllm_ascend.ops.triton.triton_utils import init_device_properties_triton
 
 
 @pytest.mark.parametrize(
-    ('B', 'T', 'H', 'D', 'dtype'),
+    ("B", "T", "H", "D", "dtype"),
     [
         pytest.param(*test, id="B{}-T{}-H{}-D{}-{}".format(*test))
         for test in [

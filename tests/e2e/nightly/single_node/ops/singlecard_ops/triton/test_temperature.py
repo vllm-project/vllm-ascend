@@ -1,17 +1,19 @@
 import random
-import torch
+
 import pytest
-from vllm.triton_utils import triton
+import torch
+
 from vllm_ascend.worker.v2.sample.gumbel import apply_temperature
 
 # Common vocab sizes from mainstream models
 VOCAB_SIZES = [
-    32000,   # LLaMA / LLaMA2 / Mistral
-    50257,   # GPT-2
-    65024,   # ChatGLM
+    32000,  # LLaMA / LLaMA2 / Mistral
+    50257,  # GPT-2
+    65024,  # ChatGLM
     128256,  # LLaMA3
     151936,  # Qwen2
 ]
+
 
 def torch_apply_temperature(
     logits: torch.Tensor,
@@ -33,12 +35,10 @@ def torch_apply_temperature(
             continue
         logits[token_idx] = logits[token_idx].float() / temp
 
+
 @pytest.mark.parametrize(
     "num_tokens, vocab_size",
-    [
-        (random.randint(1, 64), vocab_size)
-        for vocab_size in VOCAB_SIZES
-    ],
+    [(random.randint(1, 64), vocab_size) for vocab_size in VOCAB_SIZES],
 )
 def test_temperature_kernel(num_tokens, vocab_size):
     """
@@ -54,15 +54,11 @@ def test_temperature_kernel(num_tokens, vocab_size):
     torch.manual_seed(42)
 
     # Build input tensors
-    logits_triton = torch.randn(
-        (num_tokens, vocab_size), dtype=torch.float32
-    ).npu()
+    logits_triton = torch.randn((num_tokens, vocab_size), dtype=torch.float32).npu()
     logits_ref = logits_triton.clone()
 
     num_requests = num_tokens
-    expanded_idx_mapping = torch.arange(
-        num_tokens, dtype=torch.int32
-    ).npu()
+    expanded_idx_mapping = torch.arange(num_tokens, dtype=torch.int32).npu()
 
     # Include edge cases: 0.0 and 1.0 should leave logits unchanged
     temperature = torch.rand(num_requests, dtype=torch.float32).npu()
@@ -78,7 +74,8 @@ def test_temperature_kernel(num_tokens, vocab_size):
     torch_apply_temperature(logits_ref, expanded_idx_mapping, temperature)
 
     # ========== Verify results ==========
-    assert torch.allclose(logits_triton, logits_ref, atol=1e-4, rtol=1e-5), \
-        f"Triton temperature kernel output differs from torch reference.\n" \
-        f"Max diff: {torch.max(torch.abs(logits_triton - logits_ref))}\n" \
+    assert torch.allclose(logits_triton, logits_ref, atol=1e-4, rtol=1e-5), (
+        f"Triton temperature kernel output differs from torch reference.\n"
+        f"Max diff: {torch.max(torch.abs(logits_triton - logits_ref))}\n"
         f"Mean diff: {torch.mean(torch.abs(logits_triton - logits_ref).float())}"
+    )

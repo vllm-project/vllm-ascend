@@ -33,9 +33,9 @@ LONG_PROMPT = "The quick brown fox jumps over the lazy dog. " * 50
 
 def _fa3_available() -> bool:
     try:
-        if util.find_spec("flash_attn_v3") is None:
+        if util.find_spec("flash_attn_npu_v3") is None:
             return False
-        mod = import_module("flash_attn_v3")
+        mod = import_module("flash_attn_npu_v3")
         return hasattr(mod, "flash_attn_with_kvcache")
     except ImportError:
         return False
@@ -76,7 +76,7 @@ def _assert_outputs_match(fia_outputs, fa3_outputs, label=""):
         )
 
 
-@pytest.mark.skipif(not _fa3_available(), reason="flash_attn_v3 is not installed")
+@pytest.mark.skipif(not _fa3_available(), reason="flash_attn_npu_v3 is not installed")
 def test_fa3_vs_fia_single_prompt():
     """Compare FA3 and FIA with a single prompt (minimal batch size).
 
@@ -90,7 +90,7 @@ def test_fa3_vs_fia_single_prompt():
     _assert_outputs_match(fia_outputs, fa3_outputs, label="[SinglePrompt] ")
 
 
-@pytest.mark.skipif(not _fa3_available(), reason="flash_attn_v3 is not installed")
+@pytest.mark.skipif(not _fa3_available(), reason="flash_attn_npu_v3 is not installed")
 def test_fa3_vs_fia_mixed_lengths():
     """Compare FA3 and FIA with mixed prompt lengths in the same batch.
 
@@ -109,7 +109,7 @@ def test_fa3_vs_fia_mixed_lengths():
     _assert_outputs_match(fia_outputs, fa3_outputs, label="[MixedLen] ")
 
 
-@pytest.mark.skipif(not _fa3_available(), reason="flash_attn_v3 is not installed")
+@pytest.mark.skipif(not _fa3_available(), reason="flash_attn_npu_v3 is not installed")
 def test_fa3_vs_fia_with_chunkprefill():
     """Compare FA3 and FIA with single token generation where chunkprefill is used."""
     fia_outputs = _generate_with_backend(SHORT_PROMPTS, max_tokens=2, max_num_seqs=2, max_num_batched_tokens=5)
@@ -119,7 +119,7 @@ def test_fa3_vs_fia_with_chunkprefill():
     _assert_outputs_match(fia_outputs, fa3_outputs, label="[Chunkprefill] ")
 
 
-@pytest.mark.skipif(not _fa3_available(), reason="flash_attn_v3 is not installed")
+@pytest.mark.skipif(not _fa3_available(), reason="flash_attn_npu_v3 is not installed")
 def test_fa3_vs_fia_logprobs():
     """Compare FA3 and FIA logprobs for fine-grained numerical verification."""
     fia_logprobs = _generate_logprobs_with_backend(SHORT_PROMPTS[:1])

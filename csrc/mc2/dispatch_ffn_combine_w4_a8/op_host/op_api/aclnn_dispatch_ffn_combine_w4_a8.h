@@ -25,7 +25,7 @@ __attribute__((visibility("default"))) aclnnStatus aclnnDispatchFFNCombineW4A8Ge
                                                                                         const aclTensor* expertId, const aclTensorList* scale1, const aclTensorList* scale2,
                                                                                         const aclTensorList* bias1, const aclTensorList* bias2,
                                                                                         const aclTensor* probs,
-                                                                                        const char* group, int64_t maxOutputSize,
+                                                                                        const char* group, int64_t maxOutputSize, double swigluLimit,
                                                                                         const aclTensor* out, const aclTensor* expertTokenNums,
                                                                                         uint64_t* workspaceSize, aclOpExecutor** executor);
 

@@ -193,8 +193,8 @@ class TestMoECommMethod(TestBase):
         mock_td_instance.token_combine.return_value = torch.randn(4, 8)
         mock_token_dispatcher.return_value = mock_td_instance
 
-        # Mock unified_apply_mlp
-        mock_unified_apply_mlp.return_value = torch.randn(6, 8)
+        # Mock unified_apply_mlp returns (tensor, event) tuple
+        mock_unified_apply_mlp.return_value = (torch.randn(6, 8), MagicMock())
 
         # Create instance
         comm_impl = AllGatherCommImpl(self.moe_config)
@@ -247,6 +247,6 @@ class TestMoECommMethod(TestBase):
 
         # Verify token_combine was called
         mock_td_instance.token_combine.assert_called_once_with(
-            hidden_states=mock_unified_apply_mlp.return_value,
+            hidden_states=mock_unified_apply_mlp.return_value[0],
             combine_metadata=mock_td_instance.token_dispatch.return_value.combine_metadata,
         )

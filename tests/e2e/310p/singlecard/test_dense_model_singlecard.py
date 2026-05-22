@@ -16,7 +16,7 @@
 # This file is a part of the vllm-ascend project.
 
 
-from tests.e2e.conftest import VllmRunner
+from tests.e2e.conftest import VllmRunner, wait_until_npu_memory_free
 
 
 def test_qwen3_dense_tp1_fp16():
@@ -30,6 +30,28 @@ def test_qwen3_dense_tp1_fp16():
         enforce_eager=True,
         dtype="float16",
         max_model_len=16384,
+    ) as vllm_model:
+        vllm_model.generate_greedy(example_prompts, max_tokens)
+
+
+@wait_until_npu_memory_free(0.7)
+def test_qwen3_dense_tp1_fp16_aclgraph():
+    example_prompts = [
+        "Hello, my name is",
+    ] * 8
+    max_tokens = 2
+    with VllmRunner(
+        "Qwen/Qwen3-8B",
+        tensor_parallel_size=1,
+        dtype="float16",
+        max_num_seqs=16,
+        max_model_len=16384,
+        gpu_memory_utilization=0.80,
+        additional_config={"ascend_compilation_config": {"fuse_norm_quant": False}},
+        compilation_config={
+            "cudagraph_mode": "FULL_DECODE_ONLY",
+            "cudagraph_capture_sizes": [1, 2, 4, 8, 16],
+        },
     ) as vllm_model:
         vllm_model.generate_greedy(example_prompts, max_tokens)
 
