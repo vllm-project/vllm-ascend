@@ -424,6 +424,7 @@ class AscendW4A8DynamicFusedMoEMethod(AscendMoEScheme):
                 w2_scale=w2_scale,
                 w1_scale_bias=w1_scale_bias,
                 w2_scale_bias=w2_scale_bias,
+                is_per_channel_weight=self.is_per_channel_weight,
                 swiglu_limit=layer.swiglu_limit,
             )
         )
@@ -481,6 +482,12 @@ class AscendW4A8DynamicFusedMoEMethod(AscendMoEScheme):
                 weight.to(torch.float32), torch.tensor([1.0]).npu(), None, torch.quint4x2, -1, False
             )
 
+    @staticmethod
+    def maybe_squeeze_per_channel_weight_scale(scale: torch.Tensor) -> torch.Tensor:
+        if scale.dim() > 1 and scale.shape[1] == 1:
+            return scale.squeeze(1)
+        return scale
+
     def process_weights_after_loading(self, layer):
         if self.quant_method == COMPRESSED_TENSORS_METHOD:
             self.process_weights_after_loading_compressed_tensors(layer)
@@ -496,6 +503,8 @@ class AscendW4A8DynamicFusedMoEMethod(AscendMoEScheme):
             scale_np = scale.cpu().numpy()
             scale_np.dtype = np.uint32
             scale_uint64_tensor = torch.from_numpy(scale_np.astype(np.int64)).npu()
+            if self.is_per_channel_weight:
+                return self.maybe_squeeze_per_channel_weight_scale(scale_uint64_tensor)
             return scale_uint64_tensor
 
         def update_bias_compressed_tensors(weight: torch.Tensor, scale: torch.Tensor, strategy: str):
@@ -559,6 +568,8 @@ class AscendW4A8DynamicFusedMoEMethod(AscendMoEScheme):
 
         self.update_bias(layer, w13_bias, w2_bias)
 
+        if self.is_per_channel_weight:
+            layer.w13_weight_scale.data = self.maybe_squeeze_per_channel_weight_scale(layer.w13_weight_scale.data)
         layer.w13_weight.data = maybe_trans_nz(layer.w13_weight.data)
         layer.w2_weight.data = maybe_trans_nz(layer.w2_weight.data)
 

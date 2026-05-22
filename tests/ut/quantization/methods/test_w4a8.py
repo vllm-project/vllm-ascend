@@ -261,9 +261,8 @@ class TestAscendW4A8DynamicFusedMoEMethod(TestBase):
 
     @patch("torch_npu.npu_format_cast")
     @patch("torch_npu.npu_quantize")
-    @patch("torch.Tensor.npu")
-    def test_process_weights_after_loading(self, mock_npu, mock_npu_quantize, mock_npu_format_cast):
-        mock_npu.return_value = torch.Tensor()
+    @patch("torch.Tensor.npu", new=lambda self: self)
+    def test_process_weights_after_loading(self, mock_npu_quantize, mock_npu_format_cast):
         mock_npu_quantize.return_value = torch.Tensor()
         mock_npu_format_cast.side_effect = identity
         # old quant version weight
@@ -287,6 +286,7 @@ class TestAscendW4A8DynamicFusedMoEMethod(TestBase):
         per_channel_layer = self.build_layer(is_new_quant_version=True, is_per_channel_weight=True)
         self.quant_method.process_weights_after_loading(per_channel_layer)
         self.assertEqual(new_layer.w13_scale_bias.data.shape, (self.experts, 2 * self.input_size))
+        self.assertEqual(per_channel_layer.w13_weight_scale.data.shape, (self.experts, 2 * self.input_size))
 
     def test_get_weight_compressed_tensors(self):
         self.quant_method.quant_method = COMPRESSED_TENSORS_METHOD
@@ -327,6 +327,7 @@ class TestAscendW4A8DynamicFusedMoEMethod(TestBase):
         top_k = 2
 
         layer = self.build_layer(is_new_quant_version=True, is_per_channel_weight=True)
+        self.quant_method.is_per_channel_weight = True
         layer.swiglu_limit = 1000000
         x = torch.randn(tokens, hidden_size, dtype=torch.bfloat16)
         router_logits = torch.randn(tokens, num_experts, dtype=torch.float32)
@@ -384,6 +385,7 @@ class TestAscendW4A8DynamicFusedMoEMethod(TestBase):
         build_kwargs = mock_build_input.call_args.kwargs
         self.assertTrue(torch.equal(build_kwargs["hidden_states"], x))
         self.assertEqual(build_kwargs["quant_type"], self.quant_method.quant_type)
+        self.assertTrue(build_kwargs["is_per_channel_weight"])
         self.assertEqual(build_kwargs["activation"], "silu")
         self.assertEqual(build_kwargs["apply_router_weight_on_input"], False)
 
