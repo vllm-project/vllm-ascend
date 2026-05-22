@@ -190,6 +190,116 @@ PerLayerAttnMetadata: TypeAlias = list[AttnMetadataDict] | AttnMetadataDict
 SEQ_LEN_WITH_MAX_PA_WORKSPACE = 6144
 
 
+def _filter_spec_decode_logprobs_tensors(
+    logprobs_tensors: LogprobsTensors,
+    mask: torch.Tensor,
+) -> LogprobsTensors:
+    """Filter spec decode logprobs rows, including full-vocab logprobs."""
+    mask = mask.to(device=logprobs_tensors.logprobs.device, dtype=torch.bool)
+    if int(logprobs_tensors.logprobs.shape[0]) != int(mask.shape[0]):
+        raise ValueError("spec decode logprobs row count does not match sampled output")
+
+    if (
+        logprobs_tensors.logprob_token_ids.numel() == 0
+        and logprobs_tensors.selected_token_ranks.numel() == 0
+    ):
+        return LogprobsTensors(
+            logprob_token_ids=logprobs_tensors.logprob_token_ids,
+            logprobs=logprobs_tensors.logprobs[mask],
+            selected_token_ranks=logprobs_tensors.selected_token_ranks,
+        )
+
+    compact_logprobs_tensors = LogprobsTensors(
+        logprobs_tensors.logprob_token_ids,
+        logprobs_tensors.logprobs,
+        logprobs_tensors.selected_token_ranks,
+    )
+    return compact_logprobs_tensors.filter(
+        mask.to(device=logprobs_tensors.logprob_token_ids.device)
+    )
+
+
+def _parse_spec_decode_output(
+    sampled_token_ids: torch.Tensor,
+    vocab_size: int,
+    discard_sampled_tokens_req_indices: Sequence[int],
+    logprobs_tensors: LogprobsTensors | None = None,
+) -> tuple[list[list[int]], LogprobsLists | None]:
+    sampled_token_ids_np = sampled_token_ids.cpu().numpy()
+    valid_mask = (sampled_token_ids_np != PLACEHOLDER_TOKEN_ID) & (
+        sampled_token_ids_np < vocab_size
+    )
+
+    logprobs_lists = None
+    if logprobs_tensors is not None:
+        cu_num_tokens = [0] + valid_mask.sum(axis=1).cumsum().tolist()
+        if logprobs_tensors.cu_num_generated_tokens is None:
+            compact_mask = valid_mask.flatten()
+        else:
+            original_counts = np.diff(
+                np.asarray(logprobs_tensors.cu_num_generated_tokens, dtype=np.int32)
+            )
+            accepted_counts = valid_mask.sum(axis=1).astype(np.int32)
+            if original_counts.shape[0] != accepted_counts.shape[0]:
+                raise ValueError("spec decode logprobs grouping does not match sampled output")
+            if np.any(accepted_counts > original_counts):
+                raise ValueError("spec decode accepted more tokens than logprobs rows")
+            compact_mask = (
+                np.concatenate(
+                    [
+                        np.arange(original_count, dtype=np.int32) < accepted_count
+                        for original_count, accepted_count in zip(
+                            original_counts,
+                            accepted_counts,
+                        )
+                    ]
+                )
+                if len(original_counts) > 0
+                else np.empty(0, dtype=bool)
+            )
+        filtered_tensors = _filter_spec_decode_logprobs_tensors(
+            logprobs_tensors,
+            torch.from_numpy(compact_mask),
+        )
+        logprobs_lists = filtered_tensors.tolists(cu_num_tokens)
+
+    if len(discard_sampled_tokens_req_indices) > 0:
+        valid_mask[discard_sampled_tokens_req_indices] = False
+    valid_sampled_token_ids = [
+        row[valid_mask[i]].tolist() for i, row in enumerate(sampled_token_ids_np)
+    ]
+    return valid_sampled_token_ids, logprobs_lists
+
+
+class AscendAsyncGPUModelRunnerOutput(AsyncGPUModelRunnerOutput):
+    def get_output(self) -> ModelRunnerOutput:
+        """Copy async tensors to host and parse Ascend spec logprobs."""
+        max_gen_len = self.sampled_token_ids_cpu.shape[-1]
+        self.async_copy_ready_event.synchronize()
+
+        del self._logprobs_tensors
+        del self._sampled_token_ids
+        if max_gen_len == 1:
+            valid_sampled_token_ids = self.sampled_token_ids_cpu.tolist()
+            for i in self._invalid_req_indices:
+                valid_sampled_token_ids[i].clear()
+            logprobs_lists = None
+            if self._logprobs_tensors_cpu is not None:
+                logprobs_lists = self._logprobs_tensors_cpu.tolists()
+        else:
+            valid_sampled_token_ids, logprobs_lists = _parse_spec_decode_output(
+                self.sampled_token_ids_cpu,
+                self.vocab_size,
+                self._invalid_req_indices,
+                logprobs_tensors=self._logprobs_tensors_cpu,
+            )
+
+        output = self._model_runner_output
+        output.sampled_token_ids = valid_sampled_token_ids
+        output.logprobs = logprobs_lists
+        return output
+
+
 @dataclass
 class GraphCaptureContext:
     stream: torch.npu.Stream
@@ -2277,7 +2387,7 @@ class NPUModelRunner(GPUModelRunner):
 
         if not self.use_async_scheduling:
             return model_runner_output
-        async_output = AsyncGPUModelRunnerOutput(
+        async_output = AscendAsyncGPUModelRunnerOutput(
             model_runner_output=model_runner_output,
             sampled_token_ids=sampler_output.sampled_token_ids,
             logprobs_tensors=sampler_output.logprobs_tensors,
@@ -2290,6 +2400,61 @@ class NPUModelRunner(GPUModelRunner):
             async_output.async_copy_ready_event,
         )
         return async_output
+
+    def _draft_logits_for_sampling(
+        self,
+        spec_decode_metadata: SpecDecodeMetadata | None,
+    ) -> Any:
+        drafter = getattr(self, "drafter", None)
+        draft_logits = getattr(drafter, "draft_logits", None)
+        if draft_logits is None or not torch.is_tensor(draft_logits):
+            return draft_logits
+
+        current_req_ids = self._req_ids_at_logits
+        draft_logits_req_ids = getattr(drafter, "draft_logits_req_ids", None)
+        if current_req_ids is None or draft_logits_req_ids is None:
+            return draft_logits
+
+        if draft_logits.ndim != 3:
+            raise ValueError("draft logits must have shape [num_reqs, num_speculative_steps, vocab_size]")
+        current_req_ids = tuple(current_req_ids)
+        draft_logits_req_ids = tuple(draft_logits_req_ids)
+        if len(set(current_req_ids)) != len(current_req_ids):
+            raise ValueError("current request ids for draft logits contain duplicates")
+        if len(set(draft_logits_req_ids)) != len(draft_logits_req_ids):
+            raise ValueError("draft logits request ids contain duplicates")
+        if int(draft_logits.shape[0]) < len(draft_logits_req_ids):
+            raise ValueError("draft logits rows do not cover recorded request ids")
+
+        if current_req_ids == draft_logits_req_ids[: len(current_req_ids)]:
+            return draft_logits[: len(current_req_ids)]
+
+        req_id_to_draft_idx = {
+            req_id: draft_idx for draft_idx, req_id in enumerate(draft_logits_req_ids)
+        }
+        reordered = draft_logits.new_empty((len(current_req_ids), *draft_logits.shape[1:]))
+        missing_req_ids: list[str] = []
+        num_draft_tokens = (
+            getattr(spec_decode_metadata, "num_draft_tokens", None)
+            if spec_decode_metadata is not None
+            else None
+        )
+        for req_idx, req_id in enumerate(current_req_ids):
+            draft_idx = req_id_to_draft_idx.get(req_id)
+            if draft_idx is not None:
+                reordered[req_idx].copy_(draft_logits[draft_idx])
+                continue
+            if num_draft_tokens is not None and int(num_draft_tokens[req_idx]) == 0:
+                reordered[req_idx].zero_()
+                continue
+            missing_req_ids.append(req_id)
+
+        if missing_req_ids:
+            raise ValueError(
+                "draft logits are missing rows for speculative requests: "
+                f"{missing_req_ids}"
+            )
+        return reordered.contiguous()
 
     # overwrite _sample for lmhead_tp_enable and need_accepted_tokens
     def _sample(self, logits, spec_decode_metadata):
@@ -2314,7 +2479,7 @@ class NPUModelRunner(GPUModelRunner):
                 "req_indices": self._req_indices_at_logits,
                 "req_ids": self._req_ids_at_logits,
                 "spec_decode_metadata": spec_decode_metadata,
-                "draft_logits": getattr(getattr(self, "drafter", None), "draft_logits", None),
+                "draft_logits": self._draft_logits_for_sampling(spec_decode_metadata),
             }
             req_indices_np = getattr(self, "_req_indices_at_logits_np", None)
             if req_indices_np is not None:
@@ -2346,52 +2511,12 @@ class NPUModelRunner(GPUModelRunner):
         logprobs_tensors: LogprobsTensors | None,
         discard_sampled_tokens_req_indices: Sequence[int],
     ) -> tuple[list[list[int]], LogprobsLists | None]:
-        sampled_token_ids_np = sampled_token_ids.cpu().numpy()
-        valid_mask = (sampled_token_ids_np != PLACEHOLDER_TOKEN_ID) & (
-            sampled_token_ids_np < self.input_batch.vocab_size
+        return _parse_spec_decode_output(
+            sampled_token_ids,
+            self.input_batch.vocab_size,
+            discard_sampled_tokens_req_indices,
+            logprobs_tensors=logprobs_tensors,
         )
-
-        logprobs_lists = None
-        if logprobs_tensors is not None:
-            cu_num_tokens = [0] + valid_mask.sum(axis=1).cumsum().tolist()
-            if logprobs_tensors.cu_num_generated_tokens is None:
-                filtered_tensors = logprobs_tensors.filter(valid_mask.flatten())
-            else:
-                original_counts = np.diff(
-                    np.asarray(logprobs_tensors.cu_num_generated_tokens, dtype=np.int32)
-                )
-                accepted_counts = valid_mask.sum(axis=1).astype(np.int32)
-                if original_counts.shape[0] != accepted_counts.shape[0]:
-                    raise ValueError("spec decode logprobs grouping does not match sampled output")
-                if np.any(accepted_counts > original_counts):
-                    raise ValueError("spec decode accepted more tokens than logprobs rows")
-                compact_mask = np.concatenate(
-                    [
-                        np.arange(original_count, dtype=np.int32) < accepted_count
-                        for original_count, accepted_count in zip(
-                            original_counts,
-                            accepted_counts,
-                        )
-                    ]
-                )
-                compact_logprobs_tensors = LogprobsTensors(
-                    logprobs_tensors.logprob_token_ids,
-                    logprobs_tensors.logprobs,
-                    logprobs_tensors.selected_token_ranks,
-                )
-                filtered_tensors = compact_logprobs_tensors.filter(
-                    torch.from_numpy(compact_mask).to(
-                        device=logprobs_tensors.logprob_token_ids.device,
-                    )
-                )
-            logprobs_lists = filtered_tensors.tolists(cu_num_tokens)
-
-        if len(discard_sampled_tokens_req_indices) > 0:
-            valid_mask[discard_sampled_tokens_req_indices] = False
-        valid_sampled_token_ids = [
-            row[valid_mask[i]].tolist() for i, row in enumerate(sampled_token_ids_np)
-        ]
-        return valid_sampled_token_ids, logprobs_lists
 
     # TODO: remove this func after eagle_proposer is refactored and
     #  _bookkeeping_sync is moved after propose_draft_token_ids

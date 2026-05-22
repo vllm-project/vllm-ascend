@@ -201,7 +201,7 @@ class GpuSamplerBridge:
         self._activate_gpu_sampler(
             sampling_metadata,
             ctx,
-            disable_gpu_logprobs=rejection_sample_method == "probabilistic",
+            disable_gpu_logprobs=rejection_sample_method in ("probabilistic", "synthetic"),
         )
         try:
             rejection_sampler = AscendRejectionSampler(self, spec_config, self._device)
@@ -212,9 +212,11 @@ class GpuSamplerBridge:
                 output.num_sampled,
             )
             logprobs_tensors = output.logprobs_tensors
-            if rejection_sample_method == "probabilistic":
+            if rejection_sample_method in ("probabilistic", "synthetic"):
                 if self._active_processed_logits is None:
-                    raise RuntimeError("probabilistic rejection sampling did not process logits")
+                    raise RuntimeError(
+                        f"{rejection_sample_method} rejection sampling did not process logits"
+                    )
                 sampled_for_logprobs = self._flatten_sampled_token_ids(
                     sampled_token_ids,
                     output.num_sampled,

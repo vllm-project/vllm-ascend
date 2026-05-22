@@ -125,6 +125,123 @@ def strict_rejection_sample(
     return sampled, num_sampled
 
 
+@triton.jit
+def _synthetic_rejection_sample_kernel(
+    sampled_ptr,  # [num_reqs, num_speculative_steps + 1]
+    sampled_stride,
+    num_sampled_ptr,  # [num_reqs]
+    target_sampled_ptr,  # [num_draft_tokens + num_reqs]
+    input_ids_ptr,  # [num_draft_tokens + num_reqs]
+    cu_num_logits_ptr,  # [num_reqs + 1]
+    synthetic_conditional_rates_ptr,  # [num_speculative_steps]
+    uniform_probs_ptr,  # [num_draft_tokens + num_reqs]
+):
+    req_idx = tl.program_id(0)
+    start_idx = tl.load(cu_num_logits_ptr + req_idx)
+    end_idx = tl.load(cu_num_logits_ptr + req_idx + 1)
+    num_tokens = end_idx - start_idx
+
+    num_sampled = 0
+    rejected = False
+    for i in range(num_tokens - 1):
+        if not rejected:
+            uniform_prob = tl.load(uniform_probs_ptr + start_idx + i)
+            rate = tl.load(synthetic_conditional_rates_ptr + i)
+            target_sampled = tl.load(target_sampled_ptr + start_idx + i)
+            draft_sampled = tl.load(input_ids_ptr + start_idx + i + 1)
+            accepted = uniform_prob < rate
+            token_id = tl.where(accepted, draft_sampled, target_sampled)
+            tl.store(sampled_ptr + req_idx * sampled_stride + i, token_id)
+            num_sampled += 1
+            if not accepted:
+                rejected = True
+    if not rejected:
+        target_sampled = tl.load(target_sampled_ptr + start_idx + num_tokens - 1)
+        tl.store(
+            sampled_ptr + req_idx * sampled_stride + num_tokens - 1,
+            target_sampled,
+        )
+        num_sampled += 1
+    tl.store(num_sampled_ptr + req_idx, num_sampled)
+
+
+def _synthetic_rejection_sample_cpu(
+    target_sampled: torch.Tensor,
+    draft_sampled: torch.Tensor,
+    cu_num_logits: torch.Tensor,
+    num_speculative_steps: int,
+    synthetic_conditional_rates: torch.Tensor,
+) -> tuple[torch.Tensor, torch.Tensor]:
+    num_reqs = int(cu_num_logits.shape[0]) - 1
+    sampled = target_sampled.new_empty(num_reqs, num_speculative_steps + 1)
+    num_sampled = target_sampled.new_empty(num_reqs, dtype=torch.int32)
+    uniform_probs = torch.rand(
+        int(target_sampled.shape[0]),
+        dtype=torch.float32,
+        device=target_sampled.device,
+    )
+    for req_idx in range(num_reqs):
+        start_idx = int(cu_num_logits[req_idx].item())
+        end_idx = int(cu_num_logits[req_idx + 1].item())
+        count = 0
+        rejected = False
+        for row in range(start_idx, end_idx - 1):
+            if rejected:
+                continue
+            local_pos = row - start_idx
+            accepted = uniform_probs[row] < synthetic_conditional_rates[local_pos]
+            sampled[req_idx, count] = (
+                draft_sampled[row + 1] if bool(accepted.item()) else target_sampled[row]
+            )
+            count += 1
+            rejected = not bool(accepted.item())
+        if not rejected:
+            sampled[req_idx, count] = target_sampled[end_idx - 1]
+            count += 1
+        num_sampled[req_idx] = count
+    return sampled, num_sampled
+
+
+def synthetic_rejection_sample(
+    target_sampled: torch.Tensor,
+    draft_sampled: torch.Tensor,
+    cu_num_logits: torch.Tensor,
+    num_speculative_steps: int,
+    synthetic_conditional_rates: torch.Tensor | None,
+) -> tuple[torch.Tensor, torch.Tensor]:
+    if synthetic_conditional_rates is None:
+        raise ValueError("synthetic rejection sampling requires acceptance rates")
+    if target_sampled.device.type == "cpu":
+        return _synthetic_rejection_sample_cpu(
+            target_sampled,
+            draft_sampled,
+            cu_num_logits,
+            num_speculative_steps,
+            synthetic_conditional_rates,
+        )
+
+    num_reqs = cu_num_logits.shape[0] - 1
+    sampled = target_sampled.new_empty(num_reqs, num_speculative_steps + 1)
+    num_sampled = target_sampled.new_empty(num_reqs, dtype=torch.int32)
+    uniform_probs = torch.empty(
+        target_sampled.shape,
+        dtype=torch.float32,
+        device=target_sampled.device,
+    ).uniform_()
+    _synthetic_rejection_sample_kernel[(num_reqs,)](
+        sampled,
+        sampled.stride(0),
+        num_sampled,
+        target_sampled,
+        draft_sampled,
+        cu_num_logits,
+        synthetic_conditional_rates,
+        uniform_probs,
+        num_warps=1,
+    )
+    return sampled, num_sampled
+
+
 class AscendRejectionSampler:
     """Speculative rejection sampler for the v1 Ascend GPU-sampler bridge."""
 
@@ -207,10 +324,15 @@ class AscendRejectionSampler:
             )
             logprobs_tensors = None
         elif self.rejection_sample_method == "synthetic":
-            raise NotImplementedError(
-                "synthetic rejection sampling is not supported by the Ascend "
-                "GPU-sampler bridge yet."
+            sampler_output = self.sampler(logits, input_batch)
+            sampled, num_sampled = synthetic_rejection_sample(
+                sampler_output.sampled_token_ids.view(-1),
+                draft_sampled,
+                input_batch.cu_num_logits,
+                self.num_speculative_steps,
+                self.synthetic_conditional_rates,
             )
+            logprobs_tensors = None
         else:
             raise ValueError(
                 f"Unknown rejection sample method: {self.rejection_sample_method}"

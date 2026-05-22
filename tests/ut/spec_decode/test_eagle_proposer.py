@@ -2,6 +2,7 @@
 import inspect
 import unittest
 from dataclasses import dataclass
+from types import SimpleNamespace
 from typing import Any
 from unittest.mock import MagicMock, patch
 
@@ -57,6 +58,7 @@ class TestEagleProposerDraftLogits(TestBase):
         proposer.speculative_config = MagicMock(rejection_sample_method="strict")
         proposer.num_speculative_tokens = 2
         proposer.draft_logits = torch.ones((1, 1, 1))
+        proposer.draft_logits_req_ids = ("old-req",)
 
         draft_logits = proposer._new_draft_logits_buffer(
             3,
@@ -65,6 +67,19 @@ class TestEagleProposerDraftLogits(TestBase):
 
         self.assertIsNone(draft_logits)
         self.assertIsNone(proposer.draft_logits)
+        self.assertIsNone(proposer.draft_logits_req_ids)
+
+    def test_set_draft_logits_records_request_order(self):
+        proposer = AscendSpecDecodeBaseProposer.__new__(AscendSpecDecodeBaseProposer)
+        proposer.runner = SimpleNamespace(
+            input_batch=SimpleNamespace(req_ids=["req0", "req1", "req2"])
+        )
+        draft_logits = torch.zeros((2, 1, 4), dtype=torch.float32)
+
+        proposer._set_draft_logits(draft_logits)
+
+        self.assertIs(proposer.draft_logits, draft_logits)
+        self.assertEqual(proposer.draft_logits_req_ids, ("req0", "req1"))
 
 
 @dataclass

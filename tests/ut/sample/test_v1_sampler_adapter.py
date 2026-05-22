@@ -209,6 +209,78 @@ class TestGpuSamplerBridge(TestBase):
         self.assertIs(output.logprobs_tensors, logprobs_tensors)
         self.assertEqual(output.logprobs_tensors.cu_num_generated_tokens, [0, 2, 3])
 
+    def test_synthetic_rejection_uses_acceptance_rates(self):
+        from vllm_ascend.worker.v1.sample.rejection_sampler import (
+            AscendRejectionSampler,
+            BridgeSamplerOutput,
+        )
+
+        class FakeSampler:
+            def __call__(self, logits, input_batch):
+                return BridgeSamplerOutput(
+                    sampled_token_ids=torch.tensor([[99], [30], [40]], dtype=torch.int64),
+                    logprobs_tensors="stale-logprobs",
+                    num_nans=None,
+                    num_sampled=torch.ones(3, dtype=torch.int32),
+                )
+
+        input_batch = SimpleNamespace(
+            input_ids=torch.tensor([111, 5, 222], dtype=torch.int64),
+            logits_indices=torch.tensor([0, 1, 2], dtype=torch.int64),
+            cu_num_logits=torch.tensor([0, 2, 3], dtype=torch.int32),
+        )
+        sampler = AscendRejectionSampler(
+            FakeSampler(),
+            SimpleNamespace(
+                num_speculative_tokens=1,
+                rejection_sample_method="synthetic",
+                synthetic_acceptance_rates=[1.0],
+            ),
+            torch.device("cpu"),
+        )
+
+        output = sampler(torch.zeros((3, 4)), input_batch)
+
+        self.assertEqual(output.sampled_token_ids[0, :2].tolist(), [5, 30])
+        self.assertEqual(output.sampled_token_ids[1, 0].item(), 40)
+        self.assertEqual(output.num_sampled.tolist(), [2, 1])
+        self.assertIsNone(output.logprobs_tensors)
+
+    def test_synthetic_rejection_uses_target_sample_on_reject(self):
+        from vllm_ascend.worker.v1.sample.rejection_sampler import (
+            AscendRejectionSampler,
+            BridgeSamplerOutput,
+        )
+
+        class FakeSampler:
+            def __call__(self, logits, input_batch):
+                return BridgeSamplerOutput(
+                    sampled_token_ids=torch.tensor([[99], [30]], dtype=torch.int64),
+                    logprobs_tensors=None,
+                    num_nans=None,
+                    num_sampled=torch.ones(2, dtype=torch.int32),
+                )
+
+        input_batch = SimpleNamespace(
+            input_ids=torch.tensor([111, 5], dtype=torch.int64),
+            logits_indices=torch.tensor([0, 1], dtype=torch.int64),
+            cu_num_logits=torch.tensor([0, 2], dtype=torch.int32),
+        )
+        sampler = AscendRejectionSampler(
+            FakeSampler(),
+            SimpleNamespace(
+                num_speculative_tokens=1,
+                rejection_sample_method="synthetic",
+                synthetic_acceptance_rates=[0.0],
+            ),
+            torch.device("cpu"),
+        )
+
+        output = sampler(torch.zeros((2, 4)), input_batch)
+
+        self.assertEqual(output.sampled_token_ids[0, 0].item(), 99)
+        self.assertEqual(output.num_sampled.tolist(), [1])
+
     def test_activation_uses_upstream_sampling_states(self):
         from vllm.v1.worker.gpu.sample.states import NO_LOGPROBS, SamplingStates
 

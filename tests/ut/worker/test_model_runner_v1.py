@@ -4,9 +4,13 @@ from unittest.mock import MagicMock, patch
 
 import torch
 from vllm.v1.kv_cache_interface import FullAttentionSpec, KVCacheConfig, KVCacheGroupSpec, KVCacheTensor
-from vllm.v1.outputs import LogprobsTensors, SamplerOutput
+from vllm.v1.outputs import LogprobsTensors, ModelRunnerOutput, SamplerOutput
 
-from vllm_ascend.worker.model_runner_v1 import ExecuteModelState, NPUModelRunner
+from vllm_ascend.worker.model_runner_v1 import (
+    AscendAsyncGPUModelRunnerOutput,
+    ExecuteModelState,
+    NPUModelRunner,
+)
 
 
 class TestNPUModelRunnerKVCache(unittest.TestCase):
@@ -313,6 +317,52 @@ class TestNPUModelRunnerGpuSamplerBridge(unittest.TestCase):
         self.assertEqual(bridge_kwargs["draft_logits"], "draft-logits")
         runner.sampler.assert_not_called()
         runner.rejection_sampler.assert_not_called()
+
+    @patch("vllm_ascend.worker.model_runner_v1.lmhead_tp_enable")
+    def test_sample_reorders_draft_logits_by_request_id(self, mock_lmhead_tp_enable):
+        mock_lmhead_tp_enable.return_value = False
+        runner = self._build_runner()
+        runner.input_batch.num_reqs = 3
+        runner._gpu_sampler_bridge = SimpleNamespace(
+            sample_from_v1=MagicMock(return_value="bridge-output")
+        )
+        runner._positions_at_logits = torch.tensor([10, 20, 30, 31, 32], dtype=torch.int64)
+        runner._input_ids_at_logits = torch.tensor([101, 201, 301, 302, 303], dtype=torch.int64)
+        runner._req_indices_at_logits = torch.tensor([0, 1, 2, 2, 2], dtype=torch.int32)
+        runner._req_ids_at_logits = ("req0", "req1", "req2")
+        source_draft_logits = torch.arange(2 * 2 * 4, dtype=torch.float32).reshape(2, 2, 4)
+        runner.drafter = SimpleNamespace(
+            draft_logits=source_draft_logits,
+            draft_logits_req_ids=("req2", "req0"),
+        )
+
+        output = runner._sample(
+            logits=torch.randn(5, 4),
+            spec_decode_metadata=SimpleNamespace(
+                logits_indices=[0, 1, 2, 3, 4],
+                num_draft_tokens=[1, 0, 2],
+            ),
+        )
+
+        self.assertEqual(output, "bridge-output")
+        actual = runner._gpu_sampler_bridge.sample_from_v1.call_args.kwargs["draft_logits"]
+        self.assertEqual(actual.shape, (3, 2, 4))
+        torch.testing.assert_close(actual[0], source_draft_logits[1])
+        torch.testing.assert_close(actual[1], torch.zeros_like(source_draft_logits[0]))
+        torch.testing.assert_close(actual[2], source_draft_logits[0])
+
+    def test_reordering_draft_logits_rejects_missing_spec_request(self):
+        runner = self._build_runner()
+        runner._req_ids_at_logits = ("req0", "req1")
+        runner.drafter = SimpleNamespace(
+            draft_logits=torch.zeros((1, 2, 4), dtype=torch.float32),
+            draft_logits_req_ids=("req0",),
+        )
+
+        with self.assertRaisesRegex(ValueError, "missing rows"):
+            runner._draft_logits_for_sampling(
+                SimpleNamespace(num_draft_tokens=[1, 1])
+            )
 
     @patch("vllm_ascend.worker.model_runner_v1.lmhead_tp_enable")
     def test_sample_tokens_caches_positions_and_input_ids_for_bridge(self, mock_lmhead_tp_enable):
@@ -714,6 +764,67 @@ class TestNPUModelRunnerGpuSamplerBridge(unittest.TestCase):
         self.assertIsNotNone(logprobs_lists)
         self.assertEqual(runner.requests["req0"].output_token_ids, [1, 2])
         self.assertEqual(runner.requests["req1"].output_token_ids, [3])
+
+    def test_parse_spec_decode_full_vocab_logprobs(self):
+        runner = NPUModelRunner.__new__(NPUModelRunner)
+        runner.input_batch = SimpleNamespace(vocab_size=8)
+        logprobs_tensors = LogprobsTensors(
+            logprob_token_ids=torch.empty(0, dtype=torch.int32),
+            logprobs=torch.arange(16, dtype=torch.float32).reshape(4, 4),
+            selected_token_ranks=torch.empty(0, dtype=torch.int32),
+            cu_num_generated_tokens=[0, 2, 4],
+        )
+
+        valid_sampled_token_ids, logprobs_lists = runner._parse_spec_decode_output(
+            sampled_token_ids=torch.tensor([[1, -1], [2, 3]], dtype=torch.int32),
+            logprobs_tensors=logprobs_tensors,
+            discard_sampled_tokens_req_indices=[],
+        )
+
+        self.assertEqual(valid_sampled_token_ids, [[1], [2, 3]])
+        self.assertEqual(logprobs_lists.cu_num_generated_tokens, [0, 1, 3])
+        self.assertEqual(logprobs_lists.logprob_token_ids.size, 0)
+        self.assertEqual(logprobs_lists.sampled_token_ranks.size, 0)
+        torch.testing.assert_close(
+            torch.from_numpy(logprobs_lists.logprobs),
+            torch.stack(
+                [
+                    logprobs_tensors.logprobs[0],
+                    logprobs_tensors.logprobs[2],
+                    logprobs_tensors.logprobs[3],
+                ]
+            ),
+        )
+
+    def test_async_output_uses_cu_aware_spec_parser(self):
+        async_output = AscendAsyncGPUModelRunnerOutput.__new__(
+            AscendAsyncGPUModelRunnerOutput
+        )
+        async_output._model_runner_output = ModelRunnerOutput(
+            req_ids=["req0", "req1"],
+            req_id_to_index={"req0": 0, "req1": 1},
+        )
+        async_output._invalid_req_indices = []
+        async_output.async_copy_ready_event = SimpleNamespace(synchronize=lambda: None)
+        async_output.sampled_token_ids_cpu = torch.tensor(
+            [[1, -1], [2, 3]],
+            dtype=torch.int32,
+        )
+        async_output.vocab_size = 8
+        async_output._sampled_token_ids = torch.empty(0)
+        async_output._logprobs_tensors = None
+        async_output._logprobs_tensors_cpu = LogprobsTensors(
+            logprob_token_ids=torch.empty(0, dtype=torch.int32),
+            logprobs=torch.arange(16, dtype=torch.float32).reshape(4, 4),
+            selected_token_ranks=torch.empty(0, dtype=torch.int32),
+            cu_num_generated_tokens=[0, 2, 4],
+        )
+
+        output = async_output.get_output()
+
+        self.assertEqual(output.sampled_token_ids, [[1], [2, 3]])
+        self.assertEqual(output.logprobs.cu_num_generated_tokens, [0, 1, 3])
+        self.assertEqual(output.logprobs.logprob_token_ids.size, 0)
 
 
 class TestNPUModelRunnerDebugger(unittest.TestCase):

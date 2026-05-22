@@ -99,6 +99,7 @@ class AscendSpecDecodeBaseProposer(SpecDecodeBaseProposer):
         self.use_async_scheduling = self.vllm_config.scheduler_config.async_scheduling
         self.pass_hidden_states_to_model = pass_hidden_states_to_model
         self.draft_logits: torch.Tensor | None = None
+        self.draft_logits_req_ids: tuple[str, ...] | None = None
         self.decode_threshold = 1 + self.num_speculative_tokens
         self.query_start_loc = self.runner._make_buffer(self.runner.max_num_reqs + 2, dtype=torch.int32)
         self.arange_cpu = torch.arange(self.arange.shape[0], device="cpu", dtype=torch.int32)
@@ -519,10 +520,21 @@ class AscendSpecDecodeBaseProposer(SpecDecodeBaseProposer):
         logits: torch.Tensor,
     ) -> torch.Tensor | None:
         if getattr(self.speculative_config, "rejection_sample_method", "strict") != "probabilistic":
-            self.draft_logits = None
+            self._set_draft_logits(None)
             return None
         return logits.new_empty(
             (batch_size, self.num_speculative_tokens, int(logits.shape[-1])),
+        )
+
+    def _set_draft_logits(self, draft_logits: torch.Tensor | None) -> None:
+        self.draft_logits = draft_logits
+        if draft_logits is None:
+            self.draft_logits_req_ids = None
+            return
+        input_batch = getattr(getattr(self, "runner", None), "input_batch", None)
+        req_ids = getattr(input_batch, "req_ids", None)
+        self.draft_logits_req_ids = (
+            tuple(req_ids[: int(draft_logits.shape[0])]) if req_ids is not None else None
         )
 
     def _propose(
@@ -951,13 +963,15 @@ class AscendSpecDecodeBaseProposer(SpecDecodeBaseProposer):
             ):
                 if int(logits.shape[0]) % self.num_speculative_tokens != 0:
                     raise ValueError("parallel draft logits cannot be reshaped by speculative token count")
-                self.draft_logits = logits.reshape(
-                    -1,
-                    self.num_speculative_tokens,
-                    int(logits.shape[-1]),
-                ).contiguous()
+                self._set_draft_logits(
+                    logits.reshape(
+                        -1,
+                        self.num_speculative_tokens,
+                        int(logits.shape[-1]),
+                    ).contiguous()
+                )
             else:
-                self.draft_logits = draft_logits
+                self._set_draft_logits(draft_logits)
             return draft_token_ids.view(-1, self.num_speculative_tokens)
 
         if self.pcp_size * self.dcp_size > 1 and is_prefill:
@@ -965,7 +979,7 @@ class AscendSpecDecodeBaseProposer(SpecDecodeBaseProposer):
             if draft_logits is not None:
                 for draft_step in range(1, self.num_speculative_tokens):
                     draft_logits[:, draft_step, :].copy_(logits)
-                self.draft_logits = draft_logits
+                self._set_draft_logits(draft_logits)
             draft_token_ids_list = []
             for _ in range(self.num_speculative_tokens):
                 draft_token_ids_list.append(draft_token_ids)
@@ -1102,7 +1116,7 @@ class AscendSpecDecodeBaseProposer(SpecDecodeBaseProposer):
 
         # [batch_size, num_speculative_tokens]
         draft_token_ids = draft_token_ids_tensor.swapaxes(0, 1)
-        self.draft_logits = draft_logits
+        self._set_draft_logits(draft_logits)
         return draft_token_ids
 
     def set_inputs_first_pass(
