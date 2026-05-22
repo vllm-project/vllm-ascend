@@ -131,50 +131,51 @@ class EplbWorker:
 
     # TODO: Here only expert weight exchange is considered, need to be extended to cover other weight update cases
     def compose_expert_update_info_greedy(self, updated_expert_maps, current_expert_maps):
+        #
+        # Both maps are in GLOBAL format:
+        #   tensor[rank, global_expert_id] = slot_index (or -1)
+        #
+        # So torch.where gives (rank, expert_id) — the second index is the
+        # GLOBAL EXPERT ID of the expert being moved, not a slot index.
+        #
         num_layers = current_expert_maps.shape[0]
         for layer_id in range(num_layers):
-            updated_expert_maps_this_layer = updated_expert_maps[layer_id]
-            current_expert_maps_this_layer = current_expert_maps[layer_id]
+            updated = updated_expert_maps[layer_id]
+            current = current_expert_maps[layer_id]
 
             expert_send_info_this_layer: dict[Any, Any] = {}
             expert_recv_info_this_layer: dict[Any, Any] = {}
 
-            # Guard Clause: if there is no expert weight update, avoid subsequent processing
-            if torch.equal(updated_expert_maps_this_layer, current_expert_maps_this_layer):
+            if torch.equal(updated, current):
                 yield (
                     expert_send_info_this_layer,
                     expert_recv_info_this_layer,
-                    updated_expert_maps_this_layer,
+                    updated,
                     layer_id,
                 )
                 continue
 
-            # NOTE: expert_maps tensors are in LOCAL/SLOT format:
-            #   tensor[rank, slot] = local_expert_id
-            # So torch.where gives (rank, SLOT) pairs — the second index
-            # is a SLOT INDEX, not a global expert ID.
-            # We must look up the actual local_expert_id from the new map.
-
-            # Find (rank, slot) where slot becomes newly occupied
-            dst_rank_indices, slots_to_fill = torch.where(
-                (current_expert_maps_this_layer == -1) & (updated_expert_maps_this_layer != -1)
+            # Find experts that are newly assigned to a rank
+            dst_ranks, expert_ids = torch.where(
+                (current == -1) & (updated != -1)
             )
 
-            for idx in range(len(dst_rank_indices)):
-                dst_rank_id = dst_rank_indices[idx].item()
-                dest_slot = slots_to_fill[idx].item()
-                # Look up the actual local expert ID that fills this slot
-                expert_id = updated_expert_maps_this_layer[dst_rank_id, dest_slot].item()
+            for idx in range(len(dst_ranks)):
+                dst_rank_id = dst_ranks[idx].item()
+                expert_id = expert_ids[idx].item()
+
+                # Slot on the destination rank for this expert (new map)
+                dest_slot = updated[dst_rank_id, expert_id].item()
                 if dst_rank_id not in expert_recv_info_this_layer:
                     expert_recv_info_this_layer[dst_rank_id] = []
 
                 # Find source: prefer ranks freeing this expert (current has it,
                 # updated doesn't), fall back to any rank that currently holds it.
-                freeing_mask = (current_expert_maps_this_layer == expert_id) & (updated_expert_maps_this_layer == -1)
+                freeing_mask = (current[:, expert_id] != -1) & (updated[:, expert_id] == -1)
                 if freeing_mask.any():
-                    candidate_src_ranks, _ = torch.where(freeing_mask)
+                    candidate_src_ranks = torch.where(freeing_mask)[0]
                 else:
-                    candidate_src_ranks, _ = torch.where(current_expert_maps_this_layer == expert_id)
+                    candidate_src_ranks = torch.where(current[:, expert_id] != -1)[0]
 
                 # TODO: improve selection criterion of NPU sending expert_id,
                 # considering intra-node or inter-node...
@@ -182,8 +183,8 @@ class EplbWorker:
                 if src_rank_id not in expert_send_info_this_layer:
                     expert_send_info_this_layer[src_rank_id] = []
 
-                # Find which slot on the source rank currently holds this expert
-                source_slot = (current_expert_maps_this_layer[src_rank_id] == expert_id).nonzero()[0].item()
+                # Slot on the source rank for this expert (old map)
+                source_slot = current[src_rank_id, expert_id].item()
 
                 # Plan carries LOCAL SLOT indices into expert_param_per_layer,
                 # not global expert IDs.  expert_param_per_layer[layer][slot]
@@ -195,7 +196,7 @@ class EplbWorker:
             yield (
                 expert_send_info_this_layer,
                 expert_recv_info_this_layer,
-                updated_expert_maps_this_layer,
+                updated,
                 layer_id,
             )
 
