@@ -2619,13 +2619,14 @@ class AscendDSAImpl(DSAAttentionImpl):
         self,
         x: torch.Tensor,
         qr: torch.Tensor,
-        kv_cache: tuple[torch.Tensor],
+        kv_cache: tuple[torch.Tensor, ...],
         attn_metadata: DSAMetadataList,
         cos: torch.Tensor,
         sin: torch.Tensor,
         compressed_cos: torch.Tensor,
         compressed_sin: torch.Tensor,
         actual_seq_lengths_query: torch.Tensor,
+        actual_seq_lengths_key: torch.Tensor | None = None,
         with_prefill: bool = False,
         qr_pertoken_scale: torch.Tensor = None,
     ):
@@ -2651,13 +2652,14 @@ class AscendDSAImpl(DSAAttentionImpl):
         self,
         x: torch.Tensor,
         qr: torch.Tensor,
-        kv_cache: tuple[torch.Tensor],
+        kv_cache: tuple[torch.Tensor, ...],
         attn_metadata: DSAMetadataList,
         cos: torch.Tensor,
         sin: torch.Tensor,
         compressed_cos: torch.Tensor,
         compressed_sin: torch.Tensor,
         actual_seq_lengths_query: torch.Tensor,
+        actual_seq_lengths_key: torch.Tensor | None = None,
         with_prefill: bool = False,
         qr_pertoken_scale: torch.Tensor = None,
     ):
@@ -2696,13 +2698,15 @@ class AscendDSAImpl(DSAAttentionImpl):
         coff = 2 if self.compressor_overlap else 1
 
         if with_prefill:
-            assert indexer_kv_scale_metadata.prefill is not None
-            kv_block_table = indexer_kv_state_metadata.prefill.block_table
-            start_pos = indexer_kv_scale_metadata.prefill.start_pos
+            indexer_state_prefill_metadata = _require_prefill_metadata(indexer_kv_state_metadata)
+            indexer_scale_prefill_metadata = _require_prefill_metadata(indexer_kv_scale_metadata)
+            kv_block_table = indexer_state_prefill_metadata.block_table
+            start_pos = indexer_scale_prefill_metadata.start_pos
         else:
-            assert indexer_kv_scale_metadata.decode is not None
-            kv_block_table = indexer_kv_state_metadata.decode.block_table
-            start_pos = indexer_kv_scale_metadata.decode.start_pos
+            indexer_state_decode_metadata = _require_decode_metadata(indexer_kv_state_metadata)
+            indexer_scale_decode_metadata = _require_decode_metadata(indexer_kv_scale_metadata)
+            kv_block_table = indexer_state_decode_metadata.block_table
+            start_pos = indexer_scale_decode_metadata.start_pos
 
         kv = torch.ops._C_ascend.compressor(
             x,
@@ -2727,7 +2731,7 @@ class AscendDSAImpl(DSAAttentionImpl):
 
         if kv.numel() == 0:
             kv = None
-        elif self.indexer.compressor.rotate:
+        elif self.indexcom_rotate:
             kv = rotate_activation(kv, indexer_kv_scale_metadata.hadamard)
 
         # ===== Part1: matmul[C] ∥ kv_quant[V] + scatter_k_cache[AIV] =====
@@ -2742,11 +2746,11 @@ class AscendDSAImpl(DSAAttentionImpl):
                 kv_scale = kv_scale.unsqueeze(-1)
                 if with_prefill:
                     torch.ops._C_ascend.npu_scatter_nd_update_v2(  # kv_scatter
-                        indexer_k_cache, indexer_kv_scale_metadata.prefill.slot_mapping, kv
+                        indexer_k_cache, indexer_scale_prefill_metadata.slot_mapping, kv
                     )
                 else:
                     torch.ops._C_ascend.npu_scatter_nd_update_v2(  # kv_scatter
-                        indexer_k_cache, indexer_kv_scale_metadata.decode.slot_mapping, kv
+                        indexer_k_cache, indexer_scale_decode_metadata.slot_mapping, kv
                     )
 
         # Main: matmul q from qr (directly submit, V/C different engines dispatch naturally)
@@ -2794,11 +2798,11 @@ class AscendDSAImpl(DSAAttentionImpl):
                     kv_scale = kv_scale.to(torch.float16).unsqueeze(-1)
                 if with_prefill:
                     torch.ops._C_ascend.npu_scatter_nd_update_v2(
-                        indexer_scale_cache, indexer_kv_scale_metadata.prefill.slot_mapping, kv_scale
+                        indexer_scale_cache, indexer_scale_prefill_metadata.slot_mapping, kv_scale
                     )
                 else:
                     torch.ops._C_ascend.npu_scatter_nd_update_v2(
-                        indexer_scale_cache, indexer_kv_scale_metadata.decode.slot_mapping, kv_scale
+                        indexer_scale_cache, indexer_scale_decode_metadata.slot_mapping, kv_scale
                     )
 
         # Main: q_hadamard[Part1 - linear] (directly submit, C/AIV different engines dispatch naturally)
