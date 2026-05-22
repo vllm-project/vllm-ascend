@@ -145,18 +145,18 @@ def rejection_random_sample_kernel(
     cu_num_draft_tokens_ptr,  # [batch_size]
     draft_token_ids_ptr,  # [num_tokens]
     draft_probs_ptr,  # [num_tokens, vocab_size] or None
-    target_probs_ptr,  # [num_tokens, vocab_size] or [num_tokens, compressed_vocab_size] if COMPRESSED_MODE
-    target_indices_ptr,  # [num_tokens, compressed_vocab_size] global vocab indices, only used if COMPRESSED_MODE
+    target_probs_ptr,  # [num_tokens, vocab_size] or [num_tokens, selected_vocab_size] if ENABLE_REDUCE_SAMPLING
+    target_indices_ptr,  # [num_tokens, selected_vocab_size] global vocab indices, only used if ENABLE_REDUCE_SAMPLING
     bonus_token_ids_ptr,  # [batch_size]
     recovered_token_ids_ptr,  # [num_tokens]
     uniform_probs_ptr,  # [num_tokens]
     is_greedy_ptr,  # [batch_size]
     max_spec_len,
-    vocab_size,  # vocab_size or compressed_vocab_size if COMPRESSED_MODE
-    global_vocab_size,  # global vocab size for draft_probs indexing (only used if COMPRESSED_MODE)
+    vocab_size,  # vocab_size or selected_vocab_size if ENABLE_REDUCE_SAMPLING
+    global_vocab_size,  # global vocab size for draft_probs indexing (only used if ENABLE_REDUCE_SAMPLING)
     vec_len,
     NO_DRAFT_PROBS: tl.constexpr,
-    COMPRESSED_MODE: tl.constexpr,  # Whether using compressed logits
+    ENABLE_REDUCE_SAMPLING: tl.constexpr,  # Whether using reduce sampling
     BLOCK_SIZE: tl.constexpr,
     VOCAB_BLOCK_SIZE: tl.constexpr = 512,
 ):
@@ -182,7 +182,7 @@ def rejection_random_sample_kernel(
                     token_idx = start_idx + pos
                     draft_token_id = tl.load(draft_token_ids_ptr + token_idx)
 
-                    if COMPRESSED_MODE:
+                    if ENABLE_REDUCE_SAMPLING:
                         target_prob = 0.0
                         found = False
 
@@ -215,7 +215,7 @@ def rejection_random_sample_kernel(
                     if NO_DRAFT_PROBS:
                         draft_prob = 1.0
                     else:
-                        vocab_for_draft = global_vocab_size if COMPRESSED_MODE else vocab_size
+                        vocab_for_draft = global_vocab_size if ENABLE_REDUCE_SAMPLING else vocab_size
                         draft_prob = tl.load(draft_probs_ptr + token_idx * vocab_for_draft + draft_token_id)
 
                     uniform_prob = tl.load(uniform_probs_ptr + token_idx)
@@ -279,12 +279,11 @@ def sample_recovered_tokens_kernel(
     target_probs_ptr,
     target_indices_ptr,
     q_ptr,
-    compressed_vocab_size,
+    vocab_size,
     global_vocab_size,
-    PADDED_VOCAB_SIZE: tl.constexpr,
     NO_DRAFT_PROBS: tl.constexpr,
     BLOCK_VERIFY: tl.constexpr,
-    COMPRESSED_MODE: tl.constexpr,
+    ENABLE_REDUCE_SAMPLING: tl.constexpr,
     SUB_BLOCK: tl.constexpr,
 ):
     req_idx = tl.program_id(0)
@@ -300,8 +299,8 @@ def sample_recovered_tokens_kernel(
 
     token_idx = start_idx + pos
 
-    if COMPRESSED_MODE:
-        C = compressed_vocab_size
+    if ENABLE_REDUCE_SAMPLING:
+        C = vocab_size
         n_loop = tl.cdiv(C, SUB_BLOCK)
 
         global_max_p = tl.full((), -float("inf"), tl.float32)
@@ -458,18 +457,18 @@ def rejection_random_sample_block_verify_kernel(
     cu_num_draft_tokens_ptr,  # [batch_size]
     draft_token_ids_ptr,  # [num_tokens]
     draft_probs_ptr,  # [num_tokens, vocab_size] or None
-    target_probs_ptr,  # [num_tokens, vocab_size] or [num_tokens, compressed_vocab_size] if COMPRESSED_MODE
-    target_indices_ptr,  # [num_tokens, compressed_vocab_size] global vocab indices, only used if COMPRESSED_MODE
+    target_probs_ptr,  # [num_tokens, vocab_size] or [num_tokens, selected_vocab_size] if ENABLE_REDUCE_SAMPLING
+    target_indices_ptr,  # [num_tokens, selected_vocab_size] global vocab indices, only used if ENABLE_REDUCE_SAMPLING
     bonus_token_ids_ptr,  # [batch_size]
     recovered_token_ids_ptr,  # [num_tokens]
     uniform_probs_ptr,  # [num_tokens]
     is_greedy_ptr,  # [batch_size]
     max_spec_len,
-    vocab_size,  # vocab_size or compressed_vocab_size if COMPRESSED_MODE
-    global_vocab_size,  # global vocab size for draft_probs indexing (only used if COMPRESSED_MODE)
+    vocab_size,  # vocab_size or selected_vocab_size if ENABLE_REDUCE_SAMPLING
+    global_vocab_size,  # global vocab size for draft_probs indexing (only used if ENABLE_REDUCE_SAMPLING)
     vec_len,
     NO_DRAFT_PROBS: tl.constexpr,
-    COMPRESSED_MODE: tl.constexpr,  # Whether using compressed logits
+    ENABLE_REDUCE_SAMPLING: tl.constexpr,  # Whether using reduce_sampling
     BLOCK_SIZE: tl.constexpr,
     VOCAB_BLOCK_SIZE: tl.constexpr = 512,
 ):
@@ -496,7 +495,7 @@ def rejection_random_sample_block_verify_kernel(
                 token_idx = start_idx + pos
                 draft_token_id = tl.load(draft_token_ids_ptr + token_idx)
 
-                if COMPRESSED_MODE:
+                if ENABLE_REDUCE_SAMPLING:
                     target_prob = 0.0
                     found = False
 
@@ -529,7 +528,7 @@ def rejection_random_sample_block_verify_kernel(
                 if NO_DRAFT_PROBS:
                     draft_prob = 1.0
                 else:
-                    vocab_for_draft = global_vocab_size if COMPRESSED_MODE else vocab_size
+                    vocab_for_draft = global_vocab_size if ENABLE_REDUCE_SAMPLING else vocab_size
                     draft_prob = tl.load(draft_probs_ptr + token_idx * vocab_for_draft + draft_token_id)
 
                 pi = min(pi * target_prob / draft_prob, 1.0)

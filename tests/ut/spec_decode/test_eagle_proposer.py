@@ -2534,7 +2534,7 @@ class TestRunMergedDraft(TestBase):
         multi_steps_attn_metadata = [MagicMock(), MagicMock(), MagicMock()]
 
         mock_ascend_config = MagicMock()
-        mock_ascend_config.enable_reduce_sample = False
+        mock_ascend_config.enable_reduce_sample = True
         with (
             patch.object(llm_base_proposer, "lmhead_tp_enable", return_value=False),
             patch.object(llm_base_proposer, "get_ascend_config", return_value=mock_ascend_config),
@@ -2600,7 +2600,7 @@ class TestRunMergedDraft(TestBase):
         )
 
         mock_ascend_config = MagicMock()
-        mock_ascend_config.enable_reduce_sample = False
+        mock_ascend_config.enable_reduce_sample = True
         with (
             patch.object(llm_base_proposer, "lmhead_tp_enable", return_value=False),
             patch.object(llm_base_proposer, "get_ascend_config", return_value=mock_ascend_config),
