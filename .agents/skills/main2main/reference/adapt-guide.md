@@ -99,6 +99,7 @@ a missing version guard here is cheaper to fix than a CI round-trip.
 
 When analyzing vLLM changes, pay special attention to these areas that typically require vLLM Ascend adaptation:
 
+<!-- BEGIN AUTO-MAINTAINED: key-areas -->
 1. **Platform Interface** (`vllm/platforms/`)
    - New abstract methods — implement immediately; missing ones cause `TypeError: Can't instantiate abstract class AscendPlatform` at runtime, not at import time, so they won't surface until a test actually executes
    - Method signature changes
@@ -146,11 +147,13 @@ When analyzing vLLM changes, pay special attention to these areas that typically
 10. **Models** (`vllm/model_executor/models/`)
     - Changes to model forward signatures — when vllm-ascend overrides a model's forward method, signature changes break inference
     - New model architectures
+<!-- END AUTO-MAINTAINED: key-areas -->
 
 ---
 
 ## vllm-ascend Key File Locations
 
+<!-- BEGIN AUTO-MAINTAINED: file-locations -->
 | Project | Path |
 |---------|------|
 | vLLM Ascend version compatibility | `vllm-ascend/docs/source/conf.py` |
@@ -159,6 +162,10 @@ When analyzing vLLM changes, pay special attention to these areas that typically
 | Ascend-specific attention | `vllm_ascend/attention/` |
 | Ascend-specific executor | `vllm_ascend/worker/` |
 | Ascend-specific ops | `vllm_ascend/ops/` |
+| Scheduling extensions | `vllm_ascend/core/` |
+| Device abstractions | `vllm_ascend/device/` |
+| Device memory allocator | `vllm_ascend/device_allocator/` |
+| Custom CANN ops (placeholder dir) | `vllm_ascend/_cann_ops_custom/` |
 | **Specialized Implementations** | |
 | Ascend 310P specific | `vllm_ascend/_310p/` |
 | EPLB load balancing | `vllm_ascend/eplb/` |
@@ -168,17 +175,26 @@ When analyzing vLLM changes, pay special attention to these areas that typically
 | Compilation passes | `vllm_ascend/compilation/passes/` |
 | **Quantization** | |
 | Quantization methods | `vllm_ascend/quantization/` |
-| ModelSlim integration | `vllm_ascend/quantization/methods/modelslim/` |
+| ModelSlim integration | `vllm_ascend/quantization/modelslim_config.py` |
 | **Distributed & KV Cache** | |
 | KV transfer | `vllm_ascend/distributed/kv_transfer/` |
 | Device communicators | `vllm_ascend/distributed/device_communicators/` |
+| KV cache offload (CPU/NPU) | `vllm_ascend/kv_offload/` |
 | **Speculative Decoding** | |
-| MTP proposer | `vllm_ascend/spec_decode/mtp_proposer.py` |
-| Eagle proposer | `vllm_ascend/spec_decode/eagle_proposer.py` |
+| Eagle proposer (also dispatches MTP via `method="mtp"`) | `vllm_ascend/spec_decode/eagle_proposer.py` |
+| **Sampling & LoRA** | |
+| Sampler, rejection sampler, penalties | `vllm_ascend/sample/` |
+| LoRA NPU ops | `vllm_ascend/lora/` |
+| **Plugin & Model Loading** | |
+| Upstream patches (platform / worker) | `vllm_ascend/patch/` |
+| Custom model loader | `vllm_ascend/model_loader/` |
+| **Profiling** | |
+| Torch NPU profiler wrapper | `vllm_ascend/profiler/` |
 | **Utility Modules** | |
 | Common utilities | `vllm_ascend/utils.py` |
 | Ascend config | `vllm_ascend/ascend_config.py` |
 | Environment variables | `vllm_ascend/envs.py` |
+<!-- END AUTO-MAINTAINED: file-locations -->
 
 ---
 
@@ -186,6 +202,7 @@ When analyzing vLLM changes, pay special attention to these areas that typically
 
 Use this table after identifying a changed upstream symbol. It points to likely vllm-ascend locations, not guaranteed locations.
 
+<!-- BEGIN AUTO-MAINTAINED: file-mapping -->
 | vLLM upstream path | vllm-ascend path | What to check |
 |:---|:---|:---|
 | `vllm/platforms/` | `vllm_ascend/platform.py` | Abstract methods, platform capabilities |
@@ -202,4 +219,8 @@ Use this table after identifying a changed upstream symbol. It points to likely 
 | `vllm/model_executor/layers/layernorm.py` | `vllm_ascend/ops/layernorm.py` | LayerNorm op interface |
 | `vllm/model_executor/custom_op.py` | `vllm_ascend/ops/` | Custom op registration |
 | `vllm/v1/worker/gpu/spec_decode/` | `vllm_ascend/spec_decode/` | MTP/Eagle proposer interfaces |
+| `vllm/lora/` | `vllm_ascend/lora/` | LoRA op interface, punica integration |
+| `vllm/v1/sample/`, `vllm/model_executor/layers/sampler.py` | `vllm_ascend/sample/` | Sampler, rejection sampler, penalty kernels |
+| `vllm/model_executor/model_loader/` | `vllm_ascend/model_loader/` | Model loading hooks, weight format adapters |
 | `requirements*`, `constraints*`, `pyproject.toml`, `setup.py`, `setup.cfg` | Matching dependency files in vllm-ascend | Dependency versions |
+<!-- END AUTO-MAINTAINED: file-mapping -->
