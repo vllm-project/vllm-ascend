@@ -2647,7 +2647,6 @@ class AscendDSAImpl(DSAAttentionImpl):
 
         return self._indexer_qli_finish(q, kv, weights, ik, isc, indexer_kv_state_meta, isc_meta, wp)
 
-
     def cv_indexer_select_qli(
         self,
         x: torch.Tensor,
