@@ -17,7 +17,7 @@ def fault_recovery_decorator():
                     if self.device_stopped:
                         logger.info(f"[WorkerDecorator] Func {func.__name__} called after device stopped. need restart worker")
                         torch_npu.npu.restart_device(
-                            torch.npu.current_device(), rebuild_all_resources=cfg.get("rebuild_all_resources", False)
+                            torch.npu.current_device(), rebuild_all_resources=False
                         )
                         torch.distributed.reinit_process_group(
                             group=None, rebuild_link=False
