@@ -12,9 +12,10 @@
 import torch
 from vllm.triton_utils import tl, triton
 
+from vllm_ascend.device.device_op import DeviceOperator
+
 from .utils import prepare_chunk_indices, safe_exp
 
-from vllm_ascend.device.device_op import DeviceOperator
 
 @triton.heuristics(
     {
@@ -122,5 +123,5 @@ def chunk_scaled_dot_kkt_fwd(
     NT = triton.cdiv(T, BT) if cu_seqlens is None else len(chunk_indices)
     A = torch.empty(B, T, H, BT, device=k.device, dtype=output_dtype)
 
-    DeviceOperator.chunk_scaled_dot_kkt_fwd(NT, k, beta, g_cumsum, A, cu_seqlens, chunk_indices, T, B, H, Hg, K, BT, BK)
+    A = DeviceOperator.chunk_scaled_dot_kkt_fwd(NT, k, beta, g_cumsum, A, cu_seqlens, chunk_indices, T, B, H, Hg, K, BT, 128)
     return A

@@ -33,14 +33,13 @@ from vllm_ascend.compilation.acl_graph import (
     get_draft_graph_params,
     get_graph_params,
 )
+from vllm_ascend.device.device_op import DeviceOperator
 from vllm_ascend.ops.triton.fla.chunk import chunk_gated_delta_rule
 from vllm_ascend.ops.triton.fla.fused_qkvzba_split_reshape import fused_qkvzba_split_reshape_cat
 from vllm_ascend.ops.triton.fla.utils import clear_ssm_states
 from vllm_ascend.ops.triton.fused_gdn_gating import fused_gdn_gating_patch
 
 from vllm_ascend.utils import vllm_version_is, weak_ref_tensors
-
-from vllm_ascend.device.device_op import DeviceOperator
 
 
 
