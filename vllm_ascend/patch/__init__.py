@@ -162,26 +162,6 @@
 #       Remove this patch once the runtime vLLM version contains the upstream
 #       MiniMax usage-accounting fix.
 #
-# ** 8. File: platform/patch_glm_tool_call_parser.py**
-# ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
-#   1. `vllm.tool_parsers.glm4_moe_tool_parser.Glm4MoeModelToolParser`
-#      `vllm.entrypoints.openai.chat_completion.serving.OpenAIServingChat`
-#    Why:
-#       GLM-4.7 tool-call streaming can leave a terminal inline argument chunk
-#       undrained, and final streaming chunks can repeat function metadata or
-#       combine final arguments with `finish_reason="tool_calls"`.
-#    How：
-#       Monkey-patch the GLM parser to drain terminal chunks, patch remaining
-#       argument backfill to omit function metadata unless explicitly needed,
-#       and split terminal argument chunks into an argument chunk followed by
-#       an empty finish chunk.
-#    Related PR (if no, explain why):
-#       https://github.com/vllm-project/vllm/pull/37845
-#       https://github.com/vllm-project/vllm/pull/33218
-#    Future Plan:
-#       Remove this patch once the runtime vLLM version contains the GLM parser
-#       and streaming finish-chunk fixes.
-#
 # ** 10a. File: platform/patch_kv_cache_utils.py**
 # ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 #   1. `vllm.v1.core.kv_cache_utils.resolve_kv_cache_block_sizes`
