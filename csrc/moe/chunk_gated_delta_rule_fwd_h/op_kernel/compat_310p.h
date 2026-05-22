@@ -5,7 +5,10 @@
 #include "kernel_operator.h"
 #endif
 
-#if !defined(__bfloat16_t_defined)
+// Dummy bfloat16_t only needed on 310P (dav_m200) where the compiler
+// doesn't provide a native bf16 type. On 910B/910C the compiler's
+// __clang_cce_types.h already typedefs bfloat16_t from __bf16.
+#if defined(__CCE_AICORE__) && (__CCE_AICORE__ == 200) && !defined(__bfloat16_t_defined)
 #define __bfloat16_t_defined
 #define __COMPAT_310P_ACTIVE__
 struct bfloat16_t {
