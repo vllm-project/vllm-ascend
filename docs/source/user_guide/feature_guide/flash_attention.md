@@ -1,7 +1,8 @@
 # Flash Attention 3
 
 ```{note}
-Flash Attention 3 on Ascend is currently in beta. The `flash_attn_npu` package required for FA3 has not yet been open-sourced and is expected to be released after May 20th.
+Flash Attention 3 on Ascend is currently in beta. The `flash_attn_npu` package required for FA3 has been open-sourced on GitHub.
+Please refer to the [flash-attention-npu repository](https://github.com/MinghuasLab/flash-attention-npu) for more details.
 ```
 
 This document shows how to enable Flash Attention 3 (FA3) in vLLM-Ascend. FA3 provides a training-inference consistent attention implementation for Ascend NPUs.
@@ -48,23 +49,11 @@ We will support other NPUs in the future.
 
 ## Software Requirements
 
-FA3 requires the `flash_attn_npu` package, which provides the `flash_attn_v3` module with the `flash_attn_with_kvcache` operator.
-
-```{warning}
-The `flash_attn_npu` package has not yet been open-sourced. It is expected to be released after May 20th. Until then, external users cannot directly use Flash Attention 3.
-```
+FA3 requires the `flash_attn_npu` package, which provides the `flash_attn_npu_v3` module with the `flash_attn_with_kvcache` operator.
 
 ### Installation
 
-Install the `flash_attn_npu` wheel package as follows:
-
-```bash
-pip3 install flash_attn_npu-x.x.x-cp3xx-cp3xx-linux_aarch64.whl
-```
-
-```{note}
-Replace `x.x.x` with the actual package version, and `cp3xx` with the actual Python version tag matching your environment (e.g., `cp310` for Python 3.10, `cp311` for Python 3.11).
-```
+Install the `flash_attn_npu` wheel package refer to: <https://github.com/MinghuasLab/flash-attention-npu/blob/main/README.md#installation>.
 
 ## Enabling Flash Attention 3
 

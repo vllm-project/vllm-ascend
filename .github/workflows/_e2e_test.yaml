@@ -141,6 +141,8 @@ jobs:
             vllm-ascend-build-v1-${{ runner.os }}-${{ inputs.image }}-${{ steps.get_csrc_hash.outputs.CSRC_HASH }}
 
       - name: Install vllm-project/vllm-ascend
+        env:
+          MAX_JOBS: "23"
         run: |
           pip install uc-manager
           uv pip install -v -r requirements-dev.txt
@@ -409,6 +411,7 @@ jobs:
 
       - name: Install vllm-project/vllm-ascend
         env:
+          MAX_JOBS: "46"
           PIP_EXTRA_INDEX_URL: "https://repo.huaweicloud.com/ascend/repos/pypi https://triton-ascend.osinfra.cn/pypi/simple"
         run: |
           pip install uc-manager

@@ -349,6 +349,7 @@ class AscendW4A8DynamicFusedMoEMethod(AscendMoEScheme):
         activation: str = "silu",
         apply_router_weight_on_input: bool = False,
         mc2_mask: torch.Tensor | None = None,
+        tid2eid: torch.Tensor | None = None,
     ) -> torch.Tensor:
         num_shared_experts = getattr(layer, "n_shared_experts", 0)
         if num_shared_experts is None:
@@ -375,6 +376,7 @@ class AscendW4A8DynamicFusedMoEMethod(AscendMoEScheme):
             routed_scaling_factor=routed_scaling_factor,
             e_score_correction_bias=e_score_correction_bias,
             num_experts=num_logical_experts,
+            tid2eid=tid2eid,
         )
 
         # this is a naive implementation for experts load balance so as
@@ -422,6 +424,7 @@ class AscendW4A8DynamicFusedMoEMethod(AscendMoEScheme):
                 w2_scale=w2_scale,
                 w1_scale_bias=w1_scale_bias,
                 w2_scale_bias=w2_scale_bias,
+                swiglu_limit=layer.swiglu_limit,
             )
         )
 
