@@ -21,10 +21,9 @@ from vllm_ascend.attention.utils import (
 )
 from vllm_ascend.ops.layer_shard_linear import is_hidden_layer, reach_layer_for_shard_weight_series
 from vllm_ascend.ops.triton.rope import rope_forward_triton_siso
-from vllm_ascend.utils import ( 
+from vllm_ascend.utils import (
     get_weight_prefetch_method,
 )
-
 
 M = TypeVar("M", bound=AscendSFAMetadata)
 
@@ -806,9 +805,10 @@ class AscendSFACPImpl(AscendSFAImpl):
                 # AG
                 fused_kv_no_split = torch.cat(
                     [
-                        kv_no_split.view(-1, kv_no_split.shape[-1]), k_li.view(-1, k_li.shape[-1]),
+                        kv_no_split.view(-1, kv_no_split.shape[-1]),
+                        k_li.view(-1, k_li.shape[-1]),
                     ],
-                    dim=1
+                    dim=1,
                 )
                 fused_kv_no_split = torch.ops.vllm.maybe_all_gather_and_maybe_unpad(
                     fused_kv_no_split.contiguous(), need_gather_q_kv
@@ -898,4 +898,3 @@ class AscendSFACPImpl(AscendSFAImpl):
         maybe_save_kv_layer_to_connector(layer_name, list(kv_cache))
 
         return output_padded
-
