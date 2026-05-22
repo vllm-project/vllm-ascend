@@ -71,6 +71,7 @@ public:
     // 中间计算数据类型为float，高精度模式
     using T = float;
     using X_T = typename AscendC::Conditional<X_DTYPE, bfloat16_t, half>::type;
+    using ROPE_T = typename AscendC::Conditional<COMP::ropeDtype == ROPE_DTYPE::FP32, float, X_T>::type;
 
     __aicore__ inline CompressorBlockVectorPerf(){};
     // =================================设置参数=================================
@@ -244,8 +245,8 @@ private:
     GlobalTensor<T> stateCacheGm_;
     GlobalTensor<T> apeGm_;
     GlobalTensor<X_T> normWeightGm_;
-    GlobalTensor<X_T> ropeSinGm_;
-    GlobalTensor<X_T> ropeCosGm_;
+    GlobalTensor<ROPE_T> ropeSinGm_;
+    GlobalTensor<ROPE_T> ropeCosGm_;
     GlobalTensor<X_T> cmpKvOutGm_;
 
     // ================================Local Buffer区====================================
@@ -297,8 +298,8 @@ __aicore__ inline void CompressorBlockVectorPerf<COMP>::Init(
     stateCacheGm_.SetGlobalBuffer((__gm__ T *)stateCache);
     apeGm_.SetGlobalBuffer((__gm__ T *)ape);
     normWeightGm_.SetGlobalBuffer((__gm__ X_T *)normWeight);
-    ropeSinGm_.SetGlobalBuffer((__gm__ X_T *)ropeSin);
-    ropeCosGm_.SetGlobalBuffer((__gm__ X_T *)ropeCos);
+    ropeSinGm_.SetGlobalBuffer((__gm__ ROPE_T *)ropeSin);
+    ropeCosGm_.SetGlobalBuffer((__gm__ ROPE_T *)ropeCos);
     cmpKvOutGm_.SetGlobalBuffer((__gm__ X_T *)cmpKvOut);
     isExistSeqUsed = (seqUsed != nullptr);
     isExistStartPos = (startPos != nullptr);
@@ -1332,13 +1333,13 @@ __aicore__ inline void CompressorBlockVectorPerf<COMP>::CalRope(const LocalTenso
         ropeCopyParams.srcStride = static_cast<uint16_t>(normNum * sizeof(T) / DATABLOCK_BYTES);
         ropeCopyParams.dstStride = 0;
         DataCopy(tmpRopeInUb, normResUb[normNum], ropeCopyParams);
-        // sin与cos各占一半, 实际分别最多只会用8K,总占用16K
-        LocalTensor<X_T> cosUb = inputQue2.AllocTensor<X_T>();
-        LocalTensor<X_T> sinUb = cosUb[BUFFER_SIZE_BYTE_8K / sizeof(X_T)];
+        // sin/cos each reserves 16KB so fp32 rope can use the same compute tile.
+        LocalTensor<ROPE_T> cosUb = inputQue2.AllocTensor<ROPE_T>();
+        LocalTensor<ROPE_T> sinUb = cosUb[BUFFER_SIZE_BYTE_16K / sizeof(ROPE_T)];
         DataCopy(cosUb, ropeCosGm_[SinCosOffset], computeSize);
         DataCopy(sinUb, ropeSinGm_[SinCosOffset], computeSize);
         inputQue2.EnQue(sinUb);
-        inputQue2.DeQue<X_T>();
+        inputQue2.DeQue<ROPE_T>();
 
         bool isInterleave = (COMP::rotaryMode == ROTARY_MODE::INTERLEAVE) ? true : false;
         PipeBarrier<PIPE_V>();
@@ -1383,13 +1384,13 @@ __aicore__ inline void CompressorBlockVectorPerf<COMP>::CalRope(const LocalTenso
                          normResUb[normNum + (dealRowCount - dealScSize - curDealScSize) * constInfo_.headDim],
                          ropeCopyParams);
 
-                // sin与cos各占一半, 实际分别最多只会用8K,总占用16K
-                LocalTensor<X_T> cosUb = inputQue2.AllocTensor<X_T>();
-                LocalTensor<X_T> sinUb = cosUb[BUFFER_SIZE_BYTE_8K / sizeof(X_T)];
+                // sin/cos each reserves 16KB so fp32 rope can use the same compute tile.
+                LocalTensor<ROPE_T> cosUb = inputQue2.AllocTensor<ROPE_T>();
+                LocalTensor<ROPE_T> sinUb = cosUb[BUFFER_SIZE_BYTE_16K / sizeof(ROPE_T)];
                 DataCopy(cosUb, ropeCosGm_[SinCosOffset], computeSize);
                 DataCopy(sinUb, ropeSinGm_[SinCosOffset], computeSize);
                 inputQue2.EnQue(sinUb);
-                inputQue2.DeQue<X_T>();
+                inputQue2.DeQue<ROPE_T>();
 
                 bool isInterleave = (COMP::rotaryMode == ROTARY_MODE::INTERLEAVE) ? true : false;
                 PipeBarrier<PIPE_V>();

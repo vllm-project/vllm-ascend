@@ -65,9 +65,29 @@ constexpr uint32_t VL_FLOAT32_SIZE = GetVRegSize() / sizeof(float);
 constexpr uint32_t BLOCK_TYPE_SIZE = GetUbBlockSize();
 constexpr uint32_t HALF_INTERLEAVE_COEF = 2;
 
-template <typename T, typename ROPET>
+template <typename ROPE_T>
+__simd_vf__ inline void LoadRopeReg(MicroAPI::RegTensor<float> &dst, __ubuf__ ROPE_T *src, MicroAPI::MaskReg mask)
+{
+    if constexpr (IsSameType<ROPE_T, float>::value) {
+        MicroAPI::DataCopy(dst, src);
+    } else {
+        MicroAPI::RegTensor<ROPE_T> ropeReg;
+        MicroAPI::DataCopy<ROPE_T, MicroAPI::LoadDist::DIST_UNPACK_B16>(ropeReg, src);
+        Cast<float, ROPE_T, castTraitB162B32>(dst, ropeReg, mask);
+    }
+}
+
+template <typename OUT_T>
+__simd_vf__ inline void StoreRopeReg(__ubuf__ OUT_T *dst, MicroAPI::RegTensor<float> &src, MicroAPI::MaskReg mask)
+{
+    MicroAPI::RegTensor<OUT_T> outReg;
+    MicroAPI::Cast<OUT_T, float, castTraitB322B16>(outReg, src, mask);
+    MicroAPI::DataCopy<OUT_T, MicroAPI::StoreDist::DIST_PACK_B32>(dst, outReg, mask);
+}
+
+template <typename T, typename ROPE_T, typename OUT_T>
 __simd_vf__ void HalfAlignVF(
-    __ubuf__ ROPET * sinUb, __ubuf__ ROPET * cosUb, __ubuf__ T * inUb, __ubuf__ ROPET * outUb, uint32_t halfD, uint32_t halfDAlign, const RopeParam ropeParam)
+    __ubuf__ ROPE_T * sinUb, __ubuf__ ROPE_T * cosUb, __ubuf__ T * inUb, __ubuf__ OUT_T * outUb, uint32_t halfD, uint32_t halfDAlign, const RopeParam ropeParam)
 {
     MicroAPI::RegTensor<float> vregIn;
     MicroAPI::RegTensor<float> vregHalfIn;
@@ -77,18 +97,12 @@ __simd_vf__ void HalfAlignVF(
     MicroAPI::RegTensor<float> vregHalfCos;
     MicroAPI::RegTensor<float> vregOut;
     MicroAPI::RegTensor<float> vregHalfOut;
-    MicroAPI::RegTensor<ROPET> sinFp16Q;
-    MicroAPI::RegTensor<ROPET> sinFp16R;
-    MicroAPI::RegTensor<ROPET> cosFp16Q;
-    MicroAPI::RegTensor<ROPET> cosFp16R;
-    MicroAPI::RegTensor<ROPET> yBf16Q;
-    MicroAPI::RegTensor<ROPET> yBf16R;
     MicroAPI::MaskReg preg;
 
-    __ubuf__ ROPET * currSinUb;
-    __ubuf__ ROPET * currCosUb;
+    __ubuf__ ROPE_T * currSinUb;
+    __ubuf__ ROPE_T * currCosUb;
     __ubuf__ T * currInUb;
-    __ubuf__ ROPET * currOutUb;
+    __ubuf__ OUT_T * currOutUb;
     for (uint16_t sIdx = 0; sIdx < ropeParam.currSNum; sIdx++) {
         currSinUb = sinUb + sIdx * ropeParam.dAlign;
         currCosUb = cosUb + sIdx * ropeParam.dAlign;
@@ -100,14 +114,10 @@ __simd_vf__ void HalfAlignVF(
                 preg = MicroAPI::UpdateMask<float>(updateCnt);
                 MicroAPI::DataCopy(vregIn, currInUb + (i * VL_FLOAT32_SIZE));
                 MicroAPI::DataCopy(vregHalfIn, (currInUb + (i * VL_FLOAT32_SIZE + halfDAlign)));
-                MicroAPI::DataCopy<ROPET, MicroAPI::LoadDist::DIST_UNPACK_B16>(sinFp16Q, currSinUb + (i * VL_FLOAT32_SIZE));
-                MicroAPI::DataCopy<ROPET, MicroAPI::LoadDist::DIST_UNPACK_B16>(sinFp16R, currSinUb + (i * VL_FLOAT32_SIZE + halfDAlign));
-                MicroAPI::DataCopy<ROPET, MicroAPI::LoadDist::DIST_UNPACK_B16>(cosFp16Q, currCosUb + (i * VL_FLOAT32_SIZE));
-                MicroAPI::DataCopy<ROPET, MicroAPI::LoadDist::DIST_UNPACK_B16>(cosFp16R, currCosUb + (i * VL_FLOAT32_SIZE + halfDAlign));
-                Cast<float, ROPET, castTraitB162B32>(vregSin, sinFp16Q, preg);
-                Cast<float, ROPET, castTraitB162B32>(vregHalfSin, sinFp16R, preg);
-                Cast<float, ROPET, castTraitB162B32>(vregCos, cosFp16Q, preg);
-                Cast<float, ROPET, castTraitB162B32>(vregHalfCos, cosFp16R, preg);
+                LoadRopeReg(vregSin, currSinUb + (i * VL_FLOAT32_SIZE), preg);
+                LoadRopeReg(vregHalfSin, currSinUb + (i * VL_FLOAT32_SIZE + halfDAlign), preg);
+                LoadRopeReg(vregCos, currCosUb + (i * VL_FLOAT32_SIZE), preg);
+                LoadRopeReg(vregHalfCos, currCosUb + (i * VL_FLOAT32_SIZE + halfDAlign), preg);
 
 
                 MicroAPI::Mul(vregSin, vregSin, vregHalfIn, preg);
@@ -117,18 +127,16 @@ __simd_vf__ void HalfAlignVF(
                 MicroAPI::Mul(vregHalfCos, vregHalfCos, vregHalfIn, preg);
                 MicroAPI::Add(vregHalfOut, vregHalfOut, vregHalfCos, preg);
 
-                MicroAPI::Cast<ROPET, float, castTraitB322B16>(yBf16Q, vregOut, preg);
-                MicroAPI::DataCopy<ROPET, MicroAPI::StoreDist::DIST_PACK_B32>(currOutUb + (i * VL_FLOAT32_SIZE), yBf16Q, preg);
-                MicroAPI::Cast<ROPET, float, castTraitB322B16>(yBf16R, vregHalfOut, preg);
-                MicroAPI::DataCopy<ROPET, MicroAPI::StoreDist::DIST_PACK_B32>(currOutUb + (i * VL_FLOAT32_SIZE + halfDAlign), yBf16R, preg);
+                StoreRopeReg(currOutUb + (i * VL_FLOAT32_SIZE), vregOut, preg);
+                StoreRopeReg(currOutUb + (i * VL_FLOAT32_SIZE + halfDAlign), vregHalfOut, preg);
             }
         }
     }
 }
 
-template <typename T, typename ROPET>
+template <typename T, typename ROPE_T, typename OUT_T>
 __simd_vf__ void InterleaveModeVF(
-    __ubuf__ ROPET * sinUb, __ubuf__ ROPET * cosUb, __ubuf__ T * inUb, __ubuf__ ROPET * outUb, const RopeParam ropeParam, const TailParam tailParam, uint16_t loopNum)
+    __ubuf__ ROPE_T * sinUb, __ubuf__ ROPE_T * cosUb, __ubuf__ T * inUb, __ubuf__ OUT_T * outUb, const RopeParam ropeParam, const TailParam tailParam, uint16_t loopNum)
 {
     MicroAPI::RegTensor<float> vregFormerCos;
     MicroAPI::RegTensor<float> vregLatterCos;
@@ -140,22 +148,16 @@ __simd_vf__ void InterleaveModeVF(
     MicroAPI::RegTensor<float> vregEven;
     MicroAPI::RegTensor<float> vregFormerOut;
     MicroAPI::RegTensor<float> vregLatterOut;
-    MicroAPI::RegTensor<ROPET> sinFp16Q;
-    MicroAPI::RegTensor<ROPET> sinFp16R;
-    MicroAPI::RegTensor<ROPET> cosFp16Q;
-    MicroAPI::RegTensor<ROPET> cosFp16R;
-    MicroAPI::RegTensor<ROPET> yBf16Q;
-    MicroAPI::RegTensor<ROPET> yBf16R;
     MicroAPI::MaskReg pregLoop;
     MicroAPI::MaskReg pregTail;
     pregLoop = MicroAPI::CreateMask<float, MicroAPI::MaskPattern::ALL>();
 
-    __ubuf__ ROPET * currSinUb;
-    __ubuf__ ROPET * currCosUb;
+    __ubuf__ ROPE_T * currSinUb;
+    __ubuf__ ROPE_T * currCosUb;
     __ubuf__ T * currInUb;
-    __ubuf__ ROPET * currOutUb;
-    __ubuf__ ROPET* tailSinUb;
-    __ubuf__ ROPET* tailCosUb;
+    __ubuf__ OUT_T * currOutUb;
+    __ubuf__ ROPE_T* tailSinUb;
+    __ubuf__ ROPE_T* tailCosUb;
     for (uint16_t sIdx = 0; sIdx < ropeParam.currSNum; sIdx++) {//sc轴
         currSinUb = sinUb + sIdx * ropeParam.dAlign;
         currCosUb = cosUb + sIdx * ropeParam.dAlign;
@@ -166,15 +168,10 @@ __simd_vf__ void InterleaveModeVF(
                 //数据拷贝，两个寄存器分别拷贝
                 MicroAPI::DataCopy(vregFormerIn, (currInUb + (i * 2) * VL_FLOAT32_SIZE));
                 MicroAPI::DataCopy(vregLatterIn, (currInUb + (i * 2 + 1) * VL_FLOAT32_SIZE));
-                MicroAPI::DataCopy<ROPET, MicroAPI::LoadDist::DIST_UNPACK_B16>(sinFp16Q, (currSinUb + (i * 2) * VL_FLOAT32_SIZE));
-                MicroAPI::DataCopy<ROPET, MicroAPI::LoadDist::DIST_UNPACK_B16>(sinFp16R, (currSinUb + (i * 2 + 1) * VL_FLOAT32_SIZE));
-                MicroAPI::DataCopy<ROPET, MicroAPI::LoadDist::DIST_UNPACK_B16>(cosFp16Q, (currCosUb + (i * 2) * VL_FLOAT32_SIZE));
-                MicroAPI::DataCopy<ROPET, MicroAPI::LoadDist::DIST_UNPACK_B16>(cosFp16R, (currCosUb + (i * 2 + 1) * VL_FLOAT32_SIZE));
-
-                MicroAPI::Cast<float, ROPET, castTraitB162B32>(vregFormerSin, sinFp16Q, pregLoop);
-                MicroAPI::Cast<float, ROPET, castTraitB162B32>(vregLatterSin, sinFp16R, pregLoop);
-                MicroAPI::Cast<float, ROPET, castTraitB162B32>(vregFormerCos, cosFp16Q, pregLoop);
-                MicroAPI::Cast<float, ROPET, castTraitB162B32>(vregLatterCos, cosFp16R, pregLoop);
+                LoadRopeReg(vregFormerSin, (currSinUb + (i * 2) * VL_FLOAT32_SIZE), pregLoop);
+                LoadRopeReg(vregLatterSin, (currSinUb + (i * 2 + 1) * VL_FLOAT32_SIZE), pregLoop);
+                LoadRopeReg(vregFormerCos, (currCosUb + (i * 2) * VL_FLOAT32_SIZE), pregLoop);
+                LoadRopeReg(vregLatterCos, (currCosUb + (i * 2 + 1) * VL_FLOAT32_SIZE), pregLoop);
 
                 MicroAPI::Mul(vregFormerCos, vregFormerCos, vregFormerIn, pregLoop);
                 MicroAPI::Mul(vregLatterCos, vregLatterCos, vregLatterIn, pregLoop);
@@ -188,10 +185,8 @@ __simd_vf__ void InterleaveModeVF(
                 MicroAPI::Mul(vregLatterSin, vregLatterSin, vregLatterIn, pregLoop);
                 MicroAPI::Add(vregLatterCos, vregLatterCos, vregLatterSin, pregLoop);
                 //拷贝输出数据
-                MicroAPI::Cast<ROPET, float, castTraitB322B16>(yBf16Q, vregFormerCos, pregLoop);
-                MicroAPI::DataCopy<ROPET, MicroAPI::StoreDist::DIST_PACK_B32>(currOutUb +  (i * 2) * VL_FLOAT32_SIZE, yBf16Q, pregLoop);
-                MicroAPI::Cast<ROPET, float, castTraitB322B16>(yBf16R, vregLatterCos, pregLoop);
-                MicroAPI::DataCopy<ROPET, MicroAPI::StoreDist::DIST_PACK_B32>(currOutUb +  (i * 2 + 1) * VL_FLOAT32_SIZE, yBf16R, pregLoop);
+                StoreRopeReg(currOutUb +  (i * 2) * VL_FLOAT32_SIZE, vregFormerCos, pregLoop);
+                StoreRopeReg(currOutUb +  (i * 2 + 1) * VL_FLOAT32_SIZE, vregLatterCos, pregLoop);
             }
 
             currInUb = inUb + (sIdx * ropeParam.currDNum + idxD) * ropeParam.dAlign + (loopNum * 2 * VL_FLOAT32_SIZE);
@@ -205,14 +200,10 @@ __simd_vf__ void InterleaveModeVF(
                 //搬入
                 MicroAPI::DataCopy(vregFormerIn, currInUb);
                 MicroAPI::DataCopy(vregLatterIn, currInUb + VL_FLOAT32_SIZE);
-                MicroAPI::DataCopy<ROPET, MicroAPI::LoadDist::DIST_UNPACK_B16>(sinFp16Q, tailSinUb);
-                MicroAPI::DataCopy<ROPET, MicroAPI::LoadDist::DIST_UNPACK_B16>(sinFp16R, tailSinUb + VL_FLOAT32_SIZE);
-                MicroAPI::DataCopy<ROPET, MicroAPI::LoadDist::DIST_UNPACK_B16>(cosFp16Q, tailCosUb);
-                MicroAPI::DataCopy<ROPET, MicroAPI::LoadDist::DIST_UNPACK_B16>(cosFp16R, tailCosUb + VL_FLOAT32_SIZE);
-                MicroAPI::Cast<float, ROPET, castTraitB162B32>(vregFormerSin, sinFp16Q, pregLoop);
-                MicroAPI::Cast<float, ROPET, castTraitB162B32>(vregLatterSin, sinFp16R, pregTail);
-                MicroAPI::Cast<float, ROPET, castTraitB162B32>(vregFormerCos, cosFp16Q, pregLoop);
-                MicroAPI::Cast<float, ROPET, castTraitB162B32>(vregLatterCos, cosFp16R, pregTail);
+                LoadRopeReg(vregFormerSin, tailSinUb, pregLoop);
+                LoadRopeReg(vregLatterSin, tailSinUb + VL_FLOAT32_SIZE, pregTail);
+                LoadRopeReg(vregFormerCos, tailCosUb, pregLoop);
+                LoadRopeReg(vregLatterCos, tailCosUb + VL_FLOAT32_SIZE, pregTail);
                 //计算
                 MicroAPI::Mul(vregFormerCos, vregFormerCos, vregFormerIn, pregLoop);
                 MicroAPI::Mul(vregLatterCos, vregLatterCos, vregLatterIn, pregTail);
@@ -224,10 +215,8 @@ __simd_vf__ void InterleaveModeVF(
                 MicroAPI::Mul(vregLatterSin, vregLatterSin, vregLatterIn, pregTail);
                 MicroAPI::Add(vregLatterCos, vregLatterCos, vregLatterSin, pregTail);
                 //搬出
-                MicroAPI::Cast<ROPET, float, castTraitB322B16>(yBf16Q, vregFormerCos, pregLoop);
-                MicroAPI::Cast<ROPET, float, castTraitB322B16>(yBf16R, vregLatterCos, pregTail);
-                MicroAPI::DataCopy<ROPET, MicroAPI::StoreDist::DIST_PACK_B32>(currOutUb, yBf16Q, pregLoop);
-                MicroAPI::DataCopy<ROPET, MicroAPI::StoreDist::DIST_PACK_B32>(currOutUb +  VL_FLOAT32_SIZE, yBf16R, pregTail);
+                StoreRopeReg(currOutUb, vregFormerCos, pregLoop);
+                StoreRopeReg(currOutUb +  VL_FLOAT32_SIZE, vregLatterCos, pregTail);
             }
 
             // 尾块小于VL时,只读取VL
@@ -236,10 +225,8 @@ __simd_vf__ void InterleaveModeVF(
                 pregTail = MicroAPI::UpdateMask<float>(updateCnt);
                 //搬入
                 MicroAPI::DataCopy(vregFormerIn, currInUb);
-                MicroAPI::DataCopy<ROPET, MicroAPI::LoadDist::DIST_UNPACK_B16>(sinFp16Q, tailSinUb);
-                MicroAPI::DataCopy<ROPET, MicroAPI::LoadDist::DIST_UNPACK_B16>(cosFp16Q, tailCosUb);
-                MicroAPI::Cast<float, ROPET, castTraitB162B32>(vregFormerSin, sinFp16Q, pregTail);
-                MicroAPI::Cast<float, ROPET, castTraitB162B32>(vregFormerCos, cosFp16Q, pregTail);
+                LoadRopeReg(vregFormerSin, tailSinUb, pregTail);
+                LoadRopeReg(vregFormerCos, tailCosUb, pregTail);
                 //计算
                 MicroAPI::Mul(vregFormerCos, vregFormerCos, vregFormerIn, pregTail);
                 MicroAPI::DeInterleave<float>(vregEven, vregOdd, vregFormerIn, vregLatterIn);
@@ -248,8 +235,7 @@ __simd_vf__ void InterleaveModeVF(
                 MicroAPI::Mul(vregFormerSin, vregFormerSin, vregFormerIn, pregTail);
                 MicroAPI::Add(vregFormerCos, vregFormerCos, vregFormerSin, pregTail);
                 //搬出
-                MicroAPI::Cast<ROPET, float, castTraitB322B16>(yBf16Q, vregFormerCos, pregTail);
-                MicroAPI::DataCopy<ROPET, MicroAPI::StoreDist::DIST_PACK_B32>(currOutUb, yBf16Q, pregTail);
+                StoreRopeReg(currOutUb, vregFormerCos, pregTail);
             }
         }
     }
@@ -257,14 +243,14 @@ __simd_vf__ void InterleaveModeVF(
 
 
 
-template <typename T, typename ROPET>
-__aicore__ inline void RopeVF(const LocalTensor<ROPET>& sinTensor, const LocalTensor<ROPET>& cosTensor, const LocalTensor<T>& inTensor,
-    const LocalTensor<ROPET>& outTensor, uint32_t dLen, uint16_t currSNum, uint16_t currDNum, bool isInterleave)
+template <typename T, typename ROPE_T, typename OUT_T>
+__aicore__ inline void RopeVF(const LocalTensor<ROPE_T>& sinTensor, const LocalTensor<ROPE_T>& cosTensor, const LocalTensor<T>& inTensor,
+    const LocalTensor<OUT_T>& outTensor, uint32_t dLen, uint16_t currSNum, uint16_t currDNum, bool isInterleave)
 {
-    __ubuf__ ROPET* sinUb = (__ubuf__ ROPET*)sinTensor.GetPhyAddr();
-    __ubuf__ ROPET* cosUb = (__ubuf__ ROPET*)cosTensor.GetPhyAddr();
+    __ubuf__ ROPE_T* sinUb = (__ubuf__ ROPE_T*)sinTensor.GetPhyAddr();
+    __ubuf__ ROPE_T* cosUb = (__ubuf__ ROPE_T*)cosTensor.GetPhyAddr();
     __ubuf__ T* inUb = (__ubuf__ T*)inTensor.GetPhyAddr();
-    __ubuf__ ROPET* outUb = (__ubuf__ ROPET*)outTensor.GetPhyAddr();
+    __ubuf__ OUT_T* outUb = (__ubuf__ OUT_T*)outTensor.GetPhyAddr();
 
     RopeParam ropeParam;
     ropeParam.dLen = dLen;
@@ -279,12 +265,12 @@ __aicore__ inline void RopeVF(const LocalTensor<ROPET>& sinTensor, const LocalTe
         tailParam.tailTwoVL = tailNum / VL_FLOAT32_SIZE;
         tailParam.tailOneVL = (tailParam.tailTwoVL == 1 && tailNum > 0) ? 0 : 1;
         tailParam.tailLen = tailNum % VL_FLOAT32_SIZE;
-        InterleaveModeVF(sinUb, cosUb, inUb, outUb, ropeParam, tailParam, loopNum);
+        InterleaveModeVF<T, ROPE_T, OUT_T>(sinUb, cosUb, inUb, outUb, ropeParam, tailParam, loopNum);
     } else {
         uint32_t halfD = dLen / HALF_INTERLEAVE_COEF;
         ropeParam.repeatTimes = Compressor::CeilDivT(halfD, VL_FLOAT32_SIZE);
         uint32_t halfDAlign = Compressor::Align(halfD, static_cast<uint32_t>(BLOCK_TYPE_SIZE / sizeof(T)));
-        HalfAlignVF(sinUb, cosUb, inUb, outUb, halfD, halfDAlign, ropeParam);
+        HalfAlignVF<T, ROPE_T, OUT_T>(sinUb, cosUb, inUb, outUb, halfD, halfDAlign, ropeParam);
     }
 
 }

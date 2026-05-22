@@ -14,10 +14,12 @@
  */
 #if defined(__DAV_C310__)
     #include "kernel_operator.h"
+    #include "kernel_tiling/kernel_tiling.h"
     #include "rotary_position_embedding_reg_bab.h"
     #include "rotary_position_embedding_reg_ab.h"
     #include "rotary_position_embedding_reg_aba_and_ba.h"
     #include "rotary_position_embedding_reg_a_and_b.h"
+    #include "inplace_partial_rotary_mul.h"
 #else
     #include "kernel_operator.h"
     #include "kernel_tiling/kernel_tiling.h"
@@ -40,6 +42,8 @@
 #define TILING_KEY_B 20041
 #define TILING_KEY1 1
 #define TILING_KEY2 2
+#define TILING_KEY1_FP32_ROPE 11
+#define TILING_KEY2_FP32_ROPE 12
 
 using namespace AscendC;
 using namespace InplacePartialRotaryMul;
@@ -49,7 +53,21 @@ extern "C" __global__ __aicore__ void inplace_partial_rotary_mul(GM_ADDR x, GM_A
 {
     AscendC::TPipe pipe;
     #if defined(__DAV_C310__)
-        if (TILING_KEY_IS(TILING_KEY_ABA))
+        if (TILING_KEY_IS(TILING_KEY1_FP32_ROPE)) {
+            GET_TILING_DATA_WITH_STRUCT(RopeRegbaseTilingData, tiling_data_in, tiling);
+            const RopeRegbaseTilingData *__restrict tilingData = &tiling_data_in;
+            InplacePartialRotaryMul::InplacePartialRotaryMulABA<DTYPE_X, true, float> op;
+            op.Init(x, cos, sin, y, workspace, tilingData, &pipe);
+            op.Process();
+        }
+        else if (TILING_KEY_IS(TILING_KEY2_FP32_ROPE)) {
+            GET_TILING_DATA_WITH_STRUCT(RopeRegbaseTilingData, tiling_data_in, tiling);
+            const RopeRegbaseTilingData *__restrict tilingData = &tiling_data_in;
+            InplacePartialRotaryMul::InplacePartialRotaryMulABA<DTYPE_X, false, float> op;
+            op.Init(x, cos, sin, y, workspace, tilingData, &pipe);
+            op.Process();
+        }
+        else if (TILING_KEY_IS(TILING_KEY_ABA))
         {
             GET_TILING_DATA_WITH_STRUCT(RopeRegbaseTilingData, tiling_data_in, tiling);
             const RopeRegbaseTilingData *__restrict tilingData = &tiling_data_in;
@@ -108,6 +126,18 @@ extern "C" __global__ __aicore__ void inplace_partial_rotary_mul(GM_ADDR x, GM_A
         }
         if (TILING_KEY_IS(TILING_KEY2)) {
             InplacePartialRotaryMul::InplacePartialRotaryMulABA<DTYPE_X, false> op;
+            op.Init(x, cos, sin, y, workspace, tilingData1, &pipe);
+            op.Process();
+            return;
+        }
+        if (TILING_KEY_IS(TILING_KEY1_FP32_ROPE)) {
+            InplacePartialRotaryMul::InplacePartialRotaryMulABA<DTYPE_X, true, float> op;
+            op.Init(x, cos, sin, y, workspace, tilingData1, &pipe);
+            op.Process();
+            return;
+        }
+        if (TILING_KEY_IS(TILING_KEY2_FP32_ROPE)) {
+            InplacePartialRotaryMul::InplacePartialRotaryMulABA<DTYPE_X, false, float> op;
             op.Init(x, cos, sin, y, workspace, tilingData1, &pipe);
             op.Process();
             return;

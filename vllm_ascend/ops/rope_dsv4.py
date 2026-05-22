@@ -117,7 +117,7 @@ class ComplexExpRotaryEmbedding(nn.Module):
             rope_groups = ["default"]
         self.layername = layername
         self.rotary_dim = rotary_dim
-        dtype = torch.get_default_dtype()
+        dtype = torch.float32
         beta_fast = extra_kwargs.get("beta_fast", 32)
         beta_slow = extra_kwargs.get("beta_slow", 1)
         config_key = (
@@ -141,8 +141,8 @@ class ComplexExpRotaryEmbedding(nn.Module):
                 dtype=torch.float32,
             )
             freqs = torch.einsum("i,j -> ij", t, inv_freq)
-            cos = freqs.cos().repeat_interleave(2, dim=-1).to(dtype)
-            sin = freqs.sin().repeat_interleave(2, dim=-1).to(dtype)
+            cos = freqs.cos().repeat_interleave(2, dim=-1)
+            sin = freqs.sin().repeat_interleave(2, dim=-1)
             cos = cos.to(current_platform.device_type)
             sin = sin.to(current_platform.device_type)
 
