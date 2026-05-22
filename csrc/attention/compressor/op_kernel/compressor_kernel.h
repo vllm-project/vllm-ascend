@@ -26,7 +26,7 @@ using namespace AscendC;
 
 namespace Compressor {
 
-template <typename COMP>
+template <typename COMP, typename DTYPE_SIN>
 class CompressorKernel {
 public:
     __aicore__ inline CompressorKernel(TPipe* pipe, const optiling::CompressorTilingData* __restrict tilingData)
@@ -54,8 +54,8 @@ public:
     const optiling::CompressorTilingData* __restrict tilingData_;
 };
 
-template <typename COMP>
-__aicore__ inline void CompressorKernel<COMP>::Init(
+template <typename COMP, typename DTYPE_SIN>
+__aicore__ inline void CompressorKernel<COMP, DTYPE_SIN>::Init(
         __gm__ uint8_t *x,
         __gm__ uint8_t *wKv,
         __gm__ uint8_t *wGate,
@@ -75,8 +75,8 @@ __aicore__ inline void CompressorKernel<COMP>::Init(
 }
 
 
-template <typename COMP>
-__aicore__ inline void CompressorKernel<COMP>::Process()
+template <typename COMP, typename DTYPE_SIN>
+__aicore__ inline void CompressorKernel<COMP, DTYPE_SIN>::Process()
 {
     // printf("Process\n");
 }

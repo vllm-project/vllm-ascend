@@ -22,7 +22,7 @@ using namespace Compressor;
 
 #define INVOKE_COMPRESSOR_GENERAL_OP_IMPL(templateClass, ...)                                                          \
     do {                                                                                                               \
-        templateClass<COMPType<__VA_ARGS__>> op(&pipe, tilingData);                                                    \
+        templateClass<COMPType<__VA_ARGS__>, DTYPE_ROPE_SIN> op(&pipe, tilingData);                                                    \
         op.Init(x, wKv, wGate, stateCache, ape, normWeight, ropeSin, ropeCos, stateBlockTable,  \
                 cuSeqlens, seqUsed, startPos, cmpKvOut, workspace);                                                    \
         op.Process();                                                                                                  \

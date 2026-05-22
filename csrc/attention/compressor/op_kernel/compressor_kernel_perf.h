@@ -69,7 +69,7 @@ struct BatchInfo {
     uint32_t sIdx = 0;
 };
 
-template <typename COMP>
+template <typename COMP, typename DTYPE_SIN>
 class CompressorKernelPerf {
 public:
     __aicore__ inline CompressorKernelPerf(TPipe* pipe, const optiling::CompressorTilingData* __restrict tilingData)
@@ -151,7 +151,11 @@ private:
 
     // ==============================Service Define==============================
     CompressorBlockCubePerf<COMP> blockCube_;
+#if (__CCE_AICORE__ == 220)
+    CompressorBlockVectorPerf<COMP, DTYPE_SIN> blockVec_;
+#else
     CompressorBlockVectorPerf<COMP> blockVec_;
+#endif
 
     uint32_t allCompressedTcNum_ = 0;
     uint32_t curCompressedTcNum_ = 0;
@@ -163,8 +167,8 @@ private:
     bool isFirstUpdateCurGroup = true;
 };
 
-template <typename COMP>
-__aicore__ inline void CompressorKernelPerf<COMP>::Init(
+template <typename COMP, typename DTYPE_SIN>
+__aicore__ inline void CompressorKernelPerf<COMP, DTYPE_SIN>::Init(
         __gm__ uint8_t *x,
         __gm__ uint8_t *wKv,
         __gm__ uint8_t *wGate,
@@ -241,8 +245,8 @@ __aicore__ inline void CompressorKernelPerf<COMP>::Init(
     }
 }
 
-template <typename COMP>
-__aicore__ inline void CompressorKernelPerf<COMP>::InitTilingData() {
+template <typename COMP, typename DTYPE_SIN>
+__aicore__ inline void CompressorKernelPerf<COMP, DTYPE_SIN>::InitTilingData() {
     constInfo.cmpRatio = tilingData_->baseParams.cmpRatio;
     constInfo.batchSize = tilingData_->baseParams.batchSize;
     constInfo.mBaseSize = tilingData_->innerSplitParams.mBaseSize;
@@ -264,8 +268,8 @@ __aicore__ inline void CompressorKernelPerf<COMP>::InitTilingData() {
     constInfo.stride = tilingData_->baseParams.stride;
 }
 
-template <typename COMP>
-__aicore__ inline void CompressorKernelPerf<COMP>::SetBaseSize()
+template <typename COMP, typename DTYPE_SIN>
+__aicore__ inline void CompressorKernelPerf<COMP, DTYPE_SIN>::SetBaseSize()
 {
     uint32_t mSize = 0;
     uint32_t minMBaseSize = 0;
@@ -334,8 +338,8 @@ __aicore__ inline void CompressorKernelPerf<COMP>::SetBaseSize()
 }
 
 
-template <typename COMP>
-__aicore__ inline void CompressorKernelPerf<COMP>::SkipInvalidBatch(BatchInfo &batchInfo)
+template <typename COMP, typename DTYPE_SIN>
+__aicore__ inline void CompressorKernelPerf<COMP, DTYPE_SIN>::SkipInvalidBatch(BatchInfo &batchInfo)
 {
     for (; batchInfo.bIdx < constInfo.batchSize; ++batchInfo.bIdx) {
         batchInfo.seqCnt = tools_.GetSeqLength(batchInfo.bIdx);
@@ -359,8 +363,8 @@ __aicore__ inline void CompressorKernelPerf<COMP>::SkipInvalidBatch(BatchInfo &b
 }
 
 
-template <typename COMP>
-__aicore__ inline void CompressorKernelPerf<COMP>::UpdateCurGroup(BasicBlockInfo &basicBlockInfo,
+template <typename COMP, typename DTYPE_SIN>
+__aicore__ inline void CompressorKernelPerf<COMP, DTYPE_SIN>::UpdateCurGroup(BasicBlockInfo &basicBlockInfo,
                                 BatchInfo batchInfo, uint32_t &curGroupQuota, uint32_t curDealSeq)
 {
     // 更新当前组的信息
@@ -385,8 +389,8 @@ __aicore__ inline void CompressorKernelPerf<COMP>::UpdateCurGroup(BasicBlockInfo
     }
 }
 
-template <typename COMP>
-__aicore__ inline BasicBlockInfo CompressorKernelPerf<COMP>::SkipOneLoop(BatchInfo &batchInfo)
+template <typename COMP, typename DTYPE_SIN>
+__aicore__ inline BasicBlockInfo CompressorKernelPerf<COMP, DTYPE_SIN>::SkipOneLoop(BatchInfo &batchInfo)
 {
     BasicBlockInfo basicBlockInfo{};
     isFirstUpdateCurGroup = true;
@@ -455,8 +459,8 @@ __aicore__ inline BasicBlockInfo CompressorKernelPerf<COMP>::SkipOneLoop(BatchIn
 }
 
 
-template <typename COMP>
-__aicore__ inline uint32_t CompressorKernelPerf<COMP>::GetLoopTimes()
+template <typename COMP, typename DTYPE_SIN>
+__aicore__ inline uint32_t CompressorKernelPerf<COMP, DTYPE_SIN>::GetLoopTimes()
 {
     // 计算主循环次数
     uint32_t loopTimes = 0;
@@ -468,8 +472,8 @@ __aicore__ inline uint32_t CompressorKernelPerf<COMP>::GetLoopTimes()
     return loopTimes;
 }
 
-template <typename COMP>
-__aicore__ inline void CompressorKernelPerf<COMP>::CalcSplitCoreInfo()
+template <typename COMP, typename DTYPE_SIN>
+__aicore__ inline void CompressorKernelPerf<COMP, DTYPE_SIN>::CalcSplitCoreInfo()
 {
     // D方向的基本块数量
     constInfo.dBasicBlockNum = constInfo.headDim / constInfo.dBaseSize;
@@ -508,8 +512,8 @@ __aicore__ inline void CompressorKernelPerf<COMP>::CalcSplitCoreInfo()
     // }
 }
 
-template <typename COMP>
-__aicore__ inline void CompressorKernelPerf<COMP>::InitWorkspace(__gm__ uint8_t *workspace) {
+template <typename COMP, typename DTYPE_SIN>
+__aicore__ inline void CompressorKernelPerf<COMP, DTYPE_SIN>::InitWorkspace(__gm__ uint8_t *workspace) {
     uint64_t offset = 0;
     uint64_t mm1KvResStartOffset = offset;
     // mm1KvResGm
@@ -548,8 +552,8 @@ __aicore__ inline void CompressorKernelPerf<COMP>::InitWorkspace(__gm__ uint8_t 
         (__gm__ VEC1_OUT_T *)(workspace + beforeVecOffset));
 }
 
-template <typename COMP>
-__aicore__ inline void CompressorKernelPerf<COMP>::ComputeMm1(const RunInfo &info, bool isNeedExcute) {
+template <typename COMP, typename DTYPE_SIN>
+__aicore__ inline void CompressorKernelPerf<COMP, DTYPE_SIN>::ComputeMm1(const RunInfo &info, bool isNeedExcute) {
     CrossCoreWaitFlag<SYNC_MODE2, PIPE_FIX>(SYNC_V1_C1_FLAG + info.cubeDbIdx);
     if (isNeedExcute) {
         // printf("[MM1] bStart:%u, sStart:%u, dealSeqCnt:%u, dealTcNum:%u, dealScSize:%u, cubeDbIdx:%u\n", info.bStart, info.sStart, info.dealSeqCnt, info.dealTcNum, info.dealScSize, info.cubeDbIdx);
@@ -560,8 +564,8 @@ __aicore__ inline void CompressorKernelPerf<COMP>::ComputeMm1(const RunInfo &inf
     CrossCoreSetFlag<SYNC_MODE2, PIPE_FIX>(SYNC_C1_V1_FLAG + info.cubeDbIdx);
 }
 
-template <typename COMP>
-__aicore__ inline void CompressorKernelPerf<COMP>::ComputeVec1(const Vec1RunInfo &info) {
+template <typename COMP, typename DTYPE_SIN>
+__aicore__ inline void CompressorKernelPerf<COMP, DTYPE_SIN>::ComputeVec1(const Vec1RunInfo &info) {
     CrossCoreWaitFlag<SYNC_MODE2, PIPE_MTE2>(SYNC_C1_V1_FLAG + info.c1v1DbIdx);
     CrossCoreWaitFlag<SYNC_MODE0, PIPE_MTE2>(SYNC_V1_FLAG2 + info.c1v1DbIdx);
     // printf("[VEC1] bStart:%u, sStart:%u, dealTcNum:%u, dealScSize:%u, c1v1DbIdx:%u, v1v2DbIdx:%u\n", info.bStart, info.sStart, info.dealTcNum, info.dealScSize, info.c1v1DbIdx, info.v1v2DbIdx);
@@ -572,14 +576,14 @@ __aicore__ inline void CompressorKernelPerf<COMP>::ComputeVec1(const Vec1RunInfo
     CrossCoreSetFlag<SYNC_MODE0, PIPE_MTE3>(SYNC_V1_FLAG2 + (info.c1v1DbIdx + 1) % constInfo.dbWorkspaceRatio);
 }
 
-template <typename COMP>
-__aicore__ inline void CompressorKernelPerf<COMP>::ComputeVec2(const Vec2RunInfo &info) {
+template <typename COMP, typename DTYPE_SIN>
+__aicore__ inline void CompressorKernelPerf<COMP, DTYPE_SIN>::ComputeVec2(const Vec2RunInfo &info) {
     // printf("[VEC2] bStart:%u, sStart:%u, bCompressedId:%u, dealScSize:%u, v2DbIdx:%u\n", info.bStart, info.sStart, info.bCompressedId, info.dealScSize, info.v2DbIdx);
     blockVec_.ComputeVec2(info);
 }
 
-template <typename COMP>
-__aicore__ inline void CompressorKernelPerf<COMP>::AllocEventID()
+template <typename COMP, typename DTYPE_SIN>
+__aicore__ inline void CompressorKernelPerf<COMP, DTYPE_SIN>::AllocEventID()
 {
     if ASCEND_IS_AIC {
         blockCube_.AllocEventID(pipe_);
@@ -592,8 +596,8 @@ __aicore__ inline void CompressorKernelPerf<COMP>::AllocEventID()
     }
 }
 
-template <typename COMP>
-__aicore__ inline void CompressorKernelPerf<COMP>::FreeEventID()
+template <typename COMP, typename DTYPE_SIN>
+__aicore__ inline void CompressorKernelPerf<COMP, DTYPE_SIN>::FreeEventID()
 {
     if ASCEND_IS_AIC {
         for (int i = 0; i < constInfo.dbWorkspaceRatio; ++i) {
@@ -606,15 +610,15 @@ __aicore__ inline void CompressorKernelPerf<COMP>::FreeEventID()
     }
 }
 
-template <typename COMP>
-__aicore__ inline bool CompressorKernelPerf<COMP>::IsNeedExcuteC1(RunInfo info)
+template <typename COMP, typename DTYPE_SIN>
+__aicore__ inline bool CompressorKernelPerf<COMP, DTYPE_SIN>::IsNeedExcuteC1(RunInfo info)
 {
     // B超出范围则cube不执行
     return info.bStart < constInfo.batchSize;
 }
 
-template <typename COMP>
-__aicore__ inline void CompressorKernelPerf<COMP>::CalcC1V1Params(RunInfo &info, Vec1RunInfo &vec1Info, BatchInfo &batchInfo, uint32_t loopIdx)
+template <typename COMP, typename DTYPE_SIN>
+__aicore__ inline void CompressorKernelPerf<COMP, DTYPE_SIN>::CalcC1V1Params(RunInfo &info, Vec1RunInfo &vec1Info, BatchInfo &batchInfo, uint32_t loopIdx)
 {
     vec1Info.bStart = batchInfo.bIdx;
     vec1Info.sStart = batchInfo.sIdx;
@@ -632,14 +636,14 @@ __aicore__ inline void CompressorKernelPerf<COMP>::CalcC1V1Params(RunInfo &info,
     allCompressedTcNum_ += basicBlockInfo.compressedTcNum;
 }
 
-template <typename COMP>
-__aicore__ inline bool CompressorKernelPerf<COMP>::IsNeedExcuteV2(Vec2RunInfo &vec2Info)
+template <typename COMP, typename DTYPE_SIN>
+__aicore__ inline bool CompressorKernelPerf<COMP, DTYPE_SIN>::IsNeedExcuteV2(Vec2RunInfo &vec2Info)
 {
     return (vec2Info.dealScSize > 0);
 }
 
-template <typename COMP>
-__aicore__ inline bool CompressorKernelPerf<COMP>::IsNeedSyncAll(uint32_t curBasicBlockIdx)
+template <typename COMP, typename DTYPE_SIN>
+__aicore__ inline bool CompressorKernelPerf<COMP, DTYPE_SIN>::IsNeedSyncAll(uint32_t curBasicBlockIdx)
 {
     if (allCompressedTcNum_ == 0) {
         return false;
@@ -652,8 +656,8 @@ __aicore__ inline bool CompressorKernelPerf<COMP>::IsNeedSyncAll(uint32_t curBas
     return false;
 }
 
-template <typename COMP>
-__aicore__ inline void CompressorKernelPerf<COMP>::UpdateVec2Info(
+template <typename COMP, typename DTYPE_SIN>
+__aicore__ inline void CompressorKernelPerf<COMP, DTYPE_SIN>::UpdateVec2Info(
     Vec2RunInfo &vec2Info, uint32_t curBasicBlockIdx, const Vec1RunInfo &info)
 {
     // nSize轮起始先重置v2Info信息
@@ -680,8 +684,8 @@ __aicore__ inline void CompressorKernelPerf<COMP>::UpdateVec2Info(
     vec2Info.compressedId += info.dealScSize;
 }
 
-template <typename COMP>
-__aicore__ inline void CompressorKernelPerf<COMP>::Process()
+template <typename COMP, typename DTYPE_SIN>
+__aicore__ inline void CompressorKernelPerf<COMP, DTYPE_SIN>::Process()
 {
     // 所有batch的有效序列都为0时, 直接退出
     if (constInfo.batchSize == 0) {
