@@ -66,6 +66,7 @@ std::tuple<at::Tensor&, at::Tensor&> dispatch_ffn_combine(
                  x_active_mask.has_value() ? x_active_mask.value() : at::Tensor(),
                  group_ep_ptr,
                  max_output_size,
+                 swiglu_limit,
                  out,
                  expert_token_nums);
     } else {
