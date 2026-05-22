@@ -138,6 +138,7 @@ def build_fused_experts_input(
     mxfp_scale_dtype: torch.dtype | None = None,
     mxfp_per_token_scale_dtype: torch.dtype | None = None,
     mxfp_use_bf16: bool | None = None,
+    is_per_channel_weight: bool = False,
     w1_scale: list[torch.Tensor] | torch.Tensor | None = None,
     w2_scale: list[torch.Tensor] | torch.Tensor | None = None,
     w1_scale_bias: list[torch.Tensor] | torch.Tensor | None = None,
@@ -184,6 +185,7 @@ def build_fused_experts_input(
                 mxfp_per_token_scale_dtype=mxfp_per_token_scale_dtype,
                 mxfp_use_bf16=mxfp_use_bf16,
             ),
+            is_per_channel_weight=is_per_channel_weight,
         ),
         swiglu_limit=swiglu_limit,
     )
