@@ -162,9 +162,9 @@ class EplbWorker:
 
             for idx in range(len(dst_rank_indices)):
                 dst_rank_id = dst_rank_indices[idx].item()
-                slot_id = slots_to_fill[idx].item()
+                dest_slot = slots_to_fill[idx].item()
                 # Look up the actual local expert ID that fills this slot
-                expert_id = updated_expert_maps_this_layer[dst_rank_id, slot_id].item()
+                expert_id = updated_expert_maps_this_layer[dst_rank_id, dest_slot].item()
                 if dst_rank_id not in expert_recv_info_this_layer:
                     expert_recv_info_this_layer[dst_rank_id] = []
 
@@ -182,9 +182,15 @@ class EplbWorker:
                 if src_rank_id not in expert_send_info_this_layer:
                     expert_send_info_this_layer[src_rank_id] = []
 
-                # Use expert_id (local expert ID) in the plan, not slot index
-                expert_send_info_this_layer[src_rank_id].append((dst_rank_id, expert_id))
-                expert_recv_info_this_layer[dst_rank_id].append((src_rank_id, expert_id))
+                # Find which slot on the source rank currently holds this expert
+                source_slot = (current_expert_maps_this_layer[src_rank_id] == expert_id).nonzero()[0].item()
+
+                # Plan carries LOCAL SLOT indices into expert_param_per_layer,
+                # not global expert IDs.  expert_param_per_layer[layer][slot]
+                # stores the weight for whatever global expert occupies that
+                # local slot.
+                expert_send_info_this_layer[src_rank_id].append((dst_rank_id, source_slot))
+                expert_recv_info_this_layer[dst_rank_id].append((src_rank_id, dest_slot))
 
             yield (
                 expert_send_info_this_layer,

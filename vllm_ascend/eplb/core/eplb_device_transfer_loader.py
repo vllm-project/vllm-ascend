@@ -54,23 +54,23 @@ class D2DExpertWeightLoader:
         self.layer_id = layer_id
         self.comm_op_list = []
         for send_info in expert_send_info:
-            dst_rank, global_expert_id_to_send = send_info
-            # Plan now carries the local expert ID directly (not a slot index).
-            # expert_param_per_layer is indexed by local expert ID.
-            local_expert_id = global_expert_id_to_send
-            for src_tensor in self.eplb_adaptor.expert_param_per_layer[layer_id][local_expert_id]:
+            dst_rank, source_slot = send_info
+            # source_slot is a LOCAL slot index into expert_param_per_layer on
+            # this rank — it tells us where the expert's weights currently are.
+            for src_tensor in self.eplb_adaptor.expert_param_per_layer[layer_id][source_slot]:
                 self.comm_op_list.append(
                     dist.P2POp(dist.isend, src_tensor.contiguous(), self.comm_group.ranks[dst_rank], group=self.comm_group.device_group)
                 )
 
         for buffer_tensor_id, recv_info in enumerate(expert_recv_info):
-            recv_rank, global_expert_id_to_recv = recv_info
+            recv_rank, dest_slot = recv_info
             for buffer_tensor in self.eplb_adaptor.buffer_tensor_list[buffer_tensor_id]:
                 self.comm_op_list.append(
                     dist.P2POp(dist.irecv, buffer_tensor, self.comm_group.ranks[recv_rank], group=self.comm_group.device_group)
                 )
-            local_expert_to_replace = global_expert_id_to_recv  # direct expert ID
-            self.recv_expert_list.append((local_expert_to_replace, buffer_tensor_id))
+            # dest_slot is a LOCAL slot index — write received weights into
+            # the correct position on this rank.
+            self.recv_expert_list.append((dest_slot, buffer_tensor_id))
 
         self.state = ExpertWeightUpdateState.READY
 
