@@ -249,6 +249,7 @@ def dsa_forward(
         # Decode compressor
         decode_compressed_kv = None
         if has_decode:
+            assert decode_result is not None
             (q, compress_cos, compress_sin, actual_seq_lengths_query, q_idx, kv_idx, ik, isc, isc_meta, wp) = (
                 decode_result
             )
@@ -277,6 +278,7 @@ def dsa_forward(
         # Prefill compressor
         prefill_compressed_kv = None
         if has_prefill:
+            assert prefill_result is not None
             (
                 pq,
                 pcompress_cos,
