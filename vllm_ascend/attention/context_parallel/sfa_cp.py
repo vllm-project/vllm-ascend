@@ -22,7 +22,7 @@ from vllm_ascend.attention.utils import (
 from vllm_ascend.ops.layer_shard_linear import is_hidden_layer, reach_layer_for_shard_weight_series
 from vllm_ascend.ops.triton.rope import rope_forward_triton_siso
 from vllm_ascend.utils import ( 
-    get_weight_prefetch_method,  
+    get_weight_prefetch_method,
 )
 
 
@@ -167,17 +167,17 @@ class AscendSFACPMetadataBuilder(AscendSFAMetadataBuilder):
             if num_prefills > 0:
                 restore_idx = long_seq_metadata.pcp_allgather_restore_idx
                 num_tokens_pcp_padded = len(restore_idx)
-                
+
                 inverse_idx = torch.empty_like(restore_idx)
                 inverse_idx.scatter_(
-                    0, 
-                    restore_idx, 
+                    0,
+                    restore_idx,
                     torch.arange(num_tokens_pcp_padded, device=restore_idx.device, dtype=restore_idx.dtype),
                 )
 
                 prefill_start_in_slot_mapping = num_decode_tokens * self.pcp_size
                 prefill_slots = self.slot_mapping_buf[prefill_start_in_slot_mapping:].clone()
-                
+
                 self.prefill_slot_mapping = torch.where(
                     inverse_idx < num_decode_tokens * self.pcp_size,
                     torch.tensor(-1, device=restore_idx.device, dtype=torch.long),
@@ -185,7 +185,7 @@ class AscendSFACPMetadataBuilder(AscendSFAMetadataBuilder):
                 )
             metadata_cls.slot_mapping = self.slot_mapping_buf[:num_actual_tokens_pcp_padded]
             metadata_cls.prefill_slot_mapping = (
-                self.prefill_slot_mapping if hasattr(self, 'prefill_slot_mapping') else None
+                self.prefill_slot_mapping if hasattr(self, "prefill_slot_mapping") else None
             )
             # if torch.distributed.get_rank()  == 0:
             #     logger.info(f"metadata_cls.slot_mapping = {metadata_cls.slot_mapping}")
@@ -807,12 +807,12 @@ class AscendSFACPImpl(AscendSFAImpl):
                 fused_kv_no_split = torch.cat(
                     [
                         kv_no_split.view(-1, kv_no_split.shape[-1]), k_li.view(-1, k_li.shape[-1]),
-                    ], 
+                    ],
                     dim=1
                 )
                 fused_kv_no_split = torch.ops.vllm.maybe_all_gather_and_maybe_unpad(
                     fused_kv_no_split.contiguous(), need_gather_q_kv
-                )[:num_actual_tokens]   
+                )[:num_actual_tokens]
                 kv_no_split, k_li = fused_kv_no_split.split(
                     [self.qk_rope_head_dim + self.kv_lora_rank, self.head_dim], dim=-1
                 )
