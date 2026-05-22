@@ -2161,8 +2161,9 @@ class TestPrepareNextTokenIdsPadded(TestBase):
 class MockDraftModel:
     """Draft model that records prepared forward inputs."""
 
-    def __init__(self, returns_tuple=True, vocab_size=200000):
+    def __init__(self, returns_tuple=True, enable_reduce_sample=False, vocab_size=200000):
         self.returns_tuple = returns_tuple
+        self.enable_reduce_sample = enable_reduce_sample
         self.vocab_size = vocab_size
         self.calls = []
         self.logit_inputs = []
@@ -2186,12 +2187,12 @@ class MockDraftModel:
             return last_hidden_states, hidden_states
         return last_hidden_states
 
-    def compute_logits(self, sample_hidden_states, enable_reduce_sample=False):
+    def compute_logits(self, sample_hidden_states):
         self.logit_inputs.append(sample_hidden_states.clone())
         token_ids = sample_hidden_states[:, 0].to(torch.long)
         logits = torch.full((sample_hidden_states.shape[0], self.vocab_size), -1000.0)
         logits[torch.arange(sample_hidden_states.shape[0]), token_ids] = 1000.0
-        if enable_reduce_sample:
+        if self.enable_reduce_sample:
             logits = logits.argmax(dim=-1)
         return logits
 
@@ -2512,7 +2513,7 @@ class TestRunMergedDraft(TestBase):
         return [p.name for p in sig.parameters.values()]
 
     def test_run_merged_draft_eagle3_decode_prepares_each_forward_input(self):
-        self.proposer.model = MockDraftModel(returns_tuple=True)
+        self.proposer.model = MockDraftModel(returns_tuple=True, enable_reduce_sample= True)
         self.proposer.supports_mm_inputs = True
         initial_input_ids = torch.tensor(
             [279, 1196, 374, 8014, 151667, 198, 32313, 11, 151667, 198, 32313, 11],
