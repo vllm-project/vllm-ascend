@@ -1,0 +1,364 @@
+# SOME DESCRIPTIVE TITLE.
+# Copyright (C) 2025, vllm-ascend team
+# This file is distributed under the same license as the vllm-ascend
+# package.
+# FIRST AUTHOR <EMAIL@ADDRESS>, 2026.
+#
+msgid ""
+msgstr ""
+"Project-Id-Version: vllm-ascend \n"
+"Report-Msgid-Bugs-To: \n"
+"POT-Creation-Date: 2026-05-22 04:30+0000\n"
+"PO-Revision-Date: YEAR-MO-DA HO:MI+ZONE\n"
+"Last-Translator: FULL NAME <EMAIL@ADDRESS>\n"
+"Language: zh_CN\n"
+"Language-Team: zh_CN <LL@li.org>\n"
+"Plural-Forms: nplurals=1; plural=0;\n"
+"MIME-Version: 1.0\n"
+"Content-Type: text/plain; charset=utf-8\n"
+"Content-Transfer-Encoding: 8bit\n"
+"Generated-By: Babel 2.18.0\n"
+
+#: ../../source/community/issue-workflow-guidelines.md:1
+msgid "Issue Workflow Guidelines"
+msgstr "Issue 工作流指南"
+
+#: ../../source/community/issue-workflow-guidelines.md:3
+msgid ""
+"This document defines the standard lifecycle for Issues in the vLLM "
+"Ascend project — from creation through triage, active handling, and final"
+" closure. It establishes consistent label usage, owner assignment, and "
+"communication expectations to ensure smooth collaboration between "
+"contributors and maintainers."
+msgstr ""
+"本文档定义了 vLLM Ascend 项目中 Issue 的标准生命周期——从创建、分类、积极处理到最终关闭。它建立了统一的标签使用、负责人分配和沟通期望，以确保贡献者与维护者之间的顺畅协作。"
+
+#: ../../source/community/issue-workflow-guidelines.md:5
+msgid "1. Label Categories"
+msgstr "1.标签分类"
+
+#: ../../source/community/issue-workflow-guidelines.md:7
+msgid "1.1 Status Labels"
+msgstr "1.1状态标签"
+
+#: ../../source/community/issue-workflow-guidelines.md:9
+msgid "These labels track where an issue stands in the workflow."
+msgstr "这些标签用于追踪 Issue 在工作流中所处的阶段。"
+
+#: ../../source/community/issue-workflow-guidelines.md
+msgid "Label"
+msgstr "标签"
+
+#: ../../source/community/issue-workflow-guidelines.md
+msgid "Description"
+msgstr "描述"
+
+#: ../../source/community/issue-workflow-guidelines.md
+msgid "`triage review`"
+msgstr "`triage review`"
+
+#: ../../source/community/issue-workflow-guidelines.md
+msgid "Newly filed or unseen issue awaiting initial assessment by a maintainer"
+msgstr "新提交或未查看的 Issue，等待维护者进行初步评估"
+
+#: ../../source/community/issue-workflow-guidelines.md
+msgid "`triaged`"
+msgstr "`triaged`"
+
+#: ../../source/community/issue-workflow-guidelines.md
+msgid "Assessment complete; type, priority, and module have been determined"
+msgstr "评估完成；已确定类型、优先级和所属模块"
+
+#: ../../source/community/issue-workflow-guidelines.md
+msgid "`wait-feedback`"
+msgstr "`wait-feedback`"
+
+#: ../../source/community/issue-workflow-guidelines.md
+msgid ""
+"Blocked on an external dependency or awaiting a response before work can "
+"proceed"
+msgstr "因外部依赖阻塞，或等待回复后才能继续推进"
+
+#: ../../source/community/issue-workflow-guidelines.md
+msgid "`resolved`"
+msgstr "`resolved`"
+
+#: ../../source/community/issue-workflow-guidelines.md
+msgid ""
+"Issue has been closed — either via a merged PR, or through non-code "
+"resolution (e.g., answered question, configuration guidance)"
+msgstr "Issue 已关闭——通过合并的 PR 解决，或通过非代码方式解决（例如：已回答问题、提供配置指导）"
+
+#: ../../source/community/issue-workflow-guidelines.md
+msgid "`stale`"
+msgstr "`stale`"
+
+#: ../../source/community/issue-workflow-guidelines.md
+msgid ""
+"No activity for an extended period; parties have been notified and the "
+"issue will be auto-closed if there is no response"
+msgstr "长时间无活动；相关方已收到通知，若无回应将自动关闭"
+
+#: ../../source/community/issue-workflow-guidelines.md
+msgid "`duplicated`"
+msgstr "`duplicated`"
+
+#: ../../source/community/issue-workflow-guidelines.md
+msgid "A duplicate of an existing open issue or merged PR"
+msgstr "与现有开放 Issue 或已合并 PR 重复"
+
+#: ../../source/community/issue-workflow-guidelines.md
+msgid "`invalid`"
+msgstr "`invalid`"
+
+#: ../../source/community/issue-workflow-guidelines.md
+msgid "The issue report is invalid, unclear, or not reproducible"
+msgstr "Issue 报告无效、不清晰或无法复现"
+
+#: ../../source/community/issue-workflow-guidelines.md
+msgid "`wontfix`"
+msgstr "`wontfix`"
+
+#: ../../source/community/issue-workflow-guidelines.md
+msgid ""
+"The issue will not be addressed; as this issue is out of scope, unviable,"
+" or intentionally ignored for the foreseeable future"
+msgstr "此 Issue 将不予处理；因其超出范围、不可行，或在可预见的未来被有意忽略"
+
+#: ../../source/community/issue-workflow-guidelines.md:22
+msgid "1.2 Type Labels"
+msgstr "1.2类型标签"
+
+#: ../../source/community/issue-workflow-guidelines.md:24
+msgid "These labels describe the nature of the issue."
+msgstr "这些标签描述了 Issue 的性质。"
+
+#: ../../source/community/issue-workflow-guidelines.md
+msgid "`feature request`"
+msgstr "`feature request`"
+
+#: ../../source/community/issue-workflow-guidelines.md
+msgid "Request for new functionality"
+msgstr "请求新增功能"
+
+#: ../../source/community/issue-workflow-guidelines.md
+msgid "`RFC`"
+msgstr "`RFC`"
+
+#: ../../source/community/issue-workflow-guidelines.md
+msgid ""
+"Request for Comments — significant architectural or design change "
+"requiring community discussion"
+msgstr "征求意见——需要社区讨论的重大架构或设计变更"
+
+#: ../../source/community/issue-workflow-guidelines.md
+msgid "`new model`"
+msgstr "`new model`"
+
+#: ../../source/community/issue-workflow-guidelines.md
+msgid "Request to add support for a new model on Ascend NPU"
+msgstr "请求在 Ascend NPU 上新增对某模型的支持"
+
+#: ../../source/community/issue-workflow-guidelines.md
+msgid "`usage`"
+msgstr "`usage`"
+
+#: ../../source/community/issue-workflow-guidelines.md
+msgid "A usage question; no code change may be required"
+msgstr "使用问题；可能无需修改代码"
+
+#: ../../source/community/issue-workflow-guidelines.md
+msgid "`question`"
+msgstr "`question`"
+
+#: ../../source/community/issue-workflow-guidelines.md
+msgid "A general question; no code change may be required"
+msgstr "一般性问题；可能无需修改代码"
+
+#: ../../source/community/issue-workflow-guidelines.md
+msgid "`documentation`"
+msgstr "`documentation`"
+
+#: ../../source/community/issue-workflow-guidelines.md
+msgid "Improvements or corrections to documentation"
+msgstr "文档的改进或修正"
+
+#: ../../source/community/issue-workflow-guidelines.md
+msgid "`installation`"
+msgstr "`installation`"
+
+#: ../../source/community/issue-workflow-guidelines.md
+msgid "Issues related to setup and deployment"
+msgstr "与安装和部署相关的问题"
+
+#: ../../source/community/issue-workflow-guidelines.md
+msgid "`performance`"
+msgstr "`performance`"
+
+#: ../../source/community/issue-workflow-guidelines.md
+msgid "Performance regression, bottleneck, or optimization request"
+msgstr "性能回退、瓶颈或优化请求"
+
+#: ../../source/community/issue-workflow-guidelines.md
+msgid "`bug`"
+msgstr "`bug`"
+
+#: ../../source/community/issue-workflow-guidelines.md
+msgid "Something is not working correctly or behaves unexpectedly"
+msgstr "功能运行不正确或行为异常"
+
+#: ../../source/community/issue-workflow-guidelines.md:38
+msgid "1.3 Priority Labels (Optional)"
+msgstr "1.3优先级标签（可选）"
+
+#: ../../source/community/issue-workflow-guidelines.md
+msgid "`high`"
+msgstr "`high`"
+
+#: ../../source/community/issue-workflow-guidelines.md
+msgid "High priority; should be resolved in the current or next cycle"
+msgstr "高优先级；应在当前或下一个周期内解决"
+
+#: ../../source/community/issue-workflow-guidelines.md
+msgid "`medium`"
+msgstr "`medium`"
+
+#: ../../source/community/issue-workflow-guidelines.md
+msgid "Normal priority; handled in the regular development flow"
+msgstr "普通优先级；按常规开发流程处理"
+
+#: ../../source/community/issue-workflow-guidelines.md
+msgid "`low`"
+msgstr "`low`"
+
+#: ../../source/community/issue-workflow-guidelines.md
+msgid "Low priority; edge case or minor issue that can be deferred"
+msgstr "低优先级；可推迟处理的边缘情况或小问题"
+
+#: ../../source/community/issue-workflow-guidelines.md:46
+msgid "1.4 Contribution Labels (Optional)"
+msgstr "1.4贡献标签（可选）"
+
+#: ../../source/community/issue-workflow-guidelines.md
+msgid "`good first issue`"
+msgstr "`good first issue`"
+
+#: ../../source/community/issue-workflow-guidelines.md
+msgid "A well-scoped, low-complexity task suitable for new contributors"
+msgstr "范围明确、复杂度低，适合新贡献者的任务"
+
+#: ../../source/community/issue-workflow-guidelines.md
+msgid "`help wanted`"
+msgstr "`help wanted`"
+
+#: ../../source/community/issue-workflow-guidelines.md
+msgid "Community contributions are welcome and encouraged"
+msgstr "欢迎并鼓励社区贡献"
+
+#: ../../source/community/issue-workflow-guidelines.md:53
+msgid "2. Workflow"
+msgstr "2.工作流"
+
+#: ../../source/community/issue-workflow-guidelines.md:55
+msgid "![issue_label_workflow](./images/issue_label_workflow.png)"
+msgstr "![issue_label_workflow](./images/issue_label_workflow.png)"
+
+#: ../../source/community/issue-workflow-guidelines.md:55
+msgid "issue_label_workflow"
+msgstr "issue_label_workflow"
+
+#: ../../source/community/issue-workflow-guidelines.md:57
+msgid "Phase 1 — First Response"
+msgstr "阶段1——首次响应"
+
+#: ../../source/community/issue-workflow-guidelines.md:59
+msgid "When an issue is first picked up by the on-call maintainer:"
+msgstr "当值班维护者首次接手 Issue 时："
+
+#: ../../source/community/issue-workflow-guidelines.md:61
+msgid ""
+"Apply `triaged` to signal that the issue can be classified and Add the "
+"relevant module label so the issue can be routed to the appropriate "
+"module maintainer for detailed triage."
+msgstr "应用 `triaged` 标签表示该 Issue 可被分类，并添加相关模块标签，以便将其路由至相应的模块维护者进行详细分类。"
+
+#: ../../source/community/issue-workflow-guidelines.md:62
+msgid ""
+"Apply `triage review` to signal that the issue requires more review and "
+"specitfic analysis before classification."
+msgstr "应用 `triage review` 标签表示该 Issue 在分类前需要更多审查和具体分析。"
+
+#: ../../source/community/issue-workflow-guidelines.md:64
+msgid "Phase 2 — Triage and Analysis"
+msgstr "阶段2——分类与分析"
+
+#: ../../source/community/issue-workflow-guidelines.md:66
+msgid "After a thorough review of the issue content:"
+msgstr "在彻底审查 Issue 内容后："
+
+#: ../../source/community/issue-workflow-guidelines.md:68
+msgid ""
+"Verify and apply the appropriate **issue type** label (`bug`, `feature "
+"request`, `RFC`, `question`, `documentation`, `installation`, "
+"`performance`, `new model`, etc.)."
+msgstr "验证并应用适当的 **Issue 类型** 标签（`bug`、`feature request`、`RFC`、`question`、`documentation`、`installation`、`performance`、`new model` 等）。"
+
+#: ../../source/community/issue-workflow-guidelines.md:69
+msgid "Handle terminal states:"
+msgstr "处理终态："
+
+#: ../../source/community/issue-workflow-guidelines.md:70
+msgid ""
+"For duplicates, apply the `duplicated` label, provide an explanation and "
+"a link to the existing issue or PR. If there are no further questions, "
+"close the issue."
+msgstr "对于重复项，应用 `duplicated` 标签，提供解释并链接到现有 Issue 或 PR。若无进一步问题，则关闭该 Issue。"
+
+#: ../../source/community/issue-workflow-guidelines.md:71
+msgid ""
+"For invalid reports, provide an explanation, apply the `invalid` and "
+"`resolved` label, and close the issue. The issue creator can comment or "
+"request to reopen if they have further questions."
+msgstr "对于无效报告，提供解释，应用 `invalid` 和 `resolved` 标签，并关闭 Issue。Issue 创建者如有进一步问题，可评论或请求重新打开。"
+
+#: ../../source/community/issue-workflow-guidelines.md:72
+msgid "Optionally apply a **priority** label (`high`, `medium`, or `low`)."
+msgstr "可选地应用 **优先级** 标签（`high`、`medium` 或 `low`）。"
+
+#: ../../source/community/issue-workflow-guidelines.md:73
+msgid ""
+"If community contributions are welcome, apply `help wanted`. For well-"
+"scoped beginner-friendly tasks, also apply `good first issue`."
+msgstr "如果欢迎社区贡献，应用 `help wanted`。对于范围明确、适合初学者的任务，同时应用 `good first issue`。"
+
+#: ../../source/community/issue-workflow-guidelines.md:74
+msgid ""
+"Assign the issue owner and replace `triage review` with `triaged` to "
+"indicate that triage is complete."
+msgstr "指定 Issue 负责人，并将 `triage review` 替换为 `triaged`，表示分类已完成。"
+
+#: ../../source/community/issue-workflow-guidelines.md:76
+msgid "Phase 3 — Closure"
+msgstr "阶段3——关闭"
+
+#: ../../source/community/issue-workflow-guidelines.md:78
+msgid "After triage, the issue moves into tracking and implementation:"
+msgstr "分类后，Issue 进入跟踪与实施阶段："
+
+#: ../../source/community/issue-workflow-guidelines.md:80
+msgid ""
+"Keep the issue in progress until it is resolved through a merged PR or "
+"another confirmed resolution path."
+msgstr "保持 Issue 处于进行中状态，直至通过合并的 PR 或其他确认的解决路径得到解决。"
+
+#: ../../source/community/issue-workflow-guidelines.md:81
+msgid ""
+"Once the issue is resolved, apply `resolved` and close it, ideally with a"
+" reference to the merged PR or a short explanation of the resolution."
+msgstr "Issue 解决后，应用 `resolved` 标签并关闭，最好附上合并的 PR 引用或简要的解决说明。"
+
+#: ../../source/community/issue-workflow-guidelines.md:82
+msgid ""
+"If the issue remains inactive for an extended period, apply `stale` as "
+"the final state before auto-closure."
+msgstr "如果 Issue 长时间处于非活跃状态，在自动关闭前应用 `stale` 作为最终状态。"

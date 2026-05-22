@@ -8,7 +8,7 @@ msgid ""
 msgstr ""
 "Project-Id-Version: vllm-ascend \n"
 "Report-Msgid-Bugs-To: \n"
-"POT-Creation-Date: 2026-04-09 18:37+0800\n"
+"POT-Creation-Date: 2026-05-22 04:30+0000\n"
 "PO-Revision-Date: 2026-04-10 18:37+0800\n"
 "Last-Translator: FULL NAME <EMAIL@ADDRESS>\n"
 "Language: zh_CN\n"
@@ -20,132 +20,229 @@ msgstr ""
 "Generated-By: Babel 2.18.0\n"
 
 #: ../../source/tutorials/hardwares/310p.md:1
-msgid "Atlas 300I"
-msgstr "Atlas 300I"
+msgid "Atlas 300I DUO"
+msgstr "Atlas 300I DUO"
 
 #: ../../source/tutorials/hardwares/310p.md:4
+msgid "Atlas 300I DUO does not support `triton` or `triton-ascend`."
+msgstr "Atlas 300I DUO 不支持 `triton` 或 `triton-ascend`。"
+
+#: ../../source/tutorials/hardwares/310p.md:7
+msgid "Run vLLM on Atlas 300I DUO"
+msgstr "在 Atlas 300I DUO 上运行 vLLM"
+
+#: ../../source/tutorials/hardwares/310p.md:9
+msgid "Install Notes"
+msgstr "安装说明"
+
+#: ../../source/tutorials/hardwares/310p.md:11
 msgid ""
-"This Atlas 300I series is currently experimental. In future versions, "
-"there may be behavioral changes related to model coverage and performance"
-" improvement."
+"If installing from source, `vllm` and `vllm-ascend` may automatically "
+"pull in `triton` and `triton-ascend` dependencies, which may cause "
+"unexpected issues on Atlas 300I DUO. Please uninstall them before running"
+" on Atlas 300I DUO:"
 msgstr ""
-"Atlas 300I 系列当前处于实验阶段。在未来的版本中，可能会发生与模型覆盖范围和性能提升相关的行为变化。"
+"如果从源码安装，`vllm` 和 `vllm-ascend` 可能会自动引入 `triton` 和 `triton-ascend` "
+"依赖，这可能在 Atlas 300I DUO 上导致意外问题。请在 Atlas 300I DUO 上运行前卸载它们："
 
-#: ../../source/tutorials/hardwares/310p.md:5
+#: ../../source/tutorials/hardwares/310p.md:17
+msgid "Graph Mode Notes"
+msgstr "图模式说明"
+
+#: ../../source/tutorials/hardwares/310p.md:20
 msgid ""
-"Currently, the Atlas 300I series only supports eager mode and the float16"
-" data type."
+"The current release supports `FULL_DECODE_ONLY` graph mode on Atlas 300I "
+"DUO devices, but the following limitations apply due to hardware event-id"
+" resource constraints:"
 msgstr ""
-"目前，Atlas 300I 系列仅支持 eager 模式和 float16 数据类型。"
+"当前版本在 Atlas 300I DUO 设备上支持 `FULL_DECODE_ONLY` 图模式，但由于硬件事件ID资源限制，存在以下限制："
 
-#: ../../source/tutorials/hardwares/310p.md:8
-msgid "Run vLLM on Atlas 300I Series"
-msgstr "在 Atlas 300I 系列上运行 vLLM"
+#: ../../source/tutorials/hardwares/310p.md:22
+msgid ""
+"When multiple Tensor Parallel (TP) ranks are enabled, the number of "
+"capturable graphs is limited and depends on the model depth. For example,"
+" Qwen3-32B can capture and replay 2 graphs."
+msgstr ""
+"当启用多个张量并行（TP）rank时，可捕获的图数量有限，且取决于模型深度。例如，Qwen3-32B 可以捕获并重放 2 个图。"
 
-#: ../../source/tutorials/hardwares/310p.md:10
+#: ../../source/tutorials/hardwares/310p.md:23
+msgid "There is no such limitation when TP=1."
+msgstr "当 TP=1 时，没有此限制。"
+
+#: ../../source/tutorials/hardwares/310p.md:24
+msgid ""
+"We have reached out to the relevant experts for a solution. A software-"
+"based fix is considered feasible, but full support will take additional "
+"time. Thank you for your understanding."
+msgstr ""
+"我们已联系相关专家寻求解决方案。基于软件的修复被认为是可行的，但完全支持需要额外时间。感谢您的理解。"
+
+#: ../../source/tutorials/hardwares/310p.md:28
+msgid "Deployment"
+msgstr "部署"
+
+#: ../../source/tutorials/hardwares/310p.md:30
 msgid "Run docker container:"
 msgstr "运行 Docker 容器："
 
-#: ../../source/tutorials/hardwares/310p.md:40
+#: ../../source/tutorials/hardwares/310p.md:62
 msgid "Set up environment variables:"
 msgstr "设置环境变量："
 
-#: ../../source/tutorials/hardwares/310p.md:50
+#: ../../source/tutorials/hardwares/310p.md:68
 msgid "Online Inference on NPU"
 msgstr "NPU 在线推理"
 
-#: ../../source/tutorials/hardwares/310p.md:53
+#: ../../source/tutorials/hardwares/310p.md:71
 msgid ""
-"For Atlas 300I (310P), do not rely on `max-model-len` auto detection "
-"(omit `--max-model-len`), because it may cause OOM."
+"For Atlas 300I DUO (310P), do not rely on `max-model-len` auto detection "
+"(that is, do not omit the `--max-model-len` argument), because it may "
+"cause OOM."
 msgstr ""
-"对于 Atlas 300I（310P），请不要依赖 `max-model-len` 的自动检测（省略 `--max-model-len`），因为这可能导致 OOM。"
+"对于 Atlas 300I DUO (310P)，请不要依赖 `max-model-len` 的自动检测（即不要省略 `--max-model-len` 参数），因为这可能导致 OOM。"
 
-#: ../../source/tutorials/hardwares/310p.md:56
-msgid "Reason (current 310P attention path):"
-msgstr "原因（当前 310P 注意力路径）："
+#: ../../source/tutorials/hardwares/310p.md:74
+msgid "Reason, based on the current 310P attention path:"
+msgstr "原因（基于当前 310P 注意力路径）："
 
-#: ../../source/tutorials/hardwares/310p.md:57
+#: ../../source/tutorials/hardwares/310p.md:76
 msgid ""
 "`AscendAttentionMetadataBuilder310` passes `model_config.max_model_len` "
 "to `AttentionMaskBuilder310`."
 msgstr ""
 "`AscendAttentionMetadataBuilder310` 将 `model_config.max_model_len` 传递给 `AttentionMaskBuilder310`。"
 
-#: ../../source/tutorials/hardwares/310p.md:59
+#: ../../source/tutorials/hardwares/310p.md:78
 msgid ""
 "`AttentionMaskBuilder310` builds a full causal mask with shape "
-"`[max_model_len, max_model_len]` in float16, then casts it to FRACTAL_NZ."
+"`[max_model_len, max_model_len]` in float16, then converts it to "
+"FRACTAL_NZ."
 msgstr ""
 "`AttentionMaskBuilder310` 构建一个形状为 `[max_model_len, max_model_len]` 的完整因果掩码（使用 float16），然后将其转换为 FRACTAL_NZ 格式。"
 
-#: ../../source/tutorials/hardwares/310p.md:61
+#: ../../source/tutorials/hardwares/310p.md:80
 msgid ""
-"In 310P `attention_v1` prefill/chunked-prefill (`_npu_flash_attention` / "
-"`_npu_paged_attention_splitfuse`), this explicit mask tensor is consumed "
-"directly, and there is no compressed-mask path."
+"In the 310P `attention_v1` prefill/chunked-prefill path "
+"(`_npu_flash_attention` / `_npu_paged_attention_splitfuse`), this "
+"explicit mask tensor is consumed directly, and there is currently no "
+"compressed-mask path."
 msgstr ""
-"在 310P 的 `attention_v1` 预填充/分块预填充（`_npu_flash_attention` / `_npu_paged_attention_splitfuse`）中，"
-"此显式掩码张量被直接使用，并且没有压缩掩码路径。"
+"在 310P 的 `attention_v1` 预填充/分块预填充路径（`_npu_flash_attention` / `_npu_paged_attention_splitfuse`）中，此显式掩码张量被直接使用，并且目前没有压缩掩码路径。"
 
-#: ../../source/tutorials/hardwares/310p.md:66
+#: ../../source/tutorials/hardwares/310p.md:85
 msgid ""
-"So if auto resolves to a large context length, the mask allocation "
-"(`O(max_model_len^2)`) can exceed NPU memory and trigger OOM. Always set "
-"a conservative explicit value, for example `--max-model-len 4096`."
+"If auto detection resolves to a large context length, the mask allocation"
+" (`O(max_model_len^2)`) may exceed NPU memory and trigger OOM. Always set"
+" an explicit and conservative value, for example `--max-model-len 16384`."
 msgstr ""
-"因此，如果自动解析出的上下文长度较大，掩码分配（`O(max_model_len^2)`）可能会超出 NPU 内存并触发 OOM。"
-"请始终设置一个保守的显式值，例如 `--max-model-len 4096`。"
+"如果自动解析出的上下文长度较大，掩码分配（`O(max_model_len^2)`）可能会超出 NPU 内存并触发 OOM。请始终设置一个保守的显式值，例如 `--max-model-len 16384`。"
 
-#: ../../source/tutorials/hardwares/310p.md:71
+#: ../../source/tutorials/hardwares/310p.md:90
 msgid ""
-"Run the following script to start the vLLM server on NPU (Qwen3-0.6B:1 "
-"card, Qwen2.5-7B-Instruct:2 cards, Pangu-Pro-MoE-72B: 8 cards):"
-msgstr ""
-"运行以下脚本在 NPU 上启动 vLLM 服务器（Qwen3-0.6B：1 卡，Qwen2.5-7B-Instruct：2 卡，Pangu-Pro-MoE-72B：8 卡）："
-
-#: ../../source/tutorials/hardwares/310p.md
-msgid "Qwen3-0.6B"
-msgstr "Qwen3-0.6B"
-
-#: ../../source/tutorials/hardwares/310p.md:81
-#: ../../source/tutorials/hardwares/310p.md:111
-#: ../../source/tutorials/hardwares/310p.md:141
-msgid "Run the following command to start the vLLM server:"
-msgstr "运行以下命令启动 vLLM 服务器："
+"Run the following commands to start the vLLM server on NPU for the Qwen3 "
+"Dense series."
+msgstr "运行以下命令在 NPU 上为 Qwen3 Dense 系列启动 vLLM 服务器。"
 
 #: ../../source/tutorials/hardwares/310p.md:92
-#: ../../source/tutorials/hardwares/310p.md:122
-#: ../../source/tutorials/hardwares/310p.md:152
-msgid "Once your server is started, you can query the model with input prompts."
+msgid "Prepare Model Weights"
+msgstr "准备模型权重"
+
+#: ../../source/tutorials/hardwares/310p.md:94
+msgid ""
+"Use the W8A8SC quantized weights from the Eco-Tech official ModelScope "
+"repository."
+msgstr "使用 Eco-Tech 官方 ModelScope 仓库中的 W8A8SC 量化权重。"
+
+#: ../../source/tutorials/hardwares/310p.md:99
+msgid "Model"
+msgstr "模型"
+
+#: ../../source/tutorials/hardwares/310p.md:100
+msgid "ModelScope Link"
+msgstr "ModelScope 链接"
+
+#: ../../source/tutorials/hardwares/310p.md:101
+msgid "Qwen3-8B-W8A8SC-310"
+msgstr "Qwen3-8B-W8A8SC-310"
+
+#: ../../source/tutorials/hardwares/310p.md:102
+msgid ""
+"[Eco-Tech/Qwen3-8B-w8a8sc-310-vllm](https://www.modelscope.cn/models/Eco-"
+"Tech/Qwen3-8B-w8a8sc-310-vllm)"
+msgstr ""
+"[Eco-Tech/Qwen3-8B-w8a8sc-310-vllm](https://www.modelscope.cn/models/Eco-"
+"Tech/Qwen3-8B-w8a8sc-310-vllm)"
+
+#: ../../source/tutorials/hardwares/310p.md:103
+msgid "Qwen3-14B-W8A8SC-310"
+msgstr "Qwen3-14B-W8A8SC-310"
+
+#: ../../source/tutorials/hardwares/310p.md:104
+msgid ""
+"[Eco-Tech/Qwen3-14B-w8a8sc-310-vllm](https://www.modelscope.cn/models"
+"/Eco-Tech/Qwen3-14B-w8a8sc-310-vllm)"
+msgstr ""
+"[Eco-Tech/Qwen3-14B-w8a8sc-310-vllm](https://www.modelscope.cn/models"
+"/Eco-Tech/Qwen3-14B-w8a8sc-310-vllm)"
+
+#: ../../source/tutorials/hardwares/310p.md:105
+msgid "Qwen3-32B-W8A8SC-310"
+msgstr "Qwen3-32B-W8A8SC-310"
+
+#: ../../source/tutorials/hardwares/310p.md:106
+msgid ""
+"[Eco-Tech/Qwen3-32B-w8a8sc-310-vllm](https://www.modelscope.cn/models"
+"/Eco-Tech/Qwen3-32B-w8a8sc-310-vllm)"
+msgstr ""
+"[Eco-Tech/Qwen3-32B-w8a8sc-310-vllm](https://www.modelscope.cn/models"
+"/Eco-Tech/Qwen3-32B-w8a8sc-310-vllm)"
+
+#: ../../source/tutorials/hardwares/310p.md
+#: ../../source/tutorials/hardwares/310p.md:109
+msgid "Qwen3-8B-W8A8SC"
+msgstr "Qwen3-8B-W8A8SC"
+
+#: ../../source/tutorials/hardwares/310p.md
+#: ../../source/tutorials/hardwares/310p.md:130
+msgid "Qwen3-14B-W8A8SC"
+msgstr "Qwen3-14B-W8A8SC"
+
+#: ../../source/tutorials/hardwares/310p.md
+#: ../../source/tutorials/hardwares/310p.md:151
+msgid "Qwen3-32B-W8A8SC"
+msgstr "Qwen3-32B-W8A8SC"
+
+#: ../../source/tutorials/hardwares/310p.md:174
+msgid "Once the server is started, you can query the model with input prompts:"
 msgstr "服务器启动后，您可以使用输入提示词查询模型。"
 
-#: ../../source/tutorials/hardwares/310p.md
-msgid "Qwen2.5-7B-Instruct"
-msgstr "Qwen2.5-7B-Instruct"
+#: ../../source/tutorials/hardwares/310p.md:186
+#: ../../source/tutorials/hardwares/310p.md:401
+msgid "If the script runs successfully, you can see the generated result."
+msgstr "如果脚本运行成功，您将看到生成的结果。"
 
-#: ../../source/tutorials/hardwares/310p.md
-msgid "Qwen2.5-VL-3B-Instruct"
-msgstr "Qwen2.5-VL-3B-Instruct"
-
-#: ../../source/tutorials/hardwares/310p.md:168
-msgid "If you run this script successfully, you can see the results."
-msgstr "如果您成功运行此脚本，将看到结果。"
-
-#: ../../source/tutorials/hardwares/310p.md:170
+#: ../../source/tutorials/hardwares/310p.md:188
 msgid "Offline Inference"
 msgstr "离线推理"
 
-#: ../../source/tutorials/hardwares/310p.md:172
+#: ../../source/tutorials/hardwares/310p.md:190
 msgid ""
-"Run the following script (`example.py`) to execute offline inference on "
-"NPU:"
-msgstr "运行以下脚本（`example.py`）在 NPU 上执行离线推理："
+"Run the following script, `example.py`, to execute offline inference on "
+"NPU."
+msgstr "运行以下脚本（`example.py`）在 NPU 上执行离线推理。"
 
-#: ../../source/tutorials/hardwares/310p.md:307
+#: ../../source/tutorials/hardwares/310p.md:395
 msgid "Run script:"
 msgstr "运行脚本："
 
-#: ../../source/tutorials/hardwares/310p.md:313
-msgid "If you run this script successfully, you can see the info shown below:"
-msgstr "如果您成功运行此脚本，将看到如下所示的信息："
+#: ../../source/tutorials/hardwares/310p.md:403
+msgid "Closing Notes"
+msgstr "结束语"
+
+#: ../../source/tutorials/hardwares/310p.md:405
+msgid ""
+"For early access to Qwen3-MoE, Qwen3-VL, and preview support for Qwen3.5 "
+"and Qwen3.6 with performance acceleration, follow #7394 for updated "
+"deployment guidance."
+msgstr ""
+"如需提前体验 Qwen3-MoE、Qwen3-VL，以及 Qwen3.5 和 Qwen3.6 的预览支持（含性能加速），请关注 #7394 获取更新的部署指南。"
