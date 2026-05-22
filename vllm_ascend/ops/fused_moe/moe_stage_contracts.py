@@ -92,7 +92,7 @@ class MoEMC2CombineMetadata:
     tp_recv_counts: torch.Tensor
     assist_info_for_combine: torch.Tensor
     expand_scales: torch.Tensor | None
-    dispatch_with_quant: bool
+    quant: MoEQuantParams
     mc2_mask: torch.Tensor | None = None
 
 
