@@ -1,6 +1,9 @@
 #!/bin/bash
 set -euo pipefail
 
+export WORKSPACE=${WORKSPACE:-/vllm-workspace}
+export IS_PR_TEST=${IS_PR_TEST:-false}
+
 GREEN="\033[0;32m"
 BLUE="\033[0;34m"
 RED="\033[0;31m"

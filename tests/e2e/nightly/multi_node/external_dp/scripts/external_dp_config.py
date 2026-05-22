@@ -3,7 +3,6 @@ import os
 import re
 import socket
 import time
-from copy import deepcopy
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
@@ -106,19 +105,11 @@ class ExternalDPConfig:
     routing: RoutingConfig
     node_configs: list[NodeConfig]
     templates: list[NodeTemplate]
-    benchmarks: dict[str, Any] = field(default_factory=dict)
+    benchmark_cases: list[dict[str, Any]] = field(default_factory=list)
 
     @property
     def is_disaggregated_prefill(self) -> bool:
         return self.routing.type == ROUTING_PD
-
-    def benchmark_cases(self) -> list[dict[str, Any]]:
-        cases: list[dict[str, Any]] = []
-        for name, case in self.benchmarks.items():
-            case_with_name = deepcopy(case)
-            case_with_name["case_name"] = name
-            cases.append(case_with_name)
-        return cases
 
 
 def replace_cluster_placeholders(
@@ -252,6 +243,7 @@ class ExternalDPConfigLoader:
         routing = cls._parse_routing(raw_config["routing"], resolved_cluster_ips)
         node_configs = cls._parse_node_configs(raw_config, resolved_cluster_ips)
         templates = cls._parse_templates(raw_config)
+        benchmark_cases = cls._parse_benchmarks(raw_config)
 
         config = ExternalDPConfig(
             test_name=str(raw_config.get("test_name", "external_dp_test")),
@@ -263,7 +255,7 @@ class ExternalDPConfigLoader:
             routing=routing,
             node_configs=node_configs,
             templates=templates,
-            benchmarks=raw_config.get("benchmarks", {}),
+            benchmark_cases=benchmark_cases,
         )
         cls._validate_config(config)
         return config
@@ -387,6 +379,15 @@ class ExternalDPConfigLoader:
                 )
             )
         return templates
+
+    @staticmethod
+    def _parse_benchmarks(raw_config: dict[str, Any]) -> list[dict[str, Any]]:
+        benchmark_cases: list[dict[str, Any]] = []
+        for name, case in (raw_config.get("benchmarks") or {}).items():
+            case_with_name = dict(case)
+            case_with_name["case_name"] = name
+            benchmark_cases.append(case_with_name)
+        return benchmark_cases
 
     @staticmethod
     def _validate_config(config: ExternalDPConfig) -> None:

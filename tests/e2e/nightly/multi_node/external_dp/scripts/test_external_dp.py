@@ -1,5 +1,6 @@
 import logging
 import os
+import time
 from pathlib import Path
 
 from tests.e2e.nightly.multi_node.external_dp.scripts.external_dp_config import (
@@ -13,6 +14,7 @@ from tests.e2e.nightly.multi_node.external_dp.scripts.external_dp_config import 
 )
 from tests.e2e.nightly.multi_node.external_dp.scripts.external_dp_utils import (
     CommandBuilder,
+    _is_http_ready,
     build_proxy_command,
     collect_logs,
     proxy_health_url,
@@ -32,6 +34,8 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 
 DEFAULT_LOG_ROOT = Path("/tmp/external_dp_logs")
+READY_POLL_INTERVAL = 5
+READY_STATUS_LOG_INTERVAL = 30
 POST_BENCHMARK_HEALTHCHECK_TIMEOUT = 30
 
 
@@ -64,10 +68,7 @@ class ExternalDPServerManager:
                 process = start_process(built_command.cmd, built_command.env, log_file)
                 self.processes.append((process.pid, endpoint))
 
-            for _, endpoint in self.processes:
-                url = _endpoint_health_url(endpoint)
-                wait_http_ready(url, BACKEND_READY_TIMEOUT)
-                logger.info("External DP endpoint ready: %s", url)
+            _wait_all_endpoints_ready(local_endpoints, timeout=BACKEND_READY_TIMEOUT)
         except Exception:
             self.cleanup()
             raise
@@ -158,11 +159,69 @@ def _master_endpoint_health_url(endpoints: list[ExternalDPEndpoint]) -> str:
     raise RuntimeError("External DP master endpoint was not found")
 
 
-def _wait_all_endpoints_ready(endpoints, timeout: int) -> None:
+def _endpoint_label(endpoint: ExternalDPEndpoint) -> str:
+    return (
+        f"node={endpoint.config_index} rank={endpoint.local_rank} "
+        f"role={endpoint.role} url={_endpoint_health_url(endpoint)}"
+    )
+
+
+def _format_endpoint_statuses(
+    endpoints: list[ExternalDPEndpoint],
+    ready_once: dict[ExternalDPEndpoint, bool],
+) -> str:
+    parts = []
     for endpoint in endpoints:
-        url = _endpoint_health_url(endpoint)
-        wait_http_ready(url, timeout=timeout)
-        logger.info("External DP endpoint ready from master: %s", url)
+        status = "ready" if ready_once[endpoint] else "waiting"
+        parts.append(f"{_endpoint_label(endpoint)} status={status}")
+    return "; ".join(parts)
+
+
+def _wait_all_endpoints_ready(endpoints, timeout: int) -> None:
+    endpoints = list(endpoints)
+    ready_once = {endpoint: False for endpoint in endpoints}
+    deadline = time.monotonic() + timeout
+    last_log_time = 0.0
+
+    while True:
+        all_ready = True
+        unhealthy_after_ready = []
+
+        for endpoint in endpoints:
+            is_ready = _is_http_ready(_endpoint_health_url(endpoint), timeout=1.0)
+            if is_ready:
+                if not ready_once[endpoint]:
+                    logger.info("[READY] External DP endpoint %s", _endpoint_label(endpoint))
+                ready_once[endpoint] = True
+                continue
+
+            all_ready = False
+            if ready_once[endpoint]:
+                unhealthy_after_ready.append(endpoint)
+
+        if unhealthy_after_ready:
+            failed = "; ".join(_endpoint_label(endpoint) for endpoint in unhealthy_after_ready)
+            raise RuntimeError(f"External DP endpoint became unhealthy after ready: {failed}")
+
+        if all_ready:
+            return
+
+        now = time.monotonic()
+        if now - last_log_time >= READY_STATUS_LOG_INTERVAL:
+            logger.info(
+                "Polling external DP endpoints: ready=%d/%d statuses=[%s]",
+                sum(ready_once.values()),
+                len(endpoints),
+                _format_endpoint_statuses(endpoints, ready_once),
+            )
+            last_log_time = now
+
+        if now >= deadline:
+            pending = [endpoint for endpoint in endpoints if not ready_once[endpoint]]
+            pending_labels = "; ".join(_endpoint_label(endpoint) for endpoint in pending)
+            raise TimeoutError(f"Timed out waiting for external DP endpoints ready: {pending_labels}")
+
+        time.sleep(READY_POLL_INTERVAL)
 
 
 def _wait_master_endpoint_terminated(endpoints: list[ExternalDPEndpoint], timeout: int) -> None:
@@ -210,7 +269,7 @@ def test_external_dp() -> None:
                 results = run_aisbench_cases(
                     model=config.model,
                     port=config.routing.proxy_port,
-                    aisbench_cases=config.benchmark_cases(),
+                    aisbench_cases=config.benchmark_cases,
                     host_ip=config.routing.proxy_host,
                 )
                 all_commands = _build_all_commands(config, endpoints)

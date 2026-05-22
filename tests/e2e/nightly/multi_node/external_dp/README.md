@@ -46,17 +46,21 @@ Add the hosts as a top-level YAML field:
 
 ```yaml
 cluster_hosts:
-  - 172.17.0.3
-  - 172.17.0.2
+  - "172.22.0.155"
+  - "172.22.0.188"
 ```
 
-Use the same temporary config path on both nodes. Start the decoder node first:
+Use the same temporary config path on both nodes. The script defaults to using
+the current checkout under `/vllm-workspace/vllm-ascend`; set `WORKSPACE` only
+if the checkout lives somewhere else.
+
+Start the decoder node first:
 
 ```bash
 cd /vllm-workspace/vllm-ascend
 export CONFIG_YAML_PATH=/tmp/external_dp_pd_local.yaml
 export LWS_WORKER_INDEX=1
-pytest -sv --show-capture=no tests/e2e/nightly/multi_node/external_dp/scripts/test_external_dp.py
+bash tests/e2e/nightly/multi_node/external_dp/scripts/run.sh
 ```
 
 Then start the prefiller/proxy/benchmark node:
@@ -65,10 +69,11 @@ Then start the prefiller/proxy/benchmark node:
 cd /vllm-workspace/vllm-ascend
 export CONFIG_YAML_PATH=/tmp/external_dp_pd_local.yaml
 export LWS_WORKER_INDEX=0
-pytest -sv --show-capture=no tests/e2e/nightly/multi_node/external_dp/scripts/test_external_dp.py
+bash tests/e2e/nightly/multi_node/external_dp/scripts/run.sh
 ```
 
 When the model, benchmark data, and Ascend environment are already prepared,
-these are the only extra settings required. Logs default to
-`/tmp/external_dp_logs`; set `LOG_PREFIX` only if you want the framework to
-collect a compressed log artifact.
+these are the only extra settings required. `run.sh` sources the Ascend
+environment, clears old NPU Python/VLLM processes, and then runs the pytest
+entrypoint. Logs default to `/tmp/external_dp_logs`; set `LOG_PREFIX` only if
+you want the framework to collect a compressed log artifact.

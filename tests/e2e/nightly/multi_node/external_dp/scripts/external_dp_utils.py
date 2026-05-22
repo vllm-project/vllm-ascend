@@ -495,7 +495,7 @@ def build_benchmark_results(
     commands: list[BuiltCommand],
     results: list[Any],
 ) -> dict[str, Any]:
-    valid_items = [(case["case_name"], case) for case in config.benchmark_cases()]
+    valid_items = [(case["case_name"], case) for case in config.benchmark_cases]
     tasks = [_build_task_entry(key, case, result) for (key, case), result in zip(valid_items, results)]
     runner = os.environ.get("VLLM_CI_RUNNER", "")
     common_envs = _common_command_envs(commands)
