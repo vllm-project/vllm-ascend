@@ -311,7 +311,7 @@ class BaseDeviceAdaptor:
         return context_layer
 
     @staticmethod
-    def npu_recurrent_gated_delta_rule(query, key, value, g=g_spec.squeeze(0), beta, state, scale, actual_seq_lengths, ssm_state_indices, scale, num_accepted_tokens=None):
+    def npu_recurrent_gated_delta_rule(query, key, value, g, beta, state, scale, actual_seq_lengths, ssm_state_indices, scale, num_accepted_tokens=None):
         core_attn_out = torch_npu.npu_recurrent_gated_delta_rule(
             query=query,
             key=key,
@@ -463,6 +463,11 @@ class BaseDeviceAdaptor:
             store_mask = global_store_rows < T
             # 4 use mask to save data safely
             tl.store(p_Ai, b_A.to(p_Ai.dtype.element_ty, fp_downcast_rounding="rtne"), mask=store_mask)
+
+        @staticmethod
+        def npu_gemma_rms_norm(x, weight, variance_epsilon):
+            x, _ = torch.ops._C_ascend.npu_gemma_rms_norm(x, weight, variance_epsilon)
+            return x
 
 class A5DeviceAdaptor(BaseDeviceAdaptor):
     @classmethod
@@ -938,6 +943,11 @@ class A5DeviceAdaptor(BaseDeviceAdaptor):
             store_mask = global_store_rows < T
             # 4 use mask to save data safely
             tl.store(p_Ai, b_A.to(p_Ai.dtype.element_ty, fp_downcast_rounding="rtne"), mask=store_mask)
+
+        @staticmethod
+        def npu_gemma_rms_norm(x, weight, variance_epsilon):
+            x, _ = torch_npu.npu_rms_norm(x, 1.0 + self.weight, self.variance_epsilon)
+            return x
 
 def get_device_adaptor() -> type["BaseDeviceAdaptor"]:
     ascend_device_type = get_ascend_device_type()

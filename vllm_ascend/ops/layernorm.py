@@ -21,12 +21,8 @@ from vllm.config import get_current_vllm_config
 from vllm.model_executor.layers.layernorm import GemmaRMSNorm, RMSNorm, RMSNormGated
 
 from vllm_ascend.ops.triton.layernorm_gated import layer_norm_fwd_npu
-from vllm_ascend.utils import (
-    enable_custom_op,
-    get_weight_prefetch_method,
-    AscendDeviceType,
-    get_ascend_device_type,
-)
+from vllm_ascend.utils import enable_custom_op, get_weight_prefetch_method
+from vllm_ascend.device.device_op import DeviceOperator
 
 
 class AscendRMSNorm(RMSNorm):
@@ -73,7 +69,7 @@ class AscendRMSNorm(RMSNorm):
 
         if residual is not None:
             residual = torch.ops.vllm.maybe_chunk_residual(x, residual)
-            if enable_custom_op() and get_ascend_device_type() != AscendDeviceType.A5:
+            if enable_custom_op():
                 x, _, residual = torch.ops._C_ascend.npu_add_rms_norm_bias(
                     x, residual, self.weight, self.bias, self.variance_epsilon
                 )
@@ -110,10 +106,7 @@ class AscendGemmaRMSNorm(GemmaRMSNorm):
                 x, _, residual = torch_npu.npu_add_rms_norm(x, residual, 1.0 + self.weight, self.variance_epsilon)
             return x, residual
 
-        if enable_custom_op() and get_ascend_device_type() != AscendDeviceType.A5:
-            x, _ = torch.ops._C_ascend.npu_gemma_rms_norm(x, self.weight, self.variance_epsilon)
-        else:
-            x, _ = torch_npu.npu_rms_norm(x, 1.0 + self.weight, self.variance_epsilon)
+        x = DeviceOperator.npu_gemma_rms_norm(x, self.weight, self.variance_epsilon)
 
         return x
 
