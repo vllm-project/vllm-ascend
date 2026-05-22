@@ -1,6 +1,8 @@
 import functools
 import msgspec.msgpack
 
+import torch
+import torch_npu
 from vllm.logger import logger
 from vllm_ascend.recovery.types import ExceptionInfo
 
@@ -12,6 +14,16 @@ def fault_recovery_decorator():
                 return None
             else:
                 try:
+                    if self.device_stopped:
+                        logger.info(f"[WorkerDecorator] Func {func.__name__} called after device stopped. need restart worker")
+                        torch_npu.npu.restart_device(
+                            torch.npu.current_device(), rebuild_all_resources=cfg.get("rebuild_all_resources", False)
+                        )
+                        torch.distributed.reinit_process_group(
+                            group=None, rebuild_link=False
+                        )
+                        self.device_stopped = False
+                        logger.info(f"[WorkerDecorator] Func {func.__name__} reinit process group after restart device")
                     output = func(self, *args, **kwargs)
                     return output
                 except Exception as e:
