@@ -1,8 +1,6 @@
 name: Nightly-External-DP-A3
 
 on:
-  schedule:
-    - cron: "15 17 * * *"
   workflow_dispatch:
     inputs:
       config_file_path:
