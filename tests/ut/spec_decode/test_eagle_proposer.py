@@ -2186,11 +2186,13 @@ class MockDraftModel:
             return last_hidden_states, hidden_states
         return last_hidden_states
 
-    def compute_logits(self, sample_hidden_states, enable_reduce_sample=None):
+    def compute_logits(self, sample_hidden_states, enable_reduce_sample=False):
         self.logit_inputs.append(sample_hidden_states.clone())
         token_ids = sample_hidden_states[:, 0].to(torch.long)
         logits = torch.full((sample_hidden_states.shape[0], self.vocab_size), -1000.0)
         logits[torch.arange(sample_hidden_states.shape[0]), token_ids] = 1000.0
+        if enable_reduce_sample:
+            logits = logits.argmax(dim=-1)
         return logits
 
     def embed_input_ids(self, input_ids):
