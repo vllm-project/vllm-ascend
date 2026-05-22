@@ -1,6 +1,6 @@
 import math
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, ClassVar, Tuple, Type, TypeVar, TypeAlias
+from typing import TYPE_CHECKING, ClassVar, TypeAlias
 
 import torch
 import torch.nn.functional as F
@@ -78,7 +78,8 @@ def rotate_activation(x: torch.Tensor, hadamard: torch.Tensor) -> torch.Tensor:
     hidden_size = x.size(-1)
     return hadamard_transform_ref(x, hadamard=hadamard, scale=hidden_size**-0.5)
 
-def hadamard_linear(x: torch.Tensor, hadamard: torch.Tensor) -> Tuple[torch.Tensor, Tuple[int, ...], int]:
+
+def hadamard_linear(x: torch.Tensor, hadamard: torch.Tensor) -> tuple[torch.Tensor, tuple[int, ...], int]:
     """
     Part 1 of rotate_activation: Execute F.linear (matrix multiplication).
     This runs in main stream, parallel with aux_stream kv_scatter.
@@ -90,15 +91,14 @@ def hadamard_linear(x: torch.Tensor, hadamard: torch.Tensor) -> Tuple[torch.Tens
     dim = x.shape[-1]
     x = x.reshape(-1, dim)
     log_dim = math.ceil(math.log2(dim))
-    dim_padded = 2 ** log_dim
+    dim_padded = 2**log_dim
     if dim != dim_padded:
         x = F.pad(x, (0, dim_padded - dim))
     out = F.linear(x, hadamard)
     return out, x_shape, dim
 
 
-def hadamard_scale(out: torch.Tensor, x_shape: Tuple[int, ...], dim: int,
-                   scale: float = 1.0) -> torch.Tensor:
+def hadamard_scale(out: torch.Tensor, x_shape: tuple[int, ...], dim: int, scale: float = 1.0) -> torch.Tensor:
     """
     Part 2 of rotate_activation: Execute scale multiplication and reshape.
     This runs in main stream after aux_stream completes.
@@ -107,9 +107,7 @@ def hadamard_scale(out: torch.Tensor, x_shape: Tuple[int, ...], dim: int,
     return out[..., :dim].reshape(*x_shape)
 
 
-def pad_to_blocks(x: torch.Tensor,
-                  length_list: torch.Tensor,
-                  block_size: int = 128):
+def pad_to_blocks(x: torch.Tensor, length_list: torch.Tensor, block_size: int = 128):
     """
     Pads a ragged/packed tensor into fixed-size blocks.
 
@@ -2617,32 +2615,37 @@ class AscendDSAImpl(DSAAttentionImpl):
         )
         return topk_idxs
 
-
     def indexer_select_qli(
-            self,
-            x: torch.Tensor,
-            qr: torch.Tensor,
-            kv_cache: tuple[torch.Tensor],
-            attn_metadata: DSAMetadataList,
-            cos: torch.Tensor,
-            sin: torch.Tensor,
-            compressed_cos: torch.Tensor,
-            compressed_sin: torch.Tensor,
-            actual_seq_lengths_query: torch.Tensor,
-            with_prefill: bool = False,
-            qr_pertoken_scale: torch.Tensor = None,
+        self,
+        x: torch.Tensor,
+        qr: torch.Tensor,
+        kv_cache: tuple[torch.Tensor],
+        attn_metadata: DSAMetadataList,
+        cos: torch.Tensor,
+        sin: torch.Tensor,
+        compressed_cos: torch.Tensor,
+        compressed_sin: torch.Tensor,
+        actual_seq_lengths_query: torch.Tensor,
+        with_prefill: bool = False,
+        qr_pertoken_scale: torch.Tensor = None,
     ):
         q, kv, ik, isc, indexer_kv_state_meta, isc_meta, wp = self._indexer_qkv_prepare(
-            x, qr, kv_cache, attn_metadata, cos, sin,
-            compressed_cos, compressed_sin,
-            actual_seq_lengths_query, with_prefill, qr_pertoken_scale,
+            x,
+            qr,
+            kv_cache,
+            attn_metadata,
+            cos,
+            sin,
+            compressed_cos,
+            compressed_sin,
+            actual_seq_lengths_query,
+            with_prefill,
+            qr_pertoken_scale,
         )
 
-        weights = self.weights_proj(x) * (self.indexer_softmax_scale *
-                                          self.indexer_heads ** -0.5)
+        weights = self.weights_proj(x) * (self.indexer_softmax_scale * self.indexer_heads**-0.5)
 
-        return self._indexer_qli_finish(
-            q, kv, weights, ik, isc, indexer_kv_state_meta, isc_meta, wp)
+        return self._indexer_qli_finish(q, kv, weights, ik, isc, indexer_kv_state_meta, isc_meta, wp)
 
 
     def cv_indexer_select_qli(
@@ -2681,9 +2684,11 @@ class AscendDSAImpl(DSAAttentionImpl):
         dst_type = torch.float8_e4m3fn if soc_version in {AscendDeviceType.A5} else torch.int8
 
         # ===== Part0: Pre-compute on main =====
-        if (not isinstance(self.inderxer_wq_b.quant_method, AscendUnquantizedLinearMethod)) and \
-            isinstance(self.inderxer_wq_b.quant_method.quant_method, AscendW8A8DynamicLinearMethod) and \
-            qr_pertoken_scale is not None:
+        if (
+            (not isinstance(self.inderxer_wq_b.quant_method, AscendUnquantizedLinearMethod))
+            and isinstance(self.inderxer_wq_b.quant_method.quant_method, AscendW8A8DynamicLinearMethod)
+            and qr_pertoken_scale is not None
+        ):
             qr_quant_ready = qr
             qr_scale_ready = qr_pertoken_scale
         else:
@@ -2718,7 +2723,8 @@ class AscendDSAImpl(DSAAttentionImpl):
             coff=coff,
             norm_eps=self.compressor_norm_eps,
             rotary_mode=2,
-            cache_mode=1)
+            cache_mode=1,
+        )
 
         if kv.numel() == 0:
             kv = None
@@ -2737,15 +2743,19 @@ class AscendDSAImpl(DSAAttentionImpl):
                 kv_scale = kv_scale.unsqueeze(-1)
                 if with_prefill:
                     torch.ops._C_ascend.npu_scatter_nd_update_v2(  # kv_scatter
-                        indexer_k_cache, indexer_kv_scale_metadata.prefill.slot_mapping, kv)
+                        indexer_k_cache, indexer_kv_scale_metadata.prefill.slot_mapping, kv
+                    )
                 else:
                     torch.ops._C_ascend.npu_scatter_nd_update_v2(  # kv_scatter
-                        indexer_k_cache, indexer_kv_scale_metadata.decode.slot_mapping, kv)
+                        indexer_k_cache, indexer_kv_scale_metadata.decode.slot_mapping, kv
+                    )
 
         # Main: matmul q from qr (directly submit, V/C different engines dispatch naturally)
-        if (not isinstance(self.inderxer_wq_b.quant_method, AscendUnquantizedLinearMethod)) and \
-            isinstance(self.inderxer_wq_b.quant_method.quant_method, AscendW8A8DynamicLinearMethod) and \
-            qr_pertoken_scale is not None:
+        if (
+            (not isinstance(self.inderxer_wq_b.quant_method, AscendUnquantizedLinearMethod))
+            and isinstance(self.inderxer_wq_b.quant_method.quant_method, AscendW8A8DynamicLinearMethod)
+            and qr_pertoken_scale is not None
+        ):
             q = torch_npu.npu_quant_matmul(
                 qr_quant_ready,
                 self.inderxer_wq_b.weight,
@@ -2768,10 +2778,7 @@ class AscendDSAImpl(DSAAttentionImpl):
             cos,
             sin,
             rotary_mode="interleave",
-            partial_slice=[
-                self.indexcom_head_dim - self.rope_head_dim,
-                self.indexcom_head_dim
-            ],
+            partial_slice=[self.indexcom_head_dim - self.rope_head_dim, self.indexcom_head_dim],
         )
 
         # Wait for aux_stream kv_scatter to complete before proceeding
@@ -2788,10 +2795,12 @@ class AscendDSAImpl(DSAAttentionImpl):
                     kv_scale = kv_scale.to(torch.float16).unsqueeze(-1)
                 if with_prefill:
                     torch.ops._C_ascend.npu_scatter_nd_update_v2(
-                        indexer_scale_cache, indexer_kv_scale_metadata.prefill.slot_mapping, kv_scale)
+                        indexer_scale_cache, indexer_kv_scale_metadata.prefill.slot_mapping, kv_scale
+                    )
                 else:
                     torch.ops._C_ascend.npu_scatter_nd_update_v2(
-                        indexer_scale_cache, indexer_kv_scale_metadata.decode.slot_mapping, kv_scale)
+                        indexer_scale_cache, indexer_kv_scale_metadata.decode.slot_mapping, kv_scale
+                    )
 
         # Main: q_hadamard[Part1 - linear] (directly submit, C/AIV different engines dispatch naturally)
         # Part1: F.linear - parallel with aux_stream kv_scatter
@@ -2803,11 +2812,10 @@ class AscendDSAImpl(DSAAttentionImpl):
 
         # Main: q_hadamard[Part2 - scale] (after aux_stream completes)
         # Part2: scale * reshape - dot multiplication
-        q = hadamard_scale(q_linear, q_shape, q_dim, scale=hidden_size ** -0.5)
+        q = hadamard_scale(q_linear, q_shape, q_dim, scale=hidden_size**-0.5)
 
         # ===== Part4: Serial tail =====
-        weights = self.weights_proj(x) * (self.indexer_softmax_scale *
-                                          self.indexer_heads ** -0.5)
+        weights = self.weights_proj(x) * (self.indexer_softmax_scale * self.indexer_heads**-0.5)
 
         q, q_scale = torch_npu.npu_dynamic_quant(q, dst_type=dst_type)
 
@@ -2830,7 +2838,7 @@ class AscendDSAImpl(DSAAttentionImpl):
         topk_idxs, _ = torch.ops._C_ascend.npu_quant_lightning_indexer(
             query=q,
             key=indexer_k_cache,
-            weights=weights.to(torch.float16), # cast
+            weights=weights.to(torch.float16),  # cast
             query_dequant_scale=q_scale,
             key_dequant_scale=indexer_scale_cache.squeeze(-2),
             actual_seq_lengths_query=qlens,
@@ -2846,5 +2854,6 @@ class AscendDSAImpl(DSAAttentionImpl):
             pre_tokens=(1 << 63) - 1,
             next_tokens=(1 << 63) - 1,
             cmp_ratio=4,
-            return_value=False)
+            return_value=False,
+        )
         return topk_idxs

@@ -121,7 +121,6 @@ class CVLinearWrapper:
                 output_dtype=self.linear.weight_scale.dtype,
             )
 
-
             if need_unsqz:
                 output = output.unsqueeze(dim=1)
             return output
