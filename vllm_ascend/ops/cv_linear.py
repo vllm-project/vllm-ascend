@@ -142,7 +142,4 @@ class CVLinearWrapper:
 
     def __getattr__(self, name):
         """Delegate undefined attributes to the inner linear object"""
-        try:
-            return super().__getattr__(name)
-        except AttributeError:
-            return getattr(self.linear, name)
+        return getattr(self.linear, name)

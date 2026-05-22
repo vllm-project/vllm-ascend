@@ -1534,6 +1534,7 @@ class AscendDSAImpl(DSAAttentionImpl):
         with npu_stream_switch(aux_stream, enabled=True):
             torch.npu.current_stream().wait_event(e_part3_start)
             kv = self.kv_norm(kv)
+            assert self.rope_head_dim is not None
             kv = kv.view(-1, 1, self.nope_head_dim + self.rope_head_dim)
             torch.ops._C_ascend.inplace_partial_rotary_mul(
                 kv.unsqueeze(1),
