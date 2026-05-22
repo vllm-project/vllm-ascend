@@ -43,7 +43,7 @@ def _topk_log_softmax_kernel(
     for i in range(0, vocab_size, BLOCK_SIZE):
         block = i + tl.arange(0, BLOCK_SIZE)
         logits = tl.load(row_ptr + block, mask=block < vocab_size, other=float("-inf"))
-        max_val = tl.max(tl.maximum(logits, max_val))
+        max_val = tl.max(tl.maximum(logits, max_val, propagate_nan=tl.PropagateNan.ALL))
     max_val = max_val.to(tl.float32)  # type: ignore
 
     se = 0.0
