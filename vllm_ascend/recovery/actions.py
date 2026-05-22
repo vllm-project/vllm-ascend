@@ -146,6 +146,7 @@ def _clean_cache(executor: Any, cfg:dict | None) -> bool:
 @worker_action("recovery_finished")
 def _recovery_finished(executor: Any, cfg:dict | None) -> bool:
     executor.in_recovery = False
+    executor.exception_occur = False
     return cfg, True
 
 @worker_action("recovery_begin")

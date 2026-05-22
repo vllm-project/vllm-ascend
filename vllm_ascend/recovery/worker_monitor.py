@@ -26,9 +26,6 @@ class WorkerMonitor:
         self.vllm_config = vllm_config
         self._worker = worker
         self.ctx = ctx
-        self.in_recovery = False
-        self.exception_occur = False
-        self.device_stopped = False
 
         self.exception_handler_factory = self.build_exception_handler_factory()
         self.worker_input_address = get_open_zmq_ipc_path()
@@ -148,6 +145,8 @@ def create_worker_monitor(worker, vllm_config:VllmConfig):
 
     ctx=zmq.Context()
     worker.in_recovery = False
+    worker.exception_occur = False
+    worker.device_stopped = False
     worker_monitor = WorkerMonitor(vllm_config, worker, ctx)
     worker.worker_monitor = worker_monitor
     worker.worker_input_socket = make_zmq_socket(
