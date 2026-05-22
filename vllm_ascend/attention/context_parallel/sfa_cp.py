@@ -146,7 +146,7 @@ class AscendSFACPMetadataBuilder(AscendSFAMetadataBuilder):
             )
             self.slot_mapping_buf[:num_decode_tokens] = self.slot_mapping_buf[
                 : num_decode_tokens * self.pcp_size : self.pcp_size
-            ]
+            ].clone()
             self.slot_mapping_buf[num_decode_tokens : num_decode_tokens * self.pcp_size].fill_(-1)
 
             if self.speculative_config is not None and num_decodes > 0:
