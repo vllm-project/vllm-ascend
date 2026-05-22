@@ -50,6 +50,17 @@ If partial, state the valid partial-stop condition.>
 - Treated as env flakes: <brief list, or "none">
 - Last successful step: <step-id>
 
+### Adapt Guide Refresh
+Only include this section when `lint_adapt_guide.py` was run and produced
+output. Helps the PR reviewer audit machine-driven changes to the lookup
+tables in `reference/adapt-guide.md`.
+
+- Lint report: `/tmp/main2main/adapt-guide-refresh/check_report.md`
+- Adapt-guide commit: <sha or "no change — guide already up to date">
+- What changed and why: <one bullet per AUTO-MAINTAINED region touched —
+  e.g., "file-mapping: added row for `vllm/v1/foo/` since step-2's patch
+  introduced it; removed row for `vllm/old_path/` since the directory is gone">
+
 ### Partial Stop
 Only include this section when Status is `partial`.
 
@@ -80,6 +91,7 @@ Only include this section when Status is `partial`.
   only `env_flakes` and no actionable `code_bugs`. This is allowed to proceed
   to commit, but it is not the same as `passed`.
 - For `partial`, make the unresolved failure actionable: name the failing test, exception type, and likely area if known.
+- Include `Adapt Guide Refresh` only when the linter actually ran. If the guide was unchanged, still include the section so the reviewer sees the lint was performed and produced no diff.
 - Do not add "Remaining Steps (Not Started)" for a normal in-progress run; continue executing the next step instead.
 - Do not use "session time", "estimated remaining time", "too many hours", or "additional CI runs required" as the reason for `partial`.
 - Omit `Follow-up` when there is no concrete next action.
