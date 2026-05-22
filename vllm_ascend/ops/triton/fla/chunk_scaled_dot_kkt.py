@@ -14,11 +14,7 @@ from vllm.triton_utils import tl, triton
 
 from .utils import prepare_chunk_indices, safe_exp
 
-from vllm_ascend.utils import (
-    AscendDeviceType,
-    get_ascend_device_type,
-)
-
+from vllm_ascend.device.device_op import DeviceOperator
 
 @triton.heuristics(
     {
@@ -126,24 +122,5 @@ def chunk_scaled_dot_kkt_fwd(
     NT = triton.cdiv(T, BT) if cu_seqlens is None else len(chunk_indices)
     A = torch.empty(B, T, H, BT, device=k.device, dtype=output_dtype)
 
-    chunk_scaled_dot_kkt_fwd_kernel[(NT, 1)](
-        k=k,
-        beta=torch.permute(beta, (2, 0, 1)).contiguous(),
-        g_cumsum=torch.permute(g_cumsum, (2, 0, 1)).contiguous(),
-        A=A,
-        cu_seqlens=cu_seqlens,
-        chunk_indices=chunk_indices,
-        T=T,
-        B=B,
-        H=H,
-        Hg=Hg,
-        K=K,
-        BT=BT,
-        BK=128,
-        num_warps=8,
-        num_stages=3,
-        multibuffer=True,
-        **({"disable_tightly_coupled_buffer_reuse": True}
-        if get_ascend_device_type() == AscendDeviceType.A5 else {}),
-    )
+    DeviceOperator.chunk_scaled_dot_kkt_fwd(NT, k, beta, g_cumsum, A, cu_seqlens, chunk_indices, T, B, H, Hg, K, BT, BK)
     return A

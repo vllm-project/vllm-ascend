@@ -37,7 +37,7 @@ from vllm_ascend.utils import (
 
 
 def _custom_gmm_swiglu_enabled(fusion, dynamic_eplb):
-    return fusion and dynamic_eplb and enable_custom_op() and get_ascend_device_type() != AscendDeviceType.A5
+    return fusion and dynamic_eplb and enable_custom_op()
 
 
 def cumsum_group_list(

@@ -23,12 +23,7 @@ from vllm.config.compilation import Range
 from vllm.logger import logger
 
 from vllm_ascend.compilation.passes.base_pattern import BasePattern
-from vllm_ascend.utils import (
-    enable_custom_op, 
-    AscendDeviceType,
-    get_ascend_device_type,
-)
-
+from vllm_ascend.utils import enable_custom_op
 
 
 class AddRMSNormQuantPattern(BasePattern):
@@ -497,7 +492,7 @@ class AddRMSNormQuantFusionPass(VllmInductorPass):
         for eps in common_epsilons:
             AddRMSNormDynamicQuantPattern(vllm_config, eps=eps).register(self.pattern_match_passes)
             AddRMSNormDynamicQuantSPPattern(vllm_config, eps=eps).register(self.pattern_match_passes)
-            if enable_custom_op() and get_ascend_device_type() != AscendDeviceType.A5:
+            if enable_custom_op():
                 AddRMSNormQuantPattern(vllm_config, eps=eps).register(self.pattern_match_passes)
                 AddRMSNormQuantSPPattern(vllm_config, eps=eps).register(self.pattern_match_passes)
                 AddRMSNormQuantPatternWithBias(vllm_config, eps=eps).register(self.pattern_match_passes)
