@@ -22,6 +22,7 @@
 from dataclasses import dataclass
 
 import torch
+import torch_npu
 from torch import nn
 from vllm.config import CacheConfig, get_current_vllm_config
 from vllm.forward_context import ForwardContext, get_forward_context
@@ -31,7 +32,7 @@ from vllm.utils.torch_utils import direct_register_custom_op
 from vllm.v1.attention.backend import AttentionMetadata
 from vllm.v1.attention.backends.mla.sparse_swa import DeepseekV4SWACache
 
-from vllm_ascend.attention.dsa_v1 import _dsa_sub_stream
+from vllm_ascend.attention.dsa_v1 import dsv4_dsa_overlap_stream
 from vllm_ascend.models.layer.attention.layer import DSAAttention
 from vllm_ascend.utils import (
     AscendDeviceType,
@@ -193,21 +194,35 @@ def dsa_forward(
         attn_metadata = forward_context.attn_metadata
 
     if attn_metadata is None:
-        # Profiling run — lightweight sub-stream warmup (1 token).
-        # FusedMoE works in graph mode because its sub-stream runs during
-        # profiling; DSA's sub-stream has never run during profiling.
-        # This warms up the sub-stream with the same op pattern (weights_proj
-        # on sub-stream + record_event/wait_event/wait_stream) using minimal
-        # memory (1 token).
-        if self.compress_ratio == 4:
-            impl = self.dsa_attn.impl
-            if impl._use_dual_stream():
-                dummy = torch.zeros(1, hidden_states.shape[-1], dtype=hidden_states.dtype, device=hidden_states.device)
-                e1 = torch.npu.current_stream().record_event()
-                with npu_stream_switch(_dsa_sub_stream()):
-                    torch.npu.current_stream().wait_event(e1)
-                    _ = impl.weights_proj(dummy)
-                torch.npu.current_stream().wait_stream(_dsa_sub_stream())
+        # Profiling run.
+        # When dual-stream is enabled, the aux stream runs ops during forward that have never been
+        # exercised during profiling. This warmup ensures all aux-stream op patterns are captured
+        # for ACL graph compatibility.
+        impl = self.dsa_attn.impl
+        if impl.multistream_dsv4_dsa_overlap:
+            dummy = torch.zeros(1, hidden_states.shape[-1], dtype=hidden_states.dtype, device=hidden_states.device)
+            aux_stream = dsv4_dsa_overlap_stream()
+            e_warmup = torch.npu.current_stream().record_event()
+            with npu_stream_switch(aux_stream, enabled=True):
+                torch.npu.current_stream().wait_event(e_warmup)
+                if hasattr(impl.wkv, "weight_scale") and impl.wkv.weight.dtype == torch.int8:
+                    kv_q_dummy, kv_s_dummy = torch_npu.npu_dynamic_quant(dummy)
+                    _ = torch_npu.npu_quant_matmul(
+                        kv_q_dummy,
+                        impl.wkv.weight,
+                        impl.wkv.weight_scale,
+                        pertoken_scale=kv_s_dummy,
+                        output_dtype=hidden_states.dtype,
+                    )
+                else:
+                    _ = impl.cv_wkv.quantize(dummy)
+                    _ = impl.cv_wkv.matmul(dummy, None)
+                kv_dummy = torch.zeros(
+                    1, impl.nope_head_dim + impl.rope_head_dim, dtype=hidden_states.dtype, device=hidden_states.device
+                )
+                _ = impl.kv_norm(kv_dummy)
+                _ = impl.weights_proj(dummy)
+            torch.npu.current_stream().wait_stream(aux_stream)
         output.fill_(0)
         return
 
@@ -319,7 +334,8 @@ def dsa_forward(
         # quant_scatter + scatter on main stream
         e1 = torch.npu.current_stream().record_event()
 
-        with npu_stream_switch(_dsa_sub_stream()):
+        aux_stream = dsv4_dsa_overlap_stream()
+        with npu_stream_switch(aux_stream):
             torch.npu.current_stream().wait_event(e1)
             weights_raw = impl.weights_proj(hidden_states[:actual_tokens])
 
@@ -348,7 +364,7 @@ def dsa_forward(
                 prefill_compressed_kv,
             )
 
-        torch.npu.current_stream().wait_stream(_dsa_sub_stream())
+        torch.npu.current_stream().wait_stream(aux_stream)
 
         scale = impl.indexer_softmax_scale * impl.indexer_heads**-0.5
 
