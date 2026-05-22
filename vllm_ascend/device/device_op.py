@@ -117,6 +117,7 @@ class BaseDeviceAdaptor:
         weight_scale: torch.Tensor,
         x_scale: torch.Tensor,
         bias=None,
+        swiglu_limit: int = 0,
         use_mxfp_quant: bool = False,
         act_quant_type: torch.dtype | int = torch.float8_e4m3fn,
         weight_quant_type: torch.dtype | int = torch.float8_e4m3fn,
@@ -124,13 +125,14 @@ class BaseDeviceAdaptor:
         if use_mxfp_quant:
             raise RuntimeError("MXFP MoE quantization is only supported on Ascend A5.")
 
-        return torch.ops._C_ascend.grouped_matmul_swiglu_quant(
+        return torch.ops._C_ascend.grouped_matmul_swiglu_quant_weight_nz(
             x=x,
             weight=weight,
             weight_scale=weight_scale,
             x_scale=x_scale,
             group_list=group_list,
             bias=bias,
+            swiglu_limit=swiglu_limit,
         )
 
     @staticmethod
@@ -316,6 +318,7 @@ class A5DeviceAdaptor(BaseDeviceAdaptor):
             key_cache=key_cache,
             value_cache=value_cache,
             slot_mapping=slot_mapping.contiguous(),
+            cache_mode="Norm",
         )
 
     @staticmethod
@@ -413,18 +416,20 @@ class A5DeviceAdaptor(BaseDeviceAdaptor):
         weight_scale: torch.Tensor,
         x_scale: torch.Tensor,
         bias=None,
+        swiglu_limit: int = 0,
         use_mxfp_quant: bool = False,
         act_quant_type: torch.dtype | int = torch.float8_e4m3fn,
         weight_quant_type: torch.dtype | int = torch.float8_e4m3fn,
     ):
         if not use_mxfp_quant:
-            return BaseDeviceAdaptor.npu_grouped_matmul_swiglu_quant(
+            return torch_npu.npu_grouped_matmul_swiglu_quant_v2(
                 x=x,
                 weight=weight,
                 group_list=group_list,
                 weight_scale=weight_scale,
                 x_scale=x_scale,
                 bias=bias,
+                swiglu_limit=swiglu_limit,
                 use_mxfp_quant=False,
             )
 
@@ -589,10 +594,10 @@ class A5DeviceAdaptor(BaseDeviceAdaptor):
             kv_cache=decode_k_nope,
             kr_cache=decode_k_pe,
             cache_index=attn_metadata.slot_mapping[:bsz].view(bsz, -1).to(torch.int64),
-            dequant_scale_x=dynamic_scale.view(FLOAT8_E8M0FNU_DTYPE),
-            dequant_scale_w_dq=atten_obj.weight_dq_scale.view(FLOAT8_E8M0FNU_DTYPE),
-            dequant_scale_w_uq_qr=atten_obj.weight_uq_qr_scale.view(FLOAT8_E8M0FNU_DTYPE),
-            dequant_scale_w_dkv_kr=atten_obj.weight_dkv_kr_scale.view(FLOAT8_E8M0FNU_DTYPE),
+            dequant_scale_x=dynamic_scale.view(torch.float8_e8m0fnu),
+            dequant_scale_w_dq=atten_obj.weight_dq_scale.view(torch.float8_e8m0fnu),
+            dequant_scale_w_uq_qr=atten_obj.weight_uq_qr_scale.view(torch.float8_e8m0fnu),
+            dequant_scale_w_dkv_kr=atten_obj.weight_dkv_kr_scale.view(torch.float8_e8m0fnu),
             cache_mode="PA_BSND",
             query_quant_mode=0,
             weight_quant_mode=3,
