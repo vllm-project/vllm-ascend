@@ -50,12 +50,7 @@ from vllm.v1.request import RequestStatus
 from vllm_ascend.ascend_config import get_ascend_config, init_ascend_config
 from vllm_ascend.distributed.kv_transfer.utils.mooncake_transfer_engine import global_te
 from vllm_ascend.distributed.kv_transfer.utils.utils import get_transfer_timeout_value
-from vllm_ascend.utils import (
-    enable_custom_op, 
-    is_vl_model,
-    AscendDeviceType,
-    get_ascend_device_type,
-)
+from vllm_ascend.utils import enable_custom_op, is_vl_model
 
 # isort: off
 if TYPE_CHECKING:
@@ -624,7 +619,7 @@ class KVCacheRecvingThread(threading.Thread):
         use_fused_op = get_ascend_config().enable_transpose_kv_cache_by_block
         if need_nz_cache or need_cat_cache:
             # use fused op to reformat kv cache, we keep original implementation to provide ability to disable it.
-            if use_fused_op and enable_custom_op() and get_ascend_device_type() != AscendDeviceType.A5:
+            if use_fused_op and enable_custom_op():
                 if need_cat_cache:
                     # the fused op only support cat GQA/MHA kv cache by head
                     self.reformat_kv_cache_with_fused_op(grouped_local_block_ids, tp_num_need_pulls)
