@@ -67,6 +67,7 @@ from vllm_ascend.worker.kvcomp_utils import KVCompMetaData
 
 # default max value of sliding window size
 SWA_INT_MAX = 2147483647
+_ATTN_KEYS_BUFFER = None
 
 
 @register_backend(AttentionBackendEnum.CUSTOM, "ASCEND")
@@ -475,6 +476,22 @@ class AscendAttentionBackendImpl(AttentionImpl):
                 graph_params = get_graph_params()
                 attn_metadata = forward_context.attn_metadata
                 attn_keys = list(attn_metadata.keys())
+                # In some speculative methods (such as DFlash), the order of attn_keys in the Target model
+                # will be disrupted instead of increasing by layer index, so need regular expressions to
+                # reorder the attn_keys and stor the results in _ATTN_KEYS_BUFFER.
+                attn_keys_length = len(graph_params.attn_params[num_tokens])
+                global _ATTN_KEYS_BUFFER
+                if _ATTN_KEYS_BUFFER is None:
+                    import regex as re
+
+                    def extract_layer_index(key: str) -> int:
+                        match = re.search(r"(\d+)", key)
+                        return int(match.group(1)) if match else 0
+
+                    attn_keys_tmp = attn_keys[:attn_keys_length]
+                    attn_keys_tmp.sort(key=extract_layer_index)
+                    _ATTN_KEYS_BUFFER = attn_keys_tmp
+                attn_keys[:attn_keys_length] = _ATTN_KEYS_BUFFER
             # For Qwen3-next, since the kv_cache_config has already categorized
             # linear_attn and self_attn, the attn_metadata is first arranged with
             # self_attn followed by linear_attn. Therefore, using zip directly
