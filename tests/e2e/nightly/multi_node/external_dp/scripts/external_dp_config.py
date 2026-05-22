@@ -24,6 +24,8 @@ CLUSTER_PLACEHOLDER_RE = re.compile(r"\$\{(NODE_(\d+)_IP|LOCAL_IP|MASTER_IP|LWS_
 
 @dataclass(frozen=True)
 class RoutingConfig:
+    """Proxy routing metadata shared by all external DP endpoints."""
+
     type: str
     proxy_node_index: int
     proxy_host: str
@@ -34,6 +36,8 @@ class RoutingConfig:
 
 @dataclass(frozen=True)
 class NodeConfig:
+    """Per-node backend topology loaded from one config entry."""
+
     node_ip: str
     host: str
     port_start: int
@@ -44,17 +48,31 @@ class NodeConfig:
     dp_rank_start: int
     tp_size: int
     dp_address: str
+    cp_size: int = 1
+    sp_size: int = 1
     pp_size: int = 1
+
+    @property
+    def devices_per_rank(self) -> int:
+        return self.tp_size * self.cp_size * self.sp_size * self.pp_size
+
+    @property
+    def devices_per_node(self) -> int:
+        return self.dp_size_local * self.devices_per_rank
 
 
 @dataclass(frozen=True)
 class NodeTemplate:
+    """Per-node env and argument template for launching vLLM backends."""
+
     envs: dict[str, Any]
     server_cmd_template: list[str]
 
 
 @dataclass(frozen=True)
 class ExternalDPEndpoint:
+    """One concrete backend process expanded from a node config."""
+
     config_index: int
     role: str
     dp_group: str
@@ -67,6 +85,8 @@ class ExternalDPEndpoint:
     dp_size: int
     dp_size_local: int
     tp_size: int
+    cp_size: int
+    sp_size: int
     pp_size: int
     dp_address: str
     dp_rpc_port: int
@@ -75,6 +95,8 @@ class ExternalDPEndpoint:
 
 @dataclass(frozen=True)
 class ExternalDPConfig:
+    """Top-level external DP test config after YAML anchors are merged."""
+
     test_name: str
     model: str
     num_nodes: int
@@ -211,6 +233,8 @@ def _get_all_ipv4() -> list[str]:
 
 
 class ExternalDPConfigLoader:
+    """Load, normalize, and validate external DP YAML files."""
+
     @classmethod
     def from_yaml(
         cls,
@@ -334,12 +358,14 @@ class ExternalDPConfigLoader:
                     port_start=int(node["port_start"]),
                     dp_rpc_port=int(node["dp_rpc_port"]),
                     dp_group=str(node.get("dp_group", "default")),
-                    dp_size=int(node["dp_size"]),
-                    dp_size_local=int(node["dp_size_local"]),
-                    dp_rank_start=int(node["dp_rank_start"]),
-                    tp_size=int(node["tp_size"]),
-                    pp_size=int(node.get("pp_size", 1)),
+                    dp_size=int(node.get("dp_size", 1)),
+                    dp_size_local=int(node.get("dp_size_local", 1)),
+                    dp_rank_start=int(node.get("dp_rank_start", 0)),
+                    tp_size=int(node.get("tp_size", 1)),
+                    cp_size=int(node.get("cp_size", 1)),
+                    sp_size=int(node.get("sp_size", 1)),
                     dp_address=str(node["dp_address"]),
+                    pp_size=int(node.get("pp_size", 1)),
                 )
             )
         return node_configs
@@ -394,9 +420,23 @@ class ExternalDPConfigLoader:
             raise AssertionError("cluster_hosts size mismatch")
 
         for node_index, node in enumerate(config.node_configs):
-            if node.dp_size_local * node.tp_size > config.npu_per_node:
+            parallel_sizes = {
+                "dp_size": node.dp_size,
+                "dp_size_local": node.dp_size_local,
+                "tp_size": node.tp_size,
+                "cp_size": node.cp_size,
+                "sp_size": node.sp_size,
+                "pp_size": node.pp_size,
+            }
+            invalid_sizes = {name: value for name, value in parallel_sizes.items() if value < 1}
+            if invalid_sizes:
+                raise ValueError(f"node {node_index} parallel sizes must be >= 1: {invalid_sizes}")
+            if node.dp_rank_start < 0:
+                raise ValueError(f"node {node_index} dp_rank_start must be >= 0")
+
+            if node.devices_per_node > config.npu_per_node:
                 raise ValueError(
-                    f"node {node_index} uses {node.dp_size_local * node.tp_size} NPUs, "
+                    f"node {node_index} uses {node.devices_per_node} NPUs, "
                     f"but npu_per_node is {config.npu_per_node}"
                 )
             if node.dp_rank_start + node.dp_size_local > node.dp_size:
@@ -407,7 +447,10 @@ class ExternalDPConfigLoader:
 
             used_devices: set[int] = set()
             for local_rank in range(node.dp_size_local):
-                devices = range(local_rank * node.tp_size, (local_rank + 1) * node.tp_size)
+                devices = range(
+                    local_rank * node.devices_per_rank,
+                    (local_rank + 1) * node.devices_per_rank,
+                )
                 overlap = used_devices.intersection(devices)
                 if overlap:
                     raise ValueError(f"node {node_index} visible_devices overlap: {sorted(overlap)}")
@@ -415,6 +458,8 @@ class ExternalDPConfigLoader:
 
 
 class EndpointResolver:
+    """Expand node-level configs into backend endpoints."""
+
     def __init__(self, config: ExternalDPConfig):
         self.config = config
 
@@ -443,7 +488,10 @@ class EndpointResolver:
         for local_rank in range(node_config.dp_size_local):
             dp_rank = node_config.dp_rank_start + local_rank
             port = node_config.port_start + local_rank
-            device_range = range(local_rank * node_config.tp_size, (local_rank + 1) * node_config.tp_size)
+            device_range = range(
+                local_rank * node_config.devices_per_rank,
+                (local_rank + 1) * node_config.devices_per_rank,
+            )
             visible_devices = ",".join(str(device) for device in device_range)
             endpoints.append(
                 ExternalDPEndpoint(
@@ -459,6 +507,8 @@ class EndpointResolver:
                     dp_size=node_config.dp_size,
                     dp_size_local=node_config.dp_size_local,
                     tp_size=node_config.tp_size,
+                    cp_size=node_config.cp_size,
+                    sp_size=node_config.sp_size,
                     pp_size=node_config.pp_size,
                     dp_address=node_config.dp_address,
                     dp_rpc_port=node_config.dp_rpc_port,

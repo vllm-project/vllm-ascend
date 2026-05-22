@@ -1,6 +1,5 @@
 import logging
 import os
-import time
 from pathlib import Path
 
 from tests.e2e.nightly.multi_node.external_dp.scripts.external_dp_config import (
@@ -20,6 +19,7 @@ from tests.e2e.nightly.multi_node.external_dp.scripts.external_dp_utils import (
     start_process,
     terminate_process_tree,
     wait_http_ready,
+    wait_http_unready,
     write_benchmark_results_json,
 )
 from tools.aisbench import run_aisbench_cases
@@ -32,10 +32,12 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 
 DEFAULT_LOG_ROOT = Path("/tmp/external_dp_logs")
-DEFAULT_SIGNAL_ROOT = Path("/root/.cache/external_dp_signals")
+POST_BENCHMARK_HEALTHCHECK_TIMEOUT = 30
 
 
 class ExternalDPServerManager:
+    """Start and stop the backend endpoints owned by the current node."""
+
     def __init__(
         self,
         *,
@@ -63,14 +65,19 @@ class ExternalDPServerManager:
                 self.processes.append((process.pid, endpoint))
 
             for _, endpoint in self.processes:
-                if endpoint.config_index != self.current_node_index:
-                    continue
-                url = f"http://{endpoint.host}:{endpoint.port}{BACKEND_HEALTHCHECK_PATH}"
+                url = _endpoint_health_url(endpoint)
                 wait_http_ready(url, BACKEND_READY_TIMEOUT)
                 logger.info("External DP endpoint ready: %s", url)
         except Exception:
             self.cleanup()
             raise
+
+    def __enter__(self):
+        self.start_current_node()
+        return self
+
+    def __exit__(self, exc_type, exc_value, traceback):
+        self.cleanup()
 
     def cleanup(self) -> None:
         for pid, endpoint in reversed(self.processes):
@@ -88,6 +95,8 @@ class ExternalDPServerManager:
 
 
 class ExternalDPProxyLauncher:
+    """Launch the external DP proxy on the configured proxy node."""
+
     def __init__(
         self,
         *,
@@ -111,8 +120,18 @@ class ExternalDPProxyLauncher:
         log_file = self.log_root / f"node-{self.current_node_index}" / "proxy.log"
         process = start_process(cmd, {}, log_file)
         self.pid = process.pid
-        wait_http_ready(proxy_health_url(self.config), timeout=300)
+        logger.info("External DP proxy launched: %s", proxy_health_url(self.config))
+
+    def wait_ready(self, timeout: int = 300) -> None:
+        wait_http_ready(proxy_health_url(self.config), timeout=timeout)
         logger.info("External DP proxy ready: %s", proxy_health_url(self.config))
+
+    def __enter__(self):
+        self.start()
+        return self
+
+    def __exit__(self, exc_type, exc_value, traceback):
+        self.cleanup()
 
     def cleanup(self) -> None:
         if self.pid is None:
@@ -122,42 +141,35 @@ class ExternalDPProxyLauncher:
         self.pid = None
 
 
-def _job_name(config: ExternalDPConfig) -> str:
-    return os.environ.get("BENCHMARK_JOB_NAME", "") or config.test_name.replace(" ", "-")
-
-
-def _done_signal_path(config: ExternalDPConfig) -> Path:
-    return DEFAULT_SIGNAL_ROOT / f"{_job_name(config)}.done"
-
-
-def _write_done_signal(config: ExternalDPConfig) -> None:
-    signal_path = _done_signal_path(config)
-    signal_path.parent.mkdir(parents=True, exist_ok=True)
-    signal_path.write_text("done\n", encoding="utf-8")
-
-
-def _wait_done_signal(config: ExternalDPConfig, timeout: int) -> None:
-    signal_path = _done_signal_path(config)
-    deadline = time.monotonic() + timeout
-    while time.monotonic() < deadline:
-        if signal_path.exists():
-            return
-        time.sleep(5)
-    raise TimeoutError(f"Timed out waiting for external DP done signal: {signal_path}")
-
-
-def _build_all_commands(config: ExternalDPConfig):
-    endpoints = EndpointResolver(config).resolve()
+def _build_all_commands(config: ExternalDPConfig, endpoints: list[ExternalDPEndpoint]):
     builder = CommandBuilder(config)
     commands = [builder.build(endpoint, config.templates[endpoint.config_index]) for endpoint in endpoints]
-    return endpoints, commands
+    return commands
+
+
+def _endpoint_health_url(endpoint: ExternalDPEndpoint) -> str:
+    return f"http://{endpoint.host}:{endpoint.port}{BACKEND_HEALTHCHECK_PATH}"
+
+
+def _master_endpoint_health_url(endpoints: list[ExternalDPEndpoint]) -> str:
+    for endpoint in endpoints:
+        if endpoint.config_index == 0 and endpoint.local_rank == 0:
+            return _endpoint_health_url(endpoint)
+    raise RuntimeError("External DP master endpoint was not found")
 
 
 def _wait_all_endpoints_ready(endpoints, timeout: int) -> None:
     for endpoint in endpoints:
-        url = f"http://{endpoint.host}:{endpoint.port}{BACKEND_HEALTHCHECK_PATH}"
+        url = _endpoint_health_url(endpoint)
         wait_http_ready(url, timeout=timeout)
         logger.info("External DP endpoint ready from master: %s", url)
+
+
+def _wait_master_endpoint_terminated(endpoints: list[ExternalDPEndpoint], timeout: int) -> None:
+    url = _master_endpoint_health_url(endpoints)
+    wait_http_ready(url, timeout=BACKEND_READY_TIMEOUT)
+    logger.info("Hanging until master external DP endpoint terminates: %s", url)
+    wait_http_unready(url, timeout=timeout)
 
 
 def _collect_external_dp_logs(log_root: Path, current_node_index: int) -> None:
@@ -174,7 +186,7 @@ def test_external_dp() -> None:
     endpoints = EndpointResolver(config).resolve()
     current_node_index = resolve_current_node_index(config)
     log_root = Path(os.environ.get("EXTERNAL_DP_LOG_DIR", str(DEFAULT_LOG_ROOT)))
-    max_wait_seconds = int(os.environ.get("EXTERNAL_DP_MAX_WAIT_SECONDS", "7200"))
+    max_wait_seconds = int(os.environ.get("EXTERNAL_DP_MAX_WAIT_SECONDS", "3600"))
     is_master = current_node_index == 0
 
     server_manager = ExternalDPServerManager(
@@ -191,31 +203,25 @@ def test_external_dp() -> None:
     )
 
     try:
-        server_manager.start_current_node()
-        if is_master:
-            _wait_all_endpoints_ready(endpoints, timeout=max_wait_seconds)
-        proxy_launcher.start()
-
-        if is_master:
-            wait_http_ready(proxy_health_url(config), timeout=300)
-            results = run_aisbench_cases(
-                model=config.model,
-                port=config.routing.proxy_port,
-                aisbench_cases=config.benchmark_cases(),
-                host_ip=config.routing.proxy_host,
-            )
-            all_endpoints, all_commands = _build_all_commands(config)
-            write_benchmark_results_json(
-                config=config,
-                endpoints=all_endpoints,
-                commands=all_commands,
-                results=results,
-            )
-        else:
-            _wait_done_signal(config, timeout=max_wait_seconds)
+        with server_manager, proxy_launcher:
+            if is_master:
+                _wait_all_endpoints_ready(endpoints, timeout=max_wait_seconds)
+                proxy_launcher.wait_ready()
+                results = run_aisbench_cases(
+                    model=config.model,
+                    port=config.routing.proxy_port,
+                    aisbench_cases=config.benchmark_cases(),
+                    host_ip=config.routing.proxy_host,
+                )
+                all_commands = _build_all_commands(config, endpoints)
+                write_benchmark_results_json(
+                    config=config,
+                    endpoints=endpoints,
+                    commands=all_commands,
+                    results=results,
+                )
+                _wait_all_endpoints_ready(endpoints, timeout=POST_BENCHMARK_HEALTHCHECK_TIMEOUT)
+            else:
+                _wait_master_endpoint_terminated(endpoints, timeout=max_wait_seconds)
     finally:
-        if is_master:
-            _write_done_signal(config)
-        proxy_launcher.cleanup()
-        server_manager.cleanup()
         _collect_external_dp_logs(log_root, current_node_index)

@@ -58,12 +58,16 @@ _PERF_METRIC_RENAME: dict[str, str] = {
 
 @dataclass(frozen=True)
 class BuiltCommand:
+    """Rendered command, env, and printable command line."""
+
     cmd: list[str]
     env: dict[str, str]
     display_cmd: str
 
 
 class CommandBuilder:
+    """Render endpoint templates into vLLM serve commands."""
+
     def __init__(self, config: ExternalDPConfig):
         self.config = config
 
@@ -104,6 +108,8 @@ class CommandBuilder:
             "DP_RANK": str(endpoint.dp_rank),
             "LOCAL_RANK": str(endpoint.local_rank),
             "TP_SIZE": str(endpoint.tp_size),
+            "CP_SIZE": str(endpoint.cp_size),
+            "SP_SIZE": str(endpoint.sp_size),
             "PP_SIZE": str(endpoint.pp_size),
             "DP_ADDRESS": endpoint.dp_address,
             "DP_RPC_PORT": str(endpoint.dp_rpc_port),
@@ -238,6 +244,14 @@ def terminate_process_tree(pid: int, timeout: int = 30) -> None:
         process.kill()
 
 
+def _is_http_ready(url: str, timeout: float = 5.0) -> bool:
+    try:
+        with urllib.request.urlopen(url, timeout=timeout) as response:
+            return 200 <= response.status < 300
+    except (urllib.error.URLError, TimeoutError, OSError):
+        return False
+
+
 def wait_http_ready(url: str, timeout: int, interval: float = 2.0) -> None:
     deadline = time.monotonic() + timeout
     last_error: Exception | None = None
@@ -250,6 +264,15 @@ def wait_http_ready(url: str, timeout: int, interval: float = 2.0) -> None:
             last_error = exc
         time.sleep(interval)
     raise TimeoutError(f"Timed out waiting for HTTP ready: {url}; last_error={last_error}")
+
+
+def wait_http_unready(url: str, timeout: int, interval: float = 5.0) -> None:
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        if not _is_http_ready(url):
+            return
+        time.sleep(interval)
+    raise TimeoutError(f"Timed out waiting for HTTP unready: {url}")
 
 
 def collect_logs(src_dir: Path, output_tar: Path) -> None:
@@ -442,6 +465,8 @@ def _build_topology(config: ExternalDPConfig, endpoints: list[ExternalDPEndpoint
         item.pop("port_start", None)
         item.pop("dp_rpc_port", None)
         item.pop("pp_size", None)
+        item.pop("cp_size", None)
+        item.pop("sp_size", None)
         item.pop("dp_address", None)
         item.pop("dp_size_local", None)
         item.pop("dp_size", None)

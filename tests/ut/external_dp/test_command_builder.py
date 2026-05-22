@@ -1,6 +1,12 @@
+import json
+from pathlib import Path
+
 import pytest
 
-from tests.e2e.nightly.multi_node.external_dp.scripts.external_dp_config import EndpointResolver
+from tests.e2e.nightly.multi_node.external_dp.scripts.external_dp_config import (
+    EndpointResolver,
+    ExternalDPConfigLoader,
+)
 from tests.e2e.nightly.multi_node.external_dp.scripts.external_dp_utils import CommandBuilder
 
 
@@ -59,3 +65,66 @@ def test_command_can_render_from_env(generic_config):
     endpoint = EndpointResolver(generic_config).resolve()[0]
     command = CommandBuilder(generic_config).build(endpoint, generic_config.templates[0])
     assert command.cmd[command.cmd.index("--port") + 1] == command.env["SERVER_PORT"]
+
+
+def test_cp_sp_template_variables_default_to_one(generic_config):
+    endpoint = EndpointResolver(generic_config).resolve()[0]
+    template = generic_config.templates[0]
+    extended_template = type(template)(
+        envs=template.envs,
+        server_cmd_template=[*template.server_cmd_template, "${CP_SIZE}", "${SP_SIZE}"],
+    )
+    command = CommandBuilder(generic_config).build(endpoint, extended_template)
+    assert command.cmd[-2:] == ["1", "1"]
+
+
+def test_disaggregated_smoke_kv_transfer_config_uses_multiline_json():
+    config_path = Path("tests/e2e/nightly/multi_node/external_dp/config/disaggregated_prefill_smoke.yaml")
+    config = ExternalDPConfigLoader.from_yaml(
+        str(config_path),
+        cluster_ips=["10.0.0.1", "10.0.0.2"],
+    )
+    endpoints = EndpointResolver(config).resolve()
+    producer_command = CommandBuilder(config).build(endpoints[0], config.templates[0])
+    consumer_command = CommandBuilder(config).build(endpoints[-1], config.templates[1])
+
+    assert '"kv_connector": "MooncakeConnectorV1",\n' in config_path.read_text(encoding="utf-8")
+
+    for command, kv_role in ((producer_command, "kv_producer"), (consumer_command, "kv_consumer")):
+        raw_config = command.cmd[command.cmd.index("--kv-transfer-config") + 1]
+        kv_config = json.loads(raw_config)
+        assert kv_config["kv_role"] == kv_role
+        assert kv_config["kv_connector_extra_config"] == {
+            "prefill": {"dp_size": 2, "tp_size": 1},
+            "decode": {"dp_size": 2, "tp_size": 1},
+        }
+
+
+def test_deepseek_pd_kv_transfer_config_uses_multiline_json():
+    config_path = Path("tests/e2e/nightly/multi_node/external_dp/config/DeepSeek-V3.1-external-dp-pd.yaml")
+    config = ExternalDPConfigLoader.from_yaml(
+        str(config_path),
+        cluster_ips=["10.0.0.1", "10.0.0.2", "10.0.0.3", "10.0.0.4"],
+    )
+    endpoints = EndpointResolver(config).resolve()
+    endpoint_by_config_index = {endpoint.config_index: endpoint for endpoint in endpoints}
+    expected = {
+        0: ("kv_producer", "30000", "0"),
+        1: ("kv_producer", "30100", "1"),
+        2: ("kv_consumer", "30200", "2"),
+    }
+
+    assert '"kv_connector": "MooncakeConnectorV1",\n' in config_path.read_text(encoding="utf-8")
+
+    for config_index, (kv_role, kv_port, engine_id) in expected.items():
+        endpoint = endpoint_by_config_index[config_index]
+        command = CommandBuilder(config).build(endpoint, config.templates[config_index])
+        raw_config = command.cmd[command.cmd.index("--kv-transfer-config") + 1]
+        kv_config = json.loads(raw_config)
+        assert kv_config["kv_role"] == kv_role
+        assert kv_config["kv_port"] == kv_port
+        assert kv_config["engine_id"] == engine_id
+        assert kv_config["kv_connector_extra_config"] == {
+            "prefill": {"dp_size": 2, "tp_size": 8},
+            "decode": {"dp_size": 32, "tp_size": 1},
+        }

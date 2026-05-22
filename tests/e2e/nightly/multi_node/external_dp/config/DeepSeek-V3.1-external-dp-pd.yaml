@@ -117,7 +117,21 @@ templates:
       - --additional-config
       - '{"recompute_scheduler_enable":true}'
       - --kv-transfer-config
-      - '{"kv_connector":"MooncakeConnectorV1","kv_role":"kv_producer","kv_port":"30000","engine_id":"0","kv_connector_extra_config":{"prefill":{"dp_size":2,"tp_size":8},"decode":{"dp_size":32,"tp_size":1}}}'
+      - '{"kv_connector": "MooncakeConnectorV1",
+        "kv_role": "kv_producer",
+        "kv_port": "30000",
+        "engine_id": "0",
+        "kv_connector_extra_config": {
+                  "prefill": {
+                          "dp_size": 2,
+                          "tp_size": 8
+                  },
+                  "decode": {
+                          "dp_size": 32,
+                          "tp_size": 1
+                  }
+            }
+        }'
 
   - envs:
       <<: *env_common
@@ -161,7 +175,21 @@ templates:
       - --additional-config
       - '{"recompute_scheduler_enable":true}'
       - --kv-transfer-config
-      - '{"kv_connector":"MooncakeConnectorV1","kv_role":"kv_producer","kv_port":"30100","engine_id":"1","kv_connector_extra_config":{"prefill":{"dp_size":2,"tp_size":8},"decode":{"dp_size":32,"tp_size":1}}}'
+      - '{"kv_connector": "MooncakeConnectorV1",
+        "kv_role": "kv_producer",
+        "kv_port": "30100",
+        "engine_id": "1",
+        "kv_connector_extra_config": {
+                  "prefill": {
+                          "dp_size": 2,
+                          "tp_size": 8
+                  },
+                  "decode": {
+                          "dp_size": 32,
+                          "tp_size": 1
+                  }
+            }
+        }'
 
   - envs:
       <<: *env_common
@@ -207,7 +235,21 @@ templates:
       - --additional-config
       - '{"recompute_scheduler_enable":true,"multistream_overlap_shared_expert":true,"finegrained_tp_config":{"lmhead_tensor_parallel_size":16}}'
       - --kv-transfer-config
-      - '{"kv_connector":"MooncakeConnectorV1","kv_role":"kv_consumer","kv_port":"30200","engine_id":"2","kv_connector_extra_config":{"prefill":{"dp_size":2,"tp_size":8},"decode":{"dp_size":32,"tp_size":1}}}'
+      - '{"kv_connector": "MooncakeConnectorV1",
+        "kv_role": "kv_consumer",
+        "kv_port": "30200",
+        "engine_id": "2",
+        "kv_connector_extra_config": {
+                  "prefill": {
+                          "dp_size": 2,
+                          "tp_size": 8
+                  },
+                  "decode": {
+                          "dp_size": 32,
+                          "tp_size": 1
+                  }
+            }
+        }'
 
   - envs:
       <<: *env_common
