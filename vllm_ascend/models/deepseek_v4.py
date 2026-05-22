@@ -900,6 +900,7 @@ class DeepseekV4Model(nn.Module):
             self.norm = RMSNorm(config.hidden_size, eps=config.rms_norm_eps)
         else:
             self.norm = PPMissingLayer()
+
         def make_empty_intermediate_tensors(
             batch_size: int,
             dtype: torch.dtype,
@@ -979,8 +980,7 @@ class DeepseekV4Model(nn.Module):
             llama_4_scaling = None
 
         if get_pp_group().is_first_rank:
-            hidden_states = hidden_states.unsqueeze(1).repeat(
-                1, self.hc_mult, 1)  # (b, s, h) -> (b, s, c, h)
+            hidden_states = hidden_states.unsqueeze(1).repeat(1, self.hc_mult, 1)  # (b, s, h) -> (b, s, c, h)
         for layer in islice(self.layers, self.start_layer, self.end_layer):
             hidden_states, residual = layer(positions, hidden_states, residual, llama_4_scaling)
 
@@ -1006,12 +1006,13 @@ class DeepseekV4Model(nn.Module):
             self._mtp_hidden_buffer[:num_tokens].copy_(hidden_states.flatten(1))
 
         if not get_pp_group().is_last_rank:
-            return IntermediateTensors({
-                "hidden_states": hidden_states,
-            })
+            return IntermediateTensors(
+                {
+                    "hidden_states": hidden_states,
+                }
+            )
 
-        hidden_states = self.hc_head(hidden_states, self.hc_head_fn,
-                                     self.hc_head_scale, self.hc_head_base)
+        hidden_states = self.hc_head(hidden_states, self.hc_head_fn, self.hc_head_scale, self.hc_head_base)
 
         hidden_states = self.norm(hidden_states)
         return hidden_states
