@@ -168,6 +168,7 @@ def quant_apply_mlp(
                 act_quant_type=act_quant_type,
                 weight_quant_type=weight_quant_type,
                 swiglu_limit=swiglu_limit,
+                mxfp_quant_dtype=mxfp_quant_dtype,
             )
             if quantized_hidden_states is not None:
                 dispose_tensor(quantized_hidden_states)
@@ -292,6 +293,7 @@ def quant_apply_mlp(
                 act_quant_type=act_quant_type,
                 weight_quant_type=weight_quant_type,
                 swiglu_limit=swiglu_limit,
+                mxfp_quant_dtype=mxfp_quant_dtype,
             )
             if quantized_hidden_states is not None:
                 dispose_tensor(quantized_hidden_states)
@@ -448,8 +450,6 @@ def unified_apply_mlp(*, mlp_compute_input: MoEMlpComputeInput) -> torch.Tensor:
         assert mxfp is not None, "mlp_compute_input.quant.mxfp is required for MXFP quant types."
         act_quant_type = mxfp.act_quant_type or act_quant_type
         weight_quant_type = mxfp.weight_quant_type or weight_quant_type
-        if mxfp_quant_dtype == QuantType.W4A8MXFP:
-            weight_quant_type = mxfp.weight_quant_type
         scale_type = mxfp.scale_dtype
         per_token_scale_type = mxfp.per_token_scale_dtype
         use_bf16 = mxfp.use_bf16
