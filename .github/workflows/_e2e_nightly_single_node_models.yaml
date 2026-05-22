@@ -69,7 +69,7 @@ jobs:
       env:
         VLLM_USE_MODELSCOPE: True
         UV_INDEX_URL: http://cache-service.nginx-pypi-cache.svc.cluster.local/pypi/simple
-        UV_EXTRA_INDEX_URL: "https://repo.huaweicloud.com/ascend/repos/pypi https://triton-ascend.osinfra.cn/pypi/simple"
+        UV_EXTRA_INDEX_URL: "https://repo.huaweicloud.com/ascend/repos/pypi"
         UV_INDEX_STRATEGY: unsafe-best-match
         UV_NO_CACHE: 1
         UV_SYSTEM_PYTHON: 1
