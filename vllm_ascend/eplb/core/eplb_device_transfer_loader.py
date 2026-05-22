@@ -63,6 +63,20 @@ class D2DExpertWeightLoader:
 
         self.layer_id = layer_id
         self.comm_op_list = []
+
+        # DEBUG: dump expert mapping before update
+        old_map = self.eplb_adaptor.expert_map_per_layer_cpu[layer_id]
+        old_experts = sorted([(i, int(old_map[i])) for i in range(len(old_map)) if old_map[i] != -1],
+                             key=lambda x: x[1])
+        logger.info("[EPLB_DEBUG] rank=%s layer=%s BEFORE: local_slot->global_expert mapping: %s",
+            dist.get_rank(), layer_id, old_experts)
+        logger.info("[EPLB_DEBUG] rank=%s layer=%s SEND plan: %s",
+            dist.get_rank(), layer_id, expert_send_info)
+        logger.info("[EPLB_DEBUG] rank=%s layer=%s RECV plan: %s",
+            dist.get_rank(), layer_id, expert_recv_info)
+        logger.info("[EPLB_DEBUG] rank=%s layer=%s NEW expert_map: %s",
+            dist.get_rank(), layer_id,
+            [(i, int(updated_expert_map[i])) for i in range(len(updated_expert_map)) if updated_expert_map[i] != -1])
         for send_info in expert_send_info:
             dst_rank, global_expert_id_to_send = send_info
             local_expert_id = self.eplb_adaptor.expert_map_per_layer_cpu[layer_id][global_expert_id_to_send].item()
@@ -130,6 +144,13 @@ class D2DExpertWeightLoader:
             # checksum after copy_
             for updated_tensor in self.eplb_adaptor.expert_param_per_layer[self.layer_id][local_expert_to_replace]:
                 _tensor_checksum(updated_tensor, f"COPY_DONE layer={self.layer_id} local_expert={local_expert_to_replace}")
+
+        # DEBUG: dump expert mapping after update
+        new_map = self.eplb_adaptor.expert_map_per_layer_cpu[self.layer_id]
+        new_experts = sorted([(i, int(new_map[i])) for i in range(len(new_map)) if new_map[i] != -1],
+                             key=lambda x: x[1])
+        logger.info("[EPLB_DEBUG] rank=%s layer=%s AFTER:  local_slot->global_expert mapping: %s",
+            dist.get_rank(), self.layer_id, new_experts)
 
         if self.layer_id == self.num_layers - 1:
             logger.info("[EPLB] finished update expert weight.")
