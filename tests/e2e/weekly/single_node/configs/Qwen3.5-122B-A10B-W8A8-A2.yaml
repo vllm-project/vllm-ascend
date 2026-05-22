@@ -1,7 +1,10 @@
 # ==========================================
 # Shared Configurations
 # ==========================================
-
+#workflow暂缺A2yaml
+# - name: Qwen3.5-122B-A10B-W8A8-single-A2
+#    os: linux-aarch64-a2b3-8
+#  config_file_path: Qwen3.5-122B-A10B-W8A8-A2.yaml
 _envs: &envs
   TASK_QUEUE_ENABLE: "1"
   HCCL_OP_EXPANSION_MODE: "AIV"
