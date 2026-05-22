@@ -32,6 +32,7 @@ deployment:
         --trust-remote-code
         --no-enable-prefix-caching
         --gpu-memory-utilization 0.9
+        --compilation-config '{"cudagraph_mode":"PIECEWISE"}'
   -
     server_cmd: >
         vllm serve "Qwen/Qwen3-235B-A22B"
@@ -50,6 +51,7 @@ deployment:
         --trust-remote-code
         --no-enable-prefix-caching
         --gpu-memory-utilization 0.9
+        --compilation-config '{"cudagraph_mode":"PIECEWISE"}'
 benchmarks:
   perf:
     case_type: performance
