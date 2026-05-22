@@ -106,6 +106,7 @@ private:
 
     optiling::MoeInitRoutingQuantV2TilingData moeInitRoutingQuantV2TilingData;
     uint64_t initRoutingQuantTilingKey;
+    int32_t nodeId;   // -1: no node distinction (original, cross-node comm allowed), 0: this rank on node0 (first-half experts), 1: this rank on node1 (second-half experts), cross-node peermem not allowed
 
     // Hccl<HCCL_SERVER_TYPE_AICPU> hccl_;
 
@@ -144,6 +145,7 @@ __aicore__ inline void DispatchFFNCombine<TemplateMMA2ACFunc>::Init(GM_ADDR xGM,
     expertPerRank = tilingData.dispatchFFNCombineInfo.expertPerRank;
     maxOutputSize = tilingData.dispatchFFNCombineInfo.maxOutputSize;
     listLen = tilingData.dispatchFFNCombineInfo.listLen;
+    nodeId = tilingData.dispatchFFNCombineInfo.nodeId;
 
     m0 = tilingData.cocTiling.m0;
     k0 = tilingData.cocTiling.k0;
@@ -279,7 +281,7 @@ __aicore__ inline void DispatchFFNCombine<TemplateMMA2ACFunc>::Process()
         outGM_, layoutD1, layoutD2,
         expertIdGM_, moeInitRoutingQuantV2Scale, moeInitRoutingQuantV2Offset,
         expertTokensBeforeCapacity, probs_,
-        workspaceGM_, gmExpertTokenNums_, ubMoveNum, xActiveMaskGM_, moeInitRoutingQuantV2TilingData};
+        workspaceGM_, gmExpertTokenNums_, ubMoveNum, xActiveMaskGM_, nodeId, moeInitRoutingQuantV2TilingData};
     //Call kernel
     MatmulKernel kernel(params);
     kernel(params);

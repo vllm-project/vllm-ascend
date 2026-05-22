@@ -77,6 +77,7 @@ class DispatchFFNCombine : public OpDef {
     this->Attr("M").AttrType(OPTIONAL).Int();
     this->Attr("transB").AttrType(OPTIONAL).Bool(false);
     this->Attr("weightNz").AttrType(OPTIONAL).Bool(false);
+    this->Attr("nodeId").AttrType(OPTIONAL).Int(-1);  // -1: no node distinction (original, cross-node comm allowed), 0: this rank on node0 (first-half experts), 1: this rank on node1 (second-half experts), cross-node peermem not allowed
 
     OpAICoreConfig aicore_config;
     aicore_config.DynamicCompileStaticFlag(true)
