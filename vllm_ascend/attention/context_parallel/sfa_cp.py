@@ -186,10 +186,6 @@ class AscendSFACPMetadataBuilder(AscendSFAMetadataBuilder):
             metadata_cls.prefill_slot_mapping = (
                 self.prefill_slot_mapping if hasattr(self, "prefill_slot_mapping") else None
             )
-            # if torch.distributed.get_rank()  == 0:
-            #     logger.info(f"metadata_cls.slot_mapping = {metadata_cls.slot_mapping}")
-            #     logger.info(f"long_seq_metadata.pcp_allgather_restore_idx = {long_seq_metadata.pcp_allgather_restore_idx}")
-            #     logger.info(f"metadata_cls.prefill_slot_mapping = {metadata_cls.prefill_slot_mapping}")
         metadata_cls.sfa_cp_metadata = sfa_cp_metadata
         return metadata_cls
 
@@ -665,73 +661,12 @@ class AscendSFACPImpl(AscendSFAImpl):
             )
         return None, None
 
-    # def exec_kv_prefill(
-    #     self,
-    #     kv_no_split: torch.Tensor,
-    #     cos: torch.Tensor,
-    #     sin: torch.Tensor,
-    #     kv_cache: tuple,
-    #     attn_metadata: M,
-    # ):
-    #     num_decode_tokens = attn_metadata.num_decode_tokens
-    #     num_actual_tokens = attn_metadata.num_actual_tokens
-    #     kv_c, k_pe = kv_no_split.split([self.kv_lora_rank, self.qk_rope_head_dim], dim=-1)
-    #     kv_c_normed = self.kv_a_layernorm(kv_c.contiguous())  # type: ignore[misc]
-    #     assert len(kv_cache) > 1, "the number of kv cache should be greater than 1, namely (nope_cache and rope_cache)"
-    #     assert attn_metadata.sfa_cp_metadata is not None
-    #     kv_c_normed = kv_c_normed.view([kv_c_normed.shape[0], self.num_kv_heads, -1])
-    #     k_pe = k_pe.unsqueeze(1)
-    #     prefill_k_pe = k_pe
-    #     prefill_k_pe[num_decode_tokens:num_actual_tokens] = self.rope_single(
-    #         prefill_k_pe[num_decode_tokens:num_actual_tokens], cos, sin
-    #     )
-    #     kv_c_k_pe = torch.cat([kv_c_normed, k_pe], dim=-1)
-    #     kv_c_k_pe = get_pcp_group().all_gather(kv_c_k_pe, 0)
-
-    #     # cache
-    #     kv_c_normed, k_pe = kv_c_k_pe.split([self.kv_lora_rank, self.qk_rope_head_dim], dim=-1)
-    #     assert attn_metadata.prefill_slot_mapping is not None
-    #     slot_mapping = attn_metadata.prefill_slot_mapping
-    #     torch_npu._npu_reshape_and_cache(
-    #         key=kv_c_normed, value=k_pe, key_cache=kv_cache[0], value_cache=kv_cache[1], slot_indices=slot_mapping
-    #     )
-    #     return None, None
-
-    # def exec_kv_decode(
-    #     self,
-    #     kv_no_split: torch.Tensor,
-    #     cos: torch.Tensor,
-    #     sin: torch.Tensor,
-    #     kv_cache: tuple,
-    #     slots: torch.Tensor,
-    # ):
-    #     assert self.kv_a_layernorm is not None
-    #     B = kv_no_split.shape[0]
-    #     N = self.num_kv_heads
-    #     S = 1
-    #     # npu_kv_rmsnorm_rope_cache needs [B, N, S, D]
-    #     kv_no_split = kv_no_split.view(B, N, S, self.kv_lora_rank + self.qk_rope_head_dim)
-    #     cache_mode = "PA_NZ" if self.enable_kv_nz else "PA"
-    #     k_pe, k_nope, _, _ = torch_npu.npu_kv_rmsnorm_rope_cache(
-    #         kv_no_split,
-    #         self.kv_a_layernorm.weight,  # type: ignore[union-attr]
-    #         cos,
-    #         sin,
-    #         slots.to(torch.int64),
-    #         kv_cache[1],
-    #         kv_cache[0],
-    #         epsilon=self.kv_a_layernorm.variance_epsilon,  # type: ignore[union-attr]
-    #         cache_mode=cache_mode,
-    #     )
-    #     return k_pe, k_nope
-
     def _get_full_kv(self, k, attn_metadata: M):
         if self.pcp_size == 1 or self.enable_mlapo:
             return k
         else:
             assert attn_metadata.sfa_cp_metadata is not None
             k = get_pcp_group().all_gather(k.contiguous(), 0)
-            # k = torch.index_select(k, 0, attn_metadata.sfa_cp_metadata.pcp_allgather_restore_idx)
             return k
 
     def forward(
