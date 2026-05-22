@@ -4,7 +4,7 @@ from dataclasses import replace
 
 import torch
 from vllm.distributed.parallel_state import get_tp_group
-from vllm.triton_utils import HAS_TRITON, triton
+from vllm.triton_utils import HAS_TRITON
 from vllm.v1.outputs import SamplerOutput
 from vllm.v1.sample.metadata import SamplingMetadata
 from vllm.v1.sample.rejection_sampler import (
