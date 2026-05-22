@@ -17,6 +17,7 @@
 
 from dataclasses import dataclass
 from enum import Enum
+from typing import Literal, NamedTuple
 
 import torch
 import torch_npu
@@ -74,33 +75,31 @@ _ATTN_KEYS_BUFFER = None
 # unsupported-kernel behavior.
 FIA_TND_SUPPORTED_HEAD_SIZES = {64, 128, 192}
 
-# Full graph attention params are currently stored as tuples. Keep the layout
-# lengths named here so capture/replay compatibility is explicit while avoiding
-# magic-number checks in the update path.
-PAGED_ATTENTION_GRAPH_PARAM_LEN = 9
-PAGED_ATTENTION_GRAPH_PARAM_WITH_LAYER_LEN = PAGED_ATTENTION_GRAPH_PARAM_LEN + 1
-FIA_GRAPH_PARAM_LEN = 20
-FIA_GRAPH_PARAM_WITH_LAYER_LEN = FIA_GRAPH_PARAM_LEN + 1
+GraphParamKind = Literal["paged_attention", "fia"]
 
 
-def _is_paged_attention_graph_param(param: tuple) -> bool:
-    return len(param) in (
-        PAGED_ATTENTION_GRAPH_PARAM_LEN,
-        PAGED_ATTENTION_GRAPH_PARAM_WITH_LAYER_LEN,
-    )
+class AttentionGraphParam(NamedTuple):
+    """Captured attention graph metadata.
+
+    `kind` records which attention op was captured, and `layer_name` binds the
+    captured params back to the real attention layer during graph replay. This
+    avoids inferring op type from tuple length or relying on metadata dict order.
+    """
+
+    kind: GraphParamKind
+    params: tuple
+    layer_name: str | None
 
 
-def _graph_param_has_layer_name(param: tuple) -> bool:
-    return len(param) in (
-        PAGED_ATTENTION_GRAPH_PARAM_WITH_LAYER_LEN,
-        FIA_GRAPH_PARAM_WITH_LAYER_LEN,
-    )
+def _normalize_graph_param(param: AttentionGraphParam, fallback_layer_name: str) -> tuple[GraphParamKind, tuple, str]:
+    if not isinstance(param, AttentionGraphParam):
+        raise TypeError(f"Expected AttentionGraphParam, got {type(param).__name__}")
+    return param.kind, param.params, param.layer_name or fallback_layer_name
 
 
-def _split_graph_param_layer_name(param: tuple, fallback_layer_name: str) -> tuple[tuple, str]:
-    if _graph_param_has_layer_name(param):
-        return param[:-1], param[-1]
-    return param, fallback_layer_name
+def _get_graph_param_kind(param: AttentionGraphParam) -> GraphParamKind:
+    kind, _, _ = _normalize_graph_param(param, "")
+    return kind
 
 
 def _uses_sliding_window_attention(vllm_config: VllmConfig) -> bool:
@@ -456,7 +455,7 @@ class AscendAttentionBackendImpl(AttentionImpl):
             graph_params = get_graph_params()
         attn_params = graph_params.attn_params.get(num_tokens, [])
         uses_paged_attention_params = len(attn_params) > 0 and all(
-            _is_paged_attention_graph_param(param) for param in attn_params
+            _get_graph_param_kind(param) == "paged_attention" for param in attn_params
         )
 
         if uses_paged_attention_params or (using_paged_attention(num_tokens, vllm_config) and len(attn_params) == 0):
@@ -468,7 +467,7 @@ class AscendAttentionBackendImpl(AttentionImpl):
                     graph_params.handles[num_tokens],
                     graph_params.events[num_tokens],
                 ):
-                    param, layer_name = _split_graph_param_layer_name(param, key)
+                    _, param, layer_name = _normalize_graph_param(param, key)
                     (
                         query,
                         key_cache,
@@ -638,8 +637,8 @@ class AscendAttentionBackendImpl(AttentionImpl):
                     graph_params.handles[num_tokens],
                     graph_params.events[num_tokens],
                 ):
-                    if _is_paged_attention_graph_param(param):
-                        param, layer_name = _split_graph_param_layer_name(param, key)
+                    param_kind, param, layer_name = _normalize_graph_param(param, key)
+                    if param_kind == "paged_attention":
                         (
                             query,
                             key_cache,
@@ -687,8 +686,6 @@ class AscendAttentionBackendImpl(AttentionImpl):
                         torch.npu.graph_task_update_end(update_stream)
                         event.record(update_stream)
                         continue
-
-                    param, layer_name = _split_graph_param_layer_name(param, key)
 
                     (
                         query,
@@ -889,11 +886,10 @@ class AscendAttentionBackendImpl(AttentionImpl):
                 weak_ref_tensors(layer._c8_k_aq_offset),
                 weak_ref_tensors(layer._c8_v_aq_scale),
                 weak_ref_tensors(layer._c8_v_aq_offset),
-                layer_name,
             )  # type: ignore
         else:
-            attn_params = attn_params + (None, None, None, None, layer_name)  # type: ignore
-        graph_params.attn_params[num_tokens].append(attn_params)
+            attn_params = attn_params + (None, None, None, None)  # type: ignore
+        graph_params.attn_params[num_tokens].append(AttentionGraphParam("fia", attn_params, layer_name))
 
         torch.npu.graph_task_group_begin(stream)
         torch_npu.npu_fused_infer_attention_score.out(
@@ -1050,16 +1046,19 @@ class AscendAttentionBackendImpl(AttentionImpl):
             event.reset(stream)
             graph_params.events[num_tokens].append(event)
             graph_params.attn_params[num_tokens].append(
-                (
-                    weak_ref_tensors(query),
-                    weak_ref_tensors(self.key_cache),
-                    weak_ref_tensors(self.value_cache),
-                    self.num_kv_heads,
-                    self.num_heads,
-                    self.scale,
-                    attn_metadata.block_tables,
-                    attn_metadata.seq_lens,
-                    weak_ref_tensors(output),
+                AttentionGraphParam(
+                    "paged_attention",
+                    (
+                        weak_ref_tensors(query),
+                        weak_ref_tensors(self.key_cache),
+                        weak_ref_tensors(self.value_cache),
+                        self.num_kv_heads,
+                        self.num_heads,
+                        self.scale,
+                        attn_metadata.block_tables,
+                        attn_metadata.seq_lens,
+                        weak_ref_tensors(output),
+                    ),
                     self._layer_name,
                 )
             )
@@ -1408,6 +1407,8 @@ class AscendAttentionBackendImpl(AttentionImpl):
         self,
         attn_metadata: AscendMetadata,
     ) -> tuple[torch.Tensor, torch.Tensor] | tuple[None, None]:
+        """Gather current-token KV from the producer layer's shared cache."""
+
         if self.key_cache is None or self.value_cache is None:
             return None, None
         num_tokens = attn_metadata.actual_seq_lengths_q[-1]
@@ -1455,8 +1456,9 @@ class AscendAttentionBackendImpl(AttentionImpl):
             if self.key_cache is None:
                 self.key_cache, self.value_cache = kv_cache[0], kv_cache[1]
             if self.kv_sharing_target_layer_name is not None:
-                # KV-sharing target layers consume the producer layer's cache.
-                # Re-caching here would overwrite the shared KV slots.
+                # KV-sharing target layers, used by Gemma4 local/global layer
+                # pairs, consume the producer layer's cache. Re-caching here
+                # would overwrite the shared KV slots before attention reads it.
                 if self.is_kv_producer:
                     attn_metadata.reshape_cache_event.record()
                 return query, key, value, output

@@ -9,9 +9,28 @@ from vllm_ascend.attention.attention_v1 import (
     AscendAttentionBackendImpl,
     AscendAttentionMetadataBuilder,
     AscendAttentionState,
+    AttentionGraphParam,
+    _normalize_graph_param,
 )
 from vllm_ascend.attention.kvcomp_attn.attention_utils import get_kvcomp_decode_params, reshape_and_cache_kvcomp
 from vllm_ascend.attention.utils import AscendCommonAttentionMetadata
+
+
+class TestAttentionGraphParam(TestBase):
+    def test_normalize_graph_param_uses_explicit_wrapper(self):
+        raw_param = (object(),)
+        kind, param, layer_name = _normalize_graph_param(
+            AttentionGraphParam("paged_attention", raw_param, "real_layer"),
+            "fallback_layer",
+        )
+
+        self.assertEqual(kind, "paged_attention")
+        self.assertIs(param, raw_param)
+        self.assertEqual(layer_name, "real_layer")
+
+    def test_normalize_graph_param_rejects_raw_tuple(self):
+        with self.assertRaisesRegex(TypeError, "Expected AttentionGraphParam"):
+            _normalize_graph_param(tuple(range(9)), "fallback_layer")
 
 
 class TestAscendAttentionBackend(TestBase):
@@ -221,6 +240,32 @@ class TestAscendAttentionBackendImpl(TestBase):
             sinks=torch.tensor([-3.4062], dtype=torch.bfloat16),
         )
 
+        self.impl_large_head = AscendAttentionBackendImpl(
+            num_heads=8,
+            head_size=512,
+            scale=1.0,
+            num_kv_heads=8,
+            alibi_slopes=None,
+            sliding_window=None,
+            kv_cache_dtype="float16",
+            logits_soft_cap=None,
+            attn_type=self.attention_type.DECODER,
+            kv_sharing_target_layer_name=None,
+        )
+
+        self.impl_kv_share = AscendAttentionBackendImpl(
+            num_heads=8,
+            head_size=512,
+            scale=1.0,
+            num_kv_heads=8,
+            alibi_slopes=None,
+            sliding_window=None,
+            kv_cache_dtype="float16",
+            logits_soft_cap=None,
+            attn_type=self.attention_type.DECODER,
+            kv_sharing_target_layer_name="producer_layer",
+        )
+
     def test_gather_paged_kv_to_dense(self):
         block_size = 2
         key_cache = torch.arange(4 * block_size * 8 * 64).reshape(4, block_size, 8, 64)
@@ -427,6 +472,116 @@ class TestAscendAttentionBackendImpl(TestBase):
         mock_fused_infer_attention_score.assert_called_once()
 
         assert output.shape == (10, 8, 64)
+
+    @patch("torch_npu._npu_paged_attention")
+    @patch("torch_npu.npu_fused_infer_attention_score")
+    @patch("torch_npu._npu_reshape_and_cache")
+    @patch("vllm_ascend.ascend_forward_context.get_forward_context")
+    def test_gemma4_swa_decode_uses_fia_operator(
+        self,
+        mock_get_forward_context,
+        mock_npu_reshape_and_cache,
+        mock_fused_infer_attention_score,
+        mock_paged_attention,
+    ):
+        query = torch.randn(2, 8 * 64)
+        key = torch.randn(2, 8 * 64)
+        value = torch.randn(2, 8 * 64)
+        kv_cache = torch.empty(2, 4, 128, 8, 64)
+        output = torch.empty(2, 8, 64)
+
+        metadata = self.attn_metadata
+        metadata.attn_state = AscendAttentionState.DecodeOnly
+        metadata.seq_lens = torch.tensor([16, 16])
+        metadata.actual_seq_lengths_q = [1, 2]
+        metadata.block_tables = torch.zeros(2, 4, dtype=torch.long)
+        metadata.num_actual_tokens = 2
+        metadata.slot_mapping = torch.arange(2)
+        metadata.num_decodes = 2
+        metadata.num_prefills = 0
+        metadata.causal = True
+        metadata.model_runner_type = "generate"
+        layer = self.layer_no_quant
+
+        mock_get_forward_context.return_value = MagicMock(capturing=False)
+        mock_fused_infer_attention_score.return_value = (torch.ones(2, 8, 64), 1)
+
+        output = self.impl_swa.forward(layer, query, key, value, kv_cache, metadata, output)
+
+        mock_paged_attention.assert_not_called()
+        mock_fused_infer_attention_score.assert_called_once()
+        assert output.shape == (2, 8, 64)
+
+    @patch("torch_npu.npu_fusion_attention")
+    @patch("torch_npu._npu_reshape_and_cache")
+    @patch("vllm_ascend.ascend_forward_context.get_forward_context")
+    def test_gemma4_large_head_prefill_uses_fusion_attention(
+        self,
+        mock_get_forward_context,
+        mock_npu_reshape_and_cache,
+        mock_npu_fusion_attention,
+    ):
+        query = torch.randn(3, 8, 512)
+        key = torch.randn(3, 8, 512)
+        value = torch.randn(3, 8, 512)
+        kv_cache = torch.empty(2, 4, 128, 8, 512)
+        output = torch.empty_like(query)
+
+        metadata = self.attn_metadata
+        metadata.attn_state = AscendAttentionState.PrefillNoCache
+        metadata.actual_seq_lengths_q = [3]
+        metadata.seq_lens_list = [3]
+        metadata.attn_mask = None
+        metadata.causal = True
+        metadata.slot_mapping = torch.arange(3)
+        metadata.num_actual_tokens = 3
+        metadata.model_runner_type = "generate"
+        layer = self.layer_no_quant
+
+        mock_get_forward_context.return_value = MagicMock(capturing=False)
+        mock_npu_fusion_attention.return_value = (torch.ones_like(query), None)
+
+        output = self.impl_large_head.forward(layer, query, key, value, kv_cache, metadata, output)
+
+        mock_npu_fusion_attention.assert_called_once()
+        assert mock_npu_fusion_attention.call_args.kwargs["head_num"] == 8
+        assert mock_npu_fusion_attention.call_args.kwargs["input_layout"] == "TND"
+        assert output.shape == (3, 8, 512)
+
+    @patch("vllm_ascend.attention.attention_v1.DeviceOperator.reshape_and_cache")
+    def test_gemma4_kv_sharing_target_skips_cache_overwrite(self, mock_reshape_and_cache):
+        query = torch.randn(2, 8, 512)
+        key = torch.randn(2, 8, 512)
+        value = torch.randn(2, 8, 512)
+        kv_cache = torch.empty(2, 4, 128, 8, 512)
+        output = torch.empty_like(query)
+
+        metadata = self.attn_metadata
+        metadata.slot_mapping = torch.arange(2)
+        metadata.num_actual_tokens = 2
+
+        returned = self.impl_kv_share.reshape_and_cache(query, key, value, kv_cache, metadata, output)
+
+        mock_reshape_and_cache.assert_not_called()
+        self.assertIs(returned[0], query)
+        self.assertIs(returned[1], key)
+        self.assertIs(returned[2], value)
+        self.assertIs(returned[3], output)
+
+    def test_gemma4_kv_sharing_target_reads_current_token_cache(self):
+        key_cache = torch.arange(4 * 8 * 512, dtype=torch.float32).reshape(1, 4, 8, 512)
+        value_cache = key_cache + 10000
+        self.impl_kv_share.key_cache = key_cache
+        self.impl_kv_share.value_cache = value_cache
+
+        metadata = self.attn_metadata
+        metadata.actual_seq_lengths_q = [2]
+        metadata.slot_mapping = torch.tensor([1, 3], dtype=torch.long)
+
+        key, value = self.impl_kv_share._get_current_token_shared_kv(metadata)
+
+        torch.testing.assert_close(key, key_cache.reshape(-1, 8, 512)[[1, 3]])
+        torch.testing.assert_close(value, value_cache.reshape(-1, 8, 512)[[1, 3]])
 
     def test_get_kvcomp_params_early_exit(self):
         """
