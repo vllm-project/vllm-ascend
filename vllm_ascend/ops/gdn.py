@@ -239,6 +239,11 @@ def get_non_spec_chunked_prefill_meta(attn_metadata):
 
 
 class AscendGatedDeltaNetAttention(GatedDeltaNetAttention):
+    def _split_ba_for_tp(self, ba: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
+        if hasattr(self, "split_ba"):
+            return self.split_ba(ba)
+        return ba.chunk(2, dim=-1)
+
     def forward(
         self,
         hidden_states: torch.Tensor,
@@ -256,7 +261,7 @@ class AscendGatedDeltaNetAttention(GatedDeltaNetAttention):
             ba, _ = self.in_proj_ba(hidden_states)
             z, _ = self.in_proj_z(hidden_states)
             z = z.reshape(z.size(0), -1, self.head_v_dim)
-            b, a = ba.chunk(2, dim=-1)
+            b, a = self._split_ba_for_tp(ba)
             b = b.contiguous()
             a = a.contiguous()
         else:
@@ -268,7 +273,7 @@ class AscendGatedDeltaNetAttention(GatedDeltaNetAttention):
                 mixed_qkv, z = mixed_qkvz.split([qkv_size, z_size], dim=-1)
                 z = z.reshape(z.size(0), -1, self.head_v_dim)
                 ba, _ = self.in_proj_ba(hidden_states)
-                b, a = ba.chunk(2, dim=-1)
+                b, a = self._split_ba_for_tp(ba)
 
                 b = b.contiguous()
                 a = a.contiguous()
