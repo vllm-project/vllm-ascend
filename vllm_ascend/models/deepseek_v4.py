@@ -336,7 +336,8 @@ class DeepseekV4MoE(nn.Module):
             router_logits = F.linear(hidden_states.float(), self.gate.weight)
             fused_moe_out = self.experts(hidden_states=hidden_states, router_logits=router_logits)
 
-        if isinstance(fused_moe_out, tuple):
+        fused_moe_out_is_tuple = isinstance(fused_moe_out, tuple)
+        if fused_moe_out_is_tuple:
             shared_output, final_hidden_states = fused_moe_out
             if self.shared_experts is None:
                 assert shared_output is None
@@ -361,7 +362,9 @@ class DeepseekV4MoE(nn.Module):
         if self.is_sequence_parallel:
             final_hidden_states = tensor_model_parallel_all_gather(final_hidden_states, 0)
             final_hidden_states = final_hidden_states[:num_tokens]
-        elif self.tp_size > 1:
+        elif self.tp_size > 1 and fused_moe_out_is_tuple:
+            # Legacy tuple outputs are reduced here. Tensor outputs from the
+            # upstream MoERunner have already gone through its final reduction.
             final_hidden_states = self.experts.maybe_all_reduce_tensor_model_parallel(final_hidden_states)
 
         return final_hidden_states.view(num_tokens, hidden_dim)
