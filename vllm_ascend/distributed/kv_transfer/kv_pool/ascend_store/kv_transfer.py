@@ -98,6 +98,29 @@ class LayerBatchBuilder:
             return first
         return np.concatenate((first, second))
 
+    @staticmethod
+    def _dedupe_transfer_blocks(
+        block_ids_arr: np.ndarray,
+        block_gvas_arr: np.ndarray,
+    ) -> tuple[np.ndarray, np.ndarray]:
+        if block_ids_arr.size <= 1:
+            return block_ids_arr, block_gvas_arr
+
+        block_transfer_array = np.column_stack((block_ids_arr, block_gvas_arr))
+        _, unique_indices = np.unique(
+            block_transfer_array,
+            axis=0,
+            return_index=True,
+        )
+        if unique_indices.size == block_ids_arr.size:
+            return block_ids_arr, block_gvas_arr
+
+        unique_indices.sort()
+        return (
+            block_ids_arr[unique_indices],
+            block_gvas_arr[unique_indices],
+        )
+
     def _build_transfer_arrays(
         self,
         block_ids_arr: np.ndarray,
@@ -185,18 +208,28 @@ class LayerBatchBuilder:
                 last_gvas_arr[last_offset] = request.last_block_gva
                 last_offset += 1
 
+        block_ids_arr = self._concat_transfer_arrays(
+            block_ids_arr,
+            last_block_ids_arr,
+        )
+        block_gvas_arr = self._concat_transfer_arrays(
+            block_gvas_arr,
+            last_gvas_arr,
+        )
+        block_ids_arr, block_gvas_arr = self._dedupe_transfer_blocks(
+            block_ids_arr,
+            block_gvas_arr,
+        )
         addr_array, size_array, gvas_array = self._build_transfer_arrays(
             block_ids_arr, block_gvas_arr, task.layer_id)
-        last_addr_array, last_size_array, last_gvas_array = (
-            self._build_transfer_arrays(last_block_ids_arr, last_gvas_arr, task.layer_id))
 
         return LayerBatchReqMeta(
             req_ids=req_ids,
             layer_id=task.layer_id,
             is_last_chunks=is_last_chunks,
-            addr_array=self._concat_transfer_arrays(addr_array, last_addr_array),
-            size_array=self._concat_transfer_arrays(size_array, last_size_array),
-            gvas_array=self._concat_transfer_arrays(gvas_array, last_gvas_array),
+            addr_array=addr_array,
+            size_array=size_array,
+            gvas_array=gvas_array,
         )
 
 
