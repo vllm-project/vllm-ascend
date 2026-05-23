@@ -39,8 +39,17 @@ def is_arm_cpu() -> bool:
 
 
 def execute_command(cmd: list[str]) -> tuple[str, int]:
-    with subprocess.Popen(cmd, shell=False, stdout=subprocess.PIPE, stderr=subprocess.PIPE) as p:
-        out, _ = p.communicate(timeout=1000)
+    # Force a C locale so subprocess output remains parseable on localized OSes.
+    env = os.environ.copy()
+    env["LC_ALL"] = "C"
+    env["LANG"] = "C"
+    env["LC_MESSAGES"] = "C"
+    with subprocess.Popen(cmd, shell=False, stdout=subprocess.PIPE, stderr=subprocess.PIPE, env=env) as p:
+        try:
+            out, _ = p.communicate(timeout=1000)
+        except subprocess.TimeoutExpired:
+            p.kill()
+            out, _ = p.communicate()
     return out.decode(), p.returncode
 
 
@@ -202,6 +211,20 @@ class CpuAlloc:
                 raise RuntimeError(f"Failed to bind {pid} to CPU {cpu_list}.")
 
     @staticmethod
+    def _get_thread_name(pid: str, thread_id: str) -> str:
+        try:
+            with open(f"/proc/{pid}/task/{thread_id}/comm") as f:
+                return f.read().strip()
+        except OSError as err:
+            logger.warning(
+                "Failed to read thread name for pid=%s tid=%s: %s",
+                pid,
+                thread_id,
+                err,
+            )
+            return ""
+
+    @staticmethod
     def parse_skip_sockets() -> set[int]:
         skip_socket_str = envs.VLLM_ASCEND_CPU_BIND_SKIP_SOCKET
         if not skip_socket_str:
@@ -348,9 +371,6 @@ class CpuAlloc:
         else:
             total_npus = len(running)
 
-        if total_npus <= 0:
-            return
-
         # Compute global per-NPU slicing
         base = total_cpu // total_npus
         extra = total_cpu % total_npus
@@ -383,12 +403,6 @@ class CpuAlloc:
             if npu < 0 or npu >= total_npus:
                 raise RuntimeError(f"Invalid NPU id {npu}, total_npus={total_npus}.")
             cpus = _slice_for_npu(npu)
-            # Extra safety: should always be >= base >= 5
-            if len(cpus) < MIN_CPUS_PER_NPU:
-                raise RuntimeError(
-                    f"NPU{npu} got too few CPUs: {len(cpus)} (<5). "
-                    f"total_allowed={total_cpu}, total_npus={total_npus}, base={base}, extra={extra}"
-                )
             self.npu_cpu_pool[npu] = cpus
 
     @staticmethod
@@ -504,13 +518,68 @@ class CpuAlloc:
         thread_message, _ = execute_command(["ps", "-Te"])
         threads_map = self.get_threads_map(thread_message)
         main_pid = str(psutil.Process().pid)
+        process_name = psutil.Process().name()
         current_npu = self.device_info.running_npu_list[self.rank_id]
-        self.bind(main_pid, self.assign_main[current_npu], True)
-        for acl_thread in threads_map.get(main_pid, {}).get("acl_thread", []):
+        acl_threads = set(threads_map.get(main_pid, {}).get("acl_thread", []))
+        release_threads = set(threads_map.get(main_pid, {}).get("release_thread", []))
+        special_threads = acl_threads | release_threads
+
+        try:
+            thread_ids = sorted(os.listdir(f"/proc/{main_pid}/task"), key=int)
+        except OSError as err:
+            logger.warning("Failed to list threads for pid=%s: %s", main_pid, err)
+            thread_ids = []
+
+        logger.info(
+            "Binding worker process threads. process_name=%s pid=%s "
+            "main_cpus=%s acl_cpus=%s release_cpus=%s thread_count=%d",
+            process_name,
+            main_pid,
+            self.assign_main[current_npu],
+            self.assign_acl[current_npu],
+            self.assign_rel[current_npu],
+            len(thread_ids),
+        )
+        for thread_id in thread_ids:
+            if thread_id in special_threads:
+                continue
+            thread_name = self._get_thread_name(main_pid, thread_id)
+            logger.info(
+                "Binding worker thread. process_name=%s pid=%s "
+                "thread_name=%s tid=%s role=main cpus=%s",
+                process_name,
+                main_pid,
+                thread_name,
+                thread_id,
+                self.assign_main[current_npu],
+            )
+            self.bind(thread_id, self.assign_main[current_npu], False)
+        for acl_thread in acl_threads:
+            thread_name = self._get_thread_name(main_pid, acl_thread)
+            logger.info(
+                "Binding worker thread. process_name=%s pid=%s "
+                "thread_name=%s tid=%s role=acl cpus=%s",
+                process_name,
+                main_pid,
+                thread_name,
+                acl_thread,
+                self.assign_acl[current_npu],
+            )
             self.bind(acl_thread, self.assign_acl[current_npu], False)
-            self.bind_memory(acl_thread, current_npu)
-        for release_thread in threads_map.get(main_pid, {}).get("release_thread", []):
+        for release_thread in release_threads:
+            thread_name = self._get_thread_name(main_pid, release_thread)
+            logger.info(
+                "Binding worker thread. process_name=%s pid=%s "
+                "thread_name=%s tid=%s role=release cpus=%s",
+                process_name,
+                main_pid,
+                thread_name,
+                release_thread,
+                self.assign_rel[current_npu],
+            )
             self.bind(release_thread, self.assign_rel[current_npu], False)
+        # Migrate memory once for the whole process, after all threads are pinned.
+        self.bind_memory(main_pid, current_npu)
 
     def bind_npu_irq(self) -> None:
         if not os.access("/proc/irq", os.W_OK):

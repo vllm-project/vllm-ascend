@@ -19,6 +19,7 @@
 
 import copy
 import gc
+import threading
 import time
 from types import NoneType
 
@@ -201,6 +202,14 @@ class NPUWorker(WorkerBase):
                 pid,
                 task_id,
                 cpus_allowed,
+            )
+        for thread in threading.enumerate():
+            logger.info(
+                "[worker_cpu_bind_result] python_thread_name=%s ident=%s native_id=%s alive=%s",
+                thread.name,
+                thread.ident,
+                thread.native_id,
+                thread.is_alive(),
             )
 
     def uninstall_static_kernel(self):

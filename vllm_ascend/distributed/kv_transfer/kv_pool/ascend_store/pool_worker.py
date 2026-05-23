@@ -19,6 +19,7 @@ from vllm_ascend.ascend_config import get_ascend_config
 from vllm_ascend.cpu_binding import (
     bind_thread_to_cpus,
     get_kv_transfer_thread_cpus,
+    get_memcache_client_cpus,
 )
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.backend import (
     backend_map,
@@ -162,9 +163,19 @@ class KVPoolWorker:
         real_backend = getattr(backend_module, backend_name)
 
         if self.backend.lower() == "memcache":
+            memcache_client_cpus = extra_config.get("memcache_client_cpus")
+            if memcache_client_cpus is None:
+                try:
+                    memcache_client_cpus = get_memcache_client_cpus(self.local_rank)
+                except Exception as err:
+                    logger.warning(
+                        "Failed to get MemCache client CPUs for rank%d: %s",
+                        self.local_rank,
+                        err,
+                    )
             self.m_store = real_backend(  # type: ignore[misc]
                 parallel_config,
-                extra_config.get("memcache_client_cpus"),
+                memcache_client_cpus,
                 defer_init=True,
             )
         else:
@@ -249,6 +260,15 @@ class KVPoolWorker:
         )
 
     def init_backend(self) -> None:
+        logger.info(
+            "Initializing KV pool backend. backend_initialized=%s "
+            "kv_caches_registered=%s buffers_registered=%s "
+            "transfer_threads_started=%s",
+            self._backend_initialized,
+            self._kv_caches_registered,
+            self._buffers_registered,
+            self._transfer_threads_started,
+        )
         if not self._backend_initialized:
             if hasattr(self.m_store, "init_store"):
                 self.m_store.init_store()
@@ -296,6 +316,12 @@ class KVPoolWorker:
                 )
                 self.kv_send_thread.start()
                 ready_event_sending.wait()
+                logger.info(
+                    "Started KV transfer thread name=%s native_id=%s alive=%s",
+                    self.kv_send_thread.name,
+                    self.kv_send_thread.native_id,
+                    self.kv_send_thread.is_alive(),
+                )
                 self._bind_kv_transfer_thread(
                     self.kv_send_thread,
                     0,
@@ -325,12 +351,18 @@ class KVPoolWorker:
                 self.layerwise_max_transfer_bytes,
             )
             self.kv_recv_thread.start()
+            ready_event.wait()
+            logger.info(
+                "Started KV transfer thread name=%s native_id=%s alive=%s",
+                self.kv_recv_thread.name,
+                self.kv_recv_thread.native_id,
+                self.kv_recv_thread.is_alive(),
+            )
             self._bind_kv_transfer_thread(
                 self.kv_recv_thread,
                 1,
                 "layerwise recv",
             )
-            ready_event.wait()
         else:
             if self.kv_role in ["kv_producer", "kv_both"] or self.consumer_is_to_put:
                 ready_event_sending = threading.Event()
@@ -348,6 +380,12 @@ class KVPoolWorker:
                 )
                 self.kv_send_thread.start()
                 ready_event_sending.wait()
+                logger.info(
+                    "Started KV transfer thread name=%s native_id=%s alive=%s",
+                    self.kv_send_thread.name,
+                    self.kv_send_thread.native_id,
+                    self.kv_send_thread.is_alive(),
+                )
             if self.load_async:
                 ready_event = threading.Event()
                 self.kv_recv_thread = KVCacheStoreRecvingThread(
@@ -361,6 +399,12 @@ class KVPoolWorker:
                 )
                 self.kv_recv_thread.start()
                 ready_event.wait()
+                logger.info(
+                    "Started KV transfer thread name=%s native_id=%s alive=%s",
+                    self.kv_recv_thread.name,
+                    self.kv_recv_thread.native_id,
+                    self.kv_recv_thread.is_alive(),
+                )
         self._transfer_threads_started = True
 
     def register_kv_caches(self, kv_caches: dict[str, torch.Tensor]):
