@@ -5,6 +5,7 @@ import torch
 import torch_npu
 from vllm.logger import logger
 from vllm_ascend.recovery.types import ExceptionInfo
+from vllm.distributed.parallel_state import get_world_group
 
 def fault_recovery_decorator():
     def decorator(func):
@@ -22,6 +23,7 @@ def fault_recovery_decorator():
                         torch.distributed.reinit_process_group(
                             group=None, rebuild_link=False
                         )
+                        get_world_group().barrier()
                         self.device_stopped = False
                         logger.info(f"[WorkerDecorator] Func {func.__name__} reinit process group after restart device")
                     output = func(self, *args, **kwargs)
