@@ -1,3 +1,4 @@
+from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
@@ -145,6 +146,16 @@ def test_npu_recurrent_gated_delta_rule_310_flattens_state_indices(monkeypatch):
     assert call["scale_value"] == pytest.approx(3**-0.5)
 
 
+def test_causal_conv1d_v310_metadata_inputs_are_value_dependent():
+    repo_root = Path(__file__).resolve().parents[4]
+    op_def = repo_root / "csrc" / "moe" / "causal_conv1d_v310" / "op_host" / "causal_conv1d_v310_def.cpp"
+    text = op_def.read_text(encoding="utf-8")
+
+    for input_name in ("queryStartLoc", "cacheIndices", "initialStateMode", "numAcceptedTokens"):
+        input_block = text.split(f'this->Input("{input_name}")', maxsplit=1)[1].split("this->Input", maxsplit=1)[0]
+        assert ".ValueDepend(OPTIONAL)" in input_block
+
+
 def test_gdn_310_forward_core_decode_uses_recurrent_op(monkeypatch):
     _patch_gdn_runtime(monkeypatch)
     _patch_gating(monkeypatch)
@@ -252,6 +263,7 @@ def test_gdn_310_forward_core_prefill_uses_chunk_fallback_and_updates_state(monk
     assert torch.equal(conv_kwargs["query_start_loc"], torch.tensor([0, 2, 5], dtype=torch.int64))
     assert torch.equal(conv_kwargs["cache_indices"], torch.tensor([1, 3], dtype=torch.int64))
     assert torch.equal(conv_kwargs["initial_state_mode"], torch.tensor([1, 0], dtype=torch.int64))
+    assert conv_kwargs["num_accepted_tokens"] is None
 
     chunk_call = chunk_calls[0]
     assert chunk_call["cu_seqlens"] is metadata.non_spec_query_start_loc
