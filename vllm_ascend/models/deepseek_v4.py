@@ -24,6 +24,7 @@
 # limitations under the License.
 """Inference-only DeepseekV2/DeepseekV3 model."""
 
+import importlib
 import math
 import typing
 from collections.abc import Callable, Iterable
@@ -82,12 +83,22 @@ from vllm_ascend.utils import (
     vllm_version_is,
 )
 
-if vllm_version_is("0.20.2"):
-    from vllm.model_executor.layers.deepseek_compressor import CompressorStateCache
-    from vllm.model_executor.layers.deepseek_v4_attention import DeepseekV4IndexerCache
-else:
+if typing.TYPE_CHECKING:
     from vllm.models.deepseek_v4.attention import DeepseekV4IndexerCache
     from vllm.models.deepseek_v4.compressor import CompressorStateCache
+else:
+    if vllm_version_is("0.20.2"):
+        _deepseek_compressor = typing.cast(
+            typing.Any, importlib.import_module("vllm.model_executor.layers.deepseek_compressor")
+        )
+        _deepseek_v4_attention = typing.cast(
+            typing.Any, importlib.import_module("vllm.model_executor.layers.deepseek_v4_attention")
+        )
+    else:
+        _deepseek_compressor = typing.cast(typing.Any, importlib.import_module("vllm.models.deepseek_v4.compressor"))
+        _deepseek_v4_attention = typing.cast(typing.Any, importlib.import_module("vllm.models.deepseek_v4.attention"))
+    CompressorStateCache = _deepseek_compressor.CompressorStateCache
+    DeepseekV4IndexerCache = _deepseek_v4_attention.DeepseekV4IndexerCache
 
 
 def hadamard_transform_ref(x: torch.Tensor, scale=1.0):

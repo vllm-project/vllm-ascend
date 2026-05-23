@@ -1,3 +1,6 @@
+import importlib
+from typing import Any, TYPE_CHECKING, cast
+
 import torch
 import vllm
 from vllm.config import VllmConfig, get_current_vllm_config
@@ -12,14 +15,21 @@ from vllm_ascend.attention.dsa_v1 import AscendDSABackend
 from vllm_ascend.patch.platform.patch_kv_cache_interface import AscendMLAAttentionSpec
 from vllm_ascend.utils import vllm_version_is
 
-if vllm_version_is("0.20.2"):
-    from vllm.model_executor.layers import deepseek_compressor, deepseek_v4_attention
-else:
-    from vllm.models.deepseek_v4 import attention as deepseek_v4_attention
-    from vllm.models.deepseek_v4 import compressor as deepseek_compressor
+if TYPE_CHECKING:
+    from vllm.models.deepseek_v4.attention import DeepseekV4IndexerCache
+    from vllm.models.deepseek_v4.compressor import CompressorStateCache
 
-CompressorStateCache = deepseek_compressor.CompressorStateCache
-DeepseekV4IndexerCache = deepseek_v4_attention.DeepseekV4IndexerCache
+    deepseek_compressor: Any
+    deepseek_v4_attention: Any
+else:
+    if vllm_version_is("0.20.2"):
+        deepseek_compressor = cast(Any, importlib.import_module("vllm.model_executor.layers.deepseek_compressor"))
+        deepseek_v4_attention = cast(Any, importlib.import_module("vllm.model_executor.layers.deepseek_v4_attention"))
+    else:
+        deepseek_compressor = cast(Any, importlib.import_module("vllm.models.deepseek_v4.compressor"))
+        deepseek_v4_attention = cast(Any, importlib.import_module("vllm.models.deepseek_v4.attention"))
+    CompressorStateCache = deepseek_compressor.CompressorStateCache
+    DeepseekV4IndexerCache = deepseek_v4_attention.DeepseekV4IndexerCache
 
 
 class AscendCompressorStateCache(CompressorStateCache):
