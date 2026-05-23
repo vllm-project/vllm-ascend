@@ -241,8 +241,8 @@ private:
     GlobalTensor<T> stateCacheGm_;
     GlobalTensor<T> apeGm_;
     GlobalTensor<X_T> normWeightGm_;
-    GlobalTensor<X_T> ropeSinGm_;
-    GlobalTensor<X_T> ropeCosGm_;
+    GlobalTensor<DTYPE_SIN> ropeSinGm_;
+    GlobalTensor<DTYPE_SIN> ropeCosGm_;
     GlobalTensor<X_T> cmpKvOutGm_;
 
     // ================================Local Buffer区====================================
@@ -1298,10 +1298,11 @@ __aicore__ inline void CompressorBlockVectorPerf<COMP, DTYPE_SIN>::SingleCalRope
     uint64_t SinCosOffset = globalScStart * constInfo_.ropeHeadDim;
     // sin与cos各占一半, 实际分别最多只会用8K,总占用16K
     LocalTensor<DTYPE_SIN> cosUb = inputQue1.AllocTensor<DTYPE_SIN>();
+    LocalTensor<DTYPE_SIN> sinUb;
     if constexpr (IsSameType<DTYPE_SIN, float>::value) {
-        LocalTensor<DTYPE_SIN> sinUb = cosUb[BUFFER_SIZE_BYTE_32K / 2 / sizeof(DTYPE_SIN)];
+        sinUb = cosUb[BUFFER_SIZE_BYTE_32K / 2 / sizeof(DTYPE_SIN)];
     } else {
-        LocalTensor<DTYPE_SIN> sinUb = cosUb[BUFFER_SIZE_BYTE_8K / sizeof(DTYPE_SIN)];
+        sinUb = cosUb[BUFFER_SIZE_BYTE_8K / sizeof(DTYPE_SIN)];
     }
     DataCopy(cosUb, ropeCosGm_[SinCosOffset], computeSize);
     DataCopy(sinUb, ropeSinGm_[SinCosOffset], computeSize);
