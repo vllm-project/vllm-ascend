@@ -88,12 +88,6 @@ The default workdir is `/workspace`, vLLM and vLLM Ascend code are placed in `/v
 
 ## Usage
 
-You can use ModelScope mirror to speed up download:
-
-```bash
-export VLLM_USE_MODELSCOPE=True
-```
-
 There are two ways to start vLLM on Ascend NPU:
 
 :::::{tab-set}
