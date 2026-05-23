@@ -72,3 +72,5 @@ benchmarks:
     batch_size: 512
     baseline: 95
     threshold: 3
+
+# https://github.com/vllm-project/vllm-ascend/actions/runs/26330313703/job/77515228538?pr=8956
