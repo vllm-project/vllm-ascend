@@ -295,7 +295,7 @@ Run the following from any machine that can reach the service node (replace `{No
 curl http://{NodeIP}:8000/v1/chat/completions \
   -H "Content-type: application/json" \
   -d '{
-    "model": "minimax25",
+    "model": "MiniMax-M2.5",
     "messages": [{"role": "user", "content": "Hello, who are you?"}],
     "stream": false,
     "ignore_eos": true,
