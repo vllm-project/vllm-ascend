@@ -233,6 +233,7 @@ vllm serve /path/to/weight/MiniMax-M2.5-w8a8-QuaRot \
 ```
 
 Remarks:
+
 - `--max-num-seqs` parameter can be adjusted according to actual request conditions.
 - `--max-num-batched-tokens 32768` is applicable to the input sequence length of 32k or longer.
 - `--max-num-batched-tokens 16384` is applicable to the input sequence length of 16k.
