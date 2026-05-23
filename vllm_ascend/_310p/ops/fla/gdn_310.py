@@ -32,7 +32,7 @@ from vllm_ascend.utils import enable_sp
 
 
 def _l2norm(x: torch.Tensor, eps: float = 1e-6) -> torch.Tensor:
-    return F.normalize(x, p=2, dim=-1, eps=eps).to(x.dtype)
+    return F.normalize(x.to(torch.float32), p=2, dim=-1, eps=eps).to(x.dtype)
 
 
 def _flatten_state_indices(
@@ -78,12 +78,12 @@ def npu_recurrent_gated_delta_rule_310(
         accepted_tokens = num_accepted_tokens[: actual_seq_lengths.shape[0]].to(torch.int32).contiguous()
 
     out = torch.ops._C_ascend.npu_recurrent_gated_delta_rule_310(
-        query=q.squeeze(0).contiguous(),
-        key=k.squeeze(0).contiguous(),
-        value=v.squeeze(0).contiguous(),
-        g=None if g is None else g.squeeze(0).contiguous(),
+        query=q.squeeze(0).to(torch.float16).contiguous(),
+        key=k.squeeze(0).to(torch.float16).contiguous(),
+        value=v.squeeze(0).to(torch.float16).contiguous(),
+        g=None if g is None else g.squeeze(0).to(torch.float32).contiguous(),
         gk=None,
-        beta=beta.squeeze(0).contiguous(),
+        beta=beta.squeeze(0).to(torch.float16).contiguous(),
         state=state,
         actual_seq_lengths=actual_seq_lengths,
         ssm_state_indices=flat_state_indices,
@@ -94,6 +94,10 @@ def npu_recurrent_gated_delta_rule_310(
 
 
 class AscendGatedDeltaNetAttention310(GatedDeltaNetAttention):
+    def get_state_dtype(self) -> tuple[torch.dtype, torch.dtype]:
+        conv_state_dtype, _ = super().get_state_dtype()
+        return conv_state_dtype, torch.float16
+
     def _forward_core(
         self,
         mixed_qkv: torch.Tensor,
