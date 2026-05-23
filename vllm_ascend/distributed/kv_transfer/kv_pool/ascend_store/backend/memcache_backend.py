@@ -29,6 +29,9 @@ MEMCACHE_THREAD_NAMES = {
     "grp_listen_evt",
     "ptracer_dump",
 }
+MEMCACHE_THREAD_BIND_RETRY_TIMES = 10
+MEMCACHE_THREAD_BIND_RETRY_INTERVAL_S = 0.05
+MEMCACHE_THREAD_START_WAIT_S = 0.1
 
 
 class MmcDirect(Enum):
@@ -142,13 +145,13 @@ class MemcacheBackend(Backend):
 
         handled_thread_ids: set[int] = set()
         current_pid = os.getpid()
-        for _ in range(10):
+        for _ in range(MEMCACHE_THREAD_BIND_RETRY_TIMES):
             new_thread_ids = self._list_thread_ids() - before_thread_ids - handled_thread_ids
             new_thread_ids.discard(current_pid)
             for thread_id in sorted(new_thread_ids):
                 thread_name = self._get_thread_name(thread_id)
                 if not self._is_memcache_thread(thread_name):
-                    logger.info(
+                    logger.debug(
                         "Skip non-MemCache thread name=%s tid=%d while binding MemCache threads.",
                         thread_name,
                         thread_id,
@@ -172,7 +175,7 @@ class MemcacheBackend(Backend):
                         client_cpus,
                         err,
                     )
-            time.sleep(0.05)
+            time.sleep(MEMCACHE_THREAD_BIND_RETRY_INTERVAL_S)
 
     @staticmethod
     def _set_current_thread_affinity(cpus: set[int]) -> bool:
@@ -220,7 +223,7 @@ class MemcacheBackend(Backend):
                     sorted(original_cpus),
                 )
         assert res == 0
-        time.sleep(0.1)
+        time.sleep(MEMCACHE_THREAD_START_WAIT_S)
         self._bind_new_memcache_threads(before_thread_ids, client_cpus)
 
     def set_device(self):
