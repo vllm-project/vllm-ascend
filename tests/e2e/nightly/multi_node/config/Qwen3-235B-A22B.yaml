@@ -71,4 +71,3 @@ benchmarks:
     batch_size: 512
     baseline: 95
     threshold: 3
-
