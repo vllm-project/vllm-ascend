@@ -1,11 +1,13 @@
 import functools
-import msgspec.msgpack
 
+import msgspec.msgpack
 import torch
 import torch_npu
+
+from vllm.distributed.parallel_state import get_dp_group, get_pp_group, get_world_group
 from vllm.logger import logger
 from vllm_ascend.recovery.types import ExceptionInfo
-from vllm.distributed.parallel_state import get_world_group
+
 
 def fault_recovery_decorator():
     def decorator(func):
@@ -24,6 +26,14 @@ def fault_recovery_decorator():
                             group=None, rebuild_link=False
                         )
                         get_world_group().barrier()
+                        try:
+                            get_dp_group().reinit_cpu_group()
+                        except AssertionError:
+                            pass
+                        try:
+                            get_pp_group().reinit_cpu_group()
+                        except AssertionError:
+                            pass
                         self.device_stopped = False
                         logger.info(f"[WorkerDecorator] Func {func.__name__} reinit process group after restart device")
                     output = func(self, *args, **kwargs)

@@ -209,6 +209,18 @@ class GroupCoordinatorPatch(GroupCoordinator):
         if getattr(self, "mq_broadcaster", None) is not None:
             self.mq_broadcaster = None
 
+    def reinit_cpu_group(self):
+        old_cpu_group = getattr(self, "cpu_group", None)
+        if old_cpu_group is not None:
+            torch.distributed.destroy_process_group(old_cpu_group)
+            self.cpu_group = None
+
+        new_cpu_group = torch.distributed.new_group(self.ranks, backend="gloo")
+        self.cpu_group = new_cpu_group
+        logger.info(
+            "Reinit cpu_group for %s (ranks=%s)", self.unique_name, self.ranks
+        )
+
     def all_to_all(
         self,
         input_: torch.Tensor,
