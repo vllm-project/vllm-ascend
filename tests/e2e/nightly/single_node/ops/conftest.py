@@ -2,7 +2,11 @@ import time
 from datetime import datetime
 
 import pytest
+from vllm_ascend.utils import enable_custom_op
+from vllm_ascend.ops.triton.triton_utils import init_device_properties_triton
 
+init_device_properties_triton()
+enable_custom_op()
 DURATION_THRESHOLD = 120
 SLOW_COUNT_LIMIT = 5
 

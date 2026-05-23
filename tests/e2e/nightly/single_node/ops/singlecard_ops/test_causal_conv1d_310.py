@@ -22,7 +22,7 @@ def to_int64_tuple(t):
         return (t.item(),)
     return tuple(t.tolist())
 
-
+@pytest.mark.skip(reason="Tested separately on a 310P machine.")
 @pytest.mark.parametrize("has_initial_state", [False, True])
 @pytest.mark.parametrize("silu_activation", [True])
 @pytest.mark.parametrize("has_bias", [True])
@@ -96,6 +96,7 @@ def test_ascend_causal_conv1d_310_fn(
     validate_cmp(conv_states, conv_states_ref)
 
 
+@pytest.mark.skip(reason="Tested separately on a 310P machine.")
 @pytest.mark.parametrize("itype", [torch.float16])
 @pytest.mark.parametrize("silu_activation", [True])
 @pytest.mark.parametrize("has_bias", [False, True])

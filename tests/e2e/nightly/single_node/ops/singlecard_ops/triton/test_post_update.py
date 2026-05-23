@@ -5,7 +5,7 @@ import torch
 from vllm.v1.worker.gpu.input_batch import post_update as post_update_gpu
 
 from vllm_ascend.worker.v2.input_batch import post_update as post_update_npu
-from vllm_ascend.ops.triton.triton_utils import init_device_properties_triton
+
 
 def generate_test_data(
     num_reqs: int, max_num_reqs: int, vocab_size: int, num_speculative_steps: int, device: str

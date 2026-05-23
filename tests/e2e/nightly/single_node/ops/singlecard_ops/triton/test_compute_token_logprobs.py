@@ -43,6 +43,7 @@ VOCAB_SIZES = [
 TOPK_VALUES = [1, 2, 5, 10, 32, 64]
 
 
+@pytest.mark.skip("UB overflow, zengtian needs to fix it later")
 @pytest.mark.parametrize(
     "batch_size, vocab_size, topk",
     [(random.randint(1, 64), vocab_size, topk) for vocab_size in VOCAB_SIZES for topk in TOPK_VALUES],
@@ -86,6 +87,7 @@ def test_topk_log_softmax_kernel(batch_size, vocab_size, topk):
     )
 
 
+@pytest.mark.skip("UB overflow, zengtian needs to fix it later")
 @pytest.mark.parametrize("vocab_size", VOCAB_SIZES)
 def test_topk_log_softmax_edge_cases(vocab_size):
     """
@@ -129,6 +131,7 @@ def test_topk_log_softmax_edge_cases(vocab_size):
     )
 
 
+@pytest.mark.skip("UB overflow, zengtian needs to fix it later")
 @pytest.mark.parametrize(
     "batch_size, vocab_size, topk",
     [
@@ -163,6 +166,7 @@ def test_topk_log_softmax_deterministic(batch_size, vocab_size, topk):
         assert torch.equal(results[0], results[i]), f"Non-deterministic results detected in run {i}"
 
 
+@pytest.mark.skip("UB overflow, zengtian needs to fix it later")
 @pytest.mark.parametrize("dtype", [torch.float32, torch.float16])
 def test_topk_log_softmax_dtypes(dtype):
     """

@@ -3,7 +3,6 @@ import gc
 import pytest
 import torch
 
-from vllm_ascend.ops.triton.triton_utils import init_device_properties_triton
 
 NUM_TOKENS = [1, 4096]
 NUM_QKV_HEADS = [(2, 1), (16, 2)]
@@ -234,7 +233,6 @@ def test_split_qkv_rmsnorm_mrope(
     has_gate: bool,
 ):
     torch.set_default_device(device)
-    init_device_properties_triton()
     rope_dim = 2 * sum(mrope_section)
     q_size = num_q_heads * head_size
     kv_size = num_kv_heads * head_size

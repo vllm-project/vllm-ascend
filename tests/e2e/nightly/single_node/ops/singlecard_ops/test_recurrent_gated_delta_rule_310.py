@@ -81,6 +81,7 @@ def golden_recurrent_gated_delta_rule(
     return o.to(query.dtype), initial_state.to(query.dtype)
 
 
+@pytest.mark.skip(reason="Tested separately on a 310P machine.")
 @pytest.mark.parametrize("batch_size", [1, 4, 8])
 @pytest.mark.parametrize("mtp", [1, 2])
 @pytest.mark.parametrize("headnum", [(4, 8), (8, 16), (16, 32)])

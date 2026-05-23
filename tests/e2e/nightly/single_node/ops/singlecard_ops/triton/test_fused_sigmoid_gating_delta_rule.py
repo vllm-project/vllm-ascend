@@ -18,7 +18,6 @@ def test_triton_fusion_ops():
     a_log = torch.tensor([-2.6875, -3.2031, -3.3438, -2.7812, -3.0625, -4.0312, -5.3750, 5.7188]).bfloat16().npu()
     dt_bias = torch.tensor([-4.7812, -5.0938, -5.5000, 9.4375, 7.6250, -4.3750, -3.0938, 0.9688]).bfloat16().npu()
     ssm_state1 = torch.ones(1, 8, 128, 128, dtype=torch.bfloat16).npu()
-    init_device_properties_triton()
     core_attn_out_non_spec_fused = fused_sigmoid_gating_delta_rule_update(
         A_log=a_log.contiguous(),
         dt_bias=dt_bias.contiguous(),

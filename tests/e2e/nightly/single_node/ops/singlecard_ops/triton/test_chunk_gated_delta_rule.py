@@ -5,13 +5,9 @@ from unittest.mock import MagicMock, patch
 from tests.ut.base import PytestBase
 from vllm_ascend._310p.ops.fla.chunk_gated_delta_rule import chunk_gated_delta_rule_pytorch
 from vllm_ascend.ops.triton.fla.chunk import chunk_gated_delta_rule
-from vllm_ascend.ops.triton.triton_utils import init_device_properties_triton
-from vllm_ascend.utils import enable_custom_op
 
 class TestChunkGatedDeltaRule(PytestBase):
     def test_triton_fusion_ops(self, mock_moe_env):
-        init_device_properties_triton()
-        enable_custom_op()
         mock_attn_metadata = MagicMock()
         mock_attn_metadata.num_decodes = 1
         mock_forward_context = MagicMock()
@@ -27,8 +23,8 @@ class TestChunkGatedDeltaRule(PytestBase):
 
         mock_pcp_group = MagicMock()
         mock_pcp_group.world_size = 1
-        with patch('vllm_ascend.ops.triton.fla.chunk.get_forward_context', return_value=mock_forward_context):
-            with patch('vllm_ascend.ops.triton.fla.chunk.get_pcp_group', return_value=mock_pcp_group):
+        with patch('vllm_ascend.ops.triton.fla.chunk.get_forward_context', return_value=mock_forward_context), \
+            patch('vllm_ascend.ops.triton.fla.chunk.get_pcp_group', return_value=mock_pcp_group):
                 (
                     core_attn_out_non_spec,
                     last_recurrent_state,
