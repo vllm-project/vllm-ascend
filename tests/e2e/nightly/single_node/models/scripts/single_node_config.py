@@ -30,7 +30,7 @@ class SingleNodeConfig:
     prompts: list[str] = field(default_factory=lambda: PROMPTS)
     api_keyword_args: dict[str, Any] = field(default_factory=lambda: API_KEYWORD_ARGS)
     benchmarks: dict[str, Any] = field(default_factory=dict)
-    server_cmd: list[str] = field(default_factory=list)
+    server_cmd: list = field(default_factory=list)
     test_content: list[str] = field(default_factory=lambda: ["completion"])
     service_mode: str = "openai"
     epd_server_cmds: list[list[str]] = field(default_factory=list)
@@ -38,7 +38,7 @@ class SingleNodeConfig:
     extra_config: dict[str, Any] = field(default_factory=dict)
 
     def __post_init__(self) -> None:
-        port_keys = ["SERVER_PORT", "ENCODE_PORT", "PD_PORT", "PROXY_PORT"]
+        port_keys = ["SERVER_PORT", "ENCODE_PORT", "PD_PORT", "PROXY_PORT", "SERVER_PORT_2"]
         for env_key in port_keys:
             if self.envs.get(env_key) in ["DEFAULT_PORT", None]:
                 self.envs[env_key] = str(get_open_port())
@@ -54,7 +54,10 @@ class SingleNodeConfig:
         if self.test_content is None:
             self.test_content = []
 
-        self.server_cmd = self._expand_values(self.server_cmd or [], self.envs)
+        if self.server_cmd and isinstance(self.server_cmd[0], list):
+            self.server_cmd = [self._expand_values(cmd, self.envs) for cmd in self.server_cmd]
+        else:
+            self.server_cmd = self._expand_values(self.server_cmd or [], self.envs)
         self.epd_server_cmds = [self._expand_values(cmd, self.envs) for cmd in self.epd_server_cmds]
         self.epd_proxy_args = self._expand_values(self.epd_proxy_args or [], self.envs)
 
@@ -79,8 +82,19 @@ class SingleNodeConfig:
         return int(value)
 
     @property
+    def server_cmds(self) -> list[list[str]]:
+        """Return server_cmd as a list of command-arg lists (always nested)."""
+        if self.server_cmd and isinstance(self.server_cmd[0], list):
+            return self.server_cmd
+        return [self.server_cmd]
+
+    @property
     def server_port(self) -> int:
         return self._get_required_port("SERVER_PORT")
+
+    @property
+    def server_port2(self) -> int:
+        return self._get_required_port("SERVER_PORT_2")
 
     @property
     def encode_port(self) -> int:
@@ -164,7 +178,11 @@ class SingleNodeConfigLoader:
         for case in cases:
             server_cmd = case.get("server_cmd", [])
             server_cmd_extra = case.get("server_cmd_extra", [])
-            full_cmd = list(server_cmd) + list(server_cmd_extra)
+            if server_cmd and isinstance(server_cmd[0], list):
+                full_cmd = server_cmd
+            else:
+                full_cmd = list(server_cmd) + list(server_cmd_extra)
+
             extra_case_fields = {key: value for key, value in case.items() if key not in cls.STANDARD_CASE_FIELDS}
 
             # Safe parsing mapping
