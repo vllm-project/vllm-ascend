@@ -358,6 +358,14 @@ class AscendDSAMetadataBuilder(AttentionMetadataBuilder[AscendDSAMetadata]):
         self.slot_mapping = torch.zeros(
             (vllm_config.scheduler_config.max_num_batched_tokens, 2), dtype=torch.int32, device=self.device
         )
+        self.a5_decode_slot_mapping = None
+        if get_ascend_device_type() in {AscendDeviceType.A5}:
+            self.a5_decode_slot_mapping = torch.full(
+                (vllm_config.scheduler_config.max_num_batched_tokens,),
+                -1,
+                dtype=torch.int32,
+                device=self.device,
+            )
 
     @classmethod
     def get_cudagraph_support(
@@ -894,20 +902,27 @@ class AscendDSAMetadataBuilder(AttentionMetadataBuilder[AscendDSAMetadata]):
                 "compressed_tokens_start_" + str(self.compressor_ratio)
             ]
 
-        slot_mapping = self.slot_mapping[:compressed_tokens_start]
-
         tmp_compressor_ration = self.compressor_ratio if self.compressor_ratio != 0 else 1
         target_shape = min(
             self.num_decode_tokens,
             self.num_decode_tokens // tmp_compressor_ration + self.num_decodes)
-        pad_size = target_shape - slot_mapping.shape[0]
-        if pad_size > 0:
-            if slot_mapping.ndim == 1:
-                slot_mapping = F.pad(slot_mapping, (0, pad_size), value=-1)
-            else:
-                slot_mapping = F.pad(slot_mapping, (0, 0, 0, pad_size), value=-1)
+        if get_ascend_device_type() in {AscendDeviceType.A5}:
+            assert self.a5_decode_slot_mapping is not None
+            slot_mapping = self.a5_decode_slot_mapping[:target_shape]
+            slot_mapping.fill_(-1)
+            valid_slot_mapping_len = min(compressed_tokens_start, target_shape)
+            if valid_slot_mapping_len > 0:
+                slot_mapping[:valid_slot_mapping_len].copy_(self.slot_mapping[:valid_slot_mapping_len])
         else:
-            slot_mapping = slot_mapping[:target_shape]
+            slot_mapping = self.slot_mapping[:compressed_tokens_start]
+            pad_size = target_shape - slot_mapping.shape[0]
+            if pad_size > 0:
+                if slot_mapping.ndim == 1:
+                    slot_mapping = F.pad(slot_mapping, (0, pad_size), value=-1)
+                else:
+                    slot_mapping = F.pad(slot_mapping, (0, 0, 0, pad_size), value=-1)
+            else:
+                slot_mapping = slot_mapping[:target_shape]
 
         assert self.start_pos_decode is not None
         self.start_pos_decode.fill_(0)
