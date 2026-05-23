@@ -1703,34 +1703,36 @@ class AscendDSAImpl(DSAAttentionImpl):
             compressor_prefill_metadata = _require_prefill_metadata(compressor_attn_metadata)
             compressor_state_prefill_metadata = _require_prefill_metadata(compressor_kv_state_metadata)
             compress_topk_idxs = None
-            if self.multistream_dsv4_dsa_overlap:
-                compress_topk_idxs = self.cv_indexer_select_qli(  # multistream version
-                    x=hidden_states,
-                    qr=qr,
-                    kv_cache=kv_cache,
-                    attn_metadata=attn_metadata,
-                    cos=cos,
-                    sin=sin,
-                    compressed_cos=compress_cos,
-                    compressed_sin=compress_sin,
-                    actual_seq_lengths_query=actual_seq_lengths_query,
-                    actual_seq_lengths_key=actual_seq_lengths_key,
-                    with_prefill=True,
-                )
-            else:
-                compress_topk_idxs = self.indexer_select_qli(  # original version
-                    x=hidden_states,
-                    qr=qr,
-                    kv_cache=kv_cache,
-                    attn_metadata=attn_metadata,
-                    cos=cos,
-                    sin=sin,
-                    compressed_cos=compress_cos,
-                    compressed_sin=compress_sin,
-                    actual_seq_lengths_query=actual_seq_lengths_query,
-                    actual_seq_lengths_key=actual_seq_lengths_key,
-                    with_prefill=True,
-                )
+            # Only call indexer_select_qli when compress_ratio == 4 (requires 5 elements in attn_metadata)
+            if self.compress_ratio == 4:
+                if self.multistream_dsv4_dsa_overlap:
+                    compress_topk_idxs = self.cv_indexer_select_qli(  # multistream version
+                        x=hidden_states,
+                        qr=qr,
+                        kv_cache=kv_cache,
+                        attn_metadata=attn_metadata,
+                        cos=cos,
+                        sin=sin,
+                        compressed_cos=compress_cos,
+                        compressed_sin=compress_sin,
+                        actual_seq_lengths_query=actual_seq_lengths_query,
+                        actual_seq_lengths_key=actual_seq_lengths_key,
+                        with_prefill=True,
+                    )
+                else:
+                    compress_topk_idxs = self.indexer_select_qli(  # original version
+                        x=hidden_states,
+                        qr=qr,
+                        kv_cache=kv_cache,
+                        attn_metadata=attn_metadata,
+                        cos=cos,
+                        sin=sin,
+                        compressed_cos=compress_cos,
+                        compressed_sin=compress_sin,
+                        actual_seq_lengths_query=actual_seq_lengths_query,
+                        actual_seq_lengths_key=actual_seq_lengths_key,
+                        with_prefill=True,
+                    )
 
             coff = 2 if self.compressor_overlap else 1
 
@@ -1859,9 +1861,6 @@ class AscendDSAImpl(DSAAttentionImpl):
         sin = common_decode_metadata.sin[layer_name]
         actual_seq_lengths_query = common_decode_metadata.query_start_loc
         actual_seq_lengths_key = common_decode_metadata.seq_lens
-        wait_hidden_state_cal_event = (
-            torch.npu.current_stream().record_event() if self.multistream_dsa_preprocess else None
-        )
 
         if self.multistream_dsv4_dsa_overlap:
             # mla prolog: q + kv dual-stream parallel
