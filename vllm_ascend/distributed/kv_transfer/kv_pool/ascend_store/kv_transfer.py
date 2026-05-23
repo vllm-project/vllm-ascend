@@ -1,3 +1,4 @@
+import ctypes
 import queue
 import threading
 import time
@@ -330,8 +331,17 @@ class KVTransferThread(threading.Thread):
                 return res
         return 0
 
+    def _set_os_thread_name(self) -> None:
+        try:
+            libc = ctypes.CDLL("libc.so.6")
+            # Linux task comm is limited to 15 visible bytes plus NUL.
+            libc.prctl(15, self.name[:15].encode(), 0, 0, 0)
+        except Exception:
+            pass
+
     def run(self):
         """Run the thread to handle KV cache transfer requests."""
+        self._set_os_thread_name()
         self.m_store.set_device()
         self.ready_event.set()
         while True:
