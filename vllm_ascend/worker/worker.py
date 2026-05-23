@@ -19,6 +19,7 @@
 
 import copy
 import gc
+import time
 from types import NoneType
 
 import torch
@@ -591,15 +592,18 @@ class NPUWorker(WorkerBase):
         if get_ascend_config().enable_cpu_binding:
             try:
                 bind_cpus(self.local_rank)
-                if has_kv_transfer_group():
-                    connector = get_kv_transfer_group()
-                    if hasattr(connector, "rebind_kv_transfer_threads"):
-                        connector.rebind_kv_transfer_threads()
-                    if hasattr(connector, "init_backend"):
-                        connector.init_backend()
-                self.log_worker_thread_cpu_affinity()
             except Exception as e:
                 logger.warning(f"Bind cpus failed in rank{self.local_rank}: {e} Skip binding cpu.")
+        if has_kv_transfer_group():
+            try:
+                connector = get_kv_transfer_group()
+                if hasattr(connector, "init_backend"):
+                    connector.init_backend()
+            except Exception as e:
+                logger.warning(f"Init KV transfer backend failed in rank{self.local_rank}: {e}")
+            finally:
+                time.sleep(0.1)
+                self.log_worker_thread_cpu_affinity()
         # Reset the seed to ensure that the random state is not affected by
         # the model initialization and profiling.
         set_random_seed(self.model_config.seed)

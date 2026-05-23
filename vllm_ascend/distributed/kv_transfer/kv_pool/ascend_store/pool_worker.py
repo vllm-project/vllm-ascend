@@ -178,6 +178,12 @@ class KVPoolWorker:
 
         self.kv_send_thread: KVTransferThread | None = None
         self.kv_recv_thread: KVTransferThread | None = None
+        self._registered_buffer_ptrs: list[int] = []
+        self._registered_buffer_lengths: list[int] = []
+        self._kv_caches_registered = False
+        self._backend_initialized = False
+        self._buffers_registered = False
+        self._transfer_threads_started = False
 
         self.layer_load_tasks: list[list[LayerTransferTask]] = [[] for i in range(self.num_layers)]
         self.layer_save_tasks: list[list[LayerTransferTask]] = [[] for i in range(self.num_layers)]
@@ -243,47 +249,23 @@ class KVPoolWorker:
         )
 
     def init_backend(self) -> None:
-        if hasattr(self.m_store, "init_store"):
-            self.m_store.init_store()
+        if not self._backend_initialized:
+            if hasattr(self.m_store, "init_store"):
+                self.m_store.init_store()
+            self._backend_initialized = True
+        if not self._kv_caches_registered:
+            return
+        if not self._buffers_registered:
+            self.m_store.register_buffer(
+                self._registered_buffer_ptrs,
+                self._registered_buffer_lengths,
+            )
+            self._buffers_registered = True
+        self._start_kv_transfer_threads()
 
-    def register_kv_caches(self, kv_caches: dict[str, torch.Tensor]):
-        self.init_backend()
-        _, first_kv_cache_tuple = next(iter(kv_caches.items()))
-        first_kv_cache = first_kv_cache_tuple[0]
-
-        self.num_blocks = first_kv_cache.shape[0]
-        logger.info("num_blocks: %s", self.num_blocks)
-        block_rank = 3
-        self.block_len = []
-        for i in range(len(first_kv_cache_tuple)):
-            block_shape = first_kv_cache_tuple[i].shape[-block_rank:]
-            logger.info("block_shape: %s", block_shape)
-            self.block_len.append(first_kv_cache_tuple[i].element_size() * math.prod(block_shape))
-
-        logger.info(
-            "Registering KV_Caches. use_mla: %s, use_sparse: %s, shape %s",
-            self.use_mla,
-            self.use_sparse,
-            first_kv_cache.shape,
-        )
-
-        self.kv_caches_base_addr = []
-        ptrs = []
-        lengths = []
-        length = len(self.block_len)
-        for cache_or_caches in kv_caches.values():
-            for i, cache in enumerate(cache_or_caches, 0):
-                base_addr = cache.data_ptr()
-                if base_addr not in self.kv_caches_base_addr:
-                    region_len = self.num_blocks * self.block_len[i % length]
-                    ptrs.append(base_addr)
-                    lengths.append(region_len)
-                self.kv_caches_base_addr.append(base_addr)
-
-        self.m_store.register_buffer(ptrs, lengths)
-        self.page_size_bytes = sum(self.block_len)
-        self.token_database.set_kv_caches_base_addr(self.kv_caches_base_addr)
-        self.token_database.set_block_len(self.block_len)
+    def _start_kv_transfer_threads(self) -> None:
+        if self._transfer_threads_started:
+            return
 
         if self.use_layerwise:
             self.get_event = threading.Event()
@@ -313,6 +295,7 @@ class KVPoolWorker:
                     self.layerwise_max_transfer_bytes,
                 )
                 self.kv_send_thread.start()
+                ready_event_sending.wait()
                 self._bind_kv_transfer_thread(
                     self.kv_send_thread,
                     0,
@@ -364,6 +347,7 @@ class KVPoolWorker:
                     self.enable_kv_events,
                 )
                 self.kv_send_thread.start()
+                ready_event_sending.wait()
             if self.load_async:
                 ready_event = threading.Event()
                 self.kv_recv_thread = KVCacheStoreRecvingThread(
@@ -377,6 +361,49 @@ class KVPoolWorker:
                 )
                 self.kv_recv_thread.start()
                 ready_event.wait()
+        self._transfer_threads_started = True
+
+    def register_kv_caches(self, kv_caches: dict[str, torch.Tensor]):
+        _, first_kv_cache_tuple = next(iter(kv_caches.items()))
+        first_kv_cache = first_kv_cache_tuple[0]
+
+        self.num_blocks = first_kv_cache.shape[0]
+        logger.info("num_blocks: %s", self.num_blocks)
+        block_rank = 3
+        self.block_len = []
+        for i in range(len(first_kv_cache_tuple)):
+            block_shape = first_kv_cache_tuple[i].shape[-block_rank:]
+            logger.info("block_shape: %s", block_shape)
+            self.block_len.append(first_kv_cache_tuple[i].element_size() * math.prod(block_shape))
+
+        logger.info(
+            "Registering KV_Caches. use_mla: %s, use_sparse: %s, shape %s",
+            self.use_mla,
+            self.use_sparse,
+            first_kv_cache.shape,
+        )
+
+        self.kv_caches_base_addr = []
+        ptrs = []
+        lengths = []
+        length = len(self.block_len)
+        for cache_or_caches in kv_caches.values():
+            for i, cache in enumerate(cache_or_caches, 0):
+                base_addr = cache.data_ptr()
+                if base_addr not in self.kv_caches_base_addr:
+                    region_len = self.num_blocks * self.block_len[i % length]
+                    ptrs.append(base_addr)
+                    lengths.append(region_len)
+                self.kv_caches_base_addr.append(base_addr)
+
+        self.page_size_bytes = sum(self.block_len)
+        self.token_database.set_kv_caches_base_addr(self.kv_caches_base_addr)
+        self.token_database.set_block_len(self.block_len)
+        self._registered_buffer_ptrs = ptrs
+        self._registered_buffer_lengths = lengths
+        self._kv_caches_registered = True
+        if self._backend_initialized:
+            self.init_backend()
 
     def start_load_kv(self, metadata: AscendConnectorMetadata):
         self.current_layer = 0
