@@ -155,6 +155,53 @@ class NPUWorker(WorkerBase):
             signal.signal(signal.SIGTERM, signal_handler)
             signal.signal(signal.SIGINT, signal_handler)
 
+    @staticmethod
+    def _read_task_cpu_affinity(pid: str, task_id: str) -> tuple[str, str]:
+        comm_path = f"/proc/{pid}/task/{task_id}/comm"
+        status_path = f"/proc/{pid}/task/{task_id}/status"
+        name = ""
+        cpus_allowed = ""
+        try:
+            with open(comm_path) as f:
+                name = f.read().strip()
+            with open(status_path) as f:
+                for line in f:
+                    if line.startswith("Cpus_allowed_list"):
+                        cpus_allowed = line.split(":", 1)[1].strip()
+                        break
+        except OSError as err:
+            logger.warning("Failed to read CPU affinity for pid=%s tid=%s: %s", pid, task_id, err)
+        return name, cpus_allowed
+
+    def log_worker_thread_cpu_affinity(self) -> None:
+        import os
+
+        pid = str(os.getpid())
+        task_dir = f"/proc/{pid}/task"
+        try:
+            process_name, process_cpus = self._read_task_cpu_affinity(pid, pid)
+            task_ids = sorted(os.listdir(task_dir), key=int)
+        except OSError as err:
+            logger.warning("Failed to list worker threads for pid=%s: %s", pid, err)
+            return
+
+        logger.info(
+            "[worker_cpu_bind_result] process_name=%s pid=%s cpus=%s thread_count=%d",
+            process_name,
+            pid,
+            process_cpus,
+            len(task_ids),
+        )
+        for task_id in task_ids:
+            name, cpus_allowed = self._read_task_cpu_affinity(pid, task_id)
+            logger.info(
+                "[worker_cpu_bind_result] thread_name=%s pid=%s tid=%s cpus=%s",
+                name,
+                pid,
+                task_id,
+                cpus_allowed,
+            )
+
     def uninstall_static_kernel(self):
         import fcntl
         import os
@@ -548,6 +595,9 @@ class NPUWorker(WorkerBase):
                     connector = get_kv_transfer_group()
                     if hasattr(connector, "rebind_kv_transfer_threads"):
                         connector.rebind_kv_transfer_threads()
+                    if hasattr(connector, "init_backend"):
+                        connector.init_backend()
+                self.log_worker_thread_cpu_affinity()
             except Exception as e:
                 logger.warning(f"Bind cpus failed in rank{self.local_rank}: {e} Skip binding cpu.")
         # Reset the seed to ensure that the random state is not affected by

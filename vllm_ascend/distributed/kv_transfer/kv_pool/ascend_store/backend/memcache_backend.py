@@ -26,6 +26,7 @@ class MemcacheBackend(Backend):
         memcache_client_cpus=None,
         local_rank: int | None = None,
         init_bm: bool = True,
+        defer_init: bool = False,
     ):
         try:
             from memcache_hybrid import DistributedObjectStore  # type: ignore
@@ -36,17 +37,12 @@ class MemcacheBackend(Backend):
                 "to run vLLM with MemcacheConnector."
             ) from e
         try:
-            soc_version = get_ascend_device_type()
-            if init_bm and soc_version in {AscendDeviceType.A2}:
-                tmp_tensor = torch.zeros(1, device="npu")
-                output_tensor_list = [torch.empty_like(tmp_tensor) for _ in range(torch.distributed.get_world_size())]
-                torch.distributed.all_gather(output_tensor_list, tmp_tensor, group=get_world_group().device_group)
             self.local_rank = local_rank if local_rank is not None else get_world_group().local_rank
-            self.store = DistributedObjectStore()
-            set_memcache_client_cpu_affinity(
-                self.store, self.local_rank, memcache_client_cpus)
-            res = self.store.init(self.local_rank, init_bm=init_bm)
-            assert res == 0
+            self.memcache_client_cpus = memcache_client_cpus
+            self._distributed_object_store_cls = DistributedObjectStore
+            self.store = None
+            if not defer_init:
+                self.init_store(init_bm=init_bm)
         except ValueError as e:
             logger.error("Configuration loading failed: %s", e)
             raise
@@ -60,6 +56,20 @@ class MemcacheBackend(Backend):
         # the world group exists and must not initialize memcache storage, so
         # keep the old device_id=0/init_bm=False behavior here.
         return cls(parallel_config, local_rank=0, init_bm=False)
+
+    def init_store(self, init_bm: bool = True):
+        if self.store is not None:
+            return
+        soc_version = get_ascend_device_type()
+        if init_bm and soc_version in {AscendDeviceType.A2}:
+            tmp_tensor = torch.zeros(1, device="npu")
+            output_tensor_list = [torch.empty_like(tmp_tensor) for _ in range(torch.distributed.get_world_size())]
+            torch.distributed.all_gather(output_tensor_list, tmp_tensor, group=get_world_group().device_group)
+        self.store = self._distributed_object_store_cls()
+        set_memcache_client_cpu_affinity(
+            self.store, self.local_rank, self.memcache_client_cpus)
+        res = self.store.init(self.local_rank, init_bm=init_bm)
+        assert res == 0
 
     def set_device(self):
         device = torch.device(f"npu:{self.local_rank}")

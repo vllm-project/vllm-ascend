@@ -165,6 +165,7 @@ class KVPoolWorker:
             self.m_store = real_backend(  # type: ignore[misc]
                 parallel_config,
                 extra_config.get("memcache_client_cpus"),
+                defer_init=True,
             )
         else:
             self.m_store = real_backend(  # type: ignore[misc]
@@ -241,7 +242,12 @@ class KVPoolWorker:
             "layerwise recv",
         )
 
+    def init_backend(self) -> None:
+        if hasattr(self.m_store, "init_store"):
+            self.m_store.init_store()
+
     def register_kv_caches(self, kv_caches: dict[str, torch.Tensor]):
+        self.init_backend()
         _, first_kv_cache_tuple = next(iter(kv_caches.items()))
         first_kv_cache = first_kv_cache_tuple[0]
 
