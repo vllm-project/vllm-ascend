@@ -164,7 +164,6 @@ class RasDPEngineCoreProc(DPEngineCoreProc):
                 exception_occurred = True
                 continue
             if exception_occurred:
-                exception_occurred = False
                 if self.batch_queue is not None:
                     while self.batch_queue:
                         future, _, _ = self.batch_queue.pop()
@@ -177,8 +176,9 @@ class RasDPEngineCoreProc(DPEngineCoreProc):
                     logger.info("[RAS][engine=%d] batch_queue drained", self.dp_rank)
                 self.scheduler.reset_prefix_cache(reset_running_requests=True)
             try:
-                self._process_input_queue()
-
+                if not exception_occurred:
+                    self._process_input_queue()
+                exception_occurred = False
                 if self.eep_scaling_state is not None:
                     _ = self.eep_scaling_state.progress()
                     if self.eep_scaling_state.is_complete():
