@@ -279,7 +279,7 @@ class AscendMoERunner(MoERunner):
             MoECommType.ALLTOALL,
             MoECommType.MC2,
             MoECommType.FUSED_MC2,
-        }
+        } or (moe_comm_type == MoECommType.ALLGATHER and _EXTRA_CTX.flash_comm_v1_enabled)
 
     def _maybe_reduce_shared_expert_output(
         self,
