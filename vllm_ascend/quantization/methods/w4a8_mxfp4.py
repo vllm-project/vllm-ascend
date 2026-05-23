@@ -207,6 +207,7 @@ class AscendW4A8MXFPDynamicFusedMoEMethod:
             custom_routing_function=custom_routing_function,
             scoring_func=scoring_func,
             e_score_correction_bias=e_score_correction_bias,
+            routed_scaling_factor=routed_scaling_factor,
             num_experts=num_experts,
             tid2eid=tid2eid)
 
