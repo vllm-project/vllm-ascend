@@ -43,7 +43,7 @@ def register():
 
 def register_connector():
     _ensure_global_patch()
-
+    
     from vllm_ascend.distributed.ec_transfer import register_ec_connector
     from vllm_ascend.distributed.kv_transfer import register_connector
 
@@ -72,4 +72,8 @@ def register_service_profiling():
 def register_model():
     from .models import register_model
 
+<<<<<<< HEAD
     register_model()
+=======
+    register_model()
+>>>>>>> 315b474a (epd disaggregation enable mooncake store backend)
