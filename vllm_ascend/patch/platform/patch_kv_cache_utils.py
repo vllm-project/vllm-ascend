@@ -12,6 +12,7 @@ from vllm.v1.core.kv_cache_utils import (
     get_kv_cache_groups,
     get_uniform_page_size,
     may_override_num_blocks,
+    get_num_blocks,
 )
 from vllm.v1.kv_cache_interface import (
     KVCacheConfig,
@@ -59,27 +60,6 @@ def get_layerwise_storage_indices(num_layers: int) -> list[list[int]]:
                         layerwise_config.num_shared_buffers].append(layer_index)
         reused_layer_index += 1
     return [indices for indices in storage_indices if indices]
-
-
-def get_num_blocks(
-    vllm_config: VllmConfig,
-    num_layers: int,
-    available_memory: int,
-    page_size: int,
-) -> int:
-    """
-    Get the number of kv cache blocks.
-
-    Args:
-        vllm_config: The global VllmConfig
-        num_layers: The number of layers
-        available_memory: Memory available for KV cache in bytes.
-        page_size: The page size of the KV cache.
-    """
-    num_blocks = int(available_memory // page_size // num_layers)
-    num_blocks = max(num_blocks, 0)
-    num_blocks = may_override_num_blocks(vllm_config, num_blocks)
-    return num_blocks
 
 
 def get_kv_cache_config_from_groups(
