@@ -13,7 +13,7 @@ import torch
 from vllm.triton_utils import tl, triton
 
 from vllm_ascend.device.device_op import DeviceOperator
-from vllm_ascend.ops.triton.triton_utils import extract_slice, insert_slice
+from vllm_ascend.ops.triton.triton_utils import insert_slice
 
 from .utils import prepare_chunk_indices
 

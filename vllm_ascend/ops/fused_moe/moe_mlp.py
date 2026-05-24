@@ -31,8 +31,6 @@ from vllm_ascend.utils import (
     dispose_tensor,
     enable_custom_op,
     get_weight_prefetch_method,
-    get_ascend_device_type,
-    AscendDeviceType
 )
 
 
