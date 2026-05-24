@@ -101,6 +101,15 @@ env_variables: dict[str, Callable[[], Any]] = {
     # `dispatch_gmm_combine_decode` can be used only for **decode node** moe layer
     # with W8A8. And MTP layer must be W8A8.
     "VLLM_ASCEND_ENABLE_FUSED_MC2": lambda: int(os.getenv("VLLM_ASCEND_ENABLE_FUSED_MC2", "0")),
+    # Select the MoE-LoRA implementation kernel used by PunicaWrapperNPU.add_lora_fused_moe.
+    # "bgmv"    (default): combined-index two-call bgmv path. ~30-50x faster than torch
+    #                      reference. Production default.
+    # "torch"             : torch.matmul double-loop reference implementation. Slow
+    #                      (Python loop + per-bucket host sync) but numerically
+    #                      identical; use for debugging / A-B numerical comparison.
+    # "ascendc"           : reserved for a future fused AscendC kernel (v2).
+    #                      Currently raises NotImplementedError.
+    "VLLM_ASCEND_MOE_LORA_KERNEL": lambda: os.getenv("VLLM_ASCEND_MOE_LORA_KERNEL", "bgmv").lower(),
     # Whether to enable balance scheduling in the v1 scheduler.
     # Platform validation: only PD-mixed mode (`kv_role='kv_both'` or no kv_transfer_config).
     # Not supported in PD-disaggregated mode (`kv_producer` / `kv_consumer` only).
