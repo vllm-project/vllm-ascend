@@ -144,15 +144,23 @@ def chunk_gated_delta_rule_fwd(
         else:
             updated_h_state = updated_state[get_pcp_group().rank_in_group - 1, ...]
 
-        h = chunk_fwd_o_update(
-            q=q,
-            v=v_new,
-            h=h,
-            h_update=h_update,
-            updated_h_state=updated_h_state,
-            cu_seqlens=cu_seqlens,
-            chunk_offsets=chunk_offsets_chunk64,
-        )
+        if get_pcp_group().rank_in_group > 0:
+            rerun_initial_state = initial_state.clone()
+            prefill_slice = slice(num_decodes, final_state.shape[0])
+            rerun_initial_state[prefill_slice] = updated_h_state[prefill_slice]
+            h, v_new, _ = chunk_gated_delta_rule_fwd_h(
+                k=k,
+                w=w,
+                u=u,
+                g=g,
+                initial_state=rerun_initial_state,
+                output_final_state=True,
+                cu_seqlens=cu_seqlens,
+                chunk_indices=chunk_indices_chunk64,
+                chunk_offsets=chunk_offsets_chunk64,
+            )
+            h = h.transpose(1, 2).contiguous()
+            v_new = v_new.transpose(1, 2).contiguous()
 
     o_ascendc = torch.ops._C_ascend.chunk_fwd_o(
         q_ascendc,
