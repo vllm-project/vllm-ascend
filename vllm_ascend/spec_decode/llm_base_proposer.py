@@ -88,6 +88,63 @@ def split_inputs_tp_to_sp(hidden_states, out):
     return out[:padded_num_tokens_per_rank]
 
 
+class _FusedModelWithMTP:
+    """Run main model forward and MTP draft steps inside one ACL graph."""
+
+    def __init__(self, raw_model: nn.Module, drafter: "AscendSpecDecodeBaseProposer"):
+        self.raw_model = raw_model
+        self.drafter = drafter
+        num_spec_tokens = drafter.num_speculative_tokens
+        max_num_reqs = drafter.runner.max_num_reqs
+        device = drafter.device
+        self.logits_indices_buf = torch.zeros(
+            max_num_reqs * (1 + num_spec_tokens), dtype=torch.int64, device=device
+        )
+        self.draft_token_ids_buf = torch.zeros(
+            (max_num_reqs, num_spec_tokens), dtype=torch.int64, device=device
+        )
+
+    def __getattr__(self, key: str):
+        return getattr(self.raw_model, key)
+
+    def __call__(
+        self,
+        input_ids: torch.Tensor,
+        positions: torch.Tensor,
+        intermediate_tensors=None,
+        inputs_embeds: torch.Tensor | None = None,
+        **kwargs,
+    ) -> torch.Tensor:
+        hidden_states = self.raw_model(
+            input_ids=input_ids,
+            positions=positions,
+            intermediate_tensors=intermediate_tensors,
+            inputs_embeds=inputs_embeds,
+            **kwargs,
+        )
+        forward_context = get_forward_context()
+        if getattr(forward_context, "capturing", False):
+            raw_hidden_states = hidden_states[0] if isinstance(hidden_states, tuple) else hidden_states
+            num_tokens = input_ids.shape[0]
+            num_actual_tokens = int(getattr(forward_context, "num_actual_tokens", num_tokens))
+            batch_size = max(num_actual_tokens // (self.drafter.num_speculative_tokens + 1), 1)
+
+            step0_logits_indices = self.logits_indices_buf[:batch_size].clone().to(dtype=torch.long)
+            sample_hs = raw_hidden_states[step0_logits_indices]
+            next_token_ids = self.raw_model.compute_logits(sample_hs).argmax(dim=-1)
+            all_draft_ids = self.drafter.propose_all_in_graph(
+                hidden_states=raw_hidden_states,
+                input_ids=input_ids,
+                positions=positions,
+                logits_indices=self.logits_indices_buf,
+                step0_logits_indices=step0_logits_indices,
+                next_token_ids=next_token_ids,
+                num_tokens=num_tokens,
+            )
+            self.draft_token_ids_buf[: all_draft_ids.shape[0], : all_draft_ids.shape[1]].copy_(all_draft_ids)
+        return hidden_states
+
+
 class AscendSpecDecodeBaseProposer(SpecDecodeBaseProposer):
     _runnable: ACLGraphWrapper | Callable
 
@@ -395,6 +452,87 @@ class AscendSpecDecodeBaseProposer(SpecDecodeBaseProposer):
         if isinstance(self.model, ACLGraphWrapper):
             return self.model.unwrap()
         return self.model
+
+    def propose_all_in_graph(
+        self,
+        hidden_states: torch.Tensor,
+        input_ids: torch.Tensor,
+        positions: torch.Tensor,
+        logits_indices: torch.Tensor,
+        step0_logits_indices: torch.Tensor | None,
+        next_token_ids: torch.Tensor,
+        num_tokens: int,
+    ) -> torch.Tensor:
+        forward_context = get_forward_context()
+        num_actual_tokens = int(getattr(forward_context, "num_actual_tokens", num_tokens))
+        batch_size = max(num_actual_tokens // (self.num_speculative_tokens + 1), 1)
+        raw_model = self.get_model()
+
+        if step0_logits_indices is None:
+            step0_logits_indices = logits_indices[:batch_size].clone().to(dtype=torch.long)
+        if num_tokens > 0:
+            step0_logits_indices = step0_logits_indices.clamp_(0, num_tokens - 1)
+
+        self.input_ids[:num_tokens].copy_(input_ids[:num_tokens])
+        self.input_ids.index_copy_(0, step0_logits_indices, next_token_ids[:batch_size].to(self.input_ids.dtype))
+        self._set_positions(num_tokens, positions[:num_tokens])
+        self.hidden_states[:num_tokens].copy_(hidden_states[:num_tokens])
+
+        draft_token_ids_tensor = torch.zeros(
+            (self.num_speculative_tokens, batch_size),
+            dtype=next_token_ids.dtype,
+            device=self.device,
+        )
+        draft_token_ids_tensor[0].copy_(next_token_ids[:batch_size])
+        if self.num_speculative_tokens == 1:
+            return draft_token_ids_tensor.transpose(0, 1)
+
+        if self.uses_mrope:
+            local_positions = self.mrope_positions[:, step0_logits_indices]
+        else:
+            local_positions = self.positions[step0_logits_indices]
+        local_hidden_states = self.hidden_states[step0_logits_indices]
+        local_indices = self.arange[:batch_size]
+
+        input_batch_size = num_tokens
+        for draft_step in range(self.num_speculative_tokens - 1):
+            forward_context.moe_layer_index = 0
+            input_ids_i = draft_token_ids_tensor[draft_step]
+            local_positions += 1
+            self.input_ids[:batch_size].copy_(input_ids_i)
+            self._set_positions(batch_size, local_positions)
+            self.hidden_states[:batch_size].copy_(local_hidden_states.view(batch_size, -1))
+
+            model_positions = self._get_positions(input_batch_size)
+            model_hidden_states = self.hidden_states[:input_batch_size]
+            model_hidden_states, model_positions = self.maybe_pad_and_reduce(model_hidden_states, model_positions)
+
+            forward_context.attn_metadata = forward_context.draft_attn_metadatas[draft_step + 1]
+            model_kwargs = {
+                "input_ids": self.input_ids[:input_batch_size],
+                "positions": model_positions,
+                "inputs_embeds": None,
+            }
+            if self.pass_hidden_states_to_model:
+                model_kwargs["hidden_states"] = model_hidden_states
+                if self.method == "mtp":
+                    model_kwargs["positions"] = model_positions
+
+            ret_hidden_states = raw_model(**model_kwargs)
+            if not self.model_returns_tuple():
+                last_hidden_states = ret_hidden_states
+                local_hidden_states = last_hidden_states
+            else:
+                last_hidden_states, local_hidden_states = ret_hidden_states
+            last_hidden_states, _, local_hidden_states = self.maybe_all_gather_and_unpad(
+                last_hidden_states, model_positions, local_hidden_states
+            )
+
+            logits = raw_model.compute_logits(last_hidden_states[local_indices])
+            next_ids = logits.argmax(dim=-1)
+            draft_token_ids_tensor[draft_step + 1].copy_(next_ids[:batch_size])
+
+        return draft_token_ids_tensor.transpose(0, 1)
 
     def shallow_copy_metadata(self, attn_metadata):
         # Currently, new objects will be assigned to the lists in attn_metadata

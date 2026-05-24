@@ -133,6 +133,7 @@ from vllm_ascend.spec_decode.eagle_proposer import AscendEagleProposer
 from vllm_ascend.spec_decode.extract_hidden_states_proposer import (
     AscendExtractHiddenStatesProposer,
 )
+from vllm_ascend.spec_decode.llm_base_proposer import _FusedModelWithMTP
 from vllm_ascend.spec_decode.medusa_proposer import AscendMedusaProposer
 from vllm_ascend.spec_decode.ngram_proposer import AscendNgramProposer
 from vllm_ascend.spec_decode.ngram_proposer_npu import AscendNgramProposerNPU
@@ -3395,8 +3396,16 @@ class NPUModelRunner(GPUModelRunner):
         ):
             runtime_mode = self.compilation_config.cudagraph_mode
             self.update_stream: torch.npu.Stream = torch.npu.Stream()
+            runnable = self.model
+            if (
+                self.drafter is not None
+                and self.speculative_config is not None
+                and self.speculative_config.method == "mtp"
+                and getattr(self.drafter, "fused_with_main_graph", False)
+            ):
+                runnable = _FusedModelWithMTP(self.model, self.drafter)
             self.model = ACLGraphWrapper(
-                self.model,
+                runnable,
                 self.vllm_config,
                 runtime_mode=runtime_mode,
                 use_eagle=self.use_eagle,
