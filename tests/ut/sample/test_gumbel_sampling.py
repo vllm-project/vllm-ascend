@@ -34,7 +34,6 @@ def _ref_apply_temperature(
 
 @npu_test(num_npus=1, npu_type="a2")
 class TestGumbelSampling:
-
     @pytest.mark.parametrize(
         "num_tokens,vocab_size",
         [
@@ -235,7 +234,8 @@ class TestGumbelSampling:
         )
         # Low temp with such a strong signal should almost always pick token 0
         assert low_temp_winner_count > num_trials * 0.9, (
-            f"Low temp winner count ({low_temp_winner_count}/{num_trials}) should be >90%"
+            f"Low temp winner count ({low_temp_winner_count}) should be > "
+            f"high temp winner count ({high_temp_winner_count})"
         )
 
     @pytest.mark.parametrize(
