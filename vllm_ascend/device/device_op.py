@@ -17,19 +17,16 @@
 #
 import torch
 import torch_npu
+from vllm.triton_utils import tl, triton
 
 from vllm_ascend.device.mxfp_compat import (
     FLOAT8_E8M0FNU_DTYPE,
     QUANT_DTYPES,
     SCALE_DTYPES,
 )
-from vllm_ascend.utils import AscendDeviceType, get_ascend_device_type
-
-from vllm.triton_utils import tl, triton
-
-from vllm_ascend.ops.triton.triton_utils import extract_slice, insert_slice
-
 from vllm_ascend.ops.triton.fla.chunk_scaled_dot_kkt import chunk_scaled_dot_kkt_fwd_kernel
+from vllm_ascend.ops.triton.triton_utils import extract_slice, insert_slice
+from vllm_ascend.utils import AscendDeviceType, get_ascend_device_type
 
 
 class BaseDeviceAdaptor:
@@ -315,8 +312,9 @@ class BaseDeviceAdaptor:
         return context_layer
 
     @staticmethod
-    def npu_recurrent_gated_delta_rule(query, key, value, g, beta, state, scale, actual_seq_lengths,
-    ssm_state_indices, num_accepted_tokens=None):
+    def npu_recurrent_gated_delta_rule(
+        query, key, value, g, beta, state, scale, actual_seq_lengths, ssm_state_indices, num_accepted_tokens=None
+    ):
         core_attn_out = torch_npu.npu_recurrent_gated_delta_rule(
             query=query,
             key=key,
@@ -797,8 +795,9 @@ class A5DeviceAdaptor(BaseDeviceAdaptor):
         return context_layer
 
     @staticmethod
-    def npu_recurrent_gated_delta_rule(query, key, value, g, beta, state, scale, actual_seq_lengths,
-    ssm_state_indices, num_accepted_tokens=None):
+    def npu_recurrent_gated_delta_rule(
+        query, key, value, g, beta, state, scale, actual_seq_lengths, ssm_state_indices, num_accepted_tokens=None
+    ):
         core_attn_out = torch.ops._C_ascend.npu_recurrent_gated_delta_rule_custom(
             query=query,
             key=key,
