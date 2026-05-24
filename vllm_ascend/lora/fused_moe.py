@@ -237,19 +237,17 @@ class AscendFusedMoEWithLoRA(FusedMoEWithLoRA):
         # ---- per-permuted-row lora slot (1D, length N_perm) ----
         # expanded_row_idx[i] encodes orig_token*top_k + k; orig_token = //top_k.
         # token_lora_indices is a 1D LongTensor on device.
+        # NOTE: ACL-graph capture forbids host-side .item() syncs. The previous
+        # version had an `if orig_token.max().item() >= N: fallback` guard which
+        # made this entire kernel uncapturable. We replace it with a device-side
+        # clamp_: token_lora_indices is sized to max_num_batched_tokens and
+        # always has a sentinel slot at the end (or stores -1 for no-LoRA), so
+        # clamping an out-of-range index to the last slot is numerically safe -
+        # valid_mask in add_lora_fused_moe will zero out those rows' contribution.
         top_k = self.base_layer.top_k
         orig_token = torch.abs(mlp_input.expanded_row_idx) // top_k
         token_lora_indices = self.punica_wrapper.token_lora_indices
-        # Guard against truncation (token_lora_indices is shaped to num_tokens
-        # at update_metadata time; orig_token must be in range).
-        if orig_token.numel() > 0 and int(orig_token.max().item()) >= \
-                token_lora_indices.numel():
-            logger.warning_once(
-                "orig_token index %d exceeds token_lora_indices size %d; "
-                "falling back to base path.",
-                int(orig_token.max().item()), token_lora_indices.numel(),
-            )
-            return orig_mlp(mlp_input)
+        orig_token = orig_token.clamp_(max=token_lora_indices.numel() - 1)
         lora_per_row = token_lora_indices[orig_token]
 
         # === Stage 1: gate_up GMM (base) ===
