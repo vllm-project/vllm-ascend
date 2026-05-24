@@ -474,6 +474,7 @@ class BaseDeviceAdaptor:
         x, _ = torch.ops._C_ascend.npu_gemma_rms_norm(x, weight, variance_epsilon)
         return x
 
+
 class A5DeviceAdaptor(BaseDeviceAdaptor):
     @classmethod
     def reshape_and_cache(cls, key, value, key_cache, value_cache, slot_mapping):
@@ -956,6 +957,7 @@ class A5DeviceAdaptor(BaseDeviceAdaptor):
     def npu_gemma_rms_norm(x, weight, variance_epsilon):
         x, _ = torch_npu.npu_rms_norm(x, 1.0 + weight, variance_epsilon)
         return x
+
 
 def get_device_adaptor() -> type["BaseDeviceAdaptor"]:
     ascend_device_type = get_ascend_device_type()
