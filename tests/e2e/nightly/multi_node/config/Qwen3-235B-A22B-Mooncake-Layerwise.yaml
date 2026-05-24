@@ -117,3 +117,5 @@ benchmarks:
     threshold: 3
 
 # https://github.com/vllm-project/vllm-ascend/actions/runs/26335322449/job/77528004126?pr=8956  跑了2个小时还没跑完
+# https://github.com/vllm-project/vllm-ascend/actions/runs/26354132159/job/77577674350?pr=8956 跑了2个小时没跑完
+
