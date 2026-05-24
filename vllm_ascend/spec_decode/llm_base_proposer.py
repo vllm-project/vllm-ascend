@@ -142,9 +142,18 @@ class AscendSpecDecodeBaseProposer(SpecDecodeBaseProposer):
         self.enable_mtp_fused = True
         if self.method == "mtp":
             self.enable_mtp_fused = envs.VLLM_ASCEND_ENABLE_MTP_FUSED
+        base_use_cuda_graph = self.runner._use_aclgraph() and not self.speculative_config.enforce_eager
+        if self.method == "mtp":
+            # Keep MTP graph path aligned with legacy guardrails to avoid
+            # known unstable combinations.
+            base_use_cuda_graph = (
+                base_use_cuda_graph
+                and not self.use_async_scheduling
+                and not self.speculative_config.disable_padded_drafter_batch
+                and not self.use_compress
+            )
         self.use_cuda_graph = (
-            self.runner._use_aclgraph()
-            and not self.speculative_config.enforce_eager
+            base_use_cuda_graph
             and (self.method != "mtp" or self.enable_mtp_fused)
         )
 
@@ -354,15 +363,22 @@ class AscendSpecDecodeBaseProposer(SpecDecodeBaseProposer):
                 if torch.equal(layer_module.shared_head.head.weight, model.lm_head.weight):
                     layer_module.shared_head.head = model.lm_head
 
-        if self.vllm_config.compilation_config.cudagraph_mode.has_full_cudagraphs() and self.use_cuda_graph:
+        cudagraph_mode = self.vllm_config.compilation_config.cudagraph_mode
+        if (
+            (cudagraph_mode.has_full_cudagraphs() or cudagraph_mode == CUDAGraphMode.FULL_DECODE_ONLY)
+            and self.use_cuda_graph
+        ):
             self.update_stream = torch.npu.Stream()
-            self._runnable = ACLGraphWrapper(
-                self._run_merged_draft,
-                self.vllm_config,
-                runtime_mode=CUDAGraphMode.FULL,
-                use_eagle=self.use_eagle,
-                enable_enpu=self.enable_enpu,
-            )
+            if self.method == "mtp" and getattr(self, "fused_with_main_graph", False):
+                self._runnable = self._run_merged_draft
+            else:
+                self._runnable = ACLGraphWrapper(
+                    self._run_merged_draft,
+                    self.vllm_config,
+                    runtime_mode=cudagraph_mode,
+                    use_eagle=self.use_eagle,
+                    enable_enpu=self.enable_enpu,
+                )
 
     def _maybe_share_topk_indices(self, target_language_model: nn.Module) -> None:
         if hasattr(target_language_model.model, "topk_indices_buffer"):

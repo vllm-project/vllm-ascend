@@ -102,6 +102,7 @@ from vllm.v1.worker.ubatch_utils import (
 from vllm.v1.worker.utils import AttentionGroup
 
 # yapf: enable
+from vllm_ascend import envs
 from vllm_ascend.ascend_config import get_ascend_config
 from vllm_ascend.attention.attention_v1 import AscendAttentionBackend, AscendAttentionState
 from vllm_ascend.attention.dsa_v1 import AscendDSAMetadataBuilder
@@ -546,6 +547,7 @@ class NPUModelRunner(GPUModelRunner):
             | AscendExtractHiddenStatesProposer
             | None
         ) = None
+        self._fused_mtp_force_enable = envs.VLLM_ASCEND_ENABLE_MTP_FUSED
         self.actual_seq_lengths_q: list[int] = []
         self.decode_token_per_req = 1
         if self.speculative_config:
@@ -3357,6 +3359,16 @@ class NPUModelRunner(GPUModelRunner):
                 logger.info("Loading drafter model...")
                 if self.vllm_config.quant_config is not None:
                     patch_load_weights(self.vllm_config)
+                if (
+                    self.speculative_config is not None
+                    and self.speculative_config.method == "mtp"
+                    and self.compilation_config.cudagraph_mode.has_full_cudagraphs()
+                    and get_pp_group().is_last_rank
+                    and self._fused_mtp_force_enable
+                ):
+                    # Mark proposer to avoid creating an independent draft
+                    # graph wrapper when fused MTP is explicitly requested.
+                    self.drafter.fused_with_main_graph = True
                 with get_tp_context(self.drafter):
                     self.drafter.load_model(self.model)
                 if self.use_aux_hidden_state_outputs:
@@ -3376,13 +3388,17 @@ class NPUModelRunner(GPUModelRunner):
         self.model_memory_usage = m.consumed_memory
         logger.info("Loading model weights took %.4f GB", m.consumed_memory / float(2**30))
 
-        # wrap the model with full graph wrapper if needed.
-        if self.compilation_config.cudagraph_mode.has_full_cudagraphs():
+        # Wrap the model with ACLGraph when full graph routines are enabled.
+        if (
+            self.compilation_config.cudagraph_mode.has_full_cudagraphs()
+            or self.compilation_config.cudagraph_mode == CUDAGraphMode.FULL_DECODE_ONLY
+        ):
+            runtime_mode = self.compilation_config.cudagraph_mode
             self.update_stream: torch.npu.Stream = torch.npu.Stream()
             self.model = ACLGraphWrapper(
                 self.model,
                 self.vllm_config,
-                runtime_mode=CUDAGraphMode.FULL,
+                runtime_mode=runtime_mode,
                 use_eagle=self.use_eagle,
                 enable_enpu=self.enable_enpu,
             )
