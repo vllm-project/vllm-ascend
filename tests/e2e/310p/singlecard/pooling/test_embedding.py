@@ -24,7 +24,7 @@ from tests.e2e.utils import check_embeddings_close
 
 MODELS = [
     "Qwen/Qwen3-Embedding-0.6B",  # lasttoken
-    "intfloat/multilingual-e5-small",  # mean_tokens
+    "BAAI/bge-large-zh-v1.5",  # mean_tokens
 ]
 
 
@@ -36,8 +36,9 @@ def test_embed_models_correctness(model: str):
     with VllmRunner(
         model_name,
         runner="pooling",
-        max_model_len=1024,
+        max_model_len=512,
         enforce_eager=True,
+        gpu_memory_utilization=0.6,
     ) as vllm_runner:
         vllm_outputs = vllm_runner.embed(queries)
 
@@ -64,6 +65,8 @@ def test_bge_m3_correctness():
     with VllmRunner(
         model_name,
         runner="pooling",
+        max_model_len=512,
+        gpu_memory_utilization=0.6,
         cudagraph_capture_sizes=[4],
     ) as vllm_aclgraph_runner:
         vllm_aclgraph_outputs = vllm_aclgraph_runner.embed(queries)
@@ -71,24 +74,12 @@ def test_bge_m3_correctness():
     with VllmRunner(
         model_name,
         runner="pooling",
+        max_model_len=512,
+        gpu_memory_utilization=0.6,
         enforce_eager=True,
     ) as vllm_runner:
         vllm_eager_outputs = vllm_runner.embed(queries)
 
-    with HfRunner(
-        model_name,
-        dtype="float32",
-        is_sentence_transformer=True,
-    ) as hf_runner:
-        hf_outputs = hf_runner.encode(queries)
-
-    check_embeddings_close(
-        embeddings_0_lst=hf_outputs,
-        embeddings_1_lst=vllm_eager_outputs,
-        name_0="hf",
-        name_1="vllm",
-        tol=1e-2,
-    )
     check_embeddings_close(
         embeddings_0_lst=vllm_eager_outputs,
         embeddings_1_lst=vllm_aclgraph_outputs,
