@@ -27,6 +27,10 @@ from vllm_ascend.utils import AscendDeviceType, get_ascend_device_type
 
 from vllm.triton_utils import tl, triton
 
+from vllm_ascend.ops.triton.triton_utils import extract_slice, insert_slice
+
+from vllm_ascend.ops.triton.fla.chunk_scaled_dot_kkt import chunk_scaled_dot_kkt_fwd_kernel
+
 
 class BaseDeviceAdaptor:
     @classmethod
@@ -312,17 +316,17 @@ class BaseDeviceAdaptor:
 
     @staticmethod
     def npu_recurrent_gated_delta_rule(query, key, value, g, beta, state, scale, actual_seq_lengths,
-    ssm_state_indices, scale, num_accepted_tokens=None):
+    ssm_state_indices, num_accepted_tokens=None):
         core_attn_out = torch_npu.npu_recurrent_gated_delta_rule(
             query=query,
             key=key,
             value=value,
             g=g,
             beta=beta,
-            state=ssm_state,
+            state=state,
             scale=scale,
             actual_seq_lengths=actual_seq_lengths,
-            ssm_state_indices=state_indices_tensor,
+            ssm_state_indices=ssm_state_indices,
             num_accepted_tokens=num_accepted_tokens,
         ).unsqueeze(0)
 
@@ -794,17 +798,17 @@ class A5DeviceAdaptor(BaseDeviceAdaptor):
 
     @staticmethod
     def npu_recurrent_gated_delta_rule(query, key, value, g, beta, state, scale, actual_seq_lengths,
-    ssm_state_indices, scale, num_accepted_tokens=None):
+    ssm_state_indices, num_accepted_tokens=None):
         core_attn_out = torch.ops._C_ascend.npu_recurrent_gated_delta_rule_custom(
             query=query,
             key=key,
             value=value,
             g=g,
             beta=beta,
-            state=ssm_state,
-            scale=scale,
+            state=state,
+            scale_value=scale,
             actual_seq_lengths=actual_seq_lengths,
-            ssm_state_indices=state_indices_tensor,
+            ssm_state_indices=ssm_state_indices,
             num_accepted_tokens=num_accepted_tokens,
         ).unsqueeze(0)
 
@@ -831,6 +835,7 @@ class A5DeviceAdaptor(BaseDeviceAdaptor):
             multibuffer=True,
             disable_tightly_coupled_buffer_reuse=True,
         )
+        return A
 
     @triton.heuristics({"IS_VARLEN": lambda args: args["cu_seqlens"] is not None})
     @triton.jit(do_not_specialize=["T", "H"])
@@ -950,7 +955,7 @@ class A5DeviceAdaptor(BaseDeviceAdaptor):
 
     @staticmethod
     def npu_gemma_rms_norm(x, weight, variance_epsilon):
-        x, _ = torch_npu.npu_rms_norm(x, 1.0 + self.weight, self.variance_epsilon)
+        x, _ = torch_npu.npu_rms_norm(x, 1.0 + weight, variance_epsilon)
         return x
 
 def get_device_adaptor() -> type["BaseDeviceAdaptor"]:
