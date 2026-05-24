@@ -775,6 +775,9 @@ class AscendSpecDecodeBaseProposer(SpecDecodeBaseProposer):
                                 mtp_slot_mapping,
                                 attn_group=attn_group,
                             )
+                            if self.pcp_size > 1 and draft_step >= 1:
+                                if hasattr(attn_metadata, 'decode_meta') and attn_metadata.decode_meta is not None:
+                                    attn_metadata.decode_meta.dcp_mtp_attn_mask = None
                             for layer_name in self.attn_layer_names:
                                 per_layer_attn_metadata[layer_name] = attn_metadata
                         multi_steps_attn_metadata.append(per_layer_attn_metadata)
