@@ -102,6 +102,8 @@ test_cases:
       HCCL_BUFFSIZE: "512"
       VLLM_ASCEND_ENABLE_FLASHCOMM1: "1"
     server_cmd:
+      - "--port"
+      - "$SERVER_PORT"
       - "--quantization"
       - "ascend"
       - "--allowed-local-media-path"
