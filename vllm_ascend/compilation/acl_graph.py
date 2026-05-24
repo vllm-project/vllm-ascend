@@ -23,6 +23,7 @@ from vllm_ascend.ascend_forward_context import _EXTRA_CTX
 
 from ..utils import weak_ref_tensors
 
+_acl_graph_wrappers = set()
 
 @dataclasses.dataclass
 class ACLGraphEntry:
@@ -92,6 +93,7 @@ class ACLGraphWrapper:
         self.concrete_aclgraph_entries: dict[BatchDescriptor, ACLGraphEntry] = {}
         self.enable_enpu = enable_enpu
         self.use_eagle = use_eagle
+        _acl_graph_wrappers.add(self)
 
     def __getattr__(self, key: str):
         # allow accessing the attributes of the runnable.
@@ -106,6 +108,12 @@ class ACLGraphWrapper:
     def unwrap(self) -> Callable:
         # in case we need to access the original runnable.
         return self.runnable
+
+    def reset_aclgraph_cache(self) -> int:
+        num_entries = len(self.concrete_aclgraph_entries)
+        self.concrete_aclgraph_entries.clear()
+        self.first_run_finished = False
+        return num_entries
 
     def __call__(self, *args, **kwargs):
         forward_context = get_forward_context()
@@ -323,6 +331,24 @@ def update_draft_graph_params_workspaces(num_tokens: int, workspace: Any):
 
 def get_draft_graph_params():
     return _draft_graph_params
+
+
+def _reset_graph_params(params: GraphParams | None) -> None:
+    if params is None:
+        return
+    for num_tokens in params.events:
+        params.events[num_tokens] = []
+    for num_tokens in params.handles:
+        params.handles[num_tokens] = []
+    for num_tokens in params.attn_params:
+        params.attn_params[num_tokens] = []
+
+
+def reset_graph_params_for_sleep() -> None:
+    _reset_graph_params(_graph_params)
+    _reset_graph_params(_draft_graph_params)
+    for wrapper in list(_acl_graph_wrappers):
+        wrapper.reset_aclgraph_cache()
 
 
 _draft_graph_prefill_params: GraphParams | None = None
