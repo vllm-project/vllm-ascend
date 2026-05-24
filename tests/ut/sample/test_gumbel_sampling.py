@@ -230,12 +230,12 @@ class TestGumbelSampling:
         torch.npu.synchronize()
         # Low temp should pick the winner much more often than high temp
         assert low_temp_winner_count > high_temp_winner_count, (
-            f"Low temp winner count ({low_temp_winner_count}) should be > high temp winner count ({high_temp_winner_count})"
+            f"Low temp winner count ({low_temp_winner_count}) should be > "
+            f"high temp winner count ({high_temp_winner_count})"
         )
         # Low temp with such a strong signal should almost always pick token 0
         assert low_temp_winner_count > num_trials * 0.9, (
-            f"Low temp winner count ({low_temp_winner_count}) should be > "
-            f"high temp winner count ({high_temp_winner_count})"
+            f"Low temp winner count ({low_temp_winner_count}/{num_trials}) should be >90%"
         )
 
     @pytest.mark.parametrize(
