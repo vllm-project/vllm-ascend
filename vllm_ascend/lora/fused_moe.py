@@ -218,34 +218,27 @@ class AscendFusedMoEWithLoRA(FusedMoEWithLoRA):
             w1 = w1.transpose(1, 2)
             w2 = w2.transpose(1, 2)
 
-        # ---- per-permuted-row expert_id (1D, length N_perm) ----
-        # gl semantics:
-        #   glt == 1: counts per expert (length local_E)
-        #   glt == 0: cumulative counts (length local_E)
-        if glt == 1:
-            expert_per_row = torch.repeat_interleave(
-                torch.arange(gl.numel(), device=gl.device, dtype=torch.long),
-                gl.to(torch.long),
-            )
-        else:
-            counts = torch.cat([gl[:1], gl[1:] - gl[:-1]])
-            expert_per_row = torch.repeat_interleave(
-                torch.arange(counts.numel(), device=gl.device, dtype=torch.long),
-                counts.to(torch.long),
-            )
+        # ---- per-permuted-row (expert_id, orig_token) (1D, length N_perm) ----
+        # npu_moe_init_routing semantics:
+        #   sorted_hidden_states[i] corresponds to the original (token, k) pair
+        #   indexed by expanded_row_idx[i] (= orig_token * top_k + k), and that
+        #   pair was routed to expert id `topk_ids[orig_token, k]`. So both the
+        #   expert id and orig token can be recovered with a single gather.
+        # NOTE: We deliberately avoid torch.repeat_interleave(arange, gl) here -
+        # when `gl` is a device tensor and `output_size` is omitted, PyTorch
+        # must sync to read gl.sum() to determine the output shape. That sync
+        # is illegal during ACL-graph capture ("not allowed to synchronize
+        # captured-stream"). Gathering from topk_ids is pure device-side and
+        # graph-capturable.
+        top_k = self.base_layer.top_k
+        expanded = torch.abs(mlp_input.expanded_row_idx)
+        expert_per_row = mlp_input.topk_ids.reshape(-1)[expanded].to(torch.long)
 
         # ---- per-permuted-row lora slot (1D, length N_perm) ----
-        # expanded_row_idx[i] encodes orig_token*top_k + k; orig_token = //top_k.
-        # token_lora_indices is a 1D LongTensor on device.
-        # NOTE: ACL-graph capture forbids host-side .item() syncs. The previous
-        # version had an `if orig_token.max().item() >= N: fallback` guard which
-        # made this entire kernel uncapturable. We replace it with a device-side
-        # clamp_: token_lora_indices is sized to max_num_batched_tokens and
-        # always has a sentinel slot at the end (or stores -1 for no-LoRA), so
-        # clamping an out-of-range index to the last slot is numerically safe -
-        # valid_mask in add_lora_fused_moe will zero out those rows' contribution.
-        top_k = self.base_layer.top_k
-        orig_token = torch.abs(mlp_input.expanded_row_idx) // top_k
+        # token_lora_indices is a 1D LongTensor on device, sized to
+        # max_num_batched_tokens (host-known constant). Clamping defensively
+        # to the last index is a no-op in normal operation but graph-safe.
+        orig_token = expanded // top_k
         token_lora_indices = self.punica_wrapper.token_lora_indices
         orig_token = orig_token.clamp_(max=token_lora_indices.numel() - 1)
         lora_per_row = token_lora_indices[orig_token]
