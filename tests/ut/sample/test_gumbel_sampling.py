@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 #
-# Copyright (c) 2025 Huawei Technologies Co., Ltd. All Rights Reserved.
+# Copyright (c) 2026 Huawei Technologies Co., Ltd. All Rights Reserved.
 # This file is a part of the vllm-ascend project.
 #
 # Tests for vllm_ascend.worker.v2.sample.gumbel on Ascend NPU.
@@ -11,7 +11,6 @@ import pytest
 import torch
 
 from tests.ut.conftest import npu_test
-
 from vllm_ascend.worker.v2.sample.gumbel import apply_temperature, gumbel_sample
 
 DEVICE = "npu"
@@ -103,7 +102,9 @@ class TestGumbelSampling:
         torch.npu.synchronize()
 
         expected = logits.argmax(dim=-1)
-        assert torch.equal(sampled, expected), f"Greedy mismatch: sampled={sampled.tolist()} expected={expected.tolist()}"
+        assert torch.equal(sampled, expected), (
+            f"Greedy mismatch: sampled={sampled.tolist()} expected={expected.tolist()}"
+        )
 
     def test_gumbel_sample_greedy_apply_temp_flag_irrelevant(self):
         """With temp=0, apply_temperature flag should not affect result (both greedy)."""
@@ -216,8 +217,12 @@ class TestGumbelSampling:
             seed = torch.tensor([i * 1000 + 42], dtype=torch.int64, device=DEVICE)
             pos = torch.tensor([i], dtype=torch.int32, device=DEVICE)
 
-            s_low = gumbel_sample(logits_base.clone(), expanded_idx_mapping, low_temp, seed, pos, apply_temperature=True)
-            s_high = gumbel_sample(logits_base.clone(), expanded_idx_mapping, high_temp, seed, pos, apply_temperature=True)
+            s_low = gumbel_sample(
+                logits_base.clone(), expanded_idx_mapping, low_temp, seed, pos, apply_temperature=True
+            )
+            s_high = gumbel_sample(
+                logits_base.clone(), expanded_idx_mapping, high_temp, seed, pos, apply_temperature=True
+            )
             if s_low.item() == 0:
                 low_temp_winner_count += 1
             if s_high.item() == 0:
@@ -524,7 +529,9 @@ class TestGumbelSampling:
         pos = torch.arange(num_tokens, dtype=torch.int32, device=DEVICE)
 
         # Both should produce greedy results
-        s1 = gumbel_sample(logits, expanded_idx_mapping, temperature, seed, pos, apply_temperature=False, use_fp64=False)
+        s1 = gumbel_sample(
+            logits, expanded_idx_mapping, temperature, seed, pos, apply_temperature=False, use_fp64=False
+        )
         s2 = gumbel_sample(logits, expanded_idx_mapping, temperature, seed, pos, apply_temperature=False, use_fp64=True)
         torch.npu.synchronize()
 
