@@ -367,3 +367,19 @@ class AscendFusedMoE3DWithLoRA(AscendFusedMoEWithLoRA, FusedMoE3DWithLoRA):
             isinstance(source_layer, AscendFusedMoE)
             and len(packed_modules_list) == 1
         )
+
+
+# ----------------------------------------------------------------------
+# Upstream compatibility shim: vllm/lora/model_manager.py:create_dummy_lora
+# branches on `module.__class__.__name__ == "FusedMoEWithLoRA"` (and the
+# 3D variant). Without this override, our subclasses would skip the
+# pack_moe path and hit the generic pack() fallback, which produces a
+# flat list of N_experts * 3 sub-LoRAs -- `set_lora` then fails with
+# "too many values to unpack (expected 3)".
+#
+# Overriding only __name__ keeps the actual class object distinct (so
+# isinstance / type identity / debugging are unaffected) but lets the
+# upstream string compare hit our objects.
+# ----------------------------------------------------------------------
+AscendFusedMoEWithLoRA.__name__ = "FusedMoEWithLoRA"
+AscendFusedMoE3DWithLoRA.__name__ = "FusedMoE3DWithLoRA"

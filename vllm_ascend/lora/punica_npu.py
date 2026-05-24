@@ -419,30 +419,26 @@ class PunicaWrapperNPU(PunicaWrapperBase):
         offset: int = 0,
         token_lora_mapping: torch.Tensor | None = None,
     ):
-        """In-place adds the MoE-LoRA delta to `y`.
+        """In-place adds the MoE-LoRA delta to `y` using combined-index bgmv.
 
-        Semantics (one slice at a time):
-            for slice_idx, (A, B) in enumerate(zip(lora_a_stacked, lora_b_stacked)):
-                slice_out = B.shape[2]
-                col_start = offset + slice_idx * slice_out
-                for each permuted row i:
-                    l = token_lora_mapping[i]; e = expert_ids[i]
-                    if l == -1 or adapter_enabled[l] == 0: continue
-                    buf = (x[i] @ A[l, e].T) * 1.0          # shrink
-                    y[i, col_start:col_start+slice_out] += buf @ B[l, e].T  # expand
+        Trick: bgmv expects 3D weights ``[num_loras, out, in]`` and a 1D
+        ``lora_indices`` of length N. Our per-expert LoRA weights are 4D
+        ``[max_loras+1, local_E, rank/slice, in]``. We fold ``(lora_id,
+        expert_id)`` into a single virtual index ``e * (max_loras+1) + l``
+        and reshape the weights into ``[(max_loras+1)*local_E, ...]`` — a
+        zero-copy view. This collapses the v1 Python double loop into two
+        bgmv calls per slice, getting all AscendC-level perf for free.
 
-        v1 walks (lora_id, expert_id) buckets in Python. This is O(max_loras *
-        local_E) masked matmuls per call — slow but correct. A fused AscendC
-        kernel will replace this in v2.
+        Disabled / unmapped rows (``token_lora_mapping == -1`` or
+        ``adapter_enabled[l] == 0``) are routed to a sentinel slot (lora id 0,
+        expert 0) and their shrink buffer is zeroed afterwards, so expand
+        contributes nothing. This avoids any host sync.
         """
         del sorted_token_ids, num_tokens_post_padded
         del max_lora_rank, top_k_num, shrink_config, expand_config
-        del fully_sharded  # v1 does not need slice metadata on Ascend
+        del fully_sharded  # not needed on the permuted-domain Ascend path
 
         if mul_routed_weight:
-            # Only the upstream w2 path (when running in unpermuted domain)
-            # sets this. The Ascend hook operates in the permuted domain, so
-            # we never set it. Keep the assert to catch accidental misuse.
             raise NotImplementedError(
                 "mul_routed_weight=True is not supported on the Ascend MoE-LoRA "
                 "path (LoRA is applied to permuted activations before combine)."
@@ -450,37 +446,69 @@ class PunicaWrapperNPU(PunicaWrapperBase):
         if token_lora_mapping is None:
             token_lora_mapping = self.token_lora_indices[: x.size(0)]
 
-        # Fast-path: no active LoRA for any token in this batch.
-        # `no_lora` is computed from the host-side prefill metadata; if it is
-        # not set (decode without explicit prefill update), we still need to
-        # honor adapter_enabled and the -1 sentinel.
-        max_loras = int(adapter_enabled.shape[0]) - 1
-        # Operate in fp32 internally for numerical parity with the GPU path,
-        # which also accumulates the shrink buffer in fp32. Cast back to y.dtype
-        # at the very end.
+        # Early-out: prefill metadata explicitly tagged no LoRA in this batch.
+        if self.no_lora:
+            return
+
+        # max_loras+1 to include the sentinel "no-LoRA" slot at the end.
+        max_loras_plus_one = int(adapter_enabled.shape[0])
+        local_E = lora_a_stacked[0].shape[1]
+
+        # ---- build effective lora id per permuted row, no host sync ----
+        # adapter_enabled[token_lora_mapping] needs clamp(min=0) so the -1
+        # sentinel doesn't out-of-bounds index. The clamped value will be
+        # masked out below via valid_mask.
+        tlm_clamped = token_lora_mapping.clamp(min=0)
+        valid_mask = (token_lora_mapping >= 0) & (
+            adapter_enabled[tlm_clamped] != 0
+        )
+        # Sentinel routing: invalid rows go to (lora_id=0, expert_id=0). The
+        # actual values pulled from the weight tensors will be overwritten by
+        # zeros in the shrink buffer before expand.
+        safe_lora = torch.where(
+            valid_mask, tlm_clamped, torch.zeros_like(tlm_clamped)
+        )
+        # expert_ids may also be -1 if expert_map filtered out tokens on other
+        # EP ranks; clamp similarly. EP is currently asserted off, but the
+        # defensive clamp keeps the kernel safe.
+        safe_expert = expert_ids.clamp(min=0).to(torch.long)
+        # virtual_idx[i] = expert * (max_loras+1) + lora_id
+        # Layout matches torch.reshape of A from
+        # [max_loras+1, local_E, rank, in] (stride: local_E*..., ...)
+        # FIX: actually A is [max_loras+1, local_E, ...]. Reshape into
+        # [(max_loras+1)*local_E, ...] has stride [local_E*..., ...] only if
+        # we reshape via permute. Below we permute to [local_E, max_loras+1, ...]
+        # then reshape, so virtual_idx = expert * (max_loras+1) + lora_id
+        # picks A_view[expert*(max_loras+1) + lora_id] = original A[lora_id, expert].
+        virtual_idx = safe_expert * max_loras_plus_one + safe_lora.to(torch.long)
+
+        # ---- iterate slices (gate / up for _w13_slices==2, just one for w2) ----
         for slice_idx in range(len(lora_a_stacked)):
             A = lora_a_stacked[slice_idx]  # [max_loras+1, local_E, rank, in]
             B = lora_b_stacked[slice_idx]  # [max_loras+1, local_E, slice, rank]
+            rank = A.shape[2]
             slice_out = B.shape[2]
-            local_E = A.shape[1]
             col_start = offset + slice_idx * slice_out
-            col_end = col_start + slice_out
 
-            for l in range(max_loras):
-                # adapter_enabled is a device tensor; .item() forces a sync.
-                # v1 accepts the sync since this is a Python reference impl.
-                if int(adapter_enabled[l].item()) == 0:
-                    continue
-                lora_mask = token_lora_mapping == l
-                # Early skip if this LoRA has no tokens in this batch.
-                if not bool(lora_mask.any().item()):
-                    continue
-                for e in range(local_E):
-                    mask = lora_mask & (expert_ids == e)
-                    if not bool(mask.any().item()):
-                        continue
-                    x_sub = x[mask].to(torch.float32)
-                    buf = x_sub @ A[l, e].t().to(torch.float32)
-                    delta = buf @ B[l, e].t().to(torch.float32)
-                    y[mask, col_start:col_end] += delta.to(y.dtype)
+            # Permute (max_loras+1, local_E, ...) -> (local_E, max_loras+1, ...)
+            # then reshape so virtual_idx layout matches.
+            # .contiguous() is required because bgmv indexes flat dim 0.
+            A_flat = A.permute(1, 0, 2, 3).reshape(
+                local_E * max_loras_plus_one, rank, A.shape[-1]
+            ).contiguous()
+            B_flat = B.permute(1, 0, 2, 3).reshape(
+                local_E * max_loras_plus_one, slice_out, rank
+            ).contiguous()
+
+            # bgmv_shrink writes (not accumulates) into the rank buffer.
+            buffer = torch.zeros(
+                (x.size(0), rank), dtype=torch.float32, device=x.device
+            )
+            self.bgmv_shrink(x, A_flat, buffer, virtual_idx, 1.0)
+            # Mask out invalid rows so expand contributes 0 to y.
+            buffer.mul_(valid_mask.unsqueeze(-1).to(buffer.dtype))
+            # bgmv_expand_slice accumulates into y[:, col_start:col_start+slice].
+            self.bgmv_expand_slice(
+                buffer, B_flat, y, virtual_idx, col_start, slice_out, True
+            )
         return
