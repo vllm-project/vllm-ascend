@@ -1,8 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 import pytest
-import torch
-import torch.nn.functional as F
 from modelscope import snapshot_download  # type: ignore[import-untyped]
 
 from tests.e2e.conftest import HfRunner, VllmRunner
@@ -36,7 +34,9 @@ def test_cross_encoder_score_1_to_1(model_name):
     with HfRunner(model_name, dtype=DTYPE, is_cross_encoder=True) as hf_model:
         hf_outputs = hf_model.predict([text_pair]).tolist()
 
-    with VllmRunner(model_name, runner="pooling", dtype=DTYPE, max_model_len=1024, enforce_eager=True, gpu_memory_utilization=0.6) as vllm_model:
+    with VllmRunner(
+        model_name, runner="pooling", dtype=DTYPE, max_model_len=1024, enforce_eager=True, gpu_memory_utilization=0.6
+    ) as vllm_model:
         vllm_outputs = vllm_model.score(text_pair[0], text_pair[1])
 
     assert len(vllm_outputs) == 1
@@ -54,7 +54,9 @@ def test_cross_encoder_score_1_to_N(model_name):
     with HfRunner(model_name, dtype=DTYPE, is_cross_encoder=True) as hf_model:
         hf_outputs = hf_model.predict(text_pairs).tolist()
 
-    with VllmRunner(model_name, runner="pooling", dtype=DTYPE, max_model_len=1024, enforce_eager=True, gpu_memory_utilization=0.6) as vllm_model:
+    with VllmRunner(
+        model_name, runner="pooling", dtype=DTYPE, max_model_len=1024, enforce_eager=True, gpu_memory_utilization=0.6
+    ) as vllm_model:
         vllm_outputs = vllm_model.score(TEXTS_1[0], TEXTS_2)
 
     assert len(vllm_outputs) == 2
@@ -73,7 +75,9 @@ def test_cross_encoder_score_N_to_N(model_name):
     with HfRunner(model_name, dtype=DTYPE, is_cross_encoder=True) as hf_model:
         hf_outputs = hf_model.predict(text_pairs).tolist()
 
-    with VllmRunner(model_name, runner="pooling", dtype=DTYPE, max_model_len=1024, enforce_eager=True, gpu_memory_utilization=0.6) as vllm_model:
+    with VllmRunner(
+        model_name, runner="pooling", dtype=DTYPE, max_model_len=1024, enforce_eager=True, gpu_memory_utilization=0.6
+    ) as vllm_model:
         vllm_outputs = vllm_model.score(TEXTS_1, TEXTS_2)
 
     assert len(vllm_outputs) == 2
