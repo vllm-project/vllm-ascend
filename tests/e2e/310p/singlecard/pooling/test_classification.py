@@ -19,6 +19,7 @@ def test_qwen_pooling_classify_correctness() -> None:
         runner="pooling",
         max_model_len=1024,
         enforce_eager=True,
+        dtype="float16",
         gpu_memory_utilization=0.6,
     ) as vllm_runner:
         vllm_outputs = vllm_runner.classify(prompts)

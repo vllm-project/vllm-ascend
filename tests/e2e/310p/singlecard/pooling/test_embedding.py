@@ -38,6 +38,7 @@ def test_embed_models_correctness(model: str):
         runner="pooling",
         max_model_len=512,
         enforce_eager=True,
+        dtype="float16",
         gpu_memory_utilization=0.6,
     ) as vllm_runner:
         vllm_outputs = vllm_runner.embed(queries)
@@ -66,8 +67,10 @@ def test_bge_m3_correctness():
         model_name,
         runner="pooling",
         max_model_len=512,
+        dtype="float16",
         gpu_memory_utilization=0.6,
         cudagraph_capture_sizes=[4],
+        additional_config={"ascend_compilation_config": {"fuse_norm_quant": False}},
     ) as vllm_aclgraph_runner:
         vllm_aclgraph_outputs = vllm_aclgraph_runner.embed(queries)
 
@@ -75,6 +78,7 @@ def test_bge_m3_correctness():
         model_name,
         runner="pooling",
         max_model_len=512,
+        dtype="float16",
         gpu_memory_utilization=0.6,
         enforce_eager=True,
     ) as vllm_runner:
