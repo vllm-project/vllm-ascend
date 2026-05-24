@@ -502,7 +502,7 @@ def vllm_version_is(target_vllm_version: str):
         import vllm
 
         vllm_version = vllm.__version__
-    
+
     try:
         # Compare the public part of the versions to ignore local build metadata
         # (e.g., +cpu). This ensures consistent behavior regardless of which side
