@@ -116,6 +116,7 @@ class GroupCoordinatorPatch(GroupCoordinator):
         self.backend = _normalize_backend(torch_distributed_backend)
         self._acquired_hccl_keys = []
         self._unshared_hccl_groups = []
+        self._group_ranks = group_ranks
         self.use_device_communicator = use_device_communicator
         self.device_communicator = None
         self.mq_broadcaster = None
@@ -215,8 +216,14 @@ class GroupCoordinatorPatch(GroupCoordinator):
             torch.distributed.destroy_process_group(old_cpu_group)
             self.cpu_group = None
 
-        new_cpu_group = torch.distributed.new_group(self.ranks, backend="gloo")
-        self.cpu_group = new_cpu_group
+        for ranks in self._group_ranks:
+            new_cpu_group = torch.distributed.new_group(ranks, backend="gloo")
+            if self.rank in ranks:
+                self.cpu_group = new_cpu_group
+
+        if self.device_communicator is not None:
+            self.device_communicator.cpu_group = self.cpu_group
+
         logger.info(
             "Reinit cpu_group for %s (ranks=%s)", self.unique_name, self.ranks
         )
