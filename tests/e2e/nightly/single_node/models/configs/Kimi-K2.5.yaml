@@ -101,6 +101,7 @@ test_cases:
       VLLM_ASCEND_ENABLE_MLAPO: "1"
       HCCL_BUFFSIZE: "512"
       VLLM_ASCEND_ENABLE_FLASHCOMM1: "1"
+      SERVER_PORT: "DEFAULT_PORT"
     server_cmd:
       - "--port"
       - "$SERVER_PORT"
