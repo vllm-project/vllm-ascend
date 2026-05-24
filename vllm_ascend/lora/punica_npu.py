@@ -508,41 +508,58 @@ class PunicaWrapperNPU(PunicaWrapperBase):
 
         Trick: bgmv expects 3D weights ``[num_loras, out, in]`` and a 1D
         ``lora_indices`` of length N. Our per-expert LoRA weights are 4D
-        ``[max_loras+1, local_E, rank/slice, in]``. We fold ``(lora_id,
-        expert_id)`` into a single virtual index ``e * (max_loras+1) + l``
-        and reshape the weights into ``[(max_loras+1)*local_E, ...]`` via
+        ``[max_loras, local_E, rank/slice, in]``. We fold ``(lora_id,
+        expert_id)`` into a single virtual index ``e * max_loras + l`` and
+        reshape the weights into ``[max_loras*local_E, ...]`` via
         ``permute(1, 0, 2, 3).reshape(...)``. Disabled / unmapped rows are
-        routed to a sentinel slot and their shrink buffer is zeroed before
-        expand, so they contribute nothing without any host sync.
+        clamped into the [0, max_loras) range; their shrink buffer is then
+        zeroed before expand, so they contribute nothing without any host
+        sync.
+
+        IMPORTANT: stacked tensor ``shape[0]`` is exactly ``max_loras``;
+        the upstream FusedMoEWithLoRA._create_lora_a_weights allocates it
+        without the +1 sentinel that ``adapter_enabled`` carries.
+        ``adapter_enabled.shape[0] == max_loras + 1`` (the extra slot is
+        for the "no-LoRA" sentinel and is always 0). We MUST read
+        max_loras from the stacked tensor itself, not from adapter_enabled.
         """
-        max_loras_plus_one = int(adapter_enabled.shape[0])
+        # Stacked tensor shape[0] is the actual max_loras; adapter_enabled
+        # has one extra sentinel slot but the LoRA weights do not.
+        max_loras = lora_a_stacked[0].shape[0]
         local_E = lora_a_stacked[0].shape[1]
 
-        # adapter_enabled[token_lora_mapping] needs clamp(min=0) so the -1
-        # sentinel does not out-of-bounds index. The clamped value will be
-        # masked out below via valid_mask.
-        tlm_clamped = token_lora_mapping.clamp(min=0)
-        valid_mask = (token_lora_mapping >= 0) & (
-            adapter_enabled[tlm_clamped] != 0
+        # adapter_enabled[token_lora_mapping] needs clamp(min=0, max=max_loras)
+        # to avoid out-of-bounds; values out of [0, max_loras) get masked out
+        # by valid_mask below.
+        tlm_clamped = token_lora_mapping.clamp(min=0, max=max_loras)
+        valid_mask = (
+            (token_lora_mapping >= 0)
+            & (token_lora_mapping < max_loras)
+            & (adapter_enabled[tlm_clamped] != 0)
         )
+        # Sentinel routing: invalid rows go to (lora=0, expert=0); their
+        # shrink buffer is zeroed below before expand, so they contribute 0.
         safe_lora = torch.where(
             valid_mask, tlm_clamped, torch.zeros_like(tlm_clamped)
         )
+        # Cap to [0, max_loras) explicitly so virtual_idx stays in
+        # [0, max_loras * local_E) range that A_flat / B_flat span.
+        safe_lora = safe_lora.clamp(max=max_loras - 1)
         safe_expert = expert_ids.clamp(min=0).to(torch.long)
-        virtual_idx = safe_expert * max_loras_plus_one + safe_lora.to(torch.long)
+        virtual_idx = safe_expert * max_loras + safe_lora.to(torch.long)
 
         for slice_idx in range(len(lora_a_stacked)):
-            A = lora_a_stacked[slice_idx]  # [max_loras+1, local_E, rank, in]
-            B = lora_b_stacked[slice_idx]  # [max_loras+1, local_E, slice, rank]
+            A = lora_a_stacked[slice_idx]  # [max_loras, local_E, rank, in]
+            B = lora_b_stacked[slice_idx]  # [max_loras, local_E, slice, rank]
             rank = A.shape[2]
             slice_out = B.shape[2]
             col_start = offset + slice_idx * slice_out
 
             A_flat = A.permute(1, 0, 2, 3).reshape(
-                local_E * max_loras_plus_one, rank, A.shape[-1]
+                local_E * max_loras, rank, A.shape[-1]
             ).contiguous()
             B_flat = B.permute(1, 0, 2, 3).reshape(
-                local_E * max_loras_plus_one, slice_out, rank
+                local_E * max_loras, slice_out, rank
             ).contiguous()
 
             buffer = torch.zeros(
