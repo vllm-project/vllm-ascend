@@ -13,7 +13,7 @@ from vllm_ascend.utils import AscendDeviceType, get_ascend_device_type
 logger = init_logger(__name__)
 
 # Valid values for VLLM_ASCEND_MOE_LORA_KERNEL. See vllm_ascend/envs.py.
-_MOE_LORA_KERNELS = ("bgmv", "torch", "ascendc")
+_MOE_LORA_KERNELS = ("bgmv", "bgmv_per_expert", "torch", "ascendc")
 
 
 # The platforms that are compatible with the PyTorch-native implementation can
@@ -428,15 +428,20 @@ class PunicaWrapperNPU(PunicaWrapperBase):
     ):
         """In-place adds the MoE-LoRA delta to `y`.
 
-        Dispatches to one of three implementations selected by
+        Dispatches to one of four implementations selected by
         ``VLLM_ASCEND_MOE_LORA_KERNEL`` (default ``"bgmv"``):
 
-        * ``bgmv``   - combined-index two-call bgmv. Production default.
-                       ~30-50x faster than torch reference.
-        * ``torch``  - torch.matmul double-loop reference. Slow but
-                       numerically identical; for A/B debugging only.
-        * ``ascendc``- reserved for a future fused AscendC kernel (v2).
-                       Raises NotImplementedError today.
+        * ``bgmv``            - combined-index two-call bgmv. Production
+                                default. ~30-50x vs torch.
+        * ``bgmv_per_expert`` - per-expert loop calling bgmv for each
+                                bucket. ~5-10x vs torch. Intermediate
+                                debugging tier; semantics 1:1 with the
+                                original "loop over local experts, call
+                                bgmv per expert" sketch.
+        * ``torch``           - torch.matmul double-loop reference. Slow
+                                but numerically identical; A/B ground truth.
+        * ``ascendc``         - reserved for a future fused AscendC kernel
+                                (v2). Raises NotImplementedError today.
 
         All implementations share the same shared-arg unpacking and
         early-out path below; only the inner kernel differs.
@@ -471,6 +476,11 @@ class PunicaWrapperNPU(PunicaWrapperBase):
                 y, x, lora_a_stacked, lora_b_stacked,
                 expert_ids, adapter_enabled, offset, token_lora_mapping,
             )
+        elif kernel == "bgmv_per_expert":
+            return self._add_lora_fused_moe_bgmv_per_expert(
+                y, x, lora_a_stacked, lora_b_stacked,
+                expert_ids, adapter_enabled, offset, token_lora_mapping,
+            )
         elif kernel == "torch":
             return self._add_lora_fused_moe_torch_ref(
                 y, x, lora_a_stacked, lora_b_stacked,
@@ -480,7 +490,7 @@ class PunicaWrapperNPU(PunicaWrapperBase):
             raise NotImplementedError(
                 "VLLM_ASCEND_MOE_LORA_KERNEL='ascendc' is reserved for a future "
                 "fused AscendC MoE-LoRA kernel (v2 roadmap). Use 'bgmv' (default) "
-                "for production or 'torch' for debugging."
+                "for production or 'torch'/'bgmv_per_expert' for debugging."
             )
 
     def _add_lora_fused_moe_bgmv(
@@ -543,6 +553,94 @@ class PunicaWrapperNPU(PunicaWrapperBase):
             self.bgmv_expand_slice(
                 buffer, B_flat, y, virtual_idx, col_start, slice_out, True
             )
+
+    def _add_lora_fused_moe_bgmv_per_expert(
+        self,
+        y: torch.Tensor,
+        x: torch.Tensor,
+        lora_a_stacked: tuple[torch.Tensor, ...],
+        lora_b_stacked: tuple[torch.Tensor, ...],
+        expert_ids: torch.Tensor,
+        adapter_enabled: torch.Tensor,
+        offset: int,
+        token_lora_mapping: torch.Tensor,
+    ):
+        """Per-expert bgmv loop (intermediate debugging tier).
+
+        Direct realization of the original "loop over local experts and call
+        bgmv per expert" sketch. For each (slice, expert) bucket:
+            x_sub = x[mask]                             # gather rows for this expert
+            buf = bgmv_shrink(x_sub, A[:, e], lora_ids_sub, 1.0)
+            out = bgmv_expand_slice(buf, B[:, e], lora_ids_sub, 0, slice_out)
+            y[mask, col_start:col_end] += out           # scatter back
+
+        Slower than the combined-index `bgmv` kernel because:
+          * local_E Python iterations (Qwen3-30B = 128 per slice)
+          * One host sync per bucket (`mask.any().item()`)
+          * local_E * 2 bgmv kernel launches per slice (vs 2 total)
+          * Each iteration allocates a small temp output buffer
+
+        Kept as a useful debugging tier: semantics are 1:1 with the
+        narrative description, easier to step through with print/pdb than
+        the combined-index version's reshape + virtual_idx tricks.
+        """
+        max_loras_plus_one = int(adapter_enabled.shape[0])
+        local_E = lora_a_stacked[0].shape[1]
+
+        tlm_clamped = token_lora_mapping.clamp(min=0)
+        valid_mask = (token_lora_mapping >= 0) & (
+            adapter_enabled[tlm_clamped] != 0
+        )
+        # Per-bucket lora_ids will be sliced from this safe view, so invalid
+        # rows route to slot 0 — but they're filtered out by `mask` before
+        # gather, so the value at -1 positions is never read.
+        safe_lora = torch.where(
+            valid_mask, tlm_clamped, torch.zeros_like(tlm_clamped)
+        ).to(torch.long)
+        safe_expert = expert_ids.clamp(min=0).to(torch.long)
+
+        for slice_idx in range(len(lora_a_stacked)):
+            A = lora_a_stacked[slice_idx]  # [max_loras+1, local_E, rank, in]
+            B = lora_b_stacked[slice_idx]  # [max_loras+1, local_E, slice, rank]
+            rank = A.shape[2]
+            slice_out = B.shape[2]
+            col_start = offset + slice_idx * slice_out
+            col_end = col_start + slice_out
+
+            for e in range(local_E):
+                # mask: which permuted rows are routed to expert `e` AND have
+                # a valid+enabled lora slot.
+                mask = (safe_expert == e) & valid_mask
+                # Per-bucket host sync — accepted as the cost of this tier.
+                if not bool(mask.any().item()):
+                    continue
+
+                x_sub = x[mask]
+                lora_ids_sub = safe_lora[mask]
+                n_sub = x_sub.size(0)
+
+                # Per-expert weight slices (contiguous to satisfy bgmv layout).
+                A_e = A[:, e].contiguous()  # [max_loras+1, rank, in]
+                B_e = B[:, e].contiguous()  # [max_loras+1, slice_out, rank]
+
+                # Shrink to fp32 rank buffer (parity with combined-index path).
+                rank_buf = torch.zeros(
+                    (n_sub, rank), dtype=torch.float32, device=x.device
+                )
+                self.bgmv_shrink(x_sub, A_e, rank_buf, lora_ids_sub, 1.0)
+
+                # Expand into a compact [n_sub, slice_out] temporary, then
+                # scatter-add back into y. We use expand_slice (not expand)
+                # because the wrapper passes slice_offset/slice_size to the
+                # AscendC op explicitly.
+                out_buf = torch.zeros(
+                    (n_sub, slice_out), dtype=y.dtype, device=x.device
+                )
+                self.bgmv_expand_slice(
+                    rank_buf, B_e, out_buf, lora_ids_sub, 0, slice_out, True
+                )
+
+                y[mask, col_start:col_end] += out_buf
 
     def _add_lora_fused_moe_torch_ref(
         self,

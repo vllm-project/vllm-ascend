@@ -102,13 +102,17 @@ env_variables: dict[str, Callable[[], Any]] = {
     # with W8A8. And MTP layer must be W8A8.
     "VLLM_ASCEND_ENABLE_FUSED_MC2": lambda: int(os.getenv("VLLM_ASCEND_ENABLE_FUSED_MC2", "0")),
     # Select the MoE-LoRA implementation kernel used by PunicaWrapperNPU.add_lora_fused_moe.
-    # "bgmv"    (default): combined-index two-call bgmv path. ~30-50x faster than torch
-    #                      reference. Production default.
-    # "torch"             : torch.matmul double-loop reference implementation. Slow
-    #                      (Python loop + per-bucket host sync) but numerically
-    #                      identical; use for debugging / A-B numerical comparison.
-    # "ascendc"           : reserved for a future fused AscendC kernel (v2).
-    #                      Currently raises NotImplementedError.
+    # "bgmv"            (default): combined-index two-call bgmv path. ~30-50x faster
+    #                              than torch reference. Production default.
+    # "bgmv_per_expert"          : per-expert loop calling bgmv for each (expert) bucket.
+    #                              ~5-10x vs torch. Easier to read than combined-index;
+    #                              kept as an intermediate tier for stepwise A/B and as
+    #                              a more intuitive debugging baseline above torch.
+    # "torch"                    : torch.matmul double-loop reference implementation.
+    #                              Slow (Python loop + per-bucket host sync) but
+    #                              numerically identical; use for ground-truth A/B.
+    # "ascendc"                  : reserved for a future fused AscendC kernel (v2).
+    #                              Currently raises NotImplementedError.
     "VLLM_ASCEND_MOE_LORA_KERNEL": lambda: os.getenv("VLLM_ASCEND_MOE_LORA_KERNEL", "bgmv").lower(),
     # Whether to enable balance scheduling in the v1 scheduler.
     # Platform validation: only PD-mixed mode (`kv_role='kv_both'` or no kv_transfer_config).
