@@ -350,3 +350,137 @@ class PunicaWrapperNPU(PunicaWrapperBase):
         self.bgmv_expand(buffer, lora_b_stacked, y, indices, add_inputs=True)
 
         y = y.view_as(y_org)
+
+    # ------------------------------------------------------------------
+    # MoE-LoRA primitives (v1 reference implementation)
+    # ------------------------------------------------------------------
+    # NPU does not yet have a fused MoE-LoRA kernel equivalent to the
+    # upstream Triton `fused_moe_lora`. v1 ships a torch-based reference
+    # implementation: correct-by-construction, suitable for functional
+    # verification on real adapters. A fused AscendC kernel is planned
+    # for v2.
+
+    def moe_lora_align_block_size(
+        self,
+        topk_ids: torch.Tensor,
+        num_tokens: int,
+        block_size: int,
+        num_experts: int,
+        max_loras: int,
+        adapter_enabled: torch.Tensor,
+        expert_map: torch.Tensor | None = None,
+        pad_sorted_ids: bool = False,
+        naive_block_assignment: bool = False,
+    ):
+        """Aligns tokens and experts for MoE-LoRA execution.
+
+        v1 NPU implementation always returns the naive layout (one row per
+        (orig_token, k) replica) — the equivalent of upstream GPU's
+        `naive_block_assignment=True` branch. The caller (AscendFusedMoEWithLoRA)
+        does not currently consume `sorted_token_ids` / `num_tokens_post_padded`,
+        so we leave them as None to avoid extra allocations.
+
+        Returns:
+            tuple(token_lora_mapping, sorted_token_ids, expert_ids,
+                  num_tokens_post_padded)
+            * token_lora_mapping: 1D LongTensor[num_tokens] of LoRA slot id per
+              original token. -1 means "no LoRA".
+            * sorted_token_ids: always None in v1.
+            * expert_ids: flat 1D LongTensor[num_tokens * top_k]; the expert id
+              each (token, k) replica is routed to. Translated by expert_map if
+              provided.
+            * num_tokens_post_padded: always None in v1.
+        """
+        del block_size, num_experts, max_loras, pad_sorted_ids
+        del naive_block_assignment  # always naive in v1
+        token_lora_mapping = self.token_lora_indices[:num_tokens]
+        expert_ids = topk_ids.reshape(-1)
+        if expert_map is not None:
+            expert_ids = expert_map[expert_ids]
+        return token_lora_mapping, None, expert_ids, None
+
+    def add_lora_fused_moe(
+        self,
+        y: torch.Tensor,
+        x: torch.Tensor,
+        lora_a_stacked: tuple[torch.Tensor, ...],
+        lora_b_stacked: tuple[torch.Tensor, ...],
+        topk_weights: torch.Tensor | None,
+        sorted_token_ids: torch.Tensor | None,
+        expert_ids: torch.Tensor,
+        num_tokens_post_padded: torch.Tensor | None,
+        max_lora_rank: int,
+        top_k_num: int,
+        shrink_config,
+        expand_config,
+        adapter_enabled: torch.Tensor,
+        mul_routed_weight: bool = False,
+        fully_sharded: bool = False,
+        offset: int = 0,
+        token_lora_mapping: torch.Tensor | None = None,
+    ):
+        """In-place adds the MoE-LoRA delta to `y`.
+
+        Semantics (one slice at a time):
+            for slice_idx, (A, B) in enumerate(zip(lora_a_stacked, lora_b_stacked)):
+                slice_out = B.shape[2]
+                col_start = offset + slice_idx * slice_out
+                for each permuted row i:
+                    l = token_lora_mapping[i]; e = expert_ids[i]
+                    if l == -1 or adapter_enabled[l] == 0: continue
+                    buf = (x[i] @ A[l, e].T) * 1.0          # shrink
+                    y[i, col_start:col_start+slice_out] += buf @ B[l, e].T  # expand
+
+        v1 walks (lora_id, expert_id) buckets in Python. This is O(max_loras *
+        local_E) masked matmuls per call — slow but correct. A fused AscendC
+        kernel will replace this in v2.
+        """
+        del sorted_token_ids, num_tokens_post_padded
+        del max_lora_rank, top_k_num, shrink_config, expand_config
+        del fully_sharded  # v1 does not need slice metadata on Ascend
+
+        if mul_routed_weight:
+            # Only the upstream w2 path (when running in unpermuted domain)
+            # sets this. The Ascend hook operates in the permuted domain, so
+            # we never set it. Keep the assert to catch accidental misuse.
+            raise NotImplementedError(
+                "mul_routed_weight=True is not supported on the Ascend MoE-LoRA "
+                "path (LoRA is applied to permuted activations before combine)."
+            )
+        if token_lora_mapping is None:
+            token_lora_mapping = self.token_lora_indices[: x.size(0)]
+
+        # Fast-path: no active LoRA for any token in this batch.
+        # `no_lora` is computed from the host-side prefill metadata; if it is
+        # not set (decode without explicit prefill update), we still need to
+        # honor adapter_enabled and the -1 sentinel.
+        max_loras = int(adapter_enabled.shape[0]) - 1
+        # Operate in fp32 internally for numerical parity with the GPU path,
+        # which also accumulates the shrink buffer in fp32. Cast back to y.dtype
+        # at the very end.
+        for slice_idx in range(len(lora_a_stacked)):
+            A = lora_a_stacked[slice_idx]  # [max_loras+1, local_E, rank, in]
+            B = lora_b_stacked[slice_idx]  # [max_loras+1, local_E, slice, rank]
+            slice_out = B.shape[2]
+            local_E = A.shape[1]
+            col_start = offset + slice_idx * slice_out
+            col_end = col_start + slice_out
+
+            for l in range(max_loras):
+                # adapter_enabled is a device tensor; .item() forces a sync.
+                # v1 accepts the sync since this is a Python reference impl.
+                if int(adapter_enabled[l].item()) == 0:
+                    continue
+                lora_mask = token_lora_mapping == l
+                # Early skip if this LoRA has no tokens in this batch.
+                if not bool(lora_mask.any().item()):
+                    continue
+                for e in range(local_E):
+                    mask = lora_mask & (expert_ids == e)
+                    if not bool(mask.any().item()):
+                        continue
+                    x_sub = x[mask].to(torch.float32)
+                    buf = x_sub @ A[l, e].t().to(torch.float32)
+                    delta = buf @ B[l, e].t().to(torch.float32)
+                    y[mask, col_start:col_end] += delta.to(y.dtype)
+        return

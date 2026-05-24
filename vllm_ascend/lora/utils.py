@@ -15,6 +15,7 @@ from vllm.lora.layers import (
     RowParallelLinearWithShardedLoRA,
     VocabParallelEmbeddingWithLoRA,
 )
+from vllm.lora.layers.fused_moe import FusedMoE3DWithLoRA, FusedMoEWithLoRA
 from vllm.lora.layers.replicated_linear import ReplicatedLinearWithLoRA
 from vllm.lora.layers.utils import _fully_sharded_can_replace, _not_fully_sharded_can_replace
 
@@ -197,3 +198,15 @@ def refresh_all_lora_classes():
     vllm.lora.utils._all_lora_classes.add(AscendQKVParallelLinearWithShardedLoRA)
     vllm.lora.utils._all_lora_classes.add(AscendRowParallelLinearWithShardedLoRA)
     vllm.lora.utils._all_lora_classes.add(AscendReplicatedLinearWithLoRA)
+
+    # MoE LoRA: drop upstream Triton-based wrappers (they assert on TritonExperts
+    # in __init__ which does not exist on Ascend) and register Ascend variants.
+    # Imported lazily to avoid pulling in torch_npu at module-import time.
+    from vllm_ascend.lora.fused_moe import (
+        AscendFusedMoE3DWithLoRA,
+        AscendFusedMoEWithLoRA,
+    )
+    vllm.lora.utils._all_lora_classes.discard(FusedMoEWithLoRA)
+    vllm.lora.utils._all_lora_classes.discard(FusedMoE3DWithLoRA)
+    vllm.lora.utils._all_lora_classes.add(AscendFusedMoEWithLoRA)
+    vllm.lora.utils._all_lora_classes.add(AscendFusedMoE3DWithLoRA)

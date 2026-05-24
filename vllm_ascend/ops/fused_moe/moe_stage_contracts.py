@@ -139,6 +139,13 @@ class MoEMlpComputeInput:
     activation: str = "silu"
     need_trans: bool = False
     dynamic_eplb: bool = False
+    # MoE-LoRA hook needs to reconstruct (permuted_row -> orig_token) mapping
+    # to look up per-token LoRA slot ids. These optional fields are populated
+    # by build_mlp_compute_input for comm methods whose combine_metadata
+    # carries an expanded_row_idx (currently AllGather). Other comm methods
+    # leave them None; the LoRA hook detects this and falls back to base path.
+    expanded_row_idx: torch.Tensor | None = None
+    topk_ids: torch.Tensor | None = None
 
 
 __all__ = [
