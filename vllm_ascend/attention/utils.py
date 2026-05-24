@@ -1,3 +1,5 @@
+import os
+import time
 from dataclasses import dataclass, field
 from functools import lru_cache
 from typing import Any
@@ -7,6 +9,7 @@ import torch.nn.functional as F
 from vllm.config import VllmConfig, get_current_vllm_config
 from vllm.distributed.kv_transfer import get_kv_transfer_group, has_kv_transfer_group, is_v1_kv_transfer_group
 from vllm.forward_context import ForwardContext, get_forward_context
+from vllm.logger import logger
 from vllm.v1.attention.backends.utils import CommonAttentionMetadata
 
 from vllm_ascend import envs
@@ -59,6 +62,10 @@ def using_paged_attention(runtime_shape: int, vllm_config: VllmConfig) -> bool:
 def enable_cp():
     prefill_config = get_current_vllm_config().parallel_config
     return prefill_config.prefill_context_parallel_size > 1 or prefill_config.decode_context_parallel_size > 1
+
+
+def _profile_kv_connector() -> bool:
+    return os.getenv("VLLM_ASCEND_PROFILE_KV_CONNECTOR", "0") == "1"
 
 
 @dataclass
@@ -272,7 +279,15 @@ def wait_for_kv_layer_from_connector(layer_name: str):
     if attn_metadata is None:
         return
     # TODO: assert ascendMetadata
+    profile = _profile_kv_connector()
+    start = time.perf_counter() if profile else 0.0
     connector.wait_for_layer_load(layer_name)
+    if profile:
+        logger.warning(
+            "[KV_CONNECTOR_WAIT] layer=%s wait_cpu=%.3fms",
+            layer_name,
+            (time.perf_counter() - start) * 1000,
+        )
 
 
 def maybe_save_kv_layer_to_connector(
@@ -289,7 +304,18 @@ def maybe_save_kv_layer_to_connector(
     if attn_metadata is None:
         return
     # TODO: assert ascendMetadata
+    profile = _profile_kv_connector()
+    start = time.perf_counter() if profile else 0.0
     connector.save_kv_layer(layer_name, kv_cache_layer, attn_metadata)
+    if profile:
+        logger.warning(
+            "[KV_CONNECTOR_SAVE] layer=%s save_cpu=%.3fms cache_num=%s dtypes=%s shapes=%s",
+            layer_name,
+            (time.perf_counter() - start) * 1000,
+            len(kv_cache_layer),
+            [str(cache.dtype) for cache in kv_cache_layer],
+            [tuple(cache.shape) for cache in kv_cache_layer],
+        )
 
 
 def round_up(val: int, align: int) -> int:

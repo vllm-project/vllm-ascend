@@ -71,6 +71,10 @@ GET_META_MSG = b"get_meta_msg"
 DONE_RECVING_MSG = b"done_recving_msg"
 
 
+def _profile_kv_connector() -> bool:
+    return os.getenv("VLLM_ASCEND_PROFILE_KV_CONNECTOR", "0") == "1"
+
+
 class RemotePortInfo(TypedDict):
     num: int
     host: str
@@ -543,6 +547,15 @@ class KVCacheRecvingThread(threading.Thread):
                     dst_list.append(dst)
                     length_list.append(length)
 
+        profile = _profile_kv_connector()
+        if profile:
+            logger.warning(
+                "[MOONCAKE_RECV_XFER_BEGIN] req=%s mode=all_groups segments=%s total_kb=%.1f session=%s",
+                remote_request_id,
+                len(src_list),
+                sum(length_list) / 1024,
+                session_id,
+            )
         ret = self.engine.batch_transfer_sync_read(session_id, src_list, dst_list, length_list)
         if ret < 0:
             logger.error("Mooncake transfer failed for request %s", req_meta["remote_request_id"])
@@ -558,6 +571,14 @@ class KVCacheRecvingThread(threading.Thread):
             self.tp_rank,
             session_id,
         )
+        if profile:
+            logger.warning(
+                "[MOONCAKE_RECV_XFER_END] req=%s mode=all_groups elapsed=%.3fms segments=%s total_kb=%.1f",
+                remote_request_id,
+                req_transfer_elapsed,
+                len(src_list),
+                sum(length_list) / 1024,
+            )
 
     def _transfer_kv_cache(self, req_meta: dict[str, Any]):
         """Handle a KV cache transfer request."""
@@ -635,6 +656,17 @@ class KVCacheRecvingThread(threading.Thread):
                 dst_list.append(dst)
                 length_list.append(length)
 
+        profile = _profile_kv_connector()
+        if profile:
+            logger.warning(
+                "[MOONCAKE_RECV_XFER_BEGIN] req=%s segments=%s total_kb=%.1f groups=%s blocks=%s session=%s",
+                remote_request_id,
+                len(src_list),
+                sum(length_list) / 1024,
+                num_transfer_groups,
+                num_blocks,
+                session_id,
+            )
         ret = self.engine.batch_transfer_sync_read(session_id, src_list, dst_list, length_list)
         if ret < 0:
             logger.error("Mooncake transfer failed for request %s", req_meta["remote_request_id"])
@@ -653,6 +685,16 @@ class KVCacheRecvingThread(threading.Thread):
             self.tp_rank,
             session_id,
         )
+        if profile:
+            logger.warning(
+                "[MOONCAKE_RECV_XFER_END] req=%s elapsed=%.3fms segments=%s total_kb=%.1f groups=%s blocks=%s",
+                remote_request_id,
+                req_transfer_elapsed,
+                len(src_list),
+                sum(length_list) / 1024,
+                num_transfer_groups,
+                num_blocks,
+            )
 
         # Determine if the current position is the offset position at the end of
         # the KV transmission.

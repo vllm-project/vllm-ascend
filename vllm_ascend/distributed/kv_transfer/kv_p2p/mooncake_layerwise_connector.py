@@ -79,6 +79,10 @@ if TYPE_CHECKING:
 DONE_SENDING_MSG = b"done_sending_msg"
 
 
+def _profile_kv_connector() -> bool:
+    return os.getenv("VLLM_ASCEND_PROFILE_KV_CONNECTOR", "0") == "1"
+
+
 @dataclass
 class LayerMetadata:
     tensor_group_idx: list[int]
@@ -473,6 +477,17 @@ class KVCacheSendingLayerThread(threading.Thread):
 
         for session_id, transfer_meta in session_meta.items():
             if len(transfer_meta.src) > 0:
+                profile = _profile_kv_connector()
+                if profile:
+                    logger.warning(
+                        "[MOONCAKE_SEND_XFER_BEGIN] layer=%s idx=%s session=%s segments=%s total_kb=%.1f req_ids=%s",
+                        send_task.layer_name,
+                        send_task.layer_idx,
+                        session_id,
+                        len(transfer_meta.src),
+                        sum(transfer_meta.length) / 1024,
+                        transfer_meta.req_ids,
+                    )
                 req_start_time = time.perf_counter()
                 ret = self.engine.batch_transfer_sync_write(
                     session_id, transfer_meta.src, transfer_meta.dst, transfer_meta.length
@@ -499,6 +514,17 @@ class KVCacheSendingLayerThread(threading.Thread):
                         session_id,
                         req_transfer_elapsed,
                     )
+                    if profile:
+                        logger.warning(
+                            "[MOONCAKE_SEND_XFER_END] layer=%s idx=%s session=%s elapsed=%.3fms segments=%s total_kb=%.1f req_ids=%s",
+                            send_task.layer_name,
+                            send_task.layer_idx,
+                            session_id,
+                            req_transfer_elapsed,
+                            len(transfer_meta.src),
+                            total_transfer_size,
+                            transfer_meta.req_ids,
+                        )
                     if send_task.layer_idx == (self.total_layers - 1):
                         for req_id in transfer_meta.req_ids:
                             req_meta = send_task.send_request[req_id]
