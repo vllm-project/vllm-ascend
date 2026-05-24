@@ -124,7 +124,8 @@ class GroupCoordinatorPatch(GroupCoordinator):
         self.device = None
         self.use_custom_op_call = True
         self.use_cpu_custom_send_recv = False
-
+        self.group_name = group_name
+        self.group_ranks = group_ranks
         reuse_domain = _resolve_reuse_domain(group_name)
 
         try:
@@ -216,10 +217,20 @@ class GroupCoordinatorPatch(GroupCoordinator):
             self.device_communicator.destroy()
             self.device_communicator = None
             destroyed = True
-        if hasattr(self, "device_group") and self.device_group is not None:
-            torch.distributed.destroy_process_group(self.device_group)
-            self.device_group = None
+        if self._acquired_hccl_keys:
+            for hccl_key in reversed(self._acquired_hccl_keys):
+                _HCCL_PG_REGISTRY.release(hccl_key)
+            self._acquired_hccl_keys = []
             destroyed = True
+
+        if self._unshared_hccl_groups:
+            for device_group in reversed(self._unshared_hccl_groups):
+                torch.distributed.destroy_process_group(device_group)
+            self._unshared_hccl_groups = []
+            destroyed = True
+
+        if hasattr(self, "device_group"):
+            self.device_group = None
         return destroyed
 
     def restore_hccl_after_sleep(self) -> bool:
@@ -228,13 +239,19 @@ class GroupCoordinatorPatch(GroupCoordinator):
             return False
 
         self_device_group = None
-        hccl_pg_options = create_hccl_pg_options(self.group_name)
+        reuse_domain = _resolve_reuse_domain(self.group_name)
         for ranks in self.group_ranks:
-            device_group = torch.distributed.new_group(
-                ranks,
-                backend=self.torch_distributed_backend,
-                pg_options=hccl_pg_options,
+            hccl_pg_options = create_hccl_pg_options(self.group_name)
+            device_group, hccl_key = _acquire_hccl_group(
+                ranks=ranks,
+                backend=self.backend,
+                hccl_pg_options=hccl_pg_options,
+                reuse_domain=reuse_domain,
             )
+            if hccl_key is not None:
+                self._acquired_hccl_keys.append(hccl_key)
+            elif self.backend == "hccl" and self.rank in ranks:
+                self._unshared_hccl_groups.append(device_group)
             if self.rank in ranks:
                 self_device_group = device_group
 
@@ -242,7 +259,12 @@ class GroupCoordinatorPatch(GroupCoordinator):
         self.device_group = self_device_group
         self.device = torch.npu.current_device()
         if self.use_device_communicator and self.world_size > 1:
-            self._init_device_communicator()
+            self.device_communicator = NPUCommunicator(
+                cpu_group=self.cpu_group,
+                device=self.device,
+                device_group=self.device_group,
+                unique_name=self.unique_name,
+            )
         return True
 
     def all_to_all(
