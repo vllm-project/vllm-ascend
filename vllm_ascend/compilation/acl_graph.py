@@ -232,6 +232,7 @@ def update_full_graph_params(
     speculative_config=None,
     num_dcp_pcp_tokens=None,
     draft_attn_metadatas=None,
+    draft_attn_layer_names=None,
 ):
     impl_cls = attn_backend.get_impl_cls()
     impl_cls.update_graph_params(
@@ -242,6 +243,7 @@ def update_full_graph_params(
         speculative_config,
         num_dcp_pcp_tokens,
         draft_attn_metadatas,
+        draft_attn_layer_names=draft_attn_layer_names,
     )
 
     from vllm_ascend.ops.gdn import update_conv1d_graph_params

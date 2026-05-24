@@ -779,6 +779,7 @@ class AscendMLAImpl(MLAAttentionImpl):
         speculative_config=None,
         num_dcp_pcp_tokens=None,
         draft_attn_metadatas=None,
+        draft_attn_layer_names=None,
     ):
         if _EXTRA_CTX.is_draft_model:
             if _EXTRA_CTX.is_draft_model_prefill:
@@ -791,6 +792,7 @@ class AscendMLAImpl(MLAAttentionImpl):
             graph_params = get_graph_params()
             attn_metadata = forward_context.attn_metadata
             attn_keys = list(attn_metadata.keys())
+        draft_names = set(draft_attn_layer_names) if draft_attn_layer_names else set()
         # FIXME: Behold! We are using a temporary hack here to update the args
         # for each layer's attention op in the graph.
         num_layers = len(attn_keys)
@@ -834,7 +836,13 @@ class AscendMLAImpl(MLAAttentionImpl):
                     attn_metadata_current = attn_metadata
 
                 seq_lens_list = attn_metadata_current[key].decode.seq_lens_list
-                if speculative_config and speculative_config.use_eagle() and not _EXTRA_CTX.is_draft_model:
+                if key in draft_names:
+                    actual_seq_lengths = attn_metadata_current[key].decode.actual_seq_lengths_q
+                    block_table = attn_metadata_current[key].decode.block_table
+                    if speculative_config and speculative_config.disable_padded_drafter_batch:
+                        block_table = block_table[: len(actual_seq_lengths)]
+                    seq_lens_list = seq_lens_list + [0] * (len(actual_seq_lengths) - len(seq_lens_list))
+                elif speculative_config and speculative_config.use_eagle() and not _EXTRA_CTX.is_draft_model:
                     actual_seq_lengths = attn_metadata_current[key].decode.actual_seq_lengths_q
                     spec_multiple = speculative_config.num_speculative_tokens + 1
                     seq_lens_list = seq_lens_list + [0] * (num_tokens // spec_multiple - len(seq_lens_list))

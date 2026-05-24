@@ -17,6 +17,7 @@
 # Adapted from vllm-project/vllm/vllm/worker/gpu_model_runner.py
 #
 
+import inspect
 import math
 import sys
 import time
@@ -336,15 +337,23 @@ class NPUModelRunner(GPUModelRunner):
             self.c8_k_cache_dtype = torch.int8
             self.c8_k_scale_cache_dtype = torch.float16
 
-        self.attn_backend = get_attn_backend(
-            0,
-            self.dtype,
-            None,
-            use_mla=self.model_config.use_mla,
-            use_sparse=self.use_sparse,
-            use_mm_prefix=self.model_config is not None
+        # Keep compatibility with upstream vLLM and patched selector signatures.
+        attn_params = inspect.signature(get_attn_backend).parameters
+        attn_kwargs = {
+            "head_size": 0,
+            "dtype": self.dtype,
+            "kv_cache_dtype": None,
+            "use_mla": self.model_config.use_mla,
+            "use_sparse": self.use_sparse,
+            "use_mm_prefix": self.model_config is not None
             and self.model_config.is_mm_prefix_lm,
-        )
+        }
+        if "block_size" in attn_params:
+            attn_kwargs["block_size"] = self.block_size
+        if "use_compress" in attn_params:
+            hf_config = getattr(self.vllm_config.model_config, "hf_config", None)
+            attn_kwargs["use_compress"] = hasattr(hf_config, "compress_ratios")
+        self.attn_backend = get_attn_backend(**attn_kwargs)
 
         try:
             self.dcp_size = get_dcp_group().world_size

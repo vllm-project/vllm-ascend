@@ -1,5 +1,6 @@
 # ruff: noqa: E501
 import inspect
+import os
 import unittest
 from dataclasses import dataclass
 from typing import Any
@@ -271,7 +272,10 @@ class TestEagleProposerInitialization(TestBase):
         self.vllm_config.scheduler_config.async_scheduling = True
         init_ascend_config(self.vllm_config)
 
-        with set_current_vllm_config(self.vllm_config):
+        with (
+            patch.dict(os.environ, {"VLLM_ASCEND_ENABLE_MTP_FUSED": "1"}),
+            set_current_vllm_config(self.vllm_config),
+        ):
             proposer = AscendEagleProposer(vllm_config=self.vllm_config, device=self.device, runner=self.runner)
 
             self.assertEqual(proposer.hidden_size, 2048)

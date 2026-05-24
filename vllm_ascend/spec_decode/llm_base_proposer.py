@@ -41,6 +41,7 @@ from vllm.v1.spec_decode.utils import (
 )
 from vllm.v1.worker.gpu_input_batch import CachedRequestState, InputBatch
 
+from vllm_ascend import envs
 from vllm_ascend.ascend_forward_context import _EXTRA_CTX, set_ascend_forward_context
 from vllm_ascend.attention.attention_mask import AttentionMaskBuilder
 from vllm_ascend.attention.attention_v1 import AscendAttentionState
@@ -138,7 +139,14 @@ class AscendSpecDecodeBaseProposer(SpecDecodeBaseProposer):
         else:
             self.tp_group_context = nullcontext()
 
-        self.use_cuda_graph = self.runner._use_aclgraph() and not self.speculative_config.enforce_eager
+        self.enable_mtp_fused = True
+        if self.method == "mtp":
+            self.enable_mtp_fused = envs.VLLM_ASCEND_ENABLE_MTP_FUSED
+        self.use_cuda_graph = (
+            self.runner._use_aclgraph()
+            and not self.speculative_config.enforce_eager
+            and (self.method != "mtp" or self.enable_mtp_fused)
+        )
 
         # TODO: Remove it when the bug of fx-graph is solved
         self.maybe_eager_context: AbstractContextManager[Any] = nullcontext()
@@ -1851,6 +1859,8 @@ class AscendSpecDecodeBaseProposer(SpecDecodeBaseProposer):
             self.vllm_config,
             self.vllm_config.speculative_config,
             draft_attn_metadatas=draft_attn_metadatas,
+            # Some UTs mock proposer internals and do not populate this field.
+            draft_attn_layer_names=getattr(self, "attn_layer_names", None),
         )
 
     # adjusting tensor into desired size
