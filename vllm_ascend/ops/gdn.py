@@ -664,7 +664,7 @@ class AscendGatedDeltaNetAttention(GatedDeltaNetAttention):
                 scale=key_non_spec.shape[-1] ** -0.5,
                 actual_seq_lengths=actual_seq_lengths,
                 ssm_state_indices=non_spec_state_indices_tensor,
-            ).unsqueeze(0)
+            )
         else:
             core_attn_out_non_spec, last_recurrent_state = None, None
 
