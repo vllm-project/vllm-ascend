@@ -108,15 +108,6 @@ def get_dsv4_compress_ratio(config: Any, layer_idx: int) -> int:
     return compress_ratios[layer_idx]
 
 
-def clear_enable_sp():
-    global _ENABLE_SP
-    _ENABLE_SP = None
-    enable_dsa_cp.cache_clear()
-    enable_dsa_cp_with_layer_shard.cache_clear()
-    enable_dsa_cp_with_o_proj_tp.cache_clear()
-    _libc_getenv.cache_clear()
-
-
 def is_310p():
     return get_ascend_device_type() == AscendDeviceType._310P
 
@@ -209,17 +200,13 @@ def _should_trans_nz(weight: torch.Tensor) -> bool:
     if is_310p():
         return True
 
-    # Get config value instead of env
-    config = get_ascend_config()
-    nz_mode = config.weight_nz_mode
-
-    # NZ is disabled when mode is 0.
-    if not nz_mode:
+    # NZ is disabled on non-310P.
+    if not envs_ascend.VLLM_ASCEND_ENABLE_NZ:
         return False
 
-    # BF16/FP16 convert only when nz_mode == 2.
+    # BF16/FP16 convert only when enable_nz == 2.
     if weight.dtype in {torch.bfloat16, torch.float16}:
-        return nz_mode == 2
+        return envs_ascend.VLLM_ASCEND_ENABLE_NZ == 2
 
     # Quantized or other supported dtypes convert by default.
     return True
@@ -580,6 +567,9 @@ def update_aclgraph_sizes(vllm_config: VllmConfig) -> None:
     # Store original configuration and temporarily clear it
     compilation_config = vllm_config.compilation_config
     original_sizes, compilation_config.cudagraph_capture_sizes = compilation_config.cudagraph_capture_sizes, None
+    cudagraph_mode = compilation_config.cudagraph_mode
+    if cudagraph_mode.has_full_cudagraphs() and cudagraph_mode.has_piecewise_cudagraphs():
+        MAX_CAPTURE_SIZE = max(0, MAX_CAPTURE_SIZE - len(original_sizes))
 
     # Calculate parallel configuration factor
     if not vllm_config.model_config:
@@ -670,13 +660,14 @@ def update_aclgraph_sizes(vllm_config: VllmConfig) -> None:
     # If original sizes exceed maximum, sample a representative subset
     if max_num_batch_sizes < len(original_sizes):
         # Sample uniformly from original sizes
-        step = (len(original_sizes) - 1) / (max_num_batch_sizes - 1)
-        indices = [round(i * step) for i in range(max_num_batch_sizes)]
-
-        # Ensure first and last elements are preserved
-        indices[0], indices[-1] = 0, len(original_sizes) - 1
-
-        sampled_sizes = [original_sizes[i] for i in indices]
+        if max_num_batch_sizes <= 1:
+            # Avoid division by zero when only one capture size can be kept.
+            sampled_sizes = [original_sizes[-1]]
+        else:
+            step = (len(original_sizes) - 1) / (max_num_batch_sizes - 1)
+            indices = [round(i * step) for i in range(max_num_batch_sizes)]
+            indices[0], indices[-1] = 0, len(original_sizes) - 1
+            sampled_sizes = [original_sizes[i] for i in indices]
         update_cudagraph_capture_sizes(vllm_config, sampled_sizes)
         logger.info(
             "Adjusted ACL graph batch sizes for %s model (layers: %d): %d → %d sizes",
@@ -884,7 +875,7 @@ def mlp_tp_enable() -> bool:
 
 
 def matmul_allreduce_enable() -> bool:
-    return get_ascend_config().enable_matmul_allreduce
+    return envs_ascend.VLLM_ASCEND_ENABLE_MATMUL_ALLREDUCE
 
 
 def enable_sp_by_pass():
@@ -893,31 +884,23 @@ def enable_sp_by_pass():
 
 def enable_sp(vllm_config=None, enable_shared_expert_dp: bool = False) -> bool:
     global _ENABLE_SP
-    if vllm_config is None:
-        try:
+    if _ENABLE_SP is None:
+        if vllm_config is None:
             from vllm.config import get_current_vllm_config
 
             vllm_config = get_current_vllm_config()
-        except AssertionError:
-            vllm_config = None
-
-    additional_config = getattr(vllm_config, "additional_config", None) if vllm_config is not None else None
-    refresh = additional_config.get("refresh", False) if additional_config else False
-
-    if _ENABLE_SP is None or refresh:
-        if additional_config is not None and "enable_flashcomm1" in additional_config:
-            _ENABLE_SP = bool(additional_config["enable_flashcomm1"])
-        else:
-            try:
-                _ENABLE_SP = get_ascend_config().enable_flashcomm1
-            except RuntimeError:
-                _ENABLE_SP = envs_ascend.VLLM_ASCEND_ENABLE_FLASHCOMM1
+        _ENABLE_SP = (
+            envs_ascend.VLLM_ASCEND_ENABLE_FLASHCOMM1
+            # Flash comm 1 should be enabled by env VLLM_ASCEND_ENABLE_FLASHCOMM1
+            # We retain the env VLLM_ASCEND_ENABLE_FLASHCOMM here for backward compatibility.
+            or bool(int(os.getenv("VLLM_ASCEND_ENABLE_FLASHCOMM", "0")))
+        )
 
         if not _ENABLE_SP and enable_shared_expert_dp:
             _ENABLE_SP = True
             logger.info("shared_expert_dp requires enable_sp = True. has set enable_sp to True")
 
-    return bool(_ENABLE_SP)
+    return _ENABLE_SP
 
 
 # TODO remove it after vllm has this func
@@ -926,7 +909,7 @@ def shared_expert_dp_enabled() -> bool:
 
 
 def prefill_context_parallel_enable() -> bool:
-    return get_ascend_config().enable_context_parallel
+    return envs_ascend.VLLM_ASCEND_ENABLE_CONTEXT_PARALLEL
 
 
 def is_moe_model(vllm_config: VllmConfig):
@@ -1210,8 +1193,7 @@ def has_layer_idx(model_instance: torch.nn.Module) -> bool:
 
 
 def flashcomm2_enable() -> bool:
-    config_val = get_ascend_config().enable_flashcomm2_parallel_size
-    return config_val > 0
+    return envs_ascend.VLLM_ASCEND_FLASHCOMM2_PARALLEL_SIZE > 0
 
 
 def o_shard_enable() -> bool:
@@ -1222,10 +1204,10 @@ def o_shard_enable() -> bool:
 
 
 def get_flashcomm2_config_and_validate(ascend_config, vllm_config):
-    flashcomm2_oproj_tp_size = ascend_config.enable_flashcomm2_parallel_size
+    flashcomm2_oproj_tp_size = envs_ascend.VLLM_ASCEND_FLASHCOMM2_PARALLEL_SIZE
     global_tp_size = vllm_config.parallel_config.tensor_parallel_size
 
-    if ascend_config.enable_flashcomm2_parallel_size <= 0:
+    if not flashcomm2_enable():
         return 0
 
     logger.info("Enable FLASHCOMM2 with flashcomm2_oproj_tensor_parallel_size = %s", flashcomm2_oproj_tp_size)
@@ -1239,7 +1221,7 @@ def get_flashcomm2_config_and_validate(ascend_config, vllm_config):
                 "FLASHCOMM2 only supports 'o_proj' as the sole layer sharding configuration! "
                 f"Found invalid layer_sharding: {layer_sharding}"
             )
-    if not ascend_config.enable_flashcomm1:
+    if not envs_ascend.VLLM_ASCEND_ENABLE_FLASHCOMM1:
         logger.warning_once(
             "It is recommended to enable FLASHCOMM1 simultaneously when starting FLASHCOMM2 for optimal performance."
         )
