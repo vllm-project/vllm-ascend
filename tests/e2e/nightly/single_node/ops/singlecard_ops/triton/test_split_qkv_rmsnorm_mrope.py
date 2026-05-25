@@ -3,7 +3,6 @@ import gc
 import pytest
 import torch
 
-
 NUM_TOKENS = [1, 4096]
 NUM_QKV_HEADS = [(2, 1), (16, 2)]
 HEAD_SIZES = [128, 256]

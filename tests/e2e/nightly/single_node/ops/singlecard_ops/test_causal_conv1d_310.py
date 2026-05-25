@@ -22,6 +22,7 @@ def to_int64_tuple(t):
         return (t.item(),)
     return tuple(t.tolist())
 
+
 @pytest.mark.skip(reason="Tested separately on a 310P machine.")
 @pytest.mark.parametrize("has_initial_state", [False, True])
 @pytest.mark.parametrize("silu_activation", [True])

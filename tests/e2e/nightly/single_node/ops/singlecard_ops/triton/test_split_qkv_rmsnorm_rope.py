@@ -4,7 +4,6 @@ import numpy as np
 import pytest
 import torch
 
-
 MAX_POSITION_EMBEDDINGS = [262144]
 NUM_TOKENS = [1, 16, 1024]
 NUM_QKV_HEADS = [(12, 1), (64, 4)]
@@ -143,7 +142,6 @@ def test_split_qkv_rmsnorm_rope_with_bias(
 ):
     torch.manual_seed(seed)
     torch.set_default_device(device)
-
 
     q_hidden_size = num_q_heads * head_size
     kv_hidden_size = num_kv_heads * head_size

@@ -5,7 +5,6 @@ import torch
 
 from vllm_ascend.ops.triton.rope import rope_forward_triton, rope_forward_triton_siso
 
-
 IS_NEOX_STYLE = [True, False]
 DTYPES = [torch.bfloat16, torch.float16]
 MAX_POSITION_EMBEDDINGS = [262144]

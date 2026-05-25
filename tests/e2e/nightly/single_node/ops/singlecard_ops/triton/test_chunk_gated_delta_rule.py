@@ -1,10 +1,11 @@
-import gc
+from unittest.mock import MagicMock, patch
 
 import torch
-from unittest.mock import MagicMock, patch
+
 from tests.ut.base import PytestBase
 from vllm_ascend._310p.ops.fla.chunk_gated_delta_rule import chunk_gated_delta_rule_pytorch
 from vllm_ascend.ops.triton.fla.chunk import chunk_gated_delta_rule
+
 
 class TestChunkGatedDeltaRule(PytestBase):
     def test_triton_fusion_ops(self, mock_moe_env):
@@ -23,26 +24,29 @@ class TestChunkGatedDeltaRule(PytestBase):
 
         mock_pcp_group = MagicMock()
         mock_pcp_group.world_size = 1
-        with patch('vllm_ascend.ops.triton.fla.chunk.get_forward_context', return_value=mock_forward_context), \
-            patch('vllm_ascend.ops.triton.fla.chunk.get_pcp_group', return_value=mock_pcp_group):
-                (
-                    core_attn_out_non_spec,
-                    last_recurrent_state,
-                ) = chunk_gated_delta_rule(
-                    q=q,
-                    k=k,
-                    v=v,
-                    g=g,
-                    beta=beta,
-                    initial_state=initial_state,
-                    output_final_state=True,
-                    cu_seqlens=q_start_loc,
-                    head_first=False,
-                    use_qk_l2norm_in_kernel=True,
-                )
+        with (
+            patch("vllm_ascend.ops.triton.fla.chunk.get_forward_context", return_value=mock_forward_context),
+            patch("vllm_ascend.ops.triton.fla.chunk.get_pcp_group", return_value=mock_pcp_group),
+        ):
+            (
+                core_attn_out_non_spec,
+                last_recurrent_state,
+            ) = chunk_gated_delta_rule(
+                q=q,
+                k=k,
+                v=v,
+                g=g,
+                beta=beta,
+                initial_state=initial_state,
+                output_final_state=True,
+                cu_seqlens=q_start_loc,
+                head_first=False,
+                use_qk_l2norm_in_kernel=True,
+            )
 
         assert core_attn_out_non_spec.shape == (1, 17, 8, 128)
         assert last_recurrent_state.shape == (3, 8, 128, 128)
+
 
 def test_chunk_gated_delta_rule_310_state_layout_matches_vllm():
     q = torch.tensor([[[[1.0, 0.0]]]], dtype=torch.float32)

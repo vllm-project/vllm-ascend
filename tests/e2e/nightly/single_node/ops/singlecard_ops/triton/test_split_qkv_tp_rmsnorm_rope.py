@@ -4,7 +4,6 @@ import numpy as np
 import pytest
 import torch
 
-
 NUM_TOKENS = [1, 8, 32]
 NUM_QKV_HEADS = [(6, 1), (8, 2)]
 HEAD_DIMS = [128]

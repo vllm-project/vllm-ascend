@@ -43,7 +43,7 @@ def test_rejection_random_sample(max_spec_len, vocab_size, batch_size):
     recovered_ids = torch.zeros_like(draft_token_ids, dtype=torch.int64, device=device)
     grid, block_size = cal_grid_and_block_size(batch_size)
     synthetic_conditional_rates = None
-    original_rejection_random_sample_kernel[(batch_size, )](
+    original_rejection_random_sample_kernel[(batch_size,)](
         original_output_token_ids,
         cu_num_draft_tokens,
         draft_token_ids,
@@ -199,7 +199,8 @@ def test_rejection_sampler_block_verify_triton_kernel(
         vec_len=batch_size,
         NO_DRAFT_PROBS=draft_probs is None,
         BLOCK_SIZE=block_size,
-        SUB_BLOCK=32)
+        SUB_BLOCK=32,
+    )
     torch.npu.synchronize()
     assert torch.equal(output_token_ids_ref, output_token_ids_triton)
     gc.collect()

@@ -25,8 +25,8 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 import torch
-import torch_npu
 import torch.nn.functional as F
+import torch_npu
 
 from vllm_ascend.ops.fused_moe.experts_selector import check_npu_moe_gating_top_k, select_experts
 from vllm_ascend.ops.fused_moe.moe_mlp import unified_apply_mlp
@@ -40,7 +40,6 @@ from vllm_ascend.ops.fused_moe.moe_runtime_args import (
 from vllm_ascend.ops.fused_moe.token_dispatcher import TokenDispatcherWithAllGather
 from vllm_ascend.quantization.quant_type import QuantType
 
-
 NUM_EXPERTS = [8, 64]
 EP_SIZE = [1]
 TOP_KS = [2, 6]
@@ -49,10 +48,12 @@ DEVICE = ["npu"]
 
 class SiluAndMul:
     """SwiGLU activation function: silu(x[:d]) * x[d:] where d = x.shape[-1] // 2"""
+
     def __call__(self, x: torch.Tensor) -> torch.Tensor:
         d = x.shape[-1] // 2
         return F.silu(x[..., :d]) * x[..., d:]
-    
+
+
 def apply_mlp(
     hidden_states: torch.Tensor,
     w1: torch.Tensor,
@@ -199,8 +200,6 @@ def test_token_dispatcher_with_all_gather_quant(
     dtype: torch.dtype,
     device: str,
 ):
-
-
     a = torch.randn((m, k), device=device, dtype=dtype) / 10
     w1 = torch.randn((e, k, 2 * n), device=device, dtype=torch.int8)
     w1_scale = torch.empty((e, 2 * n), device=device, dtype=dtype)

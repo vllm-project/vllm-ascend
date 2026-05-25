@@ -2,8 +2,9 @@ import time
 from datetime import datetime
 
 import pytest
-from vllm_ascend.utils import enable_custom_op
+
 from vllm_ascend.ops.triton.triton_utils import init_device_properties_triton
+from vllm_ascend.utils import enable_custom_op
 
 init_device_properties_triton()
 enable_custom_op()
@@ -23,9 +24,9 @@ def pytest_runtest_teardown(item, nextitem):
     global _current_file
 
     file_path = item.fspath
-    if not hasattr(item, 'start_time'):
+    if not hasattr(item, "start_time"):
         return
-    
+
     duration = time.time() - item.start_time
 
     if file_path not in _per_file_slow_cases:
