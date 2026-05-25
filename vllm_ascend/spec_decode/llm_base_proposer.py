@@ -103,9 +103,50 @@ class _FusedModelWithMTP:
         self.draft_token_ids_buf = torch.zeros(
             (max_num_reqs, num_spec_tokens), dtype=torch.int64, device=device
         )
+        # Reusable contiguous indices [0, 1, ..., max_num_reqs-1] for step0 gather.
+        self.step0_indices_buf = torch.arange(max_num_reqs, dtype=torch.int64, device=device)
 
     def __getattr__(self, key: str):
         return getattr(self.raw_model, key)
+
+    def _get_mtp_hidden_for_drafter(
+        self,
+        hidden_states_out: torch.Tensor | tuple[torch.Tensor, ...],
+        *,
+        num_tokens: int,
+        positions: torch.Tensor,
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        """Resolve hidden states for fused MTP.
+
+        Returns:
+            last_hidden_states: used for step0 sampling logits.
+            draft_hidden_states: fed into drafter.propose_all_in_graph.
+        """
+        if isinstance(hidden_states_out, tuple):
+            last_hidden_states = hidden_states_out[0]
+            draft_hidden_states = hidden_states_out[1]
+        else:
+            last_hidden_states = hidden_states_out
+            draft_hidden_states = hidden_states_out
+
+        # Prefer explicit pre-hc_head residual stream exported by the target
+        # model, whose layout matches MTP drafter expectations.
+        get_mtp_hidden = getattr(self.raw_model, "get_mtp_target_hidden_states", None)
+        if callable(get_mtp_hidden):
+            mtp_hidden = get_mtp_hidden()
+            if mtp_hidden is not None:
+                draft_hidden_states = mtp_hidden[:num_tokens]
+
+        # Keep fused path aligned with regular proposer path so hidden-state
+        # layout matches draft buffer assumptions under TP/SP/EP variants.
+        last_hidden_states, _, draft_hidden_states = self.drafter.maybe_all_gather_and_unpad(
+            last_hidden_states,
+            positions,
+            draft_hidden_states,
+        )
+        if draft_hidden_states is None:
+            draft_hidden_states = last_hidden_states
+        return last_hidden_states, draft_hidden_states
 
     def __call__(
         self,
@@ -124,28 +165,16 @@ class _FusedModelWithMTP:
         )
         forward_context = get_forward_context()
         if getattr(forward_context, "capturing", False):
-            if isinstance(hidden_states, tuple):
-                # MTP models may return (last_hidden_states, mtp_hidden_states).
-                last_hidden_states = hidden_states[0]
-                draft_hidden_states = hidden_states[1]
-            else:
-                last_hidden_states = hidden_states
-                draft_hidden_states = hidden_states
             num_tokens = input_ids.shape[0]
             num_actual_tokens = int(getattr(forward_context, "num_actual_tokens", num_tokens))
             batch_size = max(num_actual_tokens // (self.drafter.num_speculative_tokens + 1), 1)
-
-            # Keep fused path aligned with regular proposer path so hidden-state
-            # layout matches draft buffer assumptions under TP/SP/EP variants.
-            last_hidden_states, _, draft_hidden_states = self.drafter.maybe_all_gather_and_unpad(
-                last_hidden_states,
-                positions,
-                draft_hidden_states,
+            last_hidden_states, draft_hidden_states = self._get_mtp_hidden_for_drafter(
+                hidden_states,
+                num_tokens=num_tokens,
+                positions=positions,
             )
-            if draft_hidden_states is None:
-                draft_hidden_states = last_hidden_states
 
-            step0_logits_indices = self.logits_indices_buf[:batch_size].clone().to(dtype=torch.long)
+            step0_logits_indices = self.step0_indices_buf[:batch_size]
             sample_hs = last_hidden_states[step0_logits_indices]
             next_token_ids = self.raw_model.compute_logits(sample_hs).argmax(dim=-1)
             all_draft_ids = self.drafter.propose_all_in_graph(
@@ -228,6 +257,14 @@ class AscendSpecDecodeBaseProposer(SpecDecodeBaseProposer):
         self.use_cuda_graph = (
             base_use_cuda_graph
             and (self.method != "mtp" or self.enable_mtp_fused)
+        )
+        # Reusable buffers for fused MTP proposal path to reduce per-step allocations.
+        self._mtp_step0_indices_buf = torch.arange(self.runner.max_num_reqs, dtype=torch.int64, device=self.device)
+        self._mtp_draft_token_ids_buf = torch.zeros(
+            (self.num_speculative_tokens, self.runner.max_num_reqs), dtype=torch.int64, device=self.device
+        )
+        self._mtp_fallback_buf = torch.zeros(
+            (self.num_speculative_tokens, self.runner.max_num_reqs), dtype=torch.int64, device=self.device
         )
 
         # TODO: Remove it when the bug of fx-graph is solved
@@ -482,9 +519,10 @@ class AscendSpecDecodeBaseProposer(SpecDecodeBaseProposer):
         raw_model = self.get_model()
 
         if step0_logits_indices is None:
-            step0_logits_indices = logits_indices[:batch_size].clone().to(dtype=torch.long)
-        if num_tokens > 0:
-            step0_logits_indices = step0_logits_indices.clamp_(0, num_tokens - 1)
+            step0_logits_indices = self._mtp_step0_indices_buf[:batch_size]
+        elif num_tokens > 0:
+            # Avoid in-place clamp on shared buffers.
+            step0_logits_indices = step0_logits_indices.clamp(0, num_tokens - 1)
 
         # Safety fallback:
         # In fused MTP + graph modes, hidden-state layout may differ from the
@@ -507,12 +545,9 @@ class AscendSpecDecodeBaseProposer(SpecDecodeBaseProposer):
                     num_tokens,
                 )
                 self._logged_mtp_shape_mismatch = True
-            fallback = torch.zeros(
-                (self.num_speculative_tokens, batch_size),
-                dtype=next_token_ids.dtype,
-                device=self.device,
-            )
-            fallback[0].copy_(next_token_ids[:batch_size])
+            fallback = self._mtp_fallback_buf[: self.num_speculative_tokens, :batch_size]
+            fallback.zero_()
+            fallback[0].copy_(next_token_ids[:batch_size].to(fallback.dtype))
             return fallback.transpose(0, 1)
 
         self.input_ids[:num_tokens].copy_(input_ids[:num_tokens])
@@ -520,12 +555,9 @@ class AscendSpecDecodeBaseProposer(SpecDecodeBaseProposer):
         self._set_positions(num_tokens, positions[:num_tokens])
         self.hidden_states[:num_tokens].copy_(hidden_states[:num_tokens])
 
-        draft_token_ids_tensor = torch.zeros(
-            (self.num_speculative_tokens, batch_size),
-            dtype=next_token_ids.dtype,
-            device=self.device,
-        )
-        draft_token_ids_tensor[0].copy_(next_token_ids[:batch_size])
+        draft_token_ids_tensor = self._mtp_draft_token_ids_buf[: self.num_speculative_tokens, :batch_size]
+        draft_token_ids_tensor.zero_()
+        draft_token_ids_tensor[0].copy_(next_token_ids[:batch_size].to(draft_token_ids_tensor.dtype))
         if self.num_speculative_tokens == 1:
             return draft_token_ids_tensor.transpose(0, 1)
 
@@ -2100,7 +2132,12 @@ class AscendSpecDecodeBaseProposer(SpecDecodeBaseProposer):
                 if not self.is_multimodal_model:
                     positions = torch.ops.vllm.maybe_all_gather_and_maybe_unpad(positions.contiguous(), True)
                 if hidden_states is not None:
-                    hidden_states = last_hidden_states
+                    # Keep MTP draft hidden stream independent from main-model
+                    # last_hidden_states. They can have different hidden sizes
+                    # (e.g. 16384 vs 4096), so aliasing here breaks fused path.
+                    hidden_states = torch.ops.vllm.maybe_all_gather_and_maybe_unpad(
+                        hidden_states.contiguous(), True
+                    )
         else:
             if _EXTRA_CTX.flash_comm_v1_enabled:
                 last_hidden_states = torch.ops.vllm.maybe_all_gather_and_maybe_unpad(

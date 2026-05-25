@@ -19,6 +19,7 @@
 
 import inspect
 import math
+import os
 import sys
 import time
 from collections import defaultdict
@@ -3370,15 +3371,33 @@ class NPUModelRunner(GPUModelRunner):
                     # Mark proposer to avoid creating an independent draft
                     # graph wrapper when fused MTP is explicitly requested.
                     self.drafter.fused_with_main_graph = True
-                with get_tp_context(self.drafter):
-                    self.drafter.load_model(self.model)
+                prev_draft_only = os.environ.get("VLLM_ASCEND_SPEC_CONFIG_DRAFT_ONLY")
+                os.environ["VLLM_ASCEND_SPEC_CONFIG_DRAFT_ONLY"] = "1"
+                try:
+                    with get_tp_context(self.drafter):
+                        self.drafter.load_model(self.model)
+                finally:
+                    if prev_draft_only is None:
+                        os.environ.pop("VLLM_ASCEND_SPEC_CONFIG_DRAFT_ONLY", None)
+                    else:
+                        os.environ["VLLM_ASCEND_SPEC_CONFIG_DRAFT_ONLY"] = prev_draft_only
                 if (
                     self.speculative_config is not None
                     and self.speculative_config.method == "mtp"
                     and getattr(self.drafter, "fused_with_main_graph", False)
                 ):
-                    target_hidden_size = getattr(self.vllm_config.model_config.hf_text_config, "hidden_size", None)
                     drafter_hidden_size = getattr(self.drafter, "hidden_size", None)
+                    target_hidden_size = None
+                    get_mtp_hidden = getattr(self.model, "get_mtp_target_hidden_states", None)
+                    if callable(get_mtp_hidden):
+                        mtp_hidden = get_mtp_hidden()
+                        if mtp_hidden is not None and getattr(mtp_hidden, "ndim", 0) == 2:
+                            target_hidden_size = mtp_hidden.shape[1]
+                    if target_hidden_size is None:
+                        # Fallback to plain model hidden_size if dedicated MTP
+                        # hidden buffer is unavailable.
+                        target_hidden_size = getattr(self.vllm_config.model_config.hf_text_config, "hidden_size", None)
+
                     if (
                         isinstance(target_hidden_size, int)
                         and isinstance(drafter_hidden_size, int)
