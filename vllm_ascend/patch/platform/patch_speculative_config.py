@@ -1,3 +1,4 @@
+import copy
 from typing import TYPE_CHECKING, Any
 
 from vllm.config.speculative import SpeculativeConfig
@@ -13,6 +14,9 @@ else:
 
 
 def hf_config_override(hf_config: PretrainedConfig) -> PretrainedConfig:
+    # Avoid mutating the shared target-model HF config in place.
+    # Speculative draft overrides should operate on an isolated config object.
+    hf_config = copy.deepcopy(hf_config)
     initial_architecture = hf_config.architectures[0]
     if hf_config.model_type in ("deepseek_v3", "deepseek_v32", "deepseek_v4", "glm_moe_dsa"):
         target_model_type = hf_config.model_type

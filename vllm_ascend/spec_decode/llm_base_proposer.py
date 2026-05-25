@@ -124,16 +124,32 @@ class _FusedModelWithMTP:
         )
         forward_context = get_forward_context()
         if getattr(forward_context, "capturing", False):
-            raw_hidden_states = hidden_states[0] if isinstance(hidden_states, tuple) else hidden_states
+            if isinstance(hidden_states, tuple):
+                # MTP models may return (last_hidden_states, mtp_hidden_states).
+                last_hidden_states = hidden_states[0]
+                draft_hidden_states = hidden_states[1]
+            else:
+                last_hidden_states = hidden_states
+                draft_hidden_states = hidden_states
             num_tokens = input_ids.shape[0]
             num_actual_tokens = int(getattr(forward_context, "num_actual_tokens", num_tokens))
             batch_size = max(num_actual_tokens // (self.drafter.num_speculative_tokens + 1), 1)
 
+            # Keep fused path aligned with regular proposer path so hidden-state
+            # layout matches draft buffer assumptions under TP/SP/EP variants.
+            last_hidden_states, _, draft_hidden_states = self.drafter.maybe_all_gather_and_unpad(
+                last_hidden_states,
+                positions,
+                draft_hidden_states,
+            )
+            if draft_hidden_states is None:
+                draft_hidden_states = last_hidden_states
+
             step0_logits_indices = self.logits_indices_buf[:batch_size].clone().to(dtype=torch.long)
-            sample_hs = raw_hidden_states[step0_logits_indices]
+            sample_hs = last_hidden_states[step0_logits_indices]
             next_token_ids = self.raw_model.compute_logits(sample_hs).argmax(dim=-1)
             all_draft_ids = self.drafter.propose_all_in_graph(
-                hidden_states=raw_hidden_states,
+                hidden_states=draft_hidden_states,
                 input_ids=input_ids,
                 positions=positions,
                 logits_indices=self.logits_indices_buf,
@@ -421,10 +437,7 @@ class AscendSpecDecodeBaseProposer(SpecDecodeBaseProposer):
                     layer_module.shared_head.head = model.lm_head
 
         cudagraph_mode = self.vllm_config.compilation_config.cudagraph_mode
-        if (
-            (cudagraph_mode.has_full_cudagraphs() or cudagraph_mode == CUDAGraphMode.FULL_DECODE_ONLY)
-            and self.use_cuda_graph
-        ):
+        if cudagraph_mode.has_full_cudagraphs() and self.use_cuda_graph:
             self.update_stream = torch.npu.Stream()
             if self.method == "mtp" and getattr(self, "fused_with_main_graph", False):
                 self._runnable = self._run_merged_draft
@@ -432,7 +445,7 @@ class AscendSpecDecodeBaseProposer(SpecDecodeBaseProposer):
                 self._runnable = ACLGraphWrapper(
                     self._run_merged_draft,
                     self.vllm_config,
-                    runtime_mode=cudagraph_mode,
+                    runtime_mode=CUDAGraphMode.FULL,
                     use_eagle=self.use_eagle,
                     enable_enpu=self.enable_enpu,
                 )
@@ -472,6 +485,35 @@ class AscendSpecDecodeBaseProposer(SpecDecodeBaseProposer):
             step0_logits_indices = logits_indices[:batch_size].clone().to(dtype=torch.long)
         if num_tokens > 0:
             step0_logits_indices = step0_logits_indices.clamp_(0, num_tokens - 1)
+
+        # Safety fallback:
+        # In fused MTP + graph modes, hidden-state layout may differ from the
+        # preallocated draft buffer on some shapes/configs. Instead of crashing
+        # the worker, fall back to a minimal valid draft proposal.
+        if (
+            hidden_states.ndim != 2
+            or self.hidden_states.ndim != 2
+            or hidden_states.shape[1] != self.hidden_states.shape[1]
+            or hidden_states.shape[0] < num_tokens
+            or self.hidden_states.shape[0] < num_tokens
+        ):
+            if not getattr(self, "_logged_mtp_shape_mismatch", False):
+                logger.warning(
+                    "MTP fused graph hidden-state shape mismatch in propose_all_in_graph: "
+                    "hidden_states=%s draft_buffer=%s num_tokens=%d. "
+                    "Falling back to minimal draft proposal for stability.",
+                    tuple(hidden_states.shape),
+                    tuple(self.hidden_states.shape),
+                    num_tokens,
+                )
+                self._logged_mtp_shape_mismatch = True
+            fallback = torch.zeros(
+                (self.num_speculative_tokens, batch_size),
+                dtype=next_token_ids.dtype,
+                device=self.device,
+            )
+            fallback[0].copy_(next_token_ids[:batch_size])
+            return fallback.transpose(0, 1)
 
         self.input_ids[:num_tokens].copy_(input_ids[:num_tokens])
         self.input_ids.index_copy_(0, step0_logits_indices, next_token_ids[:batch_size].to(self.input_ids.dtype))

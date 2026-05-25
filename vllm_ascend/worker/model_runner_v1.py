@@ -3372,6 +3372,25 @@ class NPUModelRunner(GPUModelRunner):
                     self.drafter.fused_with_main_graph = True
                 with get_tp_context(self.drafter):
                     self.drafter.load_model(self.model)
+                if (
+                    self.speculative_config is not None
+                    and self.speculative_config.method == "mtp"
+                    and getattr(self.drafter, "fused_with_main_graph", False)
+                ):
+                    target_hidden_size = getattr(self.vllm_config.model_config.hf_text_config, "hidden_size", None)
+                    drafter_hidden_size = getattr(self.drafter, "hidden_size", None)
+                    if (
+                        isinstance(target_hidden_size, int)
+                        and isinstance(drafter_hidden_size, int)
+                        and target_hidden_size != drafter_hidden_size
+                    ):
+                        logger.warning(
+                            "Disable fused MTP main-graph path due to hidden-size contract mismatch: "
+                            "target_hidden_size=%d drafter_hidden_size=%d.",
+                            target_hidden_size,
+                            drafter_hidden_size,
+                        )
+                        self.drafter.fused_with_main_graph = False
                 if self.use_aux_hidden_state_outputs:
                     from vllm.model_executor.models.interfaces import supports_eagle3
                     if not supports_eagle3(self.model):
@@ -3389,12 +3408,8 @@ class NPUModelRunner(GPUModelRunner):
         self.model_memory_usage = m.consumed_memory
         logger.info("Loading model weights took %.4f GB", m.consumed_memory / float(2**30))
 
-        # Wrap the model with ACLGraph when full graph routines are enabled.
-        if (
-            self.compilation_config.cudagraph_mode.has_full_cudagraphs()
-            or self.compilation_config.cudagraph_mode == CUDAGraphMode.FULL_DECODE_ONLY
-        ):
-            runtime_mode = self.compilation_config.cudagraph_mode
+        # Wrap the model with ACLGraph only for full graph modes.
+        if self.compilation_config.cudagraph_mode.has_full_cudagraphs():
             self.update_stream: torch.npu.Stream = torch.npu.Stream()
             runnable = self.model
             if (
@@ -3407,7 +3422,7 @@ class NPUModelRunner(GPUModelRunner):
             self.model = ACLGraphWrapper(
                 runnable,
                 self.vllm_config,
-                runtime_mode=runtime_mode,
+                runtime_mode=CUDAGraphMode.FULL,
                 use_eagle=self.use_eagle,
                 enable_enpu=self.enable_enpu,
             )
