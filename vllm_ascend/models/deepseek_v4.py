@@ -249,6 +249,7 @@ class DeepseekV4MoE(nn.Module):
         self.gate = ReplicatedLinear(
             config.hidden_size, config.n_routed_experts, bias=False, quant_config=None, prefix=f"{prefix}.gate"
         )
+        self.gate.precast_fp32_weight = True
 
         # Load balancing settings.
         eplb_config = parallel_config.eplb_config
@@ -684,6 +685,25 @@ class DeepseekV4Attention(nn.Module):
                     prefix=f"{prefix}.indexer",
                 )
 
+        # IndexCache: decide whether this layer reuses topk from a previous
+        # indexer-bearing layer. Refer: https://arxiv.org/abs/2603.12201
+        # Only meaningful when this layer actually owns an Indexer (c4) and
+        # IndexCache is enabled via hf-overrides. MTP layers are excluded
+        # because spec_decode shares topk_indices_buffer at the model level
+        # only, leaving impl-level references stale.
+        skip_topk = False
+        if self.compress_ratio == 4 and getattr(config, "use_index_cache", False) and ".mtp." not in prefix:
+            compress_ratios = getattr(config, "compress_ratios", None) or []
+            indexer_seq_idx = sum(1 for r in compress_ratios[:config_layer_idx] if r == 4)
+            pattern = getattr(config, "index_topk_pattern", None)
+            freq = getattr(config, "index_topk_freq", 1)
+            if pattern is None:
+                skip_topk = max(indexer_seq_idx - 1, 0) % freq != 0
+            else:
+                assert pattern[0] == "F", "index_topk_pattern must start with 'F'"
+                if 0 <= indexer_seq_idx < len(pattern):
+                    skip_topk = pattern[indexer_seq_idx] == "S"
+
         dsa_modules = DSAModules(
             wq_a=self.wq_a,
             q_norm=self.q_norm,
@@ -696,6 +716,7 @@ class DeepseekV4Attention(nn.Module):
             indexer=self.indexer,
             compressor=self.compressor,
             topk_indices_buffer=topk_indices_buffer,
+            skip_topk=skip_topk,
         )
 
         self.dsa_attn = AscendDeepseekSparseAttention(
@@ -789,7 +810,7 @@ class DeepseekV2DecoderLayer(nn.Module):
         self.hc_ffn_scale = nn.Parameter(torch.empty(3, dtype=torch.float32))
 
     def hc_pre(self, x: torch.Tensor, hc_fn: torch.Tensor, hc_scale: torch.Tensor, hc_base: torch.Tensor):
-        y = torch.ops._C_ascend.npu_hc_pre_v2(
+        y = torch.ops._C_ascend.npu_hc_pre(
             x, hc_fn, hc_scale, hc_base, self.hc_mult, self.hc_sinkhorn_iters, self.norm_eps, self.hc_eps
         )
         return y
@@ -846,6 +867,10 @@ class DeepseekV4Model(nn.Module):
             )
         else:
             topk_indices_buffer = None
+
+        # Expose at model level so spec_decode/llm_base_proposer can share
+        # this buffer with the MTP draft via attribute replacement.
+        self.topk_indices_buffer = topk_indices_buffer
 
         if get_pp_group().is_first_rank:
             self.embed_tokens = VocabParallelEmbedding(
@@ -936,8 +961,25 @@ class DeepseekV4Model(nn.Module):
             hidden_states, residual = layer(positions, hidden_states, residual, llama_4_scaling)
 
         # Stash pre-hc_head residual for the MTP draft (captured copy_).
-        num_tokens = hidden_states.shape[0]
-        self._mtp_hidden_buffer[:num_tokens].copy_(hidden_states.flatten(1))
+        # When FlashComm1 (sequence parallelism) is enabled, tokens are
+        # partitioned across TP ranks via reduce_scatter in each layer's
+        # row-parallel output projection.  We must all_gather here so the
+        # MTP layers receive the full token set — otherwise only rank 0's
+        # partition is valid and the rest of the buffer holds stale data,
+        # leading to NaN values and low acceptance rate.
+        from vllm_ascend.ascend_forward_context import get_forward_context
+
+        forward_ctx = get_forward_context()
+        if forward_ctx is not None and forward_ctx.flash_comm_v1_enabled:
+            h_states_flat = tensor_model_parallel_all_gather(hidden_states.flatten(1), dim=0)
+            pad_size = forward_ctx.pad_size
+            if pad_size > 0:
+                h_states_flat = h_states_flat[:-pad_size]
+            num_tokens = h_states_flat.shape[0]
+            self._mtp_hidden_buffer[:num_tokens].copy_(h_states_flat)
+        else:
+            num_tokens = hidden_states.shape[0]
+            self._mtp_hidden_buffer[:num_tokens].copy_(hidden_states.flatten(1))
 
         hidden_states = self.hc_head(hidden_states, self.hc_head_fn, self.hc_head_scale, self.hc_head_base)
         if not get_pp_group().is_last_rank:
