@@ -149,6 +149,72 @@ class TestNPUModelRunnerOutputTokenIds(unittest.TestCase):
         self.assertEqual(actual_output_token_ids[1], [4, 5, 7])
 
 
+class TestNPUModelRunnerV1SamplingContext(unittest.TestCase):
+    def _build_runner(self, enable_sampling_optimization=True):
+        runner = NPUModelRunner.__new__(NPUModelRunner)
+        runner.device = torch.device("cpu")
+        runner.sampling_config = SimpleNamespace(
+            enable_sampling_optimization=enable_sampling_optimization,
+        )
+        runner.input_batch = SimpleNamespace(
+            num_reqs=2,
+            req_ids=["req0", "req1"],
+        )
+        runner.input_ids = SimpleNamespace(
+            gpu=torch.tensor([101, 102, 201, 202], dtype=torch.int64),
+        )
+        runner.logits_indices = torch.tensor([1, 3], dtype=torch.int64)
+        return runner
+
+    def test_builds_v1_sampling_context_for_enabled_normal_decode(self):
+        runner = self._build_runner()
+        positions = torch.tensor([10, 11, 20, 21], dtype=torch.int64)
+
+        ctx = runner._maybe_build_v1_sampling_context(
+            positions,
+            spec_decode_metadata=None,
+        )
+
+        self.assertIsNotNone(ctx)
+        self.assertEqual(ctx.num_reqs, 2)
+        self.assertEqual(ctx.num_logits, 2)
+        self.assertTrue(ctx.is_identity_request_mapping)
+        self.assertEqual(ctx.expanded_idx_mapping.tolist(), [0, 1])
+        self.assertEqual(ctx.pos.tolist(), [11, 21])
+        self.assertEqual(ctx.input_ids.tolist(), [102, 202])
+        self.assertEqual(ctx.req_ids, ("req0", "req1"))
+
+    def test_skips_v1_sampling_context_when_disabled(self):
+        runner = self._build_runner(enable_sampling_optimization=False)
+
+        ctx = runner._maybe_build_v1_sampling_context(
+            torch.tensor([10, 11, 20, 21], dtype=torch.int64),
+            spec_decode_metadata=None,
+        )
+
+        self.assertIsNone(ctx)
+
+    def test_builds_v1_sampling_context_for_spec_decode(self):
+        runner = self._build_runner()
+        runner.logits_indices = torch.tensor([0, 1, 3], dtype=torch.int64)
+
+        ctx = runner._maybe_build_v1_sampling_context(
+            torch.tensor([10, 11, 20, 21], dtype=torch.int64),
+            spec_decode_metadata=SimpleNamespace(num_draft_tokens=[1, 0]),
+        )
+
+        self.assertIsNotNone(ctx)
+        self.assertEqual(ctx.num_reqs, 2)
+        self.assertEqual(ctx.num_logits, 3)
+        self.assertTrue(ctx.expanded_logits)
+        self.assertFalse(ctx.is_identity_request_mapping)
+        self.assertEqual(ctx.expanded_idx_mapping.tolist(), [0, 0, 1])
+        self.assertEqual(ctx.expanded_local_pos.tolist(), [0, 1, 0])
+        self.assertEqual(ctx.pos.tolist(), [10, 11, 21])
+        self.assertEqual(ctx.input_ids.tolist(), [101, 102, 202])
+        self.assertEqual(ctx.cu_num_logits_np.tolist(), [0, 2, 3])
+
+
 class TestNPUModelRunnerDebugger(unittest.TestCase):
     def _build_runner(self, debugger=None):
         runner = NPUModelRunner.__new__(NPUModelRunner)
