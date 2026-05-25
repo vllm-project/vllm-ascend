@@ -504,17 +504,23 @@ class TestAscendUnquantizedFusedMoEMethod:
 
 class TestAscendMoERunner:
     @pytest.mark.parametrize(
-        "moe_comm_type, expected",
+        "moe_comm_type, flash_comm_v1_enabled, expected",
         [
-            (MoECommType.ALLTOALL, True),
-            (MoECommType.MC2, True),
-            (MoECommType.FUSED_MC2, True),
-            (MoECommType.ALLGATHER, False),
+            (MoECommType.ALLTOALL, False, True),
+            (MoECommType.MC2, False, True),
+            (MoECommType.FUSED_MC2, False, True),
+            (MoECommType.ALLGATHER, False, False),
+            (MoECommType.ALLGATHER, True, True),
         ],
     )
-    def test_runner_reduction_properties(self, monkeypatch, moe_comm_type, expected):
+    def test_runner_reduction_properties(self, monkeypatch, moe_comm_type, flash_comm_v1_enabled, expected):
         runner = AscendMoERunner.__new__(AscendMoERunner)
         monkeypatch.setattr(fused_moe_module, "_EXTRA_CTX", SimpleNamespace(moe_comm_type=moe_comm_type))
+        monkeypatch.setattr(
+            fused_moe_module,
+            "_EXTRA_CTX",
+            SimpleNamespace(moe_comm_type=moe_comm_type, flash_comm_v1_enabled=flash_comm_v1_enabled),
+        )
 
         assert runner.use_dp_chunking is False
         if hasattr(type(runner), "_fused_output_is_reduced"):
@@ -776,6 +782,7 @@ class TestAscendFusedMoESharedExperts:
             pytest.skip("Current AscendFusedMoE has no shared_forward_impl")
         layer.multistream_overlap_shared_expert = False
         layer.shared_multistream_overlap_gate = False
+        layer.use_overlapped = False
         layer._shared_experts = MagicMock() if has_shared_experts else None
         hidden_states = torch.randn(2, 4)
         router_logits = torch.randn(2, 3)

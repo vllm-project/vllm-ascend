@@ -1426,6 +1426,37 @@ class AscendDSAImpl(DSAAttentionImpl):
             self.compressor_norm = self.compressor.norm
             self.compressor_norm_eps = self.compressor.norm_eps
 
+        # IndexCache: skip_topk indicates this layer reuses topk from a previous
+        # indexer-bearing layer; use_index_cache marks whether the buffer must
+        # be kept fresh on non-skip layers so downstream skip layers can read.
+        self.skip_topk = kwargs.get("skip_topk", False)
+        self.topk_indices_buffer = kwargs.get("topk_indices_buffer")
+        self.use_index_cache = self.skip_topk or getattr(
+            self.vllm_config.model_config.hf_config,
+            "use_index_cache",
+            False,
+        )
+
+    def _get_indexcache_topk_indices(self, num_tokens: int, offset: int = 0) -> torch.Tensor:
+        if self.topk_indices_buffer is None:
+            raise RuntimeError("IndexCache requires topk_indices_buffer when skip_topk is enabled.")
+        topk_indices = self.topk_indices_buffer[offset : offset + num_tokens]
+        if topk_indices.dim() == 2:
+            topk_indices = topk_indices.unsqueeze(1)
+        return topk_indices
+
+    def _update_indexcache_topk_indices(self, topk_indices: torch.Tensor, offset: int = 0) -> None:
+        if self.topk_indices_buffer is None:
+            return
+        num_tokens = topk_indices.shape[0]
+        topk_tokens = topk_indices.shape[-1]
+        topk_indices_to_cache = topk_indices
+        topk_indices_buffer = self.topk_indices_buffer[offset : offset + num_tokens, :topk_tokens]
+        if topk_indices_to_cache.dim() == 3 and topk_indices_buffer.dim() == 2:
+            assert topk_indices_to_cache.shape[1] == 1
+            topk_indices_to_cache = topk_indices_to_cache.squeeze(1)
+        topk_indices_buffer.copy_(topk_indices_to_cache)
+
     def process_weights_after_loading(self, act_dtype: torch.dtype):
         pass
 
@@ -1705,34 +1736,44 @@ class AscendDSAImpl(DSAAttentionImpl):
             compress_topk_idxs = None
             # Only call indexer_select_qli when compress_ratio == 4 (requires 5 elements in attn_metadata)
             if self.compress_ratio == 4:
-                if self.multistream_dsv4_dsa_overlap:
-                    compress_topk_idxs = self.cv_indexer_select_qli(  # multistream version
-                        x=hidden_states,
-                        qr=qr,
-                        kv_cache=kv_cache,
-                        attn_metadata=attn_metadata,
-                        cos=cos,
-                        sin=sin,
-                        compressed_cos=compress_cos,
-                        compressed_sin=compress_sin,
-                        actual_seq_lengths_query=actual_seq_lengths_query,
-                        actual_seq_lengths_key=actual_seq_lengths_key,
-                        with_prefill=True,
-                    )
+                # IndexCache: prefill segment lives at buffer[num_decode_tokens:]
+                # because dsa_v1 forward splits hidden_states as
+                # [decode | prefill]. See AscendDSAImpl.forward.
+                prefill_offset = attn_metadata[0].num_decode_tokens
+                prefill_num_tokens = hidden_states.shape[0]
+                if self.skip_topk:
+                    compress_topk_idxs = self._get_indexcache_topk_indices(prefill_num_tokens, offset=prefill_offset)
                 else:
-                    compress_topk_idxs = self.indexer_select_qli(  # original version
-                        x=hidden_states,
-                        qr=qr,
-                        kv_cache=kv_cache,
-                        attn_metadata=attn_metadata,
-                        cos=cos,
-                        sin=sin,
-                        compressed_cos=compress_cos,
-                        compressed_sin=compress_sin,
-                        actual_seq_lengths_query=actual_seq_lengths_query,
-                        actual_seq_lengths_key=actual_seq_lengths_key,
-                        with_prefill=True,
-                    )
+                    if self.multistream_dsv4_dsa_overlap:
+                        compress_topk_idxs = self.cv_indexer_select_qli(  # multistream version
+                            x=hidden_states,
+                            qr=qr,
+                            kv_cache=kv_cache,
+                            attn_metadata=attn_metadata,
+                            cos=cos,
+                            sin=sin,
+                            compressed_cos=compress_cos,
+                            compressed_sin=compress_sin,
+                            actual_seq_lengths_query=actual_seq_lengths_query,
+                            actual_seq_lengths_key=actual_seq_lengths_key,
+                            with_prefill=True,
+                        )
+                    else:
+                        compress_topk_idxs = self.indexer_select_qli(  # original version
+                            x=hidden_states,
+                            qr=qr,
+                            kv_cache=kv_cache,
+                            attn_metadata=attn_metadata,
+                            cos=cos,
+                            sin=sin,
+                            compressed_cos=compress_cos,
+                            compressed_sin=compress_sin,
+                            actual_seq_lengths_query=actual_seq_lengths_query,
+                            actual_seq_lengths_key=actual_seq_lengths_key,
+                            with_prefill=True,
+                        )
+                    if self.use_index_cache:
+                        self._update_indexcache_topk_indices(compress_topk_idxs, offset=prefill_offset)
 
             coff = 2 if self.compressor_overlap else 1
 
@@ -1938,37 +1979,43 @@ class AscendDSAImpl(DSAAttentionImpl):
             compress_sin = common_decode_metadata.compress_sin[layer_name]
             compress_topk_idxs = None
             if self.compress_ratio == 4:
-                # use multistream.
-                if self.multistream_dsv4_dsa_overlap:
-                    compress_topk_idxs = self.cv_indexer_select_qli(  # multistream version
-                        x=hidden_states,
-                        qr=qr,
-                        kv_cache=kv_cache,
-                        attn_metadata=attn_metadata,
-                        cos=cos,
-                        sin=sin,
-                        compressed_cos=compress_cos,
-                        compressed_sin=compress_sin,
-                        actual_seq_lengths_query=actual_seq_lengths_query,
-                        actual_seq_lengths_key=actual_seq_lengths_key,
-                        with_prefill=False,
-                        qr_pertoken_scale=qr_pertoken_scale,
-                    )
+                # IndexCache: decode segment occupies buffer[:num_decode_tokens]
+                decode_num_tokens = hidden_states.shape[0]
+                if self.skip_topk:
+                    compress_topk_idxs = self._get_indexcache_topk_indices(decode_num_tokens, offset=0)
                 else:
-                    compress_topk_idxs = self.indexer_select_qli(  # original version
-                        x=hidden_states,
-                        qr=qr,
-                        kv_cache=kv_cache,
-                        attn_metadata=attn_metadata,
-                        cos=cos,
-                        sin=sin,
-                        compressed_cos=compress_cos,
-                        compressed_sin=compress_sin,
-                        actual_seq_lengths_query=actual_seq_lengths_query,
-                        actual_seq_lengths_key=actual_seq_lengths_key,
-                        with_prefill=False,
-                        qr_pertoken_scale=qr_pertoken_scale,
-                    )
+                    if self.multistream_dsv4_dsa_overlap:
+                        compress_topk_idxs = self.cv_indexer_select_qli(  # multistream version
+                            x=hidden_states,
+                            qr=qr,
+                            kv_cache=kv_cache,
+                            attn_metadata=attn_metadata,
+                            cos=cos,
+                            sin=sin,
+                            compressed_cos=compress_cos,
+                            compressed_sin=compress_sin,
+                            actual_seq_lengths_query=actual_seq_lengths_query,
+                            actual_seq_lengths_key=actual_seq_lengths_key,
+                            with_prefill=False,
+                            qr_pertoken_scale=qr_pertoken_scale,
+                        )
+                    else:
+                        compress_topk_idxs = self.indexer_select_qli(  # original version
+                            x=hidden_states,
+                            qr=qr,
+                            kv_cache=kv_cache,
+                            attn_metadata=attn_metadata,
+                            cos=cos,
+                            sin=sin,
+                            compressed_cos=compress_cos,
+                            compressed_sin=compress_sin,
+                            actual_seq_lengths_query=actual_seq_lengths_query,
+                            actual_seq_lengths_key=actual_seq_lengths_key,
+                            with_prefill=False,
+                            qr_pertoken_scale=qr_pertoken_scale,
+                        )
+                    if self.use_index_cache:
+                        self._update_indexcache_topk_indices(compress_topk_idxs, offset=0)
 
             coff = 2 if self.compressor_overlap else 1
 
@@ -2178,28 +2225,33 @@ class AscendDSAImpl(DSAAttentionImpl):
             actual_seq_lengths_query = common_decode_metadata.query_start_loc
             actual_seq_lengths_key = common_decode_metadata.seq_lens
 
-            # QLI
-            decode_topk_idxs, _ = torch.ops._C_ascend.npu_quant_lightning_indexer(
-                query=decode_q_quant,
-                key=ik,
-                weights=decode_weights.to(torch.float16),
-                query_dequant_scale=decode_q_scale,
-                key_dequant_scale=isc.squeeze(-2),
-                actual_seq_lengths_query=indexer_decode_metadata.query_start_loc[1:],
-                actual_seq_lengths_key=indexer_decode_metadata.seq_lens,
-                block_table=indexer_decode_metadata.block_table,
-                metadata=indexer_decode_metadata.qli_metadata,
-                query_quant_mode=0,
-                key_quant_mode=0,
-                layout_query="TND",
-                layout_key="PA_BSND",
-                sparse_count=self.index_topk,
-                sparse_mode=3,
-                pre_tokens=(1 << 63) - 1,
-                next_tokens=(1 << 63) - 1,
-                cmp_ratio=4,
-                return_value=False,
-            )
+            # QLI (IndexCache: decode segment at buffer[:num_decode_tokens])
+            if self.skip_topk:
+                decode_topk_idxs = self._get_indexcache_topk_indices(num_decode_tokens, offset=0)
+            else:
+                decode_topk_idxs, _ = torch.ops._C_ascend.npu_quant_lightning_indexer(
+                    query=decode_q_quant,
+                    key=ik,
+                    weights=decode_weights.to(torch.float16),
+                    query_dequant_scale=decode_q_scale,
+                    key_dequant_scale=isc.squeeze(-2),
+                    actual_seq_lengths_query=indexer_decode_metadata.query_start_loc[1:],
+                    actual_seq_lengths_key=indexer_decode_metadata.seq_lens,
+                    block_table=indexer_decode_metadata.block_table,
+                    metadata=indexer_decode_metadata.qli_metadata,
+                    query_quant_mode=0,
+                    key_quant_mode=0,
+                    layout_query="TND",
+                    layout_key="PA_BSND",
+                    sparse_count=self.index_topk,
+                    sparse_mode=3,
+                    pre_tokens=(1 << 63) - 1,
+                    next_tokens=(1 << 63) - 1,
+                    cmp_ratio=4,
+                    return_value=False,
+                )
+                if self.use_index_cache:
+                    self._update_indexcache_topk_indices(decode_topk_idxs, offset=0)
 
             # Sparse attention (decode)
             decode_attn_output = torch.ops._C_ascend.npu_sparse_attn_sharedkv(
@@ -2238,28 +2290,34 @@ class AscendDSAImpl(DSAAttentionImpl):
             prefill_actual_seq_lengths_query = common_prefill_metadata.query_start_loc
             prefill_actual_seq_lengths_key = common_prefill_metadata.seq_lens
 
-            # QLI
-            prefill_topk_idxs, _ = torch.ops._C_ascend.npu_quant_lightning_indexer(
-                query=prefill_q_quant,
-                key=ik,
-                weights=prefill_weights.to(torch.float16),
-                query_dequant_scale=prefill_q_scale,
-                key_dequant_scale=isc.squeeze(-2),
-                actual_seq_lengths_query=indexer_prefill_metadata.query_start_loc[1:],
-                actual_seq_lengths_key=indexer_prefill_metadata.seq_lens,
-                block_table=indexer_prefill_metadata.block_table,
-                metadata=indexer_prefill_metadata.qli_metadata,
-                query_quant_mode=0,
-                key_quant_mode=0,
-                layout_query="TND",
-                layout_key="PA_BSND",
-                sparse_count=self.index_topk,
-                sparse_mode=3,
-                pre_tokens=(1 << 63) - 1,
-                next_tokens=(1 << 63) - 1,
-                cmp_ratio=4,
-                return_value=False,
-            )
+            # QLI (IndexCache: prefill segment at buffer[num_decode_tokens:num_actual_tokens])
+            prefill_num_tokens = num_actual_tokens - num_decode_tokens
+            if self.skip_topk:
+                prefill_topk_idxs = self._get_indexcache_topk_indices(prefill_num_tokens, offset=num_decode_tokens)
+            else:
+                prefill_topk_idxs, _ = torch.ops._C_ascend.npu_quant_lightning_indexer(
+                    query=prefill_q_quant,
+                    key=ik,
+                    weights=prefill_weights.to(torch.float16),
+                    query_dequant_scale=prefill_q_scale,
+                    key_dequant_scale=isc.squeeze(-2),
+                    actual_seq_lengths_query=indexer_prefill_metadata.query_start_loc[1:],
+                    actual_seq_lengths_key=indexer_prefill_metadata.seq_lens,
+                    block_table=indexer_prefill_metadata.block_table,
+                    metadata=indexer_prefill_metadata.qli_metadata,
+                    query_quant_mode=0,
+                    key_quant_mode=0,
+                    layout_query="TND",
+                    layout_key="PA_BSND",
+                    sparse_count=self.index_topk,
+                    sparse_mode=3,
+                    pre_tokens=(1 << 63) - 1,
+                    next_tokens=(1 << 63) - 1,
+                    cmp_ratio=4,
+                    return_value=False,
+                )
+                if self.use_index_cache:
+                    self._update_indexcache_topk_indices(prefill_topk_idxs, offset=num_decode_tokens)
 
             # Sparse attention (prefill)
             prefill_attn_output = torch.ops._C_ascend.npu_sparse_attn_sharedkv(
