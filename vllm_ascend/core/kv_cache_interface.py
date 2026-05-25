@@ -229,6 +229,3 @@ def register_ascend_kv_cache_specs() -> None:
         manager_class=SlidingWindowManager,
         uniform_type_base_spec=SlidingWindowMLASpec,
     )
-
-
-register_ascend_kv_cache_specs()

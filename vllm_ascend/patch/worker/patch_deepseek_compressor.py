@@ -10,6 +10,7 @@ from vllm.v1.kv_cache_interface import (
     SlidingWindowMLASpec,
     MLAAttentionSpec,
 )
+from vllm.v1.kv_cache_spec_registry import KVCacheSpecRegistry
 
 from vllm_ascend.attention.dsa_v1 import AscendDSABackend
 
@@ -70,7 +71,8 @@ class AscendDeepseekV4IndexerCache(DeepseekV4IndexerCache):
         super().__init__(head_dim, dtype, prefix, cache_config, compress_ratio)
 
     def get_kv_cache_spec(self, vllm_config: VllmConfig) -> KVCacheSpec:
-        return MLAAttentionSpec(  # Only has one vector instead of K + V
+        return KVCacheSpecRegistry.create(
+            MLAAttentionSpec,
             block_size=128,
             num_kv_heads=1,
             head_size=self.head_dim,

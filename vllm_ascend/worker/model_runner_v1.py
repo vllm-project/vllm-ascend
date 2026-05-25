@@ -93,6 +93,7 @@ from vllm.v1.worker import mamba_utils
 from vllm.v1.worker.cp_utils import (
     get_total_cp_world_size,
 )
+from vllm.v1.kv_cache_spec_registry import KVCacheSpecRegistry
 from vllm.v1.worker.gpu_model_runner import AsyncGPUModelRunnerOutput, GPUModelRunner
 from vllm.v1.worker.ubatch_utils import (
     UBatchSlices,
@@ -4181,9 +4182,8 @@ class NPUModelRunner(GPUModelRunner):
 
             elif isinstance(attn_module, MLAAttention):
                 if self.use_sparse:
-                    from vllm_ascend.core.kv_cache_interface import AscendMLAAttentionSpec
-
-                    kv_cache_spec[layer_name] = AscendMLAAttentionSpec(
+                    kv_cache_spec[layer_name] = KVCacheSpecRegistry.create(
+                        MLAAttentionSpec,
                         block_size=self.block_size,
                         num_kv_heads=1,
                         head_size=sum(self.sparse_head_dim),
@@ -4193,14 +4193,13 @@ class NPUModelRunner(GPUModelRunner):
                         cache_sparse_c8=self.ascend_config.is_sparse_c8_layer(layer_name),
                     )
                 elif spec := attn_module.get_kv_cache_spec(self.vllm_config):
-                    from vllm_ascend.core.kv_cache_interface import AscendMLAAttentionSpec
-
                     if getattr(attn_module.impl, "fa_quant_layer", False):
                         head_size = attn_module.head_size + attn_module.qk_rope_head_dim
                         dtype, cache_dtype_str = attn_module.impl.dtype, None
                     else:
                         head_size, dtype, cache_dtype_str = spec.head_size, spec.dtype, spec.cache_dtype_str
-                    kv_cache_spec[layer_name] = AscendMLAAttentionSpec(
+                    kv_cache_spec[layer_name] = KVCacheSpecRegistry.create(
+                        MLAAttentionSpec,
                         block_size=spec.block_size,
                         num_kv_heads=spec.num_kv_heads,
                         head_size=head_size,
@@ -4219,9 +4218,8 @@ class NPUModelRunner(GPUModelRunner):
                 # the indexer's k_cache is replaced by IndexerWrapper, so its
                 # KV cache is unused.
                 if spec := attn_module.get_kv_cache_spec(self.vllm_config):
-                    from vllm_ascend.core.kv_cache_interface import AscendMLAAttentionSpec
-
-                    kv_cache_spec[layer_name] = AscendMLAAttentionSpec(
+                    kv_cache_spec[layer_name] = KVCacheSpecRegistry.create(
+                        MLAAttentionSpec,
                         block_size=spec.block_size,
                         num_kv_heads=spec.num_kv_heads,
                         head_size=spec.head_size,
