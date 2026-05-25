@@ -47,7 +47,7 @@ logger = logging.getLogger(__name__)
 def check_or_set_default_env(cmake_args, env_name, env_variable, default_path=""):
     if env_variable is None:
         logging.warning(
-            "No %s found in your environment, pleause try to set %s if you customize the installation path of this "
+            "No %s found in your environment, please try to set %s if you customize the installation path of this "
             "library, otherwise default path will be adapted during build this project",
             env_name,
             env_name,
@@ -543,6 +543,7 @@ setup(
             "ascend_kv_connector = vllm_ascend:register_connector",
             "ascend_model_loader = vllm_ascend:register_model_loader",
             "ascend_service_profiling = vllm_ascend:register_service_profiling",
+            "ascend_model = vllm_ascend:register_model",
         ],
     },
 )

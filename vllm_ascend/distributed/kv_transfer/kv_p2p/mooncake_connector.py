@@ -47,7 +47,6 @@ from vllm.v1.core.sched.output import SchedulerOutput
 from vllm.v1.kv_cache_interface import KVCacheConfig
 from vllm.v1.request import RequestStatus
 
-from vllm_ascend import envs as ascend_envs
 from vllm_ascend.ascend_config import get_ascend_config, init_ascend_config
 from vllm_ascend.distributed.kv_transfer.utils.mooncake_transfer_engine import global_te
 from vllm_ascend.distributed.kv_transfer.utils.utils import get_transfer_timeout_value
@@ -374,6 +373,20 @@ class KVCacheRecvingThread(threading.Thread):
         self.invalid_block_ids: set[int] = set()
         self.failed_recv_requests_lock = threading.Lock()
 
+        self.num_draft_layers = 0
+        if self.vllm_config.speculative_config is not None:
+            if self.vllm_config.speculative_config.method == "mtp":
+                # all MTP layer use the same kv cache layer, so only need to transfer once
+                self.num_draft_layers = 1
+            elif (
+                hasattr(self.vllm_config.speculative_config.draft_model_config, "hf_config")
+                and getattr(self.vllm_config.speculative_config.draft_model_config.hf_config, "num_hidden_layers", None)
+                is not None
+            ):
+                self.num_draft_layers = (
+                    self.vllm_config.speculative_config.draft_model_config.hf_config.num_hidden_layers
+                )
+
     def add_request(
         self,
         request_id: str,
@@ -550,11 +563,10 @@ class KVCacheRecvingThread(threading.Thread):
 
         remote_kv_caches_base_addrs = self.kv_caches_base_addr[remote_engine_id][remote_handshake_port]
         first_layer_index, end_layer_index = self.pp_layer_indices[prefill_pp_rank]
-        # support MTP layer kv transfer
+        # support MTP layer and draft model kv transfer
         if self.vllm_config.speculative_config is not None:
-            # all MTP layer use the same kv cache layer, so only need to transfer once
             if prefill_pp_rank == self._prefill_pp_size - 1:
-                end_layer_index = end_layer_index + 1
+                end_layer_index = end_layer_index + self.num_draft_layers
         num_cache_per_layer = len(list(self.kv_caches.values())[0])  # Number of KV caches per layer
         local_kv_caches_base_addrs = self.kv_caches_base_addr[self.local_engine_id][self.local_handshake_port][
             first_layer_index * num_cache_per_layer : end_layer_index * num_cache_per_layer
@@ -604,7 +616,7 @@ class KVCacheRecvingThread(threading.Thread):
         is_kv_transfer_end = global_offset == tp_num_need_pulls * self._prefill_pp_size - 1
         need_cat_cache = tp_num_need_pulls > 1 and is_kv_transfer_end
         need_nz_cache = get_ascend_config().enable_kv_nz and is_kv_transfer_end
-        use_fused_op = ascend_envs.VLLM_ASCEND_FUSION_OP_TRANSPOSE_KV_CACHE_BY_BLOCK
+        use_fused_op = get_ascend_config().enable_transpose_kv_cache_by_block
         if need_nz_cache or need_cat_cache:
             # use fused op to reformat kv cache, we keep original implementation to provide ability to disable it.
             if use_fused_op and enable_custom_op():

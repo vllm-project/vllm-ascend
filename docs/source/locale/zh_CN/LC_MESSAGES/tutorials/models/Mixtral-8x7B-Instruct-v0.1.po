@@ -1,0 +1,288 @@
+# SOME DESCRIPTIVE TITLE.
+# Copyright (C) 2025, vllm-ascend team
+# This file is distributed under the same license as the vllm-ascend
+# package.
+# FIRST AUTHOR <EMAIL@ADDRESS>, 2026.
+#
+msgid ""
+msgstr ""
+"Project-Id-Version: vllm-ascend \n"
+"Report-Msgid-Bugs-To: \n"
+"POT-Creation-Date: 2026-05-22 04:30+0000\n"
+"PO-Revision-Date: YEAR-MO-DA HO:MI+ZONE\n"
+"Last-Translator: FULL NAME <EMAIL@ADDRESS>\n"
+"Language: zh_CN\n"
+"Language-Team: zh_CN <LL@li.org>\n"
+"Plural-Forms: nplurals=1; plural=0;\n"
+"MIME-Version: 1.0\n"
+"Content-Type: text/plain; charset=utf-8\n"
+"Content-Transfer-Encoding: 8bit\n"
+"Generated-By: Babel 2.18.0\n"
+
+#: ../../source/tutorials/models/Mixtral-8x7B-Instruct-v0.1.md:1
+msgid "Mixtral-8x7B-Instruct-v0.1"
+msgstr "Mixtral-8x7B-Instruct-v0.1"
+
+#: ../../source/tutorials/models/Mixtral-8x7B-Instruct-v0.1.md:3
+msgid "Introduction"
+msgstr "简介"
+
+#: ../../source/tutorials/models/Mixtral-8x7B-Instruct-v0.1.md:5
+msgid ""
+"Mixtral-8x7B-Instruct-v0.1 is a state-of-the-art mixture-of-experts (MoE)"
+" language model developed by Mistral AI. It features 8 expert models, "
+"each with 7B parameters, and is specifically fine-tuned for instruction "
+"following tasks."
+msgstr ""
+"Mixtral-8x7B-Instruct-v0.1 是由 Mistral AI 开发的最先进的混合专家（MoE）语言模型。"
+"该模型包含8个专家模型，每个专家模型拥有7B参数，并专门针对指令跟随任务进行了微调。"
+
+#: ../../source/tutorials/models/Mixtral-8x7B-Instruct-v0.1.md:7
+msgid "Key features of Mixtral-8x7B-Instruct-v0.1 include:"
+msgstr "Mixtral-8x7B-Instruct-v0.1 的主要特性包括："
+
+#: ../../source/tutorials/models/Mixtral-8x7B-Instruct-v0.1.md:9
+msgid ""
+"8x7B parameters with sparse activation (only 2 experts activated per "
+"token)"
+msgstr "8x7B参数，采用稀疏激活（每个token仅激活2个专家）"
+
+#: ../../source/tutorials/models/Mixtral-8x7B-Instruct-v0.1.md:10
+msgid "Strong performance across various NLP tasks"
+msgstr "在各种NLP任务上表现优异"
+
+#: ../../source/tutorials/models/Mixtral-8x7B-Instruct-v0.1.md:11
+msgid "Support for extended context length"
+msgstr "支持扩展上下文长度"
+
+#: ../../source/tutorials/models/Mixtral-8x7B-Instruct-v0.1.md:12
+msgid "High-quality instruction following capabilities"
+msgstr "高质量的指令跟随能力"
+
+#: ../../source/tutorials/models/Mixtral-8x7B-Instruct-v0.1.md:14
+msgid ""
+"This document will show the main verification steps of the model, "
+"including supported features, feature configuration, environment "
+"preparation, single-node deployment, accuracy and performance evaluation."
+msgstr ""
+"本文档将展示该模型的主要验证步骤，包括支持的特性、特性配置、环境准备、单节点部署、精度和性能评估。"
+
+#: ../../source/tutorials/models/Mixtral-8x7B-Instruct-v0.1.md:16
+msgid "The `Mixtral-8x7B-Instruct-v0.1` model is supported in vllm-ascend."
+msgstr "vllm-ascend 支持 `Mixtral-8x7B-Instruct-v0.1` 模型。"
+
+#: ../../source/tutorials/models/Mixtral-8x7B-Instruct-v0.1.md:18
+msgid "Environment Preparation"
+msgstr "环境准备"
+
+#: ../../source/tutorials/models/Mixtral-8x7B-Instruct-v0.1.md:20
+msgid "Model Weight"
+msgstr "模型权重"
+
+#: ../../source/tutorials/models/Mixtral-8x7B-Instruct-v0.1.md:22
+msgid ""
+"`Mixtral-8x7B-Instruct-v0.1`(BF16 version): [Download model "
+"weight](https://huggingface.co/mistralai/Mixtral-8x7B-Instruct-v0.1)"
+msgstr ""
+"`Mixtral-8x7B-Instruct-v0.1`(BF16版本)：[下载模型权重](https://huggingface.co/mistralai/Mixtral-8x7B-Instruct-v0.1)"
+
+#: ../../source/tutorials/models/Mixtral-8x7B-Instruct-v0.1.md:23
+msgid "Quantized versions may be available from third-party providers."
+msgstr "量化版本可能由第三方提供商提供。"
+
+#: ../../source/tutorials/models/Mixtral-8x7B-Instruct-v0.1.md:25
+msgid ""
+"It is recommended to download the model weight to a local directory, such"
+" as `/data/models/`."
+msgstr "建议将模型权重下载到本地目录，例如 `/data/models/`。"
+
+#: ../../source/tutorials/models/Mixtral-8x7B-Instruct-v0.1.md:27
+msgid "Installation"
+msgstr "安装"
+
+#: ../../source/tutorials/models/Mixtral-8x7B-Instruct-v0.1.md:29
+msgid ""
+"You can use our official docker image to run `Mixtral-8x7B-Instruct-v0.1`"
+" directly."
+msgstr "您可以使用我们的官方docker镜像直接运行 `Mixtral-8x7B-Instruct-v0.1`。"
+
+#: ../../source/tutorials/models/Mixtral-8x7B-Instruct-v0.1.md:31
+msgid ""
+"Select an image based on your machine type and start the docker image on "
+"your node, refer to [using docker](../../installation.md#set-up-using-"
+"docker)."
+msgstr ""
+"根据您的机器类型选择镜像，并在节点上启动docker镜像，请参考[使用docker](../../installation.md#set-up-using-docker)。"
+
+#: ../../source/tutorials/models/Mixtral-8x7B-Instruct-v0.1.md:65
+msgid "Deployment"
+msgstr "部署"
+
+#: ../../source/tutorials/models/Mixtral-8x7B-Instruct-v0.1.md:67
+msgid "Single-node Deployment"
+msgstr "单节点部署"
+
+#: ../../source/tutorials/models/Mixtral-8x7B-Instruct-v0.1.md:69
+msgid ""
+"`Mixtral-8x7B-Instruct-v0.1` can be deployed on 1 Atlas 800 A3 (64G × 16)"
+" or 1 Atlas 800 A2 (64G × 8)."
+msgstr ""
+"`Mixtral-8x7B-Instruct-v0.1` 可部署在1台 Atlas 800 A3 (64G × 16) 或 1台 Atlas 800 A2 (64G × 8) 上。"
+
+#: ../../source/tutorials/models/Mixtral-8x7B-Instruct-v0.1.md:71
+msgid "Run the following script to execute online inference."
+msgstr "运行以下脚本执行在线推理。"
+
+#: ../../source/tutorials/models/Mixtral-8x7B-Instruct-v0.1.md:103
+msgid "**Notice:** The parameters are explained as follows:"
+msgstr "**注意：** 参数说明如下："
+
+#: ../../source/tutorials/models/Mixtral-8x7B-Instruct-v0.1.md:106
+msgid ""
+"Setting the environment variable `VLLM_ASCEND_BALANCE_SCHEDULING=1` "
+"enables balance scheduling. This may help increase output throughput and "
+"reduce TPOT in v1 scheduler. However, TTFT may degrade in some scenarios."
+msgstr ""
+"设置环境变量 `VLLM_ASCEND_BALANCE_SCHEDULING=1` 可启用均衡调度。这有助于提高输出吞吐量并降低v1调度器中的TPOT。但在某些场景下，TTFT可能会下降。"
+
+#: ../../source/tutorials/models/Mixtral-8x7B-Instruct-v0.1.md:107
+msgid ""
+"`--max-model-len` specifies the maximum context length - that is, the sum"
+" of input and output tokens for a single request. For testing purposes, a"
+" value of `4096` is used here."
+msgstr ""
+"`--max-model-len` 指定最大上下文长度，即单个请求的输入和输出token总和。为测试目的，此处使用 `4096`。"
+
+#: ../../source/tutorials/models/Mixtral-8x7B-Instruct-v0.1.md:108
+msgid ""
+"`--dtype float16` specifies the data type for model weights and "
+"computations."
+msgstr "`--dtype float16` 指定模型权重和计算的数据类型。"
+
+#: ../../source/tutorials/models/Mixtral-8x7B-Instruct-v0.1.md:109
+msgid "`--trust-remote-code` allows loading models with custom code."
+msgstr "`--trust-remote-code` 允许加载包含自定义代码的模型。"
+
+#: ../../source/tutorials/models/Mixtral-8x7B-Instruct-v0.1.md:110
+msgid ""
+"`--enforce-eager` forces the use of eager execution mode instead of graph"
+" compilation, which can be more stable for some models."
+msgstr ""
+"`--enforce-eager` 强制使用即时执行模式而非图编译模式，这对某些模型可能更稳定。"
+
+#: ../../source/tutorials/models/Mixtral-8x7B-Instruct-v0.1.md:111
+msgid ""
+"`--block-size` specifies the block size for KV cache management, with a "
+"value of `128` used here."
+msgstr "`--block-size` 指定KV缓存管理的块大小，此处使用 `128`。"
+
+#: ../../source/tutorials/models/Mixtral-8x7B-Instruct-v0.1.md:112
+msgid ""
+"`--gpu-memory-utilization` sets the proportion of NPU memory to use for "
+"the model, with a value of `0.7` used here to reduce memory usage."
+msgstr "`--gpu-memory-utilization` 设置用于模型的NPU内存比例，此处使用 `0.7` 以减少内存使用。"
+
+#: ../../source/tutorials/models/Mixtral-8x7B-Instruct-v0.1.md:114
+msgid "Functional Verification"
+msgstr "功能验证"
+
+#: ../../source/tutorials/models/Mixtral-8x7B-Instruct-v0.1.md:116
+msgid ""
+"Once your server is started, you can query the model with input prompts. "
+"Mixtral-8x7B-Instruct-v0.1 uses a specific prompt format with [INST] and "
+"[/INST] tags:"
+msgstr ""
+"服务器启动后，您可以使用输入提示查询模型。Mixtral-8x7B-Instruct-v0.1 使用带有 [INST] 和 [/INST] 标签的特定提示格式："
+
+#: ../../source/tutorials/models/Mixtral-8x7B-Instruct-v0.1.md:131
+msgid "For instruction following tasks, you can use prompts like:"
+msgstr "对于指令跟随任务，您可以使用如下提示："
+
+#: ../../source/tutorials/models/Mixtral-8x7B-Instruct-v0.1.md:146
+msgid "For MoE-related questions:"
+msgstr "对于MoE相关问题："
+
+#: ../../source/tutorials/models/Mixtral-8x7B-Instruct-v0.1.md:161
+#: ../../source/tutorials/models/Mixtral-8x7B-Instruct-v0.1.md:169
+msgid "Using AISBench"
+msgstr "使用AISBench"
+
+#: ../../source/tutorials/models/Mixtral-8x7B-Instruct-v0.1.md:163
+msgid ""
+"Refer to [Using "
+"AISBench](../../developer_guide/evaluation/using_ais_bench.md) for "
+"details."
+msgstr "详情请参考[使用AISBench](../../developer_guide/evaluation/using_ais_bench.md)。"
+
+#: ../../source/tutorials/models/Mixtral-8x7B-Instruct-v0.1.md:165
+msgid ""
+"After execution, you can get the result. For reference, Mixtral-8x7B-"
+"Instruct-v0.1 typically performs well on various benchmarks including "
+"reasoning, comprehension, and instruction following tasks."
+msgstr ""
+"执行后即可获取结果。作为参考，Mixtral-8x7B-Instruct-v0.1 在包括推理、理解和指令跟随任务在内的各种基准测试中通常表现良好。"
+
+#: ../../source/tutorials/models/Mixtral-8x7B-Instruct-v0.1.md:167
+msgid "Performance"
+msgstr "性能"
+
+#: ../../source/tutorials/models/Mixtral-8x7B-Instruct-v0.1.md:171
+msgid ""
+"Refer to [Using AISBench for performance "
+"evaluation](../../developer_guide/evaluation/using_ais_bench.md#execute-"
+"performance-evaluation) for details."
+msgstr "详情请参考[使用AISBench进行性能评估](../../developer_guide/evaluation/using_ais_bench.md#execute-performance-evaluation)。"
+
+#: ../../source/tutorials/models/Mixtral-8x7B-Instruct-v0.1.md:173
+msgid "Using vLLM Benchmark"
+msgstr "使用vLLM Benchmark"
+
+#: ../../source/tutorials/models/Mixtral-8x7B-Instruct-v0.1.md:175
+msgid "Run performance evaluation of `Mixtral-8x7B-Instruct-v0.1` as an example."
+msgstr "以 `Mixtral-8x7B-Instruct-v0.1` 为例运行性能评估。"
+
+#: ../../source/tutorials/models/Mixtral-8x7B-Instruct-v0.1.md:177
+msgid ""
+"Refer to [vllm benchmark](https://docs.vllm.ai/en/latest/benchmarking/) "
+"for more details."
+msgstr "更多详情请参考[vllm benchmark](https://docs.vllm.ai/en/latest/benchmarking/)。"
+
+#: ../../source/tutorials/models/Mixtral-8x7B-Instruct-v0.1.md:179
+msgid "There are three `vllm bench` subcommands:"
+msgstr "`vllm bench` 包含三个子命令："
+
+#: ../../source/tutorials/models/Mixtral-8x7B-Instruct-v0.1.md:181
+msgid "`latency`: Benchmark the latency of a single batch of requests."
+msgstr "`latency`：基准测试单批次请求的延迟。"
+
+#: ../../source/tutorials/models/Mixtral-8x7B-Instruct-v0.1.md:182
+msgid "`serve`: Benchmark the online serving throughput."
+msgstr "`serve`：基准测试在线服务吞吐量。"
+
+#: ../../source/tutorials/models/Mixtral-8x7B-Instruct-v0.1.md:183
+msgid "`throughput`: Benchmark offline inference throughput."
+msgstr "`throughput`：基准测试离线推理吞吐量。"
+
+#: ../../source/tutorials/models/Mixtral-8x7B-Instruct-v0.1.md:185
+msgid "Take the `serve` as an example. First, start the server:"
+msgstr "以 `serve` 为例。首先，启动服务器："
+
+#: ../../source/tutorials/models/Mixtral-8x7B-Instruct-v0.1.md:201
+msgid "Conclusion"
+msgstr "结论"
+
+#: ../../source/tutorials/models/Mixtral-8x7B-Instruct-v0.1.md:203
+msgid ""
+"Mixtral-8x7B-Instruct-v0.1 is a powerful MoE model that offers excellent "
+"performance for instruction following tasks. With proper deployment on "
+"Ascend hardware using vllm-ascend, you can achieve high throughput and "
+"low latency for your AI applications."
+msgstr ""
+"Mixtral-8x7B-Instruct-v0.1 是一个强大的MoE模型，为指令跟随任务提供了卓越的性能。通过在Ascend硬件上使用vllm-ascend进行适当部署，您可以为AI应用实现高吞吐量和低延迟。"
+
+#: ../../source/tutorials/models/Mixtral-8x7B-Instruct-v0.1.md:205
+msgid ""
+"For more details about model capabilities and best practices, refer to "
+"the official Mixtral documentation and vllm-ascend user guide."
+msgstr ""
+"有关模型能力和最佳实践的更多详情，请参考官方Mixtral文档和vllm-ascend用户指南。"

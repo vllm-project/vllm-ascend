@@ -20,12 +20,9 @@
 import torch
 from vllm.triton_utils import tl, triton
 from vllm.v1.outputs import LogprobsTensors
+from vllm.v1.worker.gpu.sample.logprob import LogprobTokenIdsState
 
 from vllm_ascend.ops.triton.triton_utils import get_vectorcore_num
-from vllm_ascend.utils import vllm_version_is
-
-if not vllm_version_is("0.20.1"):
-    from vllm.v1.worker.gpu.sample.logprob import LogprobTokenIdsState
 
 
 @triton.jit
@@ -46,7 +43,7 @@ def _topk_log_softmax_kernel(
     for i in range(0, vocab_size, BLOCK_SIZE):
         block = i + tl.arange(0, BLOCK_SIZE)
         logits = tl.load(row_ptr + block, mask=block < vocab_size, other=float("-inf"))
-        max_val = tl.max(tl.maximum(logits, max_val))
+        max_val = tl.max(tl.maximum(logits, max_val, propagate_nan=tl.PropagateNan.ALL))
     max_val = max_val.to(tl.float32)  # type: ignore
 
     se = 0.0
@@ -124,7 +121,7 @@ def compute_topk_logprobs(
     num_logprobs: int,
     sampled_token_ids: torch.Tensor,
     cu_num_logits: list[int] | None = None,
-    logprob_token_ids_state: "LogprobTokenIdsState | None" = None,
+    logprob_token_ids_state: LogprobTokenIdsState | None = None,
     expanded_idx_mapping: torch.Tensor | None = None,
     max_per_req_token_ids: int = 0,
 ) -> LogprobsTensors:
