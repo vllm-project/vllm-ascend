@@ -275,7 +275,7 @@ class TestTokenDispatcherWithMC2(TestBase):
         self.assertEqual(kwargs["quant_mode"], 4)
         self.assertEqual(kwargs["y_dtype"], torch.float8_e4m3fn)
 
-    def test_mxfp4_dispatch_keeps_quantization_in_mlp_path(self):
+    def test_get_dispatch_mc2_kwargs_with_mxfp4_quant(self):
         hidden_states = torch.randn(10, 128)
         topk_weights = torch.randn(10, 1)
         topk_ids = torch.randint(0, 8, (10, 1))
@@ -292,9 +292,10 @@ class TestTokenDispatcherWithMC2(TestBase):
         )
         kwargs = self.dispatcher.get_dispatch_mc2_kwargs(token_dispatch_input)
 
-        self.assertFalse(token_dispatch_input.quant.dispatch_with_quant)
-        self.assertEqual(kwargs["quant_mode"], 0)
-        self.assertNotIn("y_dtype", kwargs)
+        self.assertTrue(token_dispatch_input.quant.dispatch_with_quant)
+        self.assertEqual(kwargs["quant_mode"], 4)
+        self.assertIn("y_dtype", kwargs)
+        self.assertNotEqual(kwargs["y_dtype"], torch.float8_e4m3fn)
 
         with patch(
             "torch_npu.npu_moe_distribute_dispatch_v2",
@@ -311,8 +312,8 @@ class TestTokenDispatcherWithMC2(TestBase):
             output = self.dispatcher.token_dispatch(token_dispatch_input=token_dispatch_input)
 
         mock_dispatch.assert_called_once()
-        self.assertIsNone(output.dynamic_scale)
-        self.assertFalse(output.combine_metadata.quant.dispatch_with_quant)
+        self.assertIsNotNone(output.dynamic_scale)
+        self.assertTrue(output.combine_metadata.quant.dispatch_with_quant)
 
 
 class TestTokenDispatcherWithAllGather(TestBase):
