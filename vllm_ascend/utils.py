@@ -1118,15 +1118,6 @@ def calculate_dp_buffer_size() -> int:
     return max(dp_buffer_size, _MIN_DP_BUFFER_SIZE)
 
 
-# Currently, when in A2, setting the environment variables HCCL_INTRA_PCIE_ENABLE=1
-# and HCCL_INTRA_ROCE_ENABLE=0 can reduce cross-machine communication traffic and
-# significantly improve communication performance of MC2 ops dispatch/combine.
-def is_hierarchical_communication_enabled():
-    return (
-        os.getenv("HCCL_INTRA_ROCE_ENABLE", "") == "0" and os.getenv("HCCL_INTRA_PCIE_ENABLE", "") == "1"
-    ) or get_ascend_config().enable_mc2_hierarchy_comm
-
-
 def should_skip_allreduce_across_dp_group(vllm_config, is_draft_model: bool = False) -> bool:
     """Decide whether to skip the all-reduce across the DP group.
 
@@ -1138,10 +1129,10 @@ def should_skip_allreduce_across_dp_group(vllm_config, is_draft_model: bool = Fa
     Skipping means each rank may have a different number of tokens, so MC2 needs
     a non-zero global_bs and must NOT receive mc2_mask.
 
-    Returns False when hierarchy comm is enabled because hierarchy requires
-    global_bs=0 (uniform tokens), which is incompatible with skipping allreduce.
+    Returns False on A2 because hierarchical MC2 requires global_bs=0
+    (uniform tokens), which is incompatible with skipping allreduce.
     """
-    if is_hierarchical_communication_enabled():
+    if get_ascend_device_type() == AscendDeviceType.A2:
         return False
 
     # For dense models, since we don't actually need dp communication, we simply skip it.
