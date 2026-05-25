@@ -1,3 +1,4 @@
+import re
 from types import SimpleNamespace
 from unittest.mock import Mock, patch
 
@@ -50,25 +51,39 @@ class TestUnpackFromInt32(TestBase):
         expected = torch.tensor([[-8], [-7], [-6], [-5], [-4], [-3]], dtype=torch.int8)
         self.assertTrue(torch.equal(result, expected))
 
-    def test_unpack_from_int32_assertions(self):
-        with self.assertRaises(AssertionError):
-            weight = torch.tensor([[1, 2]], dtype=torch.int64)
+    def test_unpack_from_int32_assertion_dtype_message(self):
+        weight = torch.tensor([[1, 2]], dtype=torch.int64)
+        message = "Expecting `weight.dtype` is torch.int32 but got torch.int64."
+
+        with self.assertRaisesRegex(AssertionError, re.escape(message)):
             unpack_from_int32(weight, torch.Size([8, 1]), 4)
 
-        with self.assertRaises(AssertionError):
-            weight = torch.tensor([[1, 2]], dtype=torch.int32)
+    def test_unpack_from_int32_assertion_num_bits_positive_message(self):
+        weight = torch.tensor([[1, 2]], dtype=torch.int32)
+        message = "Expecting `num_bits` should be positive but got 0."
+
+        with self.assertRaisesRegex(AssertionError, re.escape(message)):
             unpack_from_int32(weight, torch.Size([8, 1]), 0)
 
-        with self.assertRaises(AssertionError):
-            weight = torch.tensor([[1, 2]], dtype=torch.int32)
+    def test_unpack_from_int32_assertion_num_bits_upper_bound_message(self):
+        weight = torch.tensor([[1, 2]], dtype=torch.int32)
+        message = "Expecting `num_bits` should not be larger than 8 but got 16."
+
+        with self.assertRaisesRegex(AssertionError, re.escape(message)):
             unpack_from_int32(weight, torch.Size([8, 1]), 16)
 
-        with self.assertRaises(AssertionError):
-            weight = torch.tensor([[1, 2]], dtype=torch.int32)
+    def test_unpack_from_int32_assertion_num_bits_divides_int32_message(self):
+        weight = torch.tensor([[1, 2]], dtype=torch.int32)
+        message = "Expecting `num_bits` 3 to divide 32 exactly."
+
+        with self.assertRaisesRegex(AssertionError, re.escape(message)):
             unpack_from_int32(weight, torch.Size([8, 1]), 3)
 
-        with self.assertRaises(AssertionError):
-            weight = torch.tensor([[1, 2]], dtype=torch.int32)
+    def test_unpack_from_int32_assertion_packed_dim_message(self):
+        weight = torch.tensor([[1, 2]], dtype=torch.int32)
+        message = "Expecting `packed_dim` is 0 or 1 but got 2."
+
+        with self.assertRaisesRegex(AssertionError, re.escape(message)):
             unpack_from_int32(weight, torch.Size([8, 1]), 4, packed_dim=2)
 
 
@@ -108,22 +123,34 @@ class TestPackToInt32(TestBase):
         self.assertEqual(result.shape, weight.shape)
 
     def test_pack_to_int32_assertion_dim(self):
-        with self.assertRaises(AssertionError):
-            weight = torch.zeros((8, 8), dtype=torch.int8)
+        weight = torch.zeros((8, 8), dtype=torch.int8)
+        message = (
+            "Expecting `weight.dim()` is 3 ([expert, output_channel, input_channel] or "
+            "[expert, input_channel, output_channel]) but got 2."
+        )
+
+        with self.assertRaisesRegex(AssertionError, re.escape(message)):
             pack_to_int32(weight)
 
     def test_pack_to_int32_assertion_dtype(self):
-        with self.assertRaises(AssertionError):
-            weight = torch.zeros((2, 8, 8), dtype=torch.float32)
+        weight = torch.zeros((2, 8, 8), dtype=torch.float32)
+        message = "Expecting `weight.dtype` is torch.int8 or torch.int32 but got torch.float32."
+
+        with self.assertRaisesRegex(AssertionError, re.escape(message)):
             pack_to_int32(weight)
 
-    def test_pack_to_int32_assertion_divisible(self):
-        with self.assertRaises(AssertionError):
-            weight = torch.zeros((2, 8, 7), dtype=torch.int32)
+    def test_pack_to_int32_assertion_int32_divisible_message(self):
+        weight = torch.zeros((2, 8, 7), dtype=torch.int32)
+        message = "the last dim of weight needs to be divided by 8."
+
+        with self.assertRaisesRegex(AssertionError, re.escape(message)):
             pack_to_int32(weight)
 
-        with self.assertRaises(AssertionError):
-            weight = torch.zeros((2, 8, 7), dtype=torch.int8)
+    def test_pack_to_int32_assertion_int8_divisible_message(self):
+        weight = torch.zeros((2, 8, 7), dtype=torch.int8)
+        message = "the last dim of weight needs to be divided by 4."
+
+        with self.assertRaisesRegex(AssertionError, re.escape(message)):
             pack_to_int32(weight)
 
 
@@ -162,11 +189,16 @@ class TestAscendW4A16FusedMoEMethod(TestBase):
         expected_w2_shape = (self.experts, self.output_size, self.input_size // self.quant_method.pack_factor)
         self.assertEqual(param_dict["w2_weight_packed"].shape, expected_w2_shape)
 
-    def test_get_weight_assertions(self):
-        with self.assertRaises(AssertionError):
+    def test_get_weight_assertion_intermediate_size_message(self):
+        message = "Expecting `intermediate_size_per_partition` 33 can be divided by `pack_factor` 8"
+
+        with self.assertRaisesRegex(AssertionError, re.escape(message)):
             self.quant_method.get_weight(self.experts, self.input_size + 1, self.output_size, torch.bfloat16)
 
-        with self.assertRaises(AssertionError):
+    def test_get_weight_assertion_hidden_sizes_message(self):
+        message = "Expecting `hidden_sizes` 129 can be divided by `pack_factor` 8"
+
+        with self.assertRaisesRegex(AssertionError, re.escape(message)):
             self.quant_method.get_weight(self.experts, self.input_size, self.output_size + 1, torch.bfloat16)
 
     def test_get_dynamic_quant_param(self):
@@ -184,13 +216,18 @@ class TestAscendW4A16FusedMoEMethod(TestBase):
         self.assertEqual(param_dict["w13_weight_offset"].dtype, torch.bfloat16)
         self.assertEqual(param_dict["w13_weight_offset"].shape, expected_w13_scale_shape)
 
-    def test_get_dynamic_quant_param_assertions(self):
-        with self.assertRaises(AssertionError):
+    def test_get_dynamic_quant_param_assertion_intermediate_size_message(self):
+        message = "Expecting `intermediate_size_per_partition` 33 can be divided by `group_size` 32"
+
+        with self.assertRaisesRegex(AssertionError, re.escape(message)):
             self.quant_method.get_dynamic_quant_param(
                 self.experts, self.input_size + 1, self.output_size, torch.bfloat16
             )
 
-        with self.assertRaises(AssertionError):
+    def test_get_dynamic_quant_param_assertion_hidden_sizes_message(self):
+        message = "Expecting `hidden_sizes` 129 can be divided by `group_size` 32"
+
+        with self.assertRaisesRegex(AssertionError, re.escape(message)):
             self.quant_method.get_dynamic_quant_param(
                 self.experts, self.input_size, self.output_size + 1, torch.bfloat16
             )
@@ -322,5 +359,11 @@ class TestAscendW4A16FusedMoEMethod(TestBase):
         layer = self.build_layer()
         x = torch.randn(4, self.output_size, dtype=torch.float32)
         router_logits = torch.randn(4, self.experts + 1, dtype=torch.float32)
-        with self.assertRaises(AssertionError):
+        message = (
+            "Number of global experts mismatch (excluding redundancy): "
+            "router_logits.shape[1]=9, num_logical_experts=8"
+        )
+
+        with self.assertRaisesRegex(AssertionError, re.escape(message)):
             self.quant_method.apply(layer, x, router_logits, top_k=2, renormalize=True, num_experts=self.experts)
+        mock_select.assert_not_called()
