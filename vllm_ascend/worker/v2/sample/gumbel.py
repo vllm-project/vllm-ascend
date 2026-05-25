@@ -19,7 +19,7 @@
 #
 
 import torch
-from vllm.triton_utils import tl, triton
+from vllm.triton_utils import HAS_TRITON, tl, triton
 
 
 @triton.jit
@@ -144,38 +144,42 @@ def gumbel_sample(
     apply_temperature: bool,
     processed_logits_out: torch.Tensor | None = None,  # [num_reqs, vocab_size]
 ) -> torch.Tensor:
-    num_reqs, vocab_size = logits.shape
-    BLOCK_SIZE = 1024
-    num_blocks = triton.cdiv(vocab_size, BLOCK_SIZE)
-    local_argmax = torch.empty(
-        num_reqs,
-        num_blocks,
-        dtype=torch.int64,
-        device=logits.device,
-    )
-    local_max = torch.empty(
-        num_reqs,
-        num_blocks,
-        dtype=torch.float32,
-        device=logits.device,
-    )
-    # TODO(Ronald1995): Optimize the performance of the kernel in npu.
-    _gumbel_sample_kernel[(num_reqs, num_blocks)](
-        local_argmax,
-        local_argmax.stride(0),
-        local_max,
-        local_max.stride(0),
-        logits,
-        logits.stride(0),
-        idx_mapping,
-        seed,
-        pos,
-        temperature,
-        vocab_size,
-        BLOCK_SIZE=BLOCK_SIZE,
-        APPLY_TEMPERATURE=apply_temperature,
-    )
-    # NOTE(woosuk): Use int64 for later indexing.
-    max_block_idx = local_max.argmax(dim=-1, keepdim=True)
-    sampled = local_argmax.gather(dim=-1, index=max_block_idx).view(-1)
+    if HAS_TRITON:
+        num_reqs, vocab_size = logits.shape
+        BLOCK_SIZE = 1024
+        num_blocks = triton.cdiv(vocab_size, BLOCK_SIZE)
+        local_argmax = torch.empty(
+            num_reqs,
+            num_blocks,
+            dtype=torch.int64,
+            device=logits.device,
+        )
+        local_max = torch.empty(
+            num_reqs,
+            num_blocks,
+            dtype=torch.float32,
+            device=logits.device,
+        )
+        # TODO(Ronald1995): Optimize the performance of the kernel in npu.
+        _gumbel_sample_kernel[(num_reqs, num_blocks)](
+            local_argmax,
+            local_argmax.stride(0),
+            local_max,
+            local_max.stride(0),
+            logits,
+            logits.stride(0),
+            idx_mapping,
+            seed,
+            pos,
+            temperature,
+            vocab_size,
+            BLOCK_SIZE=BLOCK_SIZE,
+            APPLY_TEMPERATURE=apply_temperature,
+        )
+        # NOTE(woosuk): Use int64 for later indexing.
+        max_block_idx = local_max.argmax(dim=-1, keepdim=True)
+        sampled = local_argmax.gather(dim=-1, index=max_block_idx).view(-1)
+    else:
+        logits = logits.to(torch.float32)
+        sampled = torch.ops._C_ascend.npu_gumbel_sample(logits, temperature, seed, pos, idx_mapping, apply_temperature)
     return sampled
