@@ -150,19 +150,11 @@ def pack_to_int32(weight: torch.Tensor) -> torch.Tensor:
 
 @register_scheme("W4A16", "moe")
 class AscendW4A16FusedMoEMethod(AscendMoEScheme):
-    """Fused MoE quantization scheme for Ascend W4A16.
-
-    W4A16 stores expert weights in 4-bit format and keeps activations in the
-    model compute dtype. The class creates the packed weight tensors, scale and
-    offset tensors required by the Ascend fused MoE runtime, validates packing
-    alignment, and converts checkpoint layout into the NPU int4pack layout after
-    weights are loaded.
-    """
+    """FusedMoE method for Ascend W4A16."""
 
     quant_type: QuantType = QuantType.W4A16
 
     def __init__(self) -> None:
-        """Initialize W4A16 packing constants and runtime quantization config."""
         self.num_bits = 4  # dtype = torch.int4
         self.pack_factor = 8  # pack 8 of torch.int4 tensors to torch.int32
 
@@ -177,24 +169,6 @@ class AscendW4A16FusedMoEMethod(AscendMoEScheme):
         hidden_sizes: int,
         params_dtype: torch.dtype,
     ) -> dict[str, Any]:
-        """Create packed expert weight tensors.
-
-        Args:
-            num_experts: Number of physical experts allocated on the layer.
-            intermediate_size_per_partition: Per-partition MoE intermediate
-                size for each expert.
-            hidden_sizes: Hidden size of the model partition.
-            params_dtype: Parameter dtype requested by the loader. W4A16 packed
-                weights are always int32 storage, so this value is unused here.
-
-        Returns:
-            Dictionary with ``w13_weight_packed`` and ``w2_weight_packed`` empty
-            tensors in checkpoint load shape.
-
-        Raises:
-            AssertionError: If a dimension cannot be packed into 8 int4 values
-                per int32 word.
-        """
         assert intermediate_size_per_partition % self.pack_factor == 0, (
             f"Expecting `intermediate_size_per_partition` {intermediate_size_per_partition} "
             f"can be divided by `pack_factor` {self.pack_factor}"
@@ -221,24 +195,6 @@ class AscendW4A16FusedMoEMethod(AscendMoEScheme):
         hidden_sizes: int,
         params_dtype: torch.dtype,
     ) -> dict[str, Any]:
-        """Create group-wise W4A16 scale, offset, and logical shape tensors.
-
-        Args:
-            num_experts: Number of physical experts allocated on the layer.
-            intermediate_size_per_partition: Per-partition MoE intermediate
-                size for each expert.
-            hidden_sizes: Hidden size of the model partition.
-            params_dtype: Parameter dtype requested by the loader. The fused
-                W4A16 kernel consumes bfloat16 anti-quant parameters, so this
-                value is not used for scale and offset tensors.
-
-        Returns:
-            Dictionary containing bfloat16 scale/offset tensors and int32 shape
-            tensors for both fused gate/up (w13) and down (w2) expert weights.
-
-        Raises:
-            AssertionError: If a dimension is not divisible by ``group_size``.
-        """
         assert intermediate_size_per_partition % self.group_size == 0, (
             f"Expecting `intermediate_size_per_partition` {intermediate_size_per_partition} "
             f"can be divided by `group_size` {self.group_size}"
@@ -292,50 +248,12 @@ class AscendW4A16FusedMoEMethod(AscendMoEScheme):
         activation: str = "silu",
         apply_router_weight_on_input: bool = False,
         mc2_mask: torch.Tensor | None = None,
+        tid2eid: torch.Tensor | None = None,
     ) -> torch.Tensor:
-        """Run the W4A16 fused MoE forward path.
-
-        Args:
-            layer: MoE layer containing packed weights and quantization params.
-            x: Hidden states to route, shaped ``[tokens, hidden_size]``.
-            router_logits: Router scores. Its second dimension must equal the
-                logical expert count after excluding redundant and shared
-                experts.
-            top_k: Number of experts selected for each token.
-            renormalize: Whether to normalize selected expert probabilities.
-            use_grouped_topk: Whether to use grouped top-k routing.
-            num_experts: Number of experts from the caller's MoE config.
-            expert_map: Optional logical-to-local expert map.
-            topk_group: Number of groups selected in grouped top-k routing.
-            num_expert_group: Total number of expert groups for grouped top-k.
-            custom_routing_function: Optional custom router implementation.
-            scoring_func: Router scoring function name.
-            routed_scaling_factor: Scaling factor applied to routed weights.
-            e_score_correction_bias: Optional router score correction.
-            is_prefill: Kept for interface compatibility.
-            enable_force_load_balance: Kept for interface compatibility.
-            log2phy: Optional logical-to-physical expert map.
-            global_redundant_expert_num: Number of redundant experts excluded
-                from router logits.
-            pertoken_scale: Optional per-token activation scale.
-            activation: Expert MLP activation name.
-            apply_router_weight_on_input: Whether to pre-scale hidden states by
-                router weights.
-            mc2_mask: Optional MC2 dispatch mask.
-
-        Returns:
-            Output hidden states from the selected experts.
-
-        Raises:
-            AssertionError: If router logits do not match the logical expert
-                count.
-        """
         num_shared_experts = getattr(layer, "n_shared_experts", 0)
-        if num_shared_experts is None:  # TODO 判断这个if分支是否多余
-            # 原因：该分支不多余，部分模型配置会显式写入None；后续专家数计算需要整数0。
+        if num_shared_experts is None:
             num_shared_experts = 0
-        num_logical_experts = get_moe_num_logical_experts(  # TODO 这个函数是什么含义
-            # 含义：优先读取layer.moe_config.num_logical_experts；否则从总专家数中扣掉冗余专家和共享专家。
+        num_logical_experts = get_moe_num_logical_experts(
             layer,
             num_experts,
             global_redundant_expert_num=global_redundant_expert_num,
@@ -344,7 +262,7 @@ class AscendW4A16FusedMoEMethod(AscendMoEScheme):
         assert router_logits.shape[1] == num_logical_experts, (
             "Number of global experts mismatch (excluding redundancy): "
             f"router_logits.shape[1]={router_logits.shape[1]}, num_logical_experts={num_logical_experts}"
-        )  # TODO 这里把`router_logits.shape[1]`和`num_logical_experts`都打印出来
+        )
 
         topk_weights, topk_ids = select_experts(
             hidden_states=x,
@@ -359,6 +277,7 @@ class AscendW4A16FusedMoEMethod(AscendMoEScheme):
             routed_scaling_factor=routed_scaling_factor,
             e_score_correction_bias=e_score_correction_bias,
             num_experts=num_logical_experts,
+            tid2eid=tid2eid,
         )
 
         topk_ids = topk_ids.to(torch.int32)
@@ -385,20 +304,11 @@ class AscendW4A16FusedMoEMethod(AscendMoEScheme):
                 w2_scale=layer.w2_weight_scale,
                 w1_offset=layer.w13_weight_offset,
                 w2_offset=layer.w2_weight_offset,
+                swiglu_limit=layer.swiglu_limit,
             )
         )
 
     def process_weights_after_loading(self, layer: torch.nn.Module) -> None:
-        """Convert loaded W4A16 checkpoint tensors to fused-kernel layout.
-
-        Checkpoints store W4A16 weights as bit-packed int32 tensors in logical
-        expert layout. The fused Ascend kernel expects transposed NPU int4pack
-        weights plus scale/offset tensors transposed to the same logical axes.
-        This method performs that one-time conversion after loading.
-
-        Args:
-            layer: MoE layer whose W4A16 parameters have just been loaded.
-        """
         w13_shape = layer.w13_weight_packed.data.shape
         w2_shape = layer.w2_weight_packed.data.shape
         # TODO 为啥unpack了还需要pack回去？
