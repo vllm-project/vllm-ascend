@@ -55,6 +55,9 @@ class BalanceScheduler(Scheduler):
             include_finished_set,
             log_stats,
         )
+        # all-mode also needs block-aligned chunked prefill splits
+        if self.has_mamba_layers and self.cache_config.mamba_cache_mode == "all":
+            self.need_mamba_block_aligned_split = True
         self._balance_enabled = _balance_scheduling_enabled(vllm_config)
         if self._balance_enabled:
             self.balance_queue = [
