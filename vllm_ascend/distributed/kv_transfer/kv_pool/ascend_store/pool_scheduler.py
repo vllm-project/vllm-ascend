@@ -557,7 +557,11 @@ class KVPoolScheduler:
         to_free_block_ids: list[int] = []
         for event_id, count in meta.completed_events.items():
             logger.debug("event %s update with %s", event_id, count)
-            total = self.sending_events[event_id] + count
+            total = self.sending_events.get(event_id, -1)
+            if total == -1:
+                logger.warning("worker reports an invalid event: %s, count %s", event_id, count)
+                continue
+            total = total + count
             if total >= self._expected_worker_count:
                 to_free_block_ids.extend(self.sending_blocks.pop(event_id, []))
                 self.sending_events.pop(event_id, None)

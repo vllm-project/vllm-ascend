@@ -317,7 +317,7 @@ class ChunkedTokenDatabase:
         group_addrs, group_block_len, group_block_stride = self._get_group_buffers(0)
         length = len(group_block_len)
         for i in range(length):
-            block_stride = group_block_stride[i] if group_block_stride else group_block_stride[i]
+            block_stride = group_block_stride[i] if group_block_stride else group_block_len[i]
             addr = group_addrs[layer_id * length] + block_id * block_stride
             size = int(group_block_len[i] / group_block_size * (end - start))
             addr_list.append(addr)

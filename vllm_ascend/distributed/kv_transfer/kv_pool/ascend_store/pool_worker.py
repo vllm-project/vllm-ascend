@@ -999,7 +999,7 @@ class KVPoolWorker:
                 else:
                     index = self.find_max_hit_index(multi_tp_values, num_block)
                     if index == -1:
-                        hits.append(end)
+                        return 0
                     else:
                         for hit_index in range(index, -1, -1):
                             if ends[hit_index] % self.cache_transfer_granularity == 0:
