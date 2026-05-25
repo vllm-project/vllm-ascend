@@ -604,9 +604,7 @@ class DeepseekV4Attention(nn.Module):
         self.enable_dsa_cp = enable_dsa_cp()
 
         attn_sink_heads = self.n_heads if self.enable_dsa_cp else self.n_local_heads
-        self.attn_sink = nn.Parameter(
-            torch.empty(attn_sink_heads, dtype=torch.float32)
-        )
+        self.attn_sink = nn.Parameter(torch.empty(attn_sink_heads, dtype=torch.float32))
         self.wq_a = ReplicatedLinear(
             self.dim,
             self.q_lora_rank,
@@ -1202,8 +1200,7 @@ class AscendDeepseekV4ForCausalLM(nn.Module, SupportsPP, DeepseekV2MixtureOfExpe
                     param.data.copy_(loaded_weight)
                 else:
                     # Handle attention sinks (distributed across ranks)
-                    narrow_weight = loaded_weight.narrow(0, head_start,
-                                                         heads_per_rank)
+                    narrow_weight = loaded_weight.narrow(0, head_start, heads_per_rank)
                     param.data.copy_(narrow_weight)
                 loaded_params.add(name)
                 continue

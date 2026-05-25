@@ -319,8 +319,7 @@ class DeepSeekV4MTP(nn.Module, SupportsPP, DeepseekV2MixtureOfExperts):
                     param.data.copy_(loaded_weight)
                 else:
                     # Handle attention sinks (distributed across ranks)
-                    narrow_weight = loaded_weight.narrow(0, head_start,
-                                                         heads_per_rank)
+                    narrow_weight = loaded_weight.narrow(0, head_start, heads_per_rank)
                     param.data.copy_(narrow_weight)
                 loaded_params.add(name)
                 continue

@@ -2925,7 +2925,8 @@ class NPUModelRunner(GPUModelRunner):
                         )
 
             # add kvcomp_metadata into common_attn_metadata
-            if for_cudagraph_capture and not isinstance(builder, (AscendDSAMetadataBuilder, AscendDSACPMetadataBuilder)):
+            if (for_cudagraph_capture
+                    and not isinstance(builder, (AscendDSAMetadataBuilder, AscendDSACPMetadataBuilder))):
                 attn_metadata_i = builder.build_for_cudagraph_capture(common_attn_metadata)
             else:
                 attn_metadata_i = builder.build(
