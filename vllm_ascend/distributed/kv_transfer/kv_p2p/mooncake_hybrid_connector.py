@@ -367,6 +367,7 @@ class KVCacheRecvingThread(threading.Thread):
         self.kv_cache_config = kv_cache_config
         self.model_config = self.vllm_config.model_config
         self.use_mla = self.model_config.is_deepseek_mla
+        self.use_compress = hasattr(self.vllm_config.model_config.hf_config, "compress_ratios")
         self.use_hybrid = use_hybrid
         self.has_mamba = has_mamba
         self.kv_cache_specs = [g.kv_cache_spec for g in kv_cache_config.kv_cache_groups]
@@ -376,7 +377,7 @@ class KVCacheRecvingThread(threading.Thread):
             rank: get_prefill_pp_indices(self.num_layers, rank, self._prefill_pp_size, prefill_pp_layer_partition)
             for rank in range(self._prefill_pp_size)
         }
-        if not is_vl_model(vllm_config):
+        if not is_vl_model(vllm_config) and not self.use_compress:
             if self.use_mla:
                 self.k_head_dim = self.model_config.hf_text_config.kv_lora_rank
                 self.v_head_dim = self.model_config.hf_text_config.qk_rope_head_dim
