@@ -18,7 +18,7 @@ from vllm.logger import logger
 from vllm_ascend.ascend_config import get_ascend_config
 from vllm_ascend.cpu_binding import (
     bind_thread_to_cpus,
-    get_kv_transfer_thread_cpus,
+    get_cpu_binding_rank,
     get_memcache_client_cpus,
 )
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.backend import (
@@ -61,6 +61,10 @@ class KVPoolWorker:
         model_config = vllm_config.model_config
         parallel_config = vllm_config.parallel_config
         self.local_rank = envs.LOCAL_RANK
+        self.cpu_binding_rank = get_cpu_binding_rank(
+            self.local_rank,
+            parallel_config,
+        )
         self.use_mla = False
         if hasattr(model_config, "use_mla") and isinstance(model_config.use_mla, bool) and model_config.use_mla:
             self.use_mla = True
@@ -166,11 +170,12 @@ class KVPoolWorker:
             memcache_client_cpus = extra_config.get("memcache_client_cpus")
             if memcache_client_cpus is None:
                 try:
-                    memcache_client_cpus = get_memcache_client_cpus(self.local_rank)
+                    memcache_client_cpus = get_memcache_client_cpus(
+                        self.cpu_binding_rank)
                 except Exception as err:
                     logger.warning(
                         "Failed to get MemCache client CPUs for rank%d: %s",
-                        self.local_rank,
+                        self.cpu_binding_rank,
                         err,
                     )
             self.m_store = real_backend(  # type: ignore[misc]
@@ -204,14 +209,12 @@ class KVPoolWorker:
         self.kv_transfer_thread_cpus: list[int] = []
         if get_ascend_config().enable_cpu_binding:
             try:
-                self.kv_transfer_thread_cpus = get_kv_transfer_thread_cpus(
-                    self.local_rank,
-                    2,
-                )
+                self.kv_transfer_thread_cpus = get_memcache_client_cpus(
+                    self.cpu_binding_rank)
             except Exception as err:
                 logger.warning(
-                    "Failed to get KV transfer thread CPUs for rank%d: %s",
-                    self.local_rank,
+                    "Failed to get MemCache CPUs for KV transfer threads in rank%d: %s",
+                    self.cpu_binding_rank,
                     err,
                 )
         self.next_layer_to_submit = 0

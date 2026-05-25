@@ -32,6 +32,18 @@ DEVICE_BINDING_MODE: dict["AscendDeviceType", str] = {
 }
 
 
+def get_cpu_binding_rank(local_rank: int, parallel_config: object) -> int:
+    dp_rank_local = int(getattr(parallel_config, "data_parallel_rank_local", 0) or 0)
+    dp_size_local = int(getattr(parallel_config, "data_parallel_size_local", 1) or 1)
+    if dp_size_local <= 1:
+        return local_rank
+
+    per_dp_local_world_size = int(getattr(parallel_config, "local_world_size", 0) or 0)
+    if per_dp_local_world_size <= 0:
+        per_dp_local_world_size = int(getattr(parallel_config, "world_size", 1) or 1)
+    return dp_rank_local * per_dp_local_world_size + local_rank
+
+
 def is_arm_cpu() -> bool:
     arch = platform.machine().lower()
     if arch in {"x86_64", "amd64", "i386", "i686"}:
@@ -170,7 +182,6 @@ class CpuAlloc:
         self.assign_main: dict[int, list[int]] = {}
         self.assign_acl: dict[int, list[int]] = {}
         self.assign_rel: dict[int, list[int]] = {}
-        self.assign_kv_transfer: dict[int, list[int]] = {}
         self.assign_memcache: dict[int, list[int]] = {}
 
     @staticmethod
@@ -376,6 +387,16 @@ class CpuAlloc:
         )
         self.build_global_slice_cpu_pool()
 
+    def get_current_npu(self) -> int:
+        if 0 <= self.rank_id < len(self.device_info.running_npu_list):
+            return self.device_info.running_npu_list[self.rank_id]
+        if self.rank_id in self.npu_cpu_pool:
+            return self.rank_id
+        raise RuntimeError(
+            f"Invalid CPU binding rank {self.rank_id}. "
+            f"visible_npus={self.device_info.running_npu_list}"
+        )
+
     def allocate(self) -> None:
         memcache_cpu_count = self.memcache_cpu_count()
         worker_cpu_count = self.worker_cpu_count()
@@ -412,7 +433,7 @@ class CpuAlloc:
                 )
             if len(memcache) < memcache_cpu_count:
                 logger.warning(
-                    "NPU%d MemCache/KV transfer CPU count is %d, less than requested %d.",
+                    "NPU%d MemCache CPU count is %d, less than requested %d.",
                     npu,
                     len(memcache),
                     memcache_cpu_count,
@@ -421,19 +442,17 @@ class CpuAlloc:
             self.assign_acl[npu] = acl
             self.assign_rel[npu] = rel
             self.assign_memcache[npu] = memcache
-            self.assign_kv_transfer[npu] = memcache
 
     def print_plan(self) -> None:
         logger.info("The CPU allocation plan is as follows:")
-        current_npu = self.device_info.running_npu_list[self.rank_id]
+        current_npu = self.get_current_npu()
         main = " ".join(map(str, self.assign_main[current_npu]))
         memcache = " ".join(map(str, self.assign_memcache[current_npu]))
-        kv_transfer = " ".join(map(str, self.assign_kv_transfer[current_npu]))
         acl = " ".join(map(str, self.assign_acl[current_npu]))
         rel = str(self.assign_rel[current_npu]) if self.assign_rel[current_npu] else ""
         logger.info(
             f"NPU{current_npu}: main=[{main}]  memcache=[{memcache}] "
-            f"kv_transfer=[{kv_transfer}]  acl=[{acl}]  release=[{rel}]"
+            f"acl=[{acl}]  release=[{rel}]"
         )
 
     def bind_memory(self, pid: str, npu: int) -> None:
@@ -471,7 +490,7 @@ class CpuAlloc:
         threads_map = self.get_threads_map(thread_message)
         main_pid = str(psutil.Process().pid)
         process_name = psutil.Process().name()
-        current_npu = self.device_info.running_npu_list[self.rank_id]
+        current_npu = self.get_current_npu()
         acl_threads = set(threads_map.get(main_pid, {}).get("acl_thread", []))
         release_threads = set(threads_map.get(main_pid, {}).get("release_thread", []))
         special_threads = acl_threads | release_threads
@@ -538,7 +557,7 @@ class CpuAlloc:
             return
 
         # Only bind IRQ for current rank's NPU to avoid multi-process overwrite.
-        current_npu = self.device_info.running_npu_list[self.rank_id]
+        current_npu = self.get_current_npu()
         if current_npu not in self.npu_cpu_pool:
             logger.warning(f"[irq] rank:{self.rank_id} -> NPU{current_npu} has no cpu pool, skip irq binding.")
             return
@@ -630,25 +649,13 @@ def bind_cpus(rank_id: int) -> None:
     binder.run_all()
 
 
-def get_kv_transfer_thread_cpus(rank_id: int, num_threads: int | None = None) -> list[int]:
-    if not is_arm_cpu():
-        return []
-    binder = CpuAlloc(rank_id)
-    binder.build_cpu_pools()
-    current_npu = binder.device_info.running_npu_list[rank_id]
-    binder.allocate()
-    if num_threads is None:
-        num_threads = binder.memcache_cpu_count()
-    return binder.assign_kv_transfer[current_npu][:num_threads]
-
-
 def get_memcache_client_cpus(rank_id: int) -> list[int]:
     if not is_arm_cpu():
         return []
     binder = CpuAlloc(rank_id)
     binder.build_cpu_pools()
     binder.allocate()
-    current_npu = binder.device_info.running_npu_list[rank_id]
+    current_npu = binder.get_current_npu()
     return binder.assign_memcache[current_npu]
 
 
