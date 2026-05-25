@@ -27,11 +27,11 @@ _server_cmd: &server_cmd
   - "--port"
   - "$SERVER_PORT"
   - "--max-model-len"
-  - "36864"
+  - "70000"
   - "--max-num-batched-tokens"
   - "16384"
   - "--max-num-seqs"
-  - "64"
+  - "32"
   - "--async-scheduling"
   - "--quantization"
   - "ascend"
@@ -57,8 +57,8 @@ _benchmarks: &benchmarks
     dataset_path: vllm-ascend/aime2025
     request_conf: vllm_api_general_chat
     dataset_conf: aime2025/aime2025_gen_0_shot_chat_prompt
-    max_out_len: 32768
-    batch_size: 32
+    max_out_len: 65536
+    batch_size: 8
     baseline: 95
     threshold: 10
   perf:
