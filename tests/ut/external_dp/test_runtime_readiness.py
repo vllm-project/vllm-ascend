@@ -1,5 +1,6 @@
 import sys
 import types
+from pathlib import Path
 
 import pytest
 
@@ -46,3 +47,22 @@ def test_wait_all_endpoints_ready_fails_if_ready_rank_becomes_unhealthy(monkeypa
 
     with pytest.raises(RuntimeError, match="became unhealthy after ready"):
         test_external_dp._wait_all_endpoints_ready(endpoints, timeout=10)
+
+
+def test_wait_all_endpoints_ready_fails_if_local_process_exits(monkeypatch, pd_config):
+    endpoints = EndpointResolver(pd_config).resolve()[:1]
+
+    class ExitedProcess:
+        pid = 1234
+
+        def poll(self):
+            return 2
+
+    monkeypatch.setattr(test_external_dp, "_is_http_ready", lambda url, timeout: False)
+
+    with pytest.raises(RuntimeError, match="rank-0.log"):
+        test_external_dp._wait_all_endpoints_ready(
+            endpoints,
+            timeout=10,
+            process_checks=[(ExitedProcess(), endpoints[0], Path("/tmp/rank-0.log"))],
+        )

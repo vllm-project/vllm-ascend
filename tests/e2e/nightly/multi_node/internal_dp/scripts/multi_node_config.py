@@ -4,22 +4,21 @@ import subprocess
 from dataclasses import dataclass
 
 import regex as re
-import yaml
 
-# isort: off
 from tests.e2e.nightly.multi_node.scripts.utils import (
-    CONFIG_BASE_PATH,
-    DEFAULT_SERVER_PORT,
-    get_all_ipv4,
-    get_cluster_ips,
-    get_net_interface,
-    setup_logger,
     get_available_port,
+    get_net_interface,
+    load_yaml_mapping,
+    resolve_cluster_ips,
+    resolve_current_node_index,
+    setup_logger,
 )
 
-# isort: on
 setup_logger()
 logger = logging.getLogger(__name__)
+
+DEFAULT_CONFIG_BASE_PATH = "tests/e2e/nightly/multi_node/internal_dp/config/"
+DEFAULT_SERVER_PORT = 8080
 
 
 @dataclass(frozen=True)
@@ -211,15 +210,7 @@ class MultiNodeConfig:
         self.server_cmd = self._expand_env(self.cur_node.server_cmd)
 
     def _resolve_cur_index(self) -> int:
-        if idx := os.environ.get("LWS_WORKER_INDEX"):
-            return int(idx)
-
-        local_ips = get_all_ipv4()
-        for i, node in enumerate(self.nodes):
-            if node.ip in local_ips:
-                return i
-
-        raise RuntimeError("Unable to determine current node index")
+        return resolve_current_node_index([node.ip for node in self.nodes])
 
     def _expand_env(self, cmd: str) -> str:
         pattern = re.compile(r"\$(\w+)|\$\{(\w+)\}")
@@ -284,14 +275,12 @@ class MultiNodeConfigLoader:
 
     @classmethod
     def _load_yaml(cls, yaml_path: str | None) -> dict:
-        if not yaml_path:
-            yaml_path = os.getenv("CONFIG_YAML_PATH", cls.DEFAULT_CONFIG_NAME)
-
-        full_path = os.path.join(CONFIG_BASE_PATH, yaml_path)
-        logger.info("Loading config yaml: %s", full_path)
-
-        with open(full_path) as f:
-            return yaml.safe_load(f)
+        return load_yaml_mapping(
+            yaml_path,
+            default_name=cls.DEFAULT_CONFIG_NAME,
+            default_base_path=DEFAULT_CONFIG_BASE_PATH,
+            description="config",
+        )
 
     @staticmethod
     def _validate_root(cfg: dict):
@@ -334,15 +323,12 @@ class MultiNodeConfigLoader:
 
     @staticmethod
     def _resolve_cluster_ips(cfg: dict, num_nodes: int) -> list[str]:
-        if "cluster_hosts" in cfg and cfg["cluster_hosts"]:
-            logger.info(
+        return resolve_cluster_ips(
+            cfg,
+            num_nodes,
+            cluster_hosts_log_message=(
                 "Using cluster_hosts from config. This typically indicates that your current environment is a "
                 "non-Kubernetes environment."
-            )
-            ips = cfg["cluster_hosts"]
-            if len(ips) != num_nodes:
-                raise AssertionError("cluster_hosts size mismatch")
-            return ips
-
-        logger.info("Resolving cluster IPs via DNS...")
-        return get_cluster_ips(num_nodes)
+            ),
+            dns_log_message="Resolving cluster IPs via DNS...",
+        )

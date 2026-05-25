@@ -63,8 +63,7 @@ def test_parallel_sizes_default_to_one(tmp_path):
         "    tp_size: 1\n"
         "    pp_size: 1\n"
         '    dp_address: "${NODE_0_IP}"\n',
-        "    dp_group: default\n"
-        '    dp_address: "${NODE_0_IP}"\n',
+        '    dp_group: default\n    dp_address: "${NODE_0_IP}"\n',
         1,
     )
     config = ExternalDPConfigLoader.from_yaml(str(write_config(tmp_path, content)))

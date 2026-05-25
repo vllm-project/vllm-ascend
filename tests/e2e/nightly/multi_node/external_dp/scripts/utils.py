@@ -1,4 +1,3 @@
-import json
 import logging
 import os
 import re
@@ -22,13 +21,13 @@ from tests.e2e.nightly.multi_node.external_dp.scripts.external_dp_config import 
     NodeTemplate,
     replace_cluster_placeholders,
 )
-
-try:
-    import vllm
-
-    VLLM_VERSION = vllm.__version__
-except Exception:
-    VLLM_VERSION = ""
+from tests.e2e.nightly.multi_node.scripts.benchmark_results import (
+    build_task_entry,
+    extract_hardware,
+    filter_environment,
+    get_vllm_version,
+    write_results_json,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -36,24 +35,6 @@ BRACED_VARIABLE_RE = re.compile(r"\$\{([A-Za-z_][A-Za-z0-9_]*)\}")
 UNBRACED_VARIABLE_RE = re.compile(r"(?<!\$)\$([A-Za-z_][A-Za-z0-9_]*)")
 PROXY_HEALTHCHECK_PATH = "/healthcheck"
 SENSITIVE_ENV_TOKENS = ("TOKEN", "SECRET", "PASSWORD", "ACCESS_KEY")
-_PORT_ENV_KEYS = {"SERVER_PORT", "ENCODE_PORT", "PD_PORT", "PROXY_PORT"}
-_INFRA_ENV_KEYS = {
-    "HCCL_IF_IP",
-    "HCCL_SOCKET_IFNAME",
-    "GLOO_SOCKET_IFNAME",
-    "TP_SOCKET_IFNAME",
-    "LOCAL_IP",
-    "NIC_NAME",
-    "MASTER_IP",
-    "DISAGGREGATED_PREFILL_PROXY_SCRIPT",
-}
-_PERF_METRIC_RENAME: dict[str, str] = {
-    "Benchmark Duration": "Benchmark_Duration(BD)",
-    "Prefill Token Throughput": "Prefill_Token_Throughput(PTT)",
-    "Input Token Throughput": "Input_Token_Throughput(ITT)",
-    "Output Token Throughput": "Output_Token_Throughput(OTT)",
-    "Total Token Throughput": "Total_Token_Throughput(TTT)",
-}
 
 
 @dataclass(frozen=True)
@@ -313,81 +294,6 @@ def proxy_health_url(config: ExternalDPConfig) -> str:
     return f"http://{config.routing.proxy_host}:{config.routing.proxy_port}{PROXY_HEALTHCHECK_PATH}"
 
 
-def _extract_hardware(runner: str) -> str:
-    runner_lower = runner.lower()
-    for label in ("a3", "a2"):
-        if label in runner_lower:
-            return label.upper()
-    return runner
-
-
-def _task_passed(case_config: dict[str, Any], result: Any) -> bool:
-    if result == "":
-        return False
-    case_type = case_config.get("case_type")
-    baseline = case_config.get("baseline")
-    threshold = case_config.get("threshold")
-    if baseline is None or threshold is None:
-        return True
-    if case_type == "accuracy" and isinstance(result, (int, float)):
-        return abs(float(result) - float(baseline)) <= float(threshold)
-    if case_type == "performance" and isinstance(result, list) and len(result) == 2:
-        _, result_json = result
-        throughput_str = result_json.get("Output Token Throughput", {}).get("total", "")
-        try:
-            throughput_val = float(throughput_str.replace("token/s", "").strip())
-            return throughput_val >= float(threshold) * float(baseline)
-        except (ValueError, AttributeError):
-            return False
-    return True
-
-
-def _build_task_entry(case_key: str, case_config: dict[str, Any], result: Any) -> dict[str, Any]:
-    dataset_path = case_config.get("dataset_path", "")
-    dataset_conf = case_config.get("dataset_conf", "")
-    if dataset_path:
-        task_name = dataset_path.split("/", 1)[-1]
-    elif dataset_conf:
-        task_name = dataset_conf.split("/")[0]
-    else:
-        task_name = case_key
-
-    case_type = case_config.get("case_type", "unknown")
-    metrics: dict[str, float] = {}
-    if case_type == "accuracy" and isinstance(result, (int, float)):
-        metrics["accuracy"] = round(float(result), 4)
-    elif case_type == "performance" and isinstance(result, list) and len(result) == 2:
-        _, result_json = result
-        for metric_name, metric_data in result_json.items():
-            if not isinstance(metric_data, dict):
-                continue
-            total_str = metric_data.get("total", "")
-            try:
-                value = float(total_str.replace("token/s", "").replace("ms", "").replace("s", "").strip())
-                metrics[_PERF_METRIC_RENAME.get(metric_name, metric_name)] = round(value, 4)
-            except (ValueError, AttributeError):
-                pass
-
-    test_input_keys = ("num_prompts", "max_out_len", "batch_size", "request_rate")
-    test_input = {key: case_config[key] for key in test_input_keys if key in case_config}
-    target: dict[str, Any] = {}
-    if case_config.get("baseline") is not None:
-        target["baseline"] = case_config["baseline"]
-    if case_config.get("threshold") is not None:
-        target["threshold"] = case_config["threshold"]
-
-    entry: dict[str, Any] = {"name": task_name, "metrics": metrics, "test_input": test_input}
-    if target:
-        entry["target"] = target
-    entry["pass_fail"] = "pass" if _task_passed(case_config, result) else "fail"
-    return entry
-
-
-def _filter_environment(envs: dict[str, Any]) -> dict[str, Any]:
-    exclude = _PORT_ENV_KEYS | _INFRA_ENV_KEYS
-    return {key: value for key, value in envs.items() if key not in exclude}
-
-
 def _common_command_envs(commands: list[BuiltCommand]) -> dict[str, str]:
     if not commands:
         return {}
@@ -496,20 +402,20 @@ def build_benchmark_results(
     results: list[Any],
 ) -> dict[str, Any]:
     valid_items = [(case["case_name"], case) for case in config.benchmark_cases]
-    tasks = [_build_task_entry(key, case, result) for (key, case), result in zip(valid_items, results)]
+    tasks = [build_task_entry(key, case, result) for (key, case), result in zip(valid_items, results)]
     runner = os.environ.get("VLLM_CI_RUNNER", "")
     common_envs = _common_command_envs(commands)
 
     return {
         "model_name": config.model,
-        "hardware": _extract_hardware(runner),
+        "hardware": extract_hardware(runner),
         "dtype": _extract_dtype(config, commands),
         "feature": _extract_features(commands),
-        "vllm_version": VLLM_VERSION,
+        "vllm_version": get_vllm_version(),
         "vllm_ascend_version": os.environ.get("VLLM_ASCEND_REF", ""),
         "tasks": tasks,
         "serve_cmd": _build_serve_cmd(config, endpoints, commands),
-        "environment": _filter_environment(common_envs),
+        "environment": filter_environment(common_envs),
         "external_dp_topology": _build_topology(config, endpoints),
     }
 
@@ -524,10 +430,4 @@ def write_benchmark_results_json(
 ) -> Path:
     output = build_benchmark_results(config=config, endpoints=endpoints, commands=commands, results=results)
     job_name = os.environ.get("BENCHMARK_JOB_NAME", "") or config.test_name.replace(" ", "-")
-    if output_dir is None:
-        output_dir = Path("/root/.cache/benchmark_results") / job_name
-    output_dir.mkdir(parents=True, exist_ok=True)
-    output_path = output_dir / f"{job_name}.json"
-    output_path.write_text(json.dumps(output, indent=2, ensure_ascii=False), encoding="utf-8")
-    print(f"Benchmark results saved to PVC at {output_path}")
-    return output_path
+    return write_results_json(output, job_name=job_name, output_dir=output_dir)

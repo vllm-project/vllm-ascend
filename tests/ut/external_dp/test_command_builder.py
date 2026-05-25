@@ -7,7 +7,7 @@ from tests.e2e.nightly.multi_node.external_dp.scripts.external_dp_config import 
     EndpointResolver,
     ExternalDPConfigLoader,
 )
-from tests.e2e.nightly.multi_node.external_dp.scripts.external_dp_utils import CommandBuilder
+from tests.e2e.nightly.multi_node.external_dp.scripts.utils import CommandBuilder
 
 
 def test_render_server_cmd_template(generic_config):

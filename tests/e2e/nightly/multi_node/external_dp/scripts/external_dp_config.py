@@ -1,13 +1,17 @@
 import logging
 import os
-import re
-import socket
-import time
 from dataclasses import dataclass, field
-from pathlib import Path
 from typing import Any
 
-import yaml
+import regex as re
+
+from tests.e2e.nightly.multi_node.scripts.utils import (
+    load_yaml_mapping,
+    resolve_cluster_ips,
+)
+from tests.e2e.nightly.multi_node.scripts.utils import (
+    resolve_current_node_index as resolve_node_index,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -166,61 +170,7 @@ def replace_cluster_placeholders(
 
 
 def resolve_current_node_index(config: ExternalDPConfig) -> int:
-    worker_index = os.environ.get("LWS_WORKER_INDEX")
-    if worker_index:
-        return int(worker_index)
-
-    local_ips = set(_get_all_ipv4())
-    for index, ip in enumerate(config.cluster_ips):
-        if ip in local_ips:
-            return index
-    raise RuntimeError("Unable to determine current node index")
-
-
-def _dns_resolver(retries: int = 240, base_delay: float = 0.5):
-    def resolve(dns: str) -> str:
-        delay = base_delay
-        for attempt in range(retries):
-            try:
-                return socket.gethostbyname(dns)
-            except socket.gaierror:
-                if attempt == retries - 1:
-                    raise
-                time.sleep(delay)
-                delay = min(delay * 1.5, 5)
-        raise RuntimeError(f"Unable to resolve DNS: {dns}")
-
-    return resolve
-
-
-def _get_cluster_dns_list(world_size: int) -> list[str]:
-    if world_size < 1:
-        raise ValueError(f"world_size must be >= 1, got {world_size}")
-
-    leader_dns = os.getenv("LWS_LEADER_ADDRESS")
-    if not leader_dns:
-        raise RuntimeError("environment variable LWS_LEADER_ADDRESS is not set")
-
-    parts = leader_dns.split(".")
-    if len(parts) < 3:
-        raise ValueError(f"invalid leader DNS format: {leader_dns}")
-
-    leader_name, group_name, namespace = parts[0], parts[1], parts[2]
-    worker_dns_list = [f"{leader_name}-{idx}.{group_name}.{namespace}" for idx in range(1, world_size)]
-    return [leader_dns, *worker_dns_list]
-
-
-def _get_cluster_ips(world_size: int) -> list[str]:
-    resolver = _dns_resolver()
-    return [resolver(dns) for dns in _get_cluster_dns_list(world_size)]
-
-
-def _get_all_ipv4() -> list[str]:
-    ipv4s = {"127.0.0.1"}
-    hostname = socket.gethostname()
-    for info in socket.getaddrinfo(hostname, None, family=socket.AF_INET):
-        ipv4s.add(info[4][0])
-    return list(ipv4s)
+    return resolve_node_index(config.cluster_ips)
 
 
 class ExternalDPConfigLoader:
@@ -262,20 +212,12 @@ class ExternalDPConfigLoader:
 
     @staticmethod
     def _load_yaml(yaml_path: str | None) -> dict[str, Any]:
-        if not yaml_path:
-            yaml_path = os.getenv("CONFIG_YAML_PATH", DEFAULT_CONFIG_NAME)
-
-        path = Path(yaml_path)
-        if not path.is_absolute() and not path.exists():
-            base_path = os.getenv("CONFIG_BASE_PATH") or DEFAULT_CONFIG_BASE_PATH
-            path = Path(base_path) / yaml_path
-
-        logger.info("Loading external DP config yaml: %s", path)
-        with path.open(encoding="utf-8") as f:
-            data = yaml.safe_load(f)
-        if not isinstance(data, dict):
-            raise TypeError(f"External DP config must be a mapping: {path}")
-        return data
+        return load_yaml_mapping(
+            yaml_path,
+            default_name=DEFAULT_CONFIG_NAME,
+            default_base_path=DEFAULT_CONFIG_BASE_PATH,
+            description="external DP config",
+        )
 
     @staticmethod
     def _validate_root(config: dict[str, Any]) -> None:
@@ -292,19 +234,12 @@ class ExternalDPConfigLoader:
         num_nodes: int,
         cluster_ips: list[str] | None,
     ) -> list[str]:
-        if cluster_ips is not None:
-            if len(cluster_ips) != num_nodes:
-                raise AssertionError("cluster_ips size mismatch")
-            return cluster_ips
-
-        cluster_hosts = raw_config.get("cluster_hosts")
-        if cluster_hosts:
-            if len(cluster_hosts) != num_nodes:
-                raise AssertionError("cluster_hosts size mismatch")
-            return list(cluster_hosts)
-
-        logger.info("Resolving external DP cluster IPs via LWS DNS")
-        return _get_cluster_ips(num_nodes)
+        return resolve_cluster_ips(
+            raw_config,
+            num_nodes,
+            cluster_ips,
+            dns_log_message="Resolving external DP cluster IPs via LWS DNS",
+        )
 
     @staticmethod
     def _parse_routing(raw_routing: dict[str, Any], cluster_ips: list[str]) -> RoutingConfig:
@@ -325,8 +260,7 @@ class ExternalDPConfigLoader:
             proxy_port=int(routing["proxy_port"]),
             proxy_script=str(routing["proxy_script"]),
             groups={
-                str(name): [int(index) for index in indices]
-                for name, indices in routing.get("groups", {}).items()
+                str(name): [int(index) for index in indices] for name, indices in routing.get("groups", {}).items()
             },
         )
 
@@ -437,8 +371,7 @@ class ExternalDPConfigLoader:
 
             if node.devices_per_node > config.npu_per_node:
                 raise ValueError(
-                    f"node {node_index} uses {node.devices_per_node} NPUs, "
-                    f"but npu_per_node is {config.npu_per_node}"
+                    f"node {node_index} uses {node.devices_per_node} NPUs, but npu_per_node is {config.npu_per_node}"
                 )
             if node.dp_rank_start + node.dp_size_local > node.dp_size:
                 raise ValueError(f"node {node_index} dp rank range exceeds dp_size")

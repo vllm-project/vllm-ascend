@@ -1,7 +1,7 @@
 import pytest
 
 from tests.e2e.nightly.multi_node.external_dp.scripts.external_dp_config import EndpointResolver
-from tests.e2e.nightly.multi_node.external_dp.scripts.external_dp_utils import build_proxy_command, proxy_health_url
+from tests.e2e.nightly.multi_node.external_dp.scripts.utils import build_proxy_command, proxy_health_url
 
 
 def test_generic_dp_proxy_command(generic_config):

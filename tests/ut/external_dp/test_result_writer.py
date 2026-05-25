@@ -1,7 +1,7 @@
 import json
 
 from tests.e2e.nightly.multi_node.external_dp.scripts.external_dp_config import EndpointResolver
-from tests.e2e.nightly.multi_node.external_dp.scripts.external_dp_utils import (
+from tests.e2e.nightly.multi_node.external_dp.scripts.utils import (
     CommandBuilder,
     build_benchmark_results,
     write_benchmark_results_json,
