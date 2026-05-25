@@ -110,42 +110,40 @@ class V1SamplingContext:
 
         if idx_mapping_np is None:
             expanded_idx_mapping = req_indices_at_logits.to(device=device, dtype=torch.int32)
-            idx_mapping_np = expanded_idx_mapping.detach().cpu().numpy().astype(np.int32)
+            idx_mapping = expanded_idx_mapping.detach().cpu().numpy().astype(np.int32)
         else:
-            idx_mapping_np = np.asarray(idx_mapping_np, dtype=np.int32)
-            if int(idx_mapping_np.shape[0]) != num_logits:
+            idx_mapping = np.asarray(idx_mapping_np, dtype=np.int32)
+            if int(idx_mapping.shape[0]) != num_logits:
                 raise ValueError("idx_mapping_np must have one entry per logits row")
             if req_indices_at_logits.device.type == "cpu":
                 req_indices_np = req_indices_at_logits.detach().numpy().astype(np.int32, copy=False)
-                if not np.array_equal(idx_mapping_np, req_indices_np):
+                if not np.array_equal(idx_mapping, req_indices_np):
                     raise ValueError("idx_mapping_np must match req_indices_at_logits")
-            expanded_idx_mapping = torch.from_numpy(idx_mapping_np).to(device=device, dtype=torch.int32)
-        if idx_mapping_np.size and (idx_mapping_np.min() < 0 or idx_mapping_np.max() >= num_reqs):
+            expanded_idx_mapping = torch.from_numpy(idx_mapping).to(device=device, dtype=torch.int32)
+        if idx_mapping.size and (idx_mapping.min() < 0 or idx_mapping.max() >= num_reqs):
             raise ValueError("req_indices_at_logits contains an out-of-range request index")
 
         if expanded_local_pos is None:
-            local_pos_np = np.empty(num_logits, dtype=np.int64)
-            counters = np.zeros(num_reqs, dtype=np.int64)
-            for row, req_idx in enumerate(idx_mapping_np):
+            local_pos_np: np.ndarray = np.empty(num_logits, dtype=np.int64)
+            counters: np.ndarray = np.zeros(num_reqs, dtype=np.int64)
+            for row, req_idx in enumerate(idx_mapping):
                 local_pos_np[row] = counters[req_idx]
                 counters[req_idx] += 1
             expanded_local_pos = torch.from_numpy(local_pos_np).to(device=device)
         else:
             expanded_local_pos = expanded_local_pos.to(device=device, dtype=torch.int64)
 
-        expanded_logits = num_logits != num_reqs or not np.array_equal(
-            idx_mapping_np, np.arange(num_reqs, dtype=np.int32)
-        )
-        if expanded_logits and not V1SamplingContext._is_grouped_by_request(idx_mapping_np):
+        expanded_logits = num_logits != num_reqs or not np.array_equal(idx_mapping, np.arange(num_reqs, dtype=np.int32))
+        if expanded_logits and not V1SamplingContext._is_grouped_by_request(idx_mapping):
             raise ValueError("expanded logits rows must be grouped by request")
         if cu_num_logits_np is None and expanded_logits:
             cu_num_logits_np = np.concatenate(
-                (np.array([0], dtype=np.int32), np.cumsum(np.bincount(idx_mapping_np, minlength=num_reqs)))
+                (np.array([0], dtype=np.int32), np.cumsum(np.bincount(idx_mapping, minlength=num_reqs)))
             ).astype(np.int32)
 
         return V1SamplingContext(
             expanded_idx_mapping=expanded_idx_mapping,
-            idx_mapping_np=idx_mapping_np,
+            idx_mapping_np=idx_mapping,
             pos=positions_at_logits.to(device=device),
             input_ids=input_ids_at_logits.to(device=device),
             expanded_local_pos=expanded_local_pos,

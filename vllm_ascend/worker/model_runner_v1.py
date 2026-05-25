@@ -2328,6 +2328,7 @@ class NPUModelRunner(GPUModelRunner):
             return None
 
         num_reqs = self.input_batch.num_reqs
+        req_indices_np: np.ndarray
         if spec_decode_metadata is None:
             req_indices_np = np.arange(num_reqs, dtype=np.int32)
         else:
