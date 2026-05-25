@@ -294,7 +294,6 @@ class AscendDSACPMetadataBuilder(AttentionMetadataBuilder[AscendDSAMetadata]):
             local_sin,
         ) = self._build_local_token_metadata(
             num_reqs=num_reqs,
-            num_reqs_actual=num_reqs_actual,
             num_input_tokens=num_input_tokens,
             input_positions=input_positions,
             query_start_loc=query_start_loc,
@@ -354,7 +353,6 @@ class AscendDSACPMetadataBuilder(AttentionMetadataBuilder[AscendDSAMetadata]):
             query_start_loc=local_query_start_loc,
             seq_lens=local_seq_lens,
             seq_lens_q=local_seq_lens_q,
-            has_prefill=has_prefill,
             num_reqs=num_reqs,
         )
 
@@ -387,7 +385,7 @@ class AscendDSACPMetadataBuilder(AttentionMetadataBuilder[AscendDSAMetadata]):
         )
 
     def _build_local_token_metadata(
-        self, num_reqs, num_reqs_actual, num_input_tokens, input_positions, query_start_loc, seq_lens, use_cache
+        self, num_reqs, num_input_tokens, input_positions, query_start_loc, seq_lens, use_cache
     ):
         """
         For example:
@@ -407,6 +405,8 @@ class AscendDSACPMetadataBuilder(AttentionMetadataBuilder[AscendDSAMetadata]):
         tp_group = get_tp_group()
         tp_size = tp_group.world_size
         tp_rank = tp_group.rank_in_group
+        # Split the flattened token stream evenly across TP ranks. Padding keeps
+        # every rank's local slice the same length, which simplifies CP kernels.
         num_tokens_pad = ((num_input_tokens + tp_size - 1) // tp_size) * tp_size
         tokens_per_rank = num_tokens_pad // tp_size
         local_start = tp_rank * tokens_per_rank
@@ -415,14 +415,20 @@ class AscendDSACPMetadataBuilder(AttentionMetadataBuilder[AscendDSAMetadata]):
         self.local_query_start_loc.fill_(0)
         self.local_seq_lens.fill_(0)
 
+        # Intersect each request's global token interval with this rank's local
+        # token interval, then build the per-rank query_start_loc from lengths.
         local_query_start = torch.clamp(query_start_loc[:-1], min=local_start, max=local_end)
         local_query_end = torch.clamp(query_start_loc[1:], min=local_start, max=local_end)
         local_query_lens = local_query_end - local_query_start
         self.local_query_start_loc[1 : num_reqs + 1] = torch.cumsum(local_query_lens, dim=0)
 
+        # For requests that cross the local slice boundary, offset removes the
+        # tokens that live on later ranks so local_seq_lens matches local queries.
         offset = query_start_loc[1:] - local_query_end
         self.local_seq_lens[:num_reqs] = (local_query_lens > 0) * (seq_lens - offset)
 
+        # RoPE tables are generated on the padded global positions first, then
+        # sliced to this rank so local tokens keep their original positions.
         pad_tokens = num_tokens_pad - input_positions.shape[0]
         if pad_tokens > 0:
             input_positions = F.pad(input_positions, (0, pad_tokens), value=0)
@@ -464,15 +470,6 @@ class AscendDSACPMetadataBuilder(AttentionMetadataBuilder[AscendDSAMetadata]):
         mask = ((input_positions + 1) % compress_ratio) == 0
         return mask.sum()
 
-    # --- helper: build SAS metadata ---
-    def _copy_sas_metadata_to_decode_buffer(self, metadata: torch.Tensor) -> torch.Tensor:
-        assert self.req_sas_metadata is not None
-        numel = metadata.numel()
-        self.req_sas_metadata[:numel].copy_(metadata.reshape(-1))
-        if numel < self.req_sas_metadata.numel():
-            self.req_sas_metadata[numel:].fill_(0)
-        return self.req_sas_metadata
-
     def _build_sas_metadata(
         self,
         num_heads,
@@ -488,100 +485,82 @@ class AscendDSACPMetadataBuilder(AttentionMetadataBuilder[AscendDSAMetadata]):
     ):
         cmp_ratio = self.compressor_ratio if self.compressor_ratio > 1 else 1
         cache_key = f"cp_sas_c{cmp_ratio}"
-        cached_metadata = self.common_ratio_to_sas_metadata.get(cache_key)
-        if cached_metadata is not None:
-            if not has_prefill:
-                return self._copy_sas_metadata_to_decode_buffer(cached_metadata)
-            return cached_metadata
+        metadata = self.common_ratio_to_sas_metadata.get(cache_key)
+        if metadata is None:
+            cu_seqlens_ori_kv = query_start_loc if has_prefill else self.cu_seqlens_ori_kv
+            cu_seqlens_cmp_kv = None if has_prefill else self.cu_seqlens_cmp_kv
+            kw = dict(
+                num_heads_q=num_heads,
+                num_heads_kv=1,
+                head_dim=self.model_config.get_head_size(),
+                cu_seqlens_q=query_start_loc,
+                cu_seqlens_ori_kv=cu_seqlens_ori_kv,
+                cu_seqlens_cmp_kv=cu_seqlens_cmp_kv,
+                seqused_q=self.seqused_q,
+                seqused_kv=seq_lens,
+                max_seqlen_q=max_query_len,
+                max_seqlen_kv=max_seq_lens,
+                batch_size=num_reqs,
+                ori_mask_mode=4,
+                ori_win_left=self.model_config.hf_config.sliding_window - 1,
+                ori_win_right=0,
+                layout_q="TND",
+                layout_kv="PA_ND",
+                has_ori_kv=True,
+                device=str(self.seqused_q.device),
+            )
 
-        cu_seqlens_ori_kv = query_start_loc if has_prefill else self.cu_seqlens_ori_kv
-        cu_seqlens_cmp_kv = None if has_prefill else self.cu_seqlens_cmp_kv
-        kw = dict(
-            num_heads_q=num_heads,
-            num_heads_kv=1,
-            head_dim=self.model_config.get_head_size(),
-            cu_seqlens_q=query_start_loc,
-            cu_seqlens_ori_kv=cu_seqlens_ori_kv,
-            cu_seqlens_cmp_kv=cu_seqlens_cmp_kv,
-            seqused_q=self.seqused_q,
-            seqused_kv=seq_lens,
-            max_seqlen_q=max_query_len,
-            max_seqlen_kv=max_seq_lens,
-            batch_size=num_reqs,
-            ori_mask_mode=4,
-            ori_win_left=self.model_config.hf_config.sliding_window - 1,
-            ori_win_right=0,
-            layout_q="TND",
-            layout_kv="PA_ND",
-            has_ori_kv=True,
-            device=str(self.seqused_q.device),
-        )
-
-        if self.compressor_ratio > 1:
-            kw["has_cmp_kv"] = True
-            if self.compressor_ratio == 4:
-                kw["cmp_mask_mode"] = 3
-                kw["cmp_topk"] = index_topk
+            if self.compressor_ratio > 1:
+                kw["has_cmp_kv"] = True
+                if self.compressor_ratio == 4:
+                    kw["cmp_mask_mode"] = 3
+                    kw["cmp_topk"] = index_topk
+                else:
+                    kw["cmp_mask_mode"] = 3
+                kw["cmp_ratio"] = cmp_ratio
+                kw["cu_seqlens_cmp_kv"] = cu_cmp_seqlen_list
             else:
-                kw["cmp_mask_mode"] = 3
-            kw["cmp_ratio"] = cmp_ratio
-            kw["cu_seqlens_cmp_kv"] = cu_cmp_seqlen_list
-        else:
-            kw["cmp_ratio"] = cmp_ratio
-            kw["has_cmp_kv"] = False
+                kw["cmp_ratio"] = cmp_ratio
+                kw["has_cmp_kv"] = False
 
-        metadata = torch.ops._C_ascend.npu_sparse_attn_sharedkv_metadata(**kw)
+            metadata = torch.ops._C_ascend.npu_sparse_attn_sharedkv_metadata(**kw)
         self.common_ratio_to_sas_metadata[cache_key] = metadata
-        if not has_prefill:
-            metadata = self._copy_sas_metadata_to_decode_buffer(metadata)
-        return metadata
+        self.req_sas_metadata[:1024] = metadata
+        return self.req_sas_metadata[:1024]
 
-    # --- helper: build QLI metadata ---
-    def _copy_qli_metadata_to_decode_buffer(self, metadata: torch.Tensor) -> torch.Tensor:
-        assert self.req_qli_metadata is not None
-        numel = metadata.numel()
-        self.req_qli_metadata[:numel].copy_(metadata.reshape(-1))
-        if numel < self.req_qli_metadata.numel():
-            self.req_qli_metadata[numel:].fill_(0)
-        return self.req_qli_metadata
-
-    def _build_qli_metadata(self, query_start_loc, seq_lens, seq_lens_q, has_prefill, num_reqs):
+    def _build_qli_metadata(self, query_start_loc, seq_lens, seq_lens_q, num_reqs):
         if self.compressor_ratio != 4:
             return None
 
         cache_key = "cp_qli"
-        cached_metadata = self.common_ratio_to_sas_metadata.get(cache_key)
-        if cached_metadata is not None:
-            if not has_prefill:
-                return self._copy_qli_metadata_to_decode_buffer(cached_metadata)
-            return cached_metadata
+        metadata = self.common_ratio_to_sas_metadata.get(cache_key)
 
-        max_seqlen_q = max(1, int(seq_lens_q.max().item()))
-        max_seqlen_k = max(1, int(seq_lens.max().item()))
-        metadata = torch.ops._C_ascend.npu_quant_lightning_indexer_metadata(
-            actual_seq_lengths_query=query_start_loc[1:].clone(),
-            actual_seq_lengths_key=seq_lens.clone(),
-            num_heads_q=self.model_config.hf_config.index_n_heads,
-            num_heads_k=1,
-            head_dim=self.model_config.hf_config.index_head_dim,
-            query_quant_mode=0,
-            key_quant_mode=0,
-            batch_size=num_reqs,
-            max_seqlen_q=max_seqlen_q,
-            max_seqlen_k=max_seqlen_k,
-            layout_query="TND",
-            layout_key="PA_BSND",
-            sparse_count=self.model_config.hf_config.index_topk,
-            sparse_mode=3,
-            pre_tokens=(1 << 63) - 1,
-            next_tokens=(1 << 63) - 1,
-            cmp_ratio=4,
-            device=str(self.seqused_q.device),
-        )
+        if metadata is None:
+            max_seqlen_q = max(1, int(seq_lens_q.max().item()))
+            max_seqlen_k = max(1, int(seq_lens.max().item()))
+            metadata = torch.ops._C_ascend.npu_quant_lightning_indexer_metadata(
+                actual_seq_lengths_query=query_start_loc[1:].clone(),
+                actual_seq_lengths_key=seq_lens.clone(),
+                num_heads_q=self.model_config.hf_config.index_n_heads,
+                num_heads_k=1,
+                head_dim=self.model_config.hf_config.index_head_dim,
+                query_quant_mode=0,
+                key_quant_mode=0,
+                batch_size=num_reqs,
+                max_seqlen_q=max_seqlen_q,
+                max_seqlen_k=max_seqlen_k,
+                layout_query="TND",
+                layout_key="PA_BSND",
+                sparse_count=self.model_config.hf_config.index_topk,
+                sparse_mode=3,
+                pre_tokens=(1 << 63) - 1,
+                next_tokens=(1 << 63) - 1,
+                cmp_ratio=4,
+                device=str(self.seqused_q.device),
+            )
         self.common_ratio_to_sas_metadata[cache_key] = metadata
-        if not has_prefill:
-            metadata = self._copy_qli_metadata_to_decode_buffer(metadata)
-        return metadata
+        self.req_qli_metadata[:1024] = metadata
+        return self.req_qli_metadata[:1024]
 
     def build_for_graph_capture(
         self,
@@ -720,9 +699,7 @@ class AscendDSACPImpl(DSAAttentionImpl):
         hidden_states_full = torch.ops.vllm.maybe_all_gather_and_maybe_unpad(hidden_states, need_gather_q_kv)
         assert attn_metadata[0].req_metadata is not None
         local_attn_output = self._forward(layer_name, hidden_states_full, hidden_states, kv_cache, attn_metadata)
-        o_proj_input = self._restore_tp_head_layout(
-            local_attn_output, layer_name, attn_metadata[0], hidden_states_full.dtype, hidden_states_full.device
-        )
+        o_proj_input = self._restore_tp_head_layout(local_attn_output, layer_name, attn_metadata[0])
         num_tokens = o_proj_input.shape[0]
 
         # o
@@ -758,18 +735,16 @@ class AscendDSACPImpl(DSAAttentionImpl):
         if self.compress_ratio == 4:
             (compress_kv_cache, swa_kv_cache, state_cache, _, _, _) = kv_cache
             (compressor_attn_metadata, compressor_kv_state_metadata, _, _, swa_metadata) = attn_metadata
-            compress_common_attn_metadata = compressor_attn_metadata
         elif self.compress_ratio == 128:
             (compress_kv_cache, swa_kv_cache, state_cache, _, _, _) = kv_cache
             (compressor_attn_metadata, compressor_kv_state_metadata, swa_metadata) = attn_metadata
-            compress_common_attn_metadata = compressor_attn_metadata
         else:
             (_, swa_kv_cache, _, _, _, _) = kv_cache
             (swa_metadata,) = attn_metadata
-            compress_common_attn_metadata = swa_metadata
+        common_attn_metadata = attn_metadata[0]
 
-        assert compress_common_attn_metadata.req_metadata is not None
-        req_metadata = compress_common_attn_metadata.req_metadata
+        assert common_attn_metadata.req_metadata is not None
+        req_metadata = common_attn_metadata.req_metadata
         cp_metadata = req_metadata.cp_metadata
         cos = req_metadata.cos[layer_name]
         sin = req_metadata.sin[layer_name]
@@ -778,7 +753,7 @@ class AscendDSACPImpl(DSAAttentionImpl):
         actual_seq_lengths_query = req_metadata.query_start_loc
         local_seq_lengths_query = cp_metadata.local_query_start_loc
         local_seq_lengths_key = cp_metadata.local_seq_lens
-        has_prefill = _has_prefill(compress_common_attn_metadata.attn_state)
+        has_prefill = _has_prefill(common_attn_metadata.attn_state)
 
         if (not isinstance(self.wq_b.quant_method, AscendUnquantizedLinearMethod)) and isinstance(
             self.wq_b.quant_method.quant_method, AscendW8A8DynamicLinearMethod
@@ -932,8 +907,6 @@ class AscendDSACPImpl(DSAAttentionImpl):
         local_attn_output: torch.Tensor,
         layer_name: str,
         attn_metadata: M,
-        dtype: torch.dtype,
-        device: torch.device,
     ) -> torch.Tensor:
         assert attn_metadata.req_metadata is not None
         req_metadata = attn_metadata.req_metadata
