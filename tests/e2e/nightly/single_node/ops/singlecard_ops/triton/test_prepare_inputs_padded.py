@@ -5,7 +5,7 @@ import torch
 from vllm.triton_utils import triton
 
 from vllm_ascend.ops.triton.spec_decode.utils import prepare_inputs_padded_kernel
-from vllm_ascend.ops.triton.triton_utils import get_vectorcore_num, init_device_properties_triton
+from vllm_ascend.ops.triton.triton_utils import get_vectorcore_num
 from vllm_ascend.spec_decode.eagle_proposer import _PREPARE_INPUTS_BLOCK_SIZE as BLOCK_SIZE
 
 
@@ -34,7 +34,6 @@ def prepare_inputs_padded_ref(
 
 @pytest.mark.parametrize("num_reqs", [1, 7, 32, 128, 2048])
 def test_prepare_inputs_padded(num_reqs):
-    init_device_properties_triton()
     device = "npu"
     torch.manual_seed(0)
 
@@ -55,7 +54,7 @@ def test_prepare_inputs_padded(num_reqs):
 
     # Run Triton kernel
     out_tri = torch.empty(num_reqs, dtype=torch.int32, device=device)
-
+    num_rejected_tokens = torch.empty(num_reqs, dtype=torch.int32, device=device)
     num_blocks_needed = triton.cdiv(num_reqs, BLOCK_SIZE)
     num_vector_core = get_vectorcore_num()
     grid_size = min(num_blocks_needed, num_vector_core)
@@ -66,6 +65,7 @@ def test_prepare_inputs_padded(num_reqs):
         valid_sampled_tokens_count,
         query_start_loc,
         out_tri,
+        num_rejected_tokens,
         num_reqs,
         BLOCK_SIZE=BLOCK_SIZE,
     )

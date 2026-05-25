@@ -122,7 +122,6 @@ def test_apply_bad_words_no_bad_words(device="npu"):
     # Make a copy of logits to compare
     logits_before = test_data[0].clone()
     logits_after = test_data[0].clone()
-
     # Apply bad words
     apply_bad_words(logits_after, *test_data[1:], num_bad_words_per_req)
 
@@ -140,7 +139,6 @@ def test_apply_bad_words_edge_cases(device="npu"):
     num_requests = 16
     num_bad_words_per_req = 128  # Maximum allowed
     bad_word_length = 2
-
     print("\nTesting edge case: maximum bad words")
     test_data = create_test_data(num_tokens, vocab_size, num_requests, num_bad_words_per_req, bad_word_length, device)
 

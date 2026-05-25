@@ -3,7 +3,7 @@ import gc
 import pytest
 import torch
 from einops import rearrange
-from vllm.model_executor.models.qwen3_next import Qwen3NextGatedDeltaNet
+from vllm.model_executor.layers.mamba.gdn_linear_attn import GatedDeltaNetAttention
 
 from vllm_ascend.ops.triton.fla.fused_qkvzba_split_reshape import fused_qkvzba_split_reshape_cat
 
@@ -66,7 +66,7 @@ def test_fused_qkvzba_split_reshape_cat(
         head_v_dim,
     )
 
-    gdn = Qwen3NextGatedDeltaNet.__new__(Qwen3NextGatedDeltaNet)
+    gdn = GatedDeltaNetAttention.__new__(GatedDeltaNetAttention)
     gdn.num_k_heads = num_heads_qk
     gdn.num_v_heads = num_heads_v
     gdn.head_k_dim = head_qk_dim

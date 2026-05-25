@@ -4,9 +4,6 @@ import numpy as np
 import pytest
 import torch
 
-import vllm_ascend.ops.register_custom_ops  # noqa
-from vllm_ascend.ops.triton.triton_utils import init_device_properties_triton
-
 NUM_TOKENS = [1, 8, 32]
 NUM_QKV_HEADS = [(6, 1), (8, 2)]
 HEAD_DIMS = [128]
@@ -125,7 +122,6 @@ def test_split_qkv_tp_rmsnorm_rope(
     torch.manual_seed(seed)
     np.random.seed(seed)
     torch.set_default_device(device)
-    init_device_properties_triton()
 
     q_hidden_size = num_q_heads * head_dim
     kv_hidden_size = num_kv_heads * head_dim
