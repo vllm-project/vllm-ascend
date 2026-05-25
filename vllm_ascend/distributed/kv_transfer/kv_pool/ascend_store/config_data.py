@@ -275,13 +275,13 @@ class ChunkedTokenDatabase:
 
     def _get_group_buffers(
         self, kv_cache_group_id: int, cache_role: str = "kv"
-    ) -> tuple[list[int], list[int], list[int]]:
+    ) -> tuple[list[int], list[int], list[int] | None]:
         if cache_role == "state":
             return [], [], []
         return (
             self.group_kv_caches_base_addr[kv_cache_group_id],
             self.group_block_len[kv_cache_group_id],
-            self.group_block_stride[kv_cache_group_id],
+            self.group_block_stride.get(kv_cache_group_id),
         )
 
     def prepare_value(

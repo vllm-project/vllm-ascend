@@ -1043,7 +1043,8 @@ class KVPoolWorker:
             if any(row[i] != 1 for row in arr):
                 return i - 1
         else:
-            return len(arr[0]) - 1
+            # if arr is not empty, all hits, else no hits
+            return len(arr[0]) - 1 if arr else -1
 
     def get_kv_events(self) -> list[BlockStored]:
         if self.enable_kv_events and self.kv_send_thread is not None:

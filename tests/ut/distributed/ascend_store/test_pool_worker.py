@@ -68,7 +68,7 @@ class TestKVPoolWorkerHelpers(unittest.TestCase):
         result = cls.find_max_hit_index(None, arr, 3)
         self.assertEqual(result, -1)
 
-    def test_find_min_first_non_one_index_empty(self):
+    def test_find_max_hit_index_empty(self):
         cls = self._make_worker_class()
         result = cls.find_max_hit_index(None, [], 0)
         self.assertEqual(result, -1)
