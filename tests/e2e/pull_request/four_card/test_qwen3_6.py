@@ -22,13 +22,13 @@ from unittest.mock import patch
 from tests.e2e.conftest import DPVllmRunner, VllmRunner
 
 
-def test_qwen3_5_27b_distributed_mp_tp4():
+def test_qwen3_6_27b_distributed_mp_tp4():
     example_prompts = [
         "Hello, my name is",
     ] * 4
     max_tokens = 5
     with VllmRunner(
-        "Qwen/Qwen3.5-27B",
+        "Qwen/Qwen3.6-27B",
         tensor_parallel_size=4,
         cudagraph_capture_sizes=[1, 2, 4, 8],
         max_model_len=4096,
@@ -39,13 +39,13 @@ def test_qwen3_5_27b_distributed_mp_tp4():
         del vllm_model
 
 
-def test_qwen3_5_35b_distributed_mp_tp4():
+def test_qwen3_6_35b_distributed_mp_tp4():
     example_prompts = [
         "Hello, my name is",
     ] * 4
     max_tokens = 5
     with VllmRunner(
-        "Qwen/Qwen3.5-35B-A3B",
+        "Qwen/Qwen3.6-35B-A3B",
         tensor_parallel_size=4,
         cudagraph_capture_sizes=[1, 2, 4, 8],
         max_model_len=4096,
@@ -56,7 +56,7 @@ def test_qwen3_5_35b_distributed_mp_tp4():
         del vllm_model
 
 
-def test_qwen3_5_35b_distributed_mp_tp4_full_decode_only_mtp3():
+def test_qwen3_6_35b_distributed_mp_tp4_full_decode_only_mtp3():
     example_prompts = [
         "Hello, my name is",
         "The president of the United States is",
@@ -66,7 +66,7 @@ def test_qwen3_5_35b_distributed_mp_tp4_full_decode_only_mtp3():
 
     max_tokens = 20
     with VllmRunner(
-        "Qwen/Qwen3.5-35B-A3B",
+        "Qwen/Qwen3.6-35B-A3B",
         tensor_parallel_size=4,
         max_model_len=4096,
         gpu_memory_utilization=0.90,
@@ -85,7 +85,7 @@ def test_qwen3_5_35b_distributed_mp_tp4_full_decode_only_mtp3():
 
 
 @patch.dict(os.environ, {"VLLM_ASCEND_ENABLE_FLASHCOMM1": "1"})
-def test_qwen3_5_35b_distributed_mp_tp4_full_decode_only_mtp3_flashcomm():
+def test_qwen3_6_35b_distributed_mp_tp4_full_decode_only_mtp3_flashcomm():
     example_prompts = [
         "Hello, my name is",
         "The president of the United States is",
@@ -95,7 +95,7 @@ def test_qwen3_5_35b_distributed_mp_tp4_full_decode_only_mtp3_flashcomm():
 
     max_tokens = 20
     with DPVllmRunner(
-        "Qwen/Qwen3.5-35B-A3B",
+        "Qwen/Qwen3.6-35B-A3B",
         data_parallel_size=2,
         tensor_parallel_size=2,
         enable_expert_parallel=True,

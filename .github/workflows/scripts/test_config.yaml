@@ -331,7 +331,7 @@
     - vllm_ascend/ops/triton/gdn_chunk_meta.py
   tests:
     - tests/ut/ops
-    - tests/e2e/pull_request/four_card/test_qwen3_5.py
+    - tests/e2e/pull_request/four_card/test_qwen3_6.py
     - tests/e2e/pull_request/four_card/test_qwen3_next.py
 
 - name: ops_triton
@@ -342,7 +342,7 @@
     - vllm_ascend/ops/triton/batch_invariant
   tests:
     - tests/ut/ops
-    - tests/e2e/pull_request/four_card/test_qwen3_5.py
+    - tests/e2e/pull_request/four_card/test_qwen3_6.py
 
 - name: ops_no_test
   optional: true
