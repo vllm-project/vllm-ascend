@@ -57,6 +57,7 @@ class DSAModules:
     compressor: torch.nn.Module | None
     topk_indices_buffer: torch.Tensor | None
     indexer_rotary_emb: torch.nn.Module | None = None
+    skip_topk: bool = False
 
 
 class AscendDeepseekSparseAttention(MultiHeadLatentAttentionWrapper):
@@ -109,6 +110,7 @@ class AscendDeepseekSparseAttention(MultiHeadLatentAttentionWrapper):
         self.compressor = dsa_modules.compressor
         self.topk_indices_buffer = dsa_modules.topk_indices_buffer
         self.indexer_rotary_emb = dsa_modules.indexer_rotary_emb
+        self.skip_topk = dsa_modules.skip_topk
         self.prefix = prefix
 
         ascend_device_type = get_ascend_device_type()
@@ -151,6 +153,8 @@ class AscendDeepseekSparseAttention(MultiHeadLatentAttentionWrapper):
             attn_sink=self.attn_sink,
             eps=self.eps,
             swa_cache_layer=self.swa_cache_layer,
+            skip_topk=self.skip_topk,
+            topk_indices_buffer=self.topk_indices_buffer,
         )
 
         compilation_config = get_current_vllm_config().compilation_config
