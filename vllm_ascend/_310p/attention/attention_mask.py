@@ -109,7 +109,7 @@ class AttentionMaskBuilder310:
             if causal:
                 return self._get_causal_mask(self.max_seqlen)
             else:
-                return self._get_non_causal_mask(self.max_seqlen)
+                return self._get_non_causal_mask(self.max_seqlen, model_config.dtype)
 
         return self._get_causal_mask(self.max_seqlen)
 
@@ -131,7 +131,7 @@ class AttentionMaskBuilder310:
             self.attn_mask_cache = torch_npu.npu_format_cast(nd_to_nz_2d(attn_mask), ACL_FORMAT_FRACTAL_NZ)
         return self.attn_mask_cache
 
-    def _get_non_causal_mask(self, max_seq_len: int) -> torch.Tensor:
+    def _get_non_causal_mask(self, max_seq_len: int, dtype: torch.dtype) -> torch.Tensor:
         """
         Internal method to get or update the cached non-causal attention mask.
 
@@ -147,8 +147,10 @@ class AttentionMaskBuilder310:
         if self.attn_mask_cache is not None:
             return self.attn_mask_cache
 
-        attention_mask_npu = torch.zeros(size=(max_seq_len, max_seq_len), dtype=torch.bool, device=self.device)
+        attention_mask_npu = torch.zeros(
+            size=(max_seq_len, max_seq_len), dtype=dtype, device=self.device
+        )
         attention_mask_npu = nd_to_nz_2d(attention_mask_npu)
-        self.attn_mask_cache = torch_npu.npu_format_cast(attention_mask_npu.contiguous(), ACL_FORMAT_FRACTAL_NZ)
+        self.attn_mask_cache = torch_npu.npu_format_cast(attention_mask_npu.contiguous(), 29)
 
         return self.attn_mask_cache

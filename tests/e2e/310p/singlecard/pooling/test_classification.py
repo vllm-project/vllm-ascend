@@ -14,6 +14,7 @@ def test_qwen_pooling_classify_correctness() -> None:
         "The capital of France is",
         "The future of AI is what",
     ]
+
     with VllmRunner(
         model_name,
         runner="pooling",
@@ -24,7 +25,10 @@ def test_qwen_pooling_classify_correctness() -> None:
     ) as vllm_runner:
         vllm_outputs = vllm_runner.classify(prompts)
 
-    with HfRunner(model_name, dtype="float16", auto_cls=AutoModelForSequenceClassification) as hf_runner:
+
+    with HfRunner(
+        model_name, dtype="float16", model_kwargs={"attn_implementation": "eager"}, auto_cls=AutoModelForSequenceClassification
+    ) as hf_runner:
         hf_outputs = hf_runner.classify(prompts)
 
     for hf_output, vllm_output in zip(hf_outputs, vllm_outputs):
