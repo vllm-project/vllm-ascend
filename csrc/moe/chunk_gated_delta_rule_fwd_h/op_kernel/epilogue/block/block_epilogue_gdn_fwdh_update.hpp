@@ -117,7 +117,11 @@ public:
         } else if constexpr(std::is_same<GElementInput, half>::value) {
             gLastFloat = (float)gLastVal;
         } else if constexpr(std::is_same<GElementInput, bfloat16_t>::value) {
+#if defined(__CCE_AICORE__) && (__CCE_AICORE__ == 200)
+            gLastFloat = (float)gLastVal;
+#else
             gLastFloat = AscendC::ToFloat(gLastVal);
+#endif
         }
         glastUbTensor.SetValue(0, gLastFloat);
 
