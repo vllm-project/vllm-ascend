@@ -133,9 +133,8 @@ class V1SamplingContext:
         else:
             expanded_local_pos = expanded_local_pos.to(device=device, dtype=torch.int64)
 
-        expanded_logits = (
-            num_logits != num_reqs
-            or not np.array_equal(idx_mapping_np, np.arange(num_reqs, dtype=np.int32))
+        expanded_logits = num_logits != num_reqs or not np.array_equal(
+            idx_mapping_np, np.arange(num_reqs, dtype=np.int32)
         )
         if expanded_logits and not V1SamplingContext._is_grouped_by_request(idx_mapping_np):
             raise ValueError("expanded logits rows must be grouped by request")
