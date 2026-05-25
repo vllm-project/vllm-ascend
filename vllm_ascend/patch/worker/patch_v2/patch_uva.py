@@ -99,6 +99,9 @@ class UvaBufferWrapper:
 
     def __init__(self, size: int | Sequence[int], dtype: torch.dtype):
         key = "PYTORCH_NPU_ALLOC_CONF"
+        self._cpu: torch.Tensor
+        self._np: np.ndarray
+        self._uva: torch.Tensor
         if key in os.environ:
             value = os.environ[key]
             if "pinned_mem_register:True" not in value:
