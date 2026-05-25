@@ -25,9 +25,11 @@ def test_qwen_pooling_classify_correctness() -> None:
     ) as vllm_runner:
         vllm_outputs = vllm_runner.classify(prompts)
 
-
     with HfRunner(
-        model_name, dtype="float16", model_kwargs={"attn_implementation": "eager"}, auto_cls=AutoModelForSequenceClassification
+        model_name,
+        dtype="float16",
+        model_kwargs={"attn_implementation": "eager"},
+        auto_cls=AutoModelForSequenceClassification,
     ) as hf_runner:
         hf_outputs = hf_runner.classify(prompts)
 

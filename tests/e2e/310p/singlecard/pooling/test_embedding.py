@@ -17,7 +17,6 @@
 # Adapted from vllm/tests/basic_correctness/test_basic_correctness.py
 #
 import pytest
-import huggingface_hub
 from modelscope import snapshot_download  # type: ignore[import-untyped]
 
 from tests.e2e.conftest import HfRunner, VllmRunner
@@ -105,4 +104,3 @@ def test_bge_m3_correctness():
         name_1="aclgraph",
         tol=1e-2,
     )
-
