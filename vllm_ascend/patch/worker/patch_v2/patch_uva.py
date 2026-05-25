@@ -16,9 +16,9 @@
 # limitations under the License.
 # This file is a part of the vllm-ascend project.
 #
+import os
 from collections.abc import Callable, Sequence
 
-import os
 import numpy as np
 import torch
 import vllm.v1.worker.gpu.buffer_utils
@@ -91,9 +91,9 @@ class MonitoredTorchTensor:
 
 class UvaBufferWrapper:
     """
-    Ascend NPU doesn't support UVA tensors directly. 
+    Ascend NPU doesn't support UVA tensors directly.
     This is a wrapper class that provides CPU and NPU views of a UVA tensor.
-    However if users add os.environ['PYTORCH_NPU_ALLOC_CONF'] = 'pinned_mem_register:True' to environment, 
+    However if users add os.environ['PYTORCH_NPU_ALLOC_CONF'] = 'pinned_mem_register:True' to environment,
     UVA feature is Supported.
     """
 
