@@ -13,7 +13,7 @@ def fault_recovery_decorator():
     def decorator(func):
         @functools.wraps(func)
         def wrapper(self, *args, **kwargs):
-            if self.in_recovery:
+            if self.exception_occur or self.in_recovery:
                 return None
             else:
                 try:

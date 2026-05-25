@@ -71,6 +71,7 @@ def enqueue_output(self, output: Any):
         try:
             output = output.get_output()
         except Exception as e:
+            self.exception_occur = True
             logger.error("[WorkerProc] Enqueue_output detected exception")
             output = e
     if isinstance(output, Exception):
