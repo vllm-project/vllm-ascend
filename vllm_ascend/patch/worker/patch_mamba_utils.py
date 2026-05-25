@@ -69,15 +69,9 @@ def _collect_mamba_copy_meta_torch(
             attention = forward_context[layer_name]
             kv_caches: list[torch.Tensor] = attention.kv_cache
             for state, state_copy_func in zip(kv_caches, mamba_state_copy_funcs):
-                copy_spec = state_copy_func(
-                    state, block_ids, src_block_idx, accept_token_bias + 1
-                )
-                src_state = _tensor_view_from_data_ptr(
-                    state, copy_spec.start_addr, copy_spec.num_elements
-                )
-                dst_state = _tensor_view_from_data_ptr(
-                    state, state[dest_block_id].data_ptr(), copy_spec.num_elements
-                )
+                copy_spec = state_copy_func(state, block_ids, src_block_idx, accept_token_bias + 1)
+                src_state = _tensor_view_from_data_ptr(state, copy_spec.start_addr, copy_spec.num_elements)
+                dst_state = _tensor_view_from_data_ptr(state, state[dest_block_id].data_ptr(), copy_spec.num_elements)
                 tensor_copy_pairs.append((src_state, dst_state))
                 sizes_np[offset] = copy_spec.num_elements * state.element_size()
                 offset += 1
