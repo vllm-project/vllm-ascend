@@ -178,7 +178,7 @@ def test_prepare_inputs_padded_preserves_internal_seq_lens_cpu():
     spec_decode_metadata.cu_num_draft_tokens = torch.tensor([2, 3], dtype=torch.int32)
     valid_sampled_tokens_count = torch.tensor([3, 1], dtype=torch.int32)
 
-    with patch.object(eagle_proposer, "HAS_TRITON", False):
+    with patch.object(llm_base_proposer, "HAS_TRITON", False):
         spec_common_attn_metadata, *_ = proposer.prepare_inputs_padded(
             common_attn_metadata,
             spec_decode_metadata,
