@@ -25,13 +25,13 @@ from vllm.v1.serial_utils import MsgpackEncoder
 
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.config_data import (
     AscendConnectorMetadata,
+    AscendStoreKVConnectorWorkerMetadata,
     LoadSpec,
     ReqMeta,
     RequestTracker,
     get_cache_family_granularity,
     infer_group_cache_families,
     normalize_block_ids_by_group,
-    AscendStoreKVConnectorWorkerMetadata,
 )
 
 
@@ -182,7 +182,6 @@ class KVPoolScheduler:
             if isinstance(kv_cache_spec, MambaSpec):
                 mamba_group_ids.append(group_id)
         return mamba_group_ids
-
 
     def _infer_swa_blocks(self) -> list[int]:
         if self.kv_cache_config is None:
@@ -544,13 +543,9 @@ class KVPoolScheduler:
         current_step_sending: list[int] = []
         for group_id in self.mamba_group_ids:
             group_block_ids = req_meta.block_ids_by_group[group_id]
-            current_step_sending.extend(
-                [block_id for block_id in group_block_ids if block_id > 0]
-            )
+            current_step_sending.extend([block_id for block_id in group_block_ids if block_id > 0])
         logger.debug("event: %s touch blocks: %s", using_event_id, current_step_sending)
-        self._block_pool.touch(
-            [self._block_pool.blocks[block_id] for block_id in current_step_sending]
-        )
+        self._block_pool.touch([self._block_pool.blocks[block_id] for block_id in current_step_sending])
         self.sending_events[using_event_id] = 0
         self.sending_blocks[using_event_id] = current_step_sending
 
@@ -571,7 +566,6 @@ class KVPoolScheduler:
         if to_free_block_ids:
             logger.debug("free blocks: %s", to_free_block_ids)
             self._block_pool.free_blocks([self._block_pool.blocks[block_id] for block_id in to_free_block_ids])
-
 
     def request_finished(
         self,
@@ -617,6 +611,7 @@ class KVPoolScheduler:
 
     def bind_gpu_block_pool(self, gpu_block_pool: "BlockPool") -> None:
         self._block_pool = gpu_block_pool
+
 
 class LookupKeyClient:
     def __init__(self, vllm_config: "VllmConfig"):

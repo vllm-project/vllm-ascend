@@ -21,8 +21,9 @@ def verify_and_update_config(cls, vllm_config) -> None:
     Args:
         vllm_config: vLLM Config
     """
-    using_kv_transfer_with_hybrid = not vllm_config.scheduler_config.disable_hybrid_kv_cache_manager \
-                         and vllm_config.kv_transfer_config
+    using_kv_transfer_with_hybrid = (
+        not vllm_config.scheduler_config.disable_hybrid_kv_cache_manager and vllm_config.kv_transfer_config
+    )
     # Enable FULL_AND_PIECEWISE by default
     MambaModelConfig.verify_and_update_config(vllm_config)
 

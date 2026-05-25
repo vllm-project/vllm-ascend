@@ -9,8 +9,8 @@ from vllm.v1.core.sched.output import SchedulerOutput
 from vllm.v1.kv_cache_interface import KVCacheConfig
 from vllm.v1.worker import mamba_utils
 from vllm.v1.worker.gpu_input_batch import CachedRequestState
-from vllm.v1.worker.mamba_utils import collect_mamba_copy_meta, MambaCopyBuffers
 from vllm.v1.worker.lora_model_runner_mixin import GPUInputBatch
+from vllm.v1.worker.mamba_utils import MambaCopyBuffers, collect_mamba_copy_meta
 
 from vllm_ascend.ops.triton.batch_memcpy import batch_memcpy_kernel
 
@@ -73,8 +73,7 @@ def preprocess_mamba(
 
         num_scheduled_tokens = scheduler_output.num_scheduled_tokens[req_id]
         num_blocks: int = (
-            cdiv(req_state.num_computed_tokens + num_scheduled_tokens, block_size)
-            + num_speculative_blocks
+            cdiv(req_state.num_computed_tokens + num_scheduled_tokens, block_size) + num_speculative_blocks
         )
 
         # We always save the current running state at the last
@@ -104,5 +103,6 @@ def preprocess_mamba(
             input_batch.num_accepted_tokens_cpu[i] = 1
     # do not copy here, since kv_transfer still not load
     # do_mamba_copy_block(copy_bufs)
+
 
 mamba_utils.preprocess_mamba = preprocess_mamba

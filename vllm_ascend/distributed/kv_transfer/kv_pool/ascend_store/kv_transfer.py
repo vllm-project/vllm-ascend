@@ -292,9 +292,11 @@ class KVCacheStoreSendingThread(KVTransferThread):
                     keys.append(key.to_string())
                     block_hashes.append(group_block_hashes[start // group_block_size])
 
-                if not self.dcp_size > 1 and \
-                        not req_meta.disable_tp_key_sharding and \
-                        not self.group_uses_align_state[group_id]:
+                if (
+                    not self.dcp_size > 1
+                    and not req_meta.disable_tp_key_sharding
+                    and not self.group_uses_align_state[group_id]
+                ):
                     starts = starts[self.tp_rank % self.put_step :: self.put_step]
                     ends = ends[self.tp_rank % self.put_step :: self.put_step]
                     keys = keys[self.tp_rank % self.put_step :: self.put_step]

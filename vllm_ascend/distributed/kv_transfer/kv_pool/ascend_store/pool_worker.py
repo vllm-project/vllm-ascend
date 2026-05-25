@@ -26,13 +26,13 @@ from vllm.v1.kv_cache_interface import (
 
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.config_data import (
     AscendConnectorMetadata,
+    AscendStoreKVConnectorWorkerMetadata,
     ChunkedTokenDatabase,
     KeyMetadata,
     LayerMultiBlockReqMeta,
     ReqMeta,
     get_cache_family_granularity,
     infer_group_cache_families,
-    AscendStoreKVConnectorWorkerMetadata
 )
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.kv_transfer import (
     KVCacheStoreLayerRecvingThread,
@@ -121,12 +121,14 @@ class KVPoolWorker:
         if self.use_layerwise and self.num_kv_cache_groups > 1:
             raise NotImplementedError("AscendStore layerwise mode does not yet support hybrid KV cache groups.")
 
-        logger.info("use_hybrid: %s, use_mamba: %s, num_kv_cache_groups: %s, hash_block_size: %s, lcm_block_size: %s",
-                    self.use_hybrid,
-                    self.use_mamba,
-                    self.num_kv_cache_groups,
-                    self.hash_block_size,
-                    self.lcm_block_size)
+        logger.info(
+            "use_hybrid: %s, use_mamba: %s, num_kv_cache_groups: %s, hash_block_size: %s, lcm_block_size: %s",
+            self.use_hybrid,
+            self.use_mamba,
+            self.num_kv_cache_groups,
+            self.hash_block_size,
+            self.lcm_block_size,
+        )
         self.current_layer = 0
         self.num_layers = model_config.get_num_layers(parallel_config)
 
@@ -178,15 +180,13 @@ class KVPoolWorker:
                     self.pcp_rank,
                     self.dcp_rank,
                     self.pp_rank,
-                    group_id
+                    group_id,
                 )
             )
 
-        self.token_database = ChunkedTokenDatabase(self.metadata,
-                                                   self.grouped_block_size,
-                                                   partitions,
-                                                   self.use_hybrid,
-                                                   self.hash_block_size)
+        self.token_database = ChunkedTokenDatabase(
+            self.metadata, self.grouped_block_size, partitions, self.use_hybrid, self.hash_block_size
+        )
 
         backend = backend_map.get(self.backend.lower())
         assert backend is not None
@@ -326,7 +326,6 @@ class KVPoolWorker:
         self.group_block_stride[group_id] = group_block_strides
         self.group_num_layers[group_id] = len(layer_names)
 
-
     def register_kv_caches(self, kv_caches: dict[str, torch.Tensor]):
         _, first_kv_cache_tuple = next(iter(kv_caches.items()))
         first_kv_cache_tuple = self._as_cache_tuple(first_kv_cache_tuple)
@@ -435,9 +434,12 @@ class KVPoolWorker:
             if self.load_async:
                 ready_event = threading.Event()
                 self.kv_recv_thread = KVCacheStoreRecvingThread(
-                    self.m_store, self.token_database,
+                    self.m_store,
+                    self.token_database,
                     self.grouped_block_size,
-                    self.tp_rank, self.dcp_size, ready_event,
+                    self.tp_rank,
+                    self.dcp_size,
+                    ready_event,
                 )
                 self.kv_recv_thread.start()
                 ready_event.wait()
@@ -986,8 +988,10 @@ class KVPoolWorker:
                 if group_id < len(self.group_uses_align_state) and self.group_uses_align_state[group_id]:
                     # mamba group with align mode will skip some null block, we must loop it in reverse order
                     for i in range(num_block - 1, -1, -1):
-                        if (all(values[i] == 1 for values in multi_tp_values)
-                                and ends[i] % self.cache_transfer_granularity == 0):
+                        if (
+                            all(values[i] == 1 for values in multi_tp_values)
+                            and ends[i] % self.cache_transfer_granularity == 0
+                        ):
                             hits.append(ends[i])
                             break
                     else:

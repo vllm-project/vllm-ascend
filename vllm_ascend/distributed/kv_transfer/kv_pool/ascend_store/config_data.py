@@ -1,8 +1,8 @@
 from __future__ import annotations
 
 from collections.abc import Iterable, Sequence
-from typing import Any, cast
 from dataclasses import dataclass, field
+from typing import Any, cast
 
 import torch
 from vllm.distributed.kv_transfer.kv_connector.v1.base import KVConnectorMetadata, KVConnectorWorkerMetadata
@@ -274,9 +274,7 @@ class ChunkedTokenDatabase:
             self.group_num_layers[cache_role] = group_num_layers.copy()
 
     def _get_group_buffers(
-        self,
-        kv_cache_group_id: int,
-        cache_role: str = "kv"
+        self, kv_cache_group_id: int, cache_role: str = "kv"
     ) -> tuple[list[int], list[int], list[int]]:
         if cache_role == "state":
             return [], [], []
@@ -586,7 +584,7 @@ class ReqMeta:
         token_ids: list[int] | None = None,
         original_block_size: list[int] | int | None = None,
         block_ids: list[int] | list[list[int]] | None = None,
-        event_id: int | None = None
+        event_id: int | None = None,
     ) -> None:
         self.req_id = req_id
         self.token_len_chunk = token_len_chunk
@@ -634,10 +632,16 @@ class ReqMeta:
         # For save operation: do not save if the following condition is met
         # 1. has already been saved before (num_saved_tokens > 0)
         # 2. number of unsaved tokens is not reached the chunk boundary
-        chunk_boundary = cdiv(tracker.num_saved_tokens + 1, cache_transfer_granularity) * cache_transfer_granularity \
-            if discard_partial_chunks else 0
-        num_tokens_to_save = (input_token_len // cache_transfer_granularity * cache_transfer_granularity) \
-            if discard_partial_chunks else input_token_len
+        chunk_boundary = (
+            cdiv(tracker.num_saved_tokens + 1, cache_transfer_granularity) * cache_transfer_granularity
+            if discard_partial_chunks
+            else 0
+        )
+        num_tokens_to_save = (
+            (input_token_len // cache_transfer_granularity * cache_transfer_granularity)
+            if discard_partial_chunks
+            else input_token_len
+        )
 
         skip_save = skip_save or num_tokens_to_save < chunk_boundary
         if skip_save and load_spec is None:
@@ -730,7 +734,6 @@ class LayerMultiBlockReqMeta:
 
 @dataclass
 class AscendStoreKVConnectorWorkerMetadata(KVConnectorWorkerMetadata):
-
     completed_events: dict[int, int] = field(default_factory=dict)
     """key: event_id, value: completed worker count"""
 
@@ -738,9 +741,7 @@ class AscendStoreKVConnectorWorkerMetadata(KVConnectorWorkerMetadata):
         if event_id is not None:
             self.completed_events[event_id] = 1
 
-    def aggregate(
-        self, other: "KVConnectorWorkerMetadata"
-    ) -> "KVConnectorWorkerMetadata":
+    def aggregate(self, other: KVConnectorWorkerMetadata) -> KVConnectorWorkerMetadata:
         assert isinstance(other, AscendStoreKVConnectorWorkerMetadata)
 
         merged: dict[int, int] = dict(self.completed_events)

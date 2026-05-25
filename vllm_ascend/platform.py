@@ -255,12 +255,16 @@ class NPUPlatform(Platform):
     def update_block_size_for_backend(cls, vllm_config: VllmConfig) -> None:
         # TODO: NPU still sets block_size in check_and_update_config.
         # Move that logic here so block_size is chosen by the backend.
-        using_kv_transfer_with_hybrid = not vllm_config.scheduler_config.disable_hybrid_kv_cache_manager \
-                                        and vllm_config.kv_transfer_config
+        using_kv_transfer_with_hybrid = (
+            not vllm_config.scheduler_config.disable_hybrid_kv_cache_manager and vllm_config.kv_transfer_config
+        )
         cache_config = vllm_config.cache_config
         model_config = vllm_config.model_config
-        if not cache_config.enable_prefix_caching \
-                and using_kv_transfer_with_hybrid and cache_config.mamba_cache_mode == "align":
+        if (
+            not cache_config.enable_prefix_caching
+            and using_kv_transfer_with_hybrid
+            and cache_config.mamba_cache_mode == "align"
+        ):
             if cache_config.mamba_block_size is None or cache_config.mamba_block_size == model_config.max_model_len:
                 cache_config.mamba_block_size = cache_config.block_size
             else:
