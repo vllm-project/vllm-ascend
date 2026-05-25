@@ -109,6 +109,10 @@ env_variables: dict[str, Callable[[], Any]] = {
     "VLLM_ASCEND_FUSION_OP_TRANSPOSE_KV_CACHE_BY_BLOCK": lambda: bool(
         int(os.getenv("VLLM_ASCEND_FUSION_OP_TRANSPOSE_KV_CACHE_BY_BLOCK", "1"))
     ),
+    # Whether to enable the fused rejection sampler for probabilistic
+    # speculative decoding when the supported NPU/Triton conditions are met.
+    # Set to 0 to force the existing rejection sampler fallback path.
+    "VLLM_ASCEND_USE_FUSED_REJECTION": lambda: bool(int(os.getenv("VLLM_ASCEND_USE_FUSED_REJECTION", "1"))),
     # Control the aclrtMemcpyBatchAsync compile path for KV cache offloading.
     # "1": force enable, "0": force disable, None: auto-detect from CANN headers.
     "VLLM_ASCEND_ENABLE_BATCH_MEMCPY": lambda: os.getenv("VLLM_ASCEND_ENABLE_BATCH_MEMCPY", None),
