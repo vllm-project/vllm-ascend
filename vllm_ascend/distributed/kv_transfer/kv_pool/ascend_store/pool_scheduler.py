@@ -85,10 +85,6 @@ class KVPoolScheduler:
         self.pcp_size = getattr(vllm_config.parallel_config, "prefill_context_parallel_size", 1)
         self.dcp_size = getattr(vllm_config.parallel_config, "decode_context_parallel_size", 1)
 
-        if self.use_hybrid:
-            assert self.pcp_size == 1, "Hybrid mode does not yet support prefill context parallelism."
-            assert self.dcp_size == 1, "Hybrid mode does not yet support decode context parallelism."
-
         self.mamba_group_ids = self._infer_mamba_groups()
         self.original_block_size = self._infer_group_block_sizes(vllm_config, kv_cache_config)
         cp_scale = self.pcp_size * self.dcp_size

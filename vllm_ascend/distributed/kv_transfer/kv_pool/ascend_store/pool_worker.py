@@ -101,9 +101,6 @@ class KVPoolWorker:
         self.backend = vllm_config.kv_transfer_config.kv_connector_extra_config.get("backend", "mooncake")
         self.use_hybrid = self._uses_hybrid_kv_cache(vllm_config, kv_cache_config)
         self.use_mamba = self._uses_mamba_kv_cache(self.use_hybrid, kv_cache_config)
-        if self.use_hybrid:
-            assert self.pcp_size == 1, "Hybrid mode does not yet support prefill context parallelism."
-            assert self.dcp_size == 1, "Hybrid mode does not yet support decode context parallelism."
         self.original_block_size = self._infer_group_block_sizes(vllm_config, kv_cache_config)
         cp_scale = self.pcp_size * self.dcp_size
         self.grouped_block_size = [block_size * cp_scale for block_size in self.original_block_size]
@@ -989,7 +986,8 @@ class KVPoolWorker:
                 if group_id < len(self.group_uses_align_state) and self.group_uses_align_state[group_id]:
                     # mamba group with align mode will skip some null block, we must loop it in reverse order
                     for i in range(num_block - 1, -1, -1):
-                        if all(values[i] == 1 for values in multi_tp_values) and ends[i] % self.cache_transfer_granularity == 0:
+                        if (all(values[i] == 1 for values in multi_tp_values)
+                                and ends[i] % self.cache_transfer_granularity == 0):
                             hits.append(ends[i])
                             break
                     else:

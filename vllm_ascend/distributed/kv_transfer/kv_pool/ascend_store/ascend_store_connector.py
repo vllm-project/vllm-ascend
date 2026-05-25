@@ -20,6 +20,7 @@ from vllm.forward_context import ForwardContext
 from vllm.logger import logger
 from vllm.utils.network_utils import make_zmq_socket
 from vllm.v1.attention.backend import AttentionMetadata  # type: ignore
+from vllm.v1.core.block_pool import BlockPool
 from vllm.v1.core.kv_cache_manager import KVCacheBlocks
 from vllm.v1.core.sched.output import SchedulerOutput
 from vllm.v1.kv_cache_interface import KVCacheConfig
