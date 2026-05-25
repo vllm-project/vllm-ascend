@@ -167,6 +167,7 @@ class TestKVCacheStoreSendingThread(unittest.TestCase):
             put_step=1,
             kv_role=kv_role,
             ready_event=threading.Event(),
+            group_uses_align_state=[False],
             enable_kv_event=enable_kv_event,
         )
         return t, store
@@ -290,6 +291,7 @@ class TestKVCacheStoreSendingThread(unittest.TestCase):
             put_step=1,
             kv_role="kv_producer",
             ready_event=threading.Event(),
+            group_uses_align_state=[False],
         )
         req = ReqMeta(
             req_id="r1",
