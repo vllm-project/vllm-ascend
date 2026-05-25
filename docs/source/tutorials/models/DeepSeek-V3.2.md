@@ -870,6 +870,11 @@ Once your server is started, you can query the model with input prompts:
 
 - `<node0_ip>`: The IP address of the node where the server is running (e.g., localhost).
 - `<port>`: The port number specified in the server startup command (e.g., 8000).
+- Run the request from another terminal attached to the same container or from a
+  host that can reach the server port.
+- Set `model` to the same value as `--served-model-name` in the startup
+  command. For example, if the server was started with `--served-model-name ds`,
+  use `"model": "ds"`.
 
 ```shell
 curl http://<node0_ip>:<port>/v1/completions \

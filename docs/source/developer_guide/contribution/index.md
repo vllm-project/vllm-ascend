@@ -34,15 +34,23 @@ bash format.sh
 
 #### Run CI locally
 
-After completing "Run lint" setup, you can run CI (Continuous integration) locally:
+After completing "Run lint" setup, you can run CI (Continuous integration) locally.
+Choose the vLLM ref according to the vllm-ascend branch you are testing. For
+the `main` branch, use the vLLM commit or tag listed in the [Versioning
+policy](../../community/versioning_policy.md).
+For a release branch, use the matching vLLM release tag from the release
+compatibility matrix.
 
 ```{code-block} bash
    :substitutions:
 cd ~/vllm-project/
 
-# Run CI needs vLLM installed
-git clone --branch |vllm_version| https://github.com/vllm-project/vllm.git
+# Run CI needs vLLM installed.
+# For main branch development, this should match the Versioning policy main matrix.
+export VLLM_REF="|main_vllm_commit|"
+git clone https://github.com/vllm-project/vllm.git
 cd vllm
+git checkout "$VLLM_REF"
 pip install -r requirements/build.txt
 VLLM_TARGET_DEVICE="empty" pip install .
 cd ..

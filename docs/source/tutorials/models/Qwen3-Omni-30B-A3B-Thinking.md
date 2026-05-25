@@ -191,6 +191,43 @@ export HCCL_OP_EXPANSION_MODE=AIV
 vllm serve Qwen/Qwen3-Omni-30B-A3B-Thinking --tensor-parallel-size 2 --enable_expert_parallel
 ```
 
+#### NPU Device Allocation
+
+Use `ASCEND_RT_VISIBLE_DEVICES` to select visible NPU devices for vLLM Ascend.
+The value should contain the physical device IDs that this server process can
+use. For a 2-NPU 910B deployment, keep both devices visible and use tensor
+parallelism across the thinker model:
+
+```bash
+export ASCEND_RT_VISIBLE_DEVICES=0,1
+export HCCL_BUFFSIZE=512
+export HCCL_OP_EXPANSION_MODE=AIV
+
+vllm serve Qwen/Qwen3-Omni-30B-A3B-Thinking \
+    --tensor-parallel-size 2 \
+    --enable_expert_parallel \
+    --gpu-memory-utilization 0.8
+```
+
+For a 4-NPU node, dedicate the visible device list to the server process and
+increase tensor parallelism only after the 2-NPU configuration is stable:
+
+```bash
+export ASCEND_RT_VISIBLE_DEVICES=0,1,2,3
+export HCCL_BUFFSIZE=512
+export HCCL_OP_EXPANSION_MODE=AIV
+
+vllm serve Qwen/Qwen3-Omni-30B-A3B-Thinking \
+    --tensor-parallel-size 4 \
+    --enable_expert_parallel \
+    --gpu-memory-utilization 0.75
+```
+
+If multiple model stages or services share the same NPU, lower each service's
+`--gpu-memory-utilization` so the total leaves 10% to 20% HBM headroom. Stages
+that require eager mode should reserve extra headroom because their temporary
+workspace usage can differ from graph mode.
+
 ## Functional Verification
 
 Once your server is started, you can query the model with input prompts.

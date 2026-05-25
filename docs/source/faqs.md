@@ -144,6 +144,35 @@ In scenarios where NPUs have limited high bandwidth memory (on-chip memory) capa
 
 - **Configure `PYTORCH_NPU_ALLOC_CONF`**: Set this environment variable to optimize NPU memory management. For example, you can use `export PYTORCH_NPU_ALLOC_CONF=expandable_segments:True` to enable virtual memory feature to mitigate memory fragmentation caused by frequent dynamic memory size adjustments during runtime. See details in [PYTORCH_NPU_ALLOC_CONF](https://www.hiascend.com/document/detail/zh/Pytorch/700/comref/Envvariables/Envir_012.html).
 
+For Ascend 910B cards with 64 GB HBM, start with a conservative memory budget
+and then increase it after the model starts reliably. A practical first pass is:
+
+- **Single model instance**: keep `--gpu-memory-utilization` around `0.80` to
+  `0.90`. Use the lower end when the model uses eager mode, multi-modal inputs,
+  large batch sizes, speculative decoding, or long context.
+
+- **Multiple instances on one NPU**: make the sum of all instance
+  `--gpu-memory-utilization` values lower than one NPU's capacity. Keep at least
+  10% to 20% HBM for framework, operator workspace, graph capture, and memory
+  fragmentation. For example, two small models on one 64 GB card can start from
+  `0.35` to `0.40` each instead of `0.50` each.
+
+- **Long context and KV cache**: reduce `--max-model-len`,
+  `--max-num-seqs`, or `--max-num-batched-tokens` before increasing memory
+  utilization. These parameters directly affect how much KV cache is reserved
+  and are usually safer to tune than pushing utilization to the limit.
+
+- **Eager mode**: when a model or feature requires `enforce_eager=True`,
+  reserve more headroom than graph mode. Eager execution can have a different
+  temporary workspace profile on NPU, so a value that fits with graph capture may
+  still OOM in eager mode.
+
+When the service fails at startup, run `npu-smi info` inside the same container
+used to start vLLM and verify that no old process is still holding HBM. If the
+host looks idle but the container still reports device or memory errors, inspect
+`/proc/uda/namespace_node` for stale namespace records and terminate the
+corresponding `root_tgid` process after confirming it is safe to do so.
+
 ### 13. Failed to enable NPU graph mode when running DeepSeek
 
 Enabling NPU graph mode for DeepSeek may trigger an error. This is because when both MLA (Multi-Head Latent Attention) and NPU graph mode are active, the number of queries per KV head must be 32, 64, or 128. However, DeepSeek-V2-Lite has only 16 attention heads, which results in 16 queries per KV—a value outside the supported range. Support for NPU graph mode on DeepSeek-V2-Lite will be added in a future update.
