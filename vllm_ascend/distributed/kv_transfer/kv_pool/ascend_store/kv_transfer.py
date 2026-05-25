@@ -115,7 +115,6 @@ class LayerBatchBuilder:
         if unique_indices.size == block_ids_arr.size:
             return block_ids_arr, block_gvas_arr
 
-        unique_indices.sort()
         return (
             block_ids_arr[unique_indices],
             block_gvas_arr[unique_indices],

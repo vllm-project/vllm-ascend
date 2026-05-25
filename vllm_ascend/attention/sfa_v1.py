@@ -39,7 +39,6 @@ from vllm_ascend.device.device_op import DeviceOperator
 from vllm_ascend.distributed.utils import all_gather_async
 from vllm_ascend.memcache_comm_fence import (
     record_attention_compute_start,
-    record_attention_host_submit_done,
 )
 from vllm_ascend.ops.layer_shard_linear import (
     is_hidden_layer,
@@ -959,7 +958,7 @@ class AscendSFAImpl(MLAAttentionImpl):
             q_li, q_li_scale = torch_npu.npu_dynamic_quant(q_li.view(-1, self.head_dim), dst_type=self.c8_k_cache_dtype)
             q_li_scale = q_li_scale.to(self.c8_k_scale_cache_dtype)
 
-        record_attention_compute_start(wait_for_host_submit=True)
+        record_attention_compute_start()
         # DSV3.2 currently has graph compilation issues when using torch_npu.npu.lightning_indexer.
         # So two branches are maintained temporarily.
         # TODO: torch.ops._C_ascend.npu_lightning_indexer needs to be removed.
@@ -1008,7 +1007,6 @@ class AscendSFAImpl(MLAAttentionImpl):
                 sparse_count=2048,
                 sparse_mode=3,
             )
-        record_attention_host_submit_done()
         return topk_indices
 
     def _execute_sparse_flash_attention_process(

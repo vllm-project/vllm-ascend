@@ -32,24 +32,15 @@ class AttentionComputeStartGate:
     submitting H2D/L2G work, so transfer starts when the compute stream is
     actually at the attention boundary rather than merely after the Python call
     site was reached.
-
-    Some attention paths need a second host-side gate. For example, SFA records
-    the device event immediately before submitting the indexer op, but MemCache
-    should not contend with the host runtime until the indexer op has been
-    submitted. In that case wait_for_host_submit=True makes wait() block on a
-    Python event before synchronizing the device event.
     """
 
     def __init__(self) -> None:
         self._condition = threading.Condition()
         self._event: torch.npu.Event | None = None
-        self._wait_for_host_submit = False
-        self._host_submit_done = threading.Event()
 
     def record(
         self,
         stream: torch.npu.Stream | None = None,
-        wait_for_host_submit: bool = False,
     ) -> None:
         stream = stream or torch.npu.current_stream()
         event = torch.npu.Event()
@@ -57,11 +48,7 @@ class AttentionComputeStartGate:
         with self._condition:
             if self._event is None:
                 self._event = event
-                self._wait_for_host_submit = wait_for_host_submit
                 self._condition.notify_all()
-
-    def record_host_submit_done(self) -> None:
-        self._host_submit_done.set()
 
     def wait(self, timeout: float = 10.0) -> bool:
         with self._condition:
@@ -69,10 +56,6 @@ class AttentionComputeStartGate:
                 if not self._condition.wait(timeout=timeout):
                     return False
             event = self._event
-            wait_for_host_submit = self._wait_for_host_submit
-
-        if wait_for_host_submit and not self._host_submit_done.wait(timeout=timeout):
-            return False
 
         event.synchronize()
         return True
@@ -100,17 +83,9 @@ def get_attention_compute_start_gate() -> AttentionComputeStartGate:
     return gate
 
 
-def record_attention_compute_start(wait_for_host_submit: bool = False) -> None:
+def record_attention_compute_start() -> None:
     """Record the compute-stream boundary immediately before attention."""
     with _lock:
         gate = _attention_compute_start_gate
     if gate is not None:
-        gate.record(wait_for_host_submit=wait_for_host_submit)
-
-
-def record_attention_host_submit_done() -> None:
-    """Open the host-side gate after critical attention ops are submitted."""
-    with _lock:
-        gate = _attention_compute_start_gate
-    if gate is not None:
-        gate.record_host_submit_done()
+        gate.record()
