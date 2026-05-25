@@ -29,4 +29,11 @@ struct bfloat16_t {
 #define LoadDataWithSparse LoadDataWithSparseCal
 #endif
 
+// 310P has no AscendC::ToFloat — dummy bfloat16_t already has operator float()
+#ifdef __COMPAT_310P_ACTIVE__
+namespace AscendC {
+    inline float ToFloat(bfloat16_t v) { return (float)v; }
+}
+#endif
+
 #endif
