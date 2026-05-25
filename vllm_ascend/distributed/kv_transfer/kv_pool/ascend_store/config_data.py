@@ -279,9 +279,9 @@ class ChunkedTokenDatabase:
         if cache_role == "state":
             return [], [], []
         return (
-            self.group_kv_caches_base_addr.get(kv_cache_group_id),
-            self.group_block_len.get(kv_cache_group_id),
-            self.group_block_stride.get(kv_cache_group_id),
+            self.group_kv_caches_base_addr[kv_cache_group_id],
+            self.group_block_len[kv_cache_group_id],
+            self.group_block_stride[kv_cache_group_id],
         )
 
     def prepare_value(

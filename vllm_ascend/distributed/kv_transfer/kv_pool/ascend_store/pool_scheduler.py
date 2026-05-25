@@ -172,7 +172,7 @@ class KVPoolScheduler:
         )
 
     def _infer_mamba_groups(self):
-        if not self.use_hybrid:
+        if self.kv_cache_config is None or not self.use_hybrid:
             return []
         mamba_group_ids: list[int] = []
         for group_id, kv_cache_group in enumerate(self.kv_cache_config.kv_cache_groups):
@@ -545,6 +545,7 @@ class KVPoolScheduler:
             group_block_ids = req_meta.block_ids_by_group[group_id]
             current_step_sending.extend([block_id for block_id in group_block_ids if block_id > 0])
         logger.debug("event: %s touch blocks: %s", using_event_id, current_step_sending)
+        assert self._block_pool is not None
         self._block_pool.touch([self._block_pool.blocks[block_id] for block_id in current_step_sending])
         self.sending_events[using_event_id] = 0
         self.sending_blocks[using_event_id] = current_step_sending
@@ -565,6 +566,7 @@ class KVPoolScheduler:
 
         if to_free_block_ids:
             logger.debug("free blocks: %s", to_free_block_ids)
+            assert self._block_pool is not None
             self._block_pool.free_blocks([self._block_pool.blocks[block_id] for block_id in to_free_block_ids])
 
     def request_finished(

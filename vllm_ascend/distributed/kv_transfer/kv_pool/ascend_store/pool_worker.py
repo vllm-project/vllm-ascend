@@ -371,7 +371,7 @@ class KVPoolWorker:
         ptrs = [start for start, _ in registered_regions.values()]
         lengths = [end - start for start, end in registered_regions.values()]
 
-        if self.use_hybrid:
+        if self.kv_cache_config is not None and self.use_hybrid:
             for group_id, group_spec in enumerate(self.kv_cache_config.kv_cache_groups):
                 self._infer_cache_group_metadata(group_id, group_spec.layer_names)
         else:
