@@ -733,6 +733,13 @@ def _patched_build(
     if attn_metadata.num_decodes > 0:
         _patched_build_decode(self, attn_metadata, common_attn_metadata, num_decode_draft_tokens_cpu)
 
+    if (
+        self.use_full_cuda_graph
+        and attn_metadata.num_prefills == 0
+        and attn_metadata.num_spec_decodes == 0
+        and attn_metadata.num_decodes <= self.decode_cudagraph_max_bs
+    ):
+        self.non_spec_state_indices_tensor[attn_metadata.num_actual_tokens:].fill_(NULL_BLOCK_ID)
     return attn_metadata
 
 
