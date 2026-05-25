@@ -16,7 +16,7 @@ class TestCheckAndUpdateConfigPartial(PytestBase):
 
     @pytest.mark.parametrize(
         "enforce_eager, parallel_config_tensor_parallel_size, compilation_config_mode, \
-            compilation_config_cudagraph_mode, peculative_config_enforce_eager, \
+            compilation_config_cudagraph_mode, speculative_config_enforce_eager, \
             speculative_method, is_encoder_decoder, expected_cudagraph_mode",
         [
             # Basic test cases covering tensor parallel sizes, and cudagraph modes
