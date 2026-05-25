@@ -363,8 +363,10 @@ class _ExtraForwardContextProxy:
         self.check_extra_attr(name)
         ctx = self._ctx()
         if envs_vllm.VLLM_USE_V2_MODEL_RUNNER:
-            return ctx.additional_kwargs[name]
-        return getattr(ctx, name)
+            # Unset known extras default to None so optional flags (e.g. `sinks`)
+            # can be read with truthiness checks before the V2 path populates them.
+            return ctx.additional_kwargs.get(name)
+        return getattr(ctx, name, None)
 
     def __setattr__(self, name: str, value: Any) -> None:
         self.check_extra_attr(name)
