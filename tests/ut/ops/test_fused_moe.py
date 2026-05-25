@@ -782,6 +782,7 @@ class TestAscendFusedMoESharedExperts:
             pytest.skip("Current AscendFusedMoE has no shared_forward_impl")
         layer.multistream_overlap_shared_expert = False
         layer.shared_multistream_overlap_gate = False
+        layer.use_overlapped = False
         layer._shared_experts = MagicMock() if has_shared_experts else None
         hidden_states = torch.randn(2, 4)
         router_logits = torch.randn(2, 3)

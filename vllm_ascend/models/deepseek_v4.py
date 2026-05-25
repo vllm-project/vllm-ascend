@@ -249,6 +249,7 @@ class DeepseekV4MoE(nn.Module):
         self.gate = ReplicatedLinear(
             config.hidden_size, config.n_routed_experts, bias=False, quant_config=None, prefix=f"{prefix}.gate"
         )
+        self.gate.precast_fp32_weight = True
 
         # Load balancing settings.
         eplb_config = parallel_config.eplb_config
