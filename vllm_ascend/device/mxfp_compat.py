@@ -56,6 +56,12 @@ def ensure_mxfp4_linear_available(feature: str) -> None:
     )
 
 
+def ensure_mxfp4_flatquant_linear_available(feature: str) -> None:
+    _ensure_symbols_available(
+        feature, ("float4_e2m1fn_x2", "float8_e8m0fnu", "npu_kronecker_quant", "npu_quant_matmul")
+    )
+
+
 def ensure_mxfp4_moe_available(feature: str) -> None:
     _ensure_symbols_available(
         feature,

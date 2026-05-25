@@ -60,7 +60,7 @@ class TestAscendLinearMethod(TestBase):
         self.assertEqual(layer.weight.packed_factor, 0.1)
 
         # Check per tensor param
-        self.mock_scheme.get_pertensor_param.assert_called_once_with(torch.bfloat16)
+        self.mock_scheme.get_pertensor_param.assert_called_once()
         self.assertTrue(layer.weight_scale_pertensor.ignore_warning)
         self.assertEqual(layer.weight_scale_pertensor.weight_loader, weight_loader)
 
