@@ -338,15 +338,44 @@ def _reset_graph_params(params: GraphParams | None) -> None:
         return
     for num_tokens in params.events:
         params.events[num_tokens] = []
+    for num_tokens in params.workspaces:
+        params.workspaces[num_tokens] = None
     for num_tokens in params.handles:
         params.handles[num_tokens] = []
     for num_tokens in params.attn_params:
         params.attn_params[num_tokens] = []
+    for num_tokens in params.conv1d_params:
+        params.conv1d_params[num_tokens] = []
+    for num_tokens in params.conv1d_handles:
+        params.conv1d_handles[num_tokens] = []
+    for num_tokens in params.conv1d_events:
+        params.conv1d_events[num_tokens] = []
+
+
+def _clear_graph_workspaces(params: GraphParams | None) -> int:
+    if params is None:
+        return 0
+    num_cleared = 0
+    for num_tokens in params.workspaces:
+        if params.workspaces[num_tokens] is not None:
+            params.workspaces[num_tokens] = None
+            num_cleared += 1
+    return num_cleared
+
+
+def clear_attention_workspaces_for_sleep() -> int:
+    num_cleared = 0
+    num_cleared += _clear_graph_workspaces(_graph_params)
+    num_cleared += _clear_graph_workspaces(_draft_graph_params)
+    num_cleared += _clear_graph_workspaces(_draft_graph_prefill_params)
+    return num_cleared
 
 
 def reset_graph_params_for_sleep() -> None:
+    clear_attention_workspaces_for_sleep()
     _reset_graph_params(_graph_params)
     _reset_graph_params(_draft_graph_params)
+    _reset_graph_params(_draft_graph_prefill_params)
     for wrapper in list(_acl_graph_wrappers):
         wrapper.reset_aclgraph_cache()
 

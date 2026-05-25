@@ -211,7 +211,7 @@ class GroupCoordinatorPatch(GroupCoordinator):
             self.mq_broadcaster = None
 
     def destroy_hccl_for_sleep(self) -> bool:
-        """Release the HCCL process group while keeping the Gloo group alive."""
+        """Release the HCCL process group."""
         destroyed = False
         if self.device_communicator is not None:
             self.device_communicator.destroy()
@@ -303,7 +303,7 @@ def _iter_alive_group_coordinators():
 def destroy_hccl_for_sleep() -> int:
     num_destroyed = 0
     for group in _iter_alive_group_coordinators():
-        destroy = getattr(group, "destroy_hccl_for_sleep", None)
+        destroy = group.destroy_hccl_for_sleep
         if destroy is not None and destroy():
             num_destroyed += 1
     return num_destroyed
@@ -312,7 +312,7 @@ def destroy_hccl_for_sleep() -> int:
 def restore_hccl_after_sleep() -> int:
     num_restored = 0
     for group in _iter_alive_group_coordinators():
-        restore = getattr(group, "restore_hccl_after_sleep", None)
+        restore = group.restore_hccl_after_sleep
         if restore is not None and restore():
             num_restored += 1
     return num_restored

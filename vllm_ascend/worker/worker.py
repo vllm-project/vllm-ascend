@@ -204,6 +204,7 @@ class NPUWorker(WorkerBase):
             model = self.model_runner.model
             self._sleep_saved_buffers = {name: buffer.cpu().clone() for name, buffer in model.named_buffers()}
         self._invalidate_acl_graphs_for_sleep()
+        self._clear_global_cos_sin_cache_for_sleep()
         self._destroy_hccl_for_sleep()
         allocator = CaMemAllocator.get_instance()
         allocator.sleep(offload_tags=("weights",) if level == 1 else tuple())
@@ -227,6 +228,7 @@ class NPUWorker(WorkerBase):
         allocator = CaMemAllocator.get_instance()
         self._restore_hccl_after_sleep()
         allocator.wake_up(tags=tags)
+        self._restore_global_cos_sin_cache_after_sleep()
 
         hidden_size = self.vllm_config.model_config.hf_text_config.hidden_size
         model = self.model_runner.model
@@ -258,14 +260,50 @@ class NPUWorker(WorkerBase):
         self._restore_acl_graphs_after_sleep(tags)
 
     def _invalidate_acl_graphs_for_sleep(self) -> None:
+        from vllm_ascend.compilation.acl_graph import clear_attention_workspaces_for_sleep, reset_graph_params_for_sleep
+        clear_attention_workspaces_for_sleep()
         if not self.model_runner.use_aclgraph:
             return
-
-        from vllm_ascend.compilation.acl_graph import reset_graph_params_for_sleep
 
         reset_graph_params_for_sleep()
         self._reset_model_runner_graph_manager()
         self._sleep_acl_graph_invalidated = True
+
+    def _clear_global_cos_sin_cache_for_sleep(self) -> None:
+        if self._sleep_cos_sin_cache_cleared:
+            return
+
+        from vllm_ascend.ops.rotary_embedding import clear_global_cos_sin_runtime_cache
+
+        model = getattr(getattr(self, "model_runner", None), "model", None)
+        cleared = clear_global_cos_sin_runtime_cache(model)
+
+        self._sleep_cos_sin_cache_cleared = cleared
+        if cleared:
+            torch.npu.empty_cache()
+
+    def _restore_global_cos_sin_cache_after_sleep(self) -> None:
+        if not self._sleep_cos_sin_cache_cleared:
+            return
+
+        from vllm_ascend.ops.rotary_embedding import restore_global_cos_sin_cache_from_model, set_cos_and_sin
+
+        model_runner = getattr(self, "model_runner", None)
+        if model_runner is None:
+            return
+        max_num_reqs = getattr(model_runner, "max_num_reqs", None)
+        decode_token_per_req = getattr(
+            model_runner, "uniform_decode_query_len", getattr(model_runner, "decode_query_len", None)
+        )
+        dtype = getattr(model_runner, "dtype", None)
+        device = getattr(model_runner, "device", None)
+        if None in (max_num_reqs, decode_token_per_req, dtype, device):
+            logger.warning("Skip restoring global cos/sin cache after sleep due to incomplete model runner state.")
+            return
+
+        restore_global_cos_sin_cache_from_model(getattr(model_runner, "model", None))
+        set_cos_and_sin(self.vllm_config, max_num_reqs, decode_token_per_req, dtype, device)
+        self._sleep_cos_sin_cache_cleared = False
 
     def _reset_model_runner_graph_manager(self) -> None:
         from vllm.platforms import current_platform
