@@ -465,14 +465,27 @@ class AscendDSACPMetadataBuilder(AttentionMetadataBuilder[AscendDSAMetadata]):
         return mask.sum()
 
     # --- helper: build SAS metadata ---
+    def _copy_sas_metadata_to_decode_buffer(self,
+                                            metadata: torch.Tensor
+                                            ) -> torch.Tensor:
+        assert self.req_sas_metadata is not None
+        numel = metadata.numel()
+        self.req_sas_metadata[:numel].copy_(metadata.reshape(-1))
+        if numel < self.req_sas_metadata.numel():
+            self.req_sas_metadata[numel:].fill_(0)
+        return self.req_sas_metadata
+
     def _build_sas_metadata(self, num_heads, query_start_loc, seq_lens,
                             seq_lens_q,
                             max_query_len, max_seq_lens, index_topk,
                             num_reqs, has_prefill, cu_cmp_seqlen_list):
         cmp_ratio = self.compressor_ratio if self.compressor_ratio > 1 else 1
         cache_key = f"cp_sas_c{cmp_ratio}"
-        if self.common_ratio_to_sas_metadata.get(cache_key) is not None:
-            return self.common_ratio_to_sas_metadata[cache_key]
+        cached_metadata = self.common_ratio_to_sas_metadata.get(cache_key)
+        if cached_metadata is not None:
+            if not has_prefill:
+                return self._copy_sas_metadata_to_decode_buffer(cached_metadata)
+            return cached_metadata
 
         cu_seqlens_ori_kv = query_start_loc if has_prefill else self.cu_seqlens_ori_kv
         cu_seqlens_cmp_kv = None if has_prefill else self.cu_seqlens_cmp_kv
@@ -510,22 +523,33 @@ class AscendDSACPMetadataBuilder(AttentionMetadataBuilder[AscendDSAMetadata]):
             kw['has_cmp_kv'] = False
 
         metadata = torch.ops._C_ascend.npu_sparse_attn_sharedkv_metadata(**kw)
-        if not has_prefill:
-            assert self.req_sas_metadata is not None
-            self.req_sas_metadata[:1024] = metadata
-            metadata = self.req_sas_metadata
         self.common_ratio_to_sas_metadata[cache_key] = metadata
+        if not has_prefill:
+            metadata = self._copy_sas_metadata_to_decode_buffer(metadata)
         return metadata
 
     # --- helper: build QLI metadata ---
+    def _copy_qli_metadata_to_decode_buffer(self,
+                                            metadata: torch.Tensor
+                                            ) -> torch.Tensor:
+        assert self.req_qli_metadata is not None
+        numel = metadata.numel()
+        self.req_qli_metadata[:numel].copy_(metadata.reshape(-1))
+        if numel < self.req_qli_metadata.numel():
+            self.req_qli_metadata[numel:].fill_(0)
+        return self.req_qli_metadata
+
     def _build_qli_metadata(self, query_start_loc, seq_lens, seq_lens_q,
                             has_prefill, num_reqs):
         if self.compressor_ratio != 4:
             return None
 
         cache_key = "cp_qli"
-        if self.common_ratio_to_sas_metadata.get(cache_key) is not None:
-            return self.common_ratio_to_sas_metadata[cache_key]
+        cached_metadata = self.common_ratio_to_sas_metadata.get(cache_key)
+        if cached_metadata is not None:
+            if not has_prefill:
+                return self._copy_qli_metadata_to_decode_buffer(cached_metadata)
+            return cached_metadata
 
         max_seqlen_q = max(1, int(seq_lens_q.max().item()))
         max_seqlen_k = max(1, int(seq_lens.max().item()))
@@ -548,11 +572,9 @@ class AscendDSACPMetadataBuilder(AttentionMetadataBuilder[AscendDSAMetadata]):
             next_tokens=(1 << 63) - 1,
             cmp_ratio=4,
             device=str(self.seqused_q.device))
-        if not has_prefill:
-            assert self.req_qli_metadata is not None
-            self.req_qli_metadata[:1024] = metadata
-            metadata = self.req_qli_metadata
         self.common_ratio_to_sas_metadata[cache_key] = metadata
+        if not has_prefill:
+            metadata = self._copy_qli_metadata_to_decode_buffer(metadata)
         return metadata
 
     def build_for_graph_capture(
