@@ -36,7 +36,7 @@ else:
 def hadamard_transform_ref(
     x: torch.Tensor,
     hadamard: torch.Tensor,
-    scale: float = 1.0,
+    scale: float = 1.0,  # type: ignore[assignment]
 ):
     x_shape = x.shape
     dim = x.shape[-1]
@@ -143,8 +143,8 @@ class AscendDSACPMetadataBuilder(AttentionMetadataBuilder[AscendDSAMetadata]):
     aclgraph_support: ClassVar[AttentionCGSupport] = AttentionCGSupport.UNIFORM_BATCH
     hadamard = None
     start_pos_prefill: torch.Tensor | None = None
-    req_sas_metadata: torch.Tensor | None = None
-    req_qli_metadata: torch.Tensor | None = None
+    req_sas_metadata: torch.Tensor
+    req_qli_metadata: torch.Tensor
     block_size: int | None = 128
     """
     NOTE: Please read the comment at the top of the file before trying to
@@ -181,7 +181,7 @@ class AscendDSACPMetadataBuilder(AttentionMetadataBuilder[AscendDSAMetadata]):
             if hf_config.model_type == "deepseek_v4":
                 indexer_head_dim = hf_config.index_head_dim
                 try:
-                    from scipy.linalg import hadamard
+                    from scipy.linalg import hadamard  # type: ignore[import-untyped]
                 except ImportError as e:
                     raise ImportError("Please install scipy") from e
                 log_dim = math.ceil(math.log2(indexer_head_dim))
@@ -227,7 +227,10 @@ class AscendDSACPMetadataBuilder(AttentionMetadataBuilder[AscendDSAMetadata]):
         num_reqs_actual = kwargs.get("num_reqs_actual")
         self.block_size = kwargs.get("block_size", 128)
 
-        self.common_ratio_to_sas_metadata = kwargs.get("common_ratio_to_sas_metadata")
+        common_ratio = kwargs.get("common_ratio_to_sas_metadata")
+        if common_ratio is None:
+            common_ratio = {}
+        self.common_ratio_to_sas_metadata = common_ratio
         self.num_actual_tokens = common_attn_metadata.num_actual_tokens
         attn_state = kwargs.get("attn_state", common_attn_metadata.attn_state)
         has_prefill = _has_prefill(attn_state)
@@ -251,7 +254,7 @@ class AscendDSACPMetadataBuilder(AttentionMetadataBuilder[AscendDSAMetadata]):
 
         slot_mapping = common_attn_metadata.slot_mapping[:num_input_tokens]
         self.slot_mapping[:num_input_tokens] = torch.stack(
-            [slot_mapping // self.block_size, slot_mapping % self.block_size], axis=-1
+            [slot_mapping // self.block_size, slot_mapping % self.block_size], dim=-1
         )
 
         self.block_table = common_attn_metadata.block_table_tensor[:num_reqs]
@@ -769,6 +772,7 @@ class AscendDSACPImpl(DSAAttentionImpl):
             )
 
         assert common_attn_metadata.req_metadata is not None
+        assert swa_metadata.req_metadata is not None
         req_metadata = common_attn_metadata.req_metadata
         cp_metadata = req_metadata.cp_metadata
         cos = req_metadata.cos[layer_name]
@@ -829,6 +833,8 @@ class AscendDSACPImpl(DSAAttentionImpl):
 
         compress_topk_idxs = None
         if self.compress_ratio > 1:
+            assert compressor_attn_metadata.req_metadata is not None
+            assert compressor_kv_state_metadata.req_metadata is not None
             compress_cos = req_metadata.compress_cos[layer_name]
             compress_sin = req_metadata.compress_sin[layer_name]
             if self.compress_ratio == 4:
@@ -904,6 +910,7 @@ class AscendDSACPImpl(DSAAttentionImpl):
                 **common_attn_kwargs,
             )[0]
         elif self.compress_ratio == 4:
+            assert compressor_attn_metadata.req_metadata is not None
             attn_output = torch.ops._C_ascend.npu_sparse_attn_sharedkv(
                 q,
                 ori_kv=swa_kv_cache,
@@ -917,6 +924,7 @@ class AscendDSACPImpl(DSAAttentionImpl):
                 **common_attn_kwargs,
             )[0]
         else:
+            assert compressor_attn_metadata.req_metadata is not None
             attn_output = torch.ops._C_ascend.npu_sparse_attn_sharedkv(
                 q,
                 ori_kv=swa_kv_cache,
@@ -964,7 +972,7 @@ class AscendDSACPImpl(DSAAttentionImpl):
     def _update_indexer_cache(
         self,
         x: torch.Tensor,
-        kv_cache: tuple[torch.Tensor],
+        kv_cache: tuple[torch.Tensor, ...],
         attn_metadata: list[M],
         compressed_cos: torch.Tensor,
         compressed_sin: torch.Tensor,
@@ -973,7 +981,11 @@ class AscendDSACPImpl(DSAAttentionImpl):
         (_, _, _, indexer_state_cache, indexer_k_cache, indexer_scale_cache) = kv_cache
         (_, _, indexer_kv_state_metadata, indexer_kv_scale_metadata, _) = attn_metadata
         coff = 2 if self.compressor_overlap else 1
+        assert indexer_kv_scale_metadata is not None
+        assert indexer_kv_state_metadata is not None
         assert indexer_kv_scale_metadata.req_metadata is not None
+        assert indexer_kv_state_metadata.req_metadata is not None
+        assert self.indexer is not None
         kv = torch.ops._C_ascend.compressor(
             x,
             self.indexcom_wkv.weight,
@@ -1018,7 +1030,7 @@ class AscendDSACPImpl(DSAAttentionImpl):
         self,
         x: torch.Tensor,
         qr: torch.Tensor,
-        kv_cache: tuple[torch.Tensor],
+        kv_cache: tuple[torch.Tensor, ...],
         attn_metadata: list[M],
         cos: torch.Tensor,
         sin: torch.Tensor,
@@ -1028,6 +1040,7 @@ class AscendDSACPImpl(DSAAttentionImpl):
     ):
         (_, _, _, _, indexer_k_cache, indexer_scale_cache) = kv_cache
         (_, _, _, indexer_kv_scale_metadata, _) = attn_metadata
+        assert indexer_kv_scale_metadata is not None
 
         if (
             (not isinstance(self.inderxer_wq_b.quant_method, AscendUnquantizedLinearMethod))
