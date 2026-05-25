@@ -11,6 +11,7 @@
 #include "chunk_gated_delta_rule_fwd_h.h"
 #include <dlfcn.h>
 #include <new>
+#include <iostream>
 
 #include "aclnn_kernels/transdata.h"
 #include "aclnn_kernels/contiguous.h"
@@ -183,7 +184,19 @@ aclnnStatus aclnnChunkGatedDeltaRuleFwdHGetWorkspaceSize(
     CHECK_RET(ret == ACLNN_SUCCESS, ACLNN_ERR_PARAM_INVALID);
     CHECK_COND(ParamsDataContiguous(params, executorPtr) == ACLNN_SUCCESS, ACLNN_ERR_PARAM_INVALID,
                "ParamsDataContiguous failed.");
-    auto result = l0op::ChunkGatedDeltaRuleFwdH(params.k, params.w, params.u, params.gOptional, params.initalStateOptional, params.cuSeqlensOptional, params.chunkIndicesOptional, params.outputFinalState, params.chunkSize, params.hOut, params.vNewOut, params.finalStateOut, executorPtr);
+
+    // aclGetViewStrides obtains the strides and the number of strides corresponding to aclTensor
+    int64_t *initialStateStridesValuePtr = nullptr;
+    int64_t initialStateStridesValue = 0;
+    uint64_t initialStateStridesNum = 0;
+
+    if (initalStateOptional != nullptr) {
+        ret = aclGetViewStrides(initalStateOptional, &initialStateStridesValuePtr, &initialStateStridesNum);
+        CHECK_RET(ret == ACLNN_SUCCESS, ret);
+        initialStateStridesValue = initialStateStridesValuePtr[initialStateStridesNum - 2];
+    }
+
+    auto result = l0op::ChunkGatedDeltaRuleFwdH(params.k, params.w, params.u, params.gOptional, params.initalStateOptional, params.cuSeqlensOptional, params.chunkIndicesOptional, params.outputFinalState, params.chunkSize, initialStateStridesValue, params.hOut, params.vNewOut, params.finalStateOut, executorPtr);
     CHECK_RET(result[0] != nullptr, ACLNN_ERR_PARAM_NULLPTR);
 
     // If the output tensor is non-contiguous, convert the calculated contiguous tensor to non-contiguous.

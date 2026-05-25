@@ -23,6 +23,7 @@ const std::array<const aclTensor *, 3> ChunkGatedDeltaRuleFwdH(
     const aclIntArray *chunkIndicesOptional,
     bool outputFinalState,
     int64_t chunkSize,
+    int64_t initialStateStridesValue,
     const aclTensor *hOut,
     const aclTensor *vNewOut,
     const aclTensor *finalStateOut,
