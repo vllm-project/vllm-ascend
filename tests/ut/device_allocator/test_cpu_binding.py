@@ -757,6 +757,7 @@ class TestCpuBindingSupplemental(unittest.TestCase):
 class TestBindingSwitch(unittest.TestCase):
     def test_get_cpu_binding_rank_offsets_local_dp_rank(self):
         parallel_config = SimpleNamespace(
+            rank=None,
             data_parallel_rank_local=1,
             data_parallel_size_local=2,
             local_world_size=8,
@@ -765,8 +766,31 @@ class TestBindingSwitch(unittest.TestCase):
 
         self.assertEqual(get_cpu_binding_rank(3, parallel_config), 11)
 
+    def test_get_cpu_binding_rank_prefers_global_rank_in_local_dp(self):
+        parallel_config = SimpleNamespace(
+            rank=14,
+            data_parallel_rank_local=1,
+            data_parallel_size_local=2,
+            local_world_size=8,
+            world_size=8,
+        )
+
+        self.assertEqual(get_cpu_binding_rank(0, parallel_config), 14)
+
+    def test_get_cpu_binding_rank_wraps_global_rank_to_node_local_rank(self):
+        parallel_config = SimpleNamespace(
+            rank=30,
+            data_parallel_rank_local=1,
+            data_parallel_size_local=2,
+            local_world_size=8,
+            world_size=16,
+        )
+
+        self.assertEqual(get_cpu_binding_rank(0, parallel_config), 14)
+
     def test_get_cpu_binding_rank_keeps_local_rank_without_local_dp(self):
         parallel_config = SimpleNamespace(
+            rank=9,
             data_parallel_rank_local=0,
             data_parallel_size_local=1,
             local_world_size=8,

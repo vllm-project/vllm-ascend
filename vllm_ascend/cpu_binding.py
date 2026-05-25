@@ -41,6 +41,10 @@ def get_cpu_binding_rank(local_rank: int, parallel_config: object) -> int:
     per_dp_local_world_size = int(getattr(parallel_config, "local_world_size", 0) or 0)
     if per_dp_local_world_size <= 0:
         per_dp_local_world_size = int(getattr(parallel_config, "world_size", 1) or 1)
+    rank = getattr(parallel_config, "rank", None)
+    total_local_world_size = dp_size_local * per_dp_local_world_size
+    if rank is not None and total_local_world_size > 0:
+        return int(rank) % total_local_world_size
     return dp_rank_local * per_dp_local_world_size + local_rank
 
 
