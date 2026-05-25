@@ -1456,6 +1456,8 @@ class MooncakeConnectorWorker:
                 for layer_name in group.layer_names:
                     layer_group_idx[layer_name] = i
             for kv_cache_tensor in self.kv_cache_config.kv_cache_tensors:
+                if not kv_cache_tensor.shared_by:
+                    continue
                 share_tensor_addr = []
                 share_tensor_stride = []
                 cur_tensor_group_idx = []
