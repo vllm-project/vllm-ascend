@@ -21,6 +21,7 @@ DeepSeekV3/V3.1/R1, Qwen3-MoE
 ### MOE QuantType
 
 W8A8-Dynamic
+W4A8 (with fused MC2 enabled)
 
 ## How to Use EPLB
 
