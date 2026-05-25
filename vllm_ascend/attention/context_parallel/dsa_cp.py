@@ -12,13 +12,20 @@ from vllm.triton_utils import HAS_TRITON
 from vllm.v1.attention.backend import AttentionCGSupport, AttentionMetadataBuilder
 from vllm.v1.kv_cache_interface import AttentionSpec, MLAAttentionSpec
 
+from vllm_ascend.ascend_config import get_ascend_config
 from vllm_ascend.attention.abstract import DSAAttentionImpl
 from vllm_ascend.attention.attention_v1 import AscendAttentionState
 from vllm_ascend.attention.utils import AscendCommonAttentionMetadata
 from vllm_ascend.ops.linear import AscendUnquantizedLinearMethod
 from vllm_ascend.ops.rope_dsv4 import get_cos_and_sin_dsa
 from vllm_ascend.quantization.methods.w8a8_dynamic import AscendW8A8DynamicLinearMethod
-from vllm_ascend.utils import AscendDeviceType, get_ascend_device_type, olora_tp_enable
+from vllm_ascend.utils import (
+    AscendDeviceType,
+    attention_calculation_stream,
+    get_ascend_device_type,
+    npu_stream_switch,
+    olora_tp_enable,
+)
 
 if HAS_TRITON:
     from vllm_ascend.ops.triton.rms_norm import triton_q_rms  # noqa: F811
@@ -640,6 +647,9 @@ class AscendDSACPImpl(DSAAttentionImpl):
 
         self.attn_sink = kwargs["attn_sink"]
 
+        ascend_config = get_ascend_config()
+        self.multistream_dsa_preprocess = ascend_config.multistream_dsa_preprocess
+
         self.vllm_config = get_current_vllm_config()
 
         # indexer param
@@ -696,9 +706,7 @@ class AscendDSACPImpl(DSAAttentionImpl):
             return output.fill_(0)
         if not isinstance(attn_metadata, list):
             attn_metadata = [attn_metadata]
-        hidden_states_full = torch.ops.vllm.maybe_all_gather_and_maybe_unpad(hidden_states, need_gather_q_kv)
-        assert attn_metadata[0].req_metadata is not None
-        local_attn_output = self._forward(layer_name, hidden_states_full, hidden_states, kv_cache, attn_metadata)
+        local_attn_output = self._forward(layer_name, hidden_states, kv_cache, attn_metadata, need_gather_q_kv)
         o_proj_input = self._restore_tp_head_layout(local_attn_output, layer_name, attn_metadata[0])
         num_tokens = o_proj_input.shape[0]
 
@@ -726,10 +734,10 @@ class AscendDSACPImpl(DSAAttentionImpl):
     def _forward(
         self,
         layer_name,
-        hidden_states: torch.Tensor,
         hidden_states_local: torch.Tensor,
         kv_cache: tuple,
         attn_metadata: list[M],
+        need_gather_q_kv: bool = False,
     ):
         """Run full-sequence KV cache updates and local-token attention."""
         if self.compress_ratio == 4:
@@ -742,6 +750,18 @@ class AscendDSACPImpl(DSAAttentionImpl):
             (_, swa_kv_cache, _, _, _, _) = kv_cache
             (swa_metadata,) = attn_metadata
         common_attn_metadata = attn_metadata[0]
+
+        overlap_hidden_states_allgather = self.multistream_dsa_preprocess and need_gather_q_kv
+        wait_hidden_states_local_event = (
+            torch.npu.current_stream().record_event() if overlap_hidden_states_allgather else None
+        )
+        with npu_stream_switch(attention_calculation_stream(), enabled=overlap_hidden_states_allgather):
+            if wait_hidden_states_local_event:
+                torch.npu.current_stream().wait_event(wait_hidden_states_local_event)
+            hidden_states = torch.ops.vllm.maybe_all_gather_and_maybe_unpad(hidden_states_local, need_gather_q_kv)
+            wait_hidden_states_allgather_event = (
+                torch.npu.current_stream().record_event() if overlap_hidden_states_allgather else None
+            )
 
         assert common_attn_metadata.req_metadata is not None
         req_metadata = common_attn_metadata.req_metadata
@@ -768,7 +788,7 @@ class AscendDSACPImpl(DSAAttentionImpl):
                 self.wq_b.weight_scale,
                 pertoken_scale=qr_pertoken_scale_local,
                 bias=self.wq_b.bias,
-                output_dtype=hidden_states.dtype,
+                output_dtype=hidden_states_local.dtype,
             )
         else:
             qr_local = self.q_norm(self.wq_a(hidden_states_local))
@@ -785,6 +805,9 @@ class AscendDSACPImpl(DSAAttentionImpl):
             rotary_mode="interleave",
             partial_slice=[self.nope_head_dim, self.head_dim],
         )
+
+        if wait_hidden_states_allgather_event:
+            torch.npu.current_stream().wait_event(wait_hidden_states_allgather_event)
 
         kv = self.wkv(hidden_states)
         kv = self.kv_norm(kv)
