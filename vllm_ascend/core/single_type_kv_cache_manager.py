@@ -9,9 +9,9 @@ from vllm.v1.core.kv_cache_utils import BlockHashList, KVCacheBlock
 from vllm.v1.core.single_type_kv_cache_manager import (
     FullAttentionManager,
     SingleTypeKVCacheManager,
-    spec_manager_map,
 )
 from vllm.v1.kv_cache_interface import FullAttentionSpec, KVCacheSpec, MLAAttentionSpec
+from vllm.v1.kv_cache_spec_registry import KVCacheSpecRegistry
 from vllm.v1.request import Request
 
 
@@ -202,11 +202,3 @@ class CompressAttentionManager(FullAttentionManager):
             for computed in computed_blocks:
                 computed.pop()
         return computed_blocks
-
-
-def get_manager_for_kv_cache_spec(kv_cache_spec: KVCacheSpec, **kwargs) -> SingleTypeKVCacheManager:
-    manager_class = spec_manager_map[type(kv_cache_spec)]
-    if isinstance(kv_cache_spec, MLAAttentionSpec) and kv_cache_spec.compress_ratio > 1:
-        manager_class = CompressAttentionManager
-    manager = manager_class(kv_cache_spec, **kwargs)
-    return manager

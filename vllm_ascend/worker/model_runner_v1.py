@@ -4151,8 +4151,6 @@ class NPUModelRunner(GPUModelRunner):
 
         if has_ec_transfer() and get_ec_transfer().is_producer:
             return {}
-        from vllm.v1.core.single_type_kv_cache_manager import register_all_kvcache_specs
-        register_all_kvcache_specs(self.vllm_config)
 
         kv_cache_spec: dict[str, list[KVCacheSpec]] = defaultdict(list)
         attn_layers = get_layers_from_vllm_config(self.vllm_config, AttentionLayerBase)
@@ -4183,15 +4181,9 @@ class NPUModelRunner(GPUModelRunner):
 
             elif isinstance(attn_module, MLAAttention):
                 if self.use_sparse:
-                    # `MLAAttentionSpec` is temporarily patched to `AscendMLAAttentionSpec`.
-                    # Re-importing it at runtime will therefore resolve to the patched class.
-                    # Rename it here to make this behavior explicit.
-                    from vllm.v1.kv_cache_interface import MLAAttentionSpec
-                    from vllm.v1.kv_cache_registry import KVCacheSpecRegistry
-                    # TODO(rjg-lyh): when kv_cache_spec's refactor is ready,
-                    # implement it by creating a new kv_cache_spec class
-                    kv_cache_spec[layer_name] = KVCacheSpecRegistry.create(
-                        kvcache_spec_cls=MLAAttentionSpec,
+                    from vllm_ascend.core.kv_cache_interface import AscendMLAAttentionSpec
+
+                    kv_cache_spec[layer_name] = AscendMLAAttentionSpec(
                         block_size=self.block_size,
                         num_kv_heads=1,
                         head_size=sum(self.sparse_head_dim),
@@ -4201,7 +4193,8 @@ class NPUModelRunner(GPUModelRunner):
                         cache_sparse_c8=self.ascend_config.is_sparse_c8_layer(layer_name),
                     )
                 elif spec := attn_module.get_kv_cache_spec(self.vllm_config):
-                    from vllm.v1.kv_cache_interface import MLAAttentionSpec as AscendMLAAttentionSpec
+                    from vllm_ascend.core.kv_cache_interface import AscendMLAAttentionSpec
+
                     if getattr(attn_module.impl, "fa_quant_layer", False):
                         head_size = attn_module.head_size + attn_module.qk_rope_head_dim
                         dtype, cache_dtype_str = attn_module.impl.dtype, None
@@ -4226,13 +4219,8 @@ class NPUModelRunner(GPUModelRunner):
                 # the indexer's k_cache is replaced by IndexerWrapper, so its
                 # KV cache is unused.
                 if spec := attn_module.get_kv_cache_spec(self.vllm_config):
-                    # CacheOnlyAttentionLayer's module imports MLAAttentionSpec
-                    # before the patch runs, so the spec it returns is an
-                    # instance of the original (unpatched) class. Rebuilding
-                    # with the patched AscendMLAAttentionSpec makes the spec
-                    # picklable and keeps this branch consistent with the
-                    # MLAAttention branch above.
-                    from vllm.v1.kv_cache_interface import MLAAttentionSpec as AscendMLAAttentionSpec
+                    from vllm_ascend.core.kv_cache_interface import AscendMLAAttentionSpec
+
                     kv_cache_spec[layer_name] = AscendMLAAttentionSpec(
                         block_size=spec.block_size,
                         num_kv_heads=spec.num_kv_heads,

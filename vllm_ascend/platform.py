@@ -1045,4 +1045,6 @@ class NPUPlatform(Platform):
 
     @classmethod
     def register_custom_kv_cache_specs(cls, vllm_config: VllmConfig) -> None:
-        import vllm_ascend.core.kv_cache_interface  # noqa
+        from vllm_ascend.core.kv_cache_interface import register_ascend_kv_cache_specs
+
+        register_ascend_kv_cache_specs()
