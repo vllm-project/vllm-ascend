@@ -1,3 +1,4 @@
+from types import SimpleNamespace
 from unittest.mock import Mock, patch
 
 import torch
@@ -8,6 +9,16 @@ from vllm_ascend.quantization.methods.w4a16 import AscendW4A16FusedMoEMethod, pa
 
 
 class TestUnpackFromInt32(TestBase):
+    def test_unpack_from_int32_restores_values_and_crops_padding(self):
+        weight = torch.tensor([[0x76543210]], dtype=torch.int32)
+        shape = torch.Size([1, 6])
+
+        result = unpack_from_int32(weight, shape, num_bits=4, packed_dim=1)
+
+        self.assertEqual(result.dtype, torch.int8)
+        self.assertEqual(result.shape, shape)
+        self.assertTrue(torch.equal(result, torch.tensor([[-8, -7, -6, -5, -4, -3]], dtype=torch.int8)))
+
     def test_unpack_from_int32_packed_dim_1(self):
         weight = torch.tensor([[305419896, -1420531520]], dtype=torch.int32)
         shape = torch.Size([1, 8])
@@ -28,6 +39,17 @@ class TestUnpackFromInt32(TestBase):
         self.assertEqual(result.dtype, torch.int8)
         self.assertEqual(result.shape, shape)
 
+    def test_unpack_from_int32_packed_dim_0_restores_values(self):
+        weight = torch.tensor([[0x76543210]], dtype=torch.int32)
+        shape = torch.Size([6, 1])
+
+        result = unpack_from_int32(weight, shape, num_bits=4, packed_dim=0)
+
+        self.assertEqual(result.dtype, torch.int8)
+        self.assertEqual(result.shape, shape)
+        expected = torch.tensor([[-8], [-7], [-6], [-5], [-4], [-3]], dtype=torch.int8)
+        self.assertTrue(torch.equal(result, expected))
+
     def test_unpack_from_int32_assertions(self):
         with self.assertRaises(AssertionError):
             weight = torch.tensor([[1, 2]], dtype=torch.int64)
@@ -35,7 +57,19 @@ class TestUnpackFromInt32(TestBase):
 
         with self.assertRaises(AssertionError):
             weight = torch.tensor([[1, 2]], dtype=torch.int32)
+            unpack_from_int32(weight, torch.Size([8, 1]), 0)
+
+        with self.assertRaises(AssertionError):
+            weight = torch.tensor([[1, 2]], dtype=torch.int32)
             unpack_from_int32(weight, torch.Size([8, 1]), 16)
+
+        with self.assertRaises(AssertionError):
+            weight = torch.tensor([[1, 2]], dtype=torch.int32)
+            unpack_from_int32(weight, torch.Size([8, 1]), 3)
+
+        with self.assertRaises(AssertionError):
+            weight = torch.tensor([[1, 2]], dtype=torch.int32)
+            unpack_from_int32(weight, torch.Size([8, 1]), 4, packed_dim=2)
 
 
 class TestPackToInt32(TestBase):
@@ -50,6 +84,16 @@ class TestPackToInt32(TestBase):
         mock_npu_convert_weight_to_int4pack.assert_not_called()
 
         self.assertEqual(result.shape, torch.Size([2, 8, 4]))
+
+    @patch("vllm_ascend.quantization.methods.w4a16.torch_npu.npu_convert_weight_to_int4pack")
+    def test_pack_to_int32_int8_non_contiguous(self, mock_npu_convert_weight_to_int4pack):
+        weight = torch.zeros((2, 8, 16), dtype=torch.int8).transpose(1, 2)
+
+        result = pack_to_int32(weight)
+
+        self.assertEqual(result.dtype, torch.int32)
+        self.assertEqual(result.shape, torch.Size([2, 16, 2]))
+        mock_npu_convert_weight_to_int4pack.assert_not_called()
 
     @patch("vllm_ascend.quantization.methods.w4a16.torch_npu.npu_convert_weight_to_int4pack")
     def test_pack_to_int32_int32(self, mock_npu_convert_weight_to_int4pack):
@@ -118,6 +162,13 @@ class TestAscendW4A16FusedMoEMethod(TestBase):
         expected_w2_shape = (self.experts, self.output_size, self.input_size // self.quant_method.pack_factor)
         self.assertEqual(param_dict["w2_weight_packed"].shape, expected_w2_shape)
 
+    def test_get_weight_assertions(self):
+        with self.assertRaises(AssertionError):
+            self.quant_method.get_weight(self.experts, self.input_size + 1, self.output_size, torch.bfloat16)
+
+        with self.assertRaises(AssertionError):
+            self.quant_method.get_weight(self.experts, self.input_size, self.output_size + 1, torch.bfloat16)
+
     def test_get_dynamic_quant_param(self):
         param_dict = self.quant_method.get_dynamic_quant_param(
             self.experts, self.input_size, self.output_size, torch.bfloat16
@@ -132,6 +183,17 @@ class TestAscendW4A16FusedMoEMethod(TestBase):
 
         self.assertEqual(param_dict["w13_weight_offset"].dtype, torch.bfloat16)
         self.assertEqual(param_dict["w13_weight_offset"].shape, expected_w13_scale_shape)
+
+    def test_get_dynamic_quant_param_assertions(self):
+        with self.assertRaises(AssertionError):
+            self.quant_method.get_dynamic_quant_param(
+                self.experts, self.input_size + 1, self.output_size, torch.bfloat16
+            )
+
+        with self.assertRaises(AssertionError):
+            self.quant_method.get_dynamic_quant_param(
+                self.experts, self.input_size, self.output_size + 1, torch.bfloat16
+            )
 
     def build_layer(self):
         """Build a mock layer for testing"""
@@ -197,13 +259,13 @@ class TestAscendW4A16FusedMoEMethod(TestBase):
         tokens = 3
         hidden_size = self.output_size
         layer = self.build_layer()
+        layer.n_shared_experts = None
         x = torch.randn(tokens, hidden_size, dtype=torch.float32)
         router_logits = torch.randn(tokens, self.experts, dtype=torch.float32)
         topk_weights = torch.randn(tokens, 2, dtype=torch.float32)
         topk_ids = torch.randint(0, self.experts, (tokens, 2), dtype=torch.int64)
         mc2_mask = torch.tensor([1, 0, 1], dtype=torch.bool)
         pertoken_scale = torch.randn(tokens, dtype=torch.float32)
-        layer.swiglu_limit = 1000000
 
         mock_select_experts.return_value = (topk_weights, topk_ids)
         mock_comm = Mock()
@@ -225,6 +287,7 @@ class TestAscendW4A16FusedMoEMethod(TestBase):
         )
 
         mock_select_experts.assert_called_once()
+        self.assertEqual(mock_select_experts.call_args.kwargs["num_experts"], self.experts)
         fused_experts_input = mock_comm.fused_experts.call_args.kwargs["fused_experts_input"]
         self.assertEqual(fused_experts_input.activation, "gelu")
         self.assertTrue(fused_experts_input.routing.apply_router_weight_on_input)
@@ -233,9 +296,31 @@ class TestAscendW4A16FusedMoEMethod(TestBase):
 
     @patch("vllm_ascend.quantization.methods.w4a16._EXTRA_CTX")
     @patch("vllm_ascend.quantization.methods.w4a16.select_experts")
+    def test_apply_uses_layer_moe_config_logical_experts(self, mock_select_experts, mock_extra_ctx):
+        tokens = 3
+        logical_experts = self.experts - 2
+        layer = self.build_layer()
+        layer.moe_config = SimpleNamespace(num_logical_experts=logical_experts)
+        x = torch.randn(tokens, self.output_size, dtype=torch.float32)
+        router_logits = torch.randn(tokens, logical_experts, dtype=torch.float32)
+        topk_weights = torch.randn(tokens, 2, dtype=torch.float32)
+        topk_ids = torch.randint(0, logical_experts, (tokens, 2), dtype=torch.int64)
+
+        mock_select_experts.return_value = (topk_weights, topk_ids)
+        mock_comm = Mock()
+        mock_comm.fused_experts.return_value = torch.randn(tokens, self.output_size, dtype=torch.float32)
+        mock_extra_ctx.moe_comm_method = mock_comm
+
+        self.quant_method.apply(layer, x, router_logits, top_k=2, renormalize=True, num_experts=self.experts)
+
+        self.assertEqual(mock_select_experts.call_args.kwargs["num_experts"], logical_experts)
+
+    @patch("vllm_ascend.quantization.methods.w4a16._EXTRA_CTX")
+    @patch("vllm_ascend.quantization.methods.w4a16.select_experts")
     def test_apply_router_logits_mismatch_raises(self, mock_select, mock_ctx):
         layer = self.build_layer()
         x = torch.randn(4, self.output_size, dtype=torch.float32)
         router_logits = torch.randn(4, self.experts + 1, dtype=torch.float32)
-        with self.assertRaises(AssertionError):
+        with self.assertRaisesRegex(AssertionError, r"router_logits.shape\[1\]=9, num_logical_experts=8"):
             self.quant_method.apply(layer, x, router_logits, top_k=2, renormalize=True, num_experts=self.experts)
+        mock_select.assert_not_called()
