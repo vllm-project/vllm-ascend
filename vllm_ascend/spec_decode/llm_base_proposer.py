@@ -182,7 +182,7 @@ class AscendSpecDecodeBaseProposer(SpecDecodeBaseProposer):
             # RoPE need (max_num_tokens,)
             self.positions = torch.zeros(self.max_num_tokens, dtype=torch.int32, device=device)
 
-        self.token_arange_np = np.arange(self.max_num_tokens + 1)
+        self.token_arange_np = np.arange(self.max_num_tokens + 1, dtype=np.int32)
         self.enable_enpu = self.runner.enable_enpu
         self.use_eagle = self.runner.use_eagle
 
