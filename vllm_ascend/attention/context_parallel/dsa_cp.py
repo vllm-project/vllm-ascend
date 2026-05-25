@@ -36,7 +36,7 @@ else:
 def hadamard_transform_ref(
     x: torch.Tensor,
     hadamard: torch.Tensor,
-    scale: int = 1.0,
+    scale: float = 1.0,
 ):
     x_shape = x.shape
     dim = x.shape[-1]
@@ -235,7 +235,9 @@ class AscendDSACPMetadataBuilder(AttentionMetadataBuilder[AscendDSAMetadata]):
         num_input_tokens = common_attn_metadata.num_input_tokens
         if self.common_ratio_to_sas_metadata.get("input_positions", None) is None:
             input_positions = common_attn_metadata.positions[:num_input_tokens].long()
+            input_positions_cpu = common_attn_metadata.positions_cpu[:num_input_tokens].long()
             self.common_ratio_to_sas_metadata["input_positions"] = input_positions
+            self.common_ratio_to_sas_metadata["input_positions_cpu"] = input_positions_cpu
             cos, sin = get_cos_and_sin_dsa(input_positions, use_cache=not has_prefill)
             self.common_ratio_to_sas_metadata["cos"] = cos
             self.common_ratio_to_sas_metadata["sin"] = sin
@@ -243,6 +245,7 @@ class AscendDSACPMetadataBuilder(AttentionMetadataBuilder[AscendDSAMetadata]):
             self.common_ratio_to_sas_metadata["seq_lens"] = self.seq_lens
         else:
             input_positions = self.common_ratio_to_sas_metadata["input_positions"]
+            input_positions_cpu = self.common_ratio_to_sas_metadata["input_positions_cpu"]
             cos, sin = self.common_ratio_to_sas_metadata["cos"], self.common_ratio_to_sas_metadata["sin"]
             self.seq_lens = self.common_ratio_to_sas_metadata["seq_lens"]
 
@@ -254,7 +257,7 @@ class AscendDSACPMetadataBuilder(AttentionMetadataBuilder[AscendDSAMetadata]):
         self.block_table = common_attn_metadata.block_table_tensor[:num_reqs]
 
         req_metadata = self.build_req_metadata(
-            common_attn_metadata, input_positions, num_input_tokens, num_reqs_actual, attn_state
+            common_attn_metadata, input_positions, input_positions_cpu, num_input_tokens, num_reqs_actual, attn_state
         )
 
         return self.metadata_cls(  # type: ignore
@@ -276,6 +279,7 @@ class AscendDSACPMetadataBuilder(AttentionMetadataBuilder[AscendDSAMetadata]):
         self,
         common_attn_metadata: AscendCommonAttentionMetadata,
         input_positions: torch.Tensor,
+        input_positions_cpu: torch.Tensor,
         num_input_tokens: int,
         num_reqs_actual: int | None,
         attn_state: AscendAttentionState,
@@ -308,6 +312,7 @@ class AscendDSACPMetadataBuilder(AttentionMetadataBuilder[AscendDSAMetadata]):
             use_cache=not has_prefill,
         )
         local_seq_lens_q = local_query_start_loc[1 : num_reqs + 1] - local_query_start_loc[:num_reqs]
+        # TODO(qcs): remove this .item() to avoid D2H synchronization.
         max_local_query_len = max(1, int(local_seq_lens_q.max().item()))
         max_local_seq_lens = max(1, int(local_seq_lens.max().item()))
 
@@ -329,13 +334,13 @@ class AscendDSACPMetadataBuilder(AttentionMetadataBuilder[AscendDSAMetadata]):
         if self.compressor_ratio > 1:
             layer_name = f"c{self.compressor_ratio}"
             compressed_input_positions = self._get_padded_compressed_position(
-                input_positions, self.compressor_ratio, num_reqs, num_input_tokens
+                input_positions_cpu, self.compressor_ratio, num_reqs, num_input_tokens
             )
             compress_cos, compress_sin = get_cos_and_sin_dsa(
                 {layer_name: compressed_input_positions}, use_cache=not has_prefill
             )
 
-        slot_mapping_size = self._get_slot_mapping_size(input_positions, self.compressor_ratio)
+        slot_mapping_size = self._get_slot_mapping_size(input_positions_cpu, self.compressor_ratio)
         slot_mapping = self.slot_mapping[:slot_mapping_size]
 
         # --- SAS metadata (all requests combined) ---
