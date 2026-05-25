@@ -11,7 +11,7 @@ from vllm_ascend.cpu_binding import bind_thread_to_cpus
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.backend.backend import Backend
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.memcache_utils import (
     format_cpu_affinity,
-    get_skip_socket_cpu_affinity,
+    get_default_memcache_cpu_affinity,
 )
 from vllm_ascend.utils import AscendDeviceType, get_ascend_device_type
 
@@ -101,7 +101,7 @@ class MemcacheBackend(Backend):
     def _get_client_cpu_affinity(self) -> str:
         client_cpu_affinity = format_cpu_affinity(self.memcache_client_cpus)
         if not client_cpu_affinity:
-            client_cpu_affinity = get_skip_socket_cpu_affinity(self.local_rank)
+            client_cpu_affinity = get_default_memcache_cpu_affinity(self.local_rank)
         return client_cpu_affinity
 
     @staticmethod

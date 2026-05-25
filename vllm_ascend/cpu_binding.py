@@ -14,7 +14,11 @@ from vllm_ascend.utils import AscendDeviceType, get_ascend_device_type
 
 MASK_BIT = 32  # Number of bits in a CPU affinity mask group
 MIN_CPUS_PER_NPU = 5  # 2(IRQ) + 1(main, at least 1 CPU) + 1(acl) + 1(release) = 5 CPUs per NPU
-KV_TRANSFER_CPUS_PER_NPU = 2
+IRQ_CPUS_PER_NPU = 2
+ACL_CPUS_PER_NPU = 1
+RELEASE_CPUS_PER_NPU = 1
+DEFAULT_MEMCACHE_CPUS_PER_NPU = 8
+DEFAULT_WORKER_CPUS_PER_NPU = 12
 ALLOWED_CPUS_PATH = "/proc/self/status"
 ASCEND_RT_VISIBLE_DEVICES = os.getenv("ASCEND_RT_VISIBLE_DEVICES")
 
@@ -156,19 +160,42 @@ class DeviceInfo:
 
 
 class CpuAlloc:
-    def __init__(self, rank_id: int, skip_sockets: set[int] | None = None):
+    def __init__(self, rank_id: int):
         self.rank_id = rank_id
-        self.skip_sockets = skip_sockets if skip_sockets is not None else self.parse_skip_sockets()
         self.device_info: DeviceInfo = DeviceInfo()
         self.cpu_node: dict[int, int] = {}
         self.cpu_socket: dict[int, int] = {}
         self.numa_to_cpu_map: dict[int, list[int]] = defaultdict(list)
         self.npu_cpu_pool: dict[int, list[int]] = {}
-        self.skipped_socket_cpus: list[int] = []
         self.assign_main: dict[int, list[int]] = {}
         self.assign_acl: dict[int, list[int]] = {}
         self.assign_rel: dict[int, list[int]] = {}
         self.assign_kv_transfer: dict[int, list[int]] = {}
+        self.assign_memcache: dict[int, list[int]] = {}
+
+    @staticmethod
+    def _get_non_negative_env(name: str, default: int) -> int:
+        value = getattr(envs, name, default)
+        if value < 0:
+            raise ValueError(f"{name} must be non-negative.")
+        return value
+
+    @staticmethod
+    def memcache_cpu_count() -> int:
+        return CpuAlloc._get_non_negative_env(
+            "VLLM_ASCEND_CPU_BIND_MEMCACHE_CPU_COUNT",
+            DEFAULT_MEMCACHE_CPUS_PER_NPU,
+        )
+
+    @staticmethod
+    def worker_cpu_count() -> int:
+        value = CpuAlloc._get_non_negative_env(
+            "VLLM_ASCEND_CPU_BIND_WORKER_CPU_COUNT",
+            DEFAULT_WORKER_CPUS_PER_NPU,
+        )
+        if value < 1:
+            raise ValueError("VLLM_ASCEND_CPU_BIND_WORKER_CPU_COUNT must be at least 1.")
+        return value
 
     @staticmethod
     def cpu_to_mask(cpu: int) -> str:
@@ -224,22 +251,6 @@ class CpuAlloc:
             )
             return ""
 
-    @staticmethod
-    def parse_skip_sockets() -> set[int]:
-        skip_socket_str = envs.VLLM_ASCEND_CPU_BIND_SKIP_SOCKET
-        if not skip_socket_str:
-            return set()
-        skip_sockets: set[int] = set()
-        for socket_str in skip_socket_str.split(","):
-            socket_str = socket_str.strip()
-            if not socket_str:
-                continue
-            socket_id = int(socket_str)
-            if socket_id < 0:
-                raise ValueError("VLLM_ASCEND_CPU_BIND_SKIP_SOCKET must contain non-negative socket ids.")
-            skip_sockets.add(socket_id)
-        return skip_sockets
-
     def average_distribute(self, groups: dict[str, list[int]]) -> dict[int, list[int]]:
         result: dict[int, list[int]] = {}
         for key, npu_list in groups.items():
@@ -266,7 +277,7 @@ class CpuAlloc:
         return sorted(set(extended))
 
     def build_cpu_node_map(self) -> None:
-        lscpu_fields = "CPU,NODE,SOCKET" if self.skip_sockets else "CPU,NODE"
+        lscpu_fields = "CPU,NODE"
         cpu_numa_map, return_code = execute_command(["lscpu", f"-e={lscpu_fields}"])
         if return_code != 0:
             raise RuntimeError(f"lscpu command failed when querying {lscpu_fields}. Please check!")
@@ -277,68 +288,13 @@ class CpuAlloc:
             parts = line.split()
             if len(parts) < 2:
                 continue
-            if self.skip_sockets and len(parts) < 3:
-                raise RuntimeError("lscpu command output error, no SOCKET column available. Please check!")
             cpu_str, node_str = parts[:2]
-            socket_str = parts[2] if len(parts) > 2 else node_str
             cpu = int(cpu_str)
             node = int(node_str)
-            socket_id = int(socket_str)
             self.cpu_node[cpu] = node
-            self.cpu_socket[cpu] = socket_id
             self.numa_to_cpu_map[node].append(cpu)
         if len(self.numa_to_cpu_map) == 0:
             raise RuntimeError("lscpu command output error, no NUMA node available. Please check!")
-
-    def exclude_skip_sockets(self) -> None:
-        if not self.skip_sockets:
-            return
-        available_sockets = set(self.cpu_socket.values())
-        invalid_sockets = self.skip_sockets - available_sockets
-        if invalid_sockets:
-            raise RuntimeError(
-                "Invalid CPU binding skip socket ids: "
-                f"{sorted(invalid_sockets)}. Available socket ids: {sorted(available_sockets)}."
-            )
-        allowed_cpus = [
-            cpu for cpu in self.device_info.allowed_cpus if self.cpu_socket.get(cpu) not in self.skip_sockets
-        ]
-        skipped_socket_cpus = [
-            cpu for cpu in self.device_info.allowed_cpus if self.cpu_socket.get(cpu) in self.skip_sockets
-        ]
-        if not allowed_cpus:
-            raise RuntimeError(
-                "No CPUs remain after applying VLLM_ASCEND_CPU_BIND_SKIP_SOCKET="
-                f"{sorted(self.skip_sockets)}."
-            )
-        if not skipped_socket_cpus:
-            raise RuntimeError(
-                "No CPUs on skipped sockets are available in Cpus_allowed_list after applying "
-                f"VLLM_ASCEND_CPU_BIND_SKIP_SOCKET={sorted(self.skip_sockets)}."
-            )
-        logger.info(
-            f"[cpu_bind_skip_socket] rank={self.rank_id} skip_sockets={sorted(self.skip_sockets)} "
-            f"allowed_cpus_before={len(self.device_info.allowed_cpus)} allowed_cpus_after={len(allowed_cpus)} "
-            f"kv_transfer_cpus={len(skipped_socket_cpus)}"
-        )
-        self.skipped_socket_cpus = skipped_socket_cpus
-        self.device_info.allowed_cpus = allowed_cpus
-
-    def slice_skipped_socket_cpus(self, npu: int) -> list[int]:
-        if not self.skipped_socket_cpus:
-            return []
-        cpus = sorted(set(self.skipped_socket_cpus))
-        if self.device_info.total_logic_npus > 0:
-            total_npus = self.device_info.total_logic_npus
-        elif self.device_info.npu_affinity:
-            total_npus = len(self.device_info.npu_affinity)
-        else:
-            total_npus = len(self.device_info.running_npu_list)
-        base = len(cpus) // total_npus
-        extra = len(cpus) % total_npus
-        start = npu * base + (npu if npu < extra else extra)
-        take = base + (1 if npu < extra else 0)
-        return cpus[start:start + take]
 
     def build_global_slice_cpu_pool(self) -> None:
         """
@@ -412,77 +368,73 @@ class CpuAlloc:
 
     def build_cpu_pools(self) -> None:
         self.build_cpu_node_map()
-        self.exclude_skip_sockets()
-
-        mode = self._binding_mode()
-        logger.info(f"[cpu_bind_mode] mode={mode} rank={self.rank_id} visible_npus={self.device_info.running_npu_list}")
-        if mode == GLOBAL_SLICE_MODE or self.skip_sockets:
-            self.build_global_slice_cpu_pool()
-            return
-
-        # topo_affinity mode
-        if not self.device_info.npu_affinity:
-            logger.warning("NPU topo affinity not found, fallback to global-slice CPU binding.")
-            self.build_global_slice_cpu_pool()
-            return
-
-        for npu in self.device_info.running_npu_list:
-            base_cpu_list = [
-                cpu for cpu in self.device_info.npu_affinity.get(npu, []) if cpu in self.device_info.allowed_cpus
-            ]
-            if not base_cpu_list:
-                raise RuntimeError("CPUs available in 'Cpus_allowed_list' conflict with NUMA affinity.")
-            extra_cpu_list = self.extend_numa(base_cpu_list)
-            self.npu_cpu_pool[npu] = extra_cpu_list
-
-        groups = defaultdict(list)
-        for npu, cpus in self.npu_cpu_pool.items():
-            groups[str(cpus)].append(npu)
-
-        final: dict[int, list[int]] = {}
-        for key, npu_list in groups.items():
-            if len(npu_list) == 1:
-                final[npu_list[0]] = self.npu_cpu_pool[npu_list[0]]
-            else:
-                final.update(self.average_distribute({key: npu_list}))
-        self.npu_cpu_pool = final
+        logger.info(
+            "[cpu_bind_mode] mode=%s rank=%d visible_npus=%s",
+            GLOBAL_SLICE_MODE,
+            self.rank_id,
+            self.device_info.running_npu_list,
+        )
+        self.build_global_slice_cpu_pool()
 
     def allocate(self) -> None:
+        memcache_cpu_count = self.memcache_cpu_count()
+        worker_cpu_count = self.worker_cpu_count()
         for npu, pool in self.npu_cpu_pool.items():
             if len(pool) < MIN_CPUS_PER_NPU:
                 raise RuntimeError(
                     f"The number of CPUs is insufficient. Each NPU requires at least {MIN_CPUS_PER_NPU} CPUs."
-            )
-            if self.skipped_socket_cpus:
-                main = pool[2:-2]
-                kv_transfer = self.slice_skipped_socket_cpus(npu)[:KV_TRANSFER_CPUS_PER_NPU]
-            elif len(pool) >= MIN_CPUS_PER_NPU + KV_TRANSFER_CPUS_PER_NPU:
-                main = pool[2:-2 - KV_TRANSFER_CPUS_PER_NPU]
-                kv_transfer = pool[-2 - KV_TRANSFER_CPUS_PER_NPU:-2]
-            else:
-                main = pool[2:-2]
-                kv_transfer = []
-                logger.warning(
-                    "No dedicated KV transfer CPUs reserved for NPU%d because "
-                    "the CPU pool only has %d cores.",
-                    npu,
-                    len(pool),
                 )
-            acl = [pool[-2]]
-            rel = [pool[-1]]
+            irq_end = min(IRQ_CPUS_PER_NPU, len(pool))
+            remaining = pool[irq_end:]
+
+            reserved_for_acl_release = ACL_CPUS_PER_NPU + RELEASE_CPUS_PER_NPU
+            max_main_count = max(1, len(remaining) - reserved_for_acl_release)
+            main_count = min(worker_cpu_count, max_main_count)
+            main = remaining[:main_count]
+            remaining = remaining[len(main):]
+            if not main:
+                raise RuntimeError(
+                    f"The number of CPUs is insufficient. NPU{npu} requires at least one worker CPU."
+                )
+
+            acl = remaining[:ACL_CPUS_PER_NPU]
+            remaining = remaining[len(acl):]
+            rel = remaining[:RELEASE_CPUS_PER_NPU]
+            remaining = remaining[len(rel):]
+            memcache = remaining[:memcache_cpu_count]
+
+            if len(main) < worker_cpu_count:
+                logger.warning(
+                    "NPU%d worker CPU count is %d, less than requested %d.",
+                    npu,
+                    len(main),
+                    worker_cpu_count,
+                )
+            if len(memcache) < memcache_cpu_count:
+                logger.warning(
+                    "NPU%d MemCache/KV transfer CPU count is %d, less than requested %d.",
+                    npu,
+                    len(memcache),
+                    memcache_cpu_count,
+                )
             self.assign_main[npu] = main
             self.assign_acl[npu] = acl
             self.assign_rel[npu] = rel
-            self.assign_kv_transfer[npu] = kv_transfer
+            self.assign_memcache[npu] = memcache
+            self.assign_kv_transfer[npu] = memcache
 
     def print_plan(self) -> None:
         logger.info("The CPU allocation plan is as follows:")
         current_npu = self.device_info.running_npu_list[self.rank_id]
         main = " ".join(map(str, self.assign_main[current_npu]))
+        memcache = " ".join(map(str, self.assign_memcache[current_npu]))
         kv_transfer = " ".join(map(str, self.assign_kv_transfer[current_npu]))
         acl = " ".join(map(str, self.assign_acl[current_npu]))
         rel = str(self.assign_rel[current_npu]) if self.assign_rel[current_npu] else ""
-        logger.info(f"NPU{current_npu}: main=[{main}]  kv_transfer=[{kv_transfer}]  acl=[{acl}]  release=[{rel}]")
+        logger.info(
+            f"NPU{current_npu}: main=[{main}]  memcache=[{memcache}] "
+            f"kv_transfer=[{kv_transfer}]  acl=[{acl}]  release=[{rel}]"
+        )
 
     def bind_memory(self, pid: str, npu: int) -> None:
         def _get_npu_numa_node(npu_id: int) -> int | None:
@@ -678,24 +630,26 @@ def bind_cpus(rank_id: int) -> None:
     binder.run_all()
 
 
-def get_kv_transfer_thread_cpus(rank_id: int, num_threads: int = KV_TRANSFER_CPUS_PER_NPU) -> list[int]:
+def get_kv_transfer_thread_cpus(rank_id: int, num_threads: int | None = None) -> list[int]:
     if not is_arm_cpu():
         return []
     binder = CpuAlloc(rank_id)
     binder.build_cpu_pools()
     current_npu = binder.device_info.running_npu_list[rank_id]
-    if binder.skipped_socket_cpus:
-        return binder.slice_skipped_socket_cpus(current_npu)[:num_threads]
     binder.allocate()
+    if num_threads is None:
+        num_threads = binder.memcache_cpu_count()
     return binder.assign_kv_transfer[current_npu][:num_threads]
 
 
 def get_memcache_client_cpus(rank_id: int) -> list[int]:
+    if not is_arm_cpu():
+        return []
     binder = CpuAlloc(rank_id)
-    binder.build_cpu_node_map()
-    binder.exclude_skip_sockets()
+    binder.build_cpu_pools()
+    binder.allocate()
     current_npu = binder.device_info.running_npu_list[rank_id]
-    return binder.slice_skipped_socket_cpus(current_npu)[KV_TRANSFER_CPUS_PER_NPU:]
+    return binder.assign_memcache[current_npu]
 
 
 def bind_thread_to_cpus(thread_id: int, cpus: list[int]) -> None:

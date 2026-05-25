@@ -543,10 +543,7 @@ class NPUWorker(WorkerBase):
         # Bind after warmup so hot allocations are already materialized on the
         # worker process before migratepages/taskset run.
         if get_ascend_config().enable_cpu_binding:
-            try:
-                bind_cpus(self.local_rank)
-            except Exception as e:
-                logger.warning(f"Bind cpus failed in rank{self.local_rank}: {e} Skip binding cpu.")
+            bind_cpus(self.local_rank)
         if has_kv_transfer_group():
             try:
                 connector = get_kv_transfer_group()
