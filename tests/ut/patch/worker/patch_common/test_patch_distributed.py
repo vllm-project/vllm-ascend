@@ -175,7 +175,6 @@ def _load_patch_distributed_module():
         def __init__(self, **kwargs):
             self.init_kwargs = kwargs
             self.destroy = MagicMock()
-            self.all_to_all = MagicMock()
             communicator_instances.append(self)
 
     npu_communicator_module.NPUCommunicator = FakeNPUCommunicator
@@ -575,65 +574,3 @@ def test_non_hccl_destroy_path_destroys_device_group_directly(module_env):
     ]
     assert not hasattr(group, "cpu_group")
     assert not hasattr(group, "device_group")
-
-
-def test_all_to_all_returns_input_when_world_size_is_one(module_env):
-    group = _make_group(module_env)
-    group.world_size = 1
-    input_tensor = module_env.torch.randn(2, 3)
-
-    assert group.all_to_all(input_tensor) is input_tensor
-
-
-def test_all_to_all_raises_assertion_on_invalid_scatter_dim(module_env):
-    group = _make_group(module_env)
-    input_tensor = module_env.torch.randn(2, 3)
-
-    with pytest.raises(AssertionError, match="Invalid scatter dim"):
-        group.all_to_all(input_tensor, scatter_dim=2)
-
-
-def test_all_to_all_raises_assertion_on_invalid_gather_dim(module_env):
-    group = _make_group(module_env)
-    input_tensor = module_env.torch.randn(2, 3)
-
-    with pytest.raises(AssertionError, match="Invalid gather dim"):
-        group.all_to_all(input_tensor, gather_dim=2)
-
-
-def test_all_to_all_calls_device_communicator_with_correct_args(module_env):
-    group = _make_group(module_env)
-    communicator = MagicMock()
-    communicator.all_to_all.return_value = "ok"
-    group.device_communicator = communicator
-
-    input_tensor = module_env.torch.randn(2, 3)
-    output = group.all_to_all(
-        input_tensor,
-        scatter_dim=0,
-        gather_dim=1,
-        scatter_sizes=[1, 1],
-        gather_sizes=[1, 1],
-    )
-
-    communicator.all_to_all.assert_called_once_with(
-        input_tensor,
-        0,
-        1,
-        [1, 1],
-        [1, 1],
-    )
-    assert output == "ok"
-
-
-def test_all_to_all_calls_device_communicator_without_sizes(module_env):
-    group = _make_group(module_env)
-    communicator = MagicMock()
-    communicator.all_to_all.return_value = "ok"
-    group.device_communicator = communicator
-
-    input_tensor = module_env.torch.randn(2, 3)
-    output = group.all_to_all(input_tensor, scatter_dim=0, gather_dim=1)
-
-    communicator.all_to_all.assert_called_once_with(input_tensor, 0, 1, None, None)
-    assert output == "ok"

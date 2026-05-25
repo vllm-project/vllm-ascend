@@ -230,8 +230,8 @@ class TestAscendLogitsProcessor(unittest.TestCase):
             patch("vllm_ascend.ops.vocab_parallel_embedding.get_lmhead_tp_group", return_value=self.mock_group),
             patch("vllm_ascend.ops.vocab_parallel_embedding.lmhead_tp_enable", return_value=True),
             patch(
-                "vllm_ascend.ops.vocab_parallel_embedding.get_lmhead_tp_group.all_to_all",
-                return_value=torch.randn(1, self.vocab_size),
+                "vllm_ascend.ops.vocab_parallel_embedding.dist.all_to_all_single",
+                side_effect=lambda out, inp, **kwargs: out.copy_(inp),
             ),
             patch(
                 "vllm_ascend.ops.vocab_parallel_embedding.get_lmhead_tp_group.all_gather",

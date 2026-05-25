@@ -17,6 +17,7 @@
 
 
 import torch
+import torch.distributed as dist
 from torch import nn
 from torch.nn.parameter import Parameter
 from vllm.distributed import divide
@@ -265,7 +266,9 @@ class AscendLogitsProcessor(LogitsProcessor):
         gathered_hidden_states = get_lmhead_tp_group().all_gather(hidden_states, dim=0)
         local_logits = lm_head.quant_method.apply(lm_head, gathered_hidden_states, bias=embedding_bias)
         # Gather logits for tensor parallel
-        logits = get_lmhead_tp_group().all_to_all(local_logits)
+        comm_group = get_lmhead_tp_group()
+        logits = torch.empty_like(local_logits)
+        dist.all_to_all_single(logits, local_logits.contiguous(), group=comm_group.device_group)
         # Remove paddings in vocab (if any)
         if logits is not None:
             logits = logits[..., : self.org_vocab_size]
