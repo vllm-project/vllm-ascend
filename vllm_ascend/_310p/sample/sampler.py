@@ -29,6 +29,42 @@ from vllm_ascend.utils import global_stream, npu_stream_switch
 _CPU_GENERATOR_CACHE_310P: dict[int, tuple[torch.Generator, int]] = {}
 
 
+def _get_cpu_generator_310p(i: int, generator: torch.Generator) -> torch.Generator:
+    cache_entry = _CPU_GENERATOR_CACHE_310P.get(i)
+    if cache_entry is None or cache_entry[1] != id(generator):
+        cpu_generator = torch.Generator(device="cpu")
+        try:
+            # Keep RNG stream consistent with the original generator.
+            cpu_generator.set_state(generator.get_state())
+        except Exception:
+            cpu_generator.manual_seed(generator.initial_seed())
+        cache_entry = (cpu_generator, id(generator))
+        _CPU_GENERATOR_CACHE_310P[i] = cache_entry
+    return cache_entry[0]
+
+
+def fill_exponential_310p(
+    q: torch.Tensor,
+    generators: dict[int, torch.Generator],
+    has_draft_mask: torch.Tensor | None = None,
+) -> None:
+    """Fill ``q`` with exponential values using CPU RNG for 310P stability."""
+    with npu_stream_switch(global_stream()):
+        q_cpu = q.cpu()
+        if len(generators) != q_cpu.shape[0]:
+            q_cpu.exponential_()
+        if generators:
+            for i, generator in generators.items():
+                temp_q = torch.empty_like(q_cpu[i])
+                temp_q.exponential_(generator=_get_cpu_generator_310p(i, generator))
+                if has_draft_mask is not None:
+                    q_cpu[i] = torch.where(has_draft_mask[i], temp_q, q_cpu[i])
+                else:
+                    q_cpu[i] = temp_q
+        q.copy_(q_cpu.to(q.device))
+    torch.npu.current_stream().wait_stream(global_stream())
+
+
 def _random_sample_310p(
     probs: torch.Tensor,
     generators: dict[int, torch.Generator],
@@ -41,18 +77,7 @@ def _random_sample_310p(
             q.exponential_()
         if generators:
             for i, generator in generators.items():
-                cache_entry = _CPU_GENERATOR_CACHE_310P.get(i)
-                if cache_entry is None or cache_entry[1] != id(generator):
-                    cpu_generator = torch.Generator(device="cpu")
-                    try:
-                        # Keep RNG stream consistent with the original generator.
-                        cpu_generator.set_state(generator.get_state())
-                    except Exception:
-                        cpu_generator.manual_seed(generator.initial_seed())
-                    cache_entry = (cpu_generator, id(generator))
-                    _CPU_GENERATOR_CACHE_310P[i] = cache_entry
-                cpu_generator, _ = cache_entry
-                q[i].exponential_(generator=cpu_generator)
+                q[i].exponential_(generator=_get_cpu_generator_310p(i, generator))
         q = q.npu()
     torch.npu.current_stream().wait_stream(global_stream())
     return probs.div_(q).argmax(dim=-1).view(-1)

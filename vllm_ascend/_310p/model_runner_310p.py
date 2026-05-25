@@ -39,15 +39,15 @@ from vllm.v1.kv_cache_interface import (
     MambaSpec,
     UniformTypeKVCacheSpecs,
 )
-from vllm.v1.sample.rejection_sampler import RejectionSampler
-from vllm.v1.spec_decode.metadata import SpecDecodeMetadata
 from vllm.v1.worker.cp_utils import get_total_cp_world_size
+from vllm.v1.spec_decode.metadata import SpecDecodeMetadata
 
 from vllm_ascend._310p.block_table import MultiGroupBlockTable as MultiGroupBlockTable310
 from vllm_ascend._310p.npu_input_batch import NPUInputBatch310 as NPUInputBatch
 from vllm_ascend._310p.ops.rotary_embedding import prepare_mrope_cos_sin_slices_from_runner
 from vllm_ascend._310p.sample.sampler import AscendSampler310
 from vllm_ascend.attention.attention_v1 import AscendAttentionState
+from vllm_ascend.sample.rejection_sampler import AscendRejectionSampler
 from vllm_ascend.spec_decode.utils import update_num_computed_tokens_for_batch_change
 from vllm_ascend.utils import ACL_FORMAT_FRACTAL_NZ, lmhead_tp_enable
 from vllm_ascend.worker.model_runner_v1 import NPUModelRunner
@@ -82,7 +82,7 @@ class NPUModelRunner310(NPUModelRunner):
         self._acl_format = ACL_FORMAT_FRACTAL_NZ
         self.sampler = AscendSampler310()
         if getattr(self, "rejection_sampler", None) is not None:
-            self.rejection_sampler = RejectionSampler(self.sampler)
+            self.rejection_sampler = AscendRejectionSampler(self.sampler)
         if self.speculative_config is not None and self.speculative_config.method == "ngram":
             # 310P ngram requires decode-only graph shapes to be built with q_len=1.
             # Keep dispatcher's internal query_len in sync to avoid key-init assert.
