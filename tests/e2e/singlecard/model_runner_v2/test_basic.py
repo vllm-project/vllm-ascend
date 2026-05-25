@@ -22,7 +22,6 @@ import pytest
 from vllm import SamplingParams
 
 from tests.e2e.conftest import VllmRunner
-from vllm_ascend.utils import vllm_version_is
 
 MODELS = ["Qwen/Qwen3-0.6B", "vllm-ascend/DeepSeek-V2-Lite-W8A8"]
 
