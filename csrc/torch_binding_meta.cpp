@@ -228,14 +228,15 @@ std::tuple<at::Tensor&, at::Tensor&> dispatch_ffn_combine_meta(
     const at::Tensor& expert_idx,
     const at::TensorList& scale1,
     const at::TensorList& scale2,
-    const c10::optional<at::TensorList>& bias1,
-    const c10::optional<at::TensorList>& bias2,
+    const at::TensorList& bias1,
+    const at::TensorList& bias2,
     const at::Tensor& probs,
     c10::string_view group,
     int64_t max_output_size,
     at::Tensor& out,
     at::Tensor& expert_token_nums,
-    const c10::optional<at::Tensor> &x_active_mask
+    const c10::optional<at::Tensor> &x_active_mask,
+    double swiglu_limit
 ) {
     return {out, expert_token_nums};
 }
@@ -602,10 +603,10 @@ at::Tensor npu_causal_conv1d_310_meta(
     const at::Tensor& weight,
     const c10::optional<at::Tensor>& bias,
     const at::Tensor& conv_states,
-    at::IntArrayRef query_start_loc,
-    at::IntArrayRef cache_indices,
-    at::IntArrayRef initial_state_mode,
-    at::IntArrayRef num_accepted_tokens,
+    const c10::optional<at::Tensor>& query_start_loc,
+    const c10::optional<at::Tensor>& cache_indices,
+    const c10::optional<at::Tensor>& initial_state_mode,
+    const c10::optional<at::Tensor>& num_accepted_tokens,
     int64_t activation_mode,
     int64_t pad_slot_id,
     int64_t run_mode)

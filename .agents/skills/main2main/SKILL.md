@@ -192,7 +192,41 @@ Normal long-running CI with regular output is not a hang and must keep running.
 
 7. **Write step summary.** After committing, write a brief summary for this step: what upstream changes were absorbed, what vllm-ascend files were modified, and any version guards added. Save to `/tmp/main2main/steps/<step-id>/summary.md`. This is important because later steps and the final report depend on it.
 
-### Phase 3: Final summary
+### Phase 3: Refresh adapt-guide tables (after all steps are committed)
+
+The lookup tables in `reference/adapt-guide.md` drift as vllm-ascend evolves —
+new modules appear, old paths get renamed or deleted. Refresh them once per run
+*after every step is committed* (not per step), so the next main2main run reads
+an up-to-date guide. Only run this when the run is on track to reach `completed`
+or a clean partial stop; skip it if the pipeline rolled back.
+
+1. Run the linter to surface drift:
+```bash
+python3 <skill_dir>/scripts/lint_adapt_guide.py \
+  --ascend-path <ascend_path>
+```
+This writes `/tmp/main2main/adapt-guide-refresh/check_report.md` with three
+sections: invalidated paths, uncovered vllm_ascend/ directories, and upstream
+paths touched this run that the file-mapping table doesn't cover.
+
+2. Update **only the three AUTO-MAINTAINED regions** in
+`reference/adapt-guide.md` — `key-areas`, `file-locations`, `file-mapping`.
+Use the report plus this run's `changed-files.txt` to decide what to add,
+rename, or remove. Do not touch the surrounding prose, headings, or any other
+section of the file.
+
+3. Commit the refresh as a separate commit, only if the guide actually changed:
+```bash
+git -C <ascend_path> diff --quiet \
+  .agents/skills/main2main/reference/adapt-guide.md \
+  || git -C <ascend_path> commit -s \
+       -m "docs(main2main): refresh adapt-guide tables" \
+       -- .agents/skills/main2main/reference/adapt-guide.md
+```
+Use `git add <file>`, never `git add .`. Keep this commit separate from any
+step's functional commit so reviewers can audit the table changes alone.
+
+### Phase 4: Final summary
 
 Output a reviewer-facing Markdown summary only when one of these is true:
 1. Every planned step has been completed, verified, committed, and the target
@@ -220,4 +254,5 @@ These are the things most commonly missed, based on past experience:
 - [ ] Each commit message includes the upstream commit range
 - [ ] Each step has a summary in `/tmp/main2main/steps/<step-id>/summary.md`
 - [ ] If partial stop: patch + failure details saved
+- [ ] `lint_adapt_guide.py` ran and any updates to the three AUTO-MAINTAINED regions in `reference/adapt-guide.md` were committed as a separate commit
 - [ ] Final summary output to user
