@@ -109,7 +109,7 @@ jobs:
       - name: Cache vllm-ascend csrc
         id: cache-csrc
         if: ${{ steps.check_npu.outputs.has_npu == 'true' }}
-        uses: runs-on/cache@v4
+        uses: runs-on/cache@v5
         with:
           path: |
             vllm_ascend/_cann_ops_custom
