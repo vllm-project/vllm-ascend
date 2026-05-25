@@ -108,15 +108,15 @@ class UvaBufferWrapper:
                 #     f"try to add os.environ['PYTORCH_NPU_ALLOC_CONF'] = 'pinned_mem_register:True'"
                 # )
                 raise RuntimeError("error")
-            self.cpu: torch.Tensor = torch.zeros(size, dtype=dtype, device="cpu", pin_memory=True)
-            if not self.cpu.is_pinned():
+            self._cpu: torch.Tensor = torch.zeros(size, dtype=dtype, device="cpu", pin_memory=True)
+            if not self._cpu.is_pinned():
                 error_info = (
                     "UVA is not available, because cpu tensor is not pinned, "
                     "try to use .pin_memory() to cpu_tensor wantted to use uva feature"
                 )
                 raise RuntimeError(error_info)
-            self.np = self.cpu.numpy()
-            self.uva: torch.Tensor = self.cpu
+            self._np = self._cpu.numpy()
+            self._uva: torch.Tensor = self._cpu
         else:
             self._cpu: torch.Tensor = torch.zeros(size, dtype=dtype, device="cpu", pin_memory=True)
             self._np = self._cpu.numpy()
