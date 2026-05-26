@@ -2426,6 +2426,7 @@ class AscendDSAImpl(DSAAttentionImpl):
             with_prefill,
         )
 
+
     def _indexer_qli_finish(
         self,
         q: torch.Tensor,
