@@ -257,6 +257,9 @@ class NPUWorker(WorkerBase):
         device = torch.device(f"npu:{self.local_rank}")
         torch.npu.set_device(device)
 
+        # if true, allow tensor initialization and casting with internal format (e.g., NZ)
+        torch.npu.config.allow_internal_format = True
+
         # Import _inductor for graph mode execution with triton
         # This lazy import avoids torch_npu re-initialization in patch
         # Note that this should be imported after torch.npu.set_device
