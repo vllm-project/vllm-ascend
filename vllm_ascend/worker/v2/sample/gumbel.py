@@ -158,12 +158,9 @@ def gumbel_sample(
     output_processed_logits: torch.Tensor | None = None,
     output_processed_logits_col: torch.Tensor | None = None,
     use_fp64: bool = False,
-    processed_logits_out: torch.Tensor | None = None,
 ) -> torch.Tensor:
     if use_fp64:
         raise NotImplementedError("FP64 Gumbel sampling is not supported on NPU.")
-    if output_processed_logits is None:
-        output_processed_logits = processed_logits_out
 
     num_reqs, vocab_size = logits.shape
     BLOCK_SIZE = 1024
