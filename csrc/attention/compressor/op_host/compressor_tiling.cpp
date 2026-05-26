@@ -332,6 +332,7 @@ ge::graphStatus CompressorTiling::GenTilingKey() const
     uint8_t dtype = 0;
     // 0: BSH 1:TH
     uint8_t layout = 0;
+    uint8_t ropeDtype = 0;
     uint8_t rotaryMode = static_cast<uint8_t>(*context_->rotaryMode);
     uint8_t templateId = static_cast<uint8_t>(context_->templateId);
     uint8_t cacheMode = static_cast<uint8_t>(*context_->cacheMode);
@@ -341,6 +342,11 @@ ge::graphStatus CompressorTiling::GenTilingKey() const
         dtype = 0;
     } else if (xDtype == ge::DT_FLOAT16) {
         dtype = 1;
+    }
+    auto ropeSinDtype = context_->ropeSin.desc->GetDataType();
+    auto ropeCosDtype = context_->ropeCos.desc->GetDataType();
+    if (ropeSinDtype == ge::DT_FLOAT && ropeCosDtype == ge::DT_FLOAT) {
+        ropeDtype = 1;
     }
     auto xDimNum = context_->x.shape->GetStorageShape().GetDimNum();
     if (xDimNum == COMPRESSOR_DIM_NUM_3) {
@@ -352,14 +358,15 @@ ge::graphStatus CompressorTiling::GenTilingKey() const
     context_->tilingKey = GET_TPL_TILING_KEY(
         layout,
         dtype,
+        ropeDtype,
         coff,
         rotaryMode,
         1,
         templateId
     );
     OP_LOGI(context_->opName,
-            "Compressor dtype:%hhu layout:%hhu  coff:%hhu rotary_mode:%hhu, cacheMode: %u, template_id:%hhu", dtype,
-            layout, coff, rotaryMode, cacheMode, templateId);
+            "Compressor dtype:%hhu rope_dtype:%hhu layout:%hhu  coff:%hhu rotary_mode:%hhu, cacheMode: %u, template_id:%hhu",
+            dtype, ropeDtype, layout, coff, rotaryMode, cacheMode, templateId);
     OP_LOGI(context_->opName, "Compressor tilingKey:%lu", context_->tilingKey);
 
     return ge::GRAPH_SUCCESS;
@@ -887,13 +894,30 @@ ge::graphStatus CompressorTiling::CheckDtypeConsistencyX(const gert::CompileTime
     return ge::GRAPH_SUCCESS;
 }
 
+ge::graphStatus CompressorTiling::CheckDtypeConsistencyRope() const
+{
+    auto sinDtype = context_->ropeSin.desc->GetDataType();
+    auto cosDtype = context_->ropeCos.desc->GetDataType();
+    OP_CHECK_IF(
+        sinDtype != cosDtype,
+        OP_LOGE(context_->opName, "%s datatype should be same with %s: %s, but got %s", ROPE_COS_NAME.c_str(),
+                ROPE_SIN_NAME.c_str(), DataTypeToSerialString(sinDtype).c_str(),
+                DataTypeToSerialString(cosDtype).c_str()),
+        return ge::GRAPH_FAILED);
+    OP_CHECK_IF(
+        sinDtype != context_->dtype && sinDtype != ge::DT_FLOAT,
+        OP_LOGE(context_->opName, "rope datatype should be same with x or DT_FLOAT, x is %s, but got %s",
+                DataTypeToSerialString(context_->dtype).c_str(), DataTypeToSerialString(sinDtype).c_str()),
+        return ge::GRAPH_FAILED);
+    return ge::GRAPH_SUCCESS;
+}
+
 ge::graphStatus CompressorTiling::CheckDtypeConsistency() const
 {
     if (CheckDtypeConsistencyX(context_->wkv.desc, WKV_NAME) != ge::GRAPH_SUCCESS ||
         CheckDtypeConsistencyX(context_->wgate.desc, WGATE_NAME) != ge::GRAPH_SUCCESS ||
         CheckDtypeConsistencyX(context_->normWeight.desc, NORM_WEIGHT_NAME) != ge::GRAPH_SUCCESS ||
-        CheckDtypeConsistencyX(context_->ropeSin.desc, ROPE_SIN_NAME) != ge::GRAPH_SUCCESS ||
-        CheckDtypeConsistencyX(context_->ropeCos.desc, ROPE_COS_NAME) != ge::GRAPH_SUCCESS ||
+        CheckDtypeConsistencyRope() != ge::GRAPH_SUCCESS ||
         CheckDtypeConsistencyX(context_->cmpKv.desc, CMP_KV_NAME) != ge::GRAPH_SUCCESS) {
         return ge::GRAPH_FAILED;
     }
