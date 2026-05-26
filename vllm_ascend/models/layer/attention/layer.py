@@ -19,6 +19,7 @@ from vllm.utils.torch_utils import kv_cache_dtype_str_to_dtype
 from vllm.v1.attention.backend import AttentionBackend
 from vllm.v1.attention.backends.mla.sparse_swa import DeepseekV4SWACache
 from vllm.v1.kv_cache_interface import KVCacheSpec, MLAAttentionSpec
+from vllm.v1.kv_cache_spec_registry import KVCacheSpecRegistry
 
 from vllm_ascend.attention.abstract import DSAAttentionImpl
 from vllm_ascend.attention.dsa_v1 import AscendDSABackend
@@ -150,7 +151,8 @@ class DSAAttention(nn.Module, AttentionLayerBase):
         if self.compress_ratio <= 1:  # SWA part. Allocated separately as DeepseekV4SWACache.
             return None
         kv_cache_dtype = kv_cache_dtype_str_to_dtype(self.kv_cache_dtype, vllm_config.model_config)
-        return MLAAttentionSpec(
+        return KVCacheSpecRegistry.create(
+            MLAAttentionSpec,
             block_size=128,
             num_kv_heads=1,
             head_size=self.head_size,

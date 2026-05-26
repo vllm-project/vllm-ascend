@@ -32,6 +32,7 @@ from tests.e2e.conftest import VllmRunner, wait_until_npu_memory_free
 
 os.environ["PYTORCH_NPU_ALLOC_CONF"] = "max_split_size_mb:256"
 os.environ["VLLM_WORKER_MULTIPROC_METHOD"] = "spawn"
+os.environ["VLLM_USE_MODELSCOPE"] = "True"
 
 QWEN_DENSE_MODELS = [
     "vllm-ascend/Qwen3-0.6B-W8A8",
@@ -214,12 +215,12 @@ def test_deepseek3_2_w8a8_pruning_mtp_tp2_ep():
 def test_deepseek3_2_w8a8c8_pruning_mtp_tp2_ep():
     short_example_prompts = [
         "Hello ",
-    ]
+    ] * 4
     # "max_position_embeddings": 163840,
     long_example_prompts = ["Hello " * (163839 - 500) + "Hello"]
     max_tokens = 500
     with VllmRunner(
-        "vllm-ascend/DeepSeek-V3.2-W8A8-Pruning",
+        "/home/cmq/cache/modelscope/models/vllm-ascend/DeepSeek-V3.2-W8A8-Pruning",
         tensor_parallel_size=2,
         quantization="ascend",
         enable_expert_parallel=True,

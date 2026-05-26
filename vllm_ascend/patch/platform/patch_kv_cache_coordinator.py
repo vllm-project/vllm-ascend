@@ -19,8 +19,6 @@ from vllm.v1.core.kv_cache_utils import (
 from vllm.v1.core.single_type_kv_cache_manager import SingleTypeKVCacheManager
 from vllm.v1.kv_cache_interface import FullAttentionSpec, KVCacheConfig, KVCacheSpec
 
-from vllm_ascend.core.single_type_kv_cache_manager import get_manager_for_kv_cache_spec
-
 USE_MULTI_GROUPS_KV_CACHE = True
 
 
@@ -46,50 +44,18 @@ class AscendHybridKVCacheCoordinator(HybridKVCacheCoordinator):
         eagle_attn_layer_names: list[str] | None = None,
         metrics_collector: KVCacheMetricsCollector | None = None,
     ):
-        self.kv_cache_config = kv_cache_config
-        self.max_model_len = max_model_len
-        self.enable_caching = enable_caching
-
-        self.block_pool = BlockPool(
-            kv_cache_config.num_blocks,
+        super().__init__(
+            kv_cache_config,
+            max_model_len,
+            use_eagle,
             enable_caching,
-            hash_block_size,
             enable_kv_cache_events,
+            dcp_world_size,
+            pcp_world_size,
+            hash_block_size,
+            eagle_attn_layer_names,
             metrics_collector,
         )
-
-        # KV cache group indices that get the EAGLE last-block drop.
-        self.eagle_group_ids: set[int] = {i for i, g in enumerate(kv_cache_config.kv_cache_groups) if g.is_eagle_group}
-        # Conservatively fall back to flag all groups when no group is flagged.
-        if use_eagle and not self.eagle_group_ids:
-            self.eagle_group_ids = set(range(len(kv_cache_config.kv_cache_groups)))
-
-        self.single_type_managers = tuple(
-            get_manager_for_kv_cache_spec(
-                kv_cache_spec=kv_cache_group.kv_cache_spec,
-                block_pool=self.block_pool,
-                enable_caching=enable_caching,
-                kv_cache_group_id=i,
-                dcp_world_size=dcp_world_size,
-                pcp_world_size=pcp_world_size,
-            )
-            for i, kv_cache_group in enumerate(self.kv_cache_config.kv_cache_groups)
-        )
-
-        # hash_block_size: the block size used to compute block hashes.
-        # The actual block size usually equals hash_block_size, but in cases where
-        # different KV cache groups have different block sizes, the actual block size
-        # can be a multiple of hash_block_size.
-        self.hash_block_size = hash_block_size
-        if enable_caching:
-            assert all(g.kv_cache_spec.block_size % hash_block_size == 0 for g in kv_cache_config.kv_cache_groups), (
-                "block_size must be divisible by hash_block_size"
-            )
-        assert dcp_world_size == 1, "DCP not support hybrid attn now."
-        assert pcp_world_size == 1, "PCP not support hybrid attn now."
-        self.verify_and_split_kv_cache_groups()
-
-        self.use_eagle = use_eagle
 
     def verify_and_split_kv_cache_groups(self) -> None:
         """
