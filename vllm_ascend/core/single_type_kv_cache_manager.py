@@ -244,7 +244,7 @@ def get_manager_for_kv_cache_spec(
             compress_ratio = kv_cache_spec.compress_ratio
             block_size = kv_cache_spec.block_size
             max_compressed_tokens = max_model_len // compress_ratio
-            kwargs["max_admission_blocks_per_request"] = cdiv(max_compressed_tokens, block_size) + compress_ratio
+            kwargs["max_admission_blocks_per_request"] = cdiv(max_compressed_tokens, block_size) + 1
     elif isinstance(kv_cache_spec, (SlidingWindowSpec, ChunkedLocalAttentionSpec)):
         # Replicate the upstream PR #40946 cap setting for recycling specs.
         # We override the vLLM factory above, so the upstream block that does
