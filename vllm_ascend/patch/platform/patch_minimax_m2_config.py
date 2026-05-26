@@ -119,7 +119,7 @@ def _patched_verify_cuda_graph(self: ModelConfig) -> None:
         expansion_mode = os.environ.get("HCCL_OP_EXPANSION_MODE")
         if expansion_mode is None:
             os.environ["HCCL_OP_EXPANSION_MODE"] = "AIV"
-            logger.info_once("Set HCCL_OP_EXPANSION_MODE=AIV for MiniMax-M2 ACL graph capture on NPU.")
+            logger.info("Set HCCL_OP_EXPANSION_MODE=AIV for MiniMax-M2 ACL graph capture on NPU.")
         elif expansion_mode != "AIV":
             logger.warning(
                 "HCCL_OP_EXPANSION_MODE=%s may reduce ACL graph shape "
