@@ -33,6 +33,8 @@ from .interaction.elastic import ElasticServer
 from .load import elastic_load
 from .utils import find_free_port, is_valid_path_prefix
 
+DRAFT_PORT_OFFSET = 10000
+
 
 @register_model_loader("netloader")
 class ModelNetLoaderElastic(BaseModelLoader):
@@ -123,6 +125,11 @@ class ModelNetLoaderElastic(BaseModelLoader):
             self.output_prefix,
         )
 
+    @staticmethod
+    def _is_draft_model(model_config: ModelConfig) -> bool:
+        """Check whether the model_config corresponds to a draft model for speculative decoding."""
+        return getattr(model_config, "runner_type", None) == "draft"
+
     def load_model(self, vllm_config: VllmConfig, model_config: ModelConfig, prefix: str = "") -> nn.Module:
         """
         Loads the model using the specified configuration.
@@ -146,6 +153,12 @@ class ModelNetLoaderElastic(BaseModelLoader):
             logger.info("model_path is set to %s", self.model_path)
 
         device_id = torch.distributed.get_rank()
+        is_draft = self._is_draft_model(model_config)
+
+        if is_draft:
+            logger.info("Loading draft model via netloader, model_path: %s", model_config.model)
+        else:
+            logger.info("Loading target model via netloader, model_path: %s", model_config.model)
 
         if (
             self.source is None
@@ -173,13 +186,29 @@ class ModelNetLoaderElastic(BaseModelLoader):
                     model = initialize_model(vllm_config=vllm_config, model_config=model_config, prefix=prefix)
 
                 start_elastic_load = time.perf_counter()
+
+                sources = self.source
+                if is_draft:
+                    sources = [
+                        {
+                            "device_id": s["device_id"],
+                            "sources": [
+                                f"{ip}:{int(port) + DRAFT_PORT_OFFSET}"
+                                for addr in s["sources"]
+                                for ip, port in [addr.rsplit(":", 1)]
+                            ],
+                        }
+                        for s in self.source
+                    ]
+
                 model = elastic_load(
                     model=model,
                     device_id=device_id,
-                    model_path=self.model_path,
-                    sources=self.source,
+                    model_path=model_config.model,
+                    sources=sources,
                     tp=parallel_config.tensor_parallel_size,
                     pp=parallel_config.pipeline_parallel_size,
+                    group_name="netloader_draft" if is_draft else "netloader",
                 )
                 end_elastic_load = time.perf_counter()
                 logger.info("Elastic load time: %s, rank: %s", end_elastic_load - start_elastic_load, device_id)
@@ -220,15 +249,20 @@ class ModelNetLoaderElastic(BaseModelLoader):
                     self.listen_port = find_free_port()
                 else:
                     self.listen_port += device_id
+                if is_draft:
+                    self.listen_port += DRAFT_PORT_OFFSET
+
+                group_name = "netloader_draft" if is_draft else "netloader"
 
                 logger.info(
-                    "Start elastic Netloader server, rank: %s, listen port: %s:%s",
+                    "Start elastic Netloader server, rank: %s, listen port: %s:%s, group: %s",
                     device_id,
                     driver_ip,
                     self.listen_port,
+                    group_name,
                 )
 
-                if self.output_prefix is not None:
+                if self.output_prefix is not None and not is_draft:
                     try:
                         with open(self.output_prefix + str(device_id) + ".txt", "w") as file:
                             file.write(f"{driver_ip}:{self.listen_port}")
@@ -254,13 +288,18 @@ class ModelNetLoaderElastic(BaseModelLoader):
                         self.listen_port,
                         model,
                         device_id,
-                        self.model_path,
+                        model_config.model,
                         parallel_config.tensor_parallel_size,
                         parallel_config.pipeline_parallel_size,
                         self.int8_cache,
                         self.int8_cache_name,
+                        group_name=group_name,
                     )
                     elastic_server.start()
+                    if is_draft:
+                        self._draft_elastic_server = elastic_server
+                    else:
+                        self._target_elastic_server = elastic_server
                 except Exception as e:
                     logger.error("Failed to start Netloader server for rank: %s, details: %s", device_id, e)
         else:
