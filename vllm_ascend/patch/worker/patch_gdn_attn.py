@@ -17,6 +17,7 @@ from dataclasses import dataclass
 
 import torch
 import vllm.v1.attention.backends.gdn_attn as gdn_attn
+from vllm.v1.attention.backends.utils import NULL_BLOCK_ID
 
 from vllm_ascend.ops.triton.gdn_chunk_meta import (
     _build_seq_lens,
