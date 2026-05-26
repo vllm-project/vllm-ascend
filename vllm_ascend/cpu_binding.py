@@ -74,9 +74,15 @@ class DeviceInfo:
     def get_all_logic_npus(self) -> list[int]:
         """Collect all logical NPU IDs from the NPU mapping.
 
-        self.npu_map_info maps a board_id (A3) or npu_id (A2) to a per-chip map.
+        self.npu_map_info maps a physical npu_id to a per-chip map.
         The per-chip map uses chip_id as the key and the logical NPU ID string
         as the value.
+
+        Example on 310P:
+          32768 chip0 -> logic0
+          32768 chip1 -> logic1
+          32896 chip0 -> logic2
+          32896 chip1 -> logic3
         """
         logic_ids: set[int] = set()
         for _, chip_map in self.npu_map_info.items():
@@ -85,15 +91,37 @@ class DeviceInfo:
                     logic_ids.add(int(logic_str))
         return sorted(logic_ids)
 
+    def get_physical_chip_by_logic_id(self, logic_npu_id: int) -> tuple[str, str] | None:
+        """Return physical npu_id and chip_id by logical NPU ID.
+
+        Example:
+          logic0 -> ("32768", "0")
+          logic1 -> ("32768", "1")
+          logic2 -> ("32896", "0")
+          logic3 -> ("32896", "1")
+        """
+        for physical_npu_id, chip_map in self.npu_map_info.items():
+            for chip_id, logic_str in chip_map.items():
+                if logic_str and logic_str.isdigit() and int(logic_str) == logic_npu_id:
+                    return physical_npu_id, chip_id
+        return None
+
     @staticmethod
     def get_npu_map_info() -> dict[str, dict[str, str]]:
         npu_map_info: dict[str, dict[str, str]] = {}
         npu_info, _ = execute_command(["npu-smi", "info", "-m"])
         npu_map = npu_info.strip().split("\n")[1:]
         for line in npu_map:
-            npu_id, chip_id, chip_logic_id = line.strip().split()[:3]
+            parts = line.strip().split()
+            if len(parts) < 3:
+                continue
+
+            npu_id, chip_id, chip_logic_id = parts[:3]
+
+            # Skip MCU or invalid chip logic IDs.
             if not chip_logic_id.isdigit():
                 continue
+
             if npu_id not in npu_map_info:
                 npu_map_info[npu_id] = {}
             npu_map_info[npu_id][chip_id] = chip_logic_id
@@ -114,18 +142,26 @@ class DeviceInfo:
                 parts = [p.strip() for p in line.strip("|").split("|")]
                 if len(parts) < 2:
                     continue
-                npu_id = parts[0].split()[0]
-                chip_id = parts[0].split()[1]
+
+                npu_chip = parts[0].split()
+                if len(npu_chip) < 2:
+                    continue
+
+                npu_id = npu_chip[0]
+                chip_id = npu_chip[1]
+
                 if not npu_id.isdigit() or not chip_id.isdigit():
                     continue
                 chip_logic_id = self.npu_map_info.get(npu_id, {}).get(chip_id)
                 if not chip_logic_id or not chip_logic_id.isdigit():
                     raise RuntimeError("Failed to get correct chip_logic_id from command 'npu-smi info -m'.")
                 running_npu_set.add(int(chip_logic_id))
+
         if ASCEND_RT_VISIBLE_DEVICES:
             devices_str = ASCEND_RT_VISIBLE_DEVICES
             devices_list = [int(x) for x in devices_str.split(",")]
             running_npu_set = set(devices_list) & running_npu_set
+
         if not running_npu_set:
             raise RuntimeError("Can not get running npu info.")
         return sorted(running_npu_set)
@@ -140,16 +176,70 @@ class DeviceInfo:
         raise RuntimeError("Can not found specific 'Cpus_allowed_list' in the '/proc/self/status' file.")
 
     def parse_topo_affinity(self) -> dict[int, list[int]]:
-        chip_logic_id = 0
+        """Parse topology CPU affinity and map it to logical NPU IDs.
+
+        Some 310P systems report topo affinity by physical NPU ID:
+
+            NPU32768 ... CPU Affinity 48-71
+            NPU32896 ... CPU Affinity 48-71
+
+        while `npu-smi info -m` reports multiple chip logic IDs under each
+        physical NPU:
+
+            32768 chip0 -> logic0
+            32768 chip1 -> logic1
+            32896 chip0 -> logic2
+            32896 chip1 -> logic3
+
+        In this case, physical NPU affinity must be expanded to all logical
+        chip IDs under the same physical NPU.
+        """
+        fallback_logic_id = 0
         affinity: dict[int, list[int]] = {}
         affinity_message, _ = execute_command(["npu-smi", "info", "-t", "topo"])
+
         for line in affinity_message.splitlines():
-            if line.startswith("NPU"):
-                parts = line.split()
-                last_part = parts[-1]
-                if last_part != "Affinity":
-                    affinity[chip_logic_id] = self.expand_cpu_list(last_part)
-                chip_logic_id += 1
+            line = line.strip()
+            if not line.startswith("NPU"):
+                continue
+
+            parts = line.split()
+            if len(parts) < 2:
+                continue
+
+            npu_token = parts[0]
+            last_part = parts[-1]
+
+            # Header line example:
+            # NPU32768 NPU32896 CPU Affinity
+            if last_part == "Affinity":
+                continue
+
+            try:
+                cpu_list = self.expand_cpu_list(last_part)
+            except ValueError:
+                logger.warning("Failed to parse CPU affinity from topo line: %s", line)
+                continue
+
+            # Example: NPU32768 -> 32768
+            physical_npu_id = npu_token.removeprefix("NPU")
+            chip_map = self.npu_map_info.get(physical_npu_id)
+
+            if chip_map:
+                for _, logic_str in chip_map.items():
+                    if logic_str and logic_str.isdigit():
+                        affinity[int(logic_str)] = cpu_list
+            else:
+                # Fallback for platforms where topo rows are already ordered by logical NPU ID.
+                affinity[fallback_logic_id] = cpu_list
+
+            fallback_logic_id += 1
+
+        logger.debug(
+            "[cpu_topo_affinity] parsed affinity keys=%s, npu_map_info=%s",
+            sorted(affinity.keys()),
+            self.npu_map_info,
+        )
         return affinity
 
 
@@ -198,9 +288,9 @@ class CpuAlloc:
         if cpus:
             cpu_list = ",".join(map(str, cpus))
             if bind_sub_thread:
-                bind_result, return_code = execute_command(["taskset", "-acp", cpu_list, pid])
+                _, return_code = execute_command(["taskset", "-acp", cpu_list, pid])
             else:
-                bind_result, return_code = execute_command(["taskset", "-cp", cpu_list, pid])
+                _, return_code = execute_command(["taskset", "-cp", cpu_list, pid])
             if return_code != 0:
                 raise RuntimeError(f"Failed to bind {pid} to CPU {cpu_list}.")
 
@@ -266,7 +356,6 @@ class CpuAlloc:
         if total_cpu == 0:
             return
 
-        # Prefer mapping info (npu-smi info -m), fallback to topo keys, then visible list
         if self.device_info.total_logic_npus > 0:
             total_npus = self.device_info.total_logic_npus
         elif self.device_info.npu_affinity:
@@ -274,7 +363,9 @@ class CpuAlloc:
         else:
             total_npus = len(running)
 
-        # Compute global per-NPU slicing
+        if total_npus <= 0:
+            return
+
         base = total_cpu // total_npus
         extra = total_cpu % total_npus
 
@@ -292,9 +383,6 @@ class CpuAlloc:
             allowed[-16:],
         )
 
-        # Enforce per-NPU slice length >= 5.
-        # Because with remainder distribution, some NPUs may get 'base' cores and some get 'base+1'.
-        # The minimum slice size is 'base'.
         if base < MIN_CPUS_PER_NPU:
             raise RuntimeError(
                 "Insufficient CPUs for binding with IRQ/ACL/REL reservations: "
@@ -326,7 +414,10 @@ class CpuAlloc:
 
         mode = self._binding_mode()
         logger.info(
-            "[cpu_bind_mode] mode=%s rank=%s visible_npus=%s", mode, self.rank_id, self.device_info.running_npu_list
+            "[cpu_bind_mode] mode=%s rank=%s visible_npus=%s",
+            mode,
+            self.rank_id,
+            self.device_info.running_npu_list,
         )
         if mode == GLOBAL_SLICE_MODE:
             self.build_global_slice_cpu_pool()
@@ -348,12 +439,29 @@ class CpuAlloc:
             if npu in self.device_info.running_npu_list
             or any(cpu in allowed_cpu_set for cpu in self.device_info.npu_affinity.get(npu, []))
         ]
+
+        logger.debug(
+            "[cpu_bind_debug] rank=%s running_npus=%s all_logic_npus=%s candidate_npus=%s "
+            "npu_affinity_keys=%s allowed_cpus=%s",
+            self.rank_id,
+            self.device_info.running_npu_list,
+            self.device_info.all_logic_npus,
+            candidate_npus,
+            sorted(self.device_info.npu_affinity.keys()),
+            self.device_info.allowed_cpus,
+        )
+
         for npu in candidate_npus:
-            base_cpu_list = [
-                cpu for cpu in self.device_info.npu_affinity.get(npu, []) if cpu in self.device_info.allowed_cpus
-            ]
+            topo_cpu_list = self.device_info.npu_affinity.get(npu, [])
+            base_cpu_list = [cpu for cpu in topo_cpu_list if cpu in self.device_info.allowed_cpus]
             if not base_cpu_list:
-                raise RuntimeError("CPUs available in 'Cpus_allowed_list' conflict with NUMA affinity.")
+                raise RuntimeError(
+                    "No available CPUs for NPU binding. "
+                    f"npu={npu}, topo_cpus={topo_cpu_list}, "
+                    f"allowed_cpus={self.device_info.allowed_cpus}, "
+                    f"npu_affinity_keys={sorted(self.device_info.npu_affinity.keys())}. "
+                    "This may be caused by cpuset/topo conflict or missing topo affinity for this logical NPU."
+                )
             extra_cpu_list = self.extend_numa(base_cpu_list)
             self.npu_cpu_pool[npu] = extra_cpu_list
 
@@ -435,6 +543,51 @@ class CpuAlloc:
         # Migrate memory once for the whole process, after all threads are pinned.
         self.bind_memory(main_pid, current_npu)
 
+    def _get_board_info(self, npu: int) -> str:
+        """Get board info by logical NPU ID.
+
+        For 310P, logical NPU ID may not equal physical npu_id. For example:
+          logic0 -> physical 32768 chip0
+          logic1 -> physical 32768 chip1
+          logic2 -> physical 32896 chip0
+          logic3 -> physical 32896 chip1
+
+        Prefer npu-smi info -m reverse mapping first, then fallback to legacy logic.
+        """
+        physical_chip = self.device_info.get_physical_chip_by_logic_id(npu)
+        if physical_chip is not None:
+            physical_npu_id, chip_id = physical_chip
+            info, return_code = execute_command(
+                ["npu-smi", "info", "-t", "board", "-i", str(physical_npu_id), "-c", str(chip_id)]
+            )
+            if return_code == 0 and info.strip():
+                return info
+
+            logger.debug(
+                "[irq] failed to query board by physical mapping: npu=%s physical_npu_id=%s chip_id=%s",
+                npu,
+                physical_npu_id,
+                chip_id,
+            )
+
+        device_type = get_ascend_device_type()
+        if device_type == AscendDeviceType.A3:
+            card_id = npu // 2
+            chip_id = npu % 2
+            info, _ = execute_command(["npu-smi", "info", "-t", "board", "-i", str(card_id), "-c", str(chip_id)])
+            return info
+
+        info, _ = execute_command(["npu-smi", "info", "-t", "board", "-i", str(npu)])
+        return info
+
+    @staticmethod
+    def _parse_pci_addr(board_info: str) -> str:
+        for line in board_info.splitlines():
+            normalized = line.lower()
+            if "pcie bus info" in normalized or "pci bus info" in normalized or "bus info" in normalized:
+                return line.split()[-1].lower()
+        return ""
+
     def bind_npu_irq(self) -> None:
         if not os.access("/proc/irq", os.W_OK):
             return
@@ -469,26 +622,16 @@ class CpuAlloc:
             logger.warning("[irq] NPU%s cpu pool too small (<2), skip irq binding.", npu)
             return
 
-        sq_cpu, cq_cpu = cpus[0], cpus[1]  # Reserved for IRQ binding
-        pci_addr = ""
-
-        device_type = get_ascend_device_type()
-        if device_type == AscendDeviceType.A3:
-            # A3: logical npu_id = card_id*2 + chip_id
-            card_id = npu // 2
-            chip_id = npu % 2
-            info, _ = execute_command(["npu-smi", "info", "-t", "board", "-i", str(card_id), "-c", str(chip_id)])
-        else:
-            # A2 / others: logical npu_id is card id
-            info, _ = execute_command(["npu-smi", "info", "-t", "board", "-i", str(npu)])
-
-        for line in info.splitlines():
-            if "PCIe Bus Info" in line:
-                pci_addr = line.split()[-1].lower()
-                break
+        sq_cpu, cq_cpu = cpus[0], cpus[1]
+        board_info = self._get_board_info(npu)
+        pci_addr = self._parse_pci_addr(board_info)
 
         if not pci_addr:
-            logger.warning("Can't find pci address of NPU%s .", npu)
+            logger.warning(
+                "Can't find pci address of NPU%s. board_info_head=%s",
+                npu,
+                board_info.splitlines()[:8],
+            )
             return
 
         try:
