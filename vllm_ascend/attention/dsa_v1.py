@@ -1540,7 +1540,7 @@ class AscendDSAImpl(DSAAttentionImpl):
         self,
         layer_name,
         hidden_states: torch.Tensor,  # query in unified attn
-        kv_cache: tuple[torch.Tensor, ...],
+        kv_cache: tuple[torch.Tensor, ...] | None,
         attn_metadata: DSAMetadataList,
         need_gather_q_kv: bool = False,
         output: torch.Tensor | None = None,
@@ -1582,6 +1582,7 @@ class AscendDSAImpl(DSAAttentionImpl):
         forward_context = get_forward_context()
         o_proj_input_shape = (forward_context.num_tokens, self.n_local_heads, self.head_dim)
         o_proj_input = torch.empty(o_proj_input_shape, dtype=hidden_states.dtype, device=hidden_states.device)
+        assert kv_cache is not None, "kv_cache tensor tuple must be provided."
         if has_prefill:
             assert attn_metadata[0].prefill is not None
             output_prefill = self._forward_prefill(
