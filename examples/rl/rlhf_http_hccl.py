@@ -89,6 +89,7 @@ def update_weights(
     dtype_names: list[str],
     shapes: list[list[int]],
     packed: bool = False,
+    packed_buffer_size_bytes: int | None = None,
 ) -> None:
     """Update weights via HTTP endpoint."""
     url = f"{base_url}/update_weights"
@@ -100,6 +101,8 @@ def update_weights(
             packed=packed,
         )
     }
+    if packed and packed_buffer_size_bytes is not None:
+        payload["update_info"]["packed_buffer_size_bytes"] = packed_buffer_size_bytes
     response = requests.post(url, json=payload, timeout=300)
     response.raise_for_status()
 
@@ -195,21 +198,34 @@ def main():
     # Pause generation before weight sync
     pause_generation(BASE_URL)
 
-    # Collect weight metadata for the update request
+    # Collect weight metadata for the update request.
+    # Also track the largest tensor to auto-size the packed buffer.
     names = []
     dtype_names = []
     shapes = []
+    max_tensor_bytes = 0
     for name, p in train_model.named_parameters():
         names.append(name)
         dtype_names.append(str(p.dtype).split(".")[-1])
         shapes.append(list(p.shape))
+        tensor_bytes = p.numel() * p.element_size()
+        if tensor_bytes > max_tensor_bytes:
+            max_tensor_bytes = tensor_bytes
+
+    # Size the packed buffer to fit the largest tensor with 128 MB headroom,
+    # but keep the default 1 GB when the largest tensor is smaller than that.
+    packed_buffer_size_bytes = max(max_tensor_bytes + 128 * 2**20, 2**30)
+    print(
+        f"Largest tensor: {max_tensor_bytes / 2**30:.2f} GiB, "
+        f"packed buffer: {packed_buffer_size_bytes / 2**30:.2f} GiB"
+    )
 
     # Start the update_weights call in a separate thread since it will block
     # waiting for HCCL broadcasts
     # packed=True enables efficient batched tensor broadcasting
     update_thread = threading.Thread(
         target=update_weights,
-        args=(BASE_URL, names, dtype_names, shapes, True),  # packed=True
+        args=(BASE_URL, names, dtype_names, shapes, True, packed_buffer_size_bytes),
     )
     update_thread.start()
 
@@ -218,6 +234,7 @@ def main():
     trainer_args = HCCLTrainerSendWeightsArgs(
         group=model_update_group,
         packed=True,
+        packed_buffer_size_bytes=packed_buffer_size_bytes,
     )
     HCCLWeightTransferEngine.trainer_send_weights(
         iterator=train_model.named_parameters(),
