@@ -1,0 +1,127 @@
+# LAPS-Inspired Prefill Scheduling
+
+`vllm-ascend` now provides an engine-side, NPU-oriented adaptation of the core
+LAPS scheduling idea from the paper *Length-Aware Prefill Scheduling for LLM
+Serving*.
+
+## What Was Ported
+
+The original LAPS artifact on top of SGLang contains three layers:
+
+1. Dual-queue scheduling for short and long prefills.
+2. A short-request waiting window to build better short-prefill batches.
+3. Dynamic GPU allocation in the router/load balancer.
+
+For `vllm-ascend`, the currently ported pieces are the **engine-local**
+mechanisms:
+
+- `triple-queue`: split the waiting queue into immediate, short, and long prompt
+  classes.
+- `waiting window`: optionally hold an isolated short request for a small time
+  window so that more short requests can join the same batch.
+
+The CUDA-specific `attention-in-graph` optimization from the LAPS SGLang branch
+was intentionally **not** ported, because it is tightly coupled to CUDA graph
+capture and FlashAttention internals. Likewise, router-level dynamic allocation
+has **not** been merged into the Ascend proxy layer yet.
+
+## Why It Fits `vllm-ascend`
+
+The vLLM scheduler already has a centralized waiting queue in the engine core,
+which makes the LAPS queueing policy portable without changing model execution
+code. This is a good match for NPU deployment because the main benefit here is
+request isolation and batching behavior, not CUDA-only kernel machinery.
+
+## Configuration
+
+Enable the feature with environment variables before launching `vllm serve`:
+
+```bash
+export VLLM_ASCEND_LAPS_SCHEDULING=1
+export VLLM_ASCEND_LAPS_THRESHOLD=256
+export VLLM_ASCEND_LAPS_WAIT_WINDOW_MS=5
+export VLLM_ASCEND_LAPS_WAIT_MAX_BATCH=4
+```
+
+### Variables
+
+- `VLLM_ASCEND_LAPS_SCHEDULING`
+  - `1` enables the Ascend LAPS scheduler.
+  - `0` disables it.
+- `VLLM_ASCEND_LAPS_THRESHOLD`
+  - Prompts with `num_prompt_tokens <= threshold` are treated as short.
+- `VLLM_ASCEND_LAPS_WAIT_WINDOW_MS`
+  - `0` means short requests dispatch immediately.
+  - Positive values keep an isolated short batch waiting briefly.
+- `VLLM_ASCEND_LAPS_WAIT_MAX_BATCH`
+  - Dispatch short requests early once this many short requests are queued,
+    even if the wait window has not expired.
+
+## How It Is Selected
+
+`vllm-ascend` selects the scheduler at config time:
+
+- `VLLM_ASCEND_LAPS_SCHEDULING=0`
+  - Keep the normal scheduler path.
+- `VLLM_ASCEND_LAPS_SCHEDULING=1` and `recompute_scheduler_enable=true`
+  - Keep `RecomputeScheduler`, and install the LAPS waiting queue inside it.
+- `VLLM_ASCEND_LAPS_SCHEDULING=1` and `recompute_scheduler_enable=false`
+  - LAPS is not activated. The platform logs a warning and keeps the default
+    scheduler path.
+- `SLO_limits_for_dynamic_batch != -1`
+  - `SchedulerDynamicBatch` takes precedence and LAPS is ignored.
+
+In other words, the effective priority is:
+
+`dynamic batch > recompute (+ optional LAPS) > default`
+
+## Minimal Examples
+
+Enable recompute scheduler together with LAPS:
+
+```bash
+export VLLM_ASCEND_LAPS_SCHEDULING=1
+export VLLM_ASCEND_LAPS_THRESHOLD=256
+export VLLM_ASCEND_LAPS_WAIT_WINDOW_MS=5
+export VLLM_ASCEND_LAPS_WAIT_MAX_BATCH=4
+
+vllm serve <model> \
+  --additional-config '{"recompute_scheduler_enable": true}'
+```
+
+Disable LAPS explicitly:
+
+```bash
+export VLLM_ASCEND_LAPS_SCHEDULING=0
+```
+
+## Scheduling Semantics
+
+The `LAPSRequestQueue` manages three queues:
+
+- **immediate queue**: Requests that must be dispatched immediately, such as
+  preempted requests or requests with already-computed tokens (recovery flows).
+- **short queue**: Short prefills where `num_prompt_tokens <= threshold`.
+- **long queue**: Long prefills where `num_prompt_tokens > threshold`.
+
+Dispatch priority is always: immediate > short > long.
+
+- Immediate requests are dispatched as soon as they arrive.
+- Short requests accumulate in a waiting window (if configured) to form larger
+  batches, or dispatch early if `wait_max_batch` is reached.
+- Long requests are only dispatched when no immediate or short requests are
+  schedulable.
+- If only short requests are queued and the waiting window has not expired,
+  the engine stays idle briefly instead of dispatching a tiny batch.
+
+## Current Scope and Limitations
+
+- The current implementation is enabled only for the **FCFS** scheduler policy.
+- The adaptation is **engine-local**; it does not yet rebalance prefill and
+  decode instances across nodes or proxies.
+- The implementation targets the vLLM waiting-queue layer and is intended for
+  PD / EPD style serving where prompt length skew is a dominant bottleneck.
+- LAPS currently requires `recompute_scheduler_enable=true`; enabling only
+  `VLLM_ASCEND_LAPS_SCHEDULING=1` is not sufficient.
+- When dynamic batch is selected through `SLO_limits_for_dynamic_batch`,
+  LAPS is not applied.
