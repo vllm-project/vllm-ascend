@@ -574,7 +574,9 @@ class AscendGatedDeltaNetAttention(GatedDeltaNetAttention):
                     cache_indices_opt,
                     initial_state_mode_opt,
                 ) = get_non_spec_causal_conv1d_host_args(attn_metadata)
+                conv1d_out_buf = torch.empty_like(mixed_qkv_non_spec)
                 mixed_qkv_non_spec = torch.ops._C_ascend.npu_causal_conv1d_custom(
+                    conv1d_out_buf,
                     mixed_qkv_non_spec,
                     conv_weights_T,
                     conv_state=self_kv_cache[0],
