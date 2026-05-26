@@ -1859,7 +1859,6 @@ class AscendDSAImpl(DSAAttentionImpl):
                 else:
                     if self.multistream_dsv4_dsa_overlap:
                         indexer_q, indexer_kv = self.cv_indexer_select_qli(  # multistream version
-
                             x=hidden_states,
                             qr=qr,
                             kv_cache=kv_cache,
@@ -1886,8 +1885,6 @@ class AscendDSAImpl(DSAAttentionImpl):
                             actual_seq_lengths_key=actual_seq_lengths_key,
                             with_prefill=True,
                         )
-                    if self.use_index_cache:
-                        self._update_indexcache_topk_indices(compress_topk_idxs, offset=prefill_offset)
 
             coff = 2 if self.compressor_overlap else 1
 
@@ -1925,7 +1922,7 @@ class AscendDSAImpl(DSAAttentionImpl):
                 e_compressed_kv_done = main_stream.record_event()
                 with npu_stream_switch(aux_stream, enabled=True):
                     torch.npu.current_stream().wait_event(e_compressed_kv_done)
-                    weights = self.weights_proj(hidden_states) * (self.indexer_softmax_scale * self.indexer_heads**-0.5)
+                    weights_proj_output = self.weights_proj(hidden_states)
                 # Main stream: q_quant (between compressed_kv and kv_scatter)
                 soc_version = get_ascend_device_type()
                 dst_type = torch.float8_e4m3fn if soc_version in {AscendDeviceType.A5} else torch.int8
@@ -1938,8 +1935,9 @@ class AscendDSAImpl(DSAAttentionImpl):
             )
 
             if self.multistream_dsv4_dsa_overlap and self.compress_ratio == 4 and not self.skip_topk:
-                # Wait aux_stream weights_proj done
+                # Wait aux_stream weights_proj done, then compute dot
                 main_stream.wait_stream(aux_stream)
+                weights = weights_proj_output * (self.indexer_softmax_scale * self.indexer_heads**-0.5)
                 # lightning_indexer
                 indexer_scale_prefill_metadata = _require_prefill_metadata(indexer_kv_scale_metadata)
                 qlens = indexer_scale_prefill_metadata.query_start_loc[1:]
@@ -1967,6 +1965,9 @@ class AscendDSAImpl(DSAAttentionImpl):
                     cmp_ratio=4,
                     return_value=False,
                 )
+
+            if self.compress_ratio == 4 and self.use_index_cache:
+                self._update_indexcache_topk_indices(compress_topk_idxs, offset=prefill_offset)
 
         if self.compress_ratio <= 1:
             attn_output = torch.ops._C_ascend.npu_sparse_attn_sharedkv(
@@ -2176,8 +2177,6 @@ class AscendDSAImpl(DSAAttentionImpl):
                             with_prefill=False,
                             qr_pertoken_scale=qr_pertoken_scale,
                         )
-                    if self.use_index_cache:
-                        self._update_indexcache_topk_indices(compress_topk_idxs, offset=0)
 
             coff = 2 if self.compressor_overlap else 1
 
@@ -2212,7 +2211,7 @@ class AscendDSAImpl(DSAAttentionImpl):
                 e_compressed_kv_done = main_stream.record_event()
                 with npu_stream_switch(aux_stream, enabled=True):
                     torch.npu.current_stream().wait_event(e_compressed_kv_done)
-                    weights = self.weights_proj(hidden_states) * (self.indexer_softmax_scale * self.indexer_heads**-0.5)
+                    weights_proj_output = self.weights_proj(hidden_states)
                 # Main stream: q_quant (between compressed_kv and kv_scatter)
                 soc_version = get_ascend_device_type()
                 dst_type = torch.float8_e4m3fn if soc_version in {AscendDeviceType.A5} else torch.int8
@@ -2227,6 +2226,7 @@ class AscendDSAImpl(DSAAttentionImpl):
             if self.multistream_dsv4_dsa_overlap and self.compress_ratio == 4 and not self.skip_topk:
                 # Wait aux_stream weights_proj done
                 main_stream.wait_stream(aux_stream)
+                weights = weights_proj_output * (self.indexer_softmax_scale * self.indexer_heads**-0.5)
                 # lightning_indexer
                 indexer_scale_decode_metadata = _require_decode_metadata(indexer_kv_scale_metadata)
                 qlens = indexer_scale_decode_metadata.query_start_loc[1:]
@@ -2254,6 +2254,10 @@ class AscendDSAImpl(DSAAttentionImpl):
                     cmp_ratio=4,
                     return_value=False,
                 )
+
+            if self.use_index_cache:
+                self._update_indexcache_topk_indices(compress_topk_idxs, offset=0)
+
         if self.compress_ratio <= 1:
             attn_output = torch.ops._C_ascend.npu_sparse_attn_sharedkv(
                 q,
