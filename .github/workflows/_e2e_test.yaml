@@ -12,11 +12,11 @@ on:
       image_a3:
         required: false
         type: string
-        default: swr.cn-southwest-2.myhuaweicloud.com/base_image/ascend-ci/cann:9.0.0-a3-ubuntu22.04-py3.11
+        default: swr.cn-southwest-2.myhuaweicloud.com/base_image/ascend-ci/cann:9.0.0-a3-ubuntu22.04-py3.12
       image_310p:
         required: false
         type: string
-        default: swr.cn-southwest-2.myhuaweicloud.com/base_image/ascend-ci/cann:9.0.0-310p-ubuntu22.04-py3.11
+        default: swr.cn-southwest-2.myhuaweicloud.com/base_image/ascend-ci/cann:9.0.0-310p-ubuntu22.04-py3.12
       type:
         required: true
         type: string
@@ -731,7 +731,7 @@ jobs:
             libcurl4
           ldconfig
 
-          MOONCAKE_WHEEL="mooncake_transfer_engine_ascend-0.3.8.post1-cp311-cp311-manylinux_2_17_aarch64.manylinux_2_35_aarch64.whl"
+          MOONCAKE_WHEEL="mooncake_transfer_engine_ascend-0.3.8.post1-cp312-cp312-manylinux_2_17_aarch64.manylinux_2_35_aarch64.whl"
           pip install --no-cache-dir --no-deps \
             "https://vllm-ascend.obs.cn-north-4.myhuaweicloud.com/vllm-ascend/${MOONCAKE_WHEEL}"
 
