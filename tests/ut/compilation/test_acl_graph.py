@@ -12,7 +12,7 @@
 # limitations under the License.
 # This file is a part of the vllm-ascend project.
 #
-
+import weakref
 from unittest.mock import MagicMock, Mock, patch
 
 import numpy as np
@@ -26,11 +26,15 @@ from vllm_ascend.attention.attention_v1 import AscendMetadata, AscendMetadataFor
 from vllm_ascend.attention.context_parallel.attention_cp import AscendAttentionCPImpl
 from vllm_ascend.attention.context_parallel.mla_cp import AscendMlaCPImpl
 from vllm_ascend.attention.mla_v1 import AscendMLADecodeMetadata, AscendMLAMetadata
+from vllm_ascend.compilation import acl_graph
 from vllm_ascend.compilation.acl_graph import (
     ACLGraphEntry,
     ACLGraphWrapper,
+    GraphParams,
+    clear_attention_workspaces_for_sleep,
     get_draft_graph_params,
     get_graph_params,
+    reset_graph_params_for_sleep,
     set_draft_graph_params,
     set_graph_params,
     update_draft_graph_params_workspaces,
@@ -757,6 +761,49 @@ class TestACLGraphWrapper(TestBase):
 
         unwrapped = wrapper.unwrap()
         self.assertEqual(unwrapped, self.mock_runnable)
+
+    def test_acl_graph_wrappers_use_weak_refs(self):
+        self.assertIsInstance(acl_graph._acl_graph_wrappers, weakref.WeakSet)
+
+
+class TestSleepGraphParams(TestBase):
+    def test_clear_attention_workspaces_preserves_capture_size_keys(self):
+        graph_params = GraphParams(
+            events={4: [], 8: []},
+            workspaces={4: torch.empty(1), 8: torch.empty(2)},
+            handles={4: [], 8: []},
+            attn_params={4: [], 8: []},
+            conv1d_params={4: [], 8: []},
+            conv1d_handles={4: [], 8: []},
+            conv1d_events={4: [], 8: []},
+        )
+
+        with (
+            patch("vllm_ascend.compilation.acl_graph._graph_params", graph_params),
+            patch("vllm_ascend.compilation.acl_graph._draft_graph_params", None),
+            patch("vllm_ascend.compilation.acl_graph._draft_graph_prefill_params", None),
+        ):
+            clear_attention_workspaces_for_sleep()
+
+        self.assertEqual(set(graph_params.workspaces), {4, 8})
+        self.assertIsNone(graph_params.workspaces[4])
+        self.assertIsNone(graph_params.workspaces[8])
+
+    def test_reset_graph_params_for_sleep_clears_registered_wrappers(self):
+        wrapper = MagicMock()
+        wrapper.concrete_aclgraph_entries = {"entry": object()}
+        wrapper.first_run_finished = True
+
+        with (
+            patch("vllm_ascend.compilation.acl_graph._graph_params", None),
+            patch("vllm_ascend.compilation.acl_graph._draft_graph_params", None),
+            patch("vllm_ascend.compilation.acl_graph._draft_graph_prefill_params", None),
+            patch("vllm_ascend.compilation.acl_graph._acl_graph_wrappers", [wrapper]),
+        ):
+            reset_graph_params_for_sleep()
+
+        self.assertEqual(wrapper.concrete_aclgraph_entries, {})
+        self.assertFalse(wrapper.first_run_finished)
 
 
 class TestDraftGraphParams(TestBase):

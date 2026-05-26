@@ -275,7 +275,7 @@ class NPUWorker(WorkerBase):
         torch.npu.empty_cache()
         free_bytes_after_cleanup = torch.npu.mem_get_info()[0]
         free_bytes = free_bytes_after_cleanup - free_bytes_before_cleanup
-        return max(free_bytes,0)
+        return max(free_bytes, 0)
 
     def _invalidate_acl_graphs_for_sleep(self) -> None:
         from vllm_ascend.compilation.acl_graph import (
@@ -283,7 +283,7 @@ class NPUWorker(WorkerBase):
             reset_graph_params_for_sleep,
         )
         clear_attention_workspaces_for_sleep()
-        if not self.model_runner.use_aclgraph:
+        if self.model_runner is None or not getattr(self.model_runner, "use_aclgraph", False):
             return
         reset_graph_params_for_sleep()
         self._reset_model_runner_graph_manager()
@@ -295,7 +295,12 @@ class NPUWorker(WorkerBase):
 
         from vllm_ascend.ops.rotary_embedding import clear_global_cos_sin_runtime_cache
 
-        model = self.model_runner.model
+        model_runner = self.model_runner
+        if model_runner is None:
+            return
+        model = getattr(model_runner, "model", None)
+        if model is None:
+            return
         self._sleep_cos_sin_cache_cleared = clear_global_cos_sin_runtime_cache(model)
 
     def _restore_global_cos_sin_cache_after_sleep(self) -> None:
@@ -305,17 +310,17 @@ class NPUWorker(WorkerBase):
         from vllm_ascend.ops.rotary_embedding import restore_global_cos_sin_cache_from_model, set_cos_and_sin
 
         model_runner = self.model_runner
-        max_num_reqs = model_runner.max_num_reqs
+        max_num_reqs = getattr(model_runner, "max_num_reqs", None)
         decode_token_per_req = getattr(
             model_runner, "uniform_decode_query_len", getattr(model_runner, "decode_query_len", None)
         )
-        dtype = model_runner.dtype
-        device = model_runner.device
+        dtype = getattr(model_runner, "dtype", None)
+        device = getattr(model_runner, "device", None)
         if None in (max_num_reqs, decode_token_per_req, dtype, device):
             logger.warning("Skip restoring global cos/sin cache after sleep due to incomplete model runner state.")
             return
 
-        restore_global_cos_sin_cache_from_model(model_runner.model)
+        restore_global_cos_sin_cache_from_model(getattr(model_runner, "model", None))
         set_cos_and_sin(self.vllm_config, max_num_reqs, decode_token_per_req, dtype, device)
         self._sleep_cos_sin_cache_cleared = False
 
@@ -354,6 +359,8 @@ class NPUWorker(WorkerBase):
 
     def _restore_acl_graphs_after_sleep(self, tags: list[str] | None) -> None:
         if not self._sleep_acl_graph_invalidated:
+            return
+        if self.model_runner is None:
             return
         capture_model = self.model_runner.capture_model
         with set_current_vllm_config(self.vllm_config):

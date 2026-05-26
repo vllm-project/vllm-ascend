@@ -59,19 +59,19 @@ _cos_slice: torch.Tensor = None
 _sin_slice: torch.Tensor = None
 
 
-
 def _offload_module_cache_tensor(
     module: torch.nn.Module,
     cache_name: str,
-) -> int:
+) -> bool:
     cache = getattr(module, cache_name, None)
     if cache is None or not isinstance(cache, torch.Tensor) or cache.device.type == "cpu":
-        return
+        return False
 
     setattr(module, f"{cache_name}_cpu", cache.detach().cpu())
     setattr(module, f"{cache_name}_device", cache.device)
     setattr(module, cache_name, None)
-    return
+    return True
+
 
 def _restore_module_cache_tensor(
     module: torch.nn.Module,
@@ -92,7 +92,7 @@ def _restore_module_cache_tensor(
     return True
 
 
-def clear_global_cos_sin_runtime_cache(model: torch.nn.Module | None = None) -> int:
+def clear_global_cos_sin_runtime_cache(model: torch.nn.Module | None = None) -> bool:
     global _cos_mla
     global _sin_mla
     global _cos_cache
@@ -123,8 +123,8 @@ def clear_global_cos_sin_runtime_cache(model: torch.nn.Module | None = None) -> 
     if model is not None:
         for module in model.modules():
             for cache_name in ("cos_sin_cache", "cos_cached", "sin_cached", "cos", "sin"):
-                _offload_module_cache_tensor(module, cache_name)
-                cleared = True
+                if _offload_module_cache_tensor(module, cache_name):
+                    cleared = True
     return cleared
 
 
