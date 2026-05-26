@@ -67,7 +67,7 @@ def _disable_fp8(cfg: ModelConfig, *, log: bool) -> bool:
     if not _should_disable_fp8(cfg, getattr(cfg, "quantization", None)):
         return False
     if log:
-        logger.info_once(_DISABLE_FP8_LOG)
+        logger.info(_DISABLE_FP8_LOG)
     cfg.quantization = None
     return True
 
