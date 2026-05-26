@@ -238,9 +238,6 @@ def get_manager_for_kv_cache_spec(
         manager_class = CompressAttentionManager
         if max_model_len is not None:
             # Compressed-MLA peak in blocks: ceil(max_model_len/compress/block).
-            # The "+ compress_ratio" margin matches the alignment headroom used
-            # elsewhere in DSA so admission never refuses what the pool sizer
-            # promised.
             compress_ratio = kv_cache_spec.compress_ratio
             block_size = kv_cache_spec.block_size
             max_compressed_tokens = max_model_len // compress_ratio
