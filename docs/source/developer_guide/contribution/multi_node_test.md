@@ -346,8 +346,8 @@ Add `cluster_hosts` as a top-level field, for example near `num_nodes` and
 
 ```yaml
 cluster_hosts:
-  - "172.22.0.155"
-  - "172.22.0.188"
+  - "172.22.0.xxx"
+  - "172.22.0.xxx"
 ```
 
 ##### 2.1.2 Prepare the environment
@@ -429,8 +429,8 @@ Add `cluster_hosts` as a top-level field, for example near `num_nodes` and
 
 ```yaml
 cluster_hosts:
-  - "172.22.0.155"
-  - "172.22.0.188"
+  - "172.22.0.xxx"
+  - "172.22.0.xxx"
 ```
 
 ##### 2.2.2 Prepare the environment
@@ -462,18 +462,6 @@ and AISBench, you only need the run-time exports in the next step.
 External DP uses the same shared `run.sh`. Set `CONFIG_BASE_PATH` to the
 external DP config directory so the script chooses
 `external_dp/scripts/test_external_dp.py`.
-
-For generic DP smoke, set:
-
-```bash
-export CONFIG_YAML_PATH=generic_dp_smoke.yaml
-```
-
-For disaggregated prefill smoke, set:
-
-```bash
-export CONFIG_YAML_PATH=disaggregated_prefill_smoke.yaml
-```
 
 Then start the non-master node first.
 
@@ -546,44 +534,4 @@ tail -F /tmp/external_dp_logs/node-0/rank-0.log \
 # node 1: ranks
 tail -F /tmp/external_dp_logs/node-1/rank-0.log \
         /tmp/external_dp_logs/node-1/rank-1.log
-```
-
-If `EXTERNAL_DP_LOG_DIR` is set, replace `/tmp/external_dp_logs` with that
-directory. `tail -F` can be started before the files exist.
-
-When the terminal repeatedly prints `Polling external DP endpoints`, inspect
-the rank log on the node shown in the polling line. For example:
-
-```bash
-tail -n 200 /tmp/external_dp_logs/node-1/rank-0.log
-```
-
-Local rank exits fail pytest immediately and print the log path. Remote rank
-failures are diagnosed from the corresponding remote node log.
-
-For CI or local artifact collection, set `LOG_PREFIX` on each node:
-
-```bash
-export LOG_PREFIX=/tmp/external_dp_artifacts_pd_local
-mkdir -p "$LOG_PREFIX"
-```
-
-At cleanup, external DP packs raw rank and proxy logs into:
-
-```text
-$LOG_PREFIX/node_<LWS_WORKER_INDEX>_external_dp_logs.tar.gz
-```
-
-The shared `run.sh` also backs up Ascend logs to:
-
-```text
-$LOG_PREFIX/node_<LWS_WORKER_INDEX>_plogs/
-```
-
-Useful artifact commands:
-
-```bash
-ls -lh /tmp/external_dp_artifacts_pd_local
-tar -tzf /tmp/external_dp_artifacts_pd_local/node_0_external_dp_logs.tar.gz
-tar -xzf /tmp/external_dp_artifacts_pd_local/node_0_external_dp_logs.tar.gz -C /tmp
 ```

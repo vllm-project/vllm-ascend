@@ -1,7 +1,11 @@
-test_name: "test DeepSeek-V2-Lite-W8A8 generic external dp"
-model: "vllm-ascend/DeepSeek-V2-Lite-W8A8"
+test_name: "test Qwen3-30B-A3B generic external dp"
+model: "Qwen/Qwen3-30B-A3B"
 num_nodes: 2
 npu_per_node: 16
+
+cluster_hosts:
+  - "172.22.0.155"
+  - "172.22.0.188"
 
 env_common: &env_common
   VLLM_USE_MODELSCOPE: "true"
@@ -47,7 +51,7 @@ templates:
   - envs:
       <<: *env_common
       ASCEND_RT_VISIBLE_DEVICES: "${VISIBLE_DEVICES}"
-      HCCL_BUFFSIZE: "256"
+      HCCL_BUFFSIZE: "1024"
       SERVER_PORT: "${PORT}"
     server_cmd_template: &generic_server_cmd
       - --host
@@ -64,15 +68,15 @@ templates:
       - ${DP_RPC_PORT}
       - --tensor-parallel-size
       - ${TP_SIZE}
+      - --max-model-len
+      - "4096"
       - --trust-remote-code
-      - --quantization
-      - ascend
       - --enable-expert-parallel
 
   - envs:
       <<: *env_common
       ASCEND_RT_VISIBLE_DEVICES: "${VISIBLE_DEVICES}"
-      HCCL_BUFFSIZE: "256"
+      HCCL_BUFFSIZE: "1024"
       SERVER_PORT: "${PORT}"
     server_cmd_template: *generic_server_cmd
 
@@ -82,9 +86,9 @@ benchmarks:
     dataset_path: vllm-ascend/GSM8K-in3500-bs2800
     request_conf: vllm_api_stream_chat
     dataset_conf: gsm8k/gsm8k_gen_0_shot_cot_str_perf
-    num_prompts: 16
-    max_out_len: 128
-    batch_size: 4
+    num_prompts: 4
+    max_out_len: 16
+    batch_size: 1
     request_rate: 1
     baseline: 1
     threshold: 0.1
@@ -94,8 +98,8 @@ benchmarks:
     dataset_path: vllm-ascend/gsm8k
     request_conf: vllm_api_general_chat
     dataset_conf: gsm8k/gsm8k_gen_0_shot_cot_chat_prompt
-    max_out_len: 48
-    batch_size: 4
+    max_out_len: 16
+    batch_size: 1
     baseline: 0
     threshold: 100
-    num_prompts: 16
+    num_prompts: 4

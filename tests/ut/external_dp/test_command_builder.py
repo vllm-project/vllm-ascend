@@ -148,7 +148,7 @@ def test_cp_sp_template_variables_default_to_one(generic_config):
     assert command.cmd[-2:] == ["1", "1"]
 
 
-def test_generic_smoke_uses_deepseek_w8a8_command():
+def test_generic_smoke_uses_qwen3_moe_command():
     config_path = Path("tests/e2e/nightly/multi_node/external_dp/config/generic_dp_smoke.yaml")
     config = ExternalDPConfigLoader.from_yaml(
         str(config_path),
@@ -157,10 +157,13 @@ def test_generic_smoke_uses_deepseek_w8a8_command():
     endpoint = EndpointResolver(config).resolve()[0]
     command = CommandBuilder(config).build(endpoint, config.templates[0])
 
-    assert command.cmd[:3] == ["vllm", "serve", "vllm-ascend/DeepSeek-V2-Lite-W8A8"]
-    assert command.cmd[command.cmd.index("--quantization") + 1] == "ascend"
+    assert command.cmd[:3] == ["vllm", "serve", "Qwen/Qwen3-30B-A3B"]
+    assert command.cmd[command.cmd.index("--max-model-len") + 1] == "4096"
+    assert command.cmd[command.cmd.index("--data-parallel-size") + 1] == "4"
+    assert command.cmd[command.cmd.index("--data-parallel-rank") + 1] == "0"
+    assert "--quantization" not in command.cmd
     assert "--enable-expert-parallel" in command.cmd
-    assert command.env["HCCL_BUFFSIZE"] == "256"
+    assert command.env["HCCL_BUFFSIZE"] == "1024"
     assert command.env["PYTORCH_NPU_ALLOC_CONF"] == "expandable_segments:True"
     assert "VLLM_ASCEND_ENABLE_FLASHCOMM1" not in command.env
 
