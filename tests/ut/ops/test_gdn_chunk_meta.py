@@ -231,12 +231,7 @@ def test_chunk_gated_delta_rule_fwd_threads_prebuilt_chunk_offsets(
             calls.append(("o", kwargs["chunk_offsets"]))
             return _DummyTensor("o")
 
-        def fake_chunk_fwd_o_update(*args, **kwargs):
-            calls.append(("o_update", kwargs["chunk_offsets"]))
-            return _DummyTensor("h_updated")
-
         monkeypatch.setattr(chunk, "chunk_fwd_o", fake_chunk_fwd_o)
-        monkeypatch.setattr(chunk, "chunk_fwd_o_update", fake_chunk_fwd_o_update)
 
         chunk.chunk_gated_delta_rule_fwd(
             q=q,
