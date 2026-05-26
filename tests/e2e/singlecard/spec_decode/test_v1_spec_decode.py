@@ -157,7 +157,10 @@ def test_ngram_npu_async_acceptance(
         "num_speculative_tokens": num_speculative_tokens,
     }
 
-    compilation_config = CompilationConfig(cudagraph_capture_sizes=[12])
+    compilation_config = CompilationConfig(
+        cudagraph_mode="PIECEWISE",
+        cudagraph_capture_sizes=[12],
+    )
 
     with VllmRunner(
         model_name,
@@ -431,7 +434,10 @@ def test_parallel_drafting_acceptance(
         "parallel_drafting": True,
     }
 
-    compilation_config = CompilationConfig(cudagraph_capture_sizes=[12])
+    compilation_config = CompilationConfig(
+        cudagraph_mode="PIECEWISE",
+        cudagraph_capture_sizes=[12],
+    )
 
     with VllmRunner(
         main_model_name,
