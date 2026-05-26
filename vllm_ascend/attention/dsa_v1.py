@@ -2259,7 +2259,7 @@ class AscendDSAImpl(DSAAttentionImpl):
                     return_value=False,
                 )
 
-            if self.use_index_cache:
+            if self.compress_ratio == 4 and self.use_index_cache:
                 self._update_indexcache_topk_indices(compress_topk_idxs, offset=0)
 
         if self.compress_ratio <= 1:
