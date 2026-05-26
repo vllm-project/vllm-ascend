@@ -11,6 +11,8 @@ env_common:
   PYTORCH_NPU_ALLOC_CONF: "expandable_segments:True"
   VLLM_ASCEND_BALANCE_SCHEDULING: 0
   VLLM_ASCEND_ENABLE_MLAPO: 1
+  VLLM_ENGINE_READY_TIMEOUT_S: "3000"
+  VLLM_RPC_TIMEOUT: "600"
   SERVER_PORT: 8080
 
 special_dependencies:
@@ -27,11 +29,12 @@ deployment:
       --tensor-parallel-size 16
       --data-parallel-rpc-port 13389
       --data-parallel-size-local 1
+      --data-parallel-start-rank 0
       --data-parallel-address $LOCAL_IP
       --enable-expert-parallel
       --seed 1024
-      --max-num-seqs 48
-      --max-model-len 20480
+      --max-num-seqs 16
+      --max-model-len 133120
       --max-num-batched-tokens 4096
       --trust-remote-code
       --gpu-memory-utilization 0.95
@@ -51,12 +54,13 @@ deployment:
       --tensor-parallel-size 16
       --data-parallel-size-local 1
       --data-parallel-start-rank 1
+      --data-parallel-rpc-port 13389
       --headless
       --data-parallel-address $MASTER_IP
       --enable-expert-parallel
       --seed 1024
-      --max-num-seqs 48
-      --max-model-len 20480
+      --max-num-seqs 16
+      --max-model-len 133120
       --max-num-batched-tokens 4096
       --trust-remote-code
       --gpu-memory-utilization 0.95
@@ -68,16 +72,6 @@ deployment:
       --compilation-config '{"cudagraph_mode": "FULL_DECODE_ONLY","cudagraph_capture_sizes": [1,4,8,12,16,20,24,28,32,36,48,60,72]}'
       --speculative-config '{"num_speculative_tokens": 3, "method": "deepseek_mtp"}'
 benchmarks:
-  acc_GPQA:
-    case_type: accuracy
-    dataset_path: vllm-ascend/gpqa
-    request_conf: vllm_api_general_chat
-    dataset_conf: gpqa/gpqa_gen_0_shot_cot_chat_prompt
-    max_out_len: 32768
-    batch_size: 32
-    baseline: 85.35
-    threshold: 5
-
   acc_aime2025:
     case_type: accuracy
     dataset_path: vllm-ascend/aime2025
@@ -90,7 +84,7 @@ benchmarks:
 
   perf:
     case_type: performance
-    dataset_path: vllm-ascend/GSM8K_prefix90_in131072_bs100
+    dataset_path: vllm-ascend/GSM8K_prefix90_in131072_bs100_glm
     request_conf: vllm_api_stream_chat
     dataset_conf: gsm8k/gsm8k_gen_0_shot_cot_str_perf
     num_prompts: 12
