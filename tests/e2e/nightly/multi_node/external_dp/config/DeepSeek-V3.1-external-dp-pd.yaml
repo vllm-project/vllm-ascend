@@ -19,7 +19,6 @@ env_common: &env_common
   LD_LIBRARY_PATH: "/usr/local/Ascend/ascend-toolkit/latest/python/site-packages/mooncake:$LD_LIBRARY_PATH"
 
 config_common: &config_common
-  host: "0.0.0.0"
   port_start: 7100
   dp_rpc_port: 12321
 
@@ -83,7 +82,7 @@ templates:
       VLLM_ASCEND_ENABLE_FLASHCOMM1: "1"
     server_cmd_template:
       - --host
-      - ${HOST}
+      - "0.0.0.0"
       - --port
       - $SERVER_PORT
       - --data-parallel-size
@@ -141,7 +140,7 @@ templates:
       VLLM_ASCEND_ENABLE_FLASHCOMM1: "1"
     server_cmd_template:
       - --host
-      - ${HOST}
+      - "0.0.0.0"
       - --port
       - $SERVER_PORT
       - --data-parallel-size
@@ -199,7 +198,7 @@ templates:
       VLLM_ASCEND_ENABLE_MLAPO: "1"
     server_cmd_template: &deepseek_decoder_cmd
       - --host
-      - ${HOST}
+      - "0.0.0.0"
       - --port
       - $SERVER_PORT
       - --data-parallel-size

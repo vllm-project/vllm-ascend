@@ -312,43 +312,278 @@ This section assumes that you already have a [Kubernetes](https://kubernetes.io/
     }
     ```
 
-### 2. Test without kubernetes
+### 2. Test without Kubernetes
 
-Since our script is Kubernetes-friendly, we need to actively pass in some cluster information if you don't have a Kubernetes environment.
+The same `tests/e2e/nightly/multi_node/scripts/run.sh` entrypoint can be used
+on prepared bare-metal or container hosts. Without LWS, set the values that
+Kubernetes normally injects yourself:
 
-- Step 1. Add cluster_hosts to config yamls
+- `cluster_hosts` in the config yaml, using IPs reachable from every node.
+- `LWS_WORKER_INDEX` on each node, starting from `0`.
+- `CONFIG_YAML_PATH` as the config file name and `CONFIG_BASE_PATH` as the
+  config directory.
 
-    Modify on every cluster host, commands just like [DeepSeek-V3.yaml](https://github.com/vllm-project/vllm-ascend/blob/e760aae1df7814073a4180172385505c1ec0fd83/tests/e2e/nightly/multi_node/internal_dp/config/DeepSeek-V3.yaml#L25) after the configure item `num_nodes` , for example:
-    `cluster_hosts: ["xxx.xxx.xxx.188", "xxx.xxx.xxx.212"]`
+Use the host NIC IPs that can reach each other, for example addresses shown by
+`ip addr` or `ifconfig` on the active network interface. Do not use per-host
+Docker bridge addresses such as `172.17.0.1`, because each host has its own
+local bridge.
 
-- Step 2. Install develop environment
-    - Install vllm-ascend develop packages on every cluster host
+Local `cluster_hosts` edits should be removed before submitting a PR unless the
+hosts are part of a committed test environment.
 
-      ``` bash
-      cd /vllm-workspace/vllm-ascend
-      python3 -m pip install -r requirements-dev.txt
-      ```
+#### 2.1 Internal DP local run
 
-    - Install AISBench on the first host(leader node) in cluster_hosts
+##### 2.1.1 Add cluster hosts
 
-      ``` bash
-      export AIS_BENCH_TAG="v3.1-20260330-master"
-      export AIS_BENCH_URL="https://github.com/AISBench/benchmark.git"
-      export BENCHMARK_HOME=/vllm-workspace/benchmark
+Edit the internal DP config you want to run, for example:
 
-      git clone -b ${AIS_BENCH_TAG} --depth 1 ${AIS_BENCH_URL} $BENCHMARK_HOME
-      cd $BENCHMARK_HOME
-      pip install -e . -r requirements/api.txt -r requirements/extra.txt
-        ```
+```text
+tests/e2e/nightly/multi_node/internal_dp/config/DeepSeek-V3.yaml
+```
 
-- Step 3. Running test locally
+Add `cluster_hosts` as a top-level field, for example near `num_nodes` and
+`npu_per_node`:
 
-    Run the script on **each node separately**
+```yaml
+cluster_hosts:
+  - "172.22.0.155"
+  - "172.22.0.188"
+```
 
-    ``` bash
-    export WORKSPACE=/vllm-workspace # Change it to your path locally
-    export CONFIG_YAML_PATH="DeepSeek-V3.yaml" # Replace with the config case you added
-    export CONFIG_BASE_PATH="tests/e2e/nightly/multi_node/internal_dp/config/"
-    cd $WORKSPACE/vllm-ascend
-    bash tests/e2e/nightly/multi_node/scripts/run.sh
-    ```
+##### 2.1.2 Prepare the environment
+
+Install vllm-ascend development dependencies on every cluster host:
+
+```bash
+cd /vllm-workspace/vllm-ascend
+python3 -m pip install -r requirements-dev.txt
+```
+
+Install AISBench on the first host, which is the node with
+`LWS_WORKER_INDEX=0`:
+
+```bash
+export AIS_BENCH_TAG="v3.1-20260330-master"
+export AIS_BENCH_URL="https://github.com/AISBench/benchmark.git"
+export BENCHMARK_HOME=/vllm-workspace/vllm-ascend/benchmark
+
+git clone -b ${AIS_BENCH_TAG} --depth 1 ${AIS_BENCH_URL} $BENCHMARK_HOME
+cd $BENCHMARK_HOME
+pip install -e . -r requirements/api.txt -r requirements/extra.txt
+```
+
+If your local image already contains the model, benchmark data, Ascend runtime,
+and AISBench, you only need the run-time exports in the next step.
+
+##### 2.1.3 Start each node
+
+Run the script on each node separately. Start worker nodes first, then start
+node 0.
+
+On node 1:
+
+```bash
+export WORKSPACE=/vllm-workspace
+export IS_PR_TEST=false
+export CONFIG_YAML_PATH=DeepSeek-V3.yaml
+export CONFIG_BASE_PATH=tests/e2e/nightly/multi_node/internal_dp/config/
+export LWS_WORKER_INDEX=1
+
+cd $WORKSPACE/vllm-ascend
+bash tests/e2e/nightly/multi_node/scripts/run.sh
+```
+
+On node 0:
+
+```bash
+export WORKSPACE=/vllm-workspace
+export IS_PR_TEST=false
+export CONFIG_YAML_PATH=DeepSeek-V3.yaml
+export CONFIG_BASE_PATH=tests/e2e/nightly/multi_node/internal_dp/config/
+export LWS_WORKER_INDEX=0
+
+cd $WORKSPACE/vllm-ascend
+bash tests/e2e/nightly/multi_node/scripts/run.sh
+```
+
+Internal DP logs are mainly printed to the terminal running `run.sh`. When
+`LOG_PREFIX` is set, the shared script also backs up Ascend logs to:
+
+```text
+$LOG_PREFIX/node_<LWS_WORKER_INDEX>_plogs/
+```
+
+#### 2.2 External DP local run
+
+##### 2.2.1 Add cluster hosts
+
+Edit the external DP config you want to run. Common smoke configs are:
+
+```text
+tests/e2e/nightly/multi_node/external_dp/config/generic_dp_smoke.yaml
+tests/e2e/nightly/multi_node/external_dp/config/disaggregated_prefill_smoke.yaml
+```
+
+Add `cluster_hosts` as a top-level field, for example near `num_nodes` and
+`npu_per_node`:
+
+```yaml
+cluster_hosts:
+  - "172.22.0.155"
+  - "172.22.0.188"
+```
+
+##### 2.2.2 Prepare the environment
+
+Install vllm-ascend development dependencies on every cluster host:
+
+```bash
+cd /vllm-workspace/vllm-ascend
+python3 -m pip install -r requirements-dev.txt
+```
+
+Install AISBench on node 0:
+
+```bash
+export AIS_BENCH_TAG="v3.1-20260330-master"
+export AIS_BENCH_URL="https://github.com/AISBench/benchmark.git"
+export BENCHMARK_HOME=/vllm-workspace/vllm-ascend/benchmark
+
+git clone -b ${AIS_BENCH_TAG} --depth 1 ${AIS_BENCH_URL} $BENCHMARK_HOME
+cd $BENCHMARK_HOME
+pip install -e . -r requirements/api.txt -r requirements/extra.txt
+```
+
+If your local image already contains the model, benchmark data, Ascend runtime,
+and AISBench, you only need the run-time exports in the next step.
+
+##### 2.2.3 Start each node
+
+External DP uses the same shared `run.sh`. Set `CONFIG_BASE_PATH` to the
+external DP config directory so the script chooses
+`external_dp/scripts/test_external_dp.py`.
+
+For generic DP smoke, set:
+
+```bash
+export CONFIG_YAML_PATH=generic_dp_smoke.yaml
+```
+
+For disaggregated prefill smoke, set:
+
+```bash
+export CONFIG_YAML_PATH=disaggregated_prefill_smoke.yaml
+```
+
+Then start the non-master node first.
+
+On node 1:
+
+```bash
+export WORKSPACE=/vllm-workspace
+export IS_PR_TEST=false
+export CONFIG_BASE_PATH=tests/e2e/nightly/multi_node/external_dp/config/
+export CONFIG_YAML_PATH=generic_dp_smoke.yaml
+export LWS_WORKER_INDEX=1
+
+cd $WORKSPACE/vllm-ascend
+bash tests/e2e/nightly/multi_node/scripts/run.sh
+```
+
+On node 0:
+
+```bash
+export WORKSPACE=/vllm-workspace
+export IS_PR_TEST=false
+export CONFIG_BASE_PATH=tests/e2e/nightly/multi_node/external_dp/config/
+export CONFIG_YAML_PATH=generic_dp_smoke.yaml
+export LWS_WORKER_INDEX=0
+
+cd $WORKSPACE/vllm-ascend
+bash tests/e2e/nightly/multi_node/scripts/run.sh
+```
+
+For disaggregated prefill smoke, node 1 starts the decoder ranks and node 0
+starts the prefiller ranks, proxy, and benchmark. For generic DP smoke, both
+nodes start worker ranks, while node 0 also starts the proxy and benchmark.
+
+##### 2.2.4 Read logs while the test is running
+
+The terminal running `run.sh` prints pytest orchestration logs. For external DP,
+AISBench output is also printed on node 0, while backend and proxy stdout/stderr
+are written to `EXTERNAL_DP_LOG_DIR`. The default layout is:
+
+```text
+/tmp/external_dp_logs/
+  node-0/
+    rank-0.log
+    rank-1.log
+    proxy.log
+  node-1/
+    rank-0.log
+    rank-1.log
+```
+
+The first line of each rank log records the exact command and environment used
+to start that rank. `proxy.log` exists only on the configured proxy node,
+usually node 0.
+
+Use a separate log directory when running multiple local experiments:
+
+```bash
+export EXTERNAL_DP_LOG_DIR=/tmp/external_dp_logs_pd_local
+```
+
+To watch logs in real time, run these commands in another terminal on the
+corresponding node:
+
+```bash
+# node 0: ranks and proxy
+tail -F /tmp/external_dp_logs/node-0/rank-0.log \
+        /tmp/external_dp_logs/node-0/rank-1.log \
+        /tmp/external_dp_logs/node-0/proxy.log
+
+# node 1: ranks
+tail -F /tmp/external_dp_logs/node-1/rank-0.log \
+        /tmp/external_dp_logs/node-1/rank-1.log
+```
+
+If `EXTERNAL_DP_LOG_DIR` is set, replace `/tmp/external_dp_logs` with that
+directory. `tail -F` can be started before the files exist.
+
+When the terminal repeatedly prints `Polling external DP endpoints`, inspect
+the rank log on the node shown in the polling line. For example:
+
+```bash
+tail -n 200 /tmp/external_dp_logs/node-1/rank-0.log
+```
+
+Local rank exits fail pytest immediately and print the log path. Remote rank
+failures are diagnosed from the corresponding remote node log.
+
+For CI or local artifact collection, set `LOG_PREFIX` on each node:
+
+```bash
+export LOG_PREFIX=/tmp/external_dp_artifacts_pd_local
+mkdir -p "$LOG_PREFIX"
+```
+
+At cleanup, external DP packs raw rank and proxy logs into:
+
+```text
+$LOG_PREFIX/node_<LWS_WORKER_INDEX>_external_dp_logs.tar.gz
+```
+
+The shared `run.sh` also backs up Ascend logs to:
+
+```text
+$LOG_PREFIX/node_<LWS_WORKER_INDEX>_plogs/
+```
+
+Useful artifact commands:
+
+```bash
+ls -lh /tmp/external_dp_artifacts_pd_local
+tar -tzf /tmp/external_dp_artifacts_pd_local/node_0_external_dp_logs.tar.gz
+tar -xzf /tmp/external_dp_artifacts_pd_local/node_0_external_dp_logs.tar.gz -C /tmp
+```

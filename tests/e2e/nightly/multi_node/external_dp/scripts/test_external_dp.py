@@ -19,6 +19,7 @@ from tests.e2e.nightly.multi_node.external_dp.scripts.external_dp_config import 
 from tests.e2e.nightly.multi_node.external_dp.scripts.utils import (
     CommandBuilder,
     _is_http_ready,
+    build_distributed_envs,
     build_proxy_command,
     collect_logs,
     proxy_health_url,
@@ -61,6 +62,10 @@ class ExternalDPServerManager:
         self.current_node_index = current_node_index
         self.log_root = log_root
         self.command_builder = CommandBuilder(config)
+        self.distributed_envs = build_distributed_envs(
+            config.cluster_ips[current_node_index],
+            config.cluster_ips[0],
+        )
         self.processes: list[EndpointProcess] = []
 
     def start_current_node(self) -> None:
@@ -69,6 +74,10 @@ class ExternalDPServerManager:
         try:
             for endpoint in local_endpoints:
                 template = self.config.templates[endpoint.config_index]
+                template = type(template)(
+                    envs={**template.envs, **self.distributed_envs},
+                    server_cmd_template=template.server_cmd_template,
+                )
                 built_command = self.command_builder.build(endpoint, template)
                 log_file = self._endpoint_log_file(endpoint)
                 process = start_process(built_command.cmd, built_command.env, log_file)

@@ -42,7 +42,6 @@ class NodeConfig:
     """Per-node backend topology loaded from one config entry."""
 
     node_ip: str
-    host: str
     port_start: int
     dp_rpc_port: int
     dp_group: str
@@ -82,7 +81,6 @@ class ExternalDPEndpoint:
     local_rank: int
     dp_rank: int
     host: str
-    bind_host: str
     port: int
     visible_devices: str
     dp_size: int
@@ -280,7 +278,6 @@ class ExternalDPConfigLoader:
             node_configs.append(
                 NodeConfig(
                     node_ip=cluster_ips[index],
-                    host=str(node["host"]),
                     port_start=int(node["port_start"]),
                     dp_rpc_port=int(node["dp_rpc_port"]),
                     dp_group=str(node.get("dp_group", "default")),
@@ -435,7 +432,6 @@ class EndpointResolver:
                     local_rank=local_rank,
                     dp_rank=dp_rank,
                     host=node_config.node_ip,
-                    bind_host=node_config.host,
                     port=port,
                     visible_devices=visible_devices,
                     dp_size=node_config.dp_size,

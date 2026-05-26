@@ -3,17 +3,22 @@ from pathlib import Path
 
 import pytest
 
+from tests.e2e.nightly.multi_node.external_dp.scripts import utils as external_dp_utils
 from tests.e2e.nightly.multi_node.external_dp.scripts.external_dp_config import (
     EndpointResolver,
     ExternalDPConfigLoader,
 )
-from tests.e2e.nightly.multi_node.external_dp.scripts.utils import CommandBuilder
+from tests.e2e.nightly.multi_node.external_dp.scripts.utils import (
+    CommandBuilder,
+    build_distributed_envs,
+)
 
 
 def test_render_server_cmd_template(generic_config):
     endpoint = EndpointResolver(generic_config).resolve()[0]
     command = CommandBuilder(generic_config).build(endpoint, generic_config.templates[0])
     assert command.cmd[:3] == ["vllm", "serve", "Qwen/Qwen3-0.6B"]
+    assert command.cmd[command.cmd.index("--host") + 1] == "0.0.0.0"
     assert command.cmd[command.cmd.index("--port") + 1] == "7100"
     assert command.cmd[command.cmd.index("--data-parallel-rank") + 1] == "0"
 
@@ -24,6 +29,60 @@ def test_render_envs(generic_config):
     assert command.env["SERVER_PORT"] == "7100"
     assert command.env["LOCAL_ENDPOINT"] == "10.0.0.1:7100"
     assert command.env["ASCEND_RT_VISIBLE_DEVICES"] == "0"
+
+
+def test_build_distributed_envs(monkeypatch):
+    monkeypatch.setattr(external_dp_utils, "get_net_interface", lambda ip: "eth0")
+    envs = build_distributed_envs("10.0.0.1", "10.0.0.1")
+
+    assert envs == {
+        "HCCL_IF_IP": "10.0.0.1",
+        "HCCL_SOCKET_IFNAME": "eth0",
+        "GLOO_SOCKET_IFNAME": "eth0",
+        "TP_SOCKET_IFNAME": "eth0",
+        "LOCAL_IP": "10.0.0.1",
+        "NIC_NAME": "eth0",
+        "MASTER_IP": "10.0.0.1",
+    }
+
+
+def test_startup_template_can_include_distributed_envs(monkeypatch, generic_config):
+    monkeypatch.setattr(external_dp_utils, "get_net_interface", lambda ip: "eth0")
+    endpoint = EndpointResolver(generic_config).resolve()[0]
+    template = generic_config.templates[0]
+    startup_template = type(template)(
+        envs={
+            **template.envs,
+            **build_distributed_envs("10.0.0.1", "10.0.0.1"),
+        },
+        server_cmd_template=template.server_cmd_template,
+    )
+    command = CommandBuilder(generic_config).build(endpoint, startup_template)
+
+    assert command.env["LOCAL_IP"] == "10.0.0.1"
+    assert command.env["MASTER_IP"] == "10.0.0.1"
+    assert command.env["NIC_NAME"] == "eth0"
+    assert command.env["HCCL_IF_IP"] == "10.0.0.1"
+    assert command.env["GLOO_SOCKET_IFNAME"] == "eth0"
+    assert command.env["HCCL_SOCKET_IFNAME"] == "eth0"
+    assert command.env["TP_SOCKET_IFNAME"] == "eth0"
+
+
+def test_distributed_envs_override_template_network_envs(monkeypatch, generic_config):
+    monkeypatch.setattr(external_dp_utils, "get_net_interface", lambda ip: "eth0")
+    endpoint = EndpointResolver(generic_config).resolve()[0]
+    template = generic_config.templates[0]
+    startup_template = type(template)(
+        envs={
+            **template.envs,
+            "GLOO_SOCKET_IFNAME": "ib0",
+            **build_distributed_envs("10.0.0.1", "10.0.0.1"),
+        },
+        server_cmd_template=template.server_cmd_template,
+    )
+    command = CommandBuilder(generic_config).build(endpoint, startup_template)
+
+    assert command.env["GLOO_SOCKET_IFNAME"] == "eth0"
 
 
 def test_replace_generated_variables(generic_config):
@@ -41,6 +100,17 @@ def test_missing_variable_error(generic_config):
         server_cmd_template=[*template.server_cmd_template, "${UNKNOWN_VAR}"],
     )
     with pytest.raises(KeyError, match="UNKNOWN_VAR"):
+        CommandBuilder(generic_config).build(endpoint, bad_template)
+
+
+def test_host_is_not_a_config_template_variable(generic_config):
+    endpoint = EndpointResolver(generic_config).resolve()[0]
+    template = generic_config.templates[0]
+    bad_template = type(template)(
+        envs=template.envs,
+        server_cmd_template=[*template.server_cmd_template, "${HOST}"],
+    )
+    with pytest.raises(KeyError, match="HOST"):
         CommandBuilder(generic_config).build(endpoint, bad_template)
 
 
@@ -76,6 +146,23 @@ def test_cp_sp_template_variables_default_to_one(generic_config):
     )
     command = CommandBuilder(generic_config).build(endpoint, extended_template)
     assert command.cmd[-2:] == ["1", "1"]
+
+
+def test_generic_smoke_uses_deepseek_w8a8_command():
+    config_path = Path("tests/e2e/nightly/multi_node/external_dp/config/generic_dp_smoke.yaml")
+    config = ExternalDPConfigLoader.from_yaml(
+        str(config_path),
+        cluster_ips=["10.0.0.1", "10.0.0.2"],
+    )
+    endpoint = EndpointResolver(config).resolve()[0]
+    command = CommandBuilder(config).build(endpoint, config.templates[0])
+
+    assert command.cmd[:3] == ["vllm", "serve", "vllm-ascend/DeepSeek-V2-Lite-W8A8"]
+    assert command.cmd[command.cmd.index("--quantization") + 1] == "ascend"
+    assert "--enable-expert-parallel" in command.cmd
+    assert command.env["HCCL_BUFFSIZE"] == "256"
+    assert command.env["PYTORCH_NPU_ALLOC_CONF"] == "expandable_segments:True"
+    assert "VLLM_ASCEND_ENABLE_FLASHCOMM1" not in command.env
 
 
 def test_disaggregated_smoke_kv_transfer_config_uses_multiline_json():

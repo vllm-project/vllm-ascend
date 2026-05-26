@@ -9,7 +9,7 @@ import tarfile
 import time
 import urllib.error
 import urllib.request
-from dataclasses import asdict, dataclass
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
@@ -28,6 +28,7 @@ from tests.e2e.nightly.multi_node.scripts.benchmark_results import (
     get_vllm_version,
     write_results_json,
 )
+from tests.e2e.nightly.multi_node.scripts.utils import get_net_interface
 
 logger = logging.getLogger(__name__)
 
@@ -80,7 +81,6 @@ class CommandBuilder:
     def _build_variables(self, endpoint: ExternalDPEndpoint) -> dict[str, str]:
         return {
             "MODEL": self.config.model,
-            "HOST": endpoint.bind_host,
             "PORT_START": str(endpoint.port_start),
             "PORT": str(endpoint.port),
             "DP_SIZE": str(endpoint.dp_size),
@@ -163,6 +163,19 @@ class CommandBuilder:
             return variables[key]
 
         return pattern.sub(repl, value)
+
+
+def build_distributed_envs(cur_ip: str, master_ip: str) -> dict[str, str]:
+    nic_name = get_net_interface(cur_ip)
+    return {
+        "HCCL_IF_IP": cur_ip,
+        "HCCL_SOCKET_IFNAME": nic_name,
+        "GLOO_SOCKET_IFNAME": nic_name,
+        "TP_SOCKET_IFNAME": nic_name,
+        "LOCAL_IP": cur_ip,
+        "NIC_NAME": nic_name,
+        "MASTER_IP": master_ip,
+    }
 
 
 def format_command(cmd: list[str], env: dict[str, str] | None = None) -> str:
@@ -363,37 +376,6 @@ def _build_serve_cmd(
     return {key: entries}
 
 
-def _build_topology(config: ExternalDPConfig, endpoints: list[ExternalDPEndpoint]) -> dict[str, Any]:
-    endpoint_items = []
-    for endpoint in endpoints:
-        item = asdict(endpoint)
-        item.pop("bind_host", None)
-        item.pop("port_start", None)
-        item.pop("dp_rpc_port", None)
-        item.pop("pp_size", None)
-        item.pop("cp_size", None)
-        item.pop("sp_size", None)
-        item.pop("dp_address", None)
-        item.pop("dp_size_local", None)
-        item.pop("dp_size", None)
-        endpoint_items.append(item)
-
-    return {
-        "summary": {
-            "routing_type": config.routing.type,
-            "num_nodes": config.num_nodes,
-            "npu_per_node": config.npu_per_node,
-            "proxy": {
-                "node_index": config.routing.proxy_node_index,
-                "host": config.routing.proxy_host,
-                "port": config.routing.proxy_port,
-            },
-            "groups": config.routing.groups,
-        },
-        "endpoints": endpoint_items,
-    }
-
-
 def build_benchmark_results(
     *,
     config: ExternalDPConfig,
@@ -416,7 +398,6 @@ def build_benchmark_results(
         "tasks": tasks,
         "serve_cmd": _build_serve_cmd(config, endpoints, commands),
         "environment": filter_environment(common_envs),
-        "external_dp_topology": _build_topology(config, endpoints),
     }
 
 

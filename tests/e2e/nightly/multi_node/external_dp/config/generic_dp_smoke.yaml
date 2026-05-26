@@ -1,5 +1,5 @@
-test_name: "test generic external dp"
-model: "Qwen/Qwen3-0.6B"
+test_name: "test DeepSeek-V2-Lite-W8A8 generic external dp"
+model: "vllm-ascend/DeepSeek-V2-Lite-W8A8"
 num_nodes: 2
 npu_per_node: 16
 
@@ -7,9 +7,9 @@ env_common: &env_common
   VLLM_USE_MODELSCOPE: "true"
   OMP_PROC_BIND: "false"
   OMP_NUM_THREADS: "10"
+  PYTORCH_NPU_ALLOC_CONF: "expandable_segments:True"
 
 config_common: &config_common
-  host: "0.0.0.0"
   port_start: 7100
   dp_rpc_port: 12321
 
@@ -47,10 +47,11 @@ templates:
   - envs:
       <<: *env_common
       ASCEND_RT_VISIBLE_DEVICES: "${VISIBLE_DEVICES}"
+      HCCL_BUFFSIZE: "256"
       SERVER_PORT: "${PORT}"
     server_cmd_template: &generic_server_cmd
       - --host
-      - ${HOST}
+      - "0.0.0.0"
       - --port
       - $SERVER_PORT
       - --data-parallel-size
@@ -64,10 +65,14 @@ templates:
       - --tensor-parallel-size
       - ${TP_SIZE}
       - --trust-remote-code
+      - --quantization
+      - ascend
+      - --enable-expert-parallel
 
   - envs:
       <<: *env_common
       ASCEND_RT_VISIBLE_DEVICES: "${VISIBLE_DEVICES}"
+      HCCL_BUFFSIZE: "256"
       SERVER_PORT: "${PORT}"
     server_cmd_template: *generic_server_cmd
 

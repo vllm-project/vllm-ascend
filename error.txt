@@ -1,0 +1,441 @@
+Starting command: ASCEND_RT_VISIBLE_DEVICES=0 HCCL_BUFFSIZE=256 OMP_NUM_THREADS=10 OMP_PROC_BIND=false PYTORCH_NPU_ALLOC_CONF=expandable_segments:True SERVER_PORT=7100 VLLM_USE_MODELSCOPE=true vllm serve vllm-ascend/DeepSeek-V2-Lite-W8A8 --host 0.0.0.0 --port 7100 --data-parallel-size 4 --data-parallel-rank 2 --data-parallel-address 172.22.0.155 --data-parallel-rpc-port 12321 --tensor-parallel-size 1 --trust-remote-code --quantization ascend --enable-expert-parallel
+INFO 05-26 04:35:25 [__init__.py:44] Available plugins for group vllm.platform_plugins:
+INFO 05-26 04:35:25 [__init__.py:46] - ascend -> vllm_ascend:register
+INFO 05-26 04:35:25 [__init__.py:49] All plugins in this group will be loaded. Set `VLLM_PLUGINS` to control which plugins to load.
+INFO 05-26 04:35:25 [__init__.py:238] Platform plugin ascend is activated
+2026-05-26 04:35:30,807 - 673 - ServiceProfiler - INFO - VLLM_USE_V1 not set, auto-detected via vLLM 0.20.2+empty: default 1
+WARNING 05-26 04:35:30 [nixl_utils.py:34] NIXL is not available
+WARNING 05-26 04:35:30 [nixl_utils.py:44] NIXL agent config is not available
+WARNING 05-26 04:35:31 [registry.py:945] Model architecture DeepseekV4ForCausalLM is already registered, and will be overwritten by the new model class vllm_ascend.models.deepseek_v4:AscendDeepseekV4ForCausalLM.
+WARNING 05-26 04:35:31 [registry.py:945] Model architecture DeepSeekV4MTPModel is already registered, and will be overwritten by the new model class vllm_ascend.models.deepseek_v4_mtp:DeepSeekV4MTP.
+INFO 05-26 04:35:31 [__init__.py:110] Registered model loader `<class 'vllm_ascend.model_loader.netloader.netloader.ModelNetLoaderElastic'>` with load format `netloader`
+INFO 05-26 04:35:31 [__init__.py:110] Registered model loader `<class 'vllm_ascend.model_loader.rfork.rfork_loader.RForkModelLoader'>` with load format `rfork`
+(APIServer pid=673) INFO 05-26 04:35:31 [utils.py:299] ^M
+(APIServer pid=673) INFO 05-26 04:35:31 [utils.py:299]        �~V~H     �~V~H     �~V~H�~V~D   �~V~D�~V~H^M
+(APIServer pid=673) INFO 05-26 04:35:31 [utils.py:299]  �~V~D�~V~D �~V~D�~V~H �~V~H     �~V~H     �~V~H �~V~@�~V~D�~V~@ �~V~H  version 0.20.2^M
+(APIServer pid=673) INFO 05-26 04:35:31 [utils.py:299]   �~V~H�~V~D�~V~H�~V~@ �~V~H     �~V~H     �~V~H     �~V~H  model   vllm-ascend/DeepSeek-V2-Lite-W8A8^M
+(APIServer pid=673) INFO 05-26 04:35:31 [utils.py:299]    �~V~@�~V~@  �~V~@�~V~@�~V~@�~V~@�~V~@ �~V~@�~V~@�~V~@�~V~@�~V~@ �~V~@     �~V~@^M
+(APIServer pid=673) INFO 05-26 04:35:31 [utils.py:299]
+(APIServer pid=673) INFO 05-26 04:35:31 [utils.py:233] non-default args: {'model_tag': 'vllm-ascend/DeepSeek-V2-Lite-W8A8', 'host': '0.0.0.0', 'port': 7100, 'model': 'vllm-ascend/DeepSeek-V2-Lite-W8A8', 'trust_remote_code': True, 'quantization': 'ascend', 'data_parallel_size': 4, 'data_parallel_rank': 2, 'data_parallel_address': '172.22.0.155', 'data_parallel_rpc_port': 12321, 'enable_expert_parallel': True}
+(APIServer pid=673) 2026-05-26 04:35:31,588 - modelscope - WARNING - We can not confirm the cached file is for revision: master
+(APIServer pid=673) INFO 05-26 04:35:31 [arg_utils.py:718] HF_HUB_OFFLINE is True, replace model_id [vllm-ascend/DeepSeek-V2-Lite-W8A8] to model_path [/root/.cache/modelscope/hub/models/vllm-ascend/DeepSeek-V2-Lite-W8A8]
+(APIServer pid=673) `rope_parameters`'s factor field must be a float >= 1, got 40
+(APIServer pid=673) `rope_parameters`'s beta_fast field must be a float, got 32
+(APIServer pid=673) `rope_parameters`'s beta_slow field must be a float, got 1
+(APIServer pid=673) `rope_parameters`'s factor field must be a float >= 1, got 40
+(APIServer pid=673) `rope_parameters`'s beta_fast field must be a float, got 32
+(APIServer pid=673) `rope_parameters`'s beta_slow field must be a float, got 1
+(APIServer pid=673) `rope_parameters`'s factor field must be a float >= 1, got 40
+(APIServer pid=673) `rope_parameters`'s beta_fast field must be a float, got 32
+(APIServer pid=673) `rope_parameters`'s beta_slow field must be a float, got 1
+(APIServer pid=673) INFO 05-26 04:35:31 [model.py:555] Resolved architecture: DeepseekV2ForCausalLM
+(APIServer pid=673) INFO 05-26 04:35:31 [model.py:1680] Using max model len 163840
+(APIServer pid=673) INFO 05-26 04:35:32 [vllm.py:840] Asynchronous scheduling is enabled.
+(APIServer pid=673) INFO 05-26 04:35:32 [vllm.py:850] Disabling NCCL for DP synchronization when using async scheduling.
+"/tmp/external_dp_logs/node-1/rank-0.log" 65L, 7800B                                                                                                                1,1           Top
+Starting command: ASCEND_RT_VISIBLE_DEVICES=0 HCCL_BUFFSIZE=256 OMP_NUM_THREADS=10 OMP_PROC_BIND=false PYTORCH_NPU_ALLOC_CONF=expandable_segments:True SERVER_PORT=7100 VLLM_USE_MODELSCOPE=true vllm serve vllm-ascend/DeepSeek-V2-Lite-W8A8 --host 0.0.0.0 --port 7100 --data-parallel-size 4 --data-parallel-rank 2 --data-parallel-address 172.22.0.155 --data-parallel-rpc-port 12321 --tensor-parallel-size 1 --trust-remote-code --quantization ascend --enable-expert-parallel
+INFO 05-26 04:35:25 [__init__.py:44] Available plugins for group vllm.platform_plugins:
+INFO 05-26 04:35:25 [__init__.py:46] - ascend -> vllm_ascend:register
+INFO 05-26 04:35:25 [__init__.py:49] All plugins in this group will be loaded. Set `VLLM_PLUGINS` to control which plugins to load.
+INFO 05-26 04:35:25 [__init__.py:238] Platform plugin ascend is activated
+2026-05-26 04:35:30,807 - 673 - ServiceProfiler - INFO - VLLM_USE_V1 not set, auto-detected via vLLM 0.20.2+empty: default 1
+WARNING 05-26 04:35:30 [nixl_utils.py:34] NIXL is not available
+WARNING 05-26 04:35:30 [nixl_utils.py:44] NIXL agent config is not available
+WARNING 05-26 04:35:31 [registry.py:945] Model architecture DeepseekV4ForCausalLM is already registered, and will be overwritten by the new model class vllm_ascend.models.deepseek_v4:AscendDeepseekV4ForCausalLM.
+WARNING 05-26 04:35:31 [registry.py:945] Model architecture DeepSeekV4MTPModel is already registered, and will be overwritten by the new model class vllm_ascend.models.deepseek_v4_mtp:DeepSeekV4MTP.
+INFO 05-26 04:35:31 [__init__.py:110] Registered model loader `<class 'vllm_ascend.model_loader.netloader.netloader.ModelNetLoaderElastic'>` with load format `netloader`
+INFO 05-26 04:35:31 [__init__.py:110] Registered model loader `<class 'vllm_ascend.model_loader.rfork.rfork_loader.RForkModelLoader'>` with load format `rfork`
+(APIServer pid=673) INFO 05-26 04:35:31 [utils.py:299] ^M
+(APIServer pid=673) INFO 05-26 04:35:31 [utils.py:299]        �~V~H     �~V~H     �~V~H�~V~D   �~V~D�~V~H^M
+(APIServer pid=673) INFO 05-26 04:35:31 [utils.py:299]  �~V~D�~V~D �~V~D�~V~H �~V~H     �~V~H     �~V~H �~V~@�~V~D�~V~@ �~V~H  version 0.20.2^M
+(APIServer pid=673) INFO 05-26 04:35:31 [utils.py:299]   �~V~H�~V~D�~V~H�~V~@ �~V~H     �~V~H     �~V~H     �~V~H  model   vllm-ascend/DeepSeek-V2-Lite-W8A8^M
+(APIServer pid=673) INFO 05-26 04:35:31 [utils.py:299]    �~V~@�~V~@  �~V~@�~V~@�~V~@�~V~@�~V~@ �~V~@�~V~@�~V~@�~V~@�~V~@ �~V~@     �~V~@^M
+(APIServer pid=673) INFO 05-26 04:35:31 [utils.py:299]
+(APIServer pid=673) INFO 05-26 04:35:31 [utils.py:233] non-default args: {'model_tag': 'vllm-ascend/DeepSeek-V2-Lite-W8A8', 'host': '0.0.0.0', 'port': 7100, 'model': 'vllm-ascend/DeepSeek-V2-Lite-W8A8', 'trust_remote_code': True, 'quantization': 'ascend', 'data_parallel_size': 4, 'data_parallel_rank': 2, 'data_parallel_address': '172.22.0.155', 'data_parallel_rpc_port': 12321, 'enable_expert_parallel': True}
+(APIServer pid=673) 2026-05-26 04:35:31,588 - modelscope - WARNING - We can not confirm the cached file is for revision: master
+(APIServer pid=673) INFO 05-26 04:35:31 [arg_utils.py:718] HF_HUB_OFFLINE is True, replace model_id [vllm-ascend/DeepSeek-V2-Lite-W8A8] to model_path [/root/.cache/modelscope/hub/models/vllm-ascend/DeepSeek-V2-Lite-W8A8]
+(APIServer pid=673) `rope_parameters`'s factor field must be a float >= 1, got 40
+(APIServer pid=673) `rope_parameters`'s beta_fast field must be a float, got 32
+(APIServer pid=673) `rope_parameters`'s beta_slow field must be a float, got 1
+(APIServer pid=673) `rope_parameters`'s factor field must be a float >= 1, got 40
+(APIServer pid=673) `rope_parameters`'s beta_fast field must be a float, got 32
+(APIServer pid=673) `rope_parameters`'s beta_slow field must be a float, got 1
+(APIServer pid=673) `rope_parameters`'s factor field must be a float >= 1, got 40
+(APIServer pid=673) `rope_parameters`'s beta_fast field must be a float, got 32
+(APIServer pid=673) `rope_parameters`'s beta_slow field must be a float, got 1
+(APIServer pid=673) INFO 05-26 04:35:31 [model.py:555] Resolved architecture: DeepseekV2ForCausalLM
+(APIServer pid=673) INFO 05-26 04:35:31 [model.py:1680] Using max model len 163840
+(APIServer pid=673) INFO 05-26 04:35:32 [vllm.py:840] Asynchronous scheduling is enabled.
+(APIServer pid=673) INFO 05-26 04:35:32 [vllm.py:850] Disabling NCCL for DP synchronization when using async scheduling.
+"/tmp/external_dp_logs/node-1/rank-0.log" 65L, 7800B                                                                                                                1,1           Top
+INFO 05-26 04:35:25 [__init__.py:44] Available plugins for group vllm.platform_plugins:
+INFO 05-26 04:35:25 [__init__.py:46] - ascend -> vllm_ascend:register
+INFO 05-26 04:35:25 [__init__.py:49] All plugins in this group will be loaded. Set `VLLM_PLUGINS` to control which plugins to load.
+INFO 05-26 04:35:25 [__init__.py:238] Platform plugin ascend is activated
+INFO 05-26 04:35:31 [__init__.py:110] Registered model loader `<class 'vllm_ascend.model_loader.netloader.netloader.ModelNetLoaderElastic'>` with load format `netloader`
+INFO 05-26 04:35:31 [__init__.py:110] Registered model loader `<class 'vllm_ascend.model_loader.rfork.rfork_loader.RForkModelLoader'>` with load format `rfork`
+(APIServer pid=673) INFO 05-26 04:35:31 [utils.py:299] ^M
+(APIServer pid=673) INFO 05-26 04:35:31 [utils.py:299]        �~V~H     �~V~H     �~V~H�~V~D   �~V~D�~V~H^M
+(APIServer pid=673) INFO 05-26 04:35:31 [utils.py:299]  �~V~D�~V~D �~V~D�~V~H �~V~H     �~V~H     �~V~H �~V~@�~V~D�~V~@ �~V~H  version 0.20.2^M
+(APIServer pid=673) INFO 05-26 04:35:31 [utils.py:299]   �~V~H�~V~D�~V~H�~V~@ �~V~H     �~V~H     �~V~H     �~V~H  model   vllm-ascend/DeepSeek-V2-Lite-W8A8^M
+(APIServer pid=673) INFO 05-26 04:35:31 [utils.py:299]    �~V~@�~V~@  �~V~@�~V~@�~V~@�~V~@�~V~@ �~V~@�~V~@�~V~@�~V~@�~V~@ �~V~@     �~V~@^M
+(APIServer pid=673) INFO 05-26 04:35:31 [utils.py:299]
+(APIServer pid=673) 2026-05-26 04:35:31,588 - modelscope - WARNING - We can not confirm the cached file is for revision: master
+(APIServer pid=673) `rope_parameters`'s factor field must be a float >= 1, got 40
+(APIServer pid=673) `rope_parameters`'s beta_fast field must be a float, got 32
+(APIServer pid=673) `rope_parameters`'s beta_slow field must be a float, got 1
+(APIServer pid=673) `rope_parameters`'s factor field must be a float >= 1, got 40
+(APIServer pid=673) `rope_parameters`'s factor field must be a float >= 1, got 40
+(APIServer pid=673) `rope_parameters`'s beta_fast field must be a float, got 32
+(APIServer pid=673) `rope_parameters`'s beta_slow field must be a float, got 1
+(APIServer pid=673) INFO 05-26 04:35:31 [model.py:555] Resolved architecture: DeepseekV2ForCausalLM
+(APIServer pid=673) INFO 05-26 04:35:31 [model.py:1680] Using max model len 163840
+(APIServer pid=673) INFO 05-26 04:35:32 [vllm.py:840] Asynchronous scheduling is enabled.
+(APIServer pid=673) INFO 05-26 04:35:32 [vllm.py:850] Disabling NCCL for DP synchronization when using async scheduling.
+(APIServer pid=673) INFO 05-26 04:35:32 [kernel.py:205] Final IR op priority after setting platform defaults: IrOpPriorityConfig(rms_norm=['native'])
+(APIServer pid=673) WARNING 05-26 04:35:32 [platform.py:847] Parameter '--disable-cascade-attn' is a GPU-specific feature. Resetting to False for Ascend.
+(APIServer pid=673) WARNING 05-26 04:35:32 [platform.py:936] Ignored parameter 'disable_flashinfer_prefill'. This is a GPU-specific feature not supported on Ascend. Resetting to False.
+(APIServer pid=673) INFO 05-26 04:35:32 [ascend_config.py:688] Dynamic EPLB is False
+(APIServer pid=673) INFO 05-26 04:35:32 [ascend_config.py:689] The number of redundant experts is 0
+(APIServer pid=673) INFO 05-26 04:35:32 [platform.py:408] PIECEWISE compilation enabled on NPU. use_inductor not supported - using only ACL Graph mode
+(APIServer pid=673) INFO 05-26 04:35:32 [utils.py:660] Calculated maximum supported batch sizes for ACL graph: 20
+(APIServer pid=673) WARNING 05-26 04:35:32 [utils.py:661] Currently, communication is performed using FFTS+ method, which reduces the number of available streams and, as a result, limits the range of runtime shapes that can be handled. To both improve communication performance and increase the number of supported shapes, set HCCL_OP_EXPANSION_MODE=AIV.
+(APIServer pid=673) INFO 05-26 04:35:32 [utils.py:681] Adjusted ACL graph batch sizes for DeepseekV2ForCausalLM model (layers: 27): 35 �~F~R 20 sizes
+(APIServer pid=673) INFO 05-26 04:35:32 [utils.py:1321] Block size is set to 128 if prefix cache or chunked prefill is enabled.
+(APIServer pid=673) INFO 05-26 04:35:32 [platform.py:581] Set PYTORCH_NPU_ALLOC_CONF=expandable_segments:True
+(APIServer pid=673) INFO 05-26 04:35:32 [compilation.py:303] Enabled custom fusions: norm_quant, act_quant
+(APIServer pid=673) `rope_parameters`'s factor field must be a float >= 1, got 40
+(APIServer pid=673) `rope_parameters`'s beta_fast field must be a float, got 32
+(APIServer pid=673) `rope_parameters`'s beta_slow field must be a float, got 1
+(APIServer pid=673) `rope_parameters`'s factor field must be a float >= 1, got 40
+(APIServer pid=673) `rope_parameters`'s beta_fast field must be a float, got 32
+(APIServer pid=673) `rope_parameters`'s beta_slow field must be a float, got 1
+(APIServer pid=673) `rope_parameters`'s factor field must be a float >= 1, got 40
+(APIServer pid=673) `rope_parameters`'s beta_fast field must be a float, got 32
+(APIServer pid=673) `rope_parameters`'s beta_slow field must be a float, got 1
+(APIServer pid=673) `rope_parameters`'s factor field must be a float >= 1, got 40
+(APIServer pid=673) `rope_parameters`'s beta_fast field must be a float, got 32
+(APIServer pid=673) `rope_parameters`'s beta_slow field must be a float, got 1
+INFO 05-26 04:35:39 [__init__.py:44] Available plugins for group vllm.platform_plugins:
+INFO 05-26 04:35:39 [__init__.py:46] - ascend -> vllm_ascend:register
+INFO 05-26 04:35:39 [__init__.py:49] All plugins in this group will be loaded. Set `VLLM_PLUGINS` to control which plugins to load.
+INFO 05-26 04:35:39 [__init__.py:238] Platform plugin ascend is activated
+WARNING 05-26 04:35:44 [nixl_utils.py:34] NIXL is not available
+WARNING 05-26 04:35:44 [nixl_utils.py:44] NIXL agent config is not available
+[W526 04:36:12.032076611 ProcessGroupGloo.cpp:511] Warning: Unable to resolve hostname to a (local) address. Using the loopback address as fallback. Manually set the network interface to bind to with GLOO_SOCKET_IFNAME. (function operator())
+
+
+
+
+
+
+
+Starting command: ASCEND_RT_VISIBLE_DEVICES=0 HCCL_BUFFSIZE=256 OMP_NUM_THREADS=10 OMP_PROC_BIND=false PYTORCH_NPU_ALLOC_CONF=expandable_segments:True SERVER_PORT=7100 VLLM_USE_MODELSCOPE=true vllm serve vllm-ascend/DeepSeek-V2-Lite-W8A8 --host 0.0.0.0 --port 7100 --data-parallel-size 4 --data-parallel-rank 0 --data-parallel-address 172.22.0.155 --data-parallel-rpc-port 12321 --tensor-parallel-size 1 --trust-remote-code --quantization ascend --enable-expert-parallel
+INFO 05-26 04:35:43 [__init__.py:44] Available plugins for group vllm.platform_plugins:
+INFO 05-26 04:35:43 [__init__.py:46] - ascend -> vllm_ascend:register
+INFO 05-26 04:35:43 [__init__.py:49] All plugins in this group will be loaded. Set `VLLM_PLUGINS` to control which plugins to load.
+INFO 05-26 04:35:43 [__init__.py:238] Platform plugin ascend is activated
+2026-05-26 04:35:48,702 - 754 - ServiceProfiler - INFO - VLLM_USE_V1 not set, auto-detected via vLLM 0.20.2+empty: default 1
+WARNING 05-26 04:35:48 [nixl_utils.py:34] NIXL is not available
+WARNING 05-26 04:35:48 [nixl_utils.py:44] NIXL agent config is not available
+WARNING 05-26 04:35:48 [registry.py:945] Model architecture DeepseekV4ForCausalLM is already registered, and will be overwritten by the new model class vllm_ascend.models.deepseek_v4:AscendDeepseekV4ForCausalLM.
+WARNING 05-26 04:35:48 [registry.py:945] Model architecture DeepSeekV4MTPModel is already registered, and will be overwritten by the new model class vllm_ascend.models.deepseek_v4_mtp:DeepSeekV4MTP.
+INFO 05-26 04:35:48 [__init__.py:110] Registered model loader `<class 'vllm_ascend.model_loader.netloader.netloader.ModelNetLoaderElastic'>` with load format `netloader`
+INFO 05-26 04:35:48 [__init__.py:110] Registered model loader `<class 'vllm_ascend.model_loader.rfork.rfork_loader.RForkModelLoader'>` with load format `rfork`
+(APIServer pid=754) INFO 05-26 04:35:49 [utils.py:299] ^M
+(APIServer pid=754) INFO 05-26 04:35:49 [utils.py:299]        �~V~H     �~V~H     �~V~H�~V~D   �~V~D�~V~H^M
+(APIServer pid=754) INFO 05-26 04:35:49 [utils.py:299]  �~V~D�~V~D �~V~D�~V~H �~V~H     �~V~H     �~V~H �~V~@�~V~D�~V~@ �~V~H  version 0.20.2^M
+(APIServer pid=754) INFO 05-26 04:35:49 [utils.py:299]   �~V~H�~V~D�~V~H�~V~@ �~V~H     �~V~H     �~V~H     �~V~H  model   vllm-ascend/DeepSeek-V2-Lite-W8A8^M
+(APIServer pid=754) INFO 05-26 04:35:49 [utils.py:299]    �~V~@�~V~@  �~V~@�~V~@�~V~@�~V~@�~V~@ �~V~@�~V~@�~V~@�~V~@�~V~@ �~V~@     �~V~@^M
+(APIServer pid=754) INFO 05-26 04:35:49 [utils.py:299]
+(APIServer pid=754) INFO 05-26 04:35:49 [utils.py:233] non-default args: {'model_tag': 'vllm-ascend/DeepSeek-V2-Lite-W8A8', 'host': '0.0.0.0', 'port': 7100, 'model': 'vllm-ascend/DeepSeek-V2-Lite-W8A8', 'trust_remote_code': True, 'quantization': 'ascend', 'data_parallel_size': 4, 'data_parallel_rank': 0, 'data_parallel_address': '172.22.0.155', 'data_parallel_rpc_port': 12321, 'enable_expert_parallel': True}
+(APIServer pid=754) 2026-05-26 04:35:49,467 - modelscope - WARNING - We can not confirm the cached file is for revision: master
+(APIServer pid=754) INFO 05-26 04:35:49 [arg_utils.py:718] HF_HUB_OFFLINE is True, replace model_id [vllm-ascend/DeepSeek-V2-Lite-W8A8] to model_path [/root/.cache/modelscope/hub/models/vllm-ascend/DeepSeek-V2-Lite-W8A8]
+(APIServer pid=754) `rope_parameters`'s factor field must be a float >= 1, got 40
+(APIServer pid=754) `rope_parameters`'s beta_fast field must be a float, got 32
+(APIServer pid=754) `rope_parameters`'s beta_slow field must be a float, got 1
+(APIServer pid=754) `rope_parameters`'s factor field must be a float >= 1, got 40
+(APIServer pid=754) `rope_parameters`'s beta_fast field must be a float, got 32
+(APIServer pid=754) `rope_parameters`'s beta_slow field must be a float, got 1
+(APIServer pid=754) `rope_parameters`'s factor field must be a float >= 1, got 40
+(APIServer pid=754) `rope_parameters`'s beta_fast field must be a float, got 32
+(APIServer pid=754) `rope_parameters`'s beta_slow field must be a float, got 1
+(APIServer pid=754) INFO 05-26 04:35:49 [model.py:555] Resolved architecture: DeepseekV2ForCausalLM
+(APIServer pid=754) INFO 05-26 04:35:49 [model.py:1680] Using max model len 163840
+(APIServer pid=754) INFO 05-26 04:35:49 [vllm.py:840] Asynchronous scheduling is enabled.
+(APIServer pid=754) INFO 05-26 04:35:49 [vllm.py:850] Disabling NCCL for DP synchronization when using async scheduling.
+"/tmp/external_dp_logs/node-0/rank-0.log" 197L, 20731B                                                                                                              1,1           Top
+Starting command: ASCEND_RT_VISIBLE_DEVICES=0 HCCL_BUFFSIZE=256 OMP_NUM_THREADS=10 OMP_PROC_BIND=false PYTORCH_NPU_ALLOC_CONF=expandable_segments:True SERVER_PORT=7100 VLLM_USE_MODELSCOPE=true vllm serve vllm-ascend/DeepSeek-V2-Lite-W8A8 --host 0.0.0.0 --port 7100 --data-parallel-size 4 --data-parallel-rank 0 --data-parallel-address 172.22.0.155 --data-parallel-rpc-port 12321 --tensor-parallel-size 1 --trust-remote-code --quantization ascend --enable-expert-parallel
+INFO 05-26 04:35:43 [__init__.py:44] Available plugins for group vllm.platform_plugins:
+INFO 05-26 04:35:43 [__init__.py:46] - ascend -> vllm_ascend:register
+INFO 05-26 04:35:43 [__init__.py:49] All plugins in this group will be loaded. Set `VLLM_PLUGINS` to control which plugins to load.
+INFO 05-26 04:35:43 [__init__.py:238] Platform plugin ascend is activated
+2026-05-26 04:35:48,702 - 754 - ServiceProfiler - INFO - VLLM_USE_V1 not set, auto-detected via vLLM 0.20.2+empty: default 1
+WARNING 05-26 04:35:48 [nixl_utils.py:34] NIXL is not available
+WARNING 05-26 04:35:48 [nixl_utils.py:44] NIXL agent config is not available
+WARNING 05-26 04:35:48 [registry.py:945] Model architecture DeepseekV4ForCausalLM is already registered, and will be overwritten by the new model class vllm_ascend.models.deepseek_v4:AscendDeepseekV4ForCausalLM.
+WARNING 05-26 04:35:48 [registry.py:945] Model architecture DeepSeekV4MTPModel is already registered, and will be overwritten by the new model class vllm_ascend.models.deepseek_v4_mtp:DeepSeekV4MTP.
+INFO 05-26 04:35:48 [__init__.py:110] Registered model loader `<class 'vllm_ascend.model_loader.netloader.netloader.ModelNetLoaderElastic'>` with load format `netloader`
+INFO 05-26 04:35:48 [__init__.py:110] Registered model loader `<class 'vllm_ascend.model_loader.rfork.rfork_loader.RForkModelLoader'>` with load format `rfork`
+(APIServer pid=754) INFO 05-26 04:35:49 [utils.py:299] ^M
+(APIServer pid=754) INFO 05-26 04:35:49 [utils.py:299]        �~V~H     �~V~H     �~V~H�~V~D   �~V~D�~V~H^M
+(APIServer pid=754) INFO 05-26 04:35:49 [utils.py:299]  �~V~D�~V~D �~V~D�~V~H �~V~H     �~V~H     �~V~H �~V~@�~V~D�~V~@ �~V~H  version 0.20.2^M
+(APIServer pid=754) INFO 05-26 04:35:49 [utils.py:299]   �~V~H�~V~D�~V~H�~V~@ �~V~H     �~V~H     �~V~H     �~V~H  model   vllm-ascend/DeepSeek-V2-Lite-W8A8^M
+(APIServer pid=754) INFO 05-26 04:35:49 [utils.py:299]    �~V~@�~V~@  �~V~@�~V~@�~V~@�~V~@�~V~@ �~V~@�~V~@�~V~@�~V~@�~V~@ �~V~@     �~V~@^M
+(APIServer pid=754) INFO 05-26 04:35:49 [utils.py:299]
+(APIServer pid=754) INFO 05-26 04:35:49 [utils.py:233] non-default args: {'model_tag': 'vllm-ascend/DeepSeek-V2-Lite-W8A8', 'host': '0.0.0.0', 'port': 7100, 'model': 'vllm-ascend/DeepSeek-V2-Lite-W8A8', 'trust_remote_code': True, 'quantization': 'ascend', 'data_parallel_size': 4, 'data_parallel_rank': 0, 'data_parallel_address': '172.22.0.155', 'data_parallel_rpc_port': 12321, 'enable_expert_parallel': True}
+(APIServer pid=754) 2026-05-26 04:35:49,467 - modelscope - WARNING - We can not confirm the cached file is for revision: master
+(APIServer pid=754) INFO 05-26 04:35:49 [arg_utils.py:718] HF_HUB_OFFLINE is True, replace model_id [vllm-ascend/DeepSeek-V2-Lite-W8A8] to model_path [/root/.cache/modelscope/hub/models/vllm-ascend/DeepSeek-V2-Lite-W8A8]
+(APIServer pid=754) `rope_parameters`'s factor field must be a float >= 1, got 40
+(APIServer pid=754) `rope_parameters`'s beta_fast field must be a float, got 32
+(APIServer pid=754) `rope_parameters`'s beta_slow field must be a float, got 1
+(APIServer pid=754) `rope_parameters`'s factor field must be a float >= 1, got 40
+(APIServer pid=754) `rope_parameters`'s beta_fast field must be a float, got 32
+(APIServer pid=754) `rope_parameters`'s beta_slow field must be a float, got 1
+(APIServer pid=754) `rope_parameters`'s factor field must be a float >= 1, got 40
+(APIServer pid=754) `rope_parameters`'s beta_fast field must be a float, got 32
+(APIServer pid=754) `rope_parameters`'s beta_slow field must be a float, got 1
+(APIServer pid=754) INFO 05-26 04:35:49 [model.py:555] Resolved architecture: DeepseekV2ForCausalLM
+(APIServer pid=754) INFO 05-26 04:35:49 [model.py:1680] Using max model len 163840
+(APIServer pid=754) INFO 05-26 04:35:49 [vllm.py:840] Asynchronous scheduling is enabled.
+(APIServer pid=754) INFO 05-26 04:35:49 [vllm.py:850] Disabling NCCL for DP synchronization when using async scheduling.
+"/tmp/external_dp_logs/node-0/rank-0.log" 197L, 20731B                                                                                                              1,1           Top
+INFO 05-26 04:35:43 [__init__.py:44] Available plugins for group vllm.platform_plugins:
+INFO 05-26 04:35:43 [__init__.py:46] - ascend -> vllm_ascend:register
+INFO 05-26 04:35:43 [__init__.py:49] All plugins in this group will be loaded. Set `VLLM_PLUGINS` to control which plugins to load.
+INFO 05-26 04:35:43 [__init__.py:238] Platform plugin ascend is activated
+INFO 05-26 04:35:48 [__init__.py:110] Registered model loader `<class 'vllm_ascend.model_loader.netloader.netloader.ModelNetLoaderElastic'>` with load format `netloader`
+INFO 05-26 04:35:48 [__init__.py:110] Registered model loader `<class 'vllm_ascend.model_loader.rfork.rfork_loader.RForkModelLoader'>` with load format `rfork`
+(APIServer pid=754) INFO 05-26 04:35:49 [utils.py:299] ^M
+(APIServer pid=754) INFO 05-26 04:35:49 [utils.py:299]        �~V~H     �~V~H     �~V~H�~V~D   �~V~D�~V~H^M
+(APIServer pid=754) INFO 05-26 04:35:49 [utils.py:299]  �~V~D�~V~D �~V~D�~V~H �~V~H     �~V~H     �~V~H �~V~@�~V~D�~V~@ �~V~H  version 0.20.2^M
+(APIServer pid=754) INFO 05-26 04:35:49 [utils.py:299]   �~V~H�~V~D�~V~H�~V~@ �~V~H     �~V~H     �~V~H     �~V~H  model   vllm-ascend/DeepSeek-V2-Lite-W8A8^M
+(APIServer pid=754) INFO 05-26 04:35:49 [utils.py:299]    �~V~@�~V~@  �~V~@�~V~@�~V~@�~V~@�~V~@ �~V~@�~V~@�~V~@�~V~@�~V~@ �~V~@     �~V~@^M
+(APIServer pid=754) INFO 05-26 04:35:49 [utils.py:299]
+(APIServer pid=754) 2026-05-26 04:35:49,467 - modelscope - WARNING - We can not confirm the cached file is for revision: master
+(APIServer pid=754) `rope_parameters`'s factor field must be a float >= 1, got 40
+(APIServer pid=754) `rope_parameters`'s beta_fast field must be a float, got 32
+(APIServer pid=754) `rope_parameters`'s beta_slow field must be a float, got 1
+(APIServer pid=754) `rope_parameters`'s factor field must be a float >= 1, got 40
+(APIServer pid=754) `rope_parameters`'s beta_fast field must be a float, got 32
+(APIServer pid=754) `rope_parameters`'s beta_slow field must be a float, got 1
+(APIServer pid=754) `rope_parameters`'s factor field must be a float >= 1, got 40
+(APIServer pid=754) `rope_parameters`'s beta_fast field must be a float, got 32
+(APIServer pid=754) `rope_parameters`'s beta_slow field must be a float, got 1
+(APIServer pid=754) INFO 05-26 04:35:49 [utils.py:681] Adjusted ACL graph batch sizes for DeepseekV2ForCausalLM model (layers: 27): 35 �~F~R 20 sizes
+(APIServer pid=754) INFO 05-26 04:35:49 [compilation.py:303] Enabled custom fusions: norm_quant, act_quant
+(APIServer pid=754) `rope_parameters`'s factor field must be a float >= 1, got 40
+(APIServer pid=754) `rope_parameters`'s beta_fast field must be a float, got 32
+(APIServer pid=754) `rope_parameters`'s beta_slow field must be a float, got 1
+(APIServer pid=754) `rope_parameters`'s factor field must be a float >= 1, got 40
+(APIServer pid=754) `rope_parameters`'s beta_fast field must be a float, got 32
+(APIServer pid=754) `rope_parameters`'s beta_slow field must be a float, got 1
+(APIServer pid=754) `rope_parameters`'s factor field must be a float >= 1, got 40
+(APIServer pid=754) `rope_parameters`'s beta_fast field must be a float, got 32
+(APIServer pid=754) `rope_parameters`'s beta_slow field must be a float, got 1
+(APIServer pid=754) `rope_parameters`'s factor field must be a float >= 1, got 40
+(APIServer pid=754) `rope_parameters`'s beta_fast field must be a float, got 32
+(APIServer pid=754) `rope_parameters`'s beta_slow field must be a float, got 1
+INFO 05-26 04:35:59 [__init__.py:44] Available plugins for group vllm.platform_plugins:
+INFO 05-26 04:35:59 [__init__.py:46] - ascend -> vllm_ascend:register
+INFO 05-26 04:35:59 [__init__.py:49] All plugins in this group will be loaded. Set `VLLM_PLUGINS` to control which plugins to load.
+INFO 05-26 04:35:59 [__init__.py:238] Platform plugin ascend is activated
+(APIServer pid=754) INFO 05-26 04:36:00 [utils.py:1035] Started DP Coordinator process (PID: 840)
+INFO 05-26 04:36:06 [__init__.py:44] Available plugins for group vllm.platform_plugins:
+INFO 05-26 04:36:06 [__init__.py:238] Platform plugin ascend is activated
+WARNING 05-26 04:36:11 [nixl_utils.py:34] NIXL is not available
+WARNING 05-26 04:36:11 [nixl_utils.py:44] NIXL agent config is not available
+(APIServer pid=754) `rope_parameters`'s beta_slow field must be a float, got 1
+(APIServer pid=754) `rope_parameters`'s factor field must be a float >= 1, got 40
+(APIServer pid=754) `rope_parameters`'s beta_fast field must be a float, got 32
+(APIServer pid=754) `rope_parameters`'s beta_slow field must be a float, got 1
+INFO 05-26 04:35:59 [__init__.py:44] Available plugins for group vllm.platform_plugins:
+INFO 05-26 04:35:59 [__init__.py:46] - ascend -> vllm_ascend:register
+INFO 05-26 04:35:59 [__init__.py:49] All plugins in this group will be loaded. Set `VLLM_PLUGINS` to control which plugins to load.
+INFO 05-26 04:35:59 [__init__.py:238] Platform plugin ascend is activated
+(APIServer pid=754) INFO 05-26 04:36:00 [utils.py:1035] Started DP Coordinator process (PID: 840)
+INFO 05-26 04:36:06 [__init__.py:44] Available plugins for group vllm.platform_plugins:
+INFO 05-26 04:36:06 [__init__.py:238] Platform plugin ascend is activated
+WARNING 05-26 04:36:11 [nixl_utils.py:34] NIXL is not available
+WARNING 05-26 04:36:11 [nixl_utils.py:44] NIXL agent config is not available
+(EngineCore_DP0 pid=918) ERROR 05-26 04:36:12 [core.py:1136] EngineCore failed to start.^M
+(EngineCore_DP0 pid=918) ERROR 05-26 04:36:12 [core.py:1136] Traceback (most recent call last):^M
+(EngineCore_DP0 pid=918) ERROR 05-26 04:36:12 [core.py:1136]   File "/vllm-workspace/vllm/vllm/v1/engine/core.py", line 1102, in run_engine_core^M
+(EngineCore_DP0 pid=918) ERROR 05-26 04:36:12 [core.py:1136]     engine_core = DPEngineCoreProc(*args, **kwargs)^M
+(EngineCore_DP0 pid=918) ERROR 05-26 04:36:12 [core.py:1136]                   ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^M
+(EngineCore_DP0 pid=918) ERROR 05-26 04:36:12 [core.py:1136]   File "/vllm-workspace/vllm/vllm/v1/engine/core.py", line 1644, in __init__^M
+(EngineCore_DP0 pid=918) ERROR 05-26 04:36:12 [core.py:1136]     super().__init__(^M
+(EngineCore_DP0 pid=918) ERROR 05-26 04:36:12 [core.py:1136]   File "/vllm-workspace/vllm/vllm/tracing/otel.py", line 178, in sync_wrapper^M
+(EngineCore_DP0 pid=918) ERROR 05-26 04:36:12 [core.py:1136]     return func(*args, **kwargs)^M
+(EngineCore_DP0 pid=918) ERROR 05-26 04:36:12 [core.py:1136]            ^^^^^^^^^^^^^^^^^^^^^^M
+(EngineCore_DP0 pid=918) ERROR 05-26 04:36:12 [core.py:1136]   File "/vllm-workspace/vllm/vllm/v1/engine/core.py", line 874, in __init__^M
+(EngineCore_DP0 pid=918) ERROR 05-26 04:36:12 [core.py:1136]     self._init_data_parallel(vllm_config)^M
+(EngineCore_DP0 pid=918) ERROR 05-26 04:36:12 [core.py:1136]   File "/vllm-workspace/vllm/vllm/v1/engine/core.py", line 1667, in _init_data_parallel^M
+(EngineCore_DP0 pid=918) ERROR 05-26 04:36:12 [core.py:1136]     dp_group, dp_store = parallel_config.stateless_init_dp_group(return_store=True)^M
+(EngineCore_DP0 pid=918) ERROR 05-26 04:36:12 [core.py:1136]                          ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^M
+(EngineCore_DP0 pid=918) ERROR 05-26 04:36:12 [core.py:1136]   File "/vllm-workspace/vllm/vllm/config/parallel.py", line 581, in stateless_init_dp_group^M
+(EngineCore_DP0 pid=918) ERROR 05-26 04:36:12 [core.py:1136]     return stateless_init_torch_distributed_process_group(^M
+(EngineCore_DP0 pid=918) ERROR 05-26 04:36:12 [core.py:1136]            ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^M
+(EngineCore_DP0 pid=918) ERROR 05-26 04:36:12 [core.py:1136]          ^^^^^^^^^^^^^^^^^^^^^^^^^M
+(EngineCore_DP0 pid=918) ERROR 05-26 04:36:12 [core.py:1136]   File "/vllm-workspace/vllm/vllm/distributed/utils.py", line 512, in init_gloo_process_group^M
+(EngineCore_DP0 pid=918) ERROR 05-26 04:36:12 [core.py:1136]     backend_class = ProcessGroupGloo(^M
+(EngineCore_DP0 pid=918) Process EngineCore_DP0:
+(EngineCore_DP0 pid=918) Traceback (most recent call last):
+(EngineCore_DP0 pid=918)   File "/usr/local/python3.11.15/lib/python3.11/multiprocessing/process.py", line 314, in _bootstrap
+(EngineCore_DP0 pid=918)     self.run()
+(EngineCore_DP0 pid=918)   File "/usr/local/python3.11.15/lib/python3.11/multiprocessing/process.py", line 108, in run
+(EngineCore_DP0 pid=918)     self._target(*self._args, **self._kwargs)
+(EngineCore_DP0 pid=918)   File "/vllm-workspace/vllm-ascend/vllm_ascend/patch/platform/patch_balance_schedule.py", line 672, in run_engine_core
+(EngineCore_DP0 pid=918)     return _ORIGINAL_RUN_ENGINE_CORE(*args, dp_rank=dp_rank, local_dp_rank=local_dp_rank, **kwargs)
+(EngineCore_DP0 pid=918)            ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+(EngineCore_DP0 pid=918)   File "/vllm-workspace/vllm/vllm/v1/engine/core.py", line 1140, in run_engine_core
+(EngineCore_DP0 pid=918)     raise e
+(EngineCore_DP0 pid=918)   File "/vllm-workspace/vllm/vllm/v1/engine/core.py", line 1102, in run_engine_core
+(EngineCore_DP0 pid=918)     engine_core = DPEngineCoreProc(*args, **kwargs)
+(EngineCore_DP0 pid=918)                   ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+(EngineCore_DP0 pid=918)   File "/vllm-workspace/vllm/vllm/v1/engine/core.py", line 1644, in __init__
+(EngineCore_DP0 pid=918)     super().__init__(
+(EngineCore_DP0 pid=918)   File "/vllm-workspace/vllm/vllm/tracing/otel.py", line 178, in sync_wrapper
+(EngineCore_DP0 pid=918)     return func(*args, **kwargs)
+(EngineCore_DP0 pid=918)            ^^^^^^^^^^^^^^^^^^^^^
+(EngineCore_DP0 pid=918)   File "/vllm-workspace/vllm/vllm/v1/engine/core.py", line 874, in __init__
+(EngineCore_DP0 pid=918)     self._init_data_parallel(vllm_config)
+(EngineCore_DP0 pid=918)   File "/vllm-workspace/vllm/vllm/v1/engine/core.py", line 1667, in _init_data_parallel
+(EngineCore_DP0 pid=918)     dp_group, dp_store = parallel_config.stateless_init_dp_group(return_store=True)
+(EngineCore_DP0 pid=918)                          ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+(EngineCore_DP0 pid=918)   File "/vllm-workspace/vllm/vllm/config/parallel.py", line 581, in stateless_init_dp_group
+(EngineCore_DP0 pid=918)     return stateless_init_torch_distributed_process_group(
+(EngineCore_DP0 pid=918)            ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+(EngineCore_DP0 pid=918)   File "/vllm-workspace/vllm/vllm/distributed/utils.py", line 598, in stateless_init_torch_distributed_process_group
+(EngineCore_DP0 pid=918)     pg = init_gloo_process_group(
+(EngineCore_DP0 pid=918)          ^^^^^^^^^^^^^^^^^^^^^^^^
+(EngineCore_DP0 pid=918)   File "/vllm-workspace/vllm/vllm/distributed/utils.py", line 512, in init_gloo_process_group
+(EngineCore_DP0 pid=918)     backend_class = ProcessGroupGloo(
+(EngineCore_DP0 pid=918)                     ^^^^^^^^^^^^^^^^^
+(APIServer pid=754) Traceback (most recent call last):
+(APIServer pid=754)   File "/usr/local/python3.11.15/bin/vllm", line 6, in <module>
+(APIServer pid=754)     sys.exit(main())
+(APIServer pid=754)              ^^^^^^
+(APIServer pid=754)   File "/vllm-workspace/vllm/vllm/entrypoints/cli/main.py", line 92, in main
+(APIServer pid=754)     args.dispatch_function(args)
+(APIServer pid=754)   File "/vllm-workspace/vllm/vllm/entrypoints/cli/serve.py", line 122, in cmd
+(APIServer pid=754)     uvloop.run(run_server(args))
+(APIServer pid=754)   File "/usr/local/python3.11.15/lib/python3.11/site-packages/uvloop/__init__.py", line 92, in run
+(APIServer pid=754)     return runner.run(wrapper())
+(APIServer pid=754)            ^^^^^^^^^^^^^^^^^^^^^
+(APIServer pid=754)   File "/usr/local/python3.11.15/lib/python3.11/asyncio/runners.py", line 118, in run
+(APIServer pid=754)     return self._loop.run_until_complete(task)
+(APIServer pid=754)            ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+(APIServer pid=754)   File "uvloop/loop.pyx", line 1518, in uvloop.loop.Loop.run_until_complete
+(APIServer pid=754)   File "/usr/local/python3.11.15/lib/python3.11/site-packages/uvloop/__init__.py", line 48, in wrapper
+(APIServer pid=754)     return await main
+(APIServer pid=754)            ^^^^^^^^^^
+(APIServer pid=754)   File "/vllm-workspace/vllm/vllm/entrypoints/openai/api_server.py", line 678, in run_server
+(APIServer pid=754)     await run_server_worker(listen_address, sock, args, **uvicorn_kwargs)
+(APIServer pid=754)   File "/vllm-workspace/vllm/vllm/entrypoints/openai/api_server.py", line 692, in run_server_worker
+(APIServer pid=754)     async with build_async_engine_client(
+Starting command: ASCEND_RT_VISIBLE_DEVICES=0 HCCL_BUFFSIZE=256 OMP_NUM_THREADS=10 OMP_PROC_BIND=false PYTORCH_NPU_ALLOC_CONF=expandable_segments:True SERVER_PORT=7100 VLLM_USE_MODELSCOPE=true vllm serve vllm-ascend/DeepSeek-V2-Lite-W8A8 --host 0.0.0.0 --port 7100 --data-parallel-size 4 --data-parallel-rank 0 --data-parallel-address 172.22.0.155 --data-parallel-rpc-port 12321 --tensor-parallel-size 1 --trust-remote-code --quantization ascend --enable-expert-parallel
+INFO 05-26 04:35:43 [__init__.py:44] Available plugins for group vllm.platform_plugins:
+INFO 05-26 04:35:43 [__init__.py:46] - ascend -> vllm_ascend:register
+INFO 05-26 04:35:43 [__init__.py:49] All plugins in this group will be loaded. Set `VLLM_PLUGINS` to control which plugins to load.
+INFO 05-26 04:35:43 [__init__.py:238] Platform plugin ascend is activated
+2026-05-26 04:35:48,702 - 754 - ServiceProfiler - INFO - VLLM_USE_V1 not set, auto-detected via vLLM 0.20.2+empty: default 1
+WARNING 05-26 04:35:48 [nixl_utils.py:34] NIXL is not available
+WARNING 05-26 04:35:48 [nixl_utils.py:44] NIXL agent config is not available
+WARNING 05-26 04:35:48 [registry.py:945] Model architecture DeepseekV4ForCausalLM is already registered, and will be overwritten by the new model class vllm_ascend.models.deepseek_v4:AscendDeepseekV4ForCausalLM.
+WARNING 05-26 04:35:48 [registry.py:945] Model architecture DeepSeekV4MTPModel is already registered, and will be overwritten by the new model class vllm_ascend.models.deepseek_v4_mtp:DeepSeekV4MTP.
+INFO 05-26 04:35:48 [__init__.py:110] Registered model loader `<class 'vllm_ascend.model_loader.netloader.netloader.ModelNetLoaderElastic'>` with load format `netloader`
+INFO 05-26 04:35:48 [__init__.py:110] Registered model loader `<class 'vllm_ascend.model_loader.rfork.rfork_loader.RForkModelLoader'>` with load format `rfork`
+(APIServer pid=754) INFO 05-26 04:35:49 [utils.py:299] ^M
+(APIServer pid=754) INFO 05-26 04:35:49 [utils.py:299]        �~V~H     �~V~H     �~V~H�~V~D   �~V~D�~V~H^M
+(APIServer pid=754) INFO 05-26 04:35:49 [utils.py:299]  �~V~D�~V~D �~V~D�~V~H �~V~H     �~V~H     �~V~H �~V~@�~V~D�~V~@ �~V~H  version 0.20.2^M
+(APIServer pid=754) INFO 05-26 04:35:49 [utils.py:299]   �~V~H�~V~D�~V~H�~V~@ �~V~H     �~V~H     �~V~H     �~V~H  model   vllm-ascend/DeepSeek-V2-Lite-W8A8^M
+(APIServer pid=754) INFO 05-26 04:35:49 [utils.py:299]    �~V~@�~V~@  �~V~@�~V~@�~V~@�~V~@�~V~@ �~V~@�~V~@�~V~@�~V~@�~V~@ �~V~@     �~V~@^M
+(APIServer pid=754) INFO 05-26 04:35:49 [utils.py:299]
+(APIServer pid=754) INFO 05-26 04:35:49 [utils.py:233] non-default args: {'model_tag': 'vllm-ascend/DeepSeek-V2-Lite-W8A8', 'host': '0.0.0.0', 'port': 7100, 'model': 'vllm-ascend/DeepSeek-V2-Lite-W8A8', 'trust_remote_code': True, 'quantization': 'ascend', 'data_parallel_size': 4, 'data_parallel_rank': 0, 'data_parallel_address': '172.22.0.155', 'data_parallel_rpc_port': 12321, 'enable_expert_parallel': True}
+(APIServer pid=754) 2026-05-26 04:35:49,467 - modelscope - WARNING - We can not confirm the cached file is for revision: master
+(APIServer pid=754) INFO 05-26 04:35:49 [arg_utils.py:718] HF_HUB_OFFLINE is True, replace model_id [vllm-ascend/DeepSeek-V2-Lite-W8A8] to model_path [/root/.cache/modelscope/hub/models/vllm-ascend/DeepSeek-V2-Lite-W8A8]
+(APIServer pid=754) `rope_parameters`'s factor field must be a float >= 1, got 40
+(APIServer pid=754) `rope_parameters`'s beta_fast field must be a float, got 32
+(APIServer pid=754) `rope_parameters`'s beta_slow field must be a float, got 1
+(APIServer pid=754) `rope_parameters`'s factor field must be a float >= 1, got 40
+(APIServer pid=754) `rope_parameters`'s beta_fast field must be a float, got 32
+(APIServer pid=754) `rope_parameters`'s beta_slow field must be a float, got 1
+(APIServer pid=754) `rope_parameters`'s factor field must be a float >= 1, got 40
+(APIServer pid=754) `rope_parameters`'s beta_fast field must be a float, got 32
+(APIServer pid=754) `rope_parameters`'s beta_slow field must be a float, got 1
+(APIServer pid=754) INFO 05-26 04:35:49 [model.py:555] Resolved architecture: DeepseekV2ForCausalLM
+(APIServer pid=754) INFO 05-26 04:35:49 [model.py:1680] Using max model len 163840
+(APIServer pid=754) INFO 05-26 04:35:49 [vllm.py:840] Asynchronous scheduling is enabled.
+(APIServer pid=754) INFO 05-26 04:35:49 [vllm.py:850] Disabling NCCL for DP synchronization when using async scheduling.
+"/tmp/external_dp_logs/node-0/rank-0.log" 197L, 20731B                                                                                                              21,1          Top
+Starting command: ASCEND_RT_VISIBLE_DEVICES=0 HCCL_BUFFSIZE=256 OMP_NUM_THREADS=10 OMP_PROC_BIND=false PYTORCH_NPU_ALLOC_CONF=expandable_segments:True SERVER_PORT=7100 VLLM_USE_MODELSCOPE=true vllm serve vllm-ascend/DeepSeek-V2-Lite-W8A8 --host 0.0.0.0 --port 7100 --data-parallel-size 4 --data-parallel-rank 0 --data-parallel-address 172.22.0.155 --data-parallel-rpc-port 12321 --tensor-parallel-size 1 --trust-remote-code --quantization ascend --enable-expert-parallel
+INFO 05-26 04:35:43 [__init__.py:44] Available plugins for group vllm.platform_plugins:
+INFO 05-26 04:35:43 [__init__.py:46] - ascend -> vllm_ascend:register
+INFO 05-26 04:35:43 [__init__.py:49] All plugins in this group will be loaded. Set `VLLM_PLUGINS` to control which plugins to load.
+INFO 05-26 04:35:43 [__init__.py:238] Platform plugin ascend is activated
+2026-05-26 04:35:48,702 - 754 - ServiceProfiler - INFO - VLLM_USE_V1 not set, auto-detected via vLLM 0.20.2+empty: default 1
+WARNING 05-26 04:35:48 [nixl_utils.py:34] NIXL is not available
+WARNING 05-26 04:35:48 [nixl_utils.py:44] NIXL agent config is not available
+WARNING 05-26 04:35:48 [registry.py:945] Model architecture DeepseekV4ForCausalLM is already registered, and will be overwritten by the new model class vllm_ascend.models.deepseek_v4:AscendDeepseekV4ForCausalLM.
+WARNING 05-26 04:35:48 [registry.py:945] Model architecture DeepSeekV4MTPModel is already registered, and will be overwritten by the new model class vllm_ascend.models.deepseek_v4_mtp:DeepSeekV4MTP.
+INFO 05-26 04:35:48 [__init__.py:110] Registered model loader `<class 'vllm_ascend.model_loader.netloader.netloader.ModelNetLoaderElastic'>` with load format `netloader`
+INFO 05-26 04:35:48 [__init__.py:110] Registered model loader `<class 'vllm_ascend.model_loader.rfork.rfork_loader.RForkModelLoader'>` with load format `rfork`
+(APIServer pid=754) INFO 05-26 04:35:49 [utils.py:299] ^M
+(APIServer pid=754) INFO 05-26 04:35:49 [utils.py:299]        �~V~H     �~V~H     �~V~H�~V~D   �~V~D�~V~H^M
+(APIServer pid=754) INFO 05-26 04:35:49 [utils.py:299]  �~V~D�~V~D �~V~D�~V~H �~V~H     �~V~H     �~V~H �~V~@�~V~D�~V~@ �~V~H  version 0.20.2^M
+(APIServer pid=754) INFO 05-26 04:35:49 [utils.py:299]   �~V~H�~V~D�~V~H�~V~@ �~V~H     �~V~H     �~V~H     �~V~H  model   vllm-ascend/DeepSeek-V2-Lite-W8A8^M
+(APIServer pid=754) INFO 05-26 04:35:49 [utils.py:299]    �~V~@�~V~@  �~V~@�~V~@�~V~@�~V~@�~V~@ �~V~@�~V~@�~V~@�~V~@�~V~@ �~V~@     �~V~@^M
+(APIServer pid=754) INFO 05-26 04:35:49 [utils.py:299]
+(APIServer pid=754) INFO 05-26 04:35:49 [utils.py:233] non-default args: {'model_tag': 'vllm-ascend/DeepSeek-V2-Lite-W8A8', 'host': '0.0.0.0', 'port': 7100, 'model': 'vllm-ascend/DeepSeek-V2-Lite-W8A8', 'trust_remote_code': True, 'quantization': 'ascend', 'data_parallel_size': 4, 'data_parallel_rank': 0, 'data_parallel_address': '172.22.0.155', 'data_parallel_rpc_port': 12321, 'enable_expert_parallel': True}
+(APIServer pid=754) 2026-05-26 04:35:49,467 - modelscope - WARNING - We can not confirm the cached file is for revision: master
+(APIServer pid=754) INFO 05-26 04:35:49 [arg_utils.py:718] HF_HUB_OFFLINE is True, replace model_id [vllm-ascend/DeepSeek-V2-Lite-W8A8] to model_path [/root/.cache/modelscope/hub/models/vllm-ascend/DeepSeek-V2-Lite-W8A8]
+(APIServer pid=754) `rope_parameters`'s factor field must be a float >= 1, got 40
+(APIServer pid=754) `rope_parameters`'s beta_fast field must be a float, got 32
+(APIServer pid=754) `rope_parameters`'s beta_slow field must be a float, got 1
+(APIServer pid=754) `rope_parameters`'s factor field must be a float >= 1, got 40
+(APIServer pid=754) `rope_parameters`'s beta_fast field must be a float, got 32
+(APIServer pid=754) `rope_parameters`'s beta_slow field must be a float, got 1
+(APIServer pid=754) `rope_parameters`'s factor field must be a float >= 1, got 40
+(APIServer pid=754) `rope_parameters`'s beta_fast field must be a float, got 32
+(APIServer pid=754) `rope_parameters`'s beta_slow field must be a float, got 1
+(APIServer pid=754) INFO 05-26 04:35:49 [model.py:555] Resolved architecture: DeepseekV2ForCausalLM
+(APIServer pid=754) INFO 05-26 04:35:49 [model.py:1680] Using max model len 163840
+(APIServer pid=754) INFO 05-26 04:35:49 [vllm.py:840] Asynchronous scheduling is enabled.
+(APIServer pid=754) INFO 05-26 04:35:49 [vllm.py:850] Disabling NCCL for DP synchronization when using async scheduling.
+"/tmp/external_dp_logs/node-0/rank-0.log" 197L, 20731B                                                                                                              21,1          Top
+Starting command: ASCEND_RT_VISIBLE_DEVICES=0 HCCL_BUFFSIZE=256 OMP_NUM_THREADS=10 OMP_PROC_BIND=false PYTORCH_NPU_ALLOC_CONF=expandable_segments:True SERVER_PORT=7100 VLLM_USE_MODELSCOPE=true vllm serve vllm-ascend/DeepSeek-V2-Lite-W8A8 --host 0.0.0.0 --port 7100 --data-parallel-size 4 --data-parallel-rank 0 --data-parallel-address 172.22.0.155 --data-parallel-rpc-port 12321 --tensor-parallel-size 1 --trust-remote-code --quantization ascend --enable-expert-parallel
+INFO 05-26 04:35:43 [__init__.py:44] Available plugins for group vllm.platform_plugins:
+INFO 05-26 04:35:43 [__init__.py:46] - ascend -> vllm_ascend:register
+INFO 05-26 04:35:43 [__init__.py:49] All plugins in this group will be loaded. Set `VLLM_PLUGINS` to control which plugins to load.
+INFO 05-26 04:35:43 [__init__.py:238] Platform plugin ascend is activated
+2026-05-26 04:35:48,702 - 754 - ServiceProfiler - INFO - VLLM_USE_V1 not set, auto-detected via vLLM 0.20.2+empty: default 1
+WARNING 05-26 04:35:48 [nixl_utils.py:34] NIXL is not available
+WARNING 05-26 04:35:48 [nixl_utils.py:44] NIXL agent config is not available
+WARNING 05-26 04:35:48 [registry.py:945] Model architecture DeepseekV4ForCausalLM is already registered, and will be overwritten by the new model class vllm_ascend.models.deepseek_v4:AscendDeepseekV4ForCausalLM.
+WARNING 05-26 04:35:48 [registry.py:945] Model architecture DeepSeekV4MTPModel is already registered, and will be overwritten by the new model class vllm_ascend.models.deepseek_v4_mtp:DeepSeekV4MTP.
+INFO 05-26 04:35:48 [__init__.py:110] Registered model loader `<class 'vllm_ascend.model_loader.netloader.netloader.ModelNetLoaderElastic'>` with load format `netloader`
+INFO 05-26 04:35:48 [__init__.py:110] Registered model loader `<class 'vllm_ascend.model_loader.rfork.rfork_loader.RForkModelLoader'>` with load format `rfork`
+(APIServer pid=754) INFO 05-26 04:35:49 [utils.py:299] ^M
+(APIServer pid=754) INFO 05-26 04:35:49 [utils.py:299]        �~V~H     �~V~H     �~V~H�~V~D   �~V~D�~V~H^M
+(APIServer pid=754) INFO 05-26 04:35:49 [utils.py:299]  �~V~D�~V~D �~V~D�~V~H �~V~H     �~V~H     �~V~H �~V~@�~V~D�~V~@ �~V~H  version 0.20.2^M
+(APIServer pid=754) INFO 05-26 04:35:49 [utils.py:299]   �~V~H�~V~D�~V~H�~V~@ �~V~H     �~V~H     �~V~H     �~V~H  model   vllm-ascend/DeepSeek-V2-Lite-W8A8^M
+(APIServer pid=754) INFO 05-26 04:35:49 [utils.py:299]    �~V~@�~V~@  �~V~@�~V~@�~V~@�~V~@�~V~@ �~V~@�~V~@�~V~@�~V~@�~V~@ �~V~@     �~V~@^M
+(APIServer pid=754) INFO 05-26 04:35:49 [utils.py:299]
+(APIServer pid=754) INFO 05-26 04:35:49 [utils.py:233] non-default args: {'model_tag': 'vllm-ascend/DeepSeek-V2-Lite-W8A8', 'host': '0.0.0.0', 'port': 7100, 'model': 'vllm-ascend/DeepSeek-V2-Lite-W8A8', 'trust_remote_code': True, 'quantization': 'ascend', 'data_parallel_size': 4, 'data_parallel_rank': 0, 'data_parallel_address': '172.22.0.155', 'data_parallel_rpc_port': 12321, 'enable_expert_parallel': True}
+(APIServer pid=754) 2026-05-26 04:35:49,467 - modelscope - WARNING - We can not confirm the cached file is for revision: master
+(APIServer pid=754) INFO 05-26 04:35:49 [arg_utils.py:718] HF_HUB_OFFLINE is True, replace model_id [vllm-ascend/DeepSeek-V2-Lite-W8A8] to model_path [/root/.cache/modelscope/hub/models/vllm-ascend/DeepSeek-V2-Lite-W8A8]
+(APIServer pid=754) `rope_parameters`'s factor field must be a float >= 1, got 40
+(APIServer pid=754) `rope_parameters`'s beta_fast field must be a float, got 32
+(APIServer pid=754) `rope_parameters`'s beta_slow field must be a float, got 1
+(APIServer pid=754) `rope_parameters`'s factor field must be a float >= 1, got 40
+(APIServer pid=754) `rope_parameters`'s beta_fast field must be a float, got 32
+(APIServer pid=754) `rope_parameters`'s beta_slow field must be a float, got 1
+(APIServer pid=754) `rope_parameters`'s factor field must be a float >= 1, got 40
+(APIServer pid=754) `rope_parameters`'s beta_fast field must be a float, got 32
+(APIServer pid=754) `rope_parameters`'s beta_slow field must be a float, got 1
+(APIServer pid=754) INFO 05-26 04:35:49 [model.py:555] Resolved architecture: DeepseekV2ForCausalLM
+(APIServer pid=754) INFO 05-26 04:35:49 [model.py:1680] Using max model len 163840
+(APIServer pid=754) INFO 05-26 04:35:49 [vllm.py:840] Asynchronous scheduling is enabled.
+(APIServer pid=754) INFO 05-26 04:35:49 [vllm.py:850] Disabling NCCL for DP synchronization when using async scheduling.
+"/tmp/external_dp_logs/node-0/rank-0.log" 197L, 20731B

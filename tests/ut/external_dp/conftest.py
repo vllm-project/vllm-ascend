@@ -15,7 +15,6 @@ cluster_hosts:
 env_common: &env_common
   VLLM_USE_MODELSCOPE: "true"
 config_common: &config_common
-  host: "0.0.0.0"
   port_start: 7100
   dp_rpc_port: 12321
 routing:
@@ -53,7 +52,7 @@ templates:
       LOCAL_ENDPOINT: "${LOCAL_IP}:${PORT}"
     server_cmd_template: &cmd
       - --host
-      - ${HOST}
+      - "0.0.0.0"
       - --port
       - $SERVER_PORT
       - --data-parallel-size

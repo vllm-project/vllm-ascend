@@ -13,6 +13,7 @@ def test_parse_generic_dp_yaml(generic_config):
     assert generic_config.node_configs[1].dp_address == "10.0.0.1"
     assert generic_config.benchmark_cases[0]["case_name"] == "perf"
     assert not hasattr(generic_config.node_configs[1], "node_index")
+    assert not hasattr(generic_config.node_configs[1], "host")
     assert not hasattr(generic_config, "env_common")
     assert not hasattr(generic_config, "config_common")
     assert not hasattr(generic_config, "benchmarks")
