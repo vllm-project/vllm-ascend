@@ -35,6 +35,7 @@ import vllm_ascend.patch.worker.patch_minimax_m2  # noqa
 import vllm_ascend.patch.worker.patch_minimax_m2_linear_attn  # noqa
 import vllm_ascend.patch.worker.patch_mamba_utils  # noqa
 import vllm_ascend.patch.worker.patch_qwen3_next_mtp  # noqa
+import vllm_ascend.patch.worker.patch_deepseek_compressor  # noqa
 
 if not is_310p():
     import vllm_ascend.patch.worker.patch_qwen3_5  # noqa
@@ -44,6 +45,9 @@ if not is_310p():
 else:
     import vllm_ascend.patch.worker.patch_idex_310  # noqa
 import vllm_ascend.patch.worker.patch_rejection_sampler  # noqa
+
+# TODO(MengqingCao): remove after the upstream community is modified
+import vllm_ascend.patch.worker.patch_llama_eagle3  # noqa
 import vllm_ascend.patch.worker.patch_npugraph_ex_triton  # noqa
 import vllm_ascend.patch.worker.patch_kimi_k25  # noqa
 import vllm_ascend.patch.worker.patch_draft_quarot  # noqa

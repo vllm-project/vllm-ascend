@@ -33,8 +33,7 @@ os.environ["VLLM_DISABLE_SHARED_EXPERTS_STREAM"] = "1"
 
 from vllm.v1.attention.backends.registry import AttentionBackendEnum
 
-import vllm_ascend.envs as envs_ascend
-from vllm_ascend.ascend_config import init_ascend_config
+from vllm_ascend.ascend_config import get_ascend_config, init_ascend_config
 
 # isort: off
 from vllm_ascend.utils import (
@@ -487,12 +486,12 @@ class NPUPlatform(Platform):
         if get_ascend_device_type() != AscendDeviceType._310P:
             compilation_config.custom_ops = ["all"]
 
-        if envs_ascend.VLLM_ASCEND_BALANCE_SCHEDULING:
+        if ascend_config.enable_balance_scheduling:
             kv_transfer_config = vllm_config.kv_transfer_config
             kv_role = getattr(kv_transfer_config, "kv_role", None)
             if kv_transfer_config is not None and kv_role != "kv_both":
                 raise ValueError(
-                    "VLLM_ASCEND_BALANCE_SCHEDULING (balance scheduling) only supports PD-mixed mode "
+                    "enable_balance_scheduling only supports PD-mixed mode "
                     "(kv_role='kv_both' or no kv_transfer_config), and is not supported in "
                     "PD-disaggregated mode (kv_role='kv_producer'/'kv_consumer')."
                 )
@@ -581,7 +580,7 @@ class NPUPlatform(Platform):
             os.environ["PYTORCH_NPU_ALLOC_CONF"] = npu_alloc_configs
             logger.info("Set PYTORCH_NPU_ALLOC_CONF=%s", npu_alloc_configs)
 
-        if ascend_config.enable_mc2_hierarchy_comm and envs_ascend.VLLM_ASCEND_ENABLE_FUSED_MC2:
+        if ascend_config.enable_mc2_hierarchy_comm and get_ascend_config().enable_fused_mc2:
             raise ValueError(
                 "fused mc2 op cannot be used with hierarchy communication."
                 "Please disable VLLM_ASCEND_ENABLE_FUSED_MC2 by setting it to 0."
@@ -605,15 +604,17 @@ class NPUPlatform(Platform):
 
     @classmethod
     def get_attn_backend_cls(cls, selected_backend, attn_selector_config, num_heads: int | None = None):
+        use_compress = getattr(attn_selector_config, "use_compress", False)
         key = (attn_selector_config.use_mla, attn_selector_config.use_sparse)
 
         if selected_backend == AttentionBackendEnum.FLASH_ATTN and cls._validate_fa3_backend(key, attn_selector_config):
             return "vllm_ascend.attention.fa3_v1.AscendFABackend"
 
         backend_map = {
-            (True, False): "vllm_ascend.attention.mla_v1.AscendMLABackend",
-            (False, False): "vllm_ascend.attention.attention_v1.AscendAttentionBackend",
-            (True, True): "vllm_ascend.attention.sfa_v1.AscendSFABackend",
+            (True, False, False): "vllm_ascend.attention.mla_v1.AscendMLABackend",
+            (False, False, False): "vllm_ascend.attention.attention_v1.AscendAttentionBackend",
+            (True, True, False): "vllm_ascend.attention.sfa_v1.AscendSFABackend",
+            (True, False, True): "vllm_ascend.attention.dsa_v1.AscendDSABackend",
         }
         backend_map_310 = {
             (
@@ -628,7 +629,7 @@ class NPUPlatform(Platform):
         if is_310p():
             return backend_map_310.get(key, backend_map_310[(False, False)])
 
-        return backend_map[key]
+        return backend_map[(attn_selector_config.use_mla, attn_selector_config.use_sparse, use_compress)]
 
     @classmethod
     def _validate_fa3_backend(cls, key, attn_selector_config):

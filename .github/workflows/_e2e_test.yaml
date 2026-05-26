@@ -53,7 +53,7 @@ on:
         default: ''
 env:
   UV_INDEX_URL: http://cache-service.nginx-pypi-cache.svc.cluster.local/pypi/simple
-  UV_EXTRA_INDEX_URL: "https://repo.huaweicloud.com/ascend/repos/pypi http://cache-service.nginx-pypi-cache.svc.cluster.local/whl/cpu/"
+  UV_EXTRA_INDEX_URL: https://repo.huaweicloud.com/ascend/repos/pypi
   UV_INDEX_STRATEGY: unsafe-best-match
   UV_INSECURE_HOST: cache-service.nginx-pypi-cache.svc.cluster.local
   UV_HTTP_TIMEOUT: 120
@@ -124,7 +124,7 @@ jobs:
           echo "CSRC_HASH=$CSRC_HASH" >> $GITHUB_OUTPUT
 
       - name: Cache vllm-ascend csrc
-        uses: runs-on/cache@v4
+        uses: runs-on/cache@v5
         with:
           path: |
             vllm_ascend/_cann_ops_custom
@@ -136,9 +136,16 @@ jobs:
             vllm-ascend-build-v1-${{ runner.os }}-${{ inputs.image }}-${{ steps.get_csrc_hash.outputs.CSRC_HASH }}
 
       - name: Install vllm-project/vllm-ascend
+        env:
+          MAX_JOBS: "23"
         run: |
           pip install uc-manager
+          # Use CPU version package
+          # The torch-cpu repository cannot be placed in a public repository, as many packages are not available on torch-cpu. 
+          # If placed in a public repository, this will cause other package query requests to be frequently forwarded to the official repository, leading to probabilistic errors.
+          uv pip install torch==2.10.0 torchvision==0.25.0 torchaudio==2.10.0 --extra-index-url  http://cache-service.nginx-pypi-cache.svc.cluster.local/whl/cpu/
           uv pip install -r requirements-dev.txt
+          # Concurrent installation of triton-ascend can cause files to be overwritten by other packages.
           uv pip install --force-reinstall --no-deps triton-ascend==3.2.1
           if find vllm_ascend -maxdepth 1 -name '*.so' -type f 2>/dev/null | grep -q .; then
             COMPILE_CUSTOM_KERNELS=0 uv pip install -e .
@@ -254,7 +261,7 @@ jobs:
           echo "CSRC_HASH=$CSRC_HASH" >> $GITHUB_OUTPUT
 
       - name: Cache vllm-ascend csrc
-        uses: runs-on/cache@v4
+        uses: runs-on/cache@v5
         with:
           path: |
             vllm_ascend/_cann_ops_custom
@@ -266,9 +273,14 @@ jobs:
             vllm-ascend-build-v1-${{ runner.os }}-${{ inputs.image }}-${{ steps.get_csrc_hash.outputs.CSRC_HASH }}
 
       - name: Install vllm-project/vllm-ascend
+        env:
+          MAX_JOBS: "23"
         run: |
           pip install uc-manager
+          # Use CPU version package
+          uv pip install torch==2.10.0 torchvision==0.25.0 torchaudio==2.10.0 --extra-index-url  http://cache-service.nginx-pypi-cache.svc.cluster.local/whl/cpu/
           uv pip install -r requirements-dev.txt
+          # Concurrent installation of triton-ascend can cause files to be overwritten by other packages.
           uv pip install --force-reinstall --no-deps triton-ascend==3.2.1
           if find vllm_ascend -maxdepth 1 -name '*.so' -type f 2>/dev/null | grep -q .; then
             COMPILE_CUSTOM_KERNELS=0 uv pip install -e .
@@ -391,7 +403,7 @@ jobs:
           echo "CSRC_HASH=$CSRC_HASH" >> $GITHUB_OUTPUT
 
       - name: Cache vllm-ascend csrc
-        uses: runs-on/cache@v4
+        uses: runs-on/cache@v5
         with:
           path: |
             vllm_ascend/_cann_ops_custom
@@ -403,9 +415,14 @@ jobs:
             vllm-ascend-build-v1-${{ runner.os }}-${{ inputs.image_a3 }}-${{ steps.get_csrc_hash.outputs.CSRC_HASH }}
 
       - name: Install vllm-project/vllm-ascend
+        env:
+          MAX_JOBS: "46"
         run: |
           pip install uc-manager
+          # Use CPU version package
+          uv pip install torch==2.10.0 torchvision==0.25.0 torchaudio==2.10.0 --extra-index-url  http://cache-service.nginx-pypi-cache.svc.cluster.local/whl/cpu/
           uv pip install -r requirements-dev.txt
+          # Concurrent installation of triton-ascend can cause files to be overwritten by other packages.
           uv pip install --force-reinstall --no-deps triton-ascend==3.2.1
           if find vllm_ascend -maxdepth 1 -name '*.so' -type f 2>/dev/null | grep -q .; then
             COMPILE_CUSTOM_KERNELS=0 uv pip install -e .
@@ -519,7 +536,7 @@ jobs:
           echo "CSRC_HASH=$CSRC_HASH" >> $GITHUB_OUTPUT
 
       - name: Cache vllm-ascend csrc
-        uses: runs-on/cache@v4
+        uses: runs-on/cache@v5
         with:
           path: |
             vllm_ascend/_cann_ops_custom
@@ -531,9 +548,14 @@ jobs:
             vllm-ascend-build-v1-${{ runner.os }}-${{ inputs.image_a3 }}-${{ steps.get_csrc_hash.outputs.CSRC_HASH }}
 
       - name: Install vllm-project/vllm-ascend
+        env:
+          MAX_JOBS: "46"
         run: |
           pip install uc-manager
+          # Use CPU version package
+          uv pip install torch==2.10.0 torchvision==0.25.0 torchaudio==2.10.0 --extra-index-url  http://cache-service.nginx-pypi-cache.svc.cluster.local/whl/cpu/
           uv pip install -r requirements-dev.txt
+          # Concurrent installation of triton-ascend can cause files to be overwritten by other packages.
           uv pip install --force-reinstall --no-deps triton-ascend==3.2.1
           if find vllm_ascend -maxdepth 1 -name '*.so' -type f 2>/dev/null | grep -q .; then
             COMPILE_CUSTOM_KERNELS=0 uv pip install -e .
@@ -598,6 +620,7 @@ jobs:
           set -o pipefail
           # we must uninstall triton-ascend first, then triton. Otherwise, the triton folder will be left behind.
           python3 -m pip uninstall -y triton-ascend triton
+          python3 -m pip install regex
           pytest -sv --durations=0 tests/e2e/multicard/2-cards/test_aclgraph_capture_replay.py \
             2>&1 | tee /tmp/e2e-non-triton.log
           exit ${PIPESTATUS[0]}
@@ -683,7 +706,7 @@ jobs:
           echo "CSRC_HASH=$CSRC_HASH" >> $GITHUB_OUTPUT
 
       - name: Cache vllm-ascend csrc
-        uses: runs-on/cache@v4
+        uses: runs-on/cache@v5
         with:
           path: |
             vllm_ascend/_cann_ops_custom
@@ -715,9 +738,14 @@ jobs:
           pip show mooncake-transfer-engine-ascend || true
 
       - name: Install vllm-project/vllm-ascend
+        env:
+          MAX_JOBS: "92"
         run: |
           pip install uc-manager
+          # Use CPU version package
+          uv pip install torch==2.10.0 torchvision==0.25.0 torchaudio==2.10.0 --extra-index-url  http://cache-service.nginx-pypi-cache.svc.cluster.local/whl/cpu/
           uv pip install -r requirements-dev.txt
+          # Concurrent installation of triton-ascend can cause files to be overwritten by other packages.
           uv pip install --force-reinstall --no-deps triton-ascend==3.2.1
           if find vllm_ascend -maxdepth 1 -name '*.so' -type f 2>/dev/null | grep -q .; then
             COMPILE_CUSTOM_KERNELS=0 uv pip install -e .
@@ -830,7 +858,7 @@ jobs:
           echo "CSRC_HASH=$CSRC_HASH" >> $GITHUB_OUTPUT
 
       - name: Cache vllm-ascend csrc
-        uses: runs-on/cache@v4
+        uses: runs-on/cache@v5
         with:
           path: |
             vllm_ascend/_cann_ops_custom
@@ -842,9 +870,14 @@ jobs:
             vllm-ascend-build-v1-${{ runner.os }}-${{ inputs.image_a3 }}-${{ steps.get_csrc_hash.outputs.CSRC_HASH }}
 
       - name: Install vllm-project/vllm-ascend
+        env:
+          MAX_JOBS: "92"
         run: |
           pip install uc-manager
+          # Use CPU version package
+          uv pip install torch==2.10.0 torchvision==0.25.0 torchaudio==2.10.0 --extra-index-url  http://cache-service.nginx-pypi-cache.svc.cluster.local/whl/cpu/
           uv pip install -r requirements-dev.txt
+          # Concurrent installation of triton-ascend can cause files to be overwritten by other packages.
           uv pip install --force-reinstall --no-deps triton-ascend==3.2.1
           if find vllm_ascend -maxdepth 1 -name '*.so' -type f 2>/dev/null | grep -q .; then
             COMPILE_CUSTOM_KERNELS=0 uv pip install -e .
@@ -957,7 +990,7 @@ jobs:
           echo "CSRC_HASH=$CSRC_HASH" >> $GITHUB_OUTPUT
 
       - name: Cache vllm-ascend csrc
-        uses: runs-on/cache@v4
+        uses: runs-on/cache@v5
         with:
           path: |
             vllm_ascend/_cann_ops_custom
@@ -969,9 +1002,14 @@ jobs:
             vllm-ascend-build-v1-${{ runner.os }}-${{ inputs.image_310p }}-${{ steps.get_csrc_hash.outputs.CSRC_HASH }}
 
       - name: Install vllm-project/vllm-ascend
+        env:
+          MAX_JOBS: "23"
         run: |
           pip install uc-manager
+          # Use CPU version package
+          uv pip install torch==2.10.0 torchvision==0.25.0 torchaudio==2.10.0 --extra-index-url  http://cache-service.nginx-pypi-cache.svc.cluster.local/whl/cpu/
           uv pip install -r requirements-dev.txt
+          # Concurrent installation of triton-ascend can cause files to be overwritten by other packages.
           uv pip install --force-reinstall --no-deps triton-ascend==3.2.1
           if find vllm_ascend -maxdepth 1 -name '*.so' -type f 2>/dev/null | grep -q .; then
             COMPILE_CUSTOM_KERNELS=0 uv pip install -e .
@@ -1067,7 +1105,7 @@ jobs:
           echo "CSRC_HASH=$CSRC_HASH" >> $GITHUB_OUTPUT
 
       - name: Cache vllm-ascend csrc
-        uses: runs-on/cache@v4
+        uses: runs-on/cache@v5
         with:
           path: |
             vllm_ascend/_cann_ops_custom
@@ -1079,9 +1117,14 @@ jobs:
             vllm-ascend-build-v1-${{ runner.os }}-${{ inputs.image_310p }}-${{ steps.get_csrc_hash.outputs.CSRC_HASH }}
 
       - name: Install vllm-project/vllm-ascend
+        env:
+          MAX_JOBS: "92"
         run: |
           pip install uc-manager
+          # Use CPU version package
+          uv pip install torch==2.10.0 torchvision==0.25.0 torchaudio==2.10.0 --extra-index-url  http://cache-service.nginx-pypi-cache.svc.cluster.local/whl/cpu/
           uv pip install -r requirements-dev.txt
+          # Concurrent installation of triton-ascend can cause files to be overwritten by other packages.
           uv pip install --force-reinstall --no-deps triton-ascend==3.2.1
           if find vllm_ascend -maxdepth 1 -name '*.so' -type f 2>/dev/null | grep -q .; then
             COMPILE_CUSTOM_KERNELS=0 uv pip install -e .
