@@ -293,9 +293,7 @@ def dsa_forward(
         decode_compressed_kv = None
         if has_decode:
             assert decode_result is not None
-            (q, compress_cos, compress_sin, actual_seq_lengths_query, q_idx, kv_idx, ik, isc, isc_meta, wp) = (
-                decode_result
-            )
+            (q, compress_cos, compress_sin, actual_seq_lengths_query, q_idx, ik, isc, isc_meta, wp) = decode_result
 
             decode_compressed_kv = torch.ops._C_ascend.compressor(
                 decode_hs,
@@ -328,7 +326,6 @@ def dsa_forward(
                 pcompress_sin,
                 pactual_seq_lengths_query,
                 pq_idx,
-                pkv_idx,
                 pik,
                 pisc,
                 pisc_meta,
@@ -367,11 +364,17 @@ def dsa_forward(
             torch.npu.current_stream().wait_event(e1)
             weights_raw = impl.weights_proj(hidden_states[:actual_tokens])
 
-        # Main stream: quant_scatter + scatter for both decode and prefill
+        # Main stream: q_quant + scatter compress_kv for both decode and prefill
+        # kv quant+scatter already done inside _cv_indexer_qkv_prepare_multistream
+        soc_version = get_ascend_device_type()
+        dst_type = torch.float8_e4m3fn if soc_version == AscendDeviceType.A5 else torch.int8
+
         decode_q_quant = None
         decode_q_scale = None
         if has_decode:
-            decode_q_quant, decode_q_scale, _, _ = impl._indexer_quant_scatter(q_idx, kv_idx, ik, isc, isc_meta, wp)
+            decode_q_quant, decode_q_scale = torch_npu.npu_dynamic_quant(q_idx, dst_type=dst_type)
+            if soc_version not in {AscendDeviceType.A5}:
+                decode_q_scale = decode_q_scale.to(torch.float16)
 
             torch.ops._C_ascend.npu_scatter_nd_update_v2(
                 kv_cache[0],
@@ -382,9 +385,9 @@ def dsa_forward(
         prefill_q_quant = None
         prefill_q_scale = None
         if has_prefill:
-            prefill_q_quant, prefill_q_scale, _, _ = impl._indexer_quant_scatter(
-                pq_idx, pkv_idx, pik, pisc, pisc_meta, pwp
-            )
+            prefill_q_quant, prefill_q_scale = torch_npu.npu_dynamic_quant(pq_idx, dst_type=dst_type)
+            if soc_version not in {AscendDeviceType.A5}:
+                prefill_q_scale = prefill_q_scale.to(torch.float16)
 
             torch.ops._C_ascend.npu_scatter_nd_update_v2(
                 kv_cache[0],
