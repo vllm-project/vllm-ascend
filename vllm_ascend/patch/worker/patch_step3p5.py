@@ -49,17 +49,11 @@ if Step3p5Attention is not None:
                 positions=positions,
             )
         else:
-            q, k, v = qkv.split(
-                [self.q_size, self.kv_size, self.kv_size], dim=-1
-            )
-            q_by_head = q.view(
-                *q.shape[:-1], q.shape[-1] // self.head_dim, self.head_dim
-            )
+            q, k, v = qkv.split([self.q_size, self.kv_size, self.kv_size], dim=-1)
+            q_by_head = q.view(*q.shape[:-1], q.shape[-1] // self.head_dim, self.head_dim)
             q_by_head = self.q_norm(q_by_head.contiguous())
             q = q_by_head.view(q.shape)
-            k_by_head = k.view(
-                *k.shape[:-1], k.shape[-1] // self.head_dim, self.head_dim
-            )
+            k_by_head = k.view(*k.shape[:-1], k.shape[-1] // self.head_dim, self.head_dim)
             k_by_head = self.k_norm(k_by_head.contiguous())
             k = k_by_head.view(k.shape)
 
@@ -79,4 +73,3 @@ if Step3p5Attention is not None:
         return output
 
     Step3p5Attention.forward = _patched_forward
-
