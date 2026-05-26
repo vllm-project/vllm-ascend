@@ -85,7 +85,7 @@ myst_substitutions = {
     # vLLM tag for main branch
     "main_vllm_tag": "v0.20.2",
     # Python version for main branch
-    "main_python_version": ">= 3.10, < 3.12",
+    "main_python_version": ">= 3.10, < 3.13",
     # CANN version for main branch
     "main_cann_version": "9.0.0",
     # PyTorch/torch_npu version for main branch
