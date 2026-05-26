@@ -12,6 +12,7 @@ from vllm.v1.core.single_type_kv_cache_manager import (
     spec_manager_map,
 )
 from vllm.v1.kv_cache_interface import FullAttentionSpec, KVCacheSpec, MLAAttentionSpec
+from vllm.v1.kv_cache_interface import SlidingWindowSpec, ChunkedLocalAttentionSpec
 from vllm.v1.request import Request
 
 
@@ -203,10 +204,27 @@ class CompressAttentionManager(FullAttentionManager):
                 computed.pop()
         return computed_blocks
 
-
-def get_manager_for_kv_cache_spec(kv_cache_spec: KVCacheSpec, **kwargs) -> SingleTypeKVCacheManager:
+def get_manager_for_kv_cache_spec(
+    kv_cache_spec: KVCacheSpec,
+    max_num_batched_tokens: int | None = None,
+    max_model_len: int | None = None,
+    **kwargs,
+) -> SingleTypeKVCacheManager:
     manager_class = spec_manager_map[type(kv_cache_spec)]
     if isinstance(kv_cache_spec, MLAAttentionSpec) and kv_cache_spec.compress_ratio > 1:
         manager_class = CompressAttentionManager
+    # SlidingWindow / ChunkedLocalAttention 的准入上限（与上游一致）
+    if (
+        hasattr(kv_cache_spec, "max_admission_blocks_per_request")
+        and max_num_batched_tokens is not None
+        and max_model_len is not None
+    ):
+        kwargs["max_admission_blocks_per_request"] = (
+            kv_cache_spec.max_admission_blocks_per_request(
+                max_num_batched_tokens=max_num_batched_tokens,
+                max_model_len=max_model_len,
+            )
+        )
     manager = manager_class(kv_cache_spec, **kwargs)
     return manager
+

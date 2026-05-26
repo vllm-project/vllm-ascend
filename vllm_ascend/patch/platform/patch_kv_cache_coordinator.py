@@ -37,6 +37,7 @@ class AscendHybridKVCacheCoordinator(HybridKVCacheCoordinator):
         self,
         kv_cache_config: KVCacheConfig,
         max_model_len: int,
+        max_num_batched_tokens: int,
         use_eagle: bool,
         enable_caching: bool,
         enable_kv_cache_events: bool,
@@ -67,6 +68,8 @@ class AscendHybridKVCacheCoordinator(HybridKVCacheCoordinator):
         self.single_type_managers = tuple(
             get_manager_for_kv_cache_spec(
                 kv_cache_spec=kv_cache_group.kv_cache_spec,
+                max_num_batched_tokens=max_num_batched_tokens,
+                max_model_len=max_model_len,
                 block_pool=self.block_pool,
                 enable_caching=enable_caching,
                 kv_cache_group_id=i,
@@ -252,6 +255,7 @@ def get_kv_cache_coordinator(
     return AscendHybridKVCacheCoordinator(
         kv_cache_config,
         max_model_len,
+        max_num_batched_tokens,
         use_eagle,
         enable_caching,
         enable_kv_cache_events,
