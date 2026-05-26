@@ -13,10 +13,6 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-#
-
-import contextlib
-
 from vllm.triton_utils import HAS_TRITON
 
 from vllm_ascend.utils import is_310p, vllm_version_is
@@ -41,7 +37,6 @@ else:
 
 
 import vllm_ascend.patch.worker.patch_weight_utils  # noqa
-import vllm_ascend.patch.platform.patch_sched_yield  # noqa
 import vllm_ascend.patch.worker.patch_distributed  # noqa
 import vllm_ascend.patch.worker.patch_minimax_m2  # noqa
 import vllm_ascend.patch.worker.patch_minimax_m2_linear_attn  # noqa
@@ -53,14 +48,10 @@ if not is_310p():
     import vllm_ascend.patch.worker.patch_qwen3_5  # noqa
     import vllm_ascend.patch.worker.patch_gdn_attn  # noqa
     import vllm_ascend.patch.worker.patch_qwen3vl  # noqa
-
-    if not vllm_version_is("0.19.1"):
-        with contextlib.suppress(ModuleNotFoundError):
-            import vllm_ascend.patch.worker.patch_qwen3_dflash  # noqa
+    import vllm_ascend.patch.worker.patch_qwen3_dflash  # noqa
 else:
     import vllm_ascend.patch.worker.patch_idex_310  # noqa
 import vllm_ascend.patch.worker.patch_rejection_sampler  # noqa
-import vllm_ascend.patch.worker.patch_huanyuan_vl  # noqa
 
 # TODO(MengqingCao): remove after the upstream community is modified
 import vllm_ascend.patch.worker.patch_llama_eagle3  # noqa

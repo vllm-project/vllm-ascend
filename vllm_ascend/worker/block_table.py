@@ -3,6 +3,7 @@ import torch
 from vllm.distributed import get_dcp_group, get_pcp_group
 from vllm.utils.math_utils import cdiv
 from vllm.v1.attention.backends.utils import PAD_SLOT_ID
+from vllm.v1.kv_cache_interface import KVCacheGroupSpec
 from vllm.v1.utils import CpuGpuBuffer
 from vllm.v1.worker.block_table import _compute_slot_mapping_kernel
 from vllm.v1.worker.cp_utils import get_total_cp_world_size
@@ -318,7 +319,9 @@ class MultiGroupBlockTable:
         max_num_blocks: list[int] | None = None,
         kernel_sizes: list[list[int]] | None = None,
         cp_kv_cache_interleave_size: int = 1,
+        kv_cache_groups: list[KVCacheGroupSpec] | None = None,
     ) -> None:
+        del kv_cache_groups
         if kernel_sizes is None:
             kernel_sizes = [[0]] * len(block_sizes)
         # Ensure kernel_sizes matches block_sizes length

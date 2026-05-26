@@ -12,6 +12,10 @@ from vllm_ascend.worker.block_table import MultiGroupBlockTable as AscendMultiGr
 
 
 class BlockTable(AscendBlockTable):
+    def __init__(self, *args: Any, kv_cache_group: KVCacheGroupSpec | None = None, **kwargs: Any) -> None:
+        del kv_cache_group
+        super().__init__(*args, **kwargs)
+
     def compute_slot_mapping(self, *args: Any) -> None:
         req_indices, positions = self._normalize_slot_mapping_inputs(*args)
         self._compute_slot_mapping_numpy(req_indices, positions)
