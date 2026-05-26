@@ -87,7 +87,6 @@ class TestAscendSFACPMetadataBuilder(TestBase):
         self.mock_cfg.compilation_config = MagicMock()
         self.mock_cfg.compilation_config.pass_config = MagicMock()
         self.mock_cfg.compilation_config.pass_config.enable_sp = False
-
         self.mock_cfg.speculative_config = None
 
         self.patcher = patch("vllm.config.get_current_vllm_config", return_value=self.mock_cfg)
@@ -900,14 +899,21 @@ class TestAscendSFACPImpl(TestBase):
         slots = torch.tensor([0, 1, 2, 3], dtype=torch.int32)
 
         attn_metadata = MagicMock()
+
         sfa_cp_metadata = MagicMock()
+
         sfa_cp_metadata.pcp_allgather_restore_idx = torch.arange(4)
+
         attn_metadata.sfa_cp_metadata = sfa_cp_metadata
+
         attn_metadata.slot_mapping = slots
+
         attn_metadata.num_decode_tokens = 2
+
         attn_metadata.num_prefills = 0
 
         result = self.impl.exec_kv(kv_no_split, cos, sin, kv_cache, slots, attn_metadata)
+
         self.assertEqual(result, (None, None))
         mock_torch_npu._npu_reshape_and_cache.assert_called_once()
 

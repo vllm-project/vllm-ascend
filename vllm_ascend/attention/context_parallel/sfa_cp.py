@@ -142,10 +142,14 @@ class AscendSFACPMetadataBuilder(AscendSFAMetadataBuilder):
             assert long_seq_metadata is not None
             num_actual_tokens_pcp_padded = long_seq_metadata.num_actual_tokens_pcp_padded
             self.slot_mapping_buf[:num_actual_tokens_pcp_padded].copy_(
+
                 common_attn_metadata.slot_mapping[:num_actual_tokens_pcp_padded], non_blocking=True
+
             )
             self.slot_mapping_buf[:num_decode_tokens] = self.slot_mapping_buf[
+
                 : num_decode_tokens * self.pcp_size : self.pcp_size
+
             ].clone()
             self.slot_mapping_buf[num_decode_tokens : num_decode_tokens * self.pcp_size].fill_(-1)
 
