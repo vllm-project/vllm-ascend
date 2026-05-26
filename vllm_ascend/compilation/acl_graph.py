@@ -109,12 +109,6 @@ class ACLGraphWrapper:
         # in case we need to access the original runnable.
         return self.runnable
 
-    def reset_aclgraph_cache(self) -> int:
-        num_entries = len(self.concrete_aclgraph_entries)
-        self.concrete_aclgraph_entries.clear()
-        self.first_run_finished = False
-        return num_entries
-
     def __call__(self, *args, **kwargs):
         forward_context = get_forward_context()
         batch_descriptor = forward_context.batch_descriptor
@@ -332,14 +326,23 @@ def update_draft_graph_params_workspaces(num_tokens: int, workspace: Any):
 def get_draft_graph_params():
     return _draft_graph_params
 
+def _clear_attention_workspaces_for_sleep(params: GraphParams | None) -> None:
+    if params is None:
+        return
+    params.workspaces.clear()
+
+
+def clear_attention_workspaces_for_sleep() -> None:
+    _clear_attention_workspaces_for_sleep(_graph_params)
+    _clear_attention_workspaces_for_sleep(_draft_graph_params)
+    _clear_attention_workspaces_for_sleep(_draft_graph_prefill_params)
+
 
 def _reset_graph_params(params: GraphParams | None) -> None:
     if params is None:
         return
     for num_tokens in params.events:
         params.events[num_tokens] = []
-    for num_tokens in params.workspaces:
-        params.workspaces[num_tokens] = None
     for num_tokens in params.handles:
         params.handles[num_tokens] = []
     for num_tokens in params.attn_params:
@@ -352,32 +355,13 @@ def _reset_graph_params(params: GraphParams | None) -> None:
         params.conv1d_events[num_tokens] = []
 
 
-def _clear_graph_workspaces(params: GraphParams | None) -> int:
-    if params is None:
-        return 0
-    num_cleared = 0
-    for num_tokens in params.workspaces:
-        if params.workspaces[num_tokens] is not None:
-            params.workspaces[num_tokens] = None
-            num_cleared += 1
-    return num_cleared
-
-
-def clear_attention_workspaces_for_sleep() -> int:
-    num_cleared = 0
-    num_cleared += _clear_graph_workspaces(_graph_params)
-    num_cleared += _clear_graph_workspaces(_draft_graph_params)
-    num_cleared += _clear_graph_workspaces(_draft_graph_prefill_params)
-    return num_cleared
-
-
-def reset_graph_params_for_sleep() -> None:
-    clear_attention_workspaces_for_sleep()
+def reset_graph_params_for_sleep()  -> None:
     _reset_graph_params(_graph_params)
     _reset_graph_params(_draft_graph_params)
     _reset_graph_params(_draft_graph_prefill_params)
     for wrapper in list(_acl_graph_wrappers):
-        wrapper.reset_aclgraph_cache()
+        wrapper.concrete_aclgraph_entries.clear()
+        wrapper.first_run_finished = False
 
 
 _draft_graph_prefill_params: GraphParams | None = None
