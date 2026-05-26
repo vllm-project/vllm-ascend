@@ -2,7 +2,6 @@ import torch
 import torch.nn as nn
 import vllm
 from transformers import DeepseekV2Config, DeepseekV3Config
-from vllm.config import VllmConfig
 from vllm.model_executor.models.deepseek_mtp import DeepSeekMTP, DeepSeekMultiTokenPredictorLayer
 
 from vllm_ascend.utils import vllm_version_is
@@ -35,8 +34,25 @@ def get_spec_layer_idx_from_weight_name_020(
 
 
 class AscendDeepSeekMultiTokenPredictorLayer(DeepSeekMultiTokenPredictorLayer):
-    def __init__(self, vllm_config: VllmConfig, prefix: str) -> None:
+    def __init__(self, *args, **kwargs) -> None:
+        topk_indices_buffer = None
+        if len(args) >= 3:
+            vllm_config, topk_indices_buffer, prefix = args[0], args[1], args[2]
+        elif len(args) == 2:
+            vllm_config, prefix = args[0], args[1]
+            topk_indices_buffer = kwargs.pop("topk_indices_buffer", None)
+        elif "vllm_config" in kwargs and "prefix" in kwargs:
+            vllm_config = kwargs.pop("vllm_config")
+            prefix = kwargs.pop("prefix")
+            topk_indices_buffer = kwargs.pop("topk_indices_buffer", None)
+        else:
+            raise TypeError(f"Invalid arguments for {self.__class__.__name__}")
+
         super().__init__(vllm_config, prefix)
+
+        if topk_indices_buffer is not None:
+            self.mtp_block.topk_indices_buffer = topk_indices_buffer
+
         quant_description = getattr(vllm_config.quant_config, "quant_description", None)
         self.is_rot_used = quant_description.get("is_rot_used", False) if quant_description is not None else False
         self.target_model_type = vllm_config.speculative_config.target_model_config.hf_text_config.model_type

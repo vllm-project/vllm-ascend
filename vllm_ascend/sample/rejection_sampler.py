@@ -13,6 +13,7 @@ from vllm.v1.sample.rejection_sampler import (
 from vllm_ascend.ops.triton.reject_sample import (
     cal_grid_and_block_size,
     expand_triton,
+    rejection_greedy_sample_triton,
     rejection_greedy_sample_with_triton,
     rejection_random_sample_block_verify_kernel,
     rejection_random_sample_kernel,
@@ -395,6 +396,71 @@ def rejection_greedy_sample_spec_len_1_pytorch(
     output_token_ids[:, 0] = target_argmax
     bonus_token_ids = bonus_token_ids.squeeze(1)
     output_token_ids[:, 1] = torch.where(accept_req_mask, bonus_token_ids, output_token_ids[:, 1])
+
+
+def strict_rejection_sample_tensor(
+    draft_token_ids: torch.Tensor,
+    cu_num_draft_tokens: torch.Tensor,
+    max_spec_len: int,
+    target_token_ids: torch.Tensor,
+    bonus_token_ids: torch.Tensor,
+) -> torch.Tensor:
+    """Strict verifier for draft-probs-free speculative decoding.
+
+    For MTP/ngram-style speculation we do not have draft probabilities. Sampling
+    target tokens first and accepting the prefix while target == draft is
+    equivalent to the no-draft-probs rejection path, but avoids softmax,
+    recovered-token sampling, and the random rejection kernel.
+    """
+    draft_token_ids = draft_token_ids.to(torch.int32)
+    target_token_ids = target_token_ids.to(torch.int32)
+    bonus_token_ids = bonus_token_ids.to(torch.int32)
+    batch_size = cu_num_draft_tokens.shape[0]
+    device = target_token_ids.device
+
+    output_token_ids = torch.empty(
+        (batch_size, max_spec_len + 1),
+        dtype=torch.int32,
+        device=device,
+    )
+    output_token_ids.fill_(PLACEHOLDER_TOKEN_ID)
+
+    if not HAS_TRITON or output_token_ids.device.type != "npu":
+        draft_counts = cu_num_draft_tokens.clone()
+        if draft_counts.numel() > 1:
+            draft_counts[1:] = (
+                cu_num_draft_tokens[1:] - cu_num_draft_tokens[:-1]
+            )
+        bonus_token_ids_cpu = (
+            bonus_token_ids.unsqueeze(1)
+            if bonus_token_ids.ndim == 1
+            else bonus_token_ids
+        )
+        rejection_greedy_sample_pytorch(
+            output_token_ids,
+            cu_num_draft_tokens,
+            draft_token_ids,
+            target_token_ids,
+            bonus_token_ids_cpu,
+            draft_counts.to(torch.int32).tolist(),
+            max_spec_len,
+            None,
+        )
+        return output_token_ids
+
+    grid, block_size = cal_grid_and_block_size(batch_size)
+    rejection_greedy_sample_triton[(grid,)](
+        output_token_ids,
+        cu_num_draft_tokens,
+        draft_token_ids,
+        target_token_ids,
+        bonus_token_ids,
+        None,
+        batch_size,
+        max_spec_len,
+        BLOCK_SIZE=block_size,
+    )
+    return output_token_ids
 
 
 def rejection_greedy_sample_pytorch(

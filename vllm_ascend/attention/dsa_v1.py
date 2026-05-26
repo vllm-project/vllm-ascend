@@ -493,12 +493,16 @@ class AscendDSAMetadataBuilder(AttentionMetadataBuilder[AscendDSAMetadata]):
         num_reqs_actual = kwargs.get("num_reqs_actual")
         self.prefill_ratio_to_sas_metadata = kwargs.get("prefill_ratio_to_sas_metadata")
         self.decode_ratio_to_sas_metadata = kwargs.get("decode_ratio_to_sas_metadata")
-        assert self.prefill_ratio_to_sas_metadata is not None
-        assert self.decode_ratio_to_sas_metadata is not None
         self.block_size = kwargs.get("block_size", 128)
 
         self.common_ratio_to_sas_metadata = kwargs.get("common_ratio_to_sas_metadata")
-        assert self.common_ratio_to_sas_metadata is not None
+        # Initialize default values if None
+        if self.prefill_ratio_to_sas_metadata is None:
+            self.prefill_ratio_to_sas_metadata = {}
+        if self.decode_ratio_to_sas_metadata is None:
+            self.decode_ratio_to_sas_metadata = {}
+        if self.common_ratio_to_sas_metadata is None:
+            self.common_ratio_to_sas_metadata = {}
 
         if self.common_ratio_to_sas_metadata.get("num_decodes", None) is None:
             self.num_decodes, self.num_prefills, self.num_decode_tokens, self.num_prefill_tokens = (
@@ -1314,6 +1318,10 @@ class AscendDSAMetadataBuilder(AttentionMetadataBuilder[AscendDSAMetadata]):
         attn_state: AscendAttentionState = AscendAttentionState.DecodeOnly,
         **kwargs,
     ):
+        kwargs.setdefault("prefill_ratio_to_sas_metadata", {})
+        kwargs.setdefault("decode_ratio_to_sas_metadata", {})
+        kwargs.setdefault("common_ratio_to_sas_metadata", {})
+        kwargs.setdefault("block_size", self.block_size)
         if attn_state in {AscendAttentionState.DecodeOnly, AscendAttentionState.SpecDecoding}:
             attn_metadata = self.build(
                 common_prefix_len=0,

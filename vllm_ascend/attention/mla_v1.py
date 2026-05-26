@@ -779,29 +779,38 @@ class AscendMLAImpl(MLAAttentionImpl):
         speculative_config=None,
         num_dcp_pcp_tokens=None,
         draft_attn_metadatas=None,
+        draft_attn_layer_names=None,
     ):
         if _EXTRA_CTX.is_draft_model:
-            if _EXTRA_CTX.is_draft_model_prefill:
-                graph_params = get_draft_graph_prefill_params()
-            else:
-                graph_params = get_draft_graph_params()
-            attn_metadata = draft_attn_metadatas
-            attn_keys = list(attn_metadata[0].keys())
+            graph_params = get_draft_graph_params()
         else:
             graph_params = get_graph_params()
-            attn_metadata = forward_context.attn_metadata
-            attn_keys = list(attn_metadata.keys())
-        # FIXME: Behold! We are using a temporary hack here to update the args
-        # for each layer's attention op in the graph.
-        num_layers = len(attn_keys)
-        if num_layers == 0:
-            return
+        draft_names = set(draft_attn_layer_names) if draft_attn_layer_names else set()
         if _EXTRA_CTX.is_draft_model:
-            attn_keys = attn_keys * (len(graph_params.attn_params[num_tokens]) // num_layers)
-        attn_count = 0
+            attn_updates = []
+            if draft_attn_metadatas:
+                draft_keys = list(draft_attn_metadatas[0].keys())
+                for draft_step, per_layer_metadata in enumerate(draft_attn_metadatas):
+                    for key in draft_keys:
+                        attn_updates.append((key, per_layer_metadata[key], draft_step))
+        else:
+            main_attn_metadata = forward_context.attn_metadata
+            main_keys = [key for key in main_attn_metadata if key not in draft_names]
+            attn_updates = [(key, main_attn_metadata[key], None) for key in main_keys]
+            if draft_attn_metadatas:
+                draft_keys = list(draft_attn_metadatas[0].keys())
+                if draft_names:
+                    draft_keys = [key for key in draft_keys if key in draft_names]
+                for draft_step, per_layer_metadata in enumerate(draft_attn_metadatas):
+                    for key in draft_keys:
+                        attn_updates.append((key, per_layer_metadata[key], draft_step))
+
+        if len(attn_updates) == 0:
+            return
+
         with torch.npu.stream(update_stream):
-            for key, param, handle, event in zip(
-                attn_keys,
+            for (key, metadata, _draft_step), param, handle, event in zip(
+                attn_updates,
                 graph_params.attn_params[num_tokens],
                 graph_params.handles[num_tokens],
                 graph_params.events[num_tokens],
@@ -826,28 +835,21 @@ class AscendMLAImpl(MLAAttentionImpl):
                     dequant_scale_q_nope,
                     fak_descale_float,
                 ) = param
-                if _EXTRA_CTX.is_draft_model:
-                    draft_step = attn_count // num_layers
-                    attn_metadata_current = attn_metadata[draft_step]
-                    attn_count = attn_count + 1
-                else:
-                    attn_metadata_current = attn_metadata
-
-                seq_lens_list = attn_metadata_current[key].decode.seq_lens_list
-                if speculative_config and speculative_config.use_eagle() and not _EXTRA_CTX.is_draft_model:
-                    actual_seq_lengths = attn_metadata_current[key].decode.actual_seq_lengths_q
+                seq_lens_list = metadata.decode.seq_lens_list
+                if key in draft_names or _EXTRA_CTX.is_draft_model:
+                    actual_seq_lengths = metadata.decode.actual_seq_lengths_q
+                    block_table = metadata.decode.block_table
+                    if speculative_config and speculative_config.disable_padded_drafter_batch:
+                        block_table = block_table[: len(actual_seq_lengths)]
+                    seq_lens_list = seq_lens_list + [0] * (len(actual_seq_lengths) - len(seq_lens_list))
+                elif speculative_config and speculative_config.method == "mtp" and not _EXTRA_CTX.is_draft_model:
+                    actual_seq_lengths = metadata.decode.actual_seq_lengths_q
                     spec_multiple = speculative_config.num_speculative_tokens + 1
                     seq_lens_list = seq_lens_list + [0] * (num_tokens // spec_multiple - len(seq_lens_list))
                     actual_seq_lengths = [spec_multiple * (i + 1) for i in range(num_tokens // spec_multiple)]
-                elif _EXTRA_CTX.is_draft_model:
-                    actual_seq_lengths = attn_metadata_current[key].decode.actual_seq_lengths_q
-                    block_table = attn_metadata_current[key].decode.block_table
-                    # TODO: This is a hack and should be fixed in the future.
-                    if speculative_config.disable_padded_drafter_batch:
-                        block_table = block_table[: len(actual_seq_lengths)]
-                    seq_lens_list = seq_lens_list + [0] * (len(actual_seq_lengths) - len(seq_lens_list))
                 else:
                     seq_lens_list = seq_lens_list + [0] * (num_tokens - len(seq_lens_list))
+                torch.npu.graph_task_update_begin(update_stream, handle)
 
                 extra_args = {}
                 if dequant_scale_q_nope is not None:
@@ -859,8 +861,6 @@ class AscendMLAImpl(MLAAttentionImpl):
                         "dequant_scale_key": fak_descale_float,
                         "dequant_scale_value": fak_descale_float,
                     }
-
-                torch.npu.graph_task_update_begin(update_stream, handle)
                 torch_npu.npu_fused_infer_attention_score_v2.out(
                     q_nope,
                     k_nope,

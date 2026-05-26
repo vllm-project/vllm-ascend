@@ -1,4 +1,6 @@
 import os
+from contextlib import nullcontext
+from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
 import torch
@@ -69,6 +71,107 @@ class TestAscendMLABackend(TestBase):
         mock_enable_cp.return_value = True
         impl_cls = AscendMLABackend.get_impl_cls()
         self.assertIsNotNone(impl_cls)
+
+
+class TestAscendMLAUpdateGraphParams(TestBase):
+
+    @patch("vllm_ascend.attention.mla_v1.get_graph_params")
+    @patch("vllm_ascend.attention.mla_v1.torch_npu.npu_fused_infer_attention_score_v2.out")
+    @patch("vllm_ascend.attention.mla_v1.torch.npu.graph_task_update_end")
+    @patch("vllm_ascend.attention.mla_v1.torch.npu.graph_task_update_begin")
+    @patch("vllm_ascend.attention.mla_v1.torch.npu.stream")
+    def test_update_graph_params_uses_draft_step_metadata(
+        self,
+        mock_stream,
+        mock_update_begin,
+        mock_update_end,
+        mock_out,
+        mock_get_graph_params,
+    ):
+        mock_stream.return_value = nullcontext()
+        tensor = torch.zeros(1)
+        param = (
+            tensor,
+            tensor,
+            tensor,
+            tensor,
+            1,
+            1,
+            "TND",
+            None,
+            0,
+            1.0,
+            "main_block",
+            16,
+            [7, 8],
+            [1, 2],
+            tensor,
+            tensor,
+            None,
+            None,
+        )
+        draft_param_0 = param[:10] + ("draft_block_0",) + param[11:]
+        draft_param_1 = param[:10] + ("draft_block_1",) + param[11:]
+        event0 = MagicMock()
+        event1 = MagicMock()
+        event2 = MagicMock()
+        mock_get_graph_params.return_value = MagicMock(
+            attn_params={4: [param, draft_param_0, draft_param_1]},
+            handles={4: ["h0", "h1", "h2"]},
+            events={4: [event0, event1, event2]},
+            workspaces={4: "workspace"},
+        )
+
+        main_meta = MagicMock()
+        main_meta.decode.seq_lens_list = [7, 8]
+        main_meta.decode.actual_seq_lengths_q = [1, 2]
+        main_meta.decode.block_table = "main_block"
+        draft_meta_0 = MagicMock()
+        draft_meta_0.decode.seq_lens_list = [10]
+        draft_meta_0.decode.actual_seq_lengths_q = [11]
+        draft_meta_0.decode.block_table = "draft_runtime_block_0"
+        draft_meta_1 = MagicMock()
+        draft_meta_1.decode.seq_lens_list = [20, 21]
+        draft_meta_1.decode.actual_seq_lengths_q = [22, 23]
+        draft_meta_1.decode.block_table = "draft_runtime_block_1"
+        forward_context = MagicMock(
+            attn_metadata={"main": main_meta},
+        )
+
+        speculative_config = MagicMock()
+        speculative_config.method = "mtp"
+        speculative_config.num_speculative_tokens = 1
+        speculative_config.disable_padded_drafter_batch = False
+
+        with patch(
+            "vllm_ascend.attention.mla_v1._EXTRA_CTX",
+            SimpleNamespace(is_draft_model=False),
+        ):
+            AscendMLAImpl.update_graph_params(
+                update_stream="stream",
+                forward_context=forward_context,
+                num_tokens=4,
+                vllm_config=None,
+                speculative_config=speculative_config,
+                draft_attn_metadatas=[
+                    {"draft": draft_meta_0},
+                    {"draft": draft_meta_1},
+                ],
+                draft_attn_layer_names=["draft"],
+            )
+
+        self.assertEqual(mock_out.call_count, 3)
+        first_call = mock_out.call_args_list[0].kwargs
+        second_call = mock_out.call_args_list[1].kwargs
+        third_call = mock_out.call_args_list[2].kwargs
+
+        self.assertEqual(first_call["actual_seq_qlen"], [2, 4])
+        self.assertEqual(second_call["actual_seq_qlen"], [11])
+        self.assertEqual(third_call["actual_seq_qlen"], [22, 23])
+        self.assertEqual(second_call["block_table"], "draft_runtime_block_0")
+        self.assertEqual(third_call["block_table"], "draft_runtime_block_1")
+        self.assertEqual(second_call["actual_seq_kvlen"], [10])
+        self.assertEqual(third_call["actual_seq_kvlen"], [20, 21])
 
 
 class TestDecodeMLAPreprocessResult(TestBase):

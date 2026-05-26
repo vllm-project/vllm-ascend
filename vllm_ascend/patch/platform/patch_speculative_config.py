@@ -1,3 +1,6 @@
+import copy
+import inspect
+import os
 from typing import TYPE_CHECKING, Any
 
 from vllm.config.speculative import SpeculativeConfig
@@ -13,6 +16,25 @@ else:
 
 
 def hf_config_override(hf_config: PretrainedConfig) -> PretrainedConfig:
+    def _called_from_draft_model_config() -> bool:
+        return any(frame.function == "create_draft_model_config"
+                   for frame in inspect.stack())
+
+    # Only apply speculative draft config rewrite during drafter loading.
+    # This prevents accidental rewrite of the target model config, which may
+    # lead to empty supported tasks in API server.
+    if (
+        os.getenv("VLLM_ASCEND_SPEC_CONFIG_DRAFT_ONLY", "0") != "1"
+        and not _called_from_draft_model_config()
+    ):
+        # Return an isolated copy even when override is disabled, so any
+        # downstream mutation in speculative config plumbing won't pollute
+        # the shared target-model HF config object.
+        return copy.deepcopy(hf_config)
+
+    # Avoid mutating the shared target-model HF config in place.
+    # Speculative draft overrides should operate on an isolated config object.
+    hf_config = copy.deepcopy(hf_config)
     initial_architecture = hf_config.architectures[0]
     if hf_config.model_type in ("deepseek_v3", "deepseek_v32", "deepseek_v4", "glm_moe_dsa"):
         target_model_type = hf_config.model_type

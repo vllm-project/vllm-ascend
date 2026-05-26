@@ -25,6 +25,7 @@ from vllm_ascend.sample.rejection_sampler import (
     rejection_random_sample_pytorch,
     sample_recovered_tokens_blockwise_pytorch,
     sample_recovered_tokens_pytorch,
+    strict_rejection_sample_tensor,
 )
 
 # Global constants
@@ -76,6 +77,31 @@ class TestAscendRejectionSampler(TestBase):
         assert output_token_ids[0, 1].item() == 99
         assert output_token_ids[1, 0].item() == 20
         assert output_token_ids[1, 2].item() == PLACEHOLDER_TOKEN_ID
+
+    @patch("torch.arange", new=mock_pin_memory(torch.arange))
+    @patch("torch.ones", new=mock_pin_memory(torch.ones))
+    @patch("torch.full", new=mock_pin_memory(torch.full))
+    @patch("torch.tensor", new=mock_pin_memory(torch.tensor))
+    def test_strict_rejection_sample_tensor_supports_mtp_1_2_3(self):
+        draft_token_ids = torch.tensor([10, 20, 21, 30, 31, 32])
+        target_token_ids = torch.tensor([10, 20, 99, 30, 31, 32])
+        bonus_token_ids = torch.tensor([100, 200, 300])
+        cu_num_draft_tokens = torch.tensor([1, 3, 6], dtype=torch.int32)
+
+        output_token_ids = strict_rejection_sample_tensor(
+            draft_token_ids,
+            cu_num_draft_tokens,
+            max_spec_len=3,
+            target_token_ids=target_token_ids,
+            bonus_token_ids=bonus_token_ids,
+        )
+
+        expected = torch.tensor([
+            [10, 100, PLACEHOLDER_TOKEN_ID, PLACEHOLDER_TOKEN_ID],
+            [20, 99, PLACEHOLDER_TOKEN_ID, PLACEHOLDER_TOKEN_ID],
+            [30, 31, 32, 300],
+        ], dtype=torch.int32)
+        assert torch.equal(output_token_ids, expected)
 
     @patch("torch.arange", new=mock_pin_memory(torch.arange))
     @patch("torch.ones", new=mock_pin_memory(torch.ones))

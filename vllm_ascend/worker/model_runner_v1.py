@@ -17,7 +17,9 @@
 # Adapted from vllm-project/vllm/vllm/worker/gpu_model_runner.py
 #
 
+import inspect
 import math
+import os
 import sys
 import time
 from collections import defaultdict
@@ -101,6 +103,7 @@ from vllm.v1.worker.ubatch_utils import (
 from vllm.v1.worker.utils import AttentionGroup
 
 # yapf: enable
+from vllm_ascend import envs
 from vllm_ascend.ascend_config import get_ascend_config
 from vllm_ascend.attention.attention_v1 import AscendAttentionBackend, AscendAttentionState
 from vllm_ascend.attention.dsa_v1 import AscendDSAMetadataBuilder
@@ -131,6 +134,7 @@ from vllm_ascend.spec_decode.eagle_proposer import AscendEagleProposer
 from vllm_ascend.spec_decode.extract_hidden_states_proposer import (
     AscendExtractHiddenStatesProposer,
 )
+from vllm_ascend.spec_decode.llm_base_proposer import _FusedModelWithMTP
 from vllm_ascend.spec_decode.medusa_proposer import AscendMedusaProposer
 from vllm_ascend.spec_decode.ngram_proposer import AscendNgramProposer
 from vllm_ascend.spec_decode.ngram_proposer_npu import AscendNgramProposerNPU
@@ -336,15 +340,23 @@ class NPUModelRunner(GPUModelRunner):
             self.c8_k_cache_dtype = torch.int8
             self.c8_k_scale_cache_dtype = torch.float16
 
-        self.attn_backend = get_attn_backend(
-            0,
-            self.dtype,
-            None,
-            use_mla=self.model_config.use_mla,
-            use_sparse=self.use_sparse,
-            use_mm_prefix=self.model_config is not None
+        # Keep compatibility with upstream vLLM and patched selector signatures.
+        attn_params = inspect.signature(get_attn_backend).parameters
+        attn_kwargs = {
+            "head_size": 0,
+            "dtype": self.dtype,
+            "kv_cache_dtype": None,
+            "use_mla": self.model_config.use_mla,
+            "use_sparse": self.use_sparse,
+            "use_mm_prefix": self.model_config is not None
             and self.model_config.is_mm_prefix_lm,
-        )
+        }
+        if "block_size" in attn_params:
+            attn_kwargs["block_size"] = self.block_size
+        if "use_compress" in attn_params:
+            hf_config = getattr(self.vllm_config.model_config, "hf_config", None)
+            attn_kwargs["use_compress"] = hasattr(hf_config, "compress_ratios")
+        self.attn_backend = get_attn_backend(**attn_kwargs)
 
         try:
             self.dcp_size = get_dcp_group().world_size
@@ -537,6 +549,7 @@ class NPUModelRunner(GPUModelRunner):
             | AscendExtractHiddenStatesProposer
             | None
         ) = None
+        self._fused_mtp_force_enable = envs.VLLM_ASCEND_ENABLE_MTP_FUSED
         self.actual_seq_lengths_q: list[int] = []
         self.decode_token_per_req = 1
         if self.speculative_config:
@@ -3348,8 +3361,55 @@ class NPUModelRunner(GPUModelRunner):
                 logger.info("Loading drafter model...")
                 if self.vllm_config.quant_config is not None:
                     patch_load_weights(self.vllm_config)
-                with get_tp_context(self.drafter):
-                    self.drafter.load_model(self.model)
+                if (
+                    self.speculative_config is not None
+                    and self.speculative_config.method == "mtp"
+                    and self.compilation_config.cudagraph_mode.has_full_cudagraphs()
+                    and get_pp_group().is_last_rank
+                    and self._fused_mtp_force_enable
+                ):
+                    # Mark proposer to avoid creating an independent draft
+                    # graph wrapper when fused MTP is explicitly requested.
+                    self.drafter.fused_with_main_graph = True
+                prev_draft_only = os.environ.get("VLLM_ASCEND_SPEC_CONFIG_DRAFT_ONLY")
+                os.environ["VLLM_ASCEND_SPEC_CONFIG_DRAFT_ONLY"] = "1"
+                try:
+                    with get_tp_context(self.drafter):
+                        self.drafter.load_model(self.model)
+                finally:
+                    if prev_draft_only is None:
+                        os.environ.pop("VLLM_ASCEND_SPEC_CONFIG_DRAFT_ONLY", None)
+                    else:
+                        os.environ["VLLM_ASCEND_SPEC_CONFIG_DRAFT_ONLY"] = prev_draft_only
+                if (
+                    self.speculative_config is not None
+                    and self.speculative_config.method == "mtp"
+                    and getattr(self.drafter, "fused_with_main_graph", False)
+                ):
+                    drafter_hidden_size = getattr(self.drafter, "hidden_size", None)
+                    target_hidden_size = None
+                    get_mtp_hidden = getattr(self.model, "get_mtp_target_hidden_states", None)
+                    if callable(get_mtp_hidden):
+                        mtp_hidden = get_mtp_hidden()
+                        if mtp_hidden is not None and getattr(mtp_hidden, "ndim", 0) == 2:
+                            target_hidden_size = mtp_hidden.shape[1]
+                    if target_hidden_size is None:
+                        # Fallback to plain model hidden_size if dedicated MTP
+                        # hidden buffer is unavailable.
+                        target_hidden_size = getattr(self.vllm_config.model_config.hf_text_config, "hidden_size", None)
+
+                    if (
+                        isinstance(target_hidden_size, int)
+                        and isinstance(drafter_hidden_size, int)
+                        and target_hidden_size != drafter_hidden_size
+                    ):
+                        logger.warning(
+                            "Disable fused MTP main-graph path due to hidden-size contract mismatch: "
+                            "target_hidden_size=%d drafter_hidden_size=%d.",
+                            target_hidden_size,
+                            drafter_hidden_size,
+                        )
+                        self.drafter.fused_with_main_graph = False
                 if self.use_aux_hidden_state_outputs:
                     from vllm.model_executor.models.interfaces import supports_eagle3
                     if not supports_eagle3(self.model):
@@ -3367,11 +3427,19 @@ class NPUModelRunner(GPUModelRunner):
         self.model_memory_usage = m.consumed_memory
         logger.info("Loading model weights took %.4f GB", m.consumed_memory / float(2**30))
 
-        # wrap the model with full graph wrapper if needed.
+        # Wrap the model with ACLGraph only for full graph modes.
         if self.compilation_config.cudagraph_mode.has_full_cudagraphs():
             self.update_stream: torch.npu.Stream = torch.npu.Stream()
+            runnable = self.model
+            if (
+                self.drafter is not None
+                and self.speculative_config is not None
+                and self.speculative_config.method == "mtp"
+                and getattr(self.drafter, "fused_with_main_graph", False)
+            ):
+                runnable = _FusedModelWithMTP(self.model, self.drafter)
             self.model = ACLGraphWrapper(
-                self.model,
+                runnable,
                 self.vllm_config,
                 runtime_mode=CUDAGraphMode.FULL,
                 use_eagle=self.use_eagle,
