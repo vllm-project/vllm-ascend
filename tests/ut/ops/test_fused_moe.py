@@ -733,6 +733,59 @@ class TestAscendFusedMoE:
 
 
 class TestAscendFusedMoESharedExperts:
+    def test_shared_swiglu_applies_deepseek_v4_clamp_before_dynamic_quant(self, monkeypatch):
+        hidden_states = torch.tensor([[20, -20, 40, -40]], dtype=torch.int32)
+        weight_scale = torch.ones(4, dtype=torch.float32)
+        activation_scale = torch.ones(1, dtype=torch.float32)
+        public_dequant = MagicMock()
+
+        def fake_dynamic_quant(tensor):
+            return tensor.round().to(torch.int8), tensor.abs().amax(dim=-1).to(torch.float32) / 127
+
+        monkeypatch.setattr(fused_moe_module.torch_npu, "npu_dynamic_quant", fake_dynamic_quant)
+        monkeypatch.setattr(
+            fused_moe_module.torch.ops._C_ascend,
+            "npu_dequant_swiglu_quant",
+            public_dequant,
+            raising=False,
+        )
+
+        output, output_scale = fused_moe_module._shared_dequant_swiglu_quant(
+            hidden_states,
+            weight_scale,
+            activation_scale,
+            10.0,
+            torch.bfloat16,
+        )
+
+        gate = torch.clamp(hidden_states[..., :2].float(), max=10.0)
+        up = torch.clamp(hidden_states[..., 2:].float(), min=-10.0, max=10.0)
+        expected = (F.silu(gate) * up).to(torch.bfloat16)
+        torch.testing.assert_close(output, expected.round().to(torch.int8))
+        torch.testing.assert_close(output_scale, expected.abs().amax(dim=-1).to(torch.float32) / 127)
+        public_dequant.assert_not_called()
+
+    def test_shared_swiglu_keeps_public_dequant_for_unlimited_clamp(self, monkeypatch):
+        expected = (torch.ones(1, 2, dtype=torch.int8), torch.ones(1, dtype=torch.float32))
+        public_dequant = MagicMock(return_value=expected)
+        monkeypatch.setattr(
+            fused_moe_module.torch.ops._C_ascend,
+            "npu_dequant_swiglu_quant",
+            public_dequant,
+            raising=False,
+        )
+
+        output = fused_moe_module._shared_dequant_swiglu_quant(
+            torch.ones(1, 4, dtype=torch.int32),
+            torch.ones(4, dtype=torch.float32),
+            torch.ones(1, dtype=torch.float32),
+            1_000_000,
+            torch.bfloat16,
+        )
+
+        assert output is expected
+        assert public_dequant.call_args.kwargs["clamp_limit"] == 1_000_000
+
     def test_properties_and_forward_delegate(self, monkeypatch):
         layer = AscendFusedMoE.__new__(AscendFusedMoE)
         if not hasattr(type(layer), "gate"):

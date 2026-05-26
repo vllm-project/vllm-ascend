@@ -1,10 +1,11 @@
 import unittest
 from typing import ClassVar
-from unittest.mock import patch
+from unittest.mock import MagicMock, patch
 
 import torch
 
-from vllm_ascend.ops.fused_moe.moe_mlp import cumsum_group_list, unified_apply_mlp
+from vllm_ascend.ascend_forward_context import MoECommType
+from vllm_ascend.ops.fused_moe.moe_mlp import cumsum_group_list, quant_apply_mlp, unified_apply_mlp
 from vllm_ascend.ops.fused_moe.moe_runtime_args import (
     MoEMlpComputeInput,
     MoEQuantParams,
@@ -60,6 +61,123 @@ class TestW4A8RuntimeFlags(unittest.TestCase):
         self.assertFalse(
             MoEQuantParams(quant_type=QuantType.W8A8, is_per_channel_weight=True).use_w4a8_per_channel_gmm_swiglu
         )
+
+
+class TestQuantApplyMlpW4A8PerChannel(unittest.TestCase):
+    def test_effective_swiglu_limit_clamps_before_dynamic_quant(self):
+        hidden_states = torch.arange(12, dtype=torch.int8).view(3, 4)
+        dynamic_scale = torch.ones(3, dtype=torch.float32)
+        group_list = torch.tensor([2, 1], dtype=torch.int64)
+        w1 = [torch.ones(1, 8, 4, dtype=torch.int32)]
+        w2 = [torch.ones(1, 4, 4, dtype=torch.int32)]
+        w1_scale = [torch.ones(1, 8, dtype=torch.float32)]
+        w2_scale = [torch.ones(1, 4, dtype=torch.float32)]
+        w1_scale_bias = [torch.ones(1, 8, dtype=torch.float32)]
+        w2_scale_bias = [torch.ones(1, 4, dtype=torch.float32)]
+        gate_up_out = torch.tensor([[20.0, -20.0, 20.0, -20.0]], dtype=torch.bfloat16).repeat(3, 1)
+        quantized = torch.ones(3, 2, dtype=torch.int8)
+        swiglu_out_scale = torch.ones(3, dtype=torch.float32)
+        expected = torch.randn(3, 4)
+        event = object()
+        stream = MagicMock()
+        stream.record_event.return_value = event
+        extra_ctx = MagicMock()
+        extra_ctx.moe_comm_type = MoECommType.ALLGATHER
+
+        with (
+            patch("vllm_ascend.ops.fused_moe.moe_mlp._EXTRA_CTX", extra_ctx),
+            patch("vllm_ascend.ops.fused_moe.moe_mlp.enable_custom_op", return_value=True),
+            patch("vllm_ascend.ops.fused_moe.moe_mlp.torch.npu.current_stream", return_value=stream),
+            patch(
+                "vllm_ascend.ops.fused_moe.moe_mlp.torch_npu.npu_grouped_matmul",
+                return_value=[gate_up_out],
+            ),
+            patch(
+                "vllm_ascend.ops.fused_moe.moe_mlp.torch_npu.npu_dynamic_quant",
+                return_value=(quantized, swiglu_out_scale),
+            ) as mock_dynamic_quant,
+            patch(
+                "vllm_ascend.ops.fused_moe.moe_mlp.torch.ops._C_ascend.grouped_matmul_swiglu_quant_v2",
+                create=True,
+            ) as mock_gmm_swiglu_v2,
+            patch(
+                "vllm_ascend.ops.fused_moe.moe_mlp.DeviceOperator.npu_grouped_matmul_gmm2",
+                return_value=expected,
+            ),
+        ):
+            output, before_gmm2_evt = quant_apply_mlp(
+                hidden_states=hidden_states,
+                w1=w1,
+                w1_scale=w1_scale,
+                w2=w2,
+                w2_scale=w2_scale,
+                group_list=group_list,
+                group_list_type=1,
+                dynamic_scale=dynamic_scale,
+                w1_scale_bias=w1_scale_bias,
+                w2_scale_bias=w2_scale_bias,
+                use_w4a8_per_channel_gmm_swiglu=True,
+                swiglu_limit=10.0,
+            )
+
+        gate = torch.clamp(gate_up_out[..., :2], max=10.0)
+        up = torch.clamp(gate_up_out[..., 2:], min=-10.0, max=10.0)
+        torch.testing.assert_close(mock_dynamic_quant.call_args.args[0], torch.nn.functional.silu(gate) * up)
+        mock_gmm_swiglu_v2.assert_not_called()
+        self.assertIs(output, expected)
+        self.assertIs(before_gmm2_evt, event)
+
+    def test_unlimited_swiglu_limit_keeps_fused_op_path(self):
+        hidden_states = torch.arange(12, dtype=torch.int8).view(3, 4)
+        dynamic_scale = torch.ones(3, dtype=torch.float32)
+        group_list = torch.tensor([2, 1], dtype=torch.int64)
+        w1 = [torch.ones(1, 8, 4, dtype=torch.int32)]
+        w2 = [torch.ones(1, 4, 4, dtype=torch.int32)]
+        w1_scale = [torch.ones(1, 8, dtype=torch.float32)]
+        w2_scale = [torch.ones(1, 4, dtype=torch.float32)]
+        swiglu_out = torch.ones(3, 2, dtype=torch.int8)
+        swiglu_out_scale = torch.ones(3, dtype=torch.float32)
+        expected = torch.randn(3, 4)
+        event = object()
+        stream = MagicMock()
+        stream.record_event.return_value = event
+        extra_ctx = MagicMock()
+        extra_ctx.moe_comm_type = MoECommType.ALLGATHER
+
+        with (
+            patch("vllm_ascend.ops.fused_moe.moe_mlp._EXTRA_CTX", extra_ctx),
+            patch("vllm_ascend.ops.fused_moe.moe_mlp.enable_custom_op", return_value=True),
+            patch("vllm_ascend.ops.fused_moe.moe_mlp.torch.npu.current_stream", return_value=stream),
+            patch(
+                "vllm_ascend.ops.fused_moe.moe_mlp.torch.ops._C_ascend.grouped_matmul_swiglu_quant_v2",
+                return_value=(swiglu_out, swiglu_out_scale),
+                create=True,
+            ) as mock_gmm_swiglu_v2,
+            patch(
+                "vllm_ascend.ops.fused_moe.moe_mlp.torch_npu.npu_grouped_matmul",
+            ) as mock_gmm,
+            patch(
+                "vllm_ascend.ops.fused_moe.moe_mlp.DeviceOperator.npu_grouped_matmul_gmm2",
+                return_value=expected,
+            ),
+        ):
+            output, before_gmm2_evt = quant_apply_mlp(
+                hidden_states=hidden_states,
+                w1=w1,
+                w1_scale=w1_scale,
+                w2=w2,
+                w2_scale=w2_scale,
+                group_list=group_list,
+                group_list_type=1,
+                dynamic_scale=dynamic_scale,
+                use_w4a8_per_channel_gmm_swiglu=True,
+                swiglu_limit=1_000_000,
+            )
+
+        mock_gmm_swiglu_v2.assert_called_once()
+        mock_gmm.assert_not_called()
+        self.assertIs(output, expected)
+        self.assertIs(before_gmm2_evt, event)
 
 
 class TestUnifiedApplyMlpRequest(unittest.TestCase):

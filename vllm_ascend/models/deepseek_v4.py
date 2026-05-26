@@ -44,7 +44,7 @@ from vllm.distributed import (
     get_tensor_model_parallel_world_size,
     tensor_model_parallel_all_gather,
 )
-from vllm.model_executor.layers.activation import SiluAndMul
+from vllm.model_executor.layers.activation import SiluAndMul, SiluAndMulWithClamp
 from vllm.model_executor.layers.deepseek_compressor import CompressorStateCache
 from vllm.model_executor.layers.deepseek_v4_attention import DeepseekV4IndexerCache
 from vllm.model_executor.layers.fused_moe import FusedMoE
@@ -183,6 +183,7 @@ class DeepseekV2MLP(nn.Module):
         quant_config: QuantizationConfig | None = None,
         reduce_results: bool = True,
         is_sequence_parallel=False,
+        swiglu_limit: float | None = None,
         prefix: str = "",
     ) -> None:
         super().__init__()
@@ -210,7 +211,7 @@ class DeepseekV2MLP(nn.Module):
         )
         if hidden_act != "silu":
             raise ValueError(f"Unsupported activation: {hidden_act}. Only silu is supported for now.")
-        self.act_fn = SiluAndMul()
+        self.act_fn = SiluAndMulWithClamp(swiglu_limit) if swiglu_limit is not None else SiluAndMul()
 
     def forward(self, x):
         gate_up, _ = self.gate_up_proj(x)
@@ -278,6 +279,7 @@ class DeepseekV4MoE(nn.Module):
                 quant_config=quant_config,
                 is_sequence_parallel=self.is_sequence_parallel,
                 reduce_results=False,
+                swiglu_limit=getattr(config, "swiglu_limit", None),
                 prefix=f"{prefix}.shared_experts",
             )
 

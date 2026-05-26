@@ -14,10 +14,11 @@
 # limitations under the License.
 # This file is a part of the vllm-ascend project.
 
+import math
 
 import torch
 import torch_npu
-from torch.nn.functional import pad
+from torch.nn.functional import pad, silu
 from vllm.triton_utils import HAS_TRITON
 
 from vllm_ascend.ascend_forward_context import _EXTRA_CTX, MoECommType
@@ -78,6 +79,38 @@ def _require_single_tensor_for_swiglu_quant(
             raise ValueError(f"{name} must be a tensor or a single-element list, but got {len(tensor_or_list)}.")
         return tensor_or_list[0]
     return tensor_or_list
+
+
+def _has_effective_swiglu_limit(swiglu_limit: int | float | None) -> bool:
+    if swiglu_limit is None:
+        return False
+    limit = float(swiglu_limit)
+    return math.isfinite(limit) and 0.0 < limit < 1_000_000.0
+
+
+def _w4a8_per_channel_gmm_scale(w1_scale: list[torch.Tensor] | torch.Tensor) -> list[torch.Tensor]:
+    w1_scale_tensor = _require_single_tensor_for_swiglu_quant(w1_scale, name="w1_scale")
+    if w1_scale_tensor.dim() == 2:
+        w1_scale_tensor = w1_scale_tensor.unsqueeze(1)
+    return [w1_scale_tensor]
+
+
+def _w4a8_per_channel_swiglu_clamp_quant(
+    hidden_states: torch.Tensor,
+    swiglu_limit: int | float,
+) -> tuple[torch.Tensor, torch.Tensor]:
+    if hidden_states.shape[0] == 0:
+        output_shape = hidden_states.shape[:-1] + (hidden_states.shape[-1] // 2,)
+        return (
+            hidden_states.new_empty(output_shape, dtype=torch.int8),
+            torch.empty(hidden_states.shape[:-1], dtype=torch.float32, device=hidden_states.device),
+        )
+
+    half = hidden_states.shape[-1] // 2
+    limit = float(swiglu_limit)
+    gate = torch.clamp(hidden_states[..., :half], max=limit)
+    up = torch.clamp(hidden_states[..., half:], min=-limit, max=limit)
+    return torch_npu.npu_dynamic_quant(silu(gate) * up)
 
 
 def quant_apply_mlp(
@@ -254,7 +287,11 @@ def quant_apply_mlp(
             # TODO w4a8 scene: dynamic acquisition of dtype in the future
             _output_dtype = torch.bfloat16
 
-        if use_w4a8_per_channel_gmm_swiglu and enable_custom_op():
+        if (
+            use_w4a8_per_channel_gmm_swiglu
+            and enable_custom_op()
+            and not _has_effective_swiglu_limit(swiglu_limit)
+        ):
             hidden_states, swiglu_out_scale = torch.ops._C_ascend.grouped_matmul_swiglu_quant_v2(
                 x=hidden_states,
                 weight=w1,
@@ -293,12 +330,16 @@ def quant_apply_mlp(
             if quantized_hidden_states is not None:
                 dispose_tensor(quantized_hidden_states)
         else:
-            w1_scale[0] = w1_scale[0].to(w2_scale[0].dtype)
+            if use_w4a8_per_channel_gmm_swiglu:
+                gmm1_scale = _w4a8_per_channel_gmm_scale(w1_scale)
+            else:
+                w1_scale[0] = w1_scale[0].to(w2_scale[0].dtype)
+                gmm1_scale = w1_scale
             # gmm1: gate_up_proj
             hidden_states = torch_npu.npu_grouped_matmul(
                 x=[hidden_states],
                 weight=w1,
-                scale=w1_scale,
+                scale=gmm1_scale,
                 bias=bias1,
                 per_token_scale=[pertoken_scale],
                 split_item=2,
@@ -310,7 +351,11 @@ def quant_apply_mlp(
             if quantized_hidden_states is not None:
                 dispose_tensor(quantized_hidden_states)
             # act_fn: swiglu
-            if HAS_TRITON:
+            if use_w4a8_per_channel_gmm_swiglu and _has_effective_swiglu_limit(swiglu_limit):
+                hidden_states, swiglu_out_scale = _w4a8_per_channel_swiglu_clamp_quant(
+                    hidden_states, swiglu_limit
+                )
+            elif HAS_TRITON:
                 from vllm_ascend.ops.triton.activation.swiglu_quant import swiglu_quant
 
                 hidden_states, swiglu_out_scale = swiglu_quant(

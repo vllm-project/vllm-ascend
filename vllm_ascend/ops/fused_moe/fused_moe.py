@@ -14,6 +14,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 #
+import math
 from collections.abc import Callable
 from dataclasses import dataclass, field
 from functools import wraps
@@ -88,6 +89,56 @@ def mock_false():
 
 def mock_true():
     return True
+
+
+def _has_effective_swiglu_limit(swiglu_limit: int | float | None) -> bool:
+    if swiglu_limit is None:
+        return False
+    limit = float(swiglu_limit)
+    return math.isfinite(limit) and 0.0 < limit < 1_000_000.0
+
+
+def _shared_dequant_swiglu_quant(
+    hidden_states: torch.Tensor,
+    weight_scale: torch.Tensor,
+    activation_scale: torch.Tensor,
+    swiglu_limit: int | float | None,
+    output_dtype: torch.dtype,
+) -> tuple[torch.Tensor, torch.Tensor]:
+    if not _has_effective_swiglu_limit(swiglu_limit):
+        return torch.ops._C_ascend.npu_dequant_swiglu_quant(
+            x=hidden_states,
+            weight_scale=weight_scale,
+            activation_scale=activation_scale,
+            bias=None,
+            quant_scale=None,
+            quant_offset=None,
+            group_index=None,
+            activate_left=True,
+            quant_mode=1,
+            swiglu_mode=1,
+            clamp_limit=0 if swiglu_limit is None else swiglu_limit,
+        )
+
+    if hidden_states.shape[0] == 0:
+        output_shape = hidden_states.shape[:-1] + (hidden_states.shape[-1] // 2,)
+        return (
+            hidden_states.new_empty(output_shape, dtype=torch.int8),
+            torch.empty(hidden_states.shape[:-1], dtype=torch.float32, device=hidden_states.device),
+        )
+
+    weight_scale = weight_scale.to(torch.float32).reshape((1,) * (hidden_states.dim() - 1) + (-1,))
+    activation_scale = activation_scale.to(torch.float32).reshape(hidden_states.shape[:-1] + (1,))
+    gate_up = hidden_states.to(torch.float32) * weight_scale * activation_scale
+
+    half = gate_up.shape[-1] // 2
+    limit = float(swiglu_limit)
+    gate = torch.clamp(gate_up[..., :half], max=limit)
+    up = torch.clamp(gate_up[..., half:], min=-limit, max=limit)
+    swiglu = F.silu(gate) * up
+    if swiglu.dtype not in (torch.float16, torch.bfloat16):
+        swiglu = swiglu.to(output_dtype if output_dtype in (torch.float16, torch.bfloat16) else torch.bfloat16)
+    return torch_npu.npu_dynamic_quant(swiglu)
 
 
 class AscendUnquantizedFusedMoEMethod(UnquantizedFusedMoEMethod):
@@ -752,18 +803,12 @@ class AscendFusedMoE(FusedMoE):
                 # Execute activation concurrently with gmm2.
 
                 maybe_wait_event(fused_moe_evts.before_gmm2)
-                quantized_x, swiglu_out_scale = torch.ops._C_ascend.npu_dequant_swiglu_quant(
-                    x=hidden_states,
-                    weight_scale=self._shared_experts.gate_up_proj.weight_scale_fp32,
-                    activation_scale=pertoken_scale,
-                    bias=None,
-                    quant_scale=None,
-                    quant_offset=None,
-                    group_index=None,
-                    activate_left=True,
-                    quant_mode=1,
-                    swiglu_mode=1,
-                    clamp_limit=fused_moe_evts.swiglu_limit,
+                quantized_x, swiglu_out_scale = _shared_dequant_swiglu_quant(
+                    hidden_states,
+                    self._shared_experts.gate_up_proj.weight_scale_fp32,
+                    pertoken_scale,
+                    fused_moe_evts.swiglu_limit,
+                    original_dtype,
                 )
                 # Execute the down projection concurrently with the combine
                 # communication.
