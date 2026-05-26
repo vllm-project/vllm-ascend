@@ -33,6 +33,7 @@ import time
 import traceback
 from pathlib import Path
 from typing import Any, TypeVar
+from typing import Literal
 
 import huggingface_hub
 import numpy as np
@@ -176,6 +177,12 @@ def cleanup_dist_env_and_memory(shutdown_ray: bool = False):
     if hasattr(torch, "npu") and torch.npu.is_initialized():
         torch.npu.empty_cache()
         torch.npu.reset_peak_memory_stats()
+
+
+class ModelName:
+    """Global model name enumeration class."""
+    QWEN3_06B = "/home/weight/Qwen3-0.6B"
+    DEEPSEEK = "vllm-ascend/DeepSeek-V2-Lite-W8A8"
 
 
 class MooncakeLauncher:
@@ -1278,6 +1285,119 @@ class DPVllmRunner(VllmRunner):
 
 
 DataParallelVllmRunner = DPVllmRunner
+
+
+from typing import Dict, Any
+import hashlib
+import json
+
+
+class ModelCache:
+    """模型缓存管理类"""
+    def __init__(self):
+        self._cache: Dict[str, 'VllmRunner'] = {}
+    
+    def get_cache_key(self, model_config: Dict[str, Any]) -> str:
+        """生成唯一的缓存键
+        
+        Args:
+            model_config: 模型配置字典
+            
+        Returns:
+            str: 唯一的缓存键
+        """
+        # 对配置进行排序，确保相同配置生成相同的键
+        sorted_config = {k: v for k, v in sorted(model_config.items())}
+        config_str = json.dumps(sorted_config, sort_keys=True)
+        return hashlib.md5(config_str.encode()).hexdigest()
+    
+    def get_or_create(self, model_config: Dict[str, Any]) -> 'VllmRunner':
+        """获取或创建模型实例
+        
+        Args:
+            model_config: 模型配置
+            
+        Returns:
+            VllmRunner: 模型实例
+        """
+        cache_key = self.get_cache_key(model_config)
+        
+        if cache_key not in self._cache:
+            # 创建新实例
+            runner = VllmRunner(
+                model_name=model_config["model_name"],
+                quantization=model_config.get("quantization"),
+                max_model_len=model_config.get("max_model_len", 1024),
+                dtype=model_config.get("dtype", "bfloat16"),
+                gpu_memory_utilization=model_config.get("gpu_memory_utilization", 0.9),
+                enable_prefix_caching=model_config.get("enable_prefix_caching", False),
+                max_num_seqs=model_config.get("max_num_seqs", 64),
+                tensor_parallel_size=model_config.get("tensor_parallel_size", 1),
+                distributed_executor_backend=model_config.get("distributed_executor_backend", "mp"),
+                compilation_config=model_config.get("compilation_config", {"cudagraph_mode": "FULL_DECODE_ONLY", "cudagraph_capture_sizes": [1, 32, 64]}),
+                **model_config.get("extra_kwargs", {})
+            )
+            self._cache[cache_key] = runner
+            print(f"Created new model instance for: {model_config['model_name']}")
+        else:
+            print(f"Reusing existing model instance for: {model_config['model_name']}")
+        
+        return self._cache[cache_key]
+    
+    def clear(self):
+        """清理所有缓存的模型实例"""
+        for runner in self._cache.values():
+            del runner
+        self._cache.clear()
+        print("Model cache cleared")
+
+
+# 创建全局模型缓存实例
+model_cache = ModelCache()
+
+
+@pytest.fixture(scope="session", autouse=True)
+def cleanup_model_cache():
+    """测试会话结束后清理模型缓存"""
+    yield
+    model_cache.clear()
+
+
+@pytest.fixture(scope="module")
+def vllm_runner(request):
+    """根据模型配置获取或创建模型实例
+    
+    Args:
+        request: pytest request object
+        
+    Yields:
+        VllmRunner: 模型实例
+    """
+    # 从测试标记或默认配置获取模型配置
+    model_marker = request.node.get_closest_marker("model")
+    if model_marker:
+        model_config = model_marker.kwargs
+    else:
+        # 默认配置
+        model_config = {
+            "model_name": "/home/weight/Qwen3-0.6B",
+            "quantization": None,
+            "max_model_len": 1024,
+            "dtype": "auto",
+            "gpu_memory_utilization": 0.9,
+            "enable_prefix_caching": False
+        }
+    
+    # 打印 model_config 用于调试
+    print(f"[DEBUG] vllm_runner fixture - model_config: {model_config}")
+    
+    try:
+        runner = model_cache.get_or_create(model_config)
+    except Exception as e:
+        print(f"[ERROR] Failed to create model instance with config: {model_config}")
+        print(f"[ERROR] Exception: {type(e).__name__}: {e}")
+        raise
+    yield runner
 
 
 class HfRunner:
