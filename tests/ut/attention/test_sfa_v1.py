@@ -185,6 +185,7 @@ class TestAscendSFAMetadataBuilder(TestBase):
         common_attn_metadata.num_reqs = 10
         common_attn_metadata.num_actual_tokens = 100
         common_attn_metadata.max_query_len = 1
+        common_attn_metadata.prefill_context_parallel_metadata = None
         common_attn_metadata.query_start_loc = torch.tensor([0, 10, 20, 30, 40, 50, 60, 70, 80, 90])
         common_attn_metadata.query_start_loc_cpu = torch.tensor([0, 10, 20, 30, 40, 50, 60, 70, 80, 90])
         common_attn_metadata.slot_mapping = torch.randn(100, 4, 1024)
@@ -241,6 +242,7 @@ class TestAscendSFAMetadataBuilder(TestBase):
         common_attn_metadata.num_reqs = 10
         common_attn_metadata.num_actual_tokens = 100
         common_attn_metadata.max_query_len = 1
+        common_attn_metadata.prefill_context_parallel_metadata = None
         common_attn_metadata.query_start_loc = torch.tensor([0, 10, 20, 30, 40, 50, 60, 70, 80, 90])
         common_attn_metadata.query_start_loc_cpu = torch.tensor([0, 10, 20, 30, 40, 50, 60, 70, 80, 90])
         common_attn_metadata.slot_mapping = torch.randn(100, 4, 1024)
