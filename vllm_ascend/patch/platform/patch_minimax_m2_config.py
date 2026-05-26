@@ -25,6 +25,7 @@ from vllm.config.model import ModelConfig
 from vllm.logger import logger
 from vllm.platforms import current_platform
 
+# fp8校验绕过
 _original_verify_quantization = getattr(ModelConfig, "_verify_quantization", None)
 _original_verify_cuda_graph = getattr(ModelConfig, "_verify_cuda_graph", None)
 
@@ -66,7 +67,7 @@ def _disable_fp8(cfg: ModelConfig, *, log: bool) -> bool:
     if not _should_disable_fp8(cfg, getattr(cfg, "quantization", None)):
         return False
     if log:
-        logger.warning(_DISABLE_FP8_LOG)
+        logger.info_once(_DISABLE_FP8_LOG)
     cfg.quantization = None
     return True
 
@@ -118,7 +119,7 @@ def _patched_verify_cuda_graph(self: ModelConfig) -> None:
         expansion_mode = os.environ.get("HCCL_OP_EXPANSION_MODE")
         if expansion_mode is None:
             os.environ["HCCL_OP_EXPANSION_MODE"] = "AIV"
-            logger.info("Set HCCL_OP_EXPANSION_MODE=AIV for MiniMax-M2 ACL graph capture on NPU.")
+            logger.info_once("Set HCCL_OP_EXPANSION_MODE=AIV for MiniMax-M2 ACL graph capture on NPU.")
         elif expansion_mode != "AIV":
             logger.warning(
                 "HCCL_OP_EXPANSION_MODE=%s may reduce ACL graph shape "
@@ -149,20 +150,20 @@ def _patch_speculative_minimax_whitelist() -> None:
     try:
         from vllm.config.speculative import SpeculativeConfig  # type: ignore
     except Exception:
-        logger.warning(
+        logger.debug(
             "SpeculativeConfig is not found, skip patching eagle3/extract_hidden_states checks for MiniMax-M2 on NPU."
         )
         return
 
     original_verify_args = getattr(SpeculativeConfig, "_verify_args", None)
     if original_verify_args is None:
-        logger.warning(
+        logger.debug(
             "SpeculativeConfig._verify_args is not found, skip patching "
             "eagle3/extract_hidden_states checks for MiniMax-M2 on NPU."
         )
         return
     if getattr(original_verify_args, "_vllm_ascend_minimax_eagle3_patched", False):
-        logger.warning("eagle3/extract_hidden_states checks for MiniMax-M2 on NPU have already been patched.")
+        logger.debug("eagle3/extract_hidden_states checks for MiniMax-M2 on NPU have already been patched.")
         return
 
     # Pydantic dataclass validation invokes `model_validators["_verify_args"].func`, not
@@ -186,7 +187,7 @@ def _patch_speculative_minimax_whitelist() -> None:
             target_cfg = getattr(self, "target_model_config", None)
             model_type = getattr(getattr(target_cfg, "hf_text_config", None), "model_type", "")
             if "minimax" not in str(model_type).lower():
-                logger.warning(
+                logger.debug(
                     "Model type %s is not a MiniMax-M2 model, skip eagle3/extract_hidden_states checks.",
                     model_type,
                 )
@@ -219,7 +220,7 @@ def _patch_speculative_minimax_whitelist() -> None:
     try:
         from pydantic.dataclasses import rebuild_dataclass  # type: ignore
     except Exception as e:
-        logger.warning(
+        logger.debug(
             "Cannot import rebuild_dataclass (%s); SpeculativeConfig eagle3 whitelist "
             "patch may not apply at instance construction time.",
             e,
@@ -246,7 +247,7 @@ def _patch_speculative_minimax_whitelist() -> None:
             try:
                 rebuild_dataclass(VllmConfig, force=True)  # type: ignore[arg-type]
             except Exception as e:
-                logger.warning(
+                logger.debug(
                     "rebuild_dataclass(VllmConfig) failed (%s); VllmConfig(...) may "
                     "still use stale nested SpeculativeConfig validation.",
                     e,
