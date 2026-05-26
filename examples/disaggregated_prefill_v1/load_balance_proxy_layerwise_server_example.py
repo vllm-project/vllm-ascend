@@ -501,12 +501,12 @@ async def _handle_completions(api: str, request: Request):
                         choices = chunk_json.get("choices", [])
                         decode_usage = chunk_json.get("usage", {})
                         if decode_usage: 
-                            prefill_usage = proxy_state.prefill_usage_dict.pop(request_id)
+                            prefill_usage = proxy_state.prefill_usage_dict.pop(request_id, None)
                             if prefill_usage:
-                                prompt_tokens = decode_usage.get("prompt_tokens", 0) #or prefill ģ 
+                                prompt_tokens = decode_usage.get("prompt_tokens", 0)
                                 completion_tokens = decode_usage.get("completion_tokens", 0)
-                                total_tokens = decode_usage.get("total_tokens", 0) # or prompt_tokens+completion_tokens?
-                                prompt_tokens_details = prefill_usage.get("prompt_tokens_details", {}) # "prefill_usage.get("prompt_tokens_details", {})"
+                                total_tokens = decode_usage.get("total_tokens", 0)
+                                prompt_tokens_details = prefill_usage.get("prompt_tokens_details", {})
                                 completion_tokens_details = decode_usage.get("completion_tokens_details", {})
                                 merged_usage = {
                                     "prompt_tokens": prompt_tokens,
