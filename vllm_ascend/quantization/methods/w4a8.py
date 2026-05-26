@@ -84,12 +84,11 @@ class AscendW4A8DynamicLinearMethod(AscendLinearScheme):
     by grouping four int8 values.
 
     After processing, ``torch_npu.npu_weight_quant_batchmatmul`` is called with
-    ``weight`` as ``torch.int32`` in the operator-required packed layout 
+    ``weight`` as ``torch.int32`` in the operator-required packed layout
     with shape ``[input_size, output_size // 8]`` and
     ``antiquant_scale`` as ``weight_scale * weight_scale_second`` converted to
     ``x.dtype`` with shape ``[input_size // group_size, output_size]``.
     """
-
 
     def __init__(self):
         vllm_config = get_current_vllm_config()

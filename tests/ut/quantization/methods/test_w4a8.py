@@ -1,6 +1,6 @@
-import re
 from unittest.mock import MagicMock, Mock, patch
 
+import regex as re
 import torch
 
 from tests.ut.base import TestBase
@@ -119,9 +119,11 @@ class TestAscendW4A8DynamicLinearMethod(TestBase):
         layer.scale_bias = torch.nn.Parameter(torch.zeros((20, 1), dtype=torch.float32), requires_grad=False)
         expected_message = "the last dim of weight needs to be divided by 4 but got shape torch.Size([16, 10])"
 
-        with patch.object(self.method, "process_scale_second", return_value=(torch.ones((2, 20)), None)):
-            with self.assertRaisesRegex(AssertionError, re.escape(expected_message)):
-                self.method.process_weights_after_loading(layer)
+        with (
+            patch.object(self.method, "process_scale_second", return_value=(torch.ones((2, 20)), None)),
+            self.assertRaisesRegex(AssertionError, re.escape(expected_message)),
+        ):
+            self.method.process_weights_after_loading(layer)
 
 
 @npu_test(num_npus=1, npu_type="a2")

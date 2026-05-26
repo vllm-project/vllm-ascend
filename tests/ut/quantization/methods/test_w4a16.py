@@ -1,7 +1,6 @@
-import re
-from types import SimpleNamespace
 from unittest.mock import Mock, patch
 
+import regex as re
 import torch
 
 from tests.ut.base import TestBase
@@ -327,8 +326,7 @@ class TestAscendW4A16FusedMoEMethod(TestBase):
         x = torch.randn(4, self.output_size, dtype=torch.float32)
         router_logits = torch.randn(4, self.experts + 1, dtype=torch.float32)
         message = (
-            "Number of global experts mismatch (excluding redundancy): "
-            "router_logits.shape[1]=9, num_logical_experts=8"
+            "Number of global experts mismatch (excluding redundancy): router_logits.shape[1]=9, num_logical_experts=8"
         )
 
         with self.assertRaisesRegex(AssertionError, re.escape(message)):
