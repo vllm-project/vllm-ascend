@@ -1090,8 +1090,7 @@ class AscendSpecDecodeBaseProposer(SpecDecodeBaseProposer):
             sample_hidden_states = last_hidden_states[token_indices_to_sample]
             if get_ascend_config().enable_reduce_sample:
                 draft_token_ids = self.model.compute_logits(
-                    sample_hidden_states, 
-                    get_ascend_config().enable_reduce_sample
+                    sample_hidden_states, get_ascend_config().enable_reduce_sample
                 )
                 if lmhead_tp_enable() and num_indices < draft_token_ids.shape[0]:
                     draft_token_ids = draft_token_ids[:num_indices]
