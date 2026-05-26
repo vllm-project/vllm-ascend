@@ -120,7 +120,7 @@ def main() -> int:
 
     # Detailed per-mode table
     print("## Per-group raw metrics\n")
-    print("| group | prefix_len | K | num_prefixes | mode | status | ttft_mean (ms) | ttft_p50 (ms) | ttft_p99 (ms) | req/s | completed |")
+    print("| group | prefix_len | K | num_prefixes | mode | status | ttft_mean (ms) | ttft_median (ms) | ttft_p99 (ms) | req/s | completed |")
     print("|---|---:|---:|---:|---|---|---:|---:|---:|---:|---:|")
     for gid in sorted(by_gid.keys(), key=gid_sort_key):
         for mode in ("align", "all"):
@@ -136,7 +136,7 @@ def main() -> int:
             )
     print()
 
-    # ALL vs ALIGN comparison table — mean / p50 / p99 side-by-side + improvement %
+    # ALL vs ALIGN comparison table — mean / median / p99 side-by-side + improvement %
     print("## ALL vs ALIGN TTFT comparison\n")
     print("Improvement = (align - all) / align × 100% (positive = ALL is faster)\n")
     print("| group | prefix_len | K | metric | align (ms) | all (ms) | improvement |")
@@ -161,7 +161,7 @@ def main() -> int:
         k = (ra or rl)["K"]
         for metric_key, metric_label in (
             ("ttft_mean_ms", "mean"),
-            ("ttft_p50_ms", "p50"),
+            ("ttft_p50_ms", "median"),
             ("ttft_p99_ms", "p99"),
         ):
             a_v = ra.get(metric_key)
