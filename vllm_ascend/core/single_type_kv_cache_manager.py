@@ -204,9 +204,40 @@ class CompressAttentionManager(FullAttentionManager):
         return computed_blocks
 
 
-def get_manager_for_kv_cache_spec(kv_cache_spec: KVCacheSpec, **kwargs) -> SingleTypeKVCacheManager:
+def get_manager_for_kv_cache_spec(
+    kv_cache_spec: KVCacheSpec,
+    max_num_batched_tokens: int | None = None,
+    max_model_len: int | None = None,
+    **kwargs,
+) -> SingleTypeKVCacheManager:
+    """Build the per-spec KV cache manager.
+
+    For DSv4 / DSA path (``MLAAttentionSpec`` with ``compress_ratio>1``), align
+    the runtime admission gate with the startup pool-sizing bound the same way
+    vLLM PR #40946 does for ``SlidingWindowSpec`` / ``ChunkedLocalAttentionSpec``.
+    Without this cap, an admitted request can demand more blocks than the pool
+    was sized to back, and ``allocate_slots`` silently returns ``None`` from
+    the ``full_sequence_must_fit`` branch, leaving long-input requests stuck
+    in the waiting queue (see vLLM issue #40863, observed on DSv4 + MTP with
+    cc>=1 and prompt>=32K).
+
+    The compressed-MLA peak per request is bounded by
+    ``cdiv(max_model_len // compress_ratio, block_size)`` (it does not shrink
+    via recycling like SWA, but neither does it ever exceed this). Capping at
+    this value matches the pool sizer and makes admission consistent with the
+    block budget actually held.
+    """
     manager_class = spec_manager_map[type(kv_cache_spec)]
     if isinstance(kv_cache_spec, MLAAttentionSpec) and kv_cache_spec.compress_ratio > 1:
         manager_class = CompressAttentionManager
+        if max_model_len is not None:
+            # Compressed-MLA peak in blocks: ceil(max_model_len/compress/block).
+            # The "+ compress_ratio" margin matches the alignment headroom used
+            # elsewhere in DSA so admission never refuses what the pool sizer
+            # promised.
+            compress_ratio = kv_cache_spec.compress_ratio
+            block_size = kv_cache_spec.block_size
+            max_compressed_tokens = max_model_len // compress_ratio
+            kwargs["max_admission_blocks_per_request"] = cdiv(max_compressed_tokens, block_size) + compress_ratio
     manager = manager_class(kv_cache_spec, **kwargs)
     return manager
