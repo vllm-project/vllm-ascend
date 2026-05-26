@@ -18,17 +18,18 @@
 from tests.e2e.conftest import VllmRunner
 
 
-def test_qwen3_dense_tp4_w8a8():
+def test_qwen3_dense_tp4_w8a8sc():
     example_prompts = [
         "Hello, my name is",
     ]
     max_tokens = 5
     with VllmRunner(
-        "vllm-ascend/Qwen3-32B-W8A8",
+        "Eco-Tech/Qwen3-14B-w8a8sc-310-vllm/TP4/Qwen3-14B-w8a8sc-310-vllm-tp4",
         tensor_parallel_size=4,
         enforce_eager=True,
         dtype="float16",
         quantization="ascend",
+        load_format="sharded_state",
         max_model_len=16384,
     ) as vllm_model:
         vllm_model.generate_greedy(example_prompts, max_tokens)
