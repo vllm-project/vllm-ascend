@@ -245,6 +245,8 @@ run_client() {
         --host "$CLIENT_HOST" \
         --port "$PORT" \
         --model "$SERVED_NAME" \
+        --tokenizer "$MODEL" \
+        --trust-remote-code \
         --endpoint /v1/completions \
         --dataset-name prefix_repetition \
         --prefix-repetition-prefix-len "$prefix_len" \
