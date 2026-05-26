@@ -3,10 +3,11 @@
 import ctypes
 import os
 
+import pytest
 import torch
+import torch_npu
 
-torch.manual_seed(42)
-torch.npu.set_device(0)
+torch_npu.npu.set_compile_mode(jit_compile=False)
 
 _CANN = os.environ.get("ASCEND_HOME_PATH", "/usr/local/Ascend/ascend-toolkit/latest")
 _CUST = f"{_CANN}/opp/vendors/custom_transformer/op_api/lib"
@@ -122,13 +123,19 @@ def golden(query, key, value, state, beta, scale, seq_lens, indices, g, nat):
     return o, S
 
 
-def test(label, b, mtp, nk, nv, dk, dv, num_slots):
+@pytest.mark.parametrize("batch_size,mtp,nk,nv,dk,dv,num_slots", [
+    (1, 1, 8, 16, 128, 128, 444),
+    (2, 2, 8, 16, 128, 128, 444),
+    (4, 2, 4, 4, 64, 64, 32),
+])
+def test_recurrent_gated_delta_rule_v310(batch_size, mtp, nk, nv, dk, dv, num_slots):
+    torch.manual_seed(42)
     scale = dk**-0.5
-    seq_lens = torch.ones(b, dtype=torch.int32) * mtp
+    seq_lens = torch.ones(batch_size, dtype=torch.int32) * mtp
     T = int(seq_lens.sum())
     state = torch.rand(num_slots, nv, dv, dk, dtype=torch.float16)
     indices = torch.randperm(num_slots, dtype=torch.int32)[:T]
-    nat = torch.ones(b, dtype=torch.int32)
+    nat = torch.ones(batch_size, dtype=torch.int32)
     query = torch.nn.functional.normalize(torch.randn(T, nk, dk), dim=-1).to(torch.float16)
     key = torch.nn.functional.normalize(torch.randn(T, nk, dk), dim=-1).to(torch.float16)
     value = torch.randn(T, nv, dv, dtype=torch.float16)
@@ -139,31 +146,15 @@ def test(label, b, mtp, nk, nv, dk, dv, num_slots):
 
     state_npu = state.clone().npu()
     out_npu = call_v310(
-        query.npu(),
-        key.npu(),
-        value.npu(),
-        beta.npu(),
-        state_npu,
-        seq_lens.npu(),
-        indices.npu(),
-        g.npu(),
-        nat.npu(),
-        scale,
+        query.npu(), key.npu(), value.npu(), beta.npu(),
+        state_npu, seq_lens.npu(), indices.npu(), g.npu(), nat.npu(), scale,
     )
-    out_npu = out_npu.float().cpu()
-    state_npu = state_npu.float().cpu()
 
     touched = indices.long()
-    out_err = (out_npu - out_gold).abs().max().item()
-    state_err = (state_npu[touched] - state_gold[touched].float()).abs().max().item()
-    nan = out_npu.isnan().any().item()
-    ok = not nan and out_err < 2e-3
-    print(f"{label}: out_max_err={out_err:.6e} state_max_err={state_err:.6e} nan={nan} [{'PASS' if ok else 'FAIL'}]")
-    return ok
-
-
-ok = True
-ok &= test("Qwen3.5 b=1 mtp=1", b=1, mtp=1, nk=8, nv=16, dk=128, dv=128, num_slots=444)
-ok &= test("Qwen3.5 b=2 mtp=2", b=2, mtp=2, nk=8, nv=16, dk=128, dv=128, num_slots=444)
-ok &= test("small dk=64", b=4, mtp=2, nk=4, nv=4, dk=64, dv=64, num_slots=32)
-print(f"\n{'ALL PASSED' if ok else 'SOME FAILED'}")
+    torch.testing.assert_close(
+        out_npu.float().cpu(), out_gold, rtol=3e-3, atol=2e-3, equal_nan=True,
+    )
+    torch.testing.assert_close(
+        state_npu.float().cpu()[touched], state_gold.float()[touched],
+        rtol=3e-3, atol=2e-3, equal_nan=True,
+    )
