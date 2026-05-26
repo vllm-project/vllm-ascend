@@ -1483,7 +1483,7 @@ class AscendDSAImpl(DSAAttentionImpl):
         self,
         layer_name,
         hidden_states: torch.Tensor,  # query in unified attn
-        kv_cache: tuple[torch.Tensor, ...],
+        kv_cache: tuple[torch.Tensor, ...] | None,
         attn_metadata: DSAMetadataList,
         need_gather_q_kv: bool = False,
         output: torch.Tensor | None = None,
@@ -1491,7 +1491,12 @@ class AscendDSAImpl(DSAAttentionImpl):
         assert output is not None, "Output tensor must be provided."
         if attn_metadata is None:
             # Profiling run.
-            return output.fill_(0)
+            if self.multistream_dsv4_dsa_overlap:
+                self._warmup_dual_stream(hidden_states, output)
+            else:
+                output.fill_(0)
+            return output
+        assert kv_cache is not None
         if not isinstance(attn_metadata, list):
             attn_metadata = [attn_metadata]
         output_padded = output
@@ -1500,6 +1505,12 @@ class AscendDSAImpl(DSAAttentionImpl):
         has_decode = attn_metadata[0].num_decodes > 0
         decode_tokens = attn_metadata[0].num_decode_tokens
         actual_tokens = attn_metadata[0].num_actual_tokens
+
+        # Dual-stream path: multistream_dsv4_dsa_overlap with compress_ratio==4
+        if self._use_dual_stream() and self.compress_ratio == 4 and (has_decode or has_prefill):
+            return self._forward_dual_stream(
+                layer_name, hidden_states, kv_cache, attn_metadata, need_gather_q_kv, output
+            )
 
         # Delay allgather optimization: when prefill_comm_compute_overlap is
         # enabled and the batch is pure-prefill, wq_a/wkv can compute on the
@@ -2555,6 +2566,252 @@ class AscendDSAImpl(DSAAttentionImpl):
 
     def _use_dual_stream(self):
         return self.multistream_dsv4_dsa_overlap
+
+    def _warmup_dual_stream(self, hidden_states: torch.Tensor, output: torch.Tensor) -> None:
+        """Warmup aux-stream ops for ACL graph capture.
+
+        When dual-stream is enabled, the aux stream runs ops during forward
+        that have never been exercised during profiling. This warmup ensures
+        all aux-stream op patterns are captured for ACL graph compatibility.
+        """
+        dummy = torch.zeros(1, hidden_states.shape[-1], dtype=hidden_states.dtype, device=hidden_states.device)
+        aux_stream = dsv4_dsa_overlap_stream()
+        e_warmup = torch.npu.current_stream().record_event()
+        with npu_stream_switch(aux_stream, enabled=True):
+            torch.npu.current_stream().wait_event(e_warmup)
+            if hasattr(self.wkv, "weight_scale") and self.wkv.weight.dtype == torch.int8:
+                kv_q_dummy, kv_s_dummy = torch_npu.npu_dynamic_quant(dummy)
+                _ = torch_npu.npu_quant_matmul(
+                    kv_q_dummy,
+                    self.wkv.weight,
+                    self.wkv.weight_scale,
+                    pertoken_scale=kv_s_dummy,
+                    output_dtype=hidden_states.dtype,
+                )
+            else:
+                _ = self.cv_wkv.quantize(dummy)
+                _ = self.cv_wkv.matmul(dummy, None)
+            kv_dummy = torch.zeros(
+                1, self.nope_head_dim + self.rope_head_dim, dtype=hidden_states.dtype, device=hidden_states.device
+            )
+            _ = self.kv_norm(kv_dummy)
+
+            # indexer module aux stream ops
+            # Part1 aux: kv_quant (npu_dynamic_quant)
+            soc_version = get_ascend_device_type()
+            dst_type = torch.float8_e4m3fn if soc_version == AscendDeviceType.A5 else torch.int8
+            kv_dummy, kv_scale_dummy = torch_npu.npu_dynamic_quant(dummy, dst_type=dst_type)
+            # Part1 aux: scatter_k_cache (npu_scatter_nd_update_v2)
+            # In profiling stage, create dummy tensors to ensure ACL graph captures scatter operator.
+            if self.compress_ratio == 4 and self.indexer is not None:
+                slot_mapping_dummy = torch.zeros(1, dtype=torch.int64, device=hidden_states.device)
+                # Create dummy tensors for scatter warmup
+                dummy_shape = (1, 1, 1, kv_dummy.shape[-1])  # [num_blocks, block_size, num_heads, head_dim]
+                indexer_k_cache = torch.zeros(dummy_shape, dtype=kv_dummy.dtype, device=hidden_states.device)
+                indexer_scale_cache = torch.zeros(dummy_shape, dtype=torch.float16, device=hidden_states.device)
+
+                torch.ops._C_ascend.npu_scatter_nd_update_v2(indexer_k_cache, slot_mapping_dummy, kv_dummy)
+                # Part3 aux: scatter_scale_cache (npu_scatter_nd_update_v2)
+                kv_scale_dummy = kv_scale_dummy.to(torch.float16).unsqueeze(-1)
+                torch.ops._C_ascend.npu_scatter_nd_update_v2(
+                    indexer_scale_cache, slot_mapping_dummy, kv_scale_dummy
+                )
+
+                # Part4 kv_comprecessor module
+                _ = self.weights_proj(dummy)
+
+        torch.npu.current_stream().wait_stream(aux_stream)
+        output.fill_(0)
+
+    def _forward_dual_stream(
+        self,
+        layer_name: str,
+        hidden_states: torch.Tensor,
+        kv_cache: tuple[torch.Tensor, ...],
+        attn_metadata: DSAMetadataList,
+        need_gather_q_kv: bool,
+        output: torch.Tensor,
+    ) -> torch.Tensor:
+        """Dual-stream forward with 3-phase overlap orchestration.
+
+        Phase 1: Q/KV compute + indexer prepare (per phase)
+        Phase 2: Compressor + dual-stream weights_proj overlap
+        Phase 3: QLI + sparse attention + o_proj (unified)
+        """
+        has_decode = attn_metadata[0].num_decodes > 0
+        has_prefill = attn_metadata[0].num_prefills > 0
+
+        hidden_states = torch.ops.vllm.maybe_all_gather_and_maybe_unpad(hidden_states, need_gather_q_kv)
+
+        decode_tokens = attn_metadata[0].num_decode_tokens
+        actual_tokens = attn_metadata[0].num_actual_tokens
+
+        # ============================================================
+        # Phase 1: Q/KV compute + indexer prepare (per phase)
+        # ============================================================
+        decode_result = None
+        prefill_result = None
+
+        if has_decode:
+            decode_hs = hidden_states[:decode_tokens]
+            decode_result = self.dsa_decode_prepare(layer_name, decode_hs, kv_cache, attn_metadata)
+
+        if has_prefill:
+            prefill_hs = hidden_states[decode_tokens:actual_tokens]
+            prefill_result = self.dsa_prefill_prepare(layer_name, prefill_hs, kv_cache, attn_metadata)
+
+        # ============================================================
+        # Phase 2: Compressor + dual-stream weights_proj overlap
+        # ============================================================
+        (compressor_attn_metadata, compressor_kv_state_metadata, _, _, _) = attn_metadata
+
+        coff = 2 if self.compressor_overlap else 1
+        unfolded_state_cache = kv_cache[2]
+
+        # Decode compressor
+        decode_compressed_kv = None
+        if has_decode:
+            assert decode_result is not None
+            (q, compress_cos, compress_sin, actual_seq_lengths_query, q_idx, ik, isc, isc_meta, wp) = decode_result
+
+            decode_compressed_kv = torch.ops._C_ascend.compressor(
+                decode_hs,
+                self.compressor_wkv.weight,
+                self.compressor_wgate.weight,
+                unfolded_state_cache.squeeze(-2),
+                self.compressor_ape,
+                self.compressor_norm.weight,
+                compress_sin.view(-1, compress_sin.shape[-1]),
+                compress_cos.view(-1, compress_cos.shape[-1]),
+                state_block_table=compressor_kv_state_metadata.decode.block_table,
+                cu_seqlens=actual_seq_lengths_query,
+                seqused=None,
+                start_pos=compressor_attn_metadata.decode.start_pos,
+                rope_head_dim=self.rope_head_dim,
+                cmp_ratio=self.compress_ratio,
+                coff=coff,
+                norm_eps=self.compressor_norm_eps,
+                rotary_mode=2,
+                cache_mode=1,
+            )
+
+        # Prefill compressor
+        prefill_compressed_kv = None
+        if has_prefill:
+            assert prefill_result is not None
+            (
+                pq,
+                pcompress_cos,
+                pcompress_sin,
+                pactual_seq_lengths_query,
+                pq_idx,
+                pik,
+                pisc,
+                pisc_meta,
+                pwp,
+            ) = prefill_result
+
+            prefill_compressed_kv = torch.ops._C_ascend.compressor(
+                prefill_hs,
+                self.compressor_wkv.weight,
+                self.compressor_wgate.weight,
+                unfolded_state_cache.squeeze(-2),
+                self.compressor_ape,
+                self.compressor_norm.weight,
+                pcompress_sin.view(-1, pcompress_sin.shape[-1]),
+                pcompress_cos.view(-1, pcompress_cos.shape[-1]),
+                state_block_table=compressor_kv_state_metadata.prefill.block_table,
+                cu_seqlens=pactual_seq_lengths_query,
+                seqused=None,
+                start_pos=compressor_attn_metadata.prefill.start_pos,
+                rope_head_dim=self.rope_head_dim,
+                cmp_ratio=self.compress_ratio,
+                coff=coff,
+                norm_eps=self.compressor_norm_eps,
+                rotary_mode=2,
+                cache_mode=1,
+            )
+            if prefill_compressed_kv.numel() == 0:
+                prefill_compressed_kv = None
+
+        # Dual-stream: weights_proj on sub-stream overlaps with
+        # quant_scatter + scatter on main stream
+        e1 = torch.npu.current_stream().record_event()
+
+        aux_stream = dsv4_dsa_overlap_stream()
+        with npu_stream_switch(aux_stream):
+            torch.npu.current_stream().wait_event(e1)
+            weights_raw = self.weights_proj(hidden_states[:actual_tokens])
+
+        # Main stream: q_quant + scatter compress_kv for both decode and prefill
+        # kv quant+scatter already done inside _cv_indexer_qkv_prepare_multistream
+        soc_version = get_ascend_device_type()
+        dst_type = torch.float8_e4m3fn if soc_version == AscendDeviceType.A5 else torch.int8
+
+        decode_q_quant = None
+        decode_q_scale = None
+        if has_decode:
+            decode_q_quant, decode_q_scale = torch_npu.npu_dynamic_quant(q_idx, dst_type=dst_type)
+            if soc_version not in {AscendDeviceType.A5}:
+                decode_q_scale = decode_q_scale.to(torch.float16)
+
+            torch.ops._C_ascend.npu_scatter_nd_update_v2(
+                kv_cache[0],
+                compressor_attn_metadata.decode.slot_mapping,
+                decode_compressed_kv,
+            )
+
+        prefill_q_quant = None
+        prefill_q_scale = None
+        if has_prefill:
+            prefill_q_quant, prefill_q_scale = torch_npu.npu_dynamic_quant(pq_idx, dst_type=dst_type)
+            if soc_version not in {AscendDeviceType.A5}:
+                prefill_q_scale = prefill_q_scale.to(torch.float16)
+
+            torch.ops._C_ascend.npu_scatter_nd_update_v2(
+                kv_cache[0],
+                compressor_attn_metadata.prefill.slot_mapping,
+                prefill_compressed_kv,
+            )
+
+        torch.npu.current_stream().wait_stream(aux_stream)
+
+        scale = self.indexer_softmax_scale * self.indexer_heads**-0.5
+
+        # Split weights into decode and prefill portions
+        decode_weights = None
+        prefill_weights = None
+        if has_decode and has_prefill:
+            decode_weights_raw = weights_raw[:decode_tokens]
+            prefill_weights_raw = weights_raw[decode_tokens:actual_tokens]
+            decode_weights = decode_weights_raw * scale
+            prefill_weights = prefill_weights_raw * scale
+        elif has_decode:
+            decode_weights = weights_raw * scale
+        elif has_prefill:
+            prefill_weights = weights_raw * scale
+
+        # ============================================================
+        # Phase 3: QLI + sparse attention + o_proj (unified)
+        # ============================================================
+        self.dsa_dual_stream_finish(
+            layer_name,
+            output,
+            decode_q=q if has_decode else None,
+            decode_q_quant=decode_q_quant,
+            decode_q_scale=decode_q_scale,
+            decode_weights=decode_weights,
+            prefill_q=pq if has_prefill else None,
+            prefill_q_quant=prefill_q_quant,
+            prefill_q_scale=prefill_q_scale,
+            prefill_weights=prefill_weights,
+            kv_cache=kv_cache,
+            attn_metadata=attn_metadata,
+            num_decode_tokens=decode_tokens,
+            num_actual_tokens=actual_tokens,
+        )
+
+        return output
 
     def _indexer_qkv_prepare(
         self,
