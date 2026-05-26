@@ -506,6 +506,7 @@ cmdclass = {
     "install": custom_install,
 }
 
+# for test
 setup(
     name="vllm_ascend",
     # Follow:

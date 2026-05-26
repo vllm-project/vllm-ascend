@@ -79,6 +79,7 @@ jobs:
   e2e-test:
     name: e2e-full
     strategy:
+      fail-fast: true
       matrix:
         vllm_version: [1ac10f159a09897baada01b14b6a0dd6442aefd6, v0.20.2]
     needs: [changes]

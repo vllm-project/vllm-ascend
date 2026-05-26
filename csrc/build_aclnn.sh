@@ -151,11 +151,10 @@ elif [[ "$SOC_VERSION" =~ ^ascend910_93 ]]; then
     yes | cp "${HCCL_STRUCT_FILE_PATH}" "${ROOT_DIR}/csrc/utils/inc/kernel"
 
     # for dispatch_normal and combine_normal
-    TARGET_DIR="$SCRIPT_DIR/mc2/moe_dispatch_normal/op_kernel/utils/"
+    TARGET_DIR="${ROOT_DIR}/csrc/mc2/moe_dispatch_normal/op_kernel/utils/"
     cp "$HCCL_STRUCT_FILE_PATH" "$TARGET_DIR"
 
-    TARGET_DIR="$SCRIPT_DIR/mc2/moe_combine_normal/op_kernel/utils/"
-    echo "$TARGET_DIR"
+    TARGET_DIR="${ROOT_DIR}/csrc/mc2/moe_combine_normal/op_kernel/utils/"
     cp "$HCCL_STRUCT_FILE_PATH" "$TARGET_DIR"
     
     CUSTOM_OPS_ARRAY=(
