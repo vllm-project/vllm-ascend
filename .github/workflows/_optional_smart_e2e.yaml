@@ -91,6 +91,7 @@ jobs:
           apt-get update -y
           apt-get install -y python3-pip git vim wget net-tools gcc g++ cmake libnuma-dev curl gnupg2
           git config --global --add safe.directory /__w/vllm-ascend/vllm-ascend
+          pip install uv
 
       - name: Checkout vllm-project/vllm repo
         uses: actions/checkout@v6
