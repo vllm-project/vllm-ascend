@@ -2,6 +2,46 @@
 
 Additional configuration is a mechanism provided by vLLM to allow plugins to control internal behavior by themselves. VLLM Ascend uses this mechanism to make the project more flexible.
 
+## Migration Guide
+
+Starting from PR #9064, vLLM Ascend is migrating configuration from environment variables to `--additional-config`.
+
+### Important Notice
+
+- **Current Support**: Both environment variables and `--additional-config` are supported during the transition period
+- **Recommendation**: Use `--additional-config` for new deployments and migrate existing configurations
+- **Future Plan**: Environment variables will be **removed** in a future release; only `--additional-config` will be supported
+
+### Quick Reference
+
+| Environment Variable | Config Key | Type Conversion |
+|---------------------|------------|-----------------|
+| `VLLM_ASCEND_BALANCE_SCHEDULING` | `enable_balance_scheduling` | `"1"` → `true`, `"0"` → `false` |
+| `VLLM_ASCEND_ENABLE_FLASHCOMM1` | `enable_flashcomm1` | `"1"` → `true`, `"0"` → `false` |
+| `VLLM_ASCEND_ENABLE_MATMUL_ALLREDUCE` | `enable_matmul_allreduce` | `"1"` → `true`, `"0"` → `false` |
+| `VLLM_ASCEND_FLASHCOMM2_PARALLEL_SIZE` | `enable_flashcomm2_parallel_size` | Integer (unchanged) |
+| `MSMONITOR_USE_DAEMON` | `msmonitor_use_daemon` | `"1"` → `true`, `"0"` → `false` |
+| `VLLM_ASCEND_ENABLE_MLAPO` | `enable_mlapo` | `"1"` → `true`, `"0"` → `false` |
+| `VLLM_ASCEND_ENABLE_NZ` | `weight_nz_mode` | Integer (unchanged, field name changed) |
+| `VLLM_ASCEND_ENABLE_CONTEXT_PARALLEL` | `enable_context_parallel` | `"1"` → `true`, `"0"` → `false` |
+| `VLLM_ASCEND_ENABLE_FUSED_MC2` | `enable_fused_mc2` | Integer (unchanged) |
+| `VLLM_ASCEND_FUSION_OP_TRANSPOSE_KV_CACHE_BY_BLOCK` | `enable_transpose_kv_cache_by_block` | `"1"` → `true`, `"0"` → `false` |
+
+### Example Migration
+
+**Before (environment variable):**
+
+```bash
+export VLLM_ASCEND_ENABLE_FLASHCOMM1=1
+vllm serve Qwen/Qwen3-8B
+```
+
+**After (additional-config):**
+
+```bash
+vllm serve Qwen/Qwen3-8B --additional-config='{"enable_flashcomm1": true}'
+```
+
 ## How to use
 
 With either online mode or offline mode, users can use additional configuration. Take Qwen3 as an example:
