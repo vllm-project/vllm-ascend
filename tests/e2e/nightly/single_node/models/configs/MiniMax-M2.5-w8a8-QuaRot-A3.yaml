@@ -51,7 +51,7 @@ test_cases:
         dataset_conf: aime2025/aime2025_gen_0_shot_chat_prompt
         max_out_len: 65536
         batch_size: 32
-        baseline: 85
+        baseline: 90
         threshold: 5
       perf:
         case_type: performance
