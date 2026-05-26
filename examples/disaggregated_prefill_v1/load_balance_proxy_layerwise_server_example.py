@@ -359,7 +359,7 @@ async def send_request_to_service(
                 proxy_state.prefill_usage_dict[request_id] = response_json["usage"]
             if request_id in proxy_state.req_id_future:
                 result_future = proxy_state.req_id_future[request_id]
-                result_future.set_result(response.json()["kv_transfer_params"])
+                result_future.set_result(response_json["kv_transfer_params"])
             return
         except (httpx.RequestError, httpx.HTTPStatusError) as e:
             logger.warning("Attempt %s failed for %s: %s", attempt, endpoint, e)
