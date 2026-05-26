@@ -1489,7 +1489,7 @@ class AscendDSAImpl(DSAAttentionImpl):
                         indexer_scale_cache, slot_mapping_dummy, kv_scale_dummy
                     )
 
-                    # Part4 kv_comprecessor module
+                    # Warm up weights_proj on the aux stream.
                     _ = self.weights_proj(dummy)
 
             torch.npu.current_stream().wait_stream(aux_stream)
@@ -1857,7 +1857,7 @@ class AscendDSAImpl(DSAAttentionImpl):
 
         if self.multistream_dsv4_dsa_overlap:
             # mla prolog: q + kv dual-stream parallel
-            q, qr, qr_pertoken_scale = self._mla_prolog_multistream(
+            q, qr, _ = self._mla_prolog_multistream(
                 hidden_states, cos, sin, swa_kv_cache, swa_prefill_metadata.slot_mapping, is_prefill=True
             )
         elif need_prefill_gather:
@@ -1919,7 +1919,7 @@ class AscendDSAImpl(DSAAttentionImpl):
                     compress_topk_idxs = self._get_indexcache_topk_indices(prefill_num_tokens, offset=prefill_offset)
                 else:
                     if self.multistream_dsv4_dsa_overlap:
-                        indexer_q, indexer_kv = self.cv_indexer_select_qli(  # multistream version
+                        indexer_q = self.cv_indexer_select_qli(  # multistream version
                             x=hidden_states,
                             qr=qr,
                             kv_cache=kv_cache,
@@ -1929,7 +1929,6 @@ class AscendDSAImpl(DSAAttentionImpl):
                             compressed_cos=compress_cos,
                             compressed_sin=compress_sin,
                             actual_seq_lengths_query=actual_seq_lengths_query,
-                            actual_seq_lengths_key=actual_seq_lengths_key,
                             with_prefill=True,
                         )
                     else:
@@ -2211,7 +2210,7 @@ class AscendDSAImpl(DSAAttentionImpl):
                     compress_topk_idxs = self._get_indexcache_topk_indices(decode_num_tokens, offset=0)
                 else:
                     if self.multistream_dsv4_dsa_overlap:
-                        indexer_q, indexer_kv = self.cv_indexer_select_qli(  # multistream version
+                        indexer_q = self.cv_indexer_select_qli(  # multistream version
                             x=hidden_states,
                             qr=qr,
                             kv_cache=kv_cache,
@@ -2221,7 +2220,6 @@ class AscendDSAImpl(DSAAttentionImpl):
                             compressed_cos=compress_cos,
                             compressed_sin=compress_sin,
                             actual_seq_lengths_query=actual_seq_lengths_query,
-                            actual_seq_lengths_key=actual_seq_lengths_key,
                             with_prefill=False,
                             qr_pertoken_scale=qr_pertoken_scale,
                         )
@@ -2651,7 +2649,6 @@ class AscendDSAImpl(DSAAttentionImpl):
         compressed_cos: torch.Tensor,
         compressed_sin: torch.Tensor,
         actual_seq_lengths_query: torch.Tensor,
-        actual_seq_lengths_key: torch.Tensor | None = None,
         with_prefill: bool = False,
         qr_pertoken_scale: torch.Tensor = None,
     ):
@@ -2664,7 +2661,7 @@ class AscendDSAImpl(DSAAttentionImpl):
         - Part1: Main matmul[C] ∥ Aux kv_quant[V] + scatter_k_cache[AIV]
         - Part2: Main rope[V] (serial)
         - Part3: Main q_hadamard[C] ∥ Aux scatter_scale_cache[AIV]
-        - Part4: Main serial weights + q_quant + indexer
+        - Part4: Caller runs weights_proj + q_quant + indexer
         """
         (_, _, _, indexer_state_cache, indexer_k_cache, indexer_scale_cache) = kv_cache
         # sorted keys: [attn, compressor.state_cache, indexer.compressor.state_cache, indexer.k_cache, swa_cache]
@@ -2809,5 +2806,4 @@ class AscendDSAImpl(DSAAttentionImpl):
         # Part2: scale * reshape - dot multiplication
         q = hadamard_scale(q_linear, q_shape, q_dim, scale=hidden_size**-0.5)
 
-        # Return q and kv for downstream processing in _forward_prefill/_forward_decode
-        return q, kv
+        return q

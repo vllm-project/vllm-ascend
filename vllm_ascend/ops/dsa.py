@@ -173,8 +173,7 @@ class AscendDeepseekSparseAttention(MultiHeadLatentAttentionWrapper):
 
         # All DSA forward paths run inside dsa_forward custom op boundary,
         # which is required for ACL graph capture (registered with
-        # dispatch_key="PrivateUse1").  When dual-stream is disabled,
-        # dsa_forward dispatches to the original serial path.
+        # dispatch_key="PrivateUse1").
         torch.ops.vllm.dsa_forward(hidden_states, need_gather_q_kv, output, self.prefix)
 
         output = output.view(-1, output_shape[-1])
