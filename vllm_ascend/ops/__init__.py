@@ -18,44 +18,16 @@
 import torch
 from vllm.triton_utils import HAS_TRITON
 
-# [bench] guard optional sub-modules for GDN-only benchmark branch.
-# fused_moe/register_custom_ops/triton-linearnorm/vocab_parallel_embedding
-# pull in fast-moving vllm symbols (e.g. expert_map_manager) that may not
-# exist in the editable vllm checkout on the benchmark server. GDN path
-# does not need any of these.
-try:
-    import vllm_ascend.ops.fused_moe.fused_moe  # noqa
-except ImportError as _e:
-    import logging as _logging
-    _logging.getLogger(__name__).warning(
-        "[bench] skipping fused_moe import: %s", _e)
-
+import vllm_ascend.ops.fused_moe.fused_moe  # noqa
 import vllm_ascend.ops.layernorm  # noqa
-
-try:
-    import vllm_ascend.ops.register_custom_ops  # noqa
-except ImportError as _e:
-    import logging as _logging
-    _logging.getLogger(__name__).warning(
-        "[bench] skipping register_custom_ops import: %s", _e)
+import vllm_ascend.ops.register_custom_ops  # noqa
 
 if HAS_TRITON:
-    try:
-        import vllm_ascend.ops.triton.linearnorm.split_qkv_rmsnorm_rope  # noqa
-        import vllm_ascend.ops.triton.linearnorm.split_qkv_rmsnorm_mrope
-        import vllm_ascend.ops.triton.linearnorm.split_qkv_tp_rmsnorm_rope
-    except ImportError as _e:
-        import logging as _logging
-        _logging.getLogger(__name__).warning(
-            "[bench] skipping triton linearnorm imports: %s", _e)
+    import vllm_ascend.ops.triton.linearnorm.split_qkv_rmsnorm_rope  # noqa
+    import vllm_ascend.ops.triton.linearnorm.split_qkv_rmsnorm_mrope
+    import vllm_ascend.ops.triton.linearnorm.split_qkv_tp_rmsnorm_rope
 
-try:
-    import vllm_ascend.ops.vocab_parallel_embedding  # noqa
-except ImportError as _e:
-    import logging as _logging
-    _logging.getLogger(__name__).warning(
-        "[bench] skipping vocab_parallel_embedding import: %s", _e)
-
+import vllm_ascend.ops.vocab_parallel_embedding  # noqa
 from vllm_ascend.ops.activation import AscendQuickGELU, AscendSiluAndMul
 from vllm_ascend.ops.rotary_embedding import AscendDeepseekScalingRotaryEmbedding, AscendRotaryEmbedding
 
