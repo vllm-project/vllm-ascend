@@ -9,7 +9,7 @@
 #define OP_LOGW(opname, ...)             \
     do {                                 \
         (void)(opname);                  \
-        std::printf("[WARN] ";           \
+        std::printf("[WARN] ");          \
         std::printf(__VA_ARGS__);        \
         std::printf("\n");              \
     } while (0)
