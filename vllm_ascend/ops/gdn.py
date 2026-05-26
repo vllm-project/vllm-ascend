@@ -15,9 +15,7 @@
 # limitations under the License.
 #
 
-from typing import Any
 import torch
-import torch.nn.functional as F
 import torch_npu
 from einops import rearrange
 from vllm.distributed import get_pcp_group

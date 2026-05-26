@@ -128,7 +128,11 @@ class PCPManager:
         self.pcp_enter_fa_restore_idx = torch.zeros(
             self.max_num_tokens + 2 * self.pcp_world_size * self.max_num_reqs, dtype=torch.int32, device=self.device
         )
-        self.pcp_use_hybrid_attn = self.vllm_config.model_config.hf_config.model_type in ("qwen3_next", "qwen3_5", "qwen3_5_moe")
+        self.pcp_use_hybrid_attn = self.vllm_config.model_config.hf_config.model_type in (
+            "qwen3_next",
+            "qwen3_5",
+            "qwen3_5_moe",
+        )
 
         self.pcp_pads_logits_hybrid_attn = torch.ones(self.max_num_reqs, dtype=torch.int32) * (self.pcp_world_size - 1)
         self.pcp_padded_tokens_fla = 0
@@ -1276,7 +1280,7 @@ class PCPManager:
         tensor_npu = torch.zeros(len(lst), dtype=dtype, device=device)
         tensor_npu.copy_(torch.tensor(lst, dtype=dtype), non_blocking=True)
         return tensor_npu
-    
+
     def remap_mrope_positions_for_pcp(
         self,
         positions_np: np.ndarray,
@@ -1304,17 +1308,10 @@ class PCPManager:
         for index, req_id in enumerate(input_batch.req_ids):
             req = requests[req_id]
             num_sched = int(num_scheduled_tokens[index])
-            local_positions = positions_np[
-                mrope_pos_ptr:mrope_pos_ptr + num_sched
-            ]
+            local_positions = positions_np[mrope_pos_ptr : mrope_pos_ptr + num_sched]
 
-            if (
-                req.mrope_positions is not None
-                and req.mrope_positions.shape[1] > 0
-            ):
-                num_prompt_tokens = length_from_prompt_token_ids_or_embeds(
-                    req.prompt_token_ids, req.prompt_embeds
-                )
+            if req.mrope_positions is not None and req.mrope_positions.shape[1] > 0:
+                num_prompt_tokens = length_from_prompt_token_ids_or_embeds(req.prompt_token_ids, req.prompt_embeds)
                 max_mrope_idx = req.mrope_positions.shape[1]
 
                 # Build the mrope_positions for this request's PCP-local
@@ -1324,19 +1321,11 @@ class PCPManager:
 
                 # Prompt tokens: positions within prompt range,
                 # gather from pre-computed req.mrope_positions.
-                prompt_mask = local_positions < min(
-                    num_prompt_tokens, max_mrope_idx
-                )
+                prompt_mask = local_positions < min(num_prompt_tokens, max_mrope_idx)
                 if prompt_mask.any():
-                    prompt_indices = local_positions[prompt_mask].astype(
-                        np.int64
-                    )
-                    prompt_indices = np.clip(
-                        prompt_indices, 0, max_mrope_idx - 1
-                    )
-                    mrope_dst[:, prompt_mask] = req.mrope_positions[
-                        :, torch.from_numpy(prompt_indices)
-                    ].numpy()
+                    prompt_indices = local_positions[prompt_mask].astype(np.int64)
+                    prompt_indices = np.clip(prompt_indices, 0, max_mrope_idx - 1)
+                    mrope_dst[:, prompt_mask] = req.mrope_positions[:, torch.from_numpy(prompt_indices)].numpy()
 
                 # Completion/decode tokens: all 3 dims use the same
                 # position.
@@ -1346,34 +1335,23 @@ class PCPManager:
                     # compute the correct position, same as
                     # get_next_input_positions_tensor.
                     if req.mrope_position_delta is not None:
-                        comp_positions = (
-                            local_positions[completion_mask]
-                            + req.mrope_position_delta
-                        )
+                        comp_positions = local_positions[completion_mask] + req.mrope_position_delta
                     else:
                         comp_positions = local_positions[completion_mask]
-                    mrope_dst[:, completion_mask] = comp_positions[
-                        np.newaxis, :
-                    ]
+                    mrope_dst[:, completion_mask] = comp_positions[np.newaxis, :]
 
                 # Padding tokens beyond req.mrope_positions shape:
                 # use the last valid mrope position.
                 padding_mask = (~prompt_mask) & (~completion_mask)
                 if padding_mask.any():
                     last_idx = max_mrope_idx - 1
-                    mrope_dst[:, padding_mask] = req.mrope_positions[
-                        :, last_idx : last_idx + 1
-                    ].numpy()
+                    mrope_dst[:, padding_mask] = req.mrope_positions[:, last_idx : last_idx + 1].numpy()
 
-                mrope_positions.cpu[
-                    :, mrope_pos_ptr : mrope_pos_ptr + num_sched
-                ] = torch.from_numpy(mrope_dst)
+                mrope_positions.cpu[:, mrope_pos_ptr : mrope_pos_ptr + num_sched] = torch.from_numpy(mrope_dst)
             else:
                 # No mrope_positions available:
                 # all 3 dims equal the 1D position.
-                mrope_positions.cpu[
-                    :, mrope_pos_ptr : mrope_pos_ptr + num_sched
-                ] = torch.from_numpy(
+                mrope_positions.cpu[:, mrope_pos_ptr : mrope_pos_ptr + num_sched] = torch.from_numpy(
                     local_positions[np.newaxis, :].astype(np.int64)
                 )
 

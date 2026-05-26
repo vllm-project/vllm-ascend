@@ -96,10 +96,12 @@ def test_models_pcp_dcp_basic():
     ) as runner:
         outputs = runner.generate_greedy(prompts, 5)
         results = [item[1] for item in outputs]
-        golden = ["The capital of France is Paris.\nThe capital",
+        golden = [
+            "The capital of France is Paris.\nThe capital",
             "Hello, my name is Tom, I am a 20 years",
             "The president of United States is the head of state and",
-            "AI future is not just about technology,"]
+            "AI future is not just about technology,",
+        ]
         res_percent = calculate_total_char_match_percent(results, golden)
         assert res_percent > 80
 
