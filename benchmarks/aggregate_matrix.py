@@ -60,7 +60,6 @@ def load_run(group_dir: Path) -> dict[str, Any] | None:
 
     rec["ttft_mean_ms"] = pick("mean_ttft_ms", "ttft_mean")
     rec["ttft_p50_ms"] = pick("median_ttft_ms", "p50_ttft_ms")
-    rec["ttft_p95_ms"] = pick("p95_ttft_ms")
     rec["ttft_p99_ms"] = pick("p99_ttft_ms")
     rec["req_throughput"] = pick("request_throughput", "throughput")
     rec["output_throughput"] = pick("output_throughput")
@@ -121,26 +120,38 @@ def main() -> int:
 
     # Detailed per-mode table
     print("## Per-group raw metrics\n")
-    print("| group | prefix_len | K | num_prefixes | mode | status | ttft_p50 (ms) | ttft_p95 (ms) | ttft_p99 (ms) | req/s | completed |")
+    print("| group | prefix_len | K | num_prefixes | mode | status | ttft_mean (ms) | ttft_p50 (ms) | ttft_p99 (ms) | req/s | completed |")
     print("|---|---:|---:|---:|---|---|---:|---:|---:|---:|---:|")
     for gid in sorted(by_gid.keys(), key=gid_sort_key):
         for mode in ("align", "all"):
             r = by_gid[gid].get(mode)
             if r is None:
-                print(f"| {gid} | - | - | - | {mode} | absent | - | - | - | - | - |")
+                print(f"| {gid} | - | - | - | {mode} | pending | - | - | - | - | - |")
                 continue
             print(
                 f"| {gid} | {r['prefix_len']} | {r['K']} | {r['num_prefixes']} | "
                 f"{mode} | {r['status']} | "
-                f"{fmt(r['ttft_p50_ms'])} | {fmt(r['ttft_p95_ms'])} | {fmt(r['ttft_p99_ms'])} | "
+                f"{fmt(r['ttft_mean_ms'])} | {fmt(r['ttft_p50_ms'])} | {fmt(r['ttft_p99_ms'])} | "
                 f"{fmt(r['req_throughput'], '.2f')} | {fmt(r['completed'], '.0f')} |"
             )
     print()
 
-    # Speedup table
-    print("## ALL vs ALIGN speedup (TTFT p50)\n")
-    print("| group | prefix_len | K | align p50 (ms) | all p50 (ms) | speedup (align/all) |")
-    print("|---|---:|---:|---:|---:|---:|")
+    # ALL vs ALIGN comparison table — mean / p50 / p99 side-by-side + improvement %
+    print("## ALL vs ALIGN TTFT comparison\n")
+    print("Improvement = (align - all) / align × 100% (positive = ALL is faster)\n")
+    print("| group | prefix_len | K | metric | align (ms) | all (ms) | improvement |")
+    print("|---|---:|---:|---|---:|---:|---:|")
+
+    def improvement_pct(a: Any, l: Any) -> str:
+        try:
+            af = float(a)
+            lf = float(l)
+        except (TypeError, ValueError):
+            return "-"
+        if af <= 0:
+            return "-"
+        return f"{(af - lf) / af * 100:+.1f}%"
+
     for gid in sorted(by_gid.keys(), key=gid_sort_key):
         ra = by_gid[gid].get("align")
         rl = by_gid[gid].get("all")
@@ -148,18 +159,24 @@ def main() -> int:
             continue
         plen = (ra or rl)["prefix_len"]
         k = (ra or rl)["K"]
-        a_p50 = ra.get("ttft_p50_ms") if ra else None
-        l_p50 = rl.get("ttft_p50_ms") if rl else None
-        if a_p50 and l_p50 and float(l_p50) > 0:
-            speedup = float(a_p50) / float(l_p50)
-            speedup_s = f"{speedup:.2f}×"
-        else:
-            speedup_s = "-"
-        print(
-            f"| {gid} | {plen} | {k} | "
-            f"{fmt(a_p50)} | {fmt(l_p50)} | {speedup_s} |"
-        )
+        for metric_key, metric_label in (
+            ("ttft_mean_ms", "mean"),
+            ("ttft_p50_ms", "p50"),
+            ("ttft_p99_ms", "p99"),
+        ):
+            a_v = ra.get(metric_key)
+            l_v = rl.get(metric_key)
+            print(
+                f"| {gid} | {plen} | {k} | {metric_label} | "
+                f"{fmt(a_v)} | {fmt(l_v)} | {improvement_pct(a_v, l_v)} |"
+            )
     print()
+
+    # Completion summary
+    expected_groups = len(by_gid)
+    total_runs = expected_groups * 2
+    ok_runs = sum(1 for r in runs if r["status"] == "ok")
+    print(f"## Completion: {ok_runs}/{total_runs} runs ok across {expected_groups} groups\n")
 
     # Failure summary
     failures = [r for r in runs if r["status"] != "ok"]
