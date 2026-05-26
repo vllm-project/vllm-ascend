@@ -14,7 +14,7 @@
 #include "vector"
 #include "register/tilingdata_base.h"
 #include "tiling/tiling_api.h"
-#include "error_log.h"
+#include "tiling_base/error_log.h"
 #include "hcom_topo_info.h"
 #include "register/op_def_registry.h"
 #include "dispatch_ffn_combine_bf16_tiling.h"

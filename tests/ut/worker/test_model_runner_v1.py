@@ -14,6 +14,7 @@ class TestNPUModelRunnerKVCache(unittest.TestCase):
         runner.device = torch.device("cpu")
         runner.use_sparse = False
         runner.use_sparse_c8_indexer = False
+        runner.use_compress = False
         runner.use_hybrid_blocks = False
         runner.hybrid_with_attn_and_mamba = False
         runner.runner_only_attn_layers = set()
@@ -90,6 +91,7 @@ class TestNPUModelRunnerOutputTokenIds(unittest.TestCase):
         runner.device = torch.device("cpu")
         runner.vllm_config = MagicMock()
         runner.model_config = MagicMock()
+        runner.use_compress = False
         return runner
 
     @patch("vllm_ascend.worker.model_runner_v1.lmhead_tp_enable")
@@ -104,6 +106,7 @@ class TestNPUModelRunnerOutputTokenIds(unittest.TestCase):
             [4, 5, -1],
         ]
         input_batch.num_reqs = 2
+        input_batch.top_k_cpu = None
         input_batch.prev_req_id_to_index = {
             "req0": 0,
             "req1": 1,
@@ -144,6 +147,46 @@ class TestNPUModelRunnerOutputTokenIds(unittest.TestCase):
         actual_output_token_ids = actual_sampling_metadata.output_token_ids
         self.assertEqual(actual_output_token_ids[0], [1, 2, 3, 6])
         self.assertEqual(actual_output_token_ids[1], [4, 5, 7])
+
+
+class TestNPUModelRunnerDebugger(unittest.TestCase):
+    def _build_runner(self, debugger=None):
+        runner = NPUModelRunner.__new__(NPUModelRunner)
+        runner.debugger = debugger or MagicMock()
+        runner.model = MagicMock()
+        runner.model_config = MagicMock()
+        runner.model_config.enforce_eager = False
+        runner._debugger_started = True
+        runner._debugger_step_dummy_data_before_execute = False
+        runner.use_compress = False
+        return runner
+
+    def test_finalize_dump_data_stops_stop_capable_debugger(self):
+        runner = self._build_runner()
+
+        runner._finalize_dump_data()
+
+        runner.debugger.stop.assert_called_once_with()
+        runner.debugger.step.assert_called_once_with()
+        self.assertFalse(runner._debugger_started)
+
+    def test_finalize_dump_data_steps_graph_debugger_without_stop(self):
+        debugger = MagicMock(spec=["start", "step"])
+        runner = self._build_runner(debugger)
+
+        runner._finalize_dump_data()
+
+        debugger.step.assert_called_once_with()
+        self.assertTrue(runner._debugger_started)
+
+    def test_start_dump_data_noop_when_already_started(self):
+        runner = self._build_runner(MagicMock(spec=["start", "step"]))
+
+        runner._start_dump_data()
+
+        runner.debugger.start.assert_not_called()
+        runner.debugger.step.assert_not_called()
+        self.assertTrue(runner._debugger_started)
 
 
 if __name__ == "__main__":
