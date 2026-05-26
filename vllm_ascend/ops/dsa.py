@@ -195,15 +195,17 @@ def dsa_forward(
         attn_metadata = forward_context.attn_metadata
 
     if attn_metadata is None:
-        return self.dsa_attn.impl.forward(
+        self.dsa_attn.impl.forward(
             self.dsa_attn.layer_name, hidden_states, None, attn_metadata, need_gather_q_kv, output
         )
+        return
 
     kv_cache = _build_kv_cache(self, forward_context)
 
     self.dsa_attn.impl.forward(
         self.dsa_attn.layer_name, hidden_states, kv_cache, attn_metadata, need_gather_q_kv, output
     )
+    return
 
 
 def dsa_forward_fake(
