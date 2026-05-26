@@ -1,0 +1,41 @@
+model_name: "mistralai/Mamba-Codestral-7B-v0.1"
+model_type: "vllm"
+hardware: "Atlas A2 Series"
+
+test_cases:
+  - model: "/root/.cache/Mamba-Codestral-7B-v0.1"
+    server_cmd:
+      - --host
+      - 0.0.0.0
+      - --port
+      - "8000"
+      - --trust-remote-code
+      - --no-enable-prefix-caching
+      - --max-model-len
+      - "4096"
+      - --gpu-memory-utilization
+      - "0.9"
+      - --tokenizer-mode
+      - slow
+
+serve:
+  tensor_parallel_size: 1
+  dtype: auto
+  max_model_len: 4096
+  gpu_memory_utilization: 0.9
+  trust_remote_code: true
+  enforce_eager: true
+  tokenizer_mode: slow
+
+tasks:
+  - name: "gsm8k"
+    metrics:
+      - name: "exact_match,strict-match"
+        value: 0.1243
+      - name: "exact_match,flexible-extract"
+        value: 0.1259
+
+num_fewshot: 5
+apply_chat_template: false
+fewshot_as_multiturn: false
+batch_size: 1

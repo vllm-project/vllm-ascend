@@ -69,6 +69,7 @@ def causal_conv1d_fn(
     query_start_loc: torch.Tensor | None = None,
     metadata: Any | None = None,
     pad_slot_id: int = PAD_SLOT_ID,
+    **_: Any,
 ):
     """
     x: (batch, dim, seqlen) or (dim,cu_seq_len) for varlen
@@ -538,6 +539,7 @@ def causal_conv1d_update_npu(
     block_idx_last_scheduled_token: torch.Tensor | None = None,
     initial_state_idx: torch.Tensor | None = None,
     validate_data=False,
+    **_: Any,
 ):
     """
     x: Input tensor which can take the following shapes:
