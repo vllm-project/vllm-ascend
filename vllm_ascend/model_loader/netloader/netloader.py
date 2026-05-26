@@ -123,13 +123,14 @@ class ModelNetLoaderElastic(BaseModelLoader):
             self.output_prefix,
         )
 
-    def load_model(self, vllm_config: VllmConfig, model_config: ModelConfig) -> nn.Module:
+    def load_model(self, vllm_config: VllmConfig, model_config: ModelConfig, prefix: str = "") -> nn.Module:
         """
         Loads the model using the specified configuration.
 
         Parameters:
         - vllm_config: Configuration for the VLLM.
         - model_config: Configuration for the model.
+        - prefix: Module prefix for pipeline parallelism (e.g., "model.layers.0.").
 
         Returns:
         - The loaded model.
@@ -157,7 +158,9 @@ class ModelNetLoaderElastic(BaseModelLoader):
             ]
         ):
             logger.warning("Did not get valid source info, use DefaultModelLoader")
-            model, need_process_weights_after_loading = self.revert_to_default(model_config, vllm_config, device_config)
+            model, need_process_weights_after_loading = self.revert_to_default(
+                model_config, vllm_config, device_config, prefix
+            )
 
         else:
             target_device = torch.device(device_config.device)
@@ -167,7 +170,7 @@ class ModelNetLoaderElastic(BaseModelLoader):
 
             with set_default_torch_dtype(model_config.dtype):
                 with target_device:
-                    model = initialize_model(vllm_config=vllm_config, model_config=model_config)
+                    model = initialize_model(vllm_config=vllm_config, model_config=model_config, prefix=prefix)
 
                 start_elastic_load = time.perf_counter()
                 model = elastic_load(
@@ -198,7 +201,7 @@ class ModelNetLoaderElastic(BaseModelLoader):
                         torch.cuda.empty_cache()
 
                     model, need_process_weights_after_loading = self.revert_to_default(
-                        model_config, vllm_config, device_config
+                        model_config, vllm_config, device_config, prefix
                     )
 
         start_elastic_server = time.perf_counter()
@@ -275,7 +278,7 @@ class ModelNetLoaderElastic(BaseModelLoader):
 
         return model.eval()
 
-    def revert_to_default(self, model_config, vllm_config, device_config) -> tuple[nn.Module, bool]:
+    def revert_to_default(self, model_config, vllm_config, device_config, prefix: str = "") -> tuple[nn.Module, bool]:
         """
         Reverts to the default model loading logic when elastic loading fails or is not applicable.
 
@@ -288,6 +291,7 @@ class ModelNetLoaderElastic(BaseModelLoader):
         - model_config: Configuration describing model architecture, quantization, etc.
         - vllm_config: Configuration for vLLM (device, parallelism, dtype, etc).
         - device_config: Configuration for the target device (device type, device id, etc).
+        - prefix: Module prefix for pipeline parallelism.
 
         Returns:
         - A tuple (model, need_process_weights_after_loading):
@@ -300,7 +304,7 @@ class ModelNetLoaderElastic(BaseModelLoader):
         default_model_loader = DefaultModelLoader(self.load_config)
 
         if model_config.quantization is None:
-            model = default_model_loader.load_model(vllm_config=vllm_config, model_config=model_config)
+            model = default_model_loader.load_model(vllm_config=vllm_config, model_config=model_config, prefix=prefix)
             need_process_weights_after_loading = False
         else:
             logger.warning("Quantization is set, netloader use DefaultModelLoader with process_weights_after_loading ")
@@ -308,7 +312,7 @@ class ModelNetLoaderElastic(BaseModelLoader):
             target_device = torch.device(device_config.device)
             with set_default_torch_dtype(model_config.dtype):
                 with target_device:
-                    model = initialize_model(vllm_config=vllm_config, model_config=model_config)
+                    model = initialize_model(vllm_config=vllm_config, model_config=model_config, prefix=prefix)
                 default_model_loader.load_weights(model, model_config)
             model = model.eval()
 
