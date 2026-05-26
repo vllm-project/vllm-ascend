@@ -153,6 +153,7 @@ class ProxyState:
         heapq.heapify(self.decoder_heap)
         self.req_id_future = {}
         self.req_data_dict = {}
+        self.prefill_usage_dict = {}
 
     def _update_prefiller_priority(self, server_idx: int):
         """Update the priority of a prefiller server in the heap."""
@@ -353,6 +354,9 @@ async def send_request_to_service(
         try:
             response = await client.post(endpoint, json=req_data, headers=headers)
             response.raise_for_status()
+            response_json = response.json()
+            if "usage" in response_json:
+                proxy_state.prefill_usage_dict[request_id] = response_json["usage"]
             if request_id in proxy_state.req_id_future:
                 result_future = proxy_state.req_id_future[request_id]
                 result_future.set_result(response.json()["kv_transfer_params"])
@@ -495,6 +499,23 @@ async def _handle_completions(api: str, request: Request):
                             yield chunk
                             continue
                         choices = chunk_json.get("choices", [])
+                        decode_usage = chunk_json.get("usage", {})
+                        if decode_usage: 
+                            prefill_usage = proxy_state.prefill_usage_dict.pop(request_id)
+                            if prefill_usage:
+                                prompt_tokens = decode_usage.get("prompt_tokens", 0) #or prefill ģ 
+                                completion_tokens = decode_usage.get("completion_tokens", 0)
+                                total_tokens = decode_usage.get("total_tokens", 0) # or prompt_tokens+completion_tokens?
+                                prompt_tokens_details = prefill_usage.get("prompt_tokens_details", {}) # "prefill_usage.get("prompt_tokens_details", {})"
+                                completion_tokens_details = decode_usage.get("completion_tokens_details", {})
+                                merged_usage = {
+                                    "prompt_tokens": prompt_tokens,
+                                    "total_tokens": total_tokens,
+                                    "completion_tokens": completion_tokens,
+                                    "prompt_tokens_details": prompt_tokens_details,
+                                    "completion_tokens_details": completion_tokens_details}
+                                chunk_json["usage"] = merged_usage
+                                chunk = f"data: {json.dumps(chunk_json, ensure_ascii=False)}\n\n".encode("utf-8")
                         if not choices:
                             yield chunk
                             continue
