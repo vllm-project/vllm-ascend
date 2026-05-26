@@ -53,6 +53,7 @@ test_cases:
         batch_size: 32
         baseline: 90
         threshold: 5
+        ignore_eos: false
       perf:
         case_type: performance
         dataset_path: vllm-ascend/GSM8K-in3500-bs2800
