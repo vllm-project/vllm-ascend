@@ -2613,9 +2613,7 @@ class AscendDSAImpl(DSAAttentionImpl):
                 torch.ops._C_ascend.npu_scatter_nd_update_v2(indexer_k_cache, slot_mapping_dummy, kv_dummy)
                 # Part3 aux: scatter_scale_cache (npu_scatter_nd_update_v2)
                 kv_scale_dummy = kv_scale_dummy.to(torch.float16).unsqueeze(-1)
-                torch.ops._C_ascend.npu_scatter_nd_update_v2(
-                    indexer_scale_cache, slot_mapping_dummy, kv_scale_dummy
-                )
+                torch.ops._C_ascend.npu_scatter_nd_update_v2(indexer_scale_cache, slot_mapping_dummy, kv_scale_dummy)
 
                 # Part4 kv_comprecessor module
                 _ = self.weights_proj(dummy)

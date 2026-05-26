@@ -197,9 +197,7 @@ def dsa_forward(
         kv_cache = None
 
     impl = self.dsa_attn.impl
-    impl.forward(
-        layer_name, hidden_states, kv_cache, attn_metadata, need_gather_q_kv, output
-    )
+    impl.forward(layer_name, hidden_states, kv_cache, attn_metadata, need_gather_q_kv, output)
     return
 
 
