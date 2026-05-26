@@ -97,7 +97,7 @@ class AscendW4A4FlatQuantDynamicLinearMethod(AscendLinearScheme):
         params_dict = {"weight": torch.empty(output_size, input_size, dtype=torch.int8)}
         return params_dict
 
-    def get_pertensor_param(self, params_dtype: torch.dtype) -> dict[str, Any]:
+    def get_pertensor_param(self, params_dtype: torch.dtype, **kwargs: Any) -> dict[str, Any]:
         params_dict = {}
         left_trans_dim, right_trans_dim = get_decompose_dim(AscendW4A4FlatQuantDynamicLinearMethod.input_size)
         params_dict["left_trans"] = torch.empty(left_trans_dim, left_trans_dim, dtype=params_dtype)

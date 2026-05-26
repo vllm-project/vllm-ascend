@@ -162,10 +162,7 @@ class TokenDispatcherWithMC2(MoETokenDispatcher[MoEMC2CombineMetadata]):
         assert expert_map is not None, "expert_map is required for MC2 token dispatch."
         # NOTE: quant_mode differs by quant feature:
         # - Legacy int communication quantization uses quant_mode=2.
-        # - A5 MXFP communication uses quant_mode=4 only for dispatch-enabled
-        #   MXFP paths (currently MXFP8).
-        # - MXFP4 keeps quant_mode=0 which means that activations are quantized in
-        #   the MoE MLP path instead of during MC2 dispatch.
+        # - A5 MXFP communication uses quant_mode=4.
         if comm_quant_mode is not None:
             quant_mode = comm_quant_mode
         elif token_dispatch_input.quant.dispatch_with_quant:
@@ -201,8 +198,7 @@ class TokenDispatcherWithMC2(MoETokenDispatcher[MoEMC2CombineMetadata]):
                     "tp_rank_id": 0,
                 }
             )
-        # Only dispatch-enabled MXFP paths pass y_dtype through MC2. MXFP4
-        # keeps dispatch unquantized and quantizes again inside the MLP path.
+        # Only dispatch-enabled MXFP paths pass y_dtype through MC2.
         if (
             self.a5_need_extra_args
             and token_dispatch_input.quant.is_mxfp
@@ -247,11 +243,6 @@ class TokenDispatcherWithMC2(MoETokenDispatcher[MoEMC2CombineMetadata]):
             tp_recv_counts,
             expand_scales,
         ) = output[0:7]
-
-        # The dispatch operator may still return a non-None dynamic_scale when
-        # quant_mode=0. Clear it for unquantized dispatch paths such as MXFP4.
-        if not token_dispatch_input.quant.dispatch_with_quant:
-            dynamic_scale = None
 
         group_list_type = kwargs_mc2["expert_token_nums_type"]
         return MoETokenDispatchOutput(
@@ -362,7 +353,11 @@ class TokenDispatcherWithAllGather(MoETokenDispatcher[MoEAllGatherCombineMetadat
         self,
         token_dispatch_input: MoETokenDispatchInput,
     ):
-        with_quant = token_dispatch_input.quant.dispatch_with_quant
+        # TODO: After AllGather MXFP4 communication quantization thorough verification, remove this judgment.
+        #  MXFP4 keeps dispatch unquantized in AllGather path, and quantizes again inside the MLP path.
+        with_quant = (
+            token_dispatch_input.quant.dispatch_with_quant and token_dispatch_input.quant.quant_type != QuantType.MXFP4
+        )
         is_mxfp = token_dispatch_input.quant.is_mxfp
         hidden_states = token_dispatch_input.hidden_states
         topk_weights = token_dispatch_input.topk_weights

@@ -57,6 +57,7 @@ class TestAscendUnquantizedLinearMethod(TestBase):
         self.layer = mock.MagicMock()
         mock_dtype = mock.PropertyMock(return_value=torch.float16)
         type(self.layer.weight.data).dtype = mock_dtype
+        self.layer.precast_fp32_weight = False
 
     @patch("vllm_ascend.utils.get_ascend_config")
     @mock.patch("torch_npu.npu_format_cast")
