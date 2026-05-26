@@ -17,10 +17,13 @@ from __future__ import annotations
 
 from abc import ABC, abstractmethod
 from dataclasses import dataclass
+from npu_ops_transformer.ops import get_symm_buffer_for_mega_moe, mega_moe
+from vllm.distributed.parallel_state import get_ep_group 
+from vllm_ascend.distributed.parallel_state import get_mc2_group 
 
 import torch
 from vllm.model_executor.layers.fused_moe import FusedMoEConfig
-
+import os
 import vllm_ascend.envs as envs_ascend
 from vllm_ascend.ascend_forward_context import _EXTRA_CTX, MoECommType
 from vllm_ascend.ops.fused_moe.moe_mlp import unified_apply_mlp
@@ -46,7 +49,14 @@ from vllm_ascend.ops.fused_moe.token_dispatcher import (
 from vllm_ascend.quantization.quant_type import QuantType
 
 _MoECommMethods: dict[MoECommType | None, MoECommMethod] = {}
+_MEGA_MOE_DISPATCH_QUANT_MODE_MX = 4
+_MEGA_MOE_DISPATCH_QUANT_OUT_TYPE_E5M2 = 23
+_MEGA_MOE_DISPATCH_QUANT_OUT_TYPE_E4M3FN = 24
 
+def _get_dispatch_quant_out_type(dtype: torch.dtype | None) -> int:
+    if dtype == torch.float8_e5m2:
+        return _MEGA_MOE_DISPATCH_QUANT_OUT_TYPE_E5M2
+    return _MEGA_MOE_DISPATCH_QUANT_OUT_TYPE_E4M3FN
 
 def get_moe_comm_method(moe_comm_type: MoECommType | None) -> MoECommMethod | None:
     return _MoECommMethods.get(moe_comm_type)
@@ -236,7 +246,7 @@ class AlltoAllCommImpl(MoECommMethod):
     def _get_prepare_finalize(self):
         return PrepareAndFinalizeWithAll2All(self.moe_config)
 
-
+mega_moe_symm_buffer = None
 class FusedMC2CommImpl(MoECommMethod):
     """This implementation is for the scenarios listed below:
     1. `enable_expert_parallel=True`.
@@ -253,7 +263,20 @@ class FusedMC2CommImpl(MoECommMethod):
             self.expert_token_nums = torch.zeros([self.moe_config.num_local_experts], dtype=torch.int32, device="npu")
         else:
             self.expert_token_nums = None
-
+        global mega_moe_symm_buffer
+        if envs_ascend.VLLM_ASCEND_ENABLE_FUSED_MC2 == 1:
+            if  mega_moe_symm_buffer == None:
+                mega_moe_symm_buffer = get_symm_buffer_for_mega_moe(
+                    group=get_mc2_group().device_group,
+                    num_experts=self.moe_config.num_experts,
+                    num_max_tokens_per_rank=0,
+                    num_topk=self.moe_config.experts_per_token,
+                    hidden=self.moe_config.hidden_dim,
+                    intermediate_hidden=2 * self.moe_config.intermediate_size_per_partition,
+                    max_recv_token_num= 65536 * 3, #bs * epWorldSize * min(topK, expertPerRank)
+                    dispatch_quant_mode=_MEGA_MOE_DISPATCH_QUANT_MODE_MX,
+                    dispatch_quant_out_type=_MEGA_MOE_DISPATCH_QUANT_OUT_TYPE_E4M3FN,
+                )
     def _get_token_dispatcher(self):
         return TokenDispatcherWithMC2()
 
@@ -279,23 +302,49 @@ class FusedMC2CommImpl(MoECommMethod):
 
         expert_tokens = None
         if envs_ascend.VLLM_ASCEND_ENABLE_FUSED_MC2 == 1:
-            out = torch.empty_like(fused_experts_input.hidden_states)
-            torch.ops._C_ascend.dispatch_ffn_combine(  # type: ignore
-                x=fused_experts_input.hidden_states,
-                weight1=fused_experts_input.weights.w1,
-                weight2=fused_experts_input.weights.w2,
-                expert_idx=topk_ids,
-                scale1=fused_experts_input.weights.w1_scale,
-                scale2=fused_experts_input.weights.w2_scale,
-                bias1=fused_experts_input.weights.w1_scale_bias,
-                bias2=fused_experts_input.weights.w2_scale_bias,
-                probs=fused_experts_input.topk_weights.to(torch.float32),
-                group=self.token_dispatcher.moe_all_to_all_group_name,
-                max_output_size=65536,
-                out=out,
-                expert_token_nums=self.expert_token_nums,
-            )
-            expert_tokens = self.expert_token_nums
+            if fused_experts_input.quant.is_mxfp:
+                assert fused_experts_input.quant.mxfp is not None, "mxfp params are required for MXFP mega_moe."
+                
+                global mega_moe_symm_buffer
+                
+                assert mega_moe_symm_buffer is not None, "mega_moe_symm_buffer should be initialized."
+                mega_moe_symm_buffer.dispatch_quant_out_type = _get_dispatch_quant_out_type(
+                    fused_experts_input.quant.mxfp.act_quant_type
+                )
+                w1 = fused_experts_input.weights.w1
+                w2 = fused_experts_input.weights.w2
+                w1_scale = fused_experts_input.weights.w1_scale
+                w2_scale = fused_experts_input.weights.w2_scale
+
+                out, expert_tokens = mega_moe(
+                    x=fused_experts_input.hidden_states,
+                    topk_ids=topk_ids,
+                    topk_weights=fused_experts_input.topk_weights,
+                    l1_weights=w1 if isinstance(w1, list) else [w1],
+                    l2_weights=w2 if isinstance(w2, list) else [w2],
+                    sym_buffer=mega_moe_symm_buffer,
+                    l1_weights_sf=w1_scale if isinstance(w1_scale, list) else [w1_scale],
+                    l2_weights_sf=w2_scale if isinstance(w2_scale, list) else [w2_scale],
+                )
+
+            else:
+                out = torch.empty_like(fused_experts_input.hidden_states)
+                torch.ops._C_ascend.dispatch_ffn_combine(  # type: ignore
+                    x=fused_experts_input.hidden_states,
+                    weight1=fused_experts_input.weights.w1,
+                    weight2=fused_experts_input.weights.w2,
+                    expert_idx=topk_ids,
+                    scale1=fused_experts_input.weights.w1_scale,
+                    scale2=fused_experts_input.weights.w2_scale,
+                    bias1=fused_experts_input.weights.w1_scale_bias,
+                    bias2=fused_experts_input.weights.w2_scale_bias,
+                    probs=fused_experts_input.topk_weights.to(torch.float32),
+                    group=self.token_dispatcher.moe_all_to_all_group_name,
+                    max_output_size=65536,
+                    out=out,
+                    expert_token_nums=self.expert_token_nums,
+                )
+                expert_tokens = self.expert_token_nums
         elif envs_ascend.VLLM_ASCEND_ENABLE_FUSED_MC2 == 2:
             assert fused_experts_input.routing.expert_map is not None, "expert_map cannot be None."
             out, expert_tokens = torch.ops._C_ascend.dispatch_gmm_combine_decode(  # type: ignore
