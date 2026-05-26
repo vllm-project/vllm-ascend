@@ -42,6 +42,12 @@ set -uo pipefail
 MODEL="${MODEL:-/home/weight/Qwen3.5-27B-w8a8-org}"
 SERVED_NAME="${SERVED_NAME:-qwen3.5}"
 HOST="${HOST:-0.0.0.0}"
+# Client-side address used by readiness probe + vllm bench serve.
+# Must bypass http(s)_proxy or curl/httpx will round-trip through the proxy
+# and fail to reach the local vllm server.
+CLIENT_HOST="${CLIENT_HOST:-127.0.0.1}"
+export no_proxy="${no_proxy:-},127.0.0.1,localhost,${CLIENT_HOST}"
+export NO_PROXY="${NO_PROXY:-},127.0.0.1,localhost,${CLIENT_HOST}"
 PORT="${PORT:-8826}"
 TP="${TP:-2}"
 MAX_MODEL_LEN="${MAX_MODEL_LEN:-133000}"
@@ -152,7 +158,7 @@ kill_stale_serve() {
 wait_server_ready() {
     local elapsed=0
     while (( elapsed < WAIT_READY_MAX )); do
-        if curl -fsS "http://${HOST}:${PORT}/v1/models" >/dev/null 2>&1; then
+        if curl --noproxy '*' -fsS "http://${CLIENT_HOST}:${PORT}/v1/models" >/dev/null 2>&1; then
             log "  server ready after ${elapsed}s"
             return 0
         fi
@@ -236,7 +242,7 @@ run_client() {
 
     timeout "$CLIENT_TIMEOUT" vllm bench serve \
         --backend openai \
-        --host "$HOST" \
+        --host "$CLIENT_HOST" \
         --port "$PORT" \
         --model "$SERVED_NAME" \
         --endpoint /v1/completions \
