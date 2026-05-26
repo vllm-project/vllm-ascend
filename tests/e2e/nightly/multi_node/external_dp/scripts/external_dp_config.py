@@ -22,6 +22,12 @@ BACKEND_READY_TIMEOUT = 3600
 ROUTING_GENERIC_DP = "generic_dp"
 ROUTING_PD = "disaggregated_prefill"
 SUPPORTED_ROUTING_TYPES = {ROUTING_GENERIC_DP, ROUTING_PD}
+DEFAULT_PROXY_NODE_INDEX = 0
+DEFAULT_PROXY_PORT = 1999
+PROXY_SCRIPT_BY_ROUTING_TYPE = {
+    ROUTING_GENERIC_DP: "examples/external_online_dp/dp_load_balance_proxy_server.py",
+    ROUTING_PD: "examples/disaggregated_prefill_v1/load_balance_proxy_server_example.py",
+}
 CLUSTER_PLACEHOLDER_RE = re.compile(r"\$\{(NODE_(\d+)_IP|LOCAL_IP|MASTER_IP|LWS_WORKER_INDEX)\}")
 
 
@@ -44,7 +50,6 @@ class NodeConfig:
     node_ip: str
     port_start: int
     dp_rpc_port: int
-    dp_group: str
     dp_size: int
     dp_size_local: int
     dp_rank_start: int
@@ -77,7 +82,6 @@ class ExternalDPEndpoint:
 
     config_index: int
     role: str
-    dp_group: str
     local_rank: int
     dp_rank: int
     host: str
@@ -241,7 +245,11 @@ class ExternalDPConfigLoader:
 
     @staticmethod
     def _parse_routing(raw_routing: dict[str, Any], cluster_ips: list[str]) -> RoutingConfig:
-        proxy_node_index = int(raw_routing.get("proxy_node_index", 0))
+        routing_type = str(raw_routing["type"])
+        if routing_type not in PROXY_SCRIPT_BY_ROUTING_TYPE:
+            raise ValueError(f"Unsupported routing.type: {routing_type}")
+
+        proxy_node_index = DEFAULT_PROXY_NODE_INDEX
         if proxy_node_index >= len(cluster_ips) or proxy_node_index < 0:
             raise ValueError("routing.proxy_node_index out of range")
         local_ip = cluster_ips[proxy_node_index]
@@ -252,11 +260,11 @@ class ExternalDPConfigLoader:
             current_node_index=proxy_node_index,
         )
         return RoutingConfig(
-            type=str(routing["type"]),
+            type=routing_type,
             proxy_node_index=proxy_node_index,
-            proxy_host=str(routing.get("proxy_host", cluster_ips[proxy_node_index])),
-            proxy_port=int(routing["proxy_port"]),
-            proxy_script=str(routing["proxy_script"]),
+            proxy_host=local_ip,
+            proxy_port=DEFAULT_PROXY_PORT,
+            proxy_script=PROXY_SCRIPT_BY_ROUTING_TYPE[routing_type],
             groups={
                 str(name): [int(index) for index in indices] for name, indices in routing.get("groups", {}).items()
             },
@@ -280,7 +288,6 @@ class ExternalDPConfigLoader:
                     node_ip=cluster_ips[index],
                     port_start=int(node["port_start"]),
                     dp_rpc_port=int(node["dp_rpc_port"]),
-                    dp_group=str(node.get("dp_group", "default")),
                     dp_size=int(node.get("dp_size", 1)),
                     dp_size_local=int(node.get("dp_size_local", 1)),
                     dp_rank_start=int(node.get("dp_rank_start", 0)),
@@ -428,7 +435,6 @@ class EndpointResolver:
                 ExternalDPEndpoint(
                     config_index=node_index,
                     role=role,
-                    dp_group=node_config.dp_group,
                     local_rank=local_rank,
                     dp_rank=dp_rank,
                     host=node_config.node_ip,

@@ -1,6 +1,5 @@
 import logging
 import os
-import re
 import shlex
 import signal
 import subprocess
@@ -12,6 +11,8 @@ import urllib.request
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
+
+import regex as re
 
 from tests.e2e.nightly.multi_node.external_dp.scripts.external_dp_config import (
     ROUTING_GENERIC_DP,

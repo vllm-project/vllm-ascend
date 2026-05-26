@@ -86,12 +86,7 @@ def build_task_entry(case_key: str, case_config: dict[str, Any], result: Any) ->
                 continue
             total_str = metric_data.get("total", "")
             try:
-                value = float(
-                    total_str.replace("token/s", "")
-                    .replace("ms", "")
-                    .replace("s", "")
-                    .strip()
-                )
+                value = float(total_str.replace("token/s", "").replace("ms", "").replace("s", "").strip())
                 metrics[PERF_METRIC_RENAME.get(metric_name, metric_name)] = round(value, 4)
             except (ValueError, AttributeError):
                 pass

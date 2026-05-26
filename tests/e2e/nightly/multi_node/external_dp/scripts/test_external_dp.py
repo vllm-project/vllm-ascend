@@ -247,9 +247,7 @@ def _raise_if_endpoint_process_exited(process_checks: list[EndpointProcess] | No
     for process, endpoint, log_file in process_checks:
         returncode = process.poll()
         if returncode is not None:
-            exited.append(
-                f"{_endpoint_label(endpoint)} pid={process.pid} returncode={returncode} log={log_file}"
-            )
+            exited.append(f"{_endpoint_label(endpoint)} pid={process.pid} returncode={returncode} log={log_file}")
 
     if exited:
         raise RuntimeError("External DP endpoint process exited before ready: " + "; ".join(exited))
