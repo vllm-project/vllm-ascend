@@ -101,6 +101,7 @@ class TestV1SamplingContext(TestBase):
     def test_from_model_runner_inputs_can_use_cpu_mapping_without_tensor_copy(self):
         from vllm_ascend.worker.v1.sample.sampling_context import V1SamplingContext
 
+        req_indices = torch.tensor([0, 0, 1], dtype=torch.int32)
         with patch.object(
             torch.Tensor,
             "cpu",
@@ -110,12 +111,29 @@ class TestV1SamplingContext(TestBase):
                 num_reqs=2,
                 positions_at_logits=torch.tensor([3, 4, 7], dtype=torch.int64),
                 input_ids_at_logits=torch.tensor([13, 14, 17], dtype=torch.int64),
-                req_indices_at_logits=torch.tensor([0, 0, 1], dtype=torch.int32),
+                req_indices_at_logits=req_indices,
                 device=torch.device("cpu"),
                 idx_mapping_np=np.array([0, 0, 1], dtype=np.int32),
             )
 
         np.testing.assert_array_equal(ctx.idx_mapping_np, np.array([0, 0, 1], dtype=np.int32))
+        self.assertEqual(ctx.expanded_idx_mapping.data_ptr(), req_indices.data_ptr())
+
+    def test_from_model_runner_inputs_vectorizes_local_positions_for_grouped_rows(self):
+        from vllm_ascend.worker.v1.sample.sampling_context import V1SamplingContext
+
+        ctx = V1SamplingContext.from_model_runner_inputs(
+            num_reqs=2,
+            positions_at_logits=torch.tensor([7, 8, 3], dtype=torch.int64),
+            input_ids_at_logits=torch.tensor([17, 18, 13], dtype=torch.int64),
+            req_indices_at_logits=torch.tensor([1, 1, 0], dtype=torch.int32),
+            device=torch.device("cpu"),
+        )
+
+        self.assertTrue(ctx.expanded_logits)
+        self.assertEqual(ctx.expanded_idx_mapping.tolist(), [1, 1, 0])
+        self.assertEqual(ctx.expanded_local_pos.tolist(), [0, 1, 0])
+        np.testing.assert_array_equal(ctx.num_logits_per_req_np, np.array([1, 2], dtype=np.int32))
 
     def test_from_model_runner_inputs_rejects_cpu_mapping_mirror_mismatch(self):
         from vllm_ascend.worker.v1.sample.sampling_context import V1SamplingContext

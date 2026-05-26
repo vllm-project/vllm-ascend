@@ -72,15 +72,13 @@ class V1SamplingContext:
 
     @staticmethod
     def _is_grouped_by_request(idx_mapping_np: np.ndarray) -> bool:
-        seen: set[int] = set()
-        previous: int | None = None
-        for req_idx in idx_mapping_np.tolist():
-            if req_idx != previous:
-                if req_idx in seen:
-                    return False
-                seen.add(req_idx)
-                previous = req_idx
-        return True
+        if idx_mapping_np.size <= 1:
+            return True
+        group_starts: np.ndarray = np.empty(idx_mapping_np.size, dtype=bool)
+        group_starts[0] = True
+        group_starts[1:] = idx_mapping_np[1:] != idx_mapping_np[:-1]
+        group_ids = idx_mapping_np[group_starts]
+        return np.unique(group_ids).size == group_ids.size
 
     @staticmethod
     def from_model_runner_inputs(
@@ -119,23 +117,30 @@ class V1SamplingContext:
                 req_indices_np = req_indices_at_logits.detach().numpy().astype(np.int32, copy=False)
                 if not np.array_equal(idx_mapping, req_indices_np):
                     raise ValueError("idx_mapping_np must match req_indices_at_logits")
-            expanded_idx_mapping = torch.from_numpy(idx_mapping).to(device=device, dtype=torch.int32)
+            expanded_idx_mapping = req_indices_at_logits.to(device=device, dtype=torch.int32)
         if idx_mapping.size and (idx_mapping.min() < 0 or idx_mapping.max() >= num_reqs):
             raise ValueError("req_indices_at_logits contains an out-of-range request index")
-
-        if expanded_local_pos is None:
-            local_pos_np: np.ndarray = np.empty(num_logits, dtype=np.int64)
-            counters: np.ndarray = np.zeros(num_reqs, dtype=np.int64)
-            for row, req_idx in enumerate(idx_mapping):
-                local_pos_np[row] = counters[req_idx]
-                counters[req_idx] += 1
-            expanded_local_pos = torch.from_numpy(local_pos_np).to(device=device)
-        else:
-            expanded_local_pos = expanded_local_pos.to(device=device, dtype=torch.int64)
 
         expanded_logits = num_logits != num_reqs or not np.array_equal(idx_mapping, np.arange(num_reqs, dtype=np.int32))
         if expanded_logits and not V1SamplingContext._is_grouped_by_request(idx_mapping):
             raise ValueError("expanded logits rows must be grouped by request")
+
+        if expanded_local_pos is None:
+            if not expanded_logits:
+                expanded_local_pos = torch.zeros(num_logits, device=device, dtype=torch.int64)
+            elif num_logits == 0:
+                expanded_local_pos = torch.empty(0, device=device, dtype=torch.int64)
+            else:
+                group_starts_np: np.ndarray = np.empty(num_logits, dtype=bool)
+                group_starts_np[0] = True
+                group_starts_np[1:] = idx_mapping[1:] != idx_mapping[:-1]
+                group_start_rows = np.flatnonzero(group_starts_np)
+                group_lengths = np.diff(np.append(group_start_rows, num_logits))
+                local_pos_np = np.arange(num_logits, dtype=np.int64) - np.repeat(group_start_rows, group_lengths)
+                expanded_local_pos = torch.from_numpy(local_pos_np).to(device=device)
+        else:
+            expanded_local_pos = expanded_local_pos.to(device=device, dtype=torch.int64)
+
         if cu_num_logits_np is None and expanded_logits:
             cu_num_logits_np = np.concatenate(
                 (np.array([0], dtype=np.int32), np.cumsum(np.bincount(idx_mapping, minlength=num_reqs)))
@@ -144,8 +149,8 @@ class V1SamplingContext:
         return V1SamplingContext(
             expanded_idx_mapping=expanded_idx_mapping,
             idx_mapping_np=idx_mapping,
-            pos=positions_at_logits.to(device=device),
-            input_ids=input_ids_at_logits.to(device=device),
+            pos=positions_at_logits,
+            input_ids=input_ids_at_logits,
             expanded_local_pos=expanded_local_pos,
             cu_num_logits_np=cu_num_logits_np,
             expanded_logits=expanded_logits,
