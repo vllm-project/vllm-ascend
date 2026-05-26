@@ -38,6 +38,14 @@ def unpack_from_int32(
     num_bits: int,
     packed_dim: int = 1,
 ) -> torch.Tensor:
+    """Unpacks quantized weights from int32 format back to original bits.
+
+    :param weight: The packed int32 tensor containing quantized weights
+    :param shape: Original shape to restore, defaults to None
+    :param num_bits: The number of bits used for quantization (<= 8)
+    :param packed_dim: Dimension along which weights are packed (0 or 1), defaults to 1
+    :return: Unpacked tensor with int8 dtype after applying offset correction
+    """
     assert weight.dtype == torch.int32, f"Expecting `weight.dtype` is torch.int32 but got {weight.dtype}."
     assert num_bits > 0, f"Expecting `num_bits` should be positive but got {num_bits}."
     assert num_bits <= 8, f"Expecting `num_bits` should not be larger than 8 but got {num_bits}."
@@ -75,26 +83,10 @@ def unpack_from_int32(
 
 
 def pack_to_int32(weight: torch.Tensor) -> torch.Tensor:
-    """Pack a 3D MoE weight tensor into int32 storage for W4A16 kernels.
+    """Packs quantized weights into int32 format for storage.
 
-    The expected logical shape is either ``[e, n, k]`` or ``[e, k, n]``:
-    ``e`` is the number of experts, ``n`` is the expert output/intermediate
-    channel dimension, and ``k`` is the expert input/hidden channel dimension.
-
-    Int32 input contains one unpacked int4 value per element and is converted by
-    ``torch_npu.npu_convert_weight_to_int4pack`` into the device int4pack
-    layout. Int8 input is already byte-packed with two int4 values per byte, so
-    four int8 bytes can be reinterpreted as one int32 word.
-
-    Args:
-        weight: A 3D int8 or int32 tensor.
-
-    Returns:
-        A contiguous int32 tensor in packed representation.
-
-    Raises:
-        AssertionError: If the rank, dtype, or packed dimension alignment is
-            invalid.
+    :param weight: The 3D tensor to pack, must be int8 or int32 dtype
+    :return: Packed tensor with int32 dtype optimized for storage
     """
     assert weight.dim() == 3, (
         "Expecting `weight.dim()` is 3 ([expert, output_channel, input_channel] or "
@@ -111,7 +103,7 @@ def pack_to_int32(weight: torch.Tensor) -> torch.Tensor:
         packed_weight = packed_weight.view(weight.shape[0], weight.shape[1], -1)
     else:
         assert weight.shape[-1] % 4 == 0, "the last dim of weight needs to be divided by 4."
-        packed_weight = weight.contiguous().view(torch.int32).contiguous()
+        packed_weight = weight.view(torch.int32).contiguous()
 
     return packed_weight
 
