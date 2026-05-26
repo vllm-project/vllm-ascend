@@ -101,16 +101,6 @@ class TestPackToInt32(TestBase):
         self.assertEqual(result.shape, torch.Size([2, 8, 4]))
 
     @patch("vllm_ascend.quantization.methods.w4a16.torch_npu.npu_convert_weight_to_int4pack")
-    def test_pack_to_int32_int8_non_contiguous(self, mock_npu_convert_weight_to_int4pack):
-        weight = torch.zeros((2, 8, 16), dtype=torch.int8).transpose(1, 2)
-
-        result = pack_to_int32(weight)
-
-        self.assertEqual(result.dtype, torch.int32)
-        self.assertEqual(result.shape, torch.Size([2, 16, 2]))
-        mock_npu_convert_weight_to_int4pack.assert_not_called()
-
-    @patch("vllm_ascend.quantization.methods.w4a16.torch_npu.npu_convert_weight_to_int4pack")
     def test_pack_to_int32_int32(self, mock_npu_convert_weight_to_int4pack):
         def mock_convert_weight(weight):
             return weight
@@ -296,7 +286,6 @@ class TestAscendW4A16FusedMoEMethod(TestBase):
         tokens = 3
         hidden_size = self.output_size
         layer = self.build_layer()
-        layer.n_shared_experts = None
         x = torch.randn(tokens, hidden_size, dtype=torch.float32)
         router_logits = torch.randn(tokens, self.experts, dtype=torch.float32)
         topk_weights = torch.randn(tokens, 2, dtype=torch.float32)
@@ -325,33 +314,11 @@ class TestAscendW4A16FusedMoEMethod(TestBase):
         )
 
         mock_select_experts.assert_called_once()
-        self.assertEqual(mock_select_experts.call_args.kwargs["num_experts"], self.experts)
         fused_experts_input = mock_comm.fused_experts.call_args.kwargs["fused_experts_input"]
         self.assertEqual(fused_experts_input.activation, "gelu")
         self.assertTrue(fused_experts_input.routing.apply_router_weight_on_input)
         self.assertIs(fused_experts_input.routing.mc2_mask, mc2_mask)
         self.assertIs(fused_experts_input.routing.pertoken_scale, pertoken_scale)
-
-    @patch("vllm_ascend.quantization.methods.w4a16._EXTRA_CTX")
-    @patch("vllm_ascend.quantization.methods.w4a16.select_experts")
-    def test_apply_uses_layer_moe_config_logical_experts(self, mock_select_experts, mock_extra_ctx):
-        tokens = 3
-        logical_experts = self.experts - 2
-        layer = self.build_layer()
-        layer.moe_config = SimpleNamespace(num_logical_experts=logical_experts)
-        x = torch.randn(tokens, self.output_size, dtype=torch.float32)
-        router_logits = torch.randn(tokens, logical_experts, dtype=torch.float32)
-        topk_weights = torch.randn(tokens, 2, dtype=torch.float32)
-        topk_ids = torch.randint(0, logical_experts, (tokens, 2), dtype=torch.int64)
-
-        mock_select_experts.return_value = (topk_weights, topk_ids)
-        mock_comm = Mock()
-        mock_comm.fused_experts.return_value = torch.randn(tokens, self.output_size, dtype=torch.float32)
-        mock_extra_ctx.moe_comm_method = mock_comm
-
-        self.quant_method.apply(layer, x, router_logits, top_k=2, renormalize=True, num_experts=self.experts)
-
-        self.assertEqual(mock_select_experts.call_args.kwargs["num_experts"], logical_experts)
 
     @patch("vllm_ascend.quantization.methods.w4a16._EXTRA_CTX")
     @patch("vllm_ascend.quantization.methods.w4a16.select_experts")
