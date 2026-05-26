@@ -191,7 +191,10 @@ class AscendDSACPMetadataBuilder(AttentionMetadataBuilder[AscendDSAMetadata]):
                 try:
                     from scipy.linalg import hadamard  # type: ignore[import-untyped]
                 except ImportError as e:
-                    raise ImportError("Please install scipy") from e
+                    raise ImportError(
+                        "DeepSeek-V4 indexer attention requires SciPy for Hadamard transform. "
+                        "Please install scipy."
+                    ) from e
                 log_dim = math.ceil(math.log2(indexer_head_dim))
                 dim_padded = 2**log_dim
                 AscendDSACPMetadataBuilder.hadamard = torch.tensor(
@@ -810,7 +813,8 @@ class AscendDSACPMetadataBuilder(AttentionMetadataBuilder[AscendDSAMetadata]):
             )
         else:
             raise NotImplementedError(
-                "Currently we only support building dummy metadata for DecodeOnly and SpecDecoding state"
+                f"Graph capture only supports DecodeOnly and SpecDecoding attn states, "
+                f"got {attn_state}."
             )
 
         assert attn_metadata is not None

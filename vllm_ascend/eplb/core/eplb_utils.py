@@ -38,7 +38,7 @@ def expert_file_to_tensor(expert_map_path, layer_id):
     if layer_id > data["moe_layer_count"]:
         raise ValueError("Invalid EPLB Table")
     if layer_id == data["moe_layer_count"]:
-        logger.warning("Init expert map of mtp/eagle when using sample.")
+        logger.warning("[eplb/utils] Init expert map of mtp/eagle when using sample.")
         for device in data["layer_list"][0]["device_list"]:
             physical_count += len(device["device_expert"])
         return None, physical_count
