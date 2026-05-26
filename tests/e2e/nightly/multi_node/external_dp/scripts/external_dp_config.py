@@ -112,6 +112,7 @@ class ExternalDPConfig:
     node_configs: list[NodeConfig]
     templates: list[NodeTemplate]
     benchmark_cases: list[dict[str, Any]] = field(default_factory=list)
+    special_dependencies: dict[str, str] = field(default_factory=dict)
 
     @property
     def is_disaggregated_prefill(self) -> bool:
@@ -208,6 +209,7 @@ class ExternalDPConfigLoader:
             node_configs=node_configs,
             templates=templates,
             benchmark_cases=benchmark_cases,
+            special_dependencies=dict(raw_config.get("special_dependencies", {})),
         )
         cls._validate_config(config)
         return config

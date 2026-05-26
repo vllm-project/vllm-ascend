@@ -155,6 +155,7 @@ config:
     dp_address: "${NODE_1_IP}"
 
 env_common: &env_common
+  HCCL_OP_
   VLLM_USE_MODELSCOPE: "true"
   OMP_PROC_BIND: "false"
   OMP_NUM_THREADS: "10"

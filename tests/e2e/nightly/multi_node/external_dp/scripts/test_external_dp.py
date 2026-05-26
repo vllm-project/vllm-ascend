@@ -1,6 +1,7 @@
 import logging
 import os
 import subprocess
+import sys
 import threading
 import time
 from collections.abc import Callable
@@ -44,6 +45,18 @@ READY_STATUS_LOG_INTERVAL = 30
 LONG_TASK_LOG_INTERVAL = 30
 POST_BENCHMARK_HEALTHCHECK_TIMEOUT = 30
 EndpointProcess = tuple[subprocess.Popen, ExternalDPEndpoint, Path]
+
+
+def _install_special_dependencies(config: ExternalDPConfig) -> None:
+    for package, version in config.special_dependencies.items():
+        command = [
+            sys.executable,
+            "-m",
+            "pip",
+            "install",
+            f"{package}=={version}",
+        ]
+        subprocess.call(command)
 
 
 class ExternalDPServerManager:
@@ -324,6 +337,7 @@ def _collect_external_dp_logs(log_root: Path, current_node_index: int) -> None:
 
 def test_external_dp() -> None:
     config = ExternalDPConfigLoader.from_yaml()
+    _install_special_dependencies(config)
     endpoints = EndpointResolver(config).resolve()
     current_node_index = resolve_current_node_index(config)
     log_root = Path(os.environ.get("EXTERNAL_DP_LOG_DIR", str(DEFAULT_LOG_ROOT)))
