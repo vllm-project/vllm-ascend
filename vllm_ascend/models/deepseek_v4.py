@@ -249,6 +249,7 @@ class DeepseekV4MoE(nn.Module):
         self.gate = ReplicatedLinear(
             config.hidden_size, config.n_routed_experts, bias=False, quant_config=None, prefix=f"{prefix}.gate"
         )
+        self.gate.precast_fp32_weight = True
 
         # Load balancing settings.
         eplb_config = parallel_config.eplb_config
@@ -684,6 +685,25 @@ class DeepseekV4Attention(nn.Module):
                     prefix=f"{prefix}.indexer",
                 )
 
+        # IndexCache: decide whether this layer reuses topk from a previous
+        # indexer-bearing layer. Refer: https://arxiv.org/abs/2603.12201
+        # Only meaningful when this layer actually owns an Indexer (c4) and
+        # IndexCache is enabled via hf-overrides. MTP layers are excluded
+        # because spec_decode shares topk_indices_buffer at the model level
+        # only, leaving impl-level references stale.
+        skip_topk = False
+        if self.compress_ratio == 4 and getattr(config, "use_index_cache", False) and ".mtp." not in prefix:
+            compress_ratios = getattr(config, "compress_ratios", None) or []
+            indexer_seq_idx = sum(1 for r in compress_ratios[:config_layer_idx] if r == 4)
+            pattern = getattr(config, "index_topk_pattern", None)
+            freq = getattr(config, "index_topk_freq", 1)
+            if pattern is None:
+                skip_topk = max(indexer_seq_idx - 1, 0) % freq != 0
+            else:
+                assert pattern[0] == "F", "index_topk_pattern must start with 'F'"
+                if 0 <= indexer_seq_idx < len(pattern):
+                    skip_topk = pattern[indexer_seq_idx] == "S"
+
         dsa_modules = DSAModules(
             wq_a=self.wq_a,
             q_norm=self.q_norm,
@@ -696,6 +716,7 @@ class DeepseekV4Attention(nn.Module):
             indexer=self.indexer,
             compressor=self.compressor,
             topk_indices_buffer=topk_indices_buffer,
+            skip_topk=skip_topk,
         )
 
         self.dsa_attn = AscendDeepseekSparseAttention(
@@ -846,6 +867,10 @@ class DeepseekV4Model(nn.Module):
             )
         else:
             topk_indices_buffer = None
+
+        # Expose at model level so spec_decode/llm_base_proposer can share
+        # this buffer with the MTP draft via attribute replacement.
+        self.topk_indices_buffer = topk_indices_buffer
 
         if get_pp_group().is_first_rank:
             self.embed_tokens = VocabParallelEmbedding(
