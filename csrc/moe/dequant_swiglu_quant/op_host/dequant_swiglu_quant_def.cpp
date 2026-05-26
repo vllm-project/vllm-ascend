@@ -20,7 +20,7 @@ namespace ops
 {
 constexpr uint32_t DEQUANT_SWIGLU_QUANT_VERSION_TWO = 2;
 constexpr uint32_t DEQUANT_SWIGLU_QUANT_DEFAULT_VALUE = 2;
-constexpr float CLAMP_LIMIT_DEFAULT_VALUE = 7.0;
+constexpr float CLAMP_LIMIT_DEFAULT_VALUE = 0.0;
 constexpr float GLU_ALPHA_DEFAULT_VALUE = 1.702;
 class DequantSwigluQuant : public OpDef
 {

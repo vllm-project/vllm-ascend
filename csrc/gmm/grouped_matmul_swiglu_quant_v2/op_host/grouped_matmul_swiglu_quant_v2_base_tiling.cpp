@@ -167,7 +167,11 @@ ge::graphStatus GroupedMatmulSwigluQuantV2BaseTiling::ParseInputAndAttr()
                 return ge::GRAPH_FAILED);
 
     const auto swigluLimtPtr = attr->GetAttrPointer<double>(ATTR_INDEX_SWIGLU_LIMIT);
-    double swigluLimt_ = swigluLimtPtr != nullptr ? *swigluLimtPtr : 1000000.0f;
+    double swigluLimt_ = swigluLimtPtr != nullptr ? *swigluLimtPtr : 0.0f;
+    OP_CHECK_IF(!(swigluLimt_ >= 0.0),
+                OP_LOGE(context_->GetNodeName(), "swigluLimit must be non-negative, but actual value is %f.",
+                        swigluLimt_),
+                return ge::GRAPH_FAILED);
     tilingData_.gmmSwigluQuantV2BaseParams.set_swigluLimit(swigluLimt_);
     const int64_t *groupListTypePtr = attr->GetAttrPointer<int64_t>(ATTR_INDEX_GROUPLIST_TYPE);
     groupListType_ = groupListTypePtr != nullptr ? *groupListTypePtr : 0;

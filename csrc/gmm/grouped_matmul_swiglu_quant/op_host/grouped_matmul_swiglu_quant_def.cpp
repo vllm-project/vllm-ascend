@@ -54,7 +54,7 @@ public:
             .Format({ge::FORMAT_ND, ge::FORMAT_ND, ge::FORMAT_ND, ge::FORMAT_ND, ge::FORMAT_ND});
         this->Attr("is_enable_weight_assistance_matrix").AttrType(OPTIONAL).Bool(true);
         this->Attr("dequant_mode").AttrType(OPTIONAL).Int(0);
-        this->Attr("limited").AttrType(OPTIONAL).Float(1000000.0f);
+        this->Attr("limited").AttrType(OPTIONAL).Float(0.0f);
 
         OpAICoreConfig aicore_config;
         aicore_config.DynamicCompileStaticFlag(true)

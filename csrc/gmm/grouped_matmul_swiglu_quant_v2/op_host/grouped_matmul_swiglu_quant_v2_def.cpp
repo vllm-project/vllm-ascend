@@ -70,7 +70,7 @@ public:
         this->Attr("transpose_weight").AttrType(OPTIONAL).Bool(0);
         this->Attr("group_list_type").AttrType(OPTIONAL).Int(0);
         this->Attr("tuning_config").AttrType(OPTIONAL).ListInt({0});
-        this->Attr("swiglu_limit").AttrType(OPTIONAL).Float(1000000.0f);
+        this->Attr("swiglu_limit").AttrType(OPTIONAL).Float(0.0f);
 
         OpAICoreConfig aicore_config;
         aicore_config.DynamicCompileStaticFlag(true)
