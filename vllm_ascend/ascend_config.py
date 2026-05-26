@@ -135,6 +135,7 @@ class AscendConfig:
         self.enable_cpu_binding = additional_config.get("enable_cpu_binding", True)
         self.multistream_dsa_preprocess = additional_config.get("multistream_dsa_preprocess", False)
         self.multistream_dsv4_dsa_overlap = additional_config.get("multistream_dsv4_dsa_overlap", False)
+        self.prefill_comm_compute_overlap = additional_config.get("prefill_comm_compute_overlap", False)
 
         self.enable_context_parallel = self._get_config_value(
             additional_config,
