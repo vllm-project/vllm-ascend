@@ -11,7 +11,13 @@ from vllm.v1.core.single_type_kv_cache_manager import (
     SingleTypeKVCacheManager,
     spec_manager_map,
 )
-from vllm.v1.kv_cache_interface import FullAttentionSpec, KVCacheSpec, MLAAttentionSpec
+from vllm.v1.kv_cache_interface import (
+    ChunkedLocalAttentionSpec,
+    FullAttentionSpec,
+    KVCacheSpec,
+    MLAAttentionSpec,
+    SlidingWindowSpec,
+)
 from vllm.v1.request import Request
 
 
@@ -239,5 +245,18 @@ def get_manager_for_kv_cache_spec(
             block_size = kv_cache_spec.block_size
             max_compressed_tokens = max_model_len // compress_ratio
             kwargs["max_admission_blocks_per_request"] = cdiv(max_compressed_tokens, block_size) + compress_ratio
+    elif isinstance(kv_cache_spec, (SlidingWindowSpec, ChunkedLocalAttentionSpec)):
+        # Replicate the upstream PR #40946 cap setting for recycling specs.
+        # We override the vLLM factory above, so the upstream block that does
+        # this lives in dead code (never reached); without re-applying it here
+        # SlidingWindowMLASpec / ChunkedLocalAttentionSpec groups have no cap
+        # and ``full_sequence_must_fit`` admission reserves the full
+        # ``max_model_len`` worth of blocks per request, exhausting the pool
+        # at cc>=2 on DSv4 (see vLLM issue #40863).
+        if max_num_batched_tokens is not None and max_model_len is not None:
+            kwargs["max_admission_blocks_per_request"] = kv_cache_spec.max_admission_blocks_per_request(
+                max_num_batched_tokens=max_num_batched_tokens,
+                max_model_len=max_model_len,
+            )
     manager = manager_class(kv_cache_spec, **kwargs)
     return manager
