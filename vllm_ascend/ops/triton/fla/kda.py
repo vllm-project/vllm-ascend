@@ -1,29 +1,15 @@
-# SPDX-License-Identifier: Apache-2.0
-# SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-# SPDX-FileCopyrightText: Songlin Yang, Yu Zhang
-#
-# This file contains code copied from the flash-linear-attention project.
-# The original source code was licensed under the MIT license and included
-# the following copyright notice:
-# Copyright (c) 2023-2025, Songlin Yang, Yu Zhang
-# ruff: noqa: E501
-
-
 import torch
 import torch.nn as nn
-
-from vllm.model_executor.custom_op import CustomOp
 from vllm.triton_utils import tl, triton
 from vllm.utils.math_utils import cdiv, next_power_of_2
 
-from .chunk_delta_h_kda import chunk_gated_delta_rule_fwd_h
-from .cumsum_kda import chunk_local_cumsum
+from .chunk_delta_h import chunk_kda_gated_delta_rule_fwd_h
+from .cumsum import chunk_local_cumsum
 from .fused_recurrent_kda import fused_recurrent_gated_delta_rule_fwd_kernel
-from .index_kda import prepare_chunk_indices
-from .l2norm_kda import l2norm_fwd
+from .l2norm import l2norm_fwd
 from .op_kda import exp, log
-from .solve_tril_kda import solve_tril
-from .utils_kda import FLA_CHUNK_SIZE, is_amd
+from .solve_tril import solve_tril
+from .utils import FLA_CHUNK_SIZE, is_amd, prepare_chunk_indices
 
 BT_LIST_AUTOTUNE = [32, 64, 128]
 NUM_WARPS_AUTOTUNE = [2, 4, 8, 16] if is_amd else [4, 8, 16, 32]
@@ -430,6 +416,56 @@ def rms_norm_gated(
     )
     y = y.reshape(x_shape_og)
     return y if not prenorm else (y, residual_out.reshape(x_shape_og))
+
+
+class FusedRMSNormGated(nn.Module):
+    # Keep this as a plain module: vLLM may already have registered the
+    # same CustomOp name before the Ascend worker patch is loaded.
+    def __init__(
+        self,
+        hidden_size: int,
+        elementwise_affine: bool = True,
+        eps: float = 1e-5,
+        activation: str = "swish",
+        device: torch.device | None = None,
+        dtype: torch.dtype | None = None,
+    ) -> None:
+        factory_kwargs = {"device": device, "dtype": dtype}
+        super().__init__()
+
+        self.hidden_size = hidden_size
+        self.elementwise_affine = elementwise_affine
+        self.eps = eps
+        self.activation = activation
+
+        if self.activation not in ["swish", "silu", "sigmoid"]:
+            raise ValueError(f"Unsupported activation: {self.activation}")
+
+        if elementwise_affine:
+            self.weight = nn.Parameter(torch.empty(hidden_size, **factory_kwargs))
+        else:
+            self.register_parameter("weight", None)
+        self.register_parameter("bias", None)
+
+    def forward(
+        self,
+        x: torch.Tensor,
+        g: torch.Tensor,
+        residual: torch.Tensor | None = None,
+        prenorm: bool = False,
+        residual_in_fp32: bool = False,
+    ) -> torch.Tensor:
+        return rms_norm_gated(
+            x,
+            g,
+            self.weight,
+            self.bias,
+            self.activation,
+            residual=residual,
+            eps=self.eps,
+            prenorm=prenorm,
+            residual_in_fp32=residual_in_fp32,
+        )
 
 
 @triton.heuristics({"IS_VARLEN": lambda args: args["cu_seqlens"] is not None})
@@ -1162,7 +1198,7 @@ def chunk_kda_fwd(
         cu_seqlens=cu_seqlens,
     )
     del A
-    h, v_new, final_state = chunk_gated_delta_rule_fwd_h(
+    h, v_new, final_state = chunk_kda_gated_delta_rule_fwd_h(
         k=kg,
         w=w,
         u=u,

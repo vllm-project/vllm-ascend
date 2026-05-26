@@ -150,6 +150,16 @@
 #    Future Plan:
 #       Remove this patch when vLLM support the dispatch function.
 #
+#   2. `vllm.model_executor.layers.kda`, `vllm.model_executor.layers.fla.ops.kda`
+#    Why:
+#       vLLM KDA Triton kernels need Ascend-specific operator implementations.
+#    How:
+#       Override KDA prefill/decode/gating/norm helpers with Ascend Triton
+#       implementations while keeping the vLLM KimiDeltaAttention framework and
+#       state-cache flow unchanged.
+#    Future Plan:
+#       Remove this patch when vLLM supports dispatching KDA ops by platform.
+#
 # ** 5. File: worker/patch_qwen3_next_mtp.py**
 # ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 #   1. `vllm.v1.worker.utils.bind_kv_cache`

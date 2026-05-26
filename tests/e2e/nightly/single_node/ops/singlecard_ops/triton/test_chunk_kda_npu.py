@@ -12,7 +12,7 @@ import torch.nn.functional as F
 import torch_npu  # noqa: F401
 
 from vllm_ascend.ops.triton.fla.kda import chunk_kda
-from vllm_ascend.ops.triton.fla.l2norm_kda import l2norm_fwd
+from vllm_ascend.ops.triton.fla.l2norm import l2norm_fwd
 
 DEVICE = "npu"
 
