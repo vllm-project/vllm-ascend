@@ -2321,6 +2321,7 @@ class AscendDSAImpl(DSAAttentionImpl):
                 layout_kv="PA_ND",
             )[0]
         return attn_output
+
     def _indexer_qkv_prepare(
         self,
         x: torch.Tensor,
@@ -2425,7 +2426,6 @@ class AscendDSAImpl(DSAAttentionImpl):
             indexer_kv_scale_metadata,
             with_prefill,
         )
-
 
     def _indexer_qli_finish(
         self,

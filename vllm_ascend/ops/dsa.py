@@ -260,6 +260,7 @@ def dsa_forward(
         self.dsa_attn.layer_name, hidden_states, kv_cache, attn_metadata, need_gather_q_kv, output
     )
 
+
 def dsa_forward_fake(
     hidden_states: torch.Tensor,
     need_gather_q_kv: bool,
