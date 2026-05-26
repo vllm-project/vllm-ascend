@@ -1,7 +1,10 @@
 # ==========================================
 # ACTUAL TEST CASES
 # ==========================================
-
+#workflow暂缺A2yaml
+#          - name: qwen3-32b
+#            os: linux-aarch64-a2b3-4
+#            config_file_path: Qwen3-32B.yaml
 test_cases:
   - name: "Qwen3-32B-TP4"
     model: "Qwen/Qwen3-32B"

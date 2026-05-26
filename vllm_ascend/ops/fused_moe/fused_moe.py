@@ -75,6 +75,7 @@ class FusedMoEResult:
 @dataclass
 class FusedMoEEvents:
     before_routed_experts: torch.npu.Event
+    after_routed_experts: torch.npu.Event | None = field(default=None)
     before_dispatch: torch.npu.Event | None = field(default=None)
     before_gmm2: torch.npu.Event | None = field(default=None)
     before_combine: torch.npu.Event | None = field(default=None)
@@ -279,7 +280,7 @@ class AscendMoERunner(MoERunner):
             MoECommType.ALLTOALL,
             MoECommType.MC2,
             MoECommType.FUSED_MC2,
-        }
+        } or (moe_comm_type == MoECommType.ALLGATHER and _EXTRA_CTX.flash_comm_v1_enabled)
 
     def _maybe_reduce_shared_expert_output(
         self,
@@ -556,7 +557,8 @@ class AscendFusedMoE(FusedMoE):
 
     @property
     def is_internal_router(self) -> bool:
-        return False
+        gate = self.gate
+        return gate is not None and hasattr(gate, "weight_fp32")
 
     @property
     def use_dp_chunking(self) -> bool:
@@ -735,7 +737,7 @@ class AscendFusedMoE(FusedMoE):
                 quantized_x, pertoken_scale = torch_npu.npu_dynamic_quant(hidden_states)
                 # Execute the gate projection and activation concurrently with the
                 # dispatch communication.
-                maybe_wait_event(fused_moe_evts.before_dispatch)
+                maybe_wait_event(fused_moe_evts.after_routed_experts)
                 hidden_states = torch_npu.npu_quant_matmul(
                     quantized_x,
                     self._shared_experts.gate_up_proj.weight,
@@ -804,7 +806,20 @@ class AscendFusedMoE(FusedMoE):
         if self.shared_multistream_overlap_gate:
             set_flash_common3_context(shared_experts=self._shared_experts)
 
-        before_routed_experts = torch.npu.current_stream().record_event()
+        if self.is_internal_router:
+            gate = self.gate
+            assert gate is not None
+            # NOTE(Angazenn): To make this cast explicitly, the hbm usage might
+            # increase with extra hidden states. We also assume that all gate
+            # linear is unquantized so that we the weight is pre-casted in
+            # process_weights_after_loading of AscendUnquantizedLinearMethod.
+            hidden_states_fp32 = hidden_states.float()
+            before_routed_experts = torch.npu.current_stream().record_event()
+            router_logits = F.linear(hidden_states_fp32, gate.weight_fp32)
+            after_routed_experts = torch.npu.current_stream().record_event()
+        else:
+            before_routed_experts = torch.npu.current_stream().record_event()
+            after_routed_experts = None
 
         fused_moe_results = self.forward_impl(
             hidden_states=hidden_states,
@@ -824,6 +839,7 @@ class AscendFusedMoE(FusedMoE):
             shared_out = self._forward_shared_experts(
                 hidden_states,
                 FusedMoEEvents(
+                    after_routed_experts=after_routed_experts,
                     before_routed_experts=before_routed_experts,
                     before_dispatch=fused_moe_results.before_dispatch_evt,
                     before_gmm2=fused_moe_results.before_gmm2_evt,

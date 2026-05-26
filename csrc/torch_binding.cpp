@@ -1479,6 +1479,14 @@ at::Tensor npu_hc_post_npu(
     return out;
 }
 
+constexpr int64_t HC_PRE_HC_LIMIT = 4;
+constexpr int64_t HC_PRE_D_LIMIT = 4096;
+constexpr int64_t HC_PRE_D_LIMIT_EXTEND = 7168;
+constexpr int64_t HC_PRE_MIX_HC_LIMIT = 24;
+constexpr int64_t HC_PRE_FUSION_BASE_BS = 8192;
+constexpr int64_t HC_PRE_FUSION_SPLIT_K_MAX_BS = 512;
+constexpr const char* ASCEND_950_PREFIX = "Ascend950";
+
 std::tuple<at::Tensor, at::Tensor, at::Tensor> construct_hc_pre_output_tensor(const at::Tensor& x, int64_t hc_mult)
 {
     auto xDims = x.dim();
@@ -1541,20 +1549,21 @@ void check_hc_pre_shape_and_dtype(
 
     auto hc = x_dims == 4 ? x.size(2) : x.size(1);
     auto d = x_dims == 4 ? x.size(3) : x.size(2);
-    TORCH_CHECK(hc == hc_mult, "The hc of x should be equal to hc_mult, actual hc is ", hc,
-                ", hc_mult is ", hc_mult, ".");
-    auto hc_mix = (2 + hc_mult) * hc_mult;
+    TORCH_CHECK(hc_mult == HC_PRE_HC_LIMIT, "hc_mult only supports ", HC_PRE_HC_LIMIT, ", actual ", hc_mult, ".");
+    TORCH_CHECK(hc == HC_PRE_HC_LIMIT, "The hc of x only supports ", HC_PRE_HC_LIMIT, ", actual ", hc, ".");
+    TORCH_CHECK(d == HC_PRE_D_LIMIT || d == HC_PRE_D_LIMIT_EXTEND, "The d of x only supports ", HC_PRE_D_LIMIT,
+                " or ", HC_PRE_D_LIMIT_EXTEND, ", actual ", d, ".");
     TORCH_CHECK(hc_fn.dim() == 2, "Input tensor hc_fn's dim num should be 2, actual ", hc_fn.dim(), ".");
-    TORCH_CHECK(hc_fn.size(0) == hc_mix, "The hc_fn.shape[0] should be (2 + hc_mult) * hc_mult, actual ",
-                hc_fn.size(0), ", expected ", hc_mix, ".");
+    TORCH_CHECK(hc_fn.size(0) == HC_PRE_MIX_HC_LIMIT, "The hc_fn.shape[0] only supports ",
+                HC_PRE_MIX_HC_LIMIT, ", actual ", hc_fn.size(0), ".");
     TORCH_CHECK(hc_fn.size(1) == hc * d, "The hc_fn.shape[1] should be hc * d, actual hc_fn.shape[1] is ",
                 hc_fn.size(1), ", hc is ", hc, ", d is ", d, ".");
     TORCH_CHECK(hc_scale.dim() == 1, "Input tensor hc_scale's dim num should be 1, actual ", hc_scale.dim(), ".");
     TORCH_CHECK(hc_scale.size(0) == HC_SCALE_SIZE, "Input tensor hc_scale's shape should be [", HC_SCALE_SIZE,
                 "], actual [", hc_scale.size(0), "].");
     TORCH_CHECK(hc_base.dim() == 1, "Input tensor hc_base's dim num should be 1, actual ", hc_base.dim(), ".");
-    TORCH_CHECK(hc_base.size(0) == hc_mix, "The hc_base.shape[0] should be (2 + hc_mult) * hc_mult, actual ",
-                hc_base.size(0), ", expected ", hc_mix, ".");
+    TORCH_CHECK(hc_base.size(0) == HC_PRE_MIX_HC_LIMIT, "The hc_base.shape[0] only supports ",
+                HC_PRE_MIX_HC_LIMIT, ", actual ", hc_base.size(0), ".");
 
     TORCH_CHECK(x.dtype() == at::kBFloat16, "x's dtype should be BFLOAT16.");
     TORCH_CHECK(hc_fn.dtype() == at::kFloat, "hc_fn's dtype should be FLOAT32.");
@@ -1562,12 +1571,33 @@ void check_hc_pre_shape_and_dtype(
     TORCH_CHECK(hc_base.dtype() == at::kFloat, "hc_base's dtype should be FLOAT32.");
 }
 
-std::tuple<at::Tensor, at::Tensor, at::Tensor> npu_hc_pre_npu(
+int64_t get_hc_pre_batch_size(const at::Tensor& x)
+{
+    if (x.dim() == 4) {
+        return x.size(0) * x.size(1);
+    }
+    return x.size(0);
+}
+
+bool is_ascend950()
+{
+    static const char* soc_name = aclrtGetSocName();
+    return soc_name != nullptr && std::string(soc_name).find(ASCEND_950_PREFIX) == 0;
+}
+
+bool should_use_hc_pre_fusion(const at::Tensor& x)
+{
+    if (!is_ascend950()) {
+        return true;
+    }
+    auto bs = get_hc_pre_batch_size(x);
+    return bs <= HC_PRE_FUSION_SPLIT_K_MAX_BS || bs % HC_PRE_FUSION_BASE_BS == 0;
+}
+
+std::tuple<at::Tensor, at::Tensor, at::Tensor> run_hc_pre_composite(
     const at::Tensor& x, const at::Tensor& hc_fn, const at::Tensor& hc_scale, const at::Tensor& hc_base,
     int64_t hc_mult, int64_t hc_sinkhorn_iters, double norm_eps, double hc_eps)
 {
-    check_hc_pre_shape_and_dtype(x, hc_fn, hc_scale, hc_base, hc_mult);
-
     auto xDims = x.dim();
     auto rsqrt = construct_hc_pre_rsqrt_output_tensor(x, norm_eps);
     EXEC_NPU_CMD(aclnnHcPreInvRms, x, norm_eps, rsqrt);
@@ -1591,12 +1621,10 @@ std::tuple<at::Tensor, at::Tensor, at::Tensor> npu_hc_pre_npu(
     return std::tuple<at::Tensor, at::Tensor, at::Tensor>(y, post, comb_frag);
 }
 
-std::tuple<at::Tensor, at::Tensor, at::Tensor> npu_hc_pre_v2_npu(
+std::tuple<at::Tensor, at::Tensor, at::Tensor> run_hc_pre_fusion(
     const at::Tensor& x, const at::Tensor& hc_fn, const at::Tensor& hc_scale, const at::Tensor& hc_base,
     int64_t hc_mult, int64_t hc_sinkhorn_iters, double norm_eps, double hc_eps)
 {
-    check_hc_pre_shape_and_dtype(x, hc_fn, hc_scale, hc_base, hc_mult);
-
     auto output_tensors = construct_hc_pre_output_tensor(x, hc_mult);
     at::Tensor y = std::get<0>(output_tensors);
     at::Tensor post = std::get<1>(output_tensors);
@@ -1605,6 +1633,25 @@ std::tuple<at::Tensor, at::Tensor, at::Tensor> npu_hc_pre_v2_npu(
                  y, post, comb_frag);
 
     return std::tuple<at::Tensor, at::Tensor, at::Tensor>(y, post, comb_frag);
+}
+
+std::tuple<at::Tensor, at::Tensor, at::Tensor> npu_hc_pre_npu(
+    const at::Tensor& x, const at::Tensor& hc_fn, const at::Tensor& hc_scale, const at::Tensor& hc_base,
+    int64_t hc_mult, int64_t hc_sinkhorn_iters, double norm_eps, double hc_eps)
+{
+    check_hc_pre_shape_and_dtype(x, hc_fn, hc_scale, hc_base, hc_mult);
+    return run_hc_pre_composite(x, hc_fn, hc_scale, hc_base, hc_mult, hc_sinkhorn_iters, norm_eps, hc_eps);
+}
+
+std::tuple<at::Tensor, at::Tensor, at::Tensor> npu_hc_pre_v2_npu(
+    const at::Tensor& x, const at::Tensor& hc_fn, const at::Tensor& hc_scale, const at::Tensor& hc_base,
+    int64_t hc_mult, int64_t hc_sinkhorn_iters, double norm_eps, double hc_eps)
+{
+    check_hc_pre_shape_and_dtype(x, hc_fn, hc_scale, hc_base, hc_mult);
+    if (!should_use_hc_pre_fusion(x)) {
+        return run_hc_pre_composite(x, hc_fn, hc_scale, hc_base, hc_mult, hc_sinkhorn_iters, norm_eps, hc_eps);
+    }
+    return run_hc_pre_fusion(x, hc_fn, hc_scale, hc_base, hc_mult, hc_sinkhorn_iters, norm_eps, hc_eps);
 }
 
 at::Tensor construct_hc_pre_inv_rms_output_tensor(const at::Tensor& x, float epsilon=1e-20)
@@ -2231,10 +2278,10 @@ TORCH_LIBRARY_EXPAND(CONCAT(_C, _ascend), ops)
         "                         Tensor weight, "
         "                         Tensor? bias, "
         "                         Tensor conv_states, "
-        "                         int[] query_start_loc, "
-        "                         int[] cache_indices, "
-        "                         int[] initial_state_mode, "
-        "                         int[] num_accepted_tokens, "
+        "                         Tensor? query_start_loc, "
+        "                         Tensor? cache_indices, "
+        "                         Tensor? initial_state_mode, "
+        "                         Tensor? num_accepted_tokens, "
         "                         int activation_mode, "
         "                         int pad_slot_id, "
         "                         int run_mode) -> (Tensor output)");
@@ -2395,8 +2442,8 @@ TORCH_LIBRARY_EXPAND(CONCAT(_C, _ascend), ops)
 
     ops.def(
         "dispatch_ffn_combine(Tensor x, Tensor[] weight1, Tensor[] weight2, Tensor expert_idx,"
-        "                     Tensor[] scale1, Tensor[] scale2, Tensor[]? bias1, Tensor[]? bias2, Tensor probs, str group,"
-        "                     int max_output_size, Tensor! out, Tensor! expert_token_nums, Tensor? x_active_mask=None) -> (Tensor out, Tensor expert_token_nums)"
+        "                     Tensor[] scale1, Tensor[] scale2, Tensor[] bias1, Tensor[] bias2, Tensor probs, str group,"
+        "                     int max_output_size, Tensor! out, Tensor! expert_token_nums, Tensor? x_active_mask=None, float swiglu_limit=1000000.0) -> (Tensor out, Tensor expert_token_nums)"
     );
     ops.impl("dispatch_ffn_combine", torch::kPrivateUse1, &vllm_ascend::dispatch_ffn_combine);
 

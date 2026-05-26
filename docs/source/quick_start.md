@@ -90,10 +90,9 @@ The default workdir is `/workspace`, vLLM and vLLM Ascend code are placed in `/v
 
 You can use ModelScope mirror to speed up download:
 
-<!-- tests/e2e/doctest/001-quickstart-test.sh should be considered updating as well -->
+<!-- tests/e2e/doctests/001-quickstart-test.sh should be considered updating as well -->
 
 ```bash
-pip install modelscope>=1.35.1
 export VLLM_USE_MODELSCOPE=True
 ```
 
