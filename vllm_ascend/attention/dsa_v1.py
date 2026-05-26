@@ -1462,6 +1462,7 @@ class AscendDSAImpl(DSAAttentionImpl):
                 else:
                     _ = self.cv_wkv.quantize(dummy)
                     _ = self.cv_wkv.matmul(dummy, None)
+                assert self.rope_head_dim is not None
                 kv_dummy = torch.zeros(
                     1, self.nope_head_dim + self.rope_head_dim, dtype=hidden_states.dtype, device=hidden_states.device
                 )
