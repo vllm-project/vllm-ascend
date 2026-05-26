@@ -329,7 +329,7 @@ def sample_recovered_tokens_kernel(
 
             qv = tl.load(q_ptr + req_idx * C + offs, mask=mask, other=1.0).to(tl.float32)
 
-            bad_q = (qv <= 0) | tl.math.isinf(qv)
+            bad_q = (qv <= 0) | (qv != qv) | (qv == float("inf")) | (qv == -float("inf"))
             score = tl.where(bad_q, float("-inf"), prob / qv)
             score = tl.where(mask, score, float("-inf"))
 
