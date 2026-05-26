@@ -33,8 +33,7 @@ os.environ["VLLM_DISABLE_SHARED_EXPERTS_STREAM"] = "1"
 
 from vllm.v1.attention.backends.registry import AttentionBackendEnum
 
-import vllm_ascend.envs as envs_ascend
-from vllm_ascend.ascend_config import init_ascend_config
+from vllm_ascend.ascend_config import get_ascend_config, init_ascend_config
 
 # isort: off
 from vllm_ascend.utils import (
@@ -398,62 +397,35 @@ class NPUPlatform(Platform):
         # get custom compile backend for graph fusion
         compilation_config.oot_compiler = cls.get_compile_backend()
 
-        piecewise_modes = {
-            CUDAGraphMode.PIECEWISE,
-            CUDAGraphMode.FULL_AND_PIECEWISE,
-        }
-        full_graph_modes = {
-            CUDAGraphMode.FULL,
-            CUDAGraphMode.FULL_DECODE_ONLY,
-        }
-        full_graph_warning_message = """\033[91m
-            **********************************************************************************
-            * WARNING: You have enabled the *full graph* feature.
-            * This is an early experimental stage and may involve various unknown issues.
-            * A known problem is that capturing too many batch sizes can lead to OOM
-            * (Out of Memory) errors or inference hangs. If you encounter such issues,
-            * consider reducing `gpu_memory_utilization` or manually specifying a smaller
-            * batch size for graph capture.
-            * For more details, please refer to:
-            * https://docs.vllm.ai/en/stable/configuration/conserving_memory.html#reduce-cuda-graphs
-            **********************************************************************************\033[0m
-            """
-
+        compilation_config.use_inductor = False
         if compilation_config.cudagraph_mode == CUDAGraphMode.NONE:
             compilation_config.mode = CompilationMode.NONE
             ascend_config.ascend_compilation_config.enable_npugraph_ex = False
-        elif compilation_config.cudagraph_mode in piecewise_modes:
-            logger.info(
-                "%s compilation enabled on NPU. use_inductor not supported - using only ACL Graph mode",
-                compilation_config.cudagraph_mode,
-            )
+        elif compilation_config.cudagraph_mode.requires_piecewise_compilation():
+            # Our is_cuda_alike is False so we cannot reuse the assertion of upstream
             assert compilation_config.mode == CompilationMode.VLLM_COMPILE, (
-                "When enabling VLLM_COMPILE aclgraph, please make sure compilation_config.mode == "
-                "CompilationMode.VLLM_COMPILE and compilation_config.cudagraph_mode == CUDAGraphMode.VLLM_COMPILE"
+                "Compilation mode should be CompilationMode.VLLM_COMPILE "
+                "when cudagraph_mode piecewise cudagraphs is used, "
+                "cudagraph_mode=%s",
+                compilation_config.cudagraph_mode,
             )
             compilation_config.set_splitting_ops_for_v1(
                 all2all_backend=vllm_config.parallel_config.all2all_backend,
                 data_parallel_size=vllm_config.parallel_config.data_parallel_size,
             )
-            compilation_config.use_inductor = False
             # NOTE: Theoretically, we should also add vllm::mla_forward in the attention ops.
             # Since the process is created in the spawn mode, the value of the class attribute
             # attention ops transmitted is still the one before modification, so it has not been modified.
             # This will cause in scenarios where both piecewise and splitting ops are configured simultaneously,
             # If splitting ops does not contain the vllm::mla forward value, this configuration issue will
             # not be detected in advance assert.
-            if "vllm::mla_forward" not in compilation_config.splitting_ops:
-                compilation_config.splitting_ops.append("vllm::mla_forward")
+            compilation_config.splitting_ops.extend(["vllm::mla_forward"])
             update_aclgraph_sizes(vllm_config)
             ascend_config.ascend_compilation_config.enable_npugraph_ex = False
-            if compilation_config.cudagraph_mode == CUDAGraphMode.FULL_AND_PIECEWISE:
-                logger.info("FULL_AND_PIECEWISE enabled on NPU: mixed batches use PIECEWISE, decode batches use FULL.")
-                logger.warning(full_graph_warning_message)
-        elif compilation_config.cudagraph_mode in full_graph_modes:
-            logger.info("Full graph compilation enabled on NPU. use_inductor not supported - using only ACL Graph mode")
-            compilation_config.use_inductor = False
+        elif compilation_config.cudagraph_mode.has_full_cudagraphs():
+            # We don't want to have our FX graph split for the sake of static kernel feature,
+            # because it will compile multiple times, so we set splitting_ops to empty manually.
             compilation_config.splitting_ops = []
-            logger.warning(full_graph_warning_message)
         else:
             logger.info(
                 "%s cudagraph_mode is not support on NPU. falling back to NONE", compilation_config.cudagraph_mode
@@ -494,12 +466,12 @@ class NPUPlatform(Platform):
         if get_ascend_device_type() != AscendDeviceType._310P:
             compilation_config.custom_ops = ["all"]
 
-        if envs_ascend.VLLM_ASCEND_BALANCE_SCHEDULING:
+        if ascend_config.enable_balance_scheduling:
             kv_transfer_config = vllm_config.kv_transfer_config
             kv_role = getattr(kv_transfer_config, "kv_role", None)
             if kv_transfer_config is not None and kv_role != "kv_both":
                 raise ValueError(
-                    "VLLM_ASCEND_BALANCE_SCHEDULING (balance scheduling) only supports PD-mixed mode "
+                    "enable_balance_scheduling only supports PD-mixed mode "
                     "(kv_role='kv_both' or no kv_transfer_config), and is not supported in "
                     "PD-disaggregated mode (kv_role='kv_producer'/'kv_consumer')."
                 )
@@ -588,7 +560,7 @@ class NPUPlatform(Platform):
             os.environ["PYTORCH_NPU_ALLOC_CONF"] = npu_alloc_configs
             logger.info("Set PYTORCH_NPU_ALLOC_CONF=%s", npu_alloc_configs)
 
-        if ascend_config.enable_mc2_hierarchy_comm and envs_ascend.VLLM_ASCEND_ENABLE_FUSED_MC2:
+        if ascend_config.enable_mc2_hierarchy_comm and get_ascend_config().enable_fused_mc2:
             raise ValueError(
                 "fused mc2 op cannot be used with hierarchy communication."
                 "Please disable VLLM_ASCEND_ENABLE_FUSED_MC2 by setting it to 0."
