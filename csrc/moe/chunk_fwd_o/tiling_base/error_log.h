@@ -8,21 +8,24 @@
 #define OP_LOGI(opname, ...)
 #define OP_LOGW(opname, ...)             \
     do {                                 \
-        std::printf("[WARN][%s] ", std::string(opname).c_str()); \
+        (void)(opname);                  \
+        std::printf("[WARN] ";           \
         std::printf(__VA_ARGS__);        \
         std::printf("\n");              \
     } while (0)
 
 #define OP_LOGE_WITHOUT_REPORT(opname, ...) \
     do {                                    \
-        std::printf("[ERRORx][%s] ", std::string(opname).c_str()); \
+        (void)(opname);                     \
+        std::printf("[ERRORx] ");           \
         std::printf(__VA_ARGS__);           \
         std::printf("\n");                 \
     } while (0)
 
 #define OP_LOGE(opname, ...)              \
     do {                                  \
-        std::printf("[ERROR][%s] ", std::string(opname).c_str()); \
+        (void)(opname);                   \
+        std::printf("[ERROR] ");          \
         std::printf(__VA_ARGS__);         \
         std::printf("\n");               \
     } while (0)
