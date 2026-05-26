@@ -114,6 +114,12 @@ env_variables: dict[str, Callable[[], Any]] = {
     "VLLM_ASCEND_ENABLE_BATCH_MEMCPY": lambda: os.getenv("VLLM_ASCEND_ENABLE_BATCH_MEMCPY", None),
     # Whether to use MultiBlockPool for KV cache management
     "VLLM_ASCEND_APPLY_DSV4_PATCH": lambda: bool(int(os.getenv("VLLM_ASCEND_APPLY_DSV4_PATCH", "0"))),
+    # Debug-only switch for DSA checks in pure decode batches while running
+    # in graph mode. 0 disables graph decode debug checks/logs, 1 enables
+    # them. Default is 1. Valid range: 0 or 1. Not sensitive.
+    "VLLM_ASCEND_DSA_DEBUG_DECODE_GRAPH": lambda: bool(
+        int(os.getenv("VLLM_ASCEND_DSA_DEBUG_DECODE_GRAPH", "1"))
+    ),
 }
 
 # end-env-vars-definition

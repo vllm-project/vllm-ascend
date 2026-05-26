@@ -1,5 +1,5 @@
 import math
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from typing import TYPE_CHECKING, ClassVar, TypeVar
 
 import torch
@@ -7,12 +7,15 @@ import torch.nn.functional as F
 import torch_npu
 import vllm.envs as envs_vllm
 from vllm.config import VllmConfig, get_current_vllm_config
+from vllm.config.compilation import CUDAGraphMode
 from vllm.distributed import get_tensor_model_parallel_world_size
 from vllm.forward_context import get_forward_context
+from vllm.logger import logger
 from vllm.triton_utils import HAS_TRITON
 from vllm.v1.attention.backend import AttentionBackend, AttentionCGSupport, AttentionMetadataBuilder
 from vllm.v1.kv_cache_interface import AttentionSpec, MLAAttentionSpec
 
+from vllm_ascend import envs
 from vllm_ascend.ascend_config import get_ascend_config
 from vllm_ascend.attention.abstract import DSAAttentionImpl
 from vllm_ascend.attention.attention_mask import AttentionMaskBuilder
@@ -42,8 +45,572 @@ else:
 
 BUILD_METADATA_STEP_PREFILL = 0
 BUILD_METADATA_STEP_DECODE = 1
+_DSA_DEBUG_NONFINITE_LOGGED: set[tuple[str, str, int, str]] = set()
+_DSA_DEBUG_SLOT_LOGGED: set[tuple[str, str, int, str]] = set()
+_DSA_DEBUG_COMPRESSED_BAD_SLOT_LOGGED: set[tuple[str, str, int, str]] = set()
+_DSA_DEBUG_BAD_SLOT_LOGGED: set[tuple[str, str, int, str]] = set()
+_DSA_DEBUG_SAS_INPUT_LOGGED: set[tuple[str, str, int, str]] = set()
+_DSA_DEBUG_ROW_MISMATCH_LOGGED: set[tuple[str, str, int, str]] = set()
+_DSA_DEBUG_DECODE_SLOT_COLLISION_LOGGED: set[tuple[str, str, int, str]] = set()
 
 # mypy: disable-error-code="has-type"
+
+
+def _dsa_debug_metadata_summary(attn_metadata) -> str:
+    metadata = attn_metadata[0] if isinstance(attn_metadata, list) else attn_metadata
+    if metadata is None:
+        return "metadata=None"
+    return (
+        f"num_decodes={getattr(metadata, 'num_decodes', None)} "
+        f"num_prefills={getattr(metadata, 'num_prefills', None)} "
+        f"num_decode_tokens={getattr(metadata, 'num_decode_tokens', None)} "
+        f"num_actual_tokens={getattr(metadata, 'num_actual_tokens', None)} "
+        f"num_input_tokens={getattr(metadata, 'num_input_tokens', None)}"
+    )
+
+
+def _dsa_debug_should_check(attn_metadata, phase: str) -> bool:
+    metadata = attn_metadata[0] if isinstance(attn_metadata, list) else attn_metadata
+    if metadata is None:
+        return False
+    if getattr(metadata, "num_prefills", 0) > 0:
+        return True
+    if phase != "decode":
+        return False
+    if envs.VLLM_ASCEND_DSA_DEBUG_DECODE_GRAPH:
+        return True
+    forward_context = get_forward_context()
+    return getattr(forward_context, "cudagraph_runtime_mode", CUDAGraphMode.NONE) == CUDAGraphMode.NONE
+
+
+def _dsa_debug_check_finite(
+    tensor: torch.Tensor | None,
+    layer_name: str,
+    phase: str,
+    stage: str,
+    compress_ratio: int,
+    attn_metadata=None,
+) -> bool:
+    if not _dsa_debug_should_check(attn_metadata, phase):
+        return True
+    if tensor is None or tensor.numel() == 0 or not tensor.is_floating_point():
+        return True
+
+    try:
+        is_finite = torch.isfinite(tensor)
+        if bool(is_finite.all().item()):
+            return True
+        nan_count = int(torch.isnan(tensor).sum().item())
+        inf_count = int(torch.isinf(tensor).sum().item())
+        finite_count = int(is_finite.sum().item())
+        all_nan = nan_count == tensor.numel()
+        all_nonfinite = finite_count == 0
+        bad_rows_head = []
+        if tensor.ndim > 0 and tensor.shape[0] > 0:
+            row_is_finite = is_finite.reshape(tensor.shape[0], -1).all(dim=1)
+            bad_rows = torch.nonzero(~row_is_finite, as_tuple=False).reshape(-1)
+            bad_rows_head = bad_rows[: min(16, bad_rows.numel())].detach().cpu().tolist()
+    except RuntimeError as exc:
+        logger.warning(
+            "[DSA_DEBUG_NAN] finite check failed: layer=%s phase=%s "
+            "stage=%s compress_ratio=%s shape=%s dtype=%s error=%s",
+            layer_name,
+            phase,
+            stage,
+            compress_ratio,
+            tuple(tensor.shape),
+            tensor.dtype,
+            exc,
+        )
+        return True
+
+    key = (layer_name, phase, compress_ratio, stage)
+    if key not in _DSA_DEBUG_NONFINITE_LOGGED:
+        _DSA_DEBUG_NONFINITE_LOGGED.add(key)
+        forward_context = get_forward_context()
+        logger.warning(
+            "[DSA_DEBUG_NAN] non-finite tensor: layer=%s phase=%s "
+            "stage=%s compress_ratio=%s shape=%s dtype=%s nan_count=%s "
+            "inf_count=%s finite_count=%s numel=%s all_nan=%s "
+            "all_nonfinite=%s bad_rows=%s mode=%s num_tokens=%s %s",
+            layer_name,
+            phase,
+            stage,
+            compress_ratio,
+            tuple(tensor.shape),
+            tensor.dtype,
+            nan_count,
+            inf_count,
+            finite_count,
+            tensor.numel(),
+            all_nan,
+            all_nonfinite,
+            bad_rows_head,
+            getattr(forward_context, "cudagraph_runtime_mode", None),
+            getattr(forward_context, "num_tokens", None),
+            _dsa_debug_metadata_summary(attn_metadata),
+        )
+    return False
+
+
+def _dsa_debug_log_slot_mapping(
+    slot_mapping: torch.Tensor | None,
+    layer_name: str,
+    phase: str,
+    stage: str,
+    compress_ratio: int,
+    attn_metadata=None,
+) -> None:
+    if not _dsa_debug_should_check(attn_metadata, phase):
+        return
+    if slot_mapping is None or slot_mapping.numel() == 0:
+        return
+
+    key = (layer_name, phase, compress_ratio, stage)
+    if key in _DSA_DEBUG_SLOT_LOGGED:
+        return
+    _DSA_DEBUG_SLOT_LOGGED.add(key)
+
+    try:
+        valid_mask = slot_mapping >= 0
+        valid_count = int(valid_mask.sum().item())
+        slot_min = int(slot_mapping.min().item())
+        slot_max = int(slot_mapping.max().item())
+        slot_head = slot_mapping.reshape(-1)[: min(16, slot_mapping.numel())].detach().cpu().tolist()
+    except RuntimeError as exc:
+        logger.warning(
+            "[DSA_DEBUG_SLOT] slot check failed: layer=%s phase=%s "
+            "stage=%s compress_ratio=%s slot_shape=%s error=%s %s",
+            layer_name,
+            phase,
+            stage,
+            compress_ratio,
+            tuple(slot_mapping.shape),
+            exc,
+            _dsa_debug_metadata_summary(attn_metadata),
+        )
+        return
+
+    logger.warning(
+        "[DSA_DEBUG_SLOT] layer=%s phase=%s stage=%s compress_ratio=%s "
+        "slot_shape=%s slot_numel=%s valid_slot_count=%s slot_min=%s "
+        "slot_max=%s slot_head=%s %s",
+        layer_name,
+        phase,
+        stage,
+        compress_ratio,
+        tuple(slot_mapping.shape),
+        slot_mapping.numel(),
+        valid_count,
+        slot_min,
+        slot_max,
+        slot_head,
+        _dsa_debug_metadata_summary(attn_metadata),
+    )
+
+
+def _dsa_debug_log_bad_slot_rows(
+    slot_mapping: torch.Tensor | None,
+    layer_name: str,
+    phase: str,
+    stage: str,
+    compress_ratio: int,
+    row_count: int | None = None,
+    attn_metadata=None,
+) -> None:
+    if not _dsa_debug_should_check(attn_metadata, phase):
+        return
+    if slot_mapping is None or slot_mapping.numel() == 0:
+        return
+
+    flat_slot_mapping = slot_mapping.reshape(-1)
+    if row_count is None:
+        row_count = flat_slot_mapping.shape[0]
+    row_count = min(row_count, flat_slot_mapping.shape[0])
+    if row_count == 0:
+        return
+    flat_slot_mapping = flat_slot_mapping[:row_count]
+    valid_mask = flat_slot_mapping >= 0
+
+    try:
+        valid_count = int(valid_mask.sum().item())
+    except RuntimeError as exc:
+        logger.warning(
+            "[DSA_DEBUG_BAD_SLOT] valid mask check failed: layer=%s "
+            "phase=%s stage=%s compress_ratio=%s slot_shape=%s "
+            "row_count=%s error=%s %s",
+            layer_name,
+            phase,
+            stage,
+            compress_ratio,
+            tuple(slot_mapping.shape),
+            row_count,
+            exc,
+            _dsa_debug_metadata_summary(attn_metadata),
+        )
+        return
+    if valid_count == row_count:
+        return
+
+    key = (layer_name, phase, compress_ratio, stage)
+    if key in _DSA_DEBUG_BAD_SLOT_LOGGED:
+        return
+    _DSA_DEBUG_BAD_SLOT_LOGGED.add(key)
+    try:
+        bad_rows = torch.nonzero(~valid_mask, as_tuple=False).reshape(-1)
+        bad_rows_head = bad_rows[: min(16, bad_rows.numel())].detach().cpu().tolist()
+        bad_slots_head = flat_slot_mapping[bad_rows[: min(16, bad_rows.numel())]].detach().cpu().tolist()
+    except RuntimeError as exc:
+        bad_rows_head = f"error={exc}"
+        bad_slots_head = f"error={exc}"
+
+    logger.warning(
+        "[DSA_DEBUG_BAD_SLOT] layer=%s phase=%s stage=%s "
+        "compress_ratio=%s slot_shape=%s row_count=%s valid_slot_count=%s "
+        "bad_rows=%s bad_row_slots=%s %s",
+        layer_name,
+        phase,
+        stage,
+        compress_ratio,
+        tuple(slot_mapping.shape),
+        row_count,
+        valid_count,
+        bad_rows_head,
+        bad_slots_head,
+        _dsa_debug_metadata_summary(attn_metadata),
+    )
+
+
+def _dsa_debug_log_row_mismatch(
+    kv_rows: int,
+    slot_rows: int,
+    layer_name: str,
+    phase: str,
+    stage: str,
+    compress_ratio: int,
+    attn_metadata=None,
+) -> None:
+    if not _dsa_debug_should_check(attn_metadata, phase):
+        return
+    if kv_rows == slot_rows:
+        return
+    key = (layer_name, phase, compress_ratio, stage)
+    if key in _DSA_DEBUG_ROW_MISMATCH_LOGGED:
+        return
+    _DSA_DEBUG_ROW_MISMATCH_LOGGED.add(key)
+    logger.warning(
+        "[DSA_DEBUG_ROW_MISMATCH] layer=%s phase=%s stage=%s "
+        "compress_ratio=%s kv_rows=%s slot_rows=%s %s",
+        layer_name,
+        phase,
+        stage,
+        compress_ratio,
+        kv_rows,
+        slot_rows,
+        _dsa_debug_metadata_summary(attn_metadata),
+    )
+
+
+def _dsa_debug_tensor_head(tensor: torch.Tensor | None, limit: int = 16):
+    if tensor is None or tensor.numel() == 0:
+        return []
+    return tensor.reshape(-1)[: min(limit, tensor.numel())].detach().cpu().tolist()
+
+
+def _dsa_debug_log_sas_inputs(
+    metadata,
+    layer_name: str,
+    phase: str,
+    stage: str,
+    compress_ratio: int,
+    attn_metadata=None,
+) -> None:
+    if not _dsa_debug_should_check(attn_metadata, phase):
+        return
+    if metadata is None:
+        return
+
+    key = (layer_name, phase, compress_ratio, stage)
+    if key in _DSA_DEBUG_SAS_INPUT_LOGGED:
+        return
+    _DSA_DEBUG_SAS_INPUT_LOGGED.add(key)
+
+    query_start_loc = getattr(metadata, "query_start_loc", None)
+    seq_lens = getattr(metadata, "seq_lens", None)
+    start_pos = getattr(metadata, "start_pos", None)
+    block_table = getattr(metadata, "block_table", None)
+    slot_mapping = getattr(metadata, "slot_mapping", None)
+    sas_metadata = getattr(metadata, "sas_metadata", None)
+
+    try:
+        valid_slot_count = None
+        slot_min = None
+        slot_max = None
+        block_table_first_col_head = None
+        if block_table is not None and block_table.ndim >= 2 and block_table.shape[0] > 0:
+            block_table_first_col_head = _dsa_debug_tensor_head(block_table[:, 0])
+        if slot_mapping is not None and slot_mapping.numel() > 0:
+            valid_slot_count = int((slot_mapping.reshape(-1) >= 0).sum().item())
+            slot_min = int(slot_mapping.min().item())
+            slot_max = int(slot_mapping.max().item())
+        logger.warning(
+            "[DSA_DEBUG_SAS_INPUT] layer=%s phase=%s stage=%s "
+            "compress_ratio=%s q_start_shape=%s q_start_head=%s "
+            "seq_lens_shape=%s seq_lens_head=%s start_pos_shape=%s "
+            "start_pos_head=%s block_table_shape=%s block_table_head=%s "
+            "block_table_first_col_head=%s "
+            "slot_shape=%s slot_valid_count=%s slot_min=%s slot_max=%s "
+            "slot_head=%s sas_shape=%s sas_head=%s %s",
+            layer_name,
+            phase,
+            stage,
+            compress_ratio,
+            tuple(query_start_loc.shape) if query_start_loc is not None else None,
+            _dsa_debug_tensor_head(query_start_loc),
+            tuple(seq_lens.shape) if seq_lens is not None else None,
+            _dsa_debug_tensor_head(seq_lens),
+            tuple(start_pos.shape) if start_pos is not None else None,
+            _dsa_debug_tensor_head(start_pos),
+            tuple(block_table.shape) if block_table is not None else None,
+            _dsa_debug_tensor_head(block_table),
+            block_table_first_col_head,
+            tuple(slot_mapping.shape) if slot_mapping is not None else None,
+            valid_slot_count,
+            slot_min,
+            slot_max,
+            _dsa_debug_tensor_head(slot_mapping),
+            tuple(sas_metadata.shape) if sas_metadata is not None else None,
+            _dsa_debug_tensor_head(sas_metadata),
+            _dsa_debug_metadata_summary(attn_metadata),
+        )
+    except RuntimeError as exc:
+        logger.warning(
+            "[DSA_DEBUG_SAS_INPUT] metadata summary failed: layer=%s "
+            "phase=%s stage=%s compress_ratio=%s error=%s %s",
+            layer_name,
+            phase,
+            stage,
+            compress_ratio,
+            exc,
+            _dsa_debug_metadata_summary(attn_metadata),
+        )
+
+
+def _dsa_select_valid_compressed_prefill_rows(
+    compressed_kv: torch.Tensor | None,
+    slot_mapping: torch.Tensor,
+    layer_name: str,
+    phase: str,
+    stage: str,
+    compress_ratio: int,
+    attn_metadata=None,
+) -> tuple[torch.Tensor | None, torch.Tensor]:
+    if not _dsa_debug_should_check(attn_metadata, phase):
+        return compressed_kv, slot_mapping
+    if compressed_kv is None or compressed_kv.numel() == 0 or slot_mapping.numel() == 0:
+        return compressed_kv, slot_mapping
+
+    flat_compressed_kv = compressed_kv.reshape(-1, compressed_kv.shape[-1])
+    flat_slot_mapping = slot_mapping.reshape(-1)
+    kv_rows = flat_compressed_kv.shape[0]
+    slot_rows = flat_slot_mapping.shape[0]
+    _dsa_debug_log_row_mismatch(
+        kv_rows,
+        slot_rows,
+        layer_name,
+        phase,
+        stage,
+        compress_ratio,
+        attn_metadata,
+    )
+    row_count = min(flat_compressed_kv.shape[0], flat_slot_mapping.shape[0])
+    if row_count == 0:
+        return compressed_kv, slot_mapping
+
+    aligned_compressed_kv = flat_compressed_kv[:row_count]
+    flat_slot_mapping = flat_slot_mapping[:row_count]
+    valid_mask = flat_slot_mapping >= 0
+
+    try:
+        valid_count = int(valid_mask.sum().item())
+    except RuntimeError as exc:
+        logger.warning(
+            "[DSA_DEBUG_COMPRESSED_BAD_SLOT] valid mask check failed: "
+            "layer=%s phase=%s stage=%s compress_ratio=%s "
+            "compressed_shape=%s slot_shape=%s error=%s %s",
+            layer_name,
+            phase,
+            stage,
+            compress_ratio,
+            tuple(compressed_kv.shape),
+            tuple(slot_mapping.shape),
+            exc,
+            _dsa_debug_metadata_summary(attn_metadata),
+        )
+        return compressed_kv, slot_mapping
+
+    if valid_count == row_count:
+        if kv_rows != slot_rows:
+            return aligned_compressed_kv, flat_slot_mapping
+        return compressed_kv, flat_slot_mapping
+
+    key = (layer_name, phase, compress_ratio, stage)
+    if key not in _DSA_DEBUG_COMPRESSED_BAD_SLOT_LOGGED:
+        _DSA_DEBUG_COMPRESSED_BAD_SLOT_LOGGED.add(key)
+        try:
+            bad_rows = torch.nonzero(~valid_mask, as_tuple=False).reshape(-1)
+            bad_rows_head = bad_rows[: min(16, bad_rows.numel())].detach().cpu().tolist()
+            bad_slots_head = flat_slot_mapping[bad_rows[: min(16, bad_rows.numel())]].detach().cpu().tolist()
+        except RuntimeError as exc:
+            bad_rows_head = f"error={exc}"
+            bad_slots_head = f"error={exc}"
+        logger.warning(
+            "[DSA_DEBUG_COMPRESSED_BAD_SLOT] layer=%s phase=%s stage=%s "
+            "compress_ratio=%s compressed_shape=%s slot_shape=%s "
+            "valid_slot_count=%s row_count=%s bad_rows=%s bad_row_slots=%s %s",
+            layer_name,
+            phase,
+            stage,
+            compress_ratio,
+            tuple(compressed_kv.shape),
+            tuple(slot_mapping.shape),
+            valid_count,
+            row_count,
+            bad_rows_head,
+            bad_slots_head,
+            _dsa_debug_metadata_summary(attn_metadata),
+        )
+
+    if valid_count == 0:
+        return None, flat_slot_mapping[:0]
+
+    return aligned_compressed_kv[valid_mask], flat_slot_mapping[valid_mask]
+
+
+def _dsa_select_valid_prefill_rows(
+    kv: torch.Tensor | None,
+    slot_mapping: torch.Tensor,
+    layer_name: str,
+    phase: str,
+    stage: str,
+    compress_ratio: int,
+    attn_metadata=None,
+) -> tuple[torch.Tensor | None, torch.Tensor]:
+    if not _dsa_debug_should_check(attn_metadata, phase):
+        return kv, slot_mapping
+    if kv is None or kv.numel() == 0 or slot_mapping.numel() == 0:
+        return kv, slot_mapping
+
+    flat_kv = kv.reshape(-1, kv.shape[-1])
+    flat_slot_mapping = slot_mapping.reshape(-1)
+    kv_rows = flat_kv.shape[0]
+    slot_rows = flat_slot_mapping.shape[0]
+    _dsa_debug_log_row_mismatch(
+        kv_rows,
+        slot_rows,
+        layer_name,
+        phase,
+        stage,
+        compress_ratio,
+        attn_metadata,
+    )
+    row_count = min(flat_kv.shape[0], flat_slot_mapping.shape[0])
+    if row_count == 0:
+        return kv, slot_mapping
+
+    aligned_kv = flat_kv[:row_count]
+    flat_slot_mapping = flat_slot_mapping[:row_count]
+    valid_mask = flat_slot_mapping >= 0
+
+    try:
+        valid_count = int(valid_mask.sum().item())
+    except RuntimeError as exc:
+        logger.warning(
+            "[DSA_DEBUG_BAD_SLOT] valid mask check failed: layer=%s "
+            "phase=%s stage=%s compress_ratio=%s kv_shape=%s "
+            "slot_shape=%s error=%s %s",
+            layer_name,
+            phase,
+            stage,
+            compress_ratio,
+            tuple(kv.shape),
+            tuple(slot_mapping.shape),
+            exc,
+            _dsa_debug_metadata_summary(attn_metadata),
+        )
+        return kv, slot_mapping
+
+    if valid_count == row_count:
+        if kv_rows != slot_rows:
+            return aligned_kv, flat_slot_mapping
+        return kv, flat_slot_mapping
+
+    _dsa_debug_log_bad_slot_rows(
+        slot_mapping,
+        layer_name,
+        phase,
+        stage,
+        compress_ratio,
+        row_count,
+        attn_metadata,
+    )
+
+    if valid_count == 0:
+        return None, flat_slot_mapping[:0]
+
+    return aligned_kv[valid_mask], flat_slot_mapping[valid_mask]
+
+
+def _dsa_debug_log_decode_slot_collision(
+    slot_mapping: torch.Tensor | None,
+    layer_name: str,
+    phase: str,
+    stage: str,
+    compress_ratio: int,
+    attn_metadata=None,
+) -> None:
+    if not _dsa_debug_should_check(attn_metadata, phase):
+        return
+    if slot_mapping is None or slot_mapping.numel() <= 1:
+        return
+
+    key = (layer_name, phase, compress_ratio, stage)
+    if key in _DSA_DEBUG_DECODE_SLOT_COLLISION_LOGGED:
+        return
+
+    try:
+        flat_slot_mapping = slot_mapping.reshape(-1)
+        valid_slot_mapping = flat_slot_mapping[flat_slot_mapping >= 0]
+        if valid_slot_mapping.numel() <= 1:
+            return
+        unique_slots = torch.unique(valid_slot_mapping)
+        if unique_slots.numel() == valid_slot_mapping.numel():
+            return
+        _DSA_DEBUG_DECODE_SLOT_COLLISION_LOGGED.add(key)
+        logger.warning(
+            "[DSA_DEBUG_DECODE_SLOT_COLLISION] layer=%s phase=%s stage=%s "
+            "compress_ratio=%s valid_slot_count=%s unique_slot_count=%s "
+            "slot_head=%s %s",
+            layer_name,
+            phase,
+            stage,
+            compress_ratio,
+            int(valid_slot_mapping.numel()),
+            int(unique_slots.numel()),
+            flat_slot_mapping[: min(16, flat_slot_mapping.numel())].detach().cpu().tolist(),
+            _dsa_debug_metadata_summary(attn_metadata),
+        )
+    except RuntimeError as exc:
+        logger.warning(
+            "[DSA_DEBUG_DECODE_SLOT_COLLISION] check failed: layer=%s "
+            "phase=%s stage=%s compress_ratio=%s error=%s %s",
+            layer_name,
+            phase,
+            stage,
+            compress_ratio,
+            exc,
+            _dsa_debug_metadata_summary(attn_metadata),
+        )
 
 
 def hadamard_transform_ref(
@@ -437,6 +1004,20 @@ class AscendDSAMetadataBuilder(AttentionMetadataBuilder[AscendDSAMetadata]):
         fast_build: bool = False,
         **kwargs,
     ) -> AscendDSAMetadata:
+        num_actual_tokens = common_attn_metadata.num_actual_tokens
+        use_padded_decode_metadata = (
+            kwargs.get("use_padded_decode_metadata", False)
+            and common_attn_metadata.max_query_len <= self.decode_threshold
+            and common_attn_metadata.num_input_tokens > num_actual_tokens
+        )
+        if use_padded_decode_metadata:
+            # In FULL graph decode, hidden_states keeps the padded TND length.
+            # The sparse-attention metadata must describe that padded q length,
+            # while the public metadata still reports the real token count.
+            common_attn_metadata = replace(
+                common_attn_metadata,
+                num_actual_tokens=common_attn_metadata.num_input_tokens,
+            )
         num_reqs = common_attn_metadata.num_reqs
         query_start_loc = common_attn_metadata.query_start_loc
         num_reqs_actual = kwargs.get("num_reqs_actual")
@@ -457,11 +1038,14 @@ class AscendDSAMetadataBuilder(AttentionMetadataBuilder[AscendDSAMetadata]):
             self.common_ratio_to_sas_metadata["num_prefills"] = self.num_prefills
             self.common_ratio_to_sas_metadata["num_decode_tokens"] = self.num_decode_tokens
             self.common_ratio_to_sas_metadata["num_prefill_tokens"] = self.num_prefill_tokens
-            self.set_num_actual_tokens(common_attn_metadata)
+            self.num_actual_tokens = num_actual_tokens
             assert self.num_decodes + self.num_prefills == num_reqs
             assert self.num_decode_tokens + self.num_prefill_tokens == common_attn_metadata.num_actual_tokens
             num_input_tokens = common_attn_metadata.num_input_tokens
             input_positions = common_attn_metadata.positions[:num_input_tokens].long()
+            if num_actual_tokens < num_input_tokens:
+                input_positions = input_positions.clone()
+                input_positions[num_actual_tokens:].fill_(0)
             self.common_ratio_to_sas_metadata["input_positions"] = input_positions
             if self.num_prefills:
                 cos, sin = get_cos_and_sin_dsa(input_positions)
@@ -470,6 +1054,12 @@ class AscendDSAMetadataBuilder(AttentionMetadataBuilder[AscendDSAMetadata]):
             self.common_ratio_to_sas_metadata["cos"] = cos
             self.common_ratio_to_sas_metadata["sin"] = sin
             self.seq_lens = common_attn_metadata.seq_lens[:num_reqs]
+            if (
+                use_padded_decode_metadata
+                and num_reqs_actual is not None
+                and num_reqs_actual < num_reqs
+            ):
+                self.seq_lens[num_reqs_actual:num_reqs].fill_(1)
             self.common_ratio_to_sas_metadata["seq_lens"] = self.seq_lens
 
             query_start_loc_cpu = common_attn_metadata.query_start_loc_cpu
@@ -483,11 +1073,17 @@ class AscendDSAMetadataBuilder(AttentionMetadataBuilder[AscendDSAMetadata]):
                 self.common_ratio_to_sas_metadata["num_decode_tokens"],
                 self.common_ratio_to_sas_metadata["num_prefill_tokens"],
             )
-            self.set_num_actual_tokens(common_attn_metadata)
+            self.num_actual_tokens = num_actual_tokens
             num_input_tokens = common_attn_metadata.num_input_tokens
             input_positions = self.common_ratio_to_sas_metadata["input_positions"]
             cos, sin = self.common_ratio_to_sas_metadata["cos"], self.common_ratio_to_sas_metadata["sin"]
             self.seq_lens = self.common_ratio_to_sas_metadata["seq_lens"]
+            if (
+                use_padded_decode_metadata
+                and num_reqs_actual is not None
+                and num_reqs_actual < num_reqs
+            ):
+                self.seq_lens[num_reqs_actual:num_reqs].fill_(1)
             self.query_lens = self.common_ratio_to_sas_metadata["query_lens"]
 
         # NOTE: Currently, MTP-fullgraph is incompatibility pcp
@@ -510,7 +1106,12 @@ class AscendDSAMetadataBuilder(AttentionMetadataBuilder[AscendDSAMetadata]):
         decode_metadata = None
 
         if self.num_decodes > 0:
-            decode_metadata = self.build_decode_metadata(common_prefix_len, common_attn_metadata, num_reqs_actual)
+            decode_metadata = self.build_decode_metadata(
+                common_prefix_len,
+                common_attn_metadata,
+                num_reqs_actual,
+                use_padded_decode_metadata,
+            )
 
         return self.metadata_cls(  # type: ignore
             num_input_tokens=common_attn_metadata.num_input_tokens,
@@ -801,12 +1402,16 @@ class AscendDSAMetadataBuilder(AttentionMetadataBuilder[AscendDSAMetadata]):
         common_prefix_len: int,
         common_attn_metadata: AscendCommonAttentionMetadata,
         num_reqs_actual: int | None,
+        use_padded_decode_metadata: bool = False,
     ) -> AscendDSADecodeMetadata:
         assert self.decode_ratio_to_sas_metadata is not None
         if self.decode_ratio_to_sas_metadata.get("query_start_loc", None) is None:
             query_start_loc = common_attn_metadata.query_start_loc[: self.num_decodes + 1]
             self.decode_ratio_to_sas_metadata["query_start_loc"] = query_start_loc
             input_positions = common_attn_metadata.positions[: self.num_decode_tokens].long()
+            if self.num_actual_tokens is not None and self.num_actual_tokens < self.num_decode_tokens:
+                input_positions = input_positions.clone()
+                input_positions[self.num_actual_tokens : self.num_decode_tokens].fill_(0)
             self.decode_ratio_to_sas_metadata["input_positions"] = input_positions
             cos, sin = get_cos_and_sin_dsa(input_positions, use_cache=True)
             self.decode_ratio_to_sas_metadata["cos"] = cos
@@ -814,6 +1419,9 @@ class AscendDSAMetadataBuilder(AttentionMetadataBuilder[AscendDSAMetadata]):
 
             query_start_loc_cpu = common_attn_metadata.query_start_loc_cpu[: self.num_decodes + 1]
             input_positions_cpu = common_attn_metadata.positions_cpu[: self.num_decode_tokens].long()
+            if self.num_actual_tokens is not None and self.num_actual_tokens < self.num_decode_tokens:
+                input_positions_cpu = input_positions_cpu.clone()
+                input_positions_cpu[self.num_actual_tokens : self.num_decode_tokens].fill_(0)
 
             # Prefer _seq_lens_cpu (always available, updated during draft
             # iterations) over seq_lens_cpu (None in async spec decode mode).
@@ -928,7 +1536,11 @@ class AscendDSAMetadataBuilder(AttentionMetadataBuilder[AscendDSAMetadata]):
         self.start_pos_decode.fill_(0)
         self.start_pos_decode[: self.num_decodes] = start_pos_decode
 
-        if num_reqs_actual is not None and num_reqs_actual < self.num_decodes:
+        if (
+            use_padded_decode_metadata
+            and num_reqs_actual is not None
+            and num_reqs_actual < self.num_decodes
+        ):
             self.start_pos_decode[num_reqs_actual:].fill_(0)
             self.block_table[num_reqs_actual : self.num_decodes, ...].fill_(0)
 
@@ -1491,6 +2103,25 @@ class AscendDSAImpl(DSAAttentionImpl):
         actual_tokens = attn_metadata[0].num_actual_tokens  # type: ignore[index]
         prefill_hidden_states = hidden_states[decode_tokens:actual_tokens]
         decode_hidden_states = hidden_states[:decode_tokens]
+        phase = "mixed" if has_decode and has_prefill else "prefill" if has_prefill else "decode"
+        if has_prefill:
+            _dsa_debug_check_finite(
+                prefill_hidden_states,
+                layer_name,
+                phase,
+                "prefill_hidden_states",
+                self.compress_ratio,
+                attn_metadata,
+            )
+        if has_decode and has_prefill:
+            _dsa_debug_check_finite(
+                hidden_states[:actual_tokens],
+                layer_name,
+                "mixed",
+                "forward_input_hidden_states",
+                self.compress_ratio,
+                attn_metadata,
+            )
 
         forward_context = get_forward_context()
         o_proj_input_shape = (forward_context.num_tokens, self.n_local_heads, self.head_dim)
@@ -1498,6 +2129,14 @@ class AscendDSAImpl(DSAAttentionImpl):
         if has_prefill:
             assert attn_metadata[0].prefill is not None
             output_prefill = self._forward_prefill(layer_name, prefill_hidden_states, kv_cache, attn_metadata)  # type: ignore[arg-type]
+            _dsa_debug_check_finite(
+                output_prefill,
+                layer_name,
+                phase,
+                "prefill_attn_output",
+                self.compress_ratio,
+                attn_metadata,
+            )
             o_proj_input[decode_tokens:actual_tokens] = output_prefill
             cos = attn_metadata[0].prefill.cos[layer_name]  # type: ignore[index]
             sin = attn_metadata[0].prefill.sin[layer_name]  # type: ignore[index]
@@ -1505,6 +2144,14 @@ class AscendDSAImpl(DSAAttentionImpl):
         if has_decode:
             assert attn_metadata[0].decode is not None  # type: ignore[index]
             output_decode = self._forward_decode(layer_name, decode_hidden_states, kv_cache, attn_metadata)  # type: ignore[arg-type]
+            _dsa_debug_check_finite(
+                output_decode,
+                layer_name,
+                "mixed_decode" if has_prefill else "decode",
+                "decode_attn_output",
+                self.compress_ratio,
+                attn_metadata,
+            )
             o_proj_input[:decode_tokens] = output_decode
             cos = attn_metadata[0].decode.cos[layer_name]  # type: ignore[index]
             sin = attn_metadata[0].decode.sin[layer_name]  # type: ignore[index]
@@ -1512,6 +2159,35 @@ class AscendDSAImpl(DSAAttentionImpl):
         cos = attn_metadata[0].cos[layer_name]  # type: ignore[index]
         sin = attn_metadata[0].sin[layer_name]  # type: ignore[index]
         num_tokens = o_proj_input.shape[0]
+        if actual_tokens < num_tokens:
+            o_proj_input[actual_tokens:].zero_()
+        if has_prefill:
+            _dsa_debug_check_finite(
+                o_proj_input[decode_tokens:actual_tokens],
+                layer_name,
+                phase,
+                "prefill_o_proj_input_before_rotary",
+                self.compress_ratio,
+                attn_metadata,
+            )
+        if has_decode:
+            _dsa_debug_check_finite(
+                o_proj_input[:decode_tokens],
+                layer_name,
+                "mixed_decode" if has_prefill else "decode",
+                "decode_o_proj_input_before_rotary",
+                self.compress_ratio,
+                attn_metadata,
+            )
+        if has_decode and has_prefill:
+            _dsa_debug_check_finite(
+                o_proj_input[:actual_tokens],
+                layer_name,
+                "mixed",
+                "o_proj_input_before_rotary",
+                self.compress_ratio,
+                attn_metadata,
+            )
 
         torch.ops._C_ascend.inplace_partial_rotary_mul(
             o_proj_input.unsqueeze(1),
@@ -1520,6 +2196,33 @@ class AscendDSAImpl(DSAAttentionImpl):
             rotary_mode="interleave",
             partial_slice=[self.nope_head_dim, self.head_dim],
         )
+        if has_prefill:
+            _dsa_debug_check_finite(
+                o_proj_input[decode_tokens:actual_tokens],
+                layer_name,
+                phase,
+                "prefill_o_proj_input_after_rotary",
+                self.compress_ratio,
+                attn_metadata,
+            )
+        if has_decode:
+            _dsa_debug_check_finite(
+                o_proj_input[:decode_tokens],
+                layer_name,
+                "mixed_decode" if has_prefill else "decode",
+                "decode_o_proj_input_after_rotary",
+                self.compress_ratio,
+                attn_metadata,
+            )
+        if has_decode and has_prefill:
+            _dsa_debug_check_finite(
+                o_proj_input[:actual_tokens],
+                layer_name,
+                "mixed",
+                "o_proj_input_after_rotary",
+                self.compress_ratio,
+                attn_metadata,
+            )
 
         # o
         if get_ascend_device_type() in {AscendDeviceType.A5}:
@@ -1529,6 +2232,33 @@ class AscendDSAImpl(DSAAttentionImpl):
             o = torch_npu.npu_transpose_quant_batchmatmul(o, self.wo_a.weight, dtype=torch.bfloat16, bias=None, group_sizes=(0, 0, 32),
                                                         x1_scale=swiglu_out_scale.view(torch.float8_e8m0fnu), x2_scale=self.wo_a.weight_scale.view(torch.float8_e8m0fnu),
                                                         perm_x1=(1,0,2), perm_x2=(0,1,2), perm_y=(1,0,2))
+            if has_prefill:
+                _dsa_debug_check_finite(
+                    o[decode_tokens:actual_tokens],
+                    layer_name,
+                    phase,
+                    "prefill_wo_a_output",
+                    self.compress_ratio,
+                    attn_metadata,
+                )
+            if has_decode:
+                _dsa_debug_check_finite(
+                    o[:decode_tokens],
+                    layer_name,
+                    "mixed_decode" if has_prefill else "decode",
+                    "decode_wo_a_output",
+                    self.compress_ratio,
+                    attn_metadata,
+                )
+            if has_decode and has_prefill:
+                _dsa_debug_check_finite(
+                    o[:actual_tokens],
+                    layer_name,
+                    "mixed",
+                    "wo_a_output",
+                    self.compress_ratio,
+                    attn_metadata,
+                )
             o = o.reshape(num_tokens, -1)
             output[...] = self.wo_b(o)
         else:
@@ -1551,6 +2281,35 @@ class AscendDSAImpl(DSAAttentionImpl):
             o_proj_input = o_proj_input.reshape(num_tokens, -1)
             output[...] = self.wo_b(o_proj_input)
 
+        if actual_tokens < output.shape[0]:
+            output[actual_tokens:].zero_()
+        if has_prefill:
+            _dsa_debug_check_finite(
+                output[decode_tokens:actual_tokens],
+                layer_name,
+                phase,
+                "prefill_forward_output",
+                self.compress_ratio,
+                attn_metadata,
+            )
+        if has_decode:
+            _dsa_debug_check_finite(
+                output[:decode_tokens],
+                layer_name,
+                "mixed_decode" if has_prefill else "decode",
+                "decode_forward_output",
+                self.compress_ratio,
+                attn_metadata,
+            )
+        if has_decode and has_prefill:
+            _dsa_debug_check_finite(
+                output[:actual_tokens],
+                layer_name,
+                "mixed",
+                "forward_output",
+                self.compress_ratio,
+                attn_metadata,
+            )
         return output_padded
 
     def _forward_prefill(
@@ -1600,15 +2359,52 @@ class AscendDSAImpl(DSAAttentionImpl):
         sin = compress_common_attn_metadata.prefill.sin[layer_name]
         actual_seq_lengths_query = compress_common_attn_metadata.prefill.query_start_loc
         actual_seq_lengths_key = compress_common_attn_metadata.prefill.seq_lens
+        phase = (
+            "mixed_prefill"
+            if attn_metadata[0].num_decodes > 0 and attn_metadata[0].num_prefills > 0
+            else "prefill"
+        )
+        _dsa_debug_check_finite(
+            hidden_states,
+            layer_name,
+            phase,
+            "prefill_inner_hidden_states",
+            self.compress_ratio,
+            attn_metadata,
+        )
 
         # mlaprolog
         # q
         qr = self.q_norm(self.wq_a(hidden_states))
+        _dsa_debug_check_finite(
+            qr,
+            layer_name,
+            phase,
+            "prefill_qr_after_q_norm",
+            self.compress_ratio,
+            attn_metadata,
+        )
         q = self.wq_b(qr).unflatten(-1, (self.n_local_heads, self.head_dim))
+        _dsa_debug_check_finite(
+            q,
+            layer_name,
+            phase,
+            "prefill_q_after_wq_b",
+            self.compress_ratio,
+            attn_metadata,
+        )
         if is_a5:
             q = self.q_norm_without_weight(q)
         else:
             q = triton_q_rms(q, self.eps)
+        _dsa_debug_check_finite(
+            q,
+            layer_name,
+            phase,
+            "prefill_q_after_q_norm_without_weight",
+            self.compress_ratio,
+            attn_metadata,
+        )
 
         torch.ops._C_ascend.inplace_partial_rotary_mul(
             q.unsqueeze(1),
@@ -1617,9 +2413,33 @@ class AscendDSAImpl(DSAAttentionImpl):
             rotary_mode="interleave",
             partial_slice=[self.nope_head_dim, self.head_dim],
         )
+        _dsa_debug_check_finite(
+            q,
+            layer_name,
+            phase,
+            "prefill_q_after_rotary",
+            self.compress_ratio,
+            attn_metadata,
+        )
         # win kv & tok_dis
         kv = self.wkv(hidden_states)
+        _dsa_debug_check_finite(
+            kv,
+            layer_name,
+            phase,
+            "prefill_kv_after_wkv",
+            self.compress_ratio,
+            attn_metadata,
+        )
         kv = self.kv_norm(kv)
+        _dsa_debug_check_finite(
+            kv,
+            layer_name,
+            phase,
+            "prefill_kv_after_kv_norm",
+            self.compress_ratio,
+            attn_metadata,
+        )
         assert self.rope_head_dim is not None
         kv = kv.view(-1, 1, self.nope_head_dim + self.rope_head_dim)
 
@@ -1630,18 +2450,61 @@ class AscendDSAImpl(DSAAttentionImpl):
             rotary_mode="interleave",
             partial_slice=[self.nope_head_dim, self.head_dim],
         )
+        _dsa_debug_check_finite(
+            kv,
+            layer_name,
+            phase,
+            "prefill_kv_after_rotary",
+            self.compress_ratio,
+            attn_metadata,
+        )
 
         # swa exec kv
         if is_a5:
-            torch.ops._C_ascend.kv_compress_epilog(
-                kv_compress_cache=swa_kv_cache.view(-1, 1, swa_kv_cache.shape[-1]),
-                x=kv.view(-1, kv.shape[-1]),
-                slot_mapping=swa_metadata.prefill.slot_mapping,
-                quant_group_size=64,
-                quant_mode=2,
-                round_scale_flag=True,
-                layout=1,
+            _dsa_debug_log_slot_mapping(
+                swa_metadata.prefill.slot_mapping,
+                layer_name,
+                phase,
+                "prefill_swa_slot_mapping_before_epilog",
+                self.compress_ratio,
+                attn_metadata,
             )
+            _dsa_debug_log_bad_slot_rows(
+                swa_metadata.prefill.slot_mapping,
+                layer_name,
+                phase,
+                "prefill_swa_before_epilog",
+                self.compress_ratio,
+                kv.view(-1, kv.shape[-1]).shape[0],
+                attn_metadata,
+            )
+            swa_kv, swa_slot_mapping = _dsa_select_valid_prefill_rows(
+                kv,
+                swa_metadata.prefill.slot_mapping,
+                layer_name,
+                phase,
+                "prefill_swa_before_epilog",
+                self.compress_ratio,
+                attn_metadata,
+            )
+            _dsa_debug_check_finite(
+                swa_kv,
+                layer_name,
+                phase,
+                "prefill_swa_kv_valid_rows_before_epilog",
+                self.compress_ratio,
+                attn_metadata,
+            )
+            if swa_kv is not None and swa_slot_mapping.numel() > 0:
+                torch.ops._C_ascend.kv_compress_epilog(
+                    kv_compress_cache=swa_kv_cache.view(-1, 1, swa_kv_cache.shape[-1]),
+                    x=swa_kv.reshape(-1, swa_kv.shape[-1]),
+                    slot_mapping=swa_slot_mapping,
+                    quant_group_size=64,
+                    quant_mode=2,
+                    round_scale_flag=True,
+                    layout=1,
+                )
         else:
             torch.ops._C_ascend.npu_scatter_nd_update_v2(swa_kv_cache, swa_metadata.prefill.slot_mapping, kv)
 
@@ -1689,24 +2552,76 @@ class AscendDSAImpl(DSAAttentionImpl):
                 rotary_mode=2,
                 cache_mode=1,
             )
+            _dsa_debug_check_finite(
+                compressed_kv,
+                layer_name,
+                phase,
+                "prefill_raw_compressed_kv_after_compressor",
+                self.compress_ratio,
+                attn_metadata,
+            )
 
             if compressed_kv.numel() == 0:
                 compressed_kv = None
 
             # kv_compress_epilog
             if is_a5:
-                torch.ops._C_ascend.kv_compress_epilog(
-                    kv_compress_cache=compress_kv_cache.view(-1, 1, compress_kv_cache.shape[-1]),
-                    x=compressed_kv.reshape(-1, compressed_kv.shape[-1]),
-                    slot_mapping=compressor_attn_metadata.prefill.slot_mapping,
-                    quant_group_size=64,
-                    quant_mode=2,
-                    round_scale_flag=True,
-                    layout=1,
+                _dsa_debug_log_slot_mapping(
+                    compressor_attn_metadata.prefill.slot_mapping,
+                    layer_name,
+                    phase,
+                    "prefill_compressed_slot_mapping_before_epilog",
+                    self.compress_ratio,
+                    attn_metadata,
                 )
+                compressed_kv, compressed_slot_mapping = _dsa_select_valid_compressed_prefill_rows(
+                    compressed_kv,
+                    compressor_attn_metadata.prefill.slot_mapping,
+                    layer_name,
+                    phase,
+                    "prefill_compressed_before_epilog",
+                    self.compress_ratio,
+                    attn_metadata,
+                )
+                _dsa_debug_check_finite(
+                    compressed_kv,
+                    layer_name,
+                    phase,
+                    "prefill_compressed_kv_valid_rows_before_epilog",
+                    self.compress_ratio,
+                    attn_metadata,
+                )
+                if compressed_kv is not None and compressed_slot_mapping.numel() > 0:
+                    torch.ops._C_ascend.kv_compress_epilog(
+                        kv_compress_cache=compress_kv_cache.view(-1, 1, compress_kv_cache.shape[-1]),
+                        x=compressed_kv.reshape(-1, compressed_kv.shape[-1]),
+                        slot_mapping=compressed_slot_mapping,
+                        quant_group_size=64,
+                        quant_mode=2,
+                        round_scale_flag=True,
+                        layout=1,
+                    )
             else:
                 torch.ops._C_ascend.npu_scatter_nd_update_v2(
                     compress_kv_cache, compressor_attn_metadata.prefill.slot_mapping, compressed_kv
+                )
+        if is_a5:
+            _dsa_debug_log_sas_inputs(
+                swa_metadata.prefill,
+                layer_name,
+                phase,
+                "prefill_swa_sas_before_attn",
+                self.compress_ratio,
+                attn_metadata,
+            )
+            if self.compress_ratio > 1:
+                _dsa_debug_log_sas_inputs(
+                    compressor_attn_metadata.prefill,
+                    layer_name,
+                    phase,
+                    "prefill_compressed_sas_before_attn",
+                    self.compress_ratio,
+                    attn_metadata,
                 )
 
         if is_a5:
@@ -1840,6 +2755,14 @@ class AscendDSAImpl(DSAAttentionImpl):
                 layout_q="TND",
                 layout_kv="PA_ND",
             )[0]
+        _dsa_debug_check_finite(
+            attn_output,
+            layer_name,
+            phase,
+            "prefill_sparse_attn_output",
+            self.compress_ratio,
+            attn_metadata,
+        )
         return attn_output
 
     def _forward_decode(
@@ -1881,6 +2804,15 @@ class AscendDSAImpl(DSAAttentionImpl):
         sin = compress_common_attn_metadata.decode.sin[layer_name]
         actual_seq_lengths_query = compress_common_attn_metadata.decode.query_start_loc
         actual_seq_lengths_key = compress_common_attn_metadata.decode.seq_lens
+        phase = "mixed_decode" if attn_metadata[0].num_prefills > 0 else "decode"  # type: ignore[index]
+        _dsa_debug_check_finite(
+            hidden_states,
+            layer_name,
+            phase,
+            "decode_inner_hidden_states",
+            self.compress_ratio,
+            attn_metadata,
+        )
         wait_hidden_state_cal_event = (
             torch.npu.current_stream().record_event() if self.multistream_dsa_preprocess else None
         )
@@ -1905,11 +2837,27 @@ class AscendDSAImpl(DSAAttentionImpl):
             qr = q = self.q_norm(self.wq_a(hidden_states))
             q = self.wq_b(q).unflatten(-1, (self.n_local_heads, self.head_dim))
             qr_pertoken_scale = None
+        _dsa_debug_check_finite(
+            q,
+            layer_name,
+            phase,
+            "decode_q_after_wq_b",
+            self.compress_ratio,
+            attn_metadata,
+        )
 
         if is_a5:
             q = self.q_norm_without_weight(q)
         else:
             q = triton_q_rms(q, self.eps)
+        _dsa_debug_check_finite(
+            q,
+            layer_name,
+            phase,
+            "decode_q_after_q_norm_without_weight",
+            self.compress_ratio,
+            attn_metadata,
+        )
 
         torch.ops._C_ascend.inplace_partial_rotary_mul(
             q.unsqueeze(1),
@@ -1918,6 +2866,14 @@ class AscendDSAImpl(DSAAttentionImpl):
             rotary_mode="interleave",
             partial_slice=[self.nope_head_dim, self.head_dim],
         )
+        _dsa_debug_check_finite(
+            q,
+            layer_name,
+            phase,
+            "decode_q_after_rotary",
+            self.compress_ratio,
+            attn_metadata,
+        )
 
         with npu_stream_switch(attention_calculation_stream(), enabled=self.multistream_dsa_preprocess):
             if wait_hidden_state_cal_event:
@@ -1925,7 +2881,23 @@ class AscendDSAImpl(DSAAttentionImpl):
 
             # win kv & tok_dis
             kv = self.wkv(hidden_states)
+            _dsa_debug_check_finite(
+                kv,
+                layer_name,
+                phase,
+                "decode_kv_after_wkv",
+                self.compress_ratio,
+                attn_metadata,
+            )
             kv = self.kv_norm(kv)
+            _dsa_debug_check_finite(
+                kv,
+                layer_name,
+                phase,
+                "decode_kv_after_kv_norm",
+                self.compress_ratio,
+                attn_metadata,
+            )
             assert self.rope_head_dim is not None
             kv = kv.view(-1, 1, self.nope_head_dim + self.rope_head_dim)
 
@@ -1936,9 +2908,42 @@ class AscendDSAImpl(DSAAttentionImpl):
                 rotary_mode="interleave",
                 partial_slice=[self.nope_head_dim, self.head_dim],
             )
+            _dsa_debug_check_finite(
+                kv,
+                layer_name,
+                phase,
+                "decode_kv_after_rotary",
+                self.compress_ratio,
+                attn_metadata,
+            )
 
             # swa exec kv
             if is_a5:
+                _dsa_debug_log_slot_mapping(
+                    swa_metadata.decode.slot_mapping,
+                    layer_name,
+                    phase,
+                    "decode_swa_slot_mapping_before_epilog",
+                    self.compress_ratio,
+                    attn_metadata,
+                )
+                _dsa_debug_log_bad_slot_rows(
+                    swa_metadata.decode.slot_mapping,
+                    layer_name,
+                    phase,
+                    "decode_swa_before_epilog",
+                    self.compress_ratio,
+                    kv.view(-1, kv.shape[-1]).shape[0],
+                    attn_metadata,
+                )
+                _dsa_debug_log_decode_slot_collision(
+                    swa_metadata.decode.slot_mapping,
+                    layer_name,
+                    phase,
+                    "decode_swa_before_epilog",
+                    self.compress_ratio,
+                    attn_metadata,
+                )
                 torch.ops._C_ascend.kv_compress_epilog(
                     kv_compress_cache=swa_kv_cache.view(-1, 1, swa_kv_cache.shape[-1]),
                     x=kv.view(-1, kv.shape[-1]),
@@ -1981,6 +2986,15 @@ class AscendDSAImpl(DSAAttentionImpl):
             coff = 2 if self.compressor_overlap else 1
 
             # compressor
+            if is_a5:
+                _dsa_debug_log_sas_inputs(
+                    compressor_kv_state_metadata.decode,
+                    layer_name,
+                    phase,
+                    "decode_compressor_state_before_compressor",
+                    self.compress_ratio,
+                    attn_metadata,
+                )
             compressed_kv = torch.ops._C_ascend.compressor(
                 hidden_states,
                 self.compressor_wkv.weight,
@@ -2001,9 +3015,42 @@ class AscendDSAImpl(DSAAttentionImpl):
                 rotary_mode=2,
                 cache_mode=1,
             )
+            _dsa_debug_check_finite(
+                compressed_kv,
+                layer_name,
+                phase,
+                "decode_raw_compressed_kv_after_compressor",
+                self.compress_ratio,
+                attn_metadata,
+            )
             # kv_compress_epilog
             if is_a5:
                 if len(compressor_attn_metadata.decode.slot_mapping):
+                    _dsa_debug_log_slot_mapping(
+                        compressor_attn_metadata.decode.slot_mapping,
+                        layer_name,
+                        phase,
+                        "decode_compressed_slot_mapping_before_epilog",
+                        self.compress_ratio,
+                        attn_metadata,
+                    )
+                    _dsa_debug_log_bad_slot_rows(
+                        compressor_attn_metadata.decode.slot_mapping,
+                        layer_name,
+                        phase,
+                        "decode_compressed_before_epilog",
+                        self.compress_ratio,
+                        compressed_kv.reshape(-1, compressed_kv.shape[-1]).shape[0],
+                        attn_metadata,
+                    )
+                    _dsa_debug_log_decode_slot_collision(
+                        compressor_attn_metadata.decode.slot_mapping,
+                        layer_name,
+                        phase,
+                        "decode_compressed_before_epilog",
+                        self.compress_ratio,
+                        attn_metadata,
+                    )
                     torch.ops._C_ascend.kv_compress_epilog(
                         kv_compress_cache=compress_kv_cache.view(-1, 1, compress_kv_cache.shape[-1]),
                         x=compressed_kv.reshape(-1, compressed_kv.shape[-1]),
@@ -2016,6 +3063,24 @@ class AscendDSAImpl(DSAAttentionImpl):
             else:
                 torch.ops._C_ascend.npu_scatter_nd_update_v2(
                     compress_kv_cache, compressor_attn_metadata.decode.slot_mapping, compressed_kv
+                )
+        if is_a5:
+            _dsa_debug_log_sas_inputs(
+                swa_metadata.decode,
+                layer_name,
+                phase,
+                "decode_swa_sas_before_attn",
+                self.compress_ratio,
+                attn_metadata,
+            )
+            if self.compress_ratio > 1:
+                _dsa_debug_log_sas_inputs(
+                    compressor_attn_metadata.decode,
+                    layer_name,
+                    phase,
+                    "decode_compressed_sas_before_attn",
+                    self.compress_ratio,
+                    attn_metadata,
                 )
         if is_a5:
             if self.compress_ratio <= 1:
@@ -2143,6 +3208,14 @@ class AscendDSAImpl(DSAAttentionImpl):
                 layout_q="TND",
                 layout_kv="PA_ND",
             )[0]
+        _dsa_debug_check_finite(
+            attn_output,
+            layer_name,
+            phase,
+            "decode_sparse_attn_output",
+            self.compress_ratio,
+            attn_metadata,
+        )
         return attn_output
 
     def indexer_select_qli(

@@ -1880,6 +1880,7 @@ class NPUModelRunner(GPUModelRunner):
                     ubatch_slices=ubatch_slices_attn,
                     logits_indices=logits_indices,
                     use_spec_decode=use_spec_decode,
+                    use_padded_decode_metadata=cudagraph_mode == CUDAGraphMode.FULL,
                     num_scheduled_tokens=scheduler_output.num_scheduled_tokens,
                     num_scheduled_tokens_np=num_scheduled_tokens_np,
                     cascade_attn_prefix_lens=cascade_attn_prefix_lens,
@@ -2628,6 +2629,7 @@ class NPUModelRunner(GPUModelRunner):
         logits_indices: torch.Tensor | None = None,
         use_spec_decode: bool = False,
         for_cudagraph_capture: bool = False,
+        use_padded_decode_metadata: bool = False,
         num_scheduled_tokens: dict[str, int] | None = None,
         num_scheduled_tokens_np: np.ndarray | None = None,
         cascade_attn_prefix_lens: list[list[int]] | None = None,
@@ -2826,6 +2828,7 @@ class NPUModelRunner(GPUModelRunner):
                         decode_ratio_to_sas_metadata=dict(),
                         common_ratio_to_sas_metadata=dict(),
                         block_size=attn_group.kv_cache_spec.block_size,
+                        use_padded_decode_metadata=use_padded_decode_metadata,
                         )
                 else:
                     extra_attn_metadata_args = dict(
@@ -2835,6 +2838,7 @@ class NPUModelRunner(GPUModelRunner):
                         decode_ratio_to_sas_metadata=decode_ratio_to_sas_metadata,
                         common_ratio_to_sas_metadata=common_ratio_to_sas_metadata,
                         block_size=attn_group.kv_cache_spec.block_size,
+                        use_padded_decode_metadata=use_padded_decode_metadata,
                         )
 
             # add kvcomp_metadata into common_attn_metadata
@@ -3107,8 +3111,45 @@ class NPUModelRunner(GPUModelRunner):
 
             pad_attn = cudagraph_runtime_mode == CUDAGraphMode.FULL
             # check how to build dummy
+            num_scheduled_tokens_compressed_list_for_dummy = None
             if self.use_compress:
-                self.positions.fill_(127)
+                dummy_compress_position = 127
+                dummy_compress_seq_len = dummy_compress_position + 1
+                self.positions.fill_(dummy_compress_position)
+                self.optimistic_seq_lens_cpu[:num_reqs_padded] = dummy_compress_seq_len
+                self.seq_lens.copy_(self.optimistic_seq_lens_cpu, non_blocking=True)
+                for block_table in self.input_batch.block_table.block_tables:
+                    block_table.block_table.np[:num_reqs_padded, 0] = np.arange(
+                        num_reqs_padded, dtype=np.int32
+                    )
+                    block_table.block_table.copy_to_gpu(num_reqs_padded)
+                dummy_num_scheduled_tokens = (
+                    self.query_start_loc.np[1 : num_reqs + 1]
+                    - self.query_start_loc.np[:num_reqs]
+                ).astype(np.int32, copy=False)
+                dummy_num_computed_tokens = np.full(
+                    num_reqs,
+                    dummy_compress_position,
+                    dtype=np.int32,
+                )
+                (
+                    positions_compressed_list,
+                    req_indices_compressed_list,
+                    num_scheduled_tokens_compressed_list_for_dummy,
+                ) = get_compressed_pos_and_indices(
+                    dummy_num_computed_tokens,
+                    dummy_num_scheduled_tokens,
+                    self.arange_np[:num_reqs],
+                    self.use_compress,
+                    self.kv_cache_config.kv_cache_groups,
+                )
+                self.input_batch.block_table.compute_slot_mapping(
+                    num_reqs,
+                    self.query_start_loc.gpu[: num_reqs + 1],
+                    self.positions[:num_tokens_unpadded],
+                    positions_compressed_list,
+                    req_indices_compressed_list,
+                )
             attn_metadata, _ = self._build_attention_metadata(
                 num_tokens=num_tokens_unpadded,
                 num_tokens_padded=num_tokens_padded,
@@ -3117,7 +3158,9 @@ class NPUModelRunner(GPUModelRunner):
                 max_query_len=max_query_len,
                 ubatch_slices=ubatch_slices_padded if pad_attn else ubatch_slices,
                 for_cudagraph_capture=is_graph_capturing,
+                use_padded_decode_metadata=cudagraph_runtime_mode == CUDAGraphMode.FULL,
                 num_scheduled_tokens_np=num_scheduled_tokens,
+                num_scheduled_tokens_compressed_list=num_scheduled_tokens_compressed_list_for_dummy,
             )
 
         with self.maybe_dummy_run_with_lora(
