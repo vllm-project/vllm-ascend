@@ -115,8 +115,7 @@ class AscendC8KVCacheAttentionMethod(AscendAttentionScheme):
         # Returns int8 if the P node is not a PD detachment node.
         if not self.is_kv_producer:
             logger.info_once(
-                "[vllm-ascend/C8_KV] KV cache producer is disabled; "
-                "setting kv_cache_torch_dtype to torch.int8."
+                "[vllm-ascend/C8_KV] KV cache producer is disabled; setting kv_cache_torch_dtype to torch.int8."
             )
             layer.kv_cache_torch_dtype = torch.int8
         # Upgrade impl to the C8-specific subclass so the C8 forward path is always used.

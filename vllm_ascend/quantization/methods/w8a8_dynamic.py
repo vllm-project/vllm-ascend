@@ -217,8 +217,7 @@ class AscendW8A8DynamicFusedMoEMethod(AscendMoEScheme):
         if self.multistream_overlap_gate:
             fc3_context = get_flash_common3_context()
             assert fc3_context is not None, (
-                "[vllm-ascend/W8A8_DYNAMIC] flash_common3 context is required "
-                "when multistream_overlap_gate is enabled."
+                "[vllm-ascend/W8A8_DYNAMIC] flash_common3 context is required when multistream_overlap_gate is enabled."
             )
             topk_weights = fc3_context.topk_weights
             topk_ids = fc3_context.topk_ids
