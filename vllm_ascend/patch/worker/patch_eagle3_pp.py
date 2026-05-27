@@ -155,5 +155,6 @@ def _patch_proposer_load_model():
 # ---------------------------------------------------------------------------
 Eagle3LlamaForCausalLM.__init__ = _patched_eagle3_init
 Eagle3LlamaForCausalLM.forward = _patched_eagle3_forward
+Eagle3LlamaForCausalLM.supports_pp = True
 LlamaModel.make_empty_intermediate_tensors = _make_empty_intermediate_tensors
 _patch_proposer_load_model()

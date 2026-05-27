@@ -178,7 +178,7 @@ def _patch_speculative_minimax_whitelist() -> None:
     def _patched_verify_args(self, *args, **kwargs):  # type: ignore[no-untyped-def]
         try:
             return inner_verify(self, *args, **kwargs)
-        except ValueError as e:
+        except (ValueError, NotImplementedError) as e:
             method = getattr(self, "method", None)
             if method not in ("eagle3", "extract_hidden_states"):
                 raise
@@ -196,6 +196,13 @@ def _patch_speculative_minimax_whitelist() -> None:
             if "only supported for" in msg and "models" in msg:
                 # Upstream `_verify_args` calls `verify_equal_vocab_size_if_draft_model` after
                 # the aux-hidden allowlist; returning here would skip it.
+                verify_vocab = getattr(self, "verify_equal_vocab_size_if_draft_model", None)
+                if callable(verify_vocab):
+                    verify_vocab()
+                return self
+            if "pipeline parallelism" in msg and "not supported" in msg:
+                # PP check for eagle3 draft model — the draft model runs only
+                # on the last PP rank and does not need native PP support.
                 verify_vocab = getattr(self, "verify_equal_vocab_size_if_draft_model", None)
                 if callable(verify_vocab):
                     verify_vocab()
