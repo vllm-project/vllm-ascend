@@ -7,7 +7,7 @@ This guide provides step-by-step instructions to test these features with
 constrained resources.
 
 Using the Qwen2.5-72B-Instruct model as an example, this guide demonstrates
-how to use vllm-ascend {vllm_ascend_version} (with vLLM {vllm_version}) on two Atlas 800T A2
+how to use vllm-ascend {{vllm_ascend_version}} (with vLLM {{vllm_version}}) on two Atlas 800T A2
 nodes to deploy two vLLM instances. Each instance occupies 4 NPU cards and
 uses PD-colocated deployment.
 
