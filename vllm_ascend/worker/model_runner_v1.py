@@ -2863,7 +2863,7 @@ class NPUModelRunner(GPUModelRunner):
         # in the pcp scenario, the split sequence needs to be used for profile run
         # TODO: after the vllm pcp function is launched, this logic needs to be brought up to the community
         # Docode Node don't support CP prefill， so the CP chunk buffer is unnecessary
-        kv_role = getattr(self.kv_transfer_config, "kv_role", None)
+        kv_role = getattr(self.vllm_config.kv_transfer_config, "kv_role", None)
         if self.use_prefill_cp:
             if self.is_kv_producer:
                 self.max_num_tokens = math.ceil(self.max_num_tokens / (self.pcp_size * 2) / (self.dycp_size * 2)) * 2
