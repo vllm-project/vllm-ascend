@@ -191,13 +191,26 @@ class AscendSpecDecodeBaseProposer(SpecDecodeBaseProposer):
         need to customize model loading.
         """
         from vllm.compilation.backends import set_model_tag
+        from vllm.config.vllm import get_current_vllm_config_or_none
 
-        with set_model_tag("eagle_head"):
-            model = get_model(
-                vllm_config=self.vllm_config,
-                model_config=self.vllm_config.speculative_config.draft_model_config,
-            )
-        return model
+        # Eagle3LlamaForCausalMem 的 LlamaModel 用 get_current_vllm_config()
+        # 获取的仍是 target 的 compilation_config，它的 static_forward_context
+        # 已存了 target 的层名。加载 draft model 前先清空，避免 Duplicate layer name。
+        cfg = get_current_vllm_config_or_none()
+        saved_ctx = None
+        if cfg is not None:
+            saved_ctx = cfg.compilation_config.static_forward_context
+            cfg.compilation_config.static_forward_context = {}
+        try:
+            with set_model_tag("eagle_head"):
+                model = get_model(
+                    vllm_config=self.vllm_config,
+                    model_config=self.vllm_config.speculative_config.draft_model_config,
+                )
+            return model
+        finally:
+            if saved_ctx is not None and cfg is not None:
+                cfg.compilation_config.static_forward_context = saved_ctx
 
     def load_model(self, model: nn.Module) -> None:
         target_attn_layer_names = set(get_layers_from_vllm_config(self.vllm_config, AttentionLayerBase).keys())
