@@ -1165,14 +1165,8 @@ class AscendMLAImpl(MLAAttentionImpl):
         for i in range(iters):
             toks = prefill_metadata.chunked_context.seq_tot[i]
             context_seq_len_npu = self.get_context_seq_len_npu(i, attn_metadata)
-            if get_ascend_device_type() == AscendDeviceType.A5 and self.fa_quant_layer:
-                kv_c_normed = torch.empty(
-                    toks, num_heads, latent_kv_dim, dtype=cache_kv_c.dtype, device=cache_kv_c.device
-                )
-                k_pe = torch.empty(toks, num_heads, rope_dim, dtype=q_pe.dtype, device=q_pe.device)
-            else:
-                kv_c_normed = torch.empty(toks, num_heads, latent_kv_dim, dtype=q_nope.dtype, device=q_nope.device)
-                k_pe = torch.empty(toks, num_heads, rope_dim, dtype=q_nope.dtype, device=q_nope.device)
+            kv_c_normed = torch.empty(toks, num_heads, latent_kv_dim, dtype=cache_kv_c.dtype, device=cache_kv_c.device)
+            k_pe = torch.empty(toks, num_heads, rope_dim, dtype=q_pe.dtype, device=q_pe.device)
 
             DeviceOperator.kv_cache_load(
                 cache_kv_c,
@@ -1433,22 +1427,20 @@ class AscendMLAImpl(MLAAttentionImpl):
                 dequant_scale_q_nope = dequant_scale_q_nope.view(num_tokens, self.num_heads)
         elif self.fa_quant_layer and get_ascend_device_type() != AscendDeviceType.A5:
             attn_mask = None
-            input_layout = "BSND_NBSD"
-            q_nope = q_nope.view(num_tokens, 1, self.num_heads, -1).contiguous()
-            q_pe = q_pe.view(num_tokens, 1, self.num_heads, -1).contiguous()
-            dequant_scale_q_nope = dequant_scale_q_nope.view(num_tokens, 1, self.num_heads)
             sparse_mode = 0
             actual_seq_lengths = None
-            attn_output_shape = (self.num_heads, num_tokens, 1, self.kv_lora_rank)
-        elif self.fa_quant_layer and get_ascend_device_type() == AscendDeviceType.A5:
-            q_nope = q_nope.view(num_tokens, self.num_heads, 1, -1).contiguous()
-            q_pe = q_pe.view(num_tokens, self.num_heads, 1, -1)
-            dequant_scale_q_nope = dequant_scale_q_nope.view(num_tokens, self.num_heads, 1)
-            attn_mask = None
-            input_layout = "BNSD"
-            sparse_mode = 0
-            actual_seq_lengths = None
-            attn_output_shape = (num_tokens, self.num_heads, 1, self.kv_lora_rank)
+            if get_ascend_device_type() == AscendDeviceType.A5:
+                input_layout = "BNSD"
+                q_nope = q_nope.view(num_tokens, self.num_heads, 1, -1).contiguous()
+                q_pe = q_pe.view(num_tokens, self.num_heads, 1, -1)
+                dequant_scale_q_nope = dequant_scale_q_nope.view(num_tokens, self.num_heads, 1)
+                attn_output_shape = (num_tokens, self.num_heads, 1, self.kv_lora_rank)
+            else:
+                input_layout = "BSND_NBSD"
+                q_nope = q_nope.view(num_tokens, 1, self.num_heads, -1).contiguous()
+                q_pe = q_pe.view(num_tokens, 1, self.num_heads, -1).contiguous()
+                dequant_scale_q_nope = dequant_scale_q_nope.view(num_tokens, 1, self.num_heads)
+                attn_output_shape = (self.num_heads, num_tokens, 1, self.kv_lora_rank)
         else:
             # The output layout is set to NBSD to eliminate the need for a
             # transpose operation after attention.
