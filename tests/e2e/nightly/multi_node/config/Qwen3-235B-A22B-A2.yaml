@@ -31,6 +31,7 @@ deployment:
         --trust-remote-code
         --gpu-memory-utilization 0.9
         --async-scheduling
+        --compilation-config '{"cudagraph_mode":"FULL_DECODE_ONLY"}'
   -
     server_cmd: >
         vllm serve "Qwen/Qwen3-235B-A22B"
@@ -49,6 +50,7 @@ deployment:
         --trust-remote-code
         --gpu-memory-utilization 0.9
         --async-scheduling
+        --compilation-config '{"cudagraph_mode":"FULL_DECODE_ONLY"}'
 benchmarks:
   perf:
     case_type: performance

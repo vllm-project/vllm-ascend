@@ -37,6 +37,7 @@ deployment:
         --trust-remote-code
         --no-enable-prefix-caching
         --gpu-memory-utilization 0.9
+        --compilation-config '{"cudagraph_mode":"FULL_DECODE_ONLY"}'
         --additional-config '{"recompute_scheduler_enable": true,"enable_shared_expert_dp": true}'
         --kv-transfer-config
         '{"kv_connector": "MooncakeLayerwiseConnector",
@@ -73,6 +74,7 @@ deployment:
         --trust-remote-code
         --no-enable-prefix-caching
         --gpu-memory-utilization 0.9
+        --compilation-config '{"cudagraph_mode":"FULL_DECODE_ONLY"}'
         --additional-config '{"torchair_graph_config":{"enabled":true}}'
         --kv-transfer-config
         '{"kv_connector": "MooncakeLayerwiseConnector",
