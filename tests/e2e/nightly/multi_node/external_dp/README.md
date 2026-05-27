@@ -23,10 +23,10 @@ shell-style `$VARNAME`, for example `--port $SERVER_PORT`.
 The Python entrypoints under `scripts/` are intentionally kept compact:
 
 - `external_dp_config.py`: YAML loading, schema dataclasses, cluster placeholder
-  resolution, and endpoint expansion.
+  resolution, and rank expansion.
 - `utils.py`: command rendering, process helpers, proxy command
   generation, and benchmark result JSON writing.
-- `test_external_dp.py`: pytest orchestration for backend startup, proxy startup,
+- `test_external_dp.py`: pytest orchestration for rank startup, proxy startup,
   AISBench execution, log collection, and cleanup.
 
 ## Local Debugging

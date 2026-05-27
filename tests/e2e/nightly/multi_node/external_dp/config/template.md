@@ -281,7 +281,7 @@ benchmarks:
 - For `disaggregated_prefill`, use `kv_producer` for prefiller templates and
   `kv_consumer` for decoder templates.
 - `config[].dp_size`: Global DP size for this DP group.
-- `config[].dp_size_local`: Number of backend endpoints started on this node.
+- `config[].dp_size_local`: Number of vLLM ranks started on this node.
 - `config[].dp_rank_start`: First global DP rank owned by this node.
 - `config[].dp_address`: DP master address. For one global DP group, use
   `${NODE_0_IP}` on all nodes. For PD disaggregation, use the prefiller master

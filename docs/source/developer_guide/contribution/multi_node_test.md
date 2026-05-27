@@ -8,7 +8,7 @@ The following picture shows the basic deployment view of the multi-node CI mecha
 
 ![alt text](../../assets/deployment.png)
 
-From the workflow perspective, we can see how the final test script is executed, The key point is that these two shared files [lws.yaml.jinja2 and run.sh](https://github.com/vllm-project/vllm-ascend/tree/main/tests/e2e/nightly/multi_node/scripts), The former defines how our k8s cluster is pulled up, and the latter defines the entry script when the pod is started, Each node executes different logic according to the [LWS_WORKER_INDEX](https://lws.sigs.k8s.io/docs/reference/labels-annotations-and-environment-variables/) environment variable, so that multiple nodes can form a distributed cluster to perform tasks. `run.sh` selects the pytest entrypoint from the config path: internal DP configs use `internal_dp/scripts/test_multi_node.py`, while external DP configs use `external_dp/scripts/test_external_dp.py`.
+From the workflow perspective, we can see how the final test script is executed, The key point is that the shared files `tests/e2e/nightly/multi_node/scripts/lws.yaml.jinja2` and `tests/e2e/nightly/multi_node/scripts/run.sh` define the cluster template and pod entry script. Each node executes different logic according to the [LWS_WORKER_INDEX](https://lws.sigs.k8s.io/docs/reference/labels-annotations-and-environment-variables/) environment variable, so that multiple nodes can form a distributed cluster to perform tasks. `run.sh` selects the pytest entrypoint from the config path: internal DP configs use `internal_dp/scripts/test_multi_node.py`, while external DP configs use `external_dp/scripts/test_external_dp.py`.
 
 ![alt text](../../assets/workflow.png)
 
@@ -20,7 +20,7 @@ From the workflow perspective, we can see how the final test script is executed,
 
 2. Add config yaml
 
-    For the normal internal DP multi-node flow, add the config yaml to the [internal_dp/config directory](https://github.com/vllm-project/vllm-ascend/tree/main/tests/e2e/nightly/multi_node/internal_dp/config/), like [DeepSeek-V3.yaml](https://github.com/vllm-project/vllm-ascend/blob/main/tests/e2e/nightly/multi_node/internal_dp/config/DeepSeek-V3.yaml). External DP cases use the separate `tests/e2e/nightly/multi_node/external_dp/config/` directory and should pass that directory through `config_base_path` in workflow or `CONFIG_BASE_PATH` locally.
+    For the normal internal DP multi-node flow, add the config yaml to `tests/e2e/nightly/multi_node/internal_dp/config/`, like `DeepSeek-V3.yaml`. External DP cases use the separate `tests/e2e/nightly/multi_node/external_dp/config/` directory and should pass that directory through `config_base_path` in workflow or `CONFIG_BASE_PATH` locally.
 
     Suppose you have **2 nodes** running a 1P1D setup (1 Prefillers + 1 Decoder):
 
@@ -70,7 +70,7 @@ From the workflow perspective, we can see how the final test script is executed,
 
 3. Add the case to nightly workflow
 
-Currently, the multi-node test workflow is defined in the [nightly_test_a3.yaml](https://github.com/vllm-project/vllm-ascend/blob/main/.github/workflows/schedule_nightly_test_a3.yaml)
+Currently, the multi-node test workflow is defined in `.github/workflows/schedule_nightly_test_a3.yaml`.
 
     ```yaml
     multi-node-tests:
@@ -83,16 +83,16 @@ Currently, the multi-node test workflow is defined in the [nightly_test_a3.yaml]
           test_config:
             - name: multi-node-deepseek-pd
               config_file_path: DeepSeek-V3.yaml
+              config_base_path: ''
               size: 2
             - name: multi-node-qwen3-dp
               config_file_path: Qwen3-235B-A22B.yaml
+              config_base_path: ''
               size: 2
-            - name: multi-node-qwenw8a8-2node
-              config_file_path: Qwen3-235B-W8A8.yaml
-              size: 2
-            - name: multi-node-qwenw8a8-2node-eplb
-              config_file_path: Qwen3-235B-W8A8-EPLB.yaml
-              size: 2
+            - name: GLM5_1-W8A8-EP-external
+              config_file_path: GLM5_1-W8A8-EP-external.yaml
+              config_base_path: tests/e2e/nightly/multi_node/external_dp/config/
+              size: 4
       uses: ./.github/workflows/_e2e_nightly_multi_node.yaml
       with:
         soc_version: a3
@@ -101,12 +101,20 @@ Currently, the multi-node test workflow is defined in the [nightly_test_a3.yaml]
         replicas: 1
         size: ${{ matrix.test_config.size }}
         config_file_path: ${{ matrix.test_config.config_file_path }}
-        config_base_path: tests/e2e/nightly/multi_node/internal_dp/config/
+        config_base_path: ${{ matrix.test_config.config_base_path || '' }}
+        name: ${{ matrix.test_config.name }}
       secrets:
         KUBECONFIG_B64: ${{ secrets.KUBECONFIG_B64 }}
     ```
   
-The matrix above defines all the parameters required to add a multi-machine use case. The parameters worth noting (if you are adding a new use case) are `size`, `config_file_path`, and `config_base_path`. `size` defines the number of nodes required for your use case. `config_file_path` is the yaml file name, and `config_base_path` tells the loader which config directory to use. For internal DP cases, `config_base_path` may be omitted because it defaults to `tests/e2e/nightly/multi_node/internal_dp/config/`. For external DP cases, set it to `tests/e2e/nightly/multi_node/external_dp/config/`.
+The matrix above defines all the parameters required to add a multi-machine use
+case. The parameters worth noting are `size`, `config_file_path`, and
+`config_base_path`. `size` defines the number of nodes required for your use
+case. `config_file_path` is the yaml file name, and `config_base_path` tells the
+loader which config directory to use. For internal DP cases, use an empty
+`config_base_path` so the loader uses its default internal DP config directory.
+For external DP cases, set it to
+`tests/e2e/nightly/multi_node/external_dp/config/`.
 
 ## Run Multi-Node tests locally
 
@@ -417,11 +425,10 @@ $LOG_PREFIX/node_<LWS_WORKER_INDEX>_plogs/
 
 ##### 2.2.1 Add cluster hosts
 
-Edit the external DP config you want to run. Common smoke configs are:
+Edit the external DP config you want to run. For example:
 
 ```text
-tests/e2e/nightly/multi_node/external_dp/config/generic_dp_smoke.yaml
-tests/e2e/nightly/multi_node/external_dp/config/disaggregated_prefill_smoke.yaml
+tests/e2e/nightly/multi_node/external_dp/config/GLM5_1-W8A8-EP-external.yaml
 ```
 
 Add `cluster_hosts` as a top-level field, for example near `num_nodes` and
@@ -429,6 +436,8 @@ Add `cluster_hosts` as a top-level field, for example near `num_nodes` and
 
 ```yaml
 cluster_hosts:
+  - "172.22.0.xxx"
+  - "172.22.0.xxx"
   - "172.22.0.xxx"
   - "172.22.0.xxx"
 ```
@@ -463,16 +472,18 @@ External DP uses the same shared `run.sh`. Set `CONFIG_BASE_PATH` to the
 external DP config directory so the script chooses
 `external_dp/scripts/test_external_dp.py`.
 
-Then start the non-master node first.
+Then start non-master nodes first, and start node 0 last. The following example
+uses `GLM5_1-W8A8-EP-external.yaml`, which is a 4-node disaggregated prefill
+case.
 
-On node 1:
+On node 1, node 2, and node 3, set the matching `LWS_WORKER_INDEX`:
 
 ```bash
 export WORKSPACE=/vllm-workspace
 export IS_PR_TEST=false
 export CONFIG_BASE_PATH=tests/e2e/nightly/multi_node/external_dp/config/
-export CONFIG_YAML_PATH=generic_dp_smoke.yaml
-export LWS_WORKER_INDEX=1
+export CONFIG_YAML_PATH=GLM5_1-W8A8-EP-external.yaml
+export LWS_WORKER_INDEX=1  # Use 2 on node 2, and 3 on node 3.
 
 cd $WORKSPACE/vllm-ascend
 bash tests/e2e/nightly/multi_node/scripts/run.sh
@@ -484,21 +495,21 @@ On node 0:
 export WORKSPACE=/vllm-workspace
 export IS_PR_TEST=false
 export CONFIG_BASE_PATH=tests/e2e/nightly/multi_node/external_dp/config/
-export CONFIG_YAML_PATH=generic_dp_smoke.yaml
+export CONFIG_YAML_PATH=GLM5_1-W8A8-EP-external.yaml
 export LWS_WORKER_INDEX=0
 
 cd $WORKSPACE/vllm-ascend
 bash tests/e2e/nightly/multi_node/scripts/run.sh
 ```
 
-For disaggregated prefill smoke, node 1 starts the decoder ranks and node 0
-starts the prefiller ranks, proxy, and benchmark. For generic DP smoke, both
-nodes start worker ranks, while node 0 also starts the proxy and benchmark.
+For `GLM5_1-W8A8-EP-external.yaml`, node 0 and node 1 start prefiller ranks,
+node 2 and node 3 start decoder ranks, and node 0 also starts the proxy and
+benchmark.
 
 ##### 2.2.4 Read logs while the test is running
 
 The terminal running `run.sh` prints pytest orchestration logs. For external DP,
-AISBench output is also printed on node 0, while backend and proxy stdout/stderr
+AISBench output is also printed on node 0, while rank and proxy stdout/stderr
 are written to `EXTERNAL_DP_LOG_DIR`. The default layout is:
 
 ```text

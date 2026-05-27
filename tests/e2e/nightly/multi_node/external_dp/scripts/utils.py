@@ -15,11 +15,11 @@ from typing import Any
 import regex as re
 
 from tests.e2e.nightly.multi_node.external_dp.scripts.external_dp_config import (
+    ROUTING_DISAGGREGATED_PREFILL,
     ROUTING_GENERIC_DP,
-    ROUTING_PD,
     ExternalDPConfig,
-    ExternalDPEndpoint,
     NodeTemplate,
+    RankInfo,
     replace_cluster_placeholders,
 )
 from tests.e2e.nightly.multi_node.scripts.benchmark_results import (
@@ -33,14 +33,14 @@ from tests.e2e.nightly.multi_node.scripts.utils import get_net_interface
 
 logger = logging.getLogger(__name__)
 
-BRACED_VARIABLE_RE = re.compile(r"\$\{([A-Za-z_][A-Za-z0-9_]*)\}")
-UNBRACED_VARIABLE_RE = re.compile(r"(?<!\$)\$([A-Za-z_][A-Za-z0-9_]*)")
-PROXY_HEALTHCHECK_PATH = "/healthcheck"
+TEMPLATE_VAR_RE = re.compile(r"\$\{([A-Za-z_][A-Za-z0-9_]*)\}")
+ENV_VAR_RE = re.compile(r"(?<!\$)\$([A-Za-z_][A-Za-z0-9_]*)")
+PROXY_HEALTH_PATH = "/healthcheck"
 SENSITIVE_ENV_TOKENS = ("TOKEN", "SECRET", "PASSWORD", "ACCESS_KEY")
 
 
 @dataclass(frozen=True)
-class BuiltCommand:
+class ServerCommand:
     """Rendered command, env, and printable command line."""
 
     cmd: list[str]
@@ -48,19 +48,19 @@ class BuiltCommand:
     display_cmd: str
 
 
-class CommandBuilder:
-    """Render endpoint templates into vLLM serve commands."""
+class ServerCommandBuilder:
+    """Render rank templates into vLLM serve commands."""
 
     def __init__(self, config: ExternalDPConfig):
         self.config = config
 
-    def build(self, endpoint: ExternalDPEndpoint, template: NodeTemplate) -> BuiltCommand:
-        variables = self._build_variables(endpoint)
-        rendered_env = self._render_envs(template.envs, endpoint, variables)
+    def build(self, rank: RankInfo, template: NodeTemplate) -> ServerCommand:
+        variables = self._build_variables(rank)
+        rendered_env = self._render_envs(template.envs, rank, variables)
         rendered_args = [
             self._render_string(
                 arg,
-                endpoint=endpoint,
+                rank=rank,
                 braced_variables=variables,
                 unbraced_variables=rendered_env,
                 allow_missing_unbraced=False,
@@ -70,40 +70,40 @@ class CommandBuilder:
         cmd = ["vllm", "serve", self.config.model, *rendered_args]
 
         env = {key: str(value) for key, value in rendered_env.items()}
-        display_cmd = format_command(cmd, env)
+        display_cmd = format_server_cmd(cmd, env)
         logger.info(
-            "External DP endpoint command node=%s rank=%s: %s",
-            endpoint.config_index,
-            endpoint.local_rank,
+            "External DP server command node=%s rank=%s: %s",
+            rank.node_index,
+            rank.local_rank,
             display_cmd,
         )
-        return BuiltCommand(cmd=cmd, env=env, display_cmd=display_cmd)
+        return ServerCommand(cmd=cmd, env=env, display_cmd=display_cmd)
 
-    def _build_variables(self, endpoint: ExternalDPEndpoint) -> dict[str, str]:
+    def _build_variables(self, rank: RankInfo) -> dict[str, str]:
         return {
             "MODEL": self.config.model,
-            "PORT_START": str(endpoint.port_start),
-            "PORT": str(endpoint.port),
-            "DP_SIZE": str(endpoint.dp_size),
-            "DP_SIZE_LOCAL": str(endpoint.dp_size_local),
-            "DP_RANK_START": str(endpoint.dp_rank - endpoint.local_rank),
-            "DP_RANK": str(endpoint.dp_rank),
-            "LOCAL_RANK": str(endpoint.local_rank),
-            "TP_SIZE": str(endpoint.tp_size),
-            "CP_SIZE": str(endpoint.cp_size),
-            "SP_SIZE": str(endpoint.sp_size),
-            "PP_SIZE": str(endpoint.pp_size),
-            "DP_ADDRESS": endpoint.dp_address,
-            "DP_RPC_PORT": str(endpoint.dp_rpc_port),
-            "VISIBLE_DEVICES": endpoint.visible_devices,
-            "NODE_INDEX": str(endpoint.config_index),
-            "CONFIG_INDEX": str(endpoint.config_index),
+            "PORT_START": str(rank.port_start),
+            "PORT": str(rank.port),
+            "DP_SIZE": str(rank.dp_size),
+            "DP_SIZE_LOCAL": str(rank.dp_size_local),
+            "DP_RANK_START": str(rank.dp_rank - rank.local_rank),
+            "DP_RANK": str(rank.dp_rank),
+            "LOCAL_RANK": str(rank.local_rank),
+            "TP_SIZE": str(rank.tp_size),
+            "CP_SIZE": str(rank.cp_size),
+            "SP_SIZE": str(rank.sp_size),
+            "PP_SIZE": str(rank.pp_size),
+            "DP_ADDRESS": rank.dp_address,
+            "DP_RPC_PORT": str(rank.dp_rpc_port),
+            "VISIBLE_DEVICES": rank.visible_devices,
+            "NODE_INDEX": str(rank.node_index),
+            "CONFIG_INDEX": str(rank.node_index),
         }
 
     def _render_envs(
         self,
         envs: dict[str, Any],
-        endpoint: ExternalDPEndpoint,
+        rank: RankInfo,
         variables: dict[str, str],
     ) -> dict[str, str]:
         rendered_envs: dict[str, str] = {}
@@ -111,7 +111,7 @@ class CommandBuilder:
             if isinstance(value, str):
                 value = self._render_string(
                     value,
-                    endpoint=endpoint,
+                    rank=rank,
                     braced_variables=variables,
                     unbraced_variables={**os.environ, **rendered_envs},
                     allow_missing_unbraced=True,
@@ -123,7 +123,7 @@ class CommandBuilder:
         self,
         value: str,
         *,
-        endpoint: ExternalDPEndpoint,
+        rank: RankInfo,
         braced_variables: dict[str, str],
         unbraced_variables: dict[str, str],
         allow_missing_unbraced: bool,
@@ -131,19 +131,19 @@ class CommandBuilder:
         value = replace_cluster_placeholders(
             value,
             cluster_ips=self.config.cluster_ips,
-            local_ip=endpoint.host,
-            current_node_index=endpoint.config_index,
+            local_ip=rank.host,
+            current_node_index=rank.node_index,
         )
         value = self._render_variables(
             value,
             braced_variables,
-            pattern=BRACED_VARIABLE_RE,
+            pattern=TEMPLATE_VAR_RE,
             allow_missing=False,
         )
         return self._render_variables(
             value,
             unbraced_variables,
-            pattern=UNBRACED_VARIABLE_RE,
+            pattern=ENV_VAR_RE,
             allow_missing=allow_missing_unbraced,
         )
 
@@ -166,7 +166,7 @@ class CommandBuilder:
         return pattern.sub(repl, value)
 
 
-def build_distributed_envs(cur_ip: str, master_ip: str) -> dict[str, str]:
+def build_dist_envs(cur_ip: str, master_ip: str) -> dict[str, str]:
     nic_name = get_net_interface(cur_ip)
     return {
         "HCCL_IF_IP": cur_ip,
@@ -179,7 +179,7 @@ def build_distributed_envs(cur_ip: str, master_ip: str) -> dict[str, str]:
     }
 
 
-def format_command(cmd: list[str], env: dict[str, str] | None = None) -> str:
+def format_server_cmd(cmd: list[str], env: dict[str, str] | None = None) -> str:
     env_parts: list[str] = []
     for key, value in sorted((env or {}).items()):
         display_value = "***" if any(token in key.upper() for token in SENSITIVE_ENV_TOKENS) else str(value)
@@ -187,11 +187,11 @@ def format_command(cmd: list[str], env: dict[str, str] | None = None) -> str:
     return " ".join([*env_parts, shlex.join(cmd)])
 
 
-def start_process(cmd: list[str], env: dict[str, str], log_file: Path) -> subprocess.Popen:
+def start_logged_process(cmd: list[str], env: dict[str, str], log_file: Path) -> subprocess.Popen:
     log_file.parent.mkdir(parents=True, exist_ok=True)
     merged_env = {**os.environ, **env}
     with log_file.open("ab") as f:
-        f.write(f"Starting command: {format_command(cmd, env)}\n".encode())
+        f.write(f"Starting command: {format_server_cmd(cmd, env)}\n".encode())
         f.flush()
         return subprocess.Popen(
             cmd,
@@ -278,37 +278,37 @@ def collect_logs(src_dir: Path, output_tar: Path) -> None:
         tar.add(src_dir, arcname=src_dir.name)
 
 
-def build_proxy_command(config: ExternalDPConfig, endpoints: list[ExternalDPEndpoint]) -> list[str]:
+def build_proxy_server_cmd(config: ExternalDPConfig, ranks: list[RankInfo]) -> list[str]:
     routing = config.routing
     cmd = [sys.executable, routing.proxy_script, "--host", routing.proxy_host, "--port", str(routing.proxy_port)]
 
     if routing.type == ROUTING_GENERIC_DP:
-        worker_endpoints = [endpoint for endpoint in endpoints if endpoint.role == "worker"]
-        if not worker_endpoints:
-            raise ValueError("generic_dp proxy requires worker endpoints")
-        cmd.extend(["--dp-hosts", *[endpoint.host for endpoint in worker_endpoints]])
-        cmd.extend(["--dp-ports", *[str(endpoint.port) for endpoint in worker_endpoints]])
+        worker_ranks = [rank for rank in ranks if rank.role == "worker"]
+        if not worker_ranks:
+            raise ValueError("generic_dp proxy requires worker ranks")
+        cmd.extend(["--dp-hosts", *[rank.host for rank in worker_ranks]])
+        cmd.extend(["--dp-ports", *[str(rank.port) for rank in worker_ranks]])
         return cmd
 
-    if routing.type == ROUTING_PD:
-        prefiller_endpoints = [endpoint for endpoint in endpoints if endpoint.role == "prefiller"]
-        decoder_endpoints = [endpoint for endpoint in endpoints if endpoint.role == "decoder"]
-        if not prefiller_endpoints or not decoder_endpoints:
-            raise ValueError("disaggregated_prefill proxy requires prefiller and decoder endpoints")
-        cmd.extend(["--prefiller-hosts", *[endpoint.host for endpoint in prefiller_endpoints]])
-        cmd.extend(["--prefiller-ports", *[str(endpoint.port) for endpoint in prefiller_endpoints]])
-        cmd.extend(["--decoder-hosts", *[endpoint.host for endpoint in decoder_endpoints]])
-        cmd.extend(["--decoder-ports", *[str(endpoint.port) for endpoint in decoder_endpoints]])
+    if routing.type == ROUTING_DISAGGREGATED_PREFILL:
+        prefiller_ranks = [rank for rank in ranks if rank.role == "prefiller"]
+        decoder_ranks = [rank for rank in ranks if rank.role == "decoder"]
+        if not prefiller_ranks or not decoder_ranks:
+            raise ValueError("disaggregated_prefill proxy requires prefiller and decoder ranks")
+        cmd.extend(["--prefiller-hosts", *[rank.host for rank in prefiller_ranks]])
+        cmd.extend(["--prefiller-ports", *[str(rank.port) for rank in prefiller_ranks]])
+        cmd.extend(["--decoder-hosts", *[rank.host for rank in decoder_ranks]])
+        cmd.extend(["--decoder-ports", *[str(rank.port) for rank in decoder_ranks]])
         return cmd
 
     raise ValueError(f"Unsupported routing.type: {routing.type}")
 
 
-def proxy_health_url(config: ExternalDPConfig) -> str:
-    return f"http://{config.routing.proxy_host}:{config.routing.proxy_port}{PROXY_HEALTHCHECK_PATH}"
+def proxy_server_health_url(config: ExternalDPConfig) -> str:
+    return f"http://{config.routing.proxy_host}:{config.routing.proxy_port}{PROXY_HEALTH_PATH}"
 
 
-def _common_command_envs(commands: list[BuiltCommand]) -> dict[str, str]:
+def _common_command_envs(commands: list[ServerCommand]) -> dict[str, str]:
     if not commands:
         return {}
 
@@ -324,13 +324,13 @@ def _common_command_envs(commands: list[BuiltCommand]) -> dict[str, str]:
     return common_envs
 
 
-def _extract_dtype(config: ExternalDPConfig, commands: list[BuiltCommand]) -> str:
+def _extract_dtype(config: ExternalDPConfig, commands: list[ServerCommand]) -> str:
     has_w8a8 = "w8a8" in config.model.lower()
     has_quant_ascend = any("--quantization ascend" in command.display_cmd for command in commands)
     return "w8a8" if has_w8a8 and has_quant_ascend else "bf16"
 
 
-def _extract_features(commands: list[BuiltCommand]) -> list[str]:
+def _extract_features(commands: list[ServerCommand]) -> list[str]:
     if not commands:
         return []
     features: list[str] = []
@@ -364,24 +364,24 @@ def _extract_features(commands: list[BuiltCommand]) -> list[str]:
 
 def _build_serve_cmd(
     config: ExternalDPConfig,
-    endpoints: list[ExternalDPEndpoint],
-    commands: list[BuiltCommand],
+    ranks: list[RankInfo],
+    commands: list[ServerCommand],
 ) -> dict[str, Any]:
     entries: dict[str, str] = {}
-    for endpoint, command in zip(endpoints, commands):
-        prefix = endpoint.role
-        if config.routing.type == ROUTING_PD:
-            prefix = "prefill" if endpoint.role == "prefiller" else "decode"
-        entries[f"{prefix}-node{endpoint.config_index}-rank{endpoint.local_rank}"] = command.display_cmd
-    key = "external_dp_pd" if config.routing.type == ROUTING_PD else "external_dp"
+    for rank, command in zip(ranks, commands):
+        prefix = rank.role
+        if config.routing.type == ROUTING_DISAGGREGATED_PREFILL:
+            prefix = "prefill" if rank.role == "prefiller" else "decode"
+        entries[f"{prefix}-node{rank.node_index}-rank{rank.local_rank}"] = command.display_cmd
+    key = "external_dp_pd" if config.routing.type == ROUTING_DISAGGREGATED_PREFILL else "external_dp"
     return {key: entries}
 
 
 def build_benchmark_results(
     *,
     config: ExternalDPConfig,
-    endpoints: list[ExternalDPEndpoint],
-    commands: list[BuiltCommand],
+    ranks: list[RankInfo],
+    commands: list[ServerCommand],
     results: list[Any],
 ) -> dict[str, Any]:
     valid_items = [(case["case_name"], case) for case in config.benchmark_cases]
@@ -397,7 +397,7 @@ def build_benchmark_results(
         "vllm_version": get_vllm_version(),
         "vllm_ascend_version": os.environ.get("VLLM_ASCEND_REF", ""),
         "tasks": tasks,
-        "serve_cmd": _build_serve_cmd(config, endpoints, commands),
+        "serve_cmd": _build_serve_cmd(config, ranks, commands),
         "environment": filter_environment(common_envs),
     }
 
@@ -405,11 +405,11 @@ def build_benchmark_results(
 def write_benchmark_results_json(
     *,
     config: ExternalDPConfig,
-    endpoints: list[ExternalDPEndpoint],
-    commands: list[BuiltCommand],
+    ranks: list[RankInfo],
+    commands: list[ServerCommand],
     results: list[Any],
     output_dir: Path | None = None,
 ) -> Path:
-    output = build_benchmark_results(config=config, endpoints=endpoints, commands=commands, results=results)
+    output = build_benchmark_results(config=config, ranks=ranks, commands=commands, results=results)
     job_name = os.environ.get("BENCHMARK_JOB_NAME", "") or config.test_name.replace(" ", "-")
     return write_results_json(output, job_name=job_name, output_dir=output_dir)

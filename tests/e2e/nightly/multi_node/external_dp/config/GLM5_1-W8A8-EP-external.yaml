@@ -246,7 +246,7 @@ templates:
       - glm45
       - --kv-transfer-config
       - '{"kv_connector": "MooncakeConnectorV1",
-        "kv_role": "kv_producer",
+        "kv_role": "kv_consumer",
         "kv_port": "30100",
         "engine_id": "0",
         "kv_connector_extra_config": {
@@ -311,7 +311,7 @@ templates:
       - glm45
       - --kv-transfer-config
       - '{"kv_connector": "MooncakeConnectorV1",
-        "kv_role": "kv_producer",
+        "kv_role": "kv_consumer",
         "kv_port": "30100",
         "engine_id": "0",
         "kv_connector_extra_config": {

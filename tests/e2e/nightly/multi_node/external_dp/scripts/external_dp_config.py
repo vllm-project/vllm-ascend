@@ -16,24 +16,24 @@ from tests.e2e.nightly.multi_node.scripts.utils import (
 logger = logging.getLogger(__name__)
 
 DEFAULT_CONFIG_BASE_PATH = "tests/e2e/nightly/multi_node/external_dp/config/"
-DEFAULT_CONFIG_NAME = "generic_dp_smoke.yaml"
-BACKEND_HEALTHCHECK_PATH = "/health"
-BACKEND_READY_TIMEOUT = 3600
+DEFAULT_CONFIG_NAME = "GLM5_1-W8A8-EP-external.yaml"
+SERVER_HEALTH_PATH = "/health"
+SERVER_READY_TIMEOUT_SECONDS = 3600
 ROUTING_GENERIC_DP = "generic_dp"
-ROUTING_PD = "disaggregated_prefill"
-SUPPORTED_ROUTING_TYPES = {ROUTING_GENERIC_DP, ROUTING_PD}
+ROUTING_DISAGGREGATED_PREFILL = "disaggregated_prefill"
+SUPPORTED_ROUTING_TYPES = {ROUTING_GENERIC_DP, ROUTING_DISAGGREGATED_PREFILL}
 DEFAULT_PROXY_NODE_INDEX = 0
 DEFAULT_PROXY_PORT = 1999
 PROXY_SCRIPT_BY_ROUTING_TYPE = {
     ROUTING_GENERIC_DP: "examples/external_online_dp/dp_load_balance_proxy_server.py",
-    ROUTING_PD: "examples/disaggregated_prefill_v1/load_balance_proxy_server_example.py",
+    ROUTING_DISAGGREGATED_PREFILL: "examples/disaggregated_prefill_v1/load_balance_proxy_server_example.py",
 }
 CLUSTER_PLACEHOLDER_RE = re.compile(r"\$\{(NODE_(\d+)_IP|LOCAL_IP|MASTER_IP|LWS_WORKER_INDEX)\}")
 
 
 @dataclass(frozen=True)
 class RoutingConfig:
-    """Proxy routing metadata shared by all external DP endpoints."""
+    """Proxy routing metadata shared by all external DP ranks."""
 
     type: str
     proxy_node_index: int
@@ -44,10 +44,10 @@ class RoutingConfig:
 
 
 @dataclass(frozen=True)
-class NodeConfig:
-    """Per-node backend topology loaded from one config entry."""
+class NodeInfo:
+    """Per-node external DP server topology loaded from one config entry."""
 
-    node_ip: str
+    ip: str
     port_start: int
     dp_rpc_port: int
     dp_size: int
@@ -70,17 +70,17 @@ class NodeConfig:
 
 @dataclass(frozen=True)
 class NodeTemplate:
-    """Per-node env and argument template for launching vLLM backends."""
+    """Per-node env and argument template for launching vLLM servers."""
 
     envs: dict[str, Any]
     server_cmd_template: list[str]
 
 
 @dataclass(frozen=True)
-class ExternalDPEndpoint:
-    """One concrete backend process expanded from a node config."""
+class RankInfo:
+    """One concrete vLLM server rank expanded from a node config."""
 
-    config_index: int
+    node_index: int
     role: str
     local_rank: int
     dp_rank: int
@@ -109,14 +109,14 @@ class ExternalDPConfig:
     cluster_hosts: list[str] | None
     cluster_ips: list[str]
     routing: RoutingConfig
-    node_configs: list[NodeConfig]
-    templates: list[NodeTemplate]
+    nodes: list[NodeInfo]
+    launch_templates: list[NodeTemplate]
     benchmark_cases: list[dict[str, Any]] = field(default_factory=list)
     special_dependencies: dict[str, str] = field(default_factory=dict)
 
     @property
     def is_disaggregated_prefill(self) -> bool:
-        return self.routing.type == ROUTING_PD
+        return self.routing.type == ROUTING_DISAGGREGATED_PREFILL
 
 
 def replace_cluster_placeholders(
@@ -194,8 +194,8 @@ class ExternalDPConfigLoader:
 
         model = str(raw_config["model"])
         routing = cls._parse_routing(raw_config["routing"], resolved_cluster_ips)
-        node_configs = cls._parse_node_configs(raw_config, resolved_cluster_ips)
-        templates = cls._parse_templates(raw_config)
+        nodes = cls._parse_nodes(raw_config, resolved_cluster_ips)
+        launch_templates = cls._parse_templates(raw_config)
         benchmark_cases = cls._parse_benchmarks(raw_config)
 
         config = ExternalDPConfig(
@@ -206,8 +206,8 @@ class ExternalDPConfigLoader:
             cluster_hosts=raw_config.get("cluster_hosts"),
             cluster_ips=resolved_cluster_ips,
             routing=routing,
-            node_configs=node_configs,
-            templates=templates,
+            nodes=nodes,
+            launch_templates=launch_templates,
             benchmark_cases=benchmark_cases,
             special_dependencies=dict(raw_config.get("special_dependencies", {})),
         )
@@ -273,8 +273,8 @@ class ExternalDPConfigLoader:
         )
 
     @staticmethod
-    def _parse_node_configs(raw_config: dict[str, Any], cluster_ips: list[str]) -> list[NodeConfig]:
-        node_configs: list[NodeConfig] = []
+    def _parse_nodes(raw_config: dict[str, Any], cluster_ips: list[str]) -> list[NodeInfo]:
+        nodes: list[NodeInfo] = []
         for index, raw_node in enumerate(raw_config["config"]):
             raw_node_index = raw_node.get("node_index")
             if raw_node_index is not None and int(raw_node_index) != index:
@@ -285,9 +285,9 @@ class ExternalDPConfigLoader:
                 local_ip=cluster_ips[index],
                 current_node_index=index,
             )
-            node_configs.append(
-                NodeConfig(
-                    node_ip=cluster_ips[index],
+            nodes.append(
+                NodeInfo(
+                    ip=cluster_ips[index],
                     port_start=int(node["port_start"]),
                     dp_rpc_port=int(node["dp_rpc_port"]),
                     dp_size=int(node.get("dp_size", 1)),
@@ -300,7 +300,7 @@ class ExternalDPConfigLoader:
                     pp_size=int(node.get("pp_size", 1)),
                 )
             )
-        return node_configs
+        return nodes
 
     @staticmethod
     def _parse_templates(raw_config: dict[str, Any]) -> list[NodeTemplate]:
@@ -331,17 +331,19 @@ class ExternalDPConfigLoader:
 
     @staticmethod
     def _validate_config(config: ExternalDPConfig) -> None:
-        if len(config.node_configs) != config.num_nodes:
-            raise AssertionError(f"config size ({len(config.node_configs)}) != num_nodes ({config.num_nodes})")
-        if len(config.templates) != config.num_nodes:
-            raise AssertionError(f"templates size ({len(config.templates)}) != num_nodes ({config.num_nodes})")
+        if len(config.nodes) != config.num_nodes:
+            raise AssertionError(f"config size ({len(config.nodes)}) != num_nodes ({config.num_nodes})")
+        if len(config.launch_templates) != config.num_nodes:
+            raise AssertionError(f"templates size ({len(config.launch_templates)}) != num_nodes ({config.num_nodes})")
 
         if config.routing.type not in SUPPORTED_ROUTING_TYPES:
             raise ValueError(f"Unsupported routing.type: {config.routing.type}")
         groups = config.routing.groups
         if config.routing.type == ROUTING_GENERIC_DP and not groups.get("worker"):
             raise ValueError("generic_dp routing requires routing.groups.worker")
-        if config.routing.type == ROUTING_PD and (not groups.get("prefiller") or not groups.get("decoder")):
+        if config.routing.type == ROUTING_DISAGGREGATED_PREFILL and (
+            not groups.get("prefiller") or not groups.get("decoder")
+        ):
             raise ValueError("disaggregated_prefill routing requires prefiller and decoder groups")
 
         seen_group_indices: dict[int, str] = {}
@@ -350,9 +352,7 @@ class ExternalDPConfigLoader:
                 if index < 0 or index >= config.num_nodes:
                     raise ValueError(f"routing.groups.{group_name} index out of range: {index}")
                 if index in seen_group_indices:
-                    raise ValueError(
-                        f"config index {index} appears in both {seen_group_indices[index]} and {group_name}"
-                    )
+                    raise ValueError(f"node index {index} appears in both {seen_group_indices[index]} and {group_name}")
                 seen_group_indices[index] = group_name
 
         if config.routing.proxy_node_index < 0 or config.routing.proxy_node_index >= config.num_nodes:
@@ -360,7 +360,7 @@ class ExternalDPConfigLoader:
         if config.cluster_hosts and len(config.cluster_hosts) != config.num_nodes:
             raise AssertionError("cluster_hosts size mismatch")
 
-        for node_index, node in enumerate(config.node_configs):
+        for node_index, node in enumerate(config.nodes):
             parallel_sizes = {
                 "dp_size": node.dp_size,
                 "dp_size_local": node.dp_size_local,
@@ -383,7 +383,7 @@ class ExternalDPConfigLoader:
                 raise ValueError(f"node {node_index} dp rank range exceeds dp_size")
             ports = [node.port_start + local_rank for local_rank in range(node.dp_size_local)]
             if len(set(ports)) != len(ports):
-                raise ValueError(f"node {node_index} has duplicate endpoint ports")
+                raise ValueError(f"node {node_index} has duplicate server ports")
 
             used_devices: set[int] = set()
             for local_rank in range(node.dp_size_local):
@@ -397,60 +397,60 @@ class ExternalDPConfigLoader:
                 used_devices.update(devices)
 
 
-class EndpointResolver:
-    """Expand node-level configs into backend endpoints."""
+class RankResolver:
+    """Expand node-level configs into concrete vLLM server ranks."""
 
     def __init__(self, config: ExternalDPConfig):
         self.config = config
 
-    def resolve(self) -> list[ExternalDPEndpoint]:
-        role_by_config_index = self._role_by_config_index()
-        endpoints: list[ExternalDPEndpoint] = []
-        for config_index, node_config in enumerate(self.config.node_configs):
-            role = role_by_config_index[config_index]
-            endpoints.extend(self._expand_node(config_index, role, node_config))
-        return endpoints
+    def resolve(self) -> list[RankInfo]:
+        role_by_node_index = self._role_by_node_index()
+        ranks: list[RankInfo] = []
+        for node_index, node_info in enumerate(self.config.nodes):
+            role = role_by_node_index[node_index]
+            ranks.extend(self._expand_node(node_index, role, node_info))
+        return ranks
 
-    def _role_by_config_index(self) -> dict[int, str]:
+    def _role_by_node_index(self) -> dict[int, str]:
         role_by_index: dict[int, str] = {}
-        for role, config_indices in self.config.routing.groups.items():
-            for index in config_indices:
+        for role, node_indices in self.config.routing.groups.items():
+            for index in node_indices:
                 role_by_index[index] = role
 
         missing = [index for index in range(self.config.num_nodes) if index not in role_by_index]
         if missing:
-            raise ValueError(f"routing.groups does not assign role for config indices: {missing}")
+            raise ValueError(f"routing.groups does not assign role for node indices: {missing}")
         return role_by_index
 
     @staticmethod
-    def _expand_node(node_index: int, role: str, node_config: NodeConfig) -> list[ExternalDPEndpoint]:
-        endpoints: list[ExternalDPEndpoint] = []
-        for local_rank in range(node_config.dp_size_local):
-            dp_rank = node_config.dp_rank_start + local_rank
-            port = node_config.port_start + local_rank
+    def _expand_node(node_index: int, role: str, node_info: NodeInfo) -> list[RankInfo]:
+        ranks: list[RankInfo] = []
+        for local_rank in range(node_info.dp_size_local):
+            dp_rank = node_info.dp_rank_start + local_rank
+            port = node_info.port_start + local_rank
             device_range = range(
-                local_rank * node_config.devices_per_rank,
-                (local_rank + 1) * node_config.devices_per_rank,
+                local_rank * node_info.devices_per_rank,
+                (local_rank + 1) * node_info.devices_per_rank,
             )
             visible_devices = ",".join(str(device) for device in device_range)
-            endpoints.append(
-                ExternalDPEndpoint(
-                    config_index=node_index,
+            ranks.append(
+                RankInfo(
+                    node_index=node_index,
                     role=role,
                     local_rank=local_rank,
                     dp_rank=dp_rank,
-                    host=node_config.node_ip,
+                    host=node_info.ip,
                     port=port,
                     visible_devices=visible_devices,
-                    dp_size=node_config.dp_size,
-                    dp_size_local=node_config.dp_size_local,
-                    tp_size=node_config.tp_size,
-                    cp_size=node_config.cp_size,
-                    sp_size=node_config.sp_size,
-                    pp_size=node_config.pp_size,
-                    dp_address=node_config.dp_address,
-                    dp_rpc_port=node_config.dp_rpc_port,
-                    port_start=node_config.port_start,
+                    dp_size=node_info.dp_size,
+                    dp_size_local=node_info.dp_size_local,
+                    tp_size=node_info.tp_size,
+                    cp_size=node_info.cp_size,
+                    sp_size=node_info.sp_size,
+                    pp_size=node_info.pp_size,
+                    dp_address=node_info.dp_address,
+                    dp_rpc_port=node_info.dp_rpc_port,
+                    port_start=node_info.port_start,
                 )
             )
-        return endpoints
+        return ranks
