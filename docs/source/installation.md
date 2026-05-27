@@ -281,7 +281,7 @@ pip install modelscope
 python example.py
 ```
 
-The output will be like:
+The output is shown below, and it may change with version updates:
 
 ```bash
 INFO 02-18 08:49:58 __init__.py:28] Available plugins for group vllm.platform_plugins:
