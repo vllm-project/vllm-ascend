@@ -4,7 +4,7 @@ Additional configuration is a mechanism provided by vLLM to allow plugins to con
 
 ## Migration Guide
 
-Starting from PR #9064, vLLM Ascend is migrating configuration from environment variables to `--additional-config`.
+Starting from PR #9064, vLLM Ascend is migrating **10 environment variables** to `--additional-config`.
 
 ### Important Notice
 
