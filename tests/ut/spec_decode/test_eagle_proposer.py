@@ -2161,8 +2161,9 @@ class TestPrepareNextTokenIdsPadded(TestBase):
 class MockDraftModel:
     """Draft model that records prepared forward inputs."""
 
-    def __init__(self, returns_tuple=True, vocab_size=200000):
+    def __init__(self, returns_tuple=True, enable_reduce_sample=False, vocab_size=200000):
         self.returns_tuple = returns_tuple
+        self.enable_reduce_sample = enable_reduce_sample
         self.vocab_size = vocab_size
         self.calls = []
         self.logit_inputs = []
@@ -2186,11 +2187,13 @@ class MockDraftModel:
             return last_hidden_states, hidden_states
         return last_hidden_states
 
-    def compute_logits(self, sample_hidden_states):
+    def compute_logits(self, sample_hidden_states, enable_reduce_sample=False):
         self.logit_inputs.append(sample_hidden_states.clone())
         token_ids = sample_hidden_states[:, 0].to(torch.long)
         logits = torch.full((sample_hidden_states.shape[0], self.vocab_size), -1000.0)
         logits[torch.arange(sample_hidden_states.shape[0]), token_ids] = 1000.0
+        if self.enable_reduce_sample:
+            logits = logits.argmax(dim=-1)
         return logits
 
     def embed_input_ids(self, input_ids):
@@ -2414,7 +2417,7 @@ class TestRunMergedDraft(TestBase):
         assert sig_name == ["self", "input_ids", "positions", "hidden_states", "inputs_embeds"]
         sig = inspect.signature(RunnerCls.compute_logits)
         sig_name = self.get_param_names(sig)
-        assert sig_name == ["self", "hidden_states"]
+        assert sig_name == ["self", "hidden_states", "enable_reduce_sample"]
 
         import vllm_ascend.ascend_forward_context
 
@@ -2510,7 +2513,7 @@ class TestRunMergedDraft(TestBase):
         return [p.name for p in sig.parameters.values()]
 
     def test_run_merged_draft_eagle3_decode_prepares_each_forward_input(self):
-        self.proposer.model = MockDraftModel(returns_tuple=True)
+        self.proposer.model = MockDraftModel(returns_tuple=True, enable_reduce_sample= True)
         self.proposer.supports_mm_inputs = True
         initial_input_ids = torch.tensor(
             [279, 1196, 374, 8014, 151667, 198, 32313, 11, 151667, 198, 32313, 11],
@@ -2531,8 +2534,11 @@ class TestRunMergedDraft(TestBase):
         forward_context.attn_metadata = None
         multi_steps_attn_metadata = [MagicMock(), MagicMock(), MagicMock()]
 
+        mock_ascend_config = MagicMock()
+        mock_ascend_config.enable_reduce_sample = True
         with (
             patch.object(llm_base_proposer, "lmhead_tp_enable", return_value=False),
+            patch.object(llm_base_proposer, "get_ascend_config", return_value=mock_ascend_config),
             patch.object(llm_base_proposer, "get_forward_context", return_value=forward_context),
         ):
             draft_token_ids = self.proposer._run_merged_draft(
@@ -2594,7 +2600,12 @@ class TestRunMergedDraft(TestBase):
             }
         )
 
-        with patch.object(llm_base_proposer, "lmhead_tp_enable", return_value=False):
+        mock_ascend_config = MagicMock()
+        mock_ascend_config.enable_reduce_sample = False
+        with (
+            patch.object(llm_base_proposer, "lmhead_tp_enable", return_value=False),
+            patch.object(llm_base_proposer, "get_ascend_config", return_value=mock_ascend_config),
+        ):
             draft_token_ids = self.proposer._run_merged_draft(
                 num_input_tokens=12,
                 batch_size=2,
@@ -2644,8 +2655,11 @@ class TestRunMergedDraft(TestBase):
         forward_context.attn_metadata = None
         multi_steps_attn_metadata = [MagicMock(), MagicMock(), MagicMock()]
 
+        mock_ascend_config = MagicMock()
+        mock_ascend_config.enable_reduce_sample = False
         with (
             patch.object(llm_base_proposer, "lmhead_tp_enable", return_value=True),
+            patch.object(llm_base_proposer, "get_ascend_config", return_value=mock_ascend_config),
             patch.object(llm_base_proposer, "get_forward_context", return_value=forward_context),
         ):
             draft_token_ids = self.proposer._run_merged_draft(
@@ -2700,6 +2714,8 @@ class TestRunMergedDraft(TestBase):
             (1, False, torch.tensor([1, 3], dtype=torch.int64), (2, 1)),
             (2, True, torch.tensor([0, 1, 2, 3], dtype=torch.int64), (2, 2)),
         ]
+        mock_ascend_config = MagicMock()
+        mock_ascend_config.enable_reduce_sample = False
         for num_speculative_tokens, parallel_drafting, token_indices_to_sample, expected_shape in test_cases:
             with self.subTest(num_speculative_tokens=num_speculative_tokens, parallel_drafting=parallel_drafting):
                 self.proposer.method = "eagle3"
@@ -2710,7 +2726,10 @@ class TestRunMergedDraft(TestBase):
                 self.proposer.input_ids[:4] = torch.tensor([279, 1196, 374, 8014], dtype=torch.int32)
                 self.proposer.positions[:4] = torch.tensor([17, 18, 19, 20], dtype=torch.int64)
 
-                with patch.object(llm_base_proposer, "lmhead_tp_enable", return_value=False):
+                with (
+                    patch.object(llm_base_proposer, "lmhead_tp_enable", return_value=False),
+                    patch.object(llm_base_proposer, "get_ascend_config", return_value=mock_ascend_config),
+                ):
                     draft_token_ids = self.proposer._run_merged_draft(
                         num_input_tokens=4,
                         batch_size=2,

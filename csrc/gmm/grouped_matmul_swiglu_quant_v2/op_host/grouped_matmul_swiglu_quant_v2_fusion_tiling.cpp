@@ -73,7 +73,11 @@ ge::graphStatus GroupedMatmulSwigluQuantV2FusionTiling::ParseInputAndAttr()
         return ge::GRAPH_FAILED);
 
     const auto swigluLimtPtr = attr->GetAttrPointer<double>(ATTR_INDEX_SWIGLU_LIMIT);
-    double swigluLimt_ = swigluLimtPtr != nullptr ? *swigluLimtPtr : 1000000.0f;
+    double swigluLimt_ = swigluLimtPtr != nullptr ? *swigluLimtPtr : 0.0f;
+    OP_CHECK_IF(!(swigluLimt_ >= 0.0),
+        OP_LOGE(context_->GetNodeName(), "swigluLimit must be non-negative, but actual value is %f.",
+                swigluLimt_),
+        return ge::GRAPH_FAILED);
     tilingData_.set_swigluLimit(swigluLimt_);
     m_ = xTensor->GetStorageShape().GetDim(0);
     k_ = xTensor->GetStorageShape().GetDim(1);

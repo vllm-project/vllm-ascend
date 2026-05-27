@@ -45,10 +45,17 @@ class AscendHybridKVCacheCoordinator(HybridKVCacheCoordinator):
         hash_block_size: int,
         eagle_attn_layer_names: list[str] | None = None,
         metrics_collector: KVCacheMetricsCollector | None = None,
+        max_num_batched_tokens: int | None = None,
     ):
         self.kv_cache_config = kv_cache_config
         self.max_model_len = max_model_len
         self.enable_caching = enable_caching
+        # Fall back to `max_model_len` when unset so the recycling-aware
+        # admission cap (vLLM PR #40946) collapses to the prior uncapped
+        # behavior. The scheduler always supplies the real value at runtime.
+        if max_num_batched_tokens is None:
+            max_num_batched_tokens = max_model_len
+        self.max_num_batched_tokens = max_num_batched_tokens
 
         self.block_pool = BlockPool(
             kv_cache_config.num_blocks,
@@ -72,6 +79,8 @@ class AscendHybridKVCacheCoordinator(HybridKVCacheCoordinator):
                 kv_cache_group_id=i,
                 dcp_world_size=dcp_world_size,
                 pcp_world_size=pcp_world_size,
+                max_num_batched_tokens=max_num_batched_tokens,
+                max_model_len=max_model_len,
             )
             for i, kv_cache_group in enumerate(self.kv_cache_config.kv_cache_groups)
         )
@@ -260,6 +269,7 @@ def get_kv_cache_coordinator(
         hash_block_size=hash_block_size,
         eagle_attn_layer_names=eagle_attn_layer_names,
         metrics_collector=metrics_collector,
+        max_num_batched_tokens=max_num_batched_tokens,
     )
 
 

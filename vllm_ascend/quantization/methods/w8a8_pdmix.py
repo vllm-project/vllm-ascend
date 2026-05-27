@@ -57,7 +57,7 @@ class AscendW8A8PDMixLinearMethod(AscendLinearScheme):
     def get_weight(self, input_size: int, output_size: int, params_dtype: torch.dtype) -> dict[str, Any]:
         return self._static_method.get_weight(input_size, output_size, params_dtype)
 
-    def get_pertensor_param(self, params_dtype: torch.dtype) -> dict[str, Any]:
+    def get_pertensor_param(self, params_dtype: torch.dtype, **kwargs: Any) -> dict[str, Any]:
         return self._static_method.get_pertensor_param(params_dtype)
 
     def get_perchannel_param(

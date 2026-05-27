@@ -28,6 +28,7 @@ TILING_DATA_FIELD_DEF(int64_t, vNumHead);
 TILING_DATA_FIELD_DEF(int64_t, kHeadDim);
 TILING_DATA_FIELD_DEF(int64_t, vHeadDim);
 TILING_DATA_FIELD_DEF(int64_t, chunkSize);
+TILING_DATA_FIELD_DEF(int64_t, initalStateStride0);
 TILING_DATA_FIELD_DEF(bool, useInitialState);
 TILING_DATA_FIELD_DEF(bool, storeFinalState);
 TILING_DATA_FIELD_DEF(int64_t, dataType);
