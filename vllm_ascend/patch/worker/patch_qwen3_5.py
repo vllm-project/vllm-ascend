@@ -19,10 +19,13 @@
 
 import torch
 from vllm.distributed import get_tensor_model_parallel_world_size
+from vllm.model_executor.layers.mamba.gdn.qwen_gdn_linear_attn import QwenGatedDeltaNetAttention
+from vllm.model_executor.layers.mamba.mamba_utils import MambaStateShapeCalculator
 from vllm.model_executor.models.qwen3_5 import Qwen3_5DecoderLayer
 from vllm.model_executor.models.qwen3_next import Qwen3NextAttention
 
 from vllm_ascend.ascend_forward_context import _EXTRA_CTX
+from vllm_ascend.ops.gdn import AscendGatedDeltaNetAttention
 
 
 class AscendQwen3NextAttention(Qwen3NextAttention):
@@ -137,3 +140,8 @@ class AscendQwen3_5DecoderLayer(Qwen3_5DecoderLayer):
 
 Qwen3_5DecoderLayer.forward = AscendQwen3_5DecoderLayer.forward
 Qwen3NextAttention.forward = AscendQwen3NextAttention.forward
+QwenGatedDeltaNetAttention.forward = AscendGatedDeltaNetAttention.forward
+QwenGatedDeltaNetAttention._forward_core = AscendGatedDeltaNetAttention._forward_core
+QwenGatedDeltaNetAttention._split_ba_for_tp = AscendGatedDeltaNetAttention._split_ba_for_tp
+QwenGatedDeltaNetAttention._warmup_prefill_kernels = AscendGatedDeltaNetAttention._warmup_prefill_kernels
+QwenGatedDeltaNetAttention.get_state_shape = AscendGatedDeltaNetAttention.get_state_shape

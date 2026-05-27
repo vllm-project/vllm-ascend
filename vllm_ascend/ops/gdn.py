@@ -21,7 +21,8 @@ from einops import rearrange
 from vllm.distributed import get_pcp_group
 from vllm.forward_context import get_forward_context
 from vllm.model_executor.layers.fla.ops.l2norm import l2norm_fwd
-from vllm.model_executor.layers.mamba.gdn_linear_attn import GatedDeltaNetAttention
+from vllm.model_executor.layers.mamba.gdn.base import GatedDeltaNetAttention
+from vllm.model_executor.layers.mamba.mamba_utils import MambaStateShapeCalculator
 from vllm.triton_utils import triton
 from vllm.v1.attention.backend import AttentionMetadata  # type: ignore
 from vllm.v1.attention.backends.gdn_attn import GDNAttentionMetadata
@@ -246,6 +247,22 @@ class AscendGatedDeltaNetAttention(GatedDeltaNetAttention):
             return self.split_ba(ba)
         return ba.chunk(2, dim=-1)
 
+    def get_state_shape(
+        self,
+    ) -> tuple[tuple[int, ...], tuple[int, ...], tuple[int, ...], tuple[int, ...]]:
+        return MambaStateShapeCalculator.gated_delta_net_state_shape(
+            self.tp_size,
+            self.num_k_heads,
+            self.num_v_heads,
+            self.head_k_dim,
+            self.head_v_dim,
+            self.conv_kernel_size,
+            self.num_spec,
+        )
+
+    def _warmup_prefill_kernels(self, qkv_or_qkvz: torch.Tensor, v_dim: int) -> None:
+        return
+
     def forward(
         self,
         hidden_states: torch.Tensor,
@@ -319,7 +336,7 @@ class AscendGatedDeltaNetAttention(GatedDeltaNetAttention):
                 self.prefix,
             )
         else:
-            torch.ops.vllm.gdn_attention_core(
+            torch.ops.vllm.qwen_gdn_attention_core(
                 mixed_qkv,
                 b,
                 a,

@@ -20,7 +20,7 @@
 import torch
 import torch.nn.functional as F
 from vllm.forward_context import get_forward_context
-from vllm.model_executor.layers.mamba.gdn_linear_attn import GatedDeltaNetAttention
+from vllm.model_executor.layers.mamba.gdn.base import GatedDeltaNetAttention
 from vllm.v1.attention.backend import AttentionMetadata  # type: ignore
 from vllm.v1.attention.backends.gdn_attn import GDNAttentionMetadata
 from vllm.v1.attention.backends.utils import PAD_SLOT_ID
