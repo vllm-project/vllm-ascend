@@ -82,7 +82,7 @@ COOLDOWN_SEC="${COOLDOWN_SEC:-15}"
 #        PREFIX_LENS="2048 8192 16384"
 #
 # Default = new sub-chunk pair matrix targeting ALL-mode advantage region.
-PAIRS_DEFAULT="4224:1152 11392:2176 12416:4224"
+PAIRS_DEFAULT="4200:1100 11300:2200 12400:4200"
 PAIRS=(${PAIRS:-$PAIRS_DEFAULT})
 # If PAIRS contains no ':' tokens, fall back to legacy PREFIX_LENS mode.
 PREFIX_LENS=(${PREFIX_LENS:-})
