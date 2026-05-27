@@ -393,7 +393,13 @@ class KVCacheRecvingThread(threading.Thread):
         self.use_mla = self.model_config.is_deepseek_mla
         self.is_hma_required = is_hma_required
         self.block_size = self.vllm_config.cache_config.block_size
-        self.num_layers = self.model_config.hf_text_config.num_hidden_layers
+        try:
+            hf_text_config = self.model_config.hf_text_config
+            if hf_text_config is None:
+                raise AttributeError
+        except AttributeError:
+            hf_text_config = self.model_config.hf_config
+        self.num_layers = hf_text_config.num_hidden_layers
         if block_size_scale is None:
             block_size_scale = []
         self.block_size_scale = block_size_scale
@@ -403,17 +409,17 @@ class KVCacheRecvingThread(threading.Thread):
         }
         if not is_vl_model(vllm_config):
             if self.use_mla:
-                self.k_head_dim = self.model_config.hf_text_config.kv_lora_rank
-                self.v_head_dim = self.model_config.hf_text_config.qk_rope_head_dim
+                self.k_head_dim = hf_text_config.kv_lora_rank
+                self.v_head_dim = hf_text_config.qk_rope_head_dim
                 self.num_kv_heads = 1
             else:
-                self.k_head_dim = self.model_config.hf_text_config.head_dim
-                self.v_head_dim = self.model_config.hf_text_config.head_dim
-                self.num_kv_heads = max(self.model_config.hf_text_config.num_key_value_heads // self.tp_size, 1)
+                self.k_head_dim = hf_text_config.head_dim
+                self.v_head_dim = hf_text_config.head_dim
+                self.num_kv_heads = max(hf_text_config.num_key_value_heads // self.tp_size, 1)
         else:
-            self.k_head_dim = self.model_config.hf_text_config.head_dim
-            self.v_head_dim = self.model_config.hf_text_config.head_dim
-            self.num_kv_heads = max(self.model_config.hf_text_config.num_key_value_heads // self.tp_size, 1)
+            self.k_head_dim = hf_text_config.head_dim
+            self.v_head_dim = hf_text_config.head_dim
+            self.num_kv_heads = max(hf_text_config.num_key_value_heads // self.tp_size, 1)
         self.proc_not_transfer_request: dict[str, bool] = {}
         self.failed_recv_requests: set[str] = set()
         self.invalid_block_ids: set[int] = set()
