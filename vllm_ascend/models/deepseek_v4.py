@@ -24,6 +24,7 @@
 # limitations under the License.
 """Inference-only DeepseekV2/DeepseekV3 model."""
 
+import importlib
 import math
 import typing
 from collections.abc import Callable, Iterable
@@ -88,7 +89,6 @@ if vllm_version_is("0.20.2"):
 else:
     from vllm.models.deepseek_v4.attention import DeepseekV4IndexerCache
     from vllm.models.deepseek_v4.compressor import CompressorStateCache
-
 
 def hadamard_transform_ref(x: torch.Tensor, scale=1.0):
     from scipy.linalg import hadamard  # type: ignore[import-untyped]
