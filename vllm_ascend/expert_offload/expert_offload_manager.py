@@ -6,6 +6,7 @@ from vllm.config import VllmConfig
 from vllm.logger import logger
 
 from vllm_ascend.ascend_forward_context import _EXTRA_CTX
+from vllm_ascend.utils import ACL_FORMAT_FRACTAL_NZ
 
 
 _SUBSCRIBED_COMPUTE_STREAMS = set()
@@ -93,17 +94,18 @@ class ExpertOffloadManager:
         """Allocate CPU buffers for all MoE layers."""
         for _ in range(num_moe_layers):
             w13_list = [
-                torch.empty(hidden_size, w13_up_dim, dtype=params_dtype, device="cpu")
+                torch.empty(hidden_size, w13_up_dim, dtype=params_dtype, device="cpu", pin_memory=True)
                 for _ in range(num_total_experts)
             ]
             w2_list = [
                 torch.empty(intermediate_size_per_partition, hidden_size,
-                            dtype=params_dtype, device="cpu")
+                            dtype=params_dtype, device="cpu", pin_memory=True)
                 for _ in range(num_total_experts)
             ]
             self.w13_weights_cpu.append(w13_list)
             self.w2_weights_cpu.append(w2_list)
         self._drain_pending_weights()
+        self.process_weights_after_loading()
 
         self.num_total_experts = num_total_experts
 
@@ -111,6 +113,34 @@ class ExpertOffloadManager:
         self.topk_ids_h = torch.zeros([self.offload_threshold, self.topk], dtype=torch.int32, device='cpu', pin_memory=True)
         self.log2phy_h = torch.zeros(num_total_experts, dtype=torch.int32, device='cpu', pin_memory=True)
         self.log2phy_np = self.log2phy_h.numpy()
+
+    def process_weights_after_loading(self):
+        first_w13 = self.w13_weights_cpu[0][0]
+        first_w2 = self.w2_weights_cpu[0][0]
+        if first_w13.dtype != torch.int8:
+            return
+        # for w8a8, npu weight tensor is cast to NZ format,
+        # so we also store NZ format weight in weights_cpu,
+        # and copy_ tensor's underlying storage instead of tensor itself
+        # to avoid implicit format conversion during h2d.
+        num_moe_layers = len(self.w13_weights_cpu)
+        num_experts = len(self.w13_weights_cpu[0])
+        self.w13_element_num = first_w13.nelement()
+        self.w2_element_num = first_w2.nelement()
+        for layer_id in range(num_moe_layers):
+            w13 = torch.stack(self.w13_weights_cpu[layer_id]).to('npu')
+            w13_nz = torch_npu.npu_format_cast(w13, ACL_FORMAT_FRACTAL_NZ)
+            w13_nz_storage = w13_nz.untyped_storage()
+            w2 = torch.stack(self.w2_weights_cpu[layer_id]).to('npu')
+            w2_nz = torch_npu.npu_format_cast(w2, ACL_FORMAT_FRACTAL_NZ)
+            w2_nz_storage = w2_nz.untyped_storage()
+            for expert_id in range(num_experts):
+                self.w13_weights_cpu[layer_id][expert_id].untyped_storage().copy_(
+                    w13_nz_storage[expert_id * self.w13_element_num : (expert_id + 1) * self.w13_element_num]
+                )
+                self.w2_weights_cpu[layer_id][expert_id].untyped_storage().copy_(
+                    w2_nz_storage[expert_id * self.w2_element_num : (expert_id + 1) * self.w2_element_num]
+                )
 
     def register_moe_layer(self, layer):
         self.moe_layers.append(layer)
@@ -184,7 +214,7 @@ class ExpertOffloadManager:
                 buffers.append([])
             for _ in range(global_num_experts):
                 buffers[layer_moe_idx].append(
-                    torch.empty(per_expert_shape, dtype=dtype, device="cpu"))
+                    torch.empty(per_expert_shape, dtype=dtype, device="cpu", pin_memory=True))
             created_any = True
 
         if created_any:
@@ -358,10 +388,12 @@ class ExpertOffloadManager:
 
         for slot in range(ndl):
             for eid in range(min(ntotal, len(self.w13_weights_cpu[0]))):
-                self._prefill_w13[slot][eid].copy_(
-                    self.w13_weights_cpu[0][eid].to(dev))
-                self._prefill_w2[slot][eid].copy_(
-                    self.w2_weights_cpu[0][eid].to(dev))
+                self._prefill_w13[slot].untyped_storage()[eid * self.w13_element_num : (eid + 1) * self.w13_element_num].copy_(
+                    self.w13_weights_cpu[0][eid].untyped_storage()
+                )
+                self._prefill_w2[slot].untyped_storage()[eid * self.w2_element_num : (eid + 1) * self.w2_element_num].copy_(
+                    self.w2_weights_cpu[0][eid].untyped_storage()
+                )
 
             # Initialize scale/offset buffers with layer 0 data (W8A8)
             if has_scales:
@@ -373,7 +405,7 @@ class ExpertOffloadManager:
                             0 < len(cpu_buffers[scale_name])):
                         for eid in range(min(ntotal, len(cpu_buffers[scale_name][0]))):
                             prefill_list[slot][eid].copy_(
-                                cpu_buffers[scale_name][0][eid].to(dev))
+                                cpu_buffers[scale_name][0][eid])
             if has_offsets:
                 for offset_name, prefill_list, cpu_buffers in [
                     ("w13_weight_offset", self._prefill_w13_offset, self.offset_cpu_buffers),
@@ -383,7 +415,7 @@ class ExpertOffloadManager:
                             0 < len(cpu_buffers[offset_name])):
                         for eid in range(min(ntotal, len(cpu_buffers[offset_name][0]))):
                             prefill_list[slot][eid].copy_(
-                                cpu_buffers[offset_name][0][eid].to(dev))
+                                cpu_buffers[offset_name][0][eid])
             # Initialize fp32 scale (convert from scale)
             if has_scales and slot < len(self._prefill_w13_scale_fp32):
                 for eid in range(min(ntotal, self._prefill_w13_scale[slot].shape[0])):
@@ -413,10 +445,12 @@ class ExpertOffloadManager:
 
         with torch_npu.npu.stream(self.load_stream):
             for eid in range(ntotal):
-                self._prefill_w13[pool_slot][eid].copy_(
-                    self.w13_weights_cpu[layer_idx][eid].to(dev))
-                self._prefill_w2[pool_slot][eid].copy_(
-                    self.w2_weights_cpu[layer_idx][eid].to(dev))
+                self._prefill_w13[pool_slot].untyped_storage()[eid * self.w13_element_num : (eid + 1) * self.w13_element_num].copy_(
+                    self.w13_weights_cpu[layer_idx][eid].untyped_storage()
+                )
+                self._prefill_w2[pool_slot].untyped_storage()[eid * self.w2_element_num : (eid + 1) * self.w2_element_num].copy_(
+                    self.w2_weights_cpu[layer_idx][eid].untyped_storage()
+                )
 
             # W8A8 scale/offset — load into prefill buffers
             for scale_name, prefill_list, cpu_buffers in [
@@ -428,7 +462,7 @@ class ExpertOffloadManager:
                             layer_idx < len(cpu_buffers[scale_name])):
                         for eid in range(min(ntotal, len(cpu_buffers[scale_name][layer_idx]))):
                             prefill_list[pool_slot][eid].copy_(
-                                cpu_buffers[scale_name][layer_idx][eid].to(dev))
+                                cpu_buffers[scale_name][layer_idx][eid])
             for offset_name, prefill_list, cpu_buffers in [
                 ("w13_weight_offset", self._prefill_w13_offset, self.offset_cpu_buffers),
                 ("w2_weight_offset", self._prefill_w2_offset, self.offset_cpu_buffers),
@@ -438,7 +472,7 @@ class ExpertOffloadManager:
                             layer_idx < len(cpu_buffers[offset_name])):
                         for eid in range(min(ntotal, len(cpu_buffers[offset_name][layer_idx]))):
                             prefill_list[pool_slot][eid].copy_(
-                                cpu_buffers[offset_name][layer_idx][eid].to(dev))
+                                cpu_buffers[offset_name][layer_idx][eid])
 
             # Refresh fp32 scale for prefill pool
             if (pool_slot < len(self._prefill_w13_scale_fp32) and
@@ -574,11 +608,12 @@ class ExpertOffloadManager:
                     break  # no free slots — should not happen in normal usage
                 slot = reusable_slots.pop()
                 # Copy weights from CPU to NPU
-                # TODO remove the to(dev) leads to wrong accuracy, weird, need to check why.
-                layer.w13_weight.data[slot].copy_(
-                    self.w13_weights_cpu[layer_idx][eid].to(dev))
-                layer.w2_weight.data[slot].copy_(
-                    self.w2_weights_cpu[layer_idx][eid].to(dev))
+                layer.w13_weight.data.untyped_storage()[slot * self.w13_element_num : (slot + 1) * self.w13_element_num].copy_(
+                    self.w13_weights_cpu[layer_idx][eid].untyped_storage()
+                )
+                layer.w2_weight.data.untyped_storage()[slot * self.w2_element_num : (slot + 1) * self.w2_element_num].copy_(
+                    self.w2_weights_cpu[layer_idx][eid].untyped_storage()
+                )
                 # Copy scales/offsets from CPU to NPU
                 for attr_name, buffers in self.scale_cpu_buffers.items():
                     if layer_idx >= len(buffers) or eid >= len(buffers[layer_idx]):
@@ -586,14 +621,14 @@ class ExpertOffloadManager:
                     dev_tensor = getattr(layer, attr_name, None)
                     if dev_tensor is None:
                         continue
-                    dev_tensor.data[slot].copy_(buffers[layer_idx][eid].to(dev))
+                    dev_tensor.data[slot].copy_(buffers[layer_idx][eid])
                 for attr_name, buffers in self.offset_cpu_buffers.items():
                     if layer_idx >= len(buffers) or eid >= len(buffers[layer_idx]):
                         continue
                     dev_tensor = getattr(layer, attr_name, None)
                     if dev_tensor is None:
                         continue
-                    dev_tensor.data[slot].copy_(buffers[layer_idx][eid].to(dev))
+                    dev_tensor.data[slot].copy_(buffers[layer_idx][eid])
                 # Refresh derived fp32 scale if present (W8A8_DYNAMIC)
                 if hasattr(layer, 'w13_weight_scale_fp32'):
                     layer.w13_weight_scale_fp32[slot].copy_(
