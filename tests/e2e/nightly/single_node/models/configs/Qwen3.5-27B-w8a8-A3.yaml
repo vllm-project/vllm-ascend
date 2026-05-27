@@ -50,6 +50,13 @@ test_cases:
         batch_size: 32
         baseline: 90
         threshold: 5
+        thinking: true
+        temperature: 1.0
+        top_p: 0.95
+        top_k: 20
+        min_p: 0.0
+        presence_penalty: 1.5
+        repetition_penalty: 1.0
         ignore_eos: false
       perf:
         case_type: performance
