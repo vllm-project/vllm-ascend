@@ -1069,6 +1069,30 @@ class AscendAttentionBackendImpl(AttentionImpl):
         else:
             seq_lens_kv_list = actual_seq_lengths_kv.tolist() if hasattr(actual_seq_lengths_kv, 'numel') and actual_seq_lengths_kv.numel() > 1 else [int(actual_seq_lengths_kv)]
 
+        # Validate sequence length (similar to NPU operator C++ layer validation)
+        # Get max_seq_len from config (equivalent to operator internal access)
+        max_seq_len = getattr(
+            self.vllm_config.model_config, 'max_model_len',
+            getattr(self.vllm_config.model_config, 'max_seq_len', 32768)
+        )
+        
+        max_kv_len = max(seq_lens_kv_list) if seq_lens_kv_list else 0
+        if max_kv_len > max_seq_len:
+            # Truncate sequences that exceed max_model_len to prevent service crash
+            # This handles the case where prompt + generated tokens > max_model_len
+            # Note: The scheduler should ideally stop generation before reaching this point
+            import warnings
+            warnings.warn(
+                f"Sequence length {max_kv_len} exceeds maximum model length {max_seq_len}. "
+                f"Truncating to {max_seq_len}. This indicates the scheduler allowed "
+                f"generation beyond max_model_len.",
+                UserWarning,
+                stacklevel=2
+            )
+            # Truncate all sequences to max_seq_len
+            seq_lens_kv_list = [min(s, max_seq_len) for s in seq_lens_kv_list]
+            max_kv_len = max_seq_len
+
         prev_q = 0
         prev_kv = 0
         outputs = []
@@ -1100,7 +1124,42 @@ class AscendAttentionBackendImpl(AttentionImpl):
                     k_i = key[:cur_kv]
                     v_i = value[:cur_kv]
 
+            # Adjust cur_kv based on actual KV data size (mimics NPU operator behavior)
+            # NPU operator internally checks block_table and truncates to actual available length
+            # This prevents RuntimeError when requested length exceeds cached tokens
+            actual_kv_tokens = k_i.numel() // (num_kv_heads * head_size)
+            if actual_kv_tokens < cur_kv:
+                import warnings
+                warnings.warn(
+                    f"Requested KV length {cur_kv} exceeds actual cached tokens {actual_kv_tokens}. "
+                    f"Truncating to {actual_kv_tokens}. This indicates the scheduler allowed "
+                    f"generation beyond max_model_len (similar to how NPU operator handles this).",
+                    UserWarning,
+                    stacklevel=2
+                )
+                cur_kv = actual_kv_tokens
+                # Also update seq_lens_kv_list for consistency
+                seq_lens_kv_list[i] = cur_kv
+
             # reshape key/value 为 [1, num_kv_heads, cur_kv, head_size]
+            
+            # Sanity check before reshape to prevent cryptic errors
+            expected_k_elements = cur_kv * num_kv_heads * head_size
+            expected_v_elements = cur_kv * num_kv_heads * head_size
+            
+            if k_i.numel() != expected_k_elements:
+                raise RuntimeError(
+                    f"Internal error in FallbackSDPA: key tensor size mismatch "
+                    f"(expected {expected_k_elements}, got {k_i.numel()}). "
+                    f"This indicates a bug in KV cache implementation."
+                )
+            
+            if v_i.numel() != expected_v_elements:
+                raise RuntimeError(
+                    f"Internal error in FallbackSDPA: value tensor size mismatch "
+                    f"(expected {expected_v_elements}, got {v_i.numel()})."
+                )           
+            
             k_i = k_i.view(1, cur_kv, num_kv_heads, head_size).transpose(1, 2)
             v_i = v_i.view(1, cur_kv, num_kv_heads, head_size).transpose(1, 2)
 
