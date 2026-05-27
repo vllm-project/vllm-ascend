@@ -22,6 +22,7 @@ import pytest
 from vllm import SamplingParams
 
 from tests.e2e.conftest import VllmRunner
+from vllm_ascend.utils import vllm_version_is
 
 MODELS = ["Qwen/Qwen3-0.6B", "vllm-ascend/DeepSeek-V2-Lite-W8A8"]
 
@@ -64,7 +65,7 @@ def test_qwen3_dense_eager_mode(
         runner.model.generate(prompts, sampling_params)
 
 
-@pytest.mark.skipif(True, reason="V2 case will be fix")
+@pytest.mark.skipif(vllm_version_is("0.20.2"), reason="no need to support model_runner for v0.20.2")
 @pytest.mark.parametrize("model", MAIN_MODELS)
 @pytest.mark.parametrize("eagle_model", EGALE_MODELS)
 @pytest.mark.parametrize("max_tokens", [32])
@@ -103,7 +104,7 @@ def test_egale_spec_decoding(
         runner.model.generate(prompts, sampling_params)
 
 
-@pytest.mark.skipif(True, reason="V2 case will be fix")
+@pytest.mark.skipif(vllm_version_is("0.20.2"), reason="no need to support model_runner for v0.20.2")
 @pytest.mark.parametrize("model", MODELS)
 @pytest.mark.parametrize("max_tokens", [32])
 @pytest.mark.parametrize("enforce_eager", [False])
