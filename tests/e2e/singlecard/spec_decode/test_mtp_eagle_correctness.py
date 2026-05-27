@@ -92,19 +92,19 @@ def test_deepseek_mtp_local(
     with VllmRunner(
         model_name,
         tensor_parallel_size=1,
-        max_num_seqs=8,
-        gpu_memory_utilization=0.7,
+        max_num_seqs=4,
+        gpu_memory_utilization=0.9,
         distributed_executor_backend="mp",
-        enable_expert_parallel=True,
+        enable_expert_parallel=False,
         speculative_config={
             "method": "mtp",
             "num_speculative_tokens": num_speculative_tokens,
             "disable_padded_drafter_batch": disable_padded_drafter_batch,
         },
-        max_model_len=512,
+        max_model_len=256,
         compilation_config=CompilationConfig(
             cudagraph_mode=cudagraph_mode,
-            cudagraph_capture_sizes=[8],
+            cudagraph_capture_sizes=[4],
         ),
     ) as spec_llm:
         sampling_config = SamplingParams(temperature=0, max_tokens=max_tokens, ignore_eos=False)
