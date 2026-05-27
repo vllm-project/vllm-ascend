@@ -63,6 +63,7 @@ TOTAL_PROMPTS="${TOTAL_PROMPTS:-48}"
 MAX_TOKENS="${MAX_TOKENS:-1}"
 REQUEST_RATE="${REQUEST_RATE:-inf}"
 SEED="${SEED:-1024}"
+BASE_SEED="${BASE_SEED:-$SEED}"
 WARMUP_PROMPTS="${WARMUP_PROMPTS:-3}"
 
 # Server boot timeout (sec)
@@ -191,10 +192,11 @@ wait_server_ready() {
 start_server() {
     local mode="$1"
     local log_file="$2"
+    local server_seed="${3:-$SEED}"
 
     kill_stale_serve
 
-    log "  starting server mode=${mode} port=${PORT}"
+    log "  starting server mode=${mode} port=${PORT} seed=${server_seed}"
     # Use --additional-config to set mamba_cache_mode (PR8829 convention).
     # If your build still uses the older --mamba-cache-mode CLI flag, swap below.
     nohup vllm serve "$MODEL" \
@@ -213,7 +215,7 @@ start_server() {
         --gpu-memory-utilization "$GPU_MEM_UTIL" \
         --trust-remote-code \
         --async-scheduling \
-        --seed "$SEED" \
+        --seed "$server_seed" \
         --additional-config "{\"mamba_cache_mode\":\"${mode}\"}" \
         > "$log_file" 2>&1 &
 
@@ -246,11 +248,12 @@ run_client() {
     local k="$3"
     local num_prefixes="$4"
     local suffix_len="$5"
+    local client_seed="${6:-$SEED}"
 
     local client_log="${group_dir}/client.log"
     local summary_json="${group_dir}/summary.json"
 
-    log "  client: prefix_len=$prefix_len suffix_len=$suffix_len K=$k num_prefixes=$num_prefixes total=$TOTAL_PROMPTS"
+    log "  client: prefix_len=$prefix_len suffix_len=$suffix_len K=$k num_prefixes=$num_prefixes total=$TOTAL_PROMPTS seed=$client_seed"
 
     timeout "$CLIENT_TIMEOUT" vllm bench serve \
         --backend openai \
@@ -268,7 +271,7 @@ run_client() {
         --num-prompts "$TOTAL_PROMPTS" \
         --max-concurrency "$CONCURRENCY" \
         --request-rate "$REQUEST_RATE" \
-        --seed "$SEED" \
+        --seed "$client_seed" \
         --save-result \
         --result-dir "$group_dir" \
         --result-filename summary.json \
@@ -422,6 +425,10 @@ for mode in "${MODES[@]}"; do
         slen=${GROUP_SUFFIX_LENS[$i]}
         k=${GROUP_KS[$i]}
         nprefix=${GROUP_NUM_PREFIXES_ARR[$i]}
+        # Per-group seed: align and all of the SAME group share the same seed
+        # (fair comparison: identical prefix tokens). Different groups get
+        # different seeds (no implicit prefix overlap across groups).
+        group_seed=$(( BASE_SEED + i ))
 
         # Record config for this run
         cat > "${group_dir}/config.json" <<EOF
@@ -437,13 +444,14 @@ for mode in "${MODES[@]}"; do
   "max_num_batched_tokens": $MAX_NUM_BATCHED_TOKENS,
   "block_size": $BLOCK_SIZE,
   "max_tokens": $MAX_TOKENS,
+  "seed": $group_seed,
   "model": "$MODEL"
 }
 EOF
 
         # Start server
         server_log="${group_dir}/server.log"
-        if ! start_server "$mode" "$server_log"; then
+        if ! start_server "$mode" "$server_log" "$group_seed"; then
             log "  SERVER BOOT FAILED for $run_label"
             echo "server boot failed" > "${group_dir}/FAILED"
             failed=$(( failed + 1 ))
@@ -452,7 +460,7 @@ EOF
         fi
 
         # Run client
-        if run_client "$group_dir" "$plen" "$k" "$nprefix" "$slen"; then
+        if run_client "$group_dir" "$plen" "$k" "$nprefix" "$slen" "$group_seed"; then
             log "  OK: $run_label"
             ok=$(( ok + 1 ))
         else
