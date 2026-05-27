@@ -111,7 +111,7 @@ docker run --rm \
 
 ## (Optional) Install Mooncake
 
-Mooncake is pre-installed and functional in the {vllm_ascend_version} image.
+Mooncake is pre-installed and functional in the {{vllm_ascend_version}} image.
 The following installation steps are optional.
 
 Mooncake is the serving platform for Kimi, a leading LLM service provided by
