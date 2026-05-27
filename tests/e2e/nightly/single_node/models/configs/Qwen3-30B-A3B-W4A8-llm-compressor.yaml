@@ -13,7 +13,6 @@ test_cases:
       PYTORCH_NPU_ALLOC_CONF: "expandable_segments:True"
       SERVER_PORT: "DEFAULT_PORT"
     server_cmd:
-      - "--async-scheduling"
       - "--no-enable-prefix-caching"
       - "--tensor-parallel-size"
       - "2"
