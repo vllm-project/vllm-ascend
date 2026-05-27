@@ -1039,6 +1039,93 @@ class AscendAttentionBackendImpl(AttentionImpl):
             actual_seq_lengths_kv = attn_metadata.seq_lens_list
         return key, value, block_size, block_table, actual_seq_lengths_kv
 
+    def _fallback_sdpa(
+        self,
+        query,
+        key,
+        value,
+        block_table,
+        block_size,
+        attn_metadata,
+        actual_seq_lengths_kv,
+        num_tokens,
+    ):
+        import torch.nn.functional as F
+        num_heads = self.num_heads
+        num_kv_heads = self.num_kv_heads
+        head_size = self.head_size
+        num_kv_groups = num_heads // num_kv_heads
+        scale = self.scale
+        causal = attn_metadata.causal
+
+        # 将 seq_lengths 转为 Python list
+        seq_lens_q = attn_metadata.actual_seq_lengths_q
+        if isinstance(seq_lens_q, list):
+            seq_lens_q_list = seq_lens_q
+        else:
+            seq_lens_q_list = seq_lens_q.tolist() if hasattr(seq_lens_q, 'numel') and seq_lens_q.numel() > 1 else [int(seq_lens_q)]
+        if isinstance(actual_seq_lengths_kv, list):
+            seq_lens_kv_list = actual_seq_lengths_kv
+        else:
+            seq_lens_kv_list = actual_seq_lengths_kv.tolist() if hasattr(actual_seq_lengths_kv, 'numel') and actual_seq_lengths_kv.numel() > 1 else [int(actual_seq_lengths_kv)]
+
+        prev_q = 0
+        prev_kv = 0
+        outputs = []
+        for i in range(len(seq_lens_q_list)):
+            cur_q = seq_lens_q_list[i]
+            cur_kv = seq_lens_kv_list[i]
+
+            # 提取当前序列的 query, reshape 为 [1, num_heads, cur_q, head_size]
+            q_i = query[prev_q:prev_q + cur_q]
+            q_i = q_i.view(1, cur_q, num_heads, head_size).transpose(1, 2)
+
+            # 提取 key/value：支持 paged kv_cache 和 PrefillNoCache 两种情况
+            if block_table is not None and self.key_cache is not None:
+                bt_i = block_table[i]
+                valid_blocks = bt_i[bt_i >= 0]
+                if valid_blocks.numel() == 0:
+                    k_i = key[:cur_kv]
+                    v_i = value[:cur_kv]
+                else:
+                    k_cache_i = self.key_cache[valid_blocks]
+                    v_cache_i = self.value_cache[valid_blocks]
+                    k_i = k_cache_i.view(-1, num_kv_heads, head_size)[:cur_kv]
+                    v_i = v_cache_i.view(-1, num_kv_heads, head_size)[:cur_kv]
+            else:
+                if key.shape[0] == num_tokens:
+                    k_i = key[prev_kv:prev_kv + cur_kv]
+                    v_i = value[prev_kv:prev_kv + cur_kv]
+                else:
+                    k_i = key[:cur_kv]
+                    v_i = value[:cur_kv]
+
+            # reshape key/value 为 [1, num_kv_heads, cur_kv, head_size]
+            k_i = k_i.view(1, cur_kv, num_kv_heads, head_size).transpose(1, 2)
+            v_i = v_i.view(1, cur_kv, num_kv_heads, head_size).transpose(1, 2)
+
+            # GQA: expand kv heads 以匹配 query heads
+            if num_kv_groups > 1:
+                k_i = k_i.unsqueeze(2).expand(-1, -1, num_kv_groups, -1, -1).reshape(1, num_heads, cur_kv, head_size)
+                v_i = v_i.unsqueeze(2).expand(-1, -1, num_kv_groups, -1, -1).reshape(1, num_heads, cur_kv, head_size)
+
+            # causal mask
+            attn_mask_i = None
+            if causal:
+                attn_mask_i = torch.triu(
+                    torch.full((cur_q, cur_kv), float('-inf'), device=q_i.device, dtype=q_i.dtype),
+                    diagonal=cur_kv - cur_q + 1
+                )
+
+            out_i = F.scaled_dot_product_attention(q_i, k_i, v_i, attn_mask=attn_mask_i, scale=scale)
+            out_i = out_i.transpose(1, 2).reshape(cur_q, num_heads * head_size)
+            outputs.append(out_i)
+            prev_q = cur_q
+            prev_kv = cur_kv
+
+        attn_output = torch.cat(outputs, dim=0)
+        return attn_output.view(num_tokens, num_heads, head_size)
+
     def forward_fused_infer_attention(
         self,
         query: torch.Tensor,
@@ -1106,7 +1193,11 @@ class AscendAttentionBackendImpl(AttentionImpl):
                 learnable_sink=self.sinks,
             )
         else:
-            if not attn_metadata.causal:
+            if self.head_size > 192:
+                attn_output = self._fallback_sdpa(
+                    query, key, value, block_table, block_size,
+                    attn_metadata, actual_seq_lengths_kv, num_tokens)
+            elif not attn_metadata.causal:
                 attn_output, _ = torch_npu.npu_fused_infer_attention_score(
                     query=query,
                     key=key,
