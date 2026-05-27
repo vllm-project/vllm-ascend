@@ -261,3 +261,82 @@ class AscendDflashProposer(AscendEagleProposer):
 
     def _raise_if_multimodal(self):
         pass
+
+    def update_prev_verify_result(
+            self,
+            valid_sampled_tokens_count: torch.Tensor | None,
+        ) -> None:
+        """
+        valid_sampled_tokens_count: [B]
+        Count includes accepted draft tokens + bonus token.
+        accepted = valid_sampled_tokens_count - 1
+        """
+        if valid_sampled_tokens_count is None:
+            return
+
+        prev_k = int(getattr(
+            self,
+            "_last_draft_token_count",
+            getattr(self, "fixed_verify_k", self.num_speculative_tokens)
+        ))
+        prev_k = max(1, min(prev_k, self.num_speculative_tokens))
+
+        accepted = torch.clamp(
+            valid_sampled_tokens_count - 1,
+            min=0,
+            max=prev_k,
+        ).float()
+
+        avg_accepted = accepted.mean().item()
+        full_accept_rate = (accepted >= prev_k).float().mean().item()
+        zero_accept_rate = (accepted == 0).float().mean().item()
+        efficiency = avg_accepted / max(prev_k, 1)
+
+        # EMA for stability
+        alpha = 0.2
+
+        if not hasattr(self, "_ema_avg_accepted"):
+            self._ema_avg_accepted = avg_accepted
+            self._ema_full_accept_rate = full_accept_rate
+            self._ema_zero_accept_rate = zero_accept_rate
+            self._ema_efficiency = efficiency
+        else:
+            self._ema_avg_accepted = (1.0 - alpha) * self._ema_avg_accepted + alpha * avg_accepted
+            self._ema_full_accept_rate = (1.0 - alpha) * self._ema_full_accept_rate + alpha * full_accept_rate
+            self._ema_zero_accept_rate = (1.0 - alpha) * self._ema_zero_accept_rate + alpha * zero_accept_rate
+            self._ema_efficiency = (1.0 - alpha) * self._ema_efficiency + alpha * efficiency
+
+    def _select_draft_k(self):
+        N = self.num_speculative_tokens
+        current_k = int(getattr(
+            self,
+            "_last_draft_token_count",
+            getattr(self, "fixed_verify_k", N),
+        ))
+        current_k = max(1, min(current_k, N))
+
+        if not hasattr(self, "_ema_avg_accepted"):
+            return max(1, min(int(getattr(self, "fixed_verify_k", current_k)), N))
+
+        avg_accepted = self._ema_avg_accepted
+        full_accept_rate = self._ema_full_accept_rate
+        zero_accept_rate = self._ema_zero_accept_rate
+        efficiency = self._ema_efficiency
+
+        # Main idea:
+        # - If many requests accept all k tokens, k is too samll -> increase.
+        # - If average accepted tokens are much smaller than k, k is too large -> decrease.
+        # - Otherwise keep k stable.
+
+        increase_full_accept_threshold = 0.50
+        decrease_efficiency_threshold = 0.65
+        bad_zero_accept_threshold = 0.35
+
+        if full_accept_rate >= increase_full_accept_threshold:
+            next_k = current_k + 1
+        elif efficiency <= decrease_efficiency_threshold or zero_accept_rate >= bad_zero_accept_threshold:
+            next_k = int(round(avg_accepted + 1.0))
+        else:
+            next_k = current_k
+
+        return max(1, min(next_k, N))
