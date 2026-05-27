@@ -581,7 +581,8 @@ class AscendSpecDecodeBaseProposer(SpecDecodeBaseProposer):
             model_hidden_states = self.hidden_states[:input_batch_size]
             model_hidden_states, model_positions = self.maybe_pad_and_reduce(model_hidden_states, model_positions)
 
-            forward_context.attn_metadata = forward_context.draft_attn_metadatas[draft_step + 1]
+            if forward_context.draft_attn_metadatas is not None:
+                forward_context.attn_metadata = forward_context.draft_attn_metadatas[draft_step + 1]
             model_kwargs = {
                 "input_ids": self.input_ids[:input_batch_size],
                 "positions": model_positions,
