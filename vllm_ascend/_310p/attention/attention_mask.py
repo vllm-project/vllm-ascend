@@ -92,8 +92,9 @@ class AttentionMaskBuilder310:
         """
         Retrieves the appropriate attention mask based on the model configuration.
 
-        It explicitly checks for 'pooling' runner types which are not supported
-        on 310P hardware.
+        Pooling models that use Qwen architecture or LAST sequence pooling,
+        such as Qwen3 embedding, still use causal attention on 310P. Other
+        pooling models are not supported yet.
 
         Args:
             model_config: Configuration object containing runner details.
@@ -102,9 +103,19 @@ class AttentionMaskBuilder310:
             torch.Tensor: The causal attention mask.
 
         Raises:
-            NotImplementedError: If the runner_type is 'pooling'.
+            NotImplementedError: If the runner_type is 'pooling' without LAST
+                sequence pooling.
         """
         if getattr(model_config, "runner_type", None) == "pooling":
+            hf_config = getattr(model_config, "hf_config", None)
+            pooler_config = getattr(model_config, "pooler_config", None)
+            architectures = getattr(hf_config, "architectures", None) or []
+            if isinstance(architectures, str):
+                architectures = [architectures]
+            if any("qwen" in str(architecture).lower() for architecture in architectures):
+                return self._get_causal_mask(self.max_seqlen)
+            if getattr(pooler_config, "seq_pooling_type", None) == "LAST":
+                return self._get_causal_mask(self.max_seqlen)
             # TODO: pooling model will be supported soon.
             raise NotImplementedError("310P does not support runner_type='pooling'")
         return self._get_causal_mask(self.max_seqlen)
