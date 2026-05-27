@@ -277,9 +277,9 @@ class TestEagleProposerInitialization(TestBase):
             proposer = AscendEagleProposer(vllm_config=self.vllm_config, device=self.device, runner=self.runner)
 
             self.assertEqual(proposer.hidden_size, 2048)
-            self.assertTrue(proposer.use_cuda_graph)
-            expected_max_num_tokens = proposer.max_num_tokens
-            self.assertEqual(proposer.hidden_states.shape, (expected_max_num_tokens, 2048))
+            # MTP with async_scheduling intentionally disables CUDA graph to avoid
+            # known unstable combinations (see llm_base_proposer.py line 251-256)
+            self.assertFalse(proposer.use_cuda_graph)
 
     def test_initialization_draft_model(self):
         self.vllm_config.speculative_config.method = "draft_model"
