@@ -191,33 +191,29 @@ class AscendSpecDecodeBaseProposer(SpecDecodeBaseProposer):
         need to customize model loading.
         """
         from vllm.compilation.backends import set_model_tag
+        from vllm.config.vllm import get_current_vllm_config_or_none, set_current_vllm_config
 
-        # Eagle3LlamaForCausalLM 的 LlamaModel 用 get_current_vllm_config()
-        # 获取的仍是 target 的 compilation_config，其 static_forward_context
-        # 已有 target 的层名。加载前清空，避免 Duplicate layer name；
-        # 不恢复，draft 的层会留在 context 中供 load_model 查询。
-        from vllm.config.vllm import get_current_vllm_config_or_none
+        my_cfg = self.vllm_config
+        saved_ctx = my_cfg.compilation_config.static_forward_context
+        my_cfg.compilation_config.static_forward_context = {}
 
-        cfg = get_current_vllm_config_or_none()
-        saved_ctx = None
-        if cfg is not None:
-            saved_ctx = cfg.compilation_config.static_forward_context
-            cfg.compilation_config.static_forward_context = {}
-        try:
-            with set_model_tag("eagle_head"):
-                model = get_model(
-                    vllm_config=self.vllm_config,
-                    model_config=self.vllm_config.speculative_config.draft_model_config,
-                )
-            return model
-        finally:
-            if cfg is not None:
-                # draft 的层注册到了 cfg.static_forward_context 中，
-                # 把 target 的层合并回来（draft 覆盖 target 同名层不影响）
-                draft_ctx = cfg.compilation_config.static_forward_context
-                for k, v in saved_ctx.items():
-                    if k not in draft_ctx:
-                        draft_ctx[k] = v
+        old_cfg = get_current_vllm_config_or_none()
+        ctx_cm = set_current_vllm_config(my_cfg) if old_cfg is not my_cfg else nullcontext()
+
+        with set_model_tag("eagle_head"), ctx_cm:
+            model = get_model(
+                vllm_config=self.vllm_config,
+                model_config=self.vllm_config.speculative_config.draft_model_config,
+            )
+
+        # draft 的层注册到了 my_cfg.static_forward_context 中，
+        # 把 target 独有的层合并回来
+        draft_ctx = my_cfg.compilation_config.static_forward_context
+        for k, v in saved_ctx.items():
+            if k not in draft_ctx:
+                draft_ctx[k] = v
+
+        return model
 
     def load_model(self, model: nn.Module) -> None:
         target_attn_layer_names = set(get_layers_from_vllm_config(self.vllm_config, AttentionLayerBase).keys())
