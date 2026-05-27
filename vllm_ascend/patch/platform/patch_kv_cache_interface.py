@@ -18,6 +18,9 @@ class AscendMLAAttentionSpec(MLAAttentionSpec):
     (kv_cache[0]: bfloat16, kv_cache[1]: bfloat16, kv_cache[2]: bfloat16)
     to
     (kv_cache[0]: bfloat16, kv_cache[1]: bfloat16, kv_cache[2]: int8, kv_cache[3]: float16).
+    When VLLM_ASCEND_FUSE_SPARSE_C8_KV=1, kv_cache[2] packs the int8 key and
+    the float16 scale bytes together, so the tuple stays
+    (kv_cache[0], kv_cache[1], packed kv_cache[2]).
 
     The semantic meaning of each KV cache entry is as follows:
     1. kv_cache[0] stores kv_lora.

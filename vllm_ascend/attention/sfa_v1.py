@@ -12,6 +12,7 @@ from vllm.logger import logger
 from vllm.model_executor.layers.attention.mla_attention import MLACommonMetadataBuilder
 from vllm.model_executor.layers.linear import UnquantizedLinearMethod
 from vllm.triton_utils import HAS_TRITON
+from vllm.utils.torch_utils import get_dtype_size
 from vllm.v1.attention.backend import (
     AttentionBackend,  # type: ignore
     AttentionCGSupport,
@@ -53,6 +54,7 @@ from vllm_ascend.utils import (
     enable_dsa_cp,
     enable_dsa_cp_with_layer_shard,
     enable_dsa_cp_with_o_proj_tp,
+    fuse_sparse_c8_kv_cache,
     get_weight_prefetch_method,
     maybe_trans_nz,
 )
@@ -438,6 +440,7 @@ class AscendSFAImpl(MLAAttentionImpl):
         if self.use_sparse_c8_indexer:
             self.c8_k_cache_dtype = torch.int8
             self.c8_k_scale_cache_dtype = torch.float16
+        self.fuse_sparse_c8_kv = self.use_sparse_c8_indexer and fuse_sparse_c8_kv_cache()
 
         # Effective in SFA when FlashComm is enabled.
         self.enable_dsa_cp = enable_dsa_cp()
@@ -795,6 +798,26 @@ class AscendSFAImpl(MLAAttentionImpl):
         # Convert from (N, B, L) to (B, N, L)
         return ql_nope.transpose(0, 1), q_pe
 
+    def _is_packed_sparse_c8_kv_cache(self, kv_cache: tuple[torch.Tensor, ...]) -> bool:
+        return self.use_sparse_c8_indexer and self.fuse_sparse_c8_kv and len(kv_cache) == 3
+
+    def _split_sparse_c8_kv_cache(self, kv_cache: tuple[torch.Tensor, ...]) -> tuple[torch.Tensor, torch.Tensor]:
+        if self._is_packed_sparse_c8_kv_cache(kv_cache):
+            packed_k_cache = kv_cache[2]
+            packed_head_dim = self.head_dim + get_dtype_size(self.c8_k_scale_cache_dtype)
+            assert packed_k_cache.shape[-1] == packed_head_dim
+            k_cache = packed_k_cache[..., : self.head_dim]
+            k_scale_cache = packed_k_cache[..., self.head_dim :].view(self.c8_k_scale_cache_dtype)
+            return k_cache, k_scale_cache
+
+        assert len(kv_cache) == 4
+        return kv_cache[2], kv_cache[3]
+
+    def _pack_sparse_c8_kv_update(self, k_li: torch.Tensor, k_li_scale: torch.Tensor) -> torch.Tensor:
+        k_i8 = k_li.reshape(k_li.shape[0], -1)
+        scale_i8 = k_li_scale.contiguous().view(torch.int8).view(k_li.shape[0], -1)
+        return torch.cat((k_i8, scale_i8), dim=-1)
+
     def _v_up_proj(self, x):
         num_input_tokens, _, _ = x.shape
         if (
@@ -922,7 +945,7 @@ class AscendSFAImpl(MLAAttentionImpl):
         self,
         x: torch.Tensor,
         q_c: torch.Tensor,
-        kv_cache: tuple[torch.Tensor, torch.Tensor, torch.Tensor],
+        kv_cache: tuple[torch.Tensor, ...],
         attn_metadata: M,
         cos: torch.Tensor,
         sin: torch.Tensor,
@@ -961,14 +984,14 @@ class AscendSFAImpl(MLAAttentionImpl):
         # So two branches are maintained temporarily.
         # TODO: torch.ops._C_ascend.npu_lightning_indexer needs to be removed.
         if self.use_sparse_c8_indexer:
-            assert len(kv_cache) == 4
+            k_cache, k_scale_cache = self._split_sparse_c8_kv_cache(kv_cache)
             weights = weights.to(torch.float16)
             topk_indices = torch.ops._C_ascend.npu_lightning_indexer_quant(
                 query=q_li.view(q_li_shape_ori),
-                key=kv_cache[2],
+                key=k_cache,
                 weights=weights,
                 query_dequant_scale=q_li_scale.view(q_li_shape_ori[:-1]),
-                key_dequant_scale=kv_cache[3].squeeze(2),  # B S N D -> B S D
+                key_dequant_scale=k_scale_cache.squeeze(2),  # B S N D -> B S D
                 actual_seq_lengths_query=actual_seq_lengths_query,
                 actual_seq_lengths_key=actual_seq_lengths_key,
                 block_table=attn_metadata.block_table,
@@ -1036,7 +1059,7 @@ class AscendSFAImpl(MLAAttentionImpl):
         self,
         layer_name,
         hidden_states: torch.Tensor,  # query in unified attn
-        kv_cache: tuple[torch.Tensor, torch.Tensor, torch.Tensor],
+        kv_cache: tuple[torch.Tensor, ...],
         attn_metadata: M,
         need_gather_q_kv: bool = False,
         output: torch.Tensor | None = None,
@@ -1195,17 +1218,31 @@ class AscendSFAImpl(MLAAttentionImpl):
         if kv_cache is not None:
             if self.is_kv_producer:
                 attn_metadata.reshape_cache_event = torch.npu.Event()
-            torch_npu.npu_scatter_nd_update_(
-                kv_cache[2].view(-1, k_li.shape[-1]), slot_mapping.view(-1, 1), k_li.view(-1, k_li.shape[-1])
-            )  # b, s, n, d
             if self.use_sparse_c8_indexer:
-                assert len(kv_cache) == 4
                 assert k_li_scale is not None
+                if self._is_packed_sparse_c8_kv_cache(kv_cache):
+                    packed_k_li = self._pack_sparse_c8_kv_update(k_li, k_li_scale)
+                    torch_npu.npu_scatter_nd_update_(
+                        kv_cache[2].view(-1, packed_k_li.shape[-1]),
+                        slot_mapping.view(-1, 1),
+                        packed_k_li,
+                    )
+                else:
+                    assert len(kv_cache) == 4
+                    torch_npu.npu_scatter_nd_update_(
+                        kv_cache[2].view(-1, k_li.shape[-1]),
+                        slot_mapping.view(-1, 1),
+                        k_li.view(-1, k_li.shape[-1]),
+                    )  # b, s, n, d
+                    torch_npu.npu_scatter_nd_update_(
+                        kv_cache[3].view(-1, k_li_scale.shape[-1]),
+                        slot_mapping.view(-1, 1),
+                        k_li_scale.view(-1, k_li_scale.shape[-1]),
+                    )
+            else:
                 torch_npu.npu_scatter_nd_update_(
-                    kv_cache[3].view(-1, k_li_scale.shape[-1]),
-                    slot_mapping.view(-1, 1),
-                    k_li_scale.view(-1, k_li_scale.shape[-1]),
-                )
+                    kv_cache[2].view(-1, k_li.shape[-1]), slot_mapping.view(-1, 1), k_li.view(-1, k_li.shape[-1])
+                )  # b, s, n, d
             if self.is_kv_producer:
                 attn_metadata.reshape_cache_event.record()
 
