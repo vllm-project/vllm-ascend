@@ -80,7 +80,21 @@ def _patched_eagle3_init(self, *, vllm_config, prefix: str = ""):
         return
 
     # Last PP rank or PP=1: full initialization.
-    _original_eagle3_init(self, vllm_config=vllm_config, prefix=prefix)
+    # The original init uses get_num_layers() which returns the LOCAL PP rank
+    # layer count. Under PP>1 this causes the draft model's start_layer_id to
+    # overlap with the target model's layer indices on rank > 0 (duplicate
+    # layer prefix). Work around this by temporarily forcing get_num_layers
+    # to return the total number of layers.
+    total_layers = vllm_config.model_config.get_total_num_hidden_layers()
+    _original_get_num_layers = vllm_config.model_config.get_num_layers
+    vllm_config.model_config.get_num_layers = (
+        lambda parallel_config: total_layers
+    )
+    try:
+        _original_eagle3_init(self, vllm_config=vllm_config, prefix=prefix)
+    finally:
+        vllm_config.model_config.get_num_layers = _original_get_num_layers
+
     self.make_empty_intermediate_tensors = (
         self.model.make_empty_intermediate_tensors
     )
