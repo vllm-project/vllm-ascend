@@ -201,6 +201,20 @@ def _patch_speculative_minimax_whitelist() -> None:
                     verify_vocab()
                 return self
             raise
+        except NotImplementedError as e:
+            # Eagle3 draft model (Eagle3LlamaForCausalLM) 不参与 PP stage 切分，
+            # 跳过 draft model 的 PP 支持检查。
+            method = getattr(self, "method", None)
+            if method != "eagle3":
+                raise
+            if "pipeline parallelism" not in str(e).lower():
+                raise
+            # verify_with_parallel_config 只在 pp > 1 时抛出此异常，
+            # 跳过 PP 检查后仍需执行后续的 vocab size 验证。
+            verify_vocab = getattr(self, "verify_equal_vocab_size_if_draft_model", None)
+            if callable(verify_vocab):
+                verify_vocab()
+            return self
 
     _patched_verify_args._vllm_ascend_minimax_eagle3_patched = True  # type: ignore[attr-defined]
     SpeculativeConfig._verify_args = _patched_verify_args  # type: ignore[assignment]
