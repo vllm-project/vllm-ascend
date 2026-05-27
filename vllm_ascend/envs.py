@@ -114,6 +114,9 @@ env_variables: dict[str, Callable[[], Any]] = {
     "VLLM_ASCEND_ENABLE_BATCH_MEMCPY": lambda: os.getenv("VLLM_ASCEND_ENABLE_BATCH_MEMCPY", None),
     # Whether to use MultiBlockPool for KV cache management
     "VLLM_ASCEND_APPLY_DSV4_PATCH": lambda: bool(int(os.getenv("VLLM_ASCEND_APPLY_DSV4_PATCH", "0"))),
+    # Whether to enable MTP fused mode for speculative decoding.
+    # When enabled, the MTP model will be fused with the main model for better performance.
+    "VLLM_ASCEND_ENABLE_MTP_FUSED": lambda: bool(int(os.getenv("VLLM_ASCEND_ENABLE_MTP_FUSED", "0"))),
 }
 
 # end-env-vars-definition
