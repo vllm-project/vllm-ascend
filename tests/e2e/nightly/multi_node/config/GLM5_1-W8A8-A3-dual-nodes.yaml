@@ -17,7 +17,7 @@ env_common:
 
 special_dependencies:
   transformers: "5.2.0"
-# TODO: need to identify why TP and mtp+1 divisibility rules break on dual-node case 
+# TODO: need to identify why TP and mtp+1 divisibility rules break on dual-node case
 
 deployment:
   -
