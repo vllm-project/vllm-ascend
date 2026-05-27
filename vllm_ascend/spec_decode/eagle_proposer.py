@@ -191,29 +191,24 @@ class AscendSpecDecodeBaseProposer(SpecDecodeBaseProposer):
         need to customize model loading.
         """
         from vllm.compilation.backends import set_model_tag
-        from vllm.config.vllm import get_current_vllm_config_or_none, set_current_vllm_config
 
-        my_cfg = self.vllm_config
-        saved_ctx = my_cfg.compilation_config.static_forward_context
-        my_cfg.compilation_config.static_forward_context = {}
-
-        old_cfg = get_current_vllm_config_or_none()
-        ctx_cm = set_current_vllm_config(my_cfg) if old_cfg is not my_cfg else nullcontext()
-
-        with set_model_tag("eagle_head"), ctx_cm:
-            model = get_model(
-                vllm_config=self.vllm_config,
-                model_config=self.vllm_config.speculative_config.draft_model_config,
-            )
-
-        # draft 的层注册到了 my_cfg.static_forward_context 中，
-        # 把 target 独有的层合并回来
-        draft_ctx = my_cfg.compilation_config.static_forward_context
-        for k, v in saved_ctx.items():
-            if k not in draft_ctx:
-                draft_ctx[k] = v
-
-        return model
+        # PP 下 Eagle3LlamaForCausalLM.__init__ 用 get_num_layers(self.vllm_config.parallel_config)
+        # 得到的是当前 stage 的层数（如 16），导致 draft start_layer_id 偏小，
+        # 创建的层名和 target 重叠。加载前临时把 pp_size 设成 1，
+        # 让 get_num_layers 返回总层数（如 32），draft 从 32 开始就不重叠了。
+        pp_backup = self.vllm_config.parallel_config.pipeline_parallel_size
+        if pp_backup > 1:
+            self.vllm_config.parallel_config.pipeline_parallel_size = 1
+        try:
+            with set_model_tag("eagle_head"):
+                model = get_model(
+                    vllm_config=self.vllm_config,
+                    model_config=self.vllm_config.speculative_config.draft_model_config,
+                )
+            return model
+        finally:
+            if pp_backup > 1:
+                self.vllm_config.parallel_config.pipeline_parallel_size = pp_backup
 
     def load_model(self, model: nn.Module) -> None:
         target_attn_layer_names = set(get_layers_from_vllm_config(self.vllm_config, AttentionLayerBase).keys())
