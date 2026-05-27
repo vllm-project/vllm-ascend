@@ -162,6 +162,8 @@ class TestEagleProposerInitialization(TestBase):
         self.runner.pin_memory = False
         self.runner.pcp_size = 1
         self.runner.dcp_size = 1
+        self.runner.max_num_reqs = 256
+        self.runner.max_num_tokens = 1024
 
         self.vllm_config.cache_config.block_size = 16
         self.vllm_config.scheduler_config.max_num_batched_tokens = 1024
@@ -306,6 +308,8 @@ class TestEagleProposerLoadModel(TestBase):
         self.runner.pin_memory = False
         self.runner.pcp_size = 1
         self.runner.dcp_size = 1
+        self.runner.max_num_reqs = 256
+        self.runner.max_num_tokens = 1024
 
         self.vllm_config.cache_config.block_size = 16
         self.vllm_config.scheduler_config.max_num_batched_tokens = 1024
@@ -635,6 +639,8 @@ class TestEagleProposerHelperMethods(TestBase):
         self.runner.pin_memory = False
         self.runner.pcp_size = 1
         self.runner.dcp_size = 1
+        self.runner.max_num_reqs = 256
+        self.runner.max_num_tokens = 1024
 
         self.vllm_config.cache_config.block_size = 16
         self.vllm_config.scheduler_config.max_num_batched_tokens = 1024
@@ -1746,6 +1752,8 @@ class TestPrepareNextTokenIdsPadded(TestBase):
         self.runner.pin_memory = False
         self.runner.pcp_size = 1
         self.runner.dcp_size = 1
+        self.runner.max_num_reqs = 256
+        self.runner.max_num_tokens = 1024
 
         self.vllm_config.cache_config.block_size = 16
         self.vllm_config.scheduler_config.max_num_batched_tokens = 1024
@@ -2219,6 +2227,8 @@ class TestRunMergedDraft(TestBase):
         self.runner.pin_memory = False
         self.runner.pcp_size = 1
         self.runner.dcp_size = 1
+        self.runner.max_num_reqs = 256
+        self.runner.max_num_tokens = 1024
         self.runner.pcp_rank = 0
         self.runner.dcp_rank = 0
         self.runner.max_num_tokens = 64
@@ -2741,6 +2751,8 @@ class TestDraftProposerHelperMethods(TestBase):
         self.runner.dcp_size = 1
         self.runner.max_num_reqs = 256
         self.runner.max_num_tokens = 1024
+        self.runner.max_num_reqs = 256
+        self.runner.max_num_tokens = 1024
 
         self.vllm_config.cache_config.block_size = 16
         self.vllm_config.scheduler_config.max_num_batched_tokens = 1024
@@ -2849,6 +2861,8 @@ class TestEagleProposerPrepareInputs:
         self.runner.pin_memory = False
         self.runner.pcp_size = 1
         self.runner.dcp_size = 1
+        self.runner.max_num_reqs = 256
+        self.runner.max_num_tokens = 1024
         self.runner.max_num_tokens = 8192
         self.runner.max_num_reqs = 256
         self.runner.attn_state = AscendAttentionState.ChunkedPrefill
@@ -3203,6 +3217,8 @@ class TestEagleProposerPrepareInputsPadded:
         self.runner.pin_memory = False
         self.runner.pcp_size = 1
         self.runner.dcp_size = 1
+        self.runner.max_num_reqs = 256
+        self.runner.max_num_tokens = 1024
         self.runner.max_num_tokens = 8192
         self.runner.max_num_reqs = 256
         self.runner.attn_state = AscendAttentionState.ChunkedPrefill
@@ -3569,6 +3585,8 @@ class TestEagleProposerSetInputsFirstPass:
         self.runner.pin_memory = False
         self.runner.pcp_size = 1
         self.runner.dcp_size = 1
+        self.runner.max_num_reqs = 256
+        self.runner.max_num_tokens = 1024
         self.runner.max_num_tokens = 8192
         self.runner.max_num_reqs = 256
 
