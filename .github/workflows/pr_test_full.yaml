@@ -80,7 +80,7 @@ jobs:
     name: e2e-full
     strategy:
       matrix:
-        vllm_version: [694d9a81bbb07977e7a72a597acb44f6a848f774, v0.20.2]
+        vllm_version: [2380bfc2104267914eea36015e2a347b9318c6c0, v0.20.2]
     needs: [changes]
     if: ${{ needs.changes.outputs.e2e_tracker == 'true' || needs.changes.outputs.e2e_tracker == true }}
     uses: ./.github/workflows/_e2e_test.yaml
@@ -102,7 +102,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        vllm_version: [694d9a81bbb07977e7a72a597acb44f6a848f774,v0.20.2]
+        vllm_version: [2380bfc2104267914eea36015e2a347b9318c6c0,v0.20.2]
     needs: [parse-trigger]
     if: ${{ needs.parse-trigger.outputs.allowed == 'true' }}
     uses: ./.github/workflows/_e2e_test.yaml
