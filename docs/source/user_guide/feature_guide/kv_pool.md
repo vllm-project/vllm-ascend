@@ -444,8 +444,7 @@ Starting the MetaService service.
 ```shell
 export MMC_META_CONFIG_PATH=/usr/local/memcache_hybrid/latest/config/mmc-meta.conf
 
-from memcache_hybrid import MetaService
-MetaService.main()
+python -c "from memcache_hybrid import MetaService; MetaService.main()"
 ```
 
 ### PD Disaggregation Scenario
