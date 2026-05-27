@@ -437,7 +437,6 @@ ock.mmc.local_service.dram.size = 1GB
 | `ock.mmc.local_service.protocol` | `device_rdma` (supported for A2 and A3 when device ROCE available, recommended for A2), `device_sdma` (supported for A3 when HCCS available, recommended for A3). Currently does not support heterogeneous protocol setting.|
 | `ock.mmc.local_service.dram.size` | Sets the size of the memory occupied by the master. The configured value is the size of the memory occupied by each card. |
 
-
 ### Run Memcache Master
 
 Starting the MetaService service.
@@ -448,6 +447,7 @@ export MMC_META_CONFIG_PATH=/usr/local/memcache_hybrid/latest/config/mmc-meta.co
 from memcache_hybrid import MetaService
 MetaService.main()
 ```
+
 ### PD Disaggregation Scenario
 
 #### 1.Run `prefill` Node and `decode` Node
@@ -566,7 +566,6 @@ python -m vllm.entrypoints.openai.api_server "${CMD_ARGS[@]}" > log_${ROLE}.log 
 echo "vLLM started. Log file: log_${ROLE}.log"
 ```
 
-
 #### [2、Start proxy_server](#2start-proxy_server)
 
 #### [3、run-inference](#3run-inference)
@@ -576,7 +575,6 @@ echo "vLLM started. Log file: log_${ROLE}.log"
 #### 1.Run Mixed Department Script
 
 #### 800I A2/800T A2/800I A3/800T A3 Series
-
 
 **Run_pd_mix.sh:**
 
@@ -653,7 +651,6 @@ python -m vllm.entrypoints.openai.api_server "${CMD_ARGS[@]}" > log_mix.log 2>&1
 echo "vLLM started. Log file: log_mix.log"
 
 ```
-
 
 #### [2.Run Inference](#2run-inference)
 
