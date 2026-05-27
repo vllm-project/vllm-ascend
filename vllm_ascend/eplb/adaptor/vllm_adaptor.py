@@ -76,7 +76,7 @@ class VllmEplbAdaptor:
         for buffer_id in range(num_buffer_tensor):
             for name in self.expert_weight_names:
                 expert_tensor = self.param_dict[f"0.{name}"][0]
-                buffer_tensor = torch.empty(expert_tensor.size(), dtype=expert_tensor.dtype, device=expert_tensor.device)
+                buffer_tensor = torch.empty_like(expert_tensor)
                 self.buffer_tensor_list[buffer_id].append(buffer_tensor)
 
     def init_expert_param_per_layer(self):
