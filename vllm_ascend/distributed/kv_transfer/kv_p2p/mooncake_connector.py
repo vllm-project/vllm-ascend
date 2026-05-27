@@ -383,7 +383,8 @@ class KVCacheRecvingThread(threading.Thread):
         self.remote_poller = zmq.Poller()  # type: ignore
         self.timeout = 1.0  # seconds
 
-        self.vllm_config = vllm_config
+        assert vllm_config is not None
+        self.vllm_config: VllmConfig = vllm_config
         self.model_config = self.vllm_config.model_config
         self.num_speculative_tokens = (
             self.vllm_config.speculative_config.num_speculative_tokens
@@ -407,7 +408,7 @@ class KVCacheRecvingThread(threading.Thread):
             rank: get_prefill_pp_indices(self.num_layers, rank, self._prefill_pp_size, prefill_pp_layer_partition)
             for rank in range(self._prefill_pp_size)
         }
-        if not is_vl_model(vllm_config):
+        if not is_vl_model(self.vllm_config):
             if self.use_mla:
                 self.k_head_dim = hf_text_config.kv_lora_rank
                 self.v_head_dim = hf_text_config.qk_rope_head_dim
@@ -593,7 +594,9 @@ class KVCacheRecvingThread(threading.Thread):
         session_id = f"{remote_host}:{remote_transfer_port}"
 
         req_start_time = time.perf_counter()
-        src_list, dst_list, length_list = [], [], []
+        src_list: list[int] = []
+        dst_list: list[int] = []
+        length_list: list[int] = []
         attention_group_reformat_block_ids: list[tuple[tuple[int, list[list[int]], int, list[int]], bool]] = []
 
         def expand_block_ids(block_ids, scale):
@@ -1505,6 +1508,8 @@ class MooncakeConnectorWorker:
 
         # kv cache config
         self.kv_cache_config = kv_cache_config
+        self.num_blocks: int = kv_cache_config.num_blocks
+        self.kv_group2layeridx: dict[int, tuple[dict[str, Any], list[int]]] = {}
         self._is_hma_required = not vllm_config.scheduler_config.disable_hybrid_kv_cache_manager and any(
             not isinstance(g.kv_cache_spec, FullAttentionSpec) for g in kv_cache_config.kv_cache_groups
         )
@@ -1849,7 +1854,7 @@ class MooncakeConnectorWorker:
         P workers. This method also accounts for unequal P/D prefix-cache hits
         by reducing the number of remote blocks that still need to be pulled.
         """
-        prefill_tp_size = meta.remote_ptp_size if getattr(meta, "remote_ptp_size", None) else self._prefill_tp_size
+        prefill_tp_size: int = meta.remote_ptp_size if meta.remote_ptp_size is not None else self._prefill_tp_size
 
         if meta.remote_pcp_size * meta.remote_dcp_size * self.pcp_size * self.dcp_size == 1:
             if self._is_hma_required:
@@ -2229,7 +2234,7 @@ class MooncakeConnectorWorker:
                 )
 
             remote_req_id = meta.remote_request_id
-            prefill_tp_size = meta.remote_ptp_size if getattr(meta, "remote_ptp_size", None) else self._prefill_tp_size
+            prefill_tp_size: int = meta.remote_ptp_size if meta.remote_ptp_size is not None else self._prefill_tp_size
 
             (
                 remote_handshake_port_list,
@@ -2285,7 +2290,7 @@ class MooncakeConnectorWorker:
             for req_id, delay_start_time in metadata.requests_to_send.items():
                 self.kv_send_thread.add_delayed_request(req_id, delay_start_time)
 
-    def _get_tp_num_need_pulls(self, prefill_tp_size: int) -> int:
+    def _get_tp_num_need_pulls(self, prefill_tp_size: int | None) -> int:
         if prefill_tp_size is None:
             prefill_tp_size = self._prefill_tp_size
 
@@ -2368,15 +2373,15 @@ class MooncakeConnectorWorker:
         seed = string_to_int64_hash(req_id)
         rand = random.Random(seed)
         # random split prefill tp list
-        ori_data = ori_data.reshape(self._prefill_pp_size, -1)
+        ori_data_2d = ori_data.reshape(self._prefill_pp_size, -1)
         num_groups = max(
-            1, len(ori_data[0]) // num_kv_head
+            1, len(ori_data_2d[0]) // num_kv_head
         )  # The number of redundant copies for each KV head within the PP stage
         rand_group_index = rand.sample(
             range(num_groups), (max(self._decode_tp_size // num_kv_head, 1))
         )  # random choose a group
         all_results = [
-            self._get_remote_tp_ranks(ori_data[pp_index], rand_group_index, num_groups, prefill_tp_size)
+            self._get_remote_tp_ranks(ori_data_2d[pp_index], rand_group_index, num_groups, prefill_tp_size)
             for pp_index in range(self._prefill_pp_size)
         ]
         for group_index in range(len(all_results[0])):

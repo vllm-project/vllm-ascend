@@ -7,7 +7,7 @@ import time
 import types
 import unittest
 from collections import OrderedDict, defaultdict, deque
-from typing import Any
+from typing import Any, cast
 from unittest.mock import MagicMock, patch
 
 import msgspec
@@ -60,8 +60,8 @@ GET_META_MSG = b"get_meta_msg"
 DONE_RECVING_MSG = b"done_recving_msg"
 
 
-def make_agent_metadata(**overrides):
-    metadata = {
+def make_agent_metadata(**overrides: Any) -> MooncakeAgentMetadata:
+    metadata: dict[str, Any] = {
         "engine_id": "engine1",
         "te_rpc_port": 9090,
         "kv_group2layeridx": {0: ({"kv_cache_spec_type": "FullAttentionSpec"}, [0])},
@@ -121,7 +121,7 @@ class TestGetAndClearFinishedSingleRequests(unittest.TestCase):
 class TestKVCacheSendingThreadInit(unittest.TestCase):
     def setUp(self):
         kv_caches: dict[str, Any] = {}
-        self.common_args = {
+        self.common_args: dict[str, Any] = {
             "tp_rank": 1,
             "prefill_tp_size": 4,
             "local_engine_id": "engine_1",
@@ -164,7 +164,7 @@ class TestKVCacheSendingThreadInit(unittest.TestCase):
 class TestGetAndClearFinishedRequests(unittest.TestCase):
     def setUp(self):
         kv_caches: dict[str, Any] = {}
-        self.common_args = {
+        self.common_args: dict[str, Any] = {
             "tp_rank": 1,
             "prefill_tp_size": 4,
             "local_engine_id": "engine_1",
@@ -268,7 +268,7 @@ class TestKVCacheRecvingThreadBasic(unittest.TestCase):
         )
 
     def test_add_request(self):
-        test_req = {
+        test_req: dict[str, Any] = {
             "request_id": "req1",
             "local_block_ids": [1, 2],
             "remote_block_ids": [3, 4],
@@ -424,7 +424,7 @@ class TestCoreFunctionality(unittest.TestCase):
 
         mock_transfer.assert_called_once_with(self.test_req)
         mock_send.assert_called_once_with("req1", "localhost", 6666, {6666: 1})
-        self.thread.task_tracker.update_done_task_count.assert_called_once_with("req1")
+        cast(Any, self.thread.task_tracker).update_done_task_count.assert_called_once_with("req1")
         self.mock_queue.task_done.assert_called_once()
 
     @patch.object(KVCacheRecvingThread, "_get_remote_metadata")
@@ -1264,7 +1264,7 @@ class TestMooncakeConnectorWorker(unittest.TestCase):
                 self.vllm_config.model_config.is_deepseek_mla = is_deepseek_mla
                 worker = MooncakeConnectorWorker(self.vllm_config, self.engine_id, MockKVCacheConfig())
                 worker.tp_num_need_pulls = tp_num_need_pulls
-                worker.use_sparse = 0
+                worker.use_sparse = False
                 return worker._get_remote_ranks_for_req("test", remote_ptp_size)
 
         self.assertIn(
@@ -1362,7 +1362,7 @@ class TestMooncakeConnectorWorker(unittest.TestCase):
             meta.remote_multi_nodes_meta_mapping = {}
 
             remote_handshake_port_list, local_block_ids_list, remote_block_ids_list = worker._get_kv_split_metadata(
-                "0", meta
+                "0", cast(ReqMeta, meta)
             )
 
             return (
@@ -1539,7 +1539,7 @@ class TestMooncakeConnectorWorker(unittest.TestCase):
         self.assertEqual(finish_count_by_group, expected_finishes)
 
     def test_pd_disaggregated_split_cross_covers_prefix_tp_cp_pp(self):
-        cases = [
+        cases: list[dict[str, Any]] = [
             {
                 "name": "gqa_tp_unequal_remote_cp_pp_unequal",
                 "use_mla": False,
@@ -1664,7 +1664,7 @@ class TestMooncakeConnectorWorker(unittest.TestCase):
                     remote_multi_nodes_meta_mapping={},
                 )
 
-                ports, local_ids, remote_ids = worker._get_kv_split_metadata("req_hybrid", meta)
+                ports, local_ids, remote_ids = worker._get_kv_split_metadata("req_hybrid", cast(ReqMeta, meta))
                 group_pulls = worker._get_group_pulls_metadata("req_hybrid", ports, 4, 31000)
 
                 self.assertEqual(local_ids, [meta.local_block_ids])
