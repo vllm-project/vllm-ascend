@@ -11,7 +11,7 @@ _envs: &envs
   PYTORCH_NPU_ALLOC_CONF: "expandable_segments:True"
   TASK_QUEUE_ENABLE: "1"
   VLLM_ASCEND_ENABLE_MLAPO: "1"
-  VLLM_ASCEND_ENABLE_FLASHCOMM1: "1"
+  VLLM_ASCEND_ENABLE_FLASHCOMM1: "0"
   VLLM_ASCEND_ENABLE_NZ: "1"
 
 _server_cmd: &server_cmd
@@ -27,11 +27,11 @@ _server_cmd: &server_cmd
   - "--port"
   - "$SERVER_PORT"
   - "--max-model-len"
-  - "32768"
+  - "70000"
   - "--max-num-batched-tokens"
   - "16384"
   - "--max-num-seqs"
-  - "500"
+  - "32"
   - "--async-scheduling"
   - "--quantization"
   - "ascend"
@@ -57,10 +57,10 @@ _benchmarks: &benchmarks
     dataset_path: vllm-ascend/aime2025
     request_conf: vllm_api_general_chat
     dataset_conf: aime2025/aime2025_gen_0_shot_chat_prompt
-    max_out_len: 16384
-    batch_size: 32
-    baseline: 90
-    threshold: 5
+    max_out_len: 65536
+    batch_size: 8
+    baseline: 95
+    threshold: 10
   perf:
     case_type: performance
     dataset_path: vllm-ascend/GSM8K-in3500-bs2800
