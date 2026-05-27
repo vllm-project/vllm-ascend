@@ -51,10 +51,10 @@ namespace ge {
  * (1, S, 1, D) or (B, 1, 1, D).
  */
 REG_OP(InplacePartialRotaryMul)
-    .INPUT(x, TensorType({DT_FLOAT16, DT_FLOAT, DT_BFLOAT16}))
-    .INPUT(cos, TensorType({DT_FLOAT16, DT_FLOAT, DT_BFLOAT16}))
-    .INPUT(sin, TensorType({DT_FLOAT16, DT_FLOAT, DT_BFLOAT16}))
-    .OUTPUT(x, TensorType({DT_FLOAT16, DT_FLOAT, DT_BFLOAT16}))
+    .INPUT(x, TensorType({DT_FLOAT16, DT_FLOAT, DT_BFLOAT16, DT_FLOAT16, DT_BFLOAT16}))
+    .INPUT(cos, TensorType({DT_FLOAT16, DT_FLOAT, DT_BFLOAT16, DT_FLOAT, DT_FLOAT}))
+    .INPUT(sin, TensorType({DT_FLOAT16, DT_FLOAT, DT_BFLOAT16, DT_FLOAT, DT_FLOAT}))
+    .OUTPUT(x, TensorType({DT_FLOAT16, DT_FLOAT, DT_BFLOAT16, DT_FLOAT16, DT_BFLOAT16}))
     .ATTR(mode, Int, 0)
     .ATTR(partial_slice, ListInt, {0, 0})
     .OP_END_FACTORY_REG(InplacePartialRotaryMul)

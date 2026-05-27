@@ -190,17 +190,35 @@ ge::graphStatus RopeRegBaseTilingClass::CheckDtypeAndAttr()
 {
     dtype_ = context_->GetInputDesc(X_INDEX)->GetDataType();
     OPS_ERR_IF(std::find(SUPPORT_DTYPE.begin(), SUPPORT_DTYPE.end(), dtype_) == SUPPORT_DTYPE.end(),
-                OPS_LOG_E(context_->GetNodeName(), "Only support F32, BF16, F16 datetype, actual %s.",
+                OPS_LOG_E(context_->GetNodeName(), "Only support F32, BF16, F16 datetype for x, actual %s.",
                         ge::TypeUtils::DataTypeToSerialString(dtype_).c_str()),
                 return ge::GRAPH_FAILED);
-    for (int64_t i = X_INDEX; i <= SIN_INDEX; i++) {
-        auto type = context_->GetInputDesc(i)->GetDataType();
-        OPS_ERR_IF(type != dtype_,
-                    OPS_LOG_E(context_, "input %ld datatype expect %s, actual %s.", i,
-                            ge::TypeUtils::DataTypeToSerialString(dtype_).c_str(),
-                            ge::TypeUtils::DataTypeToSerialString(type).c_str()),
-                    return ge::GRAPH_FAILED);
-    }
+
+    auto cosType = context_->GetInputDesc(COS_INDEX)->GetDataType();
+    auto sinType = context_->GetInputDesc(SIN_INDEX)->GetDataType();
+
+    // Check cos/sin dtype: same type, and must be F32, BF16, or F16
+    OPS_ERR_IF(cosType != sinType,
+                OPS_LOG_E(context_, "cos and sin datatype should be same, cos is %s, sin is %s.",
+                        ge::TypeUtils::DataTypeToSerialString(cosType).c_str(),
+                        ge::TypeUtils::DataTypeToSerialString(sinType).c_str()),
+                return ge::GRAPH_FAILED);
+    OPS_ERR_IF(std::find(SUPPORT_DTYPE.begin(), SUPPORT_DTYPE.end(), cosType) == SUPPORT_DTYPE.end(),
+                OPS_LOG_E(context_->GetNodeName(), "Only support F32, BF16, F16 datetype for cos/sin, actual %s.",
+                        ge::TypeUtils::DataTypeToSerialString(cosType).c_str()),
+                return ge::GRAPH_FAILED);
+
+    // Mixed precision: x is BF16/FP16, cos/sin are FP32
+    bool isMixedPrecision = (dtype_ == ge::DT_BF16 || dtype_ == ge::DT_FLOAT16) && cosType == ge::DT_FLOAT;
+    bool isSamePrecision = (dtype_ == cosType);
+
+    OPS_ERR_IF(!isSamePrecision && !isMixedPrecision,
+                OPS_LOG_E(context_, "Unsupported dtype combination: x=%s, cos=%s. "
+                        "Supported: same type, or x=BF16/FP16 with cos/sin=FP32.",
+                        ge::TypeUtils::DataTypeToSerialString(dtype_).c_str(),
+                        ge::TypeUtils::DataTypeToSerialString(cosType).c_str()),
+                return ge::GRAPH_FAILED);
+
     auto outputType = context_->GetOutputDesc(Y_INDEX)->GetDataType();
     OPS_ERR_IF(outputType != dtype_,
                 OPS_LOG_E(context_, "output datatype expect %s, actual %s.",
