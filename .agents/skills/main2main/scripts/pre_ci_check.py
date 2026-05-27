@@ -22,6 +22,7 @@ Design note:
     version boundary. Scanning the full repo would flag all historical guards
     as mismatches whenever the release tag advances.
 """
+
 from __future__ import annotations
 
 import argparse
@@ -70,16 +71,18 @@ def _get_added_lines(repo: Path) -> list[dict[str, str]]:
         if line.startswith("+++ b/"):
             current_file = line[6:]
         elif line.startswith("@@ "):
-            match = re.search(r'\+(\d+)', line)
+            match = re.search(r"\+(\d+)", line)
             if match:
                 current_line = int(match.group(1))
         elif line.startswith("+") and not line.startswith("+++"):
             if current_file:
-                added.append({
-                    "file": current_file,
-                    "line_no": str(current_line),
-                    "text": line[1:],
-                })
+                added.append(
+                    {
+                        "file": current_file,
+                        "line_no": str(current_line),
+                        "text": line[1:],
+                    }
+                )
             current_line += 1
         elif not line.startswith("-"):
             current_line += 1
@@ -149,10 +152,10 @@ def main() -> None:
     parser = argparse.ArgumentParser(
         description="Run pre-CI verification checks for main2main.",
     )
-    parser.add_argument("--ascend-path", type=Path, required=True,
-                        help="Path to the vllm-ascend repository")
-    parser.add_argument("--release-tag", required=True,
-                        help="Expected release version string (main_vllm_tag from conf.py)")
+    parser.add_argument("--ascend-path", type=Path, required=True, help="Path to the vllm-ascend repository")
+    parser.add_argument(
+        "--release-tag", required=True, help="Expected release version string (main_vllm_tag from conf.py)"
+    )
     args = parser.parse_args()
 
     repo = args.ascend_path
@@ -169,31 +172,31 @@ def main() -> None:
 
     # Check 1: version strings in new code only
     version_ok = len(versions["mismatched"]) == 0
-    checks.append({
-        "name": "version_strings",
-        "passed": version_ok,
-        "detail": (
-            f"{versions['new_calls_count']} new vllm_version_is() calls all use {args.release_tag}"
-            if version_ok
-            else f"{len(versions['mismatched'])} new vllm_version_is() calls use wrong version"
-        ),
-        "mismatched": versions["mismatched"],
-    })
+    checks.append(
+        {
+            "name": "version_strings",
+            "passed": version_ok,
+            "detail": (
+                f"{versions['new_calls_count']} new vllm_version_is() calls all use {args.release_tag}"
+                if version_ok
+                else f"{len(versions['mismatched'])} new vllm_version_is() calls use wrong version"
+            ),
+            "mismatched": versions["mismatched"],
+        }
+    )
     if not version_ok:
         all_passed = False
 
     # Check 2: temp files
     temp_ok = len(temps["violations"]) == 0
-    checks.append({
-        "name": "temp_files",
-        "passed": temp_ok,
-        "detail": (
-            "no temp files in repo"
-            if temp_ok
-            else f"{len(temps['violations'])} temp files found in repo"
-        ),
-        "violations": temps["violations"],
-    })
+    checks.append(
+        {
+            "name": "temp_files",
+            "passed": temp_ok,
+            "detail": ("no temp files in repo" if temp_ok else f"{len(temps['violations'])} temp files found in repo"),
+            "violations": temps["violations"],
+        }
+    )
     if not temp_ok:
         all_passed = False
 

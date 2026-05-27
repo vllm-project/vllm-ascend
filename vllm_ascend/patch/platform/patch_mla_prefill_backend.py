@@ -47,6 +47,6 @@ if not vllm_version_is("0.20.2"):
         ) -> tuple[torch.Tensor, torch.Tensor]:
             raise NotImplementedError("Ascend MLA prefill is handled by AscendSFAImpl/AscendMLAImpl")
 
-    vllm.model_executor.layers.attention.mla_attention.get_mla_prefill_backend = (
-        lambda vllm_config: AscendMLAPrefillBackend
+    vllm.model_executor.layers.attention.mla_attention.get_mla_prefill_backend = lambda vllm_config: (
+        AscendMLAPrefillBackend
     )

@@ -24,6 +24,7 @@ Output:
       3. Untouched upstream    : vllm/ paths changed this run but missing from
                                  the file-mapping region (only if patches found)
 """
+
 from __future__ import annotations
 
 import argparse
@@ -184,8 +185,7 @@ def _collect_changed_files(patches_dir: Path) -> list[str]:
     return sorted(files)
 
 
-def _check_untouched_upstream(regions: dict[str, str | None],
-                              changed_files: list[str]) -> list[str]:
+def _check_untouched_upstream(regions: dict[str, str | None], changed_files: list[str]) -> list[str]:
     """List vllm/ paths touched this run that file-mapping doesn't cover.
 
     Coverage rule: a row covers a changed file when the row's upstream cell
@@ -202,20 +202,18 @@ def _check_untouched_upstream(regions: dict[str, str | None],
     for changed in changed_files:
         if not changed.startswith(UPSTREAM_PREFIX):
             continue
-        if any(changed.startswith(prefix.rstrip("/") + "/")
-               or changed == prefix.rstrip("/")
-               or changed.startswith(prefix)
-               for prefix in covered_prefixes):
+        if any(
+            changed.startswith(prefix.rstrip("/") + "/") or changed == prefix.rstrip("/") or changed.startswith(prefix)
+            for prefix in covered_prefixes
+        ):
             continue
         untouched.append(changed)
     return untouched
 
 
-def _render_report(invalid: list[dict],
-                   uncovered: list[str],
-                   untouched: list[str],
-                   patches_dir: Path,
-                   patches_seen: bool) -> str:
+def _render_report(
+    invalid: list[dict], uncovered: list[str], untouched: list[str], patches_dir: Path, patches_seen: bool
+) -> str:
     lines: list[str] = ["# Adapt Guide Lint Report", ""]
 
     lines.append("## 1. Invalidated paths")
@@ -231,8 +229,7 @@ def _render_report(invalid: list[dict],
 
     lines.append("## 2. Uncovered directories")
     lines.append("")
-    lines.append("vllm_ascend/ subdirectories that no AUTO-MAINTAINED region "
-                 "currently references.")
+    lines.append("vllm_ascend/ subdirectories that no AUTO-MAINTAINED region currently references.")
     lines.append("")
     if uncovered:
         for path in uncovered:
@@ -246,8 +243,7 @@ def _render_report(invalid: list[dict],
     if not patches_seen:
         lines.append(f"_No step patches found under `{patches_dir}` — section skipped._")
     else:
-        lines.append("vLLM paths changed in this run's step patches but not "
-                     "covered by any file-mapping row.")
+        lines.append("vLLM paths changed in this run's step patches but not covered by any file-mapping row.")
         lines.append("")
         if untouched:
             for path in untouched:
@@ -262,15 +258,19 @@ def main() -> int:
     parser = argparse.ArgumentParser(
         description="Lint the AUTO-MAINTAINED tables in adapt-guide.md.",
     )
-    parser.add_argument("--ascend-path", type=Path, required=True,
-                        help="Path to the vllm-ascend repository.")
-    parser.add_argument("--patches-dir", type=Path,
-                        default=Path("/tmp/main2main/steps"),
-                        help="Directory containing per-step patch outputs.")
+    parser.add_argument("--ascend-path", type=Path, required=True, help="Path to the vllm-ascend repository.")
     parser.add_argument(
-        "--output", type=Path,
+        "--patches-dir",
+        type=Path,
+        default=Path("/tmp/main2main/steps"),
+        help="Directory containing per-step patch outputs.",
+    )
+    parser.add_argument(
+        "--output",
+        type=Path,
         default=Path("/tmp/main2main/adapt-guide-refresh/check_report.md"),
-        help="Where to write the Markdown report.")
+        help="Where to write the Markdown report.",
+    )
     args = parser.parse_args()
 
     guide = args.ascend_path / ".agents/skills/main2main/reference/adapt-guide.md"
@@ -283,8 +283,7 @@ def main() -> int:
     missing = [name for name, body in regions.items() if body is None]
     if missing:
         print(
-            "error: missing AUTO-MAINTAINED region(s) in adapt-guide.md: "
-            + ", ".join(missing),
+            "error: missing AUTO-MAINTAINED region(s) in adapt-guide.md: " + ", ".join(missing),
             file=sys.stderr,
         )
         return 1
@@ -307,8 +306,7 @@ def main() -> int:
     print(f"Wrote {args.output}")
     print(f"  invalidated paths   : {len(invalid)}")
     print(f"  uncovered dirs      : {len(uncovered)}")
-    print(f"  untouched upstream  : {len(untouched)}"
-          + ("" if changed else " (no patches found)"))
+    print(f"  untouched upstream  : {len(untouched)}" + ("" if changed else " (no patches found)"))
     return 0
 
 
