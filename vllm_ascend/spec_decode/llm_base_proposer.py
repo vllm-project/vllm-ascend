@@ -575,6 +575,15 @@ class AscendSpecDecodeBaseProposer(SpecDecodeBaseProposer):
             local_positions += 1
             self.input_ids[:batch_size].copy_(input_ids_i)
             self._set_positions(batch_size, local_positions)
+            
+            # Guard against hidden-state shape mismatch in TP>1 scenarios.
+            # After maybe_all_gather_and_unpad, local_hidden_states may have
+            # full hidden_size (e.g. 16384), while self.hidden_states buffer
+            # was preallocated with TP-sharded hidden_size (e.g. 4096).
+            if local_hidden_states.shape[1] != self.hidden_states.shape[1]:
+                # Shape mismatch: skip this draft step to avoid NPU error.
+                # The draft token will be reused from the previous step.
+                continue
             self.hidden_states[:batch_size].copy_(local_hidden_states.view(batch_size, -1))
 
             model_positions = self._get_positions(input_batch_size)
