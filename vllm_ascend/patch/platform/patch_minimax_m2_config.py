@@ -294,3 +294,37 @@ def _patch_eagle3_registry_alias() -> None:
 
 _patch_speculative_minimax_whitelist()
 _patch_eagle3_registry_alias()
+
+# ---------------------------------------------------------------------------
+# SpecDecodeBaseProposer._get_model: 加载 Eagle3 draft model 前清空
+# static_forward_context，避免层名冲突覆盖 target 的注册信息
+# ---------------------------------------------------------------------------
+def _patch_eagle3_draft_model_context() -> None:
+    try:
+        from vllm.v1.spec_decode.llm_base_proposer import SpecDecodeBaseProposer
+    except Exception:
+        return
+
+    original_get_model = SpecDecodeBaseProposer._get_model
+
+    if getattr(original_get_model, "_vllm_ascend_ctx_patched", False):
+        return
+
+    def _patched_get_model(self):
+        from vllm.config.vllm import get_current_vllm_config_or_none
+
+        cfg = get_current_vllm_config_or_none()
+        saved_ctx = None
+        if cfg is not None:
+            saved_ctx = cfg.compilation_config.static_forward_context
+            cfg.compilation_config.static_forward_context = {}
+        try:
+            return original_get_model(self)
+        finally:
+            if saved_ctx is not None and cfg is not None:
+                cfg.compilation_config.static_forward_context = saved_ctx
+
+    _patched_get_model._vllm_ascend_ctx_patched = True
+    SpecDecodeBaseProposer._get_model = _patched_get_model
+
+
