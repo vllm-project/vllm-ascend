@@ -36,6 +36,7 @@ def load_run(group_dir: Path) -> dict[str, Any] | None:
         "group_id": cfg.get("group_id"),
         "mode": cfg.get("mode"),
         "prefix_len": cfg.get("prefix_len"),
+        "suffix_len": cfg.get("suffix_len"),
         "K": cfg.get("K"),
         "num_prefixes": cfg.get("num_prefixes"),
         "total_prompts": cfg.get("total_prompts"),
@@ -120,16 +121,25 @@ def main() -> int:
 
     # Detailed per-mode table
     print("## Per-group raw metrics\n")
-    print("| group | prefix_len | K | num_prefixes | mode | status | ttft_mean (ms) | ttft_median (ms) | ttft_p99 (ms) | req/s | completed |")
-    print("|---|---:|---:|---:|---|---|---:|---:|---:|---:|---:|")
+    print("cache_ratio = prefix_len / (prefix_len + suffix_len)\n")
+    print("| group | prefix_len | suffix_len | cache_ratio | K | num_prefixes | mode | status | ttft_mean (ms) | ttft_median (ms) | ttft_p99 (ms) | req/s | completed |")
+    print("|---|---:|---:|---:|---:|---:|---|---|---:|---:|---:|---:|---:|")
     for gid in sorted(by_gid.keys(), key=gid_sort_key):
         for mode in ("align", "all"):
             r = by_gid[gid].get(mode)
             if r is None:
-                print(f"| {gid} | - | - | - | {mode} | pending | - | - | - | - | - |")
+                print(f"| {gid} | - | - | - | - | - | {mode} | pending | - | - | - | - | - |")
                 continue
+            plen = r.get("prefix_len")
+            slen = r.get("suffix_len")
+            try:
+                ratio = float(plen) / (float(plen) + float(slen))
+                ratio_s = f"{ratio * 100:.1f}%"
+            except (TypeError, ValueError, ZeroDivisionError):
+                ratio_s = "-"
             print(
-                f"| {gid} | {r['prefix_len']} | {r['K']} | {r['num_prefixes']} | "
+                f"| {gid} | {plen} | {slen if slen is not None else '-'} | {ratio_s} | "
+                f"{r['K']} | {r['num_prefixes']} | "
                 f"{mode} | {r['status']} | "
                 f"{fmt(r['ttft_mean_ms'])} | {fmt(r['ttft_p50_ms'])} | {fmt(r['ttft_p99_ms'])} | "
                 f"{fmt(r['req_throughput'], '.2f')} | {fmt(r['completed'], '.0f')} |"

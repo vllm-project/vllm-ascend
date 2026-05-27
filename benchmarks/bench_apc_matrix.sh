@@ -73,7 +73,18 @@ CLIENT_TIMEOUT="${CLIENT_TIMEOUT:-600}"
 COOLDOWN_SEC="${COOLDOWN_SEC:-15}"
 
 # Matrix axes (override via env)
-PREFIX_LENS=(${PREFIX_LENS:-2048 8192 16384})
+#
+# Two ways to define (prefix_len, suffix_len) pairs:
+#   1. PAIRS env (preferred for non-uniform suffixes), space-separated "prefix:suffix":
+#        PAIRS="6144:2048 12288:4096 14336:3000"
+#   2. PREFIX_LENS env (legacy): all groups share SUFFIX_LEN.
+#        PREFIX_LENS="2048 8192 16384"
+#
+# Default = new sub-chunk pair matrix targeting ALL-mode advantage region.
+PAIRS_DEFAULT="6144:2048 12288:4096 14336:3000"
+PAIRS=(${PAIRS:-$PAIRS_DEFAULT})
+# If PAIRS contains no ':' tokens, fall back to legacy PREFIX_LENS mode.
+PREFIX_LENS=(${PREFIX_LENS:-})
 K_VALUES=(${K_VALUES:-2 4 6 8})
 MODES=(${MODES:-align all})
 
@@ -234,11 +245,12 @@ run_client() {
     local prefix_len="$2"
     local k="$3"
     local num_prefixes="$4"
+    local suffix_len="$5"
 
     local client_log="${group_dir}/client.log"
     local summary_json="${group_dir}/summary.json"
 
-    log "  client: prefix_len=$prefix_len K=$k num_prefixes=$num_prefixes total=$TOTAL_PROMPTS"
+    log "  client: prefix_len=$prefix_len suffix_len=$suffix_len K=$k num_prefixes=$num_prefixes total=$TOTAL_PROMPTS"
 
     timeout "$CLIENT_TIMEOUT" vllm bench serve \
         --backend openai \
@@ -250,7 +262,7 @@ run_client() {
         --endpoint /v1/completions \
         --dataset-name prefix_repetition \
         --prefix-repetition-prefix-len "$prefix_len" \
-        --prefix-repetition-suffix-len "$SUFFIX_LEN" \
+        --prefix-repetition-suffix-len "$suffix_len" \
         --prefix-repetition-num-prefixes "$num_prefixes" \
         --prefix-repetition-output-len "$MAX_TOKENS" \
         --num-prompts "$TOTAL_PROMPTS" \
@@ -282,6 +294,7 @@ run_client() {
 # Parallel arrays (portable: works on bash 3.2+)
 GROUP_IDS=()
 GROUP_PREFIX_LENS=()
+GROUP_SUFFIX_LENS=()
 GROUP_KS=()
 GROUP_NUM_PREFIXES_ARR=()
 
@@ -296,8 +309,34 @@ get_idx() {
     done
 }
 
+# Build (prefix, suffix) list from PAIRS or fall back to legacy PREFIX_LENS.
+PAIR_PLEN=()
+PAIR_SLEN=()
+if [[ ${#PAIRS[@]} -gt 0 && "${PAIRS[0]}" == *:* ]]; then
+    for tok in "${PAIRS[@]}"; do
+        plen="${tok%%:*}"
+        slen="${tok##*:}"
+        if [[ -z "$plen" || -z "$slen" || "$plen" == "$slen" && "$tok" != *:* ]]; then
+            log "ERROR: bad PAIR token: $tok (expected prefix:suffix)"
+            exit 2
+        fi
+        PAIR_PLEN+=("$plen")
+        PAIR_SLEN+=("$slen")
+    done
+elif [[ ${#PREFIX_LENS[@]} -gt 0 ]]; then
+    for plen in "${PREFIX_LENS[@]}"; do
+        PAIR_PLEN+=("$plen")
+        PAIR_SLEN+=("$SUFFIX_LEN")
+    done
+else
+    log "ERROR: no PAIRS or PREFIX_LENS configured"
+    exit 2
+fi
+
 idx=0
-for plen in "${PREFIX_LENS[@]}"; do
+for pi in "${!PAIR_PLEN[@]}"; do
+    plen="${PAIR_PLEN[$pi]}"
+    slen="${PAIR_SLEN[$pi]}"
     for k in "${K_VALUES[@]}"; do
         idx=$(( idx + 1 ))
         if (( TOTAL_PROMPTS % k != 0 )); then
@@ -312,6 +351,7 @@ for plen in "${PREFIX_LENS[@]}"; do
         gid="G${idx}"
         GROUP_IDS+=("$gid")
         GROUP_PREFIX_LENS+=("$plen")
+        GROUP_SUFFIX_LENS+=("$slen")
         GROUP_KS+=("$k")
         GROUP_NUM_PREFIXES_ARR+=("$num_prefixes")
     done
@@ -323,11 +363,12 @@ done
 log "==============================================================="
 log "Matrix plan: ${#GROUP_IDS[@]} groups × ${#MODES[@]} modes = $((${#GROUP_IDS[@]} * ${#MODES[@]})) runs"
 log "==============================================================="
-printf "%-4s %-12s %-3s %-12s %-6s\n" "id" "prefix_len" "K" "num_prefixes" "total" | tee -a "$MASTER_LOG"
+printf "%-4s %-12s %-12s %-3s %-12s %-6s\n" "id" "prefix_len" "suffix_len" "K" "num_prefixes" "total" | tee -a "$MASTER_LOG"
 for i in "${!GROUP_IDS[@]}"; do
-    printf "%-4s %-12s %-3s %-12s %-6s\n" \
+    printf "%-4s %-12s %-12s %-3s %-12s %-6s\n" \
         "${GROUP_IDS[$i]}" \
         "${GROUP_PREFIX_LENS[$i]}" \
+        "${GROUP_SUFFIX_LENS[$i]}" \
         "${GROUP_KS[$i]}" \
         "${GROUP_NUM_PREFIXES_ARR[$i]}" \
         "$TOTAL_PROMPTS" | tee -a "$MASTER_LOG"
@@ -378,6 +419,7 @@ for mode in "${MODES[@]}"; do
         rm -f "${group_dir}/FAILED"
 
         plen=${GROUP_PREFIX_LENS[$i]}
+        slen=${GROUP_SUFFIX_LENS[$i]}
         k=${GROUP_KS[$i]}
         nprefix=${GROUP_NUM_PREFIXES_ARR[$i]}
 
@@ -387,7 +429,7 @@ for mode in "${MODES[@]}"; do
   "group_id": "$gid",
   "mode": "$mode",
   "prefix_len": $plen,
-  "suffix_len": $SUFFIX_LEN,
+  "suffix_len": $slen,
   "K": $k,
   "num_prefixes": $nprefix,
   "total_prompts": $TOTAL_PROMPTS,
@@ -410,7 +452,7 @@ EOF
         fi
 
         # Run client
-        if run_client "$group_dir" "$plen" "$k" "$nprefix"; then
+        if run_client "$group_dir" "$plen" "$k" "$nprefix" "$slen"; then
             log "  OK: $run_label"
             ok=$(( ok + 1 ))
         else
