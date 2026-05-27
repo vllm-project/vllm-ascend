@@ -86,9 +86,7 @@ class TestAscendDSAMetadataBuilderBuildForGraphCapture(TestBase):
         block_size = 128
 
         sentinel_metadata = MagicMock()
-        with patch.object(
-            AscendDSAMetadataBuilder, "build", return_value=sentinel_metadata
-        ) as mock_build:
+        with patch.object(AscendDSAMetadataBuilder, "build", return_value=sentinel_metadata) as mock_build:
             result = builder.build_for_graph_capture(
                 common_attn_metadata=common_attn_metadata,
                 attn_state=AscendAttentionState.SpecDecoding,
