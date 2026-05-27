@@ -64,7 +64,7 @@ class TestW4A8RuntimeFlags(unittest.TestCase):
 
 
 class TestQuantApplyMlpW4A8PerChannel(unittest.TestCase):
-    def test_effective_swiglu_limit_clamps_before_dynamic_quant(self):
+    def test_effective_swiglu_limit_keeps_fused_op_path(self):
         hidden_states = torch.arange(12, dtype=torch.int8).view(3, 4)
         dynamic_scale = torch.ones(3, dtype=torch.float32)
         group_list = torch.tensor([2, 1], dtype=torch.int64)
@@ -74,7 +74,6 @@ class TestQuantApplyMlpW4A8PerChannel(unittest.TestCase):
         w2_scale = [torch.ones(1, 4, dtype=torch.float32)]
         w1_scale_bias = [torch.ones(1, 8, dtype=torch.float32)]
         w2_scale_bias = [torch.ones(1, 4, dtype=torch.float32)]
-        gate_up_out = torch.tensor([[20.0, -20.0, 20.0, -20.0]], dtype=torch.bfloat16).repeat(3, 1)
         quantized = torch.ones(3, 2, dtype=torch.int8)
         swiglu_out_scale = torch.ones(3, dtype=torch.float32)
         expected = torch.randn(3, 4)
@@ -90,14 +89,14 @@ class TestQuantApplyMlpW4A8PerChannel(unittest.TestCase):
             patch("vllm_ascend.ops.fused_moe.moe_mlp.torch.npu.current_stream", return_value=stream),
             patch(
                 "vllm_ascend.ops.fused_moe.moe_mlp.torch_npu.npu_grouped_matmul",
-                return_value=[gate_up_out],
-            ),
+            ) as mock_gmm,
             patch(
                 "vllm_ascend.ops.fused_moe.moe_mlp.torch_npu.npu_dynamic_quant",
                 return_value=(quantized, swiglu_out_scale),
             ) as mock_dynamic_quant,
             patch(
                 "vllm_ascend.ops.fused_moe.moe_mlp.torch.ops._C_ascend.grouped_matmul_swiglu_quant_v2",
+                return_value=(quantized, swiglu_out_scale),
                 create=True,
             ) as mock_gmm_swiglu_v2,
             patch(
@@ -120,10 +119,10 @@ class TestQuantApplyMlpW4A8PerChannel(unittest.TestCase):
                 swiglu_limit=10.0,
             )
 
-        gate = torch.clamp(gate_up_out[..., :2], max=10.0)
-        up = torch.clamp(gate_up_out[..., 2:], min=-10.0, max=10.0)
-        torch.testing.assert_close(mock_dynamic_quant.call_args.args[0], torch.nn.functional.silu(gate) * up)
-        mock_gmm_swiglu_v2.assert_not_called()
+        mock_gmm_swiglu_v2.assert_called_once()
+        self.assertEqual(mock_gmm_swiglu_v2.call_args.kwargs["swiglu_limit"], 10.0)
+        mock_dynamic_quant.assert_not_called()
+        mock_gmm.assert_not_called()
         self.assertIs(output, expected)
         self.assertIs(before_gmm2_evt, event)
 

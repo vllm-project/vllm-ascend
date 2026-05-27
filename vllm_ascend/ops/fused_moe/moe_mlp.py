@@ -290,7 +290,6 @@ def quant_apply_mlp(
         if (
             use_w4a8_per_channel_gmm_swiglu
             and enable_custom_op()
-            and not _has_effective_swiglu_limit(swiglu_limit)
         ):
             hidden_states, swiglu_out_scale = torch.ops._C_ascend.grouped_matmul_swiglu_quant_v2(
                 x=hidden_states,

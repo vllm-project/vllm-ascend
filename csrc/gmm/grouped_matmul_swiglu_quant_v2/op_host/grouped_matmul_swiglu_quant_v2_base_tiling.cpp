@@ -23,6 +23,8 @@ namespace GroupedMatmulSwigluQuantV2Tiling {
 
 constexpr int64_t ND_WEIGHT_MULTI_TENSOR_DIM = 2;
 constexpr int64_t NZ_WEIGHT_MULTI_TENSOR_DIM = 4;
+constexpr int64_t OUTPUT_INDEX = 0;
+constexpr int64_t SWIGLU_SPLIT_FACTOR = 2;
 constexpr float EFFECTIVE_TASK_RATIO = 0.95f;
 constexpr int32_t MIN_BASE_M = 16;
 
@@ -43,7 +45,6 @@ auto CeilDiv(T1 a, T2 b) -> T1
     }
     return (a + b - 1) / b;
 }
-
 
 static inline uint32_t SixteenAlign(uint32_t a, bool up = false)
 {
@@ -209,8 +210,10 @@ ge::graphStatus GroupedMatmulSwigluQuantV2BaseTiling::ParseInputAndAttr()
     tuningConfig_ = tuningConfigPtr != nullptr && tuningConfigPtr->GetSize() > 1?
                     (reinterpret_cast<const int64_t*>(tuningConfigPtr->GetData()))[0] : 0;
 
-    if (isA4W4_) {
-        n_ = wScaleTensor->GetStorageShape().GetDim(wScaleDimNum - DIM_1);
+    if (isA8W4MSD_ || isA4W4_) {
+        auto outputShape = context_->GetOutputShape(OUTPUT_INDEX);
+        OP_CHECK_NULL_WITH_CONTEXT(context_, outputShape);
+        n_ = outputShape->GetOriginShape().GetDim(DIM_1) * SWIGLU_SPLIT_FACTOR;
     } else {
         if (wTensor->GetStorageShape().GetDimNum() == ND_WEIGHT_DIM_LIMIT) {
             // ND SingleTensor [E, K, N]
