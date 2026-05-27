@@ -59,6 +59,7 @@ test_cases:
         batch_size: 32
         baseline: 90
         threshold: 5
+        ignore_eos: false
         thinking: true
         temperature: 1.0
         top_p: 0.95
@@ -66,7 +67,6 @@ test_cases:
         min_p: 0.0
         presence_penalty: 1.5
         repetition_penalty: 1.0
-        ignore_eos: false
       perf:
         case_type: performance
         dataset_path: vllm-ascend/GSM8K-in3500-bs8000-qwen3
