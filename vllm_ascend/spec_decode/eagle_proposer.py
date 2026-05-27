@@ -191,11 +191,13 @@ class AscendSpecDecodeBaseProposer(SpecDecodeBaseProposer):
         need to customize model loading.
         """
         from vllm.compilation.backends import set_model_tag
+
+        # Eagle3LlamaForCausalLM 的 LlamaModel 用 get_current_vllm_config()
+        # 获取的仍是 target 的 compilation_config，其 static_forward_context
+        # 已有 target 的层名。加载前清空，避免 Duplicate layer name；
+        # 不恢复，draft 的层会留在 context 中供 load_model 查询。
         from vllm.config.vllm import get_current_vllm_config_or_none
 
-        # Eagle3LlamaForCausalMem 的 LlamaModel 用 get_current_vllm_config()
-        # 获取的仍是 target 的 compilation_config，它的 static_forward_context
-        # 已存了 target 的层名。加载 draft model 前先清空，避免 Duplicate layer name。
         cfg = get_current_vllm_config_or_none()
         saved_ctx = None
         if cfg is not None:
@@ -209,8 +211,13 @@ class AscendSpecDecodeBaseProposer(SpecDecodeBaseProposer):
                 )
             return model
         finally:
-            if saved_ctx is not None and cfg is not None:
-                cfg.compilation_config.static_forward_context = saved_ctx
+            if cfg is not None:
+                # draft 的层注册到了 cfg.static_forward_context 中，
+                # 把 target 的层合并回来（draft 覆盖 target 同名层不影响）
+                draft_ctx = cfg.compilation_config.static_forward_context
+                for k, v in saved_ctx.items():
+                    if k not in draft_ctx:
+                        draft_ctx[k] = v
 
     def load_model(self, model: nn.Module) -> None:
         target_attn_layer_names = set(get_layers_from_vllm_config(self.vllm_config, AttentionLayerBase).keys())
