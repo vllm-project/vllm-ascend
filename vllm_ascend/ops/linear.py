@@ -452,9 +452,9 @@ class AscendColumnParallelLinear(ColumnParallelLinear):
         if "wo_a" in self.prefix:
             if self.weight.ndim == 2:
                 super().weight_loader(param, loaded_weight)
-                self.weight.data = self.weight.data.view(
-                    self.n_local_groups, self.o_lora_rank,
-                    -1).transpose(2, 1).contiguous()
+                self.weight.data = (
+                    self.weight.data.view(self.n_local_groups, self.o_lora_rank, -1).transpose(2, 1).contiguous()
+                )
             else:
                 # In RL update flows, wo_a can be loaded again after being
                 # transformed into [n_local_groups, hidden_size, o_lora_rank].
@@ -462,11 +462,15 @@ class AscendColumnParallelLinear(ColumnParallelLinear):
                 start_idx = self.tp_rank * shard_size
                 if loaded_weight.shape[0] != shard_size:
                     loaded_weight = loaded_weight.narrow(0, start_idx, shard_size)
-                loaded_weight = loaded_weight.view(
-                    self.n_local_groups,
-                    self.o_lora_rank,
-                    -1,
-                ).transpose(2, 1).contiguous()
+                loaded_weight = (
+                    loaded_weight.view(
+                        self.n_local_groups,
+                        self.o_lora_rank,
+                        -1,
+                    )
+                    .transpose(2, 1)
+                    .contiguous()
+                )
 
                 if loaded_weight.shape != self.weight.shape:
                     raise ValueError(
