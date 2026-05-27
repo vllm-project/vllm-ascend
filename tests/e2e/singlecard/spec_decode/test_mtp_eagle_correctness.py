@@ -33,6 +33,8 @@ os.environ["VLLM_WORKER_MULTIPROC_METHOD"] = "spawn"
 MODELS = ["wemaster/deepseek_mtp_main_random_bf16"]
 # Local model path for testing on A2 machine
 LOCAL_MODELS = ["/home/117_share/weight/DeepSeek-V4-Flash-w8a8-mtp"]
+# GLM-4.7-Flash model (smaller, suitable for single-card testing)
+GLM_MODELS = ["/home/s00645958/GLM-4.7-Flash"]
 
 
 @pytest.mark.parametrize("model_name", MODELS)
@@ -105,6 +107,40 @@ def test_deepseek_mtp_local(
         compilation_config=CompilationConfig(
             cudagraph_mode=cudagraph_mode,
             cudagraph_capture_sizes=[4],
+        ),
+    ) as spec_llm:
+        sampling_config = SamplingParams(temperature=0, max_tokens=max_tokens, ignore_eos=False)
+        spec_llm.generate(example_prompts, sampling_config)
+
+    cleanup_dist_env_and_memory()
+    del spec_llm
+
+
+@pytest.mark.parametrize("model_name", GLM_MODELS)
+@pytest.mark.parametrize("num_speculative_tokens", [1])
+@pytest.mark.parametrize("cudagraph_mode", ["FULL_DECODE_ONLY"])
+def test_glm_mtp_local(
+    model_name: str, num_speculative_tokens: int, cudagraph_mode: str
+):
+    example_prompts = [
+        "Hello, my name is",
+    ]
+    max_tokens = 20
+
+    with VllmRunner(
+        model_name,
+        tensor_parallel_size=1,
+        max_num_seqs=8,
+        gpu_memory_utilization=0.9,
+        distributed_executor_backend="mp",
+        speculative_config={
+            "method": "mtp",
+            "num_speculative_tokens": num_speculative_tokens,
+        },
+        max_model_len=512,
+        compilation_config=CompilationConfig(
+            cudagraph_mode=cudagraph_mode,
+            cudagraph_capture_sizes=[8],
         ),
     ) as spec_llm:
         sampling_config = SamplingParams(temperature=0, max_tokens=max_tokens, ignore_eos=False)
