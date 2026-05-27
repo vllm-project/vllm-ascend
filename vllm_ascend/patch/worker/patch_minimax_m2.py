@@ -287,3 +287,27 @@ MiniMaxM2ForCausalLM.get_eagle3_default_aux_hidden_state_layers = (  # type: ign
     _get_eagle3_default_aux_hidden_state_layers
 )
 MiniMaxM2ForCausalLM.get_eagle3_aux_hidden_state_layers = _get_eagle3_aux_hidden_state_layers  # type: ignore[attr-defined]
+
+# ---------------------------------------------------------------------------
+# Eagle3LlamaForCausalLM: 补上 SupportsPP 需要的 forward 签名
+# (Eagle3MiniMaxM2ForCausalLM 在 registry 映射到 Eagle3LlamaForCausalLM，
+#  其 forward 缺少 intermediate_tensors 参数导致 PP 检查失败)
+# ---------------------------------------------------------------------------
+from vllm.model_executor.models.llama_eagle3 import Eagle3LlamaForCausalLM  # noqa: E402
+from vllm.sequence import IntermediateTensors  # noqa: E402
+
+_original_eagle3_forward = Eagle3LlamaForCausalLM.forward
+
+
+def _patched_eagle3_forward(
+    self,
+    input_ids: torch.Tensor,
+    positions: torch.Tensor,
+    hidden_states: torch.Tensor,
+    intermediate_tensors: IntermediateTensors | None = None,
+    inputs_embeds: torch.Tensor | None = None,
+):
+    return _original_eagle3_forward(self, input_ids, positions, hidden_states, inputs_embeds)
+
+
+Eagle3LlamaForCausalLM.forward = _patched_eagle3_forward  # type: ignore[assignment]
