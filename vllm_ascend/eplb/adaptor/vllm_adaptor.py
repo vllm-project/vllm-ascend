@@ -158,6 +158,13 @@ class VllmEplbAdaptor:
 
     def do_update_expert_map(self, layer_id, updated_expert_map):
         self.expert_map_per_layer_cpu[layer_id].copy_(updated_expert_map)
+        # Also update the layer's _expert_map on NPU, which is used for
+        # token masking in the forward path (TokenDispatcherWithMC2).
+        # Without this update, stale _expert_map causes incorrect weight
+        # zeroing, and precision degrades with repeated reorderings.
+        layer = self.moe_layers[layer_id]
+        if layer._expert_map is not None:
+            layer._expert_map.copy_(updated_expert_map.to(device=layer._expert_map.device))
 
     def do_update_expert_weight(self, layer_id, local_expert_to_replace, buffer_tensor_id):
         for expert_tensor, buffer_tensor in zip(
