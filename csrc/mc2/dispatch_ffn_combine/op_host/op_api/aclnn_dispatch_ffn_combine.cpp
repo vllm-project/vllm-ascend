@@ -23,7 +23,6 @@
 #include <sys/stat.h>
 #include <sys/file.h>
 #include <climits>
-#include "../error_log.h"
 // using namespace op;
 
 // using namespace op;
@@ -46,7 +45,7 @@ extern aclnnStatus aclnnInnerDispatchFFNCombineGetWorkspaceSize(const aclTensor*
                                                          const aclTensor* expertId, const aclTensorList* scale1, const aclTensorList* scale2,
                                                          const aclTensor* probs, const aclTensor* xActiveMask,
                                                          const char* group, int64_t maxOutputSize,
-                                                         bool transB, bool weightNz,
+                                                         bool transB, bool weightNz, double swigluLimit,
                                                          const aclTensor* out, const aclTensor* expertTokenNums,
                                                          uint64_t* workspaceSize, aclOpExecutor** executor);
 extern aclnnStatus aclnnInnerDispatchFFNCombine(void *workspace, uint64_t workspaceSize,
@@ -58,7 +57,7 @@ extern "C" void __attribute__((weak)) NnopbaseSetHcclServerType(void *executor, 
 aclnnStatus aclnnDispatchFFNCombineGetWorkspaceSize(const aclTensor* x, const aclTensorList* weight1, const aclTensorList* weight2,
                                                     const aclTensor* expertId, const aclTensorList* scale1, const aclTensorList* scale2,
                                                     const aclTensor* probs, const aclTensor* xActiveMask,
-                                                    const char* group, int64_t maxOutputSize,
+                                                    const char* group, int64_t maxOutputSize, double swigluLimit,
                                                     const aclTensor* out, const aclTensor* expertTokenNums,
                                                     uint64_t* workspaceSize, aclOpExecutor** executor)
 {
@@ -66,7 +65,7 @@ aclnnStatus aclnnDispatchFFNCombineGetWorkspaceSize(const aclTensor* x, const ac
     bool weightNz = true;
 
     aclnnStatus ret = aclnnInnerDispatchFFNCombineGetWorkspaceSize(x, weight1, weight2, expertId, scale1, scale2, probs, xActiveMask, group,
-                                                                    maxOutputSize, transB, weightNz,
+                                                                    maxOutputSize, transB, weightNz, swigluLimit,
                                                                     out, expertTokenNums, workspaceSize, executor);
     return ret;
 }

@@ -32,21 +32,21 @@ using yType = MatmulType<AscendC::TPosition::GM, CubeFormat::ND, MM_DTYPE_Y>;
     do {                                                                                                           \
         using matmulType = MMImplType<aType<transA>, bType<transB>, cType, cType, cfg>;                            \
         matmulType::MT mm;                                                                                         \
-        GET_TILING_DATA_MEMBER(GMMSwigluQuantTilingData, gmmSwigluBaseParams, gmmSwigluBaseParams_, tiling);       \
-        GET_TILING_DATA_MEMBER(GMMSwigluQuantTilingData, mmTilingData, mmTilingData_, tiling);                     \
-        GET_TILING_DATA_MEMBER(GMMSwigluQuantTilingData, gmmSwiglu, gmmSwiglu_, tiling);                           \
+        GET_TILING_DATA_MEMBER(GMMSwigluQuantTensorListTilingData, gmmSwigluTensorListBaseParams, gmmSwigluTensorListBaseParams_, tiling);       \
+        GET_TILING_DATA_MEMBER(GMMSwigluQuantTensorListTilingData, mmTilingData, mmTilingData_, tiling);                     \
+        GET_TILING_DATA_MEMBER(GMMSwigluQuantTensorListTilingData, gmmSwigluTensorList, gmmSwiglu_, tiling);                           \
         if ASCEND_IS_AIC {                                                                                         \
         mm.SetSubBlockIdx(0);                                                                                      \
         mm.Init(&mmTilingData_, &tPipe);                                                                           \
         }                                                                                                          \
         computeClass<matmulType, sync, dtypeC> computeOp(mm);                                                      \
         computeOp.Init(x, weight, perChannelScale, perTokenScale, groupList, quantOutput, quantScaleOutput,        \
-                       user1, &gmmSwigluBaseParams_, &mmTilingData_, &gmmSwiglu_, &tPipe);                         \
+                       user1, &gmmSwigluTensorListBaseParams_, &mmTilingData_, &gmmSwiglu_, &tPipe);                         \
         computeOp.Process();                                                                                       \
     } while (0)
 
-extern "C" __global__ __aicore__ void grouped_matmul_swiglu_quant_weight_nz_tensor_list(GM_ADDR x, GM_ADDR weight, GM_ADDR perChannelScale, GM_ADDR perTokenScale, 
-                                                                  GM_ADDR groupList, GM_ADDR quantOutput, GM_ADDR quantScaleOutput, 
+extern "C" __global__ __aicore__ void grouped_matmul_swiglu_quant_weight_nz_tensor_list(GM_ADDR x, GM_ADDR weight, GM_ADDR perChannelScale, GM_ADDR perTokenScale,
+                                                                  GM_ADDR groupList, GM_ADDR quantOutput, GM_ADDR quantScaleOutput,
                                                                   GM_ADDR workspace, GM_ADDR tiling) {
     TPipe tPipe;
     AscendCUtils::SetOverflow(1);

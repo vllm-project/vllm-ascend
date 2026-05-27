@@ -203,6 +203,7 @@ class TestAscendW4A16FusedMoEMethod(TestBase):
         topk_ids = torch.randint(0, self.experts, (tokens, 2), dtype=torch.int64)
         mc2_mask = torch.tensor([1, 0, 1], dtype=torch.bool)
         pertoken_scale = torch.randn(tokens, dtype=torch.float32)
+        layer.swiglu_limit = 1000000
 
         mock_select_experts.return_value = (topk_weights, topk_ids)
         mock_comm = Mock()

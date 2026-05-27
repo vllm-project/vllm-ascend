@@ -64,7 +64,7 @@ Assuming your working directory is ```/workspace``` and vllm/vllm-ascend have al
 
     ```bash
     cd /workspace/LMCache-Ascend
-    python3 -m pip install -v --no-build-isolation -e .
+    python3 -m pip install --no-build-isolation -e .
     ```
 
 ### Usage

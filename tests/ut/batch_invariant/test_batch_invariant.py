@@ -28,18 +28,13 @@ class TestBatchInvariant:
     """Complete test suite for batch_invariant.py"""
 
     def test_override_envs_for_invariance(self):
-        """Test environment variable override"""
-        # Clear environment variables
-        env_vars = ["VLLM_ASCEND_ENABLE_NZ", "HCCL_DETERMINISTIC", "LCCL_DETERMINISTIC"]
-        for var in env_vars:
-            if var in os.environ:
-                del os.environ[var]
+        """Test Config and environment variable override"""
+        mock_config = MagicMock()
+        with patch("vllm_ascend.ascend_config.get_ascend_config", return_value=mock_config):
+            batch_invariant.override_envs_for_invariance()
 
-        # Call function
-        batch_invariant.override_envs_for_invariance()
-
-        # Verify environment variables
-        assert os.environ["VLLM_ASCEND_ENABLE_NZ"] == "0"
+        assert mock_config.weight_nz_mode == 0
+        assert not mock_config.enable_matmul_allreduce
         assert os.environ["HCCL_DETERMINISTIC"] == "strict"
         assert os.environ["LCCL_DETERMINISTIC"] == "1"
 

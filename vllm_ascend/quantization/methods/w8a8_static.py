@@ -50,7 +50,7 @@ class AscendW8A8LinearMethod(AscendLinearScheme):
         params_dict = {"weight": torch.empty(output_size, input_size, dtype=torch.int8)}
         return params_dict
 
-    def get_pertensor_param(self, params_dtype: torch.dtype) -> dict[str, Any]:
+    def get_pertensor_param(self, params_dtype: torch.dtype, **kwargs: Any) -> dict[str, Any]:
         params_dict = {}
         params_dict["input_scale"] = torch.empty(1, dtype=params_dtype)
         params_dict["input_offset"] = torch.empty(1, dtype=torch.int8)

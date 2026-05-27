@@ -141,6 +141,7 @@ class TestAscendW8A8MXFP8MoEMethod(TestBase):
             num_experts=self.num_experts, hidden_size=self.hidden_size, intermediate_size=self.intermediate_size
         )
         self.scheme.process_weights_after_loading(layer)
+        layer.swiglu_limit = 1000000
         x = torch.randn(tokens, self.hidden_size, dtype=torch.bfloat16)
         router_logits = torch.randn(tokens, self.num_experts, dtype=torch.float32)
         topk_weights = torch.randn(tokens, 2)

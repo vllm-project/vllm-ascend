@@ -86,7 +86,6 @@ public:
     CATLASS_DEVICE
     BlockEpilogue(Arch::Resource<ArchTag> const &resource, int32_t n, Params const &params = Params{}) : params(params)
     {
-        size_t ubOffset = 0;
         int32_t eventVMTE2 = 0;
         int32_t eventMTE2V = 0;
         int32_t eventMTE3V = 0;
@@ -119,7 +118,6 @@ public:
             AscendC::SetFlag<AscendC::HardEvent::V_MTE2>(eventUbCVMTE2List[i]);
             AscendC::SetFlag<AscendC::HardEvent::MTE3_V>(eventUbDMTE3VList[i]);  
         }
-
         ubPerTokenScaleOutput = resource.ubBuf.template GetBufferByByte<float>(ubOffset);
     }
     CATLASS_DEVICE
@@ -148,8 +146,10 @@ public:
         AscendC::GlobalTensor<ElementPerTokenScale> const &gmPerTokenScale1,
         AscendC::GlobalTensor<ElementD> const &gmD,
         AscendC::GlobalTensor<ElementPerTokenScale> const &gmPerTokenScale2,
+        Arch::Resource<ArchTag> const &resource,
 
         uint32_t epilogueCoreNum = 40,
+        float swigluLimit = 0.0f,
         Callback &&callback = Callback{}
     )
     {
@@ -170,6 +170,9 @@ public:
 
         uint32_t perCoreData =  blockM / epilogueCoreNum;
         uint32_t remainderData = blockM % epilogueCoreNum;
+
+        uint32_t scaleBlock = (perCoreData * sizeof(ElementPerTokenScale) + 31) / 32 * 32;
+        sharedTmpBuffer = resource.ubBuf.template GetBufferByByte<uint8_t>(ubOffset + scaleBlock);
 
         uint32_t tasksForIdx  = epilogueCoreIdx < remainderData ? perCoreData + 1 : perCoreData;
         uint32_t loopStartIdx = epilogueCoreIdx * perCoreData + (epilogueCoreIdx < remainderData? epilogueCoreIdx : remainderData);
@@ -220,6 +223,15 @@ public:
             AscendC::Muls(ubCFp32, ubCFp32, perTokenScale, blockN);
             AscendC::PipeBarrier<PIPE_V>();
 
+            // swiglu limit clamp
+            if (swigluLimit > 0.0f) {
+                AscendC::ClampMax(ubCFp32, ubCFp32, sharedTmpBuffer, swigluLimit, blockN);
+                AscendC::PipeBarrier<PIPE_V>();
+                AscendC::ClampMin(ubCFp32[ChunkTileLen], ubCFp32[ChunkTileLen], sharedTmpBuffer, -1.0f * swigluLimit, ChunkTileLen);
+                //AscendC::ClampMin(ubCFp32, ubCFp32, sharedTmpBuffer, -1.0f * swigluLimit, ChunkTileLen);
+                AscendC::PipeBarrier<PIPE_V>();
+            }
+            
             // Swiglu computation process
             AscendC::Muls(ubCFp32ChunkN, ubCFp32, -1.0f, ChunkTileLen);
             AscendC::PipeBarrier<PIPE_V>();
@@ -296,6 +308,7 @@ private:
     int32_t eventUbDVMTE3List[UB_STAGES];
 
     uint32_t ubListId{0};
+    size_t ubOffset;
 
     AscendC::LocalTensor<float> ubCFp32List[UB_STAGES];
     AscendC::LocalTensor<float> ubCFp32ChunkNList[UB_STAGES];
@@ -304,7 +317,7 @@ private:
     AscendC::LocalTensor<int32_t> ubQuantS32List[UB_STAGES];
     AscendC::LocalTensor<half> ubQuantF16List[UB_STAGES];
     AscendC::LocalTensor<float> ubPerTokenScaleOutput;
-
+    AscendC::LocalTensor<uint8_t> sharedTmpBuffer;
 
     CopyGmToUbC copyGmToUbC;
     CopyUbToGmD copyUbToGmD;

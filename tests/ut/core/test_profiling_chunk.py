@@ -89,10 +89,12 @@ class TestProfilingChunkConfig(TestBase):
         with self.assertRaises(ValueError):
             ProfilingChunkConfig({"min_chunk": 0})
 
+    @patch("vllm.config.VllmConfig.__post_init__", MagicMock())
     @patch("vllm_ascend.platform.NPUPlatform._fix_incompatible_config")
     def test_enabled_without_pp_raises(self, _mock):
         clear_ascend_config()
         vllm_config = VllmConfig()
+        vllm_config.model_config = MagicMock()
         vllm_config.additional_config = {
             "profiling_chunk_config": {"enabled": True},
             "refresh": True,
@@ -103,10 +105,12 @@ class TestProfilingChunkConfig(TestBase):
         self.assertIn("pipeline parallelism", str(ctx.exception))
         clear_ascend_config()
 
+    @patch("vllm.config.VllmConfig.__post_init__", MagicMock())
     @patch("vllm_ascend.platform.NPUPlatform._fix_incompatible_config")
     def test_enabled_with_pp_ok(self, _mock):
         clear_ascend_config()
         vllm_config = VllmConfig()
+        vllm_config.model_config = MagicMock()
         vllm_config.additional_config = {
             "profiling_chunk_config": {"enabled": True},
             "refresh": True,
@@ -116,10 +120,12 @@ class TestProfilingChunkConfig(TestBase):
         self.assertTrue(ascend_config.profiling_chunk_config.enabled)
         clear_ascend_config()
 
+    @patch("vllm.config.VllmConfig.__post_init__", MagicMock())
     @patch("vllm_ascend.platform.NPUPlatform._fix_incompatible_config")
     def test_disabled_without_pp_ok(self, _mock):
         clear_ascend_config()
         vllm_config = VllmConfig()
+        vllm_config.model_config = MagicMock()
         vllm_config.additional_config = {"refresh": True}
         ascend_config = init_ascend_config(vllm_config)
         self.assertFalse(ascend_config.profiling_chunk_config.enabled)
@@ -262,6 +268,7 @@ class TestProfilingChunkScheduler(TestBase):
         model_config.hf_config = mock_hf_config
         model_config.hf_text_config = MagicMock()
         model_config.hf_text_config.is_encoder_decoder = False
+        model_config.runner_type = "generate"
 
         scheduler_config = SchedulerConfig(
             max_num_seqs=MAX_NUM_SEQS,

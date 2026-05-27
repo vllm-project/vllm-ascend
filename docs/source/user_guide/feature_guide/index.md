@@ -19,6 +19,7 @@ Multi_Token_Prediction
 dynamic_batch
 epd_disaggregation
 kv_pool
+kv_cache_cpu_offload
 external_dp
 large_scale_ep
 ucm_deployment
@@ -31,4 +32,5 @@ sequence_parallelism
 batch_invariance
 lmcache_ascend_deployment
 dynamic_chunk_pipeline_parallel
+flash_attention
 :::

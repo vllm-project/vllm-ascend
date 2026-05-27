@@ -1,4 +1,5 @@
 import torch
+from vllm.v1.kv_cache_interface import KVCacheGroupSpec
 from vllm.v1.sample.logits_processor import LogitsProcessors
 
 from vllm_ascend._310p.block_table import MultiGroupBlockTable
@@ -23,6 +24,7 @@ class NPUInputBatch310(NPUInputBatch):
         is_pooling_model: bool = False,
         num_speculative_tokens: int = 0,
         cp_kv_cache_interleave_size: int = 1,
+        kv_cache_groups: list[KVCacheGroupSpec] | None = None,
     ):
         super().__init__(
             max_num_reqs=max_num_reqs,
@@ -40,6 +42,7 @@ class NPUInputBatch310(NPUInputBatch):
             is_pooling_model=is_pooling_model,
             num_speculative_tokens=num_speculative_tokens,
             cp_kv_cache_interleave_size=cp_kv_cache_interleave_size,
+            kv_cache_groups=kv_cache_groups,
         )
         self.block_table = MultiGroupBlockTable(
             max_num_reqs=max_num_reqs,
@@ -52,4 +55,5 @@ class NPUInputBatch310(NPUInputBatch):
             num_speculative_tokens=num_speculative_tokens,
             kernel_sizes=kernel_block_sizes,
             cp_kv_cache_interleave_size=cp_kv_cache_interleave_size,
+            kv_cache_groups=kv_cache_groups,
         )

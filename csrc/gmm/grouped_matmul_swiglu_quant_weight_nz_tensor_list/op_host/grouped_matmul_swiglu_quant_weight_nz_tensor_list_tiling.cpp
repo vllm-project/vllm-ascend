@@ -78,11 +78,11 @@ static void SetTilingKey(gert::TilingContext* context, bool isSplitWorkSpace) {
   }
 }
 
-static bool IsPreFill(GMMSwigluQuantTilingData &tilingData) {
-  int64_t k = tilingData.gmmSwigluBaseParams.get_K();
-  int64_t n = tilingData.gmmSwigluBaseParams.get_N();
-  int64_t m = tilingData.gmmSwigluBaseParams.get_M();
-  int64_t groupNum = tilingData.gmmSwigluBaseParams.get_groupNum();
+static bool IsPreFill(GMMSwigluQuantTensorListTilingData &tilingData) {
+  int64_t k = tilingData.gmmSwigluTensorListBaseParams.get_K();
+  int64_t n = tilingData.gmmSwigluTensorListBaseParams.get_N();
+  int64_t m = tilingData.gmmSwigluTensorListBaseParams.get_M();
+  int64_t groupNum = tilingData.gmmSwigluTensorListBaseParams.get_groupNum();
   if (groupNum == 128 && m >= PREFILL_M_MIN_SIZE) { // 128:prefiling groupNum
     std::array<int64_t, 2> kNList = {k, n}; // 2: kNList size
     if (PREFILL_WHITE_LIST.count(kNList)) {
@@ -92,10 +92,10 @@ static bool IsPreFill(GMMSwigluQuantTilingData &tilingData) {
   return false;
 }
 
-ASCENDC_EXTERN_C graphStatus TilingGMMSwigluQuant(gert::TilingContext* context) {
+ASCENDC_EXTERN_C graphStatus TilingGMMSwigluQuantTensorList(gert::TilingContext* context) {
   // set info
   OPS_LOG_I(context->GetNodeName(), "Begin Run GMM Swiglu Tiling .");
-  
+
   auto compileInfoPtr = context->GetCompileInfo<GMMSwigluCompileInfo>();
   auto xTensor = context->GetInputTensor(X_INDEX);
   OPS_LOG_E_IF_NULL(context, xTensor, return GRAPH_FAILED);
@@ -107,27 +107,35 @@ ASCENDC_EXTERN_C graphStatus TilingGMMSwigluQuant(gert::TilingContext* context) 
   auto groupListTensor = context->GetDynamicInputTensor(GROUPLIST_INDEX, 0);
   OPS_LOG_E_IF_NULL(context, groupListTensor, return GRAPH_FAILED);
   const int64_t groupNum = groupListTensor->GetStorageShape().GetDim(0);
-  GMMSwigluQuantTilingData tilingData;
+  GMMSwigluQuantTensorListTilingData tilingData;
   const int64_t row = CalRows(compileInfoPtr->ubSize_, n);
-  tilingData.gmmSwigluBaseParams.set_groupNum(groupNum);
-  tilingData.gmmSwigluBaseParams.set_coreNum(compileInfoPtr->aicNum_);
-  tilingData.gmmSwigluBaseParams.set_K(k);
-  tilingData.gmmSwigluBaseParams.set_N(n);
-  tilingData.gmmSwigluBaseParams.set_M(m);
-  tilingData.gmmSwiglu.set_maxProcessRowNum(row);
-  tilingData.gmmSwiglu.set_groupListLen(groupNum);
-  tilingData.gmmSwiglu.set_tokenLen(n);
-  
+  auto attrs = context->GetAttrs();
+  float swiglu_limit = *attrs->GetFloat(0);
+  OPS_ERR_IF(!(swiglu_limit >= 0.0f),
+             OPS_REPORT_VECTOR_INNER_ERR(context->GetNodeName(), "swiglu_limit should be non-negative"),
+             return GRAPH_FAILED);
+
+  tilingData.gmmSwigluTensorListBaseParams.set_groupNum(groupNum);
+  tilingData.gmmSwigluTensorListBaseParams.set_coreNum(compileInfoPtr->aicNum_);
+  tilingData.gmmSwigluTensorListBaseParams.set_K(k);
+  tilingData.gmmSwigluTensorListBaseParams.set_N(n);
+  tilingData.gmmSwigluTensorListBaseParams.set_M(m);
+  tilingData.gmmSwigluTensorList.set_maxProcessRowNum(row);
+  tilingData.gmmSwigluTensorList.set_groupListLen(groupNum);
+  tilingData.gmmSwigluTensorList.set_tokenLen(n);
+  tilingData.gmmSwigluTensorList.set_swigluLimit(swiglu_limit);
+
   OPS_LOG_D(context->GetNodeName(),"grouped_matmul_swiglu_quant_weight_nz_tensor_list_tiling.");
-  OPS_LOG_D(context->GetNodeName(),"gmmSwigluBaseParams.groupNum:  %ld", groupNum);
-  OPS_LOG_D(context->GetNodeName(),"gmmSwigluBaseParams.coreNum:   %u ", compileInfoPtr->aicNum_);
-  OPS_LOG_D(context->GetNodeName(),"gmmSwigluBaseParams.M:         %ld", m);
-  OPS_LOG_D(context->GetNodeName(),"gmmSwigluBaseParams.K:         %ld", k);
-  OPS_LOG_D(context->GetNodeName(),"gmmSwigluBaseParams.N:         %ld", n);
-  OPS_LOG_D(context->GetNodeName(),"gmmSwiglu.maxProcessRowNum:    %ld", row);
-  OPS_LOG_D(context->GetNodeName(),"gmmSwiglu.groupListLen:        %ld", groupNum);
-  OPS_LOG_D(context->GetNodeName(),"gmmSwiglu.tokenLen:            %ld", n);
-  
+  OPS_LOG_D(context->GetNodeName(),"gmmSwigluTensorListBaseParams.groupNum:  %ld", groupNum);
+  OPS_LOG_D(context->GetNodeName(),"gmmSwigluTensorListBaseParams.coreNum:   %u ", compileInfoPtr->aicNum_);
+  OPS_LOG_D(context->GetNodeName(),"gmmSwigluTensorListBaseParams.M:         %ld", m);
+  OPS_LOG_D(context->GetNodeName(),"gmmSwigluTensorListBaseParams.K:         %ld", k);
+  OPS_LOG_D(context->GetNodeName(),"gmmSwigluTensorListBaseParams.N:         %ld", n);
+  OPS_LOG_D(context->GetNodeName(),"gmmSwigluTensorList.maxProcessRowNum:    %ld", row);
+  OPS_LOG_D(context->GetNodeName(),"gmmSwigluTensorList.groupListLen:        %ld", groupNum);
+  OPS_LOG_D(context->GetNodeName(),"gmmSwigluTensorList.tokenLen:            %ld", n);
+  OPS_LOG_D(context->GetNodeName(),"gmmSwigluTensorList.swigluLimit:         %f", swiglu_limit);
+
   auto ascendcPlatform = platform_ascendc::PlatformAscendC(context->GetPlatformInfo());
   using namespace matmul_tiling;
   MatmulApiTiling tiling(ascendcPlatform);
@@ -143,13 +151,13 @@ ASCENDC_EXTERN_C graphStatus TilingGMMSwigluQuant(gert::TilingContext* context) 
              return GRAPH_FAILED);
   auto workspaceSizes = context->GetWorkspaceSizes(1);
   bool isPreFill = IsPreFill(tilingData);
-  tilingData.gmmSwigluBaseParams.set_isPreFill(isPreFill);
+  tilingData.gmmSwigluTensorListBaseParams.set_isPreFill(isPreFill);
   int64_t usrWorkspaceLimut = isPreFill ? PREFILL_USER_WORKSPACE_LIMIT : USER_WORKSPACE_LIMIT;
   int64_t mLimit = ((usrWorkspaceLimut / DOUBLE_WORKSPACE_SPLIT) / INT32_DTYPE_SIZE) / n;
-  OPS_ERR_IF(mLimit <= 0, 
+  OPS_ERR_IF(mLimit <= 0,
              OPS_REPORT_VECTOR_INNER_ERR(context->GetNodeName(),"mLimit is %ld must over then 0.", mLimit),
              return GRAPH_FAILED);
-  tilingData.gmmSwigluBaseParams.set_mLimit(mLimit);
+  tilingData.gmmSwigluTensorListBaseParams.set_mLimit(mLimit);
   workspaceSizes[0] = SYS_WORKSPACE_SIZE + ((mLimit * DOUBLE_WORKSPACE_SPLIT > m \
                       ? m \
                       : mLimit * DOUBLE_WORKSPACE_SPLIT) * n * sizeof(int32_t));
@@ -163,12 +171,12 @@ ASCENDC_EXTERN_C graphStatus TilingGMMSwigluQuant(gert::TilingContext* context) 
   tilingData.SaveToBuffer(context->GetRawTilingData()->GetData(), context->GetRawTilingData()->GetCapacity());
   context->SetBlockDim(compileInfoPtr->aicNum_); // block dim is the number of aicube
   context->GetRawTilingData()->SetDataSize(tilingData.GetDataSize());
-  
+
   OPS_LOG_D(context->GetNodeName(), "End Run GMM Swiglu Tiling.");
   return GRAPH_SUCCESS;
 }
 
-ASCENDC_EXTERN_C graphStatus TilingPrepareForGMMSwigluQuant(gert::TilingParseContext* context) {
+ASCENDC_EXTERN_C graphStatus TilingPrepareForGMMSwigluQuantTensorList(gert::TilingParseContext* context) {
   // get info
   fe::PlatFormInfos* platformInfoPtr = context->GetPlatformInfo();
   OPS_LOG_E_IF_NULL(context, platformInfoPtr, return GRAPH_FAILED);
@@ -183,6 +191,6 @@ ASCENDC_EXTERN_C graphStatus TilingPrepareForGMMSwigluQuant(gert::TilingParseCon
 }
 
 IMPL_OP_OPTILING(GroupedMatmulSwigluQuantWeightNzTensorList)
-.Tiling(TilingGMMSwigluQuant)
-.TilingParse<GMMSwigluCompileInfo>(TilingPrepareForGMMSwigluQuant); 
+.Tiling(TilingGMMSwigluQuantTensorList)
+.TilingParse<GMMSwigluCompileInfo>(TilingPrepareForGMMSwigluQuantTensorList);
 }  // namespace optiling

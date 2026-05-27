@@ -14,7 +14,7 @@
 #include "vector"
 #include "register/tilingdata_base.h"
 #include "tiling/tiling_api.h"
-#include "error_log.h"
+#include "tiling_base/error_log.h"
 #include "hcom_topo_info.h"
 #include "register/op_def_registry.h"
 #include "../op_kernel/dispatch_ffn_combine_tiling.h"
@@ -35,6 +35,7 @@ namespace {
     constexpr uint32_t ATTR_MAX_OUTPUT_SIZE_INDEX = 1;
     constexpr uint32_t ATTR_IS_TRANS_B = 2;
     constexpr uint32_t ATTR_WEIGHT_NZ = 3;
+    constexpr uint32_t ATTR_SWIGLU_LIMIT = 4;
     constexpr uint64_t INIT_TILINGKEY = 1000000;
     constexpr uint64_t TILINGKEY_TRANS_B = 1U;
     constexpr uint64_t TILINGKEY_WEIGHT_NZ = 10;
@@ -93,6 +94,7 @@ static ge::graphStatus DispatchFFNCombineCheckAttrAndSetTiling(gert::TilingConte
     auto maxOutputSizePtr = attrs->GetAttrPointer<int>(ATTR_MAX_OUTPUT_SIZE_INDEX);
     auto is_trans_b = attrs->GetAttrPointer<bool>(ATTR_IS_TRANS_B);
     auto weight_nz = attrs->GetAttrPointer<bool>(ATTR_WEIGHT_NZ);
+    auto swiglu_limit = attrs->GetAttrPointer<float>(ATTR_SWIGLU_LIMIT);
     OP_TILING_CHECK(groupPtr == nullptr || strlen(groupPtr) == 0,
     OP_LOGE(K_INNER_DEBUG, "group is invalid."), return GRAPH_FAILED);
 
@@ -104,6 +106,7 @@ static ge::graphStatus DispatchFFNCombineCheckAttrAndSetTiling(gert::TilingConte
     info.maxOutputSize = *maxOutputSizePtr;
     info.isTransposeB = *is_trans_b;
     info.isWeightNz = *weight_nz;
+    info.swigluLimit = swiglu_limit != nullptr ? *swiglu_limit : 0.0f;
 
     int64_t rankSize;
     (void)ge::HcomTopoInfo::Instance().GetGroupRankSize(groupPtr, rankSize);

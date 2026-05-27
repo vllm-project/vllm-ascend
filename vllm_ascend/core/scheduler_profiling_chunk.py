@@ -577,7 +577,7 @@ class ProfilingChunkScheduler(Scheduler):
                     num_encoder_tokens = sum(request.get_num_encoder_embeds(i) for i in encoder_inputs_to_schedule)
 
                 if (
-                    vllm_version_is("0.20.1")
+                    vllm_version_is("0.20.2")
                     and self.scheduler_reserve_full_isl
                     and not self.kv_cache_manager.can_fit_full_sequence(
                         request,
@@ -601,7 +601,7 @@ class ProfilingChunkScheduler(Scheduler):
                     delay_cache_blocks=load_kv_async,
                     num_encoder_tokens=num_encoder_tokens,
                     **(
-                        {} if vllm_version_is("0.20.1") else {"full_sequence_must_fit": self.scheduler_reserve_full_isl}
+                        {} if vllm_version_is("0.20.2") else {"full_sequence_must_fit": self.scheduler_reserve_full_isl}
                     ),
                 )
 

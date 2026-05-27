@@ -138,7 +138,7 @@ class AscendAttentionCPMetadataBuilder(AscendAttentionMetadataBuilder):
             num_actual_tokens_pcp_padded = num_actual_tokens
 
         slot_mapping = common_attn_metadata.slot_mapping[:num_actual_tokens_pcp_padded]
-        attn_mask = self.attn_mask_builder.get_attention_mask(self.model_config)
+        attn_mask = self.attn_mask_builder.get_attention_mask(common_attn_metadata.causal, self.model_config)
         attn_state = common_attn_metadata.attn_state
         num_computed_tokens_cpu = seq_lens - query_lens
 
@@ -740,13 +740,13 @@ class AscendAttentionCPImpl(AscendAttentionBackendImpl):
         key = torch.empty(total_toks, num_heads, head_size, dtype=query.dtype, device=query.device)
         value = torch.empty(total_toks, num_heads, head_size, dtype=query.dtype, device=query.device)
         if total_toks > 0:
-            torch_npu.atb.npu_paged_cache_load(
+            DeviceOperator.kv_cache_load(
                 cache_key,
                 cache_value,
                 attn_metadata.prefill.block_tables,
                 local_chunked_kv_lens_rank,
                 # slot offsets of current chunk in current iteration
-                seq_starts=attn_metadata.prefill.chunked_context.starts,
+                attn_metadata.prefill.chunked_context.starts,
                 key=key,
                 value=value,
             )

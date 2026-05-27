@@ -7,7 +7,7 @@ from contextlib import contextmanager
 import psutil
 
 DISAGGEGATED_PREFILL_PORT = 5333
-CONFIG_BASE_PATH = "tests/e2e/nightly/multi_node/config/"
+CONFIG_BASE_PATH = os.getenv("CONFIG_BASE_PATH") or "tests/e2e/nightly/multi_node/config/"
 DEFAULT_SERVER_PORT = 8080
 
 

@@ -803,10 +803,6 @@ In this chapter, we recommend best practices for three scenarios:
 
 ## FAQ
 
-- **Q: Why is the TPOT performance poor in Long-context test?**
-
-  A: Please ensure that the FIA operator replacement script has been executed successfully to complete the replacement of FIA operators. Here is the script: [A2](../../../../tools/install_flash_infer_attention_score_ops_a2.sh) and [A3](../../../../tools/install_flash_infer_attention_score_ops_a3.sh)
-
 - **Q: Startup fails with HCCL port conflicts (address already bound). What should I do?**
 
   A: Clean up old processes and restart: `pkill -f vLLM*`.

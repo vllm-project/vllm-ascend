@@ -36,7 +36,7 @@ test_cases:
       - '{"method":"eagle3","model":"vllm-ascend/MiniMax-M2.5-eagle-model-0318","num_speculative_tokens":3}'
       - "--enable-expert-parallel"
       - "--max-num-seqs"
-      - "32"
+      - "128"
       - "--max-num-batched-tokens"
       - "16384"
       - "--max-model-len"
@@ -44,16 +44,15 @@ test_cases:
       - "--compilation-config"
       - '{"cudagraph_mode":"FULL_DECODE_ONLY"}'
     benchmarks:
-      acc:
+      acc_aime2025:
         case_type: accuracy
-        dataset_path: vllm-ascend/gpqa
+        dataset_path: vllm-ascend/aime2025
         request_conf: vllm_api_general_chat
-        dataset_conf: gpqa/gpqa_gen_0_shot_cot_chat_prompt
-        max_out_len: 65536
+        dataset_conf: aime2025/aime2025_gen_0_shot_chat_prompt
+        max_out_len: 32768
         batch_size: 32
-        baseline: 83
+        baseline: 90
         threshold: 5
-        temperature: 1.0
       perf:
         case_type: performance
         dataset_path: vllm-ascend/GSM8K-in3500-bs2800

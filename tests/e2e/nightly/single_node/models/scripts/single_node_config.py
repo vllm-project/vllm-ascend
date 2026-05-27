@@ -1,13 +1,13 @@
 import logging
 import os
-import regex as re
 from dataclasses import dataclass, field
 from typing import Any
 
+import regex as re
 import yaml
 from vllm.utils.network_utils import get_open_port
 
-CONFIG_BASE_PATH = "tests/e2e/nightly/single_node/models/configs"
+CONFIG_BASE_PATH = os.getenv("CONFIG_BASE_PATH") or "tests/e2e/nightly/single_node/models/configs"
 
 logger = logging.getLogger(__name__)
 

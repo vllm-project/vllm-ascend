@@ -17,8 +17,13 @@
 from collections.abc import Callable
 
 import torch
+import torch.nn.functional as F
+from vllm.distributed import get_tp_group
+from vllm.forward_context import get_forward_context
 
+from vllm_ascend.ascend_forward_context import MoECommType
 from vllm_ascend.device.device_op import DeviceOperator
+from vllm_ascend.distributed.utils import split_tensor_along_first_dim
 from vllm_ascend.utils import get_weight_prefetch_method
 
 
@@ -39,6 +44,8 @@ def select_experts(
     num_logical_experts: int = -1,
     num_shared_experts: int = 0,
     num_experts: int = -1,
+    input_ids: torch.Tensor | None = None,
+    tid2eid: torch.Tensor | None = None,
 ):
     """
     Fused experts with select experts.
@@ -87,6 +94,8 @@ def select_experts(
             num_expert_group=num_expert_group,
             scoring_func=scoring_func,
             routed_scaling_factor=routed_scaling_factor,
+            tid2eid=tid2eid,
+            input_ids=input_ids,
         )
     else:
         topk_weights, topk_ids = _native_select_experts(
@@ -99,8 +108,11 @@ def select_experts(
             num_expert_group=num_expert_group,
             custom_routing_function=custom_routing_function,
             scoring_func=scoring_func,
+            routed_scaling_factor=routed_scaling_factor,
             e_score_correction_bias=e_score_correction_bias,
             num_experts=num_experts,
+            tid2eid=None,
+            input_ids=None,
         )
         # Apply routed scaling factor to weights
         if routed_scaling_factor != 1.0:
@@ -138,7 +150,7 @@ def check_npu_moe_gating_top_k(
         return False
     if custom_routing_function is not None:
         return False
-    if scoring_func != "softmax" and scoring_func != "sigmoid":
+    if scoring_func != "softmax" and scoring_func != "sigmoid" and scoring_func != "sqrtsoftplus":
         return False
     topk_group = topk_group if topk_group is not None else 1
     num_expert_group = num_expert_group if num_expert_group is not None else 1
@@ -232,10 +244,57 @@ def _select_experts_with_fusion_ops(
     num_expert_group: int | None,
     scoring_func: str = "softmax",
     routed_scaling_factor=1.0,
+    tid2eid=None,
+    input_ids=None,
 ):
     topk_group = topk_group if topk_group is not None else 1
     num_expert_group = num_expert_group if num_expert_group is not None else 1
     renorm = int(renormalize)
+    if scoring_func == "sqrtsoftplus":
+        if tid2eid is not None:
+            forward_context = get_forward_context()
+            input_ids = forward_context.input_ids.to(torch.int64)
+            # tid2eid_ones = torch.ones(tid2eid.shape[0],tid2eid.shape[1],device=router_logits.device,dtype=torch.int32)
+            tid2eid_ones = tid2eid.to(torch.int32)
+            if forward_context.moe_comm_type == MoECommType.ALLGATHER:
+                prepare_finalize = forward_context.moe_comm_method.prepare_finalize
+                input_ids = prepare_finalize.all_gather_input_id_with_dp_group(input_ids)
+            else:
+                input_ids = forward_context.moe_comm_method.pad_and_split_input_ids(input_ids)
+
+            if forward_context.flash_comm_v1_enabled and forward_context.moe_comm_type != MoECommType.ALLGATHER:
+                # Process for Flash Comm V1
+                tp_size = get_tp_group().world_size
+                tp_rank = get_tp_group().rank_in_group
+                splitted_input = split_tensor_along_first_dim(input_ids, num_partitions=tp_size)
+                input_ids = splitted_input[tp_rank].contiguous()
+            input_ids = torch.where(input_ids == -1, 0, input_ids)
+        else:
+            input_ids = None
+            tid2eid_ones = None
+        topk_weights, topk_ids, _ = torch.ops._C_ascend.moe_gating_top_k_hash(
+            x=router_logits,
+            k=top_k,
+            bias=e_score_correction_bias,
+            input_ids=input_ids,
+            tid2eid=tid2eid_ones,
+            k_group=topk_group,
+            group_count=num_expert_group,
+            routed_scaling_factor=1.0,
+            eps=1e-20,
+            group_select_mode=1,
+            # The hash custom op currently rejects renorm != 0. Apply
+            # norm_topk_prob in Python below before returning to MoE compute.
+            renorm=0,
+            norm_type=2,
+            out_flag=False,
+        )
+        # Match DeepSeek V4 routing: normalize sqrtsoftplus top-k weights
+        # before applying the routed scale. DSV4 non-AITER callers pass 1.0
+        # here and scale the routed output later with muls_add_triton.
+        topk_weights = _renormalize_topk_weights(topk_weights, renormalize)
+        topk_weights = topk_weights * routed_scaling_factor
+        return topk_weights, topk_ids
     norm_type = 0 if scoring_func == "softmax" else 1
     if e_score_correction_bias is not None and e_score_correction_bias.dtype != router_logits.dtype:
         e_score_correction_bias = e_score_correction_bias.to(router_logits.dtype)
@@ -266,8 +325,12 @@ def _native_select_experts(
     num_expert_group: int | None = None,
     custom_routing_function: Callable | None = None,
     scoring_func: str = "softmax",
+    routed_scaling_factor: float = 1.0,
     e_score_correction_bias: torch.Tensor | None = None,
     num_experts: torch.Tensor | None = None,
+    use_hash: bool = False,
+    tid2eid: dict[int, int] | None = None,
+    input_ids: torch.Tensor | None = None,
 ) -> tuple[torch.Tensor, torch.Tensor]:
     """
     Select top-k experts based on router logits.
@@ -296,11 +359,13 @@ def _native_select_experts(
         topk_weights = router_logits.softmax(dim=-1)
     elif scoring_func == "sigmoid":
         topk_weights = router_logits.sigmoid()
+    elif scoring_func == "sqrtsoftplus":
+        topk_weights = F.softplus(router_logits).sqrt()
     else:
         raise ValueError(f"Unsupported scoring function: {scoring_func}")
 
     if use_grouped_topk:
-        return _select_expert_use_group_topk(
+        topk_weights, topk_ids = _select_expert_use_group_topk(
             topk_weights=topk_weights,
             top_k=top_k,
             renormalize=renormalize,
@@ -308,6 +373,10 @@ def _native_select_experts(
             num_expert_group=num_expert_group,
             e_score_correction_bias=e_score_correction_bias,
         )
+        return topk_weights * routed_scaling_factor, topk_ids
+
+    if e_score_correction_bias is not None:
+        topk_weights = topk_weights + e_score_correction_bias
 
     if custom_routing_function is not None:
         topk_weights, topk_ids = custom_routing_function(
@@ -327,6 +396,7 @@ def _native_select_experts(
     # Required by npu_moe_init_routing
     topk_ids = topk_ids.to(torch.int32)
     topk_weights = _renormalize_topk_weights(topk_weights, renormalize)
+    topk_weights = topk_weights * routed_scaling_factor
 
     return topk_weights, topk_ids
 
