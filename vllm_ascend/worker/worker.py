@@ -332,6 +332,8 @@ class NPUWorker(WorkerBase):
         if model_runner is None:
             return
         manager = getattr(model_runner, "cudagraph_manager", None)
+        if manager is None:
+            return
         if hasattr(manager, "graphs"):
             manager.graphs.clear()
         if hasattr(manager, "_graphs_captured"):

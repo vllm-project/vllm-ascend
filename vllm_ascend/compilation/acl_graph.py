@@ -24,7 +24,7 @@ from vllm_ascend.ascend_forward_context import _EXTRA_CTX
 
 from ..utils import weak_ref_tensors
 
-_acl_graph_wrappers = weakref.WeakSet()
+_acl_graph_wrappers: weakref.WeakSet[Any] = weakref.WeakSet()
 
 
 @dataclasses.dataclass
