@@ -494,9 +494,7 @@ class TestMetadataHandling(unittest.TestCase):
 
             mock_get_socket.assert_called_once_with("host1", 5555)
             mock_return_socket.assert_called_once_with(mock_socket, "host1", 5555)
-            mock_send.assert_called_once_with(
-                mock_socket, self.thread.encoder.encode((GET_META_MSG, "")), "host1:5555"
-            )
+            mock_send.assert_called_once_with(mock_socket, self.thread.encoder.encode((GET_META_MSG, "")), "host1:5555")
             mock_recv.assert_called_once_with(mock_socket, self.thread.remote_poller, "host1:5555")
             self.assertEqual(self.thread.kv_caches_base_addr["remote_engine"][5555], [[0x3000], [0x4000]])
 
