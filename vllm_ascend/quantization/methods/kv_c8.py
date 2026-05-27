@@ -1,6 +1,7 @@
 import torch
 from vllm.config import get_current_vllm_config
 from vllm.distributed import get_tensor_model_parallel_rank, get_tensor_model_parallel_world_size
+from vllm.logger import logger
 
 from .base import AscendAttentionScheme
 from .registry import register_scheme
@@ -16,7 +17,9 @@ def _fa_quant_weight_loader(param: torch.Tensor, loaded_weight: torch.Tensor):
         shard_size = loaded_weight.shape[0] // tp_size
         loaded_weight = loaded_weight.narrow(0, shard_size * tp_rank, shard_size)
         assert param.size() == loaded_weight.size(), (
-            f"Attempted to load weight ({loaded_weight.size()}) into parameter ({param.size()}) when TP is ({tp_size})"
+            "[vllm-ascend/FAKQuant] Attempted to load weight "
+            f"({loaded_weight.size()}) into parameter ({param.size()}) "
+            f"when TP size is {tp_size} and TP rank is {tp_rank}."
         )
 
         param.data.copy_(loaded_weight)
@@ -111,6 +114,10 @@ class AscendC8KVCacheAttentionMethod(AscendAttentionScheme):
     def create_weights(self, layer: torch.nn.Module) -> None:
         # Returns int8 if the P node is not a PD detachment node.
         if not self.is_kv_producer:
+            logger.info_once(
+                "[vllm-ascend/C8_KV] KV cache producer is disabled; "
+                "setting kv_cache_torch_dtype to torch.int8."
+            )
             layer.kv_cache_torch_dtype = torch.int8
         # Upgrade impl to the C8-specific subclass so the C8 forward path is always used.
         if hasattr(layer, "impl"):
@@ -145,7 +152,9 @@ class AscendC8KVCacheAttentionMethod(AscendAttentionScheme):
         scale,
         output,
     ) -> torch.Tensor:
-        raise RuntimeError(
-            "AscendC8KVCacheAttentionMethod.apply should not be called. "
-            "C8 KV cache quantization is handled by the attention backend."
+        err_msg = (
+            "[vllm-ascend/C8_KV] AscendC8KVCacheAttentionMethod.apply should "
+            "not be called. C8 KV cache quantization is handled by the "
+            "attention backend."
         )
+        raise RuntimeError(err_msg)
