@@ -282,6 +282,7 @@ class NPUWorker(WorkerBase):
             clear_attention_workspaces_for_sleep,
             reset_graph_params_for_sleep,
         )
+
         clear_attention_workspaces_for_sleep()
         if self.model_runner is None or not getattr(self.model_runner, "use_aclgraph", False):
             return

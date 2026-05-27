@@ -290,6 +290,7 @@ class GroupCoordinatorPatch(GroupCoordinator):
 vllm.distributed.parallel_state.GroupCoordinator = GroupCoordinatorPatch
 _patch_destroy_distributed_environment()
 
+
 def _iter_alive_group_coordinators():
     seen: set[int] = set()
     for group_ref in list(_groups.values()):

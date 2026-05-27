@@ -328,6 +328,7 @@ def update_draft_graph_params_workspaces(num_tokens: int, workspace: Any):
 def get_draft_graph_params():
     return _draft_graph_params
 
+
 def _clear_attention_workspaces_for_sleep(params: GraphParams | None) -> None:
     if params is None:
         return
