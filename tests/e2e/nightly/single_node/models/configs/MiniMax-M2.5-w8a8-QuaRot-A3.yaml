@@ -52,7 +52,6 @@ test_cases:
         batch_size: 32
         baseline: 90
         threshold: 5
-        ignore_eos: false
         bos_token_id: 200019
         do_sample: true
         eos_token_id: 200020
@@ -60,6 +59,7 @@ test_cases:
         top_p: 0.95
         top_k: 40
         transformers_version: 4.46.1
+        ignore_eos: false
       perf:
         case_type: performance
         dataset_path: vllm-ascend/GSM8K-in3500-bs2800
