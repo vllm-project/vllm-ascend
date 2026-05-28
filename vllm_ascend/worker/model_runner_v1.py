@@ -1845,12 +1845,12 @@ class NPUModelRunner(GPUModelRunner):
                     if deferred_state_corrections_fn:
                         deferred_state_corrections_fn()
                         deferred_state_corrections_fn = None
-                    if hasattr(mamba_utils, "MambaBuffers"):
-                        mamba_bufs = self._get_mamba_bufs()
-                        preprocess_bufs = mamba_bufs.preprocess
-                    else:
+                    if vllm_version_is("0.20.2"):
                         mamba_bufs = self._get_mamba_copy_bufs()
                         preprocess_bufs = mamba_bufs
+                    else:
+                        mamba_bufs = self._get_mamba_bufs()
+                        preprocess_bufs = mamba_bufs.preprocess
                     mamba_utils.preprocess_mamba(
                         scheduler_output,
                         self.kv_cache_config,
@@ -1871,12 +1871,9 @@ class NPUModelRunner(GPUModelRunner):
                     )
                     self.num_accepted_tokens.copy_to_gpu(num_reqs)
 
-                    postprocess_bufs = getattr(mamba_bufs, "postprocess_align", None)
-                    if postprocess_bufs is not None and hasattr(
-                        mamba_utils, "stage_postprocess_inputs_to_gpu"
-                    ):
+                    if not vllm_version_is("0.20.2") and mamba_bufs.postprocess_align is not None:
                         mamba_utils.stage_postprocess_inputs_to_gpu(
-                            postprocess_bufs,
+                            mamba_bufs.postprocess_align,
                             scheduler_output,
                             self.input_batch.req_ids,
                             num_reqs,
