@@ -464,8 +464,19 @@ class NPUModelRunner(GPUModelRunner):
         )
         # for cleancode , actually the three attrs is defined in gpu_model_runner
         self.execute_model_state: ExecuteModelState | None = None
-        # None in the first PP rank. The rest are set after load_model.
-        self.intermediate_tensors: IntermediateTensors | None = None
+        # None in the first PP rank. Parent init already sets it for non-first
+        # ranks (with proper _pp_aux buffer from make_empty_intermediate_tensors).
+        # Do NOT unconditionally overwrite to None here.
+        if get_pp_group().is_first_rank:
+            self.intermediate_tensors: IntermediateTensors | None = None
+        else:
+            # Parent init already created the buffer; keep it.
+            # But if it's somehow None, re-create with the patched
+            # make_empty_intermediate_tensors.
+            if not hasattr(self, "intermediate_tensors") or self.intermediate_tensors is None:
+                self.intermediate_tensors = self.model.make_empty_intermediate_tensors(
+                    batch_size=self.max_num_tokens, dtype=self.dtype, device=self.device,
+                )
         self.reorder_batch_threshold: int | None = None
         self.long_seq_metadata = None
         self.query_lens: torch.Tensor | None = None
@@ -3174,23 +3185,28 @@ class NPUModelRunner(GPUModelRunner):
                 from vllm.model_executor.model_loader.default_loader import DefaultModelLoader
                 DefaultModelLoader._init_ep_weight_filter = mock_pass
             self.model: nn.Module = get_model(vllm_config=self.vllm_config)
+
+            # Set aux_hidden_state_layers on ALL PP ranks (not just last rank).
+            # Without this, non-last PP ranks skip the patched forward and never
+            # produce _pp_aux, breaking the PP transport of Eagle3 aux states.
+            if self.use_aux_hidden_state_outputs:
+                from vllm.model_executor.models.interfaces import supports_eagle3
+                if not supports_eagle3(self.model):
+                    raise RuntimeError(
+                        "Model does not support EAGLE3 interface but "
+                        "aux_hidden_state_outputs was requested"
+                    )
+                aux_layers = self._get_eagle3_aux_layers_from_config()
+                if not aux_layers:
+                    aux_layers = self.model.get_eagle3_default_aux_hidden_state_layers()
+                self.model.set_aux_hidden_state_layers(aux_layers)
+
             if self.drafter:
                 logger.info("Loading drafter model...")
                 if self.vllm_config.quant_config is not None:
                     patch_load_weights(self.vllm_config)
                 with get_tp_context(self.drafter):
                     self.drafter.load_model(self.model)
-                if self.use_aux_hidden_state_outputs:
-                    from vllm.model_executor.models.interfaces import supports_eagle3
-                    if not supports_eagle3(self.model):
-                        raise RuntimeError(
-                            "Model does not support EAGLE3 interface but "
-                            "aux_hidden_state_outputs was requested"
-                        )
-                    aux_layers = self._get_eagle3_aux_layers_from_config()
-                    if not aux_layers:
-                        aux_layers = self.model.get_eagle3_default_aux_hidden_state_layers()
-                    self.model.set_aux_hidden_state_layers(aux_layers)
 
             if self.lora_config:
                 self.model = self.load_lora_model(self.model, self.vllm_config, self.device)

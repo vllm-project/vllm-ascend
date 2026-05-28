@@ -282,10 +282,6 @@ def _patched_minimax_m2_forward(
 
     hidden_states, _ = self.norm(hidden_states, residual)
     if aux_list:
-        print(f"[PP_AUX] rank={get_pp_group().rank_in_group} "
-              f"n_aux={len(aux_list)} "
-              f"norms={[round(t.norm().item(),1) for t in aux_list]}",
-              flush=True)
         return hidden_states, aux_list
     return hidden_states
 
