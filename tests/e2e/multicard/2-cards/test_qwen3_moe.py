@@ -103,7 +103,6 @@ def test_qwen3_moe_distributed_tp2_ep2_mrv2(
         assert golden_results[i] == vllm_output[i][1]
 
 
-@pytest.mark.skip(reason="fix me, it's broken after CANN and trition-ascend are upgraded.")
 @pytest.mark.asyncio
 async def test_qwen3_moe_w8a8_distributed_tp2_ep_dynamic_eplb():
     model = "vllm-ascend/Qwen3-30B-A3B-W8A8"
@@ -140,6 +139,7 @@ async def test_qwen3_moe_w8a8_distributed_tp2_ep_dynamic_eplb():
             "expert_heat_collection_interval": 100,
             "algorithm_execution_interval": 20,
             "num_redundant_experts": 2,
+            "eplb_policy_type": 2,
         }
     }
     server_args.extend(["--additional-config", json.dumps(additional_config)])

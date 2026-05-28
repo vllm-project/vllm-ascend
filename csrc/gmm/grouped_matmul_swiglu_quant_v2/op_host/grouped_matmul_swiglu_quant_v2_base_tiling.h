@@ -64,7 +64,7 @@ private:
     int64_t usrWorkspaceLimit_ = 0;
     uint64_t workspaceSize_ = 0;
     int64_t tuningConfig_ = 0;
-    float swigluLimtPtr_ = 1000000.0f;
+    float swigluLimtPtr_ = 0.0f;
     bool isA8W4MSD_ = false;
     bool isA4W4_ = false;
     bool isNz_ = false;
