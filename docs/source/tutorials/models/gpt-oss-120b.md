@@ -115,7 +115,6 @@ vllm serve unsloth/gpt-oss-120b-BF16 \
 --served-model-name gpt-oss-120b-bf16 \
 --port 8000 \
 --trust-remote-code \
---async-scheduling \
 --max-num-seqs 4 \
 --gpu-memory-utilization 0.90 \
 --tensor-parallel-size 4 \

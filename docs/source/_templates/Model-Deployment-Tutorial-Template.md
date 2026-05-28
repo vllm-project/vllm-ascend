@@ -221,7 +221,6 @@ The following optimizations are enabled by default and require no additional con
 | FlashComm_v1 | High-concurrency, Tensor Parallelism (TP) scenarios | `export VLLM_ASCEND_ENABLE_FLASHCOMM1=1` | Decomposes traditional Allreduce into Reduce-Scatter and All-Gather, reducing RMSNorm computation dimensions | Threshold protection: Only takes effect when the actual number of tokens exceeds the threshold to avoid performance degradation in low-concurrency scenarios |
 | Matmul-ReduceScatter Fusion | Large-scale distributed environments | Automatically enabled after enabling FlashComm_v1 | Fuses matrix multiplication and Reduce-Scatter operations to achieve pipelined parallel processing | Same as FlashComm_v1, has threshold protection |
 | Weight Prefetch | MLP-intensive scenarios (Dense models) | `export VLLM_ASCEND_ENABLE_PREFETCH_MLP=1` | Utilizes vector computation time to prefetch MLP weights into L2 cache in advance | Requires coordination with prefetch buffer size adjustment |
-| Asynchronous Scheduling | Large-scale models, high-concurrency scenarios | `--async-scheduling` | Non-blocking task scheduling to improve concurrent processing capability | Should be used in coordination with FullGraph optimization |
 
 ### 10.2 Optimization Highlights
 
