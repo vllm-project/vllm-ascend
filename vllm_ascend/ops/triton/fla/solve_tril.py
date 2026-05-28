@@ -11,6 +11,7 @@
 
 import torch
 from vllm.triton_utils import tl, triton
+
 from vllm_ascend.ops.triton.triton_utils import extract_slice, insert_slice
 
 from .utils import prepare_chunk_indices
@@ -399,4 +400,5 @@ def solve_tril(
         num_warps=4,
         num_stages=3,
     )
+    
     return Ai
