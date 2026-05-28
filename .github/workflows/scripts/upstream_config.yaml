@@ -833,6 +833,12 @@ e2e-upstream_singlecard:
     estimated_time: 20
   - name: tests/entrypoints/pooling/embed/test_online_vision.py
     estimated_time: 20
+  - name: tests/models/language/pooling_mteb_test/test_snowflake_arctic_embed.py
+    estimated_time: 20
+  - name: tests/entrypoints/openai/chat_completion/test_vision.py
+    estimated_time: 20
+  - name: tests/models/multimodal/pooling/test_phi3v.py
+    estimated_time: 20
 e2e-upstream_a2_2:
   - name: tests/v1/distributed/test_async_llm_dp.py
     estimated_time: 20
