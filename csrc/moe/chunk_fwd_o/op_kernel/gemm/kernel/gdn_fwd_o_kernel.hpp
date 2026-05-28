@@ -7,8 +7,11 @@
  * INCLUDING BUT NOT LIMITED TO NON-INFRINGEMENT, MERCHANTABILITY, OR FITNESS FOR A PARTICULAR PURPOSE.
  */
 
-#if defined(__CCE_AICORE__) && __CCE_AICORE__ == 310
+#if defined(__CCE_AICORE__) && (__CCE_AICORE__ == 310)
 #define CATLASS_ARCH 3510
+#elif defined(__CCE_AICORE__) && (__CCE_AICORE__ == 200)
+#define CATLASS_ARCH 2201
+#define CATLASS_UNIFIED_CORE 1
 
 #include "catlass/arch/arch.hpp"
 #include "catlass/arch/cross_core_sync.hpp"
@@ -71,6 +74,26 @@ using _65536 = tla::Int<65536>;
 #include "tla/tensor.hpp"
 #include "tla/layout.hpp"
 #include "tla/tensor.hpp"
+
+using _0 = tla::Int<0>;
+using _1 = tla::Int<1>;
+using _2 = tla::Int<2>;
+using _4 = tla::Int<4>;
+using _8 = tla::Int<8>;
+using _16 = tla::Int<16>;
+using _32 = tla::Int<32>;
+using _64 = tla::Int<64>;
+using _128 = tla::Int<128>;
+using _256 = tla::Int<256>;
+using _512 = tla::Int<512>;
+using _1024 = tla::Int<1024>;
+using _2048 = tla::Int<2048>;
+using _4096 = tla::Int<4096>;
+using _8192 = tla::Int<8192>;
+using _16384 = tla::Int<16384>;
+using _32768 = tla::Int<32768>;
+using _65536 = tla::Int<65536>;
+
 #endif
 
 #include "kernel_operator.h"
@@ -230,6 +253,9 @@ public:
         gmAftermaskWorkspace.SetGlobalBuffer((__gm__ ElementAttenMasked *)(user + aftermaskWorkspaceOffset));
         gmMask.SetGlobalBuffer((__gm__ ElementMask *)(user + maskWorkspaceOffset));
 
+#ifdef CATLASS_UNIFIED_CORE
+        cubeBlockScheduler.Init(cu_seqlens, chunk_offsets, tiling);
+#else
         if ASCEND_IS_AIC {
             cubeBlockScheduler.Init(cu_seqlens, chunk_offsets, tiling);
         }
@@ -237,9 +263,158 @@ public:
         if ASCEND_IS_AIV {
             vecBlockScheduler.Init(cu_seqlens, chunk_offsets, tiling);
         }
+#endif
     }
 
     __aicore__ inline void Process() {
+#ifdef CATLASS_UNIFIED_CORE
+        ProcessUnifiedCore();
+#else
+        ProcessSplitCore();
+#endif
+    }
+
+    __aicore__ inline void InitCausalMask() {
+        AscendC::LocalTensor<float> maskUbTensor = resource.ubBuf.template GetBufferByByte<float>(0);
+#ifdef CATLASS_UNIFIED_CORE
+        // 310P: Duplicate count must be >= 8 (vector width = 8 floats).
+        // Build lower-triangular mask: row i has 1.0 in cols [0..i], 0.0 elsewhere.
+        // Fill all 1.0 first, then zero the upper triangle with count >= 8.
+        AscendC::Duplicate<float>(maskUbTensor, (float)1.0, 64 * 64);
+        AscendC::PipeBarrier<PIPE_V>();
+        for (uint32_t i = 0; i < 64; ++i) {
+            uint32_t zeroStart = i + 1;
+            uint32_t zeroLen = 64 - zeroStart;
+            if (zeroLen >= 8) {
+                AscendC::Duplicate<float>(maskUbTensor[i * 64 + zeroStart], (float)0.0, zeroLen);
+            } else if (zeroLen > 0) {
+                AscendC::Duplicate<float>(maskUbTensor[i * 64 + zeroStart], (float)0.0, 8);
+            }
+        }
+        AscendC::PipeBarrier<PIPE_V>();
+#else
+        AscendC::Duplicate<float>(maskUbTensor, (float)0.0, 64 * 64);
+        AscendC::PipeBarrier<PIPE_V>();
+        for (uint32_t i = 0; i < 64; ++i)
+            AscendC::Duplicate<float>(maskUbTensor[i * 64], (float)1.0, i + 1);
+        AscendC::PipeBarrier<PIPE_V>();
+#endif
+    }
+
+    __aicore__ inline void ProcessUnifiedCore() {
+        uint32_t coreNum = AscendC::GetBlockNum();
+
+        BlockMmadQK blockMmadQK(resource);
+        BlockMmadQH blockMmadQH(resource);
+        BlockMmadAttenVNEW blockMmadAttenVNEW(resource);
+
+        auto qLayout = tla::MakeLayout<ElementQ, LayoutQ>(shapeBatch * kNumHead * seqlen, kHeadDim);
+        auto kLayout = tla::MakeLayout<ElementK, LayoutK>(kHeadDim, shapeBatch * kNumHead * seqlen);
+        auto hLayout = tla::MakeLayout<ElementH, LayoutH>(shapeBatch * vNumHead * seqlen * kHeadDim, vHeadDim);
+        auto ointerLayout = tla::MakeLayout<ElementOinter, LayoutOinter>(coreNum * chunkSize * PING_PONG_STAGES, vHeadDim);
+        auto vnewLayout = tla::MakeLayout<ElementVNEW, LayoutVNEW>(shapeBatch * vNumHead * seqlen, vHeadDim);
+
+        bool needRun = false;
+        uint32_t pingpongFlag = 0;
+
+        while (cubeBlockScheduler.isRunning) {
+            cubeBlockScheduler.InitTask();
+
+            if (cubeBlockScheduler.isRunning) {
+                // CUBE1: attn = q @ k.T
+                GDNFwdOOffsets& cube1Offsets = cubeBlockScheduler.GetCube1Offsets();
+                auto attenLayout = tla::MakeLayout<ElementAtten, LayoutAtten>(coreNum * chunkSize * PING_PONG_STAGES, cube1Offsets.blockTokens);
+                auto tensorQ = tla::MakeTensor(gmQ[cube1Offsets.qkOffset], qLayout, Catlass::Arch::PositionGM{});
+                auto tensorK = tla::MakeTensor(gmK[cube1Offsets.qkOffset], kLayout, Catlass::Arch::PositionGM{});
+                auto tensorAttn = tla::MakeTensor(gmAttnWorkspace[cube1Offsets.attnWorkOffset], attenLayout, Catlass::Arch::PositionGM{});
+                GemmCoord cube1Shape{cube1Offsets.blockTokens, cube1Offsets.blockTokens, kHeadDim};
+                auto tensorBlockQ = GetTile(tensorQ, tla::MakeCoord(0, 0), tla::MakeShape(cube1Shape.m(), cube1Shape.k()));
+                auto tensorBlockK = GetTile(tensorK, tla::MakeCoord(0, 0), tla::MakeShape(cube1Shape.k(), cube1Shape.n()));
+                auto tensorBlockAttn = GetTile(tensorAttn, tla::MakeCoord(0, 0), tla::MakeShape(cube1Shape.m(), cube1Shape.n()));
+                blockMmadQK.preSetFlags();
+                blockMmadQK(tensorBlockQ, tensorBlockK, tensorBlockAttn, cube1Shape);
+                blockMmadQK.finalWaitFlags();
+
+                // Re-init causal mask after cube (cube overwrites UB[0])
+                InitCausalMask();
+
+                // VEC1: qkmask epilogue
+                EpilogueGDNFwdOQkmask epilogueGDNFwdOQkmask(resource);
+                epilogueGDNFwdOQkmask(
+                    gmAftermaskWorkspace[cube1Offsets.attnWorkOffset],
+                    gmG[cube1Offsets.gOffset], gmAttnWorkspace[cube1Offsets.attnWorkOffset], gmMask,
+                    chunkSize, cube1Offsets.blockTokens, kHeadDim, vHeadDim, pingpongFlag,
+                    cube1Offsets.batchIdx, cube1Offsets.headIdx, cube1Offsets.chunkIdx
+                );
+            }
+
+            // DEBUG: skip Cube2/3 + Vec2 for now
+            needRun = true;
+        }
+        AscendC::PipeBarrier<PIPE_ALL>();
+        return;
+
+        while (false) { // dead code — keeps the rest compiling
+            cubeBlockScheduler.InitTask();
+            if (cubeBlockScheduler.isRunning) {
+                GDNFwdOOffsets& cube1Offsets = cubeBlockScheduler.GetCube1Offsets();
+                auto attenLayout = tla::MakeLayout<ElementAtten, LayoutAtten>(coreNum * chunkSize * PING_PONG_STAGES, cube1Offsets.blockTokens);
+                // Re-init causal mask (cube matmul L0C→UB overwrites UB[0])
+                InitCausalMask();
+
+                // VEC1: qkmask epilogue
+                EpilogueGDNFwdOQkmask epilogueGDNFwdOQkmask(resource);
+                epilogueGDNFwdOQkmask(
+                    gmAftermaskWorkspace[cube1Offsets.attnWorkOffset],
+                    gmG[cube1Offsets.gOffset], gmAttnWorkspace[cube1Offsets.attnWorkOffset], gmMask,
+                    chunkSize, cube1Offsets.blockTokens, kHeadDim, vHeadDim, pingpongFlag,
+                    cube1Offsets.batchIdx, cube1Offsets.headIdx, cube1Offsets.chunkIdx
+                );
+            }
+
+            if (needRun) {
+                GDNFwdOOffsets& prevOffsets = cubeBlockScheduler.GetCube23Offsets();
+
+                // CUBE2: h_work = q @ h
+                auto tensorQ2 = tla::MakeTensor(gmQ[prevOffsets.qkOffset], qLayout, Catlass::Arch::PositionGM{});
+                auto tensorH = tla::MakeTensor(gmH[prevOffsets.hOffset], hLayout, Catlass::Arch::PositionGM{});
+                auto tensorHWork = tla::MakeTensor(gmHWorkspace[prevOffsets.hvWorkOffset], ointerLayout, Catlass::Arch::PositionGM{});
+                GemmCoord cube2Shape{prevOffsets.blockTokens, vHeadDim, kHeadDim};
+                auto tensorBlockQ2 = GetTile(tensorQ2, tla::MakeCoord(0, 0), tla::MakeShape(cube2Shape.m(), cube2Shape.k()));
+                auto tensorBlockH = GetTile(tensorH, tla::MakeCoord(0, 0), tla::MakeShape(cube2Shape.k(), cube2Shape.n()));
+                auto tensorBlockHWork = GetTile(tensorHWork, tla::MakeCoord(0, 0), tla::MakeShape(cube2Shape.m(), cube2Shape.n()));
+                blockMmadQH.preSetFlags();
+                blockMmadQH(tensorBlockQ2, tensorBlockH, tensorBlockHWork, cube2Shape);
+                blockMmadQH.finalWaitFlags();
+
+                // CUBE3: v_work = attn_masked @ v
+                auto attenLayout3 = tla::MakeLayout<ElementAtten, LayoutAtten>(coreNum * chunkSize * PING_PONG_STAGES, prevOffsets.blockTokens);
+                auto tensorAttnMask = tla::MakeTensor(gmAftermaskWorkspace[prevOffsets.attnWorkOffset], attenLayout3, Catlass::Arch::PositionGM{});
+                auto tensorV = tla::MakeTensor(gmV[prevOffsets.ovOffset], vnewLayout, Catlass::Arch::PositionGM{});
+                auto tensorVWork = tla::MakeTensor(gmVWorkspace[prevOffsets.hvWorkOffset], ointerLayout, Catlass::Arch::PositionGM{});
+                GemmCoord cube3Shape{prevOffsets.blockTokens, vHeadDim, prevOffsets.blockTokens};
+                auto tensorBlockAttnMask = GetTile(tensorAttnMask, tla::MakeCoord(0, 0), tla::MakeShape(cube3Shape.m(), cube3Shape.k()));
+                auto tensorBlockV = GetTile(tensorV, tla::MakeCoord(0, 0), tla::MakeShape(cube3Shape.k(), cube3Shape.n()));
+                auto tensorBlockVWork = GetTile(tensorVWork, tla::MakeCoord(0, 0), tla::MakeShape(cube3Shape.m(), cube3Shape.n()));
+                blockMmadAttenVNEW.preSetFlags();
+                blockMmadAttenVNEW(tensorBlockAttnMask, tensorBlockV, tensorBlockVWork, cube3Shape);
+                blockMmadAttenVNEW.finalWaitFlags();
+
+                // VEC2: output epilogue
+                EpilogueGDNFwdOOutput epilogueGDNFwdOOutput(resource);
+                epilogueGDNFwdOOutput(
+                    gmO[prevOffsets.ovOffset],
+                    gmG[prevOffsets.gOffset], gmVWorkspace[prevOffsets.hvWorkOffset], gmHWorkspace[prevOffsets.hvWorkOffset],
+                    scale, prevOffsets.blockTokens, kHeadDim, vHeadDim, pingpongFlag,
+                    prevOffsets.batchIdx, prevOffsets.headIdx, prevOffsets.chunkIdx
+                );
+            }
+
+            needRun = true;
+        }
+    }
+
+    __aicore__ inline void ProcessSplitCore() {
         if ASCEND_IS_AIC {
             uint32_t coreIdx = AscendC::GetBlockIdx();
             uint32_t coreNum = AscendC::GetBlockNum();

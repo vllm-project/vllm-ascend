@@ -13,6 +13,7 @@
  */
 
 // #include "chunk_fwd_o.h"
+#include "compat_310p.h"
 #include "gemm/kernel/gdn_fwd_o_kernel.hpp"
 #include "lib/matmul_intf.h"
 
@@ -22,13 +23,18 @@ extern "C" __global__ __aicore__ void chunk_fwd_o(GM_ADDR q, GM_ADDR k, GM_ADDR 
                                                          GM_ADDR g, GM_ADDR cu_seqlens, GM_ADDR chunk_offsets,
                                                          GM_ADDR o, GM_ADDR workspace, GM_ADDR tiling)
 {
+#ifdef CATLASS_UNIFIED_CORE
+    KERNEL_TASK_TYPE_DEFAULT(KERNEL_TYPE_MIX_AIC);
+#else
     KERNEL_TASK_TYPE_DEFAULT(KERNEL_TYPE_MIX_AIC_1_2);
+#endif
 
     GM_ADDR user = AscendC::GetUserWorkspace(workspace);
-    
+
     __gm__ ChunkFwdOTilingData *__restrict gdnFwdOTilingData = reinterpret_cast<__gm__ ChunkFwdOTilingData *__restrict>(tiling);
     using workspaceType = float;
     // dtype: 0 - fp16, 1 - bf16, 2 - fp32
+#ifndef CATLASS_UNIFIED_CORE
     if (gdnFwdOTilingData->dataType == 1) {
         if (gdnFwdOTilingData->gDataType == 2) {
             using GDNFwdOKernel = Catlass::Gemm::Kernel::GDNFwdOKernel<bfloat16_t, float, workspaceType>;
@@ -41,9 +47,11 @@ extern "C" __global__ __aicore__ void chunk_fwd_o(GM_ADDR q, GM_ADDR k, GM_ADDR 
             gdnFwdO.Init(q, k, v, h, g, cu_seqlens, chunk_offsets, o, tiling, user);
             gdnFwdO.Process();
         }
-    } else {
+    } else
+#endif
+    {
         if (gdnFwdOTilingData->gDataType == 2) {
-            using GDNFwdOKernel = Catlass::Gemm::Kernel::GDNFwdOKernel<half, float,workspaceType>;
+            using GDNFwdOKernel = Catlass::Gemm::Kernel::GDNFwdOKernel<half, float, workspaceType>;
             GDNFwdOKernel gdnFwdO;
             gdnFwdO.Init(q, k, v, h, g, cu_seqlens, chunk_offsets, o, tiling, user);
             gdnFwdO.Process();
