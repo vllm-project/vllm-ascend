@@ -10,7 +10,7 @@ from vllm_ascend.utils import is_310p
 
 
 def _can_launch_triton_batch_memcpy() -> bool:
-    return (not is_310p()) and hasattr(batch_memcpy_kernel, "__getitem__")
+    return not is_310p()
 
 
 def _batch_memcpy_triton(src_ptrs, dst_ptrs, sizes):
