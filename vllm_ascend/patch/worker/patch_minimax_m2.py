@@ -254,9 +254,13 @@ def _patched_minimax_m2_forward(
         layer_idx = self.start_layer + idx
         slot = aux_slot.get(layer_idx)
         if slot is not None:
-            aux_buffer[slot] = (
+            value = (
                 hidden_states + residual if residual is not None else hidden_states
             )
+            # Dynamo may assign different symbolic dims to hidden_states at
+            # different points in the graph.  Help it unify the batch dims.
+            torch._check(value.shape[0] == aux_buffer.shape[1])
+            aux_buffer[slot] = value
         hidden_states, residual = layer(positions, hidden_states, residual)
 
     if not get_pp_group().is_last_rank:
