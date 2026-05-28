@@ -1065,7 +1065,6 @@ class PCPManager:
             )
             prefill_context_lens = input_batch.num_computed_tokens_cpu[self.num_decode_reqs : self.num_reqs]
             context_lens = np.concatenate([decode_context_lens, prefill_context_lens])
-            
 
             num_computed_tokens_of_pcp_dcp = self._get_cp_local_seq_lens(
                 torch.tensor(context_lens),
@@ -1251,7 +1250,6 @@ class PCPManager:
             else:
                 long_seq_metadata.dcp_mtp_attn_mask = None
 
-
         self.long_seq_metadata = long_seq_metadata
         return long_seq_metadata, block_table_tensor
 
@@ -1336,7 +1334,6 @@ class PCPManager:
 
             mrope_pos_ptr += num_sched
 
-
     def generate_mtp_attention_mask_for_decode(
         self,
         decode_num_computed_tokens: list[int],
@@ -1376,21 +1373,21 @@ class PCPManager:
         cp_size = self.pcp_world_size * self.dcp_world_size
         assert cp_size > 1, "cp_size must be greater than 1"
 
-        q_lens = torch.tensor(decode_num_scheduled_tokens[:self.num_decode_reqs], dtype=torch.int32)
+        q_lens = torch.tensor(decode_num_scheduled_tokens[: self.num_decode_reqs], dtype=torch.int32)
         global_histories = torch.tensor(decode_num_computed_tokens, dtype=torch.int32)
         total_lens = global_histories + q_lens
         context_lens = total_lens - q_lens
 
         max_indices = total_lens - 1
-        valid = (max_indices >= cp_rank)
+        valid = max_indices >= cp_rank
 
         if not valid.any():
-            return self.dcp_mtp_attn_mask.cpu[:self.num_decode_reqs]
+            return self.dcp_mtp_attn_mask.cpu[: self.num_decode_reqs]
 
         k_lens = torch.div(max_indices - cp_rank, cp_size, rounding_mode="floor") + 1
         k_lens = torch.where(valid, k_lens, torch.zeros_like(k_lens))
 
-        mtp_attn_mask = self.dcp_mtp_attn_mask.cpu[:self.num_decode_reqs]
+        mtp_attn_mask = self.dcp_mtp_attn_mask.cpu[: self.num_decode_reqs]
         mtp_attn_mask.zero_()
 
         num_valid = valid.sum().item()
@@ -1415,6 +1412,6 @@ class PCPManager:
         valid_mask_3d = valid_q[:, :, None] & valid_k[:, None, :]
         full_mask = full_mask & valid_mask_3d
 
-        mtp_attn_mask[:self.num_decode_reqs, :max_q, :max_k] = full_mask
+        mtp_attn_mask[: self.num_decode_reqs, :max_q, :max_k] = full_mask
 
         return mtp_attn_mask

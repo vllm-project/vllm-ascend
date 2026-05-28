@@ -161,9 +161,7 @@ class AscendAttentionCPMetadataBuilder(AscendAttentionMetadataBuilder):
                 if self.pcp_size > 1 and common_long_seq_metadata.pcp_use_hybrid_attn:
                     query_lens = attn_chunk_seqlens * 2
                 local_context_lens_allranks = (
-                    torch.tensor(num_computed_tokens_of_pcp_dcp)[num_decodes :]
-                    .to(self.device)
-                    .to(dtype=torch.int32)
+                    torch.tensor(num_computed_tokens_of_pcp_dcp)[num_decodes:].to(self.device).to(dtype=torch.int32)
                 )
                 local_chunked_kv_lens_rank = local_context_lens_allranks[:, self.pcp_rank, self.dcp_rank]
                 actual_seq_lengths_kv = torch.cumsum(local_chunked_kv_lens_rank, dim=0).tolist()
@@ -227,13 +225,13 @@ class AscendAttentionCPMetadataBuilder(AscendAttentionMetadataBuilder):
                 pcp_metadata=pcp_metadata,
                 pcp_exit_fa_scatter_idx=common_long_seq_metadata.pcp_exit_fa_scatter_idx,
                 chunked_context=chunked_context_metadata,
-                block_tables=block_table[num_decodes :, ...],
+                block_tables=block_table[num_decodes:, ...],
                 actual_seq_lengths_q=torch.cumsum(query_lens, dim=0),
             )
 
         if num_decodes > 0:
             num_computed_tokens_array = np.array(num_computed_tokens_of_pcp_dcp)
-            num_computed_tokens_array = num_computed_tokens_array[: num_decodes]
+            num_computed_tokens_array = num_computed_tokens_array[:num_decodes]
             # TODO: numpy array mode of the shared memory is used to improve performance
             if common_long_seq_metadata.dcp_mtp_attn_mask is not None:
                 dcp_mtp_attn_mask = common_long_seq_metadata.dcp_mtp_attn_mask
@@ -241,19 +239,18 @@ class AscendAttentionCPMetadataBuilder(AscendAttentionMetadataBuilder):
                 dcp_mtp_attn_mask = None
             decode_metadata = AscendMetadataForDecode(
                 num_computed_tokens_of_pcp_dcp=num_computed_tokens_array,
-                block_tables=block_table[: num_decodes],
+                block_tables=block_table[:num_decodes],
                 dcp_mtp_attn_mask=dcp_mtp_attn_mask,
             )
 
         if self.decode_threshold == 1:
-                actual_seq_lengths_q = (torch.arange(num_decodes) + 1).tolist() + query_start_loc_cpu[1:].tolist()[
+            actual_seq_lengths_q = (torch.arange(num_decodes) + 1).tolist() + query_start_loc_cpu[1:].tolist()[
                 num_decodes:
             ]
         else:
-                actual_seq_lengths_q = [self.decode_threshold * (i + 1) for i in range(num_decodes)] + query_start_loc_cpu[
+            actual_seq_lengths_q = [self.decode_threshold * (i + 1) for i in range(num_decodes)] + query_start_loc_cpu[
                 num_decodes + 1 :
             ].tolist()
-
 
         attn_metadata = AscendMetadata(
             num_actual_tokens=num_actual_tokens,
