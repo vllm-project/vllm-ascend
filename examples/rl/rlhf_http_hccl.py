@@ -107,6 +107,29 @@ def update_weights(
     response.raise_for_status()
 
 
+def start_weight_update(base_url: str, is_checkpoint_format: bool = True) -> None:
+    """Start weight update via HTTP endpoint.
+
+    Prepares the model for layerwise reload on the vLLM server side.
+    Must be called before update_weights.
+    """
+    url = f"{base_url}/start_weight_update"
+    payload = {"is_checkpoint_format": is_checkpoint_format}
+    response = requests.post(url, json=payload, timeout=60)
+    response.raise_for_status()
+
+
+def finish_weight_update(base_url: str) -> None:
+    """Finish weight update via HTTP endpoint.
+
+    Finalizes layerwise reload on the vLLM server side.
+    Must be called after all update_weights calls are complete.
+    """
+    url = f"{base_url}/finish_weight_update"
+    response = requests.post(url, timeout=60)
+    response.raise_for_status()
+
+
 def pause_generation(base_url: str) -> None:
     """Pause generation via HTTP endpoint."""
     url = f"{base_url}/pause"
@@ -198,6 +221,9 @@ def main():
     # Pause generation before weight sync
     pause_generation(BASE_URL)
 
+    # Start weight update (prepares layerwise reload on the vLLM server)
+    start_weight_update(BASE_URL)
+
     # Collect weight metadata for the update request.
     # Also track the largest tensor to auto-size the packed buffer.
     names = []
@@ -243,6 +269,9 @@ def main():
 
     # Wait for update_weights to complete
     update_thread.join()
+
+    # Finish weight update (finalizes layerwise reload on the vLLM server)
+    finish_weight_update(BASE_URL)
 
     # Resume generation after weight sync
     resume_generation(BASE_URL)
