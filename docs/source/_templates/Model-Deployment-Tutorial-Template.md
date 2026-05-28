@@ -1,4 +1,8 @@
-# Deployment Tutorial Template Based on the XXX Model
+# Technical Documentation Template for Deployment Tutorials Based on the XXX Model
+
+<p align="center">
+  <a href="Model-Deployment-Tutorial-Template.md"><b>English</b></a> | <a href="Model-Deployment-Tutorial-Template.zh.md"><b>中文</b></a>
+</p>
 
 This template is based on deployment tutorials for models such as DeepSeek-V3.2 and Qwen-VL-Dense, and is intended to serve as a reference for technical documentation writing. Users can systematically construct relevant technical documentation by following the guidelines provided in this template.
 
@@ -39,7 +43,7 @@ This section introduces the features supported by the model, including supported
 | DeepSeek V3.2 | ✅ | | ✅ | Atlas 800I A2:<br>Minimum card requirement: xx | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | 160k | ✅ | [DeepSeek-V3.2](../../tutorials/models/DeepSeek-V3.2.md) |
 | Qwen3 | ✅ | | ✅ | Atlas 800I A2:<br>Minimum card requirement: xx | ✅ | ✅ | ✅ | | | ✅ | ✅ | | | ✅ | | ✅ | ✅ | 128k | ✅ | [Qwen3-Dense](../../tutorials/models/Qwen3-Dense.md) |
 
-**Note**: This is a simplified example. Please refer to the complete feature matrix for the full table.
+>**Note**: This is a simplified example. Please refer to the complete feature matrix for the full table.
 
 **Example 2: Reference Citation**
 
@@ -187,6 +191,20 @@ Omitted. Requirements are the same as for Accuracy Evaluation.
 **Content Writing Requirements:**
 
 Provide recommended configurations for three scenarios (long sequence, low latency, high throughput) for each model that can achieve optimal performance, but do not provide specific performance data.
+
+<table border="1" cellspacing="0" cellpadding="6">
+<thead>
+  <tr><th colspan="3">Common Info</th><th>Weight Info</th><th colspan="11">Server-P Node Config</th><th colspan="11">Server-D Node Config</th><th rowspan="2" style="text-align: center;">Optimization Rationale</th></tr>
+  <tr><th>Scenario</th><th>Remarks</th><th>*Total NPUs</th><th>Weight Version</th><th>P-NPUs</th><th>P-TP</th><th>P-DP</th><th>P-BS</th><th>P-Concurrency</th><th>Max Context</th><th>MTP Speculation Num</th><th>FUSE D_MC</th><th>EP Switch</th><th>FC+CP</th><th>Async</th><th>D-NPUs</th><th>D-TP</th><th>D-DP</th><th>D-BS</th><th>D-Concurrency</th><th>Max Context</th><th>MTP Speculation</th><th>FUSE D_M</th><th>EP Switch</th><th>FC+CP</th><th>Async</th></tr>
+</thead>
+<tbody>
+  <tr><td>High Throughput<br>(32K context, 1K output)</td><td>1P1D Deployment</td><td>16 (A3)</td><td>glm5.1w4a8</td><td>8</td><td>8</td><td>2</td><td>32</td><td>64</td><td>30k</td><td>3</td><td>Off</td><td>On</td><td>On</td><td>On</td><td>8</td><td>2</td><td>8</td><td>8</td><td>64</td><td>30k</td><td>12</td><td>Off</td><td>On</td><td>Off</td><td>On</td><td style="text-align: left;">For high throughput with short sequences, try adjusting xxx parameters</td></tr>
+  <tr><td>Long Context</td><td></td><td></td><td></td><td></td><td></td><td></td><td></td><td></td><td></td><td></td><td></td><td></td><td></td><td></td><td></td><td></td><td></td><td></td><td></td><td></td><td></td><td></td><td></td><td></td><td rowspan="2" style="text-align: left;"></td></tr>
+  <tr><td>Low Latency</td><td></td><td></td><td></td><td></td><td></td><td></td><td></td><td></td><td></td><td></td><td></td><td></td><td></td><td></td><td></td><td></td><td></td><td></td><td></td><td></td><td></td><td></td><td></td><td></td></tr>
+</tbody>
+</table>
+
+>Note: “*Total GPUs” in the table indicates the total number of GPUs used across all nodes.
 
 ## 10 Performance Tuning (Optional)
 
