@@ -452,7 +452,7 @@ class A5DeviceAdaptor(BaseDeviceAdaptor):
                 group_list=group_list,
                 x_dtype=torch.float8_e4m3fn,
                 weight_dtype=torch_npu.float4_e2m1fn_x2,
-                output_dtype=torch.bfloat16
+                output_dtype=torch.bfloat16,
             )[0]
             hidden_states = torch_npu.npu_swiglu(hidden_states)
             out, out_scale = torch_npu.npu_dynamic_mx_quant(
