@@ -8,6 +8,17 @@ YELLOW="\033[0;33m"
 RED="\033[0;31m"
 NC="\033[0m" # No Color
 
+INTERNAL_DP_TEST_PATH="tests/e2e/nightly/multi_node/internal_dp/scripts/test_multi_node.py"
+EXTERNAL_DP_TEST_PATH="tests/e2e/nightly/multi_node/external_dp/scripts/test_external_dp.py"
+
+if [ -z "${MULTI_NODE_TEST_PATH:-}" ]; then
+    if [[ "${CONFIG_BASE_PATH:-}" == *"external_dp/config"* || "${CONFIG_YAML_PATH:-}" == *"external_dp/config"* ]]; then
+        MULTI_NODE_TEST_PATH="$EXTERNAL_DP_TEST_PATH"
+    else
+        MULTI_NODE_TEST_PATH="$INTERNAL_DP_TEST_PATH"
+    fi
+fi
+
 # Configuration
 export LD_LIBRARY_PATH=/usr/local/Ascend/ascend-toolkit/latest/python/site-packages:$LD_LIBRARY_PATH
 export LD_LIBRARY_PATH=/usr/local/lib:$LD_LIBRARY_PATH
@@ -111,24 +122,24 @@ check_and_config() {
 
 install_extra_components() {
     echo "====> Installing extra components for DeepSeek-v3.2-exp-bf16"
-    
+
     if ! wget -q https://vllm-ascend.obs.cn-north-4.myhuaweicloud.com/vllm-ascend/a3/CANN-custom_ops-sfa-linux.aarch64.run; then
         echo "Failed to download CANN-custom_ops-sfa-linux.aarch64.run"
         return 1
     fi
     chmod +x ./CANN-custom_ops-sfa-linux.aarch64.run
     ./CANN-custom_ops-sfa-linux.aarch64.run --quiet
-    
+
     if ! wget -q https://vllm-ascend.obs.cn-north-4.myhuaweicloud.com/vllm-ascend/a3/custom_ops-1.0-cp311-cp311-linux_aarch64.whl; then
         echo "Failed to download custom_ops wheel"
         return 1
     fi
     pip install custom_ops-1.0-cp311-cp311-linux_aarch64.whl
-    
+
     export ASCEND_CUSTOM_OPP_PATH="/usr/local/Ascend/ascend-toolkit/latest/opp/vendors/customize${ASCEND_CUSTOM_OPP_PATH:+:${ASCEND_CUSTOM_OPP_PATH}}"
     export LD_LIBRARY_PATH="/usr/local/Ascend/ascend-toolkit/latest/opp/vendors/customize/op_api/lib/${LD_LIBRARY_PATH:+:${LD_LIBRARY_PATH}}"
     source /usr/local/Ascend/ascend-toolkit/set_env.sh
-    
+
     rm -f CANN-custom_ops-sfa-linux.aarch64.run \
           custom_ops-1.0-cp311-cp311-linux_aarch64.whl
     echo "====> Extra components installation completed"
@@ -196,7 +207,8 @@ kill_npu_processes() {
 run_tests_with_log() {
     set +e
     kill_npu_processes
-    pytest -sv --show-capture=no tests/e2e/nightly/multi_node/scripts/test_multi_node.py
+    echo "====> Run pytest entry: $MULTI_NODE_TEST_PATH"
+    pytest -sv --show-capture=no "$MULTI_NODE_TEST_PATH"
     ret=$?
     set -e
     if [ "$LWS_WORKER_INDEX" -eq 0 ]; then
