@@ -1150,16 +1150,13 @@ class AscendAttentionBackendImpl(AttentionImpl):
 
             # 提取 key/value：支持 paged kv_cache 和 PrefillNoCache 两种情况
             if block_table is not None and self.key_cache is not None:
-                bt_i = block_table[i].long()
-                valid_blocks = bt_i[bt_i >= 0]
-                if valid_blocks.numel() == 0:
-                    k_i = key[:cur_kv]
-                    v_i = value[:cur_kv]
-                else:
-                    k_cache_i = self.key_cache[valid_blocks]
-                    v_cache_i = self.value_cache[valid_blocks]
-                    k_i = k_cache_i.view(-1, num_kv_heads, head_size)[:cur_kv]
-                    v_i = v_cache_i.view(-1, num_kv_heads, head_size)[:cur_kv]
+                bt_i = block_table[i]
+                num_needed_blocks = (cur_kv + block_size - 1) // block_size
+                valid_blocks = bt_i[:num_needed_blocks].long()
+                k_cache_i = self.key_cache[valid_blocks]
+                v_cache_i = self.value_cache[valid_blocks]
+                k_i = k_cache_i.view(-1, num_kv_heads, head_size)[:cur_kv]
+                v_i = v_cache_i.view(-1, num_kv_heads, head_size)[:cur_kv]
             else:
                 k_i = key[prev_kv : prev_kv + cur_kv]
                 v_i = value[prev_kv : prev_kv + cur_kv]
