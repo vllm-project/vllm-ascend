@@ -16,12 +16,6 @@
 #
 import vllm.config.model as model_config_module
 
-_original_is_cumem_allocator_available = getattr(
-    model_config_module,
-    "is_cumem_allocator_available",
-    None,
-)
-
 
 def _patched_is_cumem_allocator_available() -> bool:
     # NPUPlatform declares sleep mode support and vllm-ascend uses CaMemAllocator
@@ -30,5 +24,5 @@ def _patched_is_cumem_allocator_available() -> bool:
     return True
 
 
-if _original_is_cumem_allocator_available is not None:
+if hasattr(model_config_module, "is_cumem_allocator_available"):
     model_config_module.is_cumem_allocator_available = _patched_is_cumem_allocator_available
