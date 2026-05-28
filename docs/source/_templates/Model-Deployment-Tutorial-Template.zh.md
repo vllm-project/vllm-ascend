@@ -194,21 +194,28 @@ lm_eval \
 
 **示例：**
 
-以下为不同场景下的推荐配置：
+### 最佳实践配置参考
 
-<table border="1" cellspacing="0" cellpadding="6">
-<thead>
-  <tr><th colspan="3">公共信息</th><th>权重信息</th><th colspan="11">服务端-P节点配置</th><th colspan="11">服务端-D节点配置</th><th rowspan="2" style="text-align: center;">优化思路</th></tr>
-  <tr><th>场景</th><th>备注</th><th>*总卡数</th><th>权重版本</th><th>P卡数</th><th>P-TP</th><th>P-DP</th><th>P-BS</th><th>P-并发</th><th>最大上下</th><th>MTP投机数</th><th>FUSE D_MC</th><th>EP开关</th><th>FC+CP</th><th>异步</th><th>D卡数</th><th>D-TP</th><th>D-DP</th><th>D-BS</th><th>D-并发</th><th>最大上下</th><th>MTP投机</th><th>FUSE D_M</th><th>EP开关</th><th>FC+CP</th><th>异步</th></tr>
-</thead>
-<tbody>
-  <tr><td>高吞吐<br>(32K推1K)</td><td>1P1D部署</td><td>16（A3）</td><td>glm5.1w4a8</td><td>8</td><td>8</td><td>2</td><td>32</td><td>64</td><td>30k</td><td>3</td><td>关</td><td>开</td><td>开</td><td>开</td><td>8</td><td>2</td><td>8</td><td>8</td><td>64</td><td>30k</td><td>12</td><td>关</td><td>开</td><td>关</td><td>开</td><td style="text-align: left;">短序列高吞吐情况下，尝试调整xxx参数</td></tr>
-  <tr><td>长序列</td><td> </td><td> </td><td> </td><td> </td><td> </td><td> </td><td> </td><td> </td><td> </td><td> </td><td> </td><td> </td><td> </td><td> </td><td> </td><td> </td><td> </td><td> </td><td> </td><td> </td><td> </td><td> </td><td> </td><td> </td><td> </td><td rowspan="2" style="text-align: left;"> </td></tr>
-  <tr><td>低时延</td><td> </td><td> </td><td> </td><td> </td><td> </td><td> </td><td> </td><td> </td><td> </td><td> </td><td> </td><td> </td><td> </td><td> </td><td> </td><td> </td><td> </td><td> </td><td> </td><td> </td><td> </td><td> </td><td> </td><td> </td><td> </td></tr>
-</tbody>
-</table>
+### 表1：场景概览
 
-> **说明**：表格中“*总卡数”表示所有节点使用的 NPU 总数。
+| 场景 | 备注 | *总卡数 | 权重版本 | 优化思路 |
+|------|------|---------|----------|----------|
+| 高吞吐<br>(32K推1K) | 1P1D部署 | 16（A3） | glm5.1w4a8 | 短序列高吞吐情况下，尝试调整xxx参数 |
+| 长序列 |  |  |  |  |
+| 低时延 |  |  |  |  |
+
+> **说明**：`*总卡数` 表示所有节点使用的 NPU 总数。
+
+### 表2：节点详细配置
+
+| 场景 | 节点 | 卡数 | TP | DP | BS | 并发 | 最大上下 | MTP投机 | FUSE D_MC/D_M | EP开关 | FC+CP | 异步 |
+|------|------|------|----|----|----|------|----------|---------|---------------|--------|-------|------|
+| 高吞吐(32K推1K) | P | 8 | 8 | 2 | 32 | 64 | 30k | 3 | 关 | 开 | 开 | 开 |
+| 高吞吐(32K推1K) | D | 8 | 2 | 8 | 8 | 64 | 30k | 12 | 关 | 开 | 关 | 开 |
+| 长序列 | P |  |  |  |  |  |  |  |  |  |  |  |
+| 长序列 | D |  |  |  |  |  |  |  |  |  |  |  |
+| 低时延 | P |  |  |  |  |  |  |  |  |  |  |  |
+| 低时延 | D |  |  |  |  |  |  |  |  |  |  |  |
 
 ## 10 性能调优 （可选）（Performance Tuning）
 

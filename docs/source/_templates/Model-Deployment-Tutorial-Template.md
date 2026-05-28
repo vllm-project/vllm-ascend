@@ -192,19 +192,30 @@ Omitted. Requirements are the same as for Accuracy Evaluation.
 
 Provide recommended configurations for three scenarios (long sequence, low latency, high throughput) for each model that can achieve optimal performance, but do not provide specific performance data.
 
-<table border="1" cellspacing="0" cellpadding="6">
-<thead>
-  <tr><th colspan="3">Common Info</th><th>Weight Info</th><th colspan="11">Server-P Node Config</th><th colspan="11">Server-D Node Config</th><th rowspan="2" style="text-align: center;">Optimization Rationale</th></tr>
-  <tr><th>Scenario</th><th>Remarks</th><th>*Total NPUs</th><th>Weight Version</th><th>P-NPUs</th><th>P-TP</th><th>P-DP</th><th>P-BS</th><th>P-Concurrency</th><th>Max Context</th><th>MTP Speculation Num</th><th>FUSE D_MC</th><th>EP Switch</th><th>FC+CP</th><th>Async</th><th>D-NPUs</th><th>D-TP</th><th>D-DP</th><th>D-BS</th><th>D-Concurrency</th><th>Max Context</th><th>MTP Speculation</th><th>FUSE D_M</th><th>EP Switch</th><th>FC+CP</th><th>Async</th></tr>
-</thead>
-<tbody>
-  <tr><td>High Throughput<br>(32K context, 1K output)</td><td>1P1D Deployment</td><td>16 (A3)</td><td>glm5.1w4a8</td><td>8</td><td>8</td><td>2</td><td>32</td><td>64</td><td>30k</td><td>3</td><td>Off</td><td>On</td><td>On</td><td>On</td><td>8</td><td>2</td><td>8</td><td>8</td><td>64</td><td>30k</td><td>12</td><td>Off</td><td>On</td><td>Off</td><td>On</td><td style="text-align: left;">For high throughput with short sequences, try adjusting xxx parameters</td></tr>
-  <tr><td>Long Context</td><td></td><td></td><td></td><td></td><td></td><td></td><td></td><td></td><td></td><td></td><td></td><td></td><td></td><td></td><td></td><td></td><td></td><td></td><td></td><td></td><td></td><td></td><td></td><td></td><td rowspan="2" style="text-align: left;"></td></tr>
-  <tr><td>Low Latency</td><td></td><td></td><td></td><td></td><td></td><td></td><td></td><td></td><td></td><td></td><td></td><td></td><td></td><td></td><td></td><td></td><td></td><td></td><td></td><td></td><td></td><td></td><td></td><td></td></tr>
-</tbody>
-</table>
+**Example:**
 
->Note: “*Total GPUs” in the table indicates the total number of GPUs used across all nodes.
+### Best Practice Configuration Reference
+
+### Table 1: Scenario Overview
+
+| Scenario | Remarks | *Total NPUs | Weight Version | Optimization Rationale |
+|----------|---------|--------------|----------------|------------------------|
+| High Throughput<br>(32K context → 1K output) | 1P1D deployment | 16 (A3) | glm5.1w4a8 | For high throughput with short sequences, try adjusting xxx parameters |
+| Long Context | | | | |
+| Low Latency | | | | |
+
+> **Note**: `*Total NPUs` indicates the total number of NPUs used across all nodes.
+
+### Table 2: Node-Level Detailed Configuration
+
+| Scenario | Node | #NPUs | TP | DP | BS | Concurrency | Max Context | MTP Speculation | FUSE D_MC/D_M | EP Switch | FC+CP | Async |
+|----------|------|-------|----|----|----|-------------|-------------|-----------------|---------------|-----------|-------|-------|
+| High Throughput (32K→1K) | P | 8 | 8 | 2 | 32 | 64 | 30k | 3 | Off | On | On | On |
+| High Throughput (32K→1K) | D | 8 | 2 | 8 | 8 | 64 | 30k | 12 | Off | On | Off | On |
+| Long Context | P | | | | | | | | | | | |
+| Long Context | D | | | | | | | | | | | |
+| Low Latency | P | | | | | | | | | | | |
+| Low Latency | D | | | | | | | | | | | |
 
 ## 10 Performance Tuning (Optional)
 
