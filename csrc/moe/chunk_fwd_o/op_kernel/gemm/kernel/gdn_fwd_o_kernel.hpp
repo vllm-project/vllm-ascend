@@ -348,30 +348,6 @@ public:
                 );
             }
 
-            // DEBUG: skip Cube2/3 + Vec2 for now
-            needRun = true;
-        }
-        AscendC::PipeBarrier<PIPE_ALL>();
-        return;
-
-        while (false) { // dead code — keeps the rest compiling
-            cubeBlockScheduler.InitTask();
-            if (cubeBlockScheduler.isRunning) {
-                GDNFwdOOffsets& cube1Offsets = cubeBlockScheduler.GetCube1Offsets();
-                auto attenLayout = tla::MakeLayout<ElementAtten, LayoutAtten>(coreNum * chunkSize * PING_PONG_STAGES, cube1Offsets.blockTokens);
-                // Re-init causal mask (cube matmul L0C→UB overwrites UB[0])
-                InitCausalMask();
-
-                // VEC1: qkmask epilogue
-                EpilogueGDNFwdOQkmask epilogueGDNFwdOQkmask(resource);
-                epilogueGDNFwdOQkmask(
-                    gmAftermaskWorkspace[cube1Offsets.attnWorkOffset],
-                    gmG[cube1Offsets.gOffset], gmAttnWorkspace[cube1Offsets.attnWorkOffset], gmMask,
-                    chunkSize, cube1Offsets.blockTokens, kHeadDim, vHeadDim, pingpongFlag,
-                    cube1Offsets.batchIdx, cube1Offsets.headIdx, cube1Offsets.chunkIdx
-                );
-            }
-
             if (needRun) {
                 GDNFwdOOffsets& prevOffsets = cubeBlockScheduler.GetCube23Offsets();
 
