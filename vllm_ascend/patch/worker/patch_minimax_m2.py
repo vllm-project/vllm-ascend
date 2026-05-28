@@ -241,6 +241,10 @@ def _patched_minimax_m2_forward(
         else:
             hidden_states = self.embed_input_ids(input_ids)
         residual = None
+        # Mark batch dim as dynamic so Dynamo doesn't specialize it to a
+        # static constant, which would later mismatch the hidden_states
+        # batch dim in the layer loop.
+        torch._dynamo.mark_dynamic(hidden_states, 0)
         aux_buffer = hidden_states.new_zeros(
             (num_aux, hidden_states.shape[0], hidden_states.shape[1])
         )
@@ -248,6 +252,7 @@ def _patched_minimax_m2_forward(
         assert intermediate_tensors is not None
         hidden_states = intermediate_tensors["hidden_states"]
         residual = intermediate_tensors["residual"]
+        torch._dynamo.mark_dynamic(hidden_states, 0)
         aux_buffer = intermediate_tensors.tensors["aux_hidden_states"]
 
     for idx, layer in enumerate(self.layers[self.start_layer : self.end_layer]):
@@ -257,9 +262,6 @@ def _patched_minimax_m2_forward(
             value = (
                 hidden_states + residual if residual is not None else hidden_states
             )
-            # Dynamo may assign different symbolic dims to hidden_states at
-            # different points in the graph.  Help it unify the batch dims.
-            torch._check(value.shape[0] == aux_buffer.shape[1])
             aux_buffer[slot] = value
         hidden_states, residual = layer(positions, hidden_states, residual)
 
