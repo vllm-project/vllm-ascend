@@ -633,6 +633,7 @@ class AscendAttentionCPImpl(AscendAttentionBackendImpl):
                     update_draft_graph_params_workspaces(num_tokens, workspace)
                 else:
                     update_graph_params_workspaces(num_tokens, workspace)
+            attn_out = torch.empty_like(query)
             if input_layerout == "TND":
                 attn_lse = torch.empty((num_tokens, num_heads, 1), dtype=torch.float, device=query.device)
             else:
