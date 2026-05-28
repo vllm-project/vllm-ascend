@@ -1,0 +1,61 @@
+# ==========================================
+# ACTUAL TEST CASES
+# ==========================================
+
+test_cases:
+  - name: "DeepSeek-V4-Flash-TP8-DP1-Case"
+    model: "Eco-Tech/DeepSeek-V4-Flash-w8a8-mtp"
+    envs:
+      HCCL_BUFFSIZE: "1024"
+      OMP_PROC_BIND: "false"
+      OMP_NUM_THREADS: "10"
+      HCCL_OP_EXPANSION_MODE: "AIV"
+      PYTORCH_NPU_ALLOC_CONF: "expandable_segments:True"
+      VLLM_ASCEND_APPLY_DSV4_PATCH: "1"
+      SERVER_PORT: "DEFAULT_PORT"
+    server_cmd:
+      - "--max-model-len"
+      - "150000"
+      - "--max-num-batched-tokens"
+      - "4096"
+      - "--served-model-name"
+      - "dsv4"
+      - "--gpu-memory-utilization"
+      - "0.9"
+      - "--max-num-seqs"
+      - "32"
+      - "--data-parallel-size"
+      - "1"
+      - "--tensor-parallel-size"
+      - "8"
+      - "--enable-expert-parallel"
+      - "--tokenizer-mode"
+      - "deepseek_v4"
+      - "--tool-call-parser"
+      - "deepseek_v4"
+      - "--enable-auto-tool-choice"
+      - "--reasoning-parser"
+      - "deepseek_v4"
+      - "--safetensors-load-strategy"
+      - "prefetch"
+      - "--quantization"
+      - "ascend"
+      - "--port"
+      - "$SERVER_PORT"
+      - "--api-server-count"
+      - "1"
+      - "--block-size"
+      - "128"
+      - "--compilation-config"
+      - '{"cudagraph_mode":"FULL_DECODE_ONLY"}'
+      - "--async-scheduling"
+    benchmarks:
+      acc:
+        case_type: accuracy
+        dataset_path: vllm-ascend/gsm8k-lite
+        request_conf: vllm_api_general_chat
+        dataset_conf: gsm8k/gsm8k_gen_0_shot_cot_chat_prompt
+        max_out_len: 4096
+        batch_size: 32
+        baseline: 95
+        threshold: 5
