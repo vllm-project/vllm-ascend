@@ -3192,10 +3192,15 @@ class NPUModelRunner(GPUModelRunner):
                 DefaultModelLoader._init_ep_weight_filter = mock_pass
             self.model: nn.Module = get_model(vllm_config=self.vllm_config)
 
-            # Set aux_hidden_state_layers on ALL PP ranks (not just last rank).
-            # Without this, non-last PP ranks skip the patched forward and never
-            # produce _pp_aux, breaking the PP transport of Eagle3 aux states.
-            if self.use_aux_hidden_state_outputs:
+            # Set aux_hidden_state_layers on ALL PP ranks.
+            # _set_up_drafter only sets use_aux_hidden_state_outputs on the last
+            # PP rank, but non-last ranks also need it to produce _pp_aux.
+            should_set_aux = self.use_aux_hidden_state_outputs or (
+                self.vllm_config.speculative_config
+                and self.vllm_config.speculative_config.method == "eagle3"
+            )
+            if should_set_aux:
+                self.use_aux_hidden_state_outputs = True
                 from vllm.model_executor.models.interfaces import supports_eagle3
                 if not supports_eagle3(self.model):
                     raise RuntimeError(
