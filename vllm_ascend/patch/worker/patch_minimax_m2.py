@@ -25,7 +25,6 @@ from vllm.distributed import (
     get_tensor_model_parallel_rank,
     get_tensor_model_parallel_world_size,
 )
-from vllm.logger import init_logger
 from vllm.model_executor.layers.mamba.linear_attn import MiniMaxText01RMSNormTP
 from vllm.model_executor.models.minimax_m2 import (
     MiniMaxM2Attention,
@@ -37,8 +36,6 @@ from vllm.platforms import current_platform
 from vllm.sequence import IntermediateTensors
 
 from vllm_ascend.ops.rotary_embedding import get_cos_and_sin_slice
-
-_pp_aux_log = init_logger(__name__)
 
 FP8_DTYPES = tuple(
     getattr(torch, dtype_name)
@@ -285,14 +282,10 @@ def _patched_minimax_m2_forward(
 
     hidden_states, _ = self.norm(hidden_states, residual)
     if aux_list:
-        _pp_aux_log.info(
-            "PP rank %s/%s: aux_list len=%d shapes=%s norms=%s",
-            get_pp_group().rank_in_group,
-            get_pp_group().world_size,
-            len(aux_list),
-            [tuple(t.shape) for t in aux_list],
-            [round(t.norm().item(), 2) for t in aux_list],
-        )
+        print(f"[PP_AUX] rank={get_pp_group().rank_in_group} "
+              f"n_aux={len(aux_list)} "
+              f"norms={[round(t.norm().item(),1) for t in aux_list]}",
+              flush=True)
         return hidden_states, aux_list
     return hidden_states
 
