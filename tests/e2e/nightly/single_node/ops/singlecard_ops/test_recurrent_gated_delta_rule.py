@@ -237,7 +237,7 @@ def test_recurrent_gated_delta_rule_no_accepted(
     )
 
     state_npu = state.npu()
-    npu_out = torch.ops._C_ascend.npu_recurrent_gated_delta_rule(t
+    npu_out = torch.ops._C_ascend.npu_recurrent_gated_delta_rule(
         query=query.npu(),
         key=key.npu(),
         value=value.npu(),
