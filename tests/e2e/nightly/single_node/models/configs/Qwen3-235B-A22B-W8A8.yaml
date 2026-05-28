@@ -13,7 +13,6 @@ _envs: &envs
 _server_cmd: &server_cmd
   - "--quantization"
   - "ascend"
-  - "--async-scheduling"
   - "--data-parallel-size"
   - "4"
   - "--tensor-parallel-size"

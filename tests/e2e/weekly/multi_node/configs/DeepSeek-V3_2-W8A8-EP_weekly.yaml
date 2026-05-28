@@ -104,7 +104,6 @@ deployment:
           --max-num-seqs 14
           --gpu-memory-utilization 0.92
           --no-enable-prefix-caching
-          --async-scheduling
           --quantization ascend
           --tokenizer-mode deepseek_v32
           --reasoning-parser deepseek_v3

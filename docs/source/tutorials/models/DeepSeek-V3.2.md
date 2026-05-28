@@ -702,7 +702,6 @@ Before you start, please
             --max-num-seqs 4 \
             --gpu-memory-utilization 0.95 \
             --no-enable-prefix-caching \
-            --async-scheduling \
             --quantization ascend \
             --kv-transfer-config \
             '{"kv_connector": "MooncakeLayerwiseConnector",
@@ -776,7 +775,6 @@ Before you start, please
             --max-num-batched-tokens 12 \
             --compilation-config '{"cudagraph_mode":"FULL_DECODE_ONLY",  "cudagraph_capture_sizes":[3, 6, 9, 12]}' \
             --trust-remote-code \
-            --async-scheduling \
             --max-num-seqs 4 \
             --gpu-memory-utilization 0.95 \
             --no-enable-prefix-caching \

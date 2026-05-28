@@ -174,7 +174,6 @@ export VLLM_ASCEND_ENABLE_FLASHCOMM1=1
 vllm serve vllm-ascend/Qwen3-32B-W8A8 \
   --served-model-name qwen3 \
   --trust-remote-code \
-  --async-scheduling \
   --quantization ascend \
   --distributed-executor-backend mp \
   --tensor-parallel-size 4 \
@@ -362,8 +361,6 @@ The configuration compilation_config = { "cudagraph_mode": "FULL_DECODE_ONLY"} i
 ### 8. Asynchronous Scheduling
 
 Asynchronous scheduling is a technique used to optimize inference efficiency. It allows non-blocking task scheduling to improve concurrency and throughput, especially when processing large-scale models.
-
-This optimization is enabled by setting `--async-scheduling`.
 
 ## Optimization Highlights
 

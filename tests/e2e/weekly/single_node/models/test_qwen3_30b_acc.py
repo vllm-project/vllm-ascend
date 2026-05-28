@@ -112,7 +112,6 @@ async def test_models(model: str, tp_size: int) -> None:
         str(port),
         "--distributed_executor_backend",
         "mp",
-        "--async-scheduling",
         "--quantization",
         "ascend",
         "--compilation-config",

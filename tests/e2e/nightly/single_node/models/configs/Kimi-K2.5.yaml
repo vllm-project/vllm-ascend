@@ -32,7 +32,6 @@ _server_cmd: &server_cmd
   - "16384"
   - "--max-num-seqs"
   - "500"
-  - "--async-scheduling"
   - "--quantization"
   - "ascend"
   - "--trust-remote-code"

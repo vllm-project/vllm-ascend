@@ -37,7 +37,6 @@ _server_cmd: &server_cmd
   - "--trust-remote-code"
   - "--gpu-memory-utilization"
   - "0.92"
-  - "--async-scheduling"
 
 _benchmarks: &benchmarks
   acc:

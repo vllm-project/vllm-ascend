@@ -37,7 +37,6 @@ _server_cmd: &server_cmd
       - "--trust-remote-code"
       - "--quantization"
       - "ascend"
-      - "--async-scheduling"
       - "--gpu-memory-utilization"
       - "0.95"
       - "--compilation-config"

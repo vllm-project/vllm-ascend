@@ -117,7 +117,6 @@ vllm serve /weights/DeepSeek-V3.1-w8a8-mtp-QuaRot \
 --seed 1024 \
 --served-model-name deepseek_v3 \
 --enable-expert-parallel \
---async-scheduling \
 --max-num-seqs 16 \
 --max-model-len 16384 \
 --max-num-batched-tokens 4096 \
@@ -184,7 +183,6 @@ vllm serve /weights/DeepSeek-V3.1-w8a8-mtp-QuaRot \
 --seed 1024 \
 --served-model-name deepseek_v3 \
 --enable-expert-parallel \
---async-scheduling \
 --max-num-seqs 16 \
 --max-model-len 16384 \
 --max-num-batched-tokens 4096 \
@@ -238,7 +236,6 @@ vllm serve /weights/DeepSeek-V3.1-w8a8-mtp-QuaRot \
 --seed 1024 \
 --served-model-name deepseek_v3 \
 --enable-expert-parallel \
---async-scheduling \
 --max-num-seqs 16 \
 --max-model-len 16384 \
 --max-num-batched-tokens 4096 \
@@ -470,7 +467,6 @@ To run the vllm-ascend `Prefill-Decode Disaggregation` service, you need to depl
       --gpu-memory-utilization 0.92 \
       --quantization ascend \
       --no-enable-prefix-caching \
-      --async-scheduling \
       --speculative-config '{"num_speculative_tokens": 1, "method": "mtp"}' \
       --compilation-config '{"cudagraph_mode": "FULL_DECODE_ONLY", "cudagraph_capture_sizes":[2, 4, 8, 16, 24, 32, 48, 56]}' \
       --additional-config '{"recompute_scheduler_enable":true,"multistream_overlap_shared_expert": true,"finegrained_tp_config": {"lmhead_tensor_parallel_size":16}}' \
@@ -546,7 +542,6 @@ To run the vllm-ascend `Prefill-Decode Disaggregation` service, you need to depl
       --gpu-memory-utilization 0.92 \
       --quantization ascend \
       --no-enable-prefix-caching \
-      --async-scheduling \
       --speculative-config '{"num_speculative_tokens": 1, "method": "mtp"}' \
       --compilation-config '{"cudagraph_mode": "FULL_DECODE_ONLY", "cudagraph_capture_sizes":[2, 4, 8, 16, 24, 32, 48, 56]}' \
       --additional-config '{"recompute_scheduler_enable":true,"multistream_overlap_shared_expert": true,"finegrained_tp_config": {"lmhead_tensor_parallel_size":16}}' \
@@ -573,7 +568,6 @@ To run the vllm-ascend `Prefill-Decode Disaggregation` service, you need to depl
 
     - `VLLM_ASCEND_ENABLE_FLASHCOMM1=1`: enables the communication optimization function on the prefill nodes.
     - `VLLM_ASCEND_ENABLE_MLAPO=1`: enables the fusion operator, which can significantly improve performance but consumes more NPU memory. In the Prefill-Decode (PD) separation scenario, enable MLAPO only on decode nodes.
-    - `--async-scheduling`: enables the asynchronous scheduling function. When Multi-Token Prediction (MTP) is enabled, asynchronous scheduling of operator delivery can be implemented to overlap the operator delivery latency.
     - `cudagraph_capture_sizes`: The recommended value is `n x (mtp + 1)`. And the min is `n = 1` and the max is `n = max-num-seqs`. For other values, it is recommended to set them to the number of frequently occurring requests on the Decode (D) node.
     - `recompute_scheduler_enable: true`: enables the recomputation scheduler. When the Key-Value Cache (KV Cache) of the decode node is insufficient, requests will be sent to the prefill node to recompute the KV Cache. In the PD separation scenario, it is recommended to enable this configuration on both prefill and decode nodes simultaneously.
     - `multistream_overlap_shared_expert: true`: When the Tensor Parallelism (TP) size is 1 or `enable_shared_expert_dp: true`, an additional stream is enabled to overlap the computation process of shared experts for improved efficiency.

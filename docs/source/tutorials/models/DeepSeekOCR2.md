@@ -97,7 +97,6 @@ vllm serve /root/.cache/DeepSeek-OCR-2 \
     --no-enable-prefix-caching \
     --gpu-memory-utilization 0.8 \
     --allowed-local-media-path / \
-    --async-scheduling \
     --additional-config '{
       "enable_cpu_binding": true,
       "multistream_overlap_shared_expert": true,
@@ -112,7 +111,6 @@ The parameters are explained as follows:
 - `--max-model-len` specifies the maximum context length - that is, the sum of input and output tokens for a single request.
 - `--no-enable-prefix-caching` indicates that prefix caching is disabled. To enable it, remove this option.
 - `--gpu-memory-utilization` represents the proportion of HBM that vLLM will use for actual inference. Its essential function is to calculate the available kv_cache size. During the warm-up phase (referred to as profile run in vLLM), vLLM records the peak GPU memory usage during an inference process with an input size of `--max-num-batched-tokens`. The available kv_cache size is then calculated as: `--gpu-memory-utilization` * HBM size - peak GPU memory usage. Therefore, the larger the value of `--gpu-memory-utilization`, the more kv_cache can be used. However, since the GPU memory usage during the warm-up phase may differ from that during actual inference (e.g., due to uneven EP load), setting `--gpu-memory-utilization` too high may lead to OOM (Out of Memory) issues during actual inference. The default value is `0.9`.
-- `--async-scheduling` Asynchronous scheduling is a technique used to optimize inference efficiency. It allows non-blocking task scheduling to improve concurrency and throughput, especially when processing large-scale models.
 
 ### Multi-node Deployment
 
