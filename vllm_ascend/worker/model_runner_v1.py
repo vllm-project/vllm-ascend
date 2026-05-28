@@ -464,19 +464,11 @@ class NPUModelRunner(GPUModelRunner):
         )
         # for cleancode , actually the three attrs is defined in gpu_model_runner
         self.execute_model_state: ExecuteModelState | None = None
-        # None in the first PP rank. Parent init already sets it for non-first
-        # ranks (with proper _pp_aux buffer from make_empty_intermediate_tensors).
-        # Do NOT unconditionally overwrite to None here.
-        if get_pp_group().is_first_rank:
-            self.intermediate_tensors: IntermediateTensors | None = None
-        else:
-            # Parent init already created the buffer; keep it.
-            # But if it's somehow None, re-create with the patched
-            # make_empty_intermediate_tensors.
-            if not hasattr(self, "intermediate_tensors") or self.intermediate_tensors is None:
-                self.intermediate_tensors = self.model.make_empty_intermediate_tensors(
-                    batch_size=self.max_num_tokens, dtype=self.dtype, device=self.device,
-                )
+        # None in the first PP rank. The rest are set after load_model
+        # (in _dummy_run or warmup). Do NOT overwrite to None unconditionally;
+        # the warmup code calls make_empty_intermediate_tensors which includes
+        # _pp_aux via the monkey-patched version.
+        self.intermediate_tensors: IntermediateTensors | None = None
         self.reorder_batch_threshold: int | None = None
         self.long_seq_metadata = None
         self.query_lens: torch.Tensor | None = None
