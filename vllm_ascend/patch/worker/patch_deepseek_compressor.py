@@ -1,10 +1,9 @@
-import importlib
-from typing import TYPE_CHECKING, Any, cast
-
 import torch
 import vllm
 from vllm.config import VllmConfig, get_current_vllm_config
 from vllm.config.cache import CacheConfig
+from vllm.model_executor.layers.deepseek_compressor import CompressorStateCache
+from vllm.model_executor.layers.deepseek_v4_attention import DeepseekV4IndexerCache
 from vllm.v1.attention.backends.mla.sparse_swa import DeepseekV4SWACache
 from vllm.v1.kv_cache_interface import (
     KVCacheSpec,
@@ -141,6 +140,6 @@ class AscendDeepseekV4SWACache(DeepseekV4SWACache):
         return AscendDSABackend
 
 
-deepseek_compressor.CompressorStateCache = AscendCompressorStateCache
-deepseek_v4_attention.DeepseekV4IndexerCache = AscendDeepseekV4IndexerCache
+vllm.model_executor.layers.deepseek_compressor.CompressorStateCache = AscendCompressorStateCache
+vllm.model_executor.layers.deepseek_v4_attention.DeepseekV4IndexerCache = AscendDeepseekV4IndexerCache
 vllm.v1.attention.backends.mla.sparse_swa.DeepseekV4SWACache = AscendDeepseekV4SWACache

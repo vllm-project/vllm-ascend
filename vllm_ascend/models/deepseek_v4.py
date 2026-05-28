@@ -24,7 +24,6 @@
 # limitations under the License.
 """Inference-only DeepseekV2/DeepseekV3 model."""
 
-import importlib
 import math
 import typing
 from collections.abc import Callable, Iterable
@@ -46,6 +45,8 @@ from vllm.distributed import (
     tensor_model_parallel_all_gather,
 )
 from vllm.model_executor.layers.activation import SiluAndMul
+from vllm.model_executor.layers.deepseek_compressor import CompressorStateCache
+from vllm.model_executor.layers.deepseek_v4_attention import DeepseekV4IndexerCache
 from vllm.model_executor.layers.fused_moe import FusedMoE
 from vllm.model_executor.layers.layernorm import RMSNorm
 from vllm.model_executor.layers.linear import (
