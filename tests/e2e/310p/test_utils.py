@@ -16,22 +16,10 @@
 # This file is a part of the vllm-ascend project.
 
 import os
-from pathlib import Path
 
-import huggingface_hub
-from modelscope import snapshot_download  # type: ignore[import-untyped]
 from PIL import Image
 
 from tests.e2e.conftest import VllmRunner
-
-
-def sharded_model_path(repo_id: str, *parts: str) -> str:
-    """Resolve a pre-sharded W8A8SC checkpoint directory from ModelScope cache."""
-    root = snapshot_download(
-        repo_id,
-        local_files_only=huggingface_hub.constants.HF_HUB_OFFLINE,
-    )
-    return str(Path(root).joinpath(*parts))
 
 
 def get_test_image():
