@@ -209,7 +209,11 @@ public:
                 AscendC::Cast(gUbTensor, gUbFPTensor, AscendC::RoundMode::CAST_NONE, mActual);
                 AscendC::PipeBarrier<PIPE_V>();
             }
+#ifdef CATLASS_UNIFIED_CORE
+            AscendC::Adds(gcompUbTensor, gUbTensor, (float)0.0, mActual);
+#else
             AscendC::Copy(gcompUbTensor, gUbTensor, 64, 2, {1, 1, 8, 8});
+#endif
             AscendC::PipeBarrier<PIPE_V>();        
 
             AscendC::Broadcast<float, 2, 0>(gbrcUpUbTensor, gcompUbTensor, dstUpShape_, srcUpShape_, shareUbTensor);
@@ -310,9 +314,12 @@ public:
                 AscendC::Cast(gUbTensor, gUbFPTensor, AscendC::RoundMode::CAST_NONE, mActual);
                 AscendC::PipeBarrier<PIPE_V>();
             }
+#ifdef CATLASS_UNIFIED_CORE
+            AscendC::Adds(gcompUbTensor, gUbTensor, (float)0.0, mActual);
+#else
             AscendC::Copy(gcompUbTensor, gUbTensor, 64, 2, {1, 1, 8, 8});
+#endif
             AscendC::PipeBarrier<PIPE_V>();
-
             uint32_t mActualPerStage = CeilDiv(mActualThisSubBlock, 2);
             uint32_t mActualThisStage = 0;
             for(uint32_t stage = 0; stage < 2; ++stage)
