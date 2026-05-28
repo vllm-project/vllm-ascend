@@ -99,7 +99,6 @@ class TestAscendConfig(TestBase):
         with patch.dict(
             os.environ,
             {
-                "VLLM_ASCEND_ENABLE_CONTEXT_PARALLEL": "1",
                 "VLLM_ASCEND_ENABLE_MATMUL_ALLREDUCE": "1",
                 "VLLM_ASCEND_ENABLE_FUSED_MC2": "2",
                 "VLLM_ASCEND_ENABLE_MLAPO": "0",
@@ -166,7 +165,6 @@ class TestAscendConfig(TestBase):
         with patch.dict(
             os.environ,
             {
-                "VLLM_ASCEND_ENABLE_CONTEXT_PARALLEL": "1",
                 "VLLM_ASCEND_ENABLE_MATMUL_ALLREDUCE": "1",
                 "VLLM_ASCEND_ENABLE_FUSED_MC2": "2",
                 "VLLM_ASCEND_ENABLE_MLAPO": "0",
