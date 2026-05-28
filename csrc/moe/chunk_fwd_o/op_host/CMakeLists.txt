@@ -5,6 +5,9 @@ get_filename_component(CATLASS_INCLUDE_DIR_ABS ${CATLASS_INCLUDE_DIR} ABSOLUTE)
 set(COMMON_KERNEL_UTILS_DIR "${CMAKE_SOURCE_DIR}/moe/common")
 get_filename_component(COMMON_KERNEL_UTILS_DIR_ABS ${COMMON_KERNEL_UTILS_DIR} ABSOLUTE)
 
+set(KERNEL_DIR "${CMAKE_CURRENT_SOURCE_DIR}/../op_kernel")
+get_filename_component(KERNEL_DIR_ABS ${KERNEL_DIR} ABSOLUTE)
+
 add_op_to_compiled_list()
 
 if (BUILD_OPEN_PROJECT)
@@ -21,6 +24,8 @@ add_ops_compile_options(
         -Werror
         -I${CATLASS_INCLUDE_DIR_ABS}
         -I${COMMON_KERNEL_UTILS_DIR_ABS}
+        -include
+        ${KERNEL_DIR_ABS}/compat_310p.h
 )
 
 if (NOT BUILD_OPS_RTY_KERNEL)
