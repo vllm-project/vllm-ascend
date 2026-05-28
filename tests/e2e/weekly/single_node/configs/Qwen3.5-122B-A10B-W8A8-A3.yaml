@@ -26,7 +26,6 @@ _server_cmd: &server_cmd
   - "0.9"
   - "--no-enable-prefix-caching"
   - "--trust-remote-code"
-  - "--async-scheduling"
   - "--allowed-local-media-path"
   - "/"
   - "--quantization"
