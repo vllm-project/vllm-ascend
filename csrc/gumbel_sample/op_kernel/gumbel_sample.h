@@ -1,13 +1,3 @@
-/**
- * Copyright (c) 2025 Huawei Technologies Co., Ltd.
- * This program is free software, you can redistribute it and/or modify it under the terms and conditions of
- * CANN Open Software License Agreement Version 2.0 (the "License").
- * Please refer to the License for details. You may not use this file except in compliance with the License.
- * THIS SOFTWARE IS PROVIDED ON AN "AS IS" BASIS, WITHOUT WARRANTIES OF ANY KIND, EITHER EXPRESS OR IMPLIED,
- * INCLUDING BUT NOT LIMITED TO NON-INFRINGEMENT, MERCHANTABILITY, OR FITNESS FOR A PARTICULAR PURPOSE.
- * See LICENSE in the root of the software repository for the full text of the License.
- */
-
 #ifndef GUMBEL_SAMPLE_H
 #define GUMBEL_SAMPLE_H
 
@@ -39,10 +29,11 @@ class GumbelSampleOp {
 public:
     __aicore__ inline GumbelSampleOp() {}
 
-    __aicore__ inline void Init(GM_ADDR logits, GM_ADDR temperature,
-                                 GM_ADDR seeds, GM_ADDR pos,
-                                 GM_ADDR idxMapping,
-                                 GM_ADDR sampled, GM_ADDR workspace,
+    __aicore__ inline void Init(GM_ADDR logits, GM_ADDR idxMapping,
+                                 GM_ADDR temperature, GM_ADDR seeds,
+                                 GM_ADDR pos, GM_ADDR processedLogitsCol,
+                                 GM_ADDR sampled, GM_ADDR processedLogits,
+                                 GM_ADDR workspace,
                                  const GumbelSampleTilingData& t,
                                  TPipe* pipePtr);  // [opt-1] TPipe 移到核函数入口，传指针
     __aicore__ inline void Process();
@@ -65,13 +56,16 @@ private:
     GlobalTensor<int64_t> seedsGm_;
     GlobalTensor<int64_t> posGm_;
     GlobalTensor<int32_t> idxMappingGm_;
+    GlobalTensor<int64_t> processedLogitsColGm_;
     GlobalTensor<int64_t> sampledGm_;
+    GlobalTensor<float>   processedLogitsGm_;
 
     // per-req 标量 buffer（Init 一次性搬入 UB，避免 GlobalTensor::GetValue，约束 #7）
     TBuf<TPosition::VECCALC> tempUbBuf_;
     TBuf<TPosition::VECCALC> seedsUbBuf_;
     TBuf<TPosition::VECCALC> posUbBuf_;
-    TBuf<TPosition::VECCALC> idxMappingUbBuf_;
+    TBuf<TPosition::VECCALC> idxMappingUbBuf_;  // int32_t
+    TBuf<TPosition::VECCALC> processedColUbBuf_;
 
     // tile 临时 buffer
     TQue<QuePosition::VECIN, 2>  inQueueLogits_;   // [opt-2] DoubleBuffer（单→双缓冲）
@@ -83,13 +77,18 @@ private:
     TBuf<TPosition::VECCALC> maskBuf_;       // Compare 输出 bitmap (uint8)
     TBuf<TPosition::VECCALC> sentinelBuf_;   // float 全 +INF（argmax sentinel）
 
-    uint32_t numTokens_   = 0;  // total token slots (= logits.dim(0))
-    uint32_t vocabSize_   = 0;
+    uint32_t numReqs_      = 0;
+    uint32_t numReqStates_ = 0;
+    uint32_t vocabSize_    = 0;
     uint32_t blockSize_   = GUMBEL_BLOCK_SIZE;
     uint32_t numTiles_    = 0;
     uint32_t lastTileLen_ = 0;
     uint32_t myStartRow_  = 0;
     uint32_t myRows_      = 0;
+    uint32_t hasProcessedLogits_ = 0;
+    uint32_t hasProcessedLogitsCol_ = 0;
+    uint32_t processedLogitsStride_ = 0;
+    uint32_t processedLogitsCol_ = 0;
 };
 
 // =================================================================
@@ -97,17 +96,21 @@ private:
 // =================================================================
 template <bool APPLY_TEMPERATURE>
 __aicore__ inline void GumbelSampleOp<APPLY_TEMPERATURE>::Init(
-    GM_ADDR logits, GM_ADDR temperature, GM_ADDR seeds, GM_ADDR pos,
-    GM_ADDR idxMapping,
-    GM_ADDR sampled, GM_ADDR /*workspace*/, const GumbelSampleTilingData& t,
+    GM_ADDR logits, GM_ADDR idxMapping, GM_ADDR temperature, GM_ADDR seeds,
+    GM_ADDR pos, GM_ADDR processedLogitsCol,
+    GM_ADDR sampled, GM_ADDR processedLogits, GM_ADDR /*workspace*/, const GumbelSampleTilingData& t,
     TPipe* pipePtr)  // [opt-1] 接受外部 TPipe 指针
 {
     pipe_ = pipePtr;  // [opt-1] 绑定外部 TPipe
-    numTokens_   = t.numTokens;
-    vocabSize_   = t.vocabSize;
+    numReqs_      = t.numReqs;
+    numReqStates_ = t.numReqStates;
+    vocabSize_    = t.vocabSize;
     blockSize_   = t.blockSize;
     numTiles_    = t.numTiles;
     lastTileLen_ = t.lastTileLen;
+    hasProcessedLogits_ = t.hasProcessedLogits;
+    hasProcessedLogitsCol_ = t.hasProcessedLogitsCol;
+    processedLogitsStride_ = t.processedLogitsStride;
 
     uint32_t blockIdx   = GetBlockIdx();
     uint32_t formerNum  = t.formerNum;
@@ -127,13 +130,16 @@ __aicore__ inline void GumbelSampleOp<APPLY_TEMPERATURE>::Init(
     seedsGm_.SetGlobalBuffer(reinterpret_cast<__gm__ int64_t*>(seeds));
     posGm_.SetGlobalBuffer(reinterpret_cast<__gm__ int64_t*>(pos));
     idxMappingGm_.SetGlobalBuffer(reinterpret_cast<__gm__ int32_t*>(idxMapping));
+    processedLogitsColGm_.SetGlobalBuffer(reinterpret_cast<__gm__ int64_t*>(processedLogitsCol));
     sampledGm_.SetGlobalBuffer(reinterpret_cast<__gm__ int64_t*>(sampled));
+    processedLogitsGm_.SetGlobalBuffer(reinterpret_cast<__gm__ float*>(processedLogits));
 
     auto Align32 = [](uint32_t bytes) -> uint32_t { return ((bytes + 31u) / 32u) * 32u; };
-    pipe_->InitBuffer(tempUbBuf_,       Align32(t.numReqStates * static_cast<uint32_t>(sizeof(float))));
-    pipe_->InitBuffer(seedsUbBuf_,      Align32(t.numReqStates * static_cast<uint32_t>(sizeof(int64_t))));
-    pipe_->InitBuffer(idxMappingUbBuf_, Align32(t.numTokens * static_cast<uint32_t>(sizeof(int32_t))));
+    pipe_->InitBuffer(tempUbBuf_,       Align32(numReqStates_ * static_cast<uint32_t>(sizeof(float))));
+    pipe_->InitBuffer(seedsUbBuf_,      Align32(numReqStates_ * static_cast<uint32_t>(sizeof(int64_t))));
+    pipe_->InitBuffer(idxMappingUbBuf_, Align32(numReqs_ * static_cast<uint32_t>(sizeof(int32_t))));
     pipe_->InitBuffer(posUbBuf_,        Align32(t.numTokens * static_cast<uint32_t>(sizeof(int64_t))));
+    pipe_->InitBuffer(processedColUbBuf_, 32);
 
     pipe_->InitBuffer(inQueueLogits_,   2, GUMBEL_BLOCK_SIZE * sizeof(float));  // [opt-2] DoubleBuffer
     pipe_->InitBuffer(outQueueSampled_, 1, 32);
@@ -157,58 +163,68 @@ __aicore__ inline void GumbelSampleOp<APPLY_TEMPERATURE>::Init(
     PipeBarrier<PIPE_V>();
 
     // 一次性把 temperature/seeds/idx_mapping/pos 搬入 UB（约束 #7：禁 GlobalTensor::GetValue）
-    // isPad=true + rightPadding：当 blockLen 不是 32 字节倍数时，用安全值填充超出部分，
-    // 避免 DataCopyPad 读取 GM 越界数据（越界数据可能是相邻张量的字节，导致计算错误）。
     {
-        auto Align32Bytes = [](uint32_t bytes) -> uint32_t {
-            return ((bytes + 31u) / 32u) * 32u;
-        };
-
         LocalTensor<float>   tempLocal       = tempUbBuf_.Get<float>();
         LocalTensor<int64_t> seedsLocal      = seedsUbBuf_.Get<int64_t>();
         LocalTensor<int32_t> idxMappingLocal = idxMappingUbBuf_.Get<int32_t>();
         LocalTensor<int64_t> posLocal        = posUbBuf_.Get<int64_t>();
 
-        {
-            uint32_t rawBytes = t.numReqStates * static_cast<uint32_t>(sizeof(float));
-            uint32_t padElems = (Align32Bytes(rawBytes) - rawBytes) / static_cast<uint32_t>(sizeof(float));
-            DataCopyExtParams pTemp;
-            pTemp.blockCount = 1; pTemp.blockLen = rawBytes;
-            pTemp.srcStride = 0; pTemp.dstStride = 0; pTemp.rsv = 0;
-            DataCopyPadExtParams<float> ppTemp{padElems > 0, 0, static_cast<uint8_t>(padElems), 0.0f};
-            DataCopyPad(tempLocal, tempGm_, pTemp, ppTemp);
-        }
-        {
-            uint32_t rawBytes = t.numReqStates * static_cast<uint32_t>(sizeof(int64_t));
-            uint32_t padElems = (Align32Bytes(rawBytes) - rawBytes) / static_cast<uint32_t>(sizeof(int64_t));
-            DataCopyExtParams pSeeds;
-            pSeeds.blockCount = 1; pSeeds.blockLen = rawBytes;
-            pSeeds.srcStride = 0; pSeeds.dstStride = 0; pSeeds.rsv = 0;
-            DataCopyPadExtParams<int64_t> ppSeeds{padElems > 0, 0, static_cast<uint8_t>(padElems), 0};
-            DataCopyPad(seedsLocal, seedsGm_, pSeeds, ppSeeds);
-        }
-        {
-            uint32_t rawBytes = t.numTokens * static_cast<uint32_t>(sizeof(int32_t));
-            uint32_t padElems = (Align32Bytes(rawBytes) - rawBytes) / static_cast<uint32_t>(sizeof(int32_t));
-            DataCopyExtParams pIdxMapping;
-            pIdxMapping.blockCount = 1; pIdxMapping.blockLen = rawBytes;
-            pIdxMapping.srcStride = 0; pIdxMapping.dstStride = 0; pIdxMapping.rsv = 0;
-            DataCopyPadExtParams<int32_t> ppIdxMapping{padElems > 0, 0, static_cast<uint8_t>(padElems), 0};
-            DataCopyPad(idxMappingLocal, idxMappingGm_, pIdxMapping, ppIdxMapping);
-        }
-        {
-            uint32_t rawBytes = t.numTokens * static_cast<uint32_t>(sizeof(int64_t));
-            uint32_t padElems = (Align32Bytes(rawBytes) - rawBytes) / static_cast<uint32_t>(sizeof(int64_t));
-            DataCopyExtParams pPos;
-            pPos.blockCount = 1; pPos.blockLen = rawBytes;
-            pPos.srcStride = 0; pPos.dstStride = 0; pPos.rsv = 0;
-            DataCopyPadExtParams<int64_t> ppPos{padElems > 0, 0, static_cast<uint8_t>(padElems), 0};
-            DataCopyPad(posLocal, posGm_, pPos, ppPos);
-        }
+        DataCopyExtParams pTemp;
+        pTemp.blockCount = 1;
+        pTemp.blockLen   = numReqStates_ * static_cast<uint32_t>(sizeof(float));
+        pTemp.srcStride  = 0;
+        pTemp.dstStride  = 0;
+        pTemp.rsv        = 0;
+        DataCopyPadExtParams<float> ppTemp{false, 0, 0, 0.0f};
+        DataCopyPad(tempLocal, tempGm_, pTemp, ppTemp);
+
+        DataCopyExtParams pSeeds;
+        pSeeds.blockCount = 1;
+        pSeeds.blockLen   = numReqStates_ * static_cast<uint32_t>(sizeof(int64_t));
+        pSeeds.srcStride  = 0;
+        pSeeds.dstStride  = 0;
+        pSeeds.rsv        = 0;
+        DataCopyPadExtParams<int64_t> ppSeeds{false, 0, 0, 0};
+        DataCopyPad(seedsLocal, seedsGm_, pSeeds, ppSeeds);
+
+        DataCopyExtParams pIdxMapping;
+        pIdxMapping.blockCount = 1;
+        pIdxMapping.blockLen   = numReqs_ * static_cast<uint32_t>(sizeof(int32_t));
+        pIdxMapping.srcStride  = 0;
+        pIdxMapping.dstStride  = 0;
+        pIdxMapping.rsv        = 0;
+        DataCopyPadExtParams<int32_t> ppIdxMapping{false, 0, 0, 0};
+        DataCopyPad(idxMappingLocal, idxMappingGm_, pIdxMapping, ppIdxMapping);
+
+        DataCopyExtParams pPos;
+        pPos.blockCount = 1;
+        pPos.blockLen   = t.numTokens * static_cast<uint32_t>(sizeof(int64_t));
+        pPos.srcStride  = 0;
+        pPos.dstStride  = 0;
+        pPos.rsv        = 0;
+        DataCopyPadExtParams<int64_t> ppPos{false, 0, 0, 0};
+        DataCopyPad(posLocal, posGm_, pPos, ppPos);
 
         event_t eMte2S = static_cast<event_t>(GetTPipePtr()->FetchEventID(HardEvent::MTE2_S));
         SetFlag<HardEvent::MTE2_S>(eMte2S);
         WaitFlag<HardEvent::MTE2_S>(eMte2S);
+    }
+
+    processedLogitsCol_ = 0;
+    if (hasProcessedLogitsCol_ != 0) {
+        LocalTensor<int64_t> colLocal = processedColUbBuf_.Get<int64_t>();
+        DataCopyExtParams pCol;
+        pCol.blockCount = 1;
+        pCol.blockLen   = static_cast<uint32_t>(sizeof(int64_t));
+        pCol.srcStride  = 0;
+        pCol.dstStride  = 0;
+        pCol.rsv        = 0;
+        DataCopyPadExtParams<int64_t> ppCol{false, 0, 0, 0};
+        DataCopyPad(colLocal, processedLogitsColGm_, pCol, ppCol);
+        event_t eCol = static_cast<event_t>(GetTPipePtr()->FetchEventID(HardEvent::MTE2_S));
+        SetFlag<HardEvent::MTE2_S>(eCol);
+        WaitFlag<HardEvent::MTE2_S>(eCol);
+        processedLogitsCol_ = static_cast<uint32_t>(colLocal.GetValue(0));
     }
 }
 
@@ -356,15 +372,12 @@ __aicore__ inline void GumbelSampleOp<APPLY_TEMPERATURE>::ProcessOneRow(uint32_t
     LocalTensor<int64_t> seedsLocal      = seedsUbBuf_.Get<int64_t>();
     LocalTensor<int32_t> idxMappingLocal = idxMappingUbBuf_.Get<int32_t>();
     LocalTensor<int64_t> posLocal        = posUbBuf_.Get<int64_t>();
-
-    // idx_mapping[reqIdx] → reqStateIdx，仅用于索引 temperature 和 seeds
-    uint32_t reqStateIdx = static_cast<uint32_t>(idxMappingLocal.GetValue(reqIdx));
-
-    float   temp   = tempLocal.GetValue(reqStateIdx);   // temperature[idx_mapping[reqIdx]]
-    int64_t seed64 = seedsLocal.GetValue(reqStateIdx);  // seeds[idx_mapping[reqIdx]]
-    // pos 和 logits 按 batch_idx（reqIdx）直接索引
-    int64_t posI64 = posLocal.GetValue(reqIdx);
-    int32_t pI32   = static_cast<int32_t>(posI64 & 0xFFFFFFFF);
+    // reqIdx = batch_idx (token row); reqStateIdx = idx_mapping[batch_idx]
+    int64_t reqStateIdx = static_cast<int64_t>(idxMappingLocal.GetValue(reqIdx));
+    float   temp        = tempLocal.GetValue(static_cast<uint32_t>(reqStateIdx));
+    int64_t seed64      = seedsLocal.GetValue(static_cast<uint32_t>(reqStateIdx));
+    int64_t posI64      = posLocal.GetValue(reqIdx);
+    int32_t pI32        = static_cast<int32_t>(posI64 & 0xFFFFFFFF);
 
     // gumbel_seed = tl.randint(seed, pos) = Philox4x32(c0=pos_i32, k0=seed_lo32, k1=seed_hi32)
     uint32_t seedLo = static_cast<uint32_t>(static_cast<uint64_t>(seed64) & 0xFFFFFFFFu);
@@ -390,25 +403,13 @@ __aicore__ inline void GumbelSampleOp<APPLY_TEMPERATURE>::ProcessOneRow(uint32_t
         Duplicate(logitsLocal, GUMBEL_NEG_INF, alignedLen);
         PipeBarrier<PIPE_V>();
 
-        // blockLen 必须是 32 字节的倍数（DMA 对齐要求）。
-        // 当 curLen * sizeof(float) 不是 32 的倍数时，用 isPad=true 填充超出部分，
-        // 避免读取 GM 越界数据（越界数据可能大于有效 logits，导致 argmax 返回越界索引，
-        // 进而被 FindFirstMatchIdx 截断为 0）。
-        uint32_t rawBytes    = curLen * static_cast<uint32_t>(sizeof(float));
-        uint32_t alignBytes  = ((rawBytes + 31u) / 32u) * 32u;
-        uint32_t rightPadElems = (alignBytes - rawBytes) / static_cast<uint32_t>(sizeof(float));
         DataCopyExtParams copyParams;
         copyParams.blockCount = 1;
-        copyParams.blockLen   = rawBytes;
+        copyParams.blockLen   = static_cast<uint32_t>(curLen * sizeof(float));
         copyParams.srcStride  = 0;
         copyParams.dstStride  = 0;
         copyParams.rsv        = 0;
-        DataCopyPadExtParams<float> padParams{
-            rightPadElems > 0,
-            0,
-            static_cast<uint8_t>(rightPadElems),
-            GUMBEL_NEG_INF
-        };
+        DataCopyPadExtParams<float> padParams{false, 0, 0, 0.0f};
         DataCopyPad(logitsLocal,
                     logitsGm_[static_cast<uint64_t>(reqIdx) * vocabSize_ + tileOffset],
                     copyParams, padParams);
@@ -420,6 +421,28 @@ __aicore__ inline void GumbelSampleOp<APPLY_TEMPERATURE>::ProcessOneRow(uint32_t
                 Muls(logitsLocal, logitsLocal, recipTemp, alignedLen);
                 PipeBarrier<PIPE_V>();
             }
+        }
+
+        if (hasProcessedLogits_ != 0) {
+            DataCopyExtParams processedParams;
+            processedParams.blockCount = 1;
+            processedParams.blockLen   = static_cast<uint32_t>(curLen * sizeof(float));
+            processedParams.srcStride  = 0;
+            processedParams.dstStride  = 0;
+            processedParams.rsv        = 0;
+            uint64_t processedOffset =
+                static_cast<uint64_t>(reqStateIdx) * processedLogitsStride_ +
+                static_cast<uint64_t>(processedLogitsCol_) * vocabSize_ + tileOffset;
+            event_t eVMte3 = static_cast<event_t>(GetTPipePtr()->FetchEventID(HardEvent::V_MTE3));
+            SetFlag<HardEvent::V_MTE3>(eVMte3);
+            WaitFlag<HardEvent::V_MTE3>(eVMte3);
+            DataCopyPad(processedLogitsGm_[processedOffset], logitsLocal, processedParams);
+            event_t eMte3V = static_cast<event_t>(GetTPipePtr()->FetchEventID(HardEvent::MTE3_V));
+            SetFlag<HardEvent::MTE3_V>(eMte3V);
+            WaitFlag<HardEvent::MTE3_V>(eMte3V);
+        }
+
+        if (!isGreedy) {
             GenerateGumbelTile(tileOffset, curLen, alignedLen, gumbelSeedLo, gumbelSeedHi);
             LocalTensor<float> gLocal = hashBuf_.Get<float>();
             Add(logitsLocal, logitsLocal, gLocal, alignedLen);

@@ -1,3 +1,11 @@
+add_op_to_compiled_list()
+
+if (BUILD_OPEN_PROJECT)
+    target_sources(op_host_aclnnInner PRIVATE
+        gumbel_sample_def.cpp
+    )
+endif()
+
 add_ops_compile_options(
     OP_NAME GumbelSample
     OPTIONS --cce-auto-sync=on
@@ -5,18 +13,9 @@ add_ops_compile_options(
             -Werror
 )
 
-target_sources(op_host_aclnn PRIVATE
-    gumbel_sample_def.cpp
-)
-
-target_sources(optiling PRIVATE
-    gumbel_sample_tiling.cpp
-)
-
-target_include_directories(optiling PRIVATE
-    ${CMAKE_CURRENT_SOURCE_DIR}
-)
-
-target_sources(opsproto PRIVATE
-    gumbel_sample_infershape.cpp
-)
+if (NOT BUILD_OPS_RTY_KERNEL)
+    add_modules_sources(OPTYPE gumbel_sample ACLNNTYPE aclnn_inner)
+    target_include_directories(${OPHOST_NAME}_tiling_obj PRIVATE
+        ${CMAKE_CURRENT_SOURCE_DIR}
+    )
+endif()

@@ -1,13 +1,3 @@
-/**
- * Copyright (c) 2025 Huawei Technologies Co., Ltd.
- * This program is free software, you can redistribute it and/or modify it under the terms and conditions of
- * CANN Open Software License Agreement Version 2.0 (the "License").
- * Please refer to the License for details. You may not use this file except in compliance with the License.
- * THIS SOFTWARE IS PROVIDED ON AN "AS IS" BASIS, WITHOUT WARRANTIES OF ANY KIND, EITHER EXPRESS OR IMPLIED,
- * INCLUDING BUT NOT LIMITED TO NON-INFRINGEMENT, MERCHANTABILITY, OR FITNESS FOR A PARTICULAR PURPOSE.
- * See LICENSE in the root of the software repository for the full text of the License.
- */
-
 #include "register/op_def_registry.h"
 
 namespace ops {
@@ -15,10 +5,16 @@ namespace ops {
 class GumbelSample : public OpDef {
 public:
     explicit GumbelSample(const char* name) : OpDef(name) {
-        // 输入声明（去掉 AutoContiguous，由框架自动处理 contiguous）
+        // ============= 输入声明 =============
         this->Input("logits")
             .ParamType(REQUIRED)
             .DataType({ge::DT_FLOAT})
+            .Format({ge::FORMAT_ND})
+            .UnknownShapeFormat({ge::FORMAT_ND});
+
+        this->Input("idx_mapping")
+            .ParamType(REQUIRED)
+            .DataType({ge::DT_INT32})
             .Format({ge::FORMAT_ND})
             .UnknownShapeFormat({ge::FORMAT_ND});
 
@@ -40,23 +36,30 @@ public:
             .Format({ge::FORMAT_ND})
             .UnknownShapeFormat({ge::FORMAT_ND});
 
-        this->Input("idx_mapping")
-            .ParamType(REQUIRED)
-            .DataType({ge::DT_INT32})
+        this->Input("output_processed_logits_col")
+            .ParamType(OPTIONAL)
+            .DataType({ge::DT_INT64})
             .Format({ge::FORMAT_ND})
             .UnknownShapeFormat({ge::FORMAT_ND});
 
-        // 输出声明
+        // ============= 输出声明 =============
         this->Output("sampled")
             .ParamType(REQUIRED)
             .DataType({ge::DT_INT64})
             .Format({ge::FORMAT_ND})
             .UnknownShapeFormat({ge::FORMAT_ND});
 
-        // apply_temperature 走编译期 TilingKey 分支（0=跳过缩放，1=应用缩放）
+        this->Output("output_processed_logits")
+            .ParamType(OPTIONAL)
+            .DataType({ge::DT_FLOAT})
+            .Format({ge::FORMAT_ND})
+            .UnknownShapeFormat({ge::FORMAT_ND});
+
+        // ============= 属性声明 =============
+        // apply_temperature 走编译期 TilingKey 分支（详见 design_plan.md §2.4）
         this->Attr("apply_temperature").AttrType(OPTIONAL).Bool(true);
 
-        // AICore 配置：目标芯片 ascend910b（覆盖 Ascend910B2 / Ascend910B3）
+        // ============= AICore 配置 =============
         OpAICoreConfig aicoreConfig;
         aicoreConfig.DynamicCompileStaticFlag(true)
             .DynamicFormatFlag(false)
@@ -66,6 +69,7 @@ public:
             .PrecisionReduceFlag(true)
             .ExtendCfgInfo("opFile.value", "gumbel_sample");
 
+        // target_soc_shorts = ["ascend910b"]（覆盖 Ascend910B2 / Ascend910B3）
         this->AICore().AddConfig("ascend910b", aicoreConfig);
     }
 };

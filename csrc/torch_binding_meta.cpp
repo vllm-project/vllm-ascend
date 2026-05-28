@@ -1540,12 +1540,21 @@ at::Tensor chunk_fwd_o_meta(
 
 at::Tensor npu_gumbel_sample_meta(
     const at::Tensor& logits,
+    const at::Tensor& idx_mapping,
     const at::Tensor& temperature,
     const at::Tensor& seeds,
     const at::Tensor& pos,
-    const at::Tensor& idx_mapping,
-    bool apply_temperature)
+    bool apply_temperature,
+    const c10::optional<at::Tensor>& output_processed_logits,
+    const c10::optional<at::Tensor>& output_processed_logits_col)
 {
+    (void)idx_mapping;
+    (void)temperature;
+    (void)seeds;
+    (void)pos;
+    (void)apply_temperature;
+    (void)output_processed_logits;
+    (void)output_processed_logits_col;
     int64_t num_tokens = logits.size(0);
     return at::empty({num_tokens}, logits.options().dtype(at::kLong));
 }

@@ -19,7 +19,7 @@
 #
 
 import torch
-from vllm.triton_utils import tl, triton
+from vllm.triton_utils import HAS_TRITON, tl, triton
 
 
 @triton.jit
@@ -159,10 +159,6 @@ def gumbel_sample(
 ) -> torch.Tensor:
     if use_fp64:
         raise NotImplementedError("FP64 Gumbel sampling is not supported on NPU.")
-    try:
-        from vllm.triton_utils import HAS_TRITON
-    except ImportError:
-        HAS_TRITON = True
     if HAS_TRITON:
         num_reqs, vocab_size = logits.shape
         BLOCK_SIZE = 1024

@@ -1,13 +1,3 @@
-/**
- * Copyright (c) 2025 Huawei Technologies Co., Ltd.
- * This program is free software, you can redistribute it and/or modify it under the terms and conditions of
- * CANN Open Software License Agreement Version 2.0 (the "License").
- * Please refer to the License for details. You may not use this file except in compliance with the License.
- * THIS SOFTWARE IS PROVIDED ON AN "AS IS" BASIS, WITHOUT WARRANTIES OF ANY KIND, EITHER EXPRESS OR IMPLIED,
- * INCLUDING BUT NOT LIMITED TO NON-INFRINGEMENT, MERCHANTABILITY, OR FITNESS FOR A PARTICULAR PURPOSE.
- * See LICENSE in the root of the software repository for the full text of the License.
- */
-
 #include "register/op_def_registry.h"
 #include "gumbel_sample_tiling.h"
 
@@ -17,16 +7,15 @@ static inline uint32_t CeilDivU32(uint32_t a, uint32_t b) {
     return (a + b - 1) / b;
 }
 
-// vocab 维分块大小：4096 fp32 = 16KB，远低于 UB；4096/64=64 ≤ 255 满足 RepeatTime 约束
+// 内部 vocab 维分块：4096 fp32 = 16KB，远低于 UB；4096/64=64 ≤ 255 满足约束 #8
 constexpr uint32_t GUMBEL_SAMPLE_BLOCK_SIZE = 4096;
 
-static ge::graphStatus GumbelSampleTilingFunc(gert::TilingContext* context)
-{
+static ge::graphStatus GumbelSampleTilingFunc(gert::TilingContext* context) {
     if (context == nullptr) {
         return ge::GRAPH_FAILED;
     }
 
-    // 优先从 CompileInfo 取核数（编译期缓存），回退到实时查询
+    // 优先从 CompileInfo 取核数（编译期缓存），回退到实时查询。
     uint32_t aivCoreNum = 0;
     auto ptrCompileInfo = reinterpret_cast<const GumbelSampleCompileInfo*>(context->GetCompileInfo());
     if (ptrCompileInfo != nullptr && ptrCompileInfo->totalCoreNum > 0) {
@@ -43,7 +32,6 @@ static ge::graphStatus GumbelSampleTilingFunc(gert::TilingContext* context)
         return ge::GRAPH_FAILED;
     }
 
-    // logits.dim(0) = num_tokens（batch slot 总数），logits.dim(1) = vocab_size
     auto logitsShapeBundle = context->GetInputShape(0);
     if (logitsShapeBundle == nullptr) {
         return ge::GRAPH_FAILED;
@@ -53,8 +41,18 @@ static ge::graphStatus GumbelSampleTilingFunc(gert::TilingContext* context)
         return ge::GRAPH_FAILED;
     }
 
-    // temperature（输入 1）的 dim0 = num_req_states
-    auto tempShapeBundle = context->GetInputShape(1);
+    // idx_mapping 是第 1 个输入（序号 1），其 dim0 = num_tokens
+    auto idxMappingShapeBundle = context->GetInputShape(1);
+    if (idxMappingShapeBundle == nullptr) {
+        return ge::GRAPH_FAILED;
+    }
+    auto idxMappingShape = idxMappingShapeBundle->GetStorageShape();
+    if (idxMappingShape.GetDimNum() < 1) {
+        return ge::GRAPH_FAILED;
+    }
+
+    // temperature 是第 2 个输入（序号 2），其 dim0 = num_req_states
+    auto tempShapeBundle = context->GetInputShape(2);
     if (tempShapeBundle == nullptr) {
         return ge::GRAPH_FAILED;
     }
@@ -65,27 +63,57 @@ static ge::graphStatus GumbelSampleTilingFunc(gert::TilingContext* context)
 
     int64_t numTokensI64    = logitsShape.GetDim(0);
     int64_t vocabSizeI64    = logitsShape.GetDim(1);
-    int64_t numReqStatesI64 = tempShape.GetDim(0);
-    if (numTokensI64 <= 0 || vocabSizeI64 <= 0 || numReqStatesI64 <= 0) {
+    int64_t numTokensIdxI64 = idxMappingShape.GetDim(0);  // must equal num_tokens
+    int64_t numReqStatesI64 = tempShape.GetDim(0);        // == num_req_states
+    if (numTokensI64 <= 0 || vocabSizeI64 <= 0 || numTokensIdxI64 <= 0 || numReqStatesI64 <= 0) {
+        return ge::GRAPH_FAILED;
+    }
+    if (numTokensI64 != numTokensIdxI64) {
         return ge::GRAPH_FAILED;
     }
     uint32_t numTokens    = static_cast<uint32_t>(numTokensI64);
     uint32_t numReqStates = static_cast<uint32_t>(numReqStatesI64);
     uint32_t vocabSize    = static_cast<uint32_t>(vocabSizeI64);
 
-    // 多核切分按 num_tokens（每 batch slot 1 行）
+    uint32_t hasProcessedLogits = 0;
+    uint32_t processedLogitsStride = 0;
+    uint32_t numSpeculativeSteps = 0;
+    auto processedShapePtr = context->GetOutputShape(1);
+    if (processedShapePtr != nullptr) {
+        auto processedShape = processedShapePtr->GetStorageShape();
+        if (processedShape.GetDimNum() >= 3) {
+            int64_t maxReqsI64 = processedShape.GetDim(0);
+            int64_t stepsI64 = processedShape.GetDim(1);
+            int64_t processedVocabI64 = processedShape.GetDim(2);
+            if (maxReqsI64 > 0 && stepsI64 > 0 && processedVocabI64 == vocabSizeI64) {
+                hasProcessedLogits = 1;
+                numSpeculativeSteps = static_cast<uint32_t>(stepsI64);
+                processedLogitsStride = static_cast<uint32_t>(stepsI64 * vocabSizeI64);
+            }
+        }
+    }
+
+    uint32_t hasProcessedLogitsCol = 0;
+    auto processedColShapeBundle = context->GetInputShape(5);
+    if (processedColShapeBundle != nullptr) {
+        auto processedColShape = processedColShapeBundle->GetStorageShape();
+        if (processedColShape.GetDimNum() == 0 ||
+            (processedColShape.GetDimNum() == 1 && processedColShape.GetDim(0) == 1)) {
+            hasProcessedLogitsCol = 1;
+        }
+    }
+
     uint32_t usedCoreNum = (numTokens < aivCoreNum) ? numTokens : aivCoreNum;
     if (usedCoreNum == 0) {
         usedCoreNum = 1;
     }
-    uint32_t formerNum   = numTokens % usedCoreNum;
-    uint32_t nRowsLarge  = CeilDivU32(numTokens, usedCoreNum);
-    uint32_t nRowsSmall  = numTokens / usedCoreNum;
-    uint32_t numTiles    = CeilDivU32(vocabSize, GUMBEL_SAMPLE_BLOCK_SIZE);
+    uint32_t formerNum  = numTokens % usedCoreNum;
+    uint32_t nRowsLarge = CeilDivU32(numTokens, usedCoreNum);
+    uint32_t nRowsSmall = numTokens / usedCoreNum;
+    uint32_t numTiles = CeilDivU32(vocabSize, GUMBEL_SAMPLE_BLOCK_SIZE);
     uint32_t lastTileLen = vocabSize - (numTiles - 1) * GUMBEL_SAMPLE_BLOCK_SIZE;
 
-    // apply_temperature 属性（bool，默认 true）
-    uint32_t applyTemp = 1u;
+    uint32_t applyTemp = 1;  // 默认 true
     auto* attrs = context->GetAttrs();
     if (attrs != nullptr) {
         const bool* applyTempAttr = attrs->GetAttrPointer<bool>(0);
@@ -95,8 +123,9 @@ static ge::graphStatus GumbelSampleTilingFunc(gert::TilingContext* context)
     }
 
     GumbelSampleTilingData tiling;
-    tiling.set_numTokens(numTokens);
+    tiling.set_numReqs(numTokens);
     tiling.set_numReqStates(numReqStates);
+    tiling.set_numTokens(numTokens);
     tiling.set_vocabSize(vocabSize);
     tiling.set_usedCoreNum(usedCoreNum);
     tiling.set_formerNum(formerNum);
@@ -106,6 +135,10 @@ static ge::graphStatus GumbelSampleTilingFunc(gert::TilingContext* context)
     tiling.set_numTiles(numTiles);
     tiling.set_lastTileLen(lastTileLen);
     tiling.set_applyTemp(applyTemp);
+    tiling.set_hasProcessedLogits(hasProcessedLogits);
+    tiling.set_hasProcessedLogitsCol(hasProcessedLogitsCol);
+    tiling.set_processedLogitsStride(processedLogitsStride);
+    tiling.set_numSpeculativeSteps(numSpeculativeSteps);
 
     tiling.SaveToBuffer(context->GetRawTilingData()->GetData(),
                         context->GetRawTilingData()->GetCapacity());

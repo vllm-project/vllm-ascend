@@ -21,8 +21,8 @@ GumbelSample 算子 e2e 测试
 """
 
 import numpy as np
-import pytest
 import torch
+
 from vllm_ascend.utils import enable_custom_op
 
 enable_custom_op()
@@ -33,13 +33,13 @@ enable_custom_op()
 #   - mulhi 使用有符号乘法（triton-ascend NPU 后端将 tt.mulhiui 编译为 smulhi）
 #   - uint_to_uniform_float：abs_signed(raw) * 4.6566127342e-10
 # ============================================================
-PHILOX_KEY_A   = np.uint32(0x9E3779B9)
-PHILOX_KEY_B   = np.uint32(0xBB67AE85)
+PHILOX_KEY_A = np.uint32(0x9E3779B9)
+PHILOX_KEY_B = np.uint32(0xBB67AE85)
 PHILOX_ROUND_A = np.uint32(0xD2511F53)
 PHILOX_ROUND_B = np.uint32(0xCD9E8D57)
-PHILOX_ROUNDS  = 10
+PHILOX_ROUNDS = 10
 PHILOX_FLOAT_SCALE = np.float32(4.6566127342e-10)
-GUMBEL_EPS     = np.float32(1e-20)
+GUMBEL_EPS = np.float32(1e-20)
 
 
 def _smulhi(a: np.uint32, b: np.uint32) -> np.uint32:
@@ -111,7 +111,7 @@ def golden_gumbel_sample(
         seed64 = int(seeds[req_state_idx]) & 0xFFFFFFFFFFFFFFFF
         pos_i32 = int(pos[batch_idx]) & 0xFFFFFFFF  # pos 直接按 batch_idx 索引
 
-        is_greedy = (temp == 0.0)
+        is_greedy = temp == 0.0
         logits_row = logits[batch_idx].astype(np.float32).copy()  # logits 直接按 batch_idx 索引
 
         if not is_greedy:
@@ -138,19 +138,37 @@ def golden_gumbel_sample(
 # ============================================================
 # 辅助：构造输入 + 调用 NPU 算子 + 打印延迟
 # ============================================================
-def _run_npu(logits_np, temp_np, seeds_np, pos_np, idx_mapping_np,
-             apply_temperature: bool):
+def _run_npu(
+    logits_np,
+    temp_np,
+    seeds_np,
+    pos_np,
+    idx_mapping_np,
+    apply_temperature: bool,
+    processed_shape=None,
+    processed_col: int | None = None,
+):
     """调用 NPU 算子，仅验证精度，不测量性能。"""
-    logits_npu      = torch.from_numpy(logits_np).npu()
-    temp_npu        = torch.from_numpy(temp_np).npu()
-    seeds_npu       = torch.from_numpy(seeds_np).npu()
-    pos_npu         = torch.from_numpy(pos_np).npu()
+    logits_npu = torch.from_numpy(logits_np).npu()
+    temp_npu = torch.from_numpy(temp_np).npu()
+    seeds_npu = torch.from_numpy(seeds_np).npu()
+    pos_npu = torch.from_numpy(pos_np).npu()
     idx_mapping_npu = torch.from_numpy(idx_mapping_np).npu()
+    processed_npu = None
+    processed_col_npu = None
+    if processed_shape is not None:
+        processed_npu = torch.empty(processed_shape, dtype=torch.float32, device="npu")
+        processed_npu.fill_(np.nan)
+    if processed_col is not None:
+        processed_col_npu = torch.tensor([processed_col], dtype=torch.int64, device="npu")
 
     out = torch.ops._C_ascend.npu_gumbel_sample(
-        logits_npu, temp_npu, seeds_npu, pos_npu, idx_mapping_npu, apply_temperature)
+        logits_npu, idx_mapping_npu, temp_npu, seeds_npu, pos_npu, apply_temperature, processed_npu, processed_col_npu
+    )
     torch.npu.synchronize()
 
+    if processed_npu is not None:
+        return out.cpu().numpy(), processed_npu.cpu().numpy()
     return out.cpu().numpy()
 
 
@@ -160,21 +178,18 @@ def _run_npu(logits_np, temp_np, seeds_np, pos_np, idx_mapping_np,
 # ============================================================
 @torch.inference_mode()
 def test_gumbel_sample_case1():
-    num_tokens     = 10
+    num_tokens = 10
     num_req_states = 10
-    vocab_size     = 1500
+    vocab_size = 1500
     rng = np.random.default_rng(2025)
-    logits_np      = np.random.default_rng(1 * 7919).standard_normal(
-                         (num_tokens, vocab_size)).astype(np.float32)
-    temp_np        = np.full(num_req_states, 0.6, dtype=np.float32)
-    seeds_np       = rng.integers(0, 2**31, size=num_req_states, dtype=np.int64)
-    pos_np         = np.arange(num_tokens, dtype=np.int64)
+    logits_np = np.random.default_rng(1 * 7919).standard_normal((num_tokens, vocab_size)).astype(np.float32)
+    temp_np = np.full(num_req_states, 0.6, dtype=np.float32)
+    seeds_np = rng.integers(0, 2**31, size=num_req_states, dtype=np.int64)
+    pos_np = np.arange(num_tokens, dtype=np.int64)
     idx_mapping_np = np.zeros(num_tokens, dtype=np.int32)
 
-    golden = golden_gumbel_sample(logits_np, temp_np, seeds_np, pos_np, idx_mapping_np,
-                                   apply_temperature=True)
-    actual = _run_npu(logits_np, temp_np, seeds_np, pos_np, idx_mapping_np,
-                      apply_temperature=True)
+    golden = golden_gumbel_sample(logits_np, temp_np, seeds_np, pos_np, idx_mapping_np, apply_temperature=True)
+    actual = _run_npu(logits_np, temp_np, seeds_np, pos_np, idx_mapping_np, apply_temperature=True)
     np.testing.assert_array_equal(actual, golden)
 
 
@@ -184,23 +199,20 @@ def test_gumbel_sample_case1():
 # ============================================================
 @torch.inference_mode()
 def test_gumbel_sample_case2():
-    num_tokens     = 20
+    num_tokens = 20
     num_req_states = 2
-    vocab_size     = 1500
+    vocab_size = 1500
     rng = np.random.default_rng(2025)
     # 消耗与 case1 相同数量的随机数以保持 seed 序列一致
     rng.integers(0, 2**31, size=10, dtype=np.int64)
-    logits_np      = np.random.default_rng(2 * 7919).standard_normal(
-                         (num_tokens, vocab_size)).astype(np.float32)
-    temp_np        = np.full(num_req_states, 0.6, dtype=np.float32)
-    seeds_np       = rng.integers(0, 2**31, size=num_req_states, dtype=np.int64)
-    pos_np         = np.arange(num_tokens, dtype=np.int64)
+    logits_np = np.random.default_rng(2 * 7919).standard_normal((num_tokens, vocab_size)).astype(np.float32)
+    temp_np = np.full(num_req_states, 0.6, dtype=np.float32)
+    seeds_np = rng.integers(0, 2**31, size=num_req_states, dtype=np.int64)
+    pos_np = np.arange(num_tokens, dtype=np.int64)
     idx_mapping_np = np.array([0] * 10 + [1] * 10, dtype=np.int32)
 
-    golden = golden_gumbel_sample(logits_np, temp_np, seeds_np, pos_np, idx_mapping_np,
-                                   apply_temperature=True)
-    actual = _run_npu(logits_np, temp_np, seeds_np, pos_np, idx_mapping_np,
-                      apply_temperature=True)
+    golden = golden_gumbel_sample(logits_np, temp_np, seeds_np, pos_np, idx_mapping_np, apply_temperature=True)
+    actual = _run_npu(logits_np, temp_np, seeds_np, pos_np, idx_mapping_np, apply_temperature=True)
     np.testing.assert_array_equal(actual, golden)
 
 
@@ -210,22 +222,48 @@ def test_gumbel_sample_case2():
 # ============================================================
 @torch.inference_mode()
 def test_gumbel_sample_case3():
-    num_tokens     = 10
+    num_tokens = 10
     num_req_states = 10
-    vocab_size     = 1500
+    vocab_size = 1500
     rng = np.random.default_rng(2025)
     # 消耗与 case1+case2 相同数量的随机数
     rng.integers(0, 2**31, size=10, dtype=np.int64)
-    rng.integers(0, 2**31, size=2,  dtype=np.int64)
-    logits_np      = np.random.default_rng(3 * 7919).standard_normal(
-                         (num_tokens, vocab_size)).astype(np.float32)
-    temp_np        = np.ones(num_req_states, dtype=np.float32)
-    seeds_np       = rng.integers(0, 2**31, size=num_req_states, dtype=np.int64)
-    pos_np         = np.arange(num_tokens, dtype=np.int64)
+    rng.integers(0, 2**31, size=2, dtype=np.int64)
+    logits_np = np.random.default_rng(3 * 7919).standard_normal((num_tokens, vocab_size)).astype(np.float32)
+    temp_np = np.ones(num_req_states, dtype=np.float32)
+    seeds_np = rng.integers(0, 2**31, size=num_req_states, dtype=np.int64)
+    pos_np = np.arange(num_tokens, dtype=np.int64)
     idx_mapping_np = np.zeros(num_tokens, dtype=np.int32)
 
-    golden = golden_gumbel_sample(logits_np, temp_np, seeds_np, pos_np, idx_mapping_np,
-                                   apply_temperature=False)
-    actual = _run_npu(logits_np, temp_np, seeds_np, pos_np, idx_mapping_np,
-                      apply_temperature=False)
+    golden = golden_gumbel_sample(logits_np, temp_np, seeds_np, pos_np, idx_mapping_np, apply_temperature=False)
+    actual = _run_npu(logits_np, temp_np, seeds_np, pos_np, idx_mapping_np, apply_temperature=False)
     np.testing.assert_array_equal(actual, golden)
+
+
+@torch.inference_mode()
+def test_gumbel_sample_processed_logits():
+    num_tokens = 4
+    num_req_states = 4
+    vocab_size = 128
+    col = 1
+    rng = np.random.default_rng(2025)
+    logits_np = np.random.default_rng(4 * 7919).standard_normal((num_tokens, vocab_size)).astype(np.float32)
+    temp_np = np.array([0.5, 1.0, 2.0, 0.25], dtype=np.float32)
+    seeds_np = rng.integers(0, 2**31, size=num_req_states, dtype=np.int64)
+    pos_np = np.arange(num_tokens, dtype=np.int64)
+    idx_mapping_np = np.arange(num_tokens, dtype=np.int32)
+
+    golden = golden_gumbel_sample(logits_np, temp_np, seeds_np, pos_np, idx_mapping_np, apply_temperature=True)
+    actual, processed = _run_npu(
+        logits_np,
+        temp_np,
+        seeds_np,
+        pos_np,
+        idx_mapping_np,
+        apply_temperature=True,
+        processed_shape=(num_req_states, 2, vocab_size),
+        processed_col=col,
+    )
+    expected_processed = logits_np / temp_np[:, None]
+    np.testing.assert_array_equal(actual, golden)
+    np.testing.assert_allclose(processed[:, col, :], expected_processed, rtol=1e-6, atol=1e-6)
