@@ -208,8 +208,8 @@ Provide recommended configurations for three scenarios (long sequence, low laten
 
 ### Table 2: Node-Level Detailed Configuration
 
-| Scenario | Configuration | #NPUs | TP | DP | BS | Concurrency | Max Context Length | MTP Speculation Num | FUSE D_MC/D_M | EP Switch | FC+CP | Async |
-|----------|---------------|-------|----|----|----|-------------|--------------------|---------------------|---------------|-----------|-------|-------|
+| Scenario | Configuration | #NPUs | TP | DP | BS | Concurrency | Max Context Length | MTP Speculation Num | FUSED_MC2 | EP Switch | FC+CP Switch | Async Scheduling |
+|----------|---------------|-------|----|----|----|-------------|--------------------|---------------------|-----------|-----------|--------------|------------------|
 | High Throughput (32K→1K) | Server-P Node / Single Machine | 8 | 8 | 2 | 32 | 64 | 30k | 3 | Off | On | On | On |
 | High Throughput (32K→1K) | Server-D Node | 8 | 2 | 8 | 8 | 64 | 30k | 12 | Off | On | Off | On |
 | Long Context | Server-P Node / Single Machine | | | | | | | | | | | |
