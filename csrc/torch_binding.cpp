@@ -61,11 +61,8 @@
 #include <memory>
 #include <mutex>
 #include <sstream>
-<<<<<<< HEAD
 #include <unordered_map>
-=======
 #include <vector>
->>>>>>> 7225bb43 (feat(npu): add storage metadata debug helpers)
 
 namespace vllm_ascend {
 
