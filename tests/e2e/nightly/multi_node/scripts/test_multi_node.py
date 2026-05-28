@@ -121,8 +121,6 @@ def _extract_features(server_cmd: list[str] | str, envs: dict[str, Any]) -> list
         features.append(speculative.get("method", "speculative"))
 
     # Features from direct flags
-    if "--async-scheduling" in cmd_list:
-        features.append("async_scheduling")
     if "--enable-expert-parallel" in cmd_list:
         features.append("expert_parallel")
 

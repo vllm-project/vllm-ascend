@@ -31,7 +31,6 @@ deployment:
         --max-num-batched-tokens 2048
         --trust-remote-code
         --gpu-memory-utilization 0.9
-        --async-scheduling
         --compilation-config '{"cudagraph_mode":"FULL_DECODE_ONLY"}'
   -
     server_cmd: >
@@ -50,7 +49,6 @@ deployment:
         --enable-expert-parallel
         --trust-remote-code
         --gpu-memory-utilization 0.9
-        --async-scheduling
         --compilation-config '{"cudagraph_mode":"FULL_DECODE_ONLY"}'
 benchmarks:
   perf:
@@ -73,6 +71,3 @@ benchmarks:
     batch_size: 16
     baseline: 96
     threshold: 5
-
-# https://github.com/vllm-project/vllm-ascend/actions/runs/26336533220/job/77531145351?pr=8956 精度为0
-# https://github.com/vllm-project/vllm-ascend/actions/runs/26354132166/job/77577696158?pr=8956 精度特别低
