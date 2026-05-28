@@ -164,7 +164,7 @@ def _patch_cudagraph_check():
             # Create a lightweight object that passes isinstance against
             # EagleProposer.  We do this late via composition to avoid
             # importing EagleProposer at module level.
-            from vllm.v1.spec_decode.llm_base_proposer import EagleProposer
+            from vllm.v1.spec_decode.eagle import EagleProposer
 
             class _DrafterStub(EagleProposer):
                 def __init__(s):
