@@ -41,6 +41,7 @@ if not is_310p():
     import vllm_ascend.patch.worker.patch_qwen3_5  # noqa
     import vllm_ascend.patch.worker.patch_gdn_attn  # noqa
     import vllm_ascend.patch.worker.patch_qwen3_dflash  # noqa
+    import vllm_ascend.patch.worker.patch_qwen3_mtp_local_argmax  # noqa
     import vllm_ascend.patch.worker.patch_qwen3vl  # noqa
 else:
     import vllm_ascend.patch.worker.patch_idex_310  # noqa
