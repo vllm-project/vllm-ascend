@@ -19,7 +19,9 @@
 
 import copy
 import gc
+import json
 import logging
+import os
 from types import NoneType
 
 import torch
@@ -50,7 +52,7 @@ from vllm.v1.worker.workspace import init_workspace_manager
 import vllm_ascend.envs as envs_ascend
 from vllm_ascend.ascend_config import get_ascend_config, init_ascend_config
 from vllm_ascend.batch_invariant import init_batch_invariance
-from vllm_ascend.cpu_binding import bind_cpus
+from vllm_ascend.cpu_binding import bind_cpus, DeviceInfo
 from vllm_ascend.device_allocator.camem import CaMemAllocator
 from vllm_ascend.distributed.parallel_state import init_ascend_model_parallel
 from vllm_ascend.ops.triton.triton_utils import init_device_properties_triton
@@ -268,6 +270,32 @@ class NPUWorker(WorkerBase):
 
         gc.collect()
         torch.npu.empty_cache()
+
+        if get_ascend_device_type() == AscendDeviceType.A5:
+            visible_devices = os.getenv("ASCEND_RT_VISIBLE_DEVICES")
+            if visible_devices is None:
+                devices = sorted(list(DeviceInfo.get_npu_map_info().keys()))
+            else:
+                devices = [int(x) for x in visible_devices.split(",")]
+            local_comm_res_path = os.getenv("ASCEND_LOCAL_COMM_RES_PATH")
+
+            if local_comm_res_path:
+                local_comm_res_file = os.path.join(local_comm_res_path, f"ub_endpoint_npu_{devices[self.local_rank]}.json")
+                try:
+                    with open(local_comm_res_file, "r") as f:
+                        data = json.load(f)
+                except FileNotFoundError:
+                    raise FileNotFoundError(
+                        f"Endpoint config file not found: {local_comm_res_file}. "
+                        "Please run generate_ep.py first to generate the endpoint configurations."
+                    )
+                except json.JSONDecodeError as e:
+                    raise ValueError(
+                        f"Failed to parse endpoint config file: {local_comm_res_file}"
+                    ) from e
+
+                local_comm_res_str = json.dumps(data, ensure_ascii=False, separators=(",", ":"))
+                os.environ["ASCEND_LOCAL_COMM_RES"] = local_comm_res_str
 
         # take current memory snapshot
         self.init_snapshot = MemorySnapshot()
