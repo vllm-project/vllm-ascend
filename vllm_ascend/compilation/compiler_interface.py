@@ -67,6 +67,60 @@ def fusion_pass_compile(
     return compiled_fn, None
 
 
+def _compute_decode_cudagraph_batch_sizes(vllm_config: VllmConfig) -> list[int]:
+    num_spec_tokens = vllm_config.speculative_config.num_speculative_tokens if vllm_config.speculative_config else 0
+    uniform_decode_query_len = num_spec_tokens + 1
+    max_num_tokens = vllm_config.scheduler_config.max_num_seqs * uniform_decode_query_len
+    return [
+        x
+        for x in vllm_config.compilation_config.cudagraph_capture_sizes
+        if max_num_tokens >= x >= uniform_decode_query_len
+    ]
+
+
+def _configure_backend(
+    config: Any,
+    ascend_compilation_config: AscendCompilationConfig,
+    vllm_config: VllmConfig,
+    process_kwargs_options: Callable | None = None,
+) -> None:
+    if process_kwargs_options is not None:
+        # npugraph_ex (both old and new): build options dict and use _process_kwargs_options.
+        # It maps flat option names to nested config paths for old versions,
+        # and directly setattr for new versions with flat CompilerConfig.
+        # force_eager=True: execute FX graph in eager mode before graph capture.
+        # inplace_pass=False: disable reinplace pass to avoid gelu fallback to CPU.
+        options: dict[str, Any] = {
+            "force_eager": True,
+            "inplace_pass": False,
+        }
+        if ascend_compilation_config.enable_static_kernel:
+            logger.info_once(
+                "enable_static_kernel is enabled, static shape kernel will be used to accelerate aclgraph execution.",
+                scope="global",
+            )
+            options["static_kernel_compile"] = True
+            # Set sym_range to limit static kernel compilation to specified batch sizes.
+            options["_vllm_aclnn_static_kernel_sym_range"] = _compute_decode_cudagraph_batch_sizes(vllm_config)
+        process_kwargs_options(config, {"options": options})
+    else:
+        # torchair (reduce-overhead): use nested config structure directly.
+        # mode="reduce-overhead": use aclgraph mode, avoid fx graph to Ascend IR transformation.
+        config.mode = "reduce-overhead"
+        config.debug.run_eagerly = True
+        # Disable reinplace pass to avoid gelu fallback to CPU causing host-device copy error.
+        config.debug.aclgraph.disable_reinplace_inplaceable_ops_pass = True
+        if ascend_compilation_config.enable_static_kernel:
+            logger.info_once(
+                "enable_static_kernel is enabled, static shape kernel will be used to accelerate aclgraph execution.",
+                scope="global",
+            )
+            config.experimental_config.aclgraph._aclnn_static_shape_kernel = True
+            config.experimental_config.aclgraph._aclnn_static_shape_kernel_sym_value_range = (
+                _compute_decode_cudagraph_batch_sizes(vllm_config)
+            )
+
+
 def npugraph_ex_compile(
     graph: fx.GraphModule,
     example_inputs: list[Any],
@@ -76,38 +130,29 @@ def npugraph_ex_compile(
     compile_range: Range,
     key: str | None = None,
 ) -> tuple[Callable | None, Any | None]:
-    import torchair
+    # Try npugraph_ex first, fall back to torchair for backward compatibility.
+    try:
+        import npugraph_ex as nge
 
-    torch.npu.set_compile_mode(jit_compile=False)
-    config = torchair.CompilerConfig()
-    # use aclgraph mode, avoid the transformation from fx graph to Ascend IR.
-    config.mode = "reduce-overhead"
-    # execute FX graph in eager mode before graph mode to optimize FX graph.
-    config.debug.run_eagerly = True
-    # This is a temporary fix to resolve issues with inplace operations in some testcases like test_whisper.
-    # Avoid to change torch.ops.aten.gelu.default to torch.ops.aten.gelu_.default which will fallback to CPU
-    # and cause copy_between_host_and_device error.
-    config.debug.aclgraph.disable_reinplace_inplaceable_ops_pass = True
-    if ascend_compilation_config.enable_static_kernel:
-        logger.info(
-            "enable_static_kernel is enabled, static shape kernel will be used to accelerate aclgraph execution."
+        torch.npu.set_compile_mode(jit_compile=False)
+        config = nge.CompilerConfig()
+        # _process_kwargs_options exists in both old and new npugraph_ex,
+        # but in different modules: new -> compiler_config, old -> npugraphex_config.
+        try:
+            from npugraph_ex.configs.compiler_config import _process_kwargs_options
+        except ImportError:
+            from npugraph_ex.configs.npugraphex_config import _process_kwargs_options
+        _configure_backend(
+            config, ascend_compilation_config, vllm_config, process_kwargs_options=_process_kwargs_options
         )
-        config.experimental_config.aclgraph._aclnn_static_shape_kernel = True
-        # According to the cudagraph_capture_size configuration, set the shapes
-        # that can trigger the compilation of static kernel. If this configuration is
-        # not applied, new shapes will trigger the compilation of static kernels,
-        # affecting program execution.
-        num_spec_tokens = vllm_config.speculative_config.num_speculative_tokens if vllm_config.speculative_config else 0
-        uniform_decode_query_len = num_spec_tokens + 1
-        max_num_tokens = vllm_config.scheduler_config.max_num_seqs * uniform_decode_query_len
-        decode_cudagraph_batch_sizes = [
-            x
-            for x in vllm_config.compilation_config.cudagraph_capture_sizes
-            if max_num_tokens >= x >= uniform_decode_query_len
-        ]
-        config.experimental_config.aclgraph._aclnn_static_shape_kernel_sym_value_range = decode_cudagraph_batch_sizes
+        npugraph_ex = nge.get_npu_backend(compiler_config=config)
+    except ImportError:
+        import torchair
 
-    npugraph_ex = torchair.get_npu_backend(compiler_config=config)
+        torch.npu.set_compile_mode(jit_compile=False)
+        config = torchair.CompilerConfig()
+        _configure_backend(config, ascend_compilation_config, vllm_config)
+        npugraph_ex = torchair.get_npu_backend(compiler_config=config)
 
     # torch.compile requires the output of the fx graph to be a tuple
     if not graph_returns_tuple(graph):
