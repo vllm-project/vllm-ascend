@@ -645,9 +645,11 @@ class NPUModelRunner(GPUModelRunner):
             # Mixed-batch case: num_reqs must equal num_reqs_padded
             assert num_reqs == num_reqs_padded
 
-            # Insert a dummy request instead of setting query_start_loc[num_reqs] = num_tokens_padded directly
-            self.query_start_loc.np[num_reqs_padded + 1] = num_tokens_padded
-            num_reqs_padded = num_reqs_padded + 1
+            # Do not insert if the last value already equals the num_tokens
+            if self.query_start_loc.np[num_reqs_padded] < num_tokens_padded:
+                # Insert a dummy request instead of change the last value directly
+                self.query_start_loc.np[num_reqs_padded + 1] = num_tokens_padded
+                num_reqs_padded = num_reqs_padded + 1
 
         self.query_start_loc.copy_to_gpu()
 
