@@ -3111,45 +3111,8 @@ class NPUModelRunner(GPUModelRunner):
 
             pad_attn = cudagraph_runtime_mode == CUDAGraphMode.FULL
             # check how to build dummy
-            num_scheduled_tokens_compressed_list_for_dummy = None
             if self.use_compress:
-                dummy_compress_position = 127
-                dummy_compress_seq_len = dummy_compress_position + 1
-                self.positions.fill_(dummy_compress_position)
-                self.optimistic_seq_lens_cpu[:num_reqs_padded] = dummy_compress_seq_len
-                self.seq_lens.copy_(self.optimistic_seq_lens_cpu, non_blocking=True)
-                for block_table in self.input_batch.block_table.block_tables:
-                    block_table.block_table.np[:num_reqs_padded, 0] = np.arange(
-                        num_reqs_padded, dtype=np.int32
-                    )
-                    block_table.block_table.copy_to_gpu(num_reqs_padded)
-                dummy_num_scheduled_tokens = (
-                    self.query_start_loc.np[1 : num_reqs + 1]
-                    - self.query_start_loc.np[:num_reqs]
-                ).astype(np.int32, copy=False)
-                dummy_num_computed_tokens = np.full(
-                    num_reqs,
-                    dummy_compress_position,
-                    dtype=np.int32,
-                )
-                (
-                    positions_compressed_list,
-                    req_indices_compressed_list,
-                    num_scheduled_tokens_compressed_list_for_dummy,
-                ) = get_compressed_pos_and_indices(
-                    dummy_num_computed_tokens,
-                    dummy_num_scheduled_tokens,
-                    self.arange_np[:num_reqs],
-                    self.use_compress,
-                    self.kv_cache_config.kv_cache_groups,
-                )
-                self.input_batch.block_table.compute_slot_mapping(
-                    num_reqs,
-                    self.query_start_loc.gpu[: num_reqs + 1],
-                    self.positions[:num_tokens_unpadded],
-                    positions_compressed_list,
-                    req_indices_compressed_list,
-                )
+                self.positions.fill_(127)
             attn_metadata, _ = self._build_attention_metadata(
                 num_tokens=num_tokens_unpadded,
                 num_tokens_padded=num_tokens_padded,
@@ -3160,7 +3123,6 @@ class NPUModelRunner(GPUModelRunner):
                 for_cudagraph_capture=is_graph_capturing,
                 use_padded_decode_metadata=cudagraph_runtime_mode == CUDAGraphMode.FULL,
                 num_scheduled_tokens_np=num_scheduled_tokens,
-                num_scheduled_tokens_compressed_list=num_scheduled_tokens_compressed_list_for_dummy,
             )
 
         with self.maybe_dummy_run_with_lora(
