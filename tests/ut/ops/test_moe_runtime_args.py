@@ -187,7 +187,7 @@ class TestMoERuntimeArgs(unittest.TestCase):
         for quant_type, expected_fusion in (
             (QuantType.MXFP8, True),
             (QuantType.MXFP4, True),
-            (QuantType.W4A8MXFP, False),
+            (QuantType.W4A8MXFP, True),
         ):
             with self.subTest(quant_type=quant_type):
                 mxfp_dtype = _get_test_mxfp_dtype(quant_type)
