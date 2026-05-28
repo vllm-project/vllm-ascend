@@ -288,6 +288,9 @@ class AscendW8A8MXFP8DynamicFusedMoEMethod(AscendMoEScheme):
                 tid2eid=tid2eid,
             )
 
+        if topk_weights is None or topk_ids is None:
+            raise RuntimeError("topk_weights and topk_ids must be set before fused MoE execution.")
+
         # this is a naive implementation for experts load balance so as
         # to avoid accumulating too much tokens on a single rank.
         # currently it is only activated when doing profile runs.
