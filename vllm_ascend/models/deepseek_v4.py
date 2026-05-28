@@ -44,7 +44,6 @@ from vllm.distributed import (
     get_tensor_model_parallel_world_size,
     tensor_model_parallel_all_gather,
 )
-from vllm.forward_context import get_forward_context
 from vllm.model_executor.layers.activation import SiluAndMul
 from vllm.model_executor.layers.deepseek_compressor import CompressorStateCache
 from vllm.model_executor.layers.deepseek_v4_attention import DeepseekV4IndexerCache
@@ -69,7 +68,6 @@ from vllm.model_executor.models.utils import (
     maybe_prefix,
     sequence_parallel_chunk,
 )
-from vllm.logger import logger
 from vllm.platforms import current_platform
 from vllm.sequence import IntermediateTensors
 from vllm.transformers_utils.configs.deepseek_v4 import DeepseekV4Config
@@ -84,103 +82,6 @@ from vllm_ascend.utils import (
     get_ascend_device_type,
     get_dsv4_compress_ratio,
 )
-
-_DSV4_DEBUG_NONFINITE_LOGGED: set[tuple[int, str]] = set()
-
-
-def _zero_padding_hidden_states(hidden_states: torch.Tensor) -> torch.Tensor:
-    forward_context = get_forward_context()
-    num_actual_tokens = getattr(forward_context, "num_actual_tokens", None)
-    if num_actual_tokens is not None and num_actual_tokens < hidden_states.shape[0]:
-        hidden_states[num_actual_tokens:].zero_()
-    return hidden_states
-
-
-def _dsv4_debug_is_prefill_or_mixed() -> bool:
-    forward_context = get_forward_context()
-    attn_metadata = getattr(forward_context, "attn_metadata", None)
-    if attn_metadata is None:
-        return False
-    if isinstance(attn_metadata, dict):
-        metadata_values = attn_metadata.values()
-    elif isinstance(attn_metadata, (list, tuple)):
-        metadata_values = attn_metadata
-    else:
-        metadata_values = (attn_metadata,)
-    for metadata in metadata_values:
-        if isinstance(metadata, (list, tuple)):
-            metadata = metadata[0] if metadata else None
-        if metadata is not None and getattr(metadata, "num_prefills", 0) > 0:
-            return True
-    return False
-
-
-def _dsv4_debug_check_actual_hidden_states(
-    hidden_states: torch.Tensor | None,
-    layer_idx: int,
-    stage: str,
-) -> bool:
-    if not _dsv4_debug_is_prefill_or_mixed():
-        return True
-    if hidden_states is None or hidden_states.numel() == 0 or not hidden_states.is_floating_point():
-        return True
-
-    forward_context = get_forward_context()
-    num_actual_tokens = getattr(forward_context, "num_actual_tokens", None)
-    if num_actual_tokens is None:
-        num_actual_tokens = hidden_states.shape[0]
-    actual_hidden_states = hidden_states[:num_actual_tokens]
-    if actual_hidden_states.numel() == 0:
-        return True
-
-    try:
-        is_finite = torch.isfinite(actual_hidden_states)
-        if bool(is_finite.all().item()):
-            return True
-        nan_count = int(torch.isnan(actual_hidden_states).sum().item())
-        inf_count = int(torch.isinf(actual_hidden_states).sum().item())
-        finite_count = int(is_finite.sum().item())
-        all_nan = nan_count == actual_hidden_states.numel()
-        all_nonfinite = finite_count == 0
-    except RuntimeError as exc:
-        logger.warning(
-            "[DSV4_DEBUG_NAN] finite check failed: layer=%s stage=%s "
-            "shape=%s actual_tokens=%s dtype=%s error=%s",
-            layer_idx,
-            stage,
-            tuple(hidden_states.shape),
-            num_actual_tokens,
-            hidden_states.dtype,
-            exc,
-        )
-        return True
-
-    key = (layer_idx, stage)
-    if key not in _DSV4_DEBUG_NONFINITE_LOGGED:
-        _DSV4_DEBUG_NONFINITE_LOGGED.add(key)
-        logger.warning(
-            "[DSV4_DEBUG_NAN] non-finite actual hidden states: "
-            "layer=%s stage=%s shape=%s actual_shape=%s dtype=%s "
-            "nan_count=%s inf_count=%s finite_count=%s numel=%s "
-            "all_nan=%s all_nonfinite=%s mode=%s num_tokens=%s "
-            "num_actual_tokens=%s",
-            layer_idx,
-            stage,
-            tuple(hidden_states.shape),
-            tuple(actual_hidden_states.shape),
-            hidden_states.dtype,
-            nan_count,
-            inf_count,
-            finite_count,
-            actual_hidden_states.numel(),
-            all_nan,
-            all_nonfinite,
-            getattr(forward_context, "cudagraph_runtime_mode", None),
-            getattr(forward_context, "num_tokens", None),
-            num_actual_tokens,
-        )
-    return False
-
 
 def hadamard_transform_ref(x: torch.Tensor, scale=1.0):
     from scipy.linalg import hadamard  # type: ignore[import-untyped]
@@ -909,35 +810,17 @@ class DeepseekV2DecoderLayer(nn.Module):
         residual: torch.Tensor | None,
         llama_4_scaling: torch.Tensor | None = None,
     ) -> torch.Tensor:
-        hidden_states = _zero_padding_hidden_states(hidden_states)
-        _dsv4_debug_check_actual_hidden_states(hidden_states, self.layer_idx, "layer_input")
         residual = hidden_states.clone()
-        _dsv4_debug_check_actual_hidden_states(residual, self.layer_idx, "attn_residual_clone")
         hidden_states, post, comb = self.hc_pre(hidden_states, self.hc_attn_fn, self.hc_attn_scale, self.hc_attn_base)
-        _dsv4_debug_check_actual_hidden_states(hidden_states, self.layer_idx, "attn_hc_pre_hidden")
-        _dsv4_debug_check_actual_hidden_states(post, self.layer_idx, "attn_hc_pre_post")
-        _dsv4_debug_check_actual_hidden_states(comb, self.layer_idx, "attn_hc_pre_comb")
         hidden_states = self.input_layernorm(hidden_states)
-        _dsv4_debug_check_actual_hidden_states(hidden_states, self.layer_idx, "attn_input_layernorm_output")
         attn_kwargs = {"positions": positions, "hidden_states": hidden_states, "llama_4_scaling": llama_4_scaling}
         hidden_states = self.self_attn(**attn_kwargs)
-        _dsv4_debug_check_actual_hidden_states(hidden_states, self.layer_idx, "self_attn_output")
         hidden_states = self.hc_post(hidden_states, residual, post, comb)
-        hidden_states = _zero_padding_hidden_states(hidden_states)
-        _dsv4_debug_check_actual_hidden_states(hidden_states, self.layer_idx, "attn_hc_post_output")
         residual = hidden_states.clone()
-        _dsv4_debug_check_actual_hidden_states(residual, self.layer_idx, "ffn_residual_clone")
         hidden_states, post, comb = self.hc_pre(hidden_states, self.hc_ffn_fn, self.hc_ffn_scale, self.hc_ffn_base)
-        _dsv4_debug_check_actual_hidden_states(hidden_states, self.layer_idx, "ffn_hc_pre_hidden")
-        _dsv4_debug_check_actual_hidden_states(post, self.layer_idx, "ffn_hc_pre_post")
-        _dsv4_debug_check_actual_hidden_states(comb, self.layer_idx, "ffn_hc_pre_comb")
         hidden_states = self.post_attention_layernorm(hidden_states)
-        _dsv4_debug_check_actual_hidden_states(hidden_states, self.layer_idx, "ffn_post_attention_layernorm_output")
         hidden_states = self.mlp(hidden_states)
-        _dsv4_debug_check_actual_hidden_states(hidden_states, self.layer_idx, "mlp_output")
         hidden_states = self.hc_post(hidden_states, residual, post, comb)
-        hidden_states = _zero_padding_hidden_states(hidden_states)
-        _dsv4_debug_check_actual_hidden_states(hidden_states, self.layer_idx, "ffn_hc_post_output")
 
         return hidden_states, residual
 
@@ -1052,8 +935,6 @@ class DeepseekV4Model(nn.Module):
             llama_4_scaling = None
 
         hidden_states = hidden_states.unsqueeze(1).repeat(1, self.hc_mult, 1)  # (b,s, c, h)
-        hidden_states = _zero_padding_hidden_states(hidden_states)
-        _dsv4_debug_check_actual_hidden_states(hidden_states, -1, "model_input_after_hc_repeat")
         for layer in islice(self.layers, self.start_layer, self.end_layer):
             hidden_states, residual = layer(positions, hidden_states, residual, llama_4_scaling)
 
