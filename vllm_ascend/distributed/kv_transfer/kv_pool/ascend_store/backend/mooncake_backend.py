@@ -78,7 +78,7 @@ class MooncakeBackend(Backend):
                 self.config.device_name,
                 self.config.master_server_address)
             if ret != 0:
-                msg = "Initialize memfabric ub protocol mooncake failed."
+                msg = "Failed to initialize MemFabric UB protocol for Mooncake."
                 logger.error(msg)
                 raise RuntimeError(msg)
         else:
