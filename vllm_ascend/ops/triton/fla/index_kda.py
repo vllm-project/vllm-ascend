@@ -11,7 +11,7 @@ import torch
 
 from vllm.triton_utils import triton
 
-from .utils_kda import tensor_cache
+from .utils import tensor_cache
 
 
 @tensor_cache

@@ -17,13 +17,13 @@ from vllm.triton_utils import tl, triton
 from vllm.utils.math_utils import cdiv, next_power_of_2
 
 from .chunk_delta_h_kda import chunk_gated_delta_rule_fwd_h
-from .cumsum_kda import chunk_local_cumsum
+from .cumsum import chunk_local_cumsum
 from .fused_recurrent_kda import fused_recurrent_gated_delta_rule_fwd_kernel
 from .index_kda import prepare_chunk_indices
-from .l2norm_kda import l2norm_fwd
+from .l2norm import l2norm_fwd
 from .op_kda import exp, log
 from .solve_tril_kda import solve_tril
-from .utils_kda import FLA_CHUNK_SIZE, is_amd
+from .utils import FLA_CHUNK_SIZE, is_amd
 
 BT_LIST_AUTOTUNE = [32, 64, 128]
 NUM_WARPS_AUTOTUNE = [2, 4, 8, 16] if is_amd else [4, 8, 16, 32]
@@ -1204,8 +1204,8 @@ def chunk_kda(
         scale = k.shape[-1] ** -0.5
 
     if use_qk_l2norm_in_kernel:
-        q = l2norm_fwd(q.contiguous())
-        k = l2norm_fwd(k.contiguous())
+        q = l2norm_fwd(q.contiguous(), backend="fla")
+        k = l2norm_fwd(k.contiguous(), backend="fla")
 
     o, final_state = chunk_kda_fwd(
         q=q,

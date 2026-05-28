@@ -11,7 +11,7 @@ import os
 
 from vllm.triton_utils import tl, tldevice, triton
 
-from .utils_kda import is_gather_supported
+from .utils import is_gather_supported
 
 if os.environ.get("FLA_USE_FAST_OPS", "0") == "1":
     exp = tldevice.fast_expf

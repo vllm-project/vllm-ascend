@@ -16,7 +16,7 @@ from vllm.triton_utils import tl, triton
 
 from .index_kda import prepare_chunk_indices
 from .op_kda import make_tensor_descriptor
-from .utils_kda import input_guard, is_amd, is_tma_supported
+from .utils import input_guard, is_amd, is_tma_supported
 
 FLA_TRIL_PRECISION = os.environ.get("FLA_TRIL_PRECISION", "ieee")
 ALLOWED_TRIL_PRECISIONS = ["ieee", "tf32"] if is_amd else ["ieee", "tf32", "tf32x3"]
