@@ -208,14 +208,14 @@ Provide recommended configurations for three scenarios (long sequence, low laten
 
 ### Table 2: Node-Level Detailed Configuration
 
-| Scenario | Node | #NPUs | TP | DP | BS | Concurrency | Max Context | MTP Speculation Num | FUSE D_MC/D_M | EP Switch | FC+CP | Async |
-|----------|------|-------|----|----|----|-------------|-------------|---------------------|---------------|-----------|-------|-------|
-| High Throughput (32K→1K) | P | 8 | 8 | 2 | 32 | 64 | 30k | 3 | Off | On | On | On |
-| High Throughput (32K→1K) | D | 8 | 2 | 8 | 8 | 64 | 30k | 12 | Off | On | Off | On |
-| Long Context | P | | | | | | | | | | | |
-| Long Context | D | | | | | | | | | | | |
-| Low Latency | P | | | | | | | | | | | |
-| Low Latency | D | | | | | | | | | | | |
+| Scenario | Configuration | #NPUs | TP | DP | BS | Concurrency | Max Context Length | MTP Speculation Num | FUSE D_MC/D_M | EP Switch | FC+CP | Async |
+|----------|---------------|-------|----|----|----|-------------|--------------------|---------------------|---------------|-----------|-------|-------|
+| High Throughput (32K→1K) | Server-P Node / Single Machine | 8 | 8 | 2 | 32 | 64 | 30k | 3 | Off | On | On | On |
+| High Throughput (32K→1K) | Server-D Node | 8 | 2 | 8 | 8 | 64 | 30k | 12 | Off | On | Off | On |
+| Long Context | Server-P Node / Single Machine | | | | | | | | | | | |
+| Long Context | Server-D Node | | | | | | | | | | | |
+| Low Latency | Server-P Node / Single Machine | | | | | | | | | | | |
+| Low Latency | Server-D Node | | | | | | | | | | | |
 
 ## 10 Performance Tuning (Optional)
 
