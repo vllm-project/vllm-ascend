@@ -917,7 +917,6 @@ This is the first release candidate of v0.12.0 for vLLM Ascend. We landed lots o
 ### Highlights
 
 - DeepSeek 3.2 is stable and performance is improved. In this release, you don't need to install any other packages now. Following the [official tutorial](https://github.com/vllm-project/vllm-ascend/blob/v0.12.0rc1/docs/source/tutorials/DeepSeek-V3.2.md) to start using it.
-- Async scheduler is more stable and ready to enable now. Please set `--async-scheduling` to enable it.
 - More new models, such as Qwen3-omni, DeepSeek OCR, PaddleOCR, OpenCUA are supported now.
 
 ### Core

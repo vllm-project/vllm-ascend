@@ -29,7 +29,6 @@ _server_cmd: &server_cmd
   - "8"
   - "--quantization"
   - "ascend"
-  - "--async-scheduling"
   - "--additional-config"
   - '{"fuse_muls_add": true, "multistream_overlap_shared_expert": false, "ascend_compilation_config": {"enable_npugraph_ex": true}}'
   - "--speculative-config"
