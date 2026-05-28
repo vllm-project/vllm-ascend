@@ -18,6 +18,7 @@ from vllm.distributed.weight_transfer.base import (
     WeightTransferInitInfo,
     WeightTransferUpdateInfo,
 )
+
 from vllm_ascend.distributed.weight_transfer.packed_tensor import (
     DEFAULT_PACKED_BUFFER_SIZE_BYTES,
     DEFAULT_PACKED_NUM_BUFFERS,
@@ -94,14 +95,11 @@ class HCCLWeightTransferUpdateInfo(WeightTransferUpdateInfo):
             )
         if len(self.shapes) != num_params:
             raise ValueError(
-                f"`shapes` should be of the same size as `names`: "
-                f"got {len(self.shapes)} and {len(self.names)}"
+                f"`shapes` should be of the same size as `names`: got {len(self.shapes)} and {len(self.names)}"
             )
 
 
-class HCCLWeightTransferEngine(
-    WeightTransferEngine[HCCLWeightTransferInitInfo, HCCLWeightTransferUpdateInfo]
-):
+class HCCLWeightTransferEngine(WeightTransferEngine[HCCLWeightTransferInitInfo, HCCLWeightTransferUpdateInfo]):
     """
     Weight transfer engine using HCCL for communication between trainer and workers.
 
@@ -113,9 +111,7 @@ class HCCLWeightTransferEngine(
     init_info_cls = HCCLWeightTransferInitInfo
     update_info_cls = HCCLWeightTransferUpdateInfo
 
-    def __init__(
-        self, config: WeightTransferConfig, parallel_config: ParallelConfig
-    ) -> None:
+    def __init__(self, config: WeightTransferConfig, parallel_config: ParallelConfig) -> None:
         """
         Initialize the HCCL weight transfer engine.
 
@@ -146,14 +142,12 @@ class HCCLWeightTransferEngine(
         rank = worker_rank + init_info.rank_offset
         # Create stateless process group
         device = torch.accelerator.current_device_index()
-        self.model_update_group = (
-            HCCLWeightTransferEngine._stateless_init_process_group(
-                init_info.master_address,
-                init_info.master_port,
-                rank,
-                init_info.world_size,
-                device=device,
-            )
+        self.model_update_group = HCCLWeightTransferEngine._stateless_init_process_group(
+            init_info.master_address,
+            init_info.master_port,
+            rank,
+            init_info.world_size,
+            device=device,
         )
 
     def receive_weights(
@@ -175,17 +169,12 @@ class HCCLWeightTransferEngine(
                          incrementally for each batch of weights to avoid OOM.
         """
         if self.model_update_group is None:
-            raise RuntimeError(
-                "HCCL weight transfer not initialized. "
-                "Call init_transfer_engine() first."
-            )
+            raise RuntimeError("HCCL weight transfer not initialized. Call init_transfer_engine() first.")
 
         if update_info.packed:
             # Build iterator of (name, (shape, dtype)) from update_info
             def state_dict_info_iterator():
-                for name, dtype_name, shape in zip(
-                    update_info.names, update_info.dtype_names, update_info.shapes
-                ):
+                for name, dtype_name, shape in zip(update_info.names, update_info.dtype_names, update_info.shapes):
                     dtype = getattr(torch, dtype_name)
                     yield (name, (shape, dtype))
 
@@ -199,14 +188,10 @@ class HCCLWeightTransferEngine(
             )
         else:
             # Use simple one-by-one broadcasting
-            for name, dtype_name, shape in zip(
-                update_info.names, update_info.dtype_names, update_info.shapes
-            ):
+            for name, dtype_name, shape in zip(update_info.names, update_info.dtype_names, update_info.shapes):
                 dtype = getattr(torch, dtype_name)
                 weight = torch.empty(shape, dtype=dtype, device="npu")
-                self.model_update_group.broadcast(
-                    weight, src=0, stream=torch.npu.current_stream()
-                )
+                self.model_update_group.broadcast(weight, src=0, stream=torch.npu.current_stream())
                 load_weights([(name, weight)])
                 del weight
 
@@ -325,9 +310,7 @@ class HCCLWeightTransferEngine(
         )
 
     @staticmethod
-    def _stateless_init_process_group(
-        master_address, master_port, rank, world_size, device
-    ):
+    def _stateless_init_process_group(master_address, master_port, rank, world_size, device):
         """
         vLLM provides `StatelessProcessGroup` to create a process group
         without considering the global process group in torch.distributed.
@@ -335,11 +318,10 @@ class HCCLWeightTransferEngine(
         the data-plane communication (HCCL) between external (train processes)
         and vLLM workers.
         """
-        from vllm_ascend.distributed.device_communicators.pyhccl import PyHcclCommunicator
         from vllm.distributed.utils import StatelessProcessGroup
 
-        pg = StatelessProcessGroup.create(
-            host=master_address, port=master_port, rank=rank, world_size=world_size
-        )
+        from vllm_ascend.distributed.device_communicators.pyhccl import PyHcclCommunicator
+
+        pg = StatelessProcessGroup.create(host=master_address, port=master_port, rank=rank, world_size=world_size)
         pyhccl = PyHcclCommunicator(pg, device=device)
         return pyhccl

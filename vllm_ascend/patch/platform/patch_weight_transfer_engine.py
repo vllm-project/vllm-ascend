@@ -48,6 +48,7 @@
 #   or provides an extension point for out-of-tree backends.
 
 from vllm.distributed.weight_transfer.factory import WeightTransferEngineFactory
+
 from vllm_ascend.distributed.weight_transfer.hccl_engine import (
     HCCLWeightTransferEngine,
 )
