@@ -198,9 +198,9 @@ Provide recommended configurations for three scenarios (long sequence, low laten
 
 ### Table 1: Scenario Overview
 
-| Scenario | Remarks | *Total NPUs | Weight Version | Optimization Rationale |
-|----------|---------|--------------|----------------|------------------------|
-| High Throughput<br>(32K context → 1K output) | 1P1D deployment | 16 (A3) | glm5.1w4a8 | For high throughput with short sequences, try adjusting xxx parameters |
+| Scenario | Deployment Mode | *Total NPUs | Weight Version | Optimization Rationale |
+|----------|----------------|-------------|----------------|------------------------|
+| High Throughput<br>(32K context → 1K output) | 1P1D deployment | 16 (A3) | glm5.1w4a8 | For short-sequence high throughput, try adjusting xxx parameters |
 | Long Context | | | | |
 | Low Latency | | | | |
 
@@ -208,8 +208,8 @@ Provide recommended configurations for three scenarios (long sequence, low laten
 
 ### Table 2: Node-Level Detailed Configuration
 
-| Scenario | Node | #NPUs | TP | DP | BS | Concurrency | Max Context | MTP Speculation | FUSE D_MC/D_M | EP Switch | FC+CP | Async |
-|----------|------|-------|----|----|----|-------------|-------------|-----------------|---------------|-----------|-------|-------|
+| Scenario | Node | #NPUs | TP | DP | BS | Concurrency | Max Context | MTP Speculation Num | FUSE D_MC/D_M | EP Switch | FC+CP | Async |
+|----------|------|-------|----|----|----|-------------|-------------|---------------------|---------------|-----------|-------|-------|
 | High Throughput (32K→1K) | P | 8 | 8 | 2 | 32 | 64 | 30k | 3 | Off | On | On | On |
 | High Throughput (32K→1K) | D | 8 | 2 | 8 | 8 | 64 | 30k | 12 | Off | On | Off | On |
 | Long Context | P | | | | | | | | | | | |
