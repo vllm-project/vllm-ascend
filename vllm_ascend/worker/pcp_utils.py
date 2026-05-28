@@ -1225,7 +1225,7 @@ class PCPManager:
 
                 # Generate MTP attention masks for decode requests when dcp_size > 1 with speculative decoding
             if (
-                self.dcp_world_size > 1
+                self.dcp_world_size * self.pcp_world_size > 1
                 and self.speculative_config
                 and self.num_decode_reqs > 0
                 and num_scheduled_tokens is not None

@@ -748,13 +748,6 @@ class AscendSpecDecodeBaseProposer(SpecDecodeBaseProposer):
                     )
                 slot_indices = torch.cat(slot_indices_list, dim=0)
 
-                # fold block_table (restore it to original size before flattened)
-                block_indices = torch.cat(
-                    [torch.tensor([0], dtype=torch.int32), torch.cumsum(query_lens_d, dim=0)[:-1]]
-                )
-                common_attn_metadata.block_table_tensor[:batch_size] = common_attn_metadata.block_table_tensor[
-                    block_indices
-                ]
                 common_attn_metadata.block_table_tensor = common_attn_metadata.block_table_tensor[:batch_size]
 
                 # Copy the old attn_metadata and update
