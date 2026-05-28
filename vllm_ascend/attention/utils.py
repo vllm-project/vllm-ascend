@@ -9,7 +9,6 @@ from vllm.distributed.kv_transfer import get_kv_transfer_group, has_kv_transfer_
 from vllm.forward_context import ForwardContext, get_forward_context
 from vllm.v1.attention.backends.utils import CommonAttentionMetadata
 
-from vllm_ascend import envs
 from vllm_ascend.utils import AscendDeviceType, get_ascend_config, get_ascend_device_type
 from vllm_ascend.worker.kvcomp_utils import KVCompMetaData
 
@@ -157,10 +156,6 @@ class AscendCommonAttentionMetadata(CommonAttentionMetadata):
     # E.g., tensor([128, 256, 64]) for 3 requests with different seq lengths.
     seq_lens_cpu: torch.Tensor = None
 
-    # Compatibility field: some vLLM versions pass this explicitly when
-    # constructing CommonAttentionMetadata while others do not.
-    seq_lens_cpu_upper_bound: torch.Tensor | None = None
-
     # CPU tensor of already computed tokens count per request.
     # E.g., tensor([100, 200, 50]) means req0 has 100 tokens already computed.
     num_computed_tokens_cpu: torch.Tensor = None
@@ -176,6 +171,7 @@ class AscendCommonAttentionMetadata(CommonAttentionMetadata):
     # NPU tensor of position indices for rotary embeddings computation.
     # E.g., tensor([0, 1, 2, ...]) indicating token positions in sequence.
     positions: torch.Tensor = None
+    positions_cpu: torch.Tensor = None
 
     # Current attention state (e.g., ChunkedPrefill, DecodeOnly).
     attn_state: Any = None
@@ -215,6 +211,7 @@ class AscendCommonAttentionMetadata(CommonAttentionMetadata):
             causal=self.causal,
             actual_seq_lengths_q=self.actual_seq_lengths_q[:num_actual_tokens],
             positions=self.positions,
+            positions_cpu=self.positions_cpu,
             attn_state=self.attn_state,
             graph_pad_size=-1,  # It should be -1 when not run in fullgraph mode.
             num_input_tokens=self.num_input_tokens,
@@ -377,12 +374,13 @@ def transdata(nd_mat, block_size: tuple = (16, 16)):
 
 
 def enabling_mlapo(vllm_config: VllmConfig) -> bool:
+    config_val = get_ascend_config().enable_mlapo
     if get_ascend_device_type() == AscendDeviceType.A5:
-        return bool(envs.VLLM_ASCEND_ENABLE_MLAPO)
+        return bool(config_val)
 
     is_decode_instance = (
         vllm_config.kv_transfer_config is not None
         and vllm_config.kv_transfer_config.is_kv_consumer
         and not vllm_config.kv_transfer_config.is_kv_producer
     )
-    return bool(envs.VLLM_ASCEND_ENABLE_MLAPO and is_decode_instance)
+    return bool(config_val and is_decode_instance)
