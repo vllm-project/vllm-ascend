@@ -134,57 +134,43 @@ def _make_empty_intermediate_tensors(
 
 
 # ---------------------------------------------------------------------------
-# Patch GPUModelRunner._check_and_update_cudagraph_mode to skip the drafter
-# isinstance assertion on non-last PP ranks.  The drafter is only created on
-# the last PP rank but the assertion runs unconditionally.
+# Helper: return a dummy drafter that passes isinstance checks for both
+# AscendEagleProposer (vllm-ascend) and EagleProposer (upstream).
 # ---------------------------------------------------------------------------
-def _patch_cudagraph_check():
+def _make_dummy_drafter():
+    from vllm_ascend.spec_decode.eagle_proposer import AscendEagleProposer
+
+    class _DrafterStub(AscendEagleProposer):
+        def __init__(s):
+            pass
+
+        def initialize_cudagraph_keys(s, *a, **k):
+            pass
+
+        def initialize_attn_backend(s, *a, **k):
+            pass
+
+    return _DrafterStub()
+
+
+# ---------------------------------------------------------------------------
+# Patch GPUModelRunner.__init__ to ensure self.drafter exists on non-last
+# PP ranks.  The upstream init only creates the drafter on the last PP rank.
+# ---------------------------------------------------------------------------
+def _patch_runner_init():
     try:
         from vllm.v1.worker.gpu_model_runner import GPUModelRunner
     except ImportError:
         return
 
-    _original_check = GPUModelRunner._check_and_update_cudagraph_mode
+    _original_init = GPUModelRunner.__init__
 
-    def _patched_check(self, attention_backends, kv_cache_groups):
-        # On non-last PP ranks the drafter is not initialized.  Save and
-        # temporarily install a dummy that passes the isinstance check so
-        # the original method body can run without failing the assertion.
-        if (
-            self.speculative_config
-            and get_pp_group().world_size > 1
-            and not get_pp_group().is_last_rank
-        ):
-            _should_restore = False
-            _saved_drafter = None
-            if hasattr(self, "drafter"):
-                _saved_drafter = self.drafter
-                _should_restore = True
+    def _patched_init(self, vllm_config, device, **kwargs):
+        _original_init(self, vllm_config, device, **kwargs)
+        if self.speculative_config and not hasattr(self, "drafter"):
+            self.drafter = _make_dummy_drafter()
 
-            # Create a lightweight object that passes isinstance against
-            # EagleProposer.  We do this late via composition to avoid
-            # importing EagleProposer at module level.
-            from vllm_ascend.spec_decode.eagle_proposer import AscendEagleProposer
-
-            class _DrafterStub(AscendEagleProposer):
-                def __init__(s):
-                    pass
-
-                def initialize_cudagraph_keys(s, *a, **k):
-                    pass
-
-            self.drafter = _DrafterStub()
-
-            try:
-                _original_check(self, attention_backends, kv_cache_groups)
-            finally:
-                if _should_restore:
-                    self.drafter = _saved_drafter
-            return
-
-        _original_check(self, attention_backends, kv_cache_groups)
-
-    GPUModelRunner._check_and_update_cudagraph_mode = _patched_check
+    GPUModelRunner.__init__ = _patched_init
 
 
 # ---------------------------------------------------------------------------
@@ -225,5 +211,5 @@ Eagle3LlamaForCausalLM.__init__ = _patched_eagle3_init
 Eagle3LlamaForCausalLM.forward = _patched_eagle3_forward
 Eagle3LlamaForCausalLM.supports_pp = True
 LlamaModel.make_empty_intermediate_tensors = _make_empty_intermediate_tensors
-_patch_cudagraph_check()
+_patch_runner_init()
 _patch_proposer_load_model()
