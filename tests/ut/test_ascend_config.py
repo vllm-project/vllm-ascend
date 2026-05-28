@@ -111,7 +111,6 @@ class TestAscendConfig(TestBase):
         ):
             ascend_config = init_ascend_config(test_vllm_config)
 
-        self.assertTrue(ascend_config.enable_context_parallel)
         self.assertTrue(ascend_config.enable_matmul_allreduce)
         self.assertEqual(ascend_config.enable_fused_mc2, 2)
         self.assertFalse(ascend_config.enable_mlapo)
@@ -152,7 +151,6 @@ class TestAscendConfig(TestBase):
     def test_migrated_config_overrides_envs(self, mock_fix_incompatible_config, mock_info_once):
         test_vllm_config = VllmConfig()
         test_vllm_config.additional_config = {
-            "enable_context_parallel": False,
             "enable_matmul_allreduce": False,
             "enable_fused_mc2": 0,
             "enable_mlapo": True,
@@ -177,7 +175,6 @@ class TestAscendConfig(TestBase):
         ):
             ascend_config = init_ascend_config(test_vllm_config)
 
-        self.assertFalse(ascend_config.enable_context_parallel)
         self.assertFalse(ascend_config.enable_matmul_allreduce)
         self.assertEqual(ascend_config.enable_fused_mc2, 0)
         self.assertTrue(ascend_config.enable_mlapo)
