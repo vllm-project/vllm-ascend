@@ -95,7 +95,6 @@ test_cases:
 #  16384 1024  0%  20
   - name: "GLM-5_1-w8a8-High—Throughput-bs20"
     model: "Eco-Tech/GLM-5.1-w8a8"
-    special_dependencies: *special_dependencies
     envs:
       <<: *envs
     server_cmd: *server_cmd
@@ -112,7 +111,6 @@ test_cases:
 #32768 512 0%  8
   - name: "GLM-5_1-w8a8-High—Throughput-bs8"
     model: "Eco-Tech/GLM-5.1-w8a8"
-    special_dependencies: *special_dependencies
     envs:
       <<: *envs
     server_cmd: *server_cmd
@@ -130,7 +128,6 @@ test_cases:
 #32768  512 90% 32
   - name: "GLM-5_1-w8a8-High—Throughput-bs32"
     model: "Eco-Tech/GLM-5.1-w8a8"
-    special_dependencies: *special_dependencies
     envs:
       <<: *envs
     server_cmd: *server_cmd
@@ -146,7 +143,6 @@ test_cases:
 #65536  1024  90% 10
   - name: "GLM-5_1-w8a8-High—Throughput-bs10"
     model: "Eco-Tech/GLM-5.1-w8a8"
-    special_dependencies: *special_dependencies
     envs:
       <<: *envs
     server_cmd: *server_cmd
