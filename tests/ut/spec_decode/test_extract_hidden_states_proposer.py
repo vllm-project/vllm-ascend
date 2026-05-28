@@ -22,8 +22,9 @@ with Ascend-specific additions for ACL graph differences.
 from __future__ import annotations
 
 import numpy as np
+import pytest
 import torch
-from vllm.config import CacheConfig, VllmConfig, set_current_vllm_config
+from vllm.config import CacheConfig, CUDAGraphMode, VllmConfig, set_current_vllm_config
 
 from vllm_ascend.ascend_config import init_ascend_config
 from vllm_ascend.spec_decode.extract_hidden_states_proposer import (
@@ -242,3 +243,161 @@ def test_prepare_next_token_ids_padded():
         # Verify return dtypes
         assert next_token_ids.dtype == torch.int32
         assert valid_sampled_tokens_count.dtype == torch.int32
+
+
+def _make_batch_desc(num_tokens: int):
+    """Build a minimal mock for ``CudagraphDispatcher.dispatch``'s batch_desc."""
+    from unittest.mock import MagicMock
+
+    batch_desc = MagicMock()
+    batch_desc.num_tokens = num_tokens
+    return batch_desc
+
+
+def _build_proposer_for_padding_test(data_parallel_size: int = 1):
+    """Shared helper for _determine_batch_execution_and_padding tests.
+
+    Returns a proposer whose ``runner``, ``cudagraph_dispatcher``, and
+    DP-related attributes are mocked so we can drive
+    ``_determine_batch_execution_and_padding`` without an NPU.
+    """
+    from unittest.mock import MagicMock
+
+    vllm_config = _create_vllm_config()
+    vllm_config.parallel_config.data_parallel_size = data_parallel_size
+
+    runner = MagicMock()
+    runner.pin_memory = False
+    runner.pcp_size = 1
+    runner.dcp_size = 1
+
+    with set_current_vllm_config(vllm_config):
+        proposer = AscendExtractHiddenStatesProposer(
+            vllm_config=vllm_config, device=torch.device("cpu"), runner=runner
+        )
+
+    proposer.dp_rank = 0
+    proposer.cudagraph_dispatcher = MagicMock()
+    return proposer, runner
+
+
+def test_determine_batch_execution_and_padding_asserts_when_runner_is_none():
+    """Constructing without a runner must fail fast with a clear message.
+
+    Regression guard for the AttributeError that would otherwise be raised
+    on ``self.runner._pad_for_sequence_parallelism(...)`` at the entry of
+    the override.
+    """
+    vllm_config = _create_vllm_config()
+
+    with set_current_vllm_config(vllm_config):
+        proposer = AscendExtractHiddenStatesProposer(
+            vllm_config=vllm_config, device=torch.device("cpu"), runner=None
+        )
+
+    proposer.cudagraph_dispatcher = type("D", (), {"dispatch": staticmethod(lambda *a, **kw: (None, None))})()
+
+    with pytest.raises(AssertionError, match="requires a runner reference"):
+        proposer._determine_batch_execution_and_padding(num_tokens=4)
+
+
+def test_determine_batch_execution_and_padding_dp1_sp_pads_and_skips_sync():
+    """With DP=1, SP-pads ``num_tokens`` but never calls DP sync.
+
+    Verifies the ``data_parallel_size == 1`` early-out and that the
+    runner's ``_pad_for_sequence_parallelism`` is still consulted so the
+    cache_only forward gets an SP-aligned input.
+    """
+    proposer, runner = _build_proposer_for_padding_test(data_parallel_size=1)
+
+    # Simulate TP=4 SP padding: round 6 up to 8
+    runner._pad_for_sequence_parallelism = lambda n: ((n + 3) // 4) * 4
+    proposer.cudagraph_dispatcher.dispatch.return_value = (
+        CUDAGraphMode.NONE,
+        _make_batch_desc(num_tokens=8),
+    )
+
+    cudagraph_mode, num_tokens_padded, num_tokens_across_dp = (
+        proposer._determine_batch_execution_and_padding(num_tokens=6)
+    )
+
+    assert num_tokens_padded == 8
+    assert num_tokens_across_dp is None  # no DP sync when dp_size == 1
+    assert cudagraph_mode == CUDAGraphMode.NONE
+    # Dispatcher saw the SP-padded value, not the raw 6.
+    args, kwargs = proposer.cudagraph_dispatcher.dispatch.call_args
+    assert args[0] == 8 or kwargs.get("num_tokens") == 8 or args == (8,)
+    runner._sync_metadata_across_dp.assert_not_called()
+
+
+def test_determine_batch_execution_and_padding_dp2_uses_runner_sync():
+    """With DP>1, must call ``runner._sync_metadata_across_dp`` (Ascend's
+    shape ``[2, dp_size]`` path) and must NOT call upstream
+    ``coordinate_batch_across_dp`` (shape ``[4, dp_size]``).
+
+    This is the core regression test for the gloo
+    ``op.preamble.length 8 vs 4`` shape mismatch on the DP cpu_group.
+    """
+    from unittest.mock import patch
+
+    proposer, runner = _build_proposer_for_padding_test(data_parallel_size=2)
+
+    runner._pad_for_sequence_parallelism = lambda n: ((n + 3) // 4) * 4
+    proposer.cudagraph_dispatcher.dispatch.side_effect = [
+        # First dispatch (pre-sync) with SP-padded num_tokens=8
+        (CUDAGraphMode.NONE, _make_batch_desc(num_tokens=8)),
+        # Re-dispatch after sync; the agreed value happens to also be 8
+        (CUDAGraphMode.NONE, _make_batch_desc(num_tokens=8)),
+    ]
+    # Pretend both DP ranks agreed on 8 tokens
+    sync_tensor = torch.tensor([8, 8], dtype=torch.int32)
+    runner._sync_metadata_across_dp.return_value = (8, sync_tensor, CUDAGraphMode.NONE)
+
+    with patch(
+        "vllm.v1.spec_decode.extract_hidden_states.coordinate_batch_across_dp"
+    ) as mock_upstream_coord:
+        cudagraph_mode, num_tokens_padded, num_tokens_across_dp = (
+            proposer._determine_batch_execution_and_padding(num_tokens=6)
+        )
+
+    # Upstream DP sync must NOT be used (it would post a [4, dp_size]
+    # tensor and break gloo on the shared cpu_group).
+    mock_upstream_coord.assert_not_called()
+    # Runner sync called once, with the SP-padded value and is_draft_model=True.
+    runner._sync_metadata_across_dp.assert_called_once()
+    call_kwargs = runner._sync_metadata_across_dp.call_args.kwargs
+    assert call_kwargs["num_tokens"] == 8  # SP-padded 6 -> 8
+    assert call_kwargs["is_draft_model"] is True
+
+    assert num_tokens_padded == 8
+    assert num_tokens_across_dp is not None
+    assert num_tokens_across_dp[proposer.dp_rank].item() == 8
+
+
+def test_determine_batch_execution_and_padding_dp2_keeps_tp_aligned_for_main_forward():
+    """If the runner's SP padding produces a TP-aligned value, the final
+    ``num_tokens_padded`` returned to the proposer (and downstream main
+    forward) is guaranteed to be TP-aligned too. Regression guard for
+    the ``reduce_scatter`` assertion ``input.shape[0] % world_size == 0``.
+    """
+    proposer, runner = _build_proposer_for_padding_test(data_parallel_size=2)
+
+    tp = 4
+    runner._pad_for_sequence_parallelism = lambda n: ((n + tp - 1) // tp) * tp
+    proposer.cudagraph_dispatcher.dispatch.side_effect = [
+        (CUDAGraphMode.NONE, _make_batch_desc(num_tokens=8)),
+        (CUDAGraphMode.NONE, _make_batch_desc(num_tokens=8)),
+    ]
+    runner._sync_metadata_across_dp.return_value = (
+        8,
+        torch.tensor([8, 8], dtype=torch.int32),
+        CUDAGraphMode.NONE,
+    )
+
+    _mode, num_tokens_padded, _across = proposer._determine_batch_execution_and_padding(
+        num_tokens=6
+    )
+
+    # The whole point of the fix: never returns 6 (which would crash
+    # SP reduce_scatter as 6 % 4 != 0).
+    assert num_tokens_padded % tp == 0

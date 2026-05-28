@@ -40,6 +40,62 @@ class AscendExtractHiddenStatesProposer(ExtractHiddenStatesProposer):
         super().__init__(vllm_config, device)
 
     @torch.inference_mode()
+    def _determine_batch_execution_and_padding(
+        self,
+        num_tokens: int,
+        use_cudagraphs: bool = True,
+    ) -> tuple[CUDAGraphMode, int, torch.Tensor | None]:
+        """Determine cudagraph mode and padded token count for this proposer step.
+
+        Same contract as upstream ``ExtractHiddenStatesProposer``, but follows
+        the Ascend model runner path: SP-pad ``num_tokens`` before dispatch,
+        and use ``runner._sync_metadata_across_dp`` for DP coordination when
+        data parallel size > 1.
+        """
+        assert self.runner is not None, (
+            "AscendExtractHiddenStatesProposer requires a runner reference "
+            "for _pad_for_sequence_parallelism / _sync_metadata_across_dp"
+        )
+
+        # SP padding must happen BEFORE DP sync (matches the main runner)
+        num_tokens = self.runner._pad_for_sequence_parallelism(num_tokens)
+
+        cudagraph_mode, batch_desc = self.cudagraph_dispatcher.dispatch(
+            num_tokens,
+            valid_modes=({CUDAGraphMode.NONE} if not use_cudagraphs else None),
+        )
+        num_tokens_padded = batch_desc.num_tokens
+
+        num_tokens_across_dp = None
+        if self.vllm_config.parallel_config.data_parallel_size > 1:
+            # Reuse the runner's DP sync so the shape matches the main model
+            # forward. ``is_draft_model=True`` short-circuits the all_reduce
+            # (cache_only draft is not MoE); the SP-pad above keeps the value
+            # TP-aligned.
+            (
+                _max_tokens_across_dp,
+                num_tokens_across_dp,
+                synced_cudagraph_mode,
+            ) = self.runner._sync_metadata_across_dp(
+                num_tokens=num_tokens_padded,
+                is_draft_model=True,
+                cudagraph_mode=cudagraph_mode,
+                allow_dp_padding=use_cudagraphs,
+            )
+
+            if num_tokens_across_dp is not None:
+                num_tokens_padded = int(num_tokens_across_dp[self.dp_rank].item())
+                # Re-dispatch with DP-synced padding.
+                cudagraph_mode, batch_desc = self.cudagraph_dispatcher.dispatch(
+                    num_tokens_padded,
+                    valid_modes={synced_cudagraph_mode},
+                )
+                assert batch_desc.num_tokens == num_tokens_padded
+                num_tokens_across_dp[self.dp_rank] = num_tokens_padded
+
+        return cudagraph_mode, num_tokens_padded, num_tokens_across_dp
+
+    @torch.inference_mode()
     def dummy_run(
         self,
         num_tokens,
