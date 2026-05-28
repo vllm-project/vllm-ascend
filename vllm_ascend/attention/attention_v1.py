@@ -1257,10 +1257,12 @@ class AscendAttentionBackendImpl(AttentionImpl):
             query_input = query[:num_tokens]
             
             # Call fallback SDPA
+            # fmt:off
             attn_output = self._fallback_sdpa(
                 query_input, key, value, block_table, block_size,
                 attn_metadata, actual_seq_lengths_kv, num_tokens)
-                
+            # fmt:on
+            
             # Fix: Handle size mismatch from _fallback_sdpa or NPU operator
             if attn_output.dim() == 2:
                 # attn_output is [tokens, hidden_size], need to reshape
@@ -1343,11 +1345,7 @@ class AscendAttentionBackendImpl(AttentionImpl):
                 learnable_sink=self.sinks,
             )
         else:
-            if self.head_size > 192:
-                attn_output = self._fallback_sdpa(
-                    query, key, value, block_table, block_size, attn_metadata, actual_seq_lengths_kv, num_tokens
-                )
-            elif not attn_metadata.causal:
+            if not attn_metadata.causal:
                 attn_output, _ = torch_npu.npu_fused_infer_attention_score(
                     query=query,
                     key=key,
