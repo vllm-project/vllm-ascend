@@ -216,8 +216,6 @@ vllm serve /path/to/weight/MiniMax-M2.5-w8a8-QuaRot \
     --tensor-parallel-size 8 \
     --quantization ascend \
     --enable-expert-parallel \
-    --enable-chunked-prefill \
-    --enable-prefix-caching \
     --max-num-seqs 32 \
     --seed 1024 \
     --max-num-batched-tokens 32768 \
