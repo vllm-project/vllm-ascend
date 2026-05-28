@@ -65,6 +65,22 @@ class MooncakeBackend(Backend):
                 msg = "Initialize mooncake failed."
                 logger.error(msg)
                 raise RuntimeError(msg)
+        elif self.config.protocol == "ub":
+            local_hostname = get_ip()
+            transfer_engine = global_te.get_transfer_engine(local_hostname, device_name=None)
+            self.local_seg = ""
+            ret = self.store.setup(
+                local_hostname,
+                self.config.metadata_server,
+                self.config.global_segment_size,
+                self.config.local_buffer_size,
+                self.config.protocol,
+                self.config.device_name,
+                self.config.master_server_address)
+            if ret != 0:
+                msg = "Initialize memfabric ub protocol mooncake failed."
+                logger.error(msg)
+                raise RuntimeError(msg)
         else:
             raise NotImplementedError(f"MooncakeBackend does not support protocol {self.config.protocol!r}.")
 
