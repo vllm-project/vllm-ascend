@@ -239,15 +239,16 @@ def _patched_minimax_m2_forward(
         assert intermediate_tensors is not None
         hidden_states = intermediate_tensors["hidden_states"]
         residual = intermediate_tensors["residual"]
-        # Carry forward aux hidden states collected on earlier PP ranks.
-        # Transported as a stacked tensor [num_aux, batch, hidden_size];
-        # unbind back to list of tensors.
+        # Carry forward aux hidden states from earlier PP ranks.
+        # Transported as [3, batch, hidden] with an aux_count scalar.
         aux_stacked = intermediate_tensors.tensors.get("aux_hidden_states")
-        aux_hidden_states: list[torch.Tensor] = (
-            list(torch.unbind(aux_stacked, dim=0))
-            if aux_stacked is not None and aux_stacked.shape[0] > 0
-            else []
-        )
+        aux_count_t = intermediate_tensors.tensors.get("aux_count")
+        if aux_stacked is not None and aux_count_t is not None and aux_count_t.item() > 0:
+            aux_hidden_states = list(
+                torch.unbind(aux_stacked[: aux_count_t.item()], dim=0)
+            )
+        else:
+            aux_hidden_states = []
 
     for idx, layer in enumerate(self.layers[self.start_layer : self.end_layer]):
         layer_idx = self.start_layer + idx
@@ -256,19 +257,22 @@ def _patched_minimax_m2_forward(
         hidden_states, residual = layer(positions, hidden_states, residual)
 
     if not get_pp_group().is_last_rank:
-        # Stack aux list into single tensor for PP transport.
-        # Empty list → shape-(0) placeholder so receiver can still deserialize.
-        if aux_hidden_states:
-            aux_transport = torch.stack(aux_hidden_states)
-        else:
-            aux_transport = torch.zeros(
-                0, hidden_states.shape[0], hidden_states.shape[1],
-                dtype=hidden_states.dtype, device=hidden_states.device,
+        # Pad to 3 and stack for PP transport; pass real count separately.
+        real_count = len(aux_hidden_states)
+        while len(aux_hidden_states) < 3:
+            aux_hidden_states.append(
+                torch.zeros_like(aux_hidden_states[0])
+                if aux_hidden_states
+                else torch.zeros(
+                    hidden_states.shape[0], hidden_states.shape[1],
+                    dtype=hidden_states.dtype, device=hidden_states.device,
+                )
             )
         return IntermediateTensors({
             "hidden_states": hidden_states,
             "residual": residual,
-            "aux_hidden_states": aux_transport,
+            "aux_hidden_states": torch.stack(aux_hidden_states),
+            "aux_count": torch.tensor([real_count], dtype=torch.int64, device=hidden_states.device),
         })
 
     hidden_states, _ = self.norm(hidden_states, residual)
@@ -302,11 +306,12 @@ if not getattr(_original_minimax_m2_forward, "_vllm_ascend_minimax_eagle3_patche
             _orig=_original_make_empty,
         ) -> IntermediateTensors:
             result = _orig(batch_size, dtype, device)
-            aux_layers = getattr(self, "aux_hidden_state_layers", ()) or ()
-            max_aux = max(len(aux_layers), 3)
             result.tensors["aux_hidden_states"] = torch.zeros(
-                (max_aux, batch_size, self.config.hidden_size),
+                (3, batch_size, self.config.hidden_size),
                 dtype=dtype, device=device,
+            )
+            result.tensors["aux_count"] = torch.zeros(
+                (1,), dtype=torch.int64, device=device,
             )
             return result
 
