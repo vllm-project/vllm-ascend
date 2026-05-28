@@ -397,7 +397,7 @@ After several minutes, you will get the performance evaluation result.
 
 The following configurations are recommended for different deployment scenarios to achieve optimal performance with Qwen3 Dense models.
 
-### Long Sequence
+### 9.1 Long Sequence
 
 For scenarios with long input/output sequences (e.g., document processing, long-form generation):
 
@@ -406,17 +406,17 @@ For scenarios with long input/output sequences (e.g., document processing, long-
 - Adjust `--max-num-batched-tokens` to balance the number of tokens processed per batch, ensuring sufficient tokens to fill the batch while avoiding OOM.
 - Enable `--compilation-config '{"cudagraph_mode": "FULL_DECODE_ONLY"}'` to reduce scheduling overhead during long decodes.
 
-### Low Latency
+### 9.2 Low Latency
 
 For interactive or real-time applications requiring minimal response time:
 
 - Enable `--async-scheduling` and FullGraph optimization: `--compilation-config '{"cudagraph_mode": "FULL_DECODE_ONLY"}'`.
 - Manually specify `cudagraph_capture_sizes` to cover the target concurrency range and avoid padding overhead during decode (see [10.2](#102-optimization-highlights)).
-- Set `TASK_QUEUE_ENABLE=1` to optimize operator dispatch pipeline.
+- Set `export TASK_QUEUE_ENABLE=1` to optimize operator dispatch pipeline.
 - Use `--block-size 128` to reduce scheduling granularity.
 - Enable jemalloc if available on your system (see [5.2](#52-multi-npu-online-deployment)).
 
-### High Throughput
+### 9.3 High Throughput
 
 For batch processing or serving scenarios maximizing tokens-per-second:
 
@@ -426,6 +426,133 @@ For batch processing or serving scenarios maximizing tokens-per-second:
 - Use a larger `--max-num-batched-tokens` value (e.g., 40960) to maximize batch utilization.
 - Enable chunked prefill to interleave prefill and decode tokens within a batch.
 - Set `--gpu-memory-utilization 0.9` to maximize available KV cache memory.
+
+### 9.4 Reference Configurations
+
+This section provides complete, annotated launch commands for representative model variants. These configurations have been validated in production environments and can serve as a starting point for your deployment.
+
+#### 9.4.1 Qwen3-8B (BF16) — General Purpose / Low Latency
+
+This configuration targets low-latency serving with TP=2, FlashComm, and speculative decoding on 2 NPUs:
+
+```bash
+# NPU device selection
+export ASCEND_RT_VISIBLE_DEVICES=0,1
+
+# Memory allocator configuration
+export PYTORCH_NPU_ALLOC_CONF=expandable_segments:True
+
+# Operator dispatch pipeline optimization
+export TASK_QUEUE_ENABLE=1
+
+# AIVector core for ROCE communication scheduling
+export HCCL_OP_EXPANSION_MODE="AIV"
+
+# Enable FlashComm_v1 optimization
+export VLLM_ASCEND_ENABLE_FLASHCOMM1=1
+
+# [Optional] System-level performance tuning (requires root)
+# echo performance | tee /sys/devices/system/cpu/cpu*/cpufreq/scaling_governor
+# sysctl -w vm.swappiness=0
+# sysctl -w kernel.numa_balancing=0
+# sysctl kernel.sched_migration_cost_ns=50000
+
+# [Optional] jemalloc for better memory allocation performance
+# Ubuntu:
+# export LD_PRELOAD=/usr/lib/aarch64-linux-gnu/libjemalloc.so.2:$LD_PRELOAD
+# openEuler:
+# export LD_PRELOAD=/usr/lib64/libjemalloc.so.2:$LD_PRELOAD
+
+# [Optional] Torch profiler for debugging
+# export VLLM_TORCH_PROFILER_DIR="./profile/online"
+# export VLLM_TORCH_PROFILER_WITH_STACK=0
+
+vllm serve /mnt/share/Qwen3-8B \
+    --served-model-name qwen3 \
+    --trust-remote-code \
+    --distributed-executor-backend mp \
+    --tensor-parallel-size 2 \
+    --max-model-len 8000 \
+    --max-num-batched-tokens 40960 \
+    --no-enable-prefix-caching \
+    --async-scheduling \
+    --compilation-config '{"cudagraph_mode": "FULL_DECODE_ONLY", "cudagraph_capture_sizes": [1, 8, 16, 24, 32, 48, 64, 72, 76, 96, 128, 144, 160, 192]}' \
+    --speculative_config '{"method": "eagle3", "model": "/mnt/share/weight/qwen3_8b_eagle3", "enforce_eager": true, "num_speculative_tokens": 3}' \
+    --port 8153 \
+    --block-size 128 \
+    --gpu-memory-utilization 0.85
+```
+
+:::{note}
+- Replace `/mnt/share/Qwen3-8B` with your local model path.
+- `cudagraph_capture_sizes` is tuned for this specific scenario. Adjust the values based on your target concurrency (see [10.2](#102-optimization-highlights)).
+- Speculative decoding with eagle3 significantly reduces time-to-first-token latency. The eagle3 model path must point to a compatible draft model. Remove `--speculative_config` if not needed.
+- Disabling prefix caching (`--no-enable-prefix-caching`) avoids the overhead of cache management in high-throughput scenarios.
+:::
+
+#### 9.4.2 Qwen3-32B-W8A8-PDMix — Max Throughput with Speculative Decoding
+
+This configuration targets maximum throughput with W8A8 PD-Mix quantization (dynamic W8A8 for prefill, static W8A8 for decode), FlashComm, weight prefetch, and eagle3 speculative decoding on 4 NPUs:
+
+```bash
+# NPU device selection
+export ASCEND_RT_VISIBLE_DEVICES=0,1,2,3
+
+# Memory allocator configuration
+export PYTORCH_NPU_ALLOC_CONF=expandable_segments:True
+
+# Operator dispatch pipeline optimization
+export TASK_QUEUE_ENABLE=1
+
+# AIVector core for ROCE communication scheduling
+export HCCL_OP_EXPANSION_MODE="AIV"
+
+# Enable FlashComm_v1 optimization
+export VLLM_ASCEND_ENABLE_FLASHCOMM1=1
+
+vllm serve /mnt/share/qwen3-32b-pdmix \
+    --served-model-name qwen3 \
+    --trust-remote-code \
+    --distributed-executor-backend mp \
+    --tensor-parallel-size 4 \
+    --max-model-len 5500 \
+    --max-num-batched-tokens 40960 \
+    --no-enable-prefix-caching \
+    --async-scheduling \
+    --quantization ascend \
+    --compilation-config '{"cudagraph_mode": "FULL_DECODE_ONLY", "cudagraph_capture_sizes": [4, 8, 64, 72, 76, 80, 96, 100, 120, 140, 144, 160, 192, 216, 240, 252, 288, 320, 336, 360, 384, 400, 408, 416, 420, 432, 480, 540, 576, 600]}' \
+    --additional-config '{"pa_shape_list": [32, 33, 34, 35, 36, 37, 38, 39, 40, 41, 42, 43, 44, 45, 46, 47, 48, 49, 50, 51, 52, 53, 54, 55, 56, 57, 58, 59, 60, 61, 62, 63, 64, 65, 66, 67, 68, 69, 70, 71, 72, 73, 74, 75, 76, 77, 78, 79, 80, 81, 82, 83, 84, 85, 86, 87, 88, 89, 90, 91, 92, 93, 94, 95, 96, 97, 98, 99, 100, 101, 102, 103, 104, 105, 106, 107, 108, 109, 110, 111, 112, 113, 114, 115, 116, 117, 118, 119, 120, 121, 122, 123, 124, 125, 126, 127, 128, 129, 130, 131, 132, 133, 134, 135, 136, 137, 138, 139, 140, 141, 142, 143, 144, 145, 146, 147, 148, 149, 150, 151, 152, 153, 154, 155, 156, 157, 158, 159, 160, 161, 162, 163, 164, 165, 166, 167, 168, 169, 170, 171, 172, 173, 174, 175, 176, 177, 178, 179, 180, 181, 182, 183, 184, 185, 186, 187, 188, 189, 190, 191, 192, 193, 194, 195, 196, 197, 198, 199, 200, 201, 202, 203, 204, 205, 206, 207, 208, 209, 210, 211, 212, 213, 214, 215, 216, 217, 218, 219, 220, 221, 222, 223, 224, 225, 226, 227, 228, 229, 230, 231, 232, 233, 234, 235, 236, 237, 238, 239, 240, 241, 242, 243, 244, 245, 246, 247, 248, 249, 250, 251, 252, 253, 254, 255, 256], "weight_prefetch_config": {"enabled": true}}' \
+    --speculative_config '{"method": "eagle3", "model": "/mnt/share/weights/qwen-eagle3/qwen3_32B_rot/", "enforce_eager": true, "num_speculative_tokens": 3}' \
+    --port 2000 \
+    --block-size 128 \
+    --gpu-memory-utilization 0.9
+```
+
+:::{note}
+- Replace `/mnt/share/qwen3-32b-pdmix` with your local W8A8 PD-Mix quantized model path.
+- The `W8A8_MIX` quantization method uses dynamic W8A8 for the prefill phase and static W8A8 for the decode phase, providing an optimal balance between accuracy and throughput.
+- `cudagraph_capture_sizes` and `pa_shape_list` are tuned for this specific deployment. The `pa_shape_list` covers a broad range of batch sizes (32–256) to ensure the PA operator is used where FIA performance is suboptimal. See [10.2](#102-optimization-highlights) for tuning guidance.
+- FlashComm_v1 is threshold-protected and only activates when the token count exceeds the threshold. The `cudagraph_capture_sizes` values must be integer multiples of TP=4 when FlashComm_v1 is enabled.
+- `weight_prefetch_config` enables MLP weight prefetching, which overlaps weight loading with vector computation to hide memory latency.
+- Disabling prefix caching (`--no-enable-prefix-caching`) avoids the overhead of cache management in high-throughput scenarios.
+:::
+
+#### 9.4.3 Qwen3-32B-W4A4 — Memory-Efficient Deployment
+
+For memory-constrained environments, W4A4 quantization enables running the 32B model on a single NPU:
+
+```bash
+vllm serve /home/models/Qwen3-32B-w4a4 \
+    --served-model-name "qwen3-32b-w4a4" \
+    --max-model-len 4096 \
+    --quantization ascend
+```
+
+:::{note}
+- For model quantization and conversion steps, see [Qwen3-32B-W4A4](Qwen3-32B-W4A4.md).
+- Pre-converted W4A4 weights are available at [Qwen3-32B-W4A4 on ModelScope](https://www.modelscope.cn/models/vllm-ascend/Qwen3-32B-W4A4).
+- Adjust `--max-model-len` according to your use case and available memory.
+:::
 
 ## 10 Performance Tuning
 
