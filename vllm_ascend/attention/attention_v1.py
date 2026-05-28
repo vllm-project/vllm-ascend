@@ -1150,7 +1150,7 @@ class AscendAttentionBackendImpl(AttentionImpl):
 
             # 提取 key/value：支持 paged kv_cache 和 PrefillNoCache 两种情况
             if block_table is not None and self.key_cache is not None:
-                bt_i = block_table[i]
+                bt_i = block_table[i].long()
                 valid_blocks = bt_i[bt_i >= 0]
                 if valid_blocks.numel() == 0:
                     k_i = key[:cur_kv]
