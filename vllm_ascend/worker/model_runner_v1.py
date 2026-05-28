@@ -2150,7 +2150,13 @@ class NPUModelRunner(GPUModelRunner):
         if self.use_async_scheduling:
             pp = get_pp_group()
             if pp.world_size > 1 and pp.is_last_rank:
-                self._pp_broadcast_prev_sampled_token_ids(sampler_output.sampled_token_ids)
+                # With spec decoding sampled_token_ids has shape
+                # [num_reqs, num_spec_tokens + 1]; the receiver
+                # expects [num_reqs, 1] — broadcast only column 0.
+                ids = sampler_output.sampled_token_ids
+                if ids.shape[-1] != 1:
+                    ids = ids[:, :1].contiguous()
+                self._pp_broadcast_prev_sampled_token_ids(ids)
 
         if not self.use_async_scheduling:
             return model_runner_output
