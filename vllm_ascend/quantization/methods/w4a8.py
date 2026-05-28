@@ -386,7 +386,9 @@ class AscendW4A8DynamicFusedMoEMethod(AscendMoEScheme):
             random_matrix = torch.rand(topk_ids.size(0), num_logical_experts, device=topk_ids.device)
             topk_ids = torch.argsort(random_matrix, dim=1)[:, : topk_ids.size(1)].to(topk_ids.dtype)
 
-        topk_weights = topk_weights.to(x.dtype)
+        # Keep router weights in FP32 for expert scaling. Casting to BF16 here
+        # loses precision before MC2/ALLTOALL combine can promote them again.
+        topk_weights = topk_weights.to(torch.float32)
 
         if self.dynamic_eplb:
             w1 = layer.w13_weight_list

@@ -272,7 +272,7 @@ def _select_experts_with_fusion_ops(
         else:
             input_ids = None
             tid2eid_ones = None
-        topk_weights, topk_ids, _ = torch.ops._C_ascend.moe_gating_top_k_hash(
+        _, topk_ids, _ = torch.ops._C_ascend.moe_gating_top_k_hash(
             x=router_logits,
             k=top_k,
             bias=e_score_correction_bias,
@@ -292,6 +292,7 @@ def _select_experts_with_fusion_ops(
         # Match DeepSeek V4 routing: normalize sqrtsoftplus top-k weights
         # before applying the routed scale. DSV4 non-AITER callers pass 1.0
         # here and scale the routed output later with muls_add_triton.
+        topk_weights = F.softplus(router_logits.to(torch.float32)).sqrt().gather(1, topk_ids.to(torch.int64))
         topk_weights = _renormalize_topk_weights(topk_weights, renormalize)
         topk_weights = topk_weights * routed_scaling_factor
         return topk_weights, topk_ids
