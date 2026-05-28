@@ -282,6 +282,16 @@ def _patched_minimax_m2_forward(
 
     hidden_states, _ = self.norm(hidden_states, residual)
     if aux_list:
+        from vllm.logger import init_logger
+        _log = init_logger(__name__)
+        _log.info(
+            "PP rank %s/%s: aux_list len=%d shapes=%s norms=%s",
+            get_pp_group().rank_in_group,
+            get_pp_group().world_size,
+            len(aux_list),
+            [tuple(t.shape) for t in aux_list],
+            [round(t.norm().item(), 2) for t in aux_list],
+        )
         return hidden_states, aux_list
     return hidden_states
 
