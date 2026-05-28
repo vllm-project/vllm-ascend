@@ -3240,10 +3240,13 @@ class NPUModelRunner(GPUModelRunner):
         if self.speculative_config and (
             self.speculative_config.use_eagle() or self.speculative_config.uses_draft_model()
         ):
-            assert isinstance(self.drafter, AscendEagleProposer | AscendDflashProposer | AscendDraftModelProposer)
-            block_size = (self.kernel_block_sizes[0] if isinstance(
-            self.kernel_block_sizes, list) else self.kernel_block_sizes)
-            self.drafter.initialize_attn_backend(kv_cache_config, block_size)
+            # The drafter is only initialized on the last PP rank.
+            # On non-last ranks (PP > 1) it is absent — skip setup.
+            if hasattr(self, "drafter") and self.drafter is not None:
+                assert isinstance(self.drafter, AscendEagleProposer | AscendDflashProposer | AscendDraftModelProposer)
+                block_size = (self.kernel_block_sizes[0] if isinstance(
+                self.kernel_block_sizes, list) else self.kernel_block_sizes)
+                self.drafter.initialize_attn_backend(kv_cache_config, block_size)
 
         if has_kv_transfer_group():
             get_kv_transfer_group().register_kv_caches(kv_caches)
@@ -4022,23 +4025,47 @@ class NPUModelRunner(GPUModelRunner):
         attention_backends: list[set[type[AttentionBackend]]],
         kv_cache_groups: list[KVCacheGroupSpec],
     ) -> None:
-        with update_pass_config(self):
-            super()._check_and_update_cudagraph_mode(attention_backends, kv_cache_groups)
+        # The upstream super()._check_and_update_cudagraph_mode asserts
+        # isinstance(self.drafter, EagleProposer | ...) unconditionally,
+        # but the drafter is only created on the last PP rank.  Inject a
+        # temporary stub on non-last ranks so the assertion passes.
+        _saved_drafter = getattr(self, "drafter", None)
+        _need_restore = False
+        if _saved_drafter is None and self.speculative_config:
+            from vllm_ascend.spec_decode.eagle_proposer import AscendEagleProposer
+
+            class _DrafterStub(AscendEagleProposer):
+                def __init__(s):
+                    pass
+                def initialize_cudagraph_keys(s, *a, **k):
+                    pass
+                def initialize_attn_backend(s, *a, **k):
+                    pass
+
+            self.drafter = _DrafterStub()
+            _need_restore = True
+
+        try:
+            with update_pass_config(self):
+                super()._check_and_update_cudagraph_mode(attention_backends, kv_cache_groups)
 
 
-        capture_descs = self.cudagraph_dispatcher.get_capture_descs()
-        capture_sizes = sorted({
-            desc.num_tokens
-            for _, descs in capture_descs
-            for desc in descs
-        })
+            capture_descs = self.cudagraph_dispatcher.get_capture_descs()
+            capture_sizes = sorted({
+                desc.num_tokens
+                for _, descs in capture_descs
+                for desc in descs
+            })
 
-        # NOTE: Since aclgraph_batch_sizes cannot be determined until here,
-        # we set the graph params right before initializing the keys.
-        if self.use_aclgraph:
-            set_graph_params(capture_sizes)
-            if self.speculative_config:
-                set_draft_graph_params(capture_sizes)
+            # NOTE: Since aclgraph_batch_sizes cannot be determined until here,
+            # we set the graph params right before initializing the keys.
+            if self.use_aclgraph:
+                set_graph_params(capture_sizes)
+                if self.speculative_config:
+                    set_draft_graph_params(capture_sizes)
+        finally:
+            if _need_restore:
+                self.drafter = _saved_drafter
 
     def capture_model(self) -> int:
         """Capture NPU graphs and return actual graph pool memory bytes consumed."""
