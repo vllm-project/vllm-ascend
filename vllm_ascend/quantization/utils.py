@@ -70,7 +70,7 @@ def get_model_file(
             )
             return Path(downloaded_path)
     except Exception as e:
-        logger.debug("Could not download %s from %s: %s", filename, model, e)
+        logger.warning("Could not download %s from %s: %s", filename, model, e)
         return None
 
 
@@ -161,7 +161,12 @@ def maybe_auto_detect_quantization(vllm_config) -> None:
     detected = detect_quantization_method(model, revision=revision)
 
     if detected is None:
-        # No quantization signature found — nothing to do.
+        logger.info(
+            'No quantization signature detected from model files for "%s". '
+            "The model will be loaded as float. "
+            'To force a quantization method, pass "--quantization <method>" explicitly.',
+            model,
+        )
         return
 
     if user_quant is not None:

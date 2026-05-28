@@ -83,7 +83,6 @@ vllm serve ${MODEL_PATH} \
     --tensor-parallel-size 4 \
     --max-model-len 32768 \
     --gpu-memory-utilization 0.90 \
-    --async-scheduling
 ```
 
 ### Key Performance Indicators

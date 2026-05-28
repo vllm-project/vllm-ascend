@@ -33,7 +33,6 @@ deployment:
       --enable-expert-parallel
       --trust-remote-code
       --gpu-memory-utilization 0.95
-      --async-scheduling
       --speculative-config '{"num_speculative_tokens": 1, "method":"mtp"}'
       --compilation-config '{"cudagraph_mode": "FULL_DECODE_ONLY", "cudagraph_capture_sizes":[2, 4, 8, 16, 32]}'
       --additional_config '{"enable_multistream_moe": true}'
@@ -55,7 +54,6 @@ deployment:
       --enable-expert-parallel
       --trust-remote-code
       --gpu-memory-utilization 0.95
-      --async-scheduling
       --speculative-config '{"num_speculative_tokens": 1, "method":"mtp"}'
       --compilation-config '{"cudagraph_mode": "FULL_DECODE_ONLY", "cudagraph_capture_sizes":[2, 4, 8, 16, 32]}'
       --additional_config '{"enable_multistream_moe": true}'

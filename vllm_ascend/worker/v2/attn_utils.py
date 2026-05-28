@@ -294,6 +294,7 @@ def _reshape_kv_cache(
     kv_cache_raw_tensors: dict[str, tuple[torch.Tensor, torch.Tensor]],
     attn_backends: dict[str, AttentionBackend],
     cache_dtype: str,
+    kernel_block_sizes: list[int] | None = None,
 ) -> dict[str, tuple[torch.Tensor, torch.Tensor]]:
     """
     Reshape the KV cache tensors to the desired shape and dtype.
@@ -312,7 +313,8 @@ def _reshape_kv_cache(
     )
 
     kv_caches: dict[str, tuple[torch.Tensor, torch.Tensor]] = {}
-    for kv_cache_group_spec in kv_cache_config.kv_cache_groups:
+    kernel_block_sizes = kernel_block_sizes or []
+    for kv_cache_group_id, kv_cache_group_spec in enumerate(kv_cache_config.kv_cache_groups):
         for layer_name in kv_cache_group_spec.layer_names:
             kv_cache_spec = kv_cache_group_spec.kv_cache_spec
             if isinstance(kv_cache_spec, UniformTypeKVCacheSpecs):
@@ -337,9 +339,20 @@ def _reshape_kv_cache(
                 assert num_blocks >= kv_cache_config.num_blocks
 
                 attn_backend = attn_backends[layer_name]
+                if kv_cache_group_id < len(kernel_block_sizes):
+                    kernel_block_size = kernel_block_sizes[kv_cache_group_id]
+                    num_blocks *= kv_cache_spec.block_size // kernel_block_size
+                else:
+                    kernel_block_size = kv_cache_spec.block_size
+
+                if kv_cache_spec.storage_block_size != kv_cache_spec.block_size:
+                    shape_block_size = kv_cache_spec.storage_block_size
+                else:
+                    shape_block_size = kernel_block_size
+
                 kv_cache_shape = attn_backend.get_kv_cache_shape(
                     num_blocks,
-                    kv_cache_spec.block_size,
+                    shape_block_size,
                     kv_cache_spec.num_kv_heads,
                     kv_cache_spec.head_size,
                     cache_dtype,

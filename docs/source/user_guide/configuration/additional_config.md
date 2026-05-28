@@ -2,6 +2,46 @@
 
 Additional configuration is a mechanism provided by vLLM to allow plugins to control internal behavior by themselves. VLLM Ascend uses this mechanism to make the project more flexible.
 
+## Migration Guide
+
+Starting from PR #9064, vLLM Ascend is migrating **10 environment variables** to `--additional-config`.
+
+### Important Notice
+
+- **Current Support**: Both environment variables and `--additional-config` are supported during the transition period
+- **Recommendation**: Use `--additional-config` for new deployments and migrate existing configurations
+- **Future Plan**: Environment variables will be **removed** in a future release; only `--additional-config` will be supported
+
+### Quick Reference
+
+| Environment Variable | Config Key | Type Conversion |
+|---------------------|------------|-----------------|
+| `VLLM_ASCEND_BALANCE_SCHEDULING` | `enable_balance_scheduling` | `"1"` → `true`, `"0"` → `false` |
+| `VLLM_ASCEND_ENABLE_FLASHCOMM1` | `enable_flashcomm1` | `"1"` → `true`, `"0"` → `false` |
+| `VLLM_ASCEND_ENABLE_MATMUL_ALLREDUCE` | `enable_matmul_allreduce` | `"1"` → `true`, `"0"` → `false` |
+| `VLLM_ASCEND_FLASHCOMM2_PARALLEL_SIZE` | `enable_flashcomm2_parallel_size` | Integer (unchanged) |
+| `MSMONITOR_USE_DAEMON` | `msmonitor_use_daemon` | `"1"` → `true`, `"0"` → `false` |
+| `VLLM_ASCEND_ENABLE_MLAPO` | `enable_mlapo` | `"1"` → `true`, `"0"` → `false` |
+| `VLLM_ASCEND_ENABLE_NZ` | `weight_nz_mode` | Integer (unchanged, field name changed) |
+| `VLLM_ASCEND_ENABLE_CONTEXT_PARALLEL` | `enable_context_parallel` | `"1"` → `true`, `"0"` → `false` |
+| `VLLM_ASCEND_ENABLE_FUSED_MC2` | `enable_fused_mc2` | Integer (unchanged) |
+| `VLLM_ASCEND_FUSION_OP_TRANSPOSE_KV_CACHE_BY_BLOCK` | `enable_transpose_kv_cache_by_block` | `"1"` → `true`, `"0"` → `false` |
+
+### Example Migration
+
+**Before (environment variable):**
+
+```bash
+export VLLM_ASCEND_ENABLE_FLASHCOMM1=1
+vllm serve Qwen/Qwen3-8B
+```
+
+**After (additional-config):**
+
+```bash
+vllm serve Qwen/Qwen3-8B --additional-config='{"enable_flashcomm1": true}'
+```
+
 ## How to use
 
 With either online mode or offline mode, users can use additional configuration. Take Qwen3 as an example:
@@ -48,6 +88,16 @@ The following table lists additional configuration options available in vLLM Asc
 | `enable_sparse_c8`                  | bool | `False` | Whether to enable KV cache C8 in DSA models (e.g., DeepSeekV3.2 and GLM5). Not supported on A5 devices now |
 | `enable_mc2_hierarchy_comm`         | bool | `False` | Enable dispatch/combine op inter-node communication by ROCE. |
 | `profiling_chunk_config`            | dict | `{}`    | Configuration options for dynamic chunked pipeline parallel. See [Dynamic Chunked Pipeline Parallel](../feature_guide/dynamic_chunk_pipeline_parallel.md) for details. |
+| `enable_balance_scheduling`         | bool | `False` | Whether to enable balance scheduling. Can also be configured via `VLLM_ASCEND_BALANCE_SCHEDULING` environment variable (deprecated). |
+| `enable_flashcomm1`                 | bool | `False` | Whether to enable FlashComm1 optimization. Can also be configured via `VLLM_ASCEND_ENABLE_FLASHCOMM1` environment variable (deprecated). |
+| `enable_matmul_allreduce`           | bool | `False` | Whether to enable matmul allreduce optimization. Can also be configured via `VLLM_ASCEND_ENABLE_MATMUL_ALLREDUCE` environment variable (deprecated). |
+| `flashcomm2_parallel_size`          | int  | `0`     | FlashComm2 parallel size. Can also be configured via `VLLM_ASCEND_FLASHCOMM2_PARALLEL_SIZE` environment variable (deprecated). |
+| `msmonitor_use_daemon`              | bool | `False` | Whether to use daemon mode for msmonitor. Can also be configured via `MSMONITOR_USE_DAEMON` environment variable (deprecated). |
+| `enable_mlapo`                      | bool | `True`  | Whether to enable MLAPO (Model Layer-wise Adaptive Parallel Optimization). Can also be configured via `VLLM_ASCEND_ENABLE_MLAPO` environment variable (deprecated). |
+| `weight_nz_mode`                    | int  | `1`     | Weight NZ mode. Can also be configured via `VLLM_ASCEND_ENABLE_NZ` environment variable (deprecated). |
+| `enable_context_parallel`           | bool | `False` | Whether to enable context parallelism. Can also be configured via `VLLM_ASCEND_ENABLE_CONTEXT_PARALLEL` environment variable (deprecated). |
+| `enable_fused_mc2`                  | int  | `0`     | Fused MC2 configuration. Can also be configured via `VLLM_ASCEND_ENABLE_FUSED_MC2` environment variable (deprecated). |
+| `enable_transpose_kv_cache_by_block`| bool | `True`  | Whether to enable transpose KV cache by block. Can also be configured via `VLLM_ASCEND_FUSION_OP_TRANSPOSE_KV_CACHE_BY_BLOCK` environment variable (deprecated). |
 
 The details of each configuration option are as follows:
 

@@ -397,7 +397,6 @@ export VLLM_USE_V1=1
 vllm serve Qwen/Qwen3-VL-32B-Instruct \
     --host 0.0.0.0 \
     --port 8000 \
-    --async-scheduling \
     --tensor-parallel-size 2 \
     --max-model-len 30000 \
     --max-num-batched-tokens 50000 \
