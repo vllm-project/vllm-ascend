@@ -357,6 +357,8 @@ class NPUWorker(WorkerBase):
     def _restore_hccl_after_sleep(self) -> None:
         with set_current_vllm_config(self.vllm_config):
             num_restored = restore_hccl_after_sleep()
+            from vllm_ascend.ops.fused_moe.moe_comm_method import refresh_moe_comm_method_after_hccl_restore
+            refresh_moe_comm_method_after_hccl_restore()
         self._sleep_hccl_destroyed = False
         logger.info("Restored %d HCCL process groups after sleep mode.", num_restored)
 
