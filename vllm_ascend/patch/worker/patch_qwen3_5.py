@@ -20,7 +20,6 @@
 import torch
 from vllm.distributed import get_tensor_model_parallel_world_size
 from vllm.model_executor.layers.mamba.gdn.qwen_gdn_linear_attn import QwenGatedDeltaNetAttention
-from vllm.model_executor.layers.mamba.mamba_utils import MambaStateShapeCalculator
 from vllm.model_executor.models.qwen3_5 import Qwen3_5DecoderLayer
 from vllm.model_executor.models.qwen3_next import Qwen3NextAttention
 
