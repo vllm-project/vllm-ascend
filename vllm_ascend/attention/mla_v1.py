@@ -1425,7 +1425,7 @@ class AscendMLAImpl(MLAAttentionImpl):
             actual_seq_lengths = decode_meta.actual_seq_lengths_q
             if self.fa_quant_layer:
                 dequant_scale_q_nope = dequant_scale_q_nope.view(num_tokens, self.num_heads)
-        elif self.fa_quant_layer and get_ascend_device_type() != AscendDeviceType.A5:
+        elif self.fa_quant_layer:
             attn_mask = None
             sparse_mode = 0
             actual_seq_lengths = None
