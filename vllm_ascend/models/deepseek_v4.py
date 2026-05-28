@@ -45,8 +45,6 @@ from vllm.distributed import (
     tensor_model_parallel_all_gather,
 )
 from vllm.model_executor.layers.activation import SiluAndMul
-from vllm.model_executor.layers.deepseek_compressor import CompressorStateCache
-from vllm.model_executor.layers.deepseek_v4_attention import DeepseekV4IndexerCache
 from vllm.model_executor.layers.fused_moe import FusedMoE
 from vllm.model_executor.layers.layernorm import RMSNorm
 from vllm.model_executor.layers.linear import (
@@ -90,6 +88,7 @@ if vllm_version_is("0.20.2"):
 else:
     from vllm.models.deepseek_v4.attention import DeepseekV4IndexerCache
     from vllm.models.deepseek_v4.compressor import CompressorStateCache
+
 
 def hadamard_transform_ref(x: torch.Tensor, scale=1.0):
     from scipy.linalg import hadamard  # type: ignore[import-untyped]

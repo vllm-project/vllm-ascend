@@ -1,10 +1,16 @@
 import vllm.model_executor.layers.mamba.ops.causal_conv1d
 import vllm.v1.worker.gpu.sample.gumbel
+from vllm.triton_utils import triton
+from vllm.utils.math_utils import next_power_of_2
 
 from vllm_ascend.ops.triton.fla.chunk import chunk_gated_delta_rule
 from vllm_ascend.ops.triton.fla.layernorm_guard import LayerNormFn
 from vllm_ascend.ops.triton.fla.sigmoid_gating import fused_recurrent_gated_delta_rule_fwd_kernel
 from vllm_ascend.ops.triton.mamba.causal_conv1d import causal_conv1d_fn, causal_conv1d_update_npu
+from vllm_ascend.utils import vllm_version_is
+
+if not vllm_version_is("0.20.2"):
+    triton.next_power_of_2 = next_power_of_2
 
 vllm.model_executor.layers.mamba.ops.causal_conv1d.causal_conv1d_update = causal_conv1d_update_npu
 vllm.model_executor.layers.mamba.ops.causal_conv1d.causal_conv1d_fn = causal_conv1d_fn
