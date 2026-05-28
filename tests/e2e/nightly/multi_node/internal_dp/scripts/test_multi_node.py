@@ -10,22 +10,20 @@ import pytest
 import vllm
 
 from tests.e2e.conftest import RemoteOpenAIServer
-from tests.e2e.nightly.multi_node.scripts.multi_node_config import MultiNodeConfig, MultiNodeConfigLoader, ProxyLauncher
+from tests.e2e.nightly.multi_node.internal_dp.scripts.multi_node_config import (
+    MultiNodeConfig,
+    MultiNodeConfigLoader,
+    ProxyLauncher,
+)
+from tests.e2e.nightly.multi_node.scripts.benchmark_results import (
+    build_task_entry,
+    extract_hardware,
+    filter_environment,
+    write_results_json,
+)
 from tools.aisbench import run_aisbench_cases
 
 logger = logging.getLogger(__name__)
-
-_PORT_ENV_KEYS = {"SERVER_PORT", "ENCODE_PORT", "PD_PORT", "PROXY_PORT"}
-_INFRA_ENV_KEYS = {
-    "HCCL_IF_IP",
-    "HCCL_SOCKET_IFNAME",
-    "GLOO_SOCKET_IFNAME",
-    "TP_SOCKET_IFNAME",
-    "LOCAL_IP",
-    "NIC_NAME",
-    "MASTER_IP",
-    "DISAGGREGATED_PREFILL_PROXY_SCRIPT",
-}
 
 _FEATURE_ENVS: dict[str, str] = {
     "VLLM_ASCEND_ENABLE_FLASHCOMM": "flashcomm",
@@ -36,22 +34,6 @@ _FEATURE_ENVS: dict[str, str] = {
     "VLLM_ASCEND_ENABLE_CONTEXT_PARALLEL": "context_parallel",
     "VLLM_ASCEND_ENABLE_FUSED_MC2": "fused_mc2",
 }
-
-_PERF_METRIC_RENAME: dict[str, str] = {
-    "Benchmark Duration": "Benchmark_Duration(BD)",
-    "Prefill Token Throughput": "Prefill_Token_Throughput(PTT)",
-    "Input Token Throughput": "Input_Token_Throughput(ITT)",
-    "Output Token Throughput": "Output_Token_Throughput(OTT)",
-    "Total Token Throughput": "Total_Token_Throughput(TTT)",
-}
-
-
-def _extract_hardware(runner: str) -> str:
-    runner_lower = runner.lower()
-    for label in ("a3", "a2"):
-        if label in runner_lower:
-            return label.upper()
-    return runner
 
 
 def _extract_dtype(config: MultiNodeConfig) -> str:
@@ -151,79 +133,6 @@ def _build_serve_cmd(config: MultiNodeConfig) -> dict[str, Any]:
     return {"dp": {f"node{node.index}": node.server_cmd for node in config.nodes}}
 
 
-def _filter_environment(envs: dict[str, Any]) -> dict[str, Any]:
-    """Return env vars with internal port and infrastructure keys removed."""
-    exclude = _PORT_ENV_KEYS | _INFRA_ENV_KEYS
-    return {k: v for k, v in envs.items() if k not in exclude}
-
-
-def _task_passed(case_config: dict[str, Any], result: Any) -> bool:
-    """Return True if a single benchmark result meets its baseline/threshold."""
-    if result == "":
-        return False
-    case_type = case_config.get("case_type")
-    baseline = case_config.get("baseline")
-    threshold = case_config.get("threshold")
-    if baseline is None or threshold is None:
-        return True
-    if case_type == "accuracy" and isinstance(result, (int, float)):
-        return abs(float(result) - float(baseline)) <= float(threshold)
-    if case_type == "performance" and isinstance(result, list) and len(result) == 2:
-        _, result_json = result
-        throughput_str = result_json.get("Output Token Throughput", {}).get("total", "")
-        try:
-            throughput_val = float(throughput_str.replace("token/s", "").strip())
-            return throughput_val >= float(threshold) * float(baseline)
-        except (ValueError, AttributeError):
-            return False
-    return True
-
-
-def _build_task_entry(case_key: str, case_config: dict[str, Any], result: Any) -> dict[str, Any]:
-    """Build a single task dict in the required format."""
-    dataset_path = case_config.get("dataset_path", "")
-    dataset_conf = case_config.get("dataset_conf", "")
-    if dataset_path:
-        task_name = dataset_path.split("/", 1)[-1]
-    elif dataset_conf:
-        task_name = dataset_conf.split("/")[0]
-    else:
-        task_name = case_key
-    case_type = case_config.get("case_type", "unknown")
-    metrics: dict[str, float] = {}
-
-    if result == "":
-        pass
-    elif case_type == "accuracy" and isinstance(result, (int, float)):
-        metrics["accuracy"] = round(float(result), 4)
-    elif case_type == "performance" and isinstance(result, list) and len(result) == 2:
-        _, result_json = result
-        for metric_name, metric_data in result_json.items():
-            if not isinstance(metric_data, dict):
-                continue
-            total_str = metric_data.get("total", "")
-            try:
-                value = float(total_str.replace("token/s", "").replace("ms", "").replace("s", "").strip())
-                metrics[_PERF_METRIC_RENAME.get(metric_name, metric_name)] = round(value, 4)
-            except (ValueError, AttributeError):
-                pass
-
-    test_input_keys = ("num_prompts", "max_out_len", "batch_size", "request_rate")
-    test_input = {k: case_config[k] for k in test_input_keys if k in case_config}
-
-    target: dict[str, Any] = {}
-    if case_config.get("baseline") is not None:
-        target["baseline"] = case_config["baseline"]
-    if case_config.get("threshold") is not None:
-        target["threshold"] = case_config["threshold"]
-
-    entry: dict[str, Any] = {"name": task_name, "metrics": metrics, "test_input": test_input}
-    if target:
-        entry["target"] = target
-    entry["pass_fail"] = "pass" if _task_passed(case_config, result) else "fail"
-    return entry
-
-
 def _save_benchmark_results_json(config: MultiNodeConfig, results: list[Any]) -> None:
     """Serialize acc & perf benchmark results to a JSON file under benchmark_results/."""
     runner = os.environ.get("VLLM_CI_RUNNER", "")
@@ -231,28 +140,22 @@ def _save_benchmark_results_json(config: MultiNodeConfig, results: list[Any]) ->
     # Filter out None benchmark cases; results align with the non-None ones in order
     valid_items = [(case["case_name"], case) for case in config.benchmark_cases]
 
-    tasks = [_build_task_entry(key, case_cfg, result) for (key, case_cfg), result in zip(valid_items, results)]
+    tasks = [build_task_entry(key, case_cfg, result) for (key, case_cfg), result in zip(valid_items, results)]
 
     output: dict[str, Any] = {
         "model_name": config.model,
-        "hardware": _extract_hardware(runner),
+        "hardware": extract_hardware(runner),
         "dtype": _extract_dtype(config),
         "feature": _extract_features(config.nodes[0].server_cmd, config.envs),
         "vllm_version": vllm.__version__,
         "vllm_ascend_version": os.environ.get("VLLM_ASCEND_REF", ""),
         "tasks": tasks,
         "serve_cmd": _build_serve_cmd(config),
-        "environment": _filter_environment(config.envs),
+        "environment": filter_environment(config.envs),
     }
 
     job_name = os.environ.get("BENCHMARK_JOB_NAME", "")
-    pvc_benchmark_dir = os.path.join("/root/.cache/benchmark_results", job_name)
-    os.makedirs(pvc_benchmark_dir, exist_ok=True)
-    pvc_output_path = os.path.join(pvc_benchmark_dir, f"{job_name}.json")
-    with open(pvc_output_path, "w", encoding="utf-8") as f:
-        json.dump(output, f, indent=2, ensure_ascii=False)
-    logger.info("Benchmark results saved to PVC at %s", pvc_output_path)
-    print(f"Benchmark results saved to PVC at {pvc_output_path}")
+    write_results_json(output, job_name=job_name)
 
 
 @pytest.mark.asyncio
