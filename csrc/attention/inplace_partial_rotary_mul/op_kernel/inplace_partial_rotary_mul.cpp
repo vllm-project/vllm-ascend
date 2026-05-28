@@ -18,6 +18,10 @@
     #include "rotary_position_embedding_reg_ab.h"
     #include "rotary_position_embedding_reg_aba_and_ba.h"
     #include "rotary_position_embedding_reg_a_and_b.h"
+    #include "rotary_position_embedding_reg_bab_mixed.h"
+    #include "rotary_position_embedding_reg_aba_and_ba_mixed.h"
+    #include "rotary_position_embedding_reg_a_and_b_mixed.h"
+    #include "rotary_position_embedding_reg_ab_mixed.h"
 #else
     #include "kernel_operator.h"
     #include "kernel_tiling/kernel_tiling.h"
@@ -38,6 +42,20 @@
 #define TILING_KEY_AB 20030
 #define TILING_KEY_A 20040
 #define TILING_KEY_B 20041
+
+#define TILING_KEY_ABA_BF16_FP32_MIXED 20110
+#define TILING_KEY_ABA_FP16_FP32_MIXED 20210
+#define TILING_KEY_BA_BF16_FP32_MIXED 20111
+#define TILING_KEY_BA_FP16_FP32_MIXED 20211
+#define TILING_KEY_BAB_BF16_FP32_MIXED 20120
+#define TILING_KEY_BAB_FP16_FP32_MIXED 20220
+#define TILING_KEY_AB_BF16_FP32_MIXED 20130
+#define TILING_KEY_AB_FP16_FP32_MIXED 20230
+#define TILING_KEY_A_BF16_FP32_MIXED 20140
+#define TILING_KEY_A_FP16_FP32_MIXED 20240
+#define TILING_KEY_B_BF16_FP32_MIXED 20141
+#define TILING_KEY_B_FP16_FP32_MIXED 20241
+
 #define TILING_KEY1 1
 #define TILING_KEY2 2
 
@@ -94,6 +112,106 @@ extern "C" __global__ __aicore__ void inplace_partial_rotary_mul(GM_ADDR x, GM_A
             GET_TILING_DATA_WITH_STRUCT(RopeRegbaseTilingData, tiling_data_in, tiling);
             const RopeRegbaseTilingData *__restrict tilingData = &tiling_data_in;
             InplacePartialRotaryMul::RotaryPositionEmbeddingAAndB<DTYPE_X, true> op;
+            op.Init(x, cos, sin, y, workspace, tilingData, &pipe);
+            op.Process();
+        }
+        // Mixed precision: x is half/bfloat16, cos/sin are float32
+        else if (TILING_KEY_IS(TILING_KEY_BAB_FP16_FP32_MIXED))
+        {
+            GET_TILING_DATA_WITH_STRUCT(RopeRegbaseTilingData, tiling_data_in, tiling);
+            const RopeRegbaseTilingData *__restrict tilingData = &tiling_data_in;
+            InplacePartialRotaryMul::RotaryPositionEmbeddingBABMixed<half> op(&pipe, tilingData);
+            op.Init(x, cos, sin, y);
+            op.Process();
+        }
+        else if (TILING_KEY_IS(TILING_KEY_BAB_BF16_FP32_MIXED))
+        {
+            GET_TILING_DATA_WITH_STRUCT(RopeRegbaseTilingData, tiling_data_in, tiling);
+            const RopeRegbaseTilingData *__restrict tilingData = &tiling_data_in;
+            InplacePartialRotaryMul::RotaryPositionEmbeddingBABMixed<bfloat16_t> op(&pipe, tilingData);
+            op.Init(x, cos, sin, y);
+            op.Process();
+        }
+        // Mixed precision ABA/BA kernels
+        else if (TILING_KEY_IS(TILING_KEY_ABA_FP16_FP32_MIXED))
+        {
+            GET_TILING_DATA_WITH_STRUCT(RopeRegbaseTilingData, tiling_data_in, tiling);
+            const RopeRegbaseTilingData *__restrict tilingData = &tiling_data_in;
+            InplacePartialRotaryMul::RotaryPositionEmbeddingABAAndBAMixed<half, false> op;
+            op.Init(x, cos, sin, y, workspace, tilingData, &pipe);
+            op.Process();
+        }
+        else if (TILING_KEY_IS(TILING_KEY_ABA_BF16_FP32_MIXED))
+        {
+            GET_TILING_DATA_WITH_STRUCT(RopeRegbaseTilingData, tiling_data_in, tiling);
+            const RopeRegbaseTilingData *__restrict tilingData = &tiling_data_in;
+            InplacePartialRotaryMul::RotaryPositionEmbeddingABAAndBAMixed<bfloat16_t, false> op;
+            op.Init(x, cos, sin, y, workspace, tilingData, &pipe);
+            op.Process();
+        }
+        else if (TILING_KEY_IS(TILING_KEY_BA_FP16_FP32_MIXED))
+        {
+            GET_TILING_DATA_WITH_STRUCT(RopeRegbaseTilingData, tiling_data_in, tiling);
+            const RopeRegbaseTilingData *__restrict tilingData = &tiling_data_in;
+            InplacePartialRotaryMul::RotaryPositionEmbeddingABAAndBAMixed<half, true> op;
+            op.Init(x, cos, sin, y, workspace, tilingData, &pipe);
+            op.Process();
+        }
+        else if (TILING_KEY_IS(TILING_KEY_BA_BF16_FP32_MIXED))
+        {
+            GET_TILING_DATA_WITH_STRUCT(RopeRegbaseTilingData, tiling_data_in, tiling);
+            const RopeRegbaseTilingData *__restrict tilingData = &tiling_data_in;
+            InplacePartialRotaryMul::RotaryPositionEmbeddingABAAndBAMixed<bfloat16_t, true> op;
+            op.Init(x, cos, sin, y, workspace, tilingData, &pipe);
+            op.Process();
+        }
+        // Mixed precision AAndB kernels
+        else if (TILING_KEY_IS(TILING_KEY_A_FP16_FP32_MIXED))
+        {
+            GET_TILING_DATA_WITH_STRUCT(RopeRegbaseTilingData, tiling_data_in, tiling);
+            const RopeRegbaseTilingData *__restrict tilingData = &tiling_data_in;
+            InplacePartialRotaryMul::RotaryPositionEmbeddingAAndBMixed<half, false> op;
+            op.Init(x, cos, sin, y, workspace, tilingData, &pipe);
+            op.Process();
+        }
+        else if (TILING_KEY_IS(TILING_KEY_A_BF16_FP32_MIXED))
+        {
+            GET_TILING_DATA_WITH_STRUCT(RopeRegbaseTilingData, tiling_data_in, tiling);
+            const RopeRegbaseTilingData *__restrict tilingData = &tiling_data_in;
+            InplacePartialRotaryMul::RotaryPositionEmbeddingAAndBMixed<bfloat16_t, false> op;
+            op.Init(x, cos, sin, y, workspace, tilingData, &pipe);
+            op.Process();
+        }
+        else if (TILING_KEY_IS(TILING_KEY_B_FP16_FP32_MIXED))
+        {
+            GET_TILING_DATA_WITH_STRUCT(RopeRegbaseTilingData, tiling_data_in, tiling);
+            const RopeRegbaseTilingData *__restrict tilingData = &tiling_data_in;
+            InplacePartialRotaryMul::RotaryPositionEmbeddingAAndBMixed<half, true> op;
+            op.Init(x, cos, sin, y, workspace, tilingData, &pipe);
+            op.Process();
+        }
+        else if (TILING_KEY_IS(TILING_KEY_B_BF16_FP32_MIXED))
+        {
+            GET_TILING_DATA_WITH_STRUCT(RopeRegbaseTilingData, tiling_data_in, tiling);
+            const RopeRegbaseTilingData *__restrict tilingData = &tiling_data_in;
+            InplacePartialRotaryMul::RotaryPositionEmbeddingAAndBMixed<bfloat16_t, true> op;
+            op.Init(x, cos, sin, y, workspace, tilingData, &pipe);
+            op.Process();
+        }
+        // Mixed precision AB kernels
+        else if (TILING_KEY_IS(TILING_KEY_AB_FP16_FP32_MIXED))
+        {
+            GET_TILING_DATA_WITH_STRUCT(RopeRegbaseTilingData, tiling_data_in, tiling);
+            const RopeRegbaseTilingData *__restrict tilingData = &tiling_data_in;
+            InplacePartialRotaryMul::RotaryPositionEmbeddingABMixed<half> op;
+            op.Init(x, cos, sin, y, workspace, tilingData, &pipe);
+            op.Process();
+        }
+        else if (TILING_KEY_IS(TILING_KEY_AB_BF16_FP32_MIXED))
+        {
+            GET_TILING_DATA_WITH_STRUCT(RopeRegbaseTilingData, tiling_data_in, tiling);
+            const RopeRegbaseTilingData *__restrict tilingData = &tiling_data_in;
+            InplacePartialRotaryMul::RotaryPositionEmbeddingABMixed<bfloat16_t> op;
             op.Init(x, cos, sin, y, workspace, tilingData, &pipe);
             op.Process();
         }

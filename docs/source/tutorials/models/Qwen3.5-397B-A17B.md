@@ -127,7 +127,6 @@ vllm serve Eco-Tech/Qwen3.5-397B-A17B-w8a8-mtp \
 --speculative_config '{"method": "qwen3_5_mtp", "num_speculative_tokens": 3, "enforce_eager": true}' \
 --compilation-config '{"cudagraph_mode":"FULL_DECODE_ONLY"}' \
 --additional-config '{"enable_cpu_binding":true}' \
---async-scheduling
 ```
 
 **Notice:**
@@ -191,7 +190,6 @@ vllm serve Eco-Tech/Qwen3.5-397B-A17B-w8a8-mtp \
 --max-model-len 32768 \
 --max-num-batched-tokens 4096 \
 --trust-remote-code \
---async-scheduling \
 --gpu-memory-utilization 0.9 \
 --no-enable-prefix-caching \
 --speculative_config '{"method": "qwen3_5_mtp", "num_speculative_tokens": 3, "enforce_eager": true}' \
@@ -241,7 +239,6 @@ vllm serve Eco-Tech/Qwen3.5-397B-A17B-w8a8-mtp \
 --max-num-batched-tokens 4096 \
 --enable-expert-parallel \
 --trust-remote-code \
---async-scheduling \
 --gpu-memory-utilization 0.9 \
 --no-enable-prefix-caching \
 --speculative_config '{"method": "qwen3_5_mtp", "num_speculative_tokens": 3, "enforce_eager": true}' \
@@ -514,7 +511,6 @@ To run the vllm-ascend `Prefill-Decode Disaggregation` service, you need to depl
        **Notice:**
        The parameters are explained as follows:
 
-       - `--async-scheduling`: enables the asynchronous scheduling function. When Multi-Token Prediction (MTP) is enabled, asynchronous scheduling of operator delivery can be implemented to overlap the operator delivery latency.
        - `cudagraph_capture_sizes`: The recommended value is `n x (mtp + 1)`. And the min is `n = 1` and the max is `n = max-num-seqs`. For other values, it is recommended to set them to the number of frequently occurring requests on the Decode (D) node.
        - `recompute_scheduler_enable: true`: enables the recomputation scheduler. When the Key-Value Cache (KV Cache) of the decode node is insufficient, requests will be sent to the prefill node to recompute the KV Cache. In the PD separation scenario, it is recommended to enable this configuration on both prefill and decode nodes simultaneously.
        - `--no-enable-prefix-caching`: The prefix-cache feature is enabled by default. You can use the `--no-enable-prefix-caching` parameter to disable this feature. Notice: for Prefill-Decode disaggregation feature, known issue on D node: [#7944](https://github.com/vllm-project/vllm-ascend/issues/7944)
