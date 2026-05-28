@@ -16,13 +16,13 @@ from vllm.model_executor.custom_op import CustomOp
 from vllm.triton_utils import tl, triton
 from vllm.utils.math_utils import cdiv, next_power_of_2
 
-from .chunk_delta_h_kda import chunk_gated_delta_rule_fwd_h
+from .chunk_delta_h import chunk_gated_delta_rule_fwd_h_kda
 from .cumsum import chunk_local_cumsum
 from .fused_recurrent_kda import fused_recurrent_gated_delta_rule_fwd_kernel
 from .index_kda import prepare_chunk_indices
 from .l2norm import l2norm_fwd
 from .op_kda import exp, log
-from .solve_tril_kda import solve_tril
+from .solve_tril import solve_tril_kda
 from .utils import FLA_CHUNK_SIZE, is_amd
 
 BT_LIST_AUTOTUNE = [32, 64, 128]
@@ -1152,7 +1152,7 @@ def chunk_kda_fwd(
         chunk_size=chunk_size,
         output_dtype=torch.float32,
     )
-    A = solve_tril(A=A, cu_seqlens=cu_seqlens, output_dtype=k.dtype)
+    A = solve_tril_kda(A=A, cu_seqlens=cu_seqlens, output_dtype=k.dtype)
     w, u, _, kg = recompute_w_u_fwd(
         k=k,
         v=v,
@@ -1162,7 +1162,7 @@ def chunk_kda_fwd(
         cu_seqlens=cu_seqlens,
     )
     del A
-    h, v_new, final_state = chunk_gated_delta_rule_fwd_h(
+    h, v_new, final_state = chunk_gated_delta_rule_fwd_h_kda(
         k=kg,
         w=w,
         u=u,
