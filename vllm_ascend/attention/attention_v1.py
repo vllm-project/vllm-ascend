@@ -1662,9 +1662,9 @@ class AscendC8AttentionBackendImpl(AscendAttentionBackendImpl):
                 num_block, blk_size, _, _ = self.key_cache.shape  # type: ignore[attr-defined]
                 paged_k = self._nz_5d_view(self.key_cache, blk_size)
                 paged_v = self._nz_5d_view(self.value_cache, blk_size)
-                # Exclude SP dummy from block_table and seq_lens slices.
-                prefill_bt = attn_metadata.block_tables[num_decodes:actual_prefill_end]
-                prefill_sl = attn_metadata.seq_lens_list[num_decodes:actual_prefill_end]
+                
+                prefill_bt = attn_metadata.block_tables[num_decodes:]
+                prefill_sl = attn_metadata.seq_lens_list[num_decodes:]
                 prefill_k, prefill_v = self._dequant_paged_kv_to_dense(
                     paged_k, paged_v, prefill_bt, prefill_sl, query.dtype, layer
                 )
