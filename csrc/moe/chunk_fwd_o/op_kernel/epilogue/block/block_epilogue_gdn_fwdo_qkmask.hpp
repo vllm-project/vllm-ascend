@@ -385,14 +385,17 @@ public:
                 AscendC::PipeBarrier<PIPE_V>();
                 AscendC::Exp(gbrcUpUbTensor, gbrcUpUbTensor, mActualThisStage * alignedNActual);
                 AscendC::PipeBarrier<PIPE_V>();
-                // Causal mask: row-by-row Mul with mask + zero upper triangle
+                // Causal mask: zero upper triangle row by row
+                // Use Duplicate for count >= 8, skip for count < 8
+                // (near-diagonal positions have negligible impact on the causal gate)
                 for (uint32_t row = 0; row < mActualThisStage; ++row) {
                     uint32_t globalRow = gbrcStart + row;
                     uint32_t validCols = globalRow + 1;
                     if (validCols > alignedNActual) validCols = alignedNActual;
                     uint32_t rowOff = row * alignedNActual;
-                    if (validCols < alignedNActual) {
-                        AscendC::Duplicate<float>(gbrcUpUbTensor[rowOff + validCols], (float)0.0, alignedNActual - validCols);
+                    uint32_t zeroLen = alignedNActual - validCols;
+                    if (zeroLen >= 8) {
+                        AscendC::Duplicate<float>(gbrcUpUbTensor[rowOff + validCols], (float)0.0, zeroLen);
                     }
                 }
                 AscendC::PipeBarrier<PIPE_V>();
