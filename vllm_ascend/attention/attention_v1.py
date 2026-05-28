@@ -1255,14 +1255,14 @@ class AscendAttentionBackendImpl(AttentionImpl):
             )
             num_tokens = attn_metadata.actual_seq_lengths_q[-1]
             query_input = query[:num_tokens]
-            
+
             # Call fallback SDPA
             # fmt:off
             attn_output = self._fallback_sdpa(
                 query_input, key, value, block_table, block_size,
                 attn_metadata, actual_seq_lengths_kv, num_tokens)
             # fmt:on
-            
+
             # Fix: Handle size mismatch from _fallback_sdpa or NPU operator
             if attn_output.dim() == 2:
                 # attn_output is [tokens, hidden_size], need to reshape
@@ -1274,19 +1274,20 @@ class AscendAttentionBackendImpl(AttentionImpl):
                 actual_tokens = attn_output.size(0)
                 if actual_tokens != num_tokens:
                     import warnings
+
                     warnings.warn(
                         f"Attention output size mismatch in FIA: metadata says {num_tokens} tokens, "
                         f"but actual output has {actual_tokens} tokens. Using actual size.",
                         UserWarning,
-                        stacklevel=2
+                        stacklevel=2,
                     )
             else:
                 raise RuntimeError(f"Unexpected attn_output shape: {attn_output.shape}")
-            
+
             safe_tokens = min(num_tokens, actual_tokens)
             output[:safe_tokens] = attn_output[:safe_tokens]
             return output
-        
+
         # we inherit ForwardContext in model runner v2, when enable model
         # runner v2, there is not capturing attribute in forward_context,
         # just use getattr to avoid attribute error.
@@ -1394,7 +1395,7 @@ class AscendAttentionBackendImpl(AttentionImpl):
                     scale=self.scale,
                     sparse_mode=3,
                 )
-                
+
             attn_output = attn_output.view(num_tokens, self.num_heads, self.head_size)
         output[:num_tokens] = attn_output[:num_tokens]
         return output
