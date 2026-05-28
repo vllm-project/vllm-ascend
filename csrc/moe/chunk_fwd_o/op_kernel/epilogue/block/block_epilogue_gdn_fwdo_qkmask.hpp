@@ -396,6 +396,10 @@ public:
                     uint32_t zeroLen = alignedNActual - validCols;
                     if (zeroLen >= 8) {
                         AscendC::Duplicate<float>(gbrcUpUbTensor[rowOff + validCols], (float)0.0, zeroLen);
+                    } else if (zeroLen > 0) {
+                        for (uint32_t c = 0; c < zeroLen; ++c) {
+                            gbrcUpUbTensor.SetValue(rowOff + validCols + c, (float)0.0);
+                        }
                     }
                 }
                 AscendC::PipeBarrier<PIPE_V>();
