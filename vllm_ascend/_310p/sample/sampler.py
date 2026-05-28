@@ -18,6 +18,7 @@
 import torch
 import vllm.envs as envs
 
+from vllm_ascend.ascend_config import get_ascend_config
 from vllm_ascend.sample.sampler import (
     DEFAULT_LOGPROBS_MODE,
     AscendSampler,
@@ -61,16 +62,29 @@ class AscendTopKTopPSampler310(AscendTopKTopPSampler):
     def forward_native(self, logits, generators, k, p):
         if envs.VLLM_BATCH_INVARIANT:
             return super().forward_native(logits, generators, k, p)
+        if get_ascend_config().enable_reduce_sample:
+            cand_logits, cand_idx = self.apply_top_k_top_p(logits, k, p, self.top_k)
+            logits_to_return = None
+            if self.logprobs_mode == "processed_logits":
+                logits_to_return = cand_logits
+            elif self.logprobs_mode == "processed_logprobs":
+                logits_to_return = cand_logits.log_softmax(dim=-1, dtype=torch.float32)
 
-        logits = self.apply_top_k_top_p(logits, k, p)
-        logits_to_return = None
-        if self.logprobs_mode == "processed_logits":
-            logits_to_return = logits
-        elif self.logprobs_mode == "processed_logprobs":
-            logits_to_return = logits.log_softmax(dim=-1, dtype=torch.float32)
+            probs = torch.softmax(cand_logits, dim=-1)
+            pos = _random_sample_310p(probs, generators)  # [B]
 
-        probs = logits.softmax(dim=-1, dtype=torch.float32)
-        return _random_sample_310p(probs, generators), logits_to_return
+            next_token = cand_idx.gather(dim=1, index=pos.unsqueeze(1)).squeeze(1)  # [B]
+            return next_token, logits_to_return
+        else:
+            logits = self.apply_top_k_top_p(logits, k, p)
+            logits_to_return = None
+            if self.logprobs_mode == "processed_logits":
+                logits_to_return = logits
+            elif self.logprobs_mode == "processed_logprobs":
+                logits_to_return = logits.log_softmax(dim=-1, dtype=torch.float32)
+
+            probs = logits.softmax(dim=-1, dtype=torch.float32)
+            return _random_sample_310p(probs, generators), logits_to_return
 
 
 class AscendSampler310(AscendSampler):

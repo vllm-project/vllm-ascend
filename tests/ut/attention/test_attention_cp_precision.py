@@ -339,7 +339,7 @@ def build_cp_attn_metadata(
     query_start_loc = query_start_loc_cpu.to(device, non_blocking=True)
 
     attn_mask_builder = AttentionMaskBuilder(device)
-    attn_mask = attn_mask_builder.get_attention_mask(vllm_config.model_config)
+    attn_mask = attn_mask_builder.get_attention_mask(common_attn_metadata.causal, vllm_config.model_config)
 
     prefill_metadata = None
     if num_prefills > 0:

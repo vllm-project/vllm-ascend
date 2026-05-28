@@ -28,6 +28,7 @@ static constexpr size_t INPUT_CHUNK_INDICES_IDX = 6;
 
 static constexpr size_t ATTR_STORE_FINAL_STATE_IDX = 0;
 static constexpr size_t ATTR_CHUNK_SIZE_IDX = 1;
+static constexpr size_t ATTR_INITIAL_STATE_STRIDE_IDX = 2;
 
 static constexpr size_t DIM_BATCH = 0;
 static constexpr size_t DIM_HEAD_NUM = 1;
@@ -106,6 +107,7 @@ ge::graphStatus Tiling4ChunkGatedDeltaRuleFwdH(gert::TilingContext *context)
     auto attrPtr = context->GetAttrs();
     bool storeFinalState = *(attrPtr->GetAttrPointer<bool>(ATTR_STORE_FINAL_STATE_IDX));
     int64_t chunkSize = *(attrPtr->GetAttrPointer<int64_t>(ATTR_CHUNK_SIZE_IDX));
+    int64_t initalStateStride0 = *(attrPtr->GetAttrPointer<int64_t>(ATTR_INITIAL_STATE_STRIDE_IDX));
 
     auto dtype = context->GetInputTensor(0)->GetDataType();
     uint64_t dataType =  dtype == ge::DT_BF16 ? 1 : 0;
@@ -147,6 +149,7 @@ ge::graphStatus Tiling4ChunkGatedDeltaRuleFwdH(gert::TilingContext *context)
     tiling.set_kHeadDim(kHeadDim);
     tiling.set_vHeadDim(vHeadDim);
     tiling.set_chunkSize(chunkSize);
+    tiling.set_initalStateStride0(initalStateStride0);
     tiling.set_useInitialState(useInitialState);
     tiling.set_storeFinalState(storeFinalState);
     tiling.set_dataType(dataType);

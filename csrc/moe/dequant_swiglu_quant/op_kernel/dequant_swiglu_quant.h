@@ -636,17 +636,21 @@ __aicore__ inline void DequantSwigluQuantBase<TEMPLATE_DSQ_ARGS>::SwiGluGate(
     CopyLocalContiguousFloat(tmpUbF32Gate, xLocalF32[calEleNum], calEleNum);
     PipeBarrier<PIPE_V>();
 
-    // tmpUbF32Gate
-    Mins(tmpUbF32Gate, tmpUbF32Gate, tl_->clampLimit, calEleNum);
-    PipeBarrier<PIPE_V>();
-    Maxs(tmpUbF32Gate, tmpUbF32Gate, -(tl_->clampLimit), calEleNum);
-    PipeBarrier<PIPE_V>();
+    if (tl_->clampLimit > 0.0f) {
+        // tmpUbF32Gate
+        Mins(tmpUbF32Gate, tmpUbF32Gate, tl_->clampLimit, calEleNum);
+        PipeBarrier<PIPE_V>();
+        Maxs(tmpUbF32Gate, tmpUbF32Gate, -(tl_->clampLimit), calEleNum);
+        PipeBarrier<PIPE_V>();
+    }
     Adds(tmpUbF32Gate, tmpUbF32Gate, tl_->gluBias, calEleNum);
     PipeBarrier<PIPE_V>();
 
-    // tmpUbF32Act
-    Mins(tmpUbF32Act, tmpUbF32Act, tl_->clampLimit, calEleNum);
-    PipeBarrier<PIPE_V>();
+    if (tl_->clampLimit > 0.0f) {
+        // tmpUbF32Act
+        Mins(tmpUbF32Act, tmpUbF32Act, tl_->clampLimit, calEleNum);
+        PipeBarrier<PIPE_V>();
+    }
     Muls(xLocalF32, tmpUbF32Act, -(tl_->gluAlpha), calEleNum);
     PipeBarrier<PIPE_V>();
     Exp(xLocalF32, xLocalF32, calEleNum);

@@ -1,4 +1,4 @@
-name: "Close stale resolved/awaiting-feedback issues"
+name: "Close stale resolved/wait-feedback issues"
 on:
   schedule:
     - cron: '0 2 * * *' 
@@ -39,14 +39,14 @@ jobs:
           days-before-pr-close: -1
       - uses: actions/stale@v10
         with:
-          # Process issues with the 'awaiting-feedback' label
-          any-of-labels: 'awaiting-feedback'
+          # Process issues with the 'wait-feedback' label
+          any-of-labels: 'wait-feedback'
 
           # Mark as stale after a period of inactivity
           days-before-stale: 7
           stale-issue-label: 'stale'
           stale-issue-message: |
-            This issue has been marked as `awaiting-feedback` but has not received any feedback for some time, so it is now labeled as `stale`. 
+            This issue has been marked as `wait-feedback` but has not received any feedback for some time, so it is now labeled as `stale`. 
             To more accurately locate and resolve the issue, we need you to provide the relevant information mentioned above. 
             `Stale` issues will automatically be closed after 14 days of inactivity.
 
@@ -58,8 +58,8 @@ jobs:
 
           # Automatically remove the 'stale' label when the issue is updated (default is true)
           remove-stale-when-updated: true
-          # Also remove the 'awaiting-feedback' label
-          labels-to-remove-when-unstale: 'awaiting-feedback'
+          # Also remove the 'wait-feedback' label
+          labels-to-remove-when-unstale: 'wait-feedback'
 
           # Avoid accidental PR processing (PRs can be handled if needed; this is issue-only)
           days-before-pr-stale: -1
