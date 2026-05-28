@@ -41,7 +41,6 @@ from vllm.distributed.kv_transfer import (
     has_kv_transfer_group,
 )
 from vllm.distributed.parallel_state import Handle, get_pp_group, get_tp_group
-from vllm.distributed.weight_transfer import WeightTransferEngineFactory
 from vllm.logger import logger
 from vllm.lora.request import LoRARequest
 from vllm.sequence import IntermediateTensors
@@ -1049,57 +1048,6 @@ class NPUWorker(WorkerBase):
 
     def take_draft_token_ids(self) -> DraftTokenIds | None:
         return self.model_runner.take_draft_token_ids()
-
-    def _check_weight_transfer_engine(self) -> None:
-        if self.weight_transfer_engine is None:
-            raise RuntimeError(
-                "Weight transfer not configured. "
-                "Please set weight_transfer_config to enable weight transfer."
-            )
-
-    def init_weight_transfer_engine(self, init_info: dict) -> None:
-        self._check_weight_transfer_engine()
-        assert self.weight_transfer_engine is not None
-        typed_init_info = self.weight_transfer_engine.parse_init_info(init_info)
-        self.weight_transfer_engine.init_transfer_engine(typed_init_info)
-
-    def update_weights(self, update_info: dict) -> None:
-        self._check_weight_transfer_engine()
-        assert self.weight_transfer_engine is not None
-
-        typed_update_info = self.weight_transfer_engine.parse_update_info(
-            update_info
-        )
-
-        model = self.model_runner.model
-
-        if typed_update_info.is_checkpoint_format:
-            from vllm.model_executor.model_loader.reload import (
-                finalize_layerwise_reload,
-                initialize_layerwise_reload,
-            )
-
-            with torch.device(self.device):
-                initialize_layerwise_reload(model)
-                self.weight_transfer_engine.receive_weights(
-                    typed_update_info,
-                    load_weights=model.load_weights,
-                )
-                finalize_layerwise_reload(model, self.model_config)
-        else:
-            def load_weights_direct(
-                weights: list[tuple[str, torch.Tensor]],
-            ) -> None:
-                for name, weight in weights:
-                    param = model.get_parameter(name)
-                    param.copy_(weight)
-
-            self.weight_transfer_engine.receive_weights(
-                typed_update_info,
-                load_weights=load_weights_direct,
-            )
-
-        torch.accelerator.synchronize()
 
     def check_health(self) -> None:
         import subprocess

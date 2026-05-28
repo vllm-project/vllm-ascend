@@ -37,12 +37,12 @@ import requests
 import torch
 from openai import OpenAI
 from transformers import AutoModelForCausalLM
+from vllm.utils.network_utils import get_ip, get_open_port
 
 from vllm_ascend.distributed.weight_transfer.hccl_engine import (
     HCCLTrainerSendWeightsArgs,
     HCCLWeightTransferEngine,
 )
-from vllm.utils.network_utils import get_ip, get_open_port
 
 BASE_URL = "http://localhost:8000"
 MODEL_NAME = "qwen/qwen3-0.6b"
@@ -242,8 +242,7 @@ def main():
     # but keep the default 1 GB when the largest tensor is smaller than that.
     packed_buffer_size_bytes = max(max_tensor_bytes + 128 * 2**20, 2**30)
     print(
-        f"Largest tensor: {max_tensor_bytes / 2**30:.2f} GiB, "
-        f"packed buffer: {packed_buffer_size_bytes / 2**30:.2f} GiB"
+        f"Largest tensor: {max_tensor_bytes / 2**30:.2f} GiB, packed buffer: {packed_buffer_size_bytes / 2**30:.2f} GiB"
     )
 
     # Start the update_weights call in a separate thread since it will block
