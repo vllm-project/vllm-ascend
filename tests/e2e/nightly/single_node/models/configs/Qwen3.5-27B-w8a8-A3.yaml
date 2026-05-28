@@ -37,7 +37,6 @@ test_cases:
       - '{"method": "qwen3_5_mtp", "num_speculative_tokens": 3,"enforce_eager": true}'
       - "--compilation-config"
       - '{"cudagraph_capture_sizes":[1,4,8,12,16,24,32,48,56,64,72,84,96,108,112,128,160,172,196,200,212,232,256,272,288,312,328,344,360,384,400,416,432,448,480,512], "cudagraph_mode":"FULL_DECODE_ONLY"}'
-      - "--async-scheduling"
       - "--mm-processor-cache-gb"
       - "0"
     benchmarks:

@@ -69,9 +69,9 @@ msgstr "FX 融合 pass"
 
 #: ../../source/developer_guide/Design_Documents/npugraph_ex.md:18
 msgid ""
-"npugraph_ex now provides three default operator fusion passes, and more "
+"npugraph_ex now provides some operator fusion passes, and more "
 "will be added in the future."
-msgstr "npugraph_ex 目前提供了三个默认的算子融合 pass，未来将添加更多。"
+msgstr "npugraph_ex 目前提供了一些算子融合 pass，未来将添加更多。"
 
 #: ../../source/developer_guide/Design_Documents/npugraph_ex.md:20
 msgid ""
@@ -82,10 +82,10 @@ msgstr "符合替换规则的算子组合可以被替换为对应的融合算子
 #: ../../source/developer_guide/Design_Documents/npugraph_ex.md:22
 msgid ""
 "You can get the default [fusion pass "
-"list](https://www.hiascend.com/document/detail/zh/Pytorch/730/modthirdparty/torchairuseguide/torchair_00017.html)"
+"list](https://www.hiascend.com/document/detail/zh/Pytorch/2600/modthirdparty/torchairuseguide/docs/zh/npugraph_ex/basic/pattern_fusion_pass.md#功能简介)"
 msgstr ""
 "你可以获取默认的[融合 pass "
-"列表](https://www.hiascend.com/document/detail/zh/Pytorch/730/modthirdparty/torchairuseguide/torchair_00017.html)"
+"列表](https://www.hiascend.com/document/detail/zh/Pytorch/2600/modthirdparty/torchairuseguide/docs/zh/npugraph_ex/basic/pattern_fusion_pass.md#功能简介)"
 
 #: ../../source/developer_guide/Design_Documents/npugraph_ex.md:24
 msgid "Custom fusion pass"
@@ -93,10 +93,10 @@ msgstr "自定义融合 pass"
 
 #: ../../source/developer_guide/Design_Documents/npugraph_ex.md:26
 msgid ""
-"Users can register a custom graph fusion pass in TorchAir to modify "
+"Users can register a custom graph fusion pass in npugraph_ex to modify "
 "PyTorch FX graphs. The registration relies on the register_replacement "
 "API."
-msgstr "用户可以在 TorchAir 中注册自定义的图融合 pass 来修改 PyTorch FX 图。注册依赖于 register_replacement API。"
+msgstr "用户可以在 npugraph_ex 中注册自定义的图融合 pass 来修改 PyTorch FX 图。注册依赖于 register_replacement API。"
 
 #: ../../source/developer_guide/Design_Documents/npugraph_ex.md:28
 msgid "Below is the declaration of this API and a demo of its usage."

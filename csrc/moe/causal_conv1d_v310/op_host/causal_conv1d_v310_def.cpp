@@ -45,25 +45,21 @@ public:
             .ParamType(OPTIONAL)
             .DataTypeList({ge::DT_INT64})
             .FormatList({ge::FORMAT_ND})
-            .ValueDepend(OPTIONAL)
             .AutoContiguous();
         this->Input("cacheIndices")
             .ParamType(OPTIONAL)
             .DataTypeList({ge::DT_INT64})
             .FormatList({ge::FORMAT_ND})
-            .ValueDepend(OPTIONAL)
             .AutoContiguous();
         this->Input("initialStateMode")
             .ParamType(OPTIONAL)
             .DataTypeList({ge::DT_INT64})
             .FormatList({ge::FORMAT_ND})
-            .ValueDepend(OPTIONAL)
             .AutoContiguous();
         this->Input("numAcceptedTokens")
             .ParamType(OPTIONAL)
             .DataTypeList({ge::DT_INT64})
             .FormatList({ge::FORMAT_ND})
-            .ValueDepend(OPTIONAL)
             .AutoContiguous();
 
         this->Output("y")

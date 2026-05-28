@@ -456,12 +456,14 @@ public:
             PipeBarrier<PIPE_V>();
             limited=tilingData_->swigluLimit;
 
-            Mins(tmpUbF32Gate, tmpUbF32Gate, limited,tilingData_->ubFactorDimy * proDimsx);
-            PipeBarrier<PIPE_V>();
-            Maxs(tmpUbF32Gate, tmpUbF32Gate, (-1.0f * limited), tilingData_->ubFactorDimy * proDimsx);
-            PipeBarrier<PIPE_V>();
-            Mins(tmpUbF32Act, tmpUbF32Act, limited, tilingData_->ubFactorDimy * proDimsx);
-            PipeBarrier<PIPE_V>();
+            if (limited > 0.0f) {
+                Mins(tmpUbF32Gate, tmpUbF32Gate, limited, tilingData_->ubFactorDimy * proDimsx);
+                PipeBarrier<PIPE_V>();
+                Maxs(tmpUbF32Gate, tmpUbF32Gate, (-1.0f * limited), tilingData_->ubFactorDimy * proDimsx);
+                PipeBarrier<PIPE_V>();
+                Mins(tmpUbF32Act, tmpUbF32Act, limited, tilingData_->ubFactorDimy * proDimsx);
+                PipeBarrier<PIPE_V>();
+            }
 
             Muls(xLocalF32, tmpUbF32Act, static_cast<float>(-1.0), tilingData_->ubFactorDimy * proDimsx);
             PipeBarrier<PIPE_V>();

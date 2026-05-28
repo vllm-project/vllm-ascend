@@ -140,7 +140,6 @@ deployment:
           --max-num-seqs 4
           --gpu-memory-utilization 0.90
           --no-enable-prefix-caching
-          --async-scheduling
           --additional-config '{"enable_cpu_binding" : false,"recompute_scheduler_enable" : true}'
           --tokenizer-mode deepseek_v32
           --reasoning-parser deepseek_v3
@@ -187,7 +186,6 @@ deployment:
           --max-num-seqs 4
           --gpu-memory-utilization 0.90
           --no-enable-prefix-caching
-          --async-scheduling
           --additional-config '{"enable_cpu_binding" : false,"recompute_scheduler_enable" : true}'
           --tokenizer-mode deepseek_v32
           --reasoning-parser deepseek_v3

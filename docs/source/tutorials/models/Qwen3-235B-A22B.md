@@ -120,7 +120,6 @@ vllm serve vllm-ascend/Qwen3-235B-A22B-w8a8 \
 --gpu-memory-utilization 0.95 \
 --hf-overrides '{"rope_parameters": {"rope_type":"yarn","rope_theta":1000000,"factor":4,"original_max_position_embeddings":32768}}' \
 --compilation-config '{"cudagraph_mode":"FULL_DECODE_ONLY"}' \
---async-scheduling
 ```
 
 **Notice:**
@@ -190,7 +189,6 @@ vllm serve Qwen/Qwen3-235B-A22B \
 --max-model-len 32768 \
 --max-num-batched-tokens 4096 \
 --trust-remote-code \
---async-scheduling \
 --gpu-memory-utilization 0.9
 ```
 
@@ -236,7 +234,6 @@ vllm serve Qwen/Qwen3-235B-A22B \
 --max-num-batched-tokens 4096 \
 --enable-expert-parallel \
 --trust-remote-code \
---async-scheduling \
 --gpu-memory-utilization 0.9 \
 ```
 
@@ -353,7 +350,6 @@ vllm serve vllm-ascend/Qwen3-235B-A22B-w8a8 \
 --gpu-memory-utilization 0.9 \
 --no-enable-prefix-caching \
 --compilation-config '{"cudagraph_mode":"FULL_DECODE_ONLY"}' \
---async-scheduling
 ```
 
 Benchmark scripts:
@@ -494,7 +490,6 @@ vllm serve vllm-ascend/Qwen3-235B-A22B-w8a8 \
 --trust-remote-code \
 --gpu-memory-utilization 0.9 \
 --compilation-config '{"cudagraph_mode":"FULL_DECODE_ONLY"}' \
---async-scheduling \
 --no-enable-prefix-caching \
 --kv-transfer-config \
 '{"kv_connector": "MooncakeConnectorV1",
@@ -559,7 +554,6 @@ vllm serve vllm-ascend/Qwen3-235B-A22B-w8a8 \
 --trust-remote-code \
 --gpu-memory-utilization 0.9 \
 --compilation-config '{"cudagraph_mode":"FULL_DECODE_ONLY"}' \
---async-scheduling \
 --no-enable-prefix-caching \
 --kv-transfer-config \
 '{"kv_connector": "MooncakeConnectorV1",

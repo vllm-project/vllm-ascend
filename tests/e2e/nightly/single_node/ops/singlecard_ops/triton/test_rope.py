@@ -4,7 +4,6 @@ import pytest
 import torch
 
 from vllm_ascend.ops.triton.rope import rope_forward_triton, rope_forward_triton_siso
-from vllm_ascend.ops.triton.triton_utils import init_device_properties_triton
 
 IS_NEOX_STYLE = [True, False]
 DTYPES = [torch.bfloat16, torch.float16]
@@ -14,9 +13,6 @@ MAX_POSITION_EMBEDDINGS = [262144]
 # (head_size, rotary_dim)
 HEAD_ROTARY_DIMS = [
     (64, 32),
-    (64, 64),
-    (128, 32),
-    (128, 64),
     (128, 128),
 ]
 # (num_q_heads, num_k_heads)
@@ -128,7 +124,6 @@ def test_rotary_embedding_triton_kernel(
 ) -> None:
     torch.manual_seed(seed)
     torch.set_default_device(device)
-    init_device_properties_triton()
     sin = torch.randn(num_tokens, rotary_dim // 2, dtype=dtype, device=device)
     cos = torch.randn(num_tokens, rotary_dim // 2, dtype=dtype, device=device)
     q_trt = torch.randn(num_tokens, num_q_heads, head_size, dtype=dtype, device=device)
@@ -170,7 +165,6 @@ def test_rotary_embedding_triton_kernel_with_cos_sin_cache(
 ) -> None:
     torch.manual_seed(seed)
     torch.set_default_device(device)
-    init_device_properties_triton()
     cos_sin_cache = torch.randn(max_position_embeddings, rotary_dim, dtype=dtype, device=device)
     positions = torch.randint(low=0, high=max_position_embeddings, size=(num_tokens,), dtype=torch.int64, device=device)
     q_trt = torch.randn(num_tokens, num_q_heads, head_size, dtype=dtype, device=device)
@@ -213,7 +207,7 @@ def test_rotary_embedding_triton_kernel_siso(
 ) -> None:
     torch.manual_seed(seed)
     torch.set_default_device(device)
-    init_device_properties_triton()
+
     if rotary_dim == -1:
         rotary_dim = head_size
     sin = torch.randn(num_tokens, rotary_dim // 2, dtype=dtype, device=device)

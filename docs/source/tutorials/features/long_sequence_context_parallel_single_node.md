@@ -100,7 +100,6 @@ vllm serve vllm-ascend/Qwen3-235B-A22B-w8a8 \
   --gpu-memory-utilization 0.95 \
   --hf-overrides '{"rope_parameters": {"rope_type":"yarn","rope_theta":1000000,"factor":4,"original_max_position_embeddings":32768}}' \
   --compilation-config '{"cudagraph_mode":"FULL_DECODE_ONLY", "cudagraph_capture_sizes":[1,2,4,8]}' \
-  --async-scheduling
 ```
 
 **Notice:**

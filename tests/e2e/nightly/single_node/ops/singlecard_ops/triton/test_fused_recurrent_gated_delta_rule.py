@@ -2,11 +2,9 @@ import torch
 from vllm.model_executor.layers.fla.ops import fused_recurrent_gated_delta_rule
 
 from vllm_ascend._310p.ops.fla.fused_recurrent_gated_delta_rule import fused_recurrent_gated_delta_rule_pytorch
-from vllm_ascend.ops.triton.triton_utils import init_device_properties_triton
 
 
 def test_fused_recurrent_gated_delta_rule_310p_parity_precision():
-    init_device_properties_triton()
     torch.manual_seed(0)
     device = "npu"
 

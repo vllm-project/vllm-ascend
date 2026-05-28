@@ -155,7 +155,6 @@ deployment:
           --trust-remote-code
           --max-num-seqs 8
           --gpu-memory-utilization 0.92
-          --async-scheduling
           --quantization ascend
           --enable-auto-tool-choice
           --tool-call-parser glm47
@@ -206,7 +205,6 @@ deployment:
           --trust-remote-code
           --max-num-seqs 8
           --gpu-memory-utilization 0.92
-          --async-scheduling
           --quantization ascend
           --enable-auto-tool-choice
           --tool-call-parser glm47

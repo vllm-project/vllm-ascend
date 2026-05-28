@@ -34,7 +34,6 @@ deployment:
         --data-parallel-rpc-port 13389
         --tensor-parallel-size 8
         --enable-expert-parallel
-        --async-scheduling
         --max-num-seqs 64
         --max-model-len 51200
         --max-num-batched-tokens 8192
@@ -61,7 +60,6 @@ deployment:
         --data-parallel-rpc-port 13389
         --tensor-parallel-size 8
         --enable-expert-parallel
-        --async-scheduling
         --max-num-seqs 64
         --max-model-len 51200
         --max-num-batched-tokens 8192
