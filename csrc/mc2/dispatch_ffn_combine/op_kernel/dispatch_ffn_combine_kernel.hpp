@@ -1124,7 +1124,6 @@ private:
             workspaceOffset += (params.EP * params.EP * params.expertPerRank) * sizeof(int32_t);
             ptrC = params.ptrWorkspace + workspaceOffset;
 
-            // workspaceOffset += params.maxOutputSize * params.problemShape.n() * sizeof(ElementC);
             ptrC2 = params.ptrWorkspace + workspaceOffset;
 
             workspaceOffset += params.maxOutputSize * n2 * sizeof(ElementC);
@@ -1132,9 +1131,7 @@ private:
             ptrPermutedToken = params.ptrWorkspace + workspaceOffset;
 
             workspaceOffset += params.maxOutputSize * params.problemShape.k() * sizeof(ElementA);
-            // ptrPermutedToken = params.ptrWorkspace + workspaceOffset;
 
-            // workspaceOffset += params.maxOutputSize * k2 * sizeof(ElementA);
             ptrSumBeforeRank = params.ptrWorkspace + workspaceOffset;
 
             workspaceOffset += params.EP * sizeof(int32_t) * FLAGSTRIDE;
