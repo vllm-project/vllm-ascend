@@ -14,7 +14,7 @@ from vllm.triton_utils import tl, triton
 
 from .index_kda import prepare_chunk_indices, prepare_chunk_offsets
 from .op_kda import exp
-from .utils_kda import FLA_CHUNK_SIZE, use_cuda_graph
+from .utils import FLA_CHUNK_SIZE, use_cuda_graph
 
 NUM_WARPS = [2, 4, 8, 16]
 
