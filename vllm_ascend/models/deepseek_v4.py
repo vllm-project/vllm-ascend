@@ -83,8 +83,8 @@ from vllm_ascend.utils import (
 )
 
 if vllm_version_is("0.20.2"):
-    from vllm.model_executor.layers.deepseek_compressor import CompressorStateCache  # noqa
-    from vllm.model_executor.layers.deepseek_v4_attention import DeepseekV4IndexerCache  # noqa
+    from vllm.model_executor.layers.deepseek_compressor import CompressorStateCache  # type:ignore
+    from vllm.model_executor.layers.deepseek_v4_attention import DeepseekV4IndexerCache  # type:ignore
 else:
     from vllm.models.deepseek_v4.attention import DeepseekV4IndexerCache
     from vllm.models.deepseek_v4.compressor import CompressorStateCache
