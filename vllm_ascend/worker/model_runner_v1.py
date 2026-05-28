@@ -1894,7 +1894,7 @@ class NPUModelRunner(GPUModelRunner):
             )
         with record_function_or_nullcontext("post process"):
             aux_hidden_states = None
-            if self.use_aux_hidden_state_outputs:
+            if self.use_aux_hidden_state_outputs and get_pp_group().is_last_rank:
                 hidden_states, aux_hidden_states = hidden_states
                 print(f"[DBG_MR] execute_model unpacked aux list len={len(aux_hidden_states) if aux_hidden_states else 0} shapes={[h.shape for h in aux_hidden_states] if aux_hidden_states else []}")
             if self.pcp_size > 1:
