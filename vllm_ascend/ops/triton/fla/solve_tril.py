@@ -400,5 +400,5 @@ def solve_tril(
         num_warps=4,
         num_stages=3,
     )
-    
+
     return Ai
