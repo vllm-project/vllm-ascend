@@ -228,57 +228,47 @@ def _patched_minimax_m2_forward(
     if not aux_layers:
         return _original_minimax_m2_forward(self, input_ids, positions, intermediate_tensors, inputs_embeds)
 
+    # Map each aux layer (global index) to its slot in a fixed-size buffer
+    # [num_aux, batch, hidden_size].  Missing slots stay zero — exactly
+    # what combine_hidden_states / fc expects.
+    aux_layers_list = list(aux_layers)
+    num_aux = len(aux_layers_list)
+    aux_slot = {layer: i for i, layer in enumerate(aux_layers_list)}
+
     if get_pp_group().is_first_rank:
         if inputs_embeds is not None:
             hidden_states = inputs_embeds
         else:
             hidden_states = self.embed_input_ids(input_ids)
         residual = None
-        aux_hidden_states: list[torch.Tensor] = []
+        aux_buffer = hidden_states.new_zeros(
+            (num_aux, hidden_states.shape[0], hidden_states.shape[1])
+        )
     else:
         assert intermediate_tensors is not None
         hidden_states = intermediate_tensors["hidden_states"]
         residual = intermediate_tensors["residual"]
-        # Carry forward aux hidden states from earlier PP ranks.
-        # Transported as [3, batch, hidden] with an aux_count scalar.
-        aux_stacked = intermediate_tensors.tensors.get("aux_hidden_states")
-        aux_count_t = intermediate_tensors.tensors.get("aux_count")
-        if aux_stacked is not None and aux_count_t is not None and aux_count_t.item() > 0:
-            aux_hidden_states = list(
-                torch.unbind(aux_stacked[: aux_count_t.item()], dim=0)
-            )
-        else:
-            aux_hidden_states = []
+        aux_buffer = intermediate_tensors.tensors["aux_hidden_states"]
 
     for idx, layer in enumerate(self.layers[self.start_layer : self.end_layer]):
         layer_idx = self.start_layer + idx
-        if layer_idx in aux_layers:
-            aux_hidden_states.append(hidden_states + residual if residual is not None else hidden_states)
+        slot = aux_slot.get(layer_idx)
+        if slot is not None:
+            aux_buffer[slot] = (
+                hidden_states + residual if residual is not None else hidden_states
+            )
         hidden_states, residual = layer(positions, hidden_states, residual)
 
     if not get_pp_group().is_last_rank:
-        # Pad to 3 and stack for PP transport; pass real count separately.
-        real_count = len(aux_hidden_states)
-        while len(aux_hidden_states) < 3:
-            aux_hidden_states.append(
-                torch.zeros_like(aux_hidden_states[0])
-                if aux_hidden_states
-                else torch.zeros(
-                    hidden_states.shape[0], hidden_states.shape[1],
-                    dtype=hidden_states.dtype, device=hidden_states.device,
-                )
-            )
         return IntermediateTensors({
             "hidden_states": hidden_states,
             "residual": residual,
-            "aux_hidden_states": torch.stack(aux_hidden_states),
-            "aux_count": torch.tensor([real_count], dtype=torch.int64, device=hidden_states.device),
+            "aux_hidden_states": aux_buffer,
         })
 
     hidden_states, _ = self.norm(hidden_states, residual)
-    if aux_hidden_states:
-        return hidden_states, aux_hidden_states
-    return hidden_states
+    aux_list = list(torch.unbind(aux_buffer, dim=0))
+    return hidden_states, aux_list
 
 
 if not getattr(_original_minimax_m2_forward, "_vllm_ascend_minimax_eagle3_patched", False):
@@ -306,12 +296,11 @@ if not getattr(_original_minimax_m2_forward, "_vllm_ascend_minimax_eagle3_patche
             _orig=_original_make_empty,
         ) -> IntermediateTensors:
             result = _orig(batch_size, dtype, device)
+            aux_layers = getattr(self, "aux_hidden_state_layers", None)
+            num_aux = len(aux_layers) if aux_layers else 3
             result.tensors["aux_hidden_states"] = torch.zeros(
-                (3, batch_size, self.config.hidden_size),
+                (num_aux, batch_size, self.config.hidden_size),
                 dtype=dtype, device=device,
-            )
-            result.tensors["aux_count"] = torch.zeros(
-                (1,), dtype=torch.int64, device=device,
             )
             return result
 
