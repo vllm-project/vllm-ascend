@@ -206,7 +206,11 @@ public:
                 AscendC::Cast(gUbTensor, gUbFPTensor, AscendC::RoundMode::CAST_NONE, mActual);
                 AscendC::PipeBarrier<PIPE_V>();
             }
+#ifdef CATLASS_UNIFIED_CORE
+            AscendC::Adds(gcompUbTensor, gUbTensor, (float)0.0, mActual);
+#else
             AscendC::Copy(gcompUbTensor, gUbTensor, 64, 2, {1, 1, 8, 8});
+#endif
             AscendC::PipeBarrier<PIPE_V>();
 
 
@@ -294,7 +298,11 @@ public:
                 AscendC::Cast(gUbTensor, gUbFPTensor, AscendC::RoundMode::CAST_NONE, mActual);
                 AscendC::PipeBarrier<PIPE_V>();
             }
+#ifdef CATLASS_UNIFIED_CORE
+            AscendC::Adds(gcompUbTensor, gUbTensor, (float)0.0, mActual);
+#else
             AscendC::Copy(gcompUbTensor, gUbTensor, 64, 2, {1, 1, 8, 8});
+#endif
             AscendC::PipeBarrier<PIPE_V>();
             AscendC::Exp(gcompUbTensor, gcompUbTensor, mActual);
             AscendC::PipeBarrier<PIPE_V>();    
