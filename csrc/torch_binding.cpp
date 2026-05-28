@@ -49,6 +49,7 @@
 #include "attention/lightning_indexer_quant/lightning_indexer_quant_torch_adpt.h"
 #include "attention/ngram_spec_decode/ngram_spec_decode_torch_adpt.h"
 #include "moe/causal_conv1d_v310/causal_conv1d_310_torch_adpt.h"
+#include "attention/recurrent_gated_delta_rule/recurrent_gated_delta_rule_torch_adpt.h"
 #include "attention/recurrent_gated_delta_rule_v310/recurrent_gated_delta_rule_310_torch_adpt.h"
 #include <c10/core/Device.h>
 #include <c10/core/Scalar.h>
@@ -2315,6 +2316,21 @@ TORCH_LIBRARY_EXPAND(CONCAT(_C, _ascend), ops)
         "-> (Tensor y ,Tensor rstd)"
         );
     ops.impl("npu_gemma_rms_norm", torch::kPrivateUse1, &vllm_ascend::npu_gemma_rms_norm);
+
+    ops.def(
+        "npu_recurrent_gated_delta_rule(Tensor query, "
+        "                               Tensor key, "
+        "                               Tensor value, "
+        "                               Tensor(a!) state, "
+        "                               *, "
+        "                               Tensor? beta=None, "
+        "                               float? scale=None, "
+        "                               Tensor? actual_seq_lengths=None, "
+        "                               Tensor? ssm_state_indices=None, "
+        "                               Tensor? num_accepted_tokens=None, "
+        "                               Tensor? g=None, "
+        "                               Tensor? gk=None) -> Tensor");
+    ops.impl("npu_recurrent_gated_delta_rule", torch::kPrivateUse1, &vllm_ascend::npu_recurrent_gated_delta_rule);
 
 #ifdef VLLM_ENABLE_ATB_AND_DIRECT_KERNELS
     // Direct kernel custom ops

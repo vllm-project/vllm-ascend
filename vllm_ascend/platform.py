@@ -756,7 +756,7 @@ class NPUPlatform(Platform):
         is_draft_model = False
         # v2 has 2 graphs in eager, one for prefill, the other for decodes, this flag is aimed to distinguish them.
         is_draft_model_prefill = False
-
+        sinks = False
         in_profile_run = get_mrv2_in_profile_run()
         moe_comm_type = select_moe_comm_method(
             num_tokens,
@@ -830,6 +830,7 @@ class NPUPlatform(Platform):
             "is_draft_model_prefill": is_draft_model_prefill,
             "in_profile_run": in_profile_run,
             "padded_num_tokens": padded_num_tokens,
+            "sinks": sinks,
         }
 
     @staticmethod

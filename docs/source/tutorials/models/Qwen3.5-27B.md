@@ -119,7 +119,6 @@ vllm serve Eco-Tech/Qwen3.5-27B-w8a8-mtp \
 --speculative_config '{"method": "qwen3_5_mtp", "num_speculative_tokens": 3, "enforce_eager": true}' \
 --compilation-config '{"cudagraph_mode":"FULL_DECODE_ONLY"}' \
 --additional-config '{"enable_cpu_binding":true}' \
---async-scheduling
 ```
 
 **Notice:**

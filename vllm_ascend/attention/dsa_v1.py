@@ -1100,7 +1100,9 @@ class AscendDSAMetadataBuilder(AttentionMetadataBuilder[AscendDSAMetadata]):
         if num_prefills:
             cos, sin = get_cos_and_sin_dsa(input_positions)
         else:
-            cos, sin = get_cos_and_sin_dsa(input_positions, True)
+            # disable use_cache, otherwise, draft_step>0 will override draft_step=0
+            # take care of this, if full graph is needed then rope cache is inevitable
+            cos, sin = get_cos_and_sin_dsa(input_positions, use_cache=False)
 
         slot_mapping = common_attn_metadata.slot_mapping[:num_input_tokens]
         self.spec_slot_mapping[draft_step - 1][:num_input_tokens] = torch.stack(  # type: ignore[index]
@@ -1244,7 +1246,9 @@ class AscendDSAMetadataBuilder(AttentionMetadataBuilder[AscendDSAMetadata]):
         max_seqlen_kv = torch.max(_seq_lens_cpu[:num_decodes]).item()
 
         input_positions = common_attn_metadata.positions[:num_decode_tokens_typed].long()
-        cos, sin = get_cos_and_sin_dsa(input_positions, use_cache=True)
+        # disable use_cache, otherwise, draft_step>0 will override draft_step=0
+        # take care of this, if full graph is needed then rope cache is inevitable
+        cos, sin = get_cos_and_sin_dsa(input_positions, use_cache=False)
 
         slot_mapping = self.spec_slot_mapping[draft_step - 1][:num_decode_tokens_typed]  # type: ignore[index]
         block_table = common_attn_metadata.block_table_tensor

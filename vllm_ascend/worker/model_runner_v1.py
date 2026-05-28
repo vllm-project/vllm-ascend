@@ -875,6 +875,15 @@ class NPUModelRunner(GPUModelRunner):
         if self.uses_mrope:
             # Only relevant for models using M-RoPE (e.g, Qwen2-VL)
             self._calc_mrope_positions(scheduler_output)
+            if self.pcp_size > 1:
+                self.pcp_manager.remap_mrope_positions_for_pcp(
+                    positions_np,
+                    num_scheduled_tokens,
+                    num_reqs,
+                    self.input_batch,
+                    self.requests,
+                    self.mrope_positions,
+                )
             self.mrope_positions.gpu.copy_(
                 self.mrope_positions.cpu,
                 non_blocking=True,
@@ -2287,7 +2296,7 @@ class NPUModelRunner(GPUModelRunner):
         if spec_decode_metadata is None:
             if lmhead_tp_enable() and logits is not None:
                 logits = logits[: self.input_batch.num_reqs]
-            if self.input_batch.top_k_cpu is not None and get_ascend_config().enable_reduce_sample:
+            if self.input_batch.sampling_metadata.top_k is not None and get_ascend_config().enable_reduce_sample:
                 max_topk = self.input_batch.top_k_cpu[self.input_batch.top_k_cpu < logits.shape[1]].max()
                 self.sampler.prepare_sampling(max_topk)
             return self.sampler(
@@ -2297,7 +2306,7 @@ class NPUModelRunner(GPUModelRunner):
 
         if lmhead_tp_enable() and logits is not None:
             logits = logits[: len(spec_decode_metadata.logits_indices)]
-        if self.input_batch.top_k_cpu is not None and get_ascend_config().enable_reduce_sample:
+        if self.input_batch.sampling_metadata.top_k is not None and get_ascend_config().enable_reduce_sample:
             max_topk = self.input_batch.top_k_cpu[self.input_batch.top_k_cpu < logits.shape[1]].max()
             self.rejection_sampler.prepare_sampling(max_topk)
         sampler_output = self.rejection_sampler(

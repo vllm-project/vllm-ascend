@@ -30,7 +30,6 @@ deployment:
         --max-num-batched-tokens 2048
         --trust-remote-code
         --gpu-memory-utilization 0.9
-        --async-scheduling
   -
     server_cmd: >
         vllm serve "Qwen/Qwen3-235B-A22B"
@@ -48,7 +47,6 @@ deployment:
         --enable-expert-parallel
         --trust-remote-code
         --gpu-memory-utilization 0.9
-        --async-scheduling
 benchmarks:
   perf:
     case_type: performance

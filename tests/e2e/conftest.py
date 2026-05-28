@@ -1450,7 +1450,11 @@ DataParallelVllmRunner = DPVllmRunner
 
 class HfRunner:
     def get_default_device(self):
-        return "cpu" if current_platform.is_cpu() else current_platform.device_type
+        if current_platform.is_cpu():
+            return "cpu"
+        else:
+            torch.npu.set_compile_mode(jit_compile=False)
+            return current_platform.device_type
 
     def wrap_device(self, x: _T, device: str | None = None) -> _T:
         if x is None or isinstance(x, (bool,)):

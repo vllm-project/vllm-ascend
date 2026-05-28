@@ -33,7 +33,6 @@ _server_cmd: &server_cmd
   - "--speculative_config"
   - '{"method": "qwen3_5_mtp", "num_speculative_tokens": 3, "enforce_eager": true}'
   - "--trust-remote-code"
-  - "--async-scheduling"
   - "--allowed-local-media-path"
   - "/"
   - "--quantization"
