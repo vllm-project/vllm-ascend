@@ -875,6 +875,15 @@ class NPUModelRunner(GPUModelRunner):
         if self.uses_mrope:
             # Only relevant for models using M-RoPE (e.g, Qwen2-VL)
             self._calc_mrope_positions(scheduler_output)
+            if self.pcp_size > 1:
+                self.pcp_manager.remap_mrope_positions_for_pcp(
+                    positions_np,
+                    num_scheduled_tokens,
+                    num_reqs,
+                    self.input_batch,
+                    self.requests,
+                    self.mrope_positions,
+                )
             self.mrope_positions.gpu.copy_(
                 self.mrope_positions.cpu,
                 non_blocking=True,
