@@ -101,7 +101,9 @@ def test_ascend_causal_conv1d(
     weight_origin = weight.transpose(-1, -2)
     conv_states_origin = conv_states.transpose(-1, -2)
     activation_num = 1 if activation else 0
-    out = torch.ops._C_ascend.npu_causal_conv1d_custom(
+    out = torch.empty_like(x_origin)
+    torch.ops._C_ascend.npu_causal_conv1d_custom(
+        out,
         x_origin,
         weight_origin,
         conv_state=conv_states_origin,
@@ -113,7 +115,8 @@ def test_ascend_causal_conv1d(
         activation_mode=activation_num,
         pad_slot_id=PAD_SLOT_ID,
         run_mode=0,
-    ).transpose(-1, -2)
+    )
+    out = out.transpose(-1, -2)
     validate_cmp(out, out_ref, itype)
     validate_cmp(conv_states, conv_states_ref, itype)
 
