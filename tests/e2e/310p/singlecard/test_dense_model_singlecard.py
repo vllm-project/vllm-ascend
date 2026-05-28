@@ -15,15 +15,12 @@
 # limitations under the License.
 # This file is a part of the vllm-ascend project.
 
-import os
-import sys
+from pathlib import Path
+
+import huggingface_hub
+from modelscope import snapshot_download  # type: ignore[import-untyped]
 
 from tests.e2e.conftest import VllmRunner, wait_until_npu_memory_free
-
-current_dir = os.path.dirname(os.path.abspath(__file__))
-sys.path.insert(0, os.path.dirname(current_dir))
-
-from test_utils import sharded_model_path  # noqa: E402
 
 
 @wait_until_npu_memory_free(0.7)
@@ -32,11 +29,11 @@ def test_qwen3_dense_tp1_w8a8sc_aclgraph():
         "Hello, my name is",
     ] * 8
     max_tokens = 2
-    model_path = sharded_model_path(
+    model_root = snapshot_download(
         "Eco-Tech/Qwen3-8B-w8a8sc-310-vllm",
-        "TP1",
-        "Qwen3-8B-w8a8sc-310-vllm-tp1",
+        local_files_only=huggingface_hub.constants.HF_HUB_OFFLINE,
     )
+    model_path = str(Path(model_root) / "TP1" / "Qwen3-8B-w8a8sc-310-vllm-tp1")
     with VllmRunner(
         model_path,
         tensor_parallel_size=1,

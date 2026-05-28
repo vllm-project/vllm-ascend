@@ -15,15 +15,12 @@
 # limitations under the License.
 # This file is a part of the vllm-ascend project.
 
-import os
-import sys
+from pathlib import Path
+
+import huggingface_hub
+from modelscope import snapshot_download  # type: ignore[import-untyped]
 
 from tests.e2e.conftest import VllmRunner
-
-current_dir = os.path.dirname(os.path.abspath(__file__))
-sys.path.insert(0, os.path.dirname(current_dir))
-
-from test_utils import sharded_model_path  # noqa: E402
 
 
 def test_qwen3_dense_tp4_w8a8sc():
@@ -31,11 +28,11 @@ def test_qwen3_dense_tp4_w8a8sc():
         "Hello, my name is",
     ]
     max_tokens = 5
-    model_path = sharded_model_path(
+    model_root = snapshot_download(
         "Eco-Tech/Qwen3-14B-w8a8sc-310-vllm",
-        "TP4",
-        "Qwen3-14B-w8a8sc-310-vllm-tp4",
+        local_files_only=huggingface_hub.constants.HF_HUB_OFFLINE,
     )
+    model_path = str(Path(model_root) / "TP4" / "Qwen3-14B-w8a8sc-310-vllm-tp4")
     with VllmRunner(
         model_path,
         tensor_parallel_size=4,
