@@ -7,7 +7,7 @@ This guide provides step-by-step instructions to test these features with
 constrained resources.
 
 Using the Qwen2.5-72B-Instruct model as an example, this guide demonstrates
-how to use vllm-ascend v0.11.0 (with vLLM v0.11.0) on two Atlas 800T A2
+how to use vllm-ascend {{vllm_ascend_version}} (with vLLM {{vllm_version}}) on two Atlas 800T A2
 nodes to deploy two vLLM instances. Each instance occupies 4 NPU cards and
 uses PD-colocated deployment.
 
@@ -80,7 +80,7 @@ Start a Docker container on each node.
 
 ```bash
 # Update the vllm-ascend image
-export IMAGE=quay.io/ascend/vllm-ascend:v0.11.0
+export IMAGE=quay.io/ascend/vllm-ascend:|vllm_ascend_version|
 export NAME=vllm-ascend
 
 # Run the container using the defined variables
@@ -111,7 +111,7 @@ docker run --rm \
 
 ## (Optional) Install Mooncake
 
-Mooncake is pre-installed and functional in the v0.11.0 image.
+Mooncake is pre-installed and functional in the {{vllm_ascend_version}} image.
 The following installation steps are optional.
 
 Mooncake is the serving platform for Kimi, a leading LLM service provided by
