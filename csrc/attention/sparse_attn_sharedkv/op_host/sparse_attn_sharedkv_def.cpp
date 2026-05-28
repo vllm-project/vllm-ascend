@@ -102,8 +102,8 @@ public:
         this->Attr("cmp_ratio").AttrType(REQUIRED).Int(1);
         this->Attr("ori_mask_mode").AttrType(REQUIRED).Int(4); // ori_mask_mode默认值4
         this->Attr("cmp_mask_mode").AttrType(REQUIRED).Int(3); // cmp_mask_mode默认值3
-        this->Attr("ori_kv_stride").AttrType(REQUIRED).Int(0); // ori_mask_mode默认值4
-        this->Attr("cmp_kv_stride").AttrType(REQUIRED).Int(0); // cmp_mask_mode默认值3
+        this->Attr("ori_kv_stride").AttrType(REQUIRED).Int(0); // stride of ori_kv block in elements
+        this->Attr("cmp_kv_stride").AttrType(REQUIRED).Int(0); // stride of cmp_kv block in elements
         this->Attr("ori_win_left").AttrType(OPTIONAL).Int(127); // ori_win_left默认值127
         this->Attr("ori_win_right").AttrType(OPTIONAL).Int(0);
         this->Attr("layout_q").AttrType(OPTIONAL).String("BSND");
@@ -120,7 +120,6 @@ public:
             .ExtendCfgInfo("aclnnSupport.value", "support_aclnn");
         this->AICore().AddConfig("ascend910b", aicore_config);
         this->AICore().AddConfig("ascend910_93", aicore_config);
-        this->AICore().AddConfig("ascend950", aicore_config);
     }
 };
 OP_ADD(SparseAttnSharedkv);

@@ -144,7 +144,7 @@ TILING_DATA_FIELD_DEF(uint32_t, actualLenDimsKV)
 TILING_DATA_FIELD_DEF(float, softmaxScale) // 即 scaleValue
 TILING_DATA_FIELD_DEF(uint32_t, outputLayout)
 TILING_DATA_FIELD_DEF(uint64_t, oriMaskMode)
-TILING_DATA_FIELD_DEF(int64_t, oriKvStride)
+TILING_DATA_FIELD_DEF(int64_t, oriKvStride0)
 TILING_DATA_FIELD_DEF(int64_t, oriWinLeft)
 TILING_DATA_FIELD_DEF(int64_t, oriWinRight)
 TILING_DATA_FIELD_DEF(int64_t, sparseBlockSize)
@@ -166,7 +166,7 @@ TILING_DATA_FIELD_DEF(uint32_t, cmpMaxBlockNumPerBatch)
 TILING_DATA_FIELD_DEF(uint32_t, sparseBlockCount)
 TILING_DATA_FIELD_DEF(int64_t, cmpRatio)
 TILING_DATA_FIELD_DEF(uint64_t, cmpMaskMode)
-TILING_DATA_FIELD_DEF(int64_t, cmpKvStride)
+TILING_DATA_FIELD_DEF(int64_t, cmpKvStride0)
 END_TILING_DATA_DEF
 REGISTER_TILING_DATA_CLASS(SparseAttnSharedkvCmpParamsOp, SparseAttnSharedkvCmpParams)
 
@@ -188,7 +188,7 @@ struct SASParaInfo {
     SASTilingOptionalParaInfo cuSeqLensQ = {nullptr, nullptr};
     SASTilingOptionalParaInfo seqUsedQ = {nullptr, nullptr};
     SASTilingOptionalParaInfo cuSeqLensKv = {nullptr, nullptr};
-	SASTilingOptionalParaInfo cuSeqLensCmpKv = {nullptr, nullptr};
+    SASTilingOptionalParaInfo cuSeqLensCmpKv = {nullptr, nullptr};
     SASTilingOptionalParaInfo sequsedKv = {nullptr, nullptr};
     SASTilingOptionalParaInfo sinks = {nullptr, nullptr};
     SASTilingOptionalParaInfo metadata = {nullptr, nullptr};
@@ -198,8 +198,8 @@ struct SASParaInfo {
     const uint32_t *cmpRatio = nullptr;
     const uint32_t *oriMaskMode = nullptr;
     const uint32_t *cmpMaskMode = nullptr;
-    const uint32_t *oriKvStride = nullptr;
-    const uint32_t *cmpKvStride = nullptr;
+    const uint32_t *oriKvStride0 = nullptr;
+    const uint32_t *cmpKvStride0 = nullptr;
     const uint32_t *oriWinLeft = nullptr;
     const uint32_t *oriWinRight = nullptr;
     const char *layoutQ = nullptr;
@@ -241,8 +241,8 @@ public:
     int64_t cmpRatio = 1;
     uint64_t oriMaskMode = 0;
     uint64_t cmpMaskMode = 0;
-    uint64_t oriKvStride = 0;
-    uint64_t cmpKvStride = 0;
+    uint64_t oriKvStride0 = 0;
+    uint64_t cmpKvStride0 = 0;
     int64_t oriWinLeft = 0;
     int64_t oriWinRight = 0;
     int64_t sparseBlockSize = 0;
@@ -319,8 +319,8 @@ private:
     ge::graphStatus CheckSingleParaCmpRatio() const;
     ge::graphStatus CheckSingleParaOriMaskMode() const;
     ge::graphStatus CheckSingleParaCmpMaskMode() const;
-    ge::graphStatus CheckSingleParaOriKvStride() const;
-    ge::graphStatus CheckSingleParaCmpKvStride() const;
+    ge::graphStatus CheckSingleParaOriKvStride0() const;
+    ge::graphStatus CheckSingleParaCmpKvStride0() const;
     ge::graphStatus CheckSingleParaOriWinLeft() const;
     ge::graphStatus CheckSingleParaOriWinRight() const;
     ge::graphStatus CheckSingleParaOriBlockTable() const;

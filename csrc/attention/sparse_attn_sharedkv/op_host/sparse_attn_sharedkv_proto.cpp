@@ -21,7 +21,7 @@ using namespace ge;
 
 namespace ops {
 constexpr uint32_t QUERY_INPUT_INDEX = 0;
-constexpr uint32_t RETURN_SOFTMAX_INDEX = 8;
+constexpr uint32_t RETURN_SOFTMAX_INDEX = 10;
 
 ge::graphStatus InferShapeSparseAttnSharedkv(gert::InferShapeContext *context)
 {
