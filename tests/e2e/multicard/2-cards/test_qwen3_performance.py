@@ -59,7 +59,6 @@ async def test_models(model: str) -> None:
         "HCCL_OP_EXPANSION_MODE": "AIV",
     }
     server_args = [
-        "--async-scheduling",
         "--distributed-executor-backend",
         "mp",
         "--tensor-parallel-size",

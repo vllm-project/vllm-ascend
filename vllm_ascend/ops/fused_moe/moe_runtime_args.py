@@ -138,12 +138,14 @@ def build_fused_experts_input(
     mxfp_scale_dtype: torch.dtype | None = None,
     mxfp_per_token_scale_dtype: torch.dtype | None = None,
     mxfp_use_bf16: bool | None = None,
+    is_per_channel_weight: bool = False,
     w1_scale: list[torch.Tensor] | torch.Tensor | None = None,
     w2_scale: list[torch.Tensor] | torch.Tensor | None = None,
-    w1_scale_bias: torch.Tensor | None = None,
-    w2_scale_bias: torch.Tensor | None = None,
+    w1_scale_bias: list[torch.Tensor] | torch.Tensor | None = None,
+    w2_scale_bias: list[torch.Tensor] | torch.Tensor | None = None,
     w1_offset: torch.Tensor | None = None,
     w2_offset: torch.Tensor | None = None,
+    swiglu_limit: int = 0,
 ) -> MoEFusedExpertsInput:
     return MoEFusedExpertsInput(
         hidden_states=hidden_states,
@@ -183,7 +185,9 @@ def build_fused_experts_input(
                 mxfp_per_token_scale_dtype=mxfp_per_token_scale_dtype,
                 mxfp_use_bf16=mxfp_use_bf16,
             ),
+            is_per_channel_weight=is_per_channel_weight,
         ),
+        swiglu_limit=swiglu_limit,
     )
 
 
@@ -222,6 +226,7 @@ def build_mlp_compute_input(
         activation=fused_experts_input.activation,
         need_trans=fused_experts_input.need_trans,
         dynamic_eplb=fused_experts_input.dynamic_eplb,
+        swiglu_limit=fused_experts_input.swiglu_limit,
     )
 
 
