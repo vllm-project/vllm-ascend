@@ -19,6 +19,7 @@ from __future__ import annotations
 
 import math
 import os
+from importlib import import_module, util
 from typing import TYPE_CHECKING, Any
 from uuid import uuid4
 
@@ -30,8 +31,9 @@ from vllm.platforms import Platform, PlatformEnum
 # todo: please remove it when solve cuda hard code in vllm
 os.environ["VLLM_DISABLE_SHARED_EXPERTS_STREAM"] = "1"
 
-import vllm_ascend.envs as envs_ascend
-from vllm_ascend.ascend_config import init_ascend_config
+from vllm.v1.attention.backends.registry import AttentionBackendEnum
+
+from vllm_ascend.ascend_config import get_ascend_config, init_ascend_config
 
 # isort: off
 from vllm_ascend.utils import (
@@ -377,11 +379,24 @@ class NPUPlatform(Platform):
         if compilation_config.cudagraph_mode == CUDAGraphMode.FULL_AND_PIECEWISE:
             compilation_config.cudagraph_mode = CUDAGraphMode.PIECEWISE
 
-        # encoder-decoder models currently only support piecewise mode
-        if model_config and model_config.is_encoder_decoder is True:
-            if compilation_config.cudagraph_mode == CUDAGraphMode.FULL_DECODE_ONLY:
-                logger.warning("encoder-decoder model doesn't support FULL_DECODE_ONLY, fallback to PIECEWISE ")
-            compilation_config.cudagraph_mode = CUDAGraphMode.PIECEWISE
+        # Encoder-decoder models currently only support PIECEWISE mode
+        # TODO(Jian Li): Confirm this behavior and explain why
+        if (
+            model_config
+            and model_config.is_encoder_decoder
+            and compilation_config.cudagraph_mode not in (CUDAGraphMode.NONE, CUDAGraphMode.PIECEWISE)
+        ):
+            cudagraph_mode = (
+                CUDAGraphMode.PIECEWISE
+                if compilation_config.mode == CompilationMode.VLLM_COMPILE
+                else CUDAGraphMode.NONE
+            )
+            logger.info_once(
+                "Encoder-decoder models don't support %s, fallback to %s.",
+                compilation_config.cudagraph_mode,
+                cudagraph_mode,
+            )
+            compilation_config.cudagraph_mode = cudagraph_mode
 
         # get custom compile backend for graph fusion
         compilation_config.oot_compiler = cls.get_compile_backend()
@@ -471,12 +486,12 @@ class NPUPlatform(Platform):
         if get_ascend_device_type() != AscendDeviceType._310P:
             compilation_config.custom_ops = ["all"]
 
-        if envs_ascend.VLLM_ASCEND_BALANCE_SCHEDULING:
+        if ascend_config.enable_balance_scheduling:
             kv_transfer_config = vllm_config.kv_transfer_config
             kv_role = getattr(kv_transfer_config, "kv_role", None)
             if kv_transfer_config is not None and kv_role != "kv_both":
                 raise ValueError(
-                    "VLLM_ASCEND_BALANCE_SCHEDULING (balance scheduling) only supports PD-mixed mode "
+                    "enable_balance_scheduling only supports PD-mixed mode "
                     "(kv_role='kv_both' or no kv_transfer_config), and is not supported in "
                     "PD-disaggregated mode (kv_role='kv_producer'/'kv_consumer')."
                 )
@@ -565,7 +580,7 @@ class NPUPlatform(Platform):
             os.environ["PYTORCH_NPU_ALLOC_CONF"] = npu_alloc_configs
             logger.info("Set PYTORCH_NPU_ALLOC_CONF=%s", npu_alloc_configs)
 
-        if ascend_config.enable_mc2_hierarchy_comm and envs_ascend.VLLM_ASCEND_ENABLE_FUSED_MC2:
+        if ascend_config.enable_mc2_hierarchy_comm and get_ascend_config().enable_fused_mc2:
             raise ValueError(
                 "fused mc2 op cannot be used with hierarchy communication."
                 "Please disable VLLM_ASCEND_ENABLE_FUSED_MC2 by setting it to 0."
@@ -589,12 +604,17 @@ class NPUPlatform(Platform):
 
     @classmethod
     def get_attn_backend_cls(cls, selected_backend, attn_selector_config, num_heads: int | None = None):
+        use_compress = getattr(attn_selector_config, "use_compress", False)
         key = (attn_selector_config.use_mla, attn_selector_config.use_sparse)
 
+        if selected_backend == AttentionBackendEnum.FLASH_ATTN and cls._validate_fa3_backend(key, attn_selector_config):
+            return "vllm_ascend.attention.fa3_v1.AscendFABackend"
+
         backend_map = {
-            (True, False): "vllm_ascend.attention.mla_v1.AscendMLABackend",
-            (False, False): "vllm_ascend.attention.attention_v1.AscendAttentionBackend",
-            (True, True): "vllm_ascend.attention.sfa_v1.AscendSFABackend",
+            (True, False, False): "vllm_ascend.attention.mla_v1.AscendMLABackend",
+            (False, False, False): "vllm_ascend.attention.attention_v1.AscendAttentionBackend",
+            (True, True, False): "vllm_ascend.attention.sfa_v1.AscendSFABackend",
+            (True, False, True): "vllm_ascend.attention.dsa_v1.AscendDSABackend",
         }
         backend_map_310 = {
             (
@@ -609,7 +629,34 @@ class NPUPlatform(Platform):
         if is_310p():
             return backend_map_310.get(key, backend_map_310[(False, False)])
 
-        return backend_map[key]
+        return backend_map[(attn_selector_config.use_mla, attn_selector_config.use_sparse, use_compress)]
+
+    @classmethod
+    def _validate_fa3_backend(cls, key, attn_selector_config):
+        if not attn_selector_config.use_batch_invariant:
+            logger.info(
+                "FA3 will not be enabled when not in training-inference consistency scenario. "
+                "Note that Ascend NPU will use its registered plugin backend instead."
+            )
+            return False
+        if key != (False, False):
+            raise ValueError("FA3 backend does not support MLA and SFA.")
+        if util.find_spec("flash_attn_npu_v3") is None:
+            raise ValueError(
+                "flash_attn_npu_v3 is not installed but FA3 backend is requested. "
+                "Please install flash_attn_npu_v3 to enable FA3."
+            )
+        mod = import_module("flash_attn_npu_v3")
+        if not hasattr(mod, "flash_attn_with_kvcache"):
+            raise ValueError(
+                "flash_attn_npu_v3 is installed but does not provide "
+                "flash_attn_with_kvcache. Please check flash_attn_npu_v3 "
+                "whether it supports flash_attn_with_kvcache."
+            )
+        logger.info(
+            "In training-inference consistency scenario, FA3 will be enabled, which may cause performance degradation."
+        )
+        return True
 
     @classmethod
     def get_punica_wrapper(cls) -> str:
@@ -709,7 +756,7 @@ class NPUPlatform(Platform):
         is_draft_model = False
         # v2 has 2 graphs in eager, one for prefill, the other for decodes, this flag is aimed to distinguish them.
         is_draft_model_prefill = False
-
+        sinks = False
         in_profile_run = get_mrv2_in_profile_run()
         moe_comm_type = select_moe_comm_method(
             num_tokens,
@@ -783,6 +830,7 @@ class NPUPlatform(Platform):
             "is_draft_model_prefill": is_draft_model_prefill,
             "in_profile_run": in_profile_run,
             "padded_num_tokens": padded_num_tokens,
+            "sinks": sinks,
         }
 
     @staticmethod
@@ -900,8 +948,13 @@ class NPUPlatform(Platform):
                 )
                 att_config.flash_attn_version = None
 
-            # Notify user that the backend will be managed by Ascend plugins
-            if getattr(att_config, "backend", None) is not None:
+            # Notify user that the backend will be managed by Ascend plugins,
+            # and for training-inference consistency, when att_config.backend
+            # == AttentionBackendEnum.FLASH_ATTN,it is NOT reset to None
+            if (
+                getattr(att_config, "backend", None) is not None
+                and att_config.backend != AttentionBackendEnum.FLASH_ATTN
+            ):
                 logger.info(
                     "User specified attention backend '%s'. Note that Ascend NPU "
                     "will use its registered plugin backend instead. Resetting to None.",
