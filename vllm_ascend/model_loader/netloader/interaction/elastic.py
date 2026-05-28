@@ -85,6 +85,17 @@ class ElasticClient:
                 self.server_addr = None
                 self.server_port = None
 
+        if self.s is None:
+            sources_str = ", ".join(self.sources[:2])
+            if len(self.sources) > 2:
+                sources_str += f", ... (total {len(self.sources)})"
+            logger.error(
+                "All sources exhausted, no connection established for device_id=%s, model_path=%s, sources=[%s]",
+                device_id,
+                model_path,
+                sources_str,
+            )
+
     def close(self) -> None:
         """
         Closes the socket connection.
@@ -314,7 +325,7 @@ class ElasticServer:
         try:
             data = json.loads(data_str)
         except Exception:
-            logger.error("Failed to load %s as JSON string", data_str)
+            logger.error("Failed to load %s as JSON string from %s", data_str, addr)
             conn.close()
             return
 
