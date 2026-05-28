@@ -37,8 +37,14 @@ class FakeRuntime:
         self.scheduler = scheduler
         self.prefiller_clients = {}
         self.decoder_clients = {}
+        self.sync_count = 0
+        self._sync_clients_from_snapshot()
 
     async def sync_clients(self):
+        self.sync_count += 1
+        self._sync_clients_from_snapshot()
+
+    def _sync_clients_from_snapshot(self):
         snapshot = self.scheduler.get_snapshot()
         self.prefiller_clients = {
             proxy.server_key(server["host"], server["port"]): SimpleNamespace(
@@ -62,6 +68,23 @@ class FakeRuntime:
 
     def get_decoder_client(self, key):
         return self.decoder_clients[key]
+
+
+class CountingScheduler:
+    def __init__(self, scheduler):
+        self.scheduler = scheduler
+        self.calls = Counter()
+
+    def __getattr__(self, name):
+        attr = getattr(self.scheduler, name)
+        if not callable(attr):
+            return attr
+
+        def wrapper(*args, **kwargs):
+            self.calls[name] += 1
+            return attr(*args, **kwargs)
+
+        return wrapper
 
 
 @pytest.fixture(autouse=True)
@@ -109,7 +132,47 @@ async def _test_proxy_basic_completion_flow(monkeypatch):
     assert chunks == [b'{"choices": [{"text": "ok"}], "usage": {"completion_tokens": 1}}']
     assert [call[0] for call in calls] == ["prefill", "decode"]
     assert calls[1][3]["kv_transfer_params"]["remote_engine_id"] == "engine-0"
+    assert proxy.runtime.sync_count == 0
     assert proxy.runtime.scheduler.healthcheck()["request_num"] == 0
+
+
+def test_proxy_hot_path_uses_batched_scheduler_operations(monkeypatch):
+    asyncio.run(_test_proxy_hot_path_uses_batched_scheduler_operations(monkeypatch))
+
+
+async def _test_proxy_hot_path_uses_batched_scheduler_operations(monkeypatch):
+    counting_scheduler = CountingScheduler(
+        proxy.SharedProxyScheduler(
+            [("127.0.0.1", 8100), ("127.0.0.1", 8101)],
+            [("127.0.0.1", 8200), ("127.0.0.1", 8201)],
+        )
+    )
+    runtime = FakeRuntime(counting_scheduler)
+    monkeypatch.setattr(proxy, "runtime", runtime)
+
+    async def fake_prefill_request(_client, _prefiller_key, _endpoint, _req_data, _request_id, **_kwargs):
+        return FakeResponse({"kv_transfer_params": {"remote_engine_id": "engine-0"}})
+
+    async def fake_decode_stream(_client, _endpoint, _req_data, request_id, **_kwargs):
+        yield b'{"choices": [{"text": "ok"}], "usage": {"completion_tokens": 1}}'
+
+    monkeypatch.setattr(proxy, "send_request_to_service", fake_prefill_request)
+    monkeypatch.setattr(proxy, "stream_service_response_with_retry", fake_decode_stream)
+
+    request = FakeRequest({"model": "test-model", "prompt": "hello", "max_tokens": 4})
+    response = await proxy.handle_completions_impl("/completions", request)
+    chunks = [chunk async for chunk in response.body_iterator]
+
+    assert chunks
+    assert runtime.sync_count == 0
+    assert counting_scheduler.calls["start_request_and_reserve_prefiller_kv"] == 1
+    assert counting_scheduler.calls["select_decoder"] == 1
+    assert counting_scheduler.calls["release_prefiller_kv"] == 1
+    assert counting_scheduler.calls["finish_request"] == 1
+    assert counting_scheduler.calls["request_started"] == 0
+    assert counting_scheduler.calls["request_finished"] == 0
+    assert counting_scheduler.calls["release_decoder"] == 0
+    assert counting_scheduler.calls["reserve_prefiller_kv"] == 0
 
 
 def test_proxy_releases_resources_on_cancel(monkeypatch):
@@ -157,7 +220,7 @@ def test_scheduler_balances_prefillers_and_decoders_under_high_concurrency():
     scheduler = proxy.SharedProxyScheduler(prefiller_instances, decoder_instances)
 
     with ThreadPoolExecutor(max_workers=32) as executor:
-        prefiller_keys = list(executor.map(lambda _: scheduler.select_prefiller(1.0)["key"], range(total_requests)))
+        prefiller_keys = list(executor.map(lambda _: scheduler.reserve_prefiller_kv(1.0)["key"], range(total_requests)))
         decoder_keys = list(executor.map(lambda _: scheduler.select_decoder(1.0)["key"], range(total_requests)))
 
     prefiller_counts = Counter(prefiller_keys)
@@ -169,7 +232,6 @@ def test_scheduler_balances_prefillers_and_decoders_under_high_concurrency():
     assert max(decoder_counts.values()) - min(decoder_counts.values()) <= 1
 
     for key, count in prefiller_counts.items():
-        scheduler.release_prefiller(key, float(count))
         scheduler.release_prefiller_kv(key, float(count))
     for key, count in decoder_counts.items():
         scheduler.release_decoder(key, float(count))
@@ -188,10 +250,9 @@ def test_scheduler_taints_instances_while_requests_are_in_flight():
 
     assert scheduler.remove_prefillers([("127.0.0.1", 8100)])
     assert scheduler.remove_decoders([("127.0.0.1", 8200)])
-    assert scheduler.select_prefiller(1.0)["key"] == proxy.server_key("127.0.0.1", 8101)
+    assert scheduler.reserve_prefiller_kv(1.0)["key"] == proxy.server_key("127.0.0.1", 8101)
     assert scheduler.select_decoder(1.0)["key"] == proxy.server_key("127.0.0.1", 8201)
 
-    scheduler.release_prefiller(proxy.server_key("127.0.0.1", 8101), 1.0)
     scheduler.release_prefiller_kv(proxy.server_key("127.0.0.1", 8101), 1.0)
     scheduler.release_decoder(proxy.server_key("127.0.0.1", 8201), 1.0)
     scheduler.request_finished()

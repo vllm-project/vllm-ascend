@@ -188,6 +188,19 @@ def setup_logging(log_level: str) -> None:
     )
 
 
+def next_req_id() -> str:
+    return str(uuid.uuid4())
+
+
+def calculate_prefill_score(request_length: int) -> float:
+    length_score = request_length / 4.0
+    return length_score * 0.0345 + 120.0745
+
+
+def calculate_decode_score(request_length: int) -> float:
+    return request_length
+
+
 def normalize_host(host: str) -> str:
     return host.replace("localhost", "0.0.0.0").replace("127.0.0.1", "0.0.0.0")
 
@@ -311,15 +324,11 @@ class SharedProxyScheduler:
         with self._lock:
             self.request_num = max(0, self.request_num - 1)
 
-    def next_req_id(self) -> str:
-        return str(uuid.uuid4())
-
-    def calculate_prefill_scores(self, request_length: int) -> float:
-        length_score = request_length / 4.0
-        return length_score * 0.0345 + 120.0745
-
-    def calculate_decode_scores(self, request_length: int) -> float:
-        return request_length
+    def start_request_and_reserve_prefiller_kv(self, token_count: float) -> dict[str, Any]:
+        with self._lock:
+            prefiller = self._reserve_prefiller_kv_no_lock(token_count)
+            self.request_num += 1
+            return prefiller
 
     def select_prefiller(self, token_count: float) -> dict[str, Any]:
         with self._lock:
@@ -335,6 +344,28 @@ class SharedProxyScheduler:
             )
             return {"key": key, "host": state["host"], "port": state["port"]}
 
+    def _reserve_prefiller_kv_no_lock(self, token_count: float) -> dict[str, Any]:
+        if not self.prefiller_heap:
+            raise RuntimeError("No prefiller servers available")
+        _, _, key = heapq.heappop(self.prefiller_heap)
+        state = self.prefillers[key]
+        state["active_kv_cache"] += token_count
+        heapq.heappush(
+            self.prefiller_heap,
+            (self._priority_no_lock(InstanceType.PREFILL, key), state["ordinal"], key),
+        )
+        return {"key": key, "host": state["host"], "port": state["port"]}
+
+    def reserve_prefiller_kv(self, token_count: float) -> dict[str, Any]:
+        """Select a prefiller and reserve only its KV pressure.
+
+        The request hot path releases prefiller active tokens immediately after
+        remote prefill finishes. Tracking only the net KV reservation avoids a
+        second manager RPC per request while keeping decode-time KV balancing.
+        """
+        with self._lock:
+            return self._reserve_prefiller_kv_no_lock(token_count)
+
     def release_prefiller(self, key: str, token_count: float) -> None:
         with self._lock:
             if key not in self.prefillers:
@@ -344,24 +375,30 @@ class SharedProxyScheduler:
 
     def release_prefiller_kv(self, key: str, token_count: float) -> None:
         with self._lock:
-            if key not in self.prefillers:
-                return
-            state = self.prefillers[key]
-            state["active_kv_cache"] = max(0.0, float(state["active_kv_cache"]) - token_count)
-            self._rebuild_heap_no_lock(InstanceType.PREFILL)
+            self._release_prefiller_kv_no_lock(key, token_count)
+
+    def _release_prefiller_kv_no_lock(self, key: str, token_count: float) -> None:
+        if key not in self.prefillers:
+            return
+        state = self.prefillers[key]
+        state["active_kv_cache"] = max(0.0, float(state["active_kv_cache"]) - token_count)
+        self._rebuild_heap_no_lock(InstanceType.PREFILL)
 
     def select_decoder(self, token_count: float) -> dict[str, Any]:
         with self._lock:
-            if not self.decoder_heap:
-                raise RuntimeError("No decoder servers available")
-            _, _, key = heapq.heappop(self.decoder_heap)
-            state = self.decoders[key]
-            state["active_tokens"] += token_count
-            heapq.heappush(
-                self.decoder_heap,
-                (self._priority_no_lock(InstanceType.DECODE, key), state["ordinal"], key),
-            )
-            return {"key": key, "host": state["host"], "port": state["port"]}
+            return self._select_decoder_no_lock(token_count)
+
+    def _select_decoder_no_lock(self, token_count: float) -> dict[str, Any]:
+        if not self.decoder_heap:
+            raise RuntimeError("No decoder servers available")
+        _, _, key = heapq.heappop(self.decoder_heap)
+        state = self.decoders[key]
+        state["active_tokens"] += token_count
+        heapq.heappush(
+            self.decoder_heap,
+            (self._priority_no_lock(InstanceType.DECODE, key), state["ordinal"], key),
+        )
+        return {"key": key, "host": state["host"], "port": state["port"]}
 
     def release_decoder(self, key: str, token_count: float) -> None:
         with self._lock:
@@ -369,6 +406,27 @@ class SharedProxyScheduler:
                 return
             self.decoders[key]["active_tokens"] -= token_count
             self._rebuild_heap_no_lock(InstanceType.DECODE)
+
+    def finish_request(
+        self,
+        prefiller_key: str | None,
+        prefiller_token_count: float,
+        decoder_key: str | None,
+        decoder_token_count: float,
+        release_prefiller_kv: bool,
+    ) -> None:
+        with self._lock:
+            if release_prefiller_kv and prefiller_key in self.prefillers:
+                prefiller = self.prefillers[prefiller_key]
+                prefiller["active_kv_cache"] = max(
+                    0.0,
+                    float(prefiller["active_kv_cache"]) - prefiller_token_count,
+                )
+                self._rebuild_heap_no_lock(InstanceType.PREFILL)
+            if decoder_key in self.decoders:
+                self.decoders[decoder_key]["active_tokens"] -= decoder_token_count
+                self._rebuild_heap_no_lock(InstanceType.DECODE)
+            self.request_num = max(0, self.request_num - 1)
 
     def get_waiting_nodes(self) -> dict[str, tuple[str, tuple[str, int], int]]:
         with self._lock:
@@ -528,6 +586,22 @@ class WorkerRuntime:
             await client.aclose()
         self.prefiller_clients.clear()
         self.decoder_clients.clear()
+
+
+async def get_prefiller_client(key: str) -> httpx.AsyncClient:
+    try:
+        return runtime.get_prefiller_client(key)
+    except KeyError:
+        await runtime.sync_clients()
+        return runtime.get_prefiller_client(key)
+
+
+async def get_decoder_client(key: str) -> httpx.AsyncClient:
+    try:
+        return runtime.get_decoder_client(key)
+    except KeyError:
+        await runtime.sync_clients()
+        return runtime.get_decoder_client(key)
 
 
 class NodeListener:
@@ -801,17 +875,26 @@ async def stream_service_response_with_retry(
                 raise exc
 
 
-async def handle_select_instance(api: str, req_data: Any, request_length: int) -> InstanceInfo:
-    await runtime.sync_clients()
+async def handle_select_instance(
+    api: str,
+    req_data: Any,
+    request_length: int,
+    start_request: bool,
+) -> InstanceInfo:
     scheduler = runtime.scheduler
-    prefiller_score = scheduler.calculate_prefill_scores(request_length)
-    request_id = scheduler.next_req_id()
-    prefiller = scheduler.select_prefiller(prefiller_score)
+    prefiller_score = calculate_prefill_score(request_length)
+    decoder_score = calculate_decode_score(request_length)
+    request_id = next_req_id()
+    if start_request:
+        prefiller = scheduler.start_request_and_reserve_prefiller_kv(prefiller_score)
+    else:
+        prefiller = scheduler.reserve_prefiller_kv(prefiller_score)
     prefiller_key = prefiller["key"]
+    prefiller_client = await get_prefiller_client(prefiller_key)
 
     try:
         response = await send_request_to_service(
-            runtime.get_prefiller_client(prefiller_key),
+            prefiller_client,
             prefiller_key,
             api,
             req_data,
@@ -819,21 +902,33 @@ async def handle_select_instance(api: str, req_data: Any, request_length: int) -
             max_retries=global_args.max_retries,
             base_delay=global_args.retry_delay,
         )
-    finally:
-        scheduler.release_prefiller(prefiller_key, prefiller_score)
+    except Exception:
+        if start_request:
+            scheduler.finish_request(prefiller_key, prefiller_score, None, 0.0, release_prefiller_kv=True)
+        else:
+            scheduler.release_prefiller_kv(prefiller_key, prefiller_score)
+        raise
 
     response_json = response.json()
     kv_transfer_params = response_json.get("kv_transfer_params", {})
     if kv_transfer_params:
         req_data["kv_transfer_params"] = kv_transfer_params
 
-    decoder_score = scheduler.calculate_decode_scores(request_length)
-    decoder = scheduler.select_decoder(decoder_score)
+    try:
+        decoder = scheduler.select_decoder(decoder_score)
+    except Exception:
+        if start_request:
+            scheduler.finish_request(prefiller_key, prefiller_score, None, 0.0, release_prefiller_kv=True)
+        else:
+            scheduler.release_prefiller_kv(prefiller_key, prefiller_score)
+        raise
     decoder_key = decoder["key"]
+    decoder_client = await get_decoder_client(decoder_key)
+
     logger.debug(
         "Using %s %s",
-        runtime.get_prefiller_client(prefiller_key).base_url,
-        runtime.get_decoder_client(decoder_key).base_url,
+        prefiller_client.base_url,
+        decoder_client.base_url,
     )
     return InstanceInfo(
         request_id=request_id,
@@ -853,19 +948,19 @@ async def select_recompute_instance(
     previous_instance: InstanceInfo,
 ) -> InstanceInfo:
     """Release the old decoder before assigning a new instance for recompute."""
+    runtime.scheduler.release_prefiller_kv(previous_instance.prefiller_key, previous_instance.prefiller_score)
     runtime.scheduler.release_decoder(previous_instance.decoder_key, previous_instance.decoder_score)
-    return await handle_select_instance(api, req_data, request_length)
+    return await handle_select_instance(api, req_data, request_length, start_request=False)
 
 
 async def handle_completions_impl(api: str, request: Request):
     scheduler = runtime.scheduler
-    scheduler.request_started()
     request_released = False
     try:
         req_data = await request.json()
         req_body = await request.body()
         request_length = len(req_body)
-        instance_info = await handle_select_instance(api, req_data, request_length)
+        instance_info = await handle_select_instance(api, req_data, request_length, start_request=True)
         stream_flag = bool(req_data.get("stream", False))
         chat_flag = "messages" in req_data
 
@@ -886,20 +981,27 @@ async def handle_completions_impl(api: str, request: Request):
             retry_count = 0
             retry = True
             completion_tokens = 0
+
+            def release_prefiller_kv_once() -> None:
+                nonlocal released_kv
+                if not released_kv:
+                    scheduler.release_prefiller_kv(instance_info.prefiller_key, instance_info.prefiller_score)
+                    released_kv = True
+
             try:
                 while retry:
                     retry = False
+                    decoder_client = await get_decoder_client(instance_info.decoder_key)
                     async for chunk in stream_service_response_with_retry(
-                        runtime.get_decoder_client(instance_info.decoder_key),
+                        decoder_client,
                         api,
                         req_data,
                         request_id=instance_info.request_id,
                         max_retries=global_args.max_retries,
                         base_delay=global_args.retry_delay,
                     ):
-                        if not released_kv and chunk:
-                            scheduler.release_prefiller_kv(instance_info.prefiller_key, instance_info.prefiller_score)
-                            released_kv = True
+                        if chunk:
+                            release_prefiller_kv_once()
                         try:
                             chunk_str = chunk.decode("utf-8").strip()
                         except UnicodeDecodeError:
@@ -949,6 +1051,7 @@ async def handle_completions_impl(api: str, request: Request):
                                 tmp_request_length,
                                 instance_info,
                             )
+                            released_kv = False
                             break
                         if retry_count > 0 and not stream_flag:
                             if chat_flag:
@@ -964,21 +1067,24 @@ async def handle_completions_impl(api: str, request: Request):
                     instance_info.decoder["port"],
                     instance_info.request_id,
                 )
-                scheduler.release_prefiller_kv(instance_info.prefiller_key, instance_info.prefiller_score)
                 raise
             except Exception as exc:
                 logger.error(
-                    "Error during streaming from decoder %s:%s: %s "
-                    "while handling request %s; releasing prefiller KV",
+                    "Error during streaming from decoder %s:%s: %s while handling request %s; releasing prefiller KV",
                     instance_info.decoder["host"],
                     instance_info.decoder["port"],
                     exc,
                     instance_info.request_id,
                 )
-                scheduler.release_prefiller_kv(instance_info.prefiller_key, instance_info.prefiller_score)
             finally:
-                scheduler.release_decoder(instance_info.decoder_key, instance_info.decoder_score)
-                scheduler.request_finished()
+                scheduler.finish_request(
+                    instance_info.prefiller_key,
+                    instance_info.prefiller_score,
+                    instance_info.decoder_key,
+                    instance_info.decoder_score,
+                    release_prefiller_kv=not released_kv,
+                )
+                released_kv = True
                 request_released = True
 
         media_type = "text/event-stream; charset=utf-8" if stream_flag else "application/json"
@@ -989,10 +1095,16 @@ async def handle_completions_impl(api: str, request: Request):
         exc_info = sys.exc_info()
         print(f"Error occurred in disagg prefill proxy server - {api} endpoint")
         print("".join(traceback.format_exception(*exc_info)))
+        if not request_released and "instance_info" in locals():
+            scheduler.finish_request(
+                instance_info.prefiller_key,
+                instance_info.prefiller_score,
+                instance_info.decoder_key,
+                instance_info.decoder_score,
+                release_prefiller_kv=True,
+            )
+            request_released = True
         raise
-    finally:
-        if not request_released:
-            scheduler.request_finished()
 
 
 async def adjust_instances_impl(adjust_mode: str, request: Request):
