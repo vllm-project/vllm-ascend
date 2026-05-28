@@ -13,9 +13,9 @@ This document describes how to install vllm-ascend manually.
     |---------------|----------------------------------|-------------------------------------------|
     | Ascend HDK    | Refer to the documentation [CANN 9.0.0](https://www.hiascend.com/document/detail/zh/canncommercial/900/releasenote/releasenote_0000.html) | Required for CANN |
     | CANN          | == 9.0.0                        | Required for vllm-ascend and torch-npu    |
-    | torch-npu     | == 2.9.0             | Required for vllm-ascend, No need to install manually, it will be auto installed in below steps |
-    | torch         | == 2.9.0                          | Required for torch-npu and vllm           |
-    | NNAL          | == 9.0.0                       | Required for libatb.so, enables advanced tensor operations |
+    | torch-npu     | == 2.10.0                       | Required for vllm-ascend, No need to install manually, it will be auto installed in below steps |
+    | torch         | == 2.10.0                       | Required for torch-npu and vllm           |
+    | NNAL          | == 9.0.0                        | Required for libatb.so, enables advanced tensor operations |
 
 There are two installation methods:
 
@@ -192,6 +192,14 @@ vllm-ascend==|pip_vllm_ascend_version|
 
 :::{dropdown} Click here to see "Build from source code"
 or build from **source code**:
+
+```{note}
+To install `triton-ascend`, run:
+
+pip install triton-ascend==3.2.1 --extra-index-url https://mirrors.huaweicloud.com/ascend/repos/pypi
+
+If you are installing via `uv`, make sure to install `triton-ascend` **last**, after all other packages have been installed, to avoid dependency resolution conflicts.
+```
 
 ```{code-block} bash
    :substitutions:

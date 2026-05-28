@@ -81,15 +81,15 @@ myst_substitutions = {
     # CANN image tag
     "cann_image_tag": "9.0.0-910b-ubuntu22.04-py3.11",
     # vLLM commit hash for main branch
-    "main_vllm_commit": "c7aa186d67b6f051680831418e957c67f34ba7a2",
+    "main_vllm_commit": "1ac10f159a09897baada01b14b6a0dd6442aefd6",
     # vLLM tag for main branch
-    "main_vllm_tag": "v0.20.1",
+    "main_vllm_tag": "v0.20.2",
     # Python version for main branch
     "main_python_version": ">= 3.10, < 3.12",
     # CANN version for main branch
     "main_cann_version": "9.0.0",
     # PyTorch/torch_npu version for main branch
-    "main_pytorch_torch_npu_version": "2.9.0 / 2.9.0",
+    "main_pytorch_torch_npu_version": "2.10.0 / 2.10.0",
     # Triton Ascend version for main branch
     "main_triton_ascend_version": "3.2.1",
 }

@@ -68,6 +68,7 @@ static inline DimTileChoice ChooseDimTileSize(gert::TilingContext *context, int6
     const int64_t candidates[] = {4096, 2048, 1024, 512, 384, 192};
 
     auto ChooseOnce = [&](bool requireExactDiv) -> DimTileChoice {
+        const bool preferMoreBlocks = (batch > static_cast<int64_t>(coreNum));
         DimTileChoice bestOver;
         int64_t bestOverGap = std::numeric_limits<int64_t>::max();
         DimTileChoice bestUnder;
@@ -77,6 +78,10 @@ static inline DimTileChoice ChooseDimTileSize(gert::TilingContext *context, int6
                 continue;
             }
             if (requireExactDiv && (dim % dimTileSize != 0)) {
+                continue;
+            }
+            const int64_t testBlocksPerSeq = requireExactDiv ? (dim / dimTileSize) : CeilDivInt64(dim, dimTileSize);
+            if (preferMoreBlocks && testBlocksPerSeq <= 1) {
                 continue;
             }
             const int64_t blocksPerSeq = requireExactDiv ? (dim / dimTileSize) : CeilDivInt64(dim, dimTileSize);
@@ -89,7 +94,6 @@ static inline DimTileChoice ChooseDimTileSize(gert::TilingContext *context, int6
             if (gridSize >= static_cast<int64_t>(coreNum)) {
                 const int64_t gap = gridSize - static_cast<int64_t>(coreNum);
                 if (gap < bestOverGap) {
-                    //                    bestOver = {dimTileSize, blocksPerSeq, gridSize};
                     bestOver.dimTileSize = dimTileSize;
                     bestOver.blocksPerSeq = blocksPerSeq;
                     bestOver.gridSize = gridSize;
@@ -261,34 +265,6 @@ static ge::graphStatus GetShapeDtypeInfo(gert::TilingContext *context, CausalCon
                 return ge::GRAPH_FAILED);
 
     const int64_t *qslData = nullptr;
-    // if (!qslAbsent) {
-    //     const gert::Tensor *qslTensor = context->GetOptionalInputTensor(QUERY_START_LOC_INDEX);
-    //     qslData = (qslTensor != nullptr) ? qslTensor->GetData<int64_t>() : nullptr;
-    //     if (qslData != nullptr) {
-    //         OP_CHECK_IF(qslData[0] != 0, OP_LOGE(context, "queryStartLoc[0] must be 0"), return ge::GRAPH_FAILED);
-    //         OP_CHECK_IF(qslData[qslSize - 1] != cuSeqlen,
-    //                     OP_LOGE(context, "queryStartLoc[last] must equal cuSeqlen, got %ld vs %ld",
-    //                             qslData[qslSize - 1], cuSeqlen),
-    //                     return ge::GRAPH_FAILED);
-    //         for (int64_t i = 0; i + 1 < qslSize; ++i) {
-    //             const int64_t cur = qslData[i];
-    //             const int64_t nxt = qslData[i + 1];
-    //             OP_CHECK_IF(cur < 0 || cur > cuSeqlen,
-    //                         OP_LOGE(context, "queryStartLoc[%ld] out of range: %ld (cuSeqlen=%ld)", i, cur, cuSeqlen),
-    //                         return ge::GRAPH_FAILED);
-    //             OP_CHECK_IF(
-    //                 nxt < 0 || nxt > cuSeqlen,
-    //                 OP_LOGE(context, "queryStartLoc[%ld] out of range: %ld (cuSeqlen=%ld)", i + 1, nxt, cuSeqlen),
-    //                 return ge::GRAPH_FAILED);
-    //             OP_CHECK_IF(
-    //                 nxt < cur,
-    //                 OP_LOGE(context,
-    //                         "queryStartLoc must be non-decreasing, got queryStartLoc[%ld]=%ld queryStartLoc[%ld]=%ld",
-    //                         i, cur, i + 1, nxt),
-    //                 return ge::GRAPH_FAILED);
-    //         }
-    //     }
-    // }
 
     if (!qslAbsent && isDecodeMode && inputMode == 2) {
         const int64_t batchFromQsl = qslSize - 1;
@@ -331,24 +307,6 @@ static ge::graphStatus GetShapeDtypeInfo(gert::TilingContext *context, CausalCon
             OP_CHECK_IF(ciShape.GetDim(0) != batch, OP_LOGE(context, "cacheIndices.size must equal batch"),
                         return ge::GRAPH_FAILED);
             tiling.hasCacheIndices = 1;
-
-            // const gert::Tensor *ciTensor = context->GetOptionalInputTensor(CACHE_INDICES_INDEX);
-            // const int64_t *ciData = (ciTensor != nullptr) ? ciTensor->GetData<int64_t>() : nullptr;
-            // if (ciData != nullptr) {
-            //     for (int64_t i = 0; i < batch; ++i) {
-            //         const int64_t v = ciData[i];
-            //         if (v == tiling.padSlotId) {
-            //             continue;
-            //         }
-            //         OP_CHECK_IF(!FitsInInt32(v), OP_LOGE(context, "cacheIndices[%ld]=%ld does not fit int32", i, v),
-            //                     return ge::GRAPH_FAILED);
-            //         OP_CHECK_IF(
-            //             v < 0 || v >= numCacheLines,
-            //             OP_LOGE(context, "cacheIndices[%ld]=%ld out of range [0, num_cache_lines=%ld), padSlotId=%ld",
-            //                     i, v, numCacheLines, tiling.padSlotId),
-            //             return ge::GRAPH_FAILED);
-            //     }
-            // }
         }
     }
     if (ciAbsent) {
@@ -373,17 +331,6 @@ static ge::graphStatus GetShapeDtypeInfo(gert::TilingContext *context, CausalCon
             OP_CHECK_IF(ismShape.GetDim(0) != batch, OP_LOGE(context, "initialStateMode.size must equal batch"),
                         return ge::GRAPH_FAILED);
             tiling.hasInitialStateMode = 1;
-
-            // const gert::Tensor *ismTensor = context->GetOptionalInputTensor(INITIAL_STATE_MODE_INDEX);
-            // const int64_t *ismData = (ismTensor != nullptr) ? ismTensor->GetData<int64_t>() : nullptr;
-            // if (ismData != nullptr) {
-            //     for (int64_t i = 0; i < batch; ++i) {
-            //         const int64_t v = ismData[i];
-            //         OP_CHECK_IF(v != 0 && v != 1,
-            //                     OP_LOGE(context, "initialStateMode[%ld]=%ld is invalid (only supports 0/1)", i, v),
-            //                     return ge::GRAPH_FAILED);
-            //     }
-            // }
         }
     }
 
@@ -411,40 +358,6 @@ static ge::graphStatus GetShapeDtypeInfo(gert::TilingContext *context, CausalCon
                                     stateLen, reqStateLen),
                             return ge::GRAPH_FAILED);
             }
-
-            // const gert::Tensor *natTensor = context->GetOptionalInputTensor(NUM_ACCEPTED_TOKENS_INDEX);
-            // const int64_t *natData = (natTensor != nullptr) ? natTensor->GetData<int64_t>() : nullptr;
-            // if (natData != nullptr) {
-            //     for (int64_t i = 0; i < batch; ++i) {
-            //         const int64_t a = natData[i];
-            //         OP_CHECK_IF(a < 0, OP_LOGE(context, "numAcceptedTokens[%ld]=%ld is invalid (must be >= 0)", i, a),
-            //                     return ge::GRAPH_FAILED);
-            //         OP_CHECK_IF(!FitsInInt32(a),
-            //                     OP_LOGE(context, "numAcceptedTokens[%ld]=%ld does not fit int32", i, a),
-            //                     return ge::GRAPH_FAILED);
-
-            //         if (inputMode == 2) {
-            //             OP_CHECK_IF(
-            //                 a > 1,
-            //                 OP_LOGE(context, "numAcceptedTokens[%ld]=%ld exceeds decode 2D token count (1)", i, a),
-            //                 return ge::GRAPH_FAILED);
-            //         } else if (inputMode == 1) {
-            //             OP_CHECK_IF(a > seqLen,
-            //                         OP_LOGE(context, "numAcceptedTokens[%ld]=%ld exceeds seqlen=%ld in 3D update", i, a,
-            //                                 seqLen),
-            //                         return ge::GRAPH_FAILED);
-            //         } else if (inputMode == 0) {
-            //             if (qslData != nullptr) {
-            //                 const int64_t lenI = qslData[i + 1] - qslData[i];
-            //                 OP_CHECK_IF(a > lenI,
-            //                             OP_LOGE(context, "numAcceptedTokens[%ld]=%ld exceeds varlen segment length=%ld",
-            //                                     i, a, lenI),
-            //                             return ge::GRAPH_FAILED);
-            //             }
-            //         }
-            //     }
-            // }
-
             tiling.hasNumAcceptedTokens = 1;
         }
     }

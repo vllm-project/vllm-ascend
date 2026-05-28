@@ -208,7 +208,7 @@ def test_rmsnorm_quant_fusion(
         pm_pass = PatternMatcherPass()
         fusion_pattern.register(pm_pass)
         model = model.to("npu")
-        seq_len = 5
+        seq_len = num_tokens
         qkv = torch.randn(seq_len, qkv_size, device="npu", dtype=dtype)
         cos_sin_cache = torch.from_numpy(np.random.uniform(0, 1, [MAX_POSITION_EMBEDDING, head_dim])).to(dtype).npu()
         positions = torch.randint(
