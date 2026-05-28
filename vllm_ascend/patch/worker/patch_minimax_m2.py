@@ -234,12 +234,21 @@ def _patched_minimax_m2_forward(
         else:
             hidden_states = self.embed_input_ids(input_ids)
         residual = None
+        aux_hidden_states: list[torch.Tensor] = []
     else:
         assert intermediate_tensors is not None
         hidden_states = intermediate_tensors["hidden_states"]
         residual = intermediate_tensors["residual"]
+        # Carry forward aux hidden states collected on earlier PP ranks.
+        # Transported as a stacked tensor [num_aux, batch, hidden_size];
+        # unbind back to list of tensors.
+        aux_stacked = intermediate_tensors.get("aux_hidden_states")
+        aux_hidden_states: list[torch.Tensor] = (
+            list(torch.unbind(aux_stacked, dim=0))
+            if aux_stacked is not None and aux_stacked.shape[0] > 0
+            else []
+        )
 
-    aux_hidden_states: list[torch.Tensor] = []
     for idx, layer in enumerate(self.layers[self.start_layer : self.end_layer]):
         layer_idx = self.start_layer + idx
         if layer_idx in aux_layers:
@@ -247,7 +256,20 @@ def _patched_minimax_m2_forward(
         hidden_states, residual = layer(positions, hidden_states, residual)
 
     if not get_pp_group().is_last_rank:
-        return IntermediateTensors({"hidden_states": hidden_states, "residual": residual})
+        # Stack aux list into single tensor for PP transport.
+        # Empty list → shape-(0) placeholder so receiver can still deserialize.
+        if aux_hidden_states:
+            aux_transport = torch.stack(aux_hidden_states)
+        else:
+            aux_transport = torch.zeros(
+                0, hidden_states.shape[0], hidden_states.shape[1],
+                dtype=hidden_states.dtype, device=hidden_states.device,
+            )
+        return IntermediateTensors({
+            "hidden_states": hidden_states,
+            "residual": residual,
+            "aux_hidden_states": aux_transport,
+        })
 
     hidden_states, _ = self.norm(hidden_states, residual)
     if aux_hidden_states:
@@ -258,6 +280,27 @@ def _patched_minimax_m2_forward(
 if not getattr(_original_minimax_m2_forward, "_vllm_ascend_minimax_eagle3_patched", False):
     MiniMaxM2Model.forward = _patched_minimax_m2_forward  # type: ignore[assignment]
     MiniMaxM2Model.forward._vllm_ascend_minimax_eagle3_patched = True  # type: ignore[attr-defined]
+
+    # Also patch make_empty_intermediate_tensors to include a buffer for
+    # aux_hidden_states so the PP send/recv can transport them between ranks.
+    _original_make_empty = MiniMaxM2Model.make_empty_intermediate_tensors
+
+    def _patched_make_empty_intermediate_tensors(
+        self: "MiniMaxM2Model",
+        batch_size: int,
+        dtype: torch.dtype,
+        device: torch.device,
+    ) -> IntermediateTensors:
+        result = _original_make_empty(self, batch_size, dtype, device)
+        aux_layers = getattr(self, "aux_hidden_state_layers", ()) or ()
+        max_aux = max(len(aux_layers), 3)  # at least 3 for default MiniMax M2.5 eagle3
+        result.tensors["aux_hidden_states"] = torch.zeros(
+            (max_aux, batch_size, self.config.hidden_size),
+            dtype=dtype, device=device,
+        )
+        return result
+
+    MiniMaxM2Model.make_empty_intermediate_tensors = _patched_make_empty_intermediate_tensors
 
 
 def _set_aux_hidden_state_layers(self: "MiniMaxM2ForCausalLM", layers: tuple[int, ...]) -> None:
