@@ -3106,7 +3106,7 @@ class NPUModelRunner(GPUModelRunner):
                 outputs = self._model_forward(
                     num_tokens_padded, input_ids, positions, intermediate_tensors, inputs_embeds
                 )
-            if self.use_aux_hidden_state_outputs:
+            if self.use_aux_hidden_state_outputs and get_pp_group().is_last_rank:
                 hidden_states, _ = outputs
             else:
                 hidden_states = outputs
