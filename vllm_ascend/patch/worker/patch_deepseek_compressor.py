@@ -13,8 +13,10 @@ from vllm_ascend.patch.platform.patch_kv_cache_interface import AscendMLAAttenti
 from vllm_ascend.utils import vllm_version_is
 
 if vllm_version_is("0.20.2"):
-    from vllm.model_executor.layers import deepseek_compressor  # type:ignore
-    from vllm.model_executor.layers import deepseek_v4_attention  # type:ignore
+    from vllm.model_executor.layers import (
+        deepseek_compressor,  # type:ignore
+        deepseek_v4_attention,  # type:ignore
+    )
     from vllm.model_executor.layers.deepseek_compressor import CompressorStateCache  # type:ignore
     from vllm.model_executor.layers.deepseek_v4_attention import DeepseekV4IndexerCache  # type:ignore
 else:
