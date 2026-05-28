@@ -1099,3 +1099,6 @@ class AscendDSACPImpl(DSAAttentionImpl):
             return_value=False,
         )
         return topk_idxs
+
+    def dsa_warmup_with_multistream(self, hidden_states: torch.Tensor):
+        pass
