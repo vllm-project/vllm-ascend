@@ -274,9 +274,9 @@ class NPUWorker(WorkerBase):
         if get_ascend_device_type() == AscendDeviceType.A5:
             visible_devices = os.getenv("ASCEND_RT_VISIBLE_DEVICES")
             if visible_devices is None:
-                devices = sorted(list(DeviceInfo.get_npu_map_info().keys()))
+                devices = sorted([int(x) for x in DeviceInfo.get_npu_map_info().keys()])
             else:
-                devices = [int(x) for x in visible_devices.split(",")]
+                devices = [int(x) for x in visible_devices.split(",") if x.strip()]
             local_comm_res_path = os.getenv("ASCEND_LOCAL_COMM_RES_PATH")
 
             if local_comm_res_path:
