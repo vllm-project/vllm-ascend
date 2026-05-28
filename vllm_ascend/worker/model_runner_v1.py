@@ -1485,7 +1485,9 @@ class NPUModelRunner(GPUModelRunner):
                     target_token_ids = self.input_ids.gpu[:num_scheduled_tokens]
                     target_positions = self._get_positions(num_scheduled_tokens)
                     if self.use_aux_hidden_state_outputs:
+                        aux_shapes = [h.shape for h in aux_hidden_states]
                         target_hidden_states = torch.cat([h[:num_scheduled_tokens] for h in aux_hidden_states], dim=-1)
+                        print(f"[DBG_MR] propose aux_states: num_scheduled={num_scheduled_tokens} aux_shapes={aux_shapes} cat_shape={target_hidden_states.shape}")
                     else:
                         target_hidden_states = hidden_states[:num_scheduled_tokens]
             else:
@@ -1894,6 +1896,7 @@ class NPUModelRunner(GPUModelRunner):
             aux_hidden_states = None
             if self.use_aux_hidden_state_outputs:
                 hidden_states, aux_hidden_states = hidden_states
+                print(f"[DBG_MR] execute_model unpacked aux list len={len(aux_hidden_states) if aux_hidden_states else 0} shapes={[h.shape for h in aux_hidden_states] if aux_hidden_states else []}")
             if self.pcp_size > 1:
                 # NOTE we must `slice` hidden_states because pcp_allgather_restore_idx
                 # ignores the padding from CUDA Graph.
@@ -2198,6 +2201,11 @@ class NPUModelRunner(GPUModelRunner):
             logits,
             sampling_metadata,
         )
+        # DEBUG: check rejection sampler output
+        if hasattr(sampler_output, 'sampled_token_ids'):
+            out_ids = sampler_output.sampled_token_ids
+            print(f"[DBG_MR] _sample output shape={out_ids.shape} num_valid={(out_ids >= 0).sum().item()}/{out_ids.numel()} "
+                  f"first_row={out_ids[0].tolist() if out_ids.shape[0] > 0 else []}")
         return sampler_output
 
     # TODO: remove this func after eagle_proposer is refactored and
@@ -2437,6 +2445,12 @@ class NPUModelRunner(GPUModelRunner):
 
         if sync_self:
             assert intermediate_tensors is not None
+            has_pp_aux = "_pp_aux" in intermediate_tensors.tensors
+            keys = list(intermediate_tensors.tensors.keys())
+            print(f"[DBG_MR] sync_and_slice rank={get_pp_group().rank_in_group} has_pp_aux={has_pp_aux} keys={keys}")
+            if has_pp_aux:
+                pp_aux_shape = intermediate_tensors.tensors["_pp_aux"].shape
+                print(f"[DBG_MR] sync_and_slice _pp_aux shape={pp_aux_shape} num_tokens={num_tokens}")
             for k, v in intermediate_tensors.items():
                 copy_len = (num_tokens + tp - 1) // tp if enable_sp() else num_tokens
                 self.intermediate_tensors[k][:copy_len].copy_(
@@ -3192,6 +3206,7 @@ class NPUModelRunner(GPUModelRunner):
                 if not aux_layers:
                     aux_layers = self.model.get_eagle3_default_aux_hidden_state_layers()
                 self.model.set_aux_hidden_state_layers(aux_layers)
+                print(f"[DBG_MR] load_model rank={get_pp_group().rank_in_group} set aux_layers={aux_layers} is_last={get_pp_group().is_last_rank}")
 
             if self.drafter:
                 logger.info("Loading drafter model...")
