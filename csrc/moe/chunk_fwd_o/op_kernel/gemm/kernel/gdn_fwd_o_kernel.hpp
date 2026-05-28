@@ -348,6 +348,9 @@ public:
                 );
             }
 
+            // GM fence: ensure Vec1 MTE3 writes are committed before Cube3 MTE2 reads
+            AscendC::PipeBarrier<PIPE_ALL>();
+
             if (needRun) {
                 GDNFwdOOffsets& prevOffsets = cubeBlockScheduler.GetCube23Offsets();
 
@@ -376,6 +379,81 @@ public:
                 blockMmadAttenVNEW(tensorBlockAttnMask, tensorBlockV, tensorBlockVWork, cube3Shape);
                 blockMmadAttenVNEW.finalWaitFlags();
 
+                // GM fence: ensure Cube2/3 L0C→UB→MTE3→GM writes are committed
+                AscendC::PipeBarrier<PIPE_ALL>();
+
+#ifdef CATLASS_UNIFIED_CORE
+                // VEC2 inline for 310P: o = scale * (v_work + exp(g) * h_work)
+                // The epilogue class uses event-based MTE2 sync that breaks after cube matmul on 310P.
+                {
+                    constexpr uint32_t STAGE_ROWS = 32;
+                    uint32_t bt = prevOffsets.blockTokens;
+                    uint32_t stageCnt = STAGE_ROWS * vHeadDim;
+                    // UB layout: vwUb[0..stageCnt), hwUb[stageCnt..2*stageCnt), gUb[2*stageCnt..+64)
+                    AscendC::LocalTensor<float> vwUb = resource.ubBuf.template GetBufferByByte<float>(0);
+                    AscendC::LocalTensor<float> hwUb = resource.ubBuf.template GetBufferByByte<float>(stageCnt * sizeof(float));
+                    AscendC::LocalTensor<float> gUb  = resource.ubBuf.template GetBufferByByte<float>(stageCnt * sizeof(float) * 2);
+                    // outUb (half) after gUb, aligned to 512B
+                    constexpr uint32_t G_RESERVE = 512;
+                    AscendC::LocalTensor<ElementVNEW> outUb = resource.ubBuf.template GetBufferByByte<ElementVNEW>(
+                        stageCnt * sizeof(float) * 2 + G_RESERVE);
+
+                    for (uint32_t row = 0; row < bt; row += STAGE_ROWS) {
+                        uint32_t rows = (row + STAGE_ROWS <= bt) ? STAGE_ROWS : (bt - row);
+                        uint32_t elems = rows * vHeadDim;
+                        uint32_t gmOff = row * vHeadDim;
+
+                        // Load v_work, h_work, g from GM
+                        AscendC::DataCopy(vwUb, gmVWorkspace[prevOffsets.hvWorkOffset + gmOff], elems);
+                        AscendC::DataCopy(hwUb, gmHWorkspace[prevOffsets.hvWorkOffset + gmOff], elems);
+                        // Load g (may be float or half)
+                        if constexpr (std::is_same<ElementG, float>::value) {
+                            AscendC::DataCopy(gUb, gmG[prevOffsets.gOffset + row], rows);
+                        } else {
+                            AscendC::LocalTensor<ElementG> gTyped = resource.ubBuf.template GetBufferByByte<ElementG>(
+                                stageCnt * sizeof(float) * 2 + 256);
+                            AscendC::DataCopy(gTyped, gmG[prevOffsets.gOffset + row], rows);
+                            AscendC::PipeBarrier<PIPE_ALL>();
+                            AscendC::Cast(gUb, gTyped, AscendC::RoundMode::CAST_NONE, rows);
+                        }
+                        AscendC::PipeBarrier<PIPE_ALL>();
+
+                        // exp(g)
+                        AscendC::Exp(gUb, gUb, rows);
+                        AscendC::PipeBarrier<PIPE_V>();
+
+                        // Broadcast exp(g) into gBrc: each row r gets exp(g[r]) repeated Dv times
+                        // gBrc lives after outUb in UB
+                        AscendC::LocalTensor<float> gBrc = resource.ubBuf.template GetBufferByByte<float>(
+                            stageCnt * sizeof(float) * 2 + G_RESERVE + stageCnt * sizeof(ElementVNEW));
+                        {
+                            uint32_t dstShape[2] = {rows, vHeadDim};
+                            uint32_t srcShape[2] = {rows, 1};
+                            // Broadcast needs a shared temp buffer — use space after gBrc
+                            AscendC::LocalTensor<uint8_t> brcTmp = resource.ubBuf.template GetBufferByByte<uint8_t>(
+                                stageCnt * sizeof(float) * 2 + G_RESERVE + stageCnt * sizeof(ElementVNEW) + elems * sizeof(float));
+                            AscendC::Broadcast<float, 2, 1>(gBrc, gUb, dstShape, srcShape, brcTmp);
+                        }
+                        AscendC::PipeBarrier<PIPE_V>();
+                        AscendC::Mul(hwUb, hwUb, gBrc, elems);
+                        AscendC::PipeBarrier<PIPE_V>();
+
+                        // v_work + exp(g)*h_work
+                        AscendC::Add(vwUb, vwUb, hwUb, elems);
+                        AscendC::PipeBarrier<PIPE_V>();
+                        // * scale
+                        AscendC::Muls(vwUb, vwUb, (float)scale, elems);
+                        AscendC::PipeBarrier<PIPE_V>();
+                        // Cast to output dtype
+                        AscendC::Cast(outUb, vwUb, AscendC::RoundMode::CAST_NONE, elems);
+                        AscendC::SetFlag<AscendC::HardEvent::V_MTE3>(EVENT_ID0);
+                        AscendC::WaitFlag<AscendC::HardEvent::V_MTE3>(EVENT_ID0);
+                        AscendC::DataCopyParams cp{1, static_cast<uint16_t>(elems * sizeof(ElementVNEW) / 32), 0, 0};
+                        AscendC::DataCopy(gmO[prevOffsets.ovOffset + gmOff], outUb, cp);
+                        AscendC::PipeBarrier<PIPE_ALL>();
+                    }
+                }
+#else
                 // VEC2: output epilogue
                 EpilogueGDNFwdOOutput epilogueGDNFwdOOutput(resource);
                 epilogueGDNFwdOOutput(
@@ -384,6 +462,7 @@ public:
                     scale, prevOffsets.blockTokens, kHeadDim, vHeadDim, pingpongFlag,
                     prevOffsets.batchIdx, prevOffsets.headIdx, prevOffsets.chunkIdx
                 );
+#endif
             }
 
             needRun = true;

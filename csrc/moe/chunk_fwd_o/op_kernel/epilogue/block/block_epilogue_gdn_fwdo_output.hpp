@@ -244,7 +244,11 @@ public:
 #ifdef CATLASS_UNIFIED_CORE
                 AscendC::Cast(outUbBFTensor, outUbTensor, AscendC::RoundMode::CAST_NONE, mActualThisSubBlock * nActual);
 #else
+#ifdef CATLASS_UNIFIED_CORE
+                AscendC::Cast(outUbBFTensor, outUbTensor, AscendC::RoundMode::CAST_NONE, mActualThisSubBlock * nActual);
+#else
                 AscendC::Cast(outUbBFTensor, outUbTensor, AscendC::RoundMode::CAST_RINT, mActualThisSubBlock * nActual);
+#endif
 #endif
                 AscendC::SetFlag<AscendC::HardEvent::V_MTE3>(EVENT_ID0 + pingpongFlag);
                 AscendC::WaitFlag<AscendC::HardEvent::V_MTE3>(EVENT_ID0 + pingpongFlag);
@@ -375,7 +379,11 @@ public:
 #ifdef CATLASS_UNIFIED_CORE
                     AscendC::Cast(outUbBFTensor, outUbTensor, AscendC::RoundMode::CAST_NONE, mActualThisStage * nActual);
 #else
+#ifdef CATLASS_UNIFIED_CORE
+                    AscendC::Cast(outUbBFTensor, outUbTensor, AscendC::RoundMode::CAST_NONE, mActualThisStage * nActual);
+#else
                     AscendC::Cast(outUbBFTensor, outUbTensor, AscendC::RoundMode::CAST_RINT, mActualThisStage * nActual);
+#endif
 #endif
                     AscendC::SetFlag<AscendC::HardEvent::V_MTE3>(EVENT_ID0 + pingpongFlag);
                     AscendC::WaitFlag<AscendC::HardEvent::V_MTE3>(EVENT_ID0 + pingpongFlag);

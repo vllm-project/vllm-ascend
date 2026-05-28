@@ -100,27 +100,8 @@ ge::graphStatus Tiling4ChunkFwdO(gert::TilingContext *context)
     constexpr size_t GM_ALIGN = 512;
     int64_t pingpongStages = 2;
 
-    // 310P: limit blockDim to cores with actual work to avoid idle-core
-    // vector instruction crashes (dav_m200 SIMT execution quirk)
-    {
-        int64_t numChunks = 0;
-        if (!isVariedLen) {
-            numChunks = (seqlen + chunkSize - 1) / chunkSize;
-        } else {
-            auto cuSeqlensTensor = context->GetOptionalInputTensor(INPUT_SEQLENS_IDX);
-            if (cuSeqlensTensor != nullptr) {
-                int64_t numBatch = cuSeqlensTensor->GetStorageShape().GetDim(0) - 1;
-                numChunks = numBatch; // conservative: at least 1 chunk per batch
-            }
-        }
-        constexpr int64_t vBlockSize = 128;
-        int64_t vLoops = vHeadDim / vBlockSize;
-        int64_t taskNum = vLoops * shapeBatch * numChunks * vNumHead;
-        uint32_t neededCores = static_cast<uint32_t>((taskNum + pingpongStages - 1) / pingpongStages);
-        if (neededCores > 0 && neededCores < aicCoreNum) {
-            aicCoreNum = neededCores;
-        }
-    }
+    // Note: blockDim limiting was removed — 310P runs correctly with all cores
+    // (idle cores skip the while loop harmlessly)
     context->SetBlockDim(aicCoreNum);
 
     size_t workspaceOffset = ascendcPlatform.GetLibApiWorkSpaceSize();
