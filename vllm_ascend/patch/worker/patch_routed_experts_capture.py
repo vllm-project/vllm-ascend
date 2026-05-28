@@ -25,7 +25,7 @@ import torch
 import torch.distributed as dist
 
 from vllm.distributed.parallel_state import get_tp_group
-from vllm.v1.routed_experts_capturer import RoutedExpertsCapturer
+from vllm.model_executor.layers.fused_moe.routed_experts_capturer import RoutedExpertsCapturer
 
 from vllm_ascend.ascend_forward_context import _EXTRA_CTX, MoECommType
 
