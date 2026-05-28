@@ -1090,11 +1090,13 @@ class AscendAttentionBackendImpl(AttentionImpl):
 
         # Validate sequence length (similar to NPU operator C++ layer validation)
         # Get max_seq_len from config (equivalent to operator internal access)
+        # fmt: off
         max_seq_len = getattr(
             self.vllm_config.model_config, 
             "max_model_len", 
             getattr(self.vllm_config.model_config, "max_seq_len", 32768)
         )
+        # fmt: on
 
         max_kv_len = max(kv_lens) if kv_lens else 0
         if max_kv_len > max_seq_len:
