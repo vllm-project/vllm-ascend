@@ -3046,6 +3046,13 @@ class NPUModelRunner(GPUModelRunner):
                 intermediate_tensors = IntermediateTensors(
                     {k: v[:intermediate_tokens] for k, v in self.intermediate_tensors.items()}
                 )
+                # _pp_aux buffer is pre-allocated with a static batch dim,
+                # but the forward expects a dynamic batch dim.  Mark it
+                # here (outside the compiled graph) so Dynamo treats both
+                # consistently.
+                aux_buf = intermediate_tensors.tensors.get("_pp_aux")
+                if aux_buf is not None:
+                    torch._dynamo.mark_dynamic(aux_buf, 0)
 
             need_dummy_logits = not is_profile and lmhead_tp_enable()
             max_num_reqs_across_dp = max_num_reqs * self.uniform_decode_query_len

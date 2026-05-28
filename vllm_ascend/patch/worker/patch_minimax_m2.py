@@ -245,13 +245,12 @@ def _patched_minimax_m2_forward(
         hidden_states = intermediate_tensors["hidden_states"]
         residual = intermediate_tensors["residual"]
         # Incoming aux buffer has shape [batch, num_aux, hidden].
-        # Mark batch dim dynamic to unify with hidden_states' batch symbol.
+        # The model runner has already marked its batch dim as dynamic.
         incoming = intermediate_tensors.tensors.get("_pp_aux")
         if incoming is not None:
-            torch._dynamo.mark_dynamic(incoming, 0)
             for i in range(incoming.shape[1]):
                 if aux_slots[i] is None:
-                    aux_slots[i] = incoming[:, i, :]
+                    aux_slots[i] = incoming[:, i, :].contiguous()
 
     for idx, layer in enumerate(self.layers[self.start_layer : self.end_layer]):
         layer_idx = self.start_layer + idx
