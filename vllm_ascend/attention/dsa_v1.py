@@ -1437,7 +1437,7 @@ class AscendDSAImpl(DSAAttentionImpl):
             False,
         )
 
-    def _dsa_warmup_with_multistream(self, hidden_states: torch.Tensor) -> None:
+    def dsa_warmup_with_multistream(self, hidden_states: torch.Tensor) -> None:
         """
         Warmup function for DSA profiling run.
         When dual-stream is enabled, the aux stream runs ops during forward that have never been
@@ -1445,13 +1445,13 @@ class AscendDSAImpl(DSAAttentionImpl):
         for ACL graph compatibility.
         """
         if hasattr(self, "multistream_dsv4_dsa_overlap") and self.multistream_dsv4_dsa_overlap:
-            dummy = torch.zeros(1, hidden_states.shape[-1], dtype=hidden_states.dtype, device=hidden_states.device)
+            hidden_states_dummy = torch.zeros(1, hidden_states.shape[-1], dtype=hidden_states.dtype, device=hidden_states.device)
             aux_stream = dsv4_dsa_overlap_stream()
             e_warmup = torch.npu.current_stream().record_event()
             with npu_stream_switch(aux_stream, enabled=True):
                 torch.npu.current_stream().wait_event(e_warmup)
                 if hasattr(self.wkv, "weight_scale") and self.wkv.weight.dtype == torch.int8:
-                    kv_q_dummy, kv_s_dummy = torch_npu.npu_dynamic_quant(dummy)
+                    kv_q_dummy, kv_s_dummy = torch_npu.npu_dynamic_quant(hidden_states_dummy)
                     _ = torch_npu.npu_quant_matmul(
                         kv_q_dummy,
                         self.wkv.weight,
@@ -1460,8 +1460,8 @@ class AscendDSAImpl(DSAAttentionImpl):
                         output_dtype=hidden_states.dtype,
                     )
                 else:
-                    _ = self.cv_wkv.quantize(dummy)
-                    _ = self.cv_wkv.matmul(dummy, None)
+                    _ = self.cv_wkv.quantize(hidden_states_dummy)
+                    _ = self.cv_wkv.matmul(hidden_states_dummy, None)
                 assert self.rope_head_dim is not None
                 kv_dummy = torch.zeros(
                     1, self.nope_head_dim + self.rope_head_dim, dtype=hidden_states.dtype, device=hidden_states.device
@@ -1471,8 +1471,11 @@ class AscendDSAImpl(DSAAttentionImpl):
                 # indexer module aux stream ops
                 # Part1 aux: kv_quant (npu_dynamic_quant)
                 soc_version = get_ascend_device_type()
-                dst_type = torch.float8_e4m3fn if soc_version == AscendDeviceType.A5 else torch.int8
-                kv_dummy, kv_scale_dummy = torch_npu.npu_dynamic_quant(dummy, dst_type=dst_type)
+                dst_type = torch.float8_e4m3fn if soc_version in {AscendDeviceType.A5} else torch.int8
+                kv_dummy, kv_scale_dummy = torch_npu.npu_dynamic_quant(hidden_states_dummy, dst_type=dst_type)
+                kv_scale_dummy = kv_scale_dummy.unsqueeze(-1)
+                if soc_version not in {AscendDeviceType.A5}:
+                    kv_scale_dummy = kv_scale_dummy.to(torch.float16).unsqueeze(-1)
                 # Part1 aux: scatter_k_cache (npu_scatter_nd_update_v2)
                 # In profiling stage, create dummy tensors to ensure ACL graph captures scatter operator.
                 if self.compress_ratio == 4 and self.indexer is not None:
@@ -1481,16 +1484,14 @@ class AscendDSAImpl(DSAAttentionImpl):
                     dummy_shape = (1, 1, 1, kv_dummy.shape[-1])  # [num_blocks, block_size, num_heads, head_dim]
                     indexer_k_cache = torch.zeros(dummy_shape, dtype=kv_dummy.dtype, device=hidden_states.device)
                     indexer_scale_cache = torch.zeros(dummy_shape, dtype=torch.float16, device=hidden_states.device)
-
+                    # Part3 aux: scatter_k_cache/scatter_scale_cache (npu_scatter_nd_update_v2)
                     torch.ops._C_ascend.npu_scatter_nd_update_v2(indexer_k_cache, slot_mapping_dummy, kv_dummy)
-                    # Part3 aux: scatter_scale_cache (npu_scatter_nd_update_v2)
-                    kv_scale_dummy = kv_scale_dummy.to(torch.float16).unsqueeze(-1)
                     torch.ops._C_ascend.npu_scatter_nd_update_v2(
                         indexer_scale_cache, slot_mapping_dummy, kv_scale_dummy
                     )
 
                     # Warm up weights_proj on the aux stream.
-                    _ = self.weights_proj(dummy)
+                    _ = self.weights_proj(hidden_states_dummy)
 
             torch.npu.current_stream().wait_stream(aux_stream)
 
@@ -1547,8 +1548,6 @@ class AscendDSAImpl(DSAAttentionImpl):
     ) -> torch.Tensor:
         assert output is not None, "Output tensor must be provided."
         if attn_metadata is None:
-            # Profiling run.
-            self._dsa_warmup_with_multistream(hidden_states)
             return output.fill_(0)
         if not isinstance(attn_metadata, list):
             attn_metadata = [attn_metadata]
