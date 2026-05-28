@@ -62,6 +62,10 @@ class AscendW8A16LinearMethod(AscendLinearScheme):
         bias: torch.Tensor | None = None,
         tp_rank: int | None = 0,
     ) -> torch.Tensor:
+        original_shape = x.shape
+        is_3d = x.dim() == 3
+        if is_3d:
+            x = x.reshape(-1, x.shape[-1])
         output = torch_npu.npu_weight_quant_batchmatmul(
             x=x,
             weight=layer.weight,
@@ -69,6 +73,8 @@ class AscendW8A16LinearMethod(AscendLinearScheme):
             antiquant_offset=layer.weight_offset,
             bias=bias,
         )
+        if is_3d:
+            output = output.reshape(original_shape[0], original_shape[1], -1)
         return output
 
     def process_weights_after_loading(self, layer):
