@@ -281,26 +281,38 @@ if not getattr(_original_minimax_m2_forward, "_vllm_ascend_minimax_eagle3_patche
     MiniMaxM2Model.forward = _patched_minimax_m2_forward  # type: ignore[assignment]
     MiniMaxM2Model.forward._vllm_ascend_minimax_eagle3_patched = True  # type: ignore[attr-defined]
 
-    # Also patch make_empty_intermediate_tensors to include a buffer for
-    # aux_hidden_states so the PP send/recv can transport them between ranks.
-    _original_make_empty = MiniMaxM2Model.make_empty_intermediate_tensors
+    # make_empty_intermediate_tensors is set as an INSTANCE attribute in
+    # MiniMaxM2Model.__init__.  Wrap __init__ to add the aux_hidden_states
+    # buffer after construction, so PP send/recv can transport aux states.
+    _original_model_init = MiniMaxM2Model.__init__
 
-    def _patched_make_empty_intermediate_tensors(
+    def _patched_model_init(
         self: "MiniMaxM2Model",
-        batch_size: int,
-        dtype: torch.dtype,
-        device: torch.device,
-    ) -> IntermediateTensors:
-        result = _original_make_empty(self, batch_size, dtype, device)
-        aux_layers = getattr(self, "aux_hidden_state_layers", ()) or ()
-        max_aux = max(len(aux_layers), 3)  # at least 3 for default MiniMax M2.5 eagle3
-        result.tensors["aux_hidden_states"] = torch.zeros(
-            (max_aux, batch_size, self.config.hidden_size),
-            dtype=dtype, device=device,
-        )
-        return result
+        *,
+        vllm_config,
+        prefix: str = "",
+    ) -> None:
+        _original_model_init(self, vllm_config=vllm_config, prefix=prefix)
+        _original_make_empty = self.make_empty_intermediate_tensors
 
-    MiniMaxM2Model.make_empty_intermediate_tensors = _patched_make_empty_intermediate_tensors
+        def _make_empty_with_aux(
+            batch_size: int,
+            dtype: torch.dtype,
+            device: torch.device,
+            _orig=_original_make_empty,
+        ) -> IntermediateTensors:
+            result = _orig(batch_size, dtype, device)
+            aux_layers = getattr(self, "aux_hidden_state_layers", ()) or ()
+            max_aux = max(len(aux_layers), 3)
+            result.tensors["aux_hidden_states"] = torch.zeros(
+                (max_aux, batch_size, self.config.hidden_size),
+                dtype=dtype, device=device,
+            )
+            return result
+
+        self.make_empty_intermediate_tensors = _make_empty_with_aux
+
+    MiniMaxM2Model.__init__ = _patched_model_init  # type: ignore[assignment]
 
 
 def _set_aux_hidden_state_layers(self: "MiniMaxM2ForCausalLM", layers: tuple[int, ...]) -> None:

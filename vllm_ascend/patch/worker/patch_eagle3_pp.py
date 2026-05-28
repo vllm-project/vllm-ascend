@@ -134,62 +134,6 @@ def _make_empty_intermediate_tensors(
 
 
 # ---------------------------------------------------------------------------
-# Helper: ensure self.drafter exists on non-last PP ranks by injecting a
-# dummy that passes isinstance checks for AscendEagleProposer (vllm-ascend)
-# and EagleProposer (upstream).
-# ---------------------------------------------------------------------------
-def _ensure_drafter(runner):
-    if (
-        runner.speculative_config
-        and get_pp_group().world_size > 1
-        and not get_pp_group().is_last_rank
-        and not hasattr(runner, "drafter")
-    ):
-        from vllm_ascend.spec_decode.eagle_proposer import AscendEagleProposer
-
-        class _DrafterStub(AscendEagleProposer):
-            def __init__(s):
-                pass
-            def initialize_cudagraph_keys(s, *a, **k):
-                pass
-            def initialize_attn_backend(s, *a, **k):
-                pass
-
-        runner.drafter = _DrafterStub()
-
-
-# ---------------------------------------------------------------------------
-# Patch GPUModelRunner._check_and_update_cudagraph_mode and
-# NPUModelRunner.initialize_kv_cache — both have isinstance assertions on
-# self.drafter that fail on non-last PP ranks where the drafter is unset.
-# ---------------------------------------------------------------------------
-def _patch_drafter_assertions():
-    try:
-        from vllm.v1.worker.gpu_model_runner import GPUModelRunner
-        from vllm_ascend.worker.model_runner_v1 import NPUModelRunner
-    except ImportError:
-        return
-
-    # --- GPUModelRunner._check_and_update_cudagraph_mode ---
-    _original_check = GPUModelRunner._check_and_update_cudagraph_mode
-
-    def _patched_check(self, attention_backends, kv_cache_groups):
-        _ensure_drafter(self)
-        _original_check(self, attention_backends, kv_cache_groups)
-
-    GPUModelRunner._check_and_update_cudagraph_mode = _patched_check
-
-    # --- NPUModelRunner.initialize_kv_cache ---
-    _original_init_kv = NPUModelRunner.initialize_kv_cache
-
-    def _patched_init_kv(self, kv_cache_config):
-        _ensure_drafter(self)
-        _original_init_kv(self, kv_cache_config)
-
-    NPUModelRunner.initialize_kv_cache = _patched_init_kv
-
-
-# ---------------------------------------------------------------------------
 # Patch AscendEagleProposer.load_model to skip non-last PP ranks
 # ---------------------------------------------------------------------------
 def _patch_proposer_load_model():
@@ -227,5 +171,4 @@ Eagle3LlamaForCausalLM.__init__ = _patched_eagle3_init
 Eagle3LlamaForCausalLM.forward = _patched_eagle3_forward
 Eagle3LlamaForCausalLM.supports_pp = True
 LlamaModel.make_empty_intermediate_tensors = _make_empty_intermediate_tensors
-_patch_drafter_assertions()
 _patch_proposer_load_model()
