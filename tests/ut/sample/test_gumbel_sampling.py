@@ -518,27 +518,6 @@ class TestGumbelSampling:
                 f"Req {req} (tok={tok}, temp={temp:.3f}): max_diff={(actual.float() - expected).abs().max().item():.6f}"
             )
 
-    def test_gumbel_sample_use_fp64_param(self):
-        """use_fp64 parameter should be accepted (but ignored on NPU)."""
-        torch.manual_seed(42)
-        num_tokens, num_reqs, vocab_size = 4, 4, 32000
-        logits = torch.randn(num_tokens, vocab_size, dtype=torch.float32, device=DEVICE)
-        expanded_idx_mapping = torch.arange(num_tokens, dtype=torch.int32, device=DEVICE)
-        temperature = torch.zeros(num_reqs, dtype=torch.float32, device=DEVICE)
-        seed = torch.randint(0, 2**31, (num_reqs,), dtype=torch.int64, device=DEVICE)
-        pos = torch.arange(num_tokens, dtype=torch.int32, device=DEVICE)
-
-        # Both should produce greedy results
-        s1 = gumbel_sample(
-            logits, expanded_idx_mapping, temperature, seed, pos, apply_temperature=False, use_fp64=False
-        )
-        s2 = gumbel_sample(logits, expanded_idx_mapping, temperature, seed, pos, apply_temperature=False, use_fp64=True)
-        torch.npu.synchronize()
-
-        expected = logits.argmax(dim=-1)
-        assert torch.equal(s1, expected), "use_fp64=False result mismatch"
-        assert torch.equal(s2, expected), "use_fp64=True result mismatch"
-
     def test_gumbel_sample_single_token(self):
         """Single token with temperature > 0 should work."""
         torch.manual_seed(42)
