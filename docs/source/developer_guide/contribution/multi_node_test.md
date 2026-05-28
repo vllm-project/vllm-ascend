@@ -83,11 +83,9 @@ Currently, the multi-node test workflow is defined in `.github/workflows/schedul
           test_config:
             - name: multi-node-deepseek-pd
               config_file_path: DeepSeek-V3.yaml
-              config_base_path: ''
               size: 2
             - name: multi-node-qwen3-dp
               config_file_path: Qwen3-235B-A22B.yaml
-              config_base_path: ''
               size: 2
             - name: GLM5_1-W8A8-EP-external
               config_file_path: GLM5_1-W8A8-EP-external.yaml

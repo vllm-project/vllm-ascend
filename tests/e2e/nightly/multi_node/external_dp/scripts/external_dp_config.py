@@ -15,19 +15,13 @@ from tests.e2e.nightly.multi_node.scripts.utils import (
 
 logger = logging.getLogger(__name__)
 
-DEFAULT_CONFIG_BASE_PATH = "tests/e2e/nightly/multi_node/external_dp/config/"
-DEFAULT_CONFIG_NAME = "GLM5_1-W8A8-EP-external.yaml"
-SERVER_HEALTH_PATH = "/health"
-SERVER_READY_TIMEOUT_SECONDS = 3600
 ROUTING_GENERIC_DP = "generic_dp"
 ROUTING_DISAGGREGATED_PREFILL = "disaggregated_prefill"
-SUPPORTED_ROUTING_TYPES = {ROUTING_GENERIC_DP, ROUTING_DISAGGREGATED_PREFILL}
-DEFAULT_PROXY_NODE_INDEX = 0
-DEFAULT_PROXY_PORT = 1999
 PROXY_SCRIPT_BY_ROUTING_TYPE = {
     ROUTING_GENERIC_DP: "examples/external_online_dp/dp_load_balance_proxy_server.py",
     ROUTING_DISAGGREGATED_PREFILL: "examples/disaggregated_prefill_v1/load_balance_proxy_server_example.py",
 }
+
 CLUSTER_PLACEHOLDER_RE = re.compile(r"\$\{(NODE_(\d+)_IP|LOCAL_IP|MASTER_IP|LWS_WORKER_INDEX)\}")
 
 
@@ -216,10 +210,12 @@ class ExternalDPConfigLoader:
 
     @staticmethod
     def _load_yaml(yaml_path: str | None) -> dict[str, Any]:
+        default_config_name = "GLM5_1-W8A8-EP-external.yaml"
+        default_config_base_path = "tests/e2e/nightly/multi_node/external_dp/config/"
         return load_yaml_mapping(
             yaml_path,
-            default_name=DEFAULT_CONFIG_NAME,
-            default_base_path=DEFAULT_CONFIG_BASE_PATH,
+            default_name=default_config_name,
+            default_base_path=default_config_base_path,
             description="external DP config",
         )
 
@@ -251,7 +247,8 @@ class ExternalDPConfigLoader:
         if routing_type not in PROXY_SCRIPT_BY_ROUTING_TYPE:
             raise ValueError(f"Unsupported routing.type: {routing_type}")
 
-        proxy_node_index = DEFAULT_PROXY_NODE_INDEX
+        proxy_node_index = 0
+        proxy_port = 1999
         if proxy_node_index >= len(cluster_ips) or proxy_node_index < 0:
             raise ValueError("routing.proxy_node_index out of range")
         local_ip = cluster_ips[proxy_node_index]
@@ -265,7 +262,7 @@ class ExternalDPConfigLoader:
             type=routing_type,
             proxy_node_index=proxy_node_index,
             proxy_host=local_ip,
-            proxy_port=DEFAULT_PROXY_PORT,
+            proxy_port=proxy_port,
             proxy_script=PROXY_SCRIPT_BY_ROUTING_TYPE[routing_type],
             groups={
                 str(name): [int(index) for index in indices] for name, indices in routing.get("groups", {}).items()
@@ -329,15 +326,26 @@ class ExternalDPConfigLoader:
             benchmark_cases.append(case_with_name)
         return benchmark_cases
 
+    @classmethod
+    def _validate_config(cls, config: ExternalDPConfig) -> None:
+        cls._validate_config_sizes(config)
+        cls._validate_routing(config)
+        cls._validate_node_parallel_config(config)
+
     @staticmethod
-    def _validate_config(config: ExternalDPConfig) -> None:
+    def _validate_config_sizes(config: ExternalDPConfig) -> None:
         if len(config.nodes) != config.num_nodes:
             raise AssertionError(f"config size ({len(config.nodes)}) != num_nodes ({config.num_nodes})")
         if len(config.launch_templates) != config.num_nodes:
             raise AssertionError(f"templates size ({len(config.launch_templates)}) != num_nodes ({config.num_nodes})")
+        if config.cluster_hosts and len(config.cluster_hosts) != config.num_nodes:
+            raise AssertionError("cluster_hosts size mismatch")
 
-        if config.routing.type not in SUPPORTED_ROUTING_TYPES:
+    @staticmethod
+    def _validate_routing(config: ExternalDPConfig) -> None:
+        if config.routing.type not in PROXY_SCRIPT_BY_ROUTING_TYPE:
             raise ValueError(f"Unsupported routing.type: {config.routing.type}")
+
         groups = config.routing.groups
         if config.routing.type == ROUTING_GENERIC_DP and not groups.get("worker"):
             raise ValueError("generic_dp routing requires routing.groups.worker")
@@ -357,9 +365,9 @@ class ExternalDPConfigLoader:
 
         if config.routing.proxy_node_index < 0 or config.routing.proxy_node_index >= config.num_nodes:
             raise ValueError("routing.proxy_node_index out of range")
-        if config.cluster_hosts and len(config.cluster_hosts) != config.num_nodes:
-            raise AssertionError("cluster_hosts size mismatch")
 
+    @staticmethod
+    def _validate_node_parallel_config(config: ExternalDPConfig) -> None:
         for node_index, node in enumerate(config.nodes):
             parallel_sizes = {
                 "dp_size": node.dp_size,
@@ -374,27 +382,12 @@ class ExternalDPConfigLoader:
                 raise ValueError(f"node {node_index} parallel sizes must be >= 1: {invalid_sizes}")
             if node.dp_rank_start < 0:
                 raise ValueError(f"node {node_index} dp_rank_start must be >= 0")
-
             if node.devices_per_node > config.npu_per_node:
                 raise ValueError(
                     f"node {node_index} uses {node.devices_per_node} NPUs, but npu_per_node is {config.npu_per_node}"
                 )
             if node.dp_rank_start + node.dp_size_local > node.dp_size:
                 raise ValueError(f"node {node_index} dp rank range exceeds dp_size")
-            ports = [node.port_start + local_rank for local_rank in range(node.dp_size_local)]
-            if len(set(ports)) != len(ports):
-                raise ValueError(f"node {node_index} has duplicate server ports")
-
-            used_devices: set[int] = set()
-            for local_rank in range(node.dp_size_local):
-                devices = range(
-                    local_rank * node.devices_per_rank,
-                    (local_rank + 1) * node.devices_per_rank,
-                )
-                overlap = used_devices.intersection(devices)
-                if overlap:
-                    raise ValueError(f"node {node_index} visible_devices overlap: {sorted(overlap)}")
-                used_devices.update(devices)
 
 
 class RankResolver:

@@ -3,24 +3,17 @@ import os
 import shlex
 import signal
 import subprocess
-import sys
 import tarfile
 import time
 import urllib.error
 import urllib.request
-from dataclasses import dataclass
 from pathlib import Path
-from typing import Any
-
-import regex as re
+from typing import TYPE_CHECKING, Any
 
 from tests.e2e.nightly.multi_node.external_dp.scripts.external_dp_config import (
     ROUTING_DISAGGREGATED_PREFILL,
-    ROUTING_GENERIC_DP,
     ExternalDPConfig,
-    NodeTemplate,
     RankInfo,
-    replace_cluster_placeholders,
 )
 from tests.e2e.nightly.multi_node.scripts.benchmark_results import (
     build_task_entry,
@@ -29,154 +22,13 @@ from tests.e2e.nightly.multi_node.scripts.benchmark_results import (
     get_vllm_version,
     write_results_json,
 )
-from tests.e2e.nightly.multi_node.scripts.utils import get_net_interface
 
 logger = logging.getLogger(__name__)
 
-TEMPLATE_VAR_RE = re.compile(r"\$\{([A-Za-z_][A-Za-z0-9_]*)\}")
-ENV_VAR_RE = re.compile(r"(?<!\$)\$([A-Za-z_][A-Za-z0-9_]*)")
-PROXY_HEALTH_PATH = "/healthcheck"
+if TYPE_CHECKING:
+    from tests.e2e.nightly.multi_node.external_dp.scripts.runtime import ServerCommand
+
 SENSITIVE_ENV_TOKENS = ("TOKEN", "SECRET", "PASSWORD", "ACCESS_KEY")
-
-
-@dataclass(frozen=True)
-class ServerCommand:
-    """Rendered command, env, and printable command line."""
-
-    cmd: list[str]
-    env: dict[str, str]
-    display_cmd: str
-
-
-class ServerCommandBuilder:
-    """Render rank templates into vLLM serve commands."""
-
-    def __init__(self, config: ExternalDPConfig):
-        self.config = config
-
-    def build(self, rank: RankInfo, template: NodeTemplate) -> ServerCommand:
-        variables = self._build_variables(rank)
-        rendered_env = self._render_envs(template.envs, rank, variables)
-        rendered_args = [
-            self._render_string(
-                arg,
-                rank=rank,
-                braced_variables=variables,
-                unbraced_variables=rendered_env,
-                allow_missing_unbraced=False,
-            )
-            for arg in template.server_cmd_template
-        ]
-        cmd = ["vllm", "serve", self.config.model, *rendered_args]
-
-        env = {key: str(value) for key, value in rendered_env.items()}
-        display_cmd = format_server_cmd(cmd, env)
-        logger.info(
-            "External DP server command node=%s rank=%s: %s",
-            rank.node_index,
-            rank.local_rank,
-            display_cmd,
-        )
-        return ServerCommand(cmd=cmd, env=env, display_cmd=display_cmd)
-
-    def _build_variables(self, rank: RankInfo) -> dict[str, str]:
-        return {
-            "MODEL": self.config.model,
-            "PORT_START": str(rank.port_start),
-            "PORT": str(rank.port),
-            "DP_SIZE": str(rank.dp_size),
-            "DP_SIZE_LOCAL": str(rank.dp_size_local),
-            "DP_RANK_START": str(rank.dp_rank - rank.local_rank),
-            "DP_RANK": str(rank.dp_rank),
-            "LOCAL_RANK": str(rank.local_rank),
-            "TP_SIZE": str(rank.tp_size),
-            "CP_SIZE": str(rank.cp_size),
-            "SP_SIZE": str(rank.sp_size),
-            "PP_SIZE": str(rank.pp_size),
-            "DP_ADDRESS": rank.dp_address,
-            "DP_RPC_PORT": str(rank.dp_rpc_port),
-            "VISIBLE_DEVICES": rank.visible_devices,
-            "NODE_INDEX": str(rank.node_index),
-            "CONFIG_INDEX": str(rank.node_index),
-        }
-
-    def _render_envs(
-        self,
-        envs: dict[str, Any],
-        rank: RankInfo,
-        variables: dict[str, str],
-    ) -> dict[str, str]:
-        rendered_envs: dict[str, str] = {}
-        for key, value in envs.items():
-            if isinstance(value, str):
-                value = self._render_string(
-                    value,
-                    rank=rank,
-                    braced_variables=variables,
-                    unbraced_variables={**os.environ, **rendered_envs},
-                    allow_missing_unbraced=True,
-                )
-            rendered_envs[str(key)] = str(value)
-        return rendered_envs
-
-    def _render_string(
-        self,
-        value: str,
-        *,
-        rank: RankInfo,
-        braced_variables: dict[str, str],
-        unbraced_variables: dict[str, str],
-        allow_missing_unbraced: bool,
-    ) -> str:
-        value = replace_cluster_placeholders(
-            value,
-            cluster_ips=self.config.cluster_ips,
-            local_ip=rank.host,
-            current_node_index=rank.node_index,
-        )
-        value = self._render_variables(
-            value,
-            braced_variables,
-            pattern=TEMPLATE_VAR_RE,
-            allow_missing=False,
-        )
-        return self._render_variables(
-            value,
-            unbraced_variables,
-            pattern=ENV_VAR_RE,
-            allow_missing=allow_missing_unbraced,
-        )
-
-    @staticmethod
-    def _render_variables(
-        value: str,
-        variables: dict[str, str],
-        *,
-        pattern: re.Pattern[str],
-        allow_missing: bool,
-    ) -> str:
-        def repl(match: re.Match[str]) -> str:
-            key = match.group(1)
-            if key not in variables:
-                if allow_missing:
-                    return ""
-                raise KeyError(f"Unknown external DP template variable: {key}")
-            return variables[key]
-
-        return pattern.sub(repl, value)
-
-
-def build_dist_envs(cur_ip: str, master_ip: str) -> dict[str, str]:
-    nic_name = get_net_interface(cur_ip)
-    return {
-        "HCCL_IF_IP": cur_ip,
-        "HCCL_SOCKET_IFNAME": nic_name,
-        "GLOO_SOCKET_IFNAME": nic_name,
-        "TP_SOCKET_IFNAME": nic_name,
-        "LOCAL_IP": cur_ip,
-        "NIC_NAME": nic_name,
-        "MASTER_IP": master_ip,
-    }
 
 
 def format_server_cmd(cmd: list[str], env: dict[str, str] | None = None) -> str:
@@ -239,7 +91,7 @@ def terminate_process_tree(pid: int, timeout: int = 30) -> None:
         process.kill()
 
 
-def _is_http_ready(url: str, timeout: float = 5.0) -> bool:
+def is_http_ready(url: str, timeout: float = 5.0) -> bool:
     try:
         with urllib.request.urlopen(url, timeout=timeout) as response:
             return 200 <= response.status < 300
@@ -264,7 +116,7 @@ def wait_http_ready(url: str, timeout: int, interval: float = 2.0) -> None:
 def wait_http_unready(url: str, timeout: int, interval: float = 5.0) -> None:
     deadline = time.monotonic() + timeout
     while time.monotonic() < deadline:
-        if not _is_http_ready(url):
+        if not is_http_ready(url):
             return
         time.sleep(interval)
     raise TimeoutError(f"Timed out waiting for HTTP unready: {url}")
@@ -278,37 +130,7 @@ def collect_logs(src_dir: Path, output_tar: Path) -> None:
         tar.add(src_dir, arcname=src_dir.name)
 
 
-def build_proxy_server_cmd(config: ExternalDPConfig, ranks: list[RankInfo]) -> list[str]:
-    routing = config.routing
-    cmd = [sys.executable, routing.proxy_script, "--host", routing.proxy_host, "--port", str(routing.proxy_port)]
-
-    if routing.type == ROUTING_GENERIC_DP:
-        worker_ranks = [rank for rank in ranks if rank.role == "worker"]
-        if not worker_ranks:
-            raise ValueError("generic_dp proxy requires worker ranks")
-        cmd.extend(["--dp-hosts", *[rank.host for rank in worker_ranks]])
-        cmd.extend(["--dp-ports", *[str(rank.port) for rank in worker_ranks]])
-        return cmd
-
-    if routing.type == ROUTING_DISAGGREGATED_PREFILL:
-        prefiller_ranks = [rank for rank in ranks if rank.role == "prefiller"]
-        decoder_ranks = [rank for rank in ranks if rank.role == "decoder"]
-        if not prefiller_ranks or not decoder_ranks:
-            raise ValueError("disaggregated_prefill proxy requires prefiller and decoder ranks")
-        cmd.extend(["--prefiller-hosts", *[rank.host for rank in prefiller_ranks]])
-        cmd.extend(["--prefiller-ports", *[str(rank.port) for rank in prefiller_ranks]])
-        cmd.extend(["--decoder-hosts", *[rank.host for rank in decoder_ranks]])
-        cmd.extend(["--decoder-ports", *[str(rank.port) for rank in decoder_ranks]])
-        return cmd
-
-    raise ValueError(f"Unsupported routing.type: {routing.type}")
-
-
-def proxy_server_health_url(config: ExternalDPConfig) -> str:
-    return f"http://{config.routing.proxy_host}:{config.routing.proxy_port}{PROXY_HEALTH_PATH}"
-
-
-def _common_command_envs(commands: list[ServerCommand]) -> dict[str, str]:
+def _common_command_envs(commands: list["ServerCommand"]) -> dict[str, str]:
     if not commands:
         return {}
 
@@ -324,13 +146,13 @@ def _common_command_envs(commands: list[ServerCommand]) -> dict[str, str]:
     return common_envs
 
 
-def _extract_dtype(config: ExternalDPConfig, commands: list[ServerCommand]) -> str:
+def _extract_dtype(config: ExternalDPConfig, commands: list["ServerCommand"]) -> str:
     has_w8a8 = "w8a8" in config.model.lower()
     has_quant_ascend = any("--quantization ascend" in command.display_cmd for command in commands)
     return "w8a8" if has_w8a8 and has_quant_ascend else "bf16"
 
 
-def _extract_features(commands: list[ServerCommand]) -> list[str]:
+def _extract_features(commands: list["ServerCommand"]) -> list[str]:
     if not commands:
         return []
     features: list[str] = []
@@ -365,7 +187,7 @@ def _extract_features(commands: list[ServerCommand]) -> list[str]:
 def _build_serve_cmd(
     config: ExternalDPConfig,
     ranks: list[RankInfo],
-    commands: list[ServerCommand],
+    commands: list["ServerCommand"],
 ) -> dict[str, Any]:
     entries: dict[str, str] = {}
     for rank, command in zip(ranks, commands):
@@ -381,7 +203,7 @@ def build_benchmark_results(
     *,
     config: ExternalDPConfig,
     ranks: list[RankInfo],
-    commands: list[ServerCommand],
+    commands: list["ServerCommand"],
     results: list[Any],
 ) -> dict[str, Any]:
     valid_items = [(case["case_name"], case) for case in config.benchmark_cases]
@@ -406,7 +228,7 @@ def write_benchmark_results_json(
     *,
     config: ExternalDPConfig,
     ranks: list[RankInfo],
-    commands: list[ServerCommand],
+    commands: list["ServerCommand"],
     results: list[Any],
     output_dir: Path | None = None,
 ) -> Path:
