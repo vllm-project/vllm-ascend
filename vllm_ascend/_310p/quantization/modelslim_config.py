@@ -63,14 +63,18 @@ def create_scheme_for_layer(
     quant_type = get_quant_type_for_layer(quant_description, prefix, layer_type, packed_modules_mapping)
 
     if quant_type is None:
-        raise ValueError(f"Could not determine quantization type for layer {prefix}.")
+        err_msg = f"Could not determine quantization type for layer {prefix} (layer_type={layer_type})."
+        logger.error(err_msg)
+        raise ValueError(err_msg)
 
     # Use registry to get scheme class
     scheme_cls = get_scheme_class(quant_type, layer_type)
     if scheme_cls is not None:
         return scheme_cls()
     else:
-        raise NotImplementedError(f"Currently, vLLM Ascend doesn't support {quant_type} for {layer_type}.")
+        err_msg = f"Currently, vLLM Ascend doesn't support quant_type={quant_type} for layer_type={layer_type}."
+        logger.error(err_msg)
+        raise NotImplementedError(err_msg)
 
 
 @register_quantization_config(ASCEND_QUANTIZATION_METHOD)
@@ -102,6 +106,7 @@ class AscendModelSlimConfig310(AscendModelSlimConfig):
             if self.is_layer_skipped_ascend(prefix, packed):
                 from vllm_ascend.ops.linear import AscendUnquantizedLinearMethod
 
+                logger.debug("Select AscendUnquantizedLinearMethod for %s (layer=%s)", prefix, "LinearBase")
                 return AscendUnquantizedLinearMethod()
 
             scheme = create_scheme_for_layer(
@@ -110,19 +115,24 @@ class AscendModelSlimConfig310(AscendModelSlimConfig):
                 layer_type="linear",
                 packed_modules_mapping=packed,
             )
+            logger.debug("Select AscendLinearMethod for %s (layer=%s)", prefix, "LinearBase")
             return AscendLinearMethod(scheme)
 
         elif isinstance(layer, FusedMoE):
             if self.is_layer_skipped_ascend(prefix, self.packed_modules_mapping):
                 from vllm_ascend._310p.fused_moe.fused_moe import AscendUnquantizedFusedMoEMethod310
 
+                logger.debug("Select AscendUnquantizedFusedMoEMethod310 for %s (layer=%s)", prefix, "FusedMoE")
                 return AscendUnquantizedFusedMoEMethod310(layer.moe_config)
             scheme = create_scheme_for_layer(self.quant_description, prefix, "moe", self.packed_modules_mapping)
+            logger.debug("Select AscendFusedMoEMethod for %s (layer=%s)", prefix, "FusedMoE")
             return AscendFusedMoEMethod(scheme, layer.moe_config)
 
         elif isinstance(layer, VocabParallelEmbedding):
             from vllm_ascend._310p.ops.vocab_parallel_embedding import AscendUnquantizedEmbeddingMethod310
 
+            logger.debug("Select AscendUnquantizedEmbeddingMethod310 for %s (layer=%s)", prefix, "VocabParallelEmbedding")
             return AscendUnquantizedEmbeddingMethod310()
 
+        logger.debug("No quant method matched for %s, falling back to base", prefix)
         return super().get_quant_method(layer, prefix)

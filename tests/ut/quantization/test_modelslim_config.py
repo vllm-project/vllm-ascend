@@ -15,6 +15,8 @@ from vllm_ascend.ops.linear import AscendUnquantizedLinearMethod
 from vllm_ascend.quantization.modelslim_config import (
     MODELSLIM_CONFIG_FILENAME,
     AscendModelSlimConfig,
+    create_scheme_for_layer,
+    get_linear_quant_type,
 )
 from vllm_ascend.utils import ASCEND_QUANTIZATION_METHOD
 
@@ -53,6 +55,54 @@ class TestAscendModelSlimConfig(TestBase):
     def test_get_min_capability(self):
         with self.assertRaises(NotImplementedError):
             AscendModelSlimConfig.get_min_capability()
+
+    @patch('vllm_ascend.quantization.modelslim_config.logger')
+    def test_get_min_capability_logs_error(self, mock_logger):
+        with self.assertRaises(NotImplementedError):
+            AscendModelSlimConfig.get_min_capability()
+        mock_logger.error.assert_called_once()
+
+    @patch('vllm_ascend.quantization.modelslim_config.logger')
+    def test_maybe_update_config_logs_error_when_file_missing(self, mock_logger):
+        config = AscendModelSlimConfig()
+        with tempfile.TemporaryDirectory() as tmpdir:
+            with self.assertRaises(ValueError):
+                config.maybe_update_config(tmpdir)
+        mock_logger.error.assert_called_once()
+        args, _ = mock_logger.error.call_args
+        self.assertIn("quantization config not found", str(args[0]))
+
+    @patch('vllm_ascend.quantization.modelslim_config.logger')
+    @patch('vllm_ascend.quantization.modelslim_config.get_current_vllm_config')
+    def test_get_quant_method_linear_debug_log(self, mock_vllm_config, mock_logger):
+        mock_vllm_config.return_value.model_config.hf_config.model_type = None
+        linear_layer = MagicMock(spec=LinearBase)
+
+        with patch.object(self.ascend_config, "is_layer_skipped_ascend", return_value=True):
+            self.ascend_config.get_quant_method(linear_layer, "layer.0.dense")
+
+        mock_logger.debug.assert_called_once()
+        args, _ = mock_logger.debug.call_args
+        self.assertIn("AscendUnquantizedLinearMethod", str(args[0]))
+
+    @patch('vllm_ascend.quantization.modelslim_config.logger')
+    @patch('vllm_ascend.quantization.modelslim_config.get_current_vllm_config')
+    def test_get_quant_method_fused_moe_debug_log(self, mock_vllm_config, mock_logger):
+        mock_vllm_config.return_value.model_config.hf_config.model_type = None
+        moe_layer = MagicMock(spec=FusedMoE)
+        moe_layer.moe = MagicMock(spec=FusedMoEConfig)
+        moe_layer.moe_config = MagicMock(spec=FusedMoEConfig)
+
+        with (
+            patch.object(self.ascend_config, "is_layer_skipped_ascend", return_value=False),
+            patch("vllm_ascend.quantization.modelslim_config.create_scheme_for_layer", return_value=MagicMock()),
+            patch("vllm_ascend.quantization.method_adapters.AscendFusedMoEMethod", return_value=MagicMock()),
+        ):
+            self.ascend_config.get_quant_method(moe_layer, "model.layers.0.mlp")
+
+        mock_logger.debug.assert_called_once()
+        args, _ = mock_logger.debug.call_args
+        self.assertIn("AscendFusedMoEMethod", str(args[0]))
 
     def test_get_config_filenames(self):
         filenames = AscendModelSlimConfig.get_config_filenames()
@@ -276,6 +326,46 @@ class TestAscendModelSlimConfig(TestBase):
         config._apply_extra_quant_adaptations()
         self.assertIn("model.layers.0.weight", config.quant_description)
         self.assertEqual(config.quant_description["model.layers.0.weight"], "INT8")
+
+
+
+class TestGetLinearQuantTypeLogging(TestBase):
+
+    @patch('vllm_ascend.quantization.modelslim_config.logger')
+    def test_inconsistent_shards_logs_error(self, mock_logger):
+        quant_desc = {
+            "layer.0.q_proj.weight": "W8A8",
+            "layer.0.k_proj.weight": "W8A16",
+            "layer.0.v_proj.weight": "W8A8",
+        }
+        packed_mapping = {"qkv_proj": ["q_proj", "k_proj", "v_proj"]}
+        with self.assertRaises(ValueError):
+            get_linear_quant_type(quant_desc, "layer.0.qkv_proj", packed_mapping)
+        mock_logger.error.assert_called_once()
+        args, _ = mock_logger.error.call_args
+        self.assertIn("Not all shards", str(args[0]))
+
+
+class TestCreateSchemeForLayerLogging(TestBase):
+
+    @patch('vllm_ascend.quantization.modelslim_config.get_quant_type_for_layer', return_value=None)
+    @patch('vllm_ascend.quantization.modelslim_config.logger')
+    def test_quant_type_none_logs_error(self, mock_logger, mock_get_type):
+        with self.assertRaises(ValueError):
+            create_scheme_for_layer({}, "layer.0.dense", "linear")
+        mock_logger.error.assert_called_once()
+        args, _ = mock_logger.error.call_args
+        self.assertIn("Could not determine quantization type", str(args[0]))
+
+    @patch('vllm_ascend.quantization.modelslim_config.get_scheme_class', return_value=None)
+    @patch('vllm_ascend.quantization.modelslim_config.get_quant_type_for_layer', return_value="FP8")
+    @patch('vllm_ascend.quantization.modelslim_config.logger')
+    def test_unsupported_quant_type_logs_error(self, mock_logger, mock_get_type, mock_get_scheme):
+        with self.assertRaises(NotImplementedError):
+            create_scheme_for_layer({}, "layer.0.dense", "linear")
+        mock_logger.error.assert_called_once()
+        args, _ = mock_logger.error.call_args
+        self.assertIn("doesn't support", str(args[0]))
 
 
 class TestApplyVllmMapper(TestBase):
