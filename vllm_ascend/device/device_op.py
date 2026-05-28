@@ -17,7 +17,6 @@
 #
 import torch
 import torch_npu
-from vllm.triton_utils import tl, triton
 
 from vllm_ascend.device.mxfp_compat import (
     FLOAT8_E8M0FNU_DTYPE,
