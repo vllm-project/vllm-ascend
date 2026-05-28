@@ -189,13 +189,13 @@ public:
             AscendC::WaitFlag<AscendC::HardEvent::V_MTE2>(EVENT_ID0 + pingpongFlag); 
             if constexpr(std::is_same<GElementInput, float>::value) {
 #ifdef CATLASS_UNIFIED_CORE
-                AscendC::DataCopy(gUbTensor, gInputThisSubBlock, gfloatUbParams);
+                AscendC::DataCopy(gUbTensor, gInputThisSubBlock, mActual);
 #else
                 AscendC::DataCopyPad(gUbTensor, gInputThisSubBlock, gfloatUbParams, gUbPadParams);
 #endif
             } else {
 #ifdef CATLASS_UNIFIED_CORE
-                AscendC::DataCopy(gUbFPTensor, gInputThisSubBlock, ghalfUbParams);
+                AscendC::DataCopy(gUbFPTensor, gInputThisSubBlock, mActual);
 #else
                 AscendC::DataCopyPad(gUbFPTensor, gInputThisSubBlock, ghalfUbParams, gUbPadParams);
 #endif
@@ -273,13 +273,13 @@ public:
             AscendC::WaitFlag<AscendC::HardEvent::V_MTE2>(EVENT_ID0 + pingpongFlag); 
             if constexpr(std::is_same<GElementInput, float>::value) {
 #ifdef CATLASS_UNIFIED_CORE
-                AscendC::DataCopy(gUbTensor, gInputThisSubBlock, gfloatUbParams);
+                AscendC::DataCopy(gUbTensor, gInputThisSubBlock, mActual);
 #else
                 AscendC::DataCopyPad(gUbTensor, gInputThisSubBlock, gfloatUbParams, gUbPadParams);
 #endif
             } else {
 #ifdef CATLASS_UNIFIED_CORE
-                AscendC::DataCopy(gUbFPTensor, gInputThisSubBlock, ghalfUbParams);
+                AscendC::DataCopy(gUbFPTensor, gInputThisSubBlock, mActual);
 #else
                 AscendC::DataCopyPad(gUbFPTensor, gInputThisSubBlock, ghalfUbParams, gUbPadParams);
 #endif
