@@ -696,7 +696,7 @@ class AscendAttentionBackendImpl(AttentionImpl):
                 self.layerIndex, attn_metadata.kvcomp_metadata, query, passed_key, block_table, actual_seq_lengths_kv
             )
 
-        num_tokens = attn_metadata.num_actual_tokens
+        num_tokens = attn_metadata.actual_seq_lengths_q[-1]
         if _EXTRA_CTX.is_draft_model:
             if _EXTRA_CTX.is_draft_model_prefill:
                 graph_params = get_draft_graph_prefill_params()
@@ -732,15 +732,6 @@ class AscendAttentionBackendImpl(AttentionImpl):
                 _, block_size, _, _ = self.key_cache.shape  # type: ignore
                 key = self._nz_5d_view(self.key_cache, block_size)
                 value = self._nz_5d_view(self.value_cache, block_size)
-                block_table = attn_metadata.block_tables
-                actual_seq_lengths_kv = attn_metadata.seq_lens_list
-            # chunked prefill.
-            else:
-                _, block_size, _, _ = self.key_cache.shape  # type: ignore
-                key = self._nz_5d_view(self.key_cache, block_size)
-                value = self._nz_5d_view(self.value_cache, block_size)
-                block_table = attn_metadata.block_tables
-                actual_seq_lengths_kv = attn_metadata.seq_lens_list
 
             # TODO: change layerout from BNSD to TND.
             input_layout = "BNSD"
@@ -1576,13 +1567,13 @@ class AscendC8AttentionBackendImpl(AscendAttentionBackendImpl):
         assert block_size % 32 == 0, f"C8 INT8 KV cache requires block_size to be a multiple of 32, got {block_size}"
         batch_size = len(attn_metadata.seq_lens_list)
 
-        key_5d = self._nz_5d_view(self.key_cache, block_size)
-        value_5d = self._nz_5d_view(self.value_cache, block_size)
+        key = self._nz_5d_view(self.key_cache, block_size)
+        value = self._nz_5d_view(self.value_cache, block_size)
 
         attn_output, _ = torch_npu.npu_fused_infer_attention_score(
             query[:batch_size].unsqueeze(2),
-            key_5d,
-            value_5d,
+            key,
+            value,
             key_antiquant_scale=layer._c8_k_aq_scale_nz_bnsd,
             value_antiquant_scale=layer._c8_v_aq_scale_nz_bnsd,
             block_table=attn_metadata.block_tables,
@@ -1617,12 +1608,7 @@ class AscendC8AttentionBackendImpl(AscendAttentionBackendImpl):
         num_decode_tokens = attn_metadata.num_decode_tokens
         num_decodes = attn_metadata.num_decodes
         actual_seq_qlen = attn_metadata.actual_seq_lengths_q
-        num_tokens = attn_metadata.num_actual_tokens
-        num_prefills = attn_metadata.num_prefills
-        actual_prefill_end = num_decodes + num_prefills
-
-        if actual_prefill_end > num_decodes and actual_seq_qlen[actual_prefill_end - 1] > num_tokens:
-            actual_prefill_end -= 1
+        num_tokens = int(actual_seq_qlen[-1])  # type: ignore[index]
 
         if num_decode_tokens > 0:
             num_block, block_size, _, _ = self.key_cache.shape  # type: ignore[attr-defined]
@@ -1653,15 +1639,15 @@ class AscendC8AttentionBackendImpl(AscendAttentionBackendImpl):
             )
             output[:num_decode_tokens] = attn_out.squeeze(2)
 
-        if attn_metadata.num_prefills > num_decodes:
+        if attn_metadata.num_prefills > 0:
             prefill_q = query[num_decode_tokens:num_tokens]
 
             prefill_seq_qlen = [
-                actual_seq_qlen[i] - num_decode_tokens for i in range(num_decodes, actual_prefill_end)
+                actual_seq_qlen[i] - num_decode_tokens for i in range(num_decodes, len(actual_seq_qlen))
             ]
 
             all_new_prefill = True
-            for i in range(num_decodes, actual_prefill_end):
+            for i in range(num_decodes, len(attn_metadata.seq_lens_list)):
                 q_start = actual_seq_qlen[i - 1] if i > 0 else 0
                 qlen_i = actual_seq_qlen[i] - q_start
                 if attn_metadata.seq_lens_list[i] > qlen_i:
