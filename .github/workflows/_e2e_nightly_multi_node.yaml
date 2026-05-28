@@ -368,6 +368,7 @@ jobs:
           DEST="/tmp/collected-logs"
           PLOG_PATH=/root/ascend/log
           KUBE_LOG_PATH=/var/log
+          EXT_LOG_PATH=/external-dp
           for i in $(seq 0 $((size - 1))); do
             if [ "${i}" -eq 0 ]; then
               POD="${LWS_NAME}-0"
@@ -381,6 +382,12 @@ jobs:
             SRC="${LOG_PREFIX}/node_${i}_plogs"
             if [ -d "$SRC" ]; then
               cp -r "$SRC"/. "${DEST}/node${i}/${PLOG_PATH}/" 2>/dev/null || true
+            fi
+            # External DP packs per-rank raw logs into a single archive per node.
+            EXT_SRC="${LOG_PREFIX}/node_${i}_external_dp_logs.tar.gz"
+            if [ -f "$EXT_SRC" ]; then
+              mkdir -p "${DEST}/node${i}/${EXT_LOG_PATH}"
+              cp "$EXT_SRC" "${DEST}/node${i}/${EXT_LOG_PATH}/" 2>/dev/null || true
             fi
           done
 
