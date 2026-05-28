@@ -287,8 +287,10 @@ public:
             uint32_t zeroLen = 64 - zeroStart;
             if (zeroLen >= 8) {
                 AscendC::Duplicate<float>(maskUbTensor[i * 64 + zeroStart], (float)0.0, zeroLen);
-            } else if (zeroLen > 0) {
-                AscendC::Duplicate<float>(maskUbTensor[i * 64 + zeroStart], (float)0.0, 8);
+            } else {
+                for (uint32_t j = 0; j < zeroLen; ++j) {
+                    maskUbTensor.SetValue(i * 64 + zeroStart + j, (float)0.0);
+                }
             }
         }
         AscendC::PipeBarrier<PIPE_V>();
