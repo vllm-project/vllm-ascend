@@ -90,7 +90,7 @@ def _configure_backend(
         # and directly setattr for new versions with flat CompilerConfig.
         # force_eager=True: execute FX graph in eager mode before graph capture.
         # inplace_pass=False: disable reinplace pass to avoid gelu fallback to CPU.
-        options = {
+        options: dict[str, Any] = {
             "force_eager": True,
             "inplace_pass": False,
         }
