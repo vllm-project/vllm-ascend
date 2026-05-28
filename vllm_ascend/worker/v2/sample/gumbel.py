@@ -164,6 +164,8 @@ def gumbel_sample(
     output_processed_logits_col: torch.Tensor | None = None,
     use_fp64: bool = False,
 ) -> torch.Tensor:
+    if use_fp64:
+        raise NotImplementedError("FP64 Gumbel sampling is not supported on NPU.")
     num_tokens, vocab_size = logits.shape
     BLOCK_SIZE = 1024
     num_blocks = triton.cdiv(vocab_size, BLOCK_SIZE)

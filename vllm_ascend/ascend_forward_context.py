@@ -10,7 +10,7 @@ from vllm.config import CUDAGraphMode, VllmConfig
 from vllm.distributed import get_dp_group, get_ep_group, get_tensor_model_parallel_world_size
 from vllm.forward_context import BatchDescriptor, get_forward_context, set_forward_context
 
-import vllm_ascend.envs as envs_ascend
+from vllm_ascend.ascend_config import get_ascend_config
 from vllm_ascend.utils import (
     AscendDeviceType,
     enable_sp,
@@ -68,6 +68,8 @@ def set_ascend_forward_context(
     skip_compiled: bool = False,
     max_tokens_across_pcp: int = 0,
     draft_attn_metadatas=None,
+    has_sinks=False,
+    input_ids=None,
 ):
     """A context manager that stores the current forward context,
     can be attention metadata, etc.
@@ -86,6 +88,8 @@ def set_ascend_forward_context(
         forward_context = get_forward_context()
         forward_context.draft_attn_metadatas = draft_attn_metadatas
 
+        forward_context.input_ids = input_ids
+
         from vllm_ascend.ops.fused_moe.moe_comm_method import get_moe_comm_method
 
         max_num_tokens = int(num_tokens_across_dp.max().item()) if num_tokens_across_dp is not None else num_tokens
@@ -101,6 +105,9 @@ def set_ascend_forward_context(
         # NOTE: This cannot be set using set_forward_context
         # due to multiple warmups before actual capturing
         forward_context.capturing = False
+
+        # TODO: remove it when fia merge in fiav2
+        forward_context.sinks = has_sinks
 
         # TODO: remove it when torch_npu.npu_mm_reduce_scatter_base supports tp_size >= 16.
         mmrs_fusion = tp_world_size <= 8
@@ -235,6 +242,9 @@ def select_moe_comm_method(num_tokens: int, vllm_config: VllmConfig, is_draft_mo
        quantization with small EP size, no dynamic_eplb, and not in MTP
        mode; otherwise use MC2 within capacity or all-to-all.
     5. On 310P, always use all-gather.
+    6. On A5 with expert parallel, use MC2 when tokens fit the MC2 capacity
+       and the EP size is large enough; otherwise use all-gather when
+       EP size is smaller than num of topK experts or all-to-all.
 
     Args:
         num_tokens (int): The number of tokens in the current batch.
@@ -273,13 +283,13 @@ def select_moe_comm_method(num_tokens: int, vllm_config: VllmConfig, is_draft_mo
     elif soc_version in {AscendDeviceType.A3}:
         # TODO: drop the EP-size guard when dispatch_ffn_combine supports larger EP sizes
         # TODO: drop speculative method guard when dispatch_gmm_combine_decode supports w16a16
-        fused_mc2_enable = envs_ascend.VLLM_ASCEND_ENABLE_FUSED_MC2
+        fused_mc2_enable = get_ascend_config().enable_fused_mc2
         dispatch_ffn_combine_enable = get_ep_group().world_size <= 32 and (not is_draft_model)
         if num_tokens <= mc2_tokens_capacity:
             fused_decode_enable = fused_mc2_enable
-            if envs_ascend.VLLM_ASCEND_ENABLE_FUSED_MC2 == 1:
+            if fused_mc2_enable == 1:
                 fused_decode_enable = fused_mc2_enable and dispatch_ffn_combine_enable
-            elif envs_ascend.VLLM_ASCEND_ENABLE_FUSED_MC2 == 2:
+            elif fused_mc2_enable == 2:
                 fused_decode_enable = (
                     fused_mc2_enable
                     and speculative_enable_dispatch_gmm_combine_decode(vllm_config)
@@ -288,16 +298,20 @@ def select_moe_comm_method(num_tokens: int, vllm_config: VllmConfig, is_draft_mo
             moe_comm_type = MoECommType.FUSED_MC2 if fused_decode_enable else MoECommType.MC2
         else:
             fused_prefill_enable = fused_mc2_enable
-            if envs_ascend.VLLM_ASCEND_ENABLE_FUSED_MC2 == 1:
+            if fused_mc2_enable == 1:
                 fused_prefill_enable = fused_mc2_enable and dispatch_ffn_combine_enable
-            elif envs_ascend.VLLM_ASCEND_ENABLE_FUSED_MC2 == 2:
+            elif fused_mc2_enable == 2:
                 fused_prefill_enable = False
             moe_comm_type = MoECommType.FUSED_MC2 if fused_prefill_enable else MoECommType.ALLTOALL
     elif soc_version in {AscendDeviceType._310P}:
         moe_comm_type = MoECommType.ALLGATHER
     elif soc_version in {AscendDeviceType.A5}:
-        if num_tokens <= mc2_tokens_capacity and vllm_config.parallel_config.world_size_across_dp > 1:
+        num_experts_per_tok = vllm_config.model_config.hf_text_config.num_experts_per_tok
+        world_size = vllm_config.parallel_config.world_size_across_dp
+        if num_tokens <= mc2_tokens_capacity and world_size > 1:
             moe_comm_type = MoECommType.MC2
+        elif world_size <= num_experts_per_tok:
+            moe_comm_type = MoECommType.ALLGATHER
         else:
             moe_comm_type = MoECommType.ALLTOALL
     else:
@@ -331,6 +345,7 @@ class _ExtraForwardContextProxy:
         "num_accept_tokens",
         "in_profile_run",
         "padded_num_tokens",
+        "sinks",
     )
 
     def check_extra_attr(self, name: str):
@@ -348,8 +363,10 @@ class _ExtraForwardContextProxy:
         self.check_extra_attr(name)
         ctx = self._ctx()
         if envs_vllm.VLLM_USE_V2_MODEL_RUNNER:
-            return ctx.additional_kwargs[name]
-        return getattr(ctx, name)
+            # Unset known extras default to None so optional flags (e.g. `sinks`)
+            # can be read with truthiness checks before the V2 path populates them.
+            return ctx.additional_kwargs.get(name)
+        return getattr(ctx, name, None)
 
     def __setattr__(self, name: str, value: Any) -> None:
         self.check_extra_attr(name)

@@ -80,13 +80,14 @@ if (BUILD_OPEN_PROJECT)
     target_compile_definitions(cust_opapi PRIVATE
             -DACLNN_LOG_FMT_CHECK
     )
-    if(BUILD_WITH_3_8_PACKAGE)  #3~8包 依赖opapi, 不依赖opbase
+    if(BUILD_WITH_3_8_PACKAGE)  # 3~8 package links opapi_math and does not depend on opsbase.
     target_link_libraries(cust_opapi PRIVATE
         $<BUILD_INTERFACE:intf_pub>
         -Wl,--whole-archive
         ops_aclnn
         -Wl,--no-whole-archive
-        -lopapi
+        # Avoid exporting CANN built-in ACLNN symbols through libcust_opapi.so.
+        $<$<BOOL:${BUILD_WITH_INSTALLED_DEPENDENCY_CANN_PKG}>:$<BUILD_INTERFACE:opapi_math>>
         nnopbase
         profapi
         ge_common_base
@@ -386,6 +387,8 @@ if (base_aclnn_srcs)
             string(REGEX REPLACE "_def$" "" _op_name ${name_without_ext})
             list(APPEND generate_aclnn_srcs ${base_aclnn_binary_dir}/aclnn_${_op_name}.cpp)
             list(APPEND generate_aclnn_headers ${base_aclnn_binary_dir}/aclnn_${_op_name}.h)
+            append_versioned_aclnn_outputs("${_src}" "aclnn" "${_op_name}" "${base_aclnn_binary_dir}"
+                                           generate_aclnn_srcs generate_aclnn_headers)
             list(APPEND generate_proto_srcs    ${generate_proto_dir}/${_op_name}_proto.cpp)
             list(APPEND generate_proto_headers ${generate_proto_dir}/${_op_name}_proto.h)
         endif ()
