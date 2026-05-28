@@ -1084,7 +1084,14 @@ class AscendAttentionBackendImpl(AttentionImpl):
             prev = q_len
 
         if attn_metadata.attn_state == AscendAttentionState.PrefillNoCache:
-            kv_lens = query_lens
+            if self.attn_type == AttentionType.ENCODER_DECODER:
+                kv_lens = []
+                prev = 0
+                for kv_len in seq_lens_kv_list:
+                    kv_lens.append(kv_len - prev)
+                    prev = kv_len
+            else:
+                kv_lens = query_lens
         else:
             kv_lens = seq_lens_kv_list
 
@@ -1154,12 +1161,8 @@ class AscendAttentionBackendImpl(AttentionImpl):
                     k_i = k_cache_i.view(-1, num_kv_heads, head_size)[:cur_kv]
                     v_i = v_cache_i.view(-1, num_kv_heads, head_size)[:cur_kv]
             else:
-                if key.shape[0] == num_tokens:
-                    k_i = key[prev_kv : prev_kv + cur_kv]
-                    v_i = value[prev_kv : prev_kv + cur_kv]
-                else:
-                    k_i = key[:cur_kv]
-                    v_i = value[:cur_kv]
+                k_i = key[prev_kv : prev_kv + cur_kv]
+                v_i = value[prev_kv : prev_kv + cur_kv]
 
             # Adjust cur_kv based on actual KV data size (mimics NPU operator behavior)
             # NPU operator internally checks block_table and truncates to actual available length
@@ -1244,6 +1247,44 @@ class AscendAttentionBackendImpl(AttentionImpl):
         output: torch.Tensor,
         kv_cache=None,
     ):
+        if self.head_size > 192:
+            # Get necessary parameters before calling _fallback_sdpa
+            passed_key = key
+            key, value, block_size, block_table, actual_seq_lengths_kv = self._get_fia_params(
+                key, value, attn_metadata, kv_cache
+            )
+            num_tokens = attn_metadata.actual_seq_lengths_q[-1]
+            query_input = query[:num_tokens]
+            
+            # Call fallback SDPA
+            attn_output = self._fallback_sdpa(
+                query_input, key, value, block_table, block_size,
+                attn_metadata, actual_seq_lengths_kv, num_tokens)
+                
+            # Fix: Handle size mismatch from _fallback_sdpa or NPU operator
+            if attn_output.dim() == 2:
+                # attn_output is [tokens, hidden_size], need to reshape
+                actual_tokens = attn_output.size(0)
+                attn_output = attn_output.view(actual_tokens, self.num_heads, self.head_size)
+            elif attn_output.dim() == 3:
+                # attn_output is already [tokens, num_heads, head_size]
+                # Verify the shape is correct
+                actual_tokens = attn_output.size(0)
+                if actual_tokens != num_tokens:
+                    import warnings
+                    warnings.warn(
+                        f"Attention output size mismatch in FIA: metadata says {num_tokens} tokens, "
+                        f"but actual output has {actual_tokens} tokens. Using actual size.",
+                        UserWarning,
+                        stacklevel=2
+                    )
+            else:
+                raise RuntimeError(f"Unexpected attn_output shape: {attn_output.shape}")
+            
+            safe_tokens = min(num_tokens, actual_tokens)
+            output[:safe_tokens] = attn_output[:safe_tokens]
+            return output
+        
         # we inherit ForwardContext in model runner v2, when enable model
         # runner v2, there is not capturing attribute in forward_context,
         # just use getattr to avoid attribute error.
@@ -1355,28 +1396,8 @@ class AscendAttentionBackendImpl(AttentionImpl):
                     scale=self.scale,
                     sparse_mode=3,
                 )
-
-            # Fix: Handle size mismatch from _fallback_sdpa or NPU operator
-            if attn_output.dim() == 2:
-                # attn_output is [tokens, hidden_size], need to reshape
-                actual_tokens = attn_output.size(0)
-                attn_output = attn_output.view(actual_tokens, self.num_heads, self.head_size)
-            elif attn_output.dim() == 3:
-                # attn_output is already [tokens, num_heads, head_size]
-                # Verify the shape is correct
-                actual_tokens = attn_output.size(0)
-                if actual_tokens != num_tokens:
-                    import warnings
-
-                    warnings.warn(
-                        f"Attention output size mismatch in FIA: metadata says {num_tokens} tokens, "
-                        f"but actual output has {actual_tokens} tokens. Using actual size.",
-                        UserWarning,
-                        stacklevel=2,
-                    )
-            else:
-                raise RuntimeError(f"Unexpected attn_output shape: {attn_output.shape}")
-
+                
+            attn_output = attn_output.view(num_tokens, self.num_heads, self.head_size)
         output[:num_tokens] = attn_output[:num_tokens]
         return output
 
