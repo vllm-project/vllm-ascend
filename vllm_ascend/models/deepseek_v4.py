@@ -45,8 +45,6 @@ from vllm.distributed import (
     tensor_model_parallel_all_gather,
 )
 from vllm.model_executor.layers.activation import SiluAndMul
-from vllm.model_executor.layers.deepseek_compressor import CompressorStateCache
-from vllm.model_executor.layers.deepseek_v4_attention import DeepseekV4IndexerCache
 from vllm.model_executor.layers.fused_moe import FusedMoE
 from vllm.model_executor.layers.layernorm import RMSNorm
 from vllm.model_executor.layers.linear import (
@@ -81,7 +79,15 @@ from vllm_ascend.utils import (
     extract_dsv4_layer_index,
     get_ascend_device_type,
     get_dsv4_compress_ratio,
+    vllm_version_is,
 )
+
+if vllm_version_is("0.20.2"):
+    from vllm.model_executor.layers.deepseek_compressor import CompressorStateCache  # type:ignore
+    from vllm.model_executor.layers.deepseek_v4_attention import DeepseekV4IndexerCache  # type:ignore
+else:
+    from vllm.models.deepseek_v4.attention import DeepseekV4IndexerCache
+    from vllm.models.deepseek_v4.compressor import CompressorStateCache
 
 
 def hadamard_transform_ref(x: torch.Tensor, scale=1.0):
