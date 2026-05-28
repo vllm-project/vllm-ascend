@@ -1445,7 +1445,9 @@ class AscendDSAImpl(DSAAttentionImpl):
         for ACL graph compatibility.
         """
         if hasattr(self, "multistream_dsv4_dsa_overlap") and self.multistream_dsv4_dsa_overlap:
-            hidden_states_dummy = torch.zeros(1, hidden_states.shape[-1], dtype=hidden_states.dtype, device=hidden_states.device)
+            hidden_states_dummy = torch.zeros(
+                1, hidden_states.shape[-1], dtype=hidden_states.dtype, device=hidden_states.device
+            )
             aux_stream = dsv4_dsa_overlap_stream()
             e_warmup = torch.npu.current_stream().record_event()
             with npu_stream_switch(aux_stream, enabled=True):
