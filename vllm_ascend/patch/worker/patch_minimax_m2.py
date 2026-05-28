@@ -242,7 +242,7 @@ def _patched_minimax_m2_forward(
         # Carry forward aux hidden states collected on earlier PP ranks.
         # Transported as a stacked tensor [num_aux, batch, hidden_size];
         # unbind back to list of tensors.
-        aux_stacked = intermediate_tensors.get("aux_hidden_states")
+        aux_stacked = intermediate_tensors.tensors.get("aux_hidden_states")
         aux_hidden_states: list[torch.Tensor] = (
             list(torch.unbind(aux_stacked, dim=0))
             if aux_stacked is not None and aux_stacked.shape[0] > 0
