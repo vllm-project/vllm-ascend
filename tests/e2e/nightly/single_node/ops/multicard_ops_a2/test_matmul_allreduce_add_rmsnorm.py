@@ -6,13 +6,12 @@ import torch
 import torch.distributed as dist
 import torch.multiprocessing as mp
 import torch_npu
-import torchair
+import npugraph_ex as nge
 
 from vllm_ascend.utils import enable_custom_op
 
-config = torchair.CompilerConfig()
-config.mode = "reduce-overhead"
-npu_backend = torchair.get_npu_backend(compiler_config=config)
+config = nge.CompilerConfig()
+npu_backend = nge.get_npu_backend(compiler_config=config)
 torch_npu.npu.config.allow_internal_format = True
 enable_custom_op()
 

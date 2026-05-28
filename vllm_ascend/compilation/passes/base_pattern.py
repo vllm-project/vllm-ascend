@@ -3,7 +3,7 @@ from collections.abc import Callable
 
 import torch
 import torch._inductor.pattern_matcher as pm
-import torchair
+import npugraph_ex as nge
 from torch._inductor.pattern_matcher import PatternMatcherPass
 from vllm.config import VllmConfig
 
@@ -48,7 +48,7 @@ class BasePattern(ABC):
 
         pm.register_replacement(pattern_fn, replacement_fn, example_inputs, pm.fwd_only, pm_pass)
 
-        torchair.register_replacement(
+        nge.register_replacement(
             search_fn=pattern_fn,
             replace_fn=replacement_fn,
             example_inputs=example_inputs,
