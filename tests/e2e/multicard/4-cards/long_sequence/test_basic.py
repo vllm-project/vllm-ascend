@@ -94,7 +94,16 @@ def test_models_pcp_dcp_basic():
         gpu_memory_utilization=0.8,
         block_size=128,
     ) as runner:
-        runner.model.generate(prompts, sampling_params)
+        outputs = runner.generate_greedy(prompts, 5)
+        results = [item[1] for item in outputs]
+        golden = [
+            "The capital of France is Paris.\nThe capital",
+            "Hello, my name is Tom, I am a 20 years",
+            "The president of United States is the head of state and",
+            "AI future is not just about technology,",
+        ]
+        res_percent = calculate_total_char_match_percent(results, golden)
+        assert res_percent > 80
 
 
 @wait_until_npu_memory_free()
@@ -458,3 +467,24 @@ def test_qwen3_5_4b_multimodal_single_and_multi_image():
         assert len(outputs) == len(inputs)
         for output in outputs:
             assert output.outputs and output.outputs[0].text.strip()
+
+
+def calculate_total_char_match_percent(pred_list: list[str], target_list: list[str]) -> float:
+    if len(pred_list) != len(target_list):
+        raise ValueError("list length not same")
+
+    total_matched = 0
+    total_checked = 0
+    for pred_str, target_str in zip(pred_list, target_list):
+        check_len = min(len(pred_str), len(target_str))
+        if check_len == 0:
+            continue
+        matched = sum(1 for a, b in zip(pred_str, target_str) if a == b)
+        total_matched += matched
+        total_checked += check_len
+
+    if total_checked == 0:
+        return 0.0
+
+    percent = (total_matched / total_checked) * 100
+    return round(percent, 2)
