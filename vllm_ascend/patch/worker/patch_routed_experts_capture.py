@@ -26,6 +26,7 @@ import torch.distributed as dist
 
 from vllm.distributed.parallel_state import get_tp_group
 from vllm.model_executor.layers.fused_moe.routed_experts_capturer import RoutedExpertsCapturer
+from vllm.forward_context import get_forward_context
 
 from vllm_ascend.ascend_forward_context import _EXTRA_CTX, MoECommType
 
@@ -66,7 +67,7 @@ def capture(self, layer_id: int, topk_ids: torch.Tensor) -> None:
         topk_ids: Tensor of shape (batch_size, num_routed_experts).
     """
 
-    ctx = _EXTRA_CTX
+    ctx = get_forward_context()
     if ctx.dp_metadata is None:  # single dp
         start_loc = 0
         end_loc = topk_ids.shape[0]
