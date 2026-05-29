@@ -142,21 +142,27 @@ elif [[ "$SOC_VERSION" =~ ^ascend910_93 ]]; then
         cd - || exit 1
     fi
     # dependency: cann-toolkit file moe_distribute_base.h
+    # CANN 9.0.0+ splits this into moe_distribute_base.h + moe_distribute_comm_ctx.h
     HCCL_STRUCT_FILE_PATH=$(find -L "${ASCEND_TOOLKIT_HOME}" -name "moe_distribute_base.h" 2>/dev/null | head -n1)
     if [ -z "$HCCL_STRUCT_FILE_PATH" ]; then
         echo "cannot find moe_distribute_base.h file in CANN env"
         exit 1
     fi
+    HCCL_STRUCT_DIR=$(dirname "${HCCL_STRUCT_FILE_PATH}")
+    HCCL_COMM_CTX_FILE="${HCCL_STRUCT_DIR}/moe_distribute_comm_ctx.h"
+
     # for dispatch_gmm_combine_decode
     yes | cp "${HCCL_STRUCT_FILE_PATH}" "${ROOT_DIR}/csrc/utils/inc/kernel"
+    [ -f "${HCCL_COMM_CTX_FILE}" ] && cp "${HCCL_COMM_CTX_FILE}" "${ROOT_DIR}/csrc/utils/inc/kernel"
 
     # for dispatch_normal and combine_normal
-    TARGET_DIR="$SCRIPT_DIR/mc2/moe_dispatch_normal/op_kernel/utils/"
+    TARGET_DIR="${ROOT_DIR}/csrc/mc2/moe_dispatch_normal/op_kernel/utils/"
     cp "$HCCL_STRUCT_FILE_PATH" "$TARGET_DIR"
+    [ -f "${HCCL_COMM_CTX_FILE}" ] && cp "${HCCL_COMM_CTX_FILE}" "$TARGET_DIR"
 
-    TARGET_DIR="$SCRIPT_DIR/mc2/moe_combine_normal/op_kernel/utils/"
-    echo "$TARGET_DIR"
+    TARGET_DIR="${ROOT_DIR}/csrc/mc2/moe_combine_normal/op_kernel/utils/"
     cp "$HCCL_STRUCT_FILE_PATH" "$TARGET_DIR"
+    [ -f "${HCCL_COMM_CTX_FILE}" ] && cp "${HCCL_COMM_CTX_FILE}" "$TARGET_DIR"
     
     CUSTOM_OPS_ARRAY=(
         "scatter_nd_update_v2"
