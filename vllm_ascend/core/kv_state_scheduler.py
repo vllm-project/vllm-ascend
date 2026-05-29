@@ -230,6 +230,7 @@ class KVStateScheduler(Scheduler):
                             self.running,
                             key=lambda r: (r.priority, r.arrival_time),
                         )
+                        preempted_idx = self.running.index(preempted_req)
                         self.running.remove(preempted_req)
                         if preempted_req in scheduled_running_reqs:
                             scheduled_running_reqs.remove(preempted_req)
@@ -245,6 +246,9 @@ class KVStateScheduler(Scheduler):
                                     preempted_req.get_num_encoder_embeds(i) for i in preempted_encoder_inputs
                                 )
                                 encoder_compute_budget += num_embeds_to_restore
+                        # Always adjust req_index if the preempted request was at
+                        # or before the current index to prevent request skipping.
+                        if preempted_idx <= req_index:
                             req_index -= 1
                     else:
                         preempted_req = self.running.pop()

@@ -414,9 +414,12 @@ def _seeded_uniform_probs(
         torch.int64,
         device,
     )
-    req_seed = seeds[idx_mapping.to(torch.long)].to(torch.float32)
+    req_seed = seeds[idx_mapping.to(torch.long)]
+    mixed_seed = req_seed ^ (req_seed >> 32)
+    mixed_seed = mixed_seed % 16777216
+    req_seed_f32 = mixed_seed.to(torch.float32)
     pos = positions.to(torch.float32)
-    return torch.frac(torch.sin(req_seed * 12.9898 + pos * 78.233) * 43758.5453)
+    return torch.frac(torch.sin(req_seed_f32 * 12.9898 + pos * 78.233) * 43758.5453)
 
 
 def _seeded_recovered_token_ids(
