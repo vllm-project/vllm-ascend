@@ -167,7 +167,9 @@ class AscendMultiHeadLatentAttention(MultiHeadLatentAttentionWrapper):
             output = torch.empty((n_out, hidden_dim), dtype=hidden_states.dtype, device=hidden_states.device)
         else:
             need_gather_q_kv = _EXTRA_CTX.flash_comm_v1_enabled
-            output = torch.empty((hidden_states.shape[0], hidden_dim), dtype=hidden_states.dtype, device=hidden_states.device)
+            output = torch.empty(
+                (hidden_states.shape[0], hidden_dim), dtype=hidden_states.dtype, device=hidden_states.device
+            )
 
         torch.ops.vllm.mla_forward(hidden_states, need_gather_q_kv, output, self.prefix)
         output = output.view(-1, hidden_dim)
