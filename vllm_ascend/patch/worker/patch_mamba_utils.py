@@ -1,5 +1,4 @@
 # mypy: ignore-errors
-import itertools
 from typing import Any
 
 from vllm.config import CacheConfig
