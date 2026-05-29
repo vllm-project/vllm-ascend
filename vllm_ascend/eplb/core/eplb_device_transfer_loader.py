@@ -67,8 +67,6 @@ class D2DExpertWeightLoader:
                 self.comm_op_list.append(
                     dist.P2POp(dist.irecv, buffer_tensor, self.comm_group.ranks[recv_rank], group=self.comm_group.device_group)
                 )
-            # dest_slot is a LOCAL SLOT index — look up the receiving
-            # expert's local ID from the updated expert map.
             local_expert_to_replace = self.updated_expert_map[global_expert_id_to_recv].item()
             self.recv_expert_list.append((local_expert_to_replace, buffer_tensor_id))
 
