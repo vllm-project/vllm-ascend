@@ -14,7 +14,6 @@
 # limitations under the License.
 # This file is a part of the vllm-ascend project.
 #
-
 FROM ascendai/python:3.11-ubuntu22.04
 
 ARG TARGETARCH
