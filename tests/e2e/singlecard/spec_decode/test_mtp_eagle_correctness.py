@@ -31,10 +31,8 @@ from tests.e2e.conftest import VllmRunner, cleanup_dist_env_and_memory
 os.environ["VLLM_WORKER_MULTIPROC_METHOD"] = "spawn"
 
 MODELS = ["wemaster/deepseek_mtp_main_random_bf16"]
-# Local model path for testing on A2 machine
-LOCAL_MODELS = ["/home/117_share/weight/DeepSeek-V4-Flash-w8a8-mtp"]
-# GLM-4.7-Flash model (smaller, suitable for single-card testing)
-GLM_MODELS = ["/home/s00645958/GLM-4.7-Flash"]
+LOCAL_MODELS = [os.getenv("VLLM_DEEPSEEK_MTP_LOCAL_PATH", "/home/117_share/weight/DeepSeek-V4-Flash-w8a8-mtp")]
+GLM_MODELS = [os.getenv("VLLM_GLM_LOCAL_PATH", "/home/s00645958/GLM-4.7-Flash")]
 
 
 @pytest.mark.parametrize("model_name", MODELS)
