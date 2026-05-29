@@ -21,7 +21,10 @@ with Ascend-specific additions for ACL graph differences.
 
 from __future__ import annotations
 
+from unittest.mock import patch
+
 import numpy as np
+import pytest
 import torch
 from vllm.config import CacheConfig, VllmConfig, set_current_vllm_config
 
@@ -29,6 +32,19 @@ from vllm_ascend.ascend_config import init_ascend_config
 from vllm_ascend.spec_decode.extract_hidden_states_proposer import (
     AscendExtractHiddenStatesProposer,
 )
+
+
+@pytest.fixture(autouse=True)
+def _no_pin_memory():
+    # On Ascend/NPU CI runners without physical hardware, torch.zeros(...,
+    # pin_memory=True) triggers aclInit and fails.  Patch
+    # is_pin_memory_available so vllm's ExtractHiddenStatesProposer.__init__
+    # creates CpuGpuBuffer with pin_memory=False.
+    with patch(
+        "vllm.v1.spec_decode.extract_hidden_states.is_pin_memory_available",
+        return_value=False,
+    ):
+        yield
 
 
 class MockCachedRequestState:
