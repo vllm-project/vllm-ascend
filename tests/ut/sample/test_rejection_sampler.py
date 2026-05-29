@@ -240,7 +240,7 @@ class TestAscendRejectionSampler(TestBase):
                 [0, 1, 2],
             ]
         )
-        enable_reduce_sampling = True
+        enable_reduced_sampling = True
         sample_recovered_tokens_pytorch(
             output_token_ids,
             cu_num_draft_tokens,
@@ -251,7 +251,7 @@ class TestAscendRejectionSampler(TestBase):
             vocab_size,
             IS_NGRAM=True,
             target_indices=target_indices,
-            enable_reduce_sampling=enable_reduce_sampling,
+            enable_reduced_sampling=enable_reduced_sampling,
         )
 
         assert output_token_ids[0].item() == 0
@@ -295,7 +295,7 @@ class TestAscendRejectionSampler(TestBase):
                 [0, 1, 2, 3],
             ]
         )
-        enable_reduce_sampling = True
+        enable_reduced_sampling = True
         rejection_random_sample_block_verify_pytorch(
             output_token_ids,
             cu_num_draft_tokens,
@@ -310,7 +310,7 @@ class TestAscendRejectionSampler(TestBase):
             vocab_size,
             IS_NGRAM=False,
             target_indices=target_indices,
-            enable_reduce_sampling=enable_reduce_sampling,
+            enable_reduced_sampling=enable_reduced_sampling,
         )
 
         assert output_token_ids[0, 0].item() == 1
@@ -346,7 +346,7 @@ class TestAscendRejectionSampler(TestBase):
                 [0, 1, 2],
             ]
         )
-        enable_reduce_sampling = True
+        enable_reduced_sampling = True
         sample_recovered_tokens_blockwise_pytorch(
             output_token_ids,
             cu_num_draft_tokens,
@@ -357,7 +357,7 @@ class TestAscendRejectionSampler(TestBase):
             vocab_size,
             IS_NGRAM=True,
             target_indices=target_indices,
-            enable_reduce_sampling=enable_reduce_sampling,
+            enable_reduced_sampling=enable_reduced_sampling,
         )
 
         assert output_token_ids[0].item() == 0
@@ -397,7 +397,7 @@ class TestAscendRejectionSampler(TestBase):
                 [0, 1, 2],
             ]
         )
-        enable_reduce_sampling = True
+        enable_reduced_sampling = True
         sample_recovered_tokens_blockwise_pytorch(
             output_token_ids,
             cu_num_draft_tokens,
@@ -408,7 +408,7 @@ class TestAscendRejectionSampler(TestBase):
             vocab_size,
             IS_NGRAM=False,
             target_indices=target_indices,
-            enable_reduce_sampling=enable_reduce_sampling,
+            enable_reduced_sampling=enable_reduced_sampling,
         )
         assert output_token_ids[0].item() == 0
         assert output_token_ids[1].item() == 0
@@ -501,7 +501,7 @@ class TestAscendRejectionSampler(TestBase):
                 [0, 1, 2, 3],
             ]
         )
-        enable_reduce_sampling = True
+        enable_reduced_sampling = True
         rejection_random_sample_pytorch(
             output_token_ids,
             cu_num_draft_tokens,
@@ -516,7 +516,7 @@ class TestAscendRejectionSampler(TestBase):
             vocab_size,
             IS_NGRAM=False,
             target_indices=target_indices,
-            enable_reduce_sampling=enable_reduce_sampling,
+            enable_reduced_sampling=enable_reduced_sampling,
         )
         assert output_token_ids[0, 0].item() == 1
         assert output_token_ids[0, 1].item() == 0
