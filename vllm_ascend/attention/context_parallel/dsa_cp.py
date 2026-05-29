@@ -329,7 +329,25 @@ class AscendDSACPMetadataBuilder(AttentionMetadataBuilder[AscendDSAMetadata]):
         fast_build: bool = False,
         **kwargs,
     ) -> AscendDSAMetadata:
+        assert self.compressor_ratio <= 1, "vLLM-Ascend only support SWA-layer for Deepseek-V4 now."
+        num_reqs = common_attn_metadata.num_reqs
         num_input_tokens = common_attn_metadata.num_input_tokens
+        num_decodes, num_prefills, num_decode_tokens, _ = split_decodes_and_prefills(
+            common_attn_metadata, decode_threshold=self.decode_threshold
+        )
+
+        self.num_decodes = num_decodes
+        self.num_prefills = num_prefills
+        self.num_decode_tokens = num_decode_tokens
+        self.num_actual_tokens = common_attn_metadata.num_actual_tokens
+        self.seq_lens = common_attn_metadata.seq_lens[:num_reqs]
+        self.block_size = kwargs.get("block_size", 128)
+
+        input_positions = common_attn_metadata.positions[:num_input_tokens].long()
+        # Draft steps update positions independently. Reusing the global RoPE
+        # cache can let later draft steps overwrite step-0 metadata.
+        cos, sin = get_cos_and_sin_dsa(input_positions, use_cache=False)
+
         slot_mapping = common_attn_metadata.slot_mapping[:num_input_tokens]
 
         assert self.spec_slot_mapping is not None
@@ -337,11 +355,124 @@ class AscendDSACPMetadataBuilder(AttentionMetadataBuilder[AscendDSAMetadata]):
             [slot_mapping // self.block_size, slot_mapping % self.block_size], dim=-1
         )
 
-        return self.build(
-            common_prefix_len=0,
+        self.block_table = common_attn_metadata.block_table_tensor[:num_reqs]
+        req_metadata = self.build_req_metadata_for_drafting(
+            draft_step=draft_step,
             common_attn_metadata=common_attn_metadata,
-            fast_build=fast_build,
-            **kwargs,
+            input_positions=input_positions,
+            num_input_tokens=num_input_tokens,
+        )
+
+        return self.metadata_cls(  # type: ignore
+            num_input_tokens=common_attn_metadata.num_input_tokens,
+            num_actual_tokens=self.num_actual_tokens,
+            head_dim=self.model_config.get_head_size(),
+            attn_mask=None,
+            num_decodes=num_decodes,
+            num_decode_tokens=num_decode_tokens,
+            num_prefills=num_prefills,
+            attn_state=common_attn_metadata.attn_state,
+            req_metadata=req_metadata,
+            query_start_loc=common_attn_metadata.query_start_loc,
+            block_tables=None,
+            seq_lens=self.seq_lens,
+            cos=cos,
+            sin=sin,
+            hadamard=None,
+        )
+
+    def build_req_metadata_for_drafting(
+        self,
+        draft_step: int,
+        common_attn_metadata: AscendCommonAttentionMetadata,
+        input_positions: torch.Tensor,
+        num_input_tokens: int,
+    ) -> AscendDSAReqMetadata:
+        """Build DSA-CP metadata for one draft step."""
+        num_reqs = common_attn_metadata.num_reqs
+        query_start_loc = common_attn_metadata.query_start_loc
+        seq_lens_q = query_start_loc[1:] - query_start_loc[:-1]
+
+        cos, sin = get_cos_and_sin_dsa(input_positions, use_cache=False)
+        (
+            local_start,
+            local_end_with_pad,
+            tokens_per_rank,
+            num_tokens_pad,
+            local_query_start_loc,
+            local_seq_lens,
+            local_cos,
+            local_sin,
+        ) = self._build_local_token_metadata(
+            num_reqs=num_reqs,
+            num_input_tokens=num_input_tokens,
+            input_positions=input_positions,
+            query_start_loc=query_start_loc,
+            seq_lens=self.seq_lens[:num_reqs],
+            use_cache=False,
+        )
+        local_query_start_loc = local_query_start_loc.clone()
+        local_seq_lens = local_seq_lens.clone()
+
+        local_seq_lens_q = local_query_start_loc[1 : num_reqs + 1] - local_query_start_loc[:num_reqs]
+        max_local_query_len = max(1, int(local_seq_lens_q.max().item()))
+        max_local_seq_lens = max(1, int(local_seq_lens.max().item()))
+
+        start_pos = self.seq_lens[:num_reqs] - seq_lens_q
+
+        assert self.spec_slot_mapping is not None
+        slot_mapping = self.spec_slot_mapping[draft_step - 1][: self.num_actual_tokens]
+
+        num_heads = self.model_config.hf_config.num_attention_heads
+        sas_metadata = torch.ops._C_ascend.npu_sparse_attn_sharedkv_metadata(
+            num_heads_q=num_heads,
+            num_heads_kv=1,
+            head_dim=self.model_config.get_head_size(),
+            cu_seqlens_q=local_query_start_loc,
+            cu_seqlens_ori_kv=local_query_start_loc,
+            cu_seqlens_cmp_kv=None,
+            seqused_q=self.seqused_q,
+            seqused_kv=local_seq_lens,
+            max_seqlen_q=max_local_query_len,
+            max_seqlen_kv=max_local_seq_lens,
+            batch_size=num_reqs,
+            cmp_ratio=1,
+            ori_mask_mode=4,
+            ori_win_left=self.model_config.hf_config.sliding_window - 1,
+            ori_win_right=0,
+            layout_q="TND",
+            layout_kv="PA_ND",
+            has_ori_kv=True,
+            has_cmp_kv=False,
+            device=str(self.seqused_q.device),
+        )
+
+        cp_metadata = DSACPMetadata(
+            local_query_start_loc=local_query_start_loc,
+            local_seq_lens=local_seq_lens,
+            local_start=local_start,
+            local_end=local_end_with_pad,
+            tokens_per_rank=tokens_per_rank,
+            num_tokens_pad=num_tokens_pad,
+            local_sin=local_sin,
+            local_cos=local_cos,
+        )
+
+        return AscendDSAReqMetadata(
+            input_positions=input_positions,
+            block_table=self.block_table[:num_reqs, ...],
+            slot_mapping=slot_mapping,
+            seq_lens=self.seq_lens[:num_reqs],
+            query_start_loc=query_start_loc,
+            cp_metadata=cp_metadata,
+            sin=sin,
+            cos=cos,
+            compress_sin=None,
+            compress_cos=None,
+            start_pos=start_pos,
+            sas_metadata=sas_metadata,
+            qli_metadata=None,
+            cu_cmp_seqlen_list=None,
         )
 
     def build_req_metadata(
