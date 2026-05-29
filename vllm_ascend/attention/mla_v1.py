@@ -3,6 +3,7 @@ from typing import TYPE_CHECKING, NamedTuple, TypeVar
 
 import numpy as np
 import torch
+import torch.nn.functional as F
 import torch_npu
 import vllm.envs as envs_vllm
 from vllm.config import VllmConfig, get_current_vllm_config
@@ -770,6 +771,12 @@ class AscendMLAImpl(MLAAttentionImpl):
                 )
         register_all_layers_to_shard_weight_series(self.layer_sharding_kwargs)
 
+        # For models whose num_heads is not a power of 2 (e.g., GLM-4.7-Flash
+        # with 20 heads), ascend attention ops require padding heads to the
+        # next power of 2.
+        self.num_heads_padded = 1 << (self.num_heads - 1).bit_length()
+        self.head_padding = self.num_heads_padded - self.num_heads
+
     @staticmethod
     def update_graph_params(
         update_stream,
@@ -1156,6 +1163,22 @@ class AscendMLAImpl(MLAAttentionImpl):
         out_list = [prefix_output.reshape(num_tokens * H, D)]
         lse_list = [prefix_lse.reshape(num_tokens * H)]
 
+        if self.head_padding > 0:
+            query = torch.cat((q_nope, q_pe), dim=-1)
+
+        common_kwargs = {
+            "num_heads": self.num_heads,
+            "num_key_value_heads": self.num_heads,
+            "input_layout": "TND",
+            "atten_mask": None,
+            "sparse_mode": 0,
+            "scale": self.scale,
+            "antiquant_mode": 0,
+            "antiquant_scale": None,
+            "softmax_lse_flag": True,
+            "actual_seq_lengths": actual_seq_lengths_q,
+        }
+
         for i in range(iters):
             toks = prefill_metadata.chunked_context.seq_tot[i]
             context_seq_len_npu = self.get_context_seq_len_npu(i, attn_metadata)
@@ -1184,25 +1207,18 @@ class AscendMLAImpl(MLAAttentionImpl):
             k_pe = k_pe.expand((*k_nope.shape[:-1], -1))
 
             actual_seq_lengths_kv = prefill_metadata.chunked_context.chunk_actual_seq_lengths_kv_list[i]
+            common_kwargs["actual_seq_lengths_kv"] = actual_seq_lengths_kv
 
-            chunk_out, chunk_lse = torch_npu.npu_fused_infer_attention_score(
-                q_nope,
-                k_nope,
-                v,
-                query_rope=q_pe,
-                key_rope=k_pe,
-                num_heads=self.num_heads,
-                num_key_value_heads=self.num_heads,
-                input_layout="TND",
-                atten_mask=None,
-                sparse_mode=0,
-                scale=self.scale,
-                antiquant_mode=0,
-                antiquant_scale=None,
-                softmax_lse_flag=True,
-                actual_seq_lengths=actual_seq_lengths_q,
-                actual_seq_lengths_kv=actual_seq_lengths_kv,
-            )
+            if self.head_padding > 0:
+                key = torch.cat((k_nope, k_pe), dim=-1)
+            else:
+                common_kwargs["query_rope"] = q_pe
+                common_kwargs["key_rope"] = k_pe
+                query = q_nope
+                key = k_nope
+
+            chunk_out, chunk_lse = torch_npu.npu_fused_infer_attention_score(query, key, v, **common_kwargs)
+
             if chunk_lse.dim() == 2:
                 chunk_lse = chunk_lse.transpose(0, 1).unsqueeze(-1)
             chunk_out = chunk_out.to(torch.float32)
@@ -1245,8 +1261,6 @@ class AscendMLAImpl(MLAAttentionImpl):
         attn_lse = torch.empty(self.num_heads, num_tokens, dtype=torch.float32, device=q_nope.device)
 
         common_kwargs = {
-            "query_rope": q_pe,
-            "key_rope": k_pe,
             "num_heads": self.num_heads,
             "num_key_value_heads": self.num_heads,
             "input_layout": "TND",
@@ -1262,7 +1276,15 @@ class AscendMLAImpl(MLAAttentionImpl):
             "actual_seq_lengths_kv": actual_seq_lengths_kv,
         }
 
-        attn_output, attn_lse = torch_npu.npu_fused_infer_attention_score(q_nope, k_nope, value, **common_kwargs)
+        if self.head_padding > 0:
+            query = torch.cat((q_nope, q_pe), dim=-1)
+            key = torch.cat((k_nope, k_pe), dim=-1)
+        else:
+            common_kwargs["query_rope"] = q_pe
+            common_kwargs["key_rope"] = k_pe
+            query, key = q_nope, k_nope
+
+        attn_output, attn_lse = torch_npu.npu_fused_infer_attention_score(query, key, value, **common_kwargs)
 
         attn_output, attn_lse = self._compute_prefill_context(
             q_nope, q_pe, kv_c_and_k_pe_cache, self.qk_rope_head_dim, attn_metadata, attn_output, attn_lse
@@ -1357,6 +1379,9 @@ class AscendMLAImpl(MLAAttentionImpl):
     ) -> torch.Tensor:
         decode_meta = attn_metadata.decode
         assert decode_meta is not None
+        # TODO: The CANN package is expected to support num_heads that are not
+        # powers of 2 in 2026 Q2. Once supported, all padding operations under
+        # `if self.head_padding > 0` in this function can be removed.
         num_tokens = q_nope.size(0)
         # shape of knope/k_pe for npu graph mode should be:
         # [num_blocks, num_kv_heads, block_size, self.kv_lora_rank/self.qk_rope_head_dim]
@@ -1382,6 +1407,7 @@ class AscendMLAImpl(MLAAttentionImpl):
             k_pe = k_pe.view(-1, self.num_kv_heads, block_size, self.qk_rope_head_dim)
 
         attn_output_shape: tuple | None = None
+        num_heads_for_op = self.num_heads_padded
         if (
             attn_metadata.attn_state
             in [
@@ -1400,8 +1426,11 @@ class AscendMLAImpl(MLAAttentionImpl):
             # Input shape: [num_tokens, num_heads, dim]
             q_nope = q_nope.view(num_tokens, self.num_heads, -1).contiguous()
             q_pe = q_pe.view(num_tokens, self.num_heads, -1)
+            if self.head_padding > 0:
+                q_pe = F.pad(q_pe, (0, 0, 0, self.head_padding), "constant", 0)
+                q_nope = F.pad(q_nope, (0, 0, 0, self.head_padding), "constant", 0)
             # Output shape: [num_heads, num_tokens, dim]
-            attn_output_shape = (self.num_heads, num_tokens, self.kv_lora_rank)
+            attn_output_shape = (num_heads_for_op, num_tokens, self.kv_lora_rank)
             sparse_mode = 3
             attn_mask = attn_metadata.decode.attn_mask  # type:ignore
             actual_seq_lengths = decode_meta.actual_seq_lengths_q
@@ -1412,10 +1441,13 @@ class AscendMLAImpl(MLAAttentionImpl):
             input_layout = "BSND_NBSD"
             q_nope = q_nope.view(num_tokens, 1, self.num_heads, -1).contiguous()
             q_pe = q_pe.view(num_tokens, 1, self.num_heads, -1).contiguous()
+            if self.head_padding > 0:
+                q_pe = F.pad(q_pe, (0, 0, 0, self.head_padding), "constant", 0)
+                q_nope = F.pad(q_nope, (0, 0, 0, self.head_padding), "constant", 0)
             dequant_scale_q_nope = dequant_scale_q_nope.view(num_tokens, 1, self.num_heads)
             sparse_mode = 0
             actual_seq_lengths = None
-            attn_output_shape = (self.num_heads, num_tokens, 1, self.kv_lora_rank)
+            attn_output_shape = (num_heads_for_op, num_tokens, 1, self.kv_lora_rank)
         else:
             # The output layout is set to NBSD to eliminate the need for a
             # transpose operation after attention.
@@ -1424,20 +1456,26 @@ class AscendMLAImpl(MLAAttentionImpl):
                 input_layout = "BSND_NBSD"
                 q_nope = q_nope.view(num_tokens, 1, self.num_heads, -1).contiguous()
                 q_pe = q_pe.view(num_tokens, 1, self.num_heads, -1)
+                if self.head_padding > 0:
+                    q_pe = F.pad(q_pe, (0, 0, 0, self.head_padding), "constant", 0)
+                    q_nope = F.pad(q_nope, (0, 0, 0, self.head_padding), "constant", 0)
             else:
                 # Input shape: [num_tokens, num_heads, seq_len, dim]
                 input_layout = "BNSD_NBSD"
                 q_nope = q_nope.view(num_tokens, self.num_heads, 1, -1).contiguous()
                 q_pe = q_pe.view(num_tokens, self.num_heads, 1, -1)
+                if self.head_padding > 0:
+                    q_pe = F.pad(q_pe, (0, 0, 0, 0, 0, self.head_padding), "constant", 0)
+                    q_nope = F.pad(q_nope, (0, 0, 0, 0, 0, self.head_padding), "constant", 0)
             # Output shape: [num_heads, num_tokens, seq_len, dim]
-            attn_output_shape = (self.num_heads, num_tokens, 1, self.kv_lora_rank)
+            attn_output_shape = (num_heads_for_op, num_tokens, 1, self.kv_lora_rank)
             sparse_mode = 0
             attn_mask = None
 
         common_kwargs = {
             "query_rope": q_pe,
             "key_rope": k_pe,
-            "num_query_heads": self.num_heads,
+            "num_query_heads": num_heads_for_op,
             "num_key_value_heads": self.num_kv_heads,
             "input_layout": input_layout,
             "atten_mask": attn_mask,
@@ -1481,7 +1519,7 @@ class AscendMLAImpl(MLAAttentionImpl):
                 weak_ref_tensors(k_nope),
                 weak_ref_tensors(q_pe),
                 weak_ref_tensors(k_pe),
-                self.num_heads,
+                num_heads_for_op,
                 self.num_kv_heads,
                 input_layout,
                 weak_ref_tensors(attn_mask) if attn_mask is not None else None,
@@ -1522,6 +1560,8 @@ class AscendMLAImpl(MLAAttentionImpl):
         else:
             attn_output, _ = torch_npu.npu_fused_infer_attention_score_v2(q_nope, k_nope, k_nope, **common_kwargs)
 
+        if self.head_padding > 0:
+            attn_output = attn_output[: self.num_heads]
         return self._v_up_proj(attn_output)
 
     def reorg_decode_q(self, decode_q_nope, decode_q_pe):
