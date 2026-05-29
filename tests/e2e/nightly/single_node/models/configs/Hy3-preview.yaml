@@ -1,0 +1,58 @@
+# ==========================================
+# Shared Configurations
+# ==========================================
+
+_envs: &envs
+  VLLM_USE_MODELSCOPE: "true"
+  HCCL_OP_EXPANSION_MODE: "AIV"
+  HCCL_BUFFSIZE: "1024"
+  OMP_PROC_BIND: "false"
+  OMP_NUM_THREADS: "1"
+  PYTORCH_NPU_ALLOC_CONF: "expandable_segments:True"
+  SERVER_PORT: "DEFAULT_PORT"
+
+_server_cmd: &server_cmd
+  - "--tensor-parallel-size"
+  - "16"
+  - "--enable-expert-parallel"
+  - "--enable-ep-weight-filter"
+  - "--tool-call-parser"
+  - "hy_v3"
+  - "--reasoning-parser"
+  - "hy_v3"
+  - "--enable-auto-tool-choice"
+  - "--max-model-len"
+  - "32768"
+  - "--max-num-seqs"
+  - "8"
+  - "--port"
+  - "$SERVER_PORT"
+  - "--speculative-config"
+  - '{"method": "mtp", "num_speculative_tokens": 1}'
+  - "--trust-remote-code"
+  - "--gpu-memory-utilization"
+  - "0.9"
+
+_benchmarks: &benchmarks
+  acc_gsm8k:
+    case_type: accuracy
+    dataset_path: vllm-ascend/gsm8k-lite
+    request_conf: vllm_api_general_chat
+    dataset_conf: gsm8k/gsm8k_gen_4_shot_cot_chat_prompt
+    max_out_len: 4096
+    batch_size: 8
+    baseline: 93.07
+    threshold: 5
+
+# ==========================================
+# ACTUAL TEST CASES
+# ==========================================
+
+test_cases:
+  - name: "Hy3-preview-TP16-EP-MTP"
+    model: "Tencent-Hunyuan/Hy3-preview"
+    envs:
+      <<: *envs
+    server_cmd: *server_cmd
+    benchmarks:
+      <<: *benchmarks
