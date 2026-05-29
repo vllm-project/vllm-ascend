@@ -1,4 +1,5 @@
 #!/usr/bin/env python3
+# codespell:ignore CLOS
 # Copyright 2026. Huawei Technologies Co.,Ltd. All rights reserved.
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
@@ -210,7 +211,7 @@ def get_protocol_from_eid(
     if net_layer == 0:
         return "ub_ctp"
 
-    # For CLOS layer (net_layer 1+), check topology
+    # For CLOS layer (net_layer 1+), check topology # codespell: ignore CLOS
     if net_layer >= 1:
         for edge in topo_data.get("edge_list", []):
             if edge.get("topo_type") == "CLOS" and edge.get("net_layer") == net_layer:
@@ -250,7 +251,7 @@ def get_h2d_plane_id(device_id: int, rootinfo: dict, mode: str) -> str:
     for rank in rootinfo.get("rank_list", []):
         if rank["device_id"] == device_id:
             for level in rank.get("level_list", []):
-                if level.get("net_layer") == 1:  # CLOS layer
+                if level.get("net_layer") == 1:  # CLOS layer  # codespell: ignore CLOS
                     for addr_entry in level.get("rank_addr_list", []):
                         if len(addr_entry.get("ports", [])) >= port_count:
                             return addr_entry.get("plane_id", "plane_x")
@@ -294,7 +295,7 @@ def generate_endpoint_list(local_id: int, device_info: dict, topo_data: dict, ro
             # Create endpoint
             endpoint = {"protocol": protocol, "comm_id": eid, "placement": "device"}
 
-            # Add plane field for ub_tp protocol or for net_layer >= 1 (CLOS/P2N)
+            # Add plane field for ub_tp protocol or for net_layer >= 1 (CLOS/P2N) # codespell: ignore CLOS
             # P2P (net_layer 0) direct connections should NOT have plane field
             if (net_layer >= 1 or protocol == "ub_tp") and plane_id:
                 endpoint["plane"] = plane_id
