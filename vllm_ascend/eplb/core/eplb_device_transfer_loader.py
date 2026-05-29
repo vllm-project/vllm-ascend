@@ -24,6 +24,11 @@ from vllm.logger import logger
 from vllm_ascend.distributed.parallel_state import get_dynamic_eplb_group
 
 
+def _fmt(t):
+    fmt = torch_npu.get_npu_format(t)
+    return "NZ" if fmt == torch_npu.Format.FRACTAL_NZ else str(fmt)
+
+
 class ExpertWeightUpdateState(Enum):
     WAITING = 0  # waiting for updated expert_map by EplbWorker
     READY = 1  # ready for d2d expert weights updating
@@ -53,10 +58,6 @@ class D2DExpertWeightLoader:
         self.updated_expert_map = updated_expert_map
 
         self.layer_id = layer_id
-        def _fmt(t):
-            fmt = torch_npu.get_npu_format(t)
-            return "NZ" if fmt == torch_npu.Format.FRACTAL_NZ else str(fmt)
-
         self.comm_op_list = []
         for send_info in expert_send_info:
             dst_rank, global_expert_id_to_send = send_info
