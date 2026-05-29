@@ -1,5 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 import copy
+import inspect
 from collections.abc import Callable
 from contextlib import AbstractContextManager, contextmanager, nullcontext
 from functools import partial
@@ -53,6 +54,17 @@ from vllm_ascend.utils import enable_sp, lmhead_tp_enable, shared_expert_dp_enab
 
 # Currently we will fix block size to a small one since `num_reqs` can't be too large
 _PREPARE_INPUTS_BLOCK_SIZE = 4
+
+
+def _call_with_supported_kwargs(func: Callable, *args, **kwargs):
+    """Call a function while dropping kwargs unsupported by its signature."""
+    if not kwargs:
+        return func(*args)
+    signature = inspect.signature(func)
+    if any(param.kind == inspect.Parameter.VAR_KEYWORD for param in signature.parameters.values()):
+        return func(*args, **kwargs)
+    supported_kwargs = {k: v for k, v in kwargs.items() if k in signature.parameters}
+    return func(*args, **supported_kwargs)
 
 
 # TODO: Remove it when the bug of fx-graph is solved
@@ -717,7 +729,13 @@ class AscendSpecDecodeBaseProposer(SpecDecodeBaseProposer):
                 common_ratio_to_sas_metadata=dict(),
                 block_size=self.draft_attn_groups[0].kv_cache_spec.block_size,
             )
-        attn_metadata = builder.build(0, common_attn_metadata, self.runner.get_model(), **extra_attn_metadata_args)
+        attn_metadata = _call_with_supported_kwargs(
+            builder.build,
+            0,
+            common_attn_metadata,
+            self.runner.get_model(),
+            **extra_attn_metadata_args,
+        )
 
         if hasattr(attn_metadata, "causal") and not attn_metadata.causal:
             attn_metadata.attn_mask = None
@@ -1497,7 +1515,8 @@ class AscendSpecDecodeBaseProposer(SpecDecodeBaseProposer):
                 common_ratio_to_sas_metadata=dict(),
                 block_size=self.draft_attn_groups[0].kv_cache_spec.block_size,
             )
-            attn_metadata = attn_metadata_builder.build_for_drafting(
+            attn_metadata = _call_with_supported_kwargs(
+                attn_metadata_builder.build_for_drafting,
                 draft_step,
                 common_attn_metadata,
                 **extra_attn_metadata_args,
