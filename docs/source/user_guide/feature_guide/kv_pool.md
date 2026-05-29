@@ -80,7 +80,7 @@ export PYTHONHASHSEED=0
         * Ensure `/usr/local/lib` and `/usr/local/lib64` are in your `LD_LIBRARY_PATH`
 
         ```shell
-        export LD_LIBRARY_PATH=/usr/local/lib64/python3.11/site-packages/mooncake:$LD_LIBRARY_PATH
+        export LD_LIBRARY_PATH=/usr/local/lib64/python3.12/site-packages/mooncake:$LD_LIBRARY_PATH
         ```
 
 ### Environment Variables Description
@@ -588,7 +588,7 @@ Method 2 for starting the MetaService service.
 source /usr/local/memcache_hybrid/set_env.sh
 source /usr/local/memfabric_hybrid/set_env.sh
 export MMC_META_CONFIG_PATH=/home/memcache/shell/mmc-meta.conf # Set it to the path of your own configuration file.
-export LD_LIBRARY_PATH=$LD_LIBRARY_PATH:/usr/local/python3.11.10/lib/
+export LD_LIBRARY_PATH=$LD_LIBRARY_PATH:/usr/local/python3.12.13/lib/
 /usr/local/memcache_hybrid/latest/aarch64-linux/bin/mmc_meta_service
 ```
 

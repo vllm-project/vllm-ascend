@@ -592,10 +592,10 @@ msgstr "\\${PYTHON_TAG} 是 Python 版本标签，\\${ARCH} 是 CPU 架构。"
 #: ../../source/user_guide/release_notes.md:76
 #, python-brace-format
 msgid ""
-"For example: python3.11 and aarch64, \\${PYTHON_TAG}=cp311, "
+"For example: python3.12 and aarch64, \\${PYTHON_TAG}=cp312, "
 "\\${ARCH}=aarch64."
 msgstr ""
-"例如：python3.11 和 aarch64，\\${PYTHON_TAG}=cp311，\\${ARCH}=aarch64。"
+"例如：python3.12 和 aarch64，\\${PYTHON_TAG}=cp312，\\${ARCH}=aarch64。"
 
 #: ../../source/user_guide/release_notes.md:78
 #: ../../source/user_guide/release_notes.md:460

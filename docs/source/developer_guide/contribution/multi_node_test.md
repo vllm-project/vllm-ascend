@@ -282,7 +282,7 @@ This section assumes that you already have a [Kubernetes](https://kubernetes.io/
     INFO 12-30 11:00:57 [__init__.py:217] Platform plugin ascend is activated
     INFO 12-30 11:00:57 [importing.py:68] Triton not installed or not compatible; certain GPU-related functions will not be available.
     ================================================================================================== test session starts ===================================================================================================
-    platform linux -- Python 3.11.13, pytest-8.4.2, pluggy-1.6.0 -- /usr/local/python3.11.13/bin/python3
+    platform linux -- Python 3.12.13, pytest-8.4.2, pluggy-1.6.0 -- /usr/local/python3.12.13/bin/python3
     cachedir: .pytest_cache
     rootdir: /vllm-workspace/vllm-ascend
     configfile: pyproject.toml
