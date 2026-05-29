@@ -272,9 +272,7 @@ def _build_proposer_for_padding_test(data_parallel_size: int = 1):
     runner.dcp_size = 1
 
     with set_current_vllm_config(vllm_config):
-        proposer = AscendExtractHiddenStatesProposer(
-            vllm_config=vllm_config, device=torch.device("cpu"), runner=runner
-        )
+        proposer = AscendExtractHiddenStatesProposer(vllm_config=vllm_config, device=torch.device("cpu"), runner=runner)
 
     proposer.dp_rank = 0
     proposer.cudagraph_dispatcher = MagicMock()
@@ -291,9 +289,7 @@ def test_determine_batch_execution_and_padding_asserts_when_runner_is_none():
     vllm_config = _create_vllm_config()
 
     with set_current_vllm_config(vllm_config):
-        proposer = AscendExtractHiddenStatesProposer(
-            vllm_config=vllm_config, device=torch.device("cpu"), runner=None
-        )
+        proposer = AscendExtractHiddenStatesProposer(vllm_config=vllm_config, device=torch.device("cpu"), runner=None)
 
     proposer.cudagraph_dispatcher = type("D", (), {"dispatch": staticmethod(lambda *a, **kw: (None, None))})()
 
@@ -317,8 +313,8 @@ def test_determine_batch_execution_and_padding_dp1_sp_pads_and_skips_sync():
         _make_batch_desc(num_tokens=8),
     )
 
-    cudagraph_mode, num_tokens_padded, num_tokens_across_dp = (
-        proposer._determine_batch_execution_and_padding(num_tokens=6)
+    cudagraph_mode, num_tokens_padded, num_tokens_across_dp = proposer._determine_batch_execution_and_padding(
+        num_tokens=6
     )
 
     assert num_tokens_padded == 8
@@ -353,11 +349,9 @@ def test_determine_batch_execution_and_padding_dp2_uses_runner_sync():
     sync_tensor = torch.tensor([8, 8], dtype=torch.int32)
     runner._sync_metadata_across_dp.return_value = (8, sync_tensor, CUDAGraphMode.NONE)
 
-    with patch(
-        "vllm.v1.spec_decode.extract_hidden_states.coordinate_batch_across_dp"
-    ) as mock_upstream_coord:
-        cudagraph_mode, num_tokens_padded, num_tokens_across_dp = (
-            proposer._determine_batch_execution_and_padding(num_tokens=6)
+    with patch("vllm.v1.spec_decode.extract_hidden_states.coordinate_batch_across_dp") as mock_upstream_coord:
+        cudagraph_mode, num_tokens_padded, num_tokens_across_dp = proposer._determine_batch_execution_and_padding(
+            num_tokens=6
         )
 
     # Upstream DP sync must NOT be used (it would post a [4, dp_size]
@@ -394,9 +388,7 @@ def test_determine_batch_execution_and_padding_dp2_keeps_tp_aligned_for_main_for
         CUDAGraphMode.NONE,
     )
 
-    _mode, num_tokens_padded, _across = proposer._determine_batch_execution_and_padding(
-        num_tokens=6
-    )
+    _mode, num_tokens_padded, _across = proposer._determine_batch_execution_and_padding(num_tokens=6)
 
     # The whole point of the fix: never returns 6 (which would crash
     # SP reduce_scatter as 6 % 4 != 0).

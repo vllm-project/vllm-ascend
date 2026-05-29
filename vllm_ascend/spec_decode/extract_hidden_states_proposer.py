@@ -57,7 +57,16 @@ class AscendExtractHiddenStatesProposer(ExtractHiddenStatesProposer):
             "for _pad_for_sequence_parallelism / _sync_metadata_across_dp"
         )
 
-        # SP padding must happen BEFORE DP sync (matches the main runner)
+        # SP padding must happen BEFORE DP sync (matches the main runner).
+        # The v2 NPUModelRunner does not implement
+        # _pad_for_sequence_parallelism; fail with a clear error instead of a
+        # confusing AttributeError if this proposer is paired with it.
+        if not hasattr(self.runner, "_pad_for_sequence_parallelism"):
+            raise NotImplementedError(
+                "The current model runner does not support sequence "
+                "parallelism padding (_pad_for_sequence_parallelism) required "
+                "for AscendExtractHiddenStatesProposer."
+            )
         num_tokens = self.runner._pad_for_sequence_parallelism(num_tokens)
 
         cudagraph_mode, batch_desc = self.cudagraph_dispatcher.dispatch(
@@ -68,6 +77,15 @@ class AscendExtractHiddenStatesProposer(ExtractHiddenStatesProposer):
 
         num_tokens_across_dp = None
         if self.vllm_config.parallel_config.data_parallel_size > 1:
+            # The v2 NPUModelRunner does not implement
+            # _sync_metadata_across_dp; fail with a clear error instead of a
+            # confusing AttributeError when data parallel size > 1.
+            if not hasattr(self.runner, "_sync_metadata_across_dp"):
+                raise NotImplementedError(
+                    "The current model runner does not support DP metadata "
+                    "synchronization (_sync_metadata_across_dp) required for "
+                    "data parallel size > 1."
+                )
             # Reuse the runner's DP sync so the shape matches the main model
             # forward. ``is_draft_model=True`` short-circuits the all_reduce
             # (cache_only draft is not MoE); the SP-pad above keeps the value
@@ -91,7 +109,6 @@ class AscendExtractHiddenStatesProposer(ExtractHiddenStatesProposer):
                     valid_modes={synced_cudagraph_mode},
                 )
                 assert batch_desc.num_tokens == num_tokens_padded
-                num_tokens_across_dp[self.dp_rank] = num_tokens_padded
 
         return cudagraph_mode, num_tokens_padded, num_tokens_across_dp
 
