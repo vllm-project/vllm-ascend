@@ -1377,10 +1377,21 @@ def singleton(cls):
 def enable_dsa_cp() -> bool:
     from vllm.config import get_current_vllm_config
     vllm_config = get_current_vllm_config()
+    # DSA CP is only applicable to models with indexer (e.g., DSv3.2, DSv4).
+    has_indexer = hasattr(vllm_config.model_config, "hf_text_config") and hasattr(
+        vllm_config.model_config.hf_text_config, "index_topk"
+    )
+    if not has_indexer:
+        return False
+
+    dsa_cp_enable = False
     additional_config = getattr(vllm_config, "additional_config", None)
     if additional_config is not None and "dsa_cp_enable" in additional_config:
-        return bool(additional_config["dsa_cp_enable"])
-    return False
+        dsa_cp_enable = bool(additional_config["dsa_cp_enable"])
+
+    if dsa_cp_enable and not enable_sp():
+        logger.warning_once("DSA CP is enabled but SP is not enabled. DSA CP will be disabled.")
+    return dsa_cp_enable and enable_sp()
 
 
 @lru_cache(maxsize=1)
