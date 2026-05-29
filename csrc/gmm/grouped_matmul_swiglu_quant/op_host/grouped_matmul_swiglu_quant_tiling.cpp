@@ -136,18 +136,17 @@ ASCENDC_EXTERN_C graphStatus TilingGMMSwigluQuant(gert::TilingContext *context)
     const int64_t k = xTensor->GetStorageShape().GetDim(1);
     auto wTensor = context->GetInputTensor(WEIGHT_INDEX);
     OP_CHECK_NULL_WITH_CONTEXT(context, wTensor);
-    // 如果属性不存在，使用无穷大作为默认值（表示无限制）
+    // swiglu limit 0 means clamp is disabled.
     auto attrs = context->GetAttrs();
-    float limited = std::numeric_limits<float>::infinity();
+    float limited = 0.0f;
     if (attrs != nullptr) {
-        // std::cout<<"weinachuan1"<<limited<<std::endl;
         if (const double *limitedPtr = attrs->GetAttrPointer<double>(ATTR_INDEX_LIMITED)) {
-            limited = static_cast<float>(*limitedPtr);  // 可能覆盖为有限值或 inf
-            // std::cout<<"weinachuan2"<<limited<<std::endl;
+            limited = static_cast<float>(*limitedPtr);
         }
-        // else: 保持默认 inf（属性不存在）
     }
-    // std::cout<<"weinachuan3"<<limited<<std::endl;
+    OP_CHECK_IF(!(limited >= 0.0f),
+                OPS_REPORT_VECTOR_INNER_ERR(context->GetNodeName(), "limited should be non-negative"),
+                return GRAPH_FAILED);
     int64_t n = 0;
     if (wTensor->GetStorageShape().GetDimNum() == ND_WEIGHT_DIM_LIMIT) { // ND
         n = wTensor->GetStorageShape().GetDim(DIM_2);

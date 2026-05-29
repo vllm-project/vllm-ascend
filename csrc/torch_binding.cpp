@@ -49,6 +49,7 @@
 #include "attention/lightning_indexer_quant/lightning_indexer_quant_torch_adpt.h"
 #include "attention/ngram_spec_decode/ngram_spec_decode_torch_adpt.h"
 #include "moe/causal_conv1d_v310/causal_conv1d_310_torch_adpt.h"
+#include "attention/recurrent_gated_delta_rule/recurrent_gated_delta_rule_torch_adpt.h"
 #include "attention/recurrent_gated_delta_rule_v310/recurrent_gated_delta_rule_310_torch_adpt.h"
 #include <c10/core/Device.h>
 #include <c10/core/Scalar.h>
@@ -2116,7 +2117,7 @@ std::tuple<at::Tensor, at::Tensor> npu_dequant_swiglu_quant(
     TORCH_CHECK(x.dim() > 1, "x dim should larger than 1");
     TORCH_CHECK(quant_mode == 0 || quant_mode == 1, "quant_mode only support 0 or 1, but got ", quant_mode);
     TORCH_CHECK(swiglu_mode == 0 || swiglu_mode == 1, "swiglu_mode only support 0 or 1, but got ", swiglu_mode);
-    TORCH_CHECK(std::isfinite(clamp_limit) && clamp_limit > 0.0, "clamp_limit should be positive finite");
+    TORCH_CHECK(clamp_limit >= 0.0, "clamp_limit should be non-negative");
     TORCH_CHECK(std::isfinite(glu_alpha), "glu_alpha should be finite");
     TORCH_CHECK(std::isfinite(glu_bias), "glu_bias should be finite");
     TORCH_CHECK(x.size(x.dim() - 1) % 2 == 0, "x last dim should be even");
@@ -2278,10 +2279,10 @@ TORCH_LIBRARY_EXPAND(CONCAT(_C, _ascend), ops)
         "                         Tensor weight, "
         "                         Tensor? bias, "
         "                         Tensor conv_states, "
-        "                         int[] query_start_loc, "
-        "                         int[] cache_indices, "
-        "                         int[] initial_state_mode, "
-        "                         int[] num_accepted_tokens, "
+        "                         Tensor? query_start_loc, "
+        "                         Tensor? cache_indices, "
+        "                         Tensor? initial_state_mode, "
+        "                         Tensor? num_accepted_tokens, "
         "                         int activation_mode, "
         "                         int pad_slot_id, "
         "                         int run_mode) -> (Tensor output)");
@@ -2315,6 +2316,21 @@ TORCH_LIBRARY_EXPAND(CONCAT(_C, _ascend), ops)
         "-> (Tensor y ,Tensor rstd)"
         );
     ops.impl("npu_gemma_rms_norm", torch::kPrivateUse1, &vllm_ascend::npu_gemma_rms_norm);
+
+    ops.def(
+        "npu_recurrent_gated_delta_rule(Tensor query, "
+        "                               Tensor key, "
+        "                               Tensor value, "
+        "                               Tensor(a!) state, "
+        "                               *, "
+        "                               Tensor? beta=None, "
+        "                               float? scale=None, "
+        "                               Tensor? actual_seq_lengths=None, "
+        "                               Tensor? ssm_state_indices=None, "
+        "                               Tensor? num_accepted_tokens=None, "
+        "                               Tensor? g=None, "
+        "                               Tensor? gk=None) -> Tensor");
+    ops.impl("npu_recurrent_gated_delta_rule", torch::kPrivateUse1, &vllm_ascend::npu_recurrent_gated_delta_rule);
 
 #ifdef VLLM_ENABLE_ATB_AND_DIRECT_KERNELS
     // Direct kernel custom ops
@@ -2381,14 +2397,14 @@ TORCH_LIBRARY_EXPAND(CONCAT(_C, _ascend), ops)
     ops.def(
         "grouped_matmul_swiglu_quant(Tensor x, Tensor weight, Tensor weight_scale, Tensor x_scale,"
         "                            Tensor group_list, *, Tensor? bias=None,"
-        "                            Tensor? offset=None, float swiglu_limit=1000000.0) ->"
+        "                            Tensor? offset=None, float swiglu_limit=0.0) ->"
         "                            (Tensor output, Tensor output_scale, Tensor output_offset)");
     ops.impl("grouped_matmul_swiglu_quant", torch::kPrivateUse1, &vllm_ascend::grouped_matmul_swiglu_quant);
 
     ops.def(
         "grouped_matmul_swiglu_quant_weight_nz(Tensor x, Tensor weight, Tensor weight_scale, Tensor x_scale,"
         "                                      Tensor group_list, *, Tensor? bias=None,"
-        "                                      Tensor? offset=None, float swiglu_limit=-1000000.0) -> "
+        "                                      Tensor? offset=None, float swiglu_limit=0.0) -> "
         "                                      (Tensor output, Tensor output_scale, Tensor output_offset)");
     ops.impl("grouped_matmul_swiglu_quant_weight_nz", torch::kPrivateUse1, &vllm_ascend::grouped_matmul_swiglu_quant_weight_nz);
 
@@ -2409,7 +2425,7 @@ TORCH_LIBRARY_EXPAND(CONCAT(_C, _ascend), ops)
     ops.def(
         "grouped_matmul_swiglu_quant_weight_nz_tensor_list(Tensor x, Tensor[] weight, Tensor[] weight_scale, Tensor x_scale,"
         "                                                  Tensor group_list, *,"
-        "                                                  Tensor? bias=None, Tensor? offset=None, float swiglu_limit=1000000.0) ->"
+        "                                                  Tensor? bias=None, Tensor? offset=None, float swiglu_limit=0.0) ->"
         "                                                  (Tensor output, Tensor output_scale, Tensor output_offset)"
     );
     ops.impl("grouped_matmul_swiglu_quant_weight_nz_tensor_list", torch::kPrivateUse1, &vllm_ascend::grouped_matmul_swiglu_quant_weight_nz_tensor_list);
@@ -2417,7 +2433,7 @@ TORCH_LIBRARY_EXPAND(CONCAT(_C, _ascend), ops)
     ops.def(
         "grouped_matmul_swiglu_quant_v2(Tensor x, Tensor[] weight, Tensor[] weight_scale, Tensor x_scale,  Tensor group_list,  Tensor? smooth_scale=None,"
         "                                                   Tensor[]? weight_assist_matrix=None, Tensor? bias=None, int? dequant_mode=0, int? dequant_dtype=0, int? quant_mode=0,"
-        "                                                 int? quant_dtype=0, bool transpose_weight=False, int group_list_type=0, int[2] tuning_config=[],float swiglu_limit=1000000.0) ->"
+        "                                                 int? quant_dtype=0, bool transpose_weight=False, int group_list_type=0, int[2] tuning_config=[],float swiglu_limit=0.0) ->"
         "                                                  (Tensor output, Tensor output_scale)"
     );
     ops.impl("grouped_matmul_swiglu_quant_v2", torch::kPrivateUse1, &vllm_ascend::grouped_matmul_swiglu_quant_v2);
@@ -2891,7 +2907,7 @@ TORCH_LIBRARY_EXPAND(CONCAT(_C, _ascend), ops)
             "bool activate_left=True, "
             "int quant_mode=0, "
             "int swiglu_mode=0, "
-            "float clamp_limit=1000000.0, "
+            "float clamp_limit=0.0, "
             "float glu_alpha=1.702, "
             "float glu_bias=1.0"
         ") -> (Tensor y, Tensor scale)"
