@@ -4408,8 +4408,8 @@ def _get_gpu_model_runner_module_name(model_runner) -> str:
 def _torch_cuda_wrapper():
     class _EventPlaceholder:
         def __init__(self, *args, **kwargs) -> None:
-            self.record = lambda: None
-            self.synchronize = lambda: None
+            self.record = lambda *a, **kw: None
+            self.synchronize = lambda *a, **kw: None
             self.wait = lambda *a, **kw: None
 
     class _StreamPlaceholder:
