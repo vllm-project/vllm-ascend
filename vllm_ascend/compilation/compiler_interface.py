@@ -204,7 +204,10 @@ class AscendCompiler(CompilerInterface):
 
         ascend_compilation_config = get_ascend_config().ascend_compilation_config
         if ascend_compilation_config.enable_npugraph_ex:
-            logger.info("enable_npugraph_ex is enabled, which will bring graph compilation optimization.")
+            logger.info_once(
+                "enable_npugraph_ex is enabled, which will bring graph compilation optimization.",
+                scope="global",
+            )
             assert hasattr(self, "vllm_config")
             return npugraph_ex_compile(
                 graph, example_inputs, compiler_config, self.vllm_config, ascend_compilation_config, compile_range, key
