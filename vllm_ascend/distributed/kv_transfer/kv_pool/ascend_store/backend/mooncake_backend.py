@@ -94,7 +94,6 @@ class MooncakeBackend(Backend):
             )
         self.config = MooncakeStoreConfig.load_from_env()
         self.store = MooncakeDistributedStore()
-        self.rank = parallel_config.rank
         self.preferred_segment = self.config.preferred_segment
         self.prefer_alloc_in_same_node = self.config.prefer_alloc_in_same_node
         if self.config.protocol == "ascend":
