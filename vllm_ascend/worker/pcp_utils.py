@@ -135,7 +135,7 @@ class PCPManager:
         )
 
         self.dcp_mtp_attn_mask = CpuGpuBuffer(
-            (max_num_reqs, self.decode_threshold, 16384),
+            (max_num_reqs, self.decode_threshold, vllm_config.model_config.max_model_len),
             dtype=torch.bool,
             device=device,
             pin_memory=pin_memory,
