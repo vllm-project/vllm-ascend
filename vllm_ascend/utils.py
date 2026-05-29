@@ -873,6 +873,22 @@ def enable_sp(vllm_config=None, enable_shared_expert_dp: bool = False) -> bool:
     return _ENABLE_SP
 
 
+def clear_enable_sp() -> None:
+    global _ENABLE_SP
+    _ENABLE_SP = None
+
+
+def get_kv_lora_rank(hf_text_config: Any) -> int:
+    value = getattr(hf_text_config, "kv_lora_rank", None)
+    if value is None:
+        value = getattr(hf_text_config, "o_lora_rank", None)
+    if value is None:
+        value = getattr(hf_text_config, "head_dim", None)
+    if value is None:
+        raise AttributeError("hf_text_config is missing kv_lora_rank/o_lora_rank/head_dim.")
+    return int(value)
+
+
 # TODO remove it after vllm has this func
 def shared_expert_dp_enabled() -> bool:
     return get_ascend_config().enable_shared_expert_dp or enable_sp() or enable_sp_by_pass()

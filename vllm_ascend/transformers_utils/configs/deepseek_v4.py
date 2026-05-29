@@ -155,4 +155,7 @@ class DeepseekV4Config(PretrainedConfig):
                     self.rope_scaling[key] = float(self.rope_scaling[key])
 
         rope_config_validation(self)
-        self.kv_lora_rank = kwargs.get("o_lora_rank", 1024)
+        # Normalize to community naming while keeping backward compatibility.
+        # Prefer kv_lora_rank, and mirror to the legacy alias o_lora_rank.
+        self.kv_lora_rank = kwargs.get("kv_lora_rank", kwargs.get("o_lora_rank", 1024))
+        self.o_lora_rank = self.kv_lora_rank

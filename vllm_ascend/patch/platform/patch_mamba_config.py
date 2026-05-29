@@ -7,6 +7,7 @@ from vllm.model_executor.models import ModelRegistry
 from vllm.model_executor.models.config import MambaModelConfig
 from vllm.utils.math_utils import cdiv
 from vllm.utils.torch_utils import STR_DTYPE_TO_TORCH_DTYPE, get_dtype_size
+from vllm_ascend.utils import get_kv_lora_rank
 
 
 @classmethod
@@ -58,7 +59,7 @@ def verify_and_update_config(cls, vllm_config) -> None:
     # and single attn_block
     if model_config.use_mla:
         attn_num_kv_heads = model_config.get_num_kv_heads(parallel_config)
-        kv_lora_rank = model_config.hf_text_config.kv_lora_rank
+        kv_lora_rank = get_kv_lora_rank(model_config.hf_text_config)
         qk_rope_head_dim = model_config.hf_text_config.qk_rope_head_dim
         attn_single_token_k_page_size = kv_lora_rank * attn_num_kv_heads * get_dtype_size(kv_cache_dtype)
         attn_rope_token_page_size = qk_rope_head_dim * attn_num_kv_heads * get_dtype_size(kv_cache_dtype)

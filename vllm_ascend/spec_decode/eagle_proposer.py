@@ -13,6 +13,9 @@ from vllm.v1.spec_decode.utils import PADDING_SLOT_ID
 
 from vllm_ascend.attention.attention_v1 import AscendAttentionState
 from vllm_ascend.attention.utils import AscendCommonAttentionMetadata
+from vllm_ascend.ascend_forward_context import set_ascend_forward_context
+from vllm_ascend.compilation.acl_graph import update_full_graph_params
+from vllm_ascend.sample.rejection_sampler import strict_rejection_sample_tensor
 from vllm_ascend.sample.sampler import sample_with_runtime_state
 from vllm_ascend.spec_decode.llm_base_proposer import AscendSpecDecodeBaseProposer
 from vllm_ascend.utils import enable_sp, enable_sp_by_pass
@@ -717,3 +720,8 @@ class AscendEagleProposer(EagleProposer, AscendSpecDecodeBaseProposer):
             step_hidden_states = hidden_states_out[:batch_size]
 
         return draft_token_ids_tensor.swapaxes(0, 1)
+
+
+# Backward-compatible symbol export for older tests/call-sites that import
+# SpecDecodeBaseProposer from this module and expect MTP-specific methods.
+SpecDecodeBaseProposer = AscendEagleProposer

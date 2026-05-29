@@ -126,6 +126,7 @@ from vllm_ascend.utils import (
     check_gdn_layer,
     enable_sp,
     enable_sp_by_pass,
+    get_kv_lora_rank,
     get_c_env,
     get_compressed_pos_and_indices,
     global_stream,
@@ -231,12 +232,14 @@ class NPUModelRunner(GPUModelRunner):
         if hasattr(hf_text_config, "compress_ratios"):
             kv_lora_rank = hf_text_config.head_dim
         else:
-            kv_lora_rank = hf_text_config.kv_lora_rank
+            kv_lora_rank = get_kv_lora_rank(hf_text_config)
+        qk_rope_head_dim = getattr(hf_text_config, "qk_rope_head_dim", getattr(hf_text_config, "head_dim", 0))
+        index_head_dim = getattr(hf_text_config, "index_head_dim", getattr(hf_text_config, "head_dim", 0))
 
         return (
             kv_lora_rank,
-            hf_text_config.qk_rope_head_dim,
-            hf_text_config.index_head_dim,
+            qk_rope_head_dim,
+            index_head_dim,
         )
 
     def _select_attn_backend(self) -> type[AttentionBackend]:

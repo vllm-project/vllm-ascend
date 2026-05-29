@@ -17,6 +17,11 @@
 
 from vllm.distributed.kv_transfer.kv_connector.factory import KVConnectorFactory
 
+# Re-export subpackages so dotted paths like
+# vllm_ascend.distributed.kv_transfer.kv_p2p.* are resolvable by
+# unittest.mock.patch during test collection.
+from . import kv_p2p  # noqa: F401
+
 
 def register_connector():
     # override multi_connector as ascend_multi_connector

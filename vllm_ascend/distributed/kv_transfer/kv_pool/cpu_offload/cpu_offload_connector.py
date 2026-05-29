@@ -26,6 +26,7 @@ from vllm_ascend.distributed.kv_transfer.kv_pool.cpu_offload.metadata import (
     MetadataServerProc,
     MLAConfig,
 )
+from vllm_ascend.utils import get_kv_lora_rank
 
 if TYPE_CHECKING:
     from vllm.forward_context import ForwardContext
@@ -296,7 +297,7 @@ class CPUOffloadingConnectorWorker:
         mla_config: MLAConfig | None = None
         if model_config.use_mla:
             mla_config = MLAConfig(
-                model_config.hf_text_config.kv_lora_rank, model_config.hf_text_config.qk_rope_head_dim
+                get_kv_lora_rank(model_config.hf_text_config), model_config.hf_text_config.qk_rope_head_dim
             )
         self.cpu_kv_caches = list(
             self.zmq_rpc_client.call(

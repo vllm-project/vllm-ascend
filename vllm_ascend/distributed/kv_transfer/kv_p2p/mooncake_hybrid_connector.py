@@ -55,7 +55,7 @@ from vllm_ascend import envs as ascend_envs
 from vllm_ascend.ascend_config import get_ascend_config, init_ascend_config
 from vllm_ascend.distributed.kv_transfer.utils.mooncake_transfer_engine import global_te
 from vllm_ascend.distributed.kv_transfer.utils.utils import get_transfer_timeout_value
-from vllm_ascend.utils import enable_custom_op, is_vl_model
+from vllm_ascend.utils import enable_custom_op, get_kv_lora_rank, is_vl_model
 
 # isort: off
 if TYPE_CHECKING:
@@ -379,7 +379,7 @@ class KVCacheRecvingThread(threading.Thread):
         }
         if not is_vl_model(vllm_config) and not self.use_compress:
             if self.use_mla:
-                self.k_head_dim = self.model_config.hf_text_config.kv_lora_rank
+                self.k_head_dim = get_kv_lora_rank(self.model_config.hf_text_config)
                 self.v_head_dim = self.model_config.hf_text_config.qk_rope_head_dim
                 self.num_kv_heads = 1
             else:
