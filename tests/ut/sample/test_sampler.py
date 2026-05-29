@@ -39,9 +39,7 @@ class TestAscendTopKTopPSampler(TestBase):
     @patch("vllm_ascend.sample.sampler.get_ascend_config", return_value=_mock_ascend_config())
     @patch("vllm_ascend.sample.sampler.generate_random_sequence")
     @patch("vllm_ascend.sample.sampler.torch_npu.npu_top_k_top_p_sample")
-    def test_forward_native_logprobs_modes(
-        self, mock_sample, mock_gen_rand, mock_get_cfg
-    ):
+    def test_forward_native_logprobs_modes(self, mock_sample, mock_gen_rand, mock_get_cfg):
         """forward_native should handle all logprobs_mode variants."""
         batch_size, vocab_size = 2, 8
         logits = torch.randn(batch_size, vocab_size)
@@ -63,9 +61,7 @@ class TestAscendTopKTopPSampler(TestBase):
     @patch("vllm_ascend.sample.sampler.get_ascend_config", return_value=_mock_ascend_config())
     @patch("vllm_ascend.sample.sampler.generate_random_sequence")
     @patch("vllm_ascend.sample.sampler.torch_npu.npu_top_k_top_p_sample")
-    def test_forward_native_default_k_p(
-        self, mock_sample, mock_gen_rand, mock_get_cfg
-    ):
+    def test_forward_native_default_k_p(self, mock_sample, mock_gen_rand, mock_get_cfg):
         """forward_native with k=None or p=None should use defaults."""
         batch_size, vocab_size = 2, 8
         logits = torch.randn(batch_size, vocab_size)

@@ -156,7 +156,7 @@ class AscendTopKTopPSampler(TopKTopPSampler):
             logits_to_return = logits
         elif self.logprobs_mode == "processed_logprobs":
             logits_to_return = logits.log_softmax(dim=-1, dtype=torch.float32)
- 
+
         if p is not None:
             p = p.type(torch.float32)
         else:

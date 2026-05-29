@@ -15,13 +15,13 @@
 # limitations under the License.
 #
 """Enable vocab-parallel local argmax for Qwen3 MTP draft sampling."""
- 
+
 import torch
 from torch import nn
 from vllm.model_executor.models.qwen3_5_mtp import Qwen3_5MTP
 from vllm.model_executor.models.qwen3_next_mtp import Qwen3NextMTP
- 
- 
+
+
 def _qwen_mtp_get_top_tokens(
     self: nn.Module,
     hidden_states: torch.Tensor,
@@ -29,10 +29,10 @@ def _qwen_mtp_get_top_tokens(
 ) -> torch.Tensor:
     del spec_step_idx
     return self.logits_processor.get_top_tokens(self.lm_head, hidden_states)
- 
- 
+
+
 if not hasattr(Qwen3_5MTP, "get_top_tokens"):
     Qwen3_5MTP.get_top_tokens = _qwen_mtp_get_top_tokens
- 
+
 if not hasattr(Qwen3NextMTP, "get_top_tokens"):
     Qwen3NextMTP.get_top_tokens = _qwen_mtp_get_top_tokens

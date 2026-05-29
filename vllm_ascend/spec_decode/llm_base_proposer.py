@@ -190,11 +190,7 @@ class AscendSpecDecodeBaseProposer(SpecDecodeBaseProposer):
         return hasattr(self.model, "draft_id_to_target_id") and self.model.draft_id_to_target_id is not None
 
     def _can_use_local_argmax_reduction(self) -> bool:
-        return (
-            self.use_local_argmax_reduction
-            and not lmhead_tp_enable()
-            and not self._uses_draft_vocab_remapping()
-        )
+        return self.use_local_argmax_reduction and not lmhead_tp_enable() and not self._uses_draft_vocab_remapping()
 
     def _draft_argmax(self, hidden_states: torch.Tensor, num_indices: int) -> torch.Tensor:
         if self._can_use_local_argmax_reduction():
@@ -405,7 +401,7 @@ class AscendSpecDecodeBaseProposer(SpecDecodeBaseProposer):
     def _freeze_draft_step_attn_metadata(self, attn_metadata):
         decode_metadata = getattr(attn_metadata, "decode", None)
         if decode_metadata is not None and decode_metadata.sas_metadata is not None:
-                decode_metadata.sas_metadata = decode_metadata.sas_metadata.clone()
+            decode_metadata.sas_metadata = decode_metadata.sas_metadata.clone()
         return attn_metadata
 
     @torch.inference_mode()
