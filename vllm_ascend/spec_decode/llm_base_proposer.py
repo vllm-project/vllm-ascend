@@ -437,7 +437,7 @@ class AscendSpecDecodeBaseProposer(SpecDecodeBaseProposer):
                 query_start_loc_cpu=self.query_start_loc.cpu[: num_reqs + 1],
                 seq_lens_cpu=self.runner.optimistic_seq_lens_cpu,
                 seq_lens_cpu_upper_bound=self.runner.optimistic_seq_lens_cpu,
-                seq_lens=self.runner.seq_lens[:num_reqs],
+                seq_lens=getattr(self.runner.seq_lens, "gpu", self.runner.seq_lens)[:num_reqs],
                 num_reqs=num_reqs,
                 num_actual_tokens=num_tokens,
                 num_input_tokens=num_tokens,
@@ -447,7 +447,7 @@ class AscendSpecDecodeBaseProposer(SpecDecodeBaseProposer):
                 block_table_tensor=self.runner.input_batch.block_table[0].get_device_tensor()[:num_reqs],
                 # This is used to hold a position.
                 slot_mapping=self.runner.input_batch.block_table[0].slot_mapping.gpu,
-                positions=self.runner.positions,
+                positions=getattr(self.runner.positions, "gpu", self.runner.positions),
                 attn_state=self.runner.attn_state,
                 decode_token_per_req=self.runner.decode_token_per_req,
                 max_seq_len=0,
@@ -1147,7 +1147,7 @@ class AscendSpecDecodeBaseProposer(SpecDecodeBaseProposer):
                 assert long_seq_metadata is not None
                 cad.prefill_context_parallel_metadata = long_seq_metadata
                 ori_token_indices_to_sample = token_indices_to_sample.clone()
-                query_lens_d = self.runner.query_lens[:num_decode_reqs]
+                query_lens_d = getattr(self.runner.query_lens, "gpu", self.runner.query_lens)[:num_decode_reqs]
             if self.pcp_size > 1:
                 # 1. preprocess decode/prefill input_ids & target_hidden_states
                 # decode input_ids: keep unchanged
@@ -1190,11 +1190,12 @@ class AscendSpecDecodeBaseProposer(SpecDecodeBaseProposer):
                 target_hidden_states = torch.cat([target_hidden_states_d, target_hidden_states_p], dim=0)
                 # 2. update sample_indices according to main model
                 if num_decode_reqs:
-                    token_indices_to_sample[:num_decode_reqs] = self.runner.logits_indices[
+                    runner_logits_indices = getattr(self.runner.logits_indices, "gpu", self.runner.logits_indices)
+                    token_indices_to_sample[:num_decode_reqs] = runner_logits_indices[
                         token_indices_to_sample[:num_decode_reqs]
                     ]
                 if num_prefill_reqs:
-                    token_indices_to_sample[-num_prefill_reqs:] = self.runner.logits_indices[-num_prefill_reqs:]
+                    token_indices_to_sample[-num_prefill_reqs:] = runner_logits_indices[-num_prefill_reqs:]
                     # 3. update attn_metadata params that may be influenced by pcp
                     cad.num_actual_tokens = num_tokens
                     cad.max_query_len = max(self.decode_threshold, max_query_len_p)
