@@ -67,7 +67,7 @@ class RForkWorker:
             self.ready_to_start_seed_service = result
             return result
         except AssertionError as e:
-            logger.exception("Pre-transfer failed: %s", e)
+            logger.exception("Pre-transfer failed for device_id=%s: %s", self.device_id, e)
             return False
 
     def transfer(self, model) -> bool:
@@ -81,7 +81,11 @@ class RForkWorker:
                 local_seed_key=self.seed_protocol.get_local_seed_key(),
             )
         except AssertionError as e:
-            logger.exception("Transfer failed: %s", e)
+            logger.exception(
+                "Transfer failed for device_id=%s: %s",
+                self.device_id,
+                e,
+            )
             return False
 
     def post_transfer(self):
@@ -98,6 +102,10 @@ class RForkWorker:
 
         if not self.ready_to_start_seed_service:
             if not self.pre_transfer(model):
+                logger.warning(
+                    "start_seed_service aborted for device_id=%s: pre_transfer failed",
+                    self.device_id,
+                )
                 return
 
         port = start_rfork_server(
@@ -116,4 +124,7 @@ class RForkWorker:
                 name="RForkHeartbeat",
             )
             self.rfork_heartbeat_thread.start()
+            logger.info(
+                self.device_id,
+            )
         self.seed_service_started = True
