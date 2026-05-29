@@ -74,9 +74,20 @@ class NetworkExceptionHandler(ExceptionHandler):
         """
         封装为最终的recovery plan并返回,包含恢复网络链路故障的全部动作
         """
+        clean_action_worker = RecoveryAction(
+            name="clean_cache"
+        )
+        clean_step_worker = RecoveryStep(
+            name="clean_cache_worker",
+            target="worker",
+            actions=[clean_action_worker],
+            timeout_s=60
+        )
+
+
         network_recover_plan = RecoveryPlan(
             name="network_recover_plan",
-            steps=[npu_recover_step, clean_step],
+            steps=[npu_recover_step, clean_step, clean_step_worker],
             cfg=config,
             timeout_s=300
         )
