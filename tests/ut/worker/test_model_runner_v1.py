@@ -224,6 +224,43 @@ class TestNPUModelRunnerKVCache(unittest.TestCase):
         self.assertIsInstance(calls[0].args[1], ast.Name)
         self.assertEqual(calls[0].args[1].id, "num_reqs")
 
+    def test_prepare_input_ids_casts_prev_sampled_tokens_for_npu_scatter(self):
+        runner = NPUModelRunner.__new__(NPUModelRunner)
+        runner.device = torch.device("cpu")
+        runner.pin_memory = False
+        runner.enable_prompt_embeds = False
+        runner.num_spec_tokens = 1
+        runner._draft_token_ids = None
+        runner.prev_positions = SimpleNamespace(
+            np=np.array([1, 0], dtype=np.int32)
+        )
+        runner.input_ids = SimpleNamespace(
+            gpu=torch.zeros(2, dtype=torch.int32),
+            copy_to_gpu=MagicMock(),
+        )
+        runner.input_batch = SimpleNamespace(
+            prev_sampled_token_ids=torch.tensor(
+                [[11], [22]], dtype=torch.int64
+            ),
+            req_ids=["req0", "req1"],
+        )
+        scheduler_output = SimpleNamespace(scheduled_spec_decode_tokens={})
+
+        runner._prepare_input_ids(
+            scheduler_output,
+            num_reqs=2,
+            total_num_scheduled_tokens=2,
+            cu_num_tokens=np.array([1, 2], dtype=np.int32),
+        )
+
+        self.assertEqual(runner.input_ids.gpu.dtype, torch.int32)
+        self.assertTrue(
+            torch.equal(
+                runner.input_ids.gpu,
+                torch.tensor([22, 11], dtype=torch.int32),
+            )
+        )
+
     def test_preprocess_presents_positions_tensor_to_parent(self):
         runner = NPUModelRunner.__new__(NPUModelRunner)
         positions = SimpleNamespace(gpu=torch.arange(8, dtype=torch.int64))

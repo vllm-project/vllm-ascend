@@ -336,6 +336,104 @@ class NPUModelRunner(GPUModelRunner):
         finally:
             self.positions = positions
 
+    def _prepare_input_ids(
+        self,
+        scheduler_output: SchedulerOutput,
+        num_reqs: int,
+        total_num_scheduled_tokens: int,
+        cu_num_tokens: np.ndarray,
+    ) -> None:
+        if self.input_batch.prev_sampled_token_ids is None:
+            self.input_ids.copy_to_gpu(total_num_scheduled_tokens)
+            if self.enable_prompt_embeds:
+                self.inputs_embeds.copy_to_gpu(total_num_scheduled_tokens)
+                self.is_token_ids.copy_to_gpu(total_num_scheduled_tokens)
+            return
+
+        prev_positions = self.prev_positions.np[:num_reqs]
+        scheduled_spec_tokens = scheduler_output.scheduled_spec_decode_tokens
+        sample_flattened_indices: list[int] = []
+        spec_flattened_indices: list[int] = []
+        prev_draft_token_indices: list[int] = []
+        prev_indices: list[int] = []
+        common_indices_match = True
+        max_flattened_index = -1
+        total_num_spec_tokens = 0
+
+        for cur_index in range(num_reqs):
+            prev_index = prev_positions[cur_index]
+            if prev_index < 0:
+                continue
+            prev_indices.append(prev_index)
+            req_id = self.input_batch.req_ids[cur_index]
+            draft_len = len(scheduled_spec_tokens.get(req_id, ()))
+            total_num_spec_tokens += draft_len
+            flattened_index = cu_num_tokens[cur_index].item() - 1
+            sample_flattened_indices.append(flattened_index - draft_len)
+            spec_flattened_indices.extend(
+                range(flattened_index - draft_len + 1, flattened_index + 1)
+            )
+            start = prev_index * self.num_spec_tokens
+            prev_draft_token_indices.extend(range(start, start + draft_len))
+            common_indices_match &= prev_index == flattened_index
+            max_flattened_index = max(max_flattened_index, flattened_index)
+
+        num_common_tokens = len(sample_flattened_indices)
+        total_without_spec = total_num_scheduled_tokens - total_num_spec_tokens
+        if num_common_tokens < total_without_spec:
+            self.input_ids.copy_to_gpu(total_num_scheduled_tokens)
+            if self.enable_prompt_embeds:
+                self.inputs_embeds.copy_to_gpu(total_num_scheduled_tokens)
+                self.is_token_ids.copy_to_gpu(total_num_scheduled_tokens)
+        if num_common_tokens == 0:
+            return
+
+        input_ids_dtype = self.input_ids.gpu.dtype
+        if common_indices_match and max_flattened_index == (num_common_tokens - 1):
+            sampled_token_ids = self.input_batch.prev_sampled_token_ids[
+                :num_common_tokens, 0
+            ].to(dtype=input_ids_dtype)
+            self.input_ids.gpu[:num_common_tokens].copy_(
+                sampled_token_ids,
+                non_blocking=True,
+            )
+            if self.enable_prompt_embeds:
+                self.is_token_ids.gpu[:num_common_tokens] = True
+            return
+
+        sampled_tokens_index_tensor = torch.tensor(
+            sample_flattened_indices, dtype=torch.int64, pin_memory=self.pin_memory
+        ).to(self.device, non_blocking=True)
+        prev_common_req_indices_tensor = torch.tensor(
+            prev_indices, dtype=torch.int64, pin_memory=self.pin_memory
+        ).to(self.device, non_blocking=True)
+        sampled_token_ids = self.input_batch.prev_sampled_token_ids[
+            prev_common_req_indices_tensor, 0
+        ].to(dtype=input_ids_dtype)
+        self.input_ids.gpu.scatter_(
+            dim=0,
+            index=sampled_tokens_index_tensor,
+            src=sampled_token_ids,
+        )
+
+        if self._draft_token_ids is None or not spec_flattened_indices:
+            return
+
+        assert isinstance(self._draft_token_ids, torch.Tensor)
+        draft_tokens_index_tensor = torch.tensor(
+            spec_flattened_indices, dtype=torch.int64, pin_memory=self.pin_memory
+        ).to(self.device, non_blocking=True)
+        prev_draft_token_indices_tensor = torch.tensor(
+            prev_draft_token_indices, dtype=torch.int64, pin_memory=self.pin_memory
+        ).to(self.device, non_blocking=True)
+        draft_token_ids = self._draft_token_ids.to(dtype=input_ids_dtype)
+
+        self.input_ids.gpu.scatter_(
+            dim=0,
+            index=draft_tokens_index_tensor,
+            src=draft_token_ids.flatten()[prev_draft_token_indices_tensor],
+        )
+
     def __init__(self, vllm_config: VllmConfig, device: torch.device):
         # TODO(qcs): These manual pad and unpad for GPUModelRunner are
         # used to expand some buffers, which need to be reverted after
