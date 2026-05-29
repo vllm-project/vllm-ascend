@@ -63,8 +63,9 @@ class D2DExpertWeightLoader:
             local_expert_id = self.eplb_adaptor.expert_map_per_layer_cpu[layer_id][global_expert_id_to_send].item()
             for src_tensor in self.eplb_adaptor.expert_param_per_layer[layer_id][local_expert_id]:
                 logger.info(
-                    "[EPLB D2D SEND] layer=%s expert=%s fmt=%s",
+                    "[EPLB D2D SEND] layer=%s expert=%s fmt=%s sum=%s",
                     layer_id, local_expert_id, _fmt(src_tensor),
+                    src_tensor.sum().item(),
                 )
                 self.comm_op_list.append(
                     dist.P2POp(dist.isend, src_tensor, self.comm_group.ranks[dst_rank], group=self.comm_group.device_group)
@@ -74,8 +75,9 @@ class D2DExpertWeightLoader:
             recv_rank, global_expert_id_to_recv = recv_info
             for buffer_tensor in self.eplb_adaptor.buffer_tensor_list[buffer_tensor_id]:
                 logger.info(
-                    "[EPLB D2D RECV_BUF] layer=%s dest_slot=%s fmt=%s",
+                    "[EPLB D2D RECV_BUF] layer=%s dest_slot=%s fmt=%s sum=%s",
                     layer_id, global_expert_id_to_recv, _fmt(buffer_tensor),
+                    buffer_tensor.sum().item(),
                 )
                 self.comm_op_list.append(
                     dist.P2POp(dist.irecv, buffer_tensor, self.comm_group.ranks[recv_rank], group=self.comm_group.device_group)
@@ -125,9 +127,10 @@ class D2DExpertWeightLoader:
             expert_tensor = self.eplb_adaptor.expert_param_per_layer[self.layer_id][local_expert_to_replace][0]
             buffer_tensor = self.eplb_adaptor.buffer_tensor_list[buffer_tensor_id][0]
             logger.info(
-                "[EPLB D2D COPY] layer=%s expert=%s buf_fmt=%s dst_fmt=%s",
+                "[EPLB D2D COPY] layer=%s expert=%s buf_fmt=%s buf_sum=%s dst_fmt=%s dst_sum=%s",
                 self.layer_id, local_expert_to_replace,
-                _fmt(buffer_tensor), _fmt(expert_tensor),
+                _fmt(buffer_tensor), buffer_tensor.sum().item(),
+                _fmt(expert_tensor), expert_tensor.sum().item(),
             )
             self.eplb_adaptor.do_update_expert_weight(self.layer_id, local_expert_to_replace, buffer_tensor_id)
 
