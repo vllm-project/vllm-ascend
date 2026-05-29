@@ -1128,7 +1128,23 @@ class AscendDSAImpl(DSAAttentionImpl):
                 else:
                     dst[idx] = src_value
             if len(src) > len(dst):
-                dst.extend(src[common_len:])
+                logger.warning_once(
+                    "DSA metadata size mismatch during graph replay: "
+                    "captured len=%d, runtime len=%d. Dynamically extending "
+                    "captured list has no effect on the ACL graph structure.",
+                    len(dst),
+                    len(src),
+                )
+                for idx in range(common_len, len(src)):
+                    src_value = src[idx]
+                    if isinstance(src_value, dict):
+                        dst.append({})
+                        cls._copy_metadata_inplace(dst[-1], src_value, visited)
+                    elif isinstance(src_value, list):
+                        dst.append([])
+                        cls._copy_metadata_inplace(dst[-1], src_value, visited)
+                    else:
+                        dst.append(src_value)
             return
 
         if is_dataclass(dst):
