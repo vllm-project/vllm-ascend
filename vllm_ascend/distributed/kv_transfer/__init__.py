@@ -15,12 +15,22 @@
 # limitations under the License.
 #
 
+from importlib import import_module
+
 from vllm.distributed.kv_transfer.kv_connector.factory import KVConnectorFactory
 
-# Re-export subpackages so dotted paths like
-# vllm_ascend.distributed.kv_transfer.kv_p2p.* are resolvable by
-# unittest.mock.patch during test collection.
-from . import kv_p2p  # noqa: F401
+__all__ = ["register_connector", "kv_p2p", "kv_pool", "utils", "ascend_multi_connector"]
+
+
+def __getattr__(name: str):
+    # Lazily expose child packages so dotted patch paths like
+    # vllm_ascend.distributed.kv_transfer.kv_p2p.* are always resolvable
+    # regardless of import order during test collection.
+    if name in {"kv_p2p", "kv_pool", "utils", "ascend_multi_connector"}:
+        module = import_module(f"{__name__}.{name}")
+        globals()[name] = module
+        return module
+    raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
 
 
 def register_connector():

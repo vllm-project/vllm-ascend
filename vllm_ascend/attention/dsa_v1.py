@@ -541,7 +541,13 @@ class AscendDSAMetadataBuilder(AttentionMetadataBuilder[AscendDSAMetadata]):
         if self.prefill_ratio_to_sas_metadata.get("prefill_input_positions", None) is None:
             input_positions = common_attn_metadata.positions[: self.num_actual_tokens].long()
             max_query_len = self.query_lens[reqs_start:].max().item()
-            max_seq_lens = common_attn_metadata.seq_lens_cpu[reqs_start:].max().item()
+            if common_attn_metadata._seq_lens_cpu is not None:
+                seq_lens_cpu = common_attn_metadata._seq_lens_cpu
+            elif common_attn_metadata.seq_lens_cpu is not None:
+                seq_lens_cpu = common_attn_metadata.seq_lens_cpu
+            else:
+                seq_lens_cpu = common_attn_metadata.seq_lens.to("cpu")
+            max_seq_lens = seq_lens_cpu[reqs_start:].max().item()
             self.prefill_ratio_to_sas_metadata["input_positions"] = input_positions
             self.prefill_ratio_to_sas_metadata["max_query_len"] = max_query_len
             self.prefill_ratio_to_sas_metadata["max_seq_lens"] = max_seq_lens
@@ -788,17 +794,27 @@ class AscendDSAMetadataBuilder(AttentionMetadataBuilder[AscendDSAMetadata]):
             self.decode_ratio_to_sas_metadata["sin"] = sin
 
             query_start_loc_cpu = common_attn_metadata.query_start_loc_cpu[: self.num_decodes + 1]
-            input_positions_cpu = common_attn_metadata.positions_cpu[: self.num_decode_tokens].long()
+            if common_attn_metadata.positions_cpu is not None:
+                input_positions_cpu = common_attn_metadata.positions_cpu[: self.num_decode_tokens].long()
+            else:
+                input_positions_cpu = common_attn_metadata.positions[: self.num_decode_tokens].long().cpu()
 
-            max_seq_lens = common_attn_metadata.seq_lens_cpu[: self.num_decodes].max().item()
+            if common_attn_metadata._seq_lens_cpu is not None:
+                seq_lens_cpu = common_attn_metadata._seq_lens_cpu[: self.num_decodes]
+            elif common_attn_metadata.seq_lens_cpu is not None:
+                seq_lens_cpu = common_attn_metadata.seq_lens_cpu[: self.num_decodes]
+            else:
+                seq_lens_cpu = common_attn_metadata.seq_lens[: self.num_decodes].to("cpu")
+
+            max_seq_lens = seq_lens_cpu.max().item()
             decode_input_positions = input_positions_cpu
-            seq_lens_list = common_attn_metadata.seq_lens_cpu[: self.num_decodes].tolist()
+            seq_lens_list = seq_lens_cpu.tolist()
             self.decode_ratio_to_sas_metadata["query_start_loc_cpu"] = query_start_loc_cpu
             self.decode_ratio_to_sas_metadata["decode_input_positions"] = decode_input_positions
             self.decode_ratio_to_sas_metadata["max_seq_lens"] = max_seq_lens
             self.decode_ratio_to_sas_metadata["seq_lens_list"] = seq_lens_list
 
-            max_seqlen_kv = torch.max(common_attn_metadata.seq_lens_cpu[: self.num_decodes]).item()
+            max_seqlen_kv = torch.max(seq_lens_cpu).item()
             max_seqlen_q = torch.max(query_start_loc_cpu[1:] - query_start_loc_cpu[:-1]).item()
             self.decode_ratio_to_sas_metadata["max_seqlen_kv"] = max_seqlen_kv
             self.decode_ratio_to_sas_metadata["max_seqlen_q"] = max_seqlen_q

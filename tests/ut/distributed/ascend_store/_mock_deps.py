@@ -166,18 +166,7 @@ for _pkg in ["vllm_ascend", "vllm_ascend.distributed"]:
     if _pkg not in sys.modules:
         sys.modules[_pkg] = _make_pkg(_pkg)
 
-_kv_transfer_init = _make_pkg("vllm_ascend.distributed.kv_transfer")
-_kv_transfer_init.register_connector = MagicMock()  # type: ignore[attr-defined]
-sys.modules["vllm_ascend.distributed.kv_transfer"] = _kv_transfer_init
-
-_kv_utils_pkg = _make_pkg("vllm_ascend.distributed.kv_transfer.utils")
-sys.modules["vllm_ascend.distributed.kv_transfer.utils"] = _kv_utils_pkg
-sys.modules["vllm_ascend.distributed.kv_transfer.utils.mooncake_transfer_engine"] = MagicMock()
-
-_kv_pool_pkg = _make_pkg("vllm_ascend.distributed.kv_transfer.kv_pool")
-sys.modules["vllm_ascend.distributed.kv_transfer.kv_pool"] = _kv_pool_pkg
-
-_ascend_store_real_path = os.path.join(
+_kv_transfer_real_path = os.path.join(
     os.path.dirname(__file__),
     "..",
     "..",
@@ -186,6 +175,31 @@ _ascend_store_real_path = os.path.join(
     "vllm_ascend",
     "distributed",
     "kv_transfer",
+)
+_kv_transfer_init = _make_pkg(
+    "vllm_ascend.distributed.kv_transfer",
+    os.path.abspath(_kv_transfer_real_path),
+)
+_kv_transfer_init.register_connector = MagicMock()  # type: ignore[attr-defined]
+sys.modules["vllm_ascend.distributed.kv_transfer"] = _kv_transfer_init
+
+_kv_utils_real_path = os.path.join(os.path.abspath(_kv_transfer_real_path), "utils")
+if "vllm_ascend.distributed.kv_transfer.utils" not in sys.modules:
+    sys.modules["vllm_ascend.distributed.kv_transfer.utils"] = _make_pkg(
+        "vllm_ascend.distributed.kv_transfer.utils",
+        _kv_utils_real_path,
+    )
+sys.modules["vllm_ascend.distributed.kv_transfer.utils.mooncake_transfer_engine"] = MagicMock()
+
+_kv_pool_real_path = os.path.join(os.path.abspath(_kv_transfer_real_path), "kv_pool")
+if "vllm_ascend.distributed.kv_transfer.kv_pool" not in sys.modules:
+    sys.modules["vllm_ascend.distributed.kv_transfer.kv_pool"] = _make_pkg(
+        "vllm_ascend.distributed.kv_transfer.kv_pool",
+        _kv_pool_real_path,
+    )
+
+_ascend_store_real_path = os.path.join(
+    os.path.abspath(_kv_transfer_real_path),
     "kv_pool",
     "ascend_store",
 )
