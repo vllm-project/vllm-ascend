@@ -87,7 +87,7 @@ class ModelAclGraphManager(ModelCudaGraphManager):
             forward_context = get_forward_context()
             update_full_graph_params(
                 # FIXME(Ronald1995): support hybrid attn backend
-                list(self.model_runner.attn_backends.values())[0],
+                self.model_runner.attn_groups[0][0].backend,
                 self.model_runner.update_stream,
                 forward_context,
                 num_tokens,
