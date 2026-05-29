@@ -31,15 +31,15 @@ class TestSamplingConfig(TestBase):
 
         sampling_config = SamplingConfig()
 
-        self.assertFalse(sampling_config.enable_sampling_optimization)
+        self.assertFalse(sampling_config.enable_sampling_v2)
         self.assertFalse(sampling_config.enable_reduced_sampling)
 
-    def test_sampling_config_can_enable_optimization(self):
+    def test_sampling_config_can_enable_sampling_v2(self):
         from vllm_ascend.ascend_config import SamplingConfig
 
-        sampling_config = SamplingConfig({"enable_sampling_optimization": True})
+        sampling_config = SamplingConfig({"enable_sampling_v2": True})
 
-        self.assertTrue(sampling_config.enable_sampling_optimization)
+        self.assertTrue(sampling_config.enable_sampling_v2)
 
     def test_sampling_config_can_enable_reduced_sampling(self):
         from vllm_ascend.ascend_config import SamplingConfig
@@ -60,7 +60,7 @@ class TestSamplingConfig(TestBase):
             vllm_config = self._make_vllm_config(
                 {
                     "sampling_config": {
-                        "enable_sampling_optimization": True,
+                        "enable_sampling_v2": True,
                         "enable_reduced_sampling": True,
                     }
                 }
@@ -68,7 +68,7 @@ class TestSamplingConfig(TestBase):
 
             ascend_config = init_ascend_config(vllm_config)
 
-            self.assertTrue(ascend_config.sampling_config.enable_sampling_optimization)
+            self.assertTrue(ascend_config.sampling_config.enable_sampling_v2)
             self.assertTrue(ascend_config.sampling_config.enable_reduced_sampling)
         finally:
             clear_ascend_config()
@@ -78,7 +78,7 @@ class TestSamplingConfig(TestBase):
         try:
             ascend_config = init_ascend_config(self._make_vllm_config())
 
-            self.assertFalse(ascend_config.sampling_config.enable_sampling_optimization)
+            self.assertFalse(ascend_config.sampling_config.enable_sampling_v2)
             self.assertFalse(ascend_config.sampling_config.enable_reduced_sampling)
         finally:
             clear_ascend_config()

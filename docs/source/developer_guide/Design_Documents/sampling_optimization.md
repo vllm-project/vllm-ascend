@@ -64,8 +64,8 @@ class SamplingConfig:
     def __init__(self, config: dict | None = None):
         if config is None:
             config = {}
-        self.enable_sampling_optimization: bool = config.get(
-            "enable_sampling_optimization", False)
+        self.enable_sampling_v2: bool = config.get(
+            "enable_sampling_v2", False)
         self.enable_batch_parallel: bool = config.get(
             "enable_batch_parallel", False)
         self.logits_processing_mode: str = config.get(
@@ -79,9 +79,13 @@ class SamplingConfig:
                 f"got '{self.logits_processing_mode}'")
 ```
 
-`enable_sampling_optimization` gates Phase 1 runtime behavior and defaults to
-`False`. Phase 1a may introduce the config object and build the future sampler
-context, but it must not route any sampling call through the new path.
+`enable_sampling_v2` gates Phase 1 runtime behavior and defaults to `False`.
+It only controls the path where `model_runner_v1` is connected to sampling
+operators introduced for `model_runner_v2`. If vLLM Ascend uses
+`model_runner_v2` directly in the future, this switch will have no effect on
+`model_runner_v2`. Phase 1a may introduce the config object and build the
+future sampler context, but it must not route any sampling call through the new
+path.
 
 `logits_processing_mode="default"` and `"skip"` belong to Phase 1c.
 `enable_batch_parallel` belongs to Phase 2. `logits_processing_mode="fused"`
@@ -120,7 +124,7 @@ sampler path and outputs unchanged.
 
 Phase 1a should include:
 
-- `SamplingConfig` parsing with `enable_sampling_optimization=False` by
+- `SamplingConfig` parsing with `enable_sampling_v2=False` by
   default
 - `vllm_ascend/worker/v1/sample/` package initialization
 - `V1SamplingContext` and mapping validation utilities
@@ -243,7 +247,7 @@ Phase 1b introduces the adapter for normal decode only. The adapter owns:
 - gumbel sampling
 - output formatting
 
-The bridge is activated only when `enable_sampling_optimization=True`. It must
+The bridge is activated only when `enable_sampling_v2=True`. It must
 fall back to the existing sampler or fail with a clear error for unsupported
 Phase 1b features such as logprobs or speculative decoding.
 
@@ -455,7 +459,7 @@ is identity. The speculative mapping is expanded from
 Phase 1e starts consuming it.
 
 Phase 1b routes `_sample()` through the adapter only when
-`enable_sampling_optimization=True` and the request is in the supported normal
+`enable_sampling_v2=True` and the request is in the supported normal
 decode surface:
 
 ```python

@@ -31,17 +31,17 @@ class SamplingConfig:
         if config is None:
             config = {}
         supported_options = {
-            "enable_sampling_optimization",
+            "enable_sampling_v2",
             "enable_reduced_sampling",
         }
         unknown_options = set(config) - supported_options
         if unknown_options:
             raise ValueError(
-                "sampling_config only supports enable_sampling_optimization "
+                "sampling_config only supports enable_sampling_v2 "
                 "and enable_reduced_sampling "
                 f"in this phase, got {sorted(unknown_options)}"
             )
-        self.enable_sampling_optimization: bool = config.get("enable_sampling_optimization", False)
+        self.enable_sampling_v2: bool = config.get("enable_sampling_v2", False)
         self.enable_reduced_sampling: bool = config.get("enable_reduced_sampling", False)
 
 

@@ -151,11 +151,11 @@ class TestNPUModelRunnerOutputTokenIds(unittest.TestCase):
 
 
 class TestNPUModelRunnerV1SamplingContext(unittest.TestCase):
-    def _build_runner(self, enable_sampling_optimization=True):
+    def _build_runner(self, enable_sampling_v2=True):
         runner = NPUModelRunner.__new__(NPUModelRunner)
         runner.device = torch.device("cpu")
         runner.sampling_config = SimpleNamespace(
-            enable_sampling_optimization=enable_sampling_optimization,
+            enable_sampling_v2=enable_sampling_v2,
         )
         runner.input_batch = SimpleNamespace(
             num_reqs=2,
@@ -186,7 +186,7 @@ class TestNPUModelRunnerV1SamplingContext(unittest.TestCase):
         self.assertEqual(ctx.req_ids, ("req0", "req1"))
 
     def test_skips_v1_sampling_context_when_disabled(self):
-        runner = self._build_runner(enable_sampling_optimization=False)
+        runner = self._build_runner(enable_sampling_v2=False)
 
         ctx = runner._maybe_build_v1_sampling_context(
             torch.tensor([10, 11, 20, 21], dtype=torch.int64),

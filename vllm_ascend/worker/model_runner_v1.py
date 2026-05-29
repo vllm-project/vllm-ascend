@@ -2320,7 +2320,7 @@ class NPUModelRunner(GPUModelRunner):
         spec_decode_metadata: SpecDecodeMetadata | None,
     ) -> V1SamplingContext | None:
         """Build the future sampler-bridge input contract without rerouting."""
-        if not self.sampling_config.enable_sampling_optimization:
+        if not self.sampling_config.enable_sampling_v2:
             return None
 
         logits_indices = getattr(self, "logits_indices", None)
