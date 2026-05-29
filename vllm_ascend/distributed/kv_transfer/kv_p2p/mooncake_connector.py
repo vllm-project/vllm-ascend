@@ -681,8 +681,8 @@ class KVCacheRecvingThread(threading.Thread):
                             src_list[start_meta_idx:], dst_list[start_meta_idx:], length_list[start_meta_idx:]
                         ):
                             logger.debug(
-                                "Mooncake mamba transfer meta: request_id=%s group_idx=%s layer_idx=%s "
-                                "local_block_id=%s remote_block_id=%s tp_num_need_pulls=%s remote_tp_offset=%s",
+                                "Mooncake mamba transfer meta: request_id=%s group_idx=%s layer_idx=%s local_block_id=%s "
+                                "remote_block_id=%s tp_num_need_pulls=%s remote_tp_offset=%s session_id=%s",
                                 remote_request_id,
                                 group_idx,
                                 layer_idx,
@@ -690,6 +690,7 @@ class KVCacheRecvingThread(threading.Thread):
                                 grouped_remote_block_ids[0][0],
                                 tp_num_need_pulls,
                                 inner_offset,
+                                session_id
                             )
                 continue
 
@@ -707,8 +708,8 @@ class KVCacheRecvingThread(threading.Thread):
                         dst_list.append(dst)
                         length_list.append(length)
                     logger.debug(
-                        "Mooncake kv transfer meta: request_id=%s group_idx=%s layer_idx=%s "
-                        "local_block_ids=%s remote_block_ids=%s tp_num_need_pulls=%s remote_tp_offset=%s",
+                        "Mooncake kv transfer meta: request_id=%s group_idx=%s layer_idx=%s local_block_ids=%s "
+                        "remote_block_ids=%s tp_num_need_pulls=%s remote_tp_offset=%s session_id=%s",
                         remote_request_id,
                         group_idx,
                         layer_idx,
@@ -716,6 +717,7 @@ class KVCacheRecvingThread(threading.Thread):
                         grouped_remote_block_ids,
                         tp_num_need_pulls,
                         inner_offset,
+                        session_id
                     )
         if not src_list:
             return
@@ -1661,9 +1663,9 @@ class MooncakeConnectorWorker:
         ptrs: list[int] = []
         lengths: list[int] = []
 
+        conv_padding = 0
         for kv_cache_tensor in self.kv_cache_config.kv_cache_tensors:
             shared_addrs: list[int] = []
-            conv_padding = 0
             has_mtp = False
             for layer_name in kv_cache_tensor.shared_by:
                 has_mtp = has_mtp or "mtp" in layer_name
@@ -1677,6 +1679,7 @@ class MooncakeConnectorWorker:
             base_addr = min(shared_addrs)
             if has_mtp:
                 base_addr -= conv_padding
+            assert base_addr % (2*1024*1024) == 0, f"Tensor start addr {base_addr} is not align with 2M."
             ptrs.append(base_addr)
             lengths.append(kv_cache_tensor.size)
 
