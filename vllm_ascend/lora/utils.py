@@ -70,16 +70,11 @@ class AscendQKVParallelLinearWithShardedLoRA(QKVParallelLinearWithShardedLoRA):
         return type(source_layer) is AscendQKVParallelLinear and len(packed_modules_list) == 1
 
 class AscendFusedMoEWithLoRA(FusedMoEWithLoRA):
-    """Ascend-specific MoE LoRA that uses split MLP execution path.
+    """Ascend-specific MoE LoRA that uses unified MLP execution path.
 
-    Unlike the GPU implementation which uses TritonExperts decorators to inject
-    LoRA into the modular kernel pipeline, this Ascend implementation splits the
-    MLP execution into discrete steps (w1 GEMM -> w13 LoRA -> activation ->
-    w2 LoRA -> w2 GEMM) and inserts LoRA computation at the correct positions.
-
-    This approach is mathematically correct because LoRA modifications are
-    applied before the nonlinear activation function (for w13) and before the
-    w2 GEMM (for w2), preserving the proper computation order:
+    This implementation injects LoRA context into the MoE pipeline, which is
+    then consumed by the unified MLP execution path in `unquant_apply_mlp`.
+    The LoRA modifications are applied at the correct positions:
         output = W2 @ act((W1 + A1@B1) @ x) + A2@B2 @ act(...)
     """
     @classmethod
@@ -94,11 +89,31 @@ class AscendFusedMoEWithLoRA(FusedMoEWithLoRA):
 
     def __init__(self, base_layer: AscendFusedMoE) -> None:
         super().__init__(base_layer)
+        self._lora_ctx = self._build_lora_context()
+        self._replace_build_fused_experts_input()
 
-    def _inject_lora_into_fused_moe(self):
-        self.base_layer.ensure_moe_quant_config_init()
-        self.base_layer.quant_method._lora_enabled = True
-        self.base_layer.quant_method._lora_wrapper = self
+    def _replace_build_fused_experts_input(self):
+        import vllm_ascend.ops.fused_moe.fused_moe as fm
+        orig_build = fm.build_fused_experts_input
+        lora_ctx = self._lora_ctx
+
+        def wrapped_build(*args, **kwargs):
+            if 'lora_context' not in kwargs:
+                kwargs['lora_context'] = lora_ctx
+            return orig_build(*args, **kwargs)
+
+        fm.build_fused_experts_input = wrapped_build
+
+    def _build_lora_context(self):
+        from vllm_ascend.ops.fused_moe.moe_stage_contracts import MoELoRAContext
+        return MoELoRAContext(
+            w13_lora_a_stacked=self.w13_lora_a_stacked,
+            w13_lora_b_stacked=self.w13_lora_b_stacked,
+            w2_lora_a_stacked=self.w2_lora_a_stacked,
+            w2_lora_b_stacked=self.w2_lora_b_stacked,
+            punica_wrapper=self.punica_wrapper,
+            num_experts=self.base_layer.local_num_experts,
+        )
 
     def set_lora(self, index, lora_a, lora_b, embeddings_tensor=None, bias=None):
         if isinstance(lora_a, list) and len(lora_a) > 3:
