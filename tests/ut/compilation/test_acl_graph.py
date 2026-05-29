@@ -34,6 +34,7 @@ from vllm_ascend.compilation.acl_graph import (
     set_draft_graph_params,
     set_graph_params,
     update_draft_graph_params_workspaces,
+    update_full_graph_params,
 )
 
 
@@ -779,6 +780,44 @@ class TestDraftGraphParams(TestBase):
         self.assertIs(draft_graph_params_mock, graph_params)
 
 
+class TestUpdateFullGraphParams(TestBase):
+    @patch("vllm_ascend.compilation.acl_graph.torch.npu.current_stream")
+    def test_waits_for_current_stream_before_update(self, mock_current_stream):
+        current_stream = MagicMock()
+        update_stream = MagicMock()
+        mock_current_stream.return_value = current_stream
+        attn_backend = MagicMock()
+        impl_cls = MagicMock()
+        attn_backend.get_impl_cls.return_value = impl_cls
+        forward_context = MagicMock()
+        vllm_config = MagicMock()
+        speculative_config = MagicMock()
+        draft_attn_metadatas = [{"draft": object()}]
+
+        update_full_graph_params(
+            attn_backend,
+            update_stream,
+            forward_context,
+            32,
+            vllm_config,
+            speculative_config,
+            draft_attn_metadatas=draft_attn_metadatas,
+            draft_attn_layer_names=["draft"],
+        )
+
+        update_stream.wait_stream.assert_called_once_with(current_stream)
+        impl_cls.update_graph_params.assert_called_once_with(
+            update_stream,
+            forward_context,
+            32,
+            vllm_config,
+            speculative_config,
+            None,
+            draft_attn_metadatas,
+            draft_attn_layer_names=["draft"],
+        )
+
+
 class TestPCPDCPGraphParams(TestBase):
     def setUp(self):
         self.update_stream = MagicMock(name="FakeStream")
@@ -788,7 +827,7 @@ class TestPCPDCPGraphParams(TestBase):
             self.graph_params = get_graph_params()
         else:
             self.graph_params = graph_params
-        mock_event = MagicMock()
+        mock_event = torch.npu.ExternalEvent()
         mock_event.record = MagicMock()
         self.graph_params.events[4] = []
         self.graph_params.handles[4] = []
@@ -866,13 +905,12 @@ class TestPCPDCPGraphParams(TestBase):
 
         _mock_graph_task_end.assert_called_once()
 
-    @patch("vllm_ascend.ascend_forward_context.get_forward_context")
     @patch(
         "torch.npu.graph_task_update_end",
     )
     @patch("torch.npu.graph_task_update_begin", MagicMock())
     @patch("torch_npu.npu_fused_infer_attention_score.out", MagicMock())
-    def test_update_attn_dcp_pcp_params(self, _mock_graph_task_end, mock_context):
+    def test_update_attn_dcp_pcp_params(self, _mock_graph_task_end):
         block_table = torch.zeros(2, 5, dtype=torch.long)
         num_heads = 256
         scale = 0.1
@@ -898,7 +936,6 @@ class TestPCPDCPGraphParams(TestBase):
         forward_context = MagicMock()
         forward_context.attn_metadata = {"attn_layer_0": metadata}
         forward_context.is_draft_model = False
-        mock_context.return_value = forward_context
 
         self.graph_params.attn_params[4] = []
         self.graph_params.attn_params[4].append(

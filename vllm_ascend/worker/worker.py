@@ -751,7 +751,22 @@ class NPUWorker(WorkerBase):
         return self.model_runner.get_supported_pooling_tasks()
 
     def get_supported_tasks(self) -> "tuple[SupportedTask, ...]":
-        return self.model_runner.get_supported_tasks()
+        tasks = self.model_runner.get_supported_tasks()
+        if tasks:
+            return tasks
+
+        # Temporary constrained fallback:
+        # In MTP + DeepSeek-V4 path, task inference may be polluted by draft
+        # model config and become empty on API server startup. Recover
+        # generation tasks only for this narrow case.
+        spec_cfg = getattr(self.vllm_config, "speculative_config", None)
+        model_type = getattr(getattr(self.model_config, "hf_text_config", None), "model_type", None)
+        if spec_cfg is not None and getattr(spec_cfg, "method", None) == "mtp" and model_type == "deepseek_v4":
+            logger.warning_once("Recovered empty supported_tasks for MTP DeepSeek-V4 by forcing generate task.")
+            # In vLLM v1, SupportedTask can be a typing alias (e.g. Literal),
+            # so return normalized task string directly for compatibility.
+            return ("generate",)
+        return tasks
 
     def take_draft_token_ids(self) -> DraftTokenIds | None:
         return self.model_runner.take_draft_token_ids()

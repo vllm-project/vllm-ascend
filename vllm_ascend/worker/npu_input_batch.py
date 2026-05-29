@@ -52,11 +52,6 @@ class NPUInputBatch(InputBatch):
     ):
         self.is_pooling_model = is_pooling_model
         self.is_spec_decode = is_spec_decode
-        # Added for compatibility with InputBatch methods that reference these
-        # attributes after PR vllm-project/vllm#34668. NPU does not use
-        # thinking budget, so the holder is always None.
-        self.thinking_budget_state_holder = None
-        self.thinking_token_budget_reqs: set[str] = set()
         self.max_num_reqs = max_num_reqs
         self.max_model_len = max_model_len
         self.max_num_batched_tokens = max_num_batched_tokens
@@ -87,20 +82,8 @@ class NPUInputBatch(InputBatch):
         # Maps req_index -> tensor of shape (num_prompt_tokens, hidden_size)
         self.req_prompt_embeds: dict[int, torch.Tensor] = {}
         self.num_tokens = np.zeros(max_num_reqs, dtype=np.int32)
-        self.num_tokens_no_spec_cpu_tensor = torch.zeros(
-            (max_num_reqs,),
-            device="cpu",
-            dtype=torch.int32,
-            pin_memory=pin_memory,
-        )
-        self.num_tokens_no_spec = self.num_tokens_no_spec_cpu_tensor.numpy()
-        self.num_prompt_tokens_cpu_tensor = torch.zeros(
-            (max_num_reqs,),
-            device="cpu",
-            dtype=torch.int32,
-            pin_memory=pin_memory,
-        )
-        self.num_prompt_tokens = self.num_prompt_tokens_cpu_tensor.numpy()
+        self.num_tokens_no_spec = np.zeros(max_num_reqs, dtype=np.int32)
+        self.num_prompt_tokens = np.zeros(max_num_reqs, dtype=np.int32)
         self.num_computed_tokens_cpu_tensor = torch.zeros(
             (max_num_reqs,),
             device="cpu",
@@ -130,18 +113,30 @@ class NPUInputBatch(InputBatch):
             (max_num_reqs,), dtype=torch.float32, device="cpu", pin_memory=pin_memory
         )
         self.temperature_cpu = self.temperature_cpu_tensor.numpy()
+        self.temperature.fill_(0)
+        self.temperature_cpu_tensor.fill_(0)
         self.greedy_reqs: set[str] = set()
         self.random_reqs: set[str] = set()
 
         self.top_p = torch.empty((max_num_reqs,), dtype=torch.float32, device=device)
         self.top_p_cpu_tensor = torch.empty((max_num_reqs,), dtype=torch.float32, device="cpu", pin_memory=pin_memory)
         self.top_p_cpu = self.top_p_cpu_tensor.numpy()
+        self.top_p.fill_(1.0)
+        self.top_p_cpu_tensor.fill_(1.0)
         self.top_p_reqs: set[str] = set()
 
         self.top_k = torch.empty((max_num_reqs,), dtype=torch.int32, device=device)
         self.top_k_cpu_tensor = torch.empty((max_num_reqs,), dtype=torch.int32, device="cpu", pin_memory=pin_memory)
         self.top_k_cpu = self.top_k_cpu_tensor.numpy()
+        self.top_k.fill_(vocab_size)
+        self.top_k_cpu_tensor.fill_(vocab_size)
         self.top_k_reqs: set[str] = set()
+        self.seed_tensor = torch.empty((max_num_reqs,), dtype=torch.int64, device=device)
+        self.seed_cpu_tensor = torch.empty((max_num_reqs,), dtype=torch.int64, device="cpu", pin_memory=pin_memory)
+        self.seed_cpu = self.seed_cpu_tensor.numpy()
+        self.seed_tensor.zero_()
+        self.seed_cpu_tensor.zero_()
+        self.seed_by_req_id: dict[str, np.int64] = {}
 
         # IDs of requests which do not support spec decoding
         self.spec_decode_unsupported_reqs: set[str] = set()
@@ -172,7 +167,7 @@ class NPUInputBatch(InputBatch):
 
         # Speculative decoding
         self.num_accepted_tokens_cpu_tensor = torch.ones(
-            (max_num_reqs,), dtype=torch.int32, device="cpu", pin_memory=pin_memory
+            (max_num_reqs,), dtype=torch.int64, device="cpu", pin_memory=pin_memory
         )
         self.num_accepted_tokens_cpu = self.num_accepted_tokens_cpu_tensor.numpy()
 
@@ -190,10 +185,6 @@ class NPUInputBatch(InputBatch):
 
         # To accumulate prompt logprobs tensor chunks across prefill steps.
         self.in_progress_prompt_logprobs_cpu: dict[str, LogprobsTensors] = {}
-
-        # req_id -> list of specific token IDs to compute logprobs for
-        # More efficient than num_logprobs=-1 when only a few tokens are needed
-        self.logprob_token_ids: dict[str, list[int]] = {}
 
         # Internal representation of per-step batch state changes, used for
         # reordering persistent batch and generating logitsprocs batch state
@@ -237,3 +228,34 @@ class NPUInputBatch(InputBatch):
         # (e.g. penalties).
         self.sampled_token_ids_cpu: torch.Tensor | None = None
         self.async_copy_ready_event: torch.Event | None = None
+
+    def add_request(self, request):
+        req_index = super().add_request(request)
+        if request.sampling_params is not None:
+            seed = request.sampling_params.seed
+            if seed is None:
+                seed = np.random.randint(
+                    np.iinfo(np.int64).min,
+                    np.iinfo(np.int64).max,
+                    dtype=np.int64,
+                )
+            self.seed_by_req_id[request.req_id] = np.int64(seed)
+        return req_index
+
+    def remove_request(self, req_id: str):
+        req_index = super().remove_request(req_id)
+        if req_index is not None:
+            self.seed_by_req_id.pop(req_id, None)
+        return req_index
+
+    def _make_sampling_metadata(self):
+        sampling_metadata = super()._make_sampling_metadata()
+        num_reqs = self.num_reqs
+        if num_reqs > 0:
+            self.seed_cpu[:num_reqs] = np.array(
+                [self.seed_by_req_id[req_id] for req_id in self.req_ids],
+                dtype=np.int64,
+            )
+            self.seed_tensor[:num_reqs].copy_(self.seed_cpu_tensor[:num_reqs], non_blocking=True)
+        sampling_metadata.seeds = self.seed_tensor
+        return sampling_metadata

@@ -23,66 +23,11 @@ from vllm.triton_utils import tl, triton
 
 
 @triton.jit
-def _temperature_kernel(
-    logits_ptr,
-    logits_stride,
-    expanded_idx_mapping_ptr,
-    temperature_ptr,
-    vocab_size,
-    BLOCK_SIZE: tl.constexpr,
-):
-    token_idx = tl.program_id(0)
-    req_state_idx = tl.load(expanded_idx_mapping_ptr + token_idx)
-    temperature = tl.load(temperature_ptr + req_state_idx).to(tl.float32)
-    if temperature == 0.0 or temperature == 1.0:
-        # Early return to avoid loading logits.
-        return
-
-    block_idx = tl.program_id(1)
-    block = block_idx * BLOCK_SIZE + tl.arange(0, BLOCK_SIZE)
-    mask = block < vocab_size
-
-    logits = tl.load(logits_ptr + token_idx * logits_stride + block, mask=mask)
-    logits = logits.to(tl.float32)
-    logits = logits / temperature
-    tl.store(logits_ptr + token_idx * logits_stride + block, logits, mask=mask)
-
-
-def apply_temperature(
-    logits: torch.Tensor,
-    expanded_idx_mapping: torch.Tensor,
-    temperature: torch.Tensor,
-) -> None:
-    """
-    Args:
-        logits: Tensor of shape (num_tokens, vocab_size) containing the logits.
-        expanded_idx_mapping: Tensor containing the mapping from token index
-            to request index of tensor temperature.
-        temperature: Tensor containing the temperature value for each request.
-    """
-    num_tokens, vocab_size = logits.shape
-    BLOCK_SIZE = 44032
-    num_blocks = triton.cdiv(vocab_size, BLOCK_SIZE)
-    _temperature_kernel[(num_tokens, num_blocks)](
-        logits,
-        logits.stride(0),
-        expanded_idx_mapping,
-        temperature,
-        vocab_size,
-        BLOCK_SIZE=BLOCK_SIZE,
-        multibuffer=False,
-    )
-
-
-@triton.jit
 def _gumbel_sample_kernel(
     local_argmax_ptr,
     local_argmax_stride,
     local_max_ptr,
     local_max_stride,
-    processed_logits_ptr,
-    processed_logits_stride,
-    processed_logits_col_ptr,
     logits_ptr,
     logits_stride,
     idx_mapping_ptr,
@@ -107,22 +52,6 @@ def _gumbel_sample_kernel(
     logits = logits.to(tl.float32)
 
     temp = tl.load(temp_ptr + req_state_idx).to(tl.float32)
-    if temp != 0.0 and APPLY_TEMPERATURE:
-        # NOTE(woosuk): Match the behavior of _temperature_kernel.
-        # E.g., if the kernel uses tl.div_rn, we should use tl.div_rn here too.
-        logits = logits / temp
-
-    if processed_logits_ptr is not None:
-        if processed_logits_col_ptr is not None:
-            col = tl.load(processed_logits_col_ptr)
-        else:
-            col = 0
-        tl.store(
-            processed_logits_ptr + req_state_idx * processed_logits_stride + col * vocab_size + block,
-            logits,
-            mask=mask,
-        )
-
     if temp != 0.0:
         # Calculate the seed for gumbel noise.
         seed = tl.load(seeds_ptr + req_state_idx)
@@ -137,6 +66,12 @@ def _gumbel_sample_kernel(
         r = tl.rand(gumbel_seed, block).to(tl.float32)
         gumbel_noise = -tl.log(-tl.log(r + 1e-20) + 1e-20)
         gumbel_noise = gumbel_noise.to(tl.float32)
+
+        # Apply temperature.
+        if APPLY_TEMPERATURE:
+            # NOTE(woosuk): Match the behavior of _temperature_kernel.
+            # E.g., if the kernel uses tl.div_rn, we should use tl.div_rn here too.
+            logits = logits / temp
 
         # Apply gumbel noise.
         logits = tl.where(mask, logits + gumbel_noise, float("-inf"))
@@ -155,12 +90,17 @@ def gumbel_sample(
     seed: torch.Tensor,  # [num_reqs]
     pos: torch.Tensor,  # [num_reqs]
     apply_temperature: bool,
-    output_processed_logits: torch.Tensor | None = None,
-    output_processed_logits_col: torch.Tensor | None = None,
-    use_fp64: bool = False,
 ) -> torch.Tensor:
-    if use_fp64:
-        raise NotImplementedError("FP64 Gumbel sampling is not supported on NPU.")
+    if logits.device.type != "npu" or not hasattr(triton, "cdiv"):
+        if apply_temperature:
+            row_temperature = temperature[idx_mapping.to(torch.long)]
+            safe_temperature = torch.where(
+                row_temperature == 0,
+                torch.ones_like(row_temperature),
+                row_temperature,
+            )
+            logits = logits / safe_temperature.unsqueeze(dim=1)
+        return logits.argmax(dim=-1)
 
     num_reqs, vocab_size = logits.shape
     BLOCK_SIZE = 1024
@@ -183,9 +123,6 @@ def gumbel_sample(
         local_argmax.stride(0),
         local_max,
         local_max.stride(0),
-        output_processed_logits,
-        output_processed_logits.stride(0) if output_processed_logits is not None else 0,
-        output_processed_logits_col,
         logits,
         logits.stride(0),
         idx_mapping,
