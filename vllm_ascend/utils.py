@@ -1276,6 +1276,11 @@ def enable_dsa_cp_with_o_proj_tp() -> bool:
     return kv_transfer_config is None or kv_transfer_config.kv_role == "kv_both"
 
 
+@lru_cache(maxsize=1)
+def fuse_sparse_c8_kv_cache() -> bool:
+    return os.getenv("VLLM_ASCEND_FUSE_SPARSE_C8_KV", "0") == "1"
+
+
 def check_gdn_layer(vllm_config) -> bool:
     """
     gdn layer is marked with `linear_attention`.
