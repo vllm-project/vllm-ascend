@@ -221,6 +221,8 @@ class AscendConfig:
             "VLLM_ASCEND_ENABLE_NZ",
             ascend_envs.VLLM_ASCEND_ENABLE_NZ,
         )
+        quest_decode_config = additional_config.get("quest_decode_config", {})
+        self.quest_decode_config = QuestDecodeConfig(quest_decode_config)
 
         # when enable_async_exponential is True, AscendSampler will be different from vllm Sampler,
         # which make batch_invariant mode not working.
@@ -568,6 +570,24 @@ class XliteGraphConfig:
                     "The recommended block size for xlite graph mode is 128.",
                     vllm_config.cache_config.block_size,
                 )
+
+
+class QuestDecodeConfig:
+    """
+    Configuration Object for quest_decode_config from additional_config.
+    """
+
+    def __init__(self, quest_decode_config: dict | None = None):
+        quest_decode_config = quest_decode_config or {}
+        if not isinstance(quest_decode_config, dict):
+            raise TypeError("quest_decode_config must be a dict.")
+
+        self.enable = bool(quest_decode_config.get("enable", False))
+        topk_pages = quest_decode_config.get("topk_pages")
+        if self.enable:
+            if not isinstance(topk_pages, int) or topk_pages <= 0:
+                raise ValueError("quest_decode_config.topk_pages must be a positive integer when QUEST is enabled.")
+        self.topk_pages = topk_pages or 0
 
 
 class WeightPrefetchConfig:

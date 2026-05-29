@@ -186,6 +186,16 @@ class AscendCommonAttentionMetadata(CommonAttentionMetadata):
     prefill_context_parallel_metadata: AscendPrefillContextParallelMetadata | None = None
     kvcomp_metadata: KVCompMetaData | None = None
 
+    # QUEST sparse-decode manager and active request ids. The manager
+    # owns all refresh bookkeeping and per-layer metadata tensors.
+    quest_manager: Any = None
+    quest_req_ids: list[str | None] | None = None
+
+    def __post_init__(self) -> None:
+        super_post_init = getattr(super(), "__post_init__", None)
+        if super_post_init is not None:
+            super_post_init()
+
     # TODO: Remove it when vLLM no longer uses this function.
     def unpadded(self, num_actual_tokens: int, num_actual_reqs: int) -> "AscendCommonAttentionMetadata":
         # This only use to eagle now. It will be use to enforce_eager in future.
@@ -219,6 +229,8 @@ class AscendCommonAttentionMetadata(CommonAttentionMetadata):
             seq_lens_cpu_upper_bound=self.seq_lens_cpu_upper_bound[:num_actual_reqs]
             if self.seq_lens_cpu_upper_bound is not None
             else None,
+            quest_manager=self.quest_manager,
+            quest_req_ids=self.quest_req_ids[:num_actual_reqs] if self.quest_req_ids is not None else None,
             max_seq_len=self.max_seq_len,
             # Propagate parent-class fields so the unpadded view is a
             # faithful sub-batch of the original. Missing any of these
