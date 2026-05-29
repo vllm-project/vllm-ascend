@@ -225,9 +225,7 @@ class AscendDSACPMetadataBuilder(AttentionMetadataBuilder[AscendDSAMetadata]):
                 for _ in range(spec_token_num)
             ]
             self.spec_local_query_start_loc = [
-                torch.zeros(
-                    scheduler_config.max_num_seqs + 1, dtype=torch.int32, device=self.device
-                )
+                torch.zeros(scheduler_config.max_num_seqs + 1, dtype=torch.int32, device=self.device)
                 for _ in range(spec_token_num)
             ]
             self.spec_local_seq_lens = [
@@ -612,7 +610,15 @@ class AscendDSACPMetadataBuilder(AttentionMetadataBuilder[AscendDSAMetadata]):
         )
 
     def _build_local_token_metadata(
-        self, num_reqs, num_input_tokens, input_positions, query_start_loc, seq_lens, use_cache, local_query_start_loc, local_seq_lens
+        self,
+        num_reqs,
+        num_input_tokens,
+        input_positions,
+        query_start_loc,
+        seq_lens,
+        use_cache,
+        local_query_start_loc,
+        local_seq_lens,
     ):
         """
         For example:
