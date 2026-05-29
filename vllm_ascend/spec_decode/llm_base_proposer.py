@@ -1949,6 +1949,14 @@ class AscendSpecDecodeBaseProposer(SpecDecodeBaseProposer):
 
     # adjusting tensor into desired size
     def _adjust_tensor(self, tensor, desired_size):
+        # vLLM runner fields may be CpuGpuBuffer; normalize to Tensor first.
+        if not isinstance(tensor, torch.Tensor):
+            if hasattr(tensor, "gpu") and isinstance(tensor.gpu, torch.Tensor):
+                tensor = tensor.gpu
+            elif hasattr(tensor, "cpu") and isinstance(tensor.cpu, torch.Tensor):
+                tensor = tensor.cpu
+            else:
+                raise TypeError(f"Unsupported tensor-like type for _adjust_tensor: {type(tensor)!r}")
         pad_size = desired_size - tensor.shape[0]
         if pad_size > 0:
             pad = [0] * (2 * tensor.dim() - 1) + [pad_size]
