@@ -1,6 +1,6 @@
+from unittest.mock import MagicMock, patch
 import unittest
 from types import SimpleNamespace
-from unittest.mock import MagicMock, patch
 
 import numpy as np
 import torch
@@ -10,8 +10,8 @@ from tests.ut.base import TestBase
 from vllm_ascend.ascend_config import init_ascend_config
 from vllm_ascend.spec_decode.eagle_proposer import (
     AscendEagleProposer,
-    SpecDecodeBaseProposer,
     _FusedModelWithMTP,
+    SpecDecodeBaseProposer,
 )
 
 
@@ -32,8 +32,6 @@ class TestEagleProposerInitialization(TestBase):
         self.runner.pin_memory = False
         self.runner.pcp_size = 1
         self.runner.dcp_size = 1
-        self.runner.max_num_reqs = 256
-        self.runner.max_num_tokens = 1024
 
         self.vllm_config.cache_config.block_size = 16
         self.vllm_config.scheduler_config.max_num_batched_tokens = 1024
@@ -1068,8 +1066,6 @@ class TestEagleProposerLoadModel(TestBase):
         self.runner.pin_memory = False
         self.runner.pcp_size = 1
         self.runner.dcp_size = 1
-        self.runner.max_num_reqs = 256
-        self.runner.max_num_tokens = 1024
 
         self.vllm_config.cache_config.block_size = 16
         self.vllm_config.scheduler_config.max_num_batched_tokens = 1024
@@ -1357,8 +1353,6 @@ class TestEagleProposerHelperMethods(TestBase):
         self.runner.pin_memory = False
         self.runner.pcp_size = 1
         self.runner.dcp_size = 1
-        self.runner.max_num_reqs = 256
-        self.runner.max_num_tokens = 1024
 
         self.vllm_config.cache_config.block_size = 16
         self.vllm_config.scheduler_config.max_num_batched_tokens = 1024

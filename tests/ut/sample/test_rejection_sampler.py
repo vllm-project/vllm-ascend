@@ -21,13 +21,13 @@ from vllm.v1.outputs import SamplerOutput
 from tests.ut.base import TestBase
 from vllm_ascend.sample.rejection_sampler import (
     RejectionSampler,
-    _should_use_cpu_strict_sampling,
     expand_batch_to_tokens,
     expand_pytorch,
     rejection_greedy_sample_pytorch,
     rejection_random_sample_pytorch,
     sample_recovered_tokens_pytorch,
     strict_rejection_sample_tensor,
+    _should_use_cpu_strict_sampling,
 )
 
 # Global constants
@@ -381,26 +381,22 @@ class TestAscendRejectionSampler(TestBase):
         cu_num_tokens = torch.tensor([2, 5, 7])
         num_tokens = 7
         # Test PyTorch path
-        with (
-            patch("vllm_ascend.sample.rejection_sampler.HAS_TRITON", False),
-            patch("vllm_ascend.sample.rejection_sampler.expand_pytorch") as mock_pytorch,
-        ):
-            expand_batch_to_tokens(x, cu_num_tokens, num_tokens)
-            mock_pytorch.assert_called_once()
-            args = mock_pytorch.call_args[0]
-            assert (args[1] == x).all()
-            assert (args[2] == cu_num_tokens).all()
+        with patch("vllm_ascend.sample.rejection_sampler.HAS_TRITON", False):
+            with patch("vllm_ascend.sample.rejection_sampler.expand_pytorch") as mock_pytorch:
+                expand_batch_to_tokens(x, cu_num_tokens, num_tokens)
+                mock_pytorch.assert_called_once()
+                args = mock_pytorch.call_args[0]
+                assert (args[1] == x).all()
+                assert (args[2] == cu_num_tokens).all()
 
         # Test Triton kernel path
-        with (
-            patch("vllm_ascend.sample.rejection_sampler.HAS_TRITON", True),
-            patch("vllm_ascend.sample.rejection_sampler.expand_triton") as mock_triton,
-        ):
-            expand_batch_to_tokens(x, cu_num_tokens, num_tokens)
-            mock_triton.assert_called_once()
-            call_args = mock_triton.call_args[0]
-            assert (call_args[2] == x).all()
-            assert (call_args[3] == cu_num_tokens).all()
+        with patch("vllm_ascend.sample.rejection_sampler.HAS_TRITON", True):
+            with patch("vllm_ascend.sample.rejection_sampler.expand_triton") as mock_triton:
+                expand_batch_to_tokens(x, cu_num_tokens, num_tokens)
+                mock_triton.assert_called_once()
+                call_args = mock_triton.call_args[0]
+                assert (call_args[2] == x).all()
+                assert (call_args[3] == cu_num_tokens).all()
 
         # Run actual function
         with patch("vllm_ascend.sample.rejection_sampler.HAS_TRITON", False):

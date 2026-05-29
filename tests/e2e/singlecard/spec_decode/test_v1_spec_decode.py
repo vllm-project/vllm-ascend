@@ -480,6 +480,7 @@ def test_parallel_drafting_acceptance(
 
 @pytest.mark.parametrize("method", DFLASH.keys())
 @pytest.mark.parametrize("num_speculative_tokens", [8])
+@pytest.mark.skip(reason="DFlash acceptance is currently broken by vllm main(39910f2b25aacc09f5e7f166cdf0030b19f8b9e8)")
 def test_dflash_acceptance(
     method: str,
     num_speculative_tokens: int,

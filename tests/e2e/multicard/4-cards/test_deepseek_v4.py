@@ -64,3 +64,52 @@ def test_deepseek_v4_w4a8_tp4_basic_greedy():
         for output_ids, output_str in outputs:
             assert len(output_str) > 0
             assert len(output_ids) > 0
+
+
+@patch.dict(
+    os.environ,
+    {
+        "VLLM_ASCEND_APPLY_DSV4_PATCH": "1",
+        "VLLM_ASCEND_ENABLE_FLASHCOMM1": "1",
+    },
+)
+@wait_until_npu_memory_free()
+def test_deepseek_v4_w4a8_tp4_index_cache_freq4():
+    """IndexCache freq=4 must produce non-empty greedy outputs identical in
+    shape to the baseline test, verifying skip_topk/topk_indices_buffer
+    plumbing (DSAModules → AscendDSAImpl) is wired correctly across both
+    serial and dual-stream paths.
+    """
+    example_prompts = [
+        "Hello, my name is",
+        "The capital of France is",
+        "What is the meaning of life?",
+    ]
+    max_tokens = 5
+
+    with VllmRunner(
+        "gdydems/DeepSeek-V4-Flash-w4a8-mtp",
+        max_model_len=8192,
+        max_num_seqs=16,
+        max_num_batched_tokens=4096,
+        dtype="auto",
+        tensor_parallel_size=4,
+        enable_expert_parallel=True,
+        gpu_memory_utilization=0.9,
+        quantization="ascend",
+        tokenizer_mode="deepseek_v4",
+        block_size=128,
+        compilation_config={
+            "cudagraph_mode": "FULL_DECODE_ONLY",
+        },
+        hf_overrides={
+            "use_index_cache": True,
+            "index_topk_freq": 4,
+        },
+    ) as vllm_model:
+        outputs = vllm_model.generate_greedy(example_prompts, max_tokens)
+
+        assert len(outputs) == len(example_prompts)
+        for output_ids, output_str in outputs:
+            assert len(output_str) > 0
+            assert len(output_ids) > 0

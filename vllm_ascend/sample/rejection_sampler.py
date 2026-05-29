@@ -4,14 +4,14 @@ import torch
 from vllm.triton_utils import HAS_TRITON, tl, triton
 from vllm.v1.outputs import SamplerOutput
 from vllm.v1.sample.metadata import SamplingMetadata
+from vllm.v1.sample.rejection_sampler import RejectionSampler as V1RejectionSampler
+from vllm.v1.sample.sampler import _SAMPLING_EPS
 from vllm.v1.sample.rejection_sampler import (
     GREEDY_TEMPERATURE,
     MAX_SPEC_LEN,
     PLACEHOLDER_TOKEN_ID,
     generate_uniform_probs,
 )
-from vllm.v1.sample.rejection_sampler import RejectionSampler as V1RejectionSampler
-from vllm.v1.sample.sampler import _SAMPLING_EPS
 
 from vllm_ascend.ops.triton.reject_sample import (
     cal_grid_and_block_size,
@@ -22,7 +22,8 @@ from vllm_ascend.ops.triton.reject_sample import (
     rejection_random_sample_kernel,
     sample_recovered_tokens_kernel,
 )
-from vllm_ascend.sample.sampler import _ensure_runtime_state_tensor, apply_top_k_top_p
+from vllm_ascend.sample.sampler import apply_top_k_top_p
+from vllm_ascend.sample.sampler import _ensure_runtime_state_tensor
 from vllm_ascend.worker.v2.sample.gumbel import gumbel_sample
 
 
@@ -85,10 +86,18 @@ class RejectionSampler(V1RejectionSampler):
             spec_token_ids=sampling_metadata.spec_token_ids,
         )
         if positions is not None and idx_mapping is not None:
-            bonus_metadata._ascend_positions = positions[bonus_logits_indices]
-            bonus_metadata._ascend_idx_mapping = idx_mapping[bonus_logits_indices]
+            setattr(
+                bonus_metadata,
+                "_ascend_positions",
+                positions[bonus_logits_indices],
+            )
+            setattr(
+                bonus_metadata,
+                "_ascend_idx_mapping",
+                idx_mapping[bonus_logits_indices],
+            )
         if hasattr(sampling_metadata, "seeds"):
-            bonus_metadata.seeds = sampling_metadata.seeds
+            setattr(bonus_metadata, "seeds", getattr(sampling_metadata, "seeds"))
 
         use_cpu_strict_sampling = _should_use_cpu_strict_sampling(
             draft_probs, logits, sampling_metadata, positions, idx_mapping
@@ -105,8 +114,16 @@ class RejectionSampler(V1RejectionSampler):
             target_logits = raw_target_logits if self.is_processed_logprobs_mode else raw_target_logits.clone()
             target_logits = self.apply_logits_processors(target_logits, sampling_metadata, metadata)
             if positions is not None and idx_mapping is not None:
-                sampling_metadata._ascend_target_positions = positions[target_logits_indices]
-                sampling_metadata._ascend_target_idx_mapping = idx_mapping[target_logits_indices]
+                setattr(
+                    sampling_metadata,
+                    "_ascend_target_positions",
+                    positions[target_logits_indices],
+                )
+                setattr(
+                    sampling_metadata,
+                    "_ascend_target_idx_mapping",
+                    idx_mapping[target_logits_indices],
+                )
 
             bonus_token_ids = _sample_token_ids_cpu(
                 bonus_logits,
@@ -154,8 +171,16 @@ class RejectionSampler(V1RejectionSampler):
         )
 
         if positions is not None and idx_mapping is not None:
-            sampling_metadata._ascend_target_positions = positions[target_logits_indices]
-            sampling_metadata._ascend_target_idx_mapping = idx_mapping[target_logits_indices]
+            setattr(
+                sampling_metadata,
+                "_ascend_target_positions",
+                positions[target_logits_indices],
+            )
+            setattr(
+                sampling_metadata,
+                "_ascend_target_idx_mapping",
+                idx_mapping[target_logits_indices],
+            )
 
         if draft_probs is None:
             target_token_ids = _sample_target_token_ids_for_strict_verify(target_logits, sampling_metadata)
@@ -532,7 +557,7 @@ def rejection_sample_tensor_no_draft_probs(
             num_tokens,
             positions,
             idx_mapping,
-            sampling_metadata.seeds,
+            getattr(sampling_metadata, "seeds"),
             device,
         )
         recovered_token_ids = _seeded_recovered_token_ids(
@@ -576,7 +601,7 @@ def rejection_sample_tensor_no_draft_probs(
         num_tokens,
         positions,
         idx_mapping,
-        sampling_metadata.seeds,
+        getattr(sampling_metadata, "seeds"),
         device,
     )
     recovered_token_ids = _seeded_recovered_token_ids(
@@ -853,7 +878,7 @@ def rejection_sample(
             num_tokens,
             runtime_positions,
             runtime_idx_mapping,
-            sampling_metadata.seeds,
+            getattr(sampling_metadata, "seeds"),
             device,
         )
     else:

@@ -793,15 +793,13 @@ class TestNPUModelRunnerFusedMTP(unittest.TestCase):
 
     def test_fused_mtp_full_graph_can_be_enabled(self):
         for value in ("1", "true", "YES", "on"):
-            with (
-                self.subTest(value=value),
-                patch.dict(
+            with self.subTest(value=value):
+                with patch.dict(
                     os.environ,
                     {"VLLM_ASCEND_ENABLE_FUSED_MTP_FULL_GRAPH": value},
                     clear=True,
-                ),
-            ):
-                self.assertTrue(NPUModelRunner._fused_mtp_full_graph_enabled())
+                ):
+                    self.assertTrue(NPUModelRunner._fused_mtp_full_graph_enabled())
 
     def test_fused_mtp_graph_batch_default_allows_batch16(self):
         runner = self._build_runner()

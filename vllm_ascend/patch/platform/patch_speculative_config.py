@@ -17,16 +17,12 @@ else:
 
 def hf_config_override(hf_config: PretrainedConfig) -> PretrainedConfig:
     def _called_from_draft_model_config() -> bool:
-        return any(frame.function == "create_draft_model_config"
-                   for frame in inspect.stack())
+        return any(frame.function == "create_draft_model_config" for frame in inspect.stack())
 
     # Only apply speculative draft config rewrite during drafter loading.
     # This prevents accidental rewrite of the target model config, which may
     # lead to empty supported tasks in API server.
-    if (
-        os.getenv("VLLM_ASCEND_SPEC_CONFIG_DRAFT_ONLY", "0") != "1"
-        and not _called_from_draft_model_config()
-    ):
+    if os.getenv("VLLM_ASCEND_SPEC_CONFIG_DRAFT_ONLY", "0") != "1" and not _called_from_draft_model_config():
         # Return an isolated copy even when override is disabled, so any
         # downstream mutation in speculative config plumbing won't pollute
         # the shared target-model HF config object.

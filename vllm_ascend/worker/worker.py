@@ -762,9 +762,7 @@ class NPUWorker(WorkerBase):
         spec_cfg = getattr(self.vllm_config, "speculative_config", None)
         model_type = getattr(getattr(self.model_config, "hf_text_config", None), "model_type", None)
         if spec_cfg is not None and getattr(spec_cfg, "method", None) == "mtp" and model_type == "deepseek_v4":
-            logger.warning_once(
-                "Recovered empty supported_tasks for MTP DeepSeek-V4 by forcing generate task."
-            )
+            logger.warning_once("Recovered empty supported_tasks for MTP DeepSeek-V4 by forcing generate task.")
             # In vLLM v1, SupportedTask can be a typing alias (e.g. Literal),
             # so return normalized task string directly for compatibility.
             return ("generate",)

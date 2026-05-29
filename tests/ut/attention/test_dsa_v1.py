@@ -51,7 +51,6 @@ class TestAscendDSAMetadataBuilder(unittest.TestCase):
 
 
 class TestAscendDSAUpdateGraphParams(unittest.TestCase):
-
     @staticmethod
     def _metadata(
         block_table: torch.Tensor,
@@ -90,19 +89,25 @@ class TestAscendDSAUpdateGraphParams(unittest.TestCase):
 
         AscendDSAImpl._copy_metadata_inplace(captured, runtime)
 
-        self.assertTrue(torch.equal(
-            captured.decode.cos["layer"],
-            torch.tensor([1.0, 2.0]),
-        ))
-        self.assertTrue(torch.equal(
-            captured.decode.sin["layer"],
-            torch.tensor([3.0, 4.0]),
-        ))
+        self.assertTrue(
+            torch.equal(
+                captured.decode.cos["layer"],
+                torch.tensor([1.0, 2.0]),
+            )
+        )
+        self.assertTrue(
+            torch.equal(
+                captured.decode.sin["layer"],
+                torch.tensor([3.0, 4.0]),
+            )
+        )
         self.assertEqual(captured.decode.seq_lens_list, [5, 6])
-        self.assertTrue(torch.equal(
-            captured.decode.nested[0],
-            torch.tensor([7, 8], dtype=torch.int32),
-        ))
+        self.assertTrue(
+            torch.equal(
+                captured.decode.nested[0],
+                torch.tensor([7, 8], dtype=torch.int32),
+            )
+        )
         self.assertEqual(captured.decode.nested[1], 9)
 
     @patch("vllm_ascend.attention.dsa_v1.torch.npu.stream")
@@ -144,21 +149,11 @@ class TestAscendDSAUpdateGraphParams(unittest.TestCase):
                 draft_attn_metadatas=[{"mtp.layer": runtime}],
             )
 
-        self.assertTrue(
-            torch.equal(captured.decode.block_table,
-                        torch.tensor([[1, 2], [0, 0]], dtype=torch.int32)))
-        self.assertTrue(
-            torch.equal(captured.decode.seq_lens,
-                        torch.tensor([7, 0], dtype=torch.int32)))
-        self.assertTrue(
-            torch.equal(captured.decode.query_start_loc,
-                        torch.tensor([0, 1, 1], dtype=torch.int32)))
-        self.assertTrue(
-            torch.equal(captured.decode.slot_mapping,
-                        torch.tensor([[3, 4], [0, 0]], dtype=torch.int32)))
-        self.assertTrue(
-            torch.equal(captured.decode.sas_metadata,
-                        torch.tensor([9, 8, 7, 6], dtype=torch.int32)))
+        self.assertTrue(torch.equal(captured.decode.block_table, torch.tensor([[1, 2], [0, 0]], dtype=torch.int32)))
+        self.assertTrue(torch.equal(captured.decode.seq_lens, torch.tensor([7, 0], dtype=torch.int32)))
+        self.assertTrue(torch.equal(captured.decode.query_start_loc, torch.tensor([0, 1, 1], dtype=torch.int32)))
+        self.assertTrue(torch.equal(captured.decode.slot_mapping, torch.tensor([[3, 4], [0, 0]], dtype=torch.int32)))
+        self.assertTrue(torch.equal(captured.decode.sas_metadata, torch.tensor([9, 8, 7, 6], dtype=torch.int32)))
         event.record.assert_called_once_with("update_stream")
 
     @patch("vllm_ascend.attention.dsa_v1.torch.npu.stream")
@@ -211,18 +206,17 @@ class TestAscendDSAUpdateGraphParams(unittest.TestCase):
                 update_stream="update_stream",
                 forward_context=SimpleNamespace(attn_metadata={}),
                 num_tokens=4,
-                draft_attn_metadatas=[{
-                    "mtp.layer.attn": runtime_0,
-                    "mtp.layer.swa_cache": runtime_1,
-                }],
+                draft_attn_metadatas=[
+                    {
+                        "mtp.layer.attn": runtime_0,
+                        "mtp.layer.swa_cache": runtime_1,
+                    }
+                ],
             )
 
-        self.assertTrue(torch.equal(captured_0.decode.seq_lens,
-                                    torch.tensor([3], dtype=torch.int32)))
-        self.assertTrue(torch.equal(captured_1.decode.seq_lens,
-                                    torch.tensor([10], dtype=torch.int32)))
-        self.assertTrue(torch.equal(captured_1.decode.sas_metadata,
-                                    torch.tensor([13, 14], dtype=torch.int32)))
+        self.assertTrue(torch.equal(captured_0.decode.seq_lens, torch.tensor([3], dtype=torch.int32)))
+        self.assertTrue(torch.equal(captured_1.decode.seq_lens, torch.tensor([10], dtype=torch.int32)))
+        self.assertTrue(torch.equal(captured_1.decode.sas_metadata, torch.tensor([13, 14], dtype=torch.int32)))
         event.record.assert_called_once_with("update_stream")
 
     @patch("vllm_ascend.attention.dsa_v1.torch.npu.stream")
@@ -267,8 +261,7 @@ class TestAscendDSAUpdateGraphParams(unittest.TestCase):
                 draft_attn_metadatas=[{"mtp.layer": runtime}],
             )
 
-        self.assertTrue(torch.equal(captured.decode.seq_lens,
-                                    torch.tensor([3], dtype=torch.int32)))
+        self.assertTrue(torch.equal(captured.decode.seq_lens, torch.tensor([3], dtype=torch.int32)))
         event.record.assert_called_once_with("update_stream")
 
     @patch("vllm_ascend.attention.dsa_v1.torch.npu.stream")
@@ -318,9 +311,7 @@ class TestAscendDSAUpdateGraphParams(unittest.TestCase):
                 draft_attn_metadatas=[{"mtp.layer": runtime}],
             )
 
-        self.assertTrue(torch.equal(captured_0.decode.seq_lens,
-                                    torch.tensor([3], dtype=torch.int32)))
-        self.assertTrue(torch.equal(captured_1.decode.seq_lens,
-                                    torch.tensor([0], dtype=torch.int32)))
+        self.assertTrue(torch.equal(captured_0.decode.seq_lens, torch.tensor([3], dtype=torch.int32)))
+        self.assertTrue(torch.equal(captured_1.decode.seq_lens, torch.tensor([0], dtype=torch.int32)))
         matched_event.record.assert_called_once_with("update_stream")
         unmatched_event.record.assert_called_once_with("update_stream")

@@ -86,8 +86,7 @@ def extract_dsv4_layer_index(config: Any, layer_name: str) -> int:
     return layer_idx
 
 
-def get_dsv4_spec_layer_idx_from_weight_name(config: Any,
-                                             weight_name: str) -> int | None:
+def get_dsv4_spec_layer_idx_from_weight_name(config: Any, weight_name: str) -> int | None:
     """Return local MTP layer index for DSV4 checkpoint weight names."""
     if weight_name.startswith("mtp."):
         return int(weight_name.split(".")[1])
@@ -450,11 +449,13 @@ def cp_chunkedprefill_comm_stream() -> torch.npu.Stream:
         _CP_CHUNKEDPREFILL_COMM_STREAM = torch_npu.npu.Stream()
     return _CP_CHUNKEDPREFILL_COMM_STREAM
 
+
 def attention_calculation_stream() -> torch.npu.Stream:
     global _ATNN_CALCULATION_STREAM
     if _ATNN_CALCULATION_STREAM is None:
         _ATNN_CALCULATION_STREAM = torch_npu.npu.Stream()
     return _ATNN_CALCULATION_STREAM
+
 
 def adapt_patch(is_global_patch: bool = False):
     if is_global_patch:
@@ -836,9 +837,10 @@ def embedding_tp_enable() -> bool:
 def oproj_tp_enable() -> bool:
     return get_ascend_config().finegrained_tp_config.oproj_tensor_parallel_size > 0
 
+
 def olora_tp_enable() -> bool:
-    return get_ascend_config(
-    ).finegrained_tp_config.olora_tensor_parallel_size > 1
+    return get_ascend_config().finegrained_tp_config.olora_tensor_parallel_size > 1
+
 
 def mlp_tp_enable() -> bool:
     return get_ascend_config().finegrained_tp_config.mlp_tensor_parallel_size > 0
@@ -1423,21 +1425,22 @@ def parse_layer_idx(prefix: str) -> int | None:
     match = re.search(r"layers\.(\d+)", prefix)
     return int(match.group(1)) if match else None
 
-def get_compressed_pos_and_indices( 
-        num_computed_tokens: np.ndarray,
-        num_scheduled_tokens: np.ndarray,
-        arrange_np: np.ndarray,
-        use_compress: bool,
-        kv_cache_groups
- ) -> tuple[List[np.ndarray], List[np.ndarray], List[np.ndarray]]:
+
+def get_compressed_pos_and_indices(
+    num_computed_tokens: np.ndarray,
+    num_scheduled_tokens: np.ndarray,
+    arrange_np: np.ndarray,
+    use_compress: bool,
+    kv_cache_groups,
+) -> tuple[List[np.ndarray], List[np.ndarray], List[np.ndarray]]:
     """
     Batch generate compressed position ids for multi-requests on DSv4.
     Calculate compressed position ids independently for each single request.
- 
+
     Args:
         num_computed_tokens: Historical processed token counts of multiple requests, shape=[num_reqs,]
         num_scheduled_tokens: New scheduled token counts of multiple requests in current step, shape=[num_reqs,]
- 
+
     Returns:
         tuple(np.ndarray, np.ndarray):
             1. Flattened compressed position id array for all requests
@@ -1446,15 +1449,19 @@ def get_compressed_pos_and_indices(
     if not use_compress:
         return None, None, None
     # Assert input validity
-    assert num_computed_tokens.shape == num_scheduled_tokens.shape, "num_computed_tokens and num_scheduled_tokens must have the same shape"
-    assert np.all(num_computed_tokens >= 0) and np.all(
-        num_scheduled_tokens >= 0), "Token count cannot be negative value"
+    assert num_computed_tokens.shape == num_scheduled_tokens.shape, (
+        "num_computed_tokens and num_scheduled_tokens must have the same shape"
+    )
+    assert np.all(num_computed_tokens >= 0) and np.all(num_scheduled_tokens >= 0), (
+        "Token count cannot be negative value"
+    )
 
     positions_compressed_list = []
     req_indices_compressed_list = []
     num_scheduled_tokens_compressed_list = []
-    
+
     from vllm.v1.kv_cache_interface import UniformTypeKVCacheSpecs
+
     for kv_cache_group_id, kv_cache_group_spec in enumerate(kv_cache_groups):
         # Calculate compressed length of historical & total tokens
         if isinstance(kv_cache_group_spec.kv_cache_spec, UniformTypeKVCacheSpecs):
@@ -1466,23 +1473,20 @@ def get_compressed_pos_and_indices(
         # Note(qcs): some models use compress_ratio=0 as non-compression tag.
         if compress_ratio > 1:
             compressed_historical_len = num_computed_tokens // compress_ratio
-            compressed_total_len = (num_computed_tokens +
-                                    num_scheduled_tokens) // compress_ratio
+            compressed_total_len = (num_computed_tokens + num_scheduled_tokens) // compress_ratio
         else:
             compressed_historical_len = num_computed_tokens
-            compressed_total_len = (num_computed_tokens + num_scheduled_tokens)
- 
+            compressed_total_len = num_computed_tokens + num_scheduled_tokens
+
         # The number of new compressed position ids for each request
         num_new_compressed_pos = compressed_total_len - compressed_historical_len
 
         # Core vectorized calculation (no for-loop)
         pos_starts = compressed_historical_len
-        prefix_offsets = np.concatenate([[0],
-                                         np.cumsum(num_new_compressed_pos[:-1])
-                                         ])
-        compressed_pos_ids = np.arange(
-            np.sum(num_new_compressed_pos)) + np.repeat(
-                pos_starts - prefix_offsets, num_new_compressed_pos)
+        prefix_offsets = np.concatenate([[0], np.cumsum(num_new_compressed_pos[:-1])])
+        compressed_pos_ids = np.arange(np.sum(num_new_compressed_pos)) + np.repeat(
+            pos_starts - prefix_offsets, num_new_compressed_pos
+        )
 
         req_indices_compressed = np.repeat(arrange_np, num_new_compressed_pos)
         req_indices_compressed_list.append(req_indices_compressed)

@@ -9,6 +9,7 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 from vllm.config import CompilationMode, CUDAGraphMode, VllmConfig, get_layers_from_vllm_config
+from vllm.sequence import IntermediateTensors
 from vllm.distributed.parallel_state import (
     get_pcp_group,
     get_pp_group,
@@ -24,7 +25,6 @@ from vllm.model_executor.model_loader import get_model
 from vllm.model_executor.models import supports_multimodal
 from vllm.model_executor.models.deepseek_v2 import DeepseekV32IndexerCache
 from vllm.model_executor.models.llama_eagle3 import Eagle3LlamaForCausalLM
-from vllm.sequence import IntermediateTensors
 from vllm.triton_utils import HAS_TRITON, triton
 from vllm.utils.math_utils import cdiv, round_up
 from vllm.utils.platform_utils import is_pin_memory_available
@@ -47,6 +47,7 @@ from vllm_ascend.attention.utils import AscendCommonAttentionMetadata
 from vllm_ascend.compilation.acl_graph import ACLGraphWrapper, update_full_graph_params
 from vllm_ascend.ops.triton.spec_decode.utils import prepare_inputs_padded_kernel
 from vllm_ascend.ops.triton.triton_utils import get_vectorcore_num
+from vllm_ascend.sample.rejection_sampler import strict_rejection_sample_tensor
 from vllm_ascend.sample.sampler import sample_with_runtime_state
 from vllm_ascend.utils import enable_sp, enable_sp_by_pass, lmhead_tp_enable, shared_expert_dp_enabled
 
