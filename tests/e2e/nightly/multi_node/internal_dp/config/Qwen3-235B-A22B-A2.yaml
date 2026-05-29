@@ -11,6 +11,7 @@ env_common:
   NUMEXPR_MAX_THREADS: 128
   TASK_QUEUE_ENABLE: 1
   PYTORCH_NPU_ALLOC_CONF: expandable_segments:True
+  VLLM_ENGINE_READY_TIMEOUT_S: 3600
 
 deployment:
   -
@@ -30,6 +31,7 @@ deployment:
         --max-num-batched-tokens 2048
         --trust-remote-code
         --gpu-memory-utilization 0.9
+        --compilation-config '{"cudagraph_mode":"FULL_DECODE_ONLY"}'
   -
     server_cmd: >
         vllm serve "Qwen/Qwen3-235B-A22B"
@@ -47,6 +49,7 @@ deployment:
         --enable-expert-parallel
         --trust-remote-code
         --gpu-memory-utilization 0.9
+        --compilation-config '{"cudagraph_mode":"FULL_DECODE_ONLY"}'
 benchmarks:
   perf:
     case_type: performance
@@ -64,7 +67,7 @@ benchmarks:
     dataset_path: vllm-ascend/gsm8k-lite
     request_conf: vllm_api_general_chat
     dataset_conf: gsm8k/gsm8k_gen_0_shot_cot_chat_prompt
-    max_out_len: 7680
-    batch_size: 256
+    max_out_len: 16384
+    batch_size: 16
     baseline: 96
     threshold: 5

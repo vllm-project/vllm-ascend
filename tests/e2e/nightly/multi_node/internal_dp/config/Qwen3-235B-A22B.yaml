@@ -12,44 +12,45 @@ env_common:
   HCCL_BUFFSIZE: 1024
   SERVER_PORT: 8080
   NUMEXPR_MAX_THREADS: 128
+  VLLM_ENGINE_READY_TIMEOUT_S: 3600
 
 deployment:
-  -
-    server_cmd: >
-        vllm serve "Qwen/Qwen3-235B-A22B"
-        --host 0.0.0.0
-        --port $SERVER_PORT
-        --data-parallel-size 4
-        --data-parallel-size-local 2
-        --data-parallel-address $LOCAL_IP
-        --data-parallel-rpc-port 13389
-        --tensor-parallel-size 8
-        --seed 1024
-        --enable-expert-parallel
-        --max-num-seqs 32
-        --max-model-len 8192
-        --max-num-batched-tokens 8192
-        --trust-remote-code
-        --no-enable-prefix-caching
-        --gpu-memory-utilization 0.9
-  -
-    server_cmd: >
-        vllm serve "Qwen/Qwen3-235B-A22B"
-        --headless
-        --data-parallel-size 4
-        --data-parallel-size-local 2
-        --data-parallel-start-rank 2
-        --data-parallel-address $MASTER_IP
-        --data-parallel-rpc-port 13389
-        --tensor-parallel-size 8
-        --seed 1024
-        --max-num-seqs 32
-        --max-model-len 8192
-        --max-num-batched-tokens 8192
-        --enable-expert-parallel
-        --trust-remote-code
-        --no-enable-prefix-caching
-        --gpu-memory-utilization 0.9
+  - server_cmd: >
+      vllm serve "Qwen/Qwen3-235B-A22B"
+      --host 0.0.0.0
+      --port $SERVER_PORT
+      --data-parallel-size 4
+      --data-parallel-size-local 2
+      --data-parallel-address $LOCAL_IP
+      --data-parallel-rpc-port 13389
+      --tensor-parallel-size 8
+      --seed 1024
+      --enable-expert-parallel
+      --max-num-seqs 32
+      --max-model-len 8192
+      --max-num-batched-tokens 8192
+      --trust-remote-code
+      --no-enable-prefix-caching
+      --gpu-memory-utilization 0.9
+      --compilation-config '{"cudagraph_mode":"PIECEWISE"}'
+  - server_cmd: >
+      vllm serve "Qwen/Qwen3-235B-A22B"
+      --headless
+      --data-parallel-size 4
+      --data-parallel-size-local 2
+      --data-parallel-start-rank 2
+      --data-parallel-address $MASTER_IP
+      --data-parallel-rpc-port 13389
+      --tensor-parallel-size 8
+      --seed 1024
+      --max-num-seqs 32
+      --max-model-len 8192
+      --max-num-batched-tokens 8192
+      --enable-expert-parallel
+      --trust-remote-code
+      --no-enable-prefix-caching
+      --gpu-memory-utilization 0.9
+      --compilation-config '{"cudagraph_mode":"PIECEWISE"}'
 benchmarks:
   perf:
     case_type: performance
@@ -71,3 +72,5 @@ benchmarks:
     batch_size: 512
     baseline: 95
     threshold: 3
+
+# https://github.com/vllm-project/vllm-ascend/actions/runs/26330313703/job/77515228538?pr=8956

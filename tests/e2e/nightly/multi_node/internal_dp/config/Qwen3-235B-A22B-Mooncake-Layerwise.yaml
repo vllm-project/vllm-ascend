@@ -43,7 +43,7 @@ deployment:
         "kv_role": "kv_producer",
         "kv_port": "30000",
         "engine_id": "0",
-        "kv_connector_module_path": "vllm_ascend.distributed.mooncake_layerwise_connector",
+        "kv_connector_module_path": "vllm_ascend.distributed.kv_transfer.kv_p2p.mooncake_layerwise_connector",
         "kv_connector_extra_config": {
                   "prefill": {
                           "dp_size": 2,
@@ -79,7 +79,7 @@ deployment:
         "kv_role": "kv_consumer",
         "kv_port": "30200",
         "engine_id": "1",
-        "kv_connector_module_path": "vllm_ascend.distributed.mooncake_layerwise_connector",
+        "kv_connector_module_path": "vllm_ascend.distributed.kv_transfer.kv_p2p.mooncake_layerwise_connector",
         "kv_connector_extra_config": {
                   "prefill": {
                           "dp_size": 2,
@@ -113,3 +113,7 @@ benchmarks:
     batch_size: 512
     baseline: 97
     threshold: 3
+
+# https://github.com/vllm-project/vllm-ascend/actions/runs/26335322449/job/77528004126?pr=8956  跑了2个小时还没跑完
+# https://github.com/vllm-project/vllm-ascend/actions/runs/26354132159/job/77577674350?pr=8956 跑了2个小时没跑完
+
