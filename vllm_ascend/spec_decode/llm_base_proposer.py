@@ -67,6 +67,67 @@ def _call_with_supported_kwargs(func: Callable, *args, **kwargs):
     return func(*args, **supported_kwargs)
 
 
+def _call_build_for_drafting_compat(
+    func: Callable,
+    common_attn_metadata: CommonAttentionMetadata,
+    draft_step: int,
+    **kwargs,
+):
+    """Call build_for_drafting across old/new upstream signatures safely."""
+    signature = inspect.signature(func)
+    parameters = list(signature.parameters.values())
+    names = [p.name for p in parameters]
+    has_var_kw = any(p.kind == inspect.Parameter.VAR_KEYWORD for p in parameters)
+    supported_kwargs = kwargs if has_var_kw else {k: v for k, v in kwargs.items() if k in signature.parameters}
+
+    if "common_attn_metadata" in names and "draft_index" in names:
+        return func(
+            common_attn_metadata=common_attn_metadata,
+            draft_index=draft_step,
+            **supported_kwargs,
+        )
+
+    if "draft_step" in names and "common_attn_metadata" in names:
+        return func(
+            draft_step=draft_step,
+            common_attn_metadata=common_attn_metadata,
+            **supported_kwargs,
+        )
+
+    if len(parameters) >= 2 and parameters[0].name.startswith("draft"):
+        return func(draft_step, common_attn_metadata, **supported_kwargs)
+    return func(common_attn_metadata, draft_step, **supported_kwargs)
+
+
+def _call_build_compat(
+    func: Callable,
+    common_prefix_len: int,
+    common_attn_metadata: CommonAttentionMetadata,
+    model: nn.Module | None = None,
+    **kwargs,
+):
+    """Call metadata builder.build across old/new upstream signatures safely."""
+    signature = inspect.signature(func)
+    parameters = list(signature.parameters.values())
+    names = [p.name for p in parameters]
+    has_var_kw = any(p.kind == inspect.Parameter.VAR_KEYWORD for p in parameters)
+    supported_kwargs = kwargs if has_var_kw else {k: v for k, v in kwargs.items() if k in signature.parameters}
+
+    call_kwargs = dict(supported_kwargs)
+    if "common_prefix_len" in names:
+        call_kwargs["common_prefix_len"] = common_prefix_len
+    if "common_attn_metadata" in names:
+        call_kwargs["common_attn_metadata"] = common_attn_metadata
+    if model is not None and "model" in names:
+        call_kwargs["model"] = model
+    if "fast_build" in names and "fast_build" not in call_kwargs:
+        call_kwargs["fast_build"] = False
+
+    if "common_prefix_len" in names and "common_attn_metadata" in names:
+        return func(**call_kwargs)
+    return func(common_prefix_len, common_attn_metadata, **supported_kwargs)
+
+
 # TODO: Remove it when the bug of fx-graph is solved
 # patch vllm_config to be in CompilationMode.NONE temporarily
 @contextmanager
@@ -729,11 +790,11 @@ class AscendSpecDecodeBaseProposer(SpecDecodeBaseProposer):
                 common_ratio_to_sas_metadata=dict(),
                 block_size=self.draft_attn_groups[0].kv_cache_spec.block_size,
             )
-        attn_metadata = _call_with_supported_kwargs(
+        attn_metadata = _call_build_compat(
             builder.build,
             0,
             common_attn_metadata,
-            self.runner.get_model(),
+            model=self.runner.get_model(),
             **extra_attn_metadata_args,
         )
 
@@ -1515,17 +1576,18 @@ class AscendSpecDecodeBaseProposer(SpecDecodeBaseProposer):
                 common_ratio_to_sas_metadata=dict(),
                 block_size=self.draft_attn_groups[0].kv_cache_spec.block_size,
             )
-            attn_metadata = _call_with_supported_kwargs(
+            attn_metadata = _call_build_for_drafting_compat(
                 attn_metadata_builder.build_for_drafting,
-                draft_step,
                 common_attn_metadata,
+                draft_step,
                 **extra_attn_metadata_args,
             )
         else:
-            attn_metadata = attn_metadata_builder.build(
+            attn_metadata = _call_build_compat(
+                attn_metadata_builder.build,
                 0,
                 common_attn_metadata,
-                self.runner.get_model(),
+                model=self.runner.get_model(),
             )
 
         if self.pcp_size * self.dcp_size > 1:
