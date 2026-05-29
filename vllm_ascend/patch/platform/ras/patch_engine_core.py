@@ -1,6 +1,7 @@
 import signal
 import time
 from contextlib import ExitStack
+from typing import cast
 
 import msgspec.msgpack
 import zmq
@@ -8,8 +9,10 @@ from vllm.config import ParallelConfig, VllmConfig
 from vllm.logger import logger
 from vllm.transformers_utils.config import maybe_register_config_serialize_by_value
 from vllm.utils.system_utils import set_process_title
-from vllm.v1.engine import EngineCoreOutputs, EngineCoreRequest, EngineCoreRequestType
+from vllm.v1.engine import EngineCoreEventType, EngineCoreOutputs, EngineCoreRequest, EngineCoreRequestType
 from vllm.v1.engine.core import DPEngineCoreProc, EngineCoreProc, EngineShutdownState
+from vllm.v1.core.sched.scheduler import Scheduler
+from vllm.v1.request import RequestStatus
 from vllm.v1.serial_utils import MsgpackDecoder
 from vllm.utils.network_utils import make_zmq_socket
 from vllm_ascend.recovery.engine_core_recovery_handler import RecoveryHandler
@@ -174,7 +177,23 @@ class RasDPEngineCoreProc(DPEngineCoreProc):
                             pass
                     self.batch_queue.clear()
                     logger.info("[RAS][engine=%d] batch_queue drained", self.dp_rank)
-                self.scheduler.reset_prefix_cache(reset_running_requests=True)
+                scheduler = cast(Scheduler, self.scheduler)
+                while scheduler.running:
+                    request = scheduler.running.pop()
+                    scheduler.kv_cache_manager.free(request)
+                    scheduler.encoder_cache_manager.free(request)
+                    request.prompt_token_ids = request._all_token_ids.copy()
+                    request._output_token_ids = []
+                    request.num_prompt_tokens = len(request.prompt_token_ids)
+                    request.num_computed_tokens = 0
+                    request.status = RequestStatus.WAITING
+                    if request.spec_token_ids is not None:
+                        request.spec_token_ids = []
+                    request.num_preemptions = 0
+                    request.num_output_placeholders = 0
+                    request.discard_latest_async_tokens = False
+                    scheduler.waiting.prepend_request(request)
+                    scheduler.prev_step_scheduled_req_ids.discard(request.request_id)
             try:
                 if not exception_occurred:
                     self._process_input_queue()
