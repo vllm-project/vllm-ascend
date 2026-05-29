@@ -15,7 +15,7 @@ from vllm.v1.kv_cache_interface import AttentionSpec, MLAAttentionSpec
 from vllm_ascend.ascend_config import get_ascend_config
 from vllm_ascend.attention.abstract import DSAAttentionImpl
 from vllm_ascend.attention.attention_v1 import AscendAttentionState
-from vllm_ascend.attention.utils import AscendCommonAttentionMetadata
+from vllm_ascend.attention.utils import AscendCommonAttentionMetadata, split_decodes_and_prefills
 from vllm_ascend.ops.linear import AscendUnquantizedLinearMethod
 from vllm_ascend.ops.rope_dsv4 import get_cos_and_sin_dsa
 from vllm_ascend.quantization.methods.w8a8_dynamic import AscendW8A8DynamicLinearMethod
@@ -116,6 +116,10 @@ class AscendDSAMetadata:
     sin: torch.Tensor
     cos: torch.Tensor
 
+    num_decodes: int
+    num_decode_tokens: int
+    num_prefills: int
+
     # For logging.
     num_input_tokens: int = 0  # Number of tokens including padding.
 
@@ -169,6 +173,10 @@ class AscendDSACPMetadataBuilder(AttentionMetadataBuilder[AscendDSAMetadata]):
 
         self.rope_dim = self.model_config.hf_text_config.qk_rope_head_dim
 
+        self.num_decodes = 0
+        self.num_prefills = 0
+        self.num_decode_tokens = 0
+        self.num_prefill_tokens = 0
         self.num_actual_tokens: int | None = None
         self.block_table: torch.Tensor = None
         self.slot_mapping: torch.Tensor = None
@@ -237,6 +245,13 @@ class AscendDSACPMetadataBuilder(AttentionMetadataBuilder[AscendDSAMetadata]):
 
         num_input_tokens = common_attn_metadata.num_input_tokens
         if self.common_ratio_to_sas_metadata.get("input_positions", None) is None:
+            self.num_decodes, self.num_prefills, self.num_decode_tokens, self.num_prefill_tokens = (
+                split_decodes_and_prefills(common_attn_metadata, decode_threshold=self.decode_threshold)
+            )
+            self.common_ratio_to_sas_metadata["num_decodes"] = self.num_decodes
+            self.common_ratio_to_sas_metadata["num_prefills"] = self.num_prefills
+            self.common_ratio_to_sas_metadata["num_decode_tokens"] = self.num_decode_tokens
+            self.common_ratio_to_sas_metadata["num_prefill_tokens"] = self.num_prefill_tokens
             input_positions = common_attn_metadata.positions[:num_input_tokens].long()
             input_positions_cpu = common_attn_metadata.positions_cpu[:num_input_tokens].long()
             self.common_ratio_to_sas_metadata["input_positions"] = input_positions
@@ -247,6 +262,12 @@ class AscendDSACPMetadataBuilder(AttentionMetadataBuilder[AscendDSAMetadata]):
             self.seq_lens = common_attn_metadata.seq_lens[:num_reqs]
             self.common_ratio_to_sas_metadata["seq_lens"] = self.seq_lens
         else:
+            self.num_decodes, self.num_prefills, self.num_decode_tokens, self.num_prefill_tokens = (
+                self.common_ratio_to_sas_metadata["num_decodes"],
+                self.common_ratio_to_sas_metadata["num_prefills"],
+                self.common_ratio_to_sas_metadata["num_decode_tokens"],
+                self.common_ratio_to_sas_metadata["num_prefill_tokens"],
+            )
             input_positions = self.common_ratio_to_sas_metadata["input_positions"]
             input_positions_cpu = self.common_ratio_to_sas_metadata["input_positions_cpu"]
             cos, sin = self.common_ratio_to_sas_metadata["cos"], self.common_ratio_to_sas_metadata["sin"]
@@ -268,6 +289,9 @@ class AscendDSACPMetadataBuilder(AttentionMetadataBuilder[AscendDSAMetadata]):
             num_actual_tokens=self.num_actual_tokens,
             head_dim=self.model_config.get_head_size(),
             attn_mask=None,
+            num_decodes=self.num_decodes,
+            num_decode_tokens=self.num_decode_tokens,
+            num_prefills=self.num_prefills,
             attn_state=attn_state,
             req_metadata=req_metadata,
             query_start_loc=query_start_loc,
