@@ -215,10 +215,13 @@ class MooncakeStoreConfig:
         with open(file_path) as file:
             config = json.load(file)
         master_server_address = os.getenv("MOONCAKE_MASTER", None)
+        global_segment_size_env = os.getenv("MOONCAKE_GLOBAL_SEGMENT_SIZE", None)
         return MooncakeStoreConfig(
             metadata_server=config.get("metadata_server"),
             global_segment_size=_parse_global_segment_size(
-                config.get("global_segment_size", DEFAULT_GLOBAL_SEGMENT_SIZE)
+                global_segment_size_env
+                if global_segment_size_env is not None
+                else config.get("global_segment_size", DEFAULT_GLOBAL_SEGMENT_SIZE)
             ),
             local_buffer_size=_parse_global_segment_size(config.get("local_buffer_size", DEFAULT_LOCAL_BUFFER_SIZE)),
             protocol=config.get("protocol", "ascend"),
