@@ -161,7 +161,7 @@ from vllm_ascend.ascend_forward_context import (  # isort: skip
     set_mc2_tokens_capacity,
 )
 from vllm.model_executor.layers.fused_moe.routed_experts_capturer import RoutedExpertsCapturer
-
+from vllm.model_executor.models.interfaces import supports_multimodal_pruning
 from vllm_ascend.sample.rejection_sampler import AscendRejectionSampler
 
 if TYPE_CHECKING:
@@ -3409,6 +3409,13 @@ class NPUModelRunner(GPUModelRunner):
         self.model_memory_usage = m.consumed_memory
         logger.info("Loading model weights took %.4f GB", m.consumed_memory / float(2**30))
 
+        mm_config = self.model_config.multimodal_config
+        self.is_multimodal_pruning_enabled = (
+            supports_multimodal_pruning(self.get_model())
+            and mm_config is not None
+            and mm_config.is_multimodal_pruning_enabled()
+        )
+        
         # wrap the model with full graph wrapper if needed.
         if self.compilation_config.cudagraph_mode.has_full_cudagraphs():
             self.update_stream: torch.npu.Stream = torch.npu.Stream()
