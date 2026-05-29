@@ -86,7 +86,7 @@ jobs:
             image: swr.cn-southwest-2.myhuaweicloud.com/base_image/ascend-ci/cann:9.0.0-a3-ubuntu22.04-py3.11
           - os: ubuntu
             chip_type: 310p
-            image: swr.cn-southwest-2.myhuaweicloud.com/base_image/ascend-ci/cann:9.0.0-310p-ubuntu22.04-py3.11
+            image: swr.cn-southwest-2.myhuaweicloud.com/base_image/ascend-ci/cann:9.1.0-beta.1-310p-ubuntu22.04-py3.11
           - os: openeuler
             chip_type: a2
             image: swr.cn-southwest-2.myhuaweicloud.com/base_image/ascend-ci/cann:9.0.0-910b-openeuler24.03-py3.11
@@ -95,7 +95,7 @@ jobs:
             image: swr.cn-southwest-2.myhuaweicloud.com/base_image/ascend-ci/cann:9.0.0-a3-openeuler24.03-py3.11
           - os: openeuler
             chip_type: 310p
-            image: swr.cn-southwest-2.myhuaweicloud.com/base_image/ascend-ci/cann:9.0.0-310p-openeuler24.03-py3.11
+            image: swr.cn-southwest-2.myhuaweicloud.com/base_image/ascend-ci/cann:9.1.0-beta.1-310p-openeuler24.03-py3.11
 
     container:
       image: ${{ matrix.image }}
