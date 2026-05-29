@@ -164,7 +164,7 @@ def capture(self, layer_id: int, topk_ids: torch.Tensor) -> None:
                 dtype=topk_ids.dtype,
                 device=topk_ids.device,
             )
-            split_topk_ids = gather_topk_ids.split(self.tp_size, dim=0)
+            split_topk_ids = torch.tensor_split(gather_topk_ids, self.tp_size, dim=0)
             dist.all_gather(list(split_topk_ids), topk_ids, get_tp_group().device_group)
             topk_ids = gather_topk_ids
             start_loc = 0
