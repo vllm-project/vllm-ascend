@@ -109,17 +109,12 @@ class AscendAttentionBackend(AttentionBackend):
 
     @staticmethod
     def swap_blocks(
-        src_kv_cache: list[torch.Tensor],
-        dst_kv_cache: list[torch.Tensor],
-        src_to_dst: torch.Tensor,
+        src: torch.Tensor,
+        dst: torch.Tensor,
+        block_size_in_bytes: int,
+        block_mapping: torch.Tensor,
     ) -> None:
-        src_key_cache, src_value_cache = src_kv_cache[0], src_kv_cache[1]
-        dst_key_cache, dst_value_cache = dst_kv_cache[0], dst_kv_cache[1]
-        src_indices = src_to_dst[:, 0]
-        dst_indices = src_to_dst[:, 1]
-
-        dst_key_cache[dst_indices] = src_key_cache[src_indices].to(dst_key_cache.device)
-        dst_value_cache[dst_indices] = src_value_cache[src_indices].to(dst_key_cache.device)
+        torch.ops._C_ascend.swap_blocks(src, dst, block_size_in_bytes, block_mapping)
 
     @staticmethod
     def copy_blocks(
