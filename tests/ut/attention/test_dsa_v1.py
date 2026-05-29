@@ -6,7 +6,7 @@ from unittest.mock import MagicMock, patch
 import torch
 
 from vllm_ascend.attention.attention_v1 import AscendAttentionState
-from vllm_ascend.attention.dsa_v1 import AscendDSAImpl, AscendDSAMetadataBuilder
+from vllm_ascend.attention.dsa_v1 import AscendDSAImpl, AscendDSAMetadataBuilder, _q_rms
 
 
 class TestAscendDSAMetadataBuilder(unittest.TestCase):
@@ -48,6 +48,34 @@ class TestAscendDSAMetadataBuilder(unittest.TestCase):
         self.assertEqual(kwargs["decode_ratio_to_sas_metadata"], {})
         self.assertEqual(kwargs["common_ratio_to_sas_metadata"], {})
         self.assertEqual(kwargs["block_size"], 128)
+
+
+class TestAscendDSAQrms(unittest.TestCase):
+    def test_q_rms_falls_back_when_triton_kernel_unavailable(self):
+        q = torch.tensor(
+            [[[3.0, 4.0], [1.0, 2.0]]],
+            dtype=torch.float32,
+        )
+        eps = 1e-6
+
+        with patch("vllm_ascend.attention.dsa_v1.triton_q_rms", None):
+            actual = _q_rms(q, eps)
+
+        expected = q * torch.rsqrt(q.pow(2).mean(dim=-1, keepdim=True) + eps)
+        self.assertTrue(torch.allclose(actual, expected))
+
+    def test_q_rms_uses_triton_kernel_when_available(self):
+        q = torch.ones((1, 2, 3), dtype=torch.float32)
+        expected = torch.full_like(q, 2.0)
+
+        with patch(
+            "vllm_ascend.attention.dsa_v1.triton_q_rms",
+            MagicMock(return_value=expected),
+        ) as mock_triton_q_rms:
+            actual = _q_rms(q, 1e-6)
+
+        mock_triton_q_rms.assert_called_once_with(q, 1e-6)
+        self.assertIs(actual, expected)
 
 
 class TestAscendDSAUpdateGraphParams(unittest.TestCase):

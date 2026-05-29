@@ -1,5 +1,9 @@
+import ast
+import inspect
 import os
+import textwrap
 import unittest
+from contextlib import nullcontext
 from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
@@ -11,10 +15,262 @@ from vllm.v1.kv_cache_interface import FullAttentionSpec, KVCacheConfig, KVCache
 from vllm.v1.sample.logits_processor.builtin import MinTokensLogitsProcessor
 from vllm.v1.spec_decode.metadata import SpecDecodeMetadata
 
+from vllm_ascend.attention.dsa_v1 import AscendDSABackend
 from vllm_ascend.worker.model_runner_v1 import NPUModelRunner
+from vllm_ascend.worker.npu_input_batch import NPUInputBatch
 
 
 class TestNPUModelRunnerKVCache(unittest.TestCase):
+    def test_sparse_head_dim_uses_kv_lora_rank_for_legacy_mla(self):
+        hf_text_config = SimpleNamespace(
+            kv_lora_rank=512,
+            qk_rope_head_dim=64,
+            index_head_dim=128,
+        )
+
+        self.assertEqual(
+            NPUModelRunner._get_sparse_head_dim(hf_text_config),
+            (512, 64, 128),
+        )
+
+    def test_sparse_head_dim_uses_head_dim_for_deepseek_v4(self):
+        hf_text_config = SimpleNamespace(
+            compress_ratios=[0, 4, 128],
+            head_dim=512,
+            qk_rope_head_dim=64,
+            index_head_dim=128,
+        )
+
+        self.assertEqual(
+            NPUModelRunner._get_sparse_head_dim(hf_text_config),
+            (512, 64, 128),
+        )
+
+    def test_select_attn_backend_uses_dsa_for_compressed_model(self):
+        runner = NPUModelRunner.__new__(NPUModelRunner)
+        runner.use_compress = True
+
+        self.assertIs(runner._select_attn_backend(), AscendDSABackend)
+
+    def test_select_attn_backend_uses_current_selector_signature(self):
+        runner = NPUModelRunner.__new__(NPUModelRunner)
+        runner.use_compress = False
+        runner.use_sparse = True
+        runner.dtype = torch.float16
+        runner.model_config = SimpleNamespace(
+            use_mla=True,
+            is_mm_prefix_lm=False,
+        )
+
+        with patch("vllm_ascend.worker.model_runner_v1.get_attn_backend") as mock_backend:
+            runner._select_attn_backend()
+
+        mock_backend.assert_called_once_with(
+            0,
+            torch.float16,
+            None,
+            use_mla=True,
+            use_sparse=True,
+            use_mm_prefix=False,
+        )
+
+    def test_enpu_enabled_reads_c_environment(self):
+        with patch.dict(os.environ, {}, clear=True):
+            self.assertFalse(NPUModelRunner._enpu_enabled())
+
+        with patch.dict(os.environ, {"ENPU_ENABLE": "true"}, clear=True):
+            self.assertTrue(NPUModelRunner._enpu_enabled())
+
+    def test_get_positions_accepts_cpu_gpu_buffer(self):
+        runner = NPUModelRunner.__new__(NPUModelRunner)
+        runner.uses_mrope = False
+        runner.uses_xdrope_dim = 0
+        runner.positions = SimpleNamespace(
+            gpu=torch.arange(8, dtype=torch.int64),
+        )
+
+        self.assertTrue(
+            torch.equal(
+                runner._get_positions(4),
+                torch.tensor([0, 1, 2, 3], dtype=torch.int64),
+            )
+        )
+        self.assertTrue(
+            torch.equal(
+                runner._get_positions(torch.tensor([1, 3, 5])),
+                torch.tensor([1, 3, 5], dtype=torch.int64),
+            )
+        )
+
+    def test_get_positions_accepts_plain_tensor(self):
+        runner = NPUModelRunner.__new__(NPUModelRunner)
+        runner.uses_mrope = False
+        runner.uses_xdrope_dim = 0
+        runner.positions = torch.arange(8, dtype=torch.int64)
+
+        self.assertTrue(
+            torch.equal(
+                runner._get_positions(4),
+                torch.tensor([0, 1, 2, 3], dtype=torch.int64),
+            )
+        )
+
+    def test_get_drafter_target_hidden_states_uses_mtp_buffer(self):
+        runner = NPUModelRunner.__new__(NPUModelRunner)
+        hidden_states = torch.zeros(2, 4)
+        mtp_hidden_states = torch.ones(2, 16)
+        runner.model = SimpleNamespace(
+            get_mtp_target_hidden_states=lambda: mtp_hidden_states
+        )
+        runner.drafter = SimpleNamespace(hidden_size=16)
+
+        self.assertIs(
+            runner._get_drafter_target_hidden_states(hidden_states),
+            mtp_hidden_states,
+        )
+
+    def test_propose_draft_token_ids_uses_drafter_hidden_source(self):
+        source = inspect.getsource(NPUModelRunner.propose_draft_token_ids)
+
+        self.assertIn(
+            "_get_drafter_target_hidden_states(hidden_states)",
+            source,
+        )
+
+    def test_get_cumsum_and_arange_accepts_legacy_no_output_buffer(self):
+        runner = NPUModelRunner.__new__(NPUModelRunner)
+        runner.arange_np = np.arange(16, dtype=np.int64)
+        runner.query_pos = SimpleNamespace(np=np.full(16, -1, dtype=np.int64))
+
+        cu_num_tokens, arange = runner._get_cumsum_and_arange(
+            np.array([2, 5, 3], dtype=np.int32)
+        )
+
+        np.testing.assert_array_equal(cu_num_tokens, np.array([2, 7, 10]))
+        np.testing.assert_array_equal(arange, np.array([0, 1, 0, 1, 2, 3, 4, 0, 1, 2]))
+        np.testing.assert_array_equal(
+            runner.query_pos.np[:10],
+            np.array([0, 1, 0, 1, 2, 3, 4, 0, 1, 2]),
+        )
+
+    def test_get_cumsum_and_arange_accepts_current_output_buffer(self):
+        runner = NPUModelRunner.__new__(NPUModelRunner)
+        runner.arange_np = np.arange(16, dtype=np.int64)
+        arange_out = np.full(16, -1, dtype=np.int64)
+
+        cu_num_tokens = runner._get_cumsum_and_arange(
+            np.array([2, 5, 3], dtype=np.int32),
+            arange_out,
+        )
+
+        np.testing.assert_array_equal(cu_num_tokens, np.array([2, 7, 10]))
+        np.testing.assert_array_equal(arange_out[:10], np.array([0, 1, 0, 1, 2, 3, 4, 0, 1, 2]))
+
+    def test_npu_input_batch_initializes_logprob_token_ids(self):
+        input_batch = NPUInputBatch(
+            max_num_reqs=2,
+            max_model_len=32,
+            max_num_batched_tokens=16,
+            device=torch.device("cpu"),
+            pin_memory=False,
+            vocab_size=128,
+            block_sizes=[16],
+            kernel_block_sizes=[[16]],
+        )
+
+        self.assertEqual(input_batch.logprob_token_ids, {})
+        self.assertIsNone(input_batch.sampling_metadata.logprob_token_ids)
+
+    def test_capture_model_returns_parent_graph_memory(self):
+        runner = NPUModelRunner.__new__(NPUModelRunner)
+
+        with (
+            patch(
+                "vllm_ascend.worker.model_runner_v1._torch_cuda_wrapper",
+                return_value=nullcontext(),
+            ),
+            patch(
+                "vllm_ascend.worker.model_runner_v1._replace_gpu_model_runner_function_wrapper",
+                return_value=nullcontext(),
+            ),
+            patch(
+                "vllm_ascend.worker.model_runner_v1.GPUModelRunner.capture_model",
+                return_value=123456,
+            ) as mock_capture,
+        ):
+            self.assertEqual(runner.capture_model(), 123456)
+
+        mock_capture.assert_called_once_with(runner)
+
+    def test_prepare_inputs_uses_numpy_slot_mapping_path(self):
+        source = inspect.getsource(NPUModelRunner._prepare_inputs)
+
+        self.assertIn(".compute_slot_mapping_draft(", source)
+        self.assertNotIn(".commit_slot_mapping(", source)
+
+    def test_prepare_inputs_uses_current_prepare_input_ids_signature(self):
+        source = inspect.getsource(NPUModelRunner._prepare_inputs)
+        tree = ast.parse(textwrap.dedent(source))
+        calls = [
+            node
+            for node in ast.walk(tree)
+            if isinstance(node, ast.Call)
+            and isinstance(node.func, ast.Attribute)
+            and node.func.attr == "_prepare_input_ids"
+        ]
+
+        self.assertEqual(len(calls), 1)
+        self.assertEqual(len(calls[0].args), 4)
+        self.assertIsInstance(calls[0].args[1], ast.Name)
+        self.assertEqual(calls[0].args[1].id, "num_reqs")
+
+    def test_preprocess_presents_positions_tensor_to_parent(self):
+        runner = NPUModelRunner.__new__(NPUModelRunner)
+        positions = SimpleNamespace(gpu=torch.arange(8, dtype=torch.int64))
+        runner.positions = positions
+        observed_positions = []
+
+        def fake_parent_preprocess(
+            self, scheduler_output, num_input_tokens, intermediate_tensors=None
+        ):
+            observed_positions.append(self.positions)
+            return (
+                None,
+                None,
+                self.positions[:num_input_tokens],
+                intermediate_tensors,
+                {},
+                None,
+            )
+
+        with patch(
+            "vllm_ascend.worker.model_runner_v1.GPUModelRunner._preprocess",
+            new=fake_parent_preprocess,
+        ):
+            _, _, preprocessed_positions, _, _, _ = runner._preprocess(
+                SimpleNamespace(), 3, None
+            )
+
+        self.assertIs(observed_positions[0], positions.gpu)
+        self.assertIs(runner.positions, positions)
+        self.assertTrue(torch.equal(preprocessed_positions, torch.tensor([0, 1, 2])))
+
+    def test_propose_draft_token_ids_uses_ascend_padded_signature(self):
+        source = inspect.getsource(NPUModelRunner.propose_draft_token_ids)
+        tree = ast.parse(textwrap.dedent(source))
+        calls = [
+            node
+            for node in ast.walk(tree)
+            if isinstance(node, ast.Call)
+            and isinstance(node.func, ast.Attribute)
+            and node.func.attr == "prepare_next_token_ids_padded"
+        ]
+
+        self.assertEqual(len(calls), 1)
+        self.assertEqual(len(calls[0].args), 5)
+        self.assertIsInstance(calls[0].args[0], ast.Name)
+        self.assertEqual(calls[0].args[0].id, "sampled_token_ids")
+
     def _build_runner(self):
         runner = NPUModelRunner.__new__(NPUModelRunner)
         runner.device = torch.device("cpu")
@@ -215,6 +471,27 @@ class TestNPUModelRunnerFusedMTP(unittest.TestCase):
         runner.input_batch.sampling_metadata.all_random = False
         runner._fused_mtp_graph_outputs_ready = False
         self.assertFalse(runner._can_use_fused_mtp_draft_path(None, metadata))
+
+    def test_fused_mtp_warmup_still_runs_drafter_dummy_outside_fused_graph(self):
+        runner = self._build_runner()
+
+        self.assertFalse(
+            runner._should_run_separate_drafter_dummy(
+                fused_mtp_graph_batch=True
+            )
+        )
+        self.assertTrue(
+            runner._should_run_separate_drafter_dummy(
+                fused_mtp_graph_batch=False
+            )
+        )
+
+        runner._fused_mtp_wrapper = None
+        self.assertTrue(
+            runner._should_run_separate_drafter_dummy(
+                fused_mtp_graph_batch=False
+            )
+        )
 
     def test_update_fused_mtp_draft_graph_params_marks_draft_context(self):
         runner = self._build_runner()

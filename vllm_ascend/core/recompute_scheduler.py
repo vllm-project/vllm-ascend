@@ -18,6 +18,7 @@
 
 from __future__ import annotations
 
+import os
 import time
 from collections import defaultdict, deque
 from dataclasses import dataclass, fields
@@ -45,6 +46,18 @@ from vllm.v1.request import Request, RequestStatus, StreamingUpdate
 from vllm.v1.sample.rejection_sampler import PLACEHOLDER_TOKEN_ID
 from vllm.v1.spec_decode.metrics import SpecDecodingStats
 from vllm.v1.utils import ConstantList, record_function_or_nullcontext
+
+
+def _get_int_env(name: str, default: int) -> int:
+    value = os.getenv(name)
+    if value is None:
+        return default
+    try:
+        return int(value)
+    except ValueError:
+        logger.warning("Invalid integer env %s=%s, fallback to %d.", name,
+                       value, default)
+        return default
 
 
 # `spec_manager_map` in single_type_kv_cache_manager is a module-level dict
@@ -430,8 +443,37 @@ class RecomputeScheduler(Scheduler):
         # Next, schedule the WAITING requests.
         if not preempted_reqs and not recomputed_reqs and self._pause_state == PauseState.UNPAUSED:
             step_skipped_waiting = create_request_queue(self.policy)
+            waiting_token_budget = token_budget
+            if (
+                self.scheduler_config.async_scheduling
+                and self.vllm_config.speculative_config is not None
+                and self.vllm_config.speculative_config.method == "mtp"
+            ):
+                prefill_budget_divisor = max(
+                    1,
+                    _get_int_env("VLLM_ASCEND_MTP_PREFILL_BUDGET_DIVISOR", 4),
+                )
+                prefill_budget_min_tokens = max(
+                    1,
+                    _get_int_env("VLLM_ASCEND_MTP_PREFILL_BUDGET_MIN", 1024),
+                )
+                decode_active = any(not req.is_prefill_chunk
+                                    for req in self.running)
+                if decode_active:
+                    waiting_token_budget = min(
+                        waiting_token_budget,
+                        max(
+                            prefill_budget_min_tokens,
+                            self.max_num_scheduled_tokens //
+                            prefill_budget_divisor,
+                        ),
+                    )
 
-            while (self.waiting or self.skipped_waiting) and token_budget > 0:
+            while (
+                (self.waiting or self.skipped_waiting)
+                and token_budget > 0
+                and waiting_token_budget > 0
+            ):
                 if len(self.running) == self.max_num_running_reqs:
                     break
 
@@ -537,12 +579,17 @@ class RecomputeScheduler(Scheduler):
 
                     # chunked prefill has to be enabled explicitly to allow
                     # pooling requests to be chunked
-                    if not self.scheduler_config.enable_chunked_prefill and num_new_tokens > token_budget:
+                    if (
+                        not self.scheduler_config.enable_chunked_prefill
+                        and num_new_tokens >
+                        min(token_budget, waiting_token_budget)
+                    ):
                         # If chunked_prefill is disabled,
                         # we can stop the scheduling here.
                         break
 
-                    num_new_tokens = min(num_new_tokens, token_budget)
+                    num_new_tokens = min(num_new_tokens, token_budget,
+                                         waiting_token_budget)
                     assert num_new_tokens > 0
 
                     # Schedule encoder inputs.
@@ -678,6 +725,7 @@ class RecomputeScheduler(Scheduler):
                 req_to_new_blocks[request_id] = self.kv_cache_manager.get_blocks(request_id)
                 num_scheduled_tokens[request_id] = num_new_tokens
                 token_budget -= num_new_tokens
+                waiting_token_budget -= num_new_tokens
                 request.status = RequestStatus.RUNNING
                 request.num_computed_tokens = num_computed_tokens
                 # Encoder-related.

@@ -69,6 +69,15 @@ def rotate_activation(x: torch.Tensor, hadamard: torch.Tensor) -> torch.Tensor:
     return hadamard_transform_ref(x, hadamard=hadamard, scale=hidden_size**-0.5)
 
 
+def _q_rms(q: torch.Tensor, variance_epsilon: float) -> torch.Tensor:
+    if triton_q_rms is not None:
+        return triton_q_rms(q, variance_epsilon)
+
+    q_fp32 = q.float()
+    variance = q_fp32.pow(2).mean(dim=-1, keepdim=True)
+    return (q_fp32 * torch.rsqrt(variance + variance_epsilon)).to(q.dtype)
+
+
 def pad_to_blocks(x: torch.Tensor, length_list: torch.Tensor, block_size: int = 128):
     """
     Pads a ragged/packed tensor into fixed-size blocks.
@@ -1505,7 +1514,7 @@ class AscendDSAImpl(DSAAttentionImpl):
         # q
         qr = self.q_norm(self.wq_a(hidden_states))
         q = self.wq_b(qr).unflatten(-1, (self.n_local_heads, self.head_dim))
-        q = triton_q_rms(q, self.eps)
+        q = _q_rms(q, self.eps)
 
         torch.ops._C_ascend.inplace_partial_rotary_mul(
             q.unsqueeze(1),
@@ -1704,7 +1713,7 @@ class AscendDSAImpl(DSAAttentionImpl):
             q = self.wq_b(q).unflatten(-1, (self.n_local_heads, self.head_dim))
             qr_pertoken_scale = None
 
-        q = triton_q_rms(q, self.eps)
+        q = _q_rms(q, self.eps)
 
         torch.ops._C_ascend.inplace_partial_rotary_mul(
             q.unsqueeze(1),

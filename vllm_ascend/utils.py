@@ -1428,6 +1428,24 @@ def parse_layer_idx(prefix: str) -> int | None:
     return int(match.group(1)) if match else None
 
 
+@lru_cache(maxsize=1)
+def _libc_getenv():
+    import ctypes
+
+    libc = ctypes.CDLL(None)
+    libc.getenv.argtypes = [ctypes.c_char_p]
+    libc.getenv.restype = ctypes.c_char_p
+    return libc.getenv
+
+
+def get_c_env(name: str, encoding: str = "utf-8") -> str | None:
+    """Read an environment variable through libc getenv."""
+    raw = _libc_getenv()(name.encode(encoding))
+    if raw is None:
+        return None
+    return raw.decode(encoding)
+
+
 def get_compressed_pos_and_indices(
     num_computed_tokens: np.ndarray,
     num_scheduled_tokens: np.ndarray,

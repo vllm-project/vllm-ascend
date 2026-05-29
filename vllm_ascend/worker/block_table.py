@@ -227,7 +227,8 @@ class BlockTable:
             block_numbers = self.block_table.np.ravel()[block_table_indices]
             block_offsets = positions % self.block_size
             np.add(block_numbers * self.block_size, block_offsets, out=self.slot_mapping.np[: req_indices.shape[0]])
-            self.slot_mapping.copy_to_gpu(req_indices.shape[0])
+
+        self.slot_mapping.copy_to_gpu(req_indices.shape[0])
 
     def commit_block_table(self, num_reqs: int) -> None:
         self.block_table.copy_to_gpu(num_reqs)

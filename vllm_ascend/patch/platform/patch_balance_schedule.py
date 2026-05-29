@@ -1,4 +1,5 @@
 # mypy: ignore-errors
+import os
 import signal
 import time
 
@@ -31,6 +32,18 @@ _ORIGINAL_SCHEDULER = Scheduler
 def _balance_scheduling_enabled(vllm_config) -> bool:
     additional_config = getattr(vllm_config, "additional_config", None) or {}
     return bool(additional_config.get("enable_balance_scheduling", False))
+
+
+def _get_int_env(name: str, default: int) -> int:
+    value = os.getenv(name)
+    if value is None:
+        return default
+    try:
+        return int(value)
+    except ValueError:
+        logger.warning("Invalid integer env %s=%s, fallback to %d.", name,
+                       value, default)
+        return default
 
 
 class BalanceScheduler(Scheduler):
@@ -276,8 +289,33 @@ class BalanceScheduler(Scheduler):
             # Use a temporary RequestQueue to collect requests that need to be
             # skipped and put back at the head of the waiting queue later
             skipped_waiting_requests = create_request_queue(self.policy)
+            waiting_token_budget = token_budget
+            if (
+                self.scheduler_config.async_scheduling
+                and self.vllm_config.speculative_config is not None
+                and self.vllm_config.speculative_config.method == "mtp"
+            ):
+                prefill_budget_divisor = max(
+                    1,
+                    _get_int_env("VLLM_ASCEND_MTP_PREFILL_BUDGET_DIVISOR", 4),
+                )
+                prefill_budget_min_tokens = max(
+                    1,
+                    _get_int_env("VLLM_ASCEND_MTP_PREFILL_BUDGET_MIN", 1024),
+                )
+                decode_active = any(not req.is_prefill_chunk
+                                    for req in self.running)
+                if decode_active:
+                    waiting_token_budget = min(
+                        waiting_token_budget,
+                        max(
+                            prefill_budget_min_tokens,
+                            self.max_num_scheduled_tokens //
+                            prefill_budget_divisor,
+                        ),
+                    )
 
-            while self.waiting and token_budget > 0:
+            while self.waiting and token_budget > 0 and waiting_token_budget > 0:
                 if len(self.running) == self.max_num_running_reqs:
                     break
 
@@ -404,12 +442,17 @@ class BalanceScheduler(Scheduler):
 
                     # chunked prefill has to be enabled explicitly to allow
                     # pooling requests to be chunked
-                    if not self.scheduler_config.enable_chunked_prefill and num_new_tokens > token_budget:
+                    if (
+                        not self.scheduler_config.enable_chunked_prefill
+                        and num_new_tokens >
+                        min(token_budget, waiting_token_budget)
+                    ):
                         # If chunked_prefill is disabled,
                         # we can stop the scheduling here.
                         break
 
-                    num_new_tokens = min(num_new_tokens, token_budget)
+                    num_new_tokens = min(num_new_tokens, token_budget,
+                                         waiting_token_budget)
                     assert num_new_tokens > 0
 
                     # Schedule encoder inputs.
@@ -514,6 +557,7 @@ class BalanceScheduler(Scheduler):
                 req_to_new_blocks[request_id] = self.kv_cache_manager.get_blocks(request_id)
                 num_scheduled_tokens[request_id] = num_new_tokens
                 token_budget -= num_new_tokens
+                waiting_token_budget -= num_new_tokens
                 request.status = RequestStatus.RUNNING
                 request.num_computed_tokens = num_computed_tokens
                 # Encoder-related.

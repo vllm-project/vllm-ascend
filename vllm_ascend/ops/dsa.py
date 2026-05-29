@@ -194,7 +194,7 @@ def dsa_forward(
         attn_metadata = forward_context.attn_metadata
 
     if attn_metadata is None:
-        self.dsa_attn.impl.dsa_warmup_with_multistream(hidden_states)
+        _profile_dsa_impl(self.dsa_attn.impl, hidden_states, output)
         return
 
     kv_cache = _build_kv_cache(self, forward_context)
@@ -212,6 +212,17 @@ def dsa_forward_fake(
     layer_name: str,
 ) -> None:
     return
+
+
+def _profile_dsa_impl(
+    impl,
+    hidden_states: torch.Tensor,
+    output: torch.Tensor,
+) -> None:
+    warmup = getattr(impl, "dsa_warmup_with_multistream", None)
+    if warmup is not None:
+        warmup(hidden_states)
+    output.fill_(0)
 
 
 direct_register_custom_op(

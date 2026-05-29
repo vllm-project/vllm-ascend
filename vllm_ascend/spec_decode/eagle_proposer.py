@@ -111,6 +111,17 @@ class _FusedModelWithMTP:
         self.next_token_ids_buf.copy_(next_token_ids)
         return self.next_token_ids_buf
 
+    def _get_draft_hidden_states(self, raw_hidden: torch.Tensor, num_tokens: int) -> torch.Tensor:
+        get_target_hidden_states = getattr(self.raw_model, "get_mtp_target_hidden_states", None)
+        if get_target_hidden_states is None:
+            return raw_hidden
+
+        draft_hidden_states = get_target_hidden_states()
+        if draft_hidden_states is None:
+            return raw_hidden
+
+        return draft_hidden_states[:num_tokens]
+
     def _update_token_indices_to_sample(
         self,
         active_req_mask: torch.Tensor,
@@ -299,8 +310,9 @@ class _FusedModelWithMTP:
                 sample_logits,
                 runtime_positions,
             )
+            draft_hidden_states = self._get_draft_hidden_states(raw_hidden, num_tokens)
             all_draft_ids = self.drafter.propose_all_in_graph(
-                hidden_states=raw_hidden,
+                hidden_states=draft_hidden_states,
                 input_ids=input_ids,
                 positions=positions,
                 logits_indices=self.logits_indices_buf,

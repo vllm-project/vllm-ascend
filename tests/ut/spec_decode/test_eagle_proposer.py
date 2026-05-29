@@ -15,6 +15,68 @@ from vllm_ascend.spec_decode.eagle_proposer import (
 )
 
 
+class TestFusedModelWithMTP(unittest.TestCase):
+
+    @patch("vllm_ascend.spec_decode.eagle_proposer.get_forward_context")
+    def test_passes_pre_hc_hidden_states_to_drafter(self, mock_get_forward_context):
+        class _DummyModel(torch.nn.Module):
+            def __init__(self):
+                super().__init__()
+                self.hidden_states = torch.arange(16, dtype=torch.float32).view(4, 4)
+                self.mtp_hidden_states = torch.arange(64, dtype=torch.float32).view(4, 16)
+                self.compute_logits_input_shape = None
+
+            def forward(self, **_kwargs):
+                return self.hidden_states
+
+            def compute_logits(self, hidden_states: torch.Tensor):
+                self.compute_logits_input_shape = hidden_states.shape
+                return torch.zeros((hidden_states.shape[0], 8), dtype=hidden_states.dtype)
+
+            def get_mtp_target_hidden_states(self):
+                return self.mtp_hidden_states
+
+        raw_model = _DummyModel()
+        drafter = SimpleNamespace(
+            num_speculative_tokens=1,
+            runner=SimpleNamespace(
+                max_num_reqs=2,
+                max_num_tokens=4,
+                input_batch=SimpleNamespace(
+                    sampling_metadata=SimpleNamespace(temperature=None),
+                ),
+            ),
+            device=torch.device("cpu"),
+            hidden_size=16,
+            dtype=torch.float32,
+            propose_all_in_graph=MagicMock(
+                return_value=torch.tensor([[7], [8]], dtype=torch.int64),
+            ),
+        )
+        fused_model = _FusedModelWithMTP(raw_model, drafter)
+        fused_model.num_reqs_buf[0] = 2
+        fused_model.sample_logits_indices_buf[:4] = torch.arange(4, dtype=torch.int64)
+        fused_model.bonus_row_indices_buf[:2] = torch.tensor([1, 3], dtype=torch.int64)
+        fused_model.target_row_indices_buf[:2] = torch.tensor([0, 2], dtype=torch.int64)
+        fused_model.cu_num_draft_tokens_buf[:2] = torch.tensor([1, 2], dtype=torch.int32)
+        fused_model.draft_token_ids_flat_buf[:2] = torch.tensor([0, 1], dtype=torch.int64)
+        fused_model.spec_decode_token_ids_buf[:2, :1] = torch.tensor([[0], [1]], dtype=torch.int64)
+        mock_get_forward_context.return_value = SimpleNamespace(
+            capturing=True,
+            flash_comm_v1_enabled=False,
+        )
+
+        fused_model(
+            input_ids=torch.tensor([11, 12, 13, 14], dtype=torch.int64),
+            positions=torch.tensor([0, 1, 2, 3], dtype=torch.int32),
+        )
+
+        call_kwargs = drafter.propose_all_in_graph.call_args.kwargs
+        self.assertEqual(raw_model.compute_logits_input_shape, torch.Size([4, 4]))
+        self.assertEqual(call_kwargs["hidden_states"].shape, torch.Size([4, 16]))
+        self.assertTrue(torch.equal(call_kwargs["hidden_states"], raw_model.mtp_hidden_states))
+
+
 class TestEagleProposerInitialization(TestBase):
     def setUp(self):
         self.vllm_config = MagicMock(spec=VllmConfig)

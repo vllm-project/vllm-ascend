@@ -93,7 +93,7 @@ from vllm.v1.worker.utils import AttentionGroup, select_common_block_size
 # yapf: enable
 from vllm_ascend.ascend_config import get_ascend_config
 from vllm_ascend.attention.attention_v1 import AscendAttentionState
-from vllm_ascend.attention.dsa_v1 import AscendDSAMetadataBuilder
+from vllm_ascend.attention.dsa_v1 import AscendDSABackend, AscendDSAMetadataBuilder
 from vllm_ascend.attention.utils import AscendCommonAttentionMetadata, using_paged_attention
 
 # yapf conflicts with isort for this block
@@ -126,6 +126,7 @@ from vllm_ascend.utils import (
     check_gdn_layer,
     enable_sp,
     enable_sp_by_pass,
+    get_c_env,
     get_compressed_pos_and_indices,
     global_stream,
     lmhead_tp_enable,
@@ -225,6 +226,116 @@ class ExecuteModelState(NamedTuple):
 
 
 class NPUModelRunner(GPUModelRunner):
+    @staticmethod
+    def _get_sparse_head_dim(hf_text_config: Any) -> tuple[int, int, int]:
+        if hasattr(hf_text_config, "compress_ratios"):
+            kv_lora_rank = hf_text_config.head_dim
+        else:
+            kv_lora_rank = hf_text_config.kv_lora_rank
+
+        return (
+            kv_lora_rank,
+            hf_text_config.qk_rope_head_dim,
+            hf_text_config.index_head_dim,
+        )
+
+    def _select_attn_backend(self) -> type[AttentionBackend]:
+        if self.use_compress:
+            return AscendDSABackend
+
+        return get_attn_backend(
+            0,
+            self.dtype,
+            None,
+            use_mla=self.model_config.use_mla,
+            use_sparse=self.use_sparse,
+            use_mm_prefix=self.model_config is not None
+            and self.model_config.is_mm_prefix_lm,
+        )
+
+    @staticmethod
+    def _enpu_enabled() -> bool:
+        enpu = get_c_env("ENPU_ENABLE")
+        return enpu is not None and enpu.lower() == "true"
+
+    def _get_positions(self, num_tokens: Any):
+        if self.uses_mrope:
+            positions = self.mrope_positions.gpu
+        elif self.uses_xdrope_dim > 0:
+            positions = self.xdrope_positions.gpu
+        else:
+            raw_positions = self.positions
+            positions = getattr(raw_positions, "gpu", raw_positions)
+
+        if isinstance(num_tokens, int) and positions.ndim > 1:
+            return positions[:, :num_tokens]
+        return positions[:num_tokens] if isinstance(num_tokens, int) else positions[num_tokens]
+
+    def _get_drafter_target_hidden_states(
+        self,
+        hidden_states: torch.Tensor,
+    ) -> torch.Tensor:
+        get_target_hidden_states = getattr(
+            self.model, "get_mtp_target_hidden_states", None
+        )
+        if get_target_hidden_states is None:
+            return hidden_states
+
+        draft_hidden_states = get_target_hidden_states()
+        if draft_hidden_states is None:
+            return hidden_states
+
+        expected_hidden_size = getattr(self.drafter, "hidden_size", None)
+        if expected_hidden_size is None:
+            return draft_hidden_states
+
+        if draft_hidden_states.shape[-1] == expected_hidden_size:
+            return draft_hidden_states
+        if hidden_states.shape[-1] == expected_hidden_size:
+            return hidden_states
+        return draft_hidden_states
+
+    def _get_cumsum_and_arange(
+        self,
+        num_tokens: np.ndarray,
+        arange_out: np.ndarray | None = None,
+        cumsum_dtype: np.dtype | None = None,
+    ):
+        if arange_out is not None:
+            return super()._get_cumsum_and_arange(num_tokens, arange_out, cumsum_dtype)
+
+        arange_out = self.query_pos.np
+        cu_num_tokens = super()._get_cumsum_and_arange(num_tokens, arange_out, cumsum_dtype)
+        total_num_tokens = int(cu_num_tokens[-1])
+        return cu_num_tokens, arange_out[:total_num_tokens]
+
+    def _preprocess(
+        self,
+        scheduler_output: SchedulerOutput,
+        num_input_tokens: int,
+        intermediate_tensors: IntermediateTensors | None = None,
+    ) -> tuple[
+        torch.Tensor | None,
+        torch.Tensor | None,
+        torch.Tensor,
+        IntermediateTensors | None,
+        dict[str, Any],
+        ECConnectorOutput | None,
+    ]:
+        positions = self.positions
+        if not hasattr(positions, "gpu"):
+            return GPUModelRunner._preprocess(
+                self, scheduler_output, num_input_tokens, intermediate_tensors
+            )
+
+        self.positions = positions.gpu
+        try:
+            return GPUModelRunner._preprocess(
+                self, scheduler_output, num_input_tokens, intermediate_tensors
+            )
+        finally:
+            self.positions = positions
+
     def __init__(self, vllm_config: VllmConfig, device: torch.device):
         # TODO(qcs): These manual pad and unpad for GPUModelRunner are
         # used to expand some buffers, which need to be reverted after
@@ -288,10 +399,8 @@ class NPUModelRunner(GPUModelRunner):
             vllm_config.model_config.hf_text_config, "index_topk"
         )
         if self.use_sparse:
-            self.sparse_head_dim = (
-                self.model_config.hf_text_config.kv_lora_rank,
-                self.model_config.hf_text_config.qk_rope_head_dim,
-                self.model_config.hf_text_config.index_head_dim,
+            self.sparse_head_dim = self._get_sparse_head_dim(
+                self.model_config.hf_text_config
             )
         # dsa c8
         self.use_sparse_c8_indexer = self.ascend_config.enable_sparse_c8
@@ -301,27 +410,7 @@ class NPUModelRunner(GPUModelRunner):
 
         self.use_compress = hasattr(self.vllm_config.model_config.hf_config,
                                     "compress_ratios")
-        if self.use_compress:
-            self.attn_backend = get_attn_backend(
-                0,
-                self.dtype,
-                None,
-                self.block_size,
-                use_mla=self.model_config.use_mla,
-                use_sparse=self.use_sparse,
-                use_compress=self.use_compress,
-                use_mm_prefix=self.model_config is not None
-                and self.model_config.is_mm_prefix_lm)
-        else:
-            self.attn_backend = get_attn_backend(
-                0,
-                self.dtype,
-                None,
-                self.block_size,
-                use_mla=self.model_config.use_mla,
-                use_sparse=self.use_sparse,
-                use_mm_prefix=self.model_config is not None
-                and self.model_config.is_mm_prefix_lm)
+        self.attn_backend = self._select_attn_backend()
 
         try:
             self.dcp_size = get_dcp_group().world_size
@@ -353,7 +442,18 @@ class NPUModelRunner(GPUModelRunner):
             )
             # TODO(zhenwenqi) after https://github.com/vllm-project/vllm/pull/28988 is merged, we can delete this
             self.input_ids = self._make_buffer(max_buffer_num_tokens, dtype=torch.int32)
-            self.positions = self._make_buffer(max_buffer_num_tokens, dtype=torch.int64)
+
+        # The Ascend runner still uses CPU/GPU mirrored buffers in its custom
+        # prepare-input and attention-metadata paths.
+        self.positions = self._make_buffer(max_buffer_num_tokens, dtype=torch.int64)
+        self.seq_lens = self._make_buffer(self.max_num_reqs, dtype=torch.int32)
+
+        self.use_eagle = (
+            vllm_config.speculative_config.use_eagle()
+            if vllm_config.speculative_config
+            else None
+        )
+        self.enable_enpu = self._enpu_enabled()
 
         self._set_up_drafter()
 
@@ -548,6 +648,12 @@ class NPUModelRunner(GPUModelRunner):
         block_reason = self._get_fused_mtp_draft_path_block_reason(
             grammar_output, spec_decode_metadata)
         return block_reason is None
+
+    def _should_run_separate_drafter_dummy(
+        self,
+        fused_mtp_graph_batch: bool,
+    ) -> bool:
+        return self._fused_mtp_wrapper is None or not fused_mtp_graph_batch
 
     def _get_fused_mtp_sampling_block_reason(self, sampling_metadata) -> str | None:
         if sampling_metadata.all_greedy:
@@ -1291,10 +1397,9 @@ class NPUModelRunner(GPUModelRunner):
             num_scheduled_tokens[:num_reqs], self.arange_np[:num_reqs],
             self.use_compress,
             self.kv_cache_config.kv_cache_groups)
-        self.input_batch.block_table.compute_slot_mapping(
+        self.input_batch.block_table.compute_slot_mapping_draft(
             req_indices, positions_np, positions_compressed_list,
             req_indices_compressed_list)
-        self.input_batch.block_table.commit_slot_mapping(total_num_scheduled_tokens)
 
         if self.use_cp:
             self.pcp_manager.init_batch_info(
@@ -1420,7 +1525,12 @@ class NPUModelRunner(GPUModelRunner):
         self.query_start_loc.gpu[num_reqs + 1 :].fill_(-1)
 
         # Copy the tensors to the NPU.
-        self._prepare_input_ids(scheduler_output, total_num_scheduled_tokens, cu_num_tokens)
+        self._prepare_input_ids(
+            scheduler_output,
+            num_reqs,
+            total_num_scheduled_tokens,
+            cu_num_tokens,
+        )
         # Calculate M-RoPE positions.
         # Only relevant for models using M-RoPE (e.g, Qwen2-VL)
         if self.uses_mrope:
@@ -1696,7 +1806,6 @@ class NPUModelRunner(GPUModelRunner):
                 )
                 assert self.drafter is not None
                 next_token_ids, valid_sampled_tokens_count = self.drafter.prepare_next_token_ids_padded(
-                    common_attn_metadata,
                     sampled_token_ids,
                     self.requests,
                     self.input_batch,
@@ -1720,13 +1829,14 @@ class NPUModelRunner(GPUModelRunner):
                 num_decode_reqs = 0
 
             num_rejected_tokens_gpu = None
+            draft_hidden_states = self._get_drafter_target_hidden_states(hidden_states)
             if spec_decode_metadata is None:
                 # update pcp related params
                 if self.pcp_size > 1:
                     token_indices_to_sample = query_start_loc_pcp_full[1 : num_reqs + 1] - 1
                     target_token_ids = input_ids_pcp_full[:num_scheduled_tokens]
                     target_positions = self._get_positions(num_scheduled_tokens)
-                    target_hidden_states = hidden_states
+                    target_hidden_states = draft_hidden_states
                     if self.use_aux_hidden_state_outputs:
                         target_hidden_states = torch.cat([h for h in aux_hidden_states], dim=-1)
                 else:
@@ -1737,7 +1847,7 @@ class NPUModelRunner(GPUModelRunner):
                     if self.use_aux_hidden_state_outputs:
                         target_hidden_states = torch.cat([h[:num_scheduled_tokens] for h in aux_hidden_states], dim=-1)
                     else:
-                        target_hidden_states = hidden_states[:num_scheduled_tokens]
+                        target_hidden_states = draft_hidden_states[:num_scheduled_tokens]
             else:
                 if self.pcp_size > 1:
                     assert common_attn_metadata is not None
@@ -1763,7 +1873,7 @@ class NPUModelRunner(GPUModelRunner):
                 if self.pcp_size > 1:
                     target_token_ids = input_ids_pcp_full[token_indices]
                     target_positions = positions
-                    target_hidden_states = hidden_states
+                    target_hidden_states = draft_hidden_states
                     if self.use_aux_hidden_state_outputs:
                         target_hidden_states = torch.cat([h for h in aux_hidden_states], dim=-1)
                 else:
@@ -1772,7 +1882,7 @@ class NPUModelRunner(GPUModelRunner):
                     if self.use_aux_hidden_state_outputs:
                         target_hidden_states = torch.cat([h[token_indices] for h in aux_hidden_states], dim=-1)
                     else:
-                        target_hidden_states = hidden_states[token_indices]
+                        target_hidden_states = draft_hidden_states[token_indices]
             assert self.drafter is not None
             draft_token_ids = self.drafter._propose(
                 target_token_ids=target_token_ids,
@@ -2085,6 +2195,21 @@ class NPUModelRunner(GPUModelRunner):
                 self._fused_mtp_wrapper.capture_mtp_enabled = (
                     fused_mtp_graph_batch)
                 if fused_mtp_graph_batch:
+                    if not getattr(self, "_fused_mtp_full_graph_active_logged",
+                                   False):
+                        self._fused_mtp_full_graph_active_logged = True
+                        logger.info(
+                            "Fused MTP full graph active: "
+                            "async_scheduling=%s cudagraph_mode=%s "
+                            "batch=%s num_tokens_padded=%s num_reqs=%s "
+                            "num_spec_tokens=%s",
+                            self.use_async_scheduling,
+                            cudagraph_mode,
+                            batch_desc,
+                            num_tokens_padded,
+                            num_reqs,
+                            self.num_spec_tokens,
+                        )
                     self._fused_mtp_runtime_common_attn_metadata = (
                         spec_decode_common_attn_metadata)
                 self._prepare_fused_mtp_runtime_buffers(
@@ -3883,9 +4008,13 @@ class NPUModelRunner(GPUModelRunner):
             dummy_compute_logits(hidden_states)
 
             if self.drafter:
-                if self._fused_mtp_wrapper is not None:
+                if not self._should_run_separate_drafter_dummy(
+                    fused_mtp_graph_batch
+                ):
                     dummy_drafter_compute_logits(hidden_states)
                 else:
+                    # Warm the draft model outside fused ACL graph capture so
+                    # AOT compile does not synchronize while the stream is captured.
                     self.drafter.dummy_run(
                         num_tokens=num_tokens_padded,
                         with_prefill=with_prefill,
@@ -3993,19 +4122,38 @@ class NPUModelRunner(GPUModelRunner):
         if self.compilation_config.cudagraph_mode.has_full_cudagraphs():
             self.update_stream: torch.npu.Stream = torch.npu.Stream()
             runnable = self.model
-            if (
+            fused_mtp_wrapper_enabled = (
                 self.speculative_config is not None
                 and self.speculative_config.method == "mtp"
                 and self.drafter is not None
                 and isinstance(self.drafter, AscendEagleProposer)
                 and get_pp_group().is_last_rank
-            ):
+            )
+            if fused_mtp_wrapper_enabled:
                 self._fused_mtp_wrapper = _FusedModelWithMTP(self.model, self.drafter)
                 runnable = self._fused_mtp_wrapper
                 self.drafter.update_stream = self.update_stream
             else:
                 self._fused_mtp_wrapper = None
-            self.model = ACLGraphWrapper(runnable, self.vllm_config, runtime_mode=CUDAGraphMode.FULL)
+            logger.info(
+                "Fused MTP wrapper %s: async_scheduling=%s "
+                "full_graph_enabled=%s cudagraph_mode=%s method=%s "
+                "has_drafter=%s pp_last_rank=%s",
+                "enabled" if fused_mtp_wrapper_enabled else "disabled",
+                self.use_async_scheduling,
+                self._fused_mtp_full_graph_enabled(),
+                self.compilation_config.cudagraph_mode,
+                getattr(self.speculative_config, "method", None),
+                self.drafter is not None,
+                get_pp_group().is_last_rank,
+            )
+            self.model = ACLGraphWrapper(
+                runnable,
+                self.vllm_config,
+                runtime_mode=CUDAGraphMode.FULL,
+                use_eagle=self.use_eagle,
+                enable_enpu=self.enable_enpu,
+            )
 
     def initialize_kv_cache(self, kv_cache_config: KVCacheConfig) -> None:
         """
@@ -4833,13 +4981,13 @@ class NPUModelRunner(GPUModelRunner):
             if self.speculative_config:
                 set_draft_graph_params(self.cudagraph_batch_sizes)
 
-    def capture_model(self) -> None:
+    def capture_model(self) -> int:
         gpu_model_runner_cls = next((cls for cls in self.__class__.__mro__ if cls.__name__ == "GPUModelRunner"), None)
         if gpu_model_runner_cls is None:
             raise TypeError("Could not find GPUModelRunner in the MRO. The class hierarchy may have changed.")
         parent_module_name = gpu_model_runner_cls.__module__
         with _torch_cuda_wrapper(), _replace_gpu_model_runner_function_wrapper(parent_module_name):
-            GPUModelRunner.capture_model(self)
+            return GPUModelRunner.capture_model(self)
 
     def _prepare_multimodal_fields(self):
         """
