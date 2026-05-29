@@ -257,7 +257,7 @@ class TestKVCacheSendingThread(unittest.TestCase):
         cache = transferred.reshape(num_blocks, block_size, tp_num_need_pulls * feature_size).clone()
         expected = transferred.transpose(1, 2).contiguous().reshape_as(cache)
 
-        thread = KVCacheSendingThread.__new__(KVCacheSendingThread)
+        thread = KVCacheRecvingThread.__new__(KVCacheRecvingThread)
         thread.kv_caches = {"layer.0": (cache, cache.clone())}
         group_kv_caches = {"layer.0": (cache.clone(), cache.clone())}
 
