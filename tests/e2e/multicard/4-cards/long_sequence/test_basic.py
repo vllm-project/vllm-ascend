@@ -25,6 +25,7 @@ from PIL import Image
 from vllm import SamplingParams
 
 from tests.e2e.conftest import VllmRunner, wait_until_npu_memory_free
+from vllm_ascend.utils import vllm_version_is
 
 os.environ["HCCL_BUFFSIZE"] = "768"
 
@@ -119,6 +120,7 @@ def test_models_pcp_dcp_basic():
     torch.npu.device_count() < 4,
     reason="DeepSeek V4 DSA CP e2e test requires at least 4 NPUs.",
 )
+@pytest.mark.skipif(not vllm_version_is("0.20.2"), reason="broken in main")
 def test_deepseek_v4_w4a8_dsa_cp_basic_greedy():
     prompts = [
         "Hello, my name is",
