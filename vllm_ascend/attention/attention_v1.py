@@ -728,10 +728,9 @@ class AscendAttentionBackendImpl(AttentionImpl):
             }
 
             # change key/value shape
-            if attn_metadata.attn_state == AscendAttentionState.DecodeOnly:
-                _, block_size, _, _ = self.key_cache.shape  # type: ignore
-                key = self._nz_5d_view(self.key_cache, block_size)
-                value = self._nz_5d_view(self.value_cache, block_size)
+            _, block_size, _, _ = self.key_cache.shape  # type: ignore
+            key = self._nz_5d_view(self.key_cache, block_size)
+            value = self._nz_5d_view(self.value_cache, block_size)
 
             # TODO: change layerout from BNSD to TND.
             input_layout = "BNSD"
@@ -1439,7 +1438,7 @@ class AscendC8AttentionBackendImpl(AscendAttentionBackendImpl):
                     return output
                 elif attn_metadata.attn_state == AscendAttentionState.DecodeOnly:
                     return self._forward_c8_decode(query, attn_metadata, output, layer)
-                
+
     def _nz_5d_view(self, cache: torch.Tensor, block_size: int) -> torch.Tensor:
         """View a KV cache tensor in NZ 5D layout: (num_blocks, num_kv_heads, head_size//nz, block_size, nz)."""
         NZ_FMT_LAST_DIM = 32
@@ -1492,7 +1491,6 @@ class AscendC8AttentionBackendImpl(AscendAttentionBackendImpl):
         """Gather paged INT8 KV blocks and dequantize."""
         batch_size = block_table.shape[0]
         max_blocks_per_seq = block_table.shape[1]
-        num_blocks = key.shape[0]
 
         # NZ 5D view: (num_blocks, num_kv_heads, head_size//nz, block_size, nz)
         block_size = key.shape[3]
@@ -1506,11 +1504,16 @@ class AscendC8AttentionBackendImpl(AscendAttentionBackendImpl):
         gathered_k = key_nz[flat_ids]
         gathered_v = value_nz[flat_ids]
         # NZ→ND conversion: permute (S, H, D//nz, nz) → reshape (S, H, D)
-        gathered_k = gathered_k.permute(0, 3, 1, 2, 4).contiguous().view(
-            batch_size, max_tokens_padded, self.num_kv_heads, self.head_size)
-        gathered_v = gathered_v.permute(0, 3, 1, 2, 4).contiguous().view(
-            batch_size, max_tokens_padded, self.num_kv_heads, self.head_size)
-
+        gathered_k = (
+            gathered_k.permute(0, 3, 1, 2, 4)
+            .contiguous()
+            .view(batch_size, max_tokens_padded, self.num_kv_heads, self.head_size)
+        )
+        gathered_v = (
+            gathered_v.permute(0, 3, 1, 2, 4)
+            .contiguous()
+            .view(batch_size, max_tokens_padded, self.num_kv_heads, self.head_size)
+        )
 
         seq_lens_t = torch.tensor(seq_lens, dtype=torch.long, device=key.device)
         positions = torch.arange(max_tokens_padded, dtype=torch.long, device=key.device)
@@ -1654,7 +1657,7 @@ class AscendC8AttentionBackendImpl(AscendAttentionBackendImpl):
                 num_block, blk_size, _, _ = self.key_cache.shape  # type: ignore[attr-defined]
                 paged_k = self._nz_5d_view(self.key_cache, blk_size)
                 paged_v = self._nz_5d_view(self.value_cache, blk_size)
-                
+
                 prefill_bt = attn_metadata.block_tables[num_decodes:]
                 prefill_sl = attn_metadata.seq_lens_list[num_decodes:]
                 prefill_k, prefill_v = self._dequant_paged_kv_to_dense(

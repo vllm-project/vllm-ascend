@@ -549,7 +549,7 @@ class AscendModelSlimConfig(QuantizationConfig):
             scheme = create_scheme_for_layer(self.quant_description, prefix, "attention", self.packed_modules_mapping)
             logger.debug("Select AscendKVCacheMethod for %s (layer=%s)", prefix, "AttentionLayerBase[fa/indexer]")
             return AscendKVCacheMethod(scheme)
-        elif isinstance(layer, AttentionLayerBase) and self.is_c8_quant_layer(prefix): 
+        elif isinstance(layer, AttentionLayerBase) and self.is_c8_quant_layer(prefix):
             from .methods.kv_c8 import AscendC8KVCacheAttentionMethod
 
             logger.debug("Select AscendKVCacheMethod(C8) for %s (layer=%s)", prefix, "AttentionLayerBase[C8]")
