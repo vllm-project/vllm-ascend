@@ -224,6 +224,16 @@ class AscendDSACPMetadataBuilder(AttentionMetadataBuilder[AscendDSAMetadata]):
                 )
                 for _ in range(spec_token_num)
             ]
+            self.spec_local_query_start_loc = [
+                torch.zeros(
+                    scheduler_config.max_num_seqs + 1, dtype=torch.int32, device=self.device
+                )
+                for _ in range(spec_token_num)
+            ]
+            self.spec_local_seq_lens = [
+                torch.zeros(scheduler_config.max_num_seqs, dtype=torch.int32, device=self.device)
+                for _ in range(spec_token_num)
+            ]
             self.decode_threshold += spec_token_num
             assert self.decode_threshold <= 16, (
                 f"decode_threshold exceeded \
@@ -411,6 +421,8 @@ class AscendDSACPMetadataBuilder(AttentionMetadataBuilder[AscendDSAMetadata]):
             query_start_loc=query_start_loc,
             seq_lens=self.seq_lens[:num_reqs],
             use_cache=False,
+            local_query_start_loc=self.spec_local_query_start_loc[draft_step - 1],
+            local_seq_lens=self.spec_local_seq_lens[draft_step - 1],
         )
         local_query_start_loc = local_query_start_loc.clone()
         local_seq_lens = local_seq_lens.clone()
@@ -511,6 +523,8 @@ class AscendDSACPMetadataBuilder(AttentionMetadataBuilder[AscendDSAMetadata]):
             query_start_loc=query_start_loc,
             seq_lens=self.seq_lens[:num_reqs],
             use_cache=not has_prefill,
+            local_query_start_loc=self.local_query_start_loc,
+            local_seq_lens=self.local_seq_lens,
         )
         local_seq_lens_q = local_query_start_loc[1 : num_reqs + 1] - local_query_start_loc[:num_reqs]
         # TODO(qcs): remove this .item() to avoid D2H synchronization.
@@ -598,7 +612,7 @@ class AscendDSACPMetadataBuilder(AttentionMetadataBuilder[AscendDSAMetadata]):
         )
 
     def _build_local_token_metadata(
-        self, num_reqs, num_input_tokens, input_positions, query_start_loc, seq_lens, use_cache
+        self, num_reqs, num_input_tokens, input_positions, query_start_loc, seq_lens, use_cache, local_query_start_loc, local_seq_lens
     ):
         """
         For example:
@@ -625,20 +639,20 @@ class AscendDSACPMetadataBuilder(AttentionMetadataBuilder[AscendDSAMetadata]):
         local_start = tp_rank * tokens_per_rank
         local_end = local_start + tokens_per_rank
 
-        self.local_query_start_loc.fill_(0)
-        self.local_seq_lens.fill_(0)
+        local_query_start_loc.fill_(0)
+        local_seq_lens.fill_(0)
 
         # Intersect each request's global token interval with this rank's local
         # token interval, then build the per-rank query_start_loc from lengths.
         local_query_start = torch.clamp(query_start_loc[:-1], min=local_start, max=local_end)
         local_query_end = torch.clamp(query_start_loc[1:], min=local_start, max=local_end)
         local_query_lens = local_query_end - local_query_start
-        self.local_query_start_loc[1 : num_reqs + 1] = torch.cumsum(local_query_lens, dim=0)
+        local_query_start_loc[1 : num_reqs + 1] = torch.cumsum(local_query_lens, dim=0)
 
         # For requests that cross the local slice boundary, offset removes the
         # tokens that live on later ranks so local_seq_lens matches local queries.
         offset = query_start_loc[1:] - local_query_end
-        self.local_seq_lens[:num_reqs] = (local_query_lens > 0) * (seq_lens - offset)
+        local_seq_lens[:num_reqs] = (local_query_lens > 0) * (seq_lens - offset)
 
         # RoPE tables are generated on the padded global positions first, then
         # sliced to this rank so local tokens keep their original positions.
@@ -653,8 +667,8 @@ class AscendDSACPMetadataBuilder(AttentionMetadataBuilder[AscendDSAMetadata]):
             local_end,
             tokens_per_rank,
             num_tokens_pad,
-            self.local_query_start_loc[: num_reqs + 1],
-            self.local_seq_lens[:num_reqs],
+            local_query_start_loc[: num_reqs + 1],
+            local_seq_lens[:num_reqs],
             local_cos,
             local_sin,
         )
