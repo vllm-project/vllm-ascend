@@ -123,11 +123,14 @@ def golden(query, key, value, state, beta, scale, seq_lens, indices, g, nat):
     return o, S
 
 
-@pytest.mark.parametrize("batch_size,mtp,nk,nv,dk,dv,num_slots", [
-    (1, 1, 8, 16, 128, 128, 444),
-    (2, 2, 8, 16, 128, 128, 444),
-    (4, 2, 4, 4, 64, 64, 32),
-])
+@pytest.mark.parametrize(
+    "batch_size,mtp,nk,nv,dk,dv,num_slots",
+    [
+        (1, 1, 8, 16, 128, 128, 444),
+        (2, 2, 8, 16, 128, 128, 444),
+        (4, 2, 4, 4, 64, 64, 32),
+    ],
+)
 def test_recurrent_gated_delta_rule_v310(batch_size, mtp, nk, nv, dk, dv, num_slots):
     torch.manual_seed(42)
     scale = dk**-0.5
@@ -146,15 +149,30 @@ def test_recurrent_gated_delta_rule_v310(batch_size, mtp, nk, nv, dk, dv, num_sl
 
     state_npu = state.clone().npu()
     out_npu = call_v310(
-        query.npu(), key.npu(), value.npu(), beta.npu(),
-        state_npu, seq_lens.npu(), indices.npu(), g.npu(), nat.npu(), scale,
+        query.npu(),
+        key.npu(),
+        value.npu(),
+        beta.npu(),
+        state_npu,
+        seq_lens.npu(),
+        indices.npu(),
+        g.npu(),
+        nat.npu(),
+        scale,
     )
 
     touched = indices.long()
     torch.testing.assert_close(
-        out_npu.float().cpu(), out_gold, rtol=3e-3, atol=2e-3, equal_nan=True,
+        out_npu.float().cpu(),
+        out_gold,
+        rtol=3e-3,
+        atol=2e-3,
+        equal_nan=True,
     )
     torch.testing.assert_close(
-        state_npu.float().cpu()[touched], state_gold.float()[touched],
-        rtol=3e-3, atol=2e-3, equal_nan=True,
+        state_npu.float().cpu()[touched],
+        state_gold.float()[touched],
+        rtol=3e-3,
+        atol=2e-3,
+        equal_nan=True,
     )
