@@ -2,29 +2,13 @@ import torch
 import torch.nn as nn
 import vllm
 from transformers import DeepseekV2Config, DeepseekV3Config
+from vllm.config import VllmConfig
 from vllm.model_executor.models.deepseek_mtp import DeepSeekMTP, DeepSeekMultiTokenPredictorLayer
-
-from vllm_ascend.utils import vllm_version_is
 
 MTP_ROT_WEIGHT_NAME = "rot.weight"
 
 
 def get_spec_layer_idx_from_weight_name(config: DeepseekV2Config | DeepseekV3Config, weight_name: str) -> int | None:
-    if hasattr(config, "num_nextn_predict_layers") and config.num_nextn_predict_layers > 0:
-        layer_idx = config.num_hidden_layers
-        for i in range(config.num_nextn_predict_layers):
-            if (
-                weight_name.startswith(f"model.layers.{layer_idx + i}.")
-                or weight_name.startswith(MTP_ROT_WEIGHT_NAME)
-                or weight_name.startswith(f"layers.{layer_idx + i}.")
-            ):
-                return layer_idx + i
-    return None
-
-
-def get_spec_layer_idx_from_weight_name_020(
-    config: DeepseekV2Config | DeepseekV3Config, weight_name: str
-) -> int | None:
     if hasattr(config, "num_nextn_predict_layers") and config.num_nextn_predict_layers > 0:
         layer_idx = config.num_hidden_layers
         for i in range(config.num_nextn_predict_layers):
@@ -34,25 +18,8 @@ def get_spec_layer_idx_from_weight_name_020(
 
 
 class AscendDeepSeekMultiTokenPredictorLayer(DeepSeekMultiTokenPredictorLayer):
-    def __init__(self, *args, **kwargs) -> None:
-        topk_indices_buffer = None
-        if len(args) >= 3:
-            vllm_config, topk_indices_buffer, prefix = args[0], args[1], args[2]
-        elif len(args) == 2:
-            vllm_config, prefix = args[0], args[1]
-            topk_indices_buffer = kwargs.pop("topk_indices_buffer", None)
-        elif "vllm_config" in kwargs and "prefix" in kwargs:
-            vllm_config = kwargs.pop("vllm_config")
-            prefix = kwargs.pop("prefix")
-            topk_indices_buffer = kwargs.pop("topk_indices_buffer", None)
-        else:
-            raise TypeError(f"Invalid arguments for {self.__class__.__name__}")
-
-        super().__init__(vllm_config, prefix)
-
-        if topk_indices_buffer is not None:
-            self.mtp_block.topk_indices_buffer = topk_indices_buffer
-
+    def __init__(self, vllm_config: VllmConfig, topk_indices_buffer: torch.Tensor, prefix: str) -> None:
+        super().__init__(vllm_config, topk_indices_buffer, prefix)
         quant_description = getattr(vllm_config.quant_config, "quant_description", None)
         self.is_rot_used = quant_description.get("is_rot_used", False) if quant_description is not None else False
         self.target_model_type = vllm_config.speculative_config.target_model_config.hf_text_config.model_type
@@ -90,14 +57,7 @@ class AscendDeepSeekMTP(DeepSeekMTP):
             return f"model.layers.{spec_layer}.rot.weight"
 
 
-if vllm_version_is("0.20.2"):
-    vllm.model_executor.models.deepseek_v2.get_spec_layer_idx_from_weight_name = get_spec_layer_idx_from_weight_name_020
-    vllm.model_executor.models.deepseek_mtp.get_spec_layer_idx_from_weight_name = (
-        get_spec_layer_idx_from_weight_name_020
-    )
-else:
-    vllm.model_executor.models.deepseek_v2.get_spec_layer_idx_from_weight_name = get_spec_layer_idx_from_weight_name
-    vllm.model_executor.models.deepseek_mtp.get_spec_layer_idx_from_weight_name = get_spec_layer_idx_from_weight_name
-
+vllm.model_executor.models.deepseek_v2.get_spec_layer_idx_from_weight_name = get_spec_layer_idx_from_weight_name
+vllm.model_executor.models.deepseek_mtp.get_spec_layer_idx_from_weight_name = get_spec_layer_idx_from_weight_name
 vllm.model_executor.models.deepseek_mtp.DeepSeekMultiTokenPredictorLayer = AscendDeepSeekMultiTokenPredictorLayer
 vllm.model_executor.models.deepseek_mtp.DeepSeekMTP = AscendDeepSeekMTP

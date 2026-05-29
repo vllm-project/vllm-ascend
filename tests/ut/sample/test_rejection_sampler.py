@@ -12,18 +12,20 @@
 # limitations under the License.
 # This file is a part of the vllm-ascend project.
 #
+from types import SimpleNamespace
 from unittest.mock import patch
 
 import torch
+from vllm.v1.outputs import SamplerOutput
 
 from tests.ut.base import TestBase
 from vllm_ascend.sample.rejection_sampler import (
+    RejectionSampler,
+    _should_use_cpu_strict_sampling,
     expand_batch_to_tokens,
     expand_pytorch,
     rejection_greedy_sample_pytorch,
-    rejection_random_sample_block_verify_pytorch,
     rejection_random_sample_pytorch,
-    sample_recovered_tokens_blockwise_pytorch,
     sample_recovered_tokens_pytorch,
     strict_rejection_sample_tensor,
 )
@@ -35,6 +37,7 @@ MAX_SPEC_LEN = 8  # Used as MAX_NUM_TOKENS in expand_batch_to_tokens
 
 
 def mock_pin_memory(original_func):
+
     def func_wo_pin_memory(*args, **kwargs):
         if kwargs.get("pin_memory", False):
             kwargs["pin_memory"] = False
@@ -44,6 +47,195 @@ def mock_pin_memory(original_func):
 
 
 class TestAscendRejectionSampler(TestBase):
+    def test_cpu_strict_sampling_is_skipped_with_seeded_runtime_state(self):
+        sampling_metadata = SimpleNamespace(
+            all_greedy=False,
+            max_num_logprobs=None,
+            seeds=torch.tensor([3], dtype=torch.int64),
+        )
+        logits = SimpleNamespace(
+            device=SimpleNamespace(type="npu"),
+        )
+
+        assert not _should_use_cpu_strict_sampling(
+            None,
+            logits,
+            sampling_metadata,
+            torch.tensor([10], dtype=torch.int32),
+            torch.tensor([0], dtype=torch.int32),
+        )
+
+    def test_cpu_strict_sampling_remains_available_without_seeded_runtime_state(
+        self,
+    ):
+        sampling_metadata = SimpleNamespace(
+            all_greedy=False,
+            max_num_logprobs=None,
+            seeds=None,
+        )
+        logits = SimpleNamespace(
+            device=SimpleNamespace(type="npu"),
+        )
+
+        assert _should_use_cpu_strict_sampling(
+            None,
+            logits,
+            sampling_metadata,
+            torch.tensor([10], dtype=torch.int32),
+            torch.tensor([0], dtype=torch.int32),
+        )
+
+    @patch("torch.arange", new=mock_pin_memory(torch.arange))
+    @patch("torch.ones", new=mock_pin_memory(torch.ones))
+    @patch("torch.full", new=mock_pin_memory(torch.full))
+    @patch("torch.tensor", new=mock_pin_memory(torch.tensor))
+    def test_forward_no_draft_probs_uses_strict_verifier(self):
+        class FakeSampler:
+            logprobs_mode = "raw_logprobs"
+
+            def __call__(self, **_kwargs):
+                return SamplerOutput(
+                    sampled_token_ids=torch.tensor([[100], [200]], dtype=torch.int32),
+                    logprobs_tensors=None,
+                )
+
+        sampler = RejectionSampler(FakeSampler())
+        metadata = SimpleNamespace(
+            max_spec_len=1,
+            bonus_logits_indices=torch.tensor([1, 3], dtype=torch.int64),
+            target_logits_indices=torch.tensor([0, 2], dtype=torch.int64),
+            draft_token_ids=torch.tensor([11, 22], dtype=torch.int32),
+            num_draft_tokens=[1, 1],
+            cu_num_draft_tokens=torch.tensor([1, 2], dtype=torch.int32),
+        )
+        sampling_metadata = SimpleNamespace(
+            temperature=torch.ones(2, dtype=torch.float32),
+            all_greedy=False,
+            all_random=True,
+            top_p=None,
+            top_k=None,
+            generators={},
+            max_num_logprobs=None,
+            no_penalties=True,
+            prompt_token_ids=None,
+            frequency_penalties=None,
+            presence_penalties=None,
+            repetition_penalties=None,
+            output_token_ids=[[], []],
+            allowed_token_ids_mask=None,
+            bad_words_token_ids={},
+            logitsprocs=SimpleNamespace(
+                argmax_invariant=[],
+                non_argmax_invariant=[],
+            ),
+            spec_token_ids=[[], []],
+            seeds=torch.tensor([3, 5], dtype=torch.int64),
+        )
+        sampling_metadata._ascend_positions = torch.arange(4, dtype=torch.int32)
+        sampling_metadata._ascend_idx_mapping = torch.tensor([0, 0, 1, 1], dtype=torch.int32)
+        logits = torch.tensor(
+            [
+                [0.0, 4.0, 1.0],
+                [5.0, 0.0, 1.0],
+                [0.0, 2.0, 6.0],
+                [1.0, 7.0, 0.0],
+            ],
+            dtype=torch.float32,
+        )
+        expected = torch.tensor([[1, -1], [2, 200]], dtype=torch.int32)
+
+        with (
+            patch("vllm_ascend.sample.rejection_sampler.HAS_TRITON", False),
+            patch("vllm_ascend.sample.rejection_sampler.rejection_sample") as mock_random_rejection,
+            patch(
+                "vllm_ascend.sample.rejection_sampler.strict_rejection_sample_tensor",
+                return_value=expected,
+            ) as mock_strict,
+        ):
+            output = sampler(
+                metadata,
+                None,
+                logits,
+                sampling_metadata,
+            )
+
+        mock_random_rejection.assert_not_called()
+        mock_strict.assert_called_once()
+        target_token_ids = mock_strict.call_args.args[3]
+        assert torch.equal(target_token_ids, torch.tensor([1, 2], dtype=torch.int32))
+        assert torch.equal(output.sampled_token_ids, expected)
+
+    @patch("torch.arange", new=mock_pin_memory(torch.arange))
+    @patch("torch.ones", new=mock_pin_memory(torch.ones))
+    @patch("torch.full", new=mock_pin_memory(torch.full))
+    @patch("torch.tensor", new=mock_pin_memory(torch.tensor))
+    def test_forward_no_draft_probs_cpu_strict_sample_skips_sampler(self):
+        class FakeSampler:
+            logprobs_mode = "raw_logprobs"
+
+            def __call__(self, **_kwargs):
+                raise AssertionError("CPU strict path must not call sampler")
+
+            @staticmethod
+            def apply_logits_processors(logits, sampling_metadata, predict_bonus_token):
+                return logits
+
+        sampler = RejectionSampler(FakeSampler())
+        metadata = SimpleNamespace(
+            max_spec_len=1,
+            bonus_logits_indices=torch.tensor([1], dtype=torch.int64),
+            target_logits_indices=torch.tensor([0], dtype=torch.int64),
+            draft_token_ids=torch.tensor([1], dtype=torch.int32),
+            num_draft_tokens=[1],
+            cu_num_draft_tokens=torch.tensor([1], dtype=torch.int32),
+        )
+        sampling_metadata = SimpleNamespace(
+            temperature=torch.ones(1, dtype=torch.float32),
+            all_greedy=False,
+            all_random=True,
+            top_p=None,
+            top_k=torch.tensor([1], dtype=torch.int32),
+            generators={},
+            max_num_logprobs=None,
+            no_penalties=True,
+            prompt_token_ids=None,
+            frequency_penalties=None,
+            presence_penalties=None,
+            repetition_penalties=None,
+            output_token_ids=[[]],
+            allowed_token_ids_mask=None,
+            bad_words_token_ids={},
+            logitsprocs=SimpleNamespace(
+                argmax_invariant=[],
+                non_argmax_invariant=[],
+            ),
+            spec_token_ids=[[]],
+            seeds=torch.tensor([3], dtype=torch.int64),
+        )
+        sampling_metadata._ascend_positions = torch.tensor([10, 11], dtype=torch.int32)
+        sampling_metadata._ascend_idx_mapping = torch.tensor([0, 0], dtype=torch.int32)
+        logits = torch.tensor(
+            [
+                [0.0, 8.0, 1.0],
+                [0.0, 1.0, 9.0],
+            ],
+            dtype=torch.float32,
+        )
+
+        with patch(
+            "vllm_ascend.sample.rejection_sampler._should_use_cpu_strict_sampling",
+            return_value=True,
+        ):
+            output = sampler(
+                metadata,
+                None,
+                logits,
+                sampling_metadata,
+            )
+
+        expected = torch.tensor([[1, 2]], dtype=torch.int32)
+        assert torch.equal(output.sampled_token_ids.cpu(), expected)
+
     @patch("torch.arange", new=mock_pin_memory(torch.arange))
     @patch("torch.ones", new=mock_pin_memory(torch.ones))
     @patch("torch.full", new=mock_pin_memory(torch.full))
@@ -96,11 +288,14 @@ class TestAscendRejectionSampler(TestBase):
             bonus_token_ids=bonus_token_ids,
         )
 
-        expected = torch.tensor([
-            [10, 100, PLACEHOLDER_TOKEN_ID, PLACEHOLDER_TOKEN_ID],
-            [20, 99, PLACEHOLDER_TOKEN_ID, PLACEHOLDER_TOKEN_ID],
-            [30, 31, 32, 300],
-        ], dtype=torch.int32)
+        expected = torch.tensor(
+            [
+                [10, 100, PLACEHOLDER_TOKEN_ID, PLACEHOLDER_TOKEN_ID],
+                [20, 99, PLACEHOLDER_TOKEN_ID, PLACEHOLDER_TOKEN_ID],
+                [30, 31, 32, 300],
+            ],
+            dtype=torch.int32,
+        )
         assert torch.equal(output_token_ids, expected)
 
     @patch("torch.arange", new=mock_pin_memory(torch.arange))
@@ -255,97 +450,8 @@ class TestAscendRejectionSampler(TestBase):
     @patch("torch.ones", new=mock_pin_memory(torch.ones))
     @patch("torch.full", new=mock_pin_memory(torch.full))
     @patch("torch.tensor", new=mock_pin_memory(torch.tensor))
-    def test_rejection_random_sample_block_verify_pytorch(self):
-        """Test random rejection sampling for block verify: accept based on uniform probability"""
-        batch_size = 2
-        max_spec_len = 3
-        output_token_ids = torch.full((batch_size, max_spec_len + 1), PLACEHOLDER_TOKEN_ID)
-
-        cu_num_draft_tokens = torch.tensor([2, 1])
-        draft_token_ids = torch.tensor([1, 0, 2])
-        draft_probs = torch.tensor(
-            [
-                [0.0, 0.6, 0.0, 0.4],
-                [0.1, 0.2, 0.3, 0.4],
-                [0.5, 0.5, 0.0, 0.0],
-            ]
-        )
-        target_probs = torch.tensor(
-            [
-                [0.0, 0.8, 0.0, 0.2],
-                [0.2, 0.1, 0.3, 0.4],
-                [0.9, 0.1, 0.0, 0.0],
-            ]
-        )
-        bonus_token_ids = torch.tensor([[100], [200]])
-        recovered_token_ids = torch.tensor([1, 2, 3])
-        uniform_probs = torch.tensor([0.7, 0.6, 0.5])
-        is_greedy = torch.tensor([False, False])
-        vocab_size = 4
-
-        rejection_random_sample_block_verify_pytorch(
-            output_token_ids,
-            cu_num_draft_tokens,
-            draft_token_ids,
-            draft_probs,
-            target_probs,
-            bonus_token_ids,
-            recovered_token_ids,
-            uniform_probs,
-            is_greedy,
-            max_spec_len,
-            vocab_size,
-            IS_NGRAM=False,
-        )
-
-        assert output_token_ids[0, 0].item() == 1
-        assert output_token_ids[0, 1].item() == 0
-        assert output_token_ids[0, 2].item() == 100
-
-    @patch("torch.arange", new=mock_pin_memory(torch.arange))
-    @patch("torch.ones", new=mock_pin_memory(torch.ones))
-    @patch("torch.full", new=mock_pin_memory(torch.full))
-    @patch("torch.tensor", new=mock_pin_memory(torch.tensor))
-    def test_sample_recovered_tokens_blockwise_pytorch_ngram(self):
-        """Test recovered token sampling for blockwise speculative decoding with n-gram."""
-        output_token_ids = torch.empty(2, dtype=torch.int32)
-        cu_num_draft_tokens = torch.tensor([1, 2])
-        draft_token_ids = torch.tensor([1, 2])
-        draft_probs = None
-        target_probs = torch.tensor(
-            [
-                [0.1, 0.2, 0.7],
-                [0.3, 0.3, 0.4],
-            ]
-        )
-        q = torch.tensor(
-            [
-                [0.1, 0.2, 0.7],
-                [0.5, 0.4, 0.1],
-            ]
-        )
-        vocab_size = 3
-
-        sample_recovered_tokens_blockwise_pytorch(
-            output_token_ids,
-            cu_num_draft_tokens,
-            draft_token_ids,
-            draft_probs,
-            target_probs,
-            q,
-            vocab_size,
-            IS_NGRAM=True,
-        )
-
-        assert output_token_ids[0].item() == 0
-        assert output_token_ids[1].item() == 1
-
-    @patch("torch.arange", new=mock_pin_memory(torch.arange))
-    @patch("torch.ones", new=mock_pin_memory(torch.ones))
-    @patch("torch.full", new=mock_pin_memory(torch.full))
-    @patch("torch.tensor", new=mock_pin_memory(torch.tensor))
-    def test_sample_recovered_tokens_blockwise_pytorch(self):
-        """Test recovered token sampling for blockwise speculative decoding."""
+    def test_sample_recovered_tokens_pytorch_autoregressive(self):
+        """Test recovered token sampling for autoregressive models"""
         output_token_ids = torch.empty(2, dtype=torch.int32)
         cu_num_draft_tokens = torch.tensor([1, 2])
         draft_token_ids = torch.tensor([0, 1])
@@ -369,7 +475,7 @@ class TestAscendRejectionSampler(TestBase):
         )
         vocab_size = 3
 
-        sample_recovered_tokens_blockwise_pytorch(
+        sample_recovered_tokens_pytorch(
             output_token_ids,
             cu_num_draft_tokens,
             draft_token_ids,

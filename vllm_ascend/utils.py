@@ -19,13 +19,15 @@
 
 from __future__ import annotations
 
+import atexit
 import functools
 import math
 import os
 from contextlib import nullcontext
 from enum import Enum
 from functools import lru_cache
-from typing import TYPE_CHECKING, Any
+from threading import Lock
+from typing import TYPE_CHECKING, Any, List
 
 import numpy as np
 import regex as re
@@ -53,7 +55,6 @@ ACL_FORMAT_FRACTAL_ND = 2
 ACL_FORMAT_FRACTAL_NZ = 29
 
 _CUSTOM_OP_ENABLED = None
-_DEVICE_PRINT_OP_REGISTERED = False
 _CURRENT_STREAM = None
 _PREFETCH_STREAM = None
 _WEIGHT_PREFETCH_METHOD = None
@@ -67,14 +68,6 @@ _DYNAMIC_EPLB_BUFFER_SIZE = 100
 _IS_MOE_MODEL = None
 _IS_DRAFTER_MOE_MODEL = None
 _IS_VL_MODEL = None
-_ENABLE_SP = None
-_HAS_LAYER_IDX = None
-_HAS_ROPE = None
-_ATNN_CALCULATION_STREAM = None
-_CUSTOM_OP_VENDOR_DIR = "custom_transformer"
-_CUSTOM_OP_BASE_DIR = (
-    os.path.dirname(__file__) if os.path.isabs(__file__) else os.path.abspath(os.path.dirname(__file__))
-)
 
 
 def extract_dsv4_layer_index(config: Any, layer_name: str) -> int:
@@ -93,7 +86,8 @@ def extract_dsv4_layer_index(config: Any, layer_name: str) -> int:
     return layer_idx
 
 
-def get_dsv4_spec_layer_idx_from_weight_name(config: Any, weight_name: str) -> int | None:
+def get_dsv4_spec_layer_idx_from_weight_name(config: Any,
+                                             weight_name: str) -> int | None:
     """Return local MTP layer index for DSV4 checkpoint weight names."""
     if weight_name.startswith("mtp."):
         return int(weight_name.split(".")[1])
@@ -108,96 +102,77 @@ def get_dsv4_compress_ratio(config: Any, layer_idx: int) -> int:
     return compress_ratios[layer_idx]
 
 
-def clear_enable_sp():
-    global _ENABLE_SP
-    _ENABLE_SP = None
-    enable_dsa_cp.cache_clear()
-    enable_dsa_cp_with_layer_shard.cache_clear()
-    enable_dsa_cp_with_o_proj_tp.cache_clear()
-    _libc_getenv.cache_clear()
+_ENABLE_SP = None
+_HAS_LAYER_IDX = None
+_SUBSCRIBED_COMPUTE_STREAMS = set()
+_GRAPH_PRINT_STREAM = None
+_GRAPH_PRINT_STREAM_LOCK = Lock()
+_HAS_ROPE = None
+_ATNN_CALCULATION_STREAM = None
+_CUSTOM_OP_VENDOR_DIR = "custom_transformer"
+_CUSTOM_OP_BASE_DIR = (
+    os.path.dirname(__file__) if os.path.isabs(__file__) else os.path.abspath(os.path.dirname(__file__))
+)
 
 
 def is_310p():
     return get_ascend_device_type() == AscendDeviceType._310P
 
 
-def _mark_op_side_effectful(op: Any) -> None:
-    torch.fx.node.has_side_effect(op)
-    default_overload = getattr(op, "default", None)
-    if default_overload is not None:
-        torch.fx.node.has_side_effect(default_overload)
+def _print_callback_on_stream(*args):
+    """Callback function to print arguments on the dedicated print stream."""
+    global _GRAPH_PRINT_STREAM
+    with torch_npu.npu.stream(_GRAPH_PRINT_STREAM):
+        print(*args, flush=True)
 
 
-def _ensure_device_print_registered() -> None:
-    global _DEVICE_PRINT_OP_REGISTERED
-
-    if _DEVICE_PRINT_OP_REGISTERED:
-        return
-
-    if not enable_custom_op():
-        raise RuntimeError(
-            "device_print requires _C_ascend.device_print ops to be available "
-            "when custom ops are enabled in the current Ascend build."
-        )
-
-    try:
-        # Mark device_print ops side-effectful so FX/Inductor does not DCE or reorder these debug callbacks.
-        _mark_op_side_effectful(torch.ops._C_ascend.device_print)
-        _mark_op_side_effectful(torch.ops._C_ascend.device_print_tensor)
-        _DEVICE_PRINT_OP_REGISTERED = True
-    except AttributeError as exc:
-        raise RuntimeError(
-            "device_print requires _C_ascend.device_print ops to be available "
-            "when custom ops are enabled in the current Ascend build."
-        ) from exc
-
-
-def device_print(
-    value: torch.Tensor | int | float | bool | str | torch.dtype | torch.device | torch.Size,
-) -> None:
-    """Print one value from a device callback.
-
-    This helper is intended for debugging. To stay replay-safe under
-    ``torch.npu.graph`` capture/replay, the underlying callback payloads are
-    retained instead of being reclaimed after the first host callback runs.
-    Avoid using it in hot paths or long-running high-frequency loops, otherwise
-    there may be memory issues due to too many retained payloads.
-
-    Supported usage:
-
-        >>> from vllm_ascend.utils import device_print
-        >>> device_print(x)
-        >>> device_print("already formatted text")
-        >>> device_print(7)
-
-    Unsupported usage:
-
-        >>> device_print("x =", x)
-        >>> device_print("This is ", x, "and this is ", y)
-
-    If you need device-time tensor values, pass the tensor itself. If you need
-    text, pass one final string that is already formatted.
-
-    Tensor values are copied to host on the current stream before the callback
-    prints them, so printing remains ordered with respect to the surrounding
-    device work.
-
-    DO NOT FORMAT A DEVICE TENSOR INTO A STRING YOURSELF AND THEN PRINT, for example:
-
-        >>> device_print(f"x = {x}")
-        >>> device_print("x = " + str(x))
+def acl_graph_print(*args):
     """
-    _ensure_device_print_registered()
+    Prints arguments from within an ACL graph.
 
-    if isinstance(value, torch.Tensor):
-        torch.ops._C_ascend.device_print_tensor(value)
-    elif isinstance(value, (str, int, float, bool, torch.dtype, torch.device, torch.Size)):
-        torch.ops._C_ascend.device_print(str(value))
-    else:
-        raise TypeError(
-            f"Unsupported device_print value type: {type(value)!r}. "
-            "Use exactly one argument: device_print(tensor), device_print('formatted text')."
-        )
+    This function is provided for developers to print debug information when encountering
+    issues within an ACL graph, pretty handy for dumping input/output tensor values, or
+    resolving unexpected hangs. Usage:
+    ```python
+    from vllm_ascend.utils import acl_graph_print
+
+    ...
+    acl_graph_print("Debug info")
+    ```
+
+    This function launches a host function on the current compute stream to print
+    the given arguments. It uses a dedicated stream for printing to avoid
+    interfering with computation.
+
+    NOTE: torch.compile does not support this function, only use this in non-compiled code.
+    For example, those custom ops like `unified_attention_with_output` or `moe_forward`.
+    """
+    global _SUBSCRIBED_COMPUTE_STREAMS
+    global _GRAPH_PRINT_STREAM
+
+    current_compute_stream = torch_npu.npu.current_stream()
+
+    with _GRAPH_PRINT_STREAM_LOCK:
+        if _GRAPH_PRINT_STREAM is None:
+            _GRAPH_PRINT_STREAM = torch_npu.npu.Stream()
+
+        if current_compute_stream not in _SUBSCRIBED_COMPUTE_STREAMS:
+            # Subscribe the compute stream to allow launching host functions.
+            torch_npu.npu._subscribe_report(current_compute_stream)
+            _SUBSCRIBED_COMPUTE_STREAMS.add(current_compute_stream)
+
+    torch_npu.npu._launch_host_func(current_compute_stream, _print_callback_on_stream, args)
+
+
+def _unregister_print_streams_on_exit():
+    """Unsubscribe all compute streams used for printing at exit."""
+    global _SUBSCRIBED_COMPUTE_STREAMS
+    with _GRAPH_PRINT_STREAM_LOCK:
+        for stream in _SUBSCRIBED_COMPUTE_STREAMS:
+            torch_npu.npu._unsubscribe_report(stream)
+
+
+atexit.register(_unregister_print_streams_on_exit)
 
 
 def _should_trans_nz(weight: torch.Tensor) -> bool:
@@ -209,17 +184,13 @@ def _should_trans_nz(weight: torch.Tensor) -> bool:
     if is_310p():
         return True
 
-    # Get config value instead of env
-    config = get_ascend_config()
-    nz_mode = config.weight_nz_mode
-
-    # NZ is disabled when mode is 0.
-    if not nz_mode:
+    # NZ is disabled on non-310P.
+    if not envs_ascend.VLLM_ASCEND_ENABLE_NZ:
         return False
 
-    # BF16/FP16 convert only when nz_mode == 2.
+    # BF16/FP16 convert only when enable_nz == 2.
     if weight.dtype in {torch.bfloat16, torch.float16}:
-        return nz_mode == 2
+        return envs_ascend.VLLM_ASCEND_ENABLE_NZ == 2
 
     # Quantized or other supported dtypes convert by default.
     return True
@@ -348,7 +319,7 @@ def enable_custom_op():
     Enable lazy init for vllm_ascend_C to avoid early initialization of CANN's RTS component.
     Ensure that ASCEND_RT_VISIBLE_DEVICES can be dynamically modified before torch.npu.set_device().
     """
-    import vllm.envs as envs
+    from vllm.model_executor.layers.batch_invariant import vllm_is_batch_invariant
 
     global _CUSTOM_OP_ENABLED
 
@@ -360,7 +331,7 @@ def enable_custom_op():
     # FIXME(linfeng): Currently custom op compilation and execution are partially available
     # in ASCEND950 chip, we temporarily disable all custom ops. Please refer to
     # https://github.com/vllm-project/vllm-ascend/issues/7157 for latest update about custom op.
-    if envs.VLLM_BATCH_INVARIANT or get_ascend_device_type() == AscendDeviceType.A5:
+    if vllm_is_batch_invariant() or get_ascend_device_type() == AscendDeviceType.A5:
         _CUSTOM_OP_ENABLED = False
         return _CUSTOM_OP_ENABLED
 
@@ -479,13 +450,11 @@ def cp_chunkedprefill_comm_stream() -> torch.npu.Stream:
         _CP_CHUNKEDPREFILL_COMM_STREAM = torch_npu.npu.Stream()
     return _CP_CHUNKEDPREFILL_COMM_STREAM
 
-
 def attention_calculation_stream() -> torch.npu.Stream:
     global _ATNN_CALCULATION_STREAM
     if _ATNN_CALCULATION_STREAM is None:
         _ATNN_CALCULATION_STREAM = torch_npu.npu.Stream()
     return _ATNN_CALCULATION_STREAM
-
 
 def adapt_patch(is_global_patch: bool = False):
     if is_global_patch:
@@ -715,10 +684,8 @@ def register_ascend_customop(vllm_config: VllmConfig | None = None):
     from vllm.model_executor.custom_op import CustomOp
 
     from vllm_ascend.ops.activation import AscendQuickGELU, AscendSiluAndMul
-    from vllm_ascend.ops.bailing_moe_linear_attn import AscendBailingMoELinearAttention
     from vllm_ascend.ops.conv import AscendConv3dLayer
-    from vllm_ascend.ops.fused_moe.fused_moe import AscendFusedMoE
-    from vllm_ascend.ops.gdn import AscendGatedDeltaNetAttention
+    from vllm_ascend.ops.fused_moe.fused_moe import AscendFusedMoE, AscendSharedFusedMoE
     from vllm_ascend.ops.layernorm import AscendGemmaRMSNorm, AscendRMSNorm, AscendRMSNormGated
     from vllm_ascend.ops.linear import (
         AscendColumnParallelLinear,
@@ -729,7 +696,6 @@ def register_ascend_customop(vllm_config: VllmConfig | None = None):
     )
     from vllm_ascend.ops.mla import AscendMultiHeadLatentAttention
     from vllm_ascend.ops.mm_encoder_attention import AscendMMEncoderAttention
-    from vllm_ascend.ops.qwen2_decoder import AscendCustomQwen2Decoder
     from vllm_ascend.ops.rel_pos_attention import AscendRelPosAttention
     from vllm_ascend.ops.rotary_embedding import (
         AscendApplyRotaryEmb,
@@ -763,30 +729,26 @@ def register_ascend_customop(vllm_config: VllmConfig | None = None):
         "RMSNorm": AscendRMSNorm,
         "GemmaRMSNorm": AscendGemmaRMSNorm,
         "FusedMoE": AscendFusedMoE,
+        "SharedFusedMoE": AscendSharedFusedMoE,
         "MultiHeadLatentAttentionWrapper": AscendMultiHeadLatentAttention,
         "MMEncoderAttention": AscendMMEncoderAttention,
         "ApplyRotaryEmb": AscendApplyRotaryEmb,
         "RMSNormGated": AscendRMSNormGated,
         "Conv3dLayer": AscendConv3dLayer,
         "RelPosAttention": AscendRelPosAttention,
-        "CustomQwen2Decoder": AscendCustomQwen2Decoder,
-        "GatedDeltaNetAttention": AscendGatedDeltaNetAttention,
-        "BailingMoELinearAttention": AscendBailingMoELinearAttention,
     }
 
     # 310P: override selected ops with 310P implementations (keep minimal changes outside _310p)
     if is_310p():
-        from vllm_ascend._310p.fused_moe.fused_moe import AscendFusedMoE310
+        from vllm_ascend._310p.fused_moe.fused_moe import AscendFusedMoE310, AscendSharedFusedMoE310
         from vllm_ascend._310p.ops.activation import AscendSiluAndMul310
-        from vllm_ascend._310p.ops.conv import AscendConv3dLayer310
-        from vllm_ascend._310p.ops.fla.gdn_310 import AscendGatedDeltaNetAttention310
         from vllm_ascend._310p.ops.layernorm import (
             AscendGemmaRMSNorm310,
             AscendRMSNorm310,
             AscendRMSNormGated310,
         )
         from vllm_ascend._310p.ops.mm_encoder_attention import AscendMMEncoderAttention310
-        from vllm_ascend._310p.ops.rotary_embedding import AscendMRotaryEmbedding310, AscendRotaryEmbedding310
+        from vllm_ascend._310p.ops.rotary_embedding import AscendRotaryEmbedding310
         from vllm_ascend._310p.ops.vocab_parallel_embedding import (
             AscendParallelLMHead310,
             AscendVocabParallelEmbedding310,
@@ -800,14 +762,14 @@ def register_ascend_customop(vllm_config: VllmConfig | None = None):
                 "GemmaRMSNorm": AscendGemmaRMSNorm310,
                 "RMSNormGated": AscendRMSNormGated310,
                 "FusedMoE": AscendFusedMoE310,
+                "SharedFusedMoE": AscendSharedFusedMoE310,
                 "ParallelLMHead": AscendParallelLMHead310,
                 "VocabParallelEmbedding": AscendVocabParallelEmbedding310,
                 "MMEncoderAttention": AscendMMEncoderAttention310,
-                "Conv3dLayer": AscendConv3dLayer310,
-                "GatedDeltaNetAttention": AscendGatedDeltaNetAttention310,
-                "MRotaryEmbedding": AscendMRotaryEmbedding310,
             }
         )
+
+        REGISTERED_ASCEND_OPS.pop("MRotaryEmbedding", None)
 
     for name, op_cls in REGISTERED_ASCEND_OPS.items():
         CustomOp.register_oot(_decorated_op_cls=op_cls, name=name)
@@ -874,17 +836,16 @@ def embedding_tp_enable() -> bool:
 def oproj_tp_enable() -> bool:
     return get_ascend_config().finegrained_tp_config.oproj_tensor_parallel_size > 0
 
-
 def olora_tp_enable() -> bool:
-    return get_ascend_config().finegrained_tp_config.olora_tensor_parallel_size > 1
-
+    return get_ascend_config(
+    ).finegrained_tp_config.olora_tensor_parallel_size > 1
 
 def mlp_tp_enable() -> bool:
     return get_ascend_config().finegrained_tp_config.mlp_tensor_parallel_size > 0
 
 
 def matmul_allreduce_enable() -> bool:
-    return get_ascend_config().enable_matmul_allreduce
+    return envs_ascend.VLLM_ASCEND_ENABLE_MATMUL_ALLREDUCE
 
 
 def enable_sp_by_pass():
@@ -893,31 +854,23 @@ def enable_sp_by_pass():
 
 def enable_sp(vllm_config=None, enable_shared_expert_dp: bool = False) -> bool:
     global _ENABLE_SP
-    if vllm_config is None:
-        try:
+    if _ENABLE_SP is None:
+        if vllm_config is None:
             from vllm.config import get_current_vllm_config
 
             vllm_config = get_current_vllm_config()
-        except AssertionError:
-            vllm_config = None
-
-    additional_config = getattr(vllm_config, "additional_config", None) if vllm_config is not None else None
-    refresh = additional_config.get("refresh", False) if additional_config else False
-
-    if _ENABLE_SP is None or refresh:
-        if additional_config is not None and "enable_flashcomm1" in additional_config:
-            _ENABLE_SP = bool(additional_config["enable_flashcomm1"])
-        else:
-            try:
-                _ENABLE_SP = get_ascend_config().enable_flashcomm1
-            except RuntimeError:
-                _ENABLE_SP = envs_ascend.VLLM_ASCEND_ENABLE_FLASHCOMM1
+        _ENABLE_SP = (
+            envs_ascend.VLLM_ASCEND_ENABLE_FLASHCOMM1
+            # Flash comm 1 should be enabled by env VLLM_ASCEND_ENABLE_FLASHCOMM1
+            # We retain the env VLLM_ASCEND_ENABLE_FLASHCOMM here for backward compatibility.
+            or bool(int(os.getenv("VLLM_ASCEND_ENABLE_FLASHCOMM", "0")))
+        )
 
         if not _ENABLE_SP and enable_shared_expert_dp:
             _ENABLE_SP = True
             logger.info("shared_expert_dp requires enable_sp = True. has set enable_sp to True")
 
-    return bool(_ENABLE_SP)
+    return _ENABLE_SP
 
 
 # TODO remove it after vllm has this func
@@ -926,7 +879,7 @@ def shared_expert_dp_enabled() -> bool:
 
 
 def prefill_context_parallel_enable() -> bool:
-    return get_ascend_config().enable_context_parallel
+    return envs_ascend.VLLM_ASCEND_ENABLE_CONTEXT_PARALLEL
 
 
 def is_moe_model(vllm_config: VllmConfig):
@@ -1171,23 +1124,7 @@ def should_skip_allreduce_across_dp_group(vllm_config, is_draft_model: bool = Fa
     # Determine whether decode must use MC2. Use max cudagraph capture size
     # if available, otherwise use the maximal uniform decode token count.
     if compilation_config.cudagraph_capture_sizes:
-        potential_max_tokens = max(
-            compilation_config.max_cudagraph_capture_size,
-            min(
-                vllm_config.scheduler_config.max_num_batched_tokens,
-                vllm_config.scheduler_config.max_num_seqs * uniform_decode_query_len,
-            ),
-        )
-        if potential_max_tokens != compilation_config.max_cudagraph_capture_size:
-            logger.warning_once(
-                "The max_cudagraph_capture_size (%d) is smaller than the potential max tokens required for "
-                "decode (%d). This may lead to suboptimal performance. Consider adjusting"
-                "max_cudagraph_capture_size or scheduler_config (max_num_batched_tokens or max_num_seqs)"
-                "to ensure max_cudagraph_capture_size can accommodate the decode workload. For more details, "
-                "see the issue #8240(https://github.com/vllm-project/vllm-ascend/issues/8240).",
-                compilation_config.max_cudagraph_capture_size,
-                potential_max_tokens,
-            )
+        potential_max_tokens = compilation_config.max_cudagraph_capture_size
     else:
         potential_max_tokens = min(max_num_reqs * uniform_decode_query_len, 512)
 
@@ -1210,8 +1147,7 @@ def has_layer_idx(model_instance: torch.nn.Module) -> bool:
 
 
 def flashcomm2_enable() -> bool:
-    config_val = get_ascend_config().enable_flashcomm2_parallel_size
-    return config_val > 0
+    return envs_ascend.VLLM_ASCEND_FLASHCOMM2_PARALLEL_SIZE > 0
 
 
 def o_shard_enable() -> bool:
@@ -1222,13 +1158,13 @@ def o_shard_enable() -> bool:
 
 
 def get_flashcomm2_config_and_validate(ascend_config, vllm_config):
-    flashcomm2_oproj_tp_size = ascend_config.enable_flashcomm2_parallel_size
+    flashcomm2_oproj_tp_size = envs_ascend.VLLM_ASCEND_FLASHCOMM2_PARALLEL_SIZE
     global_tp_size = vllm_config.parallel_config.tensor_parallel_size
 
-    if ascend_config.enable_flashcomm2_parallel_size <= 0:
+    if not flashcomm2_enable():
         return 0
 
-    logger.info("Enable FLASHCOMM2 with flashcomm2_oproj_tensor_parallel_size = %s", flashcomm2_oproj_tp_size)
+    logger.info(f"Enable FLASHCOMM2 with flashcomm2_oproj_tensor_parallel_size = {flashcomm2_oproj_tp_size}")
 
     layer_sharding = ascend_config.layer_sharding or []
     if layer_sharding:
@@ -1239,7 +1175,7 @@ def get_flashcomm2_config_and_validate(ascend_config, vllm_config):
                 "FLASHCOMM2 only supports 'o_proj' as the sole layer sharding configuration! "
                 f"Found invalid layer_sharding: {layer_sharding}"
             )
-    if not ascend_config.enable_flashcomm1:
+    if not envs_ascend.VLLM_ASCEND_ENABLE_FLASHCOMM1:
         logger.warning_once(
             "It is recommended to enable FLASHCOMM1 simultaneously when starting FLASHCOMM2 for optimal performance."
         )
@@ -1304,12 +1240,12 @@ def refresh_block_size(vllm_config):
     if cache_config.block_size is None:
         cache_config.block_size = 128
 
+    if not scheduler_config or not model_config:
+        return
+
     if model_config.hf_config.model_type == "deepseek_v4":
         # TODO(qcs): generalize the block_size
         cache_config.block_size = 128
-
-    if not scheduler_config or not model_config:
-        return
 
     if model_config.is_hybrid:
         # Hybrid attention+mamba models rely on the model-specific sizing
@@ -1319,13 +1255,7 @@ def refresh_block_size(vllm_config):
     if cache_config.block_size != 128:
         if cache_config.enable_prefix_caching or scheduler_config.enable_chunked_prefill:
             logger.info("Block size is set to 128 if prefix cache or chunked prefill is enabled.")
-            cache_config.block_size = 128
-            return
-
-    ascend_config = get_ascend_config()
-    if ascend_config.xlite_graph_config.enabled and cache_config.block_size > 128:
-        logger.warning("Setting block size to 128 for xlite compatibility.")
-        cache_config.block_size = 128
+            cache_config.block_size = 32
 
 
 def dispose_layer(layer: Any):
@@ -1393,10 +1323,9 @@ def enable_dsa_cp_with_layer_shard() -> bool:
     from vllm.config import get_current_vllm_config
 
     vllm_config = get_current_vllm_config()
-    kv_transfer_config = vllm_config.kv_transfer_config
-    # Layer sharding broadcast only pays off when it can be hidden by the
-    # heavier prefill-stage compute, so enable it only on the P-side instance.
-    is_prefill_instance = kv_transfer_config is not None and kv_transfer_config.kv_role == "kv_producer"
+    # because the broadcast in layer sharding needs to be overlapped with a heavy compute stream to be
+    # effectively hidden, it is enabled only during the prefill stage.
+    is_prefill_instance = vllm_config.kv_transfer_config is not None and vllm_config.kv_transfer_config.is_kv_producer
     return is_prefill_instance
 
 
@@ -1407,12 +1336,9 @@ def enable_dsa_cp_with_o_proj_tp() -> bool:
     from vllm.config import get_current_vllm_config
 
     vllm_config = get_current_vllm_config()
-    kv_transfer_config = vllm_config.kv_transfer_config
-
-    # In PD-mixed mode, keep the original TP o_proj weight when:
-    # 1) KV pooling is disabled, or
-    # 2) KV pooling is enabled with kv_role == "kv_both".
-    return kv_transfer_config is None or kv_transfer_config.kv_role == "kv_both"
+    # if is PD mix stage, using original TP o_proj weight, and also need to
+    # full gather for o_proj weight for prefill stage.
+    return vllm_config.kv_transfer_config is None
 
 
 def check_gdn_layer(vllm_config) -> bool:
@@ -1461,7 +1387,10 @@ def get_rope_dim(vllm_config):
 
 def calc_split_factor(num_list: list[int]):
     total = sum(num_list)
-    return [total / num for num in num_list]
+    split_factor_list = []
+    for num in num_list:
+        split_factor_list.append(total / num)
+    return split_factor_list
 
 
 # NOTE: The last two dimensions of ND are transferred to NZ
@@ -1494,43 +1423,38 @@ def parse_layer_idx(prefix: str) -> int | None:
     match = re.search(r"layers\.(\d+)", prefix)
     return int(match.group(1)) if match else None
 
-
-def get_compressed_pos_and_indices(
-    num_computed_tokens: np.ndarray,
-    num_scheduled_tokens: np.ndarray,
-    arrange_np: np.ndarray,
-    use_compress: bool,
-    kv_cache_groups,
-) -> tuple[list[np.ndarray], list[np.ndarray], list[np.ndarray]]:
+def get_compressed_pos_and_indices( 
+        num_computed_tokens: np.ndarray,
+        num_scheduled_tokens: np.ndarray,
+        arrange_np: np.ndarray,
+        use_compress: bool,
+        kv_cache_groups
+ ) -> tuple[List[np.ndarray], List[np.ndarray], List[np.ndarray]]:
     """
     Batch generate compressed position ids for multi-requests on DSv4.
     Calculate compressed position ids independently for each single request.
-
+ 
     Args:
         num_computed_tokens: Historical processed token counts of multiple requests, shape=[num_reqs,]
         num_scheduled_tokens: New scheduled token counts of multiple requests in current step, shape=[num_reqs,]
-
+ 
     Returns:
         tuple(np.ndarray, np.ndarray):
             1. Flattened compressed position id array for all requests
             2. Length of compressed position ids for each individual request
     """
     if not use_compress:
-        return None, None, None  # type: ignore[return-value]
+        return None, None, None
     # Assert input validity
-    assert num_computed_tokens.shape == num_scheduled_tokens.shape, (
-        "num_computed_tokens and num_scheduled_tokens must have the same shape"
-    )
-    assert np.all(num_computed_tokens >= 0) and np.all(num_scheduled_tokens >= 0), (
-        "Token count cannot be negative value"
-    )
+    assert num_computed_tokens.shape == num_scheduled_tokens.shape, "num_computed_tokens and num_scheduled_tokens must have the same shape"
+    assert np.all(num_computed_tokens >= 0) and np.all(
+        num_scheduled_tokens >= 0), "Token count cannot be negative value"
 
     positions_compressed_list = []
     req_indices_compressed_list = []
     num_scheduled_tokens_compressed_list = []
-
+    
     from vllm.v1.kv_cache_interface import UniformTypeKVCacheSpecs
-
     for kv_cache_group_id, kv_cache_group_spec in enumerate(kv_cache_groups):
         # Calculate compressed length of historical & total tokens
         if isinstance(kv_cache_group_spec.kv_cache_spec, UniformTypeKVCacheSpecs):
@@ -1542,47 +1466,26 @@ def get_compressed_pos_and_indices(
         # Note(qcs): some models use compress_ratio=0 as non-compression tag.
         if compress_ratio > 1:
             compressed_historical_len = num_computed_tokens // compress_ratio
-            compressed_total_len = (num_computed_tokens + num_scheduled_tokens) // compress_ratio
+            compressed_total_len = (num_computed_tokens +
+                                    num_scheduled_tokens) // compress_ratio
         else:
             compressed_historical_len = num_computed_tokens
-            compressed_total_len = num_computed_tokens + num_scheduled_tokens
-
+            compressed_total_len = (num_computed_tokens + num_scheduled_tokens)
+ 
         # The number of new compressed position ids for each request
         num_new_compressed_pos = compressed_total_len - compressed_historical_len
 
         # Core vectorized calculation (no for-loop)
         pos_starts = compressed_historical_len
-        prefix_offsets = np.concatenate([[0], np.cumsum(num_new_compressed_pos[:-1])])
-        compressed_pos_ids = np.arange(np.sum(num_new_compressed_pos)) + np.repeat(
-            pos_starts - prefix_offsets, num_new_compressed_pos
-        )
+        prefix_offsets = np.concatenate([[0],
+                                         np.cumsum(num_new_compressed_pos[:-1])
+                                         ])
+        compressed_pos_ids = np.arange(
+            np.sum(num_new_compressed_pos)) + np.repeat(
+                pos_starts - prefix_offsets, num_new_compressed_pos)
 
         req_indices_compressed = np.repeat(arrange_np, num_new_compressed_pos)
         req_indices_compressed_list.append(req_indices_compressed)
         positions_compressed_list.append(compressed_pos_ids)
         num_scheduled_tokens_compressed_list.append(num_new_compressed_pos)
     return positions_compressed_list, req_indices_compressed_list, num_scheduled_tokens_compressed_list
-
-
-def kv_cache_spec_uses_sparse_c8(kv_cache_spec) -> bool:
-    from vllm.v1.kv_cache_interface import MLAAttentionSpec
-
-    return isinstance(kv_cache_spec, MLAAttentionSpec) and bool(getattr(kv_cache_spec, "cache_sparse_c8", False))
-
-
-@lru_cache(maxsize=1)
-def _libc_getenv():
-    import ctypes
-
-    libc = ctypes.CDLL(None)
-    libc.getenv.argtypes = [ctypes.c_char_p]
-    libc.getenv.restype = ctypes.c_char_p
-    return libc.getenv
-
-
-def get_c_env(name: str, encoding: str = "utf-8") -> str | None:
-    """Read env via C getenv; returns None if unset."""
-    raw = _libc_getenv()(name.encode(encoding))
-    if raw is None:
-        return None
-    return raw.decode(encoding)

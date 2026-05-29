@@ -11,7 +11,6 @@ from vllm_ascend.sample.sampler import (
 
 
 class TestAscendSampler(TestBase):
-
     def test_init_with_raw_logprobs(self):
         sampler = AscendSampler(logprobs_mode="raw_logprobs")
         self.assertEqual(sampler.logprobs_mode, "raw_logprobs")

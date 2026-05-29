@@ -212,13 +212,8 @@ class ACLGraphWrapper:
         # When FULL + EAGLE draft (merge path), replay does not need this barrier.
         is_draft_eagle = _EXTRA_CTX.is_draft_model and self.use_eagle
         need_sync = self.runtime_mode == CUDAGraphMode.FULL and not is_draft_eagle
-        skip_replay_sync = getattr(
-            self.runnable, "skip_aclgraph_replay_sync", False)
-        if (
-            not skip_replay_sync
-            and not self.enable_enpu
-            and need_sync
-        ):
+        skip_replay_sync = getattr(self.runnable, "skip_aclgraph_replay_sync", False)
+        if not skip_replay_sync and not self.enable_enpu and need_sync:
             torch.npu.current_stream().synchronize()
         entry.aclgraph.replay()
         return entry.output
@@ -244,6 +239,7 @@ def update_full_graph_params(
     draft_attn_metadatas=None,
     draft_attn_layer_names=None,
 ):
+    update_stream.wait_stream(torch.npu.current_stream())
     impl_cls = attn_backend.get_impl_cls()
     impl_cls.update_graph_params(
         update_stream,
