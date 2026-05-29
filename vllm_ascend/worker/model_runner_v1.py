@@ -544,11 +544,12 @@ class NPUModelRunner(GPUModelRunner):
         else:
             num_reqs_padded = batch_desc_num_reqs if batch_desc_num_reqs is not None else num_reqs
 
-        if num_tokens_padded == num_reqs_padded * self.uniform_decode_query_len:
+        last_loc = self.query_start_loc.np[num_reqs]
+        if (num_tokens_padded == num_reqs_padded * self.uniform_decode_query_len
+                and last_loc == num_reqs * self.uniform_decode_query_len):
             # Uniform-batch case: num_reqs must be no greater than num_reqs_padded
             assert num_reqs <= num_reqs_padded
 
-            last_loc = self.query_start_loc.np[num_reqs]
             self.query_start_loc.np[num_reqs + 1 : num_reqs_padded + 1] = (
                 self.arange_np[1 : num_reqs_padded + 1 - num_reqs] * self.uniform_decode_query_len + last_loc
             )
