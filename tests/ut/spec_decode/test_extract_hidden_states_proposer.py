@@ -40,10 +40,17 @@ def _no_pin_memory():
     # pin_memory=True) triggers aclInit and fails.  Patch
     # is_pin_memory_available so vllm's ExtractHiddenStatesProposer.__init__
     # creates CpuGpuBuffer with pin_memory=False.
-    with patch(
-        "vllm.v1.spec_decode.extract_hidden_states.is_pin_memory_available",
-        return_value=False,
-    ):
+    # The attribute only exists in vllm >= commit 165460941; older builds
+    # (e.g. v0.20.0) don't use CpuGpuBuffer there, so no patch is needed.
+    import vllm.v1.spec_decode.extract_hidden_states as _ehs_mod
+
+    if hasattr(_ehs_mod, "is_pin_memory_available"):
+        with patch(
+            "vllm.v1.spec_decode.extract_hidden_states.is_pin_memory_available",
+            return_value=False,
+        ):
+            yield
+    else:
         yield
 
 
