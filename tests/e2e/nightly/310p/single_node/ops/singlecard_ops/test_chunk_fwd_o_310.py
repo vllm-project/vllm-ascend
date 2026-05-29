@@ -156,7 +156,7 @@ class TestChunkFwdO310:
             expected = scale * (i + 1) * attn_val * c
             actual = oc[0, 0, i, 0].item()
             rel_err = abs(actual - expected) / max(abs(expected), 1e-10)
-            assert rel_err < 0.70, \
+            assert rel_err < 0.10, \
                 f"row {i}: actual={actual:.8f} expected={expected:.8f} rel_err={rel_err:.2f}"
 
     @pytest.mark.parametrize("B,Hk,Hv,L,Dk,Dv", [
@@ -199,7 +199,7 @@ class TestChunkFwdO310:
         cos = torch.nn.functional.cosine_similarity(
             o_npu.cpu().float().flatten(),
             o_ref.flatten(), dim=0).item()
-        assert cos > 0.98, f"cosine {cos:.4f} too low for g=0 h=0 case"
+        assert cos > 0.999, f"cosine {cos:.4f} too low for g=0 h=0 case"
 
     def test_chunk_boundary_independence(self):
         """Each chunk should produce the same output for identical data."""
