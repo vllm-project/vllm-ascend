@@ -708,7 +708,7 @@ Before you start, please
     unset http_proxy
     rm -rf ~/ascend/log
 
-    nic_name="xxxxxx" #eg."enp67s0f0np0"
+    nic_name="xxxx" # change to your own nic name
     local_ip=`hostname -I|awk -F " " '{print$1}'`
 
     # # jemalloc
@@ -730,7 +730,6 @@ Before you start, please
     export OMP_NUM_THREADS=10
     export PYTORCH_NPU_ALLOC_CONF=expandable_segments:True
     export HCCL_BUFFSIZE=1024
-    export TASK_QUEUE_ENABLE=1
 
     export USE_MULTI_GROUPS_KV_CACHE=1
     export USE_MULTI_BLOCK_POOL=1
@@ -748,13 +747,13 @@ Before you start, please
         --enable-expert-parallel \
         --seed 1024 \
         --served-model-name deepseek_v4 \
-        --max-model-len 137216 \
+        --max-model-len 135000 \
         --max-num-batched-tokens 8192 \
         --max-num-seqs 16 \
         --enforce-eager \
         --async-scheduling \
         --no-disable-hybrid-kv-cache-manager \
-        --enable-prefix-caching \
+        --no-enable-prefix-caching # Change this line to '--enable-prefix-caching' if enabling prefix cache \
         --trust-remote-code \
         --gpu-memory-utilization 0.9 \
         --quantization ascend \
@@ -781,7 +780,6 @@ Before you start, please
                     }
             }
         }'
-                
     ```
 
 For each P instance, only these two configuration values need to be modified: “kv_port” and “engine_id”. The “engine_id” should start from 0 and increment sequentially, while the “kv_port” (e.g., “30100”) must be unique for each P instance, such as 30000, 30100, etc.
@@ -794,7 +792,7 @@ For each P instance, only these two configuration values need to be modified: �
     unset http_proxy
     rm -rf ~/ascend/log
 
-    nic_name="xxxxxxx" #eg. "enp67s0f0np0"
+    nic_name="xxxx" # change to your own nic name
     local_ip=`hostname -I|awk -F " " '{print$1}'`
 
     # # jemalloc
@@ -816,14 +814,9 @@ For each P instance, only these two configuration values need to be modified: �
     export OMP_NUM_THREADS=10
     export PYTORCH_NPU_ALLOC_CONF=expandable_segments:True
     export HCCL_BUFFSIZE=1024
-    export TASK_QUEUE_ENABLE=1
 
     export USE_MULTI_GROUPS_KV_CACHE=1
     export USE_MULTI_BLOCK_POOL=1
-
-    export VLLM_TORCH_PROFILER_WITH_STACK=0
-    export VLLM_TORCH_PROFILER_DIR="./profiling"
-
 
     export ASCEND_RT_VISIBLE_DEVICES=$1
 
@@ -838,11 +831,12 @@ For each P instance, only these two configuration values need to be modified: �
         --enable-expert-parallel \
         --seed 1024 \
         --served-model-name deepseek_v4 \
-        --max-model-len 137216 \
+        --max-model-len 135000 \
         --max-num-batched-tokens 60 \
         --max-num-seqs 30 \
         --async-scheduling \
         --no-disable-hybrid-kv-cache-manager \
+        --no-enable-prefix-caching # Change this line to '--enable-prefix-caching' if enabling prefix cache \
         --trust-remote-code \
         --gpu-memory-utilization 0.9 \
         --quantization ascend \
@@ -852,10 +846,6 @@ For each P instance, only these two configuration values need to be modified: �
         --enable-auto-tool-choice \
         --reasoning-parser deepseek_v4 \
         --quantization ascend \
-        --profiler-config \
-            '{"profiler": "torch",
-            "torch_profiler_dir": "./profiling",
-            "torch_profiler_with_stack": false}' \
         --speculative-config '{"num_speculative_tokens": 1, "method":"deepseek_mtp"}' \
         --compilation-config '{"cudagraph_mode": "FULL_DECODE_ONLY"}' \
         --kv-transfer-config \
@@ -890,7 +880,7 @@ For each P instance, only these two configuration values need to be modified: �
         "multistream_overlap_shared_expert":false,
         "multistream_dsa_preprocess":false,
         "recompute_scheduler_enable":true
-        }' 
+        }'
     ```
 
 Once the preparation is done, you can start the server with the following command on each node:
