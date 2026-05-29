@@ -55,6 +55,7 @@ if not HAS_TRITON and not vllm_version_is("0.20.2"):
             def _l2norm(t):
                 t_f = t.float()
                 return (t_f / torch.sqrt((t_f * t_f).sum(-1, keepdim=True) + 1e-6)).to(t.dtype)
+
             q, k = _l2norm(q), _l2norm(k)
 
         q, k, v = q.contiguous(), k.contiguous(), v.contiguous()
@@ -66,9 +67,7 @@ if not HAS_TRITON and not vllm_version_is("0.20.2"):
 
         return q, k, v, g, torch.sigmoid(b.float())
 
-    vllm.model_executor.layers.fla.ops.fused_post_conv_prep = (
-        _fused_post_conv_prep_pytorch
-    )
+    vllm.model_executor.layers.fla.ops.fused_post_conv_prep = _fused_post_conv_prep_pytorch
 
     def _fused_recurrent_packed_decode_pytorch(
         mixed_qkv,
@@ -109,9 +108,11 @@ if not HAS_TRITON and not vllm_version_is("0.20.2"):
             v_n = v[n].float()  # [HV, V]
 
             if use_qk_l2norm_in_kernel:
+
                 def _l2norm(t):
                     t_f = t.float()
                     return t_f / torch.sqrt((t_f * t_f).sum(-1, keepdim=True) + 1e-6)
+
                 q_n, k_n = _l2norm(q_n), _l2norm(k_n)
             q_n = q_n * scale
 

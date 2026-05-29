@@ -285,7 +285,9 @@ def _allocate_kv_cache(
     for group in kv_cache_config.kv_cache_groups:
         for layer_name in group.layer_names:
             layer_names.add(layer_name)
-    assert layer_names == (kv_cache_raw_tensors.keys() | shared_layers.keys()), "Some layers are not correctly initialized"
+    assert layer_names == (kv_cache_raw_tensors.keys() | shared_layers.keys()), (
+        "Some layers are not correctly initialized"
+    )
 
     return kv_cache_raw_tensors
 
@@ -296,6 +298,7 @@ def _reshape_kv_cache(
     attn_backends: dict[str, AttentionBackend],
     cache_dtype: str,
     kernel_block_sizes: list[int] | None = None,
+    shared_kv_cache_layers: dict[str, str] | None = None,
 ) -> dict[str, tuple[torch.Tensor, torch.Tensor]]:
     """
     Reshape the KV cache tensors to the desired shape and dtype.
@@ -317,6 +320,8 @@ def _reshape_kv_cache(
     kernel_block_sizes = kernel_block_sizes or []
     for kv_cache_group_id, kv_cache_group_spec in enumerate(kv_cache_config.kv_cache_groups):
         for layer_name in kv_cache_group_spec.layer_names:
+            if shared_kv_cache_layers and layer_name in shared_kv_cache_layers:
+                continue
             kv_cache_spec = kv_cache_group_spec.kv_cache_spec
             if isinstance(kv_cache_spec, UniformTypeKVCacheSpecs):
                 kv_cache_spec = kv_cache_spec.kv_cache_specs[layer_name]
@@ -382,5 +387,9 @@ def _reshape_kv_cache(
                 kv_caches[layer_name] = (k_cache, v_cache)
             else:
                 raise ValueError("Unknown KV cache spec type.")
+
+    if shared_kv_cache_layers:
+        for layer_name, target_layer_name in shared_kv_cache_layers.items():
+            kv_caches[layer_name] = kv_caches[target_layer_name]
 
     return kv_caches
