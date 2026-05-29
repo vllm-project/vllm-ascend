@@ -41,7 +41,6 @@ from vllm.v1.spec_decode.utils import (
 )
 from vllm.v1.worker.gpu_input_batch import CachedRequestState, InputBatch
 
-from vllm_ascend.ascend_config import get_ascend_config
 from vllm_ascend.ascend_forward_context import _EXTRA_CTX, set_ascend_forward_context
 from vllm_ascend.attention.attention_mask import AttentionMaskBuilder
 from vllm_ascend.attention.attention_v1 import AscendAttentionState
@@ -405,8 +404,7 @@ class AscendSpecDecodeBaseProposer(SpecDecodeBaseProposer):
 
     def _freeze_draft_step_attn_metadata(self, attn_metadata):
         decode_metadata = getattr(attn_metadata, "decode", None)
-        if decode_metadata is not None:
-            if decode_metadata.sas_metadata is not None:
+        if decode_metadata is not None and decode_metadata.sas_metadata is not None:
                 decode_metadata.sas_metadata = decode_metadata.sas_metadata.clone()
         return attn_metadata
 
@@ -1457,10 +1455,7 @@ class AscendSpecDecodeBaseProposer(SpecDecodeBaseProposer):
                 block_size = 128
 
             # Compute the slot mapping.
-            if self.uses_mrope:
-                block_numbers = clamped_positions[0] // block_size
-            else:
-                block_numbers = clamped_positions // block_size
+            block_numbers = clamped_positions[0] // block_size if self.uses_mrope else clamped_positions // block_size
             block_ids = old_common_metadata.block_table_tensor.gather(dim=1, index=block_numbers.view(-1, 1))
             block_ids = block_ids.view(-1)
             if self.uses_mrope:

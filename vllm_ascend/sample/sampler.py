@@ -1,6 +1,5 @@
 import torch
 import torch_npu
-import vllm.envs as envs
 from vllm.distributed.parallel_state import get_tp_group
 from vllm.triton_utils import HAS_TRITON
 from vllm.v1.sample.metadata import SamplingMetadata
