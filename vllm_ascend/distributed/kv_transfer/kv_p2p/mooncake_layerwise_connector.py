@@ -1691,8 +1691,8 @@ class MooncakeLayerwiseConnectorWorker:
                             -128,
                             127,
                         ).to(torch.int8)
-                        quant_keys = self.get_nz_cache(keys, layer_group_idx)
-                        quant_values = self.get_nz_cache(values, layer_group_idx)
+                        quant_keys = self.get_nz_cache(quant_keys, layer_group_idx)
+                        quant_values = self.get_nz_cache(quant_values, layer_group_idx)
                     if (
                         self.enable_kv_quant
                         and self.current_layer in self.vllm_config.quant_config.kvcache_quant_layers
