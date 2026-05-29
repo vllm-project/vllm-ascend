@@ -1624,7 +1624,7 @@ class NPUModelRunner(GPUModelRunner):
                 num_scheduled_tokens=num_scheduled_tokens,
                 num_rejected_tokens_gpu=num_rejected_tokens_gpu,
             )
-            if self.vllm_config.speculative_config.disable_padded_drafter_batch:
+            if not self.vllm_config.speculative_config.disable_padded_drafter_batch:
                 self._copy_valid_sampled_token_count(next_token_ids, valid_sampled_tokens_count)
         else:
             raise ValueError(f"Unknown speculative decoding method: {self.speculative_config.method}")
