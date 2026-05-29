@@ -148,7 +148,8 @@ aclrtMemcpyKind infer_memcpy_kind(const void* src, const void* dst)
     if ((src_is_host || src_ret != ACL_SUCCESS) && dst_is_device) {
         return ACL_MEMCPY_HOST_TO_DEVICE;
     }
-    if (src_is_host && dst_is_host) {
+    if ((src_is_host || src_ret != ACL_SUCCESS) &&
+        (dst_is_host || dst_ret != ACL_SUCCESS)) {
         return ACL_MEMCPY_HOST_TO_HOST;
     }
     return ACL_MEMCPY_DEFAULT;
@@ -290,6 +291,8 @@ void swap_blocks_impl(torch::Tensor& src, torch::Tensor& dst,
     }
 
     TORCH_CHECK(block_mapping.device().is_cpu(), "block_mapping must be on CPU");
+    TORCH_CHECK(block_mapping.dtype() == torch::kInt64,
+                "block_mapping must be int64");
     TORCH_CHECK(block_size_in_bytes > 0,
                 "block_size_in_bytes must be positive, got ",
                 block_size_in_bytes);
