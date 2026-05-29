@@ -13,23 +13,25 @@ test_cases:
       USE_MULTI_BLOCK_POOL: "1"
       USE_MULTI_GROUPS_KV_CACHE: "1"
       HCCL_BUFFSIZE: "1024"
-      VLLM_ASCEND_ENABLE_FUSED_MC2: "1"
+      VLLM_ASCEND_ENABLE_FUSED_MC2: "0"
       VLLM_ASCEND_ENABLE_FLASHCOMM1: "1"
+      VLLM_ASCEND_APPLY_DSV4_PATCH: "1"
+      ASCEND_LAUNCH_BLOCKING: "0"
       SERVER_PORT: "DEFAULT_PORT"
     server_cmd:
       - "--enable-prefix-caching"
       - "--max-model-len"
-      - "1024000"
+      - "1048576"
       - "--max-num-batched-tokens"
-      - "8192"
+      - "10240"
       - "--gpu-memory-utilization"
       - "0.9"
       - "--max-num-seqs"
-      - "4"
+      - "64"
       - "--data-parallel-size"
-      - "4"
+      - "2"
       - "--tensor-parallel-size"
-      - "4"
+      - "8"
       - "--enable-expert-parallel"
       - "--tokenizer-mode"
       - "deepseek_v4"
@@ -45,14 +47,16 @@ test_cases:
       - "--api-server-count"
       - "1"
       - "--speculative-config"
-      - '{"num_speculative_tokens": 1,"method": "deepseek_mtp"}'
+      - '{"num_speculative_tokens": 1,"method": "mtp","enforce_eager": true}'
       - "--port"
       - "$SERVER_PORT"
       - "--block-size"
       - "128"
-      - "--enforce-eager"
+      - "--compilation-config"
+      - '{"cudagraph_mode": "FULL_DECODE_ONLY"}'
+      - "--async-scheduling"
       - "--additional-config"
-      - '{"ascend_compilation_config":{"enable_npugraph_ex":true,"enable_static_kernel":false},"enable_cpu_binding":"true","multistream_overlap_shared_expert":false,"multistream_dsa_preprocess":false}'
+      - '{"ascend_compilation_config":{"enable_npugraph_ex":true,"enable_static_kernel":false},"enable_cpu_binding":"true","enable_shared_expert_dp":true,"multistream_overlap_shared_expert":true,"multistream_dsa_preprocess":false}'
     benchmarks:
       acc-gpqa:
         case_type: accuracy
