@@ -60,6 +60,24 @@ from vllm.tool_parsers.glm4_moe_tool_parser import Glm4MoeModelToolParser
 logger = chat_serving.logger
 
 
+def _filter_tool_call_null_fields(data: dict) -> dict:
+    for choice in data.get("choices", []):
+        delta = choice.get("delta", {})
+        tool_calls = delta.get("tool_calls")
+        if not tool_calls:
+            continue
+        for tc in tool_calls:
+            for key in ("id", "type"):
+                if key in tc and not tc[key]:
+                    del tc[key]
+            func = tc.get("function")
+            if isinstance(func, dict):
+                for key in ("name", "arguments"):
+                    if key in func and not func[key]:
+                        del func[key]
+    return data
+
+
 def _create_remaining_args_delta(
     delta_message: DeltaMessage,
     remaining_call: str,
@@ -308,7 +326,7 @@ async def _patched_chat_completion_stream_generator(
                             ),
                         )
 
-                    data = chunk.model_dump_json(exclude_unset=True)
+                    data = json.dumps(_filter_tool_call_null_fields(chunk.model_dump(exclude_unset=True)))
                     yield f"data: {data}\n\n"
 
                 if request.echo:
@@ -343,7 +361,7 @@ async def _patched_chat_completion_stream_generator(
                                     ),
                                 )
 
-                            data = chunk.model_dump_json(exclude_unset=True)
+                            data = json.dumps(_filter_tool_call_null_fields(chunk.model_dump(exclude_unset=True)))
                             yield f"data: {data}\n\n"
                 first_iteration = False
 
@@ -746,7 +764,7 @@ async def _patched_chat_completion_stream_generator(
                         ),
                     )
 
-                data = chunk.model_dump_json(exclude_unset=True)
+                data = json.dumps(_filter_tool_call_null_fields(chunk.model_dump(exclude_unset=True)))
                 yield f"data: {data}\n\n"
 
         if include_usage:
