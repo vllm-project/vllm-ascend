@@ -3,7 +3,7 @@ import gc
 import pytest
 import torch
 from einops import rearrange
-from vllm.model_executor.layers.mamba.gdn_linear_attn import GatedDeltaNetAttention
+from vllm.model_executor.layers.mamba.gdn.base import GatedDeltaNetAttention
 
 from vllm_ascend.ops.triton.fla.fused_qkvzba_split_reshape import fused_qkvzba_split_reshape_cat
 

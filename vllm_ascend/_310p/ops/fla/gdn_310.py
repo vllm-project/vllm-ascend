@@ -20,15 +20,22 @@
 import torch
 import torch.nn.functional as F
 from vllm.forward_context import get_forward_context
-from vllm.model_executor.layers.mamba.gdn_linear_attn import GatedDeltaNetAttention
 from vllm.v1.attention.backend import AttentionMetadata  # type: ignore
+
+from vllm_ascend.utils import enable_sp, vllm_version_is
+
+if vllm_version_is("0.20.2"):
+    from vllm.model_executor.layers.mamba.gdn_linear_attn import (  # type: ignore[import-not-found]
+        GatedDeltaNetAttention,
+    )
+else:
+    from vllm.model_executor.layers.mamba.gdn.base import GatedDeltaNetAttention
 from vllm.v1.attention.backends.gdn_attn import GDNAttentionMetadata
 from vllm.v1.attention.backends.utils import PAD_SLOT_ID
 
 from vllm_ascend._310p.ops.fla.chunk_gated_delta_rule import chunk_gated_delta_rule_pytorch
 from vllm_ascend._310p.ops.fla.fused_gdn_gating import fused_gdn_gating_pytorch
 from vllm_ascend.attention.utils import maybe_save_kv_layer_to_connector
-from vllm_ascend.utils import enable_sp
 
 
 def _l2norm(x: torch.Tensor, eps: float = 1e-6) -> torch.Tensor:
