@@ -265,7 +265,6 @@ class AscendConfig:
             and vllm_config.compilation_config.pass_config.enable_sp
         )
 
-
         # Enable optimized reduce sampling scheme
         self.enable_reduce_sample = additional_config.get("enable_reduce_sample", False)
         self.mix_placement = additional_config.get("mix_placement", False)

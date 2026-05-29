@@ -45,6 +45,7 @@ from vllm_ascend.utils import (
     check_kv_extra_config,
     flashcomm2_enable,
     get_ascend_device_type,
+    is_hierarchical_communication_enabled,
     is_moe_model,
     refresh_block_size,
     update_aclgraph_sizes,
@@ -580,9 +581,9 @@ class NPUPlatform(Platform):
             os.environ["PYTORCH_NPU_ALLOC_CONF"] = npu_alloc_configs
             logger.info("Set PYTORCH_NPU_ALLOC_CONF=%s", npu_alloc_configs)
 
-        if get_ascend_device_type() == AscendDeviceType.A2 and get_ascend_config().enable_fused_mc2:
+        if is_hierarchical_communication_enabled() and get_ascend_config().enable_fused_mc2:
             raise ValueError(
-                "fused mc2 op cannot be used with hierarchy communication."
+                "Fused MC2 cannot be used with hierarchical MC2 on Atlas A2. "
                 "Please disable VLLM_ASCEND_ENABLE_FUSED_MC2 by setting it to 0."
             )
 

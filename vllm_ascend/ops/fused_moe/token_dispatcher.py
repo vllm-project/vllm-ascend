@@ -43,6 +43,7 @@ from vllm_ascend.quantization.quant_type import QuantType
 from vllm_ascend.utils import (
     AscendDeviceType,
     get_ascend_device_type,
+    is_hierarchical_communication_enabled,
     should_skip_allreduce_across_dp_group,
 )
 
@@ -109,6 +110,7 @@ class TokenDispatcherWithMC2(MoETokenDispatcher[MoEMC2CombineMetadata]):
         self.enable_dispatch_v2 = hasattr(torch_npu, "npu_moe_distribute_dispatch_v2")
         self.need_extra_args = get_ascend_device_type() in [AscendDeviceType.A3, AscendDeviceType.A5]
         self.a5_need_extra_args = get_ascend_device_type() == AscendDeviceType.A5
+        self.use_hierarchy_mc2 = is_hierarchical_communication_enabled()
         # Here we need to calculate the global_bs = max_bs_per_rank * ep_world_size to execute
         # dispatch & combine operators with different input num_tokens per rank.
         vllm_config = get_current_vllm_config()
@@ -132,7 +134,7 @@ class TokenDispatcherWithMC2(MoETokenDispatcher[MoEMC2CombineMetadata]):
         # use the real global_bs and do NOT pass mc2_mask.
         self.global_bs = _max_global_bs if should_skip_allreduce_across_dp_group(vllm_config) else 0
 
-        if not self.enable_dispatch_v2 and get_ascend_device_type() == AscendDeviceType.A2:
+        if self.use_hierarchy_mc2 and not self.enable_dispatch_v2:
             raise RuntimeError(
                 "PTA and CANN version is too old to support mc2 hierarchy comm, please upgrade your version."
             )
@@ -200,7 +202,7 @@ class TokenDispatcherWithMC2(MoETokenDispatcher[MoEMC2CombineMetadata]):
             ):
                 y_dtype = token_dispatch_input.quant.mxfp.act_quant_type
             stage1_kwargs.update({"tp_world_size": 1, "tp_rank_id": 0, "y_dtype": y_dtype})
-        if get_ascend_device_type() == AscendDeviceType.A2:
+        if self.use_hierarchy_mc2:
             stage1_kwargs.update(
                 {
                     "expert_scales": topk_weights.to(torch.float32),
@@ -315,7 +317,7 @@ class TokenDispatcherWithMC2(MoETokenDispatcher[MoEMC2CombineMetadata]):
                     "tp_rank_id": 0,
                 }
             )
-        if get_ascend_device_type() == AscendDeviceType.A2:
+        if self.use_hierarchy_mc2:
             stage3_kwargs.update({"comm_alg": "hierarchy"})
 
         kwargs_mc2.update(stage3_kwargs)

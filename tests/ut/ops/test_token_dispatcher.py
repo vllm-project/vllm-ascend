@@ -368,16 +368,16 @@ class TestTokenDispatcherWithMC2A2Hierarchy(TestBase):
         self.rank_group_patch = patch("torch.distributed.get_rank", return_value=0)
         self.rank_group_patch.start()
 
-        self.ascend_soc_version_patch = patch(
-            "vllm_ascend.ops.fused_moe.token_dispatcher.get_ascend_device_type",
-            return_value=AscendDeviceType.A2,
+        self.hierarchy_mc2_patch = patch(
+            "vllm_ascend.ops.fused_moe.token_dispatcher.is_hierarchical_communication_enabled",
+            return_value=True,
         )
-        self.ascend_soc_version_patch.start()
+        self.hierarchy_mc2_patch.start()
         self.dispatcher = TokenDispatcherWithMC2(top_k=8, num_experts=128)
 
     def tearDown(self):
         self.mc2_group_patch.stop()
-        self.ascend_soc_version_patch.stop()
+        self.hierarchy_mc2_patch.stop()
         self.config_patcher.stop()
         self.rank_group_patch.stop()
 
