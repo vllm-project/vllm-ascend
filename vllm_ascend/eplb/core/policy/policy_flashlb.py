@@ -478,9 +478,7 @@ class FlashTree:
                 high,
                 initial_replicas,
                 width,
-                lambda mid, ci=current_idx, crf=current_replicas_f, ri=remaind_idx, rrf=remaind_replicas_f, nar=num_available_replicas: (
-                    get_score(_lpt_deployment, X_row, deployed_replicas, ci, crf[mid], ri, rrf[nar - mid])
-                ),
+                lambda mid, ci=current_idx, crf=current_replicas_f, ri=remaind_idx, rrf=remaind_replicas_f, nar=num_available_replicas: get_score(_lpt_deployment, X_row, deployed_replicas, ci, crf[mid], ri, rrf[nar - mid]),  # noqa: E501
             )
 
             deployed_replicas[current_idx] = current_replicas_f[best_replica]

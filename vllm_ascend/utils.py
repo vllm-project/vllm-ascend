@@ -27,7 +27,7 @@ from contextlib import nullcontext
 from enum import Enum
 from functools import lru_cache
 from threading import Lock
-from typing import TYPE_CHECKING, Any, List
+from typing import TYPE_CHECKING, Any
 
 import numpy as np
 import regex as re
@@ -1166,7 +1166,11 @@ def get_flashcomm2_config_and_validate(ascend_config, vllm_config):
     if not flashcomm2_enable():
         return 0
 
-    logger.info(f"Enable FLASHCOMM2 with flashcomm2_oproj_tensor_parallel_size = {flashcomm2_oproj_tp_size}")
+    logger.info(
+        "Enable FLASHCOMM2 with flashcomm2_oproj_tensor_parallel_size"
+        " = %s",
+        flashcomm2_oproj_tp_size,
+    )
 
     layer_sharding = ascend_config.layer_sharding or []
     if layer_sharding:
@@ -1432,7 +1436,7 @@ def get_compressed_pos_and_indices(
     arrange_np: np.ndarray,
     use_compress: bool,
     kv_cache_groups,
-) -> tuple[List[np.ndarray], List[np.ndarray], List[np.ndarray]]:
+) -> tuple[list[np.ndarray], list[np.ndarray], list[np.ndarray]]:
     """
     Batch generate compressed position ids for multi-requests on DSv4.
     Calculate compressed position ids independently for each single request.

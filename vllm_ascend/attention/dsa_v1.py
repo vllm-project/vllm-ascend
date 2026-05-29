@@ -1,22 +1,18 @@
 import math
 from dataclasses import dataclass, fields, is_dataclass
-from typing import TYPE_CHECKING, Any, ClassVar, Optional, Tuple, Type, TypeVar
+from typing import TYPE_CHECKING, Any, ClassVar, TypeVar
 
 import torch
 import torch.nn.functional as F
 import torch_npu
 import vllm.envs as envs_vllm
-from vllm.v1.attention.backend import AttentionBackend
 from vllm.config import VllmConfig, get_current_vllm_config
 from vllm.distributed import get_tensor_model_parallel_world_size
 from vllm.forward_context import get_forward_context
 from vllm.logger import logger
 from vllm.triton_utils import HAS_TRITON
-from vllm.utils.math_utils import cdiv, round_down
-from vllm.v1.attention.backend import AttentionCGSupport, AttentionMetadataBuilder
+from vllm.v1.attention.backend import AttentionBackend, AttentionCGSupport, AttentionMetadataBuilder
 from vllm.v1.kv_cache_interface import AttentionSpec, MLAAttentionSpec
-from vllm.model_executor.models.utils import extract_layer_index
-from vllm.v1.attention.backends.mla.sparse_swa import SVFSWACache
 
 from vllm_ascend.ascend_config import get_ascend_config
 from vllm_ascend.ascend_forward_context import _EXTRA_CTX
@@ -33,8 +29,6 @@ from vllm_ascend.utils import (
     attention_calculation_stream,
     get_ascend_device_type,
     npu_stream_switch,
-    get_dsv4_compress_ratio,
-    extract_dsv4_layer_index,
     olora_tp_enable,
 )
 from vllm_ascend.worker.npu_input_batch import NPUInputBatch
@@ -158,7 +152,7 @@ class AscendDSABackend(AttentionBackend):
         return num_blocks, block_size, scale_size
 
     @staticmethod
-    def get_impl_cls() -> Type["DSAAttentionImpl"]:
+    def get_impl_cls() -> type["DSAAttentionImpl"]:
         return AscendDSAImpl
 
     @staticmethod
@@ -185,7 +179,7 @@ class AscendDSAPrefillMetadata:
     cos: torch.Tensor = None
     compress_sin: torch.Tensor = None
     compress_cos: torch.Tensor = None
-    start_pos: Optional[torch.Tensor] = None
+    start_pos: torch.Tensor | None = None
     sas_metadata: torch.Tensor = None
     qli_metadata: torch.Tensor = None
     cu_c4_cmp_seqlen_list: torch.Tensor = None
@@ -207,7 +201,7 @@ class AscendDSADecodeMetadata:
 
     query_start_loc: torch.tensor = None
     query_start_loc_cpu: torch.tensor = None
-    attn_mask: Optional[torch.Tensor] = None
+    attn_mask: torch.Tensor | None = None
     sin: torch.Tensor = None
     cos: torch.Tensor = None
     compress_sin: torch.Tensor = None
@@ -241,22 +235,22 @@ class AscendDSAMetadata:
     # For logging.
     num_input_tokens: int = 0  # Number of tokens including padding.
 
-    query_lens: Optional[list[int]] = None
+    query_lens: list[int] | None = None
     # The dimension of the attention heads
-    head_dim: Optional[int] = None
+    head_dim: int | None = None
     attn_mask: torch.Tensor = None
     # chunked prefill by default if no attn_states passed
     attn_state: AscendAttentionState = AscendAttentionState.ChunkedPrefill
 
-    decode: Optional[AscendDSADecodeMetadata] = None
-    prefill: Optional[AscendDSAPrefillMetadata] = None
+    decode: AscendDSADecodeMetadata | None = None
+    prefill: AscendDSAPrefillMetadata | None = None
     reshape_cache_event: torch.npu.Event = None
 
     # metadata for dsv4 indexer
 
-    hadamard: Optional[torch.Tensor] = None
+    hadamard: torch.Tensor | None = None
 
-    start_pos: Optional[torch.Tensor] = None
+    start_pos: torch.Tensor | None = None
 
     def __post_init__(self):
         pass
@@ -269,13 +263,13 @@ class AscendDSAMetadataBuilder(AttentionMetadataBuilder[AscendDSAMetadata]):
     # Does this backend/builder support ACL Graphs for attention (default: no).
     aclgraph_support: ClassVar[AttentionCGSupport] = AttentionCGSupport.UNIFORM_BATCH
     hadamard = None
-    start_pos_prefill: Optional[torch.Tensor] = None
-    start_pos_decode: Optional[torch.Tensor] = None
-    decode_sas_metadata: Optional[torch.Tensor] = None
-    decode_qli_metadata: Optional[torch.Tensor] = None
-    prefill_ratio_to_sas_metadata: Optional[dict] = None
-    decode_ratio_to_sas_metadata: Optional[dict] = None
-    block_size: Optional[int] = 128
+    start_pos_prefill: torch.Tensor | None = None
+    start_pos_decode: torch.Tensor | None = None
+    decode_sas_metadata: torch.Tensor | None = None
+    decode_qli_metadata: torch.Tensor | None = None
+    prefill_ratio_to_sas_metadata: dict | None = None
+    decode_ratio_to_sas_metadata: dict | None = None
+    block_size: int | None = 128
     """
     NOTE: Please read the comment at the top of the file before trying to
     understand this class
@@ -321,7 +315,7 @@ class AscendDSAMetadataBuilder(AttentionMetadataBuilder[AscendDSAMetadata]):
         self.num_decode_tokens = 0
         self.num_prefill_tokens = 0
         self.context_lens_cpu: torch.Tensor = None
-        self.num_actual_tokens: Optional[int] = None
+        self.num_actual_tokens: int | None = None
         self.block_table: torch.Tensor = None
         self.slot_mapping: torch.Tensor = None
         self.graph_pad_size = 0
@@ -351,7 +345,8 @@ class AscendDSAMetadataBuilder(AttentionMetadataBuilder[AscendDSAMetadata]):
         self.cu_seqlens_ori_kv = torch.tensor([], device=self.device)
         self.cu_seqlens_cmp_kv = torch.tensor([], device=self.device)
         self.seqused_q = torch.tensor([], device=self.device)
-        # Note(qcs): we use two dimension slot_mapping for kvcache with shape [block_nums, block_size, head_num, head_dim]
+        # Note(qcs): we use two dimension slot_mapping for kvcache
+        # with shape [block_nums, block_size, head_num, head_dim]
         self.slot_mapping = torch.zeros(
             (vllm_config.scheduler_config.max_num_batched_tokens, 2), dtype=torch.int32, device=self.device
         )
@@ -428,12 +423,12 @@ class AscendDSAMetadataBuilder(AttentionMetadataBuilder[AscendDSAMetadata]):
     ) -> AscendDSAMetadata:
         num_reqs = common_attn_metadata.num_reqs
         query_start_loc = common_attn_metadata.query_start_loc
-        num_reqs_actual = kwargs.get("num_reqs_actual", None)
-        self.prefill_ratio_to_sas_metadata = kwargs.get("prefill_ratio_to_sas_metadata", None)
-        self.decode_ratio_to_sas_metadata = kwargs.get("decode_ratio_to_sas_metadata", None)
+        num_reqs_actual = kwargs.get("num_reqs_actual")
+        self.prefill_ratio_to_sas_metadata = kwargs.get("prefill_ratio_to_sas_metadata")
+        self.decode_ratio_to_sas_metadata = kwargs.get("decode_ratio_to_sas_metadata")
         self.block_size = kwargs.get("block_size", 128)
 
-        self.common_ratio_to_sas_metadata = kwargs.get("common_ratio_to_sas_metadata", None)
+        self.common_ratio_to_sas_metadata = kwargs.get("common_ratio_to_sas_metadata")
         if self.prefill_ratio_to_sas_metadata is None:
             self.prefill_ratio_to_sas_metadata = {}
         if self.decode_ratio_to_sas_metadata is None:
@@ -772,7 +767,7 @@ class AscendDSAMetadataBuilder(AttentionMetadataBuilder[AscendDSAMetadata]):
         self,
         common_prefix_len: int,
         common_attn_metadata: AscendCommonAttentionMetadata,
-        num_reqs_actual: Optional[int],
+        num_reqs_actual: int | None,
     ) -> AscendDSADecodeMetadata:
         if self.decode_ratio_to_sas_metadata.get("query_start_loc", None) is None:
             query_start_loc = common_attn_metadata.query_start_loc[: self.num_decodes + 1]
@@ -1010,8 +1005,10 @@ class AscendDSAMetadataBuilder(AttentionMetadataBuilder[AscendDSAMetadata]):
     def get_block_table_size(self, common_attn_metadata: AscendCommonAttentionMetadata, build_metadata_step: int):
         if build_metadata_step == BUILD_METADATA_STEP_PREFILL:
             # If graph_pad_size > -1, mean is running in fullgraph mode.
-            # NOTE: Maybe this block_table change can be removed when graph_pad_size > 1.
-            # if self.graph_pad_size > common_attn_metadata.num_reqs and self.speculative_config.disable_padded_drafter_batch:
+            # NOTE: Maybe this block_table change can be removed when
+            # graph_pad_size > 1.
+            # if self.graph_pad_size > common_attn_metadata.num_reqs
+            #     and self.speculative_config.disable_padded_drafter_batch:
             #     return self.graph_pad_size
             return common_attn_metadata.num_reqs
         return self.num_decodes
@@ -1322,8 +1319,8 @@ class AscendDSAImpl(DSAAttentionImpl):
         self.q_norm = kwargs["q_norm"]
         self.kv_norm = kwargs["kv_norm"]
 
-        self.indexer = kwargs.get("indexer", None)
-        self.compressor = kwargs.get("compressor", None)
+        self.indexer = kwargs.get("indexer")
+        self.compressor = kwargs.get("compressor")
 
         self.wo_a = kwargs["wo_a"]
         self.wo_b = kwargs["wo_b"]
@@ -1395,10 +1392,10 @@ class AscendDSAImpl(DSAAttentionImpl):
         self,
         layer_name,
         hidden_states: torch.Tensor,  # query in unified attn
-        kv_cache: Tuple[torch.Tensor],
+        kv_cache: tuple[torch.Tensor],
         attn_metadata: list[M],
         need_gather_q_kv: bool = False,
-        output: Optional[torch.Tensor] = None,
+        output: torch.Tensor | None = None,
     ) -> torch.Tensor:
         assert output is not None, "Output tensor must be provided."
         if attn_metadata is None:
@@ -1471,7 +1468,7 @@ class AscendDSAImpl(DSAAttentionImpl):
         self,
         layer_name,
         hidden_states: torch.Tensor,
-        kv_cache: Tuple[torch.Tensor],
+        kv_cache: tuple[torch.Tensor],
         attn_metadata: AscendDSAMetadata,
     ):
         compress_common_attn_metadata = None
@@ -1656,7 +1653,7 @@ class AscendDSAImpl(DSAAttentionImpl):
         self,
         layer_name,
         hidden_states: torch.Tensor,
-        kv_cache: Tuple,
+        kv_cache: tuple,
         attn_metadata: AscendDSAMetadata,
     ):
         assert attn_metadata[0].decode is not None
@@ -1954,10 +1951,14 @@ class AscendDSAImpl(DSAAttentionImpl):
             assert indexer_kv_scale_metadata.prefill is not None
             if kv is not None:
                 # if torch.distributed.get_rank() == 0:
-                #     print(f"C{self.compress_ratio} Attention decode write kv: {compress_kv_cache=}")
-                #     print(f"C{self.compress_ratio} Attention decode write kv is_contiguous: {compress_kv_cache.is_contiguous()=}")
-                #     print(f"C{self.compress_ratio} Attention decode write kv stride: {compress_kv_cache.stride()=}")
-                #     print(f"C{self.compress_ratio} Attention decode write kv: {compressor_attn_metadata.decode.slot_mapping.unsqueeze(-1)=}")
+                #     print(f"C{self.compress_ratio} Attention decode"
+                #           f" write kv: {compress_kv_cache=}")
+                #     print(f"C{self.compress_ratio} Attention decode write kv"
+                #           f" is_contiguous: {compress_kv_cache.is_contiguous()=}")
+                #     print(f"C{self.compress_ratio} Attention decode write kv"
+                #           f" stride: {compress_kv_cache.stride()=}")
+                #     print(f"C{self.compress_ratio} Attention decode write kv:"
+                #           f" {compressor_attn_metadata.decode.slot_mapping.unsqueeze(-1)=}")
                 #     print(f"C{self.compress_ratio} Attention decode write kv: {compressed_kv=}")
 
                 torch.ops._C_ascend.npu_scatter_nd_update_v2(

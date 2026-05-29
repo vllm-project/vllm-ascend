@@ -25,7 +25,7 @@ from contextlib import contextmanager, nullcontext
 from copy import copy, deepcopy
 from dataclasses import dataclass
 from multiprocessing import Manager
-from typing import TYPE_CHECKING, Any, NamedTuple, TypeAlias, Dict, List
+from typing import TYPE_CHECKING, Any, NamedTuple, TypeAlias
 
 import numpy as np
 import torch
@@ -52,7 +52,6 @@ from vllm.v1.attention.backends.gdn_attn import GDNAttentionMetadataBuilder
 from vllm.v1.attention.backends.utils import CommonAttentionMetadata
 from vllm.v1.attention.selector import get_attn_backend  # type: ignore
 from vllm.v1.core.sched.output import SchedulerOutput
-from vllm.v1.worker.utils import select_common_block_size
 from vllm.v1.kv_cache_interface import (
     AttentionSpec,
     EncoderOnlyAttentionSpec,
@@ -61,8 +60,8 @@ from vllm.v1.kv_cache_interface import (
     KVCacheSpec,
     MambaSpec,
     MLAAttentionSpec,
-    UniformTypeKVCacheSpecs,
     SlidingWindowMLASpec,
+    UniformTypeKVCacheSpecs,
 )
 from vllm.v1.outputs import (
     EMPTY_MODEL_RUNNER_OUTPUT,
@@ -89,13 +88,13 @@ from vllm.v1.worker.ubatch_utils import (
     UBatchSlices,
     maybe_create_ubatch_slices,
 )
-from vllm.v1.worker.utils import AttentionGroup
+from vllm.v1.worker.utils import AttentionGroup, select_common_block_size
 
 # yapf: enable
 from vllm_ascend.ascend_config import get_ascend_config
 from vllm_ascend.attention.attention_v1 import AscendAttentionState
+from vllm_ascend.attention.dsa_v1 import AscendDSAMetadataBuilder
 from vllm_ascend.attention.utils import AscendCommonAttentionMetadata, using_paged_attention
-from vllm_ascend.patch.platform.patch_kv_cache_interface import AscendMLAAttentionSpec
 
 # yapf conflicts with isort for this block
 # yapf: disable
@@ -105,22 +104,6 @@ from vllm_ascend.compilation.acl_graph import (
     set_graph_params,
     update_full_graph_params,
 )
-from vllm_ascend.core.kv_cache_spec import (CompressAttentionSpec,
-                                            Compress4AttentionSpec,
-                                            Compress128AttentionSpec,
-                                            # ------------- state -------------
-                                            C128AttnKVStateSpec,
-                                            C128AttnScoreStateSpec,
-                                            C4AttnKVStateSpec,
-                                            C4AttnScoreStateSpec,
-                                            C4IndexerKVStateSpec,
-                                            C4IndexerScoreStateSpec,
-                                            # ---------------------------------
-                                            C4IndexerSpec,
-                                            SWAAttentionSpec,
-                                            )
-from vllm_ascend.models.layer.attention.layer import DSAAttention
-from vllm_ascend.attention.dsa_v1 import AscendDSAMetadataBuilder
 from vllm_ascend.eplb.adaptor.vllm_adaptor import VllmEplbAdaptor
 from vllm_ascend.eplb.core.eplb_device_transfer_loader import D2DExpertWeightLoader
 from vllm_ascend.eplb.core.eplb_worker import EplbProcess
@@ -1121,12 +1104,9 @@ class NPUModelRunner(GPUModelRunner):
         sample_positions: torch.Tensor,
         spec_decode_metadata: SpecDecodeMetadata | None,
     ) -> None:
-        setattr(sampling_metadata, "_ascend_positions", sample_positions.to(torch.int32))
-        setattr(
-            sampling_metadata,
-            "_ascend_idx_mapping",
-            self._build_sampling_idx_mapping(
-                spec_decode_metadata, sample_positions.shape[0]),
+        sampling_metadata._ascend_positions = sample_positions.to(torch.int32)
+        sampling_metadata._ascend_idx_mapping = self._build_sampling_idx_mapping(
+            spec_decode_metadata, sample_positions.shape[0]
         )
 
     def _pad_query_start_loc_for_fia(
@@ -1302,7 +1282,11 @@ class NPUModelRunner(GPUModelRunner):
         cu_num_tokens, arange = self._get_cumsum_and_arange(num_scheduled_tokens)
         np.add(self.input_batch.num_computed_tokens_cpu[req_indices], arange, out=positions_np)
 
-        positions_compressed_list, req_indices_compressed_list, num_scheduled_tokens_compressed_list = get_compressed_pos_and_indices(
+        (
+            positions_compressed_list,
+            req_indices_compressed_list,
+            num_scheduled_tokens_compressed_list,
+        ) = get_compressed_pos_and_indices(
             self.input_batch.num_computed_tokens_cpu[:num_reqs],
             num_scheduled_tokens[:num_reqs], self.arange_np[:num_reqs],
             self.use_compress,
@@ -2982,6 +2966,7 @@ class NPUModelRunner(GPUModelRunner):
         layer entries, NOT DSA main model entries. We directly update the
         MTP entries using draft_attn_metadatas."""
         import torch_npu
+
         from vllm_ascend.compilation.acl_graph import get_graph_params
 
         graph_params = get_graph_params()
@@ -3428,7 +3413,9 @@ class NPUModelRunner(GPUModelRunner):
             total_num_scheduled_tokens_compressed_list = None
             num_reqs_actual = num_reqs
 
-        block_table_gid_0, slot_mapping_gid_0 = _get_block_table_and_slot_mapping(0, total_num_scheduled_tokens_compressed_list)
+        block_table_gid_0, slot_mapping_gid_0 = _get_block_table_and_slot_mapping(
+            0, total_num_scheduled_tokens_compressed_list
+        )
         self.long_seq_metadata, block_table_gid_0 = _get_pcp_metadata(block_table_gid_0)
 
         cm_base = AscendCommonAttentionMetadata(
@@ -3563,7 +3550,9 @@ class NPUModelRunner(GPUModelRunner):
                     cm.query_start_loc = self.gdn_query_start_loc.gpu[: num_reqs_padded + 1]
 
             if kv_cache_gid > 0:
-                cm.block_table_tensor, cm.slot_mapping = _get_block_table_and_slot_mapping(kv_cache_gid, total_num_scheduled_tokens_compressed_list)
+                cm.block_table_tensor, cm.slot_mapping = _get_block_table_and_slot_mapping(
+                    kv_cache_gid, total_num_scheduled_tokens_compressed_list
+                )
             if self.speculative_config and spec_decode_common_attn_metadata is None:
                 if isinstance(self.drafter, AscendEagleProposer | AscendDraftModelProposer):
                     if self.drafter.attn_layer_names[0] in kv_cache_group.layer_names:
@@ -3572,7 +3561,15 @@ class NPUModelRunner(GPUModelRunner):
                     spec_decode_common_attn_metadata = cm
 
             for attn_gid in range(len(self.attn_groups[kv_cache_gid])):
-                _build_attn_group_metadata(kv_cache_gid, attn_gid, cm, num_reqs_actual, prefill_ratio_to_sas_metadata, decode_ratio_to_sas_metadata, common_ratio_to_sas_metadata)
+                _build_attn_group_metadata(
+                    kv_cache_gid,
+                    attn_gid,
+                    cm,
+                    num_reqs_actual,
+                    prefill_ratio_to_sas_metadata,
+                    decode_ratio_to_sas_metadata,
+                    common_ratio_to_sas_metadata,
+                )
         if self.is_mm_prefix_lm:
             req_doc_ranges = {}
             for req_id in self.input_batch.req_ids:
@@ -4170,8 +4167,7 @@ class NPUModelRunner(GPUModelRunner):
                     for layer_name_inner in kv_cache_tensor.shared_by:
                         # shared the kvcache for all shared layers
                         kv_cache_raw_tensors[layer_name_inner] = tensor
-                elif "attn" in layer_name and self.use_compress and layer_name not in kv_cache_raw_tensors.keys(
-                ):
+                elif "attn" in layer_name and self.use_compress and layer_name not in kv_cache_raw_tensors:
                     if self.vllm_config.kv_transfer_config is None:
                         tensor = torch.zeros(kv_cache_tensor.size,
                                                 dtype=torch.int8,
@@ -4321,7 +4317,7 @@ class NPUModelRunner(GPUModelRunner):
             Dict[str, torch.Tensor]: A map between layer names to their
             corresponding memory buffer for KV cache.
         """
-        kv_caches: Dict[str, torch.Tensor] = {}
+        kv_caches: dict[str, torch.Tensor] = {}
         # TODO(qcs): remove me
         for group in self._kv_cache_spec_attn_group_iterator():
             attn_backend = group.backend
@@ -4609,8 +4605,11 @@ class NPUModelRunner(GPUModelRunner):
                 max_num_blocks_per_req = max(max_num_blocks_per_req, mamba_blocks_per_req)
             max_num_blocks.append(max_num_blocks_per_req)
 
-        if block_sizes != [self.cache_config.block_size] or self.kernel_block_sizes != [[self.cache_config.block_size]] \
-            or len(kv_cache_config.kv_cache_groups) > 1:
+        if (
+            block_sizes != [self.cache_config.block_size]
+            or self.kernel_block_sizes != [[self.cache_config.block_size]]
+            or len(kv_cache_config.kv_cache_groups) > 1
+        ):
             assert self.offload_config.uva.cpu_offload_gb == 0, (
                 "Cannot re-initialize the input batch when CPU weight "
                 "offloading is enabled. See https://github.com/vllm-project/vllm/pull/18298 "  # noqa: E501
