@@ -104,7 +104,7 @@ class AscendVocabParallelEmbedding(VocabParallelEmbedding):
             quant_method = UnquantizedEmbeddingMethod()
 
         if (
-            (isinstance(self, ParallelLMHead) or isinstance(self, AscendParallelLMHead))
+            isinstance(self, (ParallelLMHead, AscendParallelLMHead))
             and type(quant_method) is UnquantizedEmbeddingMethod
         ):
             quant_method = AscendUnquantizedLMHeadMethod()
