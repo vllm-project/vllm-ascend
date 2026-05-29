@@ -52,7 +52,7 @@ import json
 from pathlib import Path
 
 
-def parse_route_conf(route_conf_path: Path) -> dict[int, dict[str, str]]:
+def parse_route_conf(route_conf_path: Path) -> dict[int, dict[str, str | int | None]]:
     """
     Parse route.conf file to extract device-to-EID mappings.
 
