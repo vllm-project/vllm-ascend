@@ -94,7 +94,7 @@ def reset_proxy_globals(monkeypatch):
         [("127.0.0.1", 8200), ("127.0.0.1", 8201)],
     )
     monkeypatch.setattr(proxy, "runtime", FakeRuntime(scheduler))
-    monkeypatch.setattr(proxy, "global_args", argparse.Namespace(max_retries=1, retry_delay=0))
+    monkeypatch.setattr(proxy, "global_args", argparse.Namespace(max_retries=1, retry_delay=0, enable_metrics=False))
 
 
 def test_proxy_basic_completion_flow(monkeypatch):
@@ -211,6 +211,59 @@ async def _test_proxy_releases_resources_on_cancel(monkeypatch):
     prefiller_key = proxy.server_key("127.0.0.1", 8100)
     assert scheduler.healthcheck()["request_num"] == 0
     assert scheduler.prefillers[prefiller_key]["active_kv_cache"] == 0
+
+
+def test_proxy_records_timing_metrics(monkeypatch):
+    asyncio.run(_test_proxy_records_timing_metrics(monkeypatch))
+
+
+async def _test_proxy_records_timing_metrics(monkeypatch):
+    monkeypatch.setattr(proxy, "global_args", argparse.Namespace(max_retries=1, retry_delay=0, enable_metrics=True))
+
+    async def fake_prefill_request(_client, _prefiller_key, _endpoint, _req_data, _request_id, **_kwargs):
+        await asyncio.sleep(0)
+        return FakeResponse({"kv_transfer_params": {"remote_engine_id": "engine-0"}})
+
+    async def fake_decode_stream(_client, _endpoint, _req_data, request_id, **_kwargs):
+        await asyncio.sleep(0)
+        yield b'{"choices": [{"text": "ok"}], "usage": {"completion_tokens": 1}}'
+        await asyncio.sleep(0)
+        yield b'{"choices": [{"text": "!"}], "usage": {"completion_tokens": 1}}'
+
+    monkeypatch.setattr(proxy, "send_request_to_service", fake_prefill_request)
+    monkeypatch.setattr(proxy, "stream_service_response_with_retry", fake_decode_stream)
+
+    request = FakeRequest({"model": "test-model", "prompt": "hello", "max_tokens": 4})
+    response = await proxy.handle_completions_impl("/completions", request)
+    chunks = [chunk async for chunk in response.body_iterator]
+    metrics = proxy.runtime.scheduler.get_metrics()
+
+    assert chunks
+    assert metrics["request_count"] == 1
+    for name in [
+        "request_read_ms",
+        "prefiller_schedule_ms",
+        "prefill_request_ms",
+        "decoder_schedule_ms",
+        "decoder_first_chunk_wait_ms",
+        "decoder_inter_chunk_avg_ms",
+        "decoder_inter_chunk_max_ms",
+        "decoder_inter_chunk_sum_ms",
+        "prefiller_kv_release_ms",
+        "first_chunk_proxy_ms",
+        "time_to_first_yield_ms",
+        "request_total_ms",
+        "finish_request_ms",
+    ]:
+        assert name in metrics["average_ms"]
+        assert metrics["average_ms"][name] >= 0
+    assert metrics["average_ms"]["decoder_inter_chunk_count"] == 1
+    assert metrics["average_ms"]["decoder_inter_chunk_sum_ms"] >= 0
+    assert metrics["average_ms"]["decoder_inter_chunk_max_ms"] >= 0
+    assert metrics["average_ms"]["decoder_inter_chunk_avg_ms"] == pytest.approx(
+        metrics["average_ms"]["decoder_inter_chunk_sum_ms"]
+        / metrics["average_ms"]["decoder_inter_chunk_count"]
+    )
 
 
 def test_scheduler_balances_prefillers_and_decoders_under_high_concurrency():

@@ -201,6 +201,14 @@ def calculate_decode_score(request_length: int) -> float:
     return request_length
 
 
+def add_metric(metrics: dict[str, float], name: str, duration: float) -> None:
+    metrics[name] = metrics.get(name, 0.0) + duration * 1000.0
+
+
+def add_value_metric(metrics: dict[str, float], name: str, value: float) -> None:
+    metrics[name] = metrics.get(name, 0.0) + value
+
+
 def normalize_host(host: str) -> str:
     return host.replace("localhost", "0.0.0.0").replace("127.0.0.1", "0.0.0.0")
 
@@ -233,6 +241,9 @@ class SharedProxyScheduler:
         self.decoders: dict[str, dict[str, Any]] = {}
         self.prefiller_heap: list[tuple[float, int, str]] = []
         self.decoder_heap: list[tuple[float, int, str]] = []
+        self.metrics_count = 0
+        self.metrics_sums: dict[str, float] = {}
+        self.metrics_max: dict[str, float] = {}
         self._ordinal = 0
 
         for host, port in prefiller_instances:
@@ -315,6 +326,38 @@ class SharedProxyScheduler:
                 "decode_instances": len(self.decoders),
                 "request_num": self.request_num,
             }
+
+    def record_request_metrics(self, metrics: dict[str, float]) -> None:
+        with self._lock:
+            self.metrics_count += 1
+            for name, value in metrics.items():
+                value = float(value)
+                self.metrics_sums[name] = self.metrics_sums.get(name, 0.0) + value
+                self.metrics_max[name] = max(self.metrics_max.get(name, 0.0), value)
+
+    def get_metrics(self) -> dict[str, Any]:
+        with self._lock:
+            averages = {
+                name: value / self.metrics_count if self.metrics_count else 0.0
+                for name, value in self.metrics_sums.items()
+            }
+            if self.metrics_sums.get("decoder_inter_chunk_count", 0.0):
+                averages["decoder_inter_chunk_avg_ms"] = (
+                    self.metrics_sums.get("decoder_inter_chunk_sum_ms", 0.0)
+                    / self.metrics_sums["decoder_inter_chunk_count"]
+                )
+            return {
+                "request_count": self.metrics_count,
+                "average_ms": dict(sorted(averages.items())),
+                "max_ms": dict(sorted(self.metrics_max.items())),
+            }
+
+    def reset_metrics(self) -> dict[str, Any]:
+        with self._lock:
+            self.metrics_count = 0
+            self.metrics_sums.clear()
+            self.metrics_max.clear()
+            return self.get_metrics()
 
     def request_started(self) -> None:
         with self._lock:
@@ -655,6 +698,7 @@ def serialize_args(args) -> dict[str, Any]:
         "waiting_retry_interval": args.waiting_retry_interval,
         "workers": args.workers,
         "log_level": args.log_level,
+        "enable_metrics": args.enable_metrics,
     }
 
 
@@ -698,6 +742,11 @@ def parse_args():
         default="INFO",
         choices=["DEBUG", "INFO", "WARNING", "ERROR", "CRITICAL"],
         help="Log level for the proxy server.",
+    )
+    parser.add_argument(
+        "--enable-metrics",
+        action="store_true",
+        help="Collect per-request proxy timing metrics exposed by /metrics.",
     )
     args = parser.parse_args()
     if len(args.prefiller_hosts) != len(args.prefiller_ports):
@@ -880,19 +929,27 @@ async def handle_select_instance(
     req_data: Any,
     request_length: int,
     start_request: bool,
+    metrics: dict[str, float] | None = None,
 ) -> InstanceInfo:
     scheduler = runtime.scheduler
     prefiller_score = calculate_prefill_score(request_length)
     decoder_score = calculate_decode_score(request_length)
     request_id = next_req_id()
+    started_at = time.perf_counter()
     if start_request:
         prefiller = scheduler.start_request_and_reserve_prefiller_kv(prefiller_score)
     else:
         prefiller = scheduler.reserve_prefiller_kv(prefiller_score)
+    if metrics is not None:
+        add_metric(metrics, "prefiller_schedule_ms", time.perf_counter() - started_at)
     prefiller_key = prefiller["key"]
+    started_at = time.perf_counter()
     prefiller_client = await get_prefiller_client(prefiller_key)
+    if metrics is not None:
+        add_metric(metrics, "prefiller_client_lookup_ms", time.perf_counter() - started_at)
 
     try:
+        started_at = time.perf_counter()
         response = await send_request_to_service(
             prefiller_client,
             prefiller_key,
@@ -902,6 +959,8 @@ async def handle_select_instance(
             max_retries=global_args.max_retries,
             base_delay=global_args.retry_delay,
         )
+        if metrics is not None:
+            add_metric(metrics, "prefill_request_ms", time.perf_counter() - started_at)
     except Exception:
         if start_request:
             scheduler.finish_request(prefiller_key, prefiller_score, None, 0.0, release_prefiller_kv=True)
@@ -915,7 +974,10 @@ async def handle_select_instance(
         req_data["kv_transfer_params"] = kv_transfer_params
 
     try:
+        started_at = time.perf_counter()
         decoder = scheduler.select_decoder(decoder_score)
+        if metrics is not None:
+            add_metric(metrics, "decoder_schedule_ms", time.perf_counter() - started_at)
     except Exception:
         if start_request:
             scheduler.finish_request(prefiller_key, prefiller_score, None, 0.0, release_prefiller_kv=True)
@@ -923,7 +985,10 @@ async def handle_select_instance(
             scheduler.release_prefiller_kv(prefiller_key, prefiller_score)
         raise
     decoder_key = decoder["key"]
+    started_at = time.perf_counter()
     decoder_client = await get_decoder_client(decoder_key)
+    if metrics is not None:
+        add_metric(metrics, "decoder_client_lookup_ms", time.perf_counter() - started_at)
 
     logger.debug(
         "Using %s %s",
@@ -946,21 +1011,34 @@ async def select_recompute_instance(
     req_data: Any,
     request_length: int,
     previous_instance: InstanceInfo,
+    metrics: dict[str, float] | None = None,
 ) -> InstanceInfo:
     """Release the old decoder before assigning a new instance for recompute."""
     runtime.scheduler.release_prefiller_kv(previous_instance.prefiller_key, previous_instance.prefiller_score)
     runtime.scheduler.release_decoder(previous_instance.decoder_key, previous_instance.decoder_score)
-    return await handle_select_instance(api, req_data, request_length, start_request=False)
+    return await handle_select_instance(api, req_data, request_length, start_request=False, metrics=metrics)
 
 
 async def handle_completions_impl(api: str, request: Request):
     scheduler = runtime.scheduler
     request_released = False
+    request_started_at = time.perf_counter()
+    metrics_enabled = bool(getattr(global_args, "enable_metrics", False))
+    metrics: dict[str, float] | None = {"request_count": 1.0} if metrics_enabled else None
     try:
+        started_at = time.perf_counter()
         req_data = await request.json()
         req_body = await request.body()
+        if metrics is not None:
+            add_metric(metrics, "request_read_ms", time.perf_counter() - started_at)
         request_length = len(req_body)
-        instance_info = await handle_select_instance(api, req_data, request_length, start_request=True)
+        instance_info = await handle_select_instance(
+            api,
+            req_data,
+            request_length,
+            start_request=True,
+            metrics=metrics,
+        )
         stream_flag = bool(req_data.get("stream", False))
         chat_flag = "messages" in req_data
 
@@ -981,17 +1059,35 @@ async def handle_completions_impl(api: str, request: Request):
             retry_count = 0
             retry = True
             completion_tokens = 0
+            decoder_stream_started_at = None
+            first_decoder_chunk_at = None
+            last_decoder_chunk_at = None
+            first_chunk_yield_at = None
+            output_chunks = 0
 
             def release_prefiller_kv_once() -> None:
                 nonlocal released_kv
                 if not released_kv:
+                    started_at = time.perf_counter()
                     scheduler.release_prefiller_kv(instance_info.prefiller_key, instance_info.prefiller_score)
+                    if metrics is not None:
+                        add_metric(metrics, "prefiller_kv_release_ms", time.perf_counter() - started_at)
                     released_kv = True
+
+            def record_first_yield(chunk_received_at: float) -> None:
+                nonlocal first_chunk_yield_at
+                if first_chunk_yield_at is not None:
+                    return
+                first_chunk_yield_at = time.perf_counter()
+                if metrics is not None:
+                    add_metric(metrics, "first_chunk_proxy_ms", first_chunk_yield_at - chunk_received_at)
+                    add_metric(metrics, "time_to_first_yield_ms", first_chunk_yield_at - request_started_at)
 
             try:
                 while retry:
                     retry = False
                     decoder_client = await get_decoder_client(instance_info.decoder_key)
+                    decoder_stream_started_at = time.perf_counter()
                     async for chunk in stream_service_response_with_retry(
                         decoder_client,
                         api,
@@ -1000,12 +1096,32 @@ async def handle_completions_impl(api: str, request: Request):
                         max_retries=global_args.max_retries,
                         base_delay=global_args.retry_delay,
                     ):
+                        chunk_received_at = time.perf_counter()
+                        if first_decoder_chunk_at is None:
+                            first_decoder_chunk_at = chunk_received_at
+                            if metrics is not None:
+                                add_metric(
+                                    metrics,
+                                    "decoder_first_chunk_wait_ms",
+                                    first_decoder_chunk_at - decoder_stream_started_at,
+                                )
+                        elif metrics is not None and last_decoder_chunk_at is not None:
+                            interval_ms = (chunk_received_at - last_decoder_chunk_at) * 1000.0
+                            add_value_metric(metrics, "decoder_inter_chunk_sum_ms", interval_ms)
+                            add_value_metric(metrics, "decoder_inter_chunk_count", 1.0)
+                            metrics["decoder_inter_chunk_max_ms"] = max(
+                                metrics.get("decoder_inter_chunk_max_ms", 0.0),
+                                interval_ms,
+                            )
+                        last_decoder_chunk_at = chunk_received_at
                         if chunk:
                             release_prefiller_kv_once()
                         try:
                             chunk_str = chunk.decode("utf-8").strip()
                         except UnicodeDecodeError:
                             logger.debug("Skipping chunk: %s", chunk)
+                            record_first_yield(chunk_received_at)
+                            output_chunks += 1
                             yield chunk
                             continue
                         if not chunk_str:
@@ -1016,10 +1132,14 @@ async def handle_completions_impl(api: str, request: Request):
                             chunk_json = json.loads(chunk_str)
                         except json.JSONDecodeError:
                             logger.debug("Skipping chunk: %s", chunk_str)
+                            record_first_yield(chunk_received_at)
+                            output_chunks += 1
                             yield chunk
                             continue
                         choices = chunk_json.get("choices", [])
                         if not choices:
+                            record_first_yield(chunk_received_at)
+                            output_chunks += 1
                             yield chunk
                             continue
 
@@ -1050,6 +1170,7 @@ async def handle_completions_impl(api: str, request: Request):
                                 req_data,
                                 tmp_request_length,
                                 instance_info,
+                                metrics=metrics,
                             )
                             released_kv = False
                             break
@@ -1059,6 +1180,8 @@ async def handle_completions_impl(api: str, request: Request):
                             else:
                                 choice["text"] = generated_token
                             chunk = json.dumps(chunk_json).encode("utf-8")
+                        record_first_yield(chunk_received_at)
+                        output_chunks += 1
                         yield chunk
             except asyncio.CancelledError:
                 logger.warning(
@@ -1077,6 +1200,15 @@ async def handle_completions_impl(api: str, request: Request):
                     instance_info.request_id,
                 )
             finally:
+                finished_at = time.perf_counter()
+                if metrics is not None:
+                    if decoder_stream_started_at is not None:
+                        add_metric(metrics, "decoder_stream_total_ms", finished_at - decoder_stream_started_at)
+                    if first_chunk_yield_at is not None:
+                        add_metric(metrics, "post_first_stream_ms", finished_at - first_chunk_yield_at)
+                    add_metric(metrics, "request_total_ms", finished_at - request_started_at)
+                    metrics["output_chunks"] = float(output_chunks)
+                started_at = time.perf_counter()
                 scheduler.finish_request(
                     instance_info.prefiller_key,
                     instance_info.prefiller_score,
@@ -1084,6 +1216,9 @@ async def handle_completions_impl(api: str, request: Request):
                     instance_info.decoder_score,
                     release_prefiller_kv=not released_kv,
                 )
+                if metrics is not None:
+                    add_metric(metrics, "finish_request_ms", time.perf_counter() - started_at)
+                    scheduler.record_request_metrics(metrics)
                 released_kv = True
                 request_released = True
 
@@ -1171,6 +1306,16 @@ async def handle_chat_completions(request: Request):
 @app.get("/healthcheck")
 async def healthcheck():
     return runtime.scheduler.healthcheck()
+
+
+@app.get("/metrics")
+async def get_metrics():
+    return runtime.scheduler.get_metrics()
+
+
+@app.post("/metrics/reset")
+async def reset_metrics():
+    return runtime.scheduler.reset_metrics()
 
 
 @app.post("/instances/add")

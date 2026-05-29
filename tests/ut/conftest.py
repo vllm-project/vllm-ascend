@@ -16,6 +16,7 @@
 # This file is a part of the vllm-ascend project.
 #
 import functools
+import importlib.util
 import inspect
 import subprocess
 import sys
@@ -30,6 +31,10 @@ except (subprocess.CalledProcessError, FileNotFoundError):
     _npu_available = False
 
 if not _npu_available:
+    sys.modules.setdefault("torch_npu", MagicMock())
+    sys.modules["torch_npu"].npu.current_device = MagicMock(return_value=0)
+    sys.modules["torch_npu._inductor"] = MagicMock()
+
     triton_runtime = MagicMock()
     triton_runtime.driver.active.utils.get_device_properties.return_value = {
         "num_aic": 8,
@@ -37,13 +42,17 @@ if not _npu_available:
     }
     sys.modules["triton.runtime"] = triton_runtime
 
-from vllm_ascend.utils import adapt_patch  # noqa E402
-from vllm_ascend.utils import register_ascend_customop  # noqa E402
+if importlib.util.find_spec("vllm") is None:
 
-# Mock torch_npu AFTER vllm_ascend import to avoid circular import in accelerate
-if not _npu_available:
-    sys.modules["torch_npu"].npu.current_device = MagicMock(return_value=0)
-    sys.modules["torch_npu._inductor"] = MagicMock()
+    def adapt_patch(*_args, **_kwargs):
+        pass
+
+    def register_ascend_customop(*_args, **_kwargs):
+        pass
+
+else:
+    from vllm_ascend.utils import adapt_patch  # noqa E402
+    from vllm_ascend.utils import register_ascend_customop  # noqa E402
 
 adapt_patch()
 adapt_patch(True)
