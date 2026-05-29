@@ -5,7 +5,7 @@ from math import lcm
 from typing import Literal
 
 import vllm
-from vllm.logger import init_logger
+from vllm.logger import logger
 from vllm.v1.core.block_pool import BlockPool
 from vllm.v1.core.kv_cache_coordinator import (
     HybridKVCacheCoordinator,
@@ -40,8 +40,6 @@ except ImportError:  # pragma: no cover - older vllm without PR #43447
     AUTO_RETENTION_INTERVAL = 32768
     SlidingWindowManager = None  # type: ignore[assignment,misc]
     _HAS_LOCAL_KV_RETENTION = False
-
-logger = init_logger(__name__)
 
 USE_MULTI_GROUPS_KV_CACHE = True
 
@@ -132,8 +130,7 @@ class AscendHybridKVCacheCoordinator(HybridKVCacheCoordinator):
         self.local_kv_retention_interval = local_kv_retention_interval
         if self.local_kv_retention_interval is not None and _HAS_LOCAL_KV_RETENTION:
             has_sliding_window_group = any(
-                isinstance(manager, SlidingWindowManager)
-                for manager in self.single_type_managers
+                isinstance(manager, SlidingWindowManager) for manager in self.single_type_managers
             )
             if has_sliding_window_group:
                 if self.local_kv_retention_interval == "auto":
