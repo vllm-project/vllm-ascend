@@ -17,6 +17,7 @@
 # MiniMax-M2 linear attention: MiniMaxText01RMSNormTP weight sharding and NPU q/k norm path.
 #
 
+import logging
 from functools import partial
 
 import torch
@@ -31,6 +32,8 @@ from vllm.model_executor.layers.mamba.linear_attn import (
     MiniMaxText01RMSNormTP,
 )
 from vllm.platforms import current_platform
+
+logger = logging.getLogger(__name__)
 
 _ORIG_QK_METHOD_NAME: str | None = None
 _original_qk_method = None
@@ -48,6 +51,12 @@ if _ORIG_QK_METHOD_NAME is not None:
     # Detect whether upstream defined it as a staticmethod (some versions do).
     _orig_desc = MiniMaxText01RMSNormTP.__dict__.get(_ORIG_QK_METHOD_NAME)
     _qk_is_staticmethod = isinstance(_orig_desc, staticmethod)
+else:
+    logger.warning(
+        "Neither forward_qk nor _normalize_qk found on MiniMaxText01RMSNormTP; "
+        "MiniMax-M2 linear attention patching is a no-op. "
+        "This may indicate a vLLM API change."
+    )
 
 
 def _patched_qk(

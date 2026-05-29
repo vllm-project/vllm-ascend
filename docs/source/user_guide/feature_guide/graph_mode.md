@@ -32,7 +32,7 @@ vLLM Ascend provides two graph paths:
 
 The default graph path on Ascend involves two stages: **compile-time optimization** and **runtime capture/replay**. ACLGraph handles the runtime capture/replay. The compile-time stage differs by `cudagraph_mode`:
 
-- **FULL / FULL_DECODE_ONLY**: Npugraph_ex optimizes the FX graph via torchair (`run_eagerly=True`, compile-time only, no capture). The optimized callable is then captured and replayed by ACLGraph at runtime.
+- **FULL / FULL_DECODE_ONLY**: Npugraph_ex optimizes the FX graph via npugraph_ex (`force_eager=True`, compile-time only, no capture). The optimized callable is then captured and replayed by ACLGraph at runtime.
 - **PIECEWISE**: Npugraph_ex is disabled. Only basic FX fusion passes are applied at compile-time. ACLGraph captures and replays the resulting callable at runtime.
 - **NONE**: No compilation or graph capture. The model runs in eager mode.
 
@@ -206,7 +206,7 @@ Starting static kernel compilation, the build directory is <path>
 
 This confirms that compilation has been triggered. The absence of this message means static kernel was not enabled or the cached result was reused directly.
 
-For more details about Npugraph_ex, see the [torchair guide](https://www.hiascend.com/document/detail/zh/Pytorch/730/modthirdparty/torchairuseguide/torchair_00021.html).
+For more details about Npugraph_ex, see the [npugraph_ex guide](https://www.hiascend.com/document/detail/zh/Pytorch/2600/modthirdparty/torchairuseguide/docs/zh/overview.md).
 
 ## Using XliteGraph
 
@@ -277,6 +277,6 @@ vllm serve path/to/your/model --enforce-eager
 - [CUDA Graphs](https://docs.vllm.ai/en/latest/design/cuda_graphs/)
 - [torch.compile](https://docs.vllm.ai/en/latest/design/torch_compile/)
 - [Xlite README](https://atomgit.com/openeuler/GVirt/blob/master/xlite/README.md)
-- [Npugraph_ex torchair guide](https://www.hiascend.com/document/detail/zh/Pytorch/730/modthirdparty/torchairuseguide/torchair_00021.html)
+- [Npugraph_ex guide](https://www.hiascend.com/document/detail/zh/Pytorch/2600/modthirdparty/torchairuseguide/docs/zh/overview.md)
 - [Npugraph_ex RFC](https://github.com/vllm-project/vllm-ascend/issues/4715)
 - [ACL Graph Developer Guide](../../developer_guide/Design_Documents/ACL_Graph.md)

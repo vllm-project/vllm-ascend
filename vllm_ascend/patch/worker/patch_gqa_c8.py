@@ -15,12 +15,15 @@
 # limitations under the License.
 #
 
+import logging
 from collections.abc import Callable, Iterable
 
 import torch
 from vllm.model_executor.model_loader.weight_utils import default_weight_loader
 from vllm.model_executor.models.glm4_moe import Glm4MoeForCausalLM
 from vllm.model_executor.models.qwen3 import Qwen3ForCausalLM
+
+logger = logging.getLogger(__name__)
 
 _orig_qwen3_causal_lm_load_weights = Qwen3ForCausalLM.load_weights
 _orig_Glm4_causal_lm_load_weights = Glm4MoeForCausalLM.load_weights
@@ -47,6 +50,13 @@ def _patched_causal_lm_load_weights(
                     weight_loader = getattr(param, "weight_loader", default_weight_loader)
                     weight_loader(param, loaded_weight.squeeze())
                     c8_loaded_params.add(scale_name)
+                else:
+                    logger.warning(
+                        "Cache scale %s found in quant_config for weight %s "
+                        "but not found in model parameters; weight will be skipped.",
+                        scale_name,
+                        name,
+                    )
             else:
                 yield name, loaded_weight
 

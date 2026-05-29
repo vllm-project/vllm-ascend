@@ -1,5 +1,6 @@
 from unittest.mock import MagicMock, Mock, patch
 
+import regex as re
 import torch
 
 from tests.ut.base import TestBase
@@ -102,6 +103,27 @@ class TestAscendW4A8DynamicLinearMethod(TestBase):
         x = torch.randn(32, 256)
         self.method.apply(layer, x)
         mock_matmul.assert_called_once()
+
+    @patch("vllm_ascend.quantization.methods.w4a8.maybe_trans_nz")
+    def test_process_weights_after_loading_asserts_new_quant_packed_dim(self, mock_maybe_trans_nz):
+        self.method.new_quant_version = True
+        mock_maybe_trans_nz.side_effect = identity
+        layer = torch.nn.Module()
+        layer.weight = torch.nn.Parameter(torch.zeros((10, 16), dtype=torch.int8), requires_grad=False)
+        layer.weight_scale = torch.nn.Parameter(torch.ones((20, 1), dtype=torch.float32), requires_grad=False)
+        layer.weight_offset = torch.nn.Parameter(torch.empty_like(layer.weight_scale.data), requires_grad=False)
+        layer.weight_scale_second = torch.nn.Parameter(torch.ones((20, 2), dtype=torch.float32), requires_grad=False)
+        layer.weight_offset_second = torch.nn.Parameter(
+            torch.empty_like(layer.weight_scale_second.data), requires_grad=False
+        )
+        layer.scale_bias = torch.nn.Parameter(torch.zeros((20, 1), dtype=torch.float32), requires_grad=False)
+        expected_message = "the last dim of weight needs to be divided by 4 but got shape torch.Size([16, 10])"
+
+        with (
+            patch.object(self.method, "process_scale_second", return_value=(torch.ones((2, 20)), None)),
+            self.assertRaisesRegex(AssertionError, re.escape(expected_message)),
+        ):
+            self.method.process_weights_after_loading(layer)
 
 
 @npu_test(num_npus=1, npu_type="a2")
@@ -288,6 +310,14 @@ class TestAscendW4A8DynamicFusedMoEMethod(TestBase):
         self.assertEqual(new_layer.w13_scale_bias.data.shape, (self.experts, 2 * self.input_size))
         self.assertEqual(per_channel_layer.w13_weight_scale.data.shape, (self.experts, 2 * self.input_size))
 
+    def test_pack_to_int32_asserts_new_quant_packed_dim(self):
+        self.quant_method.new_quant_version = True
+        weight = torch.zeros((self.experts, self.output_size, 10), dtype=torch.int8)
+        expected_message = f"the last dim of weight needs to be divided by 4 but got shape {weight.shape}"
+
+        with self.assertRaisesRegex(AssertionError, re.escape(expected_message)):
+            self.quant_method.pack_to_int32(weight)
+
     def test_get_weight_compressed_tensors(self):
         self.quant_method.quant_method = COMPRESSED_TENSORS_METHOD
         result = self.quant_method.get_weight(self.experts, self.input_size, self.output_size, torch.bfloat16)
@@ -392,3 +422,22 @@ class TestAscendW4A8DynamicFusedMoEMethod(TestBase):
         mock_comm.fused_experts.assert_called_once()
         self.assertEqual(mock_comm.fused_experts.call_args.kwargs["fused_experts_input"], mock_fused_input)
         self.assertTrue(torch.equal(output, expected_output))
+
+    def test_apply_asserts_router_logits_expert_mismatch(self):
+        layer = self.build_layer(is_new_quant_version=True, is_per_channel_weight=True)
+        x = torch.randn(4, self.output_size, dtype=torch.bfloat16)
+        router_logits = torch.randn(4, self.experts - 1, dtype=torch.float32)
+        expected_message = (
+            "Number of global experts mismatch (excluding redundancy): "
+            f"router_logits.shape[1]={self.experts - 1}, num_logical_experts={self.experts}"
+        )
+
+        with self.assertRaisesRegex(AssertionError, re.escape(expected_message)):
+            self.quant_method.apply(
+                layer=layer,
+                x=x,
+                router_logits=router_logits,
+                top_k=2,
+                renormalize=True,
+                num_experts=self.experts,
+            )

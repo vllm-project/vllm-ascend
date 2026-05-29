@@ -35,10 +35,14 @@ def get_local_seed_key(
     is_draft_worker: bool = False,
 ) -> str:
     if not model_url or not model_deploy_strategy_name:
-        raise RuntimeError(
-            "RFork seed key is not set. Ensure model_loader_extra_config contains "
+        err_msg = (
+            f"RFork seed key is not set: model_url={model_url!r}, "
+            f"model_deploy_strategy_name={model_deploy_strategy_name!r}. "
+            "Ensure model_loader_extra_config contains "
             "`model_url` and `model_deploy_strategy_name`."
         )
+        logger.error(err_msg)
+        raise RuntimeError(err_msg)
 
     seed_key = f"{model_url}{seed_key_separator}{model_deploy_strategy_name}"
     key_suffix = f"{disaggregation_mode}{seed_key_separator}{node_rank}{seed_key_separator}{tp_rank}"
@@ -122,13 +126,13 @@ class RForkSeedProtocol:
             }
 
         except RuntimeError as e:
-            logger.warning("get_seed from planner RuntimeError: %s", e)
+            logger.warning("get_seed from scheduler RuntimeError: %s", e)
             return None
         except HTTPError as e:
-            logger.exception("get_seed from planner HTTPError: %s", e)
+            logger.exception("get_seed from scheduler HTTPError: %s", e)
             return None
         except Exception as e:
-            logger.exception("get_seed from planner Exception: %s", e)
+            logger.exception("get_seed from scheduler Exception: %s", e)
             return None
 
     def release_seed(self, seed) -> bool:
