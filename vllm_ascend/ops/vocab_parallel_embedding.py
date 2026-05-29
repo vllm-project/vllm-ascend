@@ -38,8 +38,7 @@ from vllm.model_executor.utils import set_weight_attrs
 
 from vllm_ascend.ascend_config import get_ascend_config
 from vllm_ascend.distributed.parallel_state import get_embed_tp_group, get_lmhead_tp_group
-from vllm_ascend.utils import embedding_tp_enable, lmhead_tp_enable
-from vllm_ascend.utils import maybe_trans_nz
+from vllm_ascend.utils import embedding_tp_enable, lmhead_tp_enable, maybe_trans_nz
 
 
 class AscendUnquantizedLMHeadMethod(UnquantizedEmbeddingMethod):

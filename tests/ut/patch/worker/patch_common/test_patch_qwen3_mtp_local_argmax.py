@@ -64,8 +64,9 @@ class TestQwen3MTPGetTopTokens:
 
     def test_patch_is_idempotent(self):
         """Applying the patch a second time should not cause issues."""
-        import vllm_ascend.patch.worker.patch_qwen3_mtp_local_argmax as mod1
         import importlib
+
+        import vllm_ascend.patch.worker.patch_qwen3_mtp_local_argmax as mod1
 
         importlib.reload(mod1)
 
