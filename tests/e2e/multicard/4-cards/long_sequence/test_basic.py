@@ -25,6 +25,7 @@ from PIL import Image
 from vllm import SamplingParams
 
 from tests.e2e.conftest import VllmRunner, wait_until_npu_memory_free
+from vllm_ascend.utils import vllm_version_is
 
 os.environ["HCCL_BUFFSIZE"] = "768"
 
@@ -104,6 +105,58 @@ def test_models_pcp_dcp_basic():
         ]
         res_percent = calculate_total_char_match_percent(results, golden)
         assert res_percent > 80
+
+
+@patch.dict(
+    os.environ,
+    {
+        "VLLM_ASCEND_APPLY_DSV4_PATCH": "1",
+        "VLLM_ASCEND_ENABLE_FLASHCOMM1": "1",
+        "PYTORCH_NPU_ALLOC_CONF": "expandable_segments:True",
+    },
+)
+@wait_until_npu_memory_free()
+@pytest.mark.skipif(
+    torch.npu.device_count() < 4,
+    reason="DeepSeek V4 DSA CP e2e test requires at least 4 NPUs.",
+)
+@pytest.mark.skipif(not vllm_version_is("0.20.2"), reason="broken in main")
+def test_deepseek_v4_w4a8_dsa_cp_basic_greedy():
+    prompts = [
+        "Hello, my name is",
+        "The capital of France is",
+        "What is the meaning of life?",
+    ]
+    max_tokens = 5
+
+    with VllmRunner(
+        "gdydems/DeepSeek-V4-Flash-w4a8-mtp",
+        max_model_len=8192,
+        max_num_seqs=16,
+        max_num_batched_tokens=4096,
+        dtype="auto",
+        tensor_parallel_size=4,
+        prefill_context_parallel_size=1,
+        decode_context_parallel_size=1,
+        enable_expert_parallel=True,
+        gpu_memory_utilization=0.9,
+        quantization="ascend",
+        tokenizer_mode="deepseek_v4",
+        block_size=128,
+        compilation_config={
+            "cudagraph_mode": "FULL_DECODE_ONLY",
+        },
+        additional_config={
+            "enable_flashcomm1": True,
+            "multistream_dsa_preprocess": True,
+        },
+    ) as runner:
+        outputs = runner.generate_greedy(prompts, max_tokens)
+
+    assert len(outputs) == len(prompts)
+    for output_ids, output_str in outputs:
+        assert len(output_str) > 0
+        assert len(output_ids) > 0
 
 
 @wait_until_npu_memory_free()

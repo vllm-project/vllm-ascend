@@ -76,6 +76,7 @@ from vllm_ascend.ops.rope_dsv4 import ComplexExpRotaryEmbedding
 from vllm_ascend.ops.triton.mul_add import muls_add_triton
 from vllm_ascend.utils import (
     AscendDeviceType,
+    enable_dsa_cp,
     extract_dsv4_layer_index,
     get_ascend_device_type,
     get_dsv4_compress_ratio,
@@ -600,8 +601,10 @@ class DeepseekV4Attention(nn.Module):
         self.eps = config.rms_norm_eps
         self.norm_eps = config.rms_norm_eps
         self.scale = self.head_dim**-0.5
+        self.enable_dsa_cp = enable_dsa_cp()
 
-        self.attn_sink = nn.Parameter(torch.empty(self.n_local_heads, dtype=torch.float32))
+        attn_sink_heads = self.n_heads if self.enable_dsa_cp else self.n_local_heads
+        self.attn_sink = nn.Parameter(torch.empty(attn_sink_heads, dtype=torch.float32))
         self.wq_a = ReplicatedLinear(
             self.dim,
             self.q_lora_rank,
@@ -611,7 +614,8 @@ class DeepseekV4Attention(nn.Module):
             return_bias=False,
         )
         self.q_norm = RMSNorm(self.q_lora_rank, eps=config.rms_norm_eps)
-        self.wq_b = ColumnParallelLinear(
+        wq_b_cls = ReplicatedLinear if self.enable_dsa_cp else ColumnParallelLinear
+        self.wq_b = wq_b_cls(
             self.q_lora_rank,
             self.n_heads * self.head_dim,
             bias=False,
@@ -1191,10 +1195,13 @@ class AscendDeepseekV4ForCausalLM(nn.Module, SupportsPP, DeepseekV2MixtureOfExpe
                 name = name.replace(".gate.bias", ".gate.e_score_correction_bias")
 
             if "sink" in name:
-                # Handle attention sinks (distributed across ranks)
                 param = params_dict[name]
-                narrow_weight = loaded_weight.narrow(0, head_start, heads_per_rank)
-                param.data.copy_(narrow_weight)
+                if enable_dsa_cp():
+                    param.data.copy_(loaded_weight)
+                else:
+                    # Handle attention sinks (distributed across ranks)
+                    narrow_weight = loaded_weight.narrow(0, head_start, heads_per_rank)
+                    param.data.copy_(narrow_weight)
                 loaded_params.add(name)
                 continue
 

@@ -103,6 +103,7 @@ from vllm.v1.worker.utils import AttentionGroup
 # yapf: enable
 from vllm_ascend.ascend_config import get_ascend_config
 from vllm_ascend.attention.attention_v1 import AscendAttentionBackend, AscendAttentionState
+from vllm_ascend.attention.context_parallel.dsa_cp import AscendDSACPMetadataBuilder
 from vllm_ascend.attention.dsa_v1 import AscendDSAMetadataBuilder
 from vllm_ascend.attention.mla_v1 import AscendMLABackend
 from vllm_ascend.attention.utils import AscendCommonAttentionMetadata, using_paged_attention
@@ -2903,7 +2904,7 @@ class NPUModelRunner(GPUModelRunner):
                     num_decode_draft_tokens_cpu=self.num_decode_draft_tokens.cpu[:num_reqs_padded],
                 )
 
-            if isinstance(builder, AscendDSAMetadataBuilder):
+            if isinstance(builder, (AscendDSAMetadataBuilder, AscendDSACPMetadataBuilder)):
                 compress_ratio = getattr(attn_group.kv_cache_spec, "compress_ratio", 1)
                 if for_cudagraph_capture:
                     extra_attn_metadata_args = dict(
@@ -2924,7 +2925,8 @@ class NPUModelRunner(GPUModelRunner):
                         )
 
             # add kvcomp_metadata into common_attn_metadata
-            if for_cudagraph_capture and not isinstance(builder, AscendDSAMetadataBuilder):
+            if (for_cudagraph_capture
+                    and not isinstance(builder, (AscendDSAMetadataBuilder, AscendDSACPMetadataBuilder))):
                 attn_metadata_i = builder.build_for_cudagraph_capture(common_attn_metadata)
             else:
                 attn_metadata_i = builder.build(
