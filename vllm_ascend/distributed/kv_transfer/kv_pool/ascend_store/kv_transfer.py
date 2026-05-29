@@ -591,11 +591,12 @@ class KVCacheStoreLayerSendingThread(KVTransferThread):
         self.request_queue.task_done()
 
         logger.info(
-            "Storing KV cache for %d out of %d blocks (missing_count=%d) for request %s",
+            "Storing KV cache for %d out of %d blocks (missing_count=%d) for request %s, layer %d",
             len(key_list),
             total_block,
             len(missing_indices),
             req_meta.req_id,
+            layer_id,
         )
 
 
