@@ -2279,15 +2279,6 @@ std::vector<int64_t> get_npu_storage_shape(const at::Tensor& tensor)
     return std::vector<int64_t>(desc.storage_sizes_.begin(), desc.storage_sizes_.end());
 }
 
-int64_t get_npu_storage_format(const at::Tensor& tensor)
-{
-    TORCH_CHECK(
-        tensor.is_privateuseone(),
-        "get_npu_storage_format only supports NPU tensors, but got device ",
-        tensor.device());
-    const auto& desc = NPUBridge::GetNpuStorageImplDesc(tensor);
-    return static_cast<int64_t>(desc.npu_format_);
-}
 
 } // namespace vllm_ascend
 
@@ -2418,10 +2409,6 @@ TORCH_LIBRARY_EXPAND(CONCAT(_C, _ascend), ops)
     ops.def("get_npu_storage_shape(Tensor tensor) -> int[]");
     ops.impl("get_npu_storage_shape", c10::DispatchKey::CompositeExplicitAutograd,
              &vllm_ascend::get_npu_storage_shape);
-
-    ops.def("get_npu_storage_format(Tensor tensor) -> int");
-    ops.impl("get_npu_storage_format", c10::DispatchKey::CompositeExplicitAutograd,
-             &vllm_ascend::get_npu_storage_format);
 
     ops.def(
         "grouped_matmul_swiglu_quant(Tensor x, Tensor weight, Tensor weight_scale, Tensor x_scale,"
