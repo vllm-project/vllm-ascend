@@ -24,7 +24,7 @@ from dataclasses import dataclass, fields
 from vllm.config import SchedulerConfig, VllmConfig
 from vllm.distributed.ec_transfer.ec_connector.base import ECConnectorMetadata
 from vllm.distributed.kv_transfer.kv_connector.v1.base import KVConnectorMetadata
-from vllm.logger import init_logger
+from vllm.logger import logger
 from vllm.v1.core.kv_cache_manager import KVCacheBlocks
 from vllm.v1.core.sched.async_scheduler import AsyncScheduler
 from vllm.v1.core.sched.output import NewRequestData, SchedulerOutput
@@ -35,8 +35,6 @@ from vllm.v1.request import Request, RequestStatus
 from vllm.v1.utils import record_function_or_nullcontext
 
 from vllm_ascend.core.kv_state_manager import KVStateManager
-
-logger = init_logger(__name__)
 
 
 @dataclass

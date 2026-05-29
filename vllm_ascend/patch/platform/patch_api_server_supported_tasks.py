@@ -3,10 +3,8 @@ from __future__ import annotations
 import json
 from typing import Any
 
-from vllm.logger import init_logger
+from vllm.logger import logger
 from vllm.tasks import SupportedTask
-
-logger = init_logger(__name__)
 
 try:
     from vllm.entrypoints.openai import api_server as _api_server
