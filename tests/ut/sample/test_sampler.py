@@ -123,7 +123,7 @@ class TestAscendTopKTopPSampler(TestBase):
     def test_generate_random_sequence(self):
         """generate_random_sequence should return a tensor of the same shape."""
         logits = torch.randn(2, 4)
-        generators = {}
+        generators: dict[int, torch.Generator] = {}
         stream = torch.npu.Stream()
         result = generate_random_sequence(logits, generators, stream)
         self.assertEqual(result.shape, logits.shape)
