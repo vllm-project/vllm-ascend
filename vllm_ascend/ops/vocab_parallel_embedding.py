@@ -38,13 +38,7 @@ from vllm.model_executor.utils import set_weight_attrs
 
 from vllm_ascend.ascend_config import get_ascend_config
 from vllm_ascend.distributed.parallel_state import get_embed_tp_group, get_lmhead_tp_group
-from vllm_ascend.utils import embedding_tp_enable, lmhead_tp_enable, maybe_trans_nz
-
-
-class AscendUnquantizedLMHeadMethod(UnquantizedEmbeddingMethod):
-    def process_weights_after_loading(self, layer: torch.nn.Module) -> None:
-        super().process_weights_after_loading(layer)
-        layer.weight.data = maybe_trans_nz(layer.weight.data)
+from vllm_ascend.utils import embedding_tp_enable, lmhead_tp_enable
 
 
 class AscendVocabParallelEmbedding(VocabParallelEmbedding):
@@ -101,12 +95,6 @@ class AscendVocabParallelEmbedding(VocabParallelEmbedding):
             quant_method = quant_config.get_quant_method(self, prefix=prefix)
         if quant_method is None:
             quant_method = UnquantizedEmbeddingMethod()
-
-        if (
-            isinstance(self, (ParallelLMHead, AscendParallelLMHead))
-            and type(quant_method) is UnquantizedEmbeddingMethod
-        ):
-            quant_method = AscendUnquantizedLMHeadMethod()
 
         # If we are making an embedding layer, then our quantization linear
         # method must implement the embedding operation. If we are another

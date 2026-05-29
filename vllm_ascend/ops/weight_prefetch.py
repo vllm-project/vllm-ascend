@@ -68,34 +68,6 @@ class WeightPrefetchMethod:
             prefetch_ratio=weight_prefetch_config.prefetch_ratio.get("mlp", {}) or {"gate_up": 1.0, "down": 1.0},
         )
 
-    @staticmethod
-    def _unwrap_model_instance(model_instance):
-        while True:
-            unwrap = getattr(model_instance, "unwrap", None)
-            if not callable(unwrap):
-                return model_instance
-            unwrapped = unwrap()
-            if unwrapped is model_instance:
-                return model_instance
-            model_instance = unwrapped
-
-    @classmethod
-    def _get_model_layers(cls, model_instance):
-        model_instance = cls._unwrap_model_instance(model_instance)
-        if model_instance is None:
-            return None
-
-        candidate_roots = [
-            getattr(model_instance, "model", None),
-            getattr(getattr(model_instance, "language_model", None), "model", None),
-            model_instance,
-        ]
-        for root in candidate_roots:
-            layers = getattr(root, "layers", None)
-            if layers is not None:
-                return layers
-        return None
-
     def maybe_prefetch_attn_weight_preprocess(
         self, layer_cls_name: str, weight: torch.Tensor, start_flag: torch.Tensor
     ) -> None:
@@ -121,22 +93,10 @@ class WeightPrefetchMethod:
             return
         forward_context = get_forward_context()
         if not forward_context or _EXTRA_CTX.model_instance is None:
-            self.moe.is_active_this_forward = False
             return
 
         # layer_idx is subtracted by 1 because layer_idx was incremented by 1 at layernorm.
-        layers = self._get_model_layers(_EXTRA_CTX.model_instance)
-        if layers is None or _EXTRA_CTX.layer_idx is None:
-            self.moe.is_active_this_forward = False
-            return
-
-        layer = layers[_EXTRA_CTX.layer_idx - 1]
-        experts = getattr(getattr(layer, "mlp", None), "experts", None)
-        weight = getattr(experts, "w13_weight", None)
-        if weight is None:
-            self.moe.is_active_this_forward = False
-            return
-
+        weight = _EXTRA_CTX.model_instance.model.layers[_EXTRA_CTX.layer_idx - 1].mlp.experts.w13_weight  # type: ignore  # type: ignore
         weight_size = weight.data.element_size() * weight.data.numel() * self.moe.prefetch_ratio.get(prefix, 0)
         torch.ops.vllm.prefetch_preprocess(weight=weight, start_flag=None, max_weight_size=int(weight_size))
 
