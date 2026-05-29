@@ -232,6 +232,18 @@ class OProjRowParallelOp(CustomRowParallelOp):
         self,
         input_: torch.Tensor,
     ) -> torch.Tensor | tuple[torch.Tensor, Parameter | None]:
+        # Pure DP OTP: weight is row-sliced along the output dimension.
+        # Each OTP rank computes a partial output slice and all-gathers
+        # along the feature dimension to reconstruct the full output.
+        if get_tp_group().world_size == 1:
+            assert self.quant_method is not None
+            bias_ = None if (self.comm_group.rank_in_group > 0 or self.skip_bias_add) else self.bias
+            output_parallel = self.quant_method.apply(self.layer, input_, bias=bias_)
+            output = self.comm_group.all_gather(output_parallel, dim=-1)
+            output_bias = self.bias if self.skip_bias_add else None
+            return output, output_bias
+
+        # PD scenario: all-to-all + matmul + reduce-scatter
         input_parallel = self.get_input_parallel(input_)
 
         # Prepare tensors for all-to-all communication
@@ -666,7 +678,7 @@ def _get_row_parallel_op(
         return ShardedCPRowParallelOp(layer)
     if "down_proj" in prefix and mlp_tp_enable() and not is_moe_layer(prefix):
         return MLPRowParallelOp(layer)
-    if "o_proj" in prefix and oproj_tp_enable():
+    if ("o_proj" in prefix or "wo_b" in prefix) and oproj_tp_enable():
         return OProjRowParallelOp(layer)
     if matmul_allreduce_enable():
         return MatmulAllreduceRowParallelOp(layer)
@@ -717,6 +729,12 @@ def get_parallel_op(disable_tp, prefix, layer, direct):
         custom_op = _get_column_parallel_op(prefix, layer)
 
     if custom_op is not None:
+        # For wo_b in pure DP OTP mode, the weight is row-sliced along the output
+        # dimension (not column-sliced along the input dimension).  Keep the
+        # original TP size so that input_size_per_partition stays at the full
+        # input size and the RowParallelLinear weight is loaded unsplit.
+        if isinstance(custom_op, OProjRowParallelOp) and "wo_b" in prefix:
+            return custom_op, 0, 1
         return custom_op, custom_op.tp_rank, custom_op.tp_size
 
     return None, get_tp_group().rank_in_group, get_tp_group().world_size

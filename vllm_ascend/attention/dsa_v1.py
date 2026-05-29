@@ -28,6 +28,7 @@ from vllm_ascend.utils import (
     get_ascend_device_type,
     npu_stream_switch,
     olora_tp_enable,
+    oproj_tp_enable,
 )
 from vllm_ascend.worker.npu_input_batch import NPUInputBatch
 
@@ -1440,6 +1441,23 @@ class AscendDSAImpl(DSAAttentionImpl):
             "use_index_cache",
             False,
         )
+
+    def process_weights_after_loading(self, act_dtype: torch.dtype):
+        if oproj_tp_enable():
+            from vllm_ascend.distributed.parallel_state import get_otp_group
+
+            otp_group = get_otp_group()
+            otp_size = otp_group.world_size
+            otp_rank = otp_group.rank_in_group
+
+            # Only OTP row-slice wo_b (wo_a keeps ColumnParallelLinear with
+            # batch matmul — group dimension must be preserved for correctness)
+            wo_b_weight = self.wo_b.weight.data
+            wo_b_rows_per_otp = wo_b_weight.shape[0] // otp_size
+            wo_b_shard = wo_b_weight[
+                otp_rank * wo_b_rows_per_otp : (otp_rank + 1) * wo_b_rows_per_otp, :
+            ].clone()
+            self.wo_b.weight = torch.nn.Parameter(wo_b_shard, requires_grad=False)
 
     def _get_indexcache_topk_indices(self, num_tokens: int, offset: int = 0) -> torch.Tensor:
         if self.topk_indices_buffer is None:
