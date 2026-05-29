@@ -208,6 +208,7 @@ class AscendUnquantizedFusedMoEMethod(UnquantizedFusedMoEMethod):
             topk_ids = torch.argsort(random_matrix, dim=1)[:, : topk_ids.size(1)].to(topk_ids.dtype)
 
         moe_comm_method = _EXTRA_CTX.moe_comm_method
+
         if self._lora_enabled and self._lora_wrapper is not None:
             final_hidden_states = self._apply_with_lora(
                 layer=layer,
@@ -223,56 +224,57 @@ class AscendUnquantizedFusedMoEMethod(UnquantizedFusedMoEMethod):
                 log2phy=log2phy,
                 pertoken_scale=pertoken_scale,
             )
-        # NOTE: In the MoECommType.FUSED_MC2 branch, we wrap weights (w1, w2) into lists
-        # and provide dummy scales (w1_scale, w2_scale). This is required because:
-        # The underlying Ascend fused operator (e.g., dispatch_ffn_combine) expects
-        # inputs in a list format.
-        # TODO: Passing an empty tensor as scale for float (BF16) cases is semantically
-        # incorrect. The ideal solution is to pass None. However, if the underlying
-        # dispatch_ffn_combine C++ operator does not support None for the scale argument
-        # (due to signature constraints), we are forced to use a placeholder empty tensor.
-        # This TODO tracks the requirement to update the C++ operator to accept Optional[Tensor]
-        # or None for scales in non-quantized scenarios.
-        if _EXTRA_CTX.moe_comm_type == MoECommType.FUSED_MC2:
-            w1 = [layer.w13_weight]
-            w1_scale = [torch.tensor([], dtype=torch.int64)]
-            w2 = [layer.w2_weight]
-            w2_scale = [torch.tensor([], dtype=torch.int64)]
-            w1_scale_bias = [torch.tensor([], dtype=torch.float32)]
-            w2_scale_bias = [torch.tensor([], dtype=torch.float32)]
         else:
-            w1 = layer.w13_weight
-            w1_scale = None
-            w2 = layer.w2_weight
-            w2_scale = None
-            w1_scale_bias = None
-            w2_scale_bias = None
+            # NOTE: In the MoECommType.FUSED_MC2 branch, we wrap weights (w1, w2) into lists
+            # and provide dummy scales (w1_scale, w2_scale). This is required because:
+            # The underlying Ascend fused operator (e.g., dispatch_ffn_combine) expects
+            # inputs in a list format.
+            # TODO: Passing an empty tensor as scale for float (BF16) cases is semantically
+            # incorrect. The ideal solution is to pass None. However, if the underlying
+            # dispatch_ffn_combine C++ operator does not support None for the scale argument
+            # (due to signature constraints), we are forced to use a placeholder empty tensor.
+            # This TODO tracks the requirement to update the C++ operator to accept Optional[Tensor]
+            # or None for scales in non-quantized scenarios.
+            if _EXTRA_CTX.moe_comm_type == MoECommType.FUSED_MC2:
+                w1 = [layer.w13_weight]
+                w1_scale = [torch.tensor([], dtype=torch.int64)]
+                w2 = [layer.w2_weight]
+                w2_scale = [torch.tensor([], dtype=torch.int64)]
+                w1_scale_bias = [torch.tensor([], dtype=torch.float32)]
+                w2_scale_bias = [torch.tensor([], dtype=torch.float32)]
+            else:
+                w1 = layer.w13_weight
+                w1_scale = None
+                w2 = layer.w2_weight
+                w2_scale = None
+                w1_scale_bias = None
+                w2_scale_bias = None
 
-        final_hidden_states = moe_comm_method.fused_experts(
-            fused_experts_input=build_fused_experts_input(
-                hidden_states=x,
-                topk_weights=topk_weights,
-                topk_ids=topk_ids,
-                w1=w1,
-                w2=w2,
-                w1_bias=layer.w13_bias if self.moe.has_bias else None,
-                w2_bias=layer.w2_bias if self.moe.has_bias else None,
-                quant_type=QuantType.NONE,
-                dynamic_eplb=self.dynamic_eplb,
-                expert_map=expert_map,
-                global_redundant_expert_num=global_redundant_expert_num,
-                mc2_mask=mc2_mask,
-                apply_router_weight_on_input=apply_router_weight_on_input,
-                log2phy=log2phy,
-                pertoken_scale=pertoken_scale,
-                activation=activation,
-                w1_scale=w1_scale,
-                w2_scale=w2_scale,
-                w1_scale_bias=w1_scale_bias,
-                w2_scale_bias=w2_scale_bias,
-                swiglu_limit=layer.swiglu_limit,
+            final_hidden_states = moe_comm_method.fused_experts(
+                fused_experts_input=build_fused_experts_input(
+                    hidden_states=x,
+                    topk_weights=topk_weights,
+                    topk_ids=topk_ids,
+                    w1=w1,
+                    w2=w2,
+                    w1_bias=layer.w13_bias if self.moe.has_bias else None,
+                    w2_bias=layer.w2_bias if self.moe.has_bias else None,
+                    quant_type=QuantType.NONE,
+                    dynamic_eplb=self.dynamic_eplb,
+                    expert_map=expert_map,
+                    global_redundant_expert_num=global_redundant_expert_num,
+                    mc2_mask=mc2_mask,
+                    apply_router_weight_on_input=apply_router_weight_on_input,
+                    log2phy=log2phy,
+                    pertoken_scale=pertoken_scale,
+                    activation=activation,
+                    w1_scale=w1_scale,
+                    w2_scale=w2_scale,
+                    w1_scale_bias=w1_scale_bias,
+                    w2_scale_bias=w2_scale_bias,
+                    swiglu_limit=layer.swiglu_limit,
+                )
             )
-        )
         if zero_expert_num > 0 and zero_expert_type is not None:
             final_hidden_states += zero_expert_result
         return final_hidden_states
@@ -308,7 +310,6 @@ class AscendUnquantizedFusedMoEMethod(UnquantizedFusedMoEMethod):
         )
         from vllm_ascend.ops.fused_moe.moe_stage_contracts import (
             MoEAllGatherCombineMetadata,
-            MoEAllToAllCombineMetadata,
         )
 
         assert _EXTRA_CTX.moe_comm_type != MoECommType.FUSED_MC2, (
@@ -316,14 +317,13 @@ class AscendUnquantizedFusedMoEMethod(UnquantizedFusedMoEMethod):
             "Please disable VLLM_ASCEND_ENABLE_FUSED_MC2 when using MoE LoRA."
         )
 
-        
         lora_layer = self._lora_wrapper
         assert lora_layer is not None, (
             f"_apply_with_lora called but layer._lora_wrapper is None. "
             f"_lora_enabled={self._lora_enabled}, "
             f"layer type={type(layer).__name__}"
         )
-        
+
         num_experts = layer.local_num_experts
 
         routed_topk_ids = topk_ids
@@ -396,7 +396,7 @@ class AscendUnquantizedFusedMoEMethod(UnquantizedFusedMoEMethod):
             group_list_type=group_list_type,
             need_trans=need_trans,
         )
-        
+
         apply_moe_lora_w13(
             gate_up_out=gate_up_out,
             hidden_states=dispatched_hidden,
@@ -421,7 +421,7 @@ class AscendUnquantizedFusedMoEMethod(UnquantizedFusedMoEMethod):
             group_list_type=group_list_type,
             need_trans=need_trans,
         )
-        
+
         apply_moe_lora_w2(
             activated_out=gate_up_out,
             w2_output=mlp_output,
