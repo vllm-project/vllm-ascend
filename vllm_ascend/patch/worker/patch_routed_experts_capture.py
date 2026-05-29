@@ -120,10 +120,11 @@ def capture(self, layer_id: int, topk_ids: torch.Tensor) -> None:
             self.tp_size > 1
             and n != token_num_per_dp
             and (
-                # all2all scenario
+                # all2all scenario use tensor split, different tp rank have different
+                # size of tokens.
                 n == (token_num_per_dp + self.tp_size - 1) // self.tp_size
-                or n == token_num_per_dp % self.tp_size
-                # mc2 scenario
+                or n == token_num_per_dp // self.tp_size
+                # mc2 scenario will pad dp tokens to max_tokens and then ceil-div.
                 or n == (max_tokens + self.tp_size - 1) // self.tp_size
             )
         ):

@@ -1,20 +1,29 @@
 import os
 from unittest.mock import patch
 
+import pytest
 from vllm import SamplingParams
 from vllm.sampling_params import RequestOutputKind
 
 from tests.e2e.conftest import VllmRunner
 
+MODELS = [
+    "Qwen/Qwen3.5-35B-A3B",
+]
 
+
+@pytest.mark.parametrize("model", MODELS)
+@pytest.mark.parametrize("enforce_eager", [True, False])
 @patch.dict(os.environ, {"OMP_NUM_THREADS": "1"})
-def test_qwen3_moe_routing_replay():
+def test_moe_routing_replay(model, enforce_eager):
     prompts = [
         "Hello, please introduce yourself.",
     ]
     with VllmRunner(
-        "Qwen/Qwen3-30B-A3B",
+        model,
+        enforce_eager=enforce_eager,
         tensor_parallel_size=2,
+        data_parallel_size=2,
         enable_expert_parallel=True,
         cudagraph_capture_sizes=[1, 2, 4, 8],
         distributed_executor_backend="mp",
