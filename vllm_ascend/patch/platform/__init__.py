@@ -22,7 +22,10 @@ import vllm_ascend.patch.platform.patch_kv_cache_interface  # noqa
 import vllm_ascend.patch.platform.patch_kv_cache_utils  # noqa
 import vllm_ascend.patch.platform.patch_mla_prefill_backend  # noqa
 from vllm_ascend import envs
+from vllm_ascend.patch.platform._deepseek_v4_import_guard import ensure_deepseek_v4_fake_package  # noqa
 from vllm_ascend.utils import is_310p
+
+ensure_deepseek_v4_fake_package()
 
 if not is_310p():
     import vllm_ascend.patch.platform.patch_mamba_config  # noqa
