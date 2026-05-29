@@ -35,6 +35,7 @@ from tests.ut.attention.utils import (  # noqa: E402
     create_common_attn_metadata,
     create_vllm_config,
 )
+from tests.ut.conftest import npu_test
 from vllm_ascend.attention.context_parallel.sfa_cp import AscendSFACPImpl  # noqa: E402
 from vllm_ascend.utils import enable_custom_op
 
@@ -376,11 +377,11 @@ def _make_fake_self(
     if gather_kv_cross_cp_compact_fn is not None:
         fake_self.gather_kv_cross_cp_compact = MagicMock(side_effect=gather_kv_cross_cp_compact_fn)
 
-    fake_self.gather_block_table = lambda block_num, block_tables, block_arange: (
-        AscendSFACPImpl.gather_block_table(fake_self, block_num, block_tables, block_arange)
+    fake_self.gather_block_table = lambda block_num, block_tables, block_arange: AscendSFACPImpl.gather_block_table(
+        fake_self, block_num, block_tables, block_arange
     )
-    fake_self._execute_sparse_flash_attention = lambda *args, **kwargs: (
-        AscendSFACPImpl._execute_sparse_flash_attention(fake_self, *args, **kwargs)
+    fake_self._execute_sparse_flash_attention = lambda *args, **kwargs: AscendSFACPImpl._execute_sparse_flash_attention(
+        fake_self, *args, **kwargs
     )
     fake_self._align_to_graph_bucket_tokens = lambda x, m: x
     return fake_self
@@ -570,6 +571,7 @@ def _make_synthetic_kv_contexts(
     return k_nope, k_rope
 
 
+@npu_test(num_npus=1, npu_type="a2")
 def _test_sfa_cp_correctness(
     batch_spec: BatchSpec,
     model: str,
@@ -825,6 +827,7 @@ _TEST_CASES: list[tuple[str, int, int]] = [
 @pytest.mark.parametrize("model", ["deepseek-ai/DeepSeek-V3.2-Exp"])
 @pytest.mark.parametrize("dtype", [torch.bfloat16, torch.float16])
 @pytest.mark.parametrize("tensor_parallel_size", [1, 2, 4])
+@npu_test(num_npus=1, npu_type="a2")
 def test_sfa_cp_correctness(
     batch_spec_name: str,
     model: str,
