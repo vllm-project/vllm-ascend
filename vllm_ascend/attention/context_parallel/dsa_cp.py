@@ -213,6 +213,26 @@ class AscendDSACPMetadataBuilder(AttentionMetadataBuilder[AscendDSAMetadata]):
             (vllm_config.scheduler_config.max_num_batched_tokens, 2), dtype=torch.int32, device=self.device
         )
 
+        self.speculative_config = vllm_config.speculative_config
+        self.decode_threshold = 1
+        self.spec_slot_mapping = None
+        if self.speculative_config:
+            spec_token_num = self.speculative_config.num_speculative_tokens
+            self.spec_slot_mapping = [
+                torch.zeros(
+                    (vllm_config.scheduler_config.max_num_batched_tokens, 2), dtype=torch.int32, device=self.device
+                )
+                for _ in range(spec_token_num)
+            ]
+            self.decode_threshold += spec_token_num
+            assert self.decode_threshold <= 16, (
+                f"decode_threshold exceeded \
+                npu_fused_infer_attention_score TND layout's limit of 16, \
+                got {self.decode_threshold}"
+            )
+
+        self.reorder_batch_threshold = self.decode_threshold
+
     @classmethod
     def get_cudagraph_support(
         cls: type["AscendDSACPMetadataBuilder"],
@@ -300,6 +320,28 @@ class AscendDSACPMetadataBuilder(AttentionMetadataBuilder[AscendDSAMetadata]):
             cos=cos,
             sin=sin,
             hadamard=AscendDSACPMetadataBuilder.hadamard,
+        )
+
+    def build_for_drafting(
+        self,
+        draft_step: int,
+        common_attn_metadata: AscendCommonAttentionMetadata,
+        fast_build: bool = False,
+        **kwargs,
+    ) -> AscendDSAMetadata:
+        num_input_tokens = common_attn_metadata.num_input_tokens
+        slot_mapping = common_attn_metadata.slot_mapping[:num_input_tokens]
+
+        assert self.spec_slot_mapping is not None
+        self.spec_slot_mapping[draft_step - 1][:num_input_tokens] = torch.stack(
+            [slot_mapping // self.block_size, slot_mapping % self.block_size], dim=-1
+        )
+
+        return self.build(
+            common_prefix_len=0,
+            common_attn_metadata=common_attn_metadata,
+            fast_build=fast_build,
+            **kwargs,
         )
 
     def build_req_metadata(
