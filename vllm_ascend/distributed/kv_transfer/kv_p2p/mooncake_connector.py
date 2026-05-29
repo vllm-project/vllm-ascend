@@ -93,6 +93,7 @@ class MooncakeAgentMetadata(msgspec.Struct, omit_defaults=True, dict=True):
 class ReqMeta:
     local_block_ids: BlockIds
     num_external_tokens: int
+    num_computed_tokens: int
     remote_block_ids: BlockIds
     remote_host: str
     remote_port: int
@@ -451,6 +452,7 @@ class KVCacheRecvingThread(threading.Thread):
         remote_host: str,
         remote_handshake_port: int,
         remote_port_send_num: dict[int, RemotePortInfo] | None = None,
+        num_computed_tokens: int = 0,
         all_task_done: bool = False,
     ):
         """Add a new request to the queue for processing."""
@@ -465,6 +467,7 @@ class KVCacheRecvingThread(threading.Thread):
             "remote_request_id": remote_request_id,
             "remote_host": remote_host,
             "remote_handshake_port": remote_handshake_port,
+            "num_computed_tokens": num_computed_tokens,
             "remote_port_send_num": remote_port_send_num,
             "all_task_done": all_task_done,
         }
@@ -627,9 +630,14 @@ class KVCacheRecvingThread(threading.Thread):
                 remote_scale = remote_block_size_scale[layer_indices[0]][0]
                 kernel_local_block_ids = expand_block_ids(local_group_block_ids, local_scale)
                 kernel_remote_block_ids = expand_block_ids(remote_group_block_ids, remote_scale)
-                # For FullAttentionSpec Prefix cache
-                if len(local_group_block_ids) < len(remote_group_block_ids):
-                    kernel_remote_block_ids = kernel_remote_block_ids[-len(kernel_local_block_ids) :]
+                # For FullAttentionSpec prefix cache with hybrid kernel blocks.
+                num_computed_tokens = req_meta.get("num_computed_tokens", 0)
+                remote_kernel_block_size = self.block_size // remote_scale
+                remote_start_idx = num_computed_tokens // remote_kernel_block_size
+                kernel_remote_block_ids = kernel_remote_block_ids[remote_start_idx:]
+                num_kernel_blocks = min(len(kernel_remote_block_ids), len(kernel_local_block_ids))
+                kernel_remote_block_ids = kernel_remote_block_ids[:num_kernel_blocks]
+                kernel_local_block_ids = kernel_local_block_ids[:num_kernel_blocks]
 
                 if tp_num_need_pulls == 1:
                     grouped_remote_block_ids, grouped_local_block_ids = group_concurrent_contiguous(
@@ -645,9 +653,9 @@ class KVCacheRecvingThread(threading.Thread):
                     )
                 )
             else:
-                # For MambaSpec Prefix cache on D node
-                if len(local_group_block_ids) < len(remote_group_block_ids):
-                    raise RuntimeError("Mooncake connector does not support prefix cache with Mamba now.")
+                # For MambaSpec num block should equal on P node and D node
+                if len(local_group_block_ids) != len(remote_group_block_ids):
+                    raise RuntimeError("For MambaSpec num block should equal on P node and D node.")
                 transfer_block_idx = len(remote_group_block_ids) - self.num_speculative_tokens - 1
                 grouped_remote_block_ids = [[remote_group_block_ids[transfer_block_idx]]]
                 grouped_local_block_ids = [[local_group_block_ids[0]]]
@@ -809,8 +817,9 @@ class KVCacheRecvingThread(threading.Thread):
             # [block, split, token, head_per_split, dim]. Restore it to
             # [block, token, split, head_per_split, dim] in the selected blocks.
             selected = cache.index_select(0, block_ids_tensor)
+            block_size = cache.shape[1]
             transposed = (
-                selected.reshape(num_blocks, tp_num_need_pulls, 128, -1)  # TODO
+                selected.reshape(num_blocks, tp_num_need_pulls, block_size, -1)
                 .transpose(1, 2)
                 .contiguous()
                 .reshape_as(selected)
@@ -1152,6 +1161,7 @@ class MooncakeConnectorMetadata(KVConnectorMetadata):
         self.requests[request_id] = ReqMeta(
             local_block_ids=local_block_ids,
             num_external_tokens=num_external_tokens,
+            num_computed_tokens=kv_transfer_params.get("num_computed_tokens", 0),
             remote_block_ids=kv_transfer_params["remote_block_ids"],
             remote_engine_id=kv_transfer_params["remote_engine_id"],
             remote_request_id=kv_transfer_params["remote_request_id"],
@@ -1344,6 +1354,7 @@ class MooncakeConnectorScheduler:
         if params is not None and params.get("do_remote_prefill"):
             # Remote prefill: get all prompt blocks from remote.
             assert num_computed_tokens % self.block_size == 0
+            params["num_computed_tokens"] = num_computed_tokens
             # Note: We use the full token count as transmit data here.
             count = max(len(request.prompt_token_ids) - num_computed_tokens, 0)
             return count, count > 0
@@ -2273,6 +2284,7 @@ class MooncakeConnectorWorker:
                         remote_host=remote_host,
                         remote_handshake_port=remote_handshake_port,
                         remote_port_send_num=remote_port_send_num,
+                        num_computed_tokens=meta.num_computed_tokens,
                         all_task_done=(
                             pcp_dcp_rank == len(remote_handshake_port_list) - 1
                             and remote_tp_offset == len(remote_ports) - 1
