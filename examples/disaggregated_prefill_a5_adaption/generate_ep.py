@@ -51,16 +51,18 @@ import argparse
 import json
 from pathlib import Path
 
+RoutePair = dict[str, str | int | None]
 
-def parse_route_conf(route_conf_path: Path) -> dict[int, dict[str, str | int | None]]:
+
+def parse_route_conf(route_conf_path: Path) -> dict[int, RoutePair]:
     """
     Parse route.conf file to extract device-to-EID mappings.
 
-    Returns: {device_id: {'local_eid': '...', 'remote_eid': '...'}}
+    Returns: {device_id: {'dev_id': ..., 'local_eid': '...', 'remote_eid': '...'}}
     """
-    pairs = {}
-    current_device_id = None
-    current_pair = {}
+    pairs: dict[int, RoutePair] = {}
+    current_device_id: int | None = None
+    current_pair: RoutePair = {}
 
     with open(route_conf_path) as f:
         for line in f:
@@ -71,15 +73,24 @@ def parse_route_conf(route_conf_path: Path) -> dict[int, dict[str, str | int | N
             if "_dev_id=" in line:
                 # Extract device_id: pairX_dev_id=32 -> device_id=32
                 parts = line.split("=")
-                current_device_id = int(parts[1])
-                current_pair = {"dev_id": current_device_id, "local_eid": None, "remote_eid": None}
-                pairs[current_device_id] = current_pair
-                print(f"current_device_local_id: {current_device_id}")
+                device_id = int(parts[1])
+                current_device_id = device_id
+
+                current_pair = {
+                    "dev_id": device_id,
+                    "local_eid": None,
+                    "remote_eid": None,
+                }
+
+                pairs[device_id] = current_pair
+                print(f"current_device_local_id: {device_id}")
+
             elif "_local_eid=" in line:
                 # Extract local EID: pairX_chan0_local_eid=0x...
                 eid = line.split("=")[1].strip().replace("0x", "")
                 if current_device_id is not None:
                     current_pair["local_eid"] = eid
+
             elif "_remote_eid=" in line:
                 # Extract remote EID: pairX_chan0_remote_eid=0x...
                 eid = line.split("=")[1].strip().replace("0x", "")
