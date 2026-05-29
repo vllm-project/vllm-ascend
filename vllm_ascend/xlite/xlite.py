@@ -261,8 +261,9 @@ class LlamaXliteModel(XliteModel):
         ]
 
         if self.quantization:
-            xlite_config.quant_attn_weight_nz = self.is_tensor_nz(xlite_model.mha_qkv[0])
-            xlite_config.quant_attn_weight_transpose = True
+            if xlite_model.mha_qkv:
+                xlite_config.quant_attn_weight_nz = self.is_tensor_nz(xlite_model.mha_qkv[0])
+                xlite_config.quant_attn_weight_transpose = True
 
             norm_bias = params_dict.get(f"{model_prefix}model.norm.bias")
             if norm_bias is not None and not self.all_tensors_zero([norm_bias]):
