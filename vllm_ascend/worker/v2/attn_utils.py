@@ -217,6 +217,7 @@ def _align_memory(tensor: torch.Tensor, alignment: int) -> torch.Tensor:
 
 def _allocate_kv_cache(
     kv_cache_config: KVCacheConfig,
+    shared_layers: dict[str, str],
     device: torch.device,
 ) -> dict[str, tuple[torch.Tensor, torch.Tensor]]:
     """
@@ -284,7 +285,7 @@ def _allocate_kv_cache(
     for group in kv_cache_config.kv_cache_groups:
         for layer_name in group.layer_names:
             layer_names.add(layer_name)
-    assert layer_names == set(kv_cache_raw_tensors.keys()), "Some layers are not correctly initialized"
+    assert layer_names == (kv_cache_raw_tensors.keys() | shared_layers.keys()), "Some layers are not correctly initialized"
 
     return kv_cache_raw_tensors
 
