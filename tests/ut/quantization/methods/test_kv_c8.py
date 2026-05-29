@@ -664,14 +664,17 @@ class TestAscendC8AttentionBackendImplScales(TestBase):
         block_size = 32
         num_blocks = 2
         nz_dim = head_size // NZ_FMT_LAST_DIM
-        H = num_kv_heads * head_size
         impl = self._make_impl(num_kv_heads, head_size)
         layer = self._make_layer(num_kv_heads, head_size)
         impl._prepare_c8_scales(layer, torch.device("cpu"))
 
         # NZ 5D format: (num_blocks, num_kv_heads, nz_dim, block_size, NZ_FMT_LAST_DIM)
-        key_int8 = torch.randint(-10, 10, (num_blocks, num_kv_heads, nz_dim, block_size, NZ_FMT_LAST_DIM), dtype=torch.int8)
-        value_int8 = torch.randint(-10, 10, (num_blocks, num_kv_heads, nz_dim, block_size, NZ_FMT_LAST_DIM), dtype=torch.int8)
+        key_int8 = torch.randint(
+            -10, 10, (num_blocks, num_kv_heads, nz_dim, block_size, NZ_FMT_LAST_DIM), dtype=torch.int8
+        )
+        value_int8 = torch.randint(
+            -10, 10, (num_blocks, num_kv_heads, nz_dim, block_size, NZ_FMT_LAST_DIM), dtype=torch.int8
+        )
         seq_lens = [32, 32]
         block_table = torch.tensor([[0], [1]], dtype=torch.long)
 
