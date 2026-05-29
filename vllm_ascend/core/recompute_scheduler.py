@@ -148,7 +148,7 @@ class RecomputeScheduler(Scheduler):
                 request.prompt_token_ids.pop()
                 request._all_token_ids.pop()
                 request.num_prompt_tokens -= 1
-            if self.is_mtp_kv_consumer:
+            if self.is_mtp_kv_consumer and (self.max_model_len >= (request.num_tokens + self.num_spec_tokens)):
                 request.spec_token_ids = [PLACEHOLDER_TOKEN_ID] * self.num_spec_tokens
             self._enqueue_waiting_request(request)
             self.requests[request.request_id] = request
