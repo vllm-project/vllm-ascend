@@ -54,10 +54,11 @@ class AscendW8A8DynamicLinearMethod(AscendLinearScheme):
     """
 
     def __init__(self):
-        pass
+        self.is_fp8 = False
 
     def get_weight(self, input_size: int, output_size: int, params_dtype: torch.dtype) -> dict[str, Any]:
-        params_dict = {"weight": torch.empty(output_size, input_size, dtype=torch.int8)}
+        weight_dtype = torch.float8_e4m3fn if self.is_fp8 else torch.int8
+        params_dict = {"weight": torch.empty(output_size, input_size, dtype=weight_dtype)}
         return params_dict
 
     def get_perchannel_param(
@@ -77,7 +78,8 @@ class AscendW8A8DynamicLinearMethod(AscendLinearScheme):
         bias: torch.Tensor | None = None,
         tp_rank: int | None = 0,
     ) -> torch.Tensor:
-        quantized_x, pertoken_scale = torch_npu.npu_dynamic_quant(x)
+        dst_type = torch.float8_e4m3fn if self.is_fp8 else torch.int8
+        quantized_x, pertoken_scale = torch_npu.npu_dynamic_quant(x, dst_type=dst_type)
         need_unsqz = False
         if pertoken_scale.dim() == 2:
             need_unsqz = True
@@ -110,14 +112,19 @@ class AscendW8A8DynamicLinearMethod(AscendLinearScheme):
                 dim=-1,
             )
         else:
+            weight_scale = layer.weight_scale_fp32 if self.is_fp8 else layer.weight_scale
             output = torch_npu.npu_quant_matmul(
                 quantized_x,
                 layer.weight,
-                layer.weight_scale,
+                weight_scale,
                 pertoken_scale=pertoken_scale,
-                bias=bias,
+                bias=bias if not self.is_fp8 else None,
                 output_dtype=x.dtype,
             )
+            # there is a bug in npu_quant_matmul for fp8 with bias
+            # remove this fallback if the bug is fixed
+            if self.is_fp8 and bias is not None:
+                output = (output + bias).to(x.dtype)
         if need_unsqz:
             output = output.unsqueeze(dim=1)
         return output
@@ -143,7 +150,8 @@ class AscendW8A8DynamicLinearMethod(AscendLinearScheme):
             del layer.weight_offset
         else:
             # cast quantized weight tensors in NZ format for higher inference speed
-            layer.weight.data = maybe_trans_nz(layer.weight.data)
+            if not self.is_fp8:
+                layer.weight.data = maybe_trans_nz(layer.weight.data)
             layer.weight_scale.data = layer.weight_scale.data.flatten()
             layer.weight_scale_fp32 = layer.weight_scale.data.to(torch.float32)
             layer.weight_offset.data = layer.weight_offset.data.flatten()
@@ -153,10 +161,9 @@ class AscendW8A8DynamicLinearMethod(AscendLinearScheme):
 class AscendW8A8DynamicFusedMoEMethod(AscendMoEScheme):
     """FusedMoE method for Ascend W8A8_DYNAMIC."""
 
-    # Declare the quantization type for this scheme
-    quant_type: QuantType = QuantType.W8A8
-
     def __init__(self):
+        self.quant_type: QuantType = QuantType.W8A8
+        self.is_fp8 = False
         vllm_config = get_current_vllm_config()
         ascend_config = get_ascend_config()
         self.use_aclgraph = (
@@ -185,12 +192,13 @@ class AscendW8A8DynamicFusedMoEMethod(AscendMoEScheme):
     def get_weight(
         self, num_experts: int, intermediate_size_per_partition: int, hidden_sizes: int, params_dtype: torch.dtype
     ) -> dict[str, Any]:
+        weight_dtype = torch.float8_e4m3fn if self.is_fp8 else torch.int8
         param_dict = {}
         param_dict["w13_weight"] = torch.empty(
-            num_experts, 2 * intermediate_size_per_partition, hidden_sizes, dtype=torch.int8
+            num_experts, 2 * intermediate_size_per_partition, hidden_sizes, dtype=weight_dtype
         )
         param_dict["w2_weight"] = torch.empty(
-            num_experts, hidden_sizes, intermediate_size_per_partition, dtype=torch.int8
+            num_experts, hidden_sizes, intermediate_size_per_partition, dtype=weight_dtype
         )
         return param_dict
 
@@ -315,7 +323,13 @@ class AscendW8A8DynamicFusedMoEMethod(AscendMoEScheme):
             w1 = [layer.w13_weight]
             w1_scale = [layer.fused_w1_scale] if fused_scale_flag else [layer.w13_weight_scale_fp32]
             w2 = [layer.w2_weight]
-            w2_scale = [layer.fused_w2_scale] if fused_scale_flag else [layer.w2_weight_scale]
+            w2_scale = (
+                [layer.fused_w2_scale]
+                if fused_scale_flag
+                else [layer.w2_weight_scale_fp32]
+                if self.is_fp8
+                else [layer.w2_weight_scale]
+            )
 
         w1_scale_bias = [torch.tensor([], dtype=torch.float32)] if fused_scale_flag else None
         w2_scale_bias = [torch.tensor([], dtype=torch.float32)] if fused_scale_flag else None
@@ -352,12 +366,15 @@ class AscendW8A8DynamicFusedMoEMethod(AscendMoEScheme):
         layer.w2_weight.data = layer.w2_weight.data.transpose(1, 2).contiguous()
         # TODO(zzzzwwjj): Currently, `torch_npu.npu_grouped_matmul_swiglu_quant`
         # can only support weight nz.
-        layer.w13_weight.data = torch_npu.npu_format_cast(layer.w13_weight.data, ACL_FORMAT_FRACTAL_NZ)
-        layer.w2_weight.data = torch_npu.npu_format_cast(layer.w2_weight.data, ACL_FORMAT_FRACTAL_NZ)
+        if not self.is_fp8:
+            layer.w13_weight.data = torch_npu.npu_format_cast(layer.w13_weight.data, ACL_FORMAT_FRACTAL_NZ)
+            layer.w2_weight.data = torch_npu.npu_format_cast(layer.w2_weight.data, ACL_FORMAT_FRACTAL_NZ)
         layer.w13_weight_scale.data = layer.w13_weight_scale.data.view(layer.w13_weight_scale.data.shape[0], -1)
         layer.w13_weight_scale_fp32 = layer.w13_weight_scale.data.to(torch.float32)
         layer.w13_weight_offset.data = layer.w13_weight_offset.data.view(layer.w13_weight_offset.data.shape[0], -1)
         layer.w2_weight_scale.data = layer.w2_weight_scale.data.view(layer.w2_weight_scale.data.shape[0], -1)
+        if self.is_fp8:
+            layer.w2_weight_scale_fp32 = layer.w2_weight_scale.data.to(torch.float32)
         layer.w2_weight_offset.data = layer.w2_weight_offset.data.view(layer.w2_weight_offset.data.shape[0], -1)
 
         if get_ascend_config().enable_fused_mc2 == 1:
@@ -389,3 +406,25 @@ class AscendW8A8DynamicFusedMoEMethod(AscendMoEScheme):
                 del layer.fused_w1_scale
                 del layer.fused_w2_scale
             torch.npu.empty_cache()
+
+
+@register_scheme("W8A8FP8_DYNAMIC", "linear")
+class AscendW8A8FP8DynamicLinearMethod(AscendW8A8DynamicLinearMethod):
+    """Linear method for Ascend W8A8FP8_DYNAMIC.
+
+    This scheme uses FP8 dynamic per-token quantization for activations
+    and FP8 per-channel quantization for weights.
+    """
+
+    def __init__(self):
+        self.is_fp8 = True
+
+
+@register_scheme("W8A8FP8_DYNAMIC", "moe")
+class AscendW8A8FP8DynamicFusedMoEMethod(AscendW8A8DynamicFusedMoEMethod):
+    """FusedMoE method for Ascend W8A8FP8_DYNAMIC."""
+
+    def __init__(self):
+        super().__init__()
+        self.quant_type: QuantType = QuantType.W8A8FP8
+        self.is_fp8 = True
