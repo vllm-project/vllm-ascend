@@ -1,4 +1,5 @@
 # Standard
+import functools
 import json
 import os
 from dataclasses import dataclass
@@ -19,6 +20,40 @@ DEFAULT_GLOBAL_SEGMENT_SIZE = 1073741824  # 1.0 GiB
 DEFAULT_LOCAL_BUFFER_SIZE = 1073741824  # 1.0 GiB
 
 
+@functools.lru_cache(maxsize=1)
+def _mooncake_setup_supports_ssd_offload() -> bool:
+    """True when installed Mooncake exposes SSD kwargs on setup() (v0.3.11+)."""
+    from mooncake.store import MooncakeDistributedStore  # type: ignore
+
+    setup = MooncakeDistributedStore.setup
+    try:
+        import inspect
+        sig = inspect.signature(setup)
+        return "enable_ssd_offload" in sig.parameters
+    except (TypeError, ValueError):
+        # pybind11 overloaded bindings often reject inspect.signature
+        doc = setup.__doc__ or ""
+        return "enable_ssd_offload" in doc
+
+
+def _ssd_setup_kwargs(config: "MooncakeStoreConfig") -> dict[str, object]:
+    """Keyword args for store.setup(); empty on old Mooncake or when SSD is off."""
+    if not config.enable_ssd_offload:
+        return {}
+    if not _mooncake_setup_supports_ssd_offload():
+        raise RuntimeError(
+            "mooncake.json has enable_ssd_offload=true, but the installed "
+            "Mooncake does not support enable_ssd_offload/ssd_offload_path in "
+            "MooncakeDistributedStore.setup(). Upgrade Mooncake to v0.3.11 or "
+            "later (see Mooncake ssd-offload.md Step 3A), or set "
+            "enable_ssd_offload to false."
+        )
+    return {
+        "enable_ssd_offload": config.enable_ssd_offload,
+        "ssd_offload_path": config.ssd_offload_path,
+    }
+
+
 class MooncakeBackend(Backend):
     def __init__(self, parallel_config: ParallelConfig):
         try:
@@ -31,6 +66,7 @@ class MooncakeBackend(Backend):
             ) from e
         self.config = MooncakeStoreConfig.load_from_env()
         self.store = MooncakeDistributedStore()
+        ssd_kwargs = _ssd_setup_kwargs(self.config)
         if self.config.protocol == "ascend":
             local_hostname = get_ip()
             # ASCEND_ENABLE_USE_FABRIC_MEM: Enable unified memory address direct transmission scheme
@@ -48,6 +84,7 @@ class MooncakeBackend(Backend):
                     self.config.device_name,
                     self.config.master_server_address,
                     transfer_engine.get_engine(),
+                    **ssd_kwargs,
                 )
             else:
                 self.local_seg = local_hostname
@@ -59,12 +96,18 @@ class MooncakeBackend(Backend):
                     self.config.protocol,
                     self.config.device_name,
                     self.config.master_server_address,
+                    **ssd_kwargs,
                 )
 
             if ret != 0:
                 msg = "Initialize mooncake failed."
                 logger.error(msg)
                 raise RuntimeError(msg)
+            if ssd_kwargs:
+                logger.info(
+                    "Mooncake SSD offload enabled (Mode A): path=%s",
+                    self.config.ssd_offload_path,
+                )
         else:
             raise NotImplementedError(f"MooncakeBackend does not support protocol {self.config.protocol!r}.")
 
@@ -119,6 +162,28 @@ class MooncakeStoreConfig:
     protocol: str
     device_name: str
     master_server_address: str
+    enable_ssd_offload: bool = False
+    ssd_offload_path: str = ""
+
+    def __post_init__(self) -> None:
+        if not self.enable_ssd_offload:
+            return
+        if not self.ssd_offload_path:
+            raise ValueError(
+                "enable_ssd_offload is true but ssd_offload_path is empty. "
+                "Set ssd_offload_path in mooncake.json."
+            )
+        if not os.path.isabs(self.ssd_offload_path):
+            raise ValueError(
+                f"ssd_offload_path must be an absolute path, got: {self.ssd_offload_path!r}"
+            )
+        if not os.path.isdir(self.ssd_offload_path):
+            logger.warning(
+                "ssd_offload_path does not exist or is not a directory: %s. "
+                "Create it before starting (e.g. mkdir -p %s).",
+                self.ssd_offload_path,
+                self.ssd_offload_path,
+            )
 
     @staticmethod
     def from_file(file_path: str) -> "MooncakeStoreConfig":
@@ -133,6 +198,8 @@ class MooncakeStoreConfig:
             protocol=config.get("protocol", "ascend"),
             device_name=config.get("device_name", ""),
             master_server_address=config.get("master_server_address"),
+            enable_ssd_offload=bool(config.get("enable_ssd_offload", False)),
+            ssd_offload_path=config.get("ssd_offload_path", ""),
         )
 
     @staticmethod

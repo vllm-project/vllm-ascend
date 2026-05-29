@@ -91,6 +91,56 @@ export PYTHONHASHSEED=0
 | 800 I/T A3 series | 25.5.0<=HDK<26.0.0 | `export ASCEND_BUFFER_POOL=4:8` | Configures the number and size of buffers on the NPU Device for aggregation and KV transfer (e.g., `4:8` means 4 buffers of 8MB). |
 | 800 I/T A2 series | N/A | `export HCCL_INTRA_ROCE_ENABLE=1` | Required by direct transmission scheme on 800 I/T A2 series|
 
+### Embedded Real Client Mode（Mooncake ssd-offload.md Step 3A）
+
+* Software:
+    * mooncake >= v0.3.11
+
+#### Start the master
+
+```bash
+mooncake_master --rpc_port=50051 --enable_offload=true
+```
+
+| Field | Description |
+| :--- | :--- |
+| `enable_offload` | Set `true` to enable SSD offload. |
+
+#### Configuration
+
+Add the following fields to your `mooncake.json`:
+
+```json
+{
+    "local_hostname": "xx.xx.xx.xx",
+    "metadata_server": "P2PHANDSHAKE",
+    "protocol": "ascend",
+    "use_ascend_direct": true,
+    "device_name": "",
+    "master_server_address": "xx.xx.xx.xx:50088",
+    "global_segment_size": "1GB",
+    "enable_ssd_offload": true,
+    "ssd_offload_path": "/nvme/mooncake_offload"
+}
+```
+
+| Field | Description |
+| :--- | :--- |
+| `enable_ssd_offload` | Set to `true` to enable SSD offload. Environment variables are not supported. |
+| `ssd_offload_path` | **Required when `enable_ssd_offload` is `true`.** Absolute path to a local directory where Mooncake stores offloaded KV data (for example, `/nvme/mooncake_offload`). The directory must exist and be writable by the vLLM process; create it before startup (`mkdir -p <path>`). Relative paths, symbolic links, and paths containing `..` are rejected by Mooncake. Passed to `MooncakeDistributedStore.setup()` as the SSD storage root (equivalent to `MOONCAKE_OFFLOAD_FILE_STORAGE_PATH` in standalone clients). Configure this field in `mooncake.json` only; environment variables are not supported. |
+
+#### Running the Embedded Real Client
+
+With Mode A (Embedded Real Client), Mooncake is embedded in vLLM. When the vLLM service starts, `AscendStoreConnector` / `MooncakeBackend` automatically calls `MooncakeDistributedStore.setup()` using the settings in `mooncake.json` (including `enable_ssd_offload` and `ssd_offload_path` when SSD offload is enabled). No separate `mooncake_client` process is required.
+
+#### Connectors Supporting Dummy Client
+
+* **AscendStoreConnector** (KV Pool backend via `MooncakeBackend`): Reads `enable_ssd_offload` and `ssd_offload_path` from `mooncake.json`. When enabled, calls full `setup()`, and forwards `register_buffer()` calls to the real client (which handles HCCL registration).
+
+#### Notes
+
+* This feature requires mooncake >= v0.3.11. 
+
 ### FAQ for HIXL (ascend_direct) backend
 
 For common troubleshooting and issue localization guidance for HIXL (ascend_direct), see:
