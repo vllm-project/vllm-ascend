@@ -162,7 +162,7 @@ class MooncakeBackend(Backend):
             if self.preferred_segment:
                 config.preferred_segment = self.local_seg
             config.prefer_alloc_in_same_node = self.prefer_alloc_in_same_node
-            res = self.store.batch_put_from_multi_buffers(keys, addrs, sizes)
+            res = self.store.batch_put_from_multi_buffers(keys, addrs, sizes, config)
             for value in res:
                 if value < 0:
                     logger.error("Failed to put key %s,res:%s", keys, res)
