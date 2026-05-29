@@ -1,12 +1,12 @@
 /**
- * This program is free software, you can redistribute it and/or modify.
  * Copyright (c) 2025 Huawei Technologies Co., Ltd.
- * This file is a part of the CANN Open Software.
- * Licensed under CANN Open Software License Agreement Version 2.0 (the "License").
- * Please refer to the License for details. You may not use this file except in compliance with the License.
- * THIS SOFTWARE IS PROVIDED ON AN "AS IS" BASIS, WITHOUT WARRANTIES OF ANY KIND, EITHER EXPRESS OR IMPLIED, INCLUDING BUT NOT LIMITED TO NON-INFRINGEMENT, MERCHANTABILITY, OR FITNESS FOR A PARTICULAR PURPOSE.
- * See LICENSE in the root of the software repository for the full text of the License.
- */
+ * This program is free software, you can redistribute it and/or modify it under the terms and conditions of
+ * CANN Open Software License Agreement Version 2.0 (the "License").
+ * Please refer to the License for details. You may not use this file except in compliance with the License.
+ * THIS SOFTWARE IS PROVIDED ON AN "AS IS" BASIS, WITHOUT WARRANTIES OF ANY KIND, EITHER EXPRESS OR IMPLIED,
+ * INCLUDING BUT NOT LIMITED TO NON-INFRINGEMENT, MERCHANTABILITY, OR FITNESS FOR A PARTICULAR PURPOSE.
+ * See LICENSE in the root of the software repository for the full text of the License.
+ */
 
 /*!
  * \file moe_distribute_base.h
@@ -16,13 +16,10 @@
 #ifndef MOE_DISTRIBUTE_BASE_H
 #define MOE_DISTRIBUTE_BASE_H
 
-#include "kernel_operator.h"
-
 constexpr uint32_t LOCAL_NOTIFY_MAX_NUM = 64;
-constexpr uint32_t LOCAL_STREAM_MAX_NUM = 19U;
+constexpr uint32_t LOCAL_STREAM_MAX_NUM = 19;
 constexpr uint32_t AICPU_OP_NOTIFY_MAX_NUM = 2;
 constexpr uint32_t AICPU_MAX_RANK_NUM = 128 * 1024;
-constexpr uint32_t TIME_CYCLE = 50; // 系统cycle数转换成时间的基准单位，固定为50
 
 struct HcclSignalInfo {
     uint64_t resId; // 在代表event时为eventid，notify时为notifyid
@@ -244,9 +241,6 @@ struct HcclAiRMAInfo {
     uint64_t memPtr{0};
     // 可往后追加字段
 };
-struct CombinedCapability {
-    uint64_t dataplaneModeBitmap;
-};
 
 struct HcclA2CombineOpParam {
     uint64_t workSpace;                         // Address for communication between client and server,
@@ -268,14 +262,6 @@ struct HcclA2CombineOpParam {
     // 追加字段
     uint64_t sizeOfAiRMAInfo; // sizeof(HcclAiRMAInfo)
     uint64_t aiRMAInfo; // HcclAiRMAInfo* 单个结构体指针
-
-    CombinedCapability* capability;             // address of the communication capability information structure on the Device
-    uint64_t capabilitySize;                    // size of the communication capability information structure
-};
-enum class DataplaneMode : uint32_t {
-    HOST = 0,
-    AICPU = 1,
-    AIV = 2,
 };
 
 enum class DBMode : int32_t {
@@ -336,30 +322,5 @@ __aicore__ inline void cacheWriteThrough(__gm__ uint8_t* sourceAddr, uint64_t le
             AscendC::DcciDst::CACHELINE_OUT>(global[i]);
     }
 }
-__aicore__ inline DataplaneMode GetDataplaneMode(GM_ADDR contextGM0) {
-    __gm__ HcclA2CombineOpParam *winContext_ = (__gm__ HcclA2CombineOpParam *)contextGM0;
-    CombinedCapability* capability = winContext_->capability;
-    uint64_t capabilitySize = winContext_->capabilitySize;
-    DataplaneMode dataplaneMode = DataplaneMode::AICPU;
-    if (capability == 0) {
-        return dataplaneMode;
-    }
-    uint64_t dataplaneModeBitmap = capability->dataplaneModeBitmap;
-    if ((dataplaneModeBitmap & 0x04) == 0x04) {
-        dataplaneMode = DataplaneMode::AIV;
-    }
-    return dataplaneMode;
-}
 
-__aicore__ inline int64_t GetCurrentTimestampUs()
-{
-    return AscendC::GetSystemCycle() / TIME_CYCLE;
-}
-
-__aicore__ inline void RecordRankCommDuration(AscendC::LocalTensor<int32_t> performanceInfoU32Tensor, uint32_t rankId, int64_t startTime)
-{
-    int64_t endTime = GetCurrentTimestampUs();
-    int32_t duration = static_cast<int32_t>(endTime - startTime); // int32_t可以表示2^31(us)，约35min在实际场景下满足需要
-    performanceInfoU32Tensor.SetValue(rankId * sizeof(int64_t) / sizeof(int32_t), duration); // 使用int32_t是因为atomicAdd不支持int64_t类型，这里只赋值到int64_t的低32位。
-}
 #endif // MOE_DISTRIBUTE_BASE_H
