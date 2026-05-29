@@ -653,7 +653,7 @@ class AscendAttentionCPImpl(AscendAttentionBackendImpl):
                     attn_metadata.decode_meta.num_computed_tokens_of_pcp_dcp[
                         : attn_metadata.num_decodes, self.pcp_rank, self.dcp_rank
                     ],
-                    attn_metadata.actual_seq_lengths_q[: attn_metadata.num_decodes],
+                    actual_seq_lengths_q,
                     weak_ref_tensors(attn_out),
                     weak_ref_tensors(attn_lse),
                     self.dcp_size,
