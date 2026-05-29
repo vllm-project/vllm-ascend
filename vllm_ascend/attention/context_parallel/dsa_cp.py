@@ -392,6 +392,7 @@ class AscendDSACPMetadataBuilder(AttentionMetadataBuilder[AscendDSAMetadata]):
         num_reqs = common_attn_metadata.num_reqs
         query_start_loc = common_attn_metadata.query_start_loc
         seq_lens_q = query_start_loc[1:] - query_start_loc[:-1]
+        has_prefill = _has_prefill(common_attn_metadata.attn_state)
 
         cos, sin = get_cos_and_sin_dsa(input_positions, use_cache=False)
         (
@@ -429,7 +430,7 @@ class AscendDSACPMetadataBuilder(AttentionMetadataBuilder[AscendDSAMetadata]):
             num_heads_kv=1,
             head_dim=self.model_config.get_head_size(),
             cu_seqlens_q=local_query_start_loc,
-            cu_seqlens_ori_kv=local_query_start_loc,
+            cu_seqlens_ori_kv=local_query_start_loc if has_prefill else self.cu_seqlens_ori_kv,
             cu_seqlens_cmp_kv=None,
             seqused_q=self.seqused_q,
             seqused_kv=local_seq_lens,
