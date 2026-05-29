@@ -7,9 +7,8 @@ test_cases:
     model: "Eco-Tech/DeepSeek-V4-Flash-w8a8-mtp"
     envs:
       OMP_PROC_BIND: "false"
-      OMP_NUM_THREADS: "10"
+      OMP_NUM_THREADS: "1"
       PYTORCH_NPU_ALLOC_CONF: "expandable_segments:True"
-      VLLM_USE_V1: "1"
       USE_MULTI_BLOCK_POOL: "1"
       USE_MULTI_GROUPS_KV_CACHE: "1"
       HCCL_BUFFSIZE: "1024"
@@ -65,8 +64,9 @@ test_cases:
         dataset_conf: gpqa/gpqa_gen_0_shot_cot_chat_prompt
         max_out_len: 65536
         batch_size: 32
-        baseline: 85
-        threshold: 5
+        baseline: 86.36
+        threshold: 3
+        thinking: true
       perf:
         case_type: performance
         dataset_path: vllm-ascend/GSM8K_prefix90_in131072_bs100_deepseek
