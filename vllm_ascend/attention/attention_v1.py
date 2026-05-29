@@ -718,7 +718,7 @@ class AscendAttentionBackendImpl(AttentionImpl):
         next_tokens = 0 if self.sliding_window else SWA_INT_MAX
 
         extra_args = {}
-        if self.enable_c8_quant:
+        if self.enable_c8_quant and layer is not None:
             extra_args = {
                 "key_antiquant_scale": layer._c8_k_aq_scale_nz_bnsd,
                 "value_antiquant_scale": layer._c8_v_aq_scale_nz_bnsd,
@@ -788,7 +788,7 @@ class AscendAttentionBackendImpl(AttentionImpl):
             pre_tokens,
             next_tokens,
         )
-        if self.enable_c8_quant:
+        if self.enable_c8_quant and layer is not None:
             attn_params = attn_params + (
                 weak_ref_tensors(layer._c8_k_aq_scale_nz_bnsd),
                 None,
@@ -1477,14 +1477,6 @@ class AscendC8AttentionBackendImpl(AscendAttentionBackendImpl):
         nz_bnsd = (self.num_kv_heads, 1, self.head_size)
         layer._c8_k_aq_scale_nz_bnsd = layer._c8_k_scale.view(nz_bnsd).contiguous()
         layer._c8_v_aq_scale_nz_bnsd = layer._c8_v_scale.view(nz_bnsd).contiguous()
-
-        # NZ is the default KV cache layout. Validate hardware constraints.
-        cache_config = self.vllm_config.cache_config
-        block_size_val = cache_config.block_size
-        assert self.head_size == 128, \
-            f"C8 NZ KV cache requires head_size==128, got {self.head_size}"
-        assert block_size_val in (128, 512), \
-            f"C8 NZ KV cache requires block_size in (128, 512), got {block_size_val}"
 
         layer._c8_scales_prepared = True
 
