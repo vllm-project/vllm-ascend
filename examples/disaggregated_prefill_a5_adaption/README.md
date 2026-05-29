@@ -13,6 +13,8 @@ Both scripts are located in this directory.
 
 ## Prerequisites
 
+Check if `/etc/hccl_rootinfo.json` exists. If not existed or current one is not ok (task failed), follow instructions below to generate one.
+
 ### 1. Install the dependency tool
 
 ```bash
