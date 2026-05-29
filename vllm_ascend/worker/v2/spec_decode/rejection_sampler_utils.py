@@ -336,7 +336,11 @@ def rejection_sample(
     num_speculative_steps: int,
     # [num_speculative_steps]
     synthetic_conditional_rates: torch.Tensor | None = None,
+    use_fp64: bool = False,
 ) -> tuple[torch.Tensor, torch.Tensor]:
+    if use_fp64:
+        raise NotImplementedError("FP64 rejection sampling is not supported on NPU.")
+
     if synthetic_conditional_rates is not None:
         # Synthetic rejection sampling needs tl_rand64, which NPU Triton does
         # not support. The greedy fallback below would silently use u=0.0 and

@@ -122,5 +122,6 @@ exclude = [
     "docs/source/tutorials/models/NVLM-D-72B.md",
     "docs/source/tutorials/models/index.md",
     "docs/source/tutorials/models/Hunyuan-A13B-Instruct.md",
+    "docs/source/tutorials/models/Hy3-preview.md",
     "docs/source/tutorials/models/gpt-oss-120b.md",
 ]

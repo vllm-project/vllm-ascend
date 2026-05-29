@@ -140,14 +140,17 @@ class TestMaybeAutoDetectQuantization(TestBase):
         self.assertIn(COMPRESSED_TENSORS_METHOD, call_args)
 
     @patch("vllm_ascend.quantization.utils.detect_quantization_method", return_value=None)
-    def test_no_detection_emits_no_log(self, mock_detect):
-        """When no quantization is detected, no log should be emitted."""
+    def test_no_detection_emits_info_log(self, mock_detect):
+        """When no quantization is detected, an info log tells the user the model loads as float."""
         vllm_config = self._make_vllm_config(quantization=None)
 
         with patch("vllm_ascend.quantization.utils.logger") as mock_logger:
             maybe_auto_detect_quantization(vllm_config)
 
-        mock_logger.info.assert_not_called()
+        mock_logger.info.assert_called_once()
+        call_args = mock_logger.info.call_args[0]
+        self.assertIn("No quantization signature detected", call_args[0])
+        self.assertIn("/fake/model", call_args)
         mock_logger.warning.assert_not_called()
         self.assertIsNone(vllm_config.model_config.quantization)
 
