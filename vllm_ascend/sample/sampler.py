@@ -260,6 +260,7 @@ def _apply_top_k_top_p_ascendc(
     if p is None and k is None:
         return logits
 
+    logits = logits.type(torch.float32)
     if p is not None:
         p = p.type(torch.float32)
     else:

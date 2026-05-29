@@ -1,6 +1,7 @@
 import unittest
 from unittest.mock import MagicMock, patch
 
+import pytest
 import torch
 
 from tests.ut.base import TestBase
@@ -11,8 +12,19 @@ from vllm_ascend.sample.sampler import (
     generate_random_sequence,
 )
 
+NPU_AVAILABLE = hasattr(torch, "npu") and torch.npu.is_available()
+
 
 class TestAscendSampler(TestBase):
+    def setUp(self):
+        if not NPU_AVAILABLE:
+            self.stream_patcher = patch("torch_npu.npu.Stream")
+            self.stream_patcher.start()
+
+    def tearDown(self):
+        if not NPU_AVAILABLE:
+            self.stream_patcher.stop()
+
     def test_init_with_raw_logprobs(self):
         sampler = AscendSampler(logprobs_mode="raw_logprobs")
         self.assertEqual(sampler.logprobs_mode, "raw_logprobs")
@@ -30,12 +42,14 @@ def _mock_ascend_config(enable_reduce_sample=False):
 class TestAscendTopKTopPSampler(TestBase):
     """Test that sampler patches are correctly applied in vllm_ascend source."""
 
+    @pytest.mark.skipif(not NPU_AVAILABLE, reason="NPU not available")
     def test_ascend_top_k_top_p_sampler_has_dsa_stream(self):
         """AscendTopKTopPSampler should have dsa_stream attribute."""
         instance = AscendTopKTopPSampler(logprobs_mode="raw_logprobs")
         self.assertTrue(hasattr(instance, "dsa_stream"))
         self.assertTrue(hasattr(instance, "logprobs_mode"))
 
+    @pytest.mark.skipif(not NPU_AVAILABLE, reason="NPU not available")
     @patch("vllm_ascend.sample.sampler.get_ascend_config", return_value=_mock_ascend_config())
     @patch("vllm_ascend.sample.sampler.generate_random_sequence")
     @patch("vllm_ascend.sample.sampler.torch_npu.npu_top_k_top_p_sample")
@@ -58,6 +72,7 @@ class TestAscendTopKTopPSampler(TestBase):
                 self.assertEqual(sampled.shape, (batch_size,))
                 self.assertEqual(sampled.dtype, torch.int64)
 
+    @pytest.mark.skipif(not NPU_AVAILABLE, reason="NPU not available")
     @patch("vllm_ascend.sample.sampler.get_ascend_config", return_value=_mock_ascend_config())
     @patch("vllm_ascend.sample.sampler.generate_random_sequence")
     @patch("vllm_ascend.sample.sampler.torch_npu.npu_top_k_top_p_sample")
@@ -82,11 +97,13 @@ class TestAscendTopKTopPSampler(TestBase):
                 self.assertEqual(sampled.shape, (batch_size,))
                 # self.assertEqual(sampled.dtype, torch.bfloat16)
 
+    @pytest.mark.skipif(not NPU_AVAILABLE, reason="NPU not available")
     def test_ascend_sampler_init_creates_topk_topp_sampler(self):
         """AscendSampler.__init__ should create topk_topp_sampler."""
         instance = AscendSampler(logprobs_mode="raw_logprobs")
         self.assertTrue(hasattr(instance, "topk_topp_sampler"))
 
+    @pytest.mark.skipif(not NPU_AVAILABLE, reason="NPU not available")
     @patch("vllm_ascend.sample.sampler.get_ascend_config", return_value=_mock_ascend_config())
     def test_apply_top_k_top_p(self, mock_get_cfg):
         """apply_top_k_top_p should handle all k/p combinations."""
@@ -111,6 +128,7 @@ class TestAscendTopKTopPSampler(TestBase):
                 if k is None and p is None:
                     torch.testing.assert_close(result, logits, msg="k=None, p=None should be identity")
 
+    @pytest.mark.skipif(not NPU_AVAILABLE, reason="NPU not available")
     def test_ascend_top_k_top_p_sampler_set_q_event(self):
         """set_q_event should store q and event."""
         instance = AscendTopKTopPSampler(logprobs_mode="raw_logprobs")
@@ -120,6 +138,7 @@ class TestAscendTopKTopPSampler(TestBase):
         self.assertIs(instance.q, q)
         self.assertIs(instance.async_event, event)
 
+    @pytest.mark.skipif(not NPU_AVAILABLE, reason="NPU not available")
     def test_generate_random_sequence(self):
         """generate_random_sequence should return a tensor of the same shape."""
         logits = torch.randn(2, 4)
@@ -129,6 +148,7 @@ class TestAscendTopKTopPSampler(TestBase):
         self.assertEqual(result.shape, logits.shape)
         self.assertEqual(result.dtype, torch.float32)
 
+    @pytest.mark.skipif(not NPU_AVAILABLE, reason="NPU not available")
     def test_generate_random_sequence_with_generators(self):
         """generate_random_sequence with non-empty generators."""
         logits = torch.randn(2, 4)
