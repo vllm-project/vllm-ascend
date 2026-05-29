@@ -186,6 +186,7 @@ def _save_timing_json(
     partition_id: int | None,
     partition_size: int | None,
     output_path: Path,
+    suite_names: list[str] | None = None,
 ) -> None:
     passed_suites = [r.to_dict() for r in records if r.passed]
     payload = {
@@ -197,6 +198,8 @@ def _save_timing_json(
         "timestamp": datetime.now(timezone.utc).isoformat(),
         "tests": passed_suites,
     }
+    if suite_names is not None and len(suite_names) > 1:
+        payload["suites"] = suite_names
     output_path.write_text(json.dumps(payload, indent=2))
     print(
         f"Timing data written to {output_path}  ({len(passed_suites)}/{len(records)} passed)",
@@ -211,8 +214,9 @@ def main() -> None:
     parser.add_argument(
         "--suite",
         required=True,
+        action="append",
         choices=list(suites.keys()),
-        help="Name of the test suite to run",
+        help="Name of the test suite to run. Can be specified multiple times.",
     )
     parser.add_argument(
         "--auto-partition-id",
@@ -243,14 +247,16 @@ timing data to improve estimates.",
     parser.add_argument(
         "--timing-report-json",
         type=Path,
-        default=Path("test_timing_data.json"),
+        default=Path("/tmp/test_timing_data.json"),
         help="Path to write the JSON timing data for CI aggregation",
     )
     args = parser.parse_args()
 
     sanity_check(suites, upstream_files)
 
-    all_files = suites[args.suite]
+    suite_names = args.suite
+    suite_label = suite_names[0] if len(suite_names) == 1 else "+".join(suite_names)
+    all_files = [test for suite_name in suite_names for test in suites[suite_name]]
     skipped = [f for f in all_files if f.is_skipped]
 
     if args.auto_partition_size is not None:
@@ -260,16 +266,23 @@ timing data to improve estimates.",
         files = [f for f in all_files if not f.is_skipped]
         partition_info = "full"
 
-    _print_plan(args.suite, files, skipped, partition_info)
+    _print_plan(suite_label, files, skipped, partition_info)
 
     exit_code, records = run_tests(
         files,
         continue_on_error=args.continue_on_error,
     )
 
-    _save_timing_json(records, args.suite, args.auto_partition_id, args.auto_partition_size, args.timing_report_json)
+    _save_timing_json(
+        records,
+        suite_label,
+        args.auto_partition_id,
+        args.auto_partition_size,
+        args.timing_report_json,
+        suite_names=suite_names,
+    )
 
-    _print_results(args.suite, records, skipped, partition_info)
+    _print_results(suite_label, records, skipped, partition_info)
     if args.auto_upgrade_estimated_times:
         sys.exit(0)
     sys.exit(exit_code)
