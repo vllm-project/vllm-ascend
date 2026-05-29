@@ -811,13 +811,13 @@ class AscendModelSlimConfig(QuantizationConfig):
 
     def _add_kvcache_quant_metadata(self):
         fa_quant_type = self.quant_description.get("fa_quant_type", "")
-        self.enable_fa_quant = fa_quant_type != "C8"
+        self.enable_fa_quant = fa_quant_type != ""
         self.kvcache_quant_layers = []
         indexer_quant_type = self.quant_description.get("indexer_quant_type", "")
         self.enable_indexer_quant = indexer_quant_type != ""
         self.indexer_quant_layers = []
         kv_quant_type = self.quant_description.get("kv_cache_type", "")
-        self.enable_c8_quant = kv_quant_type != ""
+        self.enable_c8_quant = kv_quant_type == "C8"
         self.c8_quant_layers = []
         if self.enable_fa_quant or self.enable_indexer_quant or self.enable_c8_quant:
             for key in self.quant_description:
