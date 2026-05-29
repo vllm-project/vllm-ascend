@@ -261,7 +261,7 @@ def apply_sampling_constraints(
 
     # New flow: top_k -> allgather -> top_p
     # Returns processed logits and indices
-    if get_ascend_config().enable_reduce_sample:
+    if get_ascend_config().sampling_config.enable_reduced_sampling:
         return apply_top_k_top_p(logits, k, p, top_k)
     else:
         return apply_top_k_top_p(logits, k, p)
@@ -349,7 +349,7 @@ def rejection_sample(
         grid, block_size = cal_grid_and_block_size(batch_size)
     # For greedy sampling, we need to do allgather first to get global argmax
     if not sampling_metadata.all_random:
-        if get_ascend_config().enable_reduce_sample:
+        if get_ascend_config().sampling_config.enable_reduced_sampling:
             target_argmax = greedy_sample(target_logits)
         else:
             target_argmax = target_logits.argmax(dim=-1).view(-1)

@@ -32,6 +32,7 @@ class TestSamplingConfig(TestBase):
         sampling_config = SamplingConfig()
 
         self.assertFalse(sampling_config.enable_sampling_optimization)
+        self.assertFalse(sampling_config.enable_reduced_sampling)
 
     def test_sampling_config_can_enable_optimization(self):
         from vllm_ascend.ascend_config import SamplingConfig
@@ -39,6 +40,13 @@ class TestSamplingConfig(TestBase):
         sampling_config = SamplingConfig({"enable_sampling_optimization": True})
 
         self.assertTrue(sampling_config.enable_sampling_optimization)
+
+    def test_sampling_config_can_enable_reduced_sampling(self):
+        from vllm_ascend.ascend_config import SamplingConfig
+
+        sampling_config = SamplingConfig({"enable_reduced_sampling": True})
+
+        self.assertTrue(sampling_config.enable_reduced_sampling)
 
     def test_sampling_config_rejects_later_stage_options(self):
         from vllm_ascend.ascend_config import SamplingConfig
@@ -53,6 +61,7 @@ class TestSamplingConfig(TestBase):
                 {
                     "sampling_config": {
                         "enable_sampling_optimization": True,
+                        "enable_reduced_sampling": True,
                     }
                 }
             )
@@ -60,6 +69,7 @@ class TestSamplingConfig(TestBase):
             ascend_config = init_ascend_config(vllm_config)
 
             self.assertTrue(ascend_config.sampling_config.enable_sampling_optimization)
+            self.assertTrue(ascend_config.sampling_config.enable_reduced_sampling)
         finally:
             clear_ascend_config()
 
@@ -69,6 +79,7 @@ class TestSamplingConfig(TestBase):
             ascend_config = init_ascend_config(self._make_vllm_config())
 
             self.assertFalse(ascend_config.sampling_config.enable_sampling_optimization)
+            self.assertFalse(ascend_config.sampling_config.enable_reduced_sampling)
         finally:
             clear_ascend_config()
 

@@ -93,7 +93,7 @@ class AscendSampler(Sampler):
 
     @staticmethod
     def greedy_sample(logits: torch.Tensor) -> torch.Tensor:
-        if get_ascend_config().enable_reduce_sample:
+        if get_ascend_config().sampling_config.enable_reduced_sampling:
             tp_group = get_tp_group()
             B, V_local = logits.shape
             rank = tp_group.rank_in_group
@@ -135,7 +135,7 @@ class AscendTopKTopPSampler(TopKTopPSampler):
         if envs.VLLM_BATCH_INVARIANT:
             return super().forward_native(logits, generators, k, p)
 
-        if get_ascend_config().enable_reduce_sample:
+        if get_ascend_config().sampling_config.enable_reduced_sampling:
             cand_logits, cand_idx = self.apply_top_k_top_p(logits, k, p, self.top_k)
             logits_to_return = None
             if self.logprobs_mode == "processed_logits":
@@ -170,7 +170,7 @@ def _apply_top_k_top_p_pytorch(
     p: torch.Tensor,  # [B] or None
     top_k: int | None = None,
 ) -> torch.Tensor:
-    if get_ascend_config().enable_reduce_sample:
+    if get_ascend_config().sampling_config.enable_reduced_sampling:
         tp_group = get_tp_group()
         B, V_local = logits.shape
         world_size = tp_group.world_size
@@ -245,7 +245,7 @@ def _apply_top_k_top_p_ascendc(
     p: torch.Tensor,
     top_k: int | None = None,
 ) -> torch.Tensor:
-    if get_ascend_config().enable_reduce_sample:
+    if get_ascend_config().sampling_config.enable_reduced_sampling:
         tp_group = get_tp_group()
         B, V_local = logits.shape
         rank = tp_group.rank_in_group
