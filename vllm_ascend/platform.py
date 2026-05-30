@@ -62,6 +62,7 @@ else:
     FlexibleArgumentParser = None
 
 _CUSTOM_OP_REGISTERED = False
+MAX_VIT_FLASH_ATTN_HEAD_SIZE = 128
 
 
 def config_deprecated_logging():
@@ -632,6 +633,36 @@ class NPUPlatform(Platform):
         return backend_map[(attn_selector_config.use_mla, attn_selector_config.use_sparse, use_compress)]
 
     @classmethod
+    def get_supported_vit_attn_backends(cls) -> list[AttentionBackendEnum]:
+        return [
+            AttentionBackendEnum.FLASH_ATTN,
+            AttentionBackendEnum.TORCH_SDPA,
+        ]
+
+    @classmethod
+    def get_vit_attn_backend(
+        cls,
+        head_size: int,
+        dtype: torch.dtype,
+        backend: AttentionBackendEnum | None = None,
+    ) -> AttentionBackendEnum:
+        if backend is not None:
+            assert backend in cls.get_supported_vit_attn_backends(), (
+                f"Backend {backend} is not supported for vit attention. "
+                f"Supported backends are: {cls.get_supported_vit_attn_backends()}"
+            )
+            logger.info_once(f"Using backend {backend} for vit attention")
+            return backend
+
+        # The Ascend MM encoder flash-attention path pads head sizes up to 128.
+        if dtype in (torch.float16, torch.bfloat16) and head_size <= MAX_VIT_FLASH_ATTN_HEAD_SIZE:
+            logger.info_once("Using backend FLASH_ATTN for vit attention")
+            return AttentionBackendEnum.FLASH_ATTN
+
+        logger.info_once("Using backend TORCH_SDPA for vit attention")
+        return AttentionBackendEnum.TORCH_SDPA
+
+    @classmethod
     def _validate_fa3_backend(cls, key, attn_selector_config):
         if not attn_selector_config.use_batch_invariant:
             logger.info(
@@ -859,18 +890,7 @@ class NPUPlatform(Platform):
                 )
                 vllm_config.cache_config.cpu_kvcache_space_bytes = None
 
-        # ==================== 3. MultiModal Config ====================
-        multimodal_config = getattr(model_config, "multimodal_config", None) if model_config else None
-        if multimodal_config:
-            # Ascend uses a different mechanism for Multi-Modal attention
-            if getattr(multimodal_config, "mm_encoder_attn_backend", None) is not None:
-                logger.warning(
-                    "Parameter '--mm-encoder-attn-backend' is set but Ascend uses "
-                    "a plugin mechanism for multi-modal attention. Resetting to None."
-                )
-                multimodal_config.mm_encoder_attn_backend = None
-
-        # ==================== 4. Observability Config ====================
+        # ==================== 3. Observability Config ====================
         if vllm_config.observability_config:
             # NVTX tracing is NVIDIA specific
             if getattr(vllm_config.observability_config, "enable_layerwise_nvtx_tracing", False):
@@ -880,7 +900,7 @@ class NPUPlatform(Platform):
                 )
                 vllm_config.observability_config.enable_layerwise_nvtx_tracing = False
 
-        # ==================== 5. Scheduler Config ====================
+        # ==================== 4. Scheduler Config ====================
         if vllm_config.scheduler_config:
             # Partial prefills are specific to ROCm optimization
             if getattr(vllm_config.scheduler_config, "max_num_partial_prefills", 1) != 1:
@@ -889,7 +909,7 @@ class NPUPlatform(Platform):
                 )
                 vllm_config.scheduler_config.max_num_partial_prefills = 1
 
-        # ==================== 6. Speculative Config ====================
+        # ==================== 5. Speculative Config ====================
         if vllm_config.speculative_config:
             # Ascend automatically inherits main model quantization
             if getattr(vllm_config.speculative_config, "quantization", None) is not None:
@@ -899,7 +919,7 @@ class NPUPlatform(Platform):
                 )
                 vllm_config.speculative_config.quantization = None
 
-        # ==================== 7. KV Transfer Config ====================
+        # ==================== 6. KV Transfer Config ====================
         if vllm_config.kv_transfer_config:
             # Buffer size is primarily tied to NCCL (GPU) backends
             current_buffer_size = getattr(vllm_config.kv_transfer_config, "kv_buffer_size", 1e9)
@@ -919,7 +939,7 @@ class NPUPlatform(Platform):
                 )
                 vllm_config.kv_transfer_config.enable_permute_local_kv = False
 
-        # ==================== 8. Attention Config ====================
+        # ==================== 7. Attention Config ====================
         if vllm_config.attention_config:
             att_config = vllm_config.attention_config
 
@@ -970,7 +990,7 @@ class NPUPlatform(Platform):
                 )
                 att_config.flash_attn_max_num_splits_for_cuda_graph = 32
 
-        # ==================== 9. Parallel Config ====================
+        # ==================== 8. Parallel Config ====================
         if vllm_config.parallel_config:
             # ray_workers_use_nsight requires NVIDIA Nsight which is not
             # available on Ascend NPU

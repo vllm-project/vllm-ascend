@@ -1,10 +1,12 @@
 import importlib
+from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
 import pytest
 import torch
 from vllm.config.compilation import CompilationMode, CUDAGraphMode
 from vllm.platforms import PlatformEnum
+from vllm.v1.attention.backends.registry import AttentionBackendEnum
 from vllm.v1.attention.selector import AttentionSelectorConfig  # type: ignore
 
 from tests.ut.base import TestBase
@@ -723,6 +725,62 @@ class TestNPUPlatform(TestBase):
         )
         result = self.platform.get_attn_backend_cls("ascend", attn_selector_config)
         self.assertEqual(result, "vllm_ascend.attention.attention_v1.AscendAttentionBackend")
+
+    def test_get_supported_vit_attn_backends(self):
+        self.assertEqual(
+            self.platform.get_supported_vit_attn_backends(),
+            [AttentionBackendEnum.FLASH_ATTN, AttentionBackendEnum.TORCH_SDPA],
+        )
+
+    def test_get_vit_attn_backend_uses_flash_for_npu_supported_dtype(self):
+        for dtype in (torch.float16, torch.bfloat16):
+            with self.subTest(dtype=dtype):
+                self.assertEqual(
+                    self.platform.get_vit_attn_backend(head_size=128, dtype=dtype),
+                    AttentionBackendEnum.FLASH_ATTN,
+                )
+
+    def test_get_vit_attn_backend_uses_sdpa_for_fp32(self):
+        self.assertEqual(
+            self.platform.get_vit_attn_backend(
+                head_size=128,
+                dtype=torch.float32,
+            ),
+            AttentionBackendEnum.TORCH_SDPA,
+        )
+
+    def test_get_vit_attn_backend_honors_override(self):
+        self.assertEqual(
+            self.platform.get_vit_attn_backend(
+                head_size=128,
+                dtype=torch.float16,
+                backend=AttentionBackendEnum.TORCH_SDPA,
+            ),
+            AttentionBackendEnum.TORCH_SDPA,
+        )
+
+    def test_fix_incompatible_config_preserves_mm_encoder_attn_backend(self):
+        multimodal_config = SimpleNamespace(mm_encoder_attn_backend=AttentionBackendEnum.TORCH_SDPA)
+        vllm_config = SimpleNamespace(
+            model_config=SimpleNamespace(
+                disable_cascade_attn=False,
+                multimodal_config=multimodal_config,
+            ),
+            cache_config=None,
+            observability_config=None,
+            scheduler_config=None,
+            speculative_config=None,
+            kv_transfer_config=None,
+            attention_config=None,
+            parallel_config=None,
+        )
+
+        self.platform._fix_incompatible_config(vllm_config)
+
+        self.assertEqual(
+            multimodal_config.mm_encoder_attn_backend,
+            AttentionBackendEnum.TORCH_SDPA,
+        )
 
     def test_get_punica_wrapper(self):
         result = self.platform.get_punica_wrapper()

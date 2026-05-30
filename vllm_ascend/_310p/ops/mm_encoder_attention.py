@@ -20,9 +20,11 @@ import torch
 import torch.nn.functional as F
 import torch_npu
 from vllm.model_executor.layers.attention.mm_encoder_attention import MMEncoderAttention  # type: ignore
+from vllm.v1.attention.backends.registry import AttentionBackendEnum
 
 MIN_PAD_SIZE: int = 64  # min_size to pad weight
 MAX_PAD_SIZE: int = 128  # max_size to pad weight
+NPU_FLASH_ATTN_BACKENDS = {AttentionBackendEnum.FLASH_ATTN}
 
 # Use seq_lens CPU cache to avoid frequent d2h copy.
 # AscendMMEncoderAttention310 will copy the cu_seqlens from NPU to CPU in every
@@ -89,15 +91,13 @@ class AscendMMEncoderAttention310(MMEncoderAttention):
 
         return query, key, value
 
-    def forward_oot(
+    def _forward_npu_flash_attention(
         self,
         query: torch.Tensor,
         key: torch.Tensor,
         value: torch.Tensor,
         cu_seqlens: torch.Tensor | None = None,
-        max_seqlen: torch.Tensor | None = None,  # Only used for Flash Attention
-        sequence_lengths: torch.Tensor | None = None,
-    ):
+    ) -> torch.Tensor:
         bsz, q_len = query.size()[:2]
         kv_len = key.size(1)
         is_reshaped = query.dim() == 4
@@ -140,3 +140,20 @@ class AscendMMEncoderAttention310(MMEncoderAttention):
         else:
             context_layer = einops.rearrange(context_layer, "(b s) h d -> b s (h d)", b=bsz).contiguous()
         return context_layer
+
+    def forward_oot(
+        self,
+        query: torch.Tensor,
+        key: torch.Tensor,
+        value: torch.Tensor,
+        cu_seqlens: torch.Tensor | None = None,
+        max_seqlen: torch.Tensor | None = None,  # Only used for Flash Attention
+        sequence_lengths: torch.Tensor | None = None,
+    ) -> torch.Tensor:
+        if self.attn_backend == AttentionBackendEnum.TORCH_SDPA:
+            return self._forward_sdpa(query, key, value, cu_seqlens)
+
+        if self.attn_backend in NPU_FLASH_ATTN_BACKENDS:
+            return self._forward_npu_flash_attention(query, key, value, cu_seqlens)
+
+        raise ValueError(f"Unsupported multi-modal encoder attention backend for Ascend: {self.attn_backend}.")
