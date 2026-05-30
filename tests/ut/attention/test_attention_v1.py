@@ -44,12 +44,20 @@ class TestAscendAttentionBackend(TestBase):
         self.assertEqual(result, (2, 10, 20, 30, 40))
 
     def test_swap_blocks(self):
-        src_kv_cache = [torch.zeros((10, 20)), torch.zeros((10, 20))]
-        dst_kv_cache = [torch.zeros((10, 20)), torch.zeros((10, 20))]
-        src_to_dst = torch.tensor([[0, 1], [2, 3]])
-        AscendAttentionBackend.swap_blocks(src_kv_cache, dst_kv_cache, src_to_dst)
-        self.assertTrue(torch.all(dst_kv_cache[0][1] == src_kv_cache[0][0]))
-        self.assertTrue(torch.all(dst_kv_cache[1][3] == src_kv_cache[1][2]))
+        src_cache = torch.zeros((10, 20))
+        dst_cache = torch.zeros((10, 20))
+        block_mapping = torch.tensor([[0, 1], [2, 3]])
+        block_size_in_bytes = src_cache.element_size() * src_cache.stride(0)
+
+        with patch("torch.ops._C_ascend.swap_blocks", create=True) as mock_swap_blocks:
+            AscendAttentionBackend.swap_blocks(src_cache, dst_cache, block_size_in_bytes, block_mapping)
+
+        args, kwargs = mock_swap_blocks.call_args
+        self.assertIs(args[0], src_cache)
+        self.assertIs(args[1], dst_cache)
+        self.assertEqual(args[2], block_size_in_bytes)
+        self.assertIs(args[3], block_mapping)
+        self.assertEqual(kwargs, {})
 
     def test_copy_blocks(self):
         kv_caches = [torch.zeros((10, 20)), torch.zeros((10, 20))]

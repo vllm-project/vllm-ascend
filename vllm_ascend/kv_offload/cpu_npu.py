@@ -195,9 +195,9 @@ class CpuNpuOffloadingHandler(OffloadingHandler):
         all_dst = (dst_base_ptrs[:, None] + dst_block_ids[None, :] * bsz_col).ravel()
         all_sizes = np.broadcast_to(bsz_col, (num_sub_tensors, num_pairs)).ravel().copy()
 
-        batch_src = torch.from_numpy(all_src)
-        batch_dst = torch.from_numpy(all_dst)
-        batch_sizes = torch.from_numpy(all_sizes)
+        src_ptrs = torch.from_numpy(all_src)
+        dst_ptrs = torch.from_numpy(all_dst)
+        sizes = torch.from_numpy(all_sizes)
 
         start_event = self._get_event()
         end_event = self._get_event()
@@ -213,8 +213,7 @@ class CpuNpuOffloadingHandler(OffloadingHandler):
         with torch.npu.stream(stream):
             start_event.record(stream)
             if total > 0:
-                direction = 0 if not is_d2h else 1
-                torch.ops._C_ascend.swap_blocks_batch(batch_src, batch_dst, batch_sizes, direction)
+                torch.ops._C_ascend.swap_blocks_batch(src_ptrs, dst_ptrs, sizes)
             end_event.record(stream)
 
         transfers.append(
