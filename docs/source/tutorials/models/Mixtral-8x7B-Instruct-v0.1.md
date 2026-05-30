@@ -70,7 +70,7 @@ docker run --rm \
 
 Run the following script to execute online inference.
 
-```{code-block} bash
+``` bash
 
 export HCCL_OP_EXPANSION_MODE="AIV"
 export OMP_PROC_BIND=false
@@ -82,7 +82,7 @@ export PYTORCH_NPU_ALLOC_CONF=expandable_segments:True
 export VLLM_ASCEND_ENABLE_FLASHCOMM1=1
 ```
 
-```{code-block} bash
+``` bash
 
 vllm serve "mistralai/Mixtral-8x7B-Instruct-v0.1" \
   --tensor-parallel-size 4 \

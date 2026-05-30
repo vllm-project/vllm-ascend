@@ -632,7 +632,7 @@ vllm serve /root/.cache/modelscope/hub/models/vllm-ascend/GLM5-w8a8 \
 
 ### Prefill-Decode Disaggregation
 
-We'd like to show the deployment guide of `GLM-5` on multi-node environment with 1P1D for better performance.
+We'd like to show the deployment guide of `GLM-5` on a multi-node environment with 2 prefiller + 2 decoder nodes (2P2D) for better performance.
 
 Before you start, please
 
@@ -739,576 +739,109 @@ Before you start, please
 
     ```
 
-2. prepare the script `run_dp_template.sh` on each node.
+On each node, create the `run_dp_template.sh` script. The environment variables and `vllm serve` command for every node are generated from the test configuration [`GLM5_1-W8A8-EP-external.yaml`](https://github.com/vllm-project/vllm-ascend/blob/main/tests/e2e/nightly/multi_node/external_dp/config/GLM5_1-W8A8-EP-external.yaml), so this guide always matches what CI runs. To support a longer context window on the prefill stage, add `"layer_sharding": ["q_b_proj"]` to `--additional-config` on each prefill node.
 
-    To support a 200k context window on the stage of prefill, the parameter `"layer_sharding": ["q_b_proj"]` needs to be added to `--additional_config` on each prefill node.
-    1. Prefill node 0
+#### Prefill node 0
 
-        ```shell
-        nic_name="xxxx" # change to your own nic name
-        local_ip="xxxx" # change to your own ip
+```{model-code}
+:block_name: glm5_pd_prefill_node0
+:converter_tag: external_dp_template
+:test_case_path: tests/e2e/nightly/multi_node/external_dp/config/GLM5_1-W8A8-EP-external.yaml
+:host_index: 0
 
-        export HCCL_OP_EXPANSION_MODE="AIV"
+nic_name="xxxx" # change to your own nic name
+local_ip="xxxx" # change to your own ip
 
-        export HCCL_IF_IP=$local_ip
-        export GLOO_SOCKET_IFNAME=$nic_name
-        export TP_SOCKET_IFNAME=$nic_name
-        export HCCL_SOCKET_IFNAME=$nic_name
+export HCCL_IF_IP=$local_ip
+export GLOO_SOCKET_IFNAME=$nic_name
+export TP_SOCKET_IFNAME=$nic_name
+export HCCL_SOCKET_IFNAME=$nic_name
+export LD_LIBRARY_PATH=$LD_LIBRARY_PATH:/usr/local/lib
 
-        export OMP_PROC_BIND=false
-        export OMP_NUM_THREADS=1
-        export PYTORCH_NPU_ALLOC_CONF=expandable_segments:True
-        export HCCL_BUFFSIZE=256
+{{ generated }}
+```
 
-        export ASCEND_AGGREGATE_ENABLE=1
-        export ASCEND_TRANSPORT_PRINT=1
-        export ACL_OP_INIT_MODE=1
-        export ASCEND_A3_ENABLE=1
-        # Timeout (in seconds) for automatically releasing the prefiller’s KV cache for a particular request.
-        export VLLM_MOONCAKE_ABORT_REQUEST_TIMEOUT=480
+#### Prefill node 1
 
-        export ASCEND_RT_VISIBLE_DEVICES=$1
-        export VLLM_ASCEND_ENABLE_FLASHCOMM1=1
-          
-        export VLLM_ASCEND_ENABLE_FUSED_MC2=1
-        export LD_LIBRARY_PATH=$LD_LIBRARY_PATH:/usr/local/lib
+```{model-code}
+:block_name: glm5_pd_prefill_node1
+:converter_tag: external_dp_template
+:test_case_path: tests/e2e/nightly/multi_node/external_dp/config/GLM5_1-W8A8-EP-external.yaml
+:host_index: 1
 
-        vllm serve /root/.cache/glm5-w8a8 \
-            --host 0.0.0.0 \
-            --port $2 \
-            --data-parallel-size $3 \
-            --data-parallel-rank $4 \
-            --data-parallel-address $5 \
-            --data-parallel-rpc-port $6 \
-            --tensor-parallel-size $7 \
-            --enable-expert-parallel \
-            --speculative-config '{"num_speculative_tokens": 3, "method":"deepseek_mtp"}' \
-            --profiler-config \
-            '{"profiler": "torch",
-            "torch_profiler_dir": "./vllm_profile",
-            "torch_profiler_with_stack": false}' \
-            --seed 1024 \
-            --served-model-name glm-5 \
-            --max-model-len 131072 \
-            --additional-config '{"fuse_muls_add": true, "multistream_overlap_shared_expert": true, "recompute_scheduler_enable": true, "ascend_compilation_config": {"enable_npugraph_ex": true}}' \
-            --max-num-batched-tokens 4096 \
-            --trust-remote-code \
-            --max-num-seqs 64 \
-            --enable-chunked-prefill \
-            --quantization ascend \
-            --gpu-memory-utilization 0.95 \
-            --enforce-eager \
-            --enable-auto-tool-choice \
-            --tool-call-parser glm47 \
-            --reasoning-parser glm45 \
-            --kv-transfer-config \
-            '{"kv_connector": "MooncakeConnectorV1",
-            "kv_role": "kv_producer",
-            "kv_port": "30000",
-            "engine_id": "0",
-            "kv_connector_extra_config": {
-                        "use_ascend_direct": true,
-                        "prefill": {
-                                "dp_size": 2,
-                                "tp_size": 16
-                        },
-                        "decode": {
-                                "dp_size": 16,
-                                "tp_size": 4
-                        }
-                }
-            }'
+nic_name="xxxx" # change to your own nic name
+local_ip="xxxx" # change to your own ip
 
-        ```
+export HCCL_IF_IP=$local_ip
+export GLOO_SOCKET_IFNAME=$nic_name
+export TP_SOCKET_IFNAME=$nic_name
+export HCCL_SOCKET_IFNAME=$nic_name
+export LD_LIBRARY_PATH=$LD_LIBRARY_PATH:/usr/local/lib
 
-    2. Prefill node 1
+{{ generated }}
+```
 
-        ```shell
-        nic_name="xxxx" # change to your own nic name
-        local_ip="xxxx" # change to your own ip
+#### Decode node 0
 
-        export HCCL_OP_EXPANSION_MODE="AIV"
+```{model-code}
+:block_name: glm5_pd_decode_node0
+:converter_tag: external_dp_template
+:test_case_path: tests/e2e/nightly/multi_node/external_dp/config/GLM5_1-W8A8-EP-external.yaml
+:host_index: 2
 
-        export HCCL_IF_IP=$local_ip
-        export GLOO_SOCKET_IFNAME=$nic_name
-        export TP_SOCKET_IFNAME=$nic_name
-        export HCCL_SOCKET_IFNAME=$nic_name
+nic_name="xxxx" # change to your own nic name
+local_ip="xxxx" # change to your own ip
 
-        export OMP_PROC_BIND=false
-        export OMP_NUM_THREADS=1
-        export PYTORCH_NPU_ALLOC_CONF=expandable_segments:True
-        export HCCL_BUFFSIZE=256
+export HCCL_IF_IP=$local_ip
+export GLOO_SOCKET_IFNAME=$nic_name
+export TP_SOCKET_IFNAME=$nic_name
+export HCCL_SOCKET_IFNAME=$nic_name
+export LD_LIBRARY_PATH=$LD_LIBRARY_PATH:/usr/local/lib
 
-        export ASCEND_AGGREGATE_ENABLE=1
-        export ASCEND_TRANSPORT_PRINT=1
-        export ACL_OP_INIT_MODE=1
-        export ASCEND_A3_ENABLE=1
-        # Timeout (in seconds) for automatically releasing the prefiller’s KV cache for a particular request.
-        export VLLM_MOONCAKE_ABORT_REQUEST_TIMEOUT=480
+{{ generated }}
+```
 
-        export ASCEND_RT_VISIBLE_DEVICES=$1
-        export PYTORCH_NPU_ALLOC_CONF=expandable_segments:True
+#### Decode node 1
 
-        export VLLM_ASCEND_ENABLE_FLASHCOMM1=1
-       
-        export VLLM_ASCEND_ENABLE_FUSED_MC2=1
-        export LD_LIBRARY_PATH=$LD_LIBRARY_PATH:/usr/local/lib
+```{model-code}
+:block_name: glm5_pd_decode_node1
+:converter_tag: external_dp_template
+:test_case_path: tests/e2e/nightly/multi_node/external_dp/config/GLM5_1-W8A8-EP-external.yaml
+:host_index: 3
 
-        vllm serve /root/.cache/glm5-w8a8 \
-            --host 0.0.0.0 \
-            --port $2 \
-            --data-parallel-size $3 \
-            --data-parallel-rank $4 \
-            --data-parallel-address $5 \
-            --data-parallel-rpc-port $6 \
-            --tensor-parallel-size $7 \
-            --enable-expert-parallel \
-            --speculative-config '{"num_speculative_tokens": 3, "method":"deepseek_mtp"}' \
-            --profiler-config \
-            '{"profiler": "torch",
-            "torch_profiler_dir": "./vllm_profile",
-            "torch_profiler_with_stack": false}' \
-            --seed 1024 \
-            --served-model-name glm-5 \
-            --max-model-len 131072 \
-            --additional-config '{"fuse_muls_add": true, "multistream_overlap_shared_expert": true, "recompute_scheduler_enable": true, "ascend_compilation_config": {"enable_npugraph_ex": true}}' \
-            --max-num-batched-tokens 4096 \
-            --trust-remote-code \
-            --max-num-seqs 64 \
-            --enable-chunked-prefill \
-            --gpu-memory-utilization 0.95 \
-            --quantization ascend \
-            --enforce-eager \
-            --enable-auto-tool-choice \
-            --tool-call-parser glm47 \
-            --reasoning-parser glm45 \
-            --kv-transfer-config \
-            '{"kv_connector": "MooncakeConnectorV1",
-            "kv_role": "kv_producer",
-            "kv_port": "30000",
-            "engine_id": "0",
-            "kv_connector_extra_config": {
-                        "use_ascend_direct": true,
-                        "prefill": {
-                                "dp_size": 2,
-                                "tp_size": 16
-                        },
-                        "decode": {
-                                "dp_size": 16,
-                                "tp_size": 4
-                        }
-                }
-            }'
-        ```
+nic_name="xxxx" # change to your own nic name
+local_ip="xxxx" # change to your own ip
 
-    3. Decode node 0
+export HCCL_IF_IP=$local_ip
+export GLOO_SOCKET_IFNAME=$nic_name
+export TP_SOCKET_IFNAME=$nic_name
+export HCCL_SOCKET_IFNAME=$nic_name
+export LD_LIBRARY_PATH=$LD_LIBRARY_PATH:/usr/local/lib
 
-        ```shell
-        nic_name="xxxx" # change to your own nic name
-        local_ip="xxxx" # change to your own ip
-    
-        export HCCL_OP_EXPANSION_MODE="AIV"
-    
-        export HCCL_IF_IP=$local_ip
-        export GLOO_SOCKET_IFNAME=$nic_name
-        export TP_SOCKET_IFNAME=$nic_name
-        export HCCL_SOCKET_IFNAME=$nic_name
-    
-        #Mooncake
-        export OMP_PROC_BIND=false
-        export OMP_NUM_THREADS=1
-    
-        export PYTORCH_NPU_ALLOC_CONF=expandable_segments:True
-        export HCCL_BUFFSIZE=256
-    
-    
-        export ASCEND_AGGREGATE_ENABLE=1
-        export ASCEND_TRANSPORT_PRINT=1
-        export ACL_OP_INIT_MODE=1
-        export ASCEND_A3_ENABLE=1
-        # Timeout (in seconds) for automatically releasing the prefiller’s KV cache for a particular request.
-        export VLLM_MOONCAKE_ABORT_REQUEST_TIMEOUT=480
-    
-        export TASK_QUEUE_ENABLE=1
-    
-        export ASCEND_RT_VISIBLE_DEVICES=$1
-          
-        export VLLM_ASCEND_ENABLE_FUSED_MC2=1
-        export VLLM_ASCEND_ENABLE_MLAPO=1
-        export LD_LIBRARY_PATH=$LD_LIBRARY_PATH:/usr/local/lib
-    
-        vllm serve /root/.cache/glm5-w8a8 \
-            --host 0.0.0.0 \
-            --port $2 \
-            --data-parallel-size $3 \
-            --data-parallel-rank $4 \
-            --data-parallel-address $5 \
-            --data-parallel-rpc-port $6 \
-            --tensor-parallel-size $7 \
-            --enable-expert-parallel \
-            --speculative-config '{"num_speculative_tokens": 3,  "method":"deepseek_mtp"}' \
-            --profiler-config \
-            '{"profiler": "torch",
-            "torch_profiler_dir": "./vllm_profile",
-            "torch_profiler_with_stack": false}' \
-            --seed 1024 \
-            --served-model-name glm-5 \
-            --max-model-len 200000 \
-            --max-num-batched-tokens 32 \
-            --compilation-config '{"cudagraph_mode":"FULL_DECODE_ONLY", "cudagraph_capture_sizes":[4, 8, 12, 16,20,24,28, 32]}' \
-            --additional-config '{"fuse_muls_add": true, "multistream_overlap_shared_expert": true, "recompute_scheduler_enable": true, "ascend_compilation_config": {"enable_npugraph_ex": true}}' \
-            --trust-remote-code \
-            --max-num-seqs 8 \
-            --gpu-memory-utilization 0.92 \
-            --quantization ascend \
-            --enable-auto-tool-choice \
-            --tool-call-parser glm47 \
-            --reasoning-parser glm45 \
-            --kv-transfer-config \
-            '{"kv_connector": "MooncakeConnectorV1",
-            "kv_role": "kv_consumer",
-            "kv_port": "30100",
-            "engine_id": "1",
-            "kv_connector_extra_config": {
-                        "use_ascend_direct": true,
-                        "prefill": {
-                                "dp_size": 2,
-                                "tp_size": 16
-                        },
-                        "decode": {
-                                "dp_size": 16,
-                                "tp_size": 4
-                        }
-                }
-            }'
-        ```
+{{ generated }}
+```
 
-    4. Decode node 1
+Once the preparation is done, start the server on each node (change the IP to your own). Run the command that matches the node you are on:
 
-         ```shell
-         nic_name="xxxx" # change to your own nic name
-         local_ip="xxxx" # change to your own ip
-            
-         export HCCL_OP_EXPANSION_MODE="AIV"
-            
-         export HCCL_IF_IP=$local_ip
-         export GLOO_SOCKET_IFNAME=$nic_name
-         export TP_SOCKET_IFNAME=$nic_name
-         export HCCL_SOCKET_IFNAME=$nic_name
-            
-         #Mooncake
-         export OMP_PROC_BIND=false
-         export OMP_NUM_THREADS=1
-            
-         export PYTORCH_NPU_ALLOC_CONF=expandable_segments:True
-         export HCCL_BUFFSIZE=256
-            
-         export ASCEND_AGGREGATE_ENABLE=1
-         export ASCEND_TRANSPORT_PRINT=1
-         export ACL_OP_INIT_MODE=1
-         export ASCEND_A3_ENABLE=1
-         # Timeout (in seconds) for automatically releasing the prefiller’s KV cache for a particular request.
-         export VLLM_MOONCAKE_ABORT_REQUEST_TIMEOUT=480
-            
-         export TASK_QUEUE_ENABLE=1
-            
-         export ASCEND_RT_VISIBLE_DEVICES=$1
-                     
-         export VLLM_ASCEND_ENABLE_FUSED_MC2=1
-         export VLLM_ASCEND_ENABLE_MLAPO=1
-         export LD_LIBRARY_PATH=$LD_LIBRARY_PATH:/usr/local/lib
-            
-         vllm serve /root/.cache/glm5-w8a8 \
-             --host 0.0.0.0 \
-             --port $2 \
-             --data-parallel-size $3 \
-             --data-parallel-rank $4 \
-             --data-parallel-address $5 \
-             --data-parallel-rpc-port $6 \
-             --tensor-parallel-size $7 \
-             --enable-expert-parallel \
-             --speculative-config '{"num_speculative_tokens": 3,  "method":"deepseek_mtp"}' \
-             --profiler-config \
-             '{"profiler": "torch",
-             "torch_profiler_dir": "./vllm_profile",
-             "torch_profiler_with_stack": false}' \
-             --seed 1024 \
-             --served-model-name glm-5 \
-             --max-model-len 200000 \
-             --max-num-batched-tokens 32 \
-             --compilation-config '{"cudagraph_mode":"FULL_DECODE_ONLY", "cudagraph_capture_sizes":[4, 8, 12, 16,20,24,28, 32]}' \
-             --additional-config '{"fuse_muls_add": true, "multistream_overlap_shared_expert": true, "recompute_scheduler_enable": true, "ascend_compilation_config": {"enable_npugraph_ex": true}}' \
-             --trust-remote-code \
-             --max-num-seqs 8 \
-             --gpu-memory-utilization 0.92 \
-             --quantization ascend \
-             --enable-auto-tool-choice \
-             --tool-call-parser glm47 \
-             --reasoning-parser glm45 \
-             --kv-transfer-config \
-             '{"kv_connector": "MooncakeConnectorV1",
-             "kv_role": "kv_consumer",
-             "kv_port": "30100",
-             "engine_id": "1",
-             "kv_connector_extra_config": {
-                         "use_ascend_direct": true,
-                         "prefill": {
-                                 "dp_size": 2,
-                                 "tp_size": 16
-                         },
-                         "decode": {
-                                 "dp_size": 16,
-                                 "tp_size": 4
-                         }
-                 }
-             }'
-         ```
-
-    5. Decode node 2
-
-         ```shell
-         nic_name="xxxx" # change to your own nic name
-         local_ip="xxxx" # change to your own ip
-            
-         export HCCL_OP_EXPANSION_MODE="AIV"
-            
-         export HCCL_IF_IP=$local_ip
-         export GLOO_SOCKET_IFNAME=$nic_name
-         export TP_SOCKET_IFNAME=$nic_name
-         export HCCL_SOCKET_IFNAME=$nic_name
-            
-         #Mooncake
-         export OMP_PROC_BIND=false
-         export OMP_NUM_THREADS=1
-            
-         export PYTORCH_NPU_ALLOC_CONF=expandable_segments:True
-         export HCCL_BUFFSIZE=256
-            
-         export ASCEND_AGGREGATE_ENABLE=1
-         export ASCEND_TRANSPORT_PRINT=1
-         export ACL_OP_INIT_MODE=1
-         export ASCEND_A3_ENABLE=1
-         # Timeout (in seconds) for automatically releasing the prefiller’s KV cache for a particular request.
-         export VLLM_MOONCAKE_ABORT_REQUEST_TIMEOUT=480
-            
-         export TASK_QUEUE_ENABLE=1
-            
-         export ASCEND_RT_VISIBLE_DEVICES=$1
-                     
-         export VLLM_ASCEND_ENABLE_FUSED_MC2=1
-         export VLLM_ASCEND_ENABLE_MLAPO=1
-         export LD_LIBRARY_PATH=$LD_LIBRARY_PATH:/usr/local/lib
-            
-         vllm serve /root/.cache/glm5-w8a8 \
-             --host 0.0.0.0 \
-             --port $2 \
-             --data-parallel-size $3 \
-             --data-parallel-rank $4 \
-             --data-parallel-address $5 \
-             --data-parallel-rpc-port $6 \
-             --tensor-parallel-size $7 \
-             --enable-expert-parallel \
-             --speculative-config '{"num_speculative_tokens": 3,  "method":"deepseek_mtp"}' \
-             --profiler-config \
-             '{"profiler": "torch",
-             "torch_profiler_dir": "./vllm_profile",
-             "torch_profiler_with_stack": false}' \
-             --seed 1024 \
-             --served-model-name glm-5 \
-             --max-model-len 200000 \
-             --max-num-batched-tokens 32 \
-             --compilation-config '{"cudagraph_mode":"FULL_DECODE_ONLY", "cudagraph_capture_sizes":[4, 8, 12, 16,20,24,28, 32]}' \
-             --additional-config '{"fuse_muls_add": true, "multistream_overlap_shared_expert": true, "recompute_scheduler_enable": true, "ascend_compilation_config": {"enable_npugraph_ex": true}}' \
-             --trust-remote-code \
-             --max-num-seqs 8 \
-             --gpu-memory-utilization 0.92 \
-             --quantization ascend \
-             --enable-auto-tool-choice \
-             --tool-call-parser glm47 \
-             --reasoning-parser glm45 \
-             --kv-transfer-config \
-             '{"kv_connector": "MooncakeConnectorV1",
-             "kv_role": "kv_consumer",
-             "kv_port": "30100",
-             "engine_id": "1",
-             "kv_connector_extra_config": {
-                         "use_ascend_direct": true,
-                         "prefill": {
-                                 "dp_size": 2,
-                                 "tp_size": 16
-                         },
-                         "decode": {
-                                 "dp_size": 16,
-                                 "tp_size": 4
-                         }
-                 }
-             }'
-         ```
-
-    6. Decode node 3
-
-         ```shell
-         nic_name="xxxx" # change to your own nic name
-         local_ip="xxxx" # change to your own ip
-            
-         export HCCL_OP_EXPANSION_MODE="AIV"
-            
-         export HCCL_IF_IP=$local_ip
-         export GLOO_SOCKET_IFNAME=$nic_name
-         export TP_SOCKET_IFNAME=$nic_name
-         export HCCL_SOCKET_IFNAME=$nic_name
-            
-         #Mooncake
-         export OMP_PROC_BIND=false
-         export OMP_NUM_THREADS=1
-            
-         export PYTORCH_NPU_ALLOC_CONF=expandable_segments:True
-         export HCCL_BUFFSIZE=256
-            
-         export ASCEND_AGGREGATE_ENABLE=1
-         export ASCEND_TRANSPORT_PRINT=1
-         export ACL_OP_INIT_MODE=1
-         export ASCEND_A3_ENABLE=1
-         # Timeout (in seconds) for automatically releasing the prefiller’s KV cache for a particular request.
-         export VLLM_MOONCAKE_ABORT_REQUEST_TIMEOUT=480
-            
-         export TASK_QUEUE_ENABLE=1
-            
-         export ASCEND_RT_VISIBLE_DEVICES=$1
-                     
-         export VLLM_ASCEND_ENABLE_FUSED_MC2=1
-         export VLLM_ASCEND_ENABLE_MLAPO=1
-         export LD_LIBRARY_PATH=$LD_LIBRARY_PATH:/usr/local/lib
-            
-         vllm serve /root/.cache/glm5-w8a8 \
-             --host 0.0.0.0 \
-             --port $2 \
-             --data-parallel-size $3 \
-             --data-parallel-rank $4 \
-             --data-parallel-address $5 \
-             --data-parallel-rpc-port $6 \
-             --tensor-parallel-size $7 \
-             --enable-expert-parallel \
-             --speculative-config '{"num_speculative_tokens": 3,  "method":"deepseek_mtp"}' \
-             --profiler-config \
-             '{"profiler": "torch",
-             "torch_profiler_dir": "./vllm_profile",
-             "torch_profiler_with_stack": false}' \
-             --seed 1024 \
-             --served-model-name glm-5 \
-             --max-model-len 200000 \
-             --max-num-batched-tokens 32 \
-             --compilation-config '{"cudagraph_mode":"FULL_DECODE_ONLY", "cudagraph_capture_sizes":[4, 8, 12, 16,20,24,28, 32]}' \
-             --additional-config '{"fuse_muls_add": true, "multistream_overlap_shared_expert": true, "recompute_scheduler_enable": true, "ascend_compilation_config": {"enable_npugraph_ex": true}}' \
-             --trust-remote-code \
-             --max-num-seqs 8 \
-             --gpu-memory-utilization 0.92 \
-             --quantization ascend \
-             --enable-auto-tool-choice \
-             --tool-call-parser glm47 \
-             --reasoning-parser glm45 \
-             --kv-transfer-config \
-             '{"kv_connector": "MooncakeConnectorV1",
-             "kv_role": "kv_consumer",
-             "kv_port": "30100",
-             "engine_id": "1",
-             "kv_connector_extra_config": {
-                         "use_ascend_direct": true,
-                         "prefill": {
-                                 "dp_size": 2,
-                                 "tp_size": 16
-                         },
-                         "decode": {
-                                 "dp_size": 16,
-                                 "tp_size": 4
-                         }
-                 }
-             }'
-         ```
-
-Once the preparation is done, you can start the server with the following command on each node:
-
-1. Prefill node 0
-
-    ```shell
-    # change ip to your own
-    python launch_online_dp.py --dp-size 2 --tp-size 16 --dp-size-local 1 --dp-rank-start 0 --dp-address $node_p0_ip --dp-rpc-port 10521 --vllm-start-port 6700
-    ```
-
-2. Prefill node 1
-
-    ```shell
-    # change ip to your own
-    python launch_online_dp.py --dp-size 2 --tp-size 16 --dp-size-local 1 --dp-rank-start 1 --dp-address $node_p0_ip --dp-rpc-port 10521 --vllm-start-port 6700
-    ```
-
-3. Decode node 0
-
-    ```shell
-    # change ip to your own
-    python launch_online_dp.py --dp-size 16 --tp-size 4 --dp-size-local 4 --dp-rank-start 0 --dp-address $node_d0_ip --dp-rpc-port 10523 --vllm-start-port 6721
-    ```
-
-4. Decode node 1
-
-    ```shell
-    # change ip to your own
-    python launch_online_dp.py --dp-size 16 --tp-size 4 --dp-size-local 4 --dp-rank-start 4 --dp-address $node_d0_ip --dp-rpc-port 10523 --vllm-start-port 6721
-    ```
-
-5. Decode node 2
-
-    ```shell
-    # change ip to your own
-    python launch_online_dp.py --dp-size 16 --tp-size 4 --dp-size-local 4 --dp-rank-start 8 --dp-address $node_d0_ip --dp-rpc-port 10523 --vllm-start-port 6721
-    ```
-
-6. Decode node 3
-
-    ```shell
-    # change ip to your own
-    python launch_online_dp.py --dp-size 16 --tp-size 4 --dp-size-local 4 --dp-rank-start 12 --dp-address $node_d0_ip --dp-rpc-port 10523 --vllm-start-port 6721
-    ```
+```{model-code}
+:block_name: glm5_pd_launch
+:converter_tag: external_dp_launch
+:test_case_path: tests/e2e/nightly/multi_node/external_dp/config/GLM5_1-W8A8-EP-external.yaml
+```
 
 ### Request Forwarding
 
 To set up request forwarding, run the following script on any machine. You can get the proxy program in the repository's examples: [load_balance_proxy_server_example.py](https://github.com/vllm-project/vllm-ascend/blob/main/examples/disaggregated_prefill_v1/load_balance_proxy_server_example.py)
 
-```shell
+```{model-code}
+:block_name: glm5_pd_proxy
+:converter_tag: external_dp_proxy
+:test_case_path: tests/e2e/nightly/multi_node/external_dp/config/GLM5_1-W8A8-EP-external.yaml
+
 unset http_proxy
 unset https_proxy
 
-python load_balance_proxy_server_example.py \
-    --port 8000 \
-    --host 0.0.0.0 \
-    --prefiller-hosts \
-       $node_p0_ip \
-       $node_p1_ip \
-    --prefiller-ports \
-       6700 \
-       6700 \
-    --decoder-hosts \
-      $node_d0_ip \
-      $node_d0_ip \
-      $node_d0_ip \
-      $node_d0_ip \
-      $node_d1_ip \
-      $node_d1_ip \
-      $node_d1_ip \
-      $node_d1_ip \
-      $node_d2_ip \
-      $node_d2_ip \
-      $node_d2_ip \
-      $node_d2_ip \
-      $node_d3_ip \
-      $node_d3_ip \
-      $node_d3_ip \
-      $node_d3_ip \
-    --decoder-ports \
-      6721 6722 6723 6724 \
-      6721 6722 6723 6724 \
-      6721 6722 6723 6724 \
-      6721 6722 6723 6724      
+{{ generated }}
 ```
 
 **Notice:**

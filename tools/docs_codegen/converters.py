@@ -12,9 +12,12 @@ from tools.docs_codegen.scanner import ModelCodeBlock
 from tools.docs_codegen.utils import (
     ScalarValue,
     parse_command_tokens,
+    render_cli_command,
     require_indexed_mapping,
+    require_mapping,
     require_non_empty_string,
     require_scalar_mapping,
+    substitute_template_positionals,
     trim_blank_edges,
 )
 from tools.docs_codegen.yaml_loader import LoadedYaml
@@ -40,7 +43,13 @@ class BaseConverter(ABC):
 
 def build_default_converters() -> dict[str, BaseConverter]:
     converters: dict[str, BaseConverter] = {}
-    for converter in (SingleNodeConverter(), MultiNodeConverter()):
+    for converter in (
+        SingleNodeConverter(),
+        MultiNodeConverter(),
+        ExternalDpTemplateConverter(),
+        ExternalDpLaunchConverter(),
+        ExternalDpProxyConverter(),
+    ):
         converters[converter.name] = converter
     return converters
 
@@ -177,7 +186,16 @@ def _format_export_value(value: ScalarValue) -> str:
 def _format_command_token(token: str) -> str:
     if not token:
         return '""'
-    if any(char.isspace() for char in token):
+    # Quote whitespace, embedded double quotes (JSON), and JSON-like containers
+    # so e.g. a space-free '--profiler-config {"a":"b"}' value is not mangled by
+    # the shell. Plain shell expansions like ``$SERVER_PORT`` / ``${NODE_0_IP}``
+    # start with ``$`` and are intentionally left unquoted.
+    needs_quote = (
+        any(char.isspace() for char in token)
+        or '"' in token
+        or (token[:1] in "{[" and token[-1:] in "}]")
+    )
+    if needs_quote:
         return shlex.quote(token)
     return token
 
@@ -262,3 +280,217 @@ class MultiNodeConverter(BaseConverter):
 
     def convert(self, loaded_yaml: LoadedYaml, *, block: ModelCodeBlock) -> GeneratedScript:
         return _convert_multi_node_host(loaded_yaml, block=block)
+
+
+# ============================================================================
+# External DP Converters
+#
+# These read the external-DP YAML schema directly (``model`` / ``routing`` /
+# ``config`` / ``templates``) used by
+# tests/e2e/nightly/multi_node/external_dp/config/*.yaml. They are tightly
+# coupled to that schema by design.
+# ============================================================================
+
+LAUNCH_ONLINE_DP_SCRIPT = "launch_online_dp.py"
+PROXY_SCRIPT = "load_balance_proxy_server_example.py"
+ROUTING_DISAGGREGATED_PREFILL = "disaggregated_prefill"
+
+# Mirror tests/e2e/nightly/multi_node/external_dp/scripts/external_dp_config.py
+# (proxy runs on node 0, port 1999); these are not part of the YAML.
+EXTERNAL_DP_PROXY_NODE_INDEX = 0
+EXTERNAL_DP_PROXY_PORT = 1999
+
+# Maps external-DP ``${VAR}`` template variables to the positional shell
+# parameters that ``launch_online_dp.py`` forwards to ``run_dp_template.sh``
+# (``$1=visible_devices`` ... ``$7=tp_size``). Used so generated template
+# snippets read like the hand-written ``run_dp_template.sh`` instead of leaking
+# raw ``${DP_SIZE}`` placeholders.
+RUN_DP_TEMPLATE_POSITIONALS: dict[str, str] = {
+    "VISIBLE_DEVICES": "$1",
+    "PORT": "$2",
+    "DP_SIZE": "$3",
+    "DP_RANK": "$4",
+    "DP_ADDRESS": "$5",
+    "DP_RPC_PORT": "$6",
+    "TP_SIZE": "$7",
+}
+
+# Maps each launch_online_dp.py flag to the config[] field that feeds it.
+LAUNCH_ARG_BY_FIELD: tuple[tuple[str, str], ...] = (
+    ("dp_size", "--dp-size"),
+    ("tp_size", "--tp-size"),
+    ("dp_size_local", "--dp-size-local"),
+    ("dp_rank_start", "--dp-rank-start"),
+    ("dp_address", "--dp-address"),
+    ("dp_rpc_port", "--dp-rpc-port"),
+    ("port_start", "--vllm-start-port"),
+)
+
+
+def _node_ip_placeholder(node_index: int) -> str:
+    return f"${{NODE_{node_index}_IP}}"
+
+
+def _require_node_list(yaml_root: object, *, block: ModelCodeBlock) -> list[dict]:
+    if not isinstance(yaml_root, dict):
+        raise make_docs_codegen_error(
+            f"YAML root must be a mapping, got {type(yaml_root).__name__}",
+            block=block,
+        )
+    config = yaml_root.get("config")
+    if not isinstance(config, list) or not config:
+        raise make_docs_codegen_error("YAML field 'config' must be a non-empty list", block=block)
+    return [require_mapping(node, field_name=f"config[{index}]", block=block) for index, node in enumerate(config)]
+
+
+def _require_node_field(node: Mapping[str, object], field: str, *, node_index: int, block: ModelCodeBlock) -> object:
+    if node.get(field) is None:
+        raise make_docs_codegen_error(
+            f"config[{node_index}] is missing required field '{field}'",
+            block=block,
+        )
+    return node[field]
+
+
+# ----------------------------------------------------------------------------
+# Template converter (per node): env exports + ``vllm serve`` command.
+# ----------------------------------------------------------------------------
+
+
+def _convert_external_dp_template(loaded_yaml: LoadedYaml, *, block: ModelCodeBlock) -> GeneratedScript:
+    template = require_indexed_mapping(
+        loaded_yaml.yaml_root,
+        collection_name="templates",
+        option_name="host_index",
+        field_name="template",
+        block=block,
+    )
+    model = require_non_empty_string(loaded_yaml.yaml_root.get("model"), field_name="model", block=block)
+
+    raw_envs = require_scalar_mapping(template.get("envs"), field_name="envs", block=block)
+    envs = {
+        key: (
+            substitute_template_positionals(value, positionals=RUN_DP_TEMPLATE_POSITIONALS)
+            if isinstance(value, str)
+            else value
+        )
+        for key, value in raw_envs.items()
+    }
+
+    raw_server_cmd = parse_command_tokens(
+        template.get("server_cmd_template"),
+        field_name="server_cmd_template",
+        block=block,
+    )
+    server_cmd = [
+        substitute_template_positionals(token, positionals=RUN_DP_TEMPLATE_POSITIONALS) for token in raw_server_cmd
+    ]
+
+    return _build_shell_script(envs, ["vllm", "serve", model, *server_cmd], block=block)
+
+
+class ExternalDpTemplateConverter(BaseConverter):
+    name = "external_dp_template"
+
+    def convert(self, loaded_yaml: LoadedYaml, *, block: ModelCodeBlock) -> GeneratedScript:
+        return _convert_external_dp_template(loaded_yaml, block=block)
+
+
+# ----------------------------------------------------------------------------
+# Launch converter (whole cluster): one ``python launch_online_dp.py`` line per
+# config node, single-line, separated by a blank line.
+# ----------------------------------------------------------------------------
+
+
+def _convert_external_dp_launch(loaded_yaml: LoadedYaml, *, block: ModelCodeBlock) -> GeneratedScript:
+    nodes = _require_node_list(loaded_yaml.yaml_root, block=block)
+    commands: list[str] = []
+    for node_index, node in enumerate(nodes):
+        options = [
+            (flag, [str(_require_node_field(node, field, node_index=node_index, block=block))])
+            for field, flag in LAUNCH_ARG_BY_FIELD
+        ]
+        commands.append(render_cli_command(["python", LAUNCH_ONLINE_DP_SCRIPT], options, multiline=False).rstrip())
+    return GeneratedScript(content="\n\n".join(commands) + "\n")
+
+
+class ExternalDpLaunchConverter(BaseConverter):
+    name = "external_dp_launch"
+
+    def convert(self, loaded_yaml: LoadedYaml, *, block: ModelCodeBlock) -> GeneratedScript:
+        return _convert_external_dp_launch(loaded_yaml, block=block)
+
+
+# ----------------------------------------------------------------------------
+# Proxy converter (whole cluster): the load-balance proxy launch command.
+# ----------------------------------------------------------------------------
+
+
+def _expand_proxy_group(
+    indices: object,
+    nodes: list[dict],
+    *,
+    group_name: str,
+    block: ModelCodeBlock,
+) -> tuple[list[str], list[str]]:
+    if not isinstance(indices, list) or not indices:
+        raise make_docs_codegen_error(
+            f"routing.groups.{group_name} must be a non-empty list",
+            block=block,
+        )
+    hosts: list[str] = []
+    ports: list[str] = []
+    for raw_index in indices:
+        node_index = int(raw_index)
+        if node_index < 0 or node_index >= len(nodes):
+            raise make_docs_codegen_error(
+                f"routing.groups.{group_name} index {node_index} is out of range for 'config' "
+                f"with {len(nodes)} items",
+                block=block,
+            )
+        node = nodes[node_index]
+        dp_size_local = int(_require_node_field(node, "dp_size_local", node_index=node_index, block=block))
+        port_start = int(_require_node_field(node, "port_start", node_index=node_index, block=block))
+        for local_rank in range(dp_size_local):
+            hosts.append(_node_ip_placeholder(node_index))
+            ports.append(str(port_start + local_rank))
+    return hosts, ports
+
+
+def _convert_external_dp_proxy(loaded_yaml: LoadedYaml, *, block: ModelCodeBlock) -> GeneratedScript:
+    nodes = _require_node_list(loaded_yaml.yaml_root, block=block)
+    routing = require_mapping(loaded_yaml.yaml_root.get("routing"), field_name="routing", block=block)
+
+    routing_type = routing.get("type")
+    if routing_type != ROUTING_DISAGGREGATED_PREFILL:
+        raise make_docs_codegen_error(
+            f"converter_tag 'external_dp_proxy' only supports routing.type "
+            f"'{ROUTING_DISAGGREGATED_PREFILL}', got {routing_type!r}",
+            block=block,
+        )
+
+    groups = require_mapping(routing.get("groups"), field_name="routing.groups", block=block)
+    prefiller_hosts, prefiller_ports = _expand_proxy_group(
+        groups.get("prefiller"), nodes, group_name="prefiller", block=block
+    )
+    decoder_hosts, decoder_ports = _expand_proxy_group(
+        groups.get("decoder"), nodes, group_name="decoder", block=block
+    )
+
+    options = [
+        ("--host", [_node_ip_placeholder(EXTERNAL_DP_PROXY_NODE_INDEX)]),
+        ("--port", [str(EXTERNAL_DP_PROXY_PORT)]),
+        ("--prefiller-hosts", prefiller_hosts),
+        ("--prefiller-ports", prefiller_ports),
+        ("--decoder-hosts", decoder_hosts),
+        ("--decoder-ports", decoder_ports),
+    ]
+    content = render_cli_command(["python", PROXY_SCRIPT], options, multiline=True, expand_values=True)
+    return GeneratedScript(content=content)
+
+
+class ExternalDpProxyConverter(BaseConverter):
+    name = "external_dp_proxy"
+
+    def convert(self, loaded_yaml: LoadedYaml, *, block: ModelCodeBlock) -> GeneratedScript:
+        return _convert_external_dp_proxy(loaded_yaml, block=block)

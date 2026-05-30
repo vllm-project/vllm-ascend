@@ -47,7 +47,7 @@ In addition, if you don't want to use the docker image as above, you can also bu
 
 ## Deployment
 
-```{code-block} bash
+``` bash
 
 vllm serve "Qwen/Qwen3-ASR-1.7B" \
   --tensor-parallel-size 1 \

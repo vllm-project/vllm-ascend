@@ -1,12 +1,17 @@
 from __future__ import annotations
 
 import shlex
-from collections.abc import Sequence
+from collections.abc import Mapping, Sequence
 from typing import Any, cast
+
+import regex as re
 
 from tools.docs_codegen.errors import make_docs_codegen_error
 
 ScalarValue = str | int | float | bool | None
+
+# Braced ``${VAR}`` template variables, mirroring runtime.py:TEMPLATE_VAR_RE.
+TEMPLATE_VAR_RE = re.compile(r"\$\{([A-Za-z_][A-Za-z0-9_]*)\}")
 
 
 def trim_blank_edges(lines: Sequence[str]) -> list[str]:
@@ -128,3 +133,57 @@ def parse_command_tokens(value: Any, *, field_name: str, block: Any) -> list[str
         f"converter field '{field_name}' must be a shell string or a flat token list",
         block=block,
     )
+
+
+def substitute_template_positionals(
+    value: str,
+    *,
+    positionals: Mapping[str, str],
+) -> str:
+    """Replace braced ``${VAR}`` template variables with positional shell params.
+
+    Only keys present in ``positionals`` are replaced; unknown braced variables
+    and unbraced references like ``$SERVER_PORT`` are left untouched.
+    """
+
+    def repl(match: re.Match[str]) -> str:
+        key = match.group(1)
+        return positionals.get(key, match.group(0))
+
+    return TEMPLATE_VAR_RE.sub(repl, value)
+
+
+def render_cli_command(
+    prefix: Sequence[str],
+    options: Sequence[tuple[str, Sequence[str]]],
+    *,
+    multiline: bool,
+    expand_values: bool = False,
+) -> str:
+    """Render a CLI command from a prefix and ``(flag, values)`` option groups.
+
+    Supports multi-value flags (e.g. ``--prefiller-hosts h1 h2``). With
+    ``multiline=False`` the whole command is rendered on one line. With
+    ``multiline=True`` each option starts on its own backslash-continued line;
+    when ``expand_values`` is also set, a multi-value flag is placed on its own
+    line followed by each value on its own indented line (single-value flags
+    stay inline). The returned string always ends with a newline.
+    """
+    prefix_str = " ".join(prefix)
+
+    if not multiline:
+        rendered = [" ".join([flag, *[str(value) for value in values]]) for flag, values in options]
+        return " ".join([prefix_str, *rendered]).rstrip() + "\n"
+
+    # Each entry is a logical line rendered without its trailing backslash.
+    entries: list[str] = [prefix_str]
+    for flag, values in options:
+        str_values = [str(value) for value in values]
+        if expand_values and len(str_values) > 1:
+            entries.append(f"  {flag}")
+            entries.extend(f"    {value}" for value in str_values)
+        else:
+            entries.append(f"  {' '.join([flag, *str_values])}")
+
+    lines = [entry + (" \\" if index < len(entries) - 1 else "") for index, entry in enumerate(entries)]
+    return "\n".join(lines) + "\n"
