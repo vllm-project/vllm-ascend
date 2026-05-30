@@ -970,6 +970,8 @@ class AscendSpecDecodeBaseProposer(SpecDecodeBaseProposer):
             )
 
         sample_hidden_states = last_hidden_states[token_indices_to_sample]
+        if lmhead_tp_enable() and num_indices < token_indices_to_sample.shape[0]:
+            token_indices_to_sample = token_indices_to_sample[:num_indices]
         draft_token_ids = self._draft_argmax(sample_hidden_states, num_indices)
 
         # Early exit if there is only one draft token to be generated.
@@ -1096,6 +1098,8 @@ class AscendSpecDecodeBaseProposer(SpecDecodeBaseProposer):
                 )
 
             sample_hidden_states = last_hidden_states[token_indices_to_sample]
+            if lmhead_tp_enable() and num_indices < token_indices_to_sample.shape[0]:
+                token_indices_to_sample = token_indices_to_sample[:num_indices]
             draft_token_ids = self._draft_argmax(sample_hidden_states, num_indices)
 
             # TODO(wenlong): get more than one token for tree attention
