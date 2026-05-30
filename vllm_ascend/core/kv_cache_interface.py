@@ -217,15 +217,13 @@ def register_ascend_kv_cache_specs() -> None:
     if MLAAttentionSpec not in registry_map or SlidingWindowMLASpec not in registry_map:
         return
 
-    KVCacheSpecRegistry.override(
+    KVCacheSpecRegistry.register(
         kvcache_spec_cls=AscendMLAAttentionSpec,
-        target_kv_cache_spec_cls=MLAAttentionSpec,
         manager_class=CompressAttentionManager,
         uniform_type_base_spec=FullAttentionSpec,
     )
-    KVCacheSpecRegistry.override(
+    KVCacheSpecRegistry.register(
         kvcache_spec_cls=AscendSlidingWindowMLASpec,
-        target_kv_cache_spec_cls=SlidingWindowMLASpec,
         manager_class=SlidingWindowManager,
         uniform_type_base_spec=SlidingWindowMLASpec,
     )
