@@ -345,7 +345,7 @@ class KVCacheStoreSendingThread(KVTransferThread):
                     )
                     stored_events.append(stored_event)
                     prev_key = new_block_hashes[index]
-                    logger.info("Added kv cache event '%s' to kv cache events queue", stored_event)
+                    logger.debug("Added kv cache event '%s' to kv cache events queue", stored_event)
 
             if self.kv_role == "kv_consumer":
                 keys, addrs, sizes = self._decode_adaptor_prefill_pp(
@@ -511,7 +511,7 @@ class KVCacheStoreLayerSendingThread(KVTransferThread):
             )
             stored_events.append(stored_event)
             prev_key = block_hash
-            logger.info("Added layerwise kv cache event '%s' to kv cache events queue", stored_event)
+            logger.debug("Added layerwise kv cache event '%s' to kv cache events queue", stored_event)
         return stored_events
 
     def add_request(  # type: ignore[override]
