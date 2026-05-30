@@ -295,6 +295,20 @@ The default workdir is `/workspace`, vLLM and vLLM Ascend code are placed in `/v
 
 ## Extra information
 
+### Deepseek-V4 Support
+
+vLLM-Ascend supports Deepseek-V4 models with sparse attention architecture. Key features include:
+
+- **Model Architecture**: Sparse attention mechanism optimized for long-context scenarios
+- **Supported Features**: W8A8 quantization, speculative decoding with MTP (Multi-Token Prediction), expert parallelism, PD disaggregation
+- **Hardware Requirements**: Atlas A2/A3 series
+
+For deployment guidance, refer to [DeepSeek-V3.2](tutorials/models/DeepSeek-V3.2.md) tutorial (Deepseek-V4 shares similar deployment patterns).
+
+:::{note}
+`DeepseekV4Config` is provided by vLLM's internal compatibility layer (`vllm.transformers_utils.configs.deepseek_v4`), not by HuggingFace transformers directly.
+:::
+
 ### Verify installation
 
 Create and run a simple inference test. The `example.py` can be like:
