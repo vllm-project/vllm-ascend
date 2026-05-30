@@ -164,6 +164,10 @@ __attribute__ ((visibility("default"))) void* my_malloc(ssize_t size, int device
   // allocate the aclrtDrvMemHandle
   aclrtDrvMemHandle* p_memHandle =
       (aclrtDrvMemHandle*)malloc(sizeof(aclrtDrvMemHandle));
+  if (p_memHandle == nullptr) {
+    throw std::runtime_error("my_malloc ERROR: failed to allocate aclrtDrvMemHandle (malloc returned NULL)." +
+                            std::string(" ") + __FILE__ + ":" + std::to_string(__LINE__));
+  }
 
   if (!g_python_malloc_callback) {
     throw std::runtime_error("my_malloc ERROR: g_python_malloc_callback not set." +
@@ -214,6 +218,9 @@ __attribute__ ((visibility("default"))) void my_free(void* ptr, ssize_t size, in
 
   if (!py_result || !PyTuple_Check(py_result) || PyTuple_Size(py_result) != 4) {
     PyErr_SetString(PyExc_TypeError, "Expected a tuple of size 4");
+    Py_XDECREF(py_result);
+    Py_XDECREF(py_ptr);
+    PyGILState_Release(gstate);
     return;
   }
 
@@ -223,9 +230,14 @@ __attribute__ ((visibility("default"))) void my_free(void* ptr, ssize_t size, in
   if (!PyArg_ParseTuple(py_result, "KKKK", &recv_device, &recv_size,
                         &recv_d_mem, &recv_p_memHandle)) {
     // PyArg_ParseTuple sets an error if it fails
+    Py_DECREF(py_result);
+    Py_XDECREF(py_ptr);
+    PyGILState_Release(gstate);
     return;
   }
 
+  Py_DECREF(py_result);
+  Py_XDECREF(py_ptr);
   PyGILState_Release(gstate);
 
   // recv_size == size
