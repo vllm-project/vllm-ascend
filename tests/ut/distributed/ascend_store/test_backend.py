@@ -92,11 +92,13 @@ class TestMooncakeStoreConfig(unittest.TestCase):
             os.unlink(path)
 
     def test_from_file_ssd_offload(self):
+        ssd_path = TestMooncakeStoreConfig._writable_ssd_path()
+        self.addCleanup(lambda: os.rmdir(ssd_path))
         config = {
             "metadata_server": "localhost:2379",
             "master_server_address": "host:8080",
             "enable_ssd_offload": True,
-            "ssd_offload_path": "/nvme/mooncake_offload",
+            "ssd_offload_path": ssd_path,
         }
         with tempfile.NamedTemporaryFile(mode="w", suffix=".json", delete=False) as f:
             json.dump(config, f)
@@ -106,7 +108,7 @@ class TestMooncakeStoreConfig(unittest.TestCase):
         try:
             cfg = MooncakeStoreConfig.from_file(path)
             self.assertTrue(cfg.enable_ssd_offload)
-            self.assertEqual(cfg.ssd_offload_path, "/nvme/mooncake_offload")
+            self.assertEqual(cfg.ssd_offload_path, ssd_path)
         finally:
             os.unlink(path)
 
@@ -140,6 +142,64 @@ class TestMooncakeStoreConfig(unittest.TestCase):
         finally:
             os.unlink(path)
 
+    def test_ssd_offload_requires_existing_path(self):
+        missing_path = os.path.join(
+            tempfile.gettempdir(),
+            "mooncake_ssd_missing_ut",
+        )
+        self.assertFalse(os.path.exists(missing_path))
+        with self.assertRaises(ValueError):
+            MooncakeStoreConfig(
+                metadata_server="localhost:2379",
+                global_segment_size=1024,
+                local_buffer_size=1024,
+                protocol="ascend",
+                device_name="",
+                master_server_address="host:8080",
+                enable_ssd_offload=True,
+                ssd_offload_path=missing_path,
+            )
+
+    def test_ssd_offload_requires_directory(self):
+        with tempfile.NamedTemporaryFile(delete=False) as temp_file:
+            file_path = temp_file.name
+        self.addCleanup(lambda: os.unlink(file_path))
+        with self.assertRaises(ValueError):
+            MooncakeStoreConfig(
+                metadata_server="localhost:2379",
+                global_segment_size=1024,
+                local_buffer_size=1024,
+                protocol="ascend",
+                device_name="",
+                master_server_address="host:8080",
+                enable_ssd_offload=True,
+                ssd_offload_path=file_path,
+            )
+
+    @patch(
+        "vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.backend."
+        "mooncake_backend.os.access",
+        return_value=False,
+    )
+    def test_ssd_offload_requires_writable(self, _mock_access):
+        ssd_path = TestMooncakeStoreConfig._writable_ssd_path()
+        self.addCleanup(lambda: os.rmdir(ssd_path))
+        with self.assertRaises(ValueError):
+            MooncakeStoreConfig(
+                metadata_server="localhost:2379",
+                global_segment_size=1024,
+                local_buffer_size=1024,
+                protocol="ascend",
+                device_name="",
+                master_server_address="host:8080",
+                enable_ssd_offload=True,
+                ssd_offload_path=ssd_path,
+            )
+
+    @staticmethod
+    def _writable_ssd_path() -> str:
+        return tempfile.mkdtemp(prefix="mooncake_ssd_ut_")
+
     @staticmethod
     def _base_config(**overrides) -> MooncakeStoreConfig:
         defaults = {
@@ -168,9 +228,11 @@ class TestMooncakeStoreConfig(unittest.TestCase):
         return_value=False,
     )
     def test_ssd_setup_kwargs_raises_on_old_mooncake(self, _mock_supports):
+        ssd_path = TestMooncakeStoreConfig._writable_ssd_path()
+        self.addCleanup(lambda: os.rmdir(ssd_path))
         cfg = TestMooncakeStoreConfig._base_config(
             enable_ssd_offload=True,
-            ssd_offload_path="/nvme/mooncake_offload",
+            ssd_offload_path=ssd_path,
         )
         with self.assertRaises(RuntimeError):
             _ssd_setup_kwargs(cfg)
@@ -181,9 +243,11 @@ class TestMooncakeStoreConfig(unittest.TestCase):
         return_value=True,
     )
     def test_ssd_setup_kwargs_when_supported(self, _mock_supports):
+        ssd_path = TestMooncakeStoreConfig._writable_ssd_path()
+        self.addCleanup(lambda: os.rmdir(ssd_path))
         cfg = TestMooncakeStoreConfig._base_config(
             enable_ssd_offload=True,
-            ssd_offload_path="/nvme/mooncake_offload",
+            ssd_offload_path=ssd_path,
         )
         self.assertEqual(
             _ssd_setup_kwargs(cfg),
