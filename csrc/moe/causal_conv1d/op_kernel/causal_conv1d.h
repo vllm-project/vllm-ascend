@@ -11,7 +11,6 @@
 
 /*!
  * \file causal_conv1d.h
- * \brief
  */
 
 #ifndef CAUSAL_CONV1D_H

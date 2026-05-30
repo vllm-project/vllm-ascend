@@ -244,15 +244,10 @@ elif [[ "$SOC_VERSION" =~ ^ascend950 ]]; then
         "swiglu_group_quant"
         "load_index_kv_cache"
         "indexer_compress_epilog_v2"
-<<<<<<< HEAD
-        "recurrent_gated_delta_rule"
-        "causal_conv1d"
-=======
         "causal_conv1d"
         "recurrent_gated_delta_rule"
         "chunk_fwd_o"
         "chunk_gated_delta_rule_fwd_h"
->>>>>>> 9d95731a (support gdn custom op for A5 2)
     )
 
     CUSTOM_OPS=$(IFS=';'; echo "${CUSTOM_OPS_ARRAY[*]}")
