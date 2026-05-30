@@ -55,13 +55,13 @@ GOLDEN = [
             29,
             285,
             304,
-            608,
+            6,
+            76,
             245,
             459,
             6946,
-            29,
         ],
-        "Hello, my name is <strong>Alessandro</strong> and I am a <strong>",
+        "Hello, my name is <strong>Alessandro</strong> and I'm a <strong",
     ),
     (
         [
