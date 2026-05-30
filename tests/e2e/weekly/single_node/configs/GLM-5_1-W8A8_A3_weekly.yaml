@@ -28,7 +28,6 @@ _server_cmd: &server_cmd
   - "--quantization"
   - "ascend"
   - "--enable-chunked-prefill"
-  - "--async-scheduling"
   - "--additional-config"
   - '{"enable_npugraph_ex": true,"fuse_muls_add":true,"multistream_overlap_shared_expert":true}'
   - "--compilation-config"

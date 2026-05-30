@@ -107,7 +107,6 @@ vllm serve vllm-ascend/DeepSeek-R1-W8A8 \
   --seed 1024 \
   --served-model-name deepseek_r1 \
   --enable-expert-parallel \
-  --async-scheduling \
   --max-num-seqs 16 \
   --max-model-len 16384 \
   --max-num-batched-tokens 4096 \
@@ -166,7 +165,6 @@ vllm serve vllm-ascend/DeepSeek-R1-W8A8 \
   --seed 1024 \
   --served-model-name deepseek_r1 \
   --enable-expert-parallel \
-  --async-scheduling \
   --max-num-seqs 16 \
   --max-model-len 16384 \
   --max-num-batched-tokens 4096 \
@@ -214,7 +212,6 @@ vllm serve vllm-ascend/DeepSeek-R1-W8A8 \
   --seed 1024 \
   --served-model-name deepseek_r1 \
   --enable-expert-parallel \
-  --async-scheduling \
   --max-num-seqs 16 \
   --max-model-len 16384 \
   --max-num-batched-tokens 4096 \

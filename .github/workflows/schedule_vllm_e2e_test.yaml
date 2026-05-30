@@ -184,9 +184,10 @@ jobs:
             run: |
               pip install uc-manager
               uv pip install -r requirements-dev.txt
+              uv pip install --force-reinstall --no-deps triton-ascend==3.2.1
               uv pip install -e .
               uv pip install tblib
-              uv pip install --force-reinstall --no-deps triton-ascend==3.2.1
+              
           - name: Run vllm-project/vllm test
             working-directory: ./vllm-empty
             env:
@@ -257,9 +258,10 @@ jobs:
             run: |
               pip install uc-manager
               uv pip install -r requirements-dev.txt
+              uv pip install --force-reinstall --no-deps triton-ascend==3.2.1
               uv pip install -e .
               uv pip install tblib
-              uv pip install --force-reinstall --no-deps triton-ascend==3.2.1
+
           - name: Run vllm-project/vllm test
             working-directory: ./vllm-empty
             env:
