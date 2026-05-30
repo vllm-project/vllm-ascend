@@ -131,6 +131,10 @@ class EMoonCakeStoreConnector(ECConnectorBase):
 
             try:
                 tensor_info = self.ec_store.get_tensor_info(mm_data.mm_hash + "_info")
+                if not isinstance(tensor_info, bytes):
+                    raise ValueError(f"tensor_info must be bytes, got {type(tensor_info)}")
+
+                tensor_shape, tensor_dtype = self.decoder.decode(tensor_info)
                 tensor_shape, tensor_dtype = self.decoder.decode(tensor_info)
                 tensor = torch.empty(tensor_shape, dtype=getattr(torch, tensor_dtype), device="npu")
                 tensor_bytes = tensor.element_size() * tensor.numel()
@@ -180,7 +184,10 @@ class EMoonCakeStoreConnector(ECConnectorBase):
         Returns:
             Bool indicate that media exists in cache or not
         """
-        return self.ec_store.exists([identifier])[0]
+
+        result=self.ec_store.exists([identifier])
+
+        return bool(result[0]) if result else False
 
     def update_state_after_alloc(
         self,
