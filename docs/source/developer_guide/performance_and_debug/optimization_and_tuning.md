@@ -84,7 +84,7 @@ wget https://repo.oepkgs.net/ascend/pytorch/vllm/lib/libssl.so.1.1
 wget https://repo.oepkgs.net/ascend/pytorch/vllm/python/py311_bisheng.tar.gz
 
 # Configure python and pip
-# TODO need py312_bisheng.tar.gz
+# TODO after py312_bisheng.tar.gz update
 cp ./*.so* /usr/local/lib
 tar -zxvf ./py311_bisheng.tar.gz -C /usr/local/
 mv  /usr/local/py311_bisheng/  /usr/local/python
