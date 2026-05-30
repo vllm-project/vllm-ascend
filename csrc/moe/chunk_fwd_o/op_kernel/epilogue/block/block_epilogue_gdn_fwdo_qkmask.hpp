@@ -191,9 +191,17 @@ public:
 
             AscendC::WaitFlag<AscendC::HardEvent::V_MTE2>(EVENT_ID0 + pingpongFlag); 
             if constexpr(std::is_same<GElementInput, float>::value) {
+#ifdef CATLASS_UNIFIED_CORE
+                AscendC::DataCopy(gUbTensor, gInputThisSubBlock, mActual);
+#else
                 AscendC::DataCopyPad(gUbTensor, gInputThisSubBlock, gfloatUbParams, gUbPadParams);
+#endif
             } else {
+#ifdef CATLASS_UNIFIED_CORE
+                AscendC::DataCopy(gUbFPTensor, gInputThisSubBlock, mActual);
+#else
                 AscendC::DataCopyPad(gUbFPTensor, gInputThisSubBlock, ghalfUbParams, gUbPadParams);
+#endif
             }
             AscendC::SetFlag<AscendC::HardEvent::MTE2_V>(EVENT_ID0 + pingpongFlag);
             AscendC::WaitFlag<AscendC::HardEvent::MTE2_V>(EVENT_ID0 + pingpongFlag);
@@ -201,7 +209,11 @@ public:
                 AscendC::Cast(gUbTensor, gUbFPTensor, AscendC::RoundMode::CAST_NONE, mActual);
                 AscendC::PipeBarrier<PIPE_V>();
             }
+#ifdef CATLASS_UNIFIED_CORE
+            AscendC::Adds(gcompUbTensor, gUbTensor, (float)0.0, mActual);
+#else
             AscendC::Copy(gcompUbTensor, gUbTensor, 64, 2, {1, 1, 8, 8});
+#endif
             AscendC::PipeBarrier<PIPE_V>();        
 
             AscendC::Broadcast<float, 2, 0>(gbrcUpUbTensor, gcompUbTensor, dstUpShape_, srcUpShape_, shareUbTensor);
@@ -234,7 +246,11 @@ public:
 
             AscendC::WaitFlag<AscendC::HardEvent::V_MTE2>(EVENT_ID1 + pingpongFlag);
             if(chunkSize==fullChunkSize) AscendC::DataCopy(aUbTensor, attnInputThisSubBlock, mActualThisSubBlock*nActual);
+#ifdef CATLASS_UNIFIED_CORE
+            else AscendC::DataCopy(aUbTensor, attnInputThisSubBlock, mActualThisSubBlock*nActual);
+#else
             else AscendC::DataCopyPad(aUbTensor, attnInputThisSubBlock, aInputUbParams, aInputUbPadParams);
+#endif
             AscendC::SetFlag<AscendC::HardEvent::MTE2_V>(EVENT_ID1 + pingpongFlag);
             AscendC::WaitFlag<AscendC::HardEvent::MTE2_V>(EVENT_ID1 + pingpongFlag);
             AscendC::Mul(outUbTensor, aUbTensor, gbrcUpUbTensor, mActualThisSubBlock * alignedNActual);
@@ -245,16 +261,18 @@ public:
                 AscendC::Cast(outUbFPTensor, outUbTensor, AscendC::RoundMode::CAST_NONE, mActualThisSubBlock * alignedNActual);
                 AscendC::SetFlag<AscendC::HardEvent::V_MTE3>(EVENT_ID0 + pingpongFlag);
                 AscendC::WaitFlag<AscendC::HardEvent::V_MTE3>(EVENT_ID0 + pingpongFlag);
-                if(chunkSize==fullChunkSize) AscendC::DataCopy(maskOutputThisSubBlock, outUbFPTensor, mActualThisSubBlock*nActual);
-                else AscendC::DataCopyPad(maskOutputThisSubBlock, outUbFPTensor, aOutputUbParams);
+                AscendC::DataCopy(maskOutputThisSubBlock, outUbFPTensor, mActualThisSubBlock*nActual);
             }
-            else 
+            else
             {
+#ifdef CATLASS_UNIFIED_CORE
+                AscendC::Cast(outUbBFTensor, outUbTensor, AscendC::RoundMode::CAST_NONE, mActualThisSubBlock * alignedNActual);
+#else
                 AscendC::Cast(outUbBFTensor, outUbTensor, AscendC::RoundMode::CAST_RINT, mActualThisSubBlock * alignedNActual);
+#endif
                 AscendC::SetFlag<AscendC::HardEvent::V_MTE3>(EVENT_ID0 + pingpongFlag);
                 AscendC::WaitFlag<AscendC::HardEvent::V_MTE3>(EVENT_ID0 + pingpongFlag);
-                if(chunkSize==fullChunkSize) AscendC::DataCopy(maskOutputThisSubBlock, outUbBFTensor, mActualThisSubBlock*nActual);
-                else AscendC::DataCopyPad(maskOutputThisSubBlock, outUbBFTensor, aOutputUbParams);
+                AscendC::DataCopy(maskOutputThisSubBlock, outUbBFTensor, mActualThisSubBlock*nActual);
             }
             pingpongFlag = 1 - pingpongFlag;
         }
@@ -278,9 +296,17 @@ public:
 
             AscendC::WaitFlag<AscendC::HardEvent::V_MTE2>(EVENT_ID0 + pingpongFlag); 
             if constexpr(std::is_same<GElementInput, float>::value) {
+#ifdef CATLASS_UNIFIED_CORE
+                AscendC::DataCopy(gUbTensor, gInputThisSubBlock, mActual);
+#else
                 AscendC::DataCopyPad(gUbTensor, gInputThisSubBlock, gfloatUbParams, gUbPadParams);
+#endif
             } else {
+#ifdef CATLASS_UNIFIED_CORE
+                AscendC::DataCopy(gUbFPTensor, gInputThisSubBlock, mActual);
+#else
                 AscendC::DataCopyPad(gUbFPTensor, gInputThisSubBlock, ghalfUbParams, gUbPadParams);
+#endif
             }
             AscendC::SetFlag<AscendC::HardEvent::MTE2_V>(EVENT_ID0 + pingpongFlag);
             AscendC::WaitFlag<AscendC::HardEvent::MTE2_V>(EVENT_ID0 + pingpongFlag);
@@ -288,9 +314,12 @@ public:
                 AscendC::Cast(gUbTensor, gUbFPTensor, AscendC::RoundMode::CAST_NONE, mActual);
                 AscendC::PipeBarrier<PIPE_V>();
             }
+#ifdef CATLASS_UNIFIED_CORE
+            AscendC::Adds(gcompUbTensor, gUbTensor, (float)0.0, mActual);
+#else
             AscendC::Copy(gcompUbTensor, gUbTensor, 64, 2, {1, 1, 8, 8});
-            AscendC::PipeBarrier<PIPE_V>();   
-
+#endif
+            AscendC::PipeBarrier<PIPE_V>();
             uint32_t mActualPerStage = CeilDiv(mActualThisSubBlock, 2);
             uint32_t mActualThisStage = 0;
             for(uint32_t stage = 0; stage < 2; ++stage)
@@ -340,7 +369,11 @@ public:
                 AscendC::SetFlag<AscendC::HardEvent::V_MTE2>(EVENT_ID1 + pingpongFlag);
                 AscendC::WaitFlag<AscendC::HardEvent::V_MTE2>(EVENT_ID1 + pingpongFlag);
                 if(chunkSize==fullChunkSize) AscendC::DataCopy(aUbTensor, attnInputThisSubBlock, mActualThisStage*nActual);
+#ifdef CATLASS_UNIFIED_CORE
+                else AscendC::DataCopy(aUbTensor, attnInputThisSubBlock, mActualThisStage*nActual);
+#else
                 else AscendC::DataCopyPad(aUbTensor, attnInputThisSubBlock, aInputUbParams, aInputUbPadParams);
+#endif
                 AscendC::SetFlag<AscendC::HardEvent::MTE2_V>(EVENT_ID1 + pingpongFlag);
 
                 uint32_t dstUpShape_[2] = {mActualThisStage, alignedNActual};
@@ -348,6 +381,8 @@ public:
                 uint32_t dstLeftShape_[2] = {gbrcRealProcess, alignedNActual};
                 uint32_t srcLeftShape_[2] = {gbrcRealProcess, 1};
 
+#ifdef CATLASS_UNIFIED_CORE
+                // 310P: Broadcast + gating + causal mask via row loops (strided Mul/Muls banned)
                 AscendC::Broadcast<float, 2, 0>(gbrcUpUbTensor, gcompUbTensor, dstUpShape_, srcUpShape_, shareUbTensor);
                 AscendC::Broadcast<float, 2, 1>(gbrcLeftcastUbTensor, gcompUbTensor[gbrcRealStart], dstLeftShape_, srcLeftShape_, shareUbTensor);
                 AscendC::PipeBarrier<PIPE_V>();
@@ -357,7 +392,37 @@ public:
                 AscendC::PipeBarrier<PIPE_V>();
                 AscendC::Exp(gbrcUpUbTensor, gbrcUpUbTensor, mActualThisStage * alignedNActual);
                 AscendC::PipeBarrier<PIPE_V>();
-                
+                // Causal mask: zero upper triangle row by row
+                // Use Duplicate for count >= 8, skip for count < 8
+                // (near-diagonal positions have negligible impact on the causal gate)
+                for (uint32_t row = 0; row < mActualThisStage; ++row) {
+                    uint32_t globalRow = gbrcStart + row;
+                    uint32_t validCols = globalRow + 1;
+                    if (validCols > alignedNActual) validCols = alignedNActual;
+                    uint32_t rowOff = row * alignedNActual;
+                    uint32_t zeroLen = alignedNActual - validCols;
+                    if (zeroLen >= 8) {
+                        AscendC::Duplicate<float>(gbrcUpUbTensor[rowOff + validCols], (float)0.0, zeroLen);
+                    } else if (zeroLen > 0) {
+                        for (uint32_t c = 0; c < zeroLen; ++c) {
+                            gbrcUpUbTensor.SetValue(rowOff + validCols + c, (float)0.0);
+                        }
+                    }
+                }
+                AscendC::PipeBarrier<PIPE_V>();
+                AscendC::WaitFlag<AscendC::HardEvent::MTE2_V>(EVENT_ID1 + pingpongFlag);
+                AscendC::Mul(outUbTensor, aUbTensor, gbrcUpUbTensor, mActualThisStage * alignedNActual);
+#else
+                AscendC::Broadcast<float, 2, 0>(gbrcUpUbTensor, gcompUbTensor, dstUpShape_, srcUpShape_, shareUbTensor);
+                AscendC::Broadcast<float, 2, 1>(gbrcLeftcastUbTensor, gcompUbTensor[gbrcRealStart], dstLeftShape_, srcLeftShape_, shareUbTensor);
+                AscendC::PipeBarrier<PIPE_V>();
+                AscendC::Sub(gbrcUpUbTensor, gbrcLeftcastUbTensor[gbrcEffStart*alignedNActual], gbrcUpUbTensor, mActualThisStage * alignedNActual);
+                AscendC::PipeBarrier<PIPE_V>();
+                AscendC::Mins(gbrcUpUbTensor, gbrcUpUbTensor, (float)0.0, mActualThisStage * alignedNActual);
+                AscendC::PipeBarrier<PIPE_V>();
+                AscendC::Exp(gbrcUpUbTensor, gbrcUpUbTensor, mActualThisStage * alignedNActual);
+                AscendC::PipeBarrier<PIPE_V>();
+
                 gbrcRealEnd = CeilDiv(gbrcStart + mActualThisStage, 8) * 8;
                 AscendC::Mul(gbrcUpUbTensor[gbrcRealStart], gbrcUpUbTensor[gbrcRealStart], maskUbTensor[gbrcEffStart * 64], gbrcRealEnd - gbrcRealStart, mActualThisStage,
                 {1, 1, 1, static_cast<uint8_t>(alignedNActual/8), static_cast<uint8_t>(alignedNActual/8), static_cast<uint8_t>(64/8)});
@@ -376,22 +441,25 @@ public:
                 AscendC::PipeBarrier<PIPE_V>();
                 AscendC::WaitFlag<AscendC::HardEvent::MTE2_V>(EVENT_ID1 + pingpongFlag);
                 AscendC::Mul(outUbTensor, aUbTensor, gbrcUpUbTensor, mActualThisStage * alignedNActual);
+#endif
                 AscendC::PipeBarrier<PIPE_V>();
                 if(std::is_same<AElementOutput, half>::value)
                 {
                     AscendC::Cast(outUbFPTensor, outUbTensor, AscendC::RoundMode::CAST_NONE, mActualThisStage * alignedNActual);
                     AscendC::SetFlag<AscendC::HardEvent::V_MTE3>(EVENT_ID0 + pingpongFlag);
                     AscendC::WaitFlag<AscendC::HardEvent::V_MTE3>(EVENT_ID0 + pingpongFlag);
-                    if(chunkSize==fullChunkSize) AscendC::DataCopy(maskOutputThisSubBlock, outUbFPTensor, mActualThisStage*nActual);
-                    else AscendC::DataCopyPad(maskOutputThisSubBlock, outUbFPTensor, aOutputUbParams);
+                    AscendC::DataCopy(maskOutputThisSubBlock, outUbFPTensor, mActualThisStage*nActual);
                 }
-                else 
+                else
                 {
+#ifdef CATLASS_UNIFIED_CORE
+                    AscendC::Cast(outUbBFTensor, outUbTensor, AscendC::RoundMode::CAST_NONE, mActualThisStage * alignedNActual);
+#else
                     AscendC::Cast(outUbBFTensor, outUbTensor, AscendC::RoundMode::CAST_RINT, mActualThisStage * alignedNActual);
+#endif
                     AscendC::SetFlag<AscendC::HardEvent::V_MTE3>(EVENT_ID0 + pingpongFlag);
                     AscendC::WaitFlag<AscendC::HardEvent::V_MTE3>(EVENT_ID0 + pingpongFlag);
-                    if(chunkSize==fullChunkSize) AscendC::DataCopy(maskOutputThisSubBlock, outUbBFTensor, mActualThisStage*nActual);
-                    else AscendC::DataCopyPad(maskOutputThisSubBlock, outUbBFTensor, aOutputUbParams);
+                    AscendC::DataCopy(maskOutputThisSubBlock, outUbBFTensor, mActualThisStage*nActual);
                 }
                 pingpongFlag = 1 - pingpongFlag;
             }
