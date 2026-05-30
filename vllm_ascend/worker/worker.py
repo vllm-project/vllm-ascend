@@ -257,6 +257,9 @@ class NPUWorker(WorkerBase):
         device = torch.device(f"npu:{self.local_rank}")
         torch.npu.set_device(device)
 
+        import json
+        import os
+
         # Import _inductor for graph mode execution with triton
         # This lazy import avoids torch_npu re-initialization in patch
         # Note that this should be imported after torch.npu.set_device
@@ -264,6 +267,7 @@ class NPUWorker(WorkerBase):
         from vllm.triton_utils import HAS_TRITON
         import os
         import json
+
 
         if HAS_TRITON:
             import torch_npu._inductor  # noqa: F401
