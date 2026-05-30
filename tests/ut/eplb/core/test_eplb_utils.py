@@ -8,7 +8,7 @@ from vllm.config import VllmConfig
 from vllm.model_executor.layers.fused_moe.config import FusedMoEConfig, FusedMoEParallelConfig
 
 from vllm_ascend.ascend_config import init_ascend_config
-from vllm_ascend.eplb.core.eplb_utils import init_eplb_config
+from vllm_ascend.eplb.core.eplb_utils import generate_log2phy_map, init_eplb_config
 # isort: on
 
 
@@ -63,6 +63,26 @@ class TestAscendConfig(unittest.TestCase):
         self.assertTrue(torch.equal(expert_map, gt_expert_map))
         self.assertTrue(torch.equal(log2phy, gt_log2phy))
         self.assertEqual(redundant_experts, 2)
+
+    def test_generate_log2phy_map_rotates_tail_tp_rank_with_tp_size(self):
+        global_expert_map = [
+            torch.tensor([0, -1], dtype=torch.int32),
+            torch.tensor([0, -1], dtype=torch.int32),
+            torch.tensor([0, -1], dtype=torch.int32),
+            torch.tensor([0, -1], dtype=torch.int32),
+            torch.tensor([-1, 0], dtype=torch.int32),
+            torch.tensor([-1, 0], dtype=torch.int32),
+            torch.tensor([-1, 0], dtype=torch.int32),
+            torch.tensor([-1, 0], dtype=torch.int32),
+        ]
+
+        fallback_tail_dp1 = generate_log2phy_map(global_expert_map, ep_rank=7)
+        rotated_tail_dp0 = generate_log2phy_map(global_expert_map, ep_rank=3, tp_size=4)
+        rotated_tail_dp1 = generate_log2phy_map(global_expert_map, ep_rank=7, tp_size=4)
+
+        self.assertTrue(torch.equal(fallback_tail_dp1, torch.tensor([3, 7], dtype=torch.int32)))
+        self.assertTrue(torch.equal(rotated_tail_dp0, torch.tensor([3, 4], dtype=torch.int32)))
+        self.assertTrue(torch.equal(rotated_tail_dp1, torch.tensor([0, 5], dtype=torch.int32)))
 
     def test_init_eplb_config_without_eplb(self):
         self.vllm_config.additional_config = {"refresh": True}
