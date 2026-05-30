@@ -614,9 +614,9 @@ class TestAscendC8AttentionBackendImplScales(TestBase):
         impl = self._make_impl(num_kv_heads, head_size)
         layer = self._make_layer(num_kv_heads, head_size)
         impl._prepare_c8_scales(layer, torch.device("cpu"))
-        self.assertEqual(layer._c8_k_aq_scale.shape, (1, num_kv_heads, 1, head_size))
-        self.assertEqual(layer._c8_v_aq_scale.shape, (1, num_kv_heads, 1, head_size))
-        self.assertEqual(layer._c8_k_aq_scale.dtype, self.original_dtype)
+        self.assertEqual(layer._c8_k_aq_scale_nz_bnsd.shape, (num_kv_heads, 1, head_size))
+        self.assertEqual(layer._c8_v_aq_scale_nz_bnsd.shape, (num_kv_heads, 1, head_size))
+        self.assertEqual(layer._c8_k_aq_scale_nz_bnsd.dtype, self.original_dtype)
 
     @patch("vllm_ascend.attention.attention_v1.get_tensor_model_parallel_rank", return_value=0)
     @patch("vllm_ascend.attention.attention_v1.get_tensor_model_parallel_world_size", return_value=1)
@@ -659,23 +659,31 @@ class TestAscendC8AttentionBackendImplScales(TestBase):
     @patch("vllm_ascend.attention.attention_v1.get_tensor_model_parallel_world_size", return_value=1)
     def test_dequant_paged_kv_to_dense_round_trip(self, mock_tp_size, mock_tp_rank):
         """With scale=1, offset=0: dequant(int8) == float(int8)."""
-        num_kv_heads, head_size = 2, 4
+        NZ_FMT_LAST_DIM = 32
+        num_kv_heads, head_size = 2, 32  # head_size must be divisible by NZ_FMT_LAST_DIM
         block_size = 32
         num_blocks = 2
-        H = num_kv_heads * head_size
+        nz_dim = head_size // NZ_FMT_LAST_DIM
         impl = self._make_impl(num_kv_heads, head_size)
+        impl.key_cache = torch.empty(num_blocks, block_size, num_kv_heads, head_size)
         layer = self._make_layer(num_kv_heads, head_size)
         impl._prepare_c8_scales(layer, torch.device("cpu"))
 
-        key_int8 = torch.randint(-10, 10, (num_blocks, block_size, H), dtype=torch.int8)
-        value_int8 = torch.randint(-10, 10, (num_blocks, block_size, H), dtype=torch.int8)
+        # NZ 5D format: (num_blocks, num_kv_heads, nz_dim, block_size, NZ_FMT_LAST_DIM)
+        key_int8 = torch.randint(
+            -10, 10, (num_blocks, num_kv_heads, nz_dim, block_size, NZ_FMT_LAST_DIM), dtype=torch.int8
+        )
+        value_int8 = torch.randint(
+            -10, 10, (num_blocks, num_kv_heads, nz_dim, block_size, NZ_FMT_LAST_DIM), dtype=torch.int8
+        )
         seq_lens = [32, 32]
         block_table = torch.tensor([[0], [1]], dtype=torch.long)
 
         dense_k, dense_v = impl._dequant_paged_kv_to_dense(
             key_int8, value_int8, block_table, seq_lens, torch.float32, layer
         )
-        expected_k = key_int8.view(-1, num_kv_heads, head_size).float()
+        # Convert NZ 5D to ND 3D for expected comparison
+        expected_k = key_int8.permute(0, 3, 1, 2, 4).contiguous().view(-1, num_kv_heads, head_size).float()
         self.assertEqual(dense_k.shape, (64, num_kv_heads, head_size))
         self.assertTrue(torch.allclose(dense_k, expected_k))
 
