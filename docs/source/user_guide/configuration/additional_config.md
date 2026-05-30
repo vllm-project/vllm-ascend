@@ -86,7 +86,6 @@ The following table lists additional configuration options available in vLLM Asc
 | `enable_kv_nz`                      | bool | `False` | Whether to enable KV cache NZ layout. This option only takes effects on models using MLA (e.g., DeepSeek).                                      |
 | `layer_sharding`                    | dict | `{}`    | Configuration options for Layer Sharding Linear. Layer Sharding can only be enabled in PD-disaggregated's P node. |
 | `enable_sparse_c8`                  | bool | `False` | Whether to enable KV cache C8 in DSA models (e.g., DeepSeekV3.2 and GLM5). Not supported on A5 devices now |
-| `enable_mc2_hierarchy_comm`         | bool | `False` | Enable dispatch/combine op inter-node communication by ROCE. |
 | `profiling_chunk_config`            | dict | `{}`    | Configuration options for dynamic chunked pipeline parallel. See [Dynamic Chunked Pipeline Parallel](../feature_guide/dynamic_chunk_pipeline_parallel.md) for details. |
 | `enable_balance_scheduling`         | bool | `False` | Whether to enable balance scheduling. Can also be configured via `VLLM_ASCEND_BALANCE_SCHEDULING` environment variable (deprecated). |
 | `enable_flashcomm1`                 | bool | `False` | Whether to enable FlashComm1 optimization. Can also be configured via `VLLM_ASCEND_ENABLE_FLASHCOMM1` environment variable (deprecated). |
@@ -100,6 +99,10 @@ The following table lists additional configuration options available in vLLM Asc
 | `enable_transpose_kv_cache_by_block`| bool | `True`  | Whether to enable transpose KV cache by block. Can also be configured via `VLLM_ASCEND_FUSION_OP_TRANSPOSE_KV_CACHE_BY_BLOCK` environment variable (deprecated). |
 
 The details of each configuration option are as follows:
+
+**MC2 hierarchical communication (Atlas A2)**
+
+On Atlas A2 (Ascend 910B), hierarchical MC2 dispatch/combine is enabled automatically for MoE models using the MC2 communication path. You do not need `HCCL_INTRA_PCIE_ENABLE` / `HCCL_INTRA_ROCE_ENABLE` environment variables or an `additional_config` switch. Fused MC2 (`VLLM_ASCEND_ENABLE_FUSED_MC2`) cannot be used together with hierarchical MC2 on A2.
 
 **xlite_graph_config**
 

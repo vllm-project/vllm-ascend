@@ -28,7 +28,6 @@ import torch_npu
 from vllm.config import get_current_vllm_config
 from vllm.distributed.parallel_state import get_ep_group
 
-from vllm_ascend.ascend_config import get_ascend_config
 from vllm_ascend.device.device_op import DeviceOperator
 from vllm_ascend.distributed.parallel_state import get_mc2_group
 from vllm_ascend.ops.fused_moe.comm_utils import async_all_to_all, gather_from_sequence_parallel_region
@@ -111,12 +110,7 @@ class TokenDispatcherWithMC2(MoETokenDispatcher[MoEMC2CombineMetadata]):
         self.enable_dispatch_v2 = hasattr(torch_npu, "npu_moe_distribute_dispatch_v2")
         self.need_extra_args = get_ascend_device_type() in [AscendDeviceType.A3, AscendDeviceType.A5]
         self.a5_need_extra_args = get_ascend_device_type() == AscendDeviceType.A5
-        # NOTE: When in A2, setting the environment variables HCCL_INTRA_PCIE_ENABLE=1 and
-        # HCCL_INTRA_ROCE_ENABLE=0 can reduce cross-machine communication traffic and significantly
-        # improve communication performance.
-        # When enable hierarchical communication, param `expert_scales` need to be passed in.
-        self.need_expert_scale = is_hierarchical_communication_enabled()
-
+        self.use_hierarchy_mc2 = is_hierarchical_communication_enabled()
         # Here we need to calculate the global_bs = max_bs_per_rank * ep_world_size to execute
         # dispatch & combine operators with different input num_tokens per rank.
         vllm_config = get_current_vllm_config()
@@ -140,10 +134,7 @@ class TokenDispatcherWithMC2(MoETokenDispatcher[MoEMC2CombineMetadata]):
         # use the real global_bs and do NOT pass mc2_mask.
         self.global_bs = _max_global_bs if should_skip_allreduce_across_dp_group(vllm_config) else 0
 
-        # NOTE: When enable_mc2_hierarchy_comm is true, we need pass in `comm_alg` to mc2 op.
-        self.need_comm_alg = get_ascend_config().enable_mc2_hierarchy_comm
-
-        if not self.enable_dispatch_v2 and self.need_comm_alg:
+        if self.use_hierarchy_mc2 and not self.enable_dispatch_v2:
             raise RuntimeError(
                 "PTA and CANN version is too old to support mc2 hierarchy comm, please upgrade your version."
             )
@@ -211,14 +202,19 @@ class TokenDispatcherWithMC2(MoETokenDispatcher[MoEMC2CombineMetadata]):
             ):
                 y_dtype = token_dispatch_input.quant.mxfp.act_quant_type
             stage1_kwargs.update({"tp_world_size": 1, "tp_rank_id": 0, "y_dtype": y_dtype})
-        if self.need_expert_scale or self.a5_need_extra_args:
+        if self.use_hierarchy_mc2:
+            stage1_kwargs.update(
+                {
+                    "expert_scales": topk_weights.to(torch.float32),
+                    "comm_alg": "hierarchy",
+                }
+            )
+        elif self.a5_need_extra_args:
             stage1_kwargs.update(
                 {
                     "expert_scales": topk_weights.to(torch.float32),
                 }
             )
-        if self.need_comm_alg:
-            stage1_kwargs.update({"comm_alg": "hierarchy"})
 
         kwargs_mc2.update(stage1_kwargs)
         return kwargs_mc2
@@ -321,7 +317,7 @@ class TokenDispatcherWithMC2(MoETokenDispatcher[MoEMC2CombineMetadata]):
                     "tp_rank_id": 0,
                 }
             )
-        if self.need_comm_alg:
+        if self.use_hierarchy_mc2:
             stage3_kwargs.update({"comm_alg": "hierarchy"})
 
         kwargs_mc2.update(stage3_kwargs)

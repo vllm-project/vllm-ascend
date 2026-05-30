@@ -23,7 +23,12 @@ from vllm.config import CompilationConfig, ModelConfig, ParallelConfig, VllmConf
 
 from tests.ut.base import TestBase
 from vllm_ascend import utils
-from vllm_ascend.utils import REGISTERED_ASCEND_OPS
+from vllm_ascend.utils import (
+    REGISTERED_ASCEND_OPS,
+    AscendDeviceType,
+    is_hierarchical_communication_enabled,
+    should_skip_allreduce_across_dp_group,
+)
 
 
 class TestUtils(TestBase):
@@ -406,3 +411,16 @@ class TestUtils(TestBase):
             result = utils.maybe_trans_nz(weight)
             self.assertIs(result, weight)
             assert_nz_cast(weight)
+
+    @mock.patch("vllm_ascend.utils.get_ascend_device_type", return_value=AscendDeviceType.A2)
+    def test_is_hierarchical_communication_enabled_only_on_a2(self, _mock_device_type):
+        self.assertTrue(is_hierarchical_communication_enabled())
+
+    @mock.patch("vllm_ascend.utils.get_ascend_device_type", return_value=AscendDeviceType.A3)
+    def test_is_hierarchical_communication_disabled_on_a3(self, _mock_device_type):
+        self.assertFalse(is_hierarchical_communication_enabled())
+
+    @mock.patch("vllm_ascend.utils.is_hierarchical_communication_enabled", return_value=True)
+    def test_should_skip_allreduce_returns_false_when_hierarchy_mc2_enabled(self, _mock_hierarchy):
+        vllm_config = mock.MagicMock()
+        self.assertFalse(should_skip_allreduce_across_dp_group(vllm_config))
