@@ -1019,7 +1019,7 @@ class AscendSFAImpl(MLAAttentionImpl):
                 sparse_mode=3,
             )
         else:
-            topk_indices = torch.ops._C_ascend.npu_lightning_indexer(
+            topk_indices, _ = torch.ops._C_ascend.npu_lightning_indexer(
                 query=q_li,
                 key=kv_cache[2],
                 weights=weights,
@@ -1060,7 +1060,7 @@ class AscendSFAImpl(MLAAttentionImpl):
         kv = kv_cache[0]
         key_rope = kv_cache[1]
 
-        attn_output = torch.ops._C_ascend.npu_sparse_flash_attention(
+        attn_output, _, _ = torch.ops._C_ascend.npu_sparse_flash_attention(
             query=ql_nope,
             key=kv,
             value=kv,
@@ -1075,6 +1075,7 @@ class AscendSFAImpl(MLAAttentionImpl):
             layout_query="TND",
             layout_kv="PA_BSND",
             sparse_mode=3,
+            attention_mode=2,
         )
         return attn_output
 
