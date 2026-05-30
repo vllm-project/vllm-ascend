@@ -39,7 +39,8 @@
         "Qwen3-Next-80B-A3B-Instruct",
         "Qwen3-Omni-30B-A3B-Instruct",
         "Hunyuan-A13B-Instruct",
-        "Mixtral-8x7B-Instruct-v0.1"
+        "Mixtral-8x7B-Instruct-v0.1",
+        "c4ai-command-r-v01"
       ]
     }
   ],
