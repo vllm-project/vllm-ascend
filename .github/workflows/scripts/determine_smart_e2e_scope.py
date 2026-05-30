@@ -205,13 +205,14 @@ def _resolve_npu_type_from_ast(node: ast.expr) -> RunnerDeviceType:
     raise ValueError(f"Cannot resolve npu_type from AST node: {ast.dump(node)}")
 
 
-def _extract_runner_key(node: ast.FunctionDef | ast.ClassDef) -> RunnerKey:
-    """Extract (num_npus, npu_type) from ``@npu_test`` on *node*.
+def _extract_runner_keys(node: ast.FunctionDef | ast.ClassDef) -> list[RunnerKey]:
+    """Extract one or more (num_npus, npu_type) keys from ``@npu_test``.
 
     Returns ``_DEFAULT_KEY`` when no ``@npu_test`` decorator is found.
-    Default values (``num_npus=1, npu_type=A2``) match
-    ``tests/ut/conftest.py::npu_test``.
+    Stacked ``@npu_test`` decorators route the same test node to each
+    declared runner group.
     """
+    keys: list[RunnerKey] = []
     for decorator in node.decorator_list:
         if not isinstance(decorator, ast.Call):
             continue
@@ -226,9 +227,9 @@ def _extract_runner_key(node: ast.FunctionDef | ast.ClassDef) -> RunnerKey:
                 num_npus = kw.value.value
             elif kw.arg == "npu_type":
                 npu_type = _resolve_npu_type_from_ast(kw.value)
-        return (num_npus, npu_type)
+        keys.append((num_npus, npu_type))
 
-    return _DEFAULT_KEY
+    return keys or [_DEFAULT_KEY]
 
 
 def _scan_test_file(filepath: str) -> dict[RunnerKey, list[str]]:
@@ -251,8 +252,9 @@ def _scan_test_file(filepath: str) -> dict[RunnerKey, list[str]]:
         is_test_func = isinstance(node, ast.FunctionDef) and node.name.startswith("test_")
         is_test_class = isinstance(node, ast.ClassDef) and node.name.startswith("Test")
         if is_test_func or is_test_class:
-            key = _extract_runner_key(node)
-            groups[key].append(f"{filepath}::{node.name}")
+            node_id = f"{filepath}::{node.name}"
+            for key in _extract_runner_keys(node):
+                groups[key].append(node_id)
 
     return dict(groups)
 
