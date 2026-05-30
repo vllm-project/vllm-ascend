@@ -175,10 +175,14 @@ class MooncakeStoreConfig:
             )
         if not os.path.isabs(self.ssd_offload_path):
             raise ValueError(f"ssd_offload_path must be an absolute path, got: {self.ssd_offload_path!r}")
-        if not os.path.isdir(self.ssd_offload_path):
+        if os.path.exists(self.ssd_offload_path):
+            if not os.path.isdir(self.ssd_offload_path):
+                raise ValueError(f"ssd_offload_path exists but is not a directory: {self.ssd_offload_path!r}")
+            if not os.access(self.ssd_offload_path, os.W_OK):
+                raise ValueError(f"ssd_offload_path is not writable: {self.ssd_offload_path!r}")
+        else:
             logger.warning(
-                "ssd_offload_path does not exist or is not a directory: %s. "
-                "Create it before starting (e.g. mkdir -p %s).",
+                "ssd_offload_path does not exist: %s. Create it before starting (e.g. mkdir -p %s).",
                 self.ssd_offload_path,
                 self.ssd_offload_path,
             )
