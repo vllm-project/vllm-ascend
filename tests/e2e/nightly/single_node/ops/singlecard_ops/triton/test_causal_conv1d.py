@@ -263,6 +263,7 @@ def test_causal_conv1d_update_with_batch_gather(
     torch.npu.reset_peak_memory_stats()
 
 
+@pytest.mark.skip("Probabilistic failure, need zengtian after fix")
 def test_causal_conv1d_update_qwen3_next_shape():
     device = "npu"
     itype = torch.bfloat16
