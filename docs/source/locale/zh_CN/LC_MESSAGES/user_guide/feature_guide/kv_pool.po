@@ -8,7 +8,7 @@ msgid ""
 msgstr ""
 "Project-Id-Version: vllm-ascend \n"
 "Report-Msgid-Bugs-To: \n"
-"POT-Creation-Date: 2026-05-19 04:27+0000\n"
+"POT-Creation-Date: 2026-05-28 04:29+0000\n"
 "PO-Revision-Date: 2026-01-22 16:55+0800\n"
 "Last-Translator: Gemini\n"
 "Language: zh_CN\n"
@@ -104,7 +104,7 @@ msgid "Prefill PP layer partition, needs to be set when Prefill node enables PP.
 msgstr "Prefill PP 层划分，当 Prefill 节点启用 PP 时需要设置。"
 
 #: ../../source/user_guide/feature_guide/kv_pool.md:17
-#: ../../source/user_guide/feature_guide/kv_pool.md:1174
+#: ../../source/user_guide/feature_guide/kv_pool.md:731
 msgid "Environment Variable Configuration"
 msgstr "环境变量配置"
 
@@ -120,7 +120,7 @@ msgid "Example of using Mooncake as a KV Pool backend"
 msgstr "使用 Mooncake 作为 KV 池后端的示例"
 
 #: ../../source/user_guide/feature_guide/kv_pool.md:27
-#: ../../source/user_guide/feature_guide/kv_pool.md:1101
+#: ../../source/user_guide/feature_guide/kv_pool.md:658
 msgid "Software:"
 msgstr "软件要求："
 
@@ -311,12 +311,12 @@ msgstr ""
 "`ASCEND_TRANSFER_TIMEOUT`。"
 
 #: ../../source/user_guide/feature_guide/kv_pool.md:132
-#: ../../source/user_guide/feature_guide/kv_pool.md:595
+#: ../../source/user_guide/feature_guide/kv_pool.md:450
 msgid "PD Disaggregation Scenario"
 msgstr "PD 分离（Prefill-Decode Disaggregation）场景"
 
 #: ../../source/user_guide/feature_guide/kv_pool.md:134
-#: ../../source/user_guide/feature_guide/kv_pool.md:597
+#: ../../source/user_guide/feature_guide/kv_pool.md:452
 msgid "1.Run `prefill` Node and `decode` Node"
 msgstr "1.运行 `prefill` 节点和 `decode` 节点"
 
@@ -332,8 +332,6 @@ msgstr ""
 "`AscendStoreConnector` 作为前缀缓存（prefix-cache）节点。"
 
 #: ../../source/user_guide/feature_guide/kv_pool.md:138
-#: ../../source/user_guide/feature_guide/kv_pool.md:603
-#: ../../source/user_guide/feature_guide/kv_pool.md:763
 msgid "`prefill` Node："
 msgstr "`prefill` 节点："
 
@@ -342,8 +340,6 @@ msgid "The content of the multi_producer.sh script:"
 msgstr "multi_producer.sh 脚本的内容："
 
 #: ../../source/user_guide/feature_guide/kv_pool.md:216
-#: ../../source/user_guide/feature_guide/kv_pool.md:682
-#: ../../source/user_guide/feature_guide/kv_pool.md:833
 msgid "`decode` Node："
 msgstr "`decode` 节点："
 
@@ -398,12 +394,11 @@ msgid "PD-Mixed Inference"
 msgstr "PD 混部推理"
 
 #: ../../source/user_guide/feature_guide/kv_pool.md:331
-#: ../../source/user_guide/feature_guide/kv_pool.md:908
+#: ../../source/user_guide/feature_guide/kv_pool.md:574
 msgid "1.Run Mixed Department Script"
 msgstr "1、运行混部脚本"
 
 #: ../../source/user_guide/feature_guide/kv_pool.md:337
-#: ../../source/user_guide/feature_guide/kv_pool.md:1048
 msgid "Content of pd_mix.sh:"
 msgstr "pd_mix.sh 的内容："
 
@@ -462,57 +457,19 @@ msgstr ""
 "**MemCache 依赖于 MemFabric。因此，必须先安装 MemFabric。在 MemFabric 安装完成后，再安装 "
 "Memcache。**"
 
-#: ../../source/user_guide/feature_guide/kv_pool.md:404
-msgid ""
-"**memfabric_hybrid**: "
-"<https://gitcode.com/Ascend/memfabric_hybrid/blob/master/doc/installation.md>"
-msgstr ""
-"**memfabric_hybrid**: "
-"<https://gitcode.com/Ascend/memfabric_hybrid/blob/master/doc/installation.md>"
-
-#: ../../source/user_guide/feature_guide/kv_pool.md:406
-msgid ""
-"**memcache**: "
-"<https://gitcode.com/Ascend/memcache/blob/master/doc/build.md>"
-msgstr ""
-"**memcache**: "
-"<https://gitcode.com/Ascend/memcache/blob/master/doc/build.md>"
-
-#: ../../source/user_guide/feature_guide/kv_pool.md:408
+#: ../../source/user_guide/feature_guide/kv_pool.md:409
 msgid "Configuring the memcache Config File"
 msgstr "配置 Memcache 配置文件"
 
-#: ../../source/user_guide/feature_guide/kv_pool.md:410
-msgid ""
-"config Path：/usr/local/memcache_hybrid/latest/config/ **Config file "
-"parameters "
-"description**：<https://gitcode.com/Ascend/memcache/blob/develop/doc/memcache_config.md>"
-msgstr ""
-"配置路径：/usr/local/memcache_hybrid/latest/config/ "
-"**配置文件参数说明**：<https://gitcode.com/Ascend/memcache/blob/develop/doc/memcache_config.md>"
-
-#: ../../source/user_guide/feature_guide/kv_pool.md:413
-msgid ""
-"Set TLS certificate configurations. If TLS is disabled, you do not need "
-"to upload a certificate. If TLS is enabled, you need to upload a "
-"certificate."
-msgstr "设置 TLS 证书配置。如果禁用 TLS，则无需上传证书。如果启用 TLS，则需要上传证书。"
-
-#: ../../source/user_guide/feature_guide/kv_pool.md:426
-msgid ""
-"You are advised to copy mmc-local.conf and mmc-meta.conf to your own path"
-" and modify them, and set the MMC_META_CONFIG_PATH environment variable "
-"to the path of your own mmc-meta.conf file."
-msgstr ""
-"建议将 mmc-local.conf 和 mmc-meta.conf 复制到您自己的路径并进行修改，并将 MMC_META_CONFIG_PATH"
-" 环境变量设置为您自己的 mmc-meta.conf 文件的路径。"
-
-#: ../../source/user_guide/feature_guide/kv_pool.md:428
+#: ../../source/user_guide/feature_guide/kv_pool.md:411
 msgid "**mmc-meta.conf：**"
 msgstr "**mmc-meta.conf：**"
 
-#: ../../source/user_guide/feature_guide/kv_pool.md:477
-#: ../../source/user_guide/feature_guide/kv_pool.md:551
+#: ../../source/user_guide/feature_guide/kv_pool.md:419
+msgid "**mmc-local.conf：**"
+msgstr "**mmc-local.conf：**"
+
+#: ../../source/user_guide/feature_guide/kv_pool.md:430
 msgid "**Key Focuses：**"
 msgstr "**关键要点：**"
 
@@ -525,26 +482,6 @@ msgid ""
 "Configure the IP address and port number of the master node. The IP "
 "address and port number of the P node and D node can be the same."
 msgstr "配置主节点的 IP 地址和端口号。P 节点和 D 节点的 IP 地址和端口号可以相同。"
-
-#: ../../source/user_guide/feature_guide/kv_pool.md
-msgid "`ock.mmc.meta_service.config_store_url`"
-msgstr "`ock.mmc.meta_service.config_store_url`"
-
-#: ../../source/user_guide/feature_guide/kv_pool.md
-msgid "`ock.mmc.meta.ha.enable`"
-msgstr "`ock.mmc.meta.ha.enable`"
-
-#: ../../source/user_guide/feature_guide/kv_pool.md
-msgid "Set to `false` to disable TLS authentication modification."
-msgstr "设置为 `false` 以禁用 TLS 认证修改。"
-
-#: ../../source/user_guide/feature_guide/kv_pool.md
-msgid "`ock.mmc.config_store.tls.enable`"
-msgstr "`ock.mmc.config_store.tls.enable`"
-
-#: ../../source/user_guide/feature_guide/kv_pool.md:486
-msgid "**mmc-local.conf：**"
-msgstr "**mmc-local.conf：**"
 
 #: ../../source/user_guide/feature_guide/kv_pool.md
 msgid "`ock.mmc.local_service.config_store_url`"
@@ -566,13 +503,13 @@ msgstr "`ock.mmc.local_service.protocol`"
 
 #: ../../source/user_guide/feature_guide/kv_pool.md
 msgid ""
-"`host_rdma` (default), `device_rdma` (supported for A2 and A3 when device"
-" ROCE available, recommended for A2), `device_sdma` (supported for A3 "
-"when HCCS available, recommended for A3). Currently does not support "
-"heterogeneous protocol setting."
+"`device_rdma` (supported for A2 and A3 when device ROCE available, "
+"recommended for A2), `device_sdma` (supported for A3 when HCCS available,"
+" recommended for A3). Currently does not support heterogeneous protocol "
+"setting."
 msgstr ""
-"`host_rdma`（默认），`device_rdma`（当设备 ROCE 可用时，A2 和 A3 支持，推荐用于 "
-"A2），`device_sdma`（当 HCCS 可用时，A3 支持，推荐用于 A3）。目前不支持异构协议设置。"
+"`device_rdma`（当设备 ROCE 可用时，A2 和 A3 支持，推荐用于 A2），`device_sdma`（当 HCCS "
+"可用时，A3 支持，推荐用于 A3）。目前不支持异构协议设置。"
 
 #: ../../source/user_guide/feature_guide/kv_pool.md
 msgid "`ock.mmc.local_service.dram.size`"
@@ -584,23 +521,15 @@ msgid ""
 "is the size of the memory occupied by each card."
 msgstr "设置主节点占用的内存大小。配置的值是每张卡占用的内存大小。"
 
-#: ../../source/user_guide/feature_guide/kv_pool.md:563
-msgid "Memcache environment variables"
-msgstr "Memcache 环境变量"
-
-#: ../../source/user_guide/feature_guide/kv_pool.md:572
+#: ../../source/user_guide/feature_guide/kv_pool.md:440
 msgid "Run Memcache Master"
 msgstr "运行 Memcache Master"
 
-#: ../../source/user_guide/feature_guide/kv_pool.md:574
+#: ../../source/user_guide/feature_guide/kv_pool.md:442
 msgid "Starting the MetaService service."
 msgstr "启动 MetaService 服务。"
 
-#: ../../source/user_guide/feature_guide/kv_pool.md:585
-msgid "Method 2 for starting the MetaService service."
-msgstr "启动 MetaService 服务的方法 2。"
-
-#: ../../source/user_guide/feature_guide/kv_pool.md:599
+#: ../../source/user_guide/feature_guide/kv_pool.md:454
 msgid ""
 "Using `MultiConnector` to simultaneously utilize both "
 "`MooncakeConnectorV1` and `AscendStoreConnector`. `MooncakeConnectorV1` "
@@ -610,101 +539,92 @@ msgstr ""
 "`AscendStoreConnector`。`MooncakeConnectorV1` 执行 kv_transfer，而 "
 "`AscendStoreConnector` 启用 KV 缓存池。"
 
-#: ../../source/user_guide/feature_guide/kv_pool.md:601
-#: ../../source/user_guide/feature_guide/kv_pool.md:910
-msgid "800I A2/800T A2 Series"
-msgstr "800I A2/800T A2 系列"
+#: ../../source/user_guide/feature_guide/kv_pool.md:456
+#: ../../source/user_guide/feature_guide/kv_pool.md:576
+msgid "800I A2/800T A2/800I A3/800T A3 Series"
+msgstr "800I A2/800T A2/800I A3/800T A3 系列"
 
-#: ../../source/user_guide/feature_guide/kv_pool.md:761
-#: ../../source/user_guide/feature_guide/kv_pool.md:1042
-msgid "800I A3/800T A3 Series"
-msgstr "800I A3/800T A3 系列"
+#: ../../source/user_guide/feature_guide/kv_pool.md:458
+msgid "**run_prefill.sh/run_decode.sh:**"
+msgstr "**run_prefill.sh/run_decode.sh：**"
 
-#: ../../source/user_guide/feature_guide/kv_pool.md:902
+#: ../../source/user_guide/feature_guide/kv_pool.md:568
 msgid "[2、Start proxy_server](#2start-proxy_server)"
 msgstr "[2、启动代理服务器](#2start-proxy_server)"
 
-#: ../../source/user_guide/feature_guide/kv_pool.md:904
+#: ../../source/user_guide/feature_guide/kv_pool.md:570
 msgid "[3、run-inference](#3run-inference)"
 msgstr "[3、运行推理](#3run-inference)"
 
-#: ../../source/user_guide/feature_guide/kv_pool.md:906
+#: ../../source/user_guide/feature_guide/kv_pool.md:572
 msgid "PD-Mixed Scenario"
 msgstr "PD 混部场景"
 
-#: ../../source/user_guide/feature_guide/kv_pool.md:912
-msgid "The deepseek model needs to be run in a two-node cluster."
-msgstr "deepseek 模型需要在双节点集群中运行。"
+#: ../../source/user_guide/feature_guide/kv_pool.md:578
+msgid "**Run_pd_mix.sh:**"
+msgstr "**Run_pd_mix.sh：**"
 
-#: ../../source/user_guide/feature_guide/kv_pool.md:914
-msgid "**Run_pd_mix_1.sh:**"
-msgstr "**Run_pd_mix_1.sh:**"
-
-#: ../../source/user_guide/feature_guide/kv_pool.md:977
-msgid "**Run_pd_mix_2.sh:**"
-msgstr "**Run_pd_mix_2.sh:**"
-
-#: ../../source/user_guide/feature_guide/kv_pool.md:1097
-#: ../../source/user_guide/feature_guide/kv_pool.md:1290
+#: ../../source/user_guide/feature_guide/kv_pool.md:654
+#: ../../source/user_guide/feature_guide/kv_pool.md:847
 msgid "[2.Run Inference](#2run-inference)"
 msgstr "[2、运行推理](#2run-inference)"
 
-#: ../../source/user_guide/feature_guide/kv_pool.md:1099
+#: ../../source/user_guide/feature_guide/kv_pool.md:656
 msgid "Example of using Yuanrong as a KV Pool backend"
 msgstr "使用元戎作为 KV 池后端的示例"
 
-#: ../../source/user_guide/feature_guide/kv_pool.md:1102
+#: ../../source/user_guide/feature_guide/kv_pool.md:659
 msgid ""
 "Install `openyuanrong-datasystem` on all nodes (`yr.datasystem` must be "
 "importable)."
 msgstr "在所有节点上安装 `openyuanrong-datasystem`（必须能够导入 `yr.datasystem`）。"
 
-#: ../../source/user_guide/feature_guide/kv_pool.md:1104
+#: ../../source/user_guide/feature_guide/kv_pool.md:661
 msgid "Install Yuanrong Datasystem"
 msgstr "安装元戎数据系统"
 
-#: ../../source/user_guide/feature_guide/kv_pool.md:1110
+#: ../../source/user_guide/feature_guide/kv_pool.md:667
 msgid ""
 "If the prebuilt package does not match the CANN or Ascend driver version "
 "in your environment, build Yuanrong Datasystem from source in the vLLM "
 "Ascend image. Follow the official Yuanrong Datasystem build instructions:"
 " <https://atomgit.com/openeuler/yuanrong-datasystem>"
 msgstr ""
-"如果预构建包与您环境中的 CANN 或 Ascend 驱动版本不匹配，请在 vLLM "
-"Ascend 镜像中从源码构建元戎数据系统。请遵循官方元戎数据系统构建说明："
-" <https://atomgit.com/openeuler/yuanrong-datasystem>"
+"如果预构建包与您环境中的 CANN 或 Ascend 驱动版本不匹配，请在 vLLM Ascend "
+"镜像中从源码构建元戎数据系统。请遵循官方元戎数据系统构建说明： <https://atomgit.com/openeuler/yuanrong-"
+"datasystem>"
 
-#: ../../source/user_guide/feature_guide/kv_pool.md:1115
+#: ../../source/user_guide/feature_guide/kv_pool.md:672
 msgid "Start etcd"
 msgstr "启动 etcd"
 
-#: ../../source/user_guide/feature_guide/kv_pool.md:1117
+#: ../../source/user_guide/feature_guide/kv_pool.md:674
 msgid ""
 "Yuanrong Datasystem uses etcd for service discovery. The following "
 "example starts a single-node etcd cluster:"
 msgstr "元戎数据系统使用 etcd 进行服务发现。以下示例启动一个单节点 etcd 集群："
 
-#: ../../source/user_guide/feature_guide/kv_pool.md:1146
+#: ../../source/user_guide/feature_guide/kv_pool.md:703
 msgid ""
 "For production environments, refer to the official etcd clustering "
 "documentation: <https://etcd.io/docs/v3.7/op-guide/clustering/>"
 msgstr "对于生产环境，请参考官方 etcd 集群文档：<https://etcd.io/docs/v3.7/op-guide/clustering/>"
 
-#: ../../source/user_guide/feature_guide/kv_pool.md:1149
+#: ../../source/user_guide/feature_guide/kv_pool.md:706
 msgid "Start Datasystem Worker"
 msgstr "启动数据系统工作节点"
 
-#: ../../source/user_guide/feature_guide/kv_pool.md:1151
+#: ../../source/user_guide/feature_guide/kv_pool.md:708
 msgid "Start a Datasystem worker on each node by using `dscli`:"
 msgstr "使用 `dscli` 在每个节点上启动一个数据系统工作节点："
 
-#: ../../source/user_guide/feature_guide/kv_pool.md:1161
+#: ../../source/user_guide/feature_guide/kv_pool.md:718
 msgid ""
 "The `--worker_address` value is consumed later by `DS_WORKER_ADDR`, so "
 "keep the host and port identical on the same node."
 msgstr "`--worker_address` 的值稍后会被 `DS_WORKER_ADDR` 使用，因此请确保同一节点上的主机和端口保持一致。"
 
-#: ../../source/user_guide/feature_guide/kv_pool.md:1164
+#: ../../source/user_guide/feature_guide/kv_pool.md:721
 msgid ""
 "For more parameters, refer to the `dscli` usage documentation on the "
 "Yuanrong Datasystem official site: <https://atomgit.com/openeuler"
@@ -713,11 +633,11 @@ msgstr ""
 "有关更多参数，请参考元戎数据系统官方网站上的 `dscli` 使用文档：<https://atomgit.com/openeuler"
 "/yuanrong-datasystem>"
 
-#: ../../source/user_guide/feature_guide/kv_pool.md:1168
+#: ../../source/user_guide/feature_guide/kv_pool.md:725
 msgid "To stop the worker:"
 msgstr "要停止工作节点："
 
-#: ../../source/user_guide/feature_guide/kv_pool.md:1176
+#: ../../source/user_guide/feature_guide/kv_pool.md:733
 msgid "Set the following environment variables on each node before starting vLLM:"
 msgstr "在启动 vLLM 之前，在每个节点上设置以下环境变量："
 
@@ -785,70 +705,77 @@ msgid ""
 "the Remote H2D requirements below are met."
 msgstr "传递给元戎 `HeteroClient.enable_remote_h2d`。仅当满足以下远程 H2D 要求后才使用 `1`。"
 
-#: ../../source/user_guide/feature_guide/kv_pool.md:1192
+#: ../../source/user_guide/feature_guide/kv_pool.md:749
 msgid "Remote H2D Requirements"
 msgstr "远程 H2D 要求"
 
-#: ../../source/user_guide/feature_guide/kv_pool.md:1194
+#: ../../source/user_guide/feature_guide/kv_pool.md:751
 msgid ""
 "Set `DS_ENABLE_REMOTE_H2D=1` only when Remote Host-to-Device transfer is "
 "enabled and verified in the Yuanrong Datasystem deployment:"
 msgstr "仅在元戎数据系统部署中启用并验证了远程主机到设备传输时，才设置 `DS_ENABLE_REMOTE_H2D=1`："
 
-#: ../../source/user_guide/feature_guide/kv_pool.md:1197
+#: ../../source/user_guide/feature_guide/kv_pool.md:754
 msgid ""
 "Reserve enough 2 MiB HugeTLB pages before starting the worker. For 40 GiB"
 " shared memory, reserve at least 20480 2 MiB huge pages."
 msgstr "在启动工作节点前预留足够的 2 MiB HugeTLB 页面。对于 40 GiB 共享内存，至少预留 20480 个 2 MiB 巨页。"
 
-#: ../../source/user_guide/feature_guide/kv_pool.md:1199
+#: ../../source/user_guide/feature_guide/kv_pool.md:756
 msgid ""
 "Start each Datasystem worker with Remote H2D enabled. The worker start "
 "command must include `--remote_h2d_device_ids`, `--enable_huge_tlb true`,"
 " `--arena_per_tenant 1`, and `--enable_fallocate false`. Using multiple "
 "available NPU device IDs is recommended, for example "
 "`\"0,1,2,3,4,5,6,7\"` on an 8-NPU node."
-msgstr "以启用远程 H2D 的方式启动每个数据系统工作节点。工作节点启动命令必须包含 `--remote_h2d_device_ids`、`--enable_huge_tlb true`、`--arena_per_tenant 1` 和 `--enable_fallocate false`。建议使用多个可用的 NPU 设备 ID，例如在 8-NPU 节点上使用 `\"0,1,2,3,4,5,6,7\"`。"
+msgstr ""
+"以启用远程 H2D 的方式启动每个数据系统工作节点。工作节点启动命令必须包含 "
+"`--remote_h2d_device_ids`、`--enable_huge_tlb true`、`--arena_per_tenant 1`"
+" 和 `--enable_fallocate false`。建议使用多个可用的 NPU 设备 ID，例如在 8-NPU 节点上使用 "
+"`\"0,1,2,3,4,5,6,7\"`。"
 
-#: ../../source/user_guide/feature_guide/kv_pool.md:1217
+#: ../../source/user_guide/feature_guide/kv_pool.md:774
 msgid ""
 "Make sure the NPU driver, firmware, and CANN toolkit required by Yuanrong"
 " Remote H2D are installed and visible to the worker process. In "
 "containers, mount the Ascend driver path, `npu-smi`, `hccn_tool`, "
 "`/etc/hccn.conf`, `/etc/ascend_install.info`, and the required "
 "`/dev/davinci*` devices."
-msgstr "确保元戎远程 H2D 所需的 NPU 驱动、固件和 CANN 工具包已安装且对工作进程可见。在容器中，挂载 Ascend 驱动路径、`npu-smi`、`hccn_tool`、`/etc/hccn.conf`、`/etc/ascend_install.info` 以及所需的 `/dev/davinci*` 设备。"
+msgstr ""
+"确保元戎远程 H2D 所需的 NPU 驱动、固件和 CANN 工具包已安装且对工作进程可见。在容器中，挂载 Ascend 驱动路径、`npu-"
+"smi`、`hccn_tool`、`/etc/hccn.conf`、`/etc/ascend_install.info` 以及所需的 "
+"`/dev/davinci*` 设备。"
 
-#: ../../source/user_guide/feature_guide/kv_pool.md:1221
+#: ../../source/user_guide/feature_guide/kv_pool.md:778
 msgid "Verify the NPU and RoCE environment before enabling the client flag:"
 msgstr "在启用客户端标志前验证 NPU 和 RoCE 环境："
 
-#: ../../source/user_guide/feature_guide/kv_pool.md:1249
+#: ../../source/user_guide/feature_guide/kv_pool.md:806
 msgid ""
 "If these checks fail, keep `DS_ENABLE_REMOTE_H2D=0` and use the default "
 "Datasystem transfer path."
 msgstr "如果这些检查失败，请保持 `DS_ENABLE_REMOTE_H2D=0` 并使用默认的数据系统传输路径。"
 
-#: ../../source/user_guide/feature_guide/kv_pool.md:1252
+#: ../../source/user_guide/feature_guide/kv_pool.md:809
 msgid "Run AscendStoreConnector with Yuanrong backend"
 msgstr "使用元戎后端运行 AscendStoreConnector"
 
-#: ../../source/user_guide/feature_guide/kv_pool.md:1254
+#: ../../source/user_guide/feature_guide/kv_pool.md:811
 msgid "Use `AscendStoreConnector` with `backend: \"yuanrong\"`:"
 msgstr "使用 `AscendStoreConnector` 并设置 `backend: \"yuanrong\"`："
 
-#: ../../source/user_guide/feature_guide/kv_pool.md:1279
+#: ../../source/user_guide/feature_guide/kv_pool.md:836
 msgid ""
 "`lookup_rpc_port` is the RPC port used between the pooling scheduler "
 "process and the worker process. Each instance must use a unique port "
 "value."
 msgstr "`lookup_rpc_port` 是池化调度进程与工作进程之间使用的 RPC 端口。每个实例必须使用唯一的端口值。"
 
-#: ../../source/user_guide/feature_guide/kv_pool.md:1282
+#: ../../source/user_guide/feature_guide/kv_pool.md:839
 msgid "Notes"
 msgstr "注意事项"
 
-#: ../../source/user_guide/feature_guide/kv_pool.md:1284
+#: ../../source/user_guide/feature_guide/kv_pool.md:841
 msgid ""
 "The Yuanrong backend normalizes KV keys before calling Datasystem. Keys "
 "longer than 255 characters or containing unsupported characters are "
@@ -858,7 +785,7 @@ msgstr ""
 "元戎后端在调用数据系统之前会对 KV 键进行规范化处理。长度超过 255 "
 "个字符或包含不支持字符的键会被重写，因此在调试后端存储时，请勿依赖原始的键字符串。"
 
-#: ../../source/user_guide/feature_guide/kv_pool.md:1287
+#: ../../source/user_guide/feature_guide/kv_pool.md:844
 msgid ""
 "No extra buffer pre-registration step is required for Yuanrong. The "
 "backend uses device pointers directly when building blob lists."
@@ -908,3 +835,72 @@ msgstr "元戎不需要额外的缓冲区预注册步骤。该后端在构建 bl
 
 #~ msgid "HDK >= 26.0.0<br>CANN >= 9.0.0"
 #~ msgstr "HDK >= 26.0.0<br>CANN >= 9.0.0"
+
+#~ msgid ""
+#~ "**memfabric_hybrid**: "
+#~ "<https://gitcode.com/Ascend/memfabric_hybrid/blob/master/doc/installation.md>"
+#~ msgstr ""
+#~ "**memfabric_hybrid**: "
+#~ "<https://gitcode.com/Ascend/memfabric_hybrid/blob/master/doc/installation.md>"
+
+#~ msgid ""
+#~ "**memcache**: "
+#~ "<https://gitcode.com/Ascend/memcache/blob/master/doc/build.md>"
+#~ msgstr ""
+#~ "**memcache**: "
+#~ "<https://gitcode.com/Ascend/memcache/blob/master/doc/build.md>"
+
+#~ msgid ""
+#~ "config Path：/usr/local/memcache_hybrid/latest/config/ "
+#~ "**Config file parameters "
+#~ "description**：<https://gitcode.com/Ascend/memcache/blob/develop/doc/memcache_config.md>"
+#~ msgstr ""
+#~ "配置路径：/usr/local/memcache_hybrid/latest/config/ "
+#~ "**配置文件参数说明**：<https://gitcode.com/Ascend/memcache/blob/develop/doc/memcache_config.md>"
+
+#~ msgid ""
+#~ "Set TLS certificate configurations. If "
+#~ "TLS is disabled, you do not need"
+#~ " to upload a certificate. If TLS "
+#~ "is enabled, you need to upload a"
+#~ " certificate."
+#~ msgstr "设置 TLS 证书配置。如果禁用 TLS，则无需上传证书。如果启用 TLS，则需要上传证书。"
+
+#~ msgid ""
+#~ "You are advised to copy mmc-"
+#~ "local.conf and mmc-meta.conf to your "
+#~ "own path and modify them, and set"
+#~ " the MMC_META_CONFIG_PATH environment variable"
+#~ " to the path of your own "
+#~ "mmc-meta.conf file."
+#~ msgstr ""
+#~ "建议将 mmc-local.conf 和 mmc-meta.conf "
+#~ "复制到您自己的路径并进行修改，并将 MMC_META_CONFIG_PATH 环境变量设置为您自己的 "
+#~ "mmc-meta.conf 文件的路径。"
+
+#~ msgid "`ock.mmc.meta_service.config_store_url`"
+#~ msgstr "`ock.mmc.meta_service.config_store_url`"
+
+#~ msgid "`ock.mmc.meta.ha.enable`"
+#~ msgstr "`ock.mmc.meta.ha.enable`"
+
+#~ msgid "Set to `false` to disable TLS authentication modification."
+#~ msgstr "设置为 `false` 以禁用 TLS 认证修改。"
+
+#~ msgid "`ock.mmc.config_store.tls.enable`"
+#~ msgstr "`ock.mmc.config_store.tls.enable`"
+
+#~ msgid "Memcache environment variables"
+#~ msgstr "Memcache 环境变量"
+
+#~ msgid "Method 2 for starting the MetaService service."
+#~ msgstr "启动 MetaService 服务的方法 2。"
+
+#~ msgid "800I A2/800T A2 Series"
+#~ msgstr "800I A2/800T A2 系列"
+
+#~ msgid "The deepseek model needs to be run in a two-node cluster."
+#~ msgstr "deepseek 模型需要在双节点集群中运行。"
+
+#~ msgid "**Run_pd_mix_1.sh:**"
+#~ msgstr "**Run_pd_mix_1.sh:**"
