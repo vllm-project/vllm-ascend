@@ -26,10 +26,30 @@ from vllm.distributed import (
     get_tensor_model_parallel_world_size,
     tensor_model_parallel_all_reduce,
 )
-from vllm.model_executor.custom_op import CustomOp
 from vllm.model_executor.layers.mamba.linear_attn import (
     MiniMaxText01RMSNormTP,
 )
+
+# CustomOp has moved across vllm versions. Try the modern location first,
+# then fall back to locations used in older releases.
+try:
+    from vllm.model_executor.custom_op import CustomOp
+except ImportError:
+    try:
+        from vllm.model_executor.layers.custom_op import CustomOp
+    except ImportError:
+        try:
+            from vllm.model_executor.layers.mamba.linear_attn import CustomOp
+        except ImportError:
+            # Last resort: extract from MiniMaxText01RMSNormTP's MRO.
+            for _base in MiniMaxText01RMSNormTP.__mro__:
+                if _base.__name__ == "CustomOp":
+                    CustomOp = _base
+                    break
+            else:
+                raise ImportError(
+                    "Cannot locate CustomOp for MiniMaxText01RMSNormTP."
+                )
 from vllm.platforms import current_platform
 
 _ORIG_QK_METHOD_NAME: str | None = None

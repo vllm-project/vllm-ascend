@@ -20,7 +20,14 @@ import torch_npu
 from einops import rearrange
 from vllm.forward_context import get_forward_context
 from vllm.model_executor.layers.fla.ops.l2norm import l2norm_fwd
-from vllm.model_executor.layers.mamba.gdn_linear_attn import GatedDeltaNetAttention
+try:
+    from vllm.model_executor.layers.mamba.gdn_linear_attn import (
+        GatedDeltaNetAttention,
+    )
+except ImportError:
+    from vllm.model_executor.layers.mamba.gdn.base import (
+        GatedDeltaNetAttention,
+    )
 from vllm.triton_utils import triton
 from vllm.v1.attention.backend import AttentionMetadata  # type: ignore
 from vllm.v1.attention.backends.gdn_attn import GDNAttentionMetadata
