@@ -28,7 +28,7 @@ using namespace Compressor;
         op.Process();                                                                                                  \
     } while (0)
 
-template<uint8_t XLayout, uint8_t XDType, uint8_t Coff, uint8_t RotaryMode, uint8_t CacheMode, uint8_t TemplateId>
+template<uint8_t XLayout, uint8_t XDType, uint8_t Coff, uint8_t RotaryMode, uint8_t CacheMode, uint8_t TemplateId, uint8_t RopeDType>
 __global__ __aicore__ void compressor(
     __gm__ uint8_t *x,
     __gm__ uint8_t *wKv,
@@ -56,6 +56,7 @@ __global__ __aicore__ void compressor(
     TPipe pipe;
     constexpr auto xLayout = static_cast<X_LAYOUT>(XLayout);
     constexpr auto xDtype = static_cast<X_DTYPE>(XDType);
+    constexpr auto ropeDtype = static_cast<ROPE_DTYPE>(RopeDType);
     constexpr auto coff = static_cast<COFF>(Coff);
     constexpr auto rotaryMode = static_cast<ROTARY_MODE>(RotaryMode);
     constexpr auto cacheMode = static_cast<CACHE_MODE>(CacheMode);
@@ -69,8 +70,8 @@ __global__ __aicore__ void compressor(
 //     INVOKE_COMPRESSOR_GENERAL_OP_IMPL(CompressorKernel, xLayout, xDtype, coff, rotaryMode);
 // #endif
     if constexpr (static_cast<TEMPLATE_ID>(TemplateId) == TEMPLATE_ID::PERF) {
-        INVOKE_COMPRESSOR_GENERAL_OP_IMPL(CompressorKernelPerf, xLayout, xDtype, coff, rotaryMode);
+        INVOKE_COMPRESSOR_GENERAL_OP_IMPL(CompressorKernelPerf, xLayout, xDtype, ropeDtype, coff, rotaryMode);
     } else {
-        INVOKE_COMPRESSOR_GENERAL_OP_IMPL(CompressorKernel, xLayout, xDtype, coff, rotaryMode);
+        INVOKE_COMPRESSOR_GENERAL_OP_IMPL(CompressorKernel, xLayout, xDtype, ropeDtype, coff, rotaryMode);
     }
 }
