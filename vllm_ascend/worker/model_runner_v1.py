@@ -66,6 +66,18 @@ from vllm.v1.kv_cache_interface import (
     SlidingWindowMLASpec,
     UniformTypeKVCacheSpecs,
 )
+
+# HiddenStateCacheSpec was introduced in upstream vLLM PR #39949 to mark
+# cache-only layers used by the extract_hidden_states speculative method.
+# Older vLLM versions do not export it: fall back to None so existing
+# dense-model paths (e.g. Qwen3-8B) keep working and only the new
+# hybrid-model path is gated on its availability.
+try:
+    from vllm.v1.kv_cache_interface import (  # noqa: WPS433
+        HiddenStateCacheSpec,
+    )
+except ImportError:  # pragma: no cover
+    HiddenStateCacheSpec = None  # type: ignore[assignment, misc]
 from vllm.v1.outputs import (
     EMPTY_MODEL_RUNNER_OUTPUT,
     AsyncModelRunnerOutput,
@@ -182,6 +194,16 @@ PerLayerAttnMetadata: TypeAlias = list[AttnMetadataDict] | AttnMetadataDict
 
 
 SEQ_LEN_WITH_MAX_PA_WORKSPACE = 6144
+
+
+def _is_hidden_state_cache_spec(spec: object) -> bool:
+    """Whether ``spec`` marks an ``extract_hidden_states`` cache-only layer.
+
+    Always ``False`` on older vLLM versions that do not export
+    ``HiddenStateCacheSpec`` (see the conditional import above), so dense-model
+    paths keep their original behaviour.
+    """
+    return HiddenStateCacheSpec is not None and isinstance(spec, HiddenStateCacheSpec)
 
 
 @dataclass
@@ -3597,6 +3619,7 @@ class NPUModelRunner(GPUModelRunner):
                     "linear_attn" in layer_name
                     or self.hybrid_with_attn_and_mamba
                     or "cache_only_layers" in layer_name
+                    or _is_hidden_state_cache_spec(layer_kv_cache_spec.get(layer_name))
                 ) and layer_name not in kv_cache_raw_tensors:
                     # for mamba linear attention, attn-linear hybrid, or cache_only_layers (extract_hidden_states)
                     if self.vllm_config.kv_transfer_config is None:
@@ -3828,12 +3851,20 @@ class NPUModelRunner(GPUModelRunner):
                                 layer_name]
                             assert raw_dsa_k_tensor is not None
                             sum_page_size_bytes = raw_k_tensor.numel() + raw_v_tensor.numel() + raw_dsa_k_tensor.numel()
-                    elif self.use_hybrid_blocks and self.hybrid_with_attn_and_mamba:
+                    elif (
+                        self.use_hybrid_blocks
+                        and self.hybrid_with_attn_and_mamba
+                        and "cache_only_layers" not in layer_name
+                        and not _is_hidden_state_cache_spec(current_kv_cache_spec)
+                    ):
                         # Currently, we ensure that the same kvcache format is used even if there
                         # is no shared layer, such as the full attention mtp layer of qwen3.5, etc.
                         raw_k_tensor, raw_v_tensor = kv_cache_raw_tensors[layer_name], kv_cache_raw_tensors[layer_name]
                         sum_page_size_bytes = raw_k_tensor.numel()
-                    elif "cache_only_layers" in layer_name:
+                    elif (
+                        "cache_only_layers" in layer_name
+                        or _is_hidden_state_cache_spec(current_kv_cache_spec)
+                    ):
                         # Single tensor for extract_hidden_states (no K/V split)
                         raw_tensor = kv_cache_raw_tensors[layer_name]
                         assert raw_tensor is not None
@@ -3846,7 +3877,31 @@ class NPUModelRunner(GPUModelRunner):
                             current_kv_cache_spec.num_kv_heads,
                             current_kv_cache_spec.head_size,
                         )
-                        k_cache = raw_tensor.view(current_kv_cache_spec.dtype).view(kv_cache_shape)
+                        raw_tensor = raw_tensor.view(current_kv_cache_spec.dtype)
+                        page_size_padded = getattr(
+                            current_kv_cache_spec, "page_size_padded", None
+                        )
+                        if page_size_padded is not None:
+                            # On hybrid models the cache-only layer's page is
+                            # aligned to the (padded) common page of the
+                            # mamba/attention groups, so each block carries extra
+                            # padding bytes that the unpadded kv_cache_shape does
+                            # not cover. Use a strided view whose block-dim stride
+                            # is the full padded page so the padding between blocks
+                            # is skipped, mirroring the page_size_padded handling
+                            # in upstream GPUModelRunner. CacheOnly get_kv_cache_shape
+                            # puts num_blocks at dim 0.
+                            dtype_size = get_dtype_size(current_kv_cache_spec.dtype)
+                            page_stride = current_kv_cache_spec.page_size_bytes // dtype_size
+                            strides = [1] * len(kv_cache_shape)
+                            for dim_idx in range(len(kv_cache_shape) - 2, -1, -1):
+                                strides[dim_idx] = strides[dim_idx + 1] * kv_cache_shape[dim_idx + 1]
+                            strides[0] = page_stride
+                            k_cache = torch.as_strided(
+                                raw_tensor, size=kv_cache_shape, stride=tuple(strides)
+                            )
+                        else:
+                            k_cache = raw_tensor.view(kv_cache_shape)
                         kv_caches[layer_name] = k_cache
                         continue  # Skip the rest of the AttentionSpec handling
                     else:
@@ -4272,14 +4327,23 @@ class NPUModelRunner(GPUModelRunner):
                 # the indexer's k_cache is replaced by IndexerWrapper, so its
                 # KV cache is unused.
                 if spec := attn_module.get_kv_cache_spec(self.vllm_config):
-                    # CacheOnlyAttentionLayer's module imports MLAAttentionSpec
-                    # before the patch runs, so the spec it returns is an
-                    # instance of the original (unpatched) class. Rebuilding
-                    # with the patched AscendMLAAttentionSpec makes the spec
-                    # picklable and keeps this branch consistent with the
-                    # MLAAttention branch above.
+                    # Rebuild the spec so it is picklable: the layer's module
+                    # imported MLAAttentionSpec before patch_kv_cache_interface.py
+                    # monkey-patched it, so the returned spec references a stale
+                    # class.
+                    #
+                    # Preserve the HiddenStateCacheSpec marker type when it is
+                    # available: upstream get_kv_cache_groups relies on
+                    # isinstance(spec, HiddenStateCacheSpec) to isolate cache-only
+                    # layers into their own KV cache group. Downgrading to a plain
+                    # MLAAttentionSpec would drop that marker and let the
+                    # hidden-state page size break page-size unification of hybrid
+                    # (Mamba + attention) models such as Qwen3.5. HiddenStateCacheSpec
+                    # is not monkey-patched, so it stays picklable; fall back to a
+                    # plain MLA spec only on older vLLM that lacks the marker.
                     from vllm.v1.kv_cache_interface import MLAAttentionSpec as AscendMLAAttentionSpec
-                    kv_cache_spec[layer_name] = AscendMLAAttentionSpec(
+                    cache_only_spec_cls = HiddenStateCacheSpec or AscendMLAAttentionSpec
+                    kv_cache_spec[layer_name] = cache_only_spec_cls(
                         block_size=spec.block_size,
                         num_kv_heads=spec.num_kv_heads,
                         head_size=spec.head_size,

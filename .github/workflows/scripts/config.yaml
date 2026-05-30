@@ -82,6 +82,8 @@ e2e-singlecard:
   estimated_time: 26
 - name: tests/e2e/singlecard/spec_decode/test_extract_hidden_states.py
   estimated_time: 243
+- name: tests/e2e/singlecard/spec_decode/test_extract_hidden_states_qwen35.py
+  estimated_time: 200
 e2e-multicard-2-cards:
 - name: tests/e2e/multicard/2-cards/test_aclgraph_capture_replay.py
   estimated_time: 0
