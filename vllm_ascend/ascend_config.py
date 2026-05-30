@@ -24,6 +24,27 @@ if TYPE_CHECKING:
     from vllm.config import VllmConfig
 
 
+class SamplingConfig:
+    """Configuration for sampling path optimization in v1 model runner."""
+
+    def __init__(self, config: dict | None = None):
+        if config is None:
+            config = {}
+        supported_options = {
+            "enable_sampling_v2",
+            "enable_reduced_sampling",
+        }
+        unknown_options = set(config) - supported_options
+        if unknown_options:
+            raise ValueError(
+                "sampling_config only supports enable_sampling_v2 "
+                "and enable_reduced_sampling "
+                f"in this phase, got {sorted(unknown_options)}"
+            )
+        self.enable_sampling_v2: bool = config.get("enable_sampling_v2", False)
+        self.enable_reduced_sampling: bool = config.get("enable_reduced_sampling", False)
+
+
 class AscendConfig:
     """
     Configuration Object for additional_config from vllm.configs.
@@ -53,6 +74,9 @@ class AscendConfig:
 
         profiling_chunk_config = additional_config.get("profiling_chunk_config", {})
         self.profiling_chunk_config = ProfilingChunkConfig(profiling_chunk_config)
+
+        sampling_config = additional_config.get("sampling_config", {})
+        self.sampling_config = SamplingConfig(sampling_config)
         if self.profiling_chunk_config.enabled:
             max_batched = vllm_config.scheduler_config.max_num_batched_tokens
             if max_batched < self.profiling_chunk_config.min_chunk:
@@ -267,9 +291,6 @@ class AscendConfig:
 
         # Enable dispatch/combine op inter-node communication by ROCE
         self.enable_mc2_hierarchy_comm = additional_config.get("enable_mc2_hierarchy_comm", False)
-
-        # Enable optimized reduce sampling scheme
-        self.enable_reduce_sample = additional_config.get("enable_reduce_sample", False)
 
         self.mix_placement = additional_config.get("mix_placement", False)
         self._check_mix_placement()

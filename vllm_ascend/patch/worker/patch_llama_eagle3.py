@@ -6,9 +6,9 @@ from vllm.model_executor.models.llama_eagle3 import Eagle3LlamaForCausalLM
 def compute_logits(
     self,
     hidden_states: torch.Tensor,
-    enable_reduce_sample: bool = False,
+    enable_reduced_sampling: bool = False,
 ) -> torch.Tensor | None:
-    if enable_reduce_sample:
+    if enable_reduced_sampling:
         logits = self.logits_processor(self.lm_head, hidden_states)
         if self.draft_id_to_target_id is None:
             assert logits.shape[1] == self.config.vocab_size, (

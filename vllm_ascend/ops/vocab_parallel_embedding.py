@@ -266,12 +266,12 @@ class AscendLogitsProcessor(LogitsProcessor):
         gathered_hidden_states = get_lmhead_tp_group().all_gather(hidden_states, dim=0)
         logits = lm_head.quant_method.apply(lm_head, gathered_hidden_states, bias=embedding_bias)
         # Gather logits for tensor parallel
-        if not get_ascend_config().enable_reduce_sample:
+        if not get_ascend_config().sampling_config.enable_reduced_sampling:
             logits = get_lmhead_tp_group().all_to_all(logits)
 
         # Remove paddings in vocab (if any)
         if logits is not None:
-            if not get_ascend_config().enable_reduce_sample:
+            if not get_ascend_config().sampling_config.enable_reduced_sampling:
                 logits = logits[..., : self.org_vocab_size]
             else:
                 logits = logits[..., : lm_head.num_org_embeddings_per_partition]
@@ -285,12 +285,12 @@ class AscendLogitsProcessor(LogitsProcessor):
     ) -> torch.Tensor | None:
         logits = lm_head.quant_method.apply(lm_head, hidden_states, bias=embedding_bias)
         # Gather logits for tensor parallel
-        if not get_ascend_config().enable_reduce_sample:
+        if not get_ascend_config().sampling_config.enable_reduced_sampling:
             logits = self._gather_logits(logits)
 
         # Remove paddings in vocab (if any)
         if logits is not None:
-            if not get_ascend_config().enable_reduce_sample:
+            if not get_ascend_config().sampling_config.enable_reduced_sampling:
                 logits = logits[..., : self.org_vocab_size]
             else:
                 logits = logits[..., : lm_head.num_org_embeddings_per_partition]

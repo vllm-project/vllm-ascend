@@ -1,0 +1,28 @@
+graph TB
+    subgraph s1["model_runner_v1"]
+        MR[sample_tokens]
+        MR -->|sample| SAMP
+    end
+
+    subgraph s2["Default Path"]
+        SAMP{routing}
+        SAMP -->|not set| AS[AscendSampler]
+        AS --> SO1[SamplerOutput]
+    end
+
+    subgraph s3["Adapter Path"]
+        SAMP -->|is set| ADP[V1SamplerAdapter]
+        ADP --> MC[V1SamplingContext]
+        ADP --> LP[LogitsProcessor]
+        LP -->|default| FULL["Full Pipeline"]
+        LP -->|skip| SKIP["Skip Pipeline"]
+        LP -->|fused| FUSED["Fused Pipeline"]
+        FULL --> GS[gumbel_sample]
+        SKIP --> GS
+        GS --> BP{parallel?}
+        BP -->|no| OUT[SamplerOutput]
+        BP -->|yes| BPS[BatchParallelSampler]
+        BPS --> OUT
+    end
+
+    OUT --> BK[bookkeeping_sync]

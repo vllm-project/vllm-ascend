@@ -152,6 +152,7 @@ from vllm_ascend.utils import (
 )
 from vllm_ascend.worker.npu_input_batch import NPUInputBatch
 from vllm_ascend.worker.pcp_utils import PCPManager
+from vllm_ascend.worker.v1.sample.sampling_context import V1SamplingContext
 
 from vllm_ascend.ascend_forward_context import (  # isort: skip
     MoECommType,
@@ -295,6 +296,8 @@ class NPUModelRunner(GPUModelRunner):
 
         # Ascend-specific configurations
         self.ascend_config = get_ascend_config()
+        self.sampling_config = self.ascend_config.sampling_config
+        self._v1_sampling_context: V1SamplingContext | None = None
         set_weight_prefetch_method(self.ascend_config.weight_prefetch_config)
         # Dump / PrecisionDebugger configuration now comes from AscendConfig
         dump_cfg = self.ascend_config.dump_config_path
@@ -2127,6 +2130,10 @@ class NPUModelRunner(GPUModelRunner):
         ) = self.execute_model_state
         # Clear ephemeral state.
         self.execute_model_state = None
+        self._v1_sampling_context = self._maybe_build_v1_sampling_context(
+            positions,
+            spec_decode_metadata,
+        )
 
         # Apply structured output bitmasks if present.
         if grammar_output is not None:
@@ -2309,15 +2316,71 @@ class NPUModelRunner(GPUModelRunner):
         )
         return async_output
 
+    def _maybe_build_v1_sampling_context(
+        self,
+        positions: torch.Tensor,
+        spec_decode_metadata: SpecDecodeMetadata | None,
+    ) -> V1SamplingContext | None:
+        """Build the future sampler-bridge input contract without rerouting."""
+        if not self.sampling_config.enable_sampling_v2:
+            return None
+
+        logits_indices = getattr(self, "logits_indices", None)
+        if logits_indices is None:
+            return None
+
+        num_reqs = self.input_batch.num_reqs
+        req_indices_np: np.ndarray
+        if spec_decode_metadata is None:
+            req_indices_np = np.arange(num_reqs, dtype=np.int32)
+        else:
+            num_logits_per_req = np.asarray(
+                [
+                    num_draft_tokens + 1
+                    for num_draft_tokens in spec_decode_metadata.num_draft_tokens
+                ],
+                dtype=np.int32,
+            )
+            req_indices_np = np.repeat(
+                np.arange(num_reqs, dtype=np.int32),
+                num_logits_per_req,
+            )
+        num_logits = int(req_indices_np.shape[0])
+        if int(logits_indices.shape[0]) < num_logits:
+            raise ValueError("logits_indices must cover v1 sampling context rows")
+        logits_indices = logits_indices[:num_logits]
+
+        positions_at_logits = positions.index_select(
+            0,
+            logits_indices.to(device=positions.device, dtype=torch.long),
+        )
+        input_ids_at_logits = self.input_ids.gpu.index_select(
+            0,
+            logits_indices.to(device=self.input_ids.gpu.device, dtype=torch.long),
+        )
+        req_indices = torch.from_numpy(req_indices_np).to(device=self.device)
+        return V1SamplingContext.from_model_runner_inputs(
+            num_reqs=num_reqs,
+            positions_at_logits=positions_at_logits,
+            input_ids_at_logits=input_ids_at_logits,
+            req_indices_at_logits=req_indices,
+            device=self.device,
+            req_ids=tuple(self.input_batch.req_ids[:num_reqs]),
+            idx_mapping_np=req_indices_np,
+        )
+
     # overwrite _sample for lmhead_tp_enable and need_accepted_tokens
     def _sample(self, logits, spec_decode_metadata):
         # Sample the next token and get logprobs if needed.
         sampling_metadata = self.input_batch.sampling_metadata
         self.input_batch.update_async_output_token_ids()
+        enable_reduced_sampling = False
+        if self.input_batch.sampling_metadata.top_k is not None:
+            enable_reduced_sampling = get_ascend_config().sampling_config.enable_reduced_sampling
         if spec_decode_metadata is None:
             if lmhead_tp_enable() and logits is not None:
                 logits = logits[: self.input_batch.num_reqs]
-            if self.input_batch.sampling_metadata.top_k is not None and get_ascend_config().enable_reduce_sample:
+            if self.input_batch.sampling_metadata.top_k is not None and enable_reduced_sampling:
                 max_topk = self.input_batch.top_k_cpu[self.input_batch.top_k_cpu < logits.shape[1]].max()
                 self.sampler.prepare_sampling(max_topk)
             return self.sampler(
@@ -2327,7 +2390,7 @@ class NPUModelRunner(GPUModelRunner):
 
         if lmhead_tp_enable() and logits is not None:
             logits = logits[: len(spec_decode_metadata.logits_indices)]
-        if self.input_batch.sampling_metadata.top_k is not None and get_ascend_config().enable_reduce_sample:
+        if self.input_batch.sampling_metadata.top_k is not None and enable_reduced_sampling:
             max_topk = self.input_batch.top_k_cpu[self.input_batch.top_k_cpu < logits.shape[1]].max()
             self.rejection_sampler.prepare_sampling(max_topk)
         sampler_output = self.rejection_sampler(

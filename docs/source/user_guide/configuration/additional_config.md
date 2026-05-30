@@ -71,6 +71,7 @@ The following table lists additional configuration options available in vLLM Asc
 | `finegrained_tp_config`             | dict | `{}`    | Configuration options for module tensor parallelism                                                       |
 | `ascend_compilation_config`         | dict | `{}`    | Configuration options for ascend compilation                                                              |
 | `eplb_config`                       | dict | `{}`    | Configuration options for eplb |
+| `sampling_config`                   | dict | `{}`    | Configuration options for model runner v1 sampling operator integration. |
 | `refresh`                           | bool | `false` | Whether to refresh global Ascend configuration content. This is usually used by rlhf or ut/e2e test case. |
 | `dump_config`                       | dict | `None`  | Inline msprobe dump configuration. vLLM-Ascend will materialize it to a temporary JSON file and pass that file to the debugger. |
 | `dump_config_path`                  | str  | `None`  | Configuration file path for msprobe dump (compatible legacy option).                                      |
@@ -145,6 +146,36 @@ The details of each configuration option are as follows:
 | `algorithm_execution_interval`   | int | `30`   | The forward iterations when the EPLB worker will finish CPU tasks. |
 | `expert_map_record_path`         | str | `None` | Save the expert load calculation results to a new expert table in the specified directory.|
 | `num_redundant_experts`          | int | `0`    | Specify redundant experts during initialization. |
+
+**sampling_config**
+
+| Name | Type | Default | Description |
+| ---- | ---- | ------- | ----------- |
+| `enable_sampling_v2` | bool | `False` | Whether to let `model_runner_v1` use the sampling operators introduced for `model_runner_v2`. This switch only controls the `model_runner_v1` integration path. If vLLM Ascend uses `model_runner_v2` directly in the future, this switch will have no effect on `model_runner_v2`. |
+| `enable_reduced_sampling` | bool | `False` | Whether to reduce sampling communication by keeping local vocabulary logits and sampling from gathered top-k candidates. This is intended for top-k sampling workloads and is disabled by default. |
+
+Online mode:
+
+```bash
+vllm serve Qwen/Qwen3-8B \
+  --additional-config='{"sampling_config":{"enable_sampling_v2":true,"enable_reduced_sampling":true}}'
+```
+
+Offline mode:
+
+```python
+from vllm import LLM
+
+llm = LLM(
+    model="Qwen/Qwen3-8B",
+    additional_config={
+        "sampling_config": {
+            "enable_sampling_v2": True,
+            "enable_reduced_sampling": True,
+        }
+    },
+)
+```
 
 **profiling_chunk_config**
 

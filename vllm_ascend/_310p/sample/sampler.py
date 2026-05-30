@@ -62,7 +62,7 @@ class AscendTopKTopPSampler310(AscendTopKTopPSampler):
     def forward_native(self, logits, generators, k, p):
         if envs.VLLM_BATCH_INVARIANT:
             return super().forward_native(logits, generators, k, p)
-        if get_ascend_config().enable_reduce_sample:
+        if get_ascend_config().sampling_config.enable_reduced_sampling:
             cand_logits, cand_idx = self.apply_top_k_top_p(logits, k, p, self.top_k)
             logits_to_return = None
             if self.logprobs_mode == "processed_logits":
