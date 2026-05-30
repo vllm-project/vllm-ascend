@@ -183,6 +183,7 @@ vllm serve Eco-Tech/Qwen3.5-397B-A17B-w8a8-mtp \
 --data-parallel-address $local_ip \
 --data-parallel-rpc-port 13389 \
 --seed 1024 \
+--quantization ascend \
 --served-model-name qwen3.5 \
 --tensor-parallel-size 8 \
 --enable-expert-parallel \
@@ -232,6 +233,7 @@ vllm serve Eco-Tech/Qwen3.5-397B-A17B-w8a8-mtp \
 --data-parallel-address $node0_ip \
 --data-parallel-rpc-port 13389 \
 --seed 1024 \
+--quantization ascend \
 --tensor-parallel-size 8 \
 --served-model-name qwen3.5 \
 --max-num-seqs 16 \
