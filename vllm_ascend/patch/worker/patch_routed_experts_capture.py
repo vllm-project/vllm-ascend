@@ -154,7 +154,7 @@ def capture(self, layer_id: int, topk_ids: torch.Tensor) -> None:
                     if token_num_per_dp >= self.tp_size
                     else (self.tp_size, topk_ids.shape[1])
                 )
-            # mc2 scenario in vllm-ascend.
+            # mc2 scenario in vllm-ascend
             else:
                 gather_topk_ids_shape = (n * self.tp_size, topk_ids.shape[1])
 
