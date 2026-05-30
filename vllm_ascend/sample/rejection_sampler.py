@@ -339,6 +339,11 @@ def rejection_sample(
     posterior_threshold = float(get_ascend_config().rejection_sampler_config.posterior_threshold)
     posterior_alpha = float(get_ascend_config().rejection_sampler_config.posterior_alpha)
 
+    if using_entropy_verify and ori_target_logits is not None:
+        ori_target_probs = ori_target_logits.softmax(dim=-1, dtype=torch.float32)
+    else:
+        ori_target_probs = None
+
     # Create output buffer.
     output_token_ids = torch.empty(
         (batch_size, max_spec_len + 1),
@@ -457,6 +462,8 @@ def rejection_sample(
                     POSTERIOR_ALPHA=posterior_alpha,
                     SUB_BLOCK=4 * 1024,
                     EPSILON=1e-10,
+                    ori_target_probs_ptr=ori_target_probs,
+                    ori_vocab_size=ori_target_probs.shape[-1] if ori_target_probs is not None else 0,
                 )
             else:
                 rejection_random_sample_pytorch(
@@ -478,6 +485,7 @@ def rejection_sample(
                     POSTERIOR_THRESHOLD=posterior_threshold,
                     POSTERIOR_ALPHA=posterior_alpha,
                     EPSILON=1e-10,
+                    ori_target_probs=ori_target_probs,
                 )
         else:
             # MagicMTP: Improving acceptance rate with Block Verify.
@@ -506,6 +514,8 @@ def rejection_sample(
                     POSTERIOR_ALPHA=posterior_alpha,
                     SUB_BLOCK=4 * 1024,
                     EPSILON=1e-10,
+                    ori_target_probs_ptr=ori_target_probs,
+                    ori_vocab_size=ori_target_probs.shape[-1] if ori_target_probs is not None else 0,
                 )
             else:
                 rejection_random_sample_block_verify_pytorch(
@@ -527,6 +537,7 @@ def rejection_sample(
                     POSTERIOR_THRESHOLD=posterior_threshold,
                     POSTERIOR_ALPHA=posterior_alpha,
                     EPSILON=1e-10,
+                    ori_target_probs=ori_target_probs,
                 )
     else:
         # Fallback to original mode
@@ -587,6 +598,8 @@ def rejection_sample(
                     POSTERIOR_ALPHA=posterior_alpha,
                     SUB_BLOCK=4 * 1024,
                     EPSILON=1e-10,
+                    ori_target_probs_ptr=ori_target_probs,
+                    ori_vocab_size=ori_target_probs.shape[-1] if ori_target_probs is not None else 0,
                 )
             else:
                 rejection_random_sample_pytorch(
@@ -608,6 +621,7 @@ def rejection_sample(
                     POSTERIOR_THRESHOLD=posterior_threshold,
                     POSTERIOR_ALPHA=posterior_alpha,
                     EPSILON=1e-10,
+                    ori_target_probs=ori_target_probs,
                 )
         else:
             if HAS_TRITON:
@@ -634,6 +648,8 @@ def rejection_sample(
                     POSTERIOR_ALPHA=posterior_alpha,
                     SUB_BLOCK=4 * 1024,
                     EPSILON=1e-10,
+                    ori_target_probs_ptr=ori_target_probs,
+                    ori_vocab_size=ori_target_probs.shape[-1] if ori_target_probs is not None else 0,
                 )
             else:
                 rejection_random_sample_block_verify_pytorch(
@@ -655,6 +671,7 @@ def rejection_sample(
                     POSTERIOR_THRESHOLD=posterior_threshold,
                     POSTERIOR_ALPHA=posterior_alpha,
                     EPSILON=1e-10,
+                    ori_target_probs=ori_target_probs,
                 )
 
     return output_token_ids
@@ -872,6 +889,7 @@ def rejection_random_sample_pytorch(
     POSTERIOR_THRESHOLD=0.95,
     POSTERIOR_ALPHA=0.4,
     EPSILON=1e-10,
+    ori_target_probs=None,
 ):
     """
     This function implements the Speculative Decoding rejection sampling step.
@@ -956,7 +974,8 @@ def rejection_random_sample_pytorch(
     zero_threshold = zero_threshold_cpu.to(device, non_blocking=True)
 
     if ENTROPY_VERIFY:
-        all_target_dist = target_probs[global_token_indices]
+        entropy_probs = ori_target_probs if ori_target_probs is not None else target_probs
+        all_target_dist = entropy_probs[global_token_indices]
         entropy = -(all_target_dist * torch.log(all_target_dist + EPSILON)).sum(dim=-1)
         exp_neg_entropy = torch.exp(-entropy * POSTERIOR_ALPHA)
         posterior_threshold_device = torch.tensor(POSTERIOR_THRESHOLD, device=device, dtype=torch.float32)
@@ -1206,6 +1225,7 @@ def rejection_random_sample_block_verify_pytorch(
     POSTERIOR_THRESHOLD=0.95,
     POSTERIOR_ALPHA=0.4,
     EPSILON=1e-10,
+    ori_target_probs=None,
 ):
     batch_size = output_token_ids.shape[0]
     device = output_token_ids.device
@@ -1266,7 +1286,8 @@ def rejection_random_sample_block_verify_pytorch(
     cum_uniform_token_probs = torch.cumprod(uniform_token_probs, dim=-1)
 
     if ENTROPY_VERIFY:
-        all_target_dist = target_probs[global_token_indices]
+        entropy_probs = ori_target_probs if ori_target_probs is not None else target_probs
+        all_target_dist = entropy_probs[global_token_indices]
         entropy = -(all_target_dist * torch.log(all_target_dist + EPSILON)).sum(dim=-1)
         exp_neg_entropy = torch.exp(-entropy * POSTERIOR_ALPHA)
         posterior_threshold_device = torch.tensor(POSTERIOR_THRESHOLD, device=device, dtype=torch.float32)
