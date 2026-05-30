@@ -2,7 +2,7 @@ test_name: "test Qwen3-235B-A22B multi-dp"
 model: "Qwen/Qwen3-235B-A22B"
 num_nodes: 2
 npu_per_node: 16
-env_common:
+env_common: &env_common
   HCCL_OP_EXPANSION_MODE: AIV
   TASK_QUEUE_ENABLE: 1
   VLLM_USE_MODELSCOPE: true
@@ -15,6 +15,8 @@ env_common:
 
 deployment:
   -
+    envs:
+      <<: *env_common
     server_cmd: >
         vllm serve "Qwen/Qwen3-235B-A22B"
         --host 0.0.0.0
@@ -33,6 +35,8 @@ deployment:
         --no-enable-prefix-caching
         --gpu-memory-utilization 0.9
   -
+    envs:
+      <<: *env_common
     server_cmd: >
         vllm serve "Qwen/Qwen3-235B-A22B"
         --headless
