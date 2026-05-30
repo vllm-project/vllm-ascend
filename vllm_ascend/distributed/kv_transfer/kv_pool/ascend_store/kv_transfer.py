@@ -249,6 +249,7 @@ class KVCacheStoreSendingThread(KVTransferThread):
             self.request_queue.task_done()
             return
 
+        families = req_meta.kv_cache_families_by_group or []
         for group_id in req_meta.kv_cache_group_ids or [0]:
             starts = []
             ends = []
@@ -274,6 +275,19 @@ class KVCacheStoreSendingThread(KVTransferThread):
                 keys.append(key.to_string())
                 block_hashes.append(group_block_hashes[start // group_block_size])
 
+            family = families[group_id] if group_id < len(families) else "?"
+            logger.debug(
+                "KV pool put group=%d family=%s block_size=%d req=%s token_len=%d "
+                "keys_pre_shard=%d sample_key=%s",
+                group_id,
+                family,
+                group_block_size,
+                req_id,
+                token_len,
+                len(keys),
+                keys[0] if keys else None,
+            )
+
             if not self.dcp_size > 1 and not req_meta.disable_tp_key_sharding:
                 starts = starts[self.tp_rank % self.put_step :: self.put_step]
                 ends = ends[self.tp_rank % self.put_step :: self.put_step]
@@ -281,12 +295,25 @@ class KVCacheStoreSendingThread(KVTransferThread):
                 block_hashes = block_hashes[self.tp_rank % self.put_step :: self.put_step]
 
             if not keys:
+                logger.debug(
+                    "KV pool put group=%d family=%s req=%s yields no keys after tp sharding",
+                    group_id,
+                    family,
+                    req_id,
+                )
                 continue
 
             exists_states = self.lookup(keys)
             missing_indices = [index for index, exists in enumerate(exists_states) if not exists]
 
             if not missing_indices:
+                logger.debug(
+                    "KV pool put group=%d family=%s req=%s all_keys_already_exist count=%d",
+                    group_id,
+                    family,
+                    req_id,
+                    len(keys),
+                )
                 continue
 
             starts = [starts[index] for index in missing_indices]
@@ -387,6 +414,7 @@ class KVCacheStoreRecvingThread(KVTransferThread):
         addr_list = []
         size_list = []
         key_list = []
+        families = req_meta.kv_cache_families_by_group or []
         for group_id in req_meta.kv_cache_group_ids or [0]:
             block_ids = req_meta.block_ids_by_group[group_id]
             group_block_size = self._get_block_size(group_id)
@@ -395,6 +423,7 @@ class KVCacheStoreRecvingThread(KVTransferThread):
                 // group_block_size
                 * group_block_size
             )
+            group_key_start = len(key_list)
             for start, end, key, _ in self._process_tokens_with_block_ids(
                 token_len,
                 req_meta.block_hashes,
@@ -412,6 +441,16 @@ class KVCacheStoreRecvingThread(KVTransferThread):
                 key_list.append(key.to_string())
                 addr_list.append(addr)
                 size_list.append(size)
+            family = families[group_id] if group_id < len(families) else "?"
+            logger.debug(
+                "KV pool async recv group=%d family=%s block_size=%d req=%s keys=%d sample_key=%s",
+                group_id,
+                family,
+                group_block_size,
+                req_id,
+                len(key_list) - group_key_start,
+                key_list[group_key_start] if len(key_list) > group_key_start else None,
+            )
         if not key_list:
             self.set_finished_request(req_id)
             self.request_queue.task_done()

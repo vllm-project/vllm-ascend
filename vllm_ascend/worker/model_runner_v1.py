@@ -379,8 +379,7 @@ class NPUModelRunner(GPUModelRunner):
             )
             # TODO(zhenwenqi) after https://github.com/vllm-project/vllm/pull/28988 is merged, we can delete this
             self.input_ids = self._make_buffer(max_buffer_num_tokens, dtype=torch.int32)
-            self.positions = torch.zeros(
-                max_buffer_num_tokens, dtype=torch.int64, device=self.device)
+            self.positions = self._make_buffer(max_buffer_num_tokens, dtype=torch.int64)
             
         # Create a CPU numpy buffer for positions computation when
         # self.positions is a plain tensor (non-CpuGpuBuffer case).
@@ -2870,8 +2869,12 @@ class NPUModelRunner(GPUModelRunner):
             is_prefilling=is_prefilling,
             num_input_tokens=num_tokens_padded,
             actual_seq_lengths_q=self.actual_seq_lengths_q,
-            positions=self.positions,
-            positions_cpu=self._dsa_positions_cpu_buf if self.use_compress else None,
+            positions=self.positions.gpu if hasattr(self.positions, "gpu") else self.positions,
+            positions_cpu=(
+                self._positions_cpu_buf[:num_tokens_padded]
+                if self.use_compress
+                else None
+            ),
             attn_state=self.attn_state,
             decode_token_per_req=self.decode_token_per_req,
             prefill_context_parallel_metadata=self.long_seq_metadata,
@@ -3197,8 +3200,12 @@ class NPUModelRunner(GPUModelRunner):
             pad_attn = cudagraph_runtime_mode == CUDAGraphMode.FULL
             # check how to build dummy
             if self.use_compress:
-                self.positions.fill_(127)
-                self._dsa_positions_cpu_buf.fill_(127)
+                if hasattr(self.positions, "np"):
+                    self.positions.np.fill(127)
+                    self.positions.copy_to_gpu()
+                else:
+                    self.positions.fill_(127)
+                    self._dsa_positions_cpu_buf.fill_(127)
             attn_metadata, _ = self._build_attention_metadata(
                 num_tokens=num_tokens_unpadded,
                 num_tokens_padded=num_tokens_padded,

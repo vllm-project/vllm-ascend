@@ -477,6 +477,7 @@ class KVPoolWorker:
                     addr_list = []
                     size_list = []
                     key_list = []
+                    per_group_key_count: dict[int, int] = {}
                     for group_id in load_group_ids:
                         block_ids = request.block_ids_by_group[group_id]
                         group_block_size = self.grouped_block_size[group_id]
@@ -484,6 +485,7 @@ class KVPoolWorker:
                         skip_null = (
                             group_id < len(self.group_uses_align_state) and self.group_uses_align_state[group_id]
                         )
+                        group_key_start = len(key_list)
                         for start, end, key, _ in self.token_database.process_tokens_with_block_ids(
                             token_len,
                             request.block_hashes,
@@ -501,6 +503,18 @@ class KVPoolWorker:
                             key_list.append(key.to_string())
                             addr_list.append(addr)
                             size_list.append(size)
+                        per_group_key_count[group_id] = len(key_list) - group_key_start
+                        family = self._get_group_family(self.kv_cache_group_families, group_id)
+                        logger.debug(
+                            "KV pool worker get group=%d family=%s block_size=%d skip_null=%s "
+                            "keys=%d sample_key=%s",
+                            group_id,
+                            family,
+                            group_block_size,
+                            skip_null,
+                            per_group_key_count[group_id],
+                            key_list[group_key_start] if per_group_key_count[group_id] else None,
+                        )
                     if not key_list:
                         continue
                     key_list_c = key_list[self.tp_rank % len(key_list) :] + key_list[: self.tp_rank % len(key_list)]
@@ -577,7 +591,6 @@ class KVPoolWorker:
                 continue
 
             request.skip_null_blocks_by_group = self.group_uses_align_state
-            request.disable_tp_key_sharding = (self.use_mla or self.use_sparse) and self.put_step > 1
             request.current_event = current_event
             self.kv_send_thread.add_stored_request(  # type: ignore[union-attr]
                 request.req_id

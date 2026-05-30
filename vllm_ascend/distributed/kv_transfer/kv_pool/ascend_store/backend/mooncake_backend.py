@@ -18,6 +18,43 @@ from vllm_ascend.distributed.kv_transfer.utils.mooncake_transfer_engine import g
 DEFAULT_GLOBAL_SEGMENT_SIZE = 1073741824  # 1.0 GiB
 DEFAULT_LOCAL_BUFFER_SIZE = 1073741824  # 1.0 GiB
 
+# DSV4 KV-pool diagnostic: when batch_get/batch_put returns negatives, parse
+# the key to attribute failure to specific (group, cache_family) buckets so
+# we can tell whether c1/c4/c128 is the actual culprit.
+_KEY_FIELD_RE = re.compile(r"@(group|cache_family):([^@]+)")
+
+
+def _summarize_negative_keys(keys: list[str], res_list: list[int]) -> tuple[dict[tuple[str, str], int], list[tuple[int, str, int]]]:
+    bucket_counts: dict[tuple[str, str], int] = {}
+    samples: list[tuple[int, str, int]] = []
+    for index, value in enumerate(res_list):
+        if value >= 0:
+            continue
+        key = keys[index] if index < len(keys) else "<oob>"
+        fields = dict(_KEY_FIELD_RE.findall(key))
+        bucket = (fields.get("group", "?"), fields.get("cache_family", "?"))
+        bucket_counts[bucket] = bucket_counts.get(bucket, 0) + 1
+        if len(samples) < 6:
+            samples.append((index, key, value))
+    return bucket_counts, samples
+
+
+def _log_negative_results(op: str, keys: list[str], res_list: list[int]) -> None:
+    negative_count = sum(1 for value in res_list if value < 0)
+    if not negative_count:
+        return
+    bucket_counts, samples = _summarize_negative_keys(keys, res_list)
+    logger.error(
+        "MooncakeBackend.%s negatives op=%s total_keys=%d negative_count=%d "
+        "buckets_(group,family)=%s samples(idx,key,res)=%s",
+        op,
+        op,
+        len(keys),
+        negative_count,
+        sorted(bucket_counts.items()),
+        samples,
+    )
+
 
 class MooncakeBackend(Backend):
     def __init__(self, parallel_config: ParallelConfig):
@@ -83,9 +120,8 @@ class MooncakeBackend(Backend):
     def put(self, keys: list[str], addrs: list[list[int]], sizes: list[list[int]]):
         try:
             res = self.store.batch_put_from_multi_buffers(keys, addrs, sizes)
-            for value in res:
-                if value < 0:
-                    logger.error("Failed to put key %s,res:%s", keys, res)
+            res_list = list(res)
+            _log_negative_results("put", keys, res_list)
         except Exception as e:
             logger.error("Failed to put key %s,error:%s", keys, e)
 
@@ -104,9 +140,7 @@ class MooncakeBackend(Backend):
                 res_list[:12],
                 sum(1 for value in res_list if value < 0),
             )
-            for value in res_list:
-                if value < 0:
-                    logger.error("Failed to get key %s, res:%s", keys, res_list)
+            _log_negative_results("get", keys, res_list)
         except Exception as e:
             logger.error("Failed to get key %s, error:%s", keys, e)
 
