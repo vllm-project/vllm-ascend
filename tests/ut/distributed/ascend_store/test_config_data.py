@@ -155,7 +155,8 @@ class TestChunkedTokenDatabase(unittest.TestCase):
         self.assertEqual(size[1], 160)  # 320/16*8
 
     def test_prepare_value_layer(self):
-        addr, size = self.db.prepare_value_layer(0, 16, [5, 6], layer_id=0)
+        addr, size, block_id = self.db.prepare_value_layer(0, 16, [5, 6], layer_id=0)
+        self.assertEqual(block_id, 5)
         self.assertEqual(len(addr), 2)
         # layer_id=0 => kv_caches_base_addr[0*2] and [0*2+... index mod length]
         self.assertEqual(addr[0], 1000 + 5 * 160)

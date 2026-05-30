@@ -87,7 +87,7 @@ class FakeTokenDatabase:
 
     def prepare_value_layer(self, start, end, block_ids, layer_id):
         block_id = block_ids[start // self.block_size]
-        return [2000 + layer_id * 100 + block_id], [end - start]
+        return [2000 + layer_id * 100 + block_id], [end - start], block_id
 
     def decode_adaptor_prefill_pp(self, keys, addrs, sizes):
         return keys, addrs, sizes
@@ -316,6 +316,8 @@ class TestKVCacheStoreRecvingThread(unittest.TestCase):
             tp_rank=0,
             dcp_size=1,
             ready_event=threading.Event(),
+            invalid_block_ids=set(),
+            invalid_block_ids_lock=threading.Lock(),
         )
         load_spec = LoadSpec(vllm_cached_tokens=0, kvpool_cached_tokens=32, can_load=True, token_len=32)
         req = ReqMeta(
@@ -442,6 +444,8 @@ class TestKVCacheStoreLayerRecvingThread(unittest.TestCase):
             dcp_size=1,
             ready_event=threading.Event(),
             get_event=get_event,
+            invalid_block_ids=set(),
+            invalid_block_ids_lock=threading.Lock(),
         )
         meta = KeyMetadata("m", 0, 0, 0, 0)
         req = LayerMultiBlockReqMeta(
