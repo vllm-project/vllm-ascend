@@ -892,9 +892,23 @@ ge::graphStatus CompressorTiling::CheckDtypeConsistency() const
     if (CheckDtypeConsistencyX(context_->wkv.desc, WKV_NAME) != ge::GRAPH_SUCCESS ||
         CheckDtypeConsistencyX(context_->wgate.desc, WGATE_NAME) != ge::GRAPH_SUCCESS ||
         CheckDtypeConsistencyX(context_->normWeight.desc, NORM_WEIGHT_NAME) != ge::GRAPH_SUCCESS ||
-        CheckDtypeConsistencyX(context_->ropeSin.desc, ROPE_SIN_NAME) != ge::GRAPH_SUCCESS ||
-        CheckDtypeConsistencyX(context_->ropeCos.desc, ROPE_COS_NAME) != ge::GRAPH_SUCCESS ||
         CheckDtypeConsistencyX(context_->cmpKv.desc, CMP_KV_NAME) != ge::GRAPH_SUCCESS) {
+        return ge::GRAPH_FAILED;
+    }
+    const auto ropeSinDtype = context_->ropeSin.desc->GetDataType();
+    const auto ropeCosDtype = context_->ropeCos.desc->GetDataType();
+    const bool ropeFloatSupported = (socVersion_ == platform_ascendc::SocVersion::ASCEND910B ||
+                                     socVersion_ == platform_ascendc::SocVersion::ASCEND910_93);
+    const bool ropeSinOk = (ropeSinDtype == context_->dtype) ||
+                           (ropeFloatSupported && ropeSinDtype == ge::DT_FLOAT);
+    const bool ropeCosOk = (ropeCosDtype == context_->dtype) ||
+                           (ropeFloatSupported && ropeCosDtype == ge::DT_FLOAT);
+    if (!ropeSinOk || !ropeCosOk) {
+        OP_LOGE(context_->opName,
+                "ropeSin/ropeCos datatype should be same with x%s, but got ropeSin: %s, ropeCos: %s, x: %s",
+                ropeFloatSupported ? " or be float" : "",
+                DataTypeToSerialString(ropeSinDtype).c_str(), DataTypeToSerialString(ropeCosDtype).c_str(),
+                DataTypeToSerialString(context_->dtype).c_str());
         return ge::GRAPH_FAILED;
     }
     return ge::GRAPH_SUCCESS;
