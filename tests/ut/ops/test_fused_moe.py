@@ -775,6 +775,66 @@ class TestAscendFusedMoESharedExperts:
         torch.testing.assert_close(part1_out, gate_up)
         torch.testing.assert_close(part2_out, F.sigmoid(gate_out) * down_out)
 
+    def test_quantized_shared_experts_pass_deepseek_swiglu_attrs(self, monkeypatch):
+        layer = AscendFusedMoE.__new__(AscendFusedMoE)
+        if not hasattr(layer, "_forward_shared_experts"):
+            pytest.skip("Current AscendFusedMoE has no shared expert fast path")
+        layer.multistream_overlap_shared_expert = False
+        layer.quant_type = QuantType.W8A8
+
+        shared_experts = MagicMock()
+        shared_experts.gate_up_proj.weight = torch.ones(4, 4)
+        shared_experts.gate_up_proj.weight_scale = torch.ones(4)
+        shared_experts.gate_up_proj.weight_scale_fp32 = torch.ones(8)
+        shared_experts.down_proj.weight = torch.ones(4, 4)
+        shared_experts.down_proj.weight_scale = torch.ones(4)
+        layer._shared_experts = shared_experts
+
+        stream = MagicMock()
+        monkeypatch.setattr(fused_moe_module.torch.npu, "current_stream", MagicMock(return_value=stream))
+        monkeypatch.setattr(fused_moe_module, "shared_experts_calculation_stream", MagicMock(return_value=stream))
+        monkeypatch.setattr(fused_moe_module, "_EXTRA_CTX", SimpleNamespace(moe_comm_type=MoECommType.ALLGATHER))
+
+        quantized_hidden = torch.ones(2, 4, dtype=torch.int8)
+        pertoken_scale = torch.ones(2)
+        monkeypatch.setattr(
+            fused_moe_module.torch_npu,
+            "npu_dynamic_quant",
+            MagicMock(return_value=(quantized_hidden, pertoken_scale)),
+        )
+        gate_up_int32 = torch.ones(2, 8, dtype=torch.int32)
+        shared_out = torch.ones(2, 4)
+        monkeypatch.setattr(
+            fused_moe_module.torch_npu,
+            "npu_quant_matmul",
+            MagicMock(side_effect=[gate_up_int32, shared_out]),
+        )
+        dequant_swiglu_quant = MagicMock(return_value=(torch.ones(2, 4, dtype=torch.int8), torch.ones(2)))
+        monkeypatch.setattr(
+            fused_moe_module.torch.ops._C_ascend,
+            "npu_dequant_swiglu_quant",
+            dequant_swiglu_quant,
+            raising=False,
+        )
+
+        fused_moe_evts = SimpleNamespace(
+            before_routed_experts=MagicMock(),
+            after_routed_experts=None,
+            before_gmm2=None,
+            before_combine=None,
+            swiglu_limit=10.0,
+        )
+
+        result = layer._forward_shared_experts(torch.ones(2, 4), fused_moe_evts)
+
+        torch.testing.assert_close(result, shared_out)
+        dequant_swiglu_quant.assert_called_once()
+        kwargs = dequant_swiglu_quant.call_args.kwargs
+        assert kwargs["swiglu_mode"] == 1
+        assert kwargs["clamp_limit"] == 10.0
+        assert kwargs["glu_alpha"] == 1.0
+        assert kwargs["glu_bias"] == 0.0
+
     @pytest.mark.parametrize("has_shared_experts", [False, True])
     def test_shared_forward_impl_routes_shared_output(self, monkeypatch, has_shared_experts):
         layer = AscendFusedMoE.__new__(AscendFusedMoE)

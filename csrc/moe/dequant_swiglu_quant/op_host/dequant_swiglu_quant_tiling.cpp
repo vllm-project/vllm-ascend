@@ -455,11 +455,18 @@ ge::graphStatus DequantSwigluQuantDskTiling::CheckStaticQuantShape(const int64_t
                   return ge::GRAPH_FAILED);
   colLen = quantShape.GetDim(quantShape.GetDimNum() - 1);
   if(quantShape.GetDimNum() == 1){
+    if (!hasGroupIndex_ && colLen == outDimy_) {
+      return ge::GRAPH_SUCCESS;
+    }
+    const std::string expectedShape = hasGroupIndex_
+        ? ("[" + std::to_string(groupNum_) + ", ] or [" +
+           std::to_string(groupNum_) + ", " + std::to_string(outDimy_) + "]")
+        : ("[1], [" + std::to_string(outDimy_) + "] or [1, " +
+           std::to_string(outDimy_) + "]");
     OP_CHECK_IF(colLen != groupNum_,
               OP_LOGE_FOR_INVALID_SHAPE(context_->GetNodeName(), paramName,
                   Ops::Base::ToString(quantShape).c_str(),
-                  ("[" + std::to_string(groupNum_) + ", ] or [" +
-                   std::to_string(groupNum_) + ", " + std::to_string(outDimy_) + "]").c_str()),
+                  expectedShape.c_str()),
               return ge::GRAPH_FAILED);
     colLen = 1;
   }
@@ -497,9 +504,6 @@ ge::graphStatus DequantSwigluQuantDskTiling::CheckIllegalParam() {
 }
 
 ge::graphStatus DequantSwigluQuantDskTiling::GetShapeAttrsInfoInner() {
-  if (!IsPerformanceAndGroupIndexBrach()) {
-    return ge::GRAPH_SUCCESS;
-  }
   // get 2H from x, get H from y, check if 2H can be divided by 64
   auto shapeX = context_->GetInputShape(0);
   OP_CHECK_NULL_WITH_CONTEXT(context_, shapeX);
@@ -521,7 +525,7 @@ ge::graphStatus DequantSwigluQuantDskTiling::GetShapeAttrsInfoInner() {
   // set the relevant param of group, hasGroupIndex_, groupNum_ and speGroupType_
   auto shapeGroupIndex = context_->GetOptionalInputShape(INPUT_GROUP_INDEX);
   hasGroupIndex_ = shapeGroupIndex != nullptr;
-  groupNum_ = 0;
+  groupNum_ = 1;
   speGroupType_ = false;
   if (hasGroupIndex_) {
     const gert::Shape& inputShapeGroupIndex = shapeGroupIndex->GetStorageShape();
@@ -561,7 +565,16 @@ bool DequantSwigluQuantDskTiling::IsPerformanceAndGroupIndexBrach() {
 }
 
 bool DequantSwigluQuantDskTiling::IsCapable() {
-  return IsPerformanceAndGroupIndexBrach();
+  if (IsPerformanceAndGroupIndexBrach()) {
+    return true;
+  }
+  auto* attrs = context_->GetAttrs();
+  if (attrs == nullptr) {
+    return false;
+  }
+  auto* swigluMode = attrs->GetAttrPointer<int>(SWIGLU_MODE_INDEX);
+  bool needsV2Swiglu = swigluMode != nullptr && *swigluMode != 0;
+  return needsV2Swiglu;
 }
 
 void DequantSwigluQuantDskTiling::CountTilingKey() {

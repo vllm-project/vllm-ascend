@@ -764,6 +764,8 @@ class AscendFusedMoE(FusedMoE):
                     quant_mode=1,
                     swiglu_mode=1,
                     clamp_limit=fused_moe_evts.swiglu_limit,
+                    glu_alpha=1.0,
+                    glu_bias=0.0,
                 )
                 # Execute the down projection concurrently with the combine
                 # communication.
