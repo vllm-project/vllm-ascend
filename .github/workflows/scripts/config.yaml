@@ -136,6 +136,8 @@ e2e-multicard-2-cards:
   estimated_time: 217
 - name: tests/e2e/multicard/2-cards/test_sequence_parallelism_moe.py
   estimated_time: 44
+- name: tests/e2e/multicard/2-cards/test_hccl_weight_transfer.py
+  estimated_time: 2000
 e2e-multicard-4-cards:
 - name: tests/e2e/multicard/4-cards/test_qwen3_next.py
   estimated_time: 1725
