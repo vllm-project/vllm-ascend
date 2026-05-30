@@ -45,7 +45,7 @@ class TestRoutedExpertsCapturerCapture:
         dp_metadata.num_tokens_across_dp_cpu = torch.tensor(num_tokens_across_dp_cpu)
         return dp_metadata
 
-    @patch("vllm.forward_context.get_forward_context")
+    @patch("vllm_ascend.patch.worker.patch_routed_experts_capture.get_forward_context")
     def test_single_dp(self, mock_get_ctx):
         """Test single DP scenario (no data parallelism)."""
         capturer = self._create_mock_capturer(dp_rank=0, tp_size=1)
@@ -60,7 +60,7 @@ class TestRoutedExpertsCapturerCapture:
         actual = capturer.device_buffer[:3, 0, :]
         torch.testing.assert_close(actual, expected)
 
-    @patch("vllm.forward_context.get_forward_context")
+    @patch("vllm_ascend.patch.worker.patch_routed_experts_capture.get_forward_context")
     def test_multi_dp_naive_dispatch(self, mock_get_ctx):
         """Test multi-DP naive dispatch (n == total)."""
         capturer = self._create_mock_capturer(dp_rank=0, tp_size=1)
@@ -76,7 +76,7 @@ class TestRoutedExpertsCapturerCapture:
         actual = capturer.device_buffer[:5, 0, :]
         torch.testing.assert_close(actual, expected)
 
-    @patch("vllm.forward_context.get_forward_context")
+    @patch("vllm_ascend.patch.worker.patch_routed_experts_capture.get_forward_context")
     def test_multi_dp_modular_kernel(self, mock_get_ctx):
         """Test multi-DP modular kernel path (n == token_num_per_dp)."""
         capturer = self._create_mock_capturer(dp_rank=1, tp_size=1)
@@ -92,7 +92,7 @@ class TestRoutedExpertsCapturerCapture:
         actual = capturer.device_buffer[:7, 0, :]
         torch.testing.assert_close(actual, expected)
 
-    @patch("vllm.forward_context.get_forward_context")
+    @patch("vllm_ascend.patch.worker.patch_routed_experts_capture.get_forward_context")
     def test_multi_dp_padded_all_gather(self, mock_get_ctx):
         """Test multi-DP padded all-gather path (n == total_with_padding)."""
         capturer = self._create_mock_capturer(dp_rank=0, tp_size=1)
@@ -108,10 +108,10 @@ class TestRoutedExpertsCapturerCapture:
         actual = capturer.device_buffer[:5, 0, :]
         torch.testing.assert_close(actual, expected)
 
-    @patch("vllm.forward_context.get_forward_context")
-    @patch("vllm.distributed.parallel_state.get_tp_group")
-    @patch("torch.distributed.all_gather")
-    def test_sp_modular_kernel_all2all(self, mock_all_gather, mock_get_tp_group, mock_get_ctx):
+    @patch("vllm_ascend.patch.worker.patch_routed_experts_capture.get_forward_context")
+    @patch("vllm_ascend.patch.worker.patch_routed_experts_capture.get_tp_group")
+    @patch("vllm_ascend.patch.worker.patch_routed_experts_capture.dist")
+    def test_sp_modular_kernel_all2all(self, mock_dist, mock_get_tp_group, mock_get_ctx):
         """Test SP + modular kernel path with ALLTOALL comm type."""
         capturer = self._create_mock_capturer(dp_rank=0, tp_size=2)
         dp_metadata = self._create_mock_dp_metadata([10])
@@ -134,7 +134,7 @@ class TestRoutedExpertsCapturerCapture:
                 output_list[0].copy_(input_tensor)
                 output_list[1].copy_(input_tensor + 5 * 2)
 
-            mock_all_gather.side_effect = mock_all_gather_impl
+            mock_dist.all_gather = mock_all_gather_impl
 
             capture(capturer, layer_id=0, topk_ids=topk_ids)
 
@@ -147,10 +147,10 @@ class TestRoutedExpertsCapturerCapture:
             else:
                 delattr(_EXTRA_CTX, "moe_comm_type")
 
-    @patch("vllm.forward_context.get_forward_context")
-    @patch("vllm.distributed.parallel_state.get_tp_group")
-    @patch("torch.distributed.all_gather")
-    def test_sp_modular_kernel_mc2(self, mock_all_gather, mock_get_tp_group, mock_get_ctx):
+    @patch("vllm_ascend.patch.worker.patch_routed_experts_capture.get_forward_context")
+    @patch("vllm_ascend.patch.worker.patch_routed_experts_capture.get_tp_group")
+    @patch("vllm_ascend.patch.worker.patch_routed_experts_capture.dist")
+    def test_sp_modular_kernel_mc2(self, mock_dist, mock_get_tp_group, mock_get_ctx):
         """Test SP + modular kernel path with MC2 comm type."""
         capturer = self._create_mock_capturer(dp_rank=0, tp_size=2)
         dp_metadata = self._create_mock_dp_metadata([5, 7])
@@ -173,7 +173,7 @@ class TestRoutedExpertsCapturerCapture:
                 output_list[0].copy_(input_tensor)
                 output_list[1].copy_(input_tensor + 4 * 2)
 
-            mock_all_gather.side_effect = mock_all_gather_impl
+            mock_dist.all_gather = mock_all_gather_impl
 
             capture(capturer, layer_id=0, topk_ids=topk_ids)
 
@@ -185,7 +185,7 @@ class TestRoutedExpertsCapturerCapture:
             else:
                 delattr(_EXTRA_CTX, "moe_comm_type")
 
-    @patch("vllm.forward_context.get_forward_context")
+    @patch("vllm_ascend.patch.worker.patch_routed_experts_capture.get_forward_context")
     def test_unexpected_batch_dim(self, mock_get_ctx):
         """Test that unexpected batch dimension raises AssertionError."""
         capturer = self._create_mock_capturer(dp_rank=0, tp_size=2)
@@ -198,7 +198,7 @@ class TestRoutedExpertsCapturerCapture:
         with pytest.raises(AssertionError, match="unexpected topk_ids batch"):
             capture(capturer, layer_id=0, topk_ids=topk_ids)
 
-    @patch("vllm.forward_context.get_forward_context")
+    @patch("vllm_ascend.patch.worker.patch_routed_experts_capture.get_forward_context")
     def test_layer_id_out_of_bounds(self, mock_get_ctx):
         """Test that out-of-bounds layer_id is handled gracefully."""
         capturer = self._create_mock_capturer(dp_rank=0, tp_size=1)
