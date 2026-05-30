@@ -786,3 +786,61 @@ class TestNPUPlatform(TestBase):
             self.platform.get_static_graph_wrapper_cls(),
             "vllm_ascend.compilation.acl_graph.ACLGraphWrapper",
         )
+
+    def test_balance_scheduler_and_recompute_scheduler_mutex_check(self):
+        """Test that BalanceScheduler and RecomputeScheduler cannot be enabled simultaneously."""
+
+        # Mock vllm_config with both schedulers enabled
+        mock_vllm_config = self.mock_vllm_config()
+        mock_vllm_config.additional_config = {
+            "enable_balance_scheduling": True,
+            "recompute_scheduler_enable": True,
+        }
+
+        # Should raise ValueError when both are enabled
+        with self.assertRaises(ValueError) as context, patch("vllm_ascend.platform.init_ascend_config") as mock_init:
+            mock_ascend_config = self.mock_vllm_ascend_config()
+            mock_ascend_config.enable_balance_scheduling = True
+            mock_ascend_config.recompute_scheduler_enable = True
+            mock_init.return_value = mock_ascend_config
+
+            self.platform.check_and_update_config(mock_vllm_config)
+
+        self.assertIn("cannot be enabled simultaneously", str(context.exception))
+
+    def test_balance_scheduler_alone_works(self):
+        """Test that BalanceScheduler alone works fine."""
+        mock_vllm_config = self.mock_vllm_config()
+        mock_vllm_config.additional_config = {
+            "enable_balance_scheduling": True,
+        }
+        # Configure valid kv_role for balance scheduling (kv_both or None)
+        mock_vllm_config.kv_transfer_config = None
+
+        with patch("vllm_ascend.platform.init_ascend_config") as mock_init:
+            mock_ascend_config = self.mock_vllm_ascend_config()
+            mock_ascend_config.enable_balance_scheduling = True
+            mock_ascend_config.recompute_scheduler_enable = False
+            mock_init.return_value = mock_ascend_config
+
+            # Should not raise any error
+            self.platform.check_and_update_config(mock_vllm_config)
+
+    def test_recompute_scheduler_alone_works(self):
+        """Test that RecomputeScheduler alone works fine."""
+        mock_vllm_config = self.mock_vllm_config()
+        mock_vllm_config.additional_config = {
+            "recompute_scheduler_enable": True,
+        }
+        # Configure valid kv_role for recompute scheduler (kv_producer or kv_consumer)
+        mock_vllm_config.kv_transfer_config = MagicMock()
+        mock_vllm_config.kv_transfer_config.kv_role = "kv_producer"
+
+        with patch("vllm_ascend.platform.init_ascend_config") as mock_init:
+            mock_ascend_config = self.mock_vllm_ascend_config()
+            mock_ascend_config.enable_balance_scheduling = False
+            mock_ascend_config.recompute_scheduler_enable = True
+            mock_init.return_value = mock_ascend_config
+
+            # Should not raise any error
+            self.platform.check_and_update_config(mock_vllm_config)
