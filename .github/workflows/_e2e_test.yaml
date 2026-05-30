@@ -195,7 +195,7 @@ jobs:
         if: ${{ inputs.continue_on_error == true && github.event_name != 'pull_request' }}
         with:
           name: timing-data-singlecard-light-part${{ matrix.part }}
-          path: /tmp/test_timing_data.json
+          path: test_timing_data.json
           if-no-files-found: warn
           retention-days: 5
 
@@ -331,7 +331,7 @@ jobs:
         if: ${{ inputs.continue_on_error == true && github.event_name != 'pull_request' }}
         with:
           name: timing-data-singlecard-full-part${{ matrix.part }}
-          path: /tmp/test_timing_data.json
+          path: test_timing_data.json
           if-no-files-found: warn
           retention-days: 5
 
@@ -470,7 +470,7 @@ jobs:
         if: ${{ inputs.continue_on_error == true && github.event_name != 'pull_request' }}
         with:
           name: timing-data-2card-light-part${{ matrix.part }}
-          path: /tmp/test_timing_data.json
+          path: test_timing_data.json
           if-no-files-found: warn
           retention-days: 5
 
@@ -604,7 +604,7 @@ jobs:
         if: ${{ inputs.continue_on_error == true && github.event_name != 'pull_request' }}
         with:
           name: timing-data-2card-full-part${{ matrix.part }}
-          path: /tmp/test_timing_data.json
+          path: test_timing_data.json
           if-no-files-found: warn
           retention-days: 5
 
@@ -793,7 +793,7 @@ jobs:
         if: ${{ inputs.continue_on_error == true && github.event_name != 'pull_request' }}
         with:
           name: timing-data-4card-light-part${{ matrix.part }}
-          path: /tmp/test_timing_data.json
+          path: test_timing_data.json
           if-no-files-found: warn
           retention-days: 5
 
@@ -927,7 +927,7 @@ jobs:
         if: ${{ inputs.continue_on_error == true && github.event_name != 'pull_request' }}
         with:
           name: timing-data-4card-full-part${{ matrix.part }}
-          path: /tmp/test_timing_data.json
+          path: test_timing_data.json
           if-no-files-found: warn
           retention-days: 5
 
@@ -1061,7 +1061,7 @@ jobs:
   e2e_310p-4cards:
     name: 310p multicards 4cards
     runs-on: linux-aarch64-310p-4
-    if: ${{ inputs.contains_310 || inputs.p310_tests != '' }}
+    if: ${{ inputs.contains_310 || inputs.p310_multicard_tests != '' }}
     container:
       image: ${{ inputs.image_310p }}
       env:
@@ -1169,7 +1169,7 @@ jobs:
           pytest -sv --durations=0 ${{ inputs.p310_multicard_tests }}
 
       - name: Summarize 310p multicards failure
-        if: ${{ always() && (inputs.contains_310 || inputs.p310_tests != '') }}
+        if: ${{ always() && (inputs.contains_310 || inputs.p310_multicard_tests != '') }}
         run: |
           python3 .github/workflows/scripts/ci_log_summary.py \
             --step-name "Run vllm-project/vllm-ascend test" \
