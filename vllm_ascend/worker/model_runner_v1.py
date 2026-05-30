@@ -1787,6 +1787,49 @@ class NPUModelRunner(GPUModelRunner):
                 num_scheduled_tokens_np = np.array(tokens, dtype=np.int32)
                 max_num_scheduled_tokens = int(num_scheduled_tokens_np.max())
 
+                # For ngram_gpu with full cudagraph: pad num_scheduled_tokens_np
+                # to uniform_decode_query_len so FULL dispatch has enough
+                # request slots. Skip padding in PIECEWISE / NONE (eager) modes
+                # since there is no FULL dispatch to benefit from.
+                if (
+                    self.speculative_config is not None
+                    and self.speculative_config.use_ngram_gpu()
+                    and self.compilation_config.cudagraph_mode.has_full_cudagraphs()
+                    and max_num_scheduled_tokens >= 1
+                    and max_num_scheduled_tokens <= self.uniform_decode_query_len
+                    and not np.all(num_scheduled_tokens_np == self.uniform_decode_query_len)
+                ):
+                    target_ql = self.uniform_decode_query_len
+                    num_padding_tokens: dict[str, int] = {}
+                    for i in range(num_reqs):
+                        if num_scheduled_tokens_np[i] < target_ql:
+                            pad_count = target_ql - int(num_scheduled_tokens_np[i])
+                            req_id = req_ids[i]
+                            last_token = int(self.input_batch.token_ids_cpu[
+                                i,
+                                self.input_batch.num_computed_tokens_cpu[i]
+                                + int(num_scheduled_tokens_np[i]) - 1
+                            ])
+                            dummy_draft = [last_token] * pad_count
+                            if req_id in scheduler_output.scheduled_spec_decode_tokens:
+                                scheduler_output.scheduled_spec_decode_tokens[req_id].extend(dummy_draft)
+                            else:
+                                scheduler_output.scheduled_spec_decode_tokens[req_id] = dummy_draft
+                            num_padding_tokens[req_id] = pad_count
+                            num_scheduled_tokens_np[i] = target_ql
+                    scheduler_output.total_num_scheduled_tokens = int(num_scheduled_tokens_np.sum())
+                    max_num_scheduled_tokens = target_ql
+
+                    # Record padding counts so scheduler can exclude dummy
+                    # drafts from acceptance rate statistics.
+                    if num_padding_tokens:
+                        if scheduler_output.num_invalid_spec_tokens is None:
+                            scheduler_output.num_invalid_spec_tokens = {}
+                        for rid, cnt in num_padding_tokens.items():
+                            scheduler_output.num_invalid_spec_tokens[rid] = (
+                                scheduler_output.num_invalid_spec_tokens.get(rid, 0) + cnt
+                            )
+
                 (
                     logits_indices,
                     spec_decode_metadata,
