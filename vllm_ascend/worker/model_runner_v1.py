@@ -981,6 +981,9 @@ class NPUModelRunner(GPUModelRunner):
             scheduler_output.has_structured_output_requests
             or self.input_batch.sampling_metadata.output_token_ids
         ):
+            # No CPU-side consumer in this step. Clear req-ids so later async
+            # sampling won't block on a stale draft-token event.
+            self._draft_token_req_ids = None
             return
         self._draft_token_req_ids = self.input_batch.req_ids.copy()
 
