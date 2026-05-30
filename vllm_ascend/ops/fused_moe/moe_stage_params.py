@@ -69,7 +69,7 @@ class MoEQuantParams:
 
     @property
     def is_mxfp(self) -> bool:
-        return self.quant_type in (QuantType.MXFP8, QuantType.MXFP4)
+        return self.quant_type in (QuantType.MXFP8, QuantType.MXFP4, QuantType.W4A8MXFP)
 
     @property
     def is_int_quant(self) -> bool:
@@ -81,7 +81,7 @@ class MoEQuantParams:
 
     @property
     def dispatch_with_quant(self) -> bool:
-        return self.quant_type in (QuantType.W8A8, QuantType.W4A8, QuantType.MXFP8, QuantType.MXFP4)
+        return self.quant_type in (QuantType.W8A8, QuantType.W4A8, QuantType.MXFP8, QuantType.MXFP4, QuantType.W4A8MXFP)
 
 
 __all__ = [
