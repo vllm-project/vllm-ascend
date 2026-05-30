@@ -31,10 +31,30 @@ from vllm.entrypoints.openai.engine.protocol import (
     DeltaFunctionCall,
     DeltaMessage,
     DeltaToolCall,
+    ExtractedToolCallInformation,
+    FunctionCall,
+    ToolCall,
 )
 from vllm.tool_parsers.deepseekv4_tool_parser import DeepSeekV4ToolParser
 
 ESCAPED_ARGUMENTS_PARAM_NAME = "__vllm_param_arguments__"
+
+
+def _ensure_parser_regexes(self: DeepSeekV4ToolParser) -> None:
+    self.tool_call_complete_regex = re.compile(
+        re.escape(self.tool_call_start_token) + r"(.*?)" + re.escape(self.tool_call_end_token),
+        re.DOTALL,
+    )
+    self.invoke_complete_regex = re.compile(
+        r'<｜DSML｜invoke\s+name="([^"]+)"\s*>(.*?)</｜DSML｜invoke>',
+        re.DOTALL,
+    )
+    self.parameter_complete_regex = re.compile(
+        r'<｜DSML｜parameter\s+name="([^"]+)"\s+string="(true|false)"\s*>(.*?)</｜DSML｜parameter>',
+        re.DOTALL,
+    )
+    self.parameter_start_regex = re.compile(r'<｜DSML｜parameter\s+name="([^"]+)"\s+string="(true|false)"\s*>')
+    self.invoke_start_regex = re.compile(r'<｜DSML｜invoke\s+name="([^"]+)"\s*>')
 
 
 def _partial_tag_overlap(text: str, tag: str) -> int:
@@ -65,25 +85,7 @@ def _ensure_streaming_attrs(self: DeepSeekV4ToolParser) -> None:
     if not hasattr(self, "_pending_delta_messages"):
         self._pending_delta_messages = deque()
 
-    if not hasattr(self, "tool_call_complete_regex"):
-        self.tool_call_complete_regex = re.compile(
-            re.escape(self.tool_call_start_token) + r"(.*?)" + re.escape(self.tool_call_end_token),
-            re.DOTALL,
-        )
-    if not hasattr(self, "invoke_complete_regex"):
-        self.invoke_complete_regex = re.compile(
-            r'<｜DSML｜invoke\s+name="([^"]+)"\s*>(.*?)</｜DSML｜invoke>',
-            re.DOTALL,
-        )
-    if not hasattr(self, "parameter_complete_regex"):
-        self.parameter_complete_regex = re.compile(
-            r'<｜DSML｜parameter\s+name="([^"]+)"\s+string="(true|false)"\s*>(.*?)</｜DSML｜parameter>',
-            re.DOTALL,
-        )
-    if not hasattr(self, "parameter_start_regex"):
-        self.parameter_start_regex = re.compile(r'<｜DSML｜parameter\s+name="([^"]+)"\s+string="(true|false)"\s*>')
-    if not hasattr(self, "invoke_start_regex"):
-        self.invoke_start_regex = re.compile(r'<｜DSML｜invoke\s+name="([^"]+)"\s*>')
+    _ensure_parser_regexes(self)
 
     if not hasattr(self, "current_tool_index"):
         self.current_tool_index = 0
@@ -109,6 +111,117 @@ def _function_parameters(tool):
             return function.get("parameters")
         return getattr(function, "parameters", None)
     return getattr(getattr(tool, "function", None), "parameters", None)
+
+
+def _extract_types_from_schema(schema: Any) -> list[str]:
+    if schema is None or not isinstance(schema, dict):
+        return ["string"]
+
+    types: set[str] = set()
+    type_value = schema.get("type")
+    if isinstance(type_value, str):
+        types.add(type_value)
+    elif isinstance(type_value, list):
+        types.update(t for t in type_value if isinstance(t, str))
+
+    enum_values = schema.get("enum")
+    if isinstance(enum_values, list) and enum_values:
+        for value in enum_values:
+            if value is None:
+                types.add("null")
+            elif isinstance(value, bool):
+                types.add("boolean")
+            elif isinstance(value, int):
+                types.add("integer")
+            elif isinstance(value, float):
+                types.add("number")
+            elif isinstance(value, str):
+                types.add("string")
+            elif isinstance(value, list):
+                types.add("array")
+            elif isinstance(value, dict):
+                types.add("object")
+
+    for choice_field in ("anyOf", "oneOf", "allOf"):
+        choices = schema.get(choice_field)
+        if isinstance(choices, list):
+            for choice in choices:
+                types.update(_extract_types_from_schema(choice))
+
+    return list(types) if types else ["string"]
+
+
+_TYPE_ALIASES: dict[str, str] = {
+    "str": "string",
+    "text": "string",
+    "varchar": "string",
+    "char": "string",
+    "enum": "string",
+    "int": "integer",
+    "int32": "integer",
+    "int64": "integer",
+    "uint": "integer",
+    "uint32": "integer",
+    "uint64": "integer",
+    "long": "integer",
+    "short": "integer",
+    "unsigned": "integer",
+    "float": "number",
+    "float32": "number",
+    "float64": "number",
+    "double": "number",
+    "bool": "boolean",
+    "dict": "object",
+    "arr": "array",
+    "list": "array",
+    "sequence": "array",
+}
+
+
+def _coerce_to_schema_type(value: str, schema_type: str | list[str]) -> Any:
+    if isinstance(schema_type, str):
+        schema_type = [schema_type]
+
+    normalized_types = {_TYPE_ALIASES.get(key, key) for t in schema_type for key in [t.strip().lower()]}
+
+    for candidate_type in ("null", "integer", "number", "boolean", "object", "array", "string"):
+        if candidate_type not in normalized_types:
+            continue
+
+        if candidate_type == "null":
+            if value.lower() == "null":
+                return None
+            continue
+        if candidate_type == "string":
+            return value
+        if candidate_type == "integer":
+            try:
+                return int(value)
+            except (TypeError, ValueError):
+                continue
+        if candidate_type == "number":
+            try:
+                val = float(value)
+                return val if val != int(val) else int(val)
+            except (TypeError, ValueError):
+                continue
+        if candidate_type == "boolean":
+            lower_val = value.lower().strip()
+            if lower_val in ("true", "1"):
+                return True
+            if lower_val in ("false", "0"):
+                return False
+            continue
+        if candidate_type in ("object", "array"):
+            try:
+                return json.loads(value)
+            except (json.JSONDecodeError, TypeError, ValueError):
+                continue
+
+    try:
+        return json.loads(value)
+    except (json.JSONDecodeError, ValueError):
+        return value
 
 
 def _convert_param_value_checked(value: str, param_type: str) -> Any:
@@ -175,7 +288,7 @@ def _coerce_param_value(
     if string_attr == "true":
         return value
     if param_type:
-        return _convert_param_value(self, value, param_type)
+        return _coerce_to_schema_type(value, param_type)
     try:
         return json.loads(value)
     except json.JSONDecodeError:
@@ -207,6 +320,7 @@ def _parse_invoke_params(
     request: ChatCompletionRequest | None = None,
     function_name: str | None = None,
 ) -> dict:
+    _ensure_parser_regexes(self)
     param_config = _get_param_config(self, request, function_name)
     param_dict = {}
     for param_name, string_attr, param_val in self.parameter_complete_regex.findall(invoke_str):
@@ -214,9 +328,9 @@ def _parse_invoke_params(
         param_name = _extract_param_name(param_name)
         param_type = None
         if original_param_name == ESCAPED_ARGUMENTS_PARAM_NAME and "arguments" in param_config:
-            param_type = param_config["arguments"].get("type")
+            param_type = _extract_types_from_schema(param_config["arguments"])
         elif param_name in param_config and isinstance(param_config[param_name], dict):
-            param_type = param_config[param_name].get("type")
+            param_type = _extract_types_from_schema(param_config[param_name])
 
         param_dict[param_name] = _coerce_param_value(
             self,
@@ -226,6 +340,44 @@ def _parse_invoke_params(
         )
 
     return _repair_param_dict(param_dict, param_config)
+
+
+def _patched_extract_tool_calls(
+    self: DeepSeekV4ToolParser,
+    model_output: str,
+    request: ChatCompletionRequest,
+) -> ExtractedToolCallInformation:
+    if self.tool_call_start_token not in model_output:
+        return ExtractedToolCallInformation(tools_called=False, tool_calls=[], content=model_output)
+
+    try:
+        _ensure_parser_regexes(self)
+        tool_calls = []
+        for tool_call_match in self.tool_call_complete_regex.findall(model_output):
+            for invoke_name, invoke_content in self.invoke_complete_regex.findall(tool_call_match):
+                params = _parse_invoke_params(self, invoke_content, request, invoke_name)
+                tool_calls.append(
+                    ToolCall(
+                        type="function",
+                        function=FunctionCall(
+                            name=invoke_name,
+                            arguments=json.dumps(params, ensure_ascii=False),
+                        ),
+                    )
+                )
+
+        if not tool_calls:
+            return ExtractedToolCallInformation(tools_called=False, tool_calls=[], content=model_output)
+
+        first_tool_idx = model_output.find(self.tool_call_start_token)
+        content = model_output[:first_tool_idx] if first_tool_idx > 0 else None
+        return ExtractedToolCallInformation(
+            tools_called=True,
+            tool_calls=tool_calls,
+            content=content,
+        )
+    except Exception:
+        return ExtractedToolCallInformation(tools_called=False, tool_calls=[], content=model_output)
 
 
 def _reset_streaming_state(self: DeepSeekV4ToolParser) -> None:
@@ -372,6 +524,38 @@ def _append_raw_param_value(
     self._queue_delta_message(self._emit_tool_args_delta(index, frag))
 
 
+def _param_types_for_name(
+    self: DeepSeekV4ToolParser,
+    name: str,
+    request: ChatCompletionRequest | None,
+) -> list[str]:
+    param_config = _get_param_config(self, request, self._active_tool_name)
+    if name in param_config and isinstance(param_config[name], dict):
+        return _extract_types_from_schema(param_config[name])
+    return ["string"]
+
+
+def _can_stream_raw_param(param_types: list[str]) -> bool:
+    return set(param_types).issubset({"object", "array"})
+
+
+def _finish_buffered_param(
+    self: DeepSeekV4ToolParser,
+    index: int,
+    request: ChatCompletionRequest | None,
+) -> None:
+    key = self._streaming_param_key
+    if key is None:
+        return
+
+    raw_value = "".join(self._streaming_param_raw_parts)
+    param_types = _param_types_for_name(self, key, request)
+    value = _coerce_to_schema_type(raw_value, param_types)
+    _append_json_param_value(self, index, key, value)
+    self._streaming_param_key = None
+    self._streaming_param_raw_parts.clear()
+
+
 def _should_buffer_wrapper_param(self: DeepSeekV4ToolParser, key: str, request: ChatCompletionRequest | None) -> bool:
     if self._args_started[self._active_tool_index]:
         return False
@@ -495,6 +679,9 @@ def _process_streaming_buffer(self: DeepSeekV4ToolParser, request: ChatCompletio
                 if self._streaming_param_mode.startswith("wrapper_"):
                     self._streaming_param_raw_parts.append(raw_content)
                     _finish_buffered_wrapper_param(self, index, request)
+                elif self._streaming_param_mode == "buffered_json":
+                    self._streaming_param_raw_parts.append(raw_content)
+                    _finish_buffered_param(self, index, request)
                 elif self._streaming_param_mode == "string":
                     frag = _json_escape_string_content(raw_content) + '"'
                     self._queue_delta_message(self._emit_tool_args_delta(index, frag))
@@ -509,7 +696,7 @@ def _process_streaming_buffer(self: DeepSeekV4ToolParser, request: ChatCompletio
             if safe_len > 0:
                 raw_content = self._buffer[:safe_len]
                 self._buffer = self._buffer[safe_len:]
-                if self._streaming_param_mode.startswith("wrapper_"):
+                if self._streaming_param_mode.startswith("wrapper_") or self._streaming_param_mode == "buffered_json":
                     self._streaming_param_raw_parts.append(raw_content)
                 elif self._streaming_param_mode == "string":
                     frag = _json_escape_string_content(raw_content)
@@ -542,6 +729,14 @@ def _process_streaming_buffer(self: DeepSeekV4ToolParser, request: ChatCompletio
             self._streaming_param_raw_parts.clear()
             self._streaming_param_mode = "wrapper_string" if is_string else "wrapper_json"
             continue
+
+        if not is_string:
+            param_types = _param_types_for_name(self, key, request)
+            if not _can_stream_raw_param(param_types):
+                self._streaming_param_key = key
+                self._streaming_param_raw_parts.clear()
+                self._streaming_param_mode = "buffered_json"
+                continue
 
         _append_param_prefix(self, index, key, is_string=is_string)
         self._streaming_param_mode = "string" if is_string else "json"
@@ -584,6 +779,7 @@ DeepSeekV4ToolParser._get_param_config = _get_param_config
 DeepSeekV4ToolParser._coerce_param_value = _coerce_param_value
 DeepSeekV4ToolParser._repair_param_dict = _repair_param_dict
 DeepSeekV4ToolParser._parse_invoke_params = _parse_invoke_params
+DeepSeekV4ToolParser.extract_tool_calls = _patched_extract_tool_calls
 DeepSeekV4ToolParser._reset_streaming_state = _reset_streaming_state
 DeepSeekV4ToolParser._json_escape_string_content = _json_escape_string_content
 DeepSeekV4ToolParser.drain_pending_tool_call_deltas = _drain_pending_tool_call_deltas
@@ -595,6 +791,9 @@ DeepSeekV4ToolParser._begin_streaming_tool_call = _begin_streaming_tool_call
 DeepSeekV4ToolParser._append_param_prefix = _append_param_prefix
 DeepSeekV4ToolParser._append_json_param_value = _append_json_param_value
 DeepSeekV4ToolParser._append_raw_param_value = _append_raw_param_value
+DeepSeekV4ToolParser._param_types_for_name = _param_types_for_name
+DeepSeekV4ToolParser._can_stream_raw_param = _can_stream_raw_param
+DeepSeekV4ToolParser._finish_buffered_param = _finish_buffered_param
 DeepSeekV4ToolParser._should_buffer_wrapper_param = _should_buffer_wrapper_param
 DeepSeekV4ToolParser._finish_buffered_wrapper_param = _finish_buffered_wrapper_param
 DeepSeekV4ToolParser._close_streaming_tool_call = _close_streaming_tool_call
