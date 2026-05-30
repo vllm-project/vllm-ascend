@@ -43,6 +43,7 @@ class DummyVllmConfig:
 class DummyModelConfig:
     model = "dummy-model"
     dtype = torch.float32
+    quantization = None
 
 
 @pytest.fixture
@@ -184,6 +185,71 @@ def test_load_model_elastic_success(mock_logger, monkeypatch, tmp_path):
     # Check file
     written_file = tmp_path / "output_0.txt"
     assert written_file.exists()
+
+
+@patch("vllm_ascend.model_loader.netloader.netloader.logger")
+def test_load_model_forwards_prefix_to_initialize_model(mock_logger, monkeypatch, tmp_path):
+    monkeypatch.setattr("torch.distributed.get_rank", lambda: 0)
+
+    class FakeContext:
+        def __enter__(self):
+            pass
+
+        def __exit__(self, a, b, c):
+            pass
+
+    monkeypatch.setattr("torch.device", lambda d: FakeContext())
+    monkeypatch.setattr("vllm_ascend.model_loader.netloader.netloader.deepcopy", lambda x: x)
+    monkeypatch.setattr(
+        "vllm_ascend.model_loader.netloader.netloader.set_default_torch_dtype", lambda dtype: FakeContext()
+    )
+
+    captured_kwargs = {}
+
+    def mock_initialize_model(**kwargs):
+        captured_kwargs.update(kwargs)
+        dummy_model = MagicMock(spec=nn.Module)
+        dummy_model.eval.return_value = dummy_model
+        return dummy_model
+
+    monkeypatch.setattr("vllm_ascend.model_loader.netloader.netloader.initialize_model", mock_initialize_model)
+    monkeypatch.setattr("vllm_ascend.model_loader.netloader.netloader.elastic_load", lambda **kwargs: kwargs["model"])
+    monkeypatch.setattr(
+        "vllm_ascend.model_loader.netloader.netloader.process_weights_after_loading", lambda *a, **k: None
+    )
+    monkeypatch.setattr("vllm.utils.network_utils.get_ip", lambda: "0.0.0.0")
+
+    extra = {
+        "SOURCE": [{"device_id": 0}],
+        "MODEL": "foo",
+        "INT8_CACHE": "no",
+    }
+    loader = make_loader_with_config(extra)
+    prefix = "model.layers.0."
+    loader.load_model(DummyVllmConfig(), DummyModelConfig(), prefix=prefix)
+    assert captured_kwargs.get("prefix") == prefix
+
+
+def test_revert_to_default_forwards_prefix(monkeypatch):
+    loader = make_loader_with_config({})
+    captured_kwargs = {}
+    dummy_model = MagicMock(spec=nn.Module)
+    dummy_model.eval.return_value = dummy_model
+
+    class MockDefaultModelLoader:
+        def __init__(self, load_config):
+            pass
+
+        def load_model(self, **kwargs):
+            captured_kwargs.update(kwargs)
+            return dummy_model
+
+    monkeypatch.setattr("vllm_ascend.model_loader.netloader.netloader.DefaultModelLoader", MockDefaultModelLoader)
+
+    model_config = DummyModelConfig()
+    prefix = "model.layers.0."
+    loader.revert_to_default(model_config, DummyVllmConfig(), DummyDeviceConfig(), prefix=prefix)
+    assert captured_kwargs.get("prefix") == prefix
 
 
 if __name__ == "__main__":
