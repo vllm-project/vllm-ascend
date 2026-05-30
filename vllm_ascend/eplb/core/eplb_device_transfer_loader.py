@@ -17,6 +17,7 @@
 from enum import Enum
 
 import torch.distributed as dist
+from vllm.distributed.parallel_state import get_dp_group, get_pcp_group, get_pp_group, get_tp_group
 from vllm.logger import logger
 
 from vllm_ascend.distributed.parallel_state import get_dynamic_eplb_group
@@ -38,6 +39,21 @@ class D2DExpertWeightLoader:
         self.recv_expert_list = []
         self.num_layers = 0
         self.comm_group = get_dynamic_eplb_group()
+        self._block_size = None
+
+    def _get_block_size(self):
+        if self._block_size is None:
+            dp = get_dp_group().world_size
+            pp = get_pp_group().world_size
+            pcp = get_pcp_group().world_size
+            tp = get_tp_group().world_size
+            self._block_size = dp * pp * pcp * tp
+        return self._block_size
+
+    def _ep_to_global_rank(self, ep_rank: int) -> int:
+        block_size = self._get_block_size()
+        my_offset = dist.get_rank() % block_size
+        return ep_rank * block_size + my_offset
 
     def set_adator(self, eplb_adaptor):
         self.eplb_adaptor = eplb_adaptor
@@ -53,18 +69,20 @@ class D2DExpertWeightLoader:
         self.layer_id = layer_id
         self.comm_op_list = []
         for send_info in expert_send_info:
-            dst_rank, global_expert_id_to_send = send_info
+            ep_dst_rank, global_expert_id_to_send = send_info
             local_expert_id = self.eplb_adaptor.expert_map_per_layer_cpu[layer_id][global_expert_id_to_send].item()
+            global_dst = self._ep_to_global_rank(ep_dst_rank)
             for src_tensor in self.eplb_adaptor.expert_param_per_layer[layer_id][local_expert_id]:
                 self.comm_op_list.append(
-                    dist.P2POp(dist.isend, src_tensor, dst_rank, group=self.comm_group.device_group)
+                    dist.P2POp(dist.isend, src_tensor, global_dst)
                 )
 
         for buffer_tensor_id, recv_info in enumerate(expert_recv_info):
-            recv_rank, global_expert_id_to_recv = recv_info
+            ep_recv_rank, global_expert_id_to_recv = recv_info
+            global_src = self._ep_to_global_rank(ep_recv_rank)
             for buffer_tensor in self.eplb_adaptor.buffer_tensor_list[buffer_tensor_id]:
                 self.comm_op_list.append(
-                    dist.P2POp(dist.irecv, buffer_tensor, recv_rank, group=self.comm_group.device_group)
+                    dist.P2POp(dist.irecv, buffer_tensor, global_src)
                 )
             local_expert_to_replace = self.updated_expert_map[global_expert_id_to_recv].item()
             self.recv_expert_list.append((local_expert_to_replace, buffer_tensor_id))

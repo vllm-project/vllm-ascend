@@ -113,7 +113,7 @@ class EplbUpdator:
                 expert_send_info,
                 expert_recv_info,
                 updated_expert_map_this_rank,
-                layer_id + self.adaptor.num_dense_layers,
+                self.adaptor.moe_registry.get_global_index(layer_id),
             )
 
             # set asynchronous stream for d2d expert weight update
@@ -150,15 +150,17 @@ class EplbUpdator:
 
         comm_op_list = []
 
-        for dst_rank in range(self.world_size):
-            if dst_rank == self.rank_id:
+        for dst_rank in range(self.comm_group.world_size):
+            if dst_rank == self.comm_group.rank_in_group:
                 continue
-            comm_op_list.append(dist.P2POp(dist.isend, src_tensor, dst_rank, group=self.comm_group.device_group))
+            global_dst = self.comm_group.ranks[dst_rank]
+            comm_op_list.append(dist.P2POp(dist.isend, src_tensor, global_dst, group=self.comm_group.device_group))
 
-        for src_rank in range(self.world_size):
-            if src_rank == self.rank_id:
+        for src_rank in range(self.comm_group.world_size):
+            if src_rank == self.comm_group.rank_in_group:
                 continue
-            comm_op_list.append(dist.P2POp(dist.irecv, src_tensor, src_rank, group=self.comm_group.device_group))
+            global_src = self.comm_group.ranks[src_rank]
+            comm_op_list.append(dist.P2POp(dist.irecv, src_tensor, global_src, group=self.comm_group.device_group))
         if comm_op_list:
             reqs = dist.batch_isend_irecv(comm_op_list)
 
