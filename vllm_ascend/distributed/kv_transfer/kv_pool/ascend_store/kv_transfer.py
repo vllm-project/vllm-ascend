@@ -283,10 +283,22 @@ class KVCacheStoreSendingThread(KVTransferThread):
             if not keys:
                 continue
 
+            exists_states = self.lookup(keys)
+            missing_indices = [index for index, exists in enumerate(exists_states) if not exists]
+
+            if not missing_indices:
+                continue
+
+            starts = [starts[index] for index in missing_indices]
+            ends = [ends[index] for index in missing_indices]
+            keys = [keys[index] for index in missing_indices]
+            block_hashes = [block_hashes[index] for index in missing_indices]
+
             logger.info(
-                "Storing KV cache for %d out of %d blocks for request %s in group %d",
+                "Storing KV cache for %d out of %d blocks (missing_count=%d) for request %s in group %d",
                 len(keys),
                 token_len // group_block_size,
+                len(missing_indices),
                 req_id,
                 group_id,
             )
