@@ -18,9 +18,24 @@
 
 import huggingface_hub
 from huggingface_hub import snapshot_download as hf_snapshot_download
+from modelscope import snapshot_download as modelscope_snapshot_download  # type: ignore[import-untyped]
 from vllm.assets.image import ImageAsset
 
 from tests.e2e.conftest import VllmRunner, qwen_prompt, wait_until_npu_memory_free
+
+
+def _download_model_snapshot(repo_id: str) -> str:
+    local_files_only = huggingface_hub.constants.HF_HUB_OFFLINE
+    try:
+        return hf_snapshot_download(
+            repo_id,
+            local_files_only=local_files_only,
+        )
+    except Exception:
+        return modelscope_snapshot_download(
+            repo_id,
+            local_files_only=local_files_only,
+        )
 
 
 @wait_until_npu_memory_free()
@@ -36,10 +51,7 @@ def test_mamba_ssm_multimodal_reasoning_mtp_full_decode_only():
     images = [image] * len(img_questions)
     prompts = qwen_prompt(img_questions)
 
-    model_path = hf_snapshot_download(
-        "Qwen/Qwen3.5-0.8B",
-        local_files_only=huggingface_hub.constants.HF_HUB_OFFLINE,
-    )
+    model_path = _download_model_snapshot("Qwen/Qwen3.5-0.8B")
     with VllmRunner(
         model_path,
         dtype="bfloat16",
