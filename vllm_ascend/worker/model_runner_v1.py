@@ -1910,9 +1910,10 @@ class NPUModelRunner(GPUModelRunner):
                 ubatch_slices_attn = ubatch_slices_padded if pad_attn else ubatch_slices
 
                 if (
-                    cudagraph_mode == CUDAGraphMode.FULL
+                    (cudagraph_mode == CUDAGraphMode.FULL
                     or (enable_sp() and not self.model_config.use_mla)
-                    and self.pcp_size * self.dcp_size == 1
+                    and self.pcp_size * self.dcp_size == 1)
+                    and self.speculative_config is None
                 ):
                     # Currently, Graph Mode and SP will both pad num_tokens,
                     # Another possible condition is num_tokens_padded != num_tokens_unpadded
