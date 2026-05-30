@@ -154,6 +154,7 @@ class NPUPlatform(Platform):
         else:
             from vllm_ascend._310p.quantization import AscendModelSlimConfig310  # noqa: F401
 
+        from vllm_ascend import register_triton_kernels   # noqa: F401
         config_deprecated_logging()
 
     @classmethod

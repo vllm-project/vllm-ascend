@@ -4,6 +4,7 @@ from vllm_ascend.sample.rejection_sampler import apply_sampling_constraints, exp
 
 # TODO: delete this patch after apply_sampling_constraints and rejection_sample
 #   are extracted to as class func of RejectionSampler
-rs.apply_sampling_constraints = apply_sampling_constraints
+# No need to patch now, using triton dispatcher instead.
+#rs.apply_sampling_constraints = apply_sampling_constraints
 rs.rejection_sample = rejection_sample
-rs.expand_batch_to_tokens = expand_batch_to_tokens
+#rs.expand_batch_to_tokens = expand_batch_to_tokens
