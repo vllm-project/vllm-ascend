@@ -110,15 +110,21 @@ class TestAscendAttentionCPImpl(TestBase):
 
         def mock_npu_fused_infer_attention_score_func(query, k_nope, value, **common_kwargs):
             mock_output = torch.randn_like(query)
-            mock_lse = torch.randn(query.shape[0], query.shape[1], 1)
+            # BSND layout: attn -> (B, S, N, D), lse -> (B, N, S, 1)
+            mock_lse = torch.randn(query.shape[0], query.shape[2], query.shape[1], 1)
             return mock_output, mock_lse
 
         mock_npu_fused_infer_attention_score.side_effect = mock_npu_fused_infer_attention_score_func
 
         attn_metadata = MagicMock()
+        attn_metadata.num_decodes = 2
+        attn_metadata.actual_seq_lengths_q = torch.tensor([2, 2], dtype=torch.int32)
         attn_metadata.decode_meta = MagicMock()
-        attn_metadata.num_decodes_flatten = 5
+        attn_metadata.decode_meta.dcp_mtp_attn_mask = None
         attn_metadata.decode_meta.batch_seq_mask = torch.tensor([1, 0], dtype=torch.bool)
+        attn_metadata.decode_meta.block_tables = torch.tensor([[0]], dtype=torch.int32)
+        attn_metadata.decode_meta.num_computed_tokens_of_pcp_dcp = torch.zeros(2, 2, 2, dtype=torch.int32)
+        attn_metadata.num_decodes_flatten = 5
         output = self.impl._forward_decode_pcp_dcp(query, attn_metadata)
 
         self.assertEqual(output.shape[0], 2)
