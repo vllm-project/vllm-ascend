@@ -3,7 +3,7 @@ import torch
 from vllm.distributed import get_dcp_group, get_pcp_group
 from vllm.utils.math_utils import cdiv
 from vllm.v1.attention.backends.utils import PAD_SLOT_ID
-from vllm.v1.kv_cache_interface import KVCacheGroupSpec
+from vllm.v1.kv_cache_interface import KVCacheGroupSpec, MambaSpec
 from vllm.v1.utils import CpuGpuBuffer
 from vllm.v1.worker.block_table import _compute_slot_mapping_kernel
 from vllm.v1.worker.cp_utils import get_total_cp_world_size
@@ -24,20 +24,6 @@ class BlockTable:
         kv_cache_group: KVCacheGroupSpec = None,
     ):
         self.max_num_reqs = max_num_reqs
-        compress_ratio = 1
-        if (
-            kv_cache_group is not None
-            and hasattr(kv_cache_group, "kv_cache_spec")
-            and hasattr(kv_cache_group.kv_cache_spec, "compress_ratio")
-        ):
-            compress_ratio = kv_cache_group.kv_cache_spec.compress_ratio
-        max_num_blocks_per_req = max(cdiv(max_num_blocks_per_req, compress_ratio), 1)
-        self.max_num_blocks_per_req = max_num_blocks_per_req
-        self.max_num_batched_tokens = max_num_batched_tokens
-        self.pin_memory = pin_memory
-        self.device = device
-        self.physical_block_size = block_size
-
         try:
             self.pcp_world_size = get_pcp_group().world_size
             self.pcp_rank = get_pcp_group().rank_in_group if self.pcp_world_size > 1 else 0
@@ -49,6 +35,26 @@ class BlockTable:
             self.dcp_rank = 0
             self.pcp_world_size = 1
             self.pcp_rank = 0
+        compress_ratio = 1
+        if (
+            kv_cache_group is not None
+            and hasattr(kv_cache_group, "kv_cache_spec")
+            and hasattr(kv_cache_group.kv_cache_spec, "compress_ratio")
+        ):
+            compress_ratio = kv_cache_group.kv_cache_spec.compress_ratio
+        if (
+            kv_cache_group is not None
+            and hasattr(kv_cache_group, "kv_cache_spec")
+            and (self.pcp_world_size * self.dcp_world_size > 1)
+            and isinstance(kv_cache_group.kv_cache_spec, MambaSpec)
+        ):
+            max_num_blocks_per_req = max_num_blocks_per_req * self.pcp_world_size * self.dcp_world_size
+        max_num_blocks_per_req = max(cdiv(max_num_blocks_per_req, compress_ratio), 1)
+        self.max_num_blocks_per_req = max_num_blocks_per_req
+        self.max_num_batched_tokens = max_num_batched_tokens
+        self.pin_memory = pin_memory
+        self.device = device
+        self.physical_block_size = block_size
 
         # If kernel_sizes is None or [0], use physical block size (no splitting)
         if kernel_sizes is None or kernel_sizes == [0]:
