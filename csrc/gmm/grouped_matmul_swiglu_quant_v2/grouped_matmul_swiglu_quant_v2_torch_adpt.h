@@ -40,6 +40,11 @@ std::tuple<at::Tensor, at::Tensor> grouped_matmul_swiglu_quant_v2(
     int n = weight_scale[0].sizes().back();
     int m = x_size[0];
     int k = x_size[1];
+    TORCH_CHECK(
+        group_list_type == 1,
+        "grouped_matmul_swiglu_quant_v2 only supports count-mode group_list, "
+        "but received group_list_type=",
+        group_list_type);
 
     at::Tensor output =  at::empty({m, n/2}, x.options().dtype(at::kChar));
     at::Tensor output_scale =  at::empty({m}, x.options().dtype(at::kFloat));
