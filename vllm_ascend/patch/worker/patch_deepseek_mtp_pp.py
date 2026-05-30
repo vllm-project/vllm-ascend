@@ -156,41 +156,15 @@ def _patch_proposer_for_mtp_pp():
         self, target_language_model: nn.Module
     ) -> None:
         if get_pp_group().world_size > 1:
-            if get_pp_group().is_last_rank:
-                # On the last PP rank the target model holds real embed_tokens;
-                # share them with the MTP draft model to avoid loading a
-                # duplicate copy that may be on a different device.
-                if hasattr(target_language_model.model, "embed_tokens"):
-                    target_embed_tokens = target_language_model.model.embed_tokens
-                elif hasattr(target_language_model.model, "embedding"):
-                    target_embed_tokens = target_language_model.model.embedding
-                else:
-                    raise AttributeError(
-                        "Target model does not have 'embed_tokens' or 'embedding' attribute"
-                    )
-
-                if self.method == "mtp":
-                    logger.info(
-                        "PP>1 MTP: Sharing target model embedding weights with "
-                        "the draft model on last PP rank."
-                    )
-                    if hasattr(self.model.model, "embed_tokens"):
-                        del self.model.model.embed_tokens
-                    self.model.model.embed_tokens = target_embed_tokens
-                else:
-                    # For EAGLE / EAGLE3 with PP>1, also share on last rank
-                    logger.info(
-                        "PP>1 %s: Sharing target model embedding weights on last "
-                        "PP rank.",
-                        self.method,
-                    )
-                    if hasattr(self.model.model, "embed_tokens"):
-                        del self.model.model.embed_tokens
-                    self.model.model.embed_tokens = target_embed_tokens
-            else:
-                logger.info(
-                    "Non-last PP rank, skipping embedding sharing for draft model."
-                )
+            # With PP>1, the target model's embed_tokens only exists on the
+            # first PP rank.  On the last PP rank (where the draft model runs)
+            # it is PPMissingLayer, so the draft model must load its own
+            # embedding.  Simply skip sharing on all PP>1 ranks — the draft
+            # model will load its own embedding weights.
+            logger.info(
+                "PP>1: skipping embedding sharing for draft model, "
+                "draft loads its own embedding weights."
+            )
             return
 
         # PP=1: use original logic.
