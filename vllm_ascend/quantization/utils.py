@@ -21,7 +21,12 @@ from pathlib import Path
 from vllm import envs
 from vllm.logger import logger
 
-from vllm_ascend.utils import ASCEND_QUANTIZATION_METHOD, COMPRESSED_TENSORS_METHOD
+from vllm_ascend.utils import (
+    ASCEND_QUANTIZATION_METHOD,
+    COMPRESSED_TENSORS_METHOD,
+    AscendDeviceType,
+    get_ascend_device_type,
+)
 
 
 def get_model_file(
@@ -205,6 +210,9 @@ def maybe_auto_detect_quantization(vllm_config) -> None:
 
 
 def enable_fa_quant(vllm_config, layer_name=None) -> bool:
+    is_kv_consumer = vllm_config.kv_transfer_config is not None and vllm_config.kv_transfer_config.is_kv_consumer
+    if not is_kv_consumer and get_ascend_device_type() != AscendDeviceType.A5:
+        return False
     if vllm_config.quant_config is not None and getattr(vllm_config.quant_config, "enable_fa_quant", False):
         if layer_name is not None:
             return vllm_config.quant_config.enabling_fa_quant(vllm_config, layer_name)

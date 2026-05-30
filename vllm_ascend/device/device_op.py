@@ -578,10 +578,8 @@ class A5DeviceAdaptor(BaseDeviceAdaptor):
         cos_shape = attn_metadata.decode.cos.shape
         cos = attn_metadata.decode.cos.view(cos_shape[0], 1, cos_shape[-1])
         sin = attn_metadata.decode.sin.view(cos_shape[0], 1, cos_shape[-1])
-
         decode_k_nope, decode_k_pe = kv_cache[0], kv_cache[1]
-
-        decode_q_nope, decode_q_pe, _, _, _ = torch_npu.npu_mla_prolog_v3(
+        decode_q_nope, decode_q_pe, dequant_scale_q_nope, _, _ = torch_npu.npu_mla_prolog_v3(
             token_x=hidden_states,
             weight_dq=atten_obj.weight_dq,
             weight_uq_qr=atten_obj.weight_uq_qr,
@@ -599,17 +597,20 @@ class A5DeviceAdaptor(BaseDeviceAdaptor):
             dequant_scale_w_uq_qr=atten_obj.weight_uq_qr_scale.view(torch.float8_e8m0fnu),
             dequant_scale_w_dkv_kr=atten_obj.weight_dkv_kr_scale.view(torch.float8_e8m0fnu),
             cache_mode="PA_BSND",
-            query_quant_mode=0,
+            query_quant_mode=1 if atten_obj.fa_quant_layer else 0,
             weight_quant_mode=3,
+            kv_cache_quant_mode=1 if atten_obj.fa_quant_layer else 0,
+            quant_scale_ckv=atten_obj.fak_descale_reciprocal if atten_obj.fa_quant_layer else None,
         )
-
         decode_q_nope = decode_q_nope.view(bsz, atten_obj.num_heads, atten_obj.kv_lora_rank)
         decode_q_pe = decode_q_pe.view(bsz, atten_obj.num_heads, -1)
 
         decode_q_nope, decode_q_pe = atten_obj.reorg_decode_q(decode_q_nope, decode_q_pe)
         from vllm_ascend.attention.mla_v1 import DecodeMLAPreprocessResult
 
-        decode_preprocess_res = DecodeMLAPreprocessResult(decode_q_nope, decode_q_pe, decode_k_nope, decode_k_pe)
+        decode_preprocess_res = DecodeMLAPreprocessResult(
+            decode_q_nope, decode_q_pe, decode_k_nope, decode_k_pe, dequant_scale_q_nope=dequant_scale_q_nope
+        )
         return decode_preprocess_res, None
 
     def npu_flash_attention(query, key, value, seq_lens_cpu, head_num, scale_value, num_kv_heads):

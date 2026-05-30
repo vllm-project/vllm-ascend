@@ -234,9 +234,6 @@ def _allocate_kv_cache(
             to their corresponding memory buffer for K cache and V cache
     """
     vllm_config = get_current_vllm_config()
-    is_kv_consumer = (
-        vllm_config.kv_transfer_config.is_kv_consumer if vllm_config.kv_transfer_config is not None else False
-    )
 
     # init kv cache tensors
     kv_cache_raw_tensors: dict[str, tuple[torch.Tensor, torch.Tensor]] = {}
@@ -260,7 +257,7 @@ def _allocate_kv_cache(
         k_dim, v_dim = _get_attention_kv_cache_dims(example_layer_name, example_kv_cache_spec)
         assert k_dim > 0 and v_dim > 0
         kv_head_dim_list = [k_dim, v_dim]
-        if is_kv_consumer and enable_fa_quant(vllm_config):
+        if enable_fa_quant(vllm_config):
             k_tensor_split_factor, v_tensor_split_factor = vllm_config.quant_config.get_kv_quant_split_factor(
                 example_layer_name, kv_head_dim_list
             )
@@ -308,9 +305,6 @@ def _reshape_kv_cache(
             to their corresponding memory buffer for KV cache
     """
     vllm_config = get_current_vllm_config()
-    is_kv_consumer = (
-        vllm_config.kv_transfer_config.is_kv_consumer if vllm_config.kv_transfer_config is not None else False
-    )
 
     kv_caches: dict[str, tuple[torch.Tensor, torch.Tensor]] = {}
     kernel_block_sizes = kernel_block_sizes or []
@@ -371,7 +365,7 @@ def _reshape_kv_cache(
                     v_shape = (mla_num_blocks, mla_block_size, num_kv_heads, v_dim)
 
                 k_cache_dtype = v_cache_dtype = kv_cache_spec.dtype
-                if is_kv_consumer and enable_fa_quant(vllm_config):
+                if enable_fa_quant(vllm_config):
                     k_cache_dtype, v_cache_dtype = vllm_config.quant_config.get_kv_quant_dtype(
                         layer_name, kv_cache_spec.dtype, vllm_config.model_config
                     )
