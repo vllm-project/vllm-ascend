@@ -15,6 +15,7 @@
 from __future__ import annotations
 
 import sys
+import weakref
 from contextlib import contextmanager
 from dataclasses import dataclass
 from datetime import timedelta
@@ -94,6 +95,7 @@ def _load_patch_distributed_module():
     communicator_instances: list[object] = []
     unique_name_counter = {"value": 0}
     sequence_counter = {"value": 0}
+    registered_groups = {}
     shared_hccl_options = {"hccl_config": {"hccl_buffer_size": 200}}
 
     torch_module: Any = ModuleType("torch")
@@ -147,9 +149,13 @@ def _load_patch_distributed_module():
         unique_name_counter["value"] += 1
         return f"{group_name}-{unique_name_counter['value']}"
 
+    def _register_group(group):
+        registered_groups[group.unique_name] = weakref.ref(group)
+
     parallel_state_module.GroupCoordinator = BaseGroupCoordinator
     parallel_state_module._get_unique_name = _get_unique_name
-    parallel_state_module._register_group = MagicMock()
+    parallel_state_module._register_group = MagicMock(side_effect=_register_group)
+    parallel_state_module._groups = registered_groups
     parallel_state_module.destroy_distributed_environment = destroy_distributed_environment
 
     shm_broadcast_module: Any = ModuleType("vllm.distributed.device_communicators.shm_broadcast")
@@ -554,6 +560,41 @@ def test_destroy_cleans_up_fail_closed_hccl_device_group(module_env):
     assert group._acquired_hccl_keys == []
     assert not hasattr(group, "cpu_group")
     assert not hasattr(group, "device_group")
+
+
+def test_hccl_sleep_destroy_and_restore_shared_group(module_env):
+    group = _make_group(
+        module_env,
+        group_ranks=[[0, 1]],
+        group_name="tp",
+        use_device_communicator=True,
+    )
+    original_device_group = group.device_group
+    original_communicator = group.device_communicator
+
+    assert len(_calls_with_backend(module_env, "hccl")) == 1
+
+    assert group.destroy_hccl_for_sleep() is True
+
+    original_communicator.destroy.assert_called_once()
+    assert group.device_communicator is None
+    assert group.device_group is None
+    assert group._acquired_hccl_keys == []
+    assert module_env.destroy_process_group.call_args_list == [call(original_device_group)]
+
+    assert group.destroy_hccl_for_sleep() is False
+    assert module_env.destroy_process_group.call_args_list == [call(original_device_group)]
+
+    assert group.restore_hccl_after_sleep() is True
+
+    assert len(_calls_with_backend(module_env, "hccl")) == 2
+    assert group.device_group is not None
+    assert group.device_group is not original_device_group
+    assert group.device_communicator is not None
+    assert group.device_communicator is not original_communicator
+    assert group.device == "npu:0"
+
+    assert group.restore_hccl_after_sleep() is False
 
 
 def test_non_hccl_destroy_path_destroys_device_group_directly(module_env):

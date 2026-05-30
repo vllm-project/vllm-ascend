@@ -54,6 +54,7 @@ from vllm_ascend.cpu_binding import bind_cpus
 from vllm_ascend.device_allocator.camem import CaMemAllocator
 from vllm_ascend.distributed.parallel_state import init_ascend_model_parallel
 from vllm_ascend.ops.triton.triton_utils import init_device_properties_triton
+from vllm_ascend.patch.worker.patch_distributed import destroy_hccl_for_sleep, restore_hccl_after_sleep
 from vllm_ascend.profiler.torch_npu_profiler import TorchNPUProfilerWrapper
 from vllm_ascend.utils import (
     AscendDeviceType,
@@ -130,6 +131,9 @@ class NPUWorker(WorkerBase):
         if vllm_config.model_config and vllm_config.model_config.enable_sleep_mode:
             # Buffers saved before sleep
             self._sleep_saved_buffers: dict[str, torch.Tensor] = {}
+        self._sleep_hccl_destroyed = False
+        self._sleep_acl_graph_invalidated = False
+        self._sleep_cos_sin_cache_cleared = False
 
         # FixMe: this is a patch to fix the issue cause by https://github.com/vllm-project/vllm/commit/de94289a98d7ec52a5ef02719e01a1db8b505170
         from vllm.model_executor.layers.linear import WEIGHT_LOADER_V2_SUPPORTED
@@ -199,12 +203,24 @@ class NPUWorker(WorkerBase):
         if level == 2:
             model = self.model_runner.model
             self._sleep_saved_buffers = {name: buffer.cpu().clone() for name, buffer in model.named_buffers()}
+        attention_workspace_freed_bytes = self._measure_sleep_cleanup_memory(self._invalidate_acl_graphs_for_sleep)
+        global_cos_sin_cache_freed_bytes = self._measure_sleep_cleanup_memory(
+            self._clear_global_cos_sin_cache_for_sleep
+        )
+        hccl_freed_bytes = self._measure_sleep_cleanup_memory(self._destroy_hccl_for_sleep)
         allocator = CaMemAllocator.get_instance()
         allocator.sleep(offload_tags=("weights",) if level == 1 else tuple())
         free_bytes_after_sleep, total = torch.npu.mem_get_info()
         freed_bytes = free_bytes_after_sleep - free_bytes_before_sleep
         used_bytes = total - free_bytes_after_sleep
         assert freed_bytes >= 0, "Memory usage increased after sleeping."
+        logger.info(
+            "Sleep mode released HCCL memory: %.3f GiB, attention workspace memory: %.3f GiB, "
+            "global sin/cos cache memory: %.3f GiB.",
+            hccl_freed_bytes / GiB_bytes,
+            attention_workspace_freed_bytes / GiB_bytes,
+            global_cos_sin_cache_freed_bytes / GiB_bytes,
+        )
         logger.info(
             "Sleep mode freed %.2f GiB memory, %.2f GiB memory is still in use.",
             freed_bytes / GiB_bytes,
@@ -219,7 +235,9 @@ class NPUWorker(WorkerBase):
                 "in the RL scenarios. Please set weight_nz_mode=0 via --additional-config."
             )
         allocator = CaMemAllocator.get_instance()
+        self._restore_hccl_after_sleep()
         allocator.wake_up(tags=tags)
+        self._restore_global_cos_sin_cache_after_sleep()
 
         hidden_size = self.vllm_config.model_config.hf_text_config.hidden_size
         model = self.model_runner.model
@@ -248,6 +266,112 @@ class NPUWorker(WorkerBase):
                 if name in self._sleep_saved_buffers:
                     buffer.data.copy_(self._sleep_saved_buffers[name].data)
             self._sleep_saved_buffers = {}
+        self._restore_acl_graphs_after_sleep(tags)
+
+    def _measure_sleep_cleanup_memory(self, cleanup) -> int:
+        free_bytes_before_cleanup = torch.npu.mem_get_info()[0]
+        cleanup()
+        gc.collect()
+        torch.npu.empty_cache()
+        free_bytes_after_cleanup = torch.npu.mem_get_info()[0]
+        free_bytes = free_bytes_after_cleanup - free_bytes_before_cleanup
+        return max(free_bytes, 0)
+
+    def _invalidate_acl_graphs_for_sleep(self) -> None:
+        from vllm_ascend.compilation.acl_graph import (
+            clear_attention_workspaces_for_sleep,
+            reset_graph_params_for_sleep,
+        )
+
+        clear_attention_workspaces_for_sleep()
+        if self.model_runner is None or not getattr(self.model_runner, "use_aclgraph", False):
+            return
+        reset_graph_params_for_sleep()
+        self._reset_model_runner_graph_manager()
+        self._sleep_acl_graph_invalidated = True
+
+    def _clear_global_cos_sin_cache_for_sleep(self) -> None:
+        if self._sleep_cos_sin_cache_cleared:
+            return
+
+        from vllm_ascend.ops.rotary_embedding import clear_global_cos_sin_runtime_cache
+
+        model_runner = self.model_runner
+        if model_runner is None:
+            return
+        model = getattr(model_runner, "model", None)
+        if model is None:
+            return
+        self._sleep_cos_sin_cache_cleared = clear_global_cos_sin_runtime_cache(model)
+
+    def _restore_global_cos_sin_cache_after_sleep(self) -> None:
+        if not self._sleep_cos_sin_cache_cleared:
+            return
+
+        from vllm_ascend.ops.rotary_embedding import restore_global_cos_sin_cache_from_model, set_cos_and_sin
+
+        model_runner = self.model_runner
+        max_num_reqs = getattr(model_runner, "max_num_reqs", None)
+        decode_token_per_req = getattr(
+            model_runner, "uniform_decode_query_len", getattr(model_runner, "decode_query_len", None)
+        )
+        dtype = getattr(model_runner, "dtype", None)
+        device = getattr(model_runner, "device", None)
+        if None in (max_num_reqs, decode_token_per_req, dtype, device):
+            logger.warning("Skip restoring global cos/sin cache after sleep due to incomplete model runner state.")
+            return
+
+        restore_global_cos_sin_cache_from_model(getattr(model_runner, "model", None))
+        set_cos_and_sin(self.vllm_config, max_num_reqs, decode_token_per_req, dtype, device)
+        self._sleep_cos_sin_cache_cleared = False
+
+    def _reset_model_runner_graph_manager(self) -> None:
+        from vllm.platforms import current_platform
+
+        model_runner = self.model_runner
+        if model_runner is None:
+            return
+        manager = getattr(model_runner, "cudagraph_manager", None)
+        if manager is None:
+            return
+        if hasattr(manager, "graphs"):
+            manager.graphs.clear()
+        if hasattr(manager, "_graphs_captured"):
+            manager._graphs_captured = False
+        if hasattr(manager, "pool"):
+            manager.pool = current_platform.get_global_graph_pool()
+
+    def _destroy_hccl_for_sleep(self) -> None:
+        if self._sleep_hccl_destroyed:
+            return
+        if torch.distributed.is_available() and torch.distributed.is_initialized():
+            for handle in self._pp_send_work:
+                handle.wait()
+            self._pp_send_work = []
+            torch.npu.synchronize()
+            num_destroyed = destroy_hccl_for_sleep()
+            self._sleep_hccl_destroyed = num_destroyed > 0
+            if self._sleep_hccl_destroyed:
+                logger.info("Destroyed %d HCCL process groups for sleep mode.", num_destroyed)
+
+    def _restore_hccl_after_sleep(self) -> None:
+        with set_current_vllm_config(self.vllm_config):
+            num_restored = restore_hccl_after_sleep()
+            from vllm_ascend.ops.fused_moe.moe_comm_method import refresh_moe_comm_method_after_hccl_restore
+
+            refresh_moe_comm_method_after_hccl_restore()
+        self._sleep_hccl_destroyed = False
+        logger.info("Restored %d HCCL process groups after sleep mode.", num_restored)
+
+    def _restore_acl_graphs_after_sleep(self, tags: list[str] | None) -> None:
+        if not self._sleep_acl_graph_invalidated:
+            return
+        if self.model_runner is None:
+            return
+        capture_model = self.model_runner.capture_model
+        with set_current_vllm_config(self.vllm_config):
+            capture_model()
+        self._sleep_acl_graph_invalidated = False
 
     def initialize_cache(self, num_gpu_blocks: int, num_cpu_blocks: int) -> None:
         self.cache_config.num_gpu_blocks = num_gpu_blocks

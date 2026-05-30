@@ -2,6 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 import dataclasses
+import weakref
 from collections.abc import Callable
 from contextlib import ExitStack
 from dataclasses import dataclass
@@ -22,6 +23,8 @@ from vllm.platforms import current_platform
 from vllm_ascend.ascend_forward_context import _EXTRA_CTX
 
 from ..utils import weak_ref_tensors
+
+_acl_graph_wrappers: weakref.WeakSet[Any] = weakref.WeakSet()
 
 
 @dataclasses.dataclass
@@ -92,6 +95,7 @@ class ACLGraphWrapper:
         self.concrete_aclgraph_entries: dict[BatchDescriptor, ACLGraphEntry] = {}
         self.enable_enpu = enable_enpu
         self.use_eagle = use_eagle
+        _acl_graph_wrappers.add(self)
 
     def __getattr__(self, key: str):
         # allow accessing the attributes of the runnable.
@@ -323,6 +327,45 @@ def update_draft_graph_params_workspaces(num_tokens: int, workspace: Any):
 
 def get_draft_graph_params():
     return _draft_graph_params
+
+
+def _clear_attention_workspaces_for_sleep(params: GraphParams | None) -> None:
+    if params is None:
+        return
+    for num_tokens in params.workspaces:
+        params.workspaces[num_tokens] = None
+
+
+def clear_attention_workspaces_for_sleep() -> None:
+    _clear_attention_workspaces_for_sleep(_graph_params)
+    _clear_attention_workspaces_for_sleep(_draft_graph_params)
+    _clear_attention_workspaces_for_sleep(_draft_graph_prefill_params)
+
+
+def _reset_graph_params(params: GraphParams | None) -> None:
+    if params is None:
+        return
+    for num_tokens in params.events:
+        params.events[num_tokens] = []
+    for num_tokens in params.handles:
+        params.handles[num_tokens] = []
+    for num_tokens in params.attn_params:
+        params.attn_params[num_tokens] = []
+    for num_tokens in params.conv1d_params:
+        params.conv1d_params[num_tokens] = []
+    for num_tokens in params.conv1d_handles:
+        params.conv1d_handles[num_tokens] = []
+    for num_tokens in params.conv1d_events:
+        params.conv1d_events[num_tokens] = []
+
+
+def reset_graph_params_for_sleep() -> None:
+    _reset_graph_params(_graph_params)
+    _reset_graph_params(_draft_graph_params)
+    _reset_graph_params(_draft_graph_prefill_params)
+    for wrapper in list(_acl_graph_wrappers):
+        wrapper.concrete_aclgraph_entries.clear()
+        wrapper.first_run_finished = False
 
 
 _draft_graph_prefill_params: GraphParams | None = None

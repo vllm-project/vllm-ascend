@@ -62,6 +62,15 @@ def setup_moe_comm_method(moe_config):
         _MoECommMethods[MoECommType.ALLGATHER] = AllGatherCommImpl(moe_config)
 
 
+def refresh_moe_comm_method_after_hccl_restore():
+    """Refresh cached MC2 communicator metadata after wakeup."""
+    for comm_method in _MoECommMethods.values():
+        dispatcher = getattr(comm_method, "token_dispatcher", None)
+        refresh_fn = getattr(dispatcher, "refresh_hccl_group_for_sleep_wakeup", None)
+        if callable(refresh_fn):
+            refresh_fn()
+
+
 def set_gmmswigluquant_method():
     from vllm_ascend.ascend_config import get_ascend_config
 

@@ -1063,6 +1063,68 @@ class TestNPUWorker(TestBase):
             mock_allocator.use_memory_pool.assert_called_once_with(tag="kv_cache")
             worker.model_runner.initialize_kv_cache.assert_called_once_with(mock_kv_cache_config)
 
+    def _make_worker_for_sleep_helpers(self):
+        from vllm_ascend.worker.worker import NPUWorker
+
+        worker = NPUWorker.__new__(NPUWorker)
+        worker.vllm_config = MagicMock()
+        worker.model_runner = None
+        worker._sleep_acl_graph_invalidated = False
+        worker._sleep_cos_sin_cache_cleared = False
+        return worker
+
+    def test_invalidate_acl_graphs_for_sleep_handles_missing_model_runner(self):
+        worker = self._make_worker_for_sleep_helpers()
+
+        with (
+            patch("vllm_ascend.compilation.acl_graph.clear_attention_workspaces_for_sleep") as mock_clear_workspaces,
+            patch("vllm_ascend.compilation.acl_graph.reset_graph_params_for_sleep") as mock_reset_graph_params,
+            patch.object(worker, "_reset_model_runner_graph_manager") as mock_reset_graph_manager,
+        ):
+            worker._invalidate_acl_graphs_for_sleep()
+
+        mock_clear_workspaces.assert_called_once()
+        mock_reset_graph_params.assert_not_called()
+        mock_reset_graph_manager.assert_not_called()
+        self.assertFalse(worker._sleep_acl_graph_invalidated)
+
+    def test_invalidate_acl_graphs_for_sleep_resets_acl_graph_state(self):
+        worker = self._make_worker_for_sleep_helpers()
+        worker.model_runner = MagicMock()
+        worker.model_runner.use_aclgraph = True
+
+        with (
+            patch("vllm_ascend.compilation.acl_graph.clear_attention_workspaces_for_sleep") as mock_clear_workspaces,
+            patch("vllm_ascend.compilation.acl_graph.reset_graph_params_for_sleep") as mock_reset_graph_params,
+            patch.object(worker, "_reset_model_runner_graph_manager") as mock_reset_graph_manager,
+        ):
+            worker._invalidate_acl_graphs_for_sleep()
+
+        mock_clear_workspaces.assert_called_once()
+        mock_reset_graph_params.assert_called_once()
+        mock_reset_graph_manager.assert_called_once()
+        self.assertTrue(worker._sleep_acl_graph_invalidated)
+
+    def test_restore_acl_graphs_after_sleep_handles_missing_model_runner(self):
+        worker = self._make_worker_for_sleep_helpers()
+        worker._sleep_acl_graph_invalidated = True
+
+        worker._restore_acl_graphs_after_sleep(tags=None)
+
+        self.assertTrue(worker._sleep_acl_graph_invalidated)
+
+    def test_restore_acl_graphs_after_sleep_recaptures_model(self):
+        worker = self._make_worker_for_sleep_helpers()
+        worker._sleep_acl_graph_invalidated = True
+        worker.model_runner = MagicMock()
+
+        with patch("vllm_ascend.worker.worker.set_current_vllm_config") as mock_set_config:
+            worker._restore_acl_graphs_after_sleep(tags=None)
+
+        mock_set_config.assert_called_once_with(worker.vllm_config)
+        worker.model_runner.capture_model.assert_called_once()
+        self.assertFalse(worker._sleep_acl_graph_invalidated)
+
     def test_initialize_from_config_without_sleep_mode(self):
         """Test initialize_from_config method - without sleep mode enabled"""
         from vllm_ascend.worker.worker import NPUWorker
