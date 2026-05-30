@@ -69,7 +69,7 @@ class FusedMoEResult:
     before_dispatch_evt: torch.npu.Event | None = None
     before_gmm2_evt: torch.npu.Event | None = None
     before_combine_evt: torch.npu.Event | None = None
-    swiglu_limit: int = 0
+    swiglu_limit: float = 0.0
 
 
 @dataclass
@@ -79,7 +79,7 @@ class FusedMoEEvents:
     before_dispatch: torch.npu.Event | None = field(default=None)
     before_gmm2: torch.npu.Event | None = field(default=None)
     before_combine: torch.npu.Event | None = field(default=None)
-    swiglu_limit: int = 0
+    swiglu_limit: float = 0.0
 
 
 def mock_false():
