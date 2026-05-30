@@ -219,5 +219,4 @@ DeepSeekMTP.forward = _patched_mtp_forward
 DeepSeekMTP.compute_logits = _patched_mtp_compute_logits
 DeepSeekMTP.load_weights = _patched_mtp_load_weights
 DeepSeekMTP.embed_input_ids = _patched_mtp_embed_input_ids
-DeepSeekMTP.supports_pp = True
 _patch_proposer_for_mtp_pp()
