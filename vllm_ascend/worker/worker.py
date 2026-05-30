@@ -31,8 +31,14 @@ from torch_npu.profiler import dynamic_profile as dp
 from vllm.config import CUDAGraphMode, VllmConfig, set_current_vllm_config
 from vllm.distributed import ensure_model_parallel_initialized, init_distributed_environment
 from vllm.distributed.ec_transfer import ensure_ec_transfer_initialized
-from vllm.distributed.kv_transfer import ensure_kv_transfer_initialized, get_kv_transfer_group, has_kv_transfer_group
+from vllm.distributed.kv_transfer import (
+    ensure_kv_transfer_initialized,
+    ensure_kv_transfer_shutdown,
+    get_kv_transfer_group,
+    has_kv_transfer_group,
+)
 from vllm.distributed.parallel_state import Handle, get_pp_group, get_tp_group
+from vllm.distributed.weight_transfer import WeightTransferEngineFactory
 from vllm.logger import logger
 from vllm.lora.request import LoRARequest
 from vllm.sequence import IntermediateTensors
@@ -130,6 +136,18 @@ class NPUWorker(WorkerBase):
         if vllm_config.model_config and vllm_config.model_config.enable_sleep_mode:
             # Buffers saved before sleep
             self._sleep_saved_buffers: dict[str, torch.Tensor] = {}
+
+        # Weight transfer engine (initialized on-demand)
+        self.weight_transfer_engine = (
+            WeightTransferEngineFactory.create_engine(
+                self.vllm_config.weight_transfer_config,
+                self.vllm_config.parallel_config,
+            )
+            if self.vllm_config.weight_transfer_config is not None
+            else None
+        )
+        self._weight_update_active = False
+        self._is_checkpoint_format = True
 
         # FixMe: this is a patch to fix the issue cause by https://github.com/vllm-project/vllm/commit/de94289a98d7ec52a5ef02719e01a1db8b505170
         from vllm.model_executor.layers.linear import WEIGHT_LOADER_V2_SUPPORTED
@@ -248,6 +266,156 @@ class NPUWorker(WorkerBase):
                 if name in self._sleep_saved_buffers:
                     buffer.data.copy_(self._sleep_saved_buffers[name].data)
             self._sleep_saved_buffers = {}
+
+    def _check_weight_transfer_engine(self) -> None:
+        if self.weight_transfer_engine is None:
+            raise RuntimeError(
+                "Weight transfer not configured. Please set weight_transfer_config to enable weight transfer."
+            )
+
+    def init_weight_transfer_engine(self, init_info: dict) -> None:
+        """Initialize the HCCL weight transfer process group with the trainer."""
+        self._check_weight_transfer_engine()
+        assert self.weight_transfer_engine is not None
+        typed_init_info = self.weight_transfer_engine.parse_init_info(init_info)
+        self.weight_transfer_engine.init_transfer_engine(typed_init_info)
+
+    def _check_nz_disabled(self) -> None:
+        if envs_ascend.VLLM_ASCEND_ENABLE_NZ:
+            raise ValueError(
+                "FRACTAL_NZ mode is enabled. This may cause model parameter "
+                "precision issues in the RL scenarios. Please set "
+                "VLLM_ASCEND_ENABLE_NZ=0."
+            )
+
+    def start_weight_update(self, is_checkpoint_format: bool = True) -> None:
+        """Begin a new weight update; prepares the model for layerwise reload.
+
+        Only invoked on vLLM main. v0.20.2 has no /start_weight_update endpoint
+        and folds init/finalize layerwise reload into update_weights itself.
+        """
+        self._check_weight_transfer_engine()
+
+        if self._weight_update_active:
+            raise RuntimeError(
+                "start_weight_update called while a weight update is already active. Call finish_weight_update first."
+            )
+
+        self._check_nz_disabled()
+
+        if is_checkpoint_format:
+            from vllm.model_executor.model_loader.reload import initialize_layerwise_reload
+
+            model = self.model_runner.model
+            with torch.device(self.device):
+                initialize_layerwise_reload(model)
+
+        self._is_checkpoint_format = is_checkpoint_format
+        self._weight_update_active = True
+
+    def update_weights(self, update_info: dict) -> None:
+        """Receive a chunk of weights from the trainer and load them in place."""
+        self._check_weight_transfer_engine()
+        assert self.weight_transfer_engine is not None
+
+        typed_update_info = self.weight_transfer_engine.parse_update_info(update_info)
+        model = self.model_runner.model
+
+        if vllm_version_is("0.20.2"):
+            # v0.20.2 lifecycle: update_weights is self-contained — it runs
+            # initialize_layerwise_reload before receive_weights and
+            # finalize_layerwise_reload after, reading is_checkpoint_format
+            # off the update_info payload (no start/finish endpoints).
+            self._check_nz_disabled()
+            is_checkpoint_format = typed_update_info.is_checkpoint_format
+            with torch.device(self.device):
+                if is_checkpoint_format:
+                    from vllm.model_executor.model_loader.reload import (
+                        finalize_layerwise_reload,
+                        initialize_layerwise_reload,
+                    )
+
+                    initialize_layerwise_reload(model)
+                    self.weight_transfer_engine.receive_weights(
+                        typed_update_info,
+                        load_weights=model.load_weights,
+                    )
+                    finalize_layerwise_reload(model, self.model_config)
+                else:
+
+                    def load_weights_direct(weights: list[tuple[str, torch.Tensor]]) -> None:
+                        with torch.no_grad():
+                            for name, weight in weights:
+                                param = model.get_parameter(name)
+                                param.copy_(weight)
+
+                    self.weight_transfer_engine.receive_weights(
+                        typed_update_info,
+                        load_weights=load_weights_direct,
+                    )
+        else:
+            # main lifecycle: state machine driven by start/finish.
+            if not self._weight_update_active:
+                raise RuntimeError("start_weight_update must be called before update_weights.")
+
+            with torch.device(self.device):
+                if self._is_checkpoint_format:
+                    self.weight_transfer_engine.receive_weights(
+                        typed_update_info,
+                        load_weights=model.load_weights,
+                    )
+                else:
+
+                    def load_weights_direct(weights: list[tuple[str, torch.Tensor]]) -> None:
+                        with torch.no_grad():
+                            for name, weight in weights:
+                                param = model.get_parameter(name)
+                                param.copy_(weight)
+
+                    self.weight_transfer_engine.receive_weights(
+                        typed_update_info,
+                        load_weights=load_weights_direct,
+                    )
+
+        # HCCL broadcast / packed paths are asynchronous.
+        # Sync so the next step uses the new weights.
+        torch.npu.synchronize()
+
+    def finish_weight_update(self) -> None:
+        """Finish the current weight update; runs layerwise postprocessing.
+
+        Only invoked on vLLM main. v0.20.2 has no /finish_weight_update endpoint
+        and folds layerwise finalization into update_weights itself.
+        """
+        self._check_weight_transfer_engine()
+
+        if not self._weight_update_active:
+            raise RuntimeError("start_weight_update must be called before finish_weight_update.")
+
+        if self._is_checkpoint_format:
+            from vllm.model_executor.model_loader.reload import finalize_layerwise_reload
+
+            model = self.model_runner.model
+            with torch.device(self.device):
+                finalize_layerwise_reload(model, self.model_config)
+
+        self._weight_update_active = False
+        self._is_checkpoint_format = True
+
+    def shutdown(self) -> None:
+        if ensure_kv_transfer_shutdown is not None:
+            ensure_kv_transfer_shutdown()
+
+        if self.profiler is not None:
+            self.profiler.shutdown()
+
+        if weight_transfer_engine := getattr(self, "weight_transfer_engine", None):
+            weight_transfer_engine.shutdown()
+
+        if model_runner := getattr(self, "model_runner", None):
+            shutdown_fn = getattr(model_runner, "shutdown", None)
+            if callable(shutdown_fn):
+                shutdown_fn()
 
     def initialize_cache(self, num_gpu_blocks: int, num_cpu_blocks: int) -> None:
         self.cache_config.num_gpu_blocks = num_gpu_blocks
