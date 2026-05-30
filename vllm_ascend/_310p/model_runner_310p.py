@@ -88,6 +88,19 @@ class NPUModelRunner310(NPUModelRunner):
             # Keep dispatcher's internal query_len in sync to avoid key-init assert.
             self.cudagraph_dispatcher.uniform_decode_query_len = _NGRAM_GRAPH_UNIFORM_DECODE_QUERY_LEN
 
+    def _update_states(self, scheduler_output: SchedulerOutput):
+        deferred = super()._update_states(scheduler_output)
+        if scheduler_output.finished_req_ids:
+            # condense() rewrites block_table.np (move_row). Drain the previous
+            # step's ACL graph replay on the NPU stream before the condensed
+            # CPU layout is uploaded and read as attn_metadata.block_tables.
+            # Main-line Ascend relies on the end-of-_prepare_inputs Triton
+            # slot-mapping kernel (reads block_table.gpu) for stream ordering;
+            # 310P uses CPU NumPy for slot_mapping and needs this barrier on
+            # layout-change steps only.
+            torch.npu.current_stream().synchronize()
+        return deferred
+
     @contextmanager
     def temporary_modify_uniform_decode_query_len(self):
         # This is only needed for the 310P ngram path where dispatcher uses q_len=1
