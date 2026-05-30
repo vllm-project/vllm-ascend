@@ -9,7 +9,7 @@ class EMooncakeBackend(MooncakeBackend):
         super().__init__(parallel_config=parallel_config)
 
     def put_tensor_info(self, key: str, value: bytes | None) -> None:
-        if value is not None:
+        if self.store is not None and value is not None:
             """Put value to Mooncake Store"""
             try:
                 self.store.put(key, value)
@@ -18,11 +18,12 @@ class EMooncakeBackend(MooncakeBackend):
                 raise TypeError("Mooncake Store Put Type Error.") from err
 
     def get_tensor_info(self, key: str) -> bytes | None:
-        """Get value from Mooncake Store"""
-        try:
-            data = self.store.get(key)
-        except TypeError as err:
-            logger.error("Failed to get value from Mooncake Store: %s", err)
-            raise TypeError("Mooncake Store Get Type Error.") from err
+        if self.store is not None:
+            """Get value from Mooncake Store"""
+            try:
+                data = self.store.get(key)
+            except TypeError as err:
+                logger.error("Failed to get value from Mooncake Store: %s", err)
+                raise TypeError("Mooncake Store Get Type Error.") from err
 
-        return data
+            return data
