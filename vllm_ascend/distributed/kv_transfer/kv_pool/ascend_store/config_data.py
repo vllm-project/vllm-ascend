@@ -345,6 +345,10 @@ class ChunkedTokenDatabase:
         if not block_hashes:
             return
         group_block_size = self.get_block_size(kv_cache_group_id)
+        if cache_family is None:
+            cache_family = self.group_cache_families.get(cache_role, {}).get(kv_cache_group_id, "default")
+        cache_family_ratio = max(infer_cache_family_ratio(cache_family), 1)
+        group_block_size *= cache_family_ratio
         block_hashes = get_block_hashes(
             block_hashes,
             group_block_size,
@@ -366,6 +370,10 @@ class ChunkedTokenDatabase:
             if start_idx < mask_num:
                 continue
             else:
+                start_idx //= cache_family_ratio
+                end_idx //= cache_family_ratio
+                if end_idx <= start_idx:
+                    continue
                 yield (
                     start_idx,
                     end_idx,
