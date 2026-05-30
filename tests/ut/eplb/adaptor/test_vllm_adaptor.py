@@ -33,9 +33,7 @@ class TestVllmAdaptor(unittest.TestCase):
 
         self.mock_rank = patch("vllm_ascend.eplb.adaptor.vllm_adaptor.dist.get_rank", return_value=0).start()
         self.mock_size = patch("vllm_ascend.eplb.adaptor.vllm_adaptor.dist.get_world_size", return_value=4).start()
-<<<<<<< HEAD
         self.adaptor = VllmEplbAdaptor(self.model)
-=======
 
     @patch("torch.empty_like", return_value=torch.zeros(16, 32))
     def test_init_fp16(self, mock_func):
@@ -60,7 +58,6 @@ class TestVllmAdaptor(unittest.TestCase):
         model.language_model = self.model
         model.config.text_config = self.model.config
         VllmEplbAdaptor(model)
->>>>>>> upstream/main
 
     def tearDown(self):
         self.mock_rank.stop()

@@ -3397,8 +3397,6 @@ class NPUModelRunner(GPUModelRunner):
                 from vllm.model_executor.model_loader.default_loader import DefaultModelLoader
                 DefaultModelLoader._init_ep_weight_filter = mock_pass
             self.model: nn.Module = get_model(vllm_config=self.vllm_config)
-<<<<<<< HEAD
-
             # Set aux_hidden_state_layers on ALL PP ranks.
             # _set_up_drafter only sets use_aux_hidden_state_outputs on the last
             # PP rank, but non-last ranks also need it to produce _pp_aux.
@@ -3419,7 +3417,6 @@ class NPUModelRunner(GPUModelRunner):
                     aux_layers = self.model.get_eagle3_default_aux_hidden_state_layers()
                 self.model.set_aux_hidden_state_layers(aux_layers)
 
-=======
             for name, _ in self.model.named_parameters():
                 # sinks is a kind of parameter in attention
                 # only set in weight name
@@ -3429,7 +3426,6 @@ class NPUModelRunner(GPUModelRunner):
                     break
             if self.dynamic_eplb:
                 model_register(self.model)
->>>>>>> upstream/main
             if self.drafter:
                 logger.info("Loading drafter model...")
                 if self.vllm_config.quant_config is not None:
