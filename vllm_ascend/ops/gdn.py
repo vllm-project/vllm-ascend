@@ -612,7 +612,7 @@ class AscendGatedDeltaNetAttention(GatedDeltaNetAttention):
             # (csrc/recurrent_gated_delta_rule), NOT the built-in CANN operator.
             # The custom op extends dtype support (e.g. float32 state) and is
             # loaded at runtime via ASCEND_CUSTOM_OPP_PATH.
-            core_attn_out_spec = DeviceOperator.npu_recurrent_gated_delta_rule(
+            core_attn_out_spec = torch.ops._C_ascend.npu_recurrent_gated_delta_rule(
                 query=query_spec.squeeze(0),
                 key=key_spec.squeeze(0),
                 value=value_spec.squeeze(0),
@@ -623,7 +623,7 @@ class AscendGatedDeltaNetAttention(GatedDeltaNetAttention):
                 actual_seq_lengths=actual_seq_lengths,
                 ssm_state_indices=spec_state_indices_tensor.flatten(),
                 num_accepted_tokens=num_accepted_tokens.to(torch.int32),
-            )
+            ).unsqueeze(0)
         else:
             core_attn_out_spec, last_recurrent_state = None, None
 
@@ -654,7 +654,7 @@ class AscendGatedDeltaNetAttention(GatedDeltaNetAttention):
             key_non_spec = l2norm_fwd(key_non_spec)
             # Dispatches to the vllm-ascend AscendC custom operator
             # (csrc/recurrent_gated_delta_rule), NOT the built-in CANN operator.
-            core_attn_out_non_spec = DeviceOperator.npu_recurrent_gated_delta_rule(
+            core_attn_out_non_spec = torch.ops._C_ascend.npu_recurrent_gated_delta_rule(
                 query=query_non_spec.squeeze(0),
                 key=key_non_spec.squeeze(0),
                 value=value_non_spec.squeeze(0),
@@ -664,7 +664,7 @@ class AscendGatedDeltaNetAttention(GatedDeltaNetAttention):
                 scale=key_non_spec.shape[-1] ** -0.5,
                 actual_seq_lengths=actual_seq_lengths,
                 ssm_state_indices=non_spec_state_indices_tensor,
-            )
+            ).unsqueeze(0)
         else:
             core_attn_out_non_spec, last_recurrent_state = None, None
 

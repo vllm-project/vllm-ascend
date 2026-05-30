@@ -311,25 +311,6 @@ class BaseDeviceAdaptor:
         return context_layer
 
     @staticmethod
-    def npu_recurrent_gated_delta_rule(
-        query, key, value, g, beta, state, scale, actual_seq_lengths, ssm_state_indices, num_accepted_tokens=None
-    ):
-        core_attn_out = torch_npu.npu_recurrent_gated_delta_rule(
-            query=query,
-            key=key,
-            value=value,
-            g=g,
-            beta=beta,
-            state=state,
-            scale=scale,
-            actual_seq_lengths=actual_seq_lengths,
-            ssm_state_indices=ssm_state_indices,
-            num_accepted_tokens=num_accepted_tokens,
-        ).unsqueeze(0)
-
-        return core_attn_out
-
-    @staticmethod
     def chunk_scaled_dot_kkt_fwd(NT, k, beta, g_cumsum, A, cu_seqlens, chunk_indices, T, B, H, Hg, K, BT, BK):
         chunk_scaled_dot_kkt_fwd_kernel[(NT, 1)](
             k=k,
@@ -707,25 +688,6 @@ class A5DeviceAdaptor(BaseDeviceAdaptor):
         )[0]
 
         return context_layer
-
-    @staticmethod
-    def npu_recurrent_gated_delta_rule(
-        query, key, value, g, beta, state, scale, actual_seq_lengths, ssm_state_indices, num_accepted_tokens=None
-    ):
-        core_attn_out = torch.ops._C_ascend.npu_recurrent_gated_delta_rule_custom(
-            query=query,
-            key=key,
-            value=value,
-            g=g,
-            beta=beta,
-            state=state,
-            scale_value=scale,
-            actual_seq_lengths=actual_seq_lengths,
-            ssm_state_indices=ssm_state_indices,
-            num_accepted_tokens=num_accepted_tokens,
-        ).unsqueeze(0)
-
-        return core_attn_out
 
     @staticmethod
     def chunk_scaled_dot_kkt_fwd(NT, k, beta, g_cumsum, A, cu_seqlens, chunk_indices, T, B, H, Hg, K, BT, BK):
