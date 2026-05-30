@@ -157,8 +157,15 @@ def rejection_random_sample_kernel(
     vec_len,
     NO_DRAFT_PROBS: tl.constexpr,
     ENABLE_REDUCE_SAMPLING: tl.constexpr,  # Whether using reduce sampling
+    ENTROPY_VERIFY: tl.constexpr,
     BLOCK_SIZE: tl.constexpr,
     VOCAB_BLOCK_SIZE: tl.constexpr = 512,
+    POSTERIOR_THRESHOLD: tl.constexpr = 0.95,
+    POSTERIOR_ALPHA: tl.constexpr = 0.4,
+    SUB_BLOCK: tl.constexpr = 4096,
+    EPSILON: tl.constexpr = 1e-10,
+    ori_target_probs_ptr=0,  # [num_tokens, ori_vocab_size] original probs for entropy
+    ori_vocab_size=0,  # vocab size of ori_target_probs
 ):
     block_idx = tl.program_id(0)
     offsets = block_idx * BLOCK_SIZE + tl.arange(0, BLOCK_SIZE)
@@ -220,8 +227,31 @@ def rejection_random_sample_kernel(
 
                     uniform_prob = tl.load(uniform_probs_ptr + token_idx)
 
+                    if ENTROPY_VERIFY:
+                        _entropy_vocab_size = ori_vocab_size if ori_vocab_size > 0 else vocab_size
+                        _entropy_probs_ptr = ori_target_probs_ptr if ori_vocab_size > 0 else target_probs_ptr
+                        loop = (_entropy_vocab_size + SUB_BLOCK - 1) // SUB_BLOCK
+                        entropy = 0.0
+                        for loop_i in range(loop):
+                            vocab_start = loop_i * SUB_BLOCK
+                            vocab_offset = vocab_start + tl.arange(0, SUB_BLOCK)
+                            vocab_mask = vocab_offset < _entropy_vocab_size
+                            probs = tl.load(
+                                _entropy_probs_ptr + token_idx * _entropy_vocab_size + vocab_offset, vocab_mask, other=0
+                            )
+                            log_probs = tl.log(probs + EPSILON)
+                            entropy_contrib = -probs * log_probs
+                            entropy += tl.sum(entropy_contrib)
+
+                        exp_neg_entropy = tl.exp(-entropy * POSTERIOR_ALPHA)
+                        threshold_by_entropy = exp_neg_entropy
+                        threshold = tl.minimum(threshold_by_entropy, POSTERIOR_THRESHOLD)
+                        _uniform_prob = threshold * uniform_prob
+                    else:
+                        _uniform_prob = uniform_prob
+
                     # Acceptance condition
-                    if draft_prob > 0 and target_prob / draft_prob >= uniform_prob:
+                    if draft_prob > 0 and target_prob / draft_prob >= _uniform_prob:
                         # Accept
                         token_id = draft_token_id
                     else:
@@ -282,9 +312,10 @@ def sample_recovered_tokens_kernel(
     vocab_size,
     global_vocab_size,
     NO_DRAFT_PROBS: tl.constexpr,
-    BLOCK_VERIFY: tl.constexpr,
+    # BLOCK_VERIFY: tl.constexpr,
     ENABLE_REDUCE_SAMPLING: tl.constexpr,
     SUB_BLOCK: tl.constexpr,
+    VOCAB_BLOCK_SIZE: tl.constexpr = 512,
 ):
     req_idx = tl.program_id(0)
     pos = tl.program_id(1)
@@ -301,15 +332,15 @@ def sample_recovered_tokens_kernel(
 
     if ENABLE_REDUCE_SAMPLING:
         C = vocab_size
-        n_loop = tl.cdiv(C, SUB_BLOCK)
+        n_loop = tl.cdiv(C, VOCAB_BLOCK_SIZE)
 
         global_max_p = tl.full((), -float("inf"), tl.float32)
         global_recovered_id = tl.full((), -1, tl.int64)
         draft_token_id = tl.load(draft_token_ids_ptr + token_idx).to(tl.int64)
 
         for li in range(n_loop):
-            c_start = li * SUB_BLOCK
-            offs = c_start + tl.arange(0, SUB_BLOCK)
+            c_start = li * VOCAB_BLOCK_SIZE
+            offs = c_start + tl.arange(0, VOCAB_BLOCK_SIZE)
             mask = offs < C
 
             # Load target prob and global index
@@ -347,55 +378,63 @@ def sample_recovered_tokens_kernel(
         loop = (vocab_size + SUB_BLOCK - 1) // SUB_BLOCK
         global_recovered_id = -1
         global_max_p = -1.0
-        prefix_prob = 1.0
-        if BLOCK_VERIFY:
-            for prev_pos in range(pos):
-                prev_token_idx = start_idx + prev_pos
-                prev_draft_token_id = tl.load(draft_token_ids_ptr + prev_token_idx)
-                prev_target_prob = tl.load(target_probs_ptr + prev_token_idx * vocab_size + prev_draft_token_id)
-                if NO_DRAFT_PROBS:
-                    prev_draft_prob = 1.0
-                else:
-                    prev_draft_prob = tl.load(draft_probs_ptr + prev_token_idx * vocab_size + prev_draft_token_id)
-                if prev_draft_prob > 0:
-                    prefix_prob = min(prefix_prob * prev_target_prob / prev_draft_prob, 1.0)
-                else:
-                    prefix_prob = 0.0
-
-        draft_token_id = tl.load(draft_token_ids_ptr + start_idx + pos)
-        for loop_i in range(loop):
-            vocab_start = loop_i * SUB_BLOCK
-            vocab_offset = vocab_start + tl.arange(0, SUB_BLOCK)
-            target_prob = tl.load(
-                target_probs_ptr + (start_idx + pos) * vocab_size + vocab_offset,
-                mask=vocab_offset < vocab_size,
-                other=0,
-            )
-            if NO_DRAFT_PROBS:
-                prob = prefix_prob * target_prob if BLOCK_VERIFY else target_prob
-                prob = tl.where(vocab_offset == draft_token_id, 0.0, prob)
-            else:
+        if NO_DRAFT_PROBS:
+            draft_token_id = tl.load(draft_token_ids_ptr + start_idx + pos)
+            orig_prob = tl.load(target_probs_ptr + (start_idx + pos) * vocab_size + draft_token_id)
+            # Temporarily zero out the probability of the draft token.
+            # This is essentially the same as target_prob - draft_prob, except that
+            # n-gram does not have draft_prob. We regard it as 1.
+            tl.store(target_probs_ptr + (start_idx + pos) * vocab_size + draft_token_id, 0)
+            for loop_i in range(loop):
+                vocab_start = loop_i * SUB_BLOCK
+                vocab_offset = vocab_start + tl.arange(0, SUB_BLOCK)
+                prob = tl.load(
+                    target_probs_ptr + (start_idx + pos) * vocab_size + vocab_offset,
+                    mask=vocab_offset < vocab_size,
+                    other=0,
+                )
+                q = tl.load(
+                    q_ptr + req_idx * vocab_size + vocab_offset, mask=vocab_offset < vocab_size, other=float("-inf")
+                )
+                new_p = prob / q
+                recovered_id = tl.argmax(new_p, axis=-1)
+                max_p = get_element(new_p, (recovered_id,))
+                if max_p > global_max_p:
+                    global_max_p = max_p
+                    global_recovered_id = vocab_start + recovered_id
+        else:
+            for loop_i in range(loop):
+                vocab_start = loop_i * SUB_BLOCK
+                vocab_offset = vocab_start + tl.arange(0, SUB_BLOCK)
                 draft_prob = tl.load(
                     draft_probs_ptr + (start_idx + pos) * vocab_size + vocab_offset,
                     mask=vocab_offset < vocab_size,
                     other=0,
                 )
-                if BLOCK_VERIFY:
-                    prob = tl.maximum(prefix_prob * target_prob - draft_prob, 0.0)
-                else:
-                    prob = tl.maximum(target_prob - draft_prob, 0.0)
+                target_prob = tl.load(
+                    target_probs_ptr + (start_idx + pos) * vocab_size + vocab_offset,
+                    mask=vocab_offset < vocab_size,
+                    other=0,
+                )
+                prob = tl.maximum(target_prob - draft_prob, 0)
+                # NOTE(woosuk): We don't need `prob = prob / tl.sum(prob)` here because
+                # `tl.argmax` will select the maximum value.
 
-            q = tl.load(
-                q_ptr + req_idx * vocab_size + vocab_offset, mask=vocab_offset < vocab_size, other=float("-inf")
-            )
-            new_p = prob / q
-            recovered_id = tl.argmax(new_p, axis=-1)
-            max_p = get_element(new_p, (recovered_id,))
-            if max_p > global_max_p:
-                global_max_p = max_p
-                global_recovered_id = vocab_start + recovered_id
+                q = tl.load(
+                    q_ptr + req_idx * vocab_size + vocab_offset, mask=vocab_offset < vocab_size, other=float("-inf")
+                )
+                new_p = prob / q
+                recovered_id = tl.argmax(new_p, axis=-1)
+                max_p = get_element(new_p, (recovered_id,))
+                if max_p > global_max_p:
+                    global_max_p = max_p
+                    global_recovered_id = vocab_start + recovered_id
 
         tl.store(output_token_ids_ptr + start_idx + pos, global_recovered_id)
+
+        if NO_DRAFT_PROBS:
+            # Restore the original probability.
+            tl.store(target_probs_ptr + (start_idx + pos) * vocab_size + draft_token_id, orig_prob)
 
 
 def rejection_greedy_sample_with_triton(
@@ -470,7 +509,14 @@ def rejection_random_sample_block_verify_kernel(
     NO_DRAFT_PROBS: tl.constexpr,
     ENABLE_REDUCE_SAMPLING: tl.constexpr,  # Whether using reduce_sampling
     BLOCK_SIZE: tl.constexpr,
+    ENTROPY_VERIFY: tl.constexpr,
     VOCAB_BLOCK_SIZE: tl.constexpr = 512,
+    POSTERIOR_THRESHOLD: tl.constexpr = 0.95,
+    POSTERIOR_ALPHA: tl.constexpr = 0.4,
+    SUB_BLOCK: tl.constexpr = 4096,
+    EPSILON: tl.constexpr = 1e-10,
+    ori_target_probs_ptr=0,  # [num_tokens, ori_vocab_size] original probs for entropy
+    ori_vocab_size=0,  # vocab size of ori_target_probs
 ):
     block_idx = tl.program_id(0)
     offsets = block_idx * BLOCK_SIZE + tl.arange(0, BLOCK_SIZE)
@@ -531,8 +577,33 @@ def rejection_random_sample_block_verify_kernel(
                     vocab_for_draft = global_vocab_size if ENABLE_REDUCE_SAMPLING else vocab_size
                     draft_prob = tl.load(draft_probs_ptr + token_idx * vocab_for_draft + draft_token_id)
 
+                if ENTROPY_VERIFY:
+                    _entropy_vocab_size = ori_vocab_size if ori_vocab_size > 0 else vocab_size
+                    _entropy_probs_ptr = ori_target_probs_ptr if ori_vocab_size > 0 else target_probs_ptr
+                    loop = (_entropy_vocab_size + SUB_BLOCK - 1) // SUB_BLOCK
+                    entropy = 0.0
+                    for loop_i in range(loop):
+                        vocab_start = loop_i * SUB_BLOCK
+                        vocab_offset = vocab_start + tl.arange(0, SUB_BLOCK)
+                        vocab_mask = vocab_offset < _entropy_vocab_size
+                        probs = tl.load(
+                            _entropy_probs_ptr + token_idx * _entropy_vocab_size + vocab_offset,
+                            vocab_mask,
+                            other=0,
+                        )
+                        log_probs = tl.log(probs + EPSILON)
+                        entropy_contrib = -probs * log_probs
+                        entropy += tl.sum(entropy_contrib)
+
+                    exp_neg_entropy = tl.exp(-entropy * POSTERIOR_ALPHA)
+                    threshold_by_entropy = exp_neg_entropy
+                    threshold = tl.minimum(threshold_by_entropy, POSTERIOR_THRESHOLD)
+                    _uniform_prob = threshold * uniform_prob
+                else:
+                    _uniform_prob = uniform_prob
+
                 pi = min(pi * target_prob / draft_prob, 1.0)
-                if draft_prob > 0 and pi >= uniform_prob:
+                if draft_prob > 0 and pi >= _uniform_prob:
                     last_accepted_token_pos = pos
 
             # Store accepted tokens

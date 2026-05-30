@@ -164,6 +164,7 @@ class AscendRejectionSampler(RejectionSampler):
             target_logits,
             bonus_token_ids,
             sampling_metadata,
+            ori_target_logits=raw_target_logits,
         )
 
         logprobs_tensors = None
@@ -286,6 +287,7 @@ def rejection_sample(
     sampling_metadata: SamplingMetadata,
     synthetic_mode: bool = False,
     synthetic_conditional_rates: torch.Tensor | None = None,
+    ori_target_logits: torch.Tensor | None = None,
 ) -> torch.Tensor:
     """
     Rejection sampling for speculative decoding in distributed setting.
@@ -331,7 +333,16 @@ def rejection_sample(
     # When num_speculative_tokens>=3, using block verify.
     # Skip block verify when draft_probs is None (suffix/ngram methods)
     # to avoid incorrect verification results.
-    using_block_verify = max_spec_len >= 3 and draft_probs is not None
+    # using_block_verify = max_spec_len >= 3 and draft_probs is not None
+    using_block_verify = bool(get_ascend_config().rejection_sampler_config.enable_block_verify)
+    using_entropy_verify = bool(get_ascend_config().rejection_sampler_config.enable_entropy_verify)
+    posterior_threshold = float(get_ascend_config().rejection_sampler_config.posterior_threshold)
+    posterior_alpha = float(get_ascend_config().rejection_sampler_config.posterior_alpha)
+
+    if using_entropy_verify and ori_target_logits is not None:
+        ori_target_probs = ori_target_logits.softmax(dim=-1, dtype=torch.float32)
+    else:
+        ori_target_probs = None
 
     # Create output buffer.
     output_token_ids = torch.empty(
@@ -419,7 +430,7 @@ def rejection_sample(
             target_probs,
             sampling_metadata,
             device,
-            use_block_verify=using_block_verify,
+            # use_block_verify=using_block_verify,
             target_indices=target_indices,
             global_vocab_size=global_vocab_size,
             enable_reduce_sampling=True,
@@ -445,7 +456,14 @@ def rejection_sample(
                     batch_size,
                     NO_DRAFT_PROBS=draft_probs is None,
                     ENABLE_REDUCE_SAMPLING=True,
+                    ENTROPY_VERIFY=using_entropy_verify,
                     BLOCK_SIZE=block_size,
+                    POSTERIOR_THRESHOLD=posterior_threshold,
+                    POSTERIOR_ALPHA=posterior_alpha,
+                    SUB_BLOCK=4 * 1024,
+                    EPSILON=1e-10,
+                    ori_target_probs_ptr=ori_target_probs,
+                    ori_vocab_size=ori_target_probs.shape[-1] if ori_target_probs is not None else 0,
                 )
             else:
                 rejection_random_sample_pytorch(
@@ -463,8 +481,15 @@ def rejection_sample(
                     IS_NGRAM=draft_probs is None,
                     target_indices=target_indices,
                     enable_reduce_sampling=True,
+                    ENTROPY_VERIFY=using_entropy_verify,
+                    POSTERIOR_THRESHOLD=posterior_threshold,
+                    POSTERIOR_ALPHA=posterior_alpha,
+                    EPSILON=1e-10,
+                    ori_target_probs=ori_target_probs,
                 )
         else:
+            # MagicMTP: Improving acceptance rate with Block Verify.
+            # Entropy_verify: Improving acceptance rate with entropy Verify.
             if HAS_TRITON:
                 rejection_random_sample_block_verify_kernel[(grid,)](
                     output_token_ids,
@@ -483,7 +508,14 @@ def rejection_sample(
                     batch_size,
                     NO_DRAFT_PROBS=draft_probs is None,
                     ENABLE_REDUCE_SAMPLING=True,
+                    ENTROPY_VERIFY=using_entropy_verify,
                     BLOCK_SIZE=block_size,
+                    POSTERIOR_THRESHOLD=posterior_threshold,
+                    POSTERIOR_ALPHA=posterior_alpha,
+                    SUB_BLOCK=4 * 1024,
+                    EPSILON=1e-10,
+                    ori_target_probs_ptr=ori_target_probs,
+                    ori_vocab_size=ori_target_probs.shape[-1] if ori_target_probs is not None else 0,
                 )
             else:
                 rejection_random_sample_block_verify_pytorch(
@@ -501,6 +533,11 @@ def rejection_sample(
                     IS_NGRAM=draft_probs is None,
                     target_indices=target_indices,
                     enable_reduce_sampling=True,
+                    ENTROPY_VERIFY=using_entropy_verify,
+                    POSTERIOR_THRESHOLD=posterior_threshold,
+                    POSTERIOR_ALPHA=posterior_alpha,
+                    EPSILON=1e-10,
+                    ori_target_probs=ori_target_probs,
                 )
     else:
         # Fallback to original mode
@@ -529,7 +566,7 @@ def rejection_sample(
             target_probs,
             sampling_metadata,
             device,
-            use_block_verify=using_block_verify,
+            # use_block_verify=using_block_verify,
             target_indices=None,
             global_vocab_size=vocab_size,
             enable_reduce_sampling=False,
@@ -554,7 +591,14 @@ def rejection_sample(
                     batch_size,
                     NO_DRAFT_PROBS=draft_probs is None,
                     ENABLE_REDUCE_SAMPLING=False,
+                    ENTROPY_VERIFY=using_entropy_verify,
                     BLOCK_SIZE=block_size,
+                    POSTERIOR_THRESHOLD=posterior_threshold,
+                    POSTERIOR_ALPHA=posterior_alpha,
+                    SUB_BLOCK=4 * 1024,
+                    EPSILON=1e-10,
+                    ori_target_probs_ptr=ori_target_probs,
+                    ori_vocab_size=ori_target_probs.shape[-1] if ori_target_probs is not None else 0,
                 )
             else:
                 rejection_random_sample_pytorch(
@@ -572,6 +616,11 @@ def rejection_sample(
                     IS_NGRAM=draft_probs is None,
                     target_indices=None,
                     enable_reduce_sampling=False,
+                    ENTROPY_VERIFY=using_entropy_verify,
+                    POSTERIOR_THRESHOLD=posterior_threshold,
+                    POSTERIOR_ALPHA=posterior_alpha,
+                    EPSILON=1e-10,
+                    ori_target_probs=ori_target_probs,
                 )
         else:
             if HAS_TRITON:
@@ -592,7 +641,14 @@ def rejection_sample(
                     batch_size,
                     NO_DRAFT_PROBS=draft_probs is None,
                     ENABLE_REDUCE_SAMPLING=False,
+                    ENTROPY_VERIFY=using_entropy_verify,
                     BLOCK_SIZE=block_size,
+                    POSTERIOR_THRESHOLD=posterior_threshold,
+                    POSTERIOR_ALPHA=posterior_alpha,
+                    SUB_BLOCK=4 * 1024,
+                    EPSILON=1e-10,
+                    ori_target_probs_ptr=ori_target_probs,
+                    ori_vocab_size=ori_target_probs.shape[-1] if ori_target_probs is not None else 0,
                 )
             else:
                 rejection_random_sample_block_verify_pytorch(
@@ -610,6 +666,11 @@ def rejection_sample(
                     IS_NGRAM=draft_probs is None,
                     target_indices=None,
                     enable_reduce_sampling=False,
+                    ENTROPY_VERIFY=using_entropy_verify,
+                    POSTERIOR_THRESHOLD=posterior_threshold,
+                    POSTERIOR_ALPHA=posterior_alpha,
+                    EPSILON=1e-10,
+                    ori_target_probs=ori_target_probs,
                 )
 
     return output_token_ids
@@ -703,9 +764,10 @@ def sample_recovered_tokens(
             vocab_size,
             global_vocab_size if global_vocab_size is not None else vocab_size,
             NO_DRAFT_PROBS=draft_probs is None,
-            BLOCK_VERIFY=use_block_verify,
+            # BLOCK_VERIFY=use_block_verify,
             ENABLE_REDUCE_SAMPLING=enable_reduce_sampling,
-            SUB_BLOCK=512,
+            VOCAB_BLOCK_SIZE=512,
+            SUB_BLOCK=4 * 1024,
             # TODO: enable multibuffer when accuracy problem is solved.
             multibuffer=False,
         )
@@ -822,6 +884,11 @@ def rejection_random_sample_pytorch(
     IS_NGRAM=False,
     target_indices=None,  # [num_tokens, selected_vocab_size] global vocab indices
     enable_reduce_sampling=False,
+    ENTROPY_VERIFY=False,
+    POSTERIOR_THRESHOLD=0.95,
+    POSTERIOR_ALPHA=0.4,
+    EPSILON=1e-10,
+    ori_target_probs=None,
 ):
     """
     This function implements the Speculative Decoding rejection sampling step.
@@ -905,9 +972,21 @@ def rejection_random_sample_pytorch(
     zero_threshold_cpu = torch.tensor([0.0], pin_memory=True, dtype=torch.float32)
     zero_threshold = zero_threshold_cpu.to(device, non_blocking=True)
 
-    acceptance_condition = (draft_token_probs > zero_threshold) & (
-        target_token_probs / draft_token_probs >= uniform_token_probs
-    )
+    if ENTROPY_VERIFY:
+        entropy_probs = ori_target_probs if ori_target_probs is not None else target_probs
+        all_target_dist = entropy_probs[global_token_indices]
+        entropy = -(all_target_dist * torch.log(all_target_dist + EPSILON)).sum(dim=-1)
+        exp_neg_entropy = torch.exp(-entropy * POSTERIOR_ALPHA)
+        posterior_threshold_device = torch.tensor(POSTERIOR_THRESHOLD, device=device, dtype=torch.float32)
+        threshold = torch.minimum(exp_neg_entropy, posterior_threshold_device)
+        modified_uniform_token_probs = threshold * uniform_token_probs
+        acceptance_condition = (draft_token_probs > zero_threshold) & (
+            target_token_probs / draft_token_probs >= modified_uniform_token_probs
+        )
+    else:
+        acceptance_condition = (draft_token_probs > zero_threshold) & (
+            target_token_probs / draft_token_probs >= uniform_token_probs
+        )
 
     first_rejection = (~acceptance_condition) & valid_mask
 
@@ -1141,6 +1220,11 @@ def rejection_random_sample_block_verify_pytorch(
     IS_NGRAM=False,
     target_indices=None,  # [num_tokens, selected_vocab_size] global vocab indices
     enable_reduce_sampling=False,
+    ENTROPY_VERIFY=False,
+    POSTERIOR_THRESHOLD=0.95,
+    POSTERIOR_ALPHA=0.4,
+    EPSILON=1e-10,
+    ori_target_probs=None,
 ):
     batch_size = output_token_ids.shape[0]
     device = output_token_ids.device
@@ -1198,8 +1282,19 @@ def rejection_random_sample_block_verify_pytorch(
     pi = target_token_probs / draft_token_probs
     pi = pi.clamp(max=1.0)
     pi = torch.cumprod(pi, dim=-1)
-    uniform_token_probs = torch.cumprod(uniform_token_probs, dim=-1)
-    legal_mask = (draft_token_probs > 0) & (pi >= uniform_token_probs)
+    cum_uniform_token_probs = torch.cumprod(uniform_token_probs, dim=-1)
+
+    if ENTROPY_VERIFY:
+        entropy_probs = ori_target_probs if ori_target_probs is not None else target_probs
+        all_target_dist = entropy_probs[global_token_indices]
+        entropy = -(all_target_dist * torch.log(all_target_dist + EPSILON)).sum(dim=-1)
+        exp_neg_entropy = torch.exp(-entropy * POSTERIOR_ALPHA)
+        posterior_threshold_device = torch.tensor(POSTERIOR_THRESHOLD, device=device, dtype=torch.float32)
+        threshold = torch.minimum(exp_neg_entropy, posterior_threshold_device)
+        modified_cum_uniform_token_probs = threshold * cum_uniform_token_probs
+        legal_mask = (draft_token_probs > 0) & (pi >= modified_cum_uniform_token_probs)
+    else:
+        legal_mask = (draft_token_probs > 0) & (pi >= cum_uniform_token_probs)
     legal_mask = legal_mask & valid_mask
 
     last_accept_pos = torch.where(
