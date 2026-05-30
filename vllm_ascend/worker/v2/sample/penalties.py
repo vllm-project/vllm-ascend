@@ -135,7 +135,7 @@ def apply_penalties(
 ) -> None:
     num_tokens, vocab_size = logits.shape
     BLOCK_SIZE = 8192
-    INNER_BLOCK_SIZE = 4096
+    INNER_BLOCK_SIZE = 2048
     num_blocks = triton.cdiv(vocab_size, BLOCK_SIZE)
 
     penalties = torch.stack(

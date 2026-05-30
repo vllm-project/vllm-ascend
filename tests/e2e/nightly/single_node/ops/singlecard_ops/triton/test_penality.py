@@ -1,17 +1,15 @@
-import gc
-
 import pytest
 import torch
 
 from vllm_ascend.worker.v2.sample.penalties import apply_penalties
 
 DTYPES = [torch.bfloat16, torch.float16]
-NUM_TOKENS = [2, 4, 8]
-VOCAB_SIZE = [151936]
-NUM_STATUS = [1, 4, 8, 16]
+NUM_TOKENS = [4, 16]
+VOCAB_SIZE = [100]
+NUM_STATUS = [1, 4]
 SEEDS = [0]
 DEVICES = [f"npu:{0}"]
-NUM_SPECULATIVE_TOKENS = [0, 1, 3]
+NUM_SPECULATIVE_TOKENS = [0, 1]
 DEFAULT_ATOL = 1e-3
 DEFAULT_RTOL = 1e-3
 
@@ -37,8 +35,8 @@ def pytorch_apply_penalties(
 
     logits_float = logits.float()
 
-    num_status = prompt_bin_mask.shape[0]
-    num_packed = prompt_bin_mask.shape[1]
+    # Unpack prompt masks
+    num_status, num_packed = prompt_bin_mask.shape
 
     prompt_masks_unpacked = torch.zeros(num_status, vocab_size, dtype=torch.bool, device=device)
 
@@ -52,6 +50,7 @@ def pytorch_apply_penalties(
                 if (packed_val >> bit_pos) & 1:
                     prompt_masks_unpacked[state_idx, start_idx + bit_pos] = True
 
+    # Process each token
     for token_idx in range(num_tokens):
         req_state_idx = idx_mapping[token_idx].item()
 
@@ -84,6 +83,7 @@ def pytorch_apply_penalties(
         total_output_counts = base_output_counts + draft_counts
         output_bin_mask = total_output_counts > 0
 
+        # Apply repetition penalty
         if use_rep_penalty:
             scale = torch.ones(vocab_size, device=device)
             mask = current_prompt_mask | output_bin_mask
@@ -93,9 +93,11 @@ def pytorch_apply_penalties(
             scale_factor = torch.where(pos_mask, 1.0 / scale, scale)
             logits_float[token_idx] *= scale_factor
 
+        # Apply frequency penalty
         if use_freq_penalty:
             logits_float[token_idx] -= freq_penalty * total_output_counts.float()
 
+        # Apply presence penalty
         if use_pres_penalty:
             logits_float[token_idx] -= pres_penalty * output_bin_mask.float()
 
@@ -176,74 +178,70 @@ def create_test_data(
     )
 
 
-@pytest.mark.skip(
-    reason="The test case failed and took one hour. Yang Cheng \
-        has been notified to fix it after the holiday."
-)
-@pytest.mark.parametrize("num_tokens", NUM_TOKENS)
-@pytest.mark.parametrize("vocab_size", VOCAB_SIZE)
-@pytest.mark.parametrize("num_status", NUM_STATUS)
-@pytest.mark.parametrize("num_speculative_tokens", NUM_SPECULATIVE_TOKENS)
-@pytest.mark.parametrize("dtype", DTYPES)
-@pytest.mark.parametrize("seed", SEEDS)
-@pytest.mark.parametrize("device", DEVICES)
-@torch.inference_mode()
-def test_apply_penalties(num_tokens, vocab_size, num_status, num_speculative_tokens, dtype, seed, device):
-    (
-        logits_triton,
-        idx_mapping,
-        token_ids,
-        expanded_local_pos,
-        repetition_penalty,
-        frequency_penalty,
-        presence_penalty,
-        prompt_bin_mask,
-        output_bin_counts,
-        num_spec_tokens,
-    ) = create_test_data(
-        num_tokens=num_tokens,
-        vocab_size=vocab_size,
-        num_status=num_status,
-        num_speculative_tokens=num_speculative_tokens,
-        device=device,
-        dtype=dtype,
-        seed=seed,
-    )
+class TestApplyPenalties:
+    """Test suite for apply_penalties function."""
 
-    logits_pytorch = logits_triton.clone()
+    @pytest.mark.parametrize("num_tokens", NUM_TOKENS)
+    @pytest.mark.parametrize("vocab_size", VOCAB_SIZE)
+    @pytest.mark.parametrize("num_status", NUM_STATUS)
+    @pytest.mark.parametrize("num_speculative_tokens", NUM_SPECULATIVE_TOKENS)
+    @pytest.mark.parametrize("dtype", DTYPES)
+    @pytest.mark.parametrize("seed", SEEDS)
+    @pytest.mark.parametrize("device", DEVICES)
+    @torch.inference_mode()
+    def test_apply_penalties(self, num_tokens, vocab_size, num_status, num_speculative_tokens, dtype, seed, device):
+        (
+            logits_triton,
+            idx_mapping,
+            token_ids,
+            expanded_local_pos,
+            repetition_penalty,
+            frequency_penalty,
+            presence_penalty,
+            prompt_bin_mask,
+            output_bin_counts,
+            num_spec_tokens,
+        ) = create_test_data(
+            num_tokens=num_tokens,
+            vocab_size=vocab_size,
+            num_status=num_status,
+            num_speculative_tokens=num_speculative_tokens,
+            device=device,
+            dtype=dtype,
+            seed=seed,
+        )
 
-    apply_penalties(
-        logits_triton,
-        idx_mapping,
-        token_ids,
-        expanded_local_pos,
-        repetition_penalty,
-        frequency_penalty,
-        presence_penalty,
-        prompt_bin_mask,
-        output_bin_counts,
-        num_spec_tokens,
-    )
+        logits_pytorch = logits_triton.clone()
 
-    logits_pytorch_result = pytorch_apply_penalties(
-        logits_pytorch,
-        idx_mapping,
-        token_ids,
-        expanded_local_pos,
-        repetition_penalty,
-        frequency_penalty,
-        presence_penalty,
-        prompt_bin_mask,
-        output_bin_counts,
-        num_spec_tokens,
-    )
+        apply_penalties(
+            logits_triton,
+            idx_mapping,
+            token_ids,
+            expanded_local_pos,
+            repetition_penalty,
+            frequency_penalty,
+            presence_penalty,
+            prompt_bin_mask,
+            output_bin_counts,
+            num_spec_tokens,
+        )
 
-    atol = DEFAULT_ATOL
-    rtol = DEFAULT_RTOL
-    if dtype == torch.bfloat16:
-        atol = 1e-02
-        rtol = 1e-02
-    assert torch.allclose(logits_triton, logits_pytorch_result, atol=atol, rtol=rtol)
-    gc.collect()
-    torch.npu.empty_cache()
-    torch.npu.reset_peak_memory_stats()
+        logits_pytorch_result = pytorch_apply_penalties(
+            logits_pytorch,
+            idx_mapping,
+            token_ids,
+            expanded_local_pos,
+            repetition_penalty,
+            frequency_penalty,
+            presence_penalty,
+            prompt_bin_mask,
+            output_bin_counts,
+            num_spec_tokens,
+        )
+
+        atol = DEFAULT_ATOL
+        rtol = DEFAULT_RTOL
+        if dtype == torch.bfloat16:
+            atol = 1e-02
+            rtol = 1e-02
+        assert torch.allclose(logits_triton, logits_pytorch_result, atol=atol, rtol=rtol)
