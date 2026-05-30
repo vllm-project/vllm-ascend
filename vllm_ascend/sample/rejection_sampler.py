@@ -28,6 +28,7 @@ from vllm_ascend.ops.triton.reject_sample import (
 )
 from vllm_ascend.sample.penalties import apply_all_penalties
 from vllm_ascend.sample.sampler import apply_top_k_top_p
+from vllm_ascend.utils import is_310p
 
 
 class AscendRejectionSampler(RejectionSampler):
@@ -680,15 +681,19 @@ def sample_recovered_tokens(
         dtype=torch.float32,
         device=device,
     )
-    q.exponential_()
-
     num_draft_tensor = torch.tensor(num_draft_tokens, pin_memory=True).to(device, non_blocking=True)
     has_draft_mask = num_draft_tensor > 0
+    if is_310p():
+        from vllm_ascend._310p.sample.sampler import fill_exponential_310p
 
-    for i, generator in sampling_metadata.generators.items():
-        temp_q = torch.empty_like(q[i])
-        temp_q.exponential_(generator=generator)
-        q[i] = torch.where(has_draft_mask[i], temp_q, q[i])
+        fill_exponential_310p(q, sampling_metadata.generators, has_draft_mask)
+    else:
+        q.exponential_()
+
+        for i, generator in sampling_metadata.generators.items():
+            temp_q = torch.empty_like(q[i])
+            temp_q.exponential_(generator=generator)
+            q[i] = torch.where(has_draft_mask[i], temp_q, q[i])
 
     recovered_token_ids = torch.empty_like(draft_token_ids)
     if HAS_TRITON:
