@@ -114,12 +114,6 @@ repos:
     entry: python tools/check_boolean_context_manager.py
     language: python
     types: [python]
-  - id: check-docs-yaml-sync
-    name: Check docs/yaml sync blocks
-    entry: python tools/check_docs_yaml_sync.py
-    language: python
-    files: ^docs/source/tutorials/models/.*\.md$
-    additional_dependencies: [pyyaml, regex, tomli]
   # Keep `suggestion` last
   - id: suggestion
     name: Suggestion

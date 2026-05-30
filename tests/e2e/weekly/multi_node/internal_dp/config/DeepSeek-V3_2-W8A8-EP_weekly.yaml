@@ -2,7 +2,7 @@ test_name: "weekly test DeepSeek-V3.2-W8A8-EP disaggregated_prefill"
 model: "vllm-ascend/DeepSeek-V3.2-W8A8"
 num_nodes: 2
 npu_per_node: 16
-env_common:
+env_common: &env_common
   OMP_PROC_BIND: false
   OMP_NUM_THREADS: 10
   HCCL_OP_EXPANSION_MODE: "AIV"
@@ -25,6 +25,7 @@ disaggregated_prefill:
 deployment:
   -
     envs:
+      <<: *env_common
       VLLM_ASCEND_ENABLE_FLASHCOMM1: 1
     server_cmd: >
       vllm serve vllm-ascend/DeepSeek-V3.2-W8A8
@@ -68,6 +69,7 @@ deployment:
 
   -
     envs:
+      <<: *env_common
       OMP_PROC_BIND: false
       OMP_NUM_THREADS: 10
       HCCL_OP_EXPANSION_MODE: "AIV"
