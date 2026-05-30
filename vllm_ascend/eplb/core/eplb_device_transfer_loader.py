@@ -22,6 +22,7 @@ import torch_npu
 from vllm.logger import logger
 
 from vllm_ascend.distributed.parallel_state import get_dynamic_eplb_group
+from vllm.distributed import get_ep_group
 
 
 def _fmt(t):
@@ -59,6 +60,15 @@ class D2DExpertWeightLoader:
 
         self.layer_id = layer_id
         self.comm_op_list = []
+        ep = get_ep_group()
+        logger.info(
+            "[EPLB GROUP] comm_group.ws=%s comm_group.rank=%s comm_group.ranks=%s",
+            self.comm_group.world_size, self.comm_group.rank_in_group, self.comm_group.ranks,
+        )
+        logger.info(
+            "[EPLB GROUP] ep_group.ws=%s ep_group.rank=%s ep_group.ranks=%s",
+            ep.world_size, ep.rank_in_group, ep.ranks,
+        )
         for send_info in expert_send_info:
             dst_rank, global_expert_id_to_send = send_info
             local_expert_id = self.eplb_adaptor.expert_map_per_layer_cpu[layer_id][global_expert_id_to_send].item()
