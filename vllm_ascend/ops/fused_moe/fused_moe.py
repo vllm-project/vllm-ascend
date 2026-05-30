@@ -391,12 +391,12 @@ class AscendFusedMoE(FusedMoE):
         self.multistream_overlap_gate = ascend_config.multistream_overlap_gate
         if self.multistream_overlap_gate and AscendFusedMoE.gate_stream is None:
             AscendFusedMoE.gate_stream = torch.npu.Stream()
+        vllm_config = get_current_vllm_config()
         if (
             self.custom_routing_function is None
             and self.e_score_correction_bias is not None
-            and self.scoring_func != "sqrtsoftplus"
+            and not vllm_config.model_config.is_deepseek_mla
         ):
-            vllm_config = get_current_vllm_config()
             self.e_score_correction_bias.data = self.e_score_correction_bias.data.to(
                 dtype=vllm_config.model_config.dtype
             )

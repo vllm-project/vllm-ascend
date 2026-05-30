@@ -774,6 +774,18 @@ def register_ascend_customop(vllm_config: VllmConfig | None = None):
         "BailingMoELinearAttention": AscendBailingMoELinearAttention,
     }
 
+    if vllm_config is None:
+        try:
+            from vllm.config import get_current_vllm_config
+
+            vllm_config = get_current_vllm_config()
+        except AssertionError:
+            vllm_config = None
+    if vllm_config is not None and vllm_config.model_config.is_deepseek_mla:
+        from vllm_ascend.ops.fused_moe.gate_linear import AscendGateLinear
+
+        REGISTERED_ASCEND_OPS["GateLinear"] = AscendGateLinear
+
     # 310P: override selected ops with 310P implementations (keep minimal changes outside _310p)
     if is_310p():
         from vllm_ascend._310p.fused_moe.fused_moe import AscendFusedMoE310
