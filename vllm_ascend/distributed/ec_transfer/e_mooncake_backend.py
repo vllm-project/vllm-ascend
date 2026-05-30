@@ -1,9 +1,7 @@
 from vllm.config import ParallelConfig
-from vllm.logger import init_logger
+from vllm.logger import logger
 
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.backend.mooncake_backend import MooncakeBackend
-
-logger = init_logger(__name__)
 
 
 class EMooncakeBackend(MooncakeBackend):
