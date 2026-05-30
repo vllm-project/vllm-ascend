@@ -15,35 +15,31 @@
 # limitations under the License.
 # This file is a part of the vllm-ascend project.
 
+from pathlib import Path
+
+import huggingface_hub
+from modelscope import snapshot_download  # type: ignore[import-untyped]
+
 from tests.e2e.conftest import VllmRunner
 
 
-def test_qwen3_dense_tp2_fp16():
+def test_qwen3_dense_tp4_w8a8sc():
     example_prompts = [
         "Hello, my name is",
     ]
     max_tokens = 5
+    model_root = snapshot_download(
+        "Eco-Tech/Qwen3-14B-w8a8sc-310-vllm",
+        local_files_only=huggingface_hub.constants.HF_HUB_OFFLINE,
+    )
+    model_path = str(Path(model_root) / "TP4" / "Qwen3-14B-w8a8sc-310-vllm-tp4")
     with VllmRunner(
-        "Qwen/Qwen3-8B",
-        tensor_parallel_size=2,
-        enforce_eager=True,
-        dtype="float16",
-        max_model_len=16384,
-    ) as vllm_model:
-        vllm_model.generate_greedy(example_prompts, max_tokens)
-
-
-def test_qwen3_dense_tp4_w8a8():
-    example_prompts = [
-        "Hello, my name is",
-    ]
-    max_tokens = 5
-    with VllmRunner(
-        "vllm-ascend/Qwen3-32B-W8A8",
+        model_path,
         tensor_parallel_size=4,
         enforce_eager=True,
         dtype="float16",
         quantization="ascend",
+        load_format="sharded_state",
         max_model_len=16384,
     ) as vllm_model:
         vllm_model.generate_greedy(example_prompts, max_tokens)

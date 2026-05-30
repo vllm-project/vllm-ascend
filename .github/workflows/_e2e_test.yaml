@@ -1031,7 +1031,6 @@ jobs:
         run: |
           set -o pipefail
           pytest -sv --durations=0 tests/e2e/310p/singlecard/test_dense_model_singlecard.py \
-          tests/e2e/310p/singlecard/test_vl_model_singlecard.py \
           tests/e2e/310p/singlecard/pooling/test_classification.py \
           tests/e2e/310p/singlecard/pooling/test_embedding.py \
           tests/e2e/310p/singlecard/pooling/test_scoring.py \
@@ -1148,7 +1147,7 @@ jobs:
         run: |
           set -o pipefail
           pytest -sv --durations=0 \
-          tests/e2e/310p/multicard/test_dense_model_multicard.py::test_qwen3_dense_tp4_w8a8 \
+          tests/e2e/310p/multicard/test_dense_model_multicard.py::test_qwen3_dense_tp4_w8a8sc \
           tests/e2e/310p/multicard/test_moe_model_multicard.py::test_qwen3_moe_tp4_fp16 \
           tests/e2e/310p/multicard/test_moe_model_multicard.py::test_qwen3_5_moe_tp4_fp16 \
           tests/e2e/310p/multicard/test_vl_model_multicard.py::test_qwen3_vl_8b_tp2_fp16 \

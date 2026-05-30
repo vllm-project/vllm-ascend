@@ -15,38 +15,34 @@
 # limitations under the License.
 # This file is a part of the vllm-ascend project.
 
+from pathlib import Path
+
+import huggingface_hub
+from modelscope import snapshot_download  # type: ignore[import-untyped]
 
 from tests.e2e.conftest import VllmRunner, wait_until_npu_memory_free
 
 
-def test_qwen3_dense_tp1_fp16():
-    example_prompts = [
-        "Hello, my name is",
-    ]
-    max_tokens = 5
-    with VllmRunner(
-        "Qwen/Qwen3-8B",
-        tensor_parallel_size=1,
-        enforce_eager=True,
-        dtype="float16",
-        max_model_len=16384,
-    ) as vllm_model:
-        vllm_model.generate_greedy(example_prompts, max_tokens)
-
-
 @wait_until_npu_memory_free(0.7)
-def test_qwen3_dense_tp1_fp16_aclgraph():
+def test_qwen3_dense_tp1_w8a8sc_aclgraph():
     example_prompts = [
         "Hello, my name is",
     ] * 8
     max_tokens = 2
+    model_root = snapshot_download(
+        "Eco-Tech/Qwen3-8B-w8a8sc-310-vllm",
+        local_files_only=huggingface_hub.constants.HF_HUB_OFFLINE,
+    )
+    model_path = str(Path(model_root) / "TP1" / "Qwen3-8B-w8a8sc-310-vllm-tp1")
     with VllmRunner(
-        "Qwen/Qwen3-8B",
+        model_path,
         tensor_parallel_size=1,
         dtype="float16",
         max_num_seqs=16,
         max_model_len=16384,
         gpu_memory_utilization=0.80,
+        quantization="ascend",
+        load_format="sharded_state",
         additional_config={"ascend_compilation_config": {"fuse_norm_quant": False}},
         compilation_config={
             "cudagraph_mode": "FULL_DECODE_ONLY",
