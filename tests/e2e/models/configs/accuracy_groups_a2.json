@@ -57,7 +57,8 @@
       "name": "pr-accuracy-group-2",
       "os": "linux-aarch64-a2b3-4",
       "model_list": [
-        "Qwen2.5-Math-RM-72B"
+        "Qwen2.5-Math-RM-72B",
+        "Llama-4-Scout-17B-16E-Instruct"
       ]
     }
   ]

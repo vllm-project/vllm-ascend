@@ -210,6 +210,9 @@ class AscendMetadata:
 
     kvcomp_metadata: KVCompMetaData | None = None
 
+    # sliding window attention mask
+    swa_mask: torch.Tensor | None = None
+
 
 class AscendAttentionMetadataBuilder(AttentionMetadataBuilder[AscendMetadata]):
     """
@@ -305,8 +308,18 @@ class AscendAttentionMetadataBuilder(AttentionMetadataBuilder[AscendMetadata]):
 
         attn_state = common_attn_metadata.attn_state
 
-        # Get attn_mask from singleton AttentionMaskBuilder
+        # Get attn_mask and swa_mask from singleton AttentionMaskBuilder
         attn_mask = self.attn_mask_builder.get_attention_mask(common_attn_metadata.causal, self.model_config)
+
+        swa_mask = None
+        is_swa = (
+            hasattr(self.model_config.hf_text_config, "sliding_window")
+            and self.model_config.hf_text_config.sliding_window is not None
+        )
+        if self.model_config is not None and is_swa:
+            swa_mask = self.attn_mask_builder.get_swa_mask(
+                self.model_config.dtype, self.model_config.hf_text_config.sliding_window
+            )
 
         # TODO: Yet another unnecessary H2D while we already have a query_start_loc on device
         query_start_loc = query_start_loc_cpu.pin_memory().to(self.device, non_blocking=True)
@@ -323,6 +336,7 @@ class AscendAttentionMetadataBuilder(AttentionMetadataBuilder[AscendMetadata]):
             actual_seq_lengths_q=query_start_loc_cpu[1:].tolist(),
             slot_mapping=slot_mapping,
             attn_mask=attn_mask,
+            swa_mask=swa_mask,
             attn_state=attn_state,
             num_prefills=num_prefills,
             num_decodes=num_decodes,
@@ -1039,6 +1053,36 @@ class AscendAttentionBackendImpl(AttentionImpl):
             actual_seq_lengths_kv = attn_metadata.seq_lens_list
         return key, value, block_size, block_table, actual_seq_lengths_kv
 
+    def _forward_fia_slidingwindow(self, query: torch.Tensor, attn_metadata: AscendMetadata, output: torch.Tensor):
+        batch_size = attn_metadata.seq_lens.shape[0]
+        block_size = 128
+        query = query.view(batch_size, 1, self.num_heads * self.head_size)
+        key = self.key_cache
+        value = self.value_cache
+        if self.key_cache is not None and self.value_cache is not None:
+            block_size = self.key_cache.shape[1]
+            key = self.key_cache.flatten(2, 3).contiguous()
+            value = self.value_cache.flatten(2, 3).contiguous()
+
+        attn_output, _ = torch_npu.npu_fused_infer_attention_score(
+            query,
+            key,
+            value,
+            num_heads=self.num_heads,
+            num_key_value_heads=self.num_kv_heads,
+            input_layout="BSH",
+            block_size=block_size,
+            pre_tokens=self.sliding_window,
+            scale=self.scale,
+            block_table=attn_metadata.block_tables,
+            actual_seq_lengths=[1] * len(attn_metadata.seq_lens),
+            actual_seq_lengths_kv=attn_metadata.seq_lens,
+        )
+
+        attn_output = attn_output.view(batch_size, self.num_heads, self.head_size)
+        output[:batch_size] = attn_output[:batch_size]
+        return output
+
     def forward_fused_infer_attention(
         self,
         query: torch.Tensor,
@@ -1051,6 +1095,13 @@ class AscendAttentionBackendImpl(AttentionImpl):
         # we inherit ForwardContext in model runner v2, when enable model
         # runner v2, there is not capturing attribute in forward_context,
         # just use getattr to avoid attribute error.
+        if (
+            attn_metadata.attn_state == AscendAttentionState.DecodeOnly
+            and self.sliding_window is not None
+            and attn_metadata.seq_lens.shape[0] == query.size(0)
+            and self.sinks is None
+        ):
+            return self._forward_fia_slidingwindow(query, attn_metadata, output)
         if _EXTRA_CTX.capturing:
             if self.sinks is not None:
                 attn_output, num_tokens = self.full_graph_fia_v2(query, key, value, attn_metadata, output)
@@ -1084,8 +1135,10 @@ class AscendAttentionBackendImpl(AttentionImpl):
             if attn_metadata.attn_state == AscendAttentionState.DecodeOnly:
                 actual_seq_qlen = torch.tensor([1] * len(attn_metadata.seq_lens_list), dtype=torch.int32).cumsum(dim=0)
             if self.sliding_window is not None:
+                atten_mask = attn_metadata.swa_mask
                 sparse_mode = 4
             else:
+                atten_mask = attn_metadata.attn_mask
                 sparse_mode = 3
             attn_output, _ = torch_npu.npu_fused_infer_attention_score_v2(
                 query,
@@ -1096,7 +1149,7 @@ class AscendAttentionBackendImpl(AttentionImpl):
                 input_layout="TND",
                 pre_tokens=self.sliding_window if self.sliding_window is not None else SWA_INT_MAX,
                 next_tokens=0,
-                atten_mask=attn_metadata.attn_mask,
+                atten_mask=atten_mask,
                 sparse_mode=sparse_mode,
                 softmax_scale=self.scale,
                 block_table=block_table,

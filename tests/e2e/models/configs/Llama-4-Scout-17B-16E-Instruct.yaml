@@ -1,0 +1,19 @@
+model_name: "LLM-Research/Llama-4-Scout-17B-16E-Instruct"
+model_type: "vllm"
+hardware: "Atlas A2 Series"
+
+serve:
+  tensor_parallel_size: 4
+  dtype: bfloat16
+  max_model_len: 2048
+  gpu_memory_utilization: 0.90
+  trust_remote_code: true
+
+tasks:
+  - name: "gsm8k"
+    metrics:
+      - name: "exact_match,strict-match"
+        value: 0.90
+
+limit: 101
+batch_size: 4
