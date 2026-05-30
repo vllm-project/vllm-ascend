@@ -81,7 +81,9 @@ def test_models_prefix_cache_with_cp_basic(model: str, max_tokens: int, monkeypa
 
 @pytest.mark.parametrize("model", MODELS)
 @pytest.mark.parametrize("max_tokens", [2])
-def test_models_prefix_cache_with_cp_piecewise(model: str, max_tokens: int, monkeypatch: pytest.MonkeyPatch) -> None:
+def test_models_prefix_cache_with_cp_default_full_and_piecewise(
+    model: str, max_tokens: int, monkeypatch: pytest.MonkeyPatch
+) -> None:
     monkeypatch.setenv("HCCL_BUFFSIZE", "768")
     with VllmRunner(
         model,

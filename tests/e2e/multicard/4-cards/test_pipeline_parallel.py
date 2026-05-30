@@ -102,7 +102,10 @@ def test_models_pp2_tp2(model: str, tp_size: int, pp_size: int, distributed_exec
         model,
         tensor_parallel_size=tp_size,
         pipeline_parallel_size=pp_size,
-        cudagraph_capture_sizes=[1, 2, 4],
+        compilation_config={
+            "cudagraph_mode": "PIECEWISE",
+            "cudagraph_capture_sizes": [1, 2, 4],
+        },
         distributed_executor_backend=distributed_executor_backend,
         gpu_memory_utilization=0.7,
         enable_expert_parallel=model in MOE_MODELS,
@@ -126,7 +129,10 @@ def test_models_pp2_dp2(model: str, dp_size: int, pp_size: int, distributed_exec
         model,
         data_parallel_size=dp_size,
         pipeline_parallel_size=pp_size,
-        cudagraph_capture_sizes=[1, 2, 4],
+        compilation_config={
+            "cudagraph_mode": "PIECEWISE",
+            "cudagraph_capture_sizes": [1, 2, 4],
+        },
         distributed_executor_backend=distributed_executor_backend,
         gpu_memory_utilization=0.7,
         enable_expert_parallel=model in MOE_MODELS,

@@ -213,7 +213,8 @@ ERROR 09-26 10:48:07 [model_runner_v1.py:3029] ACLgraph has insufficient availab
 Recommended mitigation strategies:
 
 1. Manually configure the compilation_config parameter with a reduced size set: '{"cudagraph_capture_sizes":[size1, size2, size3, ...]}'.
-2. Employ ACLgraph's full graph mode as an alternative to the piecewise approach.
+2. If your workload is mostly uniform decode, employ ACLGraph's `FULL` or `FULL_DECODE_ONLY` mode as an alternative to the piecewise approach.
+3. If you use `PIECEWISE` or `FULL_AND_PIECEWISE`, it is recommended to set `cudagraph_capture_sizes` manually according to your workload.
 
 Root cause analysis:
 The current stream requirement calculation for size captures only accounts for measurable factors including: data parallel size, tensor parallel size, expert parallel configuration, piece graph count, multistream-overlap shared expert settings, and HCCL communication mode (AIV/AICPU). However, numerous unquantifiable elements, such as operator characteristics and specific hardware features, consume additional streams outside of this calculation framework, resulting in stream resource exhaustion during size capture operations.

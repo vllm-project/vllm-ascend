@@ -21,8 +21,8 @@ from tests.e2e.singlecard.utils import PROMPTS_SHORT, compare_logprobs
 
 
 @wait_until_npu_memory_free()
-def test_dense_piecewise_graph():
-    """Verify dense generation on the piecewise graph path."""
+def test_dense_default_full_and_piecewise_graph():
+    """Verify dense generation on the default FULL_AND_PIECEWISE graph path."""
     runner_kwargs = {
         "model_name": "Qwen/Qwen3-0.6B",
         "max_model_len": 1024,

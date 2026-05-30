@@ -166,7 +166,7 @@ def test_models_chunked_prefill_with_cp_basic(model: str, max_tokens: int) -> No
 @pytest.mark.parametrize("model", MODELS)
 @pytest.mark.parametrize("max_tokens", [2])
 @patch.dict(os.environ, {"HCCL_BUFFSIZE": "768"})
-def test_models_chunked_prefill_with_cp_piecewise(model: str, max_tokens: int) -> None:
+def test_models_chunked_prefill_with_cp_default_full_and_piecewise(model: str, max_tokens: int) -> None:
     with VllmRunner(
         model,
         block_size=128,

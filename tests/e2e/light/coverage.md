@@ -13,7 +13,7 @@ The coverage of e2e light is as follows:
 | EP                   | ❌ | ❌ | ❌ | ❌ | ✅ | ❌ | ✅ | ❌ |
 | EPLB                 | ❌ | ❌ | ❌ | ❌ | ✅ | ❌ | ❌ | ❌ |
 | Full Graph           | ❌ | ✅ | ❌ | ✅ | ✅ | ✅ | ✅ | ✅ |
-| PIECEWISE Graph      | ✅ | ❌ | ✅ | ❌ | ❌ | ❌ | ❌ | ❌ |
+| Default FULL_AND_PIECEWISE Graph | ✅ | ❌ | ✅ | ❌ | ❌ | ❌ | ❌ | ❌ |
 | PD disaggregation    | ❌ | ❌ | ❌ | ❌ | ❌ | ❌ | ❌ | ✅ |
 | W8A8                 | ❌ | ✅ | ❌ | ❌ | ❌ | ❌ | ✅ | ✅ |
 | MTP                  | ❌ | ❌ | ❌ | ✅ | ❌ | ❌ | ❌ | ❌ |

@@ -375,10 +375,6 @@ class NPUPlatform(Platform):
                 compilation_config.cudagraph_capture_sizes = sp_aclgraph_sizes
                 update_cudagraph_capture_sizes(vllm_config, sp_aclgraph_sizes)
 
-        # TODO: Full graph is fully supported later, and the default value will be set to full graph.
-        if compilation_config.cudagraph_mode == CUDAGraphMode.FULL_AND_PIECEWISE:
-            compilation_config.cudagraph_mode = CUDAGraphMode.PIECEWISE
-
         # Encoder-decoder models currently only support PIECEWISE mode
         # TODO(Jian Li): Confirm this behavior and explain why
         if (
@@ -401,20 +397,22 @@ class NPUPlatform(Platform):
         # get custom compile backend for graph fusion
         compilation_config.oot_compiler = cls.get_compile_backend()
 
+        compilation_config.use_inductor = False
         if compilation_config.cudagraph_mode == CUDAGraphMode.NONE:
             compilation_config.mode = CompilationMode.NONE
             ascend_config.ascend_compilation_config.enable_npugraph_ex = False
-        elif compilation_config.cudagraph_mode == CUDAGraphMode.PIECEWISE:
-            logger.info("PIECEWISE compilation enabled on NPU. use_inductor not supported - using only ACL Graph mode")
+        elif compilation_config.cudagraph_mode.requires_piecewise_compilation():
+            # Our is_cuda_alike is False so we cannot reuse the assertion of upstream
             assert compilation_config.mode == CompilationMode.VLLM_COMPILE, (
-                "When enabling VLLM_COMPILE aclgraph, please make sure compilation_config.mode == "
-                "CompilationMode.VLLM_COMPILE and compilation_config.cudagraph_mode == CUDAGraphMode.VLLM_COMPILE"
+                "Compilation mode should be CompilationMode.VLLM_COMPILE "
+                "when cudagraph_mode piecewise cudagraphs is used, "
+                "cudagraph_mode=%s",
+                compilation_config.cudagraph_mode,
             )
             compilation_config.set_splitting_ops_for_v1(
                 all2all_backend=vllm_config.parallel_config.all2all_backend,
                 data_parallel_size=vllm_config.parallel_config.data_parallel_size,
             )
-            compilation_config.use_inductor = False
             # NOTE: Theoretically, we should also add vllm::mla_forward in the attention ops.
             # Since the process is created in the spawn mode, the value of the class attribute
             # attention ops transmitted is still the one before modification, so it has not been modified.
@@ -424,28 +422,10 @@ class NPUPlatform(Platform):
             compilation_config.splitting_ops.extend(["vllm::mla_forward"])
             update_aclgraph_sizes(vllm_config)
             ascend_config.ascend_compilation_config.enable_npugraph_ex = False
-        elif (
-            compilation_config.cudagraph_mode == CUDAGraphMode.FULL_DECODE_ONLY
-            or compilation_config.cudagraph_mode == CUDAGraphMode.FULL
-        ):
-            logger.info(
-                "FULL_DECODE_ONLY compilation enabled on NPU. use_inductor not supported - using only ACL Graph mode"
-            )
-            compilation_config.use_inductor = False
+        elif compilation_config.cudagraph_mode.has_full_cudagraphs():
+            # We don't want to have our FX graph split for the sake of static kernel feature,
+            # because it will compile multiple times, so we set splitting_ops to empty manually.
             compilation_config.splitting_ops = []
-            warning_message = """\033[91m
-            **********************************************************************************
-            * WARNING: You have enabled the *full graph* feature.
-            * This is an early experimental stage and may involve various unknown issues.
-            * A known problem is that capturing too many batch sizes can lead to OOM
-            * (Out of Memory) errors or inference hangs. If you encounter such issues,
-            * consider reducing `gpu_memory_utilization` or manually specifying a smaller
-            * batch size for graph capture.
-            * For more details, please refer to:
-            * https://docs.vllm.ai/en/stable/configuration/conserving_memory.html#reduce-cuda-graphs
-            **********************************************************************************\033[0m
-            """
-            logger.warning(warning_message)
         else:
             logger.info(
                 "%s cudagraph_mode is not support on NPU. falling back to NONE", compilation_config.cudagraph_mode
