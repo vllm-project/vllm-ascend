@@ -21,7 +21,7 @@ namespace ops
 constexpr uint32_t DEQUANT_SWIGLU_QUANT_VERSION_TWO = 2;
 constexpr uint32_t DEQUANT_SWIGLU_QUANT_DEFAULT_VALUE = 2;
 constexpr float CLAMP_LIMIT_DEFAULT_VALUE = 0.0;
-constexpr float GLU_ALPHA_DEFAULT_VALUE = 1.702;
+constexpr float GLU_ALPHA_DEFAULT_VALUE =1.00;// 1.702;
 class DequantSwigluQuant : public OpDef
 {
   public:
@@ -98,8 +98,8 @@ class DequantSwigluQuant : public OpDef
     this->Attr("activate_dim").AttrType(OPTIONAL).Version(DEQUANT_SWIGLU_QUANT_VERSION_TWO).Int(-1); // default value
     this->Attr("swiglu_mode").AttrType(OPTIONAL).Version(DEQUANT_SWIGLU_QUANT_VERSION_TWO).Int(0); // default value
     this->Attr("clamp_limit").AttrType(OPTIONAL).Version(DEQUANT_SWIGLU_QUANT_VERSION_TWO).Float(CLAMP_LIMIT_DEFAULT_VALUE); // default value
-    this->Attr("glu_alpha").AttrType(OPTIONAL).Version(DEQUANT_SWIGLU_QUANT_VERSION_TWO).Float(GLU_ALPHA_DEFAULT_VALUE); // default value
-    this->Attr("glu_bias").AttrType(OPTIONAL).Version(DEQUANT_SWIGLU_QUANT_VERSION_TWO).Float(1.0); // default value
+    this->Attr("glu_alpha").AttrType(OPTIONAL).Version(DEQUANT_SWIGLU_QUANT_VERSION_TWO).Float(GLU_ALPHA_DEFAULT_VALUE); // default value 1.702;
+    this->Attr("glu_bias").AttrType(OPTIONAL).Version(DEQUANT_SWIGLU_QUANT_VERSION_TWO).Float(0.0); // default value 1.0
        OpAICoreConfig aicoreConfig;
         aicoreConfig.DynamicCompileStaticFlag(true)
             .DynamicFormatFlag(false)
