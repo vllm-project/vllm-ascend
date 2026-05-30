@@ -95,7 +95,7 @@ class TestAscendSFAMetadataBuilder(TestBase):
         self.mock_cfg.compilation_config.pass_config = MagicMock()
         self.mock_cfg.compilation_config.pass_config.enable_sp = False
 
-        self.mock_cfg.speculative_config.num_speculative_tokens = 0
+        self.mock_cfg.speculative_config = None
 
         self.patcher = patch("vllm.config.get_current_vllm_config", return_value=self.mock_cfg)
         self.patcher.start()
@@ -139,9 +139,7 @@ class TestAscendSFAMetadataBuilder(TestBase):
         vllm_config.model_config.get_head_size.return_value = 64
         vllm_config.model_config.dtype = torch.float16
         vllm_config.model_config.hf_text_config.qk_rope_head_dim = 64
-        speculative_config = MagicMock()
-        speculative_config.num_speculative_tokens = 4
-        vllm_config.speculative_config = speculative_config
+        vllm_config.speculative_config = None
         device = torch.device("cpu")
 
         builder = AscendSFAMetadataBuilder(
@@ -176,9 +174,7 @@ class TestAscendSFAMetadataBuilder(TestBase):
         vllm_config.model_config.get_head_size.return_value = 64
         vllm_config.model_config.dtype = torch.float16
         vllm_config.model_config.hf_text_config.qk_rope_head_dim = 64
-        speculative_config = MagicMock()
-        speculative_config.num_speculative_tokens = 4
-        vllm_config.speculative_config = speculative_config
+        vllm_config.speculative_config = None
         device = torch.device("cpu")
 
         builder = AscendSFAMetadataBuilder(
@@ -188,6 +184,8 @@ class TestAscendSFAMetadataBuilder(TestBase):
         common_attn_metadata = MagicMock()
         common_attn_metadata.num_reqs = 10
         common_attn_metadata.num_actual_tokens = 100
+        common_attn_metadata.max_query_len = 1
+        common_attn_metadata.prefill_context_parallel_metadata = None
         common_attn_metadata.query_start_loc = torch.tensor([0, 10, 20, 30, 40, 50, 60, 70, 80, 90])
         common_attn_metadata.query_start_loc_cpu = torch.tensor([0, 10, 20, 30, 40, 50, 60, 70, 80, 90])
         common_attn_metadata.slot_mapping = torch.randn(100, 4, 1024)
@@ -233,9 +231,7 @@ class TestAscendSFAMetadataBuilder(TestBase):
         vllm_config.model_config.get_head_size.return_value = 64
         vllm_config.model_config.dtype = torch.float16
         vllm_config.model_config.hf_text_config.qk_rope_head_dim = 64
-        speculative_config = MagicMock()
-        speculative_config.num_speculative_tokens = 4
-        vllm_config.speculative_config = speculative_config
+        vllm_config.speculative_config = None
         device = torch.device("cpu")
 
         builder = AscendSFAMetadataBuilder(
@@ -245,6 +241,8 @@ class TestAscendSFAMetadataBuilder(TestBase):
         common_attn_metadata = MagicMock()
         common_attn_metadata.num_reqs = 10
         common_attn_metadata.num_actual_tokens = 100
+        common_attn_metadata.max_query_len = 1
+        common_attn_metadata.prefill_context_parallel_metadata = None
         common_attn_metadata.query_start_loc = torch.tensor([0, 10, 20, 30, 40, 50, 60, 70, 80, 90])
         common_attn_metadata.query_start_loc_cpu = torch.tensor([0, 10, 20, 30, 40, 50, 60, 70, 80, 90])
         common_attn_metadata.slot_mapping = torch.randn(100, 4, 1024)

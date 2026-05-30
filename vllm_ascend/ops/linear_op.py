@@ -61,6 +61,7 @@ from vllm.model_executor.models.utils import extract_layer_index
 
 from vllm_ascend.ascend_config import get_ascend_config
 from vllm_ascend.ascend_forward_context import _EXTRA_CTX
+from vllm_ascend.attention.utils import enable_cp
 from vllm_ascend.distributed.parallel_state import (
     get_flashcomm2_odp_group,
     get_flashcomm2_otp_group,
@@ -628,7 +629,7 @@ class ShardedCPColumnParallelOp(CustomColumnParallelOp):
 def _get_column_parallel_op(
     prefix, layer
 ) -> MLPColumnParallelOp | SequenceColumnParallelOp | ShardedCPColumnParallelOp | Flashcomm2OshardQKVParallelOp | None:
-    if enable_dsa_cp() and ("q_b_proj" in prefix or "kv_b_proj" in prefix):
+    if enable_dsa_cp() and ("q_b_proj" in prefix or "kv_b_proj" in prefix) and not enable_cp():
         return ShardedCPColumnParallelOp(layer)
     if "gate_up_proj" in prefix and mlp_tp_enable() and not is_moe_layer(prefix):
         return MLPColumnParallelOp(layer)

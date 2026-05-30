@@ -87,8 +87,7 @@ class TestAscendSFACPMetadataBuilder(TestBase):
         self.mock_cfg.compilation_config = MagicMock()
         self.mock_cfg.compilation_config.pass_config = MagicMock()
         self.mock_cfg.compilation_config.pass_config.enable_sp = False
-
-        self.mock_cfg.speculative_config.num_speculative_tokens = 0
+        self.mock_cfg.speculative_config = None
 
         self.patcher = patch("vllm.config.get_current_vllm_config", return_value=self.mock_cfg)
         self.patcher.start()
@@ -128,9 +127,7 @@ class TestAscendSFACPMetadataBuilder(TestBase):
         vllm_config.model_config.hf_text_config.qk_rope_head_dim = 64
         vllm_config.model_config.hf_text_config = MagicMock(qk_rope_head_dim=64)
         vllm_config.model_config.hf_config.model_type = "deepseek_v3"
-        speculative_config = MagicMock()
-        speculative_config.num_speculative_tokens = 0
-        vllm_config.speculative_config = speculative_config
+        vllm_config.speculative_config = None
         vllm_config.scheduler_config.max_num_seqs = 16
         vllm_config.scheduler_config.max_num_batched_tokens = 256
         vllm_config.parallel_config = MagicMock()
@@ -902,12 +899,21 @@ class TestAscendSFACPImpl(TestBase):
         slots = torch.tensor([0, 1, 2, 3], dtype=torch.int32)
 
         attn_metadata = MagicMock()
+
         sfa_cp_metadata = MagicMock()
+
         sfa_cp_metadata.pcp_allgather_restore_idx = torch.arange(4)
+
         attn_metadata.sfa_cp_metadata = sfa_cp_metadata
+
         attn_metadata.slot_mapping = slots
 
+        attn_metadata.num_decode_tokens = 2
+
+        attn_metadata.num_prefills = 0
+
         result = self.impl.exec_kv(kv_no_split, cos, sin, kv_cache, slots, attn_metadata)
+
         self.assertEqual(result, (None, None))
         mock_torch_npu._npu_reshape_and_cache.assert_called_once()
 
