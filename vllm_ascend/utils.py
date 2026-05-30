@@ -580,6 +580,9 @@ def update_aclgraph_sizes(vllm_config: VllmConfig) -> None:
     # Store original configuration and temporarily clear it
     compilation_config = vllm_config.compilation_config
     original_sizes, compilation_config.cudagraph_capture_sizes = compilation_config.cudagraph_capture_sizes, None
+    cudagraph_mode = compilation_config.cudagraph_mode
+    if cudagraph_mode.has_full_cudagraphs() and cudagraph_mode.has_piecewise_cudagraphs():
+        MAX_CAPTURE_SIZE = max(0, MAX_CAPTURE_SIZE - len(original_sizes))
 
     # Calculate parallel configuration factor
     if not vllm_config.model_config:
@@ -670,13 +673,14 @@ def update_aclgraph_sizes(vllm_config: VllmConfig) -> None:
     # If original sizes exceed maximum, sample a representative subset
     if max_num_batch_sizes < len(original_sizes):
         # Sample uniformly from original sizes
-        step = (len(original_sizes) - 1) / (max_num_batch_sizes - 1)
-        indices = [round(i * step) for i in range(max_num_batch_sizes)]
-
-        # Ensure first and last elements are preserved
-        indices[0], indices[-1] = 0, len(original_sizes) - 1
-
-        sampled_sizes = [original_sizes[i] for i in indices]
+        if max_num_batch_sizes <= 1:
+            # Avoid division by zero when only one capture size can be kept.
+            sampled_sizes = [original_sizes[-1]]
+        else:
+            step = (len(original_sizes) - 1) / (max_num_batch_sizes - 1)
+            indices = [round(i * step) for i in range(max_num_batch_sizes)]
+            indices[0], indices[-1] = 0, len(original_sizes) - 1
+            sampled_sizes = [original_sizes[i] for i in indices]
         update_cudagraph_capture_sizes(vllm_config, sampled_sizes)
         logger.info(
             "Adjusted ACL graph batch sizes for %s model (layers: %d): %d → %d sizes",
