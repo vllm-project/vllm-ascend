@@ -26,8 +26,8 @@ from vllm.distributed import (
     get_tensor_model_parallel_world_size,
     tensor_model_parallel_all_reduce,
 )
+from vllm.model_executor.custom_op import CustomOp
 from vllm.model_executor.layers.mamba.linear_attn import (
-    CustomOp,
     MiniMaxText01RMSNormTP,
 )
 from vllm.platforms import current_platform
