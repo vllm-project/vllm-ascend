@@ -7,7 +7,6 @@ from vllm.model_executor.models.qwen3_vl import (
     Qwen3VLForConditionalGeneration,
     pos_embed_interpolate_native,
 )
-from vllm.model_executor.models.utils import _merge_multimodal_embeddings
 
 from vllm_ascend.ascend_forward_context import _EXTRA_CTX
 from vllm_ascend.ops.rotary_embedding import AscendMRotaryEmbedding
