@@ -17,6 +17,7 @@ Output (stdout):
     JSON with commit_sha and files_committed on success.
     Exits with code 1 and an error description on validation failure.
 """
+
 from __future__ import annotations
 
 import argparse
@@ -105,12 +106,9 @@ def main() -> None:
     parser = argparse.ArgumentParser(
         description="Validate and commit changes for a main2main step.",
     )
-    parser.add_argument("--ascend-path", type=Path, required=True,
-                        help="Path to the vllm-ascend repository")
-    parser.add_argument("--step-id", required=True,
-                        help="Step identifier for the commit message context")
-    parser.add_argument("--message", required=True,
-                        help="Commit message")
+    parser.add_argument("--ascend-path", type=Path, required=True, help="Path to the vllm-ascend repository")
+    parser.add_argument("--step-id", required=True, help="Step identifier for the commit message context")
+    parser.add_argument("--message", required=True, help="Commit message")
     args = parser.parse_args()
 
     repo = args.ascend_path
@@ -128,8 +126,7 @@ def main() -> None:
     forbidden = _check_forbidden(committable)
     if forbidden:
         print(
-            f"Error: forbidden files in working tree:\n"
-            + "\n".join(f"  - {f}" for f in forbidden),
+            "Error: forbidden files in working tree:\n" + "\n".join(f"  - {f}" for f in forbidden),
             file=sys.stderr,
         )
         sys.exit(1)
@@ -137,8 +134,7 @@ def main() -> None:
     if not committable:
         if skipped:
             print(
-                f"Error: no committable changes to commit; skipped files:\n"
-                + "\n".join(f"  - {f}" for f in skipped),
+                "Error: no committable changes to commit; skipped files:\n" + "\n".join(f"  - {f}" for f in skipped),
                 file=sys.stderr,
             )
             sys.exit(1)

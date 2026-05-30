@@ -20,6 +20,7 @@ Side-effects:
     - Creates /tmp/main2main/ and /tmp/main2main/steps/ directories.
     - Writes /tmp/main2main/detect.json with the same JSON.
 """
+
 from __future__ import annotations
 
 import argparse
@@ -75,10 +76,8 @@ def main() -> None:
     parser = argparse.ArgumentParser(
         description="Detect base/target commits for main2main pipeline.",
     )
-    parser.add_argument("--vllm-path", type=Path, required=True,
-                        help="Path to the local vLLM repository")
-    parser.add_argument("--ascend-path", type=Path, required=True,
-                        help="Path to the local vllm-ascend repository")
+    parser.add_argument("--vllm-path", type=Path, required=True, help="Path to the local vLLM repository")
+    parser.add_argument("--ascend-path", type=Path, required=True, help="Path to the local vllm-ascend repository")
     args = parser.parse_args()
 
     conf = extract_from_conf_py(args.ascend_path)
@@ -97,7 +96,8 @@ def main() -> None:
     (workspace / "steps").mkdir(exist_ok=True)
 
     (workspace / "detect.json").write_text(
-        json.dumps(result, indent=2) + "\n", encoding="utf-8",
+        json.dumps(result, indent=2) + "\n",
+        encoding="utf-8",
     )
 
     print(json.dumps(result, indent=2))

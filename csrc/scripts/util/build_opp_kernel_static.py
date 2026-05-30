@@ -58,7 +58,7 @@ def shell_checkout_key_func(symbol_file, key_str):
 
 def to_upper_camel_case(x) -> str:
     """转大驼峰法命名"""
-    s = re.sub("_([a-zA-Z])", lambda m: (m.group(1).upper()), x.lower())
+    s = re.sub("_([a-zA-Z])", lambda m: m.group(1).upper(), x.lower())
     return s[0].upper() + s[1:]
 
 

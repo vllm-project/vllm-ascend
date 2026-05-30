@@ -1039,6 +1039,202 @@ class AscendAttentionBackendImpl(AttentionImpl):
             actual_seq_lengths_kv = attn_metadata.seq_lens_list
         return key, value, block_size, block_table, actual_seq_lengths_kv
 
+    def _fallback_sdpa(
+        self,
+        query,
+        key,
+        value,
+        block_table,
+        block_size,
+        attn_metadata,
+        actual_seq_lengths_kv,
+        num_tokens,
+    ):
+        import torch.nn.functional as F
+
+        num_heads = self.num_heads
+        num_kv_heads = self.num_kv_heads
+        head_size = self.head_size
+        num_kv_groups = num_heads // num_kv_heads
+        scale = self.scale
+        causal = attn_metadata.causal
+
+        # 将 seq_lengths 转为 Python list
+        seq_lens_q = attn_metadata.actual_seq_lengths_q
+        if isinstance(seq_lens_q, list):
+            seq_lens_q_list = seq_lens_q
+        else:
+            seq_lens_q_list = (
+                seq_lens_q.tolist() if hasattr(seq_lens_q, "numel") and seq_lens_q.numel() > 1 else [int(seq_lens_q)]
+            )
+
+        if isinstance(actual_seq_lengths_kv, list):
+            seq_lens_kv_list = actual_seq_lengths_kv
+        else:
+            seq_lens_kv_list = (
+                actual_seq_lengths_kv.tolist()
+                if hasattr(actual_seq_lengths_kv, "numel") and actual_seq_lengths_kv.numel() > 1
+                else [int(actual_seq_lengths_kv)]
+            )
+
+        query_lens = []
+        prev = 0
+        for q_len in seq_lens_q_list:
+            query_lens.append(q_len - prev)
+            prev = q_len
+
+        if attn_metadata.attn_state == AscendAttentionState.PrefillNoCache:
+            if self.attn_type == AttentionType.ENCODER_DECODER:
+                kv_lens = []
+                prev = 0
+                for kv_len in seq_lens_kv_list:
+                    kv_lens.append(kv_len - prev)
+                    prev = kv_len
+            else:
+                kv_lens = query_lens
+        else:
+            kv_lens = seq_lens_kv_list
+
+        # Validate sequence length (similar to NPU operator C++ layer validation)
+        # Get max_seq_len from config (equivalent to operator internal access)
+        # fmt: off
+        max_seq_len = getattr(
+            self.vllm_config.model_config, 
+            "max_model_len", 
+            getattr(self.vllm_config.model_config, "max_seq_len", 32768)
+        )
+        # fmt: on
+
+        max_kv_len = max(kv_lens) if kv_lens else 0
+        if max_kv_len > max_seq_len:
+            # Truncate sequences that exceed max_model_len to prevent service crash
+            # This handles the case where prompt + generated tokens > max_model_len
+            # Note: The scheduler should ideally stop generation before reaching this point
+            import warnings
+
+            warnings.warn(
+                f"Sequence length {max_kv_len} exceeds maximum model length {max_seq_len}. "
+                f"Truncating to {max_seq_len}. This indicates the scheduler allowed "
+                f"generation beyond max_model_len.",
+                UserWarning,
+                stacklevel=2,
+            )
+            # Truncate all sequences to max_seq_len
+            kv_lens = [min(s, max_seq_len) for s in kv_lens]
+
+        prev_q = 0
+        prev_kv = 0
+        outputs = []
+
+        for i in range(len(query_lens)):
+            cur_q = query_lens[i]
+            cur_kv = kv_lens[i]
+
+            # 提取当前序列的 query
+            q_i = query[prev_q : prev_q + cur_q]
+
+            actual_cur_q = q_i.size(0)
+            if actual_cur_q != cur_q:
+                import warnings
+
+                warnings.warn(
+                    f"Query size mismatch at batch {i}: metadata says {cur_q}, "
+                    f"but actual tensor has {actual_cur_q} tokens. "
+                    f"This is expected with Chunked Prefill + Speculative Decoding. Using actual size.",
+                    UserWarning,
+                    stacklevel=2,
+                )
+                cur_q = actual_cur_q
+
+            q_i = q_i.view(1, cur_q, num_heads, head_size).transpose(1, 2)
+
+            # 提取 key/value：支持 paged kv_cache 和 PrefillNoCache 两种情况
+            if block_table is not None and self.key_cache is not None:
+                bt_i = block_table[i]
+                num_needed_blocks = (cur_kv + block_size - 1) // block_size
+                valid_blocks = bt_i[:num_needed_blocks].long()
+                k_cache_i = self.key_cache[valid_blocks]
+                v_cache_i = self.value_cache[valid_blocks]
+                k_i = k_cache_i.view(-1, num_kv_heads, head_size)[:cur_kv]
+                v_i = v_cache_i.view(-1, num_kv_heads, head_size)[:cur_kv]
+            else:
+                k_i = key[prev_kv : prev_kv + cur_kv]
+                v_i = value[prev_kv : prev_kv + cur_kv]
+
+            # Adjust cur_kv based on actual KV data size (mimics NPU operator behavior)
+            # NPU operator internally checks block_table and truncates to actual available length
+            # This prevents RuntimeError when requested length exceeds cached tokens
+            actual_kv_tokens = k_i.numel() // (num_kv_heads * head_size)
+            if actual_kv_tokens < cur_kv:
+                import warnings
+
+                warnings.warn(
+                    f"Requested KV length {cur_kv} exceeds actual cached tokens {actual_kv_tokens}. "
+                    f"Truncating to {actual_kv_tokens}. This indicates the scheduler allowed "
+                    f"generation beyond max_model_len (similar to how NPU operator handles this).",
+                    UserWarning,
+                    stacklevel=2,
+                )
+                cur_kv = actual_kv_tokens
+
+            # reshape key/value 为 [1, num_kv_heads, cur_kv, head_size]
+
+            # Sanity check before reshape to prevent cryptic errors
+            expected_k_elements = cur_kv * num_kv_heads * head_size
+            expected_v_elements = cur_kv * num_kv_heads * head_size
+
+            if k_i.numel() != expected_k_elements:
+                raise RuntimeError(
+                    f"Internal error in FallbackSDPA: key tensor size mismatch "
+                    f"(expected {expected_k_elements}, got {k_i.numel()}). "
+                    f"This indicates a bug in KV cache implementation."
+                )
+
+            if v_i.numel() != expected_v_elements:
+                raise RuntimeError(
+                    f"Internal error in FallbackSDPA: value tensor size mismatch "
+                    f"(expected {expected_v_elements}, got {v_i.numel()})."
+                )
+
+            k_i = k_i.view(1, cur_kv, num_kv_heads, head_size).transpose(1, 2)
+            v_i = v_i.view(1, cur_kv, num_kv_heads, head_size).transpose(1, 2)
+
+            # GQA: expand kv heads 以匹配 query heads
+            if num_kv_groups > 1:
+                k_i = k_i.unsqueeze(2).expand(-1, -1, num_kv_groups, -1, -1).reshape(1, num_heads, cur_kv, head_size)
+                v_i = v_i.unsqueeze(2).expand(-1, -1, num_kv_groups, -1, -1).reshape(1, num_heads, cur_kv, head_size)
+
+            # causal mask
+            attn_mask_i = None
+            if causal:
+                attn_mask_i = torch.triu(
+                    torch.full((cur_q, cur_kv), float("-inf"), device=q_i.device, dtype=q_i.dtype),
+                    diagonal=cur_kv - cur_q + 1,
+                )
+
+            out_i = F.scaled_dot_product_attention(q_i, k_i, v_i, attn_mask=attn_mask_i, scale=scale)
+            out_i = out_i.transpose(1, 2).reshape(cur_q, num_heads * head_size)
+            outputs.append(out_i)
+
+            prev_q += cur_q
+            prev_kv += cur_kv
+
+        attn_output = torch.cat(outputs, dim=0)
+
+        actual_num_tokens = attn_output.size(0)
+        if actual_num_tokens != num_tokens:
+            import warnings
+
+            warnings.warn(
+                f"Output size mismatch: metadata says {num_tokens} tokens, "
+                f"but actual output has {actual_num_tokens} tokens. "
+                f"This is expected with Chunked Prefill + Speculative Decoding. Using actual size.",
+                UserWarning,
+                stacklevel=2,
+            )
+
+        return attn_output.view(actual_num_tokens, num_heads, head_size)
+
     def forward_fused_infer_attention(
         self,
         query: torch.Tensor,
@@ -1048,6 +1244,47 @@ class AscendAttentionBackendImpl(AttentionImpl):
         output: torch.Tensor,
         kv_cache=None,
     ):
+        if self.head_size > 192:
+            # Get necessary parameters before calling _fallback_sdpa
+            passed_key = key
+            key, value, block_size, block_table, actual_seq_lengths_kv = self._get_fia_params(
+                key, value, attn_metadata, kv_cache
+            )
+            num_tokens = attn_metadata.actual_seq_lengths_q[-1]
+            query_input = query[:num_tokens]
+
+            # Call fallback SDPA
+            # fmt:off
+            attn_output = self._fallback_sdpa(
+                query_input, key, value, block_table, block_size,
+                attn_metadata, actual_seq_lengths_kv, num_tokens)
+            # fmt:on
+
+            # Fix: Handle size mismatch from _fallback_sdpa or NPU operator
+            if attn_output.dim() == 2:
+                # attn_output is [tokens, hidden_size], need to reshape
+                actual_tokens = attn_output.size(0)
+                attn_output = attn_output.view(actual_tokens, self.num_heads, self.head_size)
+            elif attn_output.dim() == 3:
+                # attn_output is already [tokens, num_heads, head_size]
+                # Verify the shape is correct
+                actual_tokens = attn_output.size(0)
+                if actual_tokens != num_tokens:
+                    import warnings
+
+                    warnings.warn(
+                        f"Attention output size mismatch in FIA: metadata says {num_tokens} tokens, "
+                        f"but actual output has {actual_tokens} tokens. Using actual size.",
+                        UserWarning,
+                        stacklevel=2,
+                    )
+            else:
+                raise RuntimeError(f"Unexpected attn_output shape: {attn_output.shape}")
+
+            safe_tokens = min(num_tokens, actual_tokens)
+            output[:safe_tokens] = attn_output[:safe_tokens]
+            return output
+
         # we inherit ForwardContext in model runner v2, when enable model
         # runner v2, there is not capturing attribute in forward_context,
         # just use getattr to avoid attribute error.

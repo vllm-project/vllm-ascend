@@ -14,6 +14,7 @@ Usage:
 Output (stdout):
     JSON with files_updated and replacement_count.
 """
+
 from __future__ import annotations
 
 import argparse
@@ -74,10 +75,12 @@ def _replace_in_tracked_files(
             continue
         if not dry_run:
             path.write_bytes(data.replace(old_bytes, new_bytes))
-        updated.append({
-            "path": str(path.relative_to(repo)),
-            "replacements": count,
-        })
+        updated.append(
+            {
+                "path": str(path.relative_to(repo)),
+                "replacements": count,
+            }
+        )
 
     return updated
 
@@ -86,14 +89,10 @@ def main() -> None:
     parser = argparse.ArgumentParser(
         description="Replace old vLLM commit references in tracked vllm-ascend files.",
     )
-    parser.add_argument("--ascend-path", type=Path, required=True,
-                        help="Path to the vllm-ascend repository")
-    parser.add_argument("--old-commit", required=True,
-                        help="Existing 40-character vLLM commit SHA")
-    parser.add_argument("--new-commit", required=True,
-                        help="Replacement 40-character vLLM commit SHA")
-    parser.add_argument("--dry-run", action="store_true",
-                        help="Report matching files without modifying them")
+    parser.add_argument("--ascend-path", type=Path, required=True, help="Path to the vllm-ascend repository")
+    parser.add_argument("--old-commit", required=True, help="Existing 40-character vLLM commit SHA")
+    parser.add_argument("--new-commit", required=True, help="Replacement 40-character vLLM commit SHA")
+    parser.add_argument("--dry-run", action="store_true", help="Report matching files without modifying them")
     args = parser.parse_args()
 
     repo = args.ascend_path
