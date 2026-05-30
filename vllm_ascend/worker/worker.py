@@ -19,9 +19,7 @@
 
 import copy
 import gc
-import json
 import logging
-import os
 from types import NoneType
 
 import torch
@@ -264,6 +262,8 @@ class NPUWorker(WorkerBase):
         # Note that this should be imported after torch.npu.set_device
         # to avoid repeated set_device in extra processes
         from vllm.triton_utils import HAS_TRITON
+        import os
+        import json
 
         if HAS_TRITON:
             import torch_npu._inductor  # noqa: F401
