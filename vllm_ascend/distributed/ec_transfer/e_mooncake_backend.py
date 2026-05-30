@@ -8,7 +8,7 @@ class EMooncakeBackend(MooncakeBackend):
     def __init__(self, parallel_config: ParallelConfig):
         super().__init__(parallel_config=parallel_config)
 
-    def put_tensor_info(self, key: str, value: bytes | None) -> None:
+    def put_tensor_info(self, key: str, value: bytes | None):
         if self.store is not None and value is not None:
             """Put value to Mooncake Store"""
             try:
