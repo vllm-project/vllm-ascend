@@ -590,14 +590,24 @@ class KVCacheStoreLayerSendingThread(KVTransferThread):
             self.set_finished_request(req_meta.req_id)
         self.request_queue.task_done()
 
-        logger.info(
-            "Storing KV cache layerwise for %d out of %d blocks (missing_count=%d) for request %s, layer %d",
-            len(key_list),
-            total_block,
-            len(missing_indices),
-            req_meta.req_id,
-            layer_id,
-        )
+        if layer_id == self.final_layer_id:
+            logger.info(
+                "Storing KV cache layerwise for %d out of %d blocks (missing_count=%d) for request %s, layer %d",
+                len(key_list),
+                total_block,
+                len(missing_indices),
+                req_meta.req_id,
+                layer_id,
+            )
+        else:
+            logger.debug(
+                "Storing KV cache layerwise for %d out of %d blocks (missing_count=%d) for request %s, layer %d",
+                len(key_list),
+                total_block,
+                len(missing_indices),
+                req_meta.req_id,
+                layer_id,
+            )
 
 
 class KVCacheStoreLayerRecvingThread(KVTransferThread):
