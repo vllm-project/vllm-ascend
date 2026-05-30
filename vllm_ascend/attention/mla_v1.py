@@ -22,6 +22,7 @@ from vllm_ascend.ascend_config import get_ascend_config
 from vllm_ascend.ascend_forward_context import _EXTRA_CTX
 from vllm_ascend.attention.attention_mask import AttentionMaskBuilder
 from vllm_ascend.attention.attention_v1 import AscendAttentionState
+from vllm_ascend.attention.attn_extra_metadata import FiaMetadataPreparer
 from vllm_ascend.attention.context_parallel.common_cp import AscendPCPMetadata, CPChunkedContextMetadata
 from vllm_ascend.attention.utils import (
     AscendCommonAttentionMetadata,
@@ -232,6 +233,8 @@ class AscendMLAMetadataBuilder(MLACommonMetadataBuilder[AscendMLAMetadata]):
     understand this class
     """
 
+    extra_metadata_preparer = FiaMetadataPreparer()
+
     def __init__(
         self,
         kv_cache_spec: MLAAttentionSpec,
@@ -301,6 +304,10 @@ class AscendMLAMetadataBuilder(MLACommonMetadataBuilder[AscendMLAMetadata]):
         # Explicit override in case the underlying builder specialized this getter.
         # @override omitted only because of mypy limitation due to type variable.
         return AttentionCGSupport.UNIFORM_BATCH
+
+    @classmethod
+    def get_extra_metadata_preparer(cls) -> FiaMetadataPreparer:
+        return cls.extra_metadata_preparer
 
     def reorder_batch(self, input_batch: "NPUInputBatch", scheduler_output: "SchedulerOutput") -> bool:
         # We now want to reorder the batch so that the "decode" requests are at
@@ -429,8 +436,10 @@ class AscendMLAMetadataBuilder(MLACommonMetadataBuilder[AscendMLAMetadata]):
         fast_build: bool = False,
     ) -> AscendMLAMetadata:
         num_reqs = common_attn_metadata.num_reqs
-        query_start_loc = common_attn_metadata.query_start_loc
-        query_start_loc_cpu = common_attn_metadata.query_start_loc_cpu
+        extra = type(self).extra_metadata_preparer.get_metadata()
+        loc_src = common_attn_metadata if extra is None else extra
+        query_start_loc = loc_src.query_start_loc
+        query_start_loc_cpu = loc_src.query_start_loc_cpu
 
         self.num_decodes, self.num_prefills, self.num_decode_tokens, self.num_prefill_tokens = (
             split_decodes_and_prefills(common_attn_metadata, decode_threshold=self.decode_threshold)
