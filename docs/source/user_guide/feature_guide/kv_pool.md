@@ -139,7 +139,7 @@ With Mode A (Embedded Real Client), Mooncake is embedded in vLLM. When the vLLM 
 
 #### Notes
 
-* This feature requires mooncake >= v0.3.11. 
+* This feature requires mooncake >= v0.3.11.
 
 ### FAQ for HIXL (ascend_direct) backend
 
