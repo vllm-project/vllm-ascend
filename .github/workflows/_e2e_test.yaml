@@ -1032,6 +1032,9 @@ jobs:
           set -o pipefail
           pytest -sv --durations=0 tests/e2e/310p/singlecard/test_dense_model_singlecard.py \
           tests/e2e/310p/singlecard/test_vl_model_singlecard.py \
+          tests/e2e/310p/singlecard/pooling/test_classification.py \
+          tests/e2e/310p/singlecard/pooling/test_embedding.py \
+          tests/e2e/310p/singlecard/pooling/test_scoring.py \
           2>&1 | tee /tmp/e2e-310p-singlecard.log
           exit ${PIPESTATUS[0]}
 
