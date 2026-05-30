@@ -114,8 +114,8 @@ const std::map<std::string, std::vector<ge::DataType>> DTYPE_SUPPORT_MAP = {
     {STATE_CACHE_NAME,        {ge::DT_FLOAT}},
     {APE_NAME,                {ge::DT_FLOAT}},
     {NORM_WEIGHT_NAME,        {ge::DT_BF16, ge::DT_FLOAT16}},
-    {ROPE_SIN_NAME,           {ge::DT_BF16, ge::DT_FLOAT16}},
-    {ROPE_COS_NAME,           {ge::DT_BF16, ge::DT_FLOAT16}},
+    {ROPE_SIN_NAME,           {ge::DT_BF16, ge::DT_FLOAT16, ge::DT_FLOAT}},
+    {ROPE_COS_NAME,           {ge::DT_BF16, ge::DT_FLOAT16, ge::DT_FLOAT}},
     {STATE_BLOCK_TABLE_NAME,  {ge::DT_INT32}},
     {CU_SEQLENS_NAME,         {ge::DT_INT32}},
     {SEQUSED_NAME,            {ge::DT_INT32}},
@@ -345,6 +345,7 @@ private:
     ge::graphStatus CheckShapeConsistency() const;
     ge::graphStatus CheckShapeConsistencyRope() const;
     ge::graphStatus CheckDtypeConsistencyX(const gert::CompileTimeTensorDesc *desc, const std::string &name) const;
+    ge::graphStatus CheckDtypeConsistencyRope() const;
     ge::graphStatus CheckDtypeConsistency() const;
     ge::graphStatus CheckMultiParaConsistency() const;
     ge::graphStatus CheckDimNumConsistency() const;
