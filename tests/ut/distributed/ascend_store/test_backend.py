@@ -24,9 +24,16 @@ from unittest.mock import MagicMock, patch
 import tests.ut.distributed.ascend_store._mock_deps  # noqa: F401, E402
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.backend.backend import Backend
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.backend.mooncake_backend import (
+    DEFAULT_MOONCAKE_DISK_STAGING_BUFFER_BYTES,
     MooncakeStoreConfig,
+    _classify_replica_tier,
     _convert_to_bytes,
+    _estimate_disk_offload_staging_bytes,
+    _get_replica_tiers_by_key,
+    _get_usable_disk_offload_buffer_budget_bytes,
+    _log_mooncake_load_tier_summary,
     _parse_global_segment_size,
+    _split_disk_offload_load_batches,
 )
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.backend.yuanrong_backend import (
     YuanrongConfig,
@@ -256,6 +263,11 @@ class TestMooncakeBackendMethods(unittest.TestCase):
             backend = MooncakeBackend.__new__(MooncakeBackend)
             backend.store = MagicMock()
             backend.config = MagicMock()
+            # Defaults expected by the post-PR get()/put() paths. Tests can
+            # override individually when they want disk-offload semantics.
+            backend.disk_offload_buffer_budget_bytes = None
+            backend.usable_disk_offload_buffer_budget_bytes = None
+            backend.replicate_config = None
             return backend
 
     def test_exists(self):
@@ -461,6 +473,359 @@ class TestMemcacheBackendMethods(unittest.TestCase):
         b = self._make_backend()
         b.store.batch_put_from_layers.side_effect = Exception("fail")
         b.put(["k1"], [[100]], [[10]])
+
+
+# =========================================================================
+# MooncakeStoreConfig validation (__post_init__)
+# =========================================================================
+class TestMooncakeStoreConfigValidation(unittest.TestCase):
+    def _base_kwargs(self, **overrides):
+        kwargs = dict(
+            metadata_server="m:1",
+            protocol="ascend",
+            device_name="npu0",
+            master_server_address="m:2",
+        )
+        kwargs.update(overrides)
+        return kwargs
+
+    def test_unknown_mode_raises(self):
+        with self.assertRaises(ValueError) as ctx:
+            MooncakeStoreConfig(**self._base_kwargs(mode="unknown"))  # type: ignore[arg-type]
+        self.assertIn("unknown Mooncake mode", str(ctx.exception))
+
+    def test_zero_local_buffer_raises(self):
+        with self.assertRaises(ValueError):
+            MooncakeStoreConfig(**self._base_kwargs(local_buffer_size=0))
+
+    def test_embedded_zero_segment_raises(self):
+        with self.assertRaises(ValueError) as ctx:
+            MooncakeStoreConfig(**self._base_kwargs(global_segment_size=0))
+        self.assertIn("embedded", str(ctx.exception))
+
+    def test_standalone_nonzero_segment_raises(self):
+        with self.assertRaises(ValueError) as ctx:
+            MooncakeStoreConfig(
+                **self._base_kwargs(mode="standalone-store", global_segment_size=1024)
+            )
+        self.assertIn("standalone-store", str(ctx.exception))
+
+    def test_standalone_zero_segment_ok(self):
+        cfg = MooncakeStoreConfig(
+            **self._base_kwargs(mode="standalone-store", global_segment_size=0)
+        )
+        self.assertEqual(cfg.mode, "standalone-store")
+        self.assertFalse(cfg.enable_offload)
+
+    def test_from_file_parses_enable_offload(self):
+        config = {
+            "metadata_server": "m:1",
+            "master_server_address": "m:2",
+            "mode": "standalone-store",
+            "global_segment_size": 0,
+            "enable_offload": True,
+        }
+        with tempfile.NamedTemporaryFile(mode="w", suffix=".json", delete=False) as f:
+            json.dump(config, f)
+            f.flush()
+            path = f.name
+        try:
+            cfg = MooncakeStoreConfig.from_file(path)
+            self.assertEqual(cfg.mode, "standalone-store")
+            self.assertEqual(cfg.global_segment_size, 0)
+            self.assertTrue(cfg.enable_offload)
+        finally:
+            os.unlink(path)
+
+
+# =========================================================================
+# Disk-offload staging helpers
+# =========================================================================
+class TestEstimateDiskOffloadStagingBytes(unittest.TestCase):
+    def test_aligns_up_and_pads(self):
+        # 1 byte payload rounds up to one 4 KiB block + two padding blocks.
+        self.assertEqual(_estimate_disk_offload_staging_bytes([1]), 4096 + 2 * 4096)
+
+    def test_scatter_gather_sums(self):
+        self.assertEqual(
+            _estimate_disk_offload_staging_bytes([4096, 4096]),
+            8192 + 2 * 4096,
+        )
+
+    def test_empty_list(self):
+        # Empty payload still pays the two-block padding (rare but documented).
+        self.assertEqual(_estimate_disk_offload_staging_bytes([]), 2 * 4096)
+
+
+class TestUsableDiskOffloadBudget(unittest.TestCase):
+    def test_applies_ratio(self):
+        # Default ratio is 0.9; mocking is overkill since the function reads
+        # the live env wrapper. We assert ``int(budget * ratio) <= budget``.
+        budget = 10_000_000
+        usable = _get_usable_disk_offload_buffer_budget_bytes(budget)
+        self.assertGreater(usable, 0)
+        self.assertLessEqual(usable, budget)
+
+    def test_min_one(self):
+        # Round-down on a tiny budget still produces at least 1.
+        self.assertGreaterEqual(_get_usable_disk_offload_buffer_budget_bytes(1), 1)
+
+
+class TestSplitDiskOffloadLoadBatches(unittest.TestCase):
+    def test_under_budget_single_batch(self):
+        keys = ["a", "b"]
+        sizes = [[100], [100]]
+        addrs = [[0], [0]]
+        # Soft budget large enough for both keys.
+        batches, oversize = _split_disk_offload_load_batches(
+            keys, addrs, sizes, usable_budget_bytes=10**9, raw_budget_bytes=10**9
+        )
+        self.assertIsNone(oversize)
+        self.assertEqual(len(batches), 1)
+        self.assertEqual(batches[0][0], keys)
+
+    def test_splits_when_soft_budget_exceeded(self):
+        keys = ["a", "b", "c"]
+        sizes = [[4096], [4096], [4096]]
+        addrs = [[0], [0], [0]]
+        # Each key estimate = 4096 + 8192 = 12288. Soft cap of 16384
+        # forces one key per batch (12288 + 12288 > 16384).
+        batches, oversize = _split_disk_offload_load_batches(
+            keys, addrs, sizes, usable_budget_bytes=16384, raw_budget_bytes=10**9
+        )
+        self.assertIsNone(oversize)
+        self.assertEqual([b[0] for b in batches], [["a"], ["b"], ["c"]])
+
+    def test_oversized_key_returns_skip_signal(self):
+        keys = ["a", "huge", "c"]
+        sizes = [[100], [10**9], [100]]
+        addrs = [[0], [0], [0]]
+        batches, oversize = _split_disk_offload_load_batches(
+            keys, addrs, sizes, usable_budget_bytes=10_000, raw_budget_bytes=20_000
+        )
+        # "huge" exceeds the *hard* cap → propagate skip-signal upstream.
+        self.assertEqual(oversize, "huge")
+        self.assertEqual(batches, [])
+
+    def test_single_overflowing_key_solo_batch(self):
+        # Key bigger than soft cap but smaller than hard cap is sent solo.
+        keys = ["a", "fat"]
+        sizes = [[100], [12_000]]
+        addrs = [[0], [0]]
+        batches, oversize = _split_disk_offload_load_batches(
+            keys,
+            addrs,
+            sizes,
+            usable_budget_bytes=10_000,
+            raw_budget_bytes=50_000,
+        )
+        self.assertIsNone(oversize)
+        # ``a`` fits the soft cap → its own batch; ``fat`` exceeds the
+        # soft cap → solo batch (never co-batched).
+        batch_keys = [b[0] for b in batches]
+        self.assertEqual(batch_keys, [["a"], ["fat"]])
+
+
+# =========================================================================
+# Replica-tier classification + logging
+# =========================================================================
+class _FakeReplicaDesc:
+    def __init__(self, memory=False, disk=False, local_disk=False):
+        self._memory = memory
+        self._disk = disk
+        self._local_disk = local_disk
+
+    def is_memory_replica(self):
+        return self._memory
+
+    def is_disk_replica(self):
+        return self._disk
+
+    def is_local_disk_replica(self):
+        return self._local_disk
+
+
+class TestClassifyReplicaTier(unittest.TestCase):
+    def test_empty_unknown(self):
+        self.assertEqual(_classify_replica_tier(None), "unknown")
+        self.assertEqual(_classify_replica_tier([]), "unknown")
+        self.assertEqual(_classify_replica_tier({}), "unknown")
+
+    def test_memory(self):
+        self.assertEqual(_classify_replica_tier([_FakeReplicaDesc(memory=True)]), "memory")
+
+    def test_disk(self):
+        self.assertEqual(_classify_replica_tier([_FakeReplicaDesc(disk=True)]), "disk")
+
+    def test_local_disk_is_disk(self):
+        # Older mooncake exposes ``is_local_disk_replica``; classify as disk.
+        self.assertEqual(_classify_replica_tier([_FakeReplicaDesc(local_disk=True)]), "disk")
+
+    def test_unknown_when_no_predicate_matches(self):
+        # Replica with neither predicate truthy → "unknown".
+        self.assertEqual(_classify_replica_tier([_FakeReplicaDesc()]), "unknown")
+
+    def test_unindexable_returns_unknown(self):
+        # Some types raise TypeError on indexing — the helper must swallow that.
+        class NotIndexable:
+            def __bool__(self):
+                return True
+
+        self.assertEqual(_classify_replica_tier(NotIndexable()), "unknown")
+
+
+class TestGetReplicaTiersByKey(unittest.TestCase):
+    def test_mapping_return(self):
+        store = MagicMock()
+        store.batch_get_replica_desc.return_value = {
+            "a": [_FakeReplicaDesc(memory=True)],
+            "b": [_FakeReplicaDesc(disk=True)],
+        }
+        tiers = _get_replica_tiers_by_key(store, ["a", "b"])
+        self.assertEqual(tiers, {"a": "memory", "b": "disk"})
+
+    def test_list_return_positional(self):
+        # The fallback path: store returns a list parallel to keys.
+        store = MagicMock()
+        store.batch_get_replica_desc.return_value = [
+            [_FakeReplicaDesc(memory=True)],
+            [_FakeReplicaDesc(disk=True)],
+        ]
+        tiers = _get_replica_tiers_by_key(store, ["k0", "k1"])
+        self.assertEqual(tiers, {"k0": "memory", "k1": "disk"})
+
+    def test_api_exception_returns_all_unknown(self):
+        store = MagicMock()
+        store.batch_get_replica_desc.side_effect = Exception("api gone")
+        tiers = _get_replica_tiers_by_key(store, ["a", "b"])
+        self.assertEqual(tiers, {"a": "unknown", "b": "unknown"})
+
+
+class TestLogMooncakeLoadTierSummary(unittest.TestCase):
+    def test_summary_counts(self):
+        # Should not raise; we only assert the function tolerates partial
+        # input (load_results shorter than batch_keys).
+        _log_mooncake_load_tier_summary(
+            batch_keys=["a", "b", "c"],
+            load_results=[100, -1],  # third key has no result → treated as failed
+            tiers_by_key={"a": "memory", "b": "disk", "c": "unknown"},
+        )
+
+    def test_unexpected_tier_falls_back_to_unknown(self):
+        # Tier not in {memory,disk,unknown} should not crash the summarizer.
+        _log_mooncake_load_tier_summary(
+            batch_keys=["k"],
+            load_results=[42],
+            tiers_by_key={"k": "garbage"},
+        )
+
+
+# =========================================================================
+# MooncakeBackend.get() — disk-offload batching path
+# =========================================================================
+class TestMooncakeBackendGetWithOffload(unittest.TestCase):
+    def _make_backend(self, *, disk_offload: bool, hard_cap: int | None = None):
+        from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.backend.mooncake_backend import (
+            MooncakeBackend,
+        )
+
+        with patch.object(MooncakeBackend, "__init__", lambda self, pc: None):
+            backend = MooncakeBackend.__new__(MooncakeBackend)
+        backend.store = MagicMock()
+        backend.config = MagicMock()
+        if disk_offload:
+            hard = hard_cap if hard_cap is not None else DEFAULT_MOONCAKE_DISK_STAGING_BUFFER_BYTES
+            backend.disk_offload_buffer_budget_bytes = hard
+            backend.usable_disk_offload_buffer_budget_bytes = (
+                _get_usable_disk_offload_buffer_budget_bytes(hard)
+            )
+        else:
+            backend.disk_offload_buffer_budget_bytes = None
+            backend.usable_disk_offload_buffer_budget_bytes = None
+        return backend
+
+    def test_empty_keys_skips_store_call(self):
+        b = self._make_backend(disk_offload=False)
+        b.get([], [], [])
+        b.store.batch_get_into_multi_buffers.assert_not_called()
+
+    def test_no_offload_uses_single_batch(self):
+        b = self._make_backend(disk_offload=False)
+        b.store.batch_get_into_multi_buffers.return_value = [0, 0]
+        b.get(["k1", "k2"], [[10], [10]], [[100], [100]])
+        # Single batched call, all keys at once.
+        b.store.batch_get_into_multi_buffers.assert_called_once_with(
+            ["k1", "k2"], [[10], [10]], [[100], [100]]
+        )
+
+    def test_offload_splits_when_total_exceeds_soft_budget(self):
+        # Tiny hard cap → soft cap = 0.9 * 100_000 ≈ 90_000 bytes.
+        # Each key staging = 4096 + 8192 = 12288 bytes.
+        # Eight keys ≈ 98_304 bytes > soft cap → splits into 2 sub-batches.
+        b = self._make_backend(disk_offload=True, hard_cap=100_000)
+
+        # Return a success result whose length matches the batch — the
+        # post-PR ``get()`` uses ``zip(..., strict=True)`` for failure
+        # detection, so a fixed-length mock crashes on partial batches.
+        def _ok_per_batch(batch_keys, _addrs, _sizes):
+            return [0] * len(batch_keys)
+
+        b.store.batch_get_into_multi_buffers.side_effect = _ok_per_batch
+        keys = [f"k{i}" for i in range(8)]
+        sizes = [[4096] for _ in range(8)]
+        addrs = [[i] for i in range(8)]
+        b.get(keys, addrs, sizes)
+        # Should have split into >1 sub-batch (no single batch covers all).
+        self.assertGreater(b.store.batch_get_into_multi_buffers.call_count, 1)
+        # And every batch should respect the soft cap.
+        for call_args in b.store.batch_get_into_multi_buffers.call_args_list:
+            batch_keys = call_args.args[0]
+            self.assertLessEqual(len(batch_keys), 8)
+
+    def test_offload_skips_oversized_key(self):
+        b = self._make_backend(disk_offload=True, hard_cap=20_000)
+        keys = ["normal", "monster"]
+        # Monster key staging > hard cap → entire request is skipped.
+        sizes = [[100], [100_000]]
+        addrs = [[0], [0]]
+        b.get(keys, addrs, sizes)
+        b.store.batch_get_into_multi_buffers.assert_not_called()
+
+    def test_get_swallows_backend_exception(self):
+        b = self._make_backend(disk_offload=False)
+        b.store.batch_get_into_multi_buffers.side_effect = Exception("backend down")
+        # Must not raise — transfer threads expect get() to log and return.
+        b.get(["k1"], [[0]], [[10]])
+
+    def test_get_stops_on_first_failed_sub_batch(self):
+        b = self._make_backend(disk_offload=True, hard_cap=100_000)
+
+        # Match each sub-batch's length and return all-failures (-1).
+        def _fail_per_batch(batch_keys, _addrs, _sizes):
+            return [-1] * len(batch_keys)
+
+        b.store.batch_get_into_multi_buffers.side_effect = _fail_per_batch
+        keys = [f"k{i}" for i in range(8)]
+        sizes = [[4096] for _ in range(8)]
+        addrs = [[i] for i in range(8)]
+        b.get(keys, addrs, sizes)
+        # Stopped after first failing sub-batch (didn't dispatch all batches).
+        # split: 7-then-1 → call_count is 1 since we break on first failure.
+        self.assertEqual(b.store.batch_get_into_multi_buffers.call_count, 1)
+
+    def test_tier_log_enabled_calls_batch_get_replica_desc(self):
+        b = self._make_backend(disk_offload=False)
+        b.store.batch_get_into_multi_buffers.return_value = [0]
+        b.store.batch_get_replica_desc.return_value = {
+            "k1": [_FakeReplicaDesc(memory=True)],
+        }
+        with patch(
+            "vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.backend"
+            ".mooncake_backend.ascend_envs"
+        ) as mock_envs:
+            mock_envs.VLLM_MOONCAKE_STORE_TIER_LOG = True
+            b.get(["k1"], [[0]], [[10]])
+        b.store.batch_get_replica_desc.assert_called_once()
 
 
 if __name__ == "__main__":

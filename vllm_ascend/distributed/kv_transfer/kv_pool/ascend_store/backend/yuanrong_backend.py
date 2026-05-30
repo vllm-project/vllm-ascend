@@ -90,7 +90,10 @@ class YuanrongHelper:
 class YuanrongBackend(Backend):
     _DS_MAX_BATCH_KEYS = 10000
 
-    def __init__(self, parallel_config: ParallelConfig):
+    # ``**kwargs`` is accepted per the Backend ABC contract (carries the
+    # connector ``kv_connector_extra_config``); YuanrongBackend has no
+    # connector-level overrides and ignores the extras.
+    def __init__(self, parallel_config: ParallelConfig, **kwargs):
         try:
             from yr.datasystem.hetero_client import Blob, DeviceBlobList, HeteroClient  # type: ignore[import-not-found]
             from yr.datasystem.kv_client import SetParam  # type: ignore[import-not-found]

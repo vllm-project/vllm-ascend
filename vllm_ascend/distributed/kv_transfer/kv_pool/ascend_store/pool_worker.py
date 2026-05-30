@@ -183,8 +183,13 @@ class KVPoolWorker:
         backend_module = importlib.import_module(backend_path)
         real_backend = getattr(backend_module, backend_name)
 
+        # Pass the kv-connector extra config through so backends like
+        # MooncakeBackend can pick up overrides such as ``preferred_segment``
+        # (required for Mooncake disk-tier offloading). The ABC accepts
+        # ``**kwargs``, so backends that don't care simply ignore it.
         self.m_store = real_backend(  # type: ignore[misc]
-            parallel_config
+            parallel_config,
+            kv_connector_extra_config=(vllm_config.kv_transfer_config.kv_connector_extra_config or {}),
         )
         kv_event_config = vllm_config.kv_events_config
         self.enable_kv_events = False

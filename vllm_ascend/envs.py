@@ -112,6 +112,23 @@ env_variables: dict[str, Callable[[], Any]] = {
     # Control the aclrtMemcpyBatchAsync compile path for KV cache offloading.
     # "1": force enable, "0": force disable, None: auto-detect from CANN headers.
     "VLLM_ASCEND_ENABLE_BATCH_MEMCPY": lambda: os.getenv("VLLM_ASCEND_ENABLE_BATCH_MEMCPY", None),
+    # Mooncake KV-store: log a per-batch breakdown of memory/disk replica
+    # tiers on external GETs. Useful when enabling disk offload to verify
+    # the SSD tier is actually being hit.
+    "VLLM_MOONCAKE_STORE_TIER_LOG": lambda: os.getenv("VLLM_MOONCAKE_STORE_TIER_LOG", "False").lower() in ("true", "1"),
+    # Mooncake disk offload: fraction of the owner-side DirectIO staging
+    # buffer the worker will fill per GET batch. Caps how aggressively we
+    # pack multiple keys into a single ``batch_get_into_multi_buffers``
+    # call so we don't overflow the storage-side staging area.
+    "VLLM_MOONCAKE_DISK_STAGING_USABLE_RATIO": lambda: float(
+        os.getenv("VLLM_MOONCAKE_DISK_STAGING_USABLE_RATIO", "0.9")
+    ),
+    # Mooncake disk offload: pin this rank's PUTs to a specific owner
+    # segment ("host:port"). Required by Mooncake's standalone-store +
+    # SSD tier so puts land on the owner that has the SSD attached.
+    "MOONCAKE_PREFERRED_SEGMENT": lambda: os.getenv("MOONCAKE_PREFERRED_SEGMENT"),
+    # Mooncake: override the hostname this rank registers as a requester.
+    "MOONCAKE_REQUESTER_LOCAL_HOSTNAME": lambda: os.getenv("MOONCAKE_REQUESTER_LOCAL_HOSTNAME"),
     # Whether to use MultiBlockPool for KV cache management
     "VLLM_ASCEND_APPLY_DSV4_PATCH": lambda: bool(int(os.getenv("VLLM_ASCEND_APPLY_DSV4_PATCH", "0"))),
 }

@@ -18,7 +18,10 @@ class MmcDirect(Enum):
 
 
 class MemcacheBackend(Backend):
-    def __init__(self, parallel_config: ParallelConfig):
+    # ``**kwargs`` is accepted per the Backend ABC contract (carries the
+    # connector ``kv_connector_extra_config``); MemcacheBackend has no
+    # connector-level overrides and ignores the extras.
+    def __init__(self, parallel_config: ParallelConfig, **kwargs):
         try:
             from memcache_hybrid import DistributedObjectStore  # type: ignore
         except ImportError as e:
