@@ -11,7 +11,7 @@ from vllm.v1.kv_cache_interface import KVCacheConfig
 from vllm.v1.worker import mamba_utils
 from vllm.v1.worker.gpu_input_batch import CachedRequestState
 from vllm.v1.worker.lora_model_runner_mixin import GPUInputBatch
-from vllm.v1.worker.mamba_utils import MambaCopyBuffers, collect_mamba_copy_meta
+from vllm.v1.worker.mamba_utils import MambaCopyBuffers
 
 from vllm_ascend.ops.triton.batch_memcpy import batch_memcpy_kernel
 from vllm_ascend.utils import is_310p
@@ -169,7 +169,7 @@ def preprocess_mamba(
         curr_state_idx = num_blocks - 1 - num_speculative_blocks
         mamba_state_idx[req_id] = curr_state_idx
         if prev_state_idx != -1 and prev_state_idx != curr_state_idx:
-            collect_mamba_copy_meta(
+            mamba_utils.collect_mamba_copy_meta(
                 copy_bufs,
                 kv_cache_config,
                 mamba_state_copy_funcs,
