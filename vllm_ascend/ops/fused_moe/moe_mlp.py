@@ -109,6 +109,7 @@ def quant_apply_mlp(
     per_token_scale_type: torch.dtype | None = None,
     use_bf16: bool = True,
     swiglu_limit: float = 0.0,
+    use_w4a8_per_channel_gmm_swiglu: bool = False,
 ) -> torch.Tensor:
     input_hidden_dtype = hidden_states.dtype
     use_gmm_swiglu_quant_fusion = use_mxfp_quant or (fusion and not dynamic_eplb)
