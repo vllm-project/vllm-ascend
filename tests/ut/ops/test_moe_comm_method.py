@@ -32,6 +32,7 @@ class TestMoECommMethod(TestBase):
         self.moe_config.tp_group.device_group = MagicMock()
         self.moe_config.dp_size = 1
         self.moe_config.tp_size = 1
+        self.moe_config.pcp_size = 1
         self.moe_config.ep_size = 1
         self.moe_config.dp_group = MagicMock()
         self.moe_config.global_redundant_expert_num = 0
