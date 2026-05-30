@@ -448,6 +448,7 @@ class AscendSpecDecodeBaseProposer(SpecDecodeBaseProposer):
                 # This is used to hold a position.
                 slot_mapping=self.runner.input_batch.block_table[0].slot_mapping.gpu,
                 positions=self.runner.positions,
+                positions_cpu=self.runner._dsa_positions_cpu_buf if self.use_compress else None,
                 attn_state=self.runner.attn_state,
                 decode_token_per_req=self.runner.decode_token_per_req,
                 max_seq_len=0,
@@ -461,6 +462,14 @@ class AscendSpecDecodeBaseProposer(SpecDecodeBaseProposer):
 
             assert len(self.draft_attn_groups) > 0
             builder = self.draft_attn_groups[0].get_metadata_builder()
+            extra_attn_metadata_args: dict = {}
+            if self.use_compress:
+                extra_attn_metadata_args = dict(
+                    prefill_ratio_to_sas_metadata=dict(),
+                    decode_ratio_to_sas_metadata=dict(),
+                    common_ratio_to_sas_metadata=dict(),
+                    block_size=self.draft_attn_groups[0].kv_cache_spec.block_size,
+                )
             # update the tensor's address for each step.
             for draft_step in range(self.num_speculative_tokens):
                 common_attn_metadata = self.shallow_copy_metadata(common_attn_metadata)
@@ -475,6 +484,7 @@ class AscendSpecDecodeBaseProposer(SpecDecodeBaseProposer):
                 attn_metadata_eagle = builder.build_for_graph_capture(
                     common_attn_metadata,
                     AscendAttentionState.SpecDecoding if self.method == "mtp" else AscendAttentionState.ChunkedPrefill,
+                    **extra_attn_metadata_args,
                 )
                 per_layer_attn_metadata = dict()
                 for layer_name in self.attn_layer_names:
