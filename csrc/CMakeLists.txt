@@ -101,6 +101,9 @@ set_directory_properties(PROPERTIES
 # Suppress warnings from catlass/tla third-party headers for CANN kernel compilation
 list(APPEND OPS_COMPILE_OPTIONS -Wno-ignored-attributes)
 
+# Suppress warnings from catlass/tla third-party headers for CANN kernel compilation
+list(APPEND OPS_COMPILE_OPTIONS -Wno-ignored-attributes)
+
 include(cmake/config.cmake)
 include(cmake/func.cmake)
 include(cmake/third_party/json.cmake)
