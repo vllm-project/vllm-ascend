@@ -183,8 +183,14 @@ class KVPoolWorker:
         backend_module = importlib.import_module(backend_path)
         real_backend = getattr(backend_module, backend_name)
 
+        backend_kwargs = {}
+        if self.backend.lower() in {"mooncake", "memcache"}:
+            # DSV4 exposes compress_ratios; only use lazy store init for this
+            # compressed-model path.
+            backend_kwargs["lazy_init"] = self.use_compress
         self.m_store = real_backend(  # type: ignore[misc]
-            parallel_config
+            parallel_config,
+            **backend_kwargs,
         )
         kv_event_config = vllm_config.kv_events_config
         self.enable_kv_events = False
