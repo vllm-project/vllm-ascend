@@ -13,6 +13,7 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
+import json
 import os
 from typing import TYPE_CHECKING, Any
 
@@ -73,14 +74,26 @@ class AscendConfig:
 
         from vllm_ascend import envs as ascend_envs
 
-        if self.profiling_chunk_config.enabled and ascend_envs.VLLM_ASCEND_BALANCE_SCHEDULING:
+        self.enable_balance_scheduling = self._get_config_value(
+            additional_config,
+            "enable_balance_scheduling",
+            "VLLM_ASCEND_BALANCE_SCHEDULING",
+            ascend_envs.VLLM_ASCEND_BALANCE_SCHEDULING,
+        )
+        self.enable_flashcomm1 = self._get_config_value(
+            additional_config,
+            "enable_flashcomm1",
+            "VLLM_ASCEND_ENABLE_FLASHCOMM1",
+            ascend_envs.VLLM_ASCEND_ENABLE_FLASHCOMM1,
+        )
+        if self.profiling_chunk_config.enabled and self.enable_balance_scheduling:
             raise ValueError(
-                "profiling_chunk_config and balance scheduling (VLLM_ASCEND_BALANCE_SCHEDULING) "
+                "profiling_chunk_config and balance scheduling (enable_balance_scheduling) "
                 "cannot be enabled at the same time. Please disable one of them."
             )
 
         # Dump / PrecisionDebugger configuration
-        self.dump_config_path = additional_config.get("dump_config_path", None)
+        self.dump_config_path = self._resolve_dump_config_path(additional_config)
         self.layer_sharding = additional_config.get("layer_sharding", None)
         if self.layer_sharding:
             logger.info_once(
@@ -120,6 +133,52 @@ class AscendConfig:
         # PD-disaggregated only (kv_producer/kv_consumer); invalid in PD-mixed (kv_both / no kv_transfer_config).
         self.recompute_scheduler_enable = additional_config.get("recompute_scheduler_enable", False)
         self.enable_cpu_binding = additional_config.get("enable_cpu_binding", True)
+        self.multistream_dsa_preprocess = additional_config.get("multistream_dsa_preprocess", False)
+        self.multistream_dsv4_dsa_overlap = additional_config.get("multistream_dsv4_dsa_overlap", False)
+        self.prefill_comm_compute_overlap = additional_config.get("prefill_comm_compute_overlap", False)
+
+        self.enable_context_parallel = self._get_config_value(
+            additional_config,
+            "enable_context_parallel",
+            "VLLM_ASCEND_ENABLE_CONTEXT_PARALLEL",
+            ascend_envs.VLLM_ASCEND_ENABLE_CONTEXT_PARALLEL,
+        )
+        self.enable_matmul_allreduce = self._get_config_value(
+            additional_config,
+            "enable_matmul_allreduce",
+            "VLLM_ASCEND_ENABLE_MATMUL_ALLREDUCE",
+            ascend_envs.VLLM_ASCEND_ENABLE_MATMUL_ALLREDUCE,
+        )
+        self.enable_fused_mc2 = self._get_config_value(
+            additional_config,
+            "enable_fused_mc2",
+            "VLLM_ASCEND_ENABLE_FUSED_MC2",
+            ascend_envs.VLLM_ASCEND_ENABLE_FUSED_MC2,
+        )
+        self.enable_mlapo = self._get_config_value(
+            additional_config,
+            "enable_mlapo",
+            "VLLM_ASCEND_ENABLE_MLAPO",
+            ascend_envs.VLLM_ASCEND_ENABLE_MLAPO,
+        )
+        self.enable_flashcomm2_parallel_size = self._get_config_value(
+            additional_config,
+            "enable_flashcomm2_parallel_size",
+            "VLLM_ASCEND_FLASHCOMM2_PARALLEL_SIZE",
+            ascend_envs.VLLM_ASCEND_FLASHCOMM2_PARALLEL_SIZE,
+        )
+        self.msmonitor_use_daemon = self._get_config_value(
+            additional_config,
+            "msmonitor_use_daemon",
+            "MSMONITOR_USE_DAEMON",
+            ascend_envs.MSMONITOR_USE_DAEMON,
+        )
+        self.enable_transpose_kv_cache_by_block = self._get_config_value(
+            additional_config,
+            "enable_transpose_kv_cache_by_block",
+            "VLLM_ASCEND_FUSION_OP_TRANSPOSE_KV_CACHE_BY_BLOCK",
+            ascend_envs.VLLM_ASCEND_FUSION_OP_TRANSPOSE_KV_CACHE_BY_BLOCK,
+        )
 
         self.pd_tp_ratio = 1
         self.pd_head_ratio = 1
@@ -154,6 +213,14 @@ class AscendConfig:
         # _npu_paged_attention in this cases. This should be removed once
         # npu_fused_infer_attention_score performs better on all scenarios.
         self.pa_shape_list = additional_config.get("pa_shape_list", [])
+        # Weight NZ mode configuration.
+        # 0: disabled, 1: only quant case enable nz (default), 2: BF16/FP16 also enable nz
+        self.weight_nz_mode = self._get_config_value(
+            additional_config,
+            "weight_nz_mode",
+            "VLLM_ASCEND_ENABLE_NZ",
+            ascend_envs.VLLM_ASCEND_ENABLE_NZ,
+        )
 
         # when enable_async_exponential is True, AscendSampler will be different from vllm Sampler,
         # which make batch_invariant mode not working.
@@ -201,6 +268,9 @@ class AscendConfig:
         # Enable dispatch/combine op inter-node communication by ROCE
         self.enable_mc2_hierarchy_comm = additional_config.get("enable_mc2_hierarchy_comm", False)
 
+        # Enable optimized reduce sampling scheme
+        self.enable_reduce_sample = additional_config.get("enable_reduce_sample", False)
+
         self.mix_placement = additional_config.get("mix_placement", False)
         self._check_mix_placement()
 
@@ -208,6 +278,20 @@ class AscendConfig:
         self.enable_hamming_sparse = self.hamming_sparse["enabled"]
         self.sparse_json = self.hamming_sparse["sparse_json_location"]
         self._check_enable_hamming_sparse()
+
+    @staticmethod
+    def _get_config_value(additional_config: dict[str, Any], config_key: str, env_key: str, env_value: Any) -> Any:
+        if config_key in additional_config:
+            value = additional_config[config_key]
+            logger.info_once(f"AscendConfig.{config_key} is set from additional_config with value {value}.")
+            return value
+        if env_key in os.environ:
+            logger.info_once(
+                f"AscendConfig.{config_key} falls back to environment variable {env_key} with value {env_value}. "
+                f"Please use additional_config.{config_key} instead, because {env_key} will be removed in the "
+                "next release."
+            )
+        return env_value
 
     def _check_mix_placement(self):
         if self.mix_placement:
@@ -218,6 +302,34 @@ class AscendConfig:
         if self.enable_hamming_sparse:
             if isinstance(self.sparse_json, str) and not os.path.isfile(self.sparse_json):
                 raise ValueError("Hamming sparse config json file doesn't exist.")
+
+    @staticmethod
+    def _materialize_dump_config_to_file(dump_config: dict[str, Any]) -> str:
+        dump_config_dir = os.path.join(os.getcwd(), ".vllm_ascend", "msprobe")
+        os.makedirs(dump_config_dir, exist_ok=True)
+        dump_config_file_path = os.path.join(dump_config_dir, "msprobe_dump_config.json")
+        with open(dump_config_file_path, "w", encoding="utf-8") as file:
+            json.dump(dump_config, file, ensure_ascii=False, indent=2)
+        logger.info("Materialized additional_config.dump_config to file: %s", dump_config_file_path)
+        return dump_config_file_path
+
+    @classmethod
+    def _resolve_dump_config_path(cls, additional_config: dict[str, Any]) -> str | None:
+        dump_config_path = additional_config.get("dump_config_path")
+        dump_config = additional_config.get("dump_config")
+        if dump_config_path is not None and dump_config is not None:
+            raise ValueError(
+                "Only one of additional_config.dump_config_path or additional_config.dump_config can be set."
+            )
+        if dump_config is not None:
+            if not isinstance(dump_config, dict):
+                raise ValueError(f"additional_config.dump_config must be a dict, got {type(dump_config).__name__}.")
+            return cls._materialize_dump_config_to_file(dump_config)
+        if dump_config_path is not None and not isinstance(dump_config_path, str):
+            raise ValueError(
+                f"additional_config.dump_config_path must be a string, got {type(dump_config_path).__name__}."
+            )
+        return dump_config_path
 
     @staticmethod
     def _has_sparse_c8_layer_config(quant_config: Any) -> bool:
@@ -319,17 +431,28 @@ class FinegrainedTPConfig:
         self.lmhead_tensor_parallel_size = finegrained_tp_config.get("lmhead_tensor_parallel_size", 0)
         self.embedding_tensor_parallel_size = finegrained_tp_config.get("embedding_tensor_parallel_size", 0)
         self.mlp_tensor_parallel_size = finegrained_tp_config.get("mlp_tensor_parallel_size", 0)
+        self.olora_tensor_parallel_size = finegrained_tp_config.get("olora_tensor_parallel_size", 0)
 
         enabled_configs = []
         if self.oproj_tensor_parallel_size > 0:
             enabled_configs.append(f"oproj_tensor_parallel_size={self.oproj_tensor_parallel_size}")
             # dummy_run does not run the entire attention module in eager mode,
             # so the o_proj tp split can only be used in graph mode.
-            if vllm_config.model_config.enforce_eager is True:
+            if vllm_config.model_config.enforce_eager:
                 raise AssertionError("oproj_tensor_parallel_size is only supported in graph mode")
             if vllm_config.kv_transfer_config is None or not vllm_config.kv_transfer_config.is_kv_consumer:
                 raise AssertionError(
                     "oproj_tensor_parallel_size is only supported in pd scenario and can only be used in D node."
+                )
+        if self.olora_tensor_parallel_size > 0:
+            enabled_configs.append(f"olora_tensor_parallel_size={self.olora_tensor_parallel_size}")
+            # dummy_run does not run the entire attention module in eager mode,
+            # so the o_lora tp split can only be used in graph mode.
+            if vllm_config.model_config.enforce_eager is True:
+                raise AssertionError("olora_tensor_parallel_size is only supported in graph mode")
+            if vllm_config.kv_transfer_config is None or not vllm_config.kv_transfer_config.is_kv_consumer:
+                raise AssertionError(
+                    "olora_tensor_parallel_size is only supported in pd scenario and can only be used in D node."
                 )
         if self.lmhead_tensor_parallel_size > 0:
             enabled_configs.append(f"lmhead_tensor_parallel_size={self.lmhead_tensor_parallel_size}")
@@ -342,6 +465,7 @@ class FinegrainedTPConfig:
             self.lmhead_tensor_parallel_size,
             self.embedding_tensor_parallel_size,
             self.mlp_tensor_parallel_size,
+            self.olora_tensor_parallel_size,
         ]
         for module_tp_size in module_tp_sizes:
             if module_tp_size > 0 and vllm_config.parallel_config.data_parallel_size % module_tp_size != 0:
@@ -598,6 +722,9 @@ def init_ascend_config(vllm_config):
 def clear_ascend_config():
     global _ASCEND_CONFIG
     _ASCEND_CONFIG = None
+    from vllm_ascend.utils import clear_enable_sp
+
+    clear_enable_sp()
 
 
 def get_ascend_config():

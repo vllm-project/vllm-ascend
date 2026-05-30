@@ -34,6 +34,7 @@ from vllm.v1.kv_cache_interface import (
     MLAAttentionSpec,
     UniformTypeKVCacheSpecs,
 )
+from vllm.v1.worker.gpu.model_states.interface import ModelSpecificAttnMetadata
 from vllm.v1.worker.utils import AttentionGroup
 
 from vllm_ascend.attention.attention_mask import AttentionMaskBuilder
@@ -75,6 +76,8 @@ def build_attn_metadata(
     graph_pad_size: int = -1,
     num_input_tokens: int = 0,
     prefill_context_parallel_metadata: AscendPrefillContextParallelMetadata | None = None,
+    model_specific_attn_metadata: ModelSpecificAttnMetadata | None = None,
+    for_cudagraph_capture: bool = False,
 ) -> dict[str, Any]:
     """Build attention metadata for Ascend NPUs."""
     # TODO(Ronald1995): optimize AscendCommonAttentionMetadata.
@@ -92,10 +95,16 @@ def build_attn_metadata(
         block_table = block_tables[i]
         slot_mapping = slot_mappings[i]
 
+        common_attn_metadata_extra_kwargs = (
+            model_specific_attn_metadata.get_extra_common_attn_kwargs(i, num_reqs)
+            if model_specific_attn_metadata is not None
+            else {}
+        )
         common_attn_metadata = AscendCommonAttentionMetadata(
             query_start_loc=query_start_loc_gpu,
             query_start_loc_cpu=query_start_loc_cpu,
             seq_lens_cpu=seq_lens_cpu,
+            seq_lens_cpu_upper_bound=seq_lens_cpu,
             seq_lens=seq_lens[:num_reqs],
             num_reqs=num_reqs,
             num_actual_tokens=num_tokens,
@@ -108,14 +117,27 @@ def build_attn_metadata(
             num_input_tokens=num_input_tokens,
             prefill_context_parallel_metadata=prefill_context_parallel_metadata,
             max_seq_len=max_seq_len,
+            **common_attn_metadata_extra_kwargs,
         )
 
         for attn_group in attn_groups[i]:
             attn_metadata_builder = attn_group.get_metadata_builder(0)
-            metadata = attn_metadata_builder.build(
-                common_prefix_len=0,
-                common_attn_metadata=common_attn_metadata,
-            )
+            if for_cudagraph_capture:
+                metadata = attn_metadata_builder.build_for_cudagraph_capture(common_attn_metadata)
+            else:
+                attn_metadata_extra_kwargs = (
+                    model_specific_attn_metadata.get_extra_attn_kwargs(
+                        attn_metadata_builder,
+                        num_reqs,
+                    )
+                    if model_specific_attn_metadata is not None
+                    else {}
+                )
+                metadata = attn_metadata_builder.build(
+                    common_prefix_len=0,
+                    common_attn_metadata=common_attn_metadata,
+                    **attn_metadata_extra_kwargs,
+                )
             for layer_name in attn_group.layer_names:
                 attn_metadata[layer_name] = metadata
     return attn_metadata
@@ -272,6 +294,7 @@ def _reshape_kv_cache(
     kv_cache_raw_tensors: dict[str, tuple[torch.Tensor, torch.Tensor]],
     attn_backends: dict[str, AttentionBackend],
     cache_dtype: str,
+    kernel_block_sizes: list[int] | None = None,
 ) -> dict[str, tuple[torch.Tensor, torch.Tensor]]:
     """
     Reshape the KV cache tensors to the desired shape and dtype.
@@ -290,7 +313,8 @@ def _reshape_kv_cache(
     )
 
     kv_caches: dict[str, tuple[torch.Tensor, torch.Tensor]] = {}
-    for kv_cache_group_spec in kv_cache_config.kv_cache_groups:
+    kernel_block_sizes = kernel_block_sizes or []
+    for kv_cache_group_id, kv_cache_group_spec in enumerate(kv_cache_config.kv_cache_groups):
         for layer_name in kv_cache_group_spec.layer_names:
             kv_cache_spec = kv_cache_group_spec.kv_cache_spec
             if isinstance(kv_cache_spec, UniformTypeKVCacheSpecs):
@@ -315,9 +339,20 @@ def _reshape_kv_cache(
                 assert num_blocks >= kv_cache_config.num_blocks
 
                 attn_backend = attn_backends[layer_name]
+                if kv_cache_group_id < len(kernel_block_sizes):
+                    kernel_block_size = kernel_block_sizes[kv_cache_group_id]
+                    num_blocks *= kv_cache_spec.block_size // kernel_block_size
+                else:
+                    kernel_block_size = kv_cache_spec.block_size
+
+                if kv_cache_spec.storage_block_size != kv_cache_spec.block_size:
+                    shape_block_size = kv_cache_spec.storage_block_size
+                else:
+                    shape_block_size = kernel_block_size
+
                 kv_cache_shape = attn_backend.get_kv_cache_shape(
                     num_blocks,
-                    kv_cache_spec.block_size,
+                    shape_block_size,
                     kv_cache_spec.num_kv_heads,
                     kv_cache_spec.head_size,
                     cache_dtype,

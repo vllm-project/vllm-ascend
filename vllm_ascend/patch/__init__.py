@@ -91,18 +91,6 @@
 #    Future Plan:
 #       Remove backport once minimum supported vLLM always ships async EngineCore startup.
 #
-# ** 4. File: platform/patch_sched_yield.py**
-# ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
-#   1. `vllm.distributed.utils.USE_SCHED_YIELD`
-#    Why:
-#       os.sched_yield() doesn't work on Arm systems.
-#    How：
-#       avoid using os.sched_yield() on Arm systems.
-#    Related PR (if no, explain why):
-#       https://github.com/vllm-project/vllm/pull/30228
-#    Future Plan:
-#       Remove this patch when vLLM merge the PR.
-#
 # ** 5. File: platform/patch_balance_schedule.py**
 # ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 #   1. `vllm.v1.engine.core.EngineCoreProc.run_engine_core`
@@ -112,7 +100,8 @@
 #       requests simultaneously in a single scheduling session. This can impact the overall system throughput
 #       and performance in some scenarios.
 #    How：
-#       Set environmental variables VLLM_ASCEND_BALANCE_SCHEDULING=1 in startup script.
+#       Set --additional-config '{"enable_balance_scheduling": true}' or
+#       set environmental variable VLLM_ASCEND_BALANCE_SCHEDULING=1 (deprecated).
 #    Related PR (if no, explain why):
 #       https://github.com/vllm-project/vllm/pull/29721
 #    Future Plan:
@@ -197,27 +186,26 @@
 #       Remove this patch once the runtime vLLM version contains the upstream
 #       MiniMax usage-accounting fix.
 #
-# ** 8. File: platform/patch_glm_tool_call_parser.py**
+# ** 10a. File: platform/patch_kv_cache_utils.py**
 # ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
-#   1. `vllm.tool_parsers.glm4_moe_tool_parser.Glm4MoeModelToolParser`
-#      `vllm.entrypoints.openai.chat_completion.serving.OpenAIServingChat`
+#   1. `vllm.v1.core.kv_cache_utils.resolve_kv_cache_block_sizes`
+#      `vllm.v1.engine.core.resolve_kv_cache_block_sizes`
 #    Why:
-#       GLM-4.7 tool-call streaming can leave a terminal inline argument chunk
-#       undrained, and final streaming chunks can repeat function metadata or
-#       combine final arguments with `finish_reason="tool_calls"`.
+#       vLLM PR #40860 added a restriction that hybrid KV cache groups with
+#       multiple block sizes do not support context parallelism (dcp/pcp > 1).
+#       This restriction is correct for CUDA but not for Ascend, which
+#       implements context parallelism for MLA and SWA-MLA layers separately.
 #    How：
-#       Monkey-patch the GLM parser to drain terminal chunks, patch remaining
-#       argument backfill to omit function metadata unless explicitly needed,
-#       and split terminal argument chunks into an argument chunk followed by
-#       an empty finish chunk.
+#       Monkey-patch resolve_kv_cache_block_sizes to handle the multiple-groups
+#       + CP case by returning lcm(block_sizes) * dcp * pcp as scheduler_block_size
+#       instead of raising ValueError.
 #    Related PR (if no, explain why):
-#       https://github.com/vllm-project/vllm/pull/37845
-#       https://github.com/vllm-project/vllm/pull/33218
+#       vLLM PR #40860 ([Feat] DeepSeek V4 Rebased).
 #    Future Plan:
-#       Remove this patch once the runtime vLLM version contains the GLM parser
-#       and streaming finish-chunk fixes.
+#       Remove this patch once upstream vLLM supports hybrid KV cache + CP for
+#       non-CUDA backends, or exposes a platform hook for this behavior.
 #
-# ** 9. File: platform/patch_kv_cache_interface.py**
+# ** 10. File: platform/patch_kv_cache_interface.py**
 # ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 #   1. `vllm.v1.kv_cache_interface.MLAAttentionSpec`
 #    Why:
@@ -287,6 +275,41 @@
 #       Remove this patch once the vLLM fix is included in the supported vLLM
 #       version.
 #
+# ** 12. File: platform/patch_deepseek_v4_tool_call_parser.py**
+# ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+#   1. `vllm.tool_parsers.deepseekv4_tool_parser.DeepSeekV4ToolParser`
+#    Why:
+#       Upstream vLLM now includes DeepSeek V4 tokenizer/renderer/reasoning
+#       registration, but its streaming tool-call delta parsing does not guarantee
+#       incremental `arguments` emission for long argument payloads.
+#    How:
+#       Monkey-patch `DeepSeekV4ToolParser` stream parsing to emit tool-call
+#       metadata in the first delta and stream argument fragments incrementally.
+#    Related PR (if no, explain why):
+#       Upstream vLLM main behavior as of current runtime.
+#    Future Plan:
+#       Remove this patch if upstream streaming behavior is updated to satisfy the
+#       same DeepSeek DSML incrementality contract.
+#
+# ** 13. File: platform/patch_camem_allocator.py**
+# ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+#   1. `vllm.config.model.is_cumem_allocator_available`
+#    Why:
+#       Upstream vLLM main enables and validates the CUDA/ROCm CuMem allocator
+#       when `enable_sleep_mode=True`. Ascend implements sleep mode with its own
+#       CaMem allocator, so the upstream CuMem-only availability check fails
+#       during `ModelConfig` validation before Ascend worker code can run.
+#    How:
+#       Treat Ascend's platform sleep allocator as satisfying the allocator
+#       availability check, while preserving the original vLLM CuMem check as
+#       fallback.
+#    Related PR (if no, explain why):
+#       No, this maps an upstream CUDA/ROCm allocator validation to Ascend's
+#       backend-specific CaMem implementation.
+#    Future Plan:
+#       Remove this patch if upstream exposes a platform allocator capability hook
+#       for sleep mode validation.
+#
 # * Worker Patch:
 # ===============
 #
@@ -301,19 +324,6 @@
 #       No, we should use vlLM all2all manager to support all_to_all for npu.
 #    Future Plan:
 #       Remove this patch when the refactor of all2all manager is done.
-#
-# ** 2. File: worker/patch_bert.py**
-# ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
-#   1. `vllm.model_executor.models.bert._encode_token_type_ids`
-#      `vllm.model_executor.models.bert._decode_token_type_ids`
-#    Why:
-#       shift operation in `_encode_token_type_ids` and `_decode_token_type_ids` cannot run in ascend aclgraph mode
-#    How：
-#       Replace shift operation with multiplication and division.
-#    Related PR (if no, explain why):
-#       No, this need CANN add an aclnn shift operation
-#    Future Plan:
-#       Revert this when CANN support shift aclnn operation
 #
 # ** 3. File: worker/patch_triton.py**
 # ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
@@ -356,27 +366,22 @@
 #           to override them, then delete the patch file `worker/patch_rejection_sampler.py`.
 #       2. make these functions as costom op, then remove AscendRejectionSampler
 #
-## ** 6. File: worker/patch_module.py**
-# ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
-#   1. `vllm.v1.attention.backends.gdn_attn.torch.argsort`
-#    Why:
-#       1. 'torch.argsort' func of npu does not support bool.
-#       2. Without `stable=True`, the output will have a lot of redundant tokens.
-#    How：
-#       Replace with a new torch.argsort that will cast the input to torch.int32
-#       and do stable sort.
-#    Related PR (if no, explain why):
-#       1. It depends on torch_npu.
-#       2. https://github.com/vllm-project/vllm/pull/30632
-#    Future Plan:
-#       Remove this patch when bool is supported in 'torch.argsort' func of npu.
-#       Make 'torch.argsort' in `vllm.v1.attention.backends.gdn_attn` be stable.
-#
 # ** 7. File: worker/patch_gdn_attn.py**
 # ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 #   1. `vllm.v1.attention.backends.gdn_attn.GDNAttentionMetadataBuilder.build`
 #    Why:
 #       Qwen3.5/Qwen3Next GDN prefill on NPU needs prebuilt varlen chunk metadata
+#       to avoid forward-time host round-trips that break async scheduling.
+#    How：
+#       Monkey-patch the upstream builder in-place, keep upstream code untouched,
+#       and attach prebuilt device metadata bundle onto the returned attention
+#       metadata object for Ascend-specific consumers.
+#    Future Plan:
+#       Remove this patch when upstream exposes a backend hook for extending GDN
+#       metadata or when the optimization is accepted upstream directly.
+#   2. `vllm.v1.attention.backends.gdn_attn.GDNAttentionMetadataBuilde.build`
+#    Why:
+#       Qwen3.5/Qwen3Next GDN Decode/Specific Decode on NPU needs prebuilt varlen chunk metadata
 #       to avoid forward-time host round-trips that break async scheduling.
 #    How：
 #       Monkey-patch the upstream builder in-place, keep upstream code untouched,
@@ -418,16 +423,6 @@
 #    Future Plan:
 #       Remove this patch when vLLM support these operators.
 #
-# ** 9. File: worker/patch_huanyuan_vl.py**
-# ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
-#   1. `vllm.transformers_utils.processors.hunyuan_vl.HunYuanVLProcessor.__call__`
-#    Why:
-#       The `add_special_tokens` parameter is not supported by default in the processor.
-#    How：
-#       Remove the `add_special_tokens` parameter from kwargs before calling the original method.
-#    Future Plan:
-#       Remove this patch when vLLM aligns with the latest processor implementation.
-#
 # ** 10. File: worker/patch_qwen3vl.py**
 # ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 #   1. `vllm.model_executor.models.qwen3_vl.Qwen3VLForConditionalGeneration._get_deepstack_input_embeds`
@@ -437,12 +432,24 @@
 #       override _get_deepstack_input_embeds method with the flash comm v1 implementation.
 #    Future Plan:
 #       Remove this patch when https://github.com/vllm-project/vllm-ascend/issues/5712 is completed.
+#   2. `vllm.model_executor.models.qwen3_vl_moe.Qwen3MoeLLMForCausalLM.start_layer`,
+#      `vllm.model_executor.models.qwen3_vl_moe.Qwen3MoeLLMForCausalLM.end_layer`
+#    Why:
+#       Qwen3-VL-MoE checks the language-model pipeline boundary on non-first
+#       PP ranks, but Qwen3MoeLLMForCausalLM keeps start_layer/end_layer only
+#       on the inner model object.
+#    How:
+#       Expose start_layer/end_layer properties on Qwen3MoeLLMForCausalLM and
+#       forward them to the inner model.
+#    Future Plan:
+#       Remove this patch when upstream vLLM exposes these PP layer boundaries
+#       on the Qwen3-VL-MoE language-model wrapper.
 #
 # ** 11. File: worker/patch_npugraph_ex_triton.py**
 # ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
-#   1. `torchair.core._concrete_graph.ValuePack`,
-#      `torchair.npu_fx_compiler._unpack_meta`,
-#      `torchair.npu_fx_compiler._NpuGraphConverter._unpack_npu`
+#   1. `npugraph_ex.core._concrete_graph.ValuePack`,
+#      `npugraph_ex.npu_fx_compiler._unpack_meta`,
+#      `npugraph_ex.npu_fx_compiler._NpuGraphConverter._unpack_npu`
 #    Why:
 #       In the Triton scenario, npugraph_ex backend needs to process the value pack of the input parameters.
 #    How：

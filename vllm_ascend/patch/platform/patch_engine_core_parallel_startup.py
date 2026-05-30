@@ -17,8 +17,10 @@ from __future__ import annotations
 
 import asyncio
 import concurrent.futures
+import os
 import threading
 import weakref
+from collections.abc import Callable
 from multiprocessing import connection
 from multiprocessing.process import BaseProcess
 from multiprocessing.queues import Queue
@@ -26,17 +28,31 @@ from typing import Any, cast
 
 import vllm.v1.engine.utils as engine_utils
 from vllm.config import VllmConfig
-from vllm.logger import init_logger
+from vllm.logger import logger
 from vllm.platforms import current_platform
 from vllm.utils import numa_utils
 from vllm.utils.system_utils import get_mp_context
 from vllm.v1.executor import Executor
 from vllm.v1.utils import shutdown as engine_shutdown_utils
 
-logger = init_logger(__name__)
-
 # Mirrors vllm v1/engine/utils.py
 _ASYNC_STARTUP_ENGINE_THRESHOLD = 1
+
+
+def _ascend_enginecore_bootstrap(
+    *,
+    evar: str,
+    value: str,
+    target_fn: Callable[..., Any],
+    target_kwargs: dict[str, Any],
+) -> None:
+    """Child-side env bootstrap for older vLLM without upstream _enginecore_bootstrap."""
+    os.environ[evar] = value
+    target_fn(**target_kwargs)
+
+
+def _resolve_enginecore_bootstrap() -> Callable[..., Any]:
+    return getattr(engine_utils, "_enginecore_bootstrap", _ascend_enginecore_bootstrap)
 
 
 class _AscendCoreEngineProcManagerBackport:
@@ -73,6 +89,7 @@ class _AscendCoreEngineProcManagerBackport:
 
         from vllm.v1.engine.core import EngineCoreProc
 
+        enginecore_bootstrap = _resolve_enginecore_bootstrap()
         data_parallel = vllm_config.parallel_config.data_parallel_size > 1
         need_env_control = data_parallel and (
             not current_platform.is_cuda_alike() or vllm_config.parallel_config.use_ray
@@ -93,18 +110,12 @@ class _AscendCoreEngineProcManagerBackport:
             local_dp_ranks.append(local_index)
             self.processes.append(
                 context.Process(
-                    target=(
-                        engine_utils._enginecore_bootstrap
-                        if need_env_control
-                        else EngineCoreProc.run_engine_core
-                    ),
+                    target=(enginecore_bootstrap if need_env_control else EngineCoreProc.run_engine_core),
                     name=(f"EngineCore_DP{global_index}" if data_parallel else "EngineCore"),
                     kwargs=(
                         {
                             "evar": evar,
-                            "value": get_device_indices(
-                                evar, local_index, world_size, local_world_size
-                            ),
+                            "value": get_device_indices(evar, local_index, world_size, local_world_size),
                             "target_fn": EngineCoreProc.run_engine_core,
                             "target_kwargs": common_kwargs
                             | {
@@ -126,11 +137,11 @@ class _AscendCoreEngineProcManagerBackport:
         self.manager_stopped = threading.Event()
         self.failed_proc_name: str | None = None
 
+        startup_succeeded = False
         use_async_startup = local_engine_count > _ASYNC_STARTUP_ENGINE_THRESHOLD
         if use_async_startup:
             logger.info(
-                "Using async parallel startup for %d EngineCore processes "
-                "(Ascend patch backport).",
+                "Using async parallel startup for %d EngineCore processes (Ascend patch backport).",
                 local_engine_count,
             )
             try:
@@ -139,8 +150,9 @@ class _AscendCoreEngineProcManagerBackport:
                     "All %d EngineCore processes started successfully.",
                     local_engine_count,
                 )
+                startup_succeeded = True
             finally:
-                if self.finished_procs():
+                if not startup_succeeded or self.finished_procs():
                     self.shutdown()
         else:
             try:
@@ -152,8 +164,9 @@ class _AscendCoreEngineProcManagerBackport:
                         process_kind="EngineCore",
                     ):
                         proc.start()
+                startup_succeeded = True
             finally:
-                if self.finished_procs():
+                if not startup_succeeded or self.finished_procs():
                     self.shutdown()
 
     def _run_async_startup(
@@ -189,12 +202,7 @@ class _AscendCoreEngineProcManagerBackport:
 
             await asyncio.to_thread(_start_with_numa)
 
-        await asyncio.gather(
-            *(
-                _start_one(proc, rank)
-                for proc, rank in zip(self.processes, local_dp_ranks)
-            )
-        )
+        await asyncio.gather(*(_start_one(proc, rank) for proc, rank in zip(self.processes, local_dp_ranks)))
 
     def shutdown(self, timeout: float | None = None) -> None:
         self.manager_stopped.set()
@@ -222,20 +230,13 @@ class _AscendCoreEngineProcManagerBackport:
         return [proc.sentinel for proc in self.processes]
 
     def finished_procs(self) -> dict[str, int]:
-        return {
-            proc.name: proc.exitcode
-            for proc in self.processes
-            if proc.exitcode is not None
-        }
+        return {proc.name: proc.exitcode for proc in self.processes if proc.exitcode is not None}
 
 
 def _apply_core_engine_proc_manager_patch() -> None:
     mgr = engine_utils.CoreEngineProcManager
     if hasattr(mgr, "_run_async_startup"):
-        logger.debug(
-            "CoreEngineProcManager already provides async startup; "
-            "skipping Ascend backport."
-        )
+        logger.debug("CoreEngineProcManager already provides async startup; skipping Ascend backport.")
         return
 
     logger.warning(

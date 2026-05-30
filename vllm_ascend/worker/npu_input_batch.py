@@ -21,6 +21,7 @@ import numpy as np
 import torch
 from vllm.lora.request import LoRARequest
 from vllm.pooling_params import PoolingParams
+from vllm.v1.kv_cache_interface import KVCacheGroupSpec
 from vllm.v1.outputs import LogprobsTensors
 from vllm.v1.pool.metadata import PoolingStates
 from vllm.v1.sample.logits_processor import BatchUpdateBuilder, LogitsProcessors
@@ -47,9 +48,15 @@ class NPUInputBatch(InputBatch):
         is_pooling_model: bool = False,
         num_speculative_tokens: int = 0,
         cp_kv_cache_interleave_size: int = 1,
+        kv_cache_groups: list[KVCacheGroupSpec] | None = None,
     ):
         self.is_pooling_model = is_pooling_model
         self.is_spec_decode = is_spec_decode
+        # Added for compatibility with InputBatch methods that reference these
+        # attributes after PR vllm-project/vllm#34668. NPU does not use
+        # thinking budget, so the holder is always None.
+        self.thinking_budget_state_holder = None
+        self.thinking_token_budget_reqs: set[str] = set()
         self.max_num_reqs = max_num_reqs
         self.max_model_len = max_model_len
         self.max_num_batched_tokens = max_num_batched_tokens
@@ -114,6 +121,7 @@ class NPUInputBatch(InputBatch):
             num_speculative_tokens=num_speculative_tokens,
             kernel_sizes=kernel_block_sizes,
             cp_kv_cache_interleave_size=cp_kv_cache_interleave_size,
+            kv_cache_groups=kv_cache_groups,
         )
 
         # Sampling-related.
