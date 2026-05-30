@@ -968,18 +968,20 @@ class AscendDSAMetadataBuilder(AttentionMetadataBuilder[AscendDSAMetadata]):
 
         slot_mapping = self.slot_mapping[:compressed_tokens_start]
 
-        tmp_compressor_ration = self.compressor_ratio if self.compressor_ratio != 0 else 1
-        target_shape = min(
-            self.num_decode_tokens,
-            self.num_decode_tokens // tmp_compressor_ration + self.num_decodes)
-        pad_size = target_shape - slot_mapping.shape[0]
-        if pad_size > 0:
-            if slot_mapping.ndim == 1:
-                slot_mapping = F.pad(slot_mapping, (0, pad_size), value=-1)
+        is_a5 = get_ascend_device_type() in {AscendDeviceType.A5}
+        if is_a5:
+            tmp_compressor_ration = self.compressor_ratio if self.compressor_ratio != 0 else 1
+            target_shape = min(
+                self.num_decode_tokens,
+                self.num_decode_tokens // tmp_compressor_ration + self.num_decodes)
+            pad_size = target_shape - slot_mapping.shape[0]
+            if pad_size > 0:
+                if slot_mapping.ndim == 1:
+                    slot_mapping = F.pad(slot_mapping, (0, pad_size), value=-1)
+                else:
+                    slot_mapping = F.pad(slot_mapping, (0, 0, 0, pad_size), value=-1)
             else:
-                slot_mapping = F.pad(slot_mapping, (0, 0, 0, pad_size), value=-1)
-        else:
-            slot_mapping = slot_mapping[:target_shape]
+                slot_mapping = slot_mapping[:target_shape]
 
         assert self.start_pos_decode is not None
         self.start_pos_decode.fill_(0)
@@ -994,7 +996,7 @@ class AscendDSAMetadataBuilder(AttentionMetadataBuilder[AscendDSAMetadata]):
         index_topk = self.model_config.hf_config.index_topk
 
         assert self.decode_sas_metadata is not None
-        is_a5 = get_ascend_device_type() in {AscendDeviceType.A5}
+        
         if is_a5:
             if self.decode_ratio_to_sas_metadata.get("cu_seqlens_ori_kv", None) is None:
                 cu_seqlens_ori_kv = torch.cat([
