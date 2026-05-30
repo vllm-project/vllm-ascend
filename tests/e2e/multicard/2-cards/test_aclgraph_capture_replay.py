@@ -129,7 +129,6 @@ def _run_worker_process(
         torch.npu.reset_peak_memory_stats()
 
 
-@pytest.mark.skip(reason="fix me")
 @pytest.mark.parametrize("model", MODELS)
 @pytest.mark.parametrize("max_tokens", [4, 36])
 @patch.dict(os.environ, {"ASCEND_RT_VISIBLE_DEVICES": "0,1"})
@@ -192,13 +191,21 @@ def test_models_aclgraph_capture_replay_metrics_dp2(
     )
 
     # Metric 2: Model Execution (NPUModelRunner.execute_model)
-    # vLLM Step Breakdown:
-    # 1. First step (prefill, 1 prompt)
-    # 2. Generation steps (max_tokens)
-    # 3. Final step (likely EOS/idle step), no replay here
-    total_steps = max_tokens + 1  # this includes the 1 and 2 above
-    # vllm default enables Async scheduler, this will take 1 more steps
-    expected_exec_model = (total_steps + 1 + 1) * dp_size
+    # vLLM Step Breakdown (2-request 4-max-token async-scheduling example):
+    # scheduler step 0: (req-0, prefill)
+    # scheduler step 1: (req-0, decode)
+    # scheduler step 2: (req-0, decode)     (req-1, prefill)
+    # scheduler step 3: (req-0, decoce)     (req-1, decode)
+    # scheduler step 4: (req-0, null)       (req-1, decode)
+    # scheduler step 5: (req-0, finished)   (req-1, decode)
+    # scheduler step 6:                     (req-1, null)
+    # scheduler step 7:                     (req-1, finished)
+    # Note that (req-0, null) and (req-1, null) is possibly caused by async-scheduling.
+    # Additionally, (req-1, prefill) is within scheduler step 1 previously, so we have `total_steps = max_tokens + 1`.
+    # However, after vllm commit 83b47f ~ 4034c3, (req-1, prefill) is within scheduler step 2 currently,
+    # so we change `total_steps = max_tokens + 2` in this e2e test.
+    total_steps = max_tokens + 2  # `max_tokens` represents scheduler step 0 ~ 1 and `2` represents scheduler step 4 ~ 5
+    expected_exec_model = (total_steps + 1 + 1) * dp_size  # two `1` here represents scheduler step 6 and 7 respectively
 
     assert num_execute_model == expected_exec_model, (
         f"Model execution count mismatch. Expected: {expected_exec_model}, Got: {num_execute_model}"
