@@ -25,6 +25,7 @@ from vllm_ascend.device.mxfp_compat import (
 )
 from vllm_ascend.quantization.quant_type import QuantType
 from vllm_ascend.utils import AscendDeviceType, get_ascend_device_type
+from vllm_ascend.quantization.quant_type import QuantType
 
 
 class BaseDeviceAdaptor:
@@ -556,7 +557,7 @@ class A5DeviceAdaptor(BaseDeviceAdaptor):
             input_dtype=input_dtype,
             act_quant_type=act_quant_type,
             weight_quant_type=weight_quant_type,
-            scale_type=scale_type,
+            scale_type=scale_type if mxfp_quant_dtype != QuantType.MXFP4 else None,
             per_token_scale_type=per_token_scale_type,
             use_bf16=use_bf16,
             use_mxfp_quant=True,
@@ -569,6 +570,11 @@ class A5DeviceAdaptor(BaseDeviceAdaptor):
             raise ValueError(f"w2_scale must have a single tensor in MXFP path, but got {len(weight_scale)}.")
         gmm2_weight = weight if isinstance(weight, list) else [weight]
         gmm2_scale = weight_scale if isinstance(weight_scale, list) else [weight_scale]
+
+        # if mxfp_quant_dtype == QuantType.MXFP4:
+        gmm2_scale = None
+        antiquant_scale = weight_scale
+        gmm2_kwargs.update({'antiquant_scale': [antiquant_scale]})
 
         if mxfp_quant_dtype == QuantType.W4A8MXFP:
             gmm2_scale = None  # type: ignore[assignment]
