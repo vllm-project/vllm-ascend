@@ -382,7 +382,7 @@ class TestBaseProposerMergeDraft(TestBase):
                 torch.randn(128, 64),
             )
         )
-        instance._draft_argmax = MagicMock(return_value=torch.arange(128))
+        instance._draft_argmax = MagicMock(return_value=torch.arange(3))
 
         token_indices = torch.tensor([0, 1, 2])
         with (
@@ -402,7 +402,7 @@ class TestBaseProposerMergeDraft(TestBase):
             )
 
         assert instance._draft_argmax.call_count == 3
-        assert result.shape == (128, 3)
+        assert result.shape == (3, 3)
 
     def test_supports_mm_inputs(self):
         instance = self._make_instance(
