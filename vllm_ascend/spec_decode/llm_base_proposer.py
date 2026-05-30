@@ -41,13 +41,13 @@ from vllm.v1.spec_decode.utils import (
 )
 from vllm.v1.worker.gpu_input_batch import CachedRequestState, InputBatch
 
-from vllm_ascend.distributed.parallel_state import get_lmhead_tp_group
 from vllm_ascend.ascend_config import get_ascend_config
 from vllm_ascend.ascend_forward_context import _EXTRA_CTX, set_ascend_forward_context
 from vllm_ascend.attention.attention_mask import AttentionMaskBuilder
 from vllm_ascend.attention.attention_v1 import AscendAttentionState
 from vllm_ascend.attention.utils import AscendCommonAttentionMetadata
 from vllm_ascend.compilation.acl_graph import ACLGraphWrapper, update_full_graph_params
+from vllm_ascend.distributed.parallel_state import get_lmhead_tp_group
 from vllm_ascend.ops.triton.spec_decode.utils import prepare_inputs_padded_kernel
 from vllm_ascend.ops.triton.triton_utils import get_vectorcore_num
 from vllm_ascend.utils import enable_sp, lmhead_tp_enable, shared_expert_dp_enabled
@@ -88,6 +88,7 @@ def split_inputs_tp_to_sp(hidden_states, out):
     out[: hidden_states_curr_rank.shape[0]] = hidden_states_curr_rank
     return out[:padded_num_tokens_per_rank]
 
+
 def greedy_sample(logits: torch.Tensor) -> torch.Tensor:
     tp_group = get_tp_group()
     B, V_local = logits.shape
@@ -103,6 +104,7 @@ def greedy_sample(logits: torch.Tensor) -> torch.Tensor:
     global_max_rank = gathered_logits.argmax(dim=-1)  # [B]
     target_argmax = gathered_global_idx.gather(dim=-1, index=global_max_rank.unsqueeze(-1)).squeeze(-1)  # [B]
     return target_argmax
+
 
 class AscendSpecDecodeBaseProposer(SpecDecodeBaseProposer):
     _runnable: ACLGraphWrapper | Callable
@@ -894,11 +896,13 @@ class AscendSpecDecodeBaseProposer(SpecDecodeBaseProposer):
 
     def compute_draft_token_ids(self, hidden_states: torch.Tensor):
         logits = self.model.logits_processor(self.model.lm_head, hidden_states)
-        if not hasattr(self.model, 'draft_id_to_target_id') or self.model.draft_id_to_target_id is None:
+        if not hasattr(self.model, "draft_id_to_target_id") or self.model.draft_id_to_target_id is None:
             return greedy_sample(logits)
         logits = logits.contiguous()
         next_token = greedy_sample(logits)
-        bias = torch.index_select(self.model.draft_id_to_target_id, dim=0, index=next_token.view(-1)).view(next_token.shape)
+        bias = torch.index_select(self.model.draft_id_to_target_id, dim=0, index=next_token.view(-1)).view(
+            next_token.shape
+        )
         return next_token + bias
 
     def _run_merged_draft(
@@ -983,9 +987,9 @@ class AscendSpecDecodeBaseProposer(SpecDecodeBaseProposer):
             if lmhead_tp_enable() and num_indices < draft_token_ids.shape[0]:
                 draft_token_ids = draft_token_ids[:num_indices]
                 token_indices_to_sample = token_indices_to_sample[:num_indices]
-        else: 
+        else:
             if get_ascend_config().enable_reduce_sample and self.method in ("mtp"):
-                if not hasattr(self.model.model, 'compute_logits'):
+                if not hasattr(self.model.model, "compute_logits"):
                     draft_token_ids = self.compute_draft_token_ids(sample_hidden_states)
                     if lmhead_tp_enable() and num_indices < draft_token_ids.shape[0]:
                         draft_token_ids = draft_token_ids[:num_indices]
@@ -1136,9 +1140,9 @@ class AscendSpecDecodeBaseProposer(SpecDecodeBaseProposer):
                 if lmhead_tp_enable() and num_indices < draft_token_ids.shape[0]:
                     draft_token_ids = draft_token_ids[:num_indices]
                     token_indices_to_sample = token_indices_to_sample[:num_indices]
-            else: 
+            else:
                 if get_ascend_config().enable_reduce_sample and self.method in ("mtp"):
-                    if not hasattr(self.model.model, 'compute_logits'):
+                    if not hasattr(self.model.model, "compute_logits"):
                         draft_token_ids = self.compute_draft_token_ids(sample_hidden_states)
                         if lmhead_tp_enable() and num_indices < draft_token_ids.shape[0]:
                             draft_token_ids = draft_token_ids[:num_indices]
