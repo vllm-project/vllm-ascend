@@ -41,7 +41,6 @@ from vllm.v1.spec_decode.utils import (
 )
 from vllm.v1.worker.gpu_input_batch import CachedRequestState, InputBatch
 
-from vllm_ascend.ascend_config import get_ascend_config
 from vllm_ascend.ascend_forward_context import _EXTRA_CTX, set_ascend_forward_context
 from vllm_ascend.attention.attention_mask import AttentionMaskBuilder
 from vllm_ascend.attention.attention_v1 import AscendAttentionState
@@ -186,6 +185,27 @@ class AscendSpecDecodeBaseProposer(SpecDecodeBaseProposer):
         self.token_arange_np = np.arange(self.max_num_tokens + 1, dtype=np.int32)
         self.enable_enpu = self.runner.enable_enpu
         self.use_eagle = self.runner.use_eagle
+
+    def _uses_draft_vocab_remapping(self) -> bool:
+        return hasattr(self.model, "draft_id_to_target_id") and self.model.draft_id_to_target_id is not None
+
+    def _can_use_local_argmax_reduction(self) -> bool:
+        return self.use_local_argmax_reduction and not lmhead_tp_enable() and not self._uses_draft_vocab_remapping()
+
+    def _draft_argmax(self, hidden_states: torch.Tensor, num_indices: int) -> torch.Tensor:
+        if self._can_use_local_argmax_reduction():
+            if not hasattr(self.model, "get_top_tokens"):
+                raise ValueError(
+                    "use_local_argmax_reduction is enabled but draft model "
+                    f"{self.model.__class__.__name__} does not implement "
+                    "get_top_tokens()."
+                )
+            return self.model.get_top_tokens(hidden_states)
+
+        logits = self.model.compute_logits(hidden_states)
+        if lmhead_tp_enable() and num_indices < logits.shape[0]:
+            logits = logits[:num_indices]
+        return logits.argmax(dim=-1)
 
     def _get_model(self) -> nn.Module:
         """
@@ -380,9 +400,8 @@ class AscendSpecDecodeBaseProposer(SpecDecodeBaseProposer):
 
     def _freeze_draft_step_attn_metadata(self, attn_metadata):
         decode_metadata = getattr(attn_metadata, "decode", None)
-        if decode_metadata is not None:
-            if decode_metadata.sas_metadata is not None:
-                decode_metadata.sas_metadata = decode_metadata.sas_metadata.clone()
+        if decode_metadata is not None and decode_metadata.sas_metadata is not None:
+            decode_metadata.sas_metadata = decode_metadata.sas_metadata.clone()
         return attn_metadata
 
     @torch.inference_mode()
@@ -951,18 +970,9 @@ class AscendSpecDecodeBaseProposer(SpecDecodeBaseProposer):
             )
 
         sample_hidden_states = last_hidden_states[token_indices_to_sample]
-
-        if get_ascend_config().enable_reduce_sample:
-            draft_token_ids = self.model.compute_logits(sample_hidden_states, get_ascend_config().enable_reduce_sample)
-            if lmhead_tp_enable() and num_indices < draft_token_ids.shape[0]:
-                draft_token_ids = draft_token_ids[:num_indices]
-                token_indices_to_sample = token_indices_to_sample[:num_indices]
-        else:
-            logits = self.model.compute_logits(sample_hidden_states)
-            if lmhead_tp_enable() and num_indices < logits.shape[0]:
-                logits = logits[:num_indices]
-                token_indices_to_sample = token_indices_to_sample[:num_indices]
-            draft_token_ids = logits.argmax(dim=-1)
+        if lmhead_tp_enable() and num_indices < token_indices_to_sample.shape[0]:
+            token_indices_to_sample = token_indices_to_sample[:num_indices]
+        draft_token_ids = self._draft_argmax(sample_hidden_states, num_indices)
 
         # Early exit if there is only one draft token to be generated.
         if self.num_speculative_tokens == 1 or self.parallel_drafting:
@@ -1088,19 +1098,9 @@ class AscendSpecDecodeBaseProposer(SpecDecodeBaseProposer):
                 )
 
             sample_hidden_states = last_hidden_states[token_indices_to_sample]
-            if get_ascend_config().enable_reduce_sample:
-                draft_token_ids = self.model.compute_logits(
-                    sample_hidden_states, get_ascend_config().enable_reduce_sample
-                )
-                if lmhead_tp_enable() and num_indices < draft_token_ids.shape[0]:
-                    draft_token_ids = draft_token_ids[:num_indices]
-                    token_indices_to_sample = token_indices_to_sample[:num_indices]
-            else:
-                logits = self.model.compute_logits(sample_hidden_states)
-                if lmhead_tp_enable() and num_indices < logits.shape[0]:
-                    logits = logits[:num_indices]
-                    token_indices_to_sample = token_indices_to_sample[:num_indices]
-                draft_token_ids = logits.argmax(dim=-1)
+            if lmhead_tp_enable() and num_indices < token_indices_to_sample.shape[0]:
+                token_indices_to_sample = token_indices_to_sample[:num_indices]
+            draft_token_ids = self._draft_argmax(sample_hidden_states, num_indices)
 
             # TODO(wenlong): get more than one token for tree attention
             hidden_states = hidden_states[:batch_size]
@@ -1455,10 +1455,7 @@ class AscendSpecDecodeBaseProposer(SpecDecodeBaseProposer):
                 block_size = 128
 
             # Compute the slot mapping.
-            if self.uses_mrope:
-                block_numbers = clamped_positions[0] // block_size
-            else:
-                block_numbers = clamped_positions // block_size
+            block_numbers = clamped_positions[0] // block_size if self.uses_mrope else clamped_positions // block_size
             block_ids = old_common_metadata.block_table_tensor.gather(dim=1, index=block_numbers.view(-1, 1))
             block_ids = block_ids.view(-1)
             if self.uses_mrope:
