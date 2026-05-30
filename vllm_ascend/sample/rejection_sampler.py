@@ -164,6 +164,7 @@ class AscendRejectionSampler(RejectionSampler):
             target_logits,
             bonus_token_ids,
             sampling_metadata,
+            ori_target_logits=raw_target_logits,
         )
 
         logprobs_tensors = None
@@ -286,6 +287,7 @@ def rejection_sample(
     sampling_metadata: SamplingMetadata,
     synthetic_mode: bool = False,
     synthetic_conditional_rates: torch.Tensor | None = None,
+    ori_target_logits: torch.Tensor | None = None,
 ) -> torch.Tensor:
     """
     Rejection sampling for speculative decoding in distributed setting.
