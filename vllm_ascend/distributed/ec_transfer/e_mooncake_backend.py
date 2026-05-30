@@ -25,5 +25,6 @@ class EMooncakeBackend(MooncakeBackend):
             except TypeError as err:
                 logger.error("Failed to get value from Mooncake Store: %s", err)
                 raise TypeError("Mooncake Store Get Type Error.") from err
-
             return data
+
+        return None
