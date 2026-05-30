@@ -641,14 +641,21 @@ class RejectionSamplerConfig:
     Usage (online)::
 
         vllm serve <model> --additional-config \
-            '{"rejection_sampler_config": {"enable_block_verify": true, "enable_entropy_verify": true}}'
+            '{"rejection_sampler_config": {"enable_block_verify": true, \
+            "enable_entropy_verify": true, "posterior_threshold": 0.95, \
+            "posterior_alpha": 0.4}}'
 
     Usage (offline)::
 
         llm = LLM(
             model,
             additional_config={
-                "rejection_sampler_config": {"enable_block_verify": true, "enable_entropy_verify": true}
+                "rejection_sampler_config": {
+                    "enable_block_verify": true,
+                    "enable_entropy_verify": true,
+                    "posterior_threshold": 0.95,
+                    "posterior_alpha": 0.4,
+                }
             },
         )
     """
@@ -658,6 +665,8 @@ class RejectionSamplerConfig:
             config = {}
         self.enable_block_verify: bool = config.get("enable_block_verify", False)
         self.enable_entropy_verify: bool = config.get("enable_entropy_verify", False)
+        self.posterior_threshold: float = config.get("posterior_threshold", 0.95)
+        self.posterior_alpha: float = config.get("posterior_alpha", 0.4)
         self._validate()
 
     def _validate(self):
@@ -670,6 +679,15 @@ class RejectionSamplerConfig:
             raise ValueError(
                 f"rejection_sampler_config.enable_entropy_verify must be a bool, "
                 f"got {type(self.enable_entropy_verify).__name__}"
+            )
+        if not isinstance(self.posterior_threshold, (int, float)):
+            raise ValueError(
+                f"rejection_sampler_config.posterior_threshold must be a float, "
+                f"got {type(self.posterior_threshold).__name__}"
+            )
+        if not isinstance(self.posterior_alpha, (int, float)):
+            raise ValueError(
+                f"rejection_sampler_config.posterior_alpha must be a float, got {type(self.posterior_alpha).__name__}"
             )
 
 

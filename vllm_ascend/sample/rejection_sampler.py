@@ -336,6 +336,8 @@ def rejection_sample(
     # using_block_verify = max_spec_len >= 3 and draft_probs is not None
     using_block_verify = bool(get_ascend_config().rejection_sampler_config.enable_block_verify)
     using_entropy_verify = bool(get_ascend_config().rejection_sampler_config.enable_entropy_verify)
+    posterior_threshold = float(get_ascend_config().rejection_sampler_config.posterior_threshold)
+    posterior_alpha = float(get_ascend_config().rejection_sampler_config.posterior_alpha)
 
     # Create output buffer.
     output_token_ids = torch.empty(
@@ -451,8 +453,8 @@ def rejection_sample(
                     ENABLE_REDUCE_SAMPLING=True,
                     ENTROPY_VERIFY=using_entropy_verify,
                     BLOCK_SIZE=block_size,
-                    POSTERIOR_THRESHOLD=0.95,
-                    POSTERIOR_ALPHA=0.4,
+                    POSTERIOR_THRESHOLD=posterior_threshold,
+                    POSTERIOR_ALPHA=posterior_alpha,
                     SUB_BLOCK=4 * 1024,
                     EPSILON=1e-10,
                 )
@@ -473,8 +475,8 @@ def rejection_sample(
                     target_indices=target_indices,
                     enable_reduce_sampling=True,
                     ENTROPY_VERIFY=using_entropy_verify,
-                    POSTERIOR_THRESHOLD=0.95,
-                    POSTERIOR_ALPHA=0.4,
+                    POSTERIOR_THRESHOLD=posterior_threshold,
+                    POSTERIOR_ALPHA=posterior_alpha,
                     EPSILON=1e-10,
                 )
         else:
@@ -500,8 +502,8 @@ def rejection_sample(
                     ENABLE_REDUCE_SAMPLING=True,
                     ENTROPY_VERIFY=using_entropy_verify,
                     BLOCK_SIZE=block_size,
-                    POSTERIOR_THRESHOLD=0.95,
-                    POSTERIOR_ALPHA=0.4,
+                    POSTERIOR_THRESHOLD=posterior_threshold,
+                    POSTERIOR_ALPHA=posterior_alpha,
                     SUB_BLOCK=4 * 1024,
                     EPSILON=1e-10,
                 )
@@ -522,8 +524,8 @@ def rejection_sample(
                     target_indices=target_indices,
                     enable_reduce_sampling=True,
                     ENTROPY_VERIFY=using_entropy_verify,
-                    POSTERIOR_THRESHOLD=0.95,
-                    POSTERIOR_ALPHA=0.4,
+                    POSTERIOR_THRESHOLD=posterior_threshold,
+                    POSTERIOR_ALPHA=posterior_alpha,
                     EPSILON=1e-10,
                 )
     else:
@@ -581,8 +583,8 @@ def rejection_sample(
                     ENABLE_REDUCE_SAMPLING=False,
                     ENTROPY_VERIFY=using_entropy_verify,
                     BLOCK_SIZE=block_size,
-                    POSTERIOR_THRESHOLD=0.95,
-                    POSTERIOR_ALPHA=0.4,
+                    POSTERIOR_THRESHOLD=posterior_threshold,
+                    POSTERIOR_ALPHA=posterior_alpha,
                     SUB_BLOCK=4 * 1024,
                     EPSILON=1e-10,
                 )
@@ -603,8 +605,8 @@ def rejection_sample(
                     target_indices=None,
                     enable_reduce_sampling=False,
                     ENTROPY_VERIFY=using_entropy_verify,
-                    POSTERIOR_THRESHOLD=0.95,
-                    POSTERIOR_ALPHA=0.4,
+                    POSTERIOR_THRESHOLD=posterior_threshold,
+                    POSTERIOR_ALPHA=posterior_alpha,
                     EPSILON=1e-10,
                 )
         else:
@@ -628,8 +630,8 @@ def rejection_sample(
                     ENABLE_REDUCE_SAMPLING=False,
                     ENTROPY_VERIFY=using_entropy_verify,
                     BLOCK_SIZE=block_size,
-                    POSTERIOR_THRESHOLD=0.95,
-                    POSTERIOR_ALPHA=0.4,
+                    POSTERIOR_THRESHOLD=posterior_threshold,
+                    POSTERIOR_ALPHA=posterior_alpha,
                     SUB_BLOCK=4 * 1024,
                     EPSILON=1e-10,
                 )
@@ -650,8 +652,8 @@ def rejection_sample(
                     target_indices=None,
                     enable_reduce_sampling=False,
                     ENTROPY_VERIFY=using_entropy_verify,
-                    POSTERIOR_THRESHOLD=0.95,
-                    POSTERIOR_ALPHA=0.4,
+                    POSTERIOR_THRESHOLD=posterior_threshold,
+                    POSTERIOR_ALPHA=posterior_alpha,
                     EPSILON=1e-10,
                 )
 
