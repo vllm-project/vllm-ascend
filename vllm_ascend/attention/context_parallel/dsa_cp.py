@@ -15,7 +15,7 @@ from vllm.v1.kv_cache_interface import AttentionSpec, MLAAttentionSpec
 from vllm_ascend.ascend_config import get_ascend_config
 from vllm_ascend.attention.abstract import DSAAttentionImpl
 from vllm_ascend.attention.attention_v1 import AscendAttentionState
-from vllm_ascend.attention.utils import AscendCommonAttentionMetadata
+from vllm_ascend.attention.utils import AscendCommonAttentionMetadata, split_decodes_and_prefills
 from vllm_ascend.ops.linear import AscendUnquantizedLinearMethod
 from vllm_ascend.ops.rope_dsv4 import get_cos_and_sin_dsa
 from vllm_ascend.quantization.methods.w8a8_dynamic import AscendW8A8DynamicLinearMethod
@@ -116,6 +116,10 @@ class AscendDSAMetadata:
     sin: torch.Tensor
     cos: torch.Tensor
 
+    num_decodes: int
+    num_decode_tokens: int
+    num_prefills: int
+
     # For logging.
     num_input_tokens: int = 0  # Number of tokens including padding.
 
@@ -169,6 +173,10 @@ class AscendDSACPMetadataBuilder(AttentionMetadataBuilder[AscendDSAMetadata]):
 
         self.rope_dim = self.model_config.hf_text_config.qk_rope_head_dim
 
+        self.num_decodes = 0
+        self.num_prefills = 0
+        self.num_decode_tokens = 0
+        self.num_prefill_tokens = 0
         self.num_actual_tokens: int | None = None
         self.block_table: torch.Tensor = None
         self.slot_mapping: torch.Tensor = None
@@ -205,6 +213,34 @@ class AscendDSACPMetadataBuilder(AttentionMetadataBuilder[AscendDSAMetadata]):
             (vllm_config.scheduler_config.max_num_batched_tokens, 2), dtype=torch.int32, device=self.device
         )
 
+        self.speculative_config = vllm_config.speculative_config
+        self.decode_threshold = 1
+        self.spec_slot_mapping = None
+        if self.speculative_config:
+            spec_token_num = self.speculative_config.num_speculative_tokens
+            self.spec_slot_mapping = [
+                torch.zeros(
+                    (vllm_config.scheduler_config.max_num_batched_tokens, 2), dtype=torch.int32, device=self.device
+                )
+                for _ in range(spec_token_num)
+            ]
+            self.spec_local_query_start_loc = [
+                torch.zeros(scheduler_config.max_num_seqs + 1, dtype=torch.int32, device=self.device)
+                for _ in range(spec_token_num)
+            ]
+            self.spec_local_seq_lens = [
+                torch.zeros(scheduler_config.max_num_seqs, dtype=torch.int32, device=self.device)
+                for _ in range(spec_token_num)
+            ]
+            self.decode_threshold += spec_token_num
+            assert self.decode_threshold <= 16, (
+                f"decode_threshold exceeded \
+                npu_fused_infer_attention_score TND layout's limit of 16, \
+                got {self.decode_threshold}"
+            )
+
+        self.reorder_batch_threshold = self.decode_threshold
+
     @classmethod
     def get_cudagraph_support(
         cls: type["AscendDSACPMetadataBuilder"],
@@ -237,6 +273,13 @@ class AscendDSACPMetadataBuilder(AttentionMetadataBuilder[AscendDSAMetadata]):
 
         num_input_tokens = common_attn_metadata.num_input_tokens
         if self.common_ratio_to_sas_metadata.get("input_positions", None) is None:
+            self.num_decodes, self.num_prefills, self.num_decode_tokens, self.num_prefill_tokens = (
+                split_decodes_and_prefills(common_attn_metadata, decode_threshold=self.decode_threshold)
+            )
+            self.common_ratio_to_sas_metadata["num_decodes"] = self.num_decodes
+            self.common_ratio_to_sas_metadata["num_prefills"] = self.num_prefills
+            self.common_ratio_to_sas_metadata["num_decode_tokens"] = self.num_decode_tokens
+            self.common_ratio_to_sas_metadata["num_prefill_tokens"] = self.num_prefill_tokens
             input_positions = common_attn_metadata.positions[:num_input_tokens].long()
             input_positions_cpu = common_attn_metadata.positions_cpu[:num_input_tokens].long()
             self.common_ratio_to_sas_metadata["input_positions"] = input_positions
@@ -247,6 +290,12 @@ class AscendDSACPMetadataBuilder(AttentionMetadataBuilder[AscendDSAMetadata]):
             self.seq_lens = common_attn_metadata.seq_lens[:num_reqs]
             self.common_ratio_to_sas_metadata["seq_lens"] = self.seq_lens
         else:
+            self.num_decodes, self.num_prefills, self.num_decode_tokens, self.num_prefill_tokens = (
+                self.common_ratio_to_sas_metadata["num_decodes"],
+                self.common_ratio_to_sas_metadata["num_prefills"],
+                self.common_ratio_to_sas_metadata["num_decode_tokens"],
+                self.common_ratio_to_sas_metadata["num_prefill_tokens"],
+            )
             input_positions = self.common_ratio_to_sas_metadata["input_positions"]
             input_positions_cpu = self.common_ratio_to_sas_metadata["input_positions_cpu"]
             cos, sin = self.common_ratio_to_sas_metadata["cos"], self.common_ratio_to_sas_metadata["sin"]
@@ -268,6 +317,9 @@ class AscendDSACPMetadataBuilder(AttentionMetadataBuilder[AscendDSAMetadata]):
             num_actual_tokens=self.num_actual_tokens,
             head_dim=self.model_config.get_head_size(),
             attn_mask=None,
+            num_decodes=self.num_decodes,
+            num_decode_tokens=self.num_decode_tokens,
+            num_prefills=self.num_prefills,
             attn_state=attn_state,
             req_metadata=req_metadata,
             query_start_loc=query_start_loc,
@@ -276,6 +328,162 @@ class AscendDSACPMetadataBuilder(AttentionMetadataBuilder[AscendDSAMetadata]):
             cos=cos,
             sin=sin,
             hadamard=AscendDSACPMetadataBuilder.hadamard,
+        )
+
+    def build_for_drafting(
+        self,
+        draft_step: int,
+        common_attn_metadata: AscendCommonAttentionMetadata,
+        fast_build: bool = False,
+        **kwargs,
+    ) -> AscendDSAMetadata:
+        assert self.compressor_ratio <= 1, "vLLM-Ascend only support SWA-layer for Deepseek-V4 now."
+        num_reqs = common_attn_metadata.num_reqs
+        num_input_tokens = common_attn_metadata.num_input_tokens
+        num_decodes, num_prefills, num_decode_tokens, _ = split_decodes_and_prefills(
+            common_attn_metadata, decode_threshold=self.decode_threshold
+        )
+
+        self.num_decodes = num_decodes
+        self.num_prefills = num_prefills
+        self.num_decode_tokens = num_decode_tokens
+        self.num_actual_tokens = common_attn_metadata.num_actual_tokens
+        self.seq_lens = common_attn_metadata.seq_lens[:num_reqs]
+        self.block_size = kwargs.get("block_size", 128)
+
+        input_positions = common_attn_metadata.positions[:num_input_tokens].long()
+        # Draft steps update positions independently. Reusing the global RoPE
+        # cache can let later draft steps overwrite step-0 metadata.
+        cos, sin = get_cos_and_sin_dsa(input_positions, use_cache=False)
+
+        slot_mapping = common_attn_metadata.slot_mapping[:num_input_tokens]
+
+        assert self.spec_slot_mapping is not None
+        self.spec_slot_mapping[draft_step - 1][:num_input_tokens] = torch.stack(
+            [slot_mapping // self.block_size, slot_mapping % self.block_size], dim=-1
+        )
+
+        self.block_table = common_attn_metadata.block_table_tensor[:num_reqs]
+        req_metadata = self.build_req_metadata_for_drafting(
+            draft_step=draft_step,
+            common_attn_metadata=common_attn_metadata,
+            input_positions=input_positions,
+            num_input_tokens=num_input_tokens,
+        )
+
+        return self.metadata_cls(  # type: ignore
+            num_input_tokens=common_attn_metadata.num_input_tokens,
+            num_actual_tokens=self.num_actual_tokens,
+            head_dim=self.model_config.get_head_size(),
+            attn_mask=None,
+            num_decodes=num_decodes,
+            num_decode_tokens=num_decode_tokens,
+            num_prefills=num_prefills,
+            attn_state=common_attn_metadata.attn_state,
+            req_metadata=req_metadata,
+            query_start_loc=common_attn_metadata.query_start_loc,
+            block_tables=None,
+            seq_lens=self.seq_lens,
+            cos=cos,
+            sin=sin,
+            hadamard=None,
+        )
+
+    def build_req_metadata_for_drafting(
+        self,
+        draft_step: int,
+        common_attn_metadata: AscendCommonAttentionMetadata,
+        input_positions: torch.Tensor,
+        num_input_tokens: int,
+    ) -> AscendDSAReqMetadata:
+        """Build DSA-CP metadata for one draft step."""
+        num_reqs = common_attn_metadata.num_reqs
+        query_start_loc = common_attn_metadata.query_start_loc
+        seq_lens_q = query_start_loc[1:] - query_start_loc[:-1]
+        has_prefill = _has_prefill(common_attn_metadata.attn_state)
+
+        cos, sin = get_cos_and_sin_dsa(input_positions, use_cache=False)
+        (
+            local_start,
+            local_end_with_pad,
+            tokens_per_rank,
+            num_tokens_pad,
+            local_query_start_loc,
+            local_seq_lens,
+            local_cos,
+            local_sin,
+        ) = self._build_local_token_metadata(
+            num_reqs=num_reqs,
+            num_input_tokens=num_input_tokens,
+            input_positions=input_positions,
+            query_start_loc=query_start_loc,
+            seq_lens=self.seq_lens[:num_reqs],
+            use_cache=False,
+            local_query_start_loc=self.spec_local_query_start_loc[draft_step - 1],
+            local_seq_lens=self.spec_local_seq_lens[draft_step - 1],
+        )
+        local_query_start_loc = local_query_start_loc.clone()
+        local_seq_lens = local_seq_lens.clone()
+
+        local_seq_lens_q = local_query_start_loc[1 : num_reqs + 1] - local_query_start_loc[:num_reqs]
+        max_local_query_len = max(1, int(local_seq_lens_q.max().item()))
+        max_local_seq_lens = max(1, int(local_seq_lens.max().item()))
+
+        start_pos = self.seq_lens[:num_reqs] - seq_lens_q
+
+        assert self.spec_slot_mapping is not None
+        slot_mapping = self.spec_slot_mapping[draft_step - 1][: self.num_actual_tokens]
+
+        num_heads = self.model_config.hf_config.num_attention_heads
+        sas_metadata = torch.ops._C_ascend.npu_sparse_attn_sharedkv_metadata(
+            num_heads_q=num_heads,
+            num_heads_kv=1,
+            head_dim=self.model_config.get_head_size(),
+            cu_seqlens_q=local_query_start_loc,
+            cu_seqlens_ori_kv=local_query_start_loc if has_prefill else self.cu_seqlens_ori_kv,
+            cu_seqlens_cmp_kv=None,
+            seqused_q=self.seqused_q,
+            seqused_kv=local_seq_lens,
+            max_seqlen_q=max_local_query_len,
+            max_seqlen_kv=max_local_seq_lens,
+            batch_size=num_reqs,
+            cmp_ratio=1,
+            ori_mask_mode=4,
+            ori_win_left=self.model_config.hf_config.sliding_window - 1,
+            ori_win_right=0,
+            layout_q="TND",
+            layout_kv="PA_ND",
+            has_ori_kv=True,
+            has_cmp_kv=False,
+            device=str(self.seqused_q.device),
+        )
+
+        cp_metadata = DSACPMetadata(
+            local_query_start_loc=local_query_start_loc,
+            local_seq_lens=local_seq_lens,
+            local_start=local_start,
+            local_end=local_end_with_pad,
+            tokens_per_rank=tokens_per_rank,
+            num_tokens_pad=num_tokens_pad,
+            local_sin=local_sin,
+            local_cos=local_cos,
+        )
+
+        return AscendDSAReqMetadata(
+            input_positions=input_positions,
+            block_table=self.block_table[:num_reqs, ...],
+            slot_mapping=slot_mapping,
+            seq_lens=self.seq_lens[:num_reqs],
+            query_start_loc=query_start_loc,
+            cp_metadata=cp_metadata,
+            sin=sin,
+            cos=cos,
+            compress_sin=None,
+            compress_cos=None,
+            start_pos=start_pos,
+            sas_metadata=sas_metadata,
+            qli_metadata=None,
+            cu_cmp_seqlen_list=None,
         )
 
     def build_req_metadata(
@@ -313,6 +521,8 @@ class AscendDSACPMetadataBuilder(AttentionMetadataBuilder[AscendDSAMetadata]):
             query_start_loc=query_start_loc,
             seq_lens=self.seq_lens[:num_reqs],
             use_cache=not has_prefill,
+            local_query_start_loc=self.local_query_start_loc,
+            local_seq_lens=self.local_seq_lens,
         )
         local_seq_lens_q = local_query_start_loc[1 : num_reqs + 1] - local_query_start_loc[:num_reqs]
         # TODO(qcs): remove this .item() to avoid D2H synchronization.
@@ -400,7 +610,15 @@ class AscendDSACPMetadataBuilder(AttentionMetadataBuilder[AscendDSAMetadata]):
         )
 
     def _build_local_token_metadata(
-        self, num_reqs, num_input_tokens, input_positions, query_start_loc, seq_lens, use_cache
+        self,
+        num_reqs,
+        num_input_tokens,
+        input_positions,
+        query_start_loc,
+        seq_lens,
+        use_cache,
+        local_query_start_loc,
+        local_seq_lens,
     ):
         """
         For example:
@@ -427,20 +645,20 @@ class AscendDSACPMetadataBuilder(AttentionMetadataBuilder[AscendDSAMetadata]):
         local_start = tp_rank * tokens_per_rank
         local_end = local_start + tokens_per_rank
 
-        self.local_query_start_loc.fill_(0)
-        self.local_seq_lens.fill_(0)
+        local_query_start_loc.fill_(0)
+        local_seq_lens.fill_(0)
 
         # Intersect each request's global token interval with this rank's local
         # token interval, then build the per-rank query_start_loc from lengths.
         local_query_start = torch.clamp(query_start_loc[:-1], min=local_start, max=local_end)
         local_query_end = torch.clamp(query_start_loc[1:], min=local_start, max=local_end)
         local_query_lens = local_query_end - local_query_start
-        self.local_query_start_loc[1 : num_reqs + 1] = torch.cumsum(local_query_lens, dim=0)
+        local_query_start_loc[1 : num_reqs + 1] = torch.cumsum(local_query_lens, dim=0)
 
         # For requests that cross the local slice boundary, offset removes the
         # tokens that live on later ranks so local_seq_lens matches local queries.
         offset = query_start_loc[1:] - local_query_end
-        self.local_seq_lens[:num_reqs] = (local_query_lens > 0) * (seq_lens - offset)
+        local_seq_lens[:num_reqs] = (local_query_lens > 0) * (seq_lens - offset)
 
         # RoPE tables are generated on the padded global positions first, then
         # sliced to this rank so local tokens keep their original positions.
@@ -455,8 +673,8 @@ class AscendDSACPMetadataBuilder(AttentionMetadataBuilder[AscendDSAMetadata]):
             local_end,
             tokens_per_rank,
             num_tokens_pad,
-            self.local_query_start_loc[: num_reqs + 1],
-            self.local_seq_lens[:num_reqs],
+            local_query_start_loc[: num_reqs + 1],
+            local_seq_lens[:num_reqs],
             local_cos,
             local_sin,
         )
