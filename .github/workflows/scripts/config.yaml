@@ -145,6 +145,8 @@ e2e-multicard-4-cards:
   estimated_time: 289
 - name: tests/e2e/multicard/4-cards/test_kimi_k2.py
   estimated_time: 18
+- name: tests/e2e/multicard/4-cards/test_deepseek_v4.py
+  estimated_time: 600
 - name: tests/e2e/multicard/4-cards/long_sequence/test_accuracy.py
   estimated_time: 2541
 - name: tests/e2e/multicard/4-cards/long_sequence/test_basic.py
