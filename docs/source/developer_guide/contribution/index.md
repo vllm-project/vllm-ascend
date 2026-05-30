@@ -15,21 +15,33 @@ tests.
 
 #### Run lint locally
 
+On Windows, run the bash commands below from WSL or Git Bash. If you use
+PowerShell, activate the virtual environment with
+`.\.venv\Scripts\Activate.ps1` instead of `source ./.venv/bin/activate`.
+On Ubuntu or WSL, install `python3-venv` first if `python3 -m venv` reports
+that `ensurepip` is unavailable.
+
 ```bash
 # Choose a base dir (~/vllm-project/) and set up venv
 cd ~/vllm-project/
 python3 -m venv .venv
 source ./.venv/bin/activate
 
-# Clone vllm-ascend and install
+# Clone vllm-ascend and enter the repository
 git clone https://github.com/vllm-project/vllm-ascend.git
 cd vllm-ascend
 
-# Install lint requirement and enable pre-commit hook
+# Install lint dependencies only
 pip install -r requirements-lint.txt
 
-# Run lint (You need to install pre-commits deps via proxy network at first time)
+# Install pre-commit hook
+pre-commit install
+
+# Run lint on changed files
 bash format.sh
+
+# Run lint/static checks as CI does
+bash format.sh ci
 ```
 
 #### Run CI locally
