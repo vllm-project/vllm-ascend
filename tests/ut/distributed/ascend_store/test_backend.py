@@ -177,8 +177,7 @@ class TestMooncakeStoreConfig(unittest.TestCase):
             )
 
     @patch(
-        "vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.backend."
-        "mooncake_backend.os.access",
+        "vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.backend.mooncake_backend.os.access",
         return_value=False,
     )
     def test_ssd_offload_requires_writable(self, _mock_access):
