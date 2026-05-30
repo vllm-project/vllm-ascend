@@ -470,7 +470,7 @@ private:
             LayoutA layoutA = params.layoutA.GetTileLayout(inGroupProblemShape.GetCoordMK());
             LayoutB layoutB1 = params.layoutB1;
             LayoutScale layoutScale = params.layoutScale1;
-            LayoutC layoutC = LayoutC(inGroupProblemShape.m(), inGroupProblemShape.n());
+            LayoutC layoutC = LayoutC(inGroupProblemShape.m(), inGroupProblemShape.n(), params.problemShape.k());
             blockScheduler.Update(inGroupProblemShape, MakeCoord(L1TileShape::M, L1TileShape::N));
             uint32_t coreLoops = blockScheduler.GetCoreLoops();
             // Determine the starting loopIdx of the current core under the current groupIdx
@@ -519,7 +519,7 @@ private:
             if (params.listLen == 1) {
                 gmGroupOffsetB += inGroupProblemShape.k() * inGroupProblemShape.n();
             }
-            gmGroupOffsetC += inGroupProblemShape.m() * inGroupProblemShape.n();
+            gmGroupOffsetC += inGroupProblemShape.m() * inGroupProblemShape.k();
             startCoreIdx = (startCoreIdx  + coreLoops) % coreNum;
         }
 
@@ -928,7 +928,7 @@ private:
             int64_t gmOffsetC = layoutC.GetOffset(offsetC);
             int64_t gmOffsetD = params.layoutD1.GetOffset(offsetC);
             blockEpilogue1(gmC[gmOffsetC], shapeC, gmPerTokenScale1[rowStartThisCore], gmPermutedToken[gmOffsetD],
-                gmPerTokenScale2[rowStartThisCore], resource, params.epilogueCoreNum, params.swigluLimit);
+                gmPerTokenScale2[rowStartThisCore], resource, params.epilogueCoreNum, params.swigluLimit, params.problemShape.k());
         }
         AscendC::SyncAll<true>();
         // Synchronization signal: SwiGLU notifies GMM2 [1]
@@ -943,11 +943,11 @@ private:
                 MatrixCoord offsetC{rowStartThisCore, 0};
                 uint32_t dequantLen = dequantSum2;
                 MatrixCoord shapeC{dequantLen, params.problemShape.n()};
-                LayoutC layoutC{dequantLen, params.problemShape.n()};
+                LayoutC layoutC{dequantLen, params.problemShape.k()};
                 int64_t gmOffsetC = layoutC.GetOffset(offsetC);
                 int64_t gmOffsetD = params.layoutD1.GetOffset(offsetC);
                 blockEpilogue1(gmC[gmOffsetC], shapeC, gmPerTokenScale1[rowStartThisCore], gmPermutedToken[gmOffsetD],
-                    gmPerTokenScale2[rowStartThisCore], resource, coreNum, params.swigluLimit);
+                    gmPerTokenScale2[rowStartThisCore], resource, coreNum, params.swigluLimit, params.problemShape.k());
             }
             AscendC::SyncAll<true>();
             // Synchronization signal: SwiGLU notifies GMM2 [2]
@@ -1113,7 +1113,6 @@ private:
 
             workspaceOffset += (params.EP * params.EP * params.expertPerRank) * sizeof(int32_t);
 
-            workspaceOffset += (params.EP * params.EP * params.expertPerRank) * sizeof(int32_t);
             ptrPerTokenScale = params.ptrWorkspace + workspaceOffset;
 
             workspaceOffset += params.maxOutputSize * sizeof(ElementPerTokenScale);
@@ -1125,16 +1124,14 @@ private:
             workspaceOffset += (params.EP * params.EP * params.expertPerRank) * sizeof(int32_t);
             ptrC = params.ptrWorkspace + workspaceOffset;
 
-            workspaceOffset += params.maxOutputSize * params.problemShape.n() * sizeof(ElementC);
             ptrC2 = params.ptrWorkspace + workspaceOffset;
 
             workspaceOffset += params.maxOutputSize * n2 * sizeof(ElementC);
             ptrA = params.ptrWorkspace + workspaceOffset;
-
-            workspaceOffset += params.maxOutputSize * params.problemShape.k() * sizeof(ElementA);
             ptrPermutedToken = params.ptrWorkspace + workspaceOffset;
 
-            workspaceOffset += params.maxOutputSize * k2 * sizeof(ElementA);
+            workspaceOffset += params.maxOutputSize * params.problemShape.k() * sizeof(ElementA);
+
             ptrSumBeforeRank = params.ptrWorkspace + workspaceOffset;
 
             workspaceOffset += params.EP * sizeof(int32_t) * FLAGSTRIDE;
