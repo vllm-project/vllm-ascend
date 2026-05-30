@@ -41,6 +41,7 @@ from vllm.v1.spec_decode.utils import (
 )
 from vllm.v1.worker.gpu_input_batch import CachedRequestState, InputBatch
 
+from vllm_ascend.distributed.parallel_state import get_lmhead_tp_group
 from vllm_ascend.ascend_config import get_ascend_config
 from vllm_ascend.ascend_forward_context import _EXTRA_CTX, set_ascend_forward_context
 from vllm_ascend.attention.attention_mask import AttentionMaskBuilder
@@ -87,6 +88,21 @@ def split_inputs_tp_to_sp(hidden_states, out):
     out[: hidden_states_curr_rank.shape[0]] = hidden_states_curr_rank
     return out[:padded_num_tokens_per_rank]
 
+def greedy_sample(logits: torch.Tensor) -> torch.Tensor:
+    tp_group = get_tp_group()
+    B, V_local = logits.shape
+    rank = tp_group.rank_in_group
+
+    local_max_logits, local_max_indices = logits.max(dim=-1)
+
+    local_global_idx = local_max_indices + rank * V_local  # [B]
+
+    # [B, world_size]
+    gathered_logits = tp_group.all_gather(local_max_logits.unsqueeze(-1), dim=-1)
+    gathered_global_idx = tp_group.all_gather(local_global_idx.unsqueeze(-1), dim=-1)  # [B, world_size]
+    global_max_rank = gathered_logits.argmax(dim=-1)  # [B]
+    target_argmax = gathered_global_idx.gather(dim=-1, index=global_max_rank.unsqueeze(-1)).squeeze(-1)  # [B]
+    return target_argmax
 
 class AscendSpecDecodeBaseProposer(SpecDecodeBaseProposer):
     _runnable: ACLGraphWrapper | Callable
@@ -347,15 +363,16 @@ class AscendSpecDecodeBaseProposer(SpecDecodeBaseProposer):
                 if torch.equal(layer_module.shared_head.head.weight, model.lm_head.weight):
                     layer_module.shared_head.head = model.lm_head
 
-        if self.vllm_config.compilation_config.cudagraph_mode.has_full_cudagraphs() and self.use_cuda_graph:
+        if self.vllm_config.compilation_config.cudagraph_mode.has_full_cudagraphs():
             self.update_stream = torch.npu.Stream()
-            self._runnable = ACLGraphWrapper(
-                self._run_merged_draft,
-                self.vllm_config,
-                runtime_mode=CUDAGraphMode.FULL,
-                use_eagle=self.use_eagle,
-                enable_enpu=self.enable_enpu,
-            )
+            if self.use_cuda_graph:
+                self._runnable = ACLGraphWrapper(
+                    self._run_merged_draft,
+                    self.vllm_config,
+                    runtime_mode=CUDAGraphMode.FULL,
+                    use_eagle=self.use_eagle,
+                    enable_enpu=self.enable_enpu,
+                )
 
     def _maybe_share_topk_indices(self, target_language_model: nn.Module) -> None:
         if hasattr(target_language_model.model, "topk_indices_buffer"):
@@ -875,6 +892,15 @@ class AscendSpecDecodeBaseProposer(SpecDecodeBaseProposer):
                 self._update_full_graph_params_if_needed(forward_context, num_input_tokens, multi_steps_attn_metadata)
         return draft_token_ids
 
+    def compute_draft_token_ids(self, hidden_states: torch.Tensor):
+        logits = self.model.logits_processor(self.model.lm_head, hidden_states)
+        if self.model.draft_id_to_target_id is None:
+            return greedy_sample(logits)
+        logits = logits.contiguous()
+        next_token = greedy_sample(logits)
+        bias = torch.index_select(self.model.draft_id_to_target_id, dim=0, index=next_token.view(-1)).view(next_token.shape)
+        return next_token + bias
+
     def _run_merged_draft(
         self,
         num_input_tokens,
@@ -952,13 +978,18 @@ class AscendSpecDecodeBaseProposer(SpecDecodeBaseProposer):
 
         sample_hidden_states = last_hidden_states[token_indices_to_sample]
 
-        if get_ascend_config().enable_reduce_sample:
-            draft_token_ids = self.model.compute_logits(sample_hidden_states, get_ascend_config().enable_reduce_sample)
+        if get_ascend_config().enable_reduce_sample and self.method in ("eagle3", "dflash"):
+            draft_token_ids = self.compute_draft_token_ids(sample_hidden_states)
             if lmhead_tp_enable() and num_indices < draft_token_ids.shape[0]:
                 draft_token_ids = draft_token_ids[:num_indices]
                 token_indices_to_sample = token_indices_to_sample[:num_indices]
-        else:
+        else: 
             logits = self.model.compute_logits(sample_hidden_states)
+            if get_ascend_config().enable_reduce_sample and self.method in ("mtp"):
+                if lmhead_tp_enable():
+                    logits = get_lmhead_tp_group().all_to_all(logits)
+                else:
+                    logits = self.model.model.logits_processor._gather_logits(logits)
             if lmhead_tp_enable() and num_indices < logits.shape[0]:
                 logits = logits[:num_indices]
                 token_indices_to_sample = token_indices_to_sample[:num_indices]
@@ -1088,15 +1119,18 @@ class AscendSpecDecodeBaseProposer(SpecDecodeBaseProposer):
                 )
 
             sample_hidden_states = last_hidden_states[token_indices_to_sample]
-            if get_ascend_config().enable_reduce_sample:
-                draft_token_ids = self.model.compute_logits(
-                    sample_hidden_states, get_ascend_config().enable_reduce_sample
-                )
+            if get_ascend_config().enable_reduce_sample and self.method in ("eagle3", "dflash"):
+                draft_token_ids = self.compute_draft_token_ids(sample_hidden_states)
                 if lmhead_tp_enable() and num_indices < draft_token_ids.shape[0]:
                     draft_token_ids = draft_token_ids[:num_indices]
                     token_indices_to_sample = token_indices_to_sample[:num_indices]
-            else:
+            else: 
                 logits = self.model.compute_logits(sample_hidden_states)
+                if get_ascend_config().enable_reduce_sample and self.method in ("mtp"):
+                    if lmhead_tp_enable():
+                        logits = get_lmhead_tp_group().all_to_all(logits)
+                    else:
+                        logits = self.model.model.logits_processor._gather_logits(logits)
                 if lmhead_tp_enable() and num_indices < logits.shape[0]:
                     logits = logits[:num_indices]
                     token_indices_to_sample = token_indices_to_sample[:num_indices]
