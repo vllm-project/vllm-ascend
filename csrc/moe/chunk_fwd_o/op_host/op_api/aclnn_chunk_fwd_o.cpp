@@ -27,6 +27,7 @@
 #include "opdev/shape_utils.h"
 #include "opdev/tensor_view_utils.h"
 #include "opdev/make_op_executor.h"
+#include "aclnn/acl_meta.h"
 
 
 using namespace op;
@@ -134,7 +135,24 @@ aclnnStatus aclnnChunkFwdOGetWorkspaceSize(
     CHECK_RET(ret == ACLNN_SUCCESS, ACLNN_ERR_PARAM_INVALID);
     CHECK_COND(ParamsDataContiguous(params, executorPtr) == ACLNN_SUCCESS, ACLNN_ERR_PARAM_INVALID,
                "ParamsDataContiguous failed.");
-    auto result = l0op::ChunkFwdO(params.q, params.k, params.v, params.h, params.g, params.cuSeqlensOptional, params.chunkOffsetsOptional, params.scale, params.chunkSize, params.oOut, executorPtr);
+    
+    // kStride0, vStride0 获取步长
+    int64_t *keyStridesValue = nullptr;
+    uint64_t keyStridesNum = 0;
+    int64_t *valueStridesValue = nullptr;
+    uint64_t valueStridesNum = 0;
+
+    // aclGetViewStrides 获取aclTensor 对应的stride和stride个数
+    ret = aclGetViewStrides(k, &keyStridesValue, &keyStridesNum);
+    CHECK_RET(ret == ACLNN_SUCCESS, ret);
+    ret = aclGetViewStrides(v, &valueStridesValue, &valueStridesNum);
+    CHECK_RET(ret == ACLNN_SUCCESS, ret);
+
+    int64_t kStride0 = keyStridesValue[0];
+    int64_t vStride0 = valueStridesValue[0];
+
+    auto result = l0op::ChunkFwdO(params.q, params.k, params.v, params.h, params.g, params.cuSeqlensOptional, params.chunkOffsetsOptional,
+        kStride0, vStride0, params.scale, params.chunkSize, params.oOut, executorPtr);
     CHECK_RET(result[0] != nullptr, ACLNN_ERR_PARAM_NULLPTR);
 
     // If the output tensor is non-contiguous, convert the calculated contiguous tensor to non-contiguous.
@@ -144,6 +162,7 @@ aclnnStatus aclnnChunkFwdOGetWorkspaceSize(
     // Standard syntax, get the size of workspace needed during computation.
     *workspaceSize = uniqueExecutor->GetWorkspaceSize();
     uniqueExecutor.ReleaseTo(executor);
+    delete[] keyStridesValue, valueStridesValue;
     return ACLNN_SUCCESS;
 }
 
