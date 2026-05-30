@@ -349,3 +349,149 @@ def test_registered_parser_is_patch_loaded():
         DeepSeekV4ToolParser.extract_tool_calls_streaming
         is patch_deepseek_v4_tool_call_parser._patched_extract_tool_calls_streaming
     )
+
+
+def test_streaming_strips_non_dsml_special_token_in_content():
+    parser = DeepSeekV4ToolParser(MOCK_TOKENIZER)
+    deltas = _stream(parser, "Good.<｜begin▁of▁sentence｜>", chunk_size=3)
+    visible = "".join(d.content or "" for d in deltas if d.content)
+    assert "<｜" not in visible
+    assert visible == "Good."
+
+
+def test_streaming_strips_special_token_before_dsml_start():
+    parser = DeepSeekV4ToolParser(MOCK_TOKENIZER)
+    full = "Let me run<｜end▁of▁sentence｜>" + _build_tool_call(
+        "plan_trip",
+        {"days": 1, "flexible": False, "cities": ["Beijing"], "notes": "x"},
+    )
+    deltas = _stream(parser, full, chunk_size=4)
+    visible = "".join(d.content or "" for d in deltas if d.content)
+    arg_chunks = "".join(
+        tc.function.arguments
+        for delta in deltas
+        for tc in delta.tool_calls or []
+        if tc.index == 0 and tc.function and tc.function.arguments is not None
+    )
+    assert "<｜" not in visible
+    assert json.loads(arg_chunks) == {
+        "days": 1,
+        "flexible": False,
+        "cities": ["Beijing"],
+        "notes": "x",
+    }
+
+
+def test_streaming_holds_back_partial_special_token_across_chunks():
+    parser = DeepSeekV4ToolParser(MOCK_TOKENIZER)
+    # chunk_size=5 makes first chunk "abc<｜" so the trailing "<｜" must hold back.
+    deltas = _stream(parser, "abc<｜begin▁of▁sentence｜>def", chunk_size=5)
+    visible = "".join(d.content or "" for d in deltas if d.content)
+    assert "<｜" not in visible
+    assert visible == "abcdef"
+
+
+def test_streaming_preserves_dsml_tool_call_through_strip_path():
+    # Pins that the strip helper cannot misfire on the real DSML start token.
+    parser = DeepSeekV4ToolParser(MOCK_TOKENIZER)
+    full = "prefix " + _build_tool_call(
+        "plan_trip",
+        {"days": 2, "flexible": True, "cities": ["A"], "notes": "y"},
+    )
+    deltas = _stream(parser, full, chunk_size=7)
+    visible = "".join(d.content or "" for d in deltas if d.content)
+    arg_chunks = "".join(
+        tc.function.arguments
+        for delta in deltas
+        for tc in delta.tool_calls or []
+        if tc.index == 0 and tc.function and tc.function.arguments is not None
+    )
+    assert visible.strip() == "prefix"
+    assert json.loads(arg_chunks) == {
+        "days": 2,
+        "flexible": True,
+        "cities": ["A"],
+        "notes": "y",
+    }
+
+
+def test_streaming_strips_complete_token_and_holds_partial_in_same_delta():
+    # One delta contains both a complete special token and a trailing partial:
+    # the complete one must be stripped and the partial held back so it can
+    # complete in the next delta.
+    parser = DeepSeekV4ToolParser(MOCK_TOKENIZER)
+    deltas = _stream(
+        parser,
+        "a<｜end▁of▁sentence｜>b<｜begin▁of▁sentence｜>c",
+        chunk_size=200,
+    )
+    visible = "".join(d.content or "" for d in deltas if d.content)
+    assert "<｜" not in visible
+    assert visible == "abc"
+
+
+def test_streaming_preserves_lone_pipe_bracket_before_dsml_start():
+    # Regression guard: a bare `<｜` fragment immediately preceding the DSML
+    # start token must NOT be silently dropped — the DSML start is already
+    # confirmed, so the fragment can't grow into a real special token.
+    parser = DeepSeekV4ToolParser(MOCK_TOKENIZER)
+    full = "x<｜y" + _build_tool_call(
+        "plan_trip",
+        {"days": 1, "flexible": False, "cities": ["A"], "notes": "n"},
+    )
+    deltas = _stream(parser, full, chunk_size=200)
+    visible = "".join(d.content or "" for d in deltas if d.content)
+    assert visible == "x<｜y"
+    arg_chunks = "".join(
+        tc.function.arguments
+        for delta in deltas
+        for tc in delta.tool_calls or []
+        if tc.index == 0 and tc.function and tc.function.arguments is not None
+    )
+    assert json.loads(arg_chunks) == {
+        "days": 1,
+        "flexible": False,
+        "cities": ["A"],
+        "notes": "n",
+    }
+
+
+def _final_empty_delta(parser, full_text):
+    # Mirror vLLM's terminal call with empty delta_text after the last token.
+    return parser.extract_tool_calls_streaming(
+        previous_text=full_text,
+        current_text=full_text,
+        delta_text="",
+        previous_token_ids=[],
+        current_token_ids=[],
+        delta_token_ids=[],
+        request=ChatCompletionRequest(model="deepseek-ai/DeepSeek-V2-Chat", messages=[], tools=[_tools()]),
+    )
+
+
+def test_streaming_flushes_unclosed_pipe_text_at_stream_end():
+    # Plain text ending in an unclosed fullwidth "<｜" must NOT be lost: the
+    # trailing-partial guard holds it mid-stream, and the terminal (empty) delta
+    # flushes it back as visible content.
+    parser = DeepSeekV4ToolParser(MOCK_TOKENIZER)
+    text = "threshold x <｜ y"
+    deltas = _stream(parser, text, chunk_size=4)
+    final = _final_empty_delta(parser, text)
+    if final is not None:
+        deltas.append(final)
+    visible = "".join(d.content or "" for d in deltas if d.content)
+    assert "<｜" in visible  # the literal text is preserved, not dropped
+    assert visible == "threshold x <｜ y"
+
+
+def test_streaming_drops_truncated_dsml_start_prefix_at_stream_end():
+    # A response truncated mid-`<｜DSML｜tool_calls>` must not leak the partial
+    # start marker as visible content.
+    parser = DeepSeekV4ToolParser(MOCK_TOKENIZER)
+    text = "ok <｜DSML｜tool"
+    deltas = _stream(parser, text, chunk_size=3)
+    final = _final_empty_delta(parser, text)
+    if final is not None:
+        deltas.append(final)
+    visible = "".join(d.content or "" for d in deltas if d.content)
+    assert visible == "ok "
