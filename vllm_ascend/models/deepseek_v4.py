@@ -81,6 +81,7 @@ from vllm_ascend.utils import (
     extract_dsv4_layer_index,
     get_ascend_device_type,
     get_dsv4_compress_ratio,
+    oproj_tp_enable,
 )
 
 
@@ -1078,6 +1079,16 @@ class AscendDeepseekV4ForCausalLM(nn.Module, SupportsPP, DeepseekV2MixtureOfExpe
                 self.moe_layers.append(layer.mlp.experts)
 
         self.extract_moe_parameters(example_moe)
+
+    def process_weights_after_loading(self, act_dtype: torch.dtype):
+        if oproj_tp_enable():
+            for layer in self.model.layers:
+                if isinstance(layer, PPMissingLayer):
+                    continue
+                # DeepseekV4Attention -> dsa_attn (AscendDeepseekSparseAttention)
+                # -> dsa_attn (DSAAttention) -> impl (AscendDSAImpl)
+                attn = layer.self_attn
+                attn.dsa_attn.dsa_attn.impl.process_weights_after_loading(act_dtype)
 
     def embed_input_ids(self, input_ids: torch.Tensor) -> torch.Tensor:
         return self.model.embed_input_ids(input_ids)
