@@ -636,7 +636,7 @@ def _get_column_parallel_op(
         if any(p in prefix for p in ("qkv_proj", "conv1d", "query_key_value")):
             return Flashcomm2OshardQKVParallelOp(layer)
     if enable_sp():
-        if "shared_expert" in prefix:
+        if "shared_expert" in prefix or "share_expert" in prefix:
             return None
         sp_column_prefix = [
             "gate_up_proj",  # first MLP of most LLMs
@@ -644,6 +644,7 @@ def _get_column_parallel_op(
             "qkv_proj",  # qkv linear of most LLMs
             "conv1d",  # gated deltanet of Qwen3 Next
             "query_key_value",  # qkv linear of Bailing
+            "g_proj",  # attention gate projection of Step3p5
         ]
         for a_prefix in sp_column_prefix:
             if a_prefix in prefix:
@@ -675,7 +676,7 @@ def _get_row_parallel_op(
         if "o_proj" in prefix or "out_proj" in prefix:
             return Flashcomm2OProjRowParallelOp(layer)
     if enable_sp():
-        if "shared_expert" in prefix:
+        if "shared_expert" in prefix or "share_expert" in prefix:
             return None
         sp_row_prefixes = [
             "o_proj",  # attn output linear of most LLMs
@@ -696,6 +697,7 @@ def get_parallel_op(disable_tp, prefix, layer, direct):
         disable_tp
         or ("shared_experts" in prefix and shared_expert_dp_enabled())
         or ("shared_expert" in prefix and shared_expert_dp_enabled())
+        or ("share_expert" in prefix and shared_expert_dp_enabled())
     ):
         return None, 0, 1
     custom_op: (
