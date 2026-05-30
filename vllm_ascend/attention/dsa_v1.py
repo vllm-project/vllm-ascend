@@ -28,7 +28,6 @@ from vllm_ascend.utils import (
     get_ascend_device_type,
     npu_stream_switch,
     olora_tp_enable,
-    oproj_tp_enable,
 )
 from vllm_ascend.worker.npu_input_batch import NPUInputBatch
 
@@ -1461,48 +1460,6 @@ class AscendDSAImpl(DSAAttentionImpl):
             assert topk_indices_to_cache.shape[1] == 1
             topk_indices_to_cache = topk_indices_to_cache.squeeze(1)
         topk_indices_buffer.copy_(topk_indices_to_cache)
-
-    def process_weights_after_loading(self, act_dtype: torch.dtype):
-        if oproj_tp_enable():
-            from vllm_ascend.distributed.parallel_state import get_otp_group
-
-            otp_group = get_otp_group()
-            otp_size = otp_group.world_size
-            otp_rank = otp_group.rank_in_group
-
-            # Only OTP row-slice wo_b (wo_a keeps ColumnParallelLinear with
-            # batch matmul — group dimension must be preserved for correctness)
-            wo_b_weight = self.wo_b.weight.data
-            wo_b_rows_per_otp = wo_b_weight.shape[0] // otp_size
-            wo_b_shard = wo_b_weight[
-                otp_rank * wo_b_rows_per_otp : (otp_rank + 1) * wo_b_rows_per_otp, :
-            ].clone()
-            # Explicitly delete the old full-weight data before assigning the
-            # shard, so that the underlying storage is freed immediately rather
-            # than lingering until GC.  Without this, 60 layers × ~50 MiB of
-            # dead wo_b weight (~3 GiB total) remains on the device and causes
-            # KV-cache OOM.
-            del wo_b_weight
-            self.wo_b.weight = torch.nn.Parameter(wo_b_shard, requires_grad=False)
-
-            # Also shard the quantization scale/offset tensors that are tied to
-            # the row dimension of wo_b (RowParallelLinear output dim).
-            # For Ascend W8A8 quantization, weight_scale and weight_offset
-            # have shape [output_rows, ...] and must be sliced accordingly.
-            if hasattr(self.wo_b, 'weight_scale'):
-                ws = self.wo_b.weight_scale.data
-                ws_shard = ws[
-                    otp_rank * wo_b_rows_per_otp : (otp_rank + 1) * wo_b_rows_per_otp, :
-                ].clone()
-                del ws
-                self.wo_b.weight_scale = torch.nn.Parameter(ws_shard, requires_grad=False)
-            if hasattr(self.wo_b, 'weight_offset'):
-                wo = self.wo_b.weight_offset.data
-                wo_shard = wo[
-                    otp_rank * wo_b_rows_per_otp : (otp_rank + 1) * wo_b_rows_per_otp, :
-                ].clone()
-                del wo
-                self.wo_b.weight_offset = torch.nn.Parameter(wo_shard, requires_grad=False)
 
     # TODO: cast to bfloat16 to speed up
     def rope_single(self, x, cos, sin, inverse=False):
