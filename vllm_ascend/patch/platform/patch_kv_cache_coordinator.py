@@ -19,6 +19,7 @@ from vllm.v1.core.kv_cache_utils import (
 from vllm.v1.core.single_type_kv_cache_manager import SingleTypeKVCacheManager
 from vllm.v1.kv_cache_interface import FullAttentionSpec, KVCacheConfig, KVCacheSpec, MambaSpec
 
+from vllm_ascend import envs
 from vllm_ascend.core.single_type_kv_cache_manager import get_manager_for_kv_cache_spec
 
 USE_MULTI_GROUPS_KV_CACHE = True
@@ -276,9 +277,26 @@ def get_kv_cache_coordinator(
     eagle_attn_layer_names: list[str] | None = None,
     metrics_collector: KVCacheMetricsCollector | None = None,
 ) -> KVCacheCoordinator:
-    # Hybrid models with prefix caching need AscendHybridKVCacheCoordinator.
-    # Otherwise keep upstream coordinators (no-prefix / unitary / hybrid w/o caching).
-    if len(kv_cache_config.kv_cache_groups) == 1 or not enable_caching:
+    if envs.VLLM_ASCEND_APPLY_DSV4_PATCH:
+        return AscendHybridKVCacheCoordinator(
+            kv_cache_config,
+            max_model_len,
+            use_eagle,
+            enable_caching,
+            enable_kv_cache_events,
+            dcp_world_size=dcp_world_size,
+            pcp_world_size=pcp_world_size,
+            hash_block_size=hash_block_size,
+            eagle_attn_layer_names=eagle_attn_layer_names,
+            metrics_collector=metrics_collector,
+            max_num_batched_tokens=max_num_batched_tokens,
+        )
+
+    cp_enabled = dcp_world_size > 1 or pcp_world_size > 1
+
+    # Only CP hybrid prefix caching needs AscendHybridKVCacheCoordinator.
+    # Otherwise keep upstream coordinators (non-CP / unitary / no-prefix-cache).
+    if not cp_enabled or len(kv_cache_config.kv_cache_groups) == 1 or not enable_caching:
         return _orig_get_kv_cache_coordinator(
             kv_cache_config,
             max_model_len,
