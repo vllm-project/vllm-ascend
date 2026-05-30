@@ -180,12 +180,12 @@ def _patch_speculative_minimax_whitelist() -> None:
             return inner_verify(self, *args, **kwargs)
         except (ValueError, NotImplementedError) as e:
             method = getattr(self, "method", None)
-            if method not in ("eagle3", "extract_hidden_states"):
+            if method not in ("eagle3", "extract_hidden_states", "mtp", "deepseek_mtp"):
                 raise
 
             target_cfg = getattr(self, "target_model_config", None)
             model_type = getattr(getattr(target_cfg, "hf_text_config", None), "model_type", "")
-            if "minimax" not in str(model_type).lower():
+            if "minimax" not in str(model_type).lower() and method not in ("mtp", "deepseek_mtp"):
                 logger.debug(
                     "Model type %s is not a MiniMax-M2 model, skip eagle3/extract_hidden_states checks.",
                     model_type,
