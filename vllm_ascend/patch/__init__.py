@@ -267,6 +267,45 @@
 #       Remove this patch if upstream streaming behavior is updated to satisfy the
 #       same DeepSeek DSML incrementality contract.
 #
+# ** 12a. File: platform/patch_deepseek_v4_thinking.py**
+# ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+#   1. `vllm.entrypoints.openai.chat_completion.protocol.ChatCompletionRequest`
+#      `vllm.tokenizers.deepseek_v4`
+#    Why:
+#       Supported vLLM v0.20.2 predates newer DeepSeek V4 reasoning-effort
+#       handling: `minimal`, `xhigh`, and `max` are rejected at request
+#       validation time, reasoning effort does not automatically enable
+#       thinking, and `reasoning_effort="none"` does not force chat mode in
+#       the DeepSeek V4 tokenizer.
+#    How:
+#       Extend the request field validation to the newer accepted values,
+#       backport the newer `build_chat_params` enable_thinking behavior, and
+#       monkey-patch the DeepSeek V4 tokenizer reasoning-effort mapping.
+#    Related PR (if no, explain why):
+#       Upstream vLLM main behavior after v0.20.2.
+#    Future Plan:
+#       Remove this patch once vllm-ascend upgrades to a vLLM version with the
+#       same DeepSeek V4 thinking behavior.
+#
+# ** 13. File: platform/patch_camem_allocator.py**
+# ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+#   1. `vllm.config.model.is_cumem_allocator_available`
+#    Why:
+#       Upstream vLLM main enables and validates the CUDA/ROCm CuMem allocator
+#       when `enable_sleep_mode=True`. Ascend implements sleep mode with its own
+#       CaMem allocator, so the upstream CuMem-only availability check fails
+#       during `ModelConfig` validation before Ascend worker code can run.
+#    How:
+#       Treat Ascend's platform sleep allocator as satisfying the allocator
+#       availability check, while preserving the original vLLM CuMem check as
+#       fallback.
+#    Related PR (if no, explain why):
+#       No, this maps an upstream CUDA/ROCm allocator validation to Ascend's
+#       backend-specific CaMem implementation.
+#    Future Plan:
+#       Remove this patch if upstream exposes a platform allocator capability hook
+#       for sleep mode validation.
+#
 # * Worker Patch:
 # ===============
 #
@@ -404,9 +443,9 @@
 #
 # ** 11. File: worker/patch_npugraph_ex_triton.py**
 # ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
-#   1. `torchair.core._concrete_graph.ValuePack`,
-#      `torchair.npu_fx_compiler._unpack_meta`,
-#      `torchair.npu_fx_compiler._NpuGraphConverter._unpack_npu`
+#   1. `npugraph_ex.core._concrete_graph.ValuePack`,
+#      `npugraph_ex.npu_fx_compiler._unpack_meta`,
+#      `npugraph_ex.npu_fx_compiler._NpuGraphConverter._unpack_npu`
 #    Why:
 #       In the Triton scenario, npugraph_ex backend needs to process the value pack of the input parameters.
 #    How：

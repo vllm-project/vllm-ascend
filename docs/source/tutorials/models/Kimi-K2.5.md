@@ -163,7 +163,6 @@ vllm serve Eco-Tech/Kimi-K2.5-W4A8 \
   --tensor-parallel-size 4 \
   --data-parallel-size 4 \
   --enable-expert-parallel \
-  --async-scheduling \
   --max-num-seqs 64 \
   --max-model-len 32768 \
   --max-num-batched-tokens 16384 \
@@ -243,7 +242,6 @@ vllm serve Eco-Tech/Kimi-K2.5-W4A8 \
   --data-parallel-rpc-port 13389 \
   --tensor-parallel-size 4 \
   --enable-expert-parallel \
-  --async-scheduling \
   --max-num-seqs 16 \
   --max-model-len 32768 \
   --max-num-batched-tokens 16384 \
@@ -309,7 +307,6 @@ vllm serve Eco-Tech/Kimi-K2.5-W4A8 \
   --data-parallel-rpc-port 13389 \
   --tensor-parallel-size 4 \
   --enable-expert-parallel \
-  --async-scheduling \
   --max-num-seqs 16 \
   --max-model-len 32768 \
   --max-num-batched-tokens 16384 \
@@ -647,7 +644,6 @@ The parameters are explained as follows:
 
 - `VLLM_ASCEND_ENABLE_FLASHCOMM1=1`: enables the communication optimization function on the prefill nodes.
 - `VLLM_ASCEND_ENABLE_MLAPO=1`: enables the fusion operator, which can significantly improve performance but consumes more NPU memory. In the Prefill-Decode (PD) separation scenario, enable MLAPO only on decode nodes.
-- `--async-scheduling`: enables the asynchronous scheduling function. When Multi-Token Prediction (MTP) is enabled, asynchronous scheduling of operator delivery can be implemented to overlap the operator delivery latency.
 - `cudagraph_capture_sizes`: The recommended value is `n x (mtp + 1)`. And the min is `n = 1` and the max is `n = max-num-seqs`. For other values, it is recommended to set them to the number of frequently occurring requests on the Decode (D) node.
 - `recompute_scheduler_enable: true`: enables the recomputation scheduler. When the Key-Value Cache (KV Cache) of the decode node is insufficient, requests will be sent to the prefill node to recompute the KV Cache. In the PD separation scenario, it is recommended to enable this configuration on both prefill and decode nodes simultaneously.
 - `multistream_overlap_shared_expert: true`: When the Tensor Parallelism (TP) size is 1 or `enable_shared_expert_dp: true`, an additional stream is enabled to overlap the computation process of shared experts for improved efficiency.
