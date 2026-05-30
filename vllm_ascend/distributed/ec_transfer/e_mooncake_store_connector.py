@@ -185,7 +185,7 @@ class EMoonCakeStoreConnector(ECConnectorBase):
             Bool indicate that media exists in cache or not
         """
 
-        result=self.ec_store.exists([identifier])
+        result = self.ec_store.exists([identifier])
 
         return bool(result[0]) if result else False
 
