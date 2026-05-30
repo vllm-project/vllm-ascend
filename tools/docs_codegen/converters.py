@@ -15,6 +15,8 @@ from tools.docs_codegen.utils import (
     render_cli_command,
     require_indexed_mapping,
     require_mapping,
+    require_mapping_list,
+    require_node_field,
     require_non_empty_string,
     require_scalar_mapping,
     substitute_template_positionals,
@@ -42,6 +44,7 @@ class BaseConverter(ABC):
 
 
 def build_default_converters() -> dict[str, BaseConverter]:
+    """Instantiate the built-in converters keyed by their ``converter_tag`` name."""
     converters: dict[str, BaseConverter] = {}
     for converter in (
         SingleNodeConverter(),
@@ -60,6 +63,7 @@ def get_converter(
     *,
     block: ModelCodeBlock | None = None,
 ) -> BaseConverter:
+    """Look up a converter by ``converter_tag``, raising a helpful error if unknown."""
     converter = converters.get(tag)
     if converter is None:
         supported = ", ".join(sorted(converters))
@@ -77,6 +81,7 @@ def get_converter(
 
 
 def _join_shell_sections(*sections: Sequence[str]) -> str:
+    """Concatenate line groups, trimming each and separating them with one blank line."""
     rendered_lines: list[str] = []
     for section in sections:
         normalized = trim_blank_edges(section)
@@ -93,35 +98,23 @@ def _render_env_export_lines(
     *,
     defaults: Mapping[str, ScalarValue] | None = None,
 ) -> list[str]:
-    exports: OrderedDict[str, ScalarValue] = OrderedDict((str(key), value) for key, value in envs.items())
+    """Render ``envs`` (with optional ``defaults`` overrides) as ``export NAME=value`` lines."""
+    # Keys are already normalized to ``str`` by require_scalar_mapping upstream.
+    exports: OrderedDict[str, ScalarValue] = OrderedDict(envs)
     if defaults is not None:
-        for key, value in defaults.items():
-            exports[str(key)] = value
-    return [f"export {name}={_format_export_value(value)}" for name, value in exports.items()]
+        exports.update(defaults)
+    return [f"export {name}={_quote_env_value(value)}" for name, value in exports.items()]
 
 
-def _build_shell_script(
-    envs: Mapping[str, ScalarValue],
-    command_tokens: Sequence[str],
-    *,
-    block: ModelCodeBlock,
-    env_defaults: Mapping[str, ScalarValue] | None = None,
-) -> GeneratedScript:
-    content = _join_shell_sections(
-        _render_env_export_lines(envs, defaults=env_defaults),
-        format_vllm_serve_command(command_tokens, block=block),
-    )
-    return GeneratedScript(content=content)
-
-
-def format_vllm_serve_command(tokens: Sequence[str], *, block: ModelCodeBlock) -> list[str]:
+def _format_vllm_serve_command(tokens: Sequence[str], *, block: ModelCodeBlock) -> list[str]:
+    """Render ``vllm serve <model> ...`` as backslash-continued, one-option-per-line shell."""
     if len(tokens) < 3 or tokens[0] != "vllm" or tokens[1] != "serve":
         raise make_docs_codegen_error(
             "generated command must start with 'vllm serve <model>'",
             block=block,
         )
 
-    model = _format_command_token(tokens[2])
+    model = _quote_cli_arg(tokens[2])
     command_lines = [f"vllm serve {model}"]
     option_lines: list[str] = []
     token_index = 3
@@ -147,7 +140,7 @@ def format_vllm_serve_command(tokens: Sequence[str], *, block: ModelCodeBlock) -
                         if isinstance(parsed, (dict, list)):
                             value = json.dumps(parsed, indent=4, ensure_ascii=False)
 
-            option_lines.append(f"{token} {_format_command_token(value)}")
+            option_lines.append(f"{token} {_quote_cli_arg(value)}")
             token_index += 2
             continue
 
@@ -166,7 +159,35 @@ def format_vllm_serve_command(tokens: Sequence[str], *, block: ModelCodeBlock) -
     return command_lines
 
 
-def _format_export_value(value: ScalarValue) -> str:
+def _build_shell_script(
+    envs: Mapping[str, ScalarValue],
+    command_tokens: Sequence[str],
+    *,
+    block: ModelCodeBlock,
+    env_defaults: Mapping[str, ScalarValue] | None = None,
+) -> GeneratedScript:
+    """Assemble a script from env exports followed by the ``vllm serve`` command."""
+    content = _join_shell_sections(
+        _render_env_export_lines(envs, defaults=env_defaults),
+        _format_vllm_serve_command(command_tokens, block=block),
+    )
+    return GeneratedScript(content=content)
+
+
+# docs_codegen emits a *copy-pasteable* script, so unlike the e2e runtime's
+# format_server_cmd() (tests/e2e/nightly/multi_node/external_dp/scripts/utils.py),
+# which shlex-quotes everything for a one-off *log* line, we need two
+# context-specific quoters that both keep ``$VAR`` / ``${VAR}`` / ``$1`` as live
+# shell expansions the reader can still edit.
+
+
+def _quote_env_value(value: ScalarValue) -> str:
+    """Quote a value for an ``export NAME=value`` line.
+
+    Wraps in *double* quotes (which still expand ``$``-references) only when the
+    value carries whitespace or shell metacharacters; plain values and bare
+    ``$``-expansions are emitted unquoted.
+    """
     if value is None:
         return ""
     if isinstance(value, str):
@@ -183,18 +204,18 @@ def _format_export_value(value: ScalarValue) -> str:
     return f'"{escaped}"'
 
 
-def _format_command_token(token: str) -> str:
+def _quote_cli_arg(token: str) -> str:
+    """Quote a single ``vllm serve`` argument token.
+
+    Uses ``shlex.quote`` (single quotes ⇒ fully literal) for whitespace, embedded
+    double quotes (JSON), and JSON-like ``{...}`` / ``[...]`` containers so a
+    space-free ``--profiler-config {"a":"b"}`` value is not mangled by the shell.
+    Plain shell expansions like ``$SERVER_PORT`` / ``${NODE_0_IP}`` start with
+    ``$`` and are intentionally left unquoted so they stay live.
+    """
     if not token:
         return '""'
-    # Quote whitespace, embedded double quotes (JSON), and JSON-like containers
-    # so e.g. a space-free '--profiler-config {"a":"b"}' value is not mangled by
-    # the shell. Plain shell expansions like ``$SERVER_PORT`` / ``${NODE_0_IP}``
-    # start with ``$`` and are intentionally left unquoted.
-    needs_quote = (
-        any(char.isspace() for char in token)
-        or '"' in token
-        or (token[:1] in "{[" and token[-1:] in "}]")
-    )
+    needs_quote = any(char.isspace() for char in token) or '"' in token or (token[:1] in "{[" and token[-1:] in "}]")
     if needs_quote:
         return shlex.quote(token)
     return token
@@ -209,6 +230,7 @@ SINGLE_NODE_AUTO_SERVER_PORT = "DEFAULT_PORT"
 
 
 def _resolve_single_node_server_port(envs: Mapping[str, ScalarValue]) -> ScalarValue:
+    """Pick the SERVER_PORT export value, mapping the ``DEFAULT_PORT`` sentinel to ``8000``."""
     server_port = envs.get("SERVER_PORT")
     if server_port is None or server_port == SINGLE_NODE_AUTO_SERVER_PORT:
         return SINGLE_NODE_DEFAULT_SERVER_PORT
@@ -220,11 +242,11 @@ def _convert_single_node_case(
     *,
     block: ModelCodeBlock,
 ) -> GeneratedScript:
+    """Render ``test_cases[case_index]`` into env exports + a ``vllm serve`` command."""
     test_case = require_indexed_mapping(
         loaded_yaml.yaml_root,
         collection_name="test_cases",
         option_name="case_index",
-        field_name="test_case",
         block=block,
         default_index=0,
     )
@@ -247,6 +269,8 @@ def _convert_single_node_case(
 
 
 class SingleNodeConverter(BaseConverter):
+    """Render a single-node ``vllm serve`` script from ``test_cases[case_index]``."""
+
     name = "single_node"
 
     def convert(self, loaded_yaml: LoadedYaml, *, block: ModelCodeBlock) -> GeneratedScript:
@@ -263,11 +287,11 @@ def _convert_multi_node_host(
     *,
     block: ModelCodeBlock,
 ) -> GeneratedScript:
+    """Render ``deployment[host_index]`` into env exports + its complete ``vllm serve`` command."""
     deployment_item = require_indexed_mapping(
         loaded_yaml.yaml_root,
         collection_name="deployment",
         option_name="host_index",
-        field_name="deployment_item",
         block=block,
     )
     envs = require_scalar_mapping(deployment_item.get("envs"), field_name="envs", block=block)
@@ -276,6 +300,8 @@ def _convert_multi_node_host(
 
 
 class MultiNodeConverter(BaseConverter):
+    """Render one host's ``vllm serve`` script from ``deployment[host_index]``."""
+
     name = "multi_node"
 
     def convert(self, loaded_yaml: LoadedYaml, *, block: ModelCodeBlock) -> GeneratedScript:
@@ -315,8 +341,8 @@ RUN_DP_TEMPLATE_POSITIONALS: dict[str, str] = {
     "TP_SIZE": "$7",
 }
 
-# Maps each launch_online_dp.py flag to the config[] field that feeds it.
-LAUNCH_ARG_BY_FIELD: tuple[tuple[str, str], ...] = (
+# Ordered (config[] field, launch_online_dp.py flag) pairs; preserves CLI flag order.
+LAUNCH_FIELD_FLAGS: tuple[tuple[str, str], ...] = (
     ("dp_size", "--dp-size"),
     ("tp_size", "--tp-size"),
     ("dp_size_local", "--dp-size-local"),
@@ -328,28 +354,8 @@ LAUNCH_ARG_BY_FIELD: tuple[tuple[str, str], ...] = (
 
 
 def _node_ip_placeholder(node_index: int) -> str:
+    """Return the ``${NODE_<i>_IP}`` shell placeholder for a node index."""
     return f"${{NODE_{node_index}_IP}}"
-
-
-def _require_node_list(yaml_root: object, *, block: ModelCodeBlock) -> list[dict]:
-    if not isinstance(yaml_root, dict):
-        raise make_docs_codegen_error(
-            f"YAML root must be a mapping, got {type(yaml_root).__name__}",
-            block=block,
-        )
-    config = yaml_root.get("config")
-    if not isinstance(config, list) or not config:
-        raise make_docs_codegen_error("YAML field 'config' must be a non-empty list", block=block)
-    return [require_mapping(node, field_name=f"config[{index}]", block=block) for index, node in enumerate(config)]
-
-
-def _require_node_field(node: Mapping[str, object], field: str, *, node_index: int, block: ModelCodeBlock) -> object:
-    if node.get(field) is None:
-        raise make_docs_codegen_error(
-            f"config[{node_index}] is missing required field '{field}'",
-            block=block,
-        )
-    return node[field]
 
 
 # ----------------------------------------------------------------------------
@@ -358,11 +364,15 @@ def _require_node_field(node: Mapping[str, object], field: str, *, node_index: i
 
 
 def _convert_external_dp_template(loaded_yaml: LoadedYaml, *, block: ModelCodeBlock) -> GeneratedScript:
+    """Render ``templates[host_index]`` into per-node env exports + ``vllm serve`` command.
+
+    ``${VAR}`` template variables are rewritten to the ``$1``..``$7`` positional
+    parameters that ``run_dp_template.sh`` expects.
+    """
     template = require_indexed_mapping(
         loaded_yaml.yaml_root,
         collection_name="templates",
         option_name="host_index",
-        field_name="template",
         block=block,
     )
     model = require_non_empty_string(loaded_yaml.yaml_root.get("model"), field_name="model", block=block)
@@ -390,6 +400,8 @@ def _convert_external_dp_template(loaded_yaml: LoadedYaml, *, block: ModelCodeBl
 
 
 class ExternalDpTemplateConverter(BaseConverter):
+    """Render one external-DP node's env exports + ``vllm serve`` command from ``templates``."""
+
     name = "external_dp_template"
 
     def convert(self, loaded_yaml: LoadedYaml, *, block: ModelCodeBlock) -> GeneratedScript:
@@ -403,18 +415,21 @@ class ExternalDpTemplateConverter(BaseConverter):
 
 
 def _convert_external_dp_launch(loaded_yaml: LoadedYaml, *, block: ModelCodeBlock) -> GeneratedScript:
-    nodes = _require_node_list(loaded_yaml.yaml_root, block=block)
+    """Render one ``python launch_online_dp.py ...`` line per ``config`` node."""
+    nodes = require_mapping_list(loaded_yaml.yaml_root, collection_name="config", block=block, non_empty=True)
     commands: list[str] = []
     for node_index, node in enumerate(nodes):
         options = [
-            (flag, [str(_require_node_field(node, field, node_index=node_index, block=block))])
-            for field, flag in LAUNCH_ARG_BY_FIELD
+            (flag, [str(require_node_field(node, field, node_index=node_index, block=block))])
+            for field, flag in LAUNCH_FIELD_FLAGS
         ]
         commands.append(render_cli_command(["python", LAUNCH_ONLINE_DP_SCRIPT], options, multiline=False).rstrip())
     return GeneratedScript(content="\n\n".join(commands) + "\n")
 
 
 class ExternalDpLaunchConverter(BaseConverter):
+    """Render the cluster-wide ``launch_online_dp.py`` commands, one per ``config`` node."""
+
     name = "external_dp_launch"
 
     def convert(self, loaded_yaml: LoadedYaml, *, block: ModelCodeBlock) -> GeneratedScript:
@@ -433,6 +448,7 @@ def _expand_proxy_group(
     group_name: str,
     block: ModelCodeBlock,
 ) -> tuple[list[str], list[str]]:
+    """Expand a routing group's node indices into per-rank ``(hosts, ports)`` lists."""
     if not isinstance(indices, list) or not indices:
         raise make_docs_codegen_error(
             f"routing.groups.{group_name} must be a non-empty list",
@@ -444,13 +460,12 @@ def _expand_proxy_group(
         node_index = int(raw_index)
         if node_index < 0 or node_index >= len(nodes):
             raise make_docs_codegen_error(
-                f"routing.groups.{group_name} index {node_index} is out of range for 'config' "
-                f"with {len(nodes)} items",
+                f"routing.groups.{group_name} index {node_index} is out of range for 'config' with {len(nodes)} items",
                 block=block,
             )
         node = nodes[node_index]
-        dp_size_local = int(_require_node_field(node, "dp_size_local", node_index=node_index, block=block))
-        port_start = int(_require_node_field(node, "port_start", node_index=node_index, block=block))
+        dp_size_local = int(require_node_field(node, "dp_size_local", node_index=node_index, block=block))
+        port_start = int(require_node_field(node, "port_start", node_index=node_index, block=block))
         for local_rank in range(dp_size_local):
             hosts.append(_node_ip_placeholder(node_index))
             ports.append(str(port_start + local_rank))
@@ -458,7 +473,8 @@ def _expand_proxy_group(
 
 
 def _convert_external_dp_proxy(loaded_yaml: LoadedYaml, *, block: ModelCodeBlock) -> GeneratedScript:
-    nodes = _require_node_list(loaded_yaml.yaml_root, block=block)
+    """Render the load-balance proxy command from the ``routing`` groups."""
+    nodes = require_mapping_list(loaded_yaml.yaml_root, collection_name="config", block=block, non_empty=True)
     routing = require_mapping(loaded_yaml.yaml_root.get("routing"), field_name="routing", block=block)
 
     routing_type = routing.get("type")
@@ -473,9 +489,7 @@ def _convert_external_dp_proxy(loaded_yaml: LoadedYaml, *, block: ModelCodeBlock
     prefiller_hosts, prefiller_ports = _expand_proxy_group(
         groups.get("prefiller"), nodes, group_name="prefiller", block=block
     )
-    decoder_hosts, decoder_ports = _expand_proxy_group(
-        groups.get("decoder"), nodes, group_name="decoder", block=block
-    )
+    decoder_hosts, decoder_ports = _expand_proxy_group(groups.get("decoder"), nodes, group_name="decoder", block=block)
 
     options = [
         ("--host", [_node_ip_placeholder(EXTERNAL_DP_PROXY_NODE_INDEX)]),
@@ -490,6 +504,8 @@ def _convert_external_dp_proxy(loaded_yaml: LoadedYaml, *, block: ModelCodeBlock
 
 
 class ExternalDpProxyConverter(BaseConverter):
+    """Render the disaggregated-prefill load-balance proxy launch command."""
+
     name = "external_dp_proxy"
 
     def convert(self, loaded_yaml: LoadedYaml, *, block: ModelCodeBlock) -> GeneratedScript:

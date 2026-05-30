@@ -15,6 +15,7 @@ TEMPLATE_VAR_RE = re.compile(r"\$\{([A-Za-z_][A-Za-z0-9_]*)\}")
 
 
 def trim_blank_edges(lines: Sequence[str]) -> list[str]:
+    """Drop leading and trailing blank/whitespace-only lines."""
     start = 0
     end = len(lines)
     while start < end and not lines[start].strip():
@@ -25,6 +26,7 @@ def trim_blank_edges(lines: Sequence[str]) -> list[str]:
 
 
 def require_mapping(value: Any, *, field_name: str, block: Any) -> dict[str, Any]:
+    """Require ``value`` to be a mapping, returning it with string-coerced keys."""
     if not isinstance(value, dict):
         raise make_docs_codegen_error(
             f"converter field '{field_name}' must be a mapping, got {type(value).__name__}",
@@ -33,7 +35,40 @@ def require_mapping(value: Any, *, field_name: str, block: Any) -> dict[str, Any
     return {str(key): item for key, item in value.items()}
 
 
+def require_mapping_list(
+    yaml_root: Any,
+    *,
+    collection_name: str,
+    block: Any,
+    non_empty: bool = False,
+) -> list[dict[str, Any]]:
+    """Require ``yaml_root[collection_name]`` to be a list of mappings.
+
+    Validates that the YAML root is a mapping, that ``collection_name`` holds a
+    list (optionally non-empty), and that every element is itself a mapping.
+    Shared by ``require_indexed_mapping`` and the external-DP converters so the
+    "named YAML list of mappings" pattern lives in one place.
+    """
+    if not isinstance(yaml_root, dict):
+        raise make_docs_codegen_error(
+            f"YAML root must be a mapping, got {type(yaml_root).__name__}",
+            block=block,
+        )
+    collection = yaml_root.get(collection_name)
+    if not isinstance(collection, list) or (non_empty and not collection):
+        kind = "a non-empty list" if non_empty else "a list"
+        raise make_docs_codegen_error(
+            f"YAML field '{collection_name}' must be {kind}",
+            block=block,
+        )
+    return [
+        require_mapping(item, field_name=f"{collection_name}[{index}]", block=block)
+        for index, item in enumerate(collection)
+    ]
+
+
 def require_non_empty_string(value: Any, *, field_name: str, block: Any) -> str:
+    """Require ``value`` to be a non-blank string, returning it stripped."""
     if not isinstance(value, str) or not value.strip():
         raise make_docs_codegen_error(
             f"converter field '{field_name}' must be a non-empty string",
@@ -48,6 +83,7 @@ def require_block_index(
     option_name: str,
     default: int | None = None,
 ) -> int:
+    """Read a non-negative integer directive option (e.g. ``case_index``) off the block."""
     raw_index = block.get_option(option_name)
     if raw_index is None:
         if default is not None:
@@ -70,32 +106,25 @@ def require_indexed_mapping(
     *,
     collection_name: str,
     option_name: str,
-    field_name: str,
     block: Any,
     default_index: int | None = None,
 ) -> dict[str, Any]:
+    """Pick one mapping out of a YAML list, selected by a block directive option.
+
+    ``collection_name`` is the YAML key holding the list (e.g. ``test_cases``) and
+    ``option_name`` is the ``model-code`` directive option carrying the index
+    (e.g. ``case_index``).
+    """
     index = require_block_index(block=block, option_name=option_name, default=default_index)
 
-    if not isinstance(yaml_root, dict):
-        raise make_docs_codegen_error(
-            f"YAML root must be a mapping, got {type(yaml_root).__name__}",
-            block=block,
-        )
-
-    collection = yaml_root.get(collection_name)
-    if not isinstance(collection, list):
-        raise make_docs_codegen_error(
-            f"YAML field '{collection_name}' must be a list",
-            block=block,
-        )
-
+    collection = require_mapping_list(yaml_root, collection_name=collection_name, block=block)
     if index >= len(collection):
         raise make_docs_codegen_error(
             f"{option_name} {index} is out of range for '{collection_name}' with {len(collection)} items",
             block=block,
         )
 
-    return require_mapping(collection[index], field_name=field_name, block=block)
+    return collection[index]
 
 
 def require_scalar_mapping(
@@ -104,6 +133,7 @@ def require_scalar_mapping(
     field_name: str,
     block: Any,
 ) -> dict[str, ScalarValue]:
+    """Require a mapping whose values are all scalars (no nested mappings/lists)."""
     mapping = require_mapping(value, field_name=field_name, block=block)
     normalized: dict[str, ScalarValue] = {}
     for key, item in mapping.items():
@@ -116,7 +146,18 @@ def require_scalar_mapping(
     return normalized
 
 
+def require_node_field(node: Mapping[str, object], field: str, *, node_index: int, block: Any) -> object:
+    """Return a required ``config[node_index]`` field, erroring if it is missing."""
+    if node.get(field) is None:
+        raise make_docs_codegen_error(
+            f"config[{node_index}] is missing required field '{field}'",
+            block=block,
+        )
+    return node[field]
+
+
 def parse_command_tokens(value: Any, *, field_name: str, block: Any) -> list[str]:
+    """Normalize a shell string or flat token list into a list of argument tokens."""
     if isinstance(value, str):
         try:
             return shlex.split(value, posix=True)

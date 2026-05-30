@@ -11,10 +11,13 @@
 
 Built-in supported `converter_tag` values:
 
-| converter_tag |
-| --- |
-| `single_node` |
-| `multi_node` |
+| converter_tag | Renders | YAML source |
+| --- | --- | --- |
+| `single_node` | One `vllm serve` script for a single node | `test_cases[case_index]` |
+| `multi_node` | One host's `vllm serve` script | `deployment[host_index]` |
+| `external_dp_template` | One external-DP node's env exports + `vllm serve` command | `templates[host_index]` (+ top-level `model`) |
+| `external_dp_launch` | One `launch_online_dp.py` line per node | `config[]` |
+| `external_dp_proxy` | The load-balance proxy launch command | `config[]` + `routing` |
 
 ### For authors: add a block
 
@@ -55,7 +58,7 @@ If you put ``model-code`` blocks in other directories, Sphinx builds will not au
 | --- | --- | --- | --- |
 | `block_name` | Yes | None | Block name; must be unique within the current document |
 | `converter_tag` | Yes | None | Must be `single_node` |
-| `test_case_path` | Yes | None | Repository-relative path; file must exist |
+| `test_case_path` | Yes | None | Repository-relative path that stays within the repo (no `..` escape); file must exist |
 | `case_index` | No | `0` | Use `test_cases[case_index]` from the YAML as the rendering source |
 
 ##### YAML reference
@@ -123,7 +126,7 @@ See existing files under `tests/e2e/nightly/single_node/models/configs/`.
 | --- | --- | --- | --- |
 | `block_name` | Yes | None | Block name; must be unique within the current document |
 | `converter_tag` | Yes | None | Must be `multi_node` |
-| `test_case_path` | Yes | None | Repository-relative path; file must exist |
+| `test_case_path` | Yes | None | Repository-relative path that stays within the repo (no `..` escape); file must exist |
 | `host_index` | Yes | None | Use `deployment[host_index]` from the YAML as the rendering source |
 
 ##### YAML reference
@@ -134,6 +137,83 @@ See existing files under `tests/e2e/nightly/multi_node/config/`.
 
 - `envs`: rendered as `export ...` (scalar values)
 - `server_cmd`: a complete command (must start with `vllm serve <model>`; shell multi-line string or token list)
+
+#### External data parallel (`external_dp_template` / `external_dp_launch` / `external_dp_proxy`)
+
+These three converters read one **shared** external-DP YAML (see
+`tests/e2e/nightly/multi_node/external_dp/config/`) and each render a different
+part of the deployment. They are tightly coupled to that schema by design.
+
+The shared YAML provides:
+
+- `model`: model name (top level)
+- `config`: a list of per-node settings (`port_start`, `dp_rpc_port`, `dp_size`,
+  `dp_size_local`, `dp_rank_start`, `tp_size`, `dp_address`, ...)
+- `routing`: `type` plus `groups` (e.g. `prefiller` / `decoder` lists of `config` indices)
+- `templates`: a list of per-node `envs` and `server_cmd_template` entries
+
+`server_cmd_template` uses braced `${VAR}` placeholders that
+`external_dp_template` rewrites to the positional shell parameters consumed by
+`run_dp_template.sh`:
+
+| `${VAR}` | Positional |
+| --- | --- |
+| `${VISIBLE_DEVICES}` | `$1` |
+| `${PORT}` | `$2` |
+| `${DP_SIZE}` | `$3` |
+| `${DP_RANK}` | `$4` |
+| `${DP_ADDRESS}` | `$5` |
+| `${DP_RPC_PORT}` | `$6` |
+| `${TP_SIZE}` | `$7` |
+
+Unbraced references such as `$SERVER_PORT` and unknown braced variables are left
+untouched so they remain live shell expansions.
+
+##### Templates
+
+````md
+```{model-code}
+:block_name: your_unique_block_name_prefill_node0
+:converter_tag: external_dp_template
+:test_case_path: tests/e2e/nightly/multi_node/external_dp/config/your_model.yaml
+:host_index: 0
+```
+````
+
+`external_dp_launch` (one `python launch_online_dp.py ...` line per `config` node)
+and `external_dp_proxy` (the load-balance proxy command, e.g.
+`python load_balance_proxy_server_example.py ...`) read the whole cluster, so they
+take **no** index option:
+
+````md
+```{model-code}
+:block_name: your_unique_block_name_launch
+:converter_tag: external_dp_launch
+:test_case_path: tests/e2e/nightly/multi_node/external_dp/config/your_model.yaml
+```
+````
+
+````md
+```{model-code}
+:block_name: your_unique_block_name_proxy
+:converter_tag: external_dp_proxy
+:test_case_path: tests/e2e/nightly/multi_node/external_dp/config/your_model.yaml
+```
+````
+
+##### Options
+
+| Option | Required | Default | Description |
+| --- | --- | --- | --- |
+| `block_name` | Yes | None | Block name; must be unique within the current document |
+| `converter_tag` | Yes | None | One of `external_dp_template`, `external_dp_launch`, `external_dp_proxy` |
+| `test_case_path` | Yes | None | Repository-relative path that stays within the repo (no `..` escape); file must exist |
+| `host_index` | `external_dp_template` only | None | Use `templates[host_index]` from the YAML as the rendering source |
+
+:::{note}
+`external_dp_proxy` currently supports only `routing.type: disaggregated_prefill`
+and reads its `routing.groups.prefiller` / `routing.groups.decoder` node lists.
+:::
 
 ### Local debugging and generation
 
@@ -245,6 +325,9 @@ port `8000`.
 # Install documentation build dependencies
 python3 -m pip install -r docs/requirements-docs.txt
 
+# (Optional) Clean previous builds
+make -C docs clean
+
 # Build the English site
 make -C docs html
 
@@ -269,6 +352,10 @@ The goal of adding a converter is to make `converter_tag: <name>` render a given
    - Add a `BaseConverter` subclass that implements `convert(loaded_yaml, *, block) -> GeneratedScript`
    - Give the converter a unique `name` (the value used by `converter_tag` in docs)
    - Register it in `build_default_converters()`
+   - Reuse the shared validation/rendering helpers in `tools/docs_codegen/utils.py`
+     (`require_yaml_mapping`, `require_mapping`, `require_scalar_mapping`,
+     `require_indexed_mapping`, `parse_command_tokens`, `render_cli_command`, ...)
+     rather than re-validating the YAML shape inline
 
 2. If your converter needs new directive options (e.g. `:foo_index:`):
 

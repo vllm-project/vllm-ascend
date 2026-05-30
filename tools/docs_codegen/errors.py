@@ -54,6 +54,7 @@ def make_docs_codegen_error(
     block_name: str | None = None,
     converter_tag: str | None = None,
 ) -> DocsCodegenError:
+    """Build a ``DocsCodegenError``, pulling location context off ``block`` when given."""
     if block is not None:
         doc_path = getattr(block, "doc_path", doc_path)
         line = getattr(block, "directive_line", line)

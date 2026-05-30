@@ -6,7 +6,7 @@ from pathlib import Path
 
 import regex as re
 
-from tools.docs_codegen.errors import make_docs_codegen_error
+from tools.docs_codegen.errors import DocsCodegenError, make_docs_codegen_error
 from tools.docs_codegen.utils import trim_blank_edges
 
 MODEL_CODE_DEFAULTS_PATH = Path("docs/source/tutorials/models")
@@ -32,9 +32,11 @@ class ModelCodeBlock:
 
     @property
     def key(self) -> tuple[str, str]:
+        """Identity used to detect duplicate blocks: ``(doc_path, block_name)``."""
         return (self.doc_path.as_posix(), self.block_name)
 
     def get_option(self, name: str) -> str | None:
+        """Return the value of an extra (non-required) directive option, or ``None``."""
         for key, value in self.extra_options:
             if key == name:
                 return value
@@ -44,27 +46,40 @@ class ModelCodeBlock:
 class BlockScanner:
     """Scan markdown files for ``model-code`` directives."""
 
-    def __init__(self, *, documents_root: str | Path = MODEL_CODE_DEFAULTS_PATH) -> None:
+    def __init__(
+        self,
+        *,
+        documents_root: str | Path = MODEL_CODE_DEFAULTS_PATH,
+        repo_root: str | Path | None = None,
+    ) -> None:
         self.documents_root = Path(documents_root)
+        self.repo_root = Path(repo_root) if repo_root is not None else None
+
+    # -- Public API ----------------------------------------------------------
 
     def scan_default_blocks(self) -> list[ModelCodeBlock]:
-        if not self.documents_root.exists():
+        """Scan every markdown file under ``documents_root`` for model-code blocks."""
+        base = self._base
+        models_dir = base / self.documents_root
+        if not models_dir.exists():
             raise make_docs_codegen_error(
                 "tutorials models directory does not exist",
                 doc_path=self.documents_root,
             )
 
         blocks: list[ModelCodeBlock] = []
-        for doc_path in sorted(self.documents_root.rglob("*.md")):
-            blocks.extend(self.scan_document_blocks(doc_path))
+        for absolute_doc_path in sorted(models_dir.rglob("*.md")):
+            blocks.extend(self.scan_document_blocks(absolute_doc_path.relative_to(base)))
         return blocks
 
     def scan_document_blocks(self, doc_path: str | Path) -> list[ModelCodeBlock]:
+        """Parse all model-code directive fences in a single markdown document."""
         repo_relative_doc_path = self._normalize_document_path(doc_path)
-        if not repo_relative_doc_path.exists():
+        absolute_doc_path = self._base / repo_relative_doc_path
+        if not absolute_doc_path.exists():
             raise make_docs_codegen_error("document file does not exist", doc_path=repo_relative_doc_path)
 
-        lines = repo_relative_doc_path.read_text(encoding="utf-8").splitlines()
+        lines = absolute_doc_path.read_text(encoding="utf-8").splitlines()
         blocks: list[ModelCodeBlock] = []
         line_index = 0
 
@@ -113,6 +128,7 @@ class BlockScanner:
         return blocks
 
     def select_document_blocks(self, doc_path: str | Path, block_name: str | None = None) -> list[ModelCodeBlock]:
+        """Scan a document and optionally keep only the block named ``block_name``."""
         blocks = self.scan_document_blocks(doc_path)
         if block_name is None:
             return blocks
@@ -133,11 +149,12 @@ class BlockScanner:
         directive_line: int | None = None,
         body_lines: Sequence[str] = (),
     ) -> ModelCodeBlock:
+        """Validate directive options and assemble a ``ModelCodeBlock``."""
         repo_relative_doc_path = self._normalize_document_path(doc_path)
-        missing = [name for name in MODEL_CODE_REQUIRED_OPTION_NAMES if name not in options]
-        if missing:
-            raise make_docs_codegen_error(
-                f"model-code block missing required metadata: {', '.join(missing)}",
+
+        def fail(message: str) -> DocsCodegenError:
+            return make_docs_codegen_error(
+                message,
                 doc_path=repo_relative_doc_path,
                 line=directive_line,
                 test_case_path=options.get("test_case_path"),
@@ -145,38 +162,21 @@ class BlockScanner:
                 converter_tag=options.get("converter_tag"),
             )
 
+        missing = [name for name in MODEL_CODE_REQUIRED_OPTION_NAMES if name not in options]
+        if missing:
+            raise fail(f"model-code block missing required metadata: {', '.join(missing)}")
+
         extra = sorted(set(options).difference(MODEL_CODE_OPTION_NAMES))
         if extra:
-            raise make_docs_codegen_error(
-                f"model-code block contains unsupported metadata: {', '.join(extra)}",
-                doc_path=repo_relative_doc_path,
-                line=directive_line,
-                test_case_path=options.get("test_case_path"),
-                block_name=options.get("block_name"),
-                converter_tag=options.get("converter_tag"),
-            )
+            raise fail(f"model-code block contains unsupported metadata: {', '.join(extra)}")
 
         normalized_options = {name: options[name].strip() for name in MODEL_CODE_OPTION_NAMES if name in options}
         empty_values = [name for name, value in normalized_options.items() if not value]
         if empty_values:
-            raise make_docs_codegen_error(
-                f"model-code block contains empty metadata: {', '.join(empty_values)}",
-                doc_path=repo_relative_doc_path,
-                line=directive_line,
-                test_case_path=options.get("test_case_path"),
-                block_name=options.get("block_name"),
-                converter_tag=options.get("converter_tag"),
-            )
+            raise fail(f"model-code block contains empty metadata: {', '.join(empty_values)}")
 
         if not BLOCK_NAME_RE.fullmatch(normalized_options["block_name"]):
-            raise make_docs_codegen_error(
-                "block_name may only contain letters, numbers, dots, underscores, and dashes",
-                doc_path=repo_relative_doc_path,
-                line=directive_line,
-                test_case_path=options.get("test_case_path"),
-                block_name=options.get("block_name"),
-                converter_tag=options.get("converter_tag"),
-            )
+            raise fail("block_name may only contain letters, numbers, dots, underscores, and dashes")
 
         return ModelCodeBlock(
             doc_path=repo_relative_doc_path,
@@ -192,15 +192,21 @@ class BlockScanner:
             raw_block_lines=tuple(trim_blank_edges(body_lines)),
         )
 
+    # -- Internal helpers ----------------------------------------------------
+
     @staticmethod
     def _normalize_document_path(doc_path: str | Path) -> Path:
+        """Validate that a document path is repository-relative and contained."""
         candidate = Path(doc_path)
         if candidate.is_absolute():
             raise make_docs_codegen_error("document path must be repository-relative", doc_path=candidate)
+        if ".." in candidate.parts:
+            raise make_docs_codegen_error("document path must stay within the repository", doc_path=candidate)
         return candidate
 
     @staticmethod
     def _validate_unique_block_names(blocks: Sequence[ModelCodeBlock]) -> None:
+        """Reject documents that declare the same block_name twice."""
         seen: dict[tuple[str, str], ModelCodeBlock] = {}
         for block in blocks:
             previous = seen.get(block.key)
@@ -213,3 +219,10 @@ class BlockScanner:
                 f"'{block.block_name}' in document; previous declaration is on line {previous.directive_line}",
                 block=block,
             )
+
+    # -- Path helpers --------------------------------------------------------
+
+    @property
+    def _base(self) -> Path:
+        """Directory that repo-relative paths resolve against for filesystem I/O."""
+        return self.repo_root if self.repo_root is not None else Path.cwd()

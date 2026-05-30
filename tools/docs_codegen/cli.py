@@ -5,13 +5,17 @@ import sys
 from typing import TextIO
 
 if __name__ == "__main__":
-    # Keep `python3 tools/docs_codegen/cli.py ...` working from the repository root.
-    sys.path.insert(0, ".")
+    # Make `python3 tools/docs_codegen/cli.py ...` importable regardless of the
+    # launch directory by putting the repo root (this file's parents[2]) on the path.
+    from pathlib import Path
+
+    sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
 from tools.docs_codegen.errors import DocsCodegenError
 
 
 def build_arg_parser() -> argparse.ArgumentParser:
+    """Build the CLI argument parser (mutually exclusive ``--doc`` / ``--block`` selection)."""
     arg_parser = argparse.ArgumentParser(description="Generate shell code blocks from model-code directives.")
     selection_group = arg_parser.add_mutually_exclusive_group()
     selection_group.add_argument(
@@ -35,6 +39,7 @@ def main(
     stdout: TextIO | None = None,
     stderr: TextIO | None = None,
 ) -> int:
+    """CLI entry point; returns a process exit code (0 ok, 1 on a known generation error)."""
     stdout = stdout or sys.stdout
     stderr = stderr or sys.stderr
     args = build_arg_parser().parse_args(argv)
@@ -47,11 +52,13 @@ def main(
 
 
 def _add_generate_flags(arg_parser: argparse.ArgumentParser) -> None:
+    """Register the ``--stdout`` and ``--dry-run`` generation flags."""
     arg_parser.add_argument("--stdout", action="store_true", help="Print generated content after the output path.")
     arg_parser.add_argument("--dry-run", action="store_true", help="Generate content without writing files.")
 
 
 def _handle_generate(args: argparse.Namespace, *, stdout: TextIO) -> int:
+    """Run generation for all blocks, one document, or one block per the parsed args."""
     from tools.docs_codegen.generator import create_default_generator_service
 
     service = create_default_generator_service()
@@ -72,6 +79,7 @@ def _handle_generate(args: argparse.Namespace, *, stdout: TextIO) -> int:
 
 
 def _parse_block_ref(block_ref: str) -> tuple[str, str]:
+    """Split a ``<doc_path>::<block_name>`` reference into its two parts."""
     if "::" not in block_ref:
         raise DocsCodegenError("block reference must use '<doc_path>::<block_name>'")
 
