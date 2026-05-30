@@ -1,174 +1,33 @@
 """
-Pytest for chunk_gated_delta_rule_fwd_h on 310P via aclnn ctypes.
+chunk_gated_delta_rule_fwd_h correctness tests on Ascend 310P
+via torch.ops._C_ascend binding.
 """
-
-import ctypes
-import glob
-import os
 
 import pytest
 import torch
-import torch_npu
+import torch_npu  # noqa: F401
 
-torch_npu.npu.set_compile_mode(jit_compile=False)
+from vllm_ascend.utils import enable_custom_op
 
 CHUNK_SIZE = 64
 
 
-def _find_lib(name):
-    search = (
-        os.environ.get("LD_LIBRARY_PATH", "").split(":")
-        + [
-            "/usr/local/Ascend/ascend-toolkit/latest/aarch64-linux/lib64",
-        ]
-        + glob.glob("/usr/local/Ascend/cann-*/opp/vendors/custom_transformer/op_api/lib/")
-    )
-    for d in search:
-        p = os.path.join(d, name)
-        if os.path.isfile(p):
-            return p
-    return name
-
-
-_acl = ctypes.CDLL(_find_lib("libascendcl.so"))
-_nnop = ctypes.CDLL(_find_lib("libnnopbase.so"))
-_opapi = ctypes.CDLL(_find_lib("libcust_opapi.so"))
-_c = ctypes
-
-_nnop.aclCreateTensor.restype = _c.c_void_p
-_nnop.aclCreateTensor.argtypes = [
-    _c.POINTER(_c.c_int64),
-    _c.c_uint64,
-    _c.c_int,
-    _c.POINTER(_c.c_int64),
-    _c.c_int64,
-    _c.c_int,
-    _c.POINTER(_c.c_int64),
-    _c.c_uint64,
-    _c.c_void_p,
-]
-_nnop.aclDestroyTensor.restype = _c.c_int
-_nnop.aclDestroyTensor.argtypes = [_c.c_void_p]
-_acl.aclrtSynchronizeStream.restype = _c.c_int
-_acl.aclrtSynchronizeStream.argtypes = [_c.c_void_p]
-_acl.aclrtMalloc.restype = _c.c_int
-_acl.aclrtMalloc.argtypes = [_c.POINTER(_c.c_void_p), _c.c_uint64, _c.c_int]
-_acl.aclrtFree.restype = _c.c_int
-_acl.aclrtFree.argtypes = [_c.c_void_p]
-
-_getws = _opapi.aclnnChunkGatedDeltaRuleFwdHGetWorkspaceSize
-_exec = _opapi.aclnnChunkGatedDeltaRuleFwdH
-_getws.restype = _c.c_int
-_getws.argtypes = [
-    _c.c_void_p,
-    _c.c_void_p,
-    _c.c_void_p,
-    _c.c_void_p,
-    _c.c_void_p,
-    _c.c_void_p,
-    _c.c_bool,
-    _c.c_int64,
-    _c.c_bool,
-    _c.c_void_p,
-    _c.c_void_p,
-    _c.c_bool,
-    _c.c_bool,
-    _c.c_void_p,
-    _c.c_void_p,
-    _c.c_void_p,
-    _c.POINTER(_c.c_uint64),
-    _c.POINTER(_c.c_void_p),
-]
-_exec.restype = _c.c_int
-_exec.argtypes = [_c.c_void_p, _c.c_uint64, _c.c_void_p, _c.c_void_p]
-
-_DTYPE_MAP = {
-    torch.float16: 1,
-    torch.float32: 0,
-    torch.int64: 9,
-    torch.bfloat16: 27,
-}
-
-
-def _make_acl_tensor(t):
-    if t is None:
-        return None
-    shape = (_c.c_int64 * len(t.shape))(*t.shape)
-    strides = (_c.c_int64 * len(t.stride()))(*t.stride())
-    sd = _c.c_int64(t.untyped_storage().nbytes() // t.element_size())
-    sb = _c.c_void_p(t.untyped_storage().data_ptr())
-    return _nnop.aclCreateTensor(
-        shape,
-        len(t.shape),
-        _DTYPE_MAP[t.dtype],
-        strides,
-        t.storage_offset(),
-        2,
-        _c.byref(sd),
-        1,
-        sb,
-    )
-
-
 def npu_chunk_gdr_fwd_h(k, w, u, g, initial_state=None, chunk_size=64):
-    B, Hg, T, K = k.shape
-    HV, V = u.shape[1], u.shape[3]
-    NT = (T + chunk_size - 1) // chunk_size
-
-    h_elems = B * HV * NT * K * V
-    h_bytes = h_elems * k.element_size()
-    h_pad = ((h_bytes + 1023) // 512) * 512
-    vn_elems = B * HV * T * V
-    vn_bytes = vn_elems * k.element_size()
-    vn_pad = ((vn_bytes + 1023) // 512) * 512
-    total = h_pad // k.element_size() + vn_pad // k.element_size() + 256
-    buf = torch.empty(total, dtype=k.dtype, device=k.device)
-
-    h_out = buf[:h_elems].view(B, HV, NT, K, V)
-    vn_out = buf[h_pad // k.element_size() :][:vn_elems].view(B, HV, T, V)
-    fs_out = buf[h_pad // k.element_size() + vn_pad // k.element_size() :][:1]
-
-    stream = _c.c_void_p(torch_npu.npu.current_stream().npu_stream)
-    _acl.aclrtSynchronizeStream(stream)
-
-    ws_size, executor = _c.c_uint64(0), _c.c_void_p(None)
-    ret = _getws(
-        _make_acl_tensor(k),
-        _make_acl_tensor(w),
-        _make_acl_tensor(u),
-        _make_acl_tensor(g),
-        None,
-        _make_acl_tensor(initial_state),
-        False,
-        chunk_size,
-        True,
-        None,
-        None,
-        False,
-        False,
-        _make_acl_tensor(h_out),
-        _make_acl_tensor(vn_out),
-        _make_acl_tensor(fs_out),
-        _c.byref(ws_size),
-        _c.byref(executor),
+    enable_custom_op()
+    return torch.ops._C_ascend.chunk_gated_delta_rule_fwd_h(
+        k,
+        w,
+        u,
+        g=g,
+        initial_state=initial_state,
+        output_final_state=False,
+        chunk_size=chunk_size,
+        save_new_value=True,
     )
-    assert ret == 0, f"GetWorkspaceSize failed: {ret}"
-
-    ws_ptr = _c.c_void_p(None)
-    if ws_size.value > 0:
-        _acl.aclrtMalloc(_c.byref(ws_ptr), ws_size, 0)
-
-    ret = _exec(ws_ptr, ws_size, executor, stream)
-    assert ret == 0, f"Execute failed: {ret}"
-    _acl.aclrtSynchronizeStream(stream)
-
-    if ws_ptr.value:
-        _acl.aclrtFree(ws_ptr)
-
-    return h_out, vn_out
 
 
 def cpu_reference(k, w, u, g, initial_state=None, chunk_size=64):
+    """CPU fp32 reference matching kernel semantics."""
     k, w, u, g = k.float(), w.float(), u.float(), g.float()
     B, Hg, T, K = k.shape
     HV, V = u.shape[1], u.shape[3]
@@ -224,7 +83,7 @@ class TestChunkGatedDeltaRuleFwdH310:
         init = torch.randn(B, HV, K, V, dtype=DTYPE) * 0.01
 
         h_ref, _ = cpu_reference(k, w, u, g, init, CHUNK_SIZE)
-        h_out, _ = npu_chunk_gdr_fwd_h(
+        h_out, _, _ = npu_chunk_gdr_fwd_h(
             k.npu(),
             w.npu(),
             u.npu(),
@@ -258,7 +117,7 @@ class TestChunkGatedDeltaRuleFwdH310:
         init = torch.randn(B, HV, K, V, dtype=DTYPE) * 0.01
 
         _, vn_ref = cpu_reference(k, w, u, g, init, CHUNK_SIZE)
-        _, vn_out = npu_chunk_gdr_fwd_h(
+        _, vn_out, _ = npu_chunk_gdr_fwd_h(
             k.npu(),
             w.npu(),
             u.npu(),
@@ -280,13 +139,20 @@ class TestChunkGatedDeltaRuleFwdH310:
         torch.manual_seed(42)
         B, Hg, HV, T, K, V = 1, 1, 1, 128, 128, 128
         DTYPE = torch.float16
-        k = torch.randn(B, Hg, T, K, dtype=DTYPE).npu() * 0.1
-        w = torch.randn(B, Hg, T, K, dtype=DTYPE).npu() * 0.1
-        u = torch.randn(B, HV, T, V, dtype=DTYPE).npu() * 0.1
-        g = (-torch.rand(B, HV, T).float()).npu() * 0.1
-        init = torch.randn(B, HV, K, V, dtype=DTYPE).npu() * 0.01
+        k = (torch.randn(B, Hg, T, K, dtype=DTYPE) * 0.1).npu()
+        w = (torch.randn(B, Hg, T, K, dtype=DTYPE) * 0.1).npu()
+        u = (torch.randn(B, HV, T, V, dtype=DTYPE) * 0.1).npu()
+        g = (-torch.rand(B, HV, T).float() * 0.1).npu()
+        init = (torch.randn(B, HV, K, V, dtype=DTYPE) * 0.01).npu()
 
-        h_out, vn_out = npu_chunk_gdr_fwd_h(k, w, u, g, initial_state=init, chunk_size=CHUNK_SIZE)
+        h_out, vn_out, _ = npu_chunk_gdr_fwd_h(
+            k,
+            w,
+            u,
+            g,
+            initial_state=init,
+            chunk_size=CHUNK_SIZE,
+        )
 
         assert torch.isnan(h_out.cpu()).sum() == 0, "h_out has NaN"
         assert torch.isnan(vn_out.cpu()).sum() == 0, "vn_out has NaN"

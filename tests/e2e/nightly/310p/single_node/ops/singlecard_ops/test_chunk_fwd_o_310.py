@@ -1,105 +1,31 @@
-import ctypes
-import glob
-import os
+"""
+chunk_fwd_o correctness tests on Ascend 310P via torch.ops._C_ascend binding.
+"""
 
 import pytest
 import torch
-import torch_npu
+import torch_npu  # noqa: F401
 
-torch_npu.npu.set_compile_mode(jit_compile=False)
+from vllm_ascend.utils import enable_custom_op
 
 CHUNK_SIZE = 64
 
 
-def _find_lib(name):
-    search = os.environ.get("LD_LIBRARY_PATH", "").split(":") + glob.glob(
-        "/usr/local/Ascend/cann-*/opp/vendors/custom_transformer/op_api/lib/"
-    )
-    for d in search:
-        p = os.path.join(d, name)
-        if os.path.isfile(p):
-            return p
-    return name
-
-
-_acl = ctypes.CDLL(_find_lib("libascendcl.so"))
-_nnop = ctypes.CDLL(_find_lib("libnnopbase.so"))
-_opapi = ctypes.CDLL(_find_lib("libcust_opapi.so"))
-_c = ctypes
-_nnop.aclCreateTensor.restype = _c.c_void_p
-_nnop.aclCreateTensor.argtypes = [
-    _c.POINTER(_c.c_int64),
-    _c.c_uint64,
-    _c.c_int,
-    _c.POINTER(_c.c_int64),
-    _c.c_int64,
-    _c.c_int,
-    _c.POINTER(_c.c_int64),
-    _c.c_uint64,
-    _c.c_void_p,
-]
-_acl.aclrtSynchronizeStream.restype = _c.c_int
-_acl.aclrtSynchronizeStream.argtypes = [_c.c_void_p]
-_acl.aclrtMalloc.restype = _c.c_int
-_acl.aclrtMalloc.argtypes = [_c.POINTER(_c.c_void_p), _c.c_uint64, _c.c_int]
-_acl.aclrtFree.restype = _c.c_int
-_acl.aclrtFree.argtypes = [_c.c_void_p]
-_getws = _opapi.aclnnChunkFwdOGetWorkspaceSize
-_exec = _opapi.aclnnChunkFwdO
-_getws.restype = _c.c_int
-_getws.argtypes = [_c.c_void_p] * 5 + [
-    _c.c_void_p,
-    _c.c_void_p,
-    _c.c_double,
-    _c.c_int64,
-    _c.c_void_p,
-    _c.POINTER(_c.c_uint64),
-    _c.POINTER(_c.c_void_p),
-]
-_exec.restype = _c.c_int
-_exec.argtypes = [_c.c_void_p, _c.c_uint64, _c.c_void_p, _c.c_void_p]
-_DTYPE_MAP = {torch.float16: 1, torch.float32: 0}
-
-
-def _make_acl_tensor(t):
-    shape = (_c.c_int64 * len(t.shape))(*t.shape)
-    strides = (_c.c_int64 * len(t.stride()))(*t.stride())
-    sd = _c.c_int64(t.untyped_storage().nbytes() // t.element_size())
-    sb = _c.c_void_p(t.untyped_storage().data_ptr())
-    return _nnop.aclCreateTensor(
-        shape, len(t.shape), _DTYPE_MAP[t.dtype], strides, t.storage_offset(), 2, _c.byref(sd), 1, sb
-    )
-
-
 def npu_chunk_fwd_o(q, k, v, h, g, scale):
-    o = torch.zeros_like(v)
-    stream = _c.c_void_p(torch_npu.npu.current_stream().npu_stream)
-    _acl.aclrtSynchronizeStream(stream)
-    ws_size, executor = _c.c_uint64(0), _c.c_void_p(None)
-    ret = _getws(
-        _make_acl_tensor(q),
-        _make_acl_tensor(k),
-        _make_acl_tensor(v),
-        _make_acl_tensor(h),
-        _make_acl_tensor(g),
-        None,
-        None,
-        _c.c_double(scale),
-        _c.c_int64(CHUNK_SIZE),
-        _make_acl_tensor(o),
-        _c.byref(ws_size),
-        _c.byref(executor),
+    enable_custom_op()
+    return torch.ops._C_ascend.chunk_fwd_o(
+        q,
+        k,
+        v,
+        h,
+        scale,
+        g=g,
+        g_gamma=None,
+        cu_seqlens=None,
+        chunk_indices=None,
+        chunk_size=CHUNK_SIZE,
+        transpose_state_layout=False,
     )
-    assert ret == 0, f"GetWorkspaceSize failed: {ret}"
-    ws_ptr = _c.c_void_p(None)
-    if ws_size.value > 0:
-        _acl.aclrtMalloc(_c.byref(ws_ptr), ws_size, 0)
-    ret = _exec(ws_ptr, ws_size, executor, stream)
-    assert ret == 0, f"Execute failed: {ret}"
-    _acl.aclrtSynchronizeStream(stream)
-    if ws_ptr.value:
-        _acl.aclrtFree(ws_ptr)
-    return o
 
 
 def golden_chunk_fwd_o(q, k, v, h_state, g, scale):
@@ -171,11 +97,6 @@ class TestChunkFwdO310:
         assert torch.isnan(oc).sum() == 0, "output has NaN"
         assert torch.isinf(oc).sum() == 0, "output has Inf"
 
-        # With constant c, g=0, h=0:
-        # attn[i,j] = c^2 * Dk for all i,j
-        # gate = 1 (g=0), causal mask => attn_masked[i,j] = c^2*Dk if j<=i
-        # v_work[i,:] = sum_{j<=i} c^2*Dk * c = (i+1) * c^3 * Dk
-        # h_work = 0, o[i,:] = scale * v_work[i,:]
         attn_val = c * c * Dk
         for i in range(min(CHUNK_SIZE, 8)):
             expected = scale * (i + 1) * attn_val * c
