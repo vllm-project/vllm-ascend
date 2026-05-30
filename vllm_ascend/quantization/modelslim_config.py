@@ -384,9 +384,8 @@ def create_scheme_for_layer(
     quant_type = get_quant_type_for_layer(quant_description, prefix, layer_type, packed_modules_mapping)
 
     if quant_type is None:
-        err_msg = f"Could not determine quantization type for layer {prefix} (layer_type={layer_type})."
-        logger.error(err_msg)
-        raise ValueError(err_msg)
+        # layer not in quant_description, e.g. embed_tokens
+        return None
 
     # Use registry to get scheme class
     scheme_cls = get_scheme_class(quant_type, layer_type)
@@ -541,6 +540,9 @@ class AscendModelSlimConfig(QuantizationConfig):
                 logger.debug("Select AscendUnquantizedLinearMethod for %s (layer=%s)", prefix, "LinearBase")
                 return AscendUnquantizedLinearMethod()
             scheme = create_scheme_for_layer(self.quant_description, prefix, "linear", self.packed_modules_mapping)
+            if scheme is None:
+                from vllm_ascend.ops.linear import AscendUnquantizedLinearMethod
+                return AscendUnquantizedLinearMethod()            
             logger.debug("Select AscendLinearMethod for %s (layer=%s)", prefix, "LinearBase")
             return AscendLinearMethod(scheme)
         elif isinstance(layer, AttentionLayerBase) and (
@@ -569,6 +571,8 @@ class AscendModelSlimConfig(QuantizationConfig):
                 logger.debug("Select UnquantizedEmbeddingMethod for %s (layer=%s)", prefix, "VocabParallelEmbedding")
                 return UnquantizedEmbeddingMethod()
             scheme = create_scheme_for_layer(self.quant_description, prefix, "linear", self.packed_modules_mapping)
+            if scheme is None:
+                return UnquantizedEmbeddingMethod()
             logger.debug("Select AscendEmbeddingMethod for %s (layer=%s)", prefix, "VocabParallelEmbedding")
             return AscendEmbeddingMethod(scheme)
         logger.debug("No quant method matched for %s, falling back to base", prefix)
@@ -670,9 +674,12 @@ class AscendModelSlimConfig(QuantizationConfig):
         """
         from vllm_ascend.quantization.utils import get_model_file
 
-        # If quant_description is already populated (e.g. from from_config()),
-        # there is nothing to do.
-        if self.quant_description:
+        # If quant_description is already populated with per-layer data
+        # (e.g. from from_config()), there is nothing to do.
+        # But if it only has top-level config keys (quant_method, bits, etc.),
+        # we still need to load per-layer data from quant_model_description.json
+        has_per_layer_data = any(k.endswith(".weight") for k in self.quant_description)
+        if has_per_layer_data:
             return
 
         # Try to get the config file (local or remote)
