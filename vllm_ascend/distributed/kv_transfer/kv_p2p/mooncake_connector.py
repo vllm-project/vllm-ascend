@@ -1256,7 +1256,7 @@ class MooncakeConnectorWorker:
             for i in range(len(first_kv_cache_tuple)):
                 block_shape = first_kv_cache_tuple[i].shape[-block_rank:]
                 logger.info("block_shape: %s", block_shape)
-                self.block_len.append(first_kv_cache[i].element_size() * math.prod(block_shape))
+                self.block_len.append(first_kv_cache_tuple[i].element_size() * math.prod(block_shape))
         else:
             # eager:[num_block, block_size, num_head, hidden_dim]
             block_rank = (
