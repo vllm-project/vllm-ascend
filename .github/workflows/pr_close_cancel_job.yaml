@@ -39,7 +39,6 @@ jobs:
                     core.warning(`Failed to cancel ${run.html_url}: ${e.message}`);
                   }
                 }
-
                 if (runs.length < 100) break;
                 page++;
               }
