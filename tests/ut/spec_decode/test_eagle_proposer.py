@@ -2162,6 +2162,7 @@ class MockDraftModel:
     """Draft model that records prepared forward inputs."""
 
     def __init__(self, returns_tuple=True, vocab_size=200000):
+    def __init__(self, returns_tuple=True, vocab_size=200000):
         self.returns_tuple = returns_tuple
         self.vocab_size = vocab_size
         self.calls = []
