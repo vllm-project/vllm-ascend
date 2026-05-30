@@ -705,19 +705,21 @@ python load_balance_proxy_server_example.py \
 Once your server is started, you can query the model with input prompts:
 
 ```shell
+# Replace <node0_ip> with your primary node IP (e.g., localhost for single-node deployment)
+# Replace <port> with the port used when starting the server (default: 8000)
 curl -H "Accept: application/json" \
     -H "Content-type: application/json" \
     -X POST \
     -d '{
-        "model": "glm", 
-        "messages": [{ 
-            "role": "user", 
-            "content": "The future of AI is" 
-        }], 
-        "stream": false, 
-        "ignore_eos": false, 
-        "temperature": 0, 
-        "max_tokens": 200 
+        "model": "glm",
+        "messages": [{
+            "role": "user",
+            "content": "The future of AI is"
+        }],
+        "stream": false,
+        "ignore_eos": false,
+        "temperature": 0,
+        "max_tokens": 200
     }' http://<node0_ip>:<port>/v1/chat/completions
 ```
 
