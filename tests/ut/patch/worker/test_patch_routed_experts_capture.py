@@ -15,9 +15,10 @@
 
 from __future__ import annotations
 
-import torch
-import pytest
 from unittest.mock import MagicMock, patch
+
+import pytest
+import torch
 
 from vllm_ascend.patch.worker.patch_routed_experts_capture import capture
 
