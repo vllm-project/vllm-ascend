@@ -55,14 +55,14 @@
 
 from __future__ import annotations
 
+import contextlib
+
 import regex as re
 from vllm.entrypoints.openai.engine.protocol import FunctionCall
 from vllm.entrypoints.openai.engine.serving import OpenAIServing
-from vllm.logger import init_logger
-from vllm.tool_parsers.deepseekv32_tool_parser import DeepSeekV32ToolParser
+from vllm.logger import logger
 from vllm.tool_parsers.deepseekv4_tool_parser import DeepSeekV4ToolParser
-
-logger = init_logger(__name__)
+from vllm.tool_parsers.deepseekv32_tool_parser import DeepSeekV32ToolParser
 
 
 # ---------------------------------------------------------------------------
@@ -78,10 +78,8 @@ def _patch_adjust_request_keep_special() -> None:
         request = _original_adjust_request(self, request)
         # Keep DSML tool-call tokens during decode regardless of tool_choice, so
         # the markup is never stripped (empty content) and can be parsed out.
-        try:
+        with contextlib.suppress(Exception):
             request.skip_special_tokens = False
-        except Exception:
-            pass
         return request
 
     DeepSeekV32ToolParser.adjust_request = _patched_adjust_request
@@ -102,9 +100,7 @@ def _patch_parameter_regex_arity() -> None:
     # Only the patched (3-group) implementation needs the capturing string
     # group; the stock V32 implementation unpacks two values and must be left
     # untouched.
-    is_patched_impl = "patch_deepseek_v4_tool_call_parser" in getattr(
-        _original_parse_invoke, "__module__", ""
-    )
+    is_patched_impl = "patch_deepseek_v4_tool_call_parser" in getattr(_original_parse_invoke, "__module__", "")
 
     def _patched_parse_invoke(self, *args, **kwargs):
         if is_patched_impl:
@@ -129,9 +125,7 @@ _patch_parameter_regex_arity()
 # ---------------------------------------------------------------------------
 _TOOL_CHOICE_NONE = (None, "none")
 
-_original_parse_tool_calls_from_content = (
-    OpenAIServing._parse_tool_calls_from_content
-)
+_original_parse_tool_calls_from_content = OpenAIServing._parse_tool_calls_from_content
 
 
 def _patched_parse_tool_calls_from_content(
@@ -183,6 +177,4 @@ def _patched_parse_tool_calls_from_content(
     )
 
 
-OpenAIServing._parse_tool_calls_from_content = staticmethod(
-    _patched_parse_tool_calls_from_content
-)
+OpenAIServing._parse_tool_calls_from_content = staticmethod(_patched_parse_tool_calls_from_content)
