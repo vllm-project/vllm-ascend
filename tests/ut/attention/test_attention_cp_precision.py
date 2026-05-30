@@ -454,17 +454,18 @@ def build_cp_attn_metadata(
             block_tables=decode_block_tables,
         )
 
-    actual_seq_lengths_q = (
-        torch.arange(num_decodes_flatten, device=device) + 1
-        if num_decodes_flatten > 0
-        else torch.tensor([], device=device)
-    ).tolist() + torch.cumsum(query_lens[num_decodes:], dim=0).tolist()
+    decode_actual_seq = (
+        torch.cumsum(query_lens[:num_decodes], dim=0)
+        if num_decodes > 0
+        else torch.tensor([], device=device, dtype=torch.int32)
+    )
+    prefill_actual_seq = torch.cumsum(query_lens[num_decodes:], dim=0)
+    actual_seq_lengths_q = decode_actual_seq.tolist() + prefill_actual_seq.tolist()
 
     attn_metadata = AscendMetadata(
         num_actual_tokens=num_actual_tokens,
         num_decode_tokens=num_decode_tokens,
         num_actual_tokens_pcp_padded=num_actual_tokens_pcp_padded,
-        num_decodes_flatten=num_decodes_flatten,
         block_tables=block_table,
         query_start_loc=query_start_loc,
         seq_lens=common_attn_metadata.seq_lens[:num_reqs],
@@ -770,7 +771,7 @@ def _test_cp_decode_precision_no_cp(
     # block_table in-place. Without this, the tiled decode_block_tables
     # (created during build_cp_attn_metadata) still contains the original
     # sequential block indices, causing FIA to read from empty cache blocks.
-    if attn_metadata.num_decodes_flatten > attn_metadata.num_decodes:
+    if attn_metadata.num_decode_tokens > attn_metadata.num_decodes:
         tiled_rows = []
         for i in range(attn_metadata.num_decodes):
             q_len = batch_spec.query_lens[i]
