@@ -100,10 +100,16 @@ def npu_recurrent_gated_delta_rule_310(
     return out
 
 
+def _310p_get_state_dtype(self) -> tuple[torch.dtype, torch.dtype]:
+    conv_state_dtype, _ = _original_get_state_dtype(self)
+    return conv_state_dtype, torch.float16
+
+
+_original_get_state_dtype = GatedDeltaNetAttention.get_state_dtype
+
+
 class AscendGatedDeltaNetAttention310(GatedDeltaNetAttention):
-    def get_state_dtype(self) -> tuple[torch.dtype, torch.dtype]:
-        conv_state_dtype, _ = super().get_state_dtype()
-        return conv_state_dtype, torch.float16
+    get_state_dtype = _310p_get_state_dtype
 
     def _forward_core(
         self,
