@@ -28,6 +28,7 @@ def _mooncake_setup_supports_ssd_offload() -> bool:
     setup = MooncakeDistributedStore.setup
     try:
         import inspect
+
         sig = inspect.signature(setup)
         return "enable_ssd_offload" in sig.parameters
     except (TypeError, ValueError):
@@ -170,13 +171,10 @@ class MooncakeStoreConfig:
             return
         if not self.ssd_offload_path:
             raise ValueError(
-                "enable_ssd_offload is true but ssd_offload_path is empty. "
-                "Set ssd_offload_path in mooncake.json."
+                "enable_ssd_offload is true but ssd_offload_path is empty. Set ssd_offload_path in mooncake.json."
             )
         if not os.path.isabs(self.ssd_offload_path):
-            raise ValueError(
-                f"ssd_offload_path must be an absolute path, got: {self.ssd_offload_path!r}"
-            )
+            raise ValueError(f"ssd_offload_path must be an absolute path, got: {self.ssd_offload_path!r}")
         if not os.path.isdir(self.ssd_offload_path):
             logger.warning(
                 "ssd_offload_path does not exist or is not a directory: %s. "
