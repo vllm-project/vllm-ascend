@@ -24,6 +24,12 @@ from vllm_ascend.attention.abstract import DSAAttentionImpl
 from vllm_ascend.attention.dsa_v1 import AscendDSABackend
 
 
+# cache_config.block_size: [mla; swa; c4 state; c128 state], [page_size_padded_t1, page_size_padded_t2]
+DSV4_BLOCK_SIZES = {
+    128: [[128, 128, 8, 32], [16640, 131072]],
+    64: [[64, 64, 4, 16], [8320, 65536]],
+    32: [[32, 32, 2, 8], [4160, 32768]],
+}
 class DSAAttention(nn.Module, AttentionLayerBase):
     """Multi-Head Latent Attention layer.
 
@@ -151,7 +157,7 @@ class DSAAttention(nn.Module, AttentionLayerBase):
             return None
         kv_cache_dtype = kv_cache_dtype_str_to_dtype(self.kv_cache_dtype, vllm_config.model_config)
         return MLAAttentionSpec(
-            block_size=128,
+            block_size=DSV4_BLOCK_SIZES[vllm_config.cache_config.block_size][0][0],
             num_kv_heads=1,
             head_size=self.head_size,
             dtype=kv_cache_dtype,
