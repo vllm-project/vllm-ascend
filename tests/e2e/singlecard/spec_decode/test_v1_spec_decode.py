@@ -13,6 +13,7 @@ from vllm.tokenizers.registry import resolve_tokenizer_args
 from vllm.v1.metrics.reader import Counter, Vector
 
 from tests.e2e.conftest import VllmRunner
+from vllm_ascend.utils import vllm_version_is
 
 os.environ["VLLM_WORKER_MULTIPROC_METHOD"] = "spawn"
 
@@ -43,7 +44,11 @@ BASELINES = {
     "eagle": [0.74, 0.44, 0.29],
     "eagle3": [0.68, 0.40, 0.18],
     "draft_parallel": [0.83, 0.50, 0.33, 0.17, 0.17, 0.17, 0.17, 0.00],
-    "dflash": [0.67, 0.67, 0.44, 0.33, 0.11, 0.00, 0.00, 0.00],
+    "dflash": (
+        [0.67, 0.67, 0.44, 0.33, 0.11, 0.00, 0.00, 0.00]
+        if vllm_version_is("0.20.2")
+        else [0.60, 0.50, 0.30, 0.20, 0.20, 0.10, 0.00, 0.00]
+    ),
 }
 
 
@@ -157,7 +162,10 @@ def test_ngram_npu_async_acceptance(
         "num_speculative_tokens": num_speculative_tokens,
     }
 
-    compilation_config = CompilationConfig(cudagraph_capture_sizes=[12])
+    compilation_config = CompilationConfig(
+        cudagraph_mode="PIECEWISE",
+        cudagraph_capture_sizes=[12],
+    )
 
     with VllmRunner(
         model_name,
@@ -245,7 +253,10 @@ def test_suffix_acceptance(
             "num_speculative_tokens": 10,
         },
         max_model_len=1024,
-        cudagraph_capture_sizes=[1, 2, 4, 8],
+        compilation_config={
+            "cudagraph_mode": "PIECEWISE",
+            "cudagraph_capture_sizes": [1, 2, 4, 8],
+        },
         disable_log_stats=False,
     ) as runner:
         for i in range(10):
@@ -431,7 +442,10 @@ def test_parallel_drafting_acceptance(
         "parallel_drafting": True,
     }
 
-    compilation_config = CompilationConfig(cudagraph_capture_sizes=[12])
+    compilation_config = CompilationConfig(
+        cudagraph_mode="PIECEWISE",
+        cudagraph_capture_sizes=[12],
+    )
 
     with VllmRunner(
         main_model_name,
@@ -480,7 +494,6 @@ def test_parallel_drafting_acceptance(
 
 @pytest.mark.parametrize("method", DFLASH.keys())
 @pytest.mark.parametrize("num_speculative_tokens", [8])
-@pytest.mark.skip(reason="DFlash acceptance is currently broken by vllm main(39910f2b25aacc09f5e7f166cdf0030b19f8b9e8)")
 def test_dflash_acceptance(
     method: str,
     num_speculative_tokens: int,

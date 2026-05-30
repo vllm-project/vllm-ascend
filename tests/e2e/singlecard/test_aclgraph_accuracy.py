@@ -77,7 +77,7 @@ CASE_DS_EX = LLMTestCase(
 
 @wait_until_npu_memory_free(0.7)
 @pytest.mark.parametrize("cur_case", [CASE_QWEN_ACLGRAPH, CASE_DS_ACLGRAPH])
-def test_piecewise_res_consistency(cur_case: LLMTestCase):
+def test_default_full_and_piecewise_res_consistency(cur_case: LLMTestCase):
     runner_kwargs = {
         "model_name": cur_case.model,
         "max_model_len": 1024,
