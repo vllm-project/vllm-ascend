@@ -577,7 +577,6 @@ class KVPoolWorker:
                 continue
 
             request.skip_null_blocks_by_group = self.group_uses_align_state
-            request.disable_tp_key_sharding = (self.use_mla or self.use_sparse) and self.put_step > 1
             request.current_event = current_event
             self.kv_send_thread.add_stored_request(  # type: ignore[union-attr]
                 request.req_id
