@@ -1957,8 +1957,7 @@ class NPUModelRunner(GPUModelRunner):
             update_cos_sin(positions)
 
         if self.dynamic_eplb:
-            with record_function_or_nullcontext("EPLB weight D2D"):
-                self.eplb_updator.forward_before()
+            self.eplb_updator.forward_before()
 
         # Set cudagraph mode to none if calc_kv_scales is true.
         # KV scales calculation involves dynamic operations that are incompatible
@@ -2271,8 +2270,7 @@ class NPUModelRunner(GPUModelRunner):
             model_runner_output.execution_time_ms = (time.perf_counter() - self._execution_start_time) * 1000.0
 
         if self.dynamic_eplb:
-            with record_function_or_nullcontext("EPLB update"):
-                self.eplb_updator.forward_end()
+            self.eplb_updator.forward_end()
 
         self._finalize_dump_data()
 
