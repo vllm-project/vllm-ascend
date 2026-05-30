@@ -77,7 +77,7 @@ class AscendW4A8MXFPDSDynamicFusedMoEMethod(AscendW4A8MXFPDynamicFusedMoEMethod)
     """FusedMoe method for Ascend W8A8_DYNAMIC."""
 
     model_dtype = None
-    quant_type: QuantType = QuantType.MXFP8
+    quant_type: QuantType = QuantType.W4A8MXFP
 
     def __init__(self, quant_config, tid2eid = None):
         super().__init__()

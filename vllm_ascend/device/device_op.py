@@ -122,7 +122,7 @@ class BaseDeviceAdaptor:
         use_mxfp_quant: bool = False,
         act_quant_type: torch.dtype | int = torch.float8_e4m3fn,
         weight_quant_type: torch.dtype | int = torch.float8_e4m3fn,
-        swiglu_limit: int = 0,
+        swiglu_limit: float = 0.0,
         mxfp_quant_dtype: QuantType | None = None,
     ):
         if use_mxfp_quant:
@@ -423,7 +423,7 @@ class A5DeviceAdaptor(BaseDeviceAdaptor):
         use_mxfp_quant: bool = False,
         act_quant_type: torch.dtype | int = torch.float8_e4m3fn,
         weight_quant_type: torch.dtype | int = torch.float8_e4m3fn,
-        swiglu_limit: int = 0,
+        swiglu_limit: float = 0.0,
         mxfp_quant_dtype: QuantType | None = None,
     ):
         if not use_mxfp_quant:
@@ -455,9 +455,14 @@ class A5DeviceAdaptor(BaseDeviceAdaptor):
                 weight_dtype=torch_npu.float4_e2m1fn_x2,
                 output_dtype=torch.bfloat16,
             )[0]
-            hidden_states = torch_npu.npu_swiglu(hidden_states)
-            out, out_scale = torch_npu.npu_dynamic_mx_quant(
-                hidden_states, dst_type=torch.float8_e4m3fn, round_mode="rint"
+            # DSV4 need swiglu_limit input
+            out, out_scale, _ = torch.ops._C_ascend.npu_swiglu_group_quant(
+                hidden_states,
+                topk_weight=None,
+                group_index=None,
+                dst_type=torch.float8_e4m3fn,
+                quant_mode=2,
+                clamp_value=swiglu_limit,
             )
         else:
             out, out_scale = torch_npu.npu_grouped_matmul_swiglu_quant_v2(
@@ -557,7 +562,7 @@ class A5DeviceAdaptor(BaseDeviceAdaptor):
             input_dtype=input_dtype,
             act_quant_type=act_quant_type,
             weight_quant_type=weight_quant_type,
-            scale_type=scale_type if mxfp_quant_dtype != QuantType.MXFP4 else None,
+            scale_type=scale_type if mxfp_quant_dtype != QuantType.W4A8MXFP else None,
             per_token_scale_type=per_token_scale_type,
             use_bf16=use_bf16,
             use_mxfp_quant=True,
@@ -571,10 +576,9 @@ class A5DeviceAdaptor(BaseDeviceAdaptor):
         gmm2_weight = weight if isinstance(weight, list) else [weight]
         gmm2_scale = weight_scale if isinstance(weight_scale, list) else [weight_scale]
 
-        # if mxfp_quant_dtype == QuantType.MXFP4:
-        gmm2_scale = None
-        antiquant_scale = weight_scale
-        gmm2_kwargs.update({'antiquant_scale': [antiquant_scale]})
+        if mxfp_quant_dtype == QuantType.W4A8MXFP:
+            gmm2_scale = None  # type: ignore[assignment]
+            gmm2_kwargs.update({"antiquant_scale": [weight_scale]})
 
         if mxfp_quant_dtype == QuantType.W4A8MXFP:
             gmm2_scale = None  # type: ignore[assignment]

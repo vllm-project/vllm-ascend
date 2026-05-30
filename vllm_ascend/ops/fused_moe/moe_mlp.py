@@ -108,8 +108,7 @@ def quant_apply_mlp(
     scale_type: torch.dtype | None = None,
     per_token_scale_type: torch.dtype | None = None,
     use_bf16: bool = True,
-    swiglu_limit: int = 0,
-    use_w4a8_per_channel_gmm_swiglu: bool = False,
+    swiglu_limit: float = 0.0,
 ) -> torch.Tensor:
     input_hidden_dtype = hidden_states.dtype
     use_gmm_swiglu_quant_fusion = use_mxfp_quant or (fusion and not dynamic_eplb)
@@ -162,44 +161,19 @@ def quant_apply_mlp(
             )
         elif use_gmm_swiglu_quant_fusion:
             # gmm1: gate_up_proj & act_fn: swiglu
-            if ASCEND_DEVICE_TYPE != AscendDeviceType.A5:
-                hidden_states, swiglu_out_scale, _ = torch.ops._C_ascend.grouped_matmul_swiglu_quant_weight_nz(
-                    x=hidden_states,
-                    weight=_require_single_tensor_for_swiglu_quant(w1, name="w1"),
-                    group_list=cumsum_group_list(group_list, group_list_type, 0),
-                    weight_scale=_require_single_tensor_for_swiglu_quant(w1_scale, name="w1_scale"),
-                    x_scale=pertoken_scale,
-                    bias=None,
-                    use_mxfp_quant=use_mxfp_quant,
-                    act_quant_type=act_quant_type,
-                    weight_quant_type=weight_quant_type,
-                    swiglu_limit=swiglu_limit,
-                )
-            else:
-                antiquant_scale = _require_single_tensor_for_swiglu_quant(w1_scale, name="w1_scale")
-                hidden_states = torch_npu.npu_grouped_matmul(
-                    x=[hidden_states],
-                    weight=[_require_single_tensor_for_swiglu_quant(w1, name="w1")],
-                    scale=None,
-                    antiquant_scale=[antiquant_scale],
-                    scale_dtype=None,
-                    per_token_scale=[pertoken_scale],
-                    per_token_scale_dtype=torch.float8_e8m0fnu,
-                    split_item=2,
-                    group_type=0,
-                    group_list=cumsum_group_list(group_list, group_list_type, 0),
-                    x_dtype=torch.float8_e4m3fn,
-                    weight_dtype=torch_npu.float4_e2m1fn_x2,
-                    output_dtype=torch.bfloat16
-                )[0]
-                hidden_states, swiglu_out_scale, _ = torch.ops._C_ascend.npu_swiglu_group_quant(
-                    hidden_states,
-                    topk_weight=None,
-                    group_index=None,
-                    dst_type=torch.float8_e4m3fn,
-                    quant_mode=2,
-                    clamp_value=10.0,
-                )
+            hidden_states, swiglu_out_scale, _ = DeviceOperator.npu_grouped_matmul_swiglu_quant(
+                x=hidden_states,
+                weight=_require_single_tensor_for_swiglu_quant(w1, name="w1"),
+                group_list=cumsum_group_list(group_list, group_list_type, 0),
+                weight_scale=_require_single_tensor_for_swiglu_quant(w1_scale, name="w1_scale"),
+                x_scale=pertoken_scale,
+                bias=None,
+                use_mxfp_quant=use_mxfp_quant,
+                act_quant_type=act_quant_type,
+                weight_quant_type=weight_quant_type,
+                swiglu_limit=swiglu_limit,
+                mxfp_quant_dtype=mxfp_quant_dtype,
+            )
             if quantized_hidden_states is not None:
                 dispose_tensor(quantized_hidden_states)
         else:
@@ -312,44 +286,19 @@ def quant_apply_mlp(
                 swiglu_limit=swiglu_limit,
             )
         elif use_gmm_swiglu_quant_fusion:
-            if ASCEND_DEVICE_TYPE != AscendDeviceType.A5:
-                hidden_states, swiglu_out_scale, _ = torch.ops._C_ascend.grouped_matmul_swiglu_quant_weight_nz(
-                    x=hidden_states,
-                    weight=_require_single_tensor_for_swiglu_quant(w1, name="w1"),
-                    group_list=cumsum_group_list(group_list, group_list_type, 0),
-                    weight_scale=_require_single_tensor_for_swiglu_quant(w1_scale, name="w1_scale"),
-                    x_scale=pertoken_scale,
-                    bias=bias1,
-                    use_mxfp_quant=use_mxfp_quant,
-                    act_quant_type=act_quant_type,
-                    weight_quant_type=weight_quant_type,
-                    swiglu_limit=swiglu_limit,
-                )
-            else:
-                antiquant_scale = _require_single_tensor_for_swiglu_quant(w1_scale, name="w1_scale")
-                hidden_states = torch_npu.npu_grouped_matmul(
-                    x=[hidden_states],
-                    weight=[_require_single_tensor_for_swiglu_quant(w1, name="w1")],
-                    scale=None,
-                    antiquant_scale=[antiquant_scale],
-                    scale_dtype=None,
-                    per_token_scale=[pertoken_scale],
-                    per_token_scale_dtype=torch.float8_e8m0fnu,
-                    split_item=2,
-                    group_type=0,
-                    group_list=cumsum_group_list(group_list, group_list_type, 0),
-                    x_dtype=torch.float8_e4m3fn,
-                    weight_dtype=torch_npu.float4_e2m1fn_x2,
-                    output_dtype=torch.bfloat16
-                )[0]
-                hidden_states, swiglu_out_scale, _ = torch.ops._C_ascend.npu_swiglu_group_quant(
-                    hidden_states,
-                    topk_weight=None,
-                    group_index=None,
-                    dst_type=torch.float8_e4m3fn,
-                    quant_mode=2,
-                    clamp_value=10.0,
-                )
+            hidden_states, swiglu_out_scale, _ = DeviceOperator.npu_grouped_matmul_swiglu_quant(
+                x=hidden_states,
+                weight=_require_single_tensor_for_swiglu_quant(w1, name="w1"),
+                group_list=cumsum_group_list(group_list, group_list_type, 0),
+                weight_scale=_require_single_tensor_for_swiglu_quant(w1_scale, name="w1_scale"),
+                x_scale=pertoken_scale,
+                bias=bias1,
+                use_mxfp_quant=use_mxfp_quant,
+                act_quant_type=act_quant_type,
+                weight_quant_type=weight_quant_type,
+                swiglu_limit=swiglu_limit,
+                mxfp_quant_dtype=mxfp_quant_dtype,
+            )
             if quantized_hidden_states is not None:
                 dispose_tensor(quantized_hidden_states)
         else:
