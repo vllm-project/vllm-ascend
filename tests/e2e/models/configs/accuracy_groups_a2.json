@@ -39,6 +39,7 @@
         "Qwen3-Next-80B-A3B-Instruct",
         "Qwen3-Omni-30B-A3B-Instruct",
         "Hunyuan-A13B-Instruct",
+        "NVLM-D-72B",
         "Mixtral-8x7B-Instruct-v0.1"
       ]
     }

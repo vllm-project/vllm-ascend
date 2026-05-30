@@ -66,3 +66,23 @@ def pytest_generate_tests(metafunc):
             single_config = metafunc.config.getoption("--config")
             config_path = Path(single_config).resolve()
             metafunc.parametrize("config_filename", [config_path])
+
+
+def _patch_nvlm_config():
+    from transformers import PretrainedConfig
+
+    original_to_diff_dict = PretrainedConfig.to_diff_dict
+
+    def patched_to_diff_dict(self):
+        try:
+            return original_to_diff_dict(self)
+        except ValueError:
+            if type(self).__name__ == "NVLM_D_Config":
+                return {}
+            raise
+
+    PretrainedConfig.to_diff_dict = patched_to_diff_dict
+
+
+def pytest_configure(config):
+    _patch_nvlm_config()
