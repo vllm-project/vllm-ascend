@@ -108,10 +108,17 @@ class TestRoutedExpertsCapturerCapture:
         actual = capturer.device_buffer[:5, 0, :]
         torch.testing.assert_close(actual, expected)
 
+    @patch("vllm_ascend.ascend_forward_context.get_forward_context")
     @patch("vllm_ascend.patch.worker.patch_routed_experts_capture.get_forward_context")
     @patch("vllm_ascend.patch.worker.patch_routed_experts_capture.get_tp_group")
     @patch("vllm_ascend.patch.worker.patch_routed_experts_capture.dist")
-    def test_sp_modular_kernel_all2all(self, mock_dist, mock_get_tp_group, mock_get_ctx):
+    def test_sp_modular_kernel_all2all(
+        self,
+        mock_dist,
+        mock_get_tp_group,
+        mock_get_ctx,
+        mock_get_ctx1,
+    ):
         """Test SP + modular kernel path with ALLTOALL comm type."""
         capturer = self._create_mock_capturer(dp_rank=0, tp_size=2)
         dp_metadata = self._create_mock_dp_metadata([10])
@@ -122,7 +129,7 @@ class TestRoutedExpertsCapturerCapture:
         mock_get_tp_group.return_value = mock_tp_group
         mock_tp_group.device_group = MagicMock()
 
-        from vllm_ascend.core.forward_context import _EXTRA_CTX, MoECommType
+        from vllm_ascend.ascend_forward_context import _EXTRA_CTX, MoECommType
 
         original_comm_type = getattr(_EXTRA_CTX, "moe_comm_type", None)
         _EXTRA_CTX.moe_comm_type = MoECommType.ALLTOALL
@@ -147,10 +154,17 @@ class TestRoutedExpertsCapturerCapture:
             else:
                 delattr(_EXTRA_CTX, "moe_comm_type")
 
+    @patch("vllm_ascend.ascend_forward_context.get_forward_context")
     @patch("vllm_ascend.patch.worker.patch_routed_experts_capture.get_forward_context")
     @patch("vllm_ascend.patch.worker.patch_routed_experts_capture.get_tp_group")
     @patch("vllm_ascend.patch.worker.patch_routed_experts_capture.dist")
-    def test_sp_modular_kernel_mc2(self, mock_dist, mock_get_tp_group, mock_get_ctx):
+    def test_sp_modular_kernel_mc2(
+        self,
+        mock_dist,
+        mock_get_tp_group,
+        mock_get_ctx,
+        mock_get_ctx1,
+    ):
         """Test SP + modular kernel path with MC2 comm type."""
         capturer = self._create_mock_capturer(dp_rank=0, tp_size=2)
         dp_metadata = self._create_mock_dp_metadata([5, 7])
@@ -161,7 +175,7 @@ class TestRoutedExpertsCapturerCapture:
         mock_get_tp_group.return_value = mock_tp_group
         mock_tp_group.device_group = MagicMock()
 
-        from vllm_ascend.core.forward_context import _EXTRA_CTX, MoECommType
+        from vllm_ascend.ascend_forward_context import _EXTRA_CTX, MoECommType
 
         original_comm_type = getattr(_EXTRA_CTX, "moe_comm_type", None)
         _EXTRA_CTX.moe_comm_type = MoECommType.MC2
