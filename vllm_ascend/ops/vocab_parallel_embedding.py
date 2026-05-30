@@ -161,6 +161,8 @@ class AscendVocabParallelEmbedding(VocabParallelEmbedding):
         return input_, ~vocab_mask
 
     def forward(self, input_):
+        if input_.device != self.weight.device:
+            input_ = input_.to(self.weight.device)
         if self.forward_type == "embed_tp":
             return self._forward_embed_tp(input_)
         else:
