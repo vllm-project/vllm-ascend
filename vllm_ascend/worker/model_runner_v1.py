@@ -3882,17 +3882,12 @@ class NPUModelRunner(GPUModelRunner):
                             current_kv_cache_spec, "page_size_padded", None
                         )
                         if page_size_padded is not None:
-                            # On hybrid models the cache-only layer's page is
-                            # aligned to the (padded) common page of the
-                            # mamba/attention groups, so each block carries extra
-                            # padding bytes that the unpadded kv_cache_shape does
-                            # not cover. Use a strided view whose block-dim stride
-                            # is the full padded page so the padding between blocks
-                            # is skipped, mirroring the page_size_padded handling
-                            # in upstream GPUModelRunner. CacheOnly get_kv_cache_shape
-                            # puts num_blocks at dim 0.
+                            # The cache-only page is aligned to the hybrid common
+                            # page, so each block has trailing padding. Stride the
+                            # block dim (dim 0) by the full padded page to skip it
+                            # (cf. upstream GPUModelRunner page_size_padded view).
                             dtype_size = get_dtype_size(current_kv_cache_spec.dtype)
-                            page_stride = current_kv_cache_spec.page_size_bytes // dtype_size
+                            page_stride = page_size_padded // dtype_size
                             strides = [1] * len(kv_cache_shape)
                             for dim_idx in range(len(kv_cache_shape) - 2, -1, -1):
                                 strides[dim_idx] = strides[dim_idx + 1] * kv_cache_shape[dim_idx + 1]
