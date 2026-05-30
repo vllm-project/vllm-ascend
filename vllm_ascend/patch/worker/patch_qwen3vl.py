@@ -6,7 +6,10 @@ from vllm.model_executor.models.qwen3_vl import (
     Qwen3_VisionTransformer,
     Qwen3VLForConditionalGeneration,
     pos_embed_interpolate_native,
+    Qwen3VLMultiModalProcessor,
+    _cached_tensor,
 )
+from vllm.model_executor.models.utils import _merge_multimodal_embeddings
 
 from vllm_ascend.ascend_forward_context import _EXTRA_CTX
 from vllm_ascend.ops.rotary_embedding import AscendMRotaryEmbedding
@@ -93,6 +96,96 @@ def _fast_pos_embed_interpolate(self, grid_thw: list[list[int]]) -> torch.Tensor
 
 Qwen3_VisionTransformer.fast_pos_embed_interpolate = _fast_pos_embed_interpolate
 
+def _create_final_video_embeddings(
+    self,
+    video_embeddings: torch.Tensor,
+    num_tokens_per_frame: list[int],
+    timestamps: list[float],
+    video_grid_thw: list[int],
+    retention_mask: torch.Tensor,
+) -> torch.Tensor:
+    """Create final embeddings that combine video embeddings with
+    text embeddings of indicator tokens.
+
+    These final embeddings contain:
+    - Actual video embeddings in positions corresponding to video content
+    - Text embeddings for indicator tokens (<img>, </img>, and
+      frame separation text) in their respective positions
+
+    These embeddings will replace the placeholder embeddings to create
+    input_embeds for the LLM.
+    """
+
+    # Generate video replacement token IDs using get_video_repl
+    # This tokenizes each frame separator independently, then uses pre-tokenized
+    # special tokens to ensure consistent tokenization regardless of
+    # num_tokens_per_frame values.
+    video_repl = Qwen3VLMultiModalProcessor.get_video_repl(
+        tokens_per_frame=num_tokens_per_frame,
+        tokenizer=self._tokenizer,
+        timestamps=timestamps,
+        vision_start_token_id=self.config.vision_start_token_id,
+        vision_end_token_id=self.config.vision_end_token_id,
+        video_token_id=self.config.video_token_id,
+        select_token_id=self.is_multimodal_pruning_enabled,
+    )
+
+    repl_token_ids = torch.tensor(video_repl.full, device=video_embeddings.device)
+    embed_token_id = _cached_tensor(
+        self.config.video_token_id, repl_token_ids.device
+    )
+    is_video_embed = torch.isin(repl_token_ids, embed_token_id)
+
+    # Get text embeddings for indicator tokens (has only `visual_dim``).
+    text_embeddings = self.get_language_model().embed_input_ids(repl_token_ids)
+
+    if self.use_deepstack:
+        (
+            deepstack_input_embeds,
+            multimodal_embeddings,
+        ) = self._compute_deepstack_embeds(
+            inputs_embeds=text_embeddings,
+            multimodal_embeddings=[video_embeddings],
+            is_multimodal=is_video_embed,
+        )
+    else:
+        deepstack_input_embeds = None
+        multimodal_embeddings = [video_embeddings]
+
+    merged_embeddings = _merge_multimodal_embeddings(
+        inputs_embeds=text_embeddings,
+        multimodal_embeddings=multimodal_embeddings,
+        is_multimodal=is_video_embed,
+    )
+
+    to_concat = [merged_embeddings]
+    if deepstack_input_embeds is not None:
+        to_concat.append(
+            deepstack_input_embeds.permute(1, 0, 2).reshape(
+                deepstack_input_embeds.shape[1], -1
+            )
+        )
+
+    expanded_positions = None
+    if self.is_multimodal_pruning_enabled:
+        is_vision_start = repl_token_ids.eq(self.config.vision_start_token_id)
+        expanded_positions = self._get_expanded_positions(
+            device=merged_embeddings.device,
+            seq_len=merged_embeddings.shape[0],
+            video_grid_thw=video_grid_thw,
+            num_tokens_per_frame=num_tokens_per_frame,
+            timestamps=timestamps,
+            is_video_embed=is_video_embed,
+            is_vision_start=is_vision_start,
+            retention_mask=retention_mask,
+        )
+        to_concat.append(expanded_positions)
+
+    final_video_embeddings = torch.cat(to_concat, dim=-1)
+
+    return final_video_embeddings
+
+Qwen3VLForConditionalGeneration._create_final_video_embeddings = _create_final_video_embeddings
 
 def patch_qwen3_vl_moe_pp_layer_range():
     try:
