@@ -78,6 +78,8 @@ class AscendPrefillContextParallelMetadata:
     q_head_idx_tensor: torch.Tensor = None
 
     q_tail_idx_tensor: torch.Tensor = None
+    
+    q_head_tail_idx_tensor: torch.Tensor = None
 
     kv_with_q_head_nomask_idx_tensor: torch.Tensor = None
 
@@ -94,6 +96,8 @@ class AscendPrefillContextParallelMetadata:
     kv_with_q_tail_attn_idx_in_tail_tensor: torch.Tensor = None
 
     attn_mask_seqlens: torch.Tensor = None
+    
+    attn_mask_full_seqlens: torch.Tensor = None
 
     head_attn_nomask_seqlens: torch.Tensor = None
 
