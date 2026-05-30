@@ -27,12 +27,14 @@ from pytest_mock import MockerFixture
 
 from vllm_ascend.ascend_forward_context import MoECommType
 from vllm_ascend.ops.fused_moe import fused_moe as fused_moe_module
+from vllm_ascend.ops.fused_moe.experts_selector import _custom_routing_accepts_num_experts
 from vllm_ascend.ops.fused_moe.fused_moe import (
     AscendFusedMoE,
     AscendMoERunner,
     AscendUnquantizedFusedMoEMethod,
 )
 from vllm_ascend.ops.fused_moe.moe_comm_method import FusedExpertsResult
+from vllm_ascend.ops.fused_moe.moe_mlp import unified_apply_mlp
 from vllm_ascend.ops.fused_moe.moe_runtime_args import (
     MoEMlpComputeInput,
     MoEPrepareOutput,
@@ -243,6 +245,87 @@ class MockQuantMethod(nn.Module):
             self.apply = MagicMock(return_value=(torch.randn(num_tokens, 32), torch.randn(num_tokens, 10)))
         else:
             self.apply = MagicMock(return_value=(torch.randn(num_tokens, 32)))
+
+
+class TestUnifiedApplyMLP:
+    @patch("vllm_ascend.utils.get_ascend_device_type", return_value=AscendDeviceType.A3)
+    @patch("torch_npu.npu_grouped_matmul")
+    @patch("torch_npu.npu_swiglu")
+    def test_unified_apply_mlp_without_quantization_gelu(
+        self, mock_npu_swiglu, mock_npu_grouped_matmul, mock_soc_version
+    ):
+        mock_gate_up_out = torch.randn(10, 40, dtype=torch.float16)
+        mock_down_out = torch.randn(10, 20, dtype=torch.float16)
+        mock_npu_grouped_matmul.side_effect = [
+            [mock_gate_up_out],
+            [mock_down_out],
+        ]
+
+        hidden_states = torch.randn(10, 20, dtype=torch.float16)
+        w1 = torch.randn(5, 20, 40, dtype=torch.float16)
+        w2 = torch.randn(5, 40, 20, dtype=torch.float16)
+        group_list = torch.tensor([2, 4, 6, 8, 10], dtype=torch.int64)
+
+        result = unified_apply_mlp(
+            mlp_compute_input=build_mlp_compute_input_fixture(
+                hidden_states=hidden_states,
+                w1=w1,
+                w2=w2,
+                group_list=group_list,
+                with_quant=False,
+                activation="gelu",
+            )
+        )
+
+        assert mock_npu_grouped_matmul.call_count == 2
+        mock_npu_swiglu.assert_not_called()
+        gate, up = mock_gate_up_out.chunk(2, dim=-1)
+        expected_mlp_input = torch.nn.functional.gelu(gate) * up
+        torch.testing.assert_close(
+            mock_npu_grouped_matmul.call_args_list[1].kwargs["x"][0],
+            expected_mlp_input,
+        )
+        if isinstance(result, tuple):
+            result = result[0]
+        torch.testing.assert_close(result, mock_down_out)
+
+
+class TestExpertsSelector:
+    def test_custom_routing_signature_without_num_experts(self):
+        def routing_function(hidden_states, gating_output, topk, renormalize):
+            pass
+
+        assert not _custom_routing_accepts_num_experts(routing_function)
+
+    def test_custom_routing_signature_with_num_experts(self):
+        def routing_function(hidden_states, gating_output, topk, renormalize, num_experts):
+            pass
+
+        assert _custom_routing_accepts_num_experts(routing_function)
+
+    def test_custom_routing_signature_with_kwargs(self):
+        def routing_function(**kwargs):
+            pass
+
+        assert _custom_routing_accepts_num_experts(routing_function)
+
+    def test_custom_routing_signature_uninspectable(self, mocker):
+        mocker.patch(
+            "vllm_ascend.ops.fused_moe.experts_selector.inspect.signature",
+            side_effect=ValueError,
+        )
+
+        assert not _custom_routing_accepts_num_experts(object())
+
+    def test_custom_routing_signature_unhashable_callable(self):
+        class RoutingFunction:
+            def __eq__(self, other):
+                return self is other
+
+            def __call__(self, hidden_states, gating_output, topk, renormalize, num_experts):
+                pass
+
+        assert _custom_routing_accepts_num_experts(RoutingFunction())
 
 
 def _drop_self(signature: inspect.Signature) -> list[inspect.Parameter]:

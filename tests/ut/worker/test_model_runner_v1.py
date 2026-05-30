@@ -149,6 +149,38 @@ class TestNPUModelRunnerOutputTokenIds(unittest.TestCase):
         self.assertEqual(actual_output_token_ids[1], [4, 5, 7])
 
 
+class TestNPUModelRunnerModelForward(unittest.TestCase):
+    def test_model_forward_keeps_input_ids_for_multimodal_embeds(self):
+        runner = NPUModelRunner.__new__(NPUModelRunner)
+        runner.model = MagicMock(return_value=torch.randn(3, 4))
+        runner.supports_mm_inputs = True
+        runner.enable_enpu = False
+        runner.input_ids = SimpleNamespace(gpu=torch.arange(8))
+        runner._update_full_graph_params_if_needed = MagicMock()
+
+        forward_context = SimpleNamespace(flash_comm_v1_enabled=False)
+        positions = torch.arange(3)
+        inputs_embeds = torch.randn(3, 4)
+
+        with patch(
+            "vllm_ascend.worker.model_runner_v1.get_forward_context",
+            return_value=forward_context,
+        ):
+            runner._model_forward(
+                3,
+                input_ids=None,
+                positions=positions,
+                inputs_embeds=inputs_embeds,
+                mm_kwargs="kept",
+            )
+
+        call_kwargs = runner.model.call_args.kwargs
+        torch.testing.assert_close(call_kwargs["input_ids"], torch.arange(3))
+        self.assertIs(call_kwargs["positions"], positions)
+        self.assertIs(call_kwargs["inputs_embeds"], inputs_embeds)
+        self.assertEqual(call_kwargs["mm_kwargs"], "kept")
+
+
 class TestNPUModelRunnerDebugger(unittest.TestCase):
     def _build_runner(self, debugger=None):
         runner = NPUModelRunner.__new__(NPUModelRunner)
