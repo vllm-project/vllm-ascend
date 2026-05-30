@@ -27,8 +27,8 @@
 #include "tiling/tiling_api.h"
 #include "exe_graph/runtime/tiling_context.h"
 #include "register/op_def_registry.h"
-#include "../op_kernel/compressor_template_tiling_key.h"
-#include "../op_kernel/compressor_tiling_data.h"
+#include "../../op_kernel/arch32/compressor_template_tiling_key.h"
+#include "../../op_kernel/arch32/compressor_tiling_data.h"
 #include "platform/platform_info.h"
 
 #ifdef ASCENDC_OP_TEST
