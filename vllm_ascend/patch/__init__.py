@@ -54,18 +54,42 @@
 #    Future Plan:
 #       Remove this patch when vLLM merges the PR.
 #
-# ** 3. File: platform/patch_multiproc_executor.py**
+# ** 3. Files: platform/patch_multiproc_executor.py,
+#               platform/patch_engine_core_parallel_startup.py**
 # ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 #   1. `vllm.v1.executor.multiproc_executor.MultiprocExecutor`
+#      (`patch_multiproc_executor`, imported from `patch/platform/__init__.py`)
 #    Why:
-#       vLLM create child process with daemon=True, which doesn't work with EPLB case, since EPLB will create
-#       a new process which is not allowed by daemon=True.
+#       (a) vLLM historically used daemon=True on worker processes; that breaks EPLB-style
+#       flows that spawn additional processes from workers. Ascend keeps daemon=False on
+#       the patched worker proc.
+#       (b) The Ascend `_init_executor` replacement also matches upstream async parallel
+#       worker `Process.start()` (spawn, non-CPU OMP, multiple local ranks), aligned with
+#       vLLM commit 10189846215751d9c4eb1b8b94e86e9d2940f877.
 #    How：
-#       Set daemon=False in MultiprocExecutor.
+#       Both modules are imported unconditionally from `patch/platform/__init__.py` (after
+#       other platform patches), in order: `patch_multiproc_executor` then
+#       `patch_engine_core_parallel_startup`. This replaces the old behavior where
+#       `patch_multiproc_executor` imported only under DYNAMIC_EPLB / EXPERT_MAP_RECORD.
 #    Related PR (if no, explain why):
-#       Find a way to support daemon=False in vLLM
+#       Upstream reference: commit 10189846215751d9c4eb1b8b94e86e9d2940f877
 #    Future Plan:
-#       Remove this patch when vLLM fix the issue.
+#       Remove ascend-specific multiprocess patching when upstream supports required
+#       daemon/async startup semantics for Ascend uniformly.
+#
+#   2. `vllm.v1.engine.utils.CoreEngineProcManager` (optional backport via
+#      `patch_engine_core_parallel_startup`)
+#    Why:
+#       Older vLLM may lack asyncio-based parallel EngineCore process startup inside
+#       CoreEngineProcManager (same semantics as upstream commit above).
+#    How：
+#       If `CoreEngineProcManager` has no `_run_async_startup`, replace the class with
+#       ascend-local `_AscendCoreEngineProcManagerBackport`. If already present (newer vLLM),
+#       patch is skipped (logger.debug).
+#    Related PR (if no, explain why):
+#       Same upstream commit semantics.
+#    Future Plan:
+#       Remove backport once minimum supported vLLM always ships async EngineCore startup.
 #
 # ** 5. File: platform/patch_balance_schedule.py**
 # ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
