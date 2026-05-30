@@ -25,6 +25,7 @@ from vllm_ascend.device.device_op import DeviceOperator
 from vllm_ascend.device.mxfp_compat import (
     ensure_mxfp8_moe_available,
 )
+from vllm_ascend.lora.moe_lora_ops import apply_moe_lora_w13, apply_moe_lora_w2
 from vllm_ascend.ops.activation import AscendSwigluOAIAndMul
 from vllm_ascend.ops.fused_moe.moe_runtime_args import MoEMlpComputeInput
 from vllm_ascend.utils import (
@@ -103,7 +104,7 @@ def quant_apply_mlp(
     use_bf16: bool = True,
     swiglu_limit: int = 0,
     use_w4a8_per_channel_gmm_swiglu: bool = False,
-) -> torch.Tensor:
+) -> tuple[torch.Tensor, torch.Tensor | None]:
     input_hidden_dtype = hidden_states.dtype
     use_gmm_swiglu_quant_fusion = use_mxfp_quant or (fusion and not dynamic_eplb)
 
@@ -352,6 +353,7 @@ def unquant_apply_mlp(
     group_list_type: int = 1,
     topk_scales: torch.Tensor | None = None,
     need_trans: bool = True,
+    lora_params=None,
 ) -> torch.Tensor:
     if need_trans:
         w1 = w1.transpose(1, 2)
@@ -368,6 +370,16 @@ def unquant_apply_mlp(
         group_type=0,
         group_list=group_list,
     )[0]
+
+    if lora_params is not None:
+        apply_moe_lora_w13(
+            gate_up_out=gate_up_out,
+            hidden_states=hidden_states,
+            w13_lora_a_stacked=lora_params.w13_lora_a_stacked,
+            w13_lora_b_stacked=lora_params.w13_lora_b_stacked,
+            lora_expert_indices=lora_params.lora_expert_indices,
+            scale=1.0,
+        )
 
     if act_name == "swigluoai":
         num_experts, _, hidden_size = w1.shape
@@ -387,6 +399,17 @@ def unquant_apply_mlp(
         group_type=0,
         group_list=group_list,
     )[0]
+
+    if lora_params is not None:
+        apply_moe_lora_w2(
+            activated_out=gate_up_out,
+            w2_output=hidden_states,
+            w2_lora_a_stacked=lora_params.w2_lora_a_stacked,
+            w2_lora_b_stacked=lora_params.w2_lora_b_stacked,
+            lora_expert_indices=lora_params.lora_expert_indices,
+            scale=1.0,
+        )
+
     return hidden_states, None
 
 
@@ -415,6 +438,7 @@ def unified_apply_mlp(*, mlp_compute_input: MoEMlpComputeInput) -> torch.Tensor:
     dynamic_eplb = mlp_compute_input.dynamic_eplb
     fusion = mlp_compute_input.fusion
     swiglu_limit = mlp_compute_input.swiglu_limit
+    lora_params = getattr(mlp_compute_input, 'lora_params', None)
 
     if not mlp_compute_input.quant.is_quant:
         return unquant_apply_mlp(
@@ -428,6 +452,7 @@ def unified_apply_mlp(*, mlp_compute_input: MoEMlpComputeInput) -> torch.Tensor:
             group_list_type=group_list_type,
             topk_scales=topk_scales,
             need_trans=need_trans,
+            lora_params=lora_params,
         )
 
     assert w1_scale is not None and w2_scale is not None

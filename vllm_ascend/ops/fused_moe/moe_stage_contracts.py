@@ -17,7 +17,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Generic, TypeVar
+from typing import Any, Generic, TypeVar
 
 import numpy as np
 import torch
@@ -56,9 +56,26 @@ class MoEWeights:
 
 
 @dataclass(frozen=True, slots=True)
-class MoEFusedExpertsInput:
-    """Top-level input for the routed experts pipeline."""
+class MoELoRAContext:
+    w13_lora_a_stacked: tuple[torch.Tensor, ...]
+    w13_lora_b_stacked: tuple[torch.Tensor, ...]
+    w2_lora_a_stacked: tuple[torch.Tensor, ...]
+    w2_lora_b_stacked: tuple[torch.Tensor, ...]
+    punica_wrapper: Any
+    num_experts: int
 
+
+@dataclass(frozen=True, slots=True)
+class MoELoRAParams:
+    w13_lora_a_stacked: tuple[torch.Tensor, ...]
+    w13_lora_b_stacked: tuple[torch.Tensor, ...]
+    w2_lora_a_stacked: tuple[torch.Tensor, ...]
+    w2_lora_b_stacked: tuple[torch.Tensor, ...]
+    lora_expert_indices: torch.Tensor
+
+
+@dataclass(frozen=True, slots=True)
+class MoEFusedExpertsInput:
     hidden_states: torch.Tensor
     topk_weights: torch.Tensor
     topk_ids: torch.Tensor
@@ -69,6 +86,7 @@ class MoEFusedExpertsInput:
     need_trans: bool = False
     dynamic_eplb: bool = False
     swiglu_limit: int = 0
+    lora_context: MoELoRAContext | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -141,6 +159,7 @@ class MoEMlpComputeInput:
     need_trans: bool = False
     dynamic_eplb: bool = False
     swiglu_limit: int = 0
+    lora_params: MoELoRAParams | None = None
 
 
 __all__ = [
