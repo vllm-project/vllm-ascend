@@ -444,7 +444,13 @@ class KVPoolWorker:
                 )
                 continue
             request.skip_null_blocks_by_group = self.group_uses_align_state
-            load_group_ids = request.kv_cache_group_ids or [0]
+            # Align with lookup_scheduler: only fetch groups that the gate
+            # actually validated (DSV4 lookups only verify c1; other groups
+            # are partially stored and would surface as Mooncake get errors).
+            request.kv_cache_group_ids = self._get_lookup_gate_group_ids(
+                request.kv_cache_group_ids or list(range(self.num_kv_cache_groups))
+            )
+            load_group_ids = request.kv_cache_group_ids
             token_len = request.token_len_chunk
             if (load_spec.kvpool_cached_tokens % self.cache_transfer_granularity != 0) and (
                 load_spec.kvpool_cached_tokens == token_len - 1
@@ -577,6 +583,13 @@ class KVPoolWorker:
                 continue
 
             request.skip_null_blocks_by_group = self.group_uses_align_state
+            # Align with lookup gate groups so consumers can later get() back
+            # exactly what we put. For DSV4 this restricts pool writes to the
+            # complete c1 KV stream and skips the partially-stored c4/c128/mixed
+            # groups whose get() would otherwise log batch_get failures.
+            request.kv_cache_group_ids = self._get_lookup_gate_group_ids(
+                request.kv_cache_group_ids or list(range(self.num_kv_cache_groups))
+            )
             request.current_event = current_event
             self.kv_send_thread.add_stored_request(  # type: ignore[union-attr]
                 request.req_id
