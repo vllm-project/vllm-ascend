@@ -665,6 +665,7 @@ class TestAscendC8AttentionBackendImplScales(TestBase):
         num_blocks = 2
         nz_dim = head_size // NZ_FMT_LAST_DIM
         impl = self._make_impl(num_kv_heads, head_size)
+        impl.key_cache = torch.empty(num_blocks, block_size, num_kv_heads, head_size)
         layer = self._make_layer(num_kv_heads, head_size)
         impl._prepare_c8_scales(layer, torch.device("cpu"))
 

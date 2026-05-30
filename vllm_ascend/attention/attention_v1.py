@@ -1776,7 +1776,7 @@ class AscendC8AttentionBackendImpl(AscendAttentionBackendImpl):
                 value=value[: attn_metadata.num_actual_tokens] if not encoder_decoder else value,
                 key_cache=k_cache_layer,
                 value_cache=v_cache_layer,
-                slot_mapping=slots,
+                slot_mapping=slots[: attn_metadata.num_actual_tokens] if not encoder_decoder else slots,
             )
 
             if self.is_kv_producer:
