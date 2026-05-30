@@ -22,6 +22,8 @@ import torch
 import torch_npu
 from vllm.logger import logger
 
+from vllm.logger import logger
+
 from .base import AscendLinearScheme
 from .registry import register_scheme
 
