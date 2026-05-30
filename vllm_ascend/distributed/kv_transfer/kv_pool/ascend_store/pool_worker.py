@@ -444,7 +444,8 @@ class KVPoolWorker:
                 )
                 continue
             request.skip_null_blocks_by_group = self.group_uses_align_state
-            load_group_ids = request.kv_cache_group_ids or [0]
+            load_group_ids = self._get_lookup_gate_group_ids(request.kv_cache_group_ids or [0])
+            request.kv_cache_group_ids = load_group_ids
             token_len = request.token_len_chunk
             if (load_spec.kvpool_cached_tokens % self.cache_transfer_granularity != 0) and (
                 load_spec.kvpool_cached_tokens == token_len - 1
