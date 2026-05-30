@@ -956,19 +956,23 @@ class VllmRunner:
         )
 
     @staticmethod
-    def _finalize_generate_outputs(req_outputs: list[RequestOutput]) -> list[tuple[list[list[int]], list[str]]]:
-        outputs: list[tuple[list[list[int]], list[str]]] = []
+    def _finalize_generate_outputs(
+        req_outputs: list[RequestOutput],
+    ) -> list[tuple[list[list[int]], list[str], list[np.ndarray | None]]]:
+        outputs: list[tuple[list[list[int]], list[str], list[np.ndarray | None]]] = []
         for req_output in req_outputs:
             prompt_str = req_output.prompt
             prompt_ids = req_output.prompt_token_ids
             req_sample_output_ids: list[list[int]] = []
             req_sample_output_strs: list[str] = []
+            req_sample_routed_experts: list[np.ndarray | None] = []
             for sample in req_output.outputs:
                 output_str = sample.text
                 output_ids = list(sample.token_ids)
                 req_sample_output_ids.append(prompt_ids + output_ids)
                 req_sample_output_strs.append((prompt_str or "") + output_str)
-            outputs.append((req_sample_output_ids, req_sample_output_strs))
+                req_sample_routed_experts.append(sample.routed_experts)
+            outputs.append((req_sample_output_ids, req_sample_output_strs, req_sample_routed_experts))
         return outputs
 
     def get_inputs(
@@ -1011,7 +1015,7 @@ class VllmRunner:
         videos: PromptVideoInput | None = None,
         audios: PromptAudioInput | None = None,
         **kwargs: Any,
-    ) -> list[tuple[list[list[int]], list[str]]]:
+    ) -> list[tuple[list[list[int]], list[str], list[np.ndarray | None]]]:
         inputs = self.get_inputs(prompts, images=images, videos=videos, audios=audios)
         req_outputs = self.model.generate(inputs, sampling_params=sampling_params, **kwargs)
         return self._finalize_generate_outputs(req_outputs)
@@ -1062,7 +1066,7 @@ class VllmRunner:
     ) -> list[tuple[list[int], str]]:
         greedy_params = SamplingParams(temperature=0.0, max_tokens=max_tokens)
         outputs = self.generate(prompts, greedy_params, images=images, videos=videos, audios=audios, **kwargs)
-        return [(output_ids[0], output_str[0]) for output_ids, output_str in outputs]
+        return [(output_ids[0], output_str[0]) for output_ids, output_str, _ in outputs]
 
     def generate_greedy_logprobs(
         self,
@@ -1331,7 +1335,7 @@ class DPVllmRunner(VllmRunner):
         videos: PromptVideoInput | None = None,
         audios: PromptAudioInput | None = None,
         **kwargs: Any,
-    ) -> list[tuple[list[list[int]], list[str]]]:
+    ) -> list[tuple[list[list[int]], list[str], list[np.ndarray | None]]]:
         return self._dispatch_prompt_command(
             "generate",
             prompts,

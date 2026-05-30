@@ -5,7 +5,7 @@ import pytest
 from vllm import SamplingParams
 from vllm.sampling_params import RequestOutputKind
 
-from tests.e2e.conftest import VllmRunner
+from tests.e2e.conftest import DPVllmRunner
 
 MODELS = [
     "Qwen/Qwen3.5-35B-A3B",
@@ -19,7 +19,7 @@ def test_moe_routing_replay(model, enforce_eager):
     prompts = [
         "Hello, please introduce yourself.",
     ]
-    with VllmRunner(
+    with DPVllmRunner(
         model,
         enforce_eager=enforce_eager,
         tensor_parallel_size=2,
@@ -33,7 +33,11 @@ def test_moe_routing_replay(model, enforce_eager):
             max_tokens=5, temperature=0.8, top_p=0.95, output_kind=RequestOutputKind.FINAL_ONLY
         )
         inputs = vllm_model.get_inputs(prompts=prompts)
-        outputs = vllm_model.model.generate(prompts=inputs, sampling_params=sampling_params)
-        assert outputs[0].finished
-        assert len(outputs[0].outputs[0].text) > 0
-        assert outputs[0].outputs[0].routed_experts.size > 0
+        outputs = vllm_model.generate(prompts=inputs, sampling_params=sampling_params)
+        output_ids, output_strs, routed_experts = outputs[0]
+        assert len(output_ids) > 0
+        assert len(output_strs) > 0
+        assert routed_experts is not None
+        assert len(routed_experts) > 0
+        assert routed_experts[0] is not None
+        assert routed_experts[0].size > 0
