@@ -553,10 +553,8 @@ class XliteGraphConfig:
         self.enabled = xlite_graph_config.get("enabled", False)
         self.full_mode = xlite_graph_config.get("full_mode", False)
         if self.enabled:
-            if bool(vllm_config.speculative_config):
-                raise RuntimeError(
-                    "Xlite graph mode is not compatible with speculative decoding. Please disable speculative decoding."
-                )
+            if bool(vllm_config.speculative_config) and vllm_config.speculative_config.num_speculative_tokens != 1:
+                raise RuntimeError("Xlite graph mode only support speculative decoding with num_speculative_tokens=1.")
             if vllm_config.parallel_config.pipeline_parallel_size > 1:
                 raise RuntimeError(
                     "Xlite graph mode is not compatible with pipeline parallelism. "
