@@ -33,6 +33,11 @@ Kimi-K2.5.md
 PaddleOCR-VL.md
 MiniMax-M2.5.md
 Hunyuan-A13B-Instruct.md
+Hy3-preview.md
 Minitron-8B-Base.md
 LLaVA-OneVision-Qwen2-0.5B-OV.md
+gpt-oss-120b.md
+Mixtral-8x7B-Instruct-v0.1.md
+Qwen3-ASR-1.7B.md
+Qwen2.5-Math-RM-72B.md
 :::

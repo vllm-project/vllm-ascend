@@ -86,6 +86,10 @@ packed_modules_model_mapping: dict[str, dict[str, list[str]]] = {
         "experts": ["experts.0.gate_proj", "experts.0.up_proj", "experts.0.down_proj"],
         "fused_qkv_a_proj": ["q_a_proj", "kv_a_proj_with_mqa"],
     },
+    "deepseek_v4": {
+        "gate_up_proj": ["gate_proj", "up_proj"],
+        "experts": ["experts.0.gate_proj", "experts.0.up_proj", "experts.0.down_proj"],
+    },
     "pangu_ultra_moe": {
         "gate_up_proj": ["gate_proj", "up_proj"],
         "experts": ["experts.0.gate_proj", "experts.0.up_proj", "experts.0.down_proj"],
@@ -255,6 +259,28 @@ packed_modules_model_mapping: dict[str, dict[str, list[str]]] = {
 }
 
 
+QUANT_MODEL_PREFIX_MAPPINGS = {
+    "deepseek_v4": {
+        "layers.": "model.layers.",
+        "embed.": "model.embed_tokens.",
+        "head.": "lm_head.",
+    },
+}
+
+
+QUANT_MODEL_SUBSTR_MAPPINGS = {
+    "deepseek_v4": {
+        ".attn.": ".sefl_attn.",
+        ".w1.": ".gate_proj.",
+        ".w2.": ".down_proj.",
+        ".w3.": ".up_proj.",
+        ".ffn.": ".mlp.",
+        ".ffn_norm.": ".post_attention_layernorm.",
+        ".attn_norm.": ".input_layernorm.",
+    },
+}
+
+
 def get_packed_modules_mapping(model_type: str) -> dict[str, list[str]]:
     """Get packed modules mapping for a model type.
 
@@ -293,11 +319,13 @@ def get_linear_quant_type(
             if quant_type is None:
                 quant_type = shard_quant_type
             elif shard_quant_type != quant_type:
-                raise ValueError(
-                    f"Not all shards of {prefix} are quantized with same quant type."
-                    f"Shard {proj_name} uses {shard_quant_type}, but another shard"
-                    f"use {quant_type}. Please check quantization config."
+                err_msg = (
+                    f"Not all shards of {prefix} are quantized with same quant type. "
+                    f"Shard {proj_name} uses {shard_quant_type}, but another shard "
+                    f"uses {quant_type}. Please check quantization config."
                 )
+                logger.error(err_msg)
+                raise ValueError(err_msg)
     else:
         quant_type = quant_description[prefix + ".weight"]
     return quant_type
@@ -356,14 +384,18 @@ def create_scheme_for_layer(
     quant_type = get_quant_type_for_layer(quant_description, prefix, layer_type, packed_modules_mapping)
 
     if quant_type is None:
-        raise ValueError(f"Could not determine quantization type for layer {prefix}.")
+        err_msg = f"Could not determine quantization type for layer {prefix} (layer_type={layer_type})."
+        logger.error(err_msg)
+        raise ValueError(err_msg)
 
     # Use registry to get scheme class
     scheme_cls = get_scheme_class(quant_type, layer_type)
     if scheme_cls is not None:
         return scheme_cls()
 
-    raise NotImplementedError(f"Currently, vLLM Ascend doesn't support {quant_type} for {layer_type}.")
+    err_msg = f"Currently, vLLM Ascend doesn't support quant_type={quant_type} for layer_type={layer_type}."
+    logger.error(err_msg)
+    raise NotImplementedError(err_msg)
 
 
 @register_quantization_config(ASCEND_QUANTIZATION_METHOD)
@@ -397,6 +429,7 @@ class AscendModelSlimConfig(QuantizationConfig):
 
     @classmethod
     def get_min_capability(cls) -> int:
+        logger.error("Ascend hardware does not support 'get_min_capability' feature.")
         raise NotImplementedError('Ascend hardware dose not support "get_min_capability" feature.')
 
     @classmethod
@@ -460,9 +493,14 @@ class AscendModelSlimConfig(QuantizationConfig):
 
     def quant_prefix_mapper(self, model_type: str, prefix: str) -> str:
         self.model_type = model_type
+        prefix_mapping = QUANT_MODEL_PREFIX_MAPPINGS.get(model_type)
+        substr_mapping = QUANT_MODEL_SUBSTR_MAPPINGS.get(model_type)
+        if prefix_mapping:
+            hf_to_vllm_mapper = WeightsMapper(orig_to_new_prefix=prefix_mapping, orig_to_new_substr=substr_mapping)
+            return hf_to_vllm_mapper._map_name(prefix)
         return prefix
 
-    def get_quant_method(self, layer: torch.nn.Module, prefix: str) -> Optional["QuantizeMethodBase"]:
+    def get_quant_method(self, layer: torch.nn.Module, prefix: str, tid2eid=None) -> Optional["QuantizeMethodBase"]:
         from .method_adapters import (
             AscendEmbeddingMethod,
             AscendFusedMoEMethod,
@@ -500,31 +538,40 @@ class AscendModelSlimConfig(QuantizationConfig):
                 # Delayed import to avoid circular import
                 from vllm_ascend.ops.linear import AscendUnquantizedLinearMethod
 
+                logger.debug("Select AscendUnquantizedLinearMethod for %s (layer=%s)", prefix, "LinearBase")
                 return AscendUnquantizedLinearMethod()
             scheme = create_scheme_for_layer(self.quant_description, prefix, "linear", self.packed_modules_mapping)
+            logger.debug("Select AscendLinearMethod for %s (layer=%s)", prefix, "LinearBase")
             return AscendLinearMethod(scheme)
         elif isinstance(layer, AttentionLayerBase) and (
             self.is_fa_quant_layer(prefix) or self.is_indexer_quant_layer(prefix)
         ):
             scheme = create_scheme_for_layer(self.quant_description, prefix, "attention", self.packed_modules_mapping)
+            logger.debug("Select AscendKVCacheMethod for %s (layer=%s)", prefix, "AttentionLayerBase[fa/indexer]")
             return AscendKVCacheMethod(scheme)
         elif isinstance(layer, AttentionLayerBase) and self.quant_description.get("kv_cache_type") == "C8":
             from .methods.kv_c8 import AscendC8KVCacheAttentionMethod
 
+            logger.debug("Select AscendKVCacheMethod(C8) for %s (layer=%s)", prefix, "AttentionLayerBase[C8]")
             return AscendKVCacheMethod(AscendC8KVCacheAttentionMethod(self.quant_description, prefix))
         elif isinstance(layer, FusedMoE):
             if self.is_layer_skipped_ascend(prefix, self.packed_modules_mapping):
                 # Delayed import to avoid circular import
                 from vllm_ascend.ops.fused_moe.fused_moe import AscendUnquantizedFusedMoEMethod
 
+                logger.debug("Select AscendUnquantizedFusedMoEMethod for %s (layer=%s)", prefix, "FusedMoE")
                 return AscendUnquantizedFusedMoEMethod(layer.moe_config)
             scheme = create_scheme_for_layer(self.quant_description, prefix, "moe", self.packed_modules_mapping)
-            return AscendFusedMoEMethod(scheme, layer.moe_config)
+            logger.debug("Select AscendFusedMoEMethod for %s (layer=%s)", prefix, "FusedMoE")
+            return AscendFusedMoEMethod(scheme, layer.moe_config, tid2eid)
         elif isinstance(layer, VocabParallelEmbedding):
             if self.is_layer_skipped_ascend(prefix, self.packed_modules_mapping):
+                logger.debug("Select UnquantizedEmbeddingMethod for %s (layer=%s)", prefix, "VocabParallelEmbedding")
                 return UnquantizedEmbeddingMethod()
             scheme = create_scheme_for_layer(self.quant_description, prefix, "linear", self.packed_modules_mapping)
+            logger.debug("Select AscendEmbeddingMethod for %s (layer=%s)", prefix, "VocabParallelEmbedding")
             return AscendEmbeddingMethod(scheme)
+        logger.debug("No quant method matched for %s, falling back to base", prefix)
         return None
 
     def is_layer_skipped_ascend(self, prefix: str, fused_mapping: Mapping[str, list[str]] = MappingProxyType({})):
@@ -645,6 +692,12 @@ class AscendModelSlimConfig(QuantizationConfig):
             json_names = [os.path.basename(f) for f in json_files]
 
         # Config file not found - raise a friendly error message
+        logger.error(
+            "ModelSlim quantization config not found for model '%s'. Searched path: %s. Found JSON files: %s.",
+            model_name,
+            model_name,
+            json_names if json_names else "N/A",
+        )
         raise ValueError(
             "\n"
             + "=" * 80
@@ -696,6 +749,49 @@ class AscendModelSlimConfig(QuantizationConfig):
         This handles known key transformations such as shared_head and
         weight_packed mappings.
         """
+        if "hc_head_fn" in self.quant_description:
+            # TODO
+            extra_quant_dict = {}
+            for name in self.quant_description:
+                new_name = name
+                if not name.startswith("model"):
+                    new_name = f"model.{name}"
+                extra_quant_dict[new_name] = self.quant_description[name]
+            self.quant_description.update(extra_quant_dict)
+
+            extra_quant_dict = {}
+            for name in self.quant_description:
+                new_name = name
+                if "attn" in name and "self_attn" not in name:
+                    new_name = name.replace(".attn.", ".self_attn.")
+                extra_quant_dict[new_name] = self.quant_description[name]
+            self.quant_description.update(extra_quant_dict)
+
+            extra_quant_dict = {}
+            for name in self.quant_description:
+                new_name = name
+                if "ffn" in name:
+                    new_name = name.replace("ffn", "mlp")
+                extra_quant_dict[new_name] = self.quant_description[name]
+            self.quant_description.update(extra_quant_dict)
+
+            extra_quant_dict = {}
+            for name in self.quant_description:
+                new_name = name
+                if "w1" in name:
+                    new_name = name.replace(".w1.", ".gate_proj.")
+                if "w2" in name:
+                    new_name = name.replace(".w2.", ".down_proj.")
+                if "w3" in name:
+                    new_name = name.replace(".w3.", ".up_proj.")
+
+                if "head" in name and "lm_head" not in name:
+                    new_name = name.replace("head", "lm_head")
+                if "embed" in name and "embed_tokens" not in name:
+                    new_name = name.replace("embed", "embed_tokens")
+                extra_quant_dict[new_name] = self.quant_description[name]
+            self.quant_description.update(extra_quant_dict)
+
         extra_quant_dict = {}
         for k in self.quant_description:
             if "shared_head" in k:

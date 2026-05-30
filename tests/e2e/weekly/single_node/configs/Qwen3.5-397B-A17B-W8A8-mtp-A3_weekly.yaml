@@ -1,0 +1,403 @@
+# ==========================================
+# ACTUAL TEST CASES
+# ==========================================
+
+
+_envs: &envs
+      VLLM_USE_MODELSCOPE: "true"
+      PYTORCH_NPU_ALLOC_CONF: "expandable_segments:True"
+      HCCL_OP_EXPANSION_MODE: "AIV"
+      HCCL_BUFFSIZE: "1024"
+      OMP_NUM_THREADS: "1"
+      TASK_QUEUE_ENABLE: "1"
+      SERVER_PORT: "DEFAULT_PORT"
+      VLLM_ASCEND_ENABLE_FUSED_MC2: "1"
+      VLLM_ASCEND_ENABLE_FLASHCOMM1: "1"
+      VLLM_ENGINE_READY_TIMEOUT_S: "3000"
+      VLLM_RPC_TIMEOUT: "600"
+_server_cmd: &server_cmd
+      - "--tensor-parallel-size"
+      - "16"
+      - "--data-parallel-size"
+      - "1"
+      - "--enable-expert-parallel"
+      - "--port"
+      - "$SERVER_PORT"
+      - "--max-num-seqs"
+      - "128"
+      - "--quantization"
+      - "ascend"
+      - "--max-num-batched-tokens"
+      - "16384"
+      - "--trust-remote-code"
+      - "--gpu-memory-utilization"
+      - "0.9"
+      - "--additional-config"
+      - '{"enable_cpu_binding":true}'
+      - "--allowed-local-media-path"
+      - "/"
+      - "--mm-processor-cache-gb"
+      - "0"
+      - "--safetensors-load-strategy"
+      - "lazy"
+_benchmarks: &benchmarks
+      perf:
+        case_type: performance
+        dataset_path: vllm-ascend/GSM8K-in131072-bs100-qwen3
+        request_conf: vllm_api_stream_chat
+        dataset_conf: gsm8k/gsm8k_gen_0_shot_cot_str_perf
+        num_prompts: 8
+        max_out_len: 1024
+        batch_size: 2
+        request_rate: 0
+        baseline: 1
+        threshold: 0.97
+
+
+_benchmarks_bs144: &benchmarks_bs144
+    perf:
+      case_type: performance
+      dataset_path: vllm-ascend/GSM8K_prefix0_in16384_bs200_qwen3
+      request_conf: vllm_api_stream_chat
+      dataset_conf: gsm8k/gsm8k_gen_0_shot_cot_str_perf
+      num_prompts: 144
+      max_out_len: 1024
+      batch_size: 36
+      request_rate: 0
+      baseline: 1
+      threshold: 0.97
+
+_benchmarks_bs36: &benchmarks_bs36
+    perf:
+      case_type: performance
+      dataset_path: vllm-ascend/GSM8K_prefix0_in16384_bs100_qwen3_5
+      request_conf: vllm_api_stream_chat
+      dataset_conf: gsm8k/gsm8k_gen_0_shot_cot_str_perf
+      num_prompts: 36
+      max_out_len: 1024
+      batch_size: 9
+      request_rate: 0
+      baseline: 1
+      threshold: 0.97
+
+_benchmarks_bs48: &benchmarks_bs48
+    perf:
+      case_type: performance
+      dataset_path: vllm-ascend/GSM8K_prefix0_in32768_bs100_qwen3
+      request_conf: vllm_api_stream_chat
+      dataset_conf: gsm8k/gsm8k_gen_0_shot_cot_str_perf
+      num_prompts: 48
+      max_out_len: 512
+      batch_size: 12
+      request_rate: 0
+      baseline: 1
+      threshold: 0.97
+
+_benchmarks_bs16: &benchmarks_bs16
+    perf:
+      case_type: performance
+      dataset_path: vllm-ascend/GSM8K_prefix0_in32768_bs100_qwen3
+      request_conf: vllm_api_stream_chat
+      dataset_conf: gsm8k/gsm8k_gen_0_shot_cot_str_perf
+      num_prompts: 16
+      max_out_len: 512
+      batch_size: 4
+      request_rate: 0
+      baseline: 1
+      threshold: 0.97
+
+
+_benchmarks_bs160: &benchmarks_bs160
+    perf:
+      case_type: performance
+      dataset_path: vllm-ascend/GSM8K_prefix90_in32768_bs1000_qwen
+      request_conf: vllm_api_stream_chat
+      dataset_conf: gsm8k/gsm8k_gen_0_shot_cot_str_perf
+      num_prompts: 160
+      max_out_len: 512
+      batch_size: 40
+      request_rate: 0
+      baseline: 1
+      threshold: 0.97
+
+_benchmarks_bs32: &benchmarks_bs32
+    perf:
+      case_type: performance
+      dataset_path: vllm-ascend/GSM8K_prefix90_in32768_bs1000_qwen
+      request_conf: vllm_api_stream_chat
+      dataset_conf: gsm8k/gsm8k_gen_0_shot_cot_str_perf
+      num_prompts: 32
+      max_out_len: 512
+      batch_size: 8
+      request_rate: 0
+      baseline: 1
+      threshold: 0.97
+
+_benchmarks_bs8: &benchmarks_bs8
+    perf:
+      case_type: performance
+      dataset_path: vllm-ascend/GSM8K_prefix0_in65536_bs200_qwen3_5
+      request_conf: vllm_api_stream_chat
+      dataset_conf: gsm8k/gsm8k_gen_0_shot_cot_str_perf
+      num_prompts: 8
+      max_out_len: 1024
+      batch_size: 2
+      request_rate: 0
+      baseline: 1
+      threshold: 0.97
+
+_benchmarks_bs32_in65536: &benchmarks_bs32_in65536
+    perf:
+      case_type: performance
+      dataset_path: vllm-ascend/GSM8K_prefix0_in65536_bs200_qwen3_5
+      request_conf: vllm_api_stream_chat
+      dataset_conf: gsm8k/gsm8k_gen_0_shot_cot_str_perf
+      num_prompts: 32
+      max_out_len: 1024
+      batch_size: 8
+      request_rate: 0
+      baseline: 1
+      threshold: 0.97
+
+_benchmarks_bs136: &benchmarks_bs136
+    perf:
+      case_type: performance
+      dataset_path: vllm-ascend/GSM8K_prefix90_in65536_bs1000_qwen
+      request_conf: vllm_api_stream_chat
+      dataset_conf: gsm8k/gsm8k_gen_0_shot_cot_str_perf
+      num_prompts: 136
+      max_out_len: 1024
+      batch_size: 34
+      request_rate: 0
+      baseline: 1
+      threshold: 0.97
+
+_benchmarks_bs16_in65536: &benchmarks_bs16_in65536
+    perf:
+      case_type: performance
+      dataset_path: vllm-ascend/GSM8K_prefix90_in65536_bs1000_qwen
+      request_conf: vllm_api_stream_chat
+      dataset_conf: gsm8k/gsm8k_gen_0_shot_cot_str_perf
+      num_prompts: 16
+      max_out_len: 1024
+      batch_size: 4
+      request_rate: 0
+      baseline: 1
+      threshold: 0.97
+
+_benchmarks_bs80: &benchmarks_bs80
+  perf:
+    case_type: performance
+    dataset_path: vllm-ascend/GSM8K-in131072-bs100-qwen3
+    request_conf: vllm_api_stream_chat
+    dataset_conf: gsm8k/gsm8k_gen_0_shot_cot_str_perf
+    num_prompts: 80
+    max_out_len: 1024
+    batch_size: 20
+    request_rate: 0
+    baseline: 1
+    threshold: 0.97
+
+# ==========================================
+# ACTUAL TEST CASES
+# ==========================================
+test_cases:
+
+#131072 1024  0.9 80
+  - name: "Qwen3-397B-A17B-w8a8-A3-High—Throughput-bs80"
+    model: "Eco-Tech/Qwen3.5-397B-A17B-w8a8-mtp"
+    envs:
+      <<: *envs
+    server_cmd: *server_cmd
+    server_cmd_extra:
+      - "--enable-prefix-caching"
+      - "--speculative_config"
+      - '{"method": "qwen3_5_mtp", "num_speculative_tokens": 3, "enforce_eager": true}'
+      - "--compilation-config"
+      - '{"cudagraph_capture_sizes":[1,4,8,12,16,24,32,48,56,64,72,84,96,108,112,128,160,172,196,200,212,232,256,272,288,312,328,344,360,384,400,416,432,448,480,512], "cudagraph_mode":"FULL_DECODE_ONLY"}'
+      - "--max-model-len"
+      - "133120"
+    benchmarks:
+      <<: *benchmarks_bs80
+
+  - name: "Qwen3-397B-A17B-w8a8-A3-Minimal-Delay-bs2"
+    model: "Eco-Tech/Qwen3.5-397B-A17B-w8a8-mtp"
+    envs:
+      <<: *envs
+    server_cmd: *server_cmd
+    server_cmd_extra:
+      - "--no-enable-prefix-caching"
+      - "--speculative_config"
+      - '{"method": "qwen3_5_mtp", "num_speculative_tokens": 5, "enforce_eager": true}'
+      - "--compilation-config"
+      - '{"cudagraph_capture_sizes":[1,6,12,18,24,30,36,42,48,54,72,78,84,90,96,102,108,144,192], "cudagraph_mode":"FULL_DECODE_ONLY"}'
+      - "--max-model-len"
+      - "133120"
+    benchmarks:
+      <<: *benchmarks
+
+  - name: "Qwen3-397B-A17B-w8a8-A3-High—Throughput-bs144"
+    model: "Eco-Tech/Qwen3.5-397B-A17B-w8a8-mtp"
+    envs:
+      <<: *envs
+    server_cmd: *server_cmd
+    server_cmd_extra:
+      - "--no-enable-prefix-caching"
+      - "--speculative_config"
+      - '{"method": "qwen3_5_mtp", "num_speculative_tokens": 3, "enforce_eager": true}'
+      - "--compilation-config"
+      - '{"cudagraph_capture_sizes":[1,4,8,12,16,24,32,48,56,64,72,84,96,108,112,128,160,172,196,200,212,232,256,272,288,312,328,344,360,384,400,416,432,448,480,512], "cudagraph_mode":"FULL_DECODE_ONLY"}'
+      - "--max-model-len"
+      - "18432"
+    benchmarks:
+      <<: *benchmarks_bs144
+
+  - name: "Qwen3-397B-A17B-w8a8-A3-Minimal-Delay-bs36"
+    model: "Eco-Tech/Qwen3.5-397B-A17B-w8a8-mtp"
+    envs:
+      <<: *envs
+    server_cmd: *server_cmd
+    server_cmd_extra:
+      - "--speculative_config"
+      - '{"method": "qwen3_5_mtp", "num_speculative_tokens": 5, "enforce_eager": true}'
+      - "--compilation-config"
+      - '{"cudagraph_capture_sizes":[1,6,12,18,24,30,36,42,48,54,72,78,84,90,96,102,108,144,192], "cudagraph_mode":"FULL_DECODE_ONLY"}'
+      - "--max-model-len"
+      - "18432"
+    benchmarks:
+      <<: *benchmarks_bs36
+
+  - name: "Qwen3-397B-A17B-w8a8-A3-High—Throughput-bs48"
+    model: "Eco-Tech/Qwen3.5-397B-A17B-w8a8-mtp"
+    envs:
+      <<: *envs
+    server_cmd: *server_cmd
+    server_cmd_extra:
+      - "--no-enable-prefix-caching"
+      - "--speculative_config"
+      - '{"method": "qwen3_5_mtp", "num_speculative_tokens": 3, "enforce_eager": true}'
+      - "--compilation-config"
+      - '{"cudagraph_capture_sizes":[1,4,8,12,16,24,32,48,56,64,72,84,96,108,112,128,160,172,196,200,212,232,256,272,288,312,328,344,360,384,400,416,432,448,480,512], "cudagraph_mode":"FULL_DECODE_ONLY"}'
+      - "--max-model-len"
+      - "34304"
+    benchmarks:
+      <<: *benchmarks_bs48
+
+
+  - name: "Qwen3-397B-A17B-w8a8-A3-Minimal-Delay-bs16"
+    model: "Eco-Tech/Qwen3.5-397B-A17B-w8a8-mtp"
+    envs:
+      <<: *envs
+    server_cmd: *server_cmd
+    server_cmd_extra:
+      - "--no-enable-prefix-caching"
+      - "--speculative_config"
+      - '{"method": "qwen3_5_mtp", "num_speculative_tokens": 5, "enforce_eager": true}'
+      - "--compilation-config"
+      - '{"cudagraph_capture_sizes":[1,6,12,18,24,30,36,42,48,54,72,78,84,90,96,102,108,144,192], "cudagraph_mode":"FULL_DECODE_ONLY"}'
+      - "--max-model-len"
+      - "34304"
+    benchmarks:
+      <<: *benchmarks_bs16
+
+  - name: "Qwen3-397B-A17B-w8a8-A3-Minimal-Delay-bs160"
+    model: "Eco-Tech/Qwen3.5-397B-A17B-w8a8-mtp"
+    envs:
+      <<: *envs
+    server_cmd: *server_cmd
+    server_cmd_extra:
+      - "--enable-prefix-caching"
+      - "--speculative_config"
+      - '{"method": "qwen3_5_mtp", "num_speculative_tokens": 3, "enforce_eager": true}'
+      - "--compilation-config"
+      - '{"cudagraph_capture_sizes":[1,4,8,12,16,24,32,48,56,64,72,84,96,108,112,128,160,172,196,200,212,232,256,272,288,312,328,344,360,384,400,416,432,448,480,512], "cudagraph_mode":"FULL_DECODE_ONLY"}'
+      - "--max-model-len"
+      - "34304"
+    benchmarks:
+      <<: *benchmarks_bs160
+
+#65536 1024  0 32
+  - name: "Qwen3-397B-A17B-w8a8-A3-Minimal-Delay-bs32"
+    model: "Eco-Tech/Qwen3.5-397B-A17B-w8a8-mtp"
+    envs:
+      <<: *envs
+    server_cmd: *server_cmd
+    server_cmd_extra:
+      - "--enable-prefix-caching"
+      - "--speculative_config"
+      - '{"method": "qwen3_5_mtp", "num_speculative_tokens": 5, "enforce_eager": true}'
+      - "--compilation-config"
+      - '{"cudagraph_capture_sizes":[1,6,12,18,24,30,36,42,48,54,72,78,84,90,96,102,108,144,192], "cudagraph_mode":"FULL_DECODE_ONLY"}'
+      - "--max-model-len"
+      - "34304"
+    benchmarks:
+      <<: *benchmarks_bs32
+
+#65536 1024  0 8
+  - name: "Qwen3-397B-A17B-w8a8-A3-High—Throughput-bs8"
+    model: "Eco-Tech/Qwen3.5-397B-A17B-w8a8-mtp"
+    envs:
+      <<: *envs
+    server_cmd: *server_cmd
+    server_cmd_extra:
+      - "--no-enable-prefix-caching"
+      - "--speculative_config"
+      - '{"method": "qwen3_5_mtp", "num_speculative_tokens": 5, "enforce_eager": true}'
+      - "--compilation-config"
+      - '{"cudagraph_capture_sizes":[1,6,12,18,24,30,36,42,48,54,72,78,84,90,96,102,108,144,192], "cudagraph_mode":"FULL_DECODE_ONLY"}'
+      - "--max-model-len"
+      - "67584"
+    benchmarks:
+      <<: *benchmarks_bs8
+
+#65536  1024  0 32
+  - name: "Qwen3-397B-A17B-w8a8-A3-High—Throughput-bs32_in65536"
+    model: "Eco-Tech/Qwen3.5-397B-A17B-w8a8-mtp"
+    envs:
+      <<: *envs
+    server_cmd: *server_cmd
+    server_cmd_extra:
+      - "--no-enable-prefix-caching"
+      - "--speculative_config"
+      - '{"method": "qwen3_5_mtp", "num_speculative_tokens": 3, "enforce_eager": true}'
+      - "--compilation-config"
+      - '{"cudagraph_capture_sizes":[1,4,8,12,16,24,32,48,56,64,72,84,96,108,112,128,160,172,196,200,212,232,256,272,288,312,328,344,360,384,400,416,432,448,480,512], "cudagraph_mode":"FULL_DECODE_ONLY"}'
+      - "--max-model-len"
+      - "67584"
+    benchmarks:
+      <<: *benchmarks_bs32_in65536
+
+#67584  65536 1024  0.9 136
+  - name: "Qwen3-397B-A17B-w8a8-A3-High—Throughput-bs136"
+    model: "Eco-Tech/Qwen3.5-397B-A17B-w8a8-mtp"
+    envs:
+      <<: *envs
+    server_cmd: *server_cmd
+    server_cmd_extra:
+      - "--enable-prefix-caching"
+      - "--speculative_config"
+      - '{"method": "qwen3_5_mtp", "num_speculative_tokens": 3, "enforce_eager": true}'
+      - "--compilation-config"
+      - '{"cudagraph_capture_sizes":[1,4,8,12,16,24,32,48,56,64,72,84,96,108,112,128,160,172,196,200,212,232,256,272,288,312,328,344,360,384,400,416,432,448,480,512], "cudagraph_mode":"FULL_DECODE_ONLY"}'
+      - "--max-model-len"
+      - "67584"
+    benchmarks:
+      <<: *benchmarks_bs136
+
+#67584  65536 1024  0.9 16
+  - name: "Qwen3-397B-A17B-w8a8-A3-Minimal-Delay-bs16_in65536"
+    model: "Eco-Tech/Qwen3.5-397B-A17B-w8a8-mtp"
+    envs:
+      <<: *envs
+    server_cmd: *server_cmd
+    server_cmd_extra:
+      - "--enable-prefix-caching"
+      - "--speculative_config"
+      - '{"method": "qwen3_5_mtp", "num_speculative_tokens": 5, "enforce_eager": true}'
+      - "--compilation-config"
+      - '{"cudagraph_capture_sizes":[1,6,12,18,24,30,36,42,48,54,72,78,84,90,96,102,108,144,192], "cudagraph_mode":"FULL_DECODE_ONLY"}'
+      - "--max-model-len"
+      - "67584"
+    benchmarks:
+      <<: *benchmarks_bs16_in65536
+

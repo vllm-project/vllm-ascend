@@ -25,6 +25,7 @@ import pytest
 from vllm.utils.network_utils import get_open_port
 
 from tests.e2e.conftest import RemoteOpenAIServer, VllmRunner
+from vllm_ascend.utils import vllm_version_is
 
 
 @patch.dict(os.environ, {"HCCL_BUFFSIZE": "1024"})
@@ -74,6 +75,7 @@ def test_qwen3_moe_distributed_aiv_tp2():
         vllm_model.generate_greedy(example_prompts, max_tokens)
 
 
+@pytest.mark.skipif(vllm_version_is("0.20.2"), reason="no need to support model_runner for v0.20.2")
 @pytest.mark.parametrize("max_tokens", [5])
 @pytest.mark.parametrize("enforce_eager", [True])
 @patch.dict(os.environ, {"VLLM_USE_V2_MODEL_RUNNER": "1"})
@@ -137,6 +139,7 @@ async def test_qwen3_moe_w8a8_distributed_tp2_ep_dynamic_eplb():
             "expert_heat_collection_interval": 100,
             "algorithm_execution_interval": 20,
             "num_redundant_experts": 2,
+            "eplb_policy_type": 2,
         }
     }
     server_args.extend(["--additional-config", json.dumps(additional_config)])

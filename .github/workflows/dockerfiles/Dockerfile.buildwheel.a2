@@ -15,7 +15,7 @@
 # This file is a part of the vllm-ascend project.
 #
 ARG PY_VERSION=3.11
-FROM quay.io/ascend/manylinux:8.5.1-910b-manylinux_2_28-py${PY_VERSION}
+FROM quay.io/ascend/manylinux:9.0.0-910b-manylinux_2_28-py${PY_VERSION}
 
 ARG SOC_VERSION="ascend910b1"
 
@@ -31,7 +31,7 @@ WORKDIR /workspace
 COPY . /workspace/vllm-ascend/
 
 # Install req
-RUN python3 -m pip install -r vllm-ascend/requirements.txt --extra-index https://download.pytorch.org/whl/cpu/ && \
+RUN python3 -m pip install -r vllm-ascend/requirements.txt --extra-index https://download.pytorch.org/whl/cpu/ --extra-index-url https://repo.huaweicloud.com/ascend/repos/pypi && \
     python3 -m pip install twine attrs psutil
 
 # Install vllm-ascend

@@ -1,0 +1,387 @@
+msgid ""
+msgstr ""
+"Project-Id-Version: vllm-ascend \n"
+"Report-Msgid-Bugs-To: \n"
+"POT-Creation-Date: 2026-05-22 04:30+0000\n"
+"PO-Revision-Date: YEAR-MO-DA HO:MI+ZONE\n"
+"Last-Translator: FULL NAME <EMAIL@ADDRESS>\n"
+"Language: zh_CN\n"
+"Language-Team: zh_CN <LL@li.org>\n"
+"Plural-Forms: nplurals=1; plural=0;\n"
+"MIME-Version: 1.0\n"
+"Content-Type: text/plain; charset=utf-8\n"
+"Content-Transfer-Encoding: 8bit\n"
+"Generated-By: Babel 2.18.0\n"
+
+#: ../../source/user_guide/feature_guide/flash_attention.md:1
+msgid "Flash Attention 3"
+msgstr "Flash Attention 3"
+
+#: ../../source/user_guide/feature_guide/flash_attention.md:4
+msgid ""
+"Flash Attention 3 on Ascend is currently in beta. The `flash_attn_npu` "
+"package required for FA3 has been open-sourced on GitHub. Please refer to"
+" the [flash-attention-npu repository](https://github.com/MinghuasLab"
+"/flash-attention-npu) for more details."
+msgstr ""
+"Ascend上的Flash Attention 3目前处于测试阶段。FA3所需的`flash_attn_npu`包已在GitHub上开源。请参考[flash-attention-npu仓库](https://github.com/MinghuasLab/flash-attention-npu)获取更多详情。"
+
+#: ../../source/user_guide/feature_guide/flash_attention.md:8
+msgid ""
+"This document shows how to enable Flash Attention 3 (FA3) in vLLM-Ascend."
+" FA3 provides a training-inference consistent attention implementation "
+"for Ascend NPUs."
+msgstr ""
+"本文档介绍如何在vLLM-Ascend中启用Flash Attention 3 (FA3)。FA3为Ascend "
+"NPU提供了训练推理一致的注意力实现。"
+
+#: ../../source/user_guide/feature_guide/flash_attention.md:10
+msgid "Motivation"
+msgstr "动机"
+
+#: ../../source/user_guide/feature_guide/flash_attention.md:12
+msgid ""
+"In RL training frameworks such as veRL, the attention computation during "
+"training uses Flash Attention. When vLLM-Ascend serves as the inference "
+"backend, the default Fused Infer Attention (FIA) implementation differs "
+"from the training-side Flash Attention, which can lead to training-"
+"inference inconsistency. To address this, vLLM-Ascend introduces the FA3 "
+"attention backend to maintain consistency with the training side."
+msgstr ""
+"在veRL等RL训练框架中，训练时的注意力计算使用Flash Attention。当vLLM-Ascend作为推理后端时，默认的Fused "
+"Infer Attention (FIA)实现与训练侧的Flash Attention不同，可能导致训练推理不一致。为解决此问题，vLLM-"
+"Ascend引入了FA3注意力后端以保持与训练侧的一致性。"
+
+#: ../../source/user_guide/feature_guide/flash_attention.md:14
+msgid "FA3 is crucial for the following scenarios:"
+msgstr "FA3在以下场景中至关重要："
+
+#: ../../source/user_guide/feature_guide/flash_attention.md:16
+msgid ""
+"**Training-inference consistency**: Ensures that the attention "
+"computation during inference matches the training side, which is "
+"essential for RL workflows (e.g., veRL) where inference results are used "
+"to compute training signals."
+msgstr "**训练推理一致性**：确保推理时的注意力计算与训练侧一致，这对RL工作流（如veRL）至关重要，因为推理结果用于计算训练信号。"
+
+#: ../../source/user_guide/feature_guide/flash_attention.md:17
+msgid ""
+"**Framework debugging**: Consistent attention implementations make it "
+"easier to debug issues by eliminating discrepancies between training and "
+"inference."
+msgstr "**框架调试**：一致的注意力实现通过消除训练和推理之间的差异，使问题调试更加容易。"
+
+#: ../../source/user_guide/feature_guide/flash_attention.md:18
+msgid ""
+"**Reinforcement Learning (RL)**: RL training often requires deterministic"
+" and consistent rollouts for reproducibility and stable training."
+msgstr "**强化学习 (RL)**：RL训练通常需要确定性和一致的rollout以实现可重复性和稳定训练。"
+
+#: ../../source/user_guide/feature_guide/flash_attention.md:20
+msgid "Feature Comparison"
+msgstr "功能对比"
+
+#: ../../source/user_guide/feature_guide/flash_attention.md:22
+msgid ""
+"The following table compares the features of `flash_attn_with_kvcache` "
+"between GPU FA3 and Ascend NPU FA3:"
+msgstr "下表比较了GPU FA3和Ascend NPU FA3中`flash_attn_with_kvcache`的功能："
+
+#: ../../source/user_guide/feature_guide/flash_attention.md:3
+msgid "Feature"
+msgstr "功能"
+
+#: ../../source/user_guide/feature_guide/flash_attention.md:3
+msgid "GPU FA3"
+msgstr "GPU FA3"
+
+#: ../../source/user_guide/feature_guide/flash_attention.md:3
+msgid "NPU FA3"
+msgstr "NPU FA3"
+
+#: ../../source/user_guide/feature_guide/flash_attention.md:3
+msgid "FP16 (float16)"
+msgstr "FP16 (float16)"
+
+#: ../../source/user_guide/feature_guide/flash_attention.md:3
+msgid "✅"
+msgstr "✅"
+
+#: ../../source/user_guide/feature_guide/flash_attention.md:3
+msgid "BF16 (bfloat16)"
+msgstr "BF16 (bfloat16)"
+
+#: ../../source/user_guide/feature_guide/flash_attention.md:3
+msgid "Causal Attention"
+msgstr "因果注意力"
+
+#: ../../source/user_guide/feature_guide/flash_attention.md:3
+msgid "Sliding Window Attention"
+msgstr "滑动窗口注意力"
+
+#: ../../source/user_guide/feature_guide/flash_attention.md:3
+msgid "-"
+msgstr "-"
+
+#: ../../source/user_guide/feature_guide/flash_attention.md:3
+msgid "MQA/GQA"
+msgstr "MQA/GQA"
+
+#: ../../source/user_guide/feature_guide/flash_attention.md:3
+msgid "Paged KV Cache"
+msgstr "分页KV缓存"
+
+#: ../../source/user_guide/feature_guide/flash_attention.md:3
+msgid "Rotary Position Embedding (RoPE)"
+msgstr "旋转位置编码 (RoPE)"
+
+#: ../../source/user_guide/feature_guide/flash_attention.md:3
+msgid "ALiBi"
+msgstr "ALiBi"
+
+#: ../../source/user_guide/feature_guide/flash_attention.md:3
+msgid "Softcapping"
+msgstr "Softcapping"
+
+#: ../../source/user_guide/feature_guide/flash_attention.md:3
+msgid "FP8 Quantization"
+msgstr "FP8量化"
+
+#: ../../source/user_guide/feature_guide/flash_attention.md:3
+msgid "Variable-length Sequences"
+msgstr "变长序列"
+
+#: ../../source/user_guide/feature_guide/flash_attention.md:38
+msgid "Differences from GPU Implementation"
+msgstr "与GPU实现的差异"
+
+#: ../../source/user_guide/feature_guide/flash_attention.md:40
+msgid ""
+"The `flash_attn_with_kvcache` interface on NPU is semantically consistent"
+" with the GPU FA3 version in terms of API parameters. The key differences"
+" are:"
+msgstr "NPU上的`flash_attn_with_kvcache`接口在API参数上与GPU FA3版本语义一致。主要差异如下："
+
+#: ../../source/user_guide/feature_guide/flash_attention.md:42
+msgid ""
+"**Unsupported features on NPU FA3**: Sliding window attention, RoPE, "
+"ALiBi, Softcapping, and FP8 quantization are not yet supported."
+msgstr "**NPU FA3不支持的功能**：滑动窗口注意力、RoPE、ALiBi、Softcapping和FP8量化暂不支持。"
+
+#: ../../source/user_guide/feature_guide/flash_attention.md:43
+msgid ""
+"**Graph capture**: The tiling of `flash_attn_with_kvcache` is processed "
+"on the host side and is currently being optimized. It does not support "
+"ACL graph capture (i.e., cannot be captured into a computational graph "
+"for acceleration). Please use `enforce_eager=True` when enabling FA3."
+msgstr "**图捕获**：`flash_attn_with_kvcache`的tiling在主机侧处理，目前正在优化中。不支持ACL图捕获（即无法捕获到计算图中进行加速）。启用FA3时请使用`enforce_eager=True`。"
+
+#: ../../source/user_guide/feature_guide/flash_attention.md:45
+msgid "Hardware Requirements"
+msgstr "硬件要求"
+
+#: ../../source/user_guide/feature_guide/flash_attention.md:47
+msgid ""
+"FA3 currently requires Ascend Atlas A2 and A3 inference products NPUs. We"
+" will support other NPUs in the future."
+msgstr "FA3目前需要Ascend Atlas A2和A3推理产品NPU。未来将支持其他NPU。"
+
+#: ../../source/user_guide/feature_guide/flash_attention.md:50
+msgid "Software Requirements"
+msgstr "软件要求"
+
+#: ../../source/user_guide/feature_guide/flash_attention.md:52
+msgid ""
+"FA3 requires the `flash_attn_npu` package, which provides the "
+"`flash_attn_npu_v3` module with the `flash_attn_with_kvcache` operator."
+msgstr "FA3需要`flash_attn_npu`包，该包提供包含`flash_attn_with_kvcache`算子的`flash_attn_npu_v3`模块。"
+
+#: ../../source/user_guide/feature_guide/flash_attention.md:54
+msgid "Installation"
+msgstr "安装"
+
+#: ../../source/user_guide/feature_guide/flash_attention.md:56
+msgid ""
+"Install the `flash_attn_npu` wheel package refer to: "
+"<https://github.com/MinghuasLab/flash-attention-"
+"npu/blob/main/README.md#installation>."
+msgstr "安装`flash_attn_npu` wheel包，请参考：<https://github.com/MinghuasLab/flash-attention-npu/blob/main/README.md#installation>。"
+
+#: ../../source/user_guide/feature_guide/flash_attention.md:58
+msgid "Enabling Flash Attention 3"
+msgstr "启用Flash Attention 3"
+
+#: ../../source/user_guide/feature_guide/flash_attention.md:60
+msgid "To enable FA3, you need to:"
+msgstr "要启用FA3，您需要："
+
+#: ../../source/user_guide/feature_guide/flash_attention.md:62
+msgid ""
+"Set the environment variable `export VLLM_BATCH_INVARIANT=1` to enable "
+"batch invariant mode"
+msgstr "设置环境变量`export VLLM_BATCH_INVARIANT=1`以启用batch invariant模式"
+
+#: ../../source/user_guide/feature_guide/flash_attention.md:63
+msgid ""
+"Specify the attention backend as `FLASH_ATTN` via the LLM parameter "
+"`attention_backend=\"FLASH_ATTN\"`"
+msgstr "通过LLM参数`attention_backend=\"FLASH_ATTN\"`将注意力后端指定为`FLASH_ATTN`"
+
+#: ../../source/user_guide/feature_guide/flash_attention.md:65
+msgid "Online Inference (Server Mode)"
+msgstr "在线推理（服务器模式）"
+
+#: ../../source/user_guide/feature_guide/flash_attention.md:67
+msgid "To start a vLLM server with FA3 enabled:"
+msgstr "启动启用FA3的vLLM服务器："
+
+#: ../../source/user_guide/feature_guide/flash_attention.md:73
+msgid "Then use the OpenAI-compatible client:"
+msgstr "然后使用OpenAI兼容客户端："
+
+#: ../../source/user_guide/feature_guide/flash_attention.md:94
+msgid "Offline Inference"
+msgstr "离线推理"
+
+#: ../../source/user_guide/feature_guide/flash_attention.md:96
+msgid "For offline batch inference with FA3:"
+msgstr "使用FA3进行离线批量推理："
+
+#: ../../source/user_guide/feature_guide/flash_attention.md:131
+msgid "Limitations"
+msgstr "限制"
+
+#: ../../source/user_guide/feature_guide/flash_attention.md:133
+msgid ""
+"**Package not yet open-sourced**: The `flash_attn_npu` package required "
+"for FA3 has not yet been released. External users cannot use FA3 until "
+"the package is available."
+msgstr "**包尚未开源**：FA3所需的`flash_attn_npu`包尚未发布。在包可用之前，外部用户无法使用FA3。"
+
+#: ../../source/user_guide/feature_guide/flash_attention.md:134
+msgid ""
+"**Sliding window not supported**: FA3 does not support sliding window "
+"attention. Models that require sliding window need to use the default FIA"
+" backend."
+msgstr "**不支持滑动窗口**：FA3不支持滑动窗口注意力。需要滑动窗口的模型需使用默认FIA后端。"
+
+#: ../../source/user_guide/feature_guide/flash_attention.md:135
+msgid ""
+"**ACL graph capture not supported**: The tiling of "
+"`flash_attn_with_kvcache` is processed on the host side and currently "
+"does not support ACL graph capture. Please use `enforce_eager=True` when "
+"enabling FA3."
+msgstr "**不支持ACL图捕获**：`flash_attn_with_kvcache`的tiling在主机侧处理，目前不支持ACL图捕获。启用FA3时请使用`enforce_eager=True`。"
+
+#: ../../source/user_guide/feature_guide/flash_attention.md:136
+msgid ""
+"**RoPE not supported**: FA3 does not support rotary position embedding "
+"within the attention kernel. vLLM-Ascend patches this by using the "
+"PyTorch native RoPE fallback instead."
+msgstr "**不支持RoPE**：FA3不支持注意力核内的旋转位置编码。vLLM-Ascend通过使用PyTorch原生RoPE回退来修补此问题。"
+
+#: ../../source/user_guide/feature_guide/flash_attention.md:137
+msgid ""
+"**ALiBi not supported**: FA3 does not support ALiBi (Attention with "
+"Linear Biases)."
+msgstr "**不支持ALiBi**：FA3不支持ALiBi（线性偏置注意力）。"
+
+#: ../../source/user_guide/feature_guide/flash_attention.md:138
+msgid ""
+"**Softcapping not supported**: FA3 does not support attention logit "
+"softcapping."
+msgstr "**不支持Softcapping**：FA3不支持注意力logit softcapping。"
+
+#: ../../source/user_guide/feature_guide/flash_attention.md:139
+msgid ""
+"**FP8 quantization not supported**: FA3 does not support FP8 quantized "
+"attention."
+msgstr "**不支持FP8量化**：FA3不支持FP8量化注意力。"
+
+#: ../../source/user_guide/feature_guide/flash_attention.md:140
+msgid ""
+"**MLA and SFA not supported**: FA3 does not support Multi-head Latent "
+"Attention (MLA) or Sparse Flash Attention (SFA)."
+msgstr "**不支持MLA和SFA**：FA3不支持多头潜在注意力 (MLA) 或稀疏Flash Attention (SFA)。"
+
+#: ../../source/user_guide/feature_guide/flash_attention.md:143
+msgid ""
+"Enabling FA3 may cause performance degradation compared to the default "
+"FIA backend. This trade-off is intentional to guarantee training-"
+"inference consistency."
+msgstr "与默认FIA后端相比，启用FA3可能导致性能下降。这种权衡是有意为之，以保证训练推理一致性。"
+
+#: ../../source/user_guide/feature_guide/flash_attention.md:146
+msgid "Tested Models"
+msgstr "已测试模型"
+
+#: ../../source/user_guide/feature_guide/flash_attention.md:148
+msgid "FA3 has been tested and verified on the following models:"
+msgstr "FA3已在以下模型上测试验证："
+
+#: ../../source/user_guide/feature_guide/flash_attention.md:150
+msgid "**Qwen3 (Dense)**: `Qwen/Qwen3-0.6B`, `Qwen/Qwen3-1.7B`, `Qwen/Qwen3-8B`"
+msgstr "**Qwen3 (Dense)**：`Qwen/Qwen3-0.6B`、`Qwen/Qwen3-1.7B`、`Qwen/Qwen3-8B`"
+
+#: ../../source/user_guide/feature_guide/flash_attention.md:151
+msgid "**Qwen3 (MoE)**: `Qwen/Qwen3-30B-A3B`"
+msgstr "**Qwen3 (MoE)**：`Qwen/Qwen3-30B-A3B`"
+
+#: ../../source/user_guide/feature_guide/flash_attention.md:153
+msgid ""
+"Other models have not been tested yet and will be supported in the future"
+" if not supported after been tested."
+msgstr "其他模型尚未测试，未来将在测试后根据结果决定是否支持。"
+
+#: ../../source/user_guide/feature_guide/flash_attention.md:155
+msgid "Future Improvements"
+msgstr "未来改进"
+
+#: ../../source/user_guide/feature_guide/flash_attention.md:157
+msgid "The FA3 feature is under active development. Planned improvements include:"
+msgstr "FA3功能正在积极开发中。计划改进包括："
+
+#: ../../source/user_guide/feature_guide/flash_attention.md:159
+msgid "Open-source the `flash_attn_npu` package"
+msgstr "开源`flash_attn_npu`包"
+
+#: ../../source/user_guide/feature_guide/flash_attention.md:160
+msgid "Support ACL graph capture (host-side tiling optimization)"
+msgstr "支持ACL图捕获（主机侧tiling优化）"
+
+#: ../../source/user_guide/feature_guide/flash_attention.md:161
+msgid "Support for additional NPUs series"
+msgstr "支持更多NPU系列"
+
+#: ../../source/user_guide/feature_guide/flash_attention.md:162
+msgid "Expanded model coverage"
+msgstr "扩展模型覆盖范围"
+
+#: ../../source/user_guide/feature_guide/flash_attention.md:163
+msgid "Performance optimizations"
+msgstr "性能优化"
+
+#: ../../source/user_guide/feature_guide/flash_attention.md:164
+msgid "Additional testing and validation"
+msgstr "额外测试与验证"
+
+#~ msgid ""
+#~ "The `flash_attn_npu` package has not yet"
+#~ " been open-sourced. It is expected"
+#~ " to be released after May 20th. "
+#~ "Until then, external users cannot "
+#~ "directly use Flash Attention 3."
+#~ msgstr "`flash_attn_npu`包尚未开源，预计5月20日后发布。在此之前，外部用户无法直接使用Flash Attention 3。"
+
+#~ msgid "Install the `flash_attn_npu` wheel package as follows:"
+#~ msgstr "按如下方式安装`flash_attn_npu` wheel包："
+
+#~ msgid ""
+#~ "Replace `x.x.x` with the actual package"
+#~ " version, and `cp3xx` with the actual"
+#~ " Python version tag matching your "
+#~ "environment (e.g., `cp310` for Python "
+#~ "3.10, `cp311` for Python 3.11)."
+#~ msgstr ""
+#~ "将`x.x.x`替换为实际包版本，`cp3xx`替换为与环境匹配的实际Python版本标签（例如Python "
+#~ "3.10使用`cp310`，Python 3.11使用`cp311`）。"
