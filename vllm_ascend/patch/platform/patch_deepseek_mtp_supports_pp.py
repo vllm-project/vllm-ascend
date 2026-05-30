@@ -19,6 +19,20 @@
 # are loaded.
 #
 
+import torch
 from vllm.model_executor.models.deepseek_mtp import DeepSeekMTP
+from vllm.sequence import IntermediateTensors
 
 DeepSeekMTP.supports_pp = True
+
+
+def _mtp_make_empty_intermediate_tensors(
+    self,
+    batch_size: int,
+    dtype: torch.dtype,
+    device: torch.device,
+) -> IntermediateTensors:
+    return IntermediateTensors({})
+
+
+DeepSeekMTP.make_empty_intermediate_tensors = _mtp_make_empty_intermediate_tensors
