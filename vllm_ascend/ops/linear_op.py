@@ -225,6 +225,7 @@ class MLPRowParallelOp(CustomRowParallelOp):
 class OProjRowParallelOp(CustomRowParallelOp):
     def __init__(self, layer):
         super().__init__(layer)
+        self.is_wo_b = False
 
     @property
     def comm_group(self):
@@ -238,9 +239,21 @@ class OProjRowParallelOp(CustomRowParallelOp):
         self,
         input_: torch.Tensor,
     ) -> torch.Tensor | tuple[torch.Tensor, Parameter | None]:
-        # Single-operator (eager) mode: use simple matmul + all_gather path.
-        # In graph mode (capturing=True), the PD path (all-to-all + reduce-scatter)
-        # is used because it can be captured into an NPU graph.
+        # wo_b in OTP mode: weight is row-sliced, input is full (unsplit).
+        # Simple path: matmul with row shard → all_gather output.
+        if self.is_wo_b:
+            assert self.quant_method is not None
+            output_parallel = self.quant_method.apply(self.layer, input_, bias=self.bias)
+            output = torch.empty(
+                input_.shape[0], self.layer.output_size,
+                dtype=output_parallel.dtype, device=output_parallel.device)
+            dist.all_gather_into_tensor(output, output_parallel.contiguous(),
+                                        group=self.comm_group.device_group)
+            output_bias = self.bias if self.skip_bias_add else None
+            return output, output_bias
+
+        # Single-operator (eager) mode for o_proj (standard OTP):
+        # PD path (all-to-all + reduce-scatter) in eager mode.
         if get_ascend_config().vllm_config.model_config.enforce_eager:
             return self.eager_apply_impl(input_)
 
@@ -280,6 +293,22 @@ class OProjRowParallelOp(CustomRowParallelOp):
         self,
         input_: torch.Tensor,
     ) -> torch.Tensor | tuple[torch.Tensor, Parameter | None]:
+        # wo_b in OTP mode: weight is row-sliced, input is full (unsplit).
+        # Simple path: matmul with row shard → all_gather output.
+        if self.is_wo_b:
+            assert self.quant_method is not None
+            output_parallel = self.quant_method.apply(self.layer, input_, bias=self.bias)
+            # Row-sliced weight: each OTP rank produces a shard of the output.
+            # All-gather to reconstruct the full output across OTP ranks.
+            output = torch.empty(
+                input_.shape[0], self.layer.output_size,
+                dtype=output_parallel.dtype, device=output_parallel.device)
+            dist.all_gather_into_tensor(output, output_parallel.contiguous(),
+                                        group=self.comm_group.device_group)
+            output_bias = self.bias if self.skip_bias_add else None
+            return output, output_bias
+
+        # o_proj (standard OTP): all-to-all + matmul + reduce-scatter (PD path)
         if self.input_is_parallel:
             input_parallel = input_
         else:
@@ -357,7 +386,13 @@ class OProjRowParallelOp(CustomRowParallelOp):
 
     def update_attrs(self):
         super().update_attrs()
-        self.input_is_parallel = self.layer.input_is_parallel
+        self.is_wo_b = re.search(r'\.wo_b$', self.prefix) is not None
+        # wo_b is row-sliced along the output dimension in OTP mode.  Its input
+        # dimension is NOT split (loaded unsplit via get_parallel_op returning
+        # tp_size=1), so input_is_parallel must be True to avoid an incorrect
+        # split_tensor_along_last_dim that would crash or corrupt the batch dim.
+        if self.is_wo_b:
+            self.input_is_parallel = True
         self.input_size_per_partition = self.layer.input_size_per_partition
 
 
