@@ -2,6 +2,7 @@ import os
 
 import numpy as np
 import pytest
+import torch
 from vllm.config import (
     CacheConfig,
     CUDAGraphMode,
@@ -378,3 +379,134 @@ def test_determine_batch_execution_and_padding(
     finally:
         runner.speculative_config = saved_spec_config
         runner.uniform_decode_query_len = saved_query_len
+
+
+@npu_test(num_npus=1, npu_type=RunnerDeviceType.A2)
+class TestCalcSpecDecodeMetadata:
+    """Tests for ``NPUModelRunner._calc_spec_decode_metadata``."""
+
+    @staticmethod
+    def _run(
+        runner,
+        *,
+        num_draft_tokens,
+        cu_num_scheduled_tokens,
+        expected_logits_indices,
+        expected_target_logits_indices,
+        expected_bonus_logits_indices,
+        expected_cu_num_draft_tokens,
+        expected_cu_num_sampled_tokens,
+    ):
+        num_draft_np = np.array(num_draft_tokens, dtype=np.int32)
+        cu_num_scheduled_np = np.array(cu_num_scheduled_tokens, dtype=np.int32)
+
+        # input_ids.gpu must contain valid token data so the index lookup at
+        # `self.input_ids.gpu[logits_indices]` doesn't read past the buffer.
+        # Fill with a deterministic pattern (token id == position) so that
+        # draft_token_ids equals logits_indices[target_logits_indices + 1].
+        total_scheduled = int(cu_num_scheduled_np[-1])
+        pattern = torch.arange(total_scheduled, dtype=runner.input_ids.gpu.dtype, device=runner.device)
+        runner.input_ids.gpu[:total_scheduled].copy_(pattern)
+
+        metadata = runner._calc_spec_decode_metadata(
+            num_draft_np,
+            cu_num_scheduled_np,
+            num_pcp_pads=None,
+        )
+
+        assert metadata.num_draft_tokens == num_draft_tokens
+        np.testing.assert_array_equal(
+            metadata.logits_indices.cpu().numpy(),
+            np.array(expected_logits_indices, dtype=np.int64),
+        )
+        np.testing.assert_array_equal(
+            metadata.target_logits_indices.cpu().numpy(),
+            np.array(expected_target_logits_indices, dtype=np.int64),
+        )
+        np.testing.assert_array_equal(
+            metadata.bonus_logits_indices.cpu().numpy(),
+            np.array(expected_bonus_logits_indices, dtype=np.int64),
+        )
+        np.testing.assert_array_equal(
+            metadata.cu_num_draft_tokens.cpu().numpy(),
+            np.array(expected_cu_num_draft_tokens, dtype=np.int32),
+        )
+        np.testing.assert_array_equal(
+            metadata.cu_num_sampled_tokens.cpu().numpy(),
+            np.array(expected_cu_num_sampled_tokens, dtype=np.int32),
+        )
+
+        # draft_token_ids = input_ids[logits_indices][target_logits_indices + 1]
+        # With the identity pattern, this equals logits_indices[target_logits_indices + 1].
+        expected_draft_ids = np.array(expected_logits_indices, dtype=np.int64)[
+            np.array(expected_target_logits_indices, dtype=np.int64) + 1
+        ]
+        np.testing.assert_array_equal(
+            metadata.draft_token_ids.cpu().numpy(),
+            expected_draft_ids,
+        )
+
+    def test_mixed_draft_counts(self, model_runner):
+        """Docstring example: 5 requests with mixed draft counts [3, 0, 2, 0, 1]."""
+        self._run(
+            model_runner,
+            num_draft_tokens=[3, 0, 2, 0, 1],
+            cu_num_scheduled_tokens=[4, 104, 107, 207, 209],
+            expected_logits_indices=[0, 1, 2, 3, 103, 104, 105, 106, 206, 207, 208],
+            expected_target_logits_indices=[0, 1, 2, 5, 6, 9],
+            expected_bonus_logits_indices=[3, 4, 7, 8, 10],
+            expected_cu_num_draft_tokens=[3, 3, 5, 5, 6],
+            expected_cu_num_sampled_tokens=[4, 5, 8, 9, 11],
+        )
+
+    def test_no_draft_tokens(self, model_runner):
+        """All requests have 0 draft tokens; only bonus tokens are sampled."""
+        self._run(
+            model_runner,
+            num_draft_tokens=[0, 0, 0],
+            cu_num_scheduled_tokens=[10, 20, 30],
+            expected_logits_indices=[9, 19, 29],
+            expected_target_logits_indices=[],
+            expected_bonus_logits_indices=[0, 1, 2],
+            expected_cu_num_draft_tokens=[0, 0, 0],
+            expected_cu_num_sampled_tokens=[1, 2, 3],
+        )
+
+    def test_uniform_drafts(self, model_runner):
+        """Every request has the same number of draft tokens."""
+        self._run(
+            model_runner,
+            num_draft_tokens=[2, 2, 2],
+            cu_num_scheduled_tokens=[3, 6, 9],
+            expected_logits_indices=[0, 1, 2, 3, 4, 5, 6, 7, 8],
+            expected_target_logits_indices=[0, 1, 3, 4, 6, 7],
+            expected_bonus_logits_indices=[2, 5, 8],
+            expected_cu_num_draft_tokens=[2, 4, 6],
+            expected_cu_num_sampled_tokens=[3, 6, 9],
+        )
+
+    def test_single_request_with_drafts(self, model_runner):
+        """Single request with 3 draft tokens (minimal spec_decode case)."""
+        self._run(
+            model_runner,
+            num_draft_tokens=[3],
+            cu_num_scheduled_tokens=[4],
+            expected_logits_indices=[0, 1, 2, 3],
+            expected_target_logits_indices=[0, 1, 2],
+            expected_bonus_logits_indices=[3],
+            expected_cu_num_draft_tokens=[3],
+            expected_cu_num_sampled_tokens=[4],
+        )
+
+    def test_single_request_no_draft(self, model_runner):
+        """Single request with 0 draft tokens (most degenerate case)."""
+        self._run(
+            model_runner,
+            num_draft_tokens=[0],
+            cu_num_scheduled_tokens=[5],
+            expected_logits_indices=[4],
+            expected_target_logits_indices=[],
+            expected_bonus_logits_indices=[0],
+            expected_cu_num_draft_tokens=[0],
+            expected_cu_num_sampled_tokens=[1],
+        )
