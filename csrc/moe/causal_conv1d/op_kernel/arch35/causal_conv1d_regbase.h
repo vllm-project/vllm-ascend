@@ -11,7 +11,6 @@
 
 /*!
  * \file causal_conv1d_regbase.h
- * \brief
  */
 #ifndef CAUSAL_CONV1D_REGBASE_H
 #define CAUSAL_CONV1D_REGBASE_H
