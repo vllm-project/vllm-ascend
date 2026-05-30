@@ -187,6 +187,10 @@ class AscendSpecDecodeBaseProposer(SpecDecodeBaseProposer):
         self.enable_enpu = self.runner.enable_enpu
         self.use_eagle = self.runner.use_eagle
 
+        if get_ascend_config().specdec_config.dynamic_spec:
+            assert self.method == "dflash" and not self.use_async_scheduling, "Currently, dynamic supports only the DFlash and async_scheduling must be disabled."
+            logger.info("Dynamic Spec is Enabled")
+
     def _get_model(self) -> nn.Module:
         """
         Default method to call get_model(). Can be overridden by subclasses which
@@ -966,6 +970,8 @@ class AscendSpecDecodeBaseProposer(SpecDecodeBaseProposer):
 
         # Early exit if there is only one draft token to be generated.
         if self.num_speculative_tokens == 1 or self.parallel_drafting:
+            if self.method == "dflash" and get_ascend_config().specdec_config.dynamic_spec:
+                self._last_draft_token_count = self._select_draft_k()
             # [batch_size, 1]
             return draft_token_ids.view(-1, self.num_speculative_tokens)
 

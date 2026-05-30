@@ -48,6 +48,9 @@ class AscendConfig:
         eplb_config = additional_config.get("eplb_config", {})
         self.eplb_config = EplbConfig(eplb_config)
 
+        specdec_config = additional_config.get("specdec_config", {})
+        self.specdec_config = SpecDecConfig(specdec_config)
+
         weight_prefetch_config = additional_config.get("weight_prefetch_config", {})
         self.weight_prefetch_config = WeightPrefetchConfig(weight_prefetch_config)
 
@@ -687,6 +690,18 @@ class EplbConfig:
 
         logger.info("Dynamic EPLB is %s", self.config["dynamic_eplb"])
         logger.info("The number of redundant experts is %s", self.config["num_redundant_experts"])
+
+
+class SpecDecConfig:
+    def __init__(self, config: dict | None = None):
+        if config is None:
+            config = {}
+        self.dynamic_spec: bool = config.get("dynamic_spec", False)
+        self._validate()
+
+    def _validate(self):
+        if not isinstance(self.dynamic_spec, bool):
+            raise TypeError(f"dynamic_spec must be a boolean, got {type(self.dynamic_spec).__name__}: {self.dynamic_spec}")
 
 
 _ASCEND_CONFIG: AscendConfig | None = None

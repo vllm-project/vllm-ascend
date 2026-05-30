@@ -74,6 +74,7 @@ from vllm.v1.outputs import (
     LogprobsTensors,
     ModelRunnerOutput,
     SamplerOutput,
+    DraftTokenIds,
     make_empty_encoder_model_runner_output,
 )
 from vllm.v1.worker.utils import select_common_block_size
@@ -1528,6 +1529,9 @@ class NPUModelRunner(GPUModelRunner):
                     self.num_discarded_requests,
                 )
 
+                if self.ascend_config.specdec_config.dynamic_spec:
+                    self.drafter.update_prev_verify_result(valid_sampled_tokens_count)
+
             req_scheduled_tokens = scheduler_output.num_scheduled_tokens
             if self.use_cp:
                 long_seq_metadata = self.long_seq_metadata  # type: ignore
@@ -2084,6 +2088,18 @@ class NPUModelRunner(GPUModelRunner):
         if deferred_state_corrections_fn:
             deferred_state_corrections_fn()
         return None
+
+    def take_draft_token_ids(self) -> DraftTokenIds | None:
+        out = super().take_draft_token_ids()
+        if out is None or not self.ascend_config.specdec_config.dynamic_spec:
+            return out
+        k = getattr(self, "_last_draft_token_count", self.num_spec_tokens)
+        if k >= self.num_spec_tokens:
+            return out
+        return DraftTokenIds(
+            req_ids=out.req_ids,
+            draft_token_ids=[tokens[:k] for tokens in out.draft_token_ids],
+        )
 
     @torch.inference_mode()
     def sample_tokens(
