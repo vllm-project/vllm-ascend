@@ -24,6 +24,8 @@ WORKDIR /workspace
 
 COPY ./tools/mooncake_installer.sh /vllm-workspace/
 
+COPY ./tools/get_cpu_count.sh /vllm-workspace/
+
 # Install clang-15 (for triton-ascend) and Mooncake
 RUN apt-get update -y && \
     apt-get install -y git vim wget net-tools gcc g++ cmake numactl libnuma-dev libjemalloc2 clang-15 && \
@@ -36,7 +38,7 @@ RUN apt-get update -y && \
     source /usr/local/Ascend/ascend-toolkit/set_env.sh && \
     export LD_LIBRARY_PATH=/usr/local/Ascend/ascend-toolkit/latest/${ARCH}-linux/devlib:/usr/local/Ascend/ascend-toolkit/latest/${ARCH}-linux/lib64:$LD_LIBRARY_PATH && \
     mkdir -p build && cd build && cmake .. -DUSE_ASCEND_DIRECT=ON && \
-    make -j$(nproc) && make install && \
+    make -j$(/vllm-workspace/get_cpu_count.sh) && make install && \
     rm -rf /vllm-workspace/Mooncake/build && \
     rm -rf /var/cache/apt/* && \
     rm -rf /var/lib/apt/lists/*

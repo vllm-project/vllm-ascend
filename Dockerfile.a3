@@ -22,6 +22,8 @@ ARG MOONCAKE_TAG=v0.3.8.post1
 
 COPY ./tools/mooncake_installer.sh /vllm-workspace/
 
+COPY ./tools/get_cpu_count.sh /vllm-workspace/
+
 ENV DEBIAN_FRONTEND=noninteractive
 
 WORKDIR /workspace
@@ -38,7 +40,7 @@ RUN apt-get update -y && \
     source /usr/local/Ascend/ascend-toolkit/set_env.sh && \
     export LD_LIBRARY_PATH=/usr/local/Ascend/ascend-toolkit/latest/${ARCH}-linux/devlib:/usr/local/Ascend/ascend-toolkit/latest/${ARCH}-linux/lib64:$LD_LIBRARY_PATH && \
     mkdir -p build && cd build && cmake .. -DUSE_ASCEND_DIRECT=ON && \
-    make -j$(nproc) && make install && \
+    make -j$(/vllm-workspace/get_cpu_count.sh) && make install && \
     rm -fr /vllm-workspace/Mooncake/build && \
     rm -rf /var/cache/apt/* && \
     rm -rf /var/lib/apt/lists/*

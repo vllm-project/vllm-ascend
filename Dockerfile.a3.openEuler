@@ -24,6 +24,8 @@ WORKDIR /workspace
 
 COPY ./tools/mooncake_installer.sh /vllm-workspace/
 
+COPY ./tools/get_cpu_count.sh /vllm-workspace/
+
 SHELL ["/bin/bash", "-c"]
 
 # Install clang (for triton-ascend) and Mooncake
@@ -38,7 +40,7 @@ RUN yum update -y && \
     cd /vllm-workspace/Mooncake && \
     bash mooncake_installer.sh -y && \
     mkdir -p build && cd build && cmake .. -DUSE_ASCEND_DIRECT=ON && \
-    make -j$(nproc) && make install && \
+    make -j$(/vllm-workspace/get_cpu_count.sh) && make install && \
     rm -fr /vllm-workspace/Mooncake/build && \
     rm -rf /var/cache/yum/*
 
