@@ -44,12 +44,6 @@ enum class SparseMode : uint8_t {
     SPARSE_BUTT,
 };
 
-enum class ValidSocVersion {
-    ASCEND910 = 0,
-    ASCEND950,
-    RESERVED_VERSION = 99999
-};
-
 template<class T>
 using Range = std::pair<T, T>;
 
@@ -72,6 +66,67 @@ template<typename T>
 inline bool IsWithinTolerance(T limit, T tolerance, T value)
 {
     return limit + tolerance >= value;
+}
+
+template <typename T>
+inline typename std::enable_if<std::is_integral_v<T>, bool>::type GetAttrValue(CpuKernelContext &ctx,
+                                                                               const std::string &name, T &value)
+{
+    auto attr = ctx.GetAttr(name);
+    if (!attr) {
+        KERNEL_LOG_ERROR("attr is null: %s", name.c_str());
+        return false;
+    }
+    value = static_cast<T>(attr->GetInt());
+    return true;
+}
+
+inline bool GetAttrValue(CpuKernelContext &ctx, const std::string &name, std::string &value)
+{
+    auto attr = ctx.GetAttr(name);
+    if (!attr) {
+        KERNEL_LOG_ERROR("attr is null: %s", name.c_str());
+        return false;
+    }
+    value = attr->GetString();
+    return true;
+}
+
+inline bool GetAttrValue(CpuKernelContext &ctx, const std::string &name, bool &value)
+{
+    auto attr = ctx.GetAttr(name);
+    if (!attr) {
+        KERNEL_LOG_ERROR("attr is null: %s", name.c_str());
+        return false;
+    }
+    value = attr->GetBool();
+    return true;
+}
+
+template <typename T>
+inline typename std::enable_if<std::is_integral_v<T>, void>::type GetAttrValueOpt(CpuKernelContext &ctx,
+                                                                                  const std::string &name, T &value)
+{
+    auto attr = ctx.GetAttr(name);
+    if (attr != nullptr) {
+        value = static_cast<T>(attr->GetInt());
+    }
+}
+
+inline void GetAttrValueOpt(CpuKernelContext &ctx, const std::string &name, std::string &value)
+{
+    auto attr = ctx.GetAttr(name);
+    if (attr != nullptr) {
+        value = attr->GetString();
+    }
+}
+
+inline void GetAttrValueOpt(CpuKernelContext &ctx, const std::string &name, bool &value)
+{
+    auto attr = ctx.GetAttr(name);
+    if (attr != nullptr) {
+        value = attr->GetBool();
+    }
 }
 
 // 分核功能模块输出：FD信息，包含需要归约的数据索引及其分核信息
@@ -212,7 +267,7 @@ struct AssignContext {
     int64_t unassignedCost { 0 };
     uint32_t usedCoreNum { 0U };
     uint32_t curKvSplitPart { 1U };
-    uint32_t curFdDataNum { 1U };
+    uint32_t preFdDataNum { 0U };
 
     int64_t bN2Cost { 0 };
     uint32_t bN2Block { 0U };
@@ -230,20 +285,14 @@ public:
 
 private:
     bool Prepare(CpuKernelContext &ctx);
-    bool ParamsCheck();
     int32_t GetQueryBatchSize();
-    int32_t GetKvBatchSize();
-    bool CheckSingleParam();
-    bool CheckExistence();
-    bool CheckConsistency();
-    bool CheckFeature();
     bool ParamsInit();
     bool BalanceSchedule(SplitResult &splitRes);
-    bool GenMetaData(SplitResult &splitRes);
-    ValidSocVersion ProcessSocVersion();
+    bool GenMetadata(SplitResult &splitRes);
     // util
     uint32_t GetS1SeqSize(uint32_t bIdx);
     uint32_t GetS2SeqSize(uint32_t bIdx);
+    uint32_t GetS1ValidSeqSize(uint32_t bIdx);
     int64_t CalcPreTokenLeftUp(uint32_t s1Size, uint32_t s2Size);
     int64_t CalcNextTokenLeftUp(uint32_t s1Size, uint32_t s2Size);
     Range<int64_t> CalcS2TokenRange(uint32_t s1GIdx, const BatchCache &batchCache);
@@ -284,9 +333,6 @@ private:
     void SplitCore();
 
 private:
-    // context for log use
-    CpuKernelContext *context_ = nullptr;
-
     // input
     Tensor *actSeqLenQ_ = nullptr;
     Tensor *actSeqLenOriKv_ = nullptr;
@@ -295,7 +341,7 @@ private:
     Tensor *seqUsedKv_ = nullptr;
 
     // output
-    Tensor *metaData_ = nullptr;
+    Tensor *metadata_ = nullptr;
 
     // attributes
     int32_t batchSize_ = 0;
@@ -332,6 +378,7 @@ private:
     uint32_t sparseMode_ = 0;
     uint32_t attentionMode_ = 1;
     BlockCost<int64_t> typeCost_;
+    bool isHighPorfScfa_ = false;
 
 private:
     enum class ParamId : uint32_t {
@@ -342,7 +389,7 @@ private:
     seqUsedQ = 3,
     seqUsedKv = 4,
     // output
-    metaData = 0,
+    metadata = 0,
   };
 };
 } // namespace aicpu
