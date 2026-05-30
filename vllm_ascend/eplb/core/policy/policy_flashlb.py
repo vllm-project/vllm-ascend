@@ -162,7 +162,7 @@ def make_replica(
     num_available_replicas: int,
     current_replicas: np.ndarray,
     z_score: float,
-    method: str = "percentage",
+    method: str = "min_max_replica",
 ) -> tuple[np.ndarray, np.ndarray]:
     if method == "percentage":
         return percentage_replica(mu, var, num_available_replicas, current_replicas, z_score)
@@ -932,12 +932,13 @@ class FlashLB(EplbPolicy):
             new_average_to_peak_ratio[layer] = 1 / best_score
 
             current_deployment = self.current_deployment.get(layer, None)
-
-            new_deployment[layer] = best_deployment
-            # Minimize redeployment by permuting new deployment
-            new_deployment[layer] = FlashLB.minimize_redeploy_with_inner_permutation(
-                current_deployment, best_deployment
-            )
+            if -1 in best_deployment:
+                new_deployment[layer] = current_deployment
+            else:
+                # Minimize redeployment by permuting new deployment
+                new_deployment[layer] = FlashLB.minimize_redeploy_with_inner_permutation(
+                    current_deployment, best_deployment
+                )
             current_average_to_peak_ratio = 1 / compute_score(
                 buf, self.current_deployed_replicas.get(layer), current_deployment
             )
