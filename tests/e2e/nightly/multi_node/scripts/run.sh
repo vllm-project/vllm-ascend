@@ -129,19 +129,27 @@ install_extra_components() {
     fi
     chmod +x ./CANN-custom_ops-sfa-linux.aarch64.run
     ./CANN-custom_ops-sfa-linux.aarch64.run --quiet
+<<<<<<< HEAD
 
+=======
+    
+>>>>>>> 04d83440 (fix)
     if ! wget -q https://vllm-ascend.obs.cn-north-4.myhuaweicloud.com/vllm-ascend/a3/custom_ops-1.0-cp311-cp311-linux_aarch64.whl; then
         echo "Failed to download custom_ops wheel"
         return 1
     fi
     pip install custom_ops-1.0-cp311-cp311-linux_aarch64.whl
+<<<<<<< HEAD
 
+=======
+    
+>>>>>>> 04d83440 (fix)
     export ASCEND_CUSTOM_OPP_PATH="/usr/local/Ascend/ascend-toolkit/latest/opp/vendors/customize${ASCEND_CUSTOM_OPP_PATH:+:${ASCEND_CUSTOM_OPP_PATH}}"
     export LD_LIBRARY_PATH="/usr/local/Ascend/ascend-toolkit/latest/opp/vendors/customize/op_api/lib/${LD_LIBRARY_PATH:+:${LD_LIBRARY_PATH}}"
     source /usr/local/Ascend/ascend-toolkit/set_env.sh
 
     rm -f CANN-custom_ops-sfa-linux.aarch64.run \
-          custom_ops-1.0-cp312-cp312-linux_aarch64.whl
+          custom_ops-1.0-cp311-cp311-linux_aarch64.whl
     echo "====> Extra components installation completed"
 }
 
