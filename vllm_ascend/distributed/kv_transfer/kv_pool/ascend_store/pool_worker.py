@@ -906,7 +906,6 @@ class KVPoolWorker:
         try:
             hits = []
             kv_cache_group_ids = kv_cache_group_ids or [0]
-            kv_cache_group_ids = self._get_lookup_gate_group_ids(kv_cache_group_ids)
             for group_id in kv_cache_group_ids:
                 end = 0
                 keys = []
