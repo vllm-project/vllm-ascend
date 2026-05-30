@@ -31,77 +31,42 @@ class MooncakeBackend(Backend):
             ) from e
         self.config = MooncakeStoreConfig.load_from_env()
         self.store = MooncakeDistributedStore()
-        if self.config.protocol != "ascend":
-            raise NotImplementedError(f"MooncakeBackend does not support protocol {self.config.protocol!r}.")
+        if self.config.protocol == "ascend":
+            local_hostname = get_ip()
+            # ASCEND_ENABLE_USE_FABRIC_MEM: Enable unified memory address direct transmission scheme
+            # and only can be used for 800 I/T A3 series.
+            # Required supporting hardware versions are as follows:
+            if os.getenv("ASCEND_ENABLE_USE_FABRIC_MEM", "0") != "1":
+                transfer_engine = global_te.get_transfer_engine(local_hostname, device_name=None)
+                self.local_seg = local_hostname + ":" + str(transfer_engine.get_rpc_port())
+                ret = self.store.setup(
+                    self.local_seg,
+                    self.config.metadata_server,
+                    self.config.global_segment_size,
+                    self.config.local_buffer_size,
+                    self.config.protocol,
+                    self.config.device_name,
+                    self.config.master_server_address,
+                    transfer_engine.get_engine(),
+                )
+            else:
+                self.local_seg = local_hostname
+                ret = self.store.setup(
+                    self.local_seg,
+                    self.config.metadata_server,
+                    self.config.global_segment_size,
+                    0,
+                    self.config.protocol,
+                    self.config.device_name,
+                    self.config.master_server_address,
+                )
 
-        self._setup_done = False
-        self._is_dsv4_model = self._detect_dsv4_model()
-
-        # DSV4 models defer the mooncake store registration until the first put()
-        # because the transfer engine / buffers are not ready yet at construction time.
-        # Other models register eagerly to preserve existing behavior.
-        if not self._is_dsv4_model:
-            self._setup_store()
-
-    @staticmethod
-    def _detect_dsv4_model() -> bool:
-        """Return True when the running model is a DeepSeek-V4 variant.
-
-        Detection relies on ``hf_config.model_type == "deepseek_v4"`` obtained
-        from the current vLLM config, which matches the convention used
-        elsewhere in this package (see ``config_data.py`` / ``utils.py``).
-        """
-        try:
-            from vllm.config import get_current_vllm_config
-
-            vllm_config = get_current_vllm_config()
-        except Exception as e:
-            logger.warning("MooncakeBackend: failed to fetch current vllm config for dsv4 detection: %s", e)
-            return False
-
-        model_config = getattr(vllm_config, "model_config", None)
-        if model_config is None:
-            return False
-        hf_config = getattr(model_config, "hf_config", None)
-        return getattr(hf_config, "model_type", None) == "deepseek_v4"
-
-    def _setup_store(self) -> None:
-        if self._setup_done:
-            return
-        local_hostname = get_ip()
-        # ASCEND_ENABLE_USE_FABRIC_MEM: Enable unified memory address direct transmission scheme
-        # and only can be used for 800 I/T A3 series.
-        # Required supporting hardware versions are as follows:
-        if os.getenv("ASCEND_ENABLE_USE_FABRIC_MEM", "0") != "1":
-            transfer_engine = global_te.get_transfer_engine(local_hostname, device_name=None)
-            self.local_seg = local_hostname + ":" + str(transfer_engine.get_rpc_port())
-            ret = self.store.setup(
-                self.local_seg,
-                self.config.metadata_server,
-                self.config.global_segment_size,
-                self.config.local_buffer_size,
-                self.config.protocol,
-                self.config.device_name,
-                self.config.master_server_address,
-                transfer_engine.get_engine(),
-            )
+            if ret != 0:
+                msg = "Initialize mooncake failed."
+                logger.error(msg)
+                raise RuntimeError(msg)
         else:
-            self.local_seg = local_hostname
-            ret = self.store.setup(
-                self.local_seg,
-                self.config.metadata_server,
-                self.config.global_segment_size,
-                0,
-                self.config.protocol,
-                self.config.device_name,
-                self.config.master_server_address,
-            )
-
-        if ret != 0:
-            msg = "Initialize mooncake failed."
-            logger.error(msg)
-            raise RuntimeError(msg)
-        self._setup_done = True
+            raise NotImplementedError(f"MooncakeBackend does not support protocol {self.config.protocol!r}.")
 
     def set_device(self):
         local_rank = get_world_group().local_rank
@@ -113,22 +78,9 @@ class MooncakeBackend(Backend):
             global_te.register_buffer(ptrs, lengths)
 
     def exists(self, keys: list[str]) -> list[int]:
-        try:
-            return self.store.batch_is_exist(keys)
-        except Exception as e:
-            if self._is_dsv4_model and not self._setup_done:
-                logger.warning(
-                    "MooncakeBackend.exists: dsv4 model store is unavailable on first call "
-                    "before put() registers it; returning all-miss. error=%s",
-                    e,
-                )
-                return [0] * len(keys)
-            logger.error("Failed to check existence for keys %s, error: %s", keys, e)
-            raise
+        return self.store.batch_is_exist(keys)
 
     def put(self, keys: list[str], addrs: list[list[int]], sizes: list[list[int]]):
-        if self._is_dsv4_model and not self._setup_done:
-            self._setup_store()
         try:
             res = self.store.batch_put_from_multi_buffers(keys, addrs, sizes)
             for value in res:
