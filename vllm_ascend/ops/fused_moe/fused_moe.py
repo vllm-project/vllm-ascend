@@ -545,14 +545,12 @@ class AscendFusedMoE(FusedMoE):
 
         if self.dynamic_eplb:
             if self.policy_type == 4:
-                # TODO ALL2ALL case, currently only support ALLGATHER
                 if self.token2req[0] is not None:
-                    topk_ids = fused_experts_results.topk_ids.reshape(get_dp_group().world_size, -1, self.top_k)[get_dp_group().rank_in_group]
+                    topk_ids = fused_experts_results.topk_ids
+                    if _EXTRA_CTX.moe_comm_type == MoECommType.ALLGATHER:
+                        topk_ids = topk_ids.reshape(get_dp_group().world_size, -1, self.top_k)[get_dp_group().rank_in_group]
                     if topk_ids.shape[0] !=self.token2req[0].shape[0]:
                         # shape while mismatch when this device in dumy run
-                        # logger.warning_once(
-                        #     f"Mismatch in the number of tokens for MoE load calculation. topk_ids has {topk_ids.shape[0]} tokens, while token2req has {self.token2req[0].shape[0]} tokens. This may lead to incorrect MoE load tracking."
-                        # )
                         pass
                     else:
                         expanded_req_ids = self.token2req[0]
