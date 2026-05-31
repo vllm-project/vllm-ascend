@@ -99,6 +99,7 @@ class AscendStoreConnector(KVConnectorBase_V1, SupportsHMA):
         self._kv_cache_events: AscendStoreKVEvents | None = None
 
         self.sended_but_unfinished_reqs: set[str] = set()
+        self._current_step_needs_store_init = False
 
         if role == KVConnectorRole.SCHEDULER:
             self.connector_scheduler = KVPoolScheduler(vllm_config, self.use_layerwise, kv_cache_config)
@@ -194,6 +195,7 @@ class AscendStoreConnector(KVConnectorBase_V1, SupportsHMA):
     def start_load_kv(self, forward_context: "ForwardContext", **kwargs) -> None:
         assert self.connector_worker is not None
         metadata = self._get_connector_metadata()
+        self._current_step_needs_store_init = forward_context is not None and bool(metadata.requests)
         logger.debug(
             "KV pool connector start_load_kv metadata_requests=%d specs=%s",
             len(metadata.requests),
@@ -238,9 +240,13 @@ class AscendStoreConnector(KVConnectorBase_V1, SupportsHMA):
     def get_finished(self, finished_req_ids: set[str]) -> tuple[set[str], set[str]]:
         """Get the finished recving and sending requests."""
         assert self.connector_worker is not None
-        done_sending, done_recving = self.connector_worker.get_finished(
-            finished_req_ids, self._get_connector_metadata()
-        )
+        metadata = self._get_connector_metadata()
+        if self._current_step_needs_store_init:
+            try:
+                self.connector_worker.ensure_store_initialized()
+            finally:
+                self._current_step_needs_store_init = False
+        done_sending, done_recving = self.connector_worker.get_finished(finished_req_ids, metadata)
         return done_sending, done_recving
 
     def get_block_ids_with_load_errors(self) -> set[int]:

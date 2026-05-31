@@ -895,6 +895,11 @@ class KVPoolWorker:
         )
         return done_sending, done_recving
 
+    def ensure_store_initialized(self) -> None:
+        ensure_initialized = getattr(self.m_store, "ensure_initialized", None)
+        if ensure_initialized is not None:
+            ensure_initialized()
+
     def get_and_clear_finished_requests(self, finished_req_ids, meta: AscendConnectorMetadata) -> set[str]:
         finished_sending = set()
         for req_id in meta.preempted_req_ids:
