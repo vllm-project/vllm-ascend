@@ -84,8 +84,8 @@ class AscendW8A8DynamicLinearMethod(AscendLinearScheme):
             quantized_x = quantized_x.squeeze(dim=1)
             pertoken_scale = pertoken_scale.squeeze(dim=1)
 
-        if getattr(layer, "_chunk_size", 0):
-            chunk_size = layer._chunk_size
+        chunk_size = getattr(layer, "_chunk_size", 0)
+        if isinstance(chunk_size, int) and chunk_size > 0:
             bias_1 = bias[:chunk_size] if bias is not None else None
             bias_2 = bias[chunk_size:] if bias is not None else None
             output = torch.cat(
@@ -124,7 +124,7 @@ class AscendW8A8DynamicLinearMethod(AscendLinearScheme):
 
     def process_weights_after_loading(self, layer):
         layer.weight.data = layer.weight.data.transpose(0, 1).contiguous()
-        if "wq_b" in layer.prefix and layer.weight.shape[1] >= 65536 and enable_dsa_cp():
+        if "wq_b" in getattr(layer, "prefix", "") and layer.weight.shape[1] >= 65536 and enable_dsa_cp():
             # TODO(jianzs): Remove this workaround after
             # `torch_npu.npu_quant_matmul` supports large weight dimensions.
             chunk_size = layer.weight.shape[1] // 2
