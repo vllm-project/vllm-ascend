@@ -287,6 +287,24 @@
 #       Remove this patch once vllm-ascend upgrades to a vLLM version with the
 #       same DeepSeek V4 thinking behavior.
 #
+# ** 12b. File: platform/patch_minimax_m2_tool_call_parser.py**
+# ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+#   1. `vllm.tool_parsers.minimax_m2_tool_parser.MinimaxM2ToolParser`
+#    Why:
+#       vLLM 0.20.2 only emits MiniMax-M2 tool-call arguments after a complete
+#       `<invoke>...</invoke>` block, so long arguments are buffered instead of
+#       streamed incrementally.
+#    How:
+#       Monkey-patch the MiniMax-M2 parser to emit the tool name once the
+#       `<invoke name=...>` header is available and then stream partial
+#       `<parameter>` values as JSON argument fragments.
+#    Related PR (if no, explain why):
+#       https://github.com/vllm-project/vllm/pull/40253
+#       https://github.com/vllm-project/vllm/pull/40298
+#    Future Plan:
+#       Remove this patch once the supported vLLM version contains the upstream
+#       MiniMax-M2 incremental tool-call streaming fix.
+#
 # ** 13. File: platform/patch_camem_allocator.py**
 # ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 #   1. `vllm.config.model.is_cumem_allocator_available`
