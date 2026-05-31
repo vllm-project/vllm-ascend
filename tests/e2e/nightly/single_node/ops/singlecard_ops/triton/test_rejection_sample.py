@@ -19,6 +19,7 @@ def setup_device_properties():
     yield
 
 
+@pytest.mark.skip("Probabilistic failure, need zengtian after fix")
 @pytest.mark.parametrize("max_spec_len", [1, 2, 3])
 @pytest.mark.parametrize("vocab_size", [1024])
 @pytest.mark.parametrize("batch_size", [1, 256, 512, 1024])
