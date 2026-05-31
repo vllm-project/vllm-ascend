@@ -47,9 +47,9 @@ class EMoonCakeStoreConnector(ECConnectorBase):
             ec_extra_config = getattr(transfer_config, "ec_connector_extra_config", {})
             self.thread_executor = ThreadPoolExecutor(max_workers=getattr(transfer_config, "max_workers", 8) or 8)
             if ec_extra_config:
-                self.aligned_tensor_size = ec_extra_config.get("aligned_tensor_size", 200)
+                self.aligned_tensor_size = ec_extra_config.get("aligned_tensor_size", 100)
             else:
-                self.aligned_tensor_size = 200
+                self.aligned_tensor_size = 100
 
             if transfer_config.ec_role == "ec_producer":
                 self.send_queue = queue.Queue[tuple[str, torch.Tensor]]()
@@ -64,7 +64,7 @@ class EMoonCakeStoreConnector(ECConnectorBase):
                 [self.aligned_tensor_size, 1024, 1024], dtype=torch.bfloat16, device="npu"
             )
             tensor_bytes = self.aligned_tensor.element_size() * self.aligned_tensor.numel()
-            self.ec_store.register_buffer([self.aligned_tensor.data_ptr()], [tensor_bytes])
+            self.ec_store.register_buffer_single(self.aligned_tensor.data_ptr(), tensor_bytes)
 
     def aligned_empty_tensor(self, shape, dtype=torch.float32, device="npu:0"):
         numel = torch.Size(shape).numel()
@@ -124,7 +124,7 @@ class EMoonCakeStoreConnector(ECConnectorBase):
                     raise TimeoutError(
                         f"Can not find the mm_hash {mm_data.mm_hash} in the Mooncake store after {WAIT_TIME} seconds"
                     )
-                if self.ec_store.exists([mm_data.mm_hash])[0]:
+                if self.ec_store.exist_single(mm_data.mm_hash):
                     break
 
                 time.sleep(0.005)
@@ -135,10 +135,9 @@ class EMoonCakeStoreConnector(ECConnectorBase):
                     raise ValueError(f"tensor_info must be bytes, got {type(tensor_info)}")
 
                 tensor_shape, tensor_dtype = self.decoder.decode(tensor_info)
-                tensor_shape, tensor_dtype = self.decoder.decode(tensor_info)
                 tensor = torch.empty(tensor_shape, dtype=getattr(torch, tensor_dtype), device="npu")
                 tensor_bytes = tensor.element_size() * tensor.numel()
-                self.ec_store.get([mm_data.mm_hash], [[self.aligned_tensor.data_ptr()]], [[tensor_bytes]])
+                self.ec_store.get_tensor_single(mm_data.mm_hash, self.aligned_tensor.data_ptr(), tensor_bytes)
                 tensor.copy_(self.aligned_tensor.view(-1)[: tensor.numel()].view(tensor_shape), non_blocking=False)
                 encoder_cache[mm_data.mm_hash] = tensor
                 logger.debug(
@@ -146,7 +145,6 @@ class EMoonCakeStoreConnector(ECConnectorBase):
                     self.aligned_tensor.view(-1)[: tensor.numel()].view(tensor_shape),
                     tensor,
                 )
-                self.aligned_tensor.zero_()
 
             except Exception as e:
                 logger.error("Failed to get tensor %s from store: %s", mm_data.mm_hash, e)
@@ -185,9 +183,7 @@ class EMoonCakeStoreConnector(ECConnectorBase):
             Bool indicate that media exists in cache or not
         """
 
-        result = self.ec_store.exists([identifier])
-
-        return bool(result[0]) if result else False
+        return self.ec_store.exist_single(identifier)
 
     def update_state_after_alloc(
         self,
@@ -232,19 +228,18 @@ class EMoonCakeStoreConnector(ECConnectorBase):
                 tensor_bytes = tensor.element_size() * tensor.numel()
 
                 encoded_data = self.encoder.encode((tensor.shape, str(tensor.dtype).split(".")[-1]))
-                if not self.ec_store.exists([feat_key + "_info"])[0]:
+                if not self.ec_store.exist_single(feat_key + "_info"):
                     self.ec_store.put_tensor_info(feat_key + "_info", encoded_data)
                 torch.npu.current_stream().synchronize()
 
-                if not self.ec_store.exists([feat_key])[0]:
-                    self.ec_store.put([feat_key], [[self.aligned_tensor.data_ptr()]], [[tensor_bytes]])
+                if not self.ec_store.exist_single(feat_key):
+                    self.ec_store.put_tensor_single(feat_key, self.aligned_tensor.data_ptr(), tensor_bytes)
                 logger.debug(
                     "Send feat key %s tensor %s, aligned_tensor %s",
                     feat_key,
                     tensor,
                     self.aligned_tensor.view(-1)[: tensor.numel()].view(tensor.shape),
                 )
-                self.aligned_tensor.zero_()
                 self.send_queue.task_done()
 
             except Exception as e:
