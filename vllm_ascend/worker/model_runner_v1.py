@@ -27,7 +27,7 @@ from copy import copy, deepcopy
 from dataclasses import dataclass, replace
 from functools import partial
 from multiprocessing import Manager
-from typing import TYPE_CHECKING, Any, NamedTuple, TypeAlias
+from typing import TYPE_CHECKING, Any, NamedTuple, TypeAlias, cast
 
 import numpy as np
 import torch
@@ -659,8 +659,9 @@ class NPUModelRunner(GPUModelRunner):
         if sampling_metadata.max_num_logprobs is not None:
             return f"logprobs={sampling_metadata.max_num_logprobs}"
         logitsprocs = getattr(sampling_metadata, "logitsprocs", None)
-        if logitsprocs is not None and getattr(logitsprocs,
-                                               "argmax_invariant", ()):
+        if logitsprocs is not None and bool(
+            getattr(logitsprocs, "argmax_invariant", False)
+        ):
             return "argmax_invariant_logitsproc"
         sampling_block_reason = self._get_fused_mtp_sampling_block_reason(
             sampling_metadata)
@@ -789,10 +790,12 @@ class NPUModelRunner(GPUModelRunner):
         if input_ids is not None:
             input_ids_gpu = getattr(input_ids, "gpu", None)
             if torch.is_tensor(input_ids_gpu):
-                input_ids_gpu[start:end].fill_(0)
+                input_ids_gpu_tensor = cast(torch.Tensor, input_ids_gpu)
+                input_ids_gpu_tensor[start:end].fill_(0)
             input_ids_cpu = getattr(input_ids, "cpu", None)
             if torch.is_tensor(input_ids_cpu):
-                input_ids_cpu[start:end].fill_(0)
+                input_ids_cpu_tensor = cast(torch.Tensor, input_ids_cpu)
+                input_ids_cpu_tensor[start:end].fill_(0)
 
         pad_position = 127 if self.use_compress else 0
         if self.uses_mrope:
@@ -800,30 +803,36 @@ class NPUModelRunner(GPUModelRunner):
             if positions is not None:
                 positions_gpu = getattr(positions, "gpu", None)
                 if torch.is_tensor(positions_gpu):
-                    positions_gpu[:, start:end].fill_(0)
+                    positions_gpu_tensor = cast(torch.Tensor, positions_gpu)
+                    positions_gpu_tensor[:, start:end].fill_(0)
                 positions_cpu = getattr(positions, "cpu", None)
                 if torch.is_tensor(positions_cpu):
-                    positions_cpu[:, start:end].fill_(0)
+                    positions_cpu_tensor = cast(torch.Tensor, positions_cpu)
+                    positions_cpu_tensor[:, start:end].fill_(0)
             return
         if self.uses_xdrope_dim > 0:
             positions = getattr(self, "xdrope_positions", None)
             if positions is not None:
                 positions_gpu = getattr(positions, "gpu", None)
                 if torch.is_tensor(positions_gpu):
-                    positions_gpu[:, start:end].fill_(0)
+                    positions_gpu_tensor = cast(torch.Tensor, positions_gpu)
+                    positions_gpu_tensor[:, start:end].fill_(0)
                 positions_cpu = getattr(positions, "cpu", None)
                 if torch.is_tensor(positions_cpu):
-                    positions_cpu[:, start:end].fill_(0)
+                    positions_cpu_tensor = cast(torch.Tensor, positions_cpu)
+                    positions_cpu_tensor[:, start:end].fill_(0)
             return
         positions = getattr(self, "positions", None)
         if positions is None:
             return
         positions_gpu = getattr(positions, "gpu", None)
         if torch.is_tensor(positions_gpu):
-            positions_gpu[start:end].fill_(pad_position)
+            positions_gpu_tensor = cast(torch.Tensor, positions_gpu)
+            positions_gpu_tensor[start:end].fill_(pad_position)
         positions_cpu = getattr(positions, "cpu", None)
         if torch.is_tensor(positions_cpu):
-            positions_cpu[start:end].fill_(pad_position)
+            positions_cpu_tensor = cast(torch.Tensor, positions_cpu)
+            positions_cpu_tensor[start:end].fill_(pad_position)
         positions_np = getattr(positions, "np", None)
         if positions_np is not None:
             positions_np[start:end] = pad_position
@@ -870,8 +879,12 @@ class NPUModelRunner(GPUModelRunner):
             ],
             dtype=np.int32,
         )
-        req_indices = np.arange(repeat_counts.shape[0], dtype=np.int32)
-        idx_mapping = np.repeat(req_indices, repeat_counts)
+        req_indices: np.ndarray[Any, np.dtype[np.int32]] = np.arange(
+            repeat_counts.shape[0], dtype=np.int32
+        )
+        idx_mapping: np.ndarray[Any, np.dtype[np.int32]] = np.repeat(
+            req_indices, repeat_counts
+        )
         if idx_mapping.shape[0] > num_rows:
             idx_mapping = idx_mapping[:num_rows]
         elif idx_mapping.shape[0] < num_rows:
@@ -909,7 +922,8 @@ class NPUModelRunner(GPUModelRunner):
             raise TypeError(f"Unsupported seq_lens type: {type(seq_lens)!r}")
         if num_reqs is None:
             return tensor
-        return tensor[:num_reqs]
+        tensor_view = cast(torch.Tensor, tensor)
+        return tensor_view[:num_reqs]
 
     def _get_seq_lens_cpu_view(self,
                                num_reqs: int | None = None) -> torch.Tensor:
@@ -959,6 +973,7 @@ class NPUModelRunner(GPUModelRunner):
     ) -> None:
         wrapper = self._fused_mtp_wrapper
         assert wrapper is not None
+        wrapper_ref: _FusedModelWithMTP = wrapper
 
         num_reqs = self.input_batch.num_reqs
         active_num_tokens = int(logits_indices.shape[0])
@@ -998,14 +1013,15 @@ class NPUModelRunner(GPUModelRunner):
             slot_mapping = getattr(
                 spec_decode_common_attn_metadata, "slot_mapping", None)
             if torch.is_tensor(slot_mapping):
+                slot_mapping_tensor = cast(torch.Tensor, slot_mapping)
                 mtp_slot_mapping = self.drafter.slot_mapping_group[0]
                 slot_mapping_len = min(
                     active_num_tokens,
-                    slot_mapping.shape[0],
+                    slot_mapping_tensor.shape[0],
                     mtp_slot_mapping.shape[0],
                 )
                 mtp_slot_mapping[:slot_mapping_len].copy_(
-                    slot_mapping[:slot_mapping_len].to(
+                    slot_mapping_tensor[:slot_mapping_len].to(
                         dtype=mtp_slot_mapping.dtype,
                         device=mtp_slot_mapping.device,
                     ))
@@ -1027,31 +1043,31 @@ class NPUModelRunner(GPUModelRunner):
             if num_tokens_padded % decode_query_len != 0:
                 return
             max_graph_reqs = min(
-                wrapper.bonus_row_indices_buf.shape[0],
-                wrapper.next_token_ids_buf.shape[0],
-                wrapper.cu_num_draft_tokens_buf.shape[0],
-                wrapper.sampled_token_ids_buf.shape[0],
+                wrapper_ref.bonus_row_indices_buf.shape[0],
+                wrapper_ref.next_token_ids_buf.shape[0],
+                wrapper_ref.cu_num_draft_tokens_buf.shape[0],
+                wrapper_ref.sampled_token_ids_buf.shape[0],
             )
             padded_num_reqs = num_tokens_padded // decode_query_len
             if padded_num_reqs > max_graph_reqs:
                 return
             padded_num_reqs = max(num_reqs, padded_num_reqs)
             if padded_num_reqs > num_reqs:
-                wrapper.logits_indices_buf[num_reqs:padded_num_reqs].zero_()
+                wrapper_ref.logits_indices_buf[num_reqs:padded_num_reqs].zero_()
 
         def fill_padded_sample_rows(num_sample_rows: int) -> None:
             if num_tokens_padded is None:
                 return
             pad_end = min(
                 int(num_tokens_padded),
-                wrapper.sample_logits_indices_buf.shape[0],
-                wrapper.sample_idx_mapping_buf.shape[0],
+                wrapper_ref.sample_logits_indices_buf.shape[0],
+                wrapper_ref.sample_idx_mapping_buf.shape[0],
             )
             num_sample_rows = min(int(num_sample_rows), pad_end)
             if pad_end <= num_sample_rows:
                 return
-            wrapper.sample_logits_indices_buf[num_sample_rows:pad_end].zero_()
-            wrapper.sample_idx_mapping_buf[
+            wrapper_ref.sample_logits_indices_buf[num_sample_rows:pad_end].zero_()
+            wrapper_ref.sample_idx_mapping_buf[
                 num_sample_rows:pad_end].fill_(dummy_sample_idx)
 
         backup_next_token_ids = np.array(
@@ -1257,10 +1273,12 @@ class NPUModelRunner(GPUModelRunner):
         if (
             torch.is_tensor(prev_sampled_token_ids)
             and torch.is_tensor(input_ids_gpu)
-            and prev_sampled_token_ids.dtype != input_ids_gpu.dtype
+            and cast(torch.Tensor, prev_sampled_token_ids).dtype != cast(torch.Tensor, input_ids_gpu).dtype
         ):
+            prev_sampled_token_ids_tensor = cast(torch.Tensor, prev_sampled_token_ids)
+            input_ids_gpu_tensor = cast(torch.Tensor, input_ids_gpu)
             self.input_batch.prev_sampled_token_ids = (
-                prev_sampled_token_ids.to(dtype=input_ids_gpu.dtype))
+                prev_sampled_token_ids_tensor.to(dtype=input_ids_gpu_tensor.dtype))
         return super()._prepare_input_ids(
             scheduler_output,
             num_reqs,
@@ -1289,7 +1307,9 @@ class NPUModelRunner(GPUModelRunner):
         # This way, we can overlap the copy with the following CPU operations.
         self.input_batch.block_table.commit_block_table(num_reqs)
 
-        req_indices = np.repeat(self.arange_np[:num_reqs], num_scheduled_tokens)
+        req_indices: np.ndarray[Any, Any] = np.repeat(
+            self.arange_np[:num_reqs], num_scheduled_tokens
+        )
 
         # Get the attention state.
         if not scheduler_output.scheduled_spec_decode_tokens:
@@ -1406,7 +1426,7 @@ class NPUModelRunner(GPUModelRunner):
         if self.input_batch.req_prompt_embeds and (self.is_multimodal_model or self.enable_prompt_embeds):
             output_idx = 0
             for req_idx in range(num_reqs):
-                num_sched = num_scheduled_tokens[req_idx]
+                num_sched = int(num_scheduled_tokens[req_idx])
 
                 # Skip if this request doesn't have embeddings
                 if req_idx not in self.input_batch.req_prompt_embeds:
@@ -1928,7 +1948,7 @@ class NPUModelRunner(GPUModelRunner):
 
         # Compute the logits indices.
         # [4, 1, 3, 1, 2]
-        num_sampled_tokens = num_draft_tokens + 1
+        num_sampled_tokens: np.ndarray[Any, Any] = num_draft_tokens + 1
         # Step 1.
         # cu_num_sampled_tokens: [4, 5, 8, 9, 11]
         # _arange_scratch[:11]: [0, 1, 2, 3, 0, 0, 1, 2, 0, 0, 1]
@@ -1936,7 +1956,9 @@ class NPUModelRunner(GPUModelRunner):
             num_sampled_tokens, self._arange_scratch, cumsum_dtype=np.int32
         )
         # Step 2. [0, 0, 0, 0, 103, 104, 104, 104, 206, 207, 207]
-        logits_indices = np.repeat(cu_num_scheduled_tokens - num_sampled_tokens, num_sampled_tokens)
+        logits_indices: np.ndarray[Any, Any] = np.repeat(
+            cu_num_scheduled_tokens - num_sampled_tokens, num_sampled_tokens
+        )
         # Step 3. [0, 1, 2, 3, 103, 104, 105, 106, 206, 207, 208]
         logits_indices += self._arange_scratch[: cu_num_sampled_tokens[-1]]
 
@@ -1944,7 +1966,9 @@ class NPUModelRunner(GPUModelRunner):
         # update logits_indices after getting draft_token_ids from ori logits_indices
         if self.pcp_size > 1:
             cu_num_scheduled_tokens = cu_num_scheduled_tokens * self.pcp_size - num_pcp_pads
-            logits_indices_pcp = np.repeat(cu_num_scheduled_tokens - num_sampled_tokens, num_sampled_tokens)
+            logits_indices_pcp: np.ndarray[Any, Any] = np.repeat(
+                cu_num_scheduled_tokens - num_sampled_tokens, num_sampled_tokens
+            )
             logits_indices_pcp += self._arange_scratch[: cu_num_sampled_tokens[-1]]
             logits_indices_pcp = torch.from_numpy(logits_indices_pcp).pin_memory().to(self.device, non_blocking=True)
 
@@ -1956,11 +1980,15 @@ class NPUModelRunner(GPUModelRunner):
         cu_num_draft_tokens = np.cumsum(num_draft_tokens, dtype=np.int32)
         total_num_draft_tokens = cu_num_draft_tokens[-1]
         # [0, 0, 0, 3, 3, 5]
-        cumsums_offsets = np.repeat(cu_num_draft_tokens - num_draft_tokens, num_draft_tokens)
+        cumsums_offsets: np.ndarray[Any, Any] = np.repeat(
+            cu_num_draft_tokens - num_draft_tokens, num_draft_tokens
+        )
         # [0, 1, 2, 0, 1, 0]
         arange = self.arange_np[:total_num_draft_tokens] - cumsums_offsets
         # [0, 0, 0, 5, 5, 9]
-        target_logits_indices = np.repeat(cu_num_sampled_tokens - num_sampled_tokens, num_draft_tokens)
+        target_logits_indices: np.ndarray[Any, Any] = np.repeat(
+            cu_num_sampled_tokens - num_sampled_tokens, num_draft_tokens
+        )
         # [0, 1, 2, 5, 6, 9]
         target_logits_indices += arange
 
@@ -2511,7 +2539,9 @@ class NPUModelRunner(GPUModelRunner):
                         deferred_state_corrections_fn()
                         deferred_state_corrections_fn = None
                     num_reqs = self.input_batch.num_reqs
-                    req_indices = np.repeat(self.arange_np[:num_reqs], num_scheduled_tokens_np)
+                    req_indices: np.ndarray[Any, Any] = np.repeat(
+                        self.arange_np[:num_reqs], num_scheduled_tokens_np
+                    )
                     dsa_positions_np = self._dsa_positions_np_buf[:total_num_scheduled_tokens]
                     np.add(
                         self.input_batch.num_computed_tokens_cpu[req_indices],
@@ -3546,6 +3576,7 @@ class NPUModelRunner(GPUModelRunner):
 
         slot_mapping = getattr(runtime_common, "slot_mapping", None)
         if torch.is_tensor(slot_mapping):
+            slot_mapping_tensor = cast(torch.Tensor, slot_mapping)
             mtp_slot_mapping = drafter.slot_mapping_group[0]
             active_slot_mapping_len = int(
                 getattr(runtime_common, "num_actual_tokens",
@@ -3553,11 +3584,11 @@ class NPUModelRunner(GPUModelRunner):
             slot_mapping_len = min(
                 active_slot_mapping_len,
                 int(num_tokens),
-                slot_mapping.shape[0],
+                slot_mapping_tensor.shape[0],
                 mtp_slot_mapping.shape[0],
             )
             mtp_slot_mapping[:slot_mapping_len].copy_(
-                slot_mapping[:slot_mapping_len].to(
+                slot_mapping_tensor[:slot_mapping_len].to(
                     dtype=mtp_slot_mapping.dtype,
                     device=mtp_slot_mapping.device,
                 ))
@@ -3596,11 +3627,15 @@ class NPUModelRunner(GPUModelRunner):
         block_table = (
             self.input_batch.block_table[0].get_device_tensor()[:num_reqs])
 
+        @dataclass
         class _DecodeStub:
-            pass
+            seq_lens_list: list[int]
+            actual_seq_lengths_q: list[int]
+            block_table: torch.Tensor
 
+        @dataclass
         class _MetaStub:
-            pass
+            decode: _DecodeStub
 
         draft_attn_metadatas = []
         num_draft_steps = max(
@@ -3608,12 +3643,12 @@ class NPUModelRunner(GPUModelRunner):
         for _ in range(num_draft_steps):
             per_layer_metadata = {}
             for layer_name in self.drafter.attn_layer_names:
-                decode_stub = _DecodeStub()
-                decode_stub.seq_lens_list = seq_lens_list
-                decode_stub.actual_seq_lengths_q = actual_seq_lengths_q
-                decode_stub.block_table = block_table
-                meta = _MetaStub()
-                meta.decode = decode_stub
+                decode_stub = _DecodeStub(
+                    seq_lens_list=seq_lens_list,
+                    actual_seq_lengths_q=actual_seq_lengths_q,
+                    block_table=block_table,
+                )
+                meta = _MetaStub(decode=decode_stub)
                 per_layer_metadata[layer_name] = meta
             draft_attn_metadatas.append(per_layer_metadata)
         return draft_attn_metadatas

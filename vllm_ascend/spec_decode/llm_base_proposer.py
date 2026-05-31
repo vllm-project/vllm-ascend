@@ -3,7 +3,7 @@ import copy
 from collections.abc import Callable
 from contextlib import AbstractContextManager, contextmanager, nullcontext
 from functools import partial
-from typing import Any
+from typing import Any, cast
 
 import numpy as np
 import torch
@@ -130,8 +130,9 @@ class _FusedModelWithMTP:
         self.draft_token_ids_buf = torch.zeros((max_num_reqs, num_spec_tokens), dtype=torch.int64, device=device)
         self.next_token_ids_buf = torch.zeros((max_num_reqs,), dtype=torch.int64, device=device)
         self.valid_sampled_tokens_count_buf = torch.zeros((max_num_reqs,), dtype=torch.int32, device=device)
+        draft_hidden_size = int(getattr(drafter, "hidden_size", 0))
         self.mtp_last_hidden_states_buf = torch.zeros(
-            (max_num_tokens, drafter.hidden_size), dtype=drafter.dtype, device=device
+            (max_num_tokens, draft_hidden_size), dtype=drafter.dtype, device=device
         )
 
     def __getattr__(self, key: str):
@@ -364,6 +365,8 @@ class AscendSpecDecodeBaseProposer(SpecDecodeBaseProposer):
 
         # Assign runner before it's used in the methods below
         self.runner = runner
+        # Make hidden_size explicit for static checkers in downstream MTP paths.
+        self.hidden_size = int(getattr(self, "hidden_size", 0))
         self._maybe_resize_mtp_hidden_states_buffer()
 
         self.use_async_scheduling = self.vllm_config.scheduler_config.async_scheduling
@@ -452,7 +455,7 @@ class AscendSpecDecodeBaseProposer(SpecDecodeBaseProposer):
             # RoPE need (max_num_tokens,)
             self.positions = torch.zeros(self.max_num_tokens, dtype=torch.int32, device=device)
 
-        self.token_arange_np = np.arange(self.max_num_tokens + 1, dtype=np.int32)
+        self.token_arange_np: np.ndarray[Any, np.dtype[np.int32]] = np.arange(self.max_num_tokens + 1, dtype=np.int32)
         self.enable_enpu = self.runner.enable_enpu
         self.use_eagle = self.runner.use_eagle
 
@@ -469,10 +472,13 @@ class AscendSpecDecodeBaseProposer(SpecDecodeBaseProposer):
         if hc_mult is None:
             return
 
-        base_hidden_size = getattr(
-            target_hf_config,
-            "hidden_size",
-            getattr(draft_hf_config, "hidden_size", self.draft_model_config.get_hidden_size()),
+        base_hidden_size = cast(
+            int,
+            getattr(
+                target_hf_config,
+                "hidden_size",
+                getattr(draft_hf_config, "hidden_size", self.draft_model_config.get_hidden_size()),
+            ),
         )
         expected_hidden_size = int(base_hidden_size) * int(hc_mult)
         if expected_hidden_size <= self.hidden_size:
@@ -1479,7 +1485,8 @@ class AscendSpecDecodeBaseProposer(SpecDecodeBaseProposer):
                 "num_tokens": num_tokens,
                 "is_prefill": attn_metadata_i.num_prefills,
             }
-            run_draft = partial(self._runnable, **model_inputs)
+            runnable = cast(Callable[..., torch.Tensor], self._runnable)
+            run_draft = cast(Callable[[], torch.Tensor], partial(runnable, **model_inputs))
 
             if self.enable_enpu:
                 self._update_full_graph_params_if_needed(forward_context, num_input_tokens, multi_steps_attn_metadata)
@@ -2256,7 +2263,9 @@ class AscendSpecDecodeBaseProposer(SpecDecodeBaseProposer):
         # [0, 2, 6, 9] ->
         # [0, 0, 2, 2, 2, 2, 6, 6, 6]
         #  _r1_  ____r2____  ___r3__
-        new_query_start_locs_expanded = np.repeat(new_query_start_loc_np[:-1], new_num_tokens_per_req_np)
+        new_query_start_locs_expanded: np.ndarray[Any, np.dtype[np.int64]] = np.repeat(
+            new_query_start_loc_np[:-1], new_num_tokens_per_req_np
+        )
         # [0, 1, 2, 3, 4, 5, 6, 7, 8] ->
         # [0, 1, 0, 1, 2, 3, 0, 1, 2]
         #  _r1_  ____r2____  ___r3__
@@ -2266,7 +2275,9 @@ class AscendSpecDecodeBaseProposer(SpecDecodeBaseProposer):
         # [0, q1, q1 + q2] ->
         # [0, 0, q1, q1, q1, q1, q1 + q2, q1 + q2, q1 + q2]
         #  _r1_  _____r2_______  ___________r3____________
-        old_query_start_locs_expanded = np.repeat(query_start_loc_cpu[:-1].numpy(), new_num_tokens_per_req_np)
+        old_query_start_locs_expanded: np.ndarray[Any, np.dtype[np.int64]] = np.repeat(
+            query_start_loc_cpu[:-1].numpy(), new_num_tokens_per_req_np
+        )
         # Final token indices are:
         # [0, 1,                                // req 1
         #  q1 + 0, q1 + 1, q1 + 2, q1 + 3,       // req 2
