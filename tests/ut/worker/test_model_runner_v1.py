@@ -135,7 +135,12 @@ class TestNPUModelRunnerOutputTokenIds(unittest.TestCase):
 
         # Call sample method
         logits = torch.randn(2, 32000)
-        runner._sample(logits=logits, spec_decode_metadata=None)
+        sample_positions = torch.tensor([0, 1], dtype=torch.int64)
+        runner._sample(
+            logits=logits,
+            sample_positions=sample_positions,
+            spec_decode_metadata=None,
+        )
 
         # Verify sampler and update_async_output_token_ids were called
         runner.sampler.assert_called_once()

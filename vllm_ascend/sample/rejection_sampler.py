@@ -27,7 +27,126 @@ from vllm_ascend.ops.triton.reject_sample import (
     sample_recovered_tokens_kernel,
 )
 from vllm_ascend.sample.penalties import apply_all_penalties
-from vllm_ascend.sample.sampler import apply_top_k_top_p
+from vllm_ascend.sample.sampler import _SAMPLING_EPS, _ensure_runtime_state_tensor, apply_top_k_top_p
+from vllm_ascend.worker.v2.sample.gumbel import gumbel_sample
+
+
+def _sample_target_token_ids_for_strict_verify(
+    target_logits: torch.Tensor,
+    sampling_metadata: SamplingMetadata,
+) -> torch.Tensor:
+    target_argmax = target_logits.argmax(dim=-1)
+    if sampling_metadata.all_greedy:
+        return target_argmax.to(torch.int32)
+
+    positions = getattr(sampling_metadata, "_ascend_target_positions", None)
+    idx_mapping = getattr(sampling_metadata, "_ascend_target_idx_mapping", None)
+    seeds = getattr(sampling_metadata, "seeds", None)
+    if positions is None or idx_mapping is None or seeds is None:
+        return target_argmax.to(torch.int32)
+
+    needed = max(int(idx_mapping.shape[0]), 1)
+    temperature = _ensure_runtime_state_tensor(
+        sampling_metadata.temperature,
+        needed,
+        GREEDY_TEMPERATURE,
+        torch.float32,
+        target_logits.device,
+    )
+    seeds = _ensure_runtime_state_tensor(
+        seeds,
+        needed,
+        0,
+        torch.int64,
+        target_logits.device,
+    )
+    idx_mapping_long = idx_mapping.to(torch.long)
+    target_sampled = gumbel_sample(
+        target_logits,
+        idx_mapping.to(torch.int32),
+        temperature,
+        seeds,
+        positions.to(torch.int32),
+        apply_temperature=False,
+    )
+    if sampling_metadata.all_random:
+        return target_sampled.to(torch.int32)
+    return torch.where(
+        temperature[idx_mapping_long] < _SAMPLING_EPS,
+        target_argmax,
+        target_sampled,
+    ).to(torch.int32)
+
+
+def strict_rejection_sample_tensor(
+    draft_token_ids: torch.Tensor,
+    cu_num_draft_tokens: torch.Tensor,
+    max_spec_len: int,
+    target_token_ids: torch.Tensor,
+    bonus_token_ids: torch.Tensor,
+) -> torch.Tensor:
+    draft_token_ids = draft_token_ids.to(torch.int32)
+    target_token_ids = target_token_ids.to(torch.int32)
+    bonus_token_ids = bonus_token_ids.to(torch.int32)
+    batch_size = cu_num_draft_tokens.shape[0]
+    device = target_token_ids.device
+
+    if max_spec_len <= 0 or draft_token_ids.numel() == 0:
+        output_token_ids = torch.full(
+            (batch_size, max_spec_len + 1),
+            PLACEHOLDER_TOKEN_ID,
+            dtype=torch.int32,
+            device=device,
+        )
+        output_token_ids[:, 0] = bonus_token_ids.view(-1)[:batch_size]
+        return output_token_ids
+
+    cu_num_draft_tokens = cu_num_draft_tokens.to(torch.int64)
+    cu_start = torch.cat(
+        [
+            torch.zeros(1, dtype=torch.int64, device=device),
+            cu_num_draft_tokens[:-1],
+        ]
+    )
+    draft_counts = cu_num_draft_tokens - cu_start
+
+    token_offsets = torch.arange(max_spec_len, dtype=torch.int64, device=device)
+    flat_indices = (cu_start.unsqueeze(1) + token_offsets.unsqueeze(0)).clamp(max=draft_token_ids.shape[0] - 1)
+    target_token_matrix = target_token_ids[flat_indices]
+    draft_token_matrix = draft_token_ids[flat_indices]
+
+    placeholder_req = torch.full((batch_size,), PLACEHOLDER_TOKEN_ID, dtype=torch.int32, device=device)
+    prefix_accepted = torch.ones(batch_size, dtype=torch.bool, device=device)
+    sampled_columns = []
+    for draft_idx in range(max_spec_len):
+        has_draft = draft_counts > draft_idx
+        emit_target = prefix_accepted & has_draft
+        target_column = target_token_matrix[:, draft_idx]
+        draft_column = draft_token_matrix[:, draft_idx]
+        sampled_columns.append(
+            torch.where(
+                emit_target,
+                target_column,
+                placeholder_req,
+            )
+        )
+        prefix_accepted = prefix_accepted & (~has_draft | (draft_column == target_column))
+
+    sampled_without_bonus = torch.cat(
+        [
+            torch.stack(sampled_columns, dim=1),
+            placeholder_req.unsqueeze(1),
+        ],
+        dim=1,
+    )
+    output_columns = torch.arange(max_spec_len + 1, dtype=torch.int64, device=device)
+    bonus_column = draft_counts.clamp(min=0, max=max_spec_len)
+    bonus_mask = prefix_accepted.unsqueeze(1) & (output_columns.unsqueeze(0) == bonus_column.unsqueeze(1))
+    return torch.where(
+        bonus_mask,
+        bonus_token_ids.view(-1)[:batch_size].unsqueeze(1),
+        sampled_without_bonus,
+    )
 
 
 class AscendRejectionSampler(RejectionSampler):
@@ -115,6 +234,8 @@ class AscendRejectionSampler(RejectionSampler):
         assert metadata.max_spec_len <= MAX_SPEC_LEN
         bonus_logits_indices = metadata.bonus_logits_indices
         target_logits_indices = metadata.target_logits_indices
+        positions = getattr(sampling_metadata, "_ascend_positions", None)
+        idx_mapping = getattr(sampling_metadata, "_ascend_idx_mapping", None)
 
         # When indexing with a tensor (bonus_logits_indices), PyTorch
         # creates a new tensor with separate storage from the original
@@ -122,12 +243,18 @@ class AscendRejectionSampler(RejectionSampler):
         # won't affect the original logits tensor.
         assert logits is not None
         bonus_logits = logits[bonus_logits_indices]
+        bonus_metadata = replace(
+            sampling_metadata,
+            max_num_logprobs=-1,
+        )
+        if positions is not None and idx_mapping is not None:
+            bonus_metadata._ascend_positions = positions[bonus_logits_indices]
+            bonus_metadata._ascend_idx_mapping = idx_mapping[bonus_logits_indices]
+        if hasattr(sampling_metadata, "seeds"):
+            bonus_metadata.seeds = sampling_metadata.seeds
         bonus_sampler_output = self.sampler(
             logits=bonus_logits,
-            sampling_metadata=replace(
-                sampling_metadata,
-                max_num_logprobs=-1,
-            ),
+            sampling_metadata=bonus_metadata,
             predict_bonus_token=True,
             # Override the logprobs mode to return logits because they are
             # needed later to compute the accepted token logprobs.
@@ -154,17 +281,36 @@ class AscendRejectionSampler(RejectionSampler):
         target_logits = apply_sampling_constraints(
             target_logits, metadata.cu_num_draft_tokens, sampling_metadata, self.top_k
         )
+        if isinstance(target_logits, tuple):
+            target_logits_tensor, target_indices = target_logits
+        else:
+            target_logits_tensor = target_logits
+            target_indices = None
 
-        output_token_ids = rejection_sample(
-            metadata.draft_token_ids,
-            metadata.num_draft_tokens,
-            metadata.max_spec_len,
-            metadata.cu_num_draft_tokens,
-            draft_probs,
-            target_logits,
-            bonus_token_ids,
-            sampling_metadata,
-        )
+        if positions is not None and idx_mapping is not None:
+            sampling_metadata._ascend_target_positions = positions[target_logits_indices]
+            sampling_metadata._ascend_target_idx_mapping = idx_mapping[target_logits_indices]
+
+        if draft_probs is None and target_indices is None:
+            target_token_ids = _sample_target_token_ids_for_strict_verify(target_logits_tensor, sampling_metadata)
+            output_token_ids = strict_rejection_sample_tensor(
+                metadata.draft_token_ids,
+                metadata.cu_num_draft_tokens,
+                metadata.max_spec_len,
+                target_token_ids,
+                bonus_token_ids,
+            )
+        else:
+            output_token_ids = rejection_sample(
+                metadata.draft_token_ids,
+                metadata.num_draft_tokens,
+                metadata.max_spec_len,
+                metadata.cu_num_draft_tokens,
+                draft_probs,
+                target_logits,
+                bonus_token_ids,
+                sampling_metadata,
+            )
 
         logprobs_tensors = None
         if sampling_metadata.max_num_logprobs is not None:
@@ -172,7 +318,7 @@ class AscendRejectionSampler(RejectionSampler):
                 sampling_metadata.max_num_logprobs,
                 metadata,
                 logits,
-                target_logits if self.is_processed_logprobs_mode else raw_target_logits,
+                target_logits_tensor if self.is_processed_logprobs_mode else raw_target_logits,
                 bonus_sampler_output.logprobs_tensors.logprobs,
                 output_token_ids,
             )

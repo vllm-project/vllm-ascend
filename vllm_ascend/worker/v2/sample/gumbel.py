@@ -161,6 +161,16 @@ def gumbel_sample(
 ) -> torch.Tensor:
     if use_fp64:
         raise NotImplementedError("FP64 Gumbel sampling is not supported on NPU.")
+    if logits.device.type != "npu" or not hasattr(triton, "cdiv"):
+        if apply_temperature:
+            row_temperature = temperature[idx_mapping.to(torch.long)]
+            safe_temperature = torch.where(
+                row_temperature == 0,
+                torch.ones_like(row_temperature),
+                row_temperature,
+            )
+            logits = logits / safe_temperature.unsqueeze(dim=1)
+        return logits.argmax(dim=-1)
 
     num_reqs, vocab_size = logits.shape
     BLOCK_SIZE = 1024
