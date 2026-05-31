@@ -38,7 +38,7 @@ class MooncakeBackend(Backend):
             self.store = self._setup_store()
             self._store_initialized = True
 
-    def _ensure_initialized(self):
+    def ensure_initialized(self):
         if self._store_initialized:
             return
 
@@ -46,7 +46,7 @@ class MooncakeBackend(Backend):
             if self._store_initialized:
                 return
 
-            logger.info("Initializing Mooncake store on first put.")
+            logger.info("Initializing Mooncake store lazily.")
             self.store = self._setup_store()
             self._store_initialized = True
 
@@ -118,9 +118,9 @@ class MooncakeBackend(Backend):
         return self.store.batch_is_exist(keys)
 
     def put(self, keys: list[str], addrs: list[list[int]], sizes: list[list[int]]):
+        self.ensure_initialized()
+        assert self.store is not None
         try:
-            self._ensure_initialized()
-            assert self.store is not None
             res = self.store.batch_put_from_multi_buffers(keys, addrs, sizes)
             for value in res:
                 if value < 0:
