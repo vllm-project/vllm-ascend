@@ -14,8 +14,8 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 #
-# DeepSeek-V4 DSML: make the STREAMING tool_choice == "none" (or omitted, which
-# defaults to "none") path consistent with the NON-streaming path.
+# DeepSeek-V4 DSML: make the STREAMING tool_choice == "none" path consistent
+# with the NON-streaming path.
 #
 # Background
 # ----------
@@ -65,15 +65,14 @@ def _patch_streaming_tool_choice_none() -> None:
         delta_token_ids,
         request,
     ):
-        # Effective tool_choice == "none": either an explicit "none", or omitted
-        # (None) WITH no tools declared. tool_choice=None *with* tools present
-        # defaults to "auto" and must still be parsed -- this mirrors vLLM's
-        # _should_stream_with_auto_tool_parsing (tools and tool_choice in
-        # ["auto", None]) and the non-streaming path. Only the genuine none case
-        # surfaces the (DSML) markup as plain content; do not rely on vLLM having
-        # normalized an omitted-with-tools choice to "auto" before this point.
-        tc = getattr(request, "tool_choice", None)
-        if tc == "none" or (tc is None and not getattr(request, "tools", None)):
+        # tool_choice == "none": keep DSML markup as plain content
+        # (consistent with the non-streaming none path), do not parse tool calls.
+        # We only treat the explicit "none" case here. tool_choice is None with
+        # tools present defaults to "auto" upstream; tool_choice is None with
+        # no tools is normalized to "none" by vLLM, so the default below covers
+        # the omitted-no-tools case without us conflating it with an explicit
+        # null (which non-streaming routes through the auto parser).
+        if getattr(request, "tool_choice", "none") == "none":
             if delta_text:
                 return DeltaMessage(content=delta_text)
             return None
