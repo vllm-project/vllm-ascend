@@ -259,6 +259,7 @@ class TestMooncakeBackendMethods(unittest.TestCase):
             backend.local_seg = "127.0.0.1:1234"
             backend._lazy_init = False
             backend._store_initialized = True
+            backend._use_fabric_mem = False
             return backend
 
     def test_exists(self):
@@ -416,6 +417,11 @@ class TestMemcacheBackendMethods(unittest.TestCase):
             backend = MemcacheBackend.__new__(MemcacheBackend)
             backend.store = MagicMock()
             backend.local_rank = 0
+            backend._lazy_init = False
+            backend._store_initialized = True
+            backend._is_a2 = True
+            backend._registered_buffers = None
+            backend._buffers_registered = False
             return backend
 
     def test_exists(self):
