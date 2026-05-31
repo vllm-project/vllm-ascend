@@ -128,8 +128,7 @@ class AscendW8A8DynamicLinearMethod(AscendLinearScheme):
             # TODO(jianzs): Remove this workaround after
             # `torch_npu.npu_quant_matmul` supports large weight dimensions.
             chunk_size = layer.weight.shape[1] // 2
-            assert chunk_size < 65536, \
-                "Even after chunking, the weight dimension is still larger than 65536."
+            assert chunk_size < 65536, "Even after chunking, the weight dimension is still larger than 65536."
             layer._chunk_size = chunk_size
             layer.weight_1 = maybe_trans_nz(layer.weight.data[:, :chunk_size].contiguous())
             layer.weight_2 = maybe_trans_nz(layer.weight.data[:, chunk_size:].contiguous())
