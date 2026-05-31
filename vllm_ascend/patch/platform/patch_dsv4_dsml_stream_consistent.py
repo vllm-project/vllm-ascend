@@ -48,8 +48,6 @@ from vllm.parser.abstract_parser import DelegatingParser
 
 logger = init_logger(__name__)
 
-_TOOL_CHOICE_NONE = (None, "none")
-
 
 def _patch_streaming_tool_choice_none() -> None:
     if getattr(DelegatingParser, "_vllm_ascend_stream_none_content_patched", False):
@@ -67,9 +65,15 @@ def _patch_streaming_tool_choice_none() -> None:
         delta_token_ids,
         request,
     ):
-        # tool_choice == "none"/omitted: keep DSML markup as plain content
-        # (consistent with the non-streaming none path), do not parse tool calls.
-        if getattr(request, "tool_choice", None) in _TOOL_CHOICE_NONE:
+        # Effective tool_choice == "none": either an explicit "none", or omitted
+        # (None) WITH no tools declared. tool_choice=None *with* tools present
+        # defaults to "auto" and must still be parsed -- this mirrors vLLM's
+        # _should_stream_with_auto_tool_parsing (tools and tool_choice in
+        # ["auto", None]) and the non-streaming path. Only the genuine none case
+        # surfaces the (DSML) markup as plain content; do not rely on vLLM having
+        # normalized an omitted-with-tools choice to "auto" before this point.
+        tc = getattr(request, "tool_choice", None)
+        if tc == "none" or (tc is None and not getattr(request, "tools", None)):
             if delta_text:
                 return DeltaMessage(content=delta_text)
             return None
