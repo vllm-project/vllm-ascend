@@ -28,3 +28,30 @@ class EMooncakeBackend(MooncakeBackend):
             return data
 
         return None
+
+    def put_tensor_single(self, key: str, addr: int, size: int):
+        try:
+            assert self.store is not None
+            self.store.put_from(key, addr, size)
+        except Exception as err:
+            logger.error("Failed to put tensor into Mooncake Store: %s", err)
+            raise
+
+    def get_tensor_single(self, key: str, addr: int, size: int):
+        try:
+            assert self.store is not None
+            self.store.get_into(key, addr, size)
+        except Exception as err:
+            logger.error("Failed to get tensor from Monncake Store: %s", err)
+            raise
+
+    def exist_single(self, key: str):
+        assert self.store is not None
+        return self.store.is_exist(key)
+
+    def register_buffer_single(self, addr: int, length: int):
+        assert self.store is not None
+        ret = self.store.register_buffer(addr, length)
+        if ret != 0:
+            logger.error("Failed to register buffer for Mooncake Store: %s", ret)
+            raise
