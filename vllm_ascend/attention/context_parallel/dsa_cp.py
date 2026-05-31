@@ -1009,7 +1009,11 @@ class AscendDSACPImpl(DSAAttentionImpl):
             qr_local, qr_pertoken_scale_local = torch.ops._C_ascend.npu_rms_norm_dynamic_quant(
                 q_a, self.q_norm.weight, epsilon=self.eps
             )
-            if getattr(self.wq_b, "_is_chunked", False):
+            if getattr(self.wq_b, "_chunk_size", 0):
+                bias = self.wq_b.bias
+                chunk_size = self.wq_b._chunk_size
+                bias_1 = bias[:chunk_size] if bias is not None else None
+                bias_2 = bias[chunk_size:] if bias is not None else None
                 q = torch.cat(
                     [
                         torch_npu.npu_quant_matmul(
@@ -1017,7 +1021,7 @@ class AscendDSACPImpl(DSAAttentionImpl):
                             self.wq_b.weight_1,
                             self.wq_b.weight_1_scale,
                             pertoken_scale=qr_pertoken_scale_local,
-                            bias=self.wq_b.bias,
+                            bias=bias_1,
                             output_dtype=hidden_states_local.dtype,
                         ),
                         torch_npu.npu_quant_matmul(
@@ -1025,7 +1029,7 @@ class AscendDSACPImpl(DSAAttentionImpl):
                             self.wq_b.weight_2,
                             self.wq_b.weight_2_scale,
                             pertoken_scale=qr_pertoken_scale_local,
-                            bias=None,
+                            bias=bias_2,
                             output_dtype=hidden_states_local.dtype,
                         ),
                     ],
