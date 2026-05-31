@@ -111,7 +111,34 @@ def _patched_mtp_load_weights(
 ) -> set[str]:
     if get_pp_group().world_size > 1 and not get_pp_group().is_last_rank:
         return set()
-    return _original_mtp_load_weights(self, weights)
+
+    # Materialize — the original pass consumes the iterator.
+    weights_list = list(weights)
+
+    # Original load_weights only loads MTP-specific layers (index >=
+    # num_hidden_layers).  Embedding and lm_head are meant to be shared
+    # from the target model via _maybe_share_embeddings / _maybe_share_lm_head,
+    # but when PP>1 the target model's embedding/lm_head live on different
+    # PP stages so sharing is not possible.  Load them directly from the
+    # checkpoint instead.
+    loaded = _original_mtp_load_weights(self, weights_list)
+
+    from vllm.model_executor.model_loader.weight_utils import (
+        default_weight_loader,
+    )
+
+    params_dict = dict(self.named_parameters())
+    # Re-iterate to catch embed_tokens and lm_head that the original skipped.
+    for name, loaded_weight in weights_list:
+        if name in loaded:
+            continue
+        if name in params_dict:
+            param = params_dict[name]
+            weight_loader = getattr(param, "weight_loader", default_weight_loader)
+            weight_loader(param, loaded_weight)
+            loaded.add(name)
+
+    return loaded
 
 
 # ---------------------------------------------------------------------------
