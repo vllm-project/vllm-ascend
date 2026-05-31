@@ -1283,7 +1283,8 @@ class NPUModelRunner(GPUModelRunner):
                     cascade_attn_prefix_lens=cascade_attn_prefix_lens,
                 )
                 if get_ascend_config().eplb_config.eplb_policy_type == 4:
-                    self.eplb_adaptor.do_update_request_slot(scheduler_output, torch.max(num_tokens_across_dp) if num_tokens_across_dp is not None else num_tokens_padded)
+                    self.eplb_adaptor.do_update_request_slot(scheduler_output, 
+                                                             torch.max(num_tokens_across_dp) if (num_tokens_across_dp is not None and cudagraph_mode != CUDAGraphMode.NONE) else num_tokens_padded)
 
             (
                 input_ids,
