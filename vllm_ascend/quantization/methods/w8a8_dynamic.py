@@ -84,7 +84,10 @@ class AscendW8A8DynamicLinearMethod(AscendLinearScheme):
             quantized_x = quantized_x.squeeze(dim=1)
             pertoken_scale = pertoken_scale.squeeze(dim=1)
 
-        if getattr(layer, "_is_chunked", False):
+        if getattr(layer, "_chunk_size", 0):
+            chunk_size = layer._chunk_size
+            bias_1 = bias[:chunk_size] if bias is not None else None
+            bias_2 = bias[chunk_size:] if bias is not None else None
             output = torch.cat(
                 [
                     torch_npu.npu_quant_matmul(
@@ -92,7 +95,7 @@ class AscendW8A8DynamicLinearMethod(AscendLinearScheme):
                         layer.weight_1,
                         layer.weight_1_scale,
                         pertoken_scale=pertoken_scale,
-                        bias=bias,
+                        bias=bias_1,
                         output_dtype=x.dtype,
                     ),
                     torch_npu.npu_quant_matmul(
@@ -100,7 +103,7 @@ class AscendW8A8DynamicLinearMethod(AscendLinearScheme):
                         layer.weight_2,
                         layer.weight_2_scale,
                         pertoken_scale=pertoken_scale,
-                        bias=None,  # Only apply bias to the first chunk to avoid double counting
+                        bias=bias_2,
                         output_dtype=x.dtype,
                     ),
                 ],
@@ -125,8 +128,9 @@ class AscendW8A8DynamicLinearMethod(AscendLinearScheme):
             # TODO(jianzs): Remove this workaround after
             # `torch_npu.npu_quant_matmul` supports large weight dimensions.
             chunk_size = layer.weight.shape[1] // 2
-            assert chunk_size < 65536, "Even after chunking, the weight dimension is still larger than 65536."
-            layer._is_chunked = True
+            assert chunk_size < 65536, \
+                "Even after chunking, the weight dimension is still larger than 65536."
+            layer._chunk_size = chunk_size
             layer.weight_1 = maybe_trans_nz(layer.weight.data[:, :chunk_size].contiguous())
             layer.weight_2 = maybe_trans_nz(layer.weight.data[:, chunk_size:].contiguous())
             layer.weight_1_scale = layer.weight_scale.data[:chunk_size].flatten().contiguous()
