@@ -4,7 +4,8 @@ import torch
 from vllm.triton_utils import tl, triton
 from vllm.utils.torch_utils import direct_register_custom_op
 
-from vllm_ascend.ops.triton.triton_utils import extract_slice, get_element, get_vectorcore_num, insert_slice
+from vllm_ascend.ops.triton.triton_utils import extract_slice, get_vectorcore_num, insert_slice
+
 
 @triton.jit
 def precompute_rope_cos_sin_kernel(
@@ -35,6 +36,7 @@ def precompute_rope_cos_sin_kernel(
     sin_cos_val = tl.load(cos_sin_cache_gm_ptr + offset).to(tl.float32)
     output_offset = (positions_off + input_batch_offset)[:, None] * ROPE_DIM + sin_cos_range[None, :]
     tl.store(out_cos_sin_gm_ptr + output_offset, sin_cos_val, mask=output_offset < N)
+
 
 @triton.jit
 def split_qkv_rmsnorm_rope_simt_kernel(
@@ -262,6 +264,7 @@ def split_qkv_rmsnorm_rope_simt_kernel(
         tl.store(v_gm_ptr + out_idx, values, mask=out_mask)
         mblk_idx += v_batch_size_per_iter_per_vec
 
+
 def split_qkv_rmsnorm_rope_simt_impl(
     input: torch.Tensor,
     cos_sin_cache: torch.Tensor,
@@ -305,7 +308,6 @@ def split_qkv_rmsnorm_rope_simt_impl(
     batch_size_per_vec = iter_num_per_vec * batch_size_per_iter_per_vec
 
     v_batch_size_per_iter_per_vec = UB_SIZE / torch.float32.itemsize // (kv_hidden_size + 1)
-    
 
     cos_sin_precomputed = torch.empty(batch_size, rope_dim, dtype=torch.float32, device=input.device)
     BLOCK_SIZE = 128
@@ -355,6 +357,7 @@ def split_qkv_rmsnorm_rope_simt_impl(
         batch_size_per_vec,
     )
     return q_output, k_output, v_output
+
 
 def split_qkv_rmsnorm_rope_simt_impl_fake(
     input: torch.Tensor,
