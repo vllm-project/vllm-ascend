@@ -267,6 +267,63 @@
 #       Remove this patch if upstream streaming behavior is updated to satisfy the
 #       same DeepSeek DSML incrementality contract.
 #
+# ** 12a. File: platform/patch_deepseek_v4_thinking.py**
+# ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+#   1. `vllm.entrypoints.openai.chat_completion.protocol.ChatCompletionRequest`
+#      `vllm.tokenizers.deepseek_v4`
+#    Why:
+#       Supported vLLM v0.20.2 predates newer DeepSeek V4 reasoning-effort
+#       handling: `minimal`, `xhigh`, and `max` are rejected at request
+#       validation time, reasoning effort does not automatically enable
+#       thinking, and `reasoning_effort="none"` does not force chat mode in
+#       the DeepSeek V4 tokenizer.
+#    How:
+#       Extend the request field validation to the newer accepted values,
+#       backport the newer `build_chat_params` enable_thinking behavior, and
+#       monkey-patch the DeepSeek V4 tokenizer reasoning-effort mapping.
+#    Related PR (if no, explain why):
+#       Upstream vLLM main behavior after v0.20.2.
+#    Future Plan:
+#       Remove this patch once vllm-ascend upgrades to a vLLM version with the
+#       same DeepSeek V4 thinking behavior.
+#
+# ** 12b. File: platform/patch_minimax_m2_tool_call_parser.py**
+# ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+#   1. `vllm.tool_parsers.minimax_m2_tool_parser.MinimaxM2ToolParser`
+#    Why:
+#       vLLM 0.20.2 only emits MiniMax-M2 tool-call arguments after a complete
+#       `<invoke>...</invoke>` block, so long arguments are buffered instead of
+#       streamed incrementally.
+#    How:
+#       Monkey-patch the MiniMax-M2 parser to emit the tool name once the
+#       `<invoke name=...>` header is available and then stream partial
+#       `<parameter>` values as JSON argument fragments.
+#    Related PR (if no, explain why):
+#       https://github.com/vllm-project/vllm/pull/40253
+#       https://github.com/vllm-project/vllm/pull/40298
+#    Future Plan:
+#       Remove this patch once the supported vLLM version contains the upstream
+#       MiniMax-M2 incremental tool-call streaming fix.
+#
+# ** 13. File: platform/patch_camem_allocator.py**
+# ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+#   1. `vllm.config.model.is_cumem_allocator_available`
+#    Why:
+#       Upstream vLLM main enables and validates the CUDA/ROCm CuMem allocator
+#       when `enable_sleep_mode=True`. Ascend implements sleep mode with its own
+#       CaMem allocator, so the upstream CuMem-only availability check fails
+#       during `ModelConfig` validation before Ascend worker code can run.
+#    How:
+#       Treat Ascend's platform sleep allocator as satisfying the allocator
+#       availability check, while preserving the original vLLM CuMem check as
+#       fallback.
+#    Related PR (if no, explain why):
+#       No, this maps an upstream CUDA/ROCm allocator validation to Ascend's
+#       backend-specific CaMem implementation.
+#    Future Plan:
+#       Remove this patch if upstream exposes a platform allocator capability hook
+#       for sleep mode validation.
+#
 # * Worker Patch:
 # ===============
 #
@@ -294,6 +351,25 @@
 #       Let vLLM support triton ops dispatch.
 #    Future Plan:
 #       Remove this patch when vLLM support the dispatch function.
+#
+#   2. `triton.next_power_of_2`
+#    Why:
+#       The Triton version bundled with torch_npu on Ascend NPU
+#       does not include `next_power_of_2`, which is called by
+#       upstream vLLM and vLLM-Ascend code in 94+ places.
+#       Additionally, when Triton is not available (HAS_TRITON=False),
+#       vLLM uses TritonPlaceholder which also lacks this function.
+#    How：
+#       Import `triton` from vllm.triton_utils (which handles both
+#       real Triton and TritonPlaceholder) and inject `next_power_of_2`
+#       onto the module. For vLLM versions that have
+#       `vllm.utils.math_utils.next_power_of_2`, reuse that implementation;
+#       for v0.20.2 (which lacks it), skip the patch.
+#    Related PR (if no, explain why):
+#       No, torch_npu Triton compatibility issue.
+#    Future Plan:
+#       Remove this patch when torch_npu's Triton includes
+#       next_power_of_2 or when vLLM no longer calls triton.next_power_of_2.
 #
 # ** 4. File: worker/patch_qwen3_next_mtp.py**
 # ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
@@ -404,9 +480,9 @@
 #
 # ** 11. File: worker/patch_npugraph_ex_triton.py**
 # ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
-#   1. `torchair.core._concrete_graph.ValuePack`,
-#      `torchair.npu_fx_compiler._unpack_meta`,
-#      `torchair.npu_fx_compiler._NpuGraphConverter._unpack_npu`
+#   1. `npugraph_ex.core._concrete_graph.ValuePack`,
+#      `npugraph_ex.npu_fx_compiler._unpack_meta`,
+#      `npugraph_ex.npu_fx_compiler._NpuGraphConverter._unpack_npu`
 #    Why:
 #       In the Triton scenario, npugraph_ex backend needs to process the value pack of the input parameters.
 #    How：
