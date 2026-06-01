@@ -21,7 +21,17 @@ from einops import rearrange
 from vllm.distributed import get_pcp_group
 from vllm.forward_context import get_forward_context
 from vllm.model_executor.layers.fla.ops.l2norm import l2norm_fwd
-from vllm.model_executor.layers.mamba.gdn_linear_attn import GatedDeltaNetAttention
+
+from vllm_ascend.utils import vllm_version_is
+
+if vllm_version_is("0.20.2"):
+    from vllm.model_executor.layers.mamba.gdn_linear_attn import (  # type: ignore[import-not-found]
+        GatedDeltaNetAttention,
+    )
+else:
+    from vllm.model_executor.layers.mamba.gdn.base import GatedDeltaNetAttention
+
+from vllm.model_executor.layers.mamba.mamba_utils import MambaStateShapeCalculator
 from vllm.triton_utils import triton
 from vllm.v1.attention.backend import AttentionMetadata  # type: ignore
 from vllm.v1.attention.backends.gdn_attn import GDNAttentionMetadata
@@ -38,7 +48,7 @@ from vllm_ascend.ops.triton.fla.fused_qkvzba_split_reshape import fused_qkvzba_s
 from vllm_ascend.ops.triton.fla.utils import clear_ssm_states
 from vllm_ascend.ops.triton.fused_gdn_gating import fused_gdn_gating_patch
 from vllm_ascend.ops.triton.mamba.causal_conv1d import causal_conv1d_fn
-from vllm_ascend.utils import vllm_version_is, weak_ref_tensors
+from vllm_ascend.utils import weak_ref_tensors
 
 
 def to_int64_tuple(tensor: torch.Tensor) -> tuple[int, ...]:
@@ -241,6 +251,30 @@ def get_non_spec_chunked_prefill_meta(attn_metadata):
 
 
 class AscendGatedDeltaNetAttention(GatedDeltaNetAttention):
+    def _split_ba_for_tp(self, ba: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
+        if hasattr(self, "split_ba"):
+            return self.split_ba(ba)
+        return ba.chunk(2, dim=-1)
+
+    def get_state_shape(
+        self,
+    ) -> tuple[tuple[int, ...], tuple[int, ...], tuple[int, ...], tuple[int, ...]]:
+        return MambaStateShapeCalculator.gated_delta_net_state_shape(
+            self.tp_size,
+            self.num_k_heads,
+            self.num_v_heads,
+            self.head_k_dim,
+            self.head_v_dim,
+            self.conv_kernel_size,
+            self.num_spec,
+        )
+
+    def _warmup_prefill_kernels(self, qkv_or_qkvz: torch.Tensor, v_dim: int) -> None:
+        return
+
+    def _warmup_prefill_kernels_v0202(self, mixed_qkv: torch.Tensor) -> None:
+        return
+
     def forward(
         self,
         hidden_states: torch.Tensor,
@@ -314,7 +348,7 @@ class AscendGatedDeltaNetAttention(GatedDeltaNetAttention):
                 self.prefix,
             )
         else:
-            torch.ops.vllm.gdn_attention_core(
+            torch.ops.vllm.qwen_gdn_attention_core(
                 mixed_qkv,
                 b,
                 a,

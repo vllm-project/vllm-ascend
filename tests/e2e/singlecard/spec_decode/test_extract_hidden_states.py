@@ -76,6 +76,7 @@ def test_extract_hidden_states_eager_mode(sampling_config):
             enforce_eager=True,
             max_num_seqs=16,
             gpu_memory_utilization=0.8,
+            enable_chunked_prefill=False,
             speculative_config={
                 "method": "extract_hidden_states",
                 "num_speculative_tokens": 1,
@@ -124,6 +125,7 @@ def test_extract_hidden_states_aclgraph_mode(sampling_config):
             tensor_parallel_size=1,
             enforce_eager=False,
             max_num_seqs=16,
+            enable_chunked_prefill=False,
             speculative_config={
                 "method": "extract_hidden_states",
                 "num_speculative_tokens": 1,

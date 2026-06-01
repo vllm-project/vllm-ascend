@@ -236,6 +236,9 @@ def chunk_gated_delta_rule(
     prebuilt_meta=None,
     head_first: bool = False,
     use_qk_l2norm_in_kernel: bool = False,
+    chunk_indices: torch.Tensor | None = None,
+    chunk_offsets: torch.Tensor | None = None,
+    core_attn_out: torch.Tensor | None = None,
 ):
     r"""
     Args:

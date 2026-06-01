@@ -47,9 +47,11 @@ class GraphFusionPassManager:
         self.passes.append(pass_)
 
     def configure(self, config: VllmConfig):
+        from vllm_ascend.utils import is_310p
+
         # By default, we enable the graph fusion and quantization fusion pass.
         self.ascend_compilation_config: dict = config.additional_config.get("ascend_compilation_config", {})
-        if self.ascend_compilation_config.get("fuse_norm_quant", True):
+        if self.ascend_compilation_config.get("fuse_norm_quant", True) and not is_310p():
             from .passes.norm_quant_fusion_pass import AddRMSNormQuantFusionPass
 
             self.passes.append(AddRMSNormQuantFusionPass(config))
