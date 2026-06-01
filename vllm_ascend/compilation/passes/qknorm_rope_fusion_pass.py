@@ -28,7 +28,6 @@ from vllm_ascend.device.device_op import DeviceOperator
 from vllm_ascend.utils import get_rope_dim
 
 
-
 class QKNormRopeFusionPattern(BasePattern):
     def __init__(self, vllm_config, head_dim, num_heads, num_kv_heads, eps=1e-6):
         super().__init__(vllm_config, eps)

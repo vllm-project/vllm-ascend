@@ -82,7 +82,6 @@ def split_qkv_rmsnorm_rope_simt_kernel(
 
     input_batch_offset_end = min(input_batch_offset + batch_size_per_vec, batch_size)
 
-    pos_indices = input_batch_offset + tl.arange(0, batch_size_per_iter_per_vec)
     output_q_nblk_idx = tl.arange(0, q_hidden_size)
     output_q_nmask = output_q_nblk_idx < q_hidden_size
     output_kv_nblk_idx = tl.arange(0, kv_hidden_size)
@@ -310,7 +309,6 @@ def split_qkv_rmsnorm_rope_simt_impl(
     v_batch_size_per_iter_per_vec = UB_SIZE / torch.float32.itemsize // (kv_hidden_size + 1)
 
     cos_sin_precomputed = torch.empty(batch_size, rope_dim, dtype=torch.float32, device=input.device)
-    BLOCK_SIZE = 128
     N = cos_sin_precomputed.numel()
     grid = (num_vectorcore, 1, 1)
     batch_size_per_vec_cos_sin = pow(2, math.ceil(math.log2(batch_size_per_vec)))
