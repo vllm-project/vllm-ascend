@@ -1816,6 +1816,7 @@ class NPUModelRunner(GPUModelRunner):
                                 scheduler_output.scheduled_spec_decode_tokens[req_id] = dummy_draft
                             num_padding_tokens[req_id] = pad_count
                             num_scheduled_tokens_np[i] = target_ql
+                            scheduler_output.num_scheduled_tokens[req_id] = target_ql
                     scheduler_output.total_num_scheduled_tokens = int(num_scheduled_tokens_np.sum())
                     max_num_scheduled_tokens = target_ql
 
