@@ -256,6 +256,9 @@ class TestMooncakeBackendMethods(unittest.TestCase):
             backend = MooncakeBackend.__new__(MooncakeBackend)
             backend.store = MagicMock()
             backend.config = MagicMock()
+            backend._lazy_init = False
+            backend._store_initialized = True
+            backend._use_fabric_mem = False
             return backend
 
     def test_exists(self):
@@ -413,6 +416,12 @@ class TestMemcacheBackendMethods(unittest.TestCase):
             backend = MemcacheBackend.__new__(MemcacheBackend)
             backend.store = MagicMock()
             backend.local_rank = 0
+            # Set internal state to avoid lazy init logic during tests
+            backend._lazy_init = False
+            backend._store_initialized = True
+            backend._is_a2 = False
+            backend._registered_buffers = None
+            backend._buffers_registered = False
             return backend
 
     def test_exists(self):
