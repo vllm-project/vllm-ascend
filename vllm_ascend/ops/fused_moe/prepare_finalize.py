@@ -368,8 +368,8 @@ class PrepareAndFinalizeWithAllGather(PrepareAndFinalize):
             hidden_states, pertoken_scale = torch_npu.npu_dynamic_quant(hidden_states)
         elif quant_type == QuantType.MXFP8:
             hidden_states, pertoken_scale = torch_npu.npu_dynamic_mx_quant(hidden_states, dst_type=torch.float8_e4m3fn)
-        elif quant_type == QuantType.MXFP4:
-            # MXFP4 with AllGather+EP currently does not pre-quantize
+        elif quant_type in [QuantType.MXFP4, QuantType.W4A8MXFP]:
+            # W4A4MXFP4 and  W4A8MXFP4 with AllGather+EP currently does not pre-quantize
             # per-token activations in prepare. Keep quantization in the MoE MLP path.
             pass
 
