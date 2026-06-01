@@ -163,6 +163,7 @@ def npugraph_ex_compile(
                         f.write(py_code)
                     logger.info(f"Saved compiled graph to cache: {cache_path}")
             return compiled_gm
+        
         nfx._NpuFxCompiler._get_compiled_gm = patched_get_compiled_gm
         npugraph_ex = nge.get_npu_backend(compiler_config=config)
     except ImportError:
@@ -190,7 +191,7 @@ def npugraph_ex_compile(
     #         logger.info(f"Saved compiled graph to cache: {cache_path}")
 
     nfx._NpuFxCompiler._get_compiled_gm = _original_get_compiled_gm
-    return compiled_fn, None
+    return compiled_fn, handle
 
 
 class AscendCompiler(CompilerInterface):
@@ -250,6 +251,7 @@ class AscendCompiler(CompilerInterface):
 
         ascend_compilation_config = get_ascend_config().ascend_compilation_config
         if ascend_compilation_config.enable_npugraph_ex:
+            cache_dir = getattr(self, "cache_dir", None)
             logger.info("enable_npugraph_ex is enabled, which will bring graph compilation optimization.")
             assert hasattr(self, "vllm_config")
             return npugraph_ex_compile(
