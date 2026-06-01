@@ -87,7 +87,7 @@ jobs:
     uses: ./.github/workflows/_selected_tests.yaml
     with:
       vllm: ${{ matrix.vllm_version }}
-      image: swr.cn-southwest-2.myhuaweicloud.com/base_image/ascend-ci/cann:9.0.0-910b-ubuntu22.04-py3.12
+      image: swr.cn-southwest-2.myhuaweicloud.com/base_image/ascend-ci/cann:9.1.0-beta.1-910b-ubuntu22.04-py3.12
       contains_310: false
       type: full
 
@@ -109,7 +109,7 @@ jobs:
     uses: ./.github/workflows/_e2e_test.yaml
     with:
       vllm: ${{ matrix.vllm_version }}
-      image: swr.cn-southwest-2.myhuaweicloud.com/base_image/ascend-ci/cann:9.0.0-910b-ubuntu22.04-py3.12
+      image: swr.cn-southwest-2.myhuaweicloud.com/base_image/ascend-ci/cann:9.1.0-beta.1-910b-ubuntu22.04-py3.12
       type: comment
       ref: ${{ needs.parse-trigger.outputs.pr_sha }}
       singlecard_tests: ${{ needs.parse-trigger.outputs.singlecard_tests }}

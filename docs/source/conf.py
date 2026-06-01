@@ -78,7 +78,7 @@ myst_substitutions = {
     "pip_vllm_ascend_version": "0.19.1rc1",
     "pip_vllm_version": "0.19.1",
     # CANN image tag
-    "cann_image_tag": "9.0.0-910b-ubuntu22.04-py3.12",
+    "cann_image_tag": "9.1.0-beta.1-910b-ubuntu22.04-py3.12",
     # vLLM commit hash for main branch
     "main_vllm_commit": "9090368b650896bf5fc990c921df7eb4c20355a5",
     # vLLM tag for main branch
@@ -86,7 +86,7 @@ myst_substitutions = {
     # Python version for main branch
     "main_python_version": ">= 3.10, < 3.13",
     # CANN version for main branch
-    "main_cann_version": "9.0.0",
+    "main_cann_version": "9.1.0-beta.1",
     # PyTorch/torch_npu version for main branch
     "main_pytorch_torch_npu_version": "2.10.0 / 2.10.0",
     # Triton Ascend version for main branch

@@ -471,23 +471,7 @@ Starting the MetaService service.
 ```shell
 export MMC_META_CONFIG_PATH=/usr/local/memcache_hybrid/latest/config/mmc-meta.conf
 
-<<<<<<< HEAD
 python -c "from memcache_hybrid import MetaService; MetaService.main()"
-=======
-2. Access the Python console or compile the following Python script to start the process:
-from memcache_hybrid import MetaService
-MetaService.main()
-```
-
-Method 2 for starting the MetaService service.
-
-```shell
-source /usr/local/memcache_hybrid/set_env.sh
-source /usr/local/memfabric_hybrid/set_env.sh
-export MMC_META_CONFIG_PATH=/home/memcache/shell/mmc-meta.conf # Set it to the path of your own configuration file.
-export LD_LIBRARY_PATH=$LD_LIBRARY_PATH:/usr/local/python3.12.13/lib/
-/usr/local/memcache_hybrid/latest/aarch64-linux/bin/mmc_meta_service
->>>>>>> d293f38f (continue update py3.12)
 ```
 
 ### PD Disaggregation Scenario
