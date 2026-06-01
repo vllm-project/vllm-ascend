@@ -24,7 +24,7 @@ Refer to [feature guide](../../user_guide/feature_guide/index.md) to get the fea
 - `GLM-4.5-w8a8-with-float-mtp`(Quantized version with mtp): [Download model weight](https://modelers.cn/models/Modelers_Park/GLM-4.5-w8a8).
 - `GLM-4.6-w8a8`(Quantized version without mtp): [Download model weight](https://modelers.cn/models/Modelers_Park/GLM-4.6-w8a8). Because vllm does not support GLM4.6 mtp in October, we do not provide an mtp version. Last month, it was supported; you can use the following quantization scheme to add mtp weights to the quantized weights.
 - `GLM-4.7-w8a8-with-float-mtp`(Quantized version without mtp): [Download model weight](https://modelscope.cn/models/Eco-Tech/GLM-4.7-W8A8-floatmtp).
-- `Method of Quantify`: [quantization scheme](https://ai.gitcode.com/Ascend-SACT/GLM-4.5-w8a8). You can use these methods to quantify the model.
+- `Method of Quantization`: [quantization scheme](https://ai.gitcode.com/Ascend-SACT/GLM-4.5-w8a8). You can use these methods to quantify the model.
 
 It is recommended to download the model weight to the shared directory of multiple nodes, such as `/root/.cache/`.
 
@@ -149,7 +149,6 @@ vllm serve Eco-Tech/GLM-4.7-W8A8-floatmtp \
   --max-model-len 133000 \
   --max-num-batched-tokens 8192 \
   --max-num-seqs 16 \
-  --async-scheduling \
   --quantization ascend \
   --trust-remote-code \
   --gpu-memory-utilization 0.9 \
@@ -161,7 +160,6 @@ vllm serve Eco-Tech/GLM-4.7-W8A8-floatmtp \
 **Notice:**
 The parameters are explained as follows:
 
-- `--async-scheduling` Asynchronous scheduling is a technique used to optimize inference efficiency. It allows non-blocking task scheduling to improve concurrency and throughput, especially when processing large-scale models.
 - `fusion_ops_gmmswigluquant` The performance of the GmmSwigluQuant fusion operator tends to degrade when the total number of NPUs is ≤ 16.
 - `VLLM_ASCEND_ENABLE_FLASHCOMM1` Due to the FD feature of the FIA operator being invalidated by padding data introduced by this feature, we recommend disabling the `flashcomm1` feature for long-sequence (≥16k) and low-concurrency (≤8 batch size) scenarios.For long-sequence and high-concurrency scenarios, you may enable this feature to achieve improved Prefill performance.
 
@@ -205,7 +203,6 @@ vllm serve Eco-Tech/GLM-4.7-W8A8-floatmtp \
   --max-model-len 140000 \
   --max-num-batched-tokens 8192 \
   --max-num-seqs 16 \
-  --async-scheduling \
   --quantization ascend \
   --trust-remote-code \
   --gpu-memory-utilization 0.9 \
@@ -256,7 +253,6 @@ vllm serve Eco-Tech/GLM-4.7-W8A8-floatmtp \
   --max-model-len 140000 \
   --max-num-batched-tokens 8192 \
   --max-num-seqs 16 \
-  --async-scheduling \
   --quantization ascend \
   --trust-remote-code \
   --gpu-memory-utilization 0.9 \
@@ -271,7 +267,7 @@ vllm serve Eco-Tech/GLM-4.7-W8A8-floatmtp \
 
 ### Prefill-Decode Disaggregation
 
-We'd like to show the deployment guide of `GLM4.7` on multi-node environment with 2P1D for better performance.
+We'd like to show the deployment guide of `GLM-4.7` on multi-node environment with 2P1D for better performance.
 
 Before you start, please
 
@@ -547,7 +543,6 @@ Before you start, please
             --max-num-batched-tokens 128 \
             --max-num-seqs 4 \
             --trust-remote-code \
-            --async-scheduling \
             --gpu-memory-utilization 0.9 \
             --quantization ascend \
             --speculative-config '{"num_speculative_tokens": 3, "method":"mtp"}' \
@@ -617,7 +612,6 @@ Before you start, please
             --max-num-batched-tokens 128 \
             --max-num-seqs 4 \
             --trust-remote-code \
-            --async-scheduling \
             --gpu-memory-utilization 0.9 \
             --quantization ascend \
             --speculative-config '{"num_speculative_tokens": 3, "method":"mtp"}' \

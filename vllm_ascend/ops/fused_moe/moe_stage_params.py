@@ -61,6 +61,7 @@ class MoEQuantParams:
     quant_type: QuantType = QuantType.NONE
     comm_quant_mode: int | None = None
     mxfp: MoEMxfpParams | None = None
+    is_per_channel_weight: bool = False
 
     @property
     def is_quant(self) -> bool:
@@ -75,10 +76,12 @@ class MoEQuantParams:
         return self.quant_type in (QuantType.W8A8, QuantType.W4A8)
 
     @property
+    def use_w4a8_per_channel_gmm_swiglu(self) -> bool:
+        return self.quant_type == QuantType.W4A8 and self.is_per_channel_weight
+
+    @property
     def dispatch_with_quant(self) -> bool:
-        # MXFP4 currently quantizes activations in the MoE MLP path, so
-        # MC2 dispatch must remain unquantized for that mode.
-        return self.quant_type in (QuantType.W8A8, QuantType.W4A8, QuantType.MXFP8)
+        return self.quant_type in (QuantType.W8A8, QuantType.W4A8, QuantType.MXFP8, QuantType.MXFP4)
 
 
 __all__ = [
