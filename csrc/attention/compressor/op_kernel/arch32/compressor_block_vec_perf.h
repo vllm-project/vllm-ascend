@@ -325,12 +325,12 @@ __aicore__ inline void CompressorBlockVectorPerf<COMP>::InitBuffers(TPipe *pipe)
     pipe->InitBuffer(apeBuf, BUFFER_SIZE_BYTE_32K);
     normWeightUb = normWeightBuf.Get<T>();
     apeUb = apeBuf.Get<T>();
-    LocalTensor<T> normweightInUb = inputQue1.AllocTensor<T>();
+    LocalTensor<X_T> normweightInUb = inputQue1.AllocTensor<X_T>();
     LocalTensor<int32_t> gatherOffsetUb = gatherOffsetBuf.Get<int32_t>();
     DataCopy(normweightInUb, normWeightGm_, constInfo_.headDim); // 获取normWeight，常驻
     inputQue1.EnQue(normweightInUb);
-    inputQue1.DeQue<T>();
-    DataCopy(normWeightUb, normweightInUb, constInfo_.headDim);
+    inputQue1.DeQue<X_T>();
+    Cast(normWeightUb, normweightInUb, RoundMode::CAST_NONE, constInfo_.headDim);
     inputQue1.FreeTensor(normweightInUb);
     if constexpr (COMP::rotaryMode == Compressor::ROTARY_MODE::INTERLEAVE) {
         SetGatherSrcOffset<float>(gatherOffsetUb, constInfo_.ropeHeadDim);
