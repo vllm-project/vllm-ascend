@@ -1,9 +1,10 @@
+import math
+
 import torch
 from vllm.triton_utils import tl, triton
 from vllm.utils.torch_utils import direct_register_custom_op
 
 from vllm_ascend.ops.triton.triton_utils import extract_slice, get_element, get_vectorcore_num, insert_slice
-import math
 
 @triton.jit
 def precompute_rope_cos_sin_kernel(
@@ -14,7 +15,7 @@ def precompute_rope_cos_sin_kernel(
     batch_size_per_vec: tl.constexpr,
     ROPE_DIM: tl.constexpr,
     num_vectorcore: tl.constexpr,
-    N:tl.constexpr
+    N: tl.constexpr,
 ):
     row_pid = tl.program_id(0)
     input_batch_offset = row_pid * batch_size_per_vec
@@ -24,13 +25,15 @@ def precompute_rope_cos_sin_kernel(
     if input_batch_offset >= batch_size:
         return
 
-    x = tl.load(positions_gm_ptr + positions_off + input_batch_offset,
-                mask=(positions_off + input_batch_offset) < input_batch_offset_end)
+    x = tl.load(
+        positions_gm_ptr + positions_off + input_batch_offset,
+        mask=(positions_off + input_batch_offset) < input_batch_offset_end,
+    )
 
     sin_cos_range = tl.arange(0, ROPE_DIM)
-    offset = x[:, None]*ROPE_DIM + sin_cos_range[None, :]
+    offset = x[:, None] * ROPE_DIM + sin_cos_range[None, :]
     sin_cos_val = tl.load(cos_sin_cache_gm_ptr + offset).to(tl.float32)
-    output_offset = (positions_off+input_batch_offset)[:, None]*ROPE_DIM + sin_cos_range[None, :]
+    output_offset = (positions_off + input_batch_offset)[:, None] * ROPE_DIM + sin_cos_range[None, :]
     tl.store(out_cos_sin_gm_ptr + output_offset, sin_cos_val, mask=output_offset < N)
 
 @triton.jit
@@ -61,7 +64,7 @@ def split_qkv_rmsnorm_rope_simt_kernel(
     kv_head_num: tl.constexpr,
     qk_head_num_sum: tl.constexpr,
     v_batch_size_per_iter_per_vec: tl.constexpr,
-    batch_size_per_vec:tl.constexpr,
+    batch_size_per_vec: tl.constexpr,
 ):
     row_pid = tl.program_id(0)
 
@@ -91,23 +94,26 @@ def split_qkv_rmsnorm_rope_simt_kernel(
         mmask = (mblk_idx + pos_offset) < input_batch_offset_end
         mask = (mmask[:, None]) & (nmask[None, :])
         idx = (mblk_idx + pos_offset)[:, None] * total_hidden_size + nblk_idx[None, :]
-        values_tmp1 = tl.load(input_gm_ptr + idx, mask=mask).reshape(qk_head_nums_per_iter_per_vec, HEAD_DIM).to(tl.float32)
+        values_tmp1 = (
+            tl.load(input_gm_ptr + idx, mask=mask).reshape(qk_head_nums_per_iter_per_vec, HEAD_DIM).to(tl.float32)
+        )
         if BIAS:
             q_bias_values = tl.load(q_bias_ptr + tl.arange(0, HEAD_DIM)).to(tl.float32)
             k_bias_values = tl.load(k_bias_ptr + tl.arange(0, HEAD_DIM)).to(tl.float32)
 
         base = (input_batch_offset + pos_offset) * ROPE_DIM
-        cos_sin_offset = base + tl.arange(0, batch_size_per_iter_per_vec*ROPE_DIM)
-        cos_sin_value = tl.load(cos_sin_precomputed_ptr + cos_sin_offset, cos_sin_offset < (input_batch_offset_end * ROPE_DIM)).reshape(batch_size_per_iter_per_vec, 1, ROPE_DIM)
-        cos = extract_slice(cos_sin_value,
-        offsets=(0, 0, 0),
-        sizes=(batch_size_per_iter_per_vec, 1,  HALF_ROPE_DIM),
-        strides=(1, 1, 1)
+        cos_sin_offset = base + tl.arange(0, batch_size_per_iter_per_vec * ROPE_DIM)
+        cos_sin_value = tl.load(
+            cos_sin_precomputed_ptr + cos_sin_offset, cos_sin_offset < (input_batch_offset_end * ROPE_DIM)
+        ).reshape(batch_size_per_iter_per_vec, 1, ROPE_DIM)
+        cos = extract_slice(
+            cos_sin_value, offsets=(0, 0, 0), sizes=(batch_size_per_iter_per_vec, 1, HALF_ROPE_DIM), strides=(1, 1, 1)
         )
-        sin = extract_slice(cos_sin_value,
-        offsets=(0, 0, HALF_ROPE_DIM),
-        sizes=(batch_size_per_iter_per_vec, 1,  HALF_ROPE_DIM),
-        strides=(1, 1, 1)
+        sin = extract_slice(
+            cos_sin_value,
+            offsets=(0, 0, HALF_ROPE_DIM),
+            sizes=(batch_size_per_iter_per_vec, 1, HALF_ROPE_DIM),
+            strides=(1, 1, 1),
         )
 
         normalized_values = values_tmp1
@@ -300,8 +306,9 @@ def split_qkv_rmsnorm_rope_simt_impl(
 
     v_batch_size_per_iter_per_vec = UB_SIZE / torch.float32.itemsize // (kv_hidden_size + 1)
     
+
     cos_sin_precomputed = torch.empty(batch_size, rope_dim, dtype=torch.float32, device=input.device)
-    BLOCK_SIZE=128
+    BLOCK_SIZE = 128
     N = cos_sin_precomputed.numel()
     grid = (num_vectorcore, 1, 1)
     batch_size_per_vec_cos_sin = pow(2, math.ceil(math.log2(batch_size_per_vec)))
@@ -314,7 +321,7 @@ def split_qkv_rmsnorm_rope_simt_impl(
         rope_dim,
         num_vectorcore,
         N,
-        force_simt_only=True
+        force_simt_only=True,
     )
 
     grid = (num_vectorcore, 1, 1)

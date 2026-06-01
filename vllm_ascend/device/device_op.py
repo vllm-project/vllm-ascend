@@ -503,6 +503,7 @@ class BaseDeviceAdaptor:
 
     @staticmethod
 <<<<<<< HEAD
+<<<<<<< HEAD
     def chunk_scaled_dot_kkt_fwd(NT, k, beta, g_cumsum, A, cu_seqlens, chunk_indices, T, B, H, Hg, K, BT, BK):
         chunk_scaled_dot_kkt_fwd_kernel[(NT, 1)](
             k=k,
@@ -561,6 +562,21 @@ class BaseDeviceAdaptor:
         return x
 =======
     def split_qkv_rmsnorm_rope(input, q_weight, k_weight, q_hidden_size, kv_hidden_size, head_dim, eps, q_bias, k_bias, cos_sin_cache, positions):
+=======
+    def split_qkv_rmsnorm_rope(
+        input,
+        q_weight,
+        k_weight,
+        q_hidden_size,
+        kv_hidden_size,
+        head_dim,
+        eps,
+        q_bias,
+        k_bias,
+        cos_sin_cache,
+        positions,
+    ):
+>>>>>>> 7d22efe6 (clean code 1)
         results = torch.ops.vllm.qkv_rmsnorm_rope(
             input=input,
             q_weight=q_weight,
@@ -1144,6 +1160,7 @@ class A5DeviceAdaptor(BaseDeviceAdaptor):
 
     @staticmethod
 <<<<<<< HEAD
+<<<<<<< HEAD
     def chunk_scaled_dot_kkt_fwd(NT, k, beta, g_cumsum, A, cu_seqlens, chunk_indices, T, B, H, Hg, K, BT, BK):
         chunk_scaled_dot_kkt_fwd_kernel[(NT, 1)](
             k=k,
@@ -1201,6 +1218,21 @@ class A5DeviceAdaptor(BaseDeviceAdaptor):
         return x
 =======
     def split_qkv_rmsnorm_rope(input, q_weight, k_weight, q_hidden_size, kv_hidden_size, head_dim, eps, q_bias, k_bias, cos_sin_cache, positions):
+=======
+    def split_qkv_rmsnorm_rope(
+        input,
+        q_weight,
+        k_weight,
+        q_hidden_size,
+        kv_hidden_size,
+        head_dim,
+        eps,
+        q_bias,
+        k_bias,
+        cos_sin_cache,
+        positions,
+    ):
+>>>>>>> 7d22efe6 (clean code 1)
         results = torch.ops.vllm.qkv_rmsnorm_rope_simt(
             input=input,
             q_weight=q_weight,
