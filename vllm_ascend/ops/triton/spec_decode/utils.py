@@ -334,6 +334,7 @@ def _shift_and_gather_cache_1d_kernel(
     val = tl.load(dst_ptr + safe_dst_idx, mask=store_mask & (m < store_len), other=0)
     tl.store(base_cached + safe_m, val, mask=store_mask)
 
+
 @triton.jit
 def _shift_and_gather_hidden_kernel(
     src_ptr,
