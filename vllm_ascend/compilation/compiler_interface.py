@@ -149,7 +149,7 @@ def npugraph_ex_compile(
         _configure_backend(
             config, ascend_compilation_config, vllm_config, process_kwargs_options=_process_kwargs_options
         )
-        import torchair.npu_fx_compiler as nfx
+        import npugraph_ex.npu_fx_compiler as nfx
         _original_get_compiled_gm = nfx._NpuFxCompiler._get_compiled_gm
         
         handle = None
@@ -161,7 +161,7 @@ def npugraph_ex_compile(
                     os.makedirs(os.path.dirname(cache_path), exist_ok=True)
                     with open(cache_path, "w") as f:
                         f.write(py_code)
-                    logger.info(f"Saved compiled graph to cache: {cache_path}")
+                    logger.debug(f"Saved compiled graph to cache: {cache_path}")
             return compiled_gm
         
         nfx._NpuFxCompiler._get_compiled_gm = patched_get_compiled_gm
@@ -181,15 +181,6 @@ def npugraph_ex_compile(
         compiled_fn = npugraph_ex(graph, example_inputs)
     handle = (key, cache_path) 
 
-    # handle = None
-    # if isinstance(compiled_fn, _CompiledFxGraph):
-    #     py_code = compiled_fn.get_code()
-    #     if cache_path and py_code:
-    #         os.makedirs(os.path.dirname(cache_path), exist_ok=True)
-    #         with open(cache_path, "w") as f:
-    #             f.write(py_code)
-    #         handle = (key, cache_path)
-    #         logger.info(f"Saved compiled graph to cache: {cache_path}")
 
     nfx._NpuFxCompiler._get_compiled_gm = _original_get_compiled_gm
     return compiled_fn, handle
@@ -263,12 +254,24 @@ class AscendCompiler(CompilerInterface):
         
     def load(self, handle, graph, example_inputs, graph_index, compile_range):
         key, path = handle
-        from torchair.npu_fx_compiler import _CompiledFxArtifacts, _CompiledFxGraph
+        from npugraph_ex.npu_fx_compiler import _CompiledFxArtifacts, _CompiledFxGraph
 
         with open(path) as f:
             py_code = f.read()
         artifacts = _CompiledFxArtifacts()
         artifacts.py_code = py_code
-        logger.info("Loaded npugraph_ex compilation cache from %s", path)
+        logger.debug("Loaded npugraph_ex compilation cache from %s", path)
         compiled_fn = _CompiledFxGraph.load_artifacts(artifacts)
+
+        # The saved code was compiled from the graph after make_graph_return_tuple mutated it
+        # to return a flat tuple. If the original graph didn't return a tuple, we need to
+        # recreate the unflatten wrapper so callers receive the original output structure.
+        if not graph_returns_tuple(graph):
+            _inner_fn = compiled_fn
+            def compiled_fn(*args, **kwargs):
+                result = _inner_fn(*args, **kwargs)
+                if isinstance(result, (tuple, list)) and len(result) == 1:
+                    return result[0]
+                return result
+
         return compiled_fn
