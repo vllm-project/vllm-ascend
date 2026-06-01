@@ -48,6 +48,7 @@ from vllm_ascend._310p.npu_input_batch import NPUInputBatch310 as NPUInputBatch
 from vllm_ascend._310p.ops.rotary_embedding import prepare_mrope_cos_sin_slices_from_runner
 from vllm_ascend._310p.sample.sampler import AscendSampler310
 from vllm_ascend.attention.attention_v1 import AscendAttentionState
+from vllm_ascend.spec_decode.config import get_ascend_spec_decode_method
 from vllm_ascend.spec_decode.utils import update_num_computed_tokens_for_batch_change
 from vllm_ascend.utils import ACL_FORMAT_FRACTAL_NZ, lmhead_tp_enable
 from vllm_ascend.worker.model_runner_v1 import NPUModelRunner
@@ -83,8 +84,8 @@ class NPUModelRunner310(NPUModelRunner):
         self.sampler = AscendSampler310()
         if getattr(self, "rejection_sampler", None) is not None:
             self.rejection_sampler = RejectionSampler(self.sampler)
-        if self.speculative_config is not None and self.speculative_config.method == "ngram":
-            # 310P ngram requires decode-only graph shapes to be built with q_len=1.
+        if self.speculative_config is not None and get_ascend_spec_decode_method(self.vllm_config) in ("ngram", "zipf"):
+            # 310P hash-based proposers require decode-only graph shapes to be built with q_len=1.
             # Keep dispatcher's internal query_len in sync to avoid key-init assert.
             self.cudagraph_dispatcher.uniform_decode_query_len = _NGRAM_GRAPH_UNIFORM_DECODE_QUERY_LEN
 
@@ -103,11 +104,11 @@ class NPUModelRunner310(NPUModelRunner):
 
     @contextmanager
     def temporary_modify_uniform_decode_query_len(self):
-        # This is only needed for the 310P ngram path where dispatcher uses q_len=1
+        # This is only needed for 310P hash-based proposers where dispatcher uses q_len=1
         # while runner's default uniform_decode_query_len remains 1 + num_spec_tokens.
         # TODO: remove this temporary override after upstream supports independent
         # decode capture query_len for backend-specific paths.
-        if self.speculative_config is None or self.speculative_config.method != "ngram":
+        if self.speculative_config is None or get_ascend_spec_decode_method(self.vllm_config) not in ("ngram", "zipf"):
             yield
             return
 

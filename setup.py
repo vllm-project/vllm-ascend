@@ -306,10 +306,24 @@ class cmake_build_ext(build_ext):
             raise RuntimeError(f"CMake configuration failed: {e}")
 
         install_path = os.path.join(ROOT_DIR, self.build_lib)
+        zipf_cache_install_path = os.path.join(
+            ROOT_DIR,
+            self.build_lib,
+            "vllm_ascend",
+            "spec_decode",
+            "zipf_cache",
+        )
         if isinstance(self.distribution.get_command_obj("develop"), develop):
             install_path = os.path.join(ROOT_DIR, "vllm_ascend")
+            zipf_cache_install_path = os.path.join(
+                ROOT_DIR,
+                "vllm_ascend",
+                "spec_decode",
+                "zipf_cache",
+            )
         # add CMAKE_INSTALL_PATH
         cmake_args += [f"-DCMAKE_INSTALL_PREFIX={install_path}"]
+        cmake_args += [f"-DZIPF_CACHE_INSTALL_PATH={zipf_cache_install_path}"]
 
         cmake_args += [f"-DCMAKE_PREFIX_PATH={pybind11_cmake_path}"]
 

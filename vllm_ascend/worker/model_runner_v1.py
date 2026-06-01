@@ -127,6 +127,7 @@ from vllm_ascend.patch.worker.patch_draft_quarot import patch_load_weights
 from vllm_ascend.quantization.utils import enable_fa_quant
 from vllm_ascend.sample.sampler import AscendSampler
 from vllm_ascend.spec_decode import get_spec_decode_method
+from vllm_ascend.spec_decode.config import get_ascend_spec_decode_method
 from vllm_ascend.spec_decode.dflash_proposer import AscendDflashProposer
 from vllm_ascend.spec_decode.draft_proposer import AscendDraftModelProposer
 from vllm_ascend.spec_decode.eagle_proposer import AscendEagleProposer
@@ -138,6 +139,7 @@ from vllm_ascend.spec_decode.ngram_proposer import AscendNgramProposer
 from vllm_ascend.spec_decode.ngram_proposer_npu import AscendNgramProposerNPU
 from vllm_ascend.spec_decode.suffix_proposer import AscendSuffixDecodingProposer
 from vllm_ascend.spec_decode.utils import update_num_computed_tokens_for_batch_change
+from vllm_ascend.spec_decode.zipf_proposer import AscendZipfDecodingProposer
 from vllm_ascend.utils import (
     calc_split_factor,
     check_gdn_layer,
@@ -534,6 +536,7 @@ class NPUModelRunner(GPUModelRunner):
         self.drafter: (
             AscendNgramProposer
             | AscendNgramProposerNPU
+            | AscendZipfDecodingProposer
             | AscendEagleProposer
             | AscendDraftModelProposer
             | AscendDflashProposer
@@ -544,13 +547,14 @@ class NPUModelRunner(GPUModelRunner):
         ) = None
         self.actual_seq_lengths_q: list[int] = []
         self.decode_token_per_req = 1
+        self.spec_decode_method = get_ascend_spec_decode_method(self.vllm_config)
         if self.speculative_config:
             spec_token_num = self.speculative_config.num_speculative_tokens
             assert spec_token_num > 0
             self.decode_token_per_req = 1 + spec_token_num
             if get_pp_group().is_last_rank:
                 self.drafter = self._get_drafter()
-                if self.speculative_config.method == "eagle3":
+                if self.spec_decode_method == "eagle3":
                     assert isinstance(self.drafter, AscendEagleProposer)
                     self.use_aux_hidden_state_outputs = self.drafter.eagle3_use_aux_hidden_state
                 elif self.speculative_config.method == "extract_hidden_states":
@@ -561,7 +565,7 @@ class NPUModelRunner(GPUModelRunner):
         self.num_discarded_requests = 0
 
     def _get_drafter(self):
-        return get_spec_decode_method(self.speculative_config.method, self.vllm_config, self.device, self)
+        return get_spec_decode_method(self.spec_decode_method, self.vllm_config, self.device, self)
 
     def _use_aclgraph(self) -> bool:
         return (
@@ -1434,7 +1438,7 @@ class NPUModelRunner(GPUModelRunner):
         if not self.drafter:
             # Speculative decoding is not enabled.
             draft_token_ids = None
-        elif isinstance(self.drafter, (AscendNgramProposer, AscendSuffixDecodingProposer)):
+        elif isinstance(self.drafter, (AscendNgramProposer, AscendZipfDecodingProposer, AscendSuffixDecodingProposer)):
             draft_token_ids = self.drafter.propose(valid_sampled_token_ids)
         elif isinstance(self.drafter, AscendNgramProposerNPU):
             batch_size = min(self.input_batch.num_reqs, self.token_ids_gpu_tensor.shape[0])

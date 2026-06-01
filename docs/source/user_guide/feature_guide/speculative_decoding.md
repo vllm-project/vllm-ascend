@@ -152,6 +152,68 @@ Suffix Decoding can achieve better performance for tasks with high repetition, s
         print(f"Prompt: {prompt!r}, Generated text: {generated_text!r}")
     ```
 
+## Speculating using Zipf Decoding
+
+Zipf Decoding is a lightweight speculative decoding proposer for Ascend. It does not use a draft model. Instead, it builds a native Zipf cache from previous tokens and proposes continuations from repeated or template-like token patterns.
+
+Zipf Decoding is intended for pattern-heavy workloads such as repeated text, structured outputs, logs, code-like templates, and other prompts where local token continuations are often reused. In local NPU smoke tests, this path showed better behavior than suffix decoding on repetitive workloads, but it is not expected to be faster for every workload.
+
+> [!NOTE]
+> Upstream vLLM does not currently accept `method="zipf"` or Zipf-specific fields in `speculative_config`. Use an upstream-supported speculative decoding method as the carrier, then select the Ascend Zipf proposer through `additional_config["ascend_spec_decode_method"] = "zipf"`.
+
+- Offline inference
+
+  ```python
+    from vllm import LLM, SamplingParams
+
+    prompts = [
+        "Repeat the word hello ten times.",
+        "Explain speculative decoding in one paragraph.",
+    ]
+    sampling_params = SamplingParams(temperature=0, max_tokens=64)
+
+    llm = LLM(
+        model="meta-llama/Meta-Llama-3.1-8B-Instruct",
+        tensor_parallel_size=1,
+        speculative_config={
+            "method": "suffix",
+            "num_speculative_tokens": 3,
+        },
+        additional_config={
+            "ascend_spec_decode_method": "zipf",
+            "zipf_config": {
+                "zipf_ngram_size": 4,
+                "zipf_min_window": 1,
+                "zipf_initial_speculative_tokens": 2,
+                "zipf_skip_shared": False,
+                "zipf_generalized_before_shared": True,
+            },
+        },
+    )
+
+    outputs = llm.generate(prompts, sampling_params)
+
+    for output in outputs:
+        prompt = output.prompt
+        generated_text = output.outputs[0].text
+        print(f"Prompt: {prompt!r}, Generated text: {generated_text!r}")
+    ```
+
+Zipf configuration options:
+
+| Option | Default | Description |
+| --- | --- | --- |
+| `zipf_ngram_size` | `4` | Maximum n-gram window size used by the Zipf cache. |
+| `zipf_min_window` | `2` | Minimum n-gram window size used by the Zipf cache. |
+| `zipf_initial_speculative_tokens` | `num_speculative_tokens` | Initial number of Zipf draft tokens to propose. It must be no larger than `num_speculative_tokens`. |
+| `zipf_skip_shared` | `False` | Whether to skip shared-cache lookup and update. |
+| `zipf_generalized_before_shared` | `True` | Whether generalized-cache lookup is attempted before shared-cache lookup. |
+
+Known limitations:
+
+1. `method="zipf"` cannot be passed directly to `speculative_config` until upstream vLLM accepts Zipf in `SpeculativeConfig`.
+2. Zipf Decoding is most useful for repetitive and pattern-heavy workloads. For general chat workloads, benchmark with your own prompts before enabling it by default.
+
 ## Extracting Hidden States
 
 The `extract_hidden_states` method is a special speculative decoding mode that does not perform actual speculation. Instead, it extracts hidden states from specified layers of the target model and saves them to disk. This is primarily used for collecting training data for EAGLE-style draft models.

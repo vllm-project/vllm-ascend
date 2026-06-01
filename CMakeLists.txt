@@ -39,6 +39,10 @@ if (CMAKE_INSTALL_PREFIX STREQUAL /usr/local)
   set(CMAKE_INSTALL_PREFIX "${CMAKE_CURRENT_LIST_DIR}/out" CACHE STRINGS "path to install()")
 endif()
 
+if(NOT DEFINED ZIPF_CACHE_INSTALL_PATH)
+  set(ZIPF_CACHE_INSTALL_PATH "${CMAKE_INSTALL_PREFIX}/spec_decode/zipf_cache")
+endif()
+
 set(ASCEND_CANN_PACKAGE_PATH ${ASCEND_HOME_PATH})
 if(EXISTS ${ASCEND_HOME_PATH}/tools/tikcpp/ascendc_kernel_cmake)
     set(ASCENDC_CMAKE_DIR ${ASCEND_HOME_PATH}/tools/tikcpp/ascendc_kernel_cmake)
@@ -110,6 +114,33 @@ set(
 )
 
 pybind11_add_module(vllm_ascend_C ${VLLM_ASCEND_SRC})
+
+# ZipfCache is an internal native extension used by Ascend speculative decoding.
+# It is installed under vllm_ascend/spec_decode/zipf_cache instead of exposing a
+# top-level Python package.
+set(ZIPF_CACHE_SRC
+  ${CMAKE_CURRENT_SOURCE_DIR}/csrc/zipf_cache/src/cityhash.c
+  ${CMAKE_CURRENT_SOURCE_DIR}/csrc/zipf_cache/src/local_hash.c
+  ${CMAKE_CURRENT_SOURCE_DIR}/csrc/zipf_cache/src/token_generalizer.c
+  ${CMAKE_CURRENT_SOURCE_DIR}/csrc/zipf_cache/src/zipf_cache.c
+  ${CMAKE_CURRENT_SOURCE_DIR}/csrc/zipf_cache/src/async_worker.c
+)
+
+add_library(zipf_cache_static STATIC ${ZIPF_CACHE_SRC})
+set_target_properties(zipf_cache_static PROPERTIES POSITION_INDEPENDENT_CODE ON)
+target_include_directories(zipf_cache_static PUBLIC
+  ${CMAKE_CURRENT_SOURCE_DIR}/csrc/zipf_cache/include
+)
+target_link_libraries(zipf_cache_static PRIVATE pthread m)
+
+pybind11_add_module(_zipf_cache_cpp
+  ${CMAKE_CURRENT_SOURCE_DIR}/csrc/zipf_cache/src/pybind_zipf_cache.cpp
+)
+target_include_directories(_zipf_cache_cpp PRIVATE
+  ${CMAKE_CURRENT_SOURCE_DIR}/csrc/zipf_cache/include
+)
+target_link_libraries(_zipf_cache_cpp PRIVATE zipf_cache_static pthread m)
+add_dependencies(vllm_ascend_C _zipf_cache_cpp)
 
 # Detect aclrtMemcpyBatchAsync availability (CANN 8.5+)
 # Can be overridden via VLLM_ASCEND_ENABLE_BATCH_MEMCPY env var (registered
@@ -203,3 +234,5 @@ if(SOC_VERSION MATCHES "ascend310p.*|ascend950")
 else()
   install(TARGETS vllm_ascend_C vllm_ascend_kernels DESTINATION ${VLLM_ASCEND_INSTALL_PATH})
 endif()
+
+install(TARGETS _zipf_cache_cpp DESTINATION ${ZIPF_CACHE_INSTALL_PATH})

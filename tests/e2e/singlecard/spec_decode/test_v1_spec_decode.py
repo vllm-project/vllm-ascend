@@ -233,6 +233,53 @@ def test_qwen3_vl_eagle(
         ref_llm.model.chat(test_prompts, sampling_config)
 
 
+def test_zipf_correctness(
+    test_prompts: list[list[dict[str, Any]]],
+    sampling_config: SamplingParams,
+    model_name: str,
+):
+    """
+    Compare the outputs of a original LLM and a speculative LLM
+    should be the same when using Zipf speculative decoding.
+    """
+    with VllmRunner(model_name, max_model_len=1024, cudagraph_capture_sizes=[1, 2, 4, 8]) as ref_llm:
+        ref_outputs = ref_llm.model.chat(test_prompts, sampling_config)
+
+    with VllmRunner(
+        model_name,
+        speculative_config={
+            "method": "suffix",
+            "num_speculative_tokens": 3,
+        },
+        additional_config={
+            "ascend_spec_decode_method": "zipf",
+            "zipf_config": {
+                "zipf_ngram_size": 4,
+                "zipf_min_window": 1,
+                "zipf_initial_speculative_tokens": 2,
+                "zipf_skip_shared": False,
+                "zipf_generalized_before_shared": True,
+            },
+        },
+        cudagraph_capture_sizes=[1, 2, 4, 8],
+        max_model_len=1024,
+    ) as runner:
+        spec_outputs = runner.model.chat(test_prompts, sampling_config)
+    matches = 0
+    misses = 0
+    for ref_output, spec_output in zip(ref_outputs, spec_outputs):
+        if ref_output.outputs[0].text == spec_output.outputs[0].text:
+            matches += 1
+        else:
+            misses += 1
+            print(f"ref_output: {ref_output.outputs[0].text}")
+            print(f"spec_output: {spec_output.outputs[0].text}")
+
+    # Heuristic: expect at least 70% of the prompts to match exactly
+    # Upon failure, inspect the outputs to check for inaccuracy.
+    assert matches > int(0.66 * len(ref_outputs))
+
+
 def test_suffix_acceptance(
     test_prompts: list[list[dict[str, Any]]],
     sampling_config: SamplingParams,
