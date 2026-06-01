@@ -325,16 +325,7 @@ def _shift_and_gather_cache_1d_kernel(
     val = tl.where(cached_mask, val_cached, val_src)
     tl.store(dst_ptr + dst_idx, val, mask=mask)
 
-    # Store into the per-sequence cache.
-    store_start = tl.load(store_start_ptr + pid_seq).to(tl.int32)
-    store_len = tl.load(store_len_ptr + pid_seq).to(tl.int32)
-    m = tl.arange(0, PADDED_SHIFT)
-    store_mask = m < MAX_SHIFT
-    dst_idx = store_start + m
-    safe_dst_idx = tl.where(store_mask & (m < store_len), dst_idx, 0)
-    safe_m = tl.where(store_mask, m, 0)
-    val = tl.load(dst_ptr + safe_dst_idx, mask=store_mask & (m < store_len), other=0)
-    tl.store(base_cached + safe_m, val, mask=store_mask)
+    # Store into the per-sequence cache.\n    store_start = tl.load(store_start_ptr + pid_seq).to(tl.int32)\n    store_len = tl.load(store_len_ptr + pid_seq).to(tl.int32)\n    m = tl.arange(0, PADDED_SHIFT)\n    m_mask = (m < MAX_SHIFT) & (m < store_len)\n    dst_idx = store_start + m\n    safe_dst_idx = tl.where(m_mask, dst_idx, 0)\n    safe_m = tl.where(m < MAX_SHIFT, m, 0)\n    val = tl.load(dst_ptr + safe_dst_idx, mask=m_mask, other=0)\n    tl.store(base_cached + safe_m, val, mask=m_mask)
 
 
 @triton.jit
