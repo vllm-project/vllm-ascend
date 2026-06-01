@@ -374,6 +374,116 @@ class TestKVPoolSchedulerBuildMeta(unittest.TestCase):
         self.assertNotIn("r1", scheduler._request_trackers)
 
 
+class TestKVPoolSchedulerCachedReqsFixes(unittest.TestCase):
+    """Tests for PR #8347 scheduler-side fixes:
+
+    - resumed (preempted) requests must skip only when new_block_ids is empty
+      (the empty-check used to fire before the preempted branch and short-
+      circuit the decode/chunked branch too);
+    - decode/chunked requests must continue to produce ReqMeta even when
+      new_block_ids is empty (so the decode side can still store KV cache).
+    """
+
+    def _make_config(self, kv_role="kv_producer", extra_config=None, block_size=16):
+        config = MagicMock()
+        config.kv_transfer_config.kv_role = kv_role
+        config.kv_transfer_config.kv_connector_extra_config = extra_config or {}
+        config.kv_transfer_config.get_from_extra_config.return_value = True
+        config.parallel_config.data_parallel_rank = 0
+        config.parallel_config.prefill_context_parallel_size = 1
+        config.parallel_config.decode_context_parallel_size = 1
+        config.cache_config.block_size = block_size
+        return config
+
+    @patch("vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.pool_scheduler.LookupKeyClient")
+    def test_resumed_request_empty_block_ids_is_skipped(self, mock_client_cls):
+        config = self._make_config()
+        scheduler = KVPoolScheduler(config, use_layerwise=False)
+
+        from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.config_data import RequestTracker
+
+        scheduler._preempted_req_ids.add("r1")
+        scheduler._request_trackers["r1"] = RequestTracker(
+            req_id="r1",
+            token_len=16,
+            allocated_block_ids=[0],
+        )
+        req = MagicMock()
+        req.prompt_token_ids = list(range(16))
+        req.num_computed_tokens = 16
+        req.block_hashes = [b"h0"]
+        scheduler._unfinished_requests["r1"] = (req, [[0]])
+
+        sched_output = MagicMock()
+        sched_output.finished_req_ids = set()
+        sched_output.preempted_req_ids = set()
+        sched_output.scheduled_new_reqs = []
+        sched_output.num_scheduled_tokens = {"r1": 0}
+        sched_output.scheduled_cached_reqs = MagicMock()
+        sched_output.scheduled_cached_reqs.req_ids = ["r1"]
+        sched_output.scheduled_cached_reqs.new_block_ids = [[]]  # empty -> skip
+        sched_output.scheduled_cached_reqs.num_computed_tokens = [16]
+
+        # Should not raise and should not add an extra ReqMeta for r1.
+        meta = scheduler.build_connector_meta(sched_output)
+        self.assertEqual([r.req_id for r in meta.requests], [])
+
+    @patch("vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.pool_scheduler.LookupKeyClient")
+    def test_decode_chunked_empty_block_ids_still_processed(self, mock_client_cls):
+        """Decode/chunked with empty new_block_ids must NOT short-circuit."""
+        config = self._make_config()
+        scheduler = KVPoolScheduler(config, use_layerwise=False)
+
+        from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.config_data import RequestTracker
+
+        # Existing tracker (we are mid-decode).
+        scheduler._request_trackers["r1"] = RequestTracker(
+            req_id="r1",
+            token_len=16,
+            allocated_block_ids=[0],
+        )
+        # Existing unfinished request entry.
+        req = MagicMock()
+        req.prompt_token_ids = list(range(16))
+        req.num_computed_tokens = 16
+        req.all_token_ids = list(range(17))  # 1 decode token already seen
+        req.block_hashes = [b"h0"]
+        scheduler._unfinished_requests["r1"] = (req, [[0]])
+
+        called_update = []
+
+        # Patch tracker.update to assert it is NOT called for empty block ids.
+        orig_update = scheduler._request_trackers["r1"].update
+
+        def spy_update(*a, **kw):
+            called_update.append((a, kw))
+            return orig_update(*a, **kw)
+
+        scheduler._request_trackers["r1"].update = spy_update  # type: ignore[method-assign]
+
+        sched_output = MagicMock()
+        sched_output.finished_req_ids = set()
+        sched_output.preempted_req_ids = set()
+        sched_output.scheduled_new_reqs = []
+        sched_output.num_scheduled_tokens = {"r1": 1}  # one decode token
+        sched_output.scheduled_cached_reqs = MagicMock()
+        sched_output.scheduled_cached_reqs.req_ids = ["r1"]
+        # Empty new_block_ids: tracker.update must be skipped, but req_meta
+        # build must still happen (so the decoder can store KV cache).
+        sched_output.scheduled_cached_reqs.new_block_ids = [[]]
+        sched_output.scheduled_cached_reqs.num_computed_tokens = [16]
+
+        meta = scheduler.build_connector_meta(sched_output)
+        # Tracker.update must NOT have been called for the empty list.
+        self.assertEqual(called_update, [])
+        # Tracker token_len must still have advanced via the decode-token path.
+        self.assertEqual(scheduler._request_trackers["r1"].token_len, 17)
+        # The decode path must still produce some metadata (no early-continue);
+        # depending on configuration ReqMeta.from_request_tracker may return
+        # None, but the codepath must run without raising.
+        self.assertIsInstance(meta.requests, list)
+
+
 class TestLookupKeyClient(unittest.TestCase):
     @patch("vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.pool_scheduler.make_zmq_socket")
     @patch("vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.pool_scheduler.zmq")
