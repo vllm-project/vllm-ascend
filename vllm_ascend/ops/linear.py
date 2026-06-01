@@ -41,10 +41,11 @@ from vllm.model_executor.utils import set_weight_attrs
 from vllm.utils.torch_utils import direct_register_custom_op
 
 from vllm_ascend.ops.linear_op import get_parallel_op, get_replicated_op
-from vllm_ascend.utils import enable_sp, maybe_trans_nz
 from vllm_ascend.utils import (
     AscendDeviceType,
+    enable_sp,
     get_ascend_device_type,
+    maybe_trans_nz,
 )
 
 
@@ -451,7 +452,7 @@ class AscendColumnParallelLinear(ColumnParallelLinear):
             return self.custom_op.apply(input_)
 
         return super().forward(input_)
-    
+
     def weight_loader(self, param: Parameter, loaded_weight: torch.Tensor):
         if "wo_a" in self.prefix and get_ascend_device_type() != AscendDeviceType.A5:
             if self.weight.ndim == 2:

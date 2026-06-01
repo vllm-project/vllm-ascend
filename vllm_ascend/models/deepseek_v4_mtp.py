@@ -12,12 +12,12 @@ from vllm.config import VllmConfig
 from vllm.distributed import get_tensor_model_parallel_rank, get_tensor_model_parallel_world_size
 from vllm.model_executor.layers.fused_moe import FusedMoE
 from vllm.model_executor.layers.layernorm import RMSNorm
+from vllm.model_executor.layers.linear import ReplicatedLinear
 from vllm.model_executor.layers.logits_processor import LogitsProcessor
 from vllm.model_executor.layers.quantization import QuantizationConfig
 from vllm.model_executor.layers.vocab_parallel_embedding import ParallelLMHead, VocabParallelEmbedding
 from vllm.model_executor.model_loader.weight_utils import default_weight_loader, maybe_remap_kv_scale_name
 from vllm.model_executor.models.interfaces import SupportsPP
-from vllm.model_executor.layers.linear import ReplicatedLinear
 from vllm.model_executor.models.utils import PPMissingLayer, maybe_prefix
 from vllm.platforms import current_platform
 from vllm.sequence import IntermediateTensors
@@ -61,8 +61,12 @@ class DeepSeekMultiTokenPredictorLayer(nn.Module):
         self.config = config
         quant_config = vllm_config.quant_config
 
-        self.e_proj = ReplicatedLinear(config.hidden_size, config.hidden_size, bias=False, quant_config=quant_config, return_bias=False)
-        self.h_proj = ReplicatedLinear(config.hidden_size, config.hidden_size, bias=False, quant_config=quant_config, return_bias=False)
+        self.e_proj = ReplicatedLinear(
+            config.hidden_size, config.hidden_size, bias=False, quant_config=quant_config, return_bias=False
+        )
+        self.h_proj = ReplicatedLinear(
+            config.hidden_size, config.hidden_size, bias=False, quant_config=quant_config, return_bias=False
+        )
 
         self.enorm = RMSNorm(config.hidden_size, eps=config.rms_norm_eps)
         self.hnorm = RMSNorm(config.hidden_size, eps=config.rms_norm_eps)

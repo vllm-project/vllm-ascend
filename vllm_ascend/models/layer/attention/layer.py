@@ -157,9 +157,10 @@ class DSAAttention(nn.Module, AttentionLayerBase):
         if get_ascend_device_type() in {AscendDeviceType.A5}:
             kv_cache_dtype = torch.float8_e4m3fn
             vllm_config.cache_config.cache_dtype = "float8_e4m3fn"
-            
-        cached_head_size = (self.head_size + 128) \
-            if get_ascend_device_type() in {AscendDeviceType.A5} else self.head_size
+
+        cached_head_size = (
+            (self.head_size + 128) if get_ascend_device_type() in {AscendDeviceType.A5} else self.head_size
+        )
         return MLAAttentionSpec(
             block_size=128,
             num_kv_heads=1,

@@ -26,7 +26,6 @@ from vllm_ascend.device.mxfp_compat import (
 )
 from vllm_ascend.quantization.quant_type import QuantType
 from vllm_ascend.utils import AscendDeviceType, get_ascend_device_type
-from vllm_ascend.quantization.quant_type import QuantType
 
 
 class BaseDeviceAdaptor:
@@ -353,8 +352,7 @@ class BaseDeviceAdaptor:
         return q_quant, q_scale
 
     @staticmethod
-    def indexer_quant_scatter(q, kv, indexer_k_cache, indexer_scale_cache,
-                              indexer_full_cache, slot_mapping):
+    def indexer_quant_scatter(q, kv, indexer_k_cache, indexer_scale_cache, indexer_full_cache, slot_mapping):
         """Quantize q and scatter kv into indexer cache.
         Non-A5: int8 quant + 2x scatter_nd_update_v2 for k_cache and scale_cache."""
         q, q_scale = torch_npu.npu_dynamic_quant(q, dst_type=torch.int8)
@@ -367,10 +365,8 @@ class BaseDeviceAdaptor:
             kv_scale_out = kv_scale_out.unsqueeze(-1).to(torch.float16)
             if kv_scale_out.ndim < 4:
                 kv_scale_out = kv_scale_out.unsqueeze(-1)
-            torch.ops._C_ascend.npu_scatter_nd_update_v2(
-                indexer_k_cache, slot_mapping, kv_out)
-            torch.ops._C_ascend.npu_scatter_nd_update_v2(
-                indexer_scale_cache, slot_mapping, kv_scale_out)
+            torch.ops._C_ascend.npu_scatter_nd_update_v2(indexer_k_cache, slot_mapping, kv_out)
+            torch.ops._C_ascend.npu_scatter_nd_update_v2(indexer_scale_cache, slot_mapping, kv_scale_out)
 
         return q, q_scale, kv_out, kv_scale_out
 
@@ -393,27 +389,21 @@ class BaseDeviceAdaptor:
         kv_scale = kv_scale.to(torch.float16)
         if kv_scale.ndim < 4:
             kv_scale = kv_scale.unsqueeze(-1)
-        torch.ops._C_ascend.npu_scatter_nd_update_v2(
-            indexer_scale_cache, slot_mapping, kv_scale)
+        torch.ops._C_ascend.npu_scatter_nd_update_v2(indexer_scale_cache, slot_mapping, kv_scale)
 
     @staticmethod
     def warmup_indexer_quant_scatter(hidden_states, slot_mapping):
         """Warmup profiling for indexer quant+scatter.
         Non-A5: int8 quant + 2x scatter with dummy cache tensors."""
-        kv_dummy, kv_scale_dummy = torch_npu.npu_dynamic_quant(
-            hidden_states, dst_type=torch.int8)
+        kv_dummy, kv_scale_dummy = torch_npu.npu_dynamic_quant(hidden_states, dst_type=torch.int8)
         kv_scale_dummy = kv_scale_dummy.unsqueeze(-1).to(torch.float16)
         if kv_scale_dummy.ndim < 4:
             kv_scale_dummy = kv_scale_dummy.unsqueeze(-1)
         dummy_shape = (1, 1, 1, kv_dummy.shape[-1])
-        indexer_k_cache = torch.zeros(
-            dummy_shape, dtype=kv_dummy.dtype, device=hidden_states.device)
-        indexer_scale_cache = torch.zeros(
-            dummy_shape, dtype=torch.float16, device=hidden_states.device)
-        torch.ops._C_ascend.npu_scatter_nd_update_v2(
-            indexer_k_cache, slot_mapping, kv_dummy)
-        torch.ops._C_ascend.npu_scatter_nd_update_v2(
-            indexer_scale_cache, slot_mapping, kv_scale_dummy)
+        indexer_k_cache = torch.zeros(dummy_shape, dtype=kv_dummy.dtype, device=hidden_states.device)
+        indexer_scale_cache = torch.zeros(dummy_shape, dtype=torch.float16, device=hidden_states.device)
+        torch.ops._C_ascend.npu_scatter_nd_update_v2(indexer_k_cache, slot_mapping, kv_dummy)
+        torch.ops._C_ascend.npu_scatter_nd_update_v2(indexer_scale_cache, slot_mapping, kv_scale_dummy)
 
     # ===== Lightning Indexer Dtype Prep =====
 
@@ -439,8 +429,10 @@ class BaseDeviceAdaptor:
         """Apply Q RMS norm. Non-A5: triton_q_rms.
         A5: uses q_norm_without_weight callable when provided."""
         from vllm.triton_utils import HAS_TRITON
+
         if HAS_TRITON:
             from vllm_ascend.ops.triton.rms_norm import triton_q_rms
+
             return triton_q_rms(q, eps)
         return q
 
@@ -466,18 +458,14 @@ class BaseDeviceAdaptor:
         full_cache = kv_cache[idx_full] if len(kv_cache) > idx_full else None
         if compress_ratio == 4:
             # [0]=compress, [1]=swa, [2]=state, [3]=unused, [4]=ik, [5]=isc
-            return (kv_cache[0], kv_cache[1], kv_cache[2],
-                    kv_cache[4], kv_cache[5], full_cache)
+            return (kv_cache[0], kv_cache[1], kv_cache[2], kv_cache[4], kv_cache[5], full_cache)
         elif compress_ratio == 128:
-            return (kv_cache[0], kv_cache[1], kv_cache[2],
-                    None, None, full_cache)
+            return (kv_cache[0], kv_cache[1], kv_cache[2], None, None, full_cache)
         else:
-            return (None, kv_cache[1], None,
-                    None, None, full_cache)
+            return (None, kv_cache[1], None, None, None, full_cache)
 
     @staticmethod
-    def pad_dsa_decode_slot_mapping(slot_mapping, num_decode_tokens,
-                                       compress_ratio, num_decodes):
+    def pad_dsa_decode_slot_mapping(slot_mapping, num_decode_tokens, compress_ratio, num_decodes):
         """Pad slot_mapping for decode metadata. Non-A5: pass through."""
         return slot_mapping
 
@@ -485,8 +473,7 @@ class BaseDeviceAdaptor:
     def format_dsa_slot_mapping(slot_mapping, block_size):
         """Format slot_mapping for metadata storage.
         Non-A5: 2D [block_idx, offset]; A5: 1D pass-through."""
-        return torch.stack(
-            [slot_mapping // block_size, slot_mapping % block_size], axis=-1)
+        return torch.stack([slot_mapping // block_size, slot_mapping % block_size], axis=-1)
 
     @staticmethod
     def get_dsa_decode_cu_seqlens_cmp_kv(cmp_kv_tensor):
@@ -500,16 +487,11 @@ class BaseDeviceAdaptor:
         extra_kwargs.update(kwargs_to_add)
 
     @staticmethod
-    def get_dsa_decode_cu_seqlens_ori_kv(decode_ratio_to_sas_metadata, cache_key,
-                                      seq_lens, num_decodes, zero_i32,
-                                      fallback_cu_seqlens):
+    def get_dsa_decode_cu_seqlens_ori_kv(
+        decode_ratio_to_sas_metadata, cache_key, seq_lens, num_decodes, zero_i32, fallback_cu_seqlens
+    ):
         """Non-A5: return fallback directly (self.cu_seqlens_ori_kv)."""
         return fallback_cu_seqlens
-
-    @staticmethod
-    def compute_dsa_draft_cu_seqlens_ori_kv(seq_lens, num_decodes, zero_i32, device):
-        """Non-A5: return empty tensor for draft decode."""
-        return torch.tensor([], device=device, dtype=torch.int32)
 
     @staticmethod
     def get_dsa_kernel_block_sizes():
@@ -898,19 +880,16 @@ class A5DeviceAdaptor(BaseDeviceAdaptor):
     @staticmethod
     def indexer_quantize_query(q):
         """Quantize indexer query. A5: fp8 quant, no extra scale conversion."""
-        q_quant, q_scale = torch_npu.npu_dynamic_quant(
-            q, dst_type=torch.float8_e4m3fn)
+        q_quant, q_scale = torch_npu.npu_dynamic_quant(q, dst_type=torch.float8_e4m3fn)
         return q_quant, q_scale
 
     @staticmethod
-    def indexer_quant_scatter(q, kv, indexer_k_cache, indexer_scale_cache,
-                              indexer_full_cache, slot_mapping):
+    def indexer_quant_scatter(q, kv, indexer_k_cache, indexer_scale_cache, indexer_full_cache, slot_mapping):
         """Quantize q (fp8) and scatter kv via fused indexer_compress_epilog_v2.
         On A5, the fused op handles kv quantization, k_cache scatter, and
         scale_cache scatter internally. q is quantized separately for use
         by lightning_indexer."""
-        q, q_scale = torch_npu.npu_dynamic_quant(
-            q, dst_type=torch.float8_e4m3fn)
+        q, q_scale = torch_npu.npu_dynamic_quant(q, dst_type=torch.float8_e4m3fn)
 
         kv_out = kv
         kv_scale_out = None
@@ -950,8 +929,7 @@ class A5DeviceAdaptor(BaseDeviceAdaptor):
         """Warmup profiling for indexer quant+scatter.
         A5: fused indexer_compress_epilog_v2 with dummy cache tensor."""
         dummy_cache_shape = (1, 1, 1, hidden_states.shape[-1])
-        indexer_full_cache_dummy = torch.zeros(
-            dummy_cache_shape, dtype=torch.uint8, device=hidden_states.device)
+        indexer_full_cache_dummy = torch.zeros(dummy_cache_shape, dtype=torch.uint8, device=hidden_states.device)
         torch.ops._C_ascend.indexer_compress_epilog_v2(
             indexer_compress_cache=indexer_full_cache_dummy,
             x=hidden_states,
@@ -984,8 +962,10 @@ class A5DeviceAdaptor(BaseDeviceAdaptor):
         if q_norm_without_weight is not None:
             return q_norm_without_weight(q)
         from vllm.triton_utils import HAS_TRITON
+
         if HAS_TRITON:
             from vllm_ascend.ops.triton.rms_norm import triton_q_rms
+
             return triton_q_rms(q, eps)
         return q
 
@@ -1005,20 +985,15 @@ class A5DeviceAdaptor(BaseDeviceAdaptor):
         idx_full = 6
         full_cache = kv_cache[idx_full]
         if compress_ratio == 4:
-            return (kv_cache[0], kv_cache[1], kv_cache[2],
-                    kv_cache[4], kv_cache[5], full_cache)
+            return (kv_cache[0], kv_cache[1], kv_cache[2], kv_cache[4], kv_cache[5], full_cache)
         elif compress_ratio == 128:
-            return (kv_cache[0], kv_cache[1], kv_cache[2],
-                    None, None, full_cache)
+            return (kv_cache[0], kv_cache[1], kv_cache[2], None, None, full_cache)
         else:
-            return (None, kv_cache[1], None,
-                    None, None, full_cache)
+            return (None, kv_cache[1], None, None, None, full_cache)
 
     @staticmethod
-    def pad_dsa_decode_slot_mapping(slot_mapping, num_decode_tokens,
-                                       compress_ratio, num_decodes):
+    def pad_dsa_decode_slot_mapping(slot_mapping, num_decode_tokens, compress_ratio, num_decodes):
         """A5: pad slot_mapping to target shape for ACL graph compatibility."""
-        import torch.nn.functional as F  # local import for graph compatibility
         tmp = compress_ratio if compress_ratio != 0 else 1
         target_shape = min(num_decode_tokens, num_decode_tokens // tmp + num_decodes)
         pad_size = target_shape - slot_mapping.shape[0]
@@ -1047,28 +1022,21 @@ class A5DeviceAdaptor(BaseDeviceAdaptor):
         pass
 
     @staticmethod
-    def get_dsa_decode_cu_seqlens_ori_kv(decode_ratio_to_sas_metadata, cache_key,
-                                      seq_lens, num_decodes, zero_i32,
-                                      fallback_cu_seqlens):
+    def get_dsa_decode_cu_seqlens_ori_kv(
+        decode_ratio_to_sas_metadata, cache_key, seq_lens, num_decodes, zero_i32, fallback_cu_seqlens
+    ):
         """A5: compute from cumsum of seq_lens, with caching."""
-        if decode_ratio_to_sas_metadata is not None and \
-                cache_key in decode_ratio_to_sas_metadata:
+        if decode_ratio_to_sas_metadata is not None and cache_key in decode_ratio_to_sas_metadata:
             return decode_ratio_to_sas_metadata[cache_key]
-        cu_seqlens = torch.cat([
-            zero_i32,
-            torch.cumsum(seq_lens[:num_decodes], dim=0).to(torch.int32),
-        ])
+        cu_seqlens = torch.cat(
+            [
+                zero_i32,
+                torch.cumsum(seq_lens[:num_decodes], dim=0).to(torch.int32),
+            ]
+        )
         if decode_ratio_to_sas_metadata is not None:
             decode_ratio_to_sas_metadata[cache_key] = cu_seqlens
         return cu_seqlens
-
-    @staticmethod
-    def compute_dsa_draft_cu_seqlens_ori_kv(seq_lens, num_decodes, zero_i32, device):
-        """A5: compute from cumsum for draft decode."""
-        return torch.cat([
-            zero_i32,
-            torch.cumsum(seq_lens[:num_decodes], dim=0).to(torch.int32),
-        ])
 
     @staticmethod
     def get_dsa_kernel_block_sizes():

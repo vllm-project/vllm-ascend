@@ -25,7 +25,7 @@ import os
 from contextlib import nullcontext
 from enum import Enum
 from functools import lru_cache
-from typing import TYPE_CHECKING, Any, List
+from typing import TYPE_CHECKING, Any
 
 import numpy as np
 import regex as re

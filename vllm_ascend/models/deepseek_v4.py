@@ -624,11 +624,7 @@ class DeepseekV4Attention(nn.Module):
             return_bias=False,
         )
         self.q_norm = RMSNorm(self.q_lora_rank, eps=config.rms_norm_eps)
-        self.q_norm_without_weight = RMSNorm(
-            self.head_dim,
-            eps=config.rms_norm_eps,
-            has_weight=False
-        )
+        self.q_norm_without_weight = RMSNorm(self.head_dim, eps=config.rms_norm_eps, has_weight=False)
         wq_b_cls = ReplicatedLinear if self.enable_dsa_cp else ColumnParallelLinear
         self.wq_b = wq_b_cls(
             self.q_lora_rank,

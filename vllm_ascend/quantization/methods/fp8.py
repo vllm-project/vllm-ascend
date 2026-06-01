@@ -15,19 +15,16 @@
 # limitations under the License.
 #
 
-from collections.abc import Callable
 from typing import Any
-import math
 
 import torch
 import torch_npu
-
 from vllm.config import get_current_vllm_config
 
 from .base import QuantType
-from .w8a8_mxfp8 import AscendW8A8MXFP8DynamicLinearMethod
-from .w4a8_mxfp4 import AscendW4A8MXFPDynamicFusedMoEMethod
 from .registry import register_scheme
+from .w4a8_mxfp4 import AscendW4A8MXFPDynamicFusedMoEMethod
+from .w8a8_mxfp8 import AscendW8A8MXFP8DynamicLinearMethod
 
 
 @register_scheme("FP8", "ds_linear")
@@ -43,7 +40,7 @@ class AscendW8A8MXFP8DSDynamicLinearMethod(AscendW8A8MXFP8DynamicLinearMethod):
 
     def __init__(self, quant_config):
         super().__init__()
-        self.block_size = quant_config.get('weight_block_size', [128, 128])[0]
+        self.block_size = quant_config.get("weight_block_size", [128, 128])[0]
         vllm_config = get_current_vllm_config()
         tp_size = vllm_config.parallel_config.tensor_parallel_size
         hf_config = vllm_config.model_config.hf_config
@@ -55,7 +52,9 @@ class AscendW8A8MXFP8DSDynamicLinearMethod(AscendW8A8MXFP8DynamicLinearMethod):
         self, input_size: int, output_size: int, params_dtype: torch.dtype, layer_type: str | None = None
     ) -> dict[str, Any]:
         params_dict = {}
-        params_dict["weight_scale"] = torch.empty(output_size // self.block_size, input_size // self.block_size, dtype=torch.float32)
+        params_dict["weight_scale"] = torch.empty(
+            output_size // self.block_size, input_size // self.block_size, dtype=torch.float32
+        )
         params_dict["_packed_dim"] = 0
         params_dict["_packed_factor"] = self.block_size
         return params_dict
@@ -68,10 +67,17 @@ class AscendW8A8MXFP8DSDynamicLinearMethod(AscendW8A8MXFP8DynamicLinearMethod):
         layer.weight_scale.data = layer.weight_scale.data.reshape(n_dim, k_dim // 2, 2)
         layer.weight.data = layer.weight.data.transpose(0, 1)
         layer.weight_scale.data = layer.weight_scale.data.transpose(0, 1)
-        
-        if layer.prefix.endswith('wo_a'):
-            layer.weight.data=layer.weight.data.T.reshape(self.n_local_groups, self.o_lora_rank, -1).transpose(1, 2).contiguous()
-            layer.weight_scale.data = layer.weight_scale.data.transpose(0, 1).reshape(self.n_local_groups, self.o_lora_rank, -1, 2).transpose(1, 2).contiguous()
+
+        if layer.prefix.endswith("wo_a"):
+            layer.weight.data = (
+                layer.weight.data.T.reshape(self.n_local_groups, self.o_lora_rank, -1).transpose(1, 2).contiguous()
+            )
+            layer.weight_scale.data = (
+                layer.weight_scale.data.transpose(0, 1)
+                .reshape(self.n_local_groups, self.o_lora_rank, -1, 2)
+                .transpose(1, 2)
+                .contiguous()
+            )
 
 
 @register_scheme("FP8", "w4a8_moe")
@@ -81,7 +87,7 @@ class AscendW4A8MXFPDSDynamicFusedMoEMethod(AscendW4A8MXFPDynamicFusedMoEMethod)
     model_dtype = None
     quant_type: QuantType = QuantType.W4A8MXFP
 
-    def __init__(self, quant_config, tid2eid = None):
+    def __init__(self, quant_config, tid2eid=None):
         super().__init__()
         self.tid2eid = tid2eid
 
@@ -93,30 +99,34 @@ class AscendW4A8MXFPDSDynamicFusedMoEMethod(AscendW4A8MXFPDynamicFusedMoEMethod)
             num_experts,
             2 * intermediate_size_per_partition,
             hidden_sizes // self.group_size,
-            dtype=torch.float8_e8m0fnu
+            dtype=torch.float8_e8m0fnu,
         )
 
         param_dict["w2_weight_scale"] = torch.empty(
-            num_experts,
-            hidden_sizes,
-            intermediate_size_per_partition // self.group_size,
-            dtype=torch.float8_e8m0fnu
+            num_experts, hidden_sizes, intermediate_size_per_partition // self.group_size, dtype=torch.float8_e8m0fnu
         )
         return param_dict
 
     def process_weights_after_loading(self, layer):
         layer.w13_weight.data = torch_npu.npu_format_cast(
-            layer.w13_weight.data.view(torch.uint8), 29, 
-            customize_dtype=torch.float8_e4m3fn, 
-            input_dtype=torch_npu.float4_e2m1fn_x2)
+            layer.w13_weight.data.view(torch.uint8),
+            29,
+            customize_dtype=torch.float8_e4m3fn,
+            input_dtype=torch_npu.float4_e2m1fn_x2,
+        )
         layer.w2_weight.data = torch_npu.npu_format_cast(
-            layer.w2_weight.data.view(torch.uint8), 29, 
-            customize_dtype=torch.float8_e4m3fn, 
-            input_dtype=torch_npu.float4_e2m1fn_x2
+            layer.w2_weight.data.view(torch.uint8),
+            29,
+            customize_dtype=torch.float8_e4m3fn,
+            input_dtype=torch_npu.float4_e2m1fn_x2,
         )
         layer.w13_weight.data = layer.w13_weight.data.transpose(1, 2)
         layer.w2_weight.data = layer.w2_weight.data.transpose(1, 2)
         g, n, k = layer.w13_weight_scale.shape
-        layer.w13_weight_scale.data = layer.w13_weight_scale.data.reshape(g, n, k // 2, 2).view(torch.uint8).transpose(-3, -2)
+        layer.w13_weight_scale.data = (
+            layer.w13_weight_scale.data.reshape(g, n, k // 2, 2).view(torch.uint8).transpose(-3, -2)
+        )
         g, n, k = layer.w2_weight_scale.shape
-        layer.w2_weight_scale.data = layer.w2_weight_scale.data.reshape(g, n, k // 2, 2).view(torch.uint8).transpose(-3, -2)
+        layer.w2_weight_scale.data = (
+            layer.w2_weight_scale.data.reshape(g, n, k // 2, 2).view(torch.uint8).transpose(-3, -2)
+        )

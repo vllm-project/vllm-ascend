@@ -751,7 +751,7 @@ class AscendW4A8DynamicFusedMoEMethod(AscendMoEScheme):
             layer.w13_weight_scale.data = self.maybe_squeeze_per_channel_weight_scale(layer.w13_weight_scale.data)
         layer.w13_weight.data = maybe_trans_nz(layer.w13_weight.data)
         layer.w2_weight.data = maybe_trans_nz(layer.w2_weight.data)
-        
+
         if self.dynamic_eplb:
             layer.w13_weight_list = [weight.clone() for weight in layer.w13_weight.data.unbind(dim=0)]
             layer.w2_weight_list = [weight.clone() for weight in layer.w2_weight.data.unbind(dim=0)]

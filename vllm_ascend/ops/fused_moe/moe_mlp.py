@@ -31,11 +31,9 @@ from vllm_ascend.quantization.quant_type import QuantType
 from vllm_ascend.utils import (
     dispose_tensor,
     enable_custom_op,
-    get_weight_prefetch_method,
     get_ascend_device_type,
-    AscendDeviceType,
+    get_weight_prefetch_method,
 )
-from vllm_ascend.quantization.quant_type import QuantType
 
 ASCEND_DEVICE_TYPE = get_ascend_device_type()
 
