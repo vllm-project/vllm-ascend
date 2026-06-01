@@ -413,6 +413,396 @@ class TestAscendRejectionSampler(TestBase):
         assert output_token_ids[0].item() == 0
         assert output_token_ids[1].item() == 0
 
+
+class TestEntropyVerify(TestBase):
+    """Test ENTROPY_VERIFY mode in rejection sampling.
+
+    Entropy verify modifies the acceptance threshold based on the entropy
+    of the original target distribution:
+    - High entropy (uncertain) → lower effective threshold → more accepting
+    - Low entropy (certain)   → higher effective threshold → stricter
+    """
+
+    @patch("torch.arange", new=mock_pin_memory(torch.arange))
+    @patch("torch.ones", new=mock_pin_memory(torch.ones))
+    @patch("torch.full", new=mock_pin_memory(torch.full))
+    @patch("torch.tensor", new=mock_pin_memory(torch.tensor))
+    def test_entropy_verify_standard_high_entropy_accepts_more(self):
+        """High entropy (uniform-like) makes acceptance easier via lower threshold."""
+        batch_size = 2
+        max_spec_len = 2
+        output_token_ids = torch.full((batch_size, max_spec_len + 1), PLACEHOLDER_TOKEN_ID)
+
+        cu_num_draft_tokens = torch.tensor([2, 1])
+        draft_token_ids = torch.tensor([1, 0, 2])
+        draft_probs = torch.tensor(
+            [
+                [0.6, 0.4, 0.0],
+                [0.2, 0.8, 0.0],
+                [0.5, 0.5, 0.0],
+            ]
+        )
+        target_probs = torch.tensor(
+            [
+                [0.8, 0.2, 0.0],
+                [0.1, 0.9, 0.0],
+                [0.9, 0.1, 0.0],
+            ]
+        )
+        bonus_token_ids = torch.tensor([[100], [200]])
+        recovered_token_ids = torch.tensor([99, 88, 77])
+        uniform_probs = torch.tensor([0.7, 0.6, 0.5])
+        is_greedy = torch.tensor([False, False])
+        vocab_size = 3
+
+        ori_target_probs = torch.tensor(
+            [
+                [0.33, 0.34, 0.33],
+                [0.32, 0.35, 0.33],
+                [0.31, 0.36, 0.33],
+            ]
+        )
+
+        rejection_random_sample_pytorch(
+            output_token_ids,
+            cu_num_draft_tokens,
+            draft_token_ids,
+            draft_probs,
+            target_probs,
+            bonus_token_ids,
+            recovered_token_ids,
+            uniform_probs,
+            is_greedy,
+            max_spec_len,
+            vocab_size,
+            IS_NGRAM=False,
+            ENTROPY_VERIFY=True,
+            POSTERIOR_THRESHOLD=0.95,
+            POSTERIOR_ALPHA=0.4,
+            EPSILON=1e-10,
+            ori_target_probs=ori_target_probs,
+        )
+
+        assert output_token_ids[0, 0].item() == 1
+        assert output_token_ids[0, 1].item() == 0
+        assert output_token_ids[0, 2].item() == 100
+
+    @patch("torch.arange", new=mock_pin_memory(torch.arange))
+    @patch("torch.ones", new=mock_pin_memory(torch.ones))
+    @patch("torch.full", new=mock_pin_memory(torch.full))
+    @patch("torch.tensor", new=mock_pin_memory(torch.tensor))
+    def test_entropy_verify_standard_low_entropy_stricter(self):
+        """Low entropy (peaked) keeps strict acceptance."""
+        batch_size = 1
+        max_spec_len = 2
+        output_token_ids = torch.full((batch_size, max_spec_len + 1), PLACEHOLDER_TOKEN_ID)
+
+        cu_num_draft_tokens = torch.tensor([2])
+        draft_token_ids = torch.tensor([1, 0])
+        draft_probs = torch.tensor(
+            [
+                [0.6, 0.4, 0.0],
+                [0.8, 0.2, 0.0],
+            ]
+        )
+        target_probs = torch.tensor(
+            [
+                [0.8, 0.2, 0.0],
+                [0.1, 0.9, 0.0],
+            ]
+        )
+        bonus_token_ids = torch.tensor([[100]])
+        recovered_token_ids = torch.tensor([99, 88])
+        uniform_probs = torch.tensor([0.7, 0.6])
+        is_greedy = torch.tensor([False])
+        vocab_size = 3
+
+        ori_target_probs = torch.tensor(
+            [
+                [0.95, 0.03, 0.02],
+                [0.94, 0.04, 0.02],
+            ]
+        )
+
+        rejection_random_sample_pytorch(
+            output_token_ids,
+            cu_num_draft_tokens,
+            draft_token_ids,
+            draft_probs,
+            target_probs,
+            bonus_token_ids,
+            recovered_token_ids,
+            uniform_probs,
+            is_greedy,
+            max_spec_len,
+            vocab_size,
+            IS_NGRAM=False,
+            ENTROPY_VERIFY=True,
+            POSTERIOR_THRESHOLD=0.95,
+            POSTERIOR_ALPHA=0.4,
+            EPSILON=1e-10,
+            ori_target_probs=ori_target_probs,
+        )
+
+        assert output_token_ids[0, 0].item() == 1
+        assert output_token_ids[0, 1].item() in (0, 88)
+
+    @patch("torch.arange", new=mock_pin_memory(torch.arange))
+    @patch("torch.ones", new=mock_pin_memory(torch.ones))
+    @patch("torch.full", new=mock_pin_memory(torch.full))
+    @patch("torch.tensor", new=mock_pin_memory(torch.tensor))
+    def test_entropy_verify_block_verify(self):
+        """Entropy verify with block verify mode."""
+        batch_size = 2
+        max_spec_len = 3
+        output_token_ids = torch.full((batch_size, max_spec_len + 1), PLACEHOLDER_TOKEN_ID)
+
+        cu_num_draft_tokens = torch.tensor([2, 1])
+        draft_token_ids = torch.tensor([1, 0, 2])
+        draft_probs = torch.tensor(
+            [
+                [0.6, 0.4, 0.0, 0.0],
+                [0.2, 0.8, 0.0, 0.0],
+                [0.5, 0.5, 0.0, 0.0],
+            ]
+        )
+        target_probs = torch.tensor(
+            [
+                [0.8, 0.2, 0.0, 0.0],
+                [0.1, 0.9, 0.0, 0.0],
+                [0.9, 0.1, 0.0, 0.0],
+            ]
+        )
+        bonus_token_ids = torch.tensor([[100], [200]])
+        recovered_token_ids = torch.tensor([99, 88, 77])
+        uniform_probs = torch.tensor([0.7, 0.6, 0.5])
+        is_greedy = torch.tensor([False, False])
+        vocab_size = 4
+
+        ori_target_probs = torch.tensor(
+            [
+                [0.25, 0.25, 0.25, 0.25],
+                [0.24, 0.26, 0.25, 0.25],
+                [0.23, 0.27, 0.25, 0.25],
+            ]
+        )
+
+        rejection_random_sample_block_verify_pytorch(
+            output_token_ids,
+            cu_num_draft_tokens,
+            draft_token_ids,
+            draft_probs,
+            target_probs,
+            bonus_token_ids,
+            recovered_token_ids,
+            uniform_probs,
+            is_greedy,
+            max_spec_len,
+            vocab_size,
+            IS_NGRAM=False,
+            ENTROPY_VERIFY=True,
+            POSTERIOR_THRESHOLD=0.95,
+            POSTERIOR_ALPHA=0.4,
+            EPSILON=1e-10,
+            ori_target_probs=ori_target_probs,
+        )
+
+        assert output_token_ids[0, 0].item() == 1
+        assert output_token_ids[0, 1].item() == 0
+        assert output_token_ids[0, 2].item() == 100
+
+    @patch("torch.arange", new=mock_pin_memory(torch.arange))
+    @patch("torch.ones", new=mock_pin_memory(torch.ones))
+    @patch("torch.full", new=mock_pin_memory(torch.full))
+    @patch("torch.tensor", new=mock_pin_memory(torch.tensor))
+    def test_entropy_verify_reduce_sampling(self):
+        """Entropy verify with reduce sampling (selected vocab)."""
+        batch_size = 1
+        max_spec_len = 2
+        output_token_ids = torch.full((batch_size, max_spec_len + 1), PLACEHOLDER_TOKEN_ID)
+
+        cu_num_draft_tokens = torch.tensor([2])
+        draft_token_ids = torch.tensor([1, 0])
+        draft_probs = torch.tensor(
+            [
+                [0.6, 0.4, 0.0, 0.0, 0.0],
+                [0.8, 0.2, 0.0, 0.0, 0.0],
+            ]
+        )
+        selected_vocab_size = 3
+        target_probs = torch.tensor(
+            [
+                [0.8, 0.2, 0.0],
+                [0.1, 0.9, 0.0],
+            ]
+        )
+        target_indices = torch.tensor(
+            [
+                [0, 1, 2],
+                [0, 1, 2],
+            ]
+        )
+        bonus_token_ids = torch.tensor([[100]])
+        recovered_token_ids = torch.tensor([99, 88])
+        uniform_probs = torch.tensor([0.7, 0.6])
+        is_greedy = torch.tensor([False])
+
+        ori_target_probs = torch.tensor(
+            [
+                [0.20, 0.30, 0.10, 0.20, 0.20],
+                [0.18, 0.32, 0.12, 0.19, 0.19],
+            ]
+        )
+
+        rejection_random_sample_pytorch(
+            output_token_ids,
+            cu_num_draft_tokens,
+            draft_token_ids,
+            draft_probs,
+            target_probs,
+            bonus_token_ids,
+            recovered_token_ids,
+            uniform_probs,
+            is_greedy,
+            max_spec_len,
+            selected_vocab_size,
+            IS_NGRAM=False,
+            target_indices=target_indices,
+            enable_reduce_sampling=True,
+            ENTROPY_VERIFY=True,
+            POSTERIOR_THRESHOLD=0.95,
+            POSTERIOR_ALPHA=0.4,
+            EPSILON=1e-10,
+            ori_target_probs=ori_target_probs,
+        )
+
+        assert output_token_ids[0, 0].item() == 1
+        assert output_token_ids[0, 1].item() in (0, 88)
+        assert output_token_ids[0, 2].item() == 100
+
+    @patch("torch.arange", new=mock_pin_memory(torch.arange))
+    @patch("torch.ones", new=mock_pin_memory(torch.ones))
+    @patch("torch.full", new=mock_pin_memory(torch.full))
+    @patch("torch.tensor", new=mock_pin_memory(torch.tensor))
+    def test_entropy_verify_no_ori_probs_fallback(self):
+        """When ori_target_probs is None, fallback to target_probs for entropy."""
+        batch_size = 1
+        max_spec_len = 2
+        output_token_ids = torch.full((batch_size, max_spec_len + 1), PLACEHOLDER_TOKEN_ID)
+
+        cu_num_draft_tokens = torch.tensor([2])
+        draft_token_ids = torch.tensor([1, 0])
+        draft_probs = torch.tensor(
+            [
+                [0.6, 0.4, 0.0],
+                [0.8, 0.2, 0.0],
+            ]
+        )
+        target_probs = torch.tensor(
+            [
+                [0.35, 0.33, 0.32],
+                [0.34, 0.34, 0.32],
+            ]
+        )
+        bonus_token_ids = torch.tensor([[100]])
+        recovered_token_ids = torch.tensor([99, 88])
+        uniform_probs = torch.tensor([0.7, 0.6])
+        is_greedy = torch.tensor([False])
+        vocab_size = 3
+
+        rejection_random_sample_pytorch(
+            output_token_ids,
+            cu_num_draft_tokens,
+            draft_token_ids,
+            draft_probs,
+            target_probs,
+            bonus_token_ids,
+            recovered_token_ids,
+            uniform_probs,
+            is_greedy,
+            max_spec_len,
+            vocab_size,
+            IS_NGRAM=False,
+            ENTROPY_VERIFY=True,
+            POSTERIOR_THRESHOLD=0.95,
+            POSTERIOR_ALPHA=0.4,
+            EPSILON=1e-10,
+            ori_target_probs=None,
+        )
+
+        assert output_token_ids[0, 0].item() == 1
+        assert output_token_ids[0, 1].item() in (0, 88)
+        assert output_token_ids[0, 2].item() == 100
+
+    @patch("torch.arange", new=mock_pin_memory(torch.arange))
+    @patch("torch.ones", new=mock_pin_memory(torch.ones))
+    @patch("torch.full", new=mock_pin_memory(torch.full))
+    @patch("torch.tensor", new=mock_pin_memory(torch.tensor))
+    def test_entropy_verify_disabled_matches_baseline(self):
+        """ENTROPY_VERIFY=False should produce same result as without the param."""
+        batch_size = 1
+        max_spec_len = 2
+        output_with = torch.full((batch_size, max_spec_len + 1), PLACEHOLDER_TOKEN_ID)
+        output_without = torch.full((batch_size, max_spec_len + 1), PLACEHOLDER_TOKEN_ID)
+
+        cu_num_draft_tokens = torch.tensor([2])
+        draft_token_ids = torch.tensor([1, 0])
+        draft_probs = torch.tensor(
+            [
+                [0.6, 0.4, 0.0],
+                [0.2, 0.8, 0.0],
+            ]
+        )
+        target_probs = torch.tensor(
+            [
+                [0.8, 0.2, 0.0],
+                [0.1, 0.9, 0.0],
+            ]
+        )
+        bonus_token_ids = torch.tensor([[100]])
+        recovered_token_ids = torch.tensor([99, 88])
+        uniform_probs = torch.tensor([0.7, 0.6])
+        is_greedy = torch.tensor([False])
+        vocab_size = 3
+        ori_target_probs = torch.tensor(
+            [
+                [0.5, 0.3, 0.2],
+                [0.4, 0.4, 0.2],
+            ]
+        )
+
+        kwargs = dict(
+            output_token_ids=output_without,
+            cu_num_draft_tokens=cu_num_draft_tokens,
+            draft_token_ids=draft_token_ids,
+            draft_probs=draft_probs,
+            target_probs=target_probs,
+            bonus_token_ids=bonus_token_ids,
+            recovered_token_ids=recovered_token_ids,
+            uniform_probs=uniform_probs,
+            is_greedy=is_greedy,
+            max_spec_len=max_spec_len,
+            vocab_size=vocab_size,
+            IS_NGRAM=False,
+        )
+
+        rejection_random_sample_pytorch(**kwargs)
+
+        kwargs["output_token_ids"] = output_with
+        kwargs["ENTROPY_VERIFY"] = True
+        kwargs["POSTERIOR_THRESHOLD"] = 0.95
+        kwargs["POSTERIOR_ALPHA"] = 0.4
+        kwargs["EPSILON"] = 1e-10
+        kwargs["ori_target_probs"] = ori_target_probs
+
+        rejection_random_sample_pytorch(**kwargs)
+
+        assert torch.equal(output_with, output_without), (
+            f"ENTROPY_VERIFY=False and True (with default params) should produce "
+            f"same results when threshold/alpha don't change behavior.\n"
+            f"With: {output_with}\nWithout: {output_without}"
+        )
+
     @patch("torch.arange", new=mock_pin_memory(torch.arange))
     @patch("torch.ones", new=mock_pin_memory(torch.ones))
     @patch("torch.full", new=mock_pin_memory(torch.full))
