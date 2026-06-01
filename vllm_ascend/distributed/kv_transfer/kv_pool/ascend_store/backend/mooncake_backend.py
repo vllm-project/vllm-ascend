@@ -9,6 +9,7 @@ import regex as re
 import torch
 
 # Third Party
+from mooncake.store import ReplicateConfig  # type: ignore
 from vllm.config import ParallelConfig
 from vllm.distributed.parallel_state import get_world_group
 from vllm.logger import logger
@@ -354,25 +355,25 @@ class MooncakeBackend(Backend):
             transfer_engine = global_te.get_transfer_engine(local_hostname, device_name=None)
             self.local_seg = local_hostname + ":" + str(transfer_engine.get_rpc_port())
             ret = store.setup(
-                self.local_seg,
-                self.config.metadata_server,
-                self.config.global_segment_size,
-                self.config.local_buffer_size,
-                self.config.protocol,
-                self.config.device_name,
-                self.config.master_server_address,
-                transfer_engine.get_engine(),
+                local_hostname=self.local_seg,
+                metadata_server=self.config.metadata_server,
+                global_segment_size=self.config.global_segment_size,
+                local_buffer_size=self.config.local_buffer_size,
+                protocol=self.config.protocol,
+                rdma_devices=self.config.device_name,
+                master_server_addr=self.config.master_server_address,
+                engine=transfer_engine.get_engine(),
             )
         else:
             self.local_seg = local_hostname
             ret = store.setup(
-                self.local_seg,
-                self.config.metadata_server,
-                self.config.global_segment_size,
-                0,
-                self.config.protocol,
-                self.config.device_name,
-                self.config.master_server_address,
+                local_hostname=self.local_seg,
+                metadata_server=self.config.metadata_server,
+                global_segment_size=self.config.global_segment_size,
+                local_buffer_size=0,
+                protocol=self.config.protocol,
+                rdma_devices=self.config.device_name,
+                master_server_addr=self.config.master_server_address,
             )
 
         if ret != 0:
@@ -407,7 +408,11 @@ class MooncakeBackend(Backend):
             # Trigger lazy init (DSV4 + fabric-mem path); no-op otherwise.
             self._ensure_initialized()
             assert self.store is not None
-            res = self._batch_put(keys, addrs, sizes)
+            config = ReplicateConfig()
+            if self.config.preferred_segment:
+                config.preferred_segment = self.local_seg
+            config.prefer_alloc_in_same_node = self.config.prefer_alloc_in_same_node
+            res = self.store.batch_put_from_multi_buffers(keys, addrs, sizes, config)
             for value in res:
                 if value < 0:
                     logger.error("Failed to put key %s,res:%s", keys, res)
@@ -514,6 +519,15 @@ class MooncakeBackend(Backend):
                 current_batch_keys[:3],
                 e,
             )
+            for i, value in enumerate(res_list):
+                if value < 0:
+                    logger.error("Failed to get key %s, res:%s", keys, res_list)
+                elif value > 0:
+                    res_list[i] = 0
+            return res_list
+        except Exception as e:
+            logger.error("Failed to get key %s, error:%s", keys, e)
+            return None
 
 
 @dataclass
@@ -552,11 +566,15 @@ class MooncakeStoreConfig:
             raise ValueError("embedded mode requires global_segment_size > 0")
         if self.mode == "standalone-store" and self.global_segment_size != 0:
             raise ValueError("standalone-store mode requires global_segment_size == 0")
+    preferred_segment: bool
+    prefer_alloc_in_same_node: bool
 
     @staticmethod
     def from_file(file_path: str) -> "MooncakeStoreConfig":
         with open(file_path) as file:
             config = json.load(file)
+        master_server_address = os.getenv("MOONCAKE_MASTER", None)
+        global_segment_size_env = os.getenv("MOONCAKE_GLOBAL_SEGMENT_SIZE", None)
         return MooncakeStoreConfig(
             metadata_server=config.get("metadata_server"),
             master_server_address=config.get("master_server_address"),
@@ -564,10 +582,19 @@ class MooncakeStoreConfig:
             device_name=config.get("device_name", ""),
             mode=config.get("mode", "embedded"),
             global_segment_size=_parse_global_segment_size(
-                config.get("global_segment_size", DEFAULT_GLOBAL_SEGMENT_SIZE)
+                global_segment_size_env
+                if global_segment_size_env is not None
+                else config.get("global_segment_size", DEFAULT_GLOBAL_SEGMENT_SIZE)
             ),
             local_buffer_size=_parse_global_segment_size(config.get("local_buffer_size", DEFAULT_LOCAL_BUFFER_SIZE)),
             enable_offload=bool(config.get("enable_offload", False)),
+            protocol=config.get("protocol", "ascend"),
+            device_name=config.get("device_name", ""),
+            master_server_address=master_server_address
+            if master_server_address is not None
+            else config.get("master_server_address"),
+            preferred_segment=config.get("preferred_segment", False),
+            prefer_alloc_in_same_node=config.get("prefer_alloc_in_same_node", True),
         )
 
     @staticmethod
