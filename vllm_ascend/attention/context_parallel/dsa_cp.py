@@ -16,6 +16,7 @@ from vllm_ascend.ascend_config import get_ascend_config
 from vllm_ascend.attention.abstract import DSAAttentionImpl
 from vllm_ascend.attention.attention_v1 import AscendAttentionState
 from vllm_ascend.attention.utils import AscendCommonAttentionMetadata, split_decodes_and_prefills
+from vllm_ascend.ops.cv_linear import CVLinearWrapper
 from vllm_ascend.ops.linear import AscendUnquantizedLinearMethod
 from vllm_ascend.ops.rope_dsv4 import get_cos_and_sin_dsa
 from vllm_ascend.quantization.methods.w8a8_dynamic import AscendW8A8DynamicLinearMethod
@@ -53,6 +54,16 @@ def hadamard_transform_ref(
 def rotate_activation(x: torch.Tensor, hadamard: torch.Tensor) -> torch.Tensor:
     hidden_size = x.size(-1)
     return hadamard_transform_ref(x, hadamard=hadamard, scale=hidden_size**-0.5)
+
+
+_DSV4_DSA_OVERLAP_STREAM = None
+
+
+def dsv4_dsa_overlap_stream() -> torch.npu.Stream:
+    global _DSV4_DSA_OVERLAP_STREAM
+    if _DSV4_DSA_OVERLAP_STREAM is None:
+        _DSV4_DSA_OVERLAP_STREAM = torch.npu.Stream()
+    return _DSV4_DSA_OVERLAP_STREAM
 
 
 def _has_prefill(attn_state: AscendAttentionState) -> bool:
@@ -875,6 +886,12 @@ class AscendDSACPImpl(DSAAttentionImpl):
 
         ascend_config = get_ascend_config()
         self.multistream_dsa_preprocess = ascend_config.multistream_dsa_preprocess
+        self.multistream_dsv4_dsa_overlap = ascend_config.multistream_dsv4_dsa_overlap
+
+        # CV wrapper: split wq_a/wkv/wq_b into quantize(Vector) + matmul(Cube)
+        self.cv_wq_a = CVLinearWrapper(self.wq_a)
+        self.cv_wkv = CVLinearWrapper(self.wkv)
+        self.cv_wq_b = CVLinearWrapper(self.wq_b)
 
         self.vllm_config = get_current_vllm_config()
 
@@ -917,6 +934,45 @@ class AscendDSACPImpl(DSAAttentionImpl):
                 f"got {self.attn_sink.numel()} heads, expected {self.num_heads}."
             )
 
+    def dsa_warmup_with_multistream(self, hidden_states: torch.Tensor) -> None:
+        """Warmup aux-stream ops for ACL graph compatibility.
+
+        When multistream_dsv4_dsa_overlap is enabled, the aux stream runs ops
+        during _mla_prolog_cp_overlap that have never been exercised during
+        profiling. This warmup ensures all aux-stream op patterns are captured.
+        """
+        if not (hasattr(self, "multistream_dsv4_dsa_overlap") and self.multistream_dsv4_dsa_overlap):
+            return
+
+        hidden_states_dummy = torch.zeros(
+            1, hidden_states.shape[-1], dtype=hidden_states.dtype, device=hidden_states.device
+        )
+        aux_stream = dsv4_dsa_overlap_stream()
+        e_warmup = torch.npu.current_stream().record_event()
+        with npu_stream_switch(aux_stream, enabled=True):
+            torch.npu.current_stream().wait_event(e_warmup)
+            # wkv (local): quantize path when W8A8, else CV quantize+matmul
+            if hasattr(self.wkv, "weight_scale") and self.wkv.weight.dtype == torch.int8:
+                kv_q_dummy, kv_s_dummy = torch_npu.npu_dynamic_quant(hidden_states_dummy)
+                _ = torch_npu.npu_quant_matmul(
+                    kv_q_dummy,
+                    self.wkv.weight,
+                    self.wkv.weight_scale,
+                    pertoken_scale=kv_s_dummy,
+                    output_dtype=hidden_states.dtype,
+                )
+            else:
+                _ = self.cv_wkv.quantize(hidden_states_dummy)
+                _ = self.cv_wkv.matmul(hidden_states_dummy, None)
+            # kv_norm (warm up on small tensor)
+            kv_dummy = torch.zeros(
+                1, self.nope_head_dim + self.rope_head_dim,
+                dtype=hidden_states.dtype, device=hidden_states.device,
+            )
+            _ = self.kv_norm(kv_dummy)
+
+        torch.npu.current_stream().wait_stream(aux_stream)
+
     def forward(  # type: ignore[override]
         self,
         layer_name,
@@ -957,6 +1013,108 @@ class AscendDSACPImpl(DSAAttentionImpl):
 
         return output
 
+    def _mla_prolog_cp_overlap(
+        self,
+        hidden_states_local: torch.Tensor,
+        cos: torch.Tensor,
+        sin: torch.Tensor,
+        local_cos: torch.Tensor,
+        local_sin: torch.Tensor,
+        swa_kv_cache: torch.Tensor,
+        slot_mapping: torch.Tensor,
+        need_gather_q_kv: bool,
+    ):
+        """Unified MLA prolog with compute-communication overlap (prefill + decode).
+
+        q/qr stay on local SP partition. kv is computed from local hs, then
+        allgathered to the full sequence before norm+rope+scatter. Full hs is
+        allgathered at the end for downstream compressor/indexer.
+
+        Returns: (q, qr_local, qr_pertoken_scale_local, hidden_states_full)
+        """
+        main_stream = torch.npu.current_stream()
+        aux_stream = dsv4_dsa_overlap_stream()
+
+        is_w8a8 = (not isinstance(self.wq_b.quant_method, AscendUnquantizedLinearMethod)) and isinstance(
+            self.wq_b.quant_method.quant_method, AscendW8A8DynamicLinearMethod
+        )
+
+        # Phase 1: q_a_down[C/main] || wkv(local)[C/aux]
+        q_quant, q_pertoken_scale = self.cv_wq_a.quantize(hidden_states_local)
+        e_phase1 = main_stream.record_event()
+
+        with npu_stream_switch(aux_stream, enabled=True):
+            torch.npu.current_stream().wait_event(e_phase1)
+            kv_local = self.wkv(hidden_states_local)
+
+        wq_a_result = self.cv_wq_a.matmul(q_quant, q_pertoken_scale)
+        main_stream.wait_stream(aux_stream)
+
+        # Phase 2: q_norm(V/main) + q_b_quant || allgather(kv)[comm/aux] + kv_norm[C/aux]
+        e_phase2 = main_stream.record_event()
+
+        with npu_stream_switch(aux_stream, enabled=True):
+            torch.npu.current_stream().wait_event(e_phase2)
+            kv = torch.ops.vllm.maybe_all_gather_and_maybe_unpad(kv_local, need_gather_q_kv)
+            kv = self.kv_norm(kv)
+
+        if is_w8a8:
+            qr_local, qr_pertoken_scale_local = torch.ops._C_ascend.npu_rms_norm_dynamic_quant(
+                wq_a_result, self.q_norm.weight, epsilon=self.eps
+            )
+            q_b_quant, q_b_scale = qr_local, qr_pertoken_scale_local
+        else:
+            qr_local = self.q_norm(wq_a_result)
+            q_b_quant, q_b_scale = self.cv_wq_b.quantize(qr_local)
+            qr_pertoken_scale_local = None
+
+        main_stream.wait_stream(aux_stream)
+
+        # Phase 3: q_b_matmul+q_rms+q_rope(local) || kv_rope(global)+scatter+allgather(hs)
+        e_phase3 = main_stream.record_event()
+
+        with npu_stream_switch(aux_stream, enabled=True):
+            torch.npu.current_stream().wait_event(e_phase3)
+            kv = kv.view(-1, 1, self.nope_head_dim + self.rope_head_dim)
+            torch.ops._C_ascend.inplace_partial_rotary_mul(
+                kv.unsqueeze(1),
+                cos,
+                sin,
+                rotary_mode="interleave",
+                partial_slice=[self.nope_head_dim, self.head_dim],
+            )
+            torch.ops._C_ascend.npu_scatter_nd_update_v2(swa_kv_cache, slot_mapping, kv)
+            hidden_states = torch.ops.vllm.maybe_all_gather_and_maybe_unpad(
+                hidden_states_local, need_gather_q_kv
+            )
+
+        if is_w8a8:
+            q = torch_npu.npu_quant_matmul(
+                q_b_quant,
+                self.wq_b.weight,
+                self.wq_b.weight_scale,
+                pertoken_scale=q_b_scale,
+                bias=self.wq_b.bias,
+                output_dtype=hidden_states_local.dtype,
+            )
+        else:
+            q = self.cv_wq_b.matmul(q_b_quant, q_b_scale)
+        q = q.unflatten(-1, (self.num_heads, self.head_dim))
+
+        # Tail: q_rms + q_rope(local) — wait aux for downstream safety
+        main_stream.wait_stream(aux_stream)
+
+        q = triton_q_rms(q, self.eps)
+        torch.ops._C_ascend.inplace_partial_rotary_mul(
+            q.unsqueeze(1),
+            local_cos,
+            local_sin,
+            rotary_mode="interleave",
+            partial_slice=[self.nope_head_dim, self.head_dim],
+        )
+
+        return q, qr_local, qr_pertoken_scale_local, hidden_states
+
     def _forward(
         self,
         layer_name,
@@ -977,18 +1135,6 @@ class AscendDSACPImpl(DSAAttentionImpl):
             (swa_metadata,) = attn_metadata
         common_attn_metadata = attn_metadata[0]
 
-        overlap_hidden_states_allgather = self.multistream_dsa_preprocess and need_gather_q_kv
-        wait_hidden_states_local_event = (
-            torch.npu.current_stream().record_event() if overlap_hidden_states_allgather else None
-        )
-        with npu_stream_switch(attention_calculation_stream(), enabled=overlap_hidden_states_allgather):
-            if wait_hidden_states_local_event:
-                torch.npu.current_stream().wait_event(wait_hidden_states_local_event)
-            hidden_states = torch.ops.vllm.maybe_all_gather_and_maybe_unpad(hidden_states_local, need_gather_q_kv)
-            wait_hidden_states_allgather_event = (
-                torch.npu.current_stream().record_event() if overlap_hidden_states_allgather else None
-            )
-
         assert common_attn_metadata.req_metadata is not None
         assert swa_metadata.req_metadata is not None
         req_metadata = common_attn_metadata.req_metadata
@@ -1002,52 +1148,81 @@ class AscendDSACPImpl(DSAAttentionImpl):
         local_seq_lengths_key = cp_metadata.local_seq_lens
         has_prefill = _has_prefill(common_attn_metadata.attn_state)
 
-        if (not isinstance(self.wq_b.quant_method, AscendUnquantizedLinearMethod)) and isinstance(
-            self.wq_b.quant_method.quant_method, AscendW8A8DynamicLinearMethod
-        ):
-            q_a = self.wq_a(hidden_states_local)
-            qr_local, qr_pertoken_scale_local = torch.ops._C_ascend.npu_rms_norm_dynamic_quant(
-                q_a, self.q_norm.weight, epsilon=self.eps
-            )
-            q = torch_npu.npu_quant_matmul(
-                qr_local,
-                self.wq_b.weight,
-                self.wq_b.weight_scale,
-                pertoken_scale=qr_pertoken_scale_local,
-                bias=self.wq_b.bias,
-                output_dtype=hidden_states_local.dtype,
+        if self.multistream_dsv4_dsa_overlap:
+            # Unified prefill+decode overlap: wkv(local) → allgather(kv) on aux
+            # while q stays on local SP partition. Full hs allgathered for
+            # compressor/indexer. qr never allgathered — indexer uses local qr.
+            q, qr_local, qr_pertoken_scale_local, hidden_states = self._mla_prolog_cp_overlap(
+                hidden_states_local,
+                cos,
+                sin,
+                local_cos,
+                local_sin,
+                swa_kv_cache,
+                swa_metadata.req_metadata.slot_mapping,
+                need_gather_q_kv,
             )
         else:
-            qr_local = self.q_norm(self.wq_a(hidden_states_local))
-            q = self.wq_b(qr_local)
-            qr_pertoken_scale_local = None
+            # --- original MLA prolog path ---
+            overlap_hidden_states_allgather = self.multistream_dsa_preprocess and need_gather_q_kv
+            wait_hidden_states_local_event = (
+                torch.npu.current_stream().record_event() if overlap_hidden_states_allgather else None
+            )
+            with npu_stream_switch(attention_calculation_stream(), enabled=overlap_hidden_states_allgather):
+                if wait_hidden_states_local_event:
+                    torch.npu.current_stream().wait_event(wait_hidden_states_local_event)
+                hidden_states = torch.ops.vllm.maybe_all_gather_and_maybe_unpad(
+                    hidden_states_local, need_gather_q_kv)
+                wait_hidden_states_allgather_event = (
+                    torch.npu.current_stream().record_event() if overlap_hidden_states_allgather else None
+                )
 
-        q = q.unflatten(-1, (self.num_heads, self.head_dim))
+            if (not isinstance(self.wq_b.quant_method, AscendUnquantizedLinearMethod)) and isinstance(
+                self.wq_b.quant_method.quant_method, AscendW8A8DynamicLinearMethod
+            ):
+                q_a = self.wq_a(hidden_states_local)
+                qr_local, qr_pertoken_scale_local = torch.ops._C_ascend.npu_rms_norm_dynamic_quant(
+                    q_a, self.q_norm.weight, epsilon=self.eps
+                )
+                q = torch_npu.npu_quant_matmul(
+                    qr_local,
+                    self.wq_b.weight,
+                    self.wq_b.weight_scale,
+                    pertoken_scale=qr_pertoken_scale_local,
+                    bias=self.wq_b.bias,
+                    output_dtype=hidden_states_local.dtype,
+                )
+            else:
+                qr_local = self.q_norm(self.wq_a(hidden_states_local))
+                q = self.wq_b(qr_local)
+                qr_pertoken_scale_local = None
 
-        q = triton_q_rms(q, self.eps)
-        torch.ops._C_ascend.inplace_partial_rotary_mul(
-            q.unsqueeze(1),
-            local_cos,
-            local_sin,
-            rotary_mode="interleave",
-            partial_slice=[self.nope_head_dim, self.head_dim],
-        )
+            q = q.unflatten(-1, (self.num_heads, self.head_dim))
 
-        if wait_hidden_states_allgather_event:
-            torch.npu.current_stream().wait_event(wait_hidden_states_allgather_event)
+            q = triton_q_rms(q, self.eps)
+            torch.ops._C_ascend.inplace_partial_rotary_mul(
+                q.unsqueeze(1),
+                local_cos,
+                local_sin,
+                rotary_mode="interleave",
+                partial_slice=[self.nope_head_dim, self.head_dim],
+            )
 
-        kv = self.wkv(hidden_states)
-        kv = self.kv_norm(kv)
-        assert self.rope_head_dim is not None
-        kv = kv.view(-1, 1, self.nope_head_dim + self.rope_head_dim)
-        torch.ops._C_ascend.inplace_partial_rotary_mul(
-            kv.unsqueeze(1),
-            cos,
-            sin,
-            rotary_mode="interleave",
-            partial_slice=[self.nope_head_dim, self.head_dim],
-        )
-        torch.ops._C_ascend.npu_scatter_nd_update_v2(swa_kv_cache, swa_metadata.req_metadata.slot_mapping, kv)
+            if wait_hidden_states_allgather_event:
+                torch.npu.current_stream().wait_event(wait_hidden_states_allgather_event)
+
+            kv = self.wkv(hidden_states)
+            kv = self.kv_norm(kv)
+            assert self.rope_head_dim is not None
+            kv = kv.view(-1, 1, self.nope_head_dim + self.rope_head_dim)
+            torch.ops._C_ascend.inplace_partial_rotary_mul(
+                kv.unsqueeze(1),
+                cos,
+                sin,
+                rotary_mode="interleave",
+                partial_slice=[self.nope_head_dim, self.head_dim],
+            )
+            torch.ops._C_ascend.npu_scatter_nd_update_v2(swa_kv_cache, swa_metadata.req_metadata.slot_mapping, kv)
 
         compress_topk_idxs = None
         if self.compress_ratio > 1:
