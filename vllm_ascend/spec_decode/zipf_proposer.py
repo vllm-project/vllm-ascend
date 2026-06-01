@@ -7,6 +7,7 @@
 
 from __future__ import annotations
 
+import hashlib
 from typing import TYPE_CHECKING, Any
 
 import torch
@@ -18,6 +19,11 @@ if TYPE_CHECKING:
     from vllm.config import VllmConfig
 
     from vllm_ascend.worker.model_runner_v1 import NPUModelRunner
+
+
+def _stable_req_hash(req_id: str) -> int:
+    digest = hashlib.blake2b(str(req_id).encode("utf-8"), digest_size=8).digest()
+    return int.from_bytes(digest, byteorder="little", signed=False)
 
 
 class AscendZipfDecodingProposer:
@@ -100,7 +106,7 @@ class AscendZipfDecodingProposer:
             if num_tokens >= input_batch.max_model_len:
                 continue
 
-            req_hashes.append(hash(req_id) & 0xFFFFFFFFFFFFFFFF)
+            req_hashes.append(_stable_req_hash(req_id))
             token_ids_rows.append(input_batch.token_ids_cpu[req_index])
             num_tokens_list.append(num_tokens)
             num_prompt_list.append(int(input_batch.num_prompt_tokens[req_index]))

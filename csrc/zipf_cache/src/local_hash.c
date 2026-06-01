@@ -444,15 +444,16 @@ int local_hash_update_generalized(LocalHash* local, uint64_t gen_hash, uint32_t 
     return -1;
 }
 
+static int compare_local_hash_last_access(const void* a, const void* b) {
+    const LocalHash* access_a = *(const LocalHash* const*)a;
+    const LocalHash* access_b = *(const LocalHash* const*)b;
+    return (access_a->last_access < access_b->last_access) -
+           (access_a->last_access > access_b->last_access);
+}
+
 void local_hash_manager_cleanup(LocalHashManager* manager, size_t keep_count) {
     if (!manager || manager->count <= keep_count) return;
-    for (size_t i = 0; i < manager->count - 1; i++)
-        for (size_t j = 0; j < manager->count - i - 1; j++)
-            if (manager->hashes[j]->last_access < manager->hashes[j + 1]->last_access) {
-                LocalHash* temp = manager->hashes[j];
-                manager->hashes[j] = manager->hashes[j + 1];
-                manager->hashes[j + 1] = temp;
-            }
+    qsort(manager->hashes, manager->count, sizeof(LocalHash*), compare_local_hash_last_access);
     for (size_t i = keep_count; i < manager->count; i++) {
         local_hash_free(manager->hashes[i]);
         manager->hashes[i] = NULL;

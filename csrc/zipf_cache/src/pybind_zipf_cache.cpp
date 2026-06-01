@@ -426,6 +426,12 @@ public:
         size_t n = req_hashes.size();
         std::vector<std::vector<uint32_t>> results(n);
         if (n == 0) return results;
+        if (token_ids_rows.size() != n || num_tokens_list.size() != n ||
+            num_prompt_list.size() != n || sampled_token_ids.size() != n ||
+            valid_mask.size() != n) {
+            throw std::invalid_argument(
+                "All input lists must have the same length as req_hashes");
+        }
         if (max_spec_tokens < num_spec_tokens) {
             throw std::invalid_argument(
                 "max_spec_tokens must be >= num_spec_tokens");

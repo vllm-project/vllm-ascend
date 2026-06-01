@@ -153,7 +153,7 @@ void async_worker_free(AsyncWorker* worker) {
     pthread_join(worker->thread, NULL);
 
     // 清理未处理的任务
-    while (worker->queue.head < worker->queue.tail) {
+    while (worker->queue.tail - worker->queue.head > 0) {
         size_t head = worker->queue.head;
         AsyncTask* task = &worker->queue.tasks[head % ASYNC_QUEUE_CAPACITY];
         free(task->tokens);
