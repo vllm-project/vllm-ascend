@@ -186,8 +186,8 @@ class MultiLayerEagleProposer(AscendSpecDecodeBaseProposer):
                 common_attn_metadata.slot_mapping = self.slot_mapping_group[draft_step]
                 attn_metadata_eagle = builder.build_for_graph_capture(
                     common_attn_metadata,
-                    AscendAttentionState.SpecDecoding 
-                    if self.method in ("mtp", "mtp3") 
+                    AscendAttentionState.SpecDecoding
+                    if self.method in ("mtp", "mtp3")
                     else AscendAttentionState.ChunkedPrefill,
                 )
                 per_layer_attn_metadata = {}
