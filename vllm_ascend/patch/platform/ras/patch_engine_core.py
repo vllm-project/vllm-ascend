@@ -6,6 +6,7 @@ from typing import cast
 
 import msgspec.msgpack
 import zmq
+from vllm import pooling_params
 from vllm.config import ParallelConfig, VllmConfig
 from vllm.logger import logger
 from vllm.transformers_utils.config import maybe_register_config_serialize_by_value
@@ -205,6 +206,7 @@ class RasDPEngineCoreProc(DPEngineCoreProc):
                         prompt_token_ids=request._all_token_ids.copy(),
                         mm_features=request.mm_features,
                         sampling_params=new_samping_param,
+                        pooling_params=request.pooling_params,
                         arrival_time=request.arrival_time,
                         lora_request=request.lora_request,
                         cache_salt=request.cache_salt,
