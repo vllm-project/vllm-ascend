@@ -2191,7 +2191,6 @@ class MockDraftModel:
         token_ids = sample_hidden_states[:, 0].to(torch.long)
         logits = torch.full((sample_hidden_states.shape[0], self.vocab_size), -1000.0)
         logits[torch.arange(sample_hidden_states.shape[0]), token_ids] = 1000.0
-        logits = logits.argmax(dim=-1)
         return logits
 
     def embed_input_ids(self, input_ids):
@@ -2512,6 +2511,16 @@ class TestRunMergedDraft(TestBase):
 
     def test_run_merged_draft_eagle3_decode_prepares_each_forward_input(self):
         self.proposer.model = MockDraftModel(returns_tuple=True)
+
+        def compute_draft_token_ids(sample_hidden_states):
+            self.proposer.model.logit_inputs.append(sample_hidden_states.clone())
+            token_ids = sample_hidden_states[:, 0].to(torch.long)
+            logits = torch.full((sample_hidden_states.shape[0], self.proposer.model.vocab_size), -1000.0)
+            logits[torch.arange(sample_hidden_states.shape[0]), token_ids] = 1000.0
+            logits = logits.argmax(dim=-1)
+            return logits
+
+        self.proposer.compute_draft_token_ids = compute_draft_token_ids
         self.proposer.supports_mm_inputs = True
         initial_input_ids = torch.tensor(
             [279, 1196, 374, 8014, 151667, 198, 32313, 11, 151667, 198, 32313, 11],
