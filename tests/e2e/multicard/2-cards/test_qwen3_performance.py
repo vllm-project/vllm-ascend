@@ -49,6 +49,7 @@ vllm_bench_cases = {
 # The origin baseline: 1600.0. For some uncertain reasons, the throughput is decreased to 1514.0
 baseline_throughput = 1514.0  # baseline throughput for Qwen3-8B, measured with num_prompts=500
 
+
 @pytest.mark.skip(reason="Temporarily skipped due to flaky failures, pending investigation.")
 @pytest.mark.parametrize("model", MODELS)
 @pytest.mark.asyncio
