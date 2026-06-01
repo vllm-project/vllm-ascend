@@ -1,5 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 
+from dataclasses import dataclass
 from typing import Any
 
 import torch
@@ -7,13 +8,40 @@ from vllm.config import CUDAGraphMode, VllmConfig
 from vllm.forward_context import get_forward_context
 from vllm.v1.attention.backends.utils import CommonAttentionMetadata
 from vllm.v1.spec_decode.eagle import EagleProposer
-from vllm.v1.spec_decode.metadata import MultiLayerEagleMetadata
 
 from vllm_ascend.ascend_forward_context import _EXTRA_CTX, set_ascend_forward_context
 from vllm_ascend.attention.utils import AscendCommonAttentionMetadata
 from vllm_ascend.compilation.acl_graph import ACLGraphWrapper
 from vllm_ascend.ops.triton.spec_decode.utils import _multi_layer_eagle_shift_and_cache
 from vllm_ascend.spec_decode.llm_base_proposer import AscendSpecDecodeBaseProposer
+
+try:
+    from vllm.v1.spec_decode.metadata import MultiLayerEagleMetadata
+except ImportError:
+
+    @dataclass
+    class MultiLayerEagleMetadata:
+        """Fallback when vllm does not yet provide MultiLayerEagleMetadata."""
+
+        cached_len: torch.Tensor
+        cached_token_ids: torch.Tensor
+        cached_positions: torch.Tensor
+        cached_hidden_states: torch.Tensor
+        cached_slot_mappings: torch.Tensor
+
+        @staticmethod
+        def make_dummy(
+            layer_num: int,
+            hidden_size: int,
+            device: torch.device,
+        ) -> "MultiLayerEagleMetadata":
+            return MultiLayerEagleMetadata(
+                cached_len=torch.zeros(1, dtype=torch.int32, device=device),
+                cached_token_ids=torch.zeros(1, layer_num, dtype=torch.int32, device=device),
+                cached_positions=torch.zeros(1, layer_num, dtype=torch.int32, device=device),
+                cached_hidden_states=torch.zeros(1, layer_num, hidden_size, dtype=torch.float16, device=device),
+                cached_slot_mappings=torch.zeros(1, layer_num, dtype=torch.int64, device=device),
+            )
 
 
 class AscendEagleProposer(EagleProposer, AscendSpecDecodeBaseProposer):
