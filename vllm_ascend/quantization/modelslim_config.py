@@ -670,9 +670,12 @@ class AscendModelSlimConfig(QuantizationConfig):
         """
         from vllm_ascend.quantization.utils import get_model_file
 
-        # If quant_description is already populated (e.g. from from_config()),
-        # there is nothing to do.
-        if self.quant_description:
+        # If quant_description is already populated with per-layer data
+        # (e.g. from from_config()), there is nothing to do.
+        # But if it only has top-level config keys (quant_method, bits, etc.),
+        # we still need to load per-layer data from quant_model_description.json
+        has_per_layer_data = any(k.endswith(".weight") for k in self.quant_description)
+        if has_per_layer_data:
             return
 
         # Try to get the config file (local or remote)
