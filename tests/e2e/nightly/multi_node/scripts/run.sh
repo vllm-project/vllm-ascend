@@ -141,7 +141,7 @@ install_extra_components() {
     source /usr/local/Ascend/ascend-toolkit/set_env.sh
 
     rm -f CANN-custom_ops-sfa-linux.aarch64.run \
-          custom_ops-1.0-cp311-cp311-linux_aarch64.whl
+          custom_ops-1.0-cp312-cp312-linux_aarch64.whl
     echo "====> Extra components installation completed"
 }
 

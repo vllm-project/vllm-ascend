@@ -83,4 +83,20 @@ jobs:
     uses: ./.github/workflows/_selected_tests.yaml
     with:
       vllm: ${{ matrix.vllm_version }}
-      test_groups: ${{ needs.select-tests.outputs.test_groups }}
+      test_groups: ${{ needs.changes.outputs.test_groups }}
+
+  e2e-light:
+    name: e2e-light
+    strategy:
+      matrix:
+        vllm_version: [39910f2b25aacc09f5e7f166cdf0030b19f8b9e8, v0.20.2]
+    # Note (yikun): If CI resource are limited we can split job into two chain jobs
+    needs: [lint, changes]
+    # only trigger e2e test after lint passed and the change is e2e related with pull request.
+    if: ${{ github.event_name == 'pull_request' && needs.lint.result == 'success' && needs.changes.outputs.e2e_tracker == 'true' && !contains(github.event.pull_request.labels.*.name, 'ready') }}
+    uses: ./.github/workflows/_e2e_test.yaml
+    with:
+      vllm: ${{ matrix.vllm_version }}
+      image: swr.cn-southwest-2.myhuaweicloud.com/base_image/ascend-ci/cann:9.0.0-910b-ubuntu22.04-py3.12
+      contains_310: ${{ needs.changes.outputs._310_tracker == 'true' }}
+      type: light
