@@ -294,7 +294,7 @@
 #    How:
 #      remove the assert
 #    Related PR (if no, explain why):
-#       Upstream vLLM not support yet.
+#       https://github.com/vllm-project/vllm/pull/43935
 #    Future Plan:
 #       Remove this patch if upstream streaming behavior is updated to support mamba external KV connector
 #
