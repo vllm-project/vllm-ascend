@@ -1,5 +1,6 @@
 import signal
 import time
+import uuid
 from contextlib import ExitStack
 from typing import cast
 
@@ -180,19 +181,44 @@ class RasDPEngineCoreProc(DPEngineCoreProc):
                 scheduler = cast(Scheduler, self.scheduler)
                 while scheduler.running:
                     request = scheduler.running.pop()
+                    
+                    scheduler.requests.pop(request.request_id, None)
+                    old_blocks = scheduler.kv_cache_manager.coordinator.get_blocks(
+                        request.request_id
+                    )
+                    old_block_ids = set()
+                    for blocks_list in old_blocks:
+                        for block in blocks_list:
+                            old_block_ids.add(block.block_id)
+                    
                     scheduler.kv_cache_manager.free(request)
                     scheduler.encoder_cache_manager.free(request)
-                    request.prompt_token_ids = request._all_token_ids.copy()
-                    request._output_token_ids = []
-                    request.num_prompt_tokens = len(request.prompt_token_ids)
-                    request.num_computed_tokens = 0
-                    request.status = RequestStatus.WAITING
-                    if request.spec_token_ids is not None:
-                        request.spec_token_ids = []
-                    request.num_preemptions = 0
-                    request.num_output_placeholders = 0
-                    request.discard_latest_async_tokens = False
-                    scheduler.waiting.prepend_request(request)
+                    if old_block_ids:
+                        scheduler.kv_cache_manager.evict_blocks(old_block_ids)
+                    
+                    new_samping_param = request.sampling_params.copy()
+                    num_decoded_tokens = len(request._output_token_ids)
+                    new_samping_param.max_tokens -= num_decoded_tokens
+
+                    new_engine_core_request = EngineCoreRequest(
+                        request_id=request.request_id,
+                        prompt_token_ids=request._all_token_ids.copy(),
+                        mm_features=request.mm_features,
+                        sampling_params=new_samping_param,
+                        arrival_time=request.arrival_time,
+                        lora_request=request.lora_request,
+                        cache_salt=request.cache_salt,
+                        data_parallel_rank=None,
+                        prompt_embeds = request.prompt_embeds,
+                        client_index=request.client_index,
+                        priority=request.priority,
+                        trace_headers=request.trace_headers,
+                        resumable=request.resumable,
+                        reasoning_enabled=None,
+                    )
+                    new_request, wave = self.preprocess_add_request(new_engine_core_request)
+                    scheduler.requests[new_request.request_id] = new_request
+                    scheduler.waiting.prepend_request(new_request)
                     scheduler.prev_step_scheduled_req_ids.discard(request.request_id)
             try:
                 if not exception_occurred:

@@ -139,6 +139,8 @@ def _clean_cache(executor: Any, cfg:dict | None) -> bool:
             model_runner.requests.pop(req_id, None)
             model_runner.num_prompt_logprobs.pop(req_id, None)
             model_runner.input_batch.remove_request(req_id)
+        model_runner.input_batch.condense()
+        model_runner.input_batch.refresh_metadata()
         return cfg, True
     except Exception as e:
         logger.error(f"worker clean_cached failed with exception: {e}")

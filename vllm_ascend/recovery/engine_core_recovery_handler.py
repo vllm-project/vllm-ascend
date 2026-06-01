@@ -255,7 +255,7 @@ class RecoveryHandler:
         if self._engine_core is not None:
             self._engine_core.current_wave = msg.current_wave
             self._engine_core.step_counter = 0
-            self._engine_core.engines_running = False
+            self._engine_core.engines_running = True
 
         self._finish_recovery(success=msg.success)
 
@@ -339,7 +339,7 @@ class RecoveryHandler:
             if self._engine_core is not None:
                 self._engine_core.current_wave += 1
                 self._engine_core.step_counter = 0
-                self._engine_core.engines_running = False
+                self._engine_core.engines_running = True
             self._finish_recovery(success=result.success)
             if result.success:
                 logger.info(
