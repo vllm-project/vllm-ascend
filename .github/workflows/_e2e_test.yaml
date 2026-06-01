@@ -346,7 +346,7 @@ jobs:
   e2e-2-cards-light:
     name: multicard-2-light
     if: ${{ inputs.type == 'light' }}
-    runs-on: linux-aarch64-a3-2
+    runs-on: linux-aarch64-a2b3-2
     strategy:
       fail-fast: false
       matrix:
@@ -640,7 +640,7 @@ jobs:
   e2e-4-cards-light:
     name: multicard-4-light
     if: ${{ inputs.type == 'light' }}
-    runs-on: linux-aarch64-a3-4
+    runs-on: linux-aarch64-a2b3-4
     strategy:
       fail-fast: false
       matrix:
