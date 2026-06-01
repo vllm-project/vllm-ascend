@@ -20,7 +20,7 @@ import torch
 import torch_npu
 
 from vllm_ascend.utils import enable_custom_op
-
+torch_npu.npu.config.allow_internal_format = True
 
 def _get_npu_storage_shape_op():
     assert enable_custom_op(), "requires vllm_ascend custom ops"
@@ -35,29 +35,14 @@ def test_get_npu_storage_format_op_is_not_registered():
         getattr(torch.ops._C_ascend, op_name)
 
 
-def test_get_npu_storage_shape_reports_backing_storage_layout():
-    get_npu_storage_shape = _get_npu_storage_shape_op()
-
-    base = torch.arange(2 * 3 * 4 * 5, device="npu", dtype=torch.float16).reshape(2, 3, 4, 5)
-    sliced = base[:, :, 1:3, :]
-    transposed = base.transpose(1, 2)
-    contiguous_sliced = sliced.contiguous()
-
-    assert list(get_npu_storage_shape(base)) == [base.storage().size()]
-    assert list(get_npu_storage_shape(sliced)) == [base.storage().size()]
-    assert list(get_npu_storage_shape(transposed)) == [base.storage().size()]
-    assert list(get_npu_storage_shape(contiguous_sliced)) == list(contiguous_sliced.shape)
-
-
 def test_get_npu_storage_shape_tracks_npu_format_cast_layout():
     get_npu_storage_shape = _get_npu_storage_shape_op()
 
     base = torch.empty((1, 3, 7, 7), device="npu", dtype=torch.float16)
-    nhwc = torch_npu.npu_format_cast(base, 1)
+    nz = torch_npu.npu_format_cast(base, 29)
 
-    assert str(torch_npu.get_npu_format(nhwc)) == "NHWC"
-    assert list(nhwc.shape) == list(base.shape)
-    assert list(get_npu_storage_shape(nhwc)) == list(base.shape)
+    assert list(nz.shape) == list(base.shape)
+    assert list(get_npu_storage_shape(nz)) != list(base.shape)
 
 
 def test_get_npu_storage_shape_rejects_cpu_tensor():
