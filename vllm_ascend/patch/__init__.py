@@ -783,7 +783,7 @@
 # ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 #   1. `vllm.model_executor.layers.fused_moe.routed_experts_capturer.RoutedExpertsCapturer.capture`
 #    Why:
-#       The upstream implementation does not support vllm-ascend specific MoE communication types
+#       The upstream implementation doesn't support vllm-ascend specific MoE communication types
 #       (ALLTOALL and MC2). In the SP + modular-kernel path, the original code cannot correctly
 #       handle tensor splitting and all-gather operations on NPU, especially when tokens are
 #       unevenly distributed across TP ranks or padded to max_tokens in MC2 mode.
