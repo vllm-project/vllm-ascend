@@ -151,11 +151,15 @@ class MooncakeBackend(Backend):
                 res_list[:12],
                 sum(1 for value in res_list if value < 0),
             )
-            for value in res_list:
+            for i, value in enumerate(res_list):
                 if value < 0:
                     logger.error("Failed to get key %s, res:%s", keys, res_list)
+                elif value > 0:
+                    res_list[i] = 0
+            return res_list
         except Exception as e:
             logger.error("Failed to get key %s, error:%s", keys, e)
+            return None
 
 
 @dataclass

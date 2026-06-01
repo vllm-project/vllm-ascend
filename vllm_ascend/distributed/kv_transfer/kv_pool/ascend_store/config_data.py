@@ -330,7 +330,7 @@ class ChunkedTokenDatabase:
             size = int(self.block_len[i] / group_block_size * (end - start))
             addr_list.append(addr)
             size_list.append(size)
-        return addr_list, size_list
+        return addr_list, size_list, block_id
 
     def process_tokens(
         self,
