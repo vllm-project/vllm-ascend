@@ -476,6 +476,8 @@ class NPUPlatform(Platform):
                     "PD-disaggregated mode (kv_role='kv_producer'/'kv_consumer')."
                 )
 
+        cls._validate_kv_load_failure_policy(vllm_config)
+
         if ascend_config.recompute_scheduler_enable:
             kv_transfer_config = vllm_config.kv_transfer_config
             kv_role = getattr(kv_transfer_config, "kv_role", None)
@@ -669,6 +671,16 @@ class NPUPlatform(Platform):
     @classmethod
     def support_hybrid_kv_cache(cls) -> bool:
         return True
+
+    @staticmethod
+    def _validate_kv_load_failure_policy(vllm_config: VllmConfig) -> None:
+        kv_transfer_config = vllm_config.kv_transfer_config
+        if kv_transfer_config is None:
+            return
+        if getattr(kv_transfer_config, "kv_load_failure_policy", "fail") == "recompute":
+            assert not getattr(vllm_config.model_config, "is_hybrid", False), (
+                "Hybrid models do not support recompute mode kv load failure policy now."
+            )
 
     @classmethod
     def support_static_graph_mode(cls) -> bool:
