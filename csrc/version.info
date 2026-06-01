@@ -1,4 +1,4 @@
-Version=9.1.0-beta.1
+Version=9.0.0
 version_dir=cann
 required_package_runtime_version=">=9.0.0"
 required_package_opbase_version=">=9.0.0"
