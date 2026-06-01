@@ -96,7 +96,7 @@ jobs:
       - name: Install system dependencies
         run: |
           apt-get -y install `cat packages.txt`
-          apt-get -y install gcc g++ cmake libnuma-dev clang-15
+          apt-get -y install gcc g++ cmake libnuma-dev clang-15 ninja-build
 
           update-alternatives --install /usr/bin/clang clang /usr/bin/clang-15 20
           update-alternatives --install /usr/bin/clang++ clang++ /usr/bin/clang++-15 20
@@ -134,6 +134,26 @@ jobs:
           key: vllm-ascend-build-v1-${{ runner.os }}-${{ inputs.image }}-${{ steps.get_csrc_hash.outputs.CSRC_HASH }}
           restore-keys: |
             vllm-ascend-build-v1-${{ runner.os }}-${{ inputs.image }}-${{ steps.get_csrc_hash.outputs.CSRC_HASH }}
+
+
+      - name: Get csrc build cache base branch
+        id: get_csrc_build_cache_base_branch
+        run: |
+          base_branch="${GITHUB_BASE_REF:-${GITHUB_REF_NAME:-unknown-branch}}"
+          base_branch=$(printf "%s" "$base_branch" | tr '/:@ ' '----' | tr -cd 'A-Za-z0-9._-')
+          if [ -z "$base_branch" ]; then
+            base_branch="unknown-branch"
+          fi
+          echo "base_branch=$base_branch" >> "$GITHUB_OUTPUT"
+
+      - name: Cache vllm-ascend csrc build
+        uses: runs-on/cache@v5
+        with:
+          path: |
+            csrc/build
+          key: vllm-ascend-csrc-build-ascend910b-${{ steps.get_csrc_build_cache_base_branch.outputs.base_branch }}-ninja-${{ github.run_id }}-${{ github.run_attempt }}
+          restore-keys: |
+            vllm-ascend-csrc-build-ascend910b-${{ steps.get_csrc_build_cache_base_branch.outputs.base_branch }}-ninja-
 
       - name: Install vllm-project/vllm-ascend
         env:
@@ -233,7 +253,7 @@ jobs:
       - name: Install system dependencies
         run: |
           apt-get -y install `cat packages.txt`
-          apt-get -y install gcc g++ cmake libnuma-dev clang-15
+          apt-get -y install gcc g++ cmake libnuma-dev clang-15 ninja-build
 
           update-alternatives --install /usr/bin/clang clang /usr/bin/clang-15 20
           update-alternatives --install /usr/bin/clang++ clang++ /usr/bin/clang++-15 20
@@ -271,6 +291,26 @@ jobs:
           key: vllm-ascend-build-v1-${{ runner.os }}-${{ inputs.image }}-${{ steps.get_csrc_hash.outputs.CSRC_HASH }}
           restore-keys: |
             vllm-ascend-build-v1-${{ runner.os }}-${{ inputs.image }}-${{ steps.get_csrc_hash.outputs.CSRC_HASH }}
+
+
+      - name: Get csrc build cache base branch
+        id: get_csrc_build_cache_base_branch
+        run: |
+          base_branch="${GITHUB_BASE_REF:-${GITHUB_REF_NAME:-unknown-branch}}"
+          base_branch=$(printf "%s" "$base_branch" | tr '/:@ ' '----' | tr -cd 'A-Za-z0-9._-')
+          if [ -z "$base_branch" ]; then
+            base_branch="unknown-branch"
+          fi
+          echo "base_branch=$base_branch" >> "$GITHUB_OUTPUT"
+
+      - name: Cache vllm-ascend csrc build
+        uses: runs-on/cache@v5
+        with:
+          path: |
+            csrc/build
+          key: vllm-ascend-csrc-build-ascend910b-${{ steps.get_csrc_build_cache_base_branch.outputs.base_branch }}-ninja-${{ github.run_id }}-${{ github.run_attempt }}
+          restore-keys: |
+            vllm-ascend-csrc-build-ascend910b-${{ steps.get_csrc_build_cache_base_branch.outputs.base_branch }}-ninja-
 
       - name: Install vllm-project/vllm-ascend
         env:
@@ -375,7 +415,7 @@ jobs:
       - name: Install system dependencies
         run: |
           apt-get -y install `cat packages.txt`
-          apt-get -y install gcc g++ cmake libnuma-dev clang-15
+          apt-get -y install gcc g++ cmake libnuma-dev clang-15 ninja-build
 
           update-alternatives --install /usr/bin/clang clang /usr/bin/clang-15 20
           update-alternatives --install /usr/bin/clang++ clang++ /usr/bin/clang++-15 20
@@ -413,6 +453,26 @@ jobs:
           key: vllm-ascend-build-v1-${{ runner.os }}-${{ inputs.image_a3 }}-${{ steps.get_csrc_hash.outputs.CSRC_HASH }}
           restore-keys: |
             vllm-ascend-build-v1-${{ runner.os }}-${{ inputs.image_a3 }}-${{ steps.get_csrc_hash.outputs.CSRC_HASH }}
+
+
+      - name: Get csrc build cache base branch
+        id: get_csrc_build_cache_base_branch
+        run: |
+          base_branch="${GITHUB_BASE_REF:-${GITHUB_REF_NAME:-unknown-branch}}"
+          base_branch=$(printf "%s" "$base_branch" | tr '/:@ ' '----' | tr -cd 'A-Za-z0-9._-')
+          if [ -z "$base_branch" ]; then
+            base_branch="unknown-branch"
+          fi
+          echo "base_branch=$base_branch" >> "$GITHUB_OUTPUT"
+
+      - name: Cache vllm-ascend csrc build
+        uses: runs-on/cache@v5
+        with:
+          path: |
+            csrc/build
+          key: vllm-ascend-csrc-build-ascend910_93-${{ steps.get_csrc_build_cache_base_branch.outputs.base_branch }}-ninja-${{ github.run_id }}-${{ github.run_attempt }}
+          restore-keys: |
+            vllm-ascend-csrc-build-ascend910_93-${{ steps.get_csrc_build_cache_base_branch.outputs.base_branch }}-ninja-
 
       - name: Install vllm-project/vllm-ascend
         env:
@@ -508,7 +568,7 @@ jobs:
       - name: Install system dependencies
         run: |
           apt-get -y install `cat packages.txt`
-          apt-get -y install gcc g++ cmake libnuma-dev clang-15
+          apt-get -y install gcc g++ cmake libnuma-dev clang-15 ninja-build
 
           update-alternatives --install /usr/bin/clang clang /usr/bin/clang-15 20
           update-alternatives --install /usr/bin/clang++ clang++ /usr/bin/clang++-15 20
@@ -546,6 +606,26 @@ jobs:
           key: vllm-ascend-build-v1-${{ runner.os }}-${{ inputs.image_a3 }}-${{ steps.get_csrc_hash.outputs.CSRC_HASH }}
           restore-keys: |
             vllm-ascend-build-v1-${{ runner.os }}-${{ inputs.image_a3 }}-${{ steps.get_csrc_hash.outputs.CSRC_HASH }}
+
+
+      - name: Get csrc build cache base branch
+        id: get_csrc_build_cache_base_branch
+        run: |
+          base_branch="${GITHUB_BASE_REF:-${GITHUB_REF_NAME:-unknown-branch}}"
+          base_branch=$(printf "%s" "$base_branch" | tr '/:@ ' '----' | tr -cd 'A-Za-z0-9._-')
+          if [ -z "$base_branch" ]; then
+            base_branch="unknown-branch"
+          fi
+          echo "base_branch=$base_branch" >> "$GITHUB_OUTPUT"
+
+      - name: Cache vllm-ascend csrc build
+        uses: runs-on/cache@v5
+        with:
+          path: |
+            csrc/build
+          key: vllm-ascend-csrc-build-ascend910_93-${{ steps.get_csrc_build_cache_base_branch.outputs.base_branch }}-ninja-${{ github.run_id }}-${{ github.run_attempt }}
+          restore-keys: |
+            vllm-ascend-csrc-build-ascend910_93-${{ steps.get_csrc_build_cache_base_branch.outputs.base_branch }}-ninja-
 
       - name: Install vllm-project/vllm-ascend
         env:
@@ -678,7 +758,7 @@ jobs:
       - name: Install system dependencies
         run: |
           apt-get -y install `cat packages.txt`
-          apt-get -y install gcc g++ cmake libnuma-dev clang-15
+          apt-get -y install gcc g++ cmake libnuma-dev clang-15 ninja-build
 
           update-alternatives --install /usr/bin/clang clang /usr/bin/clang-15 20
           update-alternatives --install /usr/bin/clang++ clang++ /usr/bin/clang++-15 20
@@ -717,6 +797,25 @@ jobs:
           restore-keys: |
             vllm-ascend-build-v1-${{ runner.os }}-${{ inputs.image_a3 }}-${{ steps.get_csrc_hash.outputs.CSRC_HASH }}
 
+
+      - name: Get csrc build cache base branch
+        id: get_csrc_build_cache_base_branch
+        run: |
+          base_branch="${GITHUB_BASE_REF:-${GITHUB_REF_NAME:-unknown-branch}}"
+          base_branch=$(printf "%s" "$base_branch" | tr '/:@ ' '----' | tr -cd 'A-Za-z0-9._-')
+          if [ -z "$base_branch" ]; then
+            base_branch="unknown-branch"
+          fi
+          echo "base_branch=$base_branch" >> "$GITHUB_OUTPUT"
+
+      - name: Cache vllm-ascend csrc build
+        uses: runs-on/cache@v5
+        with:
+          path: |
+            csrc/build
+          key: vllm-ascend-csrc-build-ascend910_93-${{ steps.get_csrc_build_cache_base_branch.outputs.base_branch }}-ninja-${{ github.run_id }}-${{ github.run_attempt }}
+          restore-keys: |
+            vllm-ascend-csrc-build-ascend910_93-${{ steps.get_csrc_build_cache_base_branch.outputs.base_branch }}-ninja-
       - name: Install Mooncake wheel
         shell: bash
         run: |
@@ -830,7 +929,7 @@ jobs:
       - name: Install system dependencies
         run: |
           apt-get -y install `cat packages.txt`
-          apt-get -y install gcc g++ cmake libnuma-dev clang-15
+          apt-get -y install gcc g++ cmake libnuma-dev clang-15 ninja-build
 
           update-alternatives --install /usr/bin/clang clang /usr/bin/clang-15 20
           update-alternatives --install /usr/bin/clang++ clang++ /usr/bin/clang++-15 20
@@ -868,6 +967,26 @@ jobs:
           key: vllm-ascend-build-v1-${{ runner.os }}-${{ inputs.image_a3 }}-${{ steps.get_csrc_hash.outputs.CSRC_HASH }}
           restore-keys: |
             vllm-ascend-build-v1-${{ runner.os }}-${{ inputs.image_a3 }}-${{ steps.get_csrc_hash.outputs.CSRC_HASH }}
+
+
+      - name: Get csrc build cache base branch
+        id: get_csrc_build_cache_base_branch
+        run: |
+          base_branch="${GITHUB_BASE_REF:-${GITHUB_REF_NAME:-unknown-branch}}"
+          base_branch=$(printf "%s" "$base_branch" | tr '/:@ ' '----' | tr -cd 'A-Za-z0-9._-')
+          if [ -z "$base_branch" ]; then
+            base_branch="unknown-branch"
+          fi
+          echo "base_branch=$base_branch" >> "$GITHUB_OUTPUT"
+
+      - name: Cache vllm-ascend csrc build
+        uses: runs-on/cache@v5
+        with:
+          path: |
+            csrc/build
+          key: vllm-ascend-csrc-build-ascend910_93-${{ steps.get_csrc_build_cache_base_branch.outputs.base_branch }}-ninja-${{ github.run_id }}-${{ github.run_attempt }}
+          restore-keys: |
+            vllm-ascend-csrc-build-ascend910_93-${{ steps.get_csrc_build_cache_base_branch.outputs.base_branch }}-ninja-
 
       - name: Install vllm-project/vllm-ascend
         env:
@@ -966,7 +1085,7 @@ jobs:
       - name: Install system dependencies
         run: |
           apt-get -y install `cat packages.txt`
-          apt-get -y install gcc g++ cmake libnuma-dev
+          apt-get -y install gcc g++ cmake libnuma-dev ninja-build
           pip install uv
 
       - name: Checkout vllm-project/vllm repo
@@ -1000,6 +1119,26 @@ jobs:
           key: vllm-ascend-build-v1-${{ runner.os }}-${{ inputs.image_310p }}-${{ steps.get_csrc_hash.outputs.CSRC_HASH }}
           restore-keys: |
             vllm-ascend-build-v1-${{ runner.os }}-${{ inputs.image_310p }}-${{ steps.get_csrc_hash.outputs.CSRC_HASH }}
+
+
+      - name: Get csrc build cache base branch
+        id: get_csrc_build_cache_base_branch
+        run: |
+          base_branch="${GITHUB_BASE_REF:-${GITHUB_REF_NAME:-unknown-branch}}"
+          base_branch=$(printf "%s" "$base_branch" | tr '/:@ ' '----' | tr -cd 'A-Za-z0-9._-')
+          if [ -z "$base_branch" ]; then
+            base_branch="unknown-branch"
+          fi
+          echo "base_branch=$base_branch" >> "$GITHUB_OUTPUT"
+
+      - name: Cache vllm-ascend csrc build
+        uses: runs-on/cache@v5
+        with:
+          path: |
+            csrc/build
+          key: vllm-ascend-csrc-build-ascend310p-${{ steps.get_csrc_build_cache_base_branch.outputs.base_branch }}-ninja-${{ github.run_id }}-${{ github.run_attempt }}
+          restore-keys: |
+            vllm-ascend-csrc-build-ascend310p-${{ steps.get_csrc_build_cache_base_branch.outputs.base_branch }}-ninja-
 
       - name: Install vllm-project/vllm-ascend
         env:
@@ -1084,7 +1223,7 @@ jobs:
       - name: Install system dependencies
         run: |
           apt-get -y install `cat packages.txt`
-          apt-get -y install gcc g++ cmake libnuma-dev
+          apt-get -y install gcc g++ cmake libnuma-dev ninja-build
           pip install uv
 
       - name: Checkout vllm-project/vllm repo
@@ -1118,6 +1257,26 @@ jobs:
           key: vllm-ascend-build-v1-${{ runner.os }}-${{ inputs.image_310p }}-${{ steps.get_csrc_hash.outputs.CSRC_HASH }}
           restore-keys: |
             vllm-ascend-build-v1-${{ runner.os }}-${{ inputs.image_310p }}-${{ steps.get_csrc_hash.outputs.CSRC_HASH }}
+
+
+      - name: Get csrc build cache base branch
+        id: get_csrc_build_cache_base_branch
+        run: |
+          base_branch="${GITHUB_BASE_REF:-${GITHUB_REF_NAME:-unknown-branch}}"
+          base_branch=$(printf "%s" "$base_branch" | tr '/:@ ' '----' | tr -cd 'A-Za-z0-9._-')
+          if [ -z "$base_branch" ]; then
+            base_branch="unknown-branch"
+          fi
+          echo "base_branch=$base_branch" >> "$GITHUB_OUTPUT"
+
+      - name: Cache vllm-ascend csrc build
+        uses: runs-on/cache@v5
+        with:
+          path: |
+            csrc/build
+          key: vllm-ascend-csrc-build-ascend310p-${{ steps.get_csrc_build_cache_base_branch.outputs.base_branch }}-ninja-${{ github.run_id }}-${{ github.run_attempt }}
+          restore-keys: |
+            vllm-ascend-csrc-build-ascend310p-${{ steps.get_csrc_build_cache_base_branch.outputs.base_branch }}-ninja-
 
       - name: Install vllm-project/vllm-ascend
         env:
