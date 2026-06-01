@@ -88,21 +88,16 @@ class AscendFusedMoEWithLoRA(FusedMoEWithLoRA):
         return isinstance(source_layer, AscendFusedMoE) and len(packed_modules_list) == 2
 
     def __init__(self, base_layer: AscendFusedMoE) -> None:
-        super().__init__(base_layer)
-        self._lora_ctx = self._build_lora_context()
+        from vllm.lora.layers.base import BaseLayerWithLoRA
+        BaseLayerWithLoRA.__init__(self)
+        self.base_layer = base_layer
+        self.tp_size = base_layer.tp_size
+        self.tp_rank = base_layer.tp_rank
+        from vllm.lora.layers.utils import _get_lora_device
+        self.device = _get_lora_device(base_layer)
+        self._w13_slices = 2 if base_layer.moe_config.is_act_and_mul else 1
+        self.n_slices = base_layer.local_num_experts * (self._w13_slices + 1)
         self._replace_build_fused_experts_input()
-
-    def _replace_build_fused_experts_input(self):
-        import vllm_ascend.ops.fused_moe.fused_moe as fm
-        orig_build = fm.build_fused_experts_input
-        lora_ctx = self._lora_ctx
-
-        def wrapped_build(*args, **kwargs):
-            if 'lora_context' not in kwargs:
-                kwargs['lora_context'] = lora_ctx
-            return orig_build(*args, **kwargs)
-
-        fm.build_fused_experts_input = wrapped_build
 
     def _build_lora_context(self):
         from vllm_ascend.ops.fused_moe.moe_stage_contracts import MoELoRAContext
@@ -115,42 +110,33 @@ class AscendFusedMoEWithLoRA(FusedMoEWithLoRA):
             num_experts=self.base_layer.local_num_experts,
         )
 
+    def _replace_build_fused_experts_input(self):
+        import vllm_ascend.ops.fused_moe.fused_moe as fm
+        orig_build = fm.build_fused_experts_input
+
+        def wrapped_build(*args, **kwargs):
+            if 'lora_context' not in kwargs:
+                kwargs['lora_context'] = self._build_lora_context()
+            return orig_build(*args, **kwargs)
+
+        fm.build_fused_experts_input = wrapped_build
+
     def set_lora(self, index, lora_a, lora_b, embeddings_tensor=None, bias=None):
         if isinstance(lora_a, list) and len(lora_a) > 3:
             num_groups = len(lora_a) // 3
+            w1_lora_a = torch.stack([lora_a[i * 3 + 0] for i in range(num_groups)])
+            w2_lora_a = torch.stack([lora_a[i * 3 + 1] for i in range(num_groups)])
+            w3_lora_a = torch.stack([lora_a[i * 3 + 2] for i in range(num_groups)])
+            w1_lora_b = torch.stack([lora_b[i * 3 + 0] for i in range(num_groups)])
+            w2_lora_b = torch.stack([lora_b[i * 3 + 1] for i in range(num_groups)])
+            w3_lora_b = torch.stack([lora_b[i * 3 + 2] for i in range(num_groups)])
+            lora_a = [w1_lora_a, w2_lora_a, w3_lora_a]
+            lora_b = [w1_lora_b, w2_lora_b, w3_lora_b]
+        super().set_lora(index, lora_a, lora_b)
 
-            w1_tensors = []
-            w2_tensors = []
-            w3_tensors = []
-
-            for i in range(num_groups):
-                w1_tensors.append(lora_a[i * 3 + 0])
-                w2_tensors.append(lora_a[i * 3 + 1])
-                w3_tensors.append(lora_a[i * 3 + 2])
-
-            import torch
-            w1_lora_a = torch.stack(w1_tensors)
-            w2_lora_a = torch.stack(w2_tensors)
-            w3_lora_a = torch.stack(w3_tensors)
-
-            w1_tensors_b = []
-            w2_tensors_b = []
-            w3_tensors_b = []
-
-            for i in range(num_groups):
-                w1_tensors_b.append(lora_b[i * 3 + 0])
-                w2_tensors_b.append(lora_b[i * 3 + 1])
-                w3_tensors_b.append(lora_b[i * 3 + 2])
-
-            w1_lora_b = torch.stack(w1_tensors_b)
-            w2_lora_b = torch.stack(w2_tensors_b)
-            w3_lora_b = torch.stack(w3_tensors_b)
-
-            super().set_lora(index,
-                            [w1_lora_a, w2_lora_a, w3_lora_a],
-                            [w1_lora_b, w2_lora_b, w3_lora_b])
-        else:
-            super().set_lora(index, lora_a, lora_b)
+    def set_mapping(self, punica_wrapper):
+        super().set_mapping(punica_wrapper)
+        self._replace_build_fused_experts_input()
 
 
 def refresh_all_lora_classes():
