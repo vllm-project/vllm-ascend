@@ -520,7 +520,6 @@ setup(
     project_urls={
         "Homepage": "https://github.com/vllm-project/vllm-ascend",
     },
-    # TODO: Add 3.13 back when torch-npu support 3.13
     classifiers=[
         "Programming Language :: Python :: 3.10",
         "Programming Language :: Python :: 3.11",
