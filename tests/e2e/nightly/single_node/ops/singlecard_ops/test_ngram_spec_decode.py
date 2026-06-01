@@ -61,7 +61,9 @@ def golden_ngram_spec_decode(
             elif val != -1 and val < vocab_size:
                 valid_count += 1
             else:
-                sampled_token_ids[i, j] = -1
+                for tail_idx in range(j, sampled_token_ids.shape[1]):
+                    sampled_token_ids[i, tail_idx] = -1
+                break
 
         avail_space = M - seq_len
         if avail_space < 0:
@@ -92,16 +94,12 @@ def golden_ngram_spec_decode(
                     break
 
                 suffix = token_ids[i, nt - ngram_len : nt].tolist()
-                found = False
                 for pos in range(wc):
                     window = token_ids[i, pos : pos + ngram_len].tolist()
                     if window == suffix:
                         best_match_pos = pos
                         best_ngram_len = ngram_len
-                        found = True
                         break
-                if found:
-                    break
 
         # Stage 4: get draft tokens
         if best_match_pos >= 0:
