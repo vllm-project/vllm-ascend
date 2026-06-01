@@ -25,6 +25,7 @@ configs = SingleNodeConfigLoader.from_yaml_cases()
 
 os.environ["VLLM_ENGINE_READY_TIMEOUT_S"] = 7200
 
+
 async def run_completion_test(config: SingleNodeConfig, server: "RemoteOpenAIServer | DisaggEpdProxy") -> None:
     client = server.get_async_client()
     batch = await client.completions.create(
