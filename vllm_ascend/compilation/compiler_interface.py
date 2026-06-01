@@ -15,9 +15,9 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 #
-import os
 import copy
 import functools
+import os
 from collections.abc import Callable
 from typing import Any
 
@@ -135,7 +135,6 @@ def npugraph_ex_compile(
     # Try npugraph_ex first, fall back to torchair for backward compatibility.
     try:
         import npugraph_ex as nge
-        from torchair.npu_fx_compiler import _CompiledFxGraph
 
         cache_path = os.path.join(cache_dir, key) if (cache_dir and key) else None
 
