@@ -56,6 +56,8 @@ class AscendW8A8MXFP8DSDynamicLinearMethod(AscendW8A8MXFP8DynamicLinearMethod):
     ) -> dict[str, Any]:
         params_dict = {}
         params_dict["weight_scale"] = torch.empty(output_size // self.block_size, input_size // self.block_size, dtype=torch.float32)
+        params_dict["_packed_dim"] = 0
+        params_dict["_packed_factor"] = self.block_size
         return params_dict
 
     def process_weights_after_loading(self, layer):
