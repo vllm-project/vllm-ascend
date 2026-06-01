@@ -1,6 +1,6 @@
 """
 Precision test: chunk_gated_delta_rule_fwd_h on Ascend 310P.
-Uses the vllm-ascend Python API (chunk_gated_delta_rule_pytorch).
+Uses the vllm-ascend Python API (chunk_gated_delta_rule_310).
 Compares NPU fp16 vs CPU fp32 reference.
 """
 
@@ -10,7 +10,10 @@ import sys
 import torch
 import torch_npu
 
-from vllm_ascend._310p.ops.fla.chunk_gated_delta_rule import chunk_gated_delta_rule_pytorch
+from vllm_ascend._310p.ops.fla.chunk_gated_delta_rule import (
+    chunk_gated_delta_rule_310,
+    chunk_gated_delta_rule_pytorch,
+)
 
 torch.manual_seed(42)
 torch_npu.npu.set_device(0)
@@ -50,7 +53,7 @@ def run_test(label, B, T, Hqk, Hv, K, V, dtype=torch.float16):
     )
 
     # NPU
-    npu_out, npu_state = chunk_gated_delta_rule_pytorch(
+    npu_out, npu_state = chunk_gated_delta_rule_310(
         q=q.to("npu"),
         k=k.to("npu"),
         v=v.to("npu"),
@@ -80,7 +83,7 @@ def main():
     print()
 
     ok = True
-    ok &= run_test("small", B=1, T=64, Hqk=2, Hv=4, K=16, V=16)
+    ok &= run_test("minimal supported", B=1, T=64, Hqk=2, Hv=4, K=128, V=128)
     ok &= run_test("Qwen3 1chunk", B=1, T=64, Hqk=4, Hv=8, K=192, V=128)
     ok &= run_test("Qwen3 8chunk", B=1, T=512, Hqk=4, Hv=8, K=192, V=128)
     ok &= run_test("batch=4", B=4, T=128, Hqk=2, Hv=4, K=128, V=128)

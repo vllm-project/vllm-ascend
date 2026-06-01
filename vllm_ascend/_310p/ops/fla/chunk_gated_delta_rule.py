@@ -28,13 +28,13 @@ def _expand_qk_to_v_heads(x: torch.Tensor, num_v_heads: int) -> torch.Tensor:
     Expand q/k heads to match v heads for grouped-value-attention semantics.
     x: [L, Hqk, D] -> [L, Hv, D]
     """
-    h_qk = x.shape[1]
+    h_qk = x.shape[-2]
     if h_qk == num_v_heads:
         return x
     if num_v_heads % h_qk != 0:
         raise ValueError(f"Invalid grouped heads: Hqk={h_qk}, Hv={num_v_heads}.")
     group_size = num_v_heads // h_qk
-    return x.repeat_interleave(group_size, dim=1)
+    return x.repeat_interleave(group_size, dim=-2)
 
 
 def _iter_seq_ranges(batch_size: int, seq_len: int, cu_seqlens: torch.Tensor | None) -> list[tuple[int, int, int]]:
@@ -88,6 +88,7 @@ def _torch_chunk_gated_delta_rule_chunked(
     g: torch.Tensor,
     beta: torch.Tensor,
     chunk_size: int = CHUNK_SIZE,
+    scale: float | None = None,
     initial_state: torch.Tensor | None = None,
     output_final_state: bool = False,
     use_qk_l2norm_in_kernel: bool = False,
@@ -122,7 +123,7 @@ def _torch_chunk_gated_delta_rule_chunked(
     g = F.pad(g, (0, pad_size))
 
     total_sequence_length = sequence_length + pad_size
-    scale = 1 / (query.shape[-1] ** 0.5)
+    scale = query.shape[-1] ** -0.5 if scale is None else scale
     query = query * scale
 
     v_beta = value * beta.unsqueeze(-1)
@@ -180,12 +181,217 @@ def _torch_chunk_gated_delta_rule_chunked(
     return core_attn_out, last_recurrent_state
 
 
+def _ceil_div(value: int, divisor: int) -> int:
+    return (value + divisor - 1) // divisor
+
+
+def _require_ascend_chunk_ops(q: torch.Tensor, k: torch.Tensor, v: torch.Tensor) -> None:
+    ascend_ops = getattr(torch.ops, "_C_ascend", None)
+    if q.device.type != "npu" or ascend_ops is None:
+        raise RuntimeError("310P chunk_gated_delta_rule requires NPU AscendC kernels.")
+    if not (
+        hasattr(ascend_ops, "chunk_gated_delta_rule_fwd_h")
+        and hasattr(ascend_ops, "chunk_fwd_o")
+    ):
+        raise RuntimeError(
+            "Missing AscendC chunk-gdr ops: chunk_gated_delta_rule_fwd_h/chunk_fwd_o."
+        )
+    if q.dtype not in (torch.float16, torch.bfloat16) or k.dtype != q.dtype or v.dtype != q.dtype:
+        raise TypeError(
+            f"q/k/v must share float16 or bfloat16 dtype, got {q.dtype}, {k.dtype}, {v.dtype}."
+        )
+    if v.shape[-1] < 128 or v.shape[-1] % 128 != 0:
+        raise ValueError(f"v head dim must be >=128 and a multiple of 128, got {v.shape[-1]}.")
+
+
+def _maybe_l2norm(x: torch.Tensor, enabled: bool) -> torch.Tensor:
+    if not enabled:
+        return x
+    return F.normalize(x.to(torch.float32), p=2, dim=-1, eps=1e-6).to(x.dtype)
+
+
+def _pad_bthd_to_chunk(
+    q: torch.Tensor,
+    k: torch.Tensor,
+    v: torch.Tensor,
+    g: torch.Tensor,
+    beta: torch.Tensor,
+    chunk_size: int,
+) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, list[tuple[int, int, int]], None]:
+    batch_size, seq_len = q.shape[:2]
+    padded_len = _ceil_div(seq_len, chunk_size) * chunk_size
+    pad_len = padded_len - seq_len
+    seq_ranges = [(batch_idx, 0, seq_len) for batch_idx in range(batch_size)]
+    if pad_len == 0:
+        return q, k, v, g, beta, seq_ranges, None
+
+    q_pad = q.new_zeros((batch_size, pad_len, *q.shape[2:]))
+    k_pad = k.new_zeros((batch_size, pad_len, *k.shape[2:]))
+    v_pad = v.new_zeros((batch_size, pad_len, *v.shape[2:]))
+    g_pad = g.new_zeros((batch_size, pad_len, g.shape[-1]))
+    beta_pad = beta.new_zeros((batch_size, pad_len, beta.shape[-1]))
+    return (
+        torch.cat((q, q_pad), dim=1),
+        torch.cat((k, k_pad), dim=1),
+        torch.cat((v, v_pad), dim=1),
+        torch.cat((g, g_pad), dim=1),
+        torch.cat((beta, beta_pad), dim=1),
+        seq_ranges,
+        None,
+    )
+
+
+def _pad_varlen_to_chunk(
+    q: torch.Tensor,
+    k: torch.Tensor,
+    v: torch.Tensor,
+    g: torch.Tensor,
+    beta: torch.Tensor,
+    cu_seqlens: torch.Tensor,
+    chunk_size: int,
+) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, list[tuple[int, int, int]], torch.Tensor]:
+    q_parts: list[torch.Tensor] = []
+    k_parts: list[torch.Tensor] = []
+    v_parts: list[torch.Tensor] = []
+    g_parts: list[torch.Tensor] = []
+    beta_parts: list[torch.Tensor] = []
+    seq_ranges: list[tuple[int, int, int]] = []
+    padded_cu = [0]
+    out_cursor = 0
+
+    for seq_idx in range(cu_seqlens.numel() - 1):
+        start = int(cu_seqlens[seq_idx].item())
+        end = int(cu_seqlens[seq_idx + 1].item())
+        seq_len = end - start
+        padded_len = _ceil_div(seq_len, chunk_size) * chunk_size if seq_len > 0 else 0
+        pad_len = padded_len - seq_len
+
+        q_seq = q[:, start:end]
+        k_seq = k[:, start:end]
+        v_seq = v[:, start:end]
+        g_seq = g[:, start:end]
+        beta_seq = beta[:, start:end]
+        if pad_len > 0:
+            q_seq = torch.cat((q_seq, q.new_zeros((1, pad_len, *q.shape[2:]))), dim=1)
+            k_seq = torch.cat((k_seq, k.new_zeros((1, pad_len, *k.shape[2:]))), dim=1)
+            v_seq = torch.cat((v_seq, v.new_zeros((1, pad_len, *v.shape[2:]))), dim=1)
+            g_seq = torch.cat((g_seq, g.new_zeros((1, pad_len, g.shape[-1]))), dim=1)
+            beta_seq = torch.cat((beta_seq, beta.new_zeros((1, pad_len, beta.shape[-1]))), dim=1)
+
+        q_parts.append(q_seq)
+        k_parts.append(k_seq)
+        v_parts.append(v_seq)
+        g_parts.append(g_seq)
+        beta_parts.append(beta_seq)
+        seq_ranges.append((0, out_cursor, out_cursor + seq_len))
+        out_cursor += seq_len
+        padded_cu.append(padded_cu[-1] + padded_len)
+
+    if q_parts:
+        q_padded = torch.cat(q_parts, dim=1)
+        k_padded = torch.cat(k_parts, dim=1)
+        v_padded = torch.cat(v_parts, dim=1)
+        g_padded = torch.cat(g_parts, dim=1)
+        beta_padded = torch.cat(beta_parts, dim=1)
+    else:
+        q_padded = q[:, :0]
+        k_padded = k[:, :0]
+        v_padded = v[:, :0]
+        g_padded = g[:, :0]
+        beta_padded = beta[:, :0]
+
+    cu_padded = torch.tensor(padded_cu, dtype=torch.int64, device=cu_seqlens.device)
+    return q_padded, k_padded, v_padded, g_padded, beta_padded, seq_ranges, cu_padded
+
+
+def _prepare_chunk_indices_list(cu_seqlens: torch.Tensor, chunk_size: int) -> list[int]:
+    chunk_indices: list[int] = []
+    compact_seq_idx = 0
+    for seq_idx in range(cu_seqlens.numel() - 1):
+        seq_len = int(cu_seqlens[seq_idx + 1].item() - cu_seqlens[seq_idx].item())
+        num_chunks = _ceil_div(seq_len, chunk_size) if seq_len > 0 else 0
+        if num_chunks == 0:
+            continue
+        for chunk_idx in range(num_chunks):
+            chunk_indices.extend((compact_seq_idx, chunk_idx))
+        compact_seq_idx += 1
+    return chunk_indices
+
+
+def _compute_w_u_g_torch(
+    k: torch.Tensor,
+    v: torch.Tensor,
+    g: torch.Tensor,
+    beta: torch.Tensor,
+    chunk_size: int,
+) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+    batch_size, padded_tokens, _, k_dim = k.shape
+    num_v_heads = v.shape[2]
+    value_dim = v.shape[-1]
+    num_chunks = padded_tokens // chunk_size
+
+    k = _expand_qk_to_v_heads(k, num_v_heads).transpose(1, 2).contiguous().to(torch.float32)
+    v = v.transpose(1, 2).contiguous().to(torch.float32)
+    g = g.transpose(1, 2).contiguous().to(torch.float32)
+    beta = beta.transpose(1, 2).contiguous().to(torch.float32)
+
+    k = k.reshape(batch_size, num_v_heads, num_chunks, chunk_size, k_dim)
+    v = v.reshape(batch_size, num_v_heads, num_chunks, chunk_size, value_dim)
+    g = g.reshape(batch_size, num_v_heads, num_chunks, chunk_size).cumsum(dim=-1)
+    beta = beta.reshape(batch_size, num_v_heads, num_chunks, chunk_size)
+
+    lower_decay = (g.unsqueeze(-1) - g.unsqueeze(-2)).tril().exp().float().tril()
+    k_beta = k * beta.unsqueeze(-1)
+    attn = -(k_beta @ k.transpose(-1, -2) * lower_decay)
+    mask_diag = torch.triu(
+        torch.ones(chunk_size, chunk_size, dtype=torch.bool, device=k.device),
+        diagonal=0,
+    )
+    attn = attn.masked_fill(mask_diag, 0)
+    for row_idx in range(1, chunk_size):
+        row = attn[..., row_idx, :row_idx].clone()
+        sub = attn[..., :row_idx, :row_idx].clone()
+        attn[..., row_idx, :row_idx] = row + (row.unsqueeze(-1) * sub).sum(-2)
+    attn = attn + torch.eye(chunk_size, dtype=attn.dtype, device=attn.device)
+
+    u = attn @ (v * beta.unsqueeze(-1))
+    w = attn @ (k_beta * g.exp().unsqueeze(-1))
+
+    u = u.reshape(batch_size, num_v_heads, padded_tokens, value_dim).transpose(1, 2).contiguous()
+    w = w.reshape(batch_size, num_v_heads, padded_tokens, k_dim).transpose(1, 2).contiguous()
+    g = g.reshape(batch_size, num_v_heads, padded_tokens).transpose(1, 2).contiguous()
+    return w, u, g
+
+
+def _unpad_chunk_output(
+    out: torch.Tensor,
+    seq_ranges: list[tuple[int, int, int]],
+    total_tokens: int,
+    input_was_tnd: bool,
+    is_varlen: bool,
+) -> torch.Tensor:
+    if is_varlen:
+        unpadded = out.new_empty((1, total_tokens, *out.shape[2:]))
+        padded_cursor = 0
+        for _, start, end in seq_ranges:
+            seq_len = end - start
+            padded_len = _ceil_div(seq_len, CHUNK_SIZE) * CHUNK_SIZE if seq_len > 0 else 0
+            if seq_len > 0:
+                unpadded[:, start:end] = out[:, padded_cursor : padded_cursor + seq_len]
+            padded_cursor += padded_len
+        return unpadded[0] if input_was_tnd else unpadded
+
+    seq_len = total_tokens
+    return out[:, :seq_len]
+
+
 def chunk_gated_delta_rule_pytorch(
     q: torch.Tensor,
     k: torch.Tensor,
     v: torch.Tensor,
     g: torch.Tensor,
     beta: torch.Tensor,
+    scale: float | None = None,
     initial_state: torch.Tensor | None = None,
     output_final_state: bool = False,
     cu_seqlens: torch.Tensor | None = None,
@@ -193,11 +399,14 @@ def chunk_gated_delta_rule_pytorch(
     use_qk_l2norm_in_kernel: bool = False,
 ) -> tuple[torch.Tensor, torch.Tensor | None]:
     """
-    310P fallback with vLLM-compatible interface.
+    Reference-only implementation with vLLM-compatible interface.
     Internal math follows Transformers torch_chunk_gated_delta_rule flow.
+
+    The 310P production path must use the AscendC chunk-gdr kernels and does
+    not fall back to this implementation.
     """
     if head_first:
-        raise DeprecationWarning("head_first=True is not supported in 310P fallback.")
+        raise DeprecationWarning("head_first=True is not supported in the reference implementation.")
     q, k, v, g, beta, input_was_tnd = _normalize_chunk_inputs(q, k, v, g, beta, cu_seqlens)
 
     if cu_seqlens is not None and q.shape[0] != 1:
@@ -240,6 +449,7 @@ def chunk_gated_delta_rule_pytorch(
             g=g_seq,
             beta=beta_seq,
             chunk_size=CHUNK_SIZE,
+            scale=scale,
             initial_state=init_seq_state,
             output_final_state=True,
             use_qk_l2norm_in_kernel=use_qk_l2norm_in_kernel,
@@ -253,3 +463,131 @@ def chunk_gated_delta_rule_pytorch(
     if output_final_state:
         return out, states
     return out, None
+
+
+def chunk_gated_delta_rule_310(
+    q: torch.Tensor,
+    k: torch.Tensor,
+    v: torch.Tensor,
+    g: torch.Tensor,
+    beta: torch.Tensor,
+    scale: float | None = None,
+    initial_state: torch.Tensor | None = None,
+    output_final_state: bool = False,
+    cu_seqlens: torch.Tensor | None = None,
+    head_first: bool = False,
+    use_qk_l2norm_in_kernel: bool = False,
+) -> tuple[torch.Tensor, torch.Tensor | None]:
+    """310P chunk GDN path backed by AscendC fwd_h/fwd_o kernels.
+
+    Triton is unavailable on 310P, so the local WY preparation is done with
+    torch ops and the inter-chunk state/output matmuls are delegated to the
+    custom AscendC kernels.
+    """
+    if head_first:
+        raise DeprecationWarning("head_first=True is not supported in 310P chunk path.")
+    if g is None or beta is None:
+        raise RuntimeError("g and beta are required for the AscendC chunk-gdr path.")
+
+    q, k, v, g, beta, input_was_tnd = _normalize_chunk_inputs(q, k, v, g, beta, cu_seqlens)
+    if cu_seqlens is not None and q.shape[0] != 1:
+        raise ValueError("Variable-length mode expects batch size B=1.")
+    if k.shape != q.shape:
+        raise ValueError("q and k shapes must match.")
+    if g.shape != beta.shape or g.shape[:2] != q.shape[:2] or g.shape[2] != v.shape[2]:
+        raise ValueError("g/beta must have shape [B, T, Hv] matching v.")
+
+    _require_ascend_chunk_ops(q, k, v)
+
+    q = _maybe_l2norm(q, use_qk_l2norm_in_kernel)
+    k = _maybe_l2norm(k, use_qk_l2norm_in_kernel)
+
+    original_tokens = v.shape[1]
+    if cu_seqlens is None:
+        q_pad, k_pad, v_pad, g_pad, beta_pad, seq_ranges, cu_kernel = _pad_bthd_to_chunk(
+            q, k, v, g, beta, CHUNK_SIZE
+        )
+        cu_list = None
+        chunk_indices_list = None
+        num_states = q.shape[0]
+    else:
+        q_pad, k_pad, v_pad, g_pad, beta_pad, seq_ranges, cu_kernel = _pad_varlen_to_chunk(
+            q, k, v, g, beta, cu_seqlens.to(torch.int64).cpu(), CHUNK_SIZE
+        )
+        assert cu_kernel is not None
+        cu_list = cu_kernel.tolist()
+        chunk_indices_list = _prepare_chunk_indices_list(cu_kernel, CHUNK_SIZE)
+        num_states = cu_seqlens.numel() - 1
+
+    expected_state_shape = (num_states, v.shape[2], v.shape[-1], k.shape[-1])
+    if initial_state is not None:
+        if initial_state.device != q.device:
+            raise RuntimeError(f"initial_state must be on {q.device}, got {initial_state.device}.")
+        if tuple(initial_state.shape) != expected_state_shape:
+            raise ValueError(
+                f"initial_state must have shape {expected_state_shape}, got {tuple(initial_state.shape)}."
+            )
+
+    if q_pad.shape[1] == 0:
+        empty_out = v.new_empty((0, *v.shape[2:])) if input_was_tnd else v.new_empty(v.shape)
+        final_state = initial_state if output_final_state else None
+        return empty_out, final_state
+
+    scale = k.shape[-1] ** -0.5 if scale is None else scale
+    w_pad, u_pad, g_cumsum_pad = _compute_w_u_g_torch(k_pad, v_pad, g_pad, beta_pad, CHUNK_SIZE)
+
+    kernel_dtype = torch.float16
+    q_kernel = q_pad.to(kernel_dtype).transpose(1, 2).contiguous()
+    k_kernel = k_pad.to(kernel_dtype).transpose(1, 2).contiguous()
+    w_kernel = w_pad.to(kernel_dtype).transpose(1, 2).contiguous()
+    u_kernel = u_pad.to(kernel_dtype).transpose(1, 2).contiguous()
+    g_kernel = g_cumsum_pad.to(torch.float32).transpose(1, 2).contiguous()
+
+    if initial_state is None:
+        state = torch.zeros(
+            num_states,
+            v.shape[2],
+            v.shape[-1],
+            k.shape[-1],
+            dtype=torch.float32,
+            device=v.device,
+        )
+    else:
+        state = initial_state
+    state_kernel = state.transpose(-1, -2).contiguous()
+
+    h, v_new, final_state_kernel = torch.ops._C_ascend.chunk_gated_delta_rule_fwd_h(
+        k_kernel,
+        w_kernel,
+        u_kernel,
+        g=g_kernel,
+        gk=None,
+        initial_state=state_kernel,
+        output_final_state=output_final_state,
+        chunk_size=CHUNK_SIZE,
+        save_new_value=True,
+        cu_seqlens=cu_list,
+        chunk_indices=chunk_indices_list,
+        use_exp2=False,
+        transpose_state_layout=False,
+    )
+    o_kernel = torch.ops._C_ascend.chunk_fwd_o(
+        q_kernel,
+        k_kernel,
+        v_new,
+        h,
+        scale,
+        g=g_kernel,
+        g_gamma=None,
+        cu_seqlens=cu_list,
+        chunk_indices=chunk_indices_list,
+        chunk_size=CHUNK_SIZE,
+        transpose_state_layout=False,
+    )
+
+    out = o_kernel.transpose(1, 2).contiguous().to(v.dtype)
+    out = _unpad_chunk_output(out, seq_ranges, original_tokens, input_was_tnd, cu_seqlens is not None)
+    if not output_final_state:
+        return out, None
+    final_state = final_state_kernel.transpose(-1, -2).contiguous()
+    return out, final_state
