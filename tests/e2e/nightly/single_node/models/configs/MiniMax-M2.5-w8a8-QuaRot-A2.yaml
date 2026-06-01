@@ -41,6 +41,8 @@ test_cases:
       - "--enable-prefix-caching"
       - "--max-num-seqs"
       - "32"
+      - "--max-model-len"
+      - "196608"
       - "--seed"
       - "1024"
       - "--max-num-batched-tokens"
@@ -61,7 +63,7 @@ test_cases:
         dataset_path: vllm-ascend/gpqa
         request_conf: vllm_api_general_chat
         dataset_conf: gsm8k/gpqa_gen_0_shot_str
-        max_out_len: 196608
+        max_out_len: 131072
         batch_size: 64
         baseline: 85
         threshold: 5
