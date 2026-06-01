@@ -289,9 +289,7 @@ def _select_experts_with_fusion_ops(
             norm_type=2,
             out_flag=False,
         )
-        topk_weights = F.softplus(router_logits.to(torch.float32)).sqrt().gather(
-            1, topk_ids.to(torch.int64)
-        )
+        topk_weights = F.softplus(router_logits.to(torch.float32)).sqrt().gather(1, topk_ids.to(torch.int64))
         topk_weights = _renormalize_topk_weights(topk_weights, renormalize)
         topk_weights = topk_weights * routed_scaling_factor
         return topk_weights, topk_ids
