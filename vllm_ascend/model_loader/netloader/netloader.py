@@ -178,7 +178,7 @@ class ModelNetLoaderElastic(BaseModelLoader):
         else:
             target_device = torch.device(device_config.device)
 
-            vllm_config_backup = deepcopy(vllm_config)
+            _quant_config = vllm_config.quant_config
             model_config_backup = deepcopy(model_config)
 
             with set_default_torch_dtype(model_config.dtype):
@@ -217,7 +217,7 @@ class ModelNetLoaderElastic(BaseModelLoader):
                 if model is None:
                     logger.warning("Netloader elastic loading fails, use load format DefaultModelLoader")
 
-                    vllm_config = vllm_config_backup
+                    vllm_config.quant_config = _quant_config
                     model_config = model_config_backup
 
                     del model
@@ -338,9 +338,10 @@ class ModelNetLoaderElastic(BaseModelLoader):
             * need_process_weights_after_loading: A boolean flag indicating whether
               weights post-processing (e.g. quantization adjustments) still needs to be applied.
         """
-        self.load_config.model_loader_extra_config = {}
-        self.load_config.load_format = "auto"
-        default_model_loader = DefaultModelLoader(self.load_config)
+        load_config = deepcopy(self.load_config)
+        load_config.model_loader_extra_config = {}
+        load_config.load_format = "auto"
+        default_model_loader = DefaultModelLoader(load_config)
 
         if model_config.quantization is None:
             model = default_model_loader.load_model(vllm_config=vllm_config, model_config=model_config, prefix=prefix)
