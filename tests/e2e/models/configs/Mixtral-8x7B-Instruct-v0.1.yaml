@@ -1,22 +1,6 @@
 model_name: "mistralai/Mixtral-8x7B-Instruct-v0.1"
 hardware: "Atlas A2 Series"
 
-test_cases:
-  - model: "mistralai/Mixtral-8x7B-Instruct-v0.1"
-    server_cmd:
-      - --tensor-parallel-size
-      - "4"
-      - --max-model-len
-      - "4096"
-      - --dtype
-      - bfloat16
-      - --trust-remote-code
-      - --enforce-eager
-      - --block-size
-      - "128"
-      - --gpu-memory-utilization
-      - "0.7"
-
 serve:
   tensor_parallel_size: 4
   dtype: bfloat16
