@@ -177,7 +177,8 @@ def npugraph_ex_compile(
     # torch.compile requires the output of the fx graph to be a tuple
     if not graph_returns_tuple(graph):
         compiled_fn = make_graph_return_tuple(graph, example_inputs, npugraph_ex)
-    compiled_fn = npugraph_ex(graph, example_inputs)
+    else:
+        compiled_fn = npugraph_ex(graph, example_inputs)
     handle = (key, cache_path) 
 
     # handle = None
