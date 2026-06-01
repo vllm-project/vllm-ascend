@@ -417,9 +417,10 @@ class TestMemcacheBackendMethods(unittest.TestCase):
             backend = MemcacheBackend.__new__(MemcacheBackend)
             backend.store = MagicMock()
             backend.local_rank = 0
+            # Set internal state to avoid lazy init logic during tests
             backend._lazy_init = False
             backend._store_initialized = True
-            backend._is_a2 = True
+            backend._is_a2 = False
             backend._registered_buffers = None
             backend._buffers_registered = False
             return backend
