@@ -1152,7 +1152,7 @@ class MooncakeConnectorScheduler:
                     transfer_block_ids.append([])
             else:
                 transfer_block_ids.append(blocks)
-        return transfer_block_ids
+        return tuple(transfer_block_ids)
 
     def get_num_new_matched_tokens(self, request: "Request", num_computed_tokens: int) -> tuple[int, bool]:
         """
