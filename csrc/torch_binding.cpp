@@ -51,6 +51,7 @@
 #include "moe/causal_conv1d_v310/causal_conv1d_310_torch_adpt.h"
 #include "attention/recurrent_gated_delta_rule/recurrent_gated_delta_rule_torch_adpt.h"
 #include "attention/recurrent_gated_delta_rule_v310/recurrent_gated_delta_rule_310_torch_adpt.h"
+#include "store_kv_block/store_kv_block_torch_adpt.h"
 #include <c10/core/Device.h>
 #include <c10/core/Scalar.h>
 #include <c10/util/Exception.h>
@@ -2953,5 +2954,17 @@ TORCH_LIBRARY_EXPAND(CONCAT(_C, _ascend), ops)
         "chunk_fwd_o(Tensor q, Tensor k, Tensor v, Tensor h, float scale, *, Tensor? g=None, Tensor? g_gamma=None, int[]? cu_seqlens=None, int[]? chunk_indices=None, int? chunk_size=None, bool? transpose_state_layout=False) -> Tensor"
     );
     ops.impl("chunk_fwd_o", torch::kPrivateUse1, &vllm_ascend::chunk_fwd_o);
+
+    //store_kv_block
+    ops.def(
+        "store_kv_block_pre(Tensor slot_mapping_npu, int[2] slot_mapping_list =[], int block_size=0)"
+         "-> (Tensor group_len ,Tensor group_key_idx, Tensor group_key_cache_idx)"
+    );
+    ops.impl("store_kv_block_pre", torch::kPrivateUse1, &vllm_ascend::store_kv_block_pre);
+
+    ops.def(
+        "store_kv_block(Tensor key_in, Tensor key_cache_in, Tensor group_len, Tensor group_key_idx,Tensor group_key_cache_idx, int block_size=0) -> ()"
+    );
+    ops.impl("store_kv_block", torch::kPrivateUse1, &vllm_ascend::store_kv_block);
 }
 #endif

@@ -18,7 +18,7 @@ from vllm.v1.attention.backend import (
     MLAAttentionImpl,
 )
 from vllm.v1.kv_cache_interface import AttentionSpec
-
+from vllm_ascend import envs as ascend_envs
 from vllm_ascend.ascend_config import get_ascend_config
 from vllm_ascend.ascend_forward_context import _EXTRA_CTX
 from vllm_ascend.attention.attention_mask import AttentionMaskBuilder
@@ -154,7 +154,10 @@ class AscendSFAMetadata:
     num_decodes: int = 0
     num_decode_tokens: int = 0
     num_prefills: int = 0
-
+    block_size: int = 0
+    group_len: torch.Tensor | None = None
+    group_key_idx: torch.Tensor | None = None
+    group_key_cache_idx: torch.Tensor | None = None
 
 M = TypeVar("M", bound=AscendSFAMetadata)
 
@@ -236,6 +239,10 @@ class AscendSFAMetadataBuilder(MLACommonMetadataBuilder[AscendSFAMetadata]):
         block_table = common_attn_metadata.block_table_tensor[:num_reqs]
         slot_mapping = common_attn_metadata.slot_mapping[:num_input_tokens]
         input_positions = common_attn_metadata.positions[:num_input_tokens].long()
+
+        block_size = 128
+        if ascend_envs.VLLM_ASCEND_ENABLE_RESHAPE_OPTIM:
+            slot_mapping_cpu = slot_mapping.cpu()
 
         cum_query_lens = common_attn_metadata.query_start_loc[1 : num_reqs + 1]
         seq_lens = common_attn_metadata.seq_lens[:num_reqs]
@@ -330,6 +337,14 @@ class AscendSFAMetadataBuilder(MLACommonMetadataBuilder[AscendSFAMetadata]):
                 actual_seq_lengths_key=actual_seq_lengths_key,
             )
 
+        if ascend_envs.VLLM_ASCEND_ENABLE_RESHAPE_OPTIM:
+            slot_mapping_list = slot_mapping_cpu.tolist()
+            group_len, group_key_idx, group_key_cache_idx = torch.ops._C_ascend.store_kv_block_pre(
+                slot_mapping, slot_mapping_list, block_size
+            )
+        else:
+            group_len, group_key_idx, group_key_cache_idx = None, None, None
+
         return self.metadata_cls(  # type: ignore
             num_input_tokens=common_attn_metadata.num_input_tokens,
             num_actual_tokens=num_actual_tokens,
@@ -344,6 +359,10 @@ class AscendSFAMetadataBuilder(MLACommonMetadataBuilder[AscendSFAMetadata]):
             sin=sin[:num_input_tokens],
             cos=cos[:num_input_tokens],
             dsa_cp_context=dsa_cp_context,
+            block_size=block_size,
+            group_len=group_len,
+            group_key_idx=group_key_idx,
+            group_key_cache_idx=group_key_cache_idx,
         )
 
     def build_for_graph_capture(
@@ -1242,17 +1261,39 @@ class AscendSFAImpl(MLAAttentionImpl):
         if kv_cache is not None:
             if self.is_kv_producer:
                 attn_metadata.reshape_cache_event = torch.npu.Event()
-            torch_npu.npu_scatter_nd_update_(
-                kv_cache[2].view(-1, k_li.shape[-1]), slot_mapping.view(-1, 1), k_li.view(-1, k_li.shape[-1])
-            )  # b, s, n, d
+                
+            if self.is_kv_producer and ascend_envs.VLLM_ASCEND_ENABLE_RESHAPE_OPTIM:
+                torch.ops._C_ascend.store_kv_block(
+                    k_li,
+                    kv_cache[2],
+                    attn_metadata.group_len,
+                    attn_metadata.group_key_idx,
+                    attn_metadata.group_key_cache_idx,
+                    attn_metadata.block_size,
+                )
+            else:
+                torch_npu.npu_scatter_nd_update_(
+                    kv_cache[2].view(-1, k_li.shape[-1]), slot_mapping.view(-1, 1), k_li.view(-1, k_li.shape[-1])
+                )  # b, s, n, d
+                
             if self.use_sparse_c8_indexer:
                 assert len(kv_cache) == 4
                 assert k_li_scale is not None
-                torch_npu.npu_scatter_nd_update_(
-                    kv_cache[3].view(-1, k_li_scale.shape[-1]),
-                    slot_mapping.view(-1, 1),
-                    k_li_scale.view(-1, k_li_scale.shape[-1]),
-                )
+                if self.is_kv_producer and ascend_envs.VLLM_ASCEND_ENABLE_RESHAPE_OPTIM:
+                    torch.ops._C_ascend.store_kv_block(
+                        k_li_scale,
+                        kv_cache[3],
+                        attn_metadata.group_len,
+                        attn_metadata.group_key_idx,
+                        attn_metadata.group_key_cache_idx,
+                        attn_metadata.block_size,
+                    )
+                else:
+                    torch_npu.npu_scatter_nd_update_(
+                        kv_cache[3].view(-1, k_li_scale.shape[-1]),
+                        slot_mapping.view(-1, 1),
+                        k_li_scale.view(-1, k_li_scale.shape[-1]),
+                    )
             if self.is_kv_producer:
                 attn_metadata.reshape_cache_event.record()
 
