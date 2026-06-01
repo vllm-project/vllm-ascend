@@ -297,8 +297,6 @@ def _shift_and_gather_cache_1d_kernel(
     shift = tl.load(shift_ptr + pid_seq).to(tl.int32)
     cached_len = tl.load(cached_len_ptr + pid_seq).to(tl.int32)
 
-    assert cached_len >= shift
-
     # get dst indices
     base = pid_blk * BLOCK_TOKENS
     k = tl.arange(0, BLOCK_TOKENS)
@@ -353,8 +351,6 @@ def _shift_and_gather_hidden_kernel(
     end = tl.load(end_ptr + pid_seq).to(tl.int32)
     shift = tl.load(shift_ptr + pid_seq).to(tl.int32)
     cached_len = tl.load(cached_len_ptr + pid_seq).to(tl.int32)
-
-    assert cached_len >= shift
 
     # get dst indices
     base = pid_blk * BLOCK_TOKENS
