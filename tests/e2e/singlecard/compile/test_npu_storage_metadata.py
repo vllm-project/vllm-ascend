@@ -20,7 +20,9 @@ import torch
 import torch_npu
 
 from vllm_ascend.utils import enable_custom_op
+
 torch_npu.npu.config.allow_internal_format = True
+
 
 def _get_npu_storage_shape_op():
     assert enable_custom_op(), "requires vllm_ascend custom ops"
