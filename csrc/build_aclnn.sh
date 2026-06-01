@@ -79,7 +79,7 @@ elif [[ "$SOC_VERSION" =~ ^ascend910b ]]; then
         cd - || exit 1
     fi
     ABSOLUTE_CATLASS_PATH=$(cd "${CATLASS_PATH}" && pwd)
-    export CPATH=${ABSOLUTE_CATLASS_PATH}:${CPATH}
+    export CPATH=${ABSOLUTE_CATLASS_PATH}:${CPATH:-}
     log "catlass include=${ABSOLUTE_CATLASS_PATH}"
 
     CUSTOM_OPS_ARRAY=(
@@ -141,6 +141,9 @@ elif [[ "$SOC_VERSION" =~ ^ascend910_93 ]]; then
         git checkout "${CATLASS_COMMIT}" || exit 1
         cd - || exit 1
     fi
+    ABSOLUTE_CATLASS_PATH=$(cd "${CATLASS_PATH}" && pwd)
+    export CPATH=${ABSOLUTE_CATLASS_PATH}:${CPATH:-}
+    log "catlass include=${ABSOLUTE_CATLASS_PATH}"
     # dependency: cann-toolkit file moe_distribute_base.h
     HCCL_STRUCT_FILE_PATH=$(find -L "${ASCEND_TOOLKIT_HOME}" -name "moe_distribute_base.h" 2>/dev/null | head -n1)
     if [ -z "$HCCL_STRUCT_FILE_PATH" ]; then
@@ -151,10 +154,13 @@ elif [[ "$SOC_VERSION" =~ ^ascend910_93 ]]; then
     yes | cp "${HCCL_STRUCT_FILE_PATH}" "${ROOT_DIR}/csrc/utils/inc/kernel"
 
     # for dispatch_normal and combine_normal
-    TARGET_DIR="$SCRIPT_DIR/mc2/moe_dispatch_normal/op_kernel/utils/"
+    TARGET_DIR="${ROOT_DIR}/csrc/mc2/moe_dispatch_normal/op_kernel/utils/"
+    mkdir -p "$TARGET_DIR"
+    echo "$TARGET_DIR"
     cp "$HCCL_STRUCT_FILE_PATH" "$TARGET_DIR"
 
-    TARGET_DIR="$SCRIPT_DIR/mc2/moe_combine_normal/op_kernel/utils/"
+    TARGET_DIR="${ROOT_DIR}/csrc/mc2/moe_combine_normal/op_kernel/utils/"
+    mkdir -p "$TARGET_DIR"
     echo "$TARGET_DIR"
     cp "$HCCL_STRUCT_FILE_PATH" "$TARGET_DIR"
     
@@ -224,7 +230,7 @@ elif [[ "$SOC_VERSION" =~ ^ascend950 ]]; then
         cd - || exit 1
     fi
     ABSOLUTE_CATLASS_PATH=$(cd "${CATLASS_PATH}" && pwd)
-    export CPATH=${ABSOLUTE_CATLASS_PATH}:${CPATH}
+    export CPATH=${ABSOLUTE_CATLASS_PATH}:${CPATH:-}
     log "catlass include=${ABSOLUTE_CATLASS_PATH}"
 
     CUSTOM_OPS_ARRAY=(
@@ -274,10 +280,10 @@ log_selected_ops
   set -euo pipefail
 
   log "subshell cwd before cd=$(pwd)"
-  cd csrc
+  cd "${ROOT_DIR}/csrc"
   log "subshell cwd after cd=$(pwd)"
-  log "cleaning csrc build dirs"
-  rm -rf -- build output build_out
+  log "preserving csrc/build and cleaning output dirs"
+  rm -rf -- output build_out
 
   : "${ROOT_DIR:?ROOT_DIR is not set}"
   : "${CUSTOM_OPS:?CUSTOM_OPS is not set}"
