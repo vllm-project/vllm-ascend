@@ -492,7 +492,7 @@ class TestEntropyVerify(TestBase):
     @patch("torch.full", new=mock_pin_memory(torch.full))
     @patch("torch.tensor", new=mock_pin_memory(torch.tensor))
     def test_entropy_verify_standard_low_entropy_stricter(self):
-        """Low entropy (peaked) keeps strict acceptance."""
+        """Low entropy (peaked distribution) keeps threshold near POSTERIOR_THRESHOLD."""
         batch_size = 1
         max_spec_len = 2
         output_token_ids = torch.full((batch_size, max_spec_len + 1), PLACEHOLDER_TOKEN_ID)
@@ -519,8 +519,8 @@ class TestEntropyVerify(TestBase):
 
         ori_target_probs = torch.tensor(
             [
-                [0.95, 0.03, 0.02],
-                [0.94, 0.04, 0.02],
+                [0.55, 0.25, 0.20],
+                [0.53, 0.27, 0.20],
             ]
         )
 
@@ -545,7 +545,8 @@ class TestEntropyVerify(TestBase):
         )
 
         assert output_token_ids[0, 0].item() == 1
-        assert output_token_ids[0, 1].item() in (0, 88)
+        assert output_token_ids[0, 1].item() == 88
+        assert output_token_ids[0, 2].item() == 100
 
     @patch("torch.arange", new=mock_pin_memory(torch.arange))
     @patch("torch.ones", new=mock_pin_memory(torch.ones))
