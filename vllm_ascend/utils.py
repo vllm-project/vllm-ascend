@@ -20,6 +20,7 @@
 from __future__ import annotations
 
 import functools
+import json
 import math
 import os
 from contextlib import nullcontext
@@ -492,6 +493,36 @@ def adapt_patch(is_global_patch: bool = False):
         from vllm_ascend.patch import platform  # noqa: F401
     else:
         from vllm_ascend.patch import worker  # noqa: F401
+
+
+def setup_ascend_local_comm_res(local_rank: int) -> None:
+    """Load the local A5 endpoint config into ASCEND_LOCAL_COMM_RES."""
+    visible_devices = os.getenv("ASCEND_RT_VISIBLE_DEVICES")
+    if visible_devices is None:
+        from vllm_ascend.cpu_binding import DeviceInfo
+
+        devices = sorted([int(x) for x in DeviceInfo.get_npu_map_info()])
+    else:
+        devices = [int(x) for x in visible_devices.split(",") if x.strip()]
+
+    local_comm_res_path = os.getenv("ASCEND_LOCAL_COMM_RES_PATH")
+    if not local_comm_res_path:
+        return
+
+    local_comm_res_file = os.path.join(local_comm_res_path, f"ub_endpoint_npu_{devices[local_rank]}.json")
+    try:
+        with open(local_comm_res_file) as f:
+            data = json.load(f)
+    except FileNotFoundError:
+        raise FileNotFoundError(
+            f"Endpoint config file not found: {local_comm_res_file}. "
+            "Please set ASCEND_LOCAL_COMM_RES_PATH to a directory containing "
+            "ub_endpoint_npu_*.json endpoint configuration files."
+        )
+    except json.JSONDecodeError as e:
+        raise ValueError(f"Failed to parse endpoint config file: {local_comm_res_file}") from e
+
+    os.environ["ASCEND_LOCAL_COMM_RES"] = json.dumps(data, ensure_ascii=False, separators=(",", ":"))
 
 
 @functools.cache
