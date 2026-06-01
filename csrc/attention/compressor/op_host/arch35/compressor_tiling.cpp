@@ -951,13 +951,24 @@ ge::graphStatus CompressorTiling::CheckDtypeConsistencyX(const gert::CompileTime
     return ge::GRAPH_SUCCESS;
 }
 
+ge::graphStatus CompressorTiling::CheckDtypeConsistencyFp32(const gert::CompileTimeTensorDesc *desc,
+                                                            const std::string &name) const
+{
+    const auto actualDtype = desc->GetDataType();
+    OP_CHECK_IF(actualDtype != ge::DT_FLOAT,
+                OP_LOGE(context_->opName, "%s datatype should be DT_FLOAT, but got %s", name.c_str(),
+                        DataTypeToSerialString(actualDtype).c_str()),
+                return ge::GRAPH_FAILED);
+    return ge::GRAPH_SUCCESS;
+}
+
 ge::graphStatus CompressorTiling::CheckDtypeConsistency() const
 {
     if (CheckDtypeConsistencyX(context_->wkv.desc, WKV_NAME) != ge::GRAPH_SUCCESS ||
         CheckDtypeConsistencyX(context_->wgate.desc, WGATE_NAME) != ge::GRAPH_SUCCESS ||
-        CheckDtypeConsistencyX(context_->normWeight.desc, NORM_WEIGHT_NAME) != ge::GRAPH_SUCCESS ||
-        CheckDtypeConsistencyX(context_->ropeSin.desc, ROPE_SIN_NAME) != ge::GRAPH_SUCCESS ||
-        CheckDtypeConsistencyX(context_->ropeCos.desc, ROPE_COS_NAME) != ge::GRAPH_SUCCESS ||
+        CheckDtypeConsistencyFp32(context_->normWeight.desc, NORM_WEIGHT_NAME) != ge::GRAPH_SUCCESS ||
+        CheckDtypeConsistencyFp32(context_->ropeSin.desc, ROPE_SIN_NAME) != ge::GRAPH_SUCCESS ||
+        CheckDtypeConsistencyFp32(context_->ropeCos.desc, ROPE_COS_NAME) != ge::GRAPH_SUCCESS ||
         CheckDtypeConsistencyX(context_->cmpKv.desc, CMP_KV_NAME) != ge::GRAPH_SUCCESS) {
         return ge::GRAPH_FAILED;
     }
