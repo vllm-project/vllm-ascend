@@ -34,7 +34,7 @@ from vllm_ascend.ascend_forward_context import _EXTRA_CTX
 from vllm_ascend.distributed.utils import fc3_all_gather_and_maybe_unpad_impl
 from vllm_ascend.ops.fused_moe.moe_runtime_args import MoEPrepareOutput
 from vllm_ascend.quantization.quant_type import QuantType
-from vllm_ascend.utils import enable_sp, enable_sp_by_pass, npu_stream_switch, prefill_context_parallel_enable
+from vllm_ascend.utils import enable_sp, enable_sp_by_pass, npu_stream_switch
 
 
 class PrepareAndFinalize(ABC):
@@ -431,7 +431,7 @@ class PrepareAndFinalizeWithAllGather(PrepareAndFinalize):
             hidden_states = self.moe_config.dp_group.all_gather(hidden_states, 0)
             router_logits = self.moe_config.dp_group.all_gather(router_logits, 0)
 
-        if prefill_context_parallel_enable() and self.moe_config.pcp_size > 1:
+        if self.moe_config.pcp_size > 1:
             max_tokens_across_pcp = _EXTRA_CTX.max_tokens_across_pcp
 
             self.num_tokens_pcp = hidden_states.shape[0]
@@ -513,6 +513,6 @@ class PrepareAndFinalizeWithAllGather(PrepareAndFinalize):
             hidden_states = get_dp_group().reduce_scatter(hidden_states, 0)
             hidden_states = hidden_states[: self.num_tokens]
 
-        if prefill_context_parallel_enable() and self.moe_config.pcp_size > 1:
+        if self.moe_config.pcp_size > 1:
             hidden_states = get_pcp_group().reduce_scatter(hidden_states, dim=0)
         return hidden_states

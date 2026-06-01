@@ -40,6 +40,7 @@ from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.kv_transfer import
     KVCacheStoreRecvingThread,
     KVCacheStoreSendingThread,
     KVTransferThread,
+    record_failed_blocks,
 )
 
 backend_map = {
@@ -95,6 +96,8 @@ class KVPoolWorker:
 
         self.kv_role = vllm_config.kv_transfer_config.kv_role
         self.load_async = vllm_config.kv_transfer_config.kv_connector_extra_config.get("load_async", False)
+        self._invalid_block_ids: set[int] = set()
+        self._invalid_block_ids_lock = threading.Lock()
         self.consumer_is_to_put = vllm_config.kv_transfer_config.kv_connector_extra_config.get(
             "consumer_is_to_put", False
         )
@@ -196,8 +199,14 @@ class KVPoolWorker:
         backend_module = importlib.import_module(backend_path)
         real_backend = getattr(backend_module, backend_name)
 
+        backend_kwargs = {}
+        if self.backend.lower() in {"mooncake", "memcache"}:
+            # DSV4 exposes compress_ratios; only use lazy store init for this
+            # compressed-model path.
+            backend_kwargs["lazy_init"] = self.use_compress
         self.m_store = real_backend(  # type: ignore[misc]
-            parallel_config
+            parallel_config,
+            **backend_kwargs,
         )
         kv_event_config = vllm_config.kv_events_config
         self.enable_kv_events = False
@@ -412,6 +421,8 @@ class KVPoolWorker:
                 self.dcp_size,
                 ready_event,
                 self.get_event,
+                self._invalid_block_ids,
+                self._invalid_block_ids_lock,
             )
             self.kv_recv_thread.start()
             ready_event.wait()
@@ -440,6 +451,8 @@ class KVPoolWorker:
                     self.tp_rank,
                     self.dcp_size,
                     ready_event,
+                    self._invalid_block_ids,
+                    self._invalid_block_ids_lock,
                 )
                 self.kv_recv_thread.start()
                 ready_event.wait()
@@ -491,6 +504,7 @@ class KVPoolWorker:
                     addr_list = []
                     size_list = []
                     key_list = []
+                    block_id_list: list[int] = []
                     for group_id in load_group_ids:
                         block_ids = request.block_ids_by_group[group_id]
                         group_block_size = self.grouped_block_size[group_id]
@@ -506,7 +520,7 @@ class KVPoolWorker:
                             kv_cache_group_id=group_id,
                             skip_null_blocks=skip_null,
                         ):
-                            addr, size, _ = self.token_database.prepare_value(
+                            addr, size, block_id = self.token_database.prepare_value(
                                 start,
                                 end,
                                 block_ids,
@@ -515,6 +529,7 @@ class KVPoolWorker:
                             key_list.append(key.to_string())
                             addr_list.append(addr)
                             size_list.append(size)
+                            block_id_list.append(block_id)
                     if not key_list:
                         continue
                     key_list_c = key_list[self.tp_rank % len(key_list) :] + key_list[: self.tp_rank % len(key_list)]
@@ -524,6 +539,10 @@ class KVPoolWorker:
                     size_list_c = (
                         size_list[self.tp_rank % len(size_list) :] + size_list[: self.tp_rank % len(size_list)]
                     )
+                    block_id_list_c = (
+                        block_id_list[self.tp_rank % len(block_id_list) :]
+                        + block_id_list[: self.tp_rank % len(block_id_list)]
+                    )
                     logger.debug(
                         "KV pool worker calls backend get request=%s token_len=%d groups=%s keys=%d sample_keys=%s",
                         request.req_id,
@@ -532,7 +551,19 @@ class KVPoolWorker:
                         len(key_list_c),
                         key_list_c[:3],
                     )
-                    self.m_store.get(key_list_c, addr_list_c, size_list_c)
+                    ret = self.m_store.get(key_list_c, addr_list_c, size_list_c)
+                    if ret is not None and any(r != 0 for r in ret):
+                        missing_block_ids = record_failed_blocks(
+                            block_id_list_c,
+                            ret,
+                        )
+                        self._invalid_block_ids.update(missing_block_ids)
+                    elif ret is None:
+                        missing_block_ids = record_failed_blocks(
+                            block_id_list_c,
+                            [1] * len(block_id_list_c),
+                        )
+                        self._invalid_block_ids.update(missing_block_ids)
                     logger.debug(
                         "KV pool worker backend get returned request=%s token_len=%d groups=%s keys=%d",
                         request.req_id,
@@ -548,6 +579,12 @@ class KVPoolWorker:
                 assert ret_token_mask is not None
                 num_retrieved_tokens = ret_token_mask.sum().item()
                 logger.debug("Retrieved %s tokens", num_retrieved_tokens)
+
+    def get_block_ids_with_load_errors(self) -> set[int]:
+        with self._invalid_block_ids_lock:
+            invalid_blocks = self._invalid_block_ids.copy()
+            self._invalid_block_ids.clear()
+        return invalid_blocks
 
     def save_kv_layer(self, connector_metadata: AscendConnectorMetadata) -> None:
         if self.current_layer == 0:
@@ -591,7 +628,6 @@ class KVPoolWorker:
                 continue
 
             request.skip_null_blocks_by_group = self.group_uses_align_state
-            request.disable_tp_key_sharding = (self.use_mla or self.use_sparse) and self.put_step > 1
             request.current_event = current_event
             self.kv_send_thread.add_stored_request(  # type: ignore[union-attr]
                 request.req_id

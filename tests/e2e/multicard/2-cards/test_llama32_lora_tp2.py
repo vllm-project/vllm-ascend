@@ -24,6 +24,7 @@ def test_llama_lora_tp2(llama32_lora_files, fully_sharded_loras):
         max_loras=4,
         tensor_parallel_size=2,
         fully_sharded_loras=fully_sharded_loras,
+        compilation_config={"cudagraph_mode": "PIECEWISE"},
     ) as vllm_model:
         llm = vllm_model.model
         generate_and_test(llm, llama32_lora_files)

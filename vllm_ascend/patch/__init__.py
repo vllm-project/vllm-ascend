@@ -267,6 +267,44 @@
 #       Remove this patch if upstream streaming behavior is updated to satisfy the
 #       same DeepSeek DSML incrementality contract.
 #
+# ** 12a. File: platform/patch_deepseek_v4_thinking.py**
+# ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+#   1. `vllm.entrypoints.openai.chat_completion.protocol.ChatCompletionRequest`
+#      `vllm.tokenizers.deepseek_v4`
+#    Why:
+#       Supported vLLM v0.20.2 predates newer DeepSeek V4 reasoning-effort
+#       handling: `minimal`, `xhigh`, and `max` are rejected at request
+#       validation time, reasoning effort does not automatically enable
+#       thinking, and `reasoning_effort="none"` does not force chat mode in
+#       the DeepSeek V4 tokenizer.
+#    How:
+#       Extend the request field validation to the newer accepted values,
+#       backport the newer `build_chat_params` enable_thinking behavior, and
+#       monkey-patch the DeepSeek V4 tokenizer reasoning-effort mapping.
+#    Related PR (if no, explain why):
+#       Upstream vLLM main behavior after v0.20.2.
+#    Future Plan:
+#       Remove this patch once vllm-ascend upgrades to a vLLM version with the
+#       same DeepSeek V4 thinking behavior.
+#
+# ** 12b. File: platform/patch_minimax_m2_tool_call_parser.py**
+# ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+#   1. `vllm.tool_parsers.minimax_m2_tool_parser.MinimaxM2ToolParser`
+#    Why:
+#       vLLM 0.20.2 only emits MiniMax-M2 tool-call arguments after a complete
+#       `<invoke>...</invoke>` block, so long arguments are buffered instead of
+#       streamed incrementally.
+#    How:
+#       Monkey-patch the MiniMax-M2 parser to emit the tool name once the
+#       `<invoke name=...>` header is available and then stream partial
+#       `<parameter>` values as JSON argument fragments.
+#    Related PR (if no, explain why):
+#       https://github.com/vllm-project/vllm/pull/40253
+#       https://github.com/vllm-project/vllm/pull/40298
+#    Future Plan:
+#       Remove this patch once the supported vLLM version contains the upstream
+#       MiniMax-M2 incremental tool-call streaming fix.
+#
 # ** 13. File: platform/patch_camem_allocator.py**
 # ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 #   1. `vllm.config.model.is_cumem_allocator_available`

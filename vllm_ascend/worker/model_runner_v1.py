@@ -21,6 +21,7 @@ import math
 import sys
 import time
 from collections import defaultdict
+from collections.abc import Callable
 from contextlib import contextmanager, nullcontext
 from copy import copy, deepcopy
 from dataclasses import dataclass, replace
@@ -614,6 +615,23 @@ class NPUModelRunner(GPUModelRunner):
         if isinstance(self.model, ACLGraphWrapper):
             return self.model.unwrap()
         return self.model
+
+    def _update_states(self, scheduler_output: "SchedulerOutput") -> Callable | None:
+        # Temporary rewind guard for KV-load-failure recompute.
+        # This can be removed after the upstream fix is merged.
+        req_data = scheduler_output.scheduled_cached_reqs
+
+        if self.use_async_scheduling:
+            for i, req_id in enumerate(req_data.req_ids):
+                req_state = self.requests.get(req_id)
+                if req_state is None:
+                    continue
+
+                num_computed_tokens = req_data.num_computed_tokens[i]
+                if num_computed_tokens < req_state.num_computed_tokens:
+                    req_state.prev_num_draft_len = 0
+
+        return super()._update_states(scheduler_output)
 
     def _pad_query_start_loc_for_fia(
         self,
@@ -1747,7 +1765,9 @@ class NPUModelRunner(GPUModelRunner):
                             req_state.prev_num_draft_len = 0
 
                 # Update persistent batch states.
-                deferred_state_corrections_fn = self._update_states(scheduler_output)
+                deferred_state_corrections_fn = self._update_states(
+                    scheduler_output
+                )
 
                 if has_ec_transfer() and get_ec_transfer().is_producer:
                     with self.maybe_get_ec_connector_output(
@@ -1957,8 +1977,7 @@ class NPUModelRunner(GPUModelRunner):
             update_cos_sin(positions)
 
         if self.dynamic_eplb:
-            with record_function_or_nullcontext("EPLB weight D2D"):
-                self.eplb_updator.forward_before()
+            self.eplb_updator.forward_before()
 
         # Set cudagraph mode to none if calc_kv_scales is true.
         # KV scales calculation involves dynamic operations that are incompatible
@@ -2273,8 +2292,7 @@ class NPUModelRunner(GPUModelRunner):
             model_runner_output.execution_time_ms = (time.perf_counter() - self._execution_start_time) * 1000.0
 
         if self.dynamic_eplb:
-            with record_function_or_nullcontext("EPLB update"):
-                self.eplb_updator.forward_end()
+            self.eplb_updator.forward_end()
 
         self._finalize_dump_data()
 
