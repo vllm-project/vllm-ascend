@@ -136,6 +136,7 @@ def npugraph_ex_compile(
     try:
         import npugraph_ex as nge
         from torchair.npu_fx_compiler import _CompiledFxGraph
+
         cache_path = os.path.join(cache_dir, key) if (cache_dir and key) else None
 
         torch.npu.set_compile_mode(jit_compile=False)
@@ -150,9 +151,11 @@ def npugraph_ex_compile(
             config, ascend_compilation_config, vllm_config, process_kwargs_options=_process_kwargs_options
         )
         import npugraph_ex.npu_fx_compiler as nfx
+
         _original_get_compiled_gm = nfx._NpuFxCompiler._get_compiled_gm
-        
+
         handle = None
+
         def patched_get_compiled_gm(self, graph, example_inputs):
             compiled_gm = _original_get_compiled_gm(self, graph, example_inputs)
             if cache_path:
@@ -163,7 +166,7 @@ def npugraph_ex_compile(
                         f.write(py_code)
                     logger.debug(f"Saved compiled graph to cache: {cache_path}")
             return compiled_gm
-        
+
         nfx._NpuFxCompiler._get_compiled_gm = patched_get_compiled_gm
         npugraph_ex = nge.get_npu_backend(compiler_config=config)
     except ImportError:
@@ -179,8 +182,7 @@ def npugraph_ex_compile(
         compiled_fn = make_graph_return_tuple(graph, example_inputs, npugraph_ex)
     else:
         compiled_fn = npugraph_ex(graph, example_inputs)
-    handle = (key, cache_path) 
-
+    handle = (key, cache_path)
 
     nfx._NpuFxCompiler._get_compiled_gm = _original_get_compiled_gm
     return compiled_fn, handle
@@ -194,6 +196,7 @@ class AscendCompiler(CompilerInterface):
     """
 
     name = "AscendCompiler"
+
     # TODO(wxs): add passes related to compilation in compute_hash
     def compute_hash(self, vllm_config: VllmConfig) -> str:
         self.vllm_config = vllm_config
@@ -208,7 +211,7 @@ class AscendCompiler(CompilerInterface):
             "enable_static_kernel": ascend_compilation_config.enable_static_kernel,
         }
         logger.debug("AscendCompiler hash factors: %s", factors)
-        return sha256(str(factors).encode(), usedforsecurity=False).hexdigest()[:10] 
+        return sha256(str(factors).encode(), usedforsecurity=False).hexdigest()[:10]
 
     def initialize_cache(self, cache_dir, disable_cache=False, prefix=""):
         self.cache_dir = cache_dir
@@ -247,11 +250,18 @@ class AscendCompiler(CompilerInterface):
             logger.info("enable_npugraph_ex is enabled, which will bring graph compilation optimization.")
             assert hasattr(self, "vllm_config")
             return npugraph_ex_compile(
-                graph, example_inputs, compiler_config, self.vllm_config, ascend_compilation_config, compile_range, key, cache_dir
+                graph,
+                example_inputs,
+                compiler_config,
+                self.vllm_config,
+                ascend_compilation_config,
+                compile_range,
+                key,
+                cache_dir,
             )
         else:
             return fusion_pass_compile(graph, example_inputs, compiler_config, compile_range, key)
-        
+
     def load(self, handle, graph, example_inputs, graph_index, compile_range):
         key, path = handle
         from npugraph_ex.npu_fx_compiler import _CompiledFxArtifacts, _CompiledFxGraph
@@ -268,6 +278,7 @@ class AscendCompiler(CompilerInterface):
         # recreate the unflatten wrapper so callers receive the original output structure.
         if not graph_returns_tuple(graph):
             _inner_fn = compiled_fn
+
             def compiled_fn(*args, **kwargs):
                 result = _inner_fn(*args, **kwargs)
                 if isinstance(result, (tuple, list)) and len(result) == 1:
