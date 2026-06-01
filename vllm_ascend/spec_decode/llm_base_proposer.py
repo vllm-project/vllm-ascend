@@ -194,6 +194,13 @@ class AscendSpecDecodeBaseProposer(SpecDecodeBaseProposer):
         from vllm.compilation.backends import set_model_tag
 
         draft_vllm_config = self._create_draft_vllm_config()
+        draft_load_config = self.speculative_config.draft_load_config
+        logger.info(
+            "AscendSpecDecodeBaseProposer._get_model(): loading draft model with "
+            "load_format=%s, model=%s",
+            getattr(draft_load_config, "load_format", None),
+            getattr(self.speculative_config.draft_model_config, "model", None),
+        )
         with set_model_tag("eagle_head"):
             model = get_model(
                 vllm_config=draft_vllm_config,
