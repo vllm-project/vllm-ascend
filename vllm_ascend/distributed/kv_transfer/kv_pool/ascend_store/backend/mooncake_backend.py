@@ -519,15 +519,6 @@ class MooncakeBackend(Backend):
                 current_batch_keys[:3],
                 e,
             )
-            for i, value in enumerate(res_list):
-                if value < 0:
-                    logger.error("Failed to get key %s, res:%s", keys, res_list)
-                elif value > 0:
-                    res_list[i] = 0
-            return res_list
-        except Exception as e:
-            logger.error("Failed to get key %s, error:%s", keys, e)
-            return None
 
 
 @dataclass
@@ -566,6 +557,7 @@ class MooncakeStoreConfig:
             raise ValueError("embedded mode requires global_segment_size > 0")
         if self.mode == "standalone-store" and self.global_segment_size != 0:
             raise ValueError("standalone-store mode requires global_segment_size == 0")
+
     preferred_segment: bool
     prefer_alloc_in_same_node: bool
 
@@ -577,9 +569,6 @@ class MooncakeStoreConfig:
         global_segment_size_env = os.getenv("MOONCAKE_GLOBAL_SEGMENT_SIZE", None)
         return MooncakeStoreConfig(
             metadata_server=config.get("metadata_server"),
-            master_server_address=config.get("master_server_address"),
-            protocol=config.get("protocol", "ascend"),
-            device_name=config.get("device_name", ""),
             mode=config.get("mode", "embedded"),
             global_segment_size=_parse_global_segment_size(
                 global_segment_size_env
