@@ -333,7 +333,7 @@ class TestKVCacheStoreRecvingThread(unittest.TestCase):
 
 
 class TestKVCacheStoreLayerSendingThread(unittest.TestCase):
-    def _make_thread(self, exists_result=None, num_layers=2):
+    def _make_thread(self, exists_result=None, num_layers=2, enable_kv_event=False):
         store = FakeStore(exists_result or [0, 0])
         db = FakeTokenDatabase()
         t = KVCacheStoreLayerSendingThread(
@@ -345,6 +345,7 @@ class TestKVCacheStoreLayerSendingThread(unittest.TestCase):
             put_step=1,
             ready_event=threading.Event(),
             num_layers=num_layers,
+            enable_kv_event=enable_kv_event,
         )
         return t, store
 
@@ -360,6 +361,9 @@ class TestKVCacheStoreLayerSendingThread(unittest.TestCase):
             layer_id=layer_id,
             is_last_chunk=is_last_chunk,
             current_event=None,
+            token_ids=list(range(num_keys * 16)),
+            original_block_size=16,
+            block_hashes=[f"h{i}" for i in range(num_keys)],
         )
 
     def test_handle_request_puts_missing(self):
@@ -398,6 +402,7 @@ class TestKVCacheStoreLayerSendingThread(unittest.TestCase):
             layer_id=0,
             is_last_chunk=True,
         )
+        t.request_queue.put(req)
         t._handle_request(req)
         finished = t.get_and_clear_finished_requests()
         self.assertIn("r1", finished)
@@ -427,6 +432,37 @@ class TestKVCacheStoreLayerSendingThread(unittest.TestCase):
         t._handle_request(req)
         finished = t.get_and_clear_finished_requests()
         self.assertIn("r1", finished)
+
+    def test_layerwise_kv_event_published_on_final_layer(self):
+        t, store = self._make_thread([0], num_layers=2, enable_kv_event=True)
+        req = self._make_layer_req(layer_id=1, is_last_chunk=True, num_keys=1)
+        t.request_queue.put(req)
+        t._handle_request(req)
+        events = t.get_kv_events()
+        self.assertEqual(len(events), 1)
+        self.assertEqual(events[0].block_hashes, ["h0"])
+        self.assertEqual(events[0].token_ids, list(range(16)))
+        self.assertEqual(events[0].block_size, 16)
+
+    def test_layerwise_kv_event_not_published_before_final_layer(self):
+        t, store = self._make_thread([0], num_layers=2, enable_kv_event=True)
+        req = self._make_layer_req(layer_id=0, is_last_chunk=False, num_keys=1)
+        t.request_queue.put(req)
+        t._handle_request(req)
+        self.assertEqual(t.get_kv_events(), [])
+
+    def test_layerwise_kv_event_uses_missing_blocks_from_previous_layers(self):
+        t, store = self._make_thread([0], num_layers=2, enable_kv_event=True)
+        first_layer_req = self._make_layer_req(layer_id=0, is_last_chunk=True, num_keys=1)
+        t.request_queue.put(first_layer_req)
+        t._handle_request(first_layer_req)
+        t.m_store.exists_result = [1]
+        final_layer_req = self._make_layer_req(layer_id=1, is_last_chunk=True, num_keys=1)
+        t.request_queue.put(final_layer_req)
+        t._handle_request(final_layer_req)
+        events = t.get_kv_events()
+        self.assertEqual(len(events), 1)
+        self.assertEqual(events[0].block_hashes, ["h0"])
 
 
 class TestKVCacheStoreLayerRecvingThread(unittest.TestCase):
