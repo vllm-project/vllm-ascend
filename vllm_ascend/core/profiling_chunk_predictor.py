@@ -341,7 +341,7 @@ class ProfilingChunkManager:
         # feature is temporarily fixed. It will be enabled again after the
         # issues with the FIA operator are resolved. Therefore, in multi-request
         # concurrent scenarios, there is still room for performance improvement in CPP.
-        # self.predictor.target_latency = target_time
+        self.predictor.target_latency = target_time
 
         if not self.history_ready:
             predict_func = self.predictor.predict
