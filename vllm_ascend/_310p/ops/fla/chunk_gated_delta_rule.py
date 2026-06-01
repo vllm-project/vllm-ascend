@@ -196,9 +196,9 @@ def _require_ascend_chunk_ops(q: torch.Tensor, k: torch.Tensor, v: torch.Tensor)
         raise RuntimeError(
             "Missing AscendC chunk-gdr ops: chunk_gated_delta_rule_fwd_h/chunk_fwd_o."
         )
-    if q.dtype not in (torch.float16, torch.bfloat16) or k.dtype != q.dtype or v.dtype != q.dtype:
+    if q.dtype != torch.float16 or k.dtype != q.dtype or v.dtype != q.dtype:
         raise TypeError(
-            f"q/k/v must share float16 or bfloat16 dtype, got {q.dtype}, {k.dtype}, {v.dtype}."
+            f"q/k/v must share float16 dtype on 310P, got {q.dtype}, {k.dtype}, {v.dtype}."
         )
     if v.shape[-1] < 128 or v.shape[-1] % 128 != 0:
         raise ValueError(f"v head dim must be >=128 and a multiple of 128, got {v.shape[-1]}.")
@@ -318,31 +318,36 @@ def _prepare_chunk_indices_list(cu_seqlens: torch.Tensor, chunk_size: int) -> li
     return chunk_indices
 
 
-def _compute_w_u_g_torch(
+def _compute_kernel_inputs_from_torch_wy(
+    q: torch.Tensor,
     k: torch.Tensor,
     v: torch.Tensor,
     g: torch.Tensor,
     beta: torch.Tensor,
     chunk_size: int,
-) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
+    """Compute the original torch WY prefix and return AscendC kernel layout."""
     batch_size, padded_tokens, _, k_dim = k.shape
     num_v_heads = v.shape[2]
     value_dim = v.shape[-1]
     num_chunks = padded_tokens // chunk_size
 
-    k = _expand_qk_to_v_heads(k, num_v_heads).transpose(1, 2).contiguous().to(torch.float32)
-    v = v.transpose(1, 2).contiguous().to(torch.float32)
+    q_kernel = q.transpose(1, 2).contiguous()
+    k_kernel = k.transpose(1, 2).contiguous()
+
+    key = _expand_qk_to_v_heads(k, num_v_heads).transpose(1, 2).contiguous().to(torch.float32)
+    value = v.transpose(1, 2).contiguous().to(torch.float32)
     g = g.transpose(1, 2).contiguous().to(torch.float32)
     beta = beta.transpose(1, 2).contiguous().to(torch.float32)
 
-    k = k.reshape(batch_size, num_v_heads, num_chunks, chunk_size, k_dim)
-    v = v.reshape(batch_size, num_v_heads, num_chunks, chunk_size, value_dim)
+    key = key.reshape(batch_size, num_v_heads, num_chunks, chunk_size, k_dim)
+    value = value.reshape(batch_size, num_v_heads, num_chunks, chunk_size, value_dim)
     g = g.reshape(batch_size, num_v_heads, num_chunks, chunk_size).cumsum(dim=-1)
     beta = beta.reshape(batch_size, num_v_heads, num_chunks, chunk_size)
 
     lower_decay = (g.unsqueeze(-1) - g.unsqueeze(-2)).tril().exp().float().tril()
-    k_beta = k * beta.unsqueeze(-1)
-    attn = -(k_beta @ k.transpose(-1, -2) * lower_decay)
+    k_beta = key * beta.unsqueeze(-1)
+    attn = -(k_beta @ key.transpose(-1, -2) * lower_decay)
     mask_diag = torch.triu(
         torch.ones(chunk_size, chunk_size, dtype=torch.bool, device=k.device),
         diagonal=0,
@@ -354,13 +359,13 @@ def _compute_w_u_g_torch(
         attn[..., row_idx, :row_idx] = row + (row.unsqueeze(-1) * sub).sum(-2)
     attn = attn + torch.eye(chunk_size, dtype=attn.dtype, device=attn.device)
 
-    u = attn @ (v * beta.unsqueeze(-1))
-    w = attn @ (k_beta * g.exp().unsqueeze(-1))
+    value = attn @ (value * beta.unsqueeze(-1))
+    k_cumdecay = attn @ (k_beta * g.exp().unsqueeze(-1))
 
-    u = u.reshape(batch_size, num_v_heads, padded_tokens, value_dim).transpose(1, 2).contiguous()
-    w = w.reshape(batch_size, num_v_heads, padded_tokens, k_dim).transpose(1, 2).contiguous()
-    g = g.reshape(batch_size, num_v_heads, padded_tokens).transpose(1, 2).contiguous()
-    return w, u, g
+    u_kernel = value.reshape(batch_size, num_v_heads, padded_tokens, value_dim).to(torch.float16).contiguous()
+    w_kernel = k_cumdecay.reshape(batch_size, num_v_heads, padded_tokens, k_dim).to(torch.float16).contiguous()
+    g_kernel = g.reshape(batch_size, num_v_heads, padded_tokens).contiguous()
+    return q_kernel, k_kernel, w_kernel, u_kernel, g_kernel
 
 
 def _unpad_chunk_output(
@@ -534,14 +539,9 @@ def chunk_gated_delta_rule_310(
         return empty_out, final_state
 
     scale = k.shape[-1] ** -0.5 if scale is None else scale
-    w_pad, u_pad, g_cumsum_pad = _compute_w_u_g_torch(k_pad, v_pad, g_pad, beta_pad, CHUNK_SIZE)
-
-    kernel_dtype = torch.float16
-    q_kernel = q_pad.to(kernel_dtype).transpose(1, 2).contiguous()
-    k_kernel = k_pad.to(kernel_dtype).transpose(1, 2).contiguous()
-    w_kernel = w_pad.to(kernel_dtype).transpose(1, 2).contiguous()
-    u_kernel = u_pad.to(kernel_dtype).transpose(1, 2).contiguous()
-    g_kernel = g_cumsum_pad.to(torch.float32).transpose(1, 2).contiguous()
+    q_kernel, k_kernel, w_kernel, u_kernel, g_kernel = _compute_kernel_inputs_from_torch_wy(
+        q_pad, k_pad, v_pad, g_pad, beta_pad, CHUNK_SIZE
+    )
 
     if initial_state is None:
         state = torch.zeros(
