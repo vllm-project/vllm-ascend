@@ -19,7 +19,7 @@
 #
 
 import torch
-from vllm.triton_utils import HAS_TRITON, tl, triton
+from vllm.triton_utils import tl, triton
 
 
 @triton.jit
@@ -108,6 +108,8 @@ def _gumbel_sample_kernel(
 
     temp = tl.load(temp_ptr + req_state_idx).to(tl.float32)
     if temp != 0.0 and APPLY_TEMPERATURE:
+        # NOTE(woosuk): Match the behavior of _temperature_kernel.
+        # E.g., if the kernel uses tl.div_rn, we should use tl.div_rn here too.
         logits = logits / temp
 
     if processed_logits_ptr is not None:
@@ -159,52 +161,42 @@ def gumbel_sample(
 ) -> torch.Tensor:
     if use_fp64:
         raise NotImplementedError("FP64 Gumbel sampling is not supported on NPU.")
-    if HAS_TRITON:
-        num_reqs, vocab_size = logits.shape
-        BLOCK_SIZE = 1024
-        num_blocks = triton.cdiv(vocab_size, BLOCK_SIZE)
-        local_argmax = torch.empty(
-            num_reqs,
-            num_blocks,
-            dtype=torch.int64,
-            device=logits.device,
-        )
-        local_max = torch.empty(
-            num_reqs,
-            num_blocks,
-            dtype=torch.float32,
-            device=logits.device,
-        )
-        _gumbel_sample_kernel[(num_reqs, num_blocks)](
-            local_argmax,
-            local_argmax.stride(0),
-            local_max,
-            local_max.stride(0),
-            output_processed_logits,
-            output_processed_logits.stride(0) if output_processed_logits is not None else 0,
-            output_processed_logits_col,
-            logits,
-            logits.stride(0),
-            idx_mapping,
-            seed,
-            pos,
-            temperature,
-            vocab_size,
-            BLOCK_SIZE=BLOCK_SIZE,
-            APPLY_TEMPERATURE=apply_temperature,
-        )
-        max_block_idx = local_max.argmax(dim=-1, keepdim=True)
-        sampled = local_argmax.gather(dim=-1, index=max_block_idx).view(-1)
-    else:
-        logits = logits.to(torch.float32)
-        sampled = torch.ops._C_ascend.npu_gumbel_sample(
-            logits,
-            idx_mapping,
-            temperature,
-            seed,
-            pos,
-            apply_temperature,
-            output_processed_logits,
-            output_processed_logits_col,
-        )
+
+    num_reqs, vocab_size = logits.shape
+    BLOCK_SIZE = 1024
+    num_blocks = triton.cdiv(vocab_size, BLOCK_SIZE)
+    local_argmax = torch.empty(
+        num_reqs,
+        num_blocks,
+        dtype=torch.int64,
+        device=logits.device,
+    )
+    local_max = torch.empty(
+        num_reqs,
+        num_blocks,
+        dtype=torch.float32,
+        device=logits.device,
+    )
+    # TODO(Ronald1995): Optimize the performance of the kernel in npu.
+    _gumbel_sample_kernel[(num_reqs, num_blocks)](
+        local_argmax,
+        local_argmax.stride(0),
+        local_max,
+        local_max.stride(0),
+        output_processed_logits,
+        output_processed_logits.stride(0) if output_processed_logits is not None else 0,
+        output_processed_logits_col,
+        logits,
+        logits.stride(0),
+        idx_mapping,
+        seed,
+        pos,
+        temperature,
+        vocab_size,
+        BLOCK_SIZE=BLOCK_SIZE,
+        APPLY_TEMPERATURE=apply_temperature,
+    )
+    # NOTE(woosuk): Use int64 for later indexing.
+    max_block_idx = local_max.argmax(dim=-1, keepdim=True)
+    sampled = local_argmax.gather(dim=-1, index=max_block_idx).view(-1)
     return sampled
