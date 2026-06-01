@@ -502,6 +502,7 @@ class BaseDeviceAdaptor:
         return [8, 32, 128]
 
     @staticmethod
+<<<<<<< HEAD
     def chunk_scaled_dot_kkt_fwd(NT, k, beta, g_cumsum, A, cu_seqlens, chunk_indices, T, B, H, Hg, K, BT, BK):
         chunk_scaled_dot_kkt_fwd_kernel[(NT, 1)](
             k=k,
@@ -558,6 +559,23 @@ class BaseDeviceAdaptor:
     def npu_gemma_rms_norm(x, weight, variance_epsilon):
         x, _ = torch.ops._C_ascend.npu_gemma_rms_norm(x, weight, variance_epsilon)
         return x
+=======
+    def split_qkv_rmsnorm_rope(input, q_weight, k_weight, q_hidden_size, kv_hidden_size, head_dim, eps, q_bias, k_bias, cos_sin_cache, positions):
+        results = torch.ops.vllm.qkv_rmsnorm_rope(
+            input=input,
+            q_weight=q_weight,
+            k_weight=k_weight,
+            q_hidden_size=q_hidden_size,
+            kv_hidden_size=kv_hidden_size,
+            head_dim=head_dim,
+            eps=eps,
+            q_bias=q_bias,
+            k_bias=k_bias,
+            cos_sin_cache=cos_sin_cache,
+            positions=positions,
+        )
+        return results
+>>>>>>> c1d06287 ([bugfix] fix split_qkv_rmsnorm_rope triton kernel's accuracy prob on A5)
 
     @staticmethod
     def fused_gdn_gating(A_log: torch.Tensor, a: torch.Tensor, b: torch.Tensor, dt_bias: torch.Tensor):
@@ -1125,6 +1143,7 @@ class A5DeviceAdaptor(BaseDeviceAdaptor):
         return context_layer
 
     @staticmethod
+<<<<<<< HEAD
     def chunk_scaled_dot_kkt_fwd(NT, k, beta, g_cumsum, A, cu_seqlens, chunk_indices, T, B, H, Hg, K, BT, BK):
         chunk_scaled_dot_kkt_fwd_kernel[(NT, 1)](
             k=k,
@@ -1180,6 +1199,23 @@ class A5DeviceAdaptor(BaseDeviceAdaptor):
     def npu_gemma_rms_norm(x, weight, variance_epsilon):
         x, _ = torch_npu.npu_rms_norm(x, 1.0 + weight, variance_epsilon)
         return x
+=======
+    def split_qkv_rmsnorm_rope(input, q_weight, k_weight, q_hidden_size, kv_hidden_size, head_dim, eps, q_bias, k_bias, cos_sin_cache, positions):
+        results = torch.ops.vllm.qkv_rmsnorm_rope_simt(
+            input=input,
+            q_weight=q_weight,
+            k_weight=k_weight,
+            q_hidden_size=q_hidden_size,
+            kv_hidden_size=kv_hidden_size,
+            head_dim=head_dim,
+            eps=eps,
+            q_bias=q_bias,
+            k_bias=k_bias,
+            cos_sin_cache=cos_sin_cache,
+            positions=positions,
+        )
+        return results
+>>>>>>> c1d06287 ([bugfix] fix split_qkv_rmsnorm_rope triton kernel's accuracy prob on A5)
 
     @staticmethod
     def fused_gdn_gating(A_log: torch.Tensor, a: torch.Tensor, b: torch.Tensor, dt_bias: torch.Tensor):
