@@ -331,9 +331,7 @@ def rejection_sample(
     assert bonus_token_ids.is_contiguous()
     assert target_logits.shape[0] == num_tokens
 
-    # When num_speculative_tokens>=3, using block verify.
-    # Skip block verify when draft_probs is None (suffix/ngram methods)
-    # to avoid incorrect verification results.
+    # Block verify requires enable_block_verify config and max_spec_len >= 3.
     using_block_verify = max_spec_len >= 3 and bool(get_ascend_config().rejection_sampler_config.enable_block_verify)
     using_entropy_verify = bool(get_ascend_config().rejection_sampler_config.enable_entropy_verify)
     posterior_threshold = float(get_ascend_config().rejection_sampler_config.posterior_threshold)
