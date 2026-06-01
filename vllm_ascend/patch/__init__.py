@@ -162,6 +162,26 @@
 #       Remove this patch once the runtime vLLM version contains the upstream
 #       MiniMax usage-accounting fix.
 #
+# ** 7a. File: platform/patch_glm_tool_call_streaming.py**
+# ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+#   1. `vllm.entrypoints.openai.chat_completion.serving.OpenAIServingChat`
+#    Why:
+#       GLM tool-call streaming can emit final remaining-argument chunks with
+#       repeated tool-call metadata, and can combine terminal argument bytes with
+#       `finish_reason="tool_calls"` in the same SSE chunk.
+#    How：
+#       Monkey-patch remaining-argument delta construction to emit only argument
+#       fragments by default, and split terminal argument chunks into an argument
+#       chunk followed by an empty finish chunk.
+#    Related PR (if no, explain why):
+#       https://github.com/vllm-project/vllm/issues/44098
+#       https://github.com/vllm-project/vllm/pull/44099
+#       https://github.com/vllm-project/vllm-ascend/issues/8327
+#       https://github.com/vllm-project/vllm-ascend/pull/8178
+#    Future Plan:
+#       Remove this patch once the supported vLLM version contains the upstream
+#       GLM tool-call final chunk fixes.
+#
 # ** 10a. File: platform/patch_kv_cache_utils.py**
 # ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 #   1. `vllm.v1.core.kv_cache_utils.resolve_kv_cache_block_sizes`
