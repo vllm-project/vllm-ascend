@@ -27,6 +27,14 @@ def _get_npu_storage_shape_op():
     return torch.ops._C_ascend.get_npu_storage_shape
 
 
+def test_get_npu_storage_format_op_is_not_registered():
+    assert enable_custom_op(), "requires vllm_ascend custom ops"
+    op_name = "get_npu_storage_format"
+
+    with pytest.raises(AttributeError):
+        getattr(torch.ops._C_ascend, op_name)
+
+
 def test_get_npu_storage_shape_reports_backing_storage_layout():
     get_npu_storage_shape = _get_npu_storage_shape_op()
 
@@ -57,10 +65,3 @@ def test_get_npu_storage_shape_rejects_cpu_tensor():
 
     with pytest.raises(RuntimeError, match="get_npu_storage_shape only supports NPU tensors"):
         get_npu_storage_shape(torch.empty(2, 3))
-
-
-def test_get_npu_storage_format_op_is_not_registered():
-    assert enable_custom_op(), "requires vllm_ascend custom ops"
-
-    with pytest.raises(AttributeError):
-        torch.ops._C_ascend.get_npu_storage_format
