@@ -306,7 +306,6 @@ def sample_recovered_tokens_kernel(
     vocab_size,
     global_vocab_size,
     NO_DRAFT_PROBS: tl.constexpr,
-    # BLOCK_VERIFY: tl.constexpr,
     ENABLE_REDUCE_SAMPLING: tl.constexpr,
     SUB_BLOCK: tl.constexpr,
     VOCAB_BLOCK_SIZE: tl.constexpr = 512,

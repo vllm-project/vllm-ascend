@@ -4,6 +4,7 @@ from dataclasses import replace
 
 import torch
 from vllm.distributed.parallel_state import get_tp_group
+from vllm.logger import logger
 from vllm.triton_utils import HAS_TRITON
 from vllm.v1.outputs import SamplerOutput
 from vllm.v1.sample.metadata import SamplingMetadata
@@ -358,6 +359,21 @@ def rejection_sample(
         is_greedy = sampling_metadata.temperature == GREEDY_TEMPERATURE
     if HAS_TRITON:
         grid, block_size = cal_grid_and_block_size(batch_size)
+
+    logger.info_once(
+        "RejectionSampler config: block_verify=%s, entropy_verify=%s, "
+        "posterior_threshold=%s, posterior_alpha=%s, reduce_sample=%s, "
+        "has_triton=%s, all_greedy=%s, all_random=%s",
+        using_block_verify,
+        using_entropy_verify,
+        posterior_threshold,
+        posterior_alpha,
+        target_indices is not None,
+        HAS_TRITON,
+        sampling_metadata.all_greedy,
+        sampling_metadata.all_random,
+    )
+
     # For greedy sampling, we need to do allgather first to get global argmax
     if not sampling_metadata.all_random:
         if get_ascend_config().enable_reduce_sample:
@@ -430,7 +446,6 @@ def rejection_sample(
             target_probs,
             sampling_metadata,
             device,
-            # use_block_verify=using_block_verify,
             target_indices=target_indices,
             global_vocab_size=global_vocab_size,
             enable_reduce_sampling=True,
@@ -567,7 +582,6 @@ def rejection_sample(
             target_probs,
             sampling_metadata,
             device,
-            # use_block_verify=using_block_verify,
             target_indices=None,
             global_vocab_size=vocab_size,
             enable_reduce_sampling=False,
@@ -765,7 +779,6 @@ def sample_recovered_tokens(
             vocab_size,
             global_vocab_size if global_vocab_size is not None else vocab_size,
             NO_DRAFT_PROBS=draft_probs is None,
-            # BLOCK_VERIFY=use_block_verify,
             ENABLE_REDUCE_SAMPLING=enable_reduce_sampling,
             VOCAB_BLOCK_SIZE=512,
             SUB_BLOCK=4 * 1024,
