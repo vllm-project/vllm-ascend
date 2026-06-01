@@ -432,6 +432,7 @@ class TestMemcacheBackendMethods(unittest.TestCase):
 
     def test_register_buffer(self):
         b = self._make_backend()
+        b._is_a2 = True
         b.register_buffer([100], [200])
         b.store.register_buffer.assert_called_once()
 

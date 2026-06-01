@@ -16,6 +16,13 @@ from vllm.forward_context import get_forward_context
 from vllm.triton_utils import HAS_TRITON, tl, triton
 from vllm.v1.attention.backends.utils import PAD_SLOT_ID  # type: ignore
 
+if not HAS_TRITON:
+    from vllm_ascend._310p.ops.causal_conv1d import (
+        causal_conv1d_update as _pytorch_update,
+    )
+else:
+    _pytorch_update = None
+
 
 def causal_conv1d_ref(
     x: torch.Tensor,
@@ -578,10 +585,6 @@ def causal_conv1d_update_npu(
     out: (batch, dim) or (batch, dim, seqlen) or (num_tokens, dim), same shape as `x`
     """
     if not HAS_TRITON:
-        from vllm_ascend._310p.ops.causal_conv1d import (
-            causal_conv1d_update as _pytorch_update,
-        )
-
         return _pytorch_update(
             x,
             conv_state,
