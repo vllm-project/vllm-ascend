@@ -955,6 +955,9 @@ ge::graphStatus CompressorTiling::CheckDtypeConsistency() const
 {
     if (CheckDtypeConsistencyX(context_->wkv.desc, WKV_NAME) != ge::GRAPH_SUCCESS ||
         CheckDtypeConsistencyX(context_->wgate.desc, WGATE_NAME) != ge::GRAPH_SUCCESS ||
+        CheckDtypeConsistencyX(context_->normWeight.desc, NORM_WEIGHT_NAME) != ge::GRAPH_SUCCESS ||
+        CheckDtypeConsistencyX(context_->ropeSin.desc, ROPE_SIN_NAME) != ge::GRAPH_SUCCESS ||
+        CheckDtypeConsistencyX(context_->ropeCos.desc, ROPE_COS_NAME) != ge::GRAPH_SUCCESS ||
         CheckDtypeConsistencyX(context_->cmpKv.desc, CMP_KV_NAME) != ge::GRAPH_SUCCESS) {
         return ge::GRAPH_FAILED;
     }
