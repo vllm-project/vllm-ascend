@@ -1,8 +1,27 @@
 # Ascend Store Deployment Guide
 
-## KV Pool Parameter Description
+## Environmental Dependencies
 
-### `kv_connector_extra_config`: Additional Configurable Parameters for Pooling
+* Software:
+    * CANN >= 8.5.0
+    * vLLM：main branch
+    * vLLM-Ascend：main branch
+    * mooncake：>= 0.3.9
+
+### KV Pool Parameter Description
+
+#### `kv_load_failure_policy`: KV Load Failure Handling Policy
+
+`kv_load_failure_policy` is a top-level field in `kv-transfer-config`.
+
+* `recompute`: When KV loading fails, vLLM rolls the request back to the last valid prefix and reschedules it to recompute the failed KV blocks.
+* `fail`: When KV loading fails, the affected request is terminated directly with an error.
+
+The default value in vLLM is `fail`. If you want the request to fall back to recomputation after a KV load failure, set it to `recompute`.
+
+When `MultiConnector` is used, configure `kv_load_failure_policy` on the `MultiConnector` top-level `kv-transfer-config` instead of the child connectors.
+
+#### `kv_connector_extra_config`: Additional Configurable Parameters for Pooling
 
 | Parameter | Description |
 | :--- | :--- |
@@ -108,15 +127,19 @@ The environment variable **MOONCAKE_CONFIG_PATH** is configured to the full path
     "protocol": "ascend",
     "device_name": "",
     "master_server_address": "xx.xx.xx.xx:50088",
-    "global_segment_size": "1GB" (1024MB/1048576KB/1073741824B/1073741824)
+    "global_segment_size": "1GB" (1024MB/1048576KB/1073741824B/1073741824),
+    "preferred_segment": false,
+    "prefer_alloc_in_same_node": true
 }
 ```
 
 **metadata_server**: Configured as **P2PHANDSHAKE**.  
 **protocol:** Must be set to 'Ascend' on the NPU.
 **device_name**: ""
-**master_server_address**: Configured with the IP and port of the master service.  
-**global_segment_size**: Registered memory size per card to the KV Pool. **Needs to be aligned to 1GB.**
+**master_server_address**: Configured with the IP and port of the master service. It can also be set via the **MOONCAKE_MASTER** environment variable, which takes precedence over this configuration item (useful for injecting the master address through Kubernetes).  
+**global_segment_size**: Registered memory size per card to the KV Pool. **Needs to be aligned to 1GB.** It can also be set via the **MOONCAKE_GLOBAL_SEGMENT_SIZE** environment variable, which takes precedence over this configuration item.  
+**preferred_segment**: Whether to prefer storing KV on the local segment when putting objects to the KV Pool. Defaults to **false**.  
+**prefer_alloc_in_same_node**: Whether to prefer allocating KV on the same node. Defaults to **true**.
 
 #### 2.Start mooncake_master
 
@@ -183,6 +206,7 @@ python3 -m vllm.entrypoints.openai.api_server \
     '{
     "kv_connector": "MultiConnector",
     "kv_role": "kv_producer",
+    "kv_load_failure_policy": "recompute",
     "kv_connector_extra_config": {
         "connectors": [
             {
@@ -251,6 +275,7 @@ python3 -m vllm.entrypoints.openai.api_server \
     '{
     "kv_connector": "MultiConnector",
     "kv_role": "kv_consumer",
+    "kv_load_failure_policy": "recompute",
     "kv_connector_extra_config": {
         "connectors": [
         {
@@ -287,6 +312,7 @@ Currently, the key-value pool in PD Disaggregate only stores the kv cache genera
 {
     "kv_connector": "AscendStoreConnector",
     "kv_role": "kv_consumer",
+    "kv_load_failure_policy": "recompute",
     "kv_connector_extra_config": {
         "lookup_rpc_port": "0",
         "backend": "mooncake",
@@ -366,6 +392,7 @@ python3 -m vllm.entrypoints.openai.api_server \
     '{
     "kv_connector": "AscendStoreConnector",
     "kv_role": "kv_both",
+    "kv_load_failure_policy": "recompute",
     "kv_connector_extra_config": {
         "lookup_rpc_port":"1",
         "backend": "mooncake"
@@ -826,6 +853,7 @@ python3 -m vllm.entrypoints.openai.api_server \
     '{
     "kv_connector": "AscendStoreConnector",
     "kv_role": "kv_both",
+    "kv_load_failure_policy": "recompute",
     "kv_connector_extra_config": {
         "lookup_rpc_port": "1",
         "backend": "yuanrong"

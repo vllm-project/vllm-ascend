@@ -287,6 +287,24 @@
 #       Remove this patch once vllm-ascend upgrades to a vLLM version with the
 #       same DeepSeek V4 thinking behavior.
 #
+# ** 12b. File: platform/patch_minimax_m2_tool_call_parser.py**
+# ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+#   1. `vllm.tool_parsers.minimax_m2_tool_parser.MinimaxM2ToolParser`
+#    Why:
+#       vLLM 0.20.2 only emits MiniMax-M2 tool-call arguments after a complete
+#       `<invoke>...</invoke>` block, so long arguments are buffered instead of
+#       streamed incrementally.
+#    How:
+#       Monkey-patch the MiniMax-M2 parser to emit the tool name once the
+#       `<invoke name=...>` header is available and then stream partial
+#       `<parameter>` values as JSON argument fragments.
+#    Related PR (if no, explain why):
+#       https://github.com/vllm-project/vllm/pull/40253
+#       https://github.com/vllm-project/vllm/pull/40298
+#    Future Plan:
+#       Remove this patch once the supported vLLM version contains the upstream
+#       MiniMax-M2 incremental tool-call streaming fix.
+#
 # ** 13. File: platform/patch_camem_allocator.py**
 # ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 #   1. `vllm.config.model.is_cumem_allocator_available`
@@ -333,6 +351,25 @@
 #       Let vLLM support triton ops dispatch.
 #    Future Plan:
 #       Remove this patch when vLLM support the dispatch function.
+#
+#   2. `triton.next_power_of_2`
+#    Why:
+#       The Triton version bundled with torch_npu on Ascend NPU
+#       does not include `next_power_of_2`, which is called by
+#       upstream vLLM and vLLM-Ascend code in 94+ places.
+#       Additionally, when Triton is not available (HAS_TRITON=False),
+#       vLLM uses TritonPlaceholder which also lacks this function.
+#    How：
+#       Import `triton` from vllm.triton_utils (which handles both
+#       real Triton and TritonPlaceholder) and inject `next_power_of_2`
+#       onto the module. For vLLM versions that have
+#       `vllm.utils.math_utils.next_power_of_2`, reuse that implementation;
+#       for v0.20.2 (which lacks it), skip the patch.
+#    Related PR (if no, explain why):
+#       No, torch_npu Triton compatibility issue.
+#    Future Plan:
+#       Remove this patch when torch_npu's Triton includes
+#       next_power_of_2 or when vLLM no longer calls triton.next_power_of_2.
 #
 # ** 4. File: worker/patch_qwen3_next_mtp.py**
 # ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
