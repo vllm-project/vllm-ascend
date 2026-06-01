@@ -286,9 +286,7 @@ class NPUPlatform(Platform):
             return
 
         parallel_config = vllm_config.parallel_config
-        decode_context_parallel_size = (
-            parallel_config.decode_context_parallel_size
-        )
+        decode_context_parallel_size = parallel_config.decode_context_parallel_size
         if decode_context_parallel_size <= 1:
             return
 
@@ -298,19 +296,13 @@ class NPUPlatform(Platform):
 
         draft_parallel_config = speculative_config.draft_parallel_config
         if draft_parallel_config is not None:
-            draft_tensor_parallel_size = (
-                draft_parallel_config.tensor_parallel_size
-            )
+            draft_tensor_parallel_size = draft_parallel_config.tensor_parallel_size
         elif speculative_config.draft_tensor_parallel_size is not None:
-            draft_tensor_parallel_size = (
-                speculative_config.draft_tensor_parallel_size
-            )
+            draft_tensor_parallel_size = speculative_config.draft_tensor_parallel_size
         else:
             draft_tensor_parallel_size = parallel_config.tensor_parallel_size
 
-        total_num_attention_heads = (
-            draft_model_config.model_arch_config.total_num_attention_heads
-        )
+        total_num_attention_heads = draft_model_config.model_arch_config.total_num_attention_heads
         total_num_kv_heads = draft_model_config.get_total_num_kv_heads()
 
         if draft_tensor_parallel_size <= total_num_kv_heads:
