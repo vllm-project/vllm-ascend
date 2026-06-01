@@ -258,6 +258,7 @@ class TestMooncakeBackendMethods(unittest.TestCase):
             backend.config = MagicMock()
             backend._lazy_init = False
             backend._store_initialized = True
+            backend._use_fabric_mem = False
             return backend
 
     def test_exists(self):
