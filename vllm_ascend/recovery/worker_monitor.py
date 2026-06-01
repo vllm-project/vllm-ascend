@@ -103,18 +103,18 @@ class WorkerMonitor:
                     handler = self.exception_handler_factory.get_handler(exc)
                     if handler is None:
                         logger.info("[WorkerMonitor] Non-recoverable error detected in worker thread.")
-                        continue
-                    
-                    recovery_plan = handler.generate_plan(exc, self.vllm_config)
+                        pass
+                    else:
+                        recovery_plan = handler.generate_plan(exc, self.vllm_config)
 
-                    fault_report = FaultReport(
-                        worker_rank=self._worker.rank,
-                        engine_index=self.engine_index,
-                        exp=exc,
-                        plan=recovery_plan,
-                    )
-                    report_encode = msgspec.msgpack.encode(fault_report)
-                    core_report_socket.send(report_encode)
+                        fault_report = FaultReport(
+                            worker_rank=self._worker.rank,
+                            engine_index=self.engine_index,
+                            exp=exc,
+                            plan=recovery_plan,
+                        )
+                        report_encode = msgspec.msgpack.encode(fault_report)
+                        core_report_socket.send(report_encode)
 
                 if core_input_socket in events:
                     logger.info("[WorkerMonitor] Receive recovery_step from EngineCoreProc")

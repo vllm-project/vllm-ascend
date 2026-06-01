@@ -9,6 +9,7 @@ import threading
 import time
 import traceback
 import weakref
+import msgspec.msgpack
 from collections import deque
 from collections.abc import Callable, Sequence
 from concurrent.futures import Future, InvalidStateError
@@ -61,7 +62,7 @@ from vllm.v1.executor.abstract import Executor, FailureCallback
 from vllm.v1.executor.multiproc_executor import WorkerProc
 from vllm.v1.outputs import AsyncModelRunnerOutput, DraftTokenIds, ModelRunnerOutput
 from vllm.v1.worker.worker_base import WorkerWrapperBase
-
+from vllm_ascend.recovery.types import ExceptionInfo
 def enqueue_output(self, output: Any):
     """Prepares output from the worker and enqueues it to the
     worker_response_mq. If the output is an Exception, it is
@@ -71,8 +72,16 @@ def enqueue_output(self, output: Any):
         try:
             output = output.get_output()
         except Exception as e:
+            logger.error("[WorkerProc] Enqueue_output detected exception, send to WorkerMonitor")
             self.exception_occur = True
-            logger.error("[WorkerProc] Enqueue_output detected exception")
+            if not self.worker.in_recovery:
+                self.worker.in_recovery = True
+                exception_info = ExceptionInfo(
+                    exception_type=type(e).__name__,
+                    exception_msg=str(e),
+                )
+                exception_encode = msgspec.msgpack.encode(exception_info)
+                self.worker.worker_input_socket.send(exception_encode)
             output = e
     if isinstance(output, Exception):
         result = (WorkerProc.ResponseStatus.FAILURE, str(output))
