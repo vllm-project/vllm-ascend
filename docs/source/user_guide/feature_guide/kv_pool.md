@@ -127,15 +127,19 @@ The environment variable **MOONCAKE_CONFIG_PATH** is configured to the full path
     "protocol": "ascend",
     "device_name": "",
     "master_server_address": "xx.xx.xx.xx:50088",
-    "global_segment_size": "1GB" (1024MB/1048576KB/1073741824B/1073741824)
+    "global_segment_size": "1GB" (1024MB/1048576KB/1073741824B/1073741824),
+    "preferred_segment": false,
+    "prefer_alloc_in_same_node": true
 }
 ```
 
 **metadata_server**: Configured as **P2PHANDSHAKE**.  
 **protocol:** Must be set to 'Ascend' on the NPU.
 **device_name**: ""
-**master_server_address**: Configured with the IP and port of the master service.  
-**global_segment_size**: Registered memory size per card to the KV Pool. **Needs to be aligned to 1GB.**
+**master_server_address**: Configured with the IP and port of the master service. It can also be set via the **MOONCAKE_MASTER** environment variable, which takes precedence over this configuration item (useful for injecting the master address through Kubernetes).  
+**global_segment_size**: Registered memory size per card to the KV Pool. **Needs to be aligned to 1GB.** It can also be set via the **MOONCAKE_GLOBAL_SEGMENT_SIZE** environment variable, which takes precedence over this configuration item.  
+**preferred_segment**: Whether to prefer storing KV on the local segment when putting objects to the KV Pool. Defaults to **false**.  
+**prefer_alloc_in_same_node**: Whether to prefer allocating KV on the same node. Defaults to **true**.
 
 #### 2.Start mooncake_master
 

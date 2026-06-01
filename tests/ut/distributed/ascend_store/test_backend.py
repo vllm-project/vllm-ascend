@@ -256,6 +256,7 @@ class TestMooncakeBackendMethods(unittest.TestCase):
             backend = MooncakeBackend.__new__(MooncakeBackend)
             backend.store = MagicMock()
             backend.config = MagicMock()
+            backend.local_seg = "127.0.0.1:1234"
             backend._lazy_init = False
             backend._store_initialized = True
             backend._use_fabric_mem = False
