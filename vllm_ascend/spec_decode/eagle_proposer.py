@@ -1,7 +1,9 @@
 # SPDX-License-Identifier: Apache-2.0
 
+from __future__ import annotations
+
 from dataclasses import dataclass
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 import torch
 from vllm.config import CUDAGraphMode, VllmConfig
@@ -15,33 +17,36 @@ from vllm_ascend.compilation.acl_graph import ACLGraphWrapper
 from vllm_ascend.ops.triton.spec_decode.utils import _multi_layer_eagle_shift_and_cache
 from vllm_ascend.spec_decode.llm_base_proposer import AscendSpecDecodeBaseProposer
 
-try:
+if TYPE_CHECKING:
     from vllm.v1.spec_decode.metadata import MultiLayerEagleMetadata
-except ImportError:
+else:
+    try:
+        from vllm.v1.spec_decode.metadata import MultiLayerEagleMetadata
+    except ImportError:
 
-    @dataclass
-    class MultiLayerEagleMetadata:
-        """Fallback when vllm does not yet provide MultiLayerEagleMetadata."""
+        @dataclass
+        class MultiLayerEagleMetadata:
+            """Fallback when vllm does not yet provide MultiLayerEagleMetadata."""
 
-        cached_len: torch.Tensor
-        cached_token_ids: torch.Tensor
-        cached_positions: torch.Tensor
-        cached_hidden_states: torch.Tensor
-        cached_slot_mappings: torch.Tensor
+            cached_len: torch.Tensor
+            cached_token_ids: torch.Tensor
+            cached_positions: torch.Tensor
+            cached_hidden_states: torch.Tensor
+            cached_slot_mappings: torch.Tensor
 
-        @staticmethod
-        def make_dummy(
-            layer_num: int,
-            hidden_size: int,
-            device: torch.device,
-        ) -> "MultiLayerEagleMetadata":
-            return MultiLayerEagleMetadata(
-                cached_len=torch.zeros(1, dtype=torch.int32, device=device),
-                cached_token_ids=torch.zeros(1, layer_num, dtype=torch.int32, device=device),
-                cached_positions=torch.zeros(1, layer_num, dtype=torch.int32, device=device),
-                cached_hidden_states=torch.zeros(1, layer_num, hidden_size, dtype=torch.float16, device=device),
-                cached_slot_mappings=torch.zeros(1, layer_num, dtype=torch.int64, device=device),
-            )
+            @staticmethod
+            def make_dummy(
+                layer_num: int,
+                hidden_size: int,
+                device: torch.device,
+            ) -> MultiLayerEagleMetadata:
+                return MultiLayerEagleMetadata(
+                    cached_len=torch.zeros(1, dtype=torch.int32, device=device),
+                    cached_token_ids=torch.zeros(1, layer_num, dtype=torch.int32, device=device),
+                    cached_positions=torch.zeros(1, layer_num, dtype=torch.int32, device=device),
+                    cached_hidden_states=torch.zeros(1, layer_num, hidden_size, dtype=torch.float16, device=device),
+                    cached_slot_mappings=torch.zeros(1, layer_num, dtype=torch.int64, device=device),
+                )
 
 
 class AscendEagleProposer(EagleProposer, AscendSpecDecodeBaseProposer):
