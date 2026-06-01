@@ -333,11 +333,13 @@ class TestAscendW4A8DynamicFusedMoEMethod(TestBase):
         self.assertEqual(result["w13_weight_scale"].dtype, torch.bfloat16)
         self.assertEqual(result["w2_weight_scale"].dtype, torch.bfloat16)
 
+    @patch("torch_npu.npu_format_cast")
     @patch("torch_npu.npu_quantize")
     @patch("torch.Tensor.npu")
-    def test_process_weights_after_loading_compressed_tensors(self, mock_npu, mock_npu_quantize):
+    def test_process_weights_after_loading_compressed_tensors(self, mock_npu, mock_npu_quantize, mock_npu_format_cast):
         mock_npu.return_value = torch.Tensor()
         mock_npu_quantize.return_value = torch.Tensor()
+        mock_npu_format_cast.side_effect = identity
 
         layer = self.build_layer(is_new_quant_version=False)
         self.quant_method.quant_method = COMPRESSED_TENSORS_METHOD
