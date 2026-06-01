@@ -1425,7 +1425,6 @@ class AscendMLAImpl(MLAAttentionImpl):
             k_pe = k_pe.view(-1, self.num_kv_heads, block_size, self.qk_rope_head_dim)
 
         attn_output_shape: tuple | None = None
-        num_heads_for_op = self.num_heads_padded
         if (
             attn_metadata.attn_state
             in [
@@ -1448,7 +1447,7 @@ class AscendMLAImpl(MLAAttentionImpl):
                 q_pe = F.pad(q_pe, (0, 0, 0, self.head_padding), "constant", 0)
                 q_nope = F.pad(q_nope, (0, 0, 0, self.head_padding), "constant", 0)
             # Output shape: [num_heads, num_tokens, dim]
-            attn_output_shape = (num_heads_for_op, num_tokens, self.kv_lora_rank)
+            attn_output_shape = (self.num_heads_padded, num_tokens, self.kv_lora_rank)
             sparse_mode = 3
             attn_mask = attn_metadata.decode.attn_mask  # type:ignore
             actual_seq_lengths = decode_meta.actual_seq_lengths_q
@@ -1462,8 +1461,11 @@ class AscendMLAImpl(MLAAttentionImpl):
                 input_layout = "BNSD"
                 q_nope = q_nope.view(num_tokens, self.num_heads, 1, -1).contiguous()
                 q_pe = q_pe.view(num_tokens, self.num_heads, 1, -1)
+                if self.head_padding > 0:
+                    q_pe = F.pad(q_pe, (0, 0, 0, 0, 0, self.head_padding), "constant", 0)
+                    q_nope = F.pad(q_nope, (0, 0, 0, 0, 0, self.head_padding), "constant", 0)
                 dequant_scale_q_nope = dequant_scale_q_nope.view(num_tokens, self.num_heads, 1)
-                attn_output_shape = (num_tokens, self.num_heads, 1, self.kv_lora_rank)
+                attn_output_shape = (num_tokens, self.num_heads_padded, 1, self.kv_lora_rank)
             else:
                 input_layout = "BSND_NBSD"
                 q_nope = q_nope.view(num_tokens, 1, self.num_heads, -1).contiguous()
@@ -1472,7 +1474,7 @@ class AscendMLAImpl(MLAAttentionImpl):
                     q_pe = F.pad(q_pe, (0, 0, 0, self.head_padding), "constant", 0)
                     q_nope = F.pad(q_nope, (0, 0, 0, self.head_padding), "constant", 0)
                 dequant_scale_q_nope = dequant_scale_q_nope.view(num_tokens, 1, self.num_heads)
-                attn_output_shape = (num_heads_for_op, num_tokens, 1, self.kv_lora_rank)
+                attn_output_shape = (self.num_heads_padded, num_tokens, 1, self.kv_lora_rank)
         else:
             # The output layout is set to NBSD to eliminate the need for a
             # transpose operation after attention.
@@ -1493,14 +1495,14 @@ class AscendMLAImpl(MLAAttentionImpl):
                     q_pe = F.pad(q_pe, (0, 0, 0, 0, 0, self.head_padding), "constant", 0)
                     q_nope = F.pad(q_nope, (0, 0, 0, 0, 0, self.head_padding), "constant", 0)
             # Output shape: [num_heads, num_tokens, seq_len, dim]
-            attn_output_shape = (num_heads_for_op, num_tokens, 1, self.kv_lora_rank)
+            attn_output_shape = (self.num_heads_padded, num_tokens, 1, self.kv_lora_rank)
             sparse_mode = 0
             attn_mask = None
 
         common_kwargs = {
             "query_rope": q_pe,
             "key_rope": k_pe,
-            "num_query_heads": num_heads_for_op,
+            "num_query_heads": self.num_heads_padded,
             "num_key_value_heads": self.num_kv_heads,
             "input_layout": input_layout,
             "atten_mask": attn_mask,
@@ -1544,7 +1546,7 @@ class AscendMLAImpl(MLAAttentionImpl):
                 weak_ref_tensors(k_nope),
                 weak_ref_tensors(q_pe),
                 weak_ref_tensors(k_pe),
-                num_heads_for_op,
+                self.num_heads_padded,
                 self.num_kv_heads,
                 input_layout,
                 weak_ref_tensors(attn_mask) if attn_mask is not None else None,
