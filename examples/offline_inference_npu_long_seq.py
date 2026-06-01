@@ -5,7 +5,6 @@ import time
 from vllm import LLM, SamplingParams
 
 os.environ["VLLM_USE_MODELSCOPE"] = "True"
-os.environ["VLLM_ASCEND_ENABLE_CONTEXT_PARALLEL"] = "1"
 os.environ["VLLM_WORKER_MULTIPROC_METHOD"] = "spawn"
 
 if __name__ == "__main__":
