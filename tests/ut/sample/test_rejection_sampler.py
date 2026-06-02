@@ -536,9 +536,9 @@ class TestEntropyVerify(TestBase):
             ori_target_probs=ori_target_probs,
         )
 
-        assert output_token_ids[0, 0].item() == 1
-        assert output_token_ids[0, 1].item() == 0
-        assert output_token_ids[0, 2].item() == 100
+        assert output_token_ids[0, 0].item() == 99
+        assert output_token_ids[0, 1].item() == -1
+        assert output_token_ids[0, 2].item() == -1
 
     @patch("torch.arange", new=mock_pin_memory(torch.arange))
     @patch("torch.ones", new=mock_pin_memory(torch.ones))
@@ -597,9 +597,9 @@ class TestEntropyVerify(TestBase):
             ori_target_probs=ori_target_probs,
         )
 
-        assert output_token_ids[0, 0].item() == 1
-        assert output_token_ids[0, 1].item() == 88
-        assert output_token_ids[0, 2].item() == 100
+        assert output_token_ids[0, 0].item() == 99
+        assert output_token_ids[0, 1].item() == -1
+        assert output_token_ids[0, 2].item() == -1
 
     @patch("torch.arange", new=mock_pin_memory(torch.arange))
     @patch("torch.ones", new=mock_pin_memory(torch.ones))
@@ -661,9 +661,9 @@ class TestEntropyVerify(TestBase):
             ori_target_probs=ori_target_probs,
         )
 
-        assert output_token_ids[0, 0].item() == 1
-        assert output_token_ids[0, 1].item() == 0
-        assert output_token_ids[0, 2].item() == 100
+        assert output_token_ids[0, 0].item() == 99
+        assert output_token_ids[0, 1].item() == -1
+        assert output_token_ids[0, 2].item() == -1
 
     @patch("torch.arange", new=mock_pin_memory(torch.arange))
     @patch("torch.ones", new=mock_pin_memory(torch.ones))
@@ -732,7 +732,7 @@ class TestEntropyVerify(TestBase):
 
         assert output_token_ids[0, 0].item() == 1
         assert output_token_ids[0, 1].item() in (0, 88)
-        assert output_token_ids[0, 2].item() == 100
+        assert output_token_ids[0, 2].item() == -1
 
     @patch("torch.arange", new=mock_pin_memory(torch.arange))
     @patch("torch.ones", new=mock_pin_memory(torch.ones))
