@@ -159,7 +159,7 @@ jobs:
 
       # todo(wxs): remove this when the root cause of the cache issue is found
       - name: Clean up torch compile cache
-        run: rm -rf ~/.cache/vllm/torch_compile_cache
+        run: find ~/.cache/vllm/torch_compile_cache -mindepth 1 -maxdepth 1 ! -name "torch_aot_compile" -exec rm -rf {} + 2>/dev/null || true
 
       - name: Run vllm-project/vllm-ascend test
         env:
@@ -297,7 +297,7 @@ jobs:
           fi
 
       - name: Clean up torch compile cache
-        run: rm -rf ~/.cache/vllm/torch_compile_cache
+        run: find ~/.cache/vllm/torch_compile_cache -mindepth 1 -maxdepth 1 ! -name "torch_aot_compile" -exec rm -rf {} + 2>/dev/null || true
 
       - name: Run e2e test
         if: ${{ inputs.type == 'full' }}
@@ -441,7 +441,7 @@ jobs:
             uv pip install -e .
           fi
       - name: Clean up torch compile cache
-        run: rm -rf ~/.cache/vllm/torch_compile_cache
+        run: find ~/.cache/vllm/torch_compile_cache -mindepth 1 -maxdepth 1 ! -name "torch_aot_compile" -exec rm -rf {} + 2>/dev/null || true
 
       - name: Run vllm-project/vllm-ascend test (light)
         env:
@@ -577,7 +577,7 @@ jobs:
             uv pip install -e .
           fi
       - name: Clean up torch compile cache
-        run: rm -rf ~/.cache/vllm/torch_compile_cache
+        run: find ~/.cache/vllm/torch_compile_cache -mindepth 1 -maxdepth 1 ! -name "torch_aot_compile" -exec rm -rf {} + 2>/dev/null || true
 
       - name: Run vllm-project/vllm-ascend test (full)
         if: ${{ inputs.type == 'full' }}
@@ -771,7 +771,7 @@ jobs:
           fi
 
       - name: Clean up torch compile cache
-        run: rm -rf ~/.cache/vllm/torch_compile_cache
+        run: find ~/.cache/vllm/torch_compile_cache -mindepth 1 -maxdepth 1 ! -name "torch_aot_compile" -exec rm -rf {} + 2>/dev/null || true
 
       - name: Run vllm-project/vllm-ascend test (light)
         env:
@@ -906,7 +906,7 @@ jobs:
           fi
 
       - name: Clean up torch compile cache
-        run: rm -rf ~/.cache/vllm/torch_compile_cache
+        run: find ~/.cache/vllm/torch_compile_cache -mindepth 1 -maxdepth 1 ! -name "torch_aot_compile" -exec rm -rf {} + 2>/dev/null || true
 
       - name: Run vllm-project/vllm-ascend test for V1 Engine
         if: ${{ inputs.type == 'full' }}
@@ -1046,7 +1046,7 @@ jobs:
         run: pip uninstall -y triton-ascend triton
 
       - name: Clean up torch compile cache
-        run: rm -rf ~/.cache/vllm/torch_compile_cache
+        run: find ~/.cache/vllm/torch_compile_cache -mindepth 1 -maxdepth 1 ! -name "torch_aot_compile" -exec rm -rf {} + 2>/dev/null || true
 
       - name: Run vllm-project/vllm-ascend test
         if: ${{ inputs.contains_310 }}
@@ -1167,7 +1167,7 @@ jobs:
         run: pip uninstall -y triton-ascend triton
 
       - name: Clean up torch compile cache
-        run: rm -rf ~/.cache/vllm/torch_compile_cache
+        run: find ~/.cache/vllm/torch_compile_cache -mindepth 1 -maxdepth 1 ! -name "torch_aot_compile" -exec rm -rf {} + 2>/dev/null || true
 
       - name: Run vllm-project/vllm-ascend test
         if: ${{ inputs.contains_310 }}
