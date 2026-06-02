@@ -560,9 +560,10 @@ class KVCacheStoreLayerSendingThread(KVTransferThread):
         current_event = req_meta.current_event
         total_block = len(keys)
         is_last_chunk = req_meta.is_last_chunk
-        if req_meta.req_id not in self.stored_requests:
-            self.request_queue.task_done()
-            return
+        with self.done_task_lock:
+            if req_meta.req_id not in self.stored_requests:
+                self.request_queue.task_done()
+                return
         if not self.dcp_size > 1:
             starts = starts[self.tp_rank % self.put_step :: self.put_step]
             ends = ends[self.tp_rank % self.put_step :: self.put_step]
@@ -573,7 +574,7 @@ class KVCacheStoreLayerSendingThread(KVTransferThread):
                 stored_events = self._build_stored_events(req_meta)
                 if stored_events:
                     self.update_kv_event(stored_events)
-            if is_last_chunk:
+            if is_last_chunk and layer_id == self.final_layer_id:
                 self.dec_stored_request(req_meta.req_id)
                 self.set_finished_request(req_meta.req_id)
             self.request_queue.task_done()
@@ -591,7 +592,7 @@ class KVCacheStoreLayerSendingThread(KVTransferThread):
                 stored_events = self._build_stored_events(req_meta)
                 if stored_events:
                     self.update_kv_event(stored_events)
-            if is_last_chunk:
+            if is_last_chunk and layer_id == self.final_layer_id:
                 self.dec_stored_request(req_meta.req_id)
                 self.set_finished_request(req_meta.req_id)
             self.request_queue.task_done()
