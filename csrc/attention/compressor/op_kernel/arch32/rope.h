@@ -16,7 +16,7 @@
 #ifndef ROPE_H
 #define ROPE_H
 
-#include "../compressor_comm.h"
+#include "compressor_comm.h"
 #include "compressor_vector_comm.h"
 
 namespace Compressor {
