@@ -22,6 +22,7 @@ import torch
 from vllm.config import CompilationConfig, ModelConfig, ParallelConfig, VllmConfig
 
 from tests.ut.base import TestBase
+from tests.ut.conftest import _npu_available
 from vllm_ascend import utils
 from vllm_ascend.utils import REGISTERED_ASCEND_OPS
 
@@ -275,9 +276,11 @@ class TestUtils(TestBase):
             utils.get_max_hidden_layers(NoLayerConfig())
         self.assertIn("num_hidden_layers", str(context.exception))
 
+    @mock.patch.dict(os.environ, {"VLLM_ASCEND_ENABLE_FLASHCOMM1": "0"})
+    @pytest.mark.skipif(not _npu_available, reason="Requires real NPU (ModelConfig inspection)")
     def test_update_aclgraph_sizes(self):
         test_compilation_config = CompilationConfig(cudagraph_capture_sizes=[i for i in range(150)])
-        model_path = os.path.join(os.path.dirname(__file__), "fake_weight")
+        model_path = os.path.join(os.path.dirname(__file__), "_fake_weight")
         test_model_config = ModelConfig(model=model_path, enforce_eager=True)
         test_parallel_config = ParallelConfig()
         test_vllm_config = VllmConfig(
