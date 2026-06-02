@@ -3933,6 +3933,11 @@ def _torch_cuda_wrapper():
         torch.cuda.stream = torch.npu.stream
         torch.cuda.synchronize = torch.npu.synchronize
         torch.cuda.mem_get_info = torch.npu.mem_get_info
+        torch.cuda.graph_pool_handle = torch.npu.graph_pool_handle
+        torch.cuda.CUDAGraph = torch.npu.NPUGraph
+        torch.cuda.graph = torch.npu.graph
+        torch.cuda.set_stream = torch.npu.set_stream
+        torch.cuda.current_device = torch.npu.current_device
         yield
     except Exception as e:
         torch.cuda.Event = _EventPlaceholder
@@ -3952,6 +3957,11 @@ def _torch_cuda_wrapper():
         torch.cuda.stream = torch.npu.stream
         torch.cuda.synchronize = torch.npu.synchronize
         torch.cuda.mem_get_info = torch.npu.mem_get_info
+        torch.cuda.graph_pool_handle = torch.npu.graph_pool_handle
+        torch.cuda.CUDAGraph = torch.npu.NPUGraph
+        torch.cuda.graph = torch.npu.graph
+        torch.cuda.set_stream = torch.npu.set_stream
+        torch.cuda.current_device = torch.npu.current_device
 
 
 # TODO: This method will be removed subsequently and implemented in platform.

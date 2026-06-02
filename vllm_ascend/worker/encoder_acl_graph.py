@@ -366,9 +366,9 @@ class EncoderAclGraphManager(EncoderCudaGraphManager):
             output = self.model.encoder_cudagraph_forward(mm_kwargs, buffers)
             output_buffer = torch.empty_like(output)
 
-        graph = torch.cuda.CUDAGraph()
+        graph = torch.npu.NPUGraph()
         with encoder_graph_capture_scope(token_budget):
-            with torch.inference_mode(), torch.cuda.graph(graph):
+            with torch.inference_mode(), torch.npu.graph(graph):
                 output = self.model.encoder_cudagraph_forward(mm_kwargs, buffers)
                 output_buffer.copy_(output)
 
