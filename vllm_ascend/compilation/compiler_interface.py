@@ -291,6 +291,7 @@ class AscendCompiler(CompilerInterface):
             # "fake mode mismatch" in aot_module_simplified.
             graph = copy.deepcopy(graph)
             from torch._guards import detect_fake_mode
+
             current_fake_mode = detect_fake_mode()
             if current_fake_mode is not None:
                 example_inputs = [
