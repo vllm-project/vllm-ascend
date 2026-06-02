@@ -473,20 +473,18 @@ class FlashTree:
 
             initial_replicas = (simulation_replicas[:interval_size] - 1).sum()
 
+            # fmt: off
             best_replica, _, _ = self.neighbor_search(
                 low,
                 high,
                 initial_replicas,
                 width,
-                lambda mid,
-                ci=current_idx,
-                crf=current_replicas_f,
-                ri=remaind_idx,
-                rrf=remaind_replicas_f,
-                nar=num_available_replicas: get_score(
-                    _lpt_deployment, X_row, deployed_replicas, ci, crf[mid], ri, rrf[nar - mid]
+                lambda mid, ci=current_idx, crf=current_replicas_f, 
+                ri=remaind_idx, rrf=remaind_replicas_f, nar=num_available_replicas: (
+                    get_score(_lpt_deployment, X_row, deployed_replicas, ci, crf[mid], ri, rrf[nar - mid])
                 ),
             )
+            # fmt: on
 
             deployed_replicas[current_idx] = current_replicas_f[best_replica]
             num_available_replicas -= best_replica

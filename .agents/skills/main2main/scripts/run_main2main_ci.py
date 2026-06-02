@@ -14,6 +14,7 @@ agent context stay small.
 The raw run_suite.py status is always stored as run_suite_exit_code. The wrapper
 process exits 0 only when main2main may proceed: passed CI or env_flake_pass.
 """
+
 from __future__ import annotations
 
 import argparse
@@ -121,17 +122,15 @@ def main() -> None:
     parser = argparse.ArgumentParser(
         description="Run e2e-main2main CI for one main2main step.",
     )
-    parser.add_argument("--ascend-path", type=Path, required=True,
-                        help="Path to the vllm-ascend repository")
-    parser.add_argument("--step-id", required=True,
-                        help="Step identifier, for example step-1")
-    parser.add_argument("--round", type=int, default=1,
-                        help="CI round number for this step")
-    parser.add_argument("--suite", action="append",
-                        help="run_suite.py suite name. Can be specified multiple times. "
-                             "Defaults to e2e-singlecard-light.")
-    parser.add_argument("--workspace", type=Path, default=Path("/tmp/main2main"),
-                        help="main2main workspace directory")
+    parser.add_argument("--ascend-path", type=Path, required=True, help="Path to the vllm-ascend repository")
+    parser.add_argument("--step-id", required=True, help="Step identifier, for example step-1")
+    parser.add_argument("--round", type=int, default=1, help="CI round number for this step")
+    parser.add_argument(
+        "--suite",
+        action="append",
+        help="run_suite.py suite name. Can be specified multiple times. Defaults to e2e-singlecard-light.",
+    )
+    parser.add_argument("--workspace", type=Path, default=Path("/tmp/main2main"), help="main2main workspace directory")
     args = parser.parse_args()
 
     ascend_path = args.ascend_path.resolve()

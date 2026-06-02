@@ -29,13 +29,13 @@ Usage:
       --base-commit <sha> \\
       --target-commit <sha>
 """
+
 from __future__ import annotations
 
 import argparse
 import json
 import math
 import subprocess
-import sys
 from pathlib import Path
 from typing import Any
 
@@ -47,9 +47,7 @@ REQUIREMENTS_FILES = {
     "setup.py",
     "requirements/common.txt",
 }
-REQUIREMENTS_PREFIXES = (
-    "requirements/build/",
-)
+REQUIREMENTS_PREFIXES = ("requirements/build/",)
 
 
 def _commit_count_budget(line_budget: int = LINE_BUDGET) -> int:
@@ -74,17 +72,23 @@ def _run_git(repo: Path, *args: str) -> str:
 def _list_commits(repo: Path, base: str, target: str) -> list[dict[str, str]]:
     """Return commits in chronological order (oldest first)."""
     log_output = _run_git(
-        repo, "log", "--reverse", "--format=%H%x1f%s", f"{base}..{target}",
+        repo,
+        "log",
+        "--reverse",
+        "--format=%H%x1f%s",
+        f"{base}..{target}",
     )
     commits: list[dict[str, str]] = []
     for line in log_output.strip().splitlines():
         if not line.strip():
             continue
         parts = line.split("\x1f", 1)
-        commits.append({
-            "sha": parts[0].strip(),
-            "subject": parts[1].strip() if len(parts) > 1 else "",
-        })
+        commits.append(
+            {
+                "sha": parts[0].strip(),
+                "subject": parts[1].strip() if len(parts) > 1 else "",
+            }
+        )
     return commits
 
 
@@ -101,12 +105,14 @@ def _numstat(repo: Path, sha: str) -> list[dict[str, Any]]:
         added = int(parts[0]) if parts[0] != "-" else 0
         deleted = int(parts[1]) if parts[1] != "-" else 0
         filepath = parts[2]
-        files.append({
-            "path": filepath,
-            "added": added,
-            "deleted": deleted,
-            "lines": added + deleted,
-        })
+        files.append(
+            {
+                "path": filepath,
+                "added": added,
+                "deleted": deleted,
+                "lines": added + deleted,
+            }
+        )
     return files
 
 
@@ -163,20 +169,22 @@ def plan_steps(
         nonlocal current_cats, current_files
         if not current_commits:
             return
-        steps.append({
-            "index": len(steps) + 1,
-            "id": f"step-{len(steps) + 1}",
-            "commits": list(current_commits),
-            "commit_count": len(current_commits),
-            "start_commit": start,
-            "end_commit": current_commits[-1]["sha"],
-            "categories": sorted(current_cats),
-            "vllm_changed_lines": current_vllm_lines,
-            "total_changed_lines": current_total_lines,
-            "line_budget": LINE_BUDGET,
-            "commit_count_budget": _commit_count_budget(),
-            "files_changed": sorted(set(current_files)),
-        })
+        steps.append(
+            {
+                "index": len(steps) + 1,
+                "id": f"step-{len(steps) + 1}",
+                "commits": list(current_commits),
+                "commit_count": len(current_commits),
+                "start_commit": start,
+                "end_commit": current_commits[-1]["sha"],
+                "categories": sorted(current_cats),
+                "vllm_changed_lines": current_vllm_lines,
+                "total_changed_lines": current_total_lines,
+                "line_budget": LINE_BUDGET,
+                "commit_count_budget": _commit_count_budget(),
+                "files_changed": sorted(set(current_files)),
+            }
+        )
         current_commits = []
         current_vllm_lines = 0
         current_total_lines = 0
@@ -219,10 +227,7 @@ def plan_steps(
             continue
 
         # Would exceed a step budget? → flush first
-        if (
-            current_vllm_lines + vllm_lines > LINE_BUDGET
-            or len(current_commits) >= _commit_count_budget()
-        ):
+        if current_vllm_lines + vllm_lines > LINE_BUDGET or len(current_commits) >= _commit_count_budget():
             _flush(prev_end)
             prev_end = steps[-1]["end_commit"] if steps else base_commit
 
@@ -248,9 +253,11 @@ def _render_markdown(plan: dict[str, Any]) -> str:
         "",
     ]
     for step in plan["steps"]:
-        lines.append(f"## {step['id']} (commits: {step['commit_count']}, "
-                      f"vllm: {step['vllm_changed_lines']} lines, "
-                      f"total: {step['total_changed_lines']} lines)")
+        lines.append(
+            f"## {step['id']} (commits: {step['commit_count']}, "
+            f"vllm: {step['vllm_changed_lines']} lines, "
+            f"total: {step['total_changed_lines']} lines)"
+        )
         lines.append("")
         lines.append(f"- Categories: {', '.join(step['categories'])}")
         lines.append(f"- Range: `{step['start_commit'][:8]}..{step['end_commit'][:8]}`")
@@ -298,10 +305,12 @@ def main() -> None:
     output_dir.mkdir(parents=True, exist_ok=True)
 
     (output_dir / "steps.json").write_text(
-        json.dumps(plan, indent=2) + "\n", encoding="utf-8",
+        json.dumps(plan, indent=2) + "\n",
+        encoding="utf-8",
     )
     (output_dir / "steps.md").write_text(
-        _render_markdown(plan), encoding="utf-8",
+        _render_markdown(plan),
+        encoding="utf-8",
     )
 
     for step in plan["steps"]:
