@@ -750,7 +750,9 @@ class AscendStoreKVConnectorWorkerMetadata(KVConnectorWorkerMetadata):
             self.completed_events[event_id] = 1
 
     def aggregate(self, other: KVConnectorWorkerMetadata) -> KVConnectorWorkerMetadata:
-        assert isinstance(other, AscendStoreKVConnectorWorkerMetadata)
+        assert isinstance(other, AscendStoreKVConnectorWorkerMetadata), (
+            "aggregate worker metadata must be type of AscendStoreKVConnectorWorkerMetadata"
+        )
 
         merged: dict[int, int] = dict(self.completed_events)
         for event_id in other.completed_events:

@@ -414,7 +414,7 @@ class KVPoolScheduler:
                 kv_cache_group_families=self.kv_cache_group_families,
             )
             if req_meta is not None:
-                self.touch_sending_blocks(req_meta)
+                self.touch_sending_mamba_blocks(req_meta)
                 meta.add_request(req_meta)
 
         cached_reqs = scheduler_output.scheduled_cached_reqs
@@ -493,7 +493,7 @@ class KVPoolScheduler:
                         kv_cache_group_families=self.kv_cache_group_families,
                     )
                 if req_meta is not None:
-                    self.touch_sending_blocks(req_meta)
+                    self.touch_sending_mamba_blocks(req_meta)
                     meta.add_request(req_meta)
 
         request_ids = [req.req_id for req in scheduler_output.scheduled_new_reqs]
@@ -525,17 +525,23 @@ class KVPoolScheduler:
                     kv_cache_group_families=self.kv_cache_group_families,
                 )
                 if req_meta is not None:
-                    self.touch_sending_blocks(req_meta)
+                    self.touch_sending_mamba_blocks(req_meta)
                     meta.add_request(req_meta)
         return meta
 
     def get_sending_event_id(self):
+        """
+        get a unique event id for a kv store request
+        """
         using_id = self.sending_event_id
         # todo: reset sending_event_id, in case infinitely increasing
         self.sending_event_id += 1
         return using_id
 
-    def touch_sending_blocks(self, req_meta: ReqMeta):
+    def touch_sending_mamba_blocks(self, req_meta: ReqMeta):
+        """
+        keep the reference of all non-null mamba blocks that will send to external kv store
+        """
         if not self.use_hybrid or len(self.mamba_group_ids) == 0 or not req_meta.can_save:
             return
         using_event_id = self.get_sending_event_id()
@@ -551,6 +557,9 @@ class KVPoolScheduler:
         self.sending_blocks[using_event_id] = current_step_sending
 
     def update_connector_output(self, connector_output: KVConnectorOutput):
+        """
+        hand the connector_output, free non-null mamba blocks and so on.
+        """
         meta = connector_output.kv_connector_worker_meta
         if not isinstance(meta, AscendStoreKVConnectorWorkerMetadata):
             return
