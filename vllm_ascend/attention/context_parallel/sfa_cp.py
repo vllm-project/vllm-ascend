@@ -412,7 +412,10 @@ class AscendSFACPImpl(AscendSFAImpl):
         sin: torch.Tensor,
         actual_seq_lengths_query: torch.Tensor,
         actual_seq_lengths_key: torch.Tensor,
+        precomputed_c8_query: tuple[torch.Tensor, torch.Tensor, torch.Tensor] | None = None,
     ):
+        if precomputed_c8_query is not None:
+            raise NotImplementedError("SFA CP does not support precomputed C8 indexer query.")
         kw, _ = self.wk_weights_proj(x)
         weights = kw[:, self.head_dim :]
         q_li, _ = self.wq_b(q_c)  # [b,s,1536] @ [1536,64*128] = [b,s,64*128]
