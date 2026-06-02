@@ -105,6 +105,7 @@ elif [[ "$SOC_VERSION" =~ ^ascend910b ]]; then
         "sparse_attn_sharedkv_metadata"
         "hc_pre_sinkhorn"
         "hc_pre_inv_rms"
+        "hc_pre"
         "hc_post"
         "inplace_partial_rotary_mul"
         "rms_norm_dynamic_quant"
@@ -187,6 +188,7 @@ elif [[ "$SOC_VERSION" =~ ^ascend910_93 ]]; then
         "sparse_attn_sharedkv_metadata"
         "hc_pre_sinkhorn"
         "hc_pre_inv_rms"
+        "hc_pre"
         "hc_post"
         "inplace_partial_rotary_mul"
         "rms_norm_dynamic_quant"
@@ -242,6 +244,10 @@ elif [[ "$SOC_VERSION" =~ ^ascend950 ]]; then
         "swiglu_group_quant"
         "load_index_kv_cache"
         "indexer_compress_epilog_v2"
+        "causal_conv1d"
+        "recurrent_gated_delta_rule"
+        "chunk_fwd_o"
+        "chunk_gated_delta_rule_fwd_h"
     )
 
     CUSTOM_OPS=$(IFS=';'; echo "${CUSTOM_OPS_ARRAY[*]}")

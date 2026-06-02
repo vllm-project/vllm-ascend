@@ -134,13 +134,9 @@ class AscendConfig:
         self.recompute_scheduler_enable = additional_config.get("recompute_scheduler_enable", False)
         self.enable_cpu_binding = additional_config.get("enable_cpu_binding", True)
         self.multistream_dsa_preprocess = additional_config.get("multistream_dsa_preprocess", False)
+        self.multistream_dsv4_dsa_overlap = additional_config.get("multistream_dsv4_dsa_overlap", False)
+        self.prefill_comm_compute_overlap = additional_config.get("prefill_comm_compute_overlap", False)
 
-        self.enable_context_parallel = self._get_config_value(
-            additional_config,
-            "enable_context_parallel",
-            "VLLM_ASCEND_ENABLE_CONTEXT_PARALLEL",
-            ascend_envs.VLLM_ASCEND_ENABLE_CONTEXT_PARALLEL,
-        )
         self.enable_matmul_allreduce = self._get_config_value(
             additional_config,
             "enable_matmul_allreduce",
@@ -265,6 +261,9 @@ class AscendConfig:
 
         # Enable dispatch/combine op inter-node communication by ROCE
         self.enable_mc2_hierarchy_comm = additional_config.get("enable_mc2_hierarchy_comm", False)
+
+        # Enable optimized reduce sampling scheme
+        self.enable_reduce_sample = additional_config.get("enable_reduce_sample", False)
 
         self.mix_placement = additional_config.get("mix_placement", False)
         self._check_mix_placement()

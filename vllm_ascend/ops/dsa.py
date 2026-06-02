@@ -54,6 +54,7 @@ class DSAModules:
     compressor: torch.nn.Module | None
     topk_indices_buffer: torch.Tensor | None
     indexer_rotary_emb: torch.nn.Module | None = None
+    skip_topk: bool = False
 
 
 class AscendDeepseekSparseAttention(MultiHeadLatentAttentionWrapper):
@@ -106,6 +107,7 @@ class AscendDeepseekSparseAttention(MultiHeadLatentAttentionWrapper):
         self.compressor = dsa_modules.compressor
         self.topk_indices_buffer = dsa_modules.topk_indices_buffer
         self.indexer_rotary_emb = dsa_modules.indexer_rotary_emb
+        self.skip_topk = dsa_modules.skip_topk
         self.prefix = prefix
 
         ascend_device_type = get_ascend_device_type()
@@ -148,6 +150,8 @@ class AscendDeepseekSparseAttention(MultiHeadLatentAttentionWrapper):
             attn_sink=self.attn_sink,
             eps=self.eps,
             swa_cache_layer=self.swa_cache_layer,
+            skip_topk=self.skip_topk,
+            topk_indices_buffer=self.topk_indices_buffer,
         )
 
         compilation_config = get_current_vllm_config().compilation_config
@@ -164,9 +168,14 @@ class AscendDeepseekSparseAttention(MultiHeadLatentAttentionWrapper):
     ) -> torch.Tensor:
         need_gather_q_kv = get_forward_context().flash_comm_v1_enabled
         output_shape = hidden_states.shape
-        # FIXME: This does not seem right, should make sure the buffer is fixed
+
         output = torch.empty(output_shape, dtype=hidden_states.dtype, device=hidden_states.device)
+
+        # All DSA forward paths run inside dsa_forward custom op boundary,
+        # which is required for ACL graph capture (registered with
+        # dispatch_key="PrivateUse1").
         torch.ops.vllm.dsa_forward(hidden_states, need_gather_q_kv, output, self.prefix)
+
         output = output.view(-1, output_shape[-1])
         return output
 
@@ -185,38 +194,11 @@ def dsa_forward(
         attn_metadata = forward_context.attn_metadata
 
     if attn_metadata is None:
-        # Profiling run.
+        self.dsa_attn.impl.dsa_warmup_with_multistream(hidden_states)
         output.fill_(0)
         return
 
-    compress_kv_cache = None
-    swa_kv_cache = self.swa_cache_layer.kv_cache
-    state_cache = None
-    indexer_state_cache = None
-    indexer_k_cache = None
-    indexer_scale_cache = None
-
-    if self.compress_ratio > 1:
-        state_cache = self.compressor.state_cache.kv_cache
-        compress_kv_cache = self.dsa_attn.kv_cache
-    if self.compress_ratio == 4:
-        # TODO(qcs): refactor me
-        indexer_state_cache = self.indexer.compressor.state_cache.kv_cache
-        indexer_k_cache, indexer_scale_cache = self.indexer.k_cache.kv_cache[0][0], self.indexer.k_cache.kv_cache[0][1]
-
-    kv_cache = tuple(
-        [
-            unfold_kvcache(cache)
-            for cache in (
-                compress_kv_cache,
-                swa_kv_cache,
-                state_cache,
-                indexer_state_cache,
-                indexer_k_cache,
-                indexer_scale_cache,
-            )
-        ]
-    )
+    kv_cache = _build_kv_cache(self, forward_context)
 
     self.dsa_attn.impl.forward(
         self.dsa_attn.layer_name, hidden_states, kv_cache, attn_metadata, need_gather_q_kv, output
@@ -245,6 +227,43 @@ direct_register_custom_op(
 def filter_metadata(metadata, prefix):
     # filter using prefix, sort by key for deterministic order
     return [v for k, v in sorted(metadata.items()) if k.startswith(prefix)]
+
+
+def _build_kv_cache(self, forward_context):
+    """Construct the 6-tuple KV cache used by impl.forward()."""
+    compress_kv_cache = None
+    swa_kv_cache = self.swa_cache_layer.kv_cache
+    state_cache = None
+    indexer_state_cache = None
+    indexer_k_cache = None
+    indexer_scale_cache = None
+
+    if self.compress_ratio > 1:
+        state_cache = self.compressor.state_cache.kv_cache
+        compress_kv_cache = self.dsa_attn.kv_cache
+        virtual_engine = getattr(forward_context, "virtual_engine", None)
+        if virtual_engine is not None and isinstance(compress_kv_cache, (list, tuple)):
+            compress_kv_cache = compress_kv_cache[virtual_engine]
+    if self.compress_ratio == 4:
+        indexer_state_cache = self.indexer.compressor.state_cache.kv_cache
+        indexer_k_cache, indexer_scale_cache = (
+            self.indexer.k_cache.kv_cache[0][0],
+            self.indexer.k_cache.kv_cache[0][1],
+        )
+
+    return tuple(
+        [
+            unfold_kvcache(cache)
+            for cache in (
+                compress_kv_cache,
+                swa_kv_cache,
+                state_cache,
+                indexer_state_cache,
+                indexer_k_cache,
+                indexer_scale_cache,
+            )
+        ]
+    )
 
 
 def unfold_kvcache(kvcache):

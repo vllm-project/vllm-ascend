@@ -367,6 +367,7 @@ class KVCacheRecvingThread(threading.Thread):
         self.kv_cache_config = kv_cache_config
         self.model_config = self.vllm_config.model_config
         self.use_mla = self.model_config.is_deepseek_mla
+        self.use_compress = hasattr(self.vllm_config.model_config.hf_config, "compress_ratios")
         self.use_hybrid = use_hybrid
         self.has_mamba = has_mamba
         self.kv_cache_specs = [g.kv_cache_spec for g in kv_cache_config.kv_cache_groups]
@@ -376,7 +377,7 @@ class KVCacheRecvingThread(threading.Thread):
             rank: get_prefill_pp_indices(self.num_layers, rank, self._prefill_pp_size, prefill_pp_layer_partition)
             for rank in range(self._prefill_pp_size)
         }
-        if not is_vl_model(vllm_config):
+        if not is_vl_model(vllm_config) and not self.use_compress:
             if self.use_mla:
                 self.k_head_dim = self.model_config.hf_text_config.kv_lora_rank
                 self.v_head_dim = self.model_config.hf_text_config.qk_rope_head_dim
@@ -519,7 +520,7 @@ class KVCacheRecvingThread(threading.Thread):
         req_start_time = time.perf_counter()
         src_list, dst_list, length_list = [], [], []
         for i in range(self.hma_group_size):
-            if not remote_block_ids[i]:
+            if not remote_block_ids[i] or not local_block_ids[i]:
                 continue
             cur_remote_block_ids = remote_block_ids[i]
             cur_local_block_ids = local_block_ids[i]
@@ -1049,7 +1050,9 @@ class MooncakeConnectorScheduler:
         self.kv_cache_specs = []
         self.need_truncate = self.use_compress
         sw_sizes_tokens: list[tuple[int, int]] = []
-        for g in kv_cache_config.kv_cache_groups:
+        self.group_block_size = []
+        self.group_compress_ratio = [1 for _ in range(len(kv_cache_config.kv_cache_groups))]
+        for i, g in enumerate(kv_cache_config.kv_cache_groups):
             if isinstance(g.kv_cache_spec, UniformTypeKVCacheSpecs):
                 group_spec_set = []
                 for layer_name in g.layer_names:
@@ -1057,17 +1060,23 @@ class MooncakeConnectorScheduler:
                     if layer_spec not in group_spec_set:
                         group_spec_set.append(layer_spec)
                 self.kv_cache_specs.append(group_spec_set)
+                self.group_block_size.append(g.kv_cache_spec.block_size)
                 if isinstance(group_spec_set[0], SlidingWindowSpec):
                     sw_sizes_tokens.append((group_spec_set[0].sliding_window, group_spec_set[0].block_size))
                 else:
                     sw_sizes_tokens.append((0, layer_spec.block_size))
+                    if self.use_compress and hasattr(group_spec_set[0], "compress_ratio"):
+                        self.group_compress_ratio[i] = group_spec_set[0].compress_ratio
                 if isinstance(layer_spec, MambaSpec):
                     self.need_truncate = True
             else:
+                self.group_block_size.append(g.kv_cache_spec.block_size)
                 if isinstance(g.kv_cache_spec, SlidingWindowSpec):
                     sw_sizes_tokens.append((g.kv_cache_spec.sliding_window, g.kv_cache_spec.block_size))
                 else:
                     sw_sizes_tokens.append((0, g.kv_cache_spec.block_size))
+                    if self.use_compress and hasattr(g.kv_cache_spec, "compress_ratio"):
+                        self.group_compress_ratio[i] = g.kv_cache_spec.compress_ratio
                 if isinstance(g.kv_cache_spec, MambaSpec):
                     self.need_truncate = True
                 self.kv_cache_specs.append([g.kv_cache_spec])
@@ -1128,6 +1137,22 @@ class MooncakeConnectorScheduler:
             request.num_prompt_tokens -= 1
             request.max_tokens = 1
             params["_p_side_truncated"] = True
+
+    def _compute_transfer_block_ids(self, block_ids: BlockIds, prompt_len: int) -> BlockIds:
+        transfer_block_ids = []
+        for i, blocks in enumerate(block_ids):
+            if self.num_swa_blocks[i] == 0:
+                if self.use_compress:
+                    group_block_len = math.ceil((prompt_len // self.group_compress_ratio[i]) / self.group_block_size[i])
+                else:
+                    group_block_len = math.ceil(prompt_len / self.group_block_size[i])
+                if group_block_len > 0:
+                    transfer_block_ids.append(blocks[:group_block_len])
+                else:
+                    transfer_block_ids.append([])
+            else:
+                transfer_block_ids.append(blocks)
+        return tuple(transfer_block_ids)
 
     def get_num_new_matched_tokens(self, request: "Request", num_computed_tokens: int) -> tuple[int, bool]:
         """
@@ -1248,6 +1273,7 @@ class MooncakeConnectorScheduler:
             computed_block_ids = self.get_sw_clipped_blocks(computed_block_ids)
 
         num_prompt_blocks = math.ceil(len(request.prompt_token_ids) / self.block_size)
+        computed_block_ids = self._compute_transfer_block_ids(computed_block_ids, len(request.prompt_token_ids))
 
         return delay_free_blocks, dict(
             do_remote_prefill=True,
@@ -1456,6 +1482,8 @@ class MooncakeConnectorWorker:
                 for layer_name in group.layer_names:
                     layer_group_idx[layer_name] = i
             for kv_cache_tensor in self.kv_cache_config.kv_cache_tensors:
+                if not kv_cache_tensor.shared_by:
+                    continue
                 share_tensor_addr = []
                 share_tensor_stride = []
                 cur_tensor_group_idx = []

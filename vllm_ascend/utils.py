@@ -20,6 +20,7 @@
 from __future__ import annotations
 
 import functools
+import json
 import math
 import os
 from contextlib import nullcontext
@@ -494,6 +495,45 @@ def adapt_patch(is_global_patch: bool = False):
         from vllm_ascend.patch import worker  # noqa: F401
 
 
+def setup_ascend_local_comm_res(local_rank: int, kv_transfer_config: Any | None) -> None:
+    """Load the local A5 endpoint config into ASCEND_LOCAL_COMM_RES."""
+    if kv_transfer_config is None:
+        return
+
+    visible_devices = os.getenv("ASCEND_RT_VISIBLE_DEVICES")
+    if visible_devices is None:
+        from vllm_ascend.cpu_binding import DeviceInfo
+
+        devices = sorted([int(x) for x in DeviceInfo.get_npu_map_info()])
+    else:
+        devices = [int(x) for x in visible_devices.split(",") if x.strip()]
+
+    extra_config = kv_transfer_config.kv_connector_extra_config or {}
+    local_comm_res_path = extra_config.get("ascend_local_comm_res_path")
+    if not local_comm_res_path:
+        return
+
+    if not devices:
+        raise ValueError("No NPU devices found or specified in ASCEND_RT_VISIBLE_DEVICES.")
+    if local_rank < 0 or local_rank >= len(devices):
+        raise ValueError(f"local_rank {local_rank} is out of bounds for the available NPU devices: {devices}")
+
+    local_comm_res_file = os.path.join(local_comm_res_path, f"ub_endpoint_npu_{devices[local_rank]}.json")
+    try:
+        with open(local_comm_res_file) as f:
+            data = json.load(f)
+    except FileNotFoundError:
+        raise FileNotFoundError(
+            f"Endpoint config file not found: {local_comm_res_file}. "
+            "Please set ascend_local_comm_res_path in kv_connector_extra_config "
+            "to a directory containing ub_endpoint_npu_*.json endpoint configuration files."
+        )
+    except json.JSONDecodeError as e:
+        raise ValueError(f"Failed to parse endpoint config file: {local_comm_res_file}") from e
+
+    os.environ["ASCEND_LOCAL_COMM_RES"] = json.dumps(data, ensure_ascii=False, separators=(",", ":"))
+
+
 @functools.cache
 def vllm_version_is(target_vllm_version: str):
     if envs_ascend.VLLM_VERSION is not None:
@@ -571,7 +611,6 @@ def update_aclgraph_sizes(vllm_config: VllmConfig) -> None:
     # the number of streams, which is 2048, we save 248 streams
     # as a buffer.
     # Maximum number of graphs that can be captured by ACL Graph
-    # TODO: Find out whether we need to solve allreduce function
     MAX_CAPTURE_SIZE = 1800
 
     # enable pcp or dcp will add new communication and consume additional approximately less than 100 streams
@@ -581,6 +620,14 @@ def update_aclgraph_sizes(vllm_config: VllmConfig) -> None:
     compilation_config = vllm_config.compilation_config
     original_sizes, compilation_config.cudagraph_capture_sizes = compilation_config.cudagraph_capture_sizes, None
 
+    # TODO: Find out if we can have different sizes for mixed batch and uniform batch
+    # If so, we'll only have to reduce the sizes for mixed batch
+    from vllm.config.compilation import CUDAGraphMode
+
+    cudagraph_mode = compilation_config.cudagraph_mode
+    if cudagraph_mode == CUDAGraphMode.FULL_AND_PIECEWISE:
+        MAX_CAPTURE_SIZE = max(0, MAX_CAPTURE_SIZE - len(original_sizes))
+
     # Calculate parallel configuration factor
     if not vllm_config.model_config:
         logger.warning(
@@ -589,6 +636,7 @@ def update_aclgraph_sizes(vllm_config: VllmConfig) -> None:
         )
 
         return
+
     hf_config = vllm_config.model_config.hf_text_config
     if hasattr(hf_config, "num_hidden_layers"):
         num_hidden_layers = hf_config.num_hidden_layers
@@ -670,13 +718,14 @@ def update_aclgraph_sizes(vllm_config: VllmConfig) -> None:
     # If original sizes exceed maximum, sample a representative subset
     if max_num_batch_sizes < len(original_sizes):
         # Sample uniformly from original sizes
-        step = (len(original_sizes) - 1) / (max_num_batch_sizes - 1)
-        indices = [round(i * step) for i in range(max_num_batch_sizes)]
-
-        # Ensure first and last elements are preserved
-        indices[0], indices[-1] = 0, len(original_sizes) - 1
-
-        sampled_sizes = [original_sizes[i] for i in indices]
+        if max_num_batch_sizes <= 1:
+            # Avoid division by zero when only one capture size can be kept.
+            sampled_sizes = [original_sizes[-1]]
+        else:
+            step = (len(original_sizes) - 1) / (max_num_batch_sizes - 1)
+            indices = [round(i * step) for i in range(max_num_batch_sizes)]
+            indices[0], indices[-1] = 0, len(original_sizes) - 1
+            sampled_sizes = [original_sizes[i] for i in indices]
         update_cudagraph_capture_sizes(vllm_config, sampled_sizes)
         logger.info(
             "Adjusted ACL graph batch sizes for %s model (layers: %d): %d → %d sizes",
@@ -773,6 +822,18 @@ def register_ascend_customop(vllm_config: VllmConfig | None = None):
         "GatedDeltaNetAttention": AscendGatedDeltaNetAttention,
         "BailingMoELinearAttention": AscendBailingMoELinearAttention,
     }
+
+    if vllm_config is None:
+        try:
+            from vllm.config import get_current_vllm_config
+
+            vllm_config = get_current_vllm_config()
+        except AssertionError:
+            vllm_config = None
+    if vllm_config is not None and vllm_config.model_config.is_deepseek_mla:
+        from vllm_ascend.ops.fused_moe.gate_linear import AscendGateLinear
+
+        REGISTERED_ASCEND_OPS["GateLinear"] = AscendGateLinear
 
     # 310P: override selected ops with 310P implementations (keep minimal changes outside _310p)
     if is_310p():
@@ -925,10 +986,6 @@ def shared_expert_dp_enabled() -> bool:
     return get_ascend_config().enable_shared_expert_dp or enable_sp() or enable_sp_by_pass()
 
 
-def prefill_context_parallel_enable() -> bool:
-    return get_ascend_config().enable_context_parallel
-
-
 def is_moe_model(vllm_config: VllmConfig):
     """Checks if the model is a MoE model by config"""
     global _IS_MOE_MODEL
@@ -1072,9 +1129,9 @@ def npu_stream_switch(target_stream: torch.npu.Stream, *, enabled: bool = True):
 
 def create_hccl_pg_options(group_name: str):
     options = torch_npu._C._distributed_c10d.ProcessGroupHCCL.Options()
-    hccl_config = get_hccl_config_for_pg_options(group_name)
-    if hccl_config is not None:
-        options.hccl_config = hccl_config
+    hccl_config = get_hccl_config_for_pg_options(group_name) or {}
+    hccl_config["group_name"] = group_name
+    options.hccl_config = hccl_config
     return options
 
 
