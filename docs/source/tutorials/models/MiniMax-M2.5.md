@@ -302,53 +302,6 @@ curl http://{NodeIP}:8000/v1/chat/completions \
   }'
 ```
 
-## Performance Reference
-
-### A3 (single node, tp=16, 4k/1k@bs16)
-
-#### Results
-
-**Baseline** (`3.5k/1k@bs=217`)
-
-| Metric | Result |
-| --- | --- |
-| Success/Failure | `217/0` |
-| Mean TTFT | `10316.56 ms` |
-| Mean TPOT | `34.28 ms` |
-| Output tok/s | `4803.81` |
-| Total tok/s | `16096.59` |
-
-**Long-context reference** (`190k/1k@bs=4`)
-
-| Metric | Result |
-| --- | --- |
-| Output tok/s | `37.12` |
-| Mean TTFT | `2002.37 ms` |
-| Mean TPOT | `105.54 ms` |
-| Mean ITL | `105.54 ms` |
-
-### A2 (single node)
-
-#### Results
-
-**32k/0.5k, concurrency=40, 160 prompts**
-
-| Metric | Result |
-| --- | --- |
-| TTFT (avg) | 6944.5 ms |
-| TPOT (avg) | 50.1 ms |
-| Output throughput | 585.79 tok/s |
-| Prefix hit rate | 90% |
-
-**190k/1k, concurrency=2, 4 prompts**
-
-| Metric | Result |
-| --- | --- |
-| TTFT (avg) | 48575.1 ms |
-| TPOT (avg) | 85.3 ms |
-| Output throughput | 15.03 tok/s |
-| Prefix hit rate | 0% |
-
 ## FAQ
 
 - **Q: What should I do if the output is garbled in EP mode?**
