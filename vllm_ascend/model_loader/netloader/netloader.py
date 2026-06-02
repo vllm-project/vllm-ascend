@@ -246,11 +246,12 @@ class ModelNetLoaderElastic(BaseModelLoader):
                 logger.error("Driver IP is not set, skip to start Netloader server")
             else:
                 if self.listen_port is None:
-                    self.listen_port = find_free_port()
+                    listen_port = find_free_port()
                 else:
-                    self.listen_port += device_id
+                    listen_port = self.listen_port + device_id
                 if is_draft:
-                    self.listen_port += DRAFT_PORT_OFFSET
+                    listen_port += DRAFT_PORT_OFFSET
+                self.listen_port = listen_port
 
                 group_name = "netloader_draft" if is_draft else "netloader"
 
@@ -258,14 +259,14 @@ class ModelNetLoaderElastic(BaseModelLoader):
                     "Start elastic Netloader server, rank: %s, listen port: %s:%s, group: %s",
                     device_id,
                     driver_ip,
-                    self.listen_port,
+                    listen_port,
                     group_name,
                 )
 
                 if self.output_prefix is not None and not is_draft:
                     try:
                         with open(self.output_prefix + str(device_id) + ".txt", "w") as file:
-                            file.write(f"{driver_ip}:{self.listen_port}")
+                            file.write(f"{driver_ip}:{listen_port}")
                         logger.info(
                             "Successfully wrote server address to file: %s", self.output_prefix + str(device_id)
                         )
@@ -281,11 +282,9 @@ class ModelNetLoaderElastic(BaseModelLoader):
                         logger.error("Unknown error: %s", e)
 
                 try:
-                    assert isinstance(self.listen_port, int), f"listen port should be int but get {self.listen_port}"
-
                     elastic_server = ElasticServer(
                         driver_ip,
-                        self.listen_port,
+                        listen_port,
                         model,
                         device_id,
                         model_config.model,

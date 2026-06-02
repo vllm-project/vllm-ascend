@@ -32,7 +32,9 @@ class ElasticClient:
     Class for handling the client-side logic of Netloader of models.
     """
 
-    def __init__(self, sources: list[str], device_id: int, model_path: str, tp: int, pp: int, group_name: str = "netloader"):
+    def __init__(
+        self, sources: list[str], device_id: int, model_path: str, tp: int, pp: int, group_name: str = "netloader"
+    ):
         """
         Initializes the ElasticClient instance.
 
@@ -171,7 +173,14 @@ class ElasticClient:
         free_port = find_free_port()
         data = {
             "label": "JOIN",
-            "content": {"device_id": device_id, "model_path": model_path, "tp": tp, "pp": pp, "port": free_port, "group_name": self.group_name},
+            "content": {
+                "device_id": device_id,
+                "model_path": model_path,
+                "tp": tp,
+                "pp": pp,
+                "port": free_port,
+                "group_name": self.group_name,
+            },
         }
 
         try:
@@ -401,8 +410,12 @@ class ElasticServer:
 
         if ack["content"] and isinstance(ack["content"], dict) and "name" in ack["content"]:
             try:
-                p2psend = P2PSend(self.addr, data["content"]["port"], ack["content"]["name"],
-                                  data["content"].get("group_name", "netloader"))
+                p2psend = P2PSend(
+                    self.addr,
+                    data["content"]["port"],
+                    ack["content"]["name"],
+                    data["content"].get("group_name", "netloader"),
+                )
                 p2psend.send(self.model, self.original_int8)
             except Exception as e:
                 logger.error("P2PSend Failed to send model to %s, details: %s", self.addr, e)

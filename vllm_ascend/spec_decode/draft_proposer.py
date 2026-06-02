@@ -25,8 +25,7 @@ class AscendDraftModelProposer(DraftModelProposer, AscendSpecDecodeBaseProposer)
         draft_load_config = draft_vllm_config.load_config
         draft_model_config = self.speculative_config.draft_model_config
         logger.info(
-            "AscendDraftModelProposer._get_model(): loading draft model with "
-            "load_format=%s, model=%s",
+            "AscendDraftModelProposer._get_model(): loading draft model with load_format=%s, model=%s",
             getattr(draft_load_config, "load_format", None),
             getattr(draft_model_config, "model", None),
         )
