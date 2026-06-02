@@ -397,6 +397,8 @@ def _populate_impl_attrs(
     impl.vllm_config = vllm_config
     impl.scale = scale
     impl.num_heads = num_heads
+    impl.num_heads_padded = 1 << (num_heads - 1).bit_length()
+    impl.head_padding = impl.num_heads_padded - num_heads
     impl.num_kv_heads = 1
     impl.kv_lora_rank = kv_lora_rank
     impl.qk_nope_head_dim = qk_nope_head_dim

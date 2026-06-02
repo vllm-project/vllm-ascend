@@ -121,7 +121,10 @@ def chunk_scaled_dot_kkt_fwd(
     NT = triton.cdiv(T, BT) if cu_seqlens is None else len(chunk_indices)
     A = torch.empty(B, T, H, BT, device=k.device, dtype=output_dtype)
 
-    chunk_scaled_dot_kkt_fwd_kernel[(NT, 1)](
+    from vllm_ascend.device.device_op import DeviceOperator
+
+    A = DeviceOperator.chunk_scaled_dot_kkt_fwd(
+        NT=NT,
         k=k,
         beta=torch.permute(beta, (2, 0, 1)).contiguous(),
         g_cumsum=torch.permute(g_cumsum, (2, 0, 1)).contiguous(),
@@ -135,8 +138,5 @@ def chunk_scaled_dot_kkt_fwd(
         K=K,
         BT=BT,
         BK=128,
-        num_warps=8,
-        num_stages=3,
-        multibuffer=True,
     )
     return A
