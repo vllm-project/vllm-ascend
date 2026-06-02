@@ -1126,6 +1126,9 @@ class AscendSFAImpl(MLAAttentionImpl):
 
         # run mlapo ops when dsa-cp is disabled, and ensure that num_tokens satisfies the count limitation
         if self.enable_mlapo and num_input_tokens <= MLAPO_MAX_SUPPORTED_TOKENS:
+            hidden_states = torch.ops.vllm.maybe_all_gather_and_maybe_unpad(
+                hidden_states.contiguous(), need_gather_q_kv
+            )
             hidden_states, ql_nope, q_pe, q_c = self._sfa_preprocess_with_mlapo(
                 hidden_states=hidden_states,
                 kv_cache=kv_cache,
