@@ -98,7 +98,7 @@ enum class CACHE_MODE : std::uint8_t {
     CYCLE = static_cast<std::uint8_t>(2)
 };
 
-enum class TEMPLATE_ID:uint8_t {
+enum class TEMPLATE_ID : uint8_t {
     NORMAL = 0,
     EMPTY_X = 1,
     PERF = 2
@@ -153,6 +153,7 @@ struct ConstInfo {
     uint32_t blockNum = 0;
     uint32_t blockSize = 0;
     uint32_t maxBlockNumPerBatch = 0;
+    uint64_t stateCacheStrideDim0 = 0;
 
     // workSpace
     uint32_t dbWorkspaceRatio = 1;
@@ -166,7 +167,6 @@ struct ConstInfo {
     uint32_t nSize = 0;
 
     uint32_t dbSize = 0;
-    uint32_t stride = 1;
 };
 
 struct RunInfo {
@@ -288,14 +288,14 @@ __aicore__ inline void CopySingleMatrixNDToNZ(LocalTensor<T> l1Tensor, const Glo
 {
     Nd2NzParams nd2nzPara;
     nd2nzPara.ndNum = 1;
-    nd2nzPara.nValue = nValue; //nd矩阵的行数
+    nd2nzPara.nValue = nValue; // nd矩阵的行数
     if constexpr (IsSameType<T, int4b_t>::value) {
         constexpr uint32_t HALF_SIZE_DIVISOR = 2;
         nd2nzPara.dValue = dValue / HALF_SIZE_DIVISOR;
         nd2nzPara.srcDValue = srcDValue / HALF_SIZE_DIVISOR;
     } else {
-        nd2nzPara.dValue = dValue; //nd矩阵的列数
-        nd2nzPara.srcDValue = srcDValue; //同一nd矩阵相邻行起始地址间的偏移
+        nd2nzPara.dValue = dValue; // nd矩阵的列数
+        nd2nzPara.srcDValue = srcDValue; // 同一nd矩阵相邻行起始地址间的偏移
     }
     nd2nzPara.dstNzC0Stride = dstNzC0Stride;
     nd2nzPara.dstNzNStride = 1;
@@ -337,5 +337,5 @@ __aicore__ inline void DumpTensorForDim2(GlobalTensor<T> tensor, uint32_t desc, 
     // AscendC::DumpTensor(tensor, desc, dumpSize, shapeInfo);
 }
 
-}
+} // namespace Compressor
 #endif

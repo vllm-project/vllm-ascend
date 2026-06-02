@@ -71,14 +71,14 @@ __aicore__ inline void CompressorKernel<COMP>::Init(
         __gm__ uint8_t *cmpKvOut,
         __gm__ uint8_t *workspace)
 {
-    // printf("Init\n");
+
 }
 
 
 template <typename COMP>
 __aicore__ inline void CompressorKernel<COMP>::Process()
 {
-    // printf("Process\n");
+
 }
 
 } // namespace Compressor
