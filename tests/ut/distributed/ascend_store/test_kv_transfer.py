@@ -371,6 +371,7 @@ class TestKVCacheStoreLayerSendingThread(unittest.TestCase):
     def test_handle_request_puts_missing(self):
         t, store = self._make_thread([1, 0])
         req = self._make_layer_req(layer_id=0)
+        t.add_stored_request(req.req_id)
         t.request_queue.put(req)
         t._handle_request(req)
         self.assertEqual(len(store.put_calls), 1)
@@ -380,6 +381,7 @@ class TestKVCacheStoreLayerSendingThread(unittest.TestCase):
     def test_handle_request_all_exist_not_last(self):
         t, store = self._make_thread([1, 1])
         req = self._make_layer_req(layer_id=0, is_last_chunk=False)
+        t.add_stored_request(req.req_id)
         t.request_queue.put(req)
         t._handle_request(req)
         self.assertEqual(len(store.put_calls), 0)
@@ -387,6 +389,7 @@ class TestKVCacheStoreLayerSendingThread(unittest.TestCase):
     def test_handle_request_all_exist_last_chunk_final_layer(self):
         t, store = self._make_thread([1, 1], num_layers=2)
         req = self._make_layer_req(layer_id=1, is_last_chunk=True)
+        t.add_stored_request(req.req_id)
         t.request_queue.put(req)
         t._handle_request(req)
         finished = t.get_and_clear_finished_requests()
@@ -404,10 +407,11 @@ class TestKVCacheStoreLayerSendingThread(unittest.TestCase):
             layer_id=0,
             is_last_chunk=True,
         )
+        t.add_stored_request(req.req_id)
         t.request_queue.put(req)
         t._handle_request(req)
         finished = t.get_and_clear_finished_requests()
-        self.assertIn("r1", finished)
+        self.assertNotIn("r1", finished)
 
     def test_handle_request_with_current_event(self):
         t, store = self._make_thread([0])
@@ -423,6 +427,7 @@ class TestKVCacheStoreLayerSendingThread(unittest.TestCase):
             is_last_chunk=False,
             current_event=event,
         )
+        t.add_stored_request(req.req_id)
         t.request_queue.put(req)
         t._handle_request(req)
         event.synchronize.assert_called_once()
@@ -430,6 +435,7 @@ class TestKVCacheStoreLayerSendingThread(unittest.TestCase):
     def test_handle_request_last_chunk_final_layer_with_missing(self):
         t, store = self._make_thread([0], num_layers=2)
         req = self._make_layer_req(layer_id=1, is_last_chunk=True, num_keys=1)
+        t.add_stored_request(req.req_id)
         t.request_queue.put(req)
         t._handle_request(req)
         finished = t.get_and_clear_finished_requests()
@@ -438,6 +444,7 @@ class TestKVCacheStoreLayerSendingThread(unittest.TestCase):
     def test_layerwise_kv_event_published_on_final_layer(self):
         t, store = self._make_thread([0], num_layers=2, enable_kv_event=True)
         req = self._make_layer_req(layer_id=1, is_last_chunk=True, num_keys=1)
+        t.add_stored_request(req.req_id)
         t.request_queue.put(req)
         t._handle_request(req)
         events = t.get_kv_events()
@@ -449,6 +456,7 @@ class TestKVCacheStoreLayerSendingThread(unittest.TestCase):
     def test_layerwise_kv_event_not_published_before_final_layer(self):
         t, store = self._make_thread([0], num_layers=2, enable_kv_event=True)
         req = self._make_layer_req(layer_id=0, is_last_chunk=False, num_keys=1)
+        t.add_stored_request(req.req_id)
         t.request_queue.put(req)
         t._handle_request(req)
         self.assertEqual(t.get_kv_events(), [])
@@ -456,6 +464,7 @@ class TestKVCacheStoreLayerSendingThread(unittest.TestCase):
     def test_layerwise_kv_event_uses_missing_blocks_from_previous_layers(self):
         t, store = self._make_thread([0], num_layers=2, enable_kv_event=True)
         first_layer_req = self._make_layer_req(layer_id=0, is_last_chunk=True, num_keys=1)
+        t.add_stored_request(first_layer_req.req_id)
         t.request_queue.put(first_layer_req)
         t._handle_request(first_layer_req)
         t.m_store.exists_result = [1]
