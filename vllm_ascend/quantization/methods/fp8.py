@@ -29,11 +29,9 @@ from .w8a8_mxfp8 import AscendW8A8MXFP8DynamicLinearMethod
 
 @register_scheme("FP8", "ds_linear")
 class AscendW8A8MXFP8DSDynamicLinearMethod(AscendW8A8MXFP8DynamicLinearMethod):
-    """Linear method for Ascend W8A8_MXFP8 (Microscaling FP8) quantization.
+    """Linear method for DS original W8A8 mxfp(blocksize: 128 * 128) quantization.
 
-    This scheme uses microscaling FP8 quantization with per-group scales.
-    The activation is dynamically quantized to FP8 (E4M3FN format) with
-    microscaling, and weights are stored in FP8 format with per-group scales.
+    scales are reorganize as blocksize 32 * 1 in process_weights_after_loading
     """
 
     model_dtype = None
@@ -82,7 +80,7 @@ class AscendW8A8MXFP8DSDynamicLinearMethod(AscendW8A8MXFP8DynamicLinearMethod):
 
 @register_scheme("FP8", "w4a8_moe")
 class AscendW4A8MXFPDSDynamicFusedMoEMethod(AscendW4A8MXFPDynamicFusedMoEMethod):
-    """FusedMoe method for Ascend W8A8_DYNAMIC."""
+    """FusedMoe method for DS original w4a8 mxfp quantization."""
 
     model_dtype = None
     quant_type: QuantType = QuantType.W4A8MXFP

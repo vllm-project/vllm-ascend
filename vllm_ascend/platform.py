@@ -108,7 +108,6 @@ class NPUPlatform(Platform):
         ASCEND_QUANTIZATION_METHOD,
         COMPRESSED_TENSORS_METHOD,
         FP8_METHOD,
-        "deepseek_v4_fp8",
     ]
 
     def is_sleep_mode_available(self) -> bool:
