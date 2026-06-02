@@ -337,6 +337,11 @@ def rejection_sample(
     posterior_threshold = float(get_ascend_config().rejection_sampler_config.posterior_threshold)
     posterior_alpha = float(get_ascend_config().rejection_sampler_config.posterior_alpha)
 
+    if using_entropy_verify and ori_target_logits is not None:
+        ori_target_probs = ori_target_logits.softmax(dim=-1, dtype=torch.float32)
+    else:
+        ori_target_probs = None
+
     # Create output buffer.
     output_token_ids = torch.empty(
         (batch_size, max_spec_len + 1),
@@ -420,11 +425,6 @@ def rejection_sample(
         target_probs = target_logits.softmax(dim=-1, dtype=torch.float32)
         assert target_probs.is_contiguous()
 
-        if using_entropy_verify and ori_target_logits is not None:
-            ori_target_probs = ori_target_logits.softmax(dim=-1, dtype=torch.float32)
-        else:
-            ori_target_probs = target_probs
-
         # Generate uniform probabilities for rejection sampling
         uniform_probs = generate_uniform_probs(
             num_tokens,
@@ -466,6 +466,8 @@ def rejection_sample(
                     selected_vocab_size,
                     global_vocab_size,
                     batch_size,
+                    ori_target_probs,
+                    NO_ORI_TARGET_PROBS=ori_target_probs is None,
                     NO_DRAFT_PROBS=draft_probs is None,
                     ENABLE_REDUCE_SAMPLING=True,
                     ENTROPY_VERIFY=using_entropy_verify,
@@ -474,8 +476,6 @@ def rejection_sample(
                     POSTERIOR_ALPHA=posterior_alpha,
                     SUB_BLOCK=4 * 1024,
                     EPSILON=1e-10,
-                    ori_target_probs_ptr=ori_target_probs,
-                    ori_vocab_size=ori_target_probs.shape[-1] if ori_target_probs is not None else 0,
                 )
             else:
                 rejection_random_sample_pytorch(
@@ -518,6 +518,8 @@ def rejection_sample(
                     selected_vocab_size,
                     global_vocab_size,
                     batch_size,
+                    ori_target_probs,
+                    NO_ORI_TARGET_PROBS=ori_target_probs is None,
                     NO_DRAFT_PROBS=draft_probs is None,
                     ENABLE_REDUCE_SAMPLING=True,
                     ENTROPY_VERIFY=using_entropy_verify,
@@ -526,8 +528,6 @@ def rejection_sample(
                     POSTERIOR_ALPHA=posterior_alpha,
                     SUB_BLOCK=4 * 1024,
                     EPSILON=1e-10,
-                    ori_target_probs_ptr=ori_target_probs,
-                    ori_vocab_size=ori_target_probs.shape[-1] if ori_target_probs is not None else 0,
                 )
             else:
                 rejection_random_sample_block_verify_pytorch(
@@ -606,6 +606,8 @@ def rejection_sample(
                     vocab_size,
                     global_vocab_size,  # global_vocab_size
                     batch_size,
+                    ori_target_probs,
+                    NO_ORI_TARGET_PROBS=ori_target_probs is None,
                     NO_DRAFT_PROBS=draft_probs is None,
                     ENABLE_REDUCE_SAMPLING=False,
                     ENTROPY_VERIFY=using_entropy_verify,
@@ -614,8 +616,6 @@ def rejection_sample(
                     POSTERIOR_ALPHA=posterior_alpha,
                     SUB_BLOCK=4 * 1024,
                     EPSILON=1e-10,
-                    ori_target_probs_ptr=ori_target_probs,
-                    ori_vocab_size=ori_target_probs.shape[-1] if ori_target_probs is not None else 0,
                 )
             else:
                 rejection_random_sample_pytorch(
@@ -656,6 +656,8 @@ def rejection_sample(
                     vocab_size,
                     global_vocab_size,  # global_vocab_size
                     batch_size,
+                    ori_target_probs,
+                    NO_ORI_TARGET_PROBS=ori_target_probs is None,
                     NO_DRAFT_PROBS=draft_probs is None,
                     ENABLE_REDUCE_SAMPLING=False,
                     ENTROPY_VERIFY=using_entropy_verify,
@@ -664,8 +666,6 @@ def rejection_sample(
                     POSTERIOR_ALPHA=posterior_alpha,
                     SUB_BLOCK=4 * 1024,
                     EPSILON=1e-10,
-                    ori_target_probs_ptr=ori_target_probs,
-                    ori_vocab_size=ori_target_probs.shape[-1] if ori_target_probs is not None else 0,
                 )
             else:
                 rejection_random_sample_block_verify_pytorch(

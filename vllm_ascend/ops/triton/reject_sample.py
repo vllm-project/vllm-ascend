@@ -155,6 +155,8 @@ def rejection_random_sample_kernel(
     vocab_size,  # vocab_size or selected_vocab_size if ENABLE_REDUCE_SAMPLING
     global_vocab_size,  # global vocab size for draft_probs indexing (only used if ENABLE_REDUCE_SAMPLING)
     vec_len,
+    ori_target_probs_ptr,  # [num_tokens, ori_vocab_size] original probs for entropy
+    NO_ORI_TARGET_PROBS: tl.constexpr,
     NO_DRAFT_PROBS: tl.constexpr,
     ENABLE_REDUCE_SAMPLING: tl.constexpr,  # Whether using reduce sampling
     ENTROPY_VERIFY: tl.constexpr,
@@ -164,8 +166,6 @@ def rejection_random_sample_kernel(
     POSTERIOR_ALPHA: tl.constexpr = 0.4,
     SUB_BLOCK: tl.constexpr = 4096,
     EPSILON: tl.constexpr = 1e-10,
-    ori_target_probs_ptr=0,  # [num_tokens, ori_vocab_size] original probs for entropy
-    ori_vocab_size=0,  # vocab size of ori_target_probs
 ):
     block_idx = tl.program_id(0)
     offsets = block_idx * BLOCK_SIZE + tl.arange(0, BLOCK_SIZE)
@@ -499,6 +499,8 @@ def rejection_random_sample_block_verify_kernel(
     vocab_size,  # vocab_size or selected_vocab_size if ENABLE_REDUCE_SAMPLING
     global_vocab_size,  # global vocab size for draft_probs indexing (only used if ENABLE_REDUCE_SAMPLING)
     vec_len,
+    ori_target_probs_ptr,  # [num_tokens, ori_vocab_size] original probs for entropy
+    NO_ORI_TARGET_PROBS: tl.constexpr,
     NO_DRAFT_PROBS: tl.constexpr,
     ENABLE_REDUCE_SAMPLING: tl.constexpr,  # Whether using reduce_sampling
     BLOCK_SIZE: tl.constexpr,
@@ -691,8 +693,6 @@ def rejection_random_sample_block_and_entropy_verify_kernel(
     POSTERIOR_ALPHA: tl.constexpr = 0.4,
     SUB_BLOCK: tl.constexpr = 4096,
     EPSILON: tl.constexpr = 1e-10,
-    ori_target_probs_ptr=0,  # [num_tokens, ori_vocab_size] original probs for entropy
-    ori_vocab_size=0,  # vocab size of ori_target_probs
 ):
     block_idx = tl.program_id(0)
     offsets = block_idx * BLOCK_SIZE + tl.arange(0, BLOCK_SIZE)
@@ -754,19 +754,20 @@ def rejection_random_sample_block_and_entropy_verify_kernel(
                     draft_prob = tl.load(draft_probs_ptr + token_idx * vocab_for_draft + draft_token_id)
 
                 if ENTROPY_VERIFY:
-                    _entropy_vocab_size = ori_vocab_size if ori_vocab_size > 0 else vocab_size
-                    _entropy_probs_ptr = ori_target_probs_ptr if ori_vocab_size > 0 else target_probs_ptr
-                    loop = (_entropy_vocab_size + SUB_BLOCK - 1) // SUB_BLOCK
+                    loop = (vocab_size + SUB_BLOCK - 1) // SUB_BLOCK
                     entropy = 0.0
                     for loop_i in range(loop):
                         vocab_start = loop_i * SUB_BLOCK
                         vocab_offset = vocab_start + tl.arange(0, SUB_BLOCK)
-                        vocab_mask = vocab_offset < _entropy_vocab_size
-                        probs = tl.load(
-                            _entropy_probs_ptr + token_idx * _entropy_vocab_size + vocab_offset,
-                            vocab_mask,
-                            other=0,
-                        )
+                        vocab_mask = vocab_offset < vocab_size
+                        if NO_ORI_TARGET_PROBS:
+                            probs = tl.load(target_probs_ptr + token_idx * vocab_size + vocab_offset,
+                                        vocab_mask,
+                                        other=0)
+                        else:
+                            probs = tl.load(ori_target_probs_ptr + token_idx * vocab_size + vocab_offset,
+                                        vocab_mask,
+                                        other=0)
                         log_probs = tl.log(probs + EPSILON)
                         entropy_contrib = -probs * log_probs
                         entropy += tl.sum(entropy_contrib)
