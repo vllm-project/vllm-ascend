@@ -431,6 +431,48 @@ class TestExpertsSelector:
         torch.testing.assert_close(topk_weights, expected_weights.to(hidden_states.dtype))
         assert torch.equal(topk_ids, expected_ids.to(torch.int32))
 
+    @patch("vllm_ascend.ops.fused_moe.experts_selector.get_weight_prefetch_method", return_value=MagicMock())
+    @patch("vllm_ascend.ops.fused_moe.experts_selector.check_npu_moe_gating_top_k", return_value=True)
+    def test_select_experts_sqrtsoftplus_recomputes_hash_weights(self, _, __):
+        hidden_states = torch.ones(2, 4, dtype=torch.bfloat16)
+        router_logits = torch.tensor([[0.0, 3.0, 1.0], [4.0, 0.0, 2.0]], dtype=torch.bfloat16)
+        returned_topk_ids = torch.tensor([[1, 2], [0, 2]], dtype=torch.int32)
+
+        def fake_moe_gating_top_k_hash(**kwargs):
+            assert kwargs["renorm"] == 0
+            assert kwargs["routed_scaling_factor"] == 1.0
+            bad_weights = torch.zeros(2, 2, dtype=torch.float32)
+            return bad_weights, returned_topk_ids, torch.empty(0)
+
+        with patch.object(
+            torch.ops._C_ascend,
+            "moe_gating_top_k_hash",
+            side_effect=fake_moe_gating_top_k_hash,
+            create=True,
+        ):
+            topk_weights, topk_ids = select_experts(
+                hidden_states=hidden_states,
+                router_logits=router_logits,
+                top_k=2,
+                use_grouped_topk=True,
+                renormalize=True,
+                topk_group=1,
+                num_expert_group=1,
+                custom_routing_function=None,
+                scoring_func="sqrtsoftplus",
+                routed_scaling_factor=1.5,
+                e_score_correction_bias=None,
+                num_experts=3,
+            )
+
+        expected = F.softplus(router_logits.to(torch.float32)).sqrt().gather(1, returned_topk_ids.to(torch.int64))
+        expected = expected / expected.sum(dim=-1, keepdim=True)
+        expected = expected * 1.5
+
+        assert torch.equal(topk_ids, returned_topk_ids)
+        torch.testing.assert_close(topk_weights, expected)
+        torch.testing.assert_close(topk_weights.sum(dim=-1), torch.full((2,), 1.5))
+
     def test_select_experts_grouped_topk_bias_uses_original_weights(self):
         _require_ascend_custom_op("moe_gating_top_k")
 

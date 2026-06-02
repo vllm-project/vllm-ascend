@@ -191,6 +191,54 @@ class TestAscendW8A8FusedMoEMethod(TestBase):
         self.assertIs(fused_experts_input.topk_weights, topk_weights)
         self.assertIs(fused_experts_input.topk_ids, topk_ids)
 
+    @patch("vllm_ascend.quantization.methods.w8a8_dynamic._EXTRA_CTX")
+    @patch("vllm_ascend.quantization.methods.w8a8_dynamic.select_experts")
+    def test_apply_keeps_topk_weights_fp32(self, mock_select_experts, mock_extra_ctx):
+        tokens = 4
+        hidden_size = self.hidden_size
+        layer = torch.nn.Module()
+        layer.w13_weight = torch.randint(
+            -8,
+            8,
+            (self.num_experts, 2 * self.intermediate_size, hidden_size),
+            dtype=torch.int8,
+        )
+        layer.w2_weight = torch.randint(
+            -8,
+            8,
+            (self.num_experts, hidden_size, self.intermediate_size),
+            dtype=torch.int8,
+        )
+        layer.w13_weight_scale_fp32 = torch.ones(self.num_experts, 2 * self.intermediate_size, dtype=torch.float32)
+        layer.w2_weight_scale = torch.ones(self.num_experts, hidden_size, dtype=torch.float32)
+        layer.swiglu_limit = 1000000
+
+        x = torch.randn(tokens, hidden_size, dtype=torch.bfloat16)
+        router_logits = torch.randn(tokens, self.num_experts, dtype=torch.float32)
+        topk_weights = torch.randn(tokens, 2, dtype=torch.bfloat16)
+        topk_ids = torch.randint(0, self.num_experts, (tokens, 2), dtype=torch.int64)
+
+        mock_select_experts.return_value = (topk_weights, topk_ids)
+        mock_comm = Mock()
+        mock_comm.fused_experts.return_value = torch.randn(tokens, hidden_size, dtype=torch.float32)
+        mock_extra_ctx.moe_comm_method = mock_comm
+        mock_extra_ctx.moe_comm_type = MoECommType.ALLGATHER
+        self.quant_method.multistream_overlap_gate = False
+        self.quant_method.in_dtype = torch.bfloat16
+
+        self.quant_method.apply(
+            layer=layer,
+            x=x,
+            router_logits=router_logits,
+            top_k=2,
+            renormalize=True,
+            num_experts=self.num_experts,
+        )
+
+        fused_experts_input = mock_comm.fused_experts.call_args.kwargs["fused_experts_input"]
+        self.assertEqual(fused_experts_input.topk_weights.dtype, torch.float32)
+        torch.testing.assert_close(fused_experts_input.topk_weights, topk_weights.to(torch.float32))
+
     @patch("torch_npu.npu_format_cast")
     @patch("vllm_ascend.quantization.methods.w8a8_dynamic.get_ascend_config")
     def test_process_weights_after_loading(self, mock_get_config, mock_format_cast):

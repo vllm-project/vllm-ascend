@@ -272,7 +272,7 @@ def _select_experts_with_fusion_ops(
         else:
             input_ids = None
             tid2eid_ones = None
-        topk_weights, topk_ids, _ = torch.ops._C_ascend.moe_gating_top_k_hash(
+        _, topk_ids, _ = torch.ops._C_ascend.moe_gating_top_k_hash(
             x=router_logits,
             k=top_k,
             bias=e_score_correction_bias,
@@ -280,15 +280,18 @@ def _select_experts_with_fusion_ops(
             tid2eid=tid2eid_ones,
             k_group=topk_group,
             group_count=num_expert_group,
-            routed_scaling_factor=routed_scaling_factor,
+            routed_scaling_factor=1.0,
             eps=1e-20,
             group_select_mode=1,
-            # The hash custom op currently rejects renorm != 0. Apply
-            # norm_topk_prob in Python below before returning to MoE compute.
+            # The hash custom op currently rejects renorm != 0. Use it
+            # only for expert ids and recompute weights below.
             renorm=0,
             norm_type=2,
             out_flag=False,
         )
+        topk_weights = F.softplus(router_logits.to(torch.float32)).sqrt().gather(1, topk_ids.to(torch.int64))
+        topk_weights = _renormalize_topk_weights(topk_weights, renormalize)
+        topk_weights = topk_weights * routed_scaling_factor
         return topk_weights, topk_ids
     norm_type = 0 if scoring_func == "softmax" else 1
     if e_score_correction_bias is not None and e_score_correction_bias.dtype != router_logits.dtype:
