@@ -1709,8 +1709,6 @@ class MooncakeConnectorWorker:
         # layer indices: {group_id: (group_spec, [layer_idx0, layer_idx1, ...])}.
         self.kv_group2layeridx = self._build_kv_group2layeridx()
         has_mamba_group = self._has_mamba_group()
-        if has_mamba_group:
-            assert self.pcp_size * self.dcp_size == 1
         layer_name_to_idx = {
             layer_name: layer_idx
             for _, (group_spec, layer_indices) in self.kv_group2layeridx.items()
@@ -1881,9 +1879,6 @@ class MooncakeConnectorWorker:
             remote_block_ids_list = [meta.remote_block_ids for _ in remote_handshake_port_list]
             return remote_handshake_port_list, local_block_ids_list, remote_block_ids_list
 
-        if self._is_hma_required:
-            raise NotImplementedError("Hybrid KV transfer only supports pcp*dcp == 1 for now.")
-
         def context_parallel_parameters_check():
             assert (meta.remote_pcp_size * meta.remote_dcp_size) % (self.pcp_size * self.dcp_size) == 0
             if not (self.use_mla or self.use_sparse):
@@ -2011,9 +2006,20 @@ class MooncakeConnectorWorker:
 
         num_external_blocks = math.ceil(meta.num_external_tokens / self.block_size)
 
-        assert math.ceil(num_external_blocks / (self.pcp_size * self.dcp_size)) == len(meta.local_block_ids[0]), (
+        kv_group_items = list(self.kv_group2layeridx.items())
+        sequence_group_idx = next(
+            (
+                group_idx
+                for group_idx, (group_spec, _) in kv_group_items
+                if group_spec["kv_cache_spec_type"] != "MambaSpec"
+            ),
+            0,
+        )
+        assert math.ceil(num_external_blocks / (self.pcp_size * self.dcp_size)) == len(
+            meta.local_block_ids[sequence_group_idx]
+        ), (
             f"num_external_blocks({num_external_blocks}), cp_size({self.pcp_size * self.dcp_size}), "
-            f"local_block_ids_len ({len(meta.local_block_ids[0])})"
+            f"local_block_ids_len ({len(meta.local_block_ids[sequence_group_idx])})"
         )
         assert meta.num_prompt_blocks >= num_external_blocks, (
             f"meta.num_prompt_blocks({meta.num_prompt_blocks}), num_external_blocks({num_external_blocks})"
@@ -2066,10 +2072,22 @@ class MooncakeConnectorWorker:
         local_block_offset = 0
         for remote_kv_id in range(len(remote_handshake_port_list)):
             num_blocks_to_pull = remote_block_nums[remote_kv_id]
-            remote_block_ids_list.append([meta.remote_block_ids[0][:num_blocks_to_pull]])
-            local_block_ids_list.append(
-                [meta.local_block_ids[0][local_block_offset : local_block_offset + num_blocks_to_pull]]
-            )
+            group_remote_block_ids: list[list[int]] = []
+            group_local_block_ids: list[list[int]] = []
+            is_final_shard = remote_kv_id == len(remote_handshake_port_list) - 1
+            for group_idx, (group_spec, _) in kv_group_items:
+                if group_spec["kv_cache_spec_type"] == "MambaSpec":
+                    # Mamba state is not context-block sharded like attention
+                    # KV. Transfer the final state from the final PCP/DCP shard.
+                    group_remote_block_ids.append(list(meta.remote_block_ids[group_idx]) if is_final_shard else [])
+                    group_local_block_ids.append(list(meta.local_block_ids[group_idx]) if is_final_shard else [])
+                    continue
+                group_remote_block_ids.append(list(meta.remote_block_ids[group_idx][:num_blocks_to_pull]))
+                group_local_block_ids.append(
+                    list(meta.local_block_ids[group_idx][local_block_offset : local_block_offset + num_blocks_to_pull])
+                )
+            remote_block_ids_list.append(tuple(group_remote_block_ids))
+            local_block_ids_list.append(tuple(group_local_block_ids))
             local_block_offset += num_blocks_to_pull
 
         tp_num_need_pulls = self._get_tp_num_need_pulls(prefill_tp_size)
@@ -2111,8 +2129,12 @@ class MooncakeConnectorWorker:
         """
         if self._is_hma_required:
             _, rank_group_pulls = self._get_hybrid_remote_rank_group_pulls(req_id, prefill_tp_size)
+            num_pp_tp_ranks = prefill_tp_size * self._prefill_pp_size
             return [
-                [rank_group_pulls[remote_handshake_port - remote_base_port] for remote_handshake_port in remote_ports]
+                [
+                    rank_group_pulls[(remote_handshake_port - remote_base_port) % num_pp_tp_ranks]
+                    for remote_handshake_port in remote_ports
+                ]
                 for remote_ports in remote_handshake_port_list
             ]
 
@@ -2275,7 +2297,7 @@ class MooncakeConnectorWorker:
                     )
                     remote_port_send_num = (
                         self.remote_port_send_num[meta.remote_engine_id]
-                        if meta.remote_pcp_size * meta.remote_dcp_size > 1 and not self._has_mamba_group()
+                        if meta.remote_pcp_size * meta.remote_dcp_size > 1
                         else None
                     )
                     self.kv_recv_thread.add_request(
