@@ -69,6 +69,8 @@ jobs:
     name: singlecard-light
     if: ${{ inputs.type == 'light' }}
     runs-on: linux-aarch64-a2b3-1
+    env:
+      CSRC_BUILD_CACHE_IMAGE: ${{ inputs.image }}
     strategy:
       fail-fast: false
       matrix:
@@ -120,26 +122,6 @@ jobs:
           VLLM_TARGET_DEVICE=empty uv pip install -e .
           pip uninstall -y triton
 
-      - name: Get csrc hash
-        id: get_csrc_hash
-        run: |
-          CSRC_HASH=$(find ./csrc ./setup.py ./CMakeLists.txt ./cmake \
-            -type f -not -path '*/.*' | sort | xargs sha256sum | sha256sum | awk '{print $1}')
-          echo "CSRC_HASH=$CSRC_HASH" >> $GITHUB_OUTPUT
-
-      - name: Cache vllm-ascend csrc
-        uses: runs-on/cache@v5
-        with:
-          path: |
-            vllm_ascend/_cann_ops_custom
-            vllm_ascend/*.so
-            vllm_ascend/lib
-            vllm_ascend/include
-          key: vllm-ascend-build-v1-${{ runner.os }}-${{ inputs.image }}-${{ steps.get_csrc_hash.outputs.CSRC_HASH }}
-          restore-keys: |
-            vllm-ascend-build-v1-${{ runner.os }}-${{ inputs.image }}-${{ steps.get_csrc_hash.outputs.CSRC_HASH }}
-
-
       - name: Get csrc build cache base branch
         id: get_csrc_build_cache_base_branch
         run: |
@@ -150,14 +132,41 @@ jobs:
           fi
           echo "base_branch=$base_branch" >> "$GITHUB_OUTPUT"
 
-      - name: Cache vllm-ascend csrc build
-        uses: runs-on/cache@v5
+      - name: Get current cache hour
+        id: get_cache_time
+        shell: bash
+        run: |
+          cache_time=$(date -u +'%Y%m%d%H')
+          echo "cache_time=$cache_time" >> "$GITHUB_OUTPUT"
+
+      - name: Get csrc build cache arch
+        id: get_csrc_build_cache_arch
+        shell: bash
+        run: |
+          arch="$(uname -m)"
+          case "$arch" in
+            aarch64|arm64)
+              cache_arch="ARM64"
+              ;;
+            x86_64|amd64)
+              cache_arch="X64"
+              ;;
+            *)
+              cache_arch="$arch"
+              ;;
+          esac
+          echo "cache_arch=$cache_arch" >> "$GITHUB_OUTPUT"
+
+      - name: Restore vllm-ascend csrc build cache
+        id: restore-csrc-build-cache
+        uses: runs-on/cache/restore@v5
         with:
           path: |
             csrc/build
-          key: vllm-ascend-csrc-build-ascend910b-${{ steps.get_csrc_build_cache_base_branch.outputs.base_branch }}-ninja-${{ github.run_id }}-${{ github.run_attempt }}
+          key: vllm-ascend-build-ninja-v1-${{ steps.get_csrc_build_cache_base_branch.outputs.base_branch }}-${{ runner.os }}-${{ steps.get_csrc_build_cache_arch.outputs.cache_arch }}-${{ env.CSRC_BUILD_CACHE_IMAGE }}-${{ steps.get_cache_time.outputs.cache_time }}
           restore-keys: |
-            vllm-ascend-csrc-build-ascend910b-${{ steps.get_csrc_build_cache_base_branch.outputs.base_branch }}-ninja-
+            vllm-ascend-build-ninja-v1-${{ steps.get_csrc_build_cache_base_branch.outputs.base_branch }}-${{ runner.os }}-${{ steps.get_csrc_build_cache_arch.outputs.cache_arch }}-${{ env.CSRC_BUILD_CACHE_IMAGE }}-
+
 
       - name: Install vllm-project/vllm-ascend
         env:
@@ -171,11 +180,9 @@ jobs:
           uv pip install -r requirements-dev.txt
           # Concurrent installation of triton-ascend can cause files to be overwritten by other packages.
           uv pip install --force-reinstall --no-deps triton-ascend==3.2.1
-          if find vllm_ascend -maxdepth 1 -name '*.so' -type f 2>/dev/null | grep -q .; then
-            COMPILE_CUSTOM_KERNELS=0 uv pip install -e .
-          else
-            uv pip install -e .
-          fi
+          # use ninja build to speed up compilation, and use cache to speed up subsequent builds.
+          uv pip install -e .
+
 
       - name: Run vllm-project/vllm-ascend test
         env:
@@ -223,6 +230,8 @@ jobs:
     name: singlecard-full
     if: ${{ inputs.type == 'full' || inputs.singlecard_tests != '' }}
     runs-on: linux-aarch64-a2b3-1
+    env:
+      CSRC_BUILD_CACHE_IMAGE: ${{ inputs.image }}
     strategy:
       fail-fast: false
       matrix:
@@ -277,26 +286,6 @@ jobs:
           VLLM_TARGET_DEVICE=empty uv pip install -e .
           pip uninstall -y triton
 
-      - name: Get csrc hash
-        id: get_csrc_hash
-        run: |
-          CSRC_HASH=$(find ./csrc ./setup.py ./CMakeLists.txt ./cmake \
-            -type f -not -path '*/.*' | sort | xargs sha256sum | sha256sum | awk '{print $1}')
-          echo "CSRC_HASH=$CSRC_HASH" >> $GITHUB_OUTPUT
-
-      - name: Cache vllm-ascend csrc
-        uses: runs-on/cache@v5
-        with:
-          path: |
-            vllm_ascend/_cann_ops_custom
-            vllm_ascend/*.so
-            vllm_ascend/lib
-            vllm_ascend/include
-          key: vllm-ascend-build-v1-${{ runner.os }}-${{ inputs.image }}-${{ steps.get_csrc_hash.outputs.CSRC_HASH }}
-          restore-keys: |
-            vllm-ascend-build-v1-${{ runner.os }}-${{ inputs.image }}-${{ steps.get_csrc_hash.outputs.CSRC_HASH }}
-
-
       - name: Get csrc build cache base branch
         id: get_csrc_build_cache_base_branch
         run: |
@@ -307,14 +296,40 @@ jobs:
           fi
           echo "base_branch=$base_branch" >> "$GITHUB_OUTPUT"
 
-      - name: Cache vllm-ascend csrc build
-        uses: runs-on/cache@v5
+      - name: Get current cache hour
+        id: get_cache_time
+        shell: bash
+        run: |
+          cache_time=$(date -u +'%Y%m%d%H')
+          echo "cache_time=$cache_time" >> "$GITHUB_OUTPUT"
+
+      - name: Get csrc build cache arch
+        id: get_csrc_build_cache_arch
+        shell: bash
+        run: |
+          arch="$(uname -m)"
+          case "$arch" in
+            aarch64|arm64)
+              cache_arch="ARM64"
+              ;;
+            x86_64|amd64)
+              cache_arch="X64"
+              ;;
+            *)
+              cache_arch="$arch"
+              ;;
+          esac
+          echo "cache_arch=$cache_arch" >> "$GITHUB_OUTPUT"
+
+      - name: Restore vllm-ascend csrc build cache
+        id: restore-csrc-build-cache
+        uses: runs-on/cache/restore@v5
         with:
           path: |
             csrc/build
-          key: vllm-ascend-csrc-build-ascend910b-${{ steps.get_csrc_build_cache_base_branch.outputs.base_branch }}-ninja-${{ github.run_id }}-${{ github.run_attempt }}
+          key: vllm-ascend-build-ninja-v1-${{ steps.get_csrc_build_cache_base_branch.outputs.base_branch }}-${{ runner.os }}-${{ steps.get_csrc_build_cache_arch.outputs.cache_arch }}-${{ env.CSRC_BUILD_CACHE_IMAGE }}-${{ steps.get_cache_time.outputs.cache_time }}
           restore-keys: |
-            vllm-ascend-csrc-build-ascend910b-${{ steps.get_csrc_build_cache_base_branch.outputs.base_branch }}-ninja-
+            vllm-ascend-build-ninja-v1-${{ steps.get_csrc_build_cache_base_branch.outputs.base_branch }}-${{ runner.os }}-${{ steps.get_csrc_build_cache_arch.outputs.cache_arch }}-${{ env.CSRC_BUILD_CACHE_IMAGE }}-
 
       - name: Install vllm-project/vllm-ascend
         env:
@@ -326,11 +341,7 @@ jobs:
           uv pip install -r requirements-dev.txt
           # Concurrent installation of triton-ascend can cause files to be overwritten by other packages.
           uv pip install --force-reinstall --no-deps triton-ascend==3.2.1
-          if find vllm_ascend -maxdepth 1 -name '*.so' -type f 2>/dev/null | grep -q .; then
-            COMPILE_CUSTOM_KERNELS=0 uv pip install -e .
-          else
-            uv pip install -e .
-          fi
+          uv pip install -e .
 
       - name: Run e2e test
         if: ${{ inputs.type == 'full' }}
@@ -387,6 +398,8 @@ jobs:
     name: multicard-2-light
     if: ${{ inputs.type == 'light' }}
     runs-on: linux-aarch64-a3-2
+    env:
+      CSRC_BUILD_CACHE_IMAGE: ${{ inputs.image_a3 }}
     strategy:
       fail-fast: false
       matrix:
@@ -439,26 +452,6 @@ jobs:
           VLLM_TARGET_DEVICE=empty uv pip install -e .
           pip uninstall -y triton
 
-      - name: Get csrc hash
-        id: get_csrc_hash
-        run: |
-          CSRC_HASH=$(find ./csrc ./setup.py ./CMakeLists.txt ./cmake \
-            -type f -not -path '*/.*' | sort | xargs sha256sum | sha256sum | awk '{print $1}')
-          echo "CSRC_HASH=$CSRC_HASH" >> $GITHUB_OUTPUT
-
-      - name: Cache vllm-ascend csrc
-        uses: runs-on/cache@v5
-        with:
-          path: |
-            vllm_ascend/_cann_ops_custom
-            vllm_ascend/*.so
-            vllm_ascend/lib
-            vllm_ascend/include
-          key: vllm-ascend-build-v1-${{ runner.os }}-${{ inputs.image_a3 }}-${{ steps.get_csrc_hash.outputs.CSRC_HASH }}
-          restore-keys: |
-            vllm-ascend-build-v1-${{ runner.os }}-${{ inputs.image_a3 }}-${{ steps.get_csrc_hash.outputs.CSRC_HASH }}
-
-
       - name: Get csrc build cache base branch
         id: get_csrc_build_cache_base_branch
         run: |
@@ -469,14 +462,40 @@ jobs:
           fi
           echo "base_branch=$base_branch" >> "$GITHUB_OUTPUT"
 
-      - name: Cache vllm-ascend csrc build
-        uses: runs-on/cache@v5
+      - name: Get current cache hour
+        id: get_cache_time
+        shell: bash
+        run: |
+          cache_time=$(date -u +'%Y%m%d%H')
+          echo "cache_time=$cache_time" >> "$GITHUB_OUTPUT"
+
+      - name: Get csrc build cache arch
+        id: get_csrc_build_cache_arch
+        shell: bash
+        run: |
+          arch="$(uname -m)"
+          case "$arch" in
+            aarch64|arm64)
+              cache_arch="ARM64"
+              ;;
+            x86_64|amd64)
+              cache_arch="X64"
+              ;;
+            *)
+              cache_arch="$arch"
+              ;;
+          esac
+          echo "cache_arch=$cache_arch" >> "$GITHUB_OUTPUT"
+
+      - name: Restore vllm-ascend csrc build cache
+        id: restore-csrc-build-cache
+        uses: runs-on/cache/restore@v5
         with:
           path: |
             csrc/build
-          key: vllm-ascend-csrc-build-ascend910_93-${{ steps.get_csrc_build_cache_base_branch.outputs.base_branch }}-ninja-${{ github.run_id }}-${{ github.run_attempt }}
+          key: vllm-ascend-build-ninja-v1-${{ steps.get_csrc_build_cache_base_branch.outputs.base_branch }}-${{ runner.os }}-${{ steps.get_csrc_build_cache_arch.outputs.cache_arch }}-${{ env.CSRC_BUILD_CACHE_IMAGE }}-${{ steps.get_cache_time.outputs.cache_time }}
           restore-keys: |
-            vllm-ascend-csrc-build-ascend910_93-${{ steps.get_csrc_build_cache_base_branch.outputs.base_branch }}-ninja-
+            vllm-ascend-build-ninja-v1-${{ steps.get_csrc_build_cache_base_branch.outputs.base_branch }}-${{ runner.os }}-${{ steps.get_csrc_build_cache_arch.outputs.cache_arch }}-${{ env.CSRC_BUILD_CACHE_IMAGE }}-
 
       - name: Install vllm-project/vllm-ascend
         env:
@@ -488,11 +507,7 @@ jobs:
           uv pip install -r requirements-dev.txt
           # Concurrent installation of triton-ascend can cause files to be overwritten by other packages.
           uv pip install --force-reinstall --no-deps triton-ascend==3.2.1
-          if find vllm_ascend -maxdepth 1 -name '*.so' -type f 2>/dev/null | grep -q .; then
-            COMPILE_CUSTOM_KERNELS=0 uv pip install -e .
-          else
-            uv pip install -e .
-          fi
+          uv pip install -e .
       - name: Run vllm-project/vllm-ascend test (light)
         env:
           VLLM_WORKER_MULTIPROC_METHOD: spawn
@@ -538,6 +553,8 @@ jobs:
     name: multicard-2-full
     if: ${{ inputs.type == 'full' || inputs.multicard_2_tests != '' }}
     runs-on: linux-aarch64-a3-2
+    env:
+      CSRC_BUILD_CACHE_IMAGE: ${{ inputs.image_a3 }}
     strategy:
       fail-fast: false
       matrix:
@@ -592,26 +609,6 @@ jobs:
           VLLM_TARGET_DEVICE=empty uv pip install -e .
           pip uninstall -y triton
 
-      - name: Get csrc hash
-        id: get_csrc_hash
-        run: |
-          CSRC_HASH=$(find ./csrc ./setup.py ./CMakeLists.txt ./cmake \
-            -type f -not -path '*/.*' | sort | xargs sha256sum | sha256sum | awk '{print $1}')
-          echo "CSRC_HASH=$CSRC_HASH" >> $GITHUB_OUTPUT
-
-      - name: Cache vllm-ascend csrc
-        uses: runs-on/cache@v5
-        with:
-          path: |
-            vllm_ascend/_cann_ops_custom
-            vllm_ascend/*.so
-            vllm_ascend/lib
-            vllm_ascend/include
-          key: vllm-ascend-build-v1-${{ runner.os }}-${{ inputs.image_a3 }}-${{ steps.get_csrc_hash.outputs.CSRC_HASH }}
-          restore-keys: |
-            vllm-ascend-build-v1-${{ runner.os }}-${{ inputs.image_a3 }}-${{ steps.get_csrc_hash.outputs.CSRC_HASH }}
-
-
       - name: Get csrc build cache base branch
         id: get_csrc_build_cache_base_branch
         run: |
@@ -622,14 +619,40 @@ jobs:
           fi
           echo "base_branch=$base_branch" >> "$GITHUB_OUTPUT"
 
-      - name: Cache vllm-ascend csrc build
-        uses: runs-on/cache@v5
+      - name: Get current cache hour
+        id: get_cache_time
+        shell: bash
+        run: |
+          cache_time=$(date -u +'%Y%m%d%H')
+          echo "cache_time=$cache_time" >> "$GITHUB_OUTPUT"
+
+      - name: Get csrc build cache arch
+        id: get_csrc_build_cache_arch
+        shell: bash
+        run: |
+          arch="$(uname -m)"
+          case "$arch" in
+            aarch64|arm64)
+              cache_arch="ARM64"
+              ;;
+            x86_64|amd64)
+              cache_arch="X64"
+              ;;
+            *)
+              cache_arch="$arch"
+              ;;
+          esac
+          echo "cache_arch=$cache_arch" >> "$GITHUB_OUTPUT"
+
+      - name: Restore vllm-ascend csrc build cache
+        id: restore-csrc-build-cache
+        uses: runs-on/cache/restore@v5
         with:
           path: |
             csrc/build
-          key: vllm-ascend-csrc-build-ascend910_93-${{ steps.get_csrc_build_cache_base_branch.outputs.base_branch }}-ninja-${{ github.run_id }}-${{ github.run_attempt }}
+          key: vllm-ascend-build-ninja-v1-${{ steps.get_csrc_build_cache_base_branch.outputs.base_branch }}-${{ runner.os }}-${{ steps.get_csrc_build_cache_arch.outputs.cache_arch }}-${{ env.CSRC_BUILD_CACHE_IMAGE }}-${{ steps.get_cache_time.outputs.cache_time }}
           restore-keys: |
-            vllm-ascend-csrc-build-ascend910_93-${{ steps.get_csrc_build_cache_base_branch.outputs.base_branch }}-ninja-
+            vllm-ascend-build-ninja-v1-${{ steps.get_csrc_build_cache_base_branch.outputs.base_branch }}-${{ runner.os }}-${{ steps.get_csrc_build_cache_arch.outputs.cache_arch }}-${{ env.CSRC_BUILD_CACHE_IMAGE }}-
 
       - name: Install vllm-project/vllm-ascend
         env:
@@ -641,11 +664,7 @@ jobs:
           uv pip install -r requirements-dev.txt
           # Concurrent installation of triton-ascend can cause files to be overwritten by other packages.
           uv pip install --force-reinstall --no-deps triton-ascend==3.2.1
-          if find vllm_ascend -maxdepth 1 -name '*.so' -type f 2>/dev/null | grep -q .; then
-            COMPILE_CUSTOM_KERNELS=0 uv pip install -e .
-          else
-            uv pip install -e .
-          fi
+          uv pip install -e .
       - name: Run vllm-project/vllm-ascend test (full)
         if: ${{ inputs.type == 'full' }}
         env:
@@ -721,6 +740,8 @@ jobs:
     name: multicard-4-light
     if: ${{ inputs.type == 'light' }}
     runs-on: linux-aarch64-a3-4
+    env:
+      CSRC_BUILD_CACHE_IMAGE: ${{ inputs.image_a3 }}
     strategy:
       fail-fast: false
       matrix:
@@ -782,26 +803,6 @@ jobs:
           VLLM_TARGET_DEVICE=empty uv pip install -e .
           pip uninstall -y triton
 
-      - name: Get csrc hash
-        id: get_csrc_hash
-        run: |
-          CSRC_HASH=$(find ./csrc ./setup.py ./CMakeLists.txt ./cmake \
-            -type f -not -path '*/.*' | sort | xargs sha256sum | sha256sum | awk '{print $1}')
-          echo "CSRC_HASH=$CSRC_HASH" >> $GITHUB_OUTPUT
-
-      - name: Cache vllm-ascend csrc
-        uses: runs-on/cache@v5
-        with:
-          path: |
-            vllm_ascend/_cann_ops_custom
-            vllm_ascend/*.so
-            vllm_ascend/lib
-            vllm_ascend/include
-          key: vllm-ascend-build-v1-${{ runner.os }}-${{ inputs.image_a3 }}-${{ steps.get_csrc_hash.outputs.CSRC_HASH }}
-          restore-keys: |
-            vllm-ascend-build-v1-${{ runner.os }}-${{ inputs.image_a3 }}-${{ steps.get_csrc_hash.outputs.CSRC_HASH }}
-
-
       - name: Get csrc build cache base branch
         id: get_csrc_build_cache_base_branch
         run: |
@@ -812,14 +813,40 @@ jobs:
           fi
           echo "base_branch=$base_branch" >> "$GITHUB_OUTPUT"
 
-      - name: Cache vllm-ascend csrc build
-        uses: runs-on/cache@v5
+      - name: Get current cache hour
+        id: get_cache_time
+        shell: bash
+        run: |
+          cache_time=$(date -u +'%Y%m%d%H')
+          echo "cache_time=$cache_time" >> "$GITHUB_OUTPUT"
+
+      - name: Get csrc build cache arch
+        id: get_csrc_build_cache_arch
+        shell: bash
+        run: |
+          arch="$(uname -m)"
+          case "$arch" in
+            aarch64|arm64)
+              cache_arch="ARM64"
+              ;;
+            x86_64|amd64)
+              cache_arch="X64"
+              ;;
+            *)
+              cache_arch="$arch"
+              ;;
+          esac
+          echo "cache_arch=$cache_arch" >> "$GITHUB_OUTPUT"
+
+      - name: Restore vllm-ascend csrc build cache
+        id: restore-csrc-build-cache
+        uses: runs-on/cache/restore@v5
         with:
           path: |
             csrc/build
-          key: vllm-ascend-csrc-build-ascend910_93-${{ steps.get_csrc_build_cache_base_branch.outputs.base_branch }}-ninja-${{ github.run_id }}-${{ github.run_attempt }}
+          key: vllm-ascend-build-ninja-v1-${{ steps.get_csrc_build_cache_base_branch.outputs.base_branch }}-${{ runner.os }}-${{ steps.get_csrc_build_cache_arch.outputs.cache_arch }}-${{ env.CSRC_BUILD_CACHE_IMAGE }}-${{ steps.get_cache_time.outputs.cache_time }}
           restore-keys: |
-            vllm-ascend-csrc-build-ascend910_93-${{ steps.get_csrc_build_cache_base_branch.outputs.base_branch }}-ninja-
+            vllm-ascend-build-ninja-v1-${{ steps.get_csrc_build_cache_base_branch.outputs.base_branch }}-${{ runner.os }}-${{ steps.get_csrc_build_cache_arch.outputs.cache_arch }}-${{ env.CSRC_BUILD_CACHE_IMAGE }}-
       - name: Install Mooncake wheel
         shell: bash
         run: |
@@ -850,11 +877,7 @@ jobs:
           uv pip install -r requirements-dev.txt
           # Concurrent installation of triton-ascend can cause files to be overwritten by other packages.
           uv pip install --force-reinstall --no-deps triton-ascend==3.2.1
-          if find vllm_ascend -maxdepth 1 -name '*.so' -type f 2>/dev/null | grep -q .; then
-            COMPILE_CUSTOM_KERNELS=0 uv pip install -e .
-          else
-            uv pip install -e .
-          fi
+          uv pip install -e .
 
       - name: Run vllm-project/vllm-ascend test (light)
         env:
@@ -900,6 +923,8 @@ jobs:
     name: multicard-4-full
     if: ${{ inputs.type == 'full' || inputs.multicard_4_tests != '' }}
     runs-on: linux-aarch64-a3-4
+    env:
+      CSRC_BUILD_CACHE_IMAGE: ${{ inputs.image_a3 }}
     strategy:
       fail-fast: false
       matrix:
@@ -953,26 +978,6 @@ jobs:
           VLLM_TARGET_DEVICE=empty uv pip install -e .
           pip uninstall -y triton
 
-      - name: Get csrc hash
-        id: get_csrc_hash
-        run: |
-          CSRC_HASH=$(find ./csrc ./setup.py ./CMakeLists.txt ./cmake \
-            -type f -not -path '*/.*' | sort | xargs sha256sum | sha256sum | awk '{print $1}')
-          echo "CSRC_HASH=$CSRC_HASH" >> $GITHUB_OUTPUT
-
-      - name: Cache vllm-ascend csrc
-        uses: runs-on/cache@v5
-        with:
-          path: |
-            vllm_ascend/_cann_ops_custom
-            vllm_ascend/*.so
-            vllm_ascend/lib
-            vllm_ascend/include
-          key: vllm-ascend-build-v1-${{ runner.os }}-${{ inputs.image_a3 }}-${{ steps.get_csrc_hash.outputs.CSRC_HASH }}
-          restore-keys: |
-            vllm-ascend-build-v1-${{ runner.os }}-${{ inputs.image_a3 }}-${{ steps.get_csrc_hash.outputs.CSRC_HASH }}
-
-
       - name: Get csrc build cache base branch
         id: get_csrc_build_cache_base_branch
         run: |
@@ -983,14 +988,40 @@ jobs:
           fi
           echo "base_branch=$base_branch" >> "$GITHUB_OUTPUT"
 
-      - name: Cache vllm-ascend csrc build
-        uses: runs-on/cache@v5
+      - name: Get current cache hour
+        id: get_cache_time
+        shell: bash
+        run: |
+          cache_time=$(date -u +'%Y%m%d%H')
+          echo "cache_time=$cache_time" >> "$GITHUB_OUTPUT"
+
+      - name: Get csrc build cache arch
+        id: get_csrc_build_cache_arch
+        shell: bash
+        run: |
+          arch="$(uname -m)"
+          case "$arch" in
+            aarch64|arm64)
+              cache_arch="ARM64"
+              ;;
+            x86_64|amd64)
+              cache_arch="X64"
+              ;;
+            *)
+              cache_arch="$arch"
+              ;;
+          esac
+          echo "cache_arch=$cache_arch" >> "$GITHUB_OUTPUT"
+
+      - name: Restore vllm-ascend csrc build cache
+        id: restore-csrc-build-cache
+        uses: runs-on/cache/restore@v5
         with:
           path: |
             csrc/build
-          key: vllm-ascend-csrc-build-ascend910_93-${{ steps.get_csrc_build_cache_base_branch.outputs.base_branch }}-ninja-${{ github.run_id }}-${{ github.run_attempt }}
+          key: vllm-ascend-build-ninja-v1-${{ steps.get_csrc_build_cache_base_branch.outputs.base_branch }}-${{ runner.os }}-${{ steps.get_csrc_build_cache_arch.outputs.cache_arch }}-${{ env.CSRC_BUILD_CACHE_IMAGE }}-${{ steps.get_cache_time.outputs.cache_time }}
           restore-keys: |
-            vllm-ascend-csrc-build-ascend910_93-${{ steps.get_csrc_build_cache_base_branch.outputs.base_branch }}-ninja-
+            vllm-ascend-build-ninja-v1-${{ steps.get_csrc_build_cache_base_branch.outputs.base_branch }}-${{ runner.os }}-${{ steps.get_csrc_build_cache_arch.outputs.cache_arch }}-${{ env.CSRC_BUILD_CACHE_IMAGE }}-
 
       - name: Install vllm-project/vllm-ascend
         env:
@@ -1002,11 +1033,7 @@ jobs:
           uv pip install -r requirements-dev.txt
           # Concurrent installation of triton-ascend can cause files to be overwritten by other packages.
           uv pip install --force-reinstall --no-deps triton-ascend==3.2.1
-          if find vllm_ascend -maxdepth 1 -name '*.so' -type f 2>/dev/null | grep -q .; then
-            COMPILE_CUSTOM_KERNELS=0 uv pip install -e .
-          else
-            uv pip install -e .
-          fi
+          uv pip install -e .
 
       - name: Run vllm-project/vllm-ascend test for V1 Engine
         if: ${{ inputs.type == 'full' }}
@@ -1060,6 +1087,8 @@ jobs:
   e2e_310p:
     name: 310p singlecard
     runs-on: linux-aarch64-310p-1
+    env:
+      CSRC_BUILD_CACHE_IMAGE: ${{ inputs.image_310p }}
     if: ${{ inputs.contains_310 || inputs.p310_singlecard_tests != '' }}
     container:
       image: ${{ inputs.image_310p }}
@@ -1105,26 +1134,6 @@ jobs:
         run: |
           VLLM_TARGET_DEVICE=empty uv pip install -e .
 
-      - name: Get csrc hash
-        id: get_csrc_hash
-        run: |
-          CSRC_HASH=$(find ./csrc ./setup.py ./CMakeLists.txt ./cmake \
-            -type f -not -path '*/.*' | sort | xargs sha256sum | sha256sum | awk '{print $1}')
-          echo "CSRC_HASH=$CSRC_HASH" >> $GITHUB_OUTPUT
-
-      - name: Cache vllm-ascend csrc
-        uses: runs-on/cache@v5
-        with:
-          path: |
-            vllm_ascend/_cann_ops_custom
-            vllm_ascend/*.so
-            vllm_ascend/lib
-            vllm_ascend/include
-          key: vllm-ascend-build-v1-${{ runner.os }}-${{ inputs.image_310p }}-${{ steps.get_csrc_hash.outputs.CSRC_HASH }}
-          restore-keys: |
-            vllm-ascend-build-v1-${{ runner.os }}-${{ inputs.image_310p }}-${{ steps.get_csrc_hash.outputs.CSRC_HASH }}
-
-
       - name: Get csrc build cache base branch
         id: get_csrc_build_cache_base_branch
         run: |
@@ -1135,14 +1144,40 @@ jobs:
           fi
           echo "base_branch=$base_branch" >> "$GITHUB_OUTPUT"
 
-      - name: Cache vllm-ascend csrc build
-        uses: runs-on/cache@v5
+      - name: Get current cache hour
+        id: get_cache_time
+        shell: bash
+        run: |
+          cache_time=$(date -u +'%Y%m%d%H')
+          echo "cache_time=$cache_time" >> "$GITHUB_OUTPUT"
+
+      - name: Get csrc build cache arch
+        id: get_csrc_build_cache_arch
+        shell: bash
+        run: |
+          arch="$(uname -m)"
+          case "$arch" in
+            aarch64|arm64)
+              cache_arch="ARM64"
+              ;;
+            x86_64|amd64)
+              cache_arch="X64"
+              ;;
+            *)
+              cache_arch="$arch"
+              ;;
+          esac
+          echo "cache_arch=$cache_arch" >> "$GITHUB_OUTPUT"
+
+      - name: Restore vllm-ascend csrc build cache
+        id: restore-csrc-build-cache
+        uses: runs-on/cache/restore@v5
         with:
           path: |
             csrc/build
-          key: vllm-ascend-csrc-build-ascend310p-${{ steps.get_csrc_build_cache_base_branch.outputs.base_branch }}-ninja-${{ github.run_id }}-${{ github.run_attempt }}
+          key: vllm-ascend-build-ninja-v1-${{ steps.get_csrc_build_cache_base_branch.outputs.base_branch }}-${{ runner.os }}-${{ steps.get_csrc_build_cache_arch.outputs.cache_arch }}-${{ env.CSRC_BUILD_CACHE_IMAGE }}-${{ steps.get_cache_time.outputs.cache_time }}
           restore-keys: |
-            vllm-ascend-csrc-build-ascend310p-${{ steps.get_csrc_build_cache_base_branch.outputs.base_branch }}-ninja-
+            vllm-ascend-build-ninja-v1-${{ steps.get_csrc_build_cache_base_branch.outputs.base_branch }}-${{ runner.os }}-${{ steps.get_csrc_build_cache_arch.outputs.cache_arch }}-${{ env.CSRC_BUILD_CACHE_IMAGE }}-
 
       - name: Install vllm-project/vllm-ascend
         env:
@@ -1154,11 +1189,7 @@ jobs:
           uv pip install -r requirements-dev.txt
           # Concurrent installation of triton-ascend can cause files to be overwritten by other packages.
           uv pip install --force-reinstall --no-deps triton-ascend==3.2.1
-          if find vllm_ascend -maxdepth 1 -name '*.so' -type f 2>/dev/null | grep -q .; then
-            COMPILE_CUSTOM_KERNELS=0 uv pip install -e .
-          else
-            uv pip install -e .
-          fi
+          uv pip install -e .
           pip uninstall -y triton-ascend triton
 
       - name: Uninstall triton-ascend (310p e2e-light)
@@ -1200,6 +1231,8 @@ jobs:
   e2e_310p-4cards:
     name: 310p multicards 4cards
     runs-on: linux-aarch64-310p-4
+    env:
+      CSRC_BUILD_CACHE_IMAGE: ${{ inputs.image_310p }}
     if: ${{ inputs.contains_310 || inputs.p310_multicard_tests != '' }}
     container:
       image: ${{ inputs.image_310p }}
@@ -1223,6 +1256,8 @@ jobs:
 
       - name: Checkout vllm-project/vllm-ascend repo
         uses: actions/checkout@v6
+        with:
+          ref: ${{ inputs.ref }}
 
       - name: Install system dependencies
         run: |
@@ -1243,26 +1278,6 @@ jobs:
         run: |
           VLLM_TARGET_DEVICE=empty uv pip install -e .
 
-      - name: Get csrc hash
-        id: get_csrc_hash
-        run: |
-          CSRC_HASH=$(find ./csrc ./setup.py ./CMakeLists.txt ./cmake \
-            -type f -not -path '*/.*' | sort | xargs sha256sum | sha256sum | awk '{print $1}')
-          echo "CSRC_HASH=$CSRC_HASH" >> $GITHUB_OUTPUT
-
-      - name: Cache vllm-ascend csrc
-        uses: runs-on/cache@v5
-        with:
-          path: |
-            vllm_ascend/_cann_ops_custom
-            vllm_ascend/*.so
-            vllm_ascend/lib
-            vllm_ascend/include
-          key: vllm-ascend-build-v1-${{ runner.os }}-${{ inputs.image_310p }}-${{ steps.get_csrc_hash.outputs.CSRC_HASH }}
-          restore-keys: |
-            vllm-ascend-build-v1-${{ runner.os }}-${{ inputs.image_310p }}-${{ steps.get_csrc_hash.outputs.CSRC_HASH }}
-
-
       - name: Get csrc build cache base branch
         id: get_csrc_build_cache_base_branch
         run: |
@@ -1273,14 +1288,40 @@ jobs:
           fi
           echo "base_branch=$base_branch" >> "$GITHUB_OUTPUT"
 
-      - name: Cache vllm-ascend csrc build
-        uses: runs-on/cache@v5
+      - name: Get current cache hour
+        id: get_cache_time
+        shell: bash
+        run: |
+          cache_time=$(date -u +'%Y%m%d%H')
+          echo "cache_time=$cache_time" >> "$GITHUB_OUTPUT"
+
+      - name: Get csrc build cache arch
+        id: get_csrc_build_cache_arch
+        shell: bash
+        run: |
+          arch="$(uname -m)"
+          case "$arch" in
+            aarch64|arm64)
+              cache_arch="ARM64"
+              ;;
+            x86_64|amd64)
+              cache_arch="X64"
+              ;;
+            *)
+              cache_arch="$arch"
+              ;;
+          esac
+          echo "cache_arch=$cache_arch" >> "$GITHUB_OUTPUT"
+
+      - name: Restore vllm-ascend csrc build cache
+        id: restore-csrc-build-cache
+        uses: runs-on/cache/restore@v5
         with:
           path: |
             csrc/build
-          key: vllm-ascend-csrc-build-ascend310p-${{ steps.get_csrc_build_cache_base_branch.outputs.base_branch }}-ninja-${{ github.run_id }}-${{ github.run_attempt }}
+          key: vllm-ascend-build-ninja-v1-${{ steps.get_csrc_build_cache_base_branch.outputs.base_branch }}-${{ runner.os }}-${{ steps.get_csrc_build_cache_arch.outputs.cache_arch }}-${{ env.CSRC_BUILD_CACHE_IMAGE }}-${{ steps.get_cache_time.outputs.cache_time }}
           restore-keys: |
-            vllm-ascend-csrc-build-ascend310p-${{ steps.get_csrc_build_cache_base_branch.outputs.base_branch }}-ninja-
+            vllm-ascend-build-ninja-v1-${{ steps.get_csrc_build_cache_base_branch.outputs.base_branch }}-${{ runner.os }}-${{ steps.get_csrc_build_cache_arch.outputs.cache_arch }}-${{ env.CSRC_BUILD_CACHE_IMAGE }}-
 
       - name: Install vllm-project/vllm-ascend
         env:
@@ -1292,11 +1333,7 @@ jobs:
           uv pip install -r requirements-dev.txt
           # Concurrent installation of triton-ascend can cause files to be overwritten by other packages.
           uv pip install --force-reinstall --no-deps triton-ascend==3.2.1
-          if find vllm_ascend -maxdepth 1 -name '*.so' -type f 2>/dev/null | grep -q .; then
-            COMPILE_CUSTOM_KERNELS=0 uv pip install -e .
-          else
-            uv pip install -e .
-          fi
+          uv pip install -e .
           pip uninstall -y triton-ascend triton
 
       - name: Uninstall triton-ascend (310p e2e-light)

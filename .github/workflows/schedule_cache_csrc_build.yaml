@@ -15,17 +15,12 @@
 # This file is a part of the vllm-ascend project.
 #
 
-# Cartesian product: 2 arch × 2 os × 3 chip_type = 12 jobs
-name: 'Cache csrc Build Artifacts'
+
+name: 'Cache csrc Build Directory'
 on:
-  push:
-    branches: [ "main" ]
-    paths:
-      - 'csrc/**'
-      - 'setup.py'
-      - 'CMakeLists.txt'
-      - 'cmake/**'
-  workflow_dispatch:
+  schedule:
+    # UTC+8: 23：59pm every day
+    - cron: '59 15 * * *'
 
 defaults:
   run:
@@ -126,7 +121,7 @@ jobs:
         if: matrix.os == 'ubuntu'
         run: |
           apt-get -y install `cat packages.txt`
-          apt-get -y install gcc g++ cmake libnuma-dev zstd clang-15
+          apt-get -y install gcc g++ cmake libnuma-dev zstd clang-15 ninja-build
           update-alternatives --install /usr/bin/clang clang /usr/bin/clang-15 20
           update-alternatives --install /usr/bin/clang++ clang++ /usr/bin/clang++-15 20
           pip install uv
@@ -134,36 +129,36 @@ jobs:
       - name: Install system dependencies (openeuler)
         if: matrix.os == 'openeuler'
         run: |
-          yum install -y gcc gcc-c++ cmake numactl-devel clang
+          yum install -y gcc gcc-c++ cmake numactl-devel clang ninja-build
           pip install uv
 
-      - name: Get image tag
-        id: get_image_tag
+      - name: Get csrc build cache base branch
+        id: get_csrc_build_cache_base_branch
         run: |
-          IMAGE="${{ matrix.image }}"
-          IMAGE_TAG="${IMAGE##*:}"
-          echo "IMAGE_TAG=$IMAGE_TAG" >> $GITHUB_OUTPUT
+          base_branch="${GITHUB_BASE_REF:-${GITHUB_REF_NAME:-unknown-branch}}"
+          base_branch=$(printf "%s" "$base_branch" | tr '/:@ ' '----' | tr -cd 'A-Za-z0-9._-')
+          if [ -z "$base_branch" ]; then
+            base_branch="unknown-branch"
+          fi
+          echo "base_branch=$base_branch" >> "$GITHUB_OUTPUT"
 
-      - name: Get csrc hash
-        id: get_csrc_hash
+      - name: Get current cache hour
+        id: get_cache_time
         run: |
-          CSRC_HASH=$(find ./csrc ./setup.py ./CMakeLists.txt ./cmake \
-            -type f -not -path '*/.*' | sort | xargs sha256sum | sha256sum | awk '{print $1}')
-          echo "CSRC_HASH=$CSRC_HASH" >> $GITHUB_OUTPUT
+          cache_time=$(date -u +'%Y%m%d%H')
+          echo "cache_time=$cache_time" >> "$GITHUB_OUTPUT"
 
-      - name: Cache vllm-ascend csrc
-        id: cache-csrc
-        uses: actions/cache@v5
+      - name: Restore vllm-ascend csrc build cache
+        id: restore-csrc-build-cache
+        uses: runs-on/cache/restore@v5
         with:
           path: |
-            vllm_ascend/_cann_ops_custom
-            vllm_ascend/*.so
-            vllm_ascend/lib
-            vllm_ascend/include
-          key: vllm-ascend-build-v1-${{ matrix.arch }}-${{ steps.get_image_tag.outputs.IMAGE_TAG }}-${{ steps.get_csrc_hash.outputs.CSRC_HASH }}
+            csrc/build
+          key: vllm-ascend-build-ninja-v1-${{ steps.get_csrc_build_cache_base_branch.outputs.base_branch }}-${{ runner.os }}-${{ matrix.arch }}-${{ matrix.image }}-${{ steps.get_cache_time.outputs.cache_time }}
+          restore-keys: |
+            vllm-ascend-build-ninja-v1-${{ steps.get_csrc_build_cache_base_branch.outputs.base_branch }}-${{ runner.os }}-${{ matrix.arch }}-${{ matrix.image }}-
 
       - name: Install vllm-ascend
-        if: steps.cache-csrc.outputs.cache-hit != 'true'
         env:
           SOC_VERSION: ${{ matrix.soc_version }}
           MAX_JOBS: "16"
@@ -182,3 +177,11 @@ jobs:
           uv pip install -r requirements-dev.txt --extra-index-url https://download.pytorch.org/whl/cpu
           uv pip install --force-reinstall --no-deps triton-ascend==3.2.1
           uv pip install -e . --extra-index-url https://download.pytorch.org/whl/cpu
+
+      - name: Save vllm-ascend csrc build cache
+        if: success() && steps.restore-csrc-build-cache.outputs.cache-hit != 'true'
+        uses: runs-on/cache/save@v5
+        with:
+          path: |
+            csrc/build
+          key: vllm-ascend-build-ninja-v1-${{ steps.get_csrc_build_cache_base_branch.outputs.base_branch }}-${{ runner.os }}-${{ matrix.arch }}-${{ matrix.image }}-${{ steps.get_cache_time.outputs.cache_time }}
