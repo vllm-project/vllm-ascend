@@ -431,7 +431,13 @@ class MooncakeBackend(Backend):
         sizes: list[list[int]],
     ) -> list[int]:
         """Wrap ``batch_put_from_multi_buffers`` so older mooncake builds
-        (no ``replicate_config`` kwarg) still work."""
+        (no ``replicate_config`` kwarg) still work.
+
+        Callers must hold the store-init guarantee (``_ensure_initialized``
+        was already invoked); the ``assert`` here narrows ``self.store`` from
+        ``Any | None`` to ``Any`` for mypy.
+        """
+        assert self.store is not None
         if self.replicate_config is not None:
             try:
                 return self.store.batch_put_from_multi_buffers(keys, addrs, sizes, self.replicate_config)
@@ -547,6 +553,13 @@ class MooncakeStoreConfig:
     global_segment_size: int = DEFAULT_GLOBAL_SEGMENT_SIZE
     local_buffer_size: int = DEFAULT_LOCAL_BUFFER_SIZE
     enable_offload: bool = False
+    # ``preferred_segment``: when True, the backend pins this rank's PUTs to
+    # ``local_seg`` so replicas land on the owner that has the SSD attached
+    # (required by Mooncake's standalone-store + disk-offload mode).
+    preferred_segment: bool = False
+    # ``prefer_alloc_in_same_node``: Mooncake replica-placement hint; defaults
+    # to True to mirror the upstream Mooncake client default.
+    prefer_alloc_in_same_node: bool = True
 
     def __post_init__(self) -> None:
         if self.mode not in ("embedded", "standalone-store"):
@@ -557,9 +570,6 @@ class MooncakeStoreConfig:
             raise ValueError("embedded mode requires global_segment_size > 0")
         if self.mode == "standalone-store" and self.global_segment_size != 0:
             raise ValueError("standalone-store mode requires global_segment_size == 0")
-
-    preferred_segment: bool
-    prefer_alloc_in_same_node: bool
 
     @staticmethod
     def from_file(file_path: str) -> "MooncakeStoreConfig":
