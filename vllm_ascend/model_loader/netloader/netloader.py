@@ -193,12 +193,15 @@ class ModelNetLoaderElastic(BaseModelLoader):
                         {
                             "device_id": s["device_id"],
                             "sources": [
-                                f"{ip}:{int(port) + DRAFT_PORT_OFFSET}"
-                                for addr in s["sources"]
-                                for ip, port in [addr.rsplit(":", 1)]
+                                f"{parts[0]}:{int(parts[1]) + DRAFT_PORT_OFFSET}"
+                                for addr in s.get("sources", [])
+                                if isinstance(addr, str)
+                                and len(parts := addr.rsplit(":", 1)) == 2
+                                and parts[1].isdigit()
                             ],
                         }
                         for s in self.source
+                        if isinstance(s, dict) and "device_id" in s
                     ]
 
                 model = elastic_load(
