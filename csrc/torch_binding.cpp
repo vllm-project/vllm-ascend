@@ -119,6 +119,9 @@ void enqueue_device_print(std::unique_ptr<DevicePrintPayload> payload,
 
 aclrtMemcpyKind infer_memcpy_kind(const void* src, const void* dst)
 {
+    TORCH_CHECK(src != nullptr, "src pointer must not be null");
+    TORCH_CHECK(dst != nullptr, "dst pointer must not be null");
+
     aclrtPtrAttributes src_attrs = {};
     aclrtPtrAttributes dst_attrs = {};
     const aclError src_ret =
@@ -142,17 +145,22 @@ aclrtMemcpyKind infer_memcpy_kind(const void* src, const void* dst)
     if (src_is_device && dst_is_device) {
         return ACL_MEMCPY_DEVICE_TO_DEVICE;
     }
-    if (src_is_device && (dst_is_host || dst_ret != ACL_SUCCESS)) {
+    if (src_is_device && dst_is_host) {
         return ACL_MEMCPY_DEVICE_TO_HOST;
     }
-    if ((src_is_host || src_ret != ACL_SUCCESS) && dst_is_device) {
+    if (src_is_host && dst_is_device) {
         return ACL_MEMCPY_HOST_TO_DEVICE;
     }
-    if ((src_is_host || src_ret != ACL_SUCCESS) &&
-        (dst_is_host || dst_ret != ACL_SUCCESS)) {
+    if (src_is_host && dst_is_host) {
         return ACL_MEMCPY_HOST_TO_HOST;
     }
     return ACL_MEMCPY_DEFAULT;
+}
+
+bool is_batch_memcpy_kind(aclrtMemcpyKind memcpy_kind)
+{
+    return memcpy_kind == ACL_MEMCPY_HOST_TO_DEVICE ||
+           memcpy_kind == ACL_MEMCPY_DEVICE_TO_HOST;
 }
 
 }
@@ -184,12 +192,26 @@ void swap_blocks_batch(const torch::Tensor& src_ptrs,
         reinterpret_cast<const void*>(src_data[0]),
         reinterpret_cast<const void*>(dst_data[0]));
 
+    bool use_batch_memcpy = is_batch_memcpy_kind(memcpy_kind);
+    for (int64_t i = 0; i < n; i++) {
+        TORCH_CHECK(size_data[i] >= 0,
+                    "sizes must be non-negative, got ", size_data[i],
+                    " at index ", i);
+        if (use_batch_memcpy) {
+            const aclrtMemcpyKind current_kind = infer_memcpy_kind(
+                reinterpret_cast<const void*>(src_data[i]),
+                reinterpret_cast<const void*>(dst_data[i]));
+            if (current_kind != memcpy_kind) {
+                use_batch_memcpy = false;
+            }
+        }
+    }
+
     // =========================================================================
     // path 1: aclrtMemcpyBatchAsync (CANN 8.5+)
     // =========================================================================
 #if defined(CANN_MEMCPY_BATCH_ASYNC)
-    if (memcpy_kind == ACL_MEMCPY_HOST_TO_DEVICE ||
-        memcpy_kind == ACL_MEMCPY_DEVICE_TO_HOST) {
+    if (use_batch_memcpy) {
         static_assert(sizeof(void*) == sizeof(int64_t),
                       "void* and int64_t must be the same size");
         static_assert(sizeof(size_t) == sizeof(int64_t),
@@ -248,13 +270,14 @@ void swap_blocks_batch(const torch::Tensor& src_ptrs,
         void* dst = reinterpret_cast<void*>(dst_data[i]);
         const void* src = reinterpret_cast<const void*>(src_data[i]);
         size_t copy_size = static_cast<size_t>(size_data[i]);
+        const aclrtMemcpyKind current_kind = infer_memcpy_kind(src, dst);
 
         aclError ret = aclrtMemcpyAsync(
             dst,
             copy_size,
             src,
             copy_size,
-            memcpy_kind,
+            current_kind,
             stream);
 
         TORCH_CHECK(ret == ACL_SUCCESS,
