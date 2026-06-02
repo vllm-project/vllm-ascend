@@ -271,7 +271,7 @@ class NPUWorker(WorkerBase):
         torch.npu.empty_cache()
 
         if get_ascend_device_type() == AscendDeviceType.A5:
-            setup_ascend_local_comm_res(self.local_rank)
+            setup_ascend_local_comm_res(self.local_rank, self.vllm_config.kv_transfer_config)
 
         # take current memory snapshot
         self.init_snapshot = MemorySnapshot()
