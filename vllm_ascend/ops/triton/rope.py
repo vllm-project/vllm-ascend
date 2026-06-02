@@ -270,11 +270,13 @@ def rope_forward_triton(
 
     num_tokens, n_q_head, head_dim = q.shape
     n_kv_head = k.shape[1]
-    # TODO: use a more robust method to get BLOCK_SIZE_HEAD
+    # Keep the tile no larger than the local head count. Some TP-sharded
+    # models have very few heads per rank, and the previous fixed 64-head
+    # tile could exceed Ascend UB capacity even though most lanes were masked.
     if is_neox_style:
-        BLOCK_SIZE_HEAD = 64
+        BLOCK_SIZE_HEAD = min(64, triton.next_power_of_2(max(n_q_head, n_kv_head)))
     else:
-        BLOCK_SIZE_HEAD = 32
+        BLOCK_SIZE_HEAD = min(32, triton.next_power_of_2(max(n_q_head, n_kv_head)))
     num_vectorcore = get_vectorcore_num()
     n_row = min(num_tokens, num_vectorcore)
 
