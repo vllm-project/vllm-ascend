@@ -499,6 +499,7 @@ class BaseDeviceAdaptor:
     def get_dsa_kernel_block_sizes():
         """Non-A5: return supported kernel block sizes."""
         return [8, 32, 128]
+
     @staticmethod
     def chunk_scaled_dot_kkt_fwd(NT, k, beta, g_cumsum, A, cu_seqlens, chunk_indices, T, B, H, Hg, K, BT, BK):
         chunk_scaled_dot_kkt_fwd_kernel[(NT, 1)](

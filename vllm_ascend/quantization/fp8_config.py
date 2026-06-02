@@ -18,6 +18,8 @@ QUANTIZATION_SCHEME_MAP_TYPE = dict[str, dict[str, QuantizationArgs] | None]
 def remove_quantization_method():
     if FP8_METHOD in QUANTIZATION_METHODS:
         QUANTIZATION_METHODS.remove(FP8_METHOD)
+    if "deepseek_v4_fp8" in QUANTIZATION_METHODS:
+        QUANTIZATION_METHODS.remove("deepseek_v4_fp8")
 
 
 remove_quantization_method()
@@ -117,3 +119,7 @@ class AscendFp8Config(QuantizationConfig):
             quant_method = AscendFusedMoEMethod(scheme, layer.moe_config, tid2eid=tid2eid)
             return quant_method
         return None
+
+
+# deepseek_v4_fp8 is handled identically to fp8 on Ascend — reuse the same config.
+register_quantization_config("deepseek_v4_fp8")(AscendFp8Config)
