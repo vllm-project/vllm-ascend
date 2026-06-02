@@ -326,6 +326,7 @@ class AscendCompiler(CompilerInterface):
         artifacts.py_code = py_code
         logger.debug("Loaded npugraph_ex compilation cache from %s", path)
         compiled_fn = _CompiledFxGraph.load_artifacts(artifacts)
+        assert compiled_fn is not None, "Failed to load npugraph_ex compilation cache"
 
         # The saved code was compiled from the graph after make_graph_return_tuple mutated it
         # to return a flat tuple. If the original graph didn't return a tuple, we need to
