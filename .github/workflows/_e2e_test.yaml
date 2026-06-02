@@ -157,6 +157,10 @@ jobs:
             uv pip install -e .
           fi
 
+      # todo(wxs): remove this when the root cause of the cache issue is found
+      - name: Clean up torch compile cache
+        run: rm -rf ~/.cache/vllm/torch_compile_cache
+
       - name: Run vllm-project/vllm-ascend test
         env:
           PYTORCH_NPU_ALLOC_CONF: max_split_size_mb:256
@@ -291,6 +295,10 @@ jobs:
           else
             uv pip install -e .
           fi
+
+      # TODO: remove this when the root cause of the cache issue is found
+      - name: Clean up torch compile cache
+        run: rm -rf ~/.cache/vllm/torch_compile_cache
 
       - name: Run e2e test
         if: ${{ inputs.type == 'full' }}
@@ -433,6 +441,10 @@ jobs:
           else
             uv pip install -e .
           fi
+      # TODO: remove this when the root cause of the cache issue is found
+      - name: Clean up torch compile cache
+        run: rm -rf ~/.cache/vllm/torch_compile_cache
+
       - name: Run vllm-project/vllm-ascend test (light)
         env:
           VLLM_WORKER_MULTIPROC_METHOD: spawn
@@ -566,6 +578,10 @@ jobs:
           else
             uv pip install -e .
           fi
+      # TODO: remove this when the root cause of the cache issue is found
+      - name: Clean up torch compile cache
+        run: rm -rf ~/.cache/vllm/torch_compile_cache
+
       - name: Run vllm-project/vllm-ascend test (full)
         if: ${{ inputs.type == 'full' }}
         env:
@@ -757,6 +773,10 @@ jobs:
             uv pip install -e .
           fi
 
+      # TODO: remove this when the root cause of the cache issue is found
+      - name: Clean up torch compile cache
+        run: rm -rf ~/.cache/vllm/torch_compile_cache
+
       - name: Run vllm-project/vllm-ascend test (light)
         env:
           VLLM_WORKER_MULTIPROC_METHOD: spawn
@@ -888,6 +908,10 @@ jobs:
           else
             uv pip install -e .
           fi
+
+      # TODO: remove this when the root cause of the cache issue is found
+      - name: Clean up torch compile cache
+        run: rm -rf ~/.cache/vllm/torch_compile_cache
 
       - name: Run vllm-project/vllm-ascend test for V1 Engine
         if: ${{ inputs.type == 'full' }}
@@ -1026,6 +1050,10 @@ jobs:
         if: ${{ inputs.type == 'light' }}
         run: pip uninstall -y triton-ascend triton
 
+      # TODO: remove this when the root cause of the cache issue is found
+      - name: Clean up torch compile cache
+        run: rm -rf ~/.cache/vllm/torch_compile_cache
+
       - name: Run vllm-project/vllm-ascend test
         if: ${{ inputs.contains_310 }}
         env:
@@ -1143,6 +1171,10 @@ jobs:
       - name: Uninstall triton-ascend (310p e2e-light)
         if: ${{ inputs.type == 'light' }}
         run: pip uninstall -y triton-ascend triton
+
+      # TODO: remove this when the root cause of the cache issue is found
+      - name: Clean up torch compile cache
+        run: rm -rf ~/.cache/vllm/torch_compile_cache
 
       - name: Run vllm-project/vllm-ascend test
         if: ${{ inputs.contains_310 }}
