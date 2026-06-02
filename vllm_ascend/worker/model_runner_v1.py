@@ -556,6 +556,7 @@ class NPUModelRunner(GPUModelRunner):
         self.mamba_state_idx: dict[str, int] = {}
         self._mamba_bufs: Any | None = None
         self._mamba_copy_bufs: Any | None = None
+        self._prev_non_last_pp_mtp_scheduler_output: SchedulerOutput | None = None
         self.enable_hamming_sparse = (self.ascend_config.enable_hamming_sparse is True)
         self.enable_hamming_sparse = self.enable_hamming_sparse and not vllm_config.speculative_config
         if self.enable_hamming_sparse is True:
@@ -735,7 +736,7 @@ class NPUModelRunner(GPUModelRunner):
         self.query_start_loc.copy_to_gpu()
 
         return num_reqs_padded
-    
+
     def _is_non_last_pp_mtp(self) -> bool:
         return (
             self.need_accepted_tokens
@@ -780,34 +781,35 @@ class NPUModelRunner(GPUModelRunner):
                 num_computed = int(req_data.num_computed_tokens[i])
                 delta = num_computed - prev_num_computed
                 max_count = len(prev_spec_tokens[req_id]) + 1
-                logger.info(f">>>>>>>>>> max_count: {max_count}, delta: {delta}, num_computed: {num_computed}, prev_num_computed: {prev_num_computed}")
                 if 0 < delta <= max_count:
                     count = delta
             accepted_counts[req_id] = max(1, count)
 
         return accepted_counts
-    
-    def _update_states(self, scheduler_output: "SchedulerOutput"):
-        # For non-last PP + MTP, compute accepted counts via delta of
-        # num_computed_tokens (last rank produces sampled ids; non-last must
-        # infer acceptance from scheduler output delta).
+
+    def _prepare_non_last_pp_mtp_state_update(
+        self,
+        scheduler_output: SchedulerOutput,
+    ) -> None:
+        if not self._is_non_last_pp_mtp():
+            return
+
         accepted_counts = (
             self._compute_non_last_pp_mtp_accepted_counts(
                 scheduler_output,
-                self._prev_non_last_pp_mamba_scheduler_output,
+                self._prev_non_last_pp_mtp_scheduler_output,
             )
-            if self._is_non_last_pp_mtp()
-            else {}
         )
+        if not accepted_counts:
+            return
 
-        # Sync accepted counts to GPU and run mamba postprocess
-        # (needs correct `num_accepted_tokens_cpu` BEFORE super()._update_states).
+        # Hybrid-attention models with Mamba cache need the accepted draft-token
+        # count before the upstream state update. Non-last PP ranks do not sample
+        # locally, so infer acceptance from the scheduler's computed-token delta.
         self._sync_num_accepted_tokens_to_gpu(accepted_counts)
-        prev_scheduler_output = self._prev_non_last_pp_mamba_scheduler_output
+        prev_scheduler_output = self._prev_non_last_pp_mtp_scheduler_output
         if (
-            self._is_non_last_pp_mtp()
-            and accepted_counts
-            and prev_scheduler_output is not None
+            prev_scheduler_output is not None
             and self.cache_config.mamba_cache_mode == "align"
         ):
             mamba_utils.postprocess_mamba(
@@ -821,19 +823,17 @@ class NPUModelRunner(GPUModelRunner):
                 self._get_mamba_copy_bufs(),
             )
 
-        # Parent _update_states may reset num_accepted_tokens on
-        # non-last ranks (since no sampled_token_ids exist locally).
-        deferred_state_corrections_fn = super()._update_states(scheduler_output)
-
-        # Cache scheduler_output for next step's mamba postprocess
-        # (only when spec decode actually happened).
+    def _finish_non_last_pp_mtp_state_update(
+        self,
+        scheduler_output: SchedulerOutput,
+    ) -> None:
         if (
             self._is_non_last_pp_mtp()
             and scheduler_output.scheduled_spec_decode_tokens
         ):
-            self._prev_non_last_pp_mamba_scheduler_output = scheduler_output
-
-        return deferred_state_corrections_fn
+            self._prev_non_last_pp_mtp_scheduler_output = scheduler_output
+        else:
+            self._prev_non_last_pp_mtp_scheduler_output = None
 
     def _prepare_inputs(
         self,
@@ -2152,9 +2152,11 @@ class NPUModelRunner(GPUModelRunner):
                             req_state.prev_num_draft_len = 0
 
                 # Update persistent batch states.
+                self._prepare_non_last_pp_mtp_state_update(scheduler_output)
                 with self._pp_mtp_update_req_spec_token_ids(scheduler_output):
                     deferred_state_corrections_fn = self._update_states(
                         scheduler_output)
+                self._finish_non_last_pp_mtp_state_update(scheduler_output)
 
                 if has_ec_transfer() and get_ec_transfer().is_producer:
                     with self.maybe_get_ec_connector_output(
