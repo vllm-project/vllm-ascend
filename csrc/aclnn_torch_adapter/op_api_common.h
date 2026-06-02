@@ -86,7 +86,7 @@ extern thread_local int g_hashOffset;
   _(at::ScalarType::Half, ACL_FLOAT16)              \
   _(at::ScalarType::Float, ACL_FLOAT)               \
   _(at::ScalarType::Double, ACL_DOUBLE)             \
-  _(at::ScalarType::ComplexHalf, ACL_DT_UNDEFINED)  \
+  _(at::ScalarType::ComplexHalf, ACL_COMPLEX32)     \
   _(at::ScalarType::ComplexFloat, ACL_COMPLEX64)    \
   _(at::ScalarType::ComplexDouble, ACL_COMPLEX128)  \
   _(at::ScalarType::Bool, ACL_BOOL)                 \
@@ -96,6 +96,34 @@ extern thread_local int g_hashOffset;
   _(at::ScalarType::BFloat16, ACL_BF16)             \
   _(at::ScalarType::QUInt4x2, ACL_DT_UNDEFINED)     \
   _(at::ScalarType::QUInt2x4, ACL_DT_UNDEFINED)     \
+  _(at::ScalarType::Bits1x8, ACL_DT_UNDEFINED)      \
+  _(at::ScalarType::Bits2x4, ACL_DT_UNDEFINED)      \
+  _(at::ScalarType::Bits4x2, ACL_DT_UNDEFINED)      \
+  _(at::ScalarType::Bits8, ACL_DT_UNDEFINED)        \
+  _(at::ScalarType::Bits16, ACL_DT_UNDEFINED)       \
+  _(at::ScalarType::Float8_e5m2, ACL_FLOAT8_E5M2)   \
+  _(at::ScalarType::Float8_e4m3fn, ACL_FLOAT8_E4M3FN) \
+  _(at::ScalarType::Float8_e5m2fnuz, ACL_DT_UNDEFINED) \
+  _(at::ScalarType::Float8_e4m3fnuz, ACL_DT_UNDEFINED) \
+  _(at::ScalarType::UInt16, ACL_UINT16)             \
+  _(at::ScalarType::UInt32, ACL_UINT32)             \
+  _(at::ScalarType::UInt64, ACL_UINT64)             \
+  _(at::ScalarType::UInt1, ACL_UINT1)               \
+  _(at::ScalarType::UInt2, ACL_DT_UNDEFINED)        \
+  _(at::ScalarType::UInt3, ACL_DT_UNDEFINED)        \
+  _(at::ScalarType::UInt4, ACL_DT_UNDEFINED)        \
+  _(at::ScalarType::UInt5, ACL_DT_UNDEFINED)        \
+  _(at::ScalarType::UInt6, ACL_DT_UNDEFINED)        \
+  _(at::ScalarType::UInt7, ACL_DT_UNDEFINED)        \
+  _(at::ScalarType::Int1, ACL_DT_UNDEFINED)         \
+  _(at::ScalarType::Int2, ACL_DT_UNDEFINED)         \
+  _(at::ScalarType::Int3, ACL_DT_UNDEFINED)         \
+  _(at::ScalarType::Int4, ACL_INT4)                 \
+  _(at::ScalarType::Int5, ACL_DT_UNDEFINED)         \
+  _(at::ScalarType::Int6, ACL_DT_UNDEFINED)         \
+  _(at::ScalarType::Int7, ACL_DT_UNDEFINED)         \
+  _(at::ScalarType::Float8_e8m0fnu, ACL_FLOAT8_E8M0) \
+  _(at::ScalarType::Float4_e2m1fn_x2, ACL_FLOAT4_E2M1) \
   _(at::ScalarType::Undefined, ACL_DT_UNDEFINED)    \
   _(at::ScalarType::NumOptions, ACL_DT_UNDEFINED)
 
