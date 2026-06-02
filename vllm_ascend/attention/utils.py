@@ -385,4 +385,3 @@ def enabling_mlapo(vllm_config: VllmConfig) -> bool:
         and not vllm_config.kv_transfer_config.is_kv_producer
     )
     return bool(config_val and is_decode_instance)
-
