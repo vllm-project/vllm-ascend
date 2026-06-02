@@ -3282,7 +3282,9 @@ class NPUModelRunner(GPUModelRunner):
             if self.supports_mm_inputs and not self.model_config.is_encoder_decoder or self.enable_prompt_embeds:
                 if embedding_tp_enable():
                     self.model.embed_input_ids(
-                        self.input_ids.gpu[:num_tokens_padded])
+                        torch.zeros(num_tokens_padded,
+                                    dtype=torch.int32,
+                                    device=self.device))
                 input_ids = None
                 inputs_embeds = self.inputs_embeds.gpu[:num_tokens_padded]
             else:
