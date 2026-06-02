@@ -114,6 +114,11 @@ repos:
     entry: python tools/check_boolean_context_manager.py
     language: python
     types: [python]
+  - id: check-long-functions
+    name: Check that new functions over 100 lines have comments
+    entry: python tools/check_long_functions.py
+    language: system
+    types: [python]
   # Keep `suggestion` last
   - id: suggestion
     name: Suggestion
