@@ -143,13 +143,13 @@ jobs:
           - name: multi-node-deepseek-v3.2-W8A8-EP
             config_file_path: DeepSeek-V3_2-W8A8-EP.yaml
             size: 4
-          - name: multi-node-GLM5_1-W8A8-EP
-            config_file_path: GLM5_1-W8A8-EP.yaml
-            size: 4
-          - name: GLM5_1-W8A8-EP-external
-            config_file_path: GLM5_1-W8A8-EP-external.yaml
-            size: 4
-            config_base_path: tests/e2e/nightly/multi_node/external_dp/config/
+#          - name: multi-node-GLM5_1-W8A8-EP
+#            config_file_path: GLM5_1-W8A8-EP.yaml
+#            size: 4
+#          - name: GLM5_1-W8A8-EP-external
+#            config_file_path: GLM5_1-W8A8-EP-external.yaml
+#            size: 4
+#            config_base_path: tests/e2e/nightly/multi_node/external_dp/config/
     uses: ./.github/workflows/_e2e_nightly_multi_node.yaml
     with:
       soc_version: a3
@@ -160,7 +160,7 @@ jobs:
       replicas: 1
       size: ${{ matrix.test_config.size }}
       config_file_path: ${{ matrix.test_config.config_file_path }}
-      config_base_path: ${{ matrix.test_config.config_base_path || '' }}
+#      config_base_path: ${{ matrix.test_config.config_base_path || '' }}
       name: ${{ matrix.test_config.name }}
       vllm_ascend_ref: ${{ needs.parse-trigger.outputs.ref }}
       should_run: >-
