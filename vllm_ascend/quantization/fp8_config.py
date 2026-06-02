@@ -66,7 +66,7 @@ class AscendFp8Config(QuantizationConfig):
         super().__init__()
         self.ignore = ignore
         self.quant_format = quant_format
-        self.quant_description = config
+        self.quant_description = config if config is not None else {}
 
     def __repr__(self) -> str:
         return "Fp8Config:\n" + super().__repr__()
@@ -121,7 +121,3 @@ class AscendFp8Config(QuantizationConfig):
             quant_method = AscendFusedMoEMethod(scheme, layer.moe_config, tid2eid=tid2eid)
             return quant_method
         return None
-
-    def apply_vllm_mapper(self, hf_to_vllm_mapper: "WeightsMapper"):
-        self.target_scheme_map = hf_to_vllm_mapper.apply_dict(self.target_scheme_map)
-        self.ignore = hf_to_vllm_mapper.apply_list(self.ignore)
