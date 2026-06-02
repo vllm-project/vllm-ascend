@@ -101,7 +101,7 @@ class AscendStoreConnector(KVConnectorBase_V1, SupportsHMA):
         self.kv_caches: dict[str, torch.Tensor] = {}
         self._kv_cache_events: AscendStoreKVEvents | None = None
 
-        self._current_step_needs_store_init = False
+        self._current_step_has_real_forward = False
 
         if role == KVConnectorRole.SCHEDULER:
             assert kv_cache_config is not None
@@ -200,7 +200,7 @@ class AscendStoreConnector(KVConnectorBase_V1, SupportsHMA):
     def start_load_kv(self, forward_context: "ForwardContext", **kwargs) -> None:
         assert self.connector_worker is not None
         metadata = self._get_connector_metadata()
-        self._current_step_needs_store_init = forward_context is not None and bool(metadata.requests)
+        self._current_step_has_real_forward = forward_context is not None
         logger.debug(
             "KV pool connector start_load_kv metadata_requests=%d specs=%s",
             len(metadata.requests),
@@ -246,11 +246,11 @@ class AscendStoreConnector(KVConnectorBase_V1, SupportsHMA):
         """Get the finished recving and sending requests."""
         assert self.connector_worker is not None
         metadata = self._get_connector_metadata()
-        if self._current_step_needs_store_init:
+        if self._current_step_has_real_forward:
             try:
                 self.connector_worker.ensure_store_initialized()
             finally:
-                self._current_step_needs_store_init = False
+                self._current_step_has_real_forward = False
         done_sending, done_recving = self.connector_worker.get_finished(finished_req_ids, metadata)
         return done_sending, done_recving
 
