@@ -296,7 +296,6 @@ jobs:
             uv pip install -e .
           fi
 
-      # TODO: remove this when the root cause of the cache issue is found
       - name: Clean up torch compile cache
         run: rm -rf ~/.cache/vllm/torch_compile_cache
 
@@ -441,7 +440,6 @@ jobs:
           else
             uv pip install -e .
           fi
-      # TODO: remove this when the root cause of the cache issue is found
       - name: Clean up torch compile cache
         run: rm -rf ~/.cache/vllm/torch_compile_cache
 
@@ -578,7 +576,6 @@ jobs:
           else
             uv pip install -e .
           fi
-      # TODO: remove this when the root cause of the cache issue is found
       - name: Clean up torch compile cache
         run: rm -rf ~/.cache/vllm/torch_compile_cache
 
@@ -773,7 +770,6 @@ jobs:
             uv pip install -e .
           fi
 
-      # TODO: remove this when the root cause of the cache issue is found
       - name: Clean up torch compile cache
         run: rm -rf ~/.cache/vllm/torch_compile_cache
 
@@ -909,7 +905,6 @@ jobs:
             uv pip install -e .
           fi
 
-      # TODO: remove this when the root cause of the cache issue is found
       - name: Clean up torch compile cache
         run: rm -rf ~/.cache/vllm/torch_compile_cache
 
@@ -1050,7 +1045,6 @@ jobs:
         if: ${{ inputs.type == 'light' }}
         run: pip uninstall -y triton-ascend triton
 
-      # TODO: remove this when the root cause of the cache issue is found
       - name: Clean up torch compile cache
         run: rm -rf ~/.cache/vllm/torch_compile_cache
 
@@ -1172,7 +1166,6 @@ jobs:
         if: ${{ inputs.type == 'light' }}
         run: pip uninstall -y triton-ascend triton
 
-      # TODO: remove this when the root cause of the cache issue is found
       - name: Clean up torch compile cache
         run: rm -rf ~/.cache/vllm/torch_compile_cache
 
