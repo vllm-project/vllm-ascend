@@ -273,6 +273,67 @@ class NPUPlatform(Platform):
             raise ValueError("additional_config.layer_sharding can only be enabled in PD-disaggregated's P node.")
 
     @classmethod
+    def _validate_draft_decode_context_parallel_config(
+        cls,
+        vllm_config: VllmConfig,
+    ) -> None:
+        speculative_config = vllm_config.speculative_config
+        if speculative_config is None:
+            return
+
+        draft_model_config = speculative_config.draft_model_config
+        if draft_model_config is None:
+            return
+
+        parallel_config = vllm_config.parallel_config
+        decode_context_parallel_size = parallel_config.decode_context_parallel_size
+        if decode_context_parallel_size <= 1:
+            return
+
+        # MLA draft models do not use the GQA/MQA DCP head-sharding rule.
+        if draft_model_config.use_mla:
+            return
+
+        draft_parallel_config = speculative_config.draft_parallel_config
+        if draft_parallel_config is not None:
+            draft_tensor_parallel_size = draft_parallel_config.tensor_parallel_size
+        elif speculative_config.draft_tensor_parallel_size is not None:
+            draft_tensor_parallel_size = speculative_config.draft_tensor_parallel_size
+        else:
+            draft_tensor_parallel_size = parallel_config.tensor_parallel_size
+
+        total_num_attention_heads = draft_model_config.model_arch_config.total_num_attention_heads
+        total_num_kv_heads = draft_model_config.get_total_num_kv_heads()
+
+        if draft_tensor_parallel_size <= total_num_kv_heads:
+            raise ValueError(
+                "Invalid draft model parallel config for speculative decoding: "
+                f"tensor parallel size {draft_tensor_parallel_size} must be "
+                f"greater than total num kv heads {total_num_kv_heads} when "
+                "enable decode context parallel for GQA/MQA draft model"
+            )
+
+        max_dcp_size = draft_tensor_parallel_size // total_num_kv_heads
+        if decode_context_parallel_size > max_dcp_size:
+            raise ValueError(
+                "Invalid draft model parallel config for speculative decoding: "
+                "decode context parallel size must less than or equal to "
+                f"(draft tensor parallel size {draft_tensor_parallel_size} // "
+                f"draft total num kv heads {total_num_kv_heads}) = "
+                f"{max_dcp_size}, but got {decode_context_parallel_size}"
+            )
+
+        num_q_per_kv = total_num_attention_heads // total_num_kv_heads
+        if num_q_per_kv % decode_context_parallel_size != 0:
+            raise ValueError(
+                "Invalid draft model parallel config for speculative decoding: "
+                f"total number of q per kv attn heads ({num_q_per_kv}) must "
+                "be divisible by dcp world size when enable decode context "
+                f"parallel for GQA draft model "
+                f"({decode_context_parallel_size})."
+            )
+
+    @classmethod
     def check_and_update_config(cls, vllm_config: VllmConfig) -> None:
         from vllm_ascend.quantization.utils import maybe_auto_detect_quantization
 
@@ -280,6 +341,7 @@ class NPUPlatform(Platform):
             maybe_auto_detect_quantization(vllm_config)
 
         cls._validate_layer_sharding_config(vllm_config)
+        cls._validate_draft_decode_context_parallel_config(vllm_config)
 
         # initialize ascend config from vllm additional_config
         cls._fix_incompatible_config(vllm_config)
