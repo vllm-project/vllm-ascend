@@ -87,7 +87,7 @@ class TestAscendW8A8DynamicLinearMethod310(TestBase):
         self.assertEqual(params["weight_scale"].shape, (10, 1))
         self.assertEqual(params["weight_offset"].shape, (10, 1))
 
-    @patch("torch_npu.npu_dynamic_quant")
+    @patch("torch_npu.npu_dynamic_quant", create=True)
     @patch("torch_npu.npu_quant_matmul")
     def test_apply_310(self, mock_npu_quant_matmul, mock_npu_dynamic_quantize):
         layer = MagicMock()
@@ -121,8 +121,9 @@ class TestAscendW8A8DynamicLinearMethod310(TestBase):
 
         self.assertTrue(torch.equal(output, expected_y_output))
 
+    @patch("vllm_ascend.utils.is_310p", return_value=True)
     @patch("torch_npu.npu_format_cast")
-    def test_process_weights_after_loading_calls_nz_format_cast_310p(self, mock_npu_format_cast):
+    def test_process_weights_after_loading_calls_nz_format_cast_310p(self, mock_npu_format_cast, _mock_is_310p):
         mock_npu_format_cast.side_effect = lambda x, fmt: x
 
         layer = MagicMock()

@@ -35,7 +35,7 @@ on:
       test_cmd:
         description: 'Failing pytest command(s), semicolon-separated for batch mode'
         required: true
-        default: 'pytest -sv tests/e2e/multicard/4-cards/long_sequence/test_accuracy.py'
+        default: 'pytest -sv tests/e2e/pull_request/full/four_cards/long_sequence/test_accuracy.py'
 
 defaults:
   run:

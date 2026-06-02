@@ -49,6 +49,7 @@ class TestPyHcclCommunicator(TestBase):
     @patch("vllm_ascend.distributed.device_communicators.pyhccl_wrapper.hcclUniqueId", MockUniqueId)
     @patch("torch.distributed.is_initialized", return_value=True)
     @patch("torch.distributed.get_backend", return_value="nccl")
+    @patch("torch.distributed.Backend.HCCL", "hccl", create=True)
     @patch("torch.distributed.get_rank", return_value=1)
     @patch("torch.distributed.get_world_size", return_value=2)
     @patch("torch.distributed.get_process_group_ranks", return_value=[0, 1])

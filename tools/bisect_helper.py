@@ -38,9 +38,9 @@ DEFAULT_ENV = {
 PATH_KIND_RULES = [
     (r"tests/e2e/310p/multicard/", "e2e_310p_4cards"),
     (r"tests/e2e/310p/singlecard/", "e2e_310p_singlecard"),
-    (r"tests/e2e/multicard/4-cards/", "e2e_4cards"),
-    (r"tests/e2e/multicard/2-cards/", "e2e_2cards"),
-    (r"tests/e2e/singlecard/", "e2e_singlecard"),
+    (r"tests/e2e/pull_request/full/four_cards/", "e2e_4cards"),
+    (r"tests/e2e/pull_request/full/two_cards/", "e2e_2cards"),
+    (r"tests/e2e/pull_request/full/one_card/", "e2e_singlecard"),
     (r"tests/ut/", "ut"),
 ]
 

@@ -28,10 +28,10 @@ First, post a comment on the PR specifying which test paths to run:
 
 | Comment format | Effect |
 |---|---|
-| `/e2e tests/e2e/singlecard/test_foo.py` | Run one test file on singlecard |
-| `/e2e tests/e2e/multicard/2-cards/test_bar.py` | Run one test file on 2-card |
+| `/e2e tests/e2e/pull_request/full/one_card/test_foo.py` | Run one test file on singlecard |
+| `/e2e tests/e2e/pull_request/full/two_cards/test_bar.py` | Run one test file on two_card |
 | `/e2e path1 path2 path3` | Run multiple files, routed by path pattern |
-| `/e2e tests/e2e/singlecard/test_foo.py::test_case` | Run a specific test case |
+| `/e2e tests/e2e/pull_request/full/one_card/test_foo.py::test_case` | Run a specific test case |
 
 ### 2. Add the label
 
@@ -70,8 +70,8 @@ on path patterns:
 
 | Path pattern | Hardware | Runner |
 |---|---|---|
-| `multicard/2-cards` in path | 2-card A3 NPU | `linux-aarch64-a3-2` |
-| `multicard/4-cards` in path | 4-card A3 NPU | `linux-aarch64-a3-4` |
+| `multicard/two_cards` in path | two_card A3 NPU | `linux-aarch64-a3-2` |
+| `multicard/four_cards` in path | four_card A3 NPU | `linux-aarch64-a3-4` |
 | `310p` in path | Ascend 310P | `linux-aarch64-310p-*` |
 | All other paths | Singlecard A2 NPU | `linux-aarch64-a2b3-1` |
 
@@ -86,8 +86,8 @@ The `tests/e2e/` directory is organized by hardware category:
 tests/e2e/
 ├── singlecard/          # Single A2 card tests → singlecard runner
 ├── multicard/
-│   ├── 2-cards/         # 2-card tests → 2-card runner
-│   └── 4-cards/         # 4-card tests → 4-card runner
+│   ├── two_cards/         # two_card tests → two_card runner
+│   └── four_cards/         # four_card tests → four_card runner
 └── 310p/                # Ascend 310P tests → 310P runner
     ├── singlecard/
     └── multicard/
@@ -107,19 +107,19 @@ tests/e2e/
 Run a single singlecard test:
 
 ```text
-/e2e tests/e2e/singlecard/test_offline_inference.py
+/e2e tests/e2e/pull_request/full/one_card/test_offline_inference.py
 ```
 
-Run a 2-card test:
+Run a two_card test:
 
 ```text
-/e2e tests/e2e/multicard/2-cards/test_data_parallel.py
+/e2e tests/e2e/pull_request/full/two_cards/test_data_parallel.py
 ```
 
 Run tests across multiple hardware categories in one comment:
 
 ```text
-/e2e tests/e2e/singlecard/test_offline_inference.py tests/e2e/multicard/2-cards/test_data_parallel.py
+/e2e tests/e2e/pull_request/full/one_card/test_offline_inference.py tests/e2e/pull_request/full/two_cards/test_data_parallel.py
 ```
 
 Re-trigger after fixing an issue: just push a new commit. The `synchronize` event
@@ -139,7 +139,7 @@ to post a new comment.
 
 **Tests ran on the wrong hardware.**
 
-- Check that the path includes the expected directory segment (`2-cards`, `4-cards`,
+- Check that the path includes the expected directory segment (`two_cards`, `four_cards`,
   or `310p`). Paths that do not match any of these patterns are routed to the
   singlecard runner by default.
 

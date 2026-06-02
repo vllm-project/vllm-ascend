@@ -101,7 +101,7 @@ pytest -sv tests/ut/ops/test_prepare_finalize.py
 pytest -sv tests/ut/ops/test_prepare_finalize.py::test_prepare_inputs
 
 # Run NPU-specific tests (requires NPU hardware)
-pytest -sv tests/e2e/singlecard/test_aclgraph_accuracy.py::test_default_full_and_piecewise_res_consistency
+pytest -sv tests/e2e/pull_request/full/one_card/test_aclgraph_accuracy.py::test_default_full_and_piecewise_res_consistency
 ```
 
 **Requirement**: Run all tests locally before requesting review. Verify tests pass on NPU hardware for NPU-specific changes.

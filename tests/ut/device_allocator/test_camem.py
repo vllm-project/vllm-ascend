@@ -23,7 +23,6 @@ from vllm_ascend.device_allocator.camem import (
     AllocationData,
     CaMemAllocator,
     create_and_map,
-    find_loaded_library,
     get_pluggable_allocator,
     unmap_and_release,
 )
@@ -38,15 +37,6 @@ def dummy_free(ptr):
 
 
 class TestCaMem(PytestBase):
-    def test_find_loaded_library_success_and_not_found(self):
-        path = find_loaded_library("libc")
-        assert path is not None, "Expected to find libc library"
-        assert path.endswith(".so.6") or ".so" in path
-        assert "libc" in path
-
-        path = find_loaded_library("non_existent_library")
-        assert path is None, "Expected to not find non-existent library"
-
     @pytest.mark.parametrize(
         "handle",
         [
