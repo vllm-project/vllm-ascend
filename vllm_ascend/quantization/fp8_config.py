@@ -12,9 +12,6 @@ from vllm_ascend.utils import FP8_METHOD
 
 from .methods import get_scheme_class
 
-if TYPE_CHECKING:
-    from vllm.model_executor.models.utils import WeightsMapper
-
 
 QUANTIZATION_SCHEME_MAP_TYPE = dict[str, dict[str, QuantizationArgs] | None]
 
