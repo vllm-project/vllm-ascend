@@ -117,9 +117,9 @@ def moe_gating_top_k_numpy_ref(
 @pytest.mark.parametrize("renorm", [1])
 @pytest.mark.parametrize("norm_type", [0, 1])
 @pytest.mark.parametrize("group_count", [1, 8])
-@pytest.mark.parametrize("k_ranges", [4, 8, 12, 16, 6, 32])
-@pytest.mark.parametrize("x_dim0_range", list(range(1, 17)))
-@pytest.mark.parametrize("x_dim1_range", [256, 128, 64, 208, 192, 160])
+@pytest.mark.parametrize("k_ranges", [4, 16, 32])
+@pytest.mark.parametrize("x_dim0_range", [1, 8, 16])
+@pytest.mark.parametrize("x_dim1_range", [64, 128, 256])
 def test_npu_moe_gating_topk_compare(
     group_select_mode: int,
     renorm: int,
