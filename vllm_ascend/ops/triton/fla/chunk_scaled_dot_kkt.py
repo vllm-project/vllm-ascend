@@ -10,9 +10,15 @@
 # mypy: ignore-errors
 
 import torch
+import triton.runtime.driver as driver
 from vllm.triton_utils import tl, triton
 
 from .utils import prepare_chunk_indices, safe_exp
+
+device = torch.npu.current_device()
+properties = driver.active.utils.get_device_properties(device)
+AICORE_NUM = properties["num_aicore"]
+AIVECCORE_NUM = properties["num_vectorcore"]
 
 
 @triton.heuristics(
@@ -38,46 +44,52 @@ def chunk_scaled_dot_kkt_fwd_kernel(
     BK: tl.constexpr,
     IS_VARLEN: tl.constexpr,
     USE_G: tl.constexpr,
+    grid0=0,
 ):
-    bt_stride = B * T
-    i_t_i, _ = tl.program_id(0), tl.program_id(1)
+    core_num = tl.num_programs(0)
+    pid = tl.program_id(0)
+    T_orig = T
 
-    for i_bh in range(B * H):
-        i_b, i_h = i_bh // H, i_bh % H
-        if IS_VARLEN:
-            i_n, i_t = (
-                tl.load(chunk_indices + i_t_i * 2).to(tl.int32),
-                tl.load(chunk_indices + i_t_i * 2 + 1).to(tl.int32),
-            )
-            bos, eos = tl.load(cu_seqlens + i_n).to(tl.int32), tl.load(cu_seqlens + i_n + 1).to(tl.int32)
-            T = eos - bos
-        else:
-            bos, eos = i_b * T, i_b * T + T
-            i_t = i_t_i
-        o_t = tl.arange(0, BT)
-        o_t_fp32 = o_t.to(tl.float32)
+    for i_t_i in range(pid, grid0, core_num):
+        T = T_orig
+        bt_stride = B * T
 
-        p_beta = tl.make_block_ptr(beta + i_h * bt_stride + bos, (T,), (1,), (i_t * BT,), (BT,), (0,))
-        b_beta = tl.load(p_beta, boundary_check=(0,))
+        for i_bh in range(B * H):
+            i_b, i_h = i_bh // H, i_bh % H
+            if IS_VARLEN:
+                i_n, i_t = (
+                    tl.load(chunk_indices + i_t_i * 2).to(tl.int32),
+                    tl.load(chunk_indices + i_t_i * 2 + 1).to(tl.int32),
+                )
+                bos, eos = tl.load(cu_seqlens + i_n).to(tl.int32), tl.load(cu_seqlens + i_n + 1).to(tl.int32)
+                T = eos - bos
+            else:
+                bos, eos = i_b * T, i_b * T + T
+                i_t = i_t_i
+            o_t = tl.arange(0, BT)
+            o_t_fp32 = o_t.to(tl.float32)
 
-        b_A = tl.zeros([BT, BT], dtype=tl.float32)
-        for i_k in range(tl.cdiv(K, BK)):
-            p_k = tl.make_block_ptr(
-                k + (bos * Hg + i_h // (H // Hg)) * K, (T, K), (Hg * K, 1), (i_t * BT, i_k * BK), (BT, BK), (1, 0)
-            )
-            b_k = tl.load(p_k, boundary_check=(0, 1))
-            b_A += tl.dot(b_k, tl.trans(b_k))
+            p_beta = tl.make_block_ptr(beta + i_h * bt_stride + bos, (T,), (1,), (i_t * BT,), (BT,), (0,))
+            b_beta = tl.load(p_beta, boundary_check=(0,))
 
-        if USE_G:
-            p_g = tl.make_block_ptr(g_cumsum + i_h * bt_stride + bos, (T,), (1,), (i_t * BT,), (BT,), (0,))
-            b_g = tl.load(p_g, boundary_check=(0,))
-            b_g_diff = b_g[:, None] - b_g[None, :]
-            b_A *= safe_exp(b_g_diff)
+            b_A = tl.zeros([BT, BT], dtype=tl.float32)
+            for i_k in range(tl.cdiv(K, BK)):
+                p_k = tl.make_block_ptr(
+                    k + (bos * Hg + i_h // (H // Hg)) * K, (T, K), (Hg * K, 1), (i_t * BT, i_k * BK), (BT, BK), (1, 0)
+                )
+                b_k = tl.load(p_k, boundary_check=(0, 1))
+                b_A += tl.dot(b_k, tl.trans(b_k))
 
-        b_A *= b_beta[:, None]
-        b_A = tl.where(o_t_fp32[:, None] > o_t_fp32[None, :], b_A, 0)
-        p_A = tl.make_block_ptr(A + (bos * H + i_h) * BT, (T, BT), (BT * H, 1), (i_t * BT, 0), (BT, BT), (1, 0))
-        tl.store(p_A, b_A.to(p_A.dtype.element_ty), boundary_check=(0, 1))
+            if USE_G:
+                p_g = tl.make_block_ptr(g_cumsum + i_h * bt_stride + bos, (T,), (1,), (i_t * BT,), (BT,), (0,))
+                b_g = tl.load(p_g, boundary_check=(0,))
+                b_g_diff = b_g[:, None] - b_g[None, :]
+                b_A *= safe_exp(b_g_diff)
+
+            b_A *= b_beta[:, None]
+            b_A = tl.where(o_t_fp32[:, None] > o_t_fp32[None, :], b_A, 0)
+            p_A = tl.make_block_ptr(A + (bos * H + i_h) * BT, (T, BT), (BT * H, 1), (i_t * BT, 0), (BT, BT), (1, 0))
+            tl.store(p_A, b_A.to(p_A.dtype.element_ty), boundary_check=(0, 1))
 
 
 def chunk_scaled_dot_kkt_fwd(
@@ -121,7 +133,9 @@ def chunk_scaled_dot_kkt_fwd(
     NT = triton.cdiv(T, BT) if cu_seqlens is None else len(chunk_indices)
     A = torch.empty(B, T, H, BT, device=k.device, dtype=output_dtype)
 
-    chunk_scaled_dot_kkt_fwd_kernel[(NT, 1)](
+    core_num = AICORE_NUM
+    grid = (core_num,)
+    chunk_scaled_dot_kkt_fwd_kernel[grid](
         k=k,
         beta=torch.permute(beta, (2, 0, 1)).contiguous(),
         g_cumsum=torch.permute(g_cumsum, (2, 0, 1)).contiguous(),
@@ -135,6 +149,7 @@ def chunk_scaled_dot_kkt_fwd(
         K=K,
         BT=BT,
         BK=128,
+        grid0=NT,
         num_warps=8,
         num_stages=3,
         multibuffer=True,
