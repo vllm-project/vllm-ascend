@@ -46,10 +46,21 @@ class AscendHybridKVCacheCoordinator(HybridKVCacheCoordinator):
         eagle_attn_layer_names: list[str] | None = None,
         metrics_collector: KVCacheMetricsCollector | None = None,
         max_num_batched_tokens: int | None = None,
+        # vllm PR #44165: scheduler-side block-size invariant. Upstream
+        # ``KVCacheManager`` always forwards this kwarg from the scheduler.
+        # vllm-ascend still relies on its own compress-ratio-aware
+        # ``self.lcm_block_size`` for actual cache alignment (see
+        # ``cache_blocks`` override below); we just store the value to
+        # satisfy the upstream contract and any future downstream consumer.
+        scheduler_block_size: int | None = None,
     ):
         self.kv_cache_config = kv_cache_config
         self.max_model_len = max_model_len
         self.enable_caching = enable_caching
+        # When the caller (newer upstream ``KVCacheManager``) supplies a
+        # ``scheduler_block_size``, store it. On older upstream builds the
+        # kwarg is absent; default to 0 so attribute lookups still succeed.
+        self.scheduler_block_size = scheduler_block_size or 0
         # Fall back to `max_model_len` when unset so the recycling-aware
         # admission cap (vLLM PR #40946) collapses to the prior uncapped
         # behavior. The scheduler always supplies the real value at runtime.
@@ -81,6 +92,10 @@ class AscendHybridKVCacheCoordinator(HybridKVCacheCoordinator):
                 pcp_world_size=pcp_world_size,
                 max_num_batched_tokens=max_num_batched_tokens,
                 max_model_len=max_model_len,
+                # vllm PR #44165: upstream ``SingleTypeKVCacheManager.__init__``
+                # now requires this kwarg. ``get_manager_for_kv_cache_spec``
+                # forwards it into ``**kwargs`` for the manager class.
+                scheduler_block_size=self.scheduler_block_size,
             )
             for i, kv_cache_group in enumerate(self.kv_cache_config.kv_cache_groups)
         )
@@ -145,6 +160,27 @@ class AscendHybridKVCacheCoordinator(HybridKVCacheCoordinator):
         # NOTE: use 16k as the alignment tokens for model with compress ratio
         block_sizes = [spec.block_size * getattr(spec, "compress_ratio", 1) for spec, _, _ in self.attention_groups]
         self.lcm_block_size = lcm(*block_sizes)
+
+    def cache_blocks(self, request, num_computed_tokens: int) -> None:
+        """Cache blocks at the compress-ratio-aware alignment.
+
+        Upstream vllm PR #44165 made ``HybridKVCacheCoordinator.cache_blocks``
+        align by ``self.scheduler_block_size`` (= ``Scheduler.block_size``).
+        On Ascend's DSv4 hybrid groups (Compress128 + Compress4 + SWA-MLA) the
+        scheduler block size does **not** include the ``compress_ratio`` factor,
+        whereas ``self.lcm_block_size`` does. Using the upstream value here
+        would silently desync prefix-cache alignment for compressed groups.
+
+        Override so cache alignment continues to follow vllm-ascend's
+        ``lcm_block_size`` exactly as it did before PR #44165 landed.
+        """
+        num_computed_tokens = num_computed_tokens // self.lcm_block_size * self.lcm_block_size
+        for manager in self.single_type_managers:
+            manager.cache_blocks(
+                request,
+                num_computed_tokens,
+                alignment_tokens=self.lcm_block_size,
+            )
 
     def find_longest_cache_hit(
         self,
@@ -257,6 +293,10 @@ def get_kv_cache_coordinator(
     hash_block_size: int,
     eagle_attn_layer_names: list[str] | None = None,
     metrics_collector: KVCacheMetricsCollector | None = None,
+    # vllm PR #44165: ``KVCacheManager`` now forwards ``scheduler_block_size``.
+    # Accept the kwarg (default ``None`` keeps us compatible with older vllm
+    # that hasn't landed PR #44165) and pass it through to the coordinator.
+    scheduler_block_size: int | None = None,
 ) -> KVCacheCoordinator:
     return AscendHybridKVCacheCoordinator(
         kv_cache_config,
@@ -270,6 +310,7 @@ def get_kv_cache_coordinator(
         eagle_attn_layer_names=eagle_attn_layer_names,
         metrics_collector=metrics_collector,
         max_num_batched_tokens=max_num_batched_tokens,
+        scheduler_block_size=scheduler_block_size,
     )
 
 
