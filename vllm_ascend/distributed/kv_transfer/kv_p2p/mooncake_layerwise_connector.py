@@ -1184,9 +1184,8 @@ class MooncakeLayerwiseConnectorWorker:
             if isinstance(layer_kv_cache_spec, UniformTypeKVCacheSpecs):
                 layer_kv_cache_spec = layer_kv_cache_spec.kv_cache_specs[layer_name]
             if (
-                (self.pd_head_ratio > 1 and (isinstance(layer_kv_cache_spec, (FullAttentionSpec, SlidingWindowSpec))))
-                or self.enable_kv_quant
-            ):
+                self.pd_head_ratio > 1 and (isinstance(layer_kv_cache_spec, (FullAttentionSpec, SlidingWindowSpec)))
+            ) or self.enable_kv_quant:
                 self.attn_resharding_group_idx.add(layer_kv_group_id)
                 if use_kv_buffer is False:
                     use_kv_buffer = True
@@ -1612,13 +1611,10 @@ class MooncakeLayerwiseConnectorWorker:
             quant_keys = None
             quant_values = None
             if (
-                (
-                    self.pd_head_ratio != 1
-                    and (isinstance(self.kv_cache_specs[layer_group_idx], (FullAttentionSpec, SlidingWindowSpec)))
-                    and send_task.group_num_blocks[layer_group_idx] > 0
-                )
-                or (self.enable_kv_quant and self.current_layer in self.vllm_config.quant_config.kvcache_quant_layers)
-            ):
+                self.pd_head_ratio != 1
+                and (isinstance(self.kv_cache_specs[layer_group_idx], (FullAttentionSpec, SlidingWindowSpec)))
+                and send_task.group_num_blocks[layer_group_idx] > 0
+            ) or (self.enable_kv_quant and self.current_layer in self.vllm_config.quant_config.kvcache_quant_layers):
                 assert self.resharding_stream is not None
                 with npu_stream_switch(self.resharding_stream):
                     reshape_cache_event.wait()

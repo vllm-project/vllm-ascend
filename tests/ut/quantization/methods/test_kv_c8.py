@@ -489,7 +489,7 @@ class TestAscendC8KVCacheAttentionMethod(TestBase):
         return layer
 
     def test_create_weights_sets_kv_cache_torch_dtype(self):
-        method = self._make_method(is_kv_producer=False)
+        method = self._make_method()
         layer = self._make_layer_with_impl()
         method.create_weights(layer)
         self.assertEqual(layer.kv_cache_torch_dtype, torch.int8)
