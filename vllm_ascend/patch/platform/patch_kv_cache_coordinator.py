@@ -17,7 +17,14 @@ from vllm.v1.core.kv_cache_utils import (
     KVCacheBlock,
 )
 from vllm.v1.core.single_type_kv_cache_manager import SingleTypeKVCacheManager
-from vllm.v1.kv_cache_interface import FullAttentionSpec, KVCacheConfig, KVCacheSpec, UniformTypeKVCacheSpecs, MambaSpec, MLAAttentionSpec
+from vllm.v1.kv_cache_interface import (
+    FullAttentionSpec,
+    KVCacheConfig,
+    KVCacheSpec,
+    UniformTypeKVCacheSpecs,
+    MambaSpec,
+    MLAAttentionSpec,
+)
 
 from vllm_ascend import envs
 from vllm_ascend.core.single_type_kv_cache_manager import get_manager_for_kv_cache_spec
@@ -158,10 +165,7 @@ class AscendHybridKVCacheCoordinator(HybridKVCacheCoordinator):
         # each attention type. Requiring this because we don't support partial
         # block cache hit yet.
         # NOTE: use 16k as the alignment tokens for model with compress ratio
-        block_sizes = [
-            self._get_effective_block_size(spec)
-            for spec, _, _ in self.attention_groups
-        ]
+        block_sizes = [self._get_effective_block_size(spec) for spec, _, _ in self.attention_groups]
         self.lcm_block_size = lcm(*block_sizes)
 
     def find_longest_cache_hit(
