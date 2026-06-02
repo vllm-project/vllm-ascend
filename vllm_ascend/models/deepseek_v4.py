@@ -61,7 +61,6 @@ from vllm.model_executor.models.interfaces import MixtureOfExperts, SupportsEagl
 from vllm.model_executor.models.utils import (
     PPMissingLayer,
     is_pp_missing_parameter,
-    make_empty_intermediate_tensors_factory,
     make_layers,
     maybe_prefix,
     sequence_parallel_chunk,
@@ -908,9 +907,23 @@ class DeepseekV4Model(nn.Module):
             self.norm = RMSNorm(config.hidden_size, eps=config.rms_norm_eps)
         else:
             self.norm = PPMissingLayer()
-        self.make_empty_intermediate_tensors = make_empty_intermediate_tensors_factory(
-            ["hidden_states", "residual"], config.hidden_size
-        )
+
+        def make_empty_intermediate_tensors(
+            batch_size: int,
+            dtype: torch.dtype,
+            device: torch.device,
+        ) -> IntermediateTensors:
+            return IntermediateTensors(
+                {
+                    "hidden_states": torch.zeros(
+                        (batch_size, self.hc_mult, config.hidden_size),
+                        dtype=dtype,
+                        device=device,
+                    ),
+                }
+            )
+
+        self.make_empty_intermediate_tensors = make_empty_intermediate_tensors
 
         self.norm_eps = config.rms_norm_eps
         self.hc_eps = config.hc_eps
@@ -959,7 +972,7 @@ class DeepseekV4Model(nn.Module):
         else:
             assert intermediate_tensors is not None
             hidden_states = intermediate_tensors["hidden_states"]
-            residual = intermediate_tensors["residual"]
+            residual = None
 
         # Compute llama 4 scaling once per forward pass if enabled
         llama_4_scaling_config = None
@@ -973,7 +986,8 @@ class DeepseekV4Model(nn.Module):
         else:
             llama_4_scaling = None
 
-        hidden_states = hidden_states.unsqueeze(1).repeat(1, self.hc_mult, 1)  # (b,s, c, h)
+        if get_pp_group().is_first_rank:
+            hidden_states = hidden_states.unsqueeze(1).repeat(1, self.hc_mult, 1)  # (b, s, h) -> (b, s, c, h)
         for layer in islice(self.layers, self.start_layer, self.end_layer):
             hidden_states, residual = layer(positions, hidden_states, residual, llama_4_scaling)
 
@@ -998,9 +1012,14 @@ class DeepseekV4Model(nn.Module):
             num_tokens = hidden_states.shape[0]
             self._mtp_hidden_buffer[:num_tokens].copy_(hidden_states.flatten(1))
 
-        hidden_states = self.hc_head(hidden_states, self.hc_head_fn, self.hc_head_scale, self.hc_head_base)
         if not get_pp_group().is_last_rank:
-            return IntermediateTensors({"hidden_states": hidden_states, "residual": residual})
+            return IntermediateTensors(
+                {
+                    "hidden_states": hidden_states,
+                }
+            )
+
+        hidden_states = self.hc_head(hidden_states, self.hc_head_fn, self.hc_head_scale, self.hc_head_base)
 
         hidden_states = self.norm(hidden_states)
         return hidden_states
@@ -1202,6 +1221,8 @@ class AscendDeepseekV4ForCausalLM(nn.Module, SupportsPP, DeepseekV2MixtureOfExpe
                 name = name.replace(".gate.bias", ".gate.e_score_correction_bias")
 
             if "sink" in name:
+                if is_pp_missing_parameter(name, self):
+                    continue
                 param = params_dict[name]
                 if enable_dsa_cp():
                     param.data.copy_(loaded_weight)
