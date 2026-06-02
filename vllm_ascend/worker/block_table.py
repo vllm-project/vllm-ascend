@@ -24,17 +24,10 @@ class BlockTable:
         kv_cache_group: KVCacheGroupSpec = None,
     ):
         self.max_num_reqs = max_num_reqs
-        try:
-            self.pcp_world_size = get_pcp_group().world_size
-            self.pcp_rank = get_pcp_group().rank_in_group if self.pcp_world_size > 1 else 0
-            self.dcp_world_size = get_dcp_group().world_size
-            self.dcp_rank = get_dcp_group().rank_in_group
-        except AssertionError:
-            # DCP might not be initialized in testing
-            self.dcp_world_size = 1
-            self.dcp_rank = 0
-            self.pcp_world_size = 1
-            self.pcp_rank = 0
+        self.pcp_world_size = get_pcp_group().world_size
+        self.pcp_rank = get_pcp_group().rank_in_group if self.pcp_world_size > 1 else 0
+        self.dcp_world_size = get_dcp_group().world_size
+        self.dcp_rank = get_dcp_group().rank_in_group
         compress_ratio = 1
         if (
             kv_cache_group is not None
