@@ -7,8 +7,6 @@ import torch_npu
 from vllm.config import VllmConfig
 from vllm.platforms import current_platform
 
-from vllm_ascend.utils import AscendDeviceType, get_ascend_device_type
-
 
 class RopeGlobalState:
     def __init__(self):
@@ -119,8 +117,7 @@ class ComplexExpRotaryEmbedding(nn.Module):
             rope_groups = ["default"]
         self.layername = layername
         self.rotary_dim = rotary_dim
-        use_fp32_rope = get_ascend_device_type() in {AscendDeviceType.A2, AscendDeviceType.A3}
-        dtype = torch.float32 if use_fp32_rope else torch.get_default_dtype()
+        dtype = torch.get_default_dtype()
         beta_fast = extra_kwargs.get("beta_fast", 32)
         beta_slow = extra_kwargs.get("beta_slow", 1)
         config_key = (
@@ -144,11 +141,8 @@ class ComplexExpRotaryEmbedding(nn.Module):
                 dtype=torch.float32,
             )
             freqs = torch.einsum("i,j -> ij", t, inv_freq)
-            cos = freqs.cos().repeat_interleave(2, dim=-1)
-            sin = freqs.sin().repeat_interleave(2, dim=-1)
-            if not use_fp32_rope:
-                cos = cos.to(dtype)
-                sin = sin.to(dtype)
+            cos = freqs.cos().repeat_interleave(2, dim=-1).to(dtype)
+            sin = freqs.sin().repeat_interleave(2, dim=-1).to(dtype)
             cos = cos.to(current_platform.device_type)
             sin = sin.to(current_platform.device_type)
 

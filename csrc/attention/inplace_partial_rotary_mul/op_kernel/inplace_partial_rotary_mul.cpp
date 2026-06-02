@@ -58,8 +58,6 @@
 
 #define TILING_KEY1 1
 #define TILING_KEY2 2
-#define TILING_KEY1_FP32_ROPE 11
-#define TILING_KEY2_FP32_ROPE 12
 
 using namespace AscendC;
 using namespace InplacePartialRotaryMul;
@@ -228,18 +226,6 @@ extern "C" __global__ __aicore__ void inplace_partial_rotary_mul(GM_ADDR x, GM_A
         }
         if (TILING_KEY_IS(TILING_KEY2)) {
             InplacePartialRotaryMul::InplacePartialRotaryMulABA<DTYPE_X, false> op;
-            op.Init(x, cos, sin, y, workspace, tilingData1, &pipe);
-            op.Process();
-            return;
-        }
-        if (TILING_KEY_IS(TILING_KEY1_FP32_ROPE)) {
-            InplacePartialRotaryMul::InplacePartialRotaryMulABA<DTYPE_X, true, float> op;
-            op.Init(x, cos, sin, y, workspace, tilingData1, &pipe);
-            op.Process();
-            return;
-        }
-        if (TILING_KEY_IS(TILING_KEY2_FP32_ROPE)) {
-            InplacePartialRotaryMul::InplacePartialRotaryMulABA<DTYPE_X, false, float> op;
             op.Init(x, cos, sin, y, workspace, tilingData1, &pipe);
             op.Process();
             return;
