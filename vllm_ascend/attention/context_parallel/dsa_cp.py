@@ -1198,17 +1198,17 @@ class AscendDSACPImpl(DSAAttentionImpl):
             )
 
             kv_local = self.wkv(hidden_states_local)
-            kv_local = self.kv_norm(kv_local)
+            kv = torch.ops.vllm.maybe_all_gather_and_maybe_unpad(kv_local, need_gather_q_kv)
+            kv= self.kv_norm(kv)
             assert self.rope_head_dim is not None
-            kv_local = kv_local.view(-1, 1, self.nope_head_dim + self.rope_head_dim)
+            kv = kv.view(-1, 1, self.nope_head_dim + self.rope_head_dim)
             torch.ops._C_ascend.inplace_partial_rotary_mul(
-                kv_local.unsqueeze(1),
+                kv.unsqueeze(1),
                 cos,
                 sin,
                 rotary_mode="interleave",
                 partial_slice=[self.nope_head_dim, self.head_dim],
             )
-            kv = torch.ops.vllm.maybe_all_gather_and_maybe_unpad(kv_local, need_gather_q_kv)
             torch.ops._C_ascend.npu_scatter_nd_update_v2(swa_kv_cache, swa_metadata.req_metadata.slot_mapping, kv)
 
         compress_topk_idxs = None
