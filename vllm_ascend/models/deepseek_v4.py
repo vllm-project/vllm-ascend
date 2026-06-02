@@ -1222,7 +1222,7 @@ class AscendDeepseekV4ForCausalLM(nn.Module, SupportsPP, DeepseekV2MixtureOfExpe
                 name = name.replace(".ffn_norm.", ".post_attention_layernorm.")
             if ".attn_norm." in name:
                 name = name.replace(".attn_norm.", ".input_layernorm.")
-            if ".scale" in name:
+            if name.endswith(".scale"):
                 name = name.replace(".scale", ".weight_scale")
 
             if "rotary_emb.inv_freq" in name:
