@@ -157,6 +157,7 @@ class TestTokenDispatcherWithMC2(TestBase):
         self.assertIn("x", kwargs)
         self.assertIn("expert_ids", kwargs)
         self.assertEqual(kwargs["moe_expert_num"], 8)
+        self.assertNotIn("comm_alg", kwargs)
 
     def test_token_permutation_dispatch(self):
         hidden_states = torch.randn(10, 128)
@@ -219,6 +220,34 @@ class TestTokenDispatcherWithMC2(TestBase):
         kwargs = self.dispatcher.get_dispatch_mc2_kwargs(token_dispatch_input)
 
         self.assertEqual(kwargs["expert_token_nums_type"], EXPERT_TOKEN_NUMS_TYPE_CUMSUM)
+
+    def test_get_combine_mc_kwargs_without_hierarchy_on_non_a2(self):
+        hidden_states = torch.randn(10, 128)
+        topk_ids = torch.randint(0, 8, (10, 1))
+        topk_weights = torch.randn(10, 1)
+        expert_map = torch.tensor([0, 1, 2, 3, 4, 5, 6, 7])
+        ep_recv_counts = torch.tensor([0, 1, 2, 3, 4, 5, 6, 7])
+        tp_recv_counts = torch.tensor([0, 1, 2, 3, 4, 5, 6, 7])
+        assist_info_for_combine = torch.arange(10)
+        token_dispatch_input = build_token_dispatch_input_fixture(
+            hidden_states=hidden_states,
+            topk_weights=topk_weights,
+            topk_ids=topk_ids,
+            expert_map=expert_map,
+        )
+        combine_metadata = MoEMC2CombineMetadata(
+            topk_ids=topk_ids,
+            topk_weights=topk_weights,
+            expert_map=expert_map,
+            ep_recv_counts=ep_recv_counts,
+            tp_recv_counts=tp_recv_counts,
+            assist_info_for_combine=assist_info_for_combine,
+            expand_scales=None,
+            quant=token_dispatch_input.quant,
+        )
+        self.dispatcher.moe_expert_num = len(expert_map)
+        kwargs = self.dispatcher.get_combine_mc_kwargs(hidden_states, combine_metadata)
+        self.assertNotIn("comm_alg", kwargs)
 
     def test_get_combine_mc_kwargs_with_quant(self):
         hidden_states = torch.randn(10, 128)
@@ -314,6 +343,87 @@ class TestTokenDispatcherWithMC2(TestBase):
         mock_dispatch.assert_called_once()
         self.assertIsNotNone(output.dynamic_scale)
         self.assertTrue(output.combine_metadata.quant.dispatch_with_quant)
+
+
+class TestTokenDispatcherWithMC2A2Hierarchy(TestBase):
+    def setUp(self):
+        self.config_patcher = patch("vllm_ascend.ops.fused_moe.token_dispatcher.get_current_vllm_config")
+        self.mock_get_config = self.config_patcher.start()
+        mock_config = MagicMock()
+        mock_config.scheduler_config.max_num_seqs = 256
+        mock_config.scheduler_config.decode_max_num_seqs = 256
+        mock_config.compilation_config.custom_ops = ["all"]
+        mock_config.speculative_config = None
+        mock_config.parallel_config.tensor_parallel_size = 1
+        self.mock_get_config.return_value = mock_config
+
+        self.mc2_group = MagicMock()
+        self.mc2_group.device_group.return_value._get_backend.return_value.get_hccl_comm_name.return_value = "hccl_123"
+        self.mc2_group.rank_in_group = 0
+        self.mc2_group.world_size = 8
+        self.mc2_group_patch = patch(
+            "vllm_ascend.ops.fused_moe.token_dispatcher.get_mc2_group", return_value=self.mc2_group
+        )
+        self.mc2_group_patch.start()
+        self.rank_group_patch = patch("torch.distributed.get_rank", return_value=0)
+        self.rank_group_patch.start()
+
+        self.hierarchy_mc2_patch = patch(
+            "vllm_ascend.ops.fused_moe.token_dispatcher.is_hierarchical_communication_enabled",
+            return_value=True,
+        )
+        self.hierarchy_mc2_patch.start()
+        self.dispatcher = TokenDispatcherWithMC2(top_k=8, num_experts=128)
+
+    def tearDown(self):
+        self.mc2_group_patch.stop()
+        self.hierarchy_mc2_patch.stop()
+        self.config_patcher.stop()
+        self.rank_group_patch.stop()
+
+    def _build_dispatch_input(self):
+        hidden_states = torch.randn(10, 128)
+        topk_ids = torch.randint(0, 8, (10, 1))
+        topk_weights = torch.randn(10, 1)
+        expert_map = torch.tensor([0, 1, 2, 3, 4, 5, 6, 7])
+        return build_token_dispatch_input_fixture(
+            hidden_states=hidden_states,
+            topk_weights=topk_weights,
+            topk_ids=topk_ids,
+            expert_map=expert_map,
+        )
+
+    def test_a2_dispatch_kwargs_enable_hierarchy_comm(self):
+        token_dispatch_input = self._build_dispatch_input()
+        kwargs = self.dispatcher.get_dispatch_mc2_kwargs(token_dispatch_input)
+        self.assertEqual(kwargs["comm_alg"], "hierarchy")
+        self.assertIn("expert_scales", kwargs)
+        self.assertEqual(kwargs["expert_scales"].dtype, torch.float32)
+
+    def test_a2_combine_kwargs_enable_hierarchy_comm(self):
+        token_dispatch_input = self._build_dispatch_input()
+        hidden_states = token_dispatch_input.hidden_states
+        topk_ids = token_dispatch_input.topk_ids
+        topk_weights = token_dispatch_input.topk_weights
+        expert_map = token_dispatch_input.routing.expert_map
+        combine_metadata = MoEMC2CombineMetadata(
+            topk_ids=topk_ids,
+            topk_weights=topk_weights,
+            expert_map=expert_map,
+            ep_recv_counts=torch.tensor([0, 1, 2, 3, 4, 5, 6, 7]),
+            tp_recv_counts=torch.tensor([0, 1, 2, 3, 4, 5, 6, 7]),
+            assist_info_for_combine=torch.arange(10),
+            expand_scales=torch.randn(10, 1),
+            quant=token_dispatch_input.quant,
+        )
+        self.dispatcher.moe_expert_num = len(expert_map)
+        kwargs = self.dispatcher.get_combine_mc_kwargs(hidden_states, combine_metadata)
+        self.assertEqual(kwargs["comm_alg"], "hierarchy")
+
+    def test_a2_init_requires_dispatch_v2_for_hierarchy(self):
+        self.dispatcher.enable_dispatch_v2 = False
+        with self.assertRaises(RuntimeError):
+            TokenDispatcherWithMC2(top_k=8, num_experts=128)
 
 
 class TestTokenDispatcherWithAllGather(TestBase):

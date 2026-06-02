@@ -1135,13 +1135,17 @@ def calculate_dp_buffer_size() -> int:
     return max(dp_buffer_size, _MIN_DP_BUFFER_SIZE)
 
 
-# Currently, when in A2, setting the environment variables HCCL_INTRA_PCIE_ENABLE=1
-# and HCCL_INTRA_ROCE_ENABLE=0 can reduce cross-machine communication traffic and
-# significantly improve communication performance of MC2 ops dispatch/combine.
-def is_hierarchical_communication_enabled():
-    return (
-        os.getenv("HCCL_INTRA_ROCE_ENABLE", "") == "0" and os.getenv("HCCL_INTRA_PCIE_ENABLE", "") == "1"
-    ) or get_ascend_config().enable_mc2_hierarchy_comm
+def is_hierarchical_communication_enabled() -> bool:
+    """Whether MC2 dispatch/combine should use hierarchical communication.
+
+    When True, MC2 ops pass ``comm_alg="hierarchy"`` (and dispatch may pass
+    ``expert_scales``). In vllm-ascend this is enabled only on Atlas A2
+    (Ascend 910B). A3/A5 and other device types do not use hierarchy MC2.
+
+    Legacy ``HCCL_INTRA_PCIE_ENABLE`` / ``HCCL_INTRA_ROCE_ENABLE`` env vars and
+    ``enable_mc2_hierarchy_comm`` in ``additional_config`` are no longer consulted.
+    """
+    return get_ascend_device_type() == AscendDeviceType.A2
 
 
 def should_skip_allreduce_across_dp_group(vllm_config, is_draft_model: bool = False) -> bool:
@@ -1155,8 +1159,9 @@ def should_skip_allreduce_across_dp_group(vllm_config, is_draft_model: bool = Fa
     Skipping means each rank may have a different number of tokens, so MC2 needs
     a non-zero global_bs and must NOT receive mc2_mask.
 
-    Returns False when hierarchy comm is enabled because hierarchy requires
-    global_bs=0 (uniform tokens), which is incompatible with skipping allreduce.
+    Returns False when hierarchical MC2 is enabled (Atlas A2 only), because
+    hierarchy requires global_bs=0 (uniform tokens), which is incompatible with
+    skipping allreduce.
     """
     if is_hierarchical_communication_enabled():
         return False
