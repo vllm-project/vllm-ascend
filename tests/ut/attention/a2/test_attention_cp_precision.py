@@ -16,8 +16,6 @@ from tests.ut.attention.utils import (
 )
 from tests.ut.conftest import npu_test
 
-pytest.skip("Temporarily skip in CI", allow_module_level=True)
-
 from vllm_ascend.attention.attention_mask import AttentionMaskBuilder
 from vllm_ascend.attention.attention_v1 import AscendMetadata
 from vllm_ascend.attention.context_parallel.attention_cp import (
@@ -900,7 +898,7 @@ class TestCPAttentionPrecision:
     - Mixed decode+prefill (prefill has seq_lens == query_lens), PCP=1, DCP=1
     - MTP (Multi-Token Prediction) decode, PCP=1, DCP=1
     """
-
+    @pytest.mark.skip(reason="Waiting for rebuild with irregular mask")
     @pytest.mark.parametrize(
         "batch_spec_name",
         [
@@ -923,6 +921,7 @@ class TestCPAttentionPrecision:
         batch_spec = BATCH_SPECS[batch_spec_name]
         _test_cp_prefill_precision_no_cp(batch_spec, model)
 
+    @pytest.mark.skip(reason="Waiting for rebuild with irregular mask")
     @pytest.mark.parametrize(
         "batch_spec_name",
         [
@@ -944,6 +943,7 @@ class TestCPAttentionPrecision:
         batch_spec = BATCH_SPECS[batch_spec_name]
         _test_cp_decode_precision_no_cp(batch_spec, model)
 
+    @pytest.mark.skip(reason="Waiting for rebuild with irregular mask")
     @pytest.mark.parametrize(
         "batch_spec_name",
         [
@@ -965,6 +965,7 @@ class TestCPAttentionPrecision:
         batch_spec = BATCH_SPECS[batch_spec_name]
         _test_cp_mixed_precision_no_cp(batch_spec, model)
 
+    @pytest.mark.skip(reason="Waiting for rebuild with irregular mask")
     @pytest.mark.parametrize(
         "batch_spec_name",
         [

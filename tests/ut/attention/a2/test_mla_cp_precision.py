@@ -31,8 +31,6 @@ if "torch_npu._inductor" not in sys.modules:
 
 from vllm.config import VllmConfig  # noqa: E402
 
-pytest.skip("Temporarily skip in CI", allow_module_level=True)
-
 from tests.ut.attention.utils import BatchSpec, create_vllm_config  # noqa: E402
 from vllm_ascend.attention.attention_v1 import AscendAttentionState  # noqa: E402
 from vllm_ascend.attention.context_parallel.mla_cp import AscendMlaCPImpl  # noqa: E402
@@ -993,6 +991,7 @@ _TEST_CASES: list[tuple[str, int, int]] = [
 ]
 
 
+@pytest.mark.skip(reason="Waiting for rebuild with irregular mask")
 @pytest.mark.parametrize(
     "batch_spec_name,pcp_size,dcp_size",
     _TEST_CASES,
