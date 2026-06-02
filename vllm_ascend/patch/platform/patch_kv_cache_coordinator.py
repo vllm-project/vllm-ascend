@@ -17,7 +17,7 @@ from vllm.v1.core.kv_cache_utils import (
     KVCacheBlock,
 )
 from vllm.v1.core.single_type_kv_cache_manager import SingleTypeKVCacheManager
-from vllm.v1.kv_cache_interface import FullAttentionSpec, KVCacheConfig, KVCacheSpec
+from vllm.v1.kv_cache_interface import FullAttentionSpec, KVCacheConfig, KVCacheSpec, UniformTypeKVCacheSpecs, MLAAttentionSpec
 
 from vllm_ascend.core.single_type_kv_cache_manager import get_manager_for_kv_cache_spec
 
@@ -170,6 +170,11 @@ class AscendHybridKVCacheCoordinator(HybridKVCacheCoordinator):
         """
 
         def _get_block_hashes(kv_cache_spec: KVCacheSpec) -> BlockHashList:
+            if hasattr(kv_cache_spec, "compress_ratio"):
+                compress_ratio = kv_cache_spec.compress_ratio if kv_cache_spec.compress_ratio >= 1 else 1
+                if kv_cache_spec.block_size * compress_ratio == self.hash_block_size:
+                    return block_hashes
+                return BlockHashListWithBlockSize(block_hashes, self.hash_block_size, kv_cache_spec.block_size * compress_ratio)
             if kv_cache_spec.block_size == self.hash_block_size:
                 return block_hashes
             return BlockHashListWithBlockSize(block_hashes, self.hash_block_size, kv_cache_spec.block_size)
@@ -235,6 +240,12 @@ class AscendHybridKVCacheCoordinator(HybridKVCacheCoordinator):
                 break
 
         # Truncate full attention blocks to final hit_length (if present)
+        # NOTE(zxr): for deepseek-v4, there is two fullattn groups, but
+        # in this function, only the first fullattn group is truncate by
+        # the belowing codes(c4), c128 layer does not truncate, which may
+        # have prefix cache block hit.
+        # Due to slidingwindow attn, deepseek-v4 decode node can't have
+        # any prefix cache hit, because `hit_length` of SWA is 0.
         spec, group_ids, _ = self.attention_groups[0]
         if isinstance(spec, FullAttentionSpec):
             num_blocks = hit_length // spec.block_size
