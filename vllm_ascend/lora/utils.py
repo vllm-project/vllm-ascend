@@ -135,7 +135,10 @@ class AscendFusedMoEWithLoRA(FusedMoEWithLoRA):
         super().set_lora(index, lora_a, lora_b)
 
     def set_mapping(self, punica_wrapper):
-        super().set_mapping(punica_wrapper)
+        # Skip FusedMoEWithLoRA.set_mapping() which accesses self._moe_kernel
+        # that doesn't exist in Ascend. Call BaseLayerWithLoRA directly.
+        from vllm.lora.layers.base import BaseLayerWithLoRA
+        BaseLayerWithLoRA.set_mapping(self, punica_wrapper)
         self._replace_build_fused_experts_input()
 
 
@@ -149,8 +152,9 @@ def refresh_all_lora_classes():
     )
     # vLLM #35077 changed _all_lora_classes from set to ordered tuple.
     # Append the Ascend classes in a deterministic order.
-    vllm.lora.utils._all_lora_classes.discard(FusedMoEWithLoRA)
-    vllm.lora.utils._all_lora_classes = (
-        *vllm.lora.utils._all_lora_classes,
-        *ascend_classes,
+    # Filter out FusedMoEWithLoRA using list comprehension
+    vllm_classes = tuple(
+        cls for cls in vllm.lora.utils._all_lora_classes
+        if cls != FusedMoEWithLoRA
     )
+    vllm.lora.utils._all_lora_classes = (*vllm_classes, *ascend_classes)
