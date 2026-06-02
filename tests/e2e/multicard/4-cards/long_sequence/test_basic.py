@@ -148,6 +148,7 @@ def test_deepseek_v4_w4a8_dsa_cp_basic_greedy():
         },
         additional_config={
             "enable_flashcomm1": True,
+            "enable_dsa_cp": True,
             "multistream_dsa_preprocess": True,
         },
     ) as runner:
