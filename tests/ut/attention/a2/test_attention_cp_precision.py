@@ -15,7 +15,6 @@ from tests.ut.attention.utils import (
     patch_distributed_groups,
 )
 from tests.ut.conftest import npu_test
-
 from vllm_ascend.attention.attention_mask import AttentionMaskBuilder
 from vllm_ascend.attention.attention_v1 import AscendMetadata
 from vllm_ascend.attention.context_parallel.attention_cp import (
@@ -898,6 +897,7 @@ class TestCPAttentionPrecision:
     - Mixed decode+prefill (prefill has seq_lens == query_lens), PCP=1, DCP=1
     - MTP (Multi-Token Prediction) decode, PCP=1, DCP=1
     """
+
     @pytest.mark.skip(reason="Waiting for rebuild with irregular mask")
     @pytest.mark.parametrize(
         "batch_spec_name",
