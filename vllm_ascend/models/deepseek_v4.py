@@ -509,7 +509,8 @@ class Compressor(nn.Module):
             prefix=f"{prefix}.wgate",
             return_bias=False,
         )
-        self.norm = RMSNorm(self.head_dim, config.rms_norm_eps)
+        norm_dtype = torch.float32 if get_ascend_device_type() == AscendDeviceType.A5 else None
+        self.norm = RMSNorm(self.head_dim, config.rms_norm_eps, dtype=norm_dtype)
 
         state_dtype = torch.float32
         # TODO(zyj): change following codes if block_size is configurable & refactor the magic numbers
