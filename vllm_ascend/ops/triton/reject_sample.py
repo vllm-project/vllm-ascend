@@ -761,13 +761,13 @@ def rejection_random_sample_block_and_entropy_verify_kernel(
                         vocab_offset = vocab_start + tl.arange(0, SUB_BLOCK)
                         vocab_mask = vocab_offset < vocab_size
                         if NO_ORI_TARGET_PROBS:
-                            probs = tl.load(target_probs_ptr + token_idx * vocab_size + vocab_offset,
-                                        vocab_mask,
-                                        other=0)
+                            probs = tl.load(
+                                target_probs_ptr + token_idx * vocab_size + vocab_offset, vocab_mask, other=0
+                            )
                         else:
-                            probs = tl.load(ori_target_probs_ptr + token_idx * vocab_size + vocab_offset,
-                                        vocab_mask,
-                                        other=0)
+                            probs = tl.load(
+                                ori_target_probs_ptr + token_idx * vocab_size + vocab_offset, vocab_mask, other=0
+                            )
                         log_probs = tl.log(probs + EPSILON)
                         entropy_contrib = -probs * log_probs
                         entropy += tl.sum(entropy_contrib)
