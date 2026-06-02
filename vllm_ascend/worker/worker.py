@@ -61,6 +61,7 @@ from vllm_ascend.utils import (
     enable_sp,
     get_ascend_device_type,
     register_ascend_customop,
+    setup_ascend_local_comm_res,
     vllm_version_is,
 )
 from vllm_ascend.worker.model_runner_v1 import NPUModelRunner
@@ -271,6 +272,9 @@ class NPUWorker(WorkerBase):
 
         gc.collect()
         torch.npu.empty_cache()
+
+        if get_ascend_device_type() == AscendDeviceType.A5:
+            setup_ascend_local_comm_res(self.local_rank, self.vllm_config.kv_transfer_config)
 
         # take current memory snapshot
         self.init_snapshot = MemorySnapshot()
