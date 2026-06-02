@@ -23,6 +23,9 @@ from vllm.v1.request import Request
 from vllm_ascend.utils import vllm_version_is
 
 
+
+
+
 class CompressAttentionManager(FullAttentionManager):
     def __init__(self, kv_cache_spec: MLAAttentionSpec, block_pool: BlockPool, **kwargs) -> None:
         super().__init__(kv_cache_spec, block_pool, **kwargs)
