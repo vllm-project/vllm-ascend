@@ -13,14 +13,17 @@
  * \file causal_conv1d.h
  */
 
- #ifndef CAUSAL_CONV1D_H
- #define CAUSAL_CONV1D_H
+#ifndef CAUSAL_CONV1D_H
+#define CAUSAL_CONV1D_H
  
- #include "kernel_operator.h"
- #include "kernel_tiling/kernel_tiling.h"
- #include "causal_conv1d_tiling_data.h"
- #include "causal_conv1d_tiling_key.h"
- #include "causal_conv1d_common.h"
+#include "kernel_operator.h"
+#include "kernel_tiling/kernel_tiling.h"
+#include "causal_conv1d_tiling_data.h"
+#include "causal_conv1d_tiling_key.h"
+#include "causal_conv1d_common.h"
+#if defined(__CCE_AICORE__) && __CCE_AICORE__ == 310
+#include "arch35/causal_conv1d_regbase.h"
+#endif
  
  namespace NsCausalConv1d {
  
@@ -551,16 +554,25 @@
      LocalTensor<float> &currF = cl.currF;
      LocalTensor<T> ring = inBuf.Get<T>();
  
-     Cast(currF, ring[slotCurr * MAX_BLOCK_DIM], RoundMode::CAST_NONE, baseDim);
-     PipeBarrier<PIPE_V>();
-     MulAddDst(state0F, currF, weightF[3 * MAX_BLOCK_DIM], baseDim);
-     PipeBarrier<PIPE_V>();
- 
-     const bool hasActivation = HasActivation();
-     if (hasActivation) {
-         PipeBarrier<PIPE_V>();
-         Silu(currF, state0F, baseDim);
-     }
+#if defined(__CCE_AICORE__) && __CCE_AICORE__ == 310
+    const bool hasActivation = HasActivation();
+    if (hasActivation) {
+        ComputeFnRollingOutputRegbase<T, true>(ring[slotCurr * MAX_BLOCK_DIM], currF, state0F, weightF[3 * MAX_BLOCK_DIM], baseDim);
+    } else {
+        ComputeFnRollingOutputRegbase<T, false>(ring[slotCurr * MAX_BLOCK_DIM], currF, state0F, weightF[3 * MAX_BLOCK_DIM], baseDim);
+    }
+#else
+    Cast(currF, ring[slotCurr * MAX_BLOCK_DIM], RoundMode::CAST_NONE, baseDim);
+    PipeBarrier<PIPE_V>();
+    MulAddDst(state0F, currF, weightF[3 * MAX_BLOCK_DIM], baseDim);
+    PipeBarrier<PIPE_V>();
+
+    const bool hasActivation = HasActivation();
+    if (hasActivation) {
+        PipeBarrier<PIPE_V>();
+        Silu(currF, state0F, baseDim);
+    }
+#endif
  }
  
  template <CAUSAL_CONV1D_TEMPLATE_ARGS>
@@ -578,35 +590,40 @@
      LocalTensor<float> &currF = cl.currF;
      LocalTensor<T> ring = inBuf.Get<T>();
      constexpr int32_t w0Idx = MAX_WIDTH - kTemplateWidth;
- 
-     Cast(currF, ring[slotCurr * MAX_BLOCK_DIM], RoundMode::CAST_NONE, baseDim);
-     PipeBarrier<PIPE_V>();
- 
-     if constexpr (kTemplateWidth == 2) {
-         Mul(state0F, currF, weightF[w0Idx * MAX_BLOCK_DIM], baseDim);
-         PipeBarrier<PIPE_V>();
-     } else if constexpr (kTemplateWidth == 3) {
-         Mul(state0F, currF, weightF[(w0Idx + 1) * MAX_BLOCK_DIM], baseDim);
-         PipeBarrier<PIPE_V>();
-         Add(state0F, state0F, state1F, baseDim);
-         PipeBarrier<PIPE_V>();
- 
-         Mul(state1F, currF, weightF[w0Idx * MAX_BLOCK_DIM], baseDim);
-         PipeBarrier<PIPE_V>();
-     } else if constexpr (kTemplateWidth == 4) {
-         Mul(state0F, currF, weightF[(w0Idx + 2) * MAX_BLOCK_DIM], baseDim);
-         PipeBarrier<PIPE_V>();
-         Add(state0F, state0F, state1F, baseDim);
-         PipeBarrier<PIPE_V>();
- 
-         Mul(state1F, currF, weightF[(w0Idx + 1) * MAX_BLOCK_DIM], baseDim);
-         PipeBarrier<PIPE_V>();
-         Add(state1F, state1F, state2F, baseDim);
-         PipeBarrier<PIPE_V>();
- 
-         Mul(state2F, currF, weightF[w0Idx * MAX_BLOCK_DIM], baseDim);
-         PipeBarrier<PIPE_V>();
-     }
+
+#if defined(__CCE_AICORE__) && __CCE_AICORE__ == 310
+    AdvanceFnLocalPartialsRegbase<T, kTemplateWidth>(ring[slotCurr * MAX_BLOCK_DIM], weightF[w0Idx * MAX_BLOCK_DIM], 
+        state0F, state1F, state2F, baseDim, MAX_BLOCK_DIM);
+#else
+    Cast(currF, ring[slotCurr * MAX_BLOCK_DIM], RoundMode::CAST_NONE, baseDim);
+    PipeBarrier<PIPE_V>();
+
+    if constexpr (kTemplateWidth == 2) {
+        Mul(state0F, currF, weightF[w0Idx * MAX_BLOCK_DIM], baseDim);
+        PipeBarrier<PIPE_V>();
+    } else if constexpr (kTemplateWidth == 3) {
+        Mul(state0F, currF, weightF[(w0Idx + 1) * MAX_BLOCK_DIM], baseDim);
+        PipeBarrier<PIPE_V>();
+        Add(state0F, state0F, state1F, baseDim);
+        PipeBarrier<PIPE_V>();
+
+        Mul(state1F, currF, weightF[w0Idx * MAX_BLOCK_DIM], baseDim);
+        PipeBarrier<PIPE_V>();
+    } else if constexpr (kTemplateWidth == 4) {
+        Mul(state0F, currF, weightF[(w0Idx + 2) * MAX_BLOCK_DIM], baseDim);
+        PipeBarrier<PIPE_V>();
+        Add(state0F, state0F, state1F, baseDim);
+        PipeBarrier<PIPE_V>();
+
+        Mul(state1F, currF, weightF[(w0Idx + 1) * MAX_BLOCK_DIM], baseDim);
+        PipeBarrier<PIPE_V>();
+        Add(state1F, state1F, state2F, baseDim);
+        PipeBarrier<PIPE_V>();
+
+        Mul(state2F, currF, weightF[w0Idx * MAX_BLOCK_DIM], baseDim);
+        PipeBarrier<PIPE_V>();
+    }
+#endif
  }
  
  template <CAUSAL_CONV1D_TEMPLATE_ARGS>

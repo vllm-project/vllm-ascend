@@ -195,6 +195,7 @@ def dsa_forward(
 
     if attn_metadata is None:
         self.dsa_attn.impl.dsa_warmup_with_multistream(hidden_states)
+        output.fill_(0)
         return
 
     kv_cache = _build_kv_cache(self, forward_context)

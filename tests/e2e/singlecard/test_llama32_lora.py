@@ -134,6 +134,7 @@ def test_llama_lora(llama32_lora_files):
         max_num_seqs=7,
         max_model_len=1024,
         max_loras=4,
+        compilation_config={"cudagraph_mode": "PIECEWISE"},
     )
     llm = vllm_model.model
     generate_and_test(llm, llama32_lora_files)

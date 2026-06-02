@@ -1,5 +1,5 @@
 e2e-singlecard-light:
-- name: tests/e2e/light/single-card/test_qwen3_0_6b.py::test_dense_piecewise_graph
+- name: tests/e2e/light/single-card/test_qwen3_0_6b.py::test_dense_default_full_and_piecewise_graph
   estimated_time: 226
 - name: tests/e2e/light/single-card/test_qwen3_embedding_0_6b.py::test_embedding_full_decode_only
   estimated_time: 170
@@ -145,6 +145,8 @@ e2e-multicard-4-cards:
   estimated_time: 289
 - name: tests/e2e/multicard/4-cards/test_kimi_k2.py
   estimated_time: 18
+- name: tests/e2e/multicard/4-cards/test_deepseek_v4.py
+  estimated_time: 600
 - name: tests/e2e/multicard/4-cards/long_sequence/test_accuracy.py
   estimated_time: 2541
 - name: tests/e2e/multicard/4-cards/long_sequence/test_basic.py
