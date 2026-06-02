@@ -47,9 +47,7 @@ def _request():
 
 
 def _collect_tool_args(tool_calls):
-    return "".join(
-        tc.function.arguments for tc in tool_calls if tc.function.arguments
-    )
+    return "".join(tc.function.arguments for tc in tool_calls if tc.function.arguments)
 
 
 def test_glm47_streaming_inline_zero_arg_tool_call_waits_until_complete():

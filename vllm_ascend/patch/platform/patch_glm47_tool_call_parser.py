@@ -31,18 +31,12 @@ def _patched_extract_tool_call_regions(
     self: Glm47MoeModelToolParser,
     text: str,
 ) -> list[tuple[str, bool]]:
-    original_extract_tool_call_regions = (
-        self._ascend_original_extract_tool_call_regions
-    )
+    original_extract_tool_call_regions = self._ascend_original_extract_tool_call_regions
     regions = original_extract_tool_call_regions(text)
     normalized_regions: list[tuple[str, bool]] = []
 
     for inner_text, is_complete in regions:
-        if (
-            is_complete
-            and self.arg_key_start not in inner_text
-            and "\n" not in inner_text
-        ):
+        if is_complete and self.arg_key_start not in inner_text and "\n" not in inner_text:
             tool_name = inner_text.strip()
             inner_text = f"{tool_name}\n" if tool_name else inner_text
         normalized_regions.append((inner_text, is_complete))
