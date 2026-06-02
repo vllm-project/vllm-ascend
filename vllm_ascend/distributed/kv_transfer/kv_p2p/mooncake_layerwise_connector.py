@@ -358,10 +358,7 @@ class KVCacheSendingLayerThread(threading.Thread):
                 # kv cache quantization scenario
                 if self.enable_kv_quant and send_task.k_quant_cache is not None:
                     assert len(block_lens) == 2, "Quantization block length must be 2!"
-                    if self.enable_kv_quant:
-                        quant_block_lens = [block_lens[0] // 2, block_lens[1]]
-                    else:
-                        quant_block_lens = [block_lens[0] // 2, block_lens[1] // 2]
+                    quant_block_lens = [block_lens[0] // 2, block_lens[1]]
                     layer_local_quant_kv_addr = [self.k_buffer.data_ptr(), self.v_buffer.data_ptr()]
                     rearrange_block_ids = send_task.group_rearrange_block_ids[layer_group_idx]
                     # eg:[5,6,7,9] -> {5:0, 6:1, 7:2, 9:3}
