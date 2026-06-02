@@ -842,6 +842,7 @@ class AscendSpecDecodeBaseProposer(SpecDecodeBaseProposer):
 
         token_indices_to_sample_len = token_indices_to_sample.shape[0]
         self.token_indices_to_sample[:token_indices_to_sample_len].copy_(token_indices_to_sample)
+        self.token_indices_to_sample[token_indices_to_sample_len:].fill_(0)
 
         with set_ascend_forward_context(
             multi_steps_attn_metadata[0],
