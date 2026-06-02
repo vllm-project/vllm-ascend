@@ -74,11 +74,8 @@ Single-node deployment completes both Prefill and Decode within the same node, s
 
 Startup Command:
 
-```{test} bash
-:sync-yaml: tests/e2e/models/configs/Molmo2-8B.yaml
-:sync-target: model_name doc_serve_options
-:sync-class: cmd
-
+```{code-block} bash
+   :substitutions:
 vllm serve allenai/Molmo2-8B \
   --trust-remote-code \
   --dtype bfloat16 \
