@@ -1016,7 +1016,6 @@
  
  #undef CAUSAL_CONV1D_CLASS
  #undef CAUSAL_CONV1D_TEMPLATE_ARGS
- 
- }
- #endif
- 
+
+} // namespace NsCausalConv1d
+#endif // CAUSAL_CONV1D_H
