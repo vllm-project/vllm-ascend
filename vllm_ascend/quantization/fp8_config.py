@@ -1,4 +1,4 @@
-from typing import TYPE_CHECKING, Any, Optional, cast
+from typing import Any, Optional, cast
 
 import torch
 from compressed_tensors.quantization import QuantizationArgs
@@ -11,7 +11,6 @@ from vllm.model_executor.layers.quantization.base_config import QuantizationConf
 from vllm_ascend.utils import FP8_METHOD
 
 from .methods import get_scheme_class
-
 
 QUANTIZATION_SCHEME_MAP_TYPE = dict[str, dict[str, QuantizationArgs] | None]
 
