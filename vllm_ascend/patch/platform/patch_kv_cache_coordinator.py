@@ -17,7 +17,13 @@ from vllm.v1.core.kv_cache_utils import (
     KVCacheBlock,
 )
 from vllm.v1.core.single_type_kv_cache_manager import SingleTypeKVCacheManager
-from vllm.v1.kv_cache_interface import FullAttentionSpec, KVCacheConfig, KVCacheSpec, UniformTypeKVCacheSpecs, MLAAttentionSpec
+from vllm.v1.kv_cache_interface import (
+    FullAttentionSpec,
+    KVCacheConfig,
+    KVCacheSpec,
+    UniformTypeKVCacheSpecs,
+    MLAAttentionSpec,
+)
 
 from vllm_ascend.core.single_type_kv_cache_manager import get_manager_for_kv_cache_spec
 
@@ -174,7 +180,9 @@ class AscendHybridKVCacheCoordinator(HybridKVCacheCoordinator):
                 compress_ratio = kv_cache_spec.compress_ratio if kv_cache_spec.compress_ratio >= 1 else 1
                 if kv_cache_spec.block_size * compress_ratio == self.hash_block_size:
                     return block_hashes
-                return BlockHashListWithBlockSize(block_hashes, self.hash_block_size, kv_cache_spec.block_size * compress_ratio)
+                return BlockHashListWithBlockSize(
+                    block_hashes, self.hash_block_size, kv_cache_spec.block_size * compress_ratio
+                )
             if kv_cache_spec.block_size == self.hash_block_size:
                 return block_hashes
             return BlockHashListWithBlockSize(block_hashes, self.hash_block_size, kv_cache_spec.block_size)
