@@ -197,6 +197,8 @@ class AscendW8A8DynamicLinearMethod310(AscendW8A8Linear310pScheme):
             quantized_x = quantized_x.squeeze(dim=1)
             pertoken_scale = pertoken_scale.squeeze(dim=1)
 
+        bias_i32 = bias.to(torch.int32) if bias is not None else None
+
         # NOTE(310P):
         # - Currently, W8A8 dynamic quantization supports only symmetric quantization.
         output = torch_npu.npu_quant_matmul(
@@ -204,7 +206,7 @@ class AscendW8A8DynamicLinearMethod310(AscendW8A8Linear310pScheme):
             layer.weight.data,
             layer.weight_scale,
             pertoken_scale=pertoken_scale,
-            bias=bias,
+            bias=bias_i32,
             output_dtype=x.dtype,
         )
         if need_unsqz:
