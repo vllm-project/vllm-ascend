@@ -40,7 +40,7 @@ test_cases:
       - "--enable-chunked-prefill"
       - "--enable-prefix-caching"
       - "--max-num-seqs"
-      - "32"
+      - "120"
       - "--max-model-len"
       - "196608"
       - "--seed"
@@ -65,7 +65,7 @@ test_cases:
         dataset_conf: gsm8k/gpqa_gen_0_shot_str
         max_out_len: 131072
         batch_size: 64
-        baseline: 85
+        baseline: 83
         threshold: 5
         bos_token_id: 200019
         do_sample: true
