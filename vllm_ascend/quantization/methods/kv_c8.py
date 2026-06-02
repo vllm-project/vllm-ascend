@@ -108,15 +108,10 @@ class AscendC8KVCacheAttentionMethod(AscendAttentionScheme):
     def __init__(self, quant_description: dict, prefix: str):
         self.quant_description = quant_description
         self.prefix = prefix
-        vllm_config = get_current_vllm_config()
-        self.is_kv_producer = False
-        if vllm_config.kv_transfer_config is not None:
-            self.is_kv_producer = vllm_config.kv_transfer_config.is_kv_producer
 
     def create_weights(self, layer: torch.nn.Module) -> None:
         # Returns int8 if the P node is not a PD detachment node.
-        if not self.is_kv_producer:
-            layer.kv_cache_torch_dtype = torch.int8
+        layer.kv_cache_torch_dtype = torch.int8
         # Upgrade impl to the C8-specific subclass so the C8 forward path is always used.
         if hasattr(layer, "impl"):
             from vllm_ascend.attention.attention_v1 import AscendC8AttentionBackendImpl

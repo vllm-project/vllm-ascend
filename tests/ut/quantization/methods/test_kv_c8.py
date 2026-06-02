@@ -3,7 +3,6 @@ from unittest.mock import MagicMock, Mock, patch
 
 import torch
 import torch.nn as nn
-from vllm.config import KVTransferConfig, VllmConfig
 
 from tests.ut.base import TestBase
 
@@ -479,19 +478,10 @@ class TestC8KVScaleWeightLoader(TestBase):
 class TestAscendC8KVCacheAttentionMethod(TestBase):
     """Tests for AscendC8KVCacheAttentionMethod in kv_c8.py."""
 
-    def _make_method(self, is_kv_producer=False):
+    def _make_method(self):
         from vllm_ascend.quantization.methods.kv_c8 import AscendC8KVCacheAttentionMethod
 
-        mock_config = MagicMock(spec=VllmConfig)
-        if is_kv_producer:
-            kv_config = MagicMock(spec=KVTransferConfig)
-            kv_config.is_kv_producer = True
-            mock_config.kv_transfer_config = kv_config
-        else:
-            mock_config.kv_transfer_config = None
-
-        with patch("vllm_ascend.quantization.methods.kv_c8.get_current_vllm_config", return_value=mock_config):
-            return AscendC8KVCacheAttentionMethod(quant_description={}, prefix="model.layers.0.self_attn.attn")
+        return AscendC8KVCacheAttentionMethod(quant_description={}, prefix="model.layers.0.self_attn.attn")
 
     def _make_layer_with_impl(self):
         layer = nn.Module()
@@ -503,12 +493,6 @@ class TestAscendC8KVCacheAttentionMethod(TestBase):
         layer = self._make_layer_with_impl()
         method.create_weights(layer)
         self.assertEqual(layer.kv_cache_torch_dtype, torch.int8)
-
-    def test_create_weights_does_not_set_int8_when_kv_producer(self):
-        method = self._make_method(is_kv_producer=True)
-        layer = self._make_layer_with_impl()
-        method.create_weights(layer)
-        self.assertFalse(hasattr(layer, "kv_cache_torch_dtype"))
 
     def test_create_weights_registers_scale_offset_params(self):
         method = self._make_method()
