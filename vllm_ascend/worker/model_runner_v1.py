@@ -1890,6 +1890,87 @@ class NPUModelRunner(GPUModelRunner):
                 self.draft_token_ids_cpu[:num_reqs] = 0
             self.draft_token_ids_event.record()
 
+    def _collect_pp_mtp_readded_token(
+        self,
+        scheduler_output: "SchedulerOutput",
+    ) -> dict[str, tuple[list[int], int]]:
+        if get_pp_group().is_last_rank:
+            return {}
+
+        req_data = scheduler_output.scheduled_cached_reqs
+        new_token_ids = getattr(req_data, "new_token_ids", None)
+        if not new_token_ids:
+            return {}
+
+        cached_req_ids = set(self.input_batch.req_id_to_index)
+        finished_req_ids = set(scheduler_output.finished_req_ids)
+        scheduled_req_ids = set(scheduler_output.num_scheduled_tokens)
+        resumed_req_ids = set(req_data.resumed_req_ids)
+        unscheduled_req_ids = cached_req_ids - (scheduled_req_ids - resumed_req_ids)
+        req_ids_after_parent_removals = (
+            cached_req_ids - finished_req_ids - unscheduled_req_ids
+        )
+
+        token_fixes: dict[str, tuple[list[int], int]] = {}
+        for i, req_id in enumerate(req_data.req_ids):
+            if req_id in req_ids_after_parent_removals or i >= len(new_token_ids):
+                continue
+            if new_tokens := new_token_ids[i]:
+                token_fixes[req_id] = (
+                    list(new_tokens),
+                    req_data.num_computed_tokens[i],
+                )
+        return token_fixes
+
+    @contextmanager
+    def _pp_mtp_update_req_spec_token_ids(
+        self,
+        scheduler_output: "SchedulerOutput",
+    ):
+        if scheduler_output.total_num_scheduled_tokens == 0:
+            yield
+            return
+
+        token_fixes = self._collect_pp_mtp_readded_token(scheduler_output)
+        if not token_fixes:
+            yield
+            return
+
+        input_batch = self.input_batch
+        had_instance_update_spec_tokens = (
+            "update_req_spec_token_ids" in input_batch.__dict__
+        )
+        original_update_spec_tokens = input_batch.update_req_spec_token_ids
+        fixed_req_ids: set[str] = set()
+
+        # Parent _update_states places spec tokens immediately through this API.
+        def update_req_spec_token_ids_pp_mtp(
+            request,
+            scheduled_spec_tokens,
+        ) -> None:
+            req_id = request.req_id
+            if req_id not in fixed_req_ids and (fix_data := token_fixes.get(req_id)):
+                req_index = input_batch.req_id_to_index.get(req_id)
+                if req_index is not None:
+                    new_tokens, num_computed_tokens = fix_data
+                    end_token_index = num_computed_tokens + len(new_tokens)
+                    input_batch.token_ids_cpu[
+                        req_index, num_computed_tokens:end_token_index
+                    ] = new_tokens
+                    input_batch.num_tokens_no_spec[req_index] = end_token_index
+                    fixed_req_ids.add(req_id)
+
+            return original_update_spec_tokens(request, scheduled_spec_tokens)
+
+        input_batch.update_req_spec_token_ids = update_req_spec_token_ids_pp_mtp
+        try:
+            yield
+        finally:
+            if had_instance_update_spec_tokens:
+                input_batch.update_req_spec_token_ids = original_update_spec_tokens
+            else:
+                del input_batch.update_req_spec_token_ids
+
     @torch.inference_mode()
     def execute_model(
         self,
@@ -1972,9 +2053,9 @@ class NPUModelRunner(GPUModelRunner):
                             req_state.prev_num_draft_len = 0
 
                 # Update persistent batch states.
-                deferred_state_corrections_fn = self._update_states(
-                    scheduler_output
-                )
+                with self._pp_mtp_update_req_spec_token_ids(scheduler_output):
+                    deferred_state_corrections_fn = self._update_states(
+                        scheduler_output)
 
                 if has_ec_transfer() and get_ec_transfer().is_producer:
                     with self.maybe_get_ec_connector_output(

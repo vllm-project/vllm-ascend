@@ -287,6 +287,28 @@
 #       profiling startup and per-step timing callbacks without monkey-patching
 #       `EngineCore` and the multiprocess entry point.
 #
+# ** 10b. File: platform/patch_pp_mtp.py**
+# ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+#   1. `vllm.v1.outputs.ModelRunnerOutput`
+#   2. `vllm.v1.engine.core.EngineCore.post_step`
+#   3. `vllm.config.speculative.SpeculativeConfig._verify_args`
+#    Why:
+#       PP batch_queue schedules newer batches before consuming older model
+#       outputs. The old `post_step -> update_draft_token_ids` path updates
+#       global Request state using the newer schedule state, which can attach
+#       MTP draft tokens to the wrong prefill/decode phase.
+#    How：
+#       Carry drafter output as `ModelRunnerOutput.spec_token_ids`, skip the
+#       global post-step draft-token update in PP batch_queue mode, and validate
+#       local Eagle/MTP drafters as PP=1. Scheduler-level PP+MTP alignment is
+#       implemented by `core/scheduler_profiling_chunk.py`, which is the only
+#       scheduler supported for this feature in vllm-ascend.
+#    Related PR (if no, explain why):
+#       Backport of local vLLM PP+MTP branch changes.
+#    Future Plan:
+#       Remove this patch once the runtime vLLM version contains the upstream
+#       PP+MTP output/config/post-step fixes.
+#
 # ** 11. File: platform/patch_tool_choice_none_content.py**
 # ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 #   1. `vllm.entrypoints.openai.engine.serving.OpenAIServing._parse_tool_calls_from_content`
@@ -751,6 +773,23 @@
 #       https://github.com/vllm-project/vllm/pull/41706
 #    Future Plan:
 #       Remove this patch when vllm supports rotary quant or pluggable `MultiTokenPredictorLayer`.
+# ** 19b. File: worker/model_runner_v1.py**
+# ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+#   1. `NPUModelRunner._update_states`
+#    Why:
+#       Product vLLM may not contain PP+MTP worker state fixes. Non-last PP
+#       ranks can re-add requests whose `output_token_ids` do not include
+#       accepted draft tokens, causing `token_ids_cpu` and following spec
+#       token placement to drift.
+#    How：
+#       Wrap the parent `_update_states` in vllm-ascend and inject only the
+#       upstream PP+MTP fix before `update_req_spec_token_ids` places draft
+#       tokens for re-added non-last PP requests.
+#    Related PR (if no, explain why):
+#       Backport of local vLLM PP+MTP branch changes.
+#    Future Plan:
+#       Remove this wrapper once the minimum supported runtime vLLM contains
+#       the PP+MTP worker state fixes.
 # ** 20. File: worker/patch_mamba_utils.py**
 # ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 #   1. `vllm.v1.worker.mamba_utils.batch_memcpy_kernel = batch_memcpy_kernel`
