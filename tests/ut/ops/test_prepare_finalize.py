@@ -18,11 +18,24 @@ class TestPrepareAndFinalize(unittest.TestCase):
         patcher = patch("torch.npu.Stream", return_value=fake_stream)
         patcher.start()
         self.addCleanup(patcher.stop)
+        self.mock_get_config = patch("vllm_ascend.ops.fused_moe.prepare_finalize.get_ascend_config")
+        mock_config = self.mock_get_config.start()
+        mock_ascend_config = MagicMock()
+        mock_ascend_config.multistream_overlap_gate = False
+        mock_ascend_config.enable_context_parallel = False
+        mock_ascend_config.enable_flashcomm2_parallel_size = 0
+        mock_config.return_value = mock_ascend_config
+        self.addCleanup(self.mock_get_config.stop)
+        self.mock_get_config_utils = patch("vllm_ascend.utils.get_ascend_config")
+        mock_config_utils = self.mock_get_config_utils.start()
+        mock_config_utils.return_value = mock_ascend_config
+        self.addCleanup(self.mock_get_config_utils.stop)
         self.moe_config = MagicMock(spec=FusedMoEConfig)
         self.moe_config.tp_group = MagicMock()
         self.moe_config.tp_group.device_group = MagicMock()
         self.moe_config.dp_size = 1
         self.moe_config.tp_size = 1
+        self.moe_config.pcp_size = 1
         self.moe_config.ep_size = 1
         self.moe_config.dp_group = MagicMock()
         self.moe_config.original_num_experts = 8
@@ -171,6 +184,7 @@ class TestPrepareAndFinalize(unittest.TestCase):
 
         self.moe_config.dp_size = 2
         self.moe_config.tp_size = 1
+        self.moe_config.pcp_size = 1
         self.moe_config.ep_size = 1
         self.moe_config.dp_group = mock_dp_group
 

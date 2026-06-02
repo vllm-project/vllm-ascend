@@ -17,7 +17,7 @@
 #include "register/tilingdata_base.h"
 #include "tiling/platform/platform_ascendc.h"
 #include "platform/platform_infos_def.h"
-#include "../tiling_base/tiling_base.h"
+#include "tiling_base/tiling_base.h"
 #include "../op_kernel/recurrent_gated_delta_rule_v310_tiling_data.h"
 
 namespace optiling {

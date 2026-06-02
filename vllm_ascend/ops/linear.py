@@ -75,6 +75,9 @@ class AscendUnquantizedLinearMethod(UnquantizedLinearMethod):
 
     def process_weights_after_loading(self, layer: torch.nn.Module) -> None:
         super().process_weights_after_loading(layer)
+        # must use fp32 to avoid accuracy degradation in dsv4.
+        if getattr(layer, "precast_fp32_weight", False):
+            layer.weight_fp32 = maybe_trans_nz(layer.weight.data.to(torch.float32))
         if "conv1d" not in layer.prefix:
             layer.weight.data = maybe_trans_nz(layer.weight.data)
 
@@ -267,6 +270,7 @@ class AscendRowParallelLinear(RowParallelLinear):
         input_is_parallel: bool = True,
         skip_bias_add: bool = False,
         params_dtype: torch.dtype | None = None,
+        out_dtype: torch.dtype | None = None,
         reduce_results: bool = True,
         quant_config: QuantizationConfig | None = None,
         prefix: str = "",
@@ -291,6 +295,7 @@ class AscendRowParallelLinear(RowParallelLinear):
         self.input_size_per_partition = divide(input_size, self.tp_size)
         self.output_size_per_partition = output_size
         self.output_partition_sizes = [output_size]
+        self.out_dtype = out_dtype
 
         AscendLinearBase.__init__(
             self,
@@ -428,6 +433,11 @@ class AscendColumnParallelLinear(ColumnParallelLinear):
 
         if self.custom_op is not None:
             self.custom_op.update_attrs()
+        self.prefix = prefix
+        if "wo_a" in prefix:
+            hf_config = get_current_vllm_config().model_config.hf_text_config
+            self.n_local_groups = getattr(hf_config, "o_groups", 0) // self.tp_size
+            self.o_lora_rank = getattr(hf_config, "o_lora_rank", 0)
 
     def forward(
         self,
@@ -437,6 +447,39 @@ class AscendColumnParallelLinear(ColumnParallelLinear):
             return self.custom_op.apply(input_)
 
         return super().forward(input_)
+
+    def weight_loader(self, param: Parameter, loaded_weight: torch.Tensor):
+        if "wo_a" in self.prefix:
+            if self.weight.ndim == 2:
+                super().weight_loader(param, loaded_weight)
+                self.weight.data = (
+                    self.weight.data.view(self.n_local_groups, self.o_lora_rank, -1).transpose(2, 1).contiguous()
+                )
+            else:
+                # In RL update flows, wo_a can be loaded again after being
+                # transformed into [n_local_groups, hidden_size, o_lora_rank].
+                shard_size = self.n_local_groups * self.o_lora_rank
+                start_idx = self.tp_rank * shard_size
+                if loaded_weight.shape[0] != shard_size:
+                    loaded_weight = loaded_weight.narrow(0, start_idx, shard_size)
+                loaded_weight = (
+                    loaded_weight.view(
+                        self.n_local_groups,
+                        self.o_lora_rank,
+                        -1,
+                    )
+                    .transpose(2, 1)
+                    .contiguous()
+                )
+
+                if loaded_weight.shape != self.weight.shape:
+                    raise ValueError(
+                        f"Unexpected wo_a weight shape {tuple(loaded_weight.shape)}, "
+                        f"expected {tuple(self.weight.shape)}"
+                    )
+                self.weight.data.copy_(loaded_weight)
+        else:
+            super().weight_loader(param, loaded_weight)
 
 
 class AscendReplicatedLinear(ReplicatedLinear):
