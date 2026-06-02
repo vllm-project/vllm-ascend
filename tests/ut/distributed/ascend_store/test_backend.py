@@ -260,6 +260,8 @@ class TestMooncakeBackendMethods(unittest.TestCase):
             backend._lazy_init = False
             backend._store_initialized = True
             backend._use_fabric_mem = False
+            backend._store_init_lock = MagicMock()
+            backend.local_seg = None
             return backend
 
     def test_exists(self):
@@ -303,12 +305,11 @@ class TestMooncakeBackendMethods(unittest.TestCase):
     def test_register_buffer(self):
         b = self._make_backend()
         with (
-            patch("vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.backend.mooncake_backend.os") as mock_os,
             patch(
                 "vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.backend.mooncake_backend.global_te"
             ) as mock_te,
+            patch("vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.backend.mooncake_backend.get_ip"),
         ):
-            mock_os.getenv.return_value = "0"
             b.register_buffer([100], [200])
             mock_te.register_buffer.assert_called_once()
 
@@ -432,13 +433,9 @@ class TestMemcacheBackendMethods(unittest.TestCase):
 
     def test_register_buffer(self):
         b = self._make_backend()
-        with patch(
-            "vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.backend.memcache_backend.get_ascend_device_type"
-        ) as mock_dt:
-            from vllm_ascend.utils import AscendDeviceType
-
-            mock_dt.return_value = AscendDeviceType.A2
-            b.register_buffer([100], [200])
+        b._is_a2 = True
+        b.register_buffer([100], [200])
+        b.store.register_buffer.assert_called_once()
 
     def test_get(self):
         b = self._make_backend()
