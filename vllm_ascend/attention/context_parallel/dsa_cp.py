@@ -411,6 +411,7 @@ class AscendDSACPMetadataBuilder(AttentionMetadataBuilder[AscendDSAMetadata]):
         """Build DSA-CP metadata for one draft step."""
         num_reqs = common_attn_metadata.num_reqs
         query_start_loc = common_attn_metadata.query_start_loc
+        query_start_loc_cpu = common_attn_metadata.query_start_loc_cpu
         seq_lens_q = query_start_loc[1:] - query_start_loc[:-1]
         has_prefill = _has_prefill(common_attn_metadata.attn_state)
 
@@ -687,7 +688,13 @@ class AscendDSACPMetadataBuilder(AttentionMetadataBuilder[AscendDSAMetadata]):
         if local_query_start_loc is not None:
             local_query_start_loc[1 : num_reqs + 1] = torch.cumsum(local_query_lens, dim=0)
         else:
-            local_query_start_loc = torch.cumsum(local_query_lens, dim=0)
+            local_query_start_loc = torch.cat(
+                [
+                    torch.tensor([0], dtype=local_query_lens.dtype, device=local_query_lens.device),
+                    torch.cumsum(local_query_lens, dim=0),
+                ],
+                0,
+            )
 
         # For requests that cross the local slice boundary, offset removes the
         # tokens that live on later ranks so local_seq_lens matches local queries.
