@@ -1430,17 +1430,28 @@ def singleton(cls):
     return get_instance
 
 
-# TODO: Temporarily use enable_sp to enable the dsa_cp feature of ds32.
-# and subsequent updates will introduce new interfaces. --zzhx1
 @lru_cache(maxsize=1)
 def enable_dsa_cp() -> bool:
     from vllm.config import get_current_vllm_config
 
     vllm_config = get_current_vllm_config()
-    is_ds_v32 = hasattr(vllm_config.model_config, "hf_text_config") and hasattr(
+    # DSA CP is only applicable to models with indexer (e.g., DSv3.2, DSv4).
+    has_indexer = hasattr(vllm_config.model_config, "hf_text_config") and hasattr(
         vllm_config.model_config.hf_text_config, "index_topk"
     )
-    return bool(is_ds_v32 and enable_sp())
+    if not has_indexer:
+        return False
+
+    dsa_cp_enable = False
+    additional_config = getattr(vllm_config, "additional_config", None)
+    if additional_config is not None and "enable_dsa_cp" in additional_config:
+        dsa_cp_enable = bool(additional_config["enable_dsa_cp"])
+
+    if dsa_cp_enable and not enable_sp():
+        raise ValueError(
+            "DSA CP requires SP to be enabled. Please enable SP(set VLLM_ASCEND_ENABLE_FLASHCOMM1=1) to use DSA CP."
+        )
+    return dsa_cp_enable and enable_sp()
 
 
 @lru_cache(maxsize=1)
