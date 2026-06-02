@@ -21,6 +21,7 @@ import math
 import sys
 import time
 from collections import defaultdict
+from collections.abc import Callable
 from contextlib import contextmanager, nullcontext
 from copy import copy, deepcopy
 from dataclasses import dataclass, replace
@@ -614,6 +615,23 @@ class NPUModelRunner(GPUModelRunner):
         if isinstance(self.model, ACLGraphWrapper):
             return self.model.unwrap()
         return self.model
+
+    def _update_states(self, scheduler_output: "SchedulerOutput") -> Callable | None:
+        # Temporary rewind guard for KV-load-failure recompute.
+        # This can be removed after the upstream fix is merged.
+        req_data = scheduler_output.scheduled_cached_reqs
+
+        if self.use_async_scheduling:
+            for i, req_id in enumerate(req_data.req_ids):
+                req_state = self.requests.get(req_id)
+                if req_state is None:
+                    continue
+
+                num_computed_tokens = req_data.num_computed_tokens[i]
+                if num_computed_tokens < req_state.num_computed_tokens:
+                    req_state.prev_num_draft_len = 0
+
+        return super()._update_states(scheduler_output)
 
     def _pad_query_start_loc_for_fia(
         self,
@@ -1747,7 +1765,9 @@ class NPUModelRunner(GPUModelRunner):
                             req_state.prev_num_draft_len = 0
 
                 # Update persistent batch states.
-                deferred_state_corrections_fn = self._update_states(scheduler_output)
+                deferred_state_corrections_fn = self._update_states(
+                    scheduler_output
+                )
 
                 if has_ec_transfer() and get_ec_transfer().is_producer:
                     with self.maybe_get_ec_connector_output(
@@ -1873,6 +1893,7 @@ class NPUModelRunner(GPUModelRunner):
                         self.requests,
                         self.compilation_config.static_forward_context,
                         self.model.get_mamba_state_copy_func(),
+                        self._get_mamba_copy_bufs(),
                         preprocess_bufs,
                     )
                     # preprocess_mamba resets num_accepted_tokens_cpu to 1
@@ -2792,6 +2813,14 @@ class NPUModelRunner(GPUModelRunner):
                         slot_mapping[
                             total_num_scheduled_tokens_compressed_list[
                                 kv_cache_gid]:num_tokens_padded].fill_(-1)
+                    elif self.use_compress:
+                        # DSA dummy/graph-capture runs do not go through
+                        # _prepare_inputs(), so no fresh compressed cache
+                        # metadata is computed for them. Reusing values from
+                        # the previous real request can feed stale block-table
+                        # and [block, offset] scatter indices to DSA kernels.
+                        slot_mapping[:num_tokens_padded].fill_(0)
+                        blk_table_tensor[:maybe_num_reqs_padded].fill_(0)
                     else:
                         slot_mapping[num_tokens:num_tokens_padded].fill_(-1)
                         blk_table_tensor[num_reqs:num_reqs_padded].fill_(0)
@@ -4408,8 +4437,10 @@ def _get_gpu_model_runner_module_name(model_runner) -> str:
 def _torch_cuda_wrapper():
     class _EventPlaceholder:
         def __init__(self, *args, **kwargs) -> None:
-            self.record = lambda: None
-            self.synchronize = lambda: None
+            self.record = lambda *a, **kw: None
+            self.synchronize = lambda *a, **kw: None
+            self.wait = lambda *a, **kw: None
+            self.query = lambda *a, **kw: True
 
     class _StreamPlaceholder:
         def __init__(self, *args, **kwargs) -> None:
