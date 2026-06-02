@@ -706,9 +706,7 @@ class AscendMlaCPImpl(AscendMLAImpl):
                     (num_decodes, num_heads, q_nope.shape[1], 1), dtype=torch.float, device=q_nope.device
                 )
             elif input_layout == "BNSD":
-                softmax_lse = torch.empty(
-                    (num_tokens, num_heads, 1, 1), dtype=torch.float, device=q_nope.device
-                )
+                softmax_lse = torch.empty((num_tokens, num_heads, 1, 1), dtype=torch.float, device=q_nope.device)
             else:
                 softmax_lse = torch.empty((num_tokens, num_heads, 1), dtype=torch.float, device=q_nope.device)
 
