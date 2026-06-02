@@ -367,16 +367,15 @@ class AscendSpecDecodeBaseProposer(SpecDecodeBaseProposer):
                 if torch.equal(layer_module.shared_head.head.weight, model.lm_head.weight):
                     layer_module.shared_head.head = model.lm_head
 
-        if self.vllm_config.compilation_config.cudagraph_mode.has_full_cudagraphs():
+        if self.vllm_config.compilation_config.cudagraph_mode.has_full_cudagraphs() and self.use_cuda_graph:
             self.update_stream = torch.npu.Stream()
-            if self.use_cuda_graph:
-                self._runnable = ACLGraphWrapper(
-                    self._run_merged_draft,
-                    self.vllm_config,
-                    runtime_mode=CUDAGraphMode.FULL,
-                    use_eagle=self.use_eagle,
-                    enable_enpu=self.enable_enpu,
-                )
+            self._runnable = ACLGraphWrapper(
+                self._run_merged_draft,
+                self.vllm_config,
+                runtime_mode=CUDAGraphMode.FULL,
+                use_eagle=self.use_eagle,
+                enable_enpu=self.enable_enpu,
+            )
 
     def _maybe_share_topk_indices(self, target_language_model: nn.Module) -> None:
         if hasattr(target_language_model.model, "topk_indices_buffer"):
