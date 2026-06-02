@@ -23,6 +23,8 @@ from vllm_ascend.device.mxfp_compat import (
     QUANT_DTYPES,
     SCALE_DTYPES,
 )
+from vllm_ascend.ops.triton.fla.chunk_scaled_dot_kkt import chunk_scaled_dot_kkt_fwd_kernel
+from vllm_ascend.ops.triton.fla.solve_tril import solve_tril_16x16_kernel
 from vllm_ascend.quantization.quant_type import QuantType
 from vllm_ascend.utils import AscendDeviceType, get_ascend_device_type
 
@@ -310,6 +312,64 @@ class BaseDeviceAdaptor:
         )
 
         return context_layer
+
+    @staticmethod
+    def chunk_scaled_dot_kkt_fwd(NT, k, beta, g_cumsum, A, cu_seqlens, chunk_indices, T, B, H, Hg, K, BT, BK):
+        chunk_scaled_dot_kkt_fwd_kernel[(NT, 1)](
+            k=k,
+            beta=beta,
+            g_cumsum=g_cumsum,
+            A=A,
+            cu_seqlens=cu_seqlens,
+            chunk_indices=chunk_indices,
+            T=T,
+            B=B,
+            H=H,
+            Hg=Hg,
+            K=K,
+            BT=BT,
+            BK=BK,
+            num_warps=8,
+            num_stages=3,
+            multibuffer=True,
+        )
+
+        return A
+
+    @staticmethod
+    def solve_tril_16x16(
+        A,
+        Ad,
+        cu_seqlens,
+        chunk_indices,
+        T,
+        H,
+        BT,
+        LARGE_BLOCK_T,
+        NT,
+        B,
+    ):
+        extract_slice_stride_1 = LARGE_BLOCK_T // 32
+        solve_tril_16x16_kernel[NT, B * H](
+            A=A,
+            Ad=Ad,
+            cu_seqlens=cu_seqlens,
+            chunk_indices=chunk_indices,
+            T=T,
+            H=H,
+            BT=BT,
+            LARGE_BLOCK_T=LARGE_BLOCK_T,
+            EXTRACT_SLICE_STRIDE_1=extract_slice_stride_1,
+            num_warps=1,
+            num_stages=4,
+        )
+
+        return Ad
+
+    @staticmethod
+    def npu_gemma_rms_norm(x, weight, variance_epsilon):
+        x, _ = torch.ops._C_ascend.npu_gemma_rms_norm(x, weight, variance_epsilon)
+        return x
 
 
 class A5DeviceAdaptor(BaseDeviceAdaptor):
@@ -659,6 +719,63 @@ class A5DeviceAdaptor(BaseDeviceAdaptor):
         )[0]
 
         return context_layer
+
+    @staticmethod
+    def chunk_scaled_dot_kkt_fwd(NT, k, beta, g_cumsum, A, cu_seqlens, chunk_indices, T, B, H, Hg, K, BT, BK):
+        chunk_scaled_dot_kkt_fwd_kernel[(NT, 1)](
+            k=k,
+            beta=beta,
+            g_cumsum=g_cumsum,
+            A=A,
+            cu_seqlens=cu_seqlens,
+            chunk_indices=chunk_indices,
+            T=T,
+            B=B,
+            H=H,
+            Hg=Hg,
+            K=K,
+            BT=BT,
+            BK=BK,
+            num_warps=8,
+            num_stages=3,
+            multibuffer=True,
+            disable_tightly_coupled_buffer_reuse=True,
+        )
+        return A
+
+    @staticmethod
+    def solve_tril_16x16(
+        A,
+        Ad,
+        cu_seqlens,
+        chunk_indices,
+        T,
+        H,
+        BT,
+        LARGE_BLOCK_T,
+        NT,
+        B,
+    ):
+        solve_tril_16x16_kernel[NT, B * H](
+            A=A,
+            Ad=Ad,
+            cu_seqlens=cu_seqlens,
+            chunk_indices=chunk_indices,
+            T=T,
+            H=H,
+            BT=BT,
+            LARGE_BLOCK_T=LARGE_BLOCK_T,
+            EXTRACT_SLICE_STRIDE_1=1,
+            num_warps=1,
+            num_stages=4,
+        )
+
+        return Ad
+
+    @staticmethod
+    def npu_gemma_rms_norm(x, weight, variance_epsilon):
+        x, _ = torch_npu.npu_rms_norm(x, 1.0 + weight, variance_epsilon)
+        return x
 
 
 def get_device_adaptor() -> type["BaseDeviceAdaptor"]:
