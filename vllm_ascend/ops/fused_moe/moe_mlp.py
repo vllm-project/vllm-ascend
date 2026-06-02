@@ -388,8 +388,8 @@ def unquant_apply_mlp(
     else:
         if swiglu_limit > 0:
             gate, up = gate_up_out.chunk(2, dim=-1)
-            gate = gate.clamp(max=swiglu_limit)
-            up = up.clamp(min=-swiglu_limit, max=swiglu_limit)
+            gate.clamp_(max=swiglu_limit)
+            up.clamp_(min=-swiglu_limit, max=swiglu_limit)
         gate_up_out = torch_npu.npu_swiglu(gate_up_out)
 
     if topk_scales is not None:
