@@ -15,6 +15,7 @@ from tests.ut.attention.utils import (
     patch_distributed_groups,
 )
 from tests.ut.conftest import npu_test
+
 pytest.skip("Temporarily skip in CI", allow_module_level=True)
 
 from vllm_ascend.attention.attention_mask import AttentionMaskBuilder
