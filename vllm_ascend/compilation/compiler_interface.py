@@ -160,10 +160,22 @@ def npugraph_ex_compile(
             if cache_path:
                 py_code = compiled_gm.get_code()
                 if py_code:
-                    os.makedirs(os.path.dirname(cache_path), exist_ok=True)
-                    with open(cache_path, "w") as f:
-                        f.write(py_code)
-                    logger.debug("Saved compiled graph to cache: %s", cache_path)
+                    # Triton kernel indices (kernel_side_table) are registered in-process
+                    # at compile time and are not serializable across process boundaries.
+                    # Graphs containing triton_kernel_wrapper calls must not be cached,
+                    # because loading the py_code in a new process will hit an
+                    # AssertionError in kernel_side_table.get_kernel().
+                    if "triton_kernel_wrapper" in py_code:
+                        logger.info(
+                            "Skipping npugraph_ex cache for graph containing Triton kernels "
+                            "(kernel_side_table indices are process-local): %s",
+                            cache_path,
+                        )
+                    else:
+                        os.makedirs(os.path.dirname(cache_path), exist_ok=True)
+                        with open(cache_path, "w") as f:
+                            f.write(py_code)
+                        logger.debug("Saved compiled graph to cache: %s", cache_path)
             return compiled_gm
 
         nfx._NpuFxCompiler._get_compiled_gm = patched_get_compiled_gm
@@ -263,6 +275,48 @@ class AscendCompiler(CompilerInterface):
 
     def load(self, handle, graph, example_inputs, graph_index, compile_range):
         key, path = handle
+
+        # Cache file may be absent when the graph was skipped at save time (e.g. it
+        # contained Triton kernels whose kernel_side_table indices are process-local
+        # and cannot be serialized).  Fall back to a fresh compilation so the Triton
+        # kernels are properly registered in the current process.
+        if not path or not os.path.exists(path):
+            logger.debug(
+                "npugraph_ex cache miss for key %s (file absent or not saved), recompiling",
+                key,
+            )
+            # Mirror the same pre-processing done in compile(): deepcopy the graph
+            # to prevent make_graph_return_tuple from mutating the caller's copy,
+            # and re-wrap FakeTensor inputs under the current fake mode to avoid
+            # "fake mode mismatch" in aot_module_simplified.
+            graph = copy.deepcopy(graph)
+            from torch._guards import detect_fake_mode
+            current_fake_mode = detect_fake_mode()
+            if current_fake_mode is not None:
+                example_inputs = [
+                    current_fake_mode.from_tensor(inp)
+                    if (
+                        isinstance(inp, torch.Tensor)
+                        and hasattr(inp, "fake_mode")
+                        and inp.fake_mode is not current_fake_mode
+                    )
+                    else inp
+                    for inp in example_inputs
+                ]
+            ascend_compilation_config = get_ascend_config().ascend_compilation_config
+            assert hasattr(self, "vllm_config")
+            compiled_fn, _ = npugraph_ex_compile(
+                graph,
+                example_inputs,
+                {},
+                self.vllm_config,
+                ascend_compilation_config,
+                compile_range,
+                key,
+                getattr(self, "cache_dir", None),
+            )
+            return compiled_fn
+
         from npugraph_ex.npu_fx_compiler import _CompiledFxArtifacts, _CompiledFxGraph
 
         with open(path) as f:
