@@ -32,8 +32,11 @@ import torch_npu
 from vllm.model_executor.layers.attention.mm_encoder_attention import MMEncoderAttention  # type: ignore
 from vllm.v1.attention.backends.registry import AttentionBackendEnum
 
-from vllm_ascend.multimodal.encoder_forward_context import get_encoder_graph_runtime_state
-from vllm_ascend.multimodal.encoder_graph_params import get_encoder_graph_params, update_encoder_graph_workspace
+from vllm_ascend.worker.encoder_acl_graph import (
+    get_encoder_graph_params,
+    get_encoder_graph_runtime_state,
+    update_encoder_graph_workspace,
+)
 from vllm_ascend.utils import weak_ref_tensors
 
 MIN_PAD_SIZE: int = 64  # min_size to pad weight

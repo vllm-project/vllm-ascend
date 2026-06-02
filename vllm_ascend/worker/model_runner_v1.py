@@ -3959,7 +3959,7 @@ def _torch_cuda_wrapper():
 def _replace_gpu_model_runner_function_wrapper(target_module_name):
     import vllm.v1.worker.encoder_cudagraph as _vllm_encoder_cudagraph
 
-    from vllm_ascend.multimodal.encoder_acl_graph import EncoderAclGraphManager
+    from vllm_ascend.worker.encoder_acl_graph import EncoderAclGraphManager
 
     _encoder_mgr_orig = _vllm_encoder_cudagraph.EncoderCudaGraphManager
     _vllm_encoder_cudagraph.EncoderCudaGraphManager = EncoderAclGraphManager
