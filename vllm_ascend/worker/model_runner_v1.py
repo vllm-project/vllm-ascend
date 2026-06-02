@@ -2813,6 +2813,14 @@ class NPUModelRunner(GPUModelRunner):
                         slot_mapping[
                             total_num_scheduled_tokens_compressed_list[
                                 kv_cache_gid]:num_tokens_padded].fill_(-1)
+                    elif self.use_compress:
+                        # DSA dummy/graph-capture runs do not go through
+                        # _prepare_inputs(), so no fresh compressed cache
+                        # metadata is computed for them. Reusing values from
+                        # the previous real request can feed stale block-table
+                        # and [block, offset] scatter indices to DSA kernels.
+                        slot_mapping[:num_tokens_padded].fill_(0)
+                        blk_table_tensor[:maybe_num_reqs_padded].fill_(0)
                     else:
                         slot_mapping[num_tokens:num_tokens_padded].fill_(-1)
                         blk_table_tensor[num_reqs:num_reqs_padded].fill_(0)
