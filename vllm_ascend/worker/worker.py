@@ -128,21 +128,6 @@ class NPUWorker(WorkerBase):
             is_driver_worker=is_driver_worker,
         )
 
-        # Weight transfer engine for RLHF.  On Ascend the factory "nccl"
-        # entry is patched to return HCCLWeightTransferEngine, so
-        # backend="nccl" in weight_transfer_config actually loads HCCL.
-        from vllm.distributed.weight_transfer.factory import (
-            WeightTransferEngineFactory,
-        )
-
-        self.weight_transfer_engine = (
-            WeightTransferEngineFactory.create_engine(
-                self.vllm_config.weight_transfer_config,
-                self.vllm_config.parallel_config,
-            )
-            if self.vllm_config.weight_transfer_config is not None
-            else None
-        )
         if self.cache_config.cache_dtype == "auto":
             self.cache_dtype = self.model_config.dtype
         else:
@@ -158,15 +143,9 @@ class NPUWorker(WorkerBase):
             # Buffers saved before sleep
             self._sleep_saved_buffers: dict[str, torch.Tensor] = {}
 
-        # Weight transfer engine (initialized on-demand)
-        self.weight_transfer_engine = (
-            WeightTransferEngineFactory.create_engine(
-                self.vllm_config.weight_transfer_config,
-                self.vllm_config.parallel_config,
-            )
-            if self.vllm_config.weight_transfer_config is not None
-            else None
-        )
+        # Weight transfer engine is created in `load_model` once the model
+        # is available, since the engine needs a reference to the model.
+        self.weight_transfer_engine = None
         self._weight_update_active = False
         self._is_checkpoint_format = True
 
@@ -738,6 +717,25 @@ class NPUWorker(WorkerBase):
 
         with context, set_current_vllm_config(self.vllm_config):
             self.model_runner.load_model()
+
+        if self.vllm_config.weight_transfer_config is not None:
+            from vllm.distributed.weight_transfer.factory import (
+                WeightTransferEngineFactory,
+            )
+
+            if vllm_version_is("0.20.2") or vllm_version_is("0.21.0"):
+                # v0.20.2 / v0.21.0: create_engine takes (config, parallel_config)
+                self.weight_transfer_engine = WeightTransferEngineFactory.create_engine(
+                    self.vllm_config.weight_transfer_config,
+                    self.vllm_config.parallel_config,
+                )
+            else:
+                # main: create_engine takes (config, parallel_config, model)
+                self.weight_transfer_engine = WeightTransferEngineFactory.create_engine(
+                    self.vllm_config.weight_transfer_config,
+                    self.vllm_config.parallel_config,
+                    self.model_runner.get_model(),
+                )
 
     def compile_or_warm_up_model(self) -> CompilationTimes:
         # Note: need to adapt for graph mode.
