@@ -55,8 +55,8 @@ def _patched_get_kv_connector_handshake_metadata(self):
     return {pp_rank * tp_size + tp_rank: metadata}
 
 
-# Inject the patched version.  We replace the bound-method on the *class*
-# so all instances (including those in subprocess workers) pick it up.
-_gpu_worker_module.LocalGPUWorker.get_kv_connector_handshake_metadata = (
+# Replace the method on the Worker class so that all GPU workers
+# (including those in subprocesses) pick up the fix.
+_gpu_worker_module.Worker.get_kv_connector_handshake_metadata = (
     _patched_get_kv_connector_handshake_metadata
 )
