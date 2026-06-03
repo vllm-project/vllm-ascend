@@ -1,6 +1,6 @@
 # CI Workflow Guide
 
-This document describes the CI workflows for `vllm-ascend`, how to add new test cases, and how the selective testing system works.
+This document describes the CI workflows for `vllm-ascend`, how to add tests, and how the selective testing system works.
 
 ## Workflow Overview
 
@@ -8,7 +8,7 @@ This document describes the CI workflows for `vllm-ascend`, how to add new test 
 |----------|---------|---------------|
 | `pr_test_light.yaml` | PR to main/dev/release branches | Lint + selective tests (UT + light E2E) |
 | `pr_test_full.yaml` | PR with `ready` + `ready-for-test` labels | Selective tests (UT + full E2E) |
-| `_selected_tests.yaml` | Called by `pr_test_light` / `pr_test_full` | Runs the tests selected by `select_tests.py` |
+| `_selected_tests.yaml` | Called by `pr_test_light` / `pr_test_full` | Runs tests selected by `select_tests.py` |
 | `_e2e_test.yaml` | Called by nightly/scheduled/comment-triggered workflows | Full E2E suites via `run_suite.py` |
 | `_parse_trigger.yaml` | PR comment `/e2e` | Parses comment to run specific E2E tests |
 | `_pre_commit.yml` | Called by `pr_test_light` | Lint and format checks |
@@ -19,40 +19,108 @@ This document describes the CI workflows for `vllm-ascend`, how to add new test 
 
 ## Selective Testing System
 
-When a PR changes source files, only the affected tests should run — not the entire suite. This is handled by `select_tests.py` and configured in `test_config.yaml`.
-
-### How It Works
+When a PR changes source files, `select_tests.py` maps changed files to affected modules in `test_config.yaml`, collects their tests, routes tests to runners, and emits a GitHub Actions matrix.
 
 ```text
 PR changed files
     │
     ▼
-test_config.yaml ──► match modules ──► affected test paths
-                                            │
-                                   Route by directory convention:
-                                     UT:  a2/, a3_2/, 310p/ → NPU runner
-                                          (no convention)   → CPU runner
-                                     E2E: 1-card, 2-card, 4-card, 310p
-                                            │
-                                   runner_label.json ──► resolve runner
-                                            │
-                                       test_groups JSON
-                                            │
-                              GitHub Actions matrix ──► runs-on: <runner>
+test_config.yaml ──► resolve base inheritance ──► match modules ──► collect test paths
+                                                                         │
+                                                                Route by convention:
+                                                                  UT:  a2/, a2_2/, a3_2/, a3_4/, 310p/
+                                                                  E2E: one_card, two_card(s), four_card(s), *_310p.py
+                                                                         │
+                                                                runner_label.json
+                                                                         │
+                                                                    test_groups JSON
 ```
 
-### Key Files
+## Key Files
 
 | File | Role |
 |------|------|
-| `select_tests.py` | Matches changed files to test paths, routes by convention |
-| `test_config.yaml` | Maps source directories to test directories (UT + E2E) |
-| `runner_label.json` | Defines available runners with chip type, NPU count, and image tag |
-| `selective_test_README.md` | Detailed reference for the selective testing system |
+| `.github/workflows/scripts/select_tests.py` | Matches changed files, scans tests, routes to runners |
+| `.github/workflows/scripts/test_config.yaml` | Maps source paths to UT/E2E tests |
+| `.github/workflows/scripts/runner_label.json` | Defines runner labels, chip types, NPU count, and image tags |
+| `.github/workflows/scripts/config.yaml` | Full-suite E2E registry for nightly/scheduled runs |
 
-### UT Runner Routing (by directory convention)
+## `test_config.yaml` Tutorial
 
-No decorator is needed. The path of a test file determines the runner:
+Each module entry supports these fields:
+
+| Field | Required | Description |
+|-------|----------|-------------|
+| `name` | Yes | Unique module name |
+| `optional` | No | `true` by default. `false` means always matched when there are changed files |
+| `base` | No | Module name or list of module names to inherit from |
+| `source_file_dependencies` | No | Source/test paths that trigger this module |
+| `exclude_source_file_dependencies` | No | Paths excluded from `source_file_dependencies` matching |
+| `tests` | No | Test directories or files to run when matched |
+| `skip_tests` | No | Test files to remove after directory scanning |
+
+### Path Matching
+
+`source_file_dependencies` and `exclude_source_file_dependencies` use the same rule:
+
+- File path: exact match only, e.g. `vllm_ascend/attention/__init__.py`
+- Directory path: matches all files below it, e.g. `vllm_ascend/attention`
+- Trailing slash is ignored
+
+Example: include all attention files except `__init__.py`:
+
+```yaml
+- name: attention_other
+  optional: true
+  source_file_dependencies:
+    - vllm_ascend/attention
+  exclude_source_file_dependencies:
+    - vllm_ascend/attention/__init__.py
+  tests:
+    - tests/ut/attention
+```
+
+### Base Inheritance
+
+Use `base` when a module should append another module's dependencies and tests. Inherited list fields are merged before the child fields, with duplicates removed while preserving order.
+
+Example: `attention_gqa` inherits common attention dependencies/tests and adds GQA-specific ones:
+
+```yaml
+- name: attention_common
+  optional: true
+  source_file_dependencies:
+    - vllm_ascend/attention/__init__.py
+    - vllm_ascend/attention/attention_mask.py
+    - vllm_ascend/attention/utils.py
+  tests:
+    - tests/ut/attention/test_attention_mask.py
+    - tests/ut/attention/a2/test_common_cp.py
+
+- name: attention_gqa
+  optional: true
+  base: attention_common
+  source_file_dependencies:
+    - vllm_ascend/attention/attention_v1.py
+  tests:
+    - tests/ut/attention/a2/test_attention_v1.py
+```
+
+After inheritance, `attention_gqa` behaves as if it had both `attention_common` and GQA-specific `source_file_dependencies` and `tests`.
+
+`base` can also be a list:
+
+```yaml
+base:
+  - attention_common
+  - quantization
+```
+
+## Runner Routing
+
+### UT Routing
+
+No decorator is needed. UT runner routing is determined by path:
 
 | Directory pattern | Runner |
 |-------------------|--------|
@@ -63,103 +131,74 @@ No decorator is needed. The path of a test file determines the runner:
 | `tests/ut/<module>/a3_4/` | A3 NPU x4 |
 | `tests/ut/<module>/310p/` | 310P NPU x1 |
 
-### E2E Runner Routing (by directory convention)
+`tests/ut/_310p/` is intentionally not treated as `310p/`; it runs on CPU in mock mode.
 
-All E2E tests run on NPU. Routing is determined by the card-count directory:
+### E2E Routing
 
-| Directory pattern | Runner |
-|-------------------|--------|
-| `tests/e2e/pull_request/{light,full}/1-card/` | A2 NPU x1 |
-| `tests/e2e/pull_request/{light,full}/2-card[s]/` | A3 NPU x2 |
-| `tests/e2e/pull_request/{light,full}/4-card[s]/` | A3 NPU x4 |
-| `tests/e2e/310p/singlecard/` | 310P NPU x1 |
-| `tests/e2e/310p/multicard/` | 310P NPU x4 |
+All E2E tests run on NPU. E2E routing is determined by directory or `_310p` filename suffix:
+
+| Pattern | Runner |
+|---------|--------|
+| `tests/e2e/pull_request/{light,full}/one_card/` | A2 NPU x1 |
+| `tests/e2e/pull_request/{light,full}/two_card/` or `two_cards/` | A3 NPU x2 |
+| `tests/e2e/pull_request/{light,full}/four_card/` or `four_cards/` | A3 NPU x4 |
+| `*_310p.py` under one/two-card paths | 310P NPU x1 |
+| `*_310p.py` under four-card paths | 310P NPU x4 |
 
 ### E2E Type Filtering
 
-`select_tests.py` accepts `--e2e-type light` or `--e2e-type full` to limit E2E tests to the corresponding `pull_request` subdirectory:
+`--e2e-type light` keeps only `tests/e2e/pull_request/light/` paths.
+`--e2e-type full` keeps only `tests/e2e/pull_request/full/` paths.
+Non-`pull_request` E2E paths are always included.
 
-- `pr_test_light.yaml` uses `--e2e-type light`
-- `pr_test_full.yaml` uses `--e2e-type full`
+## Adding a New UT Test
 
-Non-`pull_request` E2E paths (e.g. `tests/e2e/310p/`) are always included regardless of the filter.
+1. Put the test in the right directory:
 
-## Adding a New UT Test Case
+   - CPU: `tests/ut/<module>/test_foo.py`
+   - A2 x1: `tests/ut/<module>/a2/test_foo.py`
+   - A2 x2: `tests/ut/<module>/a2_2/test_foo.py`
+   - A3 x2: `tests/ut/<module>/a3_2/test_foo.py`
+   - A3 x4: `tests/ut/<module>/a3_4/test_foo.py`
+   - 310P x1: `tests/ut/<module>/310p/test_foo.py`
 
-1. **Write the test**: Place the `.py` file in the appropriate directory:
-   - CPU tests: `tests/ut/<module>/test_foo.py`
-   - A2 NPU tests: `tests/ut/<module>/a2/test_foo.py`
-   - A3 NPU x2 tests: `tests/ut/<module>/a3-2/test_foo.py`
-
-2. **Update `test_config.yaml`**: Ensure the module entry exists with the correct `source_file_dependencies`. If the module already has an entry (e.g. `ops`), no change is needed — new test files are automatically discovered.
-
-Example — adding a new module:
+2. Add or update the matching module in `test_config.yaml`:
 
 ```yaml
 - name: my_module
   optional: true
   source_file_dependencies:
     - vllm_ascend/my_module
-    - tests/ut/my_module
   tests:
     - tests/ut/my_module
 ```
 
-## Adding a New E2E Test Case
+If `tests` points to a directory, `select_tests.py` scans `test_*.py` files and routes NPU subdirectories automatically.
 
-1. **Write the test**: Place the `.py` file in the appropriate directory under `tests/e2e/pull_request/`:
-   - `tests/e2e/pull_request/light/1-card/test_new_feature.py` — light smoke test
-   - `tests/e2e/pull_request/full/1-card/test_new_feature.py` — full 1-card test
-   - `tests/e2e/pull_request/full/2-cards/test_new_feature.py` — full 2-card test
+## Adding a New E2E Test
 
-2. **Add to `config.yaml`**: For full-suite runs (nightly, scheduled), add an entry with `name` and `estimated_time` to `.github/workflows/scripts/config.yaml` under the corresponding suite.
+1. Put the test under the correct PR directory:
 
-3. **Add to `test_config.yaml`**: For selective test runs (PR-triggered), add the test file to the appropriate E2E module entry so that changes to the relevant source code will trigger it.
+   - Light 1-card: `tests/e2e/pull_request/light/one_card/test_new_feature.py`
+   - Full 1-card: `tests/e2e/pull_request/full/one_card/test_new_feature.py`
+   - Full 2-card: `tests/e2e/pull_request/full/two_cards/test_new_feature.py`
+   - Full 4-card: `tests/e2e/pull_request/full/four_cards/test_new_feature.py`
 
-Example — adding an E2E test triggered by `vllm_ascend/my_feature` changes:
+2. Register it in `.github/workflows/scripts/test_config.yaml` for PR selective testing.
+3. Register it in `.github/workflows/scripts/config.yaml` for nightly/scheduled full-suite testing.
+
+Example:
 
 ```yaml
 - name: e2e_my_feature
   optional: true
   source_file_dependencies:
     - vllm_ascend/my_feature
-    - tests/e2e/pull_request   # so editing the test file itself also triggers it
+    - tests/e2e/pull_request/full/one_card/test_my_feature.py
   tests:
-    - tests/e2e/pull_request/light/1-card/test_my_feature_light.py
-    - tests/e2e/pull_request/full/1-card/test_my_feature.py
-    - tests/e2e/pull_request/full/2-cards/test_my_feature_distributed.py
-```
-
-### E2E Test Files: Two Registries
-
-Each E2E test file must be registered in **both** places:
-
-| Registry | File | Purpose |
-|----------|------|---------|
-| Selective testing | `test_config.yaml` | Determines which E2E tests run on a PR |
-| Full-suite testing | `config.yaml` | Determines suites, estimated times, and partitioning for nightly/scheduled runs |
-
-If you add an E2E test but forget `test_config.yaml`, it will not run on PRs. If you forget `config.yaml`, it will not run in nightly/scheduled suites.
-
-## Automatic Partitioning
-
-For full-suite runs (nightly, scheduled, `e2e-full`), tests are partitioned across parallel jobs by `run_suite.py` using estimated times for load balancing.
-
-### Principle
-
-1. **Read Configuration**: Read all non-skipped test cases and their `estimated_time` from `config.yaml`.
-2. **Sort (Balanced Assignment)**: Sort by `estimated_time` descending — heaviest tasks first.
-3. **Assign**: Each case goes to the partition with the current minimum total time (greedy).
-4. **Re-sort (Fast Feedback)**: Within each partition, sort ascending by `estimated_time` so quick tests run first.
-
-### Running Suites Locally
-
-```bash
-# Run the full e2e-singlecard suite
-python3 .github/workflows/scripts/run_suite.py --suite e2e-singlecard
-
-# Simulate partitioned execution (partition 0 of 2)
-python3 .github/workflows/scripts/run_suite.py --suite e2e-singlecard --auto-partition-id 0 --auto-partition-size 2
+    - tests/e2e/pull_request/light/one_card/test_my_feature_light.py
+    - tests/e2e/pull_request/full/one_card/test_my_feature.py
+    - tests/e2e/pull_request/full/two_cards/test_my_feature_distributed.py
 ```
 
 ## Running Selective Tests Locally
@@ -179,4 +218,24 @@ python3 .github/workflows/scripts/select_tests.py --diff-base origin/main --e2e-
 
 # Run all CPU UT tests regardless of module matching
 python3 .github/workflows/scripts/select_tests.py --diff-base origin/main --run-all-cpu
+```
+
+## Testing Changes to `select_tests.py`
+
+```bash
+PYTHONPATH=.github/workflows/scripts pytest -sv .github/workflows/scripts/test_select_tests.py
+ruff check .github/workflows/scripts/select_tests.py .github/workflows/scripts/test_select_tests.py
+bash format.sh ci
+```
+
+## Full-Suite E2E Partitioning
+
+Nightly and scheduled E2E suites are partitioned by `run_suite.py` using `estimated_time` from `config.yaml`.
+
+```bash
+# Run a suite locally
+python3 .github/workflows/scripts/run_suite.py --suite e2e-singlecard
+
+# Simulate partitioned execution
+python3 .github/workflows/scripts/run_suite.py --suite e2e-singlecard --auto-partition-id 0 --auto-partition-size 2
 ```
