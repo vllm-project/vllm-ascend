@@ -15,12 +15,9 @@ Test flow:
 import os
 import statistics
 import time
+from unittest.mock import patch
 
 from tests.e2e.conftest import VllmRunner
-
-os.environ["VLLM_WORKER_MULTIPROC_METHOD"] = "spawn"
-os.environ["VLLM_ALLOW_LONG_MAX_MODEL_LEN"] = "1"
-os.environ["VLLM_ASCEND_ENABLE_FLASHCOMM1"] = "1"
 
 MODEL = "Qwen/Qwen3-30B-A3B"
 
@@ -36,6 +33,14 @@ NUM_TEST = 5
 BASELINE_TTFT_S = 5.2
 
 
+@patch.dict(
+    os.environ,
+    {
+        "VLLM_WORKER_MULTIPROC_METHOD": "spawn",
+        "VLLM_ALLOW_LONG_MAX_MODEL_LEN": "1",
+        "VLLM_ASCEND_ENABLE_FLASHCOMM1": "1",
+    },
+)
 def test_profiling_chunk_ttft_performance() -> None:
     with VllmRunner(
         MODEL,
