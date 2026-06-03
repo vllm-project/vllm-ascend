@@ -114,6 +114,7 @@ class TestKVTransferMissingKeyPut(unittest.TestCase):
             current_event=None,
         )
         thread.request_queue.put(req_meta)
+        thread.add_stored_request(req_meta.req_id)
         thread._handle_request(req_meta)
 
         self.assertEqual(len(store.put_calls), 1)
