@@ -1,5 +1,6 @@
 # How to use this script: in vllm-ascend directory
 # python .github/workflows/scripts/coverage.py
+import sys
 from pathlib import Path
 
 import yaml
@@ -118,3 +119,6 @@ if init_uncovered:
     print("    (These are trivial files; their parent dirs are covered by prefix match)")
 
 print("\n" + "=" * 70)
+
+if broken or uncovered_e2e or uncovered_ut or uncovered_source:
+    sys.exit(1)
