@@ -18,8 +18,16 @@
 
 import torch
 from torch import nn
-from vllm.model_executor.models.qwen3_5_mtp import Qwen3_5MTP
-from vllm.model_executor.models.qwen3_next_mtp import Qwen3NextMTP
+
+try:
+    from vllm.model_executor.models.qwen3_5_mtp import Qwen3_5MTP
+except ImportError:
+    Qwen3_5MTP = None
+
+try:
+    from vllm.model_executor.models.qwen3_next_mtp import Qwen3NextMTP
+except ImportError:
+    Qwen3NextMTP = None
 
 
 def _qwen_mtp_get_top_tokens(
@@ -31,8 +39,8 @@ def _qwen_mtp_get_top_tokens(
     return self.logits_processor.get_top_tokens(self.lm_head, hidden_states)
 
 
-if not hasattr(Qwen3_5MTP, "get_top_tokens"):
+if Qwen3_5MTP is not None and not hasattr(Qwen3_5MTP, "get_top_tokens"):
     Qwen3_5MTP.get_top_tokens = _qwen_mtp_get_top_tokens
 
-if not hasattr(Qwen3NextMTP, "get_top_tokens"):
+if Qwen3NextMTP is not None and not hasattr(Qwen3NextMTP, "get_top_tokens"):
     Qwen3NextMTP.get_top_tokens = _qwen_mtp_get_top_tokens
