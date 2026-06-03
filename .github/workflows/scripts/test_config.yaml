@@ -185,14 +185,8 @@
     - vllm_ascend/lora
   tests:
     - tests/ut/lora
-    - tests/e2e/pull_request/full/one_card/test_ilama_lora.py
-    - tests/e2e/pull_request/full/one_card/test_llama32_lora.py
-    - tests/e2e/pull_request/full/one_card/test_qwen3_multi_loras.py
-    - tests/e2e/pull_request/full/one_card/test_qwen35_densemodel_lora.py
-    - tests/e2e/pull_request/full/one_card/pooling/test_qwen3_reranker_lora.py
-    - tests/e2e/pull_request/full/two_cards/test_ilama_lora_tp2.py
-    - tests/e2e/pull_request/full/two_cards/test_llama32_lora_tp2.py
-    - tests/e2e/pull_request/full/one_card/test_lora_with_spec_decode.py
+    - tests/e2e/pull_request/light/one_card/lora
+    - tests/e2e/pull_request/light/two_card/lora
 
 - name: model_loader
   optional: true
