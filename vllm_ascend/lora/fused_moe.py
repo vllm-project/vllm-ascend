@@ -37,6 +37,7 @@ Design (see plan in conversation history):
     TP=4 EP=1 on 4×64GB. Other paths assert early so users get a clear
     error rather than silently wrong outputs.
 """
+
 from __future__ import annotations
 
 import torch
@@ -47,7 +48,7 @@ from vllm.distributed.parallel_state import (
     get_tensor_model_parallel_rank,
     get_tensor_model_parallel_world_size,
 )
-from vllm.logger import init_logger
+from vllm.logger import logger
 from vllm.lora.layers.base import BaseLayerWithLoRA
 from vllm.lora.layers.fused_moe import FusedMoE3DWithLoRA, FusedMoEWithLoRA
 from vllm.lora.layers.utils import _get_lora_device
@@ -57,8 +58,6 @@ from vllm_ascend.ascend_forward_context import _EXTRA_CTX
 from vllm_ascend.ops.activation import AscendSwigluOAIAndMul
 from vllm_ascend.ops.fused_moe.fused_moe import AscendFusedMoE
 from vllm_ascend.ops.fused_moe.moe_stage_contracts import MoEMlpComputeInput
-
-logger = init_logger(__name__)
 
 
 def _assert_ascend_moe_lora_supported(base_layer: AscendFusedMoE) -> None:
@@ -155,11 +154,7 @@ class AscendFusedMoEWithLoRA(FusedMoEWithLoRA):
             orig_mlp = comm._apply_mlp
             self_ref._moe_state["expert_map"] = kwargs.get("expert_map")
             try:
-                comm._apply_mlp = (
-                    lambda mlp_input: self_ref._apply_mlp_with_lora(
-                        orig_mlp, mlp_input
-                    )
-                )
+                comm._apply_mlp = lambda mlp_input: self_ref._apply_mlp_with_lora(orig_mlp, mlp_input)
                 return orig_apply(layer, x, *args, **kwargs)
             finally:
                 comm._apply_mlp = orig_mlp
@@ -168,9 +163,7 @@ class AscendFusedMoEWithLoRA(FusedMoEWithLoRA):
         # We cannot use __get__ because orig_apply already is a bound method;
         # storing the function directly works because Python looks up instance
         # attrs before class attrs.
-        quant_method.apply = apply_wrapper.__get__(
-            quant_method, type(quant_method)
-        )
+        quant_method.apply = apply_wrapper.__get__(quant_method, type(quant_method))
 
     # ------------------------------------------------------------------
     # LoRA-aware MLP
@@ -196,10 +189,7 @@ class AscendFusedMoEWithLoRA(FusedMoEWithLoRA):
             )
             return orig_mlp(mlp_input)
         if mlp_input.topk_ids is None:
-            logger.warning_once(
-                "Ascend MoE LoRA: topk_ids unavailable in MoEMlpComputeInput; "
-                "skipping LoRA delta."
-            )
+            logger.warning_once("Ascend MoE LoRA: topk_ids unavailable in MoEMlpComputeInput; skipping LoRA delta.")
             return orig_mlp(mlp_input)
 
         # Local imports keep the GPU-only test environment importable.
@@ -276,9 +266,7 @@ class AscendFusedMoEWithLoRA(FusedMoEWithLoRA):
 
         # === Stage 3: activation (SiLU / SwiGLU) ===
         if mlp_input.activation == "swigluoai":
-            silu_out = AscendSwigluOAIAndMul.swiglu_oai_forward(
-                gate_up.view(-1, gate_up.shape[-1])
-            )
+            silu_out = AscendSwigluOAIAndMul.swiglu_oai_forward(gate_up.view(-1, gate_up.shape[-1]))
         else:
             silu_out = torch_npu.npu_swiglu(gate_up)
         if mlp_input.topk_scales is not None:
@@ -331,10 +319,7 @@ class AscendFusedMoEWithLoRA(FusedMoEWithLoRA):
         # AscendSharedFusedMoE inherits from AscendFusedMoE so this isinstance
         # check matches both. _assert_ascend_moe_lora_supported in __init__
         # rejects layers that actually carry shared experts.
-        return (
-            isinstance(source_layer, AscendFusedMoE)
-            and len(packed_modules_list) == 2
-        )
+        return isinstance(source_layer, AscendFusedMoE) and len(packed_modules_list) == 2
 
 
 class AscendFusedMoE3DWithLoRA(AscendFusedMoEWithLoRA, FusedMoE3DWithLoRA):
@@ -354,10 +339,7 @@ class AscendFusedMoE3DWithLoRA(AscendFusedMoEWithLoRA, FusedMoE3DWithLoRA):
         model_config: PretrainedConfig | None = None,
     ) -> bool:
         del lora_config, model_config
-        return (
-            isinstance(source_layer, AscendFusedMoE)
-            and len(packed_modules_list) == 1
-        )
+        return isinstance(source_layer, AscendFusedMoE) and len(packed_modules_list) == 1
 
 
 # ----------------------------------------------------------------------

@@ -3,14 +3,12 @@
 from collections.abc import Callable
 
 import torch
-from vllm.logger import init_logger
+from vllm.logger import logger
 from vllm.lora.punica_wrapper.punica_base import PunicaWrapperBase
 
 import vllm_ascend.envs as envs_ascend
 from vllm_ascend.lora.utils import refresh_all_lora_classes
 from vllm_ascend.utils import AscendDeviceType, get_ascend_device_type
-
-logger = init_logger(__name__)
 
 # Valid values for VLLM_ASCEND_MOE_LORA_KERNEL. See vllm_ascend/envs.py.
 _MOE_LORA_KERNELS = ("bgmv", "bgmv_per_expert", "torch", "ascendc")
@@ -465,26 +463,44 @@ class PunicaWrapperNPU(PunicaWrapperBase):
         kernel = envs_ascend.VLLM_ASCEND_MOE_LORA_KERNEL
         if kernel not in _MOE_LORA_KERNELS:
             logger.warning_once(
-                "Unknown VLLM_ASCEND_MOE_LORA_KERNEL=%r; falling back to 'bgmv'. "
-                "Valid values: %s",
-                kernel, _MOE_LORA_KERNELS,
+                "Unknown VLLM_ASCEND_MOE_LORA_KERNEL=%r; falling back to 'bgmv'. Valid values: %s",
+                kernel,
+                _MOE_LORA_KERNELS,
             )
             kernel = "bgmv"
 
         if kernel == "bgmv":
             return self._add_lora_fused_moe_bgmv(
-                y, x, lora_a_stacked, lora_b_stacked,
-                expert_ids, adapter_enabled, offset, token_lora_mapping,
+                y,
+                x,
+                lora_a_stacked,
+                lora_b_stacked,
+                expert_ids,
+                adapter_enabled,
+                offset,
+                token_lora_mapping,
             )
         elif kernel == "bgmv_per_expert":
             return self._add_lora_fused_moe_bgmv_per_expert(
-                y, x, lora_a_stacked, lora_b_stacked,
-                expert_ids, adapter_enabled, offset, token_lora_mapping,
+                y,
+                x,
+                lora_a_stacked,
+                lora_b_stacked,
+                expert_ids,
+                adapter_enabled,
+                offset,
+                token_lora_mapping,
             )
         elif kernel == "torch":
             return self._add_lora_fused_moe_torch_ref(
-                y, x, lora_a_stacked, lora_b_stacked,
-                expert_ids, adapter_enabled, offset, token_lora_mapping,
+                y,
+                x,
+                lora_a_stacked,
+                lora_b_stacked,
+                expert_ids,
+                adapter_enabled,
+                offset,
+                token_lora_mapping,
             )
         elif kernel == "ascendc":
             raise NotImplementedError(
@@ -532,16 +548,10 @@ class PunicaWrapperNPU(PunicaWrapperBase):
         # to avoid out-of-bounds; values out of [0, max_loras) get masked out
         # by valid_mask below.
         tlm_clamped = token_lora_mapping.clamp(min=0, max=max_loras)
-        valid_mask = (
-            (token_lora_mapping >= 0)
-            & (token_lora_mapping < max_loras)
-            & (adapter_enabled[tlm_clamped] != 0)
-        )
+        valid_mask = (token_lora_mapping >= 0) & (token_lora_mapping < max_loras) & (adapter_enabled[tlm_clamped] != 0)
         # Sentinel routing: invalid rows go to (lora=0, expert=0); their
         # shrink buffer is zeroed below before expand, so they contribute 0.
-        safe_lora = torch.where(
-            valid_mask, tlm_clamped, torch.zeros_like(tlm_clamped)
-        )
+        safe_lora = torch.where(valid_mask, tlm_clamped, torch.zeros_like(tlm_clamped))
         # Cap to [0, max_loras) explicitly so virtual_idx stays in
         # [0, max_loras * local_E) range that A_flat / B_flat span.
         safe_lora = safe_lora.clamp(max=max_loras - 1)
@@ -555,21 +565,13 @@ class PunicaWrapperNPU(PunicaWrapperBase):
             slice_out = B.shape[2]
             col_start = offset + slice_idx * slice_out
 
-            A_flat = A.permute(1, 0, 2, 3).reshape(
-                local_E * max_loras, rank, A.shape[-1]
-            ).contiguous()
-            B_flat = B.permute(1, 0, 2, 3).reshape(
-                local_E * max_loras, slice_out, rank
-            ).contiguous()
+            A_flat = A.permute(1, 0, 2, 3).reshape(local_E * max_loras, rank, A.shape[-1]).contiguous()
+            B_flat = B.permute(1, 0, 2, 3).reshape(local_E * max_loras, slice_out, rank).contiguous()
 
-            buffer = torch.zeros(
-                (x.size(0), rank), dtype=torch.float32, device=x.device
-            )
+            buffer = torch.zeros((x.size(0), rank), dtype=torch.float32, device=x.device)
             self.bgmv_shrink(x, A_flat, buffer, virtual_idx, 1.0)
             buffer.mul_(valid_mask.unsqueeze(-1).to(buffer.dtype))
-            self.bgmv_expand_slice(
-                buffer, B_flat, y, virtual_idx, col_start, slice_out, True
-            )
+            self.bgmv_expand_slice(buffer, B_flat, y, virtual_idx, col_start, slice_out, True)
 
     def _add_lora_fused_moe_bgmv_per_expert(
         self,
@@ -601,19 +603,14 @@ class PunicaWrapperNPU(PunicaWrapperBase):
         narrative description, easier to step through with print/pdb than
         the combined-index version's reshape + virtual_idx tricks.
         """
-        max_loras_plus_one = int(adapter_enabled.shape[0])
         local_E = lora_a_stacked[0].shape[1]
 
         tlm_clamped = token_lora_mapping.clamp(min=0)
-        valid_mask = (token_lora_mapping >= 0) & (
-            adapter_enabled[tlm_clamped] != 0
-        )
+        valid_mask = (token_lora_mapping >= 0) & (adapter_enabled[tlm_clamped] != 0)
         # Per-bucket lora_ids will be sliced from this safe view, so invalid
         # rows route to slot 0 — but they're filtered out by `mask` before
         # gather, so the value at -1 positions is never read.
-        safe_lora = torch.where(
-            valid_mask, tlm_clamped, torch.zeros_like(tlm_clamped)
-        ).to(torch.long)
+        safe_lora = torch.where(valid_mask, tlm_clamped, torch.zeros_like(tlm_clamped)).to(torch.long)
         safe_expert = expert_ids.clamp(min=0).to(torch.long)
 
         for slice_idx in range(len(lora_a_stacked)):
@@ -641,21 +638,15 @@ class PunicaWrapperNPU(PunicaWrapperBase):
                 B_e = B[:, e].contiguous()  # [max_loras+1, slice_out, rank]
 
                 # Shrink to fp32 rank buffer (parity with combined-index path).
-                rank_buf = torch.zeros(
-                    (n_sub, rank), dtype=torch.float32, device=x.device
-                )
+                rank_buf = torch.zeros((n_sub, rank), dtype=torch.float32, device=x.device)
                 self.bgmv_shrink(x_sub, A_e, rank_buf, lora_ids_sub, 1.0)
 
                 # Expand into a compact [n_sub, slice_out] temporary, then
                 # scatter-add back into y. We use expand_slice (not expand)
                 # because the wrapper passes slice_offset/slice_size to the
                 # AscendC op explicitly.
-                out_buf = torch.zeros(
-                    (n_sub, slice_out), dtype=y.dtype, device=x.device
-                )
-                self.bgmv_expand_slice(
-                    rank_buf, B_e, out_buf, lora_ids_sub, 0, slice_out, True
-                )
+                out_buf = torch.zeros((n_sub, slice_out), dtype=y.dtype, device=x.device)
+                self.bgmv_expand_slice(rank_buf, B_e, out_buf, lora_ids_sub, 0, slice_out, True)
 
                 y[mask, col_start:col_end] += out_buf
 
@@ -696,10 +687,10 @@ class PunicaWrapperNPU(PunicaWrapperBase):
             col_start = offset + slice_idx * slice_out
             col_end = col_start + slice_out
 
-            for l in range(max_loras):
-                if int(adapter_enabled[l].item()) == 0:
+            for lora_idx in range(max_loras):
+                if int(adapter_enabled[lora_idx].item()) == 0:
                     continue
-                lora_mask = token_lora_mapping == l
+                lora_mask = token_lora_mapping == lora_idx
                 if not bool(lora_mask.any().item()):
                     continue
                 for e in range(local_E):
@@ -707,6 +698,6 @@ class PunicaWrapperNPU(PunicaWrapperBase):
                     if not bool(mask.any().item()):
                         continue
                     x_sub = x[mask].to(torch.float32)
-                    buf = x_sub @ A[l, e].t().to(torch.float32)
-                    delta = buf @ B[l, e].t().to(torch.float32)
+                    buf = x_sub @ A[lora_idx, e].t().to(torch.float32)
+                    delta = buf @ B[lora_idx, e].t().to(torch.float32)
                     y[mask, col_start:col_end] += delta.to(y.dtype)

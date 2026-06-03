@@ -83,6 +83,7 @@ def refresh_all_lora_classes():
         AscendFusedMoE3DWithLoRA,
         AscendFusedMoEWithLoRA,
     )
+
     moe_ascend_classes = (
         AscendFusedMoEWithLoRA,
         AscendFusedMoE3DWithLoRA,
@@ -90,7 +91,8 @@ def refresh_all_lora_classes():
 
     # vLLM #35077 changed _all_lora_classes from set to ordered tuple.
     # Filter out upstream Triton-based MoE wrappers and append the Ascend classes.
-    vllm.lora.utils._all_lora_classes = tuple(
-        cls for cls in vllm.lora.utils._all_lora_classes
-        if cls not in (FusedMoEWithLoRA, FusedMoE3DWithLoRA)
-    ) + ascend_classes + moe_ascend_classes
+    vllm.lora.utils._all_lora_classes = (
+        tuple(cls for cls in vllm.lora.utils._all_lora_classes if cls not in (FusedMoEWithLoRA, FusedMoE3DWithLoRA))
+        + ascend_classes
+        + moe_ascend_classes
+    )

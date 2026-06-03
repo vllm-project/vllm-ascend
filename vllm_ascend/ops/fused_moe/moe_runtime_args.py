@@ -217,9 +217,7 @@ def build_mlp_compute_input(
     # MoE-LoRA needs perm_row -> orig_token mapping; AllGather's combine_metadata
     # carries expanded_row_idx. MC2 / All2All metadata classes do not expose it
     # in the same form; pass None and let the LoRA hook fall back.
-    expanded_row_idx = getattr(
-        token_dispatch_output.combine_metadata, "expanded_row_idx", None
-    )
+    expanded_row_idx = getattr(token_dispatch_output.combine_metadata, "expanded_row_idx", None)
     return MoEMlpComputeInput(
         hidden_states=token_dispatch_output.hidden_states,
         group_list=token_dispatch_output.group_list,
