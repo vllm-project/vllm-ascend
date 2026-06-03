@@ -891,7 +891,11 @@ def _init_ascend_device_type():
     global _ascend_device_type
     from vllm_ascend import _build_info  # type: ignore
 
-    _ascend_device_type = AscendDeviceType[_build_info.__device_type__]
+    device_type = getattr(_build_info, "__device_type__", None)
+    if device_type is None:
+        soc_version = getattr(_build_info, "__soc_version__", "ASCEND910B1").upper()
+        device_type = "_310P" if "310P" in soc_version else "A2"
+    _ascend_device_type = AscendDeviceType[device_type]
 
 
 def check_ascend_device_type():
@@ -1361,12 +1365,12 @@ def refresh_block_size(vllm_config):
     if cache_config.block_size is None:
         cache_config.block_size = 128
 
+    if not scheduler_config or not model_config:
+        return
+
     if model_config.hf_config.model_type == "deepseek_v4":
         # TODO(qcs): generalize the block_size
         cache_config.block_size = 128
-
-    if not scheduler_config or not model_config:
-        return
 
     if model_config.is_hybrid:
         # Hybrid attention+mamba models rely on the model-specific sizing
@@ -1379,8 +1383,11 @@ def refresh_block_size(vllm_config):
             cache_config.block_size = 128
             return
 
-    ascend_config = get_ascend_config()
-    if ascend_config.xlite_graph_config.enabled and cache_config.block_size > 128:
+    try:
+        ascend_config = get_ascend_config()
+    except RuntimeError:
+        ascend_config = None
+    if ascend_config is not None and ascend_config.xlite_graph_config.enabled and cache_config.block_size > 128:
         logger.warning("Setting block size to 128 for xlite compatibility.")
         cache_config.block_size = 128
 
@@ -1430,17 +1437,28 @@ def singleton(cls):
     return get_instance
 
 
-# TODO: Temporarily use enable_sp to enable the dsa_cp feature of ds32.
-# and subsequent updates will introduce new interfaces. --zzhx1
 @lru_cache(maxsize=1)
 def enable_dsa_cp() -> bool:
     from vllm.config import get_current_vllm_config
 
     vllm_config = get_current_vllm_config()
-    is_ds_v32 = hasattr(vllm_config.model_config, "hf_text_config") and hasattr(
+    # DSA CP is only applicable to models with indexer (e.g., DSv3.2, DSv4).
+    has_indexer = hasattr(vllm_config.model_config, "hf_text_config") and hasattr(
         vllm_config.model_config.hf_text_config, "index_topk"
     )
-    return bool(is_ds_v32 and enable_sp())
+    if not has_indexer:
+        return False
+
+    dsa_cp_enable = False
+    additional_config = getattr(vllm_config, "additional_config", None)
+    if additional_config is not None and "enable_dsa_cp" in additional_config:
+        dsa_cp_enable = bool(additional_config["enable_dsa_cp"])
+
+    if dsa_cp_enable and not enable_sp():
+        raise ValueError(
+            "DSA CP requires SP to be enabled. Please enable SP(set VLLM_ASCEND_ENABLE_FLASHCOMM1=1) to use DSA CP."
+        )
+    return dsa_cp_enable and enable_sp()
 
 
 @lru_cache(maxsize=1)

@@ -69,7 +69,7 @@ class TestUnifiedApplyMLP310(TestBase):
         self.assertIsNone(before_gmm2_evt)
         mock_unified_apply_mlp.assert_called_once_with(mlp_compute_input=mlp_compute_input)
 
-    @patch("torch_npu.npu_grouped_matmul")
+    @patch("torch_npu.npu_grouped_matmul", create=True)
     @patch("torch_npu.npu_swiglu")
     def test_unified_apply_mlp_without_quantization_310(self, mock_npu_swiglu, mock_npu_grouped_matmul):
         mock_gmm1_out = torch.randn(10, 40, dtype=torch.float16)
@@ -118,7 +118,7 @@ class TestUnifiedApplyMLP310(TestBase):
         self.assertEqual(result.dtype, torch.float16)
 
     @patch("torch.cumsum")
-    @patch("torch_npu.npu_quant_grouped_matmul_dequant")
+    @patch("torch_npu.npu_quant_grouped_matmul_dequant", create=True)
     @patch("torch_npu.npu_swiglu")
     def test_unified_apply_mlp_with_quantization_310(
         self, mock_npu_swiglu, mock_npu_quant_grouped_matmul_dequant, mock_cumsum
