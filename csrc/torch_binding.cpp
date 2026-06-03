@@ -1758,7 +1758,7 @@ void inplace_partial_rotary_mul_npu(at::Tensor & x, const at::Tensor &r1, const 
     at::ScalarType original_type = x.scalar_type();
     at::Tensor x_cast = x.to(r1.scalar_type());
     EXEC_NPU_CMD(aclnnInplacePartialRotaryMul, x_cast, r1, r2, it->second, partial_slice);
-    x.copy_(x_cast.to(original_type));
+    x.copy_(x_cast);
 }
 
 std::tuple<at::Tensor, at::Tensor> npu_rms_norm_dynamic_quant_npu(
