@@ -215,7 +215,10 @@ class MooncakeStoreConnectorV1Scheduler:
         # 多加一个scheduler侧的m_store，会不会有冲突？
         self.backend = vllm_config.kv_transfer_config.kv_connector_extra_config.get(
             "backend", "mooncake")
-        self.m_store = backend_map.get(self.backend.lower())(
+        backend_cls = backend_map.get(self.backend.lower())
+        if backend_cls is None:
+            raise ValueError(f"Unsupported backend: {self.backend}. Supported backends are: {list(backend_map.keys())}")
+        self.m_store = backend_cls(
             vllm_config.parallel_config)
         self.history_token_ids = torch.zeros(
             (vllm_config.scheduler_config.max_model_len),
