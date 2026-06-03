@@ -38,35 +38,40 @@ class MooncakeBackend(Backend):
             self.config.global_segment_size if contribute_memory else 0)
         local_buffer_size = (
             self.config.local_buffer_size if contribute_memory else 0)
-        if self.config.protocol == "ascend":
-            local_hostname = get_ip()
-            # ASCEND_ENABLE_USE_FABRIC_MEM: Enable unified memory address direct transmission scheme
-            # and only can be used for 800 I/T A3 series.
-            # Required supporting hardware versions are as follows:
-            if os.getenv("ASCEND_ENABLE_USE_FABRIC_MEM", "0") != "1":
-                transfer_engine = global_te.get_transfer_engine(local_hostname, device_name=None)
-                self.local_seg = local_hostname + ":" + str(transfer_engine.get_rpc_port())
-                ret = self.store.setup(
-                    self.local_seg,
-                    self.config.metadata_server,
-                    global_segment_size,
-                    local_buffer_size,
-                    self.config.protocol,
-                    self.config.device_name,
-                    self.config.master_server_address,
-                    transfer_engine.get_engine(),
-                )
-            else:
-                self.local_seg = local_hostname
-                ret = self.store.setup(
-                    self.local_seg,
-                    self.config.metadata_server,
-                    global_segment_size,
-                    0,
-                    self.config.protocol,
-                    self.config.device_name,
-                    self.config.master_server_address,
-                )
+        if self.config.protocol != "ascend":
+            raise ValueError(
+                f"Unsupported mooncake protocol: {self.config.protocol!r}. "
+                "Only 'ascend' is supported."
+            )
+
+        local_hostname = get_ip()
+        # ASCEND_ENABLE_USE_FABRIC_MEM: Enable unified memory address direct transmission scheme
+        # and only can be used for 800 I/T A3 series.
+        # Required supporting hardware versions are as follows:
+        if os.getenv("ASCEND_ENABLE_USE_FABRIC_MEM", "0") != "1":
+            transfer_engine = global_te.get_transfer_engine(local_hostname, device_name=None)
+            self.local_seg = local_hostname + ":" + str(transfer_engine.get_rpc_port())
+            ret = self.store.setup(
+                self.local_seg,
+                self.config.metadata_server,
+                global_segment_size,
+                local_buffer_size,
+                self.config.protocol,
+                self.config.device_name,
+                self.config.master_server_address,
+                transfer_engine.get_engine(),
+            )
+        else:
+            self.local_seg = local_hostname
+            ret = self.store.setup(
+                self.local_seg,
+                self.config.metadata_server,
+                global_segment_size,
+                0,
+                self.config.protocol,
+                self.config.device_name,
+                self.config.master_server_address,
+            )
 
         if ret != 0:
             msg = "Initialize mooncake failed."

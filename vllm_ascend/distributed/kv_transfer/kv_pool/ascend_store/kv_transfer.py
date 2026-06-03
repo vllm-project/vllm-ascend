@@ -3,7 +3,6 @@ import queue
 import threading
 import time
 from collections import defaultdict
-from concurrent.futures import ThreadPoolExecutor
 from typing import Any
 
 import numpy as np
@@ -256,8 +255,7 @@ class KVTransferThread(threading.Thread):
         self.num_addrs_per_block = len(token_database.block_len)
         self.done_task_lock = threading.Lock()
         self.request_queue: queue.Queue[Any] = queue.Queue()
-        # TODO(jianzs): make this configurable
-        self.executor = ThreadPoolExecutor(max_workers=32)
+        self.stored_requests: defaultdict[str, int] = defaultdict(int)
         self.finished_requests: set[str] = set()
         self.kv_event_lock = threading.Lock()
         self.kv_events: list[BlockStored] = []
@@ -420,29 +418,6 @@ class KVTransferThread(threading.Thread):
             self.kv_events.clear()
         return events
 
-
-class KVCacheStoreSendingThread(KVTransferThread):
-    def __init__(
-        self,
-        m_store: Backend,
-        token_database: ChunkedTokenDatabase,
-        block_size: int,
-        tp_rank: int,
-        tp_size: int,
-        dcp_size: int,
-        put_step: int,
-        kv_role: str,
-        ready_event: threading.Event,
-        enable_kv_event: bool = False,
-    ):
-        super().__init__(
-            m_store, token_database, block_size, tp_rank, tp_size, dcp_size, ready_event, name="KVCacheSendingThread"
-        )
-        self.put_step = put_step
-        self.kv_role = kv_role
-        self.stored_requests = defaultdict[str, int](int)
-        self.enable_kv_event = enable_kv_event
-
     def add_stored_request(self, req_id: str):
         with self.done_task_lock:
             self.stored_requests[req_id] += 1
@@ -463,6 +438,28 @@ class KVCacheStoreSendingThread(KVTransferThread):
                 del self.stored_requests[req_id]
                 return True
             return False
+
+
+class KVCacheStoreSendingThread(KVTransferThread):
+    def __init__(
+        self,
+        m_store: Backend,
+        token_database: ChunkedTokenDatabase,
+        block_size: int,
+        tp_rank: int,
+        tp_size: int,
+        dcp_size: int,
+        put_step: int,
+        kv_role: str,
+        ready_event: threading.Event,
+        enable_kv_event: bool = False,
+    ):
+        super().__init__(
+            m_store, token_database, block_size, tp_rank, tp_size, dcp_size, ready_event, name="KVCacheSendingThread"
+        )
+        self.put_step = put_step
+        self.kv_role = kv_role
+        self.enable_kv_event = enable_kv_event
 
     def _handle_request(self, req_meta: ReqMeta):
         token_len = req_meta.save_end_token
@@ -647,28 +644,6 @@ class KVCacheStoreKeyLayerSendingThread(KVTransferThread):
         self.put_step = put_step
         self.layer_save_finished_events = layer_save_finished_events
         self.sync_save_events = sync_save_events
-        self.stored_requests = defaultdict[str, int](int)
-
-    def add_stored_request(self, req_id: str):
-        with self.done_task_lock:
-            self.stored_requests[req_id] += 1
-
-    def dec_stored_request(self, req_id: str):
-        with self.done_task_lock:
-            if req_id in self.stored_requests:
-                self.stored_requests[req_id] -= 1
-
-    def delete_finished_stored_request(self, req_id: str):
-        with self.done_task_lock:
-            if req_id in self.stored_requests:
-                del self.stored_requests[req_id]
-
-    def try_finish_and_delete_stored_request(self, req_id: str) -> bool:
-        with self.done_task_lock:
-            if req_id in self.stored_requests and self.stored_requests[req_id] == 0:
-                del self.stored_requests[req_id]
-                return True
-            return False
 
     def add_request(  # type: ignore[override]
         self, req_meta: list[LayerTransferTask]
@@ -902,7 +877,6 @@ class KVCacheStoreLayerSendingThread(KVTransferThread):
         self.enable_kv_event = enable_kv_event
         self.layer_save_finished_events = layer_save_finished_events
         self.sync_save_events = sync_save_events
-        self.stored_requests = defaultdict[str, int](int)
         self.layer_transfer_finished_events = layer_transfer_finished_events
         self.max_transfer_blocks = max_transfer_blocks
         self.max_transfer_bytes = max_transfer_bytes
@@ -912,27 +886,6 @@ class KVCacheStoreLayerSendingThread(KVTransferThread):
             num_ranks_per_layer,
             page_size_bytes,
         )
-
-    def add_stored_request(self, req_id: str):
-        with self.done_task_lock:
-            self.stored_requests[req_id] += 1
-
-    def dec_stored_request(self, req_id: str):
-        with self.done_task_lock:
-            if req_id in self.stored_requests:
-                self.stored_requests[req_id] -= 1
-
-    def delete_finished_stored_request(self, req_id: str):
-        with self.done_task_lock:
-            if req_id in self.stored_requests:
-                del self.stored_requests[req_id]
-
-    def try_finish_and_delete_stored_request(self, req_id: str) -> bool:
-        with self.done_task_lock:
-            if req_id in self.stored_requests and self.stored_requests[req_id] == 0:
-                del self.stored_requests[req_id]
-                return True
-            return False
 
     def add_request(  # type: ignore[override]
         self, req_meta: list[LayerTransferTask]
