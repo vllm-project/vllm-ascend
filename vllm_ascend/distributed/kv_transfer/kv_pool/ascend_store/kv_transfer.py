@@ -348,27 +348,27 @@ class KVCacheStoreSendingThread(KVTransferThread):
                     addrs.append(addr)
                     sizes.append(size)
 
-                # Create KV event
-                if self.enable_kv_event:
-                    token_ids = req_meta.token_ids[start : ends[index]] if req_meta.token_ids is not None else None
-                    block_size = (
-                        req_meta.original_block_size[group_id]
-                        if isinstance(req_meta.original_block_size, list)
-                        else req_meta.original_block_size
-                    )
-                    if block_size is not None:
-                        stored_event = BlockStored(
-                            block_hashes=[new_block_hashes[index]],
-                            parent_block_hash=prev_key,
-                            token_ids=token_ids,
-                            block_size=block_size,
-                            lora_id=None,
-                            medium="cpu",
-                            lora_name=None,
+                    # Create KV event
+                    if self.enable_kv_event:
+                        token_ids = req_meta.token_ids[start : ends[index]] if req_meta.token_ids is not None else None
+                        block_size = (
+                            req_meta.original_block_size[group_id]
+                            if isinstance(req_meta.original_block_size, list)
+                            else req_meta.original_block_size
                         )
-                        stored_events.append(stored_event)
-                        prev_key = new_block_hashes[index]
-                        logger.debug("Added kv cache event '%s' to kv cache events queue", stored_event)
+                        if block_size is not None:
+                            stored_event = BlockStored(
+                                block_hashes=[new_block_hashes[index]],
+                                parent_block_hash=prev_key,
+                                token_ids=token_ids,
+                                block_size=block_size,
+                                lora_id=None,
+                                medium="cpu",
+                                lora_name=None,
+                            )
+                            stored_events.append(stored_event)
+                            prev_key = new_block_hashes[index]
+                            logger.debug("Added kv cache event '%s' to kv cache events queue", stored_event)
 
                 if self.kv_role == "kv_consumer":
                     keys, addrs, sizes = self._decode_adaptor_prefill_pp(
