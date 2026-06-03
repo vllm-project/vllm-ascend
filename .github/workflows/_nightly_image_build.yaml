@@ -70,7 +70,7 @@ jobs:
             -f .github/workflows/dockerfiles/Dockerfile.nightly.${{ inputs.target }} \
             --build-arg CANN_VERSION="9.0.0" \
             --build-arg UBUNTU_VERSION="22.04" \
-            --build-arg PYTHON_VERSION="3.11" \
+            --build-arg PYTHON_VERSION="3.12" \
             --build-arg VLLM_ASCEND_BRANCH="${BRANCH_TAG}" \
             --build-arg GITEE_USERNAME="${GITEE_USERNAME}" \
             --build-arg GITEE_TOKEN="${GITEE_TOKEN}" \

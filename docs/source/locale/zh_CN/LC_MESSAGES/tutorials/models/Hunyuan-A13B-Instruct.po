@@ -75,6 +75,7 @@ msgid "Software Stack Version Verification"
 msgstr "软件栈版本验证"
 
 #: ../../source/tutorials/models/Hunyuan-A13B-Instruct.md:66
+# TODO: 需在 Python 3.12 环境验证后更新版本号
 msgid ""
 "The environment is based on CANN built into the GiteeAI platform, and "
 "successfully runs vLLM |vllm_ascend_version|, and vLLM-"

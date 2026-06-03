@@ -5,7 +5,7 @@ This document describes how to install vllm-ascend manually.
 ## Requirements
 
 - OS: Linux
-- Python: >= 3.10, < 3.12
+- Python: >= 3.10, < 3.13
 - Hardware with Ascend NPUs. It's usually the Atlas 800 A2 series.
 - Software:
 

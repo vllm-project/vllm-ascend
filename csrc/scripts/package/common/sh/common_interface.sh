@@ -34,7 +34,7 @@ mk_custom_path() {
 }
 
 py_version_check(){
-    local pyver_set="3.7 3.8 3.9 3.10 3.11"
+    local pyver_set="3.7 3.8 3.9 3.10 3.11 3.12"
     local cur_date="$(date +"%Y-%m-%d %H:%M:%S")"
     which python3 > /dev/null 2>&1
     if [ $? -eq 0 ]; then
@@ -47,7 +47,7 @@ py_version_check(){
                 fi
             done
             
-            echo "[Common] [$cur_date] [WARNING]: $python_version is not in Python3.7.x, Python3.8.x, Python3.9.x, Python3.10.x, Python3.11.x."
+            echo "[Common] [$cur_date] [WARNING]: $python_version is not in Python3.7.x, Python3.8.x, Python3.9.x, Python3.10.x, Python3.11.x, Python3.12.x"
             return 1
         else
             echo "[Common] [$cur_date] [WARNING]: $python_version cannot be identified as a standard version, please check manually."
