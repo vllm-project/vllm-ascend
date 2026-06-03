@@ -3,7 +3,7 @@
 import pytest
 
 from tests.e2e.conftest import VllmRunner, wait_until_npu_memory_free
-from tests.e2e.pull_request.full.one_card.test_llama32_lora import generate_and_test
+from tests.e2e.pull_request.light.one_card.lora.test_llama32_lora import generate_and_test
 from vllm_ascend.utils import enable_custom_op
 
 enable_custom_op()

@@ -27,6 +27,11 @@ on:
         type: string
         required: true
         description: 'JSON array of test groups from select_tests.py'
+      ref:
+        type: string
+        required: false
+        default: ''
+        description: 'The vllm-ascend ref to test.'
 
 # Bash shells do not use ~/.profile or ~/.bashrc so these shells need to be explicitly
 # declared as "shell: bash -el {0}" on steps that need to be properly activated.
@@ -43,7 +48,7 @@ permissions:
 
 jobs:
   selected-tests:
-    name: ${{ matrix.group.npu_type }}-${{ matrix.group.num_npus }} card
+    name: ${{ matrix.group.npu_type }}-${{ matrix.group.num_npus }}card
     strategy:
       fail-fast: false
       matrix:
@@ -98,6 +103,8 @@ jobs:
 
       - name: Checkout vllm-project/vllm-ascend repo
         uses: actions/checkout@v6
+        with:
+          ref: ${{ inputs.ref || github.ref }}
 
       - name: Get csrc hash
         id: get_csrc_hash
@@ -180,7 +187,14 @@ jobs:
             echo -e "    \033[32m-\033[0m ${target}"
           done
           echo -e "\033[1;34m====================\033[0m"
-          pytest -sv --color=yes ${{ matrix.group.tests }}
+          failed=0
+          for target in ${{ matrix.group.tests }}; do
+            echo -e "\033[1;34m=== Running target: ${target} ===\033[0m"
+            if ! pytest -sv --color=yes "${target}"; then
+              failed=1
+            fi
+          done
+          exit "${failed}"
 
       - name: Run selected tests without device
         if: ${{ steps.check_npu.outputs.has_npu == 'false' }}
@@ -200,4 +214,11 @@ jobs:
             echo -e "    \033[32m-\033[0m ${target}"
           done
           echo -e "\033[1;34m====================\033[0m"
-          pytest -sv --color=yes ${{ matrix.group.tests }}
+          failed=0
+          for target in ${{ matrix.group.tests }}; do
+            echo -e "\033[1;34m=== Running target: ${target} ===\033[0m"
+            if ! pytest -sv --color=yes "${target}"; then
+              failed=1
+            fi
+          done
+          exit "${failed}"
