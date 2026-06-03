@@ -139,7 +139,7 @@ class NPUWorker310(NPUWorker):
 
     def _warm_up_atb(self):
         # 310p device do not support torch_npu._npu_matmul_add_fp32 atb ops
-        logger.info_once("[310P] Skip ATB warm-up: torch_npu._npu_matmul_add_fp32 unsupported.")
+        logger.info_once("[310P] Skip ATB warm-up.")
 
     def _init_device(self):
         device = torch.device(f"npu:{self.local_rank}")
