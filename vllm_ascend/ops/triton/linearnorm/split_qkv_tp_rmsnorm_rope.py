@@ -43,6 +43,8 @@ def _split_qkv_and_compute_local_qk_var_kernel(
     num_tokens,
     q_cols: tl.constexpr,
     k_cols: tl.constexpr,
+    q_cols_pow2: tl.constexpr,
+    k_cols_pow2: tl.constexpr,
     qkv_stride: tl.constexpr,
     q_inv_size: tl.constexpr,
     k_inv_size: tl.constexpr,
@@ -64,10 +66,13 @@ def _split_qkv_and_compute_local_qk_var_kernel(
         token_indices = block_start + block_range
         token_mask = (token_indices < num_tokens)[:, None]
 
+        # Precompute column aranges (padded to power-of-2 for Ascend NPU)
+        q_offset = tl.arange(0, q_cols_pow2)[None, :]
+        k_offset = tl.arange(0, k_cols_pow2)[None, :]
+
         # === Batch load QKV data ===
-        # Q: [BLOCK_SIZE, q_cols]
-        q_offset = tl.arange(0, q_cols)[None, :]
-        q_mask = token_mask & (q_offset < qkv_stride)
+        # Q: padded arange, masked strictly to q_cols
+        q_mask = token_mask & (q_offset < q_cols)
         q_batch = tl.load(
             input_ptr + token_indices[:, None] * qkv_stride + q_offset,
             mask=q_mask,
@@ -75,21 +80,19 @@ def _split_qkv_and_compute_local_qk_var_kernel(
         )
         q_batch_f32 = q_batch.to(tl.float32)
 
-        # K: [BLOCK_SIZE, k_cols], K follows immediately after Q
-        k_offset = (q_cols + tl.arange(0, k_cols))[None, :]
-        k_mask = token_mask & (k_offset < qkv_stride)
+        # K: padded arange at offset q_cols, masked strictly to k_cols
+        k_mask = token_mask & (k_offset < k_cols)
         k_batch = tl.load(
-            input_ptr + token_indices[:, None] * qkv_stride + k_offset,
+            input_ptr + token_indices[:, None] * qkv_stride + q_cols + k_offset,
             mask=k_mask,
             other=0.0,
         )
         k_batch_f32 = k_batch.to(tl.float32)
 
-        # V: [BLOCK_SIZE, k_cols], V is at offset Q + 2*K
-        v_offset = (q_cols + k_cols + tl.arange(0, k_cols))[None, :]
-        v_mask = token_mask & (v_offset < qkv_stride)
+        # V: padded arange at offset q_cols + k_cols, masked strictly to k_cols
+        v_mask = token_mask & (k_offset < k_cols)
         v_batch = tl.load(
-            input_ptr + token_indices[:, None] * qkv_stride + v_offset,
+            input_ptr + token_indices[:, None] * qkv_stride + q_cols + k_cols + k_offset,
             mask=v_mask,
             other=0.0,
         )
@@ -99,19 +102,19 @@ def _split_qkv_and_compute_local_qk_var_kernel(
         k_squaresum = tl.sum(k_batch_f32 * k_batch_f32, axis=-1) * k_inv_size
 
         # === Batch store QKV output ===
-        # Store Q
+        # Store Q: output stride uses actual q_cols
         q_out_offset = token_indices[:, None] * q_cols + q_offset
         q_out_mask = token_mask & (q_offset < q_cols)
         tl.store(q_out_ptr + q_out_offset, q_batch, mask=q_out_mask)
 
-        # Store K
-        k_out_offset = token_indices[:, None] * k_cols + tl.arange(0, k_cols)[None, :]
-        k_out_mask = token_mask & (tl.arange(0, k_cols)[None, :] < k_cols)
+        # Store K: output stride uses actual k_cols
+        k_out_offset = token_indices[:, None] * k_cols + k_offset
+        k_out_mask = token_mask & (k_offset < k_cols)
         tl.store(k_out_ptr + k_out_offset, k_batch, mask=k_out_mask)
 
-        # Store V
-        v_out_offset = token_indices[:, None] * k_cols + tl.arange(0, k_cols)[None, :]
-        v_out_mask = token_mask & (tl.arange(0, k_cols)[None, :] < k_cols)
+        # Store V: output stride uses actual k_cols
+        v_out_offset = token_indices[:, None] * k_cols + k_offset
+        v_out_mask = token_mask & (k_offset < k_cols)
         tl.store(v_out_ptr + v_out_offset, v_batch, mask=v_out_mask)
 
         # === Store variance ===
@@ -279,6 +282,9 @@ def split_qkv_tp_rmsnorm_rope_impl(
     # Precompute reciprocal to avoid division inside kernel
     q_inv_size = 1.0 / q_cols
     k_inv_size = 1.0 / k_cols
+    # Pad to power-of-2 for tl.arange (required by Ascend NPU Triton backend)
+    q_cols_pow2 = 1 << (q_cols - 1).bit_length()
+    k_cols_pow2 = 1 << (k_cols - 1).bit_length()
     _split_qkv_and_compute_local_qk_var_kernel[grid](
         input_2d,
         q,
@@ -288,6 +294,8 @@ def split_qkv_tp_rmsnorm_rope_impl(
         num_tokens,
         q_cols,
         k_cols,
+        q_cols_pow2,
+        k_cols_pow2,
         q_cols + 2 * k_cols,
         q_inv_size,
         k_inv_size,
