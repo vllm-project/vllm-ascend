@@ -68,16 +68,27 @@ class KVPoolWorker:
     ):
         model_config = vllm_config.model_config
         parallel_config = vllm_config.parallel_config
+        extra_config = vllm_config.kv_transfer_config.kv_connector_extra_config
+
+        self._init_parallelism_info(model_config, parallel_config)
+        self._init_kv_transfer_config(vllm_config, extra_config, use_layerwise)
+        self._init_key_head_config(model_config, parallel_config)
+        self._init_metadata(model_config)
+        self._init_backend(parallel_config, extra_config)
+        self._init_kv_events(vllm_config)
+        self._init_state_vars()
+        self._init_layerwise_config()
+
+    def _init_parallelism_info(self, model_config, parallel_config) -> None:
         self.local_rank = envs.LOCAL_RANK
         self.cpu_binding_rank = get_cpu_binding_rank(
-            self.local_rank,
-            parallel_config,
-        )
+            self.local_rank, parallel_config)
+
         self.use_mla = False
         if hasattr(model_config, "use_mla") and isinstance(model_config.use_mla, bool) and model_config.use_mla:
             self.use_mla = True
         self.use_sparse = hasattr(model_config.hf_text_config, "index_topk")
-        self.use_layerwise = use_layerwise
+
         self.tp_rank = get_tensor_model_parallel_rank()
         self.tp_size = get_tensor_model_parallel_world_size()
         self.pp_size = parallel_config.pipeline_parallel_size
@@ -88,32 +99,28 @@ class KVPoolWorker:
         self.dcp_size = get_decode_context_model_parallel_world_size()
         self.dcp_rank = get_decode_context_model_parallel_rank() if self.dcp_size > 1 else 0
 
+    def _init_kv_transfer_config(self, vllm_config, extra_config, use_layerwise) -> None:
+        self.use_layerwise = use_layerwise
         self.kv_role = vllm_config.kv_transfer_config.kv_role
-        extra_config = vllm_config.kv_transfer_config.kv_connector_extra_config
         self.load_async = extra_config.get("load_async", False)
-        self.consumer_is_to_put = extra_config.get(
-            "consumer_is_to_put", False
-        )
+        self.consumer_is_to_put = extra_config.get("consumer_is_to_put", False)
         self.backend = extra_config.get("backend", "mooncake")
         self.backend_name = self.backend.lower()
         self.use_gva_layerwise = self.use_layerwise and self.backend_name == "memcache"
         self.h2d_stagger_us = int(extra_config.get("h2d_stagger_us", 0))
-        self.h2d_stagger_group_size = int(
-            extra_config.get("h2d_stagger_group_size", 0))
-        self.h2d_stagger_dynamic_addrs_per_us = int(
-            extra_config.get("h2d_stagger_dynamic_addrs_per_us", 0))
-        self.h2d_stagger_max_us = int(
-            extra_config.get("h2d_stagger_max_us", 0))
-        self.layerwise_max_transfer_blocks = int(
-            extra_config.get("layerwise_max_transfer_blocks", 0))
-        self.layerwise_max_transfer_bytes = int(
-            extra_config.get("layerwise_max_transfer_bytes", 0))
+        self.h2d_stagger_group_size = int(extra_config.get("h2d_stagger_group_size", 0))
+        self.h2d_stagger_dynamic_addrs_per_us = int(extra_config.get("h2d_stagger_dynamic_addrs_per_us", 0))
+        self.h2d_stagger_max_us = int(extra_config.get("h2d_stagger_max_us", 0))
+        self.layerwise_max_transfer_blocks = int(extra_config.get("layerwise_max_transfer_blocks", 0))
+        self.layerwise_max_transfer_bytes = int(extra_config.get("layerwise_max_transfer_bytes", 0))
         self.block_size = vllm_config.cache_config.block_size
 
+    def _init_key_head_config(self, model_config, parallel_config) -> None:
         if self.pcp_size > 1:
             self.block_size *= self.pcp_size
         if self.dcp_size > 1:
             self.block_size *= self.dcp_size
+
         self.current_layer = 0
         self.num_layers = model_config.get_num_layers(parallel_config)
 
@@ -133,6 +140,7 @@ class KVPoolWorker:
                              self.head_or_tp_rank)
         self.num_ranks_per_layer = self.pcp_size * self.dcp_size * (self.tp_size // self.put_step)
 
+    def _init_metadata(self, model_config) -> None:
         self.metadata = KeyMetadata(
             model_config.model.rstrip("/").split("/")[-1],
             self.head_or_tp_rank,
@@ -140,34 +148,9 @@ class KVPoolWorker:
             self.dcp_rank,
             self.pp_rank,
         )
+        self.token_database = ChunkedTokenDatabase(self.metadata, self.block_size, None)
 
-        partitions = None
-        if self.kv_role == "kv_consumer" and self.consumer_is_to_put:
-            num_hidden_layers = model_config.hf_text_config.num_hidden_layers
-            partition_list_str = vllm_config.kv_transfer_config.kv_connector_extra_config.get(
-                "prefill_pp_layer_partition", None
-            )
-            prefill_pp_size = int(vllm_config.kv_transfer_config.kv_connector_extra_config.get("prefill_pp_size", 1))
-
-            if partition_list_str is not None:
-                try:
-                    partitions = [int(layer) for layer in partition_list_str.split(",")]
-                except ValueError as err:
-                    raise ValueError("Invalid partition string: {}".format(partition_list_str)) from err
-                if len(partitions) != prefill_pp_size:
-                    raise ValueError(f"{len(partitions)=} does not match {prefill_pp_size=}.")
-                if sum(partitions) != num_hidden_layers:
-                    raise ValueError(f"{sum(partitions)=} does not match {num_hidden_layers=}.")
-            else:
-                layers_per_partition = num_hidden_layers // prefill_pp_size
-                partitions = [layers_per_partition for _ in range(prefill_pp_size)]
-
-                if remaining_layers := num_hidden_layers % prefill_pp_size:
-                    for i in range(2, remaining_layers + 2):
-                        partitions[-i] += 1
-
-        self.token_database = ChunkedTokenDatabase(self.metadata, self.block_size, partitions)
-
+    def _init_backend(self, parallel_config, extra_config) -> None:
         backend = backend_map.get(self.backend.lower())
         assert backend is not None
         backend_path = backend.get("path")
@@ -180,8 +163,7 @@ class KVPoolWorker:
             memcache_client_cpus = extra_config.get("memcache_client_cpus")
             if memcache_client_cpus is None:
                 try:
-                    memcache_client_cpus = get_memcache_client_cpus(
-                        self.cpu_binding_rank)
+                    memcache_client_cpus = get_memcache_client_cpus(self.cpu_binding_rank)
                 except Exception as err:
                     logger.warning(
                         "Failed to get MemCache client CPUs for rank%d: %s",
@@ -197,11 +179,14 @@ class KVPoolWorker:
             self.m_store = real_backend(  # type: ignore[misc]
                 parallel_config
             )
+
+    def _init_kv_events(self, vllm_config) -> None:
         kv_event_config = vllm_config.kv_events_config
         self.enable_kv_events = False
         if kv_event_config and kv_event_config.enable_kv_cache_events:
             self.enable_kv_events = True
 
+    def _init_state_vars(self) -> None:
         self.kv_send_thread: KVTransferThread | None = None
         self.kv_recv_thread: KVTransferThread | None = None
         self._registered_buffer_ptrs: list[int] = []
@@ -211,22 +196,24 @@ class KVPoolWorker:
         self._buffers_registered = False
         self._transfer_threads_started = False
 
+    def _init_layerwise_config(self) -> None:
         self.layer_load_tasks: list[list[LayerTransferTask]] = [[] for i in range(self.num_layers)]
         self.layer_save_tasks: list[list[LayerTransferTask]] = [[] for i in range(self.num_layers)]
         self.layer_load_finished_events = None
         self.layer_save_finished_events = None
         self.layer_transfer_finished_events = None
+
         self.kv_transfer_thread_cpus: list[int] = []
         if get_ascend_config().enable_cpu_binding:
             try:
-                self.kv_transfer_thread_cpus = get_memcache_client_cpus(
-                    self.cpu_binding_rank)
+                self.kv_transfer_thread_cpus = get_memcache_client_cpus(self.cpu_binding_rank)
             except Exception as err:
                 logger.warning(
                     "Failed to get MemCache CPUs for KV transfer threads in rank%d: %s",
                     self.cpu_binding_rank,
                     err,
                 )
+
         self.next_layer_to_submit = 0
         layerwise_config = get_layerwise_config(self.num_layers)
         self.layerwise_offload = layerwise_config.has_layer_reuse
@@ -234,6 +221,7 @@ class KVPoolWorker:
         self.independent_layers = layerwise_config.independent_layers
         self.prefetch_layer_map = layerwise_config.prefetch_layer_map
         self.sync_save_events = None
+
         if self.use_gva_layerwise and self.layerwise_offload:
             self.layer_transfer_finished_events = [
                 threading.Event() for _ in range(self.num_layers)
