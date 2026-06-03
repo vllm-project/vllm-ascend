@@ -1,5 +1,5 @@
 import importlib
-from typing import Any
+from typing import Any, Optional
 
 from vllm.config import VllmConfig
 from vllm.distributed.kv_transfer.kv_connector.v1.base import KVConnectorMetadata
@@ -495,6 +495,227 @@ class KVPoolScheduler:
             original_block_size=self.original_block_size,
         )
 
+    def _process_new_request(
+        self,
+        request: Request,
+        scheduler_output: SchedulerOutput,
+        force_skip_save: bool,
+    ) -> Optional[ReqMeta]:
+        load_spec = self.load_specs.pop(request.req_id, None)
+        num_tokens_to_compute = (
+            request.num_computed_tokens
+            + scheduler_output.num_scheduled_tokens[request.req_id]
+        )
+        request_tuple = self._unfinished_requests.get(request.req_id)
+        if request_tuple is None:
+            raise ValueError(
+                f"Request {request.req_id} is not in _unfinished_requests, "
+                "but it is scheduled as a new request"
+            )
+        request_real = request_tuple[0]
+        if not isinstance(request.block_ids[0], list):
+            unfolded_block_ids = request.block_ids.copy()
+        else:
+            unfolded_block_ids = request.block_ids[0].copy()
+        previous_tracker = self._request_trackers.get(request.req_id)
+        request_tracker = RequestTracker(
+            req_id=request.req_id,
+            token_len=num_tokens_to_compute,
+            allocated_block_ids=unfolded_block_ids,
+            num_saved_tokens=0,
+            token_ids=request.prompt_token_ids[:num_tokens_to_compute].copy(),
+            block_keys=(previous_tracker.block_keys.copy() if previous_tracker else []),
+            block_gvas=(previous_tracker.block_gvas.copy() if previous_tracker else []),
+            gva_block_offset=(previous_tracker.gva_block_offset if previous_tracker else 0),
+        )
+        self._request_trackers[request.req_id] = request_tracker
+        num_blocks = num_tokens_to_compute // self._block_size
+        has_last_block = num_tokens_to_compute % self._block_size != 0
+        self._allocate_gva_if_needed(
+            request_tracker,
+            request_real.block_hashes,
+            num_blocks,
+            has_last_block,
+        )
+        return self._build_req_meta(
+            request_tracker,
+            request_real.block_hashes,
+            load_spec,
+            request.prompt_token_ids,
+            force_skip_save,
+        )
+
+    def _process_preempted_cached_request(
+        self,
+        new_block_ids,
+        req_id: str,
+        i: int,
+        cached_reqs,
+        scheduler_output: SchedulerOutput,
+        force_skip_save: bool,
+    ) -> Optional[ReqMeta]:
+        if isinstance(new_block_ids, tuple):
+            new_block_ids = new_block_ids[0].copy()
+        else:
+            new_block_ids = new_block_ids.copy()
+        self._preempted_req_ids.discard(req_id)
+        load_spec = self.load_specs.pop(req_id, None)
+        if self.prefill_offload:
+            load_spec = LoadSpec(
+                vllm_cached_tokens=0,
+                kvpool_cached_tokens=cached_reqs.num_computed_tokens[i],
+                can_load=True,
+            )
+        request_tuple = self._unfinished_requests.get(req_id)
+        if request_tuple is None:
+            raise ValueError(
+                f"Request {req_id} is not in _unfinished_requests, "
+                "but it is scheduled as a preempted cached request"
+            )
+        request_real = request_tuple[0]
+        num_tokens_to_compute = (
+            request_real.num_computed_tokens
+            + scheduler_output.num_scheduled_tokens[req_id]
+        )
+        previous_tracker = self._request_trackers.get(req_id)
+        request_tracker = RequestTracker(
+            req_id=req_id,
+            token_len=num_tokens_to_compute,
+            allocated_block_ids=new_block_ids,
+            num_saved_tokens=0,
+            token_ids=request_real.prompt_token_ids[:num_tokens_to_compute].copy(),
+            block_keys=(previous_tracker.block_keys.copy() if previous_tracker else []),
+            block_gvas=(previous_tracker.block_gvas.copy() if previous_tracker else []),
+            gva_block_offset=(previous_tracker.gva_block_offset if previous_tracker else 0),
+        )
+        self._request_trackers[req_id] = request_tracker
+        num_blocks = len(new_block_ids)
+        has_last_block = num_tokens_to_compute % self._block_size != 0
+        self._allocate_gva_if_needed(
+            request_tracker,
+            request_real.block_hashes,
+            num_blocks,
+            has_last_block,
+        )
+        return self._build_req_meta(
+            request_tracker,
+            request_real.block_hashes,
+            load_spec,
+            request_real.prompt_token_ids,
+            force_skip_save,
+        )
+
+    def _process_running_cached_request(
+        self,
+        new_block_ids,
+        req_id: str,
+        i: int,
+        cached_reqs,
+        scheduler_output: SchedulerOutput,
+        force_skip_save: bool,
+    ) -> Optional[ReqMeta]:
+        if not self.save_decode_cache and not self.prefill_offload:
+            return None
+        request_tracker = self._request_trackers.get(req_id)
+        if request_tracker is None:
+            raise ValueError(
+                f"Request {req_id} is not in _request_trackers, "
+                "but it is scheduled to be cached"
+            )
+        num_new_tokens = scheduler_output.num_scheduled_tokens[req_id]
+        req_tuple = self._unfinished_requests.get(req_id)
+        if req_tuple:
+            request = req_tuple[0]
+            num_current_tokens = request_tracker.token_len
+            new_token_ids = request.all_token_ids[
+                num_current_tokens : num_current_tokens + num_new_tokens
+            ]
+            if request_tracker.token_ids is not None and new_token_ids:
+                request_tracker.token_ids.extend(new_token_ids)
+            request_tracker.token_len += num_new_tokens
+        else:
+            raise ValueError(
+                f"Request {req_id} is not in _unfinished_requests, "
+                "but it is scheduled to be cached"
+            )
+        prev_token_count = request_tracker.token_len - num_new_tokens
+        prev_hash_count = prev_token_count // self._block_size
+        current_hash_count = request_tracker.token_len // self._block_size
+        new_hash_count = current_hash_count - prev_hash_count
+        has_last_block = (
+            request_tracker.token_len % self._block_size != 0
+            or current_hash_count > len(request.block_hashes)
+        )
+        if self.use_gva_layerwise and (new_hash_count > 0 or has_last_block):
+            self._ensure_tracker_gvas_cover_blocks(
+                request_tracker,
+                request.block_hashes[:current_hash_count],
+            )
+            if has_last_block:
+                self._generate_keys_and_alloc(
+                    [],
+                    request_tracker=request_tracker,
+                    has_last_block=True,
+                )
+        if new_block_ids is not None:
+            request_tracker.update(new_block_ids)
+        load_spec = None
+        if self.prefill_offload:
+            load_spec = LoadSpec(
+                vllm_cached_tokens=cached_reqs.num_computed_tokens[i],
+                kvpool_cached_tokens=cached_reqs.num_computed_tokens[i],
+                can_load=True,
+            )
+        return self._build_req_meta(
+            request_tracker,
+            request.block_hashes,
+            load_spec,
+            request.prompt_token_ids,
+            force_skip_save,
+        )
+
+    def _process_async_load_request(
+        self,
+        request_id: str,
+        request: Request,
+        block_ids: list[int],
+    ) -> Optional[ReqMeta]:
+        load_spec = self.load_specs.pop(request_id, None)
+        if not load_spec:
+            return None
+        num_tokens_to_compute = load_spec.kvpool_cached_tokens
+        if (num_tokens_to_compute % self._block_size != 0) and (
+            num_tokens_to_compute == len(request.prompt_token_ids) - 1
+        ):
+            num_tokens_to_compute = num_tokens_to_compute + 1
+        previous_tracker = self._request_trackers.get(request_id)
+        request_tracker = RequestTracker(
+            req_id=request_id,
+            token_len=num_tokens_to_compute,
+            allocated_block_ids=block_ids,
+            num_saved_tokens=0,
+            block_keys=(previous_tracker.block_keys.copy() if previous_tracker else []),
+            block_gvas=(previous_tracker.block_gvas.copy() if previous_tracker else []),
+            gva_block_offset=(previous_tracker.gva_block_offset if previous_tracker else 0),
+        )
+        self._request_trackers[request_id] = request_tracker
+        num_blocks = num_tokens_to_compute // self._block_size
+        has_last_block = num_tokens_to_compute % self._block_size != 0
+        self._allocate_gva_if_needed(
+            request_tracker,
+            request.block_hashes,
+            num_blocks,
+            has_last_block,
+        )
+        return ReqMeta.from_request_tracker(
+            request_tracker,
+            self._block_size,
+            load_spec=load_spec,
+            skip_save=None,
+            block_hashes=request.block_hashes,
+            discard_partial_chunks=self._discard_partial_chunks,
+        )
+
     def build_connector_meta(self, scheduler_output: SchedulerOutput) -> KVConnectorMetadata:
         """Attach the connector metadata to the request object.
 
@@ -529,217 +750,38 @@ class KVPoolScheduler:
         )
 
         for request in scheduler_output.scheduled_new_reqs:
-            # Right now, we only load KV for new requests
-            load_spec = self.load_specs.pop(request.req_id, None)
-            num_tokens_to_compute = request.num_computed_tokens + scheduler_output.num_scheduled_tokens[request.req_id]
-            request_tuple = self._unfinished_requests.get(request.req_id)
-            if request_tuple is None:
-                raise ValueError(
-                    f"Request {request.req_id} is not in _unfinished_requests, "
-                    "but it is scheduled as a new request"
-                )
-            request_real = request_tuple[0]  # type: ignore[index]
-            if not isinstance(request.block_ids[0], list):
-                unfolded_block_ids = request.block_ids.copy()
-            else:
-                unfolded_block_ids = request.block_ids[0].copy()
-            previous_tracker = self._request_trackers.get(request.req_id)
-            request_tracker = RequestTracker(
-                req_id=request.req_id,
-                token_len=num_tokens_to_compute,
-                allocated_block_ids=unfolded_block_ids,
-                num_saved_tokens=0,
-                token_ids=request.prompt_token_ids[:num_tokens_to_compute].copy(),
-                block_keys=(previous_tracker.block_keys.copy() if previous_tracker else []),
-                block_gvas=(previous_tracker.block_gvas.copy() if previous_tracker else []),
-                gva_block_offset=(previous_tracker.gva_block_offset if previous_tracker else 0),
-            )
-            self._request_trackers[request.req_id] = request_tracker
-
-            num_blocks = num_tokens_to_compute // self._block_size
-            has_last_block = num_tokens_to_compute % self._block_size != 0
-
-            self._allocate_gva_if_needed(
-                request_tracker,
-                request_real.block_hashes,
-                num_blocks,
-                has_last_block,
-            )
-
-            req_meta = self._build_req_meta(
-                request_tracker,
-                request_real.block_hashes,
-                load_spec,
-                request.prompt_token_ids,
-                force_skip_save,
-            )
+            req_meta = self._process_new_request(
+                request, scheduler_output, force_skip_save)
             if req_meta is not None:
                 meta.add_request(req_meta)
 
         cached_reqs = scheduler_output.scheduled_cached_reqs
         if not force_skip_save:
             for i, req_id in enumerate(cached_reqs.req_ids):
-                # resumed request
                 new_block_ids = cached_reqs.new_block_ids[i]
-                # TODO 调试的时候，添加decode，为了验证精度
                 if not new_block_ids and not self.prefill_offload:
                     continue
                 if req_id in self._preempted_req_ids:
-                    if isinstance(new_block_ids, tuple):
-                        new_block_ids = new_block_ids[0].copy()
-                    else:
-                        new_block_ids = new_block_ids.copy()
-                    self._preempted_req_ids.discard(req_id)
-                    load_spec = self.load_specs.pop(req_id, None)
-                    if self.prefill_offload:
-                        load_spec = LoadSpec(
-                            vllm_cached_tokens=0,
-                            kvpool_cached_tokens=cached_reqs.num_computed_tokens[i],
-                            can_load=True,
-                        )
-                    request_tuple = self._unfinished_requests.get(req_id)
-                    if request_tuple is None:
-                        raise ValueError(
-                            f"Request {req_id} is not in _unfinished_requests, "
-                            "but it is scheduled as a preempted cached request"
-                        )
-                    request_real = request_tuple[0]  # type: ignore[index]
-                    num_tokens_to_compute = (
-                        request_real.num_computed_tokens + scheduler_output.num_scheduled_tokens[req_id]
+                    req_meta = self._process_preempted_cached_request(
+                        new_block_ids, req_id, i,
+                        cached_reqs, scheduler_output, force_skip_save,
                     )
-                    previous_tracker = self._request_trackers.get(req_id)
-                    request_tracker = RequestTracker(
-                        req_id=req_id,
-                        token_len=num_tokens_to_compute,
-                        allocated_block_ids=new_block_ids,
-                        num_saved_tokens=0,
-                        token_ids=request_real.prompt_token_ids[:num_tokens_to_compute].copy(),
-                        block_keys=(previous_tracker.block_keys.copy() if previous_tracker else []),
-                        block_gvas=(previous_tracker.block_gvas.copy() if previous_tracker else []),
-                        gva_block_offset=(previous_tracker.gva_block_offset if previous_tracker else 0),
-                    )
-                    self._request_trackers[req_id] = request_tracker
-
-                    num_blocks = len(new_block_ids)
-                    has_last_block = num_tokens_to_compute % self._block_size != 0
-                    self._allocate_gva_if_needed(
-                        request_tracker,
-                        request_real.block_hashes,
-                        num_blocks,
-                        has_last_block,
-                    )
-
-                    req_meta = self._build_req_meta(
-                        request_tracker,
-                        request_real.block_hashes,
-                        load_spec,
-                        request_real.prompt_token_ids,
-                        force_skip_save,
-                    )
-
-                # decode/chunked request
                 else:
-                    if not self.save_decode_cache and not self.prefill_offload:
-                        continue
-                    request_tracker = self._request_trackers.get(req_id)
-                    if request_tracker is None:
-                        raise ValueError(
-                            f"Request {req_id} is not in _request_trackers, "
-                            "but it is scheduled to be cached"
-                        )
-                    num_new_tokens = scheduler_output.num_scheduled_tokens[req_id]
-                    req_tuple = self._unfinished_requests.get(req_id)
-                    if req_tuple:
-                        request = req_tuple[0]
-                        num_current_tokens = request_tracker.token_len
-                        new_token_ids = request.all_token_ids[num_current_tokens : num_current_tokens + num_new_tokens]
-                        if request_tracker.token_ids is not None and new_token_ids:
-                            request_tracker.token_ids.extend(new_token_ids)
-                        request_tracker.token_len += num_new_tokens
-                    else:
-                        raise ValueError(
-                            f"Request {req_id} is not in _unfinished_requests, but it is scheduled to be cached"
-                        )
-                    prev_token_count = request_tracker.token_len - num_new_tokens
-                    prev_hash_count = prev_token_count // self._block_size
-                    current_hash_count = request_tracker.token_len // self._block_size
-                    new_hash_count = current_hash_count - prev_hash_count
-                    has_last_block = (
-                        request_tracker.token_len % self._block_size != 0
-                        or current_hash_count > len(request.block_hashes)
-                    )
-                    if self.use_gva_layerwise and (new_hash_count > 0 or has_last_block):
-                        self._ensure_tracker_gvas_cover_blocks(
-                            request_tracker,
-                            request.block_hashes[:current_hash_count],
-                        )
-                        if has_last_block:
-                            self._generate_keys_and_alloc(
-                                [],
-                                request_tracker=request_tracker,
-                                has_last_block=True,
-                            )
-                    if new_block_ids is not None:
-                        request_tracker.update(new_block_ids)
-                    load_spec = None
-                    if self.prefill_offload:
-                        load_spec = LoadSpec(
-                            vllm_cached_tokens=cached_reqs.num_computed_tokens[i],
-                            kvpool_cached_tokens=cached_reqs.num_computed_tokens[i],
-                            can_load=True,
-                        )
-                    req_meta = self._build_req_meta(
-                        request_tracker,
-                        request.block_hashes,
-                        load_spec,
-                        request.prompt_token_ids,
-                        force_skip_save,
+                    req_meta = self._process_running_cached_request(
+                        new_block_ids, req_id, i,
+                        cached_reqs, scheduler_output, force_skip_save,
                     )
                 if req_meta is not None:
                     meta.add_request(req_meta)
+
         request_ids = [req.req_id for req in scheduler_output.scheduled_new_reqs]
         for request_id, (request, block_ids) in self._unfinished_requests.items():
             if request_id not in request_ids and request_id not in cached_reqs.req_ids:
-                load_spec = self.load_specs.pop(request_id, None)
-                if not load_spec:
-                    continue
-                num_tokens_to_compute = load_spec.kvpool_cached_tokens
-                if (num_tokens_to_compute % self._block_size != 0) and (
-                    num_tokens_to_compute == len(request.prompt_token_ids) - 1
-                ):
-                    num_tokens_to_compute = num_tokens_to_compute + 1
-                previous_tracker = self._request_trackers.get(request_id)
-                request_tracker = RequestTracker(
-                    req_id=request_id,
-                    token_len=num_tokens_to_compute,
-                    allocated_block_ids=block_ids,
-                    num_saved_tokens=0,
-                    block_keys=(previous_tracker.block_keys.copy() if previous_tracker else []),
-                    block_gvas=(previous_tracker.block_gvas.copy() if previous_tracker else []),
-                    gva_block_offset=(previous_tracker.gva_block_offset if previous_tracker else 0),
-                )
-
-                self._request_trackers[request_id] = request_tracker
-
-                num_blocks = num_tokens_to_compute // self._block_size
-                has_last_block = num_tokens_to_compute % self._block_size != 0
-                self._allocate_gva_if_needed(
-                    request_tracker,
-                    request.block_hashes,
-                    num_blocks,
-                    has_last_block,
-                )
-
-                req_meta = ReqMeta.from_request_tracker(
-                    request_tracker,
-                    self._block_size,
-                    load_spec=load_spec,
-                    skip_save=None,
-                    block_hashes=request.block_hashes,
-                    discard_partial_chunks=self._discard_partial_chunks,
-                )
+                req_meta = self._process_async_load_request(
+                    request_id, request, block_ids)
                 if req_meta is not None:
                     meta.add_request(req_meta)
+
         return meta
 
     def request_finished(
