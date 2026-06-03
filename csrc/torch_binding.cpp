@@ -51,6 +51,8 @@
 #include "attention/recurrent_gated_delta_rule_v310/recurrent_gated_delta_rule_310_torch_adpt.h"
 #include "attention/store_kv_block/store_kv_block_torch_adpt.h"
 #include "attention/fused_gdn_gating/fused_gdn_gating_torch_adpt.h"
+#include "attention/fused_sigmoid_gating_delta_rule_update/op_host/op_api/aclnn_fused_sigmoid_gating_delta_rule_update.h"
+#include "attention/fused_sigmoid_gating_delta_rule_update/fused_sigmoid_gating_delta_rule_update_torch_adpt.h"
 #include <c10/core/Device.h>
 #include <c10/core/Scalar.h>
 #include <c10/util/Exception.h>
@@ -2415,6 +2417,24 @@ TORCH_LIBRARY_EXPAND(CONCAT(_C, _ascend), ops)
         "                         int run_mode"
         ") -> (Tensor output)");
     ops.impl("npu_causal_conv1d_custom", torch::kPrivateUse1, &vllm_ascend::npu_causal_conv1d_custom);
+    ops.def(
+        "npu_fused_sigmoid_gating_delta_rule_update(Tensor A_log, "
+        "                                           Tensor a, "
+        "                                           Tensor b, "
+        "                                           Tensor dt_bias, "
+        "                                           Tensor query, "
+        "                                           Tensor key, "
+        "                                           Tensor value, "
+        "                                           Tensor! state, "
+        "                                           Tensor actual_seq_lengths, "
+        "                                           Tensor ssm_state_indices, "
+        "                                           Tensor? num_accepted_tokens=None, "
+        "                                           float scale_value=1.0, "
+        "                                           float softplus_beta=1.0, "
+        "                                           float softplus_threshold=20.0"
+        ") -> (Tensor output)");
+    ops.impl("npu_fused_sigmoid_gating_delta_rule_update", torch::kPrivateUse1,
+             &vllm_ascend::npu_fused_sigmoid_gating_delta_rule_update);
     ops.def(
         "moe_grouped_matmul("
             "Tensor x,"
