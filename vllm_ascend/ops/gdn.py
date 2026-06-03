@@ -46,7 +46,6 @@ from vllm_ascend.compilation.acl_graph import (
 from vllm_ascend.ops.triton.fla.chunk import chunk_gated_delta_rule
 from vllm_ascend.ops.triton.fla.fused_qkvzba_split_reshape import fused_qkvzba_split_reshape_cat
 from vllm_ascend.ops.triton.fla.utils import clear_ssm_states
-from vllm_ascend.ops.triton.fused_gdn_gating import fused_gdn_gating_patch
 from vllm_ascend.ops.triton.mamba.causal_conv1d import causal_conv1d_fn
 from vllm_ascend.utils import weak_ref_tensors
 
@@ -618,7 +617,7 @@ class AscendGatedDeltaNetAttention(GatedDeltaNetAttention):
         query_non_spec, key_non_spec, value_non_spec = self.rearrange_mixed_qkv(mixed_qkv_non_spec)
 
         # 2. Recurrent attention
-        g, beta = fused_gdn_gating_patch(self.A_log, a, b, self.dt_bias)
+        g, beta = torch.ops._C_ascend.npu_fused_gdn_gating(self.A_log, a, b, self.dt_bias.to(torch.float32))
         if spec_sequence_masks is not None:
             if attn_metadata.num_prefills == 0 and attn_metadata.num_decodes == 0:
                 g_spec = g
