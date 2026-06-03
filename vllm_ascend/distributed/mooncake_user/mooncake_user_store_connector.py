@@ -445,7 +445,7 @@ class MooncakeLookupClient:
         request = self.encoder.encode(uid)
         self.socket.send_multipart(request, copy=False)
         resp = self.socket.recv()
-        result = int.from_bytes(resp, "big")
+        result = int.from_bytes(resp, "big", signed=True)
         return result
 
     def close(self):
