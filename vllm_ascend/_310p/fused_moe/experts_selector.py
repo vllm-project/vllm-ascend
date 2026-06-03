@@ -17,8 +17,9 @@
 from collections.abc import Callable
 
 import torch
+import torch_npu
 
-from vllm_ascend.ops.fused_moe.experts_selector import _native_select_experts
+from vllm_ascend.ops.fused_moe.experts_selector import _native_select_experts, _renormalize_topk_weights
 
 
 def select_experts(
@@ -56,19 +57,23 @@ def select_experts(
         topk_weights: router weights of shape (num_tokens, top_k).
         topk_ids: selected expert IDs of shape (num_tokens, top_k).
     """
-    topk_weights, topk_ids = _native_select_experts(
-        hidden_states=hidden_states,
-        router_logits=router_logits,
-        top_k=top_k,
-        use_grouped_topk=use_grouped_topk,
-        renormalize=renormalize,
-        topk_group=topk_group,
-        num_expert_group=num_expert_group,
-        custom_routing_function=custom_routing_function,
-        scoring_func=scoring_func,
-        e_score_correction_bias=e_score_correction_bias,
-        num_experts=global_num_experts,
-    )
+    if scoring_func == "softmax" and not use_grouped_topk and custom_routing_function is None:
+        topk_weights, topk_ids, _ = torch_npu.npu_moe_gating_top_k_softmax(router_logits, k=top_k)
+        topk_weights = _renormalize_topk_weights(topk_weights, renormalize)
+    else:
+        topk_weights, topk_ids = _native_select_experts(
+            hidden_states=hidden_states,
+            router_logits=router_logits,
+            top_k=top_k,
+            use_grouped_topk=use_grouped_topk,
+            renormalize=renormalize,
+            topk_group=topk_group,
+            num_expert_group=num_expert_group,
+            custom_routing_function=custom_routing_function,
+            scoring_func=scoring_func,
+            e_score_correction_bias=e_score_correction_bias,
+            num_experts=global_num_experts,
+        )
     # Apply routed scaling factor to weights
     if routed_scaling_factor != 1.0:
         topk_weights = topk_weights * routed_scaling_factor
