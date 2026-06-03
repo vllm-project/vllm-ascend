@@ -144,6 +144,62 @@ def _get_changed_files(base_ref: str) -> list[str]:
     return [f for f in result.stdout.strip().split("\n") if f]
 
 
+def _matches_path_dependency(file_path: str, dependency: str) -> bool:
+    dep = dependency.rstrip("/")
+    return file_path == dep or file_path.startswith(dep + "/")
+
+
+def _as_base_list(base: str | list[str] | None) -> list[str]:
+    if base is None:
+        return []
+    if isinstance(base, str):
+        return [base]
+    return base
+
+
+def _merge_unique(parent: list, child: list) -> list:
+    result = list(parent)
+    for item in child:
+        if item not in result:
+            result.append(item)
+    return result
+
+
+def _resolve_config_inheritance(config: list[dict]) -> list[dict]:
+    module_map = {m["name"]: m for m in config}
+    resolved: dict[str, dict] = {}
+    resolving: set[str] = set()
+    inherited_fields = (
+        "source_file_dependencies",
+        "exclude_source_file_dependencies",
+        "tests",
+        "skip_tests",
+    )
+
+    def resolve(name: str) -> dict:
+        if name in resolved:
+            return resolved[name]
+        if name in resolving:
+            raise ValueError(f"Circular test config inheritance detected for module: {name}")
+        if name not in module_map:
+            raise ValueError(f"Unknown base module in test config: {name}")
+
+        resolving.add(name)
+        module = dict(module_map[name])
+        inherited_values = {field: [] for field in inherited_fields}
+        for base_name in _as_base_list(module.get("base")):
+            base_module = resolve(base_name)
+            for field in inherited_fields:
+                inherited_values[field] = _merge_unique(inherited_values[field], base_module.get(field, []))
+        for field in inherited_fields:
+            module[field] = _merge_unique(inherited_values[field], module.get(field, []))
+        resolving.remove(name)
+        resolved[name] = module
+        return module
+
+    return [resolve(module["name"]) for module in config]
+
+
 def _match_modules(
     changed_files: list[str],
     config: list[dict],
@@ -155,8 +211,14 @@ def _match_modules(
         if not module.get("optional", True):
             matched.append(module["name"])
             continue
-        deps = [d.rstrip("/") for d in module.get("source_file_dependencies", [])]
-        if any(f == dep or f.startswith(dep + "/") for f in changed_files for dep in deps):
+        deps = module.get("source_file_dependencies", [])
+        exclude_deps = module.get("exclude_source_file_dependencies", [])
+        if any(
+            _matches_path_dependency(f, dep)
+            and not any(_matches_path_dependency(f, exclude) for exclude in exclude_deps)
+            for f in changed_files
+            for dep in deps
+        ):
             matched.append(module["name"])
     return matched
 
@@ -484,7 +546,7 @@ def main():
     )
 
     args = parser.parse_args()
-    config = yaml.safe_load(args.config.read_text())
+    config = _resolve_config_inheritance(yaml.safe_load(args.config.read_text()))
 
     changed_files = _get_changed_files(args.diff_base) if args.diff_base else args.changed_files
     matched_modules = _match_modules(changed_files, config)
@@ -559,7 +621,7 @@ def main():
                     sub = [str(f) for f in sorted(p.rglob("test_*.py")) if str(f) not in skip_tests]
                     if sub:
                         filtered.extend(sub)
-                elif p.exists():
+                else:
                     filtered.append(t)
             all_groups[key] = filtered
         _dedup_groups(all_groups)

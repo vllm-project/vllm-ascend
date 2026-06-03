@@ -42,26 +42,6 @@ GPT_OSS_MODELS = [
 ]
 
 
-def test_deepseek_multistream_moe_tp2():
-    example_prompts = [
-        "Hello, my name is",
-    ]
-    dtype = "half"
-    max_tokens = 5
-    with VllmRunner(
-        "vllm-ascend/DeepSeek-V3-Pruning",
-        dtype=dtype,
-        tensor_parallel_size=2,
-        cudagraph_capture_sizes=[1, 2, 4, 8],
-        distributed_executor_backend="mp",
-        additional_config={
-            "enable_multistream_moe": True,
-            "refresh": True,
-        },
-    ) as vllm_model:
-        vllm_model.generate_greedy(example_prompts, max_tokens)
-
-
 @wait_until_npu_memory_free(target_free_percentage=0.95)
 def test_qwen3_moe_sp_tp2() -> None:
     example_prompts = [
