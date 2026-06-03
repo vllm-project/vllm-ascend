@@ -72,7 +72,7 @@ For main branch of vLLM Ascend, we usually make it compatible with the latest vL
 
 | Date       | Event                                     |
 |------------|-------------------------------------------|
-| 2026.05.30 | Release candidates, v0.20.2rc1            |
+| 2026.06.03 | Release candidates, v0.20.2rc1            |
 | 2026.04.30 | Release candidates, v0.19.1rc1            |
 | 2026.04.24 | Release candidates, v0.13.0rc3            |
 | 2026.04.01 | Release candidates, v0.18.0rc1            |
