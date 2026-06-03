@@ -480,5 +480,5 @@ class MooncakeLookupServer:
         self.thread.start()
 
     def close(self):
+        self.running = False
         self.socket.close(linger=0)
-        # TODO: close the thread!
