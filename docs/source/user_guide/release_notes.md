@@ -32,6 +32,7 @@ We're excited to announce the release of v0.20.2rc1 for vLLM Ascend. This is the
 - Fixed the missing enablement for `cv_indexer_qkv_prepare` multistream parallelism in the new overlap path. [#9530](https://github.com/vllm-project/vllm-ascend/pull/9530)
 - Reduced host-device synchronization overhead by removing the sync point in PIECEWISE mode. [#9025](https://github.com/vllm-project/vllm-ascend/pull/9025)
 - Optimized shared expert overlap timing in FusedMoE. [#9413](https://github.com/vllm-project/vllm-ascend/pull/9413)
+- [Experimental] Added reduce sampling with `enable_reduce_sample` to lower Tensor Parallel communication overhead in distributed greedy, top-k/top-p, and rejection sampling paths. [#8308](https://github.com/vllm-project/vllm-ascend/pull/8308)
 
 ### Stability and Bug Fixes
 
