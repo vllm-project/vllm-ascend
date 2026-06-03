@@ -68,10 +68,9 @@ class ChunkSizePredictor:
             logger.warning("Fitted a=%.2e is not positive. Setting a=1e-9.", fitted_a)
             fitted_a = 1e-9
         if fitted_b < 0:
-            logger.warning("Fitted b=%.2e is not positive. Setting b=0.0.", fitted_b)
-            fitted_b = 1e-9
+            logger.warning("Fitted b=%.2e is not positive. The performance may deteriorate..", fitted_b)
 
-        return fitted_a, fitted_b
+        return fitted_a
 
     def fit(self, seq_lens: list[int], latencies: list[float]) -> bool:
         """Fit quadratic coefficients f(l) = al^2 + bl + c from data points.
@@ -113,7 +112,7 @@ class ChunkSizePredictor:
                 logger.warning("Failed to fit quadratic model: %s", fallback_error)
                 return False
 
-        fitted_a, fitted_b = self.clamp_quadratic_and_linear_if_negative(fitted_a, fitted_b)
+        fitted_a = self.clamp_quadratic_and_linear_if_negative(fitted_a, fitted_b)
 
         self.quadratic_coeff_a = fitted_a
         self.linear_coeff_b = fitted_b
@@ -162,7 +161,7 @@ class ChunkSizePredictor:
             logger.warning("Failed to fit chunked model: %s", e)
             return False
 
-        fitted_a, fitted_b = self.clamp_quadratic_and_linear_if_negative(fitted_a, fitted_b)
+        fitted_a = self.clamp_quadratic_and_linear_if_negative(fitted_a, fitted_b)
 
         self.quadratic_chunk_a = fitted_a
         self.linear_chunk_b = fitted_b

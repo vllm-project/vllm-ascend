@@ -246,7 +246,8 @@ class ProfilingChunkScheduler(Scheduler):
         req_to_new_blocks: dict[str, KVCacheBlocks] = {}
         num_scheduled_tokens: dict[str, int] = {}
         # >>> PROFILING CHUNK >>>
-        time_budget = self.profiling_chunk_manager.predictor.target_latency
+        target_latency = self.profiling_chunk_manager.predictor.target_latency
+        time_budget = target_latency if target_latency is not None else float("inf")
         # <<< PROFILING CHUNK <<<
         token_budget = self.max_num_scheduled_tokens
         if self._pause_state == PauseState.PAUSED_ALL:
