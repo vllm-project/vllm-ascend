@@ -122,9 +122,9 @@ In addition, if you don't want to use the docker image as above, you can also bu
 
 - Install `vllm-ascend` from source, refer to [installation](../../installation.md).
 
-  xxxxxx
+If you want to deploy multi-node environment, you need to set up environment on each node.\
 
-If you want to deploy multi-node environment, you need to set up environment on each node.
+To use the tools_call feature, please ensure that your transformers version is 4.57.6 or lower.
 
 ## Deployment
 
@@ -174,7 +174,7 @@ vllm serve Eco-Tech/Kimi-K2.6-W4A8 \
     --compilation-config '{"cudagraph_mode":"FULL_DECODE_ONLY"}' \
     --mm-processor-cache-gb 0 \
     --mm-encoder-tp-mode data \
-    --speculative-config '{"method": "eagle3","model": "lightseekorg/kimi-k2.6-eagle3", "num_speculative_tokens": 3}'
+    --speculative-config '{"method": "dflash","model": "z-lab/Kimi-K2.6-DFlash", "num_speculative_tokens": 15}'
 ```
 
 **Notice:**
@@ -185,143 +185,6 @@ The parameters are explained as follows:
 - `--no-enable-prefix-caching` indicates that prefix caching is disabled. To enable it, remove this option.
 - `--mm-encoder-tp-mode` indicates how to optimize multi-modal encoder inference using tensor parallelism (TP). If you want to test the multimodal inputs,  we recommend using `data`.
 - If you use the w4a8 weight, more memory will be allocated to kvcache, and you can try to increase system throughput to achieve greater throughput.
-
-### Multi-node Deployment
-
-- `Kimi-K2.6-w4a8`: require at least 2 Atlas 800 A2 (64G × 8).
-
-Run the following scripts on two nodes respectively.
-
-**Node 0**
-
-```shell
-#!/bin/sh
-
-# this obtained through ifconfig
-# nic_name is the network interface name corresponding to local_ip of the current node
-nic_name="xxxx"
-local_ip="xxxx"
-
-# The value of node0_ip must be consistent with the value of local_ip set in node0 (master node)
-node0_ip="xxxx"
-
-export HCCL_IF_IP=$local_ip
-export GLOO_SOCKET_IFNAME=$nic_name
-export TP_SOCKET_IFNAME=$nic_name
-export HCCL_SOCKET_IFNAME=$nic_name
-export HCCL_INTRA_PCIE_ENABLE=1
-export HCCL_INTRA_ROCE_ENABLE=0
-
-# [Optional] jemalloc
-# jemalloc is for better performance, if `libjemalloc.so` is installed on your machine, you can turn it on.
-export LD_PRELOAD=/usr/lib/aarch64-linux-gnu/libjemalloc.so.2:$LD_PRELOAD
-
-echo performance | tee /sys/devices/system/cpu/cpu*/cpufreq/scaling_governor
-sysctl -w vm.swappiness=0
-sysctl -w kernel.numa_balancing=0
-sysctl -w kernel.sched_migration_cost_ns=50000
-export HCCL_OP_EXPANSION_MODE="AIV"
-export PYTORCH_NPU_ALLOC_CONF=expandable_segments:True
-export OMP_PROC_BIND=false
-export OMP_NUM_THREADS=1
-export TASK_QUEUE_ENABLE=1
-
-export HCCL_BUFFSIZE=1500
-export VLLM_ASCEND_ENABLE_MLAPO=1
-export VLLM_ASCEND_ENABLE_FLASHCOMM1=1
-export VLLM_ASCEND_BALANCE_SCHEDULING=1
-export VLLM_ASCEND_ENABLE_FUSED_MC2=1
-
-
-vllm serve Eco-Tech/Kimi-K2.6-W4A8 \
-  --host 0.0.0.0 \
-  --port 8088 \
-  --quantization ascend \
-  --served-model-name kimi_k26 \
-  --allowed-local-media-path / \
-  --trust-remote-code \
-  --no-enable-prefix-caching \
-  --seed 1024 \
-  --data-parallel-size 4 \
-  --data-parallel-size-local 2 \
-  --data-parallel-address $node0_ip \
-  --data-parallel-rpc-port 13389 \
-  --tensor-parallel-size 4 \
-  --enable-expert-parallel \
-  --max-num-seqs 4 \
-  --max-model-len 32768 \
-  --max-num-batched-tokens 16384 \
-  --gpu-memory-utilization 0.9 \
-  --compilation-config '{"cudagraph_mode":"FULL_DECODE_ONLY"}' \
-  --speculative-config '{"method":"eagle3", "model":"lightseekorg/kimi-k2.6-eagle3", "num_speculative_tokens":3}' \
-  --mm-encoder-tp-mode data
-```
-
-**Node 1**
-
-```shell
-#!/bin/sh
-
-# this obtained through ifconfig
-# nic_name is the network interface name corresponding to local_ip of the current node
-nic_name="xxx"
-local_ip="xxx"
-
-# The value of node0_ip must be consistent with the value of local_ip set in node0 (master node)
-node0_ip="xxxx"
-
-export HCCL_IF_IP=$local_ip
-export GLOO_SOCKET_IFNAME=$nic_name
-export TP_SOCKET_IFNAME=$nic_name
-export HCCL_SOCKET_IFNAME=$nic_name
-export HCCL_INTRA_PCIE_ENABLE=1
-export HCCL_INTRA_ROCE_ENABLE=0
-
-# [Optional] jemalloc
-# jemalloc is for better performance, if `libjemalloc.so` is installed on your machine, you can turn it on.
-export LD_PRELOAD=/usr/lib/aarch64-linux-gnu/libjemalloc.so.2:$LD_PRELOAD
-
-echo performance | tee /sys/devices/system/cpu/cpu*/cpufreq/scaling_governor
-sysctl -w vm.swappiness=0
-sysctl -w kernel.numa_balancing=0
-sysctl -w kernel.sched_migration_cost_ns=50000
-export HCCL_OP_EXPANSION_MODE="AIV"
-export PYTORCH_NPU_ALLOC_CONF=expandable_segments:True
-export OMP_PROC_BIND=false
-export OMP_NUM_THREADS=1
-export TASK_QUEUE_ENABLE=1
-
-export HCCL_BUFFSIZE=1500
-export VLLM_ASCEND_ENABLE_MLAPO=1
-export VLLM_ASCEND_ENABLE_FLASHCOMM1=1
-export VLLM_ASCEND_BALANCE_SCHEDULING=1
-export VLLM_ASCEND_ENABLE_FUSED_MC2=1
-
-vllm serve Eco-Tech/Kimi-K2.6-W4A8 \
-  --host 0.0.0.0 \
-  --port 8088 \
-  --quantization ascend \
-  --served-model-name kimi_k26 \
-  --allowed-local-media-path / \
-  --trust-remote-code \
-  --no-enable-prefix-caching \
-  --seed 1024 \
-  --headless \
-  --data-parallel-size 4 \
-  --data-parallel-size-local 2 \
-  --data-parallel-start-rank 2 \
-  --data-parallel-address $node0_ip \
-  --data-parallel-rpc-port 13389 \
-  --tensor-parallel-size 4 \
-  --enable-expert-parallel \
-  --max-num-seqs 4 \
-  --max-model-len 32768 \
-  --max-num-batched-tokens 16384 \
-  --gpu-memory-utilization 0.9 \
-  --compilation-config '{"cudagraph_mode":"FULL_DECODE_ONLY"}' \
-  --speculative-config '{"method":"eagle3", "model":"lightseekorg/kimi-k2.6-eagle3", "num_speculative_tokens":3}' \
-  --mm-encoder-tp-mode data
-```
 
 ### Prefill-Decode Disaggregation
 
@@ -795,4 +658,6 @@ In this chapter, we recommend best practices for three scenarios:
 
   A: Reduce `--max-num-seqs` and `--max-model-len` first. If needed, reduce concurrency and load-testing pressure (e.g., `max-concurrency` / `num-prompts`).
 
-  transformer function call 4.57.6
+- **Q: What transformer version is required for tools_call feature?**
+
+  A: To use the tools_call feature, please ensure that your transformers version is 4.57.6 or lower.
