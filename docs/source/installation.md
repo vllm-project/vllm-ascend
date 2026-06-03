@@ -336,81 +336,63 @@ pip install modelscope
 python example.py
 ```
 
-The output will be like:
+The output is shown below, and it may change with version updates:
 
 ```bash
-INFO 05-12 11:29:25 [__init__.py:44] Available plugins for group vllm.platform_plugins:
-INFO 05-12 11:29:25 [__init__.py:46] - ascend -> vllm_ascend:register
-INFO 05-12 11:29:25 [__init__.py:49] All plugins in this group will be loaded. Set `VLLM_PLUGINS` to control which plugins to load.
-INFO 05-12 11:29:25 [__init__.py:239] Platform plugin ascend is activated
-INFO 05-12 11:29:29 [__init__.py:110] Registered model loader `<class 'vllm_ascend.model_loader.netloader.netloader.ModelNetLoaderElastic'>` with load format `netloader`
-INFO 05-12 11:29:29 [__init__.py:110] Registered model loader `<class 'vllm_ascend.model_loader.rfork.rfork_loader.RForkModelLoader'>` with load format `rfork`
-INFO 05-12 11:29:29 [utils.py:233] non-default args: {'disable_log_stats': True, 'model': 'Qwen/Qwen3-0.6B'}
-INFO 05-12 11:29:29 [model.py:533] Resolved architecture: Qwen3ForCausalLM
-INFO 05-12 11:29:29 [model.py:1582] Using max model len 40960
-INFO 05-12 11:29:29 [scheduler.py:231] Chunked prefill is enabled with max_num_batched_tokens=8192.
-INFO 05-12 11:29:29 [vllm.py:754] Asynchronous scheduling is enabled.
-WARNING 05-12 11:29:29 [platform.py:765] Parameter '--disable-cascade-attn' is a GPU-specific feature. Resetting to False for Ascend.
-WARNING 05-12 11:29:29 [platform.py:854] Ignored parameter 'disable_flashinfer_prefill'. This is a GPU-specific feature not supported on Ascend. Resetting to False.
-INFO 05-12 11:29:29 [ascend_config.py:425] Dynamic EPLB is False
-INFO 05-12 11:29:29 [ascend_config.py:426] The number of redundant experts is 0
-INFO 05-12 11:29:29 [platform.py:370] PIECEWISE compilation enabled on NPU. use_inductor not supported - using only ACL Graph mode
-INFO 05-12 11:29:29 [utils.py:549] Calculated maximum supported batch sizes for ACL graph: 48
-WARNING 05-12 11:29:29 [utils.py:550] Currently, communication is performed using FFTS+ method, which reduces the number of available streams and, as a result, limits the range of runtime shapes that can be handled. To both improve communication performance and increase the number of supported shapes, set HCCL_OP_EXPANSION_MODE=AIV.
-INFO 05-12 11:29:29 [utils.py:582] No adjustment needed for ACL graph batch sizes: Qwen3ForCausalLM model (layers: 36) with 35 sizes
-INFO 05-12 11:29:29 [utils.py:1186] Block size is set to 128 if prefix cache or chunked prefill is enabled.
-INFO 05-12 11:29:29 [platform.py:518] Set PYTORCH_NPU_ALLOC_CONF=expandable_segments:True
-INFO 05-12 11:29:29 [compilation.py:289] Enabled custom fusions: norm_quant, act_quant
-(EngineCore pid=970) INFO 05-12 11:29:29 [core.py:103] Initializing a V1 LLM engine (v0.18.0) with config: model='Qwen/Qwen3-0.6B', speculative_config=None, tokenizer='Qwen/Qwen3-0.6B', skip_tokenizer_init=False, tokenizer_mode=auto, revision=None, tokenizer_revision=None, trust_remote_code=False, dtype=torch.bfloat16, max_seq_len=40960, download_dir=None, load_format=auto, tensor_parallel_size=1, pipeline_parallel_size=1, data_parallel_size=1, decode_context_parallel_size=1, dcp_comm_backend=ag_rs, disable_custom_all_reduce=True, quantization=None, enforce_eager=False, enable_return_routed_experts=False, kv_cache_dtype=auto, device_config=npu, structured_outputs_config=StructuredOutputsConfig(backend='auto', disable_any_whitespace=False, disable_additional_properties=False, reasoning_parser='', reasoning_parser_plugin='', enable_in_reasoning=False), observability_config=ObservabilityConfig(show_hidden_metrics_for_version=None, otlp_traces_endpoint=None, collect_detailed_traces=None, kv_cache_metrics=False, kv_cache_metrics_sample=0.01, cudagraph_metrics=False, enable_layerwise_nvtx_tracing=False, enable_mfu_metrics=False, enable_mm_processor_stats=False, enable_logging_iteration_details=False), seed=0, served_model_name=Qwen/Qwen3-0.6B, enable_prefix_caching=True, enable_chunked_prefill=True, pooler_config=None, compilation_config={'mode': <CompilationMode.VLLM_COMPILE: 3>, 'debug_dump_path': None, 'cache_dir': '', 'compile_cache_save_format': 'binary', 'backend': 'vllm_ascend.compilation.compiler_interface.AscendCompiler', 'custom_ops': ['all'], 'splitting_ops': ['vllm::unified_attention', 'vllm::unified_attention_with_output', 'vllm::unified_mla_attention', 'vllm::unified_mla_attention_with_output', 'vllm::mamba_mixer2', 'vllm::mamba_mixer', 'vllm::short_conv', 'vllm::linear_attention', 'vllm::plamo2_mamba_mixer', 'vllm::gdn_attention_core', 'vllm::olmo_hybrid_gdn_full_forward', 'vllm::kda_attention', 'vllm::sparse_attn_indexer', 'vllm::rocm_aiter_sparse_attn_indexer', 'vllm::unified_kv_cache_update', 'vllm::unified_mla_kv_cache_update', 'vllm::mla_forward'], 'compile_mm_encoder': False, 'compile_sizes': [], 'compile_ranges_endpoints': [8192], 'inductor_compile_config': {'enable_auto_functionalized_v2': False, 'combo_kernels': True, 'benchmark_combo_kernel': True}, 'inductor_passes': {}, 'cudagraph_mode': <CUDAGraphMode.PIECEWISE: 1>, 'cudagraph_num_of_warmups': 1, 'cudagraph_capture_sizes': [1, 2, 4, 8, 16, 24, 32, 40, 48, 56, 64, 72, 80, 88, 96, 104, 112, 120, 128, 136, 144, 152, 160, 168, 176, 184, 192, 200, 208, 216, 224, 232, 240, 248, 256], 'cudagraph_copy_inputs': False, 'cudagraph_specialize_lora': True, 'use_inductor_graph_partition': False, 'pass_config': {'fuse_norm_quant': True, 'fuse_act_quant': True, 'fuse_attn_quant': False, 'enable_sp': False, 'fuse_gemm_comms': False, 'fuse_allreduce_rms': False}, 'max_cudagraph_capture_size': 256, 'dynamic_shapes_config': {'type': <DynamicShapesType.BACKED: 'backed'>, 'evaluate_guards': False, 'assume_32_bit_indexing': False}, 'local_cache_dir': None, 'fast_moe_cold_start': True, 'static_all_moe_layers': []}
-(EngineCore pid=970) WARNING 05-12 11:29:30 [warnings.py:110] /usr/local/python3.11.10/lib/python3.11/site-packages/vllm_ascend/patch/worker/patch_weight_utils.py:80: UserWarning: pkg_resources is deprecated as an API. See https://setuptools.pypa.io/en/latest/pkg_resources.html. The pkg_resources package is slated for removal as early as 2025-11-30. Refrain from using this package or pin to Setuptools<81.
-(EngineCore pid=970) INFO 05-12 11:29:33 [parallel_state.py:1395] world_size=1 rank=0 local_rank=0 distributed_init_method=tcp://90.90.97.27:41723 backend=hccl
-[W512 11:29:53.116059090 socket.cpp:209] [c10d] The hostname of the client socket cannot be retrieved. err=-3
-[rank0]:[W512 11:30:33.152077370 ProcessGroupGloo.cpp:516] Warning: Unable to resolve hostname to a (local) address. Using the loopback address as fallback. Manually set the network interface to bind to with GLOO_SOCKET_IFNAME. (function operator())
-[Gloo] Rank 0 is connected to 0 peer ranks. Expected number of connected peer ranks is : 0
-[Gloo] Rank 0 is connected to 0 peer ranks. Expected number of connected peer ranks is : 0
-[Gloo] Rank 0 is connected to 0 peer ranks. Expected number of connected peer ranks is : 0
-[Gloo] Rank 0 is connected to 0 peer ranks. Expected number of connected peer ranks is : 0
-[Gloo] Rank 0 is connected to 0 peer ranks. Expected number of connected peer ranks is : 0
-[Gloo] Rank 0 is connected to 0 peer ranks. Expected number of connected peer ranks is : 0
-(EngineCore pid=970) INFO 05-12 11:33:53 [parallel_state.py:1717] rank 0 in world size 1 is assigned as DP rank 0, PP rank 0, PCP rank 0, TP rank 0, EP rank N/A, EPLB rank N/A
-[Gloo] Rank 0 is connected to 0 peer ranks. Expected number of connected peer ranks is : 0
-(EngineCore pid=970) INFO 05-12 11:34:36 [cpu_binding.py:329] [cpu_bind_mode] mode=global_slice rank=0 visible_npus=[0]
-(EngineCore pid=970) INFO 05-12 11:34:36 [cpu_binding.py:376] The CPU allocation plan is as follows:
-(EngineCore pid=970) INFO 05-12 11:34:36 [cpu_binding.py:381] NPU0: main=[2 3 4 5 6 7 8 9 10 11 12 13 14 15 16 17 18 19 20 21]  acl=[22]  release=[[23]]
-(EngineCore pid=970) INFO 05-12 11:34:36 [cpu_binding.py:403] [migrate] NPU:0 -> NUMA [0]
-(EngineCore pid=970) INFO 05-12 11:34:39 [cpu_binding.py:497] NPU0(PCI 0000:9d:00.0): sq_send_trigger_irq IRQ_ID=1113 -> CPU0, cq_update_irq IRQ_ID=1114 -> CPU1
-(EngineCore pid=970) INFO 05-12 11:34:39 [model_runner_v1.py:2572] Starting to load model Qwen/Qwen3-0.6B...
-(EngineCore pid=970) INFO 05-12 11:34:40 [compilation.py:942] Using OOT custom backend for compilation.
-(EngineCore pid=970) INFO 05-12 11:34:40 [compilation.py:942] Using OOT custom backend for compilation.
-Loading safetensors checkpoint shards:   0% Completed | 0/5 [00:00<?, ?it/s]
-Loading safetensors checkpoint shards:  20% Completed | 1/5 [00:04<00:16,  4.20s/it]
-Loading safetensors checkpoint shards:  40% Completed | 2/5 [00:08<00:11,  3.97s/it]
-Loading safetensors checkpoint shards:  60% Completed | 3/5 [00:11<00:07,  3.83s/it]
-Loading safetensors checkpoint shards:  80% Completed | 4/5 [00:14<00:03,  3.52s/it]
-Loading safetensors checkpoint shards: 100% Completed | 5/5 [00:16<00:00,  2.94s/it]
-Loading safetensors checkpoint shards: 100% Completed | 5/5 [00:16<00:00,  3.33s/it]
-(EngineCore pid=970) 
-(EngineCore pid=970) INFO 05-12 11:34:57 [default_loader.py:384] Loading weights took 16.73 seconds
-(EngineCore pid=970) INFO 05-12 11:34:57 [model_runner_v1.py:2599] Loading model weights took 15.2859 GB
-(EngineCore pid=970) INFO 05-12 11:35:02 [backends.py:988] Using cache directory: /root/.cache/vllm/torch_compile_cache/594f71dc42/rank_0_0/backbone for vLLM's torch.compile
-(EngineCore pid=970) INFO 05-12 11:35:02 [backends.py:1048] Dynamo bytecode transform time: 3.98 s
-(EngineCore pid=970) INFO 05-12 11:35:32 [backends.py:387] Compiling a graph for compile range (1, 8192) takes 12.79 s
-(EngineCore pid=970) INFO 05-12 11:35:42 [monitor.py:48] torch.compile and initial profiling/warmup run together took 44.36 s in total
-(EngineCore pid=970) INFO 05-12 11:35:44 [worker.py:357] Available KV cache memory: 39.06 GiB
-(EngineCore pid=970) INFO 05-12 11:35:44 [kv_cache_utils.py:1316] GPU KV cache size: 284,416 tokens
-(EngineCore pid=970) INFO 05-12 11:35:44 [kv_cache_utils.py:1321] Maximum concurrency for 40,960 tokens per request: 6.94x
-Capturing CUDA graphs (mixed prefill-decode, PIECEWISE): 100%|███████████████████████████████████████████████████████████████████████████████████████████████████████████████████| 35/35 [00:11<00:00,  3.03it/s]
-(EngineCore pid=970) INFO 05-12 11:35:59 [gpu_model_runner.py:5746] Graph capturing finished in 12 secs, took 0.13 GiB
-(EngineCore pid=970) INFO 05-12 11:35:59 [core.py:281] init engine (profile, create kv cache, warmup model) took 61.45 seconds
-(EngineCore pid=970) INFO 05-12 11:36:00 [platform.py:370] PIECEWISE compilation enabled on NPU. use_inductor not supported - using only ACL Graph mode
-(EngineCore pid=970) INFO 05-12 11:36:00 [utils.py:549] Calculated maximum supported batch sizes for ACL graph: 48
-(EngineCore pid=970) WARNING 05-12 11:36:00 [utils.py:550] Currently, communication is performed using FFTS+ method, which reduces the number of available streams and, as a result, limits the range of runtime shapes that can be handled. To both improve communication performance and increase the number of supported shapes, set HCCL_OP_EXPANSION_MODE=AIV.
-(EngineCore pid=970) INFO 05-12 11:36:00 [utils.py:582] No adjustment needed for ACL graph batch sizes: Qwen3ForCausalLM model (layers: 36) with 35 sizes
-(EngineCore pid=970) INFO 05-12 11:36:00 [platform.py:518] Set PYTORCH_NPU_ALLOC_CONF=expandable_segments:True
-INFO 05-12 11:36:00 [llm.py:391] Supported tasks: ['generate']
-Rendering prompts: 100%|███████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████| 4/4 [00:00<00:00, 92.51it/s]
-Processed prompts:   0%|                                                                                                               | 0/4 [00:00<?, ?it/s, est. speed input: 0.00 toks/s, output: 0.00 toks/s](EngineCore pid=970) INFO 05-12 11:36:00 [acl_graph.py:196] Replaying aclgraph
-Processed prompts: 100%|████████████████████████████████████████████████████████████████████████████████████████████████████| 4/4 [00:00<00:00,  8.75it/s, est. speed input: 48.17 toks/s, output: 140.12 toks/s]
+INFO 05-27 11:40:38 [__init__.py:44] Available plugins for group vllm.platform_plugins:
+INFO 05-27 11:40:38 [__init__.py:46] - ascend -> vllm_ascend:register
+INFO 05-27 11:40:38 [__init__.py:49] All plugins in this group will be loaded. Set `VLLM_PLUGINS` to control which plugins to load.
+INFO 05-27 11:40:38 [__init__.py:238] Platform plugin ascend is activated
+INFO 05-27 11:40:43 [nixl_utils.py:20] Setting UCX_RCACHE_MAX_UNRELEASED to '1024' to avoid a rare memory leak in UCX when using NIXL.
+INFO 05-27 11:40:43 [__init__.py:110] Registered model loader `<class 'vllm_ascend.model_loader.netloader.netloader.ModelNetLoaderElastic'>` with load format `netloader`
+INFO 05-27 11:40:43 [__init__.py:110] Registered model loader `<class 'vllm_ascend.model_loader.rfork.rfork_loader.RForkModelLoader'>` with load format `rfork`
+INFO 05-27 11:40:43 [utils.py:233] non-default args: {'disable_log_stats': True, 'model': 'Qwen/Qwen3-0.6B'}
+INFO 05-27 11:40:44 [model.py:555] Resolved architecture: Qwen3ForCausalLM
+INFO 05-27 11:40:44 [model.py:1680] Using max model len 40960
+INFO 05-27 11:40:44 [scheduler.py:239] Chunked prefill is enabled with max_num_batched_tokens=8192.
+INFO 05-27 11:40:44 [vllm.py:840] Asynchronous scheduling is enabled.
+INFO 05-27 11:40:44 [kernel.py:205] Final IR op priority after setting platform defaults: IrOpPriorityConfig(rms_norm=['native'])
+INFO 05-27 11:40:44 [ascend_config.py:593] Dynamic EPLB is False
+INFO 05-27 11:40:44 [ascend_config.py:594] The number of redundant experts is 0
+INFO 05-27 11:40:44 [platform.py:396] PIECEWISE compilation enabled on NPU. use_inductor not supported - using only ACL Graph mode
+INFO 05-27 11:40:44 [utils.py:607] Calculated maximum supported batch sizes for ACL graph: 62
+INFO 05-27 11:40:44 [utils.py:640] No adjustment needed for ACL graph batch sizes: Qwen3ForCausalLM model (layers: 28) with 35 sizes
+INFO 05-27 11:40:44 [utils.py:1251] Block size is set to 128 if prefix cache or chunked prefill is enabled.
+INFO 05-27 11:40:44 [platform.py:569] Set PYTORCH_NPU_ALLOC_CONF=expandable_segments:True
+INFO 05-27 11:40:44 [compilation.py:303] Enabled custom fusions: norm_quant, act_quant
+(EngineCore pid=75652) INFO 05-27 11:40:44 [core.py:109] Initializing a V1 LLM engine (vx.x.x) with config: model='Qwen/Qwen3-0.6B', speculative_config=None, tokenizer='Qwen/Qwen3-0.6B', skip_tokenizer_init=False, tokenizer_mode=auto, revision=None, tokenizer_revision=None, trust_remote_code=False, dtype=torch.bfloat16, max_seq_len=40960, download_dir=None, load_format=auto, tensor_parallel_size=1, pipeline_parallel_size=1, data_parallel_size=1, decode_context_parallel_size=1, dcp_comm_backend=ag_rs, disable_custom_all_reduce=True, quantization=None, quantization_config=None, enforce_eager=False, enable_return_routed_experts=False, kv_cache_dtype=auto, device_config=npu, structured_outputs_config=StructuredOutputsConfig(backend='auto', disable_any_whitespace=False, disable_additional_properties=False, reasoning_parser='', reasoning_parser_plugin='', enable_in_reasoning=False), observability_config=ObservabilityConfig(show_hidden_metrics_for_version=None, otlp_traces_endpoint=None, collect_detailed_traces=None, kv_cache_metrics=False, kv_cache_metrics_sample=0.01, cudagraph_metrics=False, enable_layerwise_nvtx_tracing=False, enable_mfu_metrics=False, enable_mm_processor_stats=False, enable_logging_iteration_details=False), seed=0, served_model_name=Qwen/Qwen3-0.6B, enable_prefix_caching=True, enable_chunked_prefill=True, pooler_config=None, compilation_config={'mode': <CompilationMode.VLLM_COMPILE: 3>, 'debug_dump_path': None, 'cache_dir': '', 'compile_cache_save_format': 'binary', 'backend': 'vllm_ascend.compilation.compiler_interface.AscendCompiler', 'custom_ops': ['all'], 'ir_enable_torch_wrap': False, 'splitting_ops': ['vllm::unified_attention_with_output', 'vllm::unified_mla_attention_with_output', 'vllm::mamba_mixer2', 'vllm::mamba_mixer', 'vllm::short_conv', 'vllm::linear_attention', 'vllm::plamo2_mamba_mixer', 'vllm::gdn_attention_core', 'vllm::gdn_attention_core_xpu', 'vllm::olmo_hybrid_gdn_full_forward', 'vllm::kda_attention', 'vllm::sparse_attn_indexer', 'vllm::rocm_aiter_sparse_attn_indexer', 'vllm::deepseek_v4_attention', 'vllm::unified_kv_cache_update', 'vllm::unified_mla_kv_cache_update', 'vllm::mla_forward'], 'compile_mm_encoder': False, 'cudagraph_mm_encoder': False, 'encoder_cudagraph_token_budgets': [], 'encoder_cudagraph_max_vision_items_per_batch': 0, 'encoder_cudagraph_max_frames_per_batch': None, 'compile_sizes': [], 'compile_ranges_endpoints': [8192], 'inductor_compile_config': {'enable_auto_functionalized_v2': False, 'size_asserts': False, 'alignment_asserts': False, 'scalar_asserts': False, 'combo_kernels': True, 'benchmark_combo_kernel': True}, 'inductor_passes': {}, 'cudagraph_mode': <CUDAGraphMode.PIECEWISE: 1>, 'cudagraph_num_of_warmups': 1, 'cudagraph_capture_sizes': [1, 2, 4, 8, 16, 24, 32, 40, 48, 56, 64, 72, 80, 88, 96, 104, 112, 120, 128, 136, 144, 152, 160, 168, 176, 184, 192, 200, 208, 216, 224, 232, 240, 248, 256], 'cudagraph_copy_inputs': False, 'cudagraph_specialize_lora': True, 'use_inductor_graph_partition': False, 'pass_config': {'fuse_norm_quant': True, 'fuse_act_quant': True, 'fuse_attn_quant': False, 'enable_sp': False, 'fuse_gemm_comms': False, 'fuse_allreduce_rms': False}, 'max_cudagraph_capture_size': 256, 'dynamic_shapes_config': {'type': <DynamicShapesType.BACKED: 'backed'>, 'evaluate_guards': False, 'assume_32_bit_indexing': False}, 'local_cache_dir': None, 'fast_moe_cold_start': True, 'static_all_moe_layers': []}, kernel_config=KernelConfig(ir_op_priority=IrOpPriorityConfig(rms_norm=['native']), enable_flashinfer_autotune=True, moe_backend='auto')
+(EngineCore pid=75652) INFO 05-27 11:40:48 [parallel_state.py:1402] world_size=1 rank=0 local_rank=0 distributed_init_method=tcp://90.90.97.28:38959 backend=hccl
+(EngineCore pid=75652) INFO 05-27 11:40:48 [parallel_state.py:1715] rank 0 in world size 1 is assigned as DP rank 0, PP rank 0, PCP rank 0, TP rank 0, EP rank N/A, EPLB rank N/A
+(EngineCore pid=75652) INFO 05-27 11:40:48 [model_runner_v1.py:3146] Starting to load model Qwen/Qwen3-0.6B...
+(EngineCore pid=75652) INFO 05-27 11:40:49 [compilation.py:1049] Using OOT custom backend for compilation.
+(EngineCore pid=75652) INFO 05-27 11:40:49 [compilation.py:1049] Using OOT custom backend for compilation.
+(EngineCore pid=75652) INFO 05-27 11:40:49 [weight_utils.py:904] Filesystem type for checkpoints: EXT4. Checkpoint size: 1.40 GiB. Available RAM: 1944.66 GiB.
+(EngineCore pid=75652) INFO 05-27 11:40:49 [weight_utils.py:927] Auto-prefetch is disabled because the filesystem (EXT4) is not a recognized network FS (NFS/Lustre). If you want to force prefetching, start vLLM with --safetensors-load-strategy=prefetch.
+(EngineCore pid=75652) INFO 05-27 11:40:51 [default_loader.py:384] Loading weights took 1.99 seconds
+(EngineCore pid=75652) INFO 05-27 11:40:51 [model_runner_v1.py:3187] Loading model weights took 1.1397 GB
+(EngineCore pid=75652) INFO 05-27 11:40:52 [backends.py:1069] Using cache directory: /root/.cache/vllm/torch_compile_cache/5a9d9c976f/rank_0_0/backbone for vLLM's torch.compile
+(EngineCore pid=75652) INFO 05-27 11:40:52 [backends.py:1128] Dynamo bytecode transform time: 0.84 s
+(EngineCore pid=75652) INFO 05-27 11:41:01 [backends.py:391] Compiling a graph for compile range (1, 8192) takes 7.77 s
+(EngineCore pid=75652) INFO 05-27 11:41:01 [decorators.py:305] Directly load AOT compilation from path /root/.cache/vllm/torch_compile_cache/torch_aot_compile/74892a710dff08ef76700608ac46ccb60eebda2bdd3037d825f26b0db836de5a/rank_0_0/model
+(EngineCore pid=75652) INFO 05-27 11:41:01 [monitor.py:53] torch.compile took 9.69 s in total
+(EngineCore pid=75652) INFO 05-27 11:41:01 [monitor.py:81] Initial profiling/warmup run took 0.07 s
+(EngineCore pid=75652) INFO 05-27 11:41:02 [worker.py:394] Available KV cache memory: 54.98 GiB
+(EngineCore pid=75652) INFO 05-27 11:41:02 [kv_cache_utils.py:1708] GPU KV cache size: 514,688 tokens
+(EngineCore pid=75652) INFO 05-27 11:41:02 [kv_cache_utils.py:1709] Maximum concurrency for 40,960 tokens per request: 12.57x
+(EngineCore pid=75652) INFO 05-27 11:41:12 [gpu_model_runner.py:6133] Graph capturing finished in 7 secs, took 0.09 GiB
+(EngineCore pid=75652) INFO 05-27 11:41:12 [worker.py:546] Free memory on device (60.89/61.27 GiB) on startup. Desired GPU memory utilization is (0.92, 56.37 GiB). Actual usage: 1.14 GiB for weights, 0.22 GiB for peak activation, 0.03 GiB for non-torch memory, 0.09 GiB for NPU graph memory. Replace gpu_memory_utilization with `--kv-cache-memory=58786898124` (54.75 GiB) to fit into requested memory, or `--kv-cache-memory=63643382784` (59.27 GiB) to fully utilize NPU free memory. Current KV cache memory: 54.98 GiB.
+(EngineCore pid=75652) INFO 05-27 11:41:15 [cpu_binding.py:328] [cpu_bind_mode] mode=global_slice rank=0 visible_npus=[0]
+(EngineCore pid=75652) INFO 05-27 11:41:15 [cpu_binding.py:388] The CPU allocation plan is as follows:
+(EngineCore pid=75652) INFO 05-27 11:41:15 [cpu_binding.py:393] NPU0: main=[2 3 4 5 6 7 8 9 10 11 12 13 14 15 16 17 18 19 20 21]  acl=[22]  release=[[23]]
+(EngineCore pid=75652) INFO 05-27 11:41:15 [cpu_binding.py:415] [migrate] NPU:0 -> NUMA [0]
+(EngineCore pid=75652) INFO 05-27 11:41:20 [cpu_binding.py:510] NPU0(PCI 0000:9d:00.0): sq_send_trigger_irq IRQ_ID=1037 -> CPU0, cq_update_irq IRQ_ID=1038 -> CPU1
+(EngineCore pid=75652) INFO 05-27 11:41:20 [core.py:299] init engine (profile, create kv cache, warmup model) took 29.13 s (compilation: 9.69 s)
+(EngineCore pid=75652) INFO 05-27 11:41:21 [kernel.py:205] Final IR op priority after setting platform defaults: IrOpPriorityConfig(rms_norm=['native'])
+(EngineCore pid=75652) INFO 05-27 11:41:21 [platform.py:396] PIECEWISE compilation enabled on NPU. use_inductor not supported - using only ACL Graph mode
+(EngineCore pid=75652) INFO 05-27 11:41:21 [utils.py:607] Calculated maximum supported batch sizes for ACL graph: 62
+(EngineCore pid=75652) INFO 05-27 11:41:21 [utils.py:640] No adjustment needed for ACL graph batch sizes: Qwen3ForCausalLM model (layers: 28) with 35 sizes
+(EngineCore pid=75652) INFO 05-27 11:41:21 [platform.py:569] Set PYTORCH_NPU_ALLOC_CONF=expandable_segments:True
+(EngineCore pid=75652) INFO 05-27 11:41:21 [acl_graph.py:198] Replaying aclgraph
 Prompt: 'Hello, my name is', Generated text: ' Lucy and I am an 8 year old who loves to draw and write stories'
 Prompt: 'The president of the United States is', Generated text: " a key leader in the federal government, and the president's role in the executive"
 Prompt: 'The capital of France is', Generated text: ' a city. What is the capital of France? The capital of France is Paris'
