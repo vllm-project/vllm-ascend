@@ -88,7 +88,7 @@ class KVTransferThread(threading.Thread):
         uid: int,
         tokens: torch.Tensor,
         block_ids: list[int],
-    ) -> torch.Tensor:
+    ) -> None:
         req = ({
             "req_id": req_id,
             "uid": uid,
