@@ -98,18 +98,3 @@ Reference values (from `tests/e2e/models/configs/c4ai-command-r-v01.yaml`):
 | --- | --- | --- |
 | gsm8k | exact_match,strict-match | 0.445 |
 | gsm8k | exact_match,flexible-extract | 0.569 |
-
-## FAQ
-
-### HCCL init failure (EI0010 / error code 5)
-
-**Symptoms:**
-
-- `hcclCommInitRootInfoConfig ... error code is 5`
-- `P2P_Communication_Failed(EI0010)`
-
-**Recommended checks:**
-
-- Confirm visible NPU count matches `--tensor-parallel-size` (this model uses TP4).
-- Verify multi-card interconnect and driver/toolkit installation in your deployment environment.
-- Retry after ensuring all workers use consistent device mapping.
