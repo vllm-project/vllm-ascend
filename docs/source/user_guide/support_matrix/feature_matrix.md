@@ -27,7 +27,7 @@ The symbols used have the following meanings:
 | [KV Cache Pool](https://docs.vllm.ai/projects/ascend/en/latest/developer_guide/Design_Documents/KV_Cache_Pool_Guide.html)  | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | | | | | | | | | | | |
 | Layer Sharding | ✅ | ✅ | ✅ | ✅ | ✅ | 🟠 | ✅ | ✅ | 🟠<sup>3</sup> | ✅ | ✅ | ✅ | ✅ | ❔ | ✅ | | | | | | | | | | |
 | Lmhead TP | ✅ | ✅ | ✅ | ✅ | ✅ | ❔ | ✅ | 🟠<sup>4</sup> | ✅ | ✅ | ✅ | ✅ | ❌ | ❔ | ✅ | ✅ | | | | | | | | | |
-| Mlapo | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | 🟠<sup>6</sup> | ✅ | ✅ | ✅ | ❌ | ❔ | ❌ | ✅ | ✅ | | | | | | | | |
+| Mlapo | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | 🟠<sup>5</sup> | ✅ | ✅ | ✅ | ❌ | ❔ | ❌ | ✅ | ✅ | | | | | | | | |
 | [<abbr title="Multimodal Inputs">mm</abbr>](https://docs.vllm.ai/en/latest/features/multimodal_inputs/) | ✅ | ✅ | ✅ | ✅ | ✅ | 🟠 | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ❌ | ✅ | ✅ | ✅ | ✅ | | | | | | | |
 | Multistream Moe | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ❔ | ✅ | ✅ | ✅ | ✅ | | | | | | |
 | Shared Expert DP | ✅ | ✅ | ✅ | ✅ | ✅ | 🟠<sup>1</sup> | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ❔ | ✅ | ✅ | ❔ | ✅ | | | | | |
@@ -41,5 +41,4 @@ The symbols used have the following meanings:
 - <sup>2</sup> Falshcomm is only enabled on the prefill stage.
 - <sup>3</sup> Layer sharding is only enabled on the prefill stage.
 - <sup>4</sup> Lmhead TP is only enabled in the pure dp scenarios.
-- <sup>5</sup> LoRA applies only to the language backbone of multimodal models (upstream).
-- <sup>6</sup> MLAPO is only supported on the decode stage.
+- <sup>5</sup> MLAPO is only supported on the decode stage.
