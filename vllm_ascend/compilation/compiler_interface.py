@@ -19,7 +19,7 @@ import copy
 import functools
 import os
 from collections.abc import Callable
-from typing import Any
+from typing import Any, cast
 
 import torch
 import torch.fx as fx
@@ -327,7 +327,7 @@ class AscendCompiler(CompilerInterface):
         artifacts = _CompiledFxArtifacts()
         artifacts.py_code = py_code
         logger.info("Loaded npugraph_ex compilation cache from %s", path)
-        compiled_fn = _CompiledFxGraph.load_artifacts(artifacts)
+        compiled_fn = cast(Callable[..., Any], _CompiledFxGraph.load_artifacts(artifacts))
 
         # The saved code was compiled from the graph after make_graph_return_tuple mutated it
         # to return a flat tuple. If the original graph didn't return a tuple, we need to
