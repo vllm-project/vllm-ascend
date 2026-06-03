@@ -485,12 +485,15 @@ class NPUPlatform(Platform):
                 all2all_backend=vllm_config.parallel_config.all2all_backend,
                 data_parallel_size=vllm_config.parallel_config.data_parallel_size,
             )
-            # NOTE: Theoretically, we should also add vllm::mla_forward and vllm::dsa_forward in the attention ops.
-            # Since the process is created in the spawn mode, the value of the class attribute
-            # attention ops transmitted is still the one before modification, so it has not been modified.
-            # This will cause in scenarios where both piecewise and splitting ops are configured simultaneously,
-            # If splitting ops does not contain the vllm::mla_forward and vllm::dsa_forward value, this configuration issue will
-            # not be detected in advance assert.
+            # NOTE: Theoretically, we should also add vllm::mla_forward and
+            # vllm::dsa_forward in the attention ops. Since the process is
+            # created in the spawn mode, the value of the class attribute
+            # attention ops transmitted is still the one before modification,
+            # so it has not been modified. This will cause in scenarios where
+            # both piecewise and splitting ops are configured simultaneously,
+            # If splitting ops does not contain the vllm::mla_forward and
+            # vllm::dsa_forward value, this configuration issue will not be
+            # detected in advance assert.
             compilation_config.splitting_ops.extend(
                 [
                     "vllm::mla_forward",
