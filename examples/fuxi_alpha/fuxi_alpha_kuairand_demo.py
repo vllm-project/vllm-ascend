@@ -336,7 +336,7 @@ def get_user_data(max_seq_len, dataloader_iter, user_id=None):
     selected_uids = []
     uids = None
     sum_cnt = 0
-    while (batch := next(dataloader_iter)) and (
+    while (batch := next(dataloader_iter, None)) and (
             uids == batch[0] or uids is None) and sum_cnt < max_seq_len:
         if user_id is not None and user_id != batch[0][0]:
             continue
