@@ -1376,68 +1376,33 @@ class AscendC8AttentionBackendImpl(AscendAttentionBackendImpl):
 
         self._prepare_c8_scales(layer, query.device)
         float_key, float_value = None, None
-        if self.vllm_config.kv_transfer_config is None:
-            if key is not None and value is not None:
-                if attn_metadata.attn_state != AscendAttentionState.DecodeOnly:
-                    float_key, float_value = key, value
-                key, value = self._quantize_kv_to_int8(key, value, layer, attn_metadata.num_actual_tokens)
-                query, key, value, _ = self._reshape_and_cache(query, key, value, kv_cache, attn_metadata, output)
-            # pooling model branch
-            if attn_metadata.model_runner_type == "pooling":
-                attn_output = self._forward_encoder_attention(query, key, value, attn_metadata, output)
+        if key is not None and value is not None:
+            if attn_metadata.attn_state != AscendAttentionState.DecodeOnly:
+                float_key, float_value = key, value
+            key, value = self._quantize_kv_to_int8(key, value, layer, attn_metadata.num_actual_tokens)
+            query, key, value, _ = self._reshape_and_cache(query, key, value, kv_cache, attn_metadata, output)
+        # pooling model branch
+        if attn_metadata.model_runner_type == "pooling":
+            attn_output = self._forward_encoder_attention(query, key, value, attn_metadata, output)
+            output[:num_tokens] = attn_output[:num_tokens]
+            return output
+        if attn_metadata.attn_state == AscendAttentionState.DecodeOnly:
+            if _EXTRA_CTX.capturing:
+                attn_output, num_tokens = self.full_graph_fia(query, key, value, attn_metadata, output, layer)
                 output[:num_tokens] = attn_output[:num_tokens]
                 return output
-            if attn_metadata.attn_state == AscendAttentionState.DecodeOnly:
-                if _EXTRA_CTX.capturing:
-                    attn_output, num_tokens = self.full_graph_fia(query, key, value, attn_metadata, output, layer)
-                    output[:num_tokens] = attn_output[:num_tokens]
-                    return output
-                return self._forward_c8_decode(query, attn_metadata, output, layer)
-            elif attn_metadata.attn_state == AscendAttentionState.ChunkedPrefill:
-                return self._forward_c8_chunked_prefill(query, float_key, float_value, attn_metadata, output, layer)
-            else:
-                return self._forward_c8_fused_infer_attention(
-                    query,
-                    float_key if float_key is not None else key,
-                    float_value if float_value is not None else value,
-                    attn_metadata,
-                    output,
-                    layer,
-                )
+            return self._forward_c8_decode(query, attn_metadata, output, layer)
+        elif attn_metadata.attn_state == AscendAttentionState.ChunkedPrefill:
+            return self._forward_c8_chunked_prefill(query, float_key, float_value, attn_metadata, output, layer)
         else:
-            if attn_metadata.attn_state != AscendAttentionState.DecodeOnly and self.is_kv_producer:
-                output_padded = None
-                if key is not None and value is not None:
-                    output_padded = output
-                    query, key, value, output_padded = self.reshape_and_cache(
-                        query, key, value, kv_cache, attn_metadata, output
-                    )
-                # pooling model branch
-                if attn_metadata.model_runner_type == "pooling":
-                    attn_output = self._forward_encoder_attention(query, key, value, attn_metadata, output)
-                    output[:num_tokens] = attn_output[:num_tokens]
-                    return output
-                if output_padded is not None:
-                    attn_output = self.forward_impl(query, key, value, kv_cache, attn_metadata, output_padded)
-                else:
-                    attn_output = self.forward_impl(query, key, value, kv_cache, attn_metadata, output)
-                output[:num_tokens] = attn_output[:num_tokens]
-                return output
-            elif not self.is_kv_producer:
-                if key is not None and value is not None:
-                    key, value = self._quantize_kv_to_int8(key, value, layer, attn_metadata.num_actual_tokens)
-                    query, key, value, _ = self._reshape_and_cache(query, key, value, kv_cache, attn_metadata, output)
-                # pooling model branch
-                if attn_metadata.model_runner_type == "pooling":
-                    attn_output = self._forward_encoder_attention(query, key, value, attn_metadata, output)
-                    output[:num_tokens] = attn_output[:num_tokens]
-                    return output
-                if _EXTRA_CTX.capturing:
-                    attn_output, num_tokens = self.full_graph_fia(query, key, value, attn_metadata, output, layer)
-                    output[:num_tokens] = attn_output[:num_tokens]
-                    return output
-                elif attn_metadata.attn_state == AscendAttentionState.DecodeOnly:
-                    return self._forward_c8_decode(query, attn_metadata, output, layer)
+            return self._forward_c8_fused_infer_attention(
+                query,
+                float_key if float_key is not None else key,
+                float_value if float_value is not None else value,
+                attn_metadata,
+                output,
+                layer,
+            )
 
     def _nz_5d_view(self, cache: torch.Tensor, block_size: int) -> torch.Tensor:
         """View a KV cache tensor in NZ 5D layout: (num_blocks, num_kv_heads, head_size//nz, block_size, nz)."""

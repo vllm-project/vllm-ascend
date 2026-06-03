@@ -218,7 +218,6 @@ class KVCacheSendingLayerThread(threading.Thread):
         k_buffer: torch.Tensor,
         v_buffer: torch.Tensor,
         enable_kv_quant: bool,
-        enable_c8_quant: bool,
         resharding_stream: torch.npu.Stream,
         callback_func: Callable[..., None] = lambda x: None,
     ):
@@ -256,7 +255,6 @@ class KVCacheSendingLayerThread(threading.Thread):
         self.k_buffer = k_buffer
         self.v_buffer = v_buffer
         self.enable_kv_quant = enable_kv_quant
-        self.enable_c8_quant = enable_c8_quant
         self.ready_event = ready_event
         self.callback_func = callback_func
 
@@ -358,12 +356,9 @@ class KVCacheSendingLayerThread(threading.Thread):
                     remote_block_ids, local_block_ids
                 )
                 # kv cache quantization scenario
-                if (self.enable_kv_quant or self.enable_c8_quant) and send_task.k_quant_cache is not None:
+                if self.enable_kv_quant and send_task.k_quant_cache is not None:
                     assert len(block_lens) == 2, "Quantization block length must be 2!"
-                    if self.enable_kv_quant:
-                        quant_block_lens = [block_lens[0] // 2, block_lens[1]]
-                    else:
-                        quant_block_lens = [block_lens[0] // 2, block_lens[1] // 2]
+                    quant_block_lens = [block_lens[0] // 2, block_lens[1]]
                     layer_local_quant_kv_addr = [self.k_buffer.data_ptr(), self.v_buffer.data_ptr()]
                     rearrange_block_ids = send_task.group_rearrange_block_ids[layer_group_idx]
                     # eg:[5,6,7,9] -> {5:0, 6:1, 7:2, 9:3}
@@ -415,8 +410,6 @@ class KVCacheSendingLayerThread(threading.Thread):
                     zip(layer_local_kv_base_addr, layer_remote_kv_base_addr)
                 ):
                     block_len = block_lens[k]
-                    if self.enable_c8_quant:
-                        block_len = block_len // 2
                     remote_block_len = remote_block_lens[k]
                     for remote_block_id, local_block_id in zip(remote_block_ids, local_block_ids):
                         src = src_layer_base_addr + rearrange_block_dict[local_block_id] * block_len
@@ -1097,13 +1090,10 @@ class MooncakeLayerwiseConnectorWorker:
         self.enable_kv_quant = (
             vllm_config.quant_config.enable_fa_quant if vllm_config.quant_config is not None else False
         )
-        self.enable_c8_quant = (
-            vllm_config.quant_config.enable_c8_quant if vllm_config.quant_config is not None else False
-        )
         self.pd_head_ratio = get_ascend_config().pd_head_ratio
         self.num_head_replica = get_ascend_config().num_head_replica
         self.resharding_stream = None
-        if self.pd_head_ratio > 1 or self.enable_kv_quant or self.enable_c8_quant:
+        if self.pd_head_ratio > 1 or self.enable_kv_quant:
             self.resharding_stream = torch.npu.Stream()
 
         self.remote_poller = zmq.Poller()  # type: ignore
@@ -1131,14 +1121,11 @@ class MooncakeLayerwiseConnectorWorker:
         alignment = 2 * 1024 * 1024
         first_k_cache = first_kv_cache_tuple[0]
         first_v_cache = first_kv_cache_tuple[1]
-        if self.pd_head_ratio > 1 or self.enable_kv_quant or self.enable_c8_quant:
+        if self.pd_head_ratio > 1 or self.enable_kv_quant:
             # regesit kv buffer
             if self.enable_kv_quant:
                 k_dtype = torch.int8
                 v_dtype = first_v_cache.dtype
-            elif self.enable_c8_quant:
-                k_dtype = torch.int8
-                v_dtype = torch.int8
             else:
                 k_dtype = first_k_cache.dtype
                 v_dtype = first_v_cache.dtype
@@ -1194,10 +1181,8 @@ class MooncakeLayerwiseConnectorWorker:
             if isinstance(layer_kv_cache_spec, UniformTypeKVCacheSpecs):
                 layer_kv_cache_spec = layer_kv_cache_spec.kv_cache_specs[layer_name]
             if (
-                (self.pd_head_ratio > 1 and (isinstance(layer_kv_cache_spec, (FullAttentionSpec, SlidingWindowSpec))))
-                or self.enable_kv_quant
-                or self.enable_c8_quant
-            ):
+                self.pd_head_ratio > 1 and (isinstance(layer_kv_cache_spec, (FullAttentionSpec, SlidingWindowSpec)))
+            ) or self.enable_kv_quant:
                 self.attn_resharding_group_idx.add(layer_kv_group_id)
                 if use_kv_buffer is False:
                     use_kv_buffer = True
@@ -1280,7 +1265,6 @@ class MooncakeLayerwiseConnectorWorker:
                 k_buffer=self.k_buffer,
                 v_buffer=self.v_buffer,
                 enable_kv_quant=self.enable_kv_quant,
-                enable_c8_quant=self.enable_c8_quant,
                 resharding_stream=self.resharding_stream,
                 callback_func=self.send_done_send_signal,
             )
@@ -1559,7 +1543,7 @@ class MooncakeLayerwiseConnectorWorker:
                 metadata.requests[req_id] = update_metadata[req_id]
 
             # update send task trans block info
-            if self.pd_head_ratio != 1 or self.enable_kv_quant or self.enable_c8_quant:
+            if self.pd_head_ratio != 1 or self.enable_kv_quant:
                 send_task = metadata.send_task
                 send_task.group_rearrange_block_ids = [[] for _ in range(self.num_kv_cache_groups)]
                 send_task.group_num_blocks = [0 for _ in range(self.num_kv_cache_groups)]
@@ -1624,14 +1608,10 @@ class MooncakeLayerwiseConnectorWorker:
             quant_keys = None
             quant_values = None
             if (
-                (
-                    self.pd_head_ratio != 1
-                    and (isinstance(self.kv_cache_specs[layer_group_idx], (FullAttentionSpec, SlidingWindowSpec)))
-                    and send_task.group_num_blocks[layer_group_idx] > 0
-                )
-                or (self.enable_c8_quant and self.current_layer in self.vllm_config.quant_config.c8_quant_layers)
-                or (self.enable_kv_quant and self.current_layer in self.vllm_config.quant_config.kvcache_quant_layers)
-            ):
+                self.pd_head_ratio != 1
+                and (isinstance(self.kv_cache_specs[layer_group_idx], (FullAttentionSpec, SlidingWindowSpec)))
+                and send_task.group_num_blocks[layer_group_idx] > 0
+            ) or (self.enable_kv_quant and self.current_layer in self.vllm_config.quant_config.kvcache_quant_layers):
                 assert self.resharding_stream is not None
                 with npu_stream_switch(self.resharding_stream):
                     reshape_cache_event.wait()
@@ -1679,20 +1659,6 @@ class MooncakeLayerwiseConnectorWorker:
                         values = values.reshape(-1, *kv_layer[1].shape[2:])
 
                         (keys, values) = kv_alltoall_and_rearrange(self.pd_head_ratio, keys, values)
-                    if self.enable_c8_quant:
-                        layer = self.vllm_config.compilation_config.static_forward_context[layer_name]
-                        quant_keys = torch.clamp(
-                            torch.round(keys * layer._c8_k_inv_scale + layer._c8_k_offset),
-                            -128,
-                            127,
-                        ).to(torch.int8)
-                        quant_values = torch.clamp(
-                            torch.round(values * layer._c8_v_inv_scale + layer._c8_v_offset),
-                            -128,
-                            127,
-                        ).to(torch.int8)
-                        quant_keys = self.get_nz_cache(quant_keys, layer_group_idx)
-                        quant_values = self.get_nz_cache(quant_values, layer_group_idx)
                     if (
                         self.enable_kv_quant
                         and self.current_layer in self.vllm_config.quant_config.kvcache_quant_layers
