@@ -29,6 +29,7 @@ def solve_tril_16x16_kernel(
     BT: tl.constexpr,
     IS_VARLEN: tl.constexpr,
     LARGE_BLOCK_T: tl.constexpr,
+    EXTRACT_SLICE_STRIDE_1: tl.constexpr,
 ):
     i_t, i_bh = tl.program_id(0), tl.program_id(1)
     i_b, i_h = i_bh // H, i_bh % H
@@ -102,7 +103,7 @@ def solve_tril_16x16_kernel(
 
         # for loop to update N_BLOCKS row vector
         for i in range(1, 16):
-            nblks_vec16 = -extract_slice(local_ori_A, (i, 0), (1, 16 * N_BLOCKS), (16 * N_BLOCKS, 1))
+            nblks_vec16 = -extract_slice(local_ori_A, (i, 0), (1, 16 * N_BLOCKS), (EXTRACT_SLICE_STRIDE_1, 1))
             b_a = tl.reshape(nblks_vec16, (N_BLOCKS, 16))
 
             dot_tmp = tl.trans(b_a[:, :, None] * b_A, (1, 0, 2))
@@ -362,7 +363,9 @@ def solve_tril(
     chunk_indices = chunk_indices_large_block
     NT = len(chunk_indices) if cu_seqlens is not None else triton.cdiv(T, LARGE_BLOCK_T)
 
-    solve_tril_16x16_kernel[NT, B * H](
+    from vllm_ascend.device.device_op import DeviceOperator
+
+    DeviceOperator.solve_tril_16x16(
         A=A,
         Ad=Ad,
         cu_seqlens=cu_seqlens,
@@ -371,8 +374,8 @@ def solve_tril(
         H=H,
         BT=BT,
         LARGE_BLOCK_T=LARGE_BLOCK_T,
-        num_warps=1,
-        num_stages=4,
+        NT=NT,
+        B=B,
     )
 
     if BT == 16:
@@ -397,4 +400,5 @@ def solve_tril(
         num_warps=4,
         num_stages=3,
     )
+
     return Ai

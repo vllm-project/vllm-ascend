@@ -73,7 +73,7 @@ Please install system dependencies
 ```bash
 pip install qwen_omni_utils modelscope
 # Used for audio processing.
-apt-get update && apt-get install ffmpeg -y
+apt-get update && apt-get install -y ffmpeg
 # Check the installation.
 ffmpeg -version
 ```
@@ -289,7 +289,7 @@ There are three `vllm bench` subcommands:
 Take the `serve` as an example. Run the code as follows.
 
 ```bash
-export VLLM_USE_MODELSCOPE=True 
+export VLLM_USE_MODELSCOPE=True
 export MODEL=Qwen/Qwen3-Omni-30B-A3B-Thinking
 python3 -m vllm.entrypoints.openai.api_server --model $MODEL --tensor-parallel-size 2 --swap-space 16 --disable-log-stats --disable-log-request --load-format dummy
 

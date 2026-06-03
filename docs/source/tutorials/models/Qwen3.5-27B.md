@@ -94,7 +94,7 @@ Run the following script to execute online 128k inference.
 ```shell
 #!/bin/sh
 # Load model from ModelScope to speed up download
-export VLLM_USE_MODELSCOPE=true
+export VLLM_USE_MODELSCOPE=True
 # To reduce memory fragmentation and avoid out of memory
 export PYTORCH_NPU_ALLOC_CONF=expandable_segments:True
 export HCCL_BUFFSIZE=512
@@ -119,7 +119,6 @@ vllm serve Eco-Tech/Qwen3.5-27B-w8a8-mtp \
 --speculative_config '{"method": "qwen3_5_mtp", "num_speculative_tokens": 3, "enforce_eager": true}' \
 --compilation-config '{"cudagraph_mode":"FULL_DECODE_ONLY"}' \
 --additional-config '{"enable_cpu_binding":true}' \
---async-scheduling
 ```
 
 **Notice:**
@@ -179,7 +178,7 @@ Refer to [Using AISBench for performance evaluation](../../developer_guide/evalu
 
 Run performance evaluation of `Qwen3.5-27B-w8a8` as an example.
 
-Refer to [vllm benchmark](https://docs.vllm.ai/en/latest/contributing/benchmarks.html) for more details.
+Refer to [vllm benchmark](https://docs.vllm.ai/en/latest/benchmarking/) for more details.
 
 There are three `vllm bench` subcommands:
 
@@ -190,7 +189,7 @@ There are three `vllm bench` subcommands:
 Take the `serve` as an example. Run the code as follows.
 
 ```shell
-export VLLM_USE_MODELSCOPE=true
+export VLLM_USE_MODELSCOPE=True
 vllm bench serve --model Eco-Tech/Qwen3.5-27B-w8a8-mtp --dataset-name random --random-input 200 --num-prompts 200 --request-rate 1 --save-result --result-dir ./
 ```
 

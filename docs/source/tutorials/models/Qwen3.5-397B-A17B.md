@@ -94,7 +94,7 @@ Run the following script to execute online 128k inference On 1 Atlas 800 A3(64G 
 ```shell
 #!/bin/sh
 # Load model from ModelScope to speed up download
-export VLLM_USE_MODELSCOPE=true
+export VLLM_USE_MODELSCOPE=True
 # To reduce memory fragmentation and avoid out of memory
 export PYTORCH_NPU_ALLOC_CONF=expandable_segments:True
 export HCCL_OP_EXPANSION_MODE="AIV"
@@ -127,7 +127,6 @@ vllm serve Eco-Tech/Qwen3.5-397B-A17B-w8a8-mtp \
 --speculative_config '{"method": "qwen3_5_mtp", "num_speculative_tokens": 3, "enforce_eager": true}' \
 --compilation-config '{"cudagraph_mode":"FULL_DECODE_ONLY"}' \
 --additional-config '{"enable_cpu_binding":true}' \
---async-scheduling
 ```
 
 **Notice:**
@@ -158,7 +157,7 @@ Node 0
 ```shell
 #!/bin/sh
 # Load model from ModelScope to speed up download
-export VLLM_USE_MODELSCOPE=true
+export VLLM_USE_MODELSCOPE=True
 # To reduce memory fragmentation and avoid out of memory
 export PYTORCH_NPU_ALLOC_CONF=expandable_segments:True
 # this obtained through ifconfig
@@ -191,7 +190,6 @@ vllm serve Eco-Tech/Qwen3.5-397B-A17B-w8a8-mtp \
 --max-model-len 32768 \
 --max-num-batched-tokens 4096 \
 --trust-remote-code \
---async-scheduling \
 --gpu-memory-utilization 0.9 \
 --no-enable-prefix-caching \
 --speculative_config '{"method": "qwen3_5_mtp", "num_speculative_tokens": 3, "enforce_eager": true}' \
@@ -204,7 +202,7 @@ Node1
 ```shell
 #!/bin/sh
 # Load model from ModelScope to speed up download
-export VLLM_USE_MODELSCOPE=true
+export VLLM_USE_MODELSCOPE=True
 # To reduce memory fragmentation and avoid out of memory
 export PYTORCH_NPU_ALLOC_CONF=expandable_segments:True
 # this obtained through ifconfig
@@ -241,7 +239,6 @@ vllm serve Eco-Tech/Qwen3.5-397B-A17B-w8a8-mtp \
 --max-num-batched-tokens 4096 \
 --enable-expert-parallel \
 --trust-remote-code \
---async-scheduling \
 --gpu-memory-utilization 0.9 \
 --no-enable-prefix-caching \
 --speculative_config '{"method": "qwen3_5_mtp", "num_speculative_tokens": 3, "enforce_eager": true}' \
@@ -289,7 +286,8 @@ To run the vllm-ascend `Prefill-Decode Disaggregation` service, you need to depl
        # jemalloc is for better performance, if `libjemalloc.so` is installed on your machine, you can turn it on.
        # export LD_PRELOAD=/usr/lib/aarch64-linux-gnu/libjemalloc.so.2:$LD_PRELOAD
        export VLLM_ENGINE_READY_TIMEOUT_S=30000
-       export VLLM_NIXL_ABORT_REQUEST_TIMEOUT=30000
+       # Timeout (in seconds) for automatically releasing the prefiller’s KV cache for a particular request.
+       export VLLM_MOONCAKE_ABORT_REQUEST_TIMEOUT=480
        export IP_ADDRESS=$local_ip
        export NETWORK_CARD_NAME=$nic_name
        export HCCL_IF_IP=$IP_ADDRESS
@@ -364,7 +362,8 @@ To run the vllm-ascend `Prefill-Decode Disaggregation` service, you need to depl
        node0_ip="xxxx"
 
        export VLLM_ENGINE_READY_TIMEOUT_S=30000
-       export VLLM_NIXL_ABORT_REQUEST_TIMEOUT=30000
+       # Timeout (in seconds) for automatically releasing the prefiller’s KV cache for a particular request.
+       export VLLM_MOONCAKE_ABORT_REQUEST_TIMEOUT=480
        export MASTER_IP_ADDRESS=$node0_ip
        export IP_ADDRESS=$local_ip
 
@@ -444,7 +443,8 @@ To run the vllm-ascend `Prefill-Decode Disaggregation` service, you need to depl
        node0_ip="xxxx"
 
        export VLLM_ENGINE_READY_TIMEOUT_S=30000
-       export VLLM_NIXL_ABORT_REQUEST_TIMEOUT=30000
+       # Timeout (in seconds) for automatically releasing the prefiller’s KV cache for a particular request.
+       export VLLM_MOONCAKE_ABORT_REQUEST_TIMEOUT=480
        export MASTER_IP_ADDRESS=$node0_ip
        export IP_ADDRESS=$local_ip
 
@@ -511,7 +511,6 @@ To run the vllm-ascend `Prefill-Decode Disaggregation` service, you need to depl
        **Notice:**
        The parameters are explained as follows:
 
-       - `--async-scheduling`: enables the asynchronous scheduling function. When Multi-Token Prediction (MTP) is enabled, asynchronous scheduling of operator delivery can be implemented to overlap the operator delivery latency.
        - `cudagraph_capture_sizes`: The recommended value is `n x (mtp + 1)`. And the min is `n = 1` and the max is `n = max-num-seqs`. For other values, it is recommended to set them to the number of frequently occurring requests on the Decode (D) node.
        - `recompute_scheduler_enable: true`: enables the recomputation scheduler. When the Key-Value Cache (KV Cache) of the decode node is insufficient, requests will be sent to the prefill node to recompute the KV Cache. In the PD separation scenario, it is recommended to enable this configuration on both prefill and decode nodes simultaneously.
        - `--no-enable-prefix-caching`: The prefix-cache feature is enabled by default. You can use the `--no-enable-prefix-caching` parameter to disable this feature. Notice: for Prefill-Decode disaggregation feature, known issue on D node: [#7944](https://github.com/vllm-project/vllm-ascend/issues/7944)
@@ -583,7 +582,7 @@ Refer to [Using AISBench for performance evaluation](../../developer_guide/evalu
 
 Run performance evaluation of `Qwen3.5-397B-A17B-w8a8` as an example.
 
-Refer to [vllm benchmark](https://docs.vllm.ai/en/latest/contributing/benchmarks.html) for more details.
+Refer to [vllm benchmark](https://docs.vllm.ai/en/latest/benchmarking/) for more details.
 
 There are three `vllm bench` subcommands:
 
@@ -594,7 +593,7 @@ There are three `vllm bench` subcommands:
 Take the `serve` as an example. Run the code as follows.
 
 ```shell
-export VLLM_USE_MODELSCOPE=true
+export VLLM_USE_MODELSCOPE=True
 vllm bench serve --model Eco-Tech/Qwen3.5-397B-A17B-w8a8-mtp --dataset-name random --random-input 200 --num-prompts 200 --request-rate 1 --save-result --result-dir ./
 ```
 

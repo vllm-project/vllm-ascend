@@ -67,12 +67,28 @@ class EplbWorker:
                 hotness = self._calculate_hotness(old_placement, load_info.sum(0))
             else:
                 hotness = self._calculate_hotness(old_placement, load_info)
-            current_mean, current_max = self._compute_imbalance(old_placement, hotness)
-            update_mean, update_max = self._compute_imbalance(new_placement, hotness)
+            # ms-service-metric begin: expose EPLB hotness details for metrics collection.
+            current_mean, current_max, current_imbalance_list = self._compute_imbalance(
+                old_placement, hotness, return_list=True
+            )
+            update_mean, update_max, update_imbalance_list = self._compute_imbalance(
+                new_placement, hotness, return_list=True
+            )
+            self.latest_expert_hotness = {
+                "current_mean": current_mean,
+                "current_max": current_max,
+                "update_mean": update_mean,
+                "update_max": update_max,
+                "current_imbalance_list": current_imbalance_list,
+                "update_imbalance_list": update_imbalance_list,
+            }
+            # ms-service-metric end.
             logger.info(
-                "[Expert Hotness] Current: mean={:.3f}, max={:.3f}, Updated: mean={:.3f}, max={:.3f}".format(
-                    current_mean, current_max, update_mean, update_max
-                )
+                "[Expert Hotness] Current: mean=%.3f, max=%.3f, Updated: mean=%.3f, max=%.3f",
+                current_mean,
+                current_max,
+                update_mean,
+                update_max,
             )
 
         if not torch.is_tensor(new_placement):
@@ -96,7 +112,7 @@ class EplbWorker:
         for layer_id in range(num_layers):
             # check if any logical expert is not placed on any rank
             if torch.unique(new_placement[layer_id]).numel() < torch.unique(old_placement[layer_id]).numel():
-                logger.error(f"There exists expert not placed on any rank in layer {layer_id}")
+                logger.error("There exists expert not placed on any rank in layer %s", layer_id)
                 new_placement[layer_id] = old_placement[layer_id]
                 continue
 
@@ -107,8 +123,10 @@ class EplbWorker:
                 # check if same logical experts are placed on the same NPU
                 if new_placement_check.numel() != torch.unique(new_placement_check).numel():
                     logger.error(
-                        "Replicated experts are placed on the same NPU; expert placement on "
-                        f"layer {layer_id}, rank {rank_id} is invalid"
+                        "Replicated experts are placed on the same NPU; "
+                        "expert placement on layer %s, rank %s is invalid",
+                        layer_id,
+                        rank_id,
                     )
                     new_placement[layer_id] = old_placement[layer_id]
                     break
@@ -117,8 +135,9 @@ class EplbWorker:
                 expert_not_move = torch.isin(new_placement_check, old_placement_check)
                 if not torch.equal(new_placement_check[expert_not_move], old_placement_check[expert_not_move]):
                     logger.error(
-                        "There exists expert movement inside NPU; expert placement on "
-                        f"layer {layer_id}, rank {rank_id} is invalid"
+                        "There exists expert movement inside NPU; expert placement on layer %s, rank %s is invalid",
+                        layer_id,
+                        rank_id,
                     )
                     new_placement[layer_id] = old_placement[layer_id]
                     break
@@ -267,7 +286,7 @@ class EplbWorker:
         return list(zip(send_all, recv_all, maps, log2phy_all, layer_ids))
 
     @staticmethod
-    def _compute_imbalance(deployment_all_layer, hotness_all_layer: np.ndarray):
+    def _compute_imbalance(deployment_all_layer, hotness_all_layer: np.ndarray, return_list: bool = False):
         imbalance_list = []
         deployment_all_layer = np.array(deployment_all_layer)
         for deployment, hotness in zip(deployment_all_layer, hotness_all_layer):
@@ -281,6 +300,10 @@ class EplbWorker:
 
         max_val = max(imbalance_list)
         mean_val = sum(imbalance_list) / len(imbalance_list)
+        # ms-service-metric begin: optionally expose per-layer imbalance without recomputing it.
+        if return_list:
+            return mean_val, max_val, imbalance_list
+        # ms-service-metric end.
         return mean_val, max_val
 
     @staticmethod
@@ -346,7 +369,8 @@ class EplbProcess:
 
             except Exception as e:
                 logger.warning(
-                    f"[EPLB subprocess exiting due to error: {e}]",
+                    "[EPLB subprocess exiting due to error: %s]",
+                    e,
                     exc_info=True,
                 )
                 break

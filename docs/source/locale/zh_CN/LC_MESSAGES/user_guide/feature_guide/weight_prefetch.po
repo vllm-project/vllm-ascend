@@ -8,7 +8,7 @@ msgid ""
 msgstr ""
 "Project-Id-Version: vllm-ascend \n"
 "Report-Msgid-Bugs-To: \n"
-"POT-Creation-Date: 2026-04-09 18:37+0800\n"
+"POT-Creation-Date: 2026-04-21 02:03+0000\n"
 "PO-Revision-Date: 2026-04-10 18:37+0800\n"
 "Last-Translator: FULL NAME <EMAIL@ADDRESS>\n"
 "Language: zh_CN\n"
@@ -36,30 +36,29 @@ msgid ""
 "computations and indirectly improving Cube computation efficiency by "
 "minimizing resource contention and optimizing data flow."
 msgstr ""
-"权重预取通过在需要之前将权重预加载到缓存中来优化内存使用，最小化模型执行期间内存访问引起的延迟。"
-"线性层有时表现出较高的 MTE 利用率。为了解决这个问题，我们创建了一个专门用于权重预取的独立流水线，"
-"它与原始向量计算流水线（如量化、MoE 门控 top_k、RMSNorm 和 SwiGlu）并行运行。"
-"这种方法允许权重提前预加载到 L2 缓存中，减少了线性层计算期间的 MTE 利用率，"
-"并通过最小化资源争用和优化数据流间接提高了 Cube 计算效率。"
+"权重预取通过在需要之前将权重预加载到缓存中来优化内存使用，最小化模型执行期间内存访问引起的延迟。线性层有时表现出较高的 MTE "
+"利用率。为了解决这个问题，我们创建了一个专门用于权重预取的独立流水线，它与原始向量计算流水线（如量化、MoE 门控 top_k、RMSNorm 和"
+" SwiGlu）并行运行。这种方法允许权重提前预加载到 L2 缓存中，减少了线性层计算期间的 MTE "
+"利用率，并通过最小化资源争用和优化数据流间接提高了 Cube 计算效率。"
 
 #: ../../source/user_guide/feature_guide/weight_prefetch.md:5
 msgid ""
 "Since we use vector computations to hide the weight prefetching pipeline,"
 " this has an effect on computation. If you prioritize low latency over "
 "high throughput, it is best not to enable prefetching."
-msgstr ""
-"由于我们使用向量计算来隐藏权重预取流水线，这会对计算产生影响。如果您优先考虑低延迟而非高吞吐量，最好不要启用预取。"
+msgstr "由于我们使用向量计算来隐藏权重预取流水线，这会对计算产生影响。如果您优先考虑低延迟而非高吞吐量，最好不要启用预取。"
 
 #: ../../source/user_guide/feature_guide/weight_prefetch.md:7
 msgid "Quick Start"
 msgstr "快速开始"
 
 #: ../../source/user_guide/feature_guide/weight_prefetch.md:9
-#, python-brace-format
 msgid ""
-"With `--additional-config '{\"weight_prefetch_config\": {\"enabled\": "
-"true}}'` to open weight prefetch."
-msgstr "使用 `--additional-config '{\"weight_prefetch_config\": {\"enabled\": true}}'` 开启权重预取。"
+"Use `--additional-config '{\"weight_prefetch_config\": {\"enabled\": "
+"true}}'` to enable weight prefetch."
+msgstr ""
+"使用 `--additional-config '{\"weight_prefetch_config\": {\"enabled\": "
+"true}}'` 开启权重预取。"
 
 #: ../../source/user_guide/feature_guide/weight_prefetch.md:11
 msgid "Fine-tune Prefetch Ratio"
@@ -75,9 +74,8 @@ msgid ""
 "added `prefetch_ratio` to allow for flexible size configuration based on "
 "the specific workload, details as follows:"
 msgstr ""
-"由于权重预取使用向量计算来隐藏权重预取流水线，预取大小的设置至关重要。"
-"如果大小太小，优化收益将无法充分发挥；而如果大小太大，可能导致资源争用，从而造成性能下降。"
-"为了适应不同的场景，我们添加了 `prefetch_ratio`，以便根据具体工作负载灵活配置大小，详情如下："
+"由于权重预取使用向量计算来隐藏权重预取流水线，预取大小的设置至关重要。如果大小太小，优化收益将无法充分发挥；而如果大小太大，可能导致资源争用，从而造成性能下降。为了适应不同的场景，我们添加了"
+" `prefetch_ratio`，以便根据具体工作负载灵活配置大小，详情如下："
 
 #: ../../source/user_guide/feature_guide/weight_prefetch.md:15
 msgid ""
@@ -92,7 +90,6 @@ msgid ""
 msgstr "“attn” 和 “moe” 配置选项用于 MoE 模型，详情如下："
 
 #: ../../source/user_guide/feature_guide/weight_prefetch.md:19
-#, python-brace-format
 msgid "`\"attn\": { \"qkv\": 1.0,  \"o\": 1.0},  \"moe\": {\"gate_up\": 0.8}`"
 msgstr "`\"attn\": { \"qkv\": 1.0,  \"o\": 1.0},  \"moe\": {\"gate_up\": 0.8}`"
 
@@ -103,7 +100,6 @@ msgid ""
 msgstr "“mlp” 配置选项用于优化稠密模型的性能，详情如下："
 
 #: ../../source/user_guide/feature_guide/weight_prefetch.md:23
-#, python-brace-format
 msgid "`\"mlp\": {\"gate_up\": 1.0, \"down\": 1.0}`"
 msgstr "`\"mlp\": {\"gate_up\": 1.0, \"down\": 1.0}`"
 
@@ -113,8 +109,8 @@ msgid ""
 "performance for Qwen3-235B-A22B-W8A8 when `--max-num-seqs` is 144, for "
 "Qwen3-32B-W8A8 when `--max-num-seqs` is 72."
 msgstr ""
-"以上值为默认配置，对于 Qwen3-235B-A22B-W8A8，当 `--max-num-seqs` 为 144 时具有良好的性能；"
-"对于 Qwen3-32B-W8A8，当 `--max-num-seqs` 为 72 时具有良好的性能。"
+"以上值为默认配置，对于 Qwen3-235B-A22B-W8A8，当 `--max-num-seqs` 为 144 时具有良好的性能；对于 "
+"Qwen3-32B-W8A8，当 `--max-num-seqs` 为 72 时具有良好的性能。"
 
 #: ../../source/user_guide/feature_guide/weight_prefetch.md:27
 msgid ""
@@ -131,11 +127,10 @@ msgid ""
 "appears as a CMO operation on a single stream; this CMO operation is the "
 "prefetch operation."
 msgstr ""
-"然而，这可能不是您场景下的最佳配置。对于更高的并发，您可以尝试增加预取大小。"
-"对于较低的并发，预取可能没有任何优势，因此您可以减小大小或禁用预取。"
-"通过收集性能分析数据来确定预取大小是否合适。具体来说，检查预取操作（例如 MLP Down Proj 权重预取）所需的时间"
-"是否与并行向量计算算子（例如 SwiGlu 计算）所需的时间重叠，以及预取操作是否不晚于向量计算算子的完成时间。"
-"在性能分析时间线中，预取操作表现为单个流上的 CMO 操作；这个 CMO 操作就是预取操作。"
+"然而，这可能不是您场景下的最佳配置。对于更高的并发，您可以尝试增加预取大小。对于较低的并发，预取可能没有任何优势，因此您可以减小大小或禁用预取。通过收集性能分析数据来确定预取大小是否合适。具体来说，检查预取操作（例如"
+" MLP Down Proj 权重预取）所需的时间是否与并行向量计算算子（例如 SwiGlu "
+"计算）所需的时间重叠，以及预取操作是否不晚于向量计算算子的完成时间。在性能分析时间线中，预取操作表现为单个流上的 CMO 操作；这个 CMO "
+"操作就是预取操作。"
 
 #: ../../source/user_guide/feature_guide/weight_prefetch.md:29
 msgid "Notes:"
@@ -153,7 +148,9 @@ msgid ""
 "Due to the current size of the L2 cache, the maximum prefetch cannot "
 "exceed 18MB. If `prefetch_ratio * linear_layer_weight_size >= 18 * 1024 *"
 " 1024` bytes, the backend will only prefetch 18MB."
-msgstr "由于当前 L2 缓存的大小，最大预取量不能超过 18MB。如果 `prefetch_ratio * linear_layer_weight_size >= 18 * 1024 * 1024` 字节，后端将仅预取 18MB。"
+msgstr ""
+"由于当前 L2 缓存的大小，最大预取量不能超过 18MB。如果 `prefetch_ratio * "
+"linear_layer_weight_size >= 18 * 1024 * 1024` 字节，后端将仅预取 18MB。"
 
 #: ../../source/user_guide/feature_guide/weight_prefetch.md:34
 msgid "Example"

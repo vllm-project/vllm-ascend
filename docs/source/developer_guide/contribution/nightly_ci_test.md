@@ -133,11 +133,7 @@ events — it will **not** run on PR-triggered runs even with `/nightly all`.
 | `qwen3-235b-a22b-w8a8` | Qwen3-235B-A22B-W8A8 |
 | `qwen3-30b-a3b-w8a8` | Qwen3-30B-A3B-W8A8 |
 | `qwen3-next-80b-a3b-instruct-w8a8` | Qwen3-Next-80B-A3B-Instruct-W8A8 |
-| `qwq-32b` | QwQ-32B |
 | `qwen3-32b-int8` | Qwen3-32B-Int8 |
-| `qwen2-5-vl-7b` | Qwen2.5-VL-7B-Instruct |
-| `qwen2-5-vl-7b-epd` | Qwen2.5-VL-7B-Instruct EPD |
-| `qwen2-5-vl-32b` | Qwen2.5-VL-32B-Instruct |
 | `qwen3-32b-int8-prefix-cache` | Qwen3-32B-Int8 prefix cache |
 | `deepseek-r1-0528-w8a8-prefix-cache` | DeepSeek-R1-0528-W8A8 prefix cache |
 | `custom-multi-ops` | Custom multi-card operator tests |

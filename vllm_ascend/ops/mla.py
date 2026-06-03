@@ -41,7 +41,7 @@ class IndexerWrapper(nn.Module):
     A wrapper of Indexer for Deepseek v3.2.
     This wrapper is currently used to solve the fp8 hard code issue of vllm's deepseek_v2.py.
     It wraps the original Indexer, inherits its module weights
-    (including wq_b, wk, weights_proj, k_norm)
+    (including wq_b, wk_weights_proj or wk/weights_proj, k_norm)
     while deletes the unused topk_indices_buffer and k_cache to save memory.
     TODO: Will be removed once original Indexer supports different quantization methods.
     """
@@ -54,8 +54,7 @@ class IndexerWrapper(nn.Module):
         self.topk_tokens: int = vllm_indexer.topk_tokens  # 2048
         self.q_lora_rank: int = vllm_indexer.q_lora_rank  # 1536
         self.wq_b = vllm_indexer.wq_b
-        self.wk = vllm_indexer.wk
-        self.weights_proj = vllm_indexer.weights_proj
+        self.wk_weights_proj = vllm_indexer.wk_weights_proj
         self.k_norm = vllm_indexer.k_norm
         self.softmax_scale = vllm_indexer.softmax_scale
         vllm_indexer.topk_indices_buffer = None  # delete topk_indices_buffer
@@ -80,6 +79,7 @@ class AscendMultiHeadLatentAttention(MultiHeadLatentAttentionWrapper):
         cache_config: CacheConfig | None = None,
         quant_config: QuantizationConfig | None = None,
         prefix: str = "",
+        skip_topk: bool = False,
     ) -> None:
         nn.Module.__init__(self)
         self.hidden_size = hidden_size
@@ -90,6 +90,7 @@ class AscendMultiHeadLatentAttention(MultiHeadLatentAttentionWrapper):
         self.qk_head_dim = qk_nope_head_dim + qk_rope_head_dim
         self.v_head_dim = v_head_dim
         self.prefix = prefix
+        self.skip_topk = skip_topk
         hf_config = get_current_vllm_config().model_config.hf_text_config
         self.enable_shared_expert_dp = get_ascend_config().enable_shared_expert_dp
         self.tp_size = get_tensor_model_parallel_world_size()
@@ -112,6 +113,8 @@ class AscendMultiHeadLatentAttention(MultiHeadLatentAttentionWrapper):
             prefix=f"{prefix}.attn",
             use_sparse=mla_modules.is_sparse,
             indexer=ascend_indexer,
+            skip_topk=skip_topk,
+            topk_indices_buffer=getattr(mla_modules, "topk_indices_buffer", None),
             # extra args
             rotary_emb=mla_modules.rotary_emb,
             fused_qkv_a_proj=mla_modules.fused_qkv_a_proj,
@@ -156,7 +159,7 @@ class AscendMultiHeadLatentAttention(MultiHeadLatentAttentionWrapper):
         kv_cache: torch.Tensor | None = None,
         attn_metadata: AttentionMetadata | None = None,
     ) -> torch.Tensor:
-        hidden_dim = hidden_states.shape[-1]
+        hidden_dim = self.hidden_size
 
         if _EXTRA_CTX.flash_comm_v1_enabled and self.tp_size > 1 and self.is_vl_first_layer:
             need_gather_q_kv = False
@@ -164,7 +167,9 @@ class AscendMultiHeadLatentAttention(MultiHeadLatentAttentionWrapper):
             output = torch.empty((n_out, hidden_dim), dtype=hidden_states.dtype, device=hidden_states.device)
         else:
             need_gather_q_kv = _EXTRA_CTX.flash_comm_v1_enabled
-            output = torch.empty(hidden_states.shape, dtype=hidden_states.dtype, device=hidden_states.device)
+            output = torch.empty(
+                (hidden_states.shape[0], hidden_dim), dtype=hidden_states.dtype, device=hidden_states.device
+            )
 
         torch.ops.vllm.mla_forward(hidden_states, need_gather_q_kv, output, self.prefix)
         output = output.view(-1, hidden_dim)

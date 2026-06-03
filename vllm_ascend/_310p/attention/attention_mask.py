@@ -35,9 +35,9 @@ class AttentionMaskBuilder310:
             max_seqlen (int): Maximum length of a sequence (including prompt and generated text).
         """
         AttentionMaskBuilder310.max_seqlen = max_seqlen
-        self.attn_mask_cache = None
+        self.causal_attn_mask_cache = None
+        self.non_causal_attn_mask_cache = None
         self.device = device
-        self.swa_mask = None
 
     @staticmethod
     def gen_causal_additive_mask(max_seq_len: int, device: torch.device):
@@ -89,32 +89,7 @@ class AttentionMaskBuilder310:
         splitfuse_mask_nz = torch_npu.npu_format_cast(nd_to_nz_spec(splitfuse_mask).contiguous(), ACL_FORMAT_FRACTAL_NZ)
         return splitfuse_mask_nz
 
-    def get_swa_mask(self, dtype: torch.dtype, sliding_window):
-        """
-        Generates or retrieves a cached Sliding Window Attention (SWA) mask.
-
-        This mask allows attention only within a specific local window (diagonal band),
-        masking out tokens that are too far in the past or in the future.
-
-        Args:
-            dtype (torch.dtype): Data type of the mask.
-            sliding_window (int): The size of the sliding window.
-
-        Returns:
-            torch.Tensor: The SWA mask cast to ACL_FORMAT_FRACTAL_NZ.
-        """
-        assert dtype == torch.float16
-        if sliding_window is not None and self.swa_mask is None:
-            mask = torch.ones(self.max_seqlen, self.max_seqlen, dtype=torch.bool)
-            triu_mask = torch.triu(mask, diagonal=1).to(self.device)
-            tril_mask = torch.tril(mask, -sliding_window).to(self.device)
-            mask = triu_mask + tril_mask
-            swa_mask = torch.zeros((self.max_seqlen, self.max_seqlen), dtype=dtype, device=self.device)
-            swa_mask.masked_fill_(mask, float("-inf"))
-            self.swa_mask = torch_npu.npu_format_cast(nd_to_nz_2d(swa_mask), ACL_FORMAT_FRACTAL_NZ)
-        return self.swa_mask
-
-    def get_attention_mask(self, model_config) -> torch.Tensor:
+    def get_attention_mask(self, causal: bool, model_config) -> torch.Tensor:
         """
         Retrieves the appropriate attention mask based on the model configuration.
 
@@ -122,6 +97,7 @@ class AttentionMaskBuilder310:
         on 310P hardware.
 
         Args:
+            causal (bool): Whether to generate a causal mask.
             model_config: Configuration object containing runner details.
 
         Returns:
@@ -131,8 +107,11 @@ class AttentionMaskBuilder310:
             NotImplementedError: If the runner_type is 'pooling'.
         """
         if getattr(model_config, "runner_type", None) == "pooling":
-            # TODO: pooling model will be supported soon.
-            raise NotImplementedError("310P does not support runner_type='pooling'")
+            if causal:
+                return self._get_causal_mask(self.max_seqlen)
+            else:
+                return self._get_non_causal_mask(self.max_seqlen, model_config.dtype)
+
         return self._get_causal_mask(self.max_seqlen)
 
     def _get_causal_mask(self, max_seq_len: int) -> torch.Tensor:
@@ -148,7 +127,31 @@ class AttentionMaskBuilder310:
         Returns:
             torch.Tensor: The cached causal mask in ACL_FORMAT_FRACTAL_NZ.
         """
-        if self.attn_mask_cache is None:
+        if self.causal_attn_mask_cache is None:
             attn_mask = self.gen_causal_additive_mask(max_seq_len, self.device)
-            self.attn_mask_cache = torch_npu.npu_format_cast(nd_to_nz_2d(attn_mask), ACL_FORMAT_FRACTAL_NZ)
-        return self.attn_mask_cache
+            self.causal_attn_mask_cache = torch_npu.npu_format_cast(nd_to_nz_2d(attn_mask), ACL_FORMAT_FRACTAL_NZ)
+        return self.causal_attn_mask_cache
+
+    def _get_non_causal_mask(self, max_seq_len: int, dtype: torch.dtype) -> torch.Tensor:
+        """
+        Internal method to get or update the cached non-causal attention mask.
+
+        If the cache is empty or the requested length exceeds the cached length,
+        a new mask is generated and converted to the NPU fractal format.
+
+        Args:
+            max_seq_len (int): The required sequence length.
+
+        Returns:
+            torch.Tensor: The cached causal mask in ACL_FORMAT_FRACTAL_NZ.
+        """
+        if self.non_causal_attn_mask_cache is not None:
+            return self.non_causal_attn_mask_cache
+
+        attention_mask_npu = torch.zeros(size=(max_seq_len, max_seq_len), dtype=dtype, device=self.device)
+        attention_mask_npu = nd_to_nz_2d(attention_mask_npu)
+        self.non_causal_attn_mask_cache = torch_npu.npu_format_cast(
+            attention_mask_npu.contiguous(), ACL_FORMAT_FRACTAL_NZ
+        )
+
+        return self.non_causal_attn_mask_cache

@@ -20,6 +20,7 @@ import torch
 import torch.distributed as dist
 import vllm.envs as envs
 from vllm.logger import logger
+from vllm.v1.utils import record_function_or_nullcontext
 
 from vllm_ascend.distributed.parallel_state import get_dynamic_eplb_group
 from vllm_ascend.eplb.adaptor.vllm_adaptor import VllmEplbAdaptor
@@ -70,7 +71,7 @@ class EplbUpdator:
 
         self.process = process
 
-        logger.info(f"[ModelRunner] Launched EPLB process (pid={self.process.pid})")
+        logger.info("[ModelRunner] Launched EPLB process (pid=%s)", self.process.pid)
 
     def update_iteration(self):
         self.cur_iterations += 1
@@ -103,27 +104,29 @@ class EplbUpdator:
         if self.get_update_info_flag():
             self.update_info_all = self.eplb_process.block_update_q.get()
         if self.update_expert_weight_flag():
-            (expert_send_info, expert_recv_info, updated_expert_map, log2phy_map, layer_id) = self.update_info_all.pop(
-                0
-            )
-            log2phy_map_this_rank = torch.from_numpy(numpy.array(log2phy_map))
-            self.eplb_loader.set_log2phy_map(log2phy_map_this_rank)
-            updated_expert_map_this_rank = torch.from_numpy(numpy.array(updated_expert_map))
-            self.eplb_loader.generate_expert_d2d_transfer_task(
-                expert_send_info,
-                expert_recv_info,
-                updated_expert_map_this_rank,
-                layer_id + self.adaptor.num_dense_layers,
-            )
+            with record_function_or_nullcontext("EPLB generate p2p task"):
+                (expert_send_info, expert_recv_info, updated_expert_map, log2phy_map, layer_id) = (
+                    self.update_info_all.pop(0)
+                )
+                log2phy_map_this_rank = torch.from_numpy(numpy.array(log2phy_map))
+                self.eplb_loader.set_log2phy_map(log2phy_map_this_rank)
+                updated_expert_map_this_rank = torch.from_numpy(numpy.array(updated_expert_map))
+                self.eplb_loader.generate_expert_d2d_transfer_task(
+                    expert_send_info,
+                    expert_recv_info,
+                    updated_expert_map_this_rank,
+                    layer_id + self.adaptor.num_dense_layers,
+                )
 
-            # set asynchronous stream for d2d expert weight update
-            self.reqs = []
-            self.eplb_loader.asyn_expert_weight_transfer(self.reqs)
+                # set asynchronous stream for d2d expert weight update
+                self.reqs = []
+                self.eplb_loader.asyn_expert_weight_transfer(self.reqs)
 
     def forward_end(self):
         if self.wakeup_eplb_worker_flag():
-            self.compute_and_set_moe_load()
-            self.wakeup_eplb_worker()
+            with record_function_or_nullcontext("EPLB gather moe load"):
+                self.compute_and_set_moe_load()
+                self.wakeup_eplb_worker()
 
         if self.update_expert_weight_flag() and self.expert_map_record_path is None:
             self.eplb_loader.update_expert_map_and_weight(self.reqs)
@@ -138,7 +141,7 @@ class EplbUpdator:
             moe_load = moe_load.permute(2, 0, 1, 3)
 
         self.shared_dict["moe_load"] = moe_load
-        logger.debug(f"[ModelRunner] Updated shared_dict['moe_load'] shape={moe_load.shape}")
+        logger.debug("[ModelRunner] Updated shared_dict['moe_load'] shape=%s", moe_load.shape)
 
         return moe_load
 

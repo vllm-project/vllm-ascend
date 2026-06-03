@@ -8,7 +8,7 @@ On Ascend, the design goal is the same as upstream static graph execution: reduc
 
 ## Prerequisites and References
 
-- Upstream vLLM design doc for generic graph concepts: [CUDA Graphs](https://docs.vllm.ai/en/latest/design/cuda_graphs.html).
+- Upstream vLLM design doc for generic graph concepts: [CUDA Graphs](https://docs.vllm.ai/en/latest/design/cuda_graphs/).
 - PyTorch graph documentation for generic capture and replay semantics: [Accelerating PyTorch with CUDA Graphs](https://pytorch.org/blog/accelerating-pytorch-with-cuda-graphs/).
 - Ascend user guide for operational enablement: [Graph Mode Guide](https://docs.vllm.ai/projects/ascend/en/latest/user_guide/feature_guide/graph_mode.html).
 - Existing repo design note: `docs/source/developer_guide/Design_Documents/ACL_Graph.md`.
@@ -66,7 +66,6 @@ The communication execution mode also matters. `update_aclgraph_sizes()` uses di
 
 Ascend currently narrows some generic upstream modes in `vllm_ascend.platform.NPUPlatform.check_and_update_config()`.
 
-- `FULL_AND_PIECEWISE` is normalized to `PIECEWISE`.
 - Encoder-decoder models are forced to `PIECEWISE`.
 - `use_inductor` is disabled for ACL graph paths.
 - `ASCEND_LAUNCH_BLOCKING=1` is rejected when ACL graph is enabled.

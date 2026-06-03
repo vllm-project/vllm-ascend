@@ -41,7 +41,9 @@ class RForkModelLoader(BaseModelLoader):
         super().__init__(load_config)
         config = load_config.model_loader_extra_config
         if not isinstance(config, dict):
-            raise RuntimeError("RFork requires --model-loader-extra-config to be a JSON object.")
+            err_msg = "RFork requires --model-loader-extra-config to be a JSON object."
+            logger.error(err_msg)
+            raise RuntimeError(err_msg)
 
         def _get_extra_config(key: str, default: str = "") -> str:
             value = config.get(key)
@@ -156,7 +158,7 @@ class RForkModelLoader(BaseModelLoader):
 
                 return model.eval()
             except Exception as e:
-                logger.warning(f"RFork transfer failed: {e}, clean up and fall back to default loader")
+                logger.warning("RFork transfer failed: %s, clean up and fall back to default loader", e)
 
                 rfork_worker.post_transfer()
 

@@ -1,10 +1,12 @@
-# GLM-5
+# GLM-5/GLM-5.1
 
 ## Introduction
 
+This document applies to both `GLM-5` and `GLM-5.1`. Unless otherwise specified, all descriptions, configurations, and deployment procedures for `GLM-5` in this document also apply to `GLM-5.1`. For brevity, `GLM-5` is used hereafter as a unified reference to both `GLM-5` and `GLM-5.1`.
+
 [GLM-5](https://huggingface.co/zai-org/GLM-5) use a Mixture-of-Experts (MoE) architecture and targets complex systems engineering and long-horizon agentic tasks.
 
-The `GLM-5` model is first supported in `vllm-ascend:v0.17.0rc1`. In `vllm-ascend:v0.17.0rc1` and `vllm-ascend:v0.18.0rc1` , the version of transformers need to be upgraded to 5.2.0.
+The `GLM-5` model is first supported in `vllm-ascend:v0.17.0rc1`. The version of transformers need to be upgraded to 5.2.0.
 
 This document will show the main verification steps of the model, including supported features, feature configuration, environment preparation, single-node and multi-node deployment, accuracy and performance evaluation.
 
@@ -21,6 +23,9 @@ Refer to [feature guide](../../user_guide/feature_guide/index.md) to get the fea
 - `GLM-5`(BF16 version): [Download model weight](https://www.modelscope.cn/models/ZhipuAI/GLM-5).
 - `GLM-5-w4a8`: [Download model weight](https://modelscope.cn/models/Eco-Tech/GLM-5-w4a8).
 - `GLM-5-w8a8`: [Download model weight](https://www.modelscope.cn/models/Eco-Tech/GLM-5-w8a8).
+- `GLM-5.1`(BF16 version): [Download model weight](https://huggingface.co/zai-org/GLM-5.1).
+- `GLM-5.1-w4a8`: [Download model weight](https://modelers.cn/models/Eco-Tech/GLM-5.1-w4a8).
+- `GLM-5.1-w8a8`: [Download model weight](https://modelers.cn/models/Eco-Tech/GLM-5.1-w8a8).
 - You can use [msmodelslim](https://gitcode.com/Ascend/msmodelslim) to quantify the model naively.
 
 It is recommended to download the model weight to the shared directory of multiple nodes, such as `/root/.cache/`
@@ -161,7 +166,6 @@ vllm serve /root/.cache/modelscope/hub/models/vllm-ascend/GLM5-w4a8 \
 --quantization ascend \
 --enable-chunked-prefill \
 --enable-prefix-caching \
---async-scheduling \
 --additional-config '{"fuse_muls_add": true, "multistream_overlap_shared_expert": true, "ascend_compilation_config": {"enable_npugraph_ex": true}}' \
 --compilation-config '{"cudagraph_mode": "FULL_DECODE_ONLY"}' \
 --speculative-config '{"num_speculative_tokens": 3, "method": "deepseek_mtp"}' 
@@ -197,7 +201,6 @@ vllm serve /root/.cache/modelscope/hub/models/vllm-ascend/GLM5-w8a8 \
 --quantization ascend \
 --enable-chunked-prefill \
 --enable-prefix-caching \
---async-scheduling \
 --additional-config '{"fuse_muls_add": true, "multistream_overlap_shared_expert": true, "ascend_compilation_config": {"enable_npugraph_ex": true}}' \
 --compilation-config '{"cudagraph_mode": "FULL_DECODE_ONLY"}' \
 --speculative-config '{"num_speculative_tokens": 3, "method": "deepseek_mtp"}' 
@@ -236,7 +239,6 @@ vllm serve /root/.cache/modelscope/hub/models/vllm-ascend/GLM-5-w4a8 \
 --quantization ascend \
 --enable-chunked-prefill \
 --enable-prefix-caching \
---async-scheduling \
 --compilation-config '{"cudagraph_mode": "FULL_DECODE_ONLY"}' \
 --additional-config '{"fuse_muls_add": true, "multistream_overlap_shared_expert": true, "ascend_compilation_config": {"enable_npugraph_ex": true}}' \
 --speculative-config '{"num_speculative_tokens": 3, "method": "deepseek_mtp"}'
@@ -249,7 +251,6 @@ vllm serve /root/.cache/modelscope/hub/models/vllm-ascend/GLM-5-w4a8 \
 The parameters are explained as follows:
 
 - For single-node deployment, we recommend using `dp1tp16` and turn off expert parallel in low-latency scenarios.
-- `--async-scheduling` Asynchronous scheduling is a technique used to optimize inference efficiency. It allows non-blocking task scheduling to improve concurrency and throughput, especially when processing large-scale models.
 
 ### Multi-node Deployment
 
@@ -508,9 +509,9 @@ if __name__ == "__main__":
                new_dict[new_key] = tensor_dict[key]
 
    new_file_name = os.path.join(directory_path, "mtp-others.safetensors")
-   new_key = ["model.layers.78.embed_tokens.weight", "model.layers.78.shared_head.head.weight"]
+   new_keys = ["model.layers.78.embed_tokens.weight", "model.layers.78.shared_head.head.weight"]
    save_file(tensors=new_dict, filename=new_file_name)
-   for key in new_key:
+   for key in new_keys:
          json_data["weight_map"][key] = "mtp-others.safetensors"
    with open(json_path, 'w', encoding='utf-8') as f:
          json.dump(json_data, f, indent=2)
@@ -570,7 +571,6 @@ vllm serve /root/.cache/modelscope/hub/models/vllm-ascend/GLM5-w8a8 \
 --quantization ascend \
 --enable-chunked-prefill \
 --enable-prefix-caching \
---async-scheduling \
 --compilation-config '{"cudagraph_mode": "FULL_DECODE_ONLY"}' \
 --additional-config '{"fuse_muls_add": true, "multistream_overlap_shared_expert": true, "ascend_compilation_config": {"enable_npugraph_ex": true}}' \
 --speculative-config '{"num_speculative_tokens": 3, "method": "deepseek_mtp"}'
@@ -622,7 +622,6 @@ vllm serve /root/.cache/modelscope/hub/models/vllm-ascend/GLM5-w8a8 \
 --quantization ascend \
 --enable-chunked-prefill \
 --enable-prefix-caching \
---async-scheduling \
 --compilation-config '{"cudagraph_mode": "FULL_DECODE_ONLY"}' \
 --additional-config '{"fuse_muls_add": true, "multistream_overlap_shared_expert": true, "ascend_compilation_config": {"enable_npugraph_ex": true}}' \
 --speculative-config '{"num_speculative_tokens": 3, "method": "deepseek_mtp"}'
@@ -765,7 +764,8 @@ Before you start, please
         export ASCEND_TRANSPORT_PRINT=1
         export ACL_OP_INIT_MODE=1
         export ASCEND_A3_ENABLE=1
-        export VLLM_NIXL_ABORT_REQUEST_TIMEOUT=300000
+        # Timeout (in seconds) for automatically releasing the prefiller’s KV cache for a particular request.
+        export VLLM_MOONCAKE_ABORT_REQUEST_TIMEOUT=480
 
         export ASCEND_RT_VISIBLE_DEVICES=$1
         export VLLM_ASCEND_ENABLE_FLASHCOMM1=1
@@ -794,7 +794,6 @@ Before you start, please
             --max-num-batched-tokens 4096 \
             --trust-remote-code \
             --max-num-seqs 64 \
-            --async-scheduling \
             --enable-chunked-prefill \
             --quantization ascend \
             --gpu-memory-utilization 0.95 \
@@ -844,7 +843,8 @@ Before you start, please
         export ASCEND_TRANSPORT_PRINT=1
         export ACL_OP_INIT_MODE=1
         export ASCEND_A3_ENABLE=1
-        export VLLM_NIXL_ABORT_REQUEST_TIMEOUT=300000
+        # Timeout (in seconds) for automatically releasing the prefiller’s KV cache for a particular request.
+        export VLLM_MOONCAKE_ABORT_REQUEST_TIMEOUT=480
 
         export ASCEND_RT_VISIBLE_DEVICES=$1
         export PYTORCH_NPU_ALLOC_CONF=expandable_segments:True
@@ -875,7 +875,6 @@ Before you start, please
             --max-num-batched-tokens 4096 \
             --trust-remote-code \
             --max-num-seqs 64 \
-            --async-scheduling \
             --enable-chunked-prefill \
             --gpu-memory-utilization 0.95 \
             --quantization ascend \
@@ -927,7 +926,8 @@ Before you start, please
         export ASCEND_TRANSPORT_PRINT=1
         export ACL_OP_INIT_MODE=1
         export ASCEND_A3_ENABLE=1
-        export VLLM_NIXL_ABORT_REQUEST_TIMEOUT=300000
+        # Timeout (in seconds) for automatically releasing the prefiller’s KV cache for a particular request.
+        export VLLM_MOONCAKE_ABORT_REQUEST_TIMEOUT=480
     
         export TASK_QUEUE_ENABLE=1
     
@@ -960,7 +960,6 @@ Before you start, please
             --trust-remote-code \
             --max-num-seqs 8 \
             --gpu-memory-utilization 0.92 \
-            --async-scheduling \
             --quantization ascend \
             --enable-auto-tool-choice \
             --tool-call-parser glm47 \
@@ -1008,7 +1007,8 @@ Before you start, please
          export ASCEND_TRANSPORT_PRINT=1
          export ACL_OP_INIT_MODE=1
          export ASCEND_A3_ENABLE=1
-         export VLLM_NIXL_ABORT_REQUEST_TIMEOUT=300000
+         # Timeout (in seconds) for automatically releasing the prefiller’s KV cache for a particular request.
+         export VLLM_MOONCAKE_ABORT_REQUEST_TIMEOUT=480
             
          export TASK_QUEUE_ENABLE=1
             
@@ -1041,7 +1041,6 @@ Before you start, please
              --trust-remote-code \
              --max-num-seqs 8 \
              --gpu-memory-utilization 0.92 \
-             --async-scheduling \
              --quantization ascend \
              --enable-auto-tool-choice \
              --tool-call-parser glm47 \
@@ -1089,7 +1088,8 @@ Before you start, please
          export ASCEND_TRANSPORT_PRINT=1
          export ACL_OP_INIT_MODE=1
          export ASCEND_A3_ENABLE=1
-         export VLLM_NIXL_ABORT_REQUEST_TIMEOUT=300000
+         # Timeout (in seconds) for automatically releasing the prefiller’s KV cache for a particular request.
+         export VLLM_MOONCAKE_ABORT_REQUEST_TIMEOUT=480
             
          export TASK_QUEUE_ENABLE=1
             
@@ -1122,7 +1122,6 @@ Before you start, please
              --trust-remote-code \
              --max-num-seqs 8 \
              --gpu-memory-utilization 0.92 \
-             --async-scheduling \
              --quantization ascend \
              --enable-auto-tool-choice \
              --tool-call-parser glm47 \
@@ -1170,7 +1169,8 @@ Before you start, please
          export ASCEND_TRANSPORT_PRINT=1
          export ACL_OP_INIT_MODE=1
          export ASCEND_A3_ENABLE=1
-         export VLLM_NIXL_ABORT_REQUEST_TIMEOUT=300000
+         # Timeout (in seconds) for automatically releasing the prefiller’s KV cache for a particular request.
+         export VLLM_MOONCAKE_ABORT_REQUEST_TIMEOUT=480
             
          export TASK_QUEUE_ENABLE=1
             
@@ -1203,7 +1203,6 @@ Before you start, please
              --trust-remote-code \
              --max-num-seqs 8 \
              --gpu-memory-utilization 0.92 \
-             --async-scheduling \
              --quantization ascend \
              --enable-auto-tool-choice \
              --tool-call-parser glm47 \
@@ -1284,8 +1283,6 @@ python load_balance_proxy_server_example.py \
     --host 0.0.0.0 \
     --prefiller-hosts \
        $node_p0_ip \
-       $node_p0_ip \
-       $node_p1_ip \
        $node_p1_ip \
     --prefiller-ports \
        6700 \
@@ -1361,7 +1358,7 @@ Refer to [Using AISBench for performance evaluation](../../developer_guide/evalu
 
 ### Using vLLM Benchmark
 
-Refer to [vllm benchmark](https://docs.vllm.ai/en/latest/contributing/benchmarks.html) for more details.
+Refer to [vllm benchmark](https://docs.vllm.ai/en/latest/contributing/) for more details.
 
 ## Best Practices
 

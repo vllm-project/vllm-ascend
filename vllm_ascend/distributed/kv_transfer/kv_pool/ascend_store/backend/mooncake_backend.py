@@ -298,6 +298,7 @@ def _convert_to_bytes(number_str: str, multiplier: int, original_input: str) -> 
         numeric_value = float(number_str)
     except ValueError:
         raise ValueError(f"Invalid numeric value '{number_str}' in: '{original_input}'")
+    # Calculate byte count
     try:
         byte_count = int(numeric_value * multiplier)
     except OverflowError:

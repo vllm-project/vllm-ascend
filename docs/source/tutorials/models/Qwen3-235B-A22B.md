@@ -95,7 +95,7 @@ Run the following script to execute online 128k inference.
 ```shell
 #!/bin/sh
 # Load model from ModelScope to speed up download
-export VLLM_USE_MODELSCOPE=true
+export VLLM_USE_MODELSCOPE=True
 # To reduce memory fragmentation and avoid out of memory
 export PYTORCH_NPU_ALLOC_CONF=expandable_segments:True
 export HCCL_BUFFSIZE=512
@@ -120,7 +120,6 @@ vllm serve vllm-ascend/Qwen3-235B-A22B-w8a8 \
 --gpu-memory-utilization 0.95 \
 --hf-overrides '{"rope_parameters": {"rope_type":"yarn","rope_theta":1000000,"factor":4,"original_max_position_embeddings":32768}}' \
 --compilation-config '{"cudagraph_mode":"FULL_DECODE_ONLY"}' \
---async-scheduling
 ```
 
 **Notice:**
@@ -157,7 +156,7 @@ Node 0
 ```shell
 #!/bin/sh
 # Load model from ModelScope to speed up download
-export VLLM_USE_MODELSCOPE=true
+export VLLM_USE_MODELSCOPE=True
 # To reduce memory fragmentation and avoid out of memory
 export PYTORCH_NPU_ALLOC_CONF=expandable_segments:True
 # this obtained through ifconfig
@@ -190,7 +189,6 @@ vllm serve Qwen/Qwen3-235B-A22B \
 --max-model-len 32768 \
 --max-num-batched-tokens 4096 \
 --trust-remote-code \
---async-scheduling \
 --gpu-memory-utilization 0.9
 ```
 
@@ -199,7 +197,7 @@ Node1
 ```shell
 #!/bin/sh
 # Load model from ModelScope to speed up download
-export VLLM_USE_MODELSCOPE=true
+export VLLM_USE_MODELSCOPE=True
 # To reduce memory fragmentation and avoid out of memory
 export PYTORCH_NPU_ALLOC_CONF=expandable_segments:True
 # this obtained through ifconfig
@@ -236,7 +234,6 @@ vllm serve Qwen/Qwen3-235B-A22B \
 --max-num-batched-tokens 4096 \
 --enable-expert-parallel \
 --trust-remote-code \
---async-scheduling \
 --gpu-memory-utilization 0.9 \
 ```
 
@@ -309,7 +306,7 @@ There are three `vllm bench` subcommands:
 Take the `serve` as an example. Run the code as follows.
 
 ```shell
-export VLLM_USE_MODELSCOPE=true
+export VLLM_USE_MODELSCOPE=True
 vllm bench serve --model vllm-ascend/Qwen3-235B-A22B-w8a8  --dataset-name random --random-input 200 --num-prompts 200 --request-rate 1 --save-result --result-dir ./
 ```
 
@@ -319,15 +316,6 @@ After about several minutes, you can get the performance evaluation result.
 
 In this section, we provide simple scripts to re-produce our latest performance. It is also recommended to read instructions above to understand basic concepts or options in vLLM && vLLM-Ascend.
 
-### Environment
-
-- vLLM v0.13.0
-- vLLM-Ascend v0.13.0rc1
-- CANN 8.3.RC2
-- torch_npu 2.8.0
-- HDK/driver 25.3.RC1
-- triton_ascend 3.2.0
-
 ### Single Node A3 (64G*16)
 
 Example server scripts:
@@ -335,7 +323,7 @@ Example server scripts:
 ```shell
 #!/bin/sh
 # Load model from ModelScope to speed up download
-export VLLM_USE_MODELSCOPE=true
+export VLLM_USE_MODELSCOPE=True
 # To reduce memory fragmentation and avoid out of memory
 export PYTORCH_NPU_ALLOC_CONF=expandable_segments:True
 export HCCL_BUFFSIZE=512
@@ -362,7 +350,6 @@ vllm serve vllm-ascend/Qwen3-235B-A22B-w8a8 \
 --gpu-memory-utilization 0.9 \
 --no-enable-prefix-caching \
 --compilation-config '{"cudagraph_mode":"FULL_DECODE_ONLY"}' \
---async-scheduling
 ```
 
 Benchmark scripts:
@@ -409,7 +396,7 @@ export TP_SOCKET_IFNAME=${ifname}
 export HCCL_SOCKET_IFNAME=${ifname}
 
 # Load model from ModelScope to speed up download
-export VLLM_USE_MODELSCOPE=true
+export VLLM_USE_MODELSCOPE=True
 # To reduce memory fragmentation and avoid out of memory
 export PYTORCH_NPU_ALLOC_CONF=expandable_segments:True
 export HCCL_BUFFSIZE=512
@@ -472,7 +459,7 @@ export TP_SOCKET_IFNAME=${ifname}
 export HCCL_SOCKET_IFNAME=${ifname}
 
 # Load model from ModelScope to speed up download
-export VLLM_USE_MODELSCOPE=true
+export VLLM_USE_MODELSCOPE=True
 # To reduce memory fragmentation and avoid out of memory
 export PYTORCH_NPU_ALLOC_CONF=expandable_segments:True
 export HCCL_BUFFSIZE=1024
@@ -503,7 +490,6 @@ vllm serve vllm-ascend/Qwen3-235B-A22B-w8a8 \
 --trust-remote-code \
 --gpu-memory-utilization 0.9 \
 --compilation-config '{"cudagraph_mode":"FULL_DECODE_ONLY"}' \
---async-scheduling \
 --no-enable-prefix-caching \
 --kv-transfer-config \
 '{"kv_connector": "MooncakeConnectorV1",
@@ -536,7 +522,7 @@ export TP_SOCKET_IFNAME=${ifname}
 export HCCL_SOCKET_IFNAME=${ifname}
 
 # Load model from ModelScope to speed up download
-export VLLM_USE_MODELSCOPE=true
+export VLLM_USE_MODELSCOPE=True
 # To reduce memory fragmentation and avoid out of memory
 export PYTORCH_NPU_ALLOC_CONF=expandable_segments:True
 export HCCL_BUFFSIZE=1024
@@ -568,7 +554,6 @@ vllm serve vllm-ascend/Qwen3-235B-A22B-w8a8 \
 --trust-remote-code \
 --gpu-memory-utilization 0.9 \
 --compilation-config '{"cudagraph_mode":"FULL_DECODE_ONLY"}' \
---async-scheduling \
 --no-enable-prefix-caching \
 --kv-transfer-config \
 '{"kv_connector": "MooncakeConnectorV1",
