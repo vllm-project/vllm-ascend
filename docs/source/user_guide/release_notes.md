@@ -61,6 +61,7 @@ We're excited to announce the release of v0.20.2rc1 for vLLM Ascend. This is the
 - GLM-5.1 deployments can hit `MoeDistributeDispatchV2`/NPU graph failures when Expert Parallel is used together with FULL graph mode. The reported workaround is to disable Expert Parallel for FULL graph mode, or use PIECEWISE/eager mode. [#9503](https://github.com/vllm-project/vllm-ascend/issues/9503)
 - 310P does not currently support `runner_type='pooling'`; starting pooling models on 310P raises `NotImplementedError`. [#9593](https://github.com/vllm-project/vllm-ascend/issues/9593)
 - Qwen3.6-35B-A3B may shut down when MTP/speculative decoding is enabled, with `numAcceptedTokens[0]=4 exceeds varlen segment length=3` reported during shape/dtype processing. [#9956](https://github.com/vllm-project/vllm-ascend/issues/9956)
+- GLM-5.1 can hang on the P node in 200K long-sequence 1P1D agent workloads after long-running service, with `MoeDistributeDispatchV2`/`aclnnMoeDistributeDispatchV4` reporting an AICore timeout. [#9958](https://github.com/vllm-project/vllm-ascend/issues/9958)
 
 ## v0.18.0 - 2026.04.30
 
