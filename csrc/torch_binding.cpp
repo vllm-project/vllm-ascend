@@ -51,7 +51,6 @@
 #include "attention/recurrent_gated_delta_rule_v310/recurrent_gated_delta_rule_310_torch_adpt.h"
 #include "attention/store_kv_block/store_kv_block_torch_adpt.h"
 #include "attention/fused_gdn_gating/fused_gdn_gating_torch_adpt.h"
-#include "attention/fused_sigmoid_gating_delta_rule_update/op_host/op_api/aclnn_fused_sigmoid_gating_delta_rule_update.h"
 #include "attention/fused_sigmoid_gating_delta_rule_update/fused_sigmoid_gating_delta_rule_update_torch_adpt.h"
 #include <c10/core/Device.h>
 #include <c10/core/Scalar.h>
