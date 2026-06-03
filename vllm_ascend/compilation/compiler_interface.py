@@ -135,7 +135,7 @@ def npugraph_ex_compile(
     # Try npugraph_ex first, fall back to torchair for backward compatibility.
     try:
         import npugraph_ex as nge
-        
+
         cache_path = os.path.join(cache_dir, key) if (cache_dir and key) else None
         torch.npu.set_compile_mode(jit_compile=False)
         config = nge.CompilerConfig()
@@ -201,7 +201,6 @@ def npugraph_ex_compile(
         return compiled_fn, None
 
 
-
 class AscendCompiler(CompilerInterface):
     """
     AscendCompiler is a custom compiler interface for the Ascend platform.
@@ -225,12 +224,11 @@ class AscendCompiler(CompilerInterface):
             "enable_static_kernel": ascend_compilation_config.enable_static_kernel,
         }
         logger.info("AscendCompiler hash factors: %s", factors)
-        return sha256(str(factors).encode(), usedforsecurity=False).hexdigest()[:10] 
+        return sha256(str(factors).encode(), usedforsecurity=False).hexdigest()[:10]
 
     def initialize_cache(self, cache_dir, disable_cache=False, prefix=""):
         self.cache_dir = cache_dir
         self.disable_cache = disable_cache
-
 
     def compile(
         self,
@@ -268,11 +266,18 @@ class AscendCompiler(CompilerInterface):
             )
             assert hasattr(self, "vllm_config")
             return npugraph_ex_compile(
-                graph, example_inputs, compiler_config, self.vllm_config, ascend_compilation_config, compile_range, key, cache_dir
+                graph,
+                example_inputs,
+                compiler_config,
+                self.vllm_config,
+                ascend_compilation_config,
+                compile_range,
+                key,
+                cache_dir,
             )
         else:
             return fusion_pass_compile(graph, example_inputs, compiler_config, compile_range, key)
-        
+
     def load(self, handle, graph, example_inputs, graph_index, compile_range):
         key, path = handle
         # Cache file may be absent when the graph was skipped at save time (e.g. it
@@ -314,9 +319,9 @@ class AscendCompiler(CompilerInterface):
                 compile_range,
                 key,
                 getattr(self, "cache_dir", None),
-            ) 
+            )
             return compiled_fn
-        
+
         from npugraph_ex.npu_fx_compiler import _CompiledFxArtifacts, _CompiledFxGraph
 
         with open(path) as f:
