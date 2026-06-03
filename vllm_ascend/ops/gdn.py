@@ -16,6 +16,7 @@
 #
 
 import torch
+import torch_npu
 from einops import rearrange
 from vllm.distributed import get_pcp_group
 from vllm.forward_context import get_forward_context
