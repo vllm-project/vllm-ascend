@@ -213,6 +213,8 @@ class AscendFusedMoEWithLoRA(FusedMoEWithLoRA):
         glt = mlp_input.group_list_type
         w1 = mlp_input.weights.w1
         w2 = mlp_input.weights.w2
+        w1_bias = mlp_input.weights.w1_bias
+        w2_bias = mlp_input.weights.w2_bias
         # Unquantized MoE always stores w1/w2 as Tensor (the list[Tensor] form
         # is only used by per-channel quantized paths, which we early-out above
         # via mlp_input.quant.is_quant).
@@ -254,6 +256,7 @@ class AscendFusedMoEWithLoRA(FusedMoEWithLoRA):
         gate_up = torch_npu.npu_grouped_matmul(
             x=[h],
             weight=[w1],
+            bias=[w1_bias.to(dtype=torch.float32)] if w1_bias is not None else None,
             split_item=2,
             group_list_type=glt,
             group_type=0,
@@ -282,7 +285,11 @@ class AscendFusedMoEWithLoRA(FusedMoEWithLoRA):
         )
 
         # === Stage 3: activation (SiLU / SwiGLU) ===
-        if mlp_input.activation == "swigluoai":
+        # Match unquant_apply_mlp: activation may arrive as an enum (vllm
+        # MoEActivation) or as a raw string; ``getattr(..., "value", ...)``
+        # normalizes both.
+        act_name = getattr(mlp_input.activation, "value", mlp_input.activation)
+        if act_name == "swigluoai":
             silu_out = AscendSwigluOAIAndMul.swiglu_oai_forward(gate_up.view(-1, gate_up.shape[-1]))
         else:
             silu_out = torch_npu.npu_swiglu(gate_up)
@@ -293,6 +300,7 @@ class AscendFusedMoEWithLoRA(FusedMoEWithLoRA):
         out = torch_npu.npu_grouped_matmul(
             x=[silu_out],
             weight=[w2],
+            bias=[w2_bias.to(dtype=torch.float32)] if w2_bias is not None else None,
             split_item=2,
             group_list_type=glt,
             group_type=0,
@@ -319,7 +327,11 @@ class AscendFusedMoEWithLoRA(FusedMoEWithLoRA):
             offset=0,
             token_lora_mapping=lora_per_row,
         )
-        return out
+        # Match MoECommMethod._apply_mlp return contract: (hidden, before_gmm2_evt).
+        # Unquant path produces no overlap event (mirrors unquant_apply_mlp's
+        # ``return hidden_states, None``); fallback branches above already
+        # forward the base ``orig_mlp`` tuple verbatim.
+        return out, None
 
     # ------------------------------------------------------------------
     # Layer-replacement registration
