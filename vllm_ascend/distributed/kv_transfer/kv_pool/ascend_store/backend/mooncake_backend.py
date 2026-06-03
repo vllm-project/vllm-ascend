@@ -75,6 +75,7 @@ class MooncakeBackend(Backend):
 
     @classmethod
     def create_scheduler_client(cls, parallel_config: ParallelConfig):
+        torch.npu.set_device(0)
         return cls(parallel_config, contribute_memory=False)
 
     def set_device(self):
