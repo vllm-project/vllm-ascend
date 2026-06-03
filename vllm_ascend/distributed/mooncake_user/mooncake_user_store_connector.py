@@ -284,7 +284,10 @@ class MooncakeStoreConnectorV1Scheduler:
         if self.kv_role == "kv_producer":
             return 0, False
 
-        uid = request.sampling_params.extra_args["uid"]
+        extra_args = request.sampling_params.extra_args or {}
+        uid = extra_args.get("uid")
+        if uid is None:
+            return 0, False
         uid = self._normalize_uid(uid)
 
         history_token_ids = self.get_history_token_ids(uid)
