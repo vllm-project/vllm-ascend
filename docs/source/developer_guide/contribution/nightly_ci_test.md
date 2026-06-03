@@ -17,9 +17,9 @@ First, post one of the following comments in the PR to specify which tests to ru
 
 | Comment | Effect |
 |---------|--------|
-| `/nightly` | Run **all** nightly tests |
-| `/nightly all` | Run **all** nightly tests (same as above) |
 | `/nightly test1 test2 ...` | Run only the **named** tests |
+| `/nightly test1/file.py test2 ...` | Run `test1` with a specific file, `test2` with the full directory |
+| `/nightly accuracy-group-1` | Run **all** accuracy tests (any `accuracy-group-*` keyword triggers the full accuracy suite) |
 
 ### 2. Add the label
 
@@ -50,7 +50,7 @@ matching the filter will be dispatched, which saves hardware resources.
 
 | | Scheduled / Manual Dispatch | PR-triggered |
 |---|----------------------------|---|
-| Trigger | Cron (daily) or `workflow_dispatch` | Label `nightly-test` + `/nightly` comment |
+| Trigger | Cron (daily) or `workflow_dispatch` | Label `nightly-test` + `/nightly <names>` comment |
 | Code tested | Pre-built nightly image | Your PR's HEAD commit (source installed fresh) |
 | Test scope | All tests | Configurable via `/nightly <names>` |
 | vLLM + vllm-ascend | From image | Checked out and installed from source |
@@ -67,21 +67,32 @@ When a PR run is detected (`is_pr_test: true`), the workflow additionally:
 The test names you can pass to `/nightly` correspond to the `name` fields in the
 workflow matrix.
 
+Tests marked with **📁** use a directory as their test target. For these tests, you can
+append a specific filename (e.g. `test_custom_op/test_fused_moe_ops.py`) to run only
+that file instead of the entire directory.
+
 ### A2 workflow (`.github/workflows/schedule_nightly_test_a2.yaml`)
 
 **Single-node tests**:
 
 | Test name | Description |
 |-----------|-------------|
-| `test_custom_op` | Custom operator tests (single card) |
-| `test_custom_op_multi_card` | Custom operator tests (multi card) |
+| `test_custom_op` 📁 | Custom operator tests (single card) |
+| `test_custom_op_multi_card` 📁 | Custom operator tests (multi card) |
 | `qwen3-32b` | Qwen3-32B model test |
 | `qwen3-next-80b-a3b-instruct` | Qwen3-Next-80B-A3B-Instruct model test |
 | `qwen3-32b-int8` | Qwen3-32B INT8 quantization test |
-| `accuracy-group-1` | Accuracy tests: Qwen3-VL-8B, Qwen3-8B, Qwen2-Audio-7B, etc. |
-| `accuracy-group-2` | Accuracy tests: ERNIE-4.5, InternVL3_5-8B, Molmo-7B, Llama-3.2-3B, etc. |
-| `accuracy-group-3` | Accuracy tests: Qwen3-30B-A3B, Qwen3-VL-30B-A3B, etc. |
-| `accuracy-group-4` | Accuracy tests: Qwen3-Next-80B-A3B, Qwen3-Omni-30B-A3B, etc. |
+| `accuracy-group-1` ⚠️ | Accuracy tests: Qwen3-VL-8B, Qwen3-8B, Qwen2-Audio-7B, etc. |
+| `accuracy-group-2` ⚠️ | Accuracy tests: ERNIE-4.5, InternVL3_5-8B, Molmo-7B, Llama-3.2-3B, etc. |
+| `accuracy-group-3` ⚠️ | Accuracy tests: Qwen3-30B-A3B, Qwen3-VL-30B-A3B, etc. |
+| `accuracy-group-4` ⚠️ | Accuracy tests: Qwen3-Next-80B-A3B, Qwen3-Omni-30B-A3B, etc. |
+
+:::{warning}
+⚠️ All `accuracy-group-*` names share the same trigger logic: the workflow checks for the
+substring `accuracy-group` in the filter, so **any one of them triggers the full accuracy
+test suite** (all groups defined in `tests/e2e/models/configs/accuracy_groups_a2.json`).
+Specifying `accuracy-group-2` does not restrict execution to group 2 only.
+:::
 
 **Multi-node tests**:
 
@@ -92,7 +103,7 @@ workflow matrix.
 
 :::{note}
 The `doc-test` job in the A2 workflow only runs on `schedule` or `workflow_dispatch`
-events — it will **not** run on PR-triggered runs even with `/nightly all`.
+events — it will **not** run on PR-triggered runs.
 :::
 
 ### A3 workflow (`.github/workflows/schedule_nightly_test_a3.yaml`)
@@ -136,22 +147,15 @@ events — it will **not** run on PR-triggered runs even with `/nightly all`.
 | `qwen3-32b-int8` | Qwen3-32B-Int8 |
 | `qwen3-32b-int8-prefix-cache` | Qwen3-32B-Int8 prefix cache |
 | `deepseek-r1-0528-w8a8-prefix-cache` | DeepSeek-R1-0528-W8A8 prefix cache |
-| `custom-multi-ops` | Custom multi-card operator tests |
+| `custom-multi-ops` 📁 | Custom multi-card operator tests |
 
 :::{warning}
 The A3 resource pool has a maximum concurrency of **5×16 NPUs**. Multi-node tests
-run with `max-parallel: 2` to avoid resource exhaustion. Running `/nightly all` on
-A3 will queue a large number of jobs — prefer targeting specific test names when
-possible.
+run with `max-parallel: 2` to avoid resource exhaustion. Always target specific test
+names to avoid resource exhaustion.
 :::
 
 ## Examples
-
-Run all available nightly tests against your PR:
-
-```text
-/nightly
-```
 
 Run only the custom operator single-card test:
 
@@ -163,6 +167,30 @@ Run two specific tests at once:
 
 ```text
 /nightly test_custom_op qwen3-32b
+```
+
+Run only a specific file within a directory-based test (📁 tests only):
+
+```text
+/nightly test_custom_op/test_fused_moe_ops.py
+```
+
+Mix file-level and full-directory targets:
+
+```text
+/nightly test_custom_op/test_fused_moe_ops.py test_custom_op_multi_card
+```
+
+Run accuracy tests (triggers the full accuracy suite regardless of which group is specified):
+
+```text
+/nightly accuracy-group-1
+```
+
+Run accuracy tests together with other tests:
+
+```text
+/nightly accuracy-group-1 test_custom_op
 ```
 
 Re-trigger after fixing an issue: just push a new commit. The `synchronize` event

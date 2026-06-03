@@ -23,7 +23,7 @@ on:
       runner:
         required: false
         type: string
-        default: linux-aarch64-a2b3-0
+        default: ubuntu-latest
       parse_e2e_comment:
         required: false
         type: boolean
@@ -42,6 +42,9 @@ on:
       ref:
         description: "The vllm-ascend ref (commit SHA for PRs, branch/tag name otherwise)"
         value: ${{ jobs.parse_nightly_trigger.outputs.ref }}
+      file_overrides:
+        description: "JSON map of test name to specific file override (e.g. {\"test_custom_op\":\"test_ops.py\"})"
+        value: ${{ jobs.parse_nightly_trigger.outputs.file_overrides }}
       allowed:
         description: "Whether the actor is allowed to trigger e2e tests"
         value: ${{ jobs.parse_e2e_comment.outputs.allowed }}
@@ -73,6 +76,7 @@ jobs:
       run: ${{ steps.parse.outputs.run }}
       filter: ${{ steps.parse.outputs.filter }}
       ref: ${{ steps.parse.outputs.ref }}
+      file_overrides: ${{ steps.parse.outputs.file_overrides }}
     steps:
       - name: Parse trigger
         id: parse
@@ -87,9 +91,24 @@ jobs:
               const match = body.trim().match(/^\/nightly(?:\s+(.+))?$/m);
               if (!match) return null;
               const args = (match[1] || '').trim();
-              if (!args || args === 'all') return 'all';
-              // Wrap with commas for exact-name matching: ",name1,name2,"
-              return ',' + args.split(/\s+/).join(',') + ',';
+              if (!args) return null;
+              // Strip /file suffixes to get base names for filter matching
+              const names = args.split(/\s+/).map(a => a.split('/')[0]);
+              return ',' + names.join(',') + ',';
+            }
+
+            function parseFileOverrides(body) {
+              if (!body) return {};
+              const match = body.trim().match(/^\/nightly(?:\s+(.+))?$/m);
+              if (!match) return {};
+              const args = (match[1] || '').trim();
+              if (!args || args === 'all') return {};
+              const overrides = {};
+              args.split(/\s+/).forEach(arg => {
+                const idx = arg.indexOf('/');
+                if (idx !== -1) overrides[arg.slice(0, idx)] = arg.slice(idx + 1);
+              });
+              return overrides;
             }
 
             function getRef() {
@@ -108,13 +127,9 @@ jobs:
             // 1. workflow_dispatch: use input test_cases
             if (eventName === 'workflow_dispatch' && workflowDispatchTestCases) {
               core.setOutput('run', 'true');
-              // Convert comma-separated list to the filter format
-              if (workflowDispatchTestCases === 'all') {
-                core.setOutput('filter', 'all');
-              } else {
-                const filter = ',' + workflowDispatchTestCases.split(',').map(s => s.trim()).join(',') + ',';
-                core.setOutput('filter', filter);
-              }
+              core.setOutput('file_overrides', '{}');
+              const filter = ',' + workflowDispatchTestCases.split(',').map(s => s.trim()).join(',') + ',';
+              core.setOutput('filter', filter);
               return;
             }
 
@@ -122,6 +137,7 @@ jobs:
             if (eventName === 'schedule') {
               core.setOutput('run', 'true');
               core.setOutput('filter', 'all');
+              core.setOutput('file_overrides', '{}');
               return;
             }
 
@@ -131,6 +147,7 @@ jobs:
               if (!labels.includes('nightly-test')) {
                 core.setOutput('run', 'false');
                 core.setOutput('filter', '');
+                core.setOutput('file_overrides', '{}');
                 return;
               }
               // Search comments for latest /nightly command
@@ -142,25 +159,29 @@ jobs:
                 per_page: 100,
               });
               let filter = null;
+              let matchedBody = null;
               for (let i = comments.length - 1; i >= 0; i--) {
                 const result = parseNightlyComment(comments[i].body);
-                if (result !== null) { filter = result; break; }
+                if (result !== null) { filter = result; matchedBody = comments[i].body; break; }
               }
               // No /nightly comment found: do not run any tests
               if (filter === null) {
                 core.info('nightly-test label present but no /nightly comment found; skipping.');
                 core.setOutput('run', 'false');
                 core.setOutput('filter', '');
+                core.setOutput('file_overrides', '{}');
                 return;
               }
               core.setOutput('run', 'true');
               core.setOutput('filter', filter);
+              core.setOutput('file_overrides', JSON.stringify(parseFileOverrides(matchedBody)));
               return;
             }
 
             // Fallback
             core.setOutput('run', 'false');
             core.setOutput('filter', '');
+            core.setOutput('file_overrides', '{}');
 
   parse_e2e_comment:
     name: Parse /e2e comment
