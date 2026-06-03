@@ -31,8 +31,11 @@ from vllm_ascend.quantization.quant_type import QuantType
 from vllm_ascend.utils import (
     dispose_tensor,
     enable_custom_op,
+    get_ascend_device_type,
     get_weight_prefetch_method,
 )
+
+ASCEND_DEVICE_TYPE = get_ascend_device_type()
 
 
 def _custom_gmm_swiglu_enabled(fusion, dynamic_eplb):
@@ -103,7 +106,7 @@ def quant_apply_mlp(
     scale_type: torch.dtype | None = None,
     per_token_scale_type: torch.dtype | None = None,
     use_bf16: bool = True,
-    swiglu_limit: int = 0,
+    swiglu_limit: float = 0.0,
     use_w4a8_per_channel_gmm_swiglu: bool = False,
 ) -> torch.Tensor:
     input_hidden_dtype = hidden_states.dtype
@@ -447,9 +450,11 @@ def unified_apply_mlp(*, mlp_compute_input: MoEMlpComputeInput) -> torch.Tensor:
 
     if use_mxfp_quant:
         mxfp = mlp_compute_input.quant.mxfp
-        assert mxfp is not None, "mlp_compute_input.quant.mxfp is required for MXFP quant types."
+        assert mxfp is not None, "mlp_compute_input.quant.mxfp is required when quant_type is MXFP8."
         act_quant_type = mxfp.act_quant_type or act_quant_type
         weight_quant_type = mxfp.weight_quant_type or weight_quant_type
+        if mxfp_quant_dtype == QuantType.W4A8MXFP:
+            weight_quant_type = mxfp.weight_quant_type
         scale_type = mxfp.scale_dtype
         per_token_scale_type = mxfp.per_token_scale_dtype
         use_bf16 = mxfp.use_bf16

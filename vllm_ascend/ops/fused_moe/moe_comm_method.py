@@ -81,7 +81,7 @@ class FusedExpertsResult:
     # For dynamic_eplb
     group_list_type: int = 1
     expert_tokens: torch.Tensor | None = None
-    swiglu_limit: int = 0
+    swiglu_limit: float = 0.0
 
 
 class MoECommMethod(ABC):

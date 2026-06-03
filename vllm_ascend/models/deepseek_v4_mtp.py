@@ -12,6 +12,7 @@ from vllm.config import VllmConfig
 from vllm.distributed import get_tensor_model_parallel_rank, get_tensor_model_parallel_world_size
 from vllm.model_executor.layers.fused_moe import FusedMoE
 from vllm.model_executor.layers.layernorm import RMSNorm
+from vllm.model_executor.layers.linear import ReplicatedLinear
 from vllm.model_executor.layers.logits_processor import LogitsProcessor
 from vllm.model_executor.layers.quantization import QuantizationConfig
 from vllm.model_executor.layers.vocab_parallel_embedding import ParallelLMHead, VocabParallelEmbedding
@@ -60,8 +61,12 @@ class DeepSeekMultiTokenPredictorLayer(nn.Module):
         self.config = config
         quant_config = vllm_config.quant_config
 
-        self.e_proj = nn.Linear(config.hidden_size, config.hidden_size, bias=False)
-        self.h_proj = nn.Linear(config.hidden_size, config.hidden_size, bias=False)
+        self.e_proj = ReplicatedLinear(
+            config.hidden_size, config.hidden_size, bias=False, quant_config=quant_config, return_bias=False
+        )
+        self.h_proj = ReplicatedLinear(
+            config.hidden_size, config.hidden_size, bias=False, quant_config=quant_config, return_bias=False
+        )
 
         self.enorm = RMSNorm(config.hidden_size, eps=config.rms_norm_eps)
         self.hnorm = RMSNorm(config.hidden_size, eps=config.rms_norm_eps)
@@ -197,6 +202,7 @@ class DeepSeekV4MTP(nn.Module, SupportsPP, DeepseekV2MixtureOfExperts):
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = ""):
         super().__init__()
         self.config = vllm_config.model_config.hf_config
+        self.quant_config = vllm_config.quant_config
         self.model = DeepSeekMultiTokenPredictor(vllm_config=vllm_config, prefix=maybe_prefix(prefix, "mtp"))
         # Set MoE hyperparameters
         self.set_moe_parameters()
@@ -273,6 +279,14 @@ class DeepSeekV4MTP(nn.Module, SupportsPP, DeepseekV2MixtureOfExperts):
         for name, loaded_weight in weights:
             if "rotary_emb.inv_freq" in name:
                 continue
+
+            if self.quant_config is not None and self.quant_config.get_name() == "fp8":
+                if name == "embed.weight":
+                    name = "mtp.0.emb.tok_emb.weight"
+
+                if name == "head.weight":
+                    name = "mtp.0.head.weight"
+
             spec_layer = get_spec_layer_idx_from_weight_name(self.config, name)
             if spec_layer is None:
                 continue
@@ -291,6 +305,9 @@ class DeepSeekV4MTP(nn.Module, SupportsPP, DeepseekV2MixtureOfExperts):
                 name = name.replace(".w2.", ".down_proj.")
             if ".w3." in name:
                 name = name.replace(".w3.", ".up_proj.")
+
+            if ".scale" in name:
+                name = name.replace(".scale", ".weight_scale")
 
             if ".head." in name:
                 name = name.replace(".head.", ".shared_head.head.")

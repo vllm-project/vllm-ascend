@@ -24,6 +24,7 @@ from vllm.logger import logger
 from vllm_ascend.utils import (
     ASCEND_QUANTIZATION_METHOD,
     COMPRESSED_TENSORS_METHOD,
+    FP8_METHOD,
     AscendDeviceType,
     get_ascend_device_type,
 )
@@ -126,6 +127,10 @@ def detect_quantization_method(model: str, revision: str | None = None) -> str |
                 quant_method = quant_cfg.get("quant_method", "")
                 if quant_method == COMPRESSED_TENSORS_METHOD:
                     return COMPRESSED_TENSORS_METHOD
+            if isinstance(quant_cfg, dict):
+                quant_method = quant_cfg.get("quant_method", "")
+                if quant_method == FP8_METHOD:
+                    return FP8_METHOD
         except (json.JSONDecodeError, OSError):
             pass
 

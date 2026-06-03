@@ -184,6 +184,7 @@ class AscendW4A8MXFPDynamicFusedMoEMethod(AscendMoEScheme):
             custom_routing_function=custom_routing_function,
             scoring_func=scoring_func,
             e_score_correction_bias=e_score_correction_bias,
+            routed_scaling_factor=routed_scaling_factor,
             num_experts=num_logical_experts,
             tid2eid=tid2eid,
         )
@@ -221,6 +222,7 @@ class AscendW4A8MXFPDynamicFusedMoEMethod(AscendMoEScheme):
                 mxfp_use_bf16=(x.dtype == torch.bfloat16),
                 w1_scale=layer.w13_weight_scale,
                 w2_scale=layer.w2_weight_scale,
+                swiglu_limit=layer.swiglu_limit,
             )
         )
 
