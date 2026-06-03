@@ -163,7 +163,7 @@ class AscendFusedMoEWithLoRA(FusedMoEWithLoRA):
         # We cannot use __get__ because orig_apply already is a bound method;
         # storing the function directly works because Python looks up instance
         # attrs before class attrs.
-        quant_method.apply = apply_wrapper.__get__(quant_method, type(quant_method))
+        quant_method.apply = apply_wrapper.__get__(quant_method, type(quant_method))  # type: ignore[method-assign]
 
     # ------------------------------------------------------------------
     # Mapping
@@ -213,6 +213,10 @@ class AscendFusedMoEWithLoRA(FusedMoEWithLoRA):
         glt = mlp_input.group_list_type
         w1 = mlp_input.weights.w1
         w2 = mlp_input.weights.w2
+        # Unquantized MoE always stores w1/w2 as Tensor (the list[Tensor] form
+        # is only used by per-channel quantized paths, which we early-out above
+        # via mlp_input.quant.is_quant).
+        assert isinstance(w1, torch.Tensor) and isinstance(w2, torch.Tensor)
         need_trans = mlp_input.need_trans
         if need_trans:
             # process_weights_after_loading stores w1/w2 already transposed
