@@ -30,6 +30,7 @@ from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.config_data import
     KeyMetadata,
     LayerMultiBlockReqMeta,
     ReqMeta,
+    get_block_hashes,
     get_cache_family_granularity,
     infer_group_cache_families,
 )
@@ -593,6 +594,10 @@ class KVPoolWorker:
                 if can_save is None or not can_save:
                     continue
 
+                request.current_event = current_event
+                self.kv_send_thread.add_stored_request(  # type: ignore[union-attr]
+                    request.req_id
+                )
                 layerwise_storer = self.store_layer(request, current_event)
                 self.layerwise_storers.append(layerwise_storer)
         for layerwise_storer in self.layerwise_storers:
@@ -736,6 +741,9 @@ class KVPoolWorker:
         starts = []
         ends = []
         keys = []
+        group_id = 0
+        group_block_size = self.grouped_block_size[group_id]
+        group_block_hashes = get_block_hashes(request.block_hashes, group_block_size, self.hash_block_size)
         for start, end, key in self.token_database.process_tokens(request.token_len_chunk, request.block_hashes):
             keys_multi_layer = key.split_layers(self.num_layers)
             starts.append(start)
@@ -754,6 +762,10 @@ class KVPoolWorker:
                     layer_id,
                     request.is_last_chunk,
                     current_event,
+                    token_ids=request.token_ids,
+                    original_block_size=request.original_block_size,
+                    block_hashes=group_block_hashes,
+                    kv_cache_group_id=group_id,
                 )
                 self.kv_send_thread.add_request(  # type: ignore[union-attr, call-arg]
                     req_meta
