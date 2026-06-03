@@ -199,7 +199,17 @@ class NPUPlatform(Platform):
 
     @classmethod
     def apply_config_platform_defaults(cls, vllm_config: VllmConfig) -> None:
-        """Apply Ascend-specific defaults. Set sp_min_token_num=1 when enable_sp and not set."""
+        """Apply Ascend-specific defaults."""
+        # Since vllm-project/vllm#43746, DeepSeek V4 model classes no longer
+        # carry @support_torch_compile. This makes vLLM auto-enable the breakable
+        # cudagraph PIECEWISE path, which is not supported on Ascend yet.
+        envs_vllm.VLLM_USE_BREAKABLE_CUDAGRAPH = False
+        logger.info(
+            "Breakable cudagraph is force disabled on Ascend because "
+            "DeepSeek V4 PIECEWISE cudagraph is not supported yet."
+        )
+
+        # Set sp_min_token_num=1 when enable_sp and not set.
         pass_config = vllm_config.compilation_config.pass_config
         if pass_config.enable_sp and pass_config.sp_min_token_num is None:
             from vllm_ascend.compilation.passes.sequence_parallelism import get_sp_min_token_num
@@ -475,13 +485,18 @@ class NPUPlatform(Platform):
                 all2all_backend=vllm_config.parallel_config.all2all_backend,
                 data_parallel_size=vllm_config.parallel_config.data_parallel_size,
             )
-            # NOTE: Theoretically, we should also add vllm::mla_forward in the attention ops.
+            # NOTE: Theoretically, we should also add this in the attention ops.
             # Since the process is created in the spawn mode, the value of the class attribute
             # attention ops transmitted is still the one before modification, so it has not been modified.
             # This will cause in scenarios where both piecewise and splitting ops are configured simultaneously,
-            # If splitting ops does not contain the vllm::mla forward value, this configuration issue will
+            # If splitting ops does not contain the this value, this configuration issue will
             # not be detected in advance assert.
-            compilation_config.splitting_ops.extend(["vllm::mla_forward"])
+            compilation_config.splitting_ops.extend(
+                [
+                    "vllm::mla_forward",
+                    "vllm::dsa_forward",
+                ]
+            )
             update_aclgraph_sizes(vllm_config)
             ascend_config.ascend_compilation_config.enable_npugraph_ex = False
         elif compilation_config.cudagraph_mode.has_full_cudagraphs():
