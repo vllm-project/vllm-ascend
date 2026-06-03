@@ -66,12 +66,9 @@ def _split_qkv_and_compute_local_qk_var_kernel(
         token_indices = block_start + block_range
         token_mask = (token_indices < num_tokens)[:, None]
 
-        # Precompute column aranges (padded to power-of-2 for Ascend NPU)
-        q_offset = tl.arange(0, q_cols_pow2)[None, :]
-        k_offset = tl.arange(0, k_cols_pow2)[None, :]
-
         # === Batch load QKV data ===
-        # Q: padded arange, masked strictly to q_cols
+        # Q: [BLOCK_SIZE, q_cols]
+        q_offset = tl.arange(0, q_cols_pow2)[None, :]
         q_mask = token_mask & (q_offset < q_cols)
         q_batch = tl.load(
             input_ptr + token_indices[:, None] * qkv_stride + q_offset,
@@ -80,7 +77,8 @@ def _split_qkv_and_compute_local_qk_var_kernel(
         )
         q_batch_f32 = q_batch.to(tl.float32)
 
-        # K: padded arange at offset q_cols, masked strictly to k_cols
+        # K: [BLOCK_SIZE, k_cols], K follows immediately after Q
+        k_offset = tl.arange(0, k_cols_pow2)[None, :]
         k_mask = token_mask & (k_offset < k_cols)
         k_batch = tl.load(
             input_ptr + token_indices[:, None] * qkv_stride + q_cols + k_offset,
@@ -89,10 +87,11 @@ def _split_qkv_and_compute_local_qk_var_kernel(
         )
         k_batch_f32 = k_batch.to(tl.float32)
 
-        # V: padded arange at offset q_cols + k_cols, masked strictly to k_cols
-        v_mask = token_mask & (k_offset < k_cols)
+        # V: [BLOCK_SIZE, k_cols], V is at offset Q + 2*K
+        v_offset = tl.arange(0, k_cols_pow2)[None, :]
+        v_mask = token_mask & (v_offset < k_cols)
         v_batch = tl.load(
-            input_ptr + token_indices[:, None] * qkv_stride + q_cols + k_cols + k_offset,
+            input_ptr + token_indices[:, None] * qkv_stride + q_cols + k_cols + v_offset,
             mask=v_mask,
             other=0.0,
         )
@@ -102,19 +101,19 @@ def _split_qkv_and_compute_local_qk_var_kernel(
         k_squaresum = tl.sum(k_batch_f32 * k_batch_f32, axis=-1) * k_inv_size
 
         # === Batch store QKV output ===
-        # Store Q: output stride uses actual q_cols
+        # Store Q
         q_out_offset = token_indices[:, None] * q_cols + q_offset
         q_out_mask = token_mask & (q_offset < q_cols)
         tl.store(q_out_ptr + q_out_offset, q_batch, mask=q_out_mask)
 
-        # Store K: output stride uses actual k_cols
+        # Store K
         k_out_offset = token_indices[:, None] * k_cols + k_offset
         k_out_mask = token_mask & (k_offset < k_cols)
         tl.store(k_out_ptr + k_out_offset, k_batch, mask=k_out_mask)
 
-        # Store V: output stride uses actual k_cols
-        v_out_offset = token_indices[:, None] * k_cols + k_offset
-        v_out_mask = token_mask & (k_offset < k_cols)
+        # Store V
+        v_out_offset = token_indices[:, None] * k_cols + v_offset
+        v_out_mask = token_mask & (v_offset < k_cols)
         tl.store(v_out_ptr + v_out_offset, v_batch, mask=v_out_mask)
 
         # === Store variance ===
