@@ -58,12 +58,17 @@ jobs:
         with:
           fetch-depth: 0
 
+      - name: Validate test coverage config
+        run: |
+          pip install pyyaml
+          python3 .github/workflows/scripts/coverage.py
+
       - name: Select tests based on changed files
         id: scope
         run: |
           git config --global --add safe.directory /__w/vllm-ascend/vllm-ascend
           git fetch origin ${{ github.base_ref }}
-          pip install pyyaml regex
+          pip install regex
           python3 .github/workflows/scripts/select_tests.py \
             --diff-base origin/${{ github.base_ref }} \
             --run-all-cpu \
