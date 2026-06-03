@@ -25,24 +25,24 @@ Currently CPP mainly focuses on optimization during the prefill phase. It is bet
 
 ### Online Serving
 
-    ```bash
-    vllm serve <model_path> \
-        --pipeline-parallel-size 2 \
-        --enable-chunked-prefill \
-        --additional-config '{"profiling_chunk_config": {"enabled": true}}'
-    ```
+```bash
+vllm serve <model_path> \
+    --pipeline-parallel-size 2 \
+    --enable-chunked-prefill \
+    --additional-config '{"profiling_chunk_config": {"enabled": true}}'
+```
 
 ### Offline Inference
 
-    ```python
-    from vllm import LLM
+```python
+from vllm import LLM
 
-    llm = LLM(
-        model="<model_path>",
-        pipeline_parallel_size=2,
-        additional_config={"profiling_chunk_config": {"enabled": True}},
-    )
-    ```
+llm = LLM(
+    model="<model_path>",
+    pipeline_parallel_size=2,
+    additional_config={"profiling_chunk_config": {"enabled": True}},
+)
+```
 
 ## Configuration Parameters
 
