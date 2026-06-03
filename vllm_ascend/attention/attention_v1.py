@@ -642,11 +642,10 @@ class AscendAttentionBackendImpl(AttentionImpl):
                     if c8_k_aq_scale is not None:
                         extra_args = {
                             "key_antiquant_scale": c8_k_aq_scale,
-                            "key_antiquant_offset": c8_k_aq_offset,
                             "value_antiquant_scale": c8_v_aq_scale,
-                            "value_antiquant_offset": c8_v_aq_offset,
                             "key_antiquant_mode": 0,
                             "value_antiquant_mode": 0,
+                            "inner_precise": 1,
                         }
                         input_layout = "BNSD"
                         sparse_mode = 0
@@ -719,16 +718,21 @@ class AscendAttentionBackendImpl(AttentionImpl):
         next_tokens = 0 if self.sliding_window else SWA_INT_MAX
 
         extra_args = {}
-        if self.enable_c8_quant:
+        if self.enable_c8_quant and layer is not None:
             extra_args = {
-                "key_antiquant_scale": layer._c8_k_aq_scale,
-                "key_antiquant_offset": layer._c8_k_aq_offset,
-                "value_antiquant_scale": layer._c8_v_aq_scale,
-                "value_antiquant_offset": layer._c8_v_aq_offset,
+                "key_antiquant_scale": layer._c8_k_aq_scale_nz_bnsd,
+                "value_antiquant_scale": layer._c8_v_aq_scale_nz_bnsd,
                 "key_antiquant_mode": 0,
                 "value_antiquant_mode": 0,
+                "inner_precise": 1,
             }
-            # TODO: Convert kvcache to NZ, and change layerout from BNSD to TND.
+
+            # change key/value shape
+            _, block_size, _, _ = self.key_cache.shape  # type: ignore
+            key = self._nz_5d_view(self.key_cache, block_size)
+            value = self._nz_5d_view(self.value_cache, block_size)
+
+            # TODO: change layerout from BNSD to TND.
             input_layout = "BNSD"
             query = query.unsqueeze(2)
             output = output.unsqueeze(2)
@@ -783,12 +787,12 @@ class AscendAttentionBackendImpl(AttentionImpl):
             pre_tokens,
             next_tokens,
         )
-        if self.enable_c8_quant:
+        if self.enable_c8_quant and layer is not None:
             attn_params = attn_params + (
-                weak_ref_tensors(layer._c8_k_aq_scale),
-                weak_ref_tensors(layer._c8_k_aq_offset),
-                weak_ref_tensors(layer._c8_v_aq_scale),
-                weak_ref_tensors(layer._c8_v_aq_offset),
+                weak_ref_tensors(layer._c8_k_aq_scale_nz_bnsd),
+                None,
+                weak_ref_tensors(layer._c8_v_aq_scale_nz_bnsd),
+                None,
             )  # type: ignore
         else:
             attn_params = attn_params + (None, None, None, None)  # type: ignore
@@ -1377,7 +1381,7 @@ class AscendC8AttentionBackendImpl(AscendAttentionBackendImpl):
                 if attn_metadata.attn_state != AscendAttentionState.DecodeOnly:
                     float_key, float_value = key, value
                 key, value = self._quantize_kv_to_int8(key, value, layer, attn_metadata.num_actual_tokens)
-                query, key, value, _ = self.reshape_and_cache(query, key, value, kv_cache, attn_metadata, output)
+                query, key, value, _ = self._reshape_and_cache(query, key, value, kv_cache, attn_metadata, output)
             # pooling model branch
             if attn_metadata.model_runner_type == "pooling":
                 attn_output = self._forward_encoder_attention(query, key, value, attn_metadata, output)
@@ -1422,7 +1426,7 @@ class AscendC8AttentionBackendImpl(AscendAttentionBackendImpl):
             elif not self.is_kv_producer:
                 if key is not None and value is not None:
                     key, value = self._quantize_kv_to_int8(key, value, layer, attn_metadata.num_actual_tokens)
-                    query, key, value, _ = self.reshape_and_cache(query, key, value, kv_cache, attn_metadata, output)
+                    query, key, value, _ = self._reshape_and_cache(query, key, value, kv_cache, attn_metadata, output)
                 # pooling model branch
                 if attn_metadata.model_runner_type == "pooling":
                     attn_output = self._forward_encoder_attention(query, key, value, attn_metadata, output)
@@ -1434,6 +1438,11 @@ class AscendC8AttentionBackendImpl(AscendAttentionBackendImpl):
                     return output
                 elif attn_metadata.attn_state == AscendAttentionState.DecodeOnly:
                     return self._forward_c8_decode(query, attn_metadata, output, layer)
+
+    def _nz_5d_view(self, cache: torch.Tensor, block_size: int) -> torch.Tensor:
+        """View a KV cache tensor in NZ 5D layout: (num_blocks, num_kv_heads, head_size//nz, block_size, nz)."""
+        NZ_FMT_LAST_DIM = 32
+        return cache.view(-1, self.num_kv_heads, self.head_size // NZ_FMT_LAST_DIM, block_size, NZ_FMT_LAST_DIM)
 
     def _prepare_c8_scales(self, layer: AttentionLayer, device: torch.device) -> None:
         """Shard per-channel C8 scales/offsets to this TP rank and pre-compute
@@ -1461,14 +1470,12 @@ class AscendC8AttentionBackendImpl(AscendAttentionBackendImpl):
         layer._c8_v_scale = _shard_and_reshape(layer.v_cache_scale.data)
         layer._c8_v_offset = _shard_and_reshape(layer.v_cache_offset.data)
 
-        bnsd = (1, self.num_kv_heads, 1, self.head_size)
-        layer._c8_k_aq_scale = layer._c8_k_scale.view(bnsd).contiguous()
-        layer._c8_k_aq_offset = layer._c8_k_offset.view(bnsd).contiguous()
-        layer._c8_v_aq_scale = layer._c8_v_scale.view(bnsd).contiguous()
-        layer._c8_v_aq_offset = layer._c8_v_offset.view(bnsd).contiguous()
-
         layer._c8_k_inv_scale = 1.0 / layer._c8_k_scale
         layer._c8_v_inv_scale = 1.0 / layer._c8_v_scale
+
+        nz_bnsd = (self.num_kv_heads, 1, self.head_size)
+        layer._c8_k_aq_scale_nz_bnsd = layer._c8_k_scale.view(nz_bnsd).contiguous()
+        layer._c8_v_aq_scale_nz_bnsd = layer._c8_v_scale.view(nz_bnsd).contiguous()
 
         layer._c8_scales_prepared = True
 
@@ -1483,26 +1490,41 @@ class AscendC8AttentionBackendImpl(AscendAttentionBackendImpl):
     ) -> tuple[torch.Tensor, torch.Tensor]:
         """Gather paged INT8 KV blocks and dequantize."""
         batch_size = block_table.shape[0]
-        block_size = key.shape[1]
-        H = key.shape[2]
         max_blocks_per_seq = block_table.shape[1]
+
+        # NZ 5D view: (num_blocks, num_kv_heads, head_size//nz, block_size, nz)
+        block_size = self.key_cache.shape[1]  # type: ignore[attr-defined]
         max_tokens_padded = max_blocks_per_seq * block_size
 
         flat_ids = block_table.reshape(-1)
-        gathered_k = key[flat_ids].view(batch_size, max_tokens_padded, H)
-        gathered_v = value[flat_ids].view(batch_size, max_tokens_padded, H)
+        key_nz = self._nz_5d_view(key, block_size)
+        value_nz = self._nz_5d_view(value, block_size)
+
+        # Gather: (batch*max_blocks, H, D//nz, S, nz)
+        gathered_k = key_nz[flat_ids]
+        gathered_v = value_nz[flat_ids]
+        # NZ→ND conversion: permute (S, H, D//nz, nz) → reshape (S, H, D)
+        gathered_k = (
+            gathered_k.permute(0, 3, 1, 2, 4)
+            .contiguous()
+            .view(batch_size, max_tokens_padded, self.num_kv_heads, self.head_size)
+        )
+        gathered_v = (
+            gathered_v.permute(0, 3, 1, 2, 4)
+            .contiguous()
+            .view(batch_size, max_tokens_padded, self.num_kv_heads, self.head_size)
+        )
 
         seq_lens_t = torch.tensor(seq_lens, dtype=torch.long, device=key.device)
         positions = torch.arange(max_tokens_padded, dtype=torch.long, device=key.device)
         valid_mask = (positions.unsqueeze(0) < seq_lens_t.unsqueeze(1)).view(-1)
 
-        dense_k = gathered_k.view(-1, H)[valid_mask]
-        dense_v = gathered_v.view(-1, H)[valid_mask]
+        dense_k = gathered_k.view(-1, self.num_kv_heads, self.head_size)[valid_mask]
+        dense_v = gathered_v.view(-1, self.num_kv_heads, self.head_size)[valid_mask]
 
-        dense_k = dense_k.view(-1, self.num_kv_heads, self.head_size)
-        dense_v = dense_v.view(-1, self.num_kv_heads, self.head_size)
-        dense_k = (dense_k.to(target_dtype) - layer._c8_k_offset) * layer._c8_k_scale
-        dense_v = (dense_v.to(target_dtype) - layer._c8_v_offset) * layer._c8_v_scale
+        # Scale-only dequant for NZ (symmetric)
+        dense_k = dense_k.to(target_dtype) * layer._c8_k_scale
+        dense_v = dense_v.to(target_dtype) * layer._c8_v_scale
         return dense_k, dense_v
 
     def _quantize_kv_to_int8(
@@ -1538,18 +1560,17 @@ class AscendC8AttentionBackendImpl(AscendAttentionBackendImpl):
         """C8 decode via FIA V1 BNSD with native paged INT8 KV + perchannel antiquant."""
         num_block, block_size, _, _ = self.key_cache.shape  # type: ignore[attr-defined]
         assert block_size % 32 == 0, f"C8 INT8 KV cache requires block_size to be a multiple of 32, got {block_size}"
-        key = self.key_cache.view(num_block, block_size, -1)  # type: ignore[attr-defined]
-        value = self.value_cache.view(num_block, block_size, -1)  # type: ignore[attr-defined]
         batch_size = len(attn_metadata.seq_lens_list)
+
+        key = self._nz_5d_view(self.key_cache, block_size)
+        value = self._nz_5d_view(self.value_cache, block_size)
 
         attn_output, _ = torch_npu.npu_fused_infer_attention_score(
             query[:batch_size].unsqueeze(2),
             key,
             value,
-            key_antiquant_scale=layer._c8_k_aq_scale,
-            key_antiquant_offset=layer._c8_k_aq_offset,
-            value_antiquant_scale=layer._c8_v_aq_scale,
-            value_antiquant_offset=layer._c8_v_aq_offset,
+            key_antiquant_scale=layer._c8_k_aq_scale_nz_bnsd,
+            value_antiquant_scale=layer._c8_v_aq_scale_nz_bnsd,
             block_table=attn_metadata.block_tables,
             actual_seq_lengths_kv=attn_metadata.seq_lens_list,
             num_heads=self.num_heads,
@@ -1557,8 +1578,10 @@ class AscendC8AttentionBackendImpl(AscendAttentionBackendImpl):
             input_layout="BNSD",
             scale=self.scale,
             block_size=block_size,
+            antiquant_mode=0,
             key_antiquant_mode=0,
             value_antiquant_mode=0,
+            inner_precise=1,
             sparse_mode=0,
         )
         attn_output = attn_output.squeeze(2)
@@ -1587,17 +1610,15 @@ class AscendC8AttentionBackendImpl(AscendAttentionBackendImpl):
             assert block_size % 32 == 0, (
                 f"C8 INT8 KV cache requires block_size to be a multiple of 32, got {block_size}"
             )
-            kv_k = self.key_cache.view(num_block, block_size, -1)  # type: ignore[attr-defined]
-            kv_v = self.value_cache.view(num_block, block_size, -1)  # type: ignore[attr-defined]
+            kv_k = self._nz_5d_view(self.key_cache, block_size)
+            kv_v = self._nz_5d_view(self.value_cache, block_size)
 
             attn_out, _ = torch_npu.npu_fused_infer_attention_score(
                 query[:num_decode_tokens].unsqueeze(2),
                 kv_k,
                 kv_v,
-                key_antiquant_scale=layer._c8_k_aq_scale,
-                key_antiquant_offset=layer._c8_k_aq_offset,
-                value_antiquant_scale=layer._c8_v_aq_scale,
-                value_antiquant_offset=layer._c8_v_aq_offset,
+                key_antiquant_scale=layer._c8_k_aq_scale_nz_bnsd,
+                value_antiquant_scale=layer._c8_v_aq_scale_nz_bnsd,
                 block_table=attn_metadata.block_tables[:num_decodes],
                 actual_seq_lengths_kv=attn_metadata.seq_lens_list[:num_decodes],
                 num_heads=self.num_heads,
@@ -1605,8 +1626,10 @@ class AscendC8AttentionBackendImpl(AscendAttentionBackendImpl):
                 input_layout="BNSD",
                 scale=self.scale,
                 block_size=block_size,
+                antiquant_mode=0,
                 key_antiquant_mode=0,
                 value_antiquant_mode=0,
+                inner_precise=1,
                 sparse_mode=0,
             )
             output[:num_decode_tokens] = attn_out.squeeze(2)
@@ -1632,8 +1655,9 @@ class AscendC8AttentionBackendImpl(AscendAttentionBackendImpl):
                 prefill_seq_kvlen = prefill_seq_qlen
             else:
                 num_block, blk_size, _, _ = self.key_cache.shape  # type: ignore[attr-defined]
-                paged_k = self.key_cache.view(num_block, blk_size, -1)  # type: ignore[attr-defined]
-                paged_v = self.value_cache.view(num_block, blk_size, -1)  # type: ignore[attr-defined]
+                paged_k = self._nz_5d_view(self.key_cache, blk_size)
+                paged_v = self._nz_5d_view(self.value_cache, blk_size)
+
                 prefill_bt = attn_metadata.block_tables[num_decodes:]
                 prefill_sl = attn_metadata.seq_lens_list[num_decodes:]
                 prefill_k, prefill_v = self._dequant_paged_kv_to_dense(
@@ -1723,3 +1747,38 @@ class AscendC8AttentionBackendImpl(AscendAttentionBackendImpl):
         attn_output = attn_output.view(num_tokens, self.num_heads, self.head_size)
         output[:num_tokens] = attn_output
         return output
+
+    def _reshape_and_cache(
+        self,
+        query: torch.Tensor,
+        key: torch.Tensor,
+        value: torch.Tensor,
+        kv_cache: tuple[torch.Tensor],
+        attn_metadata: AscendMetadata,
+        output: torch.Tensor,
+    ):
+        if len(kv_cache) > 1:
+            if self.is_kv_producer:
+                attn_metadata.reshape_cache_event = torch.npu.Event()
+            if self.key_cache is None:
+                self.key_cache, self.value_cache = kv_cache[0], kv_cache[1]
+            slots = attn_metadata.slot_mapping
+
+            encoder_decoder = self.attn_type == AttentionType.ENCODER_DECODER
+
+            # NZ write path: 5D view + npu_scatter_pa_kv_cache
+            block_size = self.vllm_config.cache_config.block_size
+            k_cache_layer = self._nz_5d_view(self.key_cache, block_size)
+            v_cache_layer = self._nz_5d_view(self.value_cache, block_size)
+
+            torch_npu.npu_scatter_pa_kv_cache(
+                key=key[: attn_metadata.num_actual_tokens] if not encoder_decoder else key,
+                value=value[: attn_metadata.num_actual_tokens] if not encoder_decoder else value,
+                key_cache=k_cache_layer,
+                value_cache=v_cache_layer,
+                slot_mapping=slots[: attn_metadata.num_actual_tokens] if not encoder_decoder else slots,
+            )
+
+            if self.is_kv_producer:
+                attn_metadata.reshape_cache_event.record()
+        return query, key, value, output
