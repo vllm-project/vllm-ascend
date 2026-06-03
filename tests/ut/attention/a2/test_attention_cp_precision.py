@@ -14,7 +14,6 @@ from tests.ut.attention.utils import (
     create_vllm_config,
     patch_distributed_groups,
 )
-from tests.ut.conftest import npu_test
 from vllm_ascend.attention.attention_mask import AttentionMaskBuilder
 from vllm_ascend.attention.attention_v1 import AscendMetadata
 from vllm_ascend.attention.context_parallel.attention_cp import (
