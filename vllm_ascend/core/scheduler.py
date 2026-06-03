@@ -16,7 +16,7 @@
 #
 import time
 from collections import deque
-from typing import Iterable, Union
+from typing import Iterable, Optional, Union
 
 from vllm.config import VllmConfig
 from vllm.distributed.kv_events import KVEventBatch
@@ -31,6 +31,8 @@ from vllm.v1.kv_cache_interface import KVCacheConfig
 from vllm.v1.outputs import ModelRunnerOutput
 from vllm.v1.request import Request, RequestStatus
 from vllm.v1.structured_output import StructuredOutputManager
+
+from vllm_ascend.attention.hstu_attention_v1 import RequestStage
 
 
 class AscendScheduler(Scheduler):
@@ -182,7 +184,18 @@ class AscendScheduler(Scheduler):
                 # We use `request.num_tokens` instead of
                 # `request.num_prompt_tokens` to consider the resumed
                 # requests, which have output tokens.
-                num_new_tokens = request.num_tokens - num_computed_tokens
+                if request.sampling_params.extra_args.get(
+                        "request_stage") == RequestStage.Decode.value:
+                    extra_args = request.sampling_params.extra_args or {}
+                    candidate_num = extra_args.get("candidate_num", 0)
+                    if isinstance(candidate_num, list):
+                        candidate_num = candidate_num[0] if candidate_num else 0
+                    candidate_len = int(candidate_num)
+                    num_new_tokens = candidate_len if (
+                        candidate_len > 0 and request.num_tokens
+                        >= candidate_len) else request.num_tokens
+                else:
+                    num_new_tokens = request.num_tokens - num_computed_tokens
                 max_tokens_in_kvcache = (self.kv_cache_config.num_blocks *
                                          self.block_size)
                 prompt_limit = min(prompt_limit, max_tokens_in_kvcache)
@@ -544,6 +557,50 @@ class AscendScheduler(Scheduler):
             return request.lora_request.long_lora_max_len
         else:
             return prompt_limit
+
+    def _get_hstu_remote_history_len(self, request: Request) -> Optional[int]:
+        connector_scheduler = getattr(self.connector, "connector_scheduler",
+                                      None)
+        load_specs = getattr(connector_scheduler, "load_specs", None)
+        if load_specs is None:
+            get_history_len = getattr(connector_scheduler, "get_history_len",
+                                      None)
+            if get_history_len is None:
+                return None
+            return get_history_len(request.request_id)
+        load_spec = load_specs.get(request.request_id)
+        if load_spec is None:
+            get_history_len = getattr(connector_scheduler, "get_history_len",
+                                      None)
+            if get_history_len is None:
+                return None
+            return get_history_len(request.request_id)
+        return getattr(load_spec, "history_len", None)
+
+    def _update_waiting_for_remote_kv(self, request: Request) -> bool:
+        if not request.sampling_params.extra_args.get(
+                "request_stage") == RequestStage.Decode.value:
+            return super()._update_waiting_for_remote_kv(request)
+
+        assert self.connector is not None
+        if request.request_id not in self.finished_recving_kv_req_ids:
+            return False
+
+        (block_ids, ) = self.kv_cache_manager.get_block_ids(request.request_id)
+        num_computed_tokens = len(block_ids) * self.block_size
+        history_len = self._get_hstu_remote_history_len(request)
+        if history_len is not None:
+            num_computed_tokens = min(num_computed_tokens, history_len)
+        else:
+            num_computed_tokens = min(num_computed_tokens, request.num_tokens)
+            if num_computed_tokens == request.num_tokens:
+                num_computed_tokens -= 1
+
+        self.kv_cache_manager.cache_blocks(request, num_computed_tokens)
+        request.num_computed_tokens = num_computed_tokens
+
+        self.finished_recving_kv_req_ids.remove(request.request_id)
+        return True
 
     def finish_requests(
         self,

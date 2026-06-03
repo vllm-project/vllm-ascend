@@ -328,6 +328,7 @@ class TestAscendAttentionBackendImpl(TestBase):
         metadata.seq_lens = torch.tensor([10])
         metadata.num_actual_tokens = 10
         metadata.slot_mapping = torch.zeros(10, dtype=torch.long)
+        metadata.additional_metadata = None
         layer = self.layer_no_quant
         # layer.quant_method.apply.return_value = metadata
         print(self.layer_no_quant._v_scale_float)
@@ -361,6 +362,7 @@ class TestAscendAttentionBackendImpl(TestBase):
         metadata.block_tables = torch.zeros(1, 5, dtype=torch.long)
         metadata.num_actual_tokens = 10
         metadata.slot_mapping = torch.zeros(10, dtype=torch.long)
+        metadata.additional_metadata = None
         layer = self.layer_no_quant
 
         output = self.impl.forward(layer,
@@ -391,6 +393,7 @@ class TestAscendAttentionBackendImpl(TestBase):
         metadata.block_tables = torch.zeros(1, 5, dtype=torch.long)
         metadata.num_actual_tokens = 10
         metadata.slot_mapping = torch.zeros(10, dtype=torch.long)
+        metadata.additional_metadata = None
         layer = self.layer_no_quant
 
         mock_get_forward_context.return_value = MagicMock(capturing=False)
@@ -497,6 +500,7 @@ class TestAscendAttentionBackendImpl(TestBase):
         metadata.block_tables = torch.zeros(1, 5, dtype=torch.long)
         metadata.num_actual_tokens = 10
         metadata.slot_mapping = torch.zeros(10, dtype=torch.long)
+        metadata.additional_metadata = None
         layer = self.layer_no_quant
 
         mock_get_forward_context.return_value = MagicMock(capturing=True)
@@ -561,6 +565,7 @@ class TestAscendAttentionBackendImpl(TestBase):
         metadata.block_tables = torch.zeros(1, 5, dtype=torch.long)
         metadata.num_actual_tokens = 10
         metadata.slot_mapping = torch.zeros(10, dtype=torch.long)
+        metadata.additional_metadata = None
 
         mock_fused_infer_attention_score.return_value = (torch.ones(10, 8,
                                                                     64), 1)

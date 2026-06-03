@@ -32,8 +32,7 @@ from vllm_ascend.ascend_config import (check_ascend_config, get_ascend_config,
 from vllm_ascend.torchair.utils import (check_torchair_cache_exist,
                                         delete_torchair_cache_file)
 from vllm_ascend.utils import (ASCEND_QUANTIZATION_METHOD, enable_sp, is_310p,
-                               is_vl_model, update_aclgraph_sizes,
-                               update_default_aclgraph_sizes)
+                               update_aclgraph_sizes)
 
 if TYPE_CHECKING:
     from vllm.config import ModelConfig, VllmConfig
@@ -183,10 +182,6 @@ class NPUPlatform(Platform):
 
         # set cudaprah sizes before extending `compilation_config.splitting_ops`
         vllm_config._set_cudagraph_sizes()
-        # There are cases where default cudagraph_capture_sizes are not friendly
-        # to ascend ops && hardwares. We update these sizes here to improve
-        # default performance.
-        update_default_aclgraph_sizes(vllm_config)
         # TODO delete graph size update here when compilation_config.pass_config.enable_sequence_parallelism
         # is supported by vllm-ascend.
         if vllm_config.parallel_config.tensor_parallel_size > 1 and not vllm_config.model_config.enforce_eager and \
@@ -272,11 +267,11 @@ class NPUPlatform(Platform):
             if cache_config.enable_prefix_caching or \
                 not ascend_scheduler_config.enabled or \
                 getattr(ascend_scheduler_config, "enable_chunked_prefill", False):
-                logger.warning(
-                    "If chunked prefill or prefix caching is enabled, block size must be set to 128."
-                )
+                #logger.warning(
+                #     "If chunked prefill or prefix caching is enabled, block size must be set to 128."
+                # )
                 origin_block_size = cache_config.block_size
-                cache_config.block_size = 128
+                # cache_config.block_size = 128
                 # TODO(MengqingCao): Remove the model_type check, after resolving the hidden error in get_kv_cache_groups.
                 if model_config and model_config.hf_config.model_type == "qwen3_next":
                     logger.warning(
@@ -303,14 +298,6 @@ class NPUPlatform(Platform):
                 vllm_config.scheduler_config)
             vllm_config.scheduler_config = recompute_scheduler_config
 
-        if is_vl_model(vllm_config):
-            if bool(int(os.getenv("VLLM_ASCEND_ENABLE_FLASHCOMM", '0'))) or \
-               bool(int(os.getenv("VLLM_ASCEND_ENABLE_FLASHCOMM1", '0'))):
-                raise ValueError(
-                    "Currently, VL models doesn't support "
-                    "FLASHCOMM in vllm-ascend. We will fix this in the future. "
-                    "Please set VLLM_ASCEND_ENABLE_FLASHCOMM1=0.")
-
     @classmethod
     def get_attn_backend_cls(
         cls,
@@ -328,6 +315,9 @@ class NPUPlatform(Platform):
             raise ValueError("vLLM Ascend does not support V0 engine.")
 
         ascend_config = get_ascend_config()
+
+        if ascend_config.model_type == "hstu_inference_ranking":
+            return "vllm_ascend.attention.hstu_attention_v1.AscendHSTUAttentionBackend"
 
         if use_mla and ascend_config.enable_shared_expert_dp:
             if use_mla and not use_sparse:

@@ -129,6 +129,7 @@ class AscendConfig:
             if self.pd_tp_ratio == 0:
                 raise AssertionError(
                     "Only support P node tp size lagger then D node tp size")
+        self.model_type = vllm_config.model_config.hf_config.model_type
 
 
 class TorchairGraphConfig:

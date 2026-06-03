@@ -1,0 +1,49 @@
+no_enable_prefix_caching: true
+skip_tokenizer_init: true
+tensor-parallel-size: 1
+data-parallel-size: 1
+block-size: 128
+max-num-batched-tokens: 8832
+max-num-seqs: 4
+port: 8100
+max-model-len: 8832
+enforce_eager: false
+# 开启
+# additional_config: '{
+#     "graph_model_compile_config": {
+#         "level": 1,
+#         "use_aclgraph": true
+#     },
+#     "ascend_scheduler_config": {
+#         "enabled": true
+#     }
+# }'
+
+# 关闭
+additional_config: '{
+    "graph_model_compile_config": {
+        "level": 0,
+        "use_aclgraph": false
+    },
+    "ascend_scheduler_config": {
+        "enabled": true
+    }
+}'
+kv-transfer-config: '{
+    "kv_connector": "MooncakeUserConnectorStore",
+    "kv_role": "kv_both",
+    "kv_connector_extra_config": {
+        "prefill": {
+            "dp_size": 1,
+            "tp_size": 1
+        },
+        "decode": {
+            "dp_size": 1,
+            "tp_size": 1
+        },
+        "use_layerwise": true,
+        "lookup_rpc_port":"1",
+        "backend": "mooncake",
+        "load_async": false
+    }
+}'

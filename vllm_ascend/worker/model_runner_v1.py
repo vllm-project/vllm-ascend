@@ -62,7 +62,6 @@ from vllm.model_executor.model_loader import get_model
 from vllm.model_executor.models.interfaces import supports_transcription
 from vllm.model_executor.models.interfaces_base import (
     VllmModelForPooling, is_pooling_model, is_text_generation_model)
-from vllm.multimodal import MULTIMODAL_REGISTRY
 from vllm.multimodal.inputs import MultiModalKwargsItem, PlaceholderRange
 from vllm.multimodal.utils import group_mm_kwargs_by_modality
 from vllm.pooling_params import PoolingParams
@@ -107,6 +106,8 @@ from vllm_ascend.ascend_forward_context import (MoECommType,
                                                 set_ascend_forward_context)
 from vllm_ascend.attention.attention_mask import AttentionMaskBuilder
 from vllm_ascend.attention.attention_v1 import AscendAttentionState
+from vllm_ascend.attention.hstu_attention_v1 import \
+    AscendHSTUAttentionMetadataBuilder
 from vllm_ascend.attention.utils import AscendCommonAttentionMetadata
 from vllm_ascend.compilation.acl_graph import (ACLGraphWrapper,
                                                set_graph_params,
@@ -441,12 +442,12 @@ class NPUModelRunner(LoRAModelRunnerMixin):
                                             pin_memory=True)
         self.slot_mapping_np = self.slot_mapping_cpu.numpy()
         self.query_start_loc_cpu = torch.zeros(self.max_num_reqs + 1,
-                                               dtype=torch.int32,
+                                               dtype=torch.int64,
                                                device="cpu",
                                                pin_memory=True)
         self.query_start_loc_np = self.query_start_loc_cpu.numpy()
         self.seq_lens_cpu = torch.zeros(self.max_num_reqs,
-                                        dtype=torch.int32,
+                                        dtype=torch.int64,
                                         device="cpu",
                                         pin_memory=True)
         self.seq_lens_np = self.seq_lens_cpu.numpy()
@@ -550,14 +551,6 @@ class NPUModelRunner(LoRAModelRunnerMixin):
         # Use integer arithmetic for ceiling division.
         num_tokens_per_tp_rank = (max_num_tokens + tp_size - 1) // tp_size
         self.mc2_tokens_capacity = num_tokens_per_tp_rank * tp_size
-
-        # Only relevant for multimodal models
-        self.mm_registry = MULTIMODAL_REGISTRY
-        self.supports_mm_inputs = self.mm_registry.supports_multimodal_inputs(
-            self.model_config)
-        if self.supports_mm_inputs:
-            self.is_mm_embed = self._make_buffer(self.max_num_tokens,
-                                                 dtype=torch.bool)
 
     def _make_buffer(self,
                      *size: Union[int, torch.SymInt],
@@ -1043,7 +1036,7 @@ class NPUModelRunner(LoRAModelRunnerMixin):
     def _gather_mm_embeddings(
         self,
         scheduler_output: "SchedulerOutput",
-    ) -> tuple[list[torch.Tensor], torch.Tensor]:
+    ) -> list[torch.Tensor]:
 
         def _iter_mm_features(req_state: CachedRequestState):
             assert req_state.mm_features is not None
@@ -1053,15 +1046,8 @@ class NPUModelRunner(LoRAModelRunnerMixin):
                     pos_info, "is_embed", None)
 
         mm_embeds: list[torch.Tensor] = []
-        total_num_scheduled_tokens = scheduler_output.total_num_scheduled_tokens
-        is_mm_embed = self.is_mm_embed.cpu
-        is_mm_embed[:total_num_scheduled_tokens] = False
-
-        req_start_idx = 0
 
         for req_id in self.input_batch.req_ids:
-            mm_embeds_req: list[torch.Tensor] = []
-
             num_scheduled_tokens = scheduler_output.num_scheduled_tokens[
                 req_id]
             req_state = self.requests[req_id]
@@ -1090,22 +1076,12 @@ class NPUModelRunner(LoRAModelRunnerMixin):
                 if is_embed is not None:
                     is_embed = is_embed[start_idx:end_idx]
 
-                req_start_pos = req_start_idx + start_pos - num_computed_tokens
-                is_mm_embed[req_start_pos+start_idx:req_start_pos + end_idx] \
-                    = True if is_embed is None else is_embed
-
                 mm_embeds_item = gather_mm_placeholders(
                     encoder_output[start_idx:end_idx],
                     is_embed=is_embed,
                 )
-                mm_embeds_req.append(mm_embeds_item)
-
-            mm_embeds.extend(mm_embeds_req)
-            req_start_idx += num_scheduled_tokens
-
-        is_mm_embed = self.is_mm_embed.copy_to_gpu(total_num_scheduled_tokens)
-
-        return mm_embeds, is_mm_embed
+                mm_embeds.append(mm_embeds_item)
+        return mm_embeds
 
     def _get_cumsum_and_arange(
         self,
@@ -1311,6 +1287,22 @@ class NPUModelRunner(LoRAModelRunnerMixin):
                arange,
                out=positions_np)
 
+        # For HSTU decode: token_ids are at positions [0, candidate_len) while
+        # attention/slot positions start at history_len.  Build a separate
+        # read-offset array so the token-embedding look-up reads from the
+        # beginning of each request's row.
+        token_read_positions_np = positions_np
+        if self.model_config.hf_config.model_type == "hstu_inference_ranking":
+            token_read_positions_np = positions_np.copy()
+            flat_idx = 0
+            for req_idx, req_id in enumerate(req_ids):
+                n = num_scheduled_tokens[req_idx]
+                req_state = self.requests.get(req_id)
+                token_start = max(0, req_state.num_prompt_tokens - n)
+                token_read_positions_np[flat_idx:flat_idx + n] = np.arange(
+                    token_start, token_start + n, dtype=np.int32)
+                flat_idx += n
+
         # Calculate M-RoPE positions.
         # Only relevant for models using M-RoPE (e.g, Qwen2-VL)
         if self.uses_mrope:
@@ -1325,7 +1317,7 @@ class NPUModelRunner(LoRAModelRunnerMixin):
         # E.g., [0, 1, 0, 1, 2, 3, 4, 0, 1, 2]
         # -> [0, 1, M, M + 1, M + 2, M + 3, M + 4, 2 * M, 2 * M + 1, 2 * M + 2]
         # where M is the max_model_len.
-        token_indices = (positions_np +
+        token_indices = (token_read_positions_np +
                          req_indices * self.input_batch.token_ids_cpu.shape[1])
 
         # Prepare input_ids.
@@ -1388,25 +1380,17 @@ class NPUModelRunner(LoRAModelRunnerMixin):
         if self.is_multimodal_model:
             # Run the multimodal encoder if any.
             self._execute_mm_encoder(scheduler_output)
-            mm_embeds, is_mm_embed = self._gather_mm_embeddings(
-                scheduler_output)
+            mm_embeds = self._gather_mm_embeddings(scheduler_output)
+
             # NOTE(woosuk): To unify token ids and soft tokens (vision
             # embeddings), we always use embeddings (rather than token ids)
             # as input to the multimodal model, even when the input is text.
             input_ids = self.input_ids[:total_num_scheduled_tokens]
-            model_type = self.vllm_config.model_config.hf_config.model_type
-            if model_type == "qwen2_5_vl" or model_type == "qwen3_vl_moe":
+            if mm_embeds:
                 inputs_embeds = self.model.get_input_embeddings(
-                    input_ids,
-                    multimodal_embeddings=mm_embeds,
-                    is_multimodal=is_mm_embed,
-                )
+                    input_ids, mm_embeds)
             else:
-                if mm_embeds:
-                    inputs_embeds = self.model.get_input_embeddings(
-                        input_ids, mm_embeds)
-                else:
-                    inputs_embeds = self.model.get_input_embeddings(input_ids)
+                inputs_embeds = self.model.get_input_embeddings(input_ids)
             # TODO(woosuk): Avoid the copy. Optimize.
             self.inputs_embeds[:total_num_scheduled_tokens].copy_(
                 inputs_embeds)
@@ -1486,7 +1470,7 @@ class NPUModelRunner(LoRAModelRunnerMixin):
                 # create a dummy block table and slot mapping for them.
                 blk_table_tensor = torch.zeros(
                     (num_reqs, 1),
-                    dtype=torch.int32,
+                    dtype=torch.int64,
                     device=self.device,
                 )
                 slot_mapping = torch.zeros(
@@ -1546,13 +1530,19 @@ class NPUModelRunner(LoRAModelRunnerMixin):
                         extra_attn_metadata_args = dict(
                             num_accepted_tokens=self.num_accepted_tokens.
                             gpu[:num_reqs],
-                            num_decode_draft_tokens_cpu=self.num_draft_tokens.
+                            num_draft_tokens=self.num_draft_tokens.
                             gpu[:num_reqs],
                         )
                     attn_metadata_i = builder.build(
                         common_prefix_len=common_prefix_len,
                         common_attn_metadata=common_attn_metadata,
                         **extra_attn_metadata_args)
+                elif isinstance(builder, AscendHSTUAttentionMetadataBuilder):
+                    attn_metadata_i = builder.build(
+                        common_prefix_len=common_prefix_len,
+                        common_attn_metadata=common_attn_metadata,
+                        requests=self.requests,
+                        scheduler_output=scheduler_output)
                 else:
                     attn_metadata_i = builder.build(
                         common_prefix_len=common_prefix_len,
@@ -1598,8 +1588,7 @@ class NPUModelRunner(LoRAModelRunnerMixin):
                                        self.speculative_config)
             else:
                 update_attn_params(self.update_stream, forward_context,
-                                   maybe_padded_num_tokens,
-                                   self.vllm_config.kv_transfer_config)
+                                   maybe_padded_num_tokens)
 
         if get_forward_context().sp_enabled:
             hidden_states = tensor_model_parallel_all_gather(hidden_states, 0)
@@ -1622,10 +1611,11 @@ class NPUModelRunner(LoRAModelRunnerMixin):
                 attn_state = AscendAttentionState.SpecDecoding
         # Speculative decoding.
         elif np.all(num_valid_tokens == 1):
-            if self.speculative_config and self.speculative_config.method == 'deepseek_mtp':
-                attn_state = AscendAttentionState.SpecDecoding
-            else:
+            if self.drafter and (self.drafter.name == SpecDcodeType.EAGLE
+                                 or self.drafter.name == SpecDcodeType.EAGLE3):
                 attn_state = AscendAttentionState.ChunkedPrefill
+            else:
+                attn_state = AscendAttentionState.SpecDecoding
         # splitfuse
         elif not ascend_config.ascend_scheduler_config.enabled or self.chunked_prefill_enabled:
             attn_state = AscendAttentionState.ChunkedPrefill
@@ -2105,10 +2095,53 @@ class NPUModelRunner(LoRAModelRunnerMixin):
                 if logprobs_tensors is not None else None
 
             # Compute prompt logprobs if needed.
-            prompt_logprobs_dict = self._get_prompt_logprobs_dict(
-                hidden_states[:scheduler_output.total_num_scheduled_tokens],
-                scheduler_output,
-            )
+            if self.model_config.hf_config.model_type == "hstu_inference_ranking":
+                prompt_logprobs_dict = {}
+                first_metadata = next(iter(attn_metadata.values()))
+                if len(
+                        scheduler_output.scheduled_new_reqs
+                ) > 0 and scheduler_output.scheduled_new_reqs[
+                        0].sampling_params.prompt_logprobs and hidden_states is not None:
+                    if first_metadata.attn_state == AscendAttentionState.DecodeOnly:
+                        num_prompt_logprobs_dict = self.input_batch.num_prompt_logprobs
+                        index = 0
+                        query_start_loc = first_metadata.query_start_loc
+                        for req_id, _ in num_prompt_logprobs_dict.items():
+                            hidden_states_req = hidden_states[
+                                query_start_loc[index]:query_start_loc[index +
+                                                                       1]].cpu(
+                                                                       )
+                            prompt_logprobs_dict[req_id] = LogprobsTensors(
+                                logprob_token_ids=hidden_states_req,
+                                logprobs=hidden_states_req,
+                                selected_token_ranks=positions[query_start_loc[
+                                    index]:query_start_loc[index + 1]].cpu())
+                            index = index + 1
+                    elif first_metadata.additional_metadata is not None and first_metadata.additional_metadata.get(
+                            "is_pd_merge", False):
+                        num_prompt_logprobs_dict = self.input_batch.num_prompt_logprobs
+                        start_index = 0
+                        index = 0
+                        num_candidates = first_metadata.additional_metadata[
+                            "num_candidates"]
+                        for req_id, _ in num_prompt_logprobs_dict.items():
+                            hidden_states_req = hidden_states[
+                                start_index:start_index +
+                                num_candidates[index]].cpu()
+                            prompt_logprobs_dict[req_id] = LogprobsTensors(
+                                logprob_token_ids=hidden_states_req,
+                                logprobs=hidden_states_req,
+                                selected_token_ranks=positions[
+                                    start_index:start_index +
+                                    num_candidates[index]].cpu())
+                            start_index += num_candidates[index]
+                            index = index + 1
+            else:
+                prompt_logprobs_dict = self._get_prompt_logprobs_dict(
+                    hidden_states[:scheduler_output.
+                                  total_num_scheduled_tokens],
+                    scheduler_output,
+                )
 
             num_sampled_tokens = sampler_output.sampled_token_ids.shape[0]
             sampled_token_ids = sampler_output.sampled_token_ids
@@ -2293,7 +2326,7 @@ class NPUModelRunner(LoRAModelRunnerMixin):
 
             attn_metadata = {}
 
-            seq_lens = max_query_len
+            seq_lens = self.model_config.max_model_len
             self.seq_lens_np[:num_reqs] = seq_lens
             self.seq_lens_np[num_reqs:] = 0
 
@@ -2308,7 +2341,7 @@ class NPUModelRunner(LoRAModelRunnerMixin):
                     query_start_loc=torch.tensor(
                         [0] + self.actual_seq_lengths_q[:num_reqs],
                         device=self.device,
-                        dtype=torch.int32),
+                        dtype=torch.int64),
                     query_start_loc_cpu=self.query_start_loc_cpu[:num_reqs +
                                                                  1],
                     seq_lens_cpu=self.seq_lens_cpu,
@@ -2335,8 +2368,10 @@ class NPUModelRunner(LoRAModelRunnerMixin):
 
                 for attn_group in self.attn_groups[kv_cache_group_id]:
                     builder = attn_group.get_metadata_builder()
+
                     attn_metadata_i = builder.build_for_graph_capture(
                         common_attn_metadata, attn_state, self.get_model())
+
                     for layer_name in kv_cache_group_spec.layer_names:
                         attn_metadata[layer_name] = attn_metadata_i
 
@@ -2357,11 +2392,11 @@ class NPUModelRunner(LoRAModelRunnerMixin):
             if self.vllm_config.model_config.use_mla:
                 # FIXME: Try using `auto_dispatch_capture=True`
                 update_mla_attn_params(self.update_stream, forward_context,
-                                       num_tokens, self.speculative_config)
+                                       positions.shape[0],
+                                       self.speculative_config)
             else:
                 update_attn_params(self.update_stream, forward_context,
-                                   num_tokens,
-                                   self.vllm_config.kv_transfer_config)
+                                   positions.shape[0])
 
         if self.drafter and self.drafter.name == SpecDcodeType.EAGLE3:
             hidden_states, _ = hidden_states
@@ -2501,21 +2536,13 @@ class NPUModelRunner(LoRAModelRunnerMixin):
             need_dummy_logits = (not self.in_profile_run
                                  and lmhead_tp_enable())
 
-            max_num_reqs_across_dp = num_tokens if not with_prefill else max_num_reqs
-            dummy_indices = torch.zeros(max_num_reqs_across_dp,
-                                        dtype=torch.int32)
+            if need_dummy_logits:
+                max_num_reqs_across_dp = num_tokens if not with_prefill else max_num_reqs
+                dummy_indices = torch.zeros(max_num_reqs_across_dp,
+                                            dtype=torch.int32)
 
-            def dummy_compute_logits(hidden_states):
-                if not need_dummy_logits:
-                    return None
-                return self.model.compute_logits(hidden_states[dummy_indices])
-
-            def dummy_drafter_compute_logits(hidden_states):
-                if not need_dummy_logits or self.drafter is None:
-                    return
-                if hasattr(self.drafter, "model") and hasattr(
-                        self.drafter.model, "compute_logits"):
-                    return self.drafter.model.compute_logits(
+                def dummy_compute_logits(hidden_states):
+                    return self.model.compute_logits(
                         hidden_states[dummy_indices])
 
             with set_ascend_forward_context(
@@ -2537,7 +2564,8 @@ class NPUModelRunner(LoRAModelRunnerMixin):
                     with_prefill, is_torchair_compile, input_ids, positions,
                     attn_metadata, num_tokens, intermediate_tensors,
                     inputs_embeds)
-                dummy_compute_logits(hidden_states)
+                if need_dummy_logits:
+                    dummy_compute_logits(hidden_states)
 
             if self.drafter:
                 self.drafter.dummy_run(
@@ -2547,8 +2575,10 @@ class NPUModelRunner(LoRAModelRunnerMixin):
                     num_reqs=num_reqs,
                     num_tokens_across_dp=num_tokens_across_dp,
                     aclgraph_runtime_mode=aclgraph_runtime_mode,
-                    batch_descriptor=batch_descriptor,
-                    dummy_compute_logits=dummy_drafter_compute_logits)
+                    batch_descriptor=batch_descriptor)
+                if need_dummy_logits:
+                    self.drafter.model.compute_logits(
+                        hidden_states[dummy_indices])
             if self.in_profile_run and self.dynamic_eplb:
                 self.model.clear_all_moe_loads()
             if not self.in_profile_run and self.dynamic_eplb:
@@ -2717,7 +2747,7 @@ class NPUModelRunner(LoRAModelRunnerMixin):
 
     def _convert_torch_format(self, tensor):
         if ACL_FORMAT == ACL_FORMAT_FRACTAL_NZ \
-                and not is_enable_nz(tensor.dtype):
+                and not is_enable_nz():
             return tensor
         tensor = torch_npu.npu_format_cast(tensor, ACL_FORMAT)
         return tensor
@@ -3483,6 +3513,14 @@ class NPUModelRunner(LoRAModelRunnerMixin):
         assert aclgraph_runtime_mode != CUDAGraphMode.NONE and \
             aclgraph_runtime_mode in [CUDAGraphMode.FULL,
                                       CUDAGraphMode.PIECEWISE]
+
+        if self.model_config.hf_config.model_type == "hstu_inference_ranking":
+            logger.info("HSTU model _capture_aclgraphs")
+            self._dummy_run(self.scheduler_config.max_num_batched_tokens,
+                            aclgraph_runtime_mode=CUDAGraphMode.NONE,
+                            force_attention=True,
+                            uniform_decode=uniform_decode)
+            return
 
         # Only rank 0 should print progress bar during capture
         if is_global_first_rank():

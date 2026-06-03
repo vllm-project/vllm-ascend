@@ -1,0 +1,99 @@
+{
+    "model_type": "hstu_inference_ranking",
+    "architectures": [
+        "HSTUInferenceForCausalLM"
+    ],
+    "num_hidden_layers": 16,
+    "use_random_model": true,
+    "max_seq_len": 8832,
+    "max_batch_size": 2,
+    "hidden_size": 4096,
+    "vocab_size": 1001024,
+    "torch_dtype": "bfloat16",
+    "captured_tokens_list": [
+        256,
+        1024,
+        2048,
+        2304,
+        3072,
+        4096,
+        4352,
+        5120,
+        8192,
+        8848,
+        9216,
+        16384,
+        16640,
+        17408
+    ],
+    "hstu_config": {
+        "hidden_size": 4096,
+        "num_layers": 12,
+        "num_attention_heads": 16,
+        "head_dim": 256,
+        "norm_epsilon": 1e-05,
+        "dtype": "bfloat16",
+        "learnable_input_layernorm": true,
+        "residual": true,
+        "is_causal": true,
+        "target_group_size": 1,
+        "position_encoding_config": null,
+        "has_ffn": true,
+        "dropout_ratio": 0.2,
+        "rab": false
+    },
+    "kv_cache_config": {
+        "blocks_in_primary_pool": 10240,
+        "page_size": 128,
+        "offload_chunksize": 8192,
+        "max_batch_size": 16,
+        "max_seq_len": 8832,
+        "max_attention_window": null
+    },
+    "task_config": {
+        "embedding_configs": [
+            {
+                "feature_names": [
+                    "action_weights"
+                ],
+                "table_name": "act",
+                "vocab_size": 4096,
+                "dim": 4096,
+                "use_dynamicemb": false
+            },
+            {
+                "feature_names": [
+                    "video_id"
+                ],
+                "table_name": "item",
+                "vocab_size": 4096,
+                "dim": 4096,
+                "use_dynamicemb": true
+            }
+        ],
+        "user_embedding_norm": "l2_norm",
+        "item_l2_norm": false,
+        "prediction_head_arch": [
+            [
+                512,
+                8,
+                1
+            ]
+        ],
+        "prediction_head_act_type": "relu",
+        "prediction_head_bias": true,
+        "num_tasks": 8,
+        "eval_metrics": [
+            "AUC"
+        ]
+    },
+    "contextual_feature_names": [],
+    "item_feature_name": "video_id",
+    "action_feature_name": "action_weights",
+    "max_num_users": 16,
+    "max_num_candidates": 256,
+    "feature_to_max_seqlen": {
+        "video_id": 8192,
+        "action_weights": 8192
+    }
+}
