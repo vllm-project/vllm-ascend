@@ -21,8 +21,6 @@ from vllm.v1.kv_cache_interface import (
     FullAttentionSpec,
     KVCacheConfig,
     KVCacheSpec,
-    UniformTypeKVCacheSpecs,
-    MLAAttentionSpec,
 )
 
 from vllm_ascend.core.single_type_kv_cache_manager import get_manager_for_kv_cache_spec
