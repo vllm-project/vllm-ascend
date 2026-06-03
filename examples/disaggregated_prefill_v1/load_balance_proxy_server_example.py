@@ -36,7 +36,7 @@
 # Run the proxy server, specifying the host/port for each prefiller and decoder:
 #
 #   python load_balance_proxy_server_example.py \
-#     --host 0.0.0.0 --port 9000 --workers 8 \
+#     --host 0.0.0.0 --port 9000 --workers 2 \
 #     --prefiller-hosts 127.0.0.1 127.0.0.1 \
 #     --prefiller-ports 8100 8101 \
 #     --decoder-hosts 127.0.0.1 127.0.0.1 \
@@ -129,7 +129,7 @@ from contextlib import asynccontextmanager
 from dataclasses import dataclass
 from multiprocessing.managers import BaseManager
 from pathlib import Path
-from typing import Any
+from typing import Any, cast
 
 import httpx
 from fastapi import FastAPI, Request
@@ -138,7 +138,7 @@ from fastapi.responses import StreamingResponse
 logger = logging.getLogger(__name__)
 
 try:
-    import uvloop
+    import uvloop  # type: ignore[import-not-found]
 
     asyncio.set_event_loop_policy(uvloop.EventLoopPolicy())
 except ImportError:
@@ -177,9 +177,9 @@ _IS_DECODE = False
 MANAGER_CONFIG_ENV = "LB_PROXY_MANAGER_CONFIG"
 ARGS_CONFIG_ENV = "LB_PROXY_ARGS"
 
-global_args = None
-shared_scheduler = None
-runtime = None
+global_args: argparse.Namespace | None = None
+shared_scheduler: "SharedProxyScheduler | None" = None
+runtime: "WorkerRuntime | None" = None
 
 
 class _ServerEntry:
@@ -196,10 +196,11 @@ class _ServerEntry:
 
 def setup_logging(log_level: str) -> None:
     logging.basicConfig(
-        level=getattr(logging, log_level.upper()),
+        level=logging.WARNING,
         format="%(asctime)s %(levelname)s [%(name)s] %(message)s",
         force=True,
     )
+    logger.setLevel(getattr(logging, log_level.upper()))
 
 
 def next_req_id() -> str:
@@ -553,7 +554,7 @@ class SchedulerManager(BaseManager):
     pass
 
 
-def get_shared_scheduler():
+def get_shared_scheduler() -> "SharedProxyScheduler":
     if shared_scheduler is None:
         raise RuntimeError("shared scheduler is not initialized")
     return shared_scheduler
@@ -563,7 +564,7 @@ SchedulerManager.register("get_scheduler", callable=get_shared_scheduler)
 
 
 class WorkerRuntime:
-    def __init__(self, scheduler):
+    def __init__(self, scheduler: Any):
         self.scheduler = scheduler
         self.prefiller_clients: dict[str, httpx.AsyncClient] = {}
         self.decoder_clients: dict[str, httpx.AsyncClient] = {}
@@ -646,20 +647,28 @@ class WorkerRuntime:
         self.decoder_clients.clear()
 
 
+def get_runtime() -> WorkerRuntime:
+    if runtime is None:
+        raise RuntimeError("worker runtime is not initialized")
+    return runtime
+
+
 async def get_prefiller_client(key: str) -> httpx.AsyncClient:
+    worker_runtime = get_runtime()
     try:
-        return runtime.get_prefiller_client(key)
+        return worker_runtime.get_prefiller_client(key)
     except KeyError:
-        await runtime.sync_clients()
-        return runtime.get_prefiller_client(key)
+        await worker_runtime.sync_clients()
+        return worker_runtime.get_prefiller_client(key)
 
 
 async def get_decoder_client(key: str) -> httpx.AsyncClient:
+    worker_runtime = get_runtime()
     try:
-        return runtime.get_decoder_client(key)
+        return worker_runtime.get_decoder_client(key)
     except KeyError:
-        await runtime.sync_clients()
-        return runtime.get_decoder_client(key)
+        await worker_runtime.sync_clients()
+        return worker_runtime.get_decoder_client(key)
 
 
 class NodeListener:
@@ -670,6 +679,7 @@ class NodeListener:
 
     def _run(self) -> None:
         while True:
+            args = get_global_args()
             for key, (instance_type, server, retries) in list(self.scheduler.get_waiting_nodes().items()):
                 host, port = server
                 is_valid = asyncio.run(self.check_instance_status(host, port))
@@ -677,14 +687,14 @@ class NodeListener:
                 retries += 1
                 if is_valid:
                     self.scheduler.activate_waiting_instance(instance_type, host, port)
-                elif retries >= global_args.max_waiting_retries:
+                elif retries >= args.max_waiting_retries:
                     print(f"Instance {key} was not added to the proxy.")
                     self.scheduler.drop_waiting_instance(key)
                 else:
                     self.scheduler.mark_waiting_retry(key, retries)
 
             self.scheduler.finalize_tainted_instances()
-            time.sleep(global_args.waiting_retry_interval)
+            time.sleep(args.waiting_retry_interval)
 
     @staticmethod
     async def check_instance_status(host: str, port: int) -> bool:
@@ -699,7 +709,7 @@ class NodeListener:
             return False
 
 
-def serialize_args(args) -> dict[str, Any]:
+def serialize_args(args: argparse.Namespace) -> dict[str, Any]:
     return {
         "port": args.port,
         "host": args.host,
@@ -716,14 +726,14 @@ def serialize_args(args) -> dict[str, Any]:
     }
 
 
-def deserialize_args(raw_args: dict[str, Any]):
+def deserialize_args(raw_args: dict[str, Any]) -> argparse.Namespace:
     args = argparse.Namespace(**raw_args)
     args.prefiller_instances = list(zip(args.prefiller_hosts, args.prefiller_ports))
     args.decoder_instances = list(zip(args.decoder_hosts, args.decoder_ports))
     return args
 
 
-def parse_args():
+def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser()
     parser.add_argument("--port", type=int, default=8000)
     parser.add_argument("--host", type=str, default="localhost")
@@ -767,7 +777,7 @@ def parse_args():
     return args
 
 
-def load_global_args_from_env():
+def load_global_args_from_env() -> argparse.Namespace:
     global global_args
     if global_args is None:
         raw = os.environ.get(ARGS_CONFIG_ENV)
@@ -775,6 +785,13 @@ def load_global_args_from_env():
             raise RuntimeError(f"{ARGS_CONFIG_ENV} is not set")
         global_args = deserialize_args(json.loads(raw))
     return global_args
+
+
+def get_global_args() -> argparse.Namespace:
+    args = load_global_args_from_env()
+    if args is None:
+        raise RuntimeError("global args are not initialized")
+    return args
 
 
 def connect_shared_scheduler():
@@ -787,7 +804,7 @@ def connect_shared_scheduler():
         authkey=base64.b64decode(manager_cfg["authkey"]),
     )
     manager.connect()
-    return manager.get_scheduler()
+    return manager.get_scheduler()  # type: ignore[attr-defined]
 
 
 def start_shared_scheduler(args) -> None:
@@ -801,7 +818,7 @@ def start_shared_scheduler(args) -> None:
         server = manager.get_server()
         thread = threading.Thread(target=server.serve_forever, daemon=True)
         thread.start()
-        host, port = server.address
+        host, port = cast(tuple[str, int], server.address)
         os.environ[MANAGER_CONFIG_ENV] = json.dumps(
             {"host": host, "port": port, "authkey": base64.b64encode(authkey).decode("ascii")}
         )
@@ -955,13 +972,15 @@ async def handle_select_instance(
     request_length: int,
     start_request: bool,
 ) -> InstanceInfo:
+    worker_runtime = get_runtime()
+    args = get_global_args()
     prefiller_score = calculate_prefill_score(request_length)
     decoder_score = calculate_decode_score(request_length)
     request_id = next_req_id()
     if start_request:
-        prefiller = await runtime.start_request_and_reserve_prefiller_kv(prefiller_score)
+        prefiller = await worker_runtime.start_request_and_reserve_prefiller_kv(prefiller_score)
     else:
-        prefiller = await runtime.reserve_prefiller_kv(prefiller_score)
+        prefiller = await worker_runtime.reserve_prefiller_kv(prefiller_score)
     prefiller_key = prefiller["key"]
     prefiller_client = await get_prefiller_client(prefiller_key)
 
@@ -972,14 +991,14 @@ async def handle_select_instance(
             api,
             req_data,
             request_id,
-            max_retries=global_args.max_retries,
-            base_delay=global_args.retry_delay,
+            max_retries=args.max_retries,
+            base_delay=args.retry_delay,
         )
     except Exception:
         if start_request:
-            await runtime.finish_request(prefiller_key, prefiller_score, None, 0.0, release_prefiller_kv=True)
+            await worker_runtime.finish_request(prefiller_key, prefiller_score, None, 0.0, release_prefiller_kv=True)
         else:
-            await runtime.release_prefiller_kv(prefiller_key, prefiller_score)
+            await worker_runtime.release_prefiller_kv(prefiller_key, prefiller_score)
         raise
 
     response_json = response.json()
@@ -988,12 +1007,12 @@ async def handle_select_instance(
         req_data["kv_transfer_params"] = kv_transfer_params
 
     try:
-        decoder = await runtime.select_decoder(decoder_score)
+        decoder = await worker_runtime.select_decoder(decoder_score)
     except Exception:
         if start_request:
-            await runtime.finish_request(prefiller_key, prefiller_score, None, 0.0, release_prefiller_kv=True)
+            await worker_runtime.finish_request(prefiller_key, prefiller_score, None, 0.0, release_prefiller_kv=True)
         else:
-            await runtime.release_prefiller_kv(prefiller_key, prefiller_score)
+            await worker_runtime.release_prefiller_kv(prefiller_key, prefiller_score)
         raise
     decoder_key = decoder["key"]
     decoder_client = await get_decoder_client(decoder_key)
@@ -1021,12 +1040,15 @@ async def select_recompute_instance(
     previous_instance: InstanceInfo,
 ) -> InstanceInfo:
     """Release the old decoder before assigning a new instance for recompute."""
-    await runtime.release_prefiller_kv(previous_instance.prefiller_key, previous_instance.prefiller_score)
-    await runtime.release_decoder(previous_instance.decoder_key, previous_instance.decoder_score)
+    worker_runtime = get_runtime()
+    await worker_runtime.release_prefiller_kv(previous_instance.prefiller_key, previous_instance.prefiller_score)
+    await worker_runtime.release_decoder(previous_instance.decoder_key, previous_instance.decoder_score)
     return await handle_select_instance(api, req_data, request_length, start_request=False)
 
 
 async def handle_completions_impl(api: str, request: Request):
+    worker_runtime = get_runtime()
+    args = get_global_args()
     request_released = False
     try:
         req_data = await request.json()
@@ -1057,7 +1079,9 @@ async def handle_completions_impl(api: str, request: Request):
             async def release_prefiller_kv_once() -> None:
                 nonlocal released_kv
                 if not released_kv:
-                    await runtime.release_prefiller_kv(instance_info.prefiller_key, instance_info.prefiller_score)
+                    await worker_runtime.release_prefiller_kv(
+                        instance_info.prefiller_key, instance_info.prefiller_score
+                    )
                     released_kv = True
 
             try:
@@ -1069,8 +1093,8 @@ async def handle_completions_impl(api: str, request: Request):
                         api,
                         req_data,
                         request_id=instance_info.request_id,
-                        max_retries=global_args.max_retries,
-                        base_delay=global_args.retry_delay,
+                        max_retries=args.max_retries,
+                        base_delay=args.retry_delay,
                     ):
                         if not released_kv and chunk:
                             await release_prefiller_kv_once()
@@ -1083,7 +1107,7 @@ async def handle_completions_impl(api: str, request: Request):
                         if not chunk_str:
                             continue
                         if chunk_str.startswith("data: "):
-                            chunk_str = chunk_str[len("data: "):]
+                            chunk_str = chunk_str[len("data: ") :]
                         try:
                             chunk_json = json.loads(chunk_str)
                         except json.JSONDecodeError:
@@ -1146,7 +1170,7 @@ async def handle_completions_impl(api: str, request: Request):
                     instance_info.request_id,
                 )
             finally:
-                await runtime.finish_request(
+                await worker_runtime.finish_request(
                     instance_info.prefiller_key,
                     instance_info.prefiller_score,
                     instance_info.decoder_key,
@@ -1165,7 +1189,7 @@ async def handle_completions_impl(api: str, request: Request):
         print(f"Error occurred in disagg prefill proxy server - {api} endpoint")
         print("".join(traceback.format_exception(*exc_info)))
         if not request_released and "instance_info" in locals():
-            await runtime.finish_request(
+            await worker_runtime.finish_request(
                 instance_info.prefiller_key,
                 instance_info.prefiller_score,
                 instance_info.decoder_key,
@@ -1192,7 +1216,7 @@ async def adjust_instances_impl(adjust_mode: str, request: Request):
         }
 
     raw_instances = [(server.host, server.port) for server in instances]
-    scheduler = runtime.scheduler
+    scheduler = get_runtime().scheduler
 
     if adjust_mode == "add":
         added_nodes, waiting_nodes = scheduler.add_instances(instance_type, raw_instances)
@@ -1261,7 +1285,7 @@ async def reset_prefix_cache(request: Request):
 
 @app.get("/healthcheck")
 async def healthcheck():
-    return runtime.scheduler.healthcheck()
+    return get_runtime().scheduler.healthcheck()
 
 
 @app.post("/instances/add")
