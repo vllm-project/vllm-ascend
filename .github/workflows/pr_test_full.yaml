@@ -88,4 +88,3 @@ jobs:
     with:
       vllm: ${{ matrix.vllm_version }}
       test_groups: ${{ needs.select-tests.outputs.test_groups }}
-
