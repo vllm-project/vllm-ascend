@@ -17,6 +17,7 @@
 # Adapted from vllm/tests/basic_correctness/test_basic_correctness.py
 #
 import os
+from pathlib import Path
 from unittest.mock import patch
 
 import pytest
@@ -28,6 +29,9 @@ from tests.e2e.conftest import VllmRunner, wait_until_npu_memory_free
 from vllm_ascend.utils import vllm_version_is
 
 os.environ["HCCL_BUFFSIZE"] = "768"
+
+E2E_ROOT = Path(__file__).resolve().parents[4]
+QWEN_IMAGE_PATH = E2E_ROOT / "prompts" / "qwen.png"
 
 
 @wait_until_npu_memory_free()
@@ -398,8 +402,7 @@ def test_dcp_piece_wise():
     reason="Qwen3-VL-8B-Instruct multimodal test requires at least 4 NPUs.",
 )
 def test_qwen3_vl_8b_multimodal_single_and_multi_image():
-    image_path = os.path.abspath(os.path.join(os.path.dirname(__file__), "../../../../../prompts/qwen.png"))
-    image = Image.open(image_path).convert("RGB")
+    image = Image.open(QWEN_IMAGE_PATH).convert("RGB")
 
     single_image_prompt = (
         "<|im_start|>system\nYou are a helpful assistant.<|im_end|>\n"
@@ -471,9 +474,8 @@ def test_qwen3_vl_8b_multimodal_single_and_multi_image():
     reason="Qwen3.5-4B multimodal test requires at least 4 NPUs.",
 )
 def test_qwen3_5_4b_multimodal_single_and_multi_image():
-    image_path = os.path.abspath(os.path.join(os.path.dirname(__file__), "../../../../../prompts/qwen.png"))
-    image_1 = Image.open(image_path).convert("RGB")
-    image_2 = Image.open(image_path).convert("RGB")
+    image_1 = Image.open(QWEN_IMAGE_PATH).convert("RGB")
+    image_2 = Image.open(QWEN_IMAGE_PATH).convert("RGB")
 
     single_image_prompt = (
         "<|im_start|>system\nYou are a helpful assistant.<|im_end|>\n"
