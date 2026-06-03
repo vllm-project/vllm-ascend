@@ -18,7 +18,11 @@ DEFAULT_LOCAL_BUFFER_SIZE = 1073741824  # 1.0 GiB
 
 
 class MooncakeBackend(Backend):
-    def __init__(self, parallel_config: ParallelConfig):
+    def __init__(
+        self,
+        parallel_config: ParallelConfig,
+        contribute_memory: bool = True,
+    ):
         try:
             from mooncake.store import MooncakeDistributedStore  # type: ignore
         except ImportError as e:
@@ -30,6 +34,10 @@ class MooncakeBackend(Backend):
         self.config = MooncakeStoreConfig.load_from_env()
         self.store = MooncakeDistributedStore()
         self.rank = parallel_config.rank
+        global_segment_size = (
+            self.config.global_segment_size if contribute_memory else 0)
+        local_buffer_size = (
+            self.config.local_buffer_size if contribute_memory else 0)
         if self.config.protocol == "ascend":
             local_hostname = get_ip()
             # ASCEND_ENABLE_USE_FABRIC_MEM: Enable unified memory address direct transmission scheme
@@ -41,8 +49,8 @@ class MooncakeBackend(Backend):
                 ret = self.store.setup(
                     self.local_seg,
                     self.config.metadata_server,
-                    self.config.global_segment_size,
-                    self.config.local_buffer_size,
+                    global_segment_size,
+                    local_buffer_size,
                     self.config.protocol,
                     self.config.device_name,
                     self.config.master_server_address,
@@ -53,7 +61,7 @@ class MooncakeBackend(Backend):
                 ret = self.store.setup(
                     self.local_seg,
                     self.config.metadata_server,
-                    self.config.global_segment_size,
+                    global_segment_size,
                     0,
                     self.config.protocol,
                     self.config.device_name,
@@ -64,6 +72,10 @@ class MooncakeBackend(Backend):
             msg = "Initialize mooncake failed."
             logger.error(msg)
             raise RuntimeError(msg)
+
+    @classmethod
+    def create_scheduler_client(cls, parallel_config: ParallelConfig):
+        return cls(parallel_config, contribute_memory=False)
 
     def set_device(self):
         device = torch.device(f"npu:{self.rank}")
