@@ -74,7 +74,10 @@ class MooncakeEngine:
 
         self.backend = vllm_config.kv_transfer_config.kv_connector_extra_config.get(
             "backend", "mooncake")
-        self.m_store = backend_map.get(self.backend.lower())(parallel_config)
+        backend_cls = backend_map.get(self.backend.lower())
+        if backend_cls is None:
+            raise ValueError(f"Unsupported backend: {self.backend}. Supported backends are: {list(backend_map.keys())}")
+        self.m_store = backend_cls(parallel_config)
 
         self.kv_send_thread: Optional[KVTransferThread] = None
         self.kv_recv_thread: Optional[KVTransferThread] = None
