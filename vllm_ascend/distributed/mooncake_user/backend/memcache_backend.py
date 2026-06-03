@@ -46,7 +46,7 @@ class MemcacheBackend(Backend):
         # self.store.register_buffer(ptrs, sizes)
         pass
 
-    def exists(self, key: str) -> list[int]:
+    def exists(self, key: str) -> bool:
         return self.store.is_exist(key) == 1
 
     def put(self, key: str, addrs: list[int], sizes: list[int]):
