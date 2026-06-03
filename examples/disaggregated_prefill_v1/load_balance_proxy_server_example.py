@@ -670,6 +670,7 @@ async def _handle_select_instance(api: str, req_data: Any, request_length: int):
     prefiller_idx = proxy_state.select_prefiller(prefiller_score)
     prefiller = proxy_state.prefillers[prefiller_idx]
     # Send request to prefiller
+    prefiller_released = False
     try:
         response = await send_request_to_service(
             prefiller.client,
@@ -680,13 +681,15 @@ async def _handle_select_instance(api: str, req_data: Any, request_length: int):
             max_retries=global_args.max_retries,
             base_delay=global_args.retry_delay,
         )
-    except Exception:
         proxy_state.release_prefiller(prefiller_idx, prefiller_score)
+        prefiller_released = True
+        response_json = response.json()
+        kv_transfer_params = response_json.get("kv_transfer_params", {})
+    except Exception:
+        if not prefiller_released:
+            proxy_state.release_prefiller(prefiller_idx, prefiller_score)
         proxy_state.release_prefiller_kv(prefiller_idx, prefiller_score)
         raise
-    proxy_state.release_prefiller(prefiller_idx, prefiller_score)
-    response_json = response.json()
-    kv_transfer_params = response_json.get("kv_transfer_params", {})
     if kv_transfer_params:
         req_data["kv_transfer_params"] = kv_transfer_params
     # Select decoder
