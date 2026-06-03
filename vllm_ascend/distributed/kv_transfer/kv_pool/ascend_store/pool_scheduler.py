@@ -450,6 +450,51 @@ class KVPoolScheduler:
         if self.load_async and not self.use_layerwise:
             self._loading_req_ids.add(request.request_id)
 
+    def _get_last_chunk_tokens_num(self, prompt_token_ids: list[int]) -> int:
+        if self._discard_partial_chunks:
+            return len(prompt_token_ids) // self._block_size * self._block_size
+        return len(prompt_token_ids)
+
+    def _allocate_gva_if_needed(
+        self,
+        request_tracker: RequestTracker,
+        block_hashes,
+        num_blocks: int,
+        has_last_block: bool,
+    ) -> None:
+        if not self.use_gva_layerwise:
+            return
+        self._ensure_tracker_gvas_cover_blocks(
+            request_tracker,
+            block_hashes[:num_blocks],
+        )
+        if has_last_block:
+            self._generate_keys_and_alloc(
+                [],
+                request_tracker=request_tracker,
+                has_last_block=True,
+            )
+
+    def _build_req_meta(
+        self,
+        request_tracker: RequestTracker,
+        block_hashes,
+        load_spec: LoadSpec | None,
+        prompt_token_ids: list[int],
+        skip_save: bool | None,
+    ):
+        last_chunk_tokens_num = self._get_last_chunk_tokens_num(prompt_token_ids)
+        return ReqMeta.from_request_tracker(
+            request_tracker,
+            self._block_size,
+            load_spec=load_spec,
+            skip_save=skip_save,
+            block_hashes=block_hashes,
+            is_last_chunk=request_tracker.token_len >= last_chunk_tokens_num,
+            discard_partial_chunks=self._discard_partial_chunks,
+            original_block_size=self.original_block_size,
+        )
+
     def build_connector_meta(self, scheduler_output: SchedulerOutput) -> KVConnectorMetadata:
         """Attach the connector metadata to the request object.
 
@@ -510,36 +555,23 @@ class KVPoolScheduler:
                 gva_block_offset=(previous_tracker.gva_block_offset if previous_tracker else 0),
             )
             self._request_trackers[request.req_id] = request_tracker
-            last_chunk_tokens_num = (
-                (len(request.prompt_token_ids) // self._block_size * self._block_size)
-                if self._discard_partial_chunks
-                else len(request.prompt_token_ids)
-            )
 
             num_blocks = num_tokens_to_compute // self._block_size
             has_last_block = num_tokens_to_compute % self._block_size != 0
 
-            if self.use_gva_layerwise:
-                self._ensure_tracker_gvas_cover_blocks(
-                    request_tracker,
-                    request_real.block_hashes[:num_blocks],
-                )
-                if has_last_block:
-                    self._generate_keys_and_alloc(
-                        [],
-                        request_tracker=request_tracker,
-                        has_last_block=True,
-                    )
-
-            req_meta = ReqMeta.from_request_tracker(
+            self._allocate_gva_if_needed(
                 request_tracker,
-                self._block_size,
-                load_spec=load_spec,
-                skip_save=force_skip_save,
-                block_hashes=request_real.block_hashes,
-                is_last_chunk=request_tracker.token_len >= last_chunk_tokens_num,
-                discard_partial_chunks=self._discard_partial_chunks,
-                original_block_size=self.original_block_size,
+                request_real.block_hashes,
+                num_blocks,
+                has_last_block,
+            )
+
+            req_meta = self._build_req_meta(
+                request_tracker,
+                request_real.block_hashes,
+                load_spec,
+                request.prompt_token_ids,
+                force_skip_save,
             )
             if req_meta is not None:
                 meta.add_request(req_meta)
@@ -590,32 +622,19 @@ class KVPoolScheduler:
 
                     num_blocks = len(new_block_ids)
                     has_last_block = num_tokens_to_compute % self._block_size != 0
-                    if self.use_gva_layerwise:
-                        self._ensure_tracker_gvas_cover_blocks(
-                            request_tracker,
-                            request_real.block_hashes[:num_blocks],
-                        )
-                        if has_last_block:
-                            self._generate_keys_and_alloc(
-                                [],
-                                request_tracker=request_tracker,
-                                has_last_block=True,
-                            )
-
-                    last_chunk_tokens_num = (
-                        (len(request_real.prompt_token_ids) // self._block_size * self._block_size)
-                        if self._discard_partial_chunks
-                        else len(request_real.prompt_token_ids)
-                    )
-                    req_meta = ReqMeta.from_request_tracker(
+                    self._allocate_gva_if_needed(
                         request_tracker,
-                        self._block_size,
-                        load_spec=load_spec,
-                        skip_save=force_skip_save,
-                        block_hashes=request_real.block_hashes,
-                        is_last_chunk=request_tracker.token_len >= last_chunk_tokens_num,
-                        discard_partial_chunks=self._discard_partial_chunks,
-                        original_block_size=self.original_block_size,
+                        request_real.block_hashes,
+                        num_blocks,
+                        has_last_block,
+                    )
+
+                    req_meta = self._build_req_meta(
+                        request_tracker,
+                        request_real.block_hashes,
+                        load_spec,
+                        request_real.prompt_token_ids,
+                        force_skip_save,
                     )
 
                 # decode/chunked request
@@ -662,11 +681,6 @@ class KVPoolScheduler:
                             )
                     if new_block_ids is not None:
                         request_tracker.update(new_block_ids)
-                    last_chunk_tokens_num = (
-                        (len(request.prompt_token_ids) // self._block_size * self._block_size)
-                        if self._discard_partial_chunks
-                        else len(request.prompt_token_ids)
-                    )
                     load_spec = None
                     if self.prefill_offload:
                         load_spec = LoadSpec(
@@ -674,15 +688,12 @@ class KVPoolScheduler:
                             kvpool_cached_tokens=cached_reqs.num_computed_tokens[i],
                             can_load=True,
                         )
-                    req_meta = ReqMeta.from_request_tracker(
+                    req_meta = self._build_req_meta(
                         request_tracker,
-                        self._block_size,
-                        load_spec=load_spec,
-                        skip_save=force_skip_save,
-                        block_hashes=request.block_hashes,
-                        is_last_chunk=request_tracker.token_len >= last_chunk_tokens_num,
-                        discard_partial_chunks=self._discard_partial_chunks,
-                        original_block_size=self.original_block_size,
+                        request.block_hashes,
+                        load_spec,
+                        request.prompt_token_ids,
+                        force_skip_save,
                     )
                 if req_meta is not None:
                     meta.add_request(req_meta)
@@ -712,17 +723,12 @@ class KVPoolScheduler:
 
                 num_blocks = num_tokens_to_compute // self._block_size
                 has_last_block = num_tokens_to_compute % self._block_size != 0
-                if self.use_gva_layerwise:
-                    self._ensure_tracker_gvas_cover_blocks(
-                        request_tracker,
-                        request.block_hashes[:num_blocks],
-                    )
-                    if has_last_block:
-                        self._generate_keys_and_alloc(
-                            [],
-                            request_tracker=request_tracker,
-                            has_last_block=True,
-                        )
+                self._allocate_gva_if_needed(
+                    request_tracker,
+                    request.block_hashes,
+                    num_blocks,
+                    has_last_block,
+                )
 
                 req_meta = ReqMeta.from_request_tracker(
                     request_tracker,
