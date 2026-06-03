@@ -434,6 +434,15 @@ class AscendSpecDecodeBaseProposer(SpecDecodeBaseProposer):
             self.query_start_loc.cpu[: num_reqs + 1].copy_(self.runner.query_start_loc.cpu[: num_reqs + 1])
             self.query_start_loc.copy_to_gpu()
 
+            positions_cpu = None
+            if self.use_compress:
+                positions_cpu = getattr(self.runner, "_dsa_positions_cpu_buf", None)
+                if positions_cpu is None:
+                    raise RuntimeError(
+                        "Compressed DSA graph capture requires "
+                        "runner._dsa_positions_cpu_buf to be initialized."
+                    )
+
             common_attn_metadata = AscendCommonAttentionMetadata(
                 query_start_loc=self.query_start_loc.gpu[: num_reqs + 1],
                 query_start_loc_cpu=self.query_start_loc.cpu[: num_reqs + 1],
@@ -450,7 +459,7 @@ class AscendSpecDecodeBaseProposer(SpecDecodeBaseProposer):
                 # This is used to hold a position.
                 slot_mapping=self.runner.input_batch.block_table[0].slot_mapping.gpu,
                 positions=self.runner.positions,
-                positions_cpu=self.runner._dsa_positions_cpu_buf if self.use_compress else None,
+                positions_cpu=positions_cpu,
                 attn_state=self.runner.attn_state,
                 decode_token_per_req=self.runner.decode_token_per_req,
                 max_seq_len=0,
