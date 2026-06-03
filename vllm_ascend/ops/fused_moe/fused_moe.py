@@ -27,7 +27,6 @@ from vllm.forward_context import get_forward_context
 from vllm.logger import logger
 from vllm.model_executor.layers.fused_moe.config import FusedMoEConfig
 from vllm.model_executor.layers.fused_moe.layer import FusedMoE, UnquantizedFusedMoEMethod
-from vllm.model_executor.layers.fused_moe.routed_experts_capturer import RoutedExpertsCapturer
 from vllm.model_executor.layers.fused_moe.runner.moe_runner import MoERunner  # type: ignore
 
 from vllm_ascend.ascend_config import get_ascend_config
@@ -38,6 +37,7 @@ from vllm_ascend.flash_common3_context import get_flash_common3_context, set_fla
 from vllm_ascend.ops.fused_moe.experts_selector import select_experts, zero_experts_compute
 from vllm_ascend.ops.fused_moe.moe_comm_method import AllGatherCommImpl, FusedExpertsResult, setup_moe_comm_method
 from vllm_ascend.ops.fused_moe.moe_runtime_args import build_fused_experts_input
+from vllm_ascend.ops.fused_moe.routed_experts_capture import AscendRoutedExpertsCapturer
 from vllm_ascend.quantization.methods.base import get_moe_num_logical_experts
 from vllm_ascend.quantization.quant_type import QuantType
 from vllm_ascend.utils import (
@@ -182,7 +182,7 @@ class AscendUnquantizedFusedMoEMethod(UnquantizedFusedMoEMethod):
         if layer.vllm_config.model_config is not None and layer.vllm_config.model_config.enable_return_routed_experts:
             if vllm_version_is("0.20.2"):
                 # 0.20.2: capturer is a process-wide singleton.
-                capturer = RoutedExpertsCapturer.get_instance()
+                capturer = AscendRoutedExpertsCapturer.get_instance()
             else:
                 capturer = getattr(layer, "_ascend_routed_experts_capturer", None)
             if capturer is not None:
