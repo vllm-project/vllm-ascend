@@ -762,18 +762,6 @@ class NPUModelRunner(GPUModelRunner):
                 self._get_mamba_copy_bufs(),
             )
 
-    def _finish_non_last_pp_mtp_state_update(
-        self,
-        scheduler_output: SchedulerOutput,
-    ) -> None:
-        if (
-            self._is_non_last_pp_mtp()
-            and scheduler_output.scheduled_spec_decode_tokens
-        ):
-            self._prev_non_last_pp_mtp_scheduler_output = scheduler_output
-        else:
-            self._prev_non_last_pp_mtp_scheduler_output = None
-
     def _prepare_inputs(
         self,
         scheduler_output: "SchedulerOutput",
@@ -1946,10 +1934,15 @@ class NPUModelRunner(GPUModelRunner):
 
                 # Update persistent batch states.
                 self._prepare_non_last_pp_mtp_state_update(scheduler_output)
-                with self._pp_mtp_update_req_spec_token_ids(scheduler_output):
-                    deferred_state_corrections_fn = self._update_states(
-                        scheduler_output)
-                self._finish_non_last_pp_mtp_state_update(scheduler_output)
+                if scheduler_output.total_num_scheduled_tokens != 0:
+                    with self._pp_mtp_update_req_spec_token_ids(scheduler_output):
+                        deferred_state_corrections_fn = self._update_states(
+                            scheduler_output)
+                if (
+                    self._is_non_last_pp_mtp()
+                    and scheduler_output.scheduled_spec_decode_tokens
+                ):
+                    self._prev_non_last_pp_mtp_scheduler_output = scheduler_output
 
                 if has_ec_transfer() and get_ec_transfer().is_producer:
                     with self.maybe_get_ec_connector_output(
@@ -4595,9 +4588,27 @@ class NPUModelRunner(GPUModelRunner):
         attention_backends: list[set[type[AttentionBackend]]],
         kv_cache_groups: list[KVCacheGroupSpec],
     ) -> None:
-        with update_pass_config(self):
-            super()._check_and_update_cudagraph_mode(attention_backends, kv_cache_groups)
+        speculative_config = self.speculative_config
+        skip_parent_drafter_init = (
+            speculative_config is not None
+            and not get_pp_group().is_last_rank
+            and (
+                speculative_config.use_eagle()
+                or speculative_config.uses_extract_hidden_states()
+            )
+        )
+        try:
+            if skip_parent_drafter_init:
+                # vLLM releases before the PP guard still try to initialize the
+                # drafter on every PP rank. Ascend only creates it on last rank.
+                self.speculative_config = None
+            with update_pass_config(self):
+                super()._check_and_update_cudagraph_mode(attention_backends, kv_cache_groups)
+        finally:
+            if skip_parent_drafter_init:
+                self.speculative_config = speculative_config
 
+        self._maybe_initialize_drafter_cudagraph_keys()
 
         capture_descs = self.cudagraph_dispatcher.get_capture_descs()
         capture_sizes = sorted({
@@ -4612,6 +4623,37 @@ class NPUModelRunner(GPUModelRunner):
             set_graph_params(capture_sizes)
             if self.speculative_config:
                 set_draft_graph_params(capture_sizes)
+
+    def _maybe_initialize_drafter_cudagraph_keys(self) -> None:
+        # Keep a local fallback for vLLM variants that do not initialize the
+        # drafter here. When the parent already did it, keys_initialized avoids
+        # rebuilding the drafter dispatch keys.
+        if not self.speculative_config:
+            return
+        if not (
+            self.speculative_config.use_eagle()
+            or self.speculative_config.uses_extract_hidden_states()
+        ):
+            return
+        if not get_pp_group().is_last_rank:
+            return
+
+        assert isinstance(
+            self.drafter,
+            AscendEagleProposer
+            | AscendDflashProposer
+            | AscendExtractHiddenStatesProposer,
+        )
+        drafter_dispatcher = getattr(self.drafter, "cudagraph_dispatcher", None)
+        if getattr(drafter_dispatcher, "keys_initialized", False):
+            return
+
+        cudagraph_mode = getattr(
+            self.cudagraph_dispatcher,
+            "cudagraph_mode",
+            self.compilation_config.cudagraph_mode,
+        )
+        self.drafter.initialize_cudagraph_keys(cudagraph_mode)
 
     def capture_model(self) -> int:
         """Capture NPU graphs and return actual graph pool memory bytes consumed."""
