@@ -3417,18 +3417,7 @@ class NPUModelRunner(GPUModelRunner):
             if self.dynamic_eplb:
                 model_register(self.model)
             if self.drafter:
-                spec_config = self.vllm_config.speculative_config
-                draft_model_config = getattr(spec_config, "draft_model_config", None)
-                draft_model_name = getattr(draft_model_config, "model", None) if draft_model_config else None
-                draft_load_config = spec_config.draft_load_config if spec_config else None
-                draft_load_format = getattr(draft_load_config, "load_format", None) if draft_load_config else None
-                logger.info(
-                    "Loading drafter model (method=%s, draft_model=%s, "
-                    "draft_load_format=%s)...",
-                    spec_config.method if spec_config else "unknown",
-                    draft_model_name,
-                    draft_load_format,
-                )
+                logger.info("Loading drafter model...")
                 if self.vllm_config.quant_config is not None:
                     patch_load_weights(self.vllm_config)
                 with get_tp_context(self.drafter):

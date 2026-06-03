@@ -38,7 +38,6 @@ class DummyVllmConfig:
     device_config = DummyDeviceConfig()
     parallel_config = DummyParallelConfig()
     additional_config = None
-    quant_config = None
 
 
 class DummyModelConfig:
