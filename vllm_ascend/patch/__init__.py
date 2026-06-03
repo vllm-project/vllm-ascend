@@ -182,6 +182,24 @@
 #       Remove this patch once the supported vLLM version contains the upstream
 #       GLM tool-call final chunk fixes.
 #
+# ** 7b. File: platform/patch_glm47_tool_call_parser.py**
+# ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+#   1. `vllm.tool_parsers.glm47_moe_tool_parser.Glm47MoeModelToolParser`
+#    Why:
+#       vLLM's GLM47 streaming parser can drop complete inline zero-argument
+#       tool calls such as `<tool_call>get_current_time</tool_call>`, while
+#       non-streaming parses the same output correctly.
+#    How：
+#       Monkey-patch GLM47 tool-call region extraction so complete inline
+#       zero-argument regions are normalized for the existing streaming name
+#       extractor without emitting partial names for incomplete regions.
+#    Related PR (if no, explain why):
+#       https://github.com/vllm-project/vllm/issues/44326
+#       https://github.com/vllm-project/vllm/pull/44327
+#    Future Plan:
+#       Remove this patch once the supported vLLM version contains the upstream
+#       GLM47 inline zero-argument streaming parser fix.
+#
 # ** 10a. File: platform/patch_kv_cache_utils.py**
 # ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 #   1. `vllm.v1.core.kv_cache_utils.resolve_kv_cache_block_sizes`
