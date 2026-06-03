@@ -496,7 +496,6 @@ gh pr create --repo vllm-project/vllm-ascend \
 | `docs/source/community/contributors.md` | New contributors |
 | `docs/conf.py` | Package version |
 | `.github/workflows/schedule_image_build_and_push.yaml` | Config |
-| `.github/workflows/schedule_update_estimated_time.yaml` | Config |
 
 ### 7.2 Version Update Script
 
