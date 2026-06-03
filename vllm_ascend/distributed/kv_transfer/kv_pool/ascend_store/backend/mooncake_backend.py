@@ -113,6 +113,7 @@ class MooncakeBackend(Backend):
 
     def register_buffer(self, ptrs: list[int], lengths: list[int]):
         if self._use_dummy_client:
+            assert self.store is not None
             for ptr, length in zip(ptrs, lengths):
                 self.store.register_buffer(ptr, length)
             return
