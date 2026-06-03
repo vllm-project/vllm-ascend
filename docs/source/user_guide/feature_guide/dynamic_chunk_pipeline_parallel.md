@@ -25,24 +25,24 @@ Currently CPP mainly focuses on optimization during the prefill phase. It is bet
 
 ### Online Serving
 
-```bash
-vllm serve <model_path> \
-    --pipeline-parallel-size 2 \
-    --enable-chunked-prefill \
-    --additional-config '{"profiling_chunk_config": {"enabled": true}}'
-```
+    ```bash
+    vllm serve <model_path> \
+        --pipeline-parallel-size 2 \
+        --enable-chunked-prefill \
+        --additional-config '{"profiling_chunk_config": {"enabled": true}}'
+    ```
 
 ### Offline Inference
 
-```python
-from vllm import LLM
+    ```python
+    from vllm import LLM
 
-llm = LLM(
-    model="<model_path>",
-    pipeline_parallel_size=2,
-    additional_config={"profiling_chunk_config": {"enabled": True}},
-)
-```
+    llm = LLM(
+        model="<model_path>",
+        pipeline_parallel_size=2,
+        additional_config={"profiling_chunk_config": {"enabled": True}},
+    )
+    ```
 
 ## Configuration Parameters
 
@@ -81,29 +81,29 @@ You can use aisbench to generate fixed-length random datasets. Refer to [Using A
 
 1. Modify `<YOUR_AISBENCH_PATH>/benchmark/ais_bench/datasets/synthetic/synthetic_config.py`:
 
-```python
-synthetic_config = {
-    "Type": "string",
-    "RequestCount": 5,
-    "TrustRemoteCode": False,
-    "StringConfig": {
-        "Input": {
-            "Method": "uniform",
-            "Params": {"MinValue": 131072, "MaxValue": 131072}  # Your max sequence length, max-model-len
+    ```python
+    synthetic_config = {
+        "Type": "string",
+        "RequestCount": 5,
+        "TrustRemoteCode": False,
+        "StringConfig": {
+            "Input": {
+                "Method": "uniform",
+                "Params": {"MinValue": 131072, "MaxValue": 131072}  # Your max sequence length, max-model-len
+            },
+            "Output": {
+                "Method": "uniform",
+                "Params": {"MinValue": 1, "MaxValue": 1}
+            }
         },
-        "Output": {
-            "Method": "uniform",
-            "Params": {"MinValue": 1, "MaxValue": 1}
-        }
-    },
-}
-```
+    }
+    ```
 
 2. Run for online calibration:
 
-```bash
-ais_bench --models vllm_api_stream_chat --datasets synthetic_gen --mode perf --debug
-```
+    ```bash
+    ais_bench --models vllm_api_stream_chat --datasets synthetic_gen --mode perf --debug
+    ```
 
 Configure online calibration data length to match your `max-model-len`. Use `batch_size=1` and ensure data differs to avoid cache hits if prefix caching is enabled.
 
