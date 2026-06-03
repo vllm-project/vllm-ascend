@@ -549,7 +549,7 @@ class MooncakeEngine:
                 value_type='token_id',
             )
             if not self.m_store.exists(key.to_string()):
-                return []
+                return 0
             buffer = self.m_store.get_buffer(key.to_string())
             history_token_ids = np.frombuffer(buffer, dtype=np.int64).tolist()
             return len(history_token_ids)
