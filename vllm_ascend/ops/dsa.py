@@ -44,6 +44,7 @@ class DSAModules:
 
     wq_a: torch.nn.Module
     q_norm: torch.nn.Module
+    q_norm_without_weight: torch.nn.Module
     wq_b: torch.nn.Module
     wkv: torch.nn.Module
     kv_norm: torch.nn.Module
@@ -97,6 +98,7 @@ class AscendDeepseekSparseAttention(MultiHeadLatentAttentionWrapper):
 
         self.wq_a = dsa_modules.wq_a
         self.q_norm = dsa_modules.q_norm
+        self.q_norm_without_weight = dsa_modules.q_norm_without_weight
         self.wq_b = dsa_modules.wq_b
         self.wkv = dsa_modules.wkv
         self.kv_norm = dsa_modules.kv_norm
@@ -111,7 +113,7 @@ class AscendDeepseekSparseAttention(MultiHeadLatentAttentionWrapper):
         self.prefix = prefix
 
         ascend_device_type = get_ascend_device_type()
-        k_dtype = torch.fp8 if ascend_device_type == AscendDeviceType.A5 else torch.bfloat16
+        k_dtype = torch.float8_e4m3fn if ascend_device_type == AscendDeviceType.A5 else torch.bfloat16
         self.swa_cache_layer = DeepseekV4SWACache(
             head_dim=self.head_dim,
             window_size=self.window_size,
@@ -142,6 +144,7 @@ class AscendDeepseekSparseAttention(MultiHeadLatentAttentionWrapper):
             wq_b=self.wq_b,
             wkv=self.wkv,
             q_norm=self.q_norm,
+            q_norm_without_weight=self.q_norm_without_weight,
             kv_norm=self.kv_norm,
             indexer=self.indexer,
             compressor=self.compressor,
@@ -237,6 +240,7 @@ def _build_kv_cache(self, forward_context):
     indexer_state_cache = None
     indexer_k_cache = None
     indexer_scale_cache = None
+    indexer_full_cache = None
 
     if self.compress_ratio > 1:
         state_cache = self.compressor.state_cache.kv_cache
@@ -246,24 +250,48 @@ def _build_kv_cache(self, forward_context):
             compress_kv_cache = compress_kv_cache[virtual_engine]
     if self.compress_ratio == 4:
         indexer_state_cache = self.indexer.compressor.state_cache.kv_cache
-        indexer_k_cache, indexer_scale_cache = (
-            self.indexer.k_cache.kv_cache[0][0],
-            self.indexer.k_cache.kv_cache[0][1],
-        )
-
-    return tuple(
-        [
-            unfold_kvcache(cache)
-            for cache in (
-                compress_kv_cache,
-                swa_kv_cache,
-                state_cache,
-                indexer_state_cache,
-                indexer_k_cache,
-                indexer_scale_cache,
+        if get_ascend_device_type() in {AscendDeviceType.A5}:
+            indexer_k_cache, indexer_scale_cache, indexer_full_cache = (
+                self.indexer.k_cache.kv_cache[0][0],
+                self.indexer.k_cache.kv_cache[0][1],
+                self.indexer.k_cache.kv_cache[0][2],
             )
-        ]
-    )
+        else:
+            indexer_k_cache, indexer_scale_cache = (
+                self.indexer.k_cache.kv_cache[0][0],
+                self.indexer.k_cache.kv_cache[0][1],
+            )
+
+    if get_ascend_device_type() in {AscendDeviceType.A5}:
+        kv_cache = tuple(
+            [
+                unfold_kvcache(cache)
+                for cache in (
+                    compress_kv_cache,
+                    swa_kv_cache,
+                    state_cache,
+                    indexer_state_cache,
+                    indexer_k_cache,
+                    indexer_scale_cache,
+                    indexer_full_cache,
+                )
+            ]
+        )
+    else:
+        kv_cache = tuple(
+            [
+                unfold_kvcache(cache)
+                for cache in (
+                    compress_kv_cache,
+                    swa_kv_cache,
+                    state_cache,
+                    indexer_state_cache,
+                    indexer_k_cache,
+                    indexer_scale_cache,
+                )
+            ]
+        )
+    return kv_cache
 
 
 def unfold_kvcache(kvcache):
