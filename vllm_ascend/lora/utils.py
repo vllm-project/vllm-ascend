@@ -98,7 +98,11 @@ class AscendFusedMoEWithLoRA(FusedMoEWithLoRA):
         self.device = _get_lora_device(base_layer)
         self._w13_slices = 2 if base_layer.moe_config.is_act_and_mul else 1
         self.n_slices = base_layer.local_num_experts * (self._w13_slices + 1)
-        self._replace_build_fused_experts_input()
+        # Attach a getter to the base_layer so that quant_method.apply()
+        # can read the correct per-layer LoRA context without a global
+        # monkey-patch (which would leak the last-initialised layer's
+        # context to all MoE layers).
+        self.base_layer.get_lora_context = self._build_lora_context
 
     def _build_lora_context(self):
         from vllm_ascend.ops.fused_moe.moe_stage_contracts import MoELoRAContext
@@ -110,17 +114,6 @@ class AscendFusedMoEWithLoRA(FusedMoEWithLoRA):
             punica_wrapper=self.punica_wrapper,
             num_experts=self.base_layer.local_num_experts,
         )
-
-    def _replace_build_fused_experts_input(self):
-        import vllm_ascend.ops.fused_moe.fused_moe as fm
-        orig_build = fm.build_fused_experts_input
-
-        def wrapped_build(*args, **kwargs):
-            if 'lora_context' not in kwargs:
-                kwargs['lora_context'] = self._build_lora_context()
-            return orig_build(*args, **kwargs)
-
-        fm.build_fused_experts_input = wrapped_build
 
     def set_lora(self, index, lora_a, lora_b, embeddings_tensor=None, bias=None):
         if isinstance(lora_a, list) and len(lora_a) > 3:
@@ -140,7 +133,6 @@ class AscendFusedMoEWithLoRA(FusedMoEWithLoRA):
         # that doesn't exist in Ascend. Call BaseLayerWithLoRA directly.
         from vllm.lora.layers.base import BaseLayerWithLoRA
         BaseLayerWithLoRA.set_mapping(self, punica_wrapper)
-        self._replace_build_fused_experts_input()
 
 
 class AscendFusedMoE3DWithLoRA(FusedMoE3DWithLoRA):
@@ -178,7 +170,9 @@ class AscendFusedMoE3DWithLoRA(FusedMoE3DWithLoRA):
         # 3D format: gate_up_proj is a single fused tensor → 1 slice
         self._w13_slices = 1
         self.n_slices = base_layer.local_num_experts * (self._w13_slices + 1)
-        self._replace_build_fused_experts_input()
+        # Attach a getter to the base_layer for per-layer LoRA context
+        # (see AscendFusedMoEWithLoRA for rationale).
+        self.base_layer.get_lora_context = self._build_lora_context
 
     def set_lora(
         self,
@@ -212,7 +206,6 @@ class AscendFusedMoE3DWithLoRA(FusedMoE3DWithLoRA):
         from vllm.lora.layers.base import BaseLayerWithLoRA
 
         BaseLayerWithLoRA.set_mapping(self, punica_wrapper)
-        self._replace_build_fused_experts_input()
 
     def _build_lora_context(self):
         from vllm_ascend.ops.fused_moe.moe_stage_contracts import MoELoRAContext
@@ -225,18 +218,6 @@ class AscendFusedMoE3DWithLoRA(FusedMoE3DWithLoRA):
             punica_wrapper=self.punica_wrapper,
             num_experts=self.base_layer.local_num_experts,
         )
-
-    def _replace_build_fused_experts_input(self):
-        import vllm_ascend.ops.fused_moe.fused_moe as fm
-
-        orig_build = fm.build_fused_experts_input
-
-        def wrapped_build(*args, **kwargs):
-            if "lora_context" not in kwargs:
-                kwargs["lora_context"] = self._build_lora_context()
-            return orig_build(*args, **kwargs)
-
-        fm.build_fused_experts_input = wrapped_build
 
 
 def refresh_all_lora_classes():

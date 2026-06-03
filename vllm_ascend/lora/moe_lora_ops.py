@@ -16,7 +16,7 @@ def _do_bgmv_expand(buffer, lora_b_merged, output, lora_expert_indices,
         bgmv_expand_slice(buffer, lora_b_merged, output, lora_expert_indices,
                             slice_offset, slice_size, add_inputs)
 
-def _build_lora_expert_indices_allgather(
+def _build_lora_expert_indices(
     lora_indices: torch.Tensor,
     expanded_row_idx: torch.Tensor,
     topk_ids: torch.Tensor,

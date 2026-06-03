@@ -255,6 +255,7 @@ class AscendUnquantizedFusedMoEMethod(UnquantizedFusedMoEMethod):
                 w1_scale_bias=w1_scale_bias,
                 w2_scale_bias=w2_scale_bias,
                 swiglu_limit=layer.swiglu_limit,
+                lora_context=getattr(layer, 'get_lora_context', lambda: None)(),
             )
         )
         if zero_expert_num > 0 and zero_expert_type is not None:

@@ -188,7 +188,7 @@ class MoECommMethod(ABC):
         routed_topk_ids: torch.Tensor,
         token_dispatch_output: MoETokenDispatchOutput,
     ):
-        from vllm_ascend.lora.moe_lora_ops import _build_lora_expert_indices_allgather
+        from vllm_ascend.lora.moe_lora_ops import _build_lora_expert_indices
         from vllm_ascend.ops.fused_moe.moe_stage_contracts import (
             MoELoRAParams,
             MoEAllGatherCombineMetadata,
@@ -198,10 +198,13 @@ class MoECommMethod(ABC):
         lora_context = fused_experts_input.lora_context
         combine_metadata = token_dispatch_output.combine_metadata
 
-        # Build lora_expert_indices based on communication method
+        # Build lora_expert_indices based on communication method.
+        # Both AllGather and AlltoAll sort tokens by expert after dispatch;
+        # the expanded_row_idx / reversed_global_input_permutation_mapping
+        # play the same role: mapping sorted position → source position.
         if isinstance(combine_metadata, MoEAllGatherCombineMetadata):
             # AllGather: dispatch output is grouped by expert
-            lora_expert_indices = _build_lora_expert_indices_allgather(
+            lora_expert_indices = _build_lora_expert_indices(
                 lora_indices=lora_context.punica_wrapper.token_lora_indices,
                 expanded_row_idx=combine_metadata.expanded_row_idx,
                 topk_ids=routed_topk_ids,
@@ -211,7 +214,7 @@ class MoECommMethod(ABC):
             # AlltoAll: dispatch output is also grouped by expert (after npu_moe_token_permute)
             # Use reversed_global_input_permutation_mapping as expanded_row_idx
             # Note: The permutation mapping contains both valid indices and -1 for padding
-            lora_expert_indices = _build_lora_expert_indices_allgather(
+            lora_expert_indices = _build_lora_expert_indices(
                 lora_indices=lora_context.punica_wrapper.token_lora_indices,
                 expanded_row_idx=combine_metadata.reversed_global_input_permutation_mapping,
                 topk_ids=routed_topk_ids,
