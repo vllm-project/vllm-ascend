@@ -560,6 +560,10 @@ class BaseDeviceAdaptor:
         return x
 
     @staticmethod
+    def fused_gdn_gating(A_log: torch.Tensor, a: torch.Tensor, b: torch.Tensor, dt_bias: torch.Tensor):
+        return torch.ops._C_ascend.npu_fused_gdn_gating(A_log, a, b, dt_bias.to(torch.float32))
+
+    @staticmethod
     def split_qkv_rmsnorm_rope(
         input,
         q_weight,
@@ -587,10 +591,6 @@ class BaseDeviceAdaptor:
             positions=positions,
         )
         return results
-
-    @staticmethod
-    def fused_gdn_gating(A_log: torch.Tensor, a: torch.Tensor, b: torch.Tensor, dt_bias: torch.Tensor):
-        return torch.ops._C_ascend.npu_fused_gdn_gating(A_log, a, b, dt_bias.to(torch.float32))
 
 
 class A5DeviceAdaptor(BaseDeviceAdaptor):
@@ -1211,6 +1211,10 @@ class A5DeviceAdaptor(BaseDeviceAdaptor):
         return x
 
     @staticmethod
+    def fused_gdn_gating(A_log: torch.Tensor, a: torch.Tensor, b: torch.Tensor, dt_bias: torch.Tensor):
+        return fused_gdn_gating_patch(A_log, a, b, dt_bias)
+
+    @staticmethod
     def split_qkv_rmsnorm_rope(
         input,
         q_weight,
@@ -1238,10 +1242,6 @@ class A5DeviceAdaptor(BaseDeviceAdaptor):
             positions=positions,
         )
         return results
-
-    @staticmethod
-    def fused_gdn_gating(A_log: torch.Tensor, a: torch.Tensor, b: torch.Tensor, dt_bias: torch.Tensor):
-        return fused_gdn_gating_patch(A_log, a, b, dt_bias)
 
 
 def get_device_adaptor() -> type["BaseDeviceAdaptor"]:
