@@ -101,10 +101,16 @@ jobs:
         run: |
           mv ./temp-vllm-ascend /vllm-workspace/vllm-ascend
 
+      - name: Set MAX_JOBS based on runner
+        run: |
+          CARDS=$(echo "${{ inputs.runner }}" | grep -oE '[0-9]+$')
+          echo "MAX_JOBS=$((CARDS * 23))" >> $GITHUB_ENV
+
       - name: Install vllm-project/vllm-ascend
         if: ${{ github.event_name == 'pull_request' }}
         working-directory: /vllm-workspace/vllm-ascend
         env:
+          MAX_JOBS: ${{ env.MAX_JOBS }}
           PIP_EXTRA_INDEX_URL: "https://repo.huaweicloud.com/ascend/repos/pypi https://triton-ascend.osinfra.cn/pypi/simple https://download.pytorch.org/whl/cpu/"
         run: |
           git config --global --add safe.directory /vllm-workspace/vllm-ascend
