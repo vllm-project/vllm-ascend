@@ -513,7 +513,7 @@ class Compressor(nn.Module):
             return_bias=False,
         )
 
-        # A5 compressor算子的norm weight入参数据类型为float
+        # A5 compressor kernel needs float for norm_weight input
         norm_dtype = torch.float32 if get_ascend_device_type() == AscendDeviceType.A5 else None
         self.norm = RMSNorm(self.head_dim, config.rms_norm_eps, dtype=norm_dtype)
 

@@ -776,6 +776,49 @@ class AscendFusedMoE(FusedMoE):
                     bias=None,
                     output_dtype=original_dtype,
                 )
+            elif has_quantized_shared and self.quant_type == QuantType.W4A8MXFP:
+                original_dtype = hidden_states.dtype
+                # Execute dynamic quant concurrently with MoE gate.
+                torch.npu.current_stream().wait_event(fused_moe_evts.before_routed_experts)
+                quantized_x, pertoken_scale = torch_npu.npu_dynamic_mx_quant(hidden_states, dst_type=torch.float8_e4m3fn)
+                # Execute the gate projection and activation concurrently with the
+                # dispatch communication.
+                maybe_wait_event(fused_moe_evts.before_dispatch)
+                hidden_states = torch_npu.npu_quant_matmul(
+                    quantized_x,
+                    self._shared_experts.gate_up_proj.weight,
+                    self._shared_experts.gate_up_proj.weight_scale,
+                    scale_dtype=torch_npu.float8_e8m0fnu,
+                    pertoken_scale=pertoken_scale,
+                    pertoken_scale_dtype=torch_npu.float8_e8m0fnu,
+                    bias=None,
+                    output_dtype=original_dtype,
+                    group_sizes=[1, 1, 32],
+                )
+                # Execute activation concurrently with gmm2.
+                maybe_wait_event(fused_moe_evts.before_gmm2)
+                quantized_x, swiglu_out_scale, _ = torch.ops._C_ascend.npu_swiglu_group_quant(
+                    hidden_states,
+                    topk_weight=None,
+                    group_index=None,
+                    dst_type=torch.float8_e4m3fn,
+                    quant_mode=2,
+                    clamp_value=fused_moe_evts.swiglu_limit,
+                )
+                # Execute the down projection concurrently with the combine
+                # communication.
+                maybe_wait_event(fused_moe_evts.before_combine)
+                shared_out = torch_npu.npu_quant_matmul(
+                    quantized_x,
+                    self._shared_experts.down_proj.weight,
+                    self._shared_experts.down_proj.weight_scale,
+                    scale_dtype=torch_npu.float8_e8m0fnu,
+                    pertoken_scale=swiglu_out_scale,
+                    pertoken_scale_dtype=torch_npu.float8_e8m0fnu,
+                    bias=None,
+                    output_dtype=original_dtype,
+                    group_sizes=[1, 1, 32],
+                )
             else:
                 # Ensure the shared experts wait for hidden_states to be ready.
                 torch.npu.current_stream().wait_event(fused_moe_evts.before_routed_experts)
