@@ -11,7 +11,7 @@ from vllm_ascend.utils import COMPRESSED_TENSORS_METHOD
 
 
 class TestAscendW4A8DynamicLinearMethod(TestBase):
-    @patch("vllm_ascend.quantization.methods.w4a8.get_tensor_model_parallel_world_size")
+    @patch("vllm.distributed.get_tensor_model_parallel_world_size")
     @patch("vllm_ascend.quantization.methods.w4a8.get_current_vllm_config")
     def setUp(self, mock_get_current_vllm_config, mock_get_tp_world_size):
         mock_get_tp_world_size.return_value = 1
@@ -128,7 +128,7 @@ class TestAscendW4A8DynamicLinearMethod(TestBase):
 
 @npu_test(num_npus=1, npu_type="a2")
 class TestAscendW4A8DynamicLinearMethodWithNpu(TestBase):
-    @patch("vllm_ascend.quantization.methods.w4a8.get_tensor_model_parallel_world_size")
+    @patch("vllm.distributed.get_tensor_model_parallel_world_size")
     @patch("vllm_ascend.quantization.methods.w4a8.get_current_vllm_config")
     def setUp(self, mock_get_current_vllm_config, mock_get_tp_world_size):
         mock_get_tp_world_size.return_value = 1
