@@ -126,7 +126,7 @@ e2e-multicard-2-cards:
   estimated_time: 406
 - name: tests/e2e/pull_request/full/two_cards/test_qwen3_moe.py
   estimated_time: 582
-- name: tests/e2e/pull_request/full/two_cards/test_qwen3_moe_routing_replay.py
+- name: tests/e2e/pull_request/full/two_cards/test_moe_routing_replay.py
   estimated_time: 192
 - name: tests/e2e/pull_request/full/two_cards/test_single_request_aclgraph.py
   estimated_time: 287
