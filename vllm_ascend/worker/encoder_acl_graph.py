@@ -198,8 +198,37 @@ def encoder_graph_replay_scope(
 # ---------------------------------------------------------------------------
 
 
+def _trim_trailing_zero_endpoints(endpoints: list[int]) -> list[int]:
+    trimmed = list(endpoints)
+    while trimmed and trimmed[-1] == 0:
+        trimmed.pop()
+    return trimmed
+
+
+def _align_fia_endpoints_to_token_budget(endpoints: list[int], token_budget: int) -> list[int]:
+    """TND FIA requires ``query.shape[0] == actual_seq_lengths[-1]`` at graph replay.
+
+    Capture fixes Q/K/V to ``token_budget`` tokens; replay metadata only describes the
+    live batch (e.g. 544 tokens). Append a padding segment up to ``token_budget`` so
+    graph-task updates match the captured tensor shapes (same as upstream cu_seqlens
+    padding for encoder graphs).
+    """
+    endpoints = _trim_trailing_zero_endpoints(endpoints)
+    if not endpoints:
+        return [token_budget]
+    last = endpoints[-1]
+    if last > token_budget:
+        raise RuntimeError(
+            f"Encoder FIA cumulative length {last} exceeds graph token_budget {token_budget}"
+        )
+    if last < token_budget:
+        endpoints.append(token_budget)
+    return endpoints
+
+
 def _resolve_vit_actual_lengths(
     *,
+    token_budget: int,
     uses_sequence_lengths_host: bool,
     vit_layer_idx: int,
     fullatt_block_indexes: AbstractSet[int] | frozenset[int] | None,
@@ -225,7 +254,8 @@ def _resolve_vit_actual_lengths(
             f"Encoder replay missing {label} for vit_layer_idx={vit_layer_idx}; "
             "EncoderAclGraphManager must populate encoder_graph_replay_scope()."
         )
-    return seq, seq
+    aligned = _align_fia_endpoints_to_token_budget(seq, token_budget)
+    return aligned, aligned
 
 
 def update_encoder_full_graph_params(
@@ -279,6 +309,7 @@ def update_encoder_full_graph_params(
             ) = packed
 
             actual_seq_lengths_q, actual_seq_lengths_kv = _resolve_vit_actual_lengths(
+                token_budget=token_budget,
                 uses_sequence_lengths_host=uses_sequence_lengths_host,
                 vit_layer_idx=vit_layer_idx,
                 fullatt_block_indexes=fullatt_block_indexes,
@@ -315,7 +346,8 @@ def _cu_prefix_to_host_endpoints(cu: torch.Tensor | None) -> list[int] | None:
     if cu is None:
         return None
     flat = cu.detach().cpu().view(-1).tolist()
-    return flat[1:] if flat else flat
+    endpoints = flat[1:] if flat else flat
+    return _trim_trailing_zero_endpoints(endpoints)
 
 
 def _per_seq_lengths_to_fia_endpoints(per_seq: list[int]) -> list[int]:
