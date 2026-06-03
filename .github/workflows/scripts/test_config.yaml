@@ -192,6 +192,7 @@
     - tests/e2e/pull_request/full/one_card/pooling/test_qwen3_reranker_lora.py
     - tests/e2e/pull_request/full/two_cards/test_ilama_lora_tp2.py
     - tests/e2e/pull_request/full/two_cards/test_llama32_lora_tp2.py
+    - tests/e2e/pull_request/full/one_card/test_lora_with_spec_decode.py
 
 - name: model_loader
   optional: true
