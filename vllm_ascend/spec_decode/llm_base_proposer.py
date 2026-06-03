@@ -23,6 +23,7 @@ from vllm.logger import logger
 from vllm.model_executor.layers.attention_layer_base import AttentionLayerBase
 from vllm.model_executor.model_loader import get_model
 from vllm.model_executor.models import supports_multimodal
+from vllm.model_executor.models.deepseek_eagle3 import Eagle3DeepseekV2ForCausalLM
 from vllm.model_executor.models.deepseek_v2 import DeepseekV32IndexerCache
 from vllm.model_executor.models.llama_eagle3 import Eagle3LlamaForCausalLM
 from vllm.model_executor.models.qwen3_dflash import DFlashQwen3ForCausalLM
@@ -31,6 +32,7 @@ from vllm.utils.math_utils import cdiv
 from vllm.utils.platform_utils import is_pin_memory_available
 from vllm.v1.attention.backends.utils import CommonAttentionMetadata
 from vllm.v1.core.sched.output import SchedulerOutput
+from vllm.v1.kv_cache_interface import MLAAttentionSpec
 from vllm.v1.sample.metadata import SamplingMetadata
 from vllm.v1.spec_decode.llm_base_proposer import SpecDecodeBaseProposer
 from vllm.v1.spec_decode.metadata import SpecDecodeMetadata
@@ -567,7 +569,9 @@ class AscendSpecDecodeBaseProposer(SpecDecodeBaseProposer):
             token_indices_to_sample = common_attn_metadata.query_start_loc[1:] - 1
 
         if self.method in ("eagle3", "dflash"):
-            assert isinstance(self.get_model(), (Eagle3LlamaForCausalLM, DFlashQwen3ForCausalLM))
+            assert isinstance(
+                self.get_model(), (Eagle3LlamaForCausalLM, DFlashQwen3ForCausalLM, Eagle3DeepseekV2ForCausalLM)
+            )
             target_hidden_states = self.model.combine_hidden_states(target_hidden_states)
             assert target_hidden_states.shape[-1] == self.hidden_size
 
@@ -1509,9 +1513,9 @@ class AscendSpecDecodeBaseProposer(SpecDecodeBaseProposer):
             )
 
         if self.pcp_size * self.dcp_size > 1:
-            if self.vllm_config.model_config.use_mla:
-                if getattr(attn_metadata, "decode", None):
-                    attn_metadata.decode.cp_seq_len = cp_seq_len
+            kv_cache_spec = self.draft_attn_groups[0].kv_cache_spec
+            if isinstance(kv_cache_spec, MLAAttentionSpec):
+                attn_metadata.decode.cp_seq_len = cp_seq_len
             else:
                 attn_metadata.decode_meta.num_computed_tokens_of_pcp_dcp = num_computed_tokens_of_pcp_dcp.numpy()
 
