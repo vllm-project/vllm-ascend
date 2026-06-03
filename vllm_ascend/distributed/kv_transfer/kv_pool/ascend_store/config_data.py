@@ -5,7 +5,7 @@ from dataclasses import dataclass, field
 from typing import Any, cast
 
 import torch
-from vllm.distributed.kv_transfer.kv_connector.v1.base import KVConnectorMetadata
+from vllm.distributed.kv_transfer.kv_connector.v1.base import KVConnectorMetadata, KVConnectorWorkerMetadata
 from vllm.logger import logger
 from vllm.utils.math_utils import cdiv
 from vllm.v1.core.kv_cache_utils import BlockHash, BlockHashList, BlockHashListWithBlockSize
@@ -197,17 +197,14 @@ def infer_group_cache_families(
 class ChunkedTokenDatabase:
     def __init__(
         self,
-        metadata: KeyMetadata,
-        block_size: int | list[int],
+        metadata: list[KeyMetadata],
+        block_size: list[int],
         partitions: list[int] | None,
         use_hybrid: bool = False,
         hash_block_size: int | None = None,
     ):
         self.metadata = metadata
-        self.block_size = block_size if isinstance(block_size, list) else [block_size]
-        self.kv_caches_base_addr: list[int] = []
-        self.block_len: list[int] = []
-        self.block_stride: list[int] = []
+        self.block_size = block_size
         self.group_kv_caches_base_addr: dict[int, list[int]] = {}
         self.group_block_len: dict[int, list[int]] = {}
         self.group_block_stride: dict[int, list[int]] = {}
@@ -234,28 +231,20 @@ class ChunkedTokenDatabase:
         assert self.metadata is not None
         if cache_family is None:
             cache_family = self.group_cache_families.get(cache_role, {}).get(kv_cache_group_id, "default")
+        group_metadata = self.metadata[kv_cache_group_id]
         return PoolKey(
             KeyMetadata(
-                model_name=self.metadata.model_name,
-                head_or_tp_rank=self.metadata.head_or_tp_rank,
-                pcp_rank=self.metadata.pcp_rank,
-                dcp_rank=self.metadata.dcp_rank,
-                pp_rank=self.metadata.pp_rank,
+                model_name=group_metadata.model_name,
+                head_or_tp_rank=group_metadata.head_or_tp_rank,
+                pcp_rank=group_metadata.pcp_rank,
+                dcp_rank=group_metadata.dcp_rank,
+                pp_rank=group_metadata.pp_rank,
                 kv_cache_group_id=kv_cache_group_id,
                 cache_role=cache_role,
                 cache_family=cache_family,
             ),
             chunk_hash,
         )
-
-    def set_kv_caches_base_addr(self, kv_caches_base_addr: list[int]):
-        self.kv_caches_base_addr = kv_caches_base_addr
-
-    def set_block_len(self, block_len: list[int]):
-        self.block_len = block_len
-
-    def set_block_stride(self, block_stride: list[int]):
-        self.block_stride = block_stride
 
     def get_block_size(self, kv_cache_group_id: int) -> int:
         if kv_cache_group_id >= len(self.block_size):
@@ -284,13 +273,15 @@ class ChunkedTokenDatabase:
         if group_num_layers is not None:
             self.group_num_layers[cache_role] = group_num_layers.copy()
 
-    def _get_group_buffers(self, kv_cache_group_id: int, cache_role: str) -> tuple[list[int], list[int], list[int]]:
+    def _get_group_buffers(
+        self, kv_cache_group_id: int, cache_role: str = "kv"
+    ) -> tuple[list[int], list[int], list[int] | None]:
         if cache_role == "state":
             return [], [], []
         return (
-            self.group_kv_caches_base_addr.get(kv_cache_group_id, self.kv_caches_base_addr),
-            self.group_block_len.get(kv_cache_group_id, self.block_len),
-            self.group_block_stride.get(kv_cache_group_id, self.block_stride),
+            self.group_kv_caches_base_addr[kv_cache_group_id],
+            self.group_block_len[kv_cache_group_id],
+            self.group_block_stride.get(kv_cache_group_id),
         )
 
     def prepare_value(
@@ -323,11 +314,12 @@ class ChunkedTokenDatabase:
         block_id = block_ids[start // group_block_size]
         addr_list: list[int] = []
         size_list: list[int] = []
-        length = len(self.block_len)
+        group_addrs, group_block_len, group_block_stride = self._get_group_buffers(0)
+        length = len(group_block_len)
         for i in range(length):
-            block_stride = self.block_stride[i] if self.block_stride else self.block_len[i]
-            addr = self.kv_caches_base_addr[layer_id * length] + block_id * block_stride
-            size = int(self.block_len[i] / group_block_size * (end - start))
+            block_stride = group_block_stride[i] if group_block_stride else group_block_len[i]
+            addr = group_addrs[layer_id * length] + block_id * block_stride
+            size = int(group_block_len[i] / group_block_size * (end - start))
             addr_list.append(addr)
             size_list.append(size)
         return addr_list, size_list, block_id
@@ -581,6 +573,8 @@ class ReqMeta:
     token_ids: list[int] | None = None
     original_block_size: list[int] | int | None = None
 
+    event_id: int | None = None
+
     def __init__(
         self,
         req_id: str,
@@ -598,6 +592,7 @@ class ReqMeta:
         token_ids: list[int] | None = None,
         original_block_size: list[int] | int | None = None,
         block_ids: list[int] | list[list[int]] | None = None,
+        event_id: int | None = None,
     ) -> None:
         self.req_id = req_id
         self.token_len_chunk = token_len_chunk
@@ -615,6 +610,7 @@ class ReqMeta:
         self.disable_tp_key_sharding = disable_tp_key_sharding
         self.token_ids = token_ids
         self.original_block_size = original_block_size
+        self.event_id = event_id
 
     @property
     def block_ids(self) -> list[int]:
@@ -627,7 +623,7 @@ class ReqMeta:
     @staticmethod
     def from_request_tracker(
         tracker: RequestTracker,
-        block_size: int,
+        cache_transfer_granularity: int,
         load_spec: LoadSpec | None = None,
         skip_save: bool | None = False,
         block_hashes: list[BlockHash] | None = None,
@@ -644,8 +640,16 @@ class ReqMeta:
         # For save operation: do not save if the following condition is met
         # 1. has already been saved before (num_saved_tokens > 0)
         # 2. number of unsaved tokens is not reached the chunk boundary
-        chunk_boundary = cdiv(tracker.num_saved_tokens + 1, block_size) * block_size if discard_partial_chunks else 0
-        num_tokens_to_save = (input_token_len // block_size * block_size) if discard_partial_chunks else input_token_len
+        chunk_boundary = (
+            cdiv(tracker.num_saved_tokens + 1, cache_transfer_granularity) * cache_transfer_granularity
+            if discard_partial_chunks
+            else 0
+        )
+        num_tokens_to_save = (
+            (input_token_len // cache_transfer_granularity * cache_transfer_granularity)
+            if discard_partial_chunks
+            else input_token_len
+        )
 
         skip_save = skip_save or num_tokens_to_save < chunk_boundary
         if skip_save and load_spec is None:
@@ -746,3 +750,26 @@ class LayerMultiBlockReqMeta:
     @block_ids.setter
     def block_ids(self, block_ids: list[int] | list[list[int]]) -> None:
         self.block_ids_by_group = normalize_block_ids_by_group(block_ids)
+
+
+@dataclass
+class AscendStoreKVConnectorWorkerMetadata(KVConnectorWorkerMetadata):
+    completed_events: dict[int, int] = field(default_factory=dict)
+    """key: event_id, value: completed worker count"""
+
+    def mark_completed_events(self, event_id: int | None) -> None:
+        if event_id is not None:
+            self.completed_events[event_id] = 1
+
+    def aggregate(self, other: KVConnectorWorkerMetadata) -> KVConnectorWorkerMetadata:
+        assert isinstance(other, AscendStoreKVConnectorWorkerMetadata), (
+            "aggregate worker metadata must be type of AscendStoreKVConnectorWorkerMetadata"
+        )
+
+        merged: dict[int, int] = dict(self.completed_events)
+        for event_id in other.completed_events:
+            if event_id not in merged:
+                merged[event_id] = other.completed_events[event_id]
+            else:
+                merged[event_id] = merged[event_id] + other.completed_events[event_id]
+        return AscendStoreKVConnectorWorkerMetadata(merged)
