@@ -9,6 +9,7 @@ _envs: &envs
   VLLM_RPC_TIMEOUT: "3600000"
   VLLM_EXECUTE_MODEL_TIMEOUT_SECONDS: "3600000"
   SERVER_PORT: "DEFAULT_PORT"
+  VLLM_ENGINE_READY_TIMEOUT_S: "7200"
 
 _server_cmd: &server_cmd
   - "--quantization"
