@@ -13,6 +13,7 @@ We're excited to announce the release of v0.20.2rc1 for vLLM Ascend. This is the
 
 - Added Flash Attention 3 support for training-inference consistency. The backend is ready in vLLM Ascend and will become directly usable once the FA3 package is publicly available. [#9060](https://github.com/vllm-project/vllm-ascend/pull/9060)
 - Added DeepSeek PCP/DCP adaptation to improve support for disaggregated deployments. [#9058](https://github.com/vllm-project/vllm-ascend/pull/9058)
+- Added a dedicated `additional_config.enable_dsa_cp` switch to decouple DSA-CP from FC1. DSA-CP now requires both FC1 and DSA-CP to be explicitly enabled, allowing FC1 to stay enabled while DSA-CP is disabled when needed. [#9878](https://github.com/vllm-project/vllm-ascend/pull/9878)
 - Added merged graph support for DFlash workloads. [#9074](https://github.com/vllm-project/vllm-ascend/pull/9074)
 - Added LoRA support for Qwen3.5 dense models. [#9023](https://github.com/vllm-project/vllm-ascend/pull/9023)
 - Added KV pool adaptation for DeepSeek V4 and separated MTP-layer KV cache sharding for DeepSeek V4 speculative decoding. [#9385](https://github.com/vllm-project/vllm-ascend/pull/9385) [#9367](https://github.com/vllm-project/vllm-ascend/pull/9367)
@@ -45,12 +46,13 @@ We're excited to announce the release of v0.20.2rc1 for vLLM Ascend. This is the
 
 ### Breaking Changes and Migration Notes
 
-- Migrated a set of runtime options from environment variables to `AscendConfig`. Please review configuration code and deployment manifests when upgrading. [#9064](https://github.com/vllm-project/vllm-ascend/pull/9064)
+- Migrated a set of runtime options from environment variables to `AscendConfig`, including the FC1/FlashComm1 switch from `VLLM_ASCEND_ENABLE_FLASHCOMM1` to `additional_config.enable_flashcomm1`. Please review configuration code and deployment manifests when upgrading. [#9064](https://github.com/vllm-project/vllm-ascend/pull/9064)
 - Disabled SwiGLU clamp by default, which may slightly change behavior for workloads that previously relied on the old default. [#9438](https://github.com/vllm-project/vllm-ascend/pull/9438)
 
 ### Documentation
 
 - Refreshed deployment and feature documentation for the current main branch release line. [#9309](https://github.com/vllm-project/vllm-ascend/pull/9309) [#8968](https://github.com/vllm-project/vllm-ascend/pull/8968)
+- Added documentation for the `enable_dsa_cp` additional configuration option for DeepSeek V3.2 and GLM5. [#9910](https://github.com/vllm-project/vllm-ascend/pull/9910)
 
 ### Known Issues
 
