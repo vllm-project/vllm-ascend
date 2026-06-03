@@ -83,7 +83,7 @@ static ge::graphStatus DoCommonTiling(gert::TilingContext* context, StoreKVBlock
         typeByte = sizeof(uint32_t);
         params.tilingKey = 4;
     } else {
-        OP_LOGE(context->GetNodeName(), "Unsupport type.");
+        OP_LOGE(context->GetNodeName(), "Unsupported type.");
         return ge::GRAPH_FAILED;
     }
 

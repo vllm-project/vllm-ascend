@@ -15,8 +15,8 @@
  */
 
 /*!
- * \file reshape_and_cache.cpp
- * \brief
+ * \file store_kv_block.cpp
+ * \brief Kernel entry for StoreKVBlock operator
  */
 #include "store_kv_block.h"
 

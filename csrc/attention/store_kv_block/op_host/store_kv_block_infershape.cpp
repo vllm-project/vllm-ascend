@@ -9,8 +9,8 @@
  */
 
 /*!
- * \file add_rms_norm_bias_infershape.cpp
- * \brief
+ * \file store_kv_block_infershape.cpp
+ * \brief InferShape implementation for StoreKVBlock
  */
 #include <graph/utils/type_utils.h>
 #include <register/op_impl_registry.h>
