@@ -29,7 +29,8 @@ class MemcacheBackend(Backend):
             self.rank = parallel_config.rank
             self.store = DistributedObjectStore()
             res = self.store.init(self.rank)
-            assert res == 0
+            if res != 0:
+                raise RuntimeError(f"Failed to initialize DistributedObjectStore, error code: {res}")
         except ValueError as e:
             logger.error("Configuration loading failed: %s", e)
             raise
