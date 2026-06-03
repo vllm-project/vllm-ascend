@@ -15,7 +15,7 @@ class Backend(ABC):
         pass
 
     @abstractmethod
-    def exists(self, key: str) -> list[int]:
+    def exists(self, key: str) -> bool:
         pass
 
     @abstractmethod
