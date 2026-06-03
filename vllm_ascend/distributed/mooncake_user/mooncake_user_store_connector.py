@@ -473,7 +473,7 @@ class MooncakeLookupServer:
                 uid = self.decoder.decode(frames)
                 result = self.mooncake_engine.lookup_scheduler(
                     uid, use_layerwise)
-                response = result.to_bytes(4, "big")
+                response = result.to_bytes(4, "big", signed=True)
                 self.socket.send(response)
 
         self.thread = threading.Thread(target=process_request, daemon=True)
