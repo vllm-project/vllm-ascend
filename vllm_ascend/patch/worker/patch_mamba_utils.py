@@ -3,7 +3,15 @@
 from typing import Any
 
 import torch
+from vllm.config import CacheConfig
+from vllm.model_executor.layers.mamba.mamba_utils import MambaStateCopyFunc
+from vllm.utils.math_utils import cdiv
+from vllm.v1.core.sched.output import SchedulerOutput
+from vllm.v1.kv_cache_interface import KVCacheConfig
 from vllm.v1.worker import mamba_utils
+from vllm.v1.worker.gpu_input_batch import CachedRequestState
+from vllm.v1.worker.lora_model_runner_mixin import GPUInputBatch
+from vllm.v1.worker.mamba_utils import MambaCopyBuffers
 
 from vllm_ascend.ops.triton.batch_memcpy import batch_memcpy_kernel
 from vllm_ascend.utils import is_310p
@@ -109,3 +117,72 @@ else:
     mamba_utils.batch_memcpy = _batch_memcpy_unavailable
     mamba_utils.collect_mamba_copy_meta = _collect_mamba_copy_meta_torch
     mamba_utils.do_mamba_copy_block = _do_mamba_copy_block_torch
+
+
+def preprocess_mamba(
+    scheduler_output: SchedulerOutput,
+    kv_cache_config: KVCacheConfig,
+    cache_config: CacheConfig,
+    mamba_state_idx: dict[str, int],
+    input_batch: GPUInputBatch,
+    requests: dict[str, CachedRequestState],
+    forward_context: dict[str, Any],
+    mamba_state_copy_funcs: tuple[MambaStateCopyFunc, ...],
+    copy_bufs: MambaCopyBuffers,
+):
+    """
+    Copy the mamba state of previous step to the last
+    (1 + num_speculative_blocks) block.
+    """
+    mamba_group_ids = copy_bufs.mamba_group_ids
+    mamba_spec = copy_bufs.mamba_spec
+    num_speculative_blocks = mamba_spec.num_speculative_blocks
+    # TODO(Chen): we need to optimize this function a lot
+    # assert cache_config.enable_prefix_caching
+    block_size = mamba_spec.block_size
+    mamba_utils.cleanup_mamba_state_idx(scheduler_output, mamba_state_idx)
+
+    copy_bufs.offset = 0
+    for i, req_id in enumerate(input_batch.req_ids):
+        req_state = requests[req_id]
+        prev_state_idx = mamba_state_idx.get(req_id)
+        if prev_state_idx is None:
+            # new / resumed request, no previous state
+            # if num_computed_tokens is 0, prev_state_idx will be -1
+            prev_state_idx = (req_state.num_computed_tokens - 1) // block_size
+
+        num_scheduled_tokens = scheduler_output.num_scheduled_tokens[req_id]
+        num_blocks: int = (
+            cdiv(req_state.num_computed_tokens + num_scheduled_tokens, block_size) + num_speculative_blocks
+        )
+
+        # We always save the current running state at the last
+        # (1 + num_speculative_blocks) block.
+        # A corner case worth mention here: assume we have block_size = 4 and
+        # num_speculative_tokens = 2. The request is [A, B, C] and contains 2 draft
+        # tokens [draft 1, draft 2]. Then we will have:
+        # Block 0: [A, B, C, draft 1]
+        # Block 1: [draft 2, TOFILL, TOFILL, TOFILL]
+        # Block 2: speculative block
+        # Block 3: speculative block
+        # And use block 1 to save the running state.
+        curr_state_idx = num_blocks - 1 - num_speculative_blocks
+        mamba_state_idx[req_id] = curr_state_idx
+        if prev_state_idx != -1 and prev_state_idx != curr_state_idx:
+            mamba_utils.collect_mamba_copy_meta(
+                copy_bufs,
+                kv_cache_config,
+                mamba_state_copy_funcs,
+                mamba_group_ids,
+                prev_state_idx,
+                curr_state_idx,
+                input_batch.num_accepted_tokens_cpu[i] - 1,
+                req_state,
+                forward_context,
+            )
+            input_batch.num_accepted_tokens_cpu[i] = 1
+    # do not copy here, since kv_transfer still not load
+    # do_mamba_copy_block(copy_bufs)
+
+
+mamba_utils.preprocess_mamba = preprocess_mamba

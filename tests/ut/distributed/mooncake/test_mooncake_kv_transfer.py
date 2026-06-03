@@ -68,6 +68,7 @@ class TestKVTransferMissingKeyPut(unittest.TestCase):
             put_step=1,
             kv_role="kv_producer",
             ready_event=threading.Event(),
+            group_uses_align_state=[False],
             enable_kv_event=False,
         )
 
