@@ -251,8 +251,7 @@ class KVCacheStoreLayerSendingThread(KVTransferThread):
         self.final_layer_id = num_layers - 1
 
     def add_request(  # type: ignore[override]
-            self, req_meta: LasyerMultiBlockReqMeta) -> torch.Tensor:
-        self.request_queue.put(req_meta)
+            self, req_meta: LasyerMultiBlockReqMeta) -> None:
 
     def _handle_request(  # type: ignore[override]
             self, req_meta: LasyerMultiBlockReqMeta):
