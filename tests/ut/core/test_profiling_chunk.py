@@ -418,3 +418,47 @@ class TestProfilingChunkScheduler(TestBase):
         scheduler.update_from_output(output, model_output)
 
         self.assertEqual(len(scheduler.running), 3)
+
+    def test_update_from_output_uses_model_output_spec_tokens(self):
+        scheduler = self.create_scheduler()
+        requests = create_requests(num_requests=2)
+        for req in requests:
+            scheduler.add_request(req)
+
+        output = scheduler.schedule()
+        model_output = ModelRunnerOutput(
+            req_ids=["0", "1"],
+            req_id_to_index={"0": 0, "1": 1},
+            sampled_token_ids=[[1000], [1001]],
+            spec_token_ids=[[11, 12], [21, 22]],
+            logprobs=None,
+            prompt_logprobs_dict={},
+            pooler_output=[],
+        )
+
+        scheduler.update_from_output(output, model_output)
+
+        self.assertEqual(scheduler.requests["0"].spec_token_ids, [11, 12])
+        self.assertEqual(scheduler.requests["1"].spec_token_ids, [21, 22])
+
+    def test_update_from_output_clears_spec_tokens_for_prefill_output(self):
+        scheduler = self.create_scheduler()
+        requests = create_requests(num_requests=1)
+        for req in requests:
+            scheduler.add_request(req)
+        scheduler.requests["0"].spec_token_ids = [1, 2]
+
+        output = scheduler.schedule()
+        model_output = ModelRunnerOutput(
+            req_ids=["0"],
+            req_id_to_index={"0": 0},
+            sampled_token_ids=[[]],
+            spec_token_ids=[[11, 12]],
+            logprobs=None,
+            prompt_logprobs_dict={},
+            pooler_output=[],
+        )
+
+        scheduler.update_from_output(output, model_output)
+
+        self.assertEqual(scheduler.requests["0"].spec_token_ids, [])
