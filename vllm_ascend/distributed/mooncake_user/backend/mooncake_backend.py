@@ -35,7 +35,8 @@ class MooncakeBackend(Backend):
                 range(dp_rank * tp_size, (dp_rank + 1) * tp_size))
         else:
             device_ids_list = list(map(int, all_device_ids.split(',')))
-        assert len(device_ids_list) > tp_rank
+        if len(device_ids_list) <= tp_rank:
+            raise ValueError(f"tp_rank {tp_rank} is out of bounds for device_ids_list {device_ids_list}")
         device_id = device_ids_list[tp_rank]
         self.config = MooncakeStoreConfig.load_from_env()
         self.store = MooncakeDistributedStore()
