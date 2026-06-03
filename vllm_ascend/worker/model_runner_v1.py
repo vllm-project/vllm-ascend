@@ -167,6 +167,7 @@ from vllm_ascend.sample.rejection_sampler import AscendRejectionSampler
 
 if TYPE_CHECKING:
     import xgrammar as xgr  # type: ignore[import-untyped]
+    from vllm.config.speculative import SpeculativeConfig
     from vllm.v1.core.sched.output import GrammarOutput, SchedulerOutput
 else:
     xgr = LazyLoader("xgr", globals(), "xgrammar")
@@ -244,6 +245,10 @@ class ExecuteModelState(NamedTuple):
 
 
 class NPUModelRunner(GPUModelRunner):
+    speculative_config: "SpeculativeConfig | None"
+    _draft_token_ids: torch.Tensor | list[list[int]] | None
+    _draft_token_req_ids: list[str] | None
+
     def __init__(self, vllm_config: VllmConfig, device: torch.device):
         # TODO(qcs): These manual pad and unpad for GPUModelRunner are
         # used to expand some buffers, which need to be reverted after
@@ -607,7 +612,9 @@ class NPUModelRunner(GPUModelRunner):
         self.num_discarded_requests = 0
 
     def _get_drafter(self):
-        return get_spec_decode_method(self.speculative_config.method, self.vllm_config, self.device, self)
+        speculative_config = self.speculative_config
+        assert speculative_config is not None
+        return get_spec_decode_method(speculative_config.method, self.vllm_config, self.device, self)
 
     def _use_aclgraph(self) -> bool:
         return (
@@ -1592,7 +1599,12 @@ class NPUModelRunner(GPUModelRunner):
 
         # For the overlay of the PCP feature and the eagle3, attn_state needs to be recovered
         # TODO: Resolved the conflict between the sunset of attn_state and the PCP that requires this interface.
-        if attn_state == AscendAttentionState.SpecDecoding and self.speculative_config.method != "mtp":
+        speculative_config = self.speculative_config
+        if (
+            attn_state == AscendAttentionState.SpecDecoding
+            and speculative_config is not None
+            and speculative_config.method != "mtp"
+        ):
             self.attn_state = AscendAttentionState.ChunkedPrefill  # type: ignore
         else:
             self.attn_state = attn_state  # type: ignore
@@ -1730,6 +1742,8 @@ class NPUModelRunner(GPUModelRunner):
         sample_hidden_states: torch.Tensor = None,
         target_model_batch_desc: BatchDescriptor = None,
     ) -> list[list[int]] | None:
+        speculative_config = self.speculative_config
+        assert speculative_config is not None
         if not self.drafter:
             # Speculative decoding is not enabled.
             draft_token_ids = None
@@ -1784,7 +1798,7 @@ class NPUModelRunner(GPUModelRunner):
             draft_token_ids = self.drafter.propose(
                 valid_sampled_token_ids, sampling_metadata, spec_decode_metadata, sample_hidden_states
             )
-        elif self.speculative_config.uses_extract_hidden_states():
+        elif speculative_config.uses_extract_hidden_states():
             # Handle extract_hidden_states method
             assert isinstance(self.drafter, AscendExtractHiddenStatesProposer)
             assert isinstance(valid_sampled_token_ids, torch.Tensor), (
@@ -1813,7 +1827,7 @@ class NPUModelRunner(GPUModelRunner):
                 )
             )
             self._copy_valid_sampled_token_count(next_token_ids, valid_sampled_tokens_count)
-        elif self.speculative_config.use_eagle() or self.speculative_config.uses_draft_model():
+        elif speculative_config.use_eagle() or speculative_config.uses_draft_model():
             common_attn_metadata = spec_decode_common_attn_metadata
             sampled_token_ids = valid_sampled_token_ids
 
@@ -1943,7 +1957,7 @@ class NPUModelRunner(GPUModelRunner):
                 num_rejected_tokens_gpu=num_rejected_tokens_gpu,
             )
         else:
-            raise ValueError(f"Unknown speculative decoding method: {self.speculative_config.method}")
+            raise ValueError(f"Unknown speculative decoding method: {speculative_config.method}")
 
         return draft_token_ids
 
@@ -2619,17 +2633,18 @@ class NPUModelRunner(GPUModelRunner):
 
             # Get draft token ids if available
             output_spec_token_ids = None
-            if self._draft_token_ids is not None:
+            draft_token_ids = self._draft_token_ids
+            if draft_token_ids is not None:
                 # Use synchronous copy to avoid NPU async stream/event
                 # synchronization issues. _get_draft_token_ids_cpu relies on
                 # event.synchronize() which may not properly wait for the
                 # async copy on NPU, resulting in stale data.
-                if torch.is_tensor(self._draft_token_ids):
-                    num_reqs = self._draft_token_ids.shape[0]
-                    draft_ids_list = self._draft_token_ids[:num_reqs].cpu().tolist()
+                if isinstance(draft_token_ids, torch.Tensor):
+                    num_reqs = draft_token_ids.shape[0]
+                    draft_ids_list = draft_token_ids[:num_reqs].cpu().tolist()
                     draft_req_ids = self._draft_token_req_ids
                 else:
-                    draft_ids_list = self._draft_token_ids
+                    draft_ids_list = draft_token_ids
                     draft_req_ids = self.input_batch.req_ids
                 if draft_ids_list and draft_req_ids:
                     draft_by_req_id = dict(

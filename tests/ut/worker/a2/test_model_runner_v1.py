@@ -257,5 +257,129 @@ class TestNPUModelRunnerDebugger(unittest.TestCase):
         self.assertTrue(runner._debugger_started)
 
 
+class TestNPUModelRunnerPPMTP(unittest.TestCase):
+    def _build_runner(self):
+        runner = NPUModelRunner.__new__(NPUModelRunner)
+        runner.need_accepted_tokens = True
+        runner.speculative_config = MagicMock()
+        runner.use_async_scheduling = False
+        runner.input_batch = MagicMock()
+        runner.input_batch.req_id_to_index = {"req0": 0, "req1": 1}
+        runner.input_batch.num_reqs = 2
+        runner.input_batch.num_accepted_tokens_cpu = torch.ones(4, dtype=torch.int32).numpy()
+        runner.num_accepted_tokens = MagicMock()
+        runner.num_accepted_tokens.np = torch.ones(4, dtype=torch.int32).numpy()
+        runner._prev_non_last_pp_mtp_scheduler_output = None
+        runner.requests = {}
+        return runner
+
+    @patch("vllm_ascend.worker.model_runner_v1.get_pp_group")
+    def test_compute_non_last_pp_mtp_accepted_counts_from_scheduler_delta(self, mock_get_pp_group):
+        mock_get_pp_group.return_value = MagicMock(is_last_rank=False)
+        runner = self._build_runner()
+        runner.requests = {
+            "req0": SimpleNamespace(num_computed_tokens=10),
+            "req1": SimpleNamespace(num_computed_tokens=20),
+        }
+        prev_output = SimpleNamespace(
+            scheduled_spec_decode_tokens={
+                "req0": [101, 102],
+                "req1": [201, 202],
+            }
+        )
+        scheduler_output = SimpleNamespace(
+            scheduled_cached_reqs=SimpleNamespace(
+                req_ids=["req0", "req1"],
+                num_computed_tokens=[12, 30],
+            )
+        )
+
+        accepted_counts = runner._compute_non_last_pp_mtp_accepted_counts(
+            scheduler_output,
+            prev_output,
+        )
+
+        self.assertEqual(accepted_counts, {"req0": 2, "req1": 1})
+
+    @patch("vllm_ascend.worker.model_runner_v1.get_pp_group")
+    def test_prepare_non_last_pp_mtp_state_update_syncs_counts(self, mock_get_pp_group):
+        mock_get_pp_group.return_value = MagicMock(is_last_rank=False)
+        runner = self._build_runner()
+        runner.requests = {
+            "req0": SimpleNamespace(num_computed_tokens=10),
+            "req1": SimpleNamespace(num_computed_tokens=20),
+        }
+        runner._prev_non_last_pp_mtp_scheduler_output = SimpleNamespace(
+            scheduled_spec_decode_tokens={
+                "req0": [101, 102],
+                "req1": [201],
+            }
+        )
+        runner.cache_config = SimpleNamespace(mamba_cache_mode="disabled")
+        scheduler_output = SimpleNamespace(
+            scheduled_cached_reqs=SimpleNamespace(
+                req_ids=["req0", "req1"],
+                num_computed_tokens=[13, 22],
+            )
+        )
+
+        runner._prepare_non_last_pp_mtp_state_update(scheduler_output)
+
+        self.assertEqual(runner.input_batch.num_accepted_tokens_cpu[:2].tolist(), [3, 2])
+        self.assertEqual(runner.num_accepted_tokens.np[:2].tolist(), [3, 2])
+        runner.num_accepted_tokens.copy_to_gpu.assert_called_once_with(2)
+
+    @patch("vllm_ascend.worker.model_runner_v1.get_pp_group")
+    def test_collect_pp_mtp_re_added_token_ignores_existing_cached_requests(self, mock_get_pp_group):
+        mock_get_pp_group.return_value = MagicMock(is_last_rank=False)
+        runner = self._build_runner()
+        runner.input_batch.req_id_to_index = {"kept": 0, "removed": 1}
+        scheduler_output = SimpleNamespace(
+            scheduled_cached_reqs=SimpleNamespace(
+                req_ids=["kept", "re-added"],
+                new_token_ids=[[1], [7, 8]],
+                resumed_req_ids=set(),
+                num_computed_tokens=[5, 9],
+            ),
+            finished_req_ids={"removed"},
+            num_scheduled_tokens={"kept": 1, "re-added": 2},
+        )
+
+        collect_token_fixes = runner._collect_pp_mtp_readded_token  # codespell:ignore readded
+        token_fixes = collect_token_fixes(scheduler_output)
+
+        self.assertEqual(token_fixes, {"re-added": ([7, 8], 9)})
+
+    @patch("vllm_ascend.worker.model_runner_v1.get_pp_group")
+    def test_pp_mtp_update_req_spec_token_ids_injects_re_added_tokens(self, mock_get_pp_group):
+        mock_get_pp_group.return_value = MagicMock(is_last_rank=False)
+        runner = self._build_runner()
+        runner.input_batch.req_id_to_index = {}
+        runner.input_batch.token_ids_cpu = torch.zeros((1, 16), dtype=torch.int32)
+        runner.input_batch.num_tokens_no_spec = torch.zeros(1, dtype=torch.int32)
+        original_update = MagicMock()
+        runner.input_batch.update_req_spec_token_ids = original_update
+        scheduler_output = SimpleNamespace(
+            total_num_scheduled_tokens=2,
+            scheduled_cached_reqs=SimpleNamespace(
+                req_ids=["re-added"],
+                new_token_ids=[[7, 8]],
+                resumed_req_ids=set(),
+                num_computed_tokens=[3],
+            ),
+            finished_req_ids=set(),
+            num_scheduled_tokens={"re-added": 2},
+        )
+        request = SimpleNamespace(req_id="re-added")
+
+        with runner._pp_mtp_update_req_spec_token_ids(scheduler_output):
+            runner.input_batch.req_id_to_index["re-added"] = 0
+            runner.input_batch.update_req_spec_token_ids(request, [11, 12])
+
+        self.assertEqual(runner.input_batch.token_ids_cpu[0, 3:5].tolist(), [7, 8])
+        self.assertEqual(int(runner.input_batch.num_tokens_no_spec[0]), 5)
+        original_update.assert_called_once_with(request, [11, 12])
+
+
 if __name__ == "__main__":
     unittest.main()

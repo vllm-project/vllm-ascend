@@ -103,8 +103,7 @@ def _patch_model_config_validation() -> None:
         hf_config = getattr(self, "hf_config", None)
         model_type = getattr(hf_config, "model_type", None)
         is_eagle_drafter = model_type == "eagle" and any(
-            arch.startswith("Eagle") or arch.endswith("Eagle3")
-            for arch in getattr(self, "architectures", ())
+            arch.startswith("Eagle") or arch.endswith("Eagle3") for arch in getattr(self, "architectures", ())
         )
         is_mtp_drafter = model_type in mtp_model_types
         if (

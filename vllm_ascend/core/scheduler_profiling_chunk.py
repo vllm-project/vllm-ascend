@@ -271,8 +271,7 @@ class ProfilingChunkScheduler(Scheduler):
                 if self.structured_output_manager.should_advance(request):
                     metadata = request.structured_output_request
                     assert metadata is not None and metadata.grammar is not None
-                    next_spec_token_ids = metadata.grammar.validate_tokens(
-                        next_spec_token_ids)
+                    next_spec_token_ids = metadata.grammar.validate_tokens(next_spec_token_ids)
                 request.spec_token_ids = next_spec_token_ids
         return engine_core_outputs
 
@@ -570,9 +569,7 @@ class ProfilingChunkScheduler(Scheduler):
                     num_new_tokens = 0
                 else:
                     if self.is_mtp_kv_consumer:
-                        num_new_tokens = (
-                            request.num_tokens_with_spec - num_computed_tokens
-                        )
+                        num_new_tokens = request.num_tokens_with_spec - num_computed_tokens
                     else:
                         num_new_tokens = request.num_tokens - num_computed_tokens
                     threshold = self.scheduler_config.long_prefill_token_threshold
@@ -674,17 +671,11 @@ class ProfilingChunkScheduler(Scheduler):
                 # Speculative decode related. In MTP KV-consumer mode, waiting
                 # requests may already carry placeholder draft tokens that need
                 # to be scheduled together with the prefill tokens.
-                if (
-                    self.is_mtp_kv_consumer or not self.vllm_config.kv_transfer_config
-                ) and request.spec_token_ids:
-                    num_scheduled_spec_tokens = (
-                        num_new_tokens + num_computed_tokens - request.num_tokens
-                    )
+                if (self.is_mtp_kv_consumer or not self.vllm_config.kv_transfer_config) and request.spec_token_ids:
+                    num_scheduled_spec_tokens = num_new_tokens + num_computed_tokens - request.num_tokens
                     if num_scheduled_spec_tokens > 0:
                         del request.spec_token_ids[num_scheduled_spec_tokens:]
-                        scheduled_spec_decode_tokens[request_id] = (
-                            request.spec_token_ids
-                        )
+                        scheduled_spec_decode_tokens[request_id] = request.spec_token_ids
                     else:
                         # Prefill request: spec tokens not applicable yet.
                         request.spec_token_ids = []
