@@ -17,7 +17,6 @@
 
 from __future__ import annotations
 
-from collections.abc import AbstractSet
 from contextlib import contextmanager
 from dataclasses import dataclass, field
 from typing import Any
@@ -205,33 +204,38 @@ def _trim_trailing_zero_endpoints(endpoints: list[int]) -> list[int]:
     return trimmed
 
 
-def _align_fia_endpoints_to_token_budget(endpoints: list[int], token_budget: int) -> list[int]:
+def _align_fia_endpoints_to_num_tokens(endpoints: list[int], num_tokens: int) -> list[int]:
     """TND FIA requires ``query.shape[0] == actual_seq_lengths[-1]`` at graph replay.
 
-    Capture fixes Q/K/V to ``token_budget`` tokens; replay metadata only describes the
-    live batch (e.g. 544 tokens). Append a padding segment up to ``token_budget`` so
-    graph-task updates match the captured tensor shapes (same as upstream cu_seqlens
-    padding for encoder graphs).
+    Use the captured Q tensor length (not ``token_budget`` alone): window-attention
+    ``cu_window_seqlens`` can use a different cumulative scale than encoder output
+    tokens. Drop endpoints past ``num_tokens`` and pad the last entry up to it.
     """
     endpoints = _trim_trailing_zero_endpoints(endpoints)
-    if not endpoints:
-        return [token_budget]
-    last = endpoints[-1]
-    if last > token_budget:
-        raise RuntimeError(
-            f"Encoder FIA cumulative length {last} exceeds graph token_budget {token_budget}"
-        )
-    if last < token_budget:
-        endpoints.append(token_budget)
-    return endpoints
+    if num_tokens <= 0:
+        return [0]
+
+    filtered: list[int] = []
+    for end in endpoints:
+        end = int(end)
+        if end <= 0:
+            continue
+        if end > num_tokens:
+            break
+        if not filtered or end > filtered[-1]:
+            filtered.append(end)
+
+    if not filtered or filtered[-1] != num_tokens:
+        filtered.append(num_tokens)
+    return filtered
 
 
 def _resolve_vit_actual_lengths(
     *,
-    token_budget: int,
+    num_query_tokens: int,
     uses_sequence_lengths_host: bool,
     vit_layer_idx: int,
-    fullatt_block_indexes: AbstractSet[int] | frozenset[int] | None,
+    fullatt_block_indexes: set[int] | frozenset[int] | None,
 ) -> tuple[list[int], list[int]]:
     """Map replay buffers + ``fullatt_block_indexes`` to FIA ``actual_seq_lengths``."""
 
@@ -254,7 +258,7 @@ def _resolve_vit_actual_lengths(
             f"Encoder replay missing {label} for vit_layer_idx={vit_layer_idx}; "
             "EncoderAclGraphManager must populate encoder_graph_replay_scope()."
         )
-    aligned = _align_fia_endpoints_to_token_budget(seq, token_budget)
+    aligned = _align_fia_endpoints_to_num_tokens(seq, num_query_tokens)
     return aligned, aligned
 
 
@@ -262,7 +266,7 @@ def update_encoder_full_graph_params(
     update_stream: torch.npu.Stream,
     token_budget: int,
     *,
-    fullatt_block_indexes: AbstractSet[int] | frozenset[int] | None = None,
+    fullatt_block_indexes: set[int] | frozenset[int] | None = None,
 ) -> None:
     """Re-bind fused infer attention host tensors inside the encoder NPUGraph (parallel to LLM path).
 
@@ -308,8 +312,9 @@ def update_encoder_full_graph_params(
                 softmax_lse,
             ) = packed
 
+            num_query_tokens = query.shape[0]
             actual_seq_lengths_q, actual_seq_lengths_kv = _resolve_vit_actual_lengths(
-                token_budget=token_budget,
+                num_query_tokens=num_query_tokens,
                 uses_sequence_lengths_host=uses_sequence_lengths_host,
                 vit_layer_idx=vit_layer_idx,
                 fullatt_block_indexes=fullatt_block_indexes,
