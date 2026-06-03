@@ -140,8 +140,24 @@ class TestKVTransferThread(unittest.TestCase):
 
     def test_update_and_get_kv_events(self):
         t, _ = self._make_thread()
-        event1 = BlockStored(block_hashes=["h1"])
-        event2 = BlockStored(block_hashes=["h2"])
+        event1 = BlockStored(
+            block_hashes=["h1"],
+            parent_block_hash=None,
+            token_ids=[1, 2, 3],
+            block_size=16,
+            lora_id=None,
+            medium="cpu",
+            lora_name=None,
+        )
+        event2 = BlockStored(
+            block_hashes=["h2"],
+            parent_block_hash="h1",
+            token_ids=[4, 5, 6],
+            block_size=16,
+            lora_id=None,
+            medium="cpu",
+            lora_name=None,
+        )
         t.update_kv_event([event1, event2])
         events = t.get_kv_events()
         self.assertEqual(len(events), 2)
