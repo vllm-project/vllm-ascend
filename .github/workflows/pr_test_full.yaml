@@ -89,29 +89,3 @@ jobs:
       vllm: ${{ matrix.vllm_version }}
       test_groups: ${{ needs.select-tests.outputs.test_groups }}
 
-  parse-trigger:
-    name: Parse /e2e comment
-    if: ${{ github.event_name == 'pull_request' && contains(github.event.pull_request.labels.*.name, 'ready') }}
-    uses: ./.github/workflows/_parse_trigger.yaml
-    with:
-      parse_e2e_comment: true
-
-  e2e-comment-test:
-    name: e2e-comment (${{ matrix.vllm_version }})
-    strategy:
-      fail-fast: false
-      matrix:
-        vllm_version: [9090368b650896bf5fc990c921df7eb4c20355a5,v0.20.2]
-    needs: [parse-trigger]
-    if: ${{ needs.parse-trigger.outputs.allowed == 'true' }}
-    uses: ./.github/workflows/_e2e_test.yaml
-    with:
-      vllm: ${{ matrix.vllm_version }}
-      image: swr.cn-southwest-2.myhuaweicloud.com/base_image/ascend-ci/cann:9.0.0-910b-ubuntu22.04-py3.11
-      type: comment
-      ref: ${{ needs.parse-trigger.outputs.pr_sha }}
-      singlecard_tests: ${{ needs.parse-trigger.outputs.singlecard_tests }}
-      multicard_2_tests: ${{ needs.parse-trigger.outputs.multicard_2_tests }}
-      multicard_4_tests: ${{ needs.parse-trigger.outputs.multicard_4_tests }}
-      p310_singlecard_tests: ${{ needs.parse-trigger.outputs.p310_singlecard_tests }}
-      p310_multicard_tests: ${{ needs.parse-trigger.outputs.p310_multicard_tests }}

@@ -341,23 +341,6 @@ The CI resource is limited, and you might need to reduce the number of layers of
     model.save_pretrained(DIST_MODEL_PATH)
     ```
 
-### View CI log summary in GitHub Actions
-
-After a CI job finishes, you can open the corresponding GitHub Actions job page and check the
-`Summary` tab to view the generated CI log summary.
-
-![GitHub Actions CI log summary](../../assets/ci_log_summary.png)
-
-The summary is intended to help developers triage failures more quickly. It may include:
-
-- failed test files
-- failed test cases
-- distinct root-cause errors
-- short error context extracted from the job log
-
-This summary is generated from the job log by
-`/.github/workflows/scripts/ci_log_summary.py` for unit-test and e2e workflows.
-
 ### Run doctest
 
 vllm-ascend provides a `vllm-ascend/tests/e2e/run_doctests.sh` command to run all doctests in the doc files.

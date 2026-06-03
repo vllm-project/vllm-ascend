@@ -27,6 +27,11 @@ on:
         type: string
         required: true
         description: 'JSON array of test groups from select_tests.py'
+      ref:
+        type: string
+        required: false
+        default: ''
+        description: 'The vllm-ascend ref to test.'
 
 # Bash shells do not use ~/.profile or ~/.bashrc so these shells need to be explicitly
 # declared as "shell: bash -el {0}" on steps that need to be properly activated.
@@ -43,7 +48,7 @@ permissions:
 
 jobs:
   selected-tests:
-    name: ${{ matrix.group.npu_type }}-${{ matrix.group.num_npus }} card
+    name: ${{ matrix.group.npu_type }}-${{ matrix.group.num_npus }}card
     strategy:
       fail-fast: false
       matrix:
@@ -98,6 +103,8 @@ jobs:
 
       - name: Checkout vllm-project/vllm-ascend repo
         uses: actions/checkout@v6
+        with:
+          ref: ${{ inputs.ref || github.ref }}
 
       - name: Get csrc hash
         id: get_csrc_hash
