@@ -172,12 +172,26 @@ class InstanceInfo:
 
 
 TAINT_PRIORITY = 1e15
+_IS_PREFILL = True
+_IS_DECODE = False
 MANAGER_CONFIG_ENV = "LB_PROXY_MANAGER_CONFIG"
 ARGS_CONFIG_ENV = "LB_PROXY_ARGS"
 
 global_args = None
 shared_scheduler = None
 runtime = None
+
+
+class _ServerEntry:
+    __slots__ = ("host", "port", "active_tokens", "active_kv_cache", "ordinal", "heap_seq")
+
+    def __init__(self, host: str, port: int, ordinal: int):
+        self.host = host
+        self.port = port
+        self.active_tokens: float = 0.0
+        self.active_kv_cache: float = 0.0
+        self.ordinal: int = ordinal
+        self.heap_seq: int = 0
 
 
 def setup_logging(log_level: str) -> None:
@@ -221,7 +235,14 @@ def build_base_url(host: str, port: int) -> str:
 
 
 class SharedProxyScheduler:
-    """Centralized mutable scheduling state shared by all uvicorn workers."""
+    """Centralized mutable scheduling state shared by all uvicorn workers.
+
+    Uses lazy-deletion min-heap: on priority change, push a new entry and
+    bump the server's ``heap_seq`` counter; stale entries (whose seq does
+    not match) are skipped on pop.  This avoids the O(n) list-comp filter
+    that the previous _incremental_update_heap incurred on every hot-path
+    operation.
+    """
 
     def __init__(self, prefiller_instances, decoder_instances):
         self._lock = threading.RLock()
@@ -229,73 +250,100 @@ class SharedProxyScheduler:
         self.waiting_nodes: dict[str, tuple[str, tuple[str, int], int]] = {}
         self.tainted_prefillers: set[str] = set()
         self.tainted_decoders: set[str] = set()
-        self.prefillers: dict[str, dict[str, Any]] = {}
-        self.decoders: dict[str, dict[str, Any]] = {}
-        self.prefiller_heap: list[tuple[float, int, str]] = []
-        self.decoder_heap: list[tuple[float, int, str]] = []
+        self.prefillers: dict[str, _ServerEntry] = {}
+        self.decoders: dict[str, _ServerEntry] = {}
+        self.prefiller_heap: list[tuple[float, int, int, str]] = []
+        self.decoder_heap: list[tuple[float, int, int, str]] = []
         self._ordinal = 0
 
         for host, port in prefiller_instances:
-            self._add_server_no_lock(InstanceType.PREFILL, host, port)
+            self._add_server_no_lock(_IS_PREFILL, host, port)
         for host, port in decoder_instances:
-            self._add_server_no_lock(InstanceType.DECODE, host, port)
+            self._add_server_no_lock(_IS_DECODE, host, port)
 
-    def _server_map(self, instance_type: str) -> dict[str, dict[str, Any]]:
-        return self.prefillers if instance_type == InstanceType.PREFILL else self.decoders
+    def _server_map(self, is_prefill: bool) -> dict[str, _ServerEntry]:
+        return self.prefillers if is_prefill else self.decoders
 
-    def _heap(self, instance_type: str) -> list[tuple[float, int, str]]:
-        return self.prefiller_heap if instance_type == InstanceType.PREFILL else self.decoder_heap
+    def _heap_ref(self, is_prefill: bool) -> list[tuple[float, int, int, str]]:
+        return self.prefiller_heap if is_prefill else self.decoder_heap
+
+    def _tainted_ref(self, is_prefill: bool) -> set[str]:
+        return self.tainted_prefillers if is_prefill else self.tainted_decoders
 
     def _next_ordinal(self) -> int:
         ordinal = self._ordinal
         self._ordinal += 1
         return ordinal
 
-    def _priority_no_lock(self, instance_type: str, key: str) -> float:
-        server = self._server_map(instance_type)[key]
-        if instance_type == InstanceType.PREFILL:
-            if key in self.tainted_prefillers:
-                return TAINT_PRIORITY
-            return float(server["active_tokens"]) + float(server["active_kv_cache"]) * 0.3
-        if key in self.tainted_decoders:
+    def _priority(self, is_prefill: bool, entry: _ServerEntry, key: str) -> float:
+        if key in (self.tainted_prefillers if is_prefill else self.tainted_decoders):
             return TAINT_PRIORITY
-        return float(server["active_tokens"])
+        if is_prefill:
+            return entry.active_tokens + entry.active_kv_cache * 0.3
+        return entry.active_tokens
 
-    def _rebuild_heap_no_lock(self, instance_type: str) -> None:
+    def _push_heap(self, is_prefill: bool, key: str) -> None:
+        entry = self._server_map(is_prefill)[key]
+        entry.heap_seq += 1
+        heap = self._heap_ref(is_prefill)
+        heapq.heappush(heap, (self._priority(is_prefill, entry, key), entry.ordinal, entry.heap_seq, key))
+        if len(heap) > 2 * len(self._server_map(is_prefill)):
+            self._compact_heap_no_lock(is_prefill)
+
+    def _pop_valid(self, is_prefill: bool) -> str:
+        servers = self._server_map(is_prefill)
+        heap = self._heap_ref(is_prefill)
+        while heap:
+            _, _, seq, key = heapq.heappop(heap)
+            if key not in servers:
+                continue
+            entry = servers[key]
+            if entry.heap_seq == seq:
+                return key
+        raise RuntimeError("No available servers")
+
+    def _rebuild_heap_no_lock(self, is_prefill: bool) -> None:
         heap = []
-        for key, state in self._server_map(instance_type).items():
-            heap.append((self._priority_no_lock(instance_type, key), state["ordinal"], key))
+        for key, entry in self._server_map(is_prefill).items():
+            entry.heap_seq += 1
+            heap.append((self._priority(is_prefill, entry, key), entry.ordinal, entry.heap_seq, key))
         heapq.heapify(heap)
-        if instance_type == InstanceType.PREFILL:
+        if is_prefill:
             self.prefiller_heap = heap
         else:
             self.decoder_heap = heap
 
-    def _add_server_no_lock(self, instance_type: str, host: str, port: int) -> bool:
+    def _compact_heap_no_lock(self, is_prefill: bool) -> None:
+        servers = self._server_map(is_prefill)
+        heap = []
+        for key, entry in servers.items():
+            heap.append((self._priority(is_prefill, entry, key), entry.ordinal, entry.heap_seq, key))
+        heapq.heapify(heap)
+        if is_prefill:
+            self.prefiller_heap = heap
+        else:
+            self.decoder_heap = heap
+
+    def _add_server_no_lock(self, is_prefill: bool, host: str, port: int) -> bool:
         key = server_key(host, port)
-        servers = self._server_map(instance_type)
+        servers = self._server_map(is_prefill)
         if key in servers:
             return False
-        servers[key] = {
-            "host": host,
-            "port": int(port),
-            "active_tokens": 0.0,
-            "active_kv_cache": 0.0,
-            "ordinal": self._next_ordinal(),
-        }
-        heapq.heappush(self._heap(instance_type), (0.0, servers[key]["ordinal"], key))
+        ordinal = self._next_ordinal()
+        servers[key] = _ServerEntry(host, int(port), ordinal)
+        self._push_heap(is_prefill, key)
         return True
 
     def get_snapshot(self) -> dict[str, list[dict[str, Any]]]:
         with self._lock:
             return {
                 "prefill_instances": [
-                    {"host": state["host"], "port": state["port"]}
-                    for _, state in sorted(self.prefillers.items(), key=lambda item: item[1]["ordinal"])
+                    {"host": e.host, "port": e.port}
+                    for _, e in sorted(self.prefillers.items(), key=lambda item: item[1].ordinal)
                 ],
                 "decode_instances": [
-                    {"host": state["host"], "port": state["port"]}
-                    for _, state in sorted(self.decoders.items(), key=lambda item: item[1]["ordinal"])
+                    {"host": e.host, "port": e.port}
+                    for _, e in sorted(self.decoders.items(), key=lambda item: item[1].ordinal)
                 ],
             }
 
@@ -326,35 +374,28 @@ class SharedProxyScheduler:
 
     def start_request_and_reserve_prefiller_kv(self, token_count: float) -> dict[str, Any]:
         with self._lock:
-            prefiller = self._reserve_prefiller_kv_no_lock(token_count)
+            key = self._pop_valid(_IS_PREFILL)
+            entry = self.prefillers[key]
+            entry.active_kv_cache += token_count
+            self._push_heap(_IS_PREFILL, key)
             self.request_num += 1
-            return prefiller
+            return {"key": key, "host": entry.host, "port": entry.port}
 
     def select_prefiller(self, token_count: float) -> dict[str, Any]:
         with self._lock:
-            if not self.prefiller_heap:
-                raise RuntimeError("No prefiller servers available")
-            _, _, key = heapq.heappop(self.prefiller_heap)
-            state = self.prefillers[key]
-            state["active_tokens"] += token_count
-            state["active_kv_cache"] += token_count
-            heapq.heappush(
-                self.prefiller_heap,
-                (self._priority_no_lock(InstanceType.PREFILL, key), state["ordinal"], key),
-            )
-            return {"key": key, "host": state["host"], "port": state["port"]}
+            key = self._pop_valid(_IS_PREFILL)
+            entry = self.prefillers[key]
+            entry.active_tokens += token_count
+            entry.active_kv_cache += token_count
+            self._push_heap(_IS_PREFILL, key)
+            return {"key": key, "host": entry.host, "port": entry.port}
 
     def _reserve_prefiller_kv_no_lock(self, token_count: float) -> dict[str, Any]:
-        if not self.prefiller_heap:
-            raise RuntimeError("No prefiller servers available")
-        _, _, key = heapq.heappop(self.prefiller_heap)
-        state = self.prefillers[key]
-        state["active_kv_cache"] += token_count
-        heapq.heappush(
-            self.prefiller_heap,
-            (self._priority_no_lock(InstanceType.PREFILL, key), state["ordinal"], key),
-        )
-        return {"key": key, "host": state["host"], "port": state["port"]}
+        key = self._pop_valid(_IS_PREFILL)
+        entry = self.prefillers[key]
+        entry.active_kv_cache += token_count
+        self._push_heap(_IS_PREFILL, key)
+        return {"key": key, "host": entry.host, "port": entry.port}
 
     def reserve_prefiller_kv(self, token_count: float) -> dict[str, Any]:
         """Select a prefiller and reserve only its KV pressure.
@@ -370,8 +411,8 @@ class SharedProxyScheduler:
         with self._lock:
             if key not in self.prefillers:
                 return
-            self.prefillers[key]["active_tokens"] -= token_count
-            self._rebuild_heap_no_lock(InstanceType.PREFILL)
+            self.prefillers[key].active_tokens -= token_count
+            self._push_heap(_IS_PREFILL, key)
 
     def release_prefiller_kv(self, key: str, token_count: float) -> None:
         with self._lock:
@@ -380,32 +421,27 @@ class SharedProxyScheduler:
     def _release_prefiller_kv_no_lock(self, key: str, token_count: float) -> None:
         if key not in self.prefillers:
             return
-        state = self.prefillers[key]
-        state["active_kv_cache"] = max(0.0, float(state["active_kv_cache"]) - token_count)
-        self._rebuild_heap_no_lock(InstanceType.PREFILL)
+        entry = self.prefillers[key]
+        entry.active_kv_cache = max(0.0, entry.active_kv_cache - token_count)
+        self._push_heap(_IS_PREFILL, key)
 
     def select_decoder(self, token_count: float) -> dict[str, Any]:
         with self._lock:
             return self._select_decoder_no_lock(token_count)
 
     def _select_decoder_no_lock(self, token_count: float) -> dict[str, Any]:
-        if not self.decoder_heap:
-            raise RuntimeError("No decoder servers available")
-        _, _, key = heapq.heappop(self.decoder_heap)
-        state = self.decoders[key]
-        state["active_tokens"] += token_count
-        heapq.heappush(
-            self.decoder_heap,
-            (self._priority_no_lock(InstanceType.DECODE, key), state["ordinal"], key),
-        )
-        return {"key": key, "host": state["host"], "port": state["port"]}
+        key = self._pop_valid(_IS_DECODE)
+        entry = self.decoders[key]
+        entry.active_tokens += token_count
+        self._push_heap(_IS_DECODE, key)
+        return {"key": key, "host": entry.host, "port": entry.port}
 
     def release_decoder(self, key: str, token_count: float) -> None:
         with self._lock:
             if key not in self.decoders:
                 return
-            self.decoders[key]["active_tokens"] -= token_count
-            self._rebuild_heap_no_lock(InstanceType.DECODE)
+            self.decoders[key].active_tokens -= token_count
+            self._push_heap(_IS_DECODE, key)
 
     def finish_request(
         self,
@@ -417,15 +453,12 @@ class SharedProxyScheduler:
     ) -> None:
         with self._lock:
             if release_prefiller_kv and prefiller_key in self.prefillers:
-                prefiller = self.prefillers[prefiller_key]
-                prefiller["active_kv_cache"] = max(
-                    0.0,
-                    float(prefiller["active_kv_cache"]) - prefiller_token_count,
-                )
-                self._rebuild_heap_no_lock(InstanceType.PREFILL)
+                entry = self.prefillers[prefiller_key]
+                entry.active_kv_cache = max(0.0, entry.active_kv_cache - prefiller_token_count)
+                self._push_heap(_IS_PREFILL, prefiller_key)
             if decoder_key in self.decoders:
-                self.decoders[decoder_key]["active_tokens"] -= decoder_token_count
-                self._rebuild_heap_no_lock(InstanceType.DECODE)
+                self.decoders[decoder_key].active_tokens -= decoder_token_count
+                self._push_heap(_IS_DECODE, decoder_key)
             self.request_num = max(0, self.request_num - 1)
 
     def get_waiting_nodes(self) -> dict[str, tuple[str, tuple[str, int], int]]:
@@ -433,10 +466,11 @@ class SharedProxyScheduler:
             return dict(self.waiting_nodes)
 
     def add_instances(self, instance_type: str, instances: list[tuple[str, int]]) -> tuple[list[str], list[str]]:
+        is_prefill = instance_type == InstanceType.PREFILL
         added_nodes: list[str] = []
         waiting_nodes: list[str] = []
         with self._lock:
-            servers = self._server_map(instance_type)
+            servers = self._server_map(is_prefill)
             for host, port in instances:
                 key = server_key(host, port)
                 if key in servers or key in self.waiting_nodes:
@@ -453,18 +487,16 @@ class SharedProxyScheduler:
             self.waiting_nodes[key] = (instance_type, server, retry_count)
 
     def activate_waiting_instance(self, instance_type: str, host: str, port: int) -> None:
+        is_prefill = instance_type == InstanceType.PREFILL
         with self._lock:
             key = server_key(host, port)
             self.waiting_nodes.pop(key, None)
-            if instance_type == InstanceType.PREFILL and key in self.tainted_prefillers:
-                self.tainted_prefillers.discard(key)
-                self._rebuild_heap_no_lock(InstanceType.PREFILL)
+            tainted = self._tainted_ref(is_prefill)
+            if key in tainted:
+                tainted.discard(key)
+                self._push_heap(is_prefill, key)
                 return
-            if instance_type == InstanceType.DECODE and key in self.tainted_decoders:
-                self.tainted_decoders.discard(key)
-                self._rebuild_heap_no_lock(InstanceType.DECODE)
-                return
-            if self._add_server_no_lock(instance_type, host, port):
+            if self._add_server_no_lock(is_prefill, host, port):
                 self.print_status(f"Add {instance_type} instance: {host}:{port}.")
 
     def drop_waiting_instance(self, key: str) -> None:
@@ -472,57 +504,49 @@ class SharedProxyScheduler:
             self.waiting_nodes.pop(key, None)
 
     def remove_prefillers(self, instances: list[tuple[str, int]]) -> bool:
-        return self._remove_instances(InstanceType.PREFILL, instances)
+        return self._remove_instances(_IS_PREFILL, instances)
 
     def remove_decoders(self, instances: list[tuple[str, int]]) -> bool:
-        return self._remove_instances(InstanceType.DECODE, instances)
+        return self._remove_instances(_IS_DECODE, instances)
 
-    def _remove_instances(self, instance_type: str, instances: list[tuple[str, int]]) -> bool:
+    def _remove_instances(self, is_prefill: bool, instances: list[tuple[str, int]]) -> bool:
         if not instances:
             return False
         keys = {server_key(host, port) for host, port in instances}
         with self._lock:
             if self.request_num > 0:
-                if instance_type == InstanceType.PREFILL:
-                    self.tainted_prefillers.update(keys)
-                else:
-                    self.tainted_decoders.update(keys)
-                self._rebuild_heap_no_lock(instance_type)
-                logger.warning("Start to taint %s instances %s.", instance_type, sorted(keys))
+                tainted = self._tainted_ref(is_prefill)
+                tainted.update(keys)
+                self._rebuild_heap_no_lock(is_prefill)
+                logger.warning("Start to taint %s instances %s.", "prefill" if is_prefill else "decode", sorted(keys))
                 return True
 
             removed = False
-            servers = self._server_map(instance_type)
+            servers = self._server_map(is_prefill)
             for key in keys:
                 removed = servers.pop(key, None) is not None or removed
                 self.waiting_nodes.pop(key, None)
-                if instance_type == InstanceType.PREFILL:
-                    self.tainted_prefillers.discard(key)
-                else:
-                    self.tainted_decoders.discard(key)
+            self._tainted_ref(is_prefill).difference_update(keys)
             if removed:
-                self._rebuild_heap_no_lock(instance_type)
-                self.print_status(f"Remove {instance_type} instances: {sorted(keys)}.")
+                self._rebuild_heap_no_lock(is_prefill)
+                self.print_status(f"Remove {'prefill' if is_prefill else 'decode'} instances: {sorted(keys)}.")
             return False
 
     def finalize_tainted_instances(self) -> None:
         with self._lock:
             if self.request_num != 0:
                 return
-            if self.tainted_prefillers:
-                keys = list(self.tainted_prefillers)
+            for is_prefill in (_IS_PREFILL, _IS_DECODE):
+                tainted = self._tainted_ref(is_prefill)
+                if not tainted:
+                    continue
+                keys = list(tainted)
+                servers = self._server_map(is_prefill)
                 for key in keys:
-                    self.prefillers.pop(key, None)
-                self.tainted_prefillers.clear()
-                self._rebuild_heap_no_lock(InstanceType.PREFILL)
-                self.print_status(f"Remove prefiller instances after drain: {keys}.")
-            if self.tainted_decoders:
-                keys = list(self.tainted_decoders)
-                for key in keys:
-                    self.decoders.pop(key, None)
-                self.tainted_decoders.clear()
-                self._rebuild_heap_no_lock(InstanceType.DECODE)
-                self.print_status(f"Remove decoder instances after drain: {keys}.")
+                    servers.pop(key, None)
+                tainted.clear()
+                self._rebuild_heap_no_lock(is_prefill)
+                self.print_status(f"Remove {'prefiller' if is_prefill else 'decoder'} instances after drain: {keys}.")
 
 
 class SchedulerManager(BaseManager):
@@ -543,6 +567,40 @@ class WorkerRuntime:
         self.scheduler = scheduler
         self.prefiller_clients: dict[str, httpx.AsyncClient] = {}
         self.decoder_clients: dict[str, httpx.AsyncClient] = {}
+        self._async_lock = asyncio.Lock()
+
+    async def start_request_and_reserve_prefiller_kv(self, token_count: float) -> dict[str, Any]:
+        async with self._async_lock:
+            return self.scheduler.start_request_and_reserve_prefiller_kv(token_count)
+
+    async def reserve_prefiller_kv(self, token_count: float) -> dict[str, Any]:
+        async with self._async_lock:
+            return self.scheduler.reserve_prefiller_kv(token_count)
+
+    async def release_prefiller_kv(self, key: str, token_count: float) -> None:
+        async with self._async_lock:
+            self.scheduler.release_prefiller_kv(key, token_count)
+
+    async def select_decoder(self, token_count: float) -> dict[str, Any]:
+        async with self._async_lock:
+            return self.scheduler.select_decoder(token_count)
+
+    async def release_decoder(self, key: str, token_count: float) -> None:
+        async with self._async_lock:
+            self.scheduler.release_decoder(key, token_count)
+
+    async def finish_request(
+        self,
+        prefiller_key: str | None,
+        prefiller_token_count: float,
+        decoder_key: str | None,
+        decoder_token_count: float,
+        release_prefiller_kv: bool,
+    ) -> None:
+        async with self._async_lock:
+            self.scheduler.finish_request(
+                prefiller_key, prefiller_token_count, decoder_key, decoder_token_count, release_prefiller_kv
+            )
 
     async def sync_clients(self) -> None:
         snapshot = self.scheduler.get_snapshot()
@@ -736,22 +794,38 @@ def start_shared_scheduler(args) -> None:
     global shared_scheduler
     shared_scheduler = SharedProxyScheduler(args.prefiller_instances, args.decoder_instances)
     NodeListener(shared_scheduler)
-    authkey = os.urandom(16)
-    manager = SchedulerManager(address=("127.0.0.1", 0), authkey=authkey)
-    server = manager.get_server()
-    thread = threading.Thread(target=server.serve_forever, daemon=True)
-    thread.start()
-    host, port = server.address
-    os.environ[MANAGER_CONFIG_ENV] = json.dumps(
-        {"host": host, "port": port, "authkey": base64.b64encode(authkey).decode("ascii")}
-    )
     os.environ[ARGS_CONFIG_ENV] = json.dumps(serialize_args(args))
+    if args.workers > 1:
+        authkey = os.urandom(16)
+        manager = SchedulerManager(address=("127.0.0.1", 0), authkey=authkey)
+        server = manager.get_server()
+        thread = threading.Thread(target=server.serve_forever, daemon=True)
+        thread.start()
+        host, port = server.address
+        os.environ[MANAGER_CONFIG_ENV] = json.dumps(
+            {"host": host, "port": port, "authkey": base64.b64encode(authkey).decode("ascii")}
+        )
+    else:
+        os.environ.pop(MANAGER_CONFIG_ENV, None)
+
+
+def _ensure_scheduler(args) -> SharedProxyScheduler:
+    global shared_scheduler
+    if shared_scheduler is not None:
+        return shared_scheduler
+    shared_scheduler = SharedProxyScheduler(args.prefiller_instances, args.decoder_instances)
+    NodeListener(shared_scheduler)
+    return shared_scheduler
 
 
 @asynccontextmanager
 async def lifespan(_app: FastAPI):
     global runtime
-    scheduler = connect_shared_scheduler()
+    args = load_global_args_from_env()
+    if args.workers > 1:
+        scheduler = connect_shared_scheduler()
+    else:
+        scheduler = _ensure_scheduler(args)
     runtime = WorkerRuntime(scheduler)
     await runtime.sync_clients()
     snapshot = scheduler.get_snapshot()
@@ -881,14 +955,13 @@ async def handle_select_instance(
     request_length: int,
     start_request: bool,
 ) -> InstanceInfo:
-    scheduler = runtime.scheduler
     prefiller_score = calculate_prefill_score(request_length)
     decoder_score = calculate_decode_score(request_length)
     request_id = next_req_id()
     if start_request:
-        prefiller = scheduler.start_request_and_reserve_prefiller_kv(prefiller_score)
+        prefiller = await runtime.start_request_and_reserve_prefiller_kv(prefiller_score)
     else:
-        prefiller = scheduler.reserve_prefiller_kv(prefiller_score)
+        prefiller = await runtime.reserve_prefiller_kv(prefiller_score)
     prefiller_key = prefiller["key"]
     prefiller_client = await get_prefiller_client(prefiller_key)
 
@@ -904,9 +977,9 @@ async def handle_select_instance(
         )
     except Exception:
         if start_request:
-            scheduler.finish_request(prefiller_key, prefiller_score, None, 0.0, release_prefiller_kv=True)
+            await runtime.finish_request(prefiller_key, prefiller_score, None, 0.0, release_prefiller_kv=True)
         else:
-            scheduler.release_prefiller_kv(prefiller_key, prefiller_score)
+            await runtime.release_prefiller_kv(prefiller_key, prefiller_score)
         raise
 
     response_json = response.json()
@@ -915,12 +988,12 @@ async def handle_select_instance(
         req_data["kv_transfer_params"] = kv_transfer_params
 
     try:
-        decoder = scheduler.select_decoder(decoder_score)
+        decoder = await runtime.select_decoder(decoder_score)
     except Exception:
         if start_request:
-            scheduler.finish_request(prefiller_key, prefiller_score, None, 0.0, release_prefiller_kv=True)
+            await runtime.finish_request(prefiller_key, prefiller_score, None, 0.0, release_prefiller_kv=True)
         else:
-            scheduler.release_prefiller_kv(prefiller_key, prefiller_score)
+            await runtime.release_prefiller_kv(prefiller_key, prefiller_score)
         raise
     decoder_key = decoder["key"]
     decoder_client = await get_decoder_client(decoder_key)
@@ -948,13 +1021,12 @@ async def select_recompute_instance(
     previous_instance: InstanceInfo,
 ) -> InstanceInfo:
     """Release the old decoder before assigning a new instance for recompute."""
-    runtime.scheduler.release_prefiller_kv(previous_instance.prefiller_key, previous_instance.prefiller_score)
-    runtime.scheduler.release_decoder(previous_instance.decoder_key, previous_instance.decoder_score)
+    await runtime.release_prefiller_kv(previous_instance.prefiller_key, previous_instance.prefiller_score)
+    await runtime.release_decoder(previous_instance.decoder_key, previous_instance.decoder_score)
     return await handle_select_instance(api, req_data, request_length, start_request=False)
 
 
 async def handle_completions_impl(api: str, request: Request):
-    scheduler = runtime.scheduler
     request_released = False
     try:
         req_data = await request.json()
@@ -982,10 +1054,10 @@ async def handle_completions_impl(api: str, request: Request):
             retry = True
             completion_tokens = 0
 
-            def release_prefiller_kv_once() -> None:
+            async def release_prefiller_kv_once() -> None:
                 nonlocal released_kv
                 if not released_kv:
-                    scheduler.release_prefiller_kv(instance_info.prefiller_key, instance_info.prefiller_score)
+                    await runtime.release_prefiller_kv(instance_info.prefiller_key, instance_info.prefiller_score)
                     released_kv = True
 
             try:
@@ -1000,8 +1072,8 @@ async def handle_completions_impl(api: str, request: Request):
                         max_retries=global_args.max_retries,
                         base_delay=global_args.retry_delay,
                     ):
-                        if chunk:
-                            release_prefiller_kv_once()
+                        if not released_kv and chunk:
+                            await release_prefiller_kv_once()
                         try:
                             chunk_str = chunk.decode("utf-8").strip()
                         except UnicodeDecodeError:
@@ -1011,7 +1083,7 @@ async def handle_completions_impl(api: str, request: Request):
                         if not chunk_str:
                             continue
                         if chunk_str.startswith("data: "):
-                            chunk_str = chunk_str[len("data: ") :]
+                            chunk_str = chunk_str[len("data: "):]
                         try:
                             chunk_json = json.loads(chunk_str)
                         except json.JSONDecodeError:
@@ -1046,10 +1118,7 @@ async def handle_completions_impl(api: str, request: Request):
                             req_data["max_tokens"] = origin_max_tokens - completion_tokens + retry_count
                             tmp_request_length = len(json.dumps(req_data).encode("utf-8"))
                             instance_info = await select_recompute_instance(
-                                api,
-                                req_data,
-                                tmp_request_length,
-                                instance_info,
+                                api, req_data, tmp_request_length, instance_info
                             )
                             released_kv = False
                             break
@@ -1077,7 +1146,7 @@ async def handle_completions_impl(api: str, request: Request):
                     instance_info.request_id,
                 )
             finally:
-                scheduler.finish_request(
+                await runtime.finish_request(
                     instance_info.prefiller_key,
                     instance_info.prefiller_score,
                     instance_info.decoder_key,
@@ -1096,7 +1165,7 @@ async def handle_completions_impl(api: str, request: Request):
         print(f"Error occurred in disagg prefill proxy server - {api} endpoint")
         print("".join(traceback.format_exception(*exc_info)))
         if not request_released and "instance_info" in locals():
-            scheduler.finish_request(
+            await runtime.finish_request(
                 instance_info.prefiller_key,
                 instance_info.prefiller_score,
                 instance_info.decoder_key,
