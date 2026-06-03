@@ -6,6 +6,7 @@ from vllm.config import VllmConfig
 from vllm.logger import logger
 
 from vllm_ascend.ascend_forward_context import _EXTRA_CTX
+from vllm_ascend.expert_offload.lrc_policy import LRCExpertCachePolicy
 from vllm_ascend.utils import ACL_FORMAT_FRACTAL_NZ
 
 
@@ -61,6 +62,14 @@ class ExpertOffloadManager:
 
         self.num_device_layers = self.offload_config.num_device_layers
         self.num_total_experts = None  # set in create_weights
+        self.cache_policy: LRCExpertCachePolicy | None = None
+        self.cache_requests: list[int] = []
+        self.cache_hits: list[int] = []
+        self.cache_misses: list[int] = []
+        self.cache_calls: list[int] = []
+        self.last_hit_experts: list[list[int]] = []
+        self.last_miss_experts: list[list[int]] = []
+        self._debug_update_weights = self.offload_config.cache_debug_log_updates
 
         ExpertOffloadManager._instance = self
 
@@ -108,9 +117,39 @@ class ExpertOffloadManager:
         self.process_weights_after_loading()
 
         self.num_total_experts = num_total_experts
+        if self.offload_config.cache_policy_enabled:
+            self.cache_requests = [0 for _ in range(num_moe_layers)]
+            self.cache_hits = [0 for _ in range(num_moe_layers)]
+            self.cache_misses = [0 for _ in range(num_moe_layers)]
+            self.cache_calls = [0 for _ in range(num_moe_layers)]
+            self.last_hit_experts = [[] for _ in range(num_moe_layers)]
+            self.last_miss_experts = [[] for _ in range(num_moe_layers)]
+            self.cache_policy = LRCExpertCachePolicy(
+                num_layers=num_moe_layers,
+                num_experts=num_total_experts,
+                cache_size=self.num_device_experts,
+                topk=self.topk,
+                recent_window=self.offload_config.cache_recent_window,
+                ema_beta=self.offload_config.cache_ema_beta,
+                recent_weight=self.offload_config.cache_recent_weight,
+                ema_weight=self.offload_config.cache_ema_weight,
+                router_weight=self.offload_config.cache_router_weight,
+                age_weight=self.offload_config.cache_age_weight,
+            )
 
         # update weights related buffers
-        self.topk_ids_h = torch.zeros([self.offload_threshold, self.topk], dtype=torch.int32, device='cpu', pin_memory=True)
+        self.topk_ids_h = torch.zeros(
+            [self.offload_threshold, self.topk],
+            dtype=torch.int32,
+            device="cpu",
+            pin_memory=True,
+        )
+        self.topk_weights_h = torch.zeros(
+            [self.offload_threshold, self.topk],
+            dtype=torch.float32,
+            device="cpu",
+            pin_memory=True,
+        )
         self.log2phy_h = torch.zeros(num_total_experts, dtype=torch.int32, device='cpu', pin_memory=True)
         self.log2phy_np = self.log2phy_h.numpy()
 
@@ -493,7 +532,8 @@ class ExpertOffloadManager:
     # ------------------------------------------------------------------ #
 
     def update_weights(self, layer, topk_ids: torch.Tensor,
-                        log2phy: torch.Tensor) -> int:
+                        log2phy: torch.Tensor,
+                        topk_weights: torch.Tensor | None = None) -> int:
         """Incrementally page in needed experts, overwriting unused slots.
 
         Routes to prefill pool (full-overwrite) when num_tokens exceeds
@@ -528,6 +568,11 @@ class ExpertOffloadManager:
             return 0
 
         topk_ids_h = self.topk_ids_h[:num_tokens]
+        topk_weights_h = None
+        if (self.cache_policy is not None and topk_weights is not None and not _EXTRA_CTX.capturing
+                and self.offload_config.cache_router_weight != 0):
+            topk_weights_h = self.topk_weights_h[:num_tokens]
+            topk_weights_h.copy_(topk_weights.to(dtype=torch.float32), non_blocking=False)
         log2phy_h = self.log2phy_h
         log2phy_np = self.log2phy_np
         topk_ids_h.copy_(topk_ids, non_blocking=_EXTRA_CTX.capturing)
@@ -544,6 +589,7 @@ class ExpertOffloadManager:
             log2phy_np,
             layer,
             layer_idx,
+            topk_weights_h,
         )
         if _EXTRA_CTX.capturing:
             torch_npu.npu._launch_host_func(
@@ -562,10 +608,18 @@ class ExpertOffloadManager:
             log2phy_np,
             layer,
             layer_idx,
+            topk_weights_h,
         ) = args
         with torch_npu.npu.stream(self.load_stream):
-            unique_experts = topk_ids_h.unique().tolist()
-            needed = set(unique_experts)
+            if self.cache_policy is not None:
+                router_scores = topk_weights_h.tolist() if topk_weights_h is not None else None
+                needed = self.cache_policy.observe(
+                    layer_idx,
+                    topk_ids_h.tolist(),
+                    router_scores=router_scores,
+                )
+            else:
+                needed = set(topk_ids_h.unique().tolist())
 
             # Build reverse map: slot → expert_id currently occupying it
             slot_owner: dict[int, int] = {}
@@ -576,37 +630,53 @@ class ExpertOffloadManager:
             on_device = set(slot_owner.values())
             already_there = needed & on_device           # no-op
             need_to_load = needed - already_there          # CPU→NPU copy
+            if self.cache_policy is not None:
+                self._record_cache_stats(layer_idx, already_there, need_to_load, needed, on_device)
             reusable_slots = [s for s, e in slot_owner.items()
                             if e not in needed]          # slots to recycle
 
-            # Debug: print routing info for first 30 calls
-            if not hasattr(self, '_dbg_call'):
-                self._dbg_call = 0
-            if self._dbg_call < 10000:
+            if self.cache_policy is not None and self._debug_update_weights:
                 import logging
                 _dbg = logging.getLogger(__name__)
-                _dbg.warning("[UPDATE-W] l=%d call=%d topk_shape=%s |needed|=%d |on_dev|=%d |to_load|=%d reusable=%d needed=%s",
-                            layer_idx, self._dbg_call, tuple(topk_ids_h.shape),
-                            len(needed), len(on_device),
-                            len(need_to_load), len(reusable_slots),
-                            sorted(needed)[:30])
+                _dbg.warning(
+                    "[UPDATE-W] l=%d call=%d topk_shape=%s |needed|=%d |on_dev|=%d "
+                    "|to_load|=%d reusable=%d needed=%s",
+                    layer_idx, self.cache_calls[layer_idx], tuple(topk_ids_h.shape),
+                    len(needed), len(on_device),
+                    len(need_to_load), len(reusable_slots),
+                    sorted(needed)[:30],
+                )
+                _dbg.warning("[UPDATE-W] l=%d cache_hit=%s cache_miss=%s",
+                             layer_idx, sorted(already_there), sorted(need_to_load))
                 if need_to_load and len(need_to_load) > len(reusable_slots):
                     _dbg.warning("[UPDATE-W] l=%d SHORTFALL: need %d load but only %d slots, to_load=%s",
                                 layer_idx, len(need_to_load), len(reusable_slots),
                                 sorted(need_to_load)[:20])
-                self._dbg_call += 1
 
             dev = layer.w13_weight.device
             n_copies = 0
             for eid in need_to_load:
-                if not reusable_slots:
+                if self.cache_policy is not None:
+                    victim = self.cache_policy.choose_victim(
+                        layer_idx,
+                        slot_owner,
+                        protected=needed,
+                    )
+                    slot = int(log2phy_np[victim]) if victim is not None else -1
+                elif reusable_slots:
+                    slot = reusable_slots.pop()
+                    victim = slot_owner[slot]
+                else:
+                    slot = -1
+                    victim = None
+
+                if slot < 0:
                     import logging
                     logging.getLogger(__name__).warning(
                         "[UPDATE-W] l=%d NO SLOTS: %d experts could not be loaded, missed=%s",
                         layer_idx, len(need_to_load) - n_copies,
                         sorted(list(need_to_load))[n_copies:][:20])
                     break  # no free slots — should not happen in normal usage
-                slot = reusable_slots.pop()
                 # Copy weights from CPU to NPU
                 layer.w13_weight.data.untyped_storage()[slot * self.w13_element_num : (slot + 1) * self.w13_element_num].copy_(
                     self.w13_weights_cpu[layer_idx][eid].untyped_storage()
@@ -634,9 +704,13 @@ class ExpertOffloadManager:
                     layer.w13_weight_scale_fp32[slot].copy_(
                         layer.w13_weight_scale.data[slot].to(torch.float32))
                 # Update mapping
-                log2phy_np[slot_owner[slot]] = -1   # evict old occupant
+                if victim is None:
+                    victim = slot_owner[slot]
+                log2phy_np[victim] = -1             # evict old occupant
                 log2phy_np[eid] = slot               # assign slot to new expert
                 slot_owner[slot] = eid
+                if slot in reusable_slots:
+                    reusable_slots.remove(slot)
                 n_copies += 1
 
             self.load_stream.synchronize()
@@ -644,6 +718,45 @@ class ExpertOffloadManager:
     # ------------------------------------------------------------------ #
     #  Internal helpers                                                    #
     # ------------------------------------------------------------------ #
+
+    def _record_cache_stats(
+        self,
+        layer_idx: int,
+        hit_experts: set[int],
+        miss_experts: set[int],
+        needed: set[int],
+        on_device: set[int],
+    ):
+        self.cache_calls[layer_idx] += 1
+        self.cache_requests[layer_idx] += len(needed)
+        self.cache_hits[layer_idx] += len(hit_experts)
+        self.cache_misses[layer_idx] += len(miss_experts)
+        self.last_hit_experts[layer_idx] = sorted(hit_experts)
+        self.last_miss_experts[layer_idx] = sorted(miss_experts)
+
+        interval = self.offload_config.cache_stats_log_interval
+        if interval == 0 or self.cache_calls[layer_idx] % interval != 0:
+            return
+
+        requests = self.cache_requests[layer_idx]
+        hit_rate = self.cache_hits[layer_idx] / requests if requests else 0.0
+        policy_step = -1
+        if self.cache_policy is not None:
+            policy_step = self.cache_policy.layer_step(layer_idx)
+        logger.info(
+            "[EXPERT-OFFLOAD-CACHE] layer=%d cache_step=%d calls=%d policy_step=%d "
+            "hit_rate=%.4f hits=%d misses=%d last_hit=%s last_miss=%s resident=%s",
+            layer_idx,
+            self.cache_calls[layer_idx],
+            self.cache_calls[layer_idx],
+            policy_step,
+            hit_rate,
+            self.cache_hits[layer_idx],
+            self.cache_misses[layer_idx],
+            self.last_hit_experts[layer_idx],
+            self.last_miss_experts[layer_idx],
+            sorted(on_device),
+        )
 
     def _drain_pending_weights(self):
         if not self._pending_weights:
