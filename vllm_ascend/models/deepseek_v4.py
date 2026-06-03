@@ -45,8 +45,6 @@ from vllm.distributed import (
     tensor_model_parallel_all_gather,
 )
 from vllm.model_executor.layers.activation import SiluAndMul
-from vllm.model_executor.layers.deepseek_compressor import CompressorStateCache
-from vllm.model_executor.layers.deepseek_v4_attention import DeepseekV4IndexerCache
 from vllm.model_executor.layers.fused_moe import FusedMoE
 from vllm.model_executor.layers.layernorm import RMSNorm
 from vllm.model_executor.layers.linear import (
@@ -63,7 +61,6 @@ from vllm.model_executor.models.interfaces import MixtureOfExperts, SupportsEagl
 from vllm.model_executor.models.utils import (
     PPMissingLayer,
     is_pp_missing_parameter,
-    make_empty_intermediate_tensors_factory,
     make_layers,
     maybe_prefix,
     sequence_parallel_chunk,
@@ -78,10 +75,19 @@ from vllm_ascend.ops.rope_dsv4 import ComplexExpRotaryEmbedding
 from vllm_ascend.ops.triton.mul_add import muls_add_triton
 from vllm_ascend.utils import (
     AscendDeviceType,
+    enable_dsa_cp,
     extract_dsv4_layer_index,
     get_ascend_device_type,
     get_dsv4_compress_ratio,
+    vllm_version_is,
 )
+
+if vllm_version_is("0.20.2"):
+    from vllm.model_executor.layers.deepseek_compressor import CompressorStateCache  # type:ignore
+    from vllm.model_executor.layers.deepseek_v4_attention import DeepseekV4IndexerCache  # type:ignore
+else:
+    from vllm.models.deepseek_v4.attention import DeepseekV4IndexerCache
+    from vllm.models.deepseek_v4.compressor import CompressorStateCache
 
 
 def hadamard_transform_ref(x: torch.Tensor, scale=1.0):
@@ -283,8 +289,15 @@ class DeepseekV4MoE(nn.Module):
 
         self.hash = layer_idx < config.num_hash_layers and not is_draft_layer
         if self.hash:
+            # Use zeros instead of empty to avoid garbage values causing
+            # invalid memory access in dummy mode (--load-format="dummy")
             self.gate.tid2eid = nn.Parameter(
-                torch.empty(config.vocab_size, config.num_experts_per_tok, dtype=torch.int32), requires_grad=False
+                torch.zeros(
+                    config.vocab_size,
+                    config.num_experts_per_tok,
+                    dtype=torch.int32,
+                ),
+                requires_grad=False,
             )
             self.gate.e_score_correction_bias = None
         else:
@@ -594,8 +607,10 @@ class DeepseekV4Attention(nn.Module):
         self.eps = config.rms_norm_eps
         self.norm_eps = config.rms_norm_eps
         self.scale = self.head_dim**-0.5
+        self.enable_dsa_cp = enable_dsa_cp()
 
-        self.attn_sink = nn.Parameter(torch.empty(self.n_local_heads, dtype=torch.float32))
+        attn_sink_heads = self.n_heads if self.enable_dsa_cp else self.n_local_heads
+        self.attn_sink = nn.Parameter(torch.empty(attn_sink_heads, dtype=torch.float32))
         self.wq_a = ReplicatedLinear(
             self.dim,
             self.q_lora_rank,
@@ -605,7 +620,8 @@ class DeepseekV4Attention(nn.Module):
             return_bias=False,
         )
         self.q_norm = RMSNorm(self.q_lora_rank, eps=config.rms_norm_eps)
-        self.wq_b = ColumnParallelLinear(
+        wq_b_cls = ReplicatedLinear if self.enable_dsa_cp else ColumnParallelLinear
+        self.wq_b = wq_b_cls(
             self.q_lora_rank,
             self.n_heads * self.head_dim,
             bias=False,
@@ -891,9 +907,23 @@ class DeepseekV4Model(nn.Module):
             self.norm = RMSNorm(config.hidden_size, eps=config.rms_norm_eps)
         else:
             self.norm = PPMissingLayer()
-        self.make_empty_intermediate_tensors = make_empty_intermediate_tensors_factory(
-            ["hidden_states", "residual"], config.hidden_size
-        )
+
+        def make_empty_intermediate_tensors(
+            batch_size: int,
+            dtype: torch.dtype,
+            device: torch.device,
+        ) -> IntermediateTensors:
+            return IntermediateTensors(
+                {
+                    "hidden_states": torch.zeros(
+                        (batch_size, self.hc_mult, config.hidden_size),
+                        dtype=dtype,
+                        device=device,
+                    ),
+                }
+            )
+
+        self.make_empty_intermediate_tensors = make_empty_intermediate_tensors
 
         self.norm_eps = config.rms_norm_eps
         self.hc_eps = config.hc_eps
@@ -942,7 +972,7 @@ class DeepseekV4Model(nn.Module):
         else:
             assert intermediate_tensors is not None
             hidden_states = intermediate_tensors["hidden_states"]
-            residual = intermediate_tensors["residual"]
+            residual = None
 
         # Compute llama 4 scaling once per forward pass if enabled
         llama_4_scaling_config = None
@@ -956,7 +986,8 @@ class DeepseekV4Model(nn.Module):
         else:
             llama_4_scaling = None
 
-        hidden_states = hidden_states.unsqueeze(1).repeat(1, self.hc_mult, 1)  # (b,s, c, h)
+        if get_pp_group().is_first_rank:
+            hidden_states = hidden_states.unsqueeze(1).repeat(1, self.hc_mult, 1)  # (b, s, h) -> (b, s, c, h)
         for layer in islice(self.layers, self.start_layer, self.end_layer):
             hidden_states, residual = layer(positions, hidden_states, residual, llama_4_scaling)
 
@@ -981,9 +1012,14 @@ class DeepseekV4Model(nn.Module):
             num_tokens = hidden_states.shape[0]
             self._mtp_hidden_buffer[:num_tokens].copy_(hidden_states.flatten(1))
 
-        hidden_states = self.hc_head(hidden_states, self.hc_head_fn, self.hc_head_scale, self.hc_head_base)
         if not get_pp_group().is_last_rank:
-            return IntermediateTensors({"hidden_states": hidden_states, "residual": residual})
+            return IntermediateTensors(
+                {
+                    "hidden_states": hidden_states,
+                }
+            )
+
+        hidden_states = self.hc_head(hidden_states, self.hc_head_fn, self.hc_head_scale, self.hc_head_base)
 
         hidden_states = self.norm(hidden_states)
         return hidden_states
@@ -1185,10 +1221,15 @@ class AscendDeepseekV4ForCausalLM(nn.Module, SupportsPP, DeepseekV2MixtureOfExpe
                 name = name.replace(".gate.bias", ".gate.e_score_correction_bias")
 
             if "sink" in name:
-                # Handle attention sinks (distributed across ranks)
+                if is_pp_missing_parameter(name, self):
+                    continue
                 param = params_dict[name]
-                narrow_weight = loaded_weight.narrow(0, head_start, heads_per_rank)
-                param.data.copy_(narrow_weight)
+                if enable_dsa_cp():
+                    param.data.copy_(loaded_weight)
+                else:
+                    # Handle attention sinks (distributed across ranks)
+                    narrow_weight = loaded_weight.narrow(0, head_start, heads_per_rank)
+                    param.data.copy_(narrow_weight)
                 loaded_params.add(name)
                 continue
 
