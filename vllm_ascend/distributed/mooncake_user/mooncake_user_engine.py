@@ -277,8 +277,7 @@ class MooncakeEngine:
                                connector_metadata: MooncakeConnectorMetadata,
                                **kwargs) -> None:
         uids = attn_metadata.additional_metadata["uids"]
-        uids_cnt = len(uids)
-        if uids is None or uids_cnt == 0:
+        if uids is None or len(uids) == 0:
             logger.warning("uids in attn_metadata is None.")
             return
 
