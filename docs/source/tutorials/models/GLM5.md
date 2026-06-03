@@ -750,7 +750,7 @@ Before you start, please
 
 2. prepare the script `run_dp_template.sh` on each node.
 
-    To support a 200k context window on the stage of prefill, the parameter `"layer_sharding": ["q_b_proj"]` needs to be added to `--additional_config` on each prefill node.
+    To support a 200k context window on the stage of prefill, the parameter `"layer_sharding": ["q_b_proj", "o_proj"]` needs to be added to `--additional_config` on each prefill node.
     1. Prefill node 0
 
         ```shell
