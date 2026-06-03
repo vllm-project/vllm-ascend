@@ -12,7 +12,9 @@ from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.backend import (
 )
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.config_data import (
     AscendConnectorMetadata,
+    KeyMetadata,
     LoadSpec,
+    PoolKey,
     ReqMeta,
     RequestTracker,
 )
@@ -57,7 +59,8 @@ class KVPoolScheduler:
         logger.info("KV pool page_size_bytes: %d", page_size_bytes)
         backend_name = vllm_config.kv_transfer_config.kv_connector_extra_config.get(
             "backend", "mooncake")
-        backend = backend_map.get(backend_name.lower())
+        self.backend_name = backend_name.lower()
+        backend = backend_map.get(self.backend_name)
         if backend is None:
             raise ValueError(f"Unsupported KV pool backend: {backend_name}")
         backend_path = backend.get("path")
@@ -70,6 +73,10 @@ class KVPoolScheduler:
 
         model_config = vllm_config.model_config
         self.tp_size = vllm_config.parallel_config.tensor_parallel_size
+        self.pp_size = vllm_config.parallel_config.pipeline_parallel_size
+        self.pp_rank = (
+            vllm_config.parallel_config.rank // self.tp_size
+        ) % self.pp_size
         self.use_mla = False
         if hasattr(model_config, "use_mla") and isinstance(model_config.use_mla, bool) and model_config.use_mla:
             self.use_mla = True
@@ -205,6 +212,125 @@ class KVPoolScheduler:
 
         return block_keys, last_block_key
 
+    def _generate_store_query_keys(
+        self,
+        block_hashes,
+        include_layers: bool = False,
+    ) -> list[list[str]]:
+        head_or_tp_ranks = self.tp_size // self.put_step
+        keys_by_block = []
+        for block_hash in block_hashes:
+            block_keys = []
+            chunk_hash = block_hash if isinstance(block_hash, str) else block_hash.hex()
+            pp_ranks = range(1) if include_layers else range(self.pp_size)
+            for pcp_rank in range(self.pcp_size):
+                for dcp_rank in range(self.dcp_size):
+                    for head_or_tp_rank in range(head_or_tp_ranks):
+                        for pp_rank in pp_ranks:
+                            pool_key = PoolKey(
+                                KeyMetadata(
+                                    self.model_name,
+                                    head_or_tp_rank,
+                                    pcp_rank,
+                                    dcp_rank,
+                                    pp_rank,
+                                ),
+                                chunk_hash,
+                            )
+                            if include_layers:
+                                block_keys.extend(
+                                    layer_key.to_string()
+                                    for layer_key in pool_key.split_layers(
+                                        self.num_layers)
+                                )
+                            else:
+                                block_keys.append(pool_key.to_string())
+            keys_by_block.append(block_keys)
+        return keys_by_block
+
+    def _get_store_lookup_hit_tokens(
+        self,
+        request: "Request",
+        token_len: int,
+        num_computed_tokens: int,
+        include_layers: bool = False,
+    ) -> int:
+        num_blocks = token_len // self._block_size
+        query_start_block = (
+            0 if self.layerwise_offload
+            else min(num_computed_tokens // self._block_size, num_blocks)
+        )
+        block_hashes_to_query = request.block_hashes[
+            query_start_block:num_blocks]
+        if not block_hashes_to_query:
+            return 0
+
+        query_keys_by_block = self._generate_store_query_keys(
+            block_hashes_to_query, include_layers=include_layers)
+        query_keys = [
+            key
+            for block_keys in query_keys_by_block
+            for key in block_keys
+        ]
+        exists_states = self.store_scheduler.batch_is_exist(query_keys)
+        if len(exists_states) != len(query_keys):
+            raise RuntimeError(
+                "KV pool exists check returned unexpected number of "
+                f"states for request {request.request_id}: "
+                f"expected={len(query_keys)}, actual={len(exists_states)}")
+
+        num_queried_hit_blocks = 0
+        offset = 0
+        for block_keys in query_keys_by_block:
+            block_states = exists_states[offset:offset + len(block_keys)]
+            offset += len(block_keys)
+            if all(exists == 1 for exists in block_states):
+                num_queried_hit_blocks += 1
+                continue
+            if any(exists == 0 for exists in block_states):
+                break
+            raise RuntimeError(
+                "KV pool exists check failed for request "
+                f"{request.request_id}: states={exists_states}")
+
+        num_hit_blocks = query_start_block + num_queried_hit_blocks
+        return num_hit_blocks * self._block_size
+
+    def _get_layerwise_gva_hit_tokens(
+        self,
+        request: "Request",
+        token_len: int,
+        num_computed_tokens: int,
+    ) -> int:
+        num_blocks = token_len // self._block_size
+        num_queried_hit_blocks = 0
+        block_hashes_to_check = request.block_hashes[:num_blocks]
+        keys_to_check = [
+            f"{self.model_name}@{bh.hex()}" for bh in block_hashes_to_check
+        ]
+        query_start_block = (
+            0 if self.layerwise_offload
+            else min(num_computed_tokens // self._block_size, num_blocks)
+        )
+        keys_to_query = keys_to_check[query_start_block:]
+        if not keys_to_query:
+            return 0
+        tracker = self._get_or_create_request_tracker(request.request_id)
+        cached_gvas = []
+        key_infos = self.store_scheduler.batch_get_key_info(keys_to_query)
+        for key_info in key_infos:
+            sizes = key_info.size()
+            if sizes and sizes > 0:
+                cached_gvas.append(key_info.gva_list()[0])
+                num_queried_hit_blocks += 1
+            else:
+                break
+        num_hit_blocks = query_start_block + num_queried_hit_blocks
+        tracker.block_keys = keys_to_check[query_start_block:num_hit_blocks]
+        tracker.block_gvas = cached_gvas[:num_queried_hit_blocks]
+        tracker.gva_block_offset = query_start_block
+        return num_hit_blocks * self._block_size
+
     def get_num_new_matched_tokens(
         self,
         request: "Request",
@@ -233,50 +359,20 @@ class KVPoolScheduler:
         if token_len < self._block_size:
             return 0, False
 
-        num_blocks = token_len // self._block_size
-        block_hashes_to_check = request.block_hashes[:num_blocks]
-        keys_to_check = [
-            f"{self.model_name}@{bh.hex()}" for bh in block_hashes_to_check
-        ]
-        query_start_block = (
-            0 if self.layerwise_offload
-            else min(num_computed_tokens // self._block_size, num_blocks)
-        )
-        keys_to_query = keys_to_check[query_start_block:]
-        if not keys_to_query:
+        if self.use_layerwise and self.backend_name == "memcache":
+            num_external_hit_tokens = self._get_layerwise_gva_hit_tokens(
+                request, token_len, num_computed_tokens)
+        else:
+            num_external_hit_tokens = self._get_store_lookup_hit_tokens(
+                request,
+                token_len,
+                num_computed_tokens,
+                include_layers=self.use_layerwise,
+            )
+
+        if num_external_hit_tokens == 0:
             return 0, False
 
-        num_queried_hit_blocks = 0
-        if self.use_layerwise:
-            tracker = self._get_or_create_request_tracker(request.request_id)
-            cached_gvas = []
-            key_infos = self.store_scheduler.batch_get_key_info(
-                keys_to_query)
-            for key_info in key_infos:
-                sizes = key_info.size()
-                if sizes and sizes > 0:
-                    cached_gvas.append(key_info.gva_list()[0])
-                    num_queried_hit_blocks += 1
-                else:
-                    break
-            num_hit_blocks = query_start_block + num_queried_hit_blocks
-            tracker.block_keys = keys_to_check[query_start_block:num_hit_blocks]
-            tracker.block_gvas = cached_gvas[:num_queried_hit_blocks]
-            tracker.gva_block_offset = query_start_block
-        else:
-            exists_states = self.store_scheduler.batch_is_exist(
-                keys_to_query)
-            for exists in exists_states:
-                if exists == 1:
-                    num_queried_hit_blocks += 1
-                    continue
-                if exists == 0:
-                    break
-                raise RuntimeError(
-                    "KV pool exists check failed for request "
-                    f"{request.request_id}: states={exists_states}")
-        num_hit_blocks = query_start_block + num_queried_hit_blocks
-        num_external_hit_tokens = num_hit_blocks * self._block_size
         if num_external_hit_tokens == request.num_tokens:
             num_external_hit_tokens -= 1
 
