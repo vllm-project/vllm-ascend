@@ -234,17 +234,15 @@ def update_full_graph_params(
     draft_attn_metadatas=None,
 ):
     impl_cls = attn_backend.get_impl_cls()
-    update_graph_params = getattr(impl_cls, "update_graph_params", None)
-    if update_graph_params is not None:
-        update_graph_params(
-            update_stream,
-            forward_context,
-            num_tokens,
-            vllm_config,
-            speculative_config,
-            num_dcp_pcp_tokens,
-            draft_attn_metadatas,
-        )
+    impl_cls.update_graph_params(
+        update_stream,
+        forward_context,
+        num_tokens,
+        vllm_config,
+        speculative_config,
+        num_dcp_pcp_tokens,
+        draft_attn_metadatas,
+    )
 
     from vllm_ascend.ops.gdn import update_conv1d_graph_params
 
