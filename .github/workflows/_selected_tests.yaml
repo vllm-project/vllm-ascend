@@ -180,7 +180,14 @@ jobs:
             echo -e "    \033[32m-\033[0m ${target}"
           done
           echo -e "\033[1;34m====================\033[0m"
-          pytest -sv --color=yes ${{ matrix.group.tests }}
+          failed=0
+          for target in ${{ matrix.group.tests }}; do
+            echo -e "\033[1;34m=== Running target: ${target} ===\033[0m"
+            if ! pytest -sv --color=yes "${target}"; then
+              failed=1
+            fi
+          done
+          exit "${failed}"
 
       - name: Run selected tests without device
         if: ${{ steps.check_npu.outputs.has_npu == 'false' }}
@@ -200,4 +207,11 @@ jobs:
             echo -e "    \033[32m-\033[0m ${target}"
           done
           echo -e "\033[1;34m====================\033[0m"
-          pytest -sv --color=yes ${{ matrix.group.tests }}
+          failed=0
+          for target in ${{ matrix.group.tests }}; do
+            echo -e "\033[1;34m=== Running target: ${target} ===\033[0m"
+            if ! pytest -sv --color=yes "${target}"; then
+              failed=1
+            fi
+          done
+          exit "${failed}"
