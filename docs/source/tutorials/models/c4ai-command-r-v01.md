@@ -48,11 +48,7 @@ docker run --rm \
 
 This document is validated on vLLM-Ascend 0.17.0rc2.dev with CANN 8.5.1 on Atlas 800I A2.
 
-```{test} bash
-:sync-yaml: tests/e2e/models/configs/c4ai-command-r-v01.yaml
-:sync-target: test_cases[0].model test_cases[0].server_cmd
-:sync-class: cmd
-
+```bash
 vllm serve "CohereLabs/c4ai-command-r-v01" \
   --served-model-name c4ai-command-r-v01 \
   --tensor-parallel-size 4 \
@@ -100,8 +96,8 @@ Reference values (from `tests/e2e/models/configs/c4ai-command-r-v01.yaml`):
 
 | Task | Metric | Expected (yaml) |
 | --- | --- | --- |
-| gsm8k | exact_match,strict-match | 0.20 |
-| gsm8k | exact_match,flexible-extract | 0.15 |
+| gsm8k | exact_match,strict-match | 0.445 |
+| gsm8k | exact_match,flexible-extract | 0.569 |
 
 ## FAQ
 
