@@ -1,5 +1,5 @@
 import torch
-import vllm.envs as envs
+import torch_npu
 from vllm.distributed.parallel_state import get_tp_group
 from vllm.triton_utils import HAS_TRITON
 from vllm.v1.sample.metadata import SamplingMetadata
@@ -8,37 +8,27 @@ from vllm.v1.sample.sampler import Sampler
 
 from vllm_ascend.ascend_config import get_ascend_config
 from vllm_ascend.sample.penalties import apply_all_penalties
-from vllm_ascend.utils import AscendDeviceType, get_ascend_device_type, global_stream, npu_stream_switch
+from vllm_ascend.utils import AscendDeviceType, get_ascend_device_type, global_stream
 
 DEFAULT_LOGPROBS_MODE = "raw_logprobs"
 
 _SAMPLING_EPS = 1e-5
 
 
-def random_sample(
-    probs: torch.Tensor,
+def generate_random_sequence(
+    logits: torch.Tensor,
     generators: dict[int, torch.Generator],
+    stream: torch.npu.Stream,
 ) -> torch.Tensor:
-    """Randomly sample from the probabilities.
-
-    We use this function instead of torch.multinomial because torch.multinomial
-    causes CPU-NPU synchronization.
-    """
-    # NOTE(woosuk): To batch-process the requests without their own seeds,
-    # which is the common case, we first assume that every request does
-    # not have its own seed. Then, we overwrite the values for the requests
-    # that have their own seeds.
-    with npu_stream_switch(global_stream()):
-        q = torch.empty_like(probs)
-        if len(generators) != probs.shape[0]:
+    with torch_npu.npu.stream(stream):
+        q = torch.empty_like(logits, dtype=torch.float32)
+        if len(generators) != logits.shape[0]:
             q.exponential_()
         if generators:
-            # TODO(woosuk): This can be slow because we handle each request
-            # one by one. Optimize this.
             for i, generator in generators.items():
                 q[i].exponential_(generator=generator)
-    torch.npu.current_stream().wait_stream(global_stream())
-    return probs.div_(q).argmax(dim=-1).view(-1)
+    torch.npu.current_stream().wait_stream(stream)
+    return q
 
 
 class AscendSampler(Sampler):
@@ -115,6 +105,7 @@ class AscendTopKTopPSampler(TopKTopPSampler):
         super().__init__(**kwargs)
         self.apply_top_k_top_p = apply_top_k_top_p
         self.top_k = None
+        self.dsa_stream = torch_npu.npu.Stream()
 
     def set_q_event(self, q, event):
         # Pass in async exponential results.
@@ -132,36 +123,31 @@ class AscendTopKTopPSampler(TopKTopPSampler):
         """Override pytorch native implementation to torch_npu"""
         # when batch_invariant mode is enabled, we should use vllm's implementation.
         # or it will make batch_invariant mode not working.
-        if envs.VLLM_BATCH_INVARIANT:
-            return super().forward_native(logits, generators, k, p)
+        logits_to_return = None
+        res = None
 
-        if get_ascend_config().enable_reduce_sample:
-            cand_logits, cand_idx = self.apply_top_k_top_p(logits, k, p, self.top_k)
-            logits_to_return = None
-            if self.logprobs_mode == "processed_logits":
-                logits_to_return = cand_logits
-            elif self.logprobs_mode == "processed_logprobs":
-                logits_to_return = cand_logits.log_softmax(dim=-1, dtype=torch.float32)
+        if self.logprobs_mode == "processed_logits":
+            logits_to_return = logits
+        elif self.logprobs_mode == "processed_logprobs":
+            logits_to_return = logits.log_softmax(dim=-1, dtype=torch.float32)
 
-            probs = cand_logits.softmax(dim=-1, dtype=torch.float32)
-            pos = random_sample(probs, generators)  # [B]
-
-            next_token = cand_idx.gather(dim=1, index=pos.unsqueeze(1)).squeeze(1)  # [B]
-            return next_token, logits_to_return
+        if p is not None:
+            p = p.to(device=logits.device, dtype=torch.float32)
         else:
-            logits = self.apply_top_k_top_p(logits, k, p)
-            logits_to_return = None
-            if self.logprobs_mode == "processed_logits":
-                logits_to_return = logits
-            elif self.logprobs_mode == "processed_logprobs":
-                logits_to_return = logits.log_softmax(dim=-1, dtype=torch.float32)
+            p = torch.ones(logits.shape[0], dtype=torch.float32, device=logits.device)
 
-            probs = logits.softmax(dim=-1, dtype=torch.float32)
-            if get_ascend_config().enable_async_exponential:
-                # Add synchronize to prevent synchronize error.
-                self.async_event.synchronize()
-                return probs.div_(self.q).argmax(dim=-1).view(-1), logits_to_return
-            return random_sample(probs, generators), logits_to_return
+        if k is not None:
+            k = k.to(device=logits.device, dtype=torch.int32)
+        else:
+            k = torch.ones((logits.shape[0],), dtype=torch.int32, device=logits.device) * logits.shape[1]
+
+        q = generate_random_sequence(logits, generators, self.dsa_stream).type(torch.float32)
+        if get_ascend_config().enable_reduce_sample:
+            local_vals, _ = torch.topk(logits, k=self.top_k, dim=-1)
+            res = torch_npu.npu_top_k_top_p_sample(local_vals, k, p, q)
+        else:
+            res = torch_npu.npu_top_k_top_p_sample(logits, k, p, q)
+        return res[0], logits_to_return
 
 
 def _apply_top_k_top_p_pytorch(
@@ -245,6 +231,20 @@ def _apply_top_k_top_p_ascendc(
     p: torch.Tensor,
     top_k: int | None = None,
 ) -> torch.Tensor:
+    if p is None and k is None:
+        return logits
+
+    logits = logits.type(torch.float32)
+    if p is not None:
+        p = p.type(torch.float32)
+    else:
+        p = torch.ones(logits.shape[0], dtype=torch.float32, device=logits.device)
+
+    if k is not None:
+        k = k.type(torch.int32)
+    else:
+        k = torch.ones((logits.shape[0],), dtype=torch.int32, device=logits.device) * logits.shape[1]
+
     if get_ascend_config().enable_reduce_sample:
         tp_group = get_tp_group()
         B, V_local = logits.shape
@@ -257,16 +257,13 @@ def _apply_top_k_top_p_ascendc(
 
         local_vals, local_idx = torch.topk(logits, k=k_for_topk, dim=-1)
         local_global_idx = local_idx + rank * V_local
-        gathered_vals = tp_group.all_gather(local_vals, dim=-1)
-        gathered_idx = tp_group.all_gather(local_global_idx, dim=-1)
+        gathered_vals = tp_group.all_gather(local_vals, dim=-1)  # [B, top_k*tp]
+        gathered_idx = tp_group.all_gather(local_global_idx, dim=-1)  # [B, top_k*tp]
 
-        if not (p is None and k is None):
-            gathered_vals = torch.ops._C_ascend.npu_apply_top_k_top_p(gathered_vals, k=k, p=p)
+        gathered_vals = torch_npu.npu_top_k_top_p_sample(gathered_vals, k, p, is_need_logits=True)[1]
         return gathered_vals, gathered_idx
-
-    if p is None and k is None:
-        return logits
-    return torch.ops._C_ascend.npu_apply_top_k_top_p(logits, k=k, p=p)
+    else:
+        return torch_npu.npu_top_k_top_p_sample(logits, k, p, is_need_logits=True)[1]
 
 
 apply_top_k_top_p = (
