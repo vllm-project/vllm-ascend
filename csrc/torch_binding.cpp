@@ -52,6 +52,7 @@
 #include "attention/recurrent_gated_delta_rule/recurrent_gated_delta_rule_torch_adpt.h"
 #include "attention/recurrent_gated_delta_rule_v310/recurrent_gated_delta_rule_310_torch_adpt.h"
 #include "attention/store_kv_block/store_kv_block_torch_adpt.h"
+#include "attention/fused_gdn_gating/fused_gdn_gating_torch_adpt.h"
 #include <c10/core/Device.h>
 #include <c10/core/Scalar.h>
 #include <c10/util/Exception.h>
@@ -63,6 +64,7 @@
 #include <mutex>
 #include <sstream>
 #include <unordered_map>
+#include <vector>
 
 namespace vllm_ascend {
 
@@ -2271,6 +2273,17 @@ at::Tensor chunk_fwd_o(
     return o;
 }
 
+std::vector<int64_t> get_npu_storage_shape(const at::Tensor& tensor)
+{
+    TORCH_CHECK(
+        tensor.is_privateuseone(),
+        "get_npu_storage_shape only supports NPU tensors, but got device ",
+        tensor.device());
+    const auto& desc = NPUBridge::GetNpuStorageImplDesc(tensor);
+    return std::vector<int64_t>(desc.storage_sizes_.begin(), desc.storage_sizes_.end());
+}
+
+
 } // namespace vllm_ascend
 
 #ifdef ASCEND_PLATFORM_310P
@@ -2396,6 +2409,10 @@ TORCH_LIBRARY_EXPAND(CONCAT(_C, _ascend), ops)
     ops.def("device_print_tensor(Tensor tensor) -> ()");
     ops.impl("device_print_tensor", c10::DispatchKey::CompositeExplicitAutograd,
              static_cast<void (*)(const at::Tensor&)>(&vllm_ascend::device_print));
+
+    ops.def("get_npu_storage_shape(Tensor tensor) -> int[]");
+    ops.impl("get_npu_storage_shape", c10::DispatchKey::CompositeExplicitAutograd,
+             &vllm_ascend::get_npu_storage_shape);
 
     ops.def(
         "grouped_matmul_swiglu_quant(Tensor x, Tensor weight, Tensor weight_scale, Tensor x_scale,"
@@ -2966,5 +2983,13 @@ TORCH_LIBRARY_EXPAND(CONCAT(_C, _ascend), ops)
         "store_kv_block(Tensor key_in, Tensor key_cache_in, Tensor group_len, Tensor group_key_idx,Tensor group_key_cache_idx, int block_size=0) -> ()"
     );
     ops.impl("store_kv_block", torch::kPrivateUse1, &vllm_ascend::store_kv_block);
+    // Fused GDN gating.
+    ops.def(
+        "npu_fused_gdn_gating(Tensor A_log, "
+        "                     Tensor a, "
+        "                     Tensor b, "
+        "                     Tensor dt_bias, "
+        "                     float beta=1.0) -> (Tensor g, Tensor beta_output)");
+    ops.impl("npu_fused_gdn_gating", torch::kPrivateUse1, &vllm_ascend::npu_fused_gdn_gating);
 }
 #endif

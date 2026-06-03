@@ -39,7 +39,9 @@ class AscendLearnable2DInterpPosEmbDivided_fixed(nn.Module):
     def forward(self, x: torch.Tensor, grid_thws: torch.Tensor) -> torch.Tensor:
         pos_embs = []
         for t, h, w in grid_thws.tolist():
-            assert t <= self.num_frames, f"t:{t} > self.num_frames:{self.num_frames}"
+            assert t <= self.num_frames, (
+                f"[vllm-ascend/patch_kimi_k25] Invalid frame count. t={t}, num_frames={self.num_frames}"
+            )
             if (h, w) == self.weight.shape[:-1]:
                 pos_emb_2d = self.weight.flatten(end_dim=1)
             else:
