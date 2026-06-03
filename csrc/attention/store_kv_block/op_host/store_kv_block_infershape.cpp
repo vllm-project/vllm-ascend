@@ -12,9 +12,10 @@
  * \file add_rms_norm_bias_infershape.cpp
  * \brief
  */
-#include "error/ops_error.h"
 #include <graph/utils/type_utils.h>
 #include <register/op_impl_registry.h>
+
+#include "error/ops_error.h"
 
 static constexpr int IDX_0 = 0;
 static constexpr int IDX_1 = 1;

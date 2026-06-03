@@ -18,6 +18,7 @@ from vllm.v1.attention.backend import (
     MLAAttentionImpl,
 )
 from vllm.v1.kv_cache_interface import AttentionSpec
+
 from vllm_ascend import envs as ascend_envs
 from vllm_ascend.ascend_config import get_ascend_config
 from vllm_ascend.ascend_forward_context import _EXTRA_CTX
@@ -158,6 +159,7 @@ class AscendSFAMetadata:
     group_len: torch.Tensor | None = None
     group_key_idx: torch.Tensor | None = None
     group_key_cache_idx: torch.Tensor | None = None
+
 
 M = TypeVar("M", bound=AscendSFAMetadata)
 
@@ -1261,7 +1263,7 @@ class AscendSFAImpl(MLAAttentionImpl):
         if kv_cache is not None:
             if self.is_kv_producer:
                 attn_metadata.reshape_cache_event = torch.npu.Event()
-                
+
             if self.is_kv_producer and ascend_envs.VLLM_ASCEND_ENABLE_RESHAPE_OPTIM:
                 torch.ops._C_ascend.store_kv_block(
                     k_li,
@@ -1275,7 +1277,7 @@ class AscendSFAImpl(MLAAttentionImpl):
                 torch_npu.npu_scatter_nd_update_(
                     kv_cache[2].view(-1, k_li.shape[-1]), slot_mapping.view(-1, 1), k_li.view(-1, k_li.shape[-1])
                 )  # b, s, n, d
-                
+
             if self.use_sparse_c8_indexer:
                 assert len(kv_cache) == 4
                 assert k_li_scale is not None
