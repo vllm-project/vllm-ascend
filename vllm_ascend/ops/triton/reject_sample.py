@@ -233,7 +233,9 @@ def rejection_random_sample_kernel(
                         if NO_DRAFT_PROBS:
                             draft_prob = 1
                         else:
-                            draft_prob = tl.load(draft_probs_ptr + (start_idx + pos) * global_vocab_size + draft_token_id)
+                            draft_prob = tl.load(
+                                draft_probs_ptr + (start_idx + pos) * global_vocab_size + draft_token_id
+                            )
                         uniform_prob = tl.load(uniform_probs_ptr + start_idx + pos)
                         # NOTE(woosuk): While the draft probability should never be 0,
                         # we check it to avoid NaNs. If it happens to be 0, we reject.
@@ -486,7 +488,6 @@ def rejection_random_sample_block_verify_kernel(
     ENABLE_REDUCE_SAMPLING: tl.constexpr,  # Whether using reduce_sampling
     BLOCK_SIZE: tl.constexpr,
     SUB_BLOCK: tl.constexpr = 512,
-    VOCAB_BLOCK_SIZE: tl.constexpr = 512,
 ):
     block_idx = tl.program_id(0)
     offsets = block_idx * BLOCK_SIZE + tl.arange(0, BLOCK_SIZE)
@@ -517,9 +518,9 @@ def rejection_random_sample_block_verify_kernel(
                     target_prob = 0.0
                     found = False
 
-                    for v_offset in range(0, vocab_size, VOCAB_BLOCK_SIZE):
+                    for v_offset in range(0, vocab_size, SUB_BLOCK):
                         if not found:
-                            vocab_offsets = v_offset + tl.arange(0, VOCAB_BLOCK_SIZE)
+                            vocab_offsets = v_offset + tl.arange(0, SUB_BLOCK)
                             vocab_mask = vocab_offsets < vocab_size
 
                             candidate_indices = tl.load(
@@ -608,7 +609,9 @@ def rejection_random_sample_block_verify_kernel(
                         next_token_idx = token_idx + 1
                         if NO_DRAFT_PROBS:
                             next_draft_token_id = tl.load(draft_token_ids_ptr + next_token_idx)
-                            next_target_prob = tl.load(target_probs_ptr + next_token_idx * vocab_size + next_draft_token_id)
+                            next_target_prob = tl.load(
+                                target_probs_ptr + next_token_idx * vocab_size + next_draft_token_id
+                            )
                             residual_mass = prefix_prob * (1.0 - next_target_prob)
                         else:
                             residual_mass = 0.0
