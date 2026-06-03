@@ -819,3 +819,20 @@
 #       Replace ops.* with the internal implementation of vllm-ascend.
 #    Future Plan:
 #       Remove this patch when vllm-ascend supports pattern matching for ops.*.
+# ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+#   1. `vllm.model_executor.layers.fused_moe.routed_experts_capturer.RoutedExpertsCapturer.capture`
+#    Why:
+#       The upstream implementation doesn't support vllm-ascend specific MoE communication types
+#       (ALLTOALL and MC2). In the SP + modular-kernel path, the original code cannot correctly
+#       handle tensor splitting and all-gather operations on NPU, especially when tokens are
+#       unevenly distributed across TP ranks or padded to max_tokens in MC2 mode.
+#    How：
+#       Override the capture method to add support for vllm-ascend's MoECommType:
+#         - Check `_EXTRA_CTX.moe_comm_type` to determine if ALLTOALL or MC2 mode is active
+#         - Calculate correct gather_topk_ids_shape based on communication type:
+#           * ALLTOALL: uses actual token_num_per_dp for shape calculation
+#           * MC2: uses padded max_tokens * tp_size for shape calculation
+#         - Properly handle tensor_split and all_gather operations for NPU distributed communication
+#    Future Plan:
+#       Remove this patch when upstream vLLM supports MoE communication type abstraction that
+#       can be extended by hardware plugins like vllm-ascend.
