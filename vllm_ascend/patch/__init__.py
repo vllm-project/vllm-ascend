@@ -362,6 +362,18 @@
 #       Remove this patch if upstream exposes a platform allocator capability hook
 #       for sleep mode validation.
 #
+# ** 14. File: platform/patch_scheduler.py**
+# ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+#   1. `vllm.v1.core.sched.scheduler.Scheduler._mamba_block_aligned_split`
+#    Why:
+#       Upstream vLLM has an assert logic, cause it fails when external KV connector hit
+#    How:
+#      remove the assert
+#    Related PR (if no, explain why):
+#       https://github.com/vllm-project/vllm/pull/43935
+#    Future Plan:
+#       Remove this patch if upstream streaming behavior is updated to support mamba external KV connector
+#
 # * Worker Patch:
 # ===============
 #
@@ -734,7 +746,16 @@
 #    Future Plan:
 #       Remove this patch when:
 #       design a dispatch mechanism for batch_memcpy_kernel.
-#
+#   3. `mamba_utils.preprocess_mamba = preprocess_mamba`
+#    Why:
+#       1. preprocess_mamba has a assert logic, cause kv transfer call fails
+#       2. preprocess_mamba copy the state of previous step to the last block before kv transfer load
+#    How:
+#       1. patch to remove assert
+#       2. path to only collect copy metadata in preprocess_mamba(and do actual copy after kv transfer load).
+#    Future Plan:
+#       Remove this patch when:
+#       vLLM itself supports kv transfer for mamba
 # ** 21. File: worker/patch_weight_utils.py**
 # ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 #   1. `vllm.model_executor.models.deepseek_v2.DeepseekV2ForCausalLM.load_weights`

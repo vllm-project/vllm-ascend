@@ -100,9 +100,8 @@ class TestLayerPoolKey(unittest.TestCase):
 class TestChunkedTokenDatabase(unittest.TestCase):
     def setUp(self):
         self.meta = KeyMetadata("llama", 0, 0, 0, 0)
-        self.db = ChunkedTokenDatabase(self.meta, block_size=16, partitions=None)
-        self.db.set_kv_caches_base_addr([1000, 2000])
-        self.db.set_block_len([160, 320])
+        self.db = ChunkedTokenDatabase([self.meta], block_size=[16], partitions=None)
+        self.db.set_group_buffers({0: [1000, 2000]}, {0: [160, 320]})
 
     def test_make_key_by_hash(self):
         key = self.db._make_key_by_hash("abc")
@@ -167,14 +166,13 @@ class TestChunkedTokenDatabase(unittest.TestCase):
         self.assertEqual(key, ["k1"])
 
     def test_decode_adaptor_prefill_pp_single_partition(self):
-        db = ChunkedTokenDatabase(self.meta, 16, partitions=[4])
+        db = ChunkedTokenDatabase([self.meta], [16], partitions=[4])
         key, addr, size = db.decode_adaptor_prefill_pp(["k1"], [[1, 2]], [[10, 20]])
         self.assertEqual(key, ["k1"])
 
     def test_decode_adaptor_prefill_pp_multi_partition(self):
-        db = ChunkedTokenDatabase(self.meta, 16, partitions=[2, 2])
-        db.set_kv_caches_base_addr([1000, 2000])
-        db.set_block_len([160, 320])
+        db = ChunkedTokenDatabase([self.meta], [16], partitions=[2, 2])
+        db.set_group_buffers({0: [1000, 2000]}, {0: [160, 320]})
         keys = ["k1@pp_rank:0"]
         addrs = [[1, 2, 3, 4, 5, 6, 7, 8]]
         sizes = [[10, 20, 30, 40, 50, 60, 70, 80]]
@@ -250,7 +248,7 @@ class TestReqMeta(unittest.TestCase):
             num_saved_tokens=0,
             token_ids=list(range(32)),
         )
-        meta = ReqMeta.from_request_tracker(tracker, block_size=16, block_hashes=[b"h1", b"h2"])
+        meta = ReqMeta.from_request_tracker(tracker, cache_transfer_granularity=16, block_hashes=[b"h1", b"h2"])
         self.assertIsNotNone(meta)
         self.assertEqual(meta.req_id, "r1")
         self.assertTrue(meta.can_save)
@@ -264,7 +262,7 @@ class TestReqMeta(unittest.TestCase):
             allocated_block_ids=[0, 1],
             num_saved_tokens=0,
         )
-        meta = ReqMeta.from_request_tracker(tracker, block_size=16, skip_save=True)
+        meta = ReqMeta.from_request_tracker(tracker, cache_transfer_granularity=16, skip_save=True)
         self.assertIsNone(meta)
 
     def test_from_request_tracker_with_load_spec(self):
@@ -275,7 +273,7 @@ class TestReqMeta(unittest.TestCase):
             num_saved_tokens=0,
         )
         load_spec = LoadSpec(vllm_cached_tokens=0, kvpool_cached_tokens=32, can_load=True)
-        meta = ReqMeta.from_request_tracker(tracker, block_size=16, load_spec=load_spec, skip_save=True)
+        meta = ReqMeta.from_request_tracker(tracker, cache_transfer_granularity=16, load_spec=load_spec, skip_save=True)
         self.assertIsNotNone(meta)
         self.assertIsNotNone(meta.load_spec)
 
@@ -287,7 +285,7 @@ class TestReqMeta(unittest.TestCase):
             num_saved_tokens=32,
         )
         load_spec = LoadSpec(vllm_cached_tokens=0, kvpool_cached_tokens=32, can_load=False)
-        meta = ReqMeta.from_request_tracker(tracker, block_size=16, load_spec=load_spec, skip_save=True)
+        meta = ReqMeta.from_request_tracker(tracker, cache_transfer_granularity=16, load_spec=load_spec, skip_save=True)
         # can_load=False => load_spec set to None in meta,
         # but skip_save+load_spec input is not None, so meta is still created
         self.assertIsNotNone(meta)
@@ -301,7 +299,7 @@ class TestReqMeta(unittest.TestCase):
             allocated_block_ids=[0, 1],
             num_saved_tokens=0,
         )
-        meta = ReqMeta.from_request_tracker(tracker, block_size=16, discard_partial_chunks=True)
+        meta = ReqMeta.from_request_tracker(tracker, cache_transfer_granularity=16, discard_partial_chunks=True)
         self.assertIsNotNone(meta)
         self.assertEqual(meta.token_len_chunk, 16)
 
@@ -312,7 +310,7 @@ class TestReqMeta(unittest.TestCase):
             allocated_block_ids=[0, 1],
             num_saved_tokens=0,
         )
-        meta = ReqMeta.from_request_tracker(tracker, block_size=16, discard_partial_chunks=False)
+        meta = ReqMeta.from_request_tracker(tracker, cache_transfer_granularity=16, discard_partial_chunks=False)
         self.assertIsNotNone(meta)
         self.assertEqual(meta.token_len_chunk, 20)
 
@@ -323,7 +321,7 @@ class TestReqMeta(unittest.TestCase):
             allocated_block_ids=[0, 1],
             num_saved_tokens=32,
         )
-        meta = ReqMeta.from_request_tracker(tracker, block_size=16)
+        meta = ReqMeta.from_request_tracker(tracker, cache_transfer_granularity=16)
 
         # num_saved_tokens=32, chunk_boundary=ceil(33/16)*16=48 > 32
         # so skip_save, and no load_spec => None
@@ -336,7 +334,7 @@ class TestReqMeta(unittest.TestCase):
             allocated_block_ids=[0, 1],
             num_saved_tokens=0,
         )
-        meta = ReqMeta.from_request_tracker(tracker, block_size=16, original_block_size=8)
+        meta = ReqMeta.from_request_tracker(tracker, cache_transfer_granularity=16, original_block_size=8)
         self.assertIsNotNone(meta)
         self.assertEqual(meta.original_block_size, 8)
 

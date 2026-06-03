@@ -26,6 +26,7 @@ from vllm.v1.kv_cache_interface import (
 
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.config_data import (
     AscendConnectorMetadata,
+    AscendStoreKVConnectorWorkerMetadata,
     ChunkedTokenDatabase,
     KeyMetadata,
     LayerMultiBlockReqMeta,
@@ -103,6 +104,7 @@ class KVPoolWorker:
         )
         self.backend = vllm_config.kv_transfer_config.kv_connector_extra_config.get("backend", "mooncake")
         self.use_hybrid = self._uses_hybrid_kv_cache(vllm_config, kv_cache_config)
+        self.use_mamba = self._uses_mamba_kv_cache(self.use_hybrid, kv_cache_config)
         self.original_block_size = self._infer_group_block_sizes(vllm_config, kv_cache_config)
         cp_scale = self.pcp_size * self.dcp_size
         self.grouped_block_size = [block_size * cp_scale for block_size in self.original_block_size]
@@ -123,6 +125,14 @@ class KVPoolWorker:
         if self.use_layerwise and self.num_kv_cache_groups > 1:
             raise NotImplementedError("AscendStore layerwise mode does not yet support hybrid KV cache groups.")
 
+        logger.info(
+            "use_hybrid: %s, use_mamba: %s, num_kv_cache_groups: %s, hash_block_size: %s, lcm_block_size: %s",
+            self.use_hybrid,
+            self.use_mamba,
+            self.num_kv_cache_groups,
+            self.hash_block_size,
+            self.lcm_block_size,
+        )
         self.current_layer = 0
         self.num_layers = model_config.get_num_layers(parallel_config)
 
@@ -137,14 +147,6 @@ class KVPoolWorker:
         else:
             self.head_or_tp_rank = self.tp_rank
             self.put_step = 1
-
-        self.metadata = KeyMetadata(
-            model_config.model.rstrip("/").split("/")[-1],
-            self.head_or_tp_rank,
-            self.pcp_rank,
-            self.dcp_rank,
-            self.pp_rank,
-        )
 
         partitions = None
         if self.kv_role == "kv_consumer" and self.consumer_is_to_put:
@@ -171,12 +173,23 @@ class KVPoolWorker:
                     for i in range(2, remaining_layers + 2):
                         partitions[-i] += 1
 
+        self.metadata: list[KeyMetadata] = []
+        for group_id in range(self.num_kv_cache_groups):
+            # the mamba kv_heads is not same with the full attention, can't share the cache data
+            group_tp_rank = self.tp_rank if self.group_uses_align_state[group_id] else self.head_or_tp_rank
+            self.metadata.append(
+                KeyMetadata(
+                    model_config.model.rstrip("/").split("/")[-1],
+                    group_tp_rank,
+                    self.pcp_rank,
+                    self.dcp_rank,
+                    self.pp_rank,
+                    group_id,
+                )
+            )
+
         self.token_database = ChunkedTokenDatabase(
-            self.metadata,
-            self.grouped_block_size,
-            partitions,
-            use_hybrid=self.use_hybrid,
-            hash_block_size=self.hash_block_size,
+            self.metadata, self.grouped_block_size, partitions, self.use_hybrid, self.hash_block_size
         )
 
         backend = backend_map.get(self.backend.lower())
@@ -277,6 +290,12 @@ class KVPoolWorker:
         )
 
     @staticmethod
+    def _uses_mamba_kv_cache(use_hybrid: bool, kv_cache_config: KVCacheConfig | None):
+        if not use_hybrid or kv_cache_config is None:
+            return False
+        return any([isinstance(g.kv_cache_spec, MambaSpec) for g in kv_cache_config.kv_cache_groups])
+
+    @staticmethod
     def _as_cache_tuple(cache_or_caches) -> tuple[torch.Tensor, ...]:
         if isinstance(cache_or_caches, torch.Tensor):
             return (cache_or_caches,)
@@ -300,6 +319,23 @@ class KVPoolWorker:
         except AttributeError:
             return cache.storage().data_ptr()
 
+    def _infer_cache_group_metadata(self, group_id: int, layer_names: list[str]):
+        group_addrs: list[int] = []
+        group_block_lens: list[int] = []
+        group_block_strides: list[int] = []
+        for layer_name in layer_names:
+            cache_or_caches = self.kv_caches[layer_name]
+            for cache in self._as_cache_tuple(cache_or_caches):
+                base_addr = cache.data_ptr()
+                block_len, block_stride, _, _ = self._get_cache_block_metadata(cache)
+                group_addrs.append(base_addr)
+                group_block_lens.append(block_len)
+                group_block_strides.append(block_stride)
+        self.group_kv_caches_base_addr[group_id] = group_addrs
+        self.group_block_len[group_id] = group_block_lens
+        self.group_block_stride[group_id] = group_block_strides
+        self.group_num_layers[group_id] = len(layer_names)
+
     def register_kv_caches(self, kv_caches: dict[str, torch.Tensor]):
         _, first_kv_cache_tuple = next(iter(kv_caches.items()))
         first_kv_cache_tuple = self._as_cache_tuple(first_kv_cache_tuple)
@@ -309,13 +345,15 @@ class KVPoolWorker:
             self.kv_cache_config.num_blocks if self.kv_cache_config is not None else first_kv_cache.shape[0]
         )
         logger.info("num_blocks: %s", self.num_blocks)
-        self.block_len = []
-        self.block_stride = []
-        for cache in first_kv_cache_tuple:
-            block_len, block_stride, _, _ = self._get_cache_block_metadata(cache)
-            logger.info("block_shape: %s", cache.shape[1:])
-            self.block_len.append(block_len)
-            self.block_stride.append(block_stride)
+        self.group_kv_caches_base_addr: dict[int, list[int]] = {}
+        self.group_block_len: dict[int, list[int]] = {}
+        self.group_block_stride: dict[int, list[int]] = {}
+        self.kv_caches = kv_caches
+        self.group_kv_cache_families: dict[int, str] = {
+            group_id: self._get_group_family(self.kv_cache_group_families, group_id)
+            for group_id in range(self.num_kv_cache_groups)
+        }
+        self.group_num_layers: dict[int, int] = {}
 
         logger.info(
             "Registering KV_Caches. use_mla: %s, use_sparse: %s, shape %s",
@@ -324,16 +362,6 @@ class KVPoolWorker:
             first_kv_cache.shape,
         )
 
-        self.kv_caches = kv_caches
-        self.kv_caches_base_addr = []
-        self.group_kv_caches_base_addr: dict[int, list[int]] = {}
-        self.group_block_len: dict[int, list[int]] = {}
-        self.group_block_stride: dict[int, list[int]] = {}
-        self.group_kv_cache_families: dict[int, str] = {
-            group_id: self._get_group_family(self.kv_cache_group_families, group_id)
-            for group_id in range(self.num_kv_cache_groups)
-        }
-        self.group_num_layers: dict[int, int] = {}
         registered_regions: dict[int, tuple[int, int]] = {}
         for cache_or_caches in kv_caches.values():
             for cache in self._as_cache_tuple(cache_or_caches):
@@ -341,7 +369,6 @@ class KVPoolWorker:
                 _, _, region_len, _ = self._get_cache_block_metadata(cache)
                 if not isinstance(region_len, int):
                     region_len = 0
-                self.kv_caches_base_addr.append(base_addr)
                 storage_key = self._get_storage_key(cache)
                 start = base_addr
                 end = base_addr + region_len
@@ -356,30 +383,11 @@ class KVPoolWorker:
 
         if self.kv_cache_config is not None and self.use_hybrid:
             for group_id, group_spec in enumerate(self.kv_cache_config.kv_cache_groups):
-                group_addrs: list[int] = []
-                group_block_lens: list[int] = []
-                group_block_strides: list[int] = []
-                seen_group_ptrs: set[int] = set()
-                for layer_name in group_spec.layer_names:
-                    cache_or_caches = kv_caches[layer_name]
-                    for cache in self._as_cache_tuple(cache_or_caches):
-                        base_addr = cache.data_ptr()
-                        if base_addr in seen_group_ptrs:
-                            continue
-                        block_len, block_stride, _, _ = self._get_cache_block_metadata(cache)
-                        group_addrs.append(base_addr)
-                        group_block_lens.append(block_len)
-                        group_block_strides.append(block_stride)
-                        seen_group_ptrs.add(base_addr)
-                self.group_kv_caches_base_addr[group_id] = group_addrs
-                self.group_block_len[group_id] = group_block_lens
-                self.group_block_stride[group_id] = group_block_strides
-                self.group_num_layers[group_id] = len(group_spec.layer_names)
+                self._infer_cache_group_metadata(group_id, group_spec.layer_names)
+        else:
+            self._infer_cache_group_metadata(0, list(kv_caches.keys()))
 
         self.m_store.register_buffer(ptrs, lengths)
-        self.token_database.set_kv_caches_base_addr(self.kv_caches_base_addr)
-        self.token_database.set_block_len(self.block_len)
-        self.token_database.set_block_stride(self.block_stride)
         self.token_database.set_group_buffers(
             self.group_kv_caches_base_addr,
             self.group_block_len,
@@ -396,7 +404,7 @@ class KVPoolWorker:
                 self.kv_send_thread = KVCacheStoreLayerSendingThread(
                     self.m_store,
                     self.token_database,
-                    self.block_size,
+                    self.grouped_block_size,
                     self.tp_rank,
                     self.dcp_size,
                     self.put_step,
@@ -409,7 +417,7 @@ class KVPoolWorker:
             self.kv_recv_thread = KVCacheStoreLayerRecvingThread(
                 self.m_store,
                 self.token_database,
-                self.block_size,
+                self.grouped_block_size,
                 self.tp_rank,
                 self.dcp_size,
                 ready_event,
@@ -425,12 +433,13 @@ class KVPoolWorker:
                 self.kv_send_thread = KVCacheStoreSendingThread(
                     self.m_store,
                     self.token_database,
-                    self.block_size,
+                    self.grouped_block_size,
                     self.tp_rank,
                     self.dcp_size,
                     self.put_step,
                     self.kv_role,
                     ready_event_sending,
+                    self.group_uses_align_state,
                     self.enable_kv_events,
                 )
                 self.kv_send_thread.start()
@@ -439,7 +448,7 @@ class KVPoolWorker:
                 self.kv_recv_thread = KVCacheStoreRecvingThread(
                     self.m_store,
                     self.token_database,
-                    self.block_size,
+                    self.grouped_block_size,
                     self.tp_rank,
                     self.dcp_size,
                     ready_event,
@@ -944,6 +953,11 @@ class KVPoolWorker:
             return 1
         return self.num_kv_head
 
+    def get_group_tp_size(self, kv_cache_group_id: int):
+        if self.group_uses_align_state[kv_cache_group_id]:
+            return self.tp_size
+        return min(self.tp_size, self._get_group_num_kv_heads(kv_cache_group_id))
+
     def lookup_scheduler(
         self,
         token_len: int,
@@ -961,7 +975,6 @@ class KVPoolWorker:
             kv_cache_group_ids = kv_cache_group_ids or [0]
             kv_cache_group_ids = self._get_lookup_gate_group_ids(kv_cache_group_ids)
             for group_id in kv_cache_group_ids:
-                end = 0
                 keys = []
                 starts = []
                 ends = []
@@ -980,11 +993,10 @@ class KVPoolWorker:
                     ends.append(end)
 
                 if not keys:
-                    hits.append(0)
-                    continue
+                    return 0
 
                 multi_tp_keys = keys[:]
-                group_tp_size = min(self.tp_size, self._get_group_num_kv_heads(group_id))
+                group_tp_size = self.get_group_tp_size(group_id)
                 for i in range(1, group_tp_size):
                     for item in keys:
                         new_str = item.replace(  # type: ignore[attr-defined]
@@ -1009,39 +1021,40 @@ class KVPoolWorker:
                     res[i * num_block : (i + 1) * num_block]  # type: ignore[index]
                     for i in range(group_tp_size * self.pp_size)
                 ]
-                first_missing = self.find_min_first_non_one_index(multi_tp_values)
                 logger.debug(
                     "KV pool lookup request token_len=%d group=%d keys=%d multi_tp_keys=%d "
-                    "exists_count=%d/%d first_missing=%d exists_sample=%s sample_keys=%s",
+                    "exists_count=%d/%d exists_sample=%s sample_keys=%s",
                     token_len,
                     group_id,
                     len(keys),
                     len(multi_tp_keys),
                     sum(1 for value in res if value == 1),  # type: ignore[union-attr]
                     len(res),
-                    first_missing,
                     list(res[: min(12, len(res))]),  # type: ignore[index]
                     multi_tp_keys[:3],
                 )
                 if group_id < len(self.group_uses_align_state) and self.group_uses_align_state[group_id]:
-                    exists_by_block = [all(values[idx] == 1 for values in multi_tp_values) for idx in range(num_block)]
-                    hit_end = 0
-                    for index in range(num_block - 1, -1, -1):
-                        if exists_by_block[index] and ends[index] % self.cache_transfer_granularity == 0:
-                            hit_end = ends[index]
+                    # mamba group with align mode will skip some null block, we must loop it in reverse order
+                    for i in range(num_block - 1, -1, -1):
+                        if (
+                            all(values[i] == 1 for values in multi_tp_values)
+                            and ends[i] % self.cache_transfer_granularity == 0
+                        ):
+                            hits.append(ends[i])
                             break
-                    hits.append(hit_end)
-                else:
-                    index = first_missing
-                    if index == -1:
-                        hits.append(end)
                     else:
-                        hit_end = 0
-                        for hit_index in range(index, 0, -1):
-                            if starts[hit_index] % self.cache_transfer_granularity == 0:
-                                hit_end = starts[hit_index]
+                        return 0
+                else:
+                    index = self.find_max_hit_index(multi_tp_values, num_block)
+                    if index == -1:
+                        return 0
+                    else:
+                        for hit_index in range(index, -1, -1):
+                            if ends[hit_index] % self.cache_transfer_granularity == 0:
+                                hits.append(ends[hit_index])
                                 break
-                        hits.append(hit_end)
+                        else:
+                            return 0
                 logger.debug(
                     "KV pool scheduler lookup group=%d keys=%d hit=%d token_len=%d",
                     group_id,
@@ -1073,11 +1086,13 @@ class KVPoolWorker:
 
         return result
 
-    def find_min_first_non_one_index(self, arr):
-        try:
-            return min(idx for row in arr for idx, val in enumerate(row) if val != 1)
-        except ValueError:
-            return -1
+    def find_max_hit_index(self, arr, num_blocks: int):
+        for i in range(num_blocks):
+            if any(row[i] != 1 for row in arr):
+                return i - 1
+        else:
+            # if arr is not empty, all hits, else no hits
+            return len(arr[0]) - 1 if arr else -1
 
     def get_kv_events(self) -> list[BlockStored]:
         if self.enable_kv_events and self.kv_send_thread is not None:
@@ -1085,3 +1100,9 @@ class KVPoolWorker:
             events = self.kv_send_thread.get_kv_events()
             return events
         return []
+
+    def build_connector_worker_meta(self) -> AscendStoreKVConnectorWorkerMetadata | None:
+        if self.use_mamba and isinstance(self.kv_send_thread, KVCacheStoreSendingThread):
+            if ce := self.kv_send_thread.get_completed_events():
+                return AscendStoreKVConnectorWorkerMetadata(ce)
+        return None
