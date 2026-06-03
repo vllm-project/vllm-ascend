@@ -72,10 +72,13 @@ class TestMooncakeStoreConfig:
             MooncakeStoreConfig,
         )
 
-        with patch.dict(os.environ, {
-            "MOONCAKE_USE_DUMMY_CLIENT": "1",
-            "MOONCAKE_DUMMY_SERVER_ADDRESS": "10.0.0.1:50052",
-        }):
+        with patch.dict(
+            os.environ,
+            {
+                "MOONCAKE_USE_DUMMY_CLIENT": "1",
+                "MOONCAKE_DUMMY_SERVER_ADDRESS": "10.0.0.1:50052",
+            },
+        ):
             config = MooncakeStoreConfig.from_file(embedded_config_file)
             assert config.use_dummy_client is True
             assert config.dummy_server_address == "10.0.0.1:50052"
