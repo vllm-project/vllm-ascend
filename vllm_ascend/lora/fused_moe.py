@@ -166,6 +166,19 @@ class AscendFusedMoEWithLoRA(FusedMoEWithLoRA):
         quant_method.apply = apply_wrapper.__get__(quant_method, type(quant_method))
 
     # ------------------------------------------------------------------
+    # Mapping
+    # ------------------------------------------------------------------
+    def set_mapping(self, punica_wrapper):
+        # Upstream FusedMoEWithLoRA.set_mapping (vllm v0.22.0+) chains into
+        # ``self._moe_kernel.fused_experts.set_lora_context(...)``, but
+        # ``_moe_kernel`` is only set by the GPU modular-kernel path that we
+        # deliberately skip in __init__. Our injection works through
+        # ``punica_wrapper.add_lora_fused_moe(...)`` inside
+        # ``_apply_mlp_with_lora``; we only need the base layer to remember
+        # the punica wrapper.
+        BaseLayerWithLoRA.set_mapping(self, punica_wrapper)
+
+    # ------------------------------------------------------------------
     # LoRA-aware MLP
     # ------------------------------------------------------------------
     def _apply_mlp_with_lora(self, orig_mlp, mlp_input: MoEMlpComputeInput):
