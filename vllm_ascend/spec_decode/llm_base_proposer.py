@@ -439,8 +439,7 @@ class AscendSpecDecodeBaseProposer(SpecDecodeBaseProposer):
                 positions_cpu = getattr(self.runner, "_dsa_positions_cpu_buf", None)
                 if positions_cpu is None:
                     raise RuntimeError(
-                        "Compressed DSA graph capture requires "
-                        "runner._dsa_positions_cpu_buf to be initialized."
+                        "Compressed DSA graph capture requires runner._dsa_positions_cpu_buf to be initialized."
                     )
 
             common_attn_metadata = AscendCommonAttentionMetadata(
