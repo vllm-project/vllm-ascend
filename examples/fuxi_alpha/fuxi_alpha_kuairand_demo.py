@@ -384,7 +384,7 @@ def get_seq_user_data(max_seq_len,
     sum_candidate_cnt = 0
     print("============ Start load seq data =============")
     while (batch :=
-           next(dataloader_iter)) and (uids == batch[0] or uids is None) and (
+           next(dataloader_iter, None)) and (uids == batch[0] or uids is None) and (
                sum_cnt < max_seq_len or sum_candidate_cnt < candidate_num):
         if user_id is not None and user_id != batch[0][0] and user_id > batch[
                 0][0]:
