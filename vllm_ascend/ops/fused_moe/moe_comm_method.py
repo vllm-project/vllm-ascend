@@ -204,6 +204,7 @@ class MoECommMethod(ABC):
         # play the same role: mapping sorted position → source position.
         if isinstance(combine_metadata, MoEAllGatherCombineMetadata):
             # AllGather: dispatch output is grouped by expert
+            # Tokens are not split across TP ranks; use full token_lora_indices.
             lora_expert_indices = _build_lora_expert_indices(
                 lora_indices=lora_context.punica_wrapper.token_lora_indices,
                 expanded_row_idx=combine_metadata.expanded_row_idx,
@@ -211,13 +212,26 @@ class MoECommMethod(ABC):
                 num_experts=lora_context.num_experts,
             )
         elif isinstance(combine_metadata, MoEAllToAllCombineMetadata):
-            # AlltoAll: dispatch output is also grouped by expert (after npu_moe_token_permute)
-            # Use reversed_global_input_permutation_mapping as expanded_row_idx
-            # Note: The permutation mapping contains both valid indices and -1 for padding
+            # AlltoAll: tokens are split across TP ranks then exchanged
+            # via all_to_all.  The token dispatcher has already permuted
+            # and exchanged a TP-split copy of token_lora_indices; use
+            # those exchanged indices which are aligned with the
+            # dispatched token order.
+            lora_indices = combine_metadata.exchanged_lora_indices
+            if lora_indices is None:
+                # Fallback (known to be incorrect for AlltoAll + TP>1).
+                lora_indices = lora_context.punica_wrapper.token_lora_indices
+            # routed_topk_ids contains GLOBAL expert IDs (0..global_E-1)
+            # but the LoRA buffers are indexed by LOCAL expert position
+            # (0..local_E-1).  Convert global → local.
+            from vllm.distributed.parallel_state import get_ep_group
+            ep_rank = get_ep_group().rank_in_group
+            local_expert_offset = ep_rank * lora_context.num_experts
+            local_topk_ids = routed_topk_ids - local_expert_offset
             lora_expert_indices = _build_lora_expert_indices(
-                lora_indices=lora_context.punica_wrapper.token_lora_indices,
+                lora_indices=lora_indices,
                 expanded_row_idx=combine_metadata.reversed_global_input_permutation_mapping,
-                topk_ids=routed_topk_ids,
+                topk_ids=local_topk_ids,
                 num_experts=lora_context.num_experts,
             )
         else:

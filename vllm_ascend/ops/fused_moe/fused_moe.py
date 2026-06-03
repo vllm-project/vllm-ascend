@@ -150,6 +150,7 @@ class AscendUnquantizedFusedMoEMethod(UnquantizedFusedMoEMethod):
         global_redundant_expert_num: int = 0,
         pertoken_scale: torch.Tensor | None = None,
         mc2_mask: torch.Tensor | None = None,
+        split_lora_indices: torch.Tensor | None = None,
     ) -> torch.Tensor:
         zero_expert_num = getattr(layer, "zero_expert_num", 0)
         zero_expert_type = getattr(layer, "zero_expert_type", None)
@@ -256,6 +257,7 @@ class AscendUnquantizedFusedMoEMethod(UnquantizedFusedMoEMethod):
                 w2_scale_bias=w2_scale_bias,
                 swiglu_limit=layer.swiglu_limit,
                 lora_context=getattr(layer, 'get_lora_context', lambda: None)(),
+                split_lora_indices=split_lora_indices,
             )
         )
         if zero_expert_num > 0 and zero_expert_type is not None:
@@ -655,6 +657,28 @@ class AscendFusedMoE(FusedMoE):
         padded_hidden_states_shape = prepare_output.padded_hidden_states_shape
         pertoken_scale = prepare_output.pertoken_scale
 
+        # When the AlltoAll comm path splits tokens across TP ranks the
+        # per-token LoRA indices must be split the same way so that the
+        # all_to_all exchange inside the token dispatcher can carry them
+        # to the correct expert-owning rank together with the tokens.
+        # torch.tensor_split handles unequal splits (e.g. 101 tokens →
+        # [50, 51]), which matches the token split in prepare().
+        split_lora_indices = None
+        lora_ctx = getattr(self, 'get_lora_context', lambda: None)()
+        if lora_ctx is not None:
+            from vllm.distributed.parallel_state import (
+                get_tensor_model_parallel_rank,
+                get_tensor_model_parallel_world_size,
+            )
+            indices = lora_ctx.punica_wrapper.token_lora_indices
+            tp_size = get_tensor_model_parallel_world_size()
+            tp_rank = get_tensor_model_parallel_rank()
+            if tp_size > 1:
+                split = torch.tensor_split(indices, tp_size, dim=0)
+                split_lora_indices = split[tp_rank].contiguous()
+            else:
+                split_lora_indices = indices
+
         # Make sure the default stream waits for the gate stream to finish.
         if self.multistream_overlap_gate:
             torch.npu.current_stream().wait_stream(AscendFusedMoE.gate_stream)
@@ -682,6 +706,7 @@ class AscendFusedMoE(FusedMoE):
             log2phy=self.log2phy,
             global_redundant_expert_num=self.global_redundant_expert_num,
             mc2_mask=mc2_mask,
+            split_lora_indices=split_lora_indices,
         )
 
         if self.dynamic_eplb:

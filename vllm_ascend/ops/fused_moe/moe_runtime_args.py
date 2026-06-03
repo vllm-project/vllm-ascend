@@ -147,6 +147,7 @@ def build_fused_experts_input(
     w2_offset: torch.Tensor | None = None,
     swiglu_limit: int = 0,
     lora_context: Any = None,
+    split_lora_indices: torch.Tensor | None = None,
 ) -> MoEFusedExpertsInput:
     return MoEFusedExpertsInput(
         hidden_states=hidden_states,
@@ -190,6 +191,7 @@ def build_fused_experts_input(
         ),
         swiglu_limit=swiglu_limit,
         lora_context=lora_context,
+        split_lora_indices=split_lora_indices,
     )
 
 
@@ -204,6 +206,7 @@ def build_token_dispatch_input(
         topk_ids=fused_experts_input.topk_ids if topk_ids is None else topk_ids,
         routing=fused_experts_input.routing,
         quant=fused_experts_input.quant,
+        split_lora_indices=fused_experts_input.split_lora_indices,
     )
 
 

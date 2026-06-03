@@ -470,6 +470,7 @@ class TokenDispatcherWithAll2AllV(MoETokenDispatcher[MoEAllToAllCombineMetadata]
         hidden_states = token_dispatch_input.hidden_states
         topk_weights = token_dispatch_input.topk_weights
         topk_ids = token_dispatch_input.topk_ids
+        split_lora_indices = token_dispatch_input.split_lora_indices
 
         (
             permutated_local_input_tokens,
@@ -481,6 +482,32 @@ class TokenDispatcherWithAll2AllV(MoETokenDispatcher[MoEAllToAllCombineMetadata]
             hidden_shape,
             hidden_shape_before_permute,
         ) = self._dispatch_preprocess(hidden_states, topk_ids)
+
+        # Exchange TP-split LoRA indices through the same permute +
+        # all_to_all pipeline so that each EP rank receives the
+        # correct lora_id for every dispatched token.
+        exchanged_lora_indices = None
+        if split_lora_indices is not None:
+            # 1st permute: same reordering as tokens
+            permuted_lora, _ = torch_npu.npu_moe_token_permute(
+                split_lora_indices.unsqueeze(-1), topk_ids, num_out_tokens=topk_ids.numel()
+            )
+            permuted_lora = permuted_lora.squeeze(-1)
+
+            # all_to_all exchange
+            _, exchanged_lora, handle = async_all_to_all(
+                permuted_lora, output_splits, input_splits, self.ep_group
+            )
+            handle.wait()
+            del permuted_lora
+
+            # 2nd permute (sort by expert within the rank) when > 1 local expert
+            if self.num_local_experts > 1:
+                exchanged_lora, _ = torch_npu.npu_moe_token_permute(
+                    exchanged_lora.unsqueeze(-1), global_input_tokens_local_experts_indices
+                )
+                exchanged_lora = exchanged_lora.squeeze(-1)
+            exchanged_lora_indices = exchanged_lora
 
         dynamic_scale_after_all2all = None
         if with_quant:
@@ -520,6 +547,7 @@ class TokenDispatcherWithAll2AllV(MoETokenDispatcher[MoEAllToAllCombineMetadata]
                 reversed_global_input_permutation_mapping=reversed_global_input_permutation_mapping,
                 hidden_shape=hidden_shape,
                 hidden_shape_before_permute=hidden_shape_before_permute,
+                exchanged_lora_indices=exchanged_lora_indices,
             ),
         )
 
