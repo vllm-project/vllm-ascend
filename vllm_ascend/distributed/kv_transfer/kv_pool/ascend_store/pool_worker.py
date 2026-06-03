@@ -34,6 +34,8 @@ from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.config_data import
     ReqMeta,
 )
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.kv_transfer import (
+    KVCacheStoreKeyLayerRecvingThread,
+    KVCacheStoreKeyLayerSendingThread,
     KVCacheStoreLayerRecvingThread,
     KVCacheStoreLayerSendingThread,
     KVCacheStoreRecvingThread,
@@ -87,6 +89,8 @@ class KVPoolWorker:
             "consumer_is_to_put", False
         )
         self.backend = extra_config.get("backend", "mooncake")
+        self.backend_name = self.backend.lower()
+        self.use_gva_layerwise = self.use_layerwise and self.backend_name == "memcache"
         self.h2d_stagger_us = int(extra_config.get("h2d_stagger_us", 0))
         self.h2d_stagger_group_size = int(
             extra_config.get("h2d_stagger_group_size", 0))
@@ -249,7 +253,7 @@ class KVPoolWorker:
             )
 
     def rebind_kv_transfer_threads(self) -> None:
-        if not self.use_layerwise:
+        if not self.use_gva_layerwise:
             return
         self._bind_kv_transfer_thread(
             self.kv_send_thread,
@@ -286,7 +290,7 @@ class KVPoolWorker:
             self.layer_load_finished_events = [threading.Event() for i in range(self.num_layers)]
             self.layer_save_finished_events = [threading.Event() for i in range(self.num_layers)]
             self.sync_save_events = [torch.npu.Event() for i in range(self.num_layers)]
-            if self.kv_role in ["kv_producer", "kv_both"]:
+            if self.use_gva_layerwise and self.kv_role in ["kv_producer", "kv_both"]:
                 ready_event_sending = threading.Event()
                 self.kv_send_thread = KVCacheStoreLayerSendingThread(
                     self.m_store,
@@ -315,36 +319,69 @@ class KVPoolWorker:
                     0,
                     "layerwise send",
                 )
+            elif self.kv_role in ["kv_producer", "kv_both"]:
+                ready_event_sending = threading.Event()
+                self.kv_send_thread = KVCacheStoreKeyLayerSendingThread(
+                    self.m_store,
+                    self.token_database,
+                    self.block_size,
+                    self.tp_rank,
+                    self.tp_size,
+                    self.dcp_size,
+                    self.put_step,
+                    ready_event_sending,
+                    self.num_layers,
+                    self.layer_save_finished_events,
+                    self.sync_save_events,
+                )
+                self.kv_send_thread.start()
+                ready_event_sending.wait()
             ready_event = threading.Event()
-            self.kv_recv_thread = KVCacheStoreLayerRecvingThread(
-                self.m_store,
-                self.token_database,
-                self.block_size,
-                self.tp_rank,
-                self.tp_size,
-                self.dcp_size,
-                self.my_key_index,
-                self.num_ranks_per_layer,
-                self.page_size_bytes,
-                ready_event,
-                self.get_event,
-                self.layer_load_finished_events,
-                self.layer_save_finished_events,
-                self.num_layers,
-                self.h2d_stagger_us,
-                self.h2d_stagger_group_size,
-                self.h2d_stagger_dynamic_addrs_per_us,
-                self.h2d_stagger_max_us,
-                self.layerwise_max_transfer_blocks,
-                self.layerwise_max_transfer_bytes,
-            )
+            if self.use_gva_layerwise:
+                self.kv_recv_thread = KVCacheStoreLayerRecvingThread(
+                    self.m_store,
+                    self.token_database,
+                    self.block_size,
+                    self.tp_rank,
+                    self.tp_size,
+                    self.dcp_size,
+                    self.my_key_index,
+                    self.num_ranks_per_layer,
+                    self.page_size_bytes,
+                    ready_event,
+                    self.get_event,
+                    self.layer_load_finished_events,
+                    self.layer_save_finished_events,
+                    self.num_layers,
+                    self.h2d_stagger_us,
+                    self.h2d_stagger_group_size,
+                    self.h2d_stagger_dynamic_addrs_per_us,
+                    self.h2d_stagger_max_us,
+                    self.layerwise_max_transfer_blocks,
+                    self.layerwise_max_transfer_bytes,
+                )
+            else:
+                self.kv_recv_thread = KVCacheStoreKeyLayerRecvingThread(
+                    self.m_store,
+                    self.token_database,
+                    self.block_size,
+                    self.tp_rank,
+                    self.tp_size,
+                    self.dcp_size,
+                    ready_event,
+                    self.get_event,
+                    self.layer_load_finished_events,
+                    self.layer_save_finished_events,
+                    self.num_layers,
+                )
             self.kv_recv_thread.start()
             ready_event.wait()
-            self._bind_kv_transfer_thread(
-                self.kv_recv_thread,
-                1,
-                "layerwise recv",
-            )
+            if self.use_gva_layerwise:
+                self._bind_kv_transfer_thread(
+                    self.kv_recv_thread,
+                    1,
+                    "layerwise recv",
+                )
         else:
             if self.kv_role in ["kv_producer", "kv_both"] or self.consumer_is_to_put:
                 ready_event_sending = threading.Event()

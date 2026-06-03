@@ -60,6 +60,7 @@ class KVPoolScheduler:
         backend_name = vllm_config.kv_transfer_config.kv_connector_extra_config.get(
             "backend", "mooncake")
         self.backend_name = backend_name.lower()
+        self.use_gva_layerwise = self.use_layerwise and self.backend_name == "memcache"
         backend = backend_map.get(self.backend_name)
         if backend is None:
             raise ValueError(f"Unsupported KV pool backend: {backend_name}")
@@ -91,15 +92,14 @@ class KVPoolScheduler:
         self.num_layers = vllm_config.model_config.get_num_layers(vllm_config.parallel_config)
         self.model_name = model_config.model.split('/')[-1]
 
-        # Keep this in sync with pool_worker.py because it affects allocation size.
         if self.use_layerwise:
             layerwise_config = get_layerwise_config(self.num_layers)
-            num_layer_keys = self.num_layers
             self.layerwise_offload = layerwise_config.has_layer_reuse
         else:
-            num_layer_keys = 1
             self.layerwise_offload = False
 
+        # Keep this in sync with pool_worker.py because it affects GVA allocation size.
+        num_layer_keys = self.num_layers if self.use_gva_layerwise else 1
         keys_per_block_hash = (
             self.pcp_size * self.dcp_size
             * (self.tp_size // self.put_step)
@@ -222,7 +222,7 @@ class KVPoolScheduler:
         for block_hash in block_hashes:
             block_keys = []
             chunk_hash = block_hash if isinstance(block_hash, str) else block_hash.hex()
-            pp_ranks = range(1) if include_layers else range(self.pp_size)
+            pp_ranks = [self.pp_rank] if include_layers else range(self.pp_size)
             for pcp_rank in range(self.pcp_size):
                 for dcp_rank in range(self.dcp_size):
                     for head_or_tp_rank in range(head_or_tp_ranks):
@@ -266,7 +266,9 @@ class KVPoolScheduler:
             return 0
 
         query_keys_by_block = self._generate_store_query_keys(
-            block_hashes_to_query, include_layers=include_layers)
+            block_hashes_to_query,
+            include_layers=include_layers,
+        )
         query_keys = [
             key
             for block_keys in query_keys_by_block
@@ -359,7 +361,7 @@ class KVPoolScheduler:
         if token_len < self._block_size:
             return 0, False
 
-        if self.use_layerwise and self.backend_name == "memcache":
+        if self.use_gva_layerwise:
             num_external_hit_tokens = self._get_layerwise_gva_hit_tokens(
                 request, token_len, num_computed_tokens)
         else:
@@ -517,7 +519,7 @@ class KVPoolScheduler:
             num_blocks = num_tokens_to_compute // self._block_size
             has_last_block = num_tokens_to_compute % self._block_size != 0
 
-            if self.use_layerwise:
+            if self.use_gva_layerwise:
                 self._ensure_tracker_gvas_cover_blocks(
                     request_tracker,
                     request_real.block_hashes[:num_blocks],
@@ -588,7 +590,7 @@ class KVPoolScheduler:
 
                     num_blocks = len(new_block_ids)
                     has_last_block = num_tokens_to_compute % self._block_size != 0
-                    if self.use_layerwise:
+                    if self.use_gva_layerwise:
                         self._ensure_tracker_gvas_cover_blocks(
                             request_tracker,
                             request_real.block_hashes[:num_blocks],
@@ -647,7 +649,7 @@ class KVPoolScheduler:
                         request_tracker.token_len % self._block_size != 0
                         or current_hash_count > len(request.block_hashes)
                     )
-                    if self.use_layerwise and (new_hash_count > 0 or has_last_block):
+                    if self.use_gva_layerwise and (new_hash_count > 0 or has_last_block):
                         self._ensure_tracker_gvas_cover_blocks(
                             request_tracker,
                             request.block_hashes[:current_hash_count],
@@ -710,7 +712,7 @@ class KVPoolScheduler:
 
                 num_blocks = num_tokens_to_compute // self._block_size
                 has_last_block = num_tokens_to_compute % self._block_size != 0
-                if self.use_layerwise:
+                if self.use_gva_layerwise:
                     self._ensure_tracker_gvas_cover_blocks(
                         request_tracker,
                         request.block_hashes[:num_blocks],

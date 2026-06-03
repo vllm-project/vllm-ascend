@@ -21,6 +21,7 @@ from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.config_data import
     LayerBlockRange,
     LayerLoadTask,
     LayerTransferTask,
+    PoolKey,
     ReqMeta,
 )
 # isort: on
@@ -615,6 +616,253 @@ class KVCacheStoreRecvingThread(KVTransferThread):
         self.m_store.get(key_list_c, addr_list_c, size_list_c)
         self.set_finished_request(req_id)
         self.request_queue.task_done()
+
+
+class KVCacheStoreKeyLayerSendingThread(KVTransferThread):
+    def __init__(
+        self,
+        m_store: Backend,
+        token_database: ChunkedTokenDatabase,
+        block_size: int,
+        tp_rank: int,
+        tp_size: int,
+        dcp_size: int,
+        put_step: int,
+        ready_event: threading.Event,
+        num_layers: int,
+        layer_save_finished_events: list[threading.Event],
+        sync_save_events: list[torch.npu.Event],
+    ):
+        super().__init__(
+            m_store,
+            token_database,
+            block_size,
+            tp_rank,
+            tp_size,
+            dcp_size,
+            ready_event,
+            name="KVCacheStoreKeyLayerSendingThread",
+        )
+        self.final_layer_id = num_layers - 1
+        self.put_step = put_step
+        self.layer_save_finished_events = layer_save_finished_events
+        self.sync_save_events = sync_save_events
+        self.stored_requests = defaultdict[str, int](int)
+
+    def add_stored_request(self, req_id: str):
+        with self.done_task_lock:
+            self.stored_requests[req_id] += 1
+
+    def dec_stored_request(self, req_id: str):
+        with self.done_task_lock:
+            if req_id in self.stored_requests:
+                self.stored_requests[req_id] -= 1
+
+    def delete_finished_stored_request(self, req_id: str):
+        with self.done_task_lock:
+            if req_id in self.stored_requests:
+                del self.stored_requests[req_id]
+
+    def try_finish_and_delete_stored_request(self, req_id: str) -> bool:
+        with self.done_task_lock:
+            if req_id in self.stored_requests and self.stored_requests[req_id] == 0:
+                del self.stored_requests[req_id]
+                return True
+            return False
+
+    def add_request(  # type: ignore[override]
+        self, req_meta: list[LayerTransferTask]
+    ) -> torch.Tensor:
+        self.request_queue.put(req_meta)
+
+    def _handle_request(  # type: ignore[override]
+        self, transfer_tasks: list[LayerTransferTask]
+    ):
+        if len(transfer_tasks) == 0:
+            self.request_queue.task_done()
+            return
+        if len(transfer_tasks) > 1:
+            raise ValueError(f"Expected at most one layer transfer task, got {len(transfer_tasks)}")
+
+        transfer_task = transfer_tasks[0]
+        layer_id = transfer_task.layer_id
+        key_list = []
+        addr_list = []
+        size_list = []
+        req_ids = []
+        is_last_chunks = []
+
+        for block_range in transfer_task.block_ranges:
+            request = block_range.request
+            req_ids.append(request.req_id)
+            is_last_chunks.append(request.is_last_chunk)
+            starts = []
+            ends = []
+            keys = []
+            mask_num = request.save_start_token // self.block_size * self.block_size
+            for start, end, key in self.token_database.process_tokens(
+                request.save_end_token,
+                request.block_hashes,
+                mask_num,
+            ):
+                block_index = start // self.block_size
+                if (block_index < block_range.start_block
+                        or block_index >= block_range.end_block):
+                    continue
+                starts.append(start)
+                ends.append(end)
+                keys.append(key.split_layers(self.final_layer_id + 1)[layer_id])
+
+            if not self.dcp_size > 1:
+                starts = starts[self.tp_rank % self.put_step :: self.put_step]
+                ends = ends[self.tp_rank % self.put_step :: self.put_step]
+                keys = keys[self.tp_rank % self.put_step :: self.put_step]
+
+            for index, key in enumerate(keys):
+                key_list.append(key.to_string())
+                addr, size = self.token_database.prepare_value_layer(
+                    starts[index],
+                    ends[index],
+                    request.block_ids,
+                    layer_id,
+                )
+                addr_list.append(addr)
+                size_list.append(size)
+
+        for req_id in req_ids:
+            self.dec_stored_request(req_id)
+
+        if key_list:
+            exists_states = self.lookup(key_list)
+            missing_indices = [
+                index for index, exists in enumerate(exists_states)
+                if not exists
+            ]
+            keys_to_put = [key_list[index] for index in missing_indices]
+            addrs_to_put = [addr_list[index] for index in missing_indices]
+            sizes_to_put = [size_list[index] for index in missing_indices]
+            if keys_to_put:
+                self.sync_save_events[layer_id].synchronize()
+                self.m_store.put(keys_to_put, addrs_to_put, sizes_to_put)
+
+        if layer_id == self.final_layer_id:
+            for req_id, is_last_chunk in zip(req_ids, is_last_chunks):
+                if is_last_chunk and self.try_finish_and_delete_stored_request(req_id):
+                    self.set_finished_request(req_id)
+
+        assert not self.layer_save_finished_events[layer_id].is_set(), f"thread: {layer_id} save failed "
+        logger.debug(f">>>>>>>>>>>>>>>>>>>> set key save layer {layer_id}")
+        self.layer_save_finished_events[layer_id].set()
+        transfer_tasks.clear()
+        self.request_queue.task_done()
+
+
+class KVCacheStoreKeyLayerRecvingThread(KVTransferThread):
+    def __init__(
+        self,
+        m_store: Backend,
+        token_database: ChunkedTokenDatabase,
+        block_size: int,
+        tp_rank: int,
+        tp_size: int,
+        dcp_size: int,
+        ready_event: threading.Event,
+        get_event: threading.Event,
+        layer_load_finished_events: list[threading.Event],
+        layer_save_finished_events: list[threading.Event],
+        num_layers: int,
+    ):
+        super().__init__(
+            m_store,
+            token_database,
+            block_size,
+            tp_rank,
+            tp_size,
+            dcp_size,
+            ready_event,
+            name="KVCacheStoreKeyLayerRecvingThread",
+        )
+        self.get_event = get_event
+        self.layer_load_finished_events = layer_load_finished_events
+        self.layer_save_finished_events = layer_save_finished_events
+        self.final_layer_id = num_layers - 1
+
+    def add_request(  # type: ignore[override]
+        self, req_meta: LayerLoadTask
+    ) -> torch.Tensor:
+        self.request_queue.put(req_meta)
+
+    def _wait_for_save(self, layer_id: int) -> None:
+        while not self.layer_save_finished_events[layer_id].wait(timeout=10):
+            logger.info("Layerwise %d save wait timed out, keep waiting before load", layer_id)
+        logger.debug(f">>>>>>>>>>>>>>>>>>>> clear key save layer {layer_id}")
+        self.layer_save_finished_events[layer_id].clear()
+
+    def _handle_request(  # type: ignore[override]
+        self, data: LayerLoadTask
+    ):
+        wait_for_save = data.wait_for_save_layer
+        layer_id = data.layer_id
+        if wait_for_save is not None:
+            self._wait_for_save(wait_for_save)
+
+        if data.attention_start_gate is not None:
+            while not data.attention_start_gate.wait(timeout=10):
+                logger.info("Layerwise %d load waits for attention compute start", layer_id)
+
+        key_list = []
+        addr_list = []
+        size_list = []
+        req_ids = []
+        is_last_chunks = []
+        if len(data.transfer_tasks) > 1:
+            raise ValueError(f"Expected at most one layer transfer task, got {len(data.transfer_tasks)}")
+        if data.transfer_tasks:
+            transfer_task = data.transfer_tasks[0]
+            for block_range in transfer_task.block_ranges:
+                request = block_range.request
+                req_ids.append(request.req_id)
+                is_last_chunks.append(request.is_last_chunk)
+                for block_index in range(block_range.start_block,
+                                         block_range.end_block):
+                    if block_index >= len(request.block_hashes):
+                        continue
+                    block_hash = request.block_hashes[block_index]
+                    chunk_hash = block_hash if isinstance(block_hash, str) else block_hash.hex()
+                    key = PoolKey(
+                        self.token_database.metadata,
+                        chunk_hash,
+                    ).split_layers(self.final_layer_id + 1)[layer_id]
+                    start = block_index * self.block_size
+                    end = start + self.block_size
+                    addr, size = self.token_database.prepare_value_layer(
+                        start,
+                        end,
+                        request.block_ids,
+                        layer_id,
+                    )
+                    key_list.append(key.to_string())
+                    addr_list.append(addr)
+                    size_list.append(size)
+
+        if key_list:
+            shift = (self.tp_rank * len(key_list)) // self.tp_size
+            key_list_c = _circular_shift(key_list, shift)
+            addr_list_c = _circular_shift(addr_list, shift)
+            size_list_c = _circular_shift(size_list, shift)
+            self.m_store.get(key_list_c, addr_list_c, size_list_c)
+
+        if layer_id == self.final_layer_id:
+            for req_id, is_last_chunk in zip(req_ids, is_last_chunks):
+                if is_last_chunk:
+                    self.set_finished_request(req_id)
+
+        assert not self.layer_load_finished_events[layer_id].is_set(), f"thread: {layer_id} load failed "
+        logger.debug(f">>>>>>>>>>>>>>>>>>>> set key load layer {layer_id}")
+        self.layer_load_finished_events[layer_id].set()
+        data.transfer_tasks.clear()
+        self.request_queue.task_done()
+        self.get_event.set()
 
 
 class KVCacheStoreLayerSendingThread(KVTransferThread):

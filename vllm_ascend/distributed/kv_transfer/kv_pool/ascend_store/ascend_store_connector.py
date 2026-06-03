@@ -67,6 +67,10 @@ class AscendStoreConnector(KVConnectorBase_V1):
         self.kv_role = vllm_config.kv_transfer_config.kv_role
 
         self.use_layerwise = vllm_config.kv_transfer_config.kv_connector_extra_config.get("use_layerwise", False)
+        backend_name = vllm_config.kv_transfer_config.kv_connector_extra_config.get(
+            "backend", "mooncake")
+        self.backend_name = backend_name.lower()
+        self.use_gva_layerwise = self.use_layerwise and self.backend_name == "memcache"
         self.consumer_is_to_put = vllm_config.kv_transfer_config.kv_connector_extra_config.get(
             "consumer_is_to_put", False
         )
@@ -78,7 +82,7 @@ class AscendStoreConnector(KVConnectorBase_V1):
                 "as the MoonCakeStoreConnector will be removed in the future."
             )
 
-        if role == KVConnectorRole.SCHEDULER and self.use_layerwise:
+        if role == KVConnectorRole.SCHEDULER and self.use_gva_layerwise:
             num_layers = vllm_config.model_config.get_num_layers(
                 vllm_config.parallel_config)
             if (get_layerwise_config(num_layers).has_layer_reuse
