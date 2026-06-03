@@ -102,5 +102,28 @@ def test_model_load_success(mock_logger, mock_p2p):
         mock_logger.info.assert_called_once()
 
 
+@patch("vllm_ascend.model_loader.netloader.load.P2PLoad")
+@patch("vllm_ascend.model_loader.netloader.load.ElasticClient")
+def test_elastic_load_passes_draft_group_name(mock_client, mock_p2p):
+    mock_client_instance = MagicMock()
+    mock_client_instance.s = True
+    mock_client_instance.ack = ["foo", "bar"]
+    mock_client_instance.server_addr = "addr"
+    mock_client_instance.__enter__.return_value = mock_client_instance
+    mock_client.return_value = mock_client_instance
+
+    expected_model = object()
+    mock_p2p_instance = MagicMock()
+    mock_p2p_instance.load.return_value = expected_model
+    mock_p2p.return_value = mock_p2p_instance
+
+    sources = [{"device_id": 0, "sources": ["127.0.0.1:15000"]}]
+    result = elastic_load("model", 0, "draft-model", sources, 1, 1, group_name="netloader_draft")
+
+    assert result is expected_model
+    mock_client.assert_called_once_with(["127.0.0.1:15000"], 0, "draft-model", 1, 1, "netloader_draft")
+    mock_p2p.assert_called_once_with("foo", "addr", "bar", "netloader_draft")
+
+
 if __name__ == "__main__":
     pytest.main()
