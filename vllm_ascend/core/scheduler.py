@@ -184,9 +184,9 @@ class AscendScheduler(Scheduler):
                 # We use `request.num_tokens` instead of
                 # `request.num_prompt_tokens` to consider the resumed
                 # requests, which have output tokens.
-                if request.sampling_params.extra_args.get(
+                extra_args = request.sampling_params.extra_args or {}
+                if extra_args.get(
                         "request_stage") == RequestStage.Decode.value:
-                    extra_args = request.sampling_params.extra_args or {}
                     candidate_num = extra_args.get("candidate_num", 0)
                     if isinstance(candidate_num, list):
                         candidate_num = candidate_num[0] if candidate_num else 0
