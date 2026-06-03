@@ -6,7 +6,7 @@ We're excited to announce the release of v0.20.2rc1 for vLLM Ascend. This is the
 
 ### Highlights
 
-- **DeepSeek V4 Support**: Added end-to-end support for DeepSeek V4, including the model architecture, DSA attention backend, KV cache management, distributed inference, tool-call parser, and MTP support. [#9270](https://github.com/vllm-project/vllm-ascend/pull/9270)
+- **DeepSeek V4 Support**: Added end-to-end support for DeepSeek V4, including the model architecture, DSA attention backend, KV cache management, distributed inference, tool-call parser, MTP support, KV Pool adaptation, and custom operator enablement. [#9270](https://github.com/vllm-project/vllm-ascend/pull/9270) [#9385](https://github.com/vllm-project/vllm-ascend/pull/9385) [#9228](https://github.com/vllm-project/vllm-ascend/pull/9228)
 - **A5 and XLite Quantization Expansion**: Added MXFP4 flatquant with row parallelism for Ascend A5 and expanded XLite support to GLM-4.7 W8A8 quantization. [#9391](https://github.com/vllm-project/vllm-ascend/pull/9391) [#9415](https://github.com/vllm-project/vllm-ascend/pull/9415)
 
 ### Features
@@ -15,11 +15,11 @@ We're excited to announce the release of v0.20.2rc1 for vLLM Ascend. This is the
 - Added DeepSeek PCP/DCP adaptation to improve support for disaggregated deployments. [#9058](https://github.com/vllm-project/vllm-ascend/pull/9058)
 - Added merged graph support for DFlash workloads. [#9074](https://github.com/vllm-project/vllm-ascend/pull/9074)
 - Added LoRA support for Qwen3.5 dense models. [#9023](https://github.com/vllm-project/vllm-ascend/pull/9023)
-- Added KV pool adaptation for DeepSeek V4. [#9385](https://github.com/vllm-project/vllm-ascend/pull/9385)
+- Added KV pool adaptation for DeepSeek V4 and separated MTP-layer KV cache sharding for DeepSeek V4 speculative decoding. [#9385](https://github.com/vllm-project/vllm-ascend/pull/9385) [#9367](https://github.com/vllm-project/vllm-ascend/pull/9367)
 
 ### Hardware and Operator Support
 
-- Added DeepSeek V4 custom operators required for the new model path. [#9228](https://github.com/vllm-project/vllm-ascend/pull/9228)
+- Added DeepSeek V4 custom operators required for the new model path, registered the operators for Ascend 910B, and switched the DeepSeek V4 `hc_pre` path to a fused operator. [#9228](https://github.com/vllm-project/vllm-ascend/pull/9228) [#9339](https://github.com/vllm-project/vllm-ascend/pull/9339) [#9396](https://github.com/vllm-project/vllm-ascend/pull/9396)
 - Enabled MXFP4 flatquant and row parallel support on Ascend A5. [#9391](https://github.com/vllm-project/vllm-ascend/pull/9391)
 - Enabled MC2 dispatch and combine support for MXFP4/MXFP8 quantization on Ascend A5. [#9365](https://github.com/vllm-project/vllm-ascend/pull/9365) [#9328](https://github.com/vllm-project/vllm-ascend/pull/9328)
 - Improved 310P support by optimizing fused operators for Qwen3.5 Dense ACLGraph and simplifying the 310P RMSNormGated path. [#9104](https://github.com/vllm-project/vllm-ascend/pull/9104) [#9489](https://github.com/vllm-project/vllm-ascend/pull/9489)
@@ -27,9 +27,15 @@ We're excited to announce the release of v0.20.2rc1 for vLLM Ascend. This is the
 ### Performance
 
 - Added DeepSeek V4 DSA multistream overlap optimizations across compressor, indexer-select, CV parallel, and pure-prefill compute-communication overlap paths. [#9450](https://github.com/vllm-project/vllm-ascend/pull/9450) [#9441](https://github.com/vllm-project/vllm-ascend/pull/9441) [#9433](https://github.com/vllm-project/vllm-ascend/pull/9433) [#9504](https://github.com/vllm-project/vllm-ascend/pull/9504)
+- Reused DSA `topk_indices` across decode steps with IndexCache to reduce repeated DeepSeek V4 index computation. [#9390](https://github.com/vllm-project/vllm-ascend/pull/9390)
 - Fixed the missing enablement for `cv_indexer_qkv_prepare` multistream parallelism in the new overlap path. [#9530](https://github.com/vllm-project/vllm-ascend/pull/9530)
 - Reduced host-device synchronization overhead by removing the sync point in PIECEWISE mode. [#9025](https://github.com/vllm-project/vllm-ascend/pull/9025)
 - Optimized shared expert overlap timing in FusedMoE. [#9413](https://github.com/vllm-project/vllm-ascend/pull/9413)
+
+### Stability and Bug Fixes
+
+- Fixed DeepSeek V4 MTP, serial inference, FlashComm, A2 tensor-output all-reduce, and P/D disaggregation KV cache edge cases. [#9456](https://github.com/vllm-project/vllm-ascend/pull/9456) [#9487](https://github.com/vllm-project/vllm-ascend/pull/9487) [#9488](https://github.com/vllm-project/vllm-ascend/pull/9488) [#9389](https://github.com/vllm-project/vllm-ascend/pull/9389) [#9500](https://github.com/vllm-project/vllm-ascend/pull/9500)
+- Fixed DeepSeek V4 `hc_pre` behavior and added a 4-card E2E regression test. [#9452](https://github.com/vllm-project/vllm-ascend/pull/9452)
 
 ### Dependencies
 
