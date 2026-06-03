@@ -2,6 +2,7 @@
 import contextlib
 import copy
 import hashlib
+import json
 import logging
 import math
 import os
@@ -1563,6 +1564,7 @@ class MooncakeConnectorWorker:
             self.tp_num_need_pulls = num_d_block_heads // num_p_block_heads
         self.local_remote_block_port_mapping: dict[str, list[list[int]] | None] = {}
         self.remote_port_send_num: dict[str, dict[int, RemotePortInfo]] = {}
+        self._dummy_store = self._init_dummy_client()
 
     def _get_prefill_decode_size(self, vllm_config: VllmConfig):
         # get prefill tp and dp size from extra config
@@ -1697,6 +1699,37 @@ class MooncakeConnectorWorker:
 
         return ptrs, lengths
 
+    def _init_dummy_client(self):
+        """Initialize dummy client for HCCL buffer registration via real client process."""
+        config_path = os.getenv("MOONCAKE_CONFIG_PATH")
+        if not config_path:
+            return None
+        try:
+            with open(config_path) as f:
+                config = json.load(f)
+        except (FileNotFoundError, json.JSONDecodeError):
+            return None
+        use_dummy = os.getenv("MOONCAKE_USE_DUMMY_CLIENT", config.get("use_dummy_client", False))
+        if isinstance(use_dummy, str):
+            use_dummy = use_dummy.lower() in ("1", "true")
+        if not use_dummy:
+            return None
+        dummy_server_address = os.getenv(
+            "MOONCAKE_DUMMY_SERVER_ADDRESS",
+            config.get("dummy_server_address", ""),
+        )
+        if not dummy_server_address:
+            logger.warning("use_dummy_client=true but no dummy_server_address configured")
+            return None
+        from mooncake.store import MooncakeDistributedStore
+
+        store = MooncakeDistributedStore()
+        ret = store.setup_dummy(mem_pool_size=0, local_buffer_size=0, server_address=dummy_server_address)
+        if ret != 0:
+            raise RuntimeError(f"MooncakeConnectorWorker dummy client setup_dummy() failed: ret={ret}")
+        logger.info("MooncakeConnectorWorker: dummy client connected to %s", dummy_server_address)
+        return store
+
     def register_kv_caches(self, kv_caches: dict[str, torch.Tensor]):
         """Register the KV Cache data."""
         self.use_mla = self.vllm_config.model_config.is_deepseek_mla
@@ -1741,6 +1774,10 @@ class MooncakeConnectorWorker:
             ptrs, lengths = self._get_registered_layer_buffers(kv_caches)
 
         global_te.register_buffer(ptrs, lengths)
+        if self._dummy_store is not None:
+            for ptr, length in zip(ptrs, lengths):
+                self._dummy_store.register_buffer(ptr, length)
+            logger.info("Registered %d KV cache buffers via dummy client", len(ptrs))
         logger.debug(
             "Mooncake register kv caches metadata: kv_group2layeridx=%s, kv_caches_base_addr=%s, "
             "block_len_per_addr=%s, block_size_scale=%s, ptrs=%s, lengths=%s",

@@ -166,6 +166,7 @@ python run_real_client.py --port 50051
 #### Connectors Supporting Dummy Client
 
 * **AscendStoreConnector** (KV Pool backend via `MooncakeBackend`): Reads `use_dummy_client` and `dummy_server_address` from `mooncake.json`. When enabled, calls `setup_dummy()` instead of the full `setup()`, and forwards `register_buffer()` calls to the real client (which handles HCCL registration).
+* **MooncakeConnectorV1** (P2P KV transfer): Also reads the same config. When enabled, registers KV cache buffers with both the dummy client (for HCCL registration via the real client) and the local transfer engine (for P2P data transfer). This dual registration pattern is required for PD disaggregated inference with coordinator handoff.
 
 #### Notes
 
