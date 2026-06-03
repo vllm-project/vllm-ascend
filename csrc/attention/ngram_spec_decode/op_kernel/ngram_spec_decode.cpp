@@ -324,6 +324,9 @@ private:
             numValidLocal.SetValue(i, valid_draft_count);
         }
 
+        AscendC::SetFlag<AscendC::HardEvent::S_MTE3>(evtSToMte3);
+        AscendC::WaitFlag<AscendC::HardEvent::S_MTE3>(evtSToMte3);
+
         uint32_t metaBytes32 = static_cast<uint32_t>(rows) * ELEM_SIZE;
         AscendC::DataCopyExtParams nextParams{1, metaBytes32, 0, 0, 0};
         AscendC::DataCopyPad(nextTokensGm[start_row], nextLocal, nextParams);
