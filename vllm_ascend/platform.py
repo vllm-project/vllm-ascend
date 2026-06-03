@@ -203,8 +203,11 @@ class NPUPlatform(Platform):
         # Since vllm-project/vllm#43746, DeepSeek V4 model classes no longer
         # carry @support_torch_compile. This makes vLLM auto-enable the breakable
         # cudagraph PIECEWISE path, which is not supported on Ascend yet.
-        # Disable it by default unless the user explicitly opts in via the env var.
-        os.environ["VLLM_USE_BREAKABLE_CUDAGRAPH"] = "0"
+        envs_vllm.VLLM_USE_BREAKABLE_CUDAGRAPH = False
+        logger.info(
+            "Breakable cudagraph is force disabled on Ascend because "
+            "DeepSeek V4 PIECEWISE cudagraph is not supported yet."
+        )
 
         """Set sp_min_token_num=1 when enable_sp and not set."""
         pass_config = vllm_config.compilation_config.pass_config
@@ -488,10 +491,12 @@ class NPUPlatform(Platform):
             # This will cause in scenarios where both piecewise and splitting ops are configured simultaneously,
             # If splitting ops does not contain the vllm::mla_forward and vllm::dsa_forward value, this configuration issue will
             # not be detected in advance assert.
-            compilation_config.splitting_ops.extend([
-                "vllm::mla_forward",
-                "vllm::dsa_forward",
-            ])
+            compilation_config.splitting_ops.extend(
+                [
+                    "vllm::mla_forward",
+                    "vllm::dsa_forward",
+                ]
+            )
             update_aclgraph_sizes(vllm_config)
             ascend_config.ascend_compilation_config.enable_npugraph_ex = False
         elif compilation_config.cudagraph_mode.has_full_cudagraphs():
