@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from collections.abc import Iterable, Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Any, cast
 
 import torch
@@ -701,8 +701,12 @@ class LayerMultiBlockReqMeta:
     ends: list[int]
     block_ids_by_group: list[list[int]]
     layer_id: int
+    block_hashes: list[Any] = field(default_factory=list)
     is_last_chunk: bool | None = True
     current_event: torch.npu.Event | None = None
+    token_ids: list[int] | None = None
+    original_block_size: list[int] | int | None = None
+    kv_cache_group_id: int = 0
 
     def __init__(
         self,
@@ -715,6 +719,10 @@ class LayerMultiBlockReqMeta:
         is_last_chunk: bool | None = True,
         current_event: torch.npu.Event | None = None,
         block_ids: list[int] | list[list[int]] | None = None,
+        token_ids: list[int] | None = None,
+        original_block_size: list[int] | int | None = None,
+        block_hashes: list[Any] | None = None,
+        kv_cache_group_id: int = 0,
     ) -> None:
         self.req_id = req_id
         self.keys = keys
@@ -726,6 +734,10 @@ class LayerMultiBlockReqMeta:
         self.layer_id = layer_id
         self.is_last_chunk = is_last_chunk
         self.current_event = current_event
+        self.token_ids = token_ids
+        self.original_block_size = original_block_size
+        self.block_hashes = [] if block_hashes is None else block_hashes
+        self.kv_cache_group_id = kv_cache_group_id
 
     @property
     def block_ids(self) -> list[int]:
