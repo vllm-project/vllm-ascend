@@ -51,6 +51,12 @@ from vllm_ascend.memcache_comm_fence import (
     reset_attention_compute_start_gate,
 )
 
+_shared_layer_transfer_events: list[threading.Event] | None = None
+
+
+def get_shared_layer_transfer_events() -> list[threading.Event] | None:
+    return _shared_layer_transfer_events
+
 
 class KVPoolWorker:
     # The main class for the cache engine.
@@ -228,6 +234,11 @@ class KVPoolWorker:
         self.independent_layers = layerwise_config.independent_layers
         self.prefetch_layer_map = layerwise_config.prefetch_layer_map
         self.sync_save_events = None
+        if self.use_gva_layerwise and self.layerwise_offload:
+            self.layer_transfer_finished_events = [
+                threading.Event() for _ in range(self.num_layers)
+            ]
+            globals()["_shared_layer_transfer_events"] = self.layer_transfer_finished_events
 
     def _bind_kv_transfer_thread(
         self,
@@ -644,12 +655,18 @@ class KVPoolWorker:
         self.layer_load_finished_events[self.current_layer].clear()
 
     def save_kv_layer(self, connector_metadata: AscendConnectorMetadata) -> None:
-        # Wait for KV cache saving to complete on the final layer that requires offloading.
         self.sync_save_events[self.current_layer].record()
         if self.layer_save_tasks[self.current_layer]:
             for block_range in self.layer_save_tasks[self.current_layer][0].block_ranges:
                 self.kv_send_thread.add_stored_request(
                     block_range.request.req_id)
+            self.kv_send_thread.add_request(self.layer_save_tasks[self.current_layer])
+        elif self.layerwise_offload:
+            layer_task = LayerTransferTask(
+                layer_id=self.current_layer,
+                block_ranges=[],
+            )
+            self.layer_save_tasks[self.current_layer].append(layer_task)
             self.kv_send_thread.add_request(self.layer_save_tasks[self.current_layer])
         else:
             self.layer_save_finished_events[self.current_layer].set()
