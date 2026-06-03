@@ -32,6 +32,7 @@ from vllm.utils.math_utils import cdiv
 from vllm.utils.platform_utils import is_pin_memory_available
 from vllm.v1.attention.backends.utils import CommonAttentionMetadata
 from vllm.v1.core.sched.output import SchedulerOutput
+from vllm.v1.kv_cache_interface import MLAAttentionSpec
 from vllm.v1.sample.metadata import SamplingMetadata
 from vllm.v1.spec_decode.llm_base_proposer import SpecDecodeBaseProposer
 from vllm.v1.spec_decode.metadata import SpecDecodeMetadata
@@ -1512,9 +1513,9 @@ class AscendSpecDecodeBaseProposer(SpecDecodeBaseProposer):
             )
 
         if self.pcp_size * self.dcp_size > 1:
-            if self.vllm_config.model_config.use_mla:
-                if getattr(attn_metadata, "decode", None):
-                    attn_metadata.decode.cp_seq_len = cp_seq_len
+            kv_cache_spec = self.draft_attn_groups[0].kv_cache_spec
+            if isinstance(kv_cache_spec, MLAAttentionSpec):
+                attn_metadata.decode.cp_seq_len = cp_seq_len
             else:
                 attn_metadata.decode_meta.num_computed_tokens_of_pcp_dcp = num_computed_tokens_of_pcp_dcp.numpy()
 
