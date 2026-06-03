@@ -152,8 +152,6 @@ def npugraph_ex_compile(
 
         _original_get_compiled_gm = nfx._NpuFxCompiler._get_compiled_gm
 
-        handle = None
-
         def patched_get_compiled_gm(self, graph, example_inputs):
             compiled_gm = _original_get_compiled_gm(self, graph, example_inputs)
             if cache_path:
