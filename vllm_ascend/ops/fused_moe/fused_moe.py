@@ -181,7 +181,7 @@ class AscendUnquantizedFusedMoEMethod(UnquantizedFusedMoEMethod):
         )
         if layer.vllm_config.model_config is not None and layer.vllm_config.model_config.enable_return_routed_experts:
             if vllm_version_is("0.20.2"):
-                # 0.20.2: capturer is a process-wide singleton.
+                # In 0.20.2, capturer is a process-wide singleton.
                 capturer = RoutedExpertsCapturer.get_instance()
             else:
                 capturer = getattr(layer, "_ascend_routed_experts_capturer", None)
