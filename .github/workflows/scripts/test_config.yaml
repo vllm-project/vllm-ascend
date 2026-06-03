@@ -20,13 +20,17 @@
 # Fields:
 #   name: Module identifier
 #   optional: true (triggered only when matched) or false (always triggered)
+#   base: Optional module name or list of module names to inherit from
 #   source_file_dependencies: List of source/test directories whose changes
 #                             trigger the tests
+#   exclude_source_file_dependencies: Optional list of source/test directories
+#                                     to exclude from source_file_dependencies
 #   tests: List of test directories/files to run
 #   skip_tests: List of test files to skip (matched against individual test
 #                paths after directory scanning)
 
 # === Modules ===
+# 310P
 - name: 310p
   optional: true
   source_file_dependencies:
@@ -40,46 +44,45 @@
     - tests/e2e/pull_request/full/four_cards/test_moe_model_310p.py
     - tests/e2e/pull_request/full/four_cards/test_vl_model_310p.py
 
+# Attention
 - name: attention_common
   optional: true
   source_file_dependencies:
     - vllm_ascend/attention/__init__.py
+    - vllm_ascend/attention/abstract.py
     - vllm_ascend/attention/attention_mask.py
     - vllm_ascend/attention/utils.py
     - vllm_ascend/attention/kvcomp_attn/
   tests:
-    - tests/ut/attention/test_attention_mask.py
-    - tests/ut/attention/a2/test_common_cp.py
-    - tests/ut/attention/a2/test_attention_v1.py
-    - tests/ut/attention/a2/test_mla_v1.py
-    - tests/ut/attention/a2/test_sfa_v1.py
+    - tests/ut/attention/
+    - tests/e2e/pull_request/light/one_card/test_qwen3_0_6b.py
+    - tests/e2e/pull_request/light/one_card/test_qwen3_5_0_8b.py
 
 - name: attention_gqa
   optional: true
+  base: attention_common
   source_file_dependencies:
     - vllm_ascend/attention/attention_v1.py
-  tests:
-    - tests/ut/attention/a2/test_attention_v1.py
-    - tests/ut/attention/a2/test_attention_v1_precision.py
 
 - name: attention_fa3
   optional: true
+  base: attention_common
   source_file_dependencies:
     - vllm_ascend/attention/fa3_v1.py
   tests:
-    - tests/ut/attention/test_attention_fa3.py
     - tests/e2e/pull_request/full/one_card/test_attention_fa3.py
 
 - name: attention_mla
   optional: true
+  base: attention_common
   source_file_dependencies:
     - vllm_ascend/attention/mla_v1.py
   tests:
-    - tests/ut/attention/a2/test_mla_v1.py
-    - tests/ut/attention/a2/test_mla_precision.py
+    - tests/e2e/pull_request/light/two_card/test_deepseek_multistream_moe.py
 
 - name: attention_sfa
   optional: true
+  base: attention_common
   source_file_dependencies:
     - vllm_ascend/attention/sfa_v1.py
   tests:
@@ -89,31 +92,21 @@
 
 - name: attention_dsa
   optional: true
+  base: attention_common
   source_file_dependencies:
-    - vllm_ascend/attention/abstract.py
     - vllm_ascend/attention/dsa_v1.py
   tests:
     - tests/e2e/pull_request/full/four_cards/test_deepseek_v4.py
-    - tests/e2e/pull_request/full/four_cards/long_sequence/test_basic.py
 
 - name: attention_cp
   optional: true
+  base: attention_common
   source_file_dependencies:
     - vllm_ascend/attention/context_parallel
   tests:
-    - tests/ut/attention/a2/test_common_cp.py
-    - tests/ut/attention/a2/test_attention_cp.py
-    - tests/ut/attention/a2/test_mla_cp.py
-    - tests/ut/attention/test_sfa_cp.py
-    - tests/ut/attention/a2/test_attention_cp_precision.py
-    - tests/ut/attention/a2/test_mla_cp_precision.py
-    - tests/ut/attention/a2/test_sfa_cp_precision.py
-    - tests/e2e/pull_request/full/four_cards/long_sequence/test_accuracy.py
-    - tests/e2e/pull_request/full/four_cards/long_sequence/test_basic.py
-    - tests/e2e/pull_request/full/four_cards/long_sequence/test_chunked_prefill_cp.py
-    - tests/e2e/pull_request/full/four_cards/long_sequence/test_mtp.py
-    - tests/e2e/pull_request/full/four_cards/long_sequence/test_prefix_caching_cp.py 
+    - tests/e2e/pull_request/full/four_cards/long_sequence/
 
+# compilation
 - name: compilation
   optional: true
   source_file_dependencies:
@@ -233,6 +226,7 @@
     - tests/ut/ops/a2/test_gdn_chunk_meta.py
     - tests/ut/ops/a2/test_weight_prefetch.py
     - tests/e2e/pull_request/light/two_card/test_qwen3_30b_a3b.py
+    - tests/e2e/pull_request/light/two_card/test_deepseek_multistream_moe.py
     - tests/e2e/pull_request/full/one_card/test_multistream_overlap_shared_expert.py
     - tests/e2e/pull_request/full/two_cards/test_qwen3_moe.py
     - tests/e2e/pull_request/full/two_cards/test_qwen3_moe_routing_replay.py
