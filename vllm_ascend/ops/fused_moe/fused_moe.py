@@ -206,6 +206,7 @@ class AscendUnquantizedFusedMoEMethod(UnquantizedFusedMoEMethod):
             topk_ids = torch.argsort(random_matrix, dim=1)[:, : topk_ids.size(1)].to(topk_ids.dtype)
 
         moe_comm_method = _EXTRA_CTX.moe_comm_method
+
         # NOTE: In the MoECommType.FUSED_MC2 branch, we wrap weights (w1, w2) into lists
         # and provide dummy scales (w1_scale, w2_scale). This is required because:
         # The underlying Ascend fused operator (e.g., dispatch_ffn_combine) expects

@@ -146,10 +146,19 @@ class MoECommMethod(ABC):
         )
         token_dispatch_output = self.token_dispatcher.token_dispatch(token_dispatch_input=token_dispatch_input)
 
+        lora_params = None
+        if fused_experts_input.lora_context is not None:
+            lora_params = self._build_lora_params(
+                fused_experts_input=fused_experts_input,
+                routed_topk_ids=routed_topk_ids,
+                token_dispatch_output=token_dispatch_output,
+            )
+
         mlp_compute_input = build_mlp_compute_input(
             fused_experts_input=fused_experts_input,
             token_dispatch_output=token_dispatch_output,
             use_fusion_ops=self.use_fusion_ops,
+            lora_params=lora_params,
         )
 
         mlp_output, before_gmm2_evt = self._apply_mlp(mlp_compute_input)
@@ -172,6 +181,56 @@ class MoECommMethod(ABC):
 
     def _apply_mlp(self, mlp_compute_input: MoEMlpComputeInput) -> torch.Tensor:
         return unified_apply_mlp(mlp_compute_input=mlp_compute_input)
+
+    def _build_lora_params(
+        self,
+        fused_experts_input: MoEFusedExpertsInput,
+        routed_topk_ids: torch.Tensor,
+        token_dispatch_output: MoETokenDispatchOutput,
+    ):
+        from vllm_ascend.lora.moe_lora_ops import _build_lora_expert_indices_allgather
+        from vllm_ascend.ops.fused_moe.moe_stage_contracts import (
+            MoELoRAParams,
+            MoEAllGatherCombineMetadata,
+            MoEAllToAllCombineMetadata,
+        )
+
+        lora_context = fused_experts_input.lora_context
+        combine_metadata = token_dispatch_output.combine_metadata
+
+        # Build lora_expert_indices based on communication method
+        if isinstance(combine_metadata, MoEAllGatherCombineMetadata):
+            # AllGather: dispatch output is grouped by expert
+            lora_expert_indices = _build_lora_expert_indices_allgather(
+                lora_indices=lora_context.punica_wrapper.token_lora_indices,
+                expanded_row_idx=combine_metadata.expanded_row_idx,
+                topk_ids=routed_topk_ids,
+                num_experts=lora_context.num_experts,
+            )
+        elif isinstance(combine_metadata, MoEAllToAllCombineMetadata):
+            # AlltoAll: dispatch output is also grouped by expert (after npu_moe_token_permute)
+            # Use reversed_global_input_permutation_mapping as expanded_row_idx
+            # Note: The permutation mapping contains both valid indices and -1 for padding
+            lora_expert_indices = _build_lora_expert_indices_allgather(
+                lora_indices=lora_context.punica_wrapper.token_lora_indices,
+                expanded_row_idx=combine_metadata.reversed_global_input_permutation_mapping,
+                topk_ids=routed_topk_ids,
+                num_experts=lora_context.num_experts,
+            )
+        else:
+            raise NotImplementedError(
+                f"MoE LoRA is not supported for combine_metadata type "
+                f"{type(combine_metadata).__name__}. "
+                "Currently only AllGather and AlltoAll communications are supported."
+            )
+
+        return MoELoRAParams(
+            w13_lora_a_stacked=lora_context.w13_lora_a_stacked,
+            w13_lora_b_stacked=lora_context.w13_lora_b_stacked,
+            w2_lora_a_stacked=lora_context.w2_lora_a_stacked,
+            w2_lora_b_stacked=lora_context.w2_lora_b_stacked,
+            lora_expert_indices=lora_expert_indices,
+        )
 
     @abstractmethod
     def _get_token_dispatcher(self) -> MoETokenDispatcher:
