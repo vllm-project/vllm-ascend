@@ -43,7 +43,7 @@ permissions:
 
 jobs:
   selected-tests:
-    name: ${{ matrix.group.npu_type }}-${{ matrix.group.num_npus }}
+    name: ${{ matrix.group.npu_type }}-${{ matrix.group.num_npus }} card
     strategy:
       fail-fast: false
       matrix:
