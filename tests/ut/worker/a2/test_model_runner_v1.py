@@ -3,7 +3,13 @@ from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
 import torch
-from vllm.v1.kv_cache_interface import FullAttentionSpec, KVCacheConfig, KVCacheGroupSpec, KVCacheTensor
+from vllm.v1.kv_cache_interface import (
+    FullAttentionSpec,
+    KVCacheConfig,
+    KVCacheGroupSpec,
+    KVCacheTensor,
+    MambaSpec,
+)
 
 from vllm_ascend.worker.model_runner_v1 import NPUModelRunner
 
@@ -83,6 +89,71 @@ class TestNPUModelRunnerKVCache(unittest.TestCase):
 
         self.assertEqual(k_cache.shape, (2, 16, 8, 64))
         self.assertEqual(v_cache.shape, (2, 16, 8, 64))
+
+
+class TestNPUModelRunnerSpecDecodeMetadata(unittest.TestCase):
+    def _build_runner(self):
+        runner = NPUModelRunner.__new__(NPUModelRunner)
+        runner.speculative_config = None
+        runner.model_config = SimpleNamespace(is_hybrid=False)
+        runner.attn_groups = []
+        runner.reorder_batch_threshold = None
+        return runner
+
+    def test_calculate_reorder_batch_threshold_uses_min_non_none(self):
+        runner = self._build_runner()
+        groups = [
+            SimpleNamespace(
+                get_metadata_builder=lambda: SimpleNamespace(
+                    reorder_batch_threshold=2
+                )
+            ),
+            SimpleNamespace(
+                get_metadata_builder=lambda: SimpleNamespace(
+                    reorder_batch_threshold=None
+                )
+            ),
+            SimpleNamespace(
+                get_metadata_builder=lambda: SimpleNamespace(
+                    reorder_batch_threshold=1
+                )
+            ),
+        ]
+        runner._attn_group_iterator = lambda: groups
+
+        runner.calculate_reorder_batch_threshold()
+
+        self.assertEqual(runner.reorder_batch_threshold, 1)
+
+    def test_requires_accepted_tokens_false_without_spec_decode(self):
+        runner = self._build_runner()
+        runner.model_config.is_hybrid = True
+
+        self.assertFalse(runner._requires_accepted_tokens_for_spec_decode())
+
+    def test_requires_accepted_tokens_true_for_hybrid_spec_decode(self):
+        runner = self._build_runner()
+        runner.speculative_config = object()
+        runner.model_config.is_hybrid = True
+
+        self.assertTrue(runner._requires_accepted_tokens_for_spec_decode())
+
+    def test_requires_accepted_tokens_true_for_mamba_spec_decode(self):
+        runner = self._build_runner()
+        runner.speculative_config = object()
+        runner.attn_groups = [
+            [
+                SimpleNamespace(
+                    kv_cache_spec=MambaSpec(
+                        block_size=16,
+                        shapes=((16, 64),),
+                        dtypes=(torch.float16,),
+                    )
+                )
+            ]
+        ]
+
+        self.assertTrue(runner._requires_accepted_tokens_for_spec_decode())
 
 
 class TestNPUModelRunnerOutputTokenIds(unittest.TestCase):
