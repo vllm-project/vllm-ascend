@@ -359,6 +359,12 @@ class KVCacheRecvingThread(threading.Thread):
             rank: get_prefill_pp_indices(self.num_layers, rank, self._prefill_pp_size, prefill_pp_layer_partition)
             for rank in range(self._prefill_pp_size)
         }
+        logger.info(
+            "MOONCAKE_DIAG recv_thread_init: num_layers=%d prefill_pp_size=%d "
+            "pp_layer_partition=%s pp_layer_indices=%s",
+            self.num_layers, self._prefill_pp_size,
+            prefill_pp_layer_partition, self.pp_layer_indices,
+        )
         if not is_vl_model(vllm_config):
             if self.use_mla:
                 self.k_head_dim = self.model_config.hf_text_config.kv_lora_rank
@@ -470,6 +476,15 @@ class KVCacheRecvingThread(threading.Thread):
         remote_handshake_port = req_meta["remote_handshake_port"]
         remote_port_send_num = req_meta["remote_port_send_num"]
         all_task_done = req_meta["all_task_done"]
+        offset = req_meta["offset"]
+        tp_num_need_pulls = req_meta["tp_num_need_pulls"]
+        logger.info(
+            "MOONCAKE_DIAG _handle_request: req=%s offset=%d tp_num_need_pulls=%d "
+            "all_task_done=%s pp_rank=%d pp_size=%d local_handshake=%d remote_handshake=%d",
+            remote_request_id, offset, tp_num_need_pulls, all_task_done,
+            offset // tp_num_need_pulls if tp_num_need_pulls > 0 else 0,
+            self._prefill_pp_size, self.local_handshake_port, remote_handshake_port,
+        )
         transfer_failed = self._is_failed_recv_request(request_id)
 
         try:
@@ -579,6 +594,13 @@ class KVCacheRecvingThread(threading.Thread):
         req_start_time = time.perf_counter()
         src_list, dst_list, length_list = [], [], []
         block_length = len(self.block_len)
+        logger.info(
+            "MOONCAKE_DIAG transfer: first_layer=%d end_layer=%d num_cache_per_layer=%d "
+            "block_len=%s inner_block_len=%d num_transfer_groups=%d",
+            first_layer_index, end_layer_index, num_cache_per_layer,
+            self.block_len, self.block_len[0] // tp_num_need_pulls if self.block_len else 0,
+            num_transfer_groups,
+        )
         for k, (src_layer_base_addr, dst_layer_base_addr) in enumerate(
             zip(local_kv_caches_base_addrs, remote_kv_caches_base_addrs)
         ):
@@ -617,6 +639,12 @@ class KVCacheRecvingThread(threading.Thread):
         need_cat_cache = tp_num_need_pulls > 1 and is_kv_transfer_end
         need_nz_cache = get_ascend_config().enable_kv_nz and is_kv_transfer_end
         use_fused_op = get_ascend_config().enable_transpose_kv_cache_by_block
+        custom_op_ok = enable_custom_op()
+        logger.info(
+            "MOONCAKE_DIAG reformat_decision: need_cat=%s need_nz=%s "
+            "use_fused_op=%s custom_op_ok=%s is_kv_transfer_end=%s",
+            need_cat_cache, need_nz_cache, use_fused_op, custom_op_ok, is_kv_transfer_end,
+        )
         if need_nz_cache or need_cat_cache:
             # use fused op to reformat kv cache, we keep original implementation to provide ability to disable it.
             if use_fused_op and enable_custom_op():
@@ -1272,6 +1300,13 @@ class MooncakeConnectorWorker:
             self.use_sparse,
             first_kv_cache.shape,
         )
+        logger.info(
+            "MOONCAKE_DIAG register_kv: block_len=%s num_blocks=%d tp_size=%d "
+            "num_kv_heads=%d stride0=%s is_contiguous=%s",
+            self.block_len, self.num_blocks, self.tp_size,
+            self.num_key_value_heads, first_kv_cache.stride(0),
+            first_kv_cache.is_contiguous(),
+        )
 
         self.kv_caches = kv_caches
         kv_caches_base_addr = []
@@ -1594,6 +1629,14 @@ class MooncakeConnectorWorker:
             prefill_tp_size = meta.remote_ptp_size if getattr(meta, "remote_ptp_size", None) else self._prefill_tp_size
             tp_num_need_pulls = self._get_tp_num_need_pulls(prefill_tp_size)
             remote_req_id = meta.remote_request_id
+            logger.info(
+                "MOONCAKE_DIAG start_load_kv: req=%s local_blocks=%d remote_blocks=%d "
+                "prefill_tp_size=%s tp_num_need_pulls=%d prefill_pp_size=%d "
+                "num_kv_heads=%d tp_size=%d",
+                req_id, len(meta.local_block_ids), len(meta.remote_block_ids),
+                prefill_tp_size, tp_num_need_pulls, self._prefill_pp_size,
+                self.num_key_value_heads, self.tp_size,
+            )
 
             if meta.remote_pcp_size * meta.remote_dcp_size > 1:
                 remote_handshake_port_list, local_block_ids_list, remote_block_ids_list = self._get_kv_split_metadata(
@@ -1766,6 +1809,13 @@ class MooncakeConnectorWorker:
             for pp_index in range(self._prefill_pp_size):
                 group.extend(all_results[pp_index][group_index])
             sampled_nums.append(group)
+        logger.info(
+            "MOONCAKE_DIAG remote_ranks: req=%s prefill_tp=%d decode_tp=%d "
+            "pp_size=%d tp_num_need_pulls=%d result=%s",
+            req_id, prefill_tp_size, self._decode_tp_size,
+            self._prefill_pp_size, self._get_tp_num_need_pulls(prefill_tp_size),
+            sampled_nums,
+        )
         return sampled_nums
 
 
