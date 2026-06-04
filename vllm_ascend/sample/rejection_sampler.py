@@ -103,6 +103,8 @@ class AscendRejectionSampler(RejectionSampler):
         logits: torch.Tensor,
         sampling_metadata: SamplingMetadata,
         bonus_sampler_output: SamplerOutput | None = None,
+        target_logits_or_tuple: torch.Tensor | tuple[torch.Tensor, torch.Tensor | None] | None = None,
+        raw_target_logits: torch.Tensor | None = None,
     ) -> SamplerOutput:
         """
         Args:
@@ -128,7 +130,6 @@ class AscendRejectionSampler(RejectionSampler):
         """
         assert metadata.max_spec_len <= MAX_SPEC_LEN
         bonus_logits_indices = metadata.bonus_logits_indices
-        target_logits_indices = metadata.target_logits_indices
         random_tensors = self.random_tensors
         self.random_tensors = None
 
@@ -153,25 +154,30 @@ class AscendRejectionSampler(RejectionSampler):
             )
         bonus_token_ids = bonus_sampler_output.sampled_token_ids
 
-        # Just like `bonus_logits`, `target_logits` is a new tensor with
-        # separate storage from the original `logits` tensor. Therefore,
-        # it is safe to update `target_logits` in place.
-        raw_target_logits = logits[target_logits_indices]
-        # Use float32 for the target_logits.
-        raw_target_logits = raw_target_logits.to(torch.float32)
-        target_logits = raw_target_logits
-        if not self.is_processed_logprobs_mode:
-            # Clone raw_target_logits before applying processors to preserve
-            # the original raw logits for logprobs computation, since
-            # apply_logits_processors modifies the tensor in-place.
-            target_logits = target_logits.clone()
-        target_logits = self.apply_logits_processors(target_logits, sampling_metadata, metadata)
-        # [num_tokens, vocab_size]
-        # NOTE(woosuk): `target_logits` can be updated in place inside the
-        # `apply_sampling_constraints` function.
-        target_logits = apply_sampling_constraints(
-            target_logits, metadata.cu_num_draft_tokens, sampling_metadata, self.top_k
-        )
+        if target_logits_or_tuple is None:
+            target_logits_indices = metadata.target_logits_indices
+            # Just like `bonus_logits`, `target_logits` is a new tensor with
+            # separate storage from the original `logits` tensor. Therefore,
+            # it is safe to update `target_logits` in place.
+            raw_target_logits = logits[target_logits_indices]
+            # Use float32 for the target_logits.
+            raw_target_logits = raw_target_logits.to(torch.float32)
+            target_logits = raw_target_logits
+            if not self.is_processed_logprobs_mode:
+                # Clone raw_target_logits before applying processors to preserve
+                # the original raw logits for logprobs computation, since
+                # apply_logits_processors modifies the tensor in-place.
+                target_logits = target_logits.clone()
+            target_logits = self.apply_logits_processors(target_logits, sampling_metadata, metadata)
+            # [num_tokens, vocab_size]
+            # NOTE(woosuk): `target_logits` can be updated in place inside the
+            # `apply_sampling_constraints` function.
+            target_logits = apply_sampling_constraints(
+                target_logits, metadata.cu_num_draft_tokens, sampling_metadata, self.top_k
+            )
+        else:
+            target_logits = target_logits_or_tuple
+            assert raw_target_logits is not None
 
         output_token_ids = rejection_sample(
             metadata.draft_token_ids,

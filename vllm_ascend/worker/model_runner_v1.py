@@ -164,7 +164,11 @@ from vllm_ascend.ascend_forward_context import (  # isort: skip
 )
 from vllm.model_executor.layers.fused_moe.routed_experts_capturer import RoutedExpertsCapturer
 
-from vllm_ascend.sample.rejection_sampler import AscendRejectionSampler, SamplingRandomTensors
+from vllm_ascend.sample.rejection_sampler import (
+    AscendRejectionSampler,
+    SamplingRandomTensors,
+    apply_sampling_constraints,
+)
 
 if TYPE_CHECKING:
     import xgrammar as xgr  # type: ignore[import-untyped]
@@ -2593,6 +2597,31 @@ class NPUModelRunner(GPUModelRunner):
             ),
         )
 
+    def _prepare_spec_target_logits(
+        self,
+        logits: torch.Tensor,
+        spec_decode_metadata: SpecDecodeMetadata,
+        sampling_metadata: SamplingMetadata,
+        max_topk: int | None,
+    ) -> tuple[torch.Tensor | tuple[torch.Tensor, torch.Tensor | None], torch.Tensor]:
+        raw_target_logits = logits[spec_decode_metadata.target_logits_indices]
+        raw_target_logits = raw_target_logits.to(torch.float32)
+        target_logits = raw_target_logits
+        if not self.rejection_sampler.is_processed_logprobs_mode:
+            target_logits = target_logits.clone()
+        target_logits = self.rejection_sampler.apply_logits_processors(
+            target_logits,
+            sampling_metadata,
+            spec_decode_metadata,
+        )
+        target_logits = apply_sampling_constraints(
+            target_logits,
+            spec_decode_metadata.cu_num_draft_tokens,
+            sampling_metadata,
+            max_topk,
+        )
+        return target_logits, raw_target_logits
+
     def _prepare_non_spec_max_topk(
         self,
         logits: torch.Tensor | None,
@@ -2716,6 +2745,12 @@ class NPUModelRunner(GPUModelRunner):
             sampling_metadata,
             random_tensors,
         )
+        target_logits, raw_target_logits = self._prepare_spec_target_logits(
+            logits,
+            spec_decode_metadata,
+            sampling_metadata,
+            max_topk,
+        )
         with self._configure_spec_rejection_sampler(max_topk, random_tensors):
             sampler_output = self.rejection_sampler(
                 spec_decode_metadata,
@@ -2723,6 +2758,8 @@ class NPUModelRunner(GPUModelRunner):
                 logits,
                 sampling_metadata,
                 bonus_sampler_output=bonus_sampler_output,
+                target_logits_or_tuple=target_logits,
+                raw_target_logits=raw_target_logits,
             )
         return sampler_output
 
