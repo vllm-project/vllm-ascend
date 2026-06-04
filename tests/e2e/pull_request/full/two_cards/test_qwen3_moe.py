@@ -25,53 +25,6 @@ from tests.e2e.conftest import VllmRunner
 from vllm_ascend.utils import vllm_version_is
 
 
-@patch.dict(os.environ, {"HCCL_BUFFSIZE": "1024"})
-def test_qwen3_moe_distributed_mp_tp2_ep():
-    example_prompts = [
-        "Hello, my name is",
-    ]
-    max_tokens = 5
-    with VllmRunner(
-        "Qwen/Qwen3-30B-A3B",
-        tensor_parallel_size=2,
-        enable_expert_parallel=True,
-        cudagraph_capture_sizes=[1, 2, 4, 8],
-        distributed_executor_backend="mp",
-    ) as vllm_model:
-        vllm_model.generate_greedy(example_prompts, max_tokens)
-
-
-def test_qwen3_moe_w8a8_distributed_tp2():
-    example_prompts = [
-        "Hello, my name is",
-    ]
-    max_tokens = 5
-    with VllmRunner(
-        "vllm-ascend/Qwen3-30B-A3B-W8A8",
-        max_model_len=8192,
-        tensor_parallel_size=2,
-        cudagraph_capture_sizes=[1, 2, 4, 8],
-        quantization="ascend",
-    ) as vllm_model:
-        vllm_model.generate_greedy(example_prompts, max_tokens)
-
-
-def test_qwen3_moe_distributed_aiv_tp2():
-    os.environ["HCCL_OP_EXPANSION_MODE"] = "AIV"
-    example_prompts = [
-        "Hello, my name is",
-    ]
-    dtype = "auto"
-    max_tokens = 5
-    with VllmRunner(
-        "Qwen/Qwen3-30B-A3B",
-        dtype=dtype,
-        tensor_parallel_size=2,
-        cudagraph_capture_sizes=[1, 2, 4, 8],
-    ) as vllm_model:
-        vllm_model.generate_greedy(example_prompts, max_tokens)
-
-
 @pytest.mark.skipif(vllm_version_is("0.20.2"), reason="no need to support model_runner for v0.20.2")
 @pytest.mark.parametrize("max_tokens", [5])
 @pytest.mark.parametrize("enforce_eager", [True])

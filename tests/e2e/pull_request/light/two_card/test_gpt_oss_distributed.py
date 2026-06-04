@@ -16,6 +16,11 @@
 # This file is a part of the vllm-ascend project.
 # Adapted from vllm/tests/basic_correctness/test_basic_correctness.py
 #
+"""Compare the short outputs of HF and vLLM when using greedy sampling.
+
+Run `pytest tests/e2e/pull_request/full/two_cards/test_gpt_oss_distributed.py`.
+"""
+
 import os
 
 import pytest
@@ -25,23 +30,20 @@ from tests.e2e.conftest import VllmRunner
 os.environ["PYTORCH_NPU_ALLOC_CONF"] = "max_split_size_mb:256"
 os.environ["VLLM_WORKER_MULTIPROC_METHOD"] = "spawn"
 
+GPT_OSS_MODELS = [
+    "unsloth/gpt-oss-20b-BF16",
+]
 
-@pytest.mark.skip(reason="CANN8.5 failed, capture stream failed, fix me")
-def test_kimi_k2_thinking_w4a16_tp4():
+
+@pytest.mark.parametrize("model", GPT_OSS_MODELS)
+def test_gpt_oss_distributed_tp2(model):
     example_prompts = [
         "Hello, my name is",
     ]
     max_tokens = 5
-
     with VllmRunner(
-        "vllm-ascend/Kimi-K2-Thinking-Pruning",
-        max_model_len=8192,
-        dtype="auto",
-        tensor_parallel_size=4,
-        enable_expert_parallel=True,
-        compilation_config={
-            "cudagraph_mode": "FULL_DECODE_ONLY",
-            "cudagraph_capture_sizes": [1],
-        },
+        model,
+        tensor_parallel_size=2,
+        enforce_eager=True,
     ) as vllm_model:
         vllm_model.generate_greedy(example_prompts, max_tokens)

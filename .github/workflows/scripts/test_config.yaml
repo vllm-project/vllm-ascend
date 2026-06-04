@@ -115,6 +115,7 @@
     - tests/ut/spec_decode
     - tests/e2e/pull_request/light/one_card/aclgraph
     - tests/e2e/pull_request/light/two_card/aclgraph
+    - tests/e2e/pull_request/light/two_card/test_qwen3_vl_30b_a3b_instruct.py
 
 - name: compilation_passes_base
   optional: true
@@ -245,50 +246,100 @@
   tests:
     - tests/e2e/pull_request/light/four_card/test_deepseek_v4.py
 
+# Ops
+- name: ops_basic
+  optional: true
+  source_file_dependencies:
+    - vllm_ascend/ops/__init__.py
+    - vllm_ascend/ops/activation.py
+    - vllm_ascend/ops/layernorm.py
+    - vllm_ascend/ops/linear.py
+    - vllm_ascend/ops/linear_op.py
+    - vllm_ascend/ops/rotary_embedding.py
+    - vllm_ascend/ops/vocab_parallel_embedding.py
+    - vllm_ascend/ops/register_custom_ops.py
+  tests:
+    - tests/ut/ops
+    - tests/e2e/pull_request/light/one_card/test_qwen3_0_6b.py
+    - tests/e2e/pull_request/light/one_card/test_minicpm.py
+
 - name: ops_moe
   optional: true
+  base: ops_basic
   source_file_dependencies:
     - vllm_ascend/ops/fused_moe
+    - vllm_ascend/ops/mla.py
   tests:
-    - tests/ut/ops/test_fused_moe.py
-    - tests/ut/ops/test_moe_mlp.py
-    - tests/ut/ops/test_moe_runtime_args.py
-    - tests/ut/ops/test_prepare_finalize.py
-    - tests/ut/ops/a3_2/test_select_experts.py
-    - tests/ut/ops/a2/test_token_dispatcher.py
-    - tests/ut/ops/test_comm_utils.py
-    - tests/ut/ops/test_gate_linear.py
-    - tests/ut/ops/test_layer_shard_linear.py
-    - tests/ut/ops/test_moe_comm_method.py
-    - tests/ut/ops/a2/test_gdn_chunk_meta.py
-    - tests/ut/ops/a2/test_weight_prefetch.py
-    - tests/e2e/pull_request/light/two_card/test_qwen3_30b_a3b.py
+    - tests/e2e/pull_request/light/one_card/test_qwen3_5_0_8b.py
+    - tests/e2e/pull_request/light/one_card/test_multistream_overlap_shared_expert.py
     - tests/e2e/pull_request/light/two_card/test_deepseek_multistream_moe.py
-    - tests/e2e/pull_request/full/one_card/test_multistream_overlap_shared_expert.py
-    - tests/e2e/pull_request/full/two_cards/test_qwen3_moe.py
-    - tests/e2e/pull_request/full/two_cards/test_moe_routing_replay.py
-    - tests/e2e/pull_request/light/two_card/test_sequence_parallelism_moe.py
     - tests/e2e/pull_request/light/two_card/test_shared_expert_dp.py
-    - tests/e2e/pull_request/full/four_cards/test_profiling_chunk_performance.py
+    - tests/e2e/pull_request/light/two_card/test_moe_routing_replay.py
+    - tests/e2e/pull_request/light/two_card/test_gpt_oss_distributed.py
 
-- name: ops_common
+- name: ops_vl
+  optional: true
+  base:
+    - ops_basic
+    - ops_moe
+  source_file_dependencies:
+    - vllm_ascend/ops/conv.py
+    - vllm_ascend/ops/mm_encoder_attention.py
+  tests:
+    - tests/e2e/pull_request/light/one_card/test_vlm.py
+
+- name: ops_deepseek_v4
+  optional: true
+  base:
+    - ops_basic
+    - ops_moe
+  source_file_dependencies:
+    - vllm_ascend/ops/cv_linear.py
+    - vllm_ascend/ops/dsa.py
+    - vllm_ascend/ops/mhc.py
+    - vllm_ascend/ops/rope_dsv4.py
+  tests:
+    - tests/e2e/pull_request/light/four_card/test_deepseek_v4.py
+
+- name: ops_distributed_inference
   optional: true
   source_file_dependencies:
-    - vllm_ascend/ops
+    - vllm_ascend/ops/flashcomm2_oshard_manager.py
+    - vllm_ascend/ops/layer_shard_linear.py
+    - vllm_ascend/ops/weight_prefetch.py
   tests:
-    - tests/ut/ops/a3_2/test_activation.py
-    - tests/ut/ops/test_flashcomm2_oshard_manager.py
-    - tests/ut/ops/test_layernorm.py
-    - tests/ut/ops/test_linear.py
-    - tests/ut/ops/test_mla.py
-    - tests/ut/ops/test_rotary_embedding.py
-    - tests/ut/ops/test_vocab_parallel_embedding.py
-    - tests/ut/patch/worker/patch_common/test_patch_gdn_attn.py
-    - tests/ut/quantization/test_modelslim_config.py
-    - tests/ut/test_utils.py
-    - tests/e2e/pull_request/light/two_card/test_qwen3_30b_a3b.py
-    - tests/e2e/pull_request/light/two_card/test_qwen3_vl_30b_a3b_instruct.py
-    - tests/e2e/pull_request/full/one_card/test_multistream_overlap_shared_expert.py
+    - tests/ut/ops
+    - tests/e2e/pull_request/light/two_card/test_flashcomm_distributed.py
+
+# Ops - GDN
+- name: ops_gdn
+  optional: true
+  source_file_dependencies:
+    - vllm_ascend/ops/gdn.py
+    - vllm_ascend/ops/triton/gdn_chunk_meta.py
+  tests:
+    - tests/ut/ops
+    - tests/e2e/pull_request/light/four_card/test_qwen3_5.py
+    - tests/e2e/pull_request/light/four_card/test_qwen3_next.py
+
+- name: ops_triton
+  optional: true
+  source_file_dependencies:
+    - vllm_ascend/ops/triton
+  exclude_source_file_dependencies:
+    - vllm_ascend/ops/triton/batch_invariant
+  tests:
+    - tests/ut/ops
+    - tests/e2e/pull_request/light/four_card/test_qwen3_5.py
+
+- name: ops_no_test
+  optional: true
+  source_file_dependencies:
+    - vllm_ascend/ops/bailing_moe_linear_attn.py
+    # deepseek ocr
+    - vllm_ascend/ops/qwen2_decoder.py
+    - vllm_ascend/ops/rel_pos_attention.py
+  tests: []
 
 - name: patch
   optional: true
@@ -296,9 +347,6 @@
     - vllm_ascend/patch
   tests:
     - tests/ut/patch
-    - tests/e2e/pull_request/full/four_cards/test_kimi_k2.py
-    - tests/e2e/pull_request/full/four_cards/test_qwen3_5.py
-    - tests/e2e/pull_request/full/four_cards/test_qwen3_next.py
 
 # Profiler
 - name: profiler
@@ -314,7 +362,6 @@
     - vllm_ascend/quantization
   tests:
     - tests/ut/quantization
-    - tests/e2e/pull_request/full/two_cards/test_offline_inference_distributed.py
 
 # Sample
 - name: sample
@@ -417,7 +464,6 @@
     - tests/e2e/pull_request/full/one_card/pooling/test_embedding.py
     - tests/e2e/pull_request/full/one_card/pooling/test_scoring.py
     - tests/e2e/pull_request/full/one_card/model_runner_v2/test_basic.py
-    - tests/e2e/pull_request/full/two_cards/test_aclgraph_capture_replay.py
     - tests/e2e/pull_request/full/two_cards/test_qwen3_performance.py
     - tests/e2e/pull_request/full/two_cards/test_external_launcher.py
     - tests/e2e/pull_request/full/two_cards/test_prefix_caching.py
@@ -437,6 +483,7 @@
   optional: true
   source_file_dependencies:
     - vllm_ascend/batch_invariant.py
+    - vllm_ascend/ops/triton/batch_invariant
   tests:
     - tests/ut/test_batch_invariant.py
     - tests/e2e/pull_request/light/one_card/aclgraph/test_aclgraph_batch_invariant.py
@@ -477,12 +524,12 @@
     - tests/ut/test_flash_common3_context.py
     - tests/ut/test_meta_registration.py
     - tests/ut/test_profiling_config.py
+    - tests/ut/test_utils.py
     - tests/e2e/pull_request/light/one_card/test_qwen3_0_6b.py
     - tests/e2e/pull_request/light/one_card/test_qwen3_5_0_8b.py
     - tests/e2e/pull_request/light/one_card/test_qwen3_8b_w8a8.py
     - tests/e2e/pull_request/light/one_card/test_qwen3_embedding_0_6b.py
-    - tests/e2e/pull_request/full/one_card/test_models.py
-    - tests/e2e/pull_request/full/one_card/test_vlm.py
+    - tests/e2e/pull_request/full/four_cards/test_profiling_chunk_performance.py
 
 - name: pipeline_parallel
   optional: true
@@ -518,8 +565,7 @@
   optional: true
   source_file_dependencies:
     - vllm_ascend/attention/sfa_v1.py
-  tests:
-    - tests/e2e/pull_request/full/two_cards/test_offline_inference_distributed.py
+  tests: []
 
 - name: quantization-moe
   optional: true

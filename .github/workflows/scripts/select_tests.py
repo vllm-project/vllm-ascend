@@ -289,15 +289,12 @@ def _scan_ut_test_dir(
 ) -> None:
     """Scan a UT directory and route tests by directory convention.
 
-    Walks the directory tree. Each subdirectory whose path matches a runner
-    convention (e.g. ``a2/``, ``a3_2/``) is collected wholesale to that
-    runner's group. Files not under any convention directory go to the CPU
-    group.
+    Walks the directory tree. Each test file is routed individually based on
+    its path — files under convention directories (e.g. ``a2/``, ``a3_2/``)
+    go to the corresponding NPU runner, others go to the CPU group.
 
-    Output prefers directory paths over file lists where possible:
-      - If the whole directory routes to a single key with no NPU subdirs,
-        emit the directory path.
-      - Otherwise, emit individual files / NPU subdirectory paths.
+    Always emits individual file paths to avoid test pollution when pytest
+    runs a whole directory.
     """
     path = Path(dir_path)
     if not path.exists():
@@ -308,37 +305,11 @@ def _scan_ut_test_dir(
         groups[_DEFAULT_KEY].append(dir_path)
         return
 
-    input_key = _route_ut_dir(dir_path + "/")
-    if input_key != _DEFAULT_KEY:
-        groups[input_key].append(dir_path)
-        return
-
-    npu_subdirs: list[tuple[RunnerKey, Path]] = []
-    cpu_files: list[Path] = []
-
-    def _walk(p: Path) -> None:
-        for entry in sorted(p.iterdir()):
-            if entry.name in ("__pycache__", "__init__.py"):
-                continue
-            if entry.is_dir():
-                key = _route_ut_dir(str(entry) + "/")
-                if key != _DEFAULT_KEY:
-                    npu_subdirs.append((key, entry))
-                else:
-                    _walk(entry)
-            elif entry.is_file() and entry.name.startswith("test_"):
-                cpu_files.append(entry)
-
-    _walk(path)
-
-    for key, sub in npu_subdirs:
-        groups[key].append(str(sub))
-
-    if not npu_subdirs and cpu_files:
-        groups[_DEFAULT_KEY].append(dir_path)
-    else:
-        for f in cpu_files:
-            groups[_DEFAULT_KEY].append(str(f))
+    for f in sorted(path.rglob("test_*.py")):
+        if any(part in ("__pycache__",) for part in f.parts):
+            continue
+        key = _route_ut_dir(str(f))
+        groups[key].append(str(f))
 
 
 def _scan_e2e_test_dir(
