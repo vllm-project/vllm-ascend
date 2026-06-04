@@ -1,5 +1,70 @@
 # Release Notes
 
+## v0.20.2rc1 - 2026.06.03
+
+We're excited to announce the release of v0.20.2rc1 for vLLM Ascend. This is the first release candidate for the v0.20.2 release line. Please follow the [official doc](https://docs.vllm.ai/projects/ascend/en/latest) to get started.
+
+### Highlights
+
+- **DeepSeek V4 Support**: Added end-to-end support for DeepSeek V4, including the model architecture, DSA attention backend, KV cache management, distributed inference, tool-call parser, MTP support, KV Pool adaptation, and custom operator enablement. [#9270](https://github.com/vllm-project/vllm-ascend/pull/9270) [#9385](https://github.com/vllm-project/vllm-ascend/pull/9385) [#9228](https://github.com/vllm-project/vllm-ascend/pull/9228)
+- **A5 and XLite Quantization Expansion**: Added MXFP4 flatquant with row parallelism for Ascend A5 and expanded XLite support to GLM-4.7 W8A8 quantization. [#9391](https://github.com/vllm-project/vllm-ascend/pull/9391) [#9415](https://github.com/vllm-project/vllm-ascend/pull/9415)
+
+### Features
+
+- Added Flash Attention 3 support for training-inference consistency. The backend is ready in vLLM Ascend and will become directly usable once the FA3 package is publicly available. [#9060](https://github.com/vllm-project/vllm-ascend/pull/9060)
+- Added DeepSeek PCP/DCP adaptation to improve support for disaggregated deployments. [#9058](https://github.com/vllm-project/vllm-ascend/pull/9058)
+- Added a dedicated `additional_config.enable_dsa_cp` switch to decouple DSA-CP from FC1. DSA-CP now requires both FC1 and DSA-CP to be explicitly enabled, allowing FC1 to stay enabled while DSA-CP is disabled when needed. [#9878](https://github.com/vllm-project/vllm-ascend/pull/9878)
+- Added merged graph support for DFlash workloads. [#9074](https://github.com/vllm-project/vllm-ascend/pull/9074)
+- Added LoRA support for Qwen3.5 dense models. [#9023](https://github.com/vllm-project/vllm-ascend/pull/9023)
+- Added KV pool adaptation for DeepSeek V4 and separated MTP-layer KV cache sharding for DeepSeek V4 speculative decoding. [#9385](https://github.com/vllm-project/vllm-ascend/pull/9385) [#9367](https://github.com/vllm-project/vllm-ascend/pull/9367)
+
+### Hardware and Operator Support
+
+- Added DeepSeek V4 custom operators required for the new model path, registered the operators for Ascend 910B, and switched the DeepSeek V4 `hc_pre` path to a fused operator. [#9228](https://github.com/vllm-project/vllm-ascend/pull/9228) [#9339](https://github.com/vllm-project/vllm-ascend/pull/9339) [#9396](https://github.com/vllm-project/vllm-ascend/pull/9396)
+- Enabled MXFP4 flatquant and row parallel support on Ascend A5. [#9391](https://github.com/vllm-project/vllm-ascend/pull/9391)
+- Enabled MC2 dispatch and combine support for MXFP4/MXFP8 quantization on Ascend A5. [#9365](https://github.com/vllm-project/vllm-ascend/pull/9365) [#9328](https://github.com/vllm-project/vllm-ascend/pull/9328)
+- Improved 310P support by optimizing fused operators for Qwen3.5 Dense ACLGraph and simplifying the 310P RMSNormGated path. [#9104](https://github.com/vllm-project/vllm-ascend/pull/9104) [#9489](https://github.com/vllm-project/vllm-ascend/pull/9489)
+
+### Performance
+
+- Added DeepSeek V4 DSA multistream overlap optimizations across compressor, indexer-select, CV parallel, and pure-prefill compute-communication overlap paths. [#9450](https://github.com/vllm-project/vllm-ascend/pull/9450) [#9441](https://github.com/vllm-project/vllm-ascend/pull/9441) [#9433](https://github.com/vllm-project/vllm-ascend/pull/9433) [#9504](https://github.com/vllm-project/vllm-ascend/pull/9504)
+- Reused DSA `topk_indices` across decode steps with IndexCache to reduce repeated DeepSeek V4 index computation. [#9390](https://github.com/vllm-project/vllm-ascend/pull/9390)
+- Fixed the missing enablement for `cv_indexer_qkv_prepare` multistream parallelism in the new overlap path. [#9530](https://github.com/vllm-project/vllm-ascend/pull/9530)
+- Reduced host-device synchronization overhead by removing the sync point in PIECEWISE mode. [#9025](https://github.com/vllm-project/vllm-ascend/pull/9025)
+- Optimized shared expert overlap timing in FusedMoE. [#9413](https://github.com/vllm-project/vllm-ascend/pull/9413)
+- [Experimental] Added reduce sampling with `enable_reduce_sample` to lower Tensor Parallel communication overhead in distributed greedy, top-k/top-p, and rejection sampling paths. [#8308](https://github.com/vllm-project/vllm-ascend/pull/8308)
+
+### Stability and Bug Fixes
+
+- Fixed DeepSeek V4 MTP, serial inference, FlashComm, A2 tensor-output all-reduce, and P/D disaggregation KV cache edge cases. [#9456](https://github.com/vllm-project/vllm-ascend/pull/9456) [#9487](https://github.com/vllm-project/vllm-ascend/pull/9487) [#9488](https://github.com/vllm-project/vllm-ascend/pull/9488) [#9389](https://github.com/vllm-project/vllm-ascend/pull/9389) [#9500](https://github.com/vllm-project/vllm-ascend/pull/9500)
+- Fixed DeepSeek V4 `hc_pre` behavior and added a 4-card E2E regression test. [#9452](https://github.com/vllm-project/vllm-ascend/pull/9452)
+
+### Dependencies
+
+- Upgraded the matched upstream vLLM baseline to v0.20.2. [#9270](https://github.com/vllm-project/vllm-ascend/pull/9270)
+- Upgraded CANN to 9.0.0 and triton-ascend to 3.2.1. [#9085](https://github.com/vllm-project/vllm-ascend/pull/9085)
+- Upgraded PyTorch and torch-npu to 2.10.0. [#9128](https://github.com/vllm-project/vllm-ascend/pull/9128)
+
+### Breaking Changes and Migration Notes
+
+- Migrated a set of runtime options from environment variables to `AscendConfig`, including the FC1/FlashComm1 switch from `VLLM_ASCEND_ENABLE_FLASHCOMM1` to `additional_config.enable_flashcomm1`. Please review configuration code and deployment manifests when upgrading. [#9064](https://github.com/vllm-project/vllm-ascend/pull/9064)
+- Disabled SwiGLU clamp by default, which may slightly change behavior for workloads that previously relied on the old default. [#9438](https://github.com/vllm-project/vllm-ascend/pull/9438)
+
+### Documentation
+
+- Refreshed deployment and feature documentation for the current main branch release line. [#9309](https://github.com/vllm-project/vllm-ascend/pull/9309) [#8968](https://github.com/vllm-project/vllm-ascend/pull/8968)
+- Added documentation for the `enable_dsa_cp` additional configuration option for DeepSeek V3.2 and GLM5. [#9910](https://github.com/vllm-project/vllm-ascend/pull/9910)
+
+### Known Issues
+
+- GLM5/GLM5.1 W4A8 deployments have known issues in some advanced configurations. CANN 9.0 with MC2 can return inaccurate output, FlashComm can fail during model startup, and MTP weight loading can fail in 1P1D A3 deployments. [#9395](https://github.com/vllm-project/vllm-ascend/issues/9395) [#9658](https://github.com/vllm-project/vllm-ascend/issues/9658) [#9655](https://github.com/vllm-project/vllm-ascend/issues/9655)
+- GLM-5.1 deployments can hit `MoeDistributeDispatchV2`/NPU graph failures when Expert Parallel is used together with FULL graph mode. The reported workaround is to disable Expert Parallel for FULL graph mode, or use PIECEWISE/eager mode. [#9503](https://github.com/vllm-project/vllm-ascend/issues/9503)
+- 310P does not currently support `runner_type='pooling'`; starting pooling models on 310P raises `NotImplementedError`. [#9593](https://github.com/vllm-project/vllm-ascend/issues/9593)
+- Qwen3.6-35B-A3B may shut down when MTP/speculative decoding is enabled, with `numAcceptedTokens[0]=4 exceeds varlen segment length=3` reported during shape/dtype processing. [#9956](https://github.com/vllm-project/vllm-ascend/issues/9956)
+- GLM-5.1 can hang on the P node in 200K long-sequence 1P1D agent workloads after long-running service, with `MoeDistributeDispatchV2`/`aclnnMoeDistributeDispatchV4` reporting an AICore timeout. [#9958](https://github.com/vllm-project/vllm-ascend/issues/9958)
+- GLM5 W4A8 deployments can see a significantly lower speculative decoding acceptance rate when MTP3 is used together with FlashComm. [#9803](https://github.com/vllm-project/vllm-ascend/issues/9803)
+- MiniMax-M2.7 W8A8/QuaRot can show lower-than-expected GPQA accuracy in long-sequence deployments when PCP/DCP is combined with Eagle3 speculative decoding. [#9959](https://github.com/vllm-project/vllm-ascend/issues/9959)
+
 ## v0.18.0 - 2026.04.30
 
 We're excited to announce the release of v0.18.0 for vLLM Ascend. This is the official release for v0.18.0. Please follow the [official doc](https://docs.vllm.ai/projects/ascend/en/v0.18.0) to get started.

@@ -29,13 +29,17 @@ class TestAscendConfig(TestBase):
     def _clean_up_ascend_config(func):
         def wrapper(*args, **kwargs):
             clear_ascend_config()
-            func(*args, **kwargs)
-            clear_ascend_config()
+            clear_enable_sp()
+            try:
+                func(*args, **kwargs)
+            finally:
+                clear_ascend_config()
+                clear_enable_sp()
 
         return wrapper
 
     @_clean_up_ascend_config
-    @patch("vllm_ascend.platform.NPUPlatform._fix_incompatible_config")
+    @patch("vllm_ascend.platform.NPUPlatform.check_and_update_config")
     def test_init_ascend_config_without_additional_config(self, mock_fix_incompatible_config):
         test_vllm_config = VllmConfig()
         # No additional config given, check the default value here.
@@ -50,7 +54,7 @@ class TestAscendConfig(TestBase):
         self.assertTrue(ascend_fusion_config.fusion_ops_gmmswigluquant)
 
     @_clean_up_ascend_config
-    @patch("vllm_ascend.platform.NPUPlatform._fix_incompatible_config")
+    @patch("vllm_ascend.platform.NPUPlatform.check_and_update_config")
     def test_init_ascend_config_with_additional_config(self, mock_fix_incompatible_config):
         test_vllm_config = VllmConfig()
         test_vllm_config.additional_config = {
@@ -79,7 +83,7 @@ class TestAscendConfig(TestBase):
         self.assertFalse(ascend_fusion_config.fusion_ops_gmmswigluquant)
 
     @_clean_up_ascend_config
-    @patch("vllm_ascend.platform.NPUPlatform._fix_incompatible_config")
+    @patch("vllm_ascend.platform.NPUPlatform.check_and_update_config")
     def test_init_ascend_config_enable_npugraph_ex(self, mock_fix_incompatible_config):
         test_vllm_config = VllmConfig()
         test_vllm_config.additional_config = {
@@ -92,7 +96,7 @@ class TestAscendConfig(TestBase):
 
     @_clean_up_ascend_config
     @patch("vllm_ascend.ascend_config.logger.info_once")
-    @patch("vllm_ascend.platform.NPUPlatform._fix_incompatible_config")
+    @patch("vllm_ascend.platform.NPUPlatform.check_and_update_config")
     def test_migrated_config_falls_back_to_envs(self, mock_fix_incompatible_config, mock_info_once):
         test_vllm_config = VllmConfig()
         test_vllm_config.parallel_config.tensor_parallel_size = 4
@@ -132,7 +136,7 @@ class TestAscendConfig(TestBase):
 
     @_clean_up_ascend_config
     @patch("vllm_ascend.ascend_config.logger.info_once")
-    @patch("vllm_ascend.platform.NPUPlatform._fix_incompatible_config")
+    @patch("vllm_ascend.platform.NPUPlatform.check_and_update_config")
     def test_migrated_config_skips_default_env_fallback_logs(self, mock_fix_incompatible_config, mock_info_once):
         test_vllm_config = VllmConfig()
         with patch.dict(os.environ, {}, clear=True):
@@ -147,7 +151,7 @@ class TestAscendConfig(TestBase):
 
     @_clean_up_ascend_config
     @patch("vllm_ascend.ascend_config.logger.info_once")
-    @patch("vllm_ascend.platform.NPUPlatform._fix_incompatible_config")
+    @patch("vllm_ascend.platform.NPUPlatform.check_and_update_config")
     def test_migrated_config_overrides_envs(self, mock_fix_incompatible_config, mock_info_once):
         test_vllm_config = VllmConfig()
         test_vllm_config.additional_config = {
@@ -187,18 +191,19 @@ class TestAscendConfig(TestBase):
         mock_info_once.assert_any_call("AscendConfig.weight_nz_mode is set from additional_config with value 1.")
 
     @_clean_up_ascend_config
-    @patch("vllm_ascend.platform.NPUPlatform._fix_incompatible_config")
+    @patch("vllm_ascend.platform.NPUPlatform.check_and_update_config")
+    @patch.dict(os.environ, {"VLLM_ASCEND_ENABLE_FLASHCOMM1": "1"}, clear=True)
     def test_enable_flashcomm1_config_overrides_disabled_env(self, mock_fix_incompatible_config):
         test_vllm_config = VllmConfig()
         test_vllm_config.additional_config = {"enable_flashcomm1": True}
-        with patch.dict(os.environ, {"VLLM_ASCEND_ENABLE_FLASHCOMM1": "0"}):
+        with patch.dict(os.environ, {"VLLM_ASCEND_ENABLE_FLASHCOMM1": "0"}, clear=True):
             ascend_config = init_ascend_config(test_vllm_config)
-
         self.assertTrue(ascend_config.enable_flashcomm1)
         self.assertTrue(enable_sp(test_vllm_config))
 
     @_clean_up_ascend_config
-    def test_enable_sp_falls_back_to_env_without_current_config(self):
+    @patch("vllm_ascend.platform.NPUPlatform.check_and_update_config")
+    def test_enable_sp_falls_back_to_env_without_current_config(self, mock_check_and_update_config):
         clear_enable_sp()
         with (
             patch.dict(os.environ, {"VLLM_ASCEND_ENABLE_FLASHCOMM1": "1"}),
@@ -208,7 +213,8 @@ class TestAscendConfig(TestBase):
 
     @_clean_up_ascend_config
     @patch("vllm_ascend.utils.logger.warning_once")
-    def test_flashcomm2_warning_uses_enable_flashcomm1_config(self, mock_warning_once):
+    @patch("vllm_ascend.platform.NPUPlatform.check_and_update_config")
+    def test_flashcomm2_warning_uses_enable_flashcomm1_config(self, mock_check_and_update_config, mock_warning_once):
         test_vllm_config = VllmConfig()
         test_vllm_config.parallel_config.tensor_parallel_size = 4
         test_vllm_config.kv_transfer_config = None
@@ -232,7 +238,7 @@ class TestAscendConfig(TestBase):
         self.assertNotIn(flashcomm1_warning, [call.args[0] for call in mock_warning_once.call_args_list])
 
     @_clean_up_ascend_config
-    @patch("vllm_ascend.platform.NPUPlatform._fix_incompatible_config")
+    @patch("vllm_ascend.platform.NPUPlatform.check_and_update_config")
     def test_get_ascend_config(self, mock_fix_incompatible_config):
         test_vllm_config = VllmConfig()
         ascend_config = init_ascend_config(test_vllm_config)
@@ -244,7 +250,7 @@ class TestAscendConfig(TestBase):
             get_ascend_config()
 
     @_clean_up_ascend_config
-    @patch("vllm_ascend.platform.NPUPlatform._fix_incompatible_config")
+    @patch("vllm_ascend.platform.NPUPlatform.check_and_update_config")
     def test_clear_ascend_config(self, mock_fix_incompatible_config):
         test_vllm_config = VllmConfig()
         ascend_config = init_ascend_config(test_vllm_config)
@@ -254,7 +260,7 @@ class TestAscendConfig(TestBase):
             get_ascend_config()
 
     @_clean_up_ascend_config
-    @patch("vllm_ascend.platform.NPUPlatform._fix_incompatible_config")
+    @patch("vllm_ascend.platform.NPUPlatform.check_and_update_config")
     def test_init_ascend_config_with_dump_config_materializes_fixed_file(self, mock_fix_incompatible_config):
         test_vllm_config = VllmConfig()
         dump_config = {"task": "tensor", "level": "L1", "dump_path": "/tmp/msprobe_dump"}
@@ -271,7 +277,7 @@ class TestAscendConfig(TestBase):
         self.assertEqual(persisted, dump_config)
 
     @_clean_up_ascend_config
-    @patch("vllm_ascend.platform.NPUPlatform._fix_incompatible_config")
+    @patch("vllm_ascend.platform.NPUPlatform.check_and_update_config")
     def test_init_ascend_config_dump_config_and_path_conflict(self, mock_fix_incompatible_config):
         test_vllm_config = VllmConfig()
         test_vllm_config.additional_config = {"dump_config_path": "/tmp/config.json", "dump_config": {"task": "tensor"}}
@@ -279,7 +285,7 @@ class TestAscendConfig(TestBase):
             init_ascend_config(test_vllm_config)
 
     @_clean_up_ascend_config
-    @patch("vllm_ascend.platform.NPUPlatform._fix_incompatible_config")
+    @patch("vllm_ascend.platform.NPUPlatform.check_and_update_config")
     def test_init_ascend_config_dump_config_type_validation(self, mock_fix_incompatible_config):
         test_vllm_config = VllmConfig()
         test_vllm_config.additional_config = {"dump_config": "/tmp/config.json"}
