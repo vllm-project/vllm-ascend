@@ -33,13 +33,14 @@ os.environ["VLLM_DISABLE_SHARED_EXPERTS_STREAM"] = "1"
 
 from vllm.v1.attention.backends.registry import AttentionBackendEnum
 
-from vllm_ascend.ascend_config import get_ascend_config, init_ascend_config
+from vllm_ascend.ascend_config import init_ascend_config
 
 # isort: off
 from vllm_ascend.utils import (
     ASCEND_QUANTIZATION_METHOD,
     COMPILATION_PASS_KEY,
     COMPRESSED_TENSORS_METHOD,
+    FP8_METHOD,
     AscendDeviceType,
     bootstrap_custom_op_env,
     check_kv_extra_config,
@@ -103,7 +104,12 @@ class NPUPlatform(Platform):
     device_control_env_var: str = "ASCEND_RT_VISIBLE_DEVICES"
     dispatch_key: str = "PrivateUse1"
 
-    supported_quantization: list[str] = [ASCEND_QUANTIZATION_METHOD, COMPRESSED_TENSORS_METHOD]
+    supported_quantization: list[str] = [
+        ASCEND_QUANTIZATION_METHOD,
+        COMPRESSED_TENSORS_METHOD,
+        FP8_METHOD,
+        "deepseek_v4_fp8",
+    ]
 
     def is_sleep_mode_available(self) -> bool:
         return True
@@ -150,7 +156,7 @@ class NPUPlatform(Platform):
                     quant_action.choices.append(ASCEND_QUANTIZATION_METHOD)
 
         if not is_310p():
-            from vllm_ascend.quantization import AscendCompressedTensorsConfig, AscendModelSlimConfig  # noqa: F401
+            from vllm_ascend.quantization import AscendCompressedTensorsConfig, AscendFp8Config, AscendModelSlimConfig  # noqa: F401
         else:
             from vllm_ascend._310p.quantization import AscendModelSlimConfig310  # noqa: F401
 
@@ -199,7 +205,17 @@ class NPUPlatform(Platform):
 
     @classmethod
     def apply_config_platform_defaults(cls, vllm_config: VllmConfig) -> None:
-        """Apply Ascend-specific defaults. Set sp_min_token_num=1 when enable_sp and not set."""
+        """Apply Ascend-specific defaults."""
+        # Since vllm-project/vllm#43746, DeepSeek V4 model classes no longer
+        # carry @support_torch_compile. This makes vLLM auto-enable the breakable
+        # cudagraph PIECEWISE path, which is not supported on Ascend yet.
+        envs_vllm.VLLM_USE_BREAKABLE_CUDAGRAPH = False
+        logger.info(
+            "Breakable cudagraph is force disabled on Ascend because "
+            "DeepSeek V4 PIECEWISE cudagraph is not supported yet."
+        )
+
+        # Set sp_min_token_num=1 when enable_sp and not set.
         pass_config = vllm_config.compilation_config.pass_config
         if pass_config.enable_sp and pass_config.sp_min_token_num is None:
             from vllm_ascend.compilation.passes.sequence_parallelism import get_sp_min_token_num
@@ -255,7 +271,23 @@ class NPUPlatform(Platform):
     def update_block_size_for_backend(cls, vllm_config: VllmConfig) -> None:
         # TODO: NPU still sets block_size in check_and_update_config.
         # Move that logic here so block_size is chosen by the backend.
-        pass
+        using_kv_transfer_with_hybrid = (
+            not vllm_config.scheduler_config.disable_hybrid_kv_cache_manager and vllm_config.kv_transfer_config
+        )
+        cache_config = vllm_config.cache_config
+        model_config = vllm_config.model_config
+        if (
+            not cache_config.enable_prefix_caching
+            and using_kv_transfer_with_hybrid
+            and cache_config.mamba_cache_mode == "align"
+        ):
+            if cache_config.mamba_block_size is None or cache_config.mamba_block_size == model_config.max_model_len:
+                cache_config.mamba_block_size = cache_config.block_size
+            else:
+                # mamba_block_size must be a multiple of block_size, so that it can hand the block hash
+                assert cache_config.mamba_block_size % cache_config.block_size == 0, (
+                    f"mamba_block_size must be a multiple of block_size: {cache_config.block_size}"
+                )
 
     @classmethod
     def set_device(cls, device: torch.device):
@@ -475,13 +507,18 @@ class NPUPlatform(Platform):
                 all2all_backend=vllm_config.parallel_config.all2all_backend,
                 data_parallel_size=vllm_config.parallel_config.data_parallel_size,
             )
-            # NOTE: Theoretically, we should also add vllm::mla_forward in the attention ops.
+            # NOTE: Theoretically, we should also add this in the attention ops.
             # Since the process is created in the spawn mode, the value of the class attribute
             # attention ops transmitted is still the one before modification, so it has not been modified.
             # This will cause in scenarios where both piecewise and splitting ops are configured simultaneously,
-            # If splitting ops does not contain the vllm::mla forward value, this configuration issue will
+            # If splitting ops does not contain the this value, this configuration issue will
             # not be detected in advance assert.
-            compilation_config.splitting_ops.extend(["vllm::mla_forward"])
+            compilation_config.splitting_ops.extend(
+                [
+                    "vllm::mla_forward",
+                    "vllm::dsa_forward",
+                ]
+            )
             update_aclgraph_sizes(vllm_config)
             ascend_config.ascend_compilation_config.enable_npugraph_ex = False
         elif compilation_config.cudagraph_mode.has_full_cudagraphs():
@@ -624,7 +661,7 @@ class NPUPlatform(Platform):
             os.environ["PYTORCH_NPU_ALLOC_CONF"] = npu_alloc_configs
             logger.info("Set PYTORCH_NPU_ALLOC_CONF=%s", npu_alloc_configs)
 
-        if ascend_config.enable_mc2_hierarchy_comm and get_ascend_config().enable_fused_mc2:
+        if ascend_config.enable_mc2_hierarchy_comm and ascend_config.enable_fused_mc2:
             raise ValueError(
                 "fused mc2 op cannot be used with hierarchy communication."
                 "Please disable VLLM_ASCEND_ENABLE_FUSED_MC2 by setting it to 0."

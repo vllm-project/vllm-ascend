@@ -38,143 +38,125 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
-  lint:
-    uses: ./.github/workflows/_pre_commit.yml
-    with:
-      vllm: 9090368b650896bf5fc990c921df7eb4c20355a5
-  changes:
-    runs-on: linux-aarch64-a2b3-0
+  lint-and-select-tests:
+    runs-on: linux-amd64-cpu-8-hk
     container:
-      image: swr.cn-southwest-2.myhuaweicloud.com/base_image/ascend-ci/vllm-ascend:nightly-cpu
+      image: quay.io/ascend-ci/vllm-ascend:lint
     outputs:
-      e2e_tracker: ${{ steps.filter.outputs.e2e_tracker }}
-      _310_tracker: ${{ steps.filter.outputs._310_tracker }}
       has_tests: ${{ steps.scope.outputs.has_tests }}
       test_groups: ${{ steps.scope.outputs.test_groups }}
       matched_modules: ${{ steps.scope.outputs.matched_modules }}
     steps:
-      - uses: actions/checkout@v6
+      - name: Validate PR title prefix
+        env:
+          PR_TITLE: ${{ github.event.pull_request.title }}
+        run: |
+          if [ -z "$PR_TITLE" ]; then
+            echo "::error::PR title cannot be empty"
+            exit 1
+          fi
+
+          echo "Checking PR title: $PR_TITLE"
+
+          VALID_PREFIXES='\[(BugFix|Performance|Test|CI|Feature|Doc|Misc|Community|Refactor)\]'
+
+          if ! echo "$PR_TITLE" | grep -iqE "$VALID_PREFIXES"; then
+            echo "::error::PR title must contain one of the following prefixes: [BugFix], [Performance], [Test], [CI], [Feature], [Doc], [Misc], [Community], [Refactor]"
+            echo "::error::Example: '[Feature] Add new optimization pass' or 'Add new feature [Feature]'"
+            exit 1
+          fi
+
+          echo "✓ PR title prefix is valid"
+
+      - name: Checkout vllm-project/vllm-ascend repo
+        uses: actions/checkout@v6
         with:
           fetch-depth: 0
-      # For now, we still need to use paths-filter to determine whether the change is related to e2e test.
-      # we will migrate to use a single script to determine all the test scope in the future.
+
+      - name: cp problem matchers
+        run: |
+          cp .github/workflows/matchers/actionlint.json "$RUNNER_TEMP/actionlint.json"
+          cp .github/workflows/matchers/markdownlint.json "$RUNNER_TEMP/markdownlint.json"
+          cp .github/workflows/matchers/mypy.json "$RUNNER_TEMP/mypy.json"
+
+      - run: echo "::add-matcher::$RUNNER_TEMP/actionlint.json"
+      - run: echo "::add-matcher::$RUNNER_TEMP/markdownlint.json"
+      - run: echo "::add-matcher::$RUNNER_TEMP/mypy.json"
+
+      - name: Checkout vllm-project/vllm repo
+        uses: actions/checkout@v6
+        with:
+          repository: vllm-project/vllm
+          path: ./vllm-empty
+          ref: 9090368b650896bf5fc990c921df7eb4c20355a5
+
       - uses: dorny/paths-filter@v4
         id: filter
         with:
           filters: |
-            e2e_tracker:
-              - '.github/workflows/pr_test_light.yaml'
-              - '.github/workflows/_e2e_test.yaml'
-              - '.github/workflows/scripts/**'
-              - '.github/workflows/_optional_smart_e2e.yaml'
-              - 'vllm_ascend/**'
-              - 'csrc/**'
-              - 'cmake/**'
-              - 'tests/e2e/**'
-              - 'CMakeLists.txt'
-              - 'setup.py'
+            lint_tracker:
               - 'requirements.txt'
               - 'requirements-dev.txt'
               - 'requirements-lint.txt'
-              - 'packages.txt'
-            ut_tracker:
-              - 'tests/ut/**'
-            _310_tracker:
-              - '.github/workflows/pr_test_light.yaml'
-              - '.github/workflows/_e2e_test.yaml'
-              - 'vllm_ascend/_310p/**'
-              - 'csrc/**'
-              - 'tests/e2e/310p/**'
-              - 'vllm_ascend/worker/**'
-              - 'vllm_ascend/attention/attention_v1.py'
-              - 'vllm_ascend/ops/fused_moe/**'
-              - 'vllm_ascend/patch/**'
-              - 'CMakeLists.txt'
 
-      - name: Determine smart UT test scope
-        if: ${{ steps.filter.outputs.ut_tracker == 'true' || steps.filter.outputs.e2e_tracker == 'true' }}
+      - name: Install vllm-ascend dev (conditional)
+        if: steps.filter.outputs.lint_tracker == 'true'
+        env:
+          UV_INDEX_URL: http://cache-service.nginx-pypi-cache.svc.cluster.local/pypi/simple
+          UV_EXTRA_INDEX_URL: "https://repo.huaweicloud.com/ascend/repos/pypi"
+          UV_INDEX_STRATEGY: unsafe-best-match
+          UV_NO_CACHE: 1
+          UV_SYSTEM_PYTHON: 1
+        run: |
+          pip install uv
+          git config --global --add safe.directory /__w/vllm-ascend/vllm-ascend
+          pip install uc-manager
+          uv pip install -r requirements-dev.txt --extra-index-url https://download.pytorch.org/whl/cpu
+
+      - name: Run pre-commit
+        env:
+          PRE_COMMIT_COLOR: always
+          FORCE_COLOR: "1"
+          TERM: xterm-256color
+          SHELLCHECK_OPTS: "--exclude=SC2046,SC2006,SC2086"
+        run: |
+          git config --global --add safe.directory /__w/vllm-ascend/vllm-ascend
+          pre-commit run --all-files --hook-stage manual --show-diff-on-failure
+
+      - name: Run mypy
+        run: |
+          PYTHONPATH="$PYTHONPATH:$(pwd)/vllm-empty"
+          export PYTHONPATH
+          git config --global --add safe.directory /__w/vllm-ascend/vllm-ascend
+          for python_version in "3.10" "3.11" "3.12"; do
+            echo "============================"
+            tools/mypy.sh 1 "$python_version"
+            echo "============================"
+          done
+
+      - name: Validate test coverage config
+        run: |
+          pip install pyyaml
+          python3 .github/workflows/scripts/coverage.py
+
+      - name: Select tests based on changed files
         id: scope
         run: |
           git config --global --add safe.directory /__w/vllm-ascend/vllm-ascend
           git fetch origin ${{ github.base_ref }}
-          pip install pyyaml
-          python3 .github/workflows/scripts/determine_smart_e2e_scope.py \
+          pip install regex
+          python3 .github/workflows/scripts/select_tests.py \
             --diff-base origin/${{ github.base_ref }} \
-            --run-all-cpu
+            --run-all-cpu \
+            --e2e-type light
 
-      - name: Post scope summary
-        if: ${{ steps.scope.outputs.has_tests == 'true' }}
-        env:
-          TEST_GROUPS: ${{ steps.scope.outputs.test_groups }}
-          MATCHED_MODULES: ${{ steps.scope.outputs.matched_modules }}
-        run: |
-          python3 -c "
-          import json, os, yaml
-          from pathlib import Path
-
-          groups = json.loads(os.environ['TEST_GROUPS'])
-          modules = os.environ['MATCHED_MODULES']
-          blacklist_path = Path('.github/workflows/scripts/ut_blacklist.yaml')
-          blacklist = yaml.safe_load(blacklist_path.read_text()) if blacklist_path.exists() else []
-
-          lines = ['## Smart UT Test Scope', '']
-          lines.append(f'**Matched modules:** {modules}')
-          lines.append('')
-
-          if blacklist:
-              lines.append('<details>')
-              lines.append(f'<summary>Blacklisted ({len(blacklist)} tests)</summary>')
-              lines.append('')
-              for bl in sorted(blacklist):
-                  lines.append(f'- \`{bl}\`')
-              lines.append('')
-              lines.append('</details>')
-              lines.append('')
-
-          for g in groups:
-              npu_type = g['npu_type']
-              num_npus = g['num_npus']
-              runner = g['runner']
-              tests = g['tests'].split()
-              if npu_type == 'cpu':
-                  header = f'### CPU ({len(tests)} tests) \u2192 \`{runner}\`'
-              else:
-                  header = f'### {npu_type.upper()} x{num_npus} ({len(tests)} tests) \u2192 \`{runner}\`'
-              lines.append(header)
-              lines.append('')
-              lines.append('| # | Test target |')
-              lines.append('|---|------------|')
-              for i, t in enumerate(tests, 1):
-                  lines.append(f'| {i} | \`{t}\` |')
-              lines.append('')
-
-          print('\n'.join(lines))
-          " >> $GITHUB_STEP_SUMMARY
-
-  smart_e2e:
-    needs: [lint, changes]
-    name: smart test
-    if: ${{ needs.lint.result == 'success' && needs.changes.outputs.has_tests == 'true' }}
+  run-selected-tests:
+    needs: lint-and-select-tests
+    if: ${{ needs.lint-and-select-tests.outputs.has_tests == 'true' && !contains(github.event.pull_request.labels.*.name, 'ready') }}
     strategy:
       matrix:
         vllm_version: [9090368b650896bf5fc990c921df7eb4c20355a5, v0.20.2]
-    uses: ./.github/workflows/_optional_smart_e2e.yaml
+    uses: ./.github/workflows/_selected_tests.yaml
     with:
       vllm: ${{ matrix.vllm_version }}
-      test_groups: ${{ needs.changes.outputs.test_groups }}
-
-  e2e-light:
-    name: e2e-light
-    strategy:
-      matrix:
-        vllm_version: [9090368b650896bf5fc990c921df7eb4c20355a5, v0.20.2]
-    # Note (yikun): If CI resource are limited we can split job into two chain jobs
-    needs: [lint, changes]
-    # only trigger e2e test after lint passed and the change is e2e related with pull request.
-    if: ${{ github.event_name == 'pull_request' && needs.lint.result == 'success' && needs.changes.outputs.e2e_tracker == 'true' && !contains(github.event.pull_request.labels.*.name, 'ready') }}
-    uses: ./.github/workflows/_e2e_test.yaml
-    with:
-      vllm: ${{ matrix.vllm_version }}
-      image: swr.cn-southwest-2.myhuaweicloud.com/base_image/ascend-ci/cann:9.0.0-910b-ubuntu22.04-py3.11
-      contains_310: ${{ needs.changes.outputs._310_tracker == 'true' }}
-      type: light
+      test_groups: ${{ needs.lint-and-select-tests.outputs.test_groups }}
