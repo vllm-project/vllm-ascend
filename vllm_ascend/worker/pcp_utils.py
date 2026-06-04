@@ -1362,8 +1362,8 @@ class PCPManager:
               - h: pos 7 % 2 = 1 -> rank1
               - i: pos 8 % 2 = 0 -> rank0
             - Final:
-              - rank0: [a,b,c,g,i] positions [0,1,2,6,8] -> mask 4x5
-              - rank1: [d,e,f,h] positions [3,4,5,7] -> mask 4x4
+              - rank0: [a,b,c,g,i] positions [0,1,2,6,8] -> mask shape 4x5
+              - rank1: [d,e,f,h] positions [3,4,5,7] -> mask shape 4x4
 
         Args:
             decode_num_computed_tokens: List of global history lengths for decode requests
