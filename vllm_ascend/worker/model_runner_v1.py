@@ -2226,25 +2226,9 @@ class NPUModelRunner(GPUModelRunner):
         sampler_output = sampling_phase_result.sampler_output
         bookkeeping_state = sampling_phase_result.bookkeeping_state
 
-        routed_experts_lists = None
-        if self.model_config.enable_return_routed_experts:
-            if vllm_version_is("0.20.2"):
-                capturer = RoutedExpertsCapturer.get_instance()
-                if capturer is not None:
-                    capturer.save_captured_experts(indices=self.cpu_slot_mapping)
-            elif self.routed_experts_initialized:
-                buf = self.routed_experts_capturer.get_device_buffer()
-                total = scheduler_output.total_num_scheduled_tokens
-                self.routed_experts_cpu[:total].copy_(buf[:total], non_blocking=True)
-                self.routed_experts_slot_mapping_cpu[:total].copy_(
-                    self.routed_experts_slot_mapping_device[:total],
-                    non_blocking=True,
-                )
-                torch.npu.current_stream().synchronize()
-                routed_experts_lists = RoutedExpertsLists(
-                    routing_data=self.routed_experts_cpu[:total].numpy(),
-                    slot_mapping=self.routed_experts_slot_mapping_cpu[:total].numpy(),
-                )
+        routed_experts_lists = self._collect_routed_experts_lists(
+            scheduler_output.total_num_scheduled_tokens,
+        )
 
         model_runner_output = self._build_model_runner_output(
             bookkeeping_state.req_ids_output_copy,
@@ -2257,14 +2241,7 @@ class NPUModelRunner(GPUModelRunner):
             cudagraph_stats,
             routed_experts_lists,
         )
-        if self.ascend_config.profiling_chunk_config.need_timing and hasattr(self, '_execution_start_time'):
-            self._sync_device()
-            model_runner_output.execution_time_ms = (time.perf_counter() - self._execution_start_time) * 1000.0
-
-        if self.dynamic_eplb:
-            self.eplb_updator.forward_end()
-
-        self._finalize_dump_data()
+        self._finalize_model_runner_output(model_runner_output)
 
         self._handle_post_sampling_state_updates(
             sampler_output.sampled_token_ids,
@@ -2283,6 +2260,44 @@ class NPUModelRunner(GPUModelRunner):
             async_output.async_copy_ready_event,
         )
         return async_output
+
+    def _collect_routed_experts_lists(
+        self,
+        total_num_scheduled_tokens: int,
+    ):
+        routed_experts_lists = None
+        if self.model_config.enable_return_routed_experts:
+            if vllm_version_is("0.20.2"):
+                capturer = RoutedExpertsCapturer.get_instance()
+                if capturer is not None:
+                    capturer.save_captured_experts(indices=self.cpu_slot_mapping)
+            elif self.routed_experts_initialized:
+                buf = self.routed_experts_capturer.get_device_buffer()
+                total = total_num_scheduled_tokens
+                self.routed_experts_cpu[:total].copy_(buf[:total], non_blocking=True)
+                self.routed_experts_slot_mapping_cpu[:total].copy_(
+                    self.routed_experts_slot_mapping_device[:total],
+                    non_blocking=True,
+                )
+                torch.npu.current_stream().synchronize()
+                routed_experts_lists = RoutedExpertsLists(
+                    routing_data=self.routed_experts_cpu[:total].numpy(),
+                    slot_mapping=self.routed_experts_slot_mapping_cpu[:total].numpy(),
+                )
+        return routed_experts_lists
+
+    def _finalize_model_runner_output(
+        self,
+        model_runner_output: ModelRunnerOutput,
+    ) -> None:
+        if self.ascend_config.profiling_chunk_config.need_timing and hasattr(self, '_execution_start_time'):
+            self._sync_device()
+            model_runner_output.execution_time_ms = (time.perf_counter() - self._execution_start_time) * 1000.0
+
+        if self.dynamic_eplb:
+            self.eplb_updator.forward_end()
+
+        self._finalize_dump_data()
 
     def _run_sampling_phase(
         self,
