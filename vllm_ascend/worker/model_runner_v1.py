@@ -2381,11 +2381,25 @@ class NPUModelRunner(GPUModelRunner):
             logits = logits[: self.input_batch.num_reqs]
         if self.input_batch.sampling_metadata.top_k is not None and get_ascend_config().enable_reduce_sample:
             max_topk = self.input_batch.top_k_cpu[self.input_batch.top_k_cpu < logits.shape[1]].max()
-            self.sampler.prepare_sampling(max_topk)
+        self.sampler.prepare_sampling(max_topk)
         return self.sampler(
             logits=logits,
             sampling_metadata=sampling_metadata,
         )
+
+    @contextmanager
+    def _configure_spec_rejection_sampler(
+        self,
+        max_topk: int | None,
+        random_tensors: SamplingRandomTensors | None,
+    ):
+        self.rejection_sampler.prepare_sampling(max_topk)
+        self.rejection_sampler.set_random_tensors(random_tensors)
+        try:
+            yield
+        finally:
+            self.rejection_sampler.set_random_tensors(None)
+            self.rejection_sampler.prepare_sampling(None)
 
     def _sample_spec_decode(
         self,
@@ -2401,8 +2415,6 @@ class NPUModelRunner(GPUModelRunner):
             max_topk = spec_sampling_state.max_topk
         elif self.input_batch.sampling_metadata.top_k is not None and get_ascend_config().enable_reduce_sample:
             max_topk = self.input_batch.top_k_cpu[self.input_batch.top_k_cpu < logits.shape[1]].max()
-        if max_topk is not None:
-            self.rejection_sampler.prepare_sampling(max_topk)
         random_tensors = spec_sampling_state.random_tensors if spec_sampling_state is not None else None
         if random_tensors is None:
             random_tensors = self._prepare_spec_sampling_random_tensors(
@@ -2411,16 +2423,13 @@ class NPUModelRunner(GPUModelRunner):
                 sampling_metadata,
                 max_topk,
             )
-        self.rejection_sampler.set_random_tensors(random_tensors)
-        try:
+        with self._configure_spec_rejection_sampler(max_topk, random_tensors):
             sampler_output = self.rejection_sampler(
                 spec_decode_metadata,
                 None,  # draft_probs
                 logits,
                 sampling_metadata,
             )
-        finally:
-            self.rejection_sampler.set_random_tensors(None)
         return sampler_output
 
     def _sample(
