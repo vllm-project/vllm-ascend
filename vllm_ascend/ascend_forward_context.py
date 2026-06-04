@@ -284,7 +284,16 @@ def select_moe_comm_method(num_tokens: int, vllm_config: VllmConfig, is_draft_mo
         # TODO: drop the EP-size guard when dispatch_ffn_combine supports larger EP sizes
         # TODO: drop speculative method guard when dispatch_gmm_combine_decode supports w16a16
         fused_mc2_enable = get_ascend_config().enable_fused_mc2
-        dispatch_ffn_combine_enable = get_ep_group().world_size <= 32 and (not is_draft_model)
+        # dispatch_ffn_combine corrupts output on the small/ragged token shape of
+        # speculative decoding (e.g. DeepSeek-V4 + MTP): it never zero-initializes
+        # its output/combine staging and its unpermute tiling divides by a per-core
+        # token count that hits 0 when a rank's local token count < AIV core count,
+        # producing NaN/garbage first-decode logits (empty / malformed begin-of-sentence
+        # responses, gh issue #9170). is_draft_model only covers the draft forward; the
+        # *target* verify forward runs with is_draft_model=False, so also guard on the
+        # speculative config. Non-speculative runs are unaffected.
+        is_spec_decode = getattr(vllm_config, "speculative_config", None) is not None
+        dispatch_ffn_combine_enable = get_ep_group().world_size <= 32 and (not is_draft_model) and (not is_spec_decode)
         if num_tokens <= mc2_tokens_capacity:
             fused_decode_enable = fused_mc2_enable
             if fused_mc2_enable == 1:
