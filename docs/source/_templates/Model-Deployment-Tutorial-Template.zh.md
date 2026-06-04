@@ -200,7 +200,7 @@ lm_eval \
 
 #### 表1：场景概览
 
-| 场景 | 部署形态 | *总卡数 | 权重版本 | 优化思路 |
+| 场景 | 部署形态 | *总卡数 | 权重版本 | 场景要点 |
 |------|------|---------|----------|----------|
 | 高吞吐<br>(32K推1K) | 1P1D部署 | 16（A3） | glm5.1w4a8 | 短序列高吞吐情况下，尝试调整xxx参数 |
 | 长序列 |  |  |  |  |
@@ -234,7 +234,7 @@ lm_eval \
 请参考[公共性能调优文档](../../developer_guide/performance_and_debug/optimization_and_tuning.md)获得调优方法。
 请参考[特性指南](../../user_guide/support_matrix/feature_matrix.md)获得详细特性说明。
 
-#### 9.2.2  模型特有优化
+#### 9.2.2  模型特有优化（可选）
 
 **资料写作要求：**
 
@@ -262,7 +262,7 @@ lm_eval \
 | 权重预取 | MLP密集型场景（Dense模型）| `export VLLM_ASCEND_ENABLE_PREFETCH_MLP=1` | 利用向量计算时间，提前将MLP权重加载到L2 Cache | 需配合预取缓冲区大小调整 |
 | 异步调度 | 大规模模型、高并发场景 | `--async-scheduling` | 非阻塞任务调度，提升并发处理能力 | 与FullGraph优化协同使用 |
 
-## 11 FAQ
+## 10 FAQ
 
 **资料写作要求：**
 
