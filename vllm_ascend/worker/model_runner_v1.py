@@ -2223,6 +2223,22 @@ class NPUModelRunner(GPUModelRunner):
             sample_hidden_states,
             batch_desc,
         )
+        return self._finalize_sampling_phase_result(
+            sampling_phase_result,
+            scheduler_output,
+            kv_connector_output,
+            ec_connector_output,
+            cudagraph_stats,
+        )
+
+    def _finalize_sampling_phase_result(
+        self,
+        sampling_phase_result: SamplingPhaseResult,
+        scheduler_output: "SchedulerOutput",
+        kv_connector_output,
+        ec_connector_output,
+        cudagraph_stats,
+    ) -> ModelRunnerOutput | AsyncModelRunnerOutput:
         sampler_output = sampling_phase_result.sampler_output
         bookkeeping_state = sampling_phase_result.bookkeeping_state
 
@@ -2250,6 +2266,7 @@ class NPUModelRunner(GPUModelRunner):
 
         if not self.use_async_scheduling:
             return model_runner_output
+
         async_output = self._build_async_model_runner_output(
             model_runner_output,
             sampler_output,
