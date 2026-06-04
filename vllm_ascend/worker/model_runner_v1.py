@@ -21,6 +21,7 @@ import math
 import sys
 import time
 from collections import defaultdict
+from collections.abc import Callable
 from contextlib import contextmanager, nullcontext
 from copy import copy, deepcopy
 from dataclasses import dataclass, replace
@@ -78,7 +79,7 @@ from vllm.v1.outputs import (
 )
 from vllm.v1.worker.utils import select_common_block_size
 
-from vllm_ascend.utils import vllm_version_is
+from vllm_ascend.utils import AscendDeviceType, get_ascend_device_type, vllm_version_is
 
 if not vllm_version_is("0.20.2"):
     from vllm.v1.outputs import RoutedExpertsLists
@@ -614,6 +615,23 @@ class NPUModelRunner(GPUModelRunner):
         if isinstance(self.model, ACLGraphWrapper):
             return self.model.unwrap()
         return self.model
+
+    def _update_states(self, scheduler_output: "SchedulerOutput") -> Callable | None:
+        # Temporary rewind guard for KV-load-failure recompute.
+        # This can be removed after the upstream fix is merged.
+        req_data = scheduler_output.scheduled_cached_reqs
+
+        if self.use_async_scheduling:
+            for i, req_id in enumerate(req_data.req_ids):
+                req_state = self.requests.get(req_id)
+                if req_state is None:
+                    continue
+
+                num_computed_tokens = req_data.num_computed_tokens[i]
+                if num_computed_tokens < req_state.num_computed_tokens:
+                    req_state.prev_num_draft_len = 0
+
+        return super()._update_states(scheduler_output)
 
     def _pad_query_start_loc_for_fia(
         self,
@@ -1747,7 +1765,9 @@ class NPUModelRunner(GPUModelRunner):
                             req_state.prev_num_draft_len = 0
 
                 # Update persistent batch states.
-                deferred_state_corrections_fn = self._update_states(scheduler_output)
+                deferred_state_corrections_fn = self._update_states(
+                    scheduler_output
+                )
 
                 if has_ec_transfer() and get_ec_transfer().is_producer:
                     with self.maybe_get_ec_connector_output(
@@ -1873,6 +1893,7 @@ class NPUModelRunner(GPUModelRunner):
                         self.requests,
                         self.compilation_config.static_forward_context,
                         self.model.get_mamba_state_copy_func(),
+                        self._get_mamba_copy_bufs(),
                         preprocess_bufs,
                     )
                     # preprocess_mamba resets num_accepted_tokens_cpu to 1
@@ -1957,8 +1978,7 @@ class NPUModelRunner(GPUModelRunner):
             update_cos_sin(positions)
 
         if self.dynamic_eplb:
-            with record_function_or_nullcontext("EPLB weight D2D"):
-                self.eplb_updator.forward_before()
+            self.eplb_updator.forward_before()
 
         # Set cudagraph mode to none if calc_kv_scales is true.
         # KV scales calculation involves dynamic operations that are incompatible
@@ -2004,6 +2024,8 @@ class NPUModelRunner(GPUModelRunner):
                 ),
             ) as kv_connector_output,
         ):
+            if self.cache_config.mamba_cache_mode == "align":
+                mamba_utils.do_mamba_copy_block(preprocess_bufs)
             hidden_states = self._model_forward(
                 num_tokens_padded, input_ids, positions, intermediate_tensors, inputs_embeds, **model_kwargs
             )
@@ -2271,8 +2293,7 @@ class NPUModelRunner(GPUModelRunner):
             model_runner_output.execution_time_ms = (time.perf_counter() - self._execution_start_time) * 1000.0
 
         if self.dynamic_eplb:
-            with record_function_or_nullcontext("EPLB update"):
-                self.eplb_updator.forward_end()
+            self.eplb_updator.forward_end()
 
         self._finalize_dump_data()
 
@@ -2794,6 +2815,14 @@ class NPUModelRunner(GPUModelRunner):
                         slot_mapping[
                             total_num_scheduled_tokens_compressed_list[
                                 kv_cache_gid]:num_tokens_padded].fill_(-1)
+                    elif self.use_compress:
+                        # DSA dummy/graph-capture runs do not go through
+                        # _prepare_inputs(), so no fresh compressed cache
+                        # metadata is computed for them. Reusing values from
+                        # the previous real request can feed stale block-table
+                        # and [block, offset] scatter indices to DSA kernels.
+                        slot_mapping[:num_tokens_padded].fill_(0)
+                        blk_table_tensor[:maybe_num_reqs_padded].fill_(0)
                     else:
                         slot_mapping[num_tokens:num_tokens_padded].fill_(-1)
                         blk_table_tensor[num_reqs:num_reqs_padded].fill_(0)
@@ -3748,10 +3777,14 @@ class NPUModelRunner(GPUModelRunner):
         kv_cache_shape_list: list[int],
         kv_cache_dtype_list: list[int],
         page_size_bytes: int,
+        overlap_full_kv_cache: bool = False,
     ):
         reshaped_kv_tensors = []
-        storage_offset_bytes = raw_tensor.storage_offset()
-        for shape, dtype in zip(kv_cache_shape_list, kv_cache_dtype_list):
+        base_storage_offset_bytes = raw_tensor.storage_offset()
+        storage_offset_bytes = base_storage_offset_bytes
+        for idx, (shape, dtype) in enumerate(zip(kv_cache_shape_list, kv_cache_dtype_list)):
+            if overlap_full_kv_cache and idx == 2:
+                storage_offset_bytes = base_storage_offset_bytes
             dtype_size = get_dtype_size(dtype)
             num_element_per_page = (
                 page_size_bytes // dtype_size
@@ -3813,6 +3846,7 @@ class NPUModelRunner(GPUModelRunner):
                         current_kv_cache_spec.head_size)
                     kv_cache_shape_list = [kv_cache_shape]
                     kv_cache_dtype_list = [current_kv_cache_spec.dtype]
+                    overlap_full_kv_cache = False
 
                     if hasattr(current_kv_cache_spec, "scale_dim") and current_kv_cache_spec.scale_dim != 0:
                         indexer_k_shape = kv_cache_shape
@@ -3821,13 +3855,34 @@ class NPUModelRunner(GPUModelRunner):
                                                 current_kv_cache_spec.num_kv_heads,
                                                 current_kv_cache_spec.scale_dim
                                                 )
-                        kv_cache_shape_list = [indexer_k_shape, indexer_scale_shape]
-                        kv_cache_dtype_list = [current_kv_cache_spec.dtype, current_kv_cache_spec.scale_dtype]
+                        if get_ascend_device_type() in {AscendDeviceType.A5}:
+                            indexer_full_shape = self.attn_backend.get_kv_cache_shape(
+                                num_blocks, current_kv_cache_spec.block_size,
+                                current_kv_cache_spec.num_kv_heads,
+                                current_kv_cache_spec.head_size
+                                + current_kv_cache_spec.scale_dim
+                                * get_dtype_size(current_kv_cache_spec.scale_dtype))
+                            kv_cache_shape_list = [
+                                indexer_k_shape, indexer_scale_shape, indexer_full_shape
+                            ]
+                            kv_cache_dtype_list = [
+                                current_kv_cache_spec.dtype,
+                                current_kv_cache_spec.scale_dtype,
+                                current_kv_cache_spec.dtype,
+                            ]
+                            overlap_full_kv_cache = True
+                        else:
+                            kv_cache_shape_list = [indexer_k_shape, indexer_scale_shape]
+                            kv_cache_dtype_list = [
+                                current_kv_cache_spec.dtype, current_kv_cache_spec.scale_dtype
+                            ]
+                            overlap_full_kv_cache = False
 
                     kv_cache = self._adjust_kv_layout(kv_tensor,
                                            kv_cache_shape_list,
                                            kv_cache_dtype_list,
                                            current_kv_cache_spec.page_size_bytes,
+                                           overlap_full_kv_cache=overlap_full_kv_cache,
                                            )
 
                     kv_caches[layer_name] = kv_cache
@@ -4410,8 +4465,10 @@ def _get_gpu_model_runner_module_name(model_runner) -> str:
 def _torch_cuda_wrapper():
     class _EventPlaceholder:
         def __init__(self, *args, **kwargs) -> None:
-            self.record = lambda: None
-            self.synchronize = lambda: None
+            self.record = lambda *a, **kw: None
+            self.synchronize = lambda *a, **kw: None
+            self.wait = lambda *a, **kw: None
+            self.query = lambda *a, **kw: True
 
     class _StreamPlaceholder:
         def __init__(self, *args, **kwargs) -> None:

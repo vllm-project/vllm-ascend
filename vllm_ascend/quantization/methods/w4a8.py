@@ -553,9 +553,9 @@ class AscendW4A8DynamicFusedMoEMethod(AscendMoEScheme):
         topk_weights = topk_weights.to(x.dtype)
 
         if self.dynamic_eplb:
-            w1 = layer.w13_weight_list
+            w1 = [i.view(torch.int32) for i in layer.w13_weight_list]
             w1_scale = layer.w13_weight_scale_list
-            w2 = layer.w2_weight_list
+            w2 = [i.view(torch.int32) for i in layer.w2_weight_list]
             w2_scale = layer.w2_weight_scale_list
             w1_scale_bias = layer.w13_scale_bias_list
             w2_scale_bias = layer.w2_scale_bias_list
@@ -637,7 +637,7 @@ class AscendW4A8DynamicFusedMoEMethod(AscendMoEScheme):
             layer.register_parameter("w2_scale_bias", w2_scale_bias)
 
     def pack_to_int32(self, weight: torch.Tensor):
-        if self.new_quant_version:
+        if self.new_quant_version or self.quant_method == COMPRESSED_TENSORS_METHOD:
             # pack 4 int8(int4*2) to int32, because in pytorch, we need to use int32 to represent int4
             assert weight.shape[-1] % 4 == 0, (
                 f"the last dim of weight needs to be divided by 4 but got shape {weight.shape}"
@@ -647,6 +647,17 @@ class AscendW4A8DynamicFusedMoEMethod(AscendMoEScheme):
             return torch_npu.npu_quantize(
                 weight.to(torch.float32), torch.tensor([1.0]).npu(), None, torch.quint4x2, -1, False
             )
+
+    def pack_int4_to_int8(self, weight: torch.Tensor) -> torch.Tensor:
+        shape = weight.shape
+        weight = weight.reshape(-1, 2)
+        weight0 = weight[:, :1]
+        weight1 = weight[:, 1:]
+        weight1_4 = torch.bitwise_left_shift(weight1, 4)
+        weight2_4 = weight0 & 0b00001111
+        weight_add = torch.bitwise_or(weight1_4, weight2_4)
+        # The clone() call is used to break the view chain
+        return weight_add.reshape(shape[:-1] + (shape[-1] // 2,)).clone()
 
     @staticmethod
     def maybe_squeeze_per_channel_weight_scale(scale: torch.Tensor) -> torch.Tensor:
@@ -705,9 +716,11 @@ class AscendW4A8DynamicFusedMoEMethod(AscendMoEScheme):
         w2_scale_bias = torch.nn.Parameter(w2_bias, requires_grad=False)
         layer.register_parameter("w2_scale_bias", w2_scale_bias)
 
-        # Accuracy problem in nz format
-        # layer.w13_weight.data = maybe_trans_nz(layer.w13_weight.data)
-        # layer.w2_weight.data = maybe_trans_nz(layer.w2_weight.data)
+        # Packs 2 int4 into 1 int8 on-the-fly to mirror the modelslim new_quant_version path
+        layer.w13_weight.data = self.pack_int4_to_int8(layer.w13_weight.data)
+        layer.w2_weight.data = self.pack_int4_to_int8(layer.w2_weight.data)
+        layer.w13_weight.data = maybe_trans_nz(layer.w13_weight.data)
+        layer.w2_weight.data = maybe_trans_nz(layer.w2_weight.data)
         layer.w13_weight.data = self.pack_to_int32(layer.w13_weight.data)
         layer.w2_weight.data = self.pack_to_int32(layer.w2_weight.data)
 
@@ -740,8 +753,8 @@ class AscendW4A8DynamicFusedMoEMethod(AscendMoEScheme):
         layer.w2_weight.data = maybe_trans_nz(layer.w2_weight.data)
 
         if self.dynamic_eplb:
-            layer.w13_weight_list = [weight.clone().view(torch.int32) for weight in layer.w13_weight.data.unbind(dim=0)]
-            layer.w2_weight_list = [weight.clone().view(torch.int32) for weight in layer.w2_weight.data.unbind(dim=0)]
+            layer.w13_weight_list = [weight.clone() for weight in layer.w13_weight.data.unbind(dim=0)]
+            layer.w2_weight_list = [weight.clone() for weight in layer.w2_weight.data.unbind(dim=0)]
             layer.w13_weight_scale_list = [weight.clone() for weight in layer.w13_weight_scale.data.unbind(dim=0)]
             layer.w2_weight_scale_list = [weight.clone() for weight in layer.w2_weight_scale.data.unbind(dim=0)]
             layer.w13_scale_bias_list = (
