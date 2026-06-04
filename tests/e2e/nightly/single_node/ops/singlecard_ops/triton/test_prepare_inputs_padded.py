@@ -6,7 +6,7 @@ from vllm.triton_utils import triton
 
 from vllm_ascend.ops.triton.spec_decode.utils import prepare_inputs_padded_kernel
 from vllm_ascend.ops.triton.triton_utils import get_vectorcore_num
-from vllm_ascend.spec_decode.eagle_proposer import _PREPARE_INPUTS_BLOCK_SIZE as BLOCK_SIZE
+from vllm_ascend.spec_decode.llm_base_proposer import _PREPARE_INPUTS_BLOCK_SIZE as BLOCK_SIZE
 
 
 def prepare_inputs_padded_ref(

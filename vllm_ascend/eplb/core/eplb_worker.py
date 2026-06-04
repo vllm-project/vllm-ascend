@@ -67,8 +67,22 @@ class EplbWorker:
                 hotness = self._calculate_hotness(old_placement, load_info.sum(0))
             else:
                 hotness = self._calculate_hotness(old_placement, load_info)
-            current_mean, current_max = self._compute_imbalance(old_placement, hotness)
-            update_mean, update_max = self._compute_imbalance(new_placement, hotness)
+            # ms-service-metric begin: expose EPLB hotness details for metrics collection.
+            current_mean, current_max, current_imbalance_list = self._compute_imbalance(
+                old_placement, hotness, return_list=True
+            )
+            update_mean, update_max, update_imbalance_list = self._compute_imbalance(
+                new_placement, hotness, return_list=True
+            )
+            self.latest_expert_hotness = {
+                "current_mean": current_mean,
+                "current_max": current_max,
+                "update_mean": update_mean,
+                "update_max": update_max,
+                "current_imbalance_list": current_imbalance_list,
+                "update_imbalance_list": update_imbalance_list,
+            }
+            # ms-service-metric end.
             logger.info(
                 "[Expert Hotness] Current: mean=%.3f, max=%.3f, Updated: mean=%.3f, max=%.3f",
                 current_mean,
@@ -272,7 +286,7 @@ class EplbWorker:
         return list(zip(send_all, recv_all, maps, log2phy_all, layer_ids))
 
     @staticmethod
-    def _compute_imbalance(deployment_all_layer, hotness_all_layer: np.ndarray):
+    def _compute_imbalance(deployment_all_layer, hotness_all_layer: np.ndarray, return_list: bool = False):
         imbalance_list = []
         deployment_all_layer = np.array(deployment_all_layer)
         for deployment, hotness in zip(deployment_all_layer, hotness_all_layer):
@@ -286,6 +300,10 @@ class EplbWorker:
 
         max_val = max(imbalance_list)
         mean_val = sum(imbalance_list) / len(imbalance_list)
+        # ms-service-metric begin: optionally expose per-layer imbalance without recomputing it.
+        if return_list:
+            return mean_val, max_val, imbalance_list
+        # ms-service-metric end.
         return mean_val, max_val
 
     @staticmethod
