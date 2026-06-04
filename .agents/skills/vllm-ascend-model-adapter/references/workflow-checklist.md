@@ -311,12 +311,14 @@ bash scripts/smoke_test.sh <served-name> 8000 --multimodal
    - `--limit-mm-per-prompt '{"image":0,"video":0,"audio":0}'`
    - then check whether failure moves from processor layer to model core.
 5. If issue persists, map failure signature to known-good implementation and patch minimal code.
+6. If the failure signature is confirmed NPU HBM exhaustion, stop the fallback ladder there. Do not continue with `cpu-offload` exploration; report that the user needs more Ascend cards or a larger-HBM machine.
 
 ## 11) Capacity baseline + sweep
 
 - Baseline (single machine): **`max-model-len=128k` + `max-num-seqs=16`**.
 - If baseline passes, expand to `max-num-seqs=32/64` when requested.
 - If baseline cannot pass due hardware/runtime limits, report explicit root cause.
+- If the explicit root cause is HBM shortage, the recommendation must be to add cards or use a larger-HBM Ascend machine. Do not recommend `cpu-offload` as the next action.
 
 ## 12) Delivery checklist
 

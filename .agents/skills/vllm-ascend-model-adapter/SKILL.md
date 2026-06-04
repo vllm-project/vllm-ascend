@@ -43,6 +43,7 @@ chmod +x .agents/skills/vllm-ascend-model-adapter/scripts/*.sh
 - Feature-first default: try best to validate ACLGraph / EP / flashcomm1 / multimodal out-of-box. MTP is validated only when the checkpoint explicitly supports it (inferred from config + weight keys in Step 2).
 - `--enable-expert-parallel` and flashcomm1 checks are MoE-only; for non-MoE models mark as not-applicable with evidence.
 - If any feature cannot be enabled, keep evidence and explain reason in final report.
+- If logs and memory telemetry confirm the blocking issue is HBM capacity on NPU, stop exploring `cpu-offload` as a remediation path. Report the model as hardware-blocked and explicitly tell the user to add cards or move to a larger-HBM Ascend machine.
 - Do not rely on `PYTHONPATH=<modified-src>:$PYTHONPATH` unless debugging fallback is strictly needed.
 - Keep code changes minimal and focused on the target model.
 - **Never introduce modeling files or patches into `vllm-ascend`**. All model adaptation code belongs in `/vllm-workspace/vllm`. If a model cannot function on Ascend without adding modeling code to `vllm-ascend`, stop — raise a GitHub issue to analyze the root cause instead.
@@ -172,6 +173,7 @@ echo "OK: model path verified at $MODEL_PATH"
 - Inspect processor files, modeling files, tokenizer files as needed.
 - Check state-dict key prefixes (and safetensors index) to infer mapping needs.
 - Decide whether support already exists in `vllm/model_executor/models/registry.py`.
+- If the model is MoE, explicitly plan an EP-first validation path and only fall back to TP-only evidence when EP fails with a documented root cause.
 
 ### 3) Analyze new operators (Ascend compatibility gate)
 
@@ -303,11 +305,13 @@ Place tests under `/tmp/npu_unit_tests/` (ephemeral; not committed).
   ```
 - Validate architecture registration and loader path with logs (no unresolved architecture, no fatal missing-key errors).
 - Try feature-first validation: EP + ACLGraph path first; eager path as fallback/isolation.
+- For MoE models, try EP before TP-only runs. If EP fails, preserve the exact command, failure log, and the fallback command used for isolation.
 - If startup succeeds but first request crashes (false-ready), treat as runtime failure and continue root-cause isolation.
 - For `torch._dynamo` + `interpolate` + `NPU contiguous` failures on VL paths, try `TORCHDYNAMO_DISABLE=1` as diagnostic/stability fallback.
 - For multimodal processor API mismatch (for example `skip_tensor_conversion` signature mismatch), use text-only isolation (`--limit-mm-per-prompt` set image/video/audio to 0) to separate processor issues from core weight loading issues.
 - Capacity baseline by default (single machine): `max-model-len=128k` + `max-num-seqs=16`.
 - Then expand concurrency (e.g., 32/64) if requested or feasible.
+- If failure is confirmed as HBM exhaustion during load or first request, do not continue with `cpu-offload` experiments. Record the exact OOM evidence and conclude that more Ascend cards or larger HBM capacity are required.
 
 > **Note**: Accuracy evaluation and performance benchmarking are out of scope for this skill. They are handled by a dedicated separate skill. If requested, invoke that skill after completing this step.
 
@@ -337,6 +341,7 @@ Place tests under `/tmp/npu_unit_tests/` (ephemeral; not committed).
 - OpenAI-compatible inference request succeeds (not startup-only).
 - Key feature set is attempted and reported: ACLGraph / EP / flashcomm1 / multimodal. MTP reported if checkpoint supports it.
 - Capacity baseline (`128k + bs16`) result is reported, or explicit reason why not feasible.
+- If the final blocker is HBM capacity, the response explicitly says to add cards or use a larger-HBM Ascend machine, and does not present `cpu-offload` as the recommended next step.
 - **Dummy stage evidence is present (if used), and real-weight stage evidence is present (mandatory).**
 - Test config YAML exists at `tests/e2e/models/configs/<ModelName>.yaml` and follows the established schema (`model_name`, `hardware`, `tasks`, `num_fewshot`).
 - Tutorial doc exists at `docs/source/tutorials/models/<ModelName>.md` and follows the standard template (Introduction, Supported Features, Environment Preparation, Deployment, Functional Verification, Accuracy Evaluation, Performance).
