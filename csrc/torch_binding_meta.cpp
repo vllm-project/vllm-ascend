@@ -241,19 +241,19 @@ std::tuple<at::Tensor&, at::Tensor&> dispatch_ffn_combine_meta(
     return {out, expert_token_nums};
 }
 
-at::Tensor npu_lightning_indexer_meta(
+std::tuple<at::Tensor, at::Tensor> npu_lightning_indexer_meta(
     const at::Tensor &query, const at::Tensor &key, const at::Tensor &weights,
     const c10::optional<at::Tensor> &actual_seq_lengths_query,
     const c10::optional<at::Tensor> &actual_seq_lengths_key,
     const c10::optional<at::Tensor> &block_table, c10::string_view layout_query,
-    c10::string_view layout_key, int64_t sparse_count, int64_t sparse_mode)
+    c10::string_view layout_key, int64_t sparse_count, int64_t sparse_mode,
+    int64_t pre_tokens, int64_t next_tokens, bool return_value)
 {
     // npu tensor max size
-    constexpr int32_t SIZE = 8;
-    constexpr int32_t DIM_0 = 0;
-    constexpr int32_t DIM_1 = 1;
-    constexpr int32_t DIM_2 = 2;
-    constexpr int32_t DIM_3 = 3;
+    constexpr int64_t SIZE = 8;
+    constexpr int64_t DIM_0 = 0;
+    constexpr int64_t DIM_1 = 1;
+    constexpr int64_t DIM_2 = 2;
 
     TORCH_CHECK(query.numel() > 0, "Query is empty.");
     TORCH_CHECK(key.numel() > 0, "Key is empty.");
@@ -275,28 +275,73 @@ at::Tensor npu_lightning_indexer_meta(
         output_size = {query.size(DIM_0), key.size(n_dim_index), sparse_count};
     }
     // construct the output tensor
-    at::Tensor lightning_indexer_output = at::empty(output_size, query.options().dtype(at::kInt));
-    return lightning_indexer_output;
+    at::Tensor sparse_indices_out = at::empty(output_size, query.options().dtype(at::kInt));
+    at::Tensor sparse_values_out;
+    if (return_value) {
+        sparse_values_out = at::empty(output_size, query.options().dtype(query.dtype()));
+    } else {
+        sparse_values_out = at::empty({0}, query.options().dtype(query.dtype()));
+    }
+    return std::tuple<at::Tensor, at::Tensor>(sparse_indices_out, sparse_values_out);
 }
 
-at::Tensor npu_sparse_flash_attention_meta(
+std::tuple<at::Tensor, at::Tensor, at::Tensor> npu_sparse_flash_attention_meta(
     const at::Tensor &query, const at::Tensor &key, const at::Tensor &value,
-    const at::Tensor &sparse_indices, double scale_value, int64_t sparse_block_size,
+    const at::Tensor &sparse_indices, double scale_value,
     const c10::optional<at::Tensor> &block_table,
     const c10::optional<at::Tensor> &actual_seq_lengths_query,
     const c10::optional<at::Tensor> &actual_seq_lengths_kv,
     const c10::optional<at::Tensor> &query_rope,
-    const c10::optional<at::Tensor> &key_rope, c10::string_view layout_query,
-    c10::string_view layout_kv,
-    int64_t sparse_mode)
+    const c10::optional<at::Tensor> &key_rope, int64_t sparse_block_size,
+    c10::string_view layout_query, c10::string_view layout_kv,
+    int64_t sparse_mode, int64_t pre_tokens, int64_t next_tokens,
+    int64_t attention_mode, bool return_softmax_lse)
 {
+    constexpr int64_t SIZE = 8;
+    constexpr int64_t DIM_0 = 0;
+    constexpr int64_t DIM_1 = 1;
+    constexpr int64_t DIM_2 = 2;
+    constexpr int64_t DIM_3 = 3;
+    constexpr int64_t DIM_4 = 4;
+
     std::string layout_query_str = std::string(layout_query);
+    TORCH_CHECK(layout_query_str == "BSND" || layout_query_str == "TND",
+                "The layout of query only support BSND and TND, but got ",
+                layout_query_str);
     for (size_t i = 0; i < query.sizes().size(); i++) {
         TORCH_CHECK(query.size(i) > 0, "All values within query's shape should be greater "
                                        "than 0, but shape[", i, "] is ", query.size(i));
     }
-    at::Tensor output = at::empty(query.sizes(), query.options().dtype(query.dtype()));
-    return output;
+
+    at::SmallVector<int64_t, SIZE> output_size;
+    if (layout_query_str == "TND") {
+        TORCH_CHECK(query.dim() == DIM_3,
+                    "When the layout of query is TND, the query dimension must be 3, but got ",
+                    query.dim());
+        output_size = {query.size(DIM_0), query.size(DIM_1), query.size(DIM_2)};
+    } else {
+        TORCH_CHECK(query.dim() == DIM_4,
+                    "When the layout of query is BSND, the query dimension must be 4, but got ",
+                    query.dim());
+        output_size = {query.size(DIM_0), query.size(DIM_1), query.size(DIM_2), query.size(DIM_3)};
+    }
+
+    at::Tensor output = at::empty(output_size, query.options().dtype(query.dtype()));
+    at::SmallVector<int64_t, SIZE> softmax_size;
+    if (return_softmax_lse) {
+        if (query.dim() == DIM_3) {
+            softmax_size = {key.size(DIM_1), query.size(DIM_0), query.size(DIM_1) / key.size(DIM_1)};
+        } else {
+            softmax_size = {
+                query.size(DIM_0), key.size(DIM_2), query.size(DIM_1), query.size(DIM_2) / key.size(DIM_2)};
+        }
+    } else {
+        softmax_size = {0};
+    }
+
+    at::Tensor softmax_max = at::empty(softmax_size, query.options().dtype(at::kFloat));
+    at::Tensor softmax_sum = at::empty(softmax_size, query.options().dtype(at::kFloat));
+    return std::tuple<at::Tensor, at::Tensor, at::Tensor>(output, softmax_max, softmax_sum);
 }
 std::tuple<at::Tensor, at::Tensor> matmul_allreduce_add_rmsnorm_meta(
     const at::Tensor &x1,
