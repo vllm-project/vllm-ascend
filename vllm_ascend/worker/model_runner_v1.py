@@ -2091,10 +2091,7 @@ class NPUModelRunner(GPUModelRunner):
                 assert broadcasted is not None
                 logits = broadcasted["logits"]
 
-            # Apply structured output bitmasks if present
-            spec_sampling_state = self._prepare_spec_sampling_state(logits, spec_decode_metadata)
-
-            self.execute_model_state = ExecuteModelState(
+            self.execute_model_state = self._build_execute_model_state(
                 scheduler_output,
                 logits,
                 spec_decode_metadata,
@@ -2104,7 +2101,6 @@ class NPUModelRunner(GPUModelRunner):
                 aux_hidden_states,
                 attn_metadata,
                 positions,
-                spec_sampling_state,
                 ec_connector_output,
                 cudagraph_stats,
                 batch_desc,
@@ -2369,6 +2365,37 @@ class NPUModelRunner(GPUModelRunner):
                 self.input_batch.sampling_metadata,
                 max_topk,
             ),
+        )
+
+    def _build_execute_model_state(
+        self,
+        scheduler_output: "SchedulerOutput",
+        logits: torch.Tensor,
+        spec_decode_metadata: SpecDecodeMetadata | None,
+        spec_decode_common_attn_metadata: AscendCommonAttentionMetadata | None,
+        hidden_states: torch.Tensor,
+        sample_hidden_states: torch.Tensor,
+        aux_hidden_states: list[torch.Tensor] | None,
+        attn_metadata: "PerLayerAttnMetadata",
+        positions: torch.Tensor,
+        ec_connector_output: "ECConnectorOutput | None",
+        cudagraph_stats: CUDAGraphStat | None,
+        batch_desc: BatchDescriptor,
+    ) -> ExecuteModelState:
+        return ExecuteModelState(
+            scheduler_output,
+            logits,
+            spec_decode_metadata,
+            spec_decode_common_attn_metadata,
+            hidden_states,
+            sample_hidden_states,
+            aux_hidden_states,
+            attn_metadata,
+            positions,
+            self._prepare_spec_sampling_state(logits, spec_decode_metadata),
+            ec_connector_output,
+            cudagraph_stats,
+            batch_desc,
         )
 
     def _sample_non_spec_decode(
