@@ -22,7 +22,7 @@ ARG PIP_INDEX_URL="https://mirrors.tuna.tsinghua.edu.cn/pypi/web/simple"
 WORKDIR /workspace
 
 RUN yum update -y && \
-    yum install -y python3-pip git vim wget net-tools gcc gcc-c++ make cmake numactl numactl-devel jemalloc patch && \
+    yum install -y python3-pip git vim wget net-tools gcc gcc-c++ make cmake numactl numactl-devel jemalloc ninja-build patch && \
     rm -rf /var/cache/yum
 
 # Install modelscope (for fast download) and ray (for multinode)
@@ -41,13 +41,13 @@ RUN VLLM_TARGET_DEVICE="empty" python3 -m pip install -e /vllm-workspace/vllm/[a
 
 # Install vllm-ascend
 ARG SOC_VERSION="ascend310p1"
-ARG COMPILE_CUSTOM_KERNELS=1
 ENV SOC_VERSION=$SOC_VERSION \
     TASK_QUEUE_ENABLE=1 \
     OMP_NUM_THREADS=1
 COPY . /vllm-workspace/vllm-ascend/
 
-RUN export PIP_EXTRA_INDEX_URL="https://mirrors.huaweicloud.com/ascend/repos/pypi" && \
+RUN --mount=type=bind,source=csrc/build,target=/vllm-workspace/vllm-ascend/csrc/build \
+    export PIP_EXTRA_INDEX_URL="https://mirrors.huaweicloud.com/ascend/repos/pypi" && \
     source /usr/local/Ascend/ascend-toolkit/set_env.sh && \
     source /usr/local/Ascend/nnal/atb/set_env.sh && \
     python3 -m pip install -e /vllm-workspace/vllm-ascend/ --extra-index https://download.pytorch.org/whl/cpu/ && \
