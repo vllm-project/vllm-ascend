@@ -26,6 +26,7 @@ import os
 import pytest
 
 from tests.e2e.conftest import VllmRunner
+from vllm_ascend.utils import vllm_version_is
 
 os.environ["PYTORCH_NPU_ALLOC_CONF"] = "max_split_size_mb:256"
 os.environ["VLLM_WORKER_MULTIPROC_METHOD"] = "spawn"
@@ -35,6 +36,7 @@ GPT_OSS_MODELS = [
 ]
 
 
+@pytest.mark.skipif(vllm_version_is("0.21.0"), reason="no need to support model_runner for v0.21.0")
 @pytest.mark.parametrize("model", GPT_OSS_MODELS)
 def test_gpt_oss_distributed_tp2(model):
     example_prompts = [
