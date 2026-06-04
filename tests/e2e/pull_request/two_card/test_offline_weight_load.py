@@ -15,7 +15,7 @@
 # limitations under the License.
 #
 """
-Run `pytest tests/multicard/test_offline_load_weight.py`.
+Run `pytest tests/e2e/pull_request/two_card/test_offline_weight_load.py`.
 """
 
 import os

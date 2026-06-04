@@ -17,7 +17,7 @@
 """
 Compare the outputs of vLLM with and without aclgraph.
 
-Run `pytest tests/multicard/test_external_launcher.py`.
+Run `pytest tests/e2e/pull_request/two_card/test_external_launcher.py`.
 """
 
 import os
