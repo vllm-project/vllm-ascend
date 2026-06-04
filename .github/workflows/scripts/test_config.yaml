@@ -103,7 +103,7 @@
     - tests/e2e/pull_request/light/four_card/long_sequence/
 
 # Compilation
-- name: compilation - aclgraph
+- name: compilation_aclgraph
   optional: true
   source_file_dependencies:
     - vllm_ascend/compilation/__init__.py
@@ -116,7 +116,7 @@
     - tests/e2e/pull_request/light/one_card/aclgraph
     - tests/e2e/pull_request/light/two_card/aclgraph
 
-- name: compilation - pass base
+- name: compilation_passes_base
   optional: true
   source_file_dependencies:
     - vllm_ascend/compilation/passes/__init__.py
@@ -128,7 +128,7 @@
     - tests/ut/compilation
     - tests/e2e/pull_request/light/one_card/compile/
 
-- name: compilation - pass norm_quant_fusion_pass
+- name: compilation_norm_quant_fusion_pass
   optional: true
   source_file_dependencies:
     - vllm_ascend/compilation/passes/norm_quant_fusion_pass.py
@@ -137,7 +137,7 @@
     - tests/e2e/pull_request/light/one_card/compile/test_norm_quant_fusion.py
     - tests/e2e/pull_request/light/one_card/compile/test_graphex_norm_quant_fusion.py
 
-- name: compilation - pass graphex_qknorm_rope_fusion_pass
+- name: compilation_graphex_qknorm_rope_fusion_pass
   optional: true
   source_file_dependencies:
     - vllm_ascend/compilation/passes/qknorm_rope_fusion_pass.py
@@ -145,7 +145,7 @@
     - tests/ut/compilation
     - tests/e2e/pull_request/light/one_card/compile/test_graphex_qknorm_rope_fusion.py
 
-- name: compilation - pass sp_pass_pass
+- name: compilation_sp_pass_pass
   optional: true
   source_file_dependencies:
     - vllm_ascend/compilation/passes/sequence_parallelism_moe.py
@@ -153,7 +153,7 @@
   tests:
     - tests/e2e/pull_request/light/two_card/test_sp_pass.py
 
-- name: compilation - pass no_test
+- name: compilation_no_test
   optional: true
   source_file_dependencies:
     - vllm_ascend/compilation/passes/allgather_chunk_noop_pass.py
@@ -325,16 +325,81 @@
     - tests/ut/sample
     - tests/e2e/pull_request/light/one_card/test_sampler.py
 
-- name: spec_decode
+# Spec Decode
+- name: spec_decode_base
   optional: true
   source_file_dependencies:
-    - vllm_ascend/spec_decode
+    - vllm_ascend/spec_decode/__init__.py
+    - vllm_ascend/spec_decode/utils.py
   tests:
     - tests/ut/spec_decode
-    - tests/e2e/pull_request/light/one_card/test_qwen3_8b_w8a8.py
-    - tests/e2e/pull_request/full/one_card/spec_decode
-    - tests/e2e/pull_request/full/two_cards/spec_decode
-    - tests/e2e/pull_request/full/four_cards/spec_decode
+
+- name: spec_decode_eagle
+  optional: true
+  base: spec_decode_base
+  source_file_dependencies:
+    - vllm_ascend/spec_decode/llm_base_proposer.py
+    - vllm_ascend/spec_decode/eagle_proposer.py
+  tests:
+    - tests/e2e/pull_request/light/one_card/spec_decode/test_eagle.py
+    - tests/e2e/pull_request/light/one_card/spec_decode/test_mtp_eagle_correctness.py
+    - tests/e2e/pull_request/light/two_card/spec_decode/test_spec_decode.py
+    - tests/e2e/pull_request/light/four_card/spec_decode/test_mtp_qwen3_next.py
+
+- name: spec_decode_ngram
+  optional: true
+  base: spec_decode_base
+  source_file_dependencies:
+    - vllm_ascend/spec_decode/ngram_proposer.py
+  tests:
+    - tests/e2e/pull_request/light/one_card/spec_decode/test_ngram.py
+
+- name: spec_decode_ngram_npu
+  optional: true
+  base: spec_decode_base
+  source_file_dependencies:
+    - vllm_ascend/spec_decode/ngram_proposer_npu.py
+  tests:
+    - tests/e2e/pull_request/light/one_card/spec_decode/test_ngram_npu.py
+
+- name: spec_decode_suffix
+  optional: true
+  base: spec_decode_base
+  source_file_dependencies:
+    - vllm_ascend/spec_decode/suffix_proposer.py
+  tests:
+    - tests/e2e/pull_request/light/one_card/spec_decode/test_suffix.py
+
+- name: spec_decode_draft
+  optional: true
+  base: spec_decode_base
+  source_file_dependencies:
+    - vllm_ascend/spec_decode/draft_proposer.py
+  tests:
+    - tests/e2e/pull_request/light/one_card/spec_decode/test_draft_parallel.py
+
+- name: spec_decode_dflash
+  optional: true
+  base: spec_decode_base
+  source_file_dependencies:
+    - vllm_ascend/spec_decode/dflash_proposer.py
+  tests:
+    - tests/e2e/pull_request/light/one_card/spec_decode/test_dflash.py
+
+- name: spec_decode_extract_hidden_states
+  optional: true
+  base: spec_decode_base
+  source_file_dependencies:
+    - vllm_ascend/spec_decode/extract_hidden_states_proposer.py
+  tests:
+    - tests/e2e/pull_request/light/one_card/spec_decode/test_extract_hidden_states.py
+
+- name: spec_decode_medusa
+  optional: true
+  base: spec_decode_base
+  source_file_dependencies:
+    - vllm_ascend/spec_decode/medusa_proposer.py
+  tests: []
 
 - name: worker
   optional: true

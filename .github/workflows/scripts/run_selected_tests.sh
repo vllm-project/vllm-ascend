@@ -58,7 +58,11 @@ print_summary() {
 run_pytest_target() {
   local target="$1"
   test_index=$((test_index + 1))
-  local log_file="${pytest_log_dir}/pytest-${test_index}.log"
+  local log_name="${target}"
+  log_name="${log_name#tests/}"
+  log_name="${log_name%.py}"
+  log_name="${log_name//[^a-zA-Z0-9_.-]/_}"
+  local log_file="${pytest_log_dir}/${test_index}-${log_name}.log"
   echo "::group::${target}"
   echo -e "\033[1;34m=== Running target: ${target} ===\033[0m"
   set +e

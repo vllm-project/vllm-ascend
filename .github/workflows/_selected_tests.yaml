@@ -206,7 +206,7 @@ jobs:
         continue-on-error: true
         uses: actions/upload-artifact@v7
         with:
-          name: selected-test-logs-${{ matrix.group.npu_type }}-${{ matrix.group.num_npus }}card
+          name: selected-test-logs-vllm-${{ inputs.vllm }}-${{ matrix.group.npu_type }}-${{ matrix.group.num_npus }}card
           path: ${{ runner.temp }}/selected-tests-*
           if-no-files-found: ignore
           retention-days: 14
