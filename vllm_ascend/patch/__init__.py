@@ -392,6 +392,28 @@
 #    Future Plan:
 #       Remove this patch if upstream streaming behavior is updated to support mamba external KV connector
 #
+# ** 15. File: platform/patch_kv_cache_coordinator.py and platform/patch_kv_cache_manager.py**
+# ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+#   1. `vllm.v1.core.kv_cache_coordinator.HybridKVCacheCoordinator.find_longest_cache_hit_partial_group`
+#      `vllm.v1.core.kv_cache_manager.KVCacheManager.get_computed_blocks`
+#    Why:
+#       In PD disaggregation with hybrid Mamba models, the D side receives
+#       FullAttention KV blocks from the P side but has no local prefix-cache
+#       hit for Mamba groups. Upstream's min-reduction across all KV groups
+#       collapses the FullAttention hit length to 0, preventing partial
+#       FullAttention-only prefix cache reuse on the D side.
+#    How:
+#       Add `hit_partial` flag to `find_longest_cache_hit_partial_group`: when True, Mamba
+#       groups are skipped in the min-reduction so only FullAttention groups
+#       determine the hit length (e.g. partial FA-only hit). `get_computed_blocks`
+#       sets `hit_partial=True` for `do_remote_prefill` requests.
+#    Related PR (if no, explain why):
+#       https://github.com/vllm-project/vllm/pull/42524
+#       https://github.com/vllm-project/vllm/pull/44243
+#    Future Plan:
+#       Remove this patch when vLLM PR #42524 is included in the supported
+#       upstream vLLM version.
+#
 # * Worker Patch:
 # ===============
 #

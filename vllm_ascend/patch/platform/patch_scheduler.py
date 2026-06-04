@@ -9,6 +9,9 @@ def _mamba_block_aligned_split(
     num_new_local_computed_tokens: int = 0,
     num_external_computed_tokens: int = 0,
 ) -> int:
+    if num_new_tokens == 0 and num_external_computed_tokens > 0:
+        return num_new_tokens
+
     num_computed_tokens = request.num_computed_tokens + num_new_local_computed_tokens + num_external_computed_tokens
     # Perform block-aligned splitting at prefill phase, including:
     # * non-resumed requests: num_computed_tokens < num_prompt_tokens + 0
