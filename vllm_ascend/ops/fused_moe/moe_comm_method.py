@@ -305,7 +305,12 @@ class FusedMC2CommImpl(MoECommMethod):
 
         expert_tokens = None
         if get_ascend_config().enable_fused_mc2 == 1:
-            out = torch.empty_like(fused_experts_input.hidden_states)
+            # zeros_like (not empty_like): dispatch_ffn_combine may skip rows whose
+            # local expert received zero tokens (currentM == 0), leaving them
+            # unwritten. Reading uninitialized HBM there yields NaN/garbage logits
+            # (a source-identified contributor to #9170). Zero is also the correct
+            # combine identity for a token with no expert contribution.
+            out = torch.zeros_like(fused_experts_input.hidden_states)
             torch.ops._C_ascend.dispatch_ffn_combine(  # type: ignore
                 x=fused_experts_input.hidden_states,
                 weight1=fused_experts_input.weights.w1,
