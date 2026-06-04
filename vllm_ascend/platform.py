@@ -40,6 +40,7 @@ from vllm_ascend.utils import (
     ASCEND_QUANTIZATION_METHOD,
     COMPILATION_PASS_KEY,
     COMPRESSED_TENSORS_METHOD,
+    FP8_METHOD,
     AscendDeviceType,
     bootstrap_custom_op_env,
     check_kv_extra_config,
@@ -103,7 +104,12 @@ class NPUPlatform(Platform):
     device_control_env_var: str = "ASCEND_RT_VISIBLE_DEVICES"
     dispatch_key: str = "PrivateUse1"
 
-    supported_quantization: list[str] = [ASCEND_QUANTIZATION_METHOD, COMPRESSED_TENSORS_METHOD]
+    supported_quantization: list[str] = [
+        ASCEND_QUANTIZATION_METHOD,
+        COMPRESSED_TENSORS_METHOD,
+        FP8_METHOD,
+        "deepseek_v4_fp8",
+    ]
 
     def is_sleep_mode_available(self) -> bool:
         return True
@@ -150,7 +156,7 @@ class NPUPlatform(Platform):
                     quant_action.choices.append(ASCEND_QUANTIZATION_METHOD)
 
         if not is_310p():
-            from vllm_ascend.quantization import AscendCompressedTensorsConfig, AscendModelSlimConfig  # noqa: F401
+            from vllm_ascend.quantization import AscendCompressedTensorsConfig, AscendFp8Config, AscendModelSlimConfig  # noqa: F401
         else:
             from vllm_ascend._310p.quantization import AscendModelSlimConfig310  # noqa: F401
 
@@ -265,7 +271,23 @@ class NPUPlatform(Platform):
     def update_block_size_for_backend(cls, vllm_config: VllmConfig) -> None:
         # TODO: NPU still sets block_size in check_and_update_config.
         # Move that logic here so block_size is chosen by the backend.
-        pass
+        using_kv_transfer_with_hybrid = (
+            not vllm_config.scheduler_config.disable_hybrid_kv_cache_manager and vllm_config.kv_transfer_config
+        )
+        cache_config = vllm_config.cache_config
+        model_config = vllm_config.model_config
+        if (
+            not cache_config.enable_prefix_caching
+            and using_kv_transfer_with_hybrid
+            and cache_config.mamba_cache_mode == "align"
+        ):
+            if cache_config.mamba_block_size is None or cache_config.mamba_block_size == model_config.max_model_len:
+                cache_config.mamba_block_size = cache_config.block_size
+            else:
+                # mamba_block_size must be a multiple of block_size, so that it can hand the block hash
+                assert cache_config.mamba_block_size % cache_config.block_size == 0, (
+                    f"mamba_block_size must be a multiple of block_size: {cache_config.block_size}"
+                )
 
     @classmethod
     def set_device(cls, device: torch.device):

@@ -37,7 +37,7 @@ copyright = "2025, vllm-ascend team"
 author = "the vllm-ascend team"
 
 # The full version, including alpha/beta/rc tags
-release = ""
+release = "0.20.2rc1"
 
 # -- General configuration ---------------------------------------------------
 
@@ -68,23 +68,23 @@ myst_substitutions = {
     # the branch of vllm, used in vllm clone
     # - main branch: 'main'
     # - vX.Y.Z branch: 'vX.Y.Z'
-    "vllm_version": "v0.19.1",
+    "vllm_version": "v0.20.2",
     # the branch of vllm-ascend, used in vllm-ascend clone and image tag
     # - main branch: 'main'
     # - vX.Y.Z branch: latest vllm-ascend release tag
-    "vllm_ascend_version": "v0.19.1rc1",
+    "vllm_ascend_version": "v0.20.2rc1",
     # the newest release version of vllm-ascend and matched vLLM, used in pip install.
     # This value should be updated when cut down release.
-    "pip_vllm_ascend_version": "0.19.1rc1",
-    "pip_vllm_version": "0.19.1",
+    "pip_vllm_ascend_version": "0.20.2rc1",
+    "pip_vllm_version": "0.20.2",
     # CANN image tag
-    "cann_image_tag": "9.0.0-910b-ubuntu22.04-py3.11",
+    "cann_image_tag": "9.0.0-910b-ubuntu22.04-py3.12",
     # vLLM commit hash for main branch
     "main_vllm_commit": "9090368b650896bf5fc990c921df7eb4c20355a5",
     # vLLM tag for main branch
     "main_vllm_tag": "v0.20.2",
     # Python version for main branch
-    "main_python_version": ">= 3.10, < 3.12",
+    "main_python_version": ">= 3.10, < 3.13",
     # CANN version for main branch
     "main_cann_version": "9.0.0",
     # PyTorch/torch_npu version for main branch

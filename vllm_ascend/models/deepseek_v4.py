@@ -185,6 +185,7 @@ class DeepseekV2MLP(nn.Module):
         hidden_size: int,
         intermediate_size: int,
         hidden_act: str,
+        swiglu_limit: float | None = None,
         quant_config: QuantizationConfig | None = None,
         reduce_results: bool = True,
         is_sequence_parallel=False,
@@ -239,6 +240,7 @@ class DeepseekV4MoE(nn.Module):
         layer_idx = int(prefix.split(sep=".")[-2])
         self.layer_idx = layer_idx
         self.routed_scaling_factor = getattr(config, "routed_scaling_factor", 1.5)
+        self.swiglu_limit = getattr(config, "swiglu_limit", None)
 
         self.ep_group = get_ep_group().device_group
         self.ep_rank = get_ep_group().rank_in_group
@@ -280,6 +282,7 @@ class DeepseekV4MoE(nn.Module):
                 hidden_size=config.hidden_size,
                 intermediate_size=intermediate_size,
                 hidden_act=config.hidden_act,
+                swiglu_limit=self.swiglu_limit,
                 quant_config=quant_config,
                 is_sequence_parallel=self.is_sequence_parallel,
                 reduce_results=False,
@@ -496,7 +499,7 @@ class Compressor(nn.Module):
             self.dim,
             self.coff * self.head_dim,
             bias=False,
-            quant_config=quant_config,
+            quant_config=None if get_ascend_device_type() in {AscendDeviceType.A5} else quant_config,
             prefix=f"{prefix}.wkv",
             return_bias=False,
         )
@@ -504,11 +507,14 @@ class Compressor(nn.Module):
             self.dim,
             self.coff * self.head_dim,
             bias=False,
-            quant_config=quant_config,
+            quant_config=None if get_ascend_device_type() in {AscendDeviceType.A5} else quant_config,
             prefix=f"{prefix}.wgate",
             return_bias=False,
         )
-        self.norm = RMSNorm(self.head_dim, config.rms_norm_eps)
+
+        # A5 compressor kernel needs float for norm_weight input
+        norm_dtype = torch.float32 if get_ascend_device_type() == AscendDeviceType.A5 else None
+        self.norm = RMSNorm(self.head_dim, config.rms_norm_eps, dtype=norm_dtype)
 
         state_dtype = torch.float32
         # TODO(zyj): change following codes if block_size is configurable & refactor the magic numbers
@@ -526,7 +532,7 @@ class Compressor(nn.Module):
                 dtype=state_dtype,
                 compress_ratio=compress_ratio,
                 prefix=f"{prefix}.state_cache",
-                block_size=32,
+                block_size=16 if get_ascend_device_type() in {AscendDeviceType.A5} else 32,
             )
         else:
             raise ValueError(
@@ -619,6 +625,7 @@ class DeepseekV4Attention(nn.Module):
             return_bias=False,
         )
         self.q_norm = RMSNorm(self.q_lora_rank, eps=config.rms_norm_eps)
+        self.q_norm_without_weight = RMSNorm(self.head_dim, eps=config.rms_norm_eps, has_weight=False)
         wq_b_cls = ReplicatedLinear if self.enable_dsa_cp else ColumnParallelLinear
         self.wq_b = wq_b_cls(
             self.q_lora_rank,
@@ -722,6 +729,7 @@ class DeepseekV4Attention(nn.Module):
         dsa_modules = DSAModules(
             wq_a=self.wq_a,
             q_norm=self.q_norm,
+            q_norm_without_weight=self.q_norm_without_weight,
             wq_b=self.wq_b,
             wkv=self.wkv,
             kv_norm=self.kv_norm,
@@ -1213,6 +1221,8 @@ class AscendDeepseekV4ForCausalLM(nn.Module, SupportsPP, DeepseekV2MixtureOfExpe
                 name = name.replace(".ffn_norm.", ".post_attention_layernorm.")
             if ".attn_norm." in name:
                 name = name.replace(".attn_norm.", ".input_layernorm.")
+            if name.endswith(".scale"):
+                name = name.replace(".scale", ".weight_scale")
 
             if "rotary_emb.inv_freq" in name:
                 continue

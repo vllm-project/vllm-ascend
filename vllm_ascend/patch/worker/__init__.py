@@ -46,9 +46,6 @@ else:
     import vllm_ascend.patch.worker.patch_idex_310  # noqa
 import vllm_ascend.patch.worker.patch_rejection_sampler  # noqa
 
-# TODO(MengqingCao): remove after the upstream community is modified
-import vllm_ascend.patch.worker.patch_llama_eagle3  # noqa
-
 # torchair/npugraph_ex is only available on NPU; silently skip when missing
 # so that CPU-only environments (e.g. UT runners without torch_npu) can still
 # import this module without crashing.
