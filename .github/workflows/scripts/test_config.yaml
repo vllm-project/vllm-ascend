@@ -801,6 +801,7 @@ estimated_times:
   tests/ut/quantization/methods/a2/test_w8a8_static.py: 40
   tests/ut/sample/a2/test_gumbel_sampling.py: 80
   tests/ut/spec_decode/a2/test_eagle_proposer.py: 50
+  tests/ut/spec_decode/a2/test_sliding_window_block_table.py: 50
   tests/ut/worker/a2/test_block_table.py: 30
   tests/ut/worker/a2/test_kvcomp_utils.py: 40
   tests/ut/worker/a2/test_model_runner_v1.py: 30

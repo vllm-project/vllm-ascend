@@ -55,6 +55,7 @@ from vllm_ascend.distributed.parallel_state import get_lmhead_tp_group
 from vllm_ascend.models.llama_eagle3_vwn import Eagle3VwnLlamaForCausalLM
 from vllm_ascend.ops.triton.spec_decode.utils import prepare_inputs_padded_kernel
 from vllm_ascend.ops.triton.triton_utils import get_vectorcore_num
+from vllm_ascend.spec_decode.utils import compute_sliding_window_block_table
 from vllm_ascend.utils import enable_sp, lmhead_tp_enable, shared_expert_dp_enabled, vllm_version_is
 
 if not vllm_version_is("0.23.0"):
@@ -284,6 +285,37 @@ class AscendSpecDecodeBaseProposer(SpecDecodeBaseProposer):
         self.token_arange_np = np.arange(self.max_num_tokens + 1, dtype=np.int32)
         self.enable_enpu = self.runner.enable_enpu
         self.use_eagle = self.runner.use_eagle
+        # Sliding window attention for draft model
+        draft_window_size = getattr(self.speculative_config, "draft_window_size", None)
+        if draft_window_size is None and self.vllm_config.additional_config:
+            draft_window_size = self.vllm_config.additional_config.get("draft_window_size")
+        if isinstance(draft_window_size, int):
+            self.draft_window_size: int | None = int(draft_window_size)
+            self.block_size = self.runner.block_size
+            self.window_blocks = (self.draft_window_size + self.block_size - 1) // self.block_size
+            # max needed blocks is window_blocks + 1 because tokens_to_cover can be
+            # up to W + B (when start_tokens is just inside a new block boundary)
+            self.max_window_blocks = self.window_blocks + 1
+            self._sliding_window_full_block_table: torch.Tensor | None = None
+            self._sliding_window_block_table_clone = torch.zeros(
+                (self.runner.max_num_reqs, self.max_window_blocks),
+                dtype=torch.int32,
+                device=self.device,
+            )
+        else:
+            self.draft_window_size = None
+            
+    def _raise_if_padded_drafter_batch_disabled_and_full_graph_enabled(self):
+        if (
+            self.speculative_config.disable_padded_drafter_batch
+            and self.use_cuda_graph
+            and self.compilation_config.cudagraph_mode.has_full_cudagraphs()
+        ):
+            raise NotImplementedError(
+                "Speculative Decoding with cudagraph mode containing full cudagraphs only "
+                "supports padded drafter batch. Please unset "
+                "disable_padded_drafter_batch in the speculative_config."
+            )
 
     def _raise_if_padded_drafter_batch_disabled_and_full_graph_enabled(self):
         if (
@@ -296,6 +328,26 @@ class AscendSpecDecodeBaseProposer(SpecDecodeBaseProposer):
                 "supports padded drafter batch. Please unset "
                 "disable_padded_drafter_batch in the speculative_config."
             )
+
+        # Sliding window attention for draft model
+        draft_window_size = getattr(self.speculative_config, "draft_window_size", None)
+        if draft_window_size is None and self.vllm_config.additional_config:
+            draft_window_size = self.vllm_config.additional_config.get("draft_window_size")
+        if isinstance(draft_window_size, int):
+            self.draft_window_size: int | None = int(draft_window_size)
+            self.block_size = self.runner.block_size
+            self.window_blocks = (self.draft_window_size + self.block_size - 1) // self.block_size
+            # max needed blocks is window_blocks + 1 because tokens_to_cover can be
+            # up to W + B (when start_tokens is just inside a new block boundary)
+            self.max_window_blocks = self.window_blocks + 1
+            self._sliding_window_full_block_table: torch.Tensor | None = None
+            self._sliding_window_block_table_clone = torch.zeros(
+                (self.runner.max_num_reqs, self.max_window_blocks),
+                dtype=torch.int32,
+                device=self.device,
+            )
+        else:
+            self.draft_window_size = None
 
     def _get_model(self) -> nn.Module:
         """
@@ -631,6 +683,10 @@ class AscendSpecDecodeBaseProposer(SpecDecodeBaseProposer):
                 # update long_seq related params and flatten block_table
                 common_attn_metadata.prefill_context_parallel_metadata = self.runner.pcp_manager.long_seq_metadata
 
+            # Apply sliding window for graph capture so shapes match runtime
+            if self.draft_window_size is not None:
+                self._apply_sliding_window(common_attn_metadata, self.runner.seq_lens[:num_reqs].clone())
+
             assert len(self.draft_attn_groups) > 0
             builder = self.draft_attn_groups[0].get_metadata_builder()
             kv_cache_spec = self.draft_attn_groups[0].kv_cache_spec
@@ -737,6 +793,58 @@ class AscendSpecDecodeBaseProposer(SpecDecodeBaseProposer):
         if forward_context.cudagraph_runtime_mode == CUDAGraphMode.FULL:
             self._update_full_graph_params(forward_context, num_input_tokens, multi_steps_attn_metadata)
 
+    def _apply_sliding_window(self, common_attn_metadata, full_seq_lens):
+        """Apply sliding window to draft model attention metadata.
+
+        Limits the draft model's attention to the most recent W tokens by
+        cropping block_table_tensor and clamping seq_lens. The original full
+        block table is saved so that slot-mapping (KV-cache write indices)
+        can still use the full KV cache.
+        """
+        if self.draft_window_size is None:
+            return
+        full_block_table = common_attn_metadata.block_table_tensor
+        num_reqs = full_seq_lens.shape[0]
+
+        # Compute the cropped window block table into the pre-allocated stable
+        # buffer. The helper is fully vectorized (no .item() / host sync) and
+        # writes in place, so the resulting block_table data_ptr is identical
+        # across ACL graph capture (dummy_run) and replay (_propose).
+        compute_sliding_window_block_table(
+            full_block_table,
+            full_seq_lens,
+            num_speculative_tokens=self.num_speculative_tokens,
+            window_size=self.draft_window_size,
+            block_size=self.block_size,
+            max_window_blocks=self.max_window_blocks,
+            out=self._sliding_window_block_table_clone,
+        )
+        # offset-0 view -> same data_ptr as the stable buffer
+        window_block_table = self._sliding_window_block_table_clone[:num_reqs]
+
+        # Save the original (full) block table for slot-mapping: KV writes must
+        # address absolute positions, not the cropped window table.
+        self._sliding_window_full_block_table = full_block_table
+
+        # Replace common_attn_metadata fields
+        common_attn_metadata.block_table_tensor = window_block_table
+        windowed_seq_lens = torch.min(full_seq_lens, torch.full_like(full_seq_lens, self.draft_window_size))
+        common_attn_metadata.seq_lens = windowed_seq_lens
+        # Sync CPU-side mirrors so attention backends on host see the same lengths
+        if getattr(common_attn_metadata, "seq_lens_cpu", None) is not None:
+            common_attn_metadata.seq_lens_cpu = windowed_seq_lens.cpu()
+        if getattr(common_attn_metadata, "_seq_lens_cpu", None) is not None:
+            common_attn_metadata._seq_lens_cpu = windowed_seq_lens.cpu().clone()
+        if getattr(common_attn_metadata, "seq_lens_cpu_upper_bound", None) is not None:
+            common_attn_metadata.seq_lens_cpu_upper_bound = windowed_seq_lens.cpu().clone()
+
+        # Pre-fill seq_lens_group for multi-step loop
+        for step in range(self.num_speculative_tokens):
+            current_len = full_seq_lens + step
+            windowed_len = torch.min(current_len, torch.full_like(current_len, self.draft_window_size))
+            self.seq_lens_group[step][:num_reqs].copy_(windowed_len)
+            self.seq_lens_group[step][num_reqs:].fill_(0)
+
     def _propose(
         self,
         # [num_tokens]
@@ -792,6 +900,11 @@ class AscendSpecDecodeBaseProposer(SpecDecodeBaseProposer):
             num_prefill_reqs=num_prefill_reqs,
             num_decode_reqs=num_decode_reqs,
         )
+
+        # Save original seq_lens and apply sliding window before any CP adjustments
+        full_seq_lens = common_attn_metadata.seq_lens.clone()
+        self._apply_sliding_window(common_attn_metadata, full_seq_lens)
+
         if self.pcp_size * self.dcp_size > 1:
             assert long_seq_args is not None
             query_lens_d, ori_token_indices_to_sample = long_seq_args
@@ -864,6 +977,18 @@ class AscendSpecDecodeBaseProposer(SpecDecodeBaseProposer):
                 # ``attn_update_stack_num_spec_norm`` don't double-count.
                 if common_attn_metadata._seq_lens_cpu is not None:
                     common_attn_metadata._seq_lens_cpu = common_attn_metadata.seq_lens_cpu.clone()
+                    # The lines above rebuild seq_lens / seq_lens_cpu from the
+                    # runner's un-windowed tensors (required for FULL-graph
+                    # padding), which discards the sliding-window clamp applied
+                    # by `_apply_sliding_window`. The draft's block_table stays
+                    # cropped to `max_window_blocks` columns, so the FIA kernel
+                    # — which reads `_seq_lens_cpu` -> `seq_lens_list` as the KV
+                    # length — must also be capped at `draft_window_size`, or it
+                    # reads far past the cropped table (OOB DDR read, ACL 507011)
+                    # on contexts longer than the window. `_seq_lens_cpu` is a
+                    # draft-local clone here, so clamping it is safe.
+                    if self.draft_window_size is not None:
+                        common_attn_metadata._seq_lens_cpu.clamp_(max=self.draft_window_size)
             if common_attn_metadata.num_computed_tokens_cpu is not None:
                 common_attn_metadata.num_computed_tokens_cpu = self._adjust_tensor(
                     common_attn_metadata.num_computed_tokens_cpu, num_reqs_padded
@@ -1734,7 +1859,12 @@ class AscendSpecDecodeBaseProposer(SpecDecodeBaseProposer):
         # operations in case they are modified in next step's `prepare_input`
         # of main model.
         # Increment the sequence lengths.
-        common_attn_metadata.seq_lens[:batch_size] += 1
+        if self.draft_window_size is not None:
+            new_lens = common_attn_metadata.seq_lens[:batch_size] + 1
+            new_lens.clamp_(max=self.draft_window_size)
+            common_attn_metadata.seq_lens[:batch_size] = new_lens
+        else:
+            common_attn_metadata.seq_lens[:batch_size] += 1
         # For the requests that exceed the max model length, we set the
         # sequence length to 1 to minimize their overheads in attention.
         exceeds_mask = common_attn_metadata.seq_lens[:batch_size] > self.max_model_len
@@ -1747,6 +1877,8 @@ class AscendSpecDecodeBaseProposer(SpecDecodeBaseProposer):
             common_attn_metadata._seq_lens_cpu[:batch_size] = common_attn_metadata._seq_lens_cpu[:batch_size] + 1
             exceeds_mask_internal_cpu = common_attn_metadata._seq_lens_cpu[:batch_size] > self.max_model_len
             common_attn_metadata._seq_lens_cpu[:batch_size].masked_fill_(exceeds_mask_internal_cpu, 1)
+            if self.draft_window_size is not None:
+                common_attn_metadata._seq_lens_cpu[:batch_size].clamp_(max=self.draft_window_size)
         if common_attn_metadata.num_computed_tokens_cpu is not None:
             common_attn_metadata.num_computed_tokens_cpu[:batch_size] += 1
         if self.uses_mrope:
@@ -1777,11 +1909,19 @@ class AscendSpecDecodeBaseProposer(SpecDecodeBaseProposer):
                 block_size = 128
 
             # Compute the slot mapping.
+            # When sliding window is enabled, block_table_tensor may be cropped
+            # for attention, but slot mapping needs the full block table to
+            # address the absolute KV cache positions.
+            if self.draft_window_size is not None and self._sliding_window_full_block_table is not None:
+                block_table_for_slot = self._sliding_window_full_block_table
+            else:
+                block_table_for_slot = old_common_metadata.block_table_tensor
+
             if self.uses_mrope:
                 block_numbers = clamped_positions[0] // block_size
             else:
                 block_numbers = clamped_positions // block_size
-            block_ids = old_common_metadata.block_table_tensor.gather(dim=1, index=block_numbers.view(-1, 1))
+            block_ids = block_table_for_slot.gather(dim=1, index=block_numbers.view(-1, 1))
             block_ids = block_ids.view(-1)
             if self.uses_mrope:
                 slot_mapping = block_ids * block_size + clamped_positions[0] % block_size
