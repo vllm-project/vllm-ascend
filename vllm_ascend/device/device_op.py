@@ -498,7 +498,7 @@ class BaseDeviceAdaptor:
     @staticmethod
     def get_dsa_kernel_block_sizes():
         """Non-A5: return supported kernel block sizes."""
-        return [8, 32, 128]
+        return [2, 4, 8, 16, 32, 64, 128]
 
     @staticmethod
     def chunk_scaled_dot_kkt_fwd(NT, k, beta, g_cumsum, A, cu_seqlens, chunk_indices, T, B, H, Hg, K, BT, BK):
@@ -1101,7 +1101,7 @@ class A5DeviceAdaptor(BaseDeviceAdaptor):
     @staticmethod
     def get_dsa_kernel_block_sizes():
         """A5: return supported kernel block sizes."""
-        return [8, 16, 128]
+        return [2, 4, 8, 16, 32, 64, 128]
 
     def npu_flash_attention(query, key, value, seq_lens_cpu, head_num, scale_value, num_kv_heads):
         seq_lens_cpu = list(seq_lens_cpu.cumsum(0))
