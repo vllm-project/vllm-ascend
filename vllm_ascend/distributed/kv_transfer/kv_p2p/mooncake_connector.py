@@ -804,37 +804,41 @@ class KVCacheRecvingThread(threading.Thread):
         """
         Fix the memory layout of specific KV cache blocks in-place.
         Rearranges per-block data from head-major to token-major.
+
+        After RDMA transfer, each block's memory is head-major::
+
+            [h0_t0..h0_t{bs-1} | h1_t0..h1_t{bs-1} | ...
+
+        But the D-side tensor stride [num_heads*hd, hd, 1] expects
+        token-major layout::
+
+            [t0_h0, t0_h1, ... | t1_h0, t1_h1, ... | ...]
+
+        Strategy: view the contiguous block data as [num_heads, bs, hd]
+        to match the head-major memory layout, then transpose(0,1) and
+        contiguous to produce the token-major layout.
+
+        NOTE: .view(num_heads, bs, -1) reads the underlying memory in
+        natural (head-major) order on a contiguous tensor — the first
+        bs*hd elements ARE head0, next bs*hd are head1, etc.  This is
+        the correct interpretation of the RDMA-written data.
         """
         block_size = self.block_size
         num_heads = self.num_kv_heads
-        head_dim = self.k_head_dim
 
         for block_id in flat_block_ids:
             k_block = k_cache_layer[block_id]
             v_block = v_cache_layer[block_id]
 
-            # Current memory layout per block (head-major after RDMA):
-            #   [h0_t0..h0_t{bs-1} | h1_t0..h1_t{bs-1} | ...]
-            #
-            # Desired layout (token-major for correct stride access):
-            #   [t0_h0, t0_h1, ... | t1_h0, t1_h1, ... | ...]
-            #
-            # Strategy: view as [tp_num_need_pulls, block_size, head_dim],
-            # then transpose(0,1) → [block_size, tp_num_need_pulls, head_dim].
-
             k_fixed = (
-                k_block.flatten()
-                .view(tp_num_need_pulls, block_size, -1)
-                .transpose(0, 1)
-                .contiguous()
-                .reshape(block_size, num_heads, -1)
+                k_block.view(num_heads, block_size, -1)    # [nh, bs, hd]  ← head-major match
+                .transpose(0, 1)                            # [bs, nh, hd]
+                .contiguous()                               # token-major in memory
             )
             v_fixed = (
-                v_block.flatten()
-                .view(tp_num_need_pulls, block_size, -1)
+                v_block.view(num_heads, block_size, -1)
                 .transpose(0, 1)
                 .contiguous()
-                .reshape(block_size, num_heads, -1)
             )
 
             k_cache_layer[block_id].copy_(k_fixed)
