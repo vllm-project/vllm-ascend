@@ -314,9 +314,6 @@ def get_linear_quant_type(
             prefix.replace(proj_name, shard_proj_name) for shard_proj_name in packed_modules_mapping[proj_name]
         ]
         for shard_prefix in shard_prefixes:
-            if (shard_prefix + ".weight") not in quant_description.keys():
-                print(f"============> shard_prefix {shard_prefix}")
-                continue
             shard_quant_type = quant_description[shard_prefix + ".weight"]
 
             if quant_type is None:
@@ -330,10 +327,7 @@ def get_linear_quant_type(
                 logger.error(err_msg)
                 raise ValueError(err_msg)
     else:
-        if (prefix + ".weight") in quant_description.keys():
-            quant_type = quant_description[prefix + ".weight"]
-        else:
-            quant_type = quant_description[list(quant_description.keys())[0]]
+        quant_type = quant_description[prefix + ".weight"]
     return quant_type
 
 
