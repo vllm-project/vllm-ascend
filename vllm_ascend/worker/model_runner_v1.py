@@ -2653,8 +2653,6 @@ class NPUModelRunner(GPUModelRunner):
         if lmhead_tp_enable() and logits is not None:
             logits = logits[: self.input_batch.num_reqs]
         max_topk = sampling_state.non_spec_max_topk
-        if max_topk is None and sampling_metadata.top_k is not None and get_ascend_config().enable_reduce_sample:
-            max_topk = self.input_batch.top_k_cpu[self.input_batch.top_k_cpu < logits.shape[1]].max()
         with self._configure_non_spec_sampler(max_topk):
             return self.sampler(
                 logits=logits,
@@ -2696,8 +2694,6 @@ class NPUModelRunner(GPUModelRunner):
             logits = logits[: len(spec_decode_metadata.logits_indices)]
         if spec_sampling_state is not None:
             max_topk = spec_sampling_state.max_topk
-        elif sampling_metadata.top_k is not None and get_ascend_config().enable_reduce_sample:
-            max_topk = self.input_batch.top_k_cpu[self.input_batch.top_k_cpu < logits.shape[1]].max()
         random_tensors = spec_sampling_state.random_tensors if spec_sampling_state is not None else None
         if random_tensors is None:
             random_tensors = self._prepare_spec_sampling_random_tensors(
