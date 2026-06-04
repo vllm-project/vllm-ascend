@@ -30,7 +30,9 @@ class MemcacheBackend(Backend):
             self.store = DistributedObjectStore()
             res = self.store.init(self.rank)
             if res != 0:
-                raise RuntimeError(f"Failed to initialize DistributedObjectStore, error code: {res}")
+                raise RuntimeError(
+                    f"Failed to initialize DistributedObjectStore, error code: {res}"
+                )
         except ValueError as e:
             logger.error("Configuration loading failed: %s", e)
             raise

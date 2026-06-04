@@ -583,6 +583,7 @@ class AscendScheduler(Scheduler):
         extra_args = request.sampling_params.extra_args or {}
         if extra_args.get(
                 "request_stage") != RequestStage.Decode.value:
+            return False
 
         assert self.connector is not None
         if request.request_id not in self.finished_recving_kv_req_ids:

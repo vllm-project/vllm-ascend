@@ -359,7 +359,6 @@ class MooncakeEngine:
                 starts, ends = get_start_end(len(request.token_ids),
                                              self.block_size)
                 for start, end in zip(starts, ends):
-                for start, end in zip(starts, ends):
                     addr, size = self.kv_recv_thread.prepare_value_layer(
                         start, end, request.block_ids, layer_id)
                     addrs += addr

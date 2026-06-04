@@ -219,9 +219,10 @@ class MooncakeStoreConnectorV1Scheduler:
             "backend", "mooncake")
         backend_cls = backend_map.get(self.backend.lower())
         if backend_cls is None:
-            raise ValueError(f"Unsupported backend: {self.backend}. Supported backends are: {list(backend_map.keys())}")
-        self.m_store = backend_cls(
-            vllm_config.parallel_config)
+            raise ValueError(
+                f"Unsupported backend: {self.backend}. Supported backends are: {list(backend_map.keys())}"
+            )
+        self.m_store = backend_cls(vllm_config.parallel_config)
         self.history_token_ids = torch.zeros(
             (vllm_config.scheduler_config.max_model_len),
             dtype=torch.int64).to(vllm_config.device_config.device)

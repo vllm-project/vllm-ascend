@@ -252,6 +252,7 @@ class KVCacheStoreLayerSendingThread(KVTransferThread):
 
     def add_request(  # type: ignore[override]
             self, req_meta: LasyerMultiBlockReqMeta) -> None:
+        self.request_queue.put(req_meta)
 
     def _handle_request(  # type: ignore[override]
             self, req_meta: LasyerMultiBlockReqMeta):
