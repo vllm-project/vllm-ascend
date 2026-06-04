@@ -79,9 +79,6 @@ from vllm.v1.outputs import (
     SamplerOutput,
     make_empty_encoder_model_runner_output,
 )
-from vllm.v1.worker.utils import select_common_block_size
-
-from vllm_ascend.utils import AscendDeviceType, get_ascend_device_type, vllm_version_is
 from vllm.v1.sample.logits_processor import build_logitsprocs
 from vllm.v1.sample.metadata import SamplingMetadata
 from vllm.v1.sample.rejection_sampler import RejectionSampler
@@ -98,7 +95,7 @@ from vllm.v1.worker.ubatch_utils import (
     UBatchSlices,
     maybe_create_ubatch_slices,
 )
-from vllm.v1.worker.utils import AttentionGroup
+from vllm.v1.worker.utils import AttentionGroup, select_common_block_size
 
 # yapf: enable
 from vllm_ascend.ascend_config import get_ascend_config
@@ -138,10 +135,12 @@ from vllm_ascend.spec_decode.ngram_proposer_npu import AscendNgramProposerNPU
 from vllm_ascend.spec_decode.suffix_proposer import AscendSuffixDecodingProposer
 from vllm_ascend.spec_decode.utils import update_num_computed_tokens_for_batch_change
 from vllm_ascend.utils import (
+    AscendDeviceType,
     calc_split_factor,
     check_gdn_layer,
     enable_sp,
     enable_sp_by_pass,
+    get_ascend_device_type,
     get_c_env,
     get_compressed_pos_and_indices,
     global_stream,
@@ -149,6 +148,7 @@ from vllm_ascend.utils import (
     lmhead_tp_enable,
     set_weight_prefetch_method,
     should_skip_allreduce_across_dp_group,
+    vllm_version_is,
 )
 from vllm_ascend.worker.npu_input_batch import NPUInputBatch
 from vllm_ascend.worker.pcp_utils import PCPManager
@@ -2202,10 +2202,7 @@ class NPUModelRunner(GPUModelRunner):
         )
 
         if vllm_version_is("0.21.0") and self.routed_experts_initialized:
-            issue_routing_d2h_copy = getattr(
-                routed_experts_capturer,
-                "issue_routing_d2h_copy",
-            )
+            issue_routing_d2h_copy = routed_experts_capturer.issue_routing_d2h_copy
             issue_routing_d2h_copy(
                 input_batch_req_ids=self.input_batch.req_ids,
                 num_scheduled_tokens=scheduler_output.num_scheduled_tokens,
@@ -2270,10 +2267,7 @@ class NPUModelRunner(GPUModelRunner):
             and self.routed_experts_initialized
         ):
             if vllm_version_is("0.21.0"):
-                extract_routed_experts = getattr(
-                    routed_experts_capturer,
-                    "extract_routed_experts_for_current_batch",
-                )
+                extract_routed_experts = routed_experts_capturer.extract_routed_experts_for_current_batch
                 routed_experts_dict = extract_routed_experts(
                     req_ids=req_ids_output_copy,
                     requests=self.requests,
@@ -2282,10 +2276,7 @@ class NPUModelRunner(GPUModelRunner):
                     max_model_len=self.max_model_len,
                 )
             else:
-                routed_experts_lists_cls = getattr(
-                    vllm_outputs,
-                    "RoutedExpertsLists",
-                )
+                routed_experts_lists_cls = vllm_outputs.RoutedExpertsLists
                 buf = self.routed_experts_capturer.get_device_buffer()
                 total = scheduler_output.total_num_scheduled_tokens
                 self.routed_experts_cpu[:total].copy_(buf[:total], non_blocking=True)
