@@ -99,9 +99,9 @@ jobs:
       max-parallel: 6
       matrix:
         branch_meta:
-          - branch_ref: releases/v0.20.2rc
-            schedule_tag_pattern: releases-v0.20.2rc
-            artifact_prefix: digests-releases-v0.20.2rc
+          - branch_ref: main
+            schedule_tag_pattern: main
+            artifact_prefix: digests
         build_meta:
           - name: A2 Ubuntu
             dockerfile: Dockerfile
