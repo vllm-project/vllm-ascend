@@ -150,7 +150,6 @@ class MoECommMethod(ABC):
         if fused_experts_input.lora_context is not None:
             lora_params = self._build_lora_params(
                 fused_experts_input=fused_experts_input,
-                routed_topk_ids=routed_topk_ids,
                 token_dispatch_output=token_dispatch_output,
             )
 
@@ -185,7 +184,6 @@ class MoECommMethod(ABC):
     def _build_lora_params(
         self,
         fused_experts_input: MoEFusedExpertsInput,
-        routed_topk_ids: torch.Tensor,
         token_dispatch_output: MoETokenDispatchOutput,
     ):
         from vllm_ascend.lora.moe_lora_ops import _build_lora_expert_indices
@@ -205,10 +203,12 @@ class MoECommMethod(ABC):
         if isinstance(combine_metadata, MoEAllGatherCombineMetadata):
             # AllGather: dispatch output is grouped by expert
             # Tokens are not split across TP ranks; use full token_lora_indices.
+            # Use the original logical topk_ids (before log2phy) because
+            # LoRA weights are stored in logical expert order.
             lora_expert_indices = _build_lora_expert_indices(
                 lora_indices=lora_context.punica_wrapper.token_lora_indices,
                 expanded_row_idx=combine_metadata.expanded_row_idx,
-                topk_ids=routed_topk_ids,
+                topk_ids=fused_experts_input.topk_ids,
                 num_experts=lora_context.num_experts,
             )
         elif isinstance(combine_metadata, MoEAllToAllCombineMetadata):
@@ -221,13 +221,15 @@ class MoECommMethod(ABC):
             if lora_indices is None:
                 # Fallback (known to be incorrect for AlltoAll + TP>1).
                 lora_indices = lora_context.punica_wrapper.token_lora_indices
-            # routed_topk_ids contains GLOBAL expert IDs (0..global_E-1)
-            # but the LoRA buffers are indexed by LOCAL expert position
-            # (0..local_E-1).  Convert global → local.
+            # Use the original logical topk_ids (before log2phy) because
+            # LoRA weights are stored in logical expert order.
+            # These contain GLOBAL expert IDs (0..global_E-1) but the LoRA
+            # buffers are indexed by LOCAL expert position (0..local_E-1).
+            # Convert global → local.
             from vllm.distributed.parallel_state import get_ep_group
             ep_rank = get_ep_group().rank_in_group
             local_expert_offset = ep_rank * lora_context.num_experts
-            local_topk_ids = routed_topk_ids - local_expert_offset
+            local_topk_ids = fused_experts_input.topk_ids - local_expert_offset
             lora_expert_indices = _build_lora_expert_indices(
                 lora_indices=lora_indices,
                 expanded_row_idx=combine_metadata.reversed_global_input_permutation_mapping,
