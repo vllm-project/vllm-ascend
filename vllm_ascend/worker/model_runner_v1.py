@@ -251,6 +251,7 @@ class SamplingExecutionState:
     non_spec_max_topk: int | None
     spec_sampling_state: "SpecSamplingExecutionState | None"
     output_token_ids_enabled: bool
+    req_ids_snapshot: list[str]
 
 
 @dataclass
@@ -1684,6 +1685,7 @@ class NPUModelRunner(GPUModelRunner):
         self,
         scheduler_output: "SchedulerOutput",
         output_token_ids_enabled: bool,
+        req_ids_snapshot: list[str],
         zeros_only: bool = False,
     ) -> None:
         if not self.num_spec_tokens:
@@ -1693,7 +1695,7 @@ class NPUModelRunner(GPUModelRunner):
             or output_token_ids_enabled
         ):
             return
-        self._draft_token_req_ids = self.input_batch.req_ids.copy()
+        self._draft_token_req_ids = req_ids_snapshot.copy()
 
         draft_token_ids: torch.Tensor = self._draft_token_ids  # type: ignore[has-type]
         if not torch.is_tensor(draft_token_ids):
@@ -2615,6 +2617,7 @@ class NPUModelRunner(GPUModelRunner):
             non_spec_max_topk=self._prepare_non_spec_max_topk(logits, sampling_metadata),
             spec_sampling_state=self._prepare_spec_sampling_state(logits, spec_decode_metadata, sampling_metadata),
             output_token_ids_enabled=bool(sampling_metadata.output_token_ids),
+            req_ids_snapshot=self.input_batch.req_ids.copy(),
         )
 
     def _build_execute_model_state(
@@ -2790,6 +2793,7 @@ class NPUModelRunner(GPUModelRunner):
             self._copy_draft_token_ids_to_cpu(
                 scheduler_output,
                 sampling_state.output_token_ids_enabled,
+                sampling_state.req_ids_snapshot,
             )
 
         if use_padded_batch:
@@ -2815,6 +2819,7 @@ class NPUModelRunner(GPUModelRunner):
                     self._copy_draft_token_ids_to_cpu(
                         scheduler_output,
                         sampling_state.output_token_ids_enabled,
+                        sampling_state.req_ids_snapshot,
                         zeros_only=True,
                     )
         elif input_fits_in_drafter:
