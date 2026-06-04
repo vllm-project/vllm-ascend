@@ -718,14 +718,14 @@ class KVCacheRecvingThread(threading.Thread):
             need_cat_cache, need_nz_cache, use_fused_op, custom_op_ok, is_kv_transfer_end,
         )
         if need_nz_cache or need_cat_cache:
-            # use fused op to reformat kv cache, we keep original implementation to provide ability to disable it.
-            if use_fused_op and enable_custom_op():
-                if need_cat_cache:
-                    # the fused op only support cat GQA/MHA kv cache by head
-                    self.reformat_kv_cache_with_fused_op(grouped_local_block_ids, tp_num_need_pulls)
-                if need_nz_cache:
-                    # maybe use fused op to reformat kv nz too in the future.
-                    self.reformat_kv_cache(grouped_local_block_ids, tp_num_need_pulls, False, need_nz_cache)
+            # Always use the software path for GQA head layout rearrangement
+            # (_fix_block_layout in-place).  The fused C++ op
+            # (transpose_kv_cache_by_block) may have parameterization issues
+            # (e.g. num_kv_head mismatch) for asymmetric TP configurations.
+            #
+            # The fused op is still available for the NZ path when enabled.
+            if need_nz_cache and not need_cat_cache and use_fused_op and enable_custom_op():
+                self.reformat_kv_cache(grouped_local_block_ids, tp_num_need_pulls, False, need_nz_cache)
             else:
                 self.reformat_kv_cache(grouped_local_block_ids, tp_num_need_pulls, need_cat_cache, need_nz_cache)
 
@@ -1126,7 +1126,7 @@ class MooncakeConnectorScheduler:
         # Handshake base port
         self.side_channel_port = (
             vllm_config.kv_transfer_config.kv_port
-            + vllm_config.parallel_config.data_parallel_rank
+            + vllm_config.parallel_config.data_parallel_index
             * vllm_config.parallel_config.tensor_parallel_size
             * vllm_config.parallel_config.pipeline_parallel_size
             * self.pcp_size
@@ -1333,7 +1333,7 @@ class MooncakeConnectorWorker:
         # Handshake base port
         self.side_channel_port = (
             vllm_config.kv_transfer_config.kv_port
-            + vllm_config.parallel_config.data_parallel_rank
+            + vllm_config.parallel_config.data_parallel_index
             * vllm_config.parallel_config.tensor_parallel_size
             * vllm_config.parallel_config.pipeline_parallel_size
             * self.pcp_size

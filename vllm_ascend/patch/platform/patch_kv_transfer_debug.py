@@ -21,6 +21,7 @@ logger = init_logger("vllm_kv_debug")
 
 # ---------------------------------------------------------------------------
 # 1. Worker handshake metadata  — called from every GPU worker
+#    (upstream gpu_worker.Worker)
 # ---------------------------------------------------------------------------
 import vllm.v1.worker.gpu_worker as _gpu_worker
 
@@ -49,6 +50,41 @@ def _debug_worker_meta(self):
 
 
 _gpu_worker.Worker.get_kv_connector_handshake_metadata = _debug_worker_meta
+
+
+# ---------------------------------------------------------------------------
+# 1b. Ascend NPUWorker handshake metadata  — separate class, not subclassed
+#     from gpu_worker.Worker, so we patch it independently.
+# ---------------------------------------------------------------------------
+try:
+    import vllm_ascend.worker.worker as _npu_worker
+
+    _orig_npu_meta = _npu_worker.NPUWorker.get_kv_connector_handshake_metadata
+
+    def _debug_npu_worker_meta(self):
+        result = _orig_npu_meta(self)
+        if result is not None:
+            from vllm.distributed.parallel_state import get_pp_group, get_tp_group
+            tp = get_tp_group()
+            pp = get_pp_group()
+            for key, meta in result.items():
+                logger.info(
+                    "KV_DEBUG npu_worker_meta: rank=%d local_rank=%d "
+                    "pp=%d/%d tp=%d/%d key=%s local_ip=%s engine_id=%s",
+                    self.rank, self.local_rank,
+                    pp.rank_in_group, pp.world_size,
+                    tp.rank_in_group, tp.world_size,
+                    key, getattr(meta, "local_ip", "?"),
+                    getattr(meta, "engine_id", "?"),
+                )
+        else:
+            logger.info("KV_DEBUG npu_worker_meta: rank=%d -> None", self.rank)
+        return result
+
+    _npu_worker.NPUWorker.get_kv_connector_handshake_metadata = _debug_npu_worker_meta
+    logger.info("KV_DEBUG: Ascend NPUWorker metadata patched")
+except Exception:
+    logger.info("KV_DEBUG: Ascend NPUWorker not available, skipping NPU patch")
 
 
 # ---------------------------------------------------------------------------
