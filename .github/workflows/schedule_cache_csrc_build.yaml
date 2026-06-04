@@ -62,11 +62,7 @@ jobs:
         id: generate
         run: |
           pip install pyyaml
-          if [[ "${{ github.event_name }}" == "push" ]]; then
-            matrix=$(python3 .github/workflows/scripts/generate_cache_matrix.py --branch-filter "${GITHUB_REF_NAME}")
-          else
-            matrix=$(python3 .github/workflows/scripts/generate_cache_matrix.py)
-          fi
+          matrix=$(python3 generate_cache_matrix.py)
           echo "matrix=$matrix" >> $GITHUB_OUTPUT
 
   # -------------------------------------------------------------------------
@@ -158,7 +154,7 @@ jobs:
           # (does not append to) the env var and would drop the ascend repo.
           uv pip install -r requirements-dev.txt
           uv pip install --force-reinstall --no-deps triton-ascend==3.2.1
-          uv pip install -e .
+          uv pip install -e . --extra-index-url https://download.pytorch.org/whl/cpu
 
       - name: Save vllm-ascend csrc build cache
         if: success() && steps.restore-csrc-build-cache.outputs.cache-hit != 'true'
