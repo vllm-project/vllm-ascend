@@ -24,7 +24,7 @@ from vllm.v1.attention.backend import AttentionMetadata  # type: ignore
 
 from vllm_ascend.utils import enable_sp, vllm_version_is
 
-if vllm_version_is("0.20.2"):
+if vllm_version_is("0.21.0"):
     from vllm.model_executor.layers.mamba.gdn_linear_attn import (  # type: ignore[import-not-found]
         GatedDeltaNetAttention,
     )
