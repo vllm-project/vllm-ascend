@@ -30,6 +30,7 @@ from vllm_ascend.device.mxfp_compat import (
 from vllm_ascend.ops.triton.fla.chunk_scaled_dot_kkt import chunk_scaled_dot_kkt_fwd_kernel
 from vllm_ascend.ops.triton.fla.solve_tril import solve_tril_16x16_kernel
 from vllm_ascend.ops.triton.fused_gdn_gating import fused_gdn_gating_patch
+from vllm_ascend.ops.activation import swiglustep_and_mul
 from vllm_ascend.quantization.quant_type import QuantType
 from vllm_ascend.utils import AscendDeviceType, get_ascend_device_type
 
@@ -960,21 +961,39 @@ class A5DeviceAdaptor(BaseDeviceAdaptor):
                 clamp_value=swiglu_limit,
             )
         else:
-            out, out_scale = torch_npu.npu_grouped_matmul_swiglu_quant_v2(
-                x=x,
-                weight=[weight],
-                group_list=group_list,
-                weight_scale=[weight_scale],
-                x_scale=x_scale,
-                dequant_mode=2,
-                quant_mode=2,
-                dequant_dtype=torch.float32,
-                quant_dtype=act_quant_type,
-                x_dtype=act_quant_type if act_quant_type in QUANT_DTYPES else None,
-                weight_dtype=weight_quant_type if weight_quant_type in QUANT_DTYPES else None,
-                weight_scale_dtype=FLOAT8_E8M0FNU_DTYPE,
-                x_scale_dtype=FLOAT8_E8M0FNU_DTYPE,
-            )
+            if swiglu_limit == 0:
+                out, out_scale = torch_npu.npu_grouped_matmul_swiglu_quant_v2(
+                    x=x,
+                    weight=[weight],
+                    group_list=group_list,
+                    weight_scale=[weight_scale],
+                    x_scale=x_scale,
+                    dequant_mode=2,
+                    quant_mode=2,
+                    dequant_dtype=torch.float32,
+                    quant_dtype=act_quant_type,
+                    x_dtype=act_quant_type if act_quant_type in QUANT_DTYPES else None,
+                    weight_dtype=weight_quant_type if weight_quant_type in QUANT_DTYPES else None,
+                    weight_scale_dtype=FLOAT8_E8M0FNU_DTYPE,
+                    x_scale_dtype=FLOAT8_E8M0FNU_DTYPE,
+                )
+            else:
+                hidden_states = torch_npu.npu_grouped_matmul(
+                    x=[x],
+                    weight=[weight],
+                    scale=[weight_scale],
+                    scale_dtype=FLOAT8_E8M0FNU_DTYPE,
+                    bias=None,
+                    per_token_scale=[x_scale],
+                    per_token_scale_dtype=FLOAT8_E8M0FNU_DTYPE,
+                    split_item=2,
+                    group_type=0,
+                    group_list=group_list,
+                    output_dtype=torch.bfloat16,
+                )[0]
+                hidden_states = swiglustep_and_mul(hidden_states, limit=swiglu_limit)
+                out, out_scale = torch_npu.npu_dynamic_mx_quant(hidden_states, dst_type=act_quant_type)
+
         return out, A5DeviceAdaptor.maybe_normalize_mxfp_scale_layout(out_scale), None
 
     @staticmethod

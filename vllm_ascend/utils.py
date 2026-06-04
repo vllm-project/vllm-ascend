@@ -669,6 +669,7 @@ def register_ascend_customop(vllm_config: VllmConfig | None = None):
     from vllm_ascend.ops.rotary_embedding import (
         AscendApplyRotaryEmb,
         AscendDeepseekScalingRotaryEmbedding,
+        AscendLlama3RotaryEmbedding,
         AscendMRotaryEmbedding,
         AscendRotaryEmbedding,
         AscendYaRNRotaryEmbedding,
@@ -693,6 +694,7 @@ def register_ascend_customop(vllm_config: VllmConfig | None = None):
         "QKVParallelLinear": AscendQKVParallelLinear,
         "ReplicatedLinear": AscendReplicatedLinear,
         "DeepseekScalingRotaryEmbedding": AscendDeepseekScalingRotaryEmbedding,
+        "Llama3RotaryEmbedding": AscendLlama3RotaryEmbedding,
         "VocabParallelEmbedding": AscendVocabParallelEmbedding,
         "ParallelLMHead": AscendParallelLMHead,
         "LogitsProcessor": AscendLogitsProcessor,
@@ -1553,8 +1555,18 @@ def get_rope_dim(vllm_config):
         # For models using partial rope like Qwen3-Next.
         if hasattr(model_config.hf_text_config, "partial_rotary_factor"):
             rope_dim = int(rope_dim * model_config.hf_text_config.partial_rotary_factor)
-        elif hasattr(model_config.hf_text_config, "rotary_dim"):
-            rope_dim = int(model_config.hf_text_config.rotary_dim)
+        else:
+            partial_rotary_factors = getattr(model_config.hf_text_config, "partial_rotary_factors", None)
+            if partial_rotary_factors:
+                rope_dim = int(rope_dim * partial_rotary_factors[0])
+            elif hasattr(model_config.hf_text_config, "rotary_dim"):
+                rope_dim = int(model_config.hf_text_config.rotary_dim)
+            else:
+                rope_params = getattr(model_config.hf_text_config, "rope_parameters", None)
+                if isinstance(rope_params, dict):
+                    pr = rope_params.get("partial_rotary_factor")
+                    if pr is not None:
+                        rope_dim = int(rope_dim * pr)
 
     return rope_dim
 
