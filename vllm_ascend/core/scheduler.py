@@ -188,6 +188,8 @@ class AscendScheduler(Scheduler):
                 if extra_args.get(
                         "request_stage") == RequestStage.Decode.value:
                     candidate_num = extra_args.get("candidate_num", 0)
+                    if candidate_num is None:
+                        candidate_num = 0
                     if isinstance(candidate_num, list):
                         candidate_num = candidate_num[0] if candidate_num else 0
                     candidate_len = int(candidate_num)
