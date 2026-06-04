@@ -1721,7 +1721,7 @@ class MooncakeConnectorWorker:
         if not dummy_server_address:
             logger.warning("use_dummy_client=true but no dummy_server_address configured")
             return None
-        from mooncake.store import MooncakeDistributedStore
+        from mooncake.store import MooncakeDistributedStore  # type: ignore
 
         store = MooncakeDistributedStore()
         ret = store.setup_dummy(mem_pool_size=0, local_buffer_size=0, server_address=dummy_server_address)
