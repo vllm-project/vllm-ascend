@@ -68,6 +68,10 @@ class TestNPUPlatform(TestBase):
         self.assertEqual(NPUPlatform.simple_compile_backend, "eager")
         self.assertEqual(NPUPlatform.ray_device_key, "NPU")
         self.assertEqual(NPUPlatform.device_control_env_var, "ASCEND_RT_VISIBLE_DEVICES")
+        self.assertEqual(
+            NPUPlatform.ray_noset_device_env_vars,
+            ["RAY_EXPERIMENTAL_NOSET_ASCEND_RT_VISIBLE_DEVICES"],
+        )
         self.assertEqual(NPUPlatform.dispatch_key, "PrivateUse1")
         self.assertEqual(NPUPlatform.supported_quantization, [ASCEND_QUANTIZATION_METHOD, COMPRESSED_TENSORS_METHOD])
 
