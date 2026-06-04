@@ -138,6 +138,8 @@ class MooncakeUserStoreConnector(KVConnectorBase_V1):
     def save_kv_cache_by_layer(self, layer_id: int, kv_cache: torch.Tensor,
                                attn_metadata: "AttentionMetadata",
                                **kwargs) -> None:
+        if self.kv_role == "kv_consumer":
+            return
         self.connector_worker.save_kv_cache_by_layer(
             layer_id, kv_cache, attn_metadata, self._get_connector_metadata())
 
