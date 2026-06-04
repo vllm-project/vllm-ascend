@@ -26,6 +26,8 @@ from unittest.mock import patch
 
 import pytest
 
+from tests.e2e.conftest import wait_until_npu_memory_free
+
 MODELS = ["Qwen/Qwen3-30B-A3B"]
 REPO_ROOT = Path(__file__).resolve().parents[5]
 EXTERNAL_LAUNCHER_SCRIPT = REPO_ROOT / "examples" / "offline_external_launcher.py"
@@ -33,6 +35,7 @@ EXTERNAL_LAUNCHER_SCRIPT = REPO_ROOT / "examples" / "offline_external_launcher.p
 
 @pytest.mark.parametrize("model", MODELS)
 @patch.dict(os.environ, {"VLLM_ASCEND_ENABLE_NZ": "0"})
+@wait_until_npu_memory_free(0.7)
 def test_qwen3_offline_load_and_sleepmode_tp2(model):
     env = os.environ.copy()
     cmd = [
