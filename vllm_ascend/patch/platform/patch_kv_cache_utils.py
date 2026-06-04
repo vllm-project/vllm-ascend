@@ -37,23 +37,30 @@ from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.layerwise_config i
 )
 
 
-def get_kv_cache_reuse_layers(max_layers: int | None = None) -> int | None:
+def get_kv_cache_reuse_layers(
+    max_layers: int | None = None,
+    extra_config: dict | None = None,
+) -> int | None:
     """Return configured KV cache reuse slots, or None when disabled."""
     if max_layers is None:
         return None
-    reuse_layers = get_layerwise_kv_cache_reuse_layers(max_layers)
+    reuse_layers = get_layerwise_kv_cache_reuse_layers(
+        max_layers, extra_config)
     if reuse_layers is None:
         return None
     if max_layers is not None and reuse_layers > max_layers:
         raise ValueError(
-            "VLLM_ASCEND_KV_POOL_LAYERWISE_NUM_SHARED_BUFFERS must not exceed the number "
+            "layerwise_num_shared_buffers must not exceed the number "
             f"of KV cache layers, got {reuse_layers} > {max_layers}."
         )
     return reuse_layers
 
 
-def get_layerwise_storage_indices(num_layers: int) -> list[list[int]]:
-    layerwise_config = get_layerwise_config(num_layers)
+def get_layerwise_storage_indices(
+    num_layers: int,
+    extra_config: dict | None = None,
+) -> list[list[int]]:
+    layerwise_config = get_layerwise_config(num_layers, extra_config)
     if not layerwise_config.has_layer_reuse:
         return [[layer_index] for layer_index in range(num_layers)]
 
@@ -98,12 +105,14 @@ def get_kv_cache_config_from_groups(
         )
 
     # Determine how model runners should initialize the KV cache tensors.
+    extra_config = vllm_config.kv_transfer_config.kv_connector_extra_config
     if len(kv_cache_groups) == 1 and isinstance(kv_cache_groups[0].kv_cache_spec, UniformTypeKVCacheSpecs):
         # Special case: all layers have the same type of KV cache but with
         # different hidden size. Allocate different amount of memory for each
         # layer based on its hidden size.
         group = kv_cache_groups[0]
-        reuse_layers = get_kv_cache_reuse_layers(len(group.layer_names))
+        reuse_layers = get_kv_cache_reuse_layers(
+            len(group.layer_names), extra_config)
         per_layer_specs = group.kv_cache_spec.kv_cache_specs
 
         if reuse_layers is not None:
@@ -121,7 +130,7 @@ def get_kv_cache_config_from_groups(
             storage_slots = [
                 [group.layer_names[layer_index] for layer_index in indices]
                 for indices in get_layerwise_storage_indices(
-                    len(group.layer_names))
+                    len(group.layer_names), extra_config)
             ]
 
         page_size = sum(
@@ -149,9 +158,9 @@ def get_kv_cache_config_from_groups(
 
         page_size = get_uniform_page_size([group.kv_cache_spec for group in kv_cache_groups])
         assert group_size > 0, "group_size must be greater than 0"
-        reuse_layers = get_kv_cache_reuse_layers(group_size)
+        reuse_layers = get_kv_cache_reuse_layers(group_size, extra_config)
         storage_indices = (
-            get_layerwise_storage_indices(group_size)
+            get_layerwise_storage_indices(group_size, extra_config)
             if reuse_layers is not None
             else [[layer_index] for layer_index in range(group_size)]
         )
@@ -240,7 +249,8 @@ def get_kv_cache_configs(
 
     # Check if the available memory is enough per worker.
     total_layers = vllm_config.model_config.get_num_layers(vllm_config.parallel_config)
-    reuse_layers = get_kv_cache_reuse_layers(total_layers)
+    extra_config = vllm_config.kv_transfer_config.kv_connector_extra_config
+    reuse_layers = get_kv_cache_reuse_layers(total_layers, extra_config)
     for groups, avail_mem in zip(projected_groups_per_worker, available_memory):
         if not groups:
             continue

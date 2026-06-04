@@ -161,7 +161,9 @@ class KVPoolScheduler:
         self.model_name = model_config.model.split('/')[-1]
 
         if self.use_layerwise:
-            layerwise_config = get_layerwise_config(self.num_layers)
+            extra_config = vllm_config.kv_transfer_config.kv_connector_extra_config
+            layerwise_config = get_layerwise_config(
+                self.num_layers, extra_config)
             self.layerwise_offload = layerwise_config.has_layer_reuse
         else:
             self.layerwise_offload = False

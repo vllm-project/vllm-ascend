@@ -98,7 +98,8 @@ class AscendStoreConnector(KVConnectorBase_V1, SupportsHMA):
         if role == KVConnectorRole.SCHEDULER and self.use_gva_layerwise:
             num_layers = vllm_config.model_config.get_num_layers(
                 vllm_config.parallel_config)
-            if (get_layerwise_config(num_layers).has_layer_reuse
+            extra_config = vllm_config.kv_transfer_config.kv_connector_extra_config
+            if (get_layerwise_config(num_layers, extra_config).has_layer_reuse
                     and self.kv_role != "kv_producer"):
                 logger.warning(
                     "[KV POOL PERFORMANCE WARNING] Layerwise KV cache reuse "

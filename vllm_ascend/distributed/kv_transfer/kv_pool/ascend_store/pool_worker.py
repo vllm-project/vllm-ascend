@@ -122,6 +122,7 @@ class KVPoolWorker:
         self.dcp_rank = get_decode_context_model_parallel_rank() if self.dcp_size > 1 else 0
 
     def _init_kv_transfer_config(self, vllm_config, extra_config, use_layerwise, kv_cache_config) -> None:
+        self._extra_config = extra_config
         self.use_layerwise = use_layerwise
         self.kv_role = vllm_config.kv_transfer_config.kv_role
         self.load_async = extra_config.get("load_async", False)
@@ -286,9 +287,10 @@ class KVPoolWorker:
                 )
 
         self.next_layer_to_submit = 0
-        layerwise_config = get_layerwise_config(self.num_layers)
+        layerwise_config = get_layerwise_config(
+            self.num_layers, self._extra_config)
         self.layerwise_offload = layerwise_config.has_layer_reuse
-        self.NUM_PREFETCH_LAYERS = layerwise_config.num_prefetch_layers
+        self.num_prefetch_layers = layerwise_config.num_prefetch_layers
         self.independent_layers = layerwise_config.independent_layers
         self.prefetch_layer_map = layerwise_config.prefetch_layer_map
         self.sync_save_events = None
@@ -881,7 +883,7 @@ class KVPoolWorker:
             )
             return True
 
-        submit_count = self.NUM_PREFETCH_LAYERS if self.current_layer == 0 else 1
+        submit_count = self.num_prefetch_layers if self.current_layer == 0 else 1
         submitted_layers = 0
         while (submitted_layers < submit_count
                and self.next_layer_to_submit < self.num_layers):
