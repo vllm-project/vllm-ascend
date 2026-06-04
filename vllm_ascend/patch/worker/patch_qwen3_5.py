@@ -23,6 +23,17 @@ from vllm.model_executor.models.qwen3_5 import Qwen3_5DecoderLayer
 from vllm.model_executor.models.qwen3_next import Qwen3NextAttention
 
 from vllm_ascend.ascend_forward_context import _EXTRA_CTX
+from vllm_ascend.ops.gdn import AscendGatedDeltaNetAttention
+from vllm_ascend.utils import is_310p, vllm_version_is
+
+if vllm_version_is("0.20.2"):
+    from vllm.model_executor.layers.mamba.gdn_linear_attn import GatedDeltaNetAttention as _GDNBaseCls
+
+    _GDN_PATCH_TARGET = _GDNBaseCls
+else:
+    from vllm.model_executor.layers.mamba.gdn.qwen_gdn_linear_attn import QwenGatedDeltaNetAttention as _GDNBaseCls
+
+    _GDN_PATCH_TARGET = _GDNBaseCls
 
 
 class AscendQwen3NextAttention(Qwen3NextAttention):
@@ -137,3 +148,18 @@ class AscendQwen3_5DecoderLayer(Qwen3_5DecoderLayer):
 
 Qwen3_5DecoderLayer.forward = AscendQwen3_5DecoderLayer.forward
 Qwen3NextAttention.forward = AscendQwen3NextAttention.forward
+_GDN_PATCH_TARGET._split_ba_for_tp = AscendGatedDeltaNetAttention._split_ba_for_tp
+_GDN_PATCH_TARGET.get_state_shape = AscendGatedDeltaNetAttention.get_state_shape
+
+if is_310p():
+    from vllm_ascend._310p.ops.fla.gdn_310 import AscendGatedDeltaNetAttention310
+
+    _GDN_PATCH_TARGET._forward_core = AscendGatedDeltaNetAttention310._forward_core
+    _GDN_PATCH_TARGET.get_state_dtype = AscendGatedDeltaNetAttention310.get_state_dtype
+else:
+    _GDN_PATCH_TARGET.forward = AscendGatedDeltaNetAttention.forward
+    _GDN_PATCH_TARGET._forward_core = AscendGatedDeltaNetAttention._forward_core
+    if vllm_version_is("0.20.2"):
+        _GDN_PATCH_TARGET._warmup_prefill_kernels = AscendGatedDeltaNetAttention._warmup_prefill_kernels_v0202
+    else:
+        _GDN_PATCH_TARGET._warmup_prefill_kernels = AscendGatedDeltaNetAttention._warmup_prefill_kernels

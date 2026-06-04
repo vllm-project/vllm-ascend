@@ -137,12 +137,6 @@ class AscendConfig:
         self.multistream_dsv4_dsa_overlap = additional_config.get("multistream_dsv4_dsa_overlap", False)
         self.prefill_comm_compute_overlap = additional_config.get("prefill_comm_compute_overlap", False)
 
-        self.enable_context_parallel = self._get_config_value(
-            additional_config,
-            "enable_context_parallel",
-            "VLLM_ASCEND_ENABLE_CONTEXT_PARALLEL",
-            ascend_envs.VLLM_ASCEND_ENABLE_CONTEXT_PARALLEL,
-        )
         self.enable_matmul_allreduce = self._get_config_value(
             additional_config,
             "enable_matmul_allreduce",

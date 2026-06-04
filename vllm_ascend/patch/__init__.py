@@ -162,6 +162,44 @@
 #       Remove this patch once the runtime vLLM version contains the upstream
 #       MiniMax usage-accounting fix.
 #
+# ** 7a. File: platform/patch_glm_tool_call_streaming.py**
+# ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+#   1. `vllm.entrypoints.openai.chat_completion.serving.OpenAIServingChat`
+#    Why:
+#       GLM tool-call streaming can emit final remaining-argument chunks with
+#       repeated tool-call metadata, and can combine terminal argument bytes with
+#       `finish_reason="tool_calls"` in the same SSE chunk.
+#    How：
+#       Monkey-patch remaining-argument delta construction to emit only argument
+#       fragments by default, and split terminal argument chunks into an argument
+#       chunk followed by an empty finish chunk.
+#    Related PR (if no, explain why):
+#       https://github.com/vllm-project/vllm/issues/44098
+#       https://github.com/vllm-project/vllm/pull/44099
+#       https://github.com/vllm-project/vllm-ascend/issues/8327
+#       https://github.com/vllm-project/vllm-ascend/pull/8178
+#    Future Plan:
+#       Remove this patch once the supported vLLM version contains the upstream
+#       GLM tool-call final chunk fixes.
+#
+# ** 7b. File: platform/patch_glm47_tool_call_parser.py**
+# ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+#   1. `vllm.tool_parsers.glm47_moe_tool_parser.Glm47MoeModelToolParser`
+#    Why:
+#       vLLM's GLM47 streaming parser can drop complete inline zero-argument
+#       tool calls such as `<tool_call>get_current_time</tool_call>`, while
+#       non-streaming parses the same output correctly.
+#    How：
+#       Monkey-patch GLM47 tool-call region extraction so complete inline
+#       zero-argument regions are normalized for the existing streaming name
+#       extractor without emitting partial names for incomplete regions.
+#    Related PR (if no, explain why):
+#       https://github.com/vllm-project/vllm/issues/44326
+#       https://github.com/vllm-project/vllm/pull/44327
+#    Future Plan:
+#       Remove this patch once the supported vLLM version contains the upstream
+#       GLM47 inline zero-argument streaming parser fix.
+#
 # ** 10a. File: platform/patch_kv_cache_utils.py**
 # ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 #   1. `vllm.v1.core.kv_cache_utils.resolve_kv_cache_block_sizes`
@@ -324,6 +362,18 @@
 #       Remove this patch if upstream exposes a platform allocator capability hook
 #       for sleep mode validation.
 #
+# ** 14. File: platform/patch_scheduler.py**
+# ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+#   1. `vllm.v1.core.sched.scheduler.Scheduler._mamba_block_aligned_split`
+#    Why:
+#       Upstream vLLM has an assert logic, cause it fails when external KV connector hit
+#    How:
+#      remove the assert
+#    Related PR (if no, explain why):
+#       https://github.com/vllm-project/vllm/pull/43935
+#    Future Plan:
+#       Remove this patch if upstream streaming behavior is updated to support mamba external KV connector
+#
 # * Worker Patch:
 # ===============
 #
@@ -351,6 +401,25 @@
 #       Let vLLM support triton ops dispatch.
 #    Future Plan:
 #       Remove this patch when vLLM support the dispatch function.
+#
+#   2. `triton.next_power_of_2`
+#    Why:
+#       The Triton version bundled with torch_npu on Ascend NPU
+#       does not include `next_power_of_2`, which is called by
+#       upstream vLLM and vLLM-Ascend code in 94+ places.
+#       Additionally, when Triton is not available (HAS_TRITON=False),
+#       vLLM uses TritonPlaceholder which also lacks this function.
+#    How：
+#       Import `triton` from vllm.triton_utils (which handles both
+#       real Triton and TritonPlaceholder) and inject `next_power_of_2`
+#       onto the module. For vLLM versions that have
+#       `vllm.utils.math_utils.next_power_of_2`, reuse that implementation;
+#       for v0.20.2 (which lacks it), skip the patch.
+#    Related PR (if no, explain why):
+#       No, torch_npu Triton compatibility issue.
+#    Future Plan:
+#       Remove this patch when torch_npu's Triton includes
+#       next_power_of_2 or when vLLM no longer calls triton.next_power_of_2.
 #
 # ** 4. File: worker/patch_qwen3_next_mtp.py**
 # ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
@@ -677,7 +746,16 @@
 #    Future Plan:
 #       Remove this patch when:
 #       design a dispatch mechanism for batch_memcpy_kernel.
-#
+#   3. `mamba_utils.preprocess_mamba = preprocess_mamba`
+#    Why:
+#       1. preprocess_mamba has a assert logic, cause kv transfer call fails
+#       2. preprocess_mamba copy the state of previous step to the last block before kv transfer load
+#    How:
+#       1. patch to remove assert
+#       2. path to only collect copy metadata in preprocess_mamba(and do actual copy after kv transfer load).
+#    Future Plan:
+#       Remove this patch when:
+#       vLLM itself supports kv transfer for mamba
 # ** 21. File: worker/patch_weight_utils.py**
 # ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 #   1. `vllm.model_executor.models.deepseek_v2.DeepseekV2ForCausalLM.load_weights`
@@ -780,3 +858,20 @@
 #       Replace ops.* with the internal implementation of vllm-ascend.
 #    Future Plan:
 #       Remove this patch when vllm-ascend supports pattern matching for ops.*.
+# ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+#   1. `vllm.model_executor.layers.fused_moe.routed_experts_capturer.RoutedExpertsCapturer.capture`
+#    Why:
+#       The upstream implementation doesn't support vllm-ascend specific MoE communication types
+#       (ALLTOALL and MC2). In the SP + modular-kernel path, the original code cannot correctly
+#       handle tensor splitting and all-gather operations on NPU, especially when tokens are
+#       unevenly distributed across TP ranks or padded to max_tokens in MC2 mode.
+#    How：
+#       Override the capture method to add support for vllm-ascend's MoECommType:
+#         - Check `_EXTRA_CTX.moe_comm_type` to determine if ALLTOALL or MC2 mode is active
+#         - Calculate correct gather_topk_ids_shape based on communication type:
+#           * ALLTOALL: uses actual token_num_per_dp for shape calculation
+#           * MC2: uses padded max_tokens * tp_size for shape calculation
+#         - Properly handle tensor_split and all_gather operations for NPU distributed communication
+#    Future Plan:
+#       Remove this patch when upstream vLLM supports MoE communication type abstraction that
+#       can be extended by hardware plugins like vllm-ascend.
