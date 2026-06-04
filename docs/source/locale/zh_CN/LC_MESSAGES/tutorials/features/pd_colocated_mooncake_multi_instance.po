@@ -8,7 +8,7 @@ msgid ""
 msgstr ""
 "Project-Id-Version: vllm-ascend \n"
 "Report-Msgid-Bugs-To: \n"
-"POT-Creation-Date: 2026-04-21 02:03+0000\n"
+"POT-Creation-Date: 2026-06-04 05:04+0000\n"
 "PO-Revision-Date: 2026-04-10 18:37+0800\n"
 "Last-Translator: FULL NAME <EMAIL@ADDRESS>\n"
 "Language: zh_CN\n"
@@ -37,12 +37,13 @@ msgstr "vLLM-Ascend 现已支持基于 Mooncake 特性的 PD 共置部署。本�
 #: ../../source/tutorials/features/pd_colocated_mooncake_multi_instance.md:9
 msgid ""
 "Using the Qwen2.5-72B-Instruct model as an example, this guide "
-"demonstrates how to use vllm-ascend v0.11.0 (with vLLM v0.11.0) on two "
-"Atlas 800T A2 nodes to deploy two vLLM instances. Each instance occupies "
-"4 NPU cards and uses PD-colocated deployment."
+"demonstrates how to use vllm-ascend {{vllm_ascend_version}} (with vLLM "
+"{{vllm_version}}) on two Atlas 800T A2 nodes to deploy two vLLM "
+"instances. Each instance occupies 4 NPU cards and uses PD-colocated "
+"deployment."
 msgstr ""
 "本指南以 Qwen2.5-72B-Instruct 模型为例，演示如何在两台 Atlas 800T A2 节点上使用 vllm-ascend "
-"v0.11.0（配合 vLLM v0.11.0）部署两个 vLLM 实例。每个实例占用 4 张 NPU 卡，并采用 PD 共置部署模式。"
+"{{vllm_ascend_version}}（配合 vLLM {{vllm_version}}）部署两个 vLLM 实例。每个实例占用 4 张 NPU 卡，并采用 PD 共置部署模式。"
 
 #: ../../source/tutorials/features/pd_colocated_mooncake_multi_instance.md:14
 msgid "Verify Multi-Node Communication Environment"
@@ -121,9 +122,9 @@ msgstr "（可选）安装 Mooncake"
 
 #: ../../source/tutorials/features/pd_colocated_mooncake_multi_instance.md:114
 msgid ""
-"Mooncake is pre-installed and functional in the v0.11.0 image. The "
-"following installation steps are optional."
-msgstr "Mooncake 在 v0.11.0 镜像中已预安装并可正常使用。以下安装步骤为可选操作。"
+"Mooncake is pre-installed and functional in the {{vllm_ascend_version}} "
+"image. The following installation steps are optional."
+msgstr "Mooncake 在 {{vllm_ascend_version}} 镜像中已预安装并可正常使用。以下安装步骤为可选操作。"
 
 #: ../../source/tutorials/features/pd_colocated_mooncake_multi_instance.md:117
 msgid ""
@@ -165,115 +166,115 @@ msgid ""
 "the following command:"
 msgstr "要在其中一个节点容器中启动 Mooncake 主服务，请使用以下命令："
 
-#: ../../source/tutorials/features/pd_colocated_mooncake_multi_instance.md:168
+#: ../../source/tutorials/features/pd_colocated_mooncake_multi_instance.md
 msgid "Parameter"
 msgstr "参数"
 
-#: ../../source/tutorials/features/pd_colocated_mooncake_multi_instance.md:169
+#: ../../source/tutorials/features/pd_colocated_mooncake_multi_instance.md
 msgid "Value"
 msgstr "值"
 
-#: ../../source/tutorials/features/pd_colocated_mooncake_multi_instance.md:170
+#: ../../source/tutorials/features/pd_colocated_mooncake_multi_instance.md
 msgid "Explanation"
 msgstr "说明"
 
-#: ../../source/tutorials/features/pd_colocated_mooncake_multi_instance.md:171
+#: ../../source/tutorials/features/pd_colocated_mooncake_multi_instance.md
 msgid "port"
 msgstr "port"
 
-#: ../../source/tutorials/features/pd_colocated_mooncake_multi_instance.md:172
+#: ../../source/tutorials/features/pd_colocated_mooncake_multi_instance.md
 msgid "50088"
 msgstr "50088"
 
-#: ../../source/tutorials/features/pd_colocated_mooncake_multi_instance.md:173
+#: ../../source/tutorials/features/pd_colocated_mooncake_multi_instance.md
 msgid "Port for the master service"
 msgstr "主服务的端口"
 
-#: ../../source/tutorials/features/pd_colocated_mooncake_multi_instance.md:174
+#: ../../source/tutorials/features/pd_colocated_mooncake_multi_instance.md
 msgid "eviction_high_watermark_ratio"
 msgstr "eviction_high_watermark_ratio"
 
-#: ../../source/tutorials/features/pd_colocated_mooncake_multi_instance.md:175
+#: ../../source/tutorials/features/pd_colocated_mooncake_multi_instance.md
 msgid "0.95"
 msgstr "0.95"
 
-#: ../../source/tutorials/features/pd_colocated_mooncake_multi_instance.md:176
+#: ../../source/tutorials/features/pd_colocated_mooncake_multi_instance.md
 msgid "High watermark ratio (95% threshold)"
 msgstr "高水位线比例（95% 阈值）"
 
-#: ../../source/tutorials/features/pd_colocated_mooncake_multi_instance.md:177
+#: ../../source/tutorials/features/pd_colocated_mooncake_multi_instance.md
 msgid "eviction_ratio"
 msgstr "eviction_ratio"
 
-#: ../../source/tutorials/features/pd_colocated_mooncake_multi_instance.md:178
+#: ../../source/tutorials/features/pd_colocated_mooncake_multi_instance.md
 msgid "0.05"
 msgstr "0.05"
 
-#: ../../source/tutorials/features/pd_colocated_mooncake_multi_instance.md:179
+#: ../../source/tutorials/features/pd_colocated_mooncake_multi_instance.md
 msgid "Percentage to evict when full (5%)"
 msgstr "存满时的淘汰比例（5%）"
 
-#: ../../source/tutorials/features/pd_colocated_mooncake_multi_instance.md:181
+#: ../../source/tutorials/features/pd_colocated_mooncake_multi_instance.md:179
 msgid "Create a Mooncake Configuration File Named mooncake.json"
 msgstr "创建名为 mooncake.json 的 Mooncake 配置文件"
 
-#: ../../source/tutorials/features/pd_colocated_mooncake_multi_instance.md:183
+#: ../../source/tutorials/features/pd_colocated_mooncake_multi_instance.md:181
 msgid "The template for the mooncake.json file is as follows:"
 msgstr "mooncake.json 文件的模板如下："
 
-#: ../../source/tutorials/features/pd_colocated_mooncake_multi_instance.md:189
+#: ../../source/tutorials/features/pd_colocated_mooncake_multi_instance.md
 msgid "metadata_server"
 msgstr "metadata_server"
 
-#: ../../source/tutorials/features/pd_colocated_mooncake_multi_instance.md:190
+#: ../../source/tutorials/features/pd_colocated_mooncake_multi_instance.md
 msgid "P2PHANDSHAKE"
 msgstr "P2PHANDSHAKE"
 
-#: ../../source/tutorials/features/pd_colocated_mooncake_multi_instance.md:191
+#: ../../source/tutorials/features/pd_colocated_mooncake_multi_instance.md
 msgid "Point-to-point handshake mode"
 msgstr "点对点握手模式"
 
-#: ../../source/tutorials/features/pd_colocated_mooncake_multi_instance.md:192
+#: ../../source/tutorials/features/pd_colocated_mooncake_multi_instance.md
 msgid "protocol"
 msgstr "protocol"
 
-#: ../../source/tutorials/features/pd_colocated_mooncake_multi_instance.md:193
+#: ../../source/tutorials/features/pd_colocated_mooncake_multi_instance.md
 msgid "ascend"
 msgstr "ascend"
 
-#: ../../source/tutorials/features/pd_colocated_mooncake_multi_instance.md:194
+#: ../../source/tutorials/features/pd_colocated_mooncake_multi_instance.md
 msgid "Ascend proprietary protocol"
 msgstr "Ascend 专有协议"
 
-#: ../../source/tutorials/features/pd_colocated_mooncake_multi_instance.md:195
+#: ../../source/tutorials/features/pd_colocated_mooncake_multi_instance.md
 msgid "master_server_address"
 msgstr "master_server_address"
 
-#: ../../source/tutorials/features/pd_colocated_mooncake_multi_instance.md:196
+#: ../../source/tutorials/features/pd_colocated_mooncake_multi_instance.md
 msgid "90.90.100.188:50088(for example)"
 msgstr "90.90.100.188:50088（示例）"
 
-#: ../../source/tutorials/features/pd_colocated_mooncake_multi_instance.md:197
+#: ../../source/tutorials/features/pd_colocated_mooncake_multi_instance.md
 msgid "Master server address"
 msgstr "主服务器地址"
 
-#: ../../source/tutorials/features/pd_colocated_mooncake_multi_instance.md:198
+#: ../../source/tutorials/features/pd_colocated_mooncake_multi_instance.md
 msgid "global_segment_size"
 msgstr "global_segment_size"
 
-#: ../../source/tutorials/features/pd_colocated_mooncake_multi_instance.md:199
+#: ../../source/tutorials/features/pd_colocated_mooncake_multi_instance.md
 msgid "107374182400"
 msgstr "107374182400"
 
-#: ../../source/tutorials/features/pd_colocated_mooncake_multi_instance.md:200
+#: ../../source/tutorials/features/pd_colocated_mooncake_multi_instance.md
 msgid "Size per segment (100 GB)"
 msgstr "每段大小（100 GB）"
 
-#: ../../source/tutorials/features/pd_colocated_mooncake_multi_instance.md:202
+#: ../../source/tutorials/features/pd_colocated_mooncake_multi_instance.md:200
 msgid "vLLM Instance Deployment"
 msgstr "vLLM 实例部署"
 
-#: ../../source/tutorials/features/pd_colocated_mooncake_multi_instance.md:204
+#: ../../source/tutorials/features/pd_colocated_mooncake_multi_instance.md:202
 msgid ""
 "Create containers on both Node 1 and Node 2, and launch the Qwen2.5-72B-"
 "Instruct model service in each to test the reusability and performance of"
@@ -285,96 +286,96 @@ msgstr ""
 "缓存的复用性和性能。实例 1 使用第一台 Atlas 800T A2 服务器上的 NPU 卡 [0-3]，实例 2 使用第二台服务器上的 NPU "
 "卡 [0-3]。"
 
-#: ../../source/tutorials/features/pd_colocated_mooncake_multi_instance.md:210
+#: ../../source/tutorials/features/pd_colocated_mooncake_multi_instance.md:208
 msgid "Deploy Instance 1"
 msgstr "部署实例 1"
 
-#: ../../source/tutorials/features/pd_colocated_mooncake_multi_instance.md:212
+#: ../../source/tutorials/features/pd_colocated_mooncake_multi_instance.md:210
 msgid ""
 "Replace file paths, host, and port parameters based on your actual "
 "environment configuration."
 msgstr "请根据实际环境配置替换文件路径、主机和端口参数。"
 
-#: ../../source/tutorials/features/pd_colocated_mooncake_multi_instance.md:244
+#: ../../source/tutorials/features/pd_colocated_mooncake_multi_instance.md:242
 msgid "Deploy Instance 2"
 msgstr "部署实例 2"
 
-#: ../../source/tutorials/features/pd_colocated_mooncake_multi_instance.md:246
+#: ../../source/tutorials/features/pd_colocated_mooncake_multi_instance.md:244
 msgid ""
 "The deployment method for Instance 2 is identical to Instance 1. Simply "
 "modify the `--host` and `--port` parameters according to your Instance 2 "
 "configuration."
 msgstr "实例 2 的部署方法与实例 1 相同。只需根据实例 2 的配置修改 `--host` 和 `--port` 参数即可。"
 
-#: ../../source/tutorials/features/pd_colocated_mooncake_multi_instance.md:250
+#: ../../source/tutorials/features/pd_colocated_mooncake_multi_instance.md:248
 msgid "Configuration Parameters"
 msgstr "配置参数"
 
-#: ../../source/tutorials/features/pd_colocated_mooncake_multi_instance.md:252
+#: ../../source/tutorials/features/pd_colocated_mooncake_multi_instance.md
 msgid "kv_connector"
 msgstr "kv_connector"
 
-#: ../../source/tutorials/features/pd_colocated_mooncake_multi_instance.md:253
+#: ../../source/tutorials/features/pd_colocated_mooncake_multi_instance.md
 msgid "MooncakeConnectorStoreV1"
 msgstr "MooncakeConnectorStoreV1"
 
-#: ../../source/tutorials/features/pd_colocated_mooncake_multi_instance.md:254
+#: ../../source/tutorials/features/pd_colocated_mooncake_multi_instance.md
 msgid "Use StoreV1 version"
 msgstr "使用 StoreV1 版本"
 
-#: ../../source/tutorials/features/pd_colocated_mooncake_multi_instance.md:255
+#: ../../source/tutorials/features/pd_colocated_mooncake_multi_instance.md
 msgid "kv_role"
 msgstr "kv_role"
 
-#: ../../source/tutorials/features/pd_colocated_mooncake_multi_instance.md:256
+#: ../../source/tutorials/features/pd_colocated_mooncake_multi_instance.md
 msgid "kv_both"
 msgstr "kv_both"
 
-#: ../../source/tutorials/features/pd_colocated_mooncake_multi_instance.md:257
+#: ../../source/tutorials/features/pd_colocated_mooncake_multi_instance.md
 msgid "Enable both produce and consume"
 msgstr "同时启用生产和消费"
 
-#: ../../source/tutorials/features/pd_colocated_mooncake_multi_instance.md:258
+#: ../../source/tutorials/features/pd_colocated_mooncake_multi_instance.md
 msgid "use_layerwise"
 msgstr "use_layerwise"
 
-#: ../../source/tutorials/features/pd_colocated_mooncake_multi_instance.md:259
+#: ../../source/tutorials/features/pd_colocated_mooncake_multi_instance.md
 msgid "false"
 msgstr "false"
 
-#: ../../source/tutorials/features/pd_colocated_mooncake_multi_instance.md:260
+#: ../../source/tutorials/features/pd_colocated_mooncake_multi_instance.md
 msgid "Transfer entire cache (see note)"
 msgstr "传输整个缓存（参见说明）"
 
-#: ../../source/tutorials/features/pd_colocated_mooncake_multi_instance.md:261
+#: ../../source/tutorials/features/pd_colocated_mooncake_multi_instance.md
 msgid "mooncake_rpc_port"
 msgstr "mooncake_rpc_port"
 
-#: ../../source/tutorials/features/pd_colocated_mooncake_multi_instance.md:262
+#: ../../source/tutorials/features/pd_colocated_mooncake_multi_instance.md
 msgid "0"
 msgstr "0"
 
-#: ../../source/tutorials/features/pd_colocated_mooncake_multi_instance.md:263
+#: ../../source/tutorials/features/pd_colocated_mooncake_multi_instance.md
 msgid "Automatic port assignment"
 msgstr "自动分配端口"
 
-#: ../../source/tutorials/features/pd_colocated_mooncake_multi_instance.md:264
+#: ../../source/tutorials/features/pd_colocated_mooncake_multi_instance.md
 msgid "load_async"
 msgstr "load_async"
 
-#: ../../source/tutorials/features/pd_colocated_mooncake_multi_instance.md:265
+#: ../../source/tutorials/features/pd_colocated_mooncake_multi_instance.md
 msgid "true"
 msgstr "true"
 
-#: ../../source/tutorials/features/pd_colocated_mooncake_multi_instance.md:266
+#: ../../source/tutorials/features/pd_colocated_mooncake_multi_instance.md
 msgid "Enable asynchronous loading"
 msgstr "启用异步加载"
 
-#: ../../source/tutorials/features/pd_colocated_mooncake_multi_instance.md:267
+#: ../../source/tutorials/features/pd_colocated_mooncake_multi_instance.md
 msgid "register_buffer"
 msgstr "register_buffer"
 
-#: ../../source/tutorials/features/pd_colocated_mooncake_multi_instance.md:268
+#: ../../source/tutorials/features/pd_colocated_mooncake_multi_instance.md
 msgid "Required for PD-colocated mode"
 msgstr "PD 共置模式下必需"
 

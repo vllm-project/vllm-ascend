@@ -8,7 +8,7 @@ msgid ""
 msgstr ""
 "Project-Id-Version: vllm-ascend \n"
 "Report-Msgid-Bugs-To: \n"
-"POT-Creation-Date: 2026-05-14 02:40+0000\n"
+"POT-Creation-Date: 2026-06-04 05:04+0000\n"
 "PO-Revision-Date: 2026-01-22 16:45+0800\n"
 "Last-Translator: Gemini\n"
 "Language: zh_CN\n"
@@ -31,28 +31,180 @@ msgid ""
 msgstr "附加配置是 vLLM 提供的一种机制，允许插件自行控制内部行为。vLLM Ascend 利用这种机制来增强项目的灵活性。"
 
 #: ../../source/user_guide/configuration/additional_config.md:5
+msgid "Migration Guide"
+msgstr "迁移指南"
+
+#: ../../source/user_guide/configuration/additional_config.md:7
+msgid ""
+"Starting from PR #9064, vLLM Ascend is migrating **10 environment "
+"variables** to `--additional-config`."
+msgstr "从 PR #9064 开始，vLLM Ascend 正在将 **10 个环境变量** 迁移至 `--additional-config`。"
+
+#: ../../source/user_guide/configuration/additional_config.md:9
+msgid "Important Notice"
+msgstr "重要通知"
+
+#: ../../source/user_guide/configuration/additional_config.md:11
+msgid ""
+"**Current Support**: Both environment variables and `--additional-config`"
+" are supported during the transition period"
+msgstr "**当前支持**：过渡期内同时支持环境变量和 `--additional-config`"
+
+#: ../../source/user_guide/configuration/additional_config.md:12
+msgid ""
+"**Recommendation**: Use `--additional-config` for new deployments and "
+"migrate existing configurations"
+msgstr "**建议**：新部署请使用 `--additional-config`，并迁移现有配置"
+
+#: ../../source/user_guide/configuration/additional_config.md:13
+msgid ""
+"**Future Plan**: Environment variables will be **removed** in a future "
+"release; only `--additional-config` will be supported"
+msgstr "**未来计划**：环境变量将在未来版本中**移除**，仅支持 `--additional-config`"
+
+#: ../../source/user_guide/configuration/additional_config.md:15
+msgid "Quick Reference"
+msgstr "快速参考"
+
+#: ../../source/user_guide/configuration/additional_config.md
+msgid "Environment Variable"
+msgstr "环境变量"
+
+#: ../../source/user_guide/configuration/additional_config.md
+msgid "Config Key"
+msgstr "配置键"
+
+#: ../../source/user_guide/configuration/additional_config.md
+msgid "Type Conversion"
+msgstr "类型转换"
+
+#: ../../source/user_guide/configuration/additional_config.md
+msgid "`VLLM_ASCEND_BALANCE_SCHEDULING`"
+msgstr "`VLLM_ASCEND_BALANCE_SCHEDULING`"
+
+#: ../../source/user_guide/configuration/additional_config.md
+msgid "`enable_balance_scheduling`"
+msgstr "`enable_balance_scheduling`"
+
+#: ../../source/user_guide/configuration/additional_config.md
+msgid "`\"1\"` → `true`, `\"0\"` → `false`"
+msgstr "`\"1\"` → `true`, `\"0\"` → `false`"
+
+#: ../../source/user_guide/configuration/additional_config.md
+msgid "`VLLM_ASCEND_ENABLE_FLASHCOMM1`"
+msgstr "`VLLM_ASCEND_ENABLE_FLASHCOMM1`"
+
+#: ../../source/user_guide/configuration/additional_config.md
+msgid "`enable_flashcomm1`"
+msgstr "`enable_flashcomm1`"
+
+#: ../../source/user_guide/configuration/additional_config.md
+msgid "`VLLM_ASCEND_ENABLE_MATMUL_ALLREDUCE`"
+msgstr "`VLLM_ASCEND_ENABLE_MATMUL_ALLREDUCE`"
+
+#: ../../source/user_guide/configuration/additional_config.md
+msgid "`enable_matmul_allreduce`"
+msgstr "`enable_matmul_allreduce`"
+
+#: ../../source/user_guide/configuration/additional_config.md
+msgid "`VLLM_ASCEND_FLASHCOMM2_PARALLEL_SIZE`"
+msgstr "`VLLM_ASCEND_FLASHCOMM2_PARALLEL_SIZE`"
+
+#: ../../source/user_guide/configuration/additional_config.md
+msgid "`enable_flashcomm2_parallel_size`"
+msgstr "`enable_flashcomm2_parallel_size`"
+
+#: ../../source/user_guide/configuration/additional_config.md
+msgid "Integer (unchanged)"
+msgstr "整数（不变）"
+
+#: ../../source/user_guide/configuration/additional_config.md
+msgid "`MSMONITOR_USE_DAEMON`"
+msgstr "`MSMONITOR_USE_DAEMON`"
+
+#: ../../source/user_guide/configuration/additional_config.md
+msgid "`msmonitor_use_daemon`"
+msgstr "`msmonitor_use_daemon`"
+
+#: ../../source/user_guide/configuration/additional_config.md
+msgid "`VLLM_ASCEND_ENABLE_MLAPO`"
+msgstr "`VLLM_ASCEND_ENABLE_MLAPO`"
+
+#: ../../source/user_guide/configuration/additional_config.md
+msgid "`enable_mlapo`"
+msgstr "`enable_mlapo`"
+
+#: ../../source/user_guide/configuration/additional_config.md
+msgid "`VLLM_ASCEND_ENABLE_NZ`"
+msgstr "`VLLM_ASCEND_ENABLE_NZ`"
+
+#: ../../source/user_guide/configuration/additional_config.md
+msgid "`weight_nz_mode`"
+msgstr "`weight_nz_mode`"
+
+#: ../../source/user_guide/configuration/additional_config.md
+msgid "Integer (unchanged, field name changed)"
+msgstr "整数（不变，字段名变更）"
+
+#: ../../source/user_guide/configuration/additional_config.md
+msgid "`VLLM_ASCEND_ENABLE_CONTEXT_PARALLEL`"
+msgstr "`VLLM_ASCEND_ENABLE_CONTEXT_PARALLEL`"
+
+#: ../../source/user_guide/configuration/additional_config.md
+msgid "`enable_context_parallel`"
+msgstr "`enable_context_parallel`"
+
+#: ../../source/user_guide/configuration/additional_config.md
+msgid "`VLLM_ASCEND_ENABLE_FUSED_MC2`"
+msgstr "`VLLM_ASCEND_ENABLE_FUSED_MC2`"
+
+#: ../../source/user_guide/configuration/additional_config.md
+msgid "`enable_fused_mc2`"
+msgstr "`enable_fused_mc2`"
+
+#: ../../source/user_guide/configuration/additional_config.md
+msgid "`VLLM_ASCEND_FUSION_OP_TRANSPOSE_KV_CACHE_BY_BLOCK`"
+msgstr "`VLLM_ASCEND_FUSION_OP_TRANSPOSE_KV_CACHE_BY_BLOCK`"
+
+#: ../../source/user_guide/configuration/additional_config.md
+msgid "`enable_transpose_kv_cache_by_block`"
+msgstr "`enable_transpose_kv_cache_by_block`"
+
+#: ../../source/user_guide/configuration/additional_config.md:30
+msgid "Example Migration"
+msgstr "迁移示例"
+
+#: ../../source/user_guide/configuration/additional_config.md:32
+msgid "**Before (environment variable):**"
+msgstr "**迁移前（环境变量）：**"
+
+#: ../../source/user_guide/configuration/additional_config.md:39
+msgid "**After (additional-config):**"
+msgstr "**迁移后（additional-config）：**"
+
+#: ../../source/user_guide/configuration/additional_config.md:45
 msgid "How to use"
 msgstr "如何使用"
 
-#: ../../source/user_guide/configuration/additional_config.md:7
+#: ../../source/user_guide/configuration/additional_config.md:47
 msgid ""
 "With either online mode or offline mode, users can use additional "
 "configuration. Take Qwen3 as an example:"
 msgstr "无论是在线模式还是离线模式，用户都可以使用附加配置。以 Qwen3 为例："
 
-#: ../../source/user_guide/configuration/additional_config.md:9
+#: ../../source/user_guide/configuration/additional_config.md:49
 msgid "**Online mode**:"
 msgstr "**在线模式**："
 
-#: ../../source/user_guide/configuration/additional_config.md:15
+#: ../../source/user_guide/configuration/additional_config.md:55
 msgid "**Offline mode**:"
 msgstr "**离线模式**："
 
-#: ../../source/user_guide/configuration/additional_config.md:23
+#: ../../source/user_guide/configuration/additional_config.md:63
 msgid "Configuration options"
 msgstr "配置选项"
 
-#: ../../source/user_guide/configuration/additional_config.md:25
+#: ../../source/user_guide/configuration/additional_config.md:65
 msgid ""
 "The following table lists additional configuration options available in "
 "vLLM Ascend:"
@@ -335,11 +487,108 @@ msgid ""
 "details."
 msgstr "动态分块流水线并行的配置选项。详情请参见[动态分块流水线并行](../feature_guide/dynamic_chunk_pipeline_parallel.md)。"
 
-#: ../../source/user_guide/configuration/additional_config.md:52
+#: ../../source/user_guide/configuration/additional_config.md
+msgid ""
+"Whether to enable balance scheduling. Can also be configured via "
+"`VLLM_ASCEND_BALANCE_SCHEDULING` environment variable (deprecated)."
+msgstr ""
+"是否启用均衡调度。也可以通过 `VLLM_ASCEND_BALANCE_SCHEDULING` 环境变量配置（已弃用）。"
+
+#: ../../source/user_guide/configuration/additional_config.md
+msgid ""
+"Whether to enable FlashComm1 optimization. Can also be configured via "
+"`VLLM_ASCEND_ENABLE_FLASHCOMM1` environment variable (deprecated)."
+msgstr ""
+"是否启用 FlashComm1 优化。也可以通过 `VLLM_ASCEND_ENABLE_FLASHCOMM1` 环境变量配置（已弃用）。"
+
+#: ../../source/user_guide/configuration/additional_config.md
+msgid ""
+"Whether to enable matmul allreduce optimization. Can also be configured "
+"via `VLLM_ASCEND_ENABLE_MATMUL_ALLREDUCE` environment variable "
+"(deprecated)."
+msgstr ""
+"是否启用矩阵乘法全规约优化。也可以通过 `VLLM_ASCEND_ENABLE_MATMUL_ALLREDUCE` 环境变量配置（已弃用）。"
+
+#: ../../source/user_guide/configuration/additional_config.md
+msgid "`flashcomm2_parallel_size`"
+msgstr "`flashcomm2_parallel_size`"
+
+#: ../../source/user_guide/configuration/additional_config.md
+msgid "`0`"
+msgstr "`0`"
+
+#: ../../source/user_guide/configuration/additional_config.md
+msgid ""
+"FlashComm2 parallel size. Can also be configured via "
+"`VLLM_ASCEND_FLASHCOMM2_PARALLEL_SIZE` environment variable (deprecated)."
+msgstr ""
+"FlashComm2 并行大小。也可以通过 `VLLM_ASCEND_FLASHCOMM2_PARALLEL_SIZE` 环境变量配置（已弃用）。"
+
+#: ../../source/user_guide/configuration/additional_config.md
+msgid ""
+"Whether to use daemon mode for msmonitor. Can also be configured via "
+"`MSMONITOR_USE_DAEMON` environment variable (deprecated)."
+msgstr ""
+"是否对 msmonitor 使用守护进程模式。也可以通过 `MSMONITOR_USE_DAEMON` 环境变量配置（已弃用）。"
+
+#: ../../source/user_guide/configuration/additional_config.md
+msgid ""
+"Whether to enable MLAPO (Model Layer-wise Adaptive Parallel "
+"Optimization). Can also be configured via `VLLM_ASCEND_ENABLE_MLAPO` "
+"environment variable (deprecated)."
+msgstr ""
+"是否启用 MLAPO（模型逐层自适应并行优化）。也可以通过 `VLLM_ASCEND_ENABLE_MLAPO` 环境变量配置（已弃用）。"
+
+#: ../../source/user_guide/configuration/additional_config.md
+msgid "`1`"
+msgstr "`1`"
+
+#: ../../source/user_guide/configuration/additional_config.md
+msgid ""
+"Weight NZ mode. Can also be configured via `VLLM_ASCEND_ENABLE_NZ` "
+"environment variable (deprecated)."
+msgstr ""
+"权重 NZ 模式。也可以通过 `VLLM_ASCEND_ENABLE_NZ` 环境变量配置（已弃用）。"
+
+#: ../../source/user_guide/configuration/additional_config.md
+msgid ""
+"Whether to enable context parallelism. Can also be configured via "
+"`VLLM_ASCEND_ENABLE_CONTEXT_PARALLEL` environment variable (deprecated)."
+msgstr ""
+"是否启用上下文并行。也可以通过 `VLLM_ASCEND_ENABLE_CONTEXT_PARALLEL` 环境变量配置（已弃用）。"
+
+#: ../../source/user_guide/configuration/additional_config.md
+msgid ""
+"Fused MC2 configuration. Can also be configured via "
+"`VLLM_ASCEND_ENABLE_FUSED_MC2` environment variable (deprecated)."
+msgstr ""
+"融合 MC2 配置。也可以通过 `VLLM_ASCEND_ENABLE_FUSED_MC2` 环境变量配置（已弃用）。"
+
+#: ../../source/user_guide/configuration/additional_config.md
+msgid ""
+"Whether to enable transpose KV cache by block. Can also be configured via"
+" `VLLM_ASCEND_FUSION_OP_TRANSPOSE_KV_CACHE_BY_BLOCK` environment variable"
+" (deprecated)."
+msgstr ""
+"是否启用按块转置 KV 缓存。也可以通过 `VLLM_ASCEND_FUSION_OP_TRANSPOSE_KV_CACHE_BY_BLOCK` 环境变量配置（已弃用）。"
+
+#: ../../source/user_guide/configuration/additional_config.md
+msgid "`enable_dsa_cp`"
+msgstr "`enable_dsa_cp`"
+
+#: ../../source/user_guide/configuration/additional_config.md
+msgid ""
+"Whether to enable dsa_cp for DeepSeek V3.2, DeepSeek V4, and other models"
+" with the same architecture. This feature depends on FLASHCOMM1. Please "
+"ensure that FLASHCOMM1 is enabled before enabling this feature."
+msgstr ""
+"是否为 DeepSeek V3.2、DeepSeek V4 及其他相同架构的模型启用 dsa_cp。此功能依赖于 FLASHCOMM1。启用此功能前请确保已启用 FLASHCOMM1。"
+
+#: ../../source/user_guide/configuration/additional_config.md:103
 msgid "The details of each configuration option are as follows:"
 msgstr "每个配置选项的详细说明如下："
 
-#: ../../source/user_guide/configuration/additional_config.md:54
+#: ../../source/user_guide/configuration/additional_config.md:105
 msgid "**xlite_graph_config**"
 msgstr "**xlite_graph_config**"
 
@@ -363,7 +612,7 @@ msgid ""
 "default, Xlite is only enabled for the decode stage."
 msgstr "是否在预填充和解码阶段同时启用 Xlite。默认情况下，Xlite 仅在解码阶段启用。"
 
-#: ../../source/user_guide/configuration/additional_config.md:61
+#: ../../source/user_guide/configuration/additional_config.md:112
 msgid "**weight_prefetch_config**"
 msgstr "**weight_prefetch_config**"
 
@@ -388,17 +637,13 @@ msgstr ""
 msgid "Prefetch ratio of each weight."
 msgstr "各项权重的预取比例。"
 
-#: ../../source/user_guide/configuration/additional_config.md:68
+#: ../../source/user_guide/configuration/additional_config.md:119
 msgid "**finegrained_tp_config**"
 msgstr "**finegrained_tp_config**"
 
 #: ../../source/user_guide/configuration/additional_config.md
 msgid "`lmhead_tensor_parallel_size`"
 msgstr "`lmhead_tensor_parallel_size`"
-
-#: ../../source/user_guide/configuration/additional_config.md
-msgid "`0`"
-msgstr "`0`"
 
 #: ../../source/user_guide/configuration/additional_config.md
 msgid "The custom tensor parallel size of lm_head."
@@ -428,7 +673,7 @@ msgstr "`mlp_tensor_parallel_size`"
 msgid "The custom tensor parallel size of mlp."
 msgstr "MLP 层的自定义张量并行大小。"
 
-#: ../../source/user_guide/configuration/additional_config.md:77
+#: ../../source/user_guide/configuration/additional_config.md:128
 msgid "**ascend_compilation_config**"
 msgstr "**ascend_compilation_config**"
 
@@ -483,7 +728,7 @@ msgstr "`fuse_muls_add`"
 msgid "Whether to enable fuse_muls_add pass."
 msgstr "是否启用 fuse_muls_add 优化通道。"
 
-#: ../../source/user_guide/configuration/additional_config.md:88
+#: ../../source/user_guide/configuration/additional_config.md:139
 msgid "**eplb_config**"
 msgstr "**eplb_config**"
 
@@ -547,7 +792,7 @@ msgstr "`num_redundant_experts`"
 msgid "Specify redundant experts during initialization."
 msgstr "在初始化阶段指定冗余专家的数量。"
 
-#: ../../source/user_guide/configuration/additional_config.md:99
+#: ../../source/user_guide/configuration/additional_config.md:150
 msgid "**profiling_chunk_config**"
 msgstr "**profiling_chunk_config**"
 
@@ -601,11 +846,11 @@ msgstr "True"
 msgid "Enable/disable Online Calibration"
 msgstr "启用/禁用在线校准"
 
-#: ../../source/user_guide/configuration/additional_config.md:108
+#: ../../source/user_guide/configuration/additional_config.md:159
 msgid "Example"
 msgstr "示例"
 
-#: ../../source/user_guide/configuration/additional_config.md:110
+#: ../../source/user_guide/configuration/additional_config.md:161
 msgid "An example of additional configuration is as follows:"
 msgstr "附加配置的一个示例如下："
 

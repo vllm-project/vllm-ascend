@@ -8,7 +8,7 @@ msgid ""
 msgstr ""
 "Project-Id-Version:  vllm-ascend\n"
 "Report-Msgid-Bugs-To: \n"
-"POT-Creation-Date: 2026-05-22 04:30+0000\n"
+"POT-Creation-Date: 2026-06-04 05:04+0000\n"
 "PO-Revision-Date: 2025-07-18 10:09+0800\n"
 "Last-Translator: \n"
 "Language: zh_CN\n"
@@ -36,8 +36,8 @@ msgid "OS: Linux"
 msgstr "操作系统：Linux"
 
 #: ../../source/installation.md:8
-msgid "Python: >= 3.10, < 3.12"
-msgstr "Python：>= 3.10, < 3.12"
+msgid "Python: >= 3.10, < 3.13"
+msgstr "Python：>= 3.10, < 3.13"
 
 #: ../../source/installation.md:9
 msgid "Hardware with Ascend NPUs. It's usually the Atlas 800 A2 series."
@@ -274,8 +274,7 @@ msgid ""
 "If you are installing via `uv`, make sure to install `triton-ascend` "
 "**last**, after all other packages have been installed, to avoid "
 "dependency resolution conflicts."
-msgstr ""
-"如果您通过 `uv` 安装，请确保在所有其他包安装完成**之后**再安装 `triton-ascend`，以避免依赖解析冲突。"
+msgstr "如果您通过 `uv` 安装，请确保在所有其他包安装完成**之后**再安装 `triton-ascend`，以避免依赖解析冲突。"
 
 #: ../../source/installation.md:221
 msgid ""
@@ -297,8 +296,8 @@ msgid ""
 "specify your g++ and gcc locations before compiling."
 msgstr ""
 "构建自定义算子需要 gcc/g++ 版本高于 8 且支持 C++17 或更高标准。如果您在使用 `pip install -e .` 时遇到 "
-"torch-npu 版本冲突，请使用 `pip install --no-build-isolation "
-"-e .` 以在系统环境下构建。如果在编译过程中遇到其他问题，通常是因为使用了非预期的编译器，您可以在编译前导出 `CXX_COMPILER` 和 "
+"torch-npu 版本冲突，请使用 `pip install --no-build-isolation -e .` "
+"以在系统环境下构建。如果在编译过程中遇到其他问题，通常是因为使用了非预期的编译器，您可以在编译前导出 `CXX_COMPILER` 和 "
 "`C_COMPILER` 环境变量来指定 g++ 和 gcc 的具体路径。"
 
 #: ../../source/installation.md:228
@@ -450,44 +449,44 @@ msgstr ""
 " cached files.`），请运行以下命令以使用 ModelScope 作为替代方案："
 
 #: ../../source/installation.md:339
-msgid "The output will be like:"
-msgstr "输出结果将类似于："
+msgid "The output is shown below, and it may change with version updates:"
+msgstr "输出如下所示，可能随版本更新而变化："
 
-#: ../../source/installation.md:424
+#: ../../source/installation.md:406
 msgid "Multi-node Deployment"
 msgstr "多节点部署"
 
-#: ../../source/installation.md:426
+#: ../../source/installation.md:408
 msgid "Verify Multi-Node Communication"
 msgstr "验证多节点通信"
 
-#: ../../source/installation.md:428
+#: ../../source/installation.md:410
 msgid ""
 "First, check physical layer connectivity, then verify each node, and "
 "finally verify the inter-node connectivity."
 msgstr "首先检查物理层连通性，然后验证每个节点，最后验证节点间连通性。"
 
-#: ../../source/installation.md:430
+#: ../../source/installation.md:412
 msgid "Physical Layer Requirements"
 msgstr "物理层要求"
 
-#: ../../source/installation.md:432
+#: ../../source/installation.md:414
 msgid ""
 "The physical machines must be located on the same WLAN, with network "
 "connectivity."
 msgstr "物理机必须位于同一局域网内，且网络互通。"
 
-#: ../../source/installation.md:433
+#: ../../source/installation.md:415
 msgid ""
 "All NPUs are connected with optical modules, and the connection status "
 "must be normal."
 msgstr "所有 NPU 均通过光模块连接，且连接状态必须正常。"
 
-#: ../../source/installation.md:435
+#: ../../source/installation.md:417
 msgid "Each Node Verification"
 msgstr "单节点验证"
 
-#: ../../source/installation.md:437
+#: ../../source/installation.md:419
 msgid ""
 "Execute the following commands on each node in sequence. The results must"
 " all be `success` and the status must be `UP`:"
@@ -501,29 +500,29 @@ msgstr "A2 系列"
 msgid "A3 series"
 msgstr "A3 系列"
 
-#: ../../source/installation.md:482
+#: ../../source/installation.md:464
 msgid "Interconnect Verification"
 msgstr "互联验证"
 
-#: ../../source/installation.md:484
+#: ../../source/installation.md:466
 msgid "1. Get NPU IP Addresses"
 msgstr "1.获取 NPU IP 地址"
 
-#: ../../source/installation.md:507
+#: ../../source/installation.md:489
 msgid "2. Cross-Node PING Test"
 msgstr "2.跨节点 PING 测试"
 
-#: ../../source/installation.md:514
+#: ../../source/installation.md:496
 msgid "Run Container In Each Node"
 msgstr "在每个节点运行容器"
 
-#: ../../source/installation.md:516
+#: ../../source/installation.md:498
 msgid ""
 "Using vLLM-ascend official container is more efficient to run multi-node "
 "environment."
 msgstr "使用 vLLM-ascend 官方容器运行多节点环境效率更高。"
 
-#: ../../source/installation.md:518
+#: ../../source/installation.md:500
 msgid ""
 "Run the following command to start the container in each node (You should"
 " download the weight to /root/.cache in advance):"
@@ -552,3 +551,6 @@ msgstr "在每个节点运行以下命令以启动容器（您应提前将权重
 
 #~ msgid "== 2.9.0"
 #~ msgstr "== 2.9.0"
+
+#~ msgid "The output will be like:"
+#~ msgstr "输出结果将类似于："
