@@ -312,7 +312,10 @@
     - vllm_ascend/ops/weight_prefetch.py
   tests:
     - tests/ut/ops
-    - tests/e2e/pull_request/two_card/test_flashcomm_distributed.py
+    - tests/e2e/pull_request/two_card/test_flashcomm_distributed.py::test_qwen3_moe_fc2_oshard_tp2
+    - tests/e2e/pull_request/two_card/test_flashcomm_distributed.py::test_deepseek_v2_lite_fc1_tp2
+    - tests/e2e/pull_request/two_card/test_flashcomm_distributed.py::test_qwen3_dense_fc1_tp2
+    - tests/e2e/pull_request/two_card/test_flashcomm_distributed.py::test_qwen3_dense_prefetch_mlp_weight_tp2
 
 - name: ops_gdn
   optional: true

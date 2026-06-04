@@ -17,7 +17,7 @@
 """
 Compare the outputs of vLLM with and without aclgraph.
 
-Run `pytest tests/multicard/test_data_parallel.py`.
+Run `pytest tests/e2e/pull_request/two_card/test_data_parallel.py`.
 """
 
 import os
@@ -31,7 +31,7 @@ import pytest
 from tests.e2e.conftest import wait_until_npu_memory_free
 
 MODELS = ["Qwen/Qwen3-30B-A3B", "vllm-ascend/Qwen3-30B-A3B-W8A8"]
-REPO_ROOT = Path(__file__).resolve().parents[5]
+REPO_ROOT = Path(__file__).resolve().parents[4]
 DATA_PARALLEL_SCRIPT = REPO_ROOT / "examples" / "offline_data_parallel.py"
 
 

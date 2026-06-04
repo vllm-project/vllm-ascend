@@ -17,7 +17,7 @@
 """
 Compare the outputs of vLLM with and without aclgraph.
 
-Run `pytest tests/multicard/test_external_launcher.py`.
+Run `pytest tests/e2e/pull_request/two_card/test_external_launcher.py`.
 """
 
 import os
@@ -36,7 +36,7 @@ from tests.e2e.conftest import wait_until_npu_memory_free
 MODELS = ["Qwen/Qwen3-0.6B"]
 MOE_MODELS = ["Qwen/Qwen3-30B-A3B"]
 DEVICE_NAME = torch_npu.npu.get_device_name(0)[:10]
-REPO_ROOT = Path(__file__).resolve().parents[5]
+REPO_ROOT = Path(__file__).resolve().parents[4]
 EXTERNAL_LAUNCHER_SCRIPT = REPO_ROOT / "examples" / "offline_external_launcher.py"
 
 
