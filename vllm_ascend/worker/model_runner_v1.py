@@ -2092,24 +2092,7 @@ class NPUModelRunner(GPUModelRunner):
                 logits = broadcasted["logits"]
 
             # Apply structured output bitmasks if present
-            spec_sampling_state = None
-            if spec_decode_metadata is not None:
-                max_topk = None
-                if (
-                    self.input_batch.sampling_metadata.top_k is not None
-                    and get_ascend_config().enable_reduce_sample
-                    and logits is not None
-                ):
-                    max_topk = self.input_batch.top_k_cpu[self.input_batch.top_k_cpu < logits.shape[1]].max()
-                spec_sampling_state = SpecSamplingExecutionState(
-                    max_topk=max_topk,
-                    random_tensors=self._prepare_spec_sampling_random_tensors(
-                        logits,
-                        spec_decode_metadata,
-                        self.input_batch.sampling_metadata,
-                        max_topk,
-                    ),
-                )
+            spec_sampling_state = self._prepare_spec_sampling_state(logits, spec_decode_metadata)
 
             self.execute_model_state = ExecuteModelState(
                 scheduler_output,
@@ -2360,6 +2343,32 @@ class NPUModelRunner(GPUModelRunner):
                 self.device,
             ),
             recovered_q=self._make_sampling_q(batch_size, selected_vocab_size, generators),
+        )
+
+    def _prepare_spec_sampling_state(
+        self,
+        logits: torch.Tensor | None,
+        spec_decode_metadata: SpecDecodeMetadata | None,
+    ) -> SpecSamplingExecutionState | None:
+        if spec_decode_metadata is None:
+            return None
+
+        max_topk = None
+        if (
+            self.input_batch.sampling_metadata.top_k is not None
+            and get_ascend_config().enable_reduce_sample
+            and logits is not None
+        ):
+            max_topk = self.input_batch.top_k_cpu[self.input_batch.top_k_cpu < logits.shape[1]].max()
+
+        return SpecSamplingExecutionState(
+            max_topk=max_topk,
+            random_tensors=self._prepare_spec_sampling_random_tensors(
+                logits,
+                spec_decode_metadata,
+                self.input_batch.sampling_metadata,
+                max_topk,
+            ),
         )
 
     def _sample_non_spec_decode(
