@@ -74,6 +74,7 @@ class MooncakeAgentMetadata(msgspec.Struct, omit_defaults=True, dict=True):
     te_rpc_port: int
     kv_caches_base_addr: list[int]
     num_blocks: int
+    block_len: list[int]
     local_ip: str = ""
 
 
@@ -337,6 +338,7 @@ class KVCacheRecvingThread(threading.Thread):
         self.kv_caches_base_addr: dict[str, dict[int, list[int]]] = SizedDict()
         self.kv_caches_base_addr[local_engine_id][local_handshake_port] = local_kv_caches_base_addr
         self.remote_te_port: dict[str, dict[int, int]] = SizedDict()
+        self.remote_block_len: dict[str, dict[int, list[int]]] = SizedDict()
         self.block_len = block_len
         # TODO(jianzs): find a better way to detect MLA.
         self.use_mla = len(block_len) == 2
@@ -600,12 +602,18 @@ class KVCacheRecvingThread(threading.Thread):
         req_start_time = time.perf_counter()
         src_list, dst_list, length_list = [], [], []
         block_length = len(self.block_len)
+        # Use remote (P-side) block_len when available for correct byte offset alignment
+        remote_kv_block_len = self.remote_block_len.get(remote_engine_id, {}).get(
+            remote_handshake_port, self.block_len[:1]
+        )
+        remote_block_len = remote_kv_block_len[0] if remote_kv_block_len else self.block_len[0]
         logger.info(
             "MOONCAKE_DIAG transfer: first_layer=%d end_layer=%d num_cache_per_layer=%d "
-            "block_len=%s inner_block_len=%d num_transfer_groups=%d "
+            "block_len=%s remote_block_len=%s inner_block_len=%d num_transfer_groups=%d "
             "offset=%d pp_rank=%d inner_off=%d tp_need=%d",
             first_layer_index, end_layer_index, num_cache_per_layer,
-            self.block_len, self.block_len[0] // tp_num_need_pulls if self.block_len else 0,
+            self.block_len, remote_block_len,
+            max(self.block_len[0] // tp_num_need_pulls, remote_block_len) if self.block_len else 0,
             num_transfer_groups,
             offset, prefill_pp_rank, inner_offset, tp_num_need_pulls,
         )
@@ -618,11 +626,17 @@ class KVCacheRecvingThread(threading.Thread):
             zip(local_kv_caches_base_addrs, remote_kv_caches_base_addrs)
         ):
             block_len = self.block_len[k % block_length]
-            inner_block_len = block_len // tp_num_need_pulls
+            # Use remote block_len for computing the stride in P-side memory to
+            # correctly handle any padding or layout differences between P and D.
+            # P has fewer heads per rank (P_TP > D_TP), so P's full block IS
+            # one "inner block".  We read it entirely via one RDMA descriptor.
+            p_block_len = remote_kv_block_len[k % len(remote_kv_block_len)] if remote_kv_block_len else block_len
+            inner_p_block_len = p_block_len  # P's full block = one head group
+            inner_d_block_len = block_len // tp_num_need_pulls if tp_num_need_pulls > 1 else block_len
             for remote_block_id, local_block_id in zip(grouped_remote_block_ids, grouped_local_block_ids):
-                src = src_layer_base_addr + local_block_id[0] * block_len + inner_offset * inner_block_len
-                dst = dst_layer_base_addr + remote_block_id[0] * inner_block_len
-                length = inner_block_len * len(local_block_id)
+                src = src_layer_base_addr + local_block_id[0] * block_len + inner_offset * inner_d_block_len
+                dst = dst_layer_base_addr + remote_block_id[0] * inner_p_block_len
+                length = inner_d_block_len * len(local_block_id)
                 src_list.append(src)
                 dst_list.append(dst)
                 length_list.append(length)
@@ -707,80 +721,118 @@ class KVCacheRecvingThread(threading.Thread):
         need_cat_cache: bool = False,
         need_nz_cache: bool = False,
     ):
-        # Get necessary parameters
-        k_cache = list(self.kv_caches.values())[0][0]
-        dtype = k_cache.dtype
-        device = k_cache.device
+        """
+        Fix the KV cache tensor layout after RDMA transfer.
+
+        Problem
+        -------
+        After RDMA transfer, each block's memory has a head-major layout::
+
+            [head0_token0..head0_token{bs-1} | head1_token0..head1_token{bs-1}]
+
+        But the D-side tensor stride expects token-major layout::
+
+            [head0_token0, head1_token0, head0_token1, head1_token1, ...]
+
+        Only the first token's head-0 data sits at offset 0 in both layouts,
+        which explains the "first token correct, subsequent garbled" symptom.
+
+        Fix
+        ---
+        Rearrange each block's in-memory data from head-major to token-major
+        in place, avoiding the npu_paged_cache_load round-trip which reads
+        with wrong strides.
+        """
+        if not need_cat_cache and not need_nz_cache:
+            return
 
         flat_block_ids = [item for sublist in block_ids for item in sublist]
-        block_ids_tensor = torch.tensor(flat_block_ids, dtype=torch.int32, device=device)
+        if not flat_block_ids:
+            return
+
         num_blocks = len(flat_block_ids)
         num_tokens = num_blocks * self.block_size
 
-        # Create device tensors for copy operations
+        # Fix GQA head layout in-place (skip when tp_num_need_pulls == 1)
+        if need_cat_cache and tp_num_need_pulls > 1:
+            torch.npu.synchronize()
+            for _, (k_cache_layer, v_cache_layer) in self.kv_caches.items():
+                self._fix_block_layout(k_cache_layer, v_cache_layer, flat_block_ids,
+                                       tp_num_need_pulls)
+
+        if need_nz_cache:
+            self._reformat_nz(flat_block_ids, num_blocks, num_tokens)
+
+    def _fix_block_layout(self, k_cache_layer: torch.Tensor, v_cache_layer: torch.Tensor,
+                          flat_block_ids: list[int], tp_num_need_pulls: int):
+        """
+        Fix the memory layout of specific KV cache blocks in-place.
+        Rearranges per-block data from head-major to token-major.
+        """
+        block_size = self.block_size
+        num_heads = self.num_kv_heads
+        head_dim = self.k_head_dim
+
+        for block_id in flat_block_ids:
+            k_block = k_cache_layer[block_id]
+            v_block = v_cache_layer[block_id]
+
+            # Current memory layout per block (head-major after RDMA):
+            #   [h0_t0..h0_t{bs-1} | h1_t0..h1_t{bs-1} | ...]
+            #
+            # Desired layout (token-major for correct stride access):
+            #   [t0_h0, t0_h1, ... | t1_h0, t1_h1, ... | ...]
+            #
+            # Strategy: view as [tp_num_need_pulls, block_size, head_dim],
+            # then transpose(0,1) → [block_size, tp_num_need_pulls, head_dim].
+
+            k_fixed = (
+                k_block.flatten()
+                .view(tp_num_need_pulls, block_size, -1)
+                .transpose(0, 1)
+                .contiguous()
+                .reshape(block_size, num_heads, -1)
+            )
+            v_fixed = (
+                v_block.flatten()
+                .view(tp_num_need_pulls, block_size, -1)
+                .transpose(0, 1)
+                .contiguous()
+                .reshape(block_size, num_heads, -1)
+            )
+
+            k_cache_layer[block_id].copy_(k_fixed)
+            v_cache_layer[block_id].copy_(v_fixed)
+
+    def _reformat_nz(self, flat_block_ids: list[int], num_blocks: int, num_tokens: int):
+        """NZ (non-zero) format conversion via load-scatter-write."""
+        k_cache = list(self.kv_caches.values())[0][0]
+        dtype = k_cache.dtype
+        device = k_cache.device
+        block_size = self.block_size
+
+        block_ids_tensor = torch.tensor(flat_block_ids, dtype=torch.int32, device=device)
         block_table = block_ids_tensor.view(1, -1)
         block_len_tensor = torch.tensor([num_tokens], dtype=torch.int32, device=device)
         seq_start_tensor = torch.tensor([0], dtype=torch.int32, device=device)
 
-        # Initialize buffers
+        block_offsets = torch.arange(0, block_size, dtype=torch.int32, device=device)
+        slot_mapping = (
+            block_offsets.reshape((1, block_size))
+            + block_ids_tensor.reshape((num_blocks, 1)) * block_size
+        ).flatten()
+
         k_buffer = torch.empty((num_tokens, self.num_kv_heads, self.k_head_dim), dtype=dtype, device=device)
         v_buffer = torch.empty((num_tokens, self.num_kv_heads, self.v_head_dim), dtype=dtype, device=device)
 
-        # Create slot mapping for reshape operations
-        block_offsets = torch.arange(0, self.block_size, dtype=torch.int32, device=device)
-        slot_mapping = (
-            block_offsets.reshape((1, self.block_size)) + block_ids_tensor.reshape((num_blocks, 1)) * self.block_size
-        ).flatten()
-
-        # FIXME: Right now, if we skip synchronization at this point, the system
-        # will crash in GQA scenarios. However, we still haven't identified the
-        # root cause.
-        torch.npu.synchronize()
-
-        # Process each layer in the KV cache
         for _, (k_cache_layer, v_cache_layer) in self.kv_caches.items():
-            # Load cache data into buffers
             torch_npu.atb.npu_paged_cache_load(
-                k_cache_layer,
-                v_cache_layer,
-                block_table,
-                block_len_tensor,
-                seq_starts=seq_start_tensor,
-                key=k_buffer,
-                value=v_buffer,
+                k_cache_layer, v_cache_layer, block_table, block_len_tensor,
+                seq_starts=seq_start_tensor, key=k_buffer, value=v_buffer,
             )
-            if need_cat_cache:
-                self._cat_kv_cache(
-                    k_cache_layer,
-                    v_cache_layer,
-                    k_buffer,
-                    v_buffer,
-                    tp_num_need_pulls,
-                    num_blocks,
-                    num_tokens,
-                    slot_mapping,
-                )
-            if need_nz_cache:
-                self._nz_kv_cache(k_cache_layer, v_cache_layer, k_buffer, v_buffer, slot_mapping)
-        # Clean up buffers
+            self._nz_kv_cache(k_cache_layer, v_cache_layer, k_buffer, v_buffer, slot_mapping)
+
         del k_buffer, v_buffer
-
-    def _cat_kv_cache(
-        self, k_cache_layer, v_cache_layer, k_buffer, v_buffer, tp_num_need_pulls, num_blocks, num_tokens, slot_mapping
-    ):
-        def _transpose_kv_cache_between_head(buffer: torch.Tensor) -> torch.Tensor:
-            buffer = buffer.view(num_blocks, tp_num_need_pulls, self.block_size, -1)
-            buffer.transpose_(1, 2)
-            return buffer.contiguous().view(num_tokens, self.num_kv_heads, -1)
-
-        # Transpose KV cache
-        k_buffer = _transpose_kv_cache_between_head(k_buffer)
-        v_buffer = _transpose_kv_cache_between_head(v_buffer)
-
-        # Reshape and cache the processed buffers
-        torch_npu._npu_reshape_and_cache(
-            key=k_buffer, value=v_buffer, key_cache=k_cache_layer, value_cache=v_cache_layer, slot_indices=slot_mapping
-        )
 
     def _nz_kv_cache(self, k_cache_layer, v_cache_layer, k_buffer, v_buffer, slot_mapping):
         nz_fmt_last_dim = 16
@@ -806,6 +858,7 @@ class KVCacheRecvingThread(threading.Thread):
             )
             self.kv_caches_base_addr[engine_id][remote_handshake_port] = agent_meta.kv_caches_base_addr
             self.remote_te_port[engine_id][remote_handshake_port] = agent_meta.te_rpc_port
+            self.remote_block_len[engine_id][remote_handshake_port] = agent_meta.block_len
         finally:
             if sock is not None:
                 self._return_remote_socket(sock, remote_host, remote_handshake_port)
@@ -1369,6 +1422,7 @@ class MooncakeConnectorWorker:
             te_rpc_port=self.te_rpc_port,
             kv_caches_base_addr=kv_caches_base_addr,
             num_blocks=self.num_blocks,
+            block_len=self.block_len,
             local_ip=get_ip(),
         )
         self.xfer_handshake_metadata = metadata
