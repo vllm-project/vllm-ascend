@@ -3797,7 +3797,7 @@ class NPUModelRunner(GPUModelRunner):
             supports_multimodal_pruning(self.get_model())
             and mm_config is not None
             and mm_config.is_multimodal_pruning_enabled()
-        )
+        ) # type: bool
         
         # wrap the model with full graph wrapper if needed.
         if self.compilation_config.cudagraph_mode.has_full_cudagraphs():
