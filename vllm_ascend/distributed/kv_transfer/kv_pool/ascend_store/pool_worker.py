@@ -3,10 +3,8 @@ from __future__ import annotations
 import importlib
 import math
 import threading
-from collections.abc import Generator
 
 import torch
-
 from vllm import envs
 from vllm.config import VllmConfig
 from vllm.distributed import (
@@ -25,6 +23,7 @@ from vllm.v1.kv_cache_interface import (
     MambaSpec,
     UniformTypeKVCacheSpecs,
 )
+
 from vllm_ascend.ascend_config import get_ascend_config
 from vllm_ascend.cpu_binding import (
     bind_thread_to_cpus,
@@ -40,7 +39,6 @@ from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.config_data import
     KeyMetadata,
     LayerBlockRange,
     LayerLoadTask,
-    LayerMultiBlockReqMeta,
     LayerTransferTask,
     ReqMeta,
     get_cache_family_granularity,
@@ -902,7 +900,7 @@ class KVPoolWorker:
         is_finish = self.layer_load_finished_events[self.current_layer].wait(timeout=10)
         if not is_finish:
             logger.info("Layerwise %d load wait timed out", self.current_layer)
-        logger.debug(f">>>>>>>>>>>>>>>>>>>> clear load layer {self.current_layer}")
+        logger.debug(">>>>>>>>>>>>>>>>>>>> clear load layer %d", self.current_layer)
         self.layer_load_finished_events[self.current_layer].clear()
 
     def get_block_ids_with_load_errors(self) -> set[int]:
@@ -933,7 +931,7 @@ class KVPoolWorker:
                 logger.info("Layerwise %d save wait timed out", self.current_layer)
             for layer_id in range(self.num_layers):
                 if self.layer_save_finished_events[layer_id].is_set():
-                    logger.debug(f">>>>>>>>>>>>>>>>>>>> clear save layer {layer_id}")
+                    logger.debug(">>>>>>>>>>>>>>>>>>>> clear save layer %d", layer_id)
                     self.layer_save_finished_events[layer_id].clear()
 
         self.current_layer = self.current_layer + 1

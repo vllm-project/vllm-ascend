@@ -11,6 +11,7 @@ from vllm.logger import logger
 from vllm.utils.math_utils import cdiv
 from vllm.v1.core.kv_cache_utils import BlockHash, BlockHashList, BlockHashListWithBlockSize
 from vllm.v1.core.sched.output import NewRequestData
+
 from vllm_ascend.memcache_comm_fence import AttentionComputeStartGate
 
 

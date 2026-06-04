@@ -1,6 +1,6 @@
 import importlib
 import math
-from typing import Any, Optional, cast
+from typing import Any, cast
 
 import vllm.envs as envs
 import zmq
@@ -21,6 +21,7 @@ from vllm.v1.kv_cache_interface import (
 )
 from vllm.v1.request import Request
 from vllm.v1.serial_utils import MsgpackEncoder
+
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.backend import (
     backend_map,
 )
@@ -693,7 +694,7 @@ class KVPoolScheduler:
         request: Request,
         scheduler_output: SchedulerOutput,
         force_skip_save: bool,
-    ) -> Optional[ReqMeta]:
+    ) -> ReqMeta | None:
         load_spec = self.load_specs.pop(request.req_id, None)
         num_tokens_to_compute = (
             request.num_computed_tokens
@@ -743,7 +744,7 @@ class KVPoolScheduler:
         cached_reqs,
         scheduler_output: SchedulerOutput,
         force_skip_save: bool,
-    ) -> Optional[ReqMeta]:
+    ) -> ReqMeta | None:
         new_block_ids_by_group = normalize_block_ids_by_group(new_block_ids)
         self._preempted_req_ids.discard(req_id)
         load_spec = self.load_specs.pop(req_id, None)
@@ -800,7 +801,7 @@ class KVPoolScheduler:
         cached_reqs,
         scheduler_output: SchedulerOutput,
         force_skip_save: bool,
-    ) -> Optional[ReqMeta]:
+    ) -> ReqMeta | None:
         if not self.save_decode_cache and not self.prefill_offload:
             return None
         request_tracker = self._request_trackers.get(req_id)
@@ -866,7 +867,7 @@ class KVPoolScheduler:
         request_id: str,
         request: Request,
         block_ids: list[list[int]],
-    ) -> Optional[ReqMeta]:
+    ) -> ReqMeta | None:
         load_spec = self.load_specs.pop(request_id, None)
         if not load_spec:
             return None

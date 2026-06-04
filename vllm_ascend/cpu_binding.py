@@ -7,8 +7,8 @@ import subprocess
 from collections import defaultdict
 
 import psutil
-
 from vllm.logger import logger
+
 from vllm_ascend import envs
 from vllm_ascend.utils import AscendDeviceType, get_ascend_device_type
 
@@ -499,8 +499,12 @@ class CpuAlloc:
         acl = " ".join(map(str, self.assign_acl[current_npu]))
         rel = str(self.assign_rel[current_npu]) if self.assign_rel[current_npu] else ""
         logger.info(
-            f"NPU{current_npu}: main=[{main}]  memcache=[{memcache}] "
-            f"acl=[{acl}]  release=[{rel}]"
+            "NPU%s: main=[%s]  memcache=[%s] acl=[%s]  release=[%s]",
+            current_npu,
+            main,
+            memcache,
+            acl,
+            rel,
         )
 
     def bind_memory(self, pid: str, npu: int) -> None:

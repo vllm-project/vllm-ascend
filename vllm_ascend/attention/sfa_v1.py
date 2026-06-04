@@ -4,9 +4,8 @@ from typing import TYPE_CHECKING, TypeVar
 import scipy  # type: ignore
 import torch
 import torch_npu
-from torch import nn
-
 import vllm.envs as envs_vllm
+from torch import nn
 from vllm.config import VllmConfig, get_current_vllm_config
 from vllm.distributed import get_tensor_model_parallel_world_size, get_tp_group
 from vllm.logger import logger
