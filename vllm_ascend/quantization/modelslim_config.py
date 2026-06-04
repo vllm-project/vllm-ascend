@@ -48,8 +48,7 @@ from .methods import get_scheme_class
 # The config filename that ModelSlim generates after quantizing a model.
 MODELSLIM_CONFIG_FILENAME = "quant_model_description.json"
 BAILING_HYBRID_MODEL_TYPES = ("bailing_hybrid", "bailing_hybrid_mtp")
-BAILING_MTP_SHARED_HEAD_PATTERN = re.compile(
-    r"^model\.layers\.\d+\.shared_head\.head$")
+BAILING_MTP_SHARED_HEAD_PATTERN = re.compile(r"^model\.layers\.\d+\.shared_head\.head$")
 
 # key: model_type
 # value: dict of fused module name -> list of original module names
