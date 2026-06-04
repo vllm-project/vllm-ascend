@@ -8,7 +8,7 @@ from vllm.config import CompilationConfig
 from vllm.v1.metrics.reader import Counter, Vector
 
 from tests.e2e.conftest import VllmRunner
-from tests.e2e.pull_request.light.one_card.spec_decode.utils import calculate_acceptance_per_pos
+from tests.e2e.pull_request.one_card.spec_decode.utils import calculate_acceptance_per_pos
 
 
 @pytest.mark.parametrize("num_speculative_tokens", [3])
