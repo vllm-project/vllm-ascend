@@ -2733,20 +2733,6 @@ class NPUModelRunner(GPUModelRunner):
         finally:
             self.sampler.prepare_sampling(None)
 
-    @contextmanager
-    def _configure_spec_rejection_sampler(
-        self,
-        max_topk: int | None,
-        random_tensors: SamplingRandomTensors | None,
-    ):
-        self.rejection_sampler.prepare_sampling(max_topk)
-        self.rejection_sampler.set_random_tensors(random_tensors)
-        try:
-            yield
-        finally:
-            self.rejection_sampler.set_random_tensors(None)
-            self.rejection_sampler.prepare_sampling(None)
-
     def _sample_spec_decode(
         self,
         logits: torch.Tensor,
@@ -2795,17 +2781,15 @@ class NPUModelRunner(GPUModelRunner):
                 sampling_metadata,
                 max_topk,
             )
-        with self._configure_spec_rejection_sampler(max_topk, random_tensors):
-            sampler_output = self._build_spec_sampler_output(
-                spec_decode_metadata,
-                logits,
-                sampling_metadata,
-                bonus_sampler_output,
-                target_logits,
-                raw_target_logits,
-                random_tensors,
-            )
-        return sampler_output
+        return self._build_spec_sampler_output(
+            spec_decode_metadata,
+            logits,
+            sampling_metadata,
+            bonus_sampler_output,
+            target_logits,
+            raw_target_logits,
+            random_tensors,
+        )
 
     def _sample_spec_decode_bonus_tokens(
         self,
@@ -2848,16 +2832,15 @@ class NPUModelRunner(GPUModelRunner):
             random_tensors=random_tensors,
         )
 
-        logprobs_tensors = None
-        if sampling_metadata.max_num_logprobs is not None:
-            logprobs_tensors = self.rejection_sampler._get_logprobs_tensors(
-                sampling_metadata.max_num_logprobs,
-                spec_decode_metadata,
-                logits,
-                target_logits if self.rejection_sampler.is_processed_logprobs_mode else raw_target_logits,
-                bonus_sampler_output.logprobs_tensors.logprobs,
-                output_token_ids,
-            )
+        logprobs_tensors = self.rejection_sampler.build_logprobs_tensors_from_prepared_inputs(
+            spec_decode_metadata,
+            logits,
+            sampling_metadata,
+            target_logits,
+            raw_target_logits,
+            bonus_sampler_output,
+            output_token_ids,
+        )
 
         return SamplerOutput(
             sampled_token_ids=output_token_ids,
