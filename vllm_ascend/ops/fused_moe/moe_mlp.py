@@ -372,9 +372,7 @@ def unquant_apply_mlp(
 
     if act_name == "swigluoai":
         num_experts, _, hidden_size = w1.shape
-        gate_up_out = AscendSwigluOAIAndMul.swiglu_oai_forward(
-            gate_up_out.view(-1, hidden_size), limit=swiglu_limit
-        )
+        gate_up_out = AscendSwigluOAIAndMul.swiglu_oai_forward(gate_up_out.view(-1, hidden_size), limit=swiglu_limit)
     else:
         if swiglu_limit > 0:
             gate, up = gate_up_out.chunk(2, dim=-1)
