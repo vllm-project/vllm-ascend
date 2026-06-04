@@ -16,7 +16,7 @@ import os
 
 from vllm.logger import init_logger
 
-logger = init_logger("vllm_kv_debug")
+logger = init_logger("vllm.kv_debug")
 
 
 # ---------------------------------------------------------------------------
