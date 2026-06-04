@@ -2409,27 +2409,29 @@ class NPUModelRunner(GPUModelRunner):
             recovered_q=self._make_sampling_q(batch_size, selected_vocab_size, generators),
         )
 
-    def _sample(
+    def _sample_non_spec_decode(
         self,
-        logits,
-        spec_decode_metadata,
-        spec_sampling_state: SpecSamplingExecutionState | None = None,
-    ):
-        # Sample the next token and get logprobs if needed.
-        sampling_metadata = self.input_batch.sampling_metadata
-        self.input_batch.update_async_output_token_ids()
-        if spec_decode_metadata is None:
-            max_topk = None
-            if lmhead_tp_enable() and logits is not None:
-                logits = logits[: self.input_batch.num_reqs]
-            if self.input_batch.sampling_metadata.top_k is not None and get_ascend_config().enable_reduce_sample:
-                max_topk = self.input_batch.top_k_cpu[self.input_batch.top_k_cpu < logits.shape[1]].max()
-                self.sampler.prepare_sampling(max_topk)
-            return self.sampler(
-                logits=logits,
-                sampling_metadata=sampling_metadata,
-            )
+        logits: torch.Tensor,
+        sampling_metadata: SamplingMetadata,
+    ) -> SamplerOutput:
+        max_topk = None
+        if lmhead_tp_enable() and logits is not None:
+            logits = logits[: self.input_batch.num_reqs]
+        if self.input_batch.sampling_metadata.top_k is not None and get_ascend_config().enable_reduce_sample:
+            max_topk = self.input_batch.top_k_cpu[self.input_batch.top_k_cpu < logits.shape[1]].max()
+            self.sampler.prepare_sampling(max_topk)
+        return self.sampler(
+            logits=logits,
+            sampling_metadata=sampling_metadata,
+        )
 
+    def _sample_spec_decode(
+        self,
+        logits: torch.Tensor,
+        spec_decode_metadata: SpecDecodeMetadata,
+        sampling_metadata: SamplingMetadata,
+        spec_sampling_state: SpecSamplingExecutionState | None = None,
+    ) -> SamplerOutput:
         max_topk = None
         if lmhead_tp_enable() and logits is not None:
             logits = logits[: len(spec_decode_metadata.logits_indices)]
@@ -2458,6 +2460,25 @@ class NPUModelRunner(GPUModelRunner):
         finally:
             self.rejection_sampler.set_random_tensors(None)
         return sampler_output
+
+    def _sample(
+        self,
+        logits,
+        spec_decode_metadata,
+        spec_sampling_state: SpecSamplingExecutionState | None = None,
+    ):
+        # Sample the next token and get logprobs if needed.
+        sampling_metadata = self.input_batch.sampling_metadata
+        self.input_batch.update_async_output_token_ids()
+        if spec_decode_metadata is None:
+            return self._sample_non_spec_decode(logits, sampling_metadata)
+
+        return self._sample_spec_decode(
+            logits,
+            spec_decode_metadata,
+            sampling_metadata,
+            spec_sampling_state,
+        )
 
     # TODO: remove this func after eagle_proposer is refactored and
     #  _bookkeeping_sync is moved after propose_draft_token_ids
