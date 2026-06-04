@@ -58,7 +58,7 @@ from vllm_ascend import envs as ascend_envs
 from vllm_ascend.ascend_config import get_ascend_config, init_ascend_config
 from vllm_ascend.distributed.kv_transfer.utils.mooncake_transfer_engine import global_te
 from vllm_ascend.distributed.kv_transfer.utils.utils import get_transfer_timeout_value
-from vllm_ascend.utils import enable_custom_op, is_vl_model
+from vllm_ascend.utils import enable_custom_op
 
 # isort: off
 if TYPE_CHECKING:
@@ -409,19 +409,6 @@ class KVCacheRecvingThread(threading.Thread):
             rank: get_prefill_pp_indices(self.num_layers, rank, self._prefill_pp_size, prefill_pp_layer_partition)
             for rank in range(self._prefill_pp_size)
         }
-        if not is_vl_model(self.vllm_config):
-            if self.use_mla:
-                self.k_head_dim = hf_text_config.kv_lora_rank
-                self.v_head_dim = hf_text_config.qk_rope_head_dim
-                self.num_kv_heads = 1
-            else:
-                self.k_head_dim = hf_text_config.head_dim
-                self.v_head_dim = hf_text_config.head_dim
-                self.num_kv_heads = max(hf_text_config.num_key_value_heads // self.tp_size, 1)
-        else:
-            self.k_head_dim = hf_text_config.head_dim
-            self.v_head_dim = hf_text_config.head_dim
-            self.num_kv_heads = max(hf_text_config.num_key_value_heads // self.tp_size, 1)
         self.proc_not_transfer_request: dict[str, bool] = {}
         self.failed_recv_requests: set[str] = set()
         self.invalid_block_ids: set[int] = set()
@@ -930,6 +917,12 @@ class KVCacheRecvingThread(threading.Thread):
             layer_name: layer_cache for layer_name, layer_cache in self.kv_caches.items() if layer_in_group(layer_name)
         }
 
+    @staticmethod
+    def _get_kv_cache_dims_from_tensors(kv_caches: dict[str, Any]) -> tuple[int, int, int]:
+        """Return (num_kv_heads, k_head_dim, v_head_dim) from registered KV cache tensors."""
+        k_cache, v_cache = next(iter(kv_caches.values()))
+        return int(k_cache.shape[-2]), int(k_cache.shape[-1]), int(v_cache.shape[-1])
+
     def reformat_kv_cache_with_fused_op(
         self,
         block_ids: list[list[int]],
@@ -938,12 +931,10 @@ class KVCacheRecvingThread(threading.Thread):
     ):
         if kv_caches is None:
             kv_caches = self.kv_caches
-        # Get necessary parameters
         k_cache = list(kv_caches.values())[0][0]
         device = k_cache.device
-        head_dim = self.model_config.hf_text_config.head_dim
+        num_kv_head, head_dim, _ = self._get_kv_cache_dims_from_tensors(kv_caches)
         block_size = self.vllm_config.cache_config.block_size
-        num_kv_head = max(self.model_config.hf_text_config.num_key_value_heads // self.tp_size, 1)
         layers = len(kv_caches)
         flat_block_ids = [item for sublist in block_ids for item in sublist]
         block_ids_tensor = torch.tensor(flat_block_ids, dtype=torch.int64, device=device)
@@ -968,10 +959,10 @@ class KVCacheRecvingThread(threading.Thread):
     ):
         if kv_caches is None:
             kv_caches = self.kv_caches
-        # Get necessary parameters
         k_cache = list(kv_caches.values())[0][0]
         dtype = k_cache.dtype
         device = k_cache.device
+        num_kv_heads, k_head_dim, v_head_dim = self._get_kv_cache_dims_from_tensors(kv_caches)
 
         flat_block_ids = [item for sublist in block_ids for item in sublist]
         block_ids_tensor = torch.tensor(flat_block_ids, dtype=torch.int32, device=device)
@@ -983,9 +974,8 @@ class KVCacheRecvingThread(threading.Thread):
         block_len_tensor = torch.tensor([num_tokens], dtype=torch.int32, device=device)
         seq_start_tensor = torch.tensor([0], dtype=torch.int32, device=device)
 
-        # Initialize buffers
-        k_buffer = torch.empty((num_tokens, self.num_kv_heads, self.k_head_dim), dtype=dtype, device=device)
-        v_buffer = torch.empty((num_tokens, self.num_kv_heads, self.v_head_dim), dtype=dtype, device=device)
+        k_buffer = torch.empty((num_tokens, num_kv_heads, k_head_dim), dtype=dtype, device=device)
+        v_buffer = torch.empty((num_tokens, num_kv_heads, v_head_dim), dtype=dtype, device=device)
 
         # Create slot mapping for reshape operations
         block_offsets = torch.arange(0, self.block_size, dtype=torch.int32, device=device)
@@ -1020,19 +1010,38 @@ class KVCacheRecvingThread(threading.Thread):
                     num_blocks,
                     num_tokens,
                     slot_mapping,
+                    num_kv_heads,
                 )
             if need_nz_cache:
-                self._nz_kv_cache(k_cache_layer, v_cache_layer, k_buffer, v_buffer, slot_mapping)
+                self._nz_kv_cache(
+                    k_cache_layer,
+                    v_cache_layer,
+                    k_buffer,
+                    v_buffer,
+                    slot_mapping,
+                    num_kv_heads,
+                    k_head_dim,
+                    v_head_dim,
+                )
         # Clean up buffers
         del k_buffer, v_buffer
 
     def _cat_kv_cache(
-        self, k_cache_layer, v_cache_layer, k_buffer, v_buffer, tp_num_need_pulls, num_blocks, num_tokens, slot_mapping
+        self,
+        k_cache_layer,
+        v_cache_layer,
+        k_buffer,
+        v_buffer,
+        tp_num_need_pulls,
+        num_blocks,
+        num_tokens,
+        slot_mapping,
+        num_kv_heads: int,
     ):
         def _transpose_kv_cache_between_head(buffer: torch.Tensor) -> torch.Tensor:
             buffer = buffer.view(num_blocks, tp_num_need_pulls, self.block_size, -1)
             buffer.transpose_(1, 2)
-            return buffer.contiguous().view(num_tokens, self.num_kv_heads, -1)
+            return buffer.contiguous().view(num_tokens, num_kv_heads, -1)
 
         # Transpose KV cache
         k_buffer = _transpose_kv_cache_between_head(k_buffer)
@@ -1043,13 +1052,23 @@ class KVCacheRecvingThread(threading.Thread):
             key=k_buffer, value=v_buffer, key_cache=k_cache_layer, value_cache=v_cache_layer, slot_indices=slot_mapping
         )
 
-    def _nz_kv_cache(self, k_cache_layer, v_cache_layer, k_buffer, v_buffer, slot_mapping):
+    def _nz_kv_cache(
+        self,
+        k_cache_layer,
+        v_cache_layer,
+        k_buffer,
+        v_buffer,
+        slot_mapping,
+        num_kv_heads: int,
+        k_head_dim: int,
+        v_head_dim: int,
+    ):
         nz_fmt_last_dim = 16
         k_cache_layer = k_cache_layer.view(
-            -1, self.k_head_dim * self.num_kv_heads // nz_fmt_last_dim, self.block_size, nz_fmt_last_dim
+            -1, k_head_dim * num_kv_heads // nz_fmt_last_dim, self.block_size, nz_fmt_last_dim
         )
         v_cache_layer = v_cache_layer.view(
-            -1, self.v_head_dim * self.num_kv_heads // nz_fmt_last_dim, self.block_size, nz_fmt_last_dim
+            -1, v_head_dim * num_kv_heads // nz_fmt_last_dim, self.block_size, nz_fmt_last_dim
         )
         torch_npu.npu_scatter_pa_kv_cache(k_buffer, v_buffer, k_cache_layer, v_cache_layer, slot_mapping)
 
