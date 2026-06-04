@@ -262,6 +262,9 @@ class SamplingExecutionState:
 class SpecSamplingExecutionState:
     max_topk: int | None
     random_tensors: SamplingRandomTensors | None
+    bonus_sampler_output: SamplerOutput | None
+    target_logits_or_tuple: torch.Tensor | tuple[torch.Tensor, torch.Tensor | None] | None
+    raw_target_logits: torch.Tensor | None
 
 
 @dataclass
@@ -2578,6 +2581,7 @@ class NPUModelRunner(GPUModelRunner):
     ) -> SpecSamplingExecutionState | None:
         if spec_decode_metadata is None:
             return None
+        assert logits is not None
 
         max_topk = None
         if (
@@ -2587,14 +2591,31 @@ class NPUModelRunner(GPUModelRunner):
         ):
             max_topk = self.input_batch.top_k_cpu[self.input_batch.top_k_cpu < logits.shape[1]].max()
 
+        random_tensors = self._prepare_spec_sampling_random_tensors(
+            logits,
+            spec_decode_metadata,
+            sampling_metadata,
+            max_topk,
+        )
+        bonus_sampler_output = self._sample_spec_decode_bonus_tokens(
+            logits,
+            spec_decode_metadata,
+            sampling_metadata,
+            random_tensors,
+        )
+        target_logits_or_tuple, raw_target_logits = self._prepare_spec_target_logits(
+            logits,
+            spec_decode_metadata,
+            sampling_metadata,
+            max_topk,
+        )
+
         return SpecSamplingExecutionState(
             max_topk=max_topk,
-            random_tensors=self._prepare_spec_sampling_random_tensors(
-                logits,
-                spec_decode_metadata,
-                sampling_metadata,
-                max_topk,
-            ),
+            random_tensors=random_tensors,
+            bonus_sampler_output=bonus_sampler_output,
+            target_logits_or_tuple=target_logits_or_tuple,
+            raw_target_logits=raw_target_logits,
         )
 
     def _prepare_spec_target_logits(
@@ -2739,18 +2760,32 @@ class NPUModelRunner(GPUModelRunner):
                 sampling_metadata,
                 max_topk,
             )
-        bonus_sampler_output = self._sample_spec_decode_bonus_tokens(
-            logits,
-            spec_decode_metadata,
-            sampling_metadata,
-            random_tensors,
+        bonus_sampler_output = (
+            spec_sampling_state.bonus_sampler_output
+            if spec_sampling_state is not None else None
         )
-        target_logits, raw_target_logits = self._prepare_spec_target_logits(
-            logits,
-            spec_decode_metadata,
-            sampling_metadata,
-            max_topk,
+        if bonus_sampler_output is None:
+            bonus_sampler_output = self._sample_spec_decode_bonus_tokens(
+                logits,
+                spec_decode_metadata,
+                sampling_metadata,
+                random_tensors,
+            )
+        target_logits = (
+            spec_sampling_state.target_logits_or_tuple
+            if spec_sampling_state is not None else None
         )
+        raw_target_logits = (
+            spec_sampling_state.raw_target_logits
+            if spec_sampling_state is not None else None
+        )
+        if target_logits is None or raw_target_logits is None:
+            target_logits, raw_target_logits = self._prepare_spec_target_logits(
+                logits,
+                spec_decode_metadata,
+                sampling_metadata,
+                max_topk,
+            )
         with self._configure_spec_rejection_sampler(max_topk, random_tensors):
             sampler_output = self.rejection_sampler(
                 spec_decode_metadata,
