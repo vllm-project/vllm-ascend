@@ -1,0 +1,428 @@
+# SOME DESCRIPTIVE TITLE.
+# Copyright (C) 2025, vllm-ascend team
+# This file is distributed under the same license as the vllm-ascend
+# package.
+# FIRST AUTHOR <EMAIL@ADDRESS>, 2026.
+#
+msgid ""
+msgstr ""
+"Project-Id-Version: vllm-ascend \n"
+"Report-Msgid-Bugs-To: \n"
+"POT-Creation-Date: 2026-06-04 05:04+0000\n"
+"PO-Revision-Date: YEAR-MO-DA HO:MI+ZONE\n"
+"Last-Translator: FULL NAME <EMAIL@ADDRESS>\n"
+"Language: zh_CN\n"
+"Language-Team: zh_CN <LL@li.org>\n"
+"Plural-Forms: nplurals=1; plural=0;\n"
+"MIME-Version: 1.0\n"
+"Content-Type: text/plain; charset=utf-8\n"
+"Content-Transfer-Encoding: 8bit\n"
+"Generated-By: Babel 2.18.0\n"
+
+#: ../../source/tutorials/models/Hy3-preview.md:1
+msgid "Hy3-preview"
+msgstr "Hy3-preview"
+
+#: ../../source/tutorials/models/Hy3-preview.md:3
+msgid "Introduction"
+msgstr "简介"
+
+#: ../../source/tutorials/models/Hy3-preview.md:5
+msgid ""
+"Hy3-preview is a Mixture-of-Experts model, with 295B total parameters, "
+"21B active parameters and 3.8B MTP layer parameters, developed by the "
+"Tencent Hy Team. It is the first model trained on Tencent rebuilt "
+"infrastructure. It improves significantly on complex reasoning, "
+"instruction following, context learning, coding, and agent tasks."
+msgstr ""
+"Hy3-preview 是一个混合专家模型，总参数量295B，激活参数量21B，MTP层参数量3.8B，由腾讯混元团队开发。它是首个在腾讯重建基础设施上训练的模型，在复杂推理、指令遵循、上下文学习、编码和智能体任务上均有显著提升。"
+
+#: ../../source/tutorials/models/Hy3-preview.md:7
+msgid ""
+"This guide records the verified vLLM Ascend serving path for Hy3-preview "
+"on one Atlas A3 16-NPU node. The verified default path is TP16 + EP + MTP"
+" + ACLGraph."
+msgstr ""
+"本指南记录了在单个 Atlas A3 16-NPU 节点上，针对 Hy3-preview 验证通过的 vLLM Ascend 服务路径。已验证的默认路径为 TP16 + EP + MTP + ACLGraph。"
+
+#: ../../source/tutorials/models/Hy3-preview.md:9
+msgid "Supported Features"
+msgstr "支持特性"
+
+#: ../../source/tutorials/models/Hy3-preview.md:11
+msgid ""
+"Refer to [supported "
+"features](../../user_guide/support_matrix/supported_models.md) to get the"
+" model's supported feature matrix."
+msgstr ""
+"请参考[支持特性](../../user_guide/support_matrix/supported_models.md)获取模型支持的特性矩阵。"
+
+#: ../../source/tutorials/models/Hy3-preview.md:13
+msgid ""
+"Refer to [feature guide](../../user_guide/feature_guide/index.md) to get "
+"the feature's configuration."
+msgstr ""
+"请参考[特性指南](../../user_guide/feature_guide/index.md)获取特性配置。"
+
+#: ../../source/tutorials/models/Hy3-preview.md:15
+msgid "Environment Preparation"
+msgstr "环境准备"
+
+#: ../../source/tutorials/models/Hy3-preview.md:17
+msgid "Model Weight"
+msgstr "模型权重"
+
+#: ../../source/tutorials/models/Hy3-preview.md:19
+msgid ""
+"Hugging Face: "
+"[tencent/Hy3-preview](https://huggingface.co/tencent/Hy3-preview)"
+msgstr ""
+"Hugging Face: "
+"[tencent/Hy3-preview](https://huggingface.co/tencent/Hy3-preview)"
+
+#: ../../source/tutorials/models/Hy3-preview.md:20
+msgid ""
+"ModelScope: [Tencent-Hunyuan/Hy3-preview](https://modelscope.cn/models"
+"/Tencent-Hunyuan/Hy3-preview)"
+msgstr ""
+"ModelScope: [Tencent-Hunyuan/Hy3-preview](https://modelscope.cn/models"
+"/Tencent-Hunyuan/Hy3-preview)"
+
+#: ../../source/tutorials/models/Hy3-preview.md:21
+msgid ""
+"GitCode: "
+"[tencent_hunyuan/Hy3-preview](https://ai.gitcode.com/tencent_hunyuan/Hy3-preview)"
+msgstr ""
+"GitCode: "
+"[tencent_hunyuan/Hy3-preview](https://ai.gitcode.com/tencent_hunyuan/Hy3-preview)"
+
+#: ../../source/tutorials/models/Hy3-preview.md:23
+msgid ""
+"Download or mount the checkpoint to a path shared by the runtime "
+"container, for example `/models/Hy3-preview`."
+msgstr ""
+"将检查点下载或挂载到运行时容器共享的路径，例如 `/models/Hy3-preview`。"
+
+#: ../../source/tutorials/models/Hy3-preview.md:25
+msgid "Hardware"
+msgstr "硬件"
+
+#: ../../source/tutorials/models/Hy3-preview.md:27
+msgid ""
+"The verified configuration uses one Atlas A3 node with 16 NPUs and 64 GB "
+"HBM per NPU. The real-weight run used about 58 GB process memory per NPU "
+"after startup."
+msgstr ""
+"已验证的配置使用一个 Atlas A3 节点，包含16个NPU，每个NPU 64 GB HBM。实际权重运行启动后每个NPU约使用58 GB进程内存。"
+
+#: ../../source/tutorials/models/Hy3-preview.md:29
+msgid "Installation"
+msgstr "安装"
+
+#: ../../source/tutorials/models/Hy3-preview.md:31
+msgid ""
+"You can use our official docker image to run Hy3-preview directly. For "
+"Atlas A3 machines, select the image variant with the `-a3` suffix. The "
+"official image already includes the vLLM and vLLM Ascend runtime needed "
+"for the verified serving path."
+msgstr ""
+"您可以直接使用官方 Docker 镜像运行 Hy3-preview。对于 Atlas A3 机器，请选择带有 `-a3` 后缀的镜像变体。官方镜像已包含验证服务路径所需的 vLLM 和 vLLM Ascend 运行时。"
+
+#: ../../source/tutorials/models/Hy3-preview.md:70
+msgid ""
+"In addition, if you don't want to use the docker image as above, you can "
+"also build all from source:"
+msgstr ""
+"此外，如果您不想使用上述 Docker 镜像，也可以从源码构建所有组件："
+
+#: ../../source/tutorials/models/Hy3-preview.md:72
+msgid ""
+"Install `vllm-ascend` from source, refer to "
+"[installation](https://github.com/vllm-project/vllm-"
+"ascend/blob/main/docs/source/installation.md)."
+msgstr ""
+"从源码安装 `vllm-ascend`，请参考[安装指南](https://github.com/vllm-project/vllm-"
+"ascend/blob/main/docs/source/installation.md)。"
+
+#: ../../source/tutorials/models/Hy3-preview.md:74
+msgid "Deployment"
+msgstr "部署"
+
+#: ../../source/tutorials/models/Hy3-preview.md:76
+msgid "Single-node Deployment"
+msgstr "单节点部署"
+
+#: ../../source/tutorials/models/Hy3-preview.md:78
+msgid "Run `vllm serve` from `/workspace`."
+msgstr "在 `/workspace` 目录下运行 `vllm serve`。"
+
+#: ../../source/tutorials/models/Hy3-preview.md:101
+msgid ""
+"`--enable-ep-weight-filter` is optional. It skips expert weights that do "
+"not belong to the local EP rank during loading, reducing disk and host-"
+"memory pressure for very large MoE checkpoints. We recommend keeping it "
+"enabled."
+msgstr ""
+"`--enable-ep-weight-filter` 为可选参数。它在加载时跳过不属于本地 EP rank 的专家权重，减少超大 MoE 检查点的磁盘和主机内存压力。建议保持启用。"
+
+#: ../../source/tutorials/models/Hy3-preview.md:102
+msgid ""
+"Tool calling and reasoning are service interfaces declared in the Hy3 "
+"README, so it is recommended to pass the corresponding `hy_v3` parsers by"
+" default."
+msgstr ""
+"工具调用和推理是 Hy3 README 中声明的服务接口，因此建议默认传递相应的 `hy_v3` 解析器。"
+
+#: ../../source/tutorials/models/Hy3-preview.md:104
+msgid "Functional Verification"
+msgstr "功能验证"
+
+#: ../../source/tutorials/models/Hy3-preview.md:106
+msgid "Check model readiness first:"
+msgstr "首先检查模型就绪状态："
+
+#: ../../source/tutorials/models/Hy3-preview.md:112
+msgid "Run a text smoke request:"
+msgstr "运行文本冒烟请求："
+
+#: ../../source/tutorials/models/Hy3-preview.md:127
+msgid "Expected result:"
+msgstr "预期结果："
+
+#: ../../source/tutorials/models/Hy3-preview.md:144
+msgid "Accuracy Evaluation"
+msgstr "精度评估"
+
+#: ../../source/tutorials/models/Hy3-preview.md:146
+msgid "Here are two accuracy evaluation methods."
+msgstr "以下是两种精度评估方法。"
+
+#: ../../source/tutorials/models/Hy3-preview.md:148
+#: ../../source/tutorials/models/Hy3-preview.md:165
+msgid "Using AISBench"
+msgstr "使用 AISBench"
+
+#: ../../source/tutorials/models/Hy3-preview.md:150
+msgid ""
+"Refer to [Using "
+"AISBench](../../developer_guide/evaluation/using_ais_bench.md) for "
+"details."
+msgstr ""
+"详情请参考[使用 AISBench](../../developer_guide/evaluation/using_ais_bench.md)。"
+
+#: ../../source/tutorials/models/Hy3-preview.md:152
+msgid ""
+"After execution, you can get the result, here is the result for reference"
+" only."
+msgstr ""
+"执行后可获取结果，以下结果仅供参考。"
+
+#: ../../source/tutorials/models/Hy3-preview.md:33
+msgid "dataset"
+msgstr "数据集"
+
+#: ../../source/tutorials/models/Hy3-preview.md:33
+msgid "version"
+msgstr "版本"
+
+#: ../../source/tutorials/models/Hy3-preview.md:33
+msgid "metric"
+msgstr "指标"
+
+#: ../../source/tutorials/models/Hy3-preview.md:33
+msgid "mode"
+msgstr "模式"
+
+#: ../../source/tutorials/models/Hy3-preview.md:33
+msgid "vllm-api-general-chat"
+msgstr "vllm-api-general-chat"
+
+#: ../../source/tutorials/models/Hy3-preview.md:33
+msgid "note"
+msgstr "备注"
+
+#: ../../source/tutorials/models/Hy3-preview.md:33
+msgid "GSM8K"
+msgstr "GSM8K"
+
+#: ../../source/tutorials/models/Hy3-preview.md:33
+msgid "-"
+msgstr "-"
+
+#: ../../source/tutorials/models/Hy3-preview.md:33
+msgid "accuracy"
+msgstr "准确率"
+
+#: ../../source/tutorials/models/Hy3-preview.md:33
+msgid "gen"
+msgstr "生成"
+
+#: ../../source/tutorials/models/Hy3-preview.md:33
+msgid "93.07"
+msgstr "93.07"
+
+#: ../../source/tutorials/models/Hy3-preview.md:33
+msgid "1 Atlas 800 A3 (64G × 16)"
+msgstr "1 Atlas 800 A3 (64G × 16)"
+
+#: ../../source/tutorials/models/Hy3-preview.md:33
+msgid "C-Eval"
+msgstr "C-Eval"
+
+#: ../../source/tutorials/models/Hy3-preview.md:33
+msgid "87.64"
+msgstr "87.64"
+
+#: ../../source/tutorials/models/Hy3-preview.md:159
+msgid "Using Language Model Evaluation Harness"
+msgstr "使用 Language Model Evaluation Harness"
+
+#: ../../source/tutorials/models/Hy3-preview.md:161
+msgid "Not tested yet."
+msgstr "尚未测试。"
+
+#: ../../source/tutorials/models/Hy3-preview.md:163
+msgid "Performance"
+msgstr "性能"
+
+#: ../../source/tutorials/models/Hy3-preview.md:167
+msgid ""
+"Refer to [Using AISBench for performance "
+"evaluation](../../developer_guide/evaluation/using_ais_bench.md#execute-"
+"performance-evaluation) for details."
+msgstr ""
+"详情请参考[使用 AISBench 进行性能评估](../../developer_guide/evaluation/using_ais_bench.md#execute-"
+"performance-evaluation)。"
+
+#: ../../source/tutorials/models/Hy3-preview.md:169
+msgid "Using vLLM Benchmark"
+msgstr "使用 vLLM Benchmark"
+
+#: ../../source/tutorials/models/Hy3-preview.md:171
+msgid ""
+"Refer to [vllm benchmark](https://docs.vllm.ai/en/latest/contributing/) "
+"for more details."
+msgstr ""
+"更多详情请参考 [vllm benchmark](https://docs.vllm.ai/en/latest/contributing/)。"
+
+#: ../../source/tutorials/models/Hy3-preview.md:173
+msgid "Lightweight Online Benchmark"
+msgstr "轻量级在线基准测试"
+
+#: ../../source/tutorials/models/Hy3-preview.md:175
+msgid ""
+"The following numbers are from a real-weight smoke benchmark on one Atlas"
+" A3 16-NPU node, using TP16 + EP + MTP + ACLGraph. The benchmark used "
+"`vllm bench serve`, random prompts, output length 128, `--max-concurrency"
+" 1`, `--temperature 0`, and 4 requests per input length. These numbers "
+"are functional performance evidence, not tuned throughput limits."
+msgstr ""
+"以下数据来自单个 Atlas A3 16-NPU 节点上的实际权重冒烟基准测试，使用 TP16 + EP + MTP + ACLGraph。基准测试使用 `vllm bench serve`，随机提示，输出长度128，`--max-concurrency 1`，`--temperature 0`，每个输入长度4个请求。这些数据为功能性能验证，并非调优后的吞吐量上限。"
+
+#: ../../source/tutorials/models/Hy3-preview.md:33
+msgid "Random input length"
+msgstr "随机输入长度"
+
+#: ../../source/tutorials/models/Hy3-preview.md:33
+msgid "Success / total"
+msgstr "成功/总数"
+
+#: ../../source/tutorials/models/Hy3-preview.md:33
+msgid "Mean TTFT (ms)"
+msgstr "平均 TTFT (ms)"
+
+#: ../../source/tutorials/models/Hy3-preview.md:33
+msgid "Mean TPOT (ms)"
+msgstr "平均 TPOT (ms)"
+
+#: ../../source/tutorials/models/Hy3-preview.md:33
+msgid "Output throughput (tok/s)"
+msgstr "输出吞吐量 (tok/s)"
+
+#: ../../source/tutorials/models/Hy3-preview.md:33
+msgid "Total token throughput (tok/s)"
+msgstr "总 token 吞吐量 (tok/s)"
+
+#: ../../source/tutorials/models/Hy3-preview.md:33
+msgid "1,024"
+msgstr "1,024"
+
+#: ../../source/tutorials/models/Hy3-preview.md:33
+msgid "4 / 4"
+msgstr "4 / 4"
+
+#: ../../source/tutorials/models/Hy3-preview.md:33
+msgid "484.64"
+msgstr "484.64"
+
+#: ../../source/tutorials/models/Hy3-preview.md:33
+msgid "30.10"
+msgstr "30.10"
+
+#: ../../source/tutorials/models/Hy3-preview.md:33
+msgid "29.71"
+msgstr "29.71"
+
+#: ../../source/tutorials/models/Hy3-preview.md:33
+msgid "270.90"
+msgstr "270.90"
+
+#: ../../source/tutorials/models/Hy3-preview.md:33
+msgid "4,096"
+msgstr "4,096"
+
+#: ../../source/tutorials/models/Hy3-preview.md:33
+msgid "1379.41"
+msgstr "1379.41"
+
+#: ../../source/tutorials/models/Hy3-preview.md:33
+msgid "30.24"
+msgstr "30.24"
+
+#: ../../source/tutorials/models/Hy3-preview.md:33
+msgid "24.52"
+msgstr "24.52"
+
+#: ../../source/tutorials/models/Hy3-preview.md:33
+msgid "811.99"
+msgstr "811.99"
+
+#: ../../source/tutorials/models/Hy3-preview.md:33
+msgid "16,384"
+msgstr "16,384"
+
+#: ../../source/tutorials/models/Hy3-preview.md:33
+msgid "2604.58"
+msgstr "2604.58"
+
+#: ../../source/tutorials/models/Hy3-preview.md:33
+msgid "30.43"
+msgstr "30.43"
+
+#: ../../source/tutorials/models/Hy3-preview.md:33
+msgid "19.79"
+msgstr "19.79"
+
+#: ../../source/tutorials/models/Hy3-preview.md:33
+msgid "2554.65"
+msgstr "2554.65"
+
+#: ../../source/tutorials/models/Hy3-preview.md:200
+msgid "Known Limitations"
+msgstr "已知限制"
+
+#: ../../source/tutorials/models/Hy3-preview.md:202
+msgid ""
+"The model config supports 262,144 tokens, but this guide only verifies "
+"32,768-token serving. Larger contexts require a separate capacity "
+"validation."
+msgstr ""
+"模型配置支持262,144个token，但本指南仅验证了32,768个token的服务。"
+"更大的上下文需要单独进行容量验证。"
+
+#: ../../source/tutorials/models/Hy3-preview.md:203
+msgid ""
+"Formal AISBench accuracy results are pending and should be added only "
+"after a real benchmark run."
+msgstr ""
+"正式的AISBench准确性结果尚未公布，应在实际基准测试运行后添加。"
