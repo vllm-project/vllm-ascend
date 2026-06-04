@@ -936,6 +936,9 @@ class NPUModelRunner(GPUModelRunner):
         else:
             discard_requests_mask = self.optimistic_seq_lens_cpu[:num_reqs].numpy() < num_tokens_np
 
+        self.discard_request_mask.np[:num_reqs] = discard_requests_mask
+        self.discard_request_mask.copy_to_gpu(num_reqs)
+ 
         discard_request_indices = np.nonzero(discard_requests_mask)[0]
         self.num_discarded_requests = len(discard_request_indices)
         self.discard_request_indices.np[: self.num_discarded_requests] = discard_request_indices
