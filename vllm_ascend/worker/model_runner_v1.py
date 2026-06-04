@@ -1054,12 +1054,41 @@ class NPUModelRunner(GPUModelRunner):
         self.num_scheduled_tokens.np[:num_reqs] = num_scheduled_tokens
         self.num_scheduled_tokens.copy_to_gpu(num_reqs)
         num_scheduled_tokens_gpu = self.num_scheduled_tokens.gpu[:num_reqs]
-        # fix prefix cache ci test
+
+        # Rebuild CP/spec inputs after async accepted-token correction.
+        should_rebuild_async_inputs = (
+            self.use_cp
+            and self.use_async_spec_decode
+            and self.valid_sampled_token_count_gpu is not None
+            and prev_req_id_to_index
+            and not with_prefill
+        )
+        corrected_num_computed_tokens_np = None
+        if should_rebuild_async_inputs:
+            # Async spec decode corrects num_computed_tokens on device.
+            # Copy once and reuse for CPU-side rebuilds in this iteration.
+            corrected_num_computed_tokens_np = (
+                self.num_computed_tokens[:num_reqs].cpu().numpy()
+            )
+
         if self.pcp_size > 1:
             # When PCP (Prefill Context Parallel) is enabled, positions use
             # special PCP offsets (position_pcp) that are only computed on CPU.
             # Copy the correctly-computed CPU positions to GPU instead of
             # recomputing on GPU (which would miss the PCP offsets).
+
+            if should_rebuild_async_inputs:
+                self._rebuild_input_ids_with_corrected_positions(
+                    scheduler_output,
+                    num_reqs,
+                    total_num_scheduled_tokens,
+                    req_indices,
+                    position_pcp,
+                    positions_np,
+                    cu_num_tokens,
+                    corrected_num_computed_tokens_np,
+                )
+
             self.positions[:total_num_scheduled_tokens].copy_(
                 torch.from_numpy(
                     positions_np[:total_num_scheduled_tokens]
@@ -1071,10 +1100,77 @@ class NPUModelRunner(GPUModelRunner):
                 self.num_computed_tokens[req_indices_gpu].to(torch.int64)
                 + self.query_pos.gpu[:total_num_scheduled_tokens]
             )
+
+            if should_rebuild_async_inputs:
+                self._rebuild_input_ids_with_corrected_positions(
+                    scheduler_output,
+                    num_reqs,
+                    total_num_scheduled_tokens,
+                    req_indices,
+                    self.query_pos.np,
+                    positions_np,
+                    cu_num_tokens,
+                    corrected_num_computed_tokens_np,
+                )
+
         self.seq_lens[:num_reqs] = (
             self.num_computed_tokens[:num_reqs] + num_scheduled_tokens_gpu
         )
         self.seq_lens[num_reqs:].fill_(0)
+
+        if (
+            self.use_cp
+            and self.use_async_spec_decode
+            and self.valid_sampled_token_count_gpu is not None
+            and prev_req_id_to_index
+            and self.decode_threshold > 2
+            and not with_prefill
+            and self.pcp_manager.async_rebuild_req_indices_full is not None
+        ):
+            req_indices_full = self.pcp_manager.async_rebuild_req_indices_full
+            cu_num_tokens_full = self.pcp_manager.async_rebuild_cu_num_tokens_full
+            num_tokens_full = self.pcp_manager.async_rebuild_num_tokens_full
+
+            assert corrected_num_computed_tokens_np is not None
+            base = corrected_num_computed_tokens_np
+
+            token_counts = np.diff(np.concatenate(([0], cu_num_tokens_full)))
+            token_starts = np.repeat(cu_num_tokens_full - token_counts, token_counts)
+            query_pos = self.arange_np[:num_tokens_full] - token_starts
+
+            positions_full = np.empty(num_tokens_full, dtype=np.int64)
+            np.add(base[req_indices_full], query_pos, out=positions_full)
+
+            if self.pcp_size > 1:
+                pre_pcp_query_start_loc = torch.zeros(
+                    num_reqs + 1,
+                    dtype=torch.int32,
+                    device=self.device,
+                )
+                pre_pcp_query_start_loc[1 : num_reqs + 1] = torch.from_numpy(
+                    cu_num_tokens_full
+                ).to(dtype=torch.int32, device=self.device)
+
+                self.input_batch.block_table.compute_slot_mapping(
+                    num_reqs,
+                    pre_pcp_query_start_loc,
+                    torch.from_numpy(positions_full).to(self.device),
+                )
+
+            self.pcp_manager.generate_pcp_mtp_input(
+                num_tokens_full,
+                scheduler_output.num_scheduled_tokens,
+                with_prefill,
+                self.input_batch,
+                self.arange_np,
+                req_indices_full,
+                positions_full,
+                cu_num_tokens_full,
+                self._draft_token_ids,
+                scheduler_output,
+                self.num_spec_tokens,
+                precomputed_positions_np=positions_full,
+            )
 
         # In async spec decode mode, num_computed_tokens was corrected on GPU
         # by update_num_computed_tokens_for_batch_change, so seq_lens (GPU) is
@@ -1232,6 +1328,45 @@ class NPUModelRunner(GPUModelRunner):
             spec_decode_metadata,
             total_num_scheduled_tokens,
             num_scheduled_tokens_compressed_list
+        )
+
+    def _rebuild_input_ids_with_corrected_positions(
+        self,
+        scheduler_output,
+        num_reqs,
+        total_num_scheduled_tokens,
+        req_indices,
+        position_offsets,
+        positions_np,
+        cu_num_tokens,
+        corrected_num_computed_tokens_np,
+    ) -> None:
+        # Reuse the corrected CPU copy of device-side starts so input_ids
+        # can be rebuilt from token_ids_cpu with the right positions.
+        base = corrected_num_computed_tokens_np
+        np.add(
+            base[req_indices],
+            position_offsets[:total_num_scheduled_tokens],
+            out=positions_np,
+        )
+
+        token_indices = (
+            positions_np[:total_num_scheduled_tokens]
+            + req_indices * self.input_batch.token_ids_cpu.shape[1]
+        )
+        torch.index_select(
+            self.input_batch.token_ids_cpu_tensor.flatten(),
+            0,
+            torch.from_numpy(token_indices),
+            out=self.input_ids.cpu[:total_num_scheduled_tokens],
+        )
+
+        self.input_ids.copy_to_gpu(total_num_scheduled_tokens)
+        self._prepare_input_ids(
+            scheduler_output,
+            num_reqs,
+            total_num_scheduled_tokens,
+            cu_num_tokens,
         )
 
     def _preprocess(
@@ -2808,6 +2943,12 @@ class NPUModelRunner(GPUModelRunner):
         def _get_pcp_metadata(block_table_tensor):
             if not self.use_cp:
                 return None, block_table_tensor
+
+            fixed_decode_seq_lens_cpu = None
+            if self.use_async_spec_decode:
+                fixed_decode_seq_lens_cpu = self.optimistic_seq_lens_cpu[:num_reqs].numpy()
+
+            assert num_reqs_padded is not None
             return self.pcp_manager.generate_pcp_metadata(
                 num_tokens,
                 self.query_lens,
@@ -2816,6 +2957,7 @@ class NPUModelRunner(GPUModelRunner):
                 block_table_tensor,
                 num_reqs_padded,
                 num_reqs,
+                fixed_decode_seq_lens_cpu,
             )
 
         def _get_block_table_and_slot_mapping(kv_cache_gid: int, total_num_scheduled_tokens_compressed_list: list[int]):
