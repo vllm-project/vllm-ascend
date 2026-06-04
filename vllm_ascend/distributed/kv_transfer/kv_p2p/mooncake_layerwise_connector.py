@@ -695,7 +695,7 @@ class MooncakeLayerwiseConnector(KVConnectorBase_V1, SupportsHMA):
             self.connector_scheduler = None
             self.connector_worker = MooncakeLayerwiseConnectorWorker(vllm_config, kv_cache_config, str(self.engine_id))
             self.connector_worker.layer_transfer_finished_events = (
-                vllm_config.layer_transfer_finished_events
+                getattr(vllm_config, "layer_transfer_finished_events", None)
             )
 
     ############################################################

@@ -120,7 +120,6 @@ class AscendStoreConnector(KVConnectorBase_V1, SupportsHMA):
                 self.use_layerwise,
                 kv_cache_config,
             )
-            # self.connector_worker.layer_transfer_finished_events = vllm_config.layer_transfer_finished_events
             assert self.connector_worker is not None
 
     ############################################################
