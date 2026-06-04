@@ -525,7 +525,7 @@ class Compressor(nn.Module):
                 dtype=state_dtype,
                 compress_ratio=compress_ratio,
                 prefix=f"{prefix}.state_cache",
-                block_size=DSV4_BLOCK_SIZES[config.cache_config.block_size][0][2],
+                block_size=DSV4_BLOCK_SIZES[cache_config.block_size][0][2],
             )
         elif compress_ratio == 128:
             self.state_cache = CompressorStateCache(
@@ -533,7 +533,7 @@ class Compressor(nn.Module):
                 dtype=state_dtype,
                 compress_ratio=compress_ratio,
                 prefix=f"{prefix}.state_cache",
-                block_size=DSV4_BLOCK_SIZES[config.cache_config.block_size][0][3],
+                block_size=DSV4_BLOCK_SIZES[cache_config.block_size][0][3],
             )
         else:
             raise ValueError(
