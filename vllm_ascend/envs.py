@@ -113,7 +113,7 @@ env_variables: dict[str, Callable[[], Any]] = {
     # Whether to use MultiBlockPool for KV cache management
     "VLLM_ASCEND_APPLY_DSV4_PATCH": lambda: bool(int(os.getenv("VLLM_ASCEND_APPLY_DSV4_PATCH", "0"))),
     # Whether to enable auto-detect quantization from model files.
-    # This feature is enabled by default. When disabled, the model will be treated as unquantized.
+    # This feature is enabled by default.
     "VLLM_ASCEND_AUTO_DETECT_QUANTIZATION": lambda: bool(int(os.getenv("VLLM_ASCEND_AUTO_DETECT_QUANTIZATION", "1"))),
 }
 
