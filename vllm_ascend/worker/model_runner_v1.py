@@ -2165,6 +2165,22 @@ class NPUModelRunner(GPUModelRunner):
         output = self._sample_tokens_from_execute_state(grammar_output, kv_connector_output)
         return output
 
+    def _prepare_logits_for_sampling(
+        self,
+        logits: torch.Tensor,
+        scheduler_output: "SchedulerOutput",
+        grammar_output: "GrammarOutput | None",
+    ) -> torch.Tensor:
+        # Apply structured output bitmasks if present.
+        if grammar_output is not None:
+            # here we are different from gpu_model_runner,
+            # the apply_grammar_bitmask uses torch.compile to optimize this,ascend does not support it now
+            logits_dtype = logits.dtype
+            logits = logits.to("cpu").float()
+            apply_grammar_bitmask(scheduler_output, grammar_output, self.input_batch, logits)
+            logits = logits.to(self.device).to(logits_dtype)
+        return logits
+
     def _sample_tokens_from_execute_state(
         self,
         grammar_output: "GrammarOutput | None",
@@ -2189,14 +2205,11 @@ class NPUModelRunner(GPUModelRunner):
         # Clear ephemeral state.
         self.execute_model_state = None
 
-        # Apply structured output bitmasks if present.
-        if grammar_output is not None:
-            # here we are different from gpu_model_runner,
-            # the apply_grammar_bitmask uses torch.compile to optimize this,ascend does not support it now
-            logits_dtype = logits.dtype
-            logits = logits.to("cpu").float()
-            apply_grammar_bitmask(scheduler_output, grammar_output, self.input_batch, logits)
-            logits = logits.to(self.device).to(logits_dtype)
+        logits = self._prepare_logits_for_sampling(
+            logits,
+            scheduler_output,
+            grammar_output,
+        )
 
         sampling_phase_result = self._run_sampling_phase(
             scheduler_output,
