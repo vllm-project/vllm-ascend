@@ -342,17 +342,25 @@ public:
                 GDNFwdHOffsets& stage2Offsets = cubeBlockScheduler.GetStage2Offsets();
 
                 // CUBE2: h_work = k.T @ v_update
+                // BlockMmadTla has no outer M loop; m must be split when kHeadDim > L1_TILE_M.
                 if (cubeBlockScheduler.NeedProcessStage2()) {
                     auto tensorK = tla::MakeTensor(gmK[stage2Offsets.wkOffset], kLayout, Catlass::Arch::PositionGM{});
                     auto tensorVwork = tla::MakeTensor(gmVUpdateWorkspace[stage2Offsets.vWorkOffset], vworkLayout, Catlass::Arch::PositionGM{});
                     auto tensorHwork = tla::MakeTensor(gmHWorkspace[stage2Offsets.hWorkOffset], hworkLayout, Catlass::Arch::PositionGM{});
-                    GemmCoord cube2Shape{kHeadDim, vHeadDim, stage2Offsets.blockTokens};
-                    auto tensorBlockK = GetTile(tensorK, tla::MakeCoord(0, 0), tla::MakeShape(cube2Shape.m(), cube2Shape.k()));
-                    auto tensorBlockVwork = GetTile(tensorVwork, tla::MakeCoord(0, 0), tla::MakeShape(cube2Shape.k(), cube2Shape.n()));
-                    auto tensorBlockHwork = GetTile(tensorHwork, tla::MakeCoord(0, 0), tla::MakeShape(cube2Shape.m(), cube2Shape.n()));
-                    blockMmadKV.preSetFlags();
-                    blockMmadKV(tensorBlockK, tensorBlockVwork, tensorBlockHwork, cube2Shape);
-                    blockMmadKV.finalWaitFlags();
+                    constexpr uint32_t L1_TILE_M_C2 = tla::get<0>(L1TileShapeTla{});
+                    uint32_t mLoopC2 = (kHeadDim + L1_TILE_M_C2 - 1) / L1_TILE_M_C2;
+                    for (uint32_t mIdx = 0; mIdx < mLoopC2; ++mIdx) {
+                        uint32_t mOff = mIdx * L1_TILE_M_C2;
+                        uint32_t mTail = kHeadDim - mOff;
+                        uint32_t mActual = (mTail < L1_TILE_M_C2) ? mTail : L1_TILE_M_C2;
+                        GemmCoord cube2Shape{mActual, vHeadDim, stage2Offsets.blockTokens};
+                        auto tensorBlockK = GetTile(tensorK, tla::MakeCoord(mOff, 0), tla::MakeShape(cube2Shape.m(), cube2Shape.k()));
+                        auto tensorBlockVwork = GetTile(tensorVwork, tla::MakeCoord(0, 0), tla::MakeShape(cube2Shape.k(), cube2Shape.n()));
+                        auto tensorBlockHwork = GetTile(tensorHwork, tla::MakeCoord(mOff, 0), tla::MakeShape(cube2Shape.m(), cube2Shape.n()));
+                        blockMmadKV.preSetFlags();
+                        blockMmadKV(tensorBlockK, tensorBlockVwork, tensorBlockHwork, cube2Shape);
+                        blockMmadKV.finalWaitFlags();
+                    }
                 }
 
                 // VEC2: h update epilogue
@@ -414,19 +422,27 @@ public:
                     GDNFwdHOffsets& cube2Offsets = cubeBlockScheduler.GetStage2Offsets();
                     if (cubeBlockScheduler.NeedProcessStage2()) {
                         // step 3: h[i+1] = k.T @ v_work
+                        // BlockMmadTla has no outer M loop; m must be split when kHeadDim > L1_TILE_M.
                         int64_t cube2OffsetK = cube2Offsets.wkOffset;
                         int64_t cube2OffsetVwork = cube2Offsets.vWorkOffset;
                         int64_t cube2OffsetH = cube2Offsets.hWorkOffset;
                         auto tensorK = tla::MakeTensor(gmK[cube2OffsetK], kLayout, Catlass::Arch::PositionGM{});
                         auto tensorVwork = tla::MakeTensor(gmVUpdateWorkspace[cube2OffsetVwork], vworkLayout, Catlass::Arch::PositionGM{});
                         auto tensorHwork = tla::MakeTensor(gmHWorkspace[cube2OffsetH], hworkLayout, Catlass::Arch::PositionGM{});
-                        GemmCoord cube2Shape{kHeadDim, vHeadDim, cube2Offsets.blockTokens};
-                        auto tensorBlockK = GetTile(tensorK, tla::MakeCoord(0, 0), tla::MakeShape(cube2Shape.m(), cube2Shape.k()));
-                        auto tensorBlockVwork = GetTile(tensorVwork, tla::MakeCoord(0, 0), tla::MakeShape(cube2Shape.k(), cube2Shape.n()));
-                        auto tensorBlockHwork = GetTile(tensorHwork, tla::MakeCoord(0, 0), tla::MakeShape(cube2Shape.m(), cube2Shape.n()));
-                        blockMmadKV.preSetFlags();
-                        blockMmadKV(tensorBlockK, tensorBlockVwork, tensorBlockHwork, cube2Shape);
-                        blockMmadKV.finalWaitFlags();
+                        constexpr uint32_t L1_TILE_M_C2 = tla::get<0>(L1TileShapeTla{});
+                        uint32_t mLoopC2 = (kHeadDim + L1_TILE_M_C2 - 1) / L1_TILE_M_C2;
+                        for (uint32_t mIdx = 0; mIdx < mLoopC2; ++mIdx) {
+                            uint32_t mOff = mIdx * L1_TILE_M_C2;
+                            uint32_t mTail = kHeadDim - mOff;
+                            uint32_t mActual = (mTail < L1_TILE_M_C2) ? mTail : L1_TILE_M_C2;
+                            GemmCoord cube2Shape{mActual, vHeadDim, cube2Offsets.blockTokens};
+                            auto tensorBlockK = GetTile(tensorK, tla::MakeCoord(mOff, 0), tla::MakeShape(cube2Shape.m(), cube2Shape.k()));
+                            auto tensorBlockVwork = GetTile(tensorVwork, tla::MakeCoord(0, 0), tla::MakeShape(cube2Shape.k(), cube2Shape.n()));
+                            auto tensorBlockHwork = GetTile(tensorHwork, tla::MakeCoord(mOff, 0), tla::MakeShape(cube2Shape.m(), cube2Shape.n()));
+                            blockMmadKV.preSetFlags();
+                            blockMmadKV(tensorBlockK, tensorBlockVwork, tensorBlockHwork, cube2Shape);
+                            blockMmadKV.finalWaitFlags();
+                        }
                     }
                     Arch::CrossCoreSetFlag<0x2, PIPE_FIX>(cubeBlockScheduler.cube2Done);
                 }
